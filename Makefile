@@ -324,6 +324,55 @@ ci: fmt-check check clippy test ## CI workflow: format check, check, lint, test
 .PHONY: pre-commit
 pre-commit: fmt clippy test ## Pre-commit checks
 
+# ----------------------------------------------------------------------------
+# CI-faithful local gate (matches .github/workflows/ci.yml exactly)
+#
+# The `verify*` targets reproduce the GitHub Actions `clippy + test (macOS
+# ARM64)` job step-for-step. They differ from the looser `clippy` / `test`
+# targets above in three ways that have repeatedly bitten us:
+#
+#   1. `--features metal,accelerate` — the CI feature set. Without it, large
+#      gated regions of mlxcel-core (parts of cache/turbo/quant, the
+#      attention-dispatch helpers, etc.) are never type-checked locally, so
+#      lint or build errors land first on CI.
+#   2. `-D warnings` — promotes every clippy warning to an error, matching
+#      `-- -D warnings` in CI. The default `clippy` target uses `-W warnings`
+#      and silently hides regressions.
+#   3. `cargo test --release` — CI runs tests in release mode for realistic
+#      MLX/Metal codegen. Debug-mode tests can pass while release-mode tests
+#      hit different optimisation paths.
+#
+# Run `make verify` before opening or updating a PR. Run `make verify-clean`
+# (which prepends `cargo clean`) when you suspect clippy's per-crate result
+# cache is masking a regression — most often after editing shared code in
+# mlxcel-core that other crates inherit lints from.
+# ----------------------------------------------------------------------------
+
+.PHONY: verify-fmt
+verify-fmt: ## CI-faithful: cargo fmt --all -- --check
+	@echo "$(CYAN)[verify] fmt check...$(RESET)"
+	$(CARGO) fmt --all -- --check
+
+.PHONY: verify-clippy
+verify-clippy: ## CI-faithful: clippy --all-targets --features metal,accelerate -- -D warnings
+	@echo "$(CYAN)[verify] clippy (features=metal,accelerate, -D warnings)...$(RESET)"
+	$(CARGO) clippy --all-targets --features metal,accelerate -- -D warnings
+
+.PHONY: verify-test
+verify-test: ## CI-faithful: cargo test --release --features metal,accelerate
+	@echo "$(CYAN)[verify] test (release, features=metal,accelerate)...$(RESET)"
+	$(CARGO) test --release --features metal,accelerate
+
+.PHONY: verify
+verify: verify-fmt verify-clippy verify-test ## Run the full CI-faithful gate locally (recommended before push)
+	@echo "$(GREEN)[verify] OK — matches GitHub Actions clippy+test job$(RESET)"
+
+.PHONY: verify-clean
+verify-clean: ## Run `verify` after a `cargo clean` (use when clippy's cache may be hiding a regression)
+	@echo "$(YELLOW)[verify-clean] dropping target/ to force a fresh clippy/test pass...$(RESET)"
+	$(CARGO) clean
+	@$(MAKE) --no-print-directory verify
+
 # ============================================================================
 # Quick Examples
 # ============================================================================
