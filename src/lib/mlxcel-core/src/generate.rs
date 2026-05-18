@@ -823,7 +823,7 @@ impl CxxGenerator {
         let n_layers = self.caches.len();
         let requested = crate::cache::turbo::boundary_v_layers_from_env();
         let layer_modes = crate::cache::turbo::resolve_layer_modes(nominal, n_layers, requested);
-        for (cache, mode) in self.caches.iter_mut().zip(layer_modes.into_iter()) {
+        for (cache, mode) in self.caches.iter_mut().zip(layer_modes) {
             cache.mode = mode;
         }
     }

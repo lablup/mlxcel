@@ -419,7 +419,7 @@ fn quantize_into_packed(
         let idx_off = tok * coords_per_token;
         let mut sum_sq = 0.0_f32;
         for d_i in 0..coords_per_token {
-            let c = centroids[indices[idx_off + d_i] as usize];
+            let c = centroids[indices[idx_off + d_i]];
             sum_sq += c * c;
         }
         let y_hat_norm = sum_sq.sqrt();
