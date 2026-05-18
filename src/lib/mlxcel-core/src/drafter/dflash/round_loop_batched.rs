@@ -714,6 +714,7 @@ mod tests {
     ///
     /// `argmax_fn(row, position, prev_token) -> next_token`. Tests seed
     /// this so the accept pattern is deterministic.
+    #[allow(clippy::type_complexity)]
     struct SyntheticTarget {
         argmax_fn: Box<SyntheticArgmaxFn>,
         concat_hidden_dim: i32,

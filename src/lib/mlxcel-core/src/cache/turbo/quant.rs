@@ -874,8 +874,7 @@ mod tests {
         let hd_usize = head_dim as usize;
         let mut k_data: Vec<f32> = Vec::with_capacity(n_tokens * hd_usize);
         let token_scales = [0.5_f32, 1.5, 4.0, 12.0];
-        for tok in 0..n_tokens {
-            let scale = token_scales[tok];
+        for &scale in token_scales.iter().take(n_tokens) {
             for _ in 0..head_dim {
                 let mut acc = 0.0_f32;
                 for _ in 0..6 {
@@ -981,8 +980,7 @@ mod tests {
         // norm storage, which is acceptable in production but would noise
         // up this test.
         let token_scales = [0.5_f32, 1.5, 4.0, 12.0];
-        for tok in 0..4 {
-            let scale = token_scales[tok];
+        for &scale in &token_scales {
             for _ in 0..head_dim {
                 // Pseudo-Gaussian via summed uniform bits → ~normal in [-1, 1].
                 let mut acc = 0.0_f32;
@@ -1057,7 +1055,7 @@ mod tests {
         let head_dim: i32 = 128;
         let params = TurboQuantParams::new(head_dim as u32, 0xC1_DECAFu32);
 
-        let mut rng = Lcg32::new(0xC0FFEE_42);
+        let mut rng = Lcg32::new(0xC0FF_EE42);
         let n_tokens = 4usize;
         let hd_usize = head_dim as usize;
         let mut v_data: Vec<f32> = Vec::with_capacity(n_tokens * hd_usize);

@@ -473,7 +473,7 @@ pub fn align_to_na_tile(len: usize) -> usize {
     if len == 0 {
         return 0;
     }
-    ((len + NA_TILE_SIZE - 1) / NA_TILE_SIZE) * NA_TILE_SIZE
+    len.div_ceil(NA_TILE_SIZE) * NA_TILE_SIZE
 }
 
 /// Create a causal attention mask for a tile-aligned padded prefill.
@@ -510,8 +510,11 @@ pub fn create_padded_prefill_mask(
     // Shape: [1, total_kv]  (broadcast along the query axis).
     // Value: 1 for valid key positions, 0 for padding key positions.
     let mut valid_mask_data = vec![0f32; total_kv as usize];
-    for i in 0..(actual_len + offset) as usize {
-        valid_mask_data[i] = 1.0;
+    for v in valid_mask_data
+        .iter_mut()
+        .take((actual_len + offset) as usize)
+    {
+        *v = 1.0;
     }
     let valid_mask = ffi::from_slice_f32(&valid_mask_data, &[1, total_kv]);
 
@@ -609,7 +612,7 @@ pub fn pipeline_hint(hidden: &MlxArray, layer_idx: usize, total_layers: usize) {
             ffi::async_eval(hidden);
         }
         PipelineMode::PerBlock(n) => {
-            if (layer_idx + 1) % n == 0 {
+            if (layer_idx + 1).is_multiple_of(*n) {
                 ffi::async_eval(hidden);
             }
         }

@@ -579,12 +579,7 @@ fn greedy_parity_perfect_drafter_matches_no_drafter_baseline_32_tokens() {
     let scripted_target: Vec<Vec<i32>> = (0..11)
         .map(|r| {
             let base = 1000 + r * 4;
-            vec![
-                base as i32,
-                (base + 1) as i32,
-                (base + 2) as i32,
-                (base + 3) as i32,
-            ]
+            vec![base, (base + 1), (base + 2), (base + 3)]
         })
         .collect();
     let scripted_draft: Vec<Vec<i32>> = scripted_target

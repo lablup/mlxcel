@@ -380,6 +380,7 @@ pub fn compute_alive_mask(
 /// Used by: tests under `cache/turbo_tests.rs` (issue #480 unit tests).
 /// Production attention call sites continue to use the standard
 /// `attention()` path until the Metal kernel lands.
+#[allow(clippy::too_many_arguments)]
 pub fn attention_sparse_v_turbo4(
     q: &MlxArray,
     k: &MlxArray,
@@ -526,6 +527,7 @@ pub fn attention_sparse_v_turbo4(
 /// case.
 ///
 /// Used by: [`KVCache::sparse_v_attention`] (issue #505).
+#[allow(clippy::too_many_arguments)]
 pub fn attention_sparse_v_turbo4_fused(
     q: &MlxArray,
     k: &MlxArray,

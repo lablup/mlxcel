@@ -87,7 +87,7 @@ pub const V_BIT_WIDTH_3: u8 = 3;
 #[inline]
 pub fn packed_bytes_per_token_3bit(head_dim: i32) -> i32 {
     debug_assert!(
-        head_dim > 0 && (head_dim as usize) % COORDS_PER_GROUP == 0,
+        head_dim > 0 && (head_dim as usize).is_multiple_of(COORDS_PER_GROUP),
         "packed_bytes_per_token_3bit: head_dim must be a positive multiple of 8; \
          got {head_dim}"
     );
@@ -109,7 +109,7 @@ pub fn packed_bytes_per_token_3bit(head_dim: i32) -> i32 {
 /// pipeline).
 pub fn pack_3bit_indices(indices: &[u8], out: &mut [u8]) {
     debug_assert!(
-        indices.len() % COORDS_PER_GROUP == 0,
+        indices.len().is_multiple_of(COORDS_PER_GROUP),
         "pack_3bit_indices: index count ({}) must be a multiple of {}",
         indices.len(),
         COORDS_PER_GROUP
@@ -147,7 +147,7 @@ pub fn pack_3bit_indices(indices: &[u8], out: &mut [u8]) {
 /// dequant path).
 pub fn unpack_3bit_indices(packed: &[u8], out: &mut [u8]) {
     debug_assert!(
-        packed.len() % BYTES_PER_GROUP == 0,
+        packed.len().is_multiple_of(BYTES_PER_GROUP),
         "unpack_3bit_indices: packed byte count ({}) must be a multiple of {}",
         packed.len(),
         BYTES_PER_GROUP
@@ -311,7 +311,7 @@ mod tests {
     #[test]
     fn round_trip_random_multi_group() {
         // 32 indices = 4 groups = 12 bytes packed. Use a deterministic LCG.
-        let mut state: u32 = 0xC0FFEE_42;
+        let mut state: u32 = 0xC0FF_EE42;
         let mut indices = vec![0u8; 32];
         for x in &mut indices {
             state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);

@@ -364,8 +364,8 @@ fn turbo4_asym_clone_handle_install_then_dequant_matches_pre_detach() {
     let v_data: Vec<f32> = (0..2 * head_dim)
         .map(|i| (((i * 7) % 13) as f32 / 13.0) - 0.5)
         .collect();
-    let k = ffi::from_slice_f32(&k_data, &[1, 1, 2, head_dim as i32]);
-    let v = ffi::from_slice_f32(&v_data, &[1, 1, 2, head_dim as i32]);
+    let k = ffi::from_slice_f32(&k_data, &[1, 1, 2, head_dim]);
+    let v = ffi::from_slice_f32(&v_data, &[1, 1, 2, head_dim]);
 
     let (_k1, v1_out) = cache.update_and_fetch(k, v);
     let v1 = flatten_fp32(&v1_out);
@@ -901,13 +901,13 @@ mod boundary_v {
     fn typical_32_layer_split_protects_first_two_and_last_two() {
         let n = 32;
         let modes = resolve_layer_modes(KVCacheMode::Turbo4Asym, n, 2);
-        for i in 0..n {
+        for (i, &actual) in modes.iter().enumerate().take(n) {
             let expected = if i < 2 || i >= n - 2 {
                 KVCacheMode::Fp16
             } else {
                 KVCacheMode::Turbo4Asym
             };
-            assert_eq!(modes[i], expected, "layer {i}");
+            assert_eq!(actual, expected, "layer {i}");
         }
     }
 
@@ -922,10 +922,10 @@ mod boundary_v {
             KVCacheMode::Turbo4Delegated,
         ] {
             let bulk = resolve_layer_modes(mode, n, 2);
-            for i in 0..n {
+            for (i, &expected) in bulk.iter().enumerate().take(n) {
                 let single = resolve_layer_mode(mode, i, n, 2);
                 assert_eq!(
-                    bulk[i], single,
+                    expected, single,
                     "{mode:?} layer {i}: bulk vs single helper disagree"
                 );
             }
@@ -1414,8 +1414,8 @@ fn turbo3_asym_clone_handle_install_then_dequant_matches_pre_detach() {
     let v_data: Vec<f32> = (0..2 * head_dim)
         .map(|i| (((i * 7) % 13) as f32 / 13.0) - 0.5)
         .collect();
-    let k = ffi::from_slice_f32(&k_data, &[1, 1, 2, head_dim as i32]);
-    let v = ffi::from_slice_f32(&v_data, &[1, 1, 2, head_dim as i32]);
+    let k = ffi::from_slice_f32(&k_data, &[1, 1, 2, head_dim]);
+    let v = ffi::from_slice_f32(&v_data, &[1, 1, 2, head_dim]);
 
     let (_k1, v1_out) = cache.update_and_fetch(k, v);
     let v1 = flatten_fp32(&v1_out);
@@ -1667,7 +1667,7 @@ fn turbo3_asym_layer_modes_apply_boundary_upgrade() {
     assert_eq!(modes.len(), 8);
     // First 2 + last 2 are upgraded to FP16; middle 4 stay Turbo3Asym.
     for (i, m) in modes.iter().enumerate() {
-        if i < 2 || i >= 6 {
+        if !(2..6).contains(&i) {
             assert_eq!(*m, KVCacheMode::Fp16, "layer {i} must be FP16 boundary");
         } else {
             assert_eq!(
@@ -2608,8 +2608,8 @@ fn delegated_dequant_sdpa_matches_reference_attention() {
 /// Steel-envelope vs cold-only fused composition parity (issue #531).
 ///
 /// `update_and_turbo4_delegated_attention` first tries the steel-envelope
-/// kernel (issue #531, single Metal dispatch covering softmax + cold-V dequant
-/// + hot-V accumulate). On the same hardware where the cold-only fused
+/// kernel (issue #531, single Metal dispatch covering softmax, cold-V dequant,
+/// and hot-V accumulate). On the same hardware where the cold-only fused
 /// composition path (issue #528) already produces correct output, the
 /// steel-envelope path must produce numerically equivalent output (within
 /// FP16 round-off) — both paths funnel through the same MLX softmax algebra

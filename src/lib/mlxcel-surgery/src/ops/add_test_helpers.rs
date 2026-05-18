@@ -22,8 +22,6 @@
 //!
 //! Used by: `add_tests`, `add_apply_tests`.
 
-#![cfg(test)]
-
 use std::path::Path;
 
 use mlxcel_core::dtype as mlx_dtype;

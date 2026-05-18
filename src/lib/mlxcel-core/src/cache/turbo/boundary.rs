@@ -373,9 +373,9 @@ mod tests {
         // Cross-check the single-layer helper against the bulk helper.
         let n = 16;
         let bulk = resolve_layer_modes(KVCacheMode::Turbo4Asym, n, 2);
-        for i in 0..n {
+        for (i, &expected) in bulk.iter().enumerate().take(n) {
             let single = resolve_layer_mode(KVCacheMode::Turbo4Asym, i, n, 2);
-            assert_eq!(bulk[i], single, "layer {i} mismatch");
+            assert_eq!(expected, single, "layer {i} mismatch");
         }
     }
 }

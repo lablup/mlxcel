@@ -111,7 +111,7 @@ impl TurboQuantParams3 {
             "TurboQuantParams3::new: head_dim must be a non-zero power of two; got {head_dim}"
         );
         assert!(
-            head_dim % 8 == 0,
+            head_dim.is_multiple_of(8),
             "TurboQuantParams3::new: head_dim must be a multiple of 8 \
              for the 24-bit packing layout; got {head_dim}"
         );
@@ -373,8 +373,7 @@ mod tests {
         let mut state: u32 = 123;
         let mut v_data: Vec<f32> = Vec::with_capacity(4 * head_dim as usize);
         let token_scales = [0.5_f32, 1.5, 4.0, 12.0];
-        for tok in 0..4 {
-            let scale = token_scales[tok];
+        for &scale in &token_scales {
             for _ in 0..head_dim {
                 let mut acc = 0.0_f32;
                 for _ in 0..6 {

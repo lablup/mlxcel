@@ -847,6 +847,7 @@ impl FusedQKVLinear {
     /// Preserves both quantization `biases` and true linear `bias` tensors
     /// when present; Qwen2-family checkpoints require q/k/v linear bias for
     /// sane logits.
+    #[allow(clippy::too_many_arguments)]
     pub fn from_weights_separate_with_mode(
         weights: &crate::weights::WeightMap,
         prefix: &str,
@@ -1773,6 +1774,7 @@ fn na_attention_log_mode() -> NaAttentionLogMode {
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn classify_na_attention_dispatch(
     q: &MlxArray,
     k: &MlxArray,
@@ -1813,6 +1815,7 @@ fn classify_na_attention_dispatch(
     (route, fast_path_eligible, nax_eligible)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn na_attention_eligibility_reasons(
     q: &MlxArray,
     k: &MlxArray,
@@ -1879,6 +1882,7 @@ fn na_attention_eligibility_reasons(
     (fast_reason, nax_reason)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn record_na_attention_dispatch(
     q: &MlxArray,
     k: &MlxArray,
@@ -1894,7 +1898,7 @@ fn record_na_attention_dispatch(
     let count = DISPATCH_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
     let should_log = match na_attention_log_mode() {
         NaAttentionLogMode::Off => false,
-        NaAttentionLogMode::Sampled => count <= 8 || count % 100 == 0,
+        NaAttentionLogMode::Sampled => count <= 8 || count.is_multiple_of(100),
         NaAttentionLogMode::All => true,
     };
     if should_log {
@@ -1993,6 +1997,11 @@ pub fn attention(
 /// Pointer-friendly attention wrapper for existing model call sites.
 ///
 /// Used by: Model attention call sites that still store masks as raw pointers
+///
+/// # Safety
+///
+/// `mask` must be either null or point to a valid, live `MlxArray`. The
+/// referent must remain valid for the duration of this call.
 pub unsafe fn attention_from_ptr(
     q: &MlxArray,
     k: &MlxArray,

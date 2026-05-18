@@ -258,6 +258,7 @@ impl Drop for DetachedPagedCacheSet {
 
 /// Internal parked-cache representation. Used by the pool so both dense and
 /// paged detached sets share a single [`DetachedHandle`] space.
+#[allow(clippy::large_enum_variant)]
 pub(super) enum ParkedCache {
     Dense(super::detach::DetachedCacheSet),
     Paged(DetachedPagedCacheSet),
@@ -434,6 +435,7 @@ impl CachePool {
     ///
     /// Retained block pins are preserved across failure paths so the caller
     /// can still call [`CachePool::release_detached_paged`] manually or retry.
+    #[allow(clippy::result_large_err)]
     pub fn adopt_paged_preserving(
         &mut self,
         model: &dyn crate::generate::LanguageModel,

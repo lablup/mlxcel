@@ -746,8 +746,10 @@ mod tests {
         let caller_bias = make_bias(&[(42, f32::NEG_INFINITY)]);
         let g = SpeculativeGenerator::new(2, 1).with_token_bias(cached);
 
-        let mut caller = SamplingConfig::default();
-        caller.token_bias = caller_bias;
+        let caller = SamplingConfig {
+            token_bias: caller_bias,
+            ..SamplingConfig::default()
+        };
         let target = g.compose_target_sampling(&caller);
 
         assert_eq!(

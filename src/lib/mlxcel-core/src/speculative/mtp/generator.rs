@@ -26,15 +26,15 @@
 //!    arm its `set_shared_kv` with the seed slabs.
 //! 3. **Round loop.** While more tokens remain:
 //!    a. Drafter produces `K-1` proposals via
-//!       [`crate::drafter::Drafter::draft_block`] (autoregressive, with
-//!       RoPE queries frozen at the bonus token's absolute position).
+//!    [`crate::drafter::Drafter::draft_block`] (autoregressive, with
+//!    RoPE queries frozen at the bonus token's absolute position).
 //!    b. Target verify on `[bonus, draft_0, …, draft_{K-2}]` via
-//!       [`MtpTarget::verify`] — produces `target_tokens`, the next
-//!       hidden, and the re-sliced shared K/V.
+//!    [`MtpTarget::verify`] — produces `target_tokens`, the next
+//!    hidden, and the re-sliced shared K/V.
 //!    c. Compare draft vs target via [`super::speculative_walk`].
 //!    d. Emit `new_tokens`. Update `bonus` to the last emitted token.
 //!    e. Rebind the drafter against the new shared K/V via
-//!       [`crate::drafter::Drafter::set_shared_kv`].
+//!    [`crate::drafter::Drafter::set_shared_kv`].
 //! 4. **Termination.** Loop exits when an emitted token is in the
 //!    target's `eos_token_ids()` or `emitted >= max_tokens`.
 

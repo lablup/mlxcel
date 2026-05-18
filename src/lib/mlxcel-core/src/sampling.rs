@@ -977,11 +977,10 @@ mod tests {
             "top token should survive nucleus (got {})",
             v[0]
         );
-        for i in 1..5 {
+        for (i, val) in v.iter().enumerate().take(5).skip(1) {
             assert!(
-                v[i].is_infinite() && v[i] < 0.0,
-                "token {i} should be filtered to -inf (got {})",
-                v[i]
+                val.is_infinite() && *val < 0.0,
+                "token {i} should be filtered to -inf (got {val})",
             );
         }
     }
