@@ -1,8 +1,13 @@
 # PR / push CI for lightweight quality gates. Builds and tests are covered by
 # release.yml (signed artifacts) and pipeline-parallel-ci.yml (distributed
-# runs); this workflow runs cargo-deny (license / advisory) and cargo-fmt
-# checks on every touched-Rust change so formatting drift and license issues
-# are caught at PR time.
+# runs); this workflow runs cargo-deny (license / advisory), cargo-fmt, and
+# cargo-clippy + cargo-test checks on every touched-Rust change so formatting
+# drift, license issues, and lint/test regressions are caught at PR time.
+#
+# Note on CUDA gating: CUDA verification stays exclusive to release.yml because
+# it requires a Linux self-hosted runner (currently only the GB10 node used for
+# release builds). Adding a PR-level CUDA gate would double runner cost for
+# limited additional safety on PRs that don't touch CUDA-specific code paths.
 
 name: CI
 
@@ -70,3 +75,30 @@ jobs:
         with:
           components: rustfmt
       - run: cargo fmt --all -- --check
+
+  clippy-and-test:
+    name: clippy + test (macOS ARM64)
+    needs: changes
+    # Only run when Rust files changed; block fork-PR access to the self-hosted
+    # runner pool (mirrors the guard in release.yml and pipeline-parallel-ci.yml).
+    if: >-
+      needs.changes.outputs.rust == 'true' &&
+      github.repository == 'lablup/mlxcel' &&
+      (github.event_name != 'pull_request' ||
+        github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: self-hosted-macos-26-arm64
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - name: Build (verify MLX FFI compiles)
+        run: cargo build --release --features metal,accelerate
+      - name: Clippy
+        run: cargo clippy --all-targets --features metal,accelerate -- -D warnings
+      - name: Test
+        run: cargo test --release --features metal,accelerate
