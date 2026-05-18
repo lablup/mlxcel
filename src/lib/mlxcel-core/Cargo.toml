@@ -23,7 +23,7 @@ smallvec = { version = "1.13", features = ["serde"] }
 sha2 = "0.11"
 thiserror = "2.0"
 tokenizers = "0.22.2"
-bincode = "1"
+postcard = { version = "1", features = ["alloc"] }
 dirs = "6"
 libm = "0.2"
 tracing = "0.1"

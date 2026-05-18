@@ -22,7 +22,7 @@
 //! The module is structured in sub-issues:
 //! - **B2 (this file, initial)**: `Script` enum, `classify_token`, helper predicates.
 //! - **B3** (added in the same file): `TokenScriptInfo`, `TokenLanguageIndex`, `build()`.
-//! - **B4** (`cache` submodule): disk cache for `TokenLanguageIndex` (vocab-hash keyed, bincode v1).
+//! - **B4** (`cache` submodule): disk cache for `TokenLanguageIndex` (vocab-hash keyed, postcard 1.x).
 
 pub mod cache;
 pub use cache::{cache_path, load_or_build, save, try_load};
@@ -284,8 +284,8 @@ pub enum LangAnalyzerError {
     Io(#[from] std::io::Error),
     #[error("tokenizer.json not found at path: {0}")]
     TokenizerJsonNotFound(String),
-    #[error("bincode serialization error: {0}")]
-    Bincode(#[from] bincode::Error),
+    #[error("postcard serialization error: {0}")]
+    Postcard(#[from] postcard::Error),
     #[error("unknown language code '{0}'; expected one of: ja zh ko en ru ar th hi he el")]
     UnknownLanguageCode(String),
 }

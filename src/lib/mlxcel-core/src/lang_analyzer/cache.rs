@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Disk cache for `TokenLanguageIndex` (B4 — vocab-hash keyed, bincode v1).
+//! Disk cache for `TokenLanguageIndex` (B4 — vocab-hash keyed, postcard 1.x).
 //!
 //! # Cache key
 //! `vocab_hash = hex(sha256(tokenizer.json bytes))[..16]`
@@ -24,7 +24,7 @@
 //! - File missing → build and write.
 //! - `version` field mismatch → rebuild and overwrite.
 //! - `--lang-bias-rebuild-cache` / `rebuild: bool` → force rebuild.
-//! - Corrupted bincode → rename to `*.broken.<epoch>.bak` then rebuild.
+//! - Corrupted postcard data → rename to `*.broken.<epoch>.bak` then rebuild.
 
 use std::path::PathBuf;
 
@@ -69,7 +69,7 @@ pub fn cache_path(vocab_hash: &str) -> PathBuf {
 /// On a version mismatch the corrupted/stale file is left in place (the
 /// caller will overwrite it via [`save`]).
 ///
-/// On a **bincode decode failure** the corrupt file is renamed to
+/// On a **postcard decode failure** the corrupt file is renamed to
 /// `<original>.broken.<epoch_secs>.bak` before returning `None`, so the
 /// caller can build fresh without worrying about re-encountering the same
 /// corrupt bytes.
@@ -77,7 +77,7 @@ pub fn try_load(vocab_hash: &str) -> Option<TokenLanguageIndex> {
     let path = cache_path(vocab_hash);
     let bytes = std::fs::read(&path).ok()?;
 
-    match bincode::deserialize::<TokenLanguageIndex>(&bytes) {
+    match postcard::from_bytes::<TokenLanguageIndex>(&bytes) {
         Ok(idx) if idx.version == CURRENT_VERSION => Some(idx),
         Ok(_) => {
             // Version mismatch — stale cache. Leave the file; the caller will
@@ -121,7 +121,7 @@ pub fn save(index: &TokenLanguageIndex) -> Result<(), LangAnalyzerError> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let bytes = bincode::serialize(index)?;
+    let bytes = postcard::to_allocvec(index)?;
     // Write to a sibling temp file first to ensure atomicity.
     let tmp = path.with_extension("bin.tmp");
     std::fs::write(&tmp, &bytes)?;
@@ -364,7 +364,7 @@ mod tests {
         std::env::set_var("MLXCEL_CACHE_DIR", tmp.path());
         let path = cache_path(hash);
         std::fs::create_dir_all(path.parent().unwrap()).expect("create dirs");
-        std::fs::write(&path, b"not valid bincode data!!!").expect("write garbage");
+        std::fs::write(&path, b"not valid postcard data!!!").expect("write garbage");
         let result = try_load(hash);
         let path_still_exists = path.exists();
         let cache_dir = path.parent().unwrap().to_path_buf();
