@@ -24,7 +24,7 @@ sha2 = "0.10"
 thiserror = "2.0"
 tokenizers = "0.22.2"
 bincode = "1"
-dirs = "5"
+dirs = "6"
 libm = "0.2"
 tracing = "0.1"
 
