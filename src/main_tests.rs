@@ -14,7 +14,108 @@
 
 use clap::Parser;
 
-use super::{Cli, Commands};
+use super::{Cli, Commands, FAMILY_ORDER, write_supported_models};
+
+/// Issue #26: the rendered `mlxcel list` output must mention every model
+/// that is registered in `ALL_MODEL_TYPES`. This is the safety net that
+/// catches the case where someone adds a `ModelType` variant but the
+/// renderer silently drops it.
+#[test]
+fn supported_models_output_mentions_every_display_name() {
+    let mut out = String::new();
+    write_supported_models(&mut out).unwrap();
+
+    for &mt in mlxcel::models::ALL_MODEL_TYPES {
+        assert!(
+            out.contains(mt.display_name()),
+            "rendered output is missing display_name {:?} for {:?}",
+            mt.display_name(),
+            mt
+        );
+    }
+}
+
+/// Issue #26: the header must report the actual `ALL_MODEL_TYPES.len()`
+/// instead of the previously-hardcoded `"57+"`. This guards against a
+/// future regression where someone re-introduces a fixed count.
+#[test]
+fn supported_models_header_uses_actual_count() {
+    let mut out = String::new();
+    write_supported_models(&mut out).unwrap();
+
+    let expected = format!(
+        "Supported Model Architectures ({}):",
+        mlxcel::models::ALL_MODEL_TYPES.len()
+    );
+    assert!(
+        out.starts_with(&expected),
+        "rendered header should start with {expected:?}, got {:?}",
+        out.lines().next().unwrap_or("")
+    );
+}
+
+/// Issue #26: the dead `docs/model_implementations.md` reference was
+/// removed. Refuse to let it come back.
+#[test]
+fn supported_models_output_has_no_dead_doc_link() {
+    let mut out = String::new();
+    write_supported_models(&mut out).unwrap();
+
+    assert!(
+        !out.contains("model_implementations.md"),
+        "rendered output must not reference the nonexistent doc \
+         `docs/model_implementations.md` (issue #26)"
+    );
+    // Be slightly broader: the renderer must also not punt readers at
+    // any external doc, since the new output is itself exhaustive.
+    assert!(
+        !out.to_lowercase().contains("for the full list"),
+        "rendered output should be self-contained; no `For the full list…` pointer"
+    );
+}
+
+/// `FAMILY_ORDER` controls the rendered section order. If a future
+/// `ModelType` is given a brand-new family that the order table has
+/// never seen, the renderer still emits it (alphabetically, at the
+/// end) but the layout drifts. This test fails fast so a maintainer
+/// will update `FAMILY_ORDER` deliberately rather than discovering
+/// it via user bug reports.
+#[test]
+fn family_order_is_exhaustive() {
+    let mut missing: Vec<&'static str> = Vec::new();
+    for &mt in mlxcel::models::ALL_MODEL_TYPES {
+        let family = mt.family();
+        if !FAMILY_ORDER.contains(&family) && !missing.contains(&family) {
+            missing.push(family);
+        }
+    }
+    assert!(
+        missing.is_empty(),
+        "FAMILY_ORDER does not list every family used by ModelType::family(); \
+         missing: {missing:?}. Add the new family/families to FAMILY_ORDER in \
+         src/main.rs in the desired display position."
+    );
+}
+
+/// `FAMILY_ORDER` should not list a family that nothing currently uses —
+/// that suggests stale ordering left over after a family rename or removal.
+#[test]
+fn family_order_has_no_orphans() {
+    let used: std::collections::HashSet<&'static str> = mlxcel::models::ALL_MODEL_TYPES
+        .iter()
+        .map(|mt| mt.family())
+        .collect();
+    let orphans: Vec<&'static str> = FAMILY_ORDER
+        .iter()
+        .copied()
+        .filter(|f| !used.contains(f))
+        .collect();
+    assert!(
+        orphans.is_empty(),
+        "FAMILY_ORDER mentions families that no ModelType currently uses: \
+         {orphans:?}. Remove them or update ModelType::metadata()."
+    );
+}
 
 #[test]
 fn generate_command_parses_tensor_parallel_flags() {

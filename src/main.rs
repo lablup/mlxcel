@@ -1029,46 +1029,104 @@ fn main() -> anyhow::Result<()> {
     }
 }
 
+/// Preferred family ordering for the `mlxcel list` output. Any family that
+/// appears in `ModelType::family()` but is missing from this slice is
+/// appended after these, sorted alphabetically — so the output remains
+/// exhaustive even if a new family is introduced without updating this
+/// table. The same drift is also caught at test time by
+/// `family_order_is_exhaustive` in `main_tests.rs`, which makes the
+/// missing-family case a CI failure rather than a silently-reordered
+/// section.
+const FAMILY_ORDER: &[&str] = &[
+    "Llama",
+    "Qwen",
+    "Gemma",
+    "Mistral",
+    "Phi",
+    "DeepSeek",
+    "Cohere",
+    "InternLM",
+    "GLM",
+    "ERNIE",
+    "Hunyuan",
+    "ExaOne",
+    "Solar",
+    "OLMo",
+    "Nemotron",
+    "MoE (other)",
+    "Mamba / SSM",
+    "Hybrid",
+    "RWKV",
+    "Specialized",
+    "Llama VLM",
+    "Qwen VLM",
+    "Gemma VLM",
+    "Mistral VLM",
+    "Phi VLM",
+    "Cohere VLM",
+    "Nemotron VLM",
+    "Other VLM",
+];
+
 fn print_supported_models() {
-    println!("Supported Model Architectures (57+):\n");
+    let mut out = String::new();
+    // Writing to a `String` cannot fail — `fmt::Write` for `String` is
+    // infallible — so `expect` is appropriate here.
+    write_supported_models(&mut out).expect("writing to a String cannot fail");
+    print!("{out}");
+}
 
-    println!("TRANSFORMER MODELS:");
-    println!("  Llama family:     Llama 1/2/3/4, Yi, TinyLlama, Vicuna");
-    println!("  Qwen family:      Qwen 2/2.5/3, Qwen MoE variants");
-    println!("  Gemma family:     Gemma 1/2/3/3n, RecurrentGemma");
-    println!("  Phi family:       Phi 1/2/3/3-small, PhiMoE");
-    println!("  Mistral family:   Mistral, Mixtral, Ministral3, Mistral3");
-    println!("  DeepSeek:         DeepSeek v1/v2/v3/v3.2, DeepSeek R1");
-    println!("  Cohere:           Command R/R+ (Cohere, Cohere2)");
-    println!("  InternLM:         InternLM 2/3");
-    println!("  GLM:              GLM4, GLM4 MoE");
-    println!("  ExaOne:           ExaOne 3/4, ExaOne MoE");
-    println!("  OLMo:             OLMo 1/2/3, OLMoE");
-    println!("  MiniMax:          MiniMax-M2 (MoE, 256 experts)");
-    println!("  Others:           StarCoder2, StableLM, Baichuan, MiniCPM 1/3");
-    println!();
+/// Render the human-readable `mlxcel list` output into `out`.
+///
+/// Separated from [`print_supported_models`] so unit tests can capture the
+/// exact bytes that the CLI would print without spawning a subprocess.
+fn write_supported_models<W: std::fmt::Write>(out: &mut W) -> std::fmt::Result {
+    use mlxcel::models::ALL_MODEL_TYPES;
 
-    println!("STATE SPACE / RNN MODELS:");
-    println!("  Mamba:            Mamba 1/2, Falcon Mamba");
-    println!("  RWKV:             RWKV v7");
-    println!("  RecurrentGemma:   Griffin hybrid (RGLRU + attention)");
-    println!();
+    writeln!(
+        out,
+        "Supported Model Architectures ({}):",
+        ALL_MODEL_TYPES.len()
+    )?;
+    writeln!(out)?;
 
-    println!("HYBRID MODELS (Attention + SSM/Linear):");
-    println!("  Jamba:            Mamba + Transformer + MoE");
-    println!("  Qwen3 Next:       Full Attention + GatedDeltaNet + MoE");
-    println!("  Nemotron-H:       Mamba2 + Attention + MLP/MoE hybrid");
-    println!();
+    // Bucket variants by family in declaration order. Members within a
+    // family stay in their `ALL_MODEL_TYPES` order (which mirrors the
+    // enum), so the output is deterministic across builds.
+    let mut buckets: Vec<(&'static str, Vec<&'static str>)> = Vec::new();
+    for &mt in ALL_MODEL_TYPES {
+        let (display, family) = mt.metadata();
+        if let Some(existing) = buckets.iter_mut().find(|(f, _)| *f == family) {
+            existing.1.push(display);
+        } else {
+            buckets.push((family, vec![display]));
+        }
+    }
 
-    println!("SPECIALIZED MODELS:");
-    println!("  Nemotron:         Nemotron-4, Nemotron-H, Nemotron-NAS");
-    println!("  ERNIE:            ERNIE 4.5, ERNIE 4.5 MoE");
-    println!("  SmolLM3:          Efficient small model");
-    println!("  Hunyuan:          Hunyuan v1 Dense");
-    println!("  MiMo:             Multi-token prediction");
-    println!();
+    // Sort by FAMILY_ORDER index, with unknown families appended
+    // alphabetically. This keeps the rendered output stable while still
+    // tolerating a new family that the order table has not learned about
+    // yet (the test `family_order_is_exhaustive` flags such drift).
+    buckets.sort_by(|a, b| {
+        let ai = FAMILY_ORDER.iter().position(|&f| f == a.0);
+        let bi = FAMILY_ORDER.iter().position(|&f| f == b.0);
+        match (ai, bi) {
+            (Some(x), Some(y)) => x.cmp(&y),
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => a.0.cmp(b.0),
+        }
+    });
 
-    println!("For the full list, see: docs/model_implementations.md");
+    for (family, members) in &buckets {
+        writeln!(out, "{family}:")?;
+        for name in members {
+            writeln!(out, "  - {name}")?;
+        }
+        writeln!(out)?;
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]

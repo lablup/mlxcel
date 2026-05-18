@@ -450,12 +450,8 @@ impl ModelType {
             ModelType::Qwen2 => ("Qwen 2 / 2.5", "Qwen"),
             ModelType::Qwen3 => ("Qwen 3", "Qwen"),
             ModelType::Qwen3Moe => ("Qwen 3 MoE", "Qwen"),
-            ModelType::Qwen3Next => {
-                ("Qwen 3 Next (Attention + GatedDeltaNet + MoE)", "Qwen")
-            }
-            ModelType::Qwen35 => {
-                ("Qwen 3.5 (Attention + GatedDeltaNet hybrid)", "Qwen")
-            }
+            ModelType::Qwen3Next => ("Qwen 3 Next (Attention + GatedDeltaNet + MoE)", "Qwen"),
+            ModelType::Qwen35 => ("Qwen 3.5 (Attention + GatedDeltaNet hybrid)", "Qwen"),
             ModelType::Qwen35Moe => ("Qwen 3.5 MoE (hybrid)", "Qwen"),
             ModelType::Qwen2Moe => ("Qwen 2 MoE", "Qwen"),
 
@@ -473,9 +469,7 @@ impl ModelType {
             ModelType::Gemma3 => ("Gemma 3", "Gemma"),
             ModelType::Gemma3n => ("Gemma 3n", "Gemma"),
             ModelType::Gemma4 => ("Gemma 4", "Gemma"),
-            ModelType::RecurrentGemma => {
-                ("RecurrentGemma (Griffin: RGLRU + attention)", "Gemma")
-            }
+            ModelType::RecurrentGemma => ("RecurrentGemma (Griffin: RGLRU + attention)", "Gemma"),
 
             // ----- Gemma VLM -----
             ModelType::Gemma3VLM => ("Gemma 3 VLM", "Gemma VLM"),
@@ -500,12 +494,11 @@ impl ModelType {
 
             // ----- Phi VLM -----
             ModelType::Phi3VLM => ("Phi 3.5 Vision (CLIP + Phi3)", "Phi VLM"),
-            ModelType::Phi4MMVLM => {
-                ("Phi-4 Multimodal (SigLIP2 NaFlex + Phi4)", "Phi VLM")
-            }
-            ModelType::Phi4SigLipVLM => {
-                ("Phi-4 SigLIP Vision (SigLIP2 NaFlex + Phi3 text)", "Phi VLM")
-            }
+            ModelType::Phi4MMVLM => ("Phi-4 Multimodal (SigLIP2 NaFlex + Phi4)", "Phi VLM"),
+            ModelType::Phi4SigLipVLM => (
+                "Phi-4 SigLIP Vision (SigLIP2 NaFlex + Phi3 text)",
+                "Phi VLM",
+            ),
 
             // ----- DeepSeek -----
             ModelType::DeepSeek => ("DeepSeek v1", "DeepSeek"),
@@ -552,30 +545,21 @@ impl ModelType {
 
             // ----- Nemotron -----
             ModelType::Nemotron => ("Nemotron-4", "Nemotron"),
-            ModelType::NemotronH => {
-                ("Nemotron-H (Mamba2 + Attention + MLP/MoE hybrid)", "Nemotron")
-            }
+            ModelType::NemotronH => (
+                "Nemotron-H (Mamba2 + Attention + MLP/MoE hybrid)",
+                "Nemotron",
+            ),
             ModelType::NemotronNAS => ("Nemotron-NAS", "Nemotron"),
-            ModelType::NemotronHNanoOmniVLM => {
-                ("Nemotron-H Nano Omni VLM", "Nemotron VLM")
-            }
+            ModelType::NemotronHNanoOmniVLM => ("Nemotron-H Nano Omni VLM", "Nemotron VLM"),
 
             // ----- MoE (other) -----
             ModelType::GptOss => ("gpt-oss (MoE)", "MoE (other)"),
             ModelType::MiniMax => ("MiniMax-M2 (MoE, 256 experts)", "MoE (other)"),
             ModelType::Mixtral => ("Mixtral (MoE)", "MoE (other)"),
-            ModelType::KimiLinear => {
-                ("Kimi Linear (MLA + GatedDeltaNet hybrid)", "MoE (other)")
-            }
-            ModelType::LongcatFlash => {
-                ("LongCat Flash (MLA + MoE, dual sublayer)", "MoE (other)")
-            }
-            ModelType::LongcatFlashNgram => {
-                ("LongCat Flash + N-gram embedding", "MoE (other)")
-            }
-            ModelType::Step3p5 => {
-                ("Step-3.5 (Sigmoid MoE gate + SwitchGLU)", "MoE (other)")
-            }
+            ModelType::KimiLinear => ("Kimi Linear (MLA + GatedDeltaNet hybrid)", "MoE (other)"),
+            ModelType::LongcatFlash => ("LongCat Flash (MLA + MoE, dual sublayer)", "MoE (other)"),
+            ModelType::LongcatFlashNgram => ("LongCat Flash + N-gram embedding", "MoE (other)"),
+            ModelType::Step3p5 => ("Step-3.5 (Sigmoid MoE gate + SwitchGLU)", "MoE (other)"),
 
             // ----- Mamba / SSM -----
             ModelType::Mamba => ("Mamba 1 / Falcon Mamba", "Mamba / SSM"),
@@ -603,15 +587,15 @@ impl ModelType {
             ModelType::MolmoPointVLM => {
                 ("Molmo-Point (point prediction + Molmo2 text)", "Other VLM")
             }
-            ModelType::Moondream3VLM => {
-                ("Moondream 3 (custom ViT + custom decoder)", "Other VLM")
-            }
-            ModelType::MiniCPMOVLM => {
-                ("MiniCPM-o (dynamic SigLIP + resampler + Qwen3-VL text)", "Other VLM")
-            }
-            ModelType::YoutuVLM => {
-                ("Youtu-VL (SigLIP2 windowed-attn + DeepSeek-V3 MLA)", "Other VLM")
-            }
+            ModelType::Moondream3VLM => ("Moondream 3 (custom ViT + custom decoder)", "Other VLM"),
+            ModelType::MiniCPMOVLM => (
+                "MiniCPM-o (dynamic SigLIP + resampler + Qwen3-VL text)",
+                "Other VLM",
+            ),
+            ModelType::YoutuVLM => (
+                "Youtu-VL (SigLIP2 windowed-attn + DeepSeek-V3 MLA)",
+                "Other VLM",
+            ),
         }
     }
 
