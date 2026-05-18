@@ -1,0 +1,56 @@
+# PR / push CI for security audit. Builds and tests are covered by
+# release.yml (signed artifacts) and pipeline-parallel-ci.yml (distributed
+# runs); this workflow runs the lightweight cargo-deny gate on every
+# touched-Rust change so license drift and new advisories are caught at
+# PR time.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  changes:
+    name: Detect changes
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      rust: ${{ steps.filter.outputs.rust }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: dorny/paths-filter@v4
+        id: filter
+        with:
+          filters: |
+            rust:
+              - '**/*.rs'
+              - '**/Cargo.toml'
+              - 'Cargo.lock'
+              - 'deny.toml'
+              - '.github/workflows/ci.yml'
+
+  deny:
+    name: cargo-deny
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check
+          log-level: warn
