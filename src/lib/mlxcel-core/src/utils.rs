@@ -608,7 +608,7 @@ fn get_pipeline_mode() -> PipelineMode {
 /// * `layer_idx` - Zero-based index of the layer that was just executed.
 /// * `total_layers` - Total number of transformer layers in the model.
 ///
-/// Used by: Llama3, Qwen3, Gemma2, Gemma3
+/// Used by: Llama3, Qwen3, Gemma, Gemma2, Gemma3
 #[inline]
 pub fn pipeline_hint(hidden: &MlxArray, layer_idx: usize, total_layers: usize) {
     static MODE: OnceLock<PipelineMode> = OnceLock::new();

@@ -22,6 +22,7 @@
 
 use mlxcel_core::generate::LanguageModel;
 use mlxcel_core::layers::{FusedQKVLinear, KVCache, UnifiedEmbedding, UnifiedLinear};
+use mlxcel_core::utils::pipeline_hint;
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
 use serde::Deserialize;
@@ -101,7 +102,6 @@ impl GemmaRMSNorm {
 // Uses FusedQKVLinear: Q, K, V weights are concatenated at load time
 // into a single [q_dim+k_dim+v_dim, hidden_dim] weight matrix,
 // enabling a single matmul instead of 3 separate ones per forward pass.
-// For Gemma v1 2B: q_dim=k_dim=v_dim=2048, fused weight = [6144, 2048].
 pub struct Attention {
     /// Fused QKV projection: Q, K, V weights concatenated along output dim.
     pub qkv_proj: FusedQKVLinear,
@@ -189,8 +189,6 @@ impl Attention {
         let num_kv_heads = args.num_key_value_heads as i32;
 
         // Fuse Q/K/V into a single projection: concatenate along output dim at load time.
-        // For Gemma v1 2B (MHA): num_heads == num_kv_heads == 8, head_dim == 256,
-        // so q_dim == k_dim == v_dim == 2048, fused weight shape = [6144, 2048].
         let qkv_proj = FusedQKVLinear::from_weights_separate(
             weights,
             prefix,
@@ -213,7 +211,7 @@ impl Attention {
     }
 }
 
-// MLP (uses GELU instead of SiLU).
+// MLP (uses tanh-approx GELU instead of SiLU).
 pub struct GemmaMLP {
     pub gate_proj: UnifiedLinear,
     pub up_proj: UnifiedLinear,
@@ -222,7 +220,8 @@ pub struct GemmaMLP {
 
 impl GemmaMLP {
     pub fn forward(&self, x: &MlxArray) -> UniquePtr<MlxArray> {
-        // GeGLU: gelu(gate_proj(x)) * up_proj(x), then down_proj
+        // GeGLU: gelu_pytorch_tanh(gate_proj(x)) * up_proj(x), then down_proj.
+        // Gemma v1 configs use `hidden_activation = gelu_pytorch_tanh`.
         // Quantized path: fused compiled quantized MLP
         if let (Some(gate_qw), Some(up_qw), Some(down_qw)) = (
             self.gate_proj.quantized_weight(),
@@ -230,7 +229,7 @@ impl GemmaMLP {
             self.down_proj.quantized_weight(),
         ) {
             return unsafe {
-                mlxcel_core::compiled_gelu_mlp_forward(
+                mlxcel_core::compiled_gelu_approx_mlp_forward(
                     x,
                     &gate_qw.weight,
                     &gate_qw.scales,
@@ -261,7 +260,7 @@ impl GemmaMLP {
         // Fallback: separate operations with compiled activation
         let gate = self.gate_proj.forward(x);
         let up = self.up_proj.forward(x);
-        let activated = mlxcel_core::compiled_geglu_activation(&gate, &up);
+        let activated = mlxcel_core::compiled_geglu_approx_activation(&gate, &up);
         self.down_proj.forward(&activated)
     }
 
@@ -370,16 +369,13 @@ impl GemmaModel {
         let mut h = self.embed_tokens.forward(input_ids);
 
         // Gemma scales embeddings by sqrt(hidden_size)
-        let scale = mlxcel_core::full_f32(
-            &[1],
-            (self.hidden_size as f32).sqrt(),
-            mlxcel_core::array_dtype(&h),
-        );
-        h = mlxcel_core::multiply(&h, &scale);
+        h = mlxcel_core::multiply_scalar(&h, (self.hidden_size as f32).sqrt());
 
         // Pass through transformer layers
+        let n = self.layers.len();
         for (i, layer) in self.layers.iter().enumerate() {
             h = layer.forward(&h, &mut caches[i], mask);
+            pipeline_hint(&h, i, n);
         }
 
         // Final norm
@@ -389,12 +385,7 @@ impl GemmaModel {
     /// Get token embeddings with Gemma scaling (for VLM merge)
     pub fn get_embed_tokens(&self, input_ids: &MlxArray) -> UniquePtr<MlxArray> {
         let h = self.embed_tokens.forward(input_ids);
-        let scale = mlxcel_core::full_f32(
-            &[1],
-            (self.hidden_size as f32).sqrt(),
-            mlxcel_core::array_dtype(&h),
-        );
-        mlxcel_core::multiply(&h, &scale)
+        mlxcel_core::multiply_scalar(&h, (self.hidden_size as f32).sqrt())
     }
 
     /// Forward with pre-computed embeddings (for VLM prefill)
@@ -411,8 +402,10 @@ impl GemmaModel {
             self.get_embed_tokens(input_ids)
         };
 
+        let n = self.layers.len();
         for (i, layer) in self.layers.iter().enumerate() {
             h = layer.forward(&h, &mut caches[i], mask);
+            pipeline_hint(&h, i, n);
         }
 
         let h = self.norm.forward(&h);
@@ -517,5 +510,9 @@ impl LanguageModel for GemmaModel {
     fn eos_token_ids(&self) -> Vec<i32> {
         // Gemma EOS token
         vec![1, 107] // <eos>, <end_of_turn>
+    }
+
+    fn supports_maskless_padded_prefill(&self) -> bool {
+        true
     }
 }
