@@ -6,6 +6,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+- Rewrite `mlxcel list` output to drive from the `ModelType` registry — fixes stale count, missing VLM family, missing ~30 model types, and removes broken docs link (#26).
+
 ## [v0.0.27] - 2026-05-16
 
 ### Added
