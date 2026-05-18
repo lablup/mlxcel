@@ -18,13 +18,6 @@ no-default-features = false
 [advisories]
 db-path = "~/.cargo/advisory-db"
 ignore = [
-    # `bincode 1.3.3` — used by mlxcel-core. The bincode 1.x team has permanently
-    # ceased development (RUSTSEC-2025-0141). No safe upgrade exists; bincode 2.x
-    # is a different crate with a breaking API. Migration to an alternative
-    # (postcard / bitcode / rkyv) is tracked separately and is not a runtime
-    # security issue — the advisory is "unmaintained", not a vulnerability.
-    { id = "RUSTSEC-2025-0141", reason = "bincode 1.x permanently unmaintained; migration tracked in a follow-up issue; no runtime vulnerability" },
-
     # `paste 1.0.15` — transitive via the `tokenizers` crate (HF). The author
     # archived the project (RUSTSEC-2024-0436). `pastey` is a drop-in fork but
     # adoption depends on upstream `tokenizers` switching. No runtime vulnerability
