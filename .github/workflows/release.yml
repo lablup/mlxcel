@@ -96,6 +96,21 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-apple-darwin
+          components: clippy, rustfmt
+
+      # Quality gate — fmt / clippy / test. Used to live in ci.yml's
+      # `clippy + test (macOS ARM64)` job, but consumed ~15 min of the shared
+      # self-hosted runner on every PR push for limited PR-time signal. Moved
+      # here so the cost is paid once per release. Local devs should run
+      # `make verify` before pushing to catch regressions earlier.
+      - name: Format check
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets --features metal,accelerate -- -D warnings
+
+      - name: Test
+        run: cargo test --release --features metal,accelerate
 
       - name: Build release binaries
         run: cargo build --release --target aarch64-apple-darwin --locked
