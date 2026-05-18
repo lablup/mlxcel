@@ -1,3 +1,7 @@
+[workspace]
+members = [".", "src/lib/mlxcel-core", "src/lib/mlxcel-surgery"]
+resolver = "2"
+
 [package]
 name = "mlxcel"
 version = "0.0.27"
