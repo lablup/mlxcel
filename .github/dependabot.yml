@@ -1,0 +1,97 @@
+# Dependabot configuration for automated dependency updates.
+# Docs: https://docs.github.com/en/code-security/dependabot/dependabot-version-updates
+
+version: 2
+updates:
+  # Cargo (Rust) dependencies — root `mlxcel` binary crate.
+  - package-ecosystem: "cargo"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+      timezone: "Asia/Seoul"
+    open-pull-requests-limit: 10
+    groups:
+      minor-and-patch:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
+    labels:
+      - "type:dependency"
+    commit-message:
+      prefix: "deps"
+      include: "scope"
+
+  # Cargo (Rust) dependencies — `mlxcel-core` library crate (separate Cargo.lock).
+  - package-ecosystem: "cargo"
+    directory: "/src/lib/mlxcel-core"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+      timezone: "Asia/Seoul"
+    open-pull-requests-limit: 10
+    groups:
+      minor-and-patch:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
+    labels:
+      - "type:dependency"
+      - "area:core"
+    commit-message:
+      prefix: "deps(core)"
+      include: "scope"
+
+  # Cargo (Rust) dependencies — `mlxcel-surgery` library crate.
+  - package-ecosystem: "cargo"
+    directory: "/src/lib/mlxcel-surgery"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+      timezone: "Asia/Seoul"
+    open-pull-requests-limit: 5
+    groups:
+      minor-and-patch:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
+    labels:
+      - "type:dependency"
+      - "area:surgery"
+    commit-message:
+      prefix: "deps(surgery)"
+      include: "scope"
+
+  # GitHub Actions dependencies.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+      timezone: "Asia/Seoul"
+    open-pull-requests-limit: 5
+    labels:
+      - "type:dependency"
+      - "type:chore"
+    commit-message:
+      prefix: "ci"
+      include: "scope"
