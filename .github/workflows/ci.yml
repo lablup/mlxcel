@@ -2,13 +2,16 @@
 # advisory) and cargo-fmt on every touched-Rust change so formatting drift and
 # license issues are caught at PR time.
 #
-# Clippy and cargo-test used to run here as `clippy + test (macOS ARM64)` on
-# the self-hosted Apple Silicon runner, but each run consumed ~15 minutes of
-# that single shared runner per PR push. Those gates were moved to the release
-# workflow (`release.yml::build-macos`), which now runs fmt/clippy/test before
-# producing signed artifacts. Local developers should run `make verify` (or
-# `make verify-clean` for a cache-clear pass) before pushing to catch
-# regressions that release-time CI will otherwise surface.
+# Clippy and cargo-test do NOT run in any workflow. They used to run on the
+# self-hosted Apple Silicon runner — first here at PR time, then briefly in
+# release.yml — and in both cases consumed ~30 min per run, blocking either
+# PRs or releases on a shared resource for failures that `make verify`
+# reliably catches on the developer's machine in a fraction of the time.
+#
+# Quality gate lives locally. Pre-push checklist:
+#   make verify         # fmt + clippy(metal,accelerate, -D warnings) + test(release)
+#   make verify-clean   # same, after `cargo clean` — use when clippy's
+#                       # per-crate cache may be hiding a regression
 #
 # Note on CUDA gating: CUDA verification stays exclusive to release.yml because
 # it requires a Linux self-hosted runner (currently only the GB10 node used for

@@ -96,21 +96,24 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-apple-darwin
-          components: clippy, rustfmt
 
-      # Quality gate — fmt / clippy / test. Used to live in ci.yml's
-      # `clippy + test (macOS ARM64)` job, but consumed ~15 min of the shared
-      # self-hosted runner on every PR push for limited PR-time signal. Moved
-      # here so the cost is paid once per release. Local devs should run
-      # `make verify` before pushing to catch regressions earlier.
-      - name: Format check
-        run: cargo fmt --all -- --check
-
-      - name: Clippy
-        run: cargo clippy --all-targets --features metal,accelerate -- -D warnings
-
-      - name: Test
-        run: cargo test --release --features metal,accelerate
+      # Lint and test deliberately do not run in this workflow.
+      #
+      # `clippy + test` against the macOS Apple Silicon target takes ~30+ min
+      # on the shared self-hosted runner. We tried gating it at PR time
+      # (ci.yml::clippy-and-test) and at release time (this job, see #21),
+      # and in both cases the cost outweighed the signal — PRs and releases
+      # were both being blocked on a slow shared resource for failures that
+      # `make verify` / `make verify-clean` reliably catch on the developer's
+      # machine in a fraction of the time.
+      #
+      # Quality gate lives locally now. Pre-push checklist:
+      #   make verify         # fmt + clippy(metal,accelerate, -D warnings) + test(release)
+      #   make verify-clean   # same, after `cargo clean` — use when clippy's
+      #                       # per-crate cache may be hiding a regression
+      #
+      # PR-time CI (ci.yml) still runs cargo-deny and cargo-fmt on ubuntu
+      # for cheap license/format drift detection.
 
       - name: Build release binaries
         run: cargo build --release --target aarch64-apple-darwin --locked
