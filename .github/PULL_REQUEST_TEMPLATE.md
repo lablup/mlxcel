@@ -33,7 +33,7 @@ What did you run to convince yourself this works? Be specific.
 For inference changes, real-checkpoint validation is required — synthetic-only is not enough.
 -->
 
-- [ ] `cargo fmt --check`
+- [ ] `cargo fmt --all -- --check` (enforced by CI — violations block merge)
 - [ ] `cargo clippy --all-targets -- -D warnings`
 - [ ] `cargo test --release`
 - [ ] `cargo deny check`

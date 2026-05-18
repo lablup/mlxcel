@@ -41,9 +41,9 @@ Thank you for your interest in contributing to mlxcel! This document covers the 
    ```
 4. Run the local quality gates:
    ```bash
-   cargo fmt --check
+   cargo fmt --all -- --check   # enforced by CI; fmt violations block merge
    cargo clippy --all-targets -- -D warnings
-   cargo deny check        # advisories + licenses + sources
+   cargo deny check             # advisories + licenses + sources
    ```
 5. For inference changes, validate against a real checkpoint — synthetic or build-only validation is not enough (see [`AGENTS.md`](AGENTS.md) for why).
 6. Commit with a conventional prefix (see below) and a clear message.

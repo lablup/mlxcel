@@ -1,8 +1,8 @@
-# PR / push CI for security audit. Builds and tests are covered by
+# PR / push CI for lightweight quality gates. Builds and tests are covered by
 # release.yml (signed artifacts) and pipeline-parallel-ci.yml (distributed
-# runs); this workflow runs the lightweight cargo-deny gate on every
-# touched-Rust change so license drift and new advisories are caught at
-# PR time.
+# runs); this workflow runs cargo-deny (license / advisory) and cargo-fmt
+# checks on every touched-Rust change so formatting drift and license issues
+# are caught at PR time.
 
 name: CI
 
@@ -54,3 +54,19 @@ jobs:
         with:
           command: check
           log-level: warn
+
+  fmt:
+    name: cargo-fmt
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all -- --check
