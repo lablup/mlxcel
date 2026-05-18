@@ -390,11 +390,11 @@ impl SparseMoeMlp {
         let hidden = self.fc2.forward(&hidden, &topk, false);
         let hidden = mlxcel_core::squeeze_axis(&hidden, -2);
 
-        let operands: [*const MlxArray; 2] = [
-            hidden.as_ref().unwrap() as *const _,
-            scores.as_ref().unwrap() as *const _,
-        ];
-        let combined = unsafe { mlxcel_core::einsum("nkh,nk->nh", &operands) };
+        let combined = crate::models::switch_layers::moe_weighted_sum(
+            &hidden,
+            &scores,
+            mlxcel_core::array_dtype(&x_flat),
+        );
 
         if orig_shape.len() > 2 {
             mlxcel_core::reshape(&combined, &orig_shape)

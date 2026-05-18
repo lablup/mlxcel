@@ -268,6 +268,33 @@ fn scatter_unsort(x: &MlxArray, inv_order: &MlxArray, orig_shape: &[i32]) -> Uni
     mlxcel_core::squeeze_axis(&reshaped, 2)
 }
 
+/// Weighted sum over selected expert outputs while preserving the residual dtype.
+///
+/// Used by: DeepSeek, DeepSeekV3, DeepSeekV32, ExaOneMoe, Ernie4_5Moe,
+///          GLM4Moe, GLM4MoeLite, GptOss, HunyuanMoe, KimiLinear, MiniMax,
+///          Mistral4, Mixtral, Moondream3, OLMoE, PhiMoE, Qwen2Moe, Qwen3Moe,
+///          Qwen3Next, Qwen3VLMoe, SolarOpen, Step3p5
+///
+/// The old `nkh,nk->nh` einsum contraction promotes the combine to float32
+/// on M5 for bf16/f16 activations. Match mlx-lm's `y * scores[..., None]`
+/// followed by `sum(axis=-2)`, with scores cast to the expert output dtype and
+/// the final result restored to the hidden/residual dtype.
+pub fn moe_weighted_sum(
+    expert_out: &MlxArray,
+    scores: &MlxArray,
+    output_dtype: i32,
+) -> UniquePtr<MlxArray> {
+    let scores_exp = mlxcel_core::expand_dims(scores, -1);
+    let scores_exp = mlxcel_core::astype(&scores_exp, mlxcel_core::array_dtype(expert_out));
+    let weighted = mlxcel_core::multiply(expert_out, &scores_exp);
+    let summed = mlxcel_core::sum_axis(&weighted, -2, false);
+    if mlxcel_core::array_dtype(&summed) == output_dtype {
+        summed
+    } else {
+        mlxcel_core::astype(&summed, output_dtype)
+    }
+}
+
 /// Group-based expert masking for MoE gates with n_group > 1.
 ///
 /// Selects the top `topk_group` expert groups (by sum of top-2 scores per group)
@@ -303,4 +330,47 @@ pub fn group_mask_scores(scores: &MlxArray, n_group: i32, topk_group: i32) -> Un
 
     // Flatten back: [n, n_group, experts_per_group] -> [n, n_experts]
     mlxcel_core::reshape(&grouped, &[n, n_experts])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn moe_weighted_sum_preserves_bf16_output_dtype() {
+        let expert_f32 = mlxcel_core::from_slice_f32(
+            &[
+                1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, //
+                2.0, 4.0, 6.0, 8.0, 1.0, 3.0, 5.0, 7.0,
+            ],
+            &[2, 2, 4],
+        );
+        let expert = mlxcel_core::astype(&expert_f32, dtype::BFLOAT16);
+        let scores = mlxcel_core::from_slice_f32(&[0.25, 0.75, 0.5, 0.5], &[2, 2]);
+
+        let out = moe_weighted_sum(&expert, &scores, dtype::BFLOAT16);
+        mlxcel_core::eval(&out);
+
+        assert_eq!(mlxcel_core::array_shape(&out), vec![2, 4]);
+        assert_eq!(mlxcel_core::array_dtype(&out), dtype::BFLOAT16);
+    }
+
+    #[test]
+    fn moe_weighted_sum_preserves_f16_output_dtype() {
+        let expert_f32 = mlxcel_core::from_slice_f32(
+            &[
+                1.0, 0.0, 3.0, 0.0, 5.0, 0.0, 7.0, 0.0, //
+                0.0, 2.0, 0.0, 4.0, 0.0, 6.0, 0.0, 8.0,
+            ],
+            &[2, 2, 4],
+        );
+        let expert = mlxcel_core::astype(&expert_f32, dtype::FLOAT16);
+        let scores = mlxcel_core::from_slice_f32(&[0.5, 0.5, 0.25, 0.75], &[2, 2]);
+
+        let out = moe_weighted_sum(&expert, &scores, dtype::FLOAT16);
+        mlxcel_core::eval(&out);
+
+        assert_eq!(mlxcel_core::array_shape(&out), vec![2, 4]);
+        assert_eq!(mlxcel_core::array_dtype(&out), dtype::FLOAT16);
+    }
 }

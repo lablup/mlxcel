@@ -419,13 +419,11 @@ impl ExaoneMoE {
         // Apply experts - returns [n_tokens, k, hidden]
         let expert_out = self.switch_mlp.forward(&x_flat, &indices);
 
-        // Weighted sum over experts: einsum fuses expand_dims + multiply + sum_axis
-        let operands: [*const mlxcel_core::MlxArray; 2] = [
-            expert_out.as_ref().unwrap() as *const _,
-            scores.as_ref().unwrap() as *const _,
-        ];
-        // SAFETY: operands are valid pointers to MlxArray owned by UniquePtr in this scope
-        let mut output = unsafe { mlxcel_core::einsum("nkh,nk->nh", &operands) };
+        let mut output = crate::models::switch_layers::moe_weighted_sum(
+            &expert_out,
+            &scores,
+            mlxcel_core::array_dtype(&x_flat),
+        );
 
         // Add shared experts output if present
         if let Some(ref shared) = self.shared_experts {

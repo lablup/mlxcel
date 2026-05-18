@@ -100,6 +100,8 @@ pub fn create_causal_mask(size: i32, offset: i32) -> UniquePtr<MlxArray> {
 
     // Convert to attention mask format: where mask=1 -> 0, where mask=0 -> -inf
     // Use where_cond to avoid NaN from 0 * -inf
+    // Intentional FP32: additive attention masks carry 0/-inf sentinels and are
+    // added to attention scores, not propagated as model activations.
     let zeros = ffi::zeros(&[size, total_len], dtype::FLOAT32);
     let neg_inf = ffi::full_f32(&[size, total_len], f32::NEG_INFINITY, dtype::FLOAT32);
     let bool_mask = ffi::greater(&mask, &zeros); // mask > 0 gives bool mask
@@ -211,6 +213,8 @@ pub fn create_causal_mask_with_window(
 
     // Convert to attention mask format: where mask=1 -> 0, where mask=0 -> -inf
     // Use where_cond to avoid NaN from 0 * -inf
+    // Intentional FP32: additive attention masks carry 0/-inf sentinels and are
+    // added to attention scores, not propagated as model activations.
     let zeros = ffi::zeros(&[size, total_len], dtype::FLOAT32);
     let neg_inf = ffi::full_f32(&[size, total_len], f32::NEG_INFINITY, dtype::FLOAT32);
     let bool_mask = ffi::greater(&mask, &zeros); // mask > 0 gives bool mask
@@ -342,6 +346,7 @@ pub fn gelu_approx(x: &MlxArray) -> UniquePtr<MlxArray> {
 /// * `x` - Input array where last dim will be split into interleaved gelu/linear parts
 /// * `limit` - Clipping limit for numerical stability
 pub fn gegelu(x: &MlxArray, limit: f32) -> UniquePtr<MlxArray> {
+    let x_dtype = ffi::array_dtype(x);
     let shape = ffi::array_shape(x);
     let ndim = shape.len();
     let last_dim = shape[ndim - 1];
@@ -373,22 +378,27 @@ pub fn gegelu(x: &MlxArray, limit: f32) -> UniquePtr<MlxArray> {
     let linear_part = ffi::squeeze_axis(&linear_part, ndim as i32);
 
     // Clip both parts for numerical stability
-    let neg_limit = ffi::full_f32(&[1], -limit, dtype::FLOAT32);
-    let pos_limit = ffi::full_f32(&[1], limit, dtype::FLOAT32);
+    let neg_limit = ffi::full_f32(&[1], -limit, x_dtype);
+    let pos_limit = ffi::full_f32(&[1], limit, x_dtype);
 
     let a_gelu = ffi::clip(&gelu_part, &neg_limit, &pos_limit);
     let a_linear = ffi::clip(&linear_part, &neg_limit, &pos_limit);
 
     // Apply GELU approximation: x * sigmoid(1.702 * x)
-    let coef = ffi::full_f32(&[1], 1.702, dtype::FLOAT32);
+    let coef = ffi::full_f32(&[1], 1.702, x_dtype);
     let scaled = ffi::multiply(&coef, &a_gelu);
     let sigmoid_x = ffi::sigmoid(&scaled);
     let out_gelu = ffi::multiply(&a_gelu, &sigmoid_x);
 
     // Compute: out_gelu * (a_linear + 1.0)
-    let ones = ffi::full_f32(&[1], 1.0, dtype::FLOAT32);
+    let ones = ffi::full_f32(&[1], 1.0, x_dtype);
     let linear_plus_one = ffi::add(&a_linear, &ones);
-    ffi::multiply(&out_gelu, &linear_plus_one)
+    let out = ffi::multiply(&out_gelu, &linear_plus_one);
+    if ffi::array_dtype(&out) == x_dtype {
+        out
+    } else {
+        ffi::astype(&out, x_dtype)
+    }
 }
 
 // Gemma-specific Functions.
@@ -431,7 +441,8 @@ pub fn clip_residual_f16(x: &MlxArray, y: &MlxArray) -> UniquePtr<MlxArray> {
     // float16 max is approximately 65504
     let bound = 65504.0f32;
 
-    // Cast to f32
+    // Intentional FP32: the residual is widened only for overflow-safe clipping
+    // and is cast back to f16 before returning.
     let x_f32 = ffi::astype(x, dtype::FLOAT32);
     let y_f32 = ffi::astype(y, dtype::FLOAT32);
 
@@ -522,6 +533,8 @@ pub fn create_padded_prefill_mask(
     let combined = ffi::multiply(&causal, &valid_mask);
 
     // Convert to additive mask: 1 → 0.0,  0 → -inf
+    // Intentional FP32: additive attention masks carry 0/-inf sentinels and are
+    // added to attention scores, not propagated as model activations.
     let zeros = ffi::zeros(&[padded_len, total_kv], dtype::FLOAT32);
     let neg_inf = ffi::full_f32(&[padded_len, total_kv], f32::NEG_INFINITY, dtype::FLOAT32);
     let bool_mask = ffi::greater(&combined, &zeros);

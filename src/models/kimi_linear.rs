@@ -842,13 +842,11 @@ impl KimiSparseMoE {
 
         // Expert computation
         let expert_out = self.switch_mlp.forward(&x_flat, &topk_indices);
-        // Weighted sum over experts: einsum fuses expand_dims + multiply + sum_axis
-        let operands: [*const mlxcel_core::MlxArray; 2] = [
-            expert_out.as_ref().unwrap() as *const _,
-            topk_scores.as_ref().unwrap() as *const _,
-        ];
-        // SAFETY: operands are valid pointers to MlxArray owned by UniquePtr in this scope
-        let mut y = unsafe { mlxcel_core::einsum("nkh,nk->nh", &operands) };
+        let mut y = crate::models::switch_layers::moe_weighted_sum(
+            &expert_out,
+            &topk_scores,
+            mlxcel_core::array_dtype(&x_flat),
+        );
 
         // Shared experts
         if let Some(ref shared) = self.shared_experts {

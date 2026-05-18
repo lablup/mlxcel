@@ -971,13 +971,11 @@ impl SparseMoeBlock {
 
         // Expert computation
         let expert_out = self.experts.forward(&x_flat, &topk_indices);
-        // Weighted sum over experts: einsum fuses expand_dims + multiply + sum_axis
-        let operands: [*const mlxcel_core::MlxArray; 2] = [
-            expert_out.as_ref().unwrap() as *const _,
-            scores.as_ref().unwrap() as *const _,
-        ];
-        // SAFETY: operands are valid pointers to MlxArray owned by UniquePtr in this scope
-        let y = unsafe { mlxcel_core::einsum("nkh,nk->nh", &operands) };
+        let y = crate::models::switch_layers::moe_weighted_sum(
+            &expert_out,
+            &scores,
+            mlxcel_core::array_dtype(&x_flat),
+        );
 
         // Shared expert
         let shared_y = self.shared_expert.forward(&x_flat);

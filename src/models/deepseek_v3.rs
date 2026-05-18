@@ -689,13 +689,11 @@ impl MoEBlock {
         // Expert computation
         let y = self.switch_mlp.forward(x, &indices);
 
-        // Weighted sum over experts: einsum fuses expand_dims + multiply + sum_axis
-        let operands: [*const mlxcel_core::MlxArray; 2] = [
-            y.as_ref().unwrap() as *const _,
-            scores.as_ref().unwrap() as *const _,
-        ];
-        // SAFETY: operands are valid pointers to MlxArray owned by UniquePtr in this scope
-        let mut result = unsafe { mlxcel_core::einsum("nkh,nk->nh", &operands) };
+        let mut result = crate::models::switch_layers::moe_weighted_sum(
+            &y,
+            &scores,
+            mlxcel_core::array_dtype(x),
+        );
 
         // Add shared experts if present
         if let Some(ref shared) = self.shared_experts {
