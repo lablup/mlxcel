@@ -155,22 +155,18 @@ fn erfinv(x: f32) -> f32 {
 }
 
 // RMSNoScale - RMSNorm without learnable scale (uses unit weight).
+// Used by: Gemma3n text attention v_norm, Gemma3n VLM projection norm.
 pub struct RMSNoScale {
     pub eps: f32,
-    pub unit_weight: UniquePtr<MlxArray>,
 }
 
 impl RMSNoScale {
-    pub fn new(dim: i32, eps: f32) -> Self {
-        // Create unit weight (all ones) for fast_rms_norm
-        Self {
-            eps,
-            unit_weight: mlxcel_core::ones(&[dim], mlxcel_core::dtype::BFLOAT16),
-        }
+    pub fn new(_dim: i32, eps: f32) -> Self {
+        Self { eps }
     }
 
     pub fn forward(&self, x: &MlxArray) -> UniquePtr<MlxArray> {
-        mlxcel_core::fast_rms_norm(x, &self.unit_weight, self.eps)
+        mlxcel_core::fast_rms_norm_no_weight(x, self.eps)
     }
 }
 
@@ -247,9 +243,9 @@ impl AltUp {
     fn compute_router_modalities(&self, x: &MlxArray) -> UniquePtr<MlxArray> {
         let normed = self.router_norm.forward(x);
         let scale_val = (self.hidden_size as f32).powf(-1.0);
-        let scale = mlxcel_core::full_f32(&[1], scale_val, mlxcel_core::array_dtype(&normed));
-        let scaled = mlxcel_core::multiply(&normed, &scale);
+        let scaled = mlxcel_core::multiply_scalar(&normed, scale_val);
         let routed = self.modality_router.forward(&scaled);
+        let routed = mlxcel_core::astype(&routed, mlxcel_core::dtype::FLOAT32);
         mlxcel_core::tanh(&routed)
     }
 
@@ -292,6 +288,7 @@ impl AltUp {
 
         // Add residual
         let predictions = mlxcel_core::add(&predictions, &x_stacked);
+        let predictions = mlxcel_core::astype(&predictions, mlxcel_core::array_dtype(&x[0]));
 
         // Split back to individual arrays
         let mut result = Vec::with_capacity(self.altup_num_inputs);
@@ -301,7 +298,6 @@ impl AltUp {
             let stop = vec![(i + 1) as i32, b, l, hidden];
             let sliced = mlxcel_core::slice(&predictions, &start, &stop);
             let squeezed = mlxcel_core::squeeze_axis(&sliced, 0);
-            // Cast back to original dtype if needed
             result.push(squeezed);
         }
 
@@ -382,10 +378,35 @@ impl AltUp {
             .unwrap_or(4);
 
         // correction_coefs and prediction_coefs are NOT quantized (small 4x4 and 16x4 layers)
-        let correction_coefs =
+        let mut correction_coefs =
             Linear::from_weights(weights, &format!("{}.correction_coefs", prefix))?;
-        let prediction_coefs =
+        let mut prediction_coefs =
             Linear::from_weights(weights, &format!("{}.prediction_coefs", prefix))?;
+        correction_coefs.weight =
+            mlxcel_core::astype(&correction_coefs.weight, mlxcel_core::dtype::FLOAT32);
+        prediction_coefs.weight =
+            mlxcel_core::astype(&prediction_coefs.weight, mlxcel_core::dtype::FLOAT32);
+        if let Some(bias) = correction_coefs.bias.take() {
+            correction_coefs.bias = Some(mlxcel_core::astype(&bias, mlxcel_core::dtype::FLOAT32));
+        }
+        if let Some(bias) = prediction_coefs.bias.take() {
+            prediction_coefs.bias = Some(mlxcel_core::astype(&bias, mlxcel_core::dtype::FLOAT32));
+        }
+
+        if let Some(clip) = config.altup_coef_clip {
+            let low = mlxcel_core::full_f32(&[1], -clip, mlxcel_core::dtype::FLOAT32);
+            let high = mlxcel_core::full_f32(&[1], clip, mlxcel_core::dtype::FLOAT32);
+            correction_coefs.weight = mlxcel_core::clip(&correction_coefs.weight, &low, &high);
+            prediction_coefs.weight = mlxcel_core::clip(&prediction_coefs.weight, &low, &high);
+        }
+        mlxcel_core::eval(&correction_coefs.weight);
+        mlxcel_core::eval(&prediction_coefs.weight);
+        if let Some(bias) = &correction_coefs.bias {
+            mlxcel_core::eval(bias);
+        }
+        if let Some(bias) = &prediction_coefs.bias {
+            mlxcel_core::eval(bias);
+        }
 
         // modality_router IS quantized
         let modality_router = UnifiedLinear::from_weights(
@@ -670,11 +691,23 @@ impl MLP {
     }
 
     pub fn forward(&self, x: &MlxArray) -> UniquePtr<MlxArray> {
-        let gate = self.gate_proj.forward(x);
-        let activated = self.gelu_topk(&gate);
-        let up = self.up_proj.forward(x);
-        let prod = mlxcel_core::multiply(&activated, &up);
-        self.down_proj.forward(&prod)
+        let x_cast;
+        let x_mlp = if mlxcel_core::array_dtype(x) == mlxcel_core::dtype::BFLOAT16 {
+            x
+        } else {
+            x_cast = mlxcel_core::astype(x, mlxcel_core::dtype::BFLOAT16);
+            &x_cast
+        };
+        let gate = self.gate_proj.forward(x_mlp);
+        let up = self.up_proj.forward(x_mlp);
+        let prod = if self.activation_sparsity <= 0.0 {
+            mlxcel_core::compiled_geglu_approx_activation(&gate, &up)
+        } else {
+            let activated = self.gelu_topk(&gate);
+            mlxcel_core::multiply(&activated, &up)
+        };
+        let out = self.down_proj.forward(&prod);
+        mlxcel_core::astype(&out, mlxcel_core::dtype::BFLOAT16)
     }
 
     pub fn from_weights(
@@ -767,17 +800,16 @@ impl DecoderLayer {
 
         // Residual + LAUREL
         let attn_gated = mlxcel_core::add(active_prediction, &attn);
-        let h_dtype = mlxcel_core::array_dtype(active_prediction);
-        let sqrt_half = mlxcel_core::full_f32(&[1], std::f32::consts::FRAC_1_SQRT_2, h_dtype);
 
         let sum = mlxcel_core::add(&attn_gated, &laurel_output);
-        let attn_laurel = mlxcel_core::multiply(&sum, &sqrt_half);
+        let attn_laurel = mlxcel_core::multiply_scalar(&sum, std::f32::consts::FRAC_1_SQRT_2);
 
         // FFN
         let attn_norm = self.pre_feedforward_layernorm.forward(&attn_laurel);
         let ffw = self.mlp.forward(&attn_norm);
         let ffw_norm = self.post_feedforward_layernorm.forward(&ffw);
         let ffw_gated = mlxcel_core::add(&attn_laurel, &ffw_norm);
+        let ffw_gated = mlxcel_core::astype(&ffw_gated, mlxcel_core::dtype::BFLOAT16);
 
         // AltUp correct
         let corrected = self.altup.correct(&predictions, &ffw_gated);
@@ -791,8 +823,7 @@ impl DecoderLayer {
         };
 
         let first = self.per_layer_input_gate.forward(&first);
-        let first = mlxcel_core::gelu_approx(&first);
-        let first = mlxcel_core::multiply(&first, per_layer_input);
+        let first = mlxcel_core::compiled_geglu_approx_activation(&first, per_layer_input);
         let first = self.per_layer_projection.forward(&first);
         let first_prediction = self.post_per_layer_input_norm.forward(&first);
 
@@ -921,12 +952,7 @@ impl Gemma3nLanguageModel {
     pub fn forward(&self, inputs: &MlxArray, caches: &mut [KVCache]) -> UniquePtr<MlxArray> {
         // Embed tokens
         let h = self.embed_tokens.forward(inputs);
-        let scale = mlxcel_core::full_f32(
-            &[1],
-            (self.config.hidden_size as f32).sqrt(),
-            mlxcel_core::array_dtype(&h),
-        );
-        let h = mlxcel_core::multiply(&h, &scale);
+        let h = mlxcel_core::multiply_scalar(&h, (self.config.hidden_size as f32).sqrt());
 
         let shape = mlxcel_core::array_shape(&h);
         let b = shape[0];
@@ -1011,6 +1037,11 @@ impl Gemma3nLanguageModel {
 
         // Final norm
         let out = self.norm.forward(&h);
+        let out = if self.embed_tokens.is_quantized() {
+            out
+        } else {
+            mlxcel_core::astype(&out, mlxcel_core::array_dtype(self.embed_tokens.weight()))
+        };
 
         // LM head (tied embeddings)
         let mut logits = self.embed_tokens.as_linear(&out);
@@ -1038,12 +1069,10 @@ impl Gemma3nLanguageModel {
         let tokens = mlxcel_core::where_cond(&mask, input_ids, &zeros);
 
         let embedded = self.embed_tokens_per_layer.forward(&tokens);
-        let scale = mlxcel_core::full_f32(
-            &[1],
+        let result = mlxcel_core::multiply_scalar(
+            &embedded,
             (self.config.hidden_size_per_layer_input as f32).sqrt(),
-            mlxcel_core::array_dtype(&embedded),
         );
-        let result = mlxcel_core::multiply(&embedded, &scale);
 
         // Reshape to [B, L, num_hidden_layers, hidden_size_per_layer_input]
         let shape = mlxcel_core::array_shape(input_ids);
@@ -1066,12 +1095,7 @@ impl Gemma3nLanguageModel {
         per_layer_inputs: &MlxArray,
     ) -> UniquePtr<MlxArray> {
         let proj = self.per_layer_model_projection.forward(inputs_embeds);
-        let scale = mlxcel_core::full_f32(
-            &[1],
-            (self.config.hidden_size as f32).powf(-0.5),
-            mlxcel_core::array_dtype(&proj),
-        );
-        let proj = mlxcel_core::multiply(&proj, &scale);
+        let proj = mlxcel_core::multiply_scalar(&proj, (self.config.hidden_size as f32).powf(-0.5));
 
         let shape = mlxcel_core::array_shape(inputs_embeds);
         let b = shape[0];
@@ -1088,24 +1112,14 @@ impl Gemma3nLanguageModel {
 
         let proj_normed = self.per_layer_projection_norm.forward(&proj);
 
-        let sqrt_half = mlxcel_core::full_f32(
-            &[1],
-            std::f32::consts::FRAC_1_SQRT_2,
-            mlxcel_core::array_dtype(&proj_normed),
-        );
         let sum = mlxcel_core::add(&proj_normed, per_layer_inputs);
-        mlxcel_core::multiply(&sum, &sqrt_half)
+        mlxcel_core::multiply_scalar(&sum, std::f32::consts::FRAC_1_SQRT_2)
     }
 
     /// Get embedded token representations (for VLM use)
     pub fn get_embed_tokens(&self, input_ids: &MlxArray) -> UniquePtr<MlxArray> {
         let h = self.embed_tokens.forward(input_ids);
-        let scale = mlxcel_core::full_f32(
-            &[1],
-            (self.config.hidden_size as f32).sqrt(),
-            mlxcel_core::array_dtype(&h),
-        );
-        mlxcel_core::multiply(&h, &scale)
+        mlxcel_core::multiply_scalar(&h, (self.config.hidden_size as f32).sqrt())
     }
 
     /// Forward pass starting from pre-computed embeddings + per_layer_inputs (for VLM)
@@ -1186,6 +1200,11 @@ impl Gemma3nLanguageModel {
 
         let h = mean_arrays(&h_list);
         let out = self.norm.forward(&h);
+        let out = if self.embed_tokens.is_quantized() {
+            out
+        } else {
+            mlxcel_core::astype(&out, mlxcel_core::array_dtype(self.embed_tokens.weight()))
+        };
         let mut logits = self.embed_tokens.as_linear(&out);
 
         if let Some(cap) = self.config.final_logit_softcapping {

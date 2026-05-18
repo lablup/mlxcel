@@ -1011,6 +1011,7 @@ pub fn load_text_weights<P: AsRef<std::path::Path>>(
         .and_then(|config_str| serde_json::from_str::<Value>(&config_str).ok());
 
     let is_gemma4 = parsed_config.as_ref().is_some_and(is_gemma4_model_config);
+    let keep_gemma3n_mlp_bf16 = parsed_config.as_ref().is_some_and(is_gemma3n_model_config);
 
     let mut weights = if is_gemma4 {
         load_gemma4_text_weights(model_dir)?
@@ -1087,7 +1088,11 @@ pub fn load_text_weights<P: AsRef<std::path::Path>>(
     // models — quantized models use bf16 scales/biases in quantized_matmul
     // which handles bf16 natively.
     if !is_quantized && should_convert_bf16_to_f16() {
-        let had_bf16 = convert_bf16_weights(&mut weights);
+        let had_bf16 = if keep_gemma3n_mlp_bf16 {
+            convert_bf16_weights_with_keep(&mut weights, gemma3n_language_mlp_bf16_key)
+        } else {
+            convert_bf16_weights(&mut weights)
+        };
         if had_bf16 {
             warn_bf16_precision();
         }
@@ -1111,6 +1116,33 @@ fn should_convert_bf16_to_f16() -> bool {
     hw.silicon_gen != mlxcel_core::hardware::AppleSiliconGen::Unknown
 }
 
+fn is_gemma3n_model_config(config: &Value) -> bool {
+    config
+        .get("model_type")
+        .and_then(Value::as_str)
+        .is_some_and(|model_type| model_type == "gemma3n")
+        || config
+            .get("text_config")
+            .and_then(|text_config| text_config.get("model_type"))
+            .and_then(Value::as_str)
+            .is_some_and(|model_type| model_type == "gemma3n" || model_type == "gemma3n_text")
+}
+
+/// Return true for Gemma3n language MLP tensors that should remain bf16.
+///
+/// Used by: load_text_weights, load_vlm_weights_common
+#[must_use]
+pub fn gemma3n_language_mlp_bf16_key(key: &str) -> bool {
+    let layer_mlp_key =
+        (key.contains(".layers.") || key.starts_with("layers.")) && key.contains(".mlp.");
+    layer_mlp_key
+        && (key.starts_with("language_model.model.layers.")
+            || key.starts_with("model.language_model.layers.")
+            || key.starts_with("language_model.layers.")
+            || key.starts_with("model.layers.")
+            || key.starts_with("layers."))
+}
+
 /// Emit a one-line stderr note when a full-precision bf16 model is loaded,
 /// unless suppressed by `MLXCEL_NO_PRECISION_WARNING` env var.
 ///
@@ -1130,27 +1162,65 @@ pub fn warn_bf16_precision() {
 /// Used by: load_text_weights, load_vlm_weights_common
 #[must_use]
 pub fn convert_bf16_weights(weights: &mut mlxcel_core::weights::WeightMap) -> bool {
+    convert_bf16_weights_with_keep(weights, |_| false)
+}
+
+/// Cast bf16 tensors to f16, except keys selected by a model-specific policy.
+///
+/// Returns `true` if any bf16 tensors were found, whether converted or kept.
+///
+/// Used by: load_text_weights, load_vlm_weights_common
+#[must_use]
+pub fn convert_bf16_weights_with_keep<F>(
+    weights: &mut mlxcel_core::weights::WeightMap,
+    keep_bf16: F,
+) -> bool
+where
+    F: Fn(&str) -> bool,
+{
     let bf16_keys: Vec<String> = weights
         .iter()
         .filter(|(_, v)| mlxcel_core::array_dtype(v) == mlxcel_core::dtype::BFLOAT16)
         .map(|(k, _)| k.clone())
         .collect();
 
-    if !bf16_keys.is_empty() {
+    if bf16_keys.is_empty() {
+        return false;
+    }
+
+    let (keep_keys, convert_keys): (Vec<_>, Vec<_>) =
+        bf16_keys.into_iter().partition(|key| keep_bf16(key));
+
+    if !convert_keys.is_empty() {
         eprintln!(
             "Converting {} bf16 weight tensors to f16 for Apple Silicon fp16 optimization.",
-            bf16_keys.len()
+            convert_keys.len()
         );
-        for key in bf16_keys {
+        for key in convert_keys {
             if let Some(tensor) = weights.get(&key) {
                 let converted = mlxcel_core::astype(tensor, mlxcel_core::dtype::FLOAT16);
+                // Materialize the cast now so decode graphs consume f16
+                // weights directly instead of carrying a bf16->f16 astype
+                // node through every projection.
+                mlxcel_core::eval(&converted);
                 weights.insert(key, converted);
             }
         }
-        true
-    } else {
-        false
     }
+
+    if !keep_keys.is_empty() {
+        eprintln!(
+            "Keeping {} bf16 weight tensors for a model-specific precision policy.",
+            keep_keys.len()
+        );
+        for key in keep_keys {
+            if let Some(tensor) = weights.get(&key) {
+                mlxcel_core::eval(tensor);
+            }
+        }
+    }
+
+    true
 }
 
 /// Sanitize config JSON string by replacing non-standard JSON values.
@@ -1408,6 +1478,22 @@ mod tests {
     }
 
     // --- normalize_nvfp4_keys tests ---
+
+    #[test]
+    fn gemma3n_language_mlp_bf16_key_matches_language_mlp_prefixes_only() {
+        assert!(gemma3n_language_mlp_bf16_key(
+            "model.language_model.layers.0.mlp.gate_proj.weight"
+        ));
+        assert!(gemma3n_language_mlp_bf16_key(
+            "language_model.model.layers.0.mlp.down_proj.weight"
+        ));
+        assert!(!gemma3n_language_mlp_bf16_key(
+            "model.vision_tower.layers.0.mlp.gate_proj.weight"
+        ));
+        assert!(!gemma3n_language_mlp_bf16_key(
+            "model.language_model.layers.0.self_attn.q_proj.weight"
+        ));
+    }
 
     #[test]
     fn normalize_nvfp4_keys_remaps_language_model_prefix() {

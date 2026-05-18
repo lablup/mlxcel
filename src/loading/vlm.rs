@@ -154,7 +154,14 @@ pub(crate) fn load_vlm_weights_common(
     if hw.silicon_gen != mlxcel_core::hardware::AppleSiliconGen::Unknown {
         let is_quantized = is_model_quantized(model_path);
         if !is_quantized {
-            let had_bf16 = crate::models::convert_bf16_weights(&mut weights);
+            let had_bf16 = if is_gemma3n_model(model_path) {
+                crate::models::convert_bf16_weights_with_keep(
+                    &mut weights,
+                    crate::models::gemma3n_language_mlp_bf16_key,
+                )
+            } else {
+                crate::models::convert_bf16_weights(&mut weights)
+            };
             if had_bf16 {
                 crate::models::warn_bf16_precision();
             }
@@ -225,6 +232,21 @@ fn is_model_quantized(model_path: &Path) -> bool {
         }
     }
     false
+}
+
+fn is_gemma3n_model(model_path: &Path) -> bool {
+    let Ok((_, config)) = read_sanitized_vlm_config(model_path) else {
+        return false;
+    };
+    config
+        .get("model_type")
+        .and_then(Value::as_str)
+        .is_some_and(|model_type| model_type == "gemma3n")
+        || config
+            .get("text_config")
+            .and_then(|text_config| text_config.get("model_type"))
+            .and_then(Value::as_str)
+            .is_some_and(|model_type| model_type == "gemma3n" || model_type == "gemma3n_text")
 }
 
 fn read_optional_model_json(model_path: &Path, file_name: &str) -> Option<Value> {
