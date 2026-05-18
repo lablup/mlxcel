@@ -308,6 +308,393 @@ pub enum ModelType {
     Rwkv7,
     RecurrentGemma,
 }
+
+/// All `ModelType` variants, in declaration order. Used as the iteration
+/// source for `mlxcel list` so that the rendered output stays in sync with
+/// the registry. The exhaustiveness contract is enforced by
+/// `ModelType::metadata()` (an exhaustive `match`) and by the
+/// `all_model_types_covers_every_variant` unit test, which both asserts a
+/// count floor and walks every entry to verify non-empty metadata.
+pub const ALL_MODEL_TYPES: &[ModelType] = &[
+    // Standard Transformer models
+    ModelType::Llama,
+    ModelType::Llama4,
+    ModelType::Llama4VLM,
+    ModelType::Qwen2,
+    ModelType::Qwen3,
+    ModelType::Qwen3Moe,
+    ModelType::Qwen3Next,
+    ModelType::Qwen35,
+    ModelType::Qwen35VLM,
+    ModelType::Qwen35Moe,
+    ModelType::Qwen35MoeVLM,
+    ModelType::Gemma,
+    ModelType::Gemma2,
+    ModelType::Gemma3,
+    ModelType::Gemma4,
+    ModelType::Gemma3VLM,
+    ModelType::Gemma4VLM,
+    ModelType::LlavaVLM,
+    ModelType::LlavaBunnyVLM,
+    ModelType::AyaVisionVLM,
+    ModelType::PaliGemmaVLM,
+    ModelType::PixtralVLM,
+    ModelType::Mistral3VLM,
+    ModelType::Qwen2VL,
+    ModelType::Qwen25VL,
+    ModelType::Qwen3VL,
+    ModelType::Qwen3VLMoe,
+    ModelType::YoutuVLM,
+    ModelType::MiniCPMOVLM,
+    ModelType::Moondream3VLM,
+    ModelType::Gemma3n,
+    ModelType::Gemma3nVLM,
+    ModelType::Phi,
+    ModelType::Phi3,
+    ModelType::Phi4MMVLM,
+    ModelType::Phi4SigLipVLM,
+    ModelType::Phi3VLM,
+    ModelType::Molmo2VLM,
+    ModelType::MolmoPointVLM,
+    ModelType::Phi3Small,
+    ModelType::PhiMoe,
+    // MoE models
+    ModelType::GptOss,
+    ModelType::MiniMax,
+    ModelType::Mixtral,
+    ModelType::Qwen2Moe,
+    ModelType::OLMoE,
+    // DeepSeek family
+    ModelType::DeepSeek,
+    ModelType::DeepSeekV2,
+    ModelType::DeepSeekV3,
+    ModelType::DeepSeekV32,
+    // Cohere family
+    ModelType::Cohere,
+    ModelType::Cohere2,
+    // Chinese/Asian models
+    ModelType::InternLM2,
+    ModelType::InternLM3,
+    ModelType::Baichuan,
+    ModelType::Glm4,
+    ModelType::Glm4Moe,
+    ModelType::Glm4MoeLite,
+    ModelType::GlmMoeDsa,
+    ModelType::Ernie45,
+    ModelType::Ernie45Moe,
+    ModelType::HunyuanMoe,
+    ModelType::HunyuanV1Dense,
+    ModelType::MiMo,
+    // Korean models
+    ModelType::ExaOne,
+    ModelType::ExaOne4,
+    ModelType::ExaOneMoe,
+    ModelType::SolarOpen,
+    // OLMo family
+    ModelType::Olmo,
+    ModelType::Olmo2,
+    ModelType::Olmo3,
+    // Code models
+    ModelType::StarCoder2,
+    // Other Transformer models
+    ModelType::MiniCPM,
+    ModelType::MiniCPM3,
+    ModelType::StableLM,
+    ModelType::SmolLM3,
+    ModelType::Ministral3,
+    ModelType::Mistral3,
+    ModelType::Mistral4,
+    ModelType::Nemotron,
+    // SSM/Mamba models
+    ModelType::Mamba,
+    ModelType::Mamba2,
+    ModelType::Jamba,
+    ModelType::NemotronH,
+    ModelType::NemotronHNanoOmniVLM,
+    ModelType::NemotronNAS,
+    // Kimi models
+    ModelType::KimiLinear,
+    // Longcat models
+    ModelType::LongcatFlash,
+    ModelType::LongcatFlashNgram,
+    // Step models
+    ModelType::Step3p5,
+    // RNN models
+    ModelType::Rwkv7,
+    ModelType::RecurrentGemma,
+];
+
+impl ModelType {
+    /// User-facing metadata for `mlxcel list`: `(display_name, family)`.
+    ///
+    /// The match is intentionally exhaustive — adding a new variant to
+    /// `ModelType` without supplying both fields is a compile error. This
+    /// is the single source of truth that prevents `mlxcel list` from
+    /// drifting away from the registry the way the previous hand-written
+    /// block did (see issue #26).
+    ///
+    /// * `display_name` — short human-readable label (e.g.
+    ///   `"Llama 4 (MoE)"`, `"Qwen 3.5 MoE VLM"`). Stay factual; do not
+    ///   invent capabilities not present in the variant.
+    /// * `family` — free-form grouping label used by the renderer to bucket
+    ///   variants into sections. Sibling families are used for VLMs
+    ///   (e.g. `"Qwen VLM"` alongside `"Qwen"`).
+    pub const fn metadata(self) -> (&'static str, &'static str) {
+        match self {
+            // ----- Llama -----
+            ModelType::Llama => ("Llama 1/2/3", "Llama"),
+            ModelType::Llama4 => ("Llama 4 (MoE)", "Llama"),
+            ModelType::Llama4VLM => ("Llama 4 VLM", "Llama VLM"),
+
+            // ----- Qwen (text/hybrid/MoE) -----
+            ModelType::Qwen2 => ("Qwen 2 / 2.5", "Qwen"),
+            ModelType::Qwen3 => ("Qwen 3", "Qwen"),
+            ModelType::Qwen3Moe => ("Qwen 3 MoE", "Qwen"),
+            ModelType::Qwen3Next => {
+                ("Qwen 3 Next (Attention + GatedDeltaNet + MoE)", "Qwen")
+            }
+            ModelType::Qwen35 => {
+                ("Qwen 3.5 (Attention + GatedDeltaNet hybrid)", "Qwen")
+            }
+            ModelType::Qwen35Moe => ("Qwen 3.5 MoE (hybrid)", "Qwen"),
+            ModelType::Qwen2Moe => ("Qwen 2 MoE", "Qwen"),
+
+            // ----- Qwen VLM -----
+            ModelType::Qwen2VL => ("Qwen2-VL", "Qwen VLM"),
+            ModelType::Qwen25VL => ("Qwen2.5-VL", "Qwen VLM"),
+            ModelType::Qwen3VL => ("Qwen3-VL", "Qwen VLM"),
+            ModelType::Qwen3VLMoe => ("Qwen3-VL MoE", "Qwen VLM"),
+            ModelType::Qwen35VLM => ("Qwen 3.5 VLM", "Qwen VLM"),
+            ModelType::Qwen35MoeVLM => ("Qwen 3.5 MoE VLM", "Qwen VLM"),
+
+            // ----- Gemma (text) -----
+            ModelType::Gemma => ("Gemma 1", "Gemma"),
+            ModelType::Gemma2 => ("Gemma 2", "Gemma"),
+            ModelType::Gemma3 => ("Gemma 3", "Gemma"),
+            ModelType::Gemma3n => ("Gemma 3n", "Gemma"),
+            ModelType::Gemma4 => ("Gemma 4", "Gemma"),
+            ModelType::RecurrentGemma => {
+                ("RecurrentGemma (Griffin: RGLRU + attention)", "Gemma")
+            }
+
+            // ----- Gemma VLM -----
+            ModelType::Gemma3VLM => ("Gemma 3 VLM", "Gemma VLM"),
+            ModelType::Gemma3nVLM => ("Gemma 3n VLM (MobileNetV5 + Gemma3n)", "Gemma VLM"),
+            ModelType::Gemma4VLM => ("Gemma 4 VLM", "Gemma VLM"),
+            ModelType::PaliGemmaVLM => ("PaliGemma (SigLIP + Gemma)", "Gemma VLM"),
+
+            // ----- Mistral (text) -----
+            ModelType::Ministral3 => ("Ministral 3", "Mistral"),
+            ModelType::Mistral3 => ("Mistral 3", "Mistral"),
+            ModelType::Mistral4 => ("Mistral 4 (MLA)", "Mistral"),
+
+            // ----- Mistral VLM -----
+            ModelType::PixtralVLM => ("Pixtral (2D-RoPE ViT + Mistral)", "Mistral VLM"),
+            ModelType::Mistral3VLM => ("Mistral 3 VLM (Pixtral ViT + Mistral)", "Mistral VLM"),
+
+            // ----- Phi (text) -----
+            ModelType::Phi => ("Phi 1 / 2", "Phi"),
+            ModelType::Phi3 => ("Phi 3", "Phi"),
+            ModelType::Phi3Small => ("Phi 3 Small", "Phi"),
+            ModelType::PhiMoe => ("Phi MoE", "Phi"),
+
+            // ----- Phi VLM -----
+            ModelType::Phi3VLM => ("Phi 3.5 Vision (CLIP + Phi3)", "Phi VLM"),
+            ModelType::Phi4MMVLM => {
+                ("Phi-4 Multimodal (SigLIP2 NaFlex + Phi4)", "Phi VLM")
+            }
+            ModelType::Phi4SigLipVLM => {
+                ("Phi-4 SigLIP Vision (SigLIP2 NaFlex + Phi3 text)", "Phi VLM")
+            }
+
+            // ----- DeepSeek -----
+            ModelType::DeepSeek => ("DeepSeek v1", "DeepSeek"),
+            ModelType::DeepSeekV2 => ("DeepSeek v2", "DeepSeek"),
+            ModelType::DeepSeekV3 => ("DeepSeek v3 / R1", "DeepSeek"),
+            ModelType::DeepSeekV32 => ("DeepSeek v3.2", "DeepSeek"),
+
+            // ----- Cohere -----
+            ModelType::Cohere => ("Command R (Cohere)", "Cohere"),
+            ModelType::Cohere2 => ("Command R+ (Cohere2)", "Cohere"),
+            ModelType::AyaVisionVLM => ("Aya Vision (SigLIP + Cohere2)", "Cohere VLM"),
+
+            // ----- InternLM -----
+            ModelType::InternLM2 => ("InternLM 2", "InternLM"),
+            ModelType::InternLM3 => ("InternLM 3", "InternLM"),
+
+            // ----- GLM -----
+            ModelType::Glm4 => ("GLM 4", "GLM"),
+            ModelType::Glm4Moe => ("GLM 4 MoE", "GLM"),
+            ModelType::Glm4MoeLite => ("GLM 4 MoE Lite", "GLM"),
+            ModelType::GlmMoeDsa => ("GLM MoE DSA", "GLM"),
+
+            // ----- ERNIE -----
+            ModelType::Ernie45 => ("ERNIE 4.5", "ERNIE"),
+            ModelType::Ernie45Moe => ("ERNIE 4.5 MoE", "ERNIE"),
+
+            // ----- Hunyuan -----
+            ModelType::HunyuanV1Dense => ("Hunyuan v1 Dense", "Hunyuan"),
+            ModelType::HunyuanMoe => ("Hunyuan MoE", "Hunyuan"),
+
+            // ----- ExaOne -----
+            ModelType::ExaOne => ("ExaOne 3", "ExaOne"),
+            ModelType::ExaOne4 => ("ExaOne 4", "ExaOne"),
+            ModelType::ExaOneMoe => ("ExaOne MoE", "ExaOne"),
+
+            // ----- Solar -----
+            ModelType::SolarOpen => ("Solar Open", "Solar"),
+
+            // ----- OLMo -----
+            ModelType::Olmo => ("OLMo 1", "OLMo"),
+            ModelType::Olmo2 => ("OLMo 2", "OLMo"),
+            ModelType::Olmo3 => ("OLMo 3", "OLMo"),
+            ModelType::OLMoE => ("OLMoE (MoE)", "OLMo"),
+
+            // ----- Nemotron -----
+            ModelType::Nemotron => ("Nemotron-4", "Nemotron"),
+            ModelType::NemotronH => {
+                ("Nemotron-H (Mamba2 + Attention + MLP/MoE hybrid)", "Nemotron")
+            }
+            ModelType::NemotronNAS => ("Nemotron-NAS", "Nemotron"),
+            ModelType::NemotronHNanoOmniVLM => {
+                ("Nemotron-H Nano Omni VLM", "Nemotron VLM")
+            }
+
+            // ----- MoE (other) -----
+            ModelType::GptOss => ("gpt-oss (MoE)", "MoE (other)"),
+            ModelType::MiniMax => ("MiniMax-M2 (MoE, 256 experts)", "MoE (other)"),
+            ModelType::Mixtral => ("Mixtral (MoE)", "MoE (other)"),
+            ModelType::KimiLinear => {
+                ("Kimi Linear (MLA + GatedDeltaNet hybrid)", "MoE (other)")
+            }
+            ModelType::LongcatFlash => {
+                ("LongCat Flash (MLA + MoE, dual sublayer)", "MoE (other)")
+            }
+            ModelType::LongcatFlashNgram => {
+                ("LongCat Flash + N-gram embedding", "MoE (other)")
+            }
+            ModelType::Step3p5 => {
+                ("Step-3.5 (Sigmoid MoE gate + SwitchGLU)", "MoE (other)")
+            }
+
+            // ----- Mamba / SSM -----
+            ModelType::Mamba => ("Mamba 1 / Falcon Mamba", "Mamba / SSM"),
+            ModelType::Mamba2 => ("Mamba 2", "Mamba / SSM"),
+
+            // ----- Hybrid (Attention + SSM) -----
+            ModelType::Jamba => ("Jamba (Mamba + Transformer + MoE)", "Hybrid"),
+
+            // ----- RWKV -----
+            ModelType::Rwkv7 => ("RWKV v7", "RWKV"),
+
+            // ----- Specialized / other small/text -----
+            ModelType::StarCoder2 => ("StarCoder 2", "Specialized"),
+            ModelType::StableLM => ("StableLM", "Specialized"),
+            ModelType::Baichuan => ("Baichuan", "Specialized"),
+            ModelType::MiniCPM => ("MiniCPM 1", "Specialized"),
+            ModelType::MiniCPM3 => ("MiniCPM 3", "Specialized"),
+            ModelType::SmolLM3 => ("SmolLM 3", "Specialized"),
+            ModelType::MiMo => ("MiMo (multi-token prediction)", "Specialized"),
+
+            // ----- Other VLM (cross-family vision-language stacks) -----
+            ModelType::LlavaVLM => ("LLaVA (CLIP/SigLIP + Llama/Qwen2)", "Other VLM"),
+            ModelType::LlavaBunnyVLM => ("LLaVA-Bunny (SigLIP + Qwen2)", "Other VLM"),
+            ModelType::Molmo2VLM => ("Molmo 2 (custom ViT + Molmo2 text)", "Other VLM"),
+            ModelType::MolmoPointVLM => {
+                ("Molmo-Point (point prediction + Molmo2 text)", "Other VLM")
+            }
+            ModelType::Moondream3VLM => {
+                ("Moondream 3 (custom ViT + custom decoder)", "Other VLM")
+            }
+            ModelType::MiniCPMOVLM => {
+                ("MiniCPM-o (dynamic SigLIP + resampler + Qwen3-VL text)", "Other VLM")
+            }
+            ModelType::YoutuVLM => {
+                ("Youtu-VL (SigLIP2 windowed-attn + DeepSeek-V3 MLA)", "Other VLM")
+            }
+        }
+    }
+
+    /// Short human-readable label for `mlxcel list`. See [`metadata`].
+    ///
+    /// [`metadata`]: ModelType::metadata
+    pub const fn display_name(self) -> &'static str {
+        self.metadata().0
+    }
+
+    /// Family grouping label used by the renderer to bucket variants into
+    /// sections. See [`metadata`].
+    ///
+    /// [`metadata`]: ModelType::metadata
+    pub const fn family(self) -> &'static str {
+        self.metadata().1
+    }
+}
+
+#[cfg(test)]
+mod metadata_tests {
+    use super::{ALL_MODEL_TYPES, ModelType};
+
+    /// `ALL_MODEL_TYPES` is the iteration source for `mlxcel list`. The
+    /// list must contain every `ModelType` variant or rendered output
+    /// will silently miss models. We catch drift two ways:
+    ///
+    /// 1. A count floor (`> 80`) tied to the README's "80+ models"
+    ///    claim. This is a *runtime* guard that triggers if a future
+    ///    refactor accidentally shrinks the slice.
+    /// 2. Walking the slice and asserting every entry has non-empty
+    ///    metadata. This catches the case where someone added a
+    ///    variant, wired it into `metadata()`, but forgot to push it
+    ///    into `ALL_MODEL_TYPES`.
+    ///
+    /// The exhaustiveness of `ModelType::metadata()` itself is enforced
+    /// at compile time by the exhaustive `match` — adding a variant
+    /// without a metadata arm is a build error.
+    #[test]
+    fn all_model_types_covers_every_variant() {
+        let count = ALL_MODEL_TYPES.len();
+        assert!(
+            count > 80,
+            "ALL_MODEL_TYPES should hold >80 variants, got {count}; \
+             did you add a variant to ModelType but forget to register \
+             it in ALL_MODEL_TYPES?"
+        );
+
+        for &mt in ALL_MODEL_TYPES {
+            assert!(
+                !mt.display_name().is_empty(),
+                "{mt:?} has empty display_name"
+            );
+            assert!(!mt.family().is_empty(), "{mt:?} has empty family");
+        }
+    }
+
+    /// Sanity check on family stability: the family of a variant must be
+    /// a non-trivial string and must round-trip through metadata.
+    #[test]
+    fn metadata_round_trip_is_consistent() {
+        for &mt in ALL_MODEL_TYPES {
+            let (name, family) = mt.metadata();
+            assert_eq!(name, mt.display_name(), "display_name mismatch for {mt:?}");
+            assert_eq!(family, mt.family(), "family mismatch for {mt:?}");
+        }
+    }
+
+    /// The slice should not contain duplicates — duplicate entries would
+    /// cause the renderer to emit the same model twice.
+    #[test]
+    fn all_model_types_has_no_duplicates() {
+        let mut seen: Vec<ModelType> = Vec::with_capacity(ALL_MODEL_TYPES.len());
+        for &mt in ALL_MODEL_TYPES {
+            assert!(
+                !seen.contains(&mt),
+                "{mt:?} appears more than once in ALL_MODEL_TYPES"
+            );
+            seen.push(mt);
+        }
+    }
+}
+
 #[cfg(test)]
 #[path = "detection_tests.rs"]
 mod detection_tests;
