@@ -1,5 +1,9 @@
 # mlxcel
 
+[![License: Apache 2.0](https://img.shields.io/github/license/lablup/mlxcel)](LICENSE)
+[![Latest Release](https://img.shields.io/github/v/release/lablup/mlxcel)](https://github.com/lablup/mlxcel/releases/latest)
+[![CI](https://github.com/lablup/mlxcel/actions/workflows/ci.yml/badge.svg)](https://github.com/lablup/mlxcel/actions/workflows/ci.yml)
+
 High-performance LLM/VLM inference runtime and server for Apple Silicon. The CLI and server are implemented in Rust and execute models through native MLX C++ bindings. Linux/CUDA builds are supported as a secondary target.
 
 ## Overview
@@ -142,7 +146,9 @@ for the CLI summary, and see [Supported models](docs/supported-models.md) for th
 
 ## Contributing
 
-Issues and pull requests are welcome. New model architectures, performance work, bug fixes, and documentation improvements are all useful. For larger changes, please open an issue first so the scope and validation plan can be discussed.
+Issues and pull requests are welcome. See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the contributor workflow, local quality gates (`cargo fmt`, `clippy`, `cargo test`, `cargo deny check`), and commit conventions. New model architectures, performance work, bug fixes, and documentation improvements are all useful. For larger changes, please open an issue first so the scope and validation plan can be discussed.
+
+For security vulnerabilities, see [`SECURITY.md`](SECURITY.md) — do **not** file these as public issues.
 
 ## License
 
