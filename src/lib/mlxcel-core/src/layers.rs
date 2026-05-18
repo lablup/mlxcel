@@ -24,8 +24,8 @@
 use crate::ffi;
 use crate::ffi::MlxArray;
 use cxx::UniquePtr;
-use std::sync::OnceLock;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::OnceLock;
 
 pub use crate::cache::{ChunkedKVCache, KVCache, KVCacheMode, RotatingKVCache};
 
