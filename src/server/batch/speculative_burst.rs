@@ -1698,7 +1698,7 @@ pub(crate) fn try_run_burst_batched(
         Ok(rows_tokens) => {
             debug_assert_eq!(rows_tokens.len(), batch_size);
             let mut finalized_rows = Vec::with_capacity(batch_size);
-            for (seq, tokens) in seqs.into_iter().zip(rows_tokens.into_iter()) {
+            for (seq, tokens) in seqs.into_iter().zip(rows_tokens) {
                 let seq_id = seq.seq_id;
                 // Transition Queued -> Prefilling now that the burst
                 // owned the row's lifecycle.
