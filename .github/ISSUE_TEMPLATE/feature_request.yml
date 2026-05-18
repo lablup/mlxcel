@@ -1,0 +1,74 @@
+name: Feature request
+description: Propose a new capability, model family, or behavior change for mlxcel
+title: "feat: <short description>"
+labels: ["type:enhancement", "status:ready"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for proposing a feature. mlxcel tracks model coverage with [mlx-lm](https://github.com/ml-explore/mlx-lm) and [mlx-vlm](https://github.com/Blaizzy/mlx-vlm) where practical; the more upstream context you can provide, the easier it is to scope.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem / motivation
+      description: What problem does this feature solve? Who is the user, and what are they trying to do today?
+      placeholder: |
+        e.g. "I want to serve LFM2-VL via mlxcel-server, but the architecture is not in the detection table."
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: |
+        Describe what should be built. For new model families, include the upstream reference (mlx-lm / mlx-vlm path or HF architecture).
+        For new server features, sketch the CLI flag or API surface.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Other approaches you considered, and why they were not chosen.
+
+  - type: dropdown
+    id: scope
+    attributes:
+      label: Scope
+      options:
+        - New model family
+        - Server / API surface (mlxcel-server)
+        - CLI behavior (mlxcel)
+        - Inference performance
+        - Surgery operation
+        - Tooling / documentation
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: How will we know this is done? List the conditions in checkbox form.
+      placeholder: |
+        - [ ] Model loads from `mlx-community/...` without conversion
+        - [ ] `mlxcel list` includes the new architecture
+        - [ ] End-to-end inference matches Python reference within RMS < 5e-3
+
+  - type: textarea
+    id: additional
+    attributes:
+      label: Additional context
+      description: Upstream PRs, papers, benchmark numbers, etc.
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Pre-submission checks
+      options:
+        - label: I searched existing issues and discussions and did not find a duplicate
+          required: true

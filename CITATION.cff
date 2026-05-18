@@ -1,0 +1,30 @@
+# Citation File Format (CFF) v1.2.0
+# Docs: https://citation-file-format.github.io/
+cff-version: 1.2.0
+title: "mlxcel: High-performance LLM/VLM/VLA inference on Apple Silicon and CUDA GPUs"
+message: "If you use this software, please cite it as below."
+type: software
+authors:
+  - name: "Lablup Inc."
+    website: "https://lablup.com"
+repository-code: "https://github.com/lablup/mlxcel"
+url: "https://github.com/lablup/mlxcel"
+abstract: >-
+  mlxcel is a Rust inference runtime and OpenAI-compatible model server for
+  MLX-format checkpoints. It targets Apple Silicon (primary) and Linux/CUDA
+  (secondary), provides continuous batching, prompt-prefix caching, speculative
+  decoding, KV-cache compression, and tensor/pipeline parallelism for
+  selected model families. Model coverage tracks the mlx-lm and mlx-vlm
+  projects where practical.
+keywords:
+  - mlx
+  - llm
+  - vlm
+  - vla
+  - inference
+  - apple-silicon
+  - cuda
+  - rust
+license: Apache-2.0
+version: "0.0.27"
+date-released: "2026-05-18"

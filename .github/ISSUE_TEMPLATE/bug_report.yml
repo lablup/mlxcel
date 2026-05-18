@@ -1,0 +1,116 @@
+name: Bug report
+description: Report something that is not working in mlxcel
+title: "fix: <short description>"
+labels: ["type:bug", "status:ready"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to file a bug report. The information below helps us reproduce the issue and ship a fix faster.
+
+        **Security issues**: Do **not** file security vulnerabilities here. See [SECURITY.md](https://github.com/lablup/mlxcel/blob/main/SECURITY.md) for the private reporting channel.
+
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: A short, factual description of the bug.
+      placeholder: e.g. "mlxcel-server crashes on /v1/chat/completions when the prompt contains a 4-byte UTF-8 character"
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction steps
+      description: |
+        Minimal commands or HTTP requests that reproduce the issue. Include the prompt and seed if relevant.
+      placeholder: |
+        1. `mlxcel download mlx-community/Qwen3.5-0.8B-OptiQ-4bit`
+        2. `mlxcel generate -m models/Qwen3.5-0.8B-OptiQ-4bit -p "..." -n 100 --seed 42`
+        3. Observed: ...
+        4. Expected: ...
+      render: bash
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: What did you expect to happen?
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: What actually happened? Include error messages, panic backtraces, or unexpected output verbatim.
+      render: text
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: mlxcel version
+      description: Output of `mlxcel --version` or the commit SHA you built from.
+      placeholder: e.g. "v0.0.27" or "main @ abc1234"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: install
+    attributes:
+      label: Install method
+      options:
+        - Homebrew (lablup/tap)
+        - Pre-built release binary (GitHub Releases)
+        - Built from source
+        - Other (please describe in Additional context)
+    validations:
+      required: true
+
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      options:
+        - macOS (Apple Silicon)
+        - Linux + CUDA (gb10)
+        - Linux + CUDA (gh200)
+        - Linux + CUDA (other — please specify in Additional context)
+        - Other
+    validations:
+      required: true
+
+  - type: input
+    id: model
+    attributes:
+      label: Model checkpoint
+      description: The Hugging Face repo ID or local path of the model you were running, if relevant.
+      placeholder: e.g. "mlx-community/Qwen3.5-0.8B-OptiQ-4bit"
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs
+      description: Server / CLI output, ideally with `RUST_LOG=mlxcel=debug` set for stack traces.
+      render: text
+
+  - type: textarea
+    id: additional
+    attributes:
+      label: Additional context
+      description: Anything else that might help — workarounds you tried, related issues, screenshots, etc.
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Pre-submission checks
+      options:
+        - label: I searched existing issues and did not find a duplicate
+          required: true
+        - label: This is not a security vulnerability (those go to SECURITY.md instead)
+          required: true

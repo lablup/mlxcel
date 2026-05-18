@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/lablup/mlxcel/security/advisories/new
+    about: Report a security issue privately. Do not file these as public issues. See SECURITY.md for the full policy.
+  - name: Question or discussion
+    url: https://github.com/lablup/mlxcel/discussions
+    about: General questions, design discussion, or "is this supported?" go here instead of issues.
+  - name: Upstream MLX issues
+    url: https://github.com/ml-explore/mlx/issues
+    about: Bugs that reproduce against upstream MLX C++ libraries (not mlxcel-specific) should be reported upstream.
