@@ -401,6 +401,11 @@ impl ExpertLinear {
 //   out_glu = x_glu * sigmoid(alpha * x_glu)
 //   return out_glu * (x_linear + 1)
 fn gpt_oss_swiglu(x_linear: &MlxArray, x_glu: &MlxArray, limit: f32) -> UniquePtr<MlxArray> {
+    if (limit - 7.0).abs() <= f32::EPSILON {
+        return mlxcel_core::compiled_gpt_oss_swiglu_activation(x_linear, x_glu);
+    }
+
+    let input_dtype = mlxcel_core::array_dtype(x_linear);
     let alpha = 1.702f32;
 
     // Clamp values
@@ -419,7 +424,8 @@ fn gpt_oss_swiglu(x_linear: &MlxArray, x_glu: &MlxArray, limit: f32) -> UniquePt
     // (x_linear + 1) * out_glu
     let one = mlxcel_core::from_slice_f32(&[1.0], &[1]);
     let x_linear_plus_1 = mlxcel_core::add(&x_linear, &one);
-    mlxcel_core::multiply(&out_glu, &x_linear_plus_1)
+    let result = mlxcel_core::multiply(&out_glu, &x_linear_plus_1);
+    mlxcel_core::astype(&result, input_dtype)
 }
 
 // SwitchGLU for GptOss (custom activation, MXFP4 support)
@@ -437,22 +443,25 @@ impl GptOssSwitchGLU {
         let top_k = indices_shape[1];
         let total = n_tokens * top_k;
         let do_sort = total >= 64;
+        let hidden_size = mlxcel_core::array_shape(x)[1];
 
-        let x_exp = mlxcel_core::expand_dims(x, -2);
-        let x_exp = mlxcel_core::expand_dims(&x_exp, -3);
+        // Python writes this as `mx.expand_dims(x, (-2, -3))`, producing
+        // [tokens, 1, 1, hidden]. The input here is already flattened to rank
+        // 2, so a reshape is equivalent and avoids two decode-hot shape ops.
+        let x_exp = mlxcel_core::reshape(x, &[n_tokens, 1, 1, hidden_size]);
 
         if do_sort {
             let (sorted_x, sorted_idx, inv_order) =
                 crate::models::switch_layers::gather_sort(&x_exp, indices);
-            let x_gate = self.gate_proj.forward(&sorted_x, &sorted_idx, true);
             let x_up = self.up_proj.forward(&sorted_x, &sorted_idx, true);
+            let x_gate = self.gate_proj.forward(&sorted_x, &sorted_idx, true);
             // Python SwitchGLU: activation(x_up, x_gate) → swiglu(x_linear=x_up, x_glu=x_gate)
             let activated = gpt_oss_swiglu(&x_up, &x_gate, self.swiglu_limit);
             let output = self.down_proj.forward(&activated, &sorted_idx, true);
             scatter_unsort(&output, &inv_order, &indices_shape)
         } else {
-            let x_gate = self.gate_proj.forward(&x_exp, indices, false);
             let x_up = self.up_proj.forward(&x_exp, indices, false);
+            let x_gate = self.gate_proj.forward(&x_exp, indices, false);
             // Python SwitchGLU: activation(x_up, x_gate) → swiglu(x_linear=x_up, x_glu=x_gate)
             let activated = gpt_oss_swiglu(&x_up, &x_gate, self.swiglu_limit);
             let output = self.down_proj.forward(&activated, indices, false);
@@ -540,16 +549,20 @@ impl MLPBlock {
 
         // Softmax over top-k logits
         let topk_logits = mlxcel_core::take_along_axis(&logits, &topk_indices, -1);
-        let scores = mlxcel_core::softmax(&topk_logits, -1);
+        let scores = mlxcel_core::softmax_precise(&topk_logits, -1);
 
         // Apply experts -> [n_tokens, k, hidden]
         let expert_out = self.experts.forward(&x_flat, &topk_indices);
 
-        // Weighted sum over experts: einsum("nkh,nk->nh")
-        // Multiply expert_out by expanded scores and sum over k
+        // Weighted sum over experts. Keep the same op shape as mlx-lm's
+        // `x * expand_dims(expert_weights, -1); x.sum(axis=-2)`. Using
+        // `einsum("nkh,nk->nh")` promotes the contraction to f32 and slows
+        // GptOss decode on M5.
         let scores_exp = mlxcel_core::expand_dims(&scores, -1);
+        let scores_exp = mlxcel_core::astype(&scores_exp, mlxcel_core::array_dtype(&expert_out));
         let weighted = mlxcel_core::multiply(&expert_out, &scores_exp);
         let result = mlxcel_core::sum_axis(&weighted, -2, false);
+        let result = mlxcel_core::astype(&result, mlxcel_core::array_dtype(&x_flat));
 
         // Reshape back
         if orig_shape.len() > 2 {

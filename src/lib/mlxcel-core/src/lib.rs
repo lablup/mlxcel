@@ -525,6 +525,14 @@ mod ffi {
         /// output = silu(gate) * x
         fn compiled_swiglu_activation(gate: &MlxArray, x: &MlxArray) -> UniquePtr<MlxArray>;
 
+        /// Compiled GptOss SwiGLU activation with kernel fusion
+        /// Matches mlx-lm gpt_oss.swiglu: clipped gate/up + sigmoid(1.702*gate).
+        /// Used by: GptOss
+        fn compiled_gpt_oss_swiglu_activation(
+            x_linear: &MlxArray,
+            x_glu: &MlxArray,
+        ) -> UniquePtr<MlxArray>;
+
         /// Compiled relu_squared: square(maximum(x, 0)) — single fused kernel
         fn compiled_relu_squared(x: &MlxArray) -> UniquePtr<MlxArray>;
 

@@ -467,6 +467,24 @@ fn test_compiled_swiglu_activation() {
 }
 
 #[test]
+fn test_compiled_gpt_oss_swiglu_activation_preserves_input_dtype() {
+    let x_linear = astype(
+        &from_slice_f32(&[-8.0, -1.0, 2.0, 8.0], &[1, 4]),
+        dtype::BFLOAT16,
+    );
+    let x_glu = astype(
+        &from_slice_f32(&[-2.0, 0.5, 2.0, 8.0], &[1, 4]),
+        dtype::BFLOAT16,
+    );
+
+    let out = compiled_gpt_oss_swiglu_activation(&x_linear, &x_glu);
+    eval(&out);
+
+    assert_eq!(array_shape(&out), vec![1, 4]);
+    assert_eq!(array_dtype(&out), dtype::BFLOAT16);
+}
+
+#[test]
 fn test_new_ops() {
     let x = from_slice_f32(&[1.0, 2.0, 3.0, 4.0], &[1, 4]);
     let s = silu(&x);

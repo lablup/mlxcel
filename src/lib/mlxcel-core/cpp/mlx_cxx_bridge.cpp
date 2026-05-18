@@ -1160,6 +1160,42 @@ std::unique_ptr<MlxArray> compiled_swiglu_activation(
     return std::make_unique<MlxArray>(std::move(result[0]));
 }
 
+// Compiled GptOss SwiGLU activation using the exact mlx-lm formulation:
+//   x_glu = clip(x_glu, max=7)
+//   x_linear = clip(x_linear, min=-7, max=7)
+//   return x_glu * sigmoid(1.702 * x_glu) * (x_linear + 1)
+// Used by: GptOss
+namespace {
+    static std::function<std::vector<array>(const std::vector<array>&)>
+    get_compiled_gpt_oss_swiglu_activation() {
+        auto fn = [](const std::vector<array>& inputs) -> std::vector<array> {
+            const auto& x_linear_in = inputs[0];
+            const auto& x_glu_in = inputs[1];
+
+            auto pos_limit = mlx::core::array(7.0f);
+            auto neg_limit = mlx::core::array(-7.0f);
+            auto x_glu = mlx::core::minimum(x_glu_in, pos_limit);
+            auto x_linear = mlx::core::maximum(x_linear_in, neg_limit);
+            x_linear = mlx::core::minimum(x_linear, pos_limit);
+
+            auto glu_scaled = mlx::core::multiply(mlx::core::array(1.702f), x_glu);
+            auto out_glu = mlx::core::multiply(x_glu, mlx::core::sigmoid(glu_scaled));
+            auto result = mlx::core::multiply(out_glu, mlx::core::add(x_linear, mlx::core::array(1.0f)));
+            return {mlx::core::astype(result, x_linear_in.dtype())};
+        };
+        return mlx::core::compile(fn, true);
+    }
+}
+
+std::unique_ptr<MlxArray> compiled_gpt_oss_swiglu_activation(
+    const MlxArray& x_linear,
+    const MlxArray& x_glu
+) {
+    static auto compiled_fn = get_compiled_gpt_oss_swiglu_activation();
+    auto result = compiled_fn({x_linear.inner, x_glu.inner});
+    return std::make_unique<MlxArray>(std::move(result[0]));
+}
+
 // Compiled GELU: x * 0.5 * (1 + erf(x / sqrt(2)))
 // Used by: Gemma2, Gemma3, StarCoder2
 namespace {

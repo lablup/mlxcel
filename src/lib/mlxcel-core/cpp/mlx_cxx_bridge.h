@@ -398,6 +398,14 @@ std::unique_ptr<MlxArray> compiled_swiglu_activation(
     const MlxArray& x
 );
 
+// GptOss SwiGLU activation only - compiled with kernel fusion (shapeless=true)
+// output = clipped_gate * sigmoid(1.702 * clipped_gate) * (clipped_up + 1)
+// Used by: GptOss
+std::unique_ptr<MlxArray> compiled_gpt_oss_swiglu_activation(
+    const MlxArray& x_linear,
+    const MlxArray& x_glu
+);
+
 // GeGLU activation - compiled with kernel fusion (shapeless=true)
 // output = gelu(gate) * x
 // Used by: Gemma, Gemma2, Gemma3 MLP layers
