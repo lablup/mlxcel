@@ -336,13 +336,11 @@ impl SparseMoeBlock {
         // Apply experts - returns [n_tokens, k, hidden]
         let expert_out = self.experts.forward(&x_flat, &topk_indices);
 
-        // Weighted sum over experts: [n_tokens, k, hidden] * [n_tokens, k] -> [n_tokens, hidden]
-        // einsum fuses expand_dims + multiply + sum_axis into single kernel
-        let operands: [*const mlxcel_core::MlxArray; 2] = [
-            expert_out.as_ref().unwrap() as *const _,
-            scores.as_ref().unwrap() as *const _,
-        ];
-        let result = unsafe { mlxcel_core::einsum("nkh,nk->nh", &operands) };
+        let result = crate::models::switch_layers::moe_weighted_sum(
+            &expert_out,
+            &scores,
+            mlxcel_core::array_dtype(&x_flat),
+        );
 
         // Reshape back to original shape
         if orig_shape.len() > 2 {
@@ -387,11 +385,11 @@ impl SparseMoeBlock {
         let expert_ms = expert_start.elapsed().as_secs_f64() * 1000.0;
 
         let combine_start = std::time::Instant::now();
-        let operands: [*const mlxcel_core::MlxArray; 2] = [
-            expert_out.as_ref().unwrap() as *const _,
-            scores.as_ref().unwrap() as *const _,
-        ];
-        let result = unsafe { mlxcel_core::einsum("nkh,nk->nh", &operands) };
+        let result = crate::models::switch_layers::moe_weighted_sum(
+            &expert_out,
+            &scores,
+            mlxcel_core::array_dtype(&x_flat),
+        );
         let result = if orig_shape.len() > 2 {
             mlxcel_core::reshape(&result, &orig_shape)
         } else {

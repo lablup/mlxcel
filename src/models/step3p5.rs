@@ -717,17 +717,8 @@ impl Step3p5MoE {
         // Expert computation
         let y = self.switch_mlp.forward(x, &indices);
 
-        // Weighted sum over experts: einsum fuses expand_dims + multiply + sum_axis
-        let operands: [*const mlxcel_core::MlxArray; 2] = [
-            y.as_ref().unwrap() as *const _,
-            scores.as_ref().unwrap() as *const _,
-        ];
-        // SAFETY: operands are valid pointers to MlxArray owned by UniquePtr in this scope
-        let routed_output = unsafe { mlxcel_core::einsum("nkh,nk->nh", &operands) };
-
-        // Cast back to original dtype
         let x_dtype = mlxcel_core::array_dtype(x);
-        let routed_output = mlxcel_core::astype(&routed_output, x_dtype);
+        let routed_output = crate::models::switch_layers::moe_weighted_sum(&y, &scores, x_dtype);
 
         // Add shared expert
         let shared_output = self.share_expert.forward(x);

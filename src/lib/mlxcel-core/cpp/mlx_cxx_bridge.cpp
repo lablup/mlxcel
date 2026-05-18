@@ -1207,7 +1207,8 @@ namespace {
             auto one = array(1.0f);
             auto erf_val = mlx::core::erf(mlx::core::divide(x, sqrt2));
             auto scale = mlx::core::multiply(half, mlx::core::add(one, erf_val));
-            return {mlx::core::multiply(x, scale)};
+            auto result = mlx::core::multiply(x, scale);
+            return {mlx::core::astype(result, x.dtype())};
         };
         return mlx::core::compile(fn, true);
     }
@@ -1233,7 +1234,8 @@ namespace {
             auto one = array(1.0f);
             auto erf_val = mlx::core::erf(mlx::core::divide(x, sqrt2));
             auto scale = mlx::core::multiply(half, mlx::core::add(one, erf_val));
-            return {mlx::core::multiply(x, scale)};
+            auto result = mlx::core::multiply(x, scale);
+            return {mlx::core::astype(result, x.dtype())};
         };
         return mlx::core::compile(fn, true);
     }
@@ -1259,7 +1261,8 @@ namespace {
             auto erf_val = mlx::core::erf(mlx::core::divide(gate, sqrt2));
             auto scale = mlx::core::multiply(half, mlx::core::add(one, erf_val));
             auto gelu_gate = mlx::core::multiply(gate, scale);
-            return {mlx::core::multiply(gelu_gate, x)};
+            auto result = mlx::core::multiply(gelu_gate, x);
+            return {mlx::core::astype(result, x.dtype())};
         };
         return mlx::core::compile(fn, true);
     }
@@ -1281,7 +1284,8 @@ namespace {
         auto fn = [](const std::vector<array>& inputs) -> std::vector<array> {
             const auto& gate = inputs[0];
             const auto& x = inputs[1];
-            return {mlx::core::multiply(gelu_tanh_approx(gate), x)};
+            auto result = mlx::core::multiply(gelu_tanh_approx(gate), x);
+            return {mlx::core::astype(result, x.dtype())};
         };
         return mlx::core::compile(fn, true);
     }
@@ -1324,7 +1328,8 @@ namespace {
             auto one = array(1.0f);
             auto erf_val = mlx::core::erf(mlx::core::divide(zeroed, sqrt2));
             auto scale = mlx::core::multiply(half, mlx::core::add(one, erf_val));
-            return {mlx::core::multiply(zeroed, scale)};
+            auto result = mlx::core::multiply(zeroed, scale);
+            return {mlx::core::astype(result, x.dtype())};
         };
         return mlx::core::compile(fn, true);
     }
@@ -1349,7 +1354,8 @@ namespace {
             const auto& cap = inputs[1];
             auto scaled = mlx::core::divide(scores, cap);
             auto tanhed = mlx::core::tanh(scaled);
-            return {mlx::core::multiply(tanhed, cap)};
+            auto result = mlx::core::multiply(tanhed, cap);
+            return {mlx::core::astype(result, scores.dtype())};
         };
         return mlx::core::compile(fn, true);
     }
@@ -1428,7 +1434,8 @@ namespace {
             auto probs = mlx::core::softmax(scores, -1);
 
             // probs @ V
-            return {mlx::core::matmul(probs, v)};
+            auto result = mlx::core::matmul(probs, v);
+            return {mlx::core::astype(result, v.dtype())};
         };
         return mlx::core::compile(fn, true);  // shapeless=true
     }
@@ -1450,7 +1457,8 @@ namespace {
             scores = mlx::core::multiply(mlx::core::tanh(mlx::core::divide(scores, cap_arr)), cap_arr);
             scores = mlx::core::add(scores, mask);
             auto probs = mlx::core::softmax(scores, -1);
-            return {mlx::core::matmul(probs, v)};
+            auto result = mlx::core::matmul(probs, v);
+            return {mlx::core::astype(result, v.dtype())};
         };
         return mlx::core::compile(fn, true);
     }
@@ -1541,7 +1549,7 @@ std::unique_ptr<MlxArray> compiled_softcap_sdpa_gqa(
         auto probs = mlx::core::softmax(scores, -1);
         auto v_grouped = mlx::core::reshape(v.inner, {B, Hk, 1, S, D});
         auto ctx = mlx::core::matmul(probs, v_grouped);
-        auto out = mlx::core::reshape(ctx, {B, Hq, QL, D});
+        auto out = mlx::core::astype(mlx::core::reshape(ctx, {B, Hq, QL, D}), v.inner.dtype());
         return std::make_unique<MlxArray>(std::move(out));
     }
 

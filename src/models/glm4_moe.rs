@@ -736,13 +736,11 @@ impl Glm4Moe {
         // Apply experts - returns [n_tokens, k, hidden]
         let expert_out = self.experts.forward(&x_flat, &topk_indices);
 
-        // Weighted sum over experts: einsum fuses expand_dims + multiply + sum_axis
-        let operands: [*const mlxcel_core::MlxArray; 2] = [
-            expert_out.as_ref().unwrap() as *const _,
-            topk_scores.as_ref().unwrap() as *const _,
-        ];
-        // SAFETY: operands are valid pointers to MlxArray owned by UniquePtr in this scope
-        let mut result = unsafe { mlxcel_core::einsum("nkh,nk->nh", &operands) };
+        let mut result = crate::models::switch_layers::moe_weighted_sum(
+            &expert_out,
+            &topk_scores,
+            mlxcel_core::array_dtype(&x_flat),
+        );
 
         // Add shared expert if present
         if let Some(ref shared) = self.shared_expert {

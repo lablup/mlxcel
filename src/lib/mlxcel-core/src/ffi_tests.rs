@@ -672,6 +672,63 @@ fn test_memory_functions() {
 }
 
 #[test]
+fn test_scalar_helpers_preserve_bf16_and_f16_dtype() {
+    for dtype in [dtype::BFLOAT16, dtype::FLOAT16] {
+        let x = astype(&from_slice_f32(&[1.0, 2.0, 3.0, 4.0], &[1, 4]), dtype);
+
+        let multiplied = multiply_scalar(&x, 2.0);
+        eval(&multiplied);
+        assert_eq!(array_dtype(&multiplied), dtype);
+
+        let divided = divide_scalar(&x, 2.0);
+        eval(&divided);
+        assert_eq!(array_dtype(&divided), dtype);
+    }
+}
+
+#[test]
+fn test_softcap_helper_preserves_bf16_and_f16_dtype() {
+    for dtype in [dtype::BFLOAT16, dtype::FLOAT16] {
+        let x = astype(
+            &from_slice_f32(&[0.0, 10.0, -10.0, 50.0, -50.0], &[1, 5]),
+            dtype,
+        );
+        let out = crate::utils::softcap(&x, 30.0);
+        eval(&out);
+
+        assert_eq!(array_shape(&out), vec![1, 5]);
+        assert_eq!(array_dtype(&out), dtype);
+    }
+}
+
+#[test]
+fn test_attention_masks_intentionally_remain_float32() {
+    let causal = crate::utils::create_causal_mask(2, 1);
+    eval(&causal);
+    assert_eq!(array_dtype(&causal), dtype::FLOAT32);
+
+    let windowed = crate::utils::create_causal_mask_with_window(4, 0, Some(2));
+    eval(&windowed);
+    assert_eq!(array_dtype(&windowed), dtype::FLOAT32);
+
+    let padded = crate::utils::create_padded_prefill_mask(2, 4, 0);
+    eval(&padded);
+    assert_eq!(array_dtype(&padded), dtype::FLOAT32);
+}
+
+#[test]
+fn test_clip_residual_f16_widens_and_returns_f16() {
+    let x = astype(&from_slice_f32(&[65500.0, 1.0], &[1, 2]), dtype::FLOAT16);
+    let y = astype(&from_slice_f32(&[10.0, 2.0], &[1, 2]), dtype::FLOAT16);
+
+    let out = crate::utils::clip_residual_f16(&x, &y);
+    eval(&out);
+
+    assert_eq!(array_shape(&out), vec![1, 2]);
+    assert_eq!(array_dtype(&out), dtype::FLOAT16);
+}
+
+#[test]
 fn test_compiled_gelu() {
     let x = from_slice_f32(&[0.0, 1.0, -1.0, 2.0], &[1, 4]);
 
@@ -700,6 +757,42 @@ fn test_compiled_gelu_approx() {
     let total = sum_all(&out);
     eval(&total);
     assert!(item_f32(&total) > 0.0);
+}
+
+#[test]
+fn test_compiled_gelu_preserves_bf16_and_f16_dtype() {
+    for dtype in [dtype::BFLOAT16, dtype::FLOAT16] {
+        let x = astype(&from_slice_f32(&[0.0, 1.0, -1.0, 2.0], &[1, 4]), dtype);
+        let out = compiled_gelu(&x);
+        eval(&out);
+
+        assert_eq!(array_shape(&out), vec![1, 4]);
+        assert_eq!(array_dtype(&out), dtype);
+    }
+}
+
+#[test]
+fn test_compiled_gelu_approx_preserves_bf16_and_f16_dtype() {
+    for dtype in [dtype::BFLOAT16, dtype::FLOAT16] {
+        let x = astype(&from_slice_f32(&[0.0, 1.0, -1.0, 2.0], &[1, 4]), dtype);
+        let out = compiled_gelu_approx(&x);
+        eval(&out);
+
+        assert_eq!(array_shape(&out), vec![1, 4]);
+        assert_eq!(array_dtype(&out), dtype);
+    }
+}
+
+#[test]
+fn test_compiled_gelu_topk_preserves_bf16_and_f16_dtype() {
+    for dtype in [dtype::BFLOAT16, dtype::FLOAT16] {
+        let x = astype(&from_slice_f32(&[-2.0, -1.0, 0.5, 4.0], &[1, 4]), dtype);
+        let out = compiled_gelu_topk(&x, 1.0);
+        eval(&out);
+
+        assert_eq!(array_shape(&out), vec![1, 4]);
+        assert_eq!(array_dtype(&out), dtype);
+    }
 }
 
 #[test]
@@ -761,6 +854,47 @@ fn test_compiled_geglu_activation() {
     let total = sum_all(&out);
     eval(&total);
     assert!(item_f32(&total) > 0.0);
+}
+
+#[test]
+fn test_compiled_geglu_preserves_bf16_and_f16_dtype() {
+    for dtype in [dtype::BFLOAT16, dtype::FLOAT16] {
+        let gate = astype(&from_slice_f32(&[1.0, 2.0, 3.0, 4.0], &[1, 4]), dtype);
+        let x = astype(&from_slice_f32(&[0.5, 1.0, 1.5, 2.0], &[1, 4]), dtype);
+        let out = compiled_geglu_activation(&gate, &x);
+        eval(&out);
+
+        assert_eq!(array_shape(&out), vec![1, 4]);
+        assert_eq!(array_dtype(&out), dtype);
+    }
+}
+
+#[test]
+fn test_compiled_geglu_approx_preserves_bf16_and_f16_dtype() {
+    for dtype in [dtype::BFLOAT16, dtype::FLOAT16] {
+        let gate = astype(&from_slice_f32(&[1.0, 2.0, 3.0, 4.0], &[1, 4]), dtype);
+        let x = astype(&from_slice_f32(&[0.5, 1.0, 1.5, 2.0], &[1, 4]), dtype);
+        let out = compiled_geglu_approx_activation(&gate, &x);
+        eval(&out);
+
+        assert_eq!(array_shape(&out), vec![1, 4]);
+        assert_eq!(array_dtype(&out), dtype);
+    }
+}
+
+#[test]
+fn test_gegelu_preserves_bf16_and_f16_dtype() {
+    for dtype in [dtype::BFLOAT16, dtype::FLOAT16] {
+        let x = astype(
+            &from_slice_f32(&[-1.0, 0.5, 2.0, 3.0, -0.5, 1.0, 4.0, 5.0], &[1, 8]),
+            dtype,
+        );
+        let out = crate::utils::gegelu(&x, 7.0);
+        eval(&out);
+
+        assert_eq!(array_shape(&out), vec![1, 4]);
+        assert_eq!(array_dtype(&out), dtype);
+    }
 }
 
 #[test]
@@ -828,6 +962,21 @@ fn test_compiled_softcap_zero_input() {
 }
 
 #[test]
+fn test_compiled_softcap_preserves_bf16_and_f16_dtype() {
+    for dtype in [dtype::BFLOAT16, dtype::FLOAT16] {
+        let scores = astype(
+            &from_slice_f32(&[0.0, 10.0, -10.0, 50.0, -50.0], &[1, 5]),
+            dtype,
+        );
+        let out = compiled_softcap(&scores, 30.0);
+        eval(&out);
+
+        assert_eq!(array_shape(&out), vec![1, 5]);
+        assert_eq!(array_dtype(&out), dtype);
+    }
+}
+
+#[test]
 fn test_compiled_clip_residual() {
     let x = from_slice_f32(&[1.0, 2.0, 3.0, 4.0], &[1, 4]);
     let y = from_slice_f32(&[0.5, 0.5, 0.5, 0.5], &[1, 4]);
@@ -864,6 +1013,21 @@ fn test_compiled_softcap_sdpa_shape() {
 }
 
 #[test]
+fn test_compiled_softcap_sdpa_preserves_v_dtype() {
+    for dtype in [dtype::BFLOAT16, dtype::FLOAT16] {
+        let q = astype(&ones(&[1, 2, 4, 8], dtype::FLOAT32), dtype);
+        let k = astype(&ones(&[1, 2, 4, 8], dtype::FLOAT32), dtype);
+        let v = astype(&ones(&[1, 2, 4, 8], dtype::FLOAT32), dtype);
+
+        let out = unsafe { compiled_softcap_sdpa(&q, &k, &v, 0.125, 30.0, std::ptr::null()) };
+        eval(&out);
+
+        assert_eq!(array_shape(&out), vec![1, 2, 4, 8]);
+        assert_eq!(array_dtype(&out), dtype);
+    }
+}
+
+#[test]
 fn test_compiled_softcap_sdpa_gqa_shape() {
     // Verify compiled_softcap_sdpa_gqa: Q has n_heads, K/V have n_kv_heads
     // Shape: q=[1, 4, 2, 8], k/v=[1, 2, 2, 8], n_rep=2
@@ -876,6 +1040,22 @@ fn test_compiled_softcap_sdpa_gqa_shape() {
 
     // Output shape should match q shape [1, 4, 2, 8]
     assert_eq!(array_shape(&out), vec![1, 4, 2, 8]);
+}
+
+#[test]
+fn test_compiled_softcap_sdpa_gqa_preserves_v_dtype() {
+    for dtype in [dtype::BFLOAT16, dtype::FLOAT16] {
+        let q = astype(&ones(&[1, 4, 2, 8], dtype::FLOAT32), dtype);
+        let k = astype(&ones(&[1, 2, 2, 8], dtype::FLOAT32), dtype);
+        let v = astype(&ones(&[1, 2, 2, 8], dtype::FLOAT32), dtype);
+
+        let out =
+            unsafe { compiled_softcap_sdpa_gqa(&q, &k, &v, 0.125, 30.0, 2, std::ptr::null()) };
+        eval(&out);
+
+        assert_eq!(array_shape(&out), vec![1, 4, 2, 8]);
+        assert_eq!(array_dtype(&out), dtype);
+    }
 }
 
 #[test]

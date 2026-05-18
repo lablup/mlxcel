@@ -2348,7 +2348,7 @@ pub fn sanitize_weights(mut weights: WeightMap, config: &Qwen35Config) -> Weight
             let v = weights.get(k.as_str()).unwrap();
             let ndim = mlxcel_core::array_shape(v).len();
             if ndim == 1 {
-                let one = mlxcel_core::full_f32(&[1], 1.0, dtype::FLOAT32);
+                let one = mlxcel_core::full_f32(&[1], 1.0, mlxcel_core::array_dtype(v));
                 let shifted = mlxcel_core::add(v, &one);
                 weights.insert(k.clone(), shifted);
             }

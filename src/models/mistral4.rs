@@ -478,13 +478,11 @@ impl Mistral4MoE {
         // Dispatch to selected experts
         let y = self.switch_mlp.forward(x, &inds);
 
-        // Weighted sum: einsum("nkh,nk->nh", y, scores)
-        let operands: [*const MlxArray; 2] = [
-            y.as_ref().unwrap() as *const _,
-            scores.as_ref().unwrap() as *const _,
-        ];
-        // SAFETY: operands are valid pointers to MlxArray owned by UniquePtr in this scope
-        let mut result = unsafe { mlxcel_core::einsum("nkh,nk->nh", &operands) };
+        let mut result = crate::models::switch_layers::moe_weighted_sum(
+            &y,
+            &scores,
+            mlxcel_core::array_dtype(x),
+        );
 
         // Add shared expert output
         if let Some(ref shared) = self.shared_experts {

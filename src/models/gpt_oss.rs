@@ -409,20 +409,20 @@ fn gpt_oss_swiglu(x_linear: &MlxArray, x_glu: &MlxArray, limit: f32) -> UniquePt
     let alpha = 1.702f32;
 
     // Clamp values
-    let neg_limit = mlxcel_core::from_slice_f32(&[-limit], &[1]);
-    let pos_limit = mlxcel_core::from_slice_f32(&[limit], &[1]);
+    let neg_limit = mlxcel_core::full_f32(&[1], -limit, input_dtype);
+    let pos_limit = mlxcel_core::full_f32(&[1], limit, input_dtype);
     let x_glu = mlxcel_core::minimum(x_glu, &pos_limit);
     let x_linear = mlxcel_core::maximum(x_linear, &neg_limit);
     let x_linear = mlxcel_core::minimum(&x_linear, &pos_limit);
 
     // glu_scaled = alpha * x_glu -> sigmoid -> out_glu = x_glu * sig
-    let alpha_arr = mlxcel_core::from_slice_f32(&[alpha], &[1]);
+    let alpha_arr = mlxcel_core::full_f32(&[1], alpha, input_dtype);
     let glu_scaled = mlxcel_core::multiply(&alpha_arr, &x_glu);
     let sig = mlxcel_core::sigmoid(&glu_scaled);
     let out_glu = mlxcel_core::multiply(&x_glu, &sig);
 
     // (x_linear + 1) * out_glu
-    let one = mlxcel_core::from_slice_f32(&[1.0], &[1]);
+    let one = mlxcel_core::full_f32(&[1], 1.0, input_dtype);
     let x_linear_plus_1 = mlxcel_core::add(&x_linear, &one);
     let result = mlxcel_core::multiply(&out_glu, &x_linear_plus_1);
     mlxcel_core::astype(&result, input_dtype)
@@ -554,15 +554,11 @@ impl MLPBlock {
         // Apply experts -> [n_tokens, k, hidden]
         let expert_out = self.experts.forward(&x_flat, &topk_indices);
 
-        // Weighted sum over experts. Keep the same op shape as mlx-lm's
-        // `x * expand_dims(expert_weights, -1); x.sum(axis=-2)`. Using
-        // `einsum("nkh,nk->nh")` promotes the contraction to f32 and slows
-        // GptOss decode on M5.
-        let scores_exp = mlxcel_core::expand_dims(&scores, -1);
-        let scores_exp = mlxcel_core::astype(&scores_exp, mlxcel_core::array_dtype(&expert_out));
-        let weighted = mlxcel_core::multiply(&expert_out, &scores_exp);
-        let result = mlxcel_core::sum_axis(&weighted, -2, false);
-        let result = mlxcel_core::astype(&result, mlxcel_core::array_dtype(&x_flat));
+        let result = crate::models::switch_layers::moe_weighted_sum(
+            &expert_out,
+            &scores,
+            mlxcel_core::array_dtype(&x_flat),
+        );
 
         // Reshape back
         if orig_shape.len() > 2 {
@@ -1285,5 +1281,30 @@ impl GptOssStageModel {
             .iter()
             .position(|kind| kind == layer_type)
             .map(|idx| caches[idx].as_interface().offset())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn gpt_oss_swiglu_fallback_preserves_bf16_and_f16_dtype() {
+        for dtype in [mlxcel_core::dtype::BFLOAT16, mlxcel_core::dtype::FLOAT16] {
+            let x_linear = mlxcel_core::astype(
+                &mlxcel_core::from_slice_f32(&[-4.0, -1.0, 2.0, 4.0], &[1, 4]),
+                dtype,
+            );
+            let x_glu = mlxcel_core::astype(
+                &mlxcel_core::from_slice_f32(&[-2.0, 0.5, 2.0, 5.0], &[1, 4]),
+                dtype,
+            );
+
+            let out = gpt_oss_swiglu(&x_linear, &x_glu, 6.0);
+            mlxcel_core::eval(&out);
+
+            assert_eq!(mlxcel_core::array_shape(&out), vec![1, 4]);
+            assert_eq!(mlxcel_core::array_dtype(&out), dtype);
+        }
     }
 }
