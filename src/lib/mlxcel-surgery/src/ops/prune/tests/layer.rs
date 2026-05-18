@@ -50,11 +50,17 @@ fn layer_prune_zeros_only_requested_layer() {
 
     // Layer 0 q_proj is zero.
     let (_, floats) = read_f32_2d(&weights, "model.layers.0.self_attn.q_proj.weight");
-    assert!(floats.iter().all(|&x| x == 0.0), "layer 0 q_proj must be zero");
+    assert!(
+        floats.iter().all(|&x| x == 0.0),
+        "layer 0 q_proj must be zero"
+    );
 
     // Layer 0 up_proj is zero.
     let (_, floats) = read_f32_2d(&weights, "model.layers.0.mlp.up_proj.weight");
-    assert!(floats.iter().all(|&x| x == 0.0), "layer 0 up_proj must be zero");
+    assert!(
+        floats.iter().all(|&x| x == 0.0),
+        "layer 0 up_proj must be zero"
+    );
 
     // Layer 1 q_proj is unchanged (still ones).
     let (_, floats) = read_f32_2d(&weights, "model.layers.1.self_attn.q_proj.weight");
@@ -80,7 +86,9 @@ fn layer_prune_errors_on_out_of_range_id() {
     );
     let op = PruneOp::new(
         "model.layers.*",
-        PruneSelector::Layer { layer_ids: vec![99] },
+        PruneSelector::Layer {
+            layer_ids: vec![99],
+        },
     )
     .expect("compile");
     let cfg = make_cfg(2, 2, 8, 16, 2);

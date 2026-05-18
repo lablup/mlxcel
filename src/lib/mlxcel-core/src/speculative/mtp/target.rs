@@ -117,10 +117,7 @@ impl std::fmt::Debug for VerifyForwardOutput {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("VerifyForwardOutput")
             .field("target_tokens", &self.target_tokens)
-            .field(
-                "has_target_logprobs",
-                &self.target_logprobs.is_some(),
-            )
+            .field("has_target_logprobs", &self.target_logprobs.is_some())
             .field("captured", &self.captured)
             .finish()
     }
@@ -188,7 +185,10 @@ impl MtpVerifyOutput {
     pub fn shared_kv_refs(&self) -> Vec<&MlxArray> {
         self.next_shared_kv
             .iter()
-            .map(|ptr| ptr.as_ref().expect("MtpVerifyOutput: non-null shared_kv ptr"))
+            .map(|ptr| {
+                ptr.as_ref()
+                    .expect("MtpVerifyOutput: non-null shared_kv ptr")
+            })
             .collect()
     }
 }

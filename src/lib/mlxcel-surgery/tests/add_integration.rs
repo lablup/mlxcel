@@ -32,10 +32,10 @@ use std::path::Path;
 
 use mlxcel_core::dtype as mlx_dtype;
 use mlxcel_core::weights::{WeightMap, WeightTransform};
-use mlxcel_core::{MlxArray, UniquePtr, array_to_raw_bytes, eval, from_bytes};
-use mlxcel_surgery::{SurgeryPipeline, parse_config_file};
-use safetensors::View;
+use mlxcel_core::{array_to_raw_bytes, eval, from_bytes, MlxArray, UniquePtr};
+use mlxcel_surgery::{parse_config_file, SurgeryPipeline};
 use safetensors::tensor::Dtype as SafeTensorDtype;
+use safetensors::View;
 
 /// `safetensors::View` over owned bytes — same shape as the helper
 /// in `src/lib/mlxcel-surgery/src/ops/add.rs`. Duplicated here
@@ -123,10 +123,7 @@ fn yaml_driven_pipeline_applies_add_op_end_to_end() {
     for layer in 0..3 {
         donor.insert(
             format!("model.layers.{layer}.mlp.down_proj.weight"),
-            f32_tensor(
-                &[0.1 * (layer + 1) as f32; 8],
-                &[2, 4],
-            ),
+            f32_tensor(&[0.1 * (layer + 1) as f32; 8], &[2, 4]),
         );
     }
     // Extra key that exists in the donor but should be irrelevant
@@ -214,12 +211,8 @@ fn programmatic_pipeline_applies_add_op_end_to_end() {
 
     let mut pipeline = SurgeryPipeline::new();
     pipeline.push(Arc::new(
-        mlxcel_surgery::AddOp::new(
-            "model.layers.*.self_attn.q_proj.weight",
-            &donor_path,
-            1.0,
-        )
-        .expect("construct AddOp"),
+        mlxcel_surgery::AddOp::new("model.layers.*.self_attn.q_proj.weight", &donor_path, 1.0)
+            .expect("construct AddOp"),
     ));
 
     let mut weights = WeightMap::new();
@@ -236,10 +229,7 @@ fn programmatic_pipeline_applies_add_op_end_to_end() {
         .get("model.layers.0.self_attn.q_proj.weight")
         .expect("present");
     let actual = extract_f32(arr);
-    assert_eq!(
-        actual,
-        vec![11.0, 22.0, 33.0, 44.0, 55.0, 66.0, 77.0, 88.0]
-    );
+    assert_eq!(actual, vec![11.0, 22.0, 33.0, 44.0, 55.0, 66.0, 77.0, 88.0]);
 }
 
 /// Acceptance criterion (e): without the op in the pipeline, an
@@ -254,7 +244,10 @@ fn empty_pipeline_is_bit_exact_no_op() {
     let original: Vec<f32> = (0..16).map(|i| i as f32 * 0.5).collect();
 
     let mut weights = WeightMap::new();
-    weights.insert("model.embed_tokens.weight".to_string(), mlx_f32(&original, &[4, 4]));
+    weights.insert(
+        "model.embed_tokens.weight".to_string(),
+        mlx_f32(&original, &[4, 4]),
+    );
 
     pipeline
         .apply(&mut weights, &serde_json::Value::Null)

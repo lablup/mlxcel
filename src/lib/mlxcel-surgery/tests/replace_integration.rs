@@ -29,7 +29,7 @@
 //! `SurgeryPipeline` builder, `ReplaceOp` produces a `WeightMap`
 //! with the targeted tensor replaced by the donor's tensor.
 
-use mlxcel_surgery::{WeightMap, WeightTransform, parse_config_file};
+use mlxcel_surgery::{parse_config_file, WeightMap, WeightTransform};
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -150,10 +150,8 @@ operations:
         mlxcel_core::from_slice_f32(&[1.0, 2.0, 3.0, 4.0], &[2, 2]),
     );
 
-    let err =
-        WeightTransform::apply(&pipeline, &mut weights, &serde_json::Value::Null).expect_err(
-            "zero-match pattern must error end-to-end through the pipeline",
-        );
+    let err = WeightTransform::apply(&pipeline, &mut weights, &serde_json::Value::Null)
+        .expect_err("zero-match pattern must error end-to-end through the pipeline");
     assert!(
         err.contains("matched no keys") || err.contains("replace"),
         "error must surface through SurgeryPipeline -> WeightTransform: {err}"

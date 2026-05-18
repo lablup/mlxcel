@@ -165,11 +165,7 @@ pub(crate) fn speculative_walk_batched(
 /// Mirrors upstream `sampler(verify_out.logits)` with the greedy
 /// `sampler = argmax(axis=-1)` — stochastic batched DFlash sampling is
 /// a follow-up (#632).
-fn argmax_logits_per_row(
-    logits: &MlxArray,
-    batch_size: i32,
-    seq_len: i32,
-) -> Vec<Vec<i32>> {
+fn argmax_logits_per_row(logits: &MlxArray, batch_size: i32, seq_len: i32) -> Vec<Vec<i32>> {
     let shape = ffi::array_shape(logits);
     debug_assert_eq!(shape.len(), 3, "expected [B, seq_len, vocab] logits");
     debug_assert_eq!(shape[0], batch_size, "logits batch dim must match B");
@@ -448,10 +444,12 @@ impl DFlashBatchedGenerator {
                 verify_buf.push(b[r]);
                 verify_buf.extend_from_slice(&draft_tokens_per_row[r]);
             }
-            let verify_input =
-                ffi::from_slice_i32(&verify_buf, &[batch_size as i32, bs as i32]);
-            let verify_out =
-                target.verify_forward_with_capture_layers(&verify_input, caches, &capture_layer_ids);
+            let verify_input = ffi::from_slice_i32(&verify_buf, &[batch_size as i32, bs as i32]);
+            let verify_out = target.verify_forward_with_capture_layers(
+                &verify_input,
+                caches,
+                &capture_layer_ids,
+            );
 
             // ---- Argmax sample (greedy at temp=0) of the per-row logits ----
             let target_tokens_per_row = argmax_logits_per_row(
@@ -464,11 +462,8 @@ impl DFlashBatchedGenerator {
             let budgets: Vec<usize> = (0..batch_size)
                 .map(|r| max_new_tokens.saturating_sub(emitted[r]))
                 .collect();
-            let (accepted_per_row, new_tokens_per_row) = speculative_walk_batched(
-                &draft_tokens_per_row,
-                &target_tokens_per_row,
-                &budgets,
-            );
+            let (accepted_per_row, new_tokens_per_row) =
+                speculative_walk_batched(&draft_tokens_per_row, &target_tokens_per_row, &budgets);
 
             // Record per-row accept lens. Finished rows still get an
             // entry (consistent shape across rounds) but the value is
@@ -557,14 +552,8 @@ impl DFlashBatchedGenerator {
             // tail-zeroing handles rows whose accept counts are below
             // max_accepted.
             if min_accepted + 1 < bs {
-                let accepted_i32: Vec<i32> =
-                    accepted_per_row.iter().map(|&a| a as i32).collect();
-                target.rollback_partial_batched(
-                    caches,
-                    &verify_out,
-                    &accepted_i32,
-                    bs as i32,
-                );
+                let accepted_i32: Vec<i32> = accepted_per_row.iter().map(|&a| a as i32).collect();
+                target.rollback_partial_batched(caches, &verify_out, &accepted_i32, bs as i32);
             }
 
             // Periodic memory cache clear. Mirrors upstream
@@ -822,8 +811,10 @@ mod tests {
             _accepted: i32,
             _block_size: i32,
         ) {
-            panic!("batched synthetic target should not call rollback_partial; \
-                    use rollback_partial_batched");
+            panic!(
+                "batched synthetic target should not call rollback_partial; \
+                    use rollback_partial_batched"
+            );
         }
 
         fn rollback_partial_batched(
@@ -846,14 +837,15 @@ mod tests {
             self.rollback_events.set(ev);
         }
 
-        fn concat_hidden_for_drafter(
-            &self,
-            verify_out: &Self::VerifyOut,
-        ) -> UniquePtr<MlxArray> {
+        fn concat_hidden_for_drafter(&self, verify_out: &Self::VerifyOut) -> UniquePtr<MlxArray> {
             ffi::slice(
                 &verify_out.captured_hidden,
                 &[0, 0, 0],
-                &[verify_out.batch_size, verify_out.verify_len, self.concat_hidden_dim],
+                &[
+                    verify_out.batch_size,
+                    verify_out.verify_len,
+                    self.concat_hidden_dim,
+                ],
             )
         }
 
@@ -983,21 +975,15 @@ mod tests {
     ) -> (DFlashBatchedRunOutput, Vec<(Vec<i32>, i32)>) {
         let target = SyntheticTarget::new(5 * 8, argmax_fn);
         // 3 caches, one per "layer" (count is incidental for synthetic test).
-        let mut caches: Vec<SyntheticCache> =
-            (0..3).map(|_| SyntheticCache::default()).collect();
+        let mut caches: Vec<SyntheticCache> = (0..3).map(|_| SyntheticCache::default()).collect();
 
         let drafter = SyntheticBatchedDrafter::new(propose_fn);
         let lm = EmbedOnlyLm;
-        let mut gen = DFlashBatchedGenerator::with_drafter(
-            Box::new(drafter),
-            SamplingConfig::greedy(),
-        );
+        let mut gen =
+            DFlashBatchedGenerator::with_drafter(Box::new(drafter), SamplingConfig::greedy());
         gen.block_size = block_size;
 
-        let first_hidden = ffi::zeros(
-            &[batch_size as i32, 1, 5 * 8],
-            crate::dtype::FLOAT32,
-        );
+        let first_hidden = ffi::zeros(&[batch_size as i32, 1, 5 * 8], crate::dtype::FLOAT32);
 
         let out = gen
             .run_batched(
@@ -1210,7 +1196,10 @@ mod tests {
 
         // Drafter variant 1: always mismatches (accept 0 every round).
         let propose_always_wrong = |bonus: &[i32], bs: usize| -> Vec<Vec<i32>> {
-            bonus.iter().map(|_| (1..bs as i32).map(|_| 0).collect()).collect()
+            bonus
+                .iter()
+                .map(|_| (1..bs as i32).map(|_| 0).collect())
+                .collect()
         };
         let (out, _) = run_synthetic_batched_round_loop(
             4,

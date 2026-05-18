@@ -181,11 +181,11 @@ pub(crate) fn load_vlm_weights_common(
         None => {
             #[cfg(feature = "surgery")]
             {
-                active_pipeline.as_deref().map(
-                    |p: &crate::surgery::SurgeryPipeline| {
+                active_pipeline
+                    .as_deref()
+                    .map(|p: &crate::surgery::SurgeryPipeline| {
                         p as &dyn mlxcel_core::weights::WeightTransform
-                    },
-                )
+                    })
             }
             #[cfg(not(feature = "surgery"))]
             {

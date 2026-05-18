@@ -262,10 +262,7 @@ pub trait SpeculativeTarget {
     /// `hidden = hidden[:, :max_a + 1, :]`); on full-accept rounds the
     /// loop forwards the full block. The target trait stays simple and
     /// the slice logic lives in one place.
-    fn concat_hidden_for_drafter(
-        &self,
-        verify_out: &Self::VerifyOut,
-    ) -> UniquePtr<MlxArray>;
+    fn concat_hidden_for_drafter(&self, verify_out: &Self::VerifyOut) -> UniquePtr<MlxArray>;
 
     /// Read the per-position logits out of `verify_out` for use by the
     /// round loop's argmax pass. Returned tensor has shape
@@ -418,7 +415,9 @@ pub(crate) fn speculative_walk(
     // The target tensor has one more position than the drafter's proposals
     // (the trailing position is the post-block argmax, which the walk
     // takes as the bonus token only if the entire prefix matched).
-    let n = draft_tokens.len().min(target_tokens.len().saturating_sub(0));
+    let n = draft_tokens
+        .len()
+        .min(target_tokens.len().saturating_sub(0));
     let mut accepted = 0;
     while accepted < n {
         // Guard against target_tokens being shorter than expected (degenerate
@@ -740,7 +739,8 @@ impl DFlashGenerator {
             // preparation overlap the host-side speculative walk.
             let hidden_phase_start = Instant::now();
             let full_hidden = target.concat_hidden_for_drafter(&verify_out);
-            diagnostics.hidden_concat_time_ms += hidden_phase_start.elapsed().as_secs_f64() * 1000.0;
+            diagnostics.hidden_concat_time_ms +=
+                hidden_phase_start.elapsed().as_secs_f64() * 1000.0;
             // SAFETY: both arrays are live for the duration of this call, and
             // the FFI bridge consumes the stack pointer slice synchronously to
             // schedule MLX evaluation.
@@ -774,8 +774,7 @@ impl DFlashGenerator {
             // ---- Walk ----
             let budget = max_tokens.saturating_sub(emitted);
             let phase_start = Instant::now();
-            let (accepted, new_tokens) =
-                speculative_walk(&draft_tokens, &target_tokens, budget);
+            let (accepted, new_tokens) = speculative_walk(&draft_tokens, &target_tokens, budget);
             diagnostics.walk_time_ms += phase_start.elapsed().as_secs_f64() * 1000.0;
             self.accept_lens.push(accepted as u32);
             diagnostics.rounds += 1;
@@ -806,9 +805,7 @@ impl DFlashGenerator {
                     // `new_tokens.len() <= bs`, so `i` is always in
                     // range — a missing entry degrades to `None` rather
                     // than panicking.
-                    let lp = target_logprobs
-                        .as_ref()
-                        .and_then(|v| v.get(i).cloned());
+                    let lp = target_logprobs.as_ref().and_then(|v| v.get(i).cloned());
                     logprobs.push(lp);
                 }
                 emitted += 1;
@@ -971,8 +968,7 @@ fn per_position_logprobs(
     let shape = ffi::array_shape(logits);
     debug_assert!(shape.len() == 3, "expected [1, seq_len, vocab] logits");
     let vocab = shape[2];
-    let mut out: Vec<crate::sampling::TokenLogprobData> =
-        Vec::with_capacity(target_tokens.len());
+    let mut out: Vec<crate::sampling::TokenLogprobData> = Vec::with_capacity(target_tokens.len());
     for (pos, &tok) in target_tokens.iter().enumerate() {
         // Slice position `pos` to a `[1, vocab]` tensor — the shape
         // `compute_logprobs` expects.
@@ -1305,10 +1301,7 @@ mod tests {
             self.rollback_events.set(ev);
         }
 
-        fn concat_hidden_for_drafter(
-            &self,
-            verify_out: &Self::VerifyOut,
-        ) -> UniquePtr<MlxArray> {
+        fn concat_hidden_for_drafter(&self, verify_out: &Self::VerifyOut) -> UniquePtr<MlxArray> {
             // Return the full captured hidden tensor; the round loop
             // does its own axis-1 slice on partial accept.
             ffi::slice(
@@ -1456,16 +1449,11 @@ mod tests {
         propose_fn: impl FnMut(i32, usize) -> Vec<i32> + 'static,
     ) -> (DFlashRunOutput, Vec<(i32, i32)>, Vec<i32>) {
         let target = SyntheticTarget::new(vec![1, 8, 15, 22, 29], 5 * 8, argmax_fn);
-        let mut caches: Vec<SyntheticCache> = (0..3)
-            .map(|_| SyntheticCache::default())
-            .collect();
+        let mut caches: Vec<SyntheticCache> = (0..3).map(|_| SyntheticCache::default()).collect();
 
         let drafter = SyntheticDrafter::new(propose_fn);
         let lm = EmbedOnlyLm;
-        let mut gen = DFlashGenerator::with_drafter(
-            Box::new(drafter),
-            SamplingConfig::greedy(),
-        );
+        let mut gen = DFlashGenerator::with_drafter(Box::new(drafter), SamplingConfig::greedy());
         // Round loop pulls block_size from the generator.
         gen.block_size = block_size;
 
@@ -1505,17 +1493,15 @@ mod tests {
     #[test]
     fn round_loop_passes_drafter_target_layer_ids_to_verify() {
         let drafter_ids = vec![1, 16, 31, 46, 61];
-        let target = SyntheticTarget::new(
-            vec![1, 8, 15, 22, 29],
-            5 * 8,
-            |_s: i32, prev_token: i32| prev_token + 1,
-        );
+        let target =
+            SyntheticTarget::new(vec![1, 8, 15, 22, 29], 5 * 8, |_s: i32, prev_token: i32| {
+                prev_token + 1
+            });
         let mut caches: Vec<SyntheticCache> = (0..3).map(|_| SyntheticCache::default()).collect();
 
-        let drafter = SyntheticDrafter::new(|bonus, bs| {
-            (1..bs as i32).map(|s| bonus + s).collect()
-        })
-        .with_target_layer_ids(drafter_ids.clone());
+        let drafter =
+            SyntheticDrafter::new(|bonus, bs| (1..bs as i32).map(|s| bonus + s).collect())
+                .with_target_layer_ids(drafter_ids.clone());
         let lm = EmbedOnlyLm;
         let mut gen = DFlashGenerator::new(
             Box::new(drafter),
@@ -1561,16 +1547,11 @@ mod tests {
     #[test]
     fn round_loop_full_accept_every_round_skips_rollback() {
         let argmax_fn = |_s: i32, prev_token: i32| prev_token + 1;
-        let propose_fn = |bonus: i32, bs: usize| -> Vec<i32> {
-            (1..bs as i32).map(|s| bonus + s).collect()
-        };
+        let propose_fn =
+            |bonus: i32, bs: usize| -> Vec<i32> { (1..bs as i32).map(|s| bonus + s).collect() };
 
         let (out, rollback_events, verify_lens) = run_synthetic_round_loop(
-            8,
-            /*max_tokens=*/ 24,
-            /*first_bonus=*/ 100,
-            argmax_fn,
-            propose_fn,
+            8, /*max_tokens=*/ 24, /*first_bonus=*/ 100, argmax_fn, propose_fn,
         );
 
         // Each round must have accepted exactly `block_size - 1 = 7`.
@@ -1625,11 +1606,7 @@ mod tests {
         };
 
         let (out, rollback_events, _) = run_synthetic_round_loop(
-            8,
-            /*max_tokens=*/ 32,
-            /*first_bonus=*/ 100,
-            argmax_fn,
-            propose_fn,
+            8, /*max_tokens=*/ 32, /*first_bonus=*/ 100, argmax_fn, propose_fn,
         );
 
         for (i, acc) in out.accept_lens.iter().enumerate() {
@@ -1678,11 +1655,7 @@ mod tests {
         };
 
         let (out, rollback_events, _) = run_synthetic_round_loop(
-            8,
-            /*max_tokens=*/ 24,
-            /*first_bonus=*/ 100,
-            argmax_fn,
-            propose_fn,
+            8, /*max_tokens=*/ 24, /*first_bonus=*/ 100, argmax_fn, propose_fn,
         );
 
         assert!(
@@ -1697,10 +1670,7 @@ mod tests {
         // Rollback called on rounds 1 and 2 (partial accept) but NOT
         // on round 3 (full accept). Count only partial-accept events
         // (`accepted < block_size - 1`).
-        let partial_count = rollback_events
-            .iter()
-            .filter(|(a, b)| *a < *b - 1)
-            .count();
+        let partial_count = rollback_events.iter().filter(|(a, b)| *a < *b - 1).count();
         assert!(
             partial_count >= 2,
             "rollback should fire on partial-accept rounds 1 and 2; got {rollback_events:?}"
@@ -1733,11 +1703,7 @@ mod tests {
         };
 
         let (_out, rollback_events, _) = run_synthetic_round_loop(
-            8,
-            /*max_tokens=*/ 24,
-            /*first_bonus=*/ 100,
-            argmax_fn,
-            propose_fn,
+            8, /*max_tokens=*/ 24, /*first_bonus=*/ 100, argmax_fn, propose_fn,
         );
 
         // Exactly one rollback event (round 2), not two or three.
@@ -1779,7 +1745,7 @@ mod tests {
 
         let first_bonus = 100i32;
         let max_tokens = 33; // 1 first_bonus + 32 round-loop emissions
-        // Build the reference greedy sequence.
+                             // Build the reference greedy sequence.
         let mut reference: Vec<i32> = Vec::with_capacity(max_tokens);
         reference.push(first_bonus);
         for _ in 1..max_tokens {
@@ -1792,13 +1758,8 @@ mod tests {
         // can produce ([30, 230)).
         let propose_always_wrong =
             |_bonus: i32, bs: usize| -> Vec<i32> { (1..bs as i32).map(|_| 0).collect() };
-        let (out, _, _) = run_synthetic_round_loop(
-            8,
-            max_tokens,
-            first_bonus,
-            argmax_fn,
-            propose_always_wrong,
-        );
+        let (out, _, _) =
+            run_synthetic_round_loop(8, max_tokens, first_bonus, argmax_fn, propose_always_wrong);
 
         let reference_tail = &reference[1..];
         assert_eq!(
@@ -1877,12 +1838,10 @@ mod tests {
     #[test]
     fn round_loop_stops_on_eos_emission() {
         let argmax_fn = |_s: i32, prev: i32| prev + 1;
-        let propose_fn = |bonus: i32, bs: usize| -> Vec<i32> {
-            (1..bs as i32).map(|s| bonus + s).collect()
-        };
+        let propose_fn =
+            |bonus: i32, bs: usize| -> Vec<i32> { (1..bs as i32).map(|s| bonus + s).collect() };
         let target = SyntheticTarget::new(vec![1, 8, 15, 22, 29], 5 * 8, argmax_fn);
-        let mut caches: Vec<SyntheticCache> =
-            (0..3).map(|_| SyntheticCache::default()).collect();
+        let mut caches: Vec<SyntheticCache> = (0..3).map(|_| SyntheticCache::default()).collect();
         let drafter = SyntheticDrafter::new(propose_fn);
         let lm = EmbedOnlyLm;
         let mut gen = DFlashGenerator::with_drafter(Box::new(drafter), SamplingConfig::greedy());
@@ -1914,13 +1873,16 @@ mod tests {
     #[test]
     fn round_loop_max_tokens_one_emits_nothing() {
         let argmax_fn = |_s: i32, _prev: i32| 99;
-        let propose_fn = |_bonus: i32, bs: usize| -> Vec<i32> {
-            (1..bs as i32).map(|_| 0).collect()
-        };
-        let (out, rollback_events, verify_lens) =
-            run_synthetic_round_loop(8, /*max_tokens=*/ 1, /*first_bonus=*/ 100, argmax_fn, propose_fn);
+        let propose_fn =
+            |_bonus: i32, bs: usize| -> Vec<i32> { (1..bs as i32).map(|_| 0).collect() };
+        let (out, rollback_events, verify_lens) = run_synthetic_round_loop(
+            8, /*max_tokens=*/ 1, /*first_bonus=*/ 100, argmax_fn, propose_fn,
+        );
 
-        assert!(out.tokens.is_empty(), "max_tokens=1 must emit no further tokens");
+        assert!(
+            out.tokens.is_empty(),
+            "max_tokens=1 must emit no further tokens"
+        );
         assert!(out.accept_lens.is_empty());
         assert!(rollback_events.is_empty());
         assert!(verify_lens.is_empty());

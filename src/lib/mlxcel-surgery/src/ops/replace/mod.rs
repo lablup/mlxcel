@@ -72,9 +72,9 @@ mod wildcard;
 use wildcard::WildcardPattern;
 
 #[cfg(test)]
-mod tests;
-#[cfg(test)]
 mod quant_tests;
+#[cfg(test)]
+mod tests;
 
 /// Concrete `SurgeryOp` implementing tensor substitution from an
 /// external donor safetensors file.
@@ -160,11 +160,7 @@ impl ReplaceOp {
 }
 
 impl SurgeryOp for ReplaceOp {
-    fn apply(
-        &self,
-        weights: &mut WeightMap,
-        _cfg: &serde_json::Value,
-    ) -> Result<(), SurgeryError> {
+    fn apply(&self, weights: &mut WeightMap, _cfg: &serde_json::Value) -> Result<(), SurgeryError> {
         // 1) Collect base keys to replace. Sorting keeps the
         //    operation deterministic across `HashMap` iteration
         //    order so error messages are stable.
@@ -234,15 +230,15 @@ impl SurgeryOp for ReplaceOp {
         //    keeps memory bounded for multi-GB donor files when only
         //    a handful of tensors are being replaced.
         let donor_keys_needed_capture = donor_keys_needed.clone();
-        let donor_map: WeightMap = mlxcel_core::weights::load_safetensors_filtered(
-            donor_path_str,
-            move |name| donor_keys_needed_capture.contains(name),
-        )
-        .map_err(|e| {
-            SurgeryError::Other(anyhow::anyhow!(
-                "replace: failed to load donor safetensors {donor_path_str}: {e}"
-            ))
-        })?;
+        let donor_map: WeightMap =
+            mlxcel_core::weights::load_safetensors_filtered(donor_path_str, move |name| {
+                donor_keys_needed_capture.contains(name)
+            })
+            .map_err(|e| {
+                SurgeryError::Other(anyhow::anyhow!(
+                    "replace: failed to load donor safetensors {donor_path_str}: {e}"
+                ))
+            })?;
 
         // 5) Verify every requested donor key was provided. We do
         //    this before mutating the base map so that an error

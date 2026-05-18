@@ -83,18 +83,13 @@ impl DFlashDecoderLayer {
         let post_attention_layernorm_w = weights
             .get(&format!("{prefix}.post_attention_layernorm.weight"))
             .map(|w| ffi::copy(w))
-            .ok_or_else(|| {
-                format!("Weight not found: {prefix}.post_attention_layernorm.weight")
-            })?;
+            .ok_or_else(|| format!("Weight not found: {prefix}.post_attention_layernorm.weight"))?;
 
         Ok(Self {
             self_attn,
             mlp,
             input_layernorm: RMSNorm::new(input_layernorm_w, config.rms_norm_eps),
-            post_attention_layernorm: RMSNorm::new(
-                post_attention_layernorm_w,
-                config.rms_norm_eps,
-            ),
+            post_attention_layernorm: RMSNorm::new(post_attention_layernorm_w, config.rms_norm_eps),
         })
     }
 }

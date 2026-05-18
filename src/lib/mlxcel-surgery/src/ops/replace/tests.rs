@@ -251,15 +251,16 @@ fn apply_with_source_key_wildcard_substitution() {
 #[test]
 fn apply_shape_mismatch_errors_and_leaves_weights_untouched() {
     let dir = tempfile::tempdir().unwrap();
-    let donor_path = write_donor_safetensors_f32(
-        dir.path(),
-        &[("model.x.weight", &[1.0, 2.0, 3.0], &[3])],
-    );
+    let donor_path =
+        write_donor_safetensors_f32(dir.path(), &[("model.x.weight", &[1.0, 2.0, 3.0], &[3])]);
     let op = ReplaceOp::new("model.x.weight", "model.x.weight", donor_path).unwrap();
 
     let mut weights = WeightMap::new();
     // Base has shape [2], donor has shape [3] -> mismatch.
-    weights.insert("model.x.weight".to_string(), make_tensor(&[10.0, 20.0], &[2]));
+    weights.insert(
+        "model.x.weight".to_string(),
+        make_tensor(&[10.0, 20.0], &[2]),
+    );
 
     let err = op
         .apply(&mut weights, &serde_json::Value::Null)
@@ -319,8 +320,7 @@ fn apply_dtype_mismatch_errors() {
 #[test]
 fn apply_missing_source_key_returns_tensor_not_found() {
     let dir = tempfile::tempdir().unwrap();
-    let donor_path =
-        write_donor_safetensors_f32(dir.path(), &[("some.other.key", &[1.0], &[1])]);
+    let donor_path = write_donor_safetensors_f32(dir.path(), &[("some.other.key", &[1.0], &[1])]);
     let op = ReplaceOp::new("model.x.weight", "model.x.weight", donor_path).unwrap();
 
     let mut weights = WeightMap::new();
@@ -384,4 +384,3 @@ fn name_is_replace() {
     let op = ReplaceOp::new("x", "x", donor).unwrap();
     assert_eq!(op.name(), "replace");
 }
-

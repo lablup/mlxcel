@@ -225,21 +225,19 @@ impl<T: MtpTarget> MtpBatchedGenerator<T> {
         for (r, prompt) in prompt_tokens_per_row.iter().enumerate() {
             if prompt.is_empty() {
                 return Err(DrafterError::DraftFailed {
-                    reason: format!(
-                        "MTP batched round loop: prompt row {r} must be non-empty"
-                    ),
+                    reason: format!("MTP batched round loop: prompt row {r} must be non-empty"),
                 });
             }
         }
 
-        let eos_tokens =
-            merged_eos_token_ids(self.target.eos_token_ids(), &sampler.stop_token_ids);
+        let eos_tokens = merged_eos_token_ids(self.target.eos_token_ids(), &sampler.stop_token_ids);
 
         // Per-row output streams. The first slot holds the seed bonus the
         // target produced from `prefill_and_seed_batched`; the round loop
         // appends to these.
-        let mut tokens_per_row: Vec<Vec<i32>> =
-            (0..batch_size).map(|_| Vec::with_capacity(max_new_tokens)).collect();
+        let mut tokens_per_row: Vec<Vec<i32>> = (0..batch_size)
+            .map(|_| Vec::with_capacity(max_new_tokens))
+            .collect();
         let mut accept_lens_per_row: Vec<Vec<u32>> = (0..batch_size).map(|_| Vec::new()).collect();
         let mut finished: Vec<bool> = vec![false; batch_size];
 
@@ -451,11 +449,9 @@ impl<T: MtpTarget> MtpBatchedGenerator<T> {
             // This is the per-row rollback contract from #655 (Gemma 4
             // `rollback_speculative_cache`) and #657 (per-row mask
             // normalization).
-            verify_out = self.target.verify_finalize_batched(
-                &accepted_per_row,
-                bs,
-                forward_out.captured,
-            )?;
+            verify_out =
+                self.target
+                    .verify_finalize_batched(&accepted_per_row, bs, forward_out.captured)?;
 
             if finished.iter().all(|&f| f) {
                 break;
@@ -847,12 +843,7 @@ mod tests {
                 vec![60, 61, 62, 63],
             ],
         ];
-        let target = BatchedMockTarget::new(
-            vec![100, 200],
-            script.clone(),
-            vec![],
-            vec![0, 0],
-        );
+        let target = BatchedMockTarget::new(vec![100, 200], script.clone(), vec![], vec![0, 0]);
         // Drafter proposes the next-round's first bs-1 target tokens
         // every round → full accept. Track per-row round indices.
         let captured_script: Vec<Vec<Vec<i32>>> = script.clone();
@@ -911,12 +902,7 @@ mod tests {
             ],
         ];
         let captured_script = script.clone();
-        let target = BatchedMockTarget::new(
-            vec![100, 200],
-            script,
-            vec![],
-            vec![0, 0],
-        );
+        let target = BatchedMockTarget::new(vec![100, 200], script, vec![], vec![0, 0]);
         let round_indices: RefCell<Vec<usize>> = RefCell::new(vec![0; 2]);
         let drafter = BatchedMockDrafter::new(move |bonus: &[i32], bs: usize| -> Vec<Vec<i32>> {
             // Row 0: full match. Row 1: all 999 (mismatch every position).
@@ -994,12 +980,8 @@ mod tests {
             ],
         ];
         let captured_script = script.clone();
-        let target = BatchedMockTarget::new(
-            vec![100, 200, 300, 400],
-            script,
-            vec![99],
-            vec![0, 0, 0, 0],
-        );
+        let target =
+            BatchedMockTarget::new(vec![100, 200, 300, 400], script, vec![99], vec![0, 0, 0, 0]);
         let round_indices: RefCell<Vec<usize>> = RefCell::new(vec![0; 4]);
         let drafter = BatchedMockDrafter::new(move |bonus: &[i32], bs: usize| -> Vec<Vec<i32>> {
             // Each row proposes the first bs-1 of its current round's
@@ -1125,13 +1107,14 @@ mod tests {
                 Option<crate::sampling::TokenLogprobData>,
             ) {
                 let seed = self.build_verify_output(1);
-                let first_bonus_lp = logprobs_config.enabled.then(|| {
-                    crate::sampling::TokenLogprobData {
-                        token_id: self.first_bonus,
-                        logprob: 0.0,
-                        top_alternatives: Vec::new(),
-                    }
-                });
+                let first_bonus_lp =
+                    logprobs_config
+                        .enabled
+                        .then(|| crate::sampling::TokenLogprobData {
+                            token_id: self.first_bonus,
+                            logprob: 0.0,
+                            top_alternatives: Vec::new(),
+                        });
                 (self.first_bonus, seed, first_bonus_lp)
             }
             fn embed_token(&self, _token_id: i32) -> UniquePtr<MlxArray> {
@@ -1230,8 +1213,7 @@ mod tests {
 
         // Generate the per-row reference token streams by running
         // MtpGenerator (B = 1) on each row.
-        let mut reference_tokens: Vec<Vec<i32>> =
-            Vec::with_capacity(first_bonus_per_row.len());
+        let mut reference_tokens: Vec<Vec<i32>> = Vec::with_capacity(first_bonus_per_row.len());
         let scripts = make_script(first_bonus_per_row.len());
         for (r, &first_bonus) in first_bonus_per_row.iter().enumerate() {
             let row_script = scripts[r].clone();
@@ -1314,8 +1296,10 @@ mod tests {
                 reference_tokens[r].len(),
                 "row {r}: token count must match reference"
             );
-            for (i, (got, want)) in
-                batched_row.iter().zip(reference_tokens[r].iter()).enumerate()
+            for (i, (got, want)) in batched_row
+                .iter()
+                .zip(reference_tokens[r].iter())
+                .enumerate()
             {
                 assert_eq!(
                     got, want,
@@ -1344,12 +1328,7 @@ mod tests {
             ],
         ];
         let captured_script = script.clone();
-        let target = BatchedMockTarget::new(
-            vec![100, 200],
-            script,
-            vec![],
-            vec![0, 0],
-        );
+        let target = BatchedMockTarget::new(vec![100, 200], script, vec![], vec![0, 0]);
         let round_indices: RefCell<Vec<usize>> = RefCell::new(vec![0; 2]);
         let drafter = BatchedMockDrafter::new(move |bonus: &[i32], bs: usize| -> Vec<Vec<i32>> {
             let mut round_idx = round_indices.borrow_mut();
@@ -1403,12 +1382,8 @@ mod tests {
         ];
         let captured_script = script.clone();
         let left_padding = vec![4_usize, 0, 2];
-        let target = BatchedMockTarget::new(
-            vec![100, 200, 300],
-            script,
-            vec![],
-            left_padding.clone(),
-        );
+        let target =
+            BatchedMockTarget::new(vec![100, 200, 300], script, vec![], left_padding.clone());
         let drafter = BatchedMockDrafter::new(move |bonus: &[i32], bs: usize| -> Vec<Vec<i32>> {
             let mut out = Vec::with_capacity(bonus.len());
             for row in captured_script.iter().take(bonus.len()) {
@@ -1419,11 +1394,7 @@ mod tests {
         let mut gen_ = MtpBatchedGenerator::new(target, Box::new(drafter), 4);
         let out = gen_
             .run_batched(
-                &[
-                    vec![1],
-                    vec![1, 2, 3, 4, 5],
-                    vec![1, 2, 3],
-                ],
+                &[vec![1], vec![1, 2, 3, 4, 5], vec![1, 2, 3]],
                 &SamplingConfig::greedy(),
                 5,
             )
@@ -1455,17 +1426,9 @@ mod tests {
         // Two rows, K = 4, just enough rounds to surface the per-round
         // rebind: 1 seed bind + 1 mid-loop rebind after the first
         // verify_finalize_batched.
-        let script = vec![
-            vec![vec![10, 11, 12, 13]],
-            vec![vec![20, 21, 22, 23]],
-        ];
+        let script = vec![vec![vec![10, 11, 12, 13]], vec![vec![20, 21, 22, 23]]];
         let captured_script = script.clone();
-        let target = BatchedMockTarget::new(
-            vec![100, 200],
-            script,
-            vec![],
-            vec![0, 0],
-        );
+        let target = BatchedMockTarget::new(vec![100, 200], script, vec![], vec![0, 0]);
         let drafter = BatchedMockDrafter::new(move |bonus: &[i32], bs: usize| -> Vec<Vec<i32>> {
             let mut out = Vec::with_capacity(bonus.len());
             for row in captured_script.iter().take(bonus.len()) {
@@ -1499,31 +1462,19 @@ mod tests {
         let target = BatchedMockTarget::new(vec![], vec![], vec![], vec![]);
         let drafter = BatchedMockDrafter::new(|_b: &[i32], _bs: usize| Vec::new());
         let mut gen_ = MtpBatchedGenerator::new(target, Box::new(drafter), 4);
-        let result = gen_.run_batched(
-            &Vec::<Vec<i32>>::new(),
-            &SamplingConfig::greedy(),
-            10,
-        );
+        let result = gen_.run_batched(&Vec::<Vec<i32>>::new(), &SamplingConfig::greedy(), 10);
         assert!(result.is_err(), "empty batch must be rejected");
     }
 
     /// max_new_tokens = 1 short-circuits to seed bonus only.
     #[test]
     fn batched_max_tokens_one_emits_only_seed_bonus() {
-        let target = BatchedMockTarget::new(
-            vec![100, 200],
-            vec![vec![], vec![]],
-            vec![],
-            vec![0, 0],
-        );
+        let target =
+            BatchedMockTarget::new(vec![100, 200], vec![vec![], vec![]], vec![], vec![0, 0]);
         let drafter = BatchedMockDrafter::new(|_b: &[i32], _bs: usize| Vec::new());
         let mut gen_ = MtpBatchedGenerator::new(target, Box::new(drafter), 4);
         let out = gen_
-            .run_batched(
-                &[vec![1], vec![2]],
-                &SamplingConfig::greedy(),
-                1,
-            )
+            .run_batched(&[vec![1], vec![2]], &SamplingConfig::greedy(), 1)
             .expect("max_tokens = 1 must succeed");
         assert_eq!(out.tokens[0], vec![100]);
         assert_eq!(out.tokens[1], vec![200]);
@@ -1533,10 +1484,7 @@ mod tests {
     /// other continues normally.
     #[test]
     fn batched_seed_bonus_eos_freezes_only_that_row() {
-        let script = vec![
-            vec![vec![10, 11, 12, 13]],
-            vec![vec![20, 21, 22, 23]],
-        ];
+        let script = vec![vec![vec![10, 11, 12, 13]], vec![vec![20, 21, 22, 23]]];
         let captured_script = script.clone();
         let target = BatchedMockTarget::new(
             vec![100, 200],
@@ -1553,11 +1501,7 @@ mod tests {
         });
         let mut gen_ = MtpBatchedGenerator::new(target, Box::new(drafter), 4);
         let out = gen_
-            .run_batched(
-                &[vec![1], vec![2]],
-                &SamplingConfig::greedy(),
-                5,
-            )
+            .run_batched(&[vec![1], vec![2]], &SamplingConfig::greedy(), 5)
             .expect("batched MTP must complete");
         assert_eq!(out.tokens[0], vec![100], "row 0 froze on EOS seed");
         assert_eq!(out.tokens[1].len(), 5, "row 1 continued normally");
@@ -1566,24 +1510,12 @@ mod tests {
     /// Sanity: drafter that returns wrong row-count fails fast.
     #[test]
     fn batched_round_loop_rejects_bad_drafter_row_count() {
-        let script = vec![
-            vec![vec![10, 11, 12, 13]],
-            vec![vec![20, 21, 22, 23]],
-        ];
-        let target = BatchedMockTarget::new(
-            vec![100, 200],
-            script,
-            vec![],
-            vec![0, 0],
-        );
+        let script = vec![vec![vec![10, 11, 12, 13]], vec![vec![20, 21, 22, 23]]];
+        let target = BatchedMockTarget::new(vec![100, 200], script, vec![], vec![0, 0]);
         // Bad drafter: always returns 1 row regardless of input batch.
         let drafter = BatchedMockDrafter::new(|_b: &[i32], bs: usize| vec![vec![0; bs - 1]]);
         let mut gen_ = MtpBatchedGenerator::new(target, Box::new(drafter), 4);
-        let result = gen_.run_batched(
-            &[vec![1], vec![2]],
-            &SamplingConfig::greedy(),
-            5,
-        );
+        let result = gen_.run_batched(&[vec![1], vec![2]], &SamplingConfig::greedy(), 5);
         assert!(result.is_err(), "bad drafter row count must surface");
     }
 

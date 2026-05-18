@@ -207,12 +207,7 @@ fn non_quantized_base_with_no_siblings_does_not_require_donor_siblings() {
     );
     // Note: NO `.scales` / `.biases` in the donor.
     let donor_path = write_quant_donor(dir.path(), donor_tensors);
-    let op = ReplaceOp::new(
-        "model.linear.weight",
-        "model.linear.weight",
-        donor_path,
-    )
-    .unwrap();
+    let op = ReplaceOp::new("model.linear.weight", "model.linear.weight", donor_path).unwrap();
     let mut weights = WeightMap::new();
     weights.insert(
         "model.linear.weight".to_string(),

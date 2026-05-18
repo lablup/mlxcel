@@ -92,11 +92,7 @@ pub struct WalkResult {
 ///
 /// Both invariants are debug-asserted. Release builds tolerate
 /// shape mismatches by short-circuiting to a safe accept count.
-pub fn speculative_walk(
-    draft_tokens: &[i32],
-    target_tokens: &[i32],
-    budget: usize,
-) -> WalkResult {
+pub fn speculative_walk(draft_tokens: &[i32], target_tokens: &[i32], budget: usize) -> WalkResult {
     debug_assert_eq!(
         target_tokens.len(),
         draft_tokens.len() + 1,
@@ -337,10 +333,7 @@ mod tests {
         let budgets = vec![100, 100];
         let (accepted, new_tokens) = speculative_walk_batched(&draft, &target, &budgets);
         assert_eq!(accepted, vec![3, 3]);
-        assert_eq!(
-            new_tokens,
-            vec![vec![10, 11, 12, 13], vec![20, 21, 22, 23]]
-        );
+        assert_eq!(new_tokens, vec![vec![10, 11, 12, 13], vec![20, 21, 22, 23]]);
     }
 
     #[test]
@@ -348,11 +341,7 @@ mod tests {
         // Acceptance criterion: per-row accept counts diverge in the
         // same batch. Row 0 full-accepts, row 1 mismatches at index 1,
         // row 2 mismatches at index 0.
-        let draft = vec![
-            vec![10, 11, 12],
-            vec![20, 99, 22],
-            vec![99, 31, 32],
-        ];
+        let draft = vec![vec![10, 11, 12], vec![20, 99, 22], vec![99, 31, 32]];
         let target = vec![
             vec![10, 11, 12, 13],
             vec![20, 21, 22, 23],

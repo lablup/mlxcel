@@ -232,24 +232,12 @@ pub fn apply_proportional_rope_batched(
         return copy(x);
     }
     if batch == 1 {
-        return apply_proportional_rope(
-            x,
-            head_dim,
-            partial_rotary_factor,
-            offsets[0],
-            freqs,
-        );
+        return apply_proportional_rope(x, head_dim, partial_rotary_factor, offsets[0], freqs);
     }
 
     let first_offset = offsets[0];
     if offsets[1..].iter().all(|&offset| offset == first_offset) {
-        return apply_proportional_rope(
-            x,
-            head_dim,
-            partial_rotary_factor,
-            first_offset,
-            freqs,
-        );
+        return apply_proportional_rope(x, head_dim, partial_rotary_factor, first_offset, freqs);
     }
 
     let rank = shape.len();
@@ -265,13 +253,7 @@ pub fn apply_proportional_rope_batched(
         begin[0] = batch_idx as i32;
         end[0] = batch_idx as i32 + 1;
         let chunk = slice(x, &begin, &end);
-        let chunk = apply_proportional_rope(
-            &chunk,
-            head_dim,
-            partial_rotary_factor,
-            offset,
-            freqs,
-        );
+        let chunk = apply_proportional_rope(&chunk, head_dim, partial_rotary_factor, offset, freqs);
         result = concatenate(&result, &chunk, 0);
     }
 

@@ -43,9 +43,7 @@ fn attention_head_prune_zeros_q_proj_row_slice() {
 
     let (shape, floats) = read_f32_2d(&weights, "model.layers.0.self_attn.q_proj.weight");
     assert_eq!(shape, vec![32, 16]);
-    let row_sum = |r: usize| -> f32 {
-        floats[r * 16..(r + 1) * 16].iter().sum()
-    };
+    let row_sum = |r: usize| -> f32 { floats[r * 16..(r + 1) * 16].iter().sum() };
     // Head 0 rows [0..8): nonzero.
     for r in 0..8 {
         assert!(row_sum(r) > 0.0, "row {r} (head 0) should be nonzero");
@@ -202,7 +200,8 @@ fn attention_head_uses_text_config_for_vlm() {
             "num_hidden_layers": 1,
         }
     });
-    op.apply(&mut weights, &cfg).expect("apply on VLM-style cfg");
+    op.apply(&mut weights, &cfg)
+        .expect("apply on VLM-style cfg");
 
     let (_, floats) = read_f32_2d(
         &weights,
@@ -256,11 +255,7 @@ fn quantized_attention_head_zeros_weight_scales_biases() {
     for r in 8..16 {
         let start = r * row_bytes;
         for b in 0..row_bytes {
-            assert_eq!(
-                bytes[start + b],
-                0,
-                "scales row {r} byte {b} must be zero"
-            );
+            assert_eq!(bytes[start + b], 0, "scales row {r} byte {b} must be zero");
         }
     }
     // Verify rows [0..8) are not zero (still ones).

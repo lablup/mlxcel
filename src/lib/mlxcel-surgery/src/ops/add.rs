@@ -68,10 +68,10 @@ use std::path::{Path, PathBuf};
 
 use globset::{Glob, GlobMatcher};
 use mlxcel_core::dtype as mlx_dtype;
-use mlxcel_core::weights::{WeightMap, load_safetensors};
+use mlxcel_core::weights::{load_safetensors, WeightMap};
 use mlxcel_core::{
-    MlxArray, UniquePtr, add as mlx_add, array_dtype, array_shape, astype, copy as mlx_copy,
-    multiply_scalar,
+    add as mlx_add, array_dtype, array_shape, astype, copy as mlx_copy, multiply_scalar, MlxArray,
+    UniquePtr,
 };
 
 use crate::{SurgeryError, SurgeryOp};
@@ -180,11 +180,7 @@ impl AddOp {
 }
 
 impl SurgeryOp for AddOp {
-    fn apply(
-        &self,
-        weights: &mut WeightMap,
-        _cfg: &serde_json::Value,
-    ) -> Result<(), SurgeryError> {
+    fn apply(&self, weights: &mut WeightMap, _cfg: &serde_json::Value) -> Result<(), SurgeryError> {
         // Snapshot matched keys up front so we can mutate the map
         // afterwards without iterating a borrowed view. `keys` is
         // also handy for the "zero matches" diagnostic below.

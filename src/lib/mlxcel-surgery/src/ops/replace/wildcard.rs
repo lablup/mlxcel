@@ -222,9 +222,7 @@ mod tests {
             .match_with_captures("model.layers.0.self_attn.weight")
             .unwrap();
         assert_eq!(caps, vec!["0".to_string()]);
-        assert!(p
-            .match_with_captures("model.layers.0.mlp.weight")
-            .is_none());
+        assert!(p.match_with_captures("model.layers.0.mlp.weight").is_none());
     }
 
     #[test]
@@ -246,7 +244,9 @@ mod tests {
     #[test]
     fn trailing_star_captures_suffix() {
         let p = WildcardPattern::parse("model.layers.0.*");
-        let caps = p.match_with_captures("model.layers.0.q_proj.weight").unwrap();
+        let caps = p
+            .match_with_captures("model.layers.0.q_proj.weight")
+            .unwrap();
         assert_eq!(caps, vec!["q_proj.weight".to_string()]);
     }
 

@@ -50,11 +50,7 @@ pub type WeightMap = HashMap<String, UniquePtr<MlxArray>>;
 pub trait WeightTransform {
     /// Apply the transform to `weights`. Returns `Ok(())` on success or
     /// an error string describing why the transform could not be applied.
-    fn apply(
-        &self,
-        weights: &mut WeightMap,
-        cfg: &serde_json::Value,
-    ) -> Result<(), String>;
+    fn apply(&self, weights: &mut WeightMap, cfg: &serde_json::Value) -> Result<(), String>;
 }
 
 /// Parse a `model.safetensors.index.json` file and return the set of unique shard filenames.

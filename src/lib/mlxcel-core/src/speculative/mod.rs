@@ -272,8 +272,7 @@ impl SpeculativeGenerator {
             let chunk_input = ffi::from_slice_i32(chunk, &[1, step as i32]);
             // Prefill both models with the chunk (logits discarded — we only
             // need the KV cache state for the continuation).
-            let _main_chunk_logits =
-                main_model.forward(&chunk_input, &mut self.main_caches, None);
+            let _main_chunk_logits = main_model.forward(&chunk_input, &mut self.main_caches, None);
             let _draft_chunk_logits =
                 draft_model.forward(&chunk_input, &mut self.draft_caches, None);
             // Evaluate only the KV cache state so it is materialised before
@@ -815,8 +814,7 @@ mod tests {
     #[test]
     fn prefill_step_size_matches_upstream_default() {
         assert_eq!(
-            PREFILL_STEP_SIZE,
-            512,
+            PREFILL_STEP_SIZE, 512,
             "PREFILL_STEP_SIZE must match upstream mlx-lm default (512). \
              Update this test if you intentionally deviate."
         );

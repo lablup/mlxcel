@@ -2373,10 +2373,8 @@ impl KVCache {
 
                 let k_slice = ffi::slice(k_int8, &[0, 0, 0, 0], &[ks[0], ks[1], live_len, ks[3]]);
                 let v_slice = ffi::slice(v_int8, &[0, 0, 0, 0], &[vs[0], vs[1], live_len, vs[3]]);
-                let ks_slice =
-                    ffi::slice(k_scales, &[0, 0, 0, 0], &[kss[0], kss[1], live_len, 1]);
-                let vs_slice =
-                    ffi::slice(v_scales, &[0, 0, 0, 0], &[vss[0], vss[1], live_len, 1]);
+                let ks_slice = ffi::slice(k_scales, &[0, 0, 0, 0], &[kss[0], kss[1], live_len, 1]);
+                let vs_slice = ffi::slice(v_scales, &[0, 0, 0, 0], &[vss[0], vss[1], live_len, 1]);
 
                 (
                     dequantize(&k_slice, &ks_slice),
@@ -3785,8 +3783,7 @@ impl RotatingKVCache {
             return (new_keys, new_values);
         }
 
-        let (base_k, base_v, current_seq_len) =
-            self.visible_fp16_prefix_for_concat();
+        let (base_k, base_v, current_seq_len) = self.visible_fp16_prefix_for_concat();
 
         let concat_k = concatenate(&base_k, &new_keys, 2);
         let concat_v = concatenate(&base_v, &new_values, 2);
@@ -5681,10 +5678,7 @@ mod tests {
                 .collect::<Vec<_>>()
         };
         assert_eq!(to_f32(&visible_keys), vec![1.0, 5.0, 6.0, 7.0, 8.0]);
-        assert_eq!(
-            to_f32(&visible_values),
-            vec![10.0, 50.0, 60.0, 70.0, 80.0]
-        );
+        assert_eq!(to_f32(&visible_values), vec![10.0, 50.0, 60.0, 70.0, 80.0]);
     }
 
     #[test]
@@ -6190,10 +6184,8 @@ mod tests {
         }
         let (q_unrot, _) = unit_token(42);
         let q_ref = rotate_at(&q_unrot, M);
-        let (k_ref, v_ref) = cache_ref.update_and_fetch(
-            rotate_at(&unit_token(99).0, M),
-            unit_token(99).1,
-        );
+        let (k_ref, v_ref) =
+            cache_ref.update_and_fetch(rotate_at(&unit_token(99).0, M), unit_token(99).1);
         let out_ref = mlxcel_core::causal_attention(&q_ref, &k_ref, &v_ref, scale, 0.0, 0);
         let out_ref_f32 = to_f32(&out_ref);
 
@@ -6216,11 +6208,10 @@ mod tests {
         // position `M` to simulate the pre-fix offset decrement.
         assert_eq!(cache_broken.trim_front(N), N);
         let q_broken = rotate_at(&q_unrot, M);
-        let (k_broken, v_broken) = cache_broken.update_and_fetch(
-            rotate_at(&unit_token(99).0, M),
-            unit_token(99).1,
-        );
-        let out_broken = mlxcel_core::causal_attention(&q_broken, &k_broken, &v_broken, scale, 0.0, 0);
+        let (k_broken, v_broken) =
+            cache_broken.update_and_fetch(rotate_at(&unit_token(99).0, M), unit_token(99).1);
+        let out_broken =
+            mlxcel_core::causal_attention(&q_broken, &k_broken, &v_broken, scale, 0.0, 0);
         let out_broken_f32 = to_f32(&out_broken);
 
         let mut sq_err = 0.0_f64;

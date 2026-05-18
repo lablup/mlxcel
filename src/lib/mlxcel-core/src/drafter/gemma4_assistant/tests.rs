@@ -185,11 +185,7 @@ fn make_test_weights(config: &Gemma4AssistantConfig) -> WeightMap {
             &format!("{p}.mlp.gate_proj.weight"),
             &[inter, hidden],
         );
-        insert_zeros(
-            &mut w,
-            &format!("{p}.mlp.up_proj.weight"),
-            &[inter, hidden],
-        );
+        insert_zeros(&mut w, &format!("{p}.mlp.up_proj.weight"), &[inter, hidden]);
         insert_zeros(
             &mut w,
             &format!("{p}.mlp.down_proj.weight"),
@@ -261,10 +257,7 @@ impl LanguageModel for MockLanguageModel {
         let shape = ffi::array_shape(input_ids);
         let b = shape[0];
         let l = shape[1];
-        Some(ffi::zeros(
-            &[b, l, self.hidden_size],
-            crate::dtype::FLOAT32,
-        ))
+        Some(ffi::zeros(&[b, l, self.hidden_size], crate::dtype::FLOAT32))
     }
 }
 
@@ -304,7 +297,11 @@ fn from_weights_loads_tied_dense_drafter() {
     let cfg = make_test_config(2, true);
     let weights = make_test_weights(&cfg);
     let model = Gemma4AssistantDraftModel::from_weights(weights, cfg);
-    assert!(model.is_ok(), "tied-dense drafter must load: {:?}", model.err());
+    assert!(
+        model.is_ok(),
+        "tied-dense drafter must load: {:?}",
+        model.err()
+    );
 }
 
 #[test]
@@ -365,7 +362,9 @@ fn draft_block_rejects_call_before_set_shared_kv() {
     model.bind(&target).expect("bind");
 
     let sampler = SamplingConfig::greedy();
-    let err = model.draft_block(0, None, 4, &sampler).expect_err("must fail");
+    let err = model
+        .draft_block(0, None, 4, &sampler)
+        .expect_err("must fail");
     match err {
         DrafterError::SetSharedKvNotCalled => {}
         other => panic!("expected SetSharedKvNotCalled, got {other:?}"),
@@ -381,7 +380,9 @@ fn draft_block_rejects_call_before_bind() {
     // Skip bind, set_shared_kv first (the order doesn't matter; both
     // pre-conditions must hold). draft_block must fail before it runs.
     let sampler = SamplingConfig::greedy();
-    let err = model.draft_block(0, None, 4, &sampler).expect_err("must fail");
+    let err = model
+        .draft_block(0, None, 4, &sampler)
+        .expect_err("must fail");
     // Order check: set_shared_kv runs first inside draft_block, so the
     // first guard to trigger is SetSharedKvNotCalled. After that fixes,
     // BindNotCalled fires. The test pins the first-failure ordering.
@@ -477,7 +478,11 @@ fn centroid_path_bind_set_shared_kv_draft_block_end_to_end() {
     let tc = cfg.text_config();
     let vocab = tc.vocab_size;
     let backbone = cfg.backbone_hidden_size as i32;
-    assert_eq!(vocab % cfg.num_centroids, 0, "vocab must be divisible by num_centroids");
+    assert_eq!(
+        vocab % cfg.num_centroids,
+        0,
+        "vocab must be divisible by num_centroids"
+    );
 
     // Rebuild pre/post projection weights for the corrected backbone size.
     let mut weights = make_test_weights(&cfg);
@@ -489,7 +494,9 @@ fn centroid_path_bind_set_shared_kv_draft_block_end_to_end() {
     let mut model = Gemma4AssistantDraftModel::from_weights(weights, cfg.clone()).expect("load");
 
     let target = MockLanguageModel::new(vocab as i32, 64);
-    model.bind(&target).expect("bind must succeed for centroid path");
+    model
+        .bind(&target)
+        .expect("bind must succeed for centroid path");
 
     // Set up shared K/V: 4 tensors (full + SWA) at [B=1, n_kv=1, kv=4, head=32].
     let kv_shape = &[1_i32, 1, 4, 32];
@@ -505,7 +512,9 @@ fn centroid_path_bind_set_shared_kv_draft_block_end_to_end() {
     ];
     let shared = crate::drafter::SharedKv::new(&tensors);
     model
-        .set_shared_kv(shared, /*kv_offset=*/ 0, /*position=*/ 0, /*left_padding=*/ 0)
+        .set_shared_kv(
+            shared, /*kv_offset=*/ 0, /*position=*/ 0, /*left_padding=*/ 0,
+        )
         .expect("set_shared_kv");
 
     // Build a hidden tensor [1, 1, backbone].
@@ -608,22 +617,10 @@ fn draft_block_batched_returns_b_rows_of_k_minus_one_proposals() {
     let kv_len = 8;
     let head_dim = 32;
     let n_kv = 1;
-    let k_full = ffi::zeros(
-        &[batch_size, n_kv, kv_len, head_dim],
-        crate::dtype::FLOAT32,
-    );
-    let v_full = ffi::zeros(
-        &[batch_size, n_kv, kv_len, head_dim],
-        crate::dtype::FLOAT32,
-    );
-    let k_swa = ffi::zeros(
-        &[batch_size, n_kv, kv_len, head_dim],
-        crate::dtype::FLOAT32,
-    );
-    let v_swa = ffi::zeros(
-        &[batch_size, n_kv, kv_len, head_dim],
-        crate::dtype::FLOAT32,
-    );
+    let k_full = ffi::zeros(&[batch_size, n_kv, kv_len, head_dim], crate::dtype::FLOAT32);
+    let v_full = ffi::zeros(&[batch_size, n_kv, kv_len, head_dim], crate::dtype::FLOAT32);
+    let k_swa = ffi::zeros(&[batch_size, n_kv, kv_len, head_dim], crate::dtype::FLOAT32);
+    let v_swa = ffi::zeros(&[batch_size, n_kv, kv_len, head_dim], crate::dtype::FLOAT32);
     let tensors: Vec<&MlxArray> = vec![
         k_full.as_ref().unwrap(),
         v_full.as_ref().unwrap(),
@@ -631,9 +628,7 @@ fn draft_block_batched_returns_b_rows_of_k_minus_one_proposals() {
         v_swa.as_ref().unwrap(),
     ];
     let shared = SharedKv::new(&tensors);
-    model
-        .set_shared_kv(shared, 0, 0, 0)
-        .expect("set_shared_kv");
+    model.set_shared_kv(shared, 0, 0, 0).expect("set_shared_kv");
 
     // hidden tensor: [B, 1, backbone].
     let hidden = ffi::zeros(&[batch_size, 1, backbone], crate::dtype::FLOAT32);
@@ -668,9 +663,7 @@ fn draft_block_batched_rejects_block_size_zero_with_empty_rows() {
     let v = ffi::zeros(&[2, 1, 4, 32], crate::dtype::FLOAT32);
     let tensors: Vec<&MlxArray> = vec![k.as_ref().unwrap(), v.as_ref().unwrap()];
     let shared = SharedKv::new(&tensors);
-    model
-        .set_shared_kv(shared, 0, 0, 0)
-        .expect("set_shared_kv");
+    model.set_shared_kv(shared, 0, 0, 0).expect("set_shared_kv");
 
     let last_bonus = vec![1_i32, 2];
     let sampler = SamplingConfig::greedy();

@@ -195,11 +195,7 @@ impl OwnedSharedKv {
         let kv_valid_len = kv_len.saturating_sub(left_padding as i32);
         let valid_scalar = BatchScalar::Scalar(kv_valid_len);
         let left_scalar = BatchScalar::Scalar(left_padding as i32);
-        Self::from_shared_kv_normalized_with_metadata(
-            shared,
-            &valid_scalar,
-            Some(&left_scalar),
-        )
+        Self::from_shared_kv_normalized_with_metadata(shared, &valid_scalar, Some(&left_scalar))
     }
 
     /// Batched-MTP constructor that accepts explicit per-row valid lengths
@@ -240,7 +236,9 @@ impl OwnedSharedKv {
         let normalized = normalize_batched_shared_kv_states(&map, kv_valid_len, left_padding);
 
         let take_pair = |layer: LayerType| -> Option<(UniquePtr<MlxArray>, UniquePtr<MlxArray>)> {
-            normalized.get(&layer).map(|(k, v)| (ffi::copy(k), ffi::copy(v)))
+            normalized
+                .get(&layer)
+                .map(|(k, v)| (ffi::copy(k), ffi::copy(v)))
         };
 
         Ok(Self {
@@ -404,7 +402,10 @@ impl std::fmt::Debug for Gemma4AssistantDraftModel {
             .field("backbone_hidden_size", &self.config.backbone_hidden_size)
             .field("block_size", &self.config.block_size)
             .field("tie_word_embeddings", &self.config.tie_word_embeddings)
-            .field("use_ordered_embeddings", &self.config.use_ordered_embeddings)
+            .field(
+                "use_ordered_embeddings",
+                &self.config.use_ordered_embeddings,
+            )
             .field("num_layers", &self.inner.layers.len())
             .field("centroid_lm_head_ready", &self.centroid_lm_head.is_some())
             .field("bound", &self.lm_head.is_some())
@@ -561,16 +562,16 @@ impl Gemma4AssistantDraftModel {
             // can't reach the weights here, the centroid head is pre-built
             // during `from_weights` (via `centroid_lm_head: Option<MaskedEmbedder>`)
             // and this method just takes it out.
-            let centroid = self
-                .centroid_lm_head
-                .take()
-                .ok_or_else(|| DrafterError::WeightLoad {
-                    reason: "use_ordered_embeddings=true but MaskedEmbedder was not pre-built \
+            let centroid =
+                self.centroid_lm_head
+                    .take()
+                    .ok_or_else(|| DrafterError::WeightLoad {
+                        reason: "use_ordered_embeddings=true but MaskedEmbedder was not pre-built \
                              during from_weights; ensure the checkpoint contains \
                              masked_embedding.centroids.weight and \
                              masked_embedding.token_ordering"
-                        .into(),
-                })?;
+                            .into(),
+                    })?;
             LmHead::Centroid(centroid)
         } else if self.config.tie_word_embeddings {
             LmHead::Tied
@@ -769,9 +770,7 @@ impl Gemma4AssistantDraftModel {
             // Convert the string layer_type to the `LayerType` enum to look
             // up in the `HashMap<LayerType, ...>` returned by `make_drafter_masks`.
             let layer_type_enum = str_to_layer_type(layer.layer_type())?;
-            let mask_opt = masks
-                .get(&layer_type_enum)
-                .and_then(|m| m.as_deref());
+            let mask_opt = masks.get(&layer_type_enum).and_then(|m| m.as_deref());
             h = layer.forward(&h, mask_opt, k, v, rope_offset);
         }
 
@@ -981,8 +980,9 @@ impl Drafter for Gemma4AssistantDraftModel {
         }
 
         // Per-row token-stream accumulators.
-        let mut tokens_per_row: Vec<Vec<i32>> =
-            (0..batch_size).map(|_| Vec::with_capacity(proposals as usize)).collect();
+        let mut tokens_per_row: Vec<Vec<i32>> = (0..batch_size)
+            .map(|_| Vec::with_capacity(proposals as usize))
+            .collect();
 
         // Per-step recurrent state: `h_prev` starts at the caller's
         // [B, 1, backbone] target hidden; `last_tokens` starts at the

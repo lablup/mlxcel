@@ -140,11 +140,7 @@ impl SurgeryOp for ScaleOp {
     /// the configured scalar.
     ///
     /// See the module docstring for the quantized-layout routing rule.
-    fn apply(
-        &self,
-        weights: &mut WeightMap,
-        _cfg: &serde_json::Value,
-    ) -> Result<(), SurgeryError> {
+    fn apply(&self, weights: &mut WeightMap, _cfg: &serde_json::Value) -> Result<(), SurgeryError> {
         // Stage 1 — resolve every glob hit on the *as-loaded* key set
         // to one or more *effective* mutation targets. This isolates
         // the iteration from the subsequent mutation, lets us

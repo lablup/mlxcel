@@ -237,9 +237,14 @@ impl DrafterAttention {
                 offsets,
                 Some(freqs),
             ),
-            (None, RopeOffset::Scalar(offset)) => {
-                ffi::fast_rope(&queries, self.rope_dims, false, self.rope_theta, 1.0, offset)
-            }
+            (None, RopeOffset::Scalar(offset)) => ffi::fast_rope(
+                &queries,
+                self.rope_dims,
+                false,
+                self.rope_theta,
+                1.0,
+                offset,
+            ),
             (None, RopeOffset::PerRow(offsets)) => crate::fast_rope_batched(
                 &queries,
                 self.rope_dims,

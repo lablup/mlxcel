@@ -302,7 +302,12 @@ impl<T: MtpTarget> MtpGenerator<T> {
             return (
                 emitted,
                 logprobs,
-                Self::build_stats(prompt_len, 0, std::time::Duration::ZERO, std::time::Duration::ZERO),
+                Self::build_stats(
+                    prompt_len,
+                    0,
+                    std::time::Duration::ZERO,
+                    std::time::Duration::ZERO,
+                ),
             );
         }
 
@@ -331,7 +336,12 @@ impl<T: MtpTarget> MtpGenerator<T> {
             return (
                 emitted,
                 logprobs,
-                Self::build_stats(prompt_len, gen_count, prefill_time, std::time::Duration::ZERO),
+                Self::build_stats(
+                    prompt_len,
+                    gen_count,
+                    prefill_time,
+                    std::time::Duration::ZERO,
+                ),
             );
         }
 
@@ -417,9 +427,9 @@ impl<T: MtpTarget> MtpGenerator<T> {
             // for the walk; the captured state holds hidden + shared
             // K/V slabs for the finalize step.
             let verify_forward_start = Instant::now();
-            let forward_out =
-                self.target
-                    .verify_forward(&verify_input, sampling, logprobs_config);
+            let forward_out = self
+                .target
+                .verify_forward(&verify_input, sampling, logprobs_config);
             diagnostics.verify_forward_ms += duration_ms(verify_forward_start.elapsed());
 
             // Walk the draft against the target's argmax tokens.
@@ -436,11 +446,9 @@ impl<T: MtpTarget> MtpGenerator<T> {
             // *before* `forward_out` is moved into `verify_finalize`.
             let target_logprobs = forward_out.target_logprobs;
             let verify_finalize_start = Instant::now();
-            verify_out = self.target.verify_finalize(
-                walk.accepted,
-                actual_bs,
-                forward_out.captured,
-            );
+            verify_out =
+                self.target
+                    .verify_finalize(walk.accepted, actual_bs, forward_out.captured);
             diagnostics.verify_finalize_ms += duration_ms(verify_finalize_start.elapsed());
 
             // Emit accepted tokens. `walk.new_tokens[i] == target_tokens[i]`
@@ -456,9 +464,7 @@ impl<T: MtpTarget> MtpGenerator<T> {
                     // `walk.new_tokens.len() <= actual_bs`, so `i` is
                     // always in range — but a missing entry degrades to
                     // `None` rather than panicking.
-                    let lp = target_logprobs
-                        .as_ref()
-                        .and_then(|v| v.get(i).cloned());
+                    let lp = target_logprobs.as_ref().and_then(|v| v.get(i).cloned());
                     logprobs.push(lp);
                 }
                 if eos_tokens.contains(&tok) {

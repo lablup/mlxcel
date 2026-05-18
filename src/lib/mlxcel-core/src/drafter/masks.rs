@@ -171,13 +171,7 @@ pub fn bidirectional_full_mask(
     dtype: i32,
 ) -> Option<UniquePtr<MlxArray>> {
     let key_offset = BatchScalar::Scalar(0);
-    bidirectional_full_mask_with_key_offset(
-        _query_len,
-        kv_len,
-        kv_valid_len,
-        &key_offset,
-        dtype,
-    )
+    bidirectional_full_mask_with_key_offset(_query_len, kv_len, kv_valid_len, &key_offset, dtype)
 }
 
 /// Build the bidirectional full-attention bias with an absolute K/V
@@ -328,10 +322,7 @@ pub fn bidirectional_swa_mask_with_key_offset(
     if let (BatchScalar::Scalar(qo), true, BatchScalar::Scalar(ko)) =
         (query_offset, kv_valid_is_scalar, key_offset)
     {
-        if kv_len <= window
-            && *qo - *ko < window
-            && *ko + kv_len - (*qo + query_len) < window
-        {
+        if kv_len <= window && *qo - *ko < window && *ko + kv_len - (*qo + query_len) < window {
             return None;
         }
     }
@@ -382,8 +373,8 @@ pub fn bidirectional_swa_mask_with_key_offset(
             let q_range_1d = ffi::arange_i32(0, query_len, 1); // [query_len]
             let q_range = ffi::reshape(&q_range_1d, &[1, query_len]); // [1, query_len]
             let q_idx_2d = ffi::add(&qo_col, &q_range); // [B, query_len]
-            // Reshape for the [B, query_len, kv_len] computation:
-            //   q_idx -> [B, query_len, 1], k_idx -> [1, 1, kv_len].
+                                                        // Reshape for the [B, query_len, kv_len] computation:
+                                                        //   q_idx -> [B, query_len, 1], k_idx -> [1, 1, kv_len].
             let q_idx = ffi::reshape(&q_idx_2d, &[batch, query_len, 1]);
 
             let k_idx = match key_offset {
@@ -404,7 +395,7 @@ pub fn bidirectional_swa_mask_with_key_offset(
             // Per-row kv_valid_len tail-mask.
             let inside = apply_kv_valid_tail_batched(inside, &k_idx, kv_valid_len, batch);
             let bias_3d = build_bias_from_bool(&inside, dtype); // [B, query_len, kv_len]
-            // Reshape to [B, 1, query_len, kv_len].
+                                                                // Reshape to [B, 1, query_len, kv_len].
             Some(ffi::reshape(&bias_3d, &[batch, 1, query_len, kv_len]))
         }
     }
@@ -573,12 +564,9 @@ pub fn make_drafter_masks_with_valid_len(
                 &effective_valid,
                 dtype,
             ),
-            LayerType::FullAttention => make_full_mask_with_absolute_key_offset(
-                query_len,
-                kv_len,
-                &effective_valid,
-                dtype,
-            ),
+            LayerType::FullAttention => {
+                make_full_mask_with_absolute_key_offset(query_len, kv_len, &effective_valid, dtype)
+            }
         };
         masks.insert(layer_type, mask);
     }
@@ -855,11 +843,7 @@ fn roll_left_per_row(
 /// Mirror upstream's `_broadcast_batch_vector`: lift `value` to an
 /// `int32` 1-D tensor of length `batch`, repeating B=1 inputs across rows,
 /// and clip into `[0, limit]`.
-fn broadcast_batch_vector(
-    value: &BatchScalar<'_>,
-    batch: i32,
-    limit: i32,
-) -> UniquePtr<MlxArray> {
+fn broadcast_batch_vector(value: &BatchScalar<'_>, batch: i32, limit: i32) -> UniquePtr<MlxArray> {
     let raw = match value {
         BatchScalar::Scalar(v) => ffi::from_slice_i32(&[*v], &[1]),
         BatchScalar::PerRow(arr) => {
@@ -966,7 +950,12 @@ mod tests {
     #[test]
     fn full_mask_returns_none_when_no_padding() {
         // kv_valid_len == None: degenerate case, mask is None.
-        let mask = bidirectional_full_mask(/*query_len=*/ 1, /*kv_len=*/ 8, None, dtype::FLOAT32);
+        let mask = bidirectional_full_mask(
+            /*query_len=*/ 1,
+            /*kv_len=*/ 8,
+            None,
+            dtype::FLOAT32,
+        );
         assert!(mask.is_none(), "full mask must be None without padding");
     }
 
@@ -986,8 +975,13 @@ mod tests {
     fn full_mask_scalar_short_prefix_produces_expected_bias() {
         // kv_len=5, kv_valid_len=3: positions [0,1,2]=0, [3,4]=-inf.
         let valid = BatchScalar::Scalar(3);
-        let mask = bidirectional_full_mask(/*query_len=*/ 1, /*kv_len=*/ 5, Some(&valid), dtype::FLOAT32)
-            .expect("mask must materialise when valid < kv_len");
+        let mask = bidirectional_full_mask(
+            /*query_len=*/ 1,
+            /*kv_len=*/ 5,
+            Some(&valid),
+            dtype::FLOAT32,
+        )
+        .expect("mask must materialise when valid < kv_len");
         assert_eq!(ffi::array_shape(&mask), vec![1, 1, 1, 5]);
 
         // Inspect each column.
@@ -1043,9 +1037,14 @@ mod tests {
         // the valid prefix.
         let valid = BatchScalar::Scalar(10);
         let key_offset = BatchScalar::Scalar(7);
-        let mask =
-            bidirectional_full_mask_with_key_offset(1, 4, Some(&valid), &key_offset, dtype::FLOAT32)
-                .expect("absolute key 10 must be masked");
+        let mask = bidirectional_full_mask_with_key_offset(
+            1,
+            4,
+            Some(&valid),
+            &key_offset,
+            dtype::FLOAT32,
+        )
+        .expect("absolute key 10 must be masked");
         assert_eq!(ffi::array_shape(&mask), vec![1, 1, 1, 4]);
 
         for k in 0..3 {
@@ -1074,7 +1073,10 @@ mod tests {
             None,
             dtype::FLOAT32,
         );
-        assert!(mask.is_none(), "SWA mask should be None when window dominates");
+        assert!(
+            mask.is_none(),
+            "SWA mask should be None when window dominates"
+        );
     }
 
     #[test]
@@ -1113,8 +1115,7 @@ mod tests {
         // query_offset=3, query_len=1, kv_len=8, window=2.
         // q = 3, |3 - k| < 2 ⇒ k ∈ {2, 3, 4} -> 0; else -inf.
         let qo = BatchScalar::Scalar(3);
-        let mask =
-            bidirectional_swa_mask(1, &qo, 8, 2, None, dtype::FLOAT32).expect("materialise");
+        let mask = bidirectional_swa_mask(1, &qo, 8, 2, None, dtype::FLOAT32).expect("materialise");
         for k in 0..2 {
             let v = mask_at_qk(&mask, &[0, 0, 0, k]);
             assert!(v.is_infinite() && v < 0.0, "k={k} must be -inf");
@@ -1155,8 +1156,7 @@ mod tests {
         shared.insert(LayerType::FullAttention, (&k_full, &v_full));
         shared.insert(LayerType::SlidingWindowAttention, (&k_swa, &v_swa));
 
-        let masks =
-            make_drafter_masks(&shared, query_len, &qo, sliding_window, dtype::FLOAT32);
+        let masks = make_drafter_masks(&shared, query_len, &qo, sliding_window, dtype::FLOAT32);
 
         assert_eq!(masks.len(), 2);
         assert!(
@@ -1164,7 +1164,10 @@ mod tests {
             "full mask must be None in the fast path",
         );
         assert!(
-            masks.get(&LayerType::SlidingWindowAttention).unwrap().is_none(),
+            masks
+                .get(&LayerType::SlidingWindowAttention)
+                .unwrap()
+                .is_none(),
             "SWA mask must be None in the fast path",
         );
     }
@@ -1210,8 +1213,8 @@ mod tests {
     #[test]
     fn full_mask_dtype_matches_request_bfloat16() {
         let valid = BatchScalar::Scalar(3);
-        let mask = bidirectional_full_mask(1, 5, Some(&valid), dtype::BFLOAT16)
-            .expect("materialise");
+        let mask =
+            bidirectional_full_mask(1, 5, Some(&valid), dtype::BFLOAT16).expect("materialise");
         assert_eq!(
             ffi::array_dtype(&mask),
             dtype::BFLOAT16,
@@ -1234,8 +1237,8 @@ mod tests {
     #[test]
     fn swa_mask_dtype_matches_request_bfloat16() {
         let qo = BatchScalar::Scalar(0);
-        let mask = bidirectional_swa_mask(1, &qo, 8, 4, None, dtype::BFLOAT16)
-            .expect("materialise");
+        let mask =
+            bidirectional_swa_mask(1, &qo, 8, 4, None, dtype::BFLOAT16).expect("materialise");
         assert_eq!(
             ffi::array_dtype(&mask),
             dtype::BFLOAT16,

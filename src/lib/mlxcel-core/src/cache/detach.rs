@@ -241,19 +241,14 @@ impl DetachedKVCache {
 
         // Slice axis 2 (seq-len) of each tensor to the new length. Width axes
         // (B, H, head_dim / packed_dim) come from the existing shape.
-        let trim_axis_seq = |a: &Option<UniquePtr<MlxArray>>,
-                             tail_axis: i32|
-         -> Option<UniquePtr<MlxArray>> {
-            a.as_ref().map(|arr| {
-                let shape = ffi::array_shape(arr);
-                let last = if tail_axis == 0 { shape[3] } else { tail_axis };
-                ffi::slice(
-                    arr,
-                    &[0, 0, 0, 0],
-                    &[shape[0], shape[1], new_len, last],
-                )
-            })
-        };
+        let trim_axis_seq =
+            |a: &Option<UniquePtr<MlxArray>>, tail_axis: i32| -> Option<UniquePtr<MlxArray>> {
+                a.as_ref().map(|arr| {
+                    let shape = ffi::array_shape(arr);
+                    let last = if tail_axis == 0 { shape[3] } else { tail_axis };
+                    ffi::slice(arr, &[0, 0, 0, 0], &[shape[0], shape[1], new_len, last])
+                })
+            };
 
         if self.mode == KVCacheMode::Turbo4Delegated {
             // K is unified — same shape contract as Fp16. Slice to `new_len`.

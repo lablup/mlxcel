@@ -464,8 +464,14 @@ mod tests {
     fn tiny_weights_without_embed() -> WeightMap {
         let mut w: WeightMap = std::collections::HashMap::new();
         // fc: [hidden, num_target_layers * hidden] = [4, 16]
-        w.insert("fc.weight".to_string(), ffi::zeros(&[4, 16], dtype::FLOAT32));
-        w.insert("hidden_norm.weight".to_string(), ffi::zeros(&[4], dtype::FLOAT32));
+        w.insert(
+            "fc.weight".to_string(),
+            ffi::zeros(&[4, 16], dtype::FLOAT32),
+        );
+        w.insert(
+            "hidden_norm.weight".to_string(),
+            ffi::zeros(&[4], dtype::FLOAT32),
+        );
         w.insert("norm.weight".to_string(), ffi::zeros(&[4], dtype::FLOAT32));
         // Layer 0 projections. q out = n_heads*head_dim = 4; k/v out =
         // n_kv_heads*head_dim = 2; o in = 4.
@@ -593,9 +599,9 @@ mod tests {
 
         // Stand-in for the target's embedding table — a regular
         // [vocab, hidden] tensor, the same shape Qwen 3.5 hands out.
-        let target_embed = crate::layers::UnifiedEmbedding::Regular(
-            crate::layers::Embedding::new(ffi::zeros(&[8, 4], dtype::FLOAT32)),
-        );
+        let target_embed = crate::layers::UnifiedEmbedding::Regular(crate::layers::Embedding::new(
+            ffi::zeros(&[8, 4], dtype::FLOAT32),
+        ));
         model.bind_target_embedding(target_embed);
 
         assert!(

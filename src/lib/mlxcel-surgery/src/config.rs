@@ -70,9 +70,9 @@ use globset::{Glob, GlobMatcher};
 use serde::Deserialize;
 
 use crate::ops::{InterpolateOp, ScaleOp};
-use crate::{SharedSurgeryOp, SurgeryError, SurgeryPipeline};
 #[cfg(test)]
 use crate::WeightMap;
+use crate::{SharedSurgeryOp, SurgeryError, SurgeryPipeline};
 
 /// The only schema version this parser understands. Bump when the
 /// YAML shape changes in a way that is not backwards-compatible; the
@@ -332,11 +332,9 @@ fn materialize_op(
             if source_key.is_empty() {
                 return Err(spec_error(idx, "replace", "source_key must not be empty"));
             }
-            let resolved =
-                resolve_existing_source(idx, "replace", "source", &source, base_dir)?;
-            let op = crate::ops::ReplaceOp::new(&pattern, &source_key, resolved).map_err(
-                |e| spec_error(idx, "replace", &format!("{e}")),
-            )?;
+            let resolved = resolve_existing_source(idx, "replace", "source", &source, base_dir)?;
+            let op = crate::ops::ReplaceOp::new(&pattern, &source_key, resolved)
+                .map_err(|e| spec_error(idx, "replace", &format!("{e}")))?;
             Ok(Arc::new(op))
         }
         OpSpec::Interpolate {

@@ -27,7 +27,7 @@ use std::io::Write;
 use mlxcel_core::dtype;
 use mlxcel_core::weights::{WeightMap, WeightTransform};
 use mlxcel_surgery::{
-    PruneOp, PruneSelector, SurgeryPipeline, parse_config_file, parse_config_str,
+    parse_config_file, parse_config_str, PruneOp, PruneSelector, SurgeryPipeline,
 };
 
 /// Build a Llama-style synthetic weight map for one layer with the
@@ -83,7 +83,9 @@ operations:
     let pipeline = parse_config_str(yaml, None).expect("parse YAML");
     assert_eq!(pipeline.len(), 1);
 
-    let mut weights = build_synthetic_weights(/* heads */ 4, /* head_dim */ 8, /* hidden */ 32);
+    let mut weights = build_synthetic_weights(
+        /* heads */ 4, /* head_dim */ 8, /* hidden */ 32,
+    );
     let cfg = serde_json::json!({
         "num_attention_heads": 4,
         "num_key_value_heads": 4,
@@ -300,7 +302,10 @@ fn baseline_with_empty_pipeline_is_bit_exact_no_op() {
             mlxcel_core::eval(v);
             mlxcel_core::array_to_raw_bytes(v)
         };
-        assert_eq!(before, &after, "key {k} must be byte-exact after empty pipeline");
+        assert_eq!(
+            before, &after,
+            "key {k} must be byte-exact after empty pipeline"
+        );
     }
 }
 

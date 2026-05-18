@@ -1225,10 +1225,7 @@ fn install_surgery_pipeline_for_server(startup: &ServerStartupConfig) -> Result<
         return Ok(());
     };
     if !path.exists() {
-        anyhow::bail!(
-            "--surgery: config file does not exist: {}",
-            path.display()
-        );
+        anyhow::bail!("--surgery: config file does not exist: {}", path.display());
     }
     let pipeline = crate::surgery::load_pipeline_from_file(path)
         .map_err(|e| anyhow::anyhow!("--surgery: {e}"))?;

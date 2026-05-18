@@ -837,11 +837,10 @@ operations:
 "#,
         )
         .unwrap();
-        let pipeline =
-            mlxcel_surgery::parse_config_file(&yaml_path).expect("scale parses");
+        let pipeline = mlxcel_surgery::parse_config_file(&yaml_path).expect("scale parses");
 
-        let weights = load_text_weights(&dir, Some(&pipeline))
-            .expect("scale through loader must succeed");
+        let weights =
+            load_text_weights(&dir, Some(&pipeline)).expect("scale through loader must succeed");
 
         let scaled = weights
             .get("model.layers.0.self_attn.q_proj.weight")
@@ -856,8 +855,7 @@ operations:
         // None-transform path is the property under test here.
         let baseline_dir = temp_model_dir("yaml_scale_real_baseline");
         write_text_model_fixture(&baseline_dir);
-        let baseline = load_text_weights(&baseline_dir, None)
-            .expect("baseline load must succeed");
+        let baseline = load_text_weights(&baseline_dir, None).expect("baseline load must succeed");
         let baseline_q = baseline
             .get("model.layers.0.self_attn.q_proj.weight")
             .unwrap();
@@ -892,8 +890,7 @@ operations:
 "#,
         )
         .unwrap();
-        let pipeline =
-            mlxcel_surgery::parse_config_file(&yaml_path).expect("scale parses");
+        let pipeline = mlxcel_surgery::parse_config_file(&yaml_path).expect("scale parses");
 
         let result = load_text_weights(&dir, Some(&pipeline));
         match result {
@@ -963,8 +960,7 @@ operations:
     pattern: "no.such.key.anywhere"
     factor: 2.0
 "#;
-        let pipeline = mlxcel_surgery::parse_config_str(yaml, None)
-            .expect("scale yaml must parse");
+        let pipeline = mlxcel_surgery::parse_config_str(yaml, None).expect("scale yaml must parse");
         let _slot_guard = ScopedActivePipeline::install(Arc::new(pipeline));
 
         let dir_with_slot = temp_model_dir("active_slot_installed");
@@ -1218,8 +1214,7 @@ operations:
     pattern: "model.layers.0.self_attn.*"
     head_ids: [2]
 "#;
-        let pipeline =
-            mlxcel_surgery::parse_config_str(yaml, None).expect("YAML must parse");
+        let pipeline = mlxcel_surgery::parse_config_str(yaml, None).expect("YAML must parse");
         assert_eq!(pipeline.len(), 1);
 
         let dir = temp_model_dir("prune_e2e_yaml");
@@ -1293,8 +1288,7 @@ operations:
     source_key: "model.embed_tokens.weight"
 "#;
         std::fs::write(&yaml_path, yaml).unwrap();
-        let pipeline =
-            mlxcel_surgery::parse_config_file(&yaml_path).expect("replace yaml parses");
+        let pipeline = mlxcel_surgery::parse_config_file(&yaml_path).expect("replace yaml parses");
 
         let baseline = load_text_weights(&dir, None).unwrap();
         let with_replace = load_text_weights(&dir, Some(&pipeline)).unwrap();

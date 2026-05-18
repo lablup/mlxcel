@@ -88,15 +88,15 @@ use std::fs;
 use std::path::Path;
 use std::sync::OnceLock;
 
+pub mod dflash;
+/// Concrete Gemma 4 MTP "assistant" drafter implementation. Wired into
+/// [`load_drafter`]'s `Mtp` arm in issue #626.
+pub mod gemma4_assistant;
 /// Centroid-routed sparse softmax LM head used by Gemma 4 E2B / E4B
 /// assistant drafters. Wired into `Gemma4AssistantDraftModel` in sub-3
 /// (#626) — landed here independently per issue #627 so the layer can
 /// be unit-tested in isolation before integration.
 pub mod masked_embedder;
-pub mod dflash;
-/// Concrete Gemma 4 MTP "assistant" drafter implementation. Wired into
-/// [`load_drafter`]'s `Mtp` arm in issue #626.
-pub mod gemma4_assistant;
 
 /// Drafter shapes recognised by mlxcel.
 ///
@@ -1026,9 +1026,8 @@ mod tests {
         // `Dflash` arm cannot silently regress to `NotYetImplemented`.
         let dir = tempdir().unwrap();
         write_drafter_config(&dir, None);
-        let err = load_drafter(dir.path(), Some(DrafterKind::Dflash)).expect_err(
-            "load_drafter must fail on a config-only fixture with no safetensors",
-        );
+        let err = load_drafter(dir.path(), Some(DrafterKind::Dflash))
+            .expect_err("load_drafter must fail on a config-only fixture with no safetensors");
         match err {
             DrafterError::LoadFailed { reason } => {
                 // Reason is implementation-defined; the typed variant

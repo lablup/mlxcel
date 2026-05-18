@@ -85,15 +85,16 @@ operations:
     let values = read_f32(scaled);
     assert_eq!(values.len(), 4);
     for (got, want) in values.iter().zip([3.0_f32, 6.0, -9.0, 0.0].iter()) {
-        assert!(
-            (got - want).abs() < 1e-5,
-            "expected {want}, got {got}",
-        );
+        assert!((got - want).abs() < 1e-5, "expected {want}, got {got}",);
     }
 
     // Untouched siblings — bit-identical.
     assert_eq!(
-        read_f32(weights.get("model.layers.0.self_attn.q_proj.weight").unwrap()),
+        read_f32(
+            weights
+                .get("model.layers.0.self_attn.q_proj.weight")
+                .unwrap()
+        ),
         vec![100.0, 200.0],
     );
     assert_eq!(

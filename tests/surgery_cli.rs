@@ -206,9 +206,7 @@ fn extract_generated_suffix(stdout: &str) -> &str {
     // followed by a blank line and then the stats line.
     let start = stdout.find("Generating...\nHello").unwrap_or(0);
     let from_hello = &stdout[start..];
-    let end = from_hello
-        .find("\n[Generated")
-        .unwrap_or(from_hello.len());
+    let end = from_hello.find("\n[Generated").unwrap_or(from_hello.len());
     &from_hello[..end]
 }
 
@@ -243,11 +241,7 @@ fn malformed_surgery_yaml_fails_fast() {
         output.status
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
-    let combined = format!(
-        "{}{}",
-        String::from_utf8_lossy(&output.stdout),
-        stderr
-    );
+    let combined = format!("{}{}", String::from_utf8_lossy(&output.stdout), stderr);
     assert!(
         combined.contains("surgery"),
         "error must mention 'surgery' so the user identifies the flag: {combined}"

@@ -229,12 +229,11 @@ impl MaskedEmbedder {
             }
         })?;
         let ordering_key = format!("{prefix}.token_ordering");
-        let token_ordering = weights
-            .get(&ordering_key)
-            .map(|w| ffi::copy(w))
-            .ok_or(MaskedEmbedderError::MissingWeight {
+        let token_ordering = weights.get(&ordering_key).map(|w| ffi::copy(w)).ok_or(
+            MaskedEmbedderError::MissingWeight {
                 key: ordering_key.clone(),
-            })?;
+            },
+        )?;
         Self::new(
             centroids,
             token_ordering,
@@ -276,10 +275,7 @@ impl MaskedEmbedder {
         // Normalise to [B, L, H] for the rest of the pipeline so the
         // reshape arithmetic stays uniform.
         let hidden = if shape.len() == 2 {
-            ffi::reshape(
-                hidden_states,
-                &[batch, seq_len, self.hidden_size as i32],
-            )
+            ffi::reshape(hidden_states, &[batch, seq_len, self.hidden_size as i32])
         } else {
             ffi::copy(hidden_states)
         };
@@ -355,11 +351,7 @@ impl MaskedEmbedder {
         // full_f32 casts the f32 scalar to the requested dtype, so bf16/f16
         // inputs produce a bf16/f16 scratch tensor and the scatter that
         // follows stays in the model's native precision (no f32 promotion).
-        let out = ffi::full_f32(
-            &[batch, seq_len, self.vocab_size as i32],
-            mask_value,
-            dtype,
-        );
+        let out = ffi::full_f32(&[batch, seq_len, self.vocab_size as i32], mask_value, dtype);
 
         // Step 10-11: scatter selected logits into the masked tensor.
         //
@@ -418,10 +410,7 @@ mod tests {
         // Row c = [10*c + 1, 0.0]: this puts centroid c's logit at
         // 10*c*h[0] for an input with h[1] = 0, so centroids are perfectly
         // ordered by their index when h[0] > 0.
-        let cw = ffi::from_slice_f32(
-            &[1.0, 0.0, 11.0, 0.0, 21.0, 0.0, 31.0, 0.0],
-            &[4, 2],
-        );
+        let cw = ffi::from_slice_f32(&[1.0, 0.0, 11.0, 0.0, 21.0, 0.0, 31.0, 0.0], &[4, 2]);
         let centroids = Linear::new(cw, None);
 
         // token_ordering[c*4 + k] = c*4 + k → contiguous block per centroid.
@@ -779,10 +768,7 @@ mod tests {
         // Dense-LM-head drafters (26B-A4B, 31B) carry no centroid table —
         // the hook must not insert anything in their absence.
         let mut weights: WeightMap = WeightMap::new();
-        weights.insert(
-            "something.else".to_string(),
-            from_slice_i32(&[0, 1], &[2]),
-        );
+        weights.insert("something.else".to_string(), from_slice_i32(&[0, 1], &[2]));
 
         sanitize_token_ordering(&mut weights, "masked_embedding");
 

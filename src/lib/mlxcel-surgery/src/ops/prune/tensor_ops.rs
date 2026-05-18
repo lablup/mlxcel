@@ -41,10 +41,7 @@ use crate::{SurgeryError, WeightMap};
 
 /// Replace `weights[key]` with a zero-filled tensor of the same shape
 /// and dtype. Caller has already verified the key exists.
-pub(super) fn zero_tensor_inplace(
-    weights: &mut WeightMap,
-    key: &str,
-) -> Result<(), SurgeryError> {
+pub(super) fn zero_tensor_inplace(weights: &mut WeightMap, key: &str) -> Result<(), SurgeryError> {
     let arr = weights
         .get(key)
         .ok_or_else(|| SurgeryError::TensorNotFound(key.to_string()))?;

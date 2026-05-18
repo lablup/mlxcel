@@ -51,11 +51,7 @@ fn new_rejects_bad_glob() {
 #[test]
 fn zero_match_pattern_errors() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let donor_path = write_single_donor(
-        dir.path(),
-        "unused.key",
-        f32_tensor(&[1.0, 1.0], &[2]),
-    );
+    let donor_path = write_single_donor(dir.path(), "unused.key", f32_tensor(&[1.0, 1.0], &[2]));
 
     let mut weights = WeightMap::new();
     weights.insert(
@@ -116,12 +112,8 @@ fn missing_source_key_errors() {
         mlx_f32(&[1.0; 4], &[2, 2]),
     );
 
-    let op = AddOp::new(
-        "model.layers.*.self_attn.q_proj.weight",
-        &donor_path,
-        1.0,
-    )
-    .expect("construct");
+    let op =
+        AddOp::new("model.layers.*.self_attn.q_proj.weight", &donor_path, 1.0).expect("construct");
 
     match op.apply(&mut weights, &serde_json::Value::Null) {
         Err(SurgeryError::TensorNotFound(key)) => {
@@ -153,12 +145,8 @@ fn shape_mismatch_returns_structured_error() {
         mlx_f32(&[1.0; 4], &[2, 2]),
     );
 
-    let op = AddOp::new(
-        "model.layers.*.self_attn.q_proj.weight",
-        &donor_path,
-        1.0,
-    )
-    .expect("construct");
+    let op =
+        AddOp::new("model.layers.*.self_attn.q_proj.weight", &donor_path, 1.0).expect("construct");
 
     match op.apply(&mut weights, &serde_json::Value::Null) {
         Err(SurgeryError::ShapeMismatch {
@@ -195,12 +183,8 @@ fn quantized_packed_base_returns_focused_error() {
         from_slice_u32(&packed_bits, &[2, 2]),
     );
 
-    let op = AddOp::new(
-        "model.layers.*.mlp.gate_proj.weight",
-        &donor_path,
-        1.0,
-    )
-    .expect("construct");
+    let op =
+        AddOp::new("model.layers.*.mlp.gate_proj.weight", &donor_path, 1.0).expect("construct");
 
     let err = op
         .apply(&mut weights, &serde_json::Value::Null)

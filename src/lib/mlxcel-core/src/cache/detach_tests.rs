@@ -677,10 +677,7 @@ fn detached_kvcache_trim_to_mid_buffer_resets_offset_and_visible_keys() {
 #[test]
 fn detached_kvcache_trim_to_zero_drops_storage_and_keeps_mode() {
     let mut live = KVCache::new_with_mode(KVCacheMode::Int8);
-    live.update(
-        fp32_tokens(&[1.0, 2.0, 3.0]),
-        fp32_tokens(&[4.0, 5.0, 6.0]),
-    );
+    live.update(fp32_tokens(&[1.0, 2.0, 3.0]), fp32_tokens(&[4.0, 5.0, 6.0]));
     let mut handle = live.clone_handle();
     assert_eq!(handle.seq_len(), 3);
     assert_eq!(handle.mode(), KVCacheMode::Int8);
@@ -698,7 +695,9 @@ fn detached_kvcache_trim_to_exact_offset_is_noop() {
     live.update(fp32_tokens(&[1.0, 2.0]), fp32_tokens(&[3.0, 4.0]));
     let mut handle = live.clone_handle();
 
-    handle.trim_to(2).expect("trim_to exact offset must succeed");
+    handle
+        .trim_to(2)
+        .expect("trim_to exact offset must succeed");
     assert_eq!(handle.seq_len(), 2);
 
     let mut restored = KVCache::new();
@@ -825,7 +824,9 @@ fn detached_cache_set_truncate_to_zero_drops_every_layer() {
     let v: Vec<f32> = (1..=4).map(|i| i as f32 * 10.0).collect();
     let mut detached = detached_set_with_fp16_layers(2, &k, &v);
 
-    detached.truncate_to(0).expect("truncate_to zero must succeed");
+    detached
+        .truncate_to(0)
+        .expect("truncate_to zero must succeed");
     assert!(detached.caches.iter().all(|c| c.is_empty()));
     assert_eq!(detached.current_offset, 0);
     assert_eq!(detached.prompt_len, 0);
@@ -940,10 +941,7 @@ fn detached_cache_set_truncate_to_int8_preserves_dequantization() {
     let seq_adopted = pool.adopt(&model, detached).unwrap();
     let (k_a, v_a) = {
         let caches = pool.get_caches_mut(seq_adopted).unwrap();
-        caches[0].update_and_fetch(
-            fp32_tokens(&full_k[5..]),
-            fp32_tokens(&full_v[5..]),
-        )
+        caches[0].update_and_fetch(fp32_tokens(&full_k[5..]), fp32_tokens(&full_v[5..]))
     };
     eval(&k_a);
     eval(&v_a);

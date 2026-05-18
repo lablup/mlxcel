@@ -106,12 +106,11 @@ impl DFlashDrafter {
                 path: config_path.display().to_string(),
                 source: e,
             })?;
-        let config = DFlashConfig::from_json(&config_json).map_err(|e| {
-            DrafterError::ConfigParse {
+        let config =
+            DFlashConfig::from_json(&config_json).map_err(|e| DrafterError::ConfigParse {
                 path: config_path.display().to_string(),
                 source: serde::de::Error::custom(e),
-            }
-        })?;
+            })?;
 
         let mut weights = crate::weights::load_weights_from_dir(path)
             .map_err(|msg| DrafterError::LoadFailed { reason: msg })?;
@@ -209,8 +208,9 @@ impl Drafter for DFlashDrafter {
         //    expose `embed_tokens` (e.g. a non-Qwen-3.5 model fed in by
         //    mistake).
         if self.model.needs_embed_binding() {
-            let embed = target.embed_tokens_module().ok_or_else(|| {
-                DrafterError::BindFailed {
+            let embed = target
+                .embed_tokens_module()
+                .ok_or_else(|| DrafterError::BindFailed {
                     reason: format!(
                         "DFlash drafter checkpoint omits embed_tokens.weight \
                          and the target does not expose embed_tokens_module(); \
@@ -220,8 +220,7 @@ impl Drafter for DFlashDrafter {
                          (kind = {})",
                         self.kind()
                     ),
-                }
-            })?;
+                })?;
             self.model.bind_target_embedding(embed);
         } else {
             // Legacy capability smoke-test for self-contained checkpoints:
@@ -427,10 +426,7 @@ fn sample_block_per_position_batched(
     sampler: &SamplingConfig,
 ) -> Result<Vec<Vec<i32>>, DrafterError> {
     let shape = ffi::array_shape(logits);
-    if shape.len() != 3
-        || shape[0] != batch_size as i32
-        || shape[1] != block_size as i32
-    {
+    if shape.len() != 3 || shape[0] != batch_size as i32 || shape[1] != block_size as i32 {
         return Err(DrafterError::DraftFailed {
             reason: format!(
                 "DFlash drafter (batched) expected logits shape \
@@ -468,11 +464,7 @@ fn sample_block_per_position_batched(
         for i in 0..n {
             // Row `(b, i+1)` of the [B, L, V] logits.
             let pos = (i + 1) as i32;
-            let row = ffi::slice(
-                logits,
-                &[b, pos, 0_i32],
-                &[b + 1, pos + 1, vocab],
-            );
+            let row = ffi::slice(logits, &[b, pos, 0_i32], &[b + 1, pos + 1, vocab]);
             // Drop the seq axis so we get a `[1, vocab]` 2D slice (fused_sample
             // / argmax expect `[batch, vocab]`).
             let row = ffi::reshape(&row, &[1_i32, vocab]);
@@ -536,7 +528,11 @@ fn sample_block_per_position(
     for i in 0..n {
         // Row `i + 1` of the [1, L, V] logits.
         let row_idx = (i + 1) as i32;
-        let row = ffi::slice(logits, &[0_i32, row_idx, 0_i32], &[1_i32, row_idx + 1, vocab]);
+        let row = ffi::slice(
+            logits,
+            &[0_i32, row_idx, 0_i32],
+            &[1_i32, row_idx + 1, vocab],
+        );
         // Drop the seq axis so we get a `[1, vocab]` 2D slice (fused_sample
         // / argmax expect `[batch, vocab]`).
         let row = ffi::reshape(&row, &[1_i32, vocab]);
@@ -588,10 +584,7 @@ fn sample_block_per_position_array(
     }
 
     let tokens = sample_block_per_position(logits, block_size, sampler)?;
-    Ok(ffi::from_slice_i32(
-        &tokens,
-        &[1, (block_size - 1) as i32],
-    ))
+    Ok(ffi::from_slice_i32(&tokens, &[1, (block_size - 1) as i32]))
 }
 
 #[cfg(test)]
@@ -620,10 +613,7 @@ mod tests {
             ffi::zeros(&[4, 4], dtype::BFLOAT16),
         );
         // A non-bf16 tensor: should pass through.
-        weights.insert(
-            "fc.weight".to_string(),
-            ffi::zeros(&[4, 4], dtype::FLOAT16),
-        );
+        weights.insert("fc.weight".to_string(), ffi::zeros(&[4, 4], dtype::FLOAT16));
 
         convert_bf16_to_f16_non_quantized(&mut weights);
 

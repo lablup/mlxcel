@@ -200,8 +200,8 @@ mod tests {
     #[test]
     fn load_pipeline_surfaces_io_error_for_missing_file() {
         let _guard = env_lock();
-        let err = load_pipeline_from_file("/does/not/exist.yaml")
-            .expect_err("missing file must fail");
+        let err =
+            load_pipeline_from_file("/does/not/exist.yaml").expect_err("missing file must fail");
         assert!(
             err.contains("/does/not/exist.yaml"),
             "error must mention path: {err}"

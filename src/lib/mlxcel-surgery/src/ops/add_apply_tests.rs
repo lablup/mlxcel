@@ -28,9 +28,7 @@ use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{array_dtype, astype};
 
 use super::add::AddOp;
-use super::add_test_helpers::{
-    OwnedTensor, extract_f32, f32_tensor, mlx_f32, write_single_donor,
-};
+use super::add_test_helpers::{extract_f32, f32_tensor, mlx_f32, write_single_donor, OwnedTensor};
 use crate::SurgeryOp;
 
 #[test]
@@ -49,12 +47,8 @@ fn applies_correct_value_with_default_alpha() {
         mlx_f32(&[1.0, 2.0, 3.0, 4.0], &[2, 2]),
     );
 
-    let op = AddOp::new(
-        "model.layers.*.mlp.down_proj.weight",
-        &donor_path,
-        1.0,
-    )
-    .expect("construct");
+    let op =
+        AddOp::new("model.layers.*.mlp.down_proj.weight", &donor_path, 1.0).expect("construct");
 
     op.apply(&mut weights, &serde_json::Value::Null)
         .expect("apply must succeed");
@@ -81,12 +75,8 @@ fn applies_correct_value_with_alpha_half() {
         mlx_f32(&[1.0, 2.0, 3.0, 4.0], &[2, 2]),
     );
 
-    let op = AddOp::new(
-        "model.layers.*.mlp.down_proj.weight",
-        &donor_path,
-        0.5,
-    )
-    .expect("construct");
+    let op =
+        AddOp::new("model.layers.*.mlp.down_proj.weight", &donor_path, 0.5).expect("construct");
 
     op.apply(&mut weights, &serde_json::Value::Null)
         .expect("apply must succeed");
@@ -116,12 +106,8 @@ fn applies_correct_value_with_negative_alpha() {
         mlx_f32(&[10.0, 10.0, 10.0, 10.0], &[2, 2]),
     );
 
-    let op = AddOp::new(
-        "model.layers.*.mlp.down_proj.weight",
-        &donor_path,
-        -2.0,
-    )
-    .expect("construct");
+    let op =
+        AddOp::new("model.layers.*.mlp.down_proj.weight", &donor_path, -2.0).expect("construct");
 
     op.apply(&mut weights, &serde_json::Value::Null)
         .expect("apply must succeed");
@@ -174,8 +160,7 @@ fn alpha_zero_still_diagnoses_zero_match_patterns() {
         mlx_f32(&[1.0; 4], &[2, 2]),
     );
 
-    let op = AddOp::new("layer.does.not.exist.*", "/anywhere.safetensors", 0.0)
-        .expect("construct");
+    let op = AddOp::new("layer.does.not.exist.*", "/anywhere.safetensors", 0.0).expect("construct");
 
     let err = op
         .apply(&mut weights, &serde_json::Value::Null)
@@ -214,12 +199,8 @@ fn applies_to_multiple_matched_keys() {
         mlx_f32(&[100.0; 4], &[2, 2]),
     );
 
-    let op = AddOp::new(
-        "model.layers.*.mlp.down_proj.weight",
-        &donor_path,
-        2.5,
-    )
-    .expect("construct");
+    let op =
+        AddOp::new("model.layers.*.mlp.down_proj.weight", &donor_path, 2.5).expect("construct");
 
     op.apply(&mut weights, &serde_json::Value::Null)
         .expect("apply must succeed across layers");
@@ -253,17 +234,10 @@ fn donor_dtype_is_cast_to_base_dtype() {
     // Build a base f16 array via f32 → astype(f16).
     let base_f32 = mlx_f32(&[1.0, 1.0, 1.0, 1.0], &[2, 2]);
     let base_f16 = astype(&base_f32, mlx_dtype::FLOAT16);
-    weights.insert(
-        "model.layers.0.mlp.down_proj.weight".to_string(),
-        base_f16,
-    );
+    weights.insert("model.layers.0.mlp.down_proj.weight".to_string(), base_f16);
 
-    let op = AddOp::new(
-        "model.layers.*.mlp.down_proj.weight",
-        &donor_path,
-        1.0,
-    )
-    .expect("construct");
+    let op =
+        AddOp::new("model.layers.*.mlp.down_proj.weight", &donor_path, 1.0).expect("construct");
 
     op.apply(&mut weights, &serde_json::Value::Null)
         .expect("dtype-cast donor must succeed");

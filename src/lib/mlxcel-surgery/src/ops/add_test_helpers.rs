@@ -27,9 +27,9 @@
 use std::path::Path;
 
 use mlxcel_core::dtype as mlx_dtype;
-use mlxcel_core::{MlxArray, UniquePtr, array_to_raw_bytes, eval, from_bytes};
-use safetensors::View;
+use mlxcel_core::{array_to_raw_bytes, eval, from_bytes, MlxArray, UniquePtr};
 use safetensors::tensor::Dtype as SafeTensorDtype;
+use safetensors::View;
 
 /// A `safetensors::View` impl over owned bytes — copied from the
 /// pattern used in `src/distributed/pipeline/partial_loading_adapter_tests.rs`.
@@ -70,16 +70,11 @@ pub(crate) fn f32_tensor(values: &[f32], shape: &[usize]) -> OwnedTensor {
 
 /// Write a single-tensor safetensors file under `dir` named
 /// `donor.safetensors`. Returns the file path.
-pub(crate) fn write_single_donor(
-    dir: &Path,
-    key: &str,
-    tensor: OwnedTensor,
-) -> std::path::PathBuf {
+pub(crate) fn write_single_donor(dir: &Path, key: &str, tensor: OwnedTensor) -> std::path::PathBuf {
     let mut tensors = std::collections::HashMap::new();
     tensors.insert(key.to_string(), tensor);
     let path = dir.join("donor.safetensors");
-    safetensors::serialize_to_file(&tensors, None, &path)
-        .expect("serialize donor safetensors");
+    safetensors::serialize_to_file(&tensors, None, &path).expect("serialize donor safetensors");
     path
 }
 

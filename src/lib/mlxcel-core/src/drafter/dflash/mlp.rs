@@ -67,24 +67,12 @@ impl DFlashMlp {
         group_size: i32,
         bits: i32,
     ) -> Result<Self, String> {
-        let gate_proj = UnifiedLinear::from_weights(
-            weights,
-            &format!("{prefix}.gate_proj"),
-            group_size,
-            bits,
-        )?;
-        let up_proj = UnifiedLinear::from_weights(
-            weights,
-            &format!("{prefix}.up_proj"),
-            group_size,
-            bits,
-        )?;
-        let down_proj = UnifiedLinear::from_weights(
-            weights,
-            &format!("{prefix}.down_proj"),
-            group_size,
-            bits,
-        )?;
+        let gate_proj =
+            UnifiedLinear::from_weights(weights, &format!("{prefix}.gate_proj"), group_size, bits)?;
+        let up_proj =
+            UnifiedLinear::from_weights(weights, &format!("{prefix}.up_proj"), group_size, bits)?;
+        let down_proj =
+            UnifiedLinear::from_weights(weights, &format!("{prefix}.down_proj"), group_size, bits)?;
         Ok(Self {
             gate_proj,
             up_proj,

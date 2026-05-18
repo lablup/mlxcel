@@ -194,8 +194,7 @@ fn scales_matched_tensors_and_leaves_others_alone() {
 
 #[test]
 fn glob_wildcard_matches_multiple_layers() {
-    let op = ScaleOp::new("model.layers.*.self_attn.o_proj.weight", 0.5)
-        .expect("construct");
+    let op = ScaleOp::new("model.layers.*.self_attn.o_proj.weight", 0.5).expect("construct");
     let mut weights = WeightMap::new();
     for layer in 0..3 {
         weights.insert(
@@ -209,7 +208,8 @@ fn glob_wildcard_matches_multiple_layers() {
         );
     }
 
-    op.apply(&mut weights, &serde_json::Value::Null).expect("apply");
+    op.apply(&mut weights, &serde_json::Value::Null)
+        .expect("apply");
 
     for layer in 0..3 {
         let o = weights
@@ -232,7 +232,8 @@ fn preserves_dtype_and_shape_for_f16_tensor() {
     let mut weights = WeightMap::new();
     weights.insert("model.layer.weight".to_string(), f16_arr);
 
-    op.apply(&mut weights, &serde_json::Value::Null).expect("apply");
+    op.apply(&mut weights, &serde_json::Value::Null)
+        .expect("apply");
 
     let after = weights.get("model.layer.weight").unwrap();
     assert_eq!(
@@ -270,12 +271,10 @@ fn quantized_affine_routes_to_scales_and_biases_not_packed_codes() {
         "model.layer.scales".to_string(),
         f32_tensor(&[0.25, 0.5, 1.0, 2.0]),
     );
-    weights.insert(
-        "model.layer.biases".to_string(),
-        f32_tensor(&[10.0, -20.0]),
-    );
+    weights.insert("model.layer.biases".to_string(), f32_tensor(&[10.0, -20.0]));
 
-    op.apply(&mut weights, &serde_json::Value::Null).expect("apply");
+    op.apply(&mut weights, &serde_json::Value::Null)
+        .expect("apply");
 
     // Packed codes — bit-identical.
     let packed = weights.get("model.layer.weight").unwrap();
@@ -315,7 +314,8 @@ fn quantized_mxfp4_layer_without_biases_scales_only_scales() {
         f32_tensor(&[2.0, -4.0, 8.0]),
     );
 
-    op.apply(&mut weights, &serde_json::Value::Null).expect("apply");
+    op.apply(&mut weights, &serde_json::Value::Null)
+        .expect("apply");
 
     let packed = weights.get("model.embed.weight").unwrap();
     mlxcel_core::eval(packed);
@@ -343,7 +343,8 @@ fn pattern_matching_scales_directly_is_pass_through() {
         f32_tensor(&[0.1, 0.2, 0.3]),
     );
 
-    op.apply(&mut weights, &serde_json::Value::Null).expect("apply");
+    op.apply(&mut weights, &serde_json::Value::Null)
+        .expect("apply");
 
     let after = weights.get("model.layer.scales").unwrap();
     // Note: f32 multiply has rounding; assert with tolerance.
@@ -374,7 +375,8 @@ fn wildcard_matching_quantized_triplet_does_not_double_scale() {
     weights.insert("model.layer.scales".to_string(), f32_tensor(&[3.0]));
     weights.insert("model.layer.biases".to_string(), f32_tensor(&[-5.0]));
 
-    op.apply(&mut weights, &serde_json::Value::Null).expect("apply");
+    op.apply(&mut weights, &serde_json::Value::Null)
+        .expect("apply");
 
     let scales = weights.get("model.layer.scales").unwrap();
     assert_eq!(
@@ -415,7 +417,8 @@ fn factor_one_is_a_value_preserving_pass() {
         f32_tensor(&[1.5, -2.5, 0.0, f32::MIN_POSITIVE]),
     );
 
-    op.apply(&mut weights, &serde_json::Value::Null).expect("apply");
+    op.apply(&mut weights, &serde_json::Value::Null)
+        .expect("apply");
 
     let after = weights.get("model.layer.weight").unwrap();
     let values = read_f32(after);
