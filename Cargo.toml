@@ -81,10 +81,10 @@ sha2 = "0.10"
 # Fast non-cryptographic-grade hashing for prompt prefix cache keys (issue #419).
 # BLAKE3 is used only for in-process cache-key digests; no security boundary
 # depends on it.
-blake3 = "1.5"
+blake3 = "1.8"
 
 # CLI
-clap = { version = "4.5.31", features = ["derive", "env"] }
+clap = { version = "4.6.1", features = ["derive", "env"] }
 
 # Image processing (for VLM)
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
@@ -119,12 +119,12 @@ llguidance = { version = "1.7", default-features = false, features = ["lark", "r
 toktrie_hf_tokenizers = "1.7"
 
 # HTTP Server
-tokio = { version = "1.35", features = ["full"] }
+tokio = { version = "1.52", features = ["full"] }
 axum = { version = "0.7", features = ["json", "macros"] }
 tokio-stream = "0.1"
 tokio-util = "0.7"
 futures = "0.3"
-uuid = { version = "1.6", features = ["v4"] }
+uuid = { version = "1.23", features = ["v4"] }
 chrono = "0.4"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
