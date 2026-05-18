@@ -25,7 +25,7 @@
 
 use crate::models::qwen_mrope_state::MRopeState;
 use mlxcel_core::cache::SequenceId;
-use mlxcel_core::layers::{KVCache, RMSNorm, UnifiedEmbedding, UnifiedLinear};
+use mlxcel_core::layers::{FusedQKVLinear, KVCache, RMSNorm, UnifiedEmbedding, UnifiedLinear};
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
 use serde::Deserialize;
@@ -269,9 +269,7 @@ pub(crate) fn rotate_half(x: &MlxArray) -> UniquePtr<MlxArray> {
 
 // Attention with q_norm/k_norm and Interleaved MRoPE.
 struct Attention {
-    q_proj: UnifiedLinear,
-    k_proj: UnifiedLinear,
-    v_proj: UnifiedLinear,
+    qkv_proj: FusedQKVLinear,
     o_proj: UnifiedLinear,
     q_norm: RMSNorm,
     k_norm: RMSNorm,
@@ -279,6 +277,7 @@ struct Attention {
     num_heads: i32,
     num_kv_heads: i32,
     head_dim: i32,
+    rope_base: f32,
     scale: f32,
 }
 
@@ -290,24 +289,19 @@ impl Attention {
     ) -> Result<Self, String> {
         let gs = config.group_size();
         let bits = config.bits();
-        let q_proj = UnifiedLinear::from_weights(
+        let head_dim = config.head_dim();
+        let num_heads = config.num_attention_heads as i32;
+        let num_kv_heads = config.num_kv_heads() as i32;
+        let qkv_proj = FusedQKVLinear::from_weights_separate(
             weights,
-            &format!("{}.self_attn.q_proj", prefix),
+            &format!("{}.self_attn", prefix),
             gs,
             bits,
+            num_heads,
+            num_kv_heads,
+            head_dim as i32,
         )?;
-        let k_proj = UnifiedLinear::from_weights(
-            weights,
-            &format!("{}.self_attn.k_proj", prefix),
-            gs,
-            bits,
-        )?;
-        let v_proj = UnifiedLinear::from_weights(
-            weights,
-            &format!("{}.self_attn.v_proj", prefix),
-            gs,
-            bits,
-        )?;
+
         let o_proj = UnifiedLinear::from_weights(
             weights,
             &format!("{}.self_attn.o_proj", prefix),
@@ -315,7 +309,6 @@ impl Attention {
             bits,
         )?;
 
-        let head_dim = config.head_dim();
         let q_norm = load_rms_norm(
             weights,
             &format!("{}.self_attn.q_norm", prefix),
@@ -330,16 +323,15 @@ impl Attention {
         let mrope = InterleavedMRoPE::new(head_dim, config.rope_theta, config.mrope_section());
 
         Ok(Self {
-            q_proj,
-            k_proj,
-            v_proj,
+            qkv_proj,
             o_proj,
             q_norm,
             k_norm,
             mrope,
-            num_heads: config.num_attention_heads as i32,
-            num_kv_heads: config.num_kv_heads() as i32,
+            num_heads,
+            num_kv_heads,
             head_dim: head_dim as i32,
+            rope_base: config.rope_theta,
             scale: (head_dim as f32).powf(-0.5),
         })
     }
@@ -355,9 +347,7 @@ impl Attention {
         let b = shape[0];
         let l = shape[1];
 
-        let q = self.q_proj.forward(x);
-        let k = self.k_proj.forward(x);
-        let v = self.v_proj.forward(x);
+        let (q, k, v) = self.qkv_proj.forward(x);
 
         // Reshape: [B, L, dim] -> [B, L, heads, head_dim]
         let q = mlxcel_core::reshape(&q, &[b, l, self.num_heads, self.head_dim]);
@@ -421,6 +411,61 @@ impl Attention {
         };
 
         // [B, heads, L, head_dim] -> [B, L, dim]
+        let output = mlxcel_core::transpose_axes(&output, &[0, 2, 1, 3]);
+        let output = mlxcel_core::reshape(&output, &[b, l, -1]);
+        self.o_proj.forward(&output)
+    }
+
+    fn forward_text_only(
+        &self,
+        x: &MlxArray,
+        cache: &mut KVCache,
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        let shape = mlxcel_core::array_shape(x);
+        let b = shape[0];
+        let l = shape[1];
+
+        let (q, k, v) = self.qkv_proj.forward(x);
+
+        let q = mlxcel_core::reshape(&q, &[b, l, self.num_heads, self.head_dim]);
+        let k = mlxcel_core::reshape(&k, &[b, l, self.num_kv_heads, self.head_dim]);
+        let v = mlxcel_core::reshape(&v, &[b, l, self.num_kv_heads, self.head_dim]);
+
+        let q = self.q_norm.forward(&q);
+        let k = self.k_norm.forward(&k);
+
+        let q = mlxcel_core::transpose_axes(&q, &[0, 2, 1, 3]);
+        let k = mlxcel_core::transpose_axes(&k, &[0, 2, 1, 3]);
+        let v = mlxcel_core::transpose_axes(&v, &[0, 2, 1, 3]);
+
+        let offset = cache.offset;
+        let q = mlxcel_core::fast_rope(&q, self.head_dim, false, self.rope_base, 1.0, offset);
+        let k = mlxcel_core::fast_rope(&k, self.head_dim, false, self.rope_base, 1.0, offset);
+
+        let (k, v) = cache.update_and_fetch(k, v);
+
+        let n_rep = self.num_heads / self.num_kv_heads;
+        let k = if n_rep > 1 {
+            mlxcel_core::utils::repeat_kv(&k, n_rep)
+        } else {
+            mlxcel_core::copy(&k)
+        };
+        let v = if n_rep > 1 {
+            mlxcel_core::utils::repeat_kv(&v, n_rep)
+        } else {
+            mlxcel_core::copy(&v)
+        };
+
+        let output = if l > 1 && mask.is_none() {
+            mlxcel_core::causal_attention(&q, &k, &v, self.scale, 0.0, 0)
+        } else {
+            let mask_ptr = mask.map(|m| m as *const _).unwrap_or(std::ptr::null());
+            unsafe {
+                mlxcel_core::layers::attention_from_ptr(&q, &k, &v, self.scale, mask_ptr, 0.0, 0)
+            }
+        };
+
         let output = mlxcel_core::transpose_axes(&output, &[0, 2, 1, 3]);
         let output = mlxcel_core::reshape(&output, &[b, l, -1]);
         self.o_proj.forward(&output)
@@ -512,6 +557,20 @@ impl DecoderLayer {
         let r = self
             .attn
             .forward(&self.input_layernorm.forward(x), cache, mask, position_ids);
+        let h = mlxcel_core::add(x, &r);
+        let r = self.mlp.forward(&self.post_attention_layernorm.forward(&h));
+        mlxcel_core::add(&h, &r)
+    }
+
+    fn forward_text_only(
+        &self,
+        x: &MlxArray,
+        cache: &mut KVCache,
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        let r = self
+            .attn
+            .forward_text_only(&self.input_layernorm.forward(x), cache, mask);
         let h = mlxcel_core::add(x, &r);
         let r = self.mlp.forward(&self.post_attention_layernorm.forward(&h));
         mlxcel_core::add(&h, &r)
@@ -655,6 +714,23 @@ impl Qwen3VLModel {
         *self.deepstack_visual_embeds.borrow_mut() = None;
     }
 
+    fn can_use_text_only_fast_path(&self, seq_id: Option<SequenceId>) -> bool {
+        let has_mrope_state = self.mrope_state.with_entry(seq_id, |entry| {
+            entry.position_ids.is_some() || entry.rope_deltas.unwrap_or(0) != 0
+        });
+        if has_mrope_state {
+            return false;
+        }
+
+        let has_visual_mask = self.visual_pos_masks.borrow().is_some();
+        let has_deepstack_embeds = self
+            .deepstack_visual_embeds
+            .borrow()
+            .as_ref()
+            .is_some_and(|embeds| !embeds.is_empty());
+        !has_visual_mask && !has_deepstack_embeds
+    }
+
     /// DeepStack: add visual features at image positions in hidden states
     fn deepstack_process(
         h: &MlxArray,
@@ -750,6 +826,16 @@ impl Qwen3VLModel {
         mask: Option<&MlxArray>,
         seq_id: Option<SequenceId>,
     ) -> UniquePtr<MlxArray> {
+        let cache_offset = caches[0].offset;
+        if input_embeddings.is_none() && cache_offset == 0 {
+            self.clear_mrope_state();
+            self.clear_deepstack_state();
+        }
+
+        if input_embeddings.is_none() && self.can_use_text_only_fast_path(seq_id) {
+            return self.forward_text_only(input_ids, caches, mask);
+        }
+
         let mut h = if let Some(embeds) = input_embeddings {
             mlxcel_core::copy(embeds)
         } else {
@@ -759,7 +845,6 @@ impl Qwen3VLModel {
         let ids_shape = mlxcel_core::array_shape(input_ids);
         let batch = ids_shape[0];
         let seq_len = ids_shape[1];
-        let cache_offset = caches[0].offset;
 
         // Compute position_ids using this sequence's MRoPE entry.
         let position_ids = self.mrope_state.with_entry(seq_id, |entry| {
@@ -828,6 +913,22 @@ impl Qwen3VLModel {
             {
                 h = Self::deepstack_process(&h, masks, &embeds[layer_idx]);
             }
+        }
+
+        h = self.norm.forward(&h);
+        self.lm_head.forward(&h)
+    }
+
+    fn forward_text_only(
+        &self,
+        input_ids: &MlxArray,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        let mut h = self.embed_tokens.forward(input_ids);
+
+        for (layer_idx, layer) in self.layers.iter().enumerate() {
+            h = layer.forward_text_only(&h, &mut caches[layer_idx], mask);
         }
 
         h = self.norm.forward(&h);

@@ -24,8 +24,8 @@
 use crate::ffi;
 use crate::ffi::MlxArray;
 use cxx::UniquePtr;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 pub use crate::cache::{ChunkedKVCache, KVCache, KVCacheMode, RotatingKVCache};
 
@@ -812,7 +812,8 @@ impl UnifiedLinear {
 ///   `[q_dim | k_dim | v_dim, hidden_dim]`  →  `q_dim = n_heads * head_dim`
 ///                                           →  `k_dim = v_dim = n_kv_heads * head_dim`
 ///
-/// Used by: Llama3, Qwen2/3, Gemma v1/2/3, Mistral, Cohere2, StarCoder2, InternLM3
+/// Used by: Llama3, Qwen2/3, Qwen3-VL, Qwen3-VL-MoE, Gemma v1/2/3, Mistral,
+/// Cohere2, StarCoder2, InternLM3
 pub struct FusedQKVLinear {
     /// Single concatenated QKV projection weight.
     pub qkv_proj: UnifiedLinear,
