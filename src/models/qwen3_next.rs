@@ -32,7 +32,9 @@ mod helpers;
 #[path = "qwen3_next_helpers_tests.rs"]
 mod helper_tests;
 
-use crate::models::gated_delta::{GatedDeltaCache, RMSNormGated, gated_delta_update};
+use crate::models::gated_delta::{
+    GatedDeltaCache, RMSNormGated, gated_delta_update, scaled_fast_rms_norm_no_weight,
+};
 use mlxcel_core::dtype;
 use mlxcel_core::generate::LanguageModel;
 use mlxcel_core::layers::{KVCache, RMSNorm, UnifiedEmbedding, UnifiedLinear};
@@ -368,23 +370,11 @@ impl GatedDeltaNet {
                 .map(|s| mlxcel_core::copy(s.as_ref().unwrap()))
         });
 
-        // Apply RMS norm with scaling
+        // Apply RMS norm with scaling. Reference mlx-lm keeps this on
+        // mx.fast.rms_norm rather than expanding it into primitive ops.
         let inv_scale = (self.head_k_dim as f32).powf(-0.5);
-        let q_dtype = mlxcel_core::array_dtype(&q);
-        let eps_arr = mlxcel_core::full_f32(&[1], 1e-6, q_dtype);
-
-        // Manual RMS norm: x / sqrt(mean(x^2) + eps)
-        let q_sq = mlxcel_core::square(&q);
-        let q_sq_mean = mlxcel_core::mean_axis(&q_sq, -1, true);
-        let q_rms = mlxcel_core::sqrt(&mlxcel_core::add(&q_sq_mean, &eps_arr));
-        let scale_q = mlxcel_core::full_f32(&[1], inv_scale * inv_scale, q_dtype);
-        let q = mlxcel_core::multiply(&mlxcel_core::divide(&q, &q_rms), &scale_q);
-
-        let k_sq = mlxcel_core::square(&k);
-        let k_sq_mean = mlxcel_core::mean_axis(&k_sq, -1, true);
-        let k_rms = mlxcel_core::sqrt(&mlxcel_core::add(&k_sq_mean, &eps_arr));
-        let scale_k = mlxcel_core::full_f32(&[1], inv_scale, q_dtype);
-        let k = mlxcel_core::multiply(&mlxcel_core::divide(&k, &k_rms), &scale_k);
+        let q = scaled_fast_rms_norm_no_weight(&q, inv_scale * inv_scale, 1e-6);
+        let k = scaled_fast_rms_norm_no_weight(&k, inv_scale, 1e-6);
 
         // Run gated delta update
         let (out, new_state) = gated_delta_update(

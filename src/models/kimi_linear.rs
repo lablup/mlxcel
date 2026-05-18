@@ -22,7 +22,7 @@
 //!
 //! Reference: mlx-lm/mlx_lm/models/kimi_linear.py
 
-use crate::models::gated_delta::gated_delta_update;
+use crate::models::gated_delta::{gated_delta_update, scaled_fast_rms_norm_no_weight};
 use crate::models::switch_layers::SwitchGLU;
 use mlxcel_core::dtype;
 use mlxcel_core::generate::LanguageModel;
@@ -590,22 +590,11 @@ impl KimiDeltaAttention {
         let k = mlxcel_core::reshape(&k_conv, &[b, t, self.num_heads, self.head_dim]);
         let v = mlxcel_core::reshape(&v_conv, &[b, t, self.num_heads, self.head_dim]);
 
-        // RMS normalize Q and K (without learned weight)
-        let q_dtype = mlxcel_core::array_dtype(&q);
-        let eps_arr = mlxcel_core::full_f32(&[1], 1e-6, q_dtype);
+        // RMS normalize Q and K (without learned weight). Reference mlx-lm
+        // uses mx.fast.rms_norm here; keep it fused instead of expanding it.
         let inv_scale = self.scale;
-
-        let q_sq = mlxcel_core::square(&q);
-        let q_sq_mean = mlxcel_core::mean_axis(&q_sq, -1, true);
-        let q_rms = mlxcel_core::sqrt(&mlxcel_core::add(&q_sq_mean, &eps_arr));
-        let scale_q = mlxcel_core::full_f32(&[1], inv_scale * inv_scale, q_dtype);
-        let q = mlxcel_core::multiply(&mlxcel_core::divide(&q, &q_rms), &scale_q);
-
-        let k_sq = mlxcel_core::square(&k);
-        let k_sq_mean = mlxcel_core::mean_axis(&k_sq, -1, true);
-        let k_rms = mlxcel_core::sqrt(&mlxcel_core::add(&k_sq_mean, &eps_arr));
-        let scale_k = mlxcel_core::full_f32(&[1], inv_scale, q_dtype);
-        let k = mlxcel_core::multiply(&mlxcel_core::divide(&k, &k_rms), &scale_k);
+        let q = scaled_fast_rms_norm_no_weight(&q, inv_scale * inv_scale, 1e-6);
+        let k = scaled_fast_rms_norm_no_weight(&k, inv_scale, 1e-6);
 
         // Compute gating logits
         let a_logits = self.f_b_proj.forward(&self.f_a_proj.forward(x));

@@ -400,6 +400,18 @@ pub fn gated_delta_update(
     gated_delta_ops(q, k, v, &g, &beta, state, mask)
 }
 
+/// Fast RMS normalization without a learned scale, followed by scalar scaling.
+///
+/// Mirrors mlx-lm's `mx.fast.rms_norm(x, None, eps) * scale` path for linear
+/// attention q/k normalization, avoiding the expanded square/mean/sqrt/divide
+/// graph on every decode step.
+///
+/// Used by: Qwen3Next, Qwen3.5, KimiLinear
+pub fn scaled_fast_rms_norm_no_weight(x: &MlxArray, scale: f32, eps: f32) -> UniquePtr<MlxArray> {
+    let normed = mlxcel_core::fast_rms_norm_no_weight(x, eps);
+    mlxcel_core::multiply_scalar(&normed, scale)
+}
+
 // RMSNorm with optional gating.
 /// RMSNorm with optional SwiGLU gating (for GatedDeltaNet output).
 /// Gating: silu(gate) * rms_norm(x)
@@ -418,13 +430,10 @@ impl RMSNormGated {
     pub fn forward(&self, x: &MlxArray, gate: Option<&MlxArray>) -> UniquePtr<MlxArray> {
         let target_dtype = mlxcel_core::array_dtype(x);
 
-        // RMS normalization
-        let x_sq = mlxcel_core::square(x);
-        let mean_sq = mlxcel_core::mean_axis(&x_sq, -1, true);
-        let eps_arr = mlxcel_core::full_f32(&[1], self.eps, mlxcel_core::array_dtype(&mean_sq));
-        let rms = mlxcel_core::sqrt(&mlxcel_core::add(&mean_sq, &eps_arr));
-        let normed = mlxcel_core::divide(x, &rms);
-        let scaled = mlxcel_core::multiply(&normed, &self.weight);
+        // Reference mlx-lm uses mx.fast.rms_norm here. Keeping this as the
+        // fast kernel avoids expanding the gated delta decode graph with
+        // square/mean/sqrt/divide/multiply per linear-attention layer.
+        let scaled = mlxcel_core::fast_rms_norm(x, &self.weight, self.eps);
 
         // Apply SwiGLU gating: silu(gate) * x
         // Python mlx-lm promotes the gated path to float32 before restoring the
