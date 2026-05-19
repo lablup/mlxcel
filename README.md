@@ -37,16 +37,16 @@ brew install mlxcel
 
 ```bash
 # Download an MLX-format checkpoint from Hugging Face.
-mlxcel download mlx-community/Qwen3.5-0.8B-OptiQ-4bit
+mlxcel download mlx-community/Qwen3.5-0.8B-4bit
 
 # One-off generation.
 mlxcel generate \
-    -m models/Qwen3.5-0.8B-OptiQ-4bit \
+    -m models/Qwen3.5-0.8B-4bit \
     -p "Hello, world!" -n 100
 
 # OpenAI-compatible server.
 mlxcel-server \
-    -m models/Qwen3.5-0.8B-OptiQ-4bit \
+    -m models/Qwen3.5-0.8B-4bit \
     --port 8080
 ```
 
