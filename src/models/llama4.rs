@@ -1728,6 +1728,14 @@ impl LanguageModel for Llama4Wrapper {
             .prepare_sequence_state(seq_id, self.model.make_llama4_caches());
     }
 
+    fn reset_runtime_state(&self) {
+        // Used by: CxxGenerator single-row generation paths. Llama 4 owns
+        // iGQA cache state inside `ModelOwnedSequenceState`; reset only the
+        // legacy fallback slot, leaving scheduler-owned per-sequence entries
+        // untouched.
+        self.reset_caches();
+    }
+
     fn release_sequence_state_by_id(&self, seq_id: SequenceId) {
         self.sequence_state.release_sequence_state(seq_id)
     }

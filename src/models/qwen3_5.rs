@@ -2575,6 +2575,17 @@ impl LanguageModel for Qwen35Model {
             .prepare_sequence_state(seq_id, self.make_internal_caches());
     }
 
+    fn reset_runtime_state(&self) {
+        // Used by: CxxGenerator single-row generation paths. Qwen 3.5 Next
+        // owns mixed attention / GatedDelta cache state in
+        // `ModelOwnedSequenceState`; reset the fallback cache slot for fresh
+        // CLI / benchmark runs without touching scheduler-owned sequence
+        // entries. Do not clear the MRoPE fallback here: VLM callers populate
+        // it during embedding preparation immediately before generation.
+        self.sequence_state
+            .replace_internal(self.make_internal_caches());
+    }
+
     fn release_sequence_state_by_id(&self, seq_id: SequenceId) {
         self.sequence_state.release_sequence_state(seq_id);
         // Issue #540: drop the per-sequence MRoPE entry alongside the

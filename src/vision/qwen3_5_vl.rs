@@ -377,6 +377,14 @@ impl LanguageModel for Qwen35VLModel {
         );
     }
 
+    fn reset_runtime_state(&self) {
+        // Used by: CxxGenerator single-row generation paths. Reset the
+        // hybrid text backbone's fallback mixed-cache slot while preserving
+        // the MRoPE fallback written by VLM embedding preparation just before
+        // generation starts.
+        mlxcel_core::generate::LanguageModel::reset_runtime_state(&self.text_model);
+    }
+
     /// Issue #540: forward `seq_ids` to the underlying Qwen3.5 model so
     /// each row's MRoPE state resolves correctly in mixed VL+text
     /// batches. `Qwen35Model::forward_batched_with_context_and_ids`

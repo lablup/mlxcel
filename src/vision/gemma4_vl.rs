@@ -551,6 +551,14 @@ impl LanguageModel for Gemma4VLModel {
         self.text_model.prepare_sequence_state(seq_id);
     }
 
+    fn reset_runtime_state(&self) {
+        // Used by: CxxGenerator single-row generation paths. Reset only the
+        // text backbone's fallback cache slot; the VLM per-layer-inputs
+        // fallback is populated by `get_input_embeddings*` immediately before
+        // `forward_with_embeddings*` consumes it.
+        self.text_model.reset_runtime_state();
+    }
+
     fn release_sequence_state_by_id(&self, seq_id: SequenceId) {
         // Issue #543: drop the per-sequence `per_layer_inputs`
         // alongside the text model's per-sequence cache release so

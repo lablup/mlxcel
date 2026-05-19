@@ -3346,6 +3346,14 @@ impl LanguageModel for Gemma4Wrapper {
             .prepare_sequence_state(seq_id, self.model.make_caches());
     }
 
+    fn reset_runtime_state(&self) {
+        // Used by: CxxGenerator single-row generation paths. Gemma 4 owns
+        // its fallback cache slot inside `ModelOwnedSequenceState`; reset it
+        // for fresh CLI / benchmark runs without touching scheduler-owned
+        // per-sequence entries.
+        self.reset_caches();
+    }
+
     fn release_sequence_state_by_id(&self, seq_id: SequenceId) {
         self.sequence_state.release_sequence_state(seq_id);
     }

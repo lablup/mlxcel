@@ -1204,6 +1204,17 @@ impl mlxcel_core::generate::LanguageModel for Gemma3Wrapper {
             .prepare_sequence_state(seq_id, self.model.make_caches());
     }
 
+    fn reset_runtime_state(&self) {
+        // Used by: CxxGenerator single-row generation paths. Gemma 3 owns
+        // its fallback sliding/global KV cache state inside
+        // `ModelOwnedSequenceState`; the caller-provided `KVCache` slice is
+        // intentionally empty/ignored. Reset the fallback slot before each
+        // fresh CLI / benchmark generation so a second VLM prefill does not
+        // reuse offsets from a previous run with a stale 4D attention mask
+        // (issue #731).
+        self.reset_caches();
+    }
+
     fn release_sequence_state_by_id(&self, seq_id: SequenceId) {
         self.sequence_state.release_sequence_state(seq_id)
     }

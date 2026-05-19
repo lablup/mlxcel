@@ -237,6 +237,20 @@ pub trait LanguageModel {
     /// so that padding positions do not corrupt subsequent decode steps.
     fn trim_internal_caches(&self, _excess: i32) {}
 
+    /// Reset model-owned fallback runtime state before a fresh single-row
+    /// generation starts.
+    ///
+    /// Most models store all request-local state in the `KVCache` slice owned
+    /// by [`CxxGenerator`], so the default is a no-op. Models that keep a
+    /// fallback cache slot on `&self` (for legacy CLI / benchmark paths that
+    /// do not carry a `SequenceId`) override this to clear that slot without
+    /// touching scheduler-owned per-sequence maps.
+    ///
+    /// Used by: `CxxGenerator::{reset_with_model, generate_streaming,
+    /// generate_with_stats, generate_streaming_with_embeddings,
+    /// generate_with_stats_and_embeddings, evaluate_loglikelihoods}`.
+    fn reset_runtime_state(&self) {}
+
     /// Release any model-owned sequence state associated with the provided
     /// external cache slice before the scheduler drops that cache set.
     ///
@@ -782,8 +796,9 @@ impl CxxGenerator {
     /// Reset generator state including model-internal caches.
     ///
     /// Models with internal RefCell caches (sliding window, SSM, hybrid) reset
-    /// their own state inside `make_caches()`. This method ensures both the
-    /// generator's cache vector and the model's internal caches are cleared.
+    /// their own fallback state inside `reset_runtime_state()`. This method
+    /// ensures both the generator's cache vector and the model's internal
+    /// single-row caches are cleared.
     /// The kv_cache_mode is applied to the freshly created caches.
     ///
     /// Honors the Boundary-V policy (issue #478): when `self.kv_cache_mode`
@@ -792,6 +807,7 @@ impl CxxGenerator {
     /// The boundary count is read from `MLXCEL_KV_BOUNDARY_V_LAYERS` so a
     /// runtime-tuned count is honored on every reset.
     pub fn reset_with_model<M: LanguageModel + ?Sized>(&mut self, model: &M) {
+        model.reset_runtime_state();
         self.caches = model.make_caches();
         // Apply the configured KV cache mode (with Boundary-V upgrade) to
         // all freshly created caches.
@@ -854,8 +870,11 @@ impl CxxGenerator {
         sampling: &SamplingConfig,
         mut on_token: F,
     ) -> Vec<i32> {
-        // Reset state
-        self.reset();
+        // Reset generator-owned caches and model-owned fallback caches. The
+        // latter matters for model-owned cache families (Gemma 3/4, Llama 4,
+        // Qwen 3.5 Next) whose legacy single-row path does not carry a
+        // `SequenceId`.
+        self.reset_with_model(model);
 
         // Axis B: merge any generator-cached language-bias map into the
         // sampling config before seeding/penalty evaluation. Empty cached
@@ -1122,8 +1141,9 @@ impl CxxGenerator {
         sampling: &SamplingConfig,
         mut on_token: F,
     ) -> Vec<i32> {
-        // Reset state
-        self.reset();
+        // Reset generator-owned caches and model-owned fallback caches. See
+        // `generate_streaming` for the model-owned cache rationale.
+        self.reset_with_model(model);
 
         // Axis B: inject generator-cached language-bias into the sampling config.
         let sampling_cow = self.compose_sampling(sampling);
@@ -1269,7 +1289,7 @@ impl CxxGenerator {
     ) -> (Vec<i32>, GenerationStats) {
         use std::time::Instant;
 
-        self.reset();
+        self.reset_with_model(model);
 
         // Axis B: inject generator-cached language-bias into the sampling config.
         let sampling_cow = self.compose_sampling(sampling);
@@ -1417,8 +1437,9 @@ impl CxxGenerator {
     ) -> (Vec<i32>, GenerationStats) {
         use std::time::Instant;
 
-        // Reset state
-        self.reset();
+        // Reset generator-owned caches and model-owned fallback caches. See
+        // `generate_streaming` for the model-owned cache rationale.
+        self.reset_with_model(model);
 
         // Axis B: inject generator-cached language-bias into the sampling config.
         let sampling_cow = self.compose_sampling(sampling);
@@ -2140,6 +2161,61 @@ mod tests {
         model.trim_internal_caches(8);
         model.trim_internal_caches(0);
         model.trim_internal_caches(-1);
+    }
+
+    struct TrackingResetModel {
+        reset_call_count: std::cell::Cell<usize>,
+    }
+
+    impl TrackingResetModel {
+        fn new() -> Self {
+            Self {
+                reset_call_count: std::cell::Cell::new(0),
+            }
+        }
+    }
+
+    impl LanguageModel for TrackingResetModel {
+        fn forward(
+            &self,
+            input_ids: &MlxArray,
+            _caches: &mut [KVCache],
+            _mask: Option<&MlxArray>,
+        ) -> UniquePtr<MlxArray> {
+            ffi::eval(input_ids);
+            ffi::zeros(&[1, 1, 4], crate::dtype::FLOAT32)
+        }
+
+        fn make_caches(&self) -> Vec<KVCache> {
+            vec![KVCache::new()]
+        }
+
+        fn num_layers(&self) -> usize {
+            1
+        }
+
+        fn eos_token_ids(&self) -> Vec<i32> {
+            vec![99]
+        }
+
+        fn reset_runtime_state(&self) {
+            self.reset_call_count.set(self.reset_call_count.get() + 1);
+        }
+    }
+
+    #[test]
+    fn reset_with_model_invokes_runtime_state_hook() {
+        let model = TrackingResetModel::new();
+        let mut generator = CxxGenerator::new(model.num_layers());
+
+        assert_eq!(model.reset_call_count.get(), 0);
+        generator.reset_with_model(&model);
+
+        assert_eq!(
+            model.reset_call_count.get(),
+            1,
+            "reset_with_model must reset model-owned fallback state"
+        );
     }
 
     /// A model that overrides trim_internal_caches records each call so we can

@@ -300,6 +300,10 @@ impl LanguageModel for LoadedModel {
         delegate_language_model!(self, after_prefill())
     }
 
+    fn reset_runtime_state(&self) {
+        delegate_language_model!(self, reset_runtime_state())
+    }
+
     fn release_sequence_state(&self, caches: &mut [mlxcel_core::layers::KVCache]) {
         delegate_language_model!(self, release_sequence_state(caches))
     }

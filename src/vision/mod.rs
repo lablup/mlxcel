@@ -262,6 +262,10 @@ impl LanguageModel for VisionLanguageModel {
         self.text_model.after_prefill()
     }
 
+    fn reset_runtime_state(&self) {
+        self.text_model.reset_runtime_state()
+    }
+
     fn trim_internal_caches(&self, excess: i32) {
         self.text_model.trim_internal_caches(excess)
     }
