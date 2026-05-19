@@ -21,25 +21,16 @@ For every benchmark run, include:
 Averages are useful only after the raw rows are available. Avoid statements such
 as "faster than X" unless the comparable model set and exclusions are explicit.
 
-## README reference snapshot
+## Current result snapshot
 
-The root README currently summarizes the latest Apple Silicon reference
-snapshot:
+Keep public result summaries in a single place so aggregate numbers do not drift
+between documents. The current Apple Silicon benchmark report is:
 
-- Date: 2026-05-18 full sweep, with selected targeted rows refreshed on 2026-05-19
-- Hardware: MacBook Pro M5 Max, 128GB
-- Runtime: mlxcel 0.0.28
-- MLX: 0.31.2
-- Baselines: mlx-lm 0.31.3 (`ed1fca4`) and mlx-vlm 0.4.4
-- Scope: 98 text model directories plus a separate 98-entry VLM prompt pass
-- Comparable text pairs: 67; average mlxcel/mlx-lm decode throughput 95%, median 97%, with 50 / 67 rows at or above 90% parity
-- Comparable VLM pairs: 17; average mlxcel/mlx-vlm decode throughput 94%, median 95%, with 12 / 17 rows at or above 90% parity
+- [Benchmark Report - 2026-05-19](benchmark_results/benchmark-report.md)
 
-An earlier 2026-05-08 M1 Ultra snapshot reported about 119% of the mlx-lm
-baseline across 37 comparable 4-bit text checkpoints. That number is kept only
-as historical context; use the current raw rows and rerun the suite on the
-target hardware before relying on README numbers for release notes or capacity
-planning.
+Use that report and its linked raw per-hardware tables for release notes,
+README updates, or capacity planning. This page should stay focused on
+methodology, required metadata, and caveats.
 
 ## Suggested benchmark commands
 
