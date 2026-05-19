@@ -189,17 +189,17 @@ Compatibility and performance testing for mlxcel models on **MacBook Pro M5 Max 
 ## VLM (image input) — full sweep
 
 Below table reports the per-VLM-prompt run from `bench_decode.sh all --vlm`.
-All entries use the VLM prompt 'What is in this image?' (no image attached;
-result reflects text-only response throughput on the VLM code path).
+All entries use the VLM prompt 'What is in this image?' with
+`tests/fixtures/test_image.png`.
 
 | Model | Test Model | Status | Prefill | Decode | vs M1 Ultra | Notes |
 |-------|------------|--------|---------|--------|-------------|-------|
 | aya-vision-8b | aya-vision-8b | ✅ | 1616.46 | 112.09 | 1.02x | 84 tokens |
 | bunny-llama3-8b | bunny-llama3-8b-4bit | ✅ | 2851.65 | 112.24 | **1.17x** | 37 tokens |
 | gemma3 (4B) | gemma3-4b-4bit | ✅ | 567.95 | 127.61 | **1.69x** | 16 tokens |
-| gemma3n (E2B 4bit) | gemma3n-e2b-4bit | ❌ | - | FAIL | - | FAIL:bench; broadcast `(1,288,256) vs (1,273,256)` |
-| gemma3n (E4B 4bit) | gemma3n-e4b-4bit | ❌ | - | FAIL | - | FAIL:bench; broadcast `(1,288,256) vs (1,273,256)` |
-| gemma3n (E4B bf16) | gemma3n-e4b-bf16 | ❌ | - | FAIL | - | FAIL:bench; broadcast `(1,288,256) vs (1,273,256)`; bf16→f16 conversion path |
+| gemma3n (E2B 4bit) | gemma3n-e2b-4bit | ✅ | 2893.48 | 151.36 | **2.08x** | 29 tokens |
+| gemma3n (E4B 4bit) | gemma3n-e4b-4bit | ✅ | 2186.03 | 106.01 | **1.87x** | 33 tokens |
+| gemma3n (E4B bf16) | gemma3n-e4b-bf16 | ✅ | 2025.46 | 36.95 | **1.16x** | 24 tokens; bf16→f16 conversion path |
 | gemma4 (26B MoE) | gemma-4-26b-a4b-it-4bit | ✅ | 864.73 | 134.38 | **2.13x** | 30 tokens |
 | gemma4 (31B) | gemma-4-31b-4bit | ✅ | 430.80 | 23.41 | **1.51x** | 5 tokens |
 | gemma4 (31B IT) | gemma-4-31b-it-4bit | ✅ | 445.15 | 27.21 | **1.49x** | 28 tokens |
@@ -241,7 +241,7 @@ Source CSVs (same M5 Max host, mlxcel 0.0.28 with `--cooldown 15 --big-cooldown 
 
 - mlxcel: `benchmarks/metal_m5max_2026-05-19.csv`
 - mlx-lm: `benchmarks/pylm_m5max_2026-05-18.csv` (mlx-lm 0.31.3 dev checkout in `references/mlx-lm`)
-- mlxcel VLM: `benchmarks/metal_m5max_vlm_2026-05-19.csv`
+- mlxcel VLM: `benchmarks/metal_m5max_vlm_2026-05-19.csv`, `benchmarks/metal_m5max_vlm_2026-05-20.csv` (Gemma3n VLM entries)
 - mlx-vlm: `benchmarks/pylm_m5max_vlm_2026-05-18.csv` (mlx-vlm 0.4.4)
 
 The M5 Max baseline sub-sweeps ran as part of the same continuous benchmark
@@ -263,10 +263,10 @@ snapshot.
 
 ### Aggregate (VLM, models with >=5 generated tokens both sides)
 
-- **Comparable VLM pairs**: 17
-- **mlxcel >= mlx-vlm**: 7 / 17 (41%)
-- **mlxcel >= 90% parity**: 14 / 17 (82%)
-- **Average mlxcel/mlx-vlm**: 100% (median 100%, range 77%-123%)
+- **Comparable VLM pairs**: 20
+- **mlxcel >= mlx-vlm**: 9 / 20 (45%)
+- **mlxcel >= 90% parity**: 16 / 20 (80%)
+- **Average mlxcel/mlx-vlm**: 100% (median 100%, range 74%-123%)
 
 ### Text decode (tok/s)
 
@@ -385,9 +385,9 @@ snapshot.
 | gemma-4-e4b-it-4bit | 134.10 | 131.24 | **102%** |
 | gemma-4-e4b-it-8bit | 76.28 | 90.00 | 85% |
 | gemma3-4b-4bit | 127.61 | FAIL | - |
-| gemma3n-e2b-4bit | FAIL | 124.63 | - |
-| gemma3n-e4b-4bit | FAIL | 93.55 | - |
-| gemma3n-e4b-bf16 | FAIL | 49.88 | - |
+| gemma3n-e2b-4bit | 151.36 | 124.63 | **121%** |
+| gemma3n-e4b-4bit | 106.01 | 93.55 | **113%** |
+| gemma3n-e4b-bf16 | 36.95 | 49.88 | 74% |
 | internvl3-1b | FAIL | 529.33 | - |
 | llama-4-scout-17b-4bit | 48.33 | FAIL | - |
 | llava-1.5-7b-4bit | 117.70 | FAIL | - |

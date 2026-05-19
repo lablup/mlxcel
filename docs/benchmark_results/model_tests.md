@@ -11,7 +11,7 @@ M5 Max, and mlx-lm / mlx-vlm baselines, see
 | Hardware | File | Status | Last Updated |
 |----------|------|--------|-------------|
 | Mac Studio M1 Ultra 128GB | [model_tests_m1ultra.md](model_tests_m1ultra.md) | Active | 2026-05-19 |
-| MacBook Pro M5 Max 128GB | [model_tests_m5max.md](model_tests_m5max.md) | Active | 2026-05-19 |
+| MacBook Pro M5 Max 128GB | [model_tests_m5max.md](model_tests_m5max.md) | Active | 2026-05-20 |
 | NVIDIA GB10 (DIGITS) | [model_tests_gb10.md](model_tests_gb10.md) | Active | 2026-05-19 |
 
 ## Benchmark CSVs
@@ -22,6 +22,7 @@ Current source-of-truth data lives in `benchmarks/`:
 |-----|----------|------|------|
 | `metal_m5max_2026-05-19.csv` | M5 Max | 2026-05-19 (mlxcel 0.0.28, MLX 0.31.2) | Text |
 | `metal_m5max_vlm_2026-05-19.csv` | M5 Max | 2026-05-19 (mlxcel 0.0.28, MLX 0.31.2) | VLM |
+| `metal_m5max_vlm_2026-05-20.csv` | M5 Max | 2026-05-20 (mlxcel 0.0.28, MLX 0.31.2; Gemma3n VLM entries) | VLM |
 | `pylm_m5max_2026-05-18.csv` | M5 Max | 2026-05-19 benchmark campaign (mlx-lm 0.31.3 baseline; CSV date crossed midnight) | Text |
 | `pylm_m5max_vlm_2026-05-18.csv` | M5 Max | 2026-05-19 benchmark campaign (mlx-vlm 0.4.4 baseline; CSV date crossed midnight) | VLM |
 | `metal_m1ultra_2026-05-19.csv` | M1 Ultra | 2026-05-19 (mlxcel 0.0.28, MLX commit 84961223; >65GB skipped) | Text |
@@ -73,14 +74,14 @@ For Qwen2.5-0.5B, the 4-bit variant is the comparable row across both Apple Sili
 | Text models tested (M5 Max, 2026-05-19) | 89 pass, 4 partial, 5 fail (98 total) |
 | Text models tested (GB10, 2026-05-19) | 41 pass, 56 partial, 14 fail (111 total) |
 | VLM models tested (GB10, 2026-05-19) | 13 pass, 19 partial, 3 fail (image path) |
-| VLM models tested (M5 Max, 2026-05-19) | 24 working, 3 fail (from VLM sweep) |
+| VLM models tested (M5 Max, 2026-05-19 campaign) | 27 working, 3 fail (from VLM sweep) |
 | VLM models tested (M1 Ultra, 2026-05-19) | 33 pass, 4 partial, 2 fail |
 | Beating mlx-lm on M1 Ultra (text, >100%) | 36/40 (90%, 5-19 baseline) |
 | At 90%+ parity on M1 Ultra (text) | 40/40 (100%, 5-19 baseline) |
-| Beating mlx-lm on M5 Max (text, >=100%) | 23/67 (34%, 5-19 mlxcel vs 5-18 mlx-lm) |
-| At 90%+ parity on M5 Max (text) | 59/67 (88%, 5-19 mlxcel vs 5-18 mlx-lm) |
-| Average vs mlx-lm on M5 Max (text) | 96% decode speed (median 98%, 5-19 mlxcel vs 5-18 mlx-lm) |
-| Average vs mlx-vlm on M5 Max (VLM) | 95% decode speed (median 99%, 5-19 mlxcel vs 5-18 mlx-vlm; 19 pairs) |
+| Beating mlx-lm on M5 Max (text, >=100%) | 24/66 (36%, 5-19 mlxcel vs 5-18 mlx-lm) |
+| At 90%+ parity on M5 Max (text) | 58/66 (88%, 5-19 mlxcel vs 5-18 mlx-lm) |
+| Average vs mlx-lm on M5 Max (text) | 97% decode speed (median 99%, 5-19 mlxcel vs 5-18 mlx-lm) |
+| Average vs mlx-vlm on M5 Max (VLM) | 100% decode speed (median 100%, 20 comparable pairs) |
 
 ## Generating Benchmarks
 

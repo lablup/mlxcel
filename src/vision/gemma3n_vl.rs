@@ -121,6 +121,34 @@ impl Gemma3nVLModel {
 
         merged
     }
+
+    fn align_per_layer_inputs_to_embeddings(
+        per_layer_inputs: &MlxArray,
+        input_embeddings: &MlxArray,
+    ) -> Option<UniquePtr<MlxArray>> {
+        let pli_shape = mlxcel_core::array_shape(per_layer_inputs);
+        let embed_shape = mlxcel_core::array_shape(input_embeddings);
+        let current_seq = pli_shape[1];
+        let target_seq = embed_shape[1];
+
+        if current_seq == target_seq {
+            return None;
+        }
+
+        if current_seq > target_seq {
+            return Some(mlxcel_core::slice(
+                per_layer_inputs,
+                &[0, 0, 0, 0],
+                &[pli_shape[0], target_seq, pli_shape[2], pli_shape[3]],
+            ));
+        }
+
+        let pad_rows = target_seq - current_seq;
+        let dtype = mlxcel_core::array_dtype(per_layer_inputs);
+        let padding =
+            mlxcel_core::zeros(&[pli_shape[0], pad_rows, pli_shape[2], pli_shape[3]], dtype);
+        Some(mlxcel_core::concatenate(per_layer_inputs, &padding, 1))
+    }
 }
 
 impl LanguageModel for Gemma3nVLModel {
@@ -143,9 +171,17 @@ impl LanguageModel for Gemma3nVLModel {
         if let Some(embeds) = input_embeddings {
             // VLM prefill: use cached per_layer_inputs
             let pli = self.cached_per_layer_inputs.borrow_mut().take().unwrap();
+            // Issue #736: M5 tile-aligned prefill pads the token stream and
+            // merged embeddings to an NA tile length. The projected
+            // per-layer tensor is produced before that generic padding step,
+            // so align it here before Gemma3n's per-layer blend.
+            let aligned_pli = Self::align_per_layer_inputs_to_embeddings(&pli, embeds);
+            let pli_ref = aligned_pli
+                .as_ref()
+                .map_or_else(|| pli.as_ref().unwrap(), |array| array.as_ref().unwrap());
             self.text_model
                 .language_model
-                .forward_with_inputs(embeds, &pli, caches)
+                .forward_with_inputs(embeds, pli_ref, caches)
         } else {
             self.text_model.language_model.forward(input_ids, caches)
         }
@@ -165,5 +201,45 @@ impl LanguageModel for Gemma3nVLModel {
 
     fn eos_token_ids(&self) -> Vec<i32> {
         mlxcel_core::generate::LanguageModel::eos_token_ids(&self.text_model)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Gemma3nVLModel;
+
+    #[test]
+    fn align_per_layer_inputs_pads_to_embedding_sequence_length() {
+        let per_layer_inputs = mlxcel_core::zeros(&[1, 273, 2, 256], mlxcel_core::dtype::FLOAT32);
+        let embeddings = mlxcel_core::zeros(&[1, 288, 128], mlxcel_core::dtype::FLOAT32);
+
+        let aligned =
+            Gemma3nVLModel::align_per_layer_inputs_to_embeddings(&per_layer_inputs, &embeddings)
+                .expect("expected padding for shorter per_layer_inputs");
+
+        assert_eq!(mlxcel_core::array_shape(&aligned), vec![1, 288, 2, 256]);
+    }
+
+    #[test]
+    fn align_per_layer_inputs_slices_to_embedding_sequence_length() {
+        let per_layer_inputs = mlxcel_core::zeros(&[1, 288, 2, 256], mlxcel_core::dtype::FLOAT32);
+        let embeddings = mlxcel_core::zeros(&[1, 273, 128], mlxcel_core::dtype::FLOAT32);
+
+        let aligned =
+            Gemma3nVLModel::align_per_layer_inputs_to_embeddings(&per_layer_inputs, &embeddings)
+                .expect("expected slicing for longer per_layer_inputs");
+
+        assert_eq!(mlxcel_core::array_shape(&aligned), vec![1, 273, 2, 256]);
+    }
+
+    #[test]
+    fn align_per_layer_inputs_leaves_matching_sequence_length_untouched() {
+        let per_layer_inputs = mlxcel_core::zeros(&[1, 273, 2, 256], mlxcel_core::dtype::FLOAT32);
+        let embeddings = mlxcel_core::zeros(&[1, 273, 128], mlxcel_core::dtype::FLOAT32);
+
+        let aligned =
+            Gemma3nVLModel::align_per_layer_inputs_to_embeddings(&per_layer_inputs, &embeddings);
+
+        assert!(aligned.is_none());
     }
 }

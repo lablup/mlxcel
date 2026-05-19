@@ -11,9 +11,11 @@
 #   e.g. benchmarks/metal_m1ultra_2026-03-31.csv
 #   VLM: benchmarks/metal_m1ultra_vlm_2026-03-31.csv
 #
-# The script runs each model twice: a warmup pass (discarded) to preheat Metal
-# shader compilation and memory-mapping, followed by the measured pass.
-# Both passes use --profile for structured timing output.
+# The script uses `mlxcel-bench-decode` so each model is loaded once and the
+# warmup pass (discarded) and measured pass run in the same process. This keeps
+# Metal/MLX warm state alive for the measured prefill, matching the Python
+# `bench_mlxlm.py` harness and avoiding cold-prefill skew from two separate
+# `mlxcel generate` invocations.
 #
 # CSV columns (14):
 #   model, model_path, prompt_tokens, generated_tokens,
@@ -37,6 +39,7 @@ set -euo pipefail
 trap 'echo "Interrupted (signal received)" >&2; exit 130' INT TERM
 
 MLXCEL="./target/release/mlxcel"
+MLXCEL_BENCH="./target/release/mlxcel-bench-decode"
 MODELS_DIR="./models"
 BENCHMARKS_DIR="./benchmarks"
 TEXT_PROMPT="Hello, how are you today?"
@@ -47,6 +50,7 @@ TIMEOUT=300
 JIT_PREHEAT_TIMEOUT=600
 VLM_IMAGE="tests/fixtures/test_image.png"
 VLM_MODE=0
+NO_CHAT_TEMPLATE=0
 OUTPUT=""
 SUFFIX=""
 DATE=$(date '+%Y-%m-%d')
@@ -181,6 +185,9 @@ Options:
   --vlm               VLM mode (use image prompt)
   --image PATH        Image for VLM benchmark (default: tests/fixtures/test_image.png)
   --prompt TEXT        Override text prompt
+  --no-chat-template   Disable automatic chat template application in the
+                       mlxcel benchmark runner. Use this when comparing
+                       against raw-prompt mlx-lm stream_generate baselines.
   --max-tokens N      Max tokens to generate (default: 100)
   --warmup-tokens N   Tokens for warmup pass (default: 20)
   --timeout N         Timeout per run in seconds (default: 300)
@@ -290,29 +297,25 @@ bench_one() {
     extra_args+=(--image "$VLM_IMAGE")
   fi
 
-  # --- Warmup pass (preheat Metal shaders / CUDA JIT kernels & memory maps) ---
+  # --- Same-process warmup + measured pass ---
   # On CUDA, the first run of a model triggers JIT kernel compilation which can
-  # take several minutes. Use JIT_PREHEAT_TIMEOUT (default 600s) for the warmup
-  # pass so these models are not incorrectly marked as FAIL:warmup.
-  local warmup_timeout="$TIMEOUT"
+  # take several minutes. The bench runner performs warmup and measurement in a
+  # single process, so allow the CUDA run to consume both the JIT preheat budget
+  # and the normal measured-run budget.
+  local run_timeout="$TIMEOUT"
   if [[ "$BACKEND" == "cuda" ]]; then
-    warmup_timeout="$JIT_PREHEAT_TIMEOUT"
+    run_timeout=$((JIT_PREHEAT_TIMEOUT + TIMEOUT))
   fi
-  >&2 printf '>>> [warmup] %s ...\n' "$model_name"
-  if ! timeout "$warmup_timeout" "$MLXCEL" generate \
-      -m "$model_path" -p "$prompt" -n "$WARMUP_TOKENS" \
-      ${extra_args[@]+"${extra_args[@]}"} --profile >/dev/null 2>&1; then
-    >&2 echo "    warmup failed"
-    echo "${model_name},${model_path},,,,,,,$DATE,$HARDWARE_FULL,$MLX_VERSION,$BUILD_TYPE,$MAX_TOKENS,\"$prompt\",FAIL:warmup"
-    return
+  if [[ "$NO_CHAT_TEMPLATE" -eq 1 ]]; then
+    extra_args+=(--no-chat-template)
   fi
 
-  # --- Measured pass ---
-  >&2 printf '>>> [bench]  %s ...\n' "$model_name"
+  >&2 printf '>>> [bench]  %s (same-process warmup=%s) ...\n' "$model_name" "$WARMUP_TOKENS"
   local raw
-  if ! raw=$(timeout "$TIMEOUT" "$MLXCEL" generate \
+  if ! raw=$(timeout "$run_timeout" "$MLXCEL_BENCH" \
       -m "$model_path" -p "$prompt" -n "$MAX_TOKENS" \
-      ${extra_args[@]+"${extra_args[@]}"} --profile 2>&1); then
+      --warmup-tokens "$WARMUP_TOKENS" \
+      ${extra_args[@]+"${extra_args[@]}"} 2>&1); then
     >&2 echo "    benchmark failed"
     echo "${model_name},${model_path},,,,,,,$DATE,$HARDWARE_FULL,$MLX_VERSION,$BUILD_TYPE,$MAX_TOKENS,\"$prompt\",FAIL:bench"
     return
@@ -365,6 +368,7 @@ while [[ $# -gt 0 ]]; do
     --vlm)            VLM_MODE=1; shift ;;
     --image)          VLM_IMAGE="$2"; VLM_MODE=1; shift 2 ;;
     --prompt)         TEXT_PROMPT="$2"; shift 2 ;;
+    --no-chat-template) NO_CHAT_TEMPLATE=1; shift ;;
     --max-tokens)     MAX_TOKENS="$2"; shift 2 ;;
     --warmup-tokens)  WARMUP_TOKENS="$2"; shift 2 ;;
     --timeout)        TIMEOUT="$2"; shift 2 ;;
@@ -391,6 +395,10 @@ fi
 
 if [[ ! -x "$MLXCEL" ]]; then
   echo "Error: $MLXCEL not found. Run 'cargo build --release' first." >&2
+  exit 1
+fi
+if [[ ! -x "$MLXCEL_BENCH" ]]; then
+  echo "Error: $MLXCEL_BENCH not found. Run 'cargo build --release --bin mlxcel-bench-decode' first." >&2
   exit 1
 fi
 

@@ -37,6 +37,7 @@ use base64::Engine as _;
 use common::{repo_binary_path, repo_model_dir};
 
 const GEMMA3N_E2B_MODEL: &str = "gemma3n-e2b-4bit";
+const GEMMA3N_E4B_MODEL: &str = "gemma3n-e4b-4bit";
 
 fn reserve_port() -> u16 {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
@@ -119,6 +120,44 @@ async fn post_vlm_chat(
 
 fn has_chat_choice(response: &serde_json::Value) -> bool {
     response["choices"][0]["message"]["content"].is_string()
+}
+
+#[test]
+#[ignore = "requires local Gemma 3n VLM weights and the mlxcel-bench-decode binary"]
+fn gemma3n_vlm_single_row_bench_prefill_accepts_m5_tile_padding() {
+    let model_dir = repo_model_dir(GEMMA3N_E4B_MODEL);
+    if !model_dir.exists() {
+        eprintln!(
+            "Skipping test: model directory not found at {}",
+            model_dir.display()
+        );
+        return;
+    }
+
+    let model_arg = model_dir.to_string_lossy().to_string();
+    let image_arg = fixture_image_path().to_string_lossy().to_string();
+    let output = Command::new(repo_binary_path("mlxcel-bench-decode"))
+        .args([
+            "-m",
+            &model_arg,
+            "-p",
+            "What is in this image?",
+            "--image",
+            &image_arg,
+            "-n",
+            "4",
+            "--warmup-tokens",
+            "20",
+        ])
+        .output()
+        .expect("run mlxcel-bench-decode");
+
+    assert!(
+        output.status.success(),
+        "single-row Gemma 3n VLM prefill failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 #[tokio::test]

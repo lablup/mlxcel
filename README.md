@@ -90,7 +90,7 @@ in the prefill path.
 | Mode | Baseline | M5 Max pairs | M5 Max median vs baseline | M1 Ultra pairs | M1 Ultra median vs baseline |
 |------|----------|-------------:|--------------------------:|---------------:|----------------------------:|
 | Text | `mlx-lm` | 66 | **2.70x** | 73 | **1.76x** |
-| VLM | `mlx-vlm` | 17 | 0.68x | 17 | **1.33x** |
+| VLM | `mlx-vlm` | 20 | 0.94x | 17 | **1.33x** |
 
 ### Decode: steady-state token generation
 
@@ -101,7 +101,7 @@ averaged **100%** of `mlx-vlm` with a **100%** median.
 | Mode | Baseline | Comparable pairs | Average vs baseline | Median vs baseline | >=90% parity | >= baseline | Range |
 |------|----------|-----------------:|--------------------:|-------------------:|-------------:|------------:|------:|
 | Text | `mlx-lm` | 66 | 97% | **99%** | 58 / 66 (88%) | 24 / 66 (36%) | 72%-127% |
-| VLM | `mlx-vlm` | 17 | 100% | **100%** | 14 / 17 (82%) | 7 / 17 (41%) | 77%-123% |
+| VLM | `mlx-vlm` | 20 | 100% | **100%** | 16 / 20 (80%) | 9 / 20 (45%) | 74%-123% |
 
 Representative decode throughput is shown below in tokens per second. M5 Max
 reference columns are same-host `mlx-lm` or `mlx-vlm` runs; M1 Ultra values are
@@ -135,6 +135,7 @@ family, quantization, prompt shape, decode length, and hardware. See
 | Qwen3.5 0.8B 4bit | 202 tok/s | 506 tok/s | 411 tok/s | 123% |
 | Qwen3.5 35B-A3B 4bit | 71 tok/s | 151 tok/s | 129 tok/s | 117% |
 | Gemma 4 E2B 4bit | 107 tok/s | 217 tok/s | 202 tok/s | 108% |
+| Gemma 3n E2B 4bit | 72 tok/s | 151 tok/s | 125 tok/s | 121% |
 | Gemma 4 26B-A4B 4bit | 63 tok/s | 134 tok/s | 137 tok/s | 98% |
 | Molmo2 4B | 59 tok/s | 64 tok/s | 67 tok/s | 96% |
 | Phi 3.5 Vision 4bit | 94 tok/s | 123 tok/s | 160 tok/s | 77% |

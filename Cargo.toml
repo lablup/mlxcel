@@ -29,6 +29,15 @@ path = "src/bin/mlx_server.rs"
 name = "speculative_bench"
 path = "src/bin/speculative_bench.rs"
 
+# Same-process decode benchmark harness used by `scripts/bench_decode.sh`.
+# It loads a model once, runs the warmup generation, resets model/cache state,
+# then runs the measured pass in the same process. This mirrors the Python
+# `stream_generate` timing more closely than two separate `mlxcel generate`
+# invocations, especially for prefill.
+[[bin]]
+name = "mlxcel-bench-decode"
+path = "src/bin/bench_decode.rs"
+
 [features]
 default = ["surgery"]
 metal = ["mlxcel-core/metal"]
