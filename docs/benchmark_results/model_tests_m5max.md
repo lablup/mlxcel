@@ -14,7 +14,7 @@ Compatibility and performance testing for mlxcel models on **MacBook Pro M5 Max 
 | **mlx-vlm baseline** | 0.4.4 |
 | **Test Prompt** | "Hello, how are you today?" (text) / "What is in this image?" (VLM) |
 | **Max Tokens** | 100 |
-| **Test Date** | 2026-05-19 full sweep; 2026-05-20 Molmo v1 spot-check; 2026-05-20 Phi-3.5 spot-check; 2026-05-20 Gemma2/Gemma3 dense spot-check; 2026-05-20 Jamba spot-check |
+| **Test Date** | 2026-05-19 full sweep; 2026-05-20 Molmo v1 spot-check; 2026-05-20 Phi-3.5 spot-check; 2026-05-20 Gemma2/Gemma3 dense spot-check; 2026-05-20 Jamba spot-check; 2026-05-21 near-parity remeasure |
 | **Benchmark Status** | Full text + VLM sweep on mlxcel using `mlxcel-bench-decode`, 98 text + 98 VLM-mode passes with `--cooldown 15 --big-cooldown 15`. mlx-lm / mlx-vlm baseline sub-sweeps are from the same benchmark campaign; their CSV filenames carry 2026-05-18 because the run crossed calendar midnight. |
 
 ## Legend
@@ -275,7 +275,7 @@ snapshot.
 | Gemma-4-31b-it-nvfp4 | 7.17 | FAIL | - |
 | aya-expanse-8b-4bit | 110.55 | 113.87 | 97% |
 | aya-vision-8b | 109.24 | FAIL | - |
-| baichuan-m1-14b-4bit | 55.89 | 64.86 | 86% |
+| baichuan-m1-14b-4bit | 64.73 | 64.68 | **100%** |
 | bunny-llama3-8b-4bit | 111.08 | FAIL | - |
 | command-r7b-4bit | 110.91 | 110.67 | **100%** |
 | deepseek-coder-1.3b-4bit | 178.03 | FAIL | - |
@@ -531,6 +531,7 @@ increase and 96% of mlx-lm's 555.43 tok/s on the same prompt.
 |-------|-------|----------|
 | deepseek-v3-4bit | MoE + MLA; still fails warmup | Medium |
 | qwen3-next-480b-4bit | OOM-skip on 128 GB; weights exceed 85% memory budget | Medium |
+| qwen3-0.6b-4bit | Full-budget raw prompt stays at ~93% of mlx-lm; sub-95% decode gap | Medium |
 | Gemma-4-31b-it-nvfp4 | nvfp4 quantization runs at ~1.5 tok/s; no fast Metal kernel for nvfp4 | Medium |
 | falcon-mamba-7b-4bit | Generic chat prompt exits after `<|im_end|>`; use a non-chat code prompt for perf checks | Low |
 | phi-2-4bit | Generates only 1 token — likely EOS handling | Low |
