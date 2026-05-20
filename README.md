@@ -95,13 +95,13 @@ in the prefill path.
 ### Decode: steady-state token generation
 
 Decode stays close to the Python MLX references on the same host. For M5 Max,
-text decode averaged **97%** of `mlx-lm` with a **99%** median, while VLM decode
-averaged **100%** of `mlx-vlm` with a **100%** median.
+text decode averaged **98%** of `mlx-lm` with a **99%** median, while VLM decode
+averaged **101%** of `mlx-vlm` with a **100%** median.
 
 | Mode | Baseline | Comparable pairs | Average vs baseline | Median vs baseline | >=90% parity | >= baseline | Range |
 |------|----------|-----------------:|--------------------:|-------------------:|-------------:|------------:|------:|
-| Text | `mlx-lm` | 66 | 97% | **99%** | 58 / 66 (88%) | 24 / 66 (36%) | 72%-127% |
-| VLM | `mlx-vlm` | 20 | 100% | **100%** | 16 / 20 (80%) | 9 / 20 (45%) | 74%-123% |
+| Text | `mlx-lm` | 66 | 98% | **99%** | 62 / 66 (94%) | 27 / 66 (41%) | 72%-127% |
+| VLM | `mlx-vlm` | 20 | 101% | **100%** | 17 / 20 (85%) | 10 / 20 (50%) | 74%-123% |
 
 Representative decode throughput is shown below in tokens per second. M5 Max
 reference columns are same-host `mlx-lm` or `mlx-vlm` runs; M1 Ultra values are
@@ -115,8 +115,8 @@ family, quantization, prompt shape, decode length, and hardware. See
 | SmolLM-135M 4bit | 407 tok/s | 905 tok/s | 712 tok/s | 127% |
 | Llama 3.1 8B 4bit | 107 tok/s | 117 tok/s | 117 tok/s | 99% |
 | Qwen2.5 7B 4bit | 110 tok/s | 126 tok/s | 124 tok/s | 102% |
-| Gemma 2B 4bit | 194 tok/s | 211 tok/s | 223 tok/s | 94% |
-| Gemma 3 4B 4bit | 100 tok/s | 146 tok/s | 182 tok/s | 81% |
+| Gemma 2B 4bit | 190 tok/s | 217 tok/s | 223 tok/s | 97% |
+| Gemma 3 4B 4bit | 114 tok/s | 182 tok/s | 182 tok/s | 100% |
 | Gemma 4 26B-A4B 4bit | 73 tok/s | 137 tok/s | 141 tok/s | 97% |
 | Qwen3 MoE 30B 4bit | 71 tok/s | 156 tok/s | 147 tok/s | 106% |
 | GLM-4 Flash 4bit | 47 tok/s | 104 tok/s | 104 tok/s | 100% |
