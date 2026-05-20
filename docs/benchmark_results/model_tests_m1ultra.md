@@ -15,7 +15,7 @@ Compatibility and performance testing for mlxcel models on **Mac Studio M1 Ultra
 | **mlx-vlm baseline** | dev checkout `references/mlx-vlm` @ `d85ca4d` — "Compatibility bridge for non-VL models" #1181 |
 | **Test Prompt** | "Hello, how are you today?" (text) / "What is in this image?" (VLM) |
 | **Max Tokens** | 100 (measured pass); 20 (warmup pass, same process) |
-| **Test Date** | 2026-05-19 full sweep (mlxcel + mlx-lm + mlx-vlm baselines) |
+| **Test Date** | 2026-05-19 full sweep (mlxcel + mlx-lm + mlx-vlm baselines); 2026-05-21 mlxcel refresh of Molmo / Phi-3.5 / Gemma dense / Jamba / InternVL on current main |
 | **Baseline CSVs** | `benchmarks/pylm_m1ultra_2026-05-19.csv` (mlx-lm, 75 ran / 33 FAIL / 3 oversize-skip / 1 exit-fail) + `benchmarks/pylm_m1ultra_vlm_2026-05-19.csv` (mlx-vlm, 20 working VLM models) |
 
 ## Legend
@@ -52,9 +52,9 @@ Compatibility and performance testing for mlxcel models on **Mac Studio M1 Ultra
 | qwen2 (1.5B) | Qwen2.5-1.5B-Instruct-4bit | ✅ | 808.08 | 240.24 | **100%** | mlx-lm: 239.20; 100 tokens |
 | qwen2 (1.5B base) | Qwen2.5-1.5B-4bit | ✅ | 701.57 | 241.44 | **100%** | mlx-lm: 241.41; base variant; 100 tokens |
 | phi | phi-2-hf-4bit-mlx | ✅ | 134.96 | 59.62 | - | mlx-lm fails to load; only 1 token (likely EOS) |
-| phi3 | Phi-3-mini-4k-instruct-4bit | ✅ | 190.49 | 169.42 | 99% | mlx-lm: 171.36; only 25 tokens |
-| phi3small | Phi-3.5-mini-instruct-4bit | ✅ | 169.66 | 120.68 | 73% | mlx-lm: 166.30; only 40 tokens |
-| phi4 | Phi-4-4bit | ✅ | 114.74 | 57.52 | 98% | mlx-lm: 58.68 |
+| phi3 | Phi-3-mini-4k-instruct-4bit | ✅ | 173.84 | 167.27 | 98% | mlx-lm: 171.36; only 25 tokens |
+| phi3small | Phi-3.5-mini-instruct-4bit | ✅ | 218.87 | 160.90 | 97% | mlx-lm: 166.30; fused SuScaledRoPE; only 40 tokens |
+| phi4 | Phi-4-4bit | ✅ | 111.29 | 57.02 | 97% | mlx-lm: 58.68 |
 | smollm3 | SmolLM-135M-Instruct-4bit | ✅ | 486.25 | 407.36 | **108%** | mlx-lm: 375.91 |
 | smollm3 (3B) | SmolLM3-3B-4bit | ✅ | 568.57 | 136.34 | 96% | mlx-lm: 141.66 |
 | stablelm | stablelm-2-1_6b-chat-4bit | ✅ | 656.55 | 280.32 | 100% | mlx-lm: 280.65; only 59 tokens |
@@ -69,10 +69,10 @@ Compatibility and performance testing for mlxcel models on **Mac Studio M1 Ultra
 
 | Model | Test Model | Status | Prefill | Decode | vs mlx-lm | Notes |
 |-------|------------|--------|---------|--------|-----------|-------|
-| gemma | gemma-2b-it-4bit | ✅ | 369.50 | 194.02 | 93% | mlx-lm: 207.78; major decode improvement from 81.76; only 49 tokens |
-| gemma2 | gemma-2-2b-it-4bit | ✅ | 294.27 | 129.30 | 84% | mlx-lm: 153.50; only 18 tokens |
-| gemma3 | gemma-3-1b-it-4bit | ✅ | 114.45 | 196.14 | 93% | mlx-lm: 211.50; only 34 tokens |
-| gemma3 (4B) | gemma-3-4b-it-4bit | ✅ | 231.64 | 99.74 | 91% | mlx-lm: 109.48; fixed SDPA threadgroup memory; only 86 tokens |
+| gemma | gemma-2b-it-4bit | ✅ | 378.01 | 189.91 | 91% | mlx-lm: 207.78; major decode improvement from 81.76; only 49 tokens |
+| gemma2 | gemma-2-2b-it-4bit | ✅ | 334.20 | 163.85 | **107%** | mlx-lm: 153.50; tanh-approx GeGLU aligned with mlx-lm; only 18 tokens |
+| gemma3 | gemma-3-1b-it-4bit | ✅ | 431.88 | 225.75 | **107%** | mlx-lm: 211.50; only 34 tokens |
+| gemma3 (4B) | gemma-3-4b-it-4bit | ✅ | 203.23 | 113.61 | **104%** | mlx-lm: 109.48; tanh-approx GeGLU + fused norm-RoPE; only 86 tokens |
 | gemma4 (31B) | gemma-4-31b-4bit | ✅ | 24.54 | 20.15 | 99% | mlx-lm: 20.36 |
 | gemma4 (31B-it) | gemma-4-31b-it-4bit | ✅ | 52.04 | 19.06 | 94% | mlx-lm: 20.23; instruction-tuned variant |
 | gemma4 (26B A4B) | gemma-4-26b-a4b-it-4bit | ✅ | 168.66 | 73.18 | **101%** | mlx-lm: 72.52; fixed SDPA threadgroup memory; only 26 tokens |
@@ -109,7 +109,7 @@ Compatibility and performance testing for mlxcel models on **Mac Studio M1 Ultra
 | qwen2_moe | Qwen1.5-MoE-A2.7B-Chat-4bit | ✅ | 378.81 | 144.37 | 100% | mlx-lm: 144.98; only 43 tokens |
 | qwen3_moe | Qwen3-30B-A3B-4bit | ✅ | 183.00 | 71.07 | **101%** | mlx-lm: 70.18 |
 | qwen3_5_moe | qwen3.5-35B-A3B-4bit | ✅ | 216.08 | 72.05 | 94% | mlx-lm: 76.44; Hybrid GatedDeltaNet + MoE (256 experts); only 34 tokens |
-| phimoe | Phi-3.5-MoE-instruct-4bit | ✅ | 107.87 | 76.24 | **110%** | mlx-lm: 69.28 |
+| phimoe | Phi-3.5-MoE-instruct-4bit | ✅ | 105.77 | 74.41 | **107%** | mlx-lm: 69.28 |
 | solar_open | Solar-Open-100B-4bit | ✅ | 73.74 | 35.88 | **101%** | mlx-lm: 35.69; 128 experts, top-8; layer-eval skip (PR #724); 54GB |
 | solar_open (int4) | Solar-Open-100B-int4 | ✅ | - | 11.55 | - | mlx-lm: fails to load; 128 experts, top-8; int4 quantization; 54GB |
 | olmoe | - | ⏳ | - | - | - | |
@@ -146,7 +146,7 @@ Compatibility and performance testing for mlxcel models on **Mac Studio M1 Ultra
 |-------|------------|--------|---------|--------|-----------|-------|
 | mamba | Falcon-Mamba-7B-4bit | ⚠️ | 92.67 | 42.91 | 47% | mlx-lm: 91.04; only 2 tokens due to chat template EOS |
 | mamba2 | mamba2-1.3b-4bit | ✅ | 162.53 | 102.63 | - | mlx-lm: FAIL |
-| jamba | Jamba-v0.1-4bit | ✅ | 340.05 | 111.56 | 85% | mlx-lm: 131.04; only 76 tokens |
+| jamba | Jamba-v0.1-4bit | ✅ | 325.65 | 119.33 | 91% | mlx-lm: 131.04; fused QKV + single-token Mamba fast path; only 76 tokens |
 | rwkv7 | - | ⏳ | - | - | - | RWKV v7 linear attention |
 
 ## Chinese / Asian Language Models
@@ -183,7 +183,7 @@ Compatibility and performance testing for mlxcel models on **Mac Studio M1 Ultra
 
 | Model | Test Model | Status | Prefill | Decode | vs mlx-vlm | Notes |
 |-------|------------|--------|---------|--------|------------|-------|
-| gemma3 | gemma-3-4b-it-4bit | ✅ | 249.11 | 74.91 | 80% | mlx-vlm: 93.79; SigLIP + AvgPool; fixed SDPA threadgroup memory; 275 prompt, 16 gen |
+| gemma3 | gemma-3-4b-it-4bit | ✅ | 218.56 | 85.61 | 91% | mlx-vlm: 93.79; SigLIP + AvgPool; tanh-approx GeGLU + fused norm-RoPE; 275 prompt, 16 gen |
 | gemma3n (E2B) | gemma-3n-E2B-it-4bit | ✅ | 771.46 | 72.38 | **122%** | mlx-vlm: 59.57; MobileNetV5 + MSFA; fixed SDPA threadgroup memory; 273 prompt, 29 gen |
 | gemma3n (E4B bf16) | gemma-3n-E4B-it (bf16) | ✅ | 644.18 | 32.12 | 89% | mlx-vlm: 36.18; MobileNetV5 + MSFA; bf16 prefill path retune (PR #727); bf16; 273 prompt, 24 gen |
 | gemma3n (E4B 4bit) | gemma-3n-E4B-it-4bit | ✅ | 490.04 | 56.69 | **113%** | mlx-vlm: 50.00; fixed SDPA threadgroup memory; 273 prompt, 33 gen |
@@ -204,13 +204,13 @@ Compatibility and performance testing for mlxcel models on **Mac Studio M1 Ultra
 | pixtral | pixtral-12b-4bit | ✅ | 473.22 | 59.17 | - | mlx-vlm: FAIL; Pixtral ViT; Mistral; 4102 prompt, 100 gen |
 | mistral3 | mistral-small-3.1-24b-4bit | ✅ | 144.54 | 29.69 | - | mlx-vlm: FAIL; Pixtral ViT + PatchMerger; Mistral; 3032 prompt, 100 gen; mlx-vlm error |
 | ministral3 | Ministral-3B-Instruct-4bit | ✅ | 891.57 | 123.91 | - | mlx-vlm: FAIL; Pixtral ViT; 3566 prompt, 100 gen |
-| phi3.5-vision | Phi-3.5-vision-instruct-4bit | ✅ | 1164.87 | 94.10 | **102%** | mlx-vlm: 92.53; CLIP + HD tiling; Phi3; 773 prompt, 19 gen |
+| phi3.5-vision | Phi-3.5-vision-instruct-4bit | ✅ | 960.85 | 117.63 | **127%** | mlx-vlm: 92.53; CLIP + HD tiling; Phi3; fused SuScaledRoPE; 773 prompt, 19 gen |
 | phi4mm | phi-4-multimodal-instruct (bf16) | ✅ | 571.90 | 25.42 | - | SigLIP + HD transform + AvgPool2d; Phi3; SuScaledRoPE + runtime LoRA; 2635 tokens; 12GB bf16 |
 | moondream3 | moondream3-preview-4bit | ⚠️ | 1.36 | 10.05 | - | SigLIP + MLP; image output garbled; only 63 tokens |
 | minicpm-o | MiniCPM-o-2_6-4bit | ✅ | 33.67 | 70.80 | - | SigLIP + Resampler; Qwen3; 80 tokens |
-| molmo | Molmo-7B | ❌ | - | FAIL | - | warmup failure; unsupported architecture (only molmo2 supported) |
+| molmo | Molmo-7B | ✅ | 555.19 | 77.98 | - | CLIP ViT + attention pooling + OLMo text; mlx-vlm baseline is a 1-token anomaly; 327 prompt, 100 gen |
 | molmo2 | molmo2-4b | ✅ | 1011.99 | 59.36 | 98% | mlx-vlm: 60.87; fast SDPA vision encoder; 430 prompt, 100 gen |
-| internvl3 | InternVL3-1B | ❌ | - | FAIL | - | warmup failure; unsupported architecture |
+| internvl3 | InternVL3-1B | ✅ | 1760.25 | 225.51 | 85% | mlx-vlm: 264.40; InternViT + pixel-shuffle + Qwen2; 293 prompt, 8 gen |
 | nemotron-omni | Nemotron-3-Nano-Omni-30B-A3B-Reasoning-4bit | ✅ | 312.49 | 67.97 | - | mlx-vlm: FAIL; NEW (5-19); Mamba2+Transformer+MoE+Parakeet audio; 100 gen |
 | youtu-vl | youtu-vl-4b-instruct | ⚠️ | 569.47 | 24.19 | - | mlx-vlm: FAIL; NEW (5-19); only 1 gen token |
 | qwen2-vl | Qwen2-VL-2B-Instruct-4bit | ⚠️ | 527.90 | 0.00 | - | Custom ViT + MRoPE; text-only pass; VLM warmup failure |
@@ -236,9 +236,9 @@ Compatibility and performance testing for mlxcel models on **Mac Studio M1 Ultra
 
 | Status | Count |
 |--------|-------|
-| ✅ Pass | 115 (82 text + 33 VLM) |
+| ✅ Pass | 117 (82 text + 35 VLM) |
 | ⚠️ Partial | 6 (2 text + 4 VLM) |
-| ❌ Fail | 8 (6 text + 2 VLM) |
+| ❌ Fail | 6 (6 text + 0 VLM) |
 | ⏳ Pending / Skipped (>65GB) | 16 (13 text pending + 3 oversize skip) |
 
 ## Performance Comparison
@@ -251,21 +251,21 @@ runtime comparison.
 
 | Mode | Comparable pairs | Median mlxcel/baseline | >=90% parity | >= baseline | Range |
 |------|-----------------:|-----------------------:|-------------:|------------:|------:|
-| Text vs mlx-lm | 73 | 97% | 62/73 (85%) | 16/73 (22%) | 47%-113% |
-| VLM vs mlx-vlm | 17 | 98% | 11/17 (65%) | 8/17 (47%) | 76%-122% |
+| Text vs mlx-lm | 73 | 97% | 65/73 (89%) | 20/73 (27%) | 47%-113% |
+| VLM vs mlx-vlm | 18 | 98% | 12/18 (67%) | 8/18 (44%) | 76%-127% |
 
 ### Representative decode wins
 
 | Model | mlxcel | Baseline | vs baseline |
 |-------|-------:|---------:|------------:|
 | qwen2.5-0.5b-4bit | 355.29 | 315.48 | **113%** |
-| phi-3.5-moe-4bit | 76.24 | 69.28 | **110%** |
+| phi-3.5-moe-4bit | 74.41 | 69.28 | **107%** |
 | minicpm3-4b-4bit | 80.24 | 73.26 | **110%** |
 | smollm-135m-4bit | 407.36 | 375.91 | **108%** |
 | llava-interleave-qwen-0.5b-bf16 (VLM) | 269.86 | 225.15 | **120%** |
 | gemma3n-e2b-4bit (VLM) | 72.38 | 59.57 | **122%** |
 | gemma-4-e2b-it-4bit (VLM) | 107.06 | 97.19 | **110%** |
-| phi-3.5-vision-4bit (VLM) | 94.10 | 92.53 | **102%** |
+| phi-3.5-vision-4bit (VLM) | 117.63 | 92.53 | **127%** |
 
 ### Main optimization gaps
 
@@ -274,10 +274,8 @@ runtime comparison.
 | falcon-mamba-7b-4bit | 42.91 | 91.04 | 47% | Chat template causes early EOS; only 2 generated tokens |
 | qwen2.5-vl-3b-4bit (text path) | 98.53 | 160.42 | 61% | VLM wrapper text-only comparison |
 | qwen2-vl-2b-4bit (text path) | 150.02 | 236.86 | 63% | VLM wrapper text-only comparison |
-| phi-3.5-mini-4bit | 120.68 | 166.30 | 73% | only 40 tokens |
 | gemma-4-31b-4bit (VLM) | 15.46 | 20.30 | 76% | large VLM path |
-| gemma-3-4b-it-4bit (VLM) | 77.12 | 97.36 | 79% | measured with warmup=0; see VLM test conditions |
-| gemma3-4b-4bit (VLM) | 74.91 | 93.79 | 80% | measured with warmup=0; see VLM test conditions |
+| gemma-3-4b-it-4bit (VLM) | 85.61 | 97.36 | 88% | measured with warmup=0; see VLM test conditions |
 
 ## Performance vs mlx-lm / mlx-vlm baseline (2026-05-19, same-day sweep)
 
@@ -295,16 +293,16 @@ Numbers are decode tok/s. `mlxcel vs mlx-lm` is `mlxcel / mlx-lm` as a percentag
 ### Aggregate (text)
 
 - **Comparable text pairs**: 73
-- **mlxcel >= mlx-lm**: 16 / 73 (22%)
-- **mlxcel >= 90% parity**: 62 / 73 (85%)
-- **Average mlxcel/mlx-lm**: 95% (median 97%, range 47%-113%)
+- **mlxcel >= mlx-lm**: 20 / 73 (27%)
+- **mlxcel >= 90% parity**: 65 / 73 (89%)
+- **Average mlxcel/mlx-lm**: 96% (median 97%, range 47%-113%)
 
 ### Aggregate (VLM, models with >=5 generated tokens both sides)
 
-- **Comparable VLM pairs**: 17
-- **mlxcel >= mlx-vlm**: 8 / 17 (47%)
-- **mlxcel >= 90% parity**: 11 / 17 (65%)
-- **Average mlxcel/mlx-vlm**: 98% (median 98%, range 76%-122%)
+- **Comparable VLM pairs**: 18
+- **mlxcel >= mlx-vlm**: 8 / 18 (44%)
+- **mlxcel >= 90% parity**: 12 / 18 (67%)
+- **Average mlxcel/mlx-vlm**: 99% (median 98%, range 76%-127%)
 
 ### Text decode (tok/s)
 
@@ -329,8 +327,8 @@ Numbers are decode tok/s. `mlxcel vs mlx-lm` is `mlxcel / mlx-lm` as a percentag
 | exaone-3.5-2.4b-4bit | 199.04 | 194.65 | **102%** |
 | exaone4-1.2b-4bit | 252.36 | FAIL | - |
 | falcon-mamba-7b-4bit | 42.91 | 91.04 | 47% |
-| gemma-2b-4bit | 194.02 | 207.78 | 93% |
-| gemma-3-4b-it-4bit | 100.84 | 109.72 | 92% |
+| gemma-2b-4bit | 189.91 | 207.78 | 91% |
+| gemma-3-4b-it-4bit | 113.61 | 109.72 | **104%** |
 | gemma-4-26b-a4b-it-4bit | 73.18 | 72.52 | **101%** |
 | gemma-4-31b-4bit | 20.15 | 20.36 | 99% |
 | gemma-4-31b-it-4bit | 19.06 | 20.23 | 94% |
@@ -338,9 +336,9 @@ Numbers are decode tok/s. `mlxcel vs mlx-lm` is `mlxcel / mlx-lm` as a percentag
 | gemma-4-e2b-it-8bit | 87.42 | FAIL | - |
 | gemma-4-e4b-it-4bit | 81.88 | FAIL | - |
 | gemma-4-e4b-it-8bit | 59.35 | FAIL | - |
-| gemma2-2b-4bit | 129.30 | 153.50 | 84% |
-| gemma3-1b-4bit | 196.14 | 211.50 | 93% |
-| gemma3-4b-4bit | 99.74 | 109.48 | 91% |
+| gemma2-2b-4bit | 163.85 | 153.50 | **107%** |
+| gemma3-1b-4bit | 225.75 | 211.50 | **107%** |
+| gemma3-4b-4bit | 112.95 | 109.48 | **103%** |
 | gemma3n-e2b-4bit | 76.86 | FAIL | - |
 | gemma3n-e4b-4bit | 60.18 | FAIL | - |
 | gemma3n-e4b-bf16 | 34.41 | 39.02 | 88% |
@@ -351,7 +349,7 @@ Numbers are decode tok/s. `mlxcel vs mlx-lm` is `mlxcel / mlx-lm` as a percentag
 | hunyuan-large-4bit | 44.22 | FAIL | - |
 | internlm2-7b-4bit | 107.52 | 111.92 | 96% |
 | internlm3-8b-4bit | 86.88 | FAIL | - |
-| jamba-v0.1-4bit | 111.56 | 131.04 | 85% |
+| jamba-v0.1-4bit | 119.33 | 131.04 | 91% |
 | llama-3.1-8b-4bit | 107.23 | 110.66 | 97% |
 | llama-3.1-8b-bf16 | 35.15 | 35.32 | 100% |
 | llama-3.2-1b-4bit | 377.90 | 418.25 | 90% |
@@ -375,11 +373,11 @@ Numbers are decode tok/s. `mlxcel vs mlx-lm` is `mlxcel / mlx-lm` as a percentag
 | olmo3-32b-4bit | 21.79 | 21.57 | **101%** |
 | paligemma2-3b-6bit | 0.00 | FAIL | - |
 | phi-2-4bit | 59.62 | FAIL | - |
-| phi-3-mini-4bit | 169.42 | 171.36 | 99% |
-| phi-3.5-mini-4bit | 120.68 | 166.30 | 73% |
-| phi-3.5-moe-4bit | 76.24 | 69.28 | **110%** |
-| phi-3.5-vision-4bit | 122.36 | FAIL | - |
-| phi-4-4bit | 57.52 | 58.68 | 98% |
+| phi-3-mini-4bit | 167.27 | 171.36 | 98% |
+| phi-3.5-mini-4bit | 160.90 | 166.30 | 97% |
+| phi-3.5-moe-4bit | 74.41 | 69.28 | **107%** |
+| phi-3.5-vision-4bit | 160.16 | FAIL | - |
+| phi-4-4bit | 57.02 | 58.68 | 97% |
 | pixtral-12b-4bit | 68.90 | 69.49 | 99% |
 | qwen1.5-moe-a2.7b-4bit | 144.37 | 144.98 | 100% |
 | qwen2-vl-2b-4bit | 150.02 | 236.86 | 63% |
@@ -422,7 +420,7 @@ Numbers are decode tok/s. `mlxcel vs mlx-lm` is `mlxcel / mlx-lm` as a percentag
 | aya-vision-8b | 109.36 | 103.74 | **105%** |
 | bunny-llama3-8b-4bit | 96.07 | FAIL | - |
 | deepseek-v3-4bit | - | FAIL | - |
-| gemma-3-4b-it-4bit | 77.12 | 97.36 | 79% |
+| gemma-3-4b-it-4bit | 85.61 | 97.36 | 88% |
 | gemma-4-26b-a4b-it-4bit | 63.18 | 61.07 | **103%** |
 | gemma-4-31b-4bit | 15.46 | 20.30 | 76% |
 | gemma-4-31b-it-4bit | 18.32 | 19.78 | 93% |
@@ -430,11 +428,11 @@ Numbers are decode tok/s. `mlxcel vs mlx-lm` is `mlxcel / mlx-lm` as a percentag
 | gemma-4-e2b-it-8bit | 80.48 | 91.06 | 88% |
 | gemma-4-e4b-it-4bit | 72.91 | 70.34 | **104%** |
 | gemma-4-e4b-it-8bit | 54.83 | 63.25 | 87% |
-| gemma3-4b-4bit | 74.91 | 93.79 | 80% |
+| gemma3-4b-4bit | 86.97 | 93.79 | 93% |
 | gemma3n-e2b-4bit | 72.38 | 59.57 | **122%** |
 | gemma3n-e4b-4bit | 56.69 | 50.00 | **113%** |
 | gemma3n-e4b-bf16 | 32.12 | 36.18 | 89% |
-| internvl3-1b | FAIL | 264.40 | - |
+| internvl3-1b | 225.51 | 264.40 | 85% |
 | llama-4-scout-17b-4bit | 31.73 | FAIL | - |
 | llava-1.5-7b-4bit | 101.61 | FAIL | - |
 | llava-interleave-qwen-0.5b-bf16 | 269.86 | 225.15 | **120%** |
@@ -442,10 +440,10 @@ Numbers are decode tok/s. `mlxcel vs mlx-lm` is `mlxcel / mlx-lm` as a percentag
 | minimax-m2-3bit | - | FAIL | - |
 | ministral-3b-4bit | 123.91 | FAIL | - |
 | mistral-small-3.1-24b-4bit | 29.69 | FAIL | - |
-| molmo-7b | FAIL | 38399.52 | - |
+| molmo-7b | 77.98 | 38399.52 (anomalous) | - |
 | molmo2-4b | 59.36 | 60.87 | 98% |
 | paligemma2-3b-6bit | 45.09 | 70.45 | 64% |
-| phi-3.5-vision-4bit | 94.10 | 92.53 | **102%** |
+| phi-3.5-vision-4bit | 117.63 | 92.53 | **127%** |
 | pixtral-12b-4bit | 59.17 | FAIL | - |
 | qwen2-vl-2b-4bit | 0.00 | FAIL | - |
 | qwen2.5-vl-3b-4bit | 97.51 | FAIL | - |
@@ -498,8 +496,6 @@ Ran all 80 local models (45GB threshold) to verify text/image generation.
 | youtu-vl-4b-instruct | NEW (5-19); VLM produces only 1 token; text-only produces 0 tokens | Medium |
 | llama4 | Repetitive output on long generations | Low |
 | moondream3 | Image output garbled; text-only works; needs reconstruct_from_crops | Medium |
-| internvl3 | Warmup failure; unsupported architecture | Medium |
-| molmo-7b | Warmup failure; unsupported architecture (only molmo2 supported) | Low |
 | qwen-vl family | Broadcast shape errors on M5 Max with 224x224 images | Medium |
 | GLM-5-4bit | Persistent warmup failure (since 5-08) | Medium |
 
