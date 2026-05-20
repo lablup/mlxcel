@@ -39,6 +39,8 @@ use crate::vlm_prompt::{ImageTokenBlockStats, apply_image_token_blocks};
 use crate::youtu_vl_prompt::insert_youtu_vl_image_tokens;
 use crate::{LoadedModel, VlmRuntimeRef};
 
+const MOLMO_V1_BOS_TOKEN_ID: i32 = 151643;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VlmPreparationSummary {
     QwenVlm {
@@ -73,6 +75,9 @@ pub enum VlmPreparationSummary {
     },
     Phi4MM {
         image_slots: usize,
+        total_tokens: usize,
+    },
+    Molmo {
         total_tokens: usize,
     },
     Molmo2 {
@@ -445,6 +450,47 @@ where
                 }),
             }))
         }
+        VlmRuntimeRef::Molmo(molmo) => {
+            // Molmo v1 builds the `<im_start>…<im_end>` token block as explicit
+            // IDs, then prepends an EOS-as-BOS token to the whole sequence. The
+            // model-local processor also wraps text as ` User: ... Assistant:`
+            // and shifts `image_input_idx` by one after inserting BOS.
+            let proc_out = molmo.processor.preprocess_image(&images[0]);
+
+            let molmo_prompt = format_molmo_v1_prompt_for_processor(prompt);
+            let prompt_text_ids = encode(&molmo_prompt, false);
+            let mut combined =
+                Vec::with_capacity(1 + proc_out.image_token_ids.len() + prompt_text_ids.len());
+            combined.push(MOLMO_V1_BOS_TOKEN_ID);
+            combined.extend(proc_out.image_token_ids.clone());
+            combined.extend(prompt_text_ids);
+            *prompt_tokens = combined;
+
+            let image_input_idx_shifted =
+                shift_molmo_v1_image_input_idx_for_bos(&proc_out.image_input_idx);
+            let pixel_values =
+                mlxcel_core::from_slice_f32(&proc_out.pixel_values, &proc_out.pixel_values_shape);
+            let image_input_idx = mlxcel_core::from_slice_i32(
+                &image_input_idx_shifted,
+                &[proc_out.image_input_idx_len],
+            );
+            let image_masks =
+                mlxcel_core::from_slice_f32(&proc_out.image_masks, &proc_out.image_masks_shape);
+            let input_ids_arr = prompt_ids_array(prompt_tokens);
+            let embeddings = molmo.get_input_embeddings(
+                &input_ids_arr,
+                &pixel_values,
+                &image_input_idx,
+                &image_masks,
+            );
+
+            Ok(Some(PreparedVlmEmbeddings {
+                embeddings,
+                preparation: Some(VlmPreparationSummary::Molmo {
+                    total_tokens: prompt_tokens.len(),
+                }),
+            }))
+        }
         VlmRuntimeRef::Molmo2(molmo2) => {
             let proc_out = molmo2.processor.preprocess_image(&images[0]);
             let image_token_str = molmo2.processor.get_image_tokens(&proc_out.image_grid);
@@ -713,6 +759,23 @@ where
             }))
         }
     }
+}
+
+fn format_molmo_v1_prompt_for_processor(prompt: &str) -> String {
+    let without_image_placeholder = prompt.replace("<|image|>", "");
+    let prompt = without_image_placeholder.trim();
+    if prompt.starts_with("User:") && prompt.ends_with("Assistant:") {
+        format!(" {prompt}")
+    } else {
+        format!(" User: {prompt} Assistant:")
+    }
+}
+
+fn shift_molmo_v1_image_input_idx_for_bos(image_input_idx: &[i32]) -> Vec<i32> {
+    image_input_idx
+        .iter()
+        .map(|&idx| if idx < 0 { idx } else { idx + 1 })
+        .collect()
 }
 
 fn expand_gemma4_image_tokens(

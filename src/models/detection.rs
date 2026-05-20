@@ -194,6 +194,7 @@ pub fn get_model_type(model_path: &Path) -> Result<ModelType> {
         "aya_vision" => Ok(ModelType::AyaVisionVLM),
         "paligemma" => Ok(ModelType::PaliGemmaVLM),
         "pixtral" => Ok(ModelType::PixtralVLM),
+        "molmo" => Ok(ModelType::MolmoVLM),
         "molmo2" => Ok(ModelType::Molmo2VLM),
         "molmo_point" => Ok(ModelType::MolmoPointVLM),
         _ => Err(anyhow::anyhow!(

@@ -14,7 +14,7 @@ Compatibility and performance testing for mlxcel models on **MacBook Pro M5 Max 
 | **mlx-vlm baseline** | 0.4.4 |
 | **Test Prompt** | "Hello, how are you today?" (text) / "What is in this image?" (VLM) |
 | **Max Tokens** | 100 |
-| **Test Date** | 2026-05-19 full sweep |
+| **Test Date** | 2026-05-19 full sweep; 2026-05-20 Molmo v1 spot-check |
 | **Benchmark Status** | Full text + VLM sweep on mlxcel using `mlxcel-bench-decode`, 98 text + 98 VLM-mode passes with `--cooldown 15 --big-cooldown 15`. mlx-lm / mlx-vlm baseline sub-sweeps are from the same benchmark campaign; their CSV filenames carry 2026-05-18 because the run crossed calendar midnight. |
 
 ## Legend
@@ -177,7 +177,7 @@ Compatibility and performance testing for mlxcel models on **MacBook Pro M5 Max 
 | ministral3 | Ministral-3B-Instruct-4bit | ✅ | 6580.56 | 223.03 | **1.54x** | 34 tokens; VLM wrapper |
 | mistral-small | mistral-small-3.1-24b-4bit | ✅ | 90.62 | 41.41 | **1.31x** | 100 tokens |
 | molmo2 | molmo2-4b | ✅ | 540.64 | 64.09 | 1.07x | 33 tokens |
-| molmo-7b | molmo-7b | ❌ | - | FAIL | - | FAIL:bench |
+| molmo-7b | molmo-7b | ✅ | 338.65 | 78.74 | - | 24 tokens; text spot-check |
 | internvl3 | internvl3-1b | ❌ | - | FAIL | - | FAIL:bench |
 | smollm-135m | SmolLM-135M-Instruct-4bit | ✅ | 6058.41 | 905.24 | **2.22x** | 100 tokens |
 | smollm3-3b | SmolLM3-3B-4bit | ✅ | 2242.59 | 232.79 | **1.71x** | 46 tokens |
@@ -214,7 +214,7 @@ All entries use the VLM prompt 'What is in this image?' with
 | llava-next | llava-next-mistral-7b-4bit | ✅ | 2969.90 | 120.38 | **1.14x** | 100 tokens |
 | ministral3 | ministral-3b-4bit | ✅ | 2784.82 | 195.22 | **1.58x** | 100 tokens |
 | mistral-small (3.1 24B) | mistral-small-3.1-24b-4bit | ✅ | 676.13 | 39.62 | **1.33x** | 100 tokens |
-| molmo-7b | molmo-7b | ❌ | - | FAIL | - | FAIL:bench (unsupported architecture) |
+| molmo-7b | molmo-7b | ✅ | 2287.29 | 84.99 | - | 100 tokens; mlx-vlm baseline is a 1-token anomaly |
 | molmo2 (4B) | molmo2-4b | ✅ | 2512.31 | 64.01 | 1.08x | 46 tokens |
 | paligemma2 (3B 6-bit) | paligemma2-3b-6bit | ✅ | 4294.39 | 80.09 | **1.78x** | 2 tokens |
 | phi-3.5-vision | phi-3.5-vision-4bit | ✅ | 2821.55 | 123.07 | **1.31x** | 19 tokens |
@@ -229,11 +229,11 @@ All entries use the VLM prompt 'What is in this image?' with
 
 | Status | Count |
 |--------|-------|
-| ✅ Pass | 92 |
+| ✅ Pass | 93 |
 | ⚠️ Partial | 2 (falcon-mamba-7b-4bit, phi-2-4bit) |
-| ❌ Fail | 4 (deepseek-v3-4bit, internvl3-1b, molmo-7b, qwen3-next-480b-4bit) |
+| ❌ Fail | 3 (deepseek-v3-4bit, internvl3-1b, qwen3-next-480b-4bit) |
 
-98 models tested in total. `qwen2-vl-2b-4bit` was already counted under ✅ (its text mode passed); the VLM image-mode fix flipped its VLM-table row from ⚠️ to ✅ without changing the per-model total.
+98 models tested in total. `qwen2-vl-2b-4bit` was already counted under ✅ (its text mode passed); the VLM image-mode fix flipped its VLM-table row from ⚠️ to ✅ without changing the per-model total. Adding Molmo v1 support flips `molmo-7b` from FAIL to ✅ in both the text spot-check row and the VLM table.
 
 ## Performance vs mlx-lm / mlx-vlm baseline (2026-05-19 benchmark campaign)
 
@@ -325,7 +325,7 @@ snapshot.
 | ministral-3b-4bit | 223.03 | 231.92 | 96% |
 | mistral-small-3.1-24b-4bit | 41.41 | 41.49 | 100% |
 | mixtral-8x7b-4bit | 65.20 | 66.08 | 99% |
-| molmo-7b | - | FAIL | - |
+| molmo-7b | 78.74 | FAIL | - |
 | molmo2-4b | 64.09 | FAIL | - |
 | nemotron-h-30b-4bit | 177.18 | 178.80 | 99% |
 | nemotron-nas-30b-4bit | 176.38 | 178.39 | 99% |
@@ -395,7 +395,7 @@ snapshot.
 | llava-next-mistral-7b-4bit | 120.38 | FAIL | - |
 | ministral-3b-4bit | 195.22 | FAIL | - |
 | mistral-small-3.1-24b-4bit | 39.62 | FAIL | - |
-| molmo-7b | FAIL | 56471.65 (anomalous) | - |
+| molmo-7b | 84.99 | 56471.65 (anomalous, 1 token) | - |
 | molmo2-4b | 64.01 | 66.80 | 96% |
 | paligemma2-3b-6bit | 80.09 | 124.55 | - |
 | phi-3.5-vision-4bit | 123.07 | 159.63 | 77% |
@@ -536,7 +536,6 @@ increase and 96% of mlx-lm's 555.43 tok/s on the same prompt.
 | phi-2-4bit | Generates only 1 token — likely EOS handling | Low |
 | llama-3.1-8b-bf16 | bf16 → f16 conversion path is functional but slow | Low |
 | internvl3-1b | unsupported architecture | Low |
-| molmo-7b | unsupported architecture | Low |
 
 ## Notes
 
@@ -547,6 +546,7 @@ increase and 96% of mlx-lm's 555.43 tok/s on the same prompt.
   (mlxcel 0.0.28, same-day MLX pin `84961223`).
 - Prefill and decode tok/s reported separately.
 - Full text + VLM sweep on 2026-05-19: 98 text models (`bench_decode.sh all`) and a matching `bench_decode.sh all --vlm` pass, both at `--cooldown 15 --big-cooldown 15`. Failures match the 2026-05-18 baseline (same 5 text-side and 26 VLM-side fails — all pre-existing).
+- Molmo v1 (`molmo-7b`) spot-check on 2026-05-20: text-only measured 338.65 prefill / 78.74 decode tok/s (24 tokens), and the VLM path measured 2287.29 prefill / 84.99 decode tok/s (100 tokens) with the output now identifying the orange-square fixture instead of the pre-fix degenerate loop. The upstream mlx-vlm baseline row is a 1-token anomaly, so no percentage comparison is reported; a `molmo2-4b` no-regression check held at ~63 tok/s decode.
 - Cooldown discipline on M5 Max: 15s general / 15s big-model cooldowns were sufficient for this back-to-back run on a freshly-built binary; longer cooldowns (`--cooldown 30 --big-cooldown 30`) remain the safer default for marathon sessions or when thermal headroom is uncertain.
 - Measurement noise on very fast small models remains high (qwen3.5-0.8b-4bit and
   similar can span ±15% across back-to-back runs because 100 tokens generate in

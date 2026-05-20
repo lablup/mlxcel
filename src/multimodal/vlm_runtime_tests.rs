@@ -13,8 +13,8 @@
 // limitations under the License.
 
 use super::{
-    VlmPreparationSummary, expand_gemma4_video_tokens, prepared_embedding_refs,
-    should_prepare_vlm_embeddings,
+    VlmPreparationSummary, expand_gemma4_video_tokens, format_molmo_v1_prompt_for_processor,
+    prepared_embedding_refs, shift_molmo_v1_image_input_idx_for_bos, should_prepare_vlm_embeddings,
 };
 use crate::vision::merge::InputEmbeddings;
 use crate::vlm_prompt::{ImageTokenBlockAction, ImageTokenBlockStats};
@@ -76,6 +76,38 @@ fn prepared_embedding_refs_rejects_null_attention_masks() {
         Err(err) => err.to_string(),
     };
     assert!(err.contains("null 4D attention mask"));
+}
+
+#[test]
+fn molmo_v1_prompt_matches_model_processor_role_format() {
+    assert_eq!(
+        format_molmo_v1_prompt_for_processor("What is in this image?"),
+        " User: What is in this image? Assistant:"
+    );
+}
+
+#[test]
+fn molmo_v1_prompt_does_not_double_wrap_chat_template_output() {
+    assert_eq!(
+        format_molmo_v1_prompt_for_processor("User: What is in this image? Assistant:"),
+        " User: What is in this image? Assistant:"
+    );
+}
+
+#[test]
+fn molmo_v1_prompt_strips_image_placeholder() {
+    assert_eq!(
+        format_molmo_v1_prompt_for_processor("<|image|> What is in this image?"),
+        " User: What is in this image? Assistant:"
+    );
+}
+
+#[test]
+fn molmo_v1_image_input_idx_shifts_only_valid_positions_for_bos() {
+    assert_eq!(
+        shift_molmo_v1_image_input_idx_for_bos(&[-100, -1, 0, 12, 313]),
+        vec![-100, -1, 1, 13, 314]
+    );
 }
 
 // -- Gemma 4 video token expansion (issue #553) ----------------------

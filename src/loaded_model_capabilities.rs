@@ -36,6 +36,7 @@ pub enum VlmRuntimeRef<'a> {
     Phi4MM(&'a vision::Phi4MMVLModel),
     Phi4SigLip(&'a vision::Phi4SigLipVLModel),
     Phi3V(&'a vision::Phi3VLModel),
+    Molmo(&'a vision::MolmoVLModel),
     Molmo2(&'a vision::Molmo2VLModel),
     MolmoPoint(&'a vision::MolmoPointVLModel),
     /// Nemotron H Nano Omni vision runtime (issue #554, vision-only scope).
@@ -136,6 +137,7 @@ impl LoadedModel {
             Self::Phi4MMVLM(model) => Some(VlmRuntimeRef::Phi4MM(model)),
             Self::Phi4SigLipVLM(model) => Some(VlmRuntimeRef::Phi4SigLip(model)),
             Self::Phi3VLM(model) => Some(VlmRuntimeRef::Phi3V(model)),
+            Self::MolmoVLM(model) => Some(VlmRuntimeRef::Molmo(model)),
             Self::Molmo2VLM(model) => Some(VlmRuntimeRef::Molmo2(model)),
             Self::MolmoPointVLM(model) => Some(VlmRuntimeRef::MolmoPoint(model)),
             Self::NemotronHNanoOmniVLM(model) => Some(VlmRuntimeRef::NemotronHNanoOmni(model)),

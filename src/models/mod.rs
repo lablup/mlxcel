@@ -69,6 +69,7 @@ pub mod minimax;
 pub mod ministral3;
 pub mod mistral4;
 pub mod mixtral;
+pub mod molmo;
 pub mod molmo2;
 pub mod molmo_point;
 pub mod moondream3;
@@ -144,6 +145,7 @@ pub use minimax::MiniMaxModel;
 pub use ministral3::{Ministral3Model, Ministral3Wrapper};
 pub use mistral4::Mistral4Model;
 pub use mixtral::MixtralModel;
+pub use molmo::MolmoModel;
 pub use molmo2::Molmo2Model;
 pub use moondream3::Moondream3Model;
 pub use nemotron::NemotronModel;
@@ -226,6 +228,7 @@ pub enum ModelType {
     Phi4MMVLM,       // Phi-4 Multimodal (SigLIP2 NaFlex + Phi4 text, image path only)
     Phi4SigLipVLM,   // Phi-4 reasoning vision (SigLIP2 NaFlex + Phi3-style text)
     Phi3VLM,         // Phi 3.5 Vision (CLIP + Phi3)
+    MolmoVLM,        // Molmo v1 (CLIP ViT + attention pooling + OLMo-style text)
     Molmo2VLM,       // Molmo2 (custom ViT + attention pooling + Molmo2 text)
     MolmoPointVLM,   // Molmo-Point (custom ViT + point prediction + Molmo2 text)
     Phi3Small,       // Phi 3 Small
@@ -347,6 +350,7 @@ pub const ALL_MODEL_TYPES: &[ModelType] = &[
     ModelType::Qwen3VL,
     ModelType::Qwen3VLMoe,
     ModelType::YoutuVLM,
+    ModelType::InternVLChatVLM,
     ModelType::MiniCPMOVLM,
     ModelType::Moondream3VLM,
     ModelType::Gemma3n,
@@ -356,6 +360,7 @@ pub const ALL_MODEL_TYPES: &[ModelType] = &[
     ModelType::Phi4MMVLM,
     ModelType::Phi4SigLipVLM,
     ModelType::Phi3VLM,
+    ModelType::MolmoVLM,
     ModelType::Molmo2VLM,
     ModelType::MolmoPointVLM,
     ModelType::Phi3Small,
@@ -588,6 +593,7 @@ impl ModelType {
             ModelType::InternVLChatVLM => {
                 ("InternVL (InternViT + pixel-shuffle + Qwen2)", "Other VLM")
             }
+            ModelType::MolmoVLM => ("Molmo (CLIP ViT + OLMo-style text)", "Other VLM"),
             ModelType::Molmo2VLM => ("Molmo 2 (custom ViT + Molmo2 text)", "Other VLM"),
             ModelType::MolmoPointVLM => {
                 ("Molmo-Point (point prediction + Molmo2 text)", "Other VLM")

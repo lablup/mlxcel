@@ -1120,6 +1120,195 @@ pub(super) fn molmo2_max_crops(preprocessor_config: Option<&Value>) -> usize {
         .unwrap_or(8) as usize
 }
 
+/// Rewrite original-HF Molmo v1 weight keys to the standard mlx-vlm layout.
+///
+/// Unlike Molmo2, v1 keeps the `.transformer.resblocks.N` vision path intact
+/// (the encoder loads from that exact prefix). mlx-vlm checkpoints already use
+/// the target naming, in which case this is a no-op per key.
+pub(super) fn rewrite_molmo_weight_key(key: &str) -> String {
+    let mut new_key = key.to_string();
+    if new_key.starts_with("model.transformer.") {
+        new_key = new_key.replacen("model.transformer.", "language_model.model.", 1);
+    }
+    if new_key.starts_with("model.vision_backbone.") {
+        new_key = new_key.replacen("model.vision_backbone.", "vision_tower.", 1);
+    }
+    new_key
+}
+
+fn remap_molmo_weights(raw_weights: WeightMap) -> WeightMap {
+    let mut weights = WeightMap::new();
+    for (key, value) in raw_weights {
+        weights.insert(rewrite_molmo_weight_key(&key), value);
+    }
+    weights
+}
+
+/// Read a vision config field with a reference default. Molmo-7B ships an almost
+/// empty `vision_config`, so most fields fall back to the dataclass defaults.
+fn molmo_vision_i32(vision_config: &Value, key: &str, default: i32) -> i32 {
+    vision_config
+        .get(key)
+        .and_then(|v| v.as_i64())
+        .unwrap_or(default as i64) as i32
+}
+
+pub(crate) fn load_molmo_vlm(model_path: &Path) -> Result<LoadedModel> {
+    use vision::encoders::molmo::{MolmoVisionConfig, MolmoVisionModel};
+    use vision::processors::molmo::{MolmoImageTokens, MolmoProcessor};
+
+    let (_config_str, full_config) = read_sanitized_vlm_config(model_path)?;
+
+    // Text config: Molmo-7B is flat (text fields at the top level). The
+    // MolmoTextConfig serde defaults + aliases tolerate both flat and nested
+    // `text_config` schemas.
+    let mut text_config_value = full_config
+        .get("text_config")
+        .cloned()
+        .unwrap_or_else(|| full_config.clone());
+    inherit_quantization_if_missing(&mut text_config_value, &full_config)?;
+    let text_config: models::molmo::MolmoTextConfig = serde_json::from_value(text_config_value)
+        .map_err(|e| anyhow::anyhow!("Failed to parse Molmo text config: {}", e))?;
+
+    // Vision config: apply reference `VisionConfig` defaults for the many fields
+    // Molmo-7B omits from its minimal `vision_config`.
+    let empty = Value::Object(Default::default());
+    let vision_config = full_config.get("vision_config").unwrap_or(&empty);
+    let mut vit_layers = full_config
+        .get("vit_layers")
+        .or_else(|| vision_config.get("vit_layers"))
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_i64().map(|n| n as i32))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_else(|| vec![-2, -9]);
+    if vit_layers.is_empty() {
+        vit_layers = vec![-2, -9];
+    }
+
+    let image_patch_size = molmo_vision_i32(vision_config, "image_patch_size", 14) as usize;
+    let image_default_input = vision_config
+        .get("image_default_input_size")
+        .and_then(|v| v.as_array())
+        .and_then(|a| {
+            let h = a.first()?.as_i64()? as i32;
+            let w = a.get(1)?.as_i64()? as i32;
+            Some((h, w))
+        })
+        .unwrap_or((336, 336));
+    let patch_h = image_default_input.0 / image_patch_size as i32;
+    let patch_w = image_default_input.1 / image_patch_size as i32;
+
+    let vision_cfg = MolmoVisionConfig {
+        image_num_layers: molmo_vision_i32(vision_config, "image_num_layers", 23) as usize,
+        image_emb_dim: molmo_vision_i32(vision_config, "image_emb_dim", 1024),
+        image_num_heads: molmo_vision_i32(vision_config, "image_num_heads", 16),
+        image_num_kv_heads: molmo_vision_i32(vision_config, "image_num_key_value_heads", 16),
+        image_head_dim: molmo_vision_i32(vision_config, "image_head_dim", 64),
+        image_num_pos: molmo_vision_i32(vision_config, "image_num_pos", 577) as usize,
+        image_norm_eps: vision_config
+            .get("image_norm_eps")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(1e-5) as f32,
+        image_num_patch: (patch_h, patch_w),
+        image_pooling_h: molmo_vision_i32(vision_config, "image_pooling_h", 2),
+        image_pooling_w: molmo_vision_i32(vision_config, "image_pooling_w", 2),
+        vit_layers,
+        group_size: text_config.group_size(),
+        bits: text_config.bits(),
+    };
+
+    // Load + remap weights, then convert plain bf16 -> f16 on Apple Silicon
+    // (keeping quantization scales/biases as bf16). `load_vlm_weights_common`
+    // skips conversion because the model is quantized.
+    let mut weights = remap_molmo_weights(load_vlm_weights_common(model_path, None)?);
+    let hw = mlxcel_core::hardware::get_hardware();
+    if hw.silicon_gen != mlxcel_core::hardware::AppleSiliconGen::Unknown {
+        let had_bf16 = models::convert_bf16_weights_with_keep(&mut weights, |key| {
+            key.ends_with(".scales") || key.ends_with(".biases")
+        });
+        if had_bf16 {
+            models::warn_bf16_precision();
+        }
+    }
+    models::sanitize_tied_embeddings(&mut weights, &full_config);
+
+    let text_model =
+        models::MolmoModel::from_weights(&weights, &text_config, "language_model.model")
+            .map_err(|e| anyhow::anyhow!("Failed to load Molmo text model: {}", e))?;
+
+    let vision_tower = MolmoVisionModel::from_weights(&weights, "vision_tower", vision_cfg)
+        .map_err(|e| anyhow::anyhow!("Failed to load Molmo vision model: {}", e))?;
+
+    // Processor configuration (preprocessor_config.json drives crop/margin/mean).
+    let preprocessor_config = read_optional_model_json(model_path, "preprocessor_config.json");
+    let max_crops = preprocessor_config
+        .as_ref()
+        .and_then(|c| c.get("max_crops"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(12) as usize;
+    let overlap = preprocessor_config
+        .as_ref()
+        .and_then(|c| c.get("overlap_margins"))
+        .and_then(|v| v.as_array())
+        .and_then(|a| {
+            let l = a.first()?.as_u64()? as usize;
+            let r = a.get(1)?.as_u64()? as usize;
+            Some((l, r))
+        });
+    let base_size = preprocessor_config
+        .as_ref()
+        .and_then(|c| c.get("base_image_input_size"))
+        .and_then(|v| v.as_array())
+        .and_then(|a| {
+            let h = a.first()?.as_u64()? as usize;
+            let w = a.get(1)?.as_u64()? as usize;
+            Some((h, w))
+        });
+    let token_len = preprocessor_config.as_ref().and_then(|c| {
+        let h = c.get("image_token_length_h")?.as_u64()? as usize;
+        let w = c.get("image_token_length_w")?.as_u64()? as usize;
+        Some((h, w))
+    });
+    let mean = read_clip_triple(preprocessor_config.as_ref(), "image_mean");
+    let std = read_clip_triple(preprocessor_config.as_ref(), "image_std");
+
+    let tokens = MolmoImageTokens::default();
+    let processor = MolmoProcessor::new(
+        max_crops,
+        overlap,
+        Some(image_patch_size),
+        base_size,
+        token_len,
+        mean,
+        std,
+        tokens,
+    );
+
+    let vlm = vision::MolmoVLModel {
+        text_model,
+        vision_tower,
+        processor,
+    };
+
+    Ok(LoadedModel::MolmoVLM(vlm))
+}
+
+/// Read a 3-element CLIP normalization triple from the preprocessor config.
+fn read_clip_triple(config: Option<&Value>, key: &str) -> Option<[f32; 3]> {
+    config
+        .and_then(|c| c.get(key))
+        .and_then(|v| v.as_array())
+        .and_then(|a| {
+            let x = a.first()?.as_f64()? as f32;
+            let y = a.get(1)?.as_f64()? as f32;
+            let z = a.get(2)?.as_f64()? as f32;
+            Some([x, y, z])
+        })
+}
+
 pub(crate) fn load_molmo2_vlm(model_path: &Path) -> Result<LoadedModel> {
     use vision::encoders::molmo2::Molmo2VisionModel;
     use vision::processors::molmo2::Molmo2Processor;

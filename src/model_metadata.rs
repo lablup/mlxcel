@@ -133,6 +133,7 @@ macro_rules! for_each_model_registration {
             Phi4MMVLM => { kind: Vlm, directory: Vlm, weight: None, adapter: Some("Phi4MM VLM does not support adapter loading; use load_model() instead") };
             Phi4SigLipVLM => { kind: Vlm, directory: Vlm, weight: None, adapter: Some("Phi4-SigLIP VLM does not support adapter loading; use load_model() instead") };
             Phi3VLM => { kind: Vlm, directory: Vlm, weight: None, adapter: Some("Phi3V VLM does not support adapter loading; use load_model() instead") };
+            MolmoVLM => { kind: Vlm, directory: Vlm, weight: None, adapter: Some("Molmo VLM does not support adapter loading; use load_model() instead") };
             Molmo2VLM => { kind: Vlm, directory: Vlm, weight: None, adapter: Some("Molmo2 VLM does not support adapter loading; use load_model() instead") };
             MolmoPointVLM => { kind: Vlm, directory: Vlm, weight: None, adapter: Some("Molmo-Point VLM does not support adapter loading; use load_model() instead") };
             Phi3Small => { kind: Text, directory: ConfigBacked, weight: Some(WeightLoadRoute::ConfigBacked), adapter: None, config_backed: { dir_loader: models::Phi3SmallModel::load, args: models::phi3small::ModelArgs, weight_builder: models::Phi3SmallModel::from_weights, wrap: LoadedModel::Phi3Small } };

@@ -90,6 +90,12 @@ fn print_preparation_summary(summary: VlmPreparationSummary) {
                 image_slots, total_tokens
             );
         }
+        VlmPreparationSummary::Molmo { total_tokens } => {
+            println!(
+                "Molmo: expanded prompt with image tokens ({} total tokens)",
+                total_tokens
+            );
+        }
         VlmPreparationSummary::Molmo2 { total_tokens } => {
             println!(
                 "Molmo2: expanded prompt with image tokens ({} total tokens)",

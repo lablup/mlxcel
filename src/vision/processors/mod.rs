@@ -19,6 +19,7 @@
 pub mod gemma4;
 pub mod internvl;
 pub mod minicpmo;
+pub mod molmo;
 pub mod molmo2;
 pub mod molmo_point;
 pub mod moondream3;

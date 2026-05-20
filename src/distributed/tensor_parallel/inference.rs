@@ -222,6 +222,7 @@ fn fallback_architecture(model_type: ModelType) -> &'static str {
         | ModelType::AyaVisionVLM
         | ModelType::PixtralVLM
         | ModelType::Moondream3VLM
+        | ModelType::MolmoVLM
         | ModelType::Molmo2VLM
         | ModelType::MolmoPointVLM
         // InternVL's text backbone is Qwen2 (llama family). TP is not
