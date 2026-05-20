@@ -38,6 +38,7 @@ use common::{repo_binary_path, repo_model_dir};
 
 const GEMMA3N_E2B_MODEL: &str = "gemma3n-e2b-4bit";
 const GEMMA3N_E4B_MODEL: &str = "gemma3n-e4b-4bit";
+const QWEN2_5_VL_MODEL: &str = "qwen2.5-vl-3b-4bit";
 
 fn reserve_port() -> u16 {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
@@ -155,6 +156,59 @@ fn gemma3n_vlm_single_row_bench_prefill_accepts_m5_tile_padding() {
     assert!(
         output.status.success(),
         "single-row Gemma 3n VLM prefill failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// Regression guard for the `qwen2.5-vl-3b-4bit` same-process warmup failure.
+///
+/// `qwen2.5-vl-3b-4bit` previously aborted during warmup on M5 Max when run
+/// through the same-process bench harness (warmup pass followed immediately by
+/// a measured pass in the same process). The root cause was a generator-owned
+/// KV-cache rebuild missing for some VLM paths — the warmup pass left stale KV
+/// state that caused a 4-D attention mask broadcast to abort on the subsequent
+/// measured pass. PR #34 fixed this by rebuilding generator-owned KV caches
+/// before each single-row run in `CxxGenerator::reset_with_model()`.
+/// `qwen2_5_vl` has no model-owned fallback state, so the fix applied
+/// transitively.
+///
+/// This test exercises exactly the `FAIL:warmup` repro path: image VLM with
+/// `--warmup-tokens 20` so the harness performs both a warmup pass and a
+/// measured pass in the same process.
+#[test]
+#[ignore = "requires local Qwen2.5-VL weights and the mlxcel-bench-decode binary"]
+fn qwen2_5_vl_single_row_bench_prefill_succeeds_with_m5_warmup() {
+    let model_dir = repo_model_dir(QWEN2_5_VL_MODEL);
+    if !model_dir.exists() {
+        eprintln!(
+            "Skipping test: model directory not found at {}",
+            model_dir.display()
+        );
+        return;
+    }
+
+    let model_arg = model_dir.to_string_lossy().to_string();
+    let image_arg = fixture_image_path().to_string_lossy().to_string();
+    let output = Command::new(repo_binary_path("mlxcel-bench-decode"))
+        .args([
+            "-m",
+            &model_arg,
+            "-p",
+            "What is in this image?",
+            "--image",
+            &image_arg,
+            "-n",
+            "4",
+            "--warmup-tokens",
+            "20",
+        ])
+        .output()
+        .expect("run mlxcel-bench-decode");
+
+    assert!(
+        output.status.success(),
+        "same-process warmup+measure for qwen2.5-vl-3b-4bit VLM failed\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );

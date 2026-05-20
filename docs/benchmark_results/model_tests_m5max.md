@@ -79,7 +79,7 @@ Compatibility and performance testing for mlxcel models on **MacBook Pro M5 Max 
 | qwen2.5 (0.5B bf16) | Qwen2.5-0.5B-Instruct (bf16) | ✅ | 5793.10 | 404.68 | - | 100 tokens |
 | qwen2.5 (7B) | Qwen2.5-7B-Instruct-4bit | ✅ | 917.38 | 126.36 | **1.15x** | 100 tokens |
 | qwen2.5 (7B 8bit) | Qwen2.5-7B-Instruct-8bit | ✅ | 845.08 | 68.98 | 1.00x | 100 tokens |
-| qwen2.5-vl (3B) | Qwen2.5-VL-3B-Instruct-4bit | ❌ | - | FAIL | - | FAIL:bench |
+| qwen2.5-vl (3B) | Qwen2.5-VL-3B-Instruct-4bit | ✅ | 1529.43 | 165.11 | - | 39 tokens; EOS-terminate; fixed by #34 |
 | qwen2-vl (2B) | Qwen2-VL-2B-Instruct-4bit | ✅ | 2642.68 | 273.84 | **1.83x** | 35 tokens |
 | qwen1.5-moe | Qwen1.5-MoE-A2.7B-Chat-4bit | ✅ | 924.51 | 237.73 | **1.65x** | 100 tokens |
 | qwen3 (0.6B) | Qwen3-0.6B-4bit | ✅ | 3683.87 | 566.50 | **1.92x** | 9 tokens |
@@ -220,7 +220,7 @@ All entries use the VLM prompt 'What is in this image?' with
 | phi-3.5-vision | phi-3.5-vision-4bit | ✅ | 2821.55 | 123.07 | **1.31x** | 19 tokens |
 | pixtral (12B) | pixtral-12b-4bit | ✅ | 1998.87 | 69.71 | **1.18x** | 100 tokens |
 | qwen2-vl (2B) | qwen2-vl-2b-4bit | ⚠️ | 1026.28 | 0 | - | loaded; 0 generated tokens |
-| qwen2.5-vl (3B) | qwen2.5-vl-3b-4bit | ❌ | - | FAIL | - | FAIL:bench |
+| qwen2.5-vl (3B) | qwen2.5-vl-3b-4bit | ✅ | 1696.53 | 156.83 | **1.61x** | 22 tokens; EOS-terminate; fixed by #34 |
 | qwen3-vl (2B) | qwen3-vl-2b-4bit | ✅ | 934.98 | 281.37 | **1.65x** | 100 tokens |
 | qwen3-vl (30B MoE) | qwen3-vl-30b-a3b-4bit | ✅ | 260.23 | 36.23 | **1.37x** | 2 tokens; #719 |
 | qwen3-vl (32B) | qwen3-vl-32b-4bit | ✅ | 117.14 | 19.65 | 1.05x | 100 tokens; #719 |
@@ -229,9 +229,9 @@ All entries use the VLM prompt 'What is in this image?' with
 
 | Status | Count |
 |--------|-------|
-| ✅ Pass | 91 |
+| ✅ Pass | 92 |
 | ⚠️ Partial | 2 (falcon-mamba-7b-4bit, phi-2-4bit) |
-| ❌ Fail | 5 (deepseek-v3-4bit, internvl3-1b, molmo-7b, qwen2.5-vl-3b-4bit, qwen3-next-480b-4bit) |
+| ❌ Fail | 4 (deepseek-v3-4bit, internvl3-1b, molmo-7b, qwen3-next-480b-4bit) |
 
 98 models tested in total.
 
@@ -346,7 +346,7 @@ snapshot.
 | qwen2.5-0.5b-bf16 | 404.68 | 402.73 | **100%** |
 | qwen2.5-7b-4bit | 126.36 | 123.59 | **102%** |
 | qwen2.5-7b-8bit | 68.98 | 67.44 | **102%** |
-| qwen2.5-vl-3b-4bit | - | FAIL | - |
+| qwen2.5-vl-3b-4bit | 156.83 | 98.53 | **159%** |
 | qwen3-0.6b-4bit | 566.50 | 651.14 | 87% |
 | qwen3-1.7b-4bit | 368.50 | 384.84 | 96% |
 | qwen3-30b-a3b-4bit | 156.15 | 147.22 | **106%** |
@@ -401,6 +401,7 @@ snapshot.
 | phi-3.5-vision-4bit | 123.07 | 159.63 | 77% |
 | pixtral-12b-4bit | 69.71 | FAIL | - |
 | qwen2-vl-2b-4bit | 0.00 | 279.55 | - |
+| qwen2.5-vl-3b-4bit | 156.83 | FAIL | - |
 | qwen3-vl-2b-4bit | 281.37 | FAIL | - |
 | qwen3-vl-30b-a3b-4bit | 36.23 | FAIL | - |
 | qwen3-vl-32b-4bit | 19.65 | FAIL | - |
@@ -417,7 +418,7 @@ snapshot.
 
 The mlx-lm-side FAILs are unchanged from the 2026-05-18 baseline:
 unsupported architectures (`deepseek-v3-4bit`, `internvl3-1b`,
-`molmo-7b`, `qwen2.5-vl-3b-4bit`), `transformers` config schema drift
+`molmo-7b`), `transformers` config schema drift
 (`exaone4-1.2b-4bit`, the `gemma-4-e{2,4}b-it-{4,8}bit` and
 `gemma3n-e{2,4}b-4bit` family), tokenizer wrapper bugs
 (`internlm3-8b-4bit`), `ModelArgs` mismatch (`mamba2-1.3b-4bit`,
@@ -530,7 +531,6 @@ increase and 96% of mlx-lm's 555.43 tok/s on the same prompt.
 |-------|-------|----------|
 | deepseek-v3-4bit | MoE + MLA; still fails warmup | Medium |
 | qwen3-next-480b-4bit | OOM-skip on 128 GB; weights exceed 85% memory budget | Medium |
-| qwen2.5-vl-3b-4bit | FAIL:warmup | Medium |
 | Gemma-4-31b-it-nvfp4 | nvfp4 quantization runs at ~1.5 tok/s; no fast Metal kernel for nvfp4 | Medium |
 | falcon-mamba-7b-4bit | Generic chat prompt exits after `<|im_end|>`; use a non-chat code prompt for perf checks | Low |
 | phi-2-4bit | Generates only 1 token — likely EOS handling | Low |
