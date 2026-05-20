@@ -58,7 +58,7 @@ Compatibility and performance testing for mlxcel models on **Mac Studio M1 Ultra
 | smollm3 | SmolLM-135M-Instruct-4bit | ✅ | 486.25 | 407.36 | **108%** | mlx-lm: 375.91 |
 | smollm3 (3B) | SmolLM3-3B-4bit | ✅ | 568.57 | 136.34 | 96% | mlx-lm: 141.66 |
 | stablelm | stablelm-2-1_6b-chat-4bit | ✅ | 656.55 | 280.32 | 100% | mlx-lm: 280.65; only 59 tokens |
-| starcoder2 | starcoder2-3b-4bit | ✅ | 177.66 | 171.30 | **103%** | mlx-lm: 166.17; major decode improvement |
+| starcoder2 | starcoder2-3b-4bit | ✅ | 177.66 | 171.30 | **103%** | mlx-lm: 166.17 |
 | olmo | OLMo-1B-hf-4bit | ✅ | 179.80 | 219.54 | - | mlx-lm: FAIL |
 | olmo2 | OLMo2-7B-4bit | ✅ | 281.23 | 103.66 | 93% | mlx-lm: 110.88; only 27 tokens |
 | olmo3 | OLMo3.1-32B-4bit | ✅ | 81.40 | 21.79 | **101%** | mlx-lm: 21.57 |
@@ -69,19 +69,19 @@ Compatibility and performance testing for mlxcel models on **Mac Studio M1 Ultra
 
 | Model | Test Model | Status | Prefill | Decode | vs mlx-lm | Notes |
 |-------|------------|--------|---------|--------|-----------|-------|
-| gemma | gemma-2b-it-4bit | ✅ | 378.01 | 189.91 | 91% | mlx-lm: 207.78; major decode improvement from 81.76; only 49 tokens |
+| gemma | gemma-2b-it-4bit | ✅ | 378.01 | 189.91 | 91% | mlx-lm: 207.78; only 49 tokens |
 | gemma2 | gemma-2-2b-it-4bit | ✅ | 334.20 | 163.85 | **107%** | mlx-lm: 153.50; only 18 tokens |
 | gemma3 | gemma-3-1b-it-4bit | ✅ | 431.88 | 225.75 | **107%** | mlx-lm: 211.50; only 34 tokens |
 | gemma3 (4B) | gemma-3-4b-it-4bit | ✅ | 203.23 | 113.61 | **104%** | mlx-lm: 109.48; only 86 tokens |
 | gemma4 (31B) | gemma-4-31b-4bit | ✅ | 24.54 | 20.15 | 99% | mlx-lm: 20.36 |
 | gemma4 (31B-it) | gemma-4-31b-it-4bit | ✅ | 52.04 | 19.06 | 94% | mlx-lm: 20.23; instruction-tuned variant |
-| gemma4 (26B A4B) | gemma-4-26b-a4b-it-4bit | ✅ | 168.66 | 73.18 | **101%** | mlx-lm: 72.52; fixed SDPA threadgroup memory; only 26 tokens |
-| gemma4 (E2B 4bit) | gemma-4-e2b-it-4bit | ✅ | 257.28 | 116.08 | - | mlx-lm: FAIL; fixed SDPA threadgroup memory; only 34 tokens |
-| gemma4 (E2B 8bit) | gemma-4-e2b-it-8bit | ✅ | 212.56 | 87.42 | - | mlx-lm: FAIL; fixed SDPA threadgroup memory; only 38 tokens |
-| gemma4 (E4B 4bit) | gemma-4-e4b-it-4bit | ✅ | 175.01 | 81.88 | - | mlx-lm: FAIL; fixed SDPA threadgroup memory; only 25 tokens |
-| gemma4 (E4B 8bit) | gemma-4-e4b-it-8bit | ✅ | 165.49 | 59.35 | - | mlx-lm: FAIL; fixed SDPA threadgroup memory; only 39 tokens |
-| gemma3n | gemma-3n-E2B-it-4bit | ✅ | 238.51 | 76.86 | - | mlx-lm: FAIL; fixed SDPA threadgroup memory; only 69 tokens |
-| gemma3n (E4B) | gemma-3n-E4B-it-4bit | ✅ | 169.94 | 60.18 | - | mlx-lm: FAIL; fixed SDPA threadgroup memory; only 74 tokens |
+| gemma4 (26B A4B) | gemma-4-26b-a4b-it-4bit | ✅ | 168.66 | 73.18 | **101%** | mlx-lm: 72.52; only 26 tokens |
+| gemma4 (E2B 4bit) | gemma-4-e2b-it-4bit | ✅ | 257.28 | 116.08 | - | mlx-lm: FAIL; only 34 tokens |
+| gemma4 (E2B 8bit) | gemma-4-e2b-it-8bit | ✅ | 212.56 | 87.42 | - | mlx-lm: FAIL; only 38 tokens |
+| gemma4 (E4B 4bit) | gemma-4-e4b-it-4bit | ✅ | 175.01 | 81.88 | - | mlx-lm: FAIL; only 25 tokens |
+| gemma4 (E4B 8bit) | gemma-4-e4b-it-8bit | ✅ | 165.49 | 59.35 | - | mlx-lm: FAIL; only 39 tokens |
+| gemma3n | gemma-3n-E2B-it-4bit | ✅ | 238.51 | 76.86 | - | mlx-lm: FAIL; only 69 tokens |
+| gemma3n (E4B) | gemma-3n-E4B-it-4bit | ✅ | 169.94 | 60.18 | - | mlx-lm: FAIL; only 74 tokens |
 | gemma3n (E4B bf16) | gemma-3n-E4B-it (bf16) | ✅ | 169.01 | 34.41 | 88% | mlx-lm: 39.02; bf16 prefill path retune (PR #727); bf16; only 72 tokens |
 | recurrent_gemma | - | ⏳ | - | - | - | Griffin SSM+attention hybrid |
 
@@ -184,13 +184,13 @@ Compatibility and performance testing for mlxcel models on **Mac Studio M1 Ultra
 | Model | Test Model | Status | Prefill | Decode | vs mlx-vlm | Notes |
 |-------|------------|--------|---------|--------|------------|-------|
 | gemma3 | gemma-3-4b-it-4bit | ✅ | 218.56 | 85.61 | 91% | mlx-vlm: 93.79; SigLIP + AvgPool; 275 prompt, 16 gen |
-| gemma3n (E2B) | gemma-3n-E2B-it-4bit | ✅ | 771.46 | 72.38 | **122%** | mlx-vlm: 59.57; MobileNetV5 + MSFA; fixed SDPA threadgroup memory; 273 prompt, 29 gen |
+| gemma3n (E2B) | gemma-3n-E2B-it-4bit | ✅ | 771.46 | 72.38 | **122%** | mlx-vlm: 59.57; MobileNetV5 + MSFA; 273 prompt, 29 gen |
 | gemma3n (E4B bf16) | gemma-3n-E4B-it (bf16) | ✅ | 644.18 | 32.12 | 89% | mlx-vlm: 36.18; MobileNetV5 + MSFA; bf16 prefill path retune (PR #727); bf16; 273 prompt, 24 gen |
-| gemma3n (E4B 4bit) | gemma-3n-E4B-it-4bit | ✅ | 490.04 | 56.69 | **113%** | mlx-vlm: 50.00; fixed SDPA threadgroup memory; 273 prompt, 33 gen |
-| gemma4 (E2B 4bit) | gemma-4-e2b-it-4bit | ✅ | 989.24 | 107.06 | **110%** | mlx-vlm: 97.19; fixed SDPA threadgroup memory; 274 prompt, 100 gen |
-| gemma4 (E2B 8bit) | gemma-4-e2b-it-8bit | ✅ | 969.00 | 80.48 | 88% | mlx-vlm: 91.06; fixed SDPA threadgroup memory; 274 prompt, 100 gen |
-| gemma4 (E4B 4bit) | gemma-4-e4b-it-4bit | ✅ | 561.68 | 72.91 | **104%** | mlx-vlm: 70.34; fixed SDPA threadgroup memory; 274 prompt, 54 gen |
-| gemma4 (E4B 8bit) | gemma-4-e4b-it-8bit | ✅ | 534.96 | 54.83 | 87% | mlx-vlm: 63.25; fixed SDPA threadgroup memory; 274 prompt, 35 gen |
+| gemma3n (E4B 4bit) | gemma-3n-E4B-it-4bit | ✅ | 490.04 | 56.69 | **113%** | mlx-vlm: 50.00; 273 prompt, 33 gen |
+| gemma4 (E2B 4bit) | gemma-4-e2b-it-4bit | ✅ | 989.24 | 107.06 | **110%** | mlx-vlm: 97.19; 274 prompt, 100 gen |
+| gemma4 (E2B 8bit) | gemma-4-e2b-it-8bit | ✅ | 969.00 | 80.48 | 88% | mlx-vlm: 91.06; 274 prompt, 100 gen |
+| gemma4 (E4B 4bit) | gemma-4-e4b-it-4bit | ✅ | 561.68 | 72.91 | **104%** | mlx-vlm: 70.34; 274 prompt, 54 gen |
+| gemma4 (E4B 8bit) | gemma-4-e4b-it-8bit | ✅ | 534.96 | 54.83 | 87% | mlx-vlm: 63.25; 274 prompt, 35 gen |
 | gemma4 (31B 4bit) | gemma-4-31b-4bit | ✅ | 95.02 | 15.46 | 76% | mlx-vlm: 20.30; 274 prompt, 100 gen |
 | gemma4 (31B-it 4bit) | gemma-4-31b-it-4bit | ✅ | 99.07 | 18.32 | 93% | mlx-vlm: 19.78; 274 prompt, 100 gen |
 | gemma4 (26B A4B) | gemma-4-26b-a4b-it-4bit | ✅ | 476.14 | 63.18 | **103%** | mlx-vlm: 61.07; 277 prompt, 28 gen |
