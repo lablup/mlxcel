@@ -53,7 +53,7 @@ Compatibility and performance testing for mlxcel models on **Mac Studio M1 Ultra
 | qwen2 (1.5B base) | Qwen2.5-1.5B-4bit | ✅ | 701.57 | 241.44 | **100%** | mlx-lm: 241.41; base variant; 100 tokens |
 | phi | phi-2-hf-4bit-mlx | ✅ | 134.96 | 59.62 | - | mlx-lm fails to load; only 1 token (likely EOS) |
 | phi3 | Phi-3-mini-4k-instruct-4bit | ✅ | 173.84 | 167.27 | 98% | mlx-lm: 171.36; only 25 tokens |
-| phi3small | Phi-3.5-mini-instruct-4bit | ✅ | 218.87 | 160.90 | 97% | mlx-lm: 166.30; fused SuScaledRoPE; only 40 tokens |
+| phi3small | Phi-3.5-mini-instruct-4bit | ✅ | 218.87 | 160.90 | 97% | mlx-lm: 166.30; only 40 tokens |
 | phi4 | Phi-4-4bit | ✅ | 111.29 | 57.02 | 97% | mlx-lm: 58.68 |
 | smollm3 | SmolLM-135M-Instruct-4bit | ✅ | 486.25 | 407.36 | **108%** | mlx-lm: 375.91 |
 | smollm3 (3B) | SmolLM3-3B-4bit | ✅ | 568.57 | 136.34 | 96% | mlx-lm: 141.66 |
@@ -70,9 +70,9 @@ Compatibility and performance testing for mlxcel models on **Mac Studio M1 Ultra
 | Model | Test Model | Status | Prefill | Decode | vs mlx-lm | Notes |
 |-------|------------|--------|---------|--------|-----------|-------|
 | gemma | gemma-2b-it-4bit | ✅ | 378.01 | 189.91 | 91% | mlx-lm: 207.78; major decode improvement from 81.76; only 49 tokens |
-| gemma2 | gemma-2-2b-it-4bit | ✅ | 334.20 | 163.85 | **107%** | mlx-lm: 153.50; tanh-approx GeGLU aligned with mlx-lm; only 18 tokens |
+| gemma2 | gemma-2-2b-it-4bit | ✅ | 334.20 | 163.85 | **107%** | mlx-lm: 153.50; only 18 tokens |
 | gemma3 | gemma-3-1b-it-4bit | ✅ | 431.88 | 225.75 | **107%** | mlx-lm: 211.50; only 34 tokens |
-| gemma3 (4B) | gemma-3-4b-it-4bit | ✅ | 203.23 | 113.61 | **104%** | mlx-lm: 109.48; tanh-approx GeGLU + fused norm-RoPE; only 86 tokens |
+| gemma3 (4B) | gemma-3-4b-it-4bit | ✅ | 203.23 | 113.61 | **104%** | mlx-lm: 109.48; only 86 tokens |
 | gemma4 (31B) | gemma-4-31b-4bit | ✅ | 24.54 | 20.15 | 99% | mlx-lm: 20.36 |
 | gemma4 (31B-it) | gemma-4-31b-it-4bit | ✅ | 52.04 | 19.06 | 94% | mlx-lm: 20.23; instruction-tuned variant |
 | gemma4 (26B A4B) | gemma-4-26b-a4b-it-4bit | ✅ | 168.66 | 73.18 | **101%** | mlx-lm: 72.52; fixed SDPA threadgroup memory; only 26 tokens |
@@ -146,7 +146,7 @@ Compatibility and performance testing for mlxcel models on **Mac Studio M1 Ultra
 |-------|------------|--------|---------|--------|-----------|-------|
 | mamba | Falcon-Mamba-7B-4bit | ⚠️ | 92.67 | 42.91 | 47% | mlx-lm: 91.04; only 2 tokens due to chat template EOS |
 | mamba2 | mamba2-1.3b-4bit | ✅ | 162.53 | 102.63 | - | mlx-lm: FAIL |
-| jamba | Jamba-v0.1-4bit | ✅ | 325.65 | 119.33 | 91% | mlx-lm: 131.04; fused QKV + single-token Mamba fast path; only 76 tokens |
+| jamba | Jamba-v0.1-4bit | ✅ | 325.65 | 119.33 | 91% | mlx-lm: 131.04; only 76 tokens |
 | rwkv7 | - | ⏳ | - | - | - | RWKV v7 linear attention |
 
 ## Chinese / Asian Language Models
@@ -183,7 +183,7 @@ Compatibility and performance testing for mlxcel models on **Mac Studio M1 Ultra
 
 | Model | Test Model | Status | Prefill | Decode | vs mlx-vlm | Notes |
 |-------|------------|--------|---------|--------|------------|-------|
-| gemma3 | gemma-3-4b-it-4bit | ✅ | 218.56 | 85.61 | 91% | mlx-vlm: 93.79; SigLIP + AvgPool; tanh-approx GeGLU + fused norm-RoPE; 275 prompt, 16 gen |
+| gemma3 | gemma-3-4b-it-4bit | ✅ | 218.56 | 85.61 | 91% | mlx-vlm: 93.79; SigLIP + AvgPool; 275 prompt, 16 gen |
 | gemma3n (E2B) | gemma-3n-E2B-it-4bit | ✅ | 771.46 | 72.38 | **122%** | mlx-vlm: 59.57; MobileNetV5 + MSFA; fixed SDPA threadgroup memory; 273 prompt, 29 gen |
 | gemma3n (E4B bf16) | gemma-3n-E4B-it (bf16) | ✅ | 644.18 | 32.12 | 89% | mlx-vlm: 36.18; MobileNetV5 + MSFA; bf16 prefill path retune (PR #727); bf16; 273 prompt, 24 gen |
 | gemma3n (E4B 4bit) | gemma-3n-E4B-it-4bit | ✅ | 490.04 | 56.69 | **113%** | mlx-vlm: 50.00; fixed SDPA threadgroup memory; 273 prompt, 33 gen |
@@ -204,7 +204,7 @@ Compatibility and performance testing for mlxcel models on **Mac Studio M1 Ultra
 | pixtral | pixtral-12b-4bit | ✅ | 473.22 | 59.17 | - | mlx-vlm: FAIL; Pixtral ViT; Mistral; 4102 prompt, 100 gen |
 | mistral3 | mistral-small-3.1-24b-4bit | ✅ | 144.54 | 29.69 | - | mlx-vlm: FAIL; Pixtral ViT + PatchMerger; Mistral; 3032 prompt, 100 gen; mlx-vlm error |
 | ministral3 | Ministral-3B-Instruct-4bit | ✅ | 891.57 | 123.91 | - | mlx-vlm: FAIL; Pixtral ViT; 3566 prompt, 100 gen |
-| phi3.5-vision | Phi-3.5-vision-instruct-4bit | ✅ | 960.85 | 117.63 | **127%** | mlx-vlm: 92.53; CLIP + HD tiling; Phi3; fused SuScaledRoPE; 773 prompt, 19 gen |
+| phi3.5-vision | Phi-3.5-vision-instruct-4bit | ✅ | 960.85 | 117.63 | **127%** | mlx-vlm: 92.53; CLIP + HD tiling; Phi3; 773 prompt, 19 gen |
 | phi4mm | phi-4-multimodal-instruct (bf16) | ✅ | 571.90 | 25.42 | - | SigLIP + HD transform + AvgPool2d; Phi3; SuScaledRoPE + runtime LoRA; 2635 tokens; 12GB bf16 |
 | moondream3 | moondream3-preview-4bit | ⚠️ | 1.36 | 10.05 | - | SigLIP + MLP; image output garbled; only 63 tokens |
 | minicpm-o | MiniCPM-o-2_6-4bit | ✅ | 33.67 | 70.80 | - | SigLIP + Resampler; Qwen3; 80 tokens |
