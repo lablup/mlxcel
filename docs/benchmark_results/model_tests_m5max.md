@@ -219,7 +219,7 @@ All entries use the VLM prompt 'What is in this image?' with
 | paligemma2 (3B 6-bit) | paligemma2-3b-6bit | ✅ | 4294.39 | 80.09 | **1.78x** | 2 tokens |
 | phi-3.5-vision | phi-3.5-vision-4bit | ✅ | 2821.55 | 123.07 | **1.31x** | 19 tokens |
 | pixtral (12B) | pixtral-12b-4bit | ✅ | 1998.87 | 69.71 | **1.18x** | 100 tokens |
-| qwen2-vl (2B) | qwen2-vl-2b-4bit | ⚠️ | 1026.28 | 0 | - | loaded; 0 generated tokens |
+| qwen2-vl (2B) | qwen2-vl-2b-4bit | ✅ | 2485.82 | 247.21 | - | 12 tokens; EOS-terminate |
 | qwen2.5-vl (3B) | qwen2.5-vl-3b-4bit | ✅ | 1696.53 | 156.83 | **1.61x** | 22 tokens; EOS-terminate; fixed by #34 |
 | qwen3-vl (2B) | qwen3-vl-2b-4bit | ✅ | 934.98 | 281.37 | **1.65x** | 100 tokens |
 | qwen3-vl (30B MoE) | qwen3-vl-30b-a3b-4bit | ✅ | 260.23 | 36.23 | **1.37x** | 2 tokens; #719 |
@@ -233,7 +233,7 @@ All entries use the VLM prompt 'What is in this image?' with
 | ⚠️ Partial | 2 (falcon-mamba-7b-4bit, phi-2-4bit) |
 | ❌ Fail | 4 (deepseek-v3-4bit, internvl3-1b, molmo-7b, qwen3-next-480b-4bit) |
 
-98 models tested in total.
+98 models tested in total. `qwen2-vl-2b-4bit` was already counted under ✅ (its text mode passed); the VLM image-mode fix flipped its VLM-table row from ⚠️ to ✅ without changing the per-model total.
 
 ## Performance vs mlx-lm / mlx-vlm baseline (2026-05-19 benchmark campaign)
 
@@ -400,7 +400,7 @@ snapshot.
 | paligemma2-3b-6bit | 80.09 | 124.55 | - |
 | phi-3.5-vision-4bit | 123.07 | 159.63 | 77% |
 | pixtral-12b-4bit | 69.71 | FAIL | - |
-| qwen2-vl-2b-4bit | 0.00 | 279.55 | - |
+| qwen2-vl-2b-4bit | 247.21 | 279.55 | 88% |
 | qwen2.5-vl-3b-4bit | 156.83 | FAIL | - |
 | qwen3-vl-2b-4bit | 281.37 | FAIL | - |
 | qwen3-vl-30b-a3b-4bit | 36.23 | FAIL | - |

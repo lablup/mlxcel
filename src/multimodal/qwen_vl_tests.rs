@@ -36,9 +36,55 @@ fn insert_qwen_vl_image_tokens_inserts_blocks_after_bos() {
     assert_eq!(prompt_tokens, vec![1, 100, 103, 103, 103, 103, 101, 42, 43]);
 }
 
+// A prompt that already carries one `<|image_pad|>` per image
+// (the canonical framing emitted by the model chat template, e.g. qwen2_vl on
+// the CLI image path) must have that single placeholder EXPANDED to the grid
+// count, not skipped. Previously this returned `None`, leaving one placeholder
+// to face N vision features — a count mismatch that produced zero tokens.
 #[test]
-fn insert_qwen_vl_image_tokens_is_noop_when_image_tokens_already_exist() {
-    let mut prompt_tokens = vec![1, 103, 42, 43];
+fn insert_qwen_vl_image_tokens_expands_single_placeholder_per_image() {
+    // [<|im_start|>, <|vision_start|>(100), <|image_pad|>(103), <|vision_end|>(101), 42, 43]
+    let mut prompt_tokens = vec![1, 100, 103, 101, 42, 43];
+    let stats = insert_qwen_vl_image_tokens(&mut prompt_tokens, &[(1, 4, 4)], 2, 100, 103);
+
+    // (1*4/2*4/2) = 4 image tokens; the single placeholder expands in place,
+    // keeping the template's vision_start/vision_end framing.
+    assert_eq!(
+        stats,
+        Some(InsertedQwenVlmTokens {
+            image_blocks: 1,
+            total_image_tokens: 4,
+        })
+    );
+    assert_eq!(prompt_tokens, vec![1, 100, 103, 103, 103, 103, 101, 42, 43]);
+}
+
+// Two images, one placeholder each, with differing grids → expand each in
+// place to its own count.
+#[test]
+fn insert_qwen_vl_image_tokens_expands_one_placeholder_per_image_multi() {
+    let mut prompt_tokens = vec![1, 203, 7, 203, 8];
+    let stats =
+        insert_qwen_vl_image_tokens(&mut prompt_tokens, &[(1, 4, 4), (2, 2, 2)], 2, 200, 203);
+
+    // image 0: 1*2*2 = 4; image 1: 2*1*1 = 2; total 6.
+    assert_eq!(
+        stats,
+        Some(InsertedQwenVlmTokens {
+            image_blocks: 2,
+            total_image_tokens: 6,
+        })
+    );
+    assert_eq!(prompt_tokens, vec![1, 203, 203, 203, 203, 7, 203, 203, 8]);
+}
+
+// A placeholder count that does not equal the image count (e.g. the prompt was
+// already expanded to N>images placeholders) must be left untouched so we never
+// double-expand.
+#[test]
+fn insert_qwen_vl_image_tokens_noop_when_already_expanded() {
+    // 4 placeholders for a single image that expects 4 → already expanded.
+    let mut prompt_tokens = vec![1, 100, 103, 103, 103, 103, 101, 42];
     let original = prompt_tokens.clone();
 
     let stats = insert_qwen_vl_image_tokens(&mut prompt_tokens, &[(1, 4, 4)], 2, 100, 103);
