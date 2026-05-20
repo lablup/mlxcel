@@ -14,7 +14,7 @@ Compatibility and performance testing for mlxcel models on **MacBook Pro M5 Max 
 | **mlx-vlm baseline** | 0.4.4 |
 | **Test Prompt** | "Hello, how are you today?" (text) / "What is in this image?" (VLM) |
 | **Max Tokens** | 100 |
-| **Test Date** | 2026-05-19 full sweep; 2026-05-20 Molmo v1 spot-check; 2026-05-20 Phi-3.5 spot-check |
+| **Test Date** | 2026-05-19 full sweep; 2026-05-20 Molmo v1 spot-check; 2026-05-20 Phi-3.5 spot-check; 2026-05-20 Gemma2/Gemma3 dense spot-check |
 | **Benchmark Status** | Full text + VLM sweep on mlxcel using `mlxcel-bench-decode`, 98 text + 98 VLM-mode passes with `--cooldown 15 --big-cooldown 15`. mlx-lm / mlx-vlm baseline sub-sweeps are from the same benchmark campaign; their CSV filenames carry 2026-05-18 because the run crossed calendar midnight. |
 
 ## Legend
@@ -48,10 +48,10 @@ Compatibility and performance testing for mlxcel models on **MacBook Pro M5 Max 
 
 | Model | Test Model | Status | Prefill | Decode | vs M1 Ultra | Notes |
 |-------|------------|--------|---------|--------|-------------|-------|
-| gemma | gemma-2b-it-4bit | ✅ | 1346.43 | 210.51 | 1.08x | 49 tokens; issue #718 |
-| gemma2 | gemma-2-2b-it-4bit | ✅ | 1130.43 | 196.72 | **1.52x** | 18 tokens |
-| gemma3 | gemma-3-1b-it-4bit | ✅ | 2117.64 | 382.07 | **1.95x** | 20 tokens |
-| gemma3 (4B) | gemma-3-4b-it-4bit | ✅ | 794.31 | 146.43 | **1.47x** | 91 tokens |
+| gemma | gemma-2b-it-4bit | ✅ | 1288.22 | 217.38 | 1.12x | 49 tokens |
+| gemma2 | gemma-2-2b-it-4bit | ✅ | 1266.11 | 241.96 | **1.87x** | 18 tokens; full-budget raw prompt 245.83 tok/s |
+| gemma3 | gemma-3-1b-it-4bit | ✅ | 2072.39 | 399.65 | **2.04x** | 30 tokens |
+| gemma3 (4B) | gemma-3-4b-it-4bit | ✅ | 819.97 | 182.16 | **1.83x** | 81 tokens; full-budget raw prompt 183.77 tok/s |
 | gemma3n (E2B) | gemma-3n-E2B-it-4bit | ✅ | 812.25 | 158.71 | **2.06x** | 71 tokens |
 | gemma3n (E4B) | gemma-3n-E4B-it-4bit | ✅ | 601.09 | 110.24 | **1.83x** | 71 tokens |
 | gemma3n (E4B bf16) | gemma-3n-E4B-it (bf16) | ✅ | 348.30 | 39.19 | **1.14x** | 72 tokens; issue #716; Gemma3n language MLP bf16 preserved, other bf16 materialized as f16; 78% of mlx-lm decode |
@@ -196,7 +196,7 @@ All entries use the VLM prompt 'What is in this image?' with
 |-------|------------|--------|---------|--------|-------------|-------|
 | aya-vision-8b | aya-vision-8b | ✅ | 1616.46 | 112.09 | 1.02x | 84 tokens |
 | bunny-llama3-8b | bunny-llama3-8b-4bit | ✅ | 2851.65 | 112.24 | **1.17x** | 37 tokens |
-| gemma3 (4B) | gemma3-4b-4bit | ✅ | 567.95 | 127.61 | **1.69x** | 16 tokens |
+| gemma3 (4B) | gemma3-4b-4bit | ✅ | 593.32 | 159.58 | **2.11x** | 16 tokens |
 | gemma3n (E2B 4bit) | gemma3n-e2b-4bit | ✅ | 2893.48 | 151.36 | **2.08x** | 29 tokens |
 | gemma3n (E4B 4bit) | gemma3n-e4b-4bit | ✅ | 2186.03 | 106.01 | **1.87x** | 33 tokens |
 | gemma3n (E4B bf16) | gemma3n-e4b-bf16 | ✅ | 2025.46 | 36.95 | **1.16x** | 24 tokens; bf16→f16 conversion path |
@@ -257,9 +257,9 @@ snapshot.
 ### Aggregate (text)
 
 - **Comparable text pairs**: 66 (models with >=5 generated tokens both sides)
-- **mlxcel >= mlx-lm**: 24 / 66 (36%)
-- **mlxcel >= 90% parity**: 59 / 66 (89%, the Phi-3.5 mini fix raises it from 79% to 98%)
-- **Average mlxcel/mlx-lm**: 97% (median 99%, range 72%-127%)
+- **mlxcel >= mlx-lm**: 27 / 66 (41%)
+- **mlxcel >= 90% parity**: 61 / 66 (92%, the Phi-3.5 and Gemma dense fixes add Phi-3.5 mini, Gemma2-2b, and Gemma3-4b)
+- **Average mlxcel/mlx-lm**: 98% (median 99%, range 72%-127%)
 
 ### Aggregate (VLM, models with >=5 generated tokens both sides)
 
@@ -286,7 +286,7 @@ snapshot.
 | exaone-3.5-2.4b-4bit | 282.35 | 289.01 | 98% |
 | exaone4-1.2b-4bit | 424.44 | FAIL | - |
 | falcon-mamba-7b-4bit | 63.19 | 140.10 | 45% |
-| gemma-2b-4bit | 210.51 | 223.27 | 94% |
+| gemma-2b-4bit | 217.38 | 223.27 | 97% |
 | gemma-4-26b-a4b-it-4bit | 137.12 | 141.08 | 97% |
 | gemma-4-31b-4bit | 28.59 | 28.79 | 99% |
 | gemma-4-31b-it-4bit | 27.34 | 28.74 | 95% |
@@ -294,9 +294,9 @@ snapshot.
 | gemma-4-e2b-it-8bit | 136.69 | FAIL | - |
 | gemma-4-e4b-it-4bit | 136.68 | FAIL | - |
 | gemma-4-e4b-it-8bit | 80.88 | FAIL | - |
-| gemma2-2b-4bit | 196.72 | 241.76 | 81% |
-| gemma3-1b-4bit | 382.07 | 388.52 | 98% |
-| gemma3-4b-4bit | 146.43 | 181.66 | 81% |
+| gemma2-2b-4bit | 241.96 | 241.76 | **100%** |
+| gemma3-1b-4bit | 399.65 | 388.52 | **103%** |
+| gemma3-4b-4bit | 182.16 | 181.66 | **100%** |
 | gemma3n-e2b-4bit | 158.71 | FAIL | - |
 | gemma3n-e4b-4bit | 110.24 | FAIL | - |
 | gemma3n-e4b-bf16 | 39.19 | 48.72 | 80% |
@@ -384,7 +384,7 @@ snapshot.
 | gemma-4-e2b-it-8bit | 133.74 | 150.51 | 89% |
 | gemma-4-e4b-it-4bit | 134.10 | 131.24 | **102%** |
 | gemma-4-e4b-it-8bit | 76.28 | 90.00 | 85% |
-| gemma3-4b-4bit | 127.61 | FAIL | - |
+| gemma3-4b-4bit | 159.58 | FAIL | - |
 | gemma3n-e2b-4bit | 151.36 | 124.63 | **121%** |
 | gemma3n-e4b-4bit | 106.01 | 93.55 | **113%** |
 | gemma3n-e4b-bf16 | 36.95 | 49.88 | 74% |
@@ -548,6 +548,7 @@ increase and 96% of mlx-lm's 555.43 tok/s on the same prompt.
 - Full text + VLM sweep on 2026-05-19: 98 text models (`bench_decode.sh all`) and a matching `bench_decode.sh all --vlm` pass, both at `--cooldown 15 --big-cooldown 15`. Failures match the 2026-05-18 baseline (same 5 text-side and 26 VLM-side fails — all pre-existing).
 - Molmo v1 (`molmo-7b`) spot-check on 2026-05-20: text-only measured 338.65 prefill / 78.74 decode tok/s (24 tokens), and the VLM path measured 2287.29 prefill / 84.99 decode tok/s (100 tokens) with the output now identifying the orange-square fixture instead of the pre-fix degenerate loop. The upstream mlx-vlm baseline row is a 1-token anomaly, so no percentage comparison is reported; a `molmo2-4b` no-regression check held at ~63 tok/s decode.
 - Phi-3.5 SuScaledRoPE spot-check on 2026-05-20: fusing the quantized QKV projection/split/reshape/transpose/SuScaledRoPE chain and scaling only the rotary prefix raised `phi-3.5-mini-4bit` from 164.03 to 204.63 tok/s decode (79% to 98% of mlx-lm) and `phi-3.5-vision-4bit` VLM from 123.07 to 168.77 tok/s decode (77% to 106% of mlx-vlm) while output stayed coherent. Guardrails held within noise: `phi-3-mini-4bit` 207.89, `phi-4-4bit` 63.86, and `phi-3.5-moe-4bit` 115.20 tok/s decode.
+- Gemma2/Gemma3 dense spot-check on 2026-05-20: aligning the Gemma2/Gemma3 dense MLP with mlx-lm's tanh-approx GeGLU (`nn.gelu_approx`) and fusing the quantized QKV preparation raised `gemma2-2b-4bit` from 196.72 to 241.96 tok/s decode (81% to 100% of mlx-lm) and `gemma3-4b-4bit` from 146.43 to 182.16 tok/s decode (81% to 100%), with the `gemma3-4b-4bit` VLM row rising from 127.61 to 159.58 tok/s. Guardrails held: `gemma-2b-4bit` 217.38 and `gemma3-1b-4bit` 399.65 tok/s decode.
 - Cooldown discipline on M5 Max: 15s general / 15s big-model cooldowns were sufficient for this back-to-back run on a freshly-built binary; longer cooldowns (`--cooldown 30 --big-cooldown 30`) remain the safer default for marathon sessions or when thermal headroom is uncertain.
 - Measurement noise on very fast small models remains high (qwen3.5-0.8b-4bit and
   similar can span ±15% across back-to-back runs because 100 tokens generate in

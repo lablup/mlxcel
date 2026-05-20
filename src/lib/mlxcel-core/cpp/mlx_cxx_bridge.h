@@ -374,12 +374,12 @@ std::unique_ptr<MlxArray> compiled_relu_squared(const MlxArray& x);
 std::unique_ptr<MlxArray> compiled_silu(const MlxArray& x);
 
 // Compiled gelu: x * 0.5 * (1 + erf(x / sqrt(2))) — single fused kernel
-// Used by: Gemma2, Gemma3, StarCoder2, and other GELU-based models
+// Used by: StarCoder2 and other precise GELU-based models
 std::unique_ptr<MlxArray> compiled_gelu(const MlxArray& x);
 
 // Compiled gelu_approx: erf-based GELU (x * 0.5 * (1 + erf(x / sqrt(2)))) — fused kernel
 // Uses erf instead of tanh for numerical stability with bf16 inputs.
-// Used by: Gemma2, Gemma3 (matches Python nn.gelu_approx)
+// Used by: legacy/tests
 std::unique_ptr<MlxArray> compiled_gelu_approx(const MlxArray& x);
 
 // Compiled gelu_topk: sparse GELU with dynamic threshold — single fused kernel
@@ -408,7 +408,7 @@ std::unique_ptr<MlxArray> compiled_gpt_oss_swiglu_activation(
 
 // GeGLU activation - compiled with kernel fusion (shapeless=true)
 // output = gelu(gate) * x
-// Used by: Gemma, Gemma2, Gemma3 MLP layers
+// Used by: legacy/tests for precise GeGLU
 std::unique_ptr<MlxArray> compiled_geglu_activation(
     const MlxArray& gate,
     const MlxArray& x
@@ -466,7 +466,7 @@ std::unique_ptr<MlxArray> compiled_softcap_sdpa_gqa(
 
 // Compiled GELU MLP forward: down_proj(gelu(gate_proj(x)) * up_proj(x))
 // Fuses gate_proj + gelu + up_proj + multiply + down_proj into compiled graph
-// Used by: Gemma2, Gemma3 and other GELU-gated MLP models
+// Used by: legacy/tests for precise GELU-gated MLP models
 std::unique_ptr<MlxArray> compiled_gelu_mlp_forward(
     const MlxArray& x,
     const MlxArray& gate_proj,
@@ -485,7 +485,7 @@ std::unique_ptr<MlxArray> compiled_gelu_mlp_forward(
 
 // Compiled GELU-approx MLP forward: down_proj(gelu_approx(gate_proj(x)) * up_proj(x))
 // Fuses the quantized projections and Python MLX tanh-approx GeGLU.
-// Used by: Gemma4 dense MLP
+// Used by: Gemma2, Gemma3, Gemma4 dense MLP
 std::unique_ptr<MlxArray> compiled_gelu_approx_mlp_forward(
     const MlxArray& x,
     const MlxArray& gate_proj,
@@ -543,7 +543,7 @@ std::unique_ptr<MlxArray> compiled_swiglu_mlp_forward_fp16(
 // Compiled GELU MLP forward for non-quantized (FP16/BF16) weights:
 //   down_proj(gelu(gate_proj(x)) * up_proj(x))
 // Fuses gate_proj + gelu + up_proj + multiply + down_proj into compiled graph.
-// Used by: Gemma2, Gemma3, StarCoder2 and other GELU-gated FP models
+// Used by: Gemma, Gemma4 and other GELU-gated FP models
 std::unique_ptr<MlxArray> compiled_gelu_mlp_forward_fp16(
     const MlxArray& x,
     const MlxArray& gate_weight,
@@ -934,7 +934,7 @@ std::unique_ptr<MlxArray> fused_qkv_project_and_rope(
 );
 
 // Fused concatenated QKV projection + split + reshape + transpose + RoPE.
-// Used by: Llama3-family fused attention preparation path.
+// Used by: Llama3-family and Gemma2 fused attention preparation paths.
 void fused_qkv_project_split_rope(
     const MlxArray& x,
     const MlxArray& weight,
@@ -945,6 +945,31 @@ void fused_qkv_project_split_rope(
     int32_t head_dim,
     int32_t rope_dims,
     float rope_base,
+    int32_t cache_offset,
+    int32_t group_size,
+    int32_t bits,
+    rust::Str mode,
+    std::unique_ptr<MlxArray>& q_out,
+    std::unique_ptr<MlxArray>& k_out,
+    std::unique_ptr<MlxArray>& v_out
+);
+
+// Fused concatenated QKV projection + split + reshape + transpose +
+// GemmaRMSNorm(Q/K) + RoPE.
+// Used by: Gemma3 dense attention preparation path.
+void fused_qkv_project_split_norm_rope(
+    const MlxArray& x,
+    const MlxArray& weight,
+    const MlxArray& scales,
+    const MlxArray* biases,     // nullable for mxfp4/nvfp4/mxfp8
+    const MlxArray& q_norm_weight,
+    const MlxArray& k_norm_weight,
+    int32_t num_heads,
+    int32_t num_kv_heads,
+    int32_t head_dim,
+    int32_t rope_dims,
+    float rope_base,
+    float rms_eps,
     int32_t cache_offset,
     int32_t group_size,
     int32_t bits,

@@ -138,28 +138,39 @@ impl Attention {
         let shape = mlxcel_core::array_shape(x);
         let b = shape[0];
         let l = shape[1];
-
-        // Fused QKV projection: single matmul → split into Q, K, V
-        let (q, k, v) = self.qkv_proj.forward(x);
-
-        // Reshape and transpose to [batch, n_heads, seq_len, head_dim]
-        let q = mlxcel_core::reshape(&q, &[b, l, self.num_heads, self.head_dim]);
-        let k = mlxcel_core::reshape(&k, &[b, l, self.num_kv_heads, self.head_dim]);
-        let v = mlxcel_core::reshape(&v, &[b, l, self.num_kv_heads, self.head_dim]);
-
-        let q = mlxcel_core::transpose_axes(&q, &[0, 2, 1, 3]);
-        let k = mlxcel_core::transpose_axes(&k, &[0, 2, 1, 3]);
-        let v = mlxcel_core::transpose_axes(&v, &[0, 2, 1, 3]);
-
-        // Apply Q/K normalization AFTER transpose (matches Python mlx-lm)
-        let q = self.q_norm.forward(&q);
-        let k = self.k_norm.forward(&k);
-
         let offset = cache.offset();
 
-        // Apply RoPE
-        let q = mlxcel_core::fast_rope(&q, self.head_dim, false, self.rope_base, 1.0, offset);
-        let k = mlxcel_core::fast_rope(&k, self.head_dim, false, self.rope_base, 1.0, offset);
+        let (q, k, v) = if let Some((q, k, v)) = self.qkv_proj.forward_split_norm_rope_quantized(
+            x,
+            &self.q_norm,
+            &self.k_norm,
+            self.head_dim,
+            self.rope_base,
+            offset,
+        ) {
+            (q, k, v)
+        } else {
+            // Fused QKV projection: single matmul → split into Q, K, V
+            let (q, k, v) = self.qkv_proj.forward(x);
+
+            // Reshape and transpose to [batch, n_heads, seq_len, head_dim]
+            let q = mlxcel_core::reshape(&q, &[b, l, self.num_heads, self.head_dim]);
+            let k = mlxcel_core::reshape(&k, &[b, l, self.num_kv_heads, self.head_dim]);
+            let v = mlxcel_core::reshape(&v, &[b, l, self.num_kv_heads, self.head_dim]);
+
+            let q = mlxcel_core::transpose_axes(&q, &[0, 2, 1, 3]);
+            let k = mlxcel_core::transpose_axes(&k, &[0, 2, 1, 3]);
+            let v = mlxcel_core::transpose_axes(&v, &[0, 2, 1, 3]);
+
+            // Apply Q/K normalization AFTER transpose (matches Python mlx-lm)
+            let q = self.q_norm.forward(&q);
+            let k = self.k_norm.forward(&k);
+
+            // Apply RoPE
+            let q = mlxcel_core::fast_rope(&q, self.head_dim, false, self.rope_base, 1.0, offset);
+            let k = mlxcel_core::fast_rope(&k, self.head_dim, false, self.rope_base, 1.0, offset);
+            (q, k, v)
+        };
 
         // Update KV cache and get sliced views
         let (cache_k, cache_v) = cache.update_and_fetch(k, v);
@@ -428,7 +439,7 @@ impl MLP {
             self.down_proj.quantized_weight(),
         ) {
             return unsafe {
-                mlxcel_core::compiled_gelu_mlp_forward(
+                mlxcel_core::compiled_gelu_approx_mlp_forward(
                     x,
                     &gate_qw.weight,
                     &gate_qw.scales,
@@ -446,20 +457,10 @@ impl MLP {
             };
         }
 
-        // Non-quantized path: fused compiled FP MLP
-        if let Some(result) = mlxcel_core::layers::compiled_gelu_mlp_fp16(
-            x,
-            &self.gate_proj,
-            &self.up_proj,
-            &self.down_proj,
-        ) {
-            return result;
-        }
-
         // Fallback: separate operations with compiled activation
         let gate = self.gate_proj.forward(x);
         let up = self.up_proj.forward(x);
-        let activated = mlxcel_core::compiled_geglu_activation(&gate, &up);
+        let activated = mlxcel_core::compiled_geglu_approx_activation(&gate, &up);
         self.down_proj.forward(&activated)
     }
 

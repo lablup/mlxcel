@@ -415,6 +415,11 @@ impl GemmaRMSNorm {
     pub fn forward(&self, x: &MlxArray) -> UniquePtr<MlxArray> {
         ffi::fast_rms_norm(x, &self.adjusted_weight, self.eps)
     }
+
+    /// Pre-adjusted `(1 + weight)` tensor used by fused Gemma attention paths.
+    pub fn adjusted_weight(&self) -> &MlxArray {
+        &self.adjusted_weight
+    }
 }
 
 /// Layer Normalization layer (standard LayerNorm with weight and optional bias)
@@ -1158,6 +1163,108 @@ impl FusedQKVLinear {
                         self.head_dim,
                         rope_dims,
                         rope_base,
+                        cache_offset,
+                        weight.group_size,
+                        weight.bits,
+                        &weight.mode,
+                        &mut q,
+                        &mut k,
+                        &mut v,
+                    );
+                }
+                Some((q, k, v))
+            }
+            UnifiedLinear::Regular(_) => None,
+        }
+    }
+
+    /// Fused concatenated QKV projection + split + reshape + transpose + RoPE.
+    ///
+    /// Returns Q/K/V already shaped `[B, H, T, D]`. Q/K have RoPE applied.
+    /// Only available for quantized fused-QKV weights.
+    ///
+    /// Used by: Gemma2 dense attention path.
+    pub fn forward_split_rope_quantized(
+        &self,
+        x: &MlxArray,
+        rope_dims: i32,
+        rope_base: f32,
+        cache_offset: i32,
+    ) -> Option<(
+        UniquePtr<MlxArray>,
+        UniquePtr<MlxArray>,
+        UniquePtr<MlxArray>,
+    )> {
+        match &self.qkv_proj {
+            UnifiedLinear::Quantized { weight, .. } => {
+                let mut q = cxx::UniquePtr::null();
+                let mut k = cxx::UniquePtr::null();
+                let mut v = cxx::UniquePtr::null();
+                unsafe {
+                    ffi::fused_qkv_project_split_rope(
+                        x,
+                        &weight.weight,
+                        &weight.scales,
+                        weight.biases_ptr(),
+                        self.n_heads,
+                        self.n_kv_heads,
+                        self.head_dim,
+                        rope_dims,
+                        rope_base,
+                        cache_offset,
+                        weight.group_size,
+                        weight.bits,
+                        &weight.mode,
+                        &mut q,
+                        &mut k,
+                        &mut v,
+                    );
+                }
+                Some((q, k, v))
+            }
+            UnifiedLinear::Regular(_) => None,
+        }
+    }
+
+    /// Fused concatenated QKV projection + split + reshape + transpose +
+    /// GemmaRMSNorm(Q/K) + RoPE.
+    ///
+    /// Returns Q/K/V already shaped `[B, H, T, D]`. Q/K are normalized and
+    /// have RoPE applied. Only available for quantized fused-QKV weights.
+    ///
+    /// Used by: Gemma3 dense attention path.
+    pub fn forward_split_norm_rope_quantized(
+        &self,
+        x: &MlxArray,
+        q_norm: &GemmaRMSNorm,
+        k_norm: &GemmaRMSNorm,
+        rope_dims: i32,
+        rope_base: f32,
+        cache_offset: i32,
+    ) -> Option<(
+        UniquePtr<MlxArray>,
+        UniquePtr<MlxArray>,
+        UniquePtr<MlxArray>,
+    )> {
+        match &self.qkv_proj {
+            UnifiedLinear::Quantized { weight, .. } => {
+                let mut q = cxx::UniquePtr::null();
+                let mut k = cxx::UniquePtr::null();
+                let mut v = cxx::UniquePtr::null();
+                unsafe {
+                    ffi::fused_qkv_project_split_norm_rope(
+                        x,
+                        &weight.weight,
+                        &weight.scales,
+                        weight.biases_ptr(),
+                        q_norm.adjusted_weight(),
+                        k_norm.adjusted_weight(),
+                        self.n_heads,
+                        self.n_kv_heads,
+                        self.head_dim,
+                        rope_dims,
+                        rope_base,
+                        q_norm.eps,
                         cache_offset,
                         weight.group_size,
                         weight.bits,
@@ -2549,7 +2656,7 @@ pub fn metal4_attention(
 ///
 /// Returns `None` if any projection is quantized (caller should use the quantized path).
 ///
-/// Used by: Gemma2, Gemma3, StarCoder2 and other GELU-gated FP models
+/// Used by: Gemma, Gemma4 and other GELU-gated FP models
 pub fn compiled_gelu_mlp_fp16(
     x: &MlxArray,
     gate_proj: &UnifiedLinear,

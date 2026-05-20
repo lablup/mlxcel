@@ -1198,7 +1198,7 @@ std::unique_ptr<MlxArray> compiled_gpt_oss_swiglu_activation(
 }
 
 // Compiled GELU: x * 0.5 * (1 + erf(x / sqrt(2)))
-// Used by: Gemma2, Gemma3, StarCoder2
+// Used by: StarCoder2
 namespace {
     static std::function<std::vector<array>(const std::vector<array>&)> get_compiled_gelu() {
         auto fn = [](const std::vector<array>& inputs) -> std::vector<array> {
@@ -1223,7 +1223,7 @@ std::unique_ptr<MlxArray> compiled_gelu(const MlxArray& x) {
 
 // Compiled GELU approx: erf-based GELU (x * 0.5 * (1 + erf(x / sqrt(2))))
 // Uses erf instead of tanh for numerical stability with bf16 inputs.
-// Used by: Gemma2, Gemma3 (Python uses gelu_approx)
+// Used by: legacy/tests
 namespace {
     static std::function<std::vector<array>(const std::vector<array>&)> get_compiled_gelu_approx() {
         auto fn = [](const std::vector<array>& inputs) -> std::vector<array> {
@@ -1249,7 +1249,7 @@ std::unique_ptr<MlxArray> compiled_gelu_approx(const MlxArray& x) {
 }
 
 // Compiled GeGLU: gelu(gate) * x
-// Used by: Gemma2, Gemma3 MLP layers
+// Used by: legacy/tests for precise GeGLU
 namespace {
     static std::function<std::vector<array>(const std::vector<array>&)> get_compiled_geglu() {
         auto fn = [](const std::vector<array>& inputs) -> std::vector<array> {
@@ -1585,7 +1585,7 @@ std::unique_ptr<MlxArray> compiled_softcap_sdpa_gqa(
 
 // Compiled GELU MLP forward: down_proj(gelu(gate_proj(x)) * up_proj(x))
 // Compiles entire MLP into a single cached graph
-// Used by: Gemma2, Gemma3 and other GELU-gated models
+// Used by: legacy/tests for precise GELU-gated models
 namespace {
     static std::function<std::vector<array>(const std::vector<array>&)>
     get_compiled_qgelu_mlp() {
@@ -1692,7 +1692,7 @@ std::unique_ptr<MlxArray> compiled_gelu_mlp_forward(
 }
 
 // Compiled quantized GeGLU MLP using Python MLX's tanh-approx GELU.
-// Used by: Gemma4
+// Used by: Gemma2, Gemma3, Gemma4
 namespace {
     static std::function<std::vector<array>(const std::vector<array>&)>
     get_compiled_qgelu_approx_mlp() {
@@ -1959,7 +1959,7 @@ std::unique_ptr<MlxArray> compiled_swiglu_mlp_forward_fp16(
 // The GeGLU activation (gelu(gate) * up) uses the compiled geglu kernel
 // which correctly fuses element-wise ops only.
 //
-// Used by: Gemma2, Gemma3, StarCoder2 and other GELU-gated FP models
+// Used by: Gemma, Gemma4 and other GELU-gated FP models
 std::unique_ptr<MlxArray> compiled_gelu_mlp_forward_fp16(
     const MlxArray& x,
     const MlxArray& gate_weight,
@@ -3402,6 +3402,70 @@ void fused_qkv_project_split_rope(
     q = transpose(q, {0, 2, 1, 3});
     k = transpose(k, {0, 2, 1, 3});
     v = transpose(v, {0, 2, 1, 3});
+
+    q = mlx::core::fast::rope(q, rope_dims, false, rope_base, 1.0f, cache_offset);
+    k = mlx::core::fast::rope(k, rope_dims, false, rope_base, 1.0f, cache_offset);
+
+    q_out = std::make_unique<MlxArray>(std::move(q));
+    k_out = std::make_unique<MlxArray>(std::move(k));
+    v_out = std::make_unique<MlxArray>(std::move(v));
+}
+
+void fused_qkv_project_split_norm_rope(
+    const MlxArray& x,
+    const MlxArray& weight,
+    const MlxArray& scales,
+    const MlxArray* biases,
+    const MlxArray& q_norm_weight,
+    const MlxArray& k_norm_weight,
+    int32_t num_heads,
+    int32_t num_kv_heads,
+    int32_t head_dim,
+    int32_t rope_dims,
+    float rope_base,
+    float rms_eps,
+    int32_t cache_offset,
+    int32_t group_size,
+    int32_t bits,
+    rust::Str mode,
+    std::unique_ptr<MlxArray>& q_out,
+    std::unique_ptr<MlxArray>& k_out,
+    std::unique_ptr<MlxArray>& v_out
+) {
+    using namespace mlx::core;
+
+    auto batch_size = x.inner.shape()[0];
+    auto seq_len = x.inner.shape()[1];
+
+    std::optional<array> biases_opt = biases ? std::optional(biases->inner) : std::nullopt;
+    std::string mode_str(mode.data(), mode.size());
+    auto proj = quantized_matmul(
+        x.inner, weight.inner, scales.inner, biases_opt,
+        true, std::optional<int>(group_size), std::optional<int>(bits), mode_str);
+
+    int q_cols = num_heads * head_dim;
+    int kv_cols = num_kv_heads * head_dim;
+    int qkv_cols = q_cols + (2 * kv_cols);
+
+    auto proj_shape = proj.shape();
+    if (proj_shape.size() != 3 || proj_shape[2] != qkv_cols) {
+        throw std::runtime_error("fused_qkv_project_split_norm_rope: unexpected projection shape");
+    }
+
+    auto q = slice(proj, {0, 0, 0}, {batch_size, seq_len, q_cols});
+    auto k = slice(proj, {0, 0, q_cols}, {batch_size, seq_len, q_cols + kv_cols});
+    auto v = slice(proj, {0, 0, q_cols + kv_cols}, {batch_size, seq_len, qkv_cols});
+
+    q = reshape(q, {batch_size, seq_len, num_heads, head_dim});
+    k = reshape(k, {batch_size, seq_len, num_kv_heads, head_dim});
+    v = reshape(v, {batch_size, seq_len, num_kv_heads, head_dim});
+
+    q = transpose(q, {0, 2, 1, 3});
+    k = transpose(k, {0, 2, 1, 3});
+    v = transpose(v, {0, 2, 1, 3});
+
+    q = mlx::core::fast::rms_norm(q, q_norm_weight.inner, rms_eps);
+    k = mlx::core::fast::rms_norm(k, k_norm_weight.inner, rms_eps);
 
     q = mlx::core::fast::rope(q, rope_dims, false, rope_base, 1.0f, cache_offset);
     k = mlx::core::fast::rope(k, rope_dims, false, rope_base, 1.0f, cache_offset);

@@ -22,7 +22,7 @@ Current source-of-truth data lives in `benchmarks/`:
 |-----|----------|------|------|
 | `metal_m5max_2026-05-19.csv` | M5 Max | 2026-05-19 (mlxcel 0.0.28, MLX 0.31.2) | Text |
 | `metal_m5max_vlm_2026-05-19.csv` | M5 Max | 2026-05-19 (mlxcel 0.0.28, MLX 0.31.2) | VLM |
-| `metal_m5max_vlm_2026-05-20.csv` | M5 Max | 2026-05-20 (mlxcel 0.0.28, MLX 0.31.2; Gemma3n + Molmo v1 + Phi-3.5 vision VLM entries) | VLM |
+| `metal_m5max_vlm_2026-05-20.csv` | M5 Max | 2026-05-20 (mlxcel 0.0.28, MLX 0.31.2; Gemma3n + Molmo v1 + Phi-3.5 vision + Gemma3 4B VLM entries) | VLM |
 | `pylm_m5max_2026-05-18.csv` | M5 Max | 2026-05-19 benchmark campaign (mlx-lm 0.31.3 baseline; CSV date crossed midnight) | Text |
 | `pylm_m5max_vlm_2026-05-18.csv` | M5 Max | 2026-05-19 benchmark campaign (mlx-vlm 0.4.4 baseline; CSV date crossed midnight) | VLM |
 | `metal_m1ultra_2026-05-19.csv` | M1 Ultra | 2026-05-19 (mlxcel 0.0.28, MLX commit 84961223; >65GB skipped) | Text |
@@ -46,7 +46,7 @@ The table below summarizes the current cross-hardware decode readings for select
 | Llama-3.2-1B | 1B | 332.54 | 539.67 | 226.87 |
 | Qwen3-0.6B | 600M | 198.08 | 510.83 | 203.04* |
 | StableLM-1.6B | 1.6B | 270.47 | 424.32 | 186.64 |
-| Gemma-3-1B | 1B | 196.54 | 381.28 | 182.97 |
+| Gemma-3-1B | 1B | 196.54 | 399.65 | 182.97 |
 | EXAONE-3.5-2.4B | 2.4B | 190.43 | 287.68 | 104.06 |
 | SmolLM3-3B | 3B | 136.43 | 232.92 | 101.88 |
 | Nemotron-H-30B | 30B | 89.96 | 171.76 | 25.75 |
@@ -78,9 +78,9 @@ For Qwen2.5-0.5B, the 4-bit variant is the comparable row across both Apple Sili
 | VLM models tested (M1 Ultra, 2026-05-19) | 33 pass, 4 partial, 2 fail |
 | Beating mlx-lm on M1 Ultra (text, >100%) | 36/40 (90%, 5-19 baseline) |
 | At 90%+ parity on M1 Ultra (text) | 40/40 (100%, 5-19 baseline) |
-| Beating mlx-lm on M5 Max (text, >=100%) | 24/66 (36%, 5-19 mlxcel vs 5-18 mlx-lm) |
-| At 90%+ parity on M5 Max (text) | 58/66 (88%, 5-19 mlxcel vs 5-18 mlx-lm) |
-| Average vs mlx-lm on M5 Max (text) | 97% decode speed (median 99%, 5-19 mlxcel vs 5-18 mlx-lm) |
+| Beating mlx-lm on M5 Max (text, >=100%) | 27/66 (41%, 5-19 mlxcel vs 5-18 mlx-lm) |
+| At 90%+ parity on M5 Max (text) | 61/66 (92%, 5-19 mlxcel vs 5-18 mlx-lm) |
+| Average vs mlx-lm on M5 Max (text) | 98% decode speed (median 99%, 5-19 mlxcel vs 5-18 mlx-lm) |
 | Average vs mlx-vlm on M5 Max (VLM) | 100% decode speed (median 100%, 20 comparable pairs) |
 
 ## Generating Benchmarks

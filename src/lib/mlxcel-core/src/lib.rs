@@ -540,20 +540,20 @@ mod ffi {
         fn compiled_silu(x: &MlxArray) -> UniquePtr<MlxArray>;
 
         /// Compiled gelu: x * 0.5 * (1 + erf(x / sqrt(2))) — single fused kernel
-        /// Used by: Gemma2, Gemma3, StarCoder2, and other GELU-based models
+        /// Used by: StarCoder2 and other precise GELU-based models
         fn compiled_gelu(x: &MlxArray) -> UniquePtr<MlxArray>;
 
         /// Compiled gelu_approx: erf-based GELU (x * 0.5 * (1 + erf(x / sqrt(2))))
         /// Uses erf instead of tanh for numerical stability with bf16 inputs.
-        /// Used by: Gemma2, Gemma3 (Python uses gelu_approx)
+        /// Used by: legacy/tests
         fn compiled_gelu_approx(x: &MlxArray) -> UniquePtr<MlxArray>;
 
         /// Compiled GeGLU activation: gelu(gate) * x — single fused kernel
-        /// Used by: Gemma2, Gemma3 MLP layers
+        /// Used by: legacy/tests for precise GeGLU
         fn compiled_geglu_activation(gate: &MlxArray, x: &MlxArray) -> UniquePtr<MlxArray>;
 
         /// Compiled GeGLU activation using Python MLX tanh-approx GELU.
-        /// Used by: Gemma4 MLP and SwitchGeGLU layers
+        /// Used by: Gemma2, Gemma3, Gemma4 MLP and SwitchGeGLU layers
         fn compiled_geglu_approx_activation(gate: &MlxArray, x: &MlxArray) -> UniquePtr<MlxArray>;
 
         /// Compiled gelu_topk: sparse GELU with dynamic threshold — single fused kernel
@@ -596,7 +596,7 @@ mod ffi {
 
         /// Compiled GELU MLP forward: down_proj(gelu(gate_proj(x)) * up_proj(x))
         /// Fuses entire MLP into a single compiled graph
-        /// Used by: Gemma2, Gemma3 and other GELU-gated MLP models
+        /// Used by: legacy/tests for precise GELU-gated MLP models
         unsafe fn compiled_gelu_mlp_forward(
             x: &MlxArray,
             gate_proj: &MlxArray,
@@ -615,7 +615,7 @@ mod ffi {
 
         /// Compiled GELU-approx MLP forward:
         /// down_proj(gelu_approx(gate_proj(x)) * up_proj(x)).
-        /// Used by: Gemma4 dense MLP
+        /// Used by: Gemma2, Gemma3, Gemma4 dense MLP
         unsafe fn compiled_gelu_approx_mlp_forward(
             x: &MlxArray,
             gate_proj: &MlxArray,
@@ -672,7 +672,7 @@ mod ffi {
 
         /// Compiled GELU MLP forward for non-quantized (FP16/BF16) weights
         /// Fuses gate_proj + gelu + up_proj + multiply + down_proj into compiled graph
-        /// Used by: Gemma2, Gemma3, StarCoder2 and other GELU-gated FP models
+        /// Used by: Gemma, Gemma4 and other GELU-gated FP models
         unsafe fn compiled_gelu_mlp_forward_fp16(
             x: &MlxArray,
             gate_weight: &MlxArray,
@@ -1198,7 +1198,7 @@ mod ffi {
         ) -> UniquePtr<MlxArray>;
 
         /// Fused concatenated QKV projection + split + reshape + transpose + RoPE.
-        /// Used by: Llama3-family fused attention preparation path.
+        /// Used by: Llama3-family and Gemma2 fused attention preparation paths.
         unsafe fn fused_qkv_project_split_rope(
             x: &MlxArray,
             weight: &MlxArray,
@@ -1209,6 +1209,31 @@ mod ffi {
             head_dim: i32,
             rope_dims: i32,
             rope_base: f32,
+            cache_offset: i32,
+            group_size: i32,
+            bits: i32,
+            mode: &str,
+            q_out: &mut UniquePtr<MlxArray>,
+            k_out: &mut UniquePtr<MlxArray>,
+            v_out: &mut UniquePtr<MlxArray>,
+        );
+
+        /// Fused concatenated QKV projection + split + reshape + transpose +
+        /// GemmaRMSNorm(Q/K) + RoPE.
+        /// Used by: Gemma3 dense attention preparation path.
+        unsafe fn fused_qkv_project_split_norm_rope(
+            x: &MlxArray,
+            weight: &MlxArray,
+            scales: &MlxArray,
+            biases: *const MlxArray,
+            q_norm_weight: &MlxArray,
+            k_norm_weight: &MlxArray,
+            num_heads: i32,
+            num_kv_heads: i32,
+            head_dim: i32,
+            rope_dims: i32,
+            rope_base: f32,
+            rms_eps: f32,
             cache_offset: i32,
             group_size: i32,
             bits: i32,
