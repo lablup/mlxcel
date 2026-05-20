@@ -1169,7 +1169,7 @@ pub fn convert_bf16_weights(weights: &mut mlxcel_core::weights::WeightMap) -> bo
 ///
 /// Returns `true` if any bf16 tensors were found, whether converted or kept.
 ///
-/// Used by: load_text_weights, load_vlm_weights_common
+/// Used by: load_text_weights, load_vlm_weights_common, load_internvl_vlm
 #[must_use]
 pub fn convert_bf16_weights_with_keep<F>(
     weights: &mut mlxcel_core::weights::WeightMap,

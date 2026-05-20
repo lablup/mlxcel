@@ -39,6 +39,7 @@ pub mod gemma3n_vl;
 pub mod gemma4_multimodal_embedder;
 pub mod gemma4_per_layer_inputs_state;
 pub mod gemma4_vl;
+pub mod internvl;
 pub mod minicpmo_vl;
 pub mod molmo2_vl;
 pub mod molmo_point_vl;
@@ -57,6 +58,7 @@ pub mod youtu_vl;
 // Re-export VLM model types
 pub use gemma3n_vl::Gemma3nVLModel;
 pub use gemma4_vl::Gemma4VLModel;
+pub use internvl::InternVLChatVLM;
 pub use minicpmo_vl::MiniCPMOVLModel;
 pub use molmo_point_vl::MolmoPointVLModel;
 pub use molmo2_vl::Molmo2VLModel;

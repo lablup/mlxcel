@@ -188,47 +188,48 @@ pub use step3p5::Step3p5Model;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ModelType {
     // Standard Transformer models
-    Llama,         // Llama 1/2/3, Mistral
-    Llama4,        // Llama 4 (MoE)
-    Llama4VLM,     // Llama 4 VLM (vision-language)
-    Qwen2,         // Qwen 2/2.5
-    Qwen3,         // Qwen 3
-    Qwen3Moe,      // Qwen 3 MoE
-    Qwen3Next,     // Qwen 3 with GatedDeltaNet
-    Qwen35,        // Qwen 3.5 Hybrid (Transformer + GatedDeltaNet)
-    Qwen35VLM,     // Qwen 3.5 VLM (Qwen3-VL vision + Qwen3.5 hybrid text)
-    Qwen35Moe,     // Qwen 3.5 MoE Hybrid
-    Qwen35MoeVLM,  // Qwen 3.5 MoE VLM
-    Gemma,         // Gemma 1
-    Gemma2,        // Gemma 2
-    Gemma3,        // Gemma 3 (text-only)
-    Gemma4,        // Gemma 4 text-only route
-    Gemma3VLM,     // Gemma 3 VLM (vision-language)
-    Gemma4VLM,     // Gemma 4 VLM (vision-language)
-    LlavaVLM,      // LLaVA (CLIP/SigLIP + Llama/Qwen2)
-    LlavaBunnyVLM, // LLaVA-Bunny (SigLIP + Qwen2)
-    AyaVisionVLM,  // Aya Vision (SigLIP + Cohere2)
-    PaliGemmaVLM,  // PaliGemma (SigLIP + Gemma)
-    PixtralVLM,    // Pixtral (ViT w/ 2D RoPE + Mistral)
-    Mistral3VLM,   // Mistral 3 VLM (Pixtral ViT + PatchMerger + Mistral)
-    Qwen2VL,       // Qwen2-VL (custom ViT + Qwen2 w/ MRoPE)
-    Qwen25VL,      // Qwen2.5-VL (windowed ViT + Qwen2 w/ MRoPE)
-    Qwen3VL,       // Qwen3-VL (ViT + interleaved MRoPE + DeepStack)
-    Qwen3VLMoe,    // Qwen3-VL-MoE (Qwen3-VL + MoE text backbone)
-    YoutuVLM,      // Youtu-VL (SigLIP2 windowed-attn + DeepSeek-V3-style MLA)
-    MiniCPMOVLM,   // MiniCPM-o (dynamic SigLIP + resampler + Qwen3-VL text)
-    Moondream3VLM, // Moondream3 (custom ViT + custom text decoder, query/caption image path)
-    Gemma3n,       // Gemma 3n (text-only)
-    Gemma3nVLM,    // Gemma 3n VLM (MobileNetV5 + Gemma3n)
-    Phi,           // Phi 1/2
-    Phi3,          // Phi 3
-    Phi4MMVLM,     // Phi-4 Multimodal (SigLIP2 NaFlex + Phi4 text, image path only)
-    Phi4SigLipVLM, // Phi-4 reasoning vision (SigLIP2 NaFlex + Phi3-style text)
-    Phi3VLM,       // Phi 3.5 Vision (CLIP + Phi3)
-    Molmo2VLM,     // Molmo2 (custom ViT + attention pooling + Molmo2 text)
-    MolmoPointVLM, // Molmo-Point (custom ViT + point prediction + Molmo2 text)
-    Phi3Small,     // Phi 3 Small
-    PhiMoe,        // Phi MoE
+    Llama,           // Llama 1/2/3, Mistral
+    Llama4,          // Llama 4 (MoE)
+    Llama4VLM,       // Llama 4 VLM (vision-language)
+    Qwen2,           // Qwen 2/2.5
+    Qwen3,           // Qwen 3
+    Qwen3Moe,        // Qwen 3 MoE
+    Qwen3Next,       // Qwen 3 with GatedDeltaNet
+    Qwen35,          // Qwen 3.5 Hybrid (Transformer + GatedDeltaNet)
+    Qwen35VLM,       // Qwen 3.5 VLM (Qwen3-VL vision + Qwen3.5 hybrid text)
+    Qwen35Moe,       // Qwen 3.5 MoE Hybrid
+    Qwen35MoeVLM,    // Qwen 3.5 MoE VLM
+    Gemma,           // Gemma 1
+    Gemma2,          // Gemma 2
+    Gemma3,          // Gemma 3 (text-only)
+    Gemma4,          // Gemma 4 text-only route
+    Gemma3VLM,       // Gemma 3 VLM (vision-language)
+    Gemma4VLM,       // Gemma 4 VLM (vision-language)
+    LlavaVLM,        // LLaVA (CLIP/SigLIP + Llama/Qwen2)
+    LlavaBunnyVLM,   // LLaVA-Bunny (SigLIP + Qwen2)
+    AyaVisionVLM,    // Aya Vision (SigLIP + Cohere2)
+    PaliGemmaVLM,    // PaliGemma (SigLIP + Gemma)
+    PixtralVLM,      // Pixtral (ViT w/ 2D RoPE + Mistral)
+    Mistral3VLM,     // Mistral 3 VLM (Pixtral ViT + PatchMerger + Mistral)
+    Qwen2VL,         // Qwen2-VL (custom ViT + Qwen2 w/ MRoPE)
+    Qwen25VL,        // Qwen2.5-VL (windowed ViT + Qwen2 w/ MRoPE)
+    Qwen3VL,         // Qwen3-VL (ViT + interleaved MRoPE + DeepStack)
+    Qwen3VLMoe,      // Qwen3-VL-MoE (Qwen3-VL + MoE text backbone)
+    YoutuVLM,        // Youtu-VL (SigLIP2 windowed-attn + DeepSeek-V3-style MLA)
+    InternVLChatVLM, // InternVL (internvl_chat): InternViT + pixel-shuffle mlp1 + Qwen2 text
+    MiniCPMOVLM,     // MiniCPM-o (dynamic SigLIP + resampler + Qwen3-VL text)
+    Moondream3VLM,   // Moondream3 (custom ViT + custom text decoder, query/caption image path)
+    Gemma3n,         // Gemma 3n (text-only)
+    Gemma3nVLM,      // Gemma 3n VLM (MobileNetV5 + Gemma3n)
+    Phi,             // Phi 1/2
+    Phi3,            // Phi 3
+    Phi4MMVLM,       // Phi-4 Multimodal (SigLIP2 NaFlex + Phi4 text, image path only)
+    Phi4SigLipVLM,   // Phi-4 reasoning vision (SigLIP2 NaFlex + Phi3-style text)
+    Phi3VLM,         // Phi 3.5 Vision (CLIP + Phi3)
+    Molmo2VLM,       // Molmo2 (custom ViT + attention pooling + Molmo2 text)
+    MolmoPointVLM,   // Molmo-Point (custom ViT + point prediction + Molmo2 text)
+    Phi3Small,       // Phi 3 Small
+    PhiMoe,          // Phi MoE
 
     // MoE models
     GptOss,
@@ -584,6 +585,9 @@ impl ModelType {
             // ----- Other VLM (cross-family vision-language stacks) -----
             ModelType::LlavaVLM => ("LLaVA (CLIP/SigLIP + Llama/Qwen2)", "Other VLM"),
             ModelType::LlavaBunnyVLM => ("LLaVA-Bunny (SigLIP + Qwen2)", "Other VLM"),
+            ModelType::InternVLChatVLM => {
+                ("InternVL (InternViT + pixel-shuffle + Qwen2)", "Other VLM")
+            }
             ModelType::Molmo2VLM => ("Molmo 2 (custom ViT + Molmo2 text)", "Other VLM"),
             ModelType::MolmoPointVLM => {
                 ("Molmo-Point (point prediction + Molmo2 text)", "Other VLM")

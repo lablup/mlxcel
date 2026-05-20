@@ -25,6 +25,7 @@ use anyhow::Result;
 use image::DynamicImage;
 use mlxcel_core::MlxArray;
 
+use crate::internvl_prompt::insert_internvl_image_tokens;
 use crate::minicpmo_prompt::prepare_minicpmo_prompt_tokens;
 use crate::moondream3_prompt::{Moondream3PromptMode, prepare_moondream3_prompt_tokens};
 use crate::phi3v_prompt::prepare_phi3v_prompt_tokens;
@@ -104,6 +105,12 @@ pub enum VlmPreparationSummary {
     YoutuVL {
         image_blocks: usize,
         total_image_tokens: i32,
+    },
+    /// Issue #738: InternVL expanded each `<image>`/`<IMG_CONTEXT>` placeholder
+    /// into `<img> + <IMG_CONTEXT> * (num_image_token * tiles) + </img>`.
+    InternVL {
+        image_blocks: usize,
+        total_image_tokens: usize,
     },
     ImageBlocks(ImageTokenBlockStats),
 }
@@ -644,6 +651,39 @@ where
             let input_ids_arr = prompt_ids_array(prompt_tokens);
             let embeddings =
                 youtu.get_input_embeddings(&input_ids_arr, &pixel_values, &spatial_shapes);
+
+            Ok(Some(PreparedVlmEmbeddings {
+                embeddings,
+                preparation,
+            }))
+        }
+        VlmRuntimeRef::InternVL(internvl) => {
+            // Dynamic tiling: each image becomes `tiles` 448x448 tiles
+            // (plus a thumbnail when split). Each tile contributes
+            // `num_image_token` (256) image-feature tokens.
+            let (pixel_values, tiles_per_image) = internvl.processor.preprocess_with_tiles(images);
+
+            let preparation = insert_internvl_image_tokens(
+                prompt_tokens,
+                &tiles_per_image,
+                internvl.num_image_token,
+                internvl.img_start_token_id,
+                internvl.image_context_token_id,
+                internvl.img_end_token_id,
+            )
+            .map(|stats| VlmPreparationSummary::InternVL {
+                image_blocks: stats.image_blocks,
+                total_image_tokens: stats.total_image_tokens,
+            });
+
+            // InternVL processes all tiles for the request in one tower call;
+            // skip the opportunistic vision cache for the first integration
+            // (mirrors the Youtu-VL decision).
+            let _ = active_caches;
+            let _ = image_cache_keys;
+
+            let input_ids_arr = prompt_ids_array(prompt_tokens);
+            let embeddings = internvl.get_input_embeddings(&input_ids_arr, &pixel_values);
 
             Ok(Some(PreparedVlmEmbeddings {
                 embeddings,

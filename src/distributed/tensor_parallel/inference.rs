@@ -223,7 +223,11 @@ fn fallback_architecture(model_type: ModelType) -> &'static str {
         | ModelType::PixtralVLM
         | ModelType::Moondream3VLM
         | ModelType::Molmo2VLM
-        | ModelType::MolmoPointVLM => "llama",
+        | ModelType::MolmoPointVLM
+        // InternVL's text backbone is Qwen2 (llama family). TP is not
+        // supported for VLM-kind models (the loader refuses it earlier);
+        // this keeps the planner dispatch table from panicking.
+        | ModelType::InternVLChatVLM => "llama",
         // Youtu-VL is not currently supported by tensor-parallel inference;
         // we return a placeholder architecture string here so the planner
         // does not panic on the dispatch table lookup. The actual loader

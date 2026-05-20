@@ -1741,8 +1741,22 @@ impl BatchScheduler {
 
         let prompt_len = seq.prompt_tokens.len();
 
-        // Decide: chunked vs full prefill
-        if self.prefill_chunk_size > 0 && prompt_len > self.prefill_chunk_size {
+        // Decide: chunked vs full prefill.
+        //
+        // VLM image requests carry pre-merged input embeddings spanning the
+        // full (unpadded) prompt length and are consumed whole by
+        // `forward_with_embeddings` (which ignores `input_ids` length when
+        // embeddings are present). Chunked prefill would (a) feed the entire
+        // embedding sequence on chunk 0 while advancing `prefill_offset` by
+        // only one chunk — corrupting the cache/offset bookkeeping — and
+        // (b) re-introduce the NA-tile padding/embedding shape mismatch that
+        // `execute_full_prefill` guards against. So embeddings-bearing
+        // sequences always take the full-prefill path, mirroring the batched
+        // dispatch which already forces VLM requests to `execute_full_prefill`.
+        if self.prefill_chunk_size > 0
+            && prompt_len > self.prefill_chunk_size
+            && seq.vlm_embeddings.is_none()
+        {
             // Start chunked prefill: process first chunk
             self.start_chunked_prefill(seq);
         } else {
@@ -2302,26 +2316,37 @@ impl BatchScheduler {
         // On M5+ hardware pad the prompt to a 32-token tile boundary for
         // optimal Neural Accelerator throughput.
         let actual_len = suffix_tokens.len();
-        let (effective_tokens, pad_mask_opt) = if should_align_prefill() {
-            let padded_len = align_to_na_tile(actual_len);
-            if padded_len > actual_len {
-                let mut padded = suffix_tokens.clone();
-                padded.resize(padded_len, 0);
-                // The padding mask anchors to the adopted cache offset so
-                // the newly-prefilled positions see the correct KV-history
-                // positions on M5+ hardware.
-                let mask = create_padded_prefill_mask(
-                    actual_len as i32,
-                    padded_len as i32,
-                    seq.prefill_start_offset as i32,
-                );
-                (padded, Some(mask))
+        // VLM image requests inject pre-merged input embeddings at the real
+        // (unpadded) sequence length and run through `forward_with_embeddings`
+        // below. NA-tile alignment pads only the token-id vector and builds a
+        // matching padded mask — it does NOT pad the injected embeddings. So
+        // aligning here would hand the model a padded mask (e.g. 320x320) that
+        // cannot broadcast against the unpadded embeddings (e.g. [1,H,293,293]),
+        // aborting the process. Skip alignment when embeddings are present; the
+        // text backbone then builds a causal mask sized to the embeddings,
+        // matching the CLI generate path. Token-id (text-only) prefill — for
+        // VLMs and plain text models alike — is unaffected.
+        let (effective_tokens, pad_mask_opt) =
+            if should_align_prefill() && seq.vlm_embeddings.is_none() {
+                let padded_len = align_to_na_tile(actual_len);
+                if padded_len > actual_len {
+                    let mut padded = suffix_tokens.clone();
+                    padded.resize(padded_len, 0);
+                    // The padding mask anchors to the adopted cache offset so
+                    // the newly-prefilled positions see the correct KV-history
+                    // positions on M5+ hardware.
+                    let mask = create_padded_prefill_mask(
+                        actual_len as i32,
+                        padded_len as i32,
+                        seq.prefill_start_offset as i32,
+                    );
+                    (padded, Some(mask))
+                } else {
+                    (suffix_tokens.clone(), None)
+                }
             } else {
                 (suffix_tokens.clone(), None)
-            }
-        } else {
-            (suffix_tokens.clone(), None)
-        };
+            };
 
         let eff_len = effective_tokens.len() as i32;
         let input = mlxcel_core::from_slice_i32(&effective_tokens, &[1, eff_len]);

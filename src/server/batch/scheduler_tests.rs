@@ -448,6 +448,86 @@ fn chunked_prefill_interleaving_pattern() {
 }
 
 // -------------------------------------------------------------------
+// VLM embedding guard routing tests (issue #738 server-prefill fixes)
+// -------------------------------------------------------------------
+//
+// The two server-side guards added for InternVL (and all VLM image prefills)
+// ensure that sequences carrying pre-merged `vlm_embeddings` always take the
+// full-prefill path, never the chunked-prefill path, and never the NA-tile
+// padding path.
+//
+// The actual crashes (chunked-route corruption and NA-tile shape mismatch) are
+// M5 Neural-Accelerator-gated (`should_align_prefill()` is true only on M5 NA)
+// and therefore cannot be reproduced in unit tests on arbitrary CI hardware.
+// These tests instead verify the routing *decision* using a synthetic
+// `InputEmbeddings` value — following the pattern established in
+// `speculative_burst_tests.rs`.
+
+/// Mirror of the scheduler's chunked-prefill guard:
+/// `seq.vlm_embeddings.is_none()` must be true for chunked prefill to start.
+fn should_use_chunked_prefill(seq: &SequenceInfo, chunk_size: usize) -> bool {
+    chunk_size > 0 && seq.prompt_tokens.len() > chunk_size && seq.vlm_embeddings.is_none()
+}
+
+/// Mirror of the scheduler's NA-tile alignment guard:
+/// alignment is skipped when `vlm_embeddings` is present.
+fn should_apply_na_tile_alignment(seq: &SequenceInfo) -> bool {
+    // `should_align_prefill()` is true only on M5 NA hardware; here we test
+    // only the guard condition, not the hardware predicate.
+    seq.vlm_embeddings.is_none()
+}
+
+#[test]
+fn vlm_embedding_sequence_bypasses_chunked_prefill_route() {
+    use crate::vision::merge::InputEmbeddings;
+    use mlxcel_core::from_slice_f32;
+
+    let (mut seq, _rx) = make_test_sequence(42);
+    // Long prompt that would normally trigger chunked prefill.
+    seq.prompt_tokens = (0..512_i32).collect();
+
+    // Without embeddings: chunked prefill is eligible.
+    assert!(
+        should_use_chunked_prefill(&seq, 128),
+        "text-only long sequence must be eligible for chunked prefill"
+    );
+
+    // With embeddings (VLM image request): must bypass chunked prefill.
+    seq.vlm_embeddings = Some(InputEmbeddings {
+        inputs_embeds: from_slice_f32(&[0.0f32; 4], &[1, 1, 4]),
+        attention_mask_4d: None,
+    });
+    assert!(
+        !should_use_chunked_prefill(&seq, 128),
+        "VLM-embedding sequence must not enter the chunked-prefill route"
+    );
+}
+
+#[test]
+fn vlm_embedding_sequence_bypasses_na_tile_alignment() {
+    use crate::vision::merge::InputEmbeddings;
+    use mlxcel_core::from_slice_f32;
+
+    let (mut seq, _rx) = make_test_sequence(43);
+
+    // Without embeddings: NA-tile alignment is eligible (hardware gate aside).
+    assert!(
+        should_apply_na_tile_alignment(&seq),
+        "text-only sequence must be eligible for NA-tile alignment"
+    );
+
+    // With embeddings: NA-tile alignment must be skipped to avoid shape mismatch.
+    seq.vlm_embeddings = Some(InputEmbeddings {
+        inputs_embeds: from_slice_f32(&[0.0f32; 4], &[1, 1, 4]),
+        attention_mask_4d: None,
+    });
+    assert!(
+        !should_apply_na_tile_alignment(&seq),
+        "VLM-embedding sequence must bypass NA-tile alignment to prevent mask/embedding shape mismatch"
+    );
+}
+
+// -------------------------------------------------------------------
 // Eviction victim selection tests
 // -------------------------------------------------------------------
 

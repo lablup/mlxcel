@@ -148,6 +148,15 @@ fn print_preparation_summary(summary: VlmPreparationSummary) {
                 image_blocks, total_image_tokens
             );
         }
+        VlmPreparationSummary::InternVL {
+            image_blocks,
+            total_image_tokens,
+        } => {
+            println!(
+                "InternVL: inserted {} image block(s) ({} total image tokens)",
+                image_blocks, total_image_tokens
+            );
+        }
         VlmPreparationSummary::ImageBlocks(stats) => match stats.action {
             ImageTokenBlockAction::Expanded {
                 existing_image_count,
