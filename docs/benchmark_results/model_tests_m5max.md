@@ -14,7 +14,7 @@ Compatibility and performance testing for mlxcel models on **MacBook Pro M5 Max 
 | **mlx-vlm baseline** | 0.4.4 |
 | **Test Prompt** | "Hello, how are you today?" (text) / "What is in this image?" (VLM) |
 | **Max Tokens** | 100 |
-| **Test Date** | 2026-05-19 full sweep; 2026-05-20 Molmo v1 spot-check; 2026-05-20 Phi-3.5 spot-check; 2026-05-20 Gemma2/Gemma3 dense spot-check |
+| **Test Date** | 2026-05-19 full sweep; 2026-05-20 Molmo v1 spot-check; 2026-05-20 Phi-3.5 spot-check; 2026-05-20 Gemma2/Gemma3 dense spot-check; 2026-05-20 Jamba spot-check |
 | **Benchmark Status** | Full text + VLM sweep on mlxcel using `mlxcel-bench-decode`, 98 text + 98 VLM-mode passes with `--cooldown 15 --big-cooldown 15`. mlx-lm / mlx-vlm baseline sub-sweeps are from the same benchmark campaign; their CSV filenames carry 2026-05-18 because the run crossed calendar midnight. |
 
 ## Legend
@@ -157,7 +157,7 @@ Compatibility and performance testing for mlxcel models on **MacBook Pro M5 Max 
 |-------|------------|--------|---------|--------|-------------|-------|
 | mamba | Falcon-Mamba-7B-4bit | ⚠️ | 235.98 | 63.19 | **1.47x** | 2 tokens; chat template EOS |
 | mamba2 | mamba2-1.3b-4bit | ✅ | 877.90 | 184.69 | **1.80x** | 100 tokens |
-| jamba | Jamba-v0.1-4bit | ✅ | 833.76 | 182.50 | **1.64x** | 100 tokens |
+| jamba | Jamba-v0.1-4bit | ✅ | 591.61 | 215.84 | **1.93x** | 100 tokens; raw prompt 215.74 tok/s |
 
 ## Chinese / Asian Language Models
 
@@ -258,7 +258,7 @@ snapshot.
 
 - **Comparable text pairs**: 66 (models with >=5 generated tokens both sides)
 - **mlxcel >= mlx-lm**: 27 / 66 (41%)
-- **mlxcel >= 90% parity**: 61 / 66 (92%, the Phi-3.5 and Gemma dense fixes add Phi-3.5 mini, Gemma2-2b, and Gemma3-4b)
+- **mlxcel >= 90% parity**: 62 / 66 (94%, the Phi-3.5, Gemma dense, and Jamba fixes raise four models past 90%)
 - **Average mlxcel/mlx-lm**: 98% (median 99%, range 72%-127%)
 
 ### Aggregate (VLM, models with >=5 generated tokens both sides)
@@ -309,7 +309,7 @@ snapshot.
 | internlm2-7b-4bit | 117.25 | 117.98 | 99% |
 | internlm3-8b-4bit | 101.23 | FAIL | - |
 | internvl3-1b | - | FAIL | - |
-| jamba-v0.1-4bit | 182.50 | 219.38 | 83% |
+| jamba-v0.1-4bit | 215.84 | 219.38 | 98% |
 | llama-3.1-8b-4bit | 116.65 | 117.43 | 99% |
 | llama-3.1-8b-bf16 | 33.93 | 34.29 | 99% |
 | llama-3.2-1b-4bit | 546.81 | 578.64 | 94% |
@@ -549,6 +549,7 @@ increase and 96% of mlx-lm's 555.43 tok/s on the same prompt.
 - Molmo v1 (`molmo-7b`) spot-check on 2026-05-20: text-only measured 338.65 prefill / 78.74 decode tok/s (24 tokens), and the VLM path measured 2287.29 prefill / 84.99 decode tok/s (100 tokens) with the output now identifying the orange-square fixture instead of the pre-fix degenerate loop. The upstream mlx-vlm baseline row is a 1-token anomaly, so no percentage comparison is reported; a `molmo2-4b` no-regression check held at ~63 tok/s decode.
 - Phi-3.5 SuScaledRoPE spot-check on 2026-05-20: fusing the quantized QKV projection/split/reshape/transpose/SuScaledRoPE chain and scaling only the rotary prefix raised `phi-3.5-mini-4bit` from 164.03 to 204.63 tok/s decode (79% to 98% of mlx-lm) and `phi-3.5-vision-4bit` VLM from 123.07 to 168.77 tok/s decode (77% to 106% of mlx-vlm) while output stayed coherent. Guardrails held within noise: `phi-3-mini-4bit` 207.89, `phi-4-4bit` 63.86, and `phi-3.5-moe-4bit` 115.20 tok/s decode.
 - Gemma2/Gemma3 dense spot-check on 2026-05-20: aligning the Gemma2/Gemma3 dense MLP with mlx-lm's tanh-approx GeGLU (`nn.gelu_approx`) and fusing the quantized QKV preparation raised `gemma2-2b-4bit` from 196.72 to 241.96 tok/s decode (81% to 100% of mlx-lm) and `gemma3-4b-4bit` from 146.43 to 182.16 tok/s decode (81% to 100%), with the `gemma3-4b-4bit` VLM row rising from 127.61 to 159.58 tok/s. Guardrails held: `gemma-2b-4bit` 217.38 and `gemma3-1b-4bit` 399.65 tok/s decode.
+- Jamba hybrid decode spot-check on 2026-05-20: switching the attention block to the fused QKV projection plus the native GQA SDPA kernel, and adding a single-token fast path to the Mamba mixer that skips the sequential scan, raised `jamba-v0.1-4bit` from 182.50 to 215.84 tok/s decode (83% to 98% of mlx-lm), with the raw 100-token prompt measuring 215.74 tok/s.
 - Cooldown discipline on M5 Max: 15s general / 15s big-model cooldowns were sufficient for this back-to-back run on a freshly-built binary; longer cooldowns (`--cooldown 30 --big-cooldown 30`) remain the safer default for marathon sessions or when thermal headroom is uncertain.
 - Measurement noise on very fast small models remains high (qwen3.5-0.8b-4bit and
   similar can span ±15% across back-to-back runs because 100 tokens generate in

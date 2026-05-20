@@ -873,7 +873,7 @@ impl UnifiedLinear {
 ///                                           →  `k_dim = v_dim = n_kv_heads * head_dim`
 ///
 /// Used by: Llama3, Qwen2/3, Qwen3-VL, Qwen3-VL-MoE, Gemma v1/2/3, Mistral,
-/// Cohere2, StarCoder2, InternLM3
+/// Cohere2, StarCoder2, InternLM3, Jamba
 pub struct FusedQKVLinear {
     /// Single concatenated QKV projection weight.
     pub qkv_proj: UnifiedLinear,

@@ -22,8 +22,10 @@
 // - Mixed cache: KVCache for attention, MambaCache for Mamba
 
 use mlxcel_core::generate::LanguageModel;
-use mlxcel_core::layers::{KVCache, Linear, RMSNorm, UnifiedEmbedding, UnifiedLinear};
-use mlxcel_core::utils::{create_causal_mask, repeat_kv, silu, slice_axis, stack_arrays};
+use mlxcel_core::layers::{
+    FusedQKVLinear, KVCache, Linear, RMSNorm, UnifiedEmbedding, UnifiedLinear,
+};
+use mlxcel_core::utils::{create_causal_mask, silu, slice_axis, stack_arrays};
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr, concatenate};
 use serde::Deserialize;
@@ -427,9 +429,7 @@ impl FeedForward {
 
 // Jamba Attention.
 struct JambaAttention {
-    q_proj: UnifiedLinear,
-    k_proj: UnifiedLinear,
-    v_proj: UnifiedLinear,
+    qkv_proj: FusedQKVLinear,
     o_proj: UnifiedLinear,
     n_heads: usize,
     n_kv_heads: usize,
@@ -448,9 +448,7 @@ impl JambaAttention {
         let batch = shape[0];
         let seq_len = shape[1];
 
-        let queries = self.q_proj.forward(x);
-        let keys = self.k_proj.forward(x);
-        let values = self.v_proj.forward(x);
+        let (queries, keys, values) = self.qkv_proj.forward(x);
 
         // Reshape to [batch, seq, n_heads, head_dim]
         let queries = mlxcel_core::reshape(
@@ -478,29 +476,12 @@ impl JambaAttention {
             (keys, values)
         };
 
-        // Repeat KV for GQA if needed
-        let n_rep = self.n_heads / self.n_kv_heads;
-        let (keys, values) = if n_rep > 1 {
-            let keys = repeat_kv(&keys, n_rep as i32);
-            let values = repeat_kv(&values, n_rep as i32);
-            (keys, values)
-        } else {
-            (keys, values)
+        let mask_ptr = mask.map(|m| m as *const _).unwrap_or(std::ptr::null());
+        let output = unsafe {
+            mlxcel_core::layers::attention_from_ptr(
+                &queries, &keys, &values, self.scale, mask_ptr, 0.0, 0,
+            )
         };
-
-        // Scaled dot-product attention
-        let keys_t = mlxcel_core::transpose_axes(&keys, &[0, 1, 3, 2]);
-        let mut scores = mlxcel_core::matmul(&queries, &keys_t);
-        let scale_arr = mlxcel_core::full_f32(&[1], self.scale, mlxcel_core::array_dtype(&scores));
-        scores = mlxcel_core::multiply(&scores, &scale_arr);
-
-        // Apply mask
-        if let Some(m) = mask {
-            scores = mlxcel_core::add(&scores, m);
-        }
-
-        let weights = mlxcel_core::softmax(&scores, -1);
-        let output = mlxcel_core::matmul(&weights, &values);
 
         // Transpose back and reshape
         let output = mlxcel_core::transpose_axes(&output, &[0, 2, 1, 3]);
@@ -584,6 +565,30 @@ impl JambaMambaMixer {
         let delta_exp =
             mlxcel_core::reshape(&delta, &[batch, seq_len, self.intermediate_size as i32, 1]);
         let dt_a = mlxcel_core::exp(&mlxcel_core::multiply(&delta_exp, a));
+
+        if seq_len == 1 {
+            let new_state_t = mlxcel_core::squeeze_axis(&new_state, 1);
+            let dt_a_t = mlxcel_core::squeeze_axis(&dt_a, 1);
+            let updated_t = if let Some(prev) = state {
+                let prev_contrib = mlxcel_core::multiply(prev, &dt_a_t);
+                mlxcel_core::add(&prev_contrib, &new_state_t)
+            } else {
+                new_state_t
+            };
+
+            let c_t = mlxcel_core::squeeze_axis(&c, 1);
+            let c_exp = mlxcel_core::reshape(&c_t, &[batch, self.ssm_state_size as i32, 1]);
+            let y = mlxcel_core::matmul(&updated_t, &c_exp);
+            let y = mlxcel_core::squeeze_axis(&y, -1);
+            let y = mlxcel_core::expand_dims(&y, 1);
+
+            let d_reshaped =
+                mlxcel_core::reshape(&self.d_param, &[1, 1, self.intermediate_size as i32]);
+            let d_contrib = mlxcel_core::multiply(&d_reshaped, x);
+            let y = mlxcel_core::add(&y, &d_contrib);
+
+            return (y, updated_t);
+        }
 
         // Sequential scan through timesteps (runs regardless of initial state)
         // Python: for t in range(T): if state: new_state[:,t] = state*dtA[:,t] + new_state[:,t]; state = new_state[:,t]
@@ -1069,23 +1074,15 @@ impl JambaModel {
 
             // Build temporal block
             let temporal = if is_attn {
-                let q_proj = UnifiedLinear::from_weights(
+                let head_dim = config.get_head_dim();
+                let qkv_proj = FusedQKVLinear::from_weights_separate(
                     &weights,
-                    &format!("{}.self_attn.q_proj", prefix),
+                    &format!("{}.self_attn", prefix),
                     group_size,
                     bits,
-                )?;
-                let k_proj = UnifiedLinear::from_weights(
-                    &weights,
-                    &format!("{}.self_attn.k_proj", prefix),
-                    group_size,
-                    bits,
-                )?;
-                let v_proj = UnifiedLinear::from_weights(
-                    &weights,
-                    &format!("{}.self_attn.v_proj", prefix),
-                    group_size,
-                    bits,
+                    config.num_attention_heads as i32,
+                    config.num_key_value_heads as i32,
+                    head_dim as i32,
                 )?;
                 let o_proj = UnifiedLinear::from_weights(
                     &weights,
@@ -1095,14 +1092,12 @@ impl JambaModel {
                 )?;
 
                 TemporalBlock::Attention(JambaAttention {
-                    q_proj,
-                    k_proj,
-                    v_proj,
+                    qkv_proj,
                     o_proj,
                     n_heads: config.num_attention_heads,
                     n_kv_heads: config.num_key_value_heads,
-                    head_dim: config.get_head_dim(),
-                    scale: (config.get_head_dim() as f32).powf(-0.5),
+                    head_dim,
+                    scale: (head_dim as f32).powf(-0.5),
                 })
             } else {
                 let mamba_prefix = format!("{}.mamba", prefix);

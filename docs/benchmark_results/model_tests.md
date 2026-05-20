@@ -79,7 +79,7 @@ For Qwen2.5-0.5B, the 4-bit variant is the comparable row across both Apple Sili
 | Beating mlx-lm on M1 Ultra (text, >100%) | 36/40 (90%, 5-19 baseline) |
 | At 90%+ parity on M1 Ultra (text) | 40/40 (100%, 5-19 baseline) |
 | Beating mlx-lm on M5 Max (text, >=100%) | 27/66 (41%, 5-19 mlxcel vs 5-18 mlx-lm) |
-| At 90%+ parity on M5 Max (text) | 61/66 (92%, 5-19 mlxcel vs 5-18 mlx-lm) |
+| At 90%+ parity on M5 Max (text) | 62/66 (94%, 5-19 mlxcel vs 5-18 mlx-lm) |
 | Average vs mlx-lm on M5 Max (text) | 98% decode speed (median 99%, 5-19 mlxcel vs 5-18 mlx-lm) |
 | Average vs mlx-vlm on M5 Max (VLM) | 100% decode speed (median 100%, 20 comparable pairs) |
 
