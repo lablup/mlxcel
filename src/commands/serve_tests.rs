@@ -98,6 +98,11 @@ fn sample_args() -> crate::ServeArgs {
         speculative: mlxcel::cli::speculative_args::SpeculativeArgs::default(),
         decode_storage_backend: None,
         vision_cache_size: 20,
+        max_image_payload_size: mlxcel::server::DEFAULT_MAX_IMAGE_PAYLOAD_SIZE,
+        max_images_per_request: mlxcel::server::DEFAULT_MAX_IMAGES_PER_REQUEST,
+        max_image_width: mlxcel::server::DEFAULT_MAX_IMAGE_WIDTH,
+        max_image_height: mlxcel::server::DEFAULT_MAX_IMAGE_HEIGHT,
+        max_image_decode_alloc_bytes: mlxcel::server::DEFAULT_MAX_IMAGE_DECODE_ALLOC_BYTES,
         enable_elastic_pp: false,
         elastic_pp_drain_timeout: 120,
         elastic_pp_pressure_fraction: 0.92,
@@ -155,6 +160,23 @@ fn build_startup_input_propagates_decode_storage_backend() {
         input.decode_storage_backend,
         Some(mlxcel::server::DecodeStorageBackend::Paged)
     );
+}
+
+#[test]
+fn build_startup_input_propagates_image_limits() {
+    let mut args = sample_args();
+    args.max_image_payload_size = 1234;
+    args.max_images_per_request = 3;
+    args.max_image_width = 2048;
+    args.max_image_height = 1024;
+    args.max_image_decode_alloc_bytes = 16 * 1024 * 1024;
+
+    let input = build_startup_input(args).expect("resolve");
+    assert_eq!(input.max_image_payload_size, 1234);
+    assert_eq!(input.max_images_per_request, 3);
+    assert_eq!(input.max_image_width, 2048);
+    assert_eq!(input.max_image_height, 1024);
+    assert_eq!(input.max_image_decode_alloc_bytes, 16 * 1024 * 1024);
 }
 
 #[test]

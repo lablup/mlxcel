@@ -17,10 +17,12 @@ use std::io::Cursor;
 use image::{DynamicImage, ImageBuffer, ImageFormat, Rgb};
 
 use super::{
-    StreamingDecodeState, build_generation_result, decode_request_images, merge_config_stop_tokens,
-    parse_byte_fallback_token, safe_emit_boundary,
+    StreamingDecodeState, build_generation_result, decode_request_images,
+    decode_request_images_with_limits, merge_config_stop_tokens, parse_byte_fallback_token,
+    safe_emit_boundary,
 };
 use crate::SamplingConfig;
+use crate::server::media::ImageInputLimits;
 use crate::tokenizer::MlxcelTokenizer;
 
 fn encode_png_bytes() -> Vec<u8> {
@@ -28,6 +30,39 @@ fn encode_png_bytes() -> Vec<u8> {
     let mut cursor = Cursor::new(Vec::new());
     image.write_to(&mut cursor, ImageFormat::Png).unwrap();
     cursor.into_inner()
+}
+
+fn png_chunk(name: &[u8; 4], data: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(12 + data.len());
+    out.extend_from_slice(&(data.len() as u32).to_be_bytes());
+    out.extend_from_slice(name);
+    out.extend_from_slice(data);
+    out.extend_from_slice(&crc32(name, data).to_be_bytes());
+    out
+}
+
+fn crc32(name: &[u8; 4], data: &[u8]) -> u32 {
+    let mut crc = 0xffff_ffffu32;
+    for &byte in name.iter().chain(data.iter()) {
+        crc ^= u32::from(byte);
+        for _ in 0..8 {
+            let mask = 0u32.wrapping_sub(crc & 1);
+            crc = (crc >> 1) ^ (0xedb8_8320 & mask);
+        }
+    }
+    !crc
+}
+
+fn synthetic_png_bomb_header(width: u32, height: u32) -> Vec<u8> {
+    let mut ihdr = Vec::with_capacity(13);
+    ihdr.extend_from_slice(&width.to_be_bytes());
+    ihdr.extend_from_slice(&height.to_be_bytes());
+    ihdr.extend_from_slice(&[8, 2, 0, 0, 0]);
+
+    let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
+    png.extend_from_slice(&png_chunk(b"IHDR", &ihdr));
+    png.extend_from_slice(&png_chunk(b"IEND", &[]));
+    png
 }
 
 #[test]
@@ -48,6 +83,25 @@ fn decode_request_images_keeps_valid_images_and_rejects_all_invalid_input() {
 
     let err = decode_request_images(&[vec![1, 2, 3]]).unwrap_err();
     assert!(err.to_string().contains("Failed to decode any images"));
+}
+
+#[test]
+fn decode_request_images_rejects_decompression_bomb_header() {
+    let limits = ImageInputLimits {
+        max_width: 4096,
+        max_height: 4096,
+        max_decode_alloc_bytes: 32 * 1024 * 1024,
+        ..ImageInputLimits::default()
+    };
+    let err =
+        decode_request_images_with_limits(&[synthetic_png_bomb_header(100_000, 100_000)], limits)
+            .unwrap_err();
+
+    assert!(
+        err.to_string()
+            .contains("Image decode rejected by configured limits"),
+        "{err}"
+    );
 }
 
 #[test]

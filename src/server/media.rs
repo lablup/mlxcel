@@ -18,11 +18,15 @@
 //! request formats without growing individual route handlers. The helpers stay
 //! async so local file reads and remote URL fetches do not block Axum workers.
 
+use anyhow::{Context, Result, anyhow, bail};
 use base64::Engine;
 use futures::StreamExt;
 use std::{
     path::{Path, PathBuf},
-    sync::OnceLock,
+    sync::{
+        OnceLock,
+        atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering},
+    },
     time::Duration,
 };
 
@@ -91,8 +95,98 @@ impl ResolvedVideo {
     }
 }
 
+/// Maximum encoded image payload size after base64/HTTP/file resolution: 64 MiB.
+///
+/// This keeps common VLM uploads well inside the default while bounding the
+/// server memory committed before the image decoder can apply format-aware
+/// limits.
+pub const DEFAULT_MAX_IMAGE_PAYLOAD_SIZE: usize = 64 * 1024 * 1024;
+
+/// Maximum number of image content blocks accepted in one request.
+pub const DEFAULT_MAX_IMAGES_PER_REQUEST: usize = 16;
+
+/// Maximum decoded image width accepted by the server image decoder.
+pub const DEFAULT_MAX_IMAGE_WIDTH: u32 = 16_384;
+
+/// Maximum decoded image height accepted by the server image decoder.
+pub const DEFAULT_MAX_IMAGE_HEIGHT: u32 = 16_384;
+
+/// Maximum image-decoder allocation budget in bytes.
+pub const DEFAULT_MAX_IMAGE_DECODE_ALLOC_BYTES: u64 = 512 * 1024 * 1024;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ImageInputLimits {
+    pub max_payload_bytes: usize,
+    pub max_images_per_request: usize,
+    pub max_width: u32,
+    pub max_height: u32,
+    pub max_decode_alloc_bytes: u64,
+}
+
+impl Default for ImageInputLimits {
+    fn default() -> Self {
+        Self {
+            max_payload_bytes: DEFAULT_MAX_IMAGE_PAYLOAD_SIZE,
+            max_images_per_request: DEFAULT_MAX_IMAGES_PER_REQUEST,
+            max_width: DEFAULT_MAX_IMAGE_WIDTH,
+            max_height: DEFAULT_MAX_IMAGE_HEIGHT,
+            max_decode_alloc_bytes: DEFAULT_MAX_IMAGE_DECODE_ALLOC_BYTES,
+        }
+    }
+}
+
+impl ImageInputLimits {
+    #[must_use]
+    pub(crate) fn image_decode_limits(self) -> image::Limits {
+        let mut limits = image::Limits::default();
+        limits.max_image_width = Some(self.max_width);
+        limits.max_image_height = Some(self.max_height);
+        limits.max_alloc = Some(self.max_decode_alloc_bytes);
+        limits
+    }
+}
+
+static MAX_IMAGE_PAYLOAD_BYTES: AtomicUsize = AtomicUsize::new(DEFAULT_MAX_IMAGE_PAYLOAD_SIZE);
+static MAX_IMAGES_PER_REQUEST: AtomicUsize = AtomicUsize::new(DEFAULT_MAX_IMAGES_PER_REQUEST);
+static MAX_IMAGE_WIDTH: AtomicU32 = AtomicU32::new(DEFAULT_MAX_IMAGE_WIDTH);
+static MAX_IMAGE_HEIGHT: AtomicU32 = AtomicU32::new(DEFAULT_MAX_IMAGE_HEIGHT);
+static MAX_IMAGE_DECODE_ALLOC_BYTES: AtomicU64 =
+    AtomicU64::new(DEFAULT_MAX_IMAGE_DECODE_ALLOC_BYTES);
+
+pub(crate) fn configure_image_input_limits(limits: ImageInputLimits) {
+    MAX_IMAGE_PAYLOAD_BYTES.store(limits.max_payload_bytes, Ordering::Relaxed);
+    MAX_IMAGES_PER_REQUEST.store(limits.max_images_per_request, Ordering::Relaxed);
+    MAX_IMAGE_WIDTH.store(limits.max_width, Ordering::Relaxed);
+    MAX_IMAGE_HEIGHT.store(limits.max_height, Ordering::Relaxed);
+    MAX_IMAGE_DECODE_ALLOC_BYTES.store(limits.max_decode_alloc_bytes, Ordering::Relaxed);
+}
+
+#[must_use]
+pub(crate) fn current_image_input_limits() -> ImageInputLimits {
+    ImageInputLimits {
+        max_payload_bytes: MAX_IMAGE_PAYLOAD_BYTES.load(Ordering::Relaxed),
+        max_images_per_request: MAX_IMAGES_PER_REQUEST.load(Ordering::Relaxed),
+        max_width: MAX_IMAGE_WIDTH.load(Ordering::Relaxed),
+        max_height: MAX_IMAGE_HEIGHT.load(Ordering::Relaxed),
+        max_decode_alloc_bytes: MAX_IMAGE_DECODE_ALLOC_BYTES.load(Ordering::Relaxed),
+    }
+}
+
+#[cfg(test)]
 pub(crate) async fn extract_chat_image_data(request: &ChatCompletionRequest) -> Vec<Vec<u8>> {
-    collect_image_data(request.image_urls()).await
+    match try_extract_chat_image_data(request).await {
+        Ok(images) => images,
+        Err(err) => {
+            tracing::warn!("Failed to collect request images: {err:#}");
+            Vec::new()
+        }
+    }
+}
+
+pub(crate) async fn try_extract_chat_image_data(
+    request: &ChatCompletionRequest,
+) -> Result<Vec<Vec<u8>>> {
+    try_collect_image_data_with_limits(request.image_urls(), current_image_input_limits()).await
 }
 
 /// Environment variable holding the comma-separated list of canonical
@@ -638,25 +732,63 @@ async fn read_audio_input(input: &InputAudio) -> Option<Vec<u8>> {
 
     // data:audio/...;base64,... URI
     if data.starts_with("data:audio/") {
-        return validate_audio_size(decode_data_uri(data));
+        return validate_audio_size(
+            decode_data_uri_with_limit(data, "audio", MAX_AUDIO_PAYLOAD_SIZE)
+                .map_err(|err| {
+                    tracing::warn!("Failed to read audio data URI: {err:#}");
+                    err
+                })
+                .ok(),
+        );
     }
 
     // file:// prefix
     if let Some(path) = data.strip_prefix("file://") {
-        return validate_audio_size(read_local_image(Path::new(path)).await);
+        return validate_audio_size(
+            read_local_bytes_with_limit(Path::new(path), "audio", MAX_AUDIO_PAYLOAD_SIZE)
+                .await
+                .map_err(|err| {
+                    tracing::warn!("Failed to read audio file {}: {err:#}", path);
+                    err
+                })
+                .ok(),
+        );
     }
 
     // HTTP(S) URL
     if is_http_url(data) {
-        return validate_audio_size(fetch_remote_image(data).await);
+        return validate_audio_size(
+            fetch_remote_bytes_with_limit(data, "audio", MAX_AUDIO_PAYLOAD_SIZE)
+                .await
+                .map_err(|err| {
+                    tracing::warn!("Failed to fetch audio URL {data}: {err:#}");
+                    err
+                })
+                .ok(),
+        );
     }
 
     // Bare local path
     if Path::new(data).is_file() {
-        return validate_audio_size(read_local_image(Path::new(data)).await);
+        return validate_audio_size(
+            read_local_bytes_with_limit(Path::new(data), "audio", MAX_AUDIO_PAYLOAD_SIZE)
+                .await
+                .map_err(|err| {
+                    tracing::warn!("Failed to read audio file {data}: {err:#}");
+                    err
+                })
+                .ok(),
+        );
     }
 
     // Try as raw base64 data
+    if data.len() > max_base64_encoded_len(MAX_AUDIO_PAYLOAD_SIZE) {
+        tracing::warn!(
+            "Audio base64 payload is too large to fit the {} byte limit; rejecting",
+            MAX_AUDIO_PAYLOAD_SIZE
+        );
+        return None;
+    }
     match base64::engine::general_purpose::STANDARD.decode(data) {
         Ok(bytes) if !bytes.is_empty() => validate_audio_size(Some(bytes)),
         _ => {
@@ -681,101 +813,189 @@ fn validate_audio_size(data: Option<Vec<u8>>) -> Option<Vec<u8>> {
     }
 }
 
+#[cfg(test)]
 pub(crate) async fn collect_image_data<I, S>(urls: I) -> Vec<Vec<u8>>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    match try_collect_image_data_with_limits(urls, current_image_input_limits()).await {
+        Ok(images) => images,
+        Err(err) => {
+            tracing::warn!("Failed to collect image data: {err:#}");
+            Vec::new()
+        }
+    }
+}
+
+pub(crate) async fn try_collect_image_data_with_limits<I, S>(
+    urls: I,
+    limits: ImageInputLimits,
+) -> Result<Vec<Vec<u8>>>
 where
     I: IntoIterator<Item = S>,
     S: AsRef<str>,
 {
     let mut images = Vec::new();
 
-    for url in urls {
-        if let Some(bytes) = read_image_url(url.as_ref()).await {
-            images.push(bytes);
+    for (index, url) in urls.into_iter().enumerate() {
+        if index >= limits.max_images_per_request {
+            bail!(
+                "Too many image inputs: received at least {}, maximum is {}",
+                index + 1,
+                limits.max_images_per_request
+            );
+        }
+        match try_read_image_url_with_limits(url.as_ref(), limits).await {
+            Ok(Some(bytes)) => images.push(bytes),
+            Ok(None) => {}
+            Err(err) => {
+                tracing::warn!("Skipping invalid image input: {err:#}");
+            }
         }
     }
 
-    images
+    Ok(images)
 }
 
+#[cfg(test)]
 pub(crate) async fn read_image_url(url: &str) -> Option<Vec<u8>> {
-    if url.starts_with("data:image/") {
-        return decode_data_uri(url);
-    }
-
-    if let Some(path) = url.strip_prefix("file://") {
-        return read_local_image(Path::new(path)).await;
-    }
-
-    if is_http_url(url) {
-        return fetch_remote_image(url).await;
-    }
-
-    if Path::new(url).is_file() {
-        return read_local_image(Path::new(url)).await;
-    }
-
-    tracing::warn!("Unsupported image URL scheme: {}", url);
-    None
-}
-
-fn decode_data_uri(url: &str) -> Option<Vec<u8>> {
-    let Some((metadata, encoded_data)) = url.split_once(',') else {
-        tracing::warn!("Invalid data URI format");
-        return None;
-    };
-
-    if !metadata.ends_with(";base64") {
-        tracing::warn!("Unsupported data URI encoding: {}", metadata);
-        return None;
-    }
-
-    match base64::engine::general_purpose::STANDARD.decode(encoded_data) {
-        Ok(bytes) => Some(bytes),
+    match try_read_image_url_with_limits(url, current_image_input_limits()).await {
+        Ok(bytes) => bytes,
         Err(err) => {
-            tracing::warn!("Failed to decode base64 image: {}", err);
+            tracing::warn!("Failed to read image URL: {err:#}");
             None
         }
     }
+}
+
+pub(crate) async fn try_read_image_url_with_limits(
+    url: &str,
+    limits: ImageInputLimits,
+) -> Result<Option<Vec<u8>>> {
+    if url.starts_with("data:image/") {
+        return decode_data_uri_with_limit(url, "image", limits.max_payload_bytes).map(Some);
+    }
+
+    if let Some(path) = url.strip_prefix("file://") {
+        return read_local_bytes_with_limit(Path::new(path), "image", limits.max_payload_bytes)
+            .await
+            .map(Some);
+    }
+
+    if is_http_url(url) {
+        return fetch_remote_bytes_with_limit(url, "image", limits.max_payload_bytes)
+            .await
+            .map(Some);
+    }
+
+    if Path::new(url).is_file() {
+        return read_local_bytes_with_limit(Path::new(url), "image", limits.max_payload_bytes)
+            .await
+            .map(Some);
+    }
+
+    tracing::warn!("Unsupported image URL scheme: {}", url);
+    Ok(None)
+}
+
+fn decode_data_uri_with_limit(url: &str, kind: &str, max_size: usize) -> Result<Vec<u8>> {
+    let Some((metadata, encoded_data)) = url.split_once(',') else {
+        bail!("Invalid {kind} data URI format");
+    };
+
+    if !metadata.ends_with(";base64") {
+        bail!("Unsupported {kind} data URI encoding: {metadata}");
+    }
+
+    let max_encoded_len = max_base64_encoded_len(max_size);
+    if encoded_data.len() > max_encoded_len {
+        bail!(
+            "{kind} payload too large: base64 body is {} bytes, maximum decoded size is {} bytes",
+            encoded_data.len(),
+            max_size
+        );
+    }
+
+    match base64::engine::general_purpose::STANDARD.decode(encoded_data) {
+        Ok(bytes) => validate_payload_size(bytes, kind, max_size),
+        Err(err) => Err(anyhow!("Failed to decode base64 {kind}: {err}")),
+    }
+}
+
+fn max_base64_encoded_len(max_decoded_len: usize) -> usize {
+    max_decoded_len.div_ceil(3).saturating_mul(4)
 }
 
 fn is_http_url(url: &str) -> bool {
     url.starts_with("http://") || url.starts_with("https://")
 }
 
-async fn fetch_remote_image(url: &str) -> Option<Vec<u8>> {
+async fn fetch_remote_bytes_with_limit(url: &str, kind: &str, max_size: usize) -> Result<Vec<u8>> {
     let response = match http_image_client().get(url).send().await {
         Ok(response) => response,
-        Err(err) => {
-            tracing::warn!("Failed to fetch image URL {}: {}", url, err);
-            return None;
-        }
+        Err(err) => bail!("Failed to fetch {kind} URL {url}: {err}"),
     };
 
     let response = match response.error_for_status() {
         Ok(response) => response,
-        Err(err) => {
-            tracing::warn!("Image URL returned error status {}: {}", url, err);
-            return None;
-        }
+        Err(err) => bail!("{kind} URL returned error status {url}: {err}"),
     };
 
-    match response.bytes().await {
-        Ok(bytes) => Some(bytes.to_vec()),
-        Err(err) => {
-            tracing::warn!("Failed to read image response body {}: {}", url, err);
-            None
+    if let Some(content_length) = response.content_length()
+        && content_length > max_size as u64
+    {
+        bail!(
+            "{kind} payload too large: HTTP content-length is {} bytes, maximum is {} bytes",
+            content_length,
+            max_size
+        );
+    }
+
+    let mut bytes = Vec::new();
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.with_context(|| format!("Failed to read {kind} response body {url}"))?;
+        if bytes.len().saturating_add(chunk.len()) > max_size {
+            bail!(
+                "{kind} payload too large: response body exceeded {} bytes",
+                max_size
+            );
         }
+        bytes.extend_from_slice(&chunk);
+    }
+    Ok(bytes)
+}
+
+async fn read_local_bytes_with_limit(path: &Path, kind: &str, max_size: usize) -> Result<Vec<u8>> {
+    match tokio::fs::metadata(path).await {
+        Ok(meta) if meta.len() > max_size as u64 => {
+            bail!(
+                "{kind} payload too large: file {} is {} bytes, maximum is {} bytes",
+                path.display(),
+                meta.len(),
+                max_size
+            );
+        }
+        Ok(_) => {}
+        Err(err) => bail!("Failed to stat {kind} file {}: {err}", path.display()),
+    }
+
+    match tokio::fs::read(path).await {
+        Ok(bytes) => validate_payload_size(bytes, kind, max_size),
+        Err(err) => bail!("Failed to read {kind} file {}: {err}", path.display()),
     }
 }
 
-async fn read_local_image(path: &Path) -> Option<Vec<u8>> {
-    match tokio::fs::read(path).await {
-        Ok(bytes) => Some(bytes),
-        Err(err) => {
-            tracing::warn!("Failed to read image file {}: {}", path.display(), err);
-            None
-        }
+fn validate_payload_size(bytes: Vec<u8>, kind: &str, max_size: usize) -> Result<Vec<u8>> {
+    if bytes.len() > max_size {
+        bail!(
+            "{kind} payload too large: {} bytes, maximum is {} bytes",
+            bytes.len(),
+            max_size
+        );
     }
+    Ok(bytes)
 }
 
 fn http_image_client() -> &'static reqwest::Client {

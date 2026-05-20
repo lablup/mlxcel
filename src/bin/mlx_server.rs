@@ -624,6 +624,55 @@ struct ServerArgs {
     #[arg(long = "vision-cache-size", default_value_t = 20, value_name = "N")]
     vision_cache_size: usize,
 
+    /// Maximum encoded bytes accepted for each image input.
+    ///
+    /// Also reads `LLAMA_ARG_MAX_IMAGE_PAYLOAD_SIZE`.
+    #[arg(
+        long = "max-image-payload-size",
+        env = "LLAMA_ARG_MAX_IMAGE_PAYLOAD_SIZE",
+        default_value_t = mlxcel::server::DEFAULT_MAX_IMAGE_PAYLOAD_SIZE,
+        value_name = "BYTES"
+    )]
+    max_image_payload_size: usize,
+
+    /// Maximum number of image inputs accepted in one request.
+    ///
+    /// Also reads `LLAMA_ARG_MAX_IMAGES`.
+    #[arg(
+        long = "max-images",
+        env = "LLAMA_ARG_MAX_IMAGES",
+        default_value_t = mlxcel::server::DEFAULT_MAX_IMAGES_PER_REQUEST,
+        value_name = "N"
+    )]
+    max_images_per_request: usize,
+
+    /// Maximum decoded image width accepted by the VLM image decoder.
+    #[arg(
+        long = "max-image-width",
+        env = "LLAMA_ARG_MAX_IMAGE_WIDTH",
+        default_value_t = mlxcel::server::DEFAULT_MAX_IMAGE_WIDTH,
+        value_name = "PX"
+    )]
+    max_image_width: u32,
+
+    /// Maximum decoded image height accepted by the VLM image decoder.
+    #[arg(
+        long = "max-image-height",
+        env = "LLAMA_ARG_MAX_IMAGE_HEIGHT",
+        default_value_t = mlxcel::server::DEFAULT_MAX_IMAGE_HEIGHT,
+        value_name = "PX"
+    )]
+    max_image_height: u32,
+
+    /// Maximum decoder allocation budget for a single image.
+    #[arg(
+        long = "max-image-decode-alloc-bytes",
+        env = "LLAMA_ARG_MAX_IMAGE_DECODE_ALLOC_BYTES",
+        default_value_t = mlxcel::server::DEFAULT_MAX_IMAGE_DECODE_ALLOC_BYTES,
+        value_name = "BYTES"
+    )]
+    max_image_decode_alloc_bytes: u64,
+
     /// Enable experimental elastic pipeline-parallel repartitioning.
     ///
     /// When set, `mlxcel-server` constructs a repartition coordinator (see
@@ -1070,6 +1119,11 @@ fn build_startup_input(mut args: ServerArgs) -> anyhow::Result<ServerStartupInpu
         tp_embedding_mode: args.tp_embedding_mode,
         tp_lm_head_mode: args.tp_lm_head_mode,
         vision_cache_size: args.vision_cache_size,
+        max_image_payload_size: args.max_image_payload_size,
+        max_images_per_request: args.max_images_per_request,
+        max_image_width: args.max_image_width,
+        max_image_height: args.max_image_height,
+        max_image_decode_alloc_bytes: args.max_image_decode_alloc_bytes,
         enable_elastic_pp: args.enable_elastic_pp,
         elastic_pp_drain_timeout: args.elastic_pp_drain_timeout,
         elastic_pp_pressure_fraction: args.elastic_pp_pressure_fraction,

@@ -16,8 +16,9 @@ use std::fs;
 use std::path::PathBuf;
 
 use super::{
-    collect_image_data, extract_chat_image_data, extract_chat_video_paths_with_allowlist,
-    read_image_url, scan_insecure_allowlist_dirs,
+    ImageInputLimits, collect_image_data, extract_chat_image_data,
+    extract_chat_video_paths_with_allowlist, read_image_url, scan_insecure_allowlist_dirs,
+    try_collect_image_data_with_limits, try_read_image_url_with_limits,
 };
 use crate::server::types::request::VideoUrl;
 use crate::server::types::{
@@ -125,6 +126,38 @@ async fn collect_image_data_skips_invalid_entries() {
     ])
     .await;
     assert_eq!(images, vec![b"hello".to_vec()]);
+}
+
+#[tokio::test]
+async fn collect_image_data_rejects_too_many_images() {
+    let limits = ImageInputLimits {
+        max_images_per_request: 1,
+        ..ImageInputLimits::default()
+    };
+    let err = try_collect_image_data_with_limits(
+        [
+            "data:image/png;base64,aGVsbG8=",
+            "data:image/png;base64,d29ybGQ=",
+        ],
+        limits,
+    )
+    .await
+    .unwrap_err();
+
+    assert!(err.to_string().contains("Too many image inputs"));
+}
+
+#[tokio::test]
+async fn read_image_url_rejects_oversized_data_uri() {
+    let limits = ImageInputLimits {
+        max_payload_bytes: 2,
+        ..ImageInputLimits::default()
+    };
+    let err = try_read_image_url_with_limits("data:image/png;base64,aGVsbG8=", limits)
+        .await
+        .unwrap_err();
+
+    assert!(err.to_string().contains("image payload too large"));
 }
 
 #[tokio::test]

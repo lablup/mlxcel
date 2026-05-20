@@ -92,7 +92,9 @@ async fn prepare_chat_request_uses_template_output_and_extracts_images() {
     let processor =
         ChatTemplateProcessor::with_template("Prompt: {{ messages[0].content }}".to_string());
 
-    let prepared = prepare_chat_request(&processor, &request, None).await;
+    let prepared = prepare_chat_request(&processor, &request, None)
+        .await
+        .unwrap();
     assert_eq!(prepared.prompt, "Prompt: Look");
     assert_eq!(prepared.image_data, vec![b"hello".to_vec()]);
 }
@@ -108,7 +110,9 @@ async fn prepare_chat_request_falls_back_to_simple_prompt_on_template_error() {
     }]);
     let processor = ChatTemplateProcessor::with_template("{% if %}".to_string());
 
-    let prepared = prepare_chat_request(&processor, &request, None).await;
+    let prepared = prepare_chat_request(&processor, &request, None)
+        .await
+        .unwrap();
     assert_eq!(prepared.prompt, request.to_prompt());
 }
 
@@ -132,7 +136,9 @@ async fn h1_fallback_strips_think_blocks_when_preserve_thinking_false() {
     let request = three_turn_request_with_think_blocks();
     let processor = ChatTemplateProcessor::with_template(broken_template());
 
-    let prepared = prepare_chat_request(&processor, &request, None).await;
+    let prepared = prepare_chat_request(&processor, &request, None)
+        .await
+        .unwrap();
 
     assert!(
         !prepared.prompt.contains("<think>"),
@@ -176,7 +182,9 @@ async fn h1_fallback_preserves_think_blocks_when_preserve_thinking_true() {
 
     let processor = ChatTemplateProcessor::with_template(broken_template());
 
-    let prepared = prepare_chat_request(&processor, &request, None).await;
+    let prepared = prepare_chat_request(&processor, &request, None)
+        .await
+        .unwrap();
 
     assert!(
         prepared.prompt.contains("<think>"),
@@ -419,7 +427,9 @@ async fn preserve_thinking_false_strips_all_prior_think_blocks() {
     // are stripped (both are strictly before u3).
     let request = three_turn_request_with_think_blocks();
     let processor = ChatTemplateProcessor::with_template(dump_template());
-    let prepared = prepare_chat_request(&processor, &request, None).await;
+    let prepared = prepare_chat_request(&processor, &request, None)
+        .await
+        .unwrap();
 
     // Neither think content nor markers should remain.
     assert!(
@@ -446,7 +456,9 @@ async fn preserve_thinking_true_retains_all_think_blocks() {
     request.chat_template_kwargs = Some(map);
 
     let processor = ChatTemplateProcessor::with_template(dump_template());
-    let prepared = prepare_chat_request(&processor, &request, None).await;
+    let prepared = prepare_chat_request(&processor, &request, None)
+        .await
+        .unwrap();
 
     // All think blocks retained.
     assert!(prepared.prompt.contains("<think>"));
@@ -473,7 +485,9 @@ async fn preserve_thinking_via_extra_body_nested_works() {
     request.extra_body = Some(extra);
 
     let processor = ChatTemplateProcessor::with_template(dump_template());
-    let prepared = prepare_chat_request(&processor, &request, None).await;
+    let prepared = prepare_chat_request(&processor, &request, None)
+        .await
+        .unwrap();
     assert!(prepared.prompt.contains("<think>"));
 }
 
@@ -489,7 +503,9 @@ async fn preserve_thinking_via_extra_body_flat_dashscope_works() {
     request.extra_body = Some(extra);
 
     let processor = ChatTemplateProcessor::with_template(dump_template());
-    let prepared = prepare_chat_request(&processor, &request, None).await;
+    let prepared = prepare_chat_request(&processor, &request, None)
+        .await
+        .unwrap();
     assert!(prepared.prompt.contains("<think>"));
 }
 
@@ -500,7 +516,9 @@ async fn server_default_preserve_thinking_applies_when_request_empty() {
     let server_default =
         ChatTemplateKwargs::from_json_str(r#"{"preserve_thinking": true}"#).unwrap();
     let processor = ChatTemplateProcessor::with_template(dump_template());
-    let prepared = prepare_chat_request(&processor, &request, Some(&server_default)).await;
+    let prepared = prepare_chat_request(&processor, &request, Some(&server_default))
+        .await
+        .unwrap();
     assert!(prepared.prompt.contains("<think>"));
 }
 
@@ -519,7 +537,9 @@ async fn per_request_overrides_server_default_for_single_key() {
     let server_default =
         ChatTemplateKwargs::from_json_str(r#"{"preserve_thinking": true}"#).unwrap();
     let processor = ChatTemplateProcessor::with_template(dump_template());
-    let prepared = prepare_chat_request(&processor, &request, Some(&server_default)).await;
+    let prepared = prepare_chat_request(&processor, &request, Some(&server_default))
+        .await
+        .unwrap();
     assert!(
         !prepared.prompt.contains("<think>"),
         "per-request false must override server default true"
@@ -626,8 +646,12 @@ async fn prefix_stability_across_turns_when_preserve_thinking_true() {
         params: SamplingParams::default(),
     };
 
-    let prep_t2 = prepare_chat_request(&processor, &request_t2, None).await;
-    let prep_t3 = prepare_chat_request(&processor, &request_t3, None).await;
+    let prep_t2 = prepare_chat_request(&processor, &request_t2, None)
+        .await
+        .unwrap();
+    let prep_t3 = prepare_chat_request(&processor, &request_t3, None)
+        .await
+        .unwrap();
 
     // Prefix stability: prep_t3 starts with prep_t2's rendering. This
     // guarantees the KV cache built for turn 2 can be reused as a prefix
@@ -714,7 +738,9 @@ async fn top_level_wins_over_extra_body_when_both_present() {
     request.extra_body = Some(extra);
 
     let processor = ChatTemplateProcessor::with_template(dump_template());
-    let prepared = prepare_chat_request(&processor, &request, None).await;
+    let prepared = prepare_chat_request(&processor, &request, None)
+        .await
+        .unwrap();
     // Top-level says true → think blocks retained despite extra_body saying false.
     assert!(prepared.prompt.contains("<think>"));
 }
@@ -757,7 +783,9 @@ async fn rolling_checkpoint_tolerates_tool_turn_in_middle() {
     let processor = ChatTemplateProcessor::with_template(dump_template());
     // preserve_thinking=false (default): threshold = index 2 (last "user"),
     // strip only the assistant message at index 1.
-    let prepared = prepare_chat_request(&processor, &request, None).await;
+    let prepared = prepare_chat_request(&processor, &request, None)
+        .await
+        .unwrap();
     assert!(
         !prepared.prompt.contains("<think>"),
         "think in first assistant reply must be stripped"
@@ -778,7 +806,9 @@ async fn flattened_openai_extra_body_preserve_thinking_reaches_request_kwargs() 
     );
 
     let processor = ChatTemplateProcessor::with_template(dump_template());
-    let prepared = prepare_chat_request(&processor, &request, None).await;
+    let prepared = prepare_chat_request(&processor, &request, None)
+        .await
+        .unwrap();
     assert!(prepared.prompt.contains("<think>"));
     assert!(prepared.prompt.contains("calc 2+2"));
     assert!(prepared.prompt.contains("calc 3+3"));
@@ -827,7 +857,9 @@ async fn rolling_checkpoint_ignores_pseudo_user_tool_response_anchor() {
     ];
     let request = request_with_messages(messages);
     let processor = ChatTemplateProcessor::with_template(dump_template());
-    let prepared = prepare_chat_request(&processor, &request, None).await;
+    let prepared = prepare_chat_request(&processor, &request, None)
+        .await
+        .unwrap();
 
     assert!(
         !prepared.prompt.contains("plan 1"),
@@ -973,7 +1005,9 @@ async fn prompt_cache_on_defaults_preserve_thinking_to_true() {
     let request = three_turn_request_with_think_blocks();
     let processor = ChatTemplateProcessor::with_template(dump_template());
     let prepared =
-        prepare_chat_request_with_cache(&processor, &request, None, /* cache */ true).await;
+        prepare_chat_request_with_cache(&processor, &request, None, /* cache */ true)
+            .await
+            .unwrap();
 
     assert!(
         prepared.prompt.contains("<think>"),
@@ -998,7 +1032,9 @@ async fn prompt_cache_on_respects_explicit_false_override() {
 
     let processor = ChatTemplateProcessor::with_template(dump_template());
     let prepared =
-        prepare_chat_request_with_cache(&processor, &request, None, /* cache */ true).await;
+        prepare_chat_request_with_cache(&processor, &request, None, /* cache */ true)
+            .await
+            .unwrap();
 
     assert!(
         !prepared.prompt.contains("<think>"),
@@ -1024,7 +1060,9 @@ async fn prompt_cache_on_respects_explicit_false_via_extra_body() {
 
     let processor = ChatTemplateProcessor::with_template(dump_template());
     let prepared =
-        prepare_chat_request_with_cache(&processor, &request, None, /* cache */ true).await;
+        prepare_chat_request_with_cache(&processor, &request, None, /* cache */ true)
+            .await
+            .unwrap();
 
     assert!(
         !prepared.prompt.contains("<think>"),
@@ -1039,7 +1077,9 @@ async fn prompt_cache_off_preserves_pre_422_behavior() {
     // strip) applies.
     let request = three_turn_request_with_think_blocks();
     let processor = ChatTemplateProcessor::with_template(dump_template());
-    let prepared = prepare_chat_request(&processor, &request, None).await;
+    let prepared = prepare_chat_request(&processor, &request, None)
+        .await
+        .unwrap();
     assert!(
         !prepared.prompt.contains("<think>"),
         "cache off → pre-#422 strip remains the default"
@@ -1060,7 +1100,8 @@ async fn prompt_cache_on_respects_server_default_false() {
         Some(&server_default),
         /* cache */ true,
     )
-    .await;
+    .await
+    .unwrap();
     assert!(
         !prepared.prompt.contains("<think>"),
         "explicit server default false must survive the cache-on defaulting"
@@ -1100,7 +1141,9 @@ async fn preserve_thinking_defaulting_logs_once_per_session() {
     let processor = ChatTemplateProcessor::with_template(dump_template());
 
     // First call should add our session id.
-    let _ = prepare_chat_request_with_cache(&processor, &request, None, /* cache */ true).await;
+    let _ = prepare_chat_request_with_cache(&processor, &request, None, /* cache */ true)
+        .await
+        .unwrap();
     {
         let set = log_once_sessions().lock().expect("log-once mutex");
         assert!(
@@ -1113,7 +1156,9 @@ async fn preserve_thinking_defaulting_logs_once_per_session() {
     // Second call with the same session id must not grow the set at all
     // (the HashSet::insert call returns false, which is the dedup signal
     // the production code relies on to skip the log).
-    let _ = prepare_chat_request_with_cache(&processor, &request, None, /* cache */ true).await;
+    let _ = prepare_chat_request_with_cache(&processor, &request, None, /* cache */ true)
+        .await
+        .unwrap();
     {
         let set = log_once_sessions().lock().expect("log-once mutex");
         // The set may have been concurrently modified by parallel tests
@@ -1146,11 +1191,15 @@ async fn preserve_thinking_defaulting_logs_per_distinct_session() {
 
     let mut req_a = three_turn_request_with_think_blocks();
     req_a.prompt_cache_key = Some(uniq_a.clone());
-    let _ = prepare_chat_request_with_cache(&processor, &req_a, None, true).await;
+    let _ = prepare_chat_request_with_cache(&processor, &req_a, None, true)
+        .await
+        .unwrap();
 
     let mut req_b = three_turn_request_with_think_blocks();
     req_b.prompt_cache_key = Some(uniq_b.clone());
-    let _ = prepare_chat_request_with_cache(&processor, &req_b, None, true).await;
+    let _ = prepare_chat_request_with_cache(&processor, &req_b, None, true)
+        .await
+        .unwrap();
 
     let set = log_once_sessions().lock().expect("log-once mutex");
     assert!(
@@ -1271,7 +1320,9 @@ async fn chat_request_drops_temp_files_on_completion() {
     let processor = ChatTemplateProcessor::with_template(
         "{% for m in messages %}{{ m.content }}{% endfor %}".to_string(),
     );
-    let prepared = prepare_chat_request(&processor, &request, None).await;
+    let prepared = prepare_chat_request(&processor, &request, None)
+        .await
+        .unwrap();
 
     // Resolved: exactly one entry whose temp_guard is `Some` (data:video
     // is server-owned and must carry the Drop guard alongside it).

@@ -154,6 +154,11 @@ pub struct ServerStartupInput {
     /// Maximum number of cached post-projection image features per loaded model.
     /// `0` disables the cache entirely.
     pub vision_cache_size: usize,
+    pub max_image_payload_size: usize,
+    pub max_images_per_request: usize,
+    pub max_image_width: u32,
+    pub max_image_height: u32,
+    pub max_image_decode_alloc_bytes: u64,
 
     // Elastic pipeline-parallel repartitioning (issue #349).
     /// Enable `--enable-elastic-pp`. Off by default.
@@ -535,6 +540,11 @@ impl ServerStartupInput {
             tp_embedding_mode: self.tp_embedding_mode,
             tp_lm_head_mode: self.tp_lm_head_mode,
             vision_cache_size: self.vision_cache_size,
+            max_image_payload_size: self.max_image_payload_size,
+            max_images_per_request: self.max_images_per_request,
+            max_image_width: self.max_image_width,
+            max_image_height: self.max_image_height,
+            max_image_decode_alloc_bytes: self.max_image_decode_alloc_bytes,
             enable_elastic_pp: self.enable_elastic_pp,
             elastic_pp_drain_timeout: self.elastic_pp_drain_timeout,
             elastic_pp_pressure_fraction: self.elastic_pp_pressure_fraction,

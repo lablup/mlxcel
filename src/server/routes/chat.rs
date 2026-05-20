@@ -352,7 +352,8 @@ async fn non_stream_chat_completion(
         state.config.chat_template_kwargs.as_ref(),
         prompt_cache_enabled,
     )
-    .await;
+    .await
+    .map_err(|err| ErrorResponse::new(err.to_string(), "invalid_request_error"))?;
     let primed_open_thinking = is_prompt_primed_open_thinking(&prepared.prompt);
     let mut options = build_generate_options(&request.params, &state.config);
     options.priority = priority;
@@ -514,6 +515,12 @@ async fn stream_chat_completion(
         prompt_cache_enabled,
     )
     .await;
+    let prepared = match prepared {
+        Ok(prepared) => prepared,
+        Err(err) => {
+            return ErrorResponse::new(err.to_string(), "invalid_request_error").into_response();
+        }
+    };
     let primed_open_thinking = is_prompt_primed_open_thinking(&prepared.prompt);
     let mut options = build_generate_options(&request.params, &state.config);
     options.priority = priority;

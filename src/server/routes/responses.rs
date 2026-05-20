@@ -183,6 +183,12 @@ async fn non_stream_create_response(
         prompt_cache_enabled,
     )
     .await;
+    let prepared = match prepared {
+        Ok(prepared) => prepared,
+        Err(err) => {
+            return ErrorResponse::new(err.to_string(), "invalid_request_error").into_response();
+        }
+    };
     let mut options = build_generate_options(&translated.chat_request.params, &state.config);
     options.priority = priority;
     options.reasoning_budget = budget_override;
@@ -274,6 +280,12 @@ async fn stream_create_response(
         prompt_cache_enabled,
     )
     .await;
+    let prepared = match prepared {
+        Ok(prepared) => prepared,
+        Err(err) => {
+            return ErrorResponse::new(err.to_string(), "invalid_request_error").into_response();
+        }
+    };
     let mut options = build_generate_options(&translated.chat_request.params, &state.config);
     options.priority = priority;
     options.reasoning_budget = budget_override;

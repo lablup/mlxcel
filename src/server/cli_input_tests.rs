@@ -102,6 +102,11 @@ fn sample_input() -> ServerStartupInput {
         tp_embedding_mode: "replicated".to_string(),
         tp_lm_head_mode: "replicated".to_string(),
         vision_cache_size: 20,
+        max_image_payload_size: crate::server::DEFAULT_MAX_IMAGE_PAYLOAD_SIZE,
+        max_images_per_request: crate::server::DEFAULT_MAX_IMAGES_PER_REQUEST,
+        max_image_width: crate::server::DEFAULT_MAX_IMAGE_WIDTH,
+        max_image_height: crate::server::DEFAULT_MAX_IMAGE_HEIGHT,
+        max_image_decode_alloc_bytes: crate::server::DEFAULT_MAX_IMAGE_DECODE_ALLOC_BYTES,
         enable_elastic_pp: false,
         elastic_pp_drain_timeout: 120,
         elastic_pp_pressure_fraction: 0.92,
@@ -175,6 +180,23 @@ fn into_startup_config_normalizes_edge_only_flags() {
         Some(PathBuf::from("models/draft"))
     );
     assert_eq!(startup.log_file, Some(PathBuf::from("server.log")));
+}
+
+#[test]
+fn into_startup_config_propagates_image_limits() {
+    let mut input = sample_input();
+    input.max_image_payload_size = 8192;
+    input.max_images_per_request = 4;
+    input.max_image_width = 4096;
+    input.max_image_height = 2048;
+    input.max_image_decode_alloc_bytes = 64 * 1024 * 1024;
+
+    let startup = input.into_startup_config().expect("valid startup input");
+    assert_eq!(startup.max_image_payload_size, 8192);
+    assert_eq!(startup.max_images_per_request, 4);
+    assert_eq!(startup.max_image_width, 4096);
+    assert_eq!(startup.max_image_height, 2048);
+    assert_eq!(startup.max_image_decode_alloc_bytes, 64 * 1024 * 1024);
 }
 
 #[test]

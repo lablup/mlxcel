@@ -17,6 +17,7 @@
 //! `ModelProvider` owns the public channel API, while this module owns the
 //! long-lived worker thread behavior plus the image/VLM preparation helpers.
 
+use std::io::Cursor;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, mpsc};
@@ -24,11 +25,12 @@ use std::thread;
 use std::time::Instant;
 
 use anyhow::{Result, anyhow};
-use image::DynamicImage;
+use image::{DynamicImage, ImageError, ImageReader};
 
 use crate::LoadedModel;
 use crate::SamplingConfig;
 use crate::server::batch::BatchObservability;
+use crate::server::media::{ImageInputLimits, current_image_input_limits};
 use crate::server::state::BatchMetrics;
 use crate::tokenizer::MlxcelTokenizer;
 use crate::vision::feature_cache::ModelVisionCaches;
@@ -527,23 +529,45 @@ pub(crate) fn merge_config_stop_tokens(
 }
 
 pub(crate) fn decode_request_images(images: &[Vec<u8>]) -> Result<Vec<DynamicImage>> {
-    let decoded_images: Vec<DynamicImage> = images
-        .iter()
-        .filter_map(|bytes| {
-            image::load_from_memory(bytes)
-                .map_err(|err| {
-                    tracing::warn!("Failed to decode image: {}", err);
-                    err
-                })
-                .ok()
-        })
-        .collect();
+    decode_request_images_with_limits(images, current_image_input_limits())
+}
+
+pub(crate) fn decode_request_images_with_limits(
+    images: &[Vec<u8>],
+    limits: ImageInputLimits,
+) -> Result<Vec<DynamicImage>> {
+    let mut decoded_images: Vec<DynamicImage> = Vec::with_capacity(images.len());
+
+    for bytes in images {
+        match decode_request_image_with_limits(bytes, limits) {
+            Ok(image) => decoded_images.push(image),
+            Err(err) if is_image_limit_error(&err) => {
+                return Err(anyhow!("Image decode rejected by configured limits: {err}"));
+            }
+            Err(err) => {
+                tracing::warn!("Failed to decode image: {}", err);
+            }
+        }
+    }
 
     if decoded_images.is_empty() {
         Err(anyhow!("Failed to decode any images"))
     } else {
         Ok(decoded_images)
     }
+}
+
+fn decode_request_image_with_limits(
+    bytes: &[u8],
+    limits: ImageInputLimits,
+) -> image::ImageResult<DynamicImage> {
+    let mut reader = ImageReader::new(Cursor::new(bytes)).with_guessed_format()?;
+    reader.limits(limits.image_decode_limits());
+    reader.decode()
+}
+
+fn is_image_limit_error(err: &ImageError) -> bool {
+    matches!(err, ImageError::Limits(_))
 }
 
 pub(crate) fn prepare_request_vlm_embeddings(

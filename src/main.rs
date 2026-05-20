@@ -793,6 +793,55 @@ pub(crate) struct ServeArgs {
     #[arg(long = "vision-cache-size", default_value_t = 20, value_name = "N")]
     vision_cache_size: usize,
 
+    /// Maximum encoded bytes accepted for each image input.
+    ///
+    /// Also reads `LLAMA_ARG_MAX_IMAGE_PAYLOAD_SIZE`.
+    #[arg(
+        long = "max-image-payload-size",
+        env = "LLAMA_ARG_MAX_IMAGE_PAYLOAD_SIZE",
+        default_value_t = mlxcel::server::DEFAULT_MAX_IMAGE_PAYLOAD_SIZE,
+        value_name = "BYTES"
+    )]
+    max_image_payload_size: usize,
+
+    /// Maximum number of image inputs accepted in one request.
+    ///
+    /// Also reads `LLAMA_ARG_MAX_IMAGES`.
+    #[arg(
+        long = "max-images",
+        env = "LLAMA_ARG_MAX_IMAGES",
+        default_value_t = mlxcel::server::DEFAULT_MAX_IMAGES_PER_REQUEST,
+        value_name = "N"
+    )]
+    max_images_per_request: usize,
+
+    /// Maximum decoded image width accepted by the VLM image decoder.
+    #[arg(
+        long = "max-image-width",
+        env = "LLAMA_ARG_MAX_IMAGE_WIDTH",
+        default_value_t = mlxcel::server::DEFAULT_MAX_IMAGE_WIDTH,
+        value_name = "PX"
+    )]
+    max_image_width: u32,
+
+    /// Maximum decoded image height accepted by the VLM image decoder.
+    #[arg(
+        long = "max-image-height",
+        env = "LLAMA_ARG_MAX_IMAGE_HEIGHT",
+        default_value_t = mlxcel::server::DEFAULT_MAX_IMAGE_HEIGHT,
+        value_name = "PX"
+    )]
+    max_image_height: u32,
+
+    /// Maximum decoder allocation budget for a single image.
+    #[arg(
+        long = "max-image-decode-alloc-bytes",
+        env = "LLAMA_ARG_MAX_IMAGE_DECODE_ALLOC_BYTES",
+        default_value_t = mlxcel::server::DEFAULT_MAX_IMAGE_DECODE_ALLOC_BYTES,
+        value_name = "BYTES"
+    )]
+    max_image_decode_alloc_bytes: u64,
+
     /// Enable experimental elastic pipeline-parallel repartitioning.
     #[arg(long = "enable-elastic-pp", default_value_t = false)]
     enable_elastic_pp: bool,

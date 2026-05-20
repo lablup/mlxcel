@@ -193,6 +193,17 @@ pub struct ServerStartupConfig {
     /// [`DEFAULT_VISION_CACHE_SIZE`](crate::vision::feature_cache::DEFAULT_VISION_CACHE_SIZE).
     pub vision_cache_size: usize,
 
+    /// Maximum encoded image payload bytes accepted per image content block.
+    pub max_image_payload_size: usize,
+    /// Maximum number of image content blocks accepted in one request.
+    pub max_images_per_request: usize,
+    /// Maximum decoded image width passed to `image::Limits`.
+    pub max_image_width: u32,
+    /// Maximum decoded image height passed to `image::Limits`.
+    pub max_image_height: u32,
+    /// Maximum decoder allocation budget passed to `image::Limits`.
+    pub max_image_decode_alloc_bytes: u64,
+
     // Elastic pipeline-parallel repartitioning (issue #349).
     /// When `true`, the runtime constructs the elastic repartition coordinator
     /// described in `docs_internal/architecture/elastic-pipeline-repartition-
@@ -394,6 +405,11 @@ impl Default for ServerStartupConfig {
             tp_embedding_mode: "replicated".to_string(),
             tp_lm_head_mode: "replicated".to_string(),
             vision_cache_size: crate::vision::feature_cache::DEFAULT_VISION_CACHE_SIZE,
+            max_image_payload_size: crate::server::DEFAULT_MAX_IMAGE_PAYLOAD_SIZE,
+            max_images_per_request: crate::server::DEFAULT_MAX_IMAGES_PER_REQUEST,
+            max_image_width: crate::server::DEFAULT_MAX_IMAGE_WIDTH,
+            max_image_height: crate::server::DEFAULT_MAX_IMAGE_HEIGHT,
+            max_image_decode_alloc_bytes: crate::server::DEFAULT_MAX_IMAGE_DECODE_ALLOC_BYTES,
             enable_elastic_pp: false,
             elastic_pp_drain_timeout: 120,
             elastic_pp_pressure_fraction: 0.92,
@@ -1243,6 +1259,13 @@ fn install_surgery_pipeline_for_server(startup: &ServerStartupConfig) -> Result<
 /// Shared entry point used by both `mlxcel serve` and `mlxcel-server`.
 pub async fn start_server(mut startup: ServerStartupConfig) -> Result<()> {
     initialize_server_logging(&startup)?;
+    super::media::configure_image_input_limits(super::media::ImageInputLimits {
+        max_payload_bytes: startup.max_image_payload_size,
+        max_images_per_request: startup.max_images_per_request,
+        max_width: startup.max_image_width,
+        max_height: startup.max_image_height,
+        max_decode_alloc_bytes: startup.max_image_decode_alloc_bytes,
+    });
 
     // Axis A weight-load surgery (Epic #363, issue #371). Install the
     // pipeline *before* worker startup so the spawned model loader

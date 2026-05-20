@@ -60,13 +60,15 @@
 use std::collections::HashSet;
 use std::sync::{Mutex, OnceLock};
 
+use anyhow::Result;
+
 use super::chat_template::{ChatMessage, ChatTemplateProcessor};
 use super::chat_template_kwargs::{
     ChatTemplateKwargs, extract_request_kwargs, merge_server_and_request, strip_rolling_checkpoint,
     strip_think_block,
 };
 use super::media::{
-    ResolvedVideo, extract_chat_audio_data, extract_chat_image_data, extract_chat_video_paths,
+    ResolvedVideo, extract_chat_audio_data, extract_chat_video_paths, try_extract_chat_image_data,
 };
 use super::prompt_cache::key::resolve_session_key;
 use super::types::ChatCompletionRequest;
@@ -120,7 +122,7 @@ pub(crate) async fn prepare_chat_request(
     processor: &ChatTemplateProcessor,
     request: &ChatCompletionRequest,
     server_default_kwargs: Option<&ChatTemplateKwargs>,
-) -> PreparedChatRequest {
+) -> Result<PreparedChatRequest> {
     prepare_chat_request_with_cache(processor, request, server_default_kwargs, false).await
 }
 
@@ -141,7 +143,7 @@ pub(crate) async fn prepare_chat_request_with_cache(
     request: &ChatCompletionRequest,
     server_default_kwargs: Option<&ChatTemplateKwargs>,
     prompt_cache_enabled: bool,
-) -> PreparedChatRequest {
+) -> Result<PreparedChatRequest> {
     // Determine effective tools based on tool_choice
     let effective_tools = effective_tools(request);
     let merged_extra_body = request.merged_extra_body();
@@ -204,17 +206,17 @@ pub(crate) async fn prepare_chat_request_with_cache(
     };
 
     let (image_data, audio_data, videos) = tokio::join!(
-        extract_chat_image_data(request),
+        try_extract_chat_image_data(request),
         extract_chat_audio_data(request),
         extract_chat_video_paths(request),
     );
 
-    PreparedChatRequest {
+    Ok(PreparedChatRequest {
         prompt,
-        image_data,
+        image_data: image_data?,
         audio_data,
         videos,
-    }
+    })
 }
 
 /// Emit an INFO log exactly once per resolved session when the
