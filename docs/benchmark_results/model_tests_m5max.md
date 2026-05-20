@@ -14,7 +14,7 @@ Compatibility and performance testing for mlxcel models on **MacBook Pro M5 Max 
 | **mlx-vlm baseline** | 0.4.4 |
 | **Test Prompt** | "Hello, how are you today?" (text) / "What is in this image?" (VLM) |
 | **Max Tokens** | 100 |
-| **Test Date** | 2026-05-19 full sweep; 2026-05-20 Molmo v1 spot-check |
+| **Test Date** | 2026-05-19 full sweep; 2026-05-20 Molmo v1 spot-check; 2026-05-20 Phi-3.5 spot-check |
 | **Benchmark Status** | Full text + VLM sweep on mlxcel using `mlxcel-bench-decode`, 98 text + 98 VLM-mode passes with `--cooldown 15 --big-cooldown 15`. mlx-lm / mlx-vlm baseline sub-sweeps are from the same benchmark campaign; their CSV filenames carry 2026-05-18 because the run crossed calendar midnight. |
 
 ## Legend
@@ -106,11 +106,11 @@ Compatibility and performance testing for mlxcel models on **MacBook Pro M5 Max 
 | Model | Test Model | Status | Prefill | Decode | vs M1 Ultra | Notes |
 |-------|------------|--------|---------|--------|-------------|-------|
 | phi-2 | phi-2-hf-4bit-mlx | ⚠️ | 391.64 | 79.60 | **1.34x** | 1 tokens; (likely EOS) |
-| phi-3-mini | Phi-3-mini-4k-instruct-4bit | ✅ | 585.90 | 207.58 | **1.23x** | 25 tokens |
-| phi-3.5-mini | Phi-3.5-mini-instruct-4bit | ✅ | 525.72 | 164.03 | **1.36x** | 40 tokens |
-| phi-3.5-moe | Phi-3.5-MoE-instruct-4bit | ✅ | 99.32 | 115.14 | **1.51x** | 100 tokens |
-| phi-3.5-vision | Phi-3.5-vision-instruct-4bit | ✅ | 788.84 | 163.61 | **1.34x** | 43 tokens; text-only |
-| phi-4 | Phi-4-4bit | ✅ | 248.97 | 63.78 | **1.11x** | 100 tokens |
+| phi-3-mini | Phi-3-mini-4k-instruct-4bit | ✅ | 586.96 | 207.89 | **1.23x** | 25 tokens |
+| phi-3.5-mini | Phi-3.5-mini-instruct-4bit | ✅ | 578.85 | 204.63 | **1.70x** | 40 tokens |
+| phi-3.5-moe | Phi-3.5-MoE-instruct-4bit | ✅ | 99.27 | 115.20 | **1.51x** | 100 tokens |
+| phi-3.5-vision | Phi-3.5-vision-instruct-4bit | ✅ | 868.19 | 203.14 | **1.66x** | 43 tokens; text-only |
+| phi-4 | Phi-4-4bit | ✅ | 250.99 | 63.86 | **1.11x** | 100 tokens |
 
 ## OLMo Family
 
@@ -217,7 +217,7 @@ All entries use the VLM prompt 'What is in this image?' with
 | molmo-7b | molmo-7b | ✅ | 2287.29 | 84.99 | - | 100 tokens; mlx-vlm baseline is a 1-token anomaly |
 | molmo2 (4B) | molmo2-4b | ✅ | 2512.31 | 64.01 | 1.08x | 46 tokens |
 | paligemma2 (3B 6-bit) | paligemma2-3b-6bit | ✅ | 4294.39 | 80.09 | **1.78x** | 2 tokens |
-| phi-3.5-vision | phi-3.5-vision-4bit | ✅ | 2821.55 | 123.07 | **1.31x** | 19 tokens |
+| phi-3.5-vision | phi-3.5-vision-4bit | ✅ | 3582.68 | 168.77 | **1.79x** | 19 tokens |
 | pixtral (12B) | pixtral-12b-4bit | ✅ | 1998.87 | 69.71 | **1.18x** | 100 tokens |
 | qwen2-vl (2B) | qwen2-vl-2b-4bit | ✅ | 2485.82 | 247.21 | - | 12 tokens; EOS-terminate |
 | qwen2.5-vl (3B) | qwen2.5-vl-3b-4bit | ✅ | 1696.53 | 156.83 | **1.61x** | 22 tokens; EOS-terminate; fixed by #34 |
@@ -258,15 +258,15 @@ snapshot.
 
 - **Comparable text pairs**: 66 (models with >=5 generated tokens both sides)
 - **mlxcel >= mlx-lm**: 24 / 66 (36%)
-- **mlxcel >= 90% parity**: 58 / 66 (88%)
+- **mlxcel >= 90% parity**: 59 / 66 (89%, the Phi-3.5 mini fix raises it from 79% to 98%)
 - **Average mlxcel/mlx-lm**: 97% (median 99%, range 72%-127%)
 
 ### Aggregate (VLM, models with >=5 generated tokens both sides)
 
 - **Comparable VLM pairs**: 20
-- **mlxcel >= mlx-vlm**: 9 / 20 (45%)
-- **mlxcel >= 90% parity**: 16 / 20 (80%)
-- **Average mlxcel/mlx-vlm**: 100% (median 100%, range 74%-123%)
+- **mlxcel >= mlx-vlm**: 10 / 20 (50%, the Phi-3.5 vision fix raises it from 77% to 106%)
+- **mlxcel >= 90% parity**: 17 / 20 (85%)
+- **Average mlxcel/mlx-vlm**: 101% (median 100%, range 74%-123%)
 
 ### Text decode (tok/s)
 
@@ -334,11 +334,11 @@ snapshot.
 | olmo3-32b-4bit | 29.11 | 28.99 | **100%** |
 | paligemma2-3b-6bit | 149.98 | FAIL | - |
 | phi-2-4bit | 79.60 | FAIL | - |
-| phi-3-mini-4bit | 207.58 | 212.74 | 98% |
-| phi-3.5-mini-4bit | 164.03 | 207.79 | 79% |
-| phi-3.5-moe-4bit | 115.14 | 107.56 | **107%** |
+| phi-3-mini-4bit | 207.89 | 212.74 | 98% |
+| phi-3.5-mini-4bit | 204.63 | 207.79 | 98% |
+| phi-3.5-moe-4bit | 115.20 | 107.56 | **107%** |
 | phi-3.5-vision-4bit | 163.61 | FAIL | - |
-| phi-4-4bit | 63.78 | 62.28 | **102%** |
+| phi-4-4bit | 63.86 | 62.28 | **103%** |
 | pixtral-12b-4bit | 76.56 | 74.95 | **102%** |
 | qwen1.5-moe-a2.7b-4bit | 237.73 | 237.50 | **100%** |
 | qwen2-vl-2b-4bit | 273.84 | 381.98 | 72% |
@@ -398,7 +398,7 @@ snapshot.
 | molmo-7b | 84.99 | 56471.65 (anomalous, 1 token) | - |
 | molmo2-4b | 64.01 | 66.80 | 96% |
 | paligemma2-3b-6bit | 80.09 | 124.55 | - |
-| phi-3.5-vision-4bit | 123.07 | 159.63 | 77% |
+| phi-3.5-vision-4bit | 168.77 | 159.63 | **106%** |
 | pixtral-12b-4bit | 69.71 | FAIL | - |
 | qwen2-vl-2b-4bit | 247.21 | 279.55 | 88% |
 | qwen2.5-vl-3b-4bit | 156.83 | FAIL | - |
@@ -547,6 +547,7 @@ increase and 96% of mlx-lm's 555.43 tok/s on the same prompt.
 - Prefill and decode tok/s reported separately.
 - Full text + VLM sweep on 2026-05-19: 98 text models (`bench_decode.sh all`) and a matching `bench_decode.sh all --vlm` pass, both at `--cooldown 15 --big-cooldown 15`. Failures match the 2026-05-18 baseline (same 5 text-side and 26 VLM-side fails — all pre-existing).
 - Molmo v1 (`molmo-7b`) spot-check on 2026-05-20: text-only measured 338.65 prefill / 78.74 decode tok/s (24 tokens), and the VLM path measured 2287.29 prefill / 84.99 decode tok/s (100 tokens) with the output now identifying the orange-square fixture instead of the pre-fix degenerate loop. The upstream mlx-vlm baseline row is a 1-token anomaly, so no percentage comparison is reported; a `molmo2-4b` no-regression check held at ~63 tok/s decode.
+- Phi-3.5 SuScaledRoPE spot-check on 2026-05-20: fusing the quantized QKV projection/split/reshape/transpose/SuScaledRoPE chain and scaling only the rotary prefix raised `phi-3.5-mini-4bit` from 164.03 to 204.63 tok/s decode (79% to 98% of mlx-lm) and `phi-3.5-vision-4bit` VLM from 123.07 to 168.77 tok/s decode (77% to 106% of mlx-vlm) while output stayed coherent. Guardrails held within noise: `phi-3-mini-4bit` 207.89, `phi-4-4bit` 63.86, and `phi-3.5-moe-4bit` 115.20 tok/s decode.
 - Cooldown discipline on M5 Max: 15s general / 15s big-model cooldowns were sufficient for this back-to-back run on a freshly-built binary; longer cooldowns (`--cooldown 30 --big-cooldown 30`) remain the safer default for marathon sessions or when thermal headroom is uncertain.
 - Measurement noise on very fast small models remains high (qwen3.5-0.8b-4bit and
   similar can span ±15% across back-to-back runs because 100 tokens generate in

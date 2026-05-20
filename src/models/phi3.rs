@@ -158,54 +158,28 @@ impl Phi3Attention {
         let b = shape[0];
         let l = shape[1];
 
-        // Fused QKV projection
-        let qkv = self.qkv_proj.forward(x);
-
-        // Split QKV
-        let q_size = self.num_heads * self.head_dim;
-        let kv_size = self.num_kv_heads * self.head_dim;
-
-        // Slice to get Q, K, V
-        let q = mlxcel_core::slice_last_dim(&qkv, 0, q_size);
-        let k = mlxcel_core::slice_last_dim(&qkv, q_size, q_size + kv_size);
-        let v = mlxcel_core::slice_last_dim(&qkv, q_size + kv_size, q_size + 2 * kv_size);
-
-        // Reshape to [batch, seq_len, n_heads, head_dim]
-        let q = mlxcel_core::reshape(&q, &[b, l, self.num_heads, self.head_dim]);
-        let k = mlxcel_core::reshape(&k, &[b, l, self.num_kv_heads, self.head_dim]);
-        let v = mlxcel_core::reshape(&v, &[b, l, self.num_kv_heads, self.head_dim]);
-
-        // Transpose to [batch, n_heads, seq_len, head_dim]
-        let q = mlxcel_core::transpose_axes(&q, &[0, 2, 1, 3]);
-        let k = mlxcel_core::transpose_axes(&k, &[0, 2, 1, 3]);
-        let v = mlxcel_core::transpose_axes(&v, &[0, 2, 1, 3]);
-
         let offset = cache.offset;
 
-        // Apply RoPE (SuScaledRoPE for longrope models, plain RoPE otherwise)
-        let (q, k) = if let Some(ref freqs) = self.su_rope_freqs {
-            // SuScaledRoPE: pre-scale the rotary dimensions, then apply with custom freqs
-            // Use pre-computed scale array to avoid per-token from_slice_f32 allocation
-            let (q, k) = if let Some(ref scale_arr) = self.su_rope_scale_arr {
-                (
-                    mlxcel_core::multiply(&q, scale_arr),
-                    mlxcel_core::multiply(&k, scale_arr),
-                )
+        // Fused QKV split + RoPE preparation. The SuScaledRoPE quantized path
+        // mirrors mlx-lm/mlx-vlm by scaling only the rotary prefix and keeps
+        // the projection/split/reshape/transpose/RoPE chain in one bridge call.
+        let (q, k, v) = if let Some(ref freqs) = self.su_rope_freqs {
+            if let Some((q, k, v)) = self.qkv_proj.forward_fused_qkv_split_su_scaled_rope(
+                x,
+                self.num_heads,
+                self.num_kv_heads,
+                self.head_dim,
+                self.rope_dims,
+                freqs,
+                self.su_rope_scale,
+                offset,
+            ) {
+                (q, k, v)
             } else {
-                (
-                    mlxcel_core::reshape(&q, &mlxcel_core::array_shape(&q)),
-                    mlxcel_core::reshape(&k, &mlxcel_core::array_shape(&k)),
-                )
-            };
-            let q =
-                mlxcel_core::fast_rope_with_freqs(&q, self.rope_dims, false, 1.0, offset, freqs);
-            let k =
-                mlxcel_core::fast_rope_with_freqs(&k, self.rope_dims, false, 1.0, offset, freqs);
-            (q, k)
+                self.prepare_qkv_with_rope(x, b, l, offset, Some(freqs))
+            }
         } else {
-            let q = mlxcel_core::fast_rope(&q, self.rope_dims, false, self.rope_base, 1.0, offset);
-            let k = mlxcel_core::fast_rope(&k, self.rope_dims, false, self.rope_base, 1.0, offset);
-            (q, k)
+            self.prepare_qkv_with_rope(x, b, l, offset, None)
         };
 
         // Update KV cache and get sliced views
@@ -231,6 +205,75 @@ impl Phi3Attention {
 
         // Output projection
         self.o_proj.forward(&attn_out)
+    }
+
+    fn prepare_qkv_with_rope(
+        &self,
+        x: &MlxArray,
+        b: i32,
+        l: i32,
+        offset: i32,
+        su_freqs: Option<&MlxArray>,
+    ) -> (
+        UniquePtr<MlxArray>,
+        UniquePtr<MlxArray>,
+        UniquePtr<MlxArray>,
+    ) {
+        let qkv = self.qkv_proj.forward(x);
+        let q_size = self.num_heads * self.head_dim;
+        let kv_size = self.num_kv_heads * self.head_dim;
+
+        let q = mlxcel_core::slice_last_dim(&qkv, 0, q_size);
+        let k = mlxcel_core::slice_last_dim(&qkv, q_size, q_size + kv_size);
+        let v = mlxcel_core::slice_last_dim(&qkv, q_size + kv_size, q_size + 2 * kv_size);
+
+        let q = mlxcel_core::reshape(&q, &[b, l, self.num_heads, self.head_dim]);
+        let k = mlxcel_core::reshape(&k, &[b, l, self.num_kv_heads, self.head_dim]);
+        let v = mlxcel_core::reshape(&v, &[b, l, self.num_kv_heads, self.head_dim]);
+
+        let q = mlxcel_core::transpose_axes(&q, &[0, 2, 1, 3]);
+        let k = mlxcel_core::transpose_axes(&k, &[0, 2, 1, 3]);
+        let v = mlxcel_core::transpose_axes(&v, &[0, 2, 1, 3]);
+
+        let (q, k) = if let Some(freqs) = su_freqs {
+            let (q, k) = self.scale_su_rope_rotary_prefix(&q, &k);
+            let q =
+                mlxcel_core::fast_rope_with_freqs(&q, self.rope_dims, false, 1.0, offset, freqs);
+            let k =
+                mlxcel_core::fast_rope_with_freqs(&k, self.rope_dims, false, 1.0, offset, freqs);
+            (q, k)
+        } else {
+            let q = mlxcel_core::fast_rope(&q, self.rope_dims, false, self.rope_base, 1.0, offset);
+            let k = mlxcel_core::fast_rope(&k, self.rope_dims, false, self.rope_base, 1.0, offset);
+            (q, k)
+        };
+
+        (q, k, v)
+    }
+
+    fn scale_su_rope_rotary_prefix(
+        &self,
+        q: &MlxArray,
+        k: &MlxArray,
+    ) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
+        let Some(ref scale_arr) = self.su_rope_scale_arr else {
+            return (
+                mlxcel_core::reshape(q, &mlxcel_core::array_shape(q)),
+                mlxcel_core::reshape(k, &mlxcel_core::array_shape(k)),
+            );
+        };
+
+        let scale_rotary = |x: &MlxArray| {
+            let shape = mlxcel_core::array_shape(x);
+            let last = shape.len() - 1;
+            let mut rotary_end = shape.clone();
+            rotary_end[last] = self.rope_dims;
+            let rotary = mlxcel_core::slice(x, &vec![0; shape.len()], &rotary_end);
+            let rotary = mlxcel_core::multiply(&rotary, scale_arr);
+            mlxcel_core::slice_update(x, &rotary, &vec![0; shape.len()], &rotary_end)
+        };
+
+        (scale_rotary(q), scale_rotary(k))
     }
 
     pub fn from_weights(

@@ -17,6 +17,7 @@
 #ifdef __APPLE__
 #include "mlx/backend/metal/metal.h"
 #endif
+#include <algorithm>
 #include <cstring>
 #include <cstdlib>
 #include <fstream>
@@ -3404,6 +3405,90 @@ void fused_qkv_project_split_rope(
 
     q = mlx::core::fast::rope(q, rope_dims, false, rope_base, 1.0f, cache_offset);
     k = mlx::core::fast::rope(k, rope_dims, false, rope_base, 1.0f, cache_offset);
+
+    q_out = std::make_unique<MlxArray>(std::move(q));
+    k_out = std::make_unique<MlxArray>(std::move(k));
+    v_out = std::make_unique<MlxArray>(std::move(v));
+}
+
+namespace {
+array apply_su_scaled_rope(
+    array x,
+    int32_t rope_dims,
+    const array& rope_freqs,
+    float rope_input_scale,
+    int32_t cache_offset
+) {
+    if (rope_input_scale != 1.0f && rope_dims > 0) {
+        auto x_shape = x.shape();
+        Shape starts(x_shape.size(), 0);
+        Shape stops(x_shape.begin(), x_shape.end());
+        stops.back() = std::min<int32_t>(rope_dims, x_shape.back());
+        auto rotary = slice(x, starts, stops);
+        auto scale = array(rope_input_scale, x.dtype());
+        rotary = multiply(rotary, scale);
+        x = slice_update(x, rotary, starts, stops);
+    }
+
+    return mlx::core::fast::rope(
+        x, rope_dims, false, std::nullopt, 1.0f, cache_offset, rope_freqs);
+}
+}
+
+void fused_qkv_project_split_su_scaled_rope(
+    const MlxArray& x,
+    const MlxArray& weight,
+    const MlxArray& scales,
+    const MlxArray* biases,
+    int32_t num_heads,
+    int32_t num_kv_heads,
+    int32_t head_dim,
+    int32_t rope_dims,
+    const MlxArray& rope_freqs,
+    float rope_input_scale,
+    int32_t cache_offset,
+    int32_t group_size,
+    int32_t bits,
+    rust::Str mode,
+    std::unique_ptr<MlxArray>& q_out,
+    std::unique_ptr<MlxArray>& k_out,
+    std::unique_ptr<MlxArray>& v_out
+) {
+    using namespace mlx::core;
+
+    auto batch_size = x.inner.shape()[0];
+    auto seq_len = x.inner.shape()[1];
+
+    std::optional<array> biases_opt = biases ? std::optional(biases->inner) : std::nullopt;
+    std::string mode_str(mode.data(), mode.size());
+    auto proj = quantized_matmul(
+        x.inner, weight.inner, scales.inner, biases_opt,
+        true, std::optional<int>(group_size), std::optional<int>(bits), mode_str);
+
+    int q_cols = num_heads * head_dim;
+    int kv_cols = num_kv_heads * head_dim;
+    int qkv_cols = q_cols + (2 * kv_cols);
+
+    auto proj_shape = proj.shape();
+    if (proj_shape.size() != 3 || proj_shape[2] != qkv_cols) {
+        throw std::runtime_error(
+            "fused_qkv_project_split_su_scaled_rope: unexpected projection shape");
+    }
+
+    auto q = slice(proj, {0, 0, 0}, {batch_size, seq_len, q_cols});
+    auto k = slice(proj, {0, 0, q_cols}, {batch_size, seq_len, q_cols + kv_cols});
+    auto v = slice(proj, {0, 0, q_cols + kv_cols}, {batch_size, seq_len, qkv_cols});
+
+    q = reshape(q, {batch_size, seq_len, num_heads, head_dim});
+    k = reshape(k, {batch_size, seq_len, num_kv_heads, head_dim});
+    v = reshape(v, {batch_size, seq_len, num_kv_heads, head_dim});
+
+    q = transpose(q, {0, 2, 1, 3});
+    k = transpose(k, {0, 2, 1, 3});
+    v = transpose(v, {0, 2, 1, 3});
+
+    q = apply_su_scaled_rope(q, rope_dims, rope_freqs.inner, rope_input_scale, cache_offset);
+    k = apply_su_scaled_rope(k, rope_dims, rope_freqs.inner, rope_input_scale, cache_offset);
 
     q_out = std::make_unique<MlxArray>(std::move(q));
     k_out = std::make_unique<MlxArray>(std::move(k));

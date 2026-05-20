@@ -1218,6 +1218,29 @@ mod ffi {
             v_out: &mut UniquePtr<MlxArray>,
         );
 
+        /// Fused concatenated QKV projection + split + reshape + transpose +
+        /// SuScaledRoPE.
+        /// Used by: Phi3/Phi3V longrope-su attention path.
+        unsafe fn fused_qkv_project_split_su_scaled_rope(
+            x: &MlxArray,
+            weight: &MlxArray,
+            scales: &MlxArray,
+            biases: *const MlxArray,
+            num_heads: i32,
+            num_kv_heads: i32,
+            head_dim: i32,
+            rope_dims: i32,
+            rope_freqs: &MlxArray,
+            rope_input_scale: f32,
+            cache_offset: i32,
+            group_size: i32,
+            bits: i32,
+            mode: &str,
+            q_out: &mut UniquePtr<MlxArray>,
+            k_out: &mut UniquePtr<MlxArray>,
+            v_out: &mut UniquePtr<MlxArray>,
+        );
+
         /// Experimental dense causal prefill attention path:
         /// qkv projection + split + rope + native causal SDPA + output projection.
         unsafe fn fused_causal_prefill_attention(

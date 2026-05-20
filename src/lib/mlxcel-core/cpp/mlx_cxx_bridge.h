@@ -954,6 +954,30 @@ void fused_qkv_project_split_rope(
     std::unique_ptr<MlxArray>& v_out
 );
 
+// Fused concatenated QKV projection + split + reshape + transpose +
+// SuScaledRoPE. Mirrors mlx-lm/mlx-vlm SuScaledRoPE by scaling only the
+// rotary prefix before applying custom frequency RoPE.
+// Used by: Phi3/Phi3V longrope-su attention path.
+void fused_qkv_project_split_su_scaled_rope(
+    const MlxArray& x,
+    const MlxArray& weight,
+    const MlxArray& scales,
+    const MlxArray* biases,     // nullable for mxfp4/nvfp4/mxfp8
+    int32_t num_heads,
+    int32_t num_kv_heads,
+    int32_t head_dim,
+    int32_t rope_dims,
+    const MlxArray& rope_freqs,
+    float rope_input_scale,
+    int32_t cache_offset,
+    int32_t group_size,
+    int32_t bits,
+    rust::Str mode,
+    std::unique_ptr<MlxArray>& q_out,
+    std::unique_ptr<MlxArray>& k_out,
+    std::unique_ptr<MlxArray>& v_out
+);
+
 // Experimental dense causal prefill attention path:
 // qkv projection + split + rope + native causal SDPA + output projection.
 // Returns output plus K/V tensors so Rust can populate the KV cache.

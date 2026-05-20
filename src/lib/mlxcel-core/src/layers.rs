@@ -778,6 +778,61 @@ impl UnifiedLinear {
         }
     }
 
+    /// Fused concatenated QKV projection + split + reshape + transpose + SuScaledRoPE.
+    ///
+    /// Returns Q/K/V already shaped `[B, H, T, D]`. Q/K match mlx-lm/mlx-vlm
+    /// SuScaledRoPE semantics by scaling only the rotary prefix before custom
+    /// frequency RoPE. Only available for quantized fused-QKV weights.
+    ///
+    /// Used by: Phi3/Phi3V longrope-su attention path.
+    #[allow(clippy::too_many_arguments)]
+    pub fn forward_fused_qkv_split_su_scaled_rope(
+        &self,
+        x: &MlxArray,
+        num_heads: i32,
+        num_kv_heads: i32,
+        head_dim: i32,
+        rope_dims: i32,
+        rope_freqs: &MlxArray,
+        rope_input_scale: f32,
+        cache_offset: i32,
+    ) -> Option<(
+        UniquePtr<MlxArray>,
+        UniquePtr<MlxArray>,
+        UniquePtr<MlxArray>,
+    )> {
+        match self {
+            Self::Quantized { weight, .. } => {
+                let mut q = cxx::UniquePtr::null();
+                let mut k = cxx::UniquePtr::null();
+                let mut v = cxx::UniquePtr::null();
+                unsafe {
+                    ffi::fused_qkv_project_split_su_scaled_rope(
+                        x,
+                        &weight.weight,
+                        &weight.scales,
+                        weight.biases_ptr(),
+                        num_heads,
+                        num_kv_heads,
+                        head_dim,
+                        rope_dims,
+                        rope_freqs,
+                        rope_input_scale,
+                        cache_offset,
+                        weight.group_size,
+                        weight.bits,
+                        &weight.mode,
+                        &mut q,
+                        &mut k,
+                        &mut v,
+                    );
+                }
+                Some((q, k, v))
+            }
+            Self::Regular(_) => None,
+        }
+    }
+
     /// Get a reference to the inner Linear (if non-quantized)
     /// Used by compiled FP MLP operations that need direct weight/bias access
     pub fn regular_weight(&self) -> Option<&Linear> {
