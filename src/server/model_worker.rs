@@ -173,9 +173,23 @@ pub(crate) fn spawn_model_worker_with_batch_config(
         let (model, tokenizer) = match result {
             Ok((model, tokenizer)) => {
                 let load_elapsed = load_start.elapsed();
+                // Issue #55: log MLX-allocator resident memory after a
+                // successful weight load so operators see the actual
+                // working set the model occupies (not just the tensor
+                // sum). Useful for capacity planning and for the future
+                // preflight (#56) which will compare this against
+                // `MLXCEL_MEMORY_LIMIT` to fail fast.
+                let snap = mlxcel_core::memory::snapshot();
                 tracing::info!(
-                    "Model {worker_model_id} loaded in {:.3}s",
-                    load_elapsed.as_secs_f64()
+                    worker_model_id = %worker_model_id,
+                    load_seconds = load_elapsed.as_secs_f64(),
+                    active_bytes = snap.active_bytes,
+                    peak_bytes = snap.peak_bytes,
+                    cache_bytes = snap.cache_bytes,
+                    limit_bytes = snap.limit_bytes,
+                    "Model {worker_model_id} loaded in {:.3}s (resident after load: {:.2} GB)",
+                    load_elapsed.as_secs_f64(),
+                    snap.active_bytes as f64 / (1024.0 * 1024.0 * 1024.0),
                 );
                 loaded.store(true, Ordering::Release);
                 (model, tokenizer)
@@ -450,9 +464,23 @@ pub(crate) fn spawn_legacy_model_worker(
         let (model, tokenizer) = match result {
             Ok((model, tokenizer)) => {
                 let load_elapsed = load_start.elapsed();
+                // Issue #55: log MLX-allocator resident memory after a
+                // successful weight load so operators see the actual
+                // working set the model occupies (not just the tensor
+                // sum). Useful for capacity planning and for the future
+                // preflight (#56) which will compare this against
+                // `MLXCEL_MEMORY_LIMIT` to fail fast.
+                let snap = mlxcel_core::memory::snapshot();
                 tracing::info!(
-                    "Model {worker_model_id} loaded in {:.3}s",
-                    load_elapsed.as_secs_f64()
+                    worker_model_id = %worker_model_id,
+                    load_seconds = load_elapsed.as_secs_f64(),
+                    active_bytes = snap.active_bytes,
+                    peak_bytes = snap.peak_bytes,
+                    cache_bytes = snap.cache_bytes,
+                    limit_bytes = snap.limit_bytes,
+                    "Model {worker_model_id} loaded in {:.3}s (resident after load: {:.2} GB)",
+                    load_elapsed.as_secs_f64(),
+                    snap.active_bytes as f64 / (1024.0 * 1024.0 * 1024.0),
                 );
                 loaded.store(true, Ordering::Release);
                 (model, tokenizer)

@@ -3815,6 +3815,39 @@ size_t get_wired_limit() {
     return 0;
 }
 
+// MLX runtime memory accounting (issue #55) — thin one-line forwarders to
+// the canonical entry points in `mlx/memory.h`. The active allocator
+// (Metal / CUDA / no-gpu CommonAllocator) decides what each value means;
+// see the header comment in `mlx_cxx_bridge.h` for the cross-backend
+// semantics.
+size_t get_active_memory() {
+    return mlx::core::get_active_memory();
+}
+
+size_t get_peak_memory() {
+    return mlx::core::get_peak_memory();
+}
+
+size_t get_cache_memory() {
+    return mlx::core::get_cache_memory();
+}
+
+size_t set_memory_limit(size_t limit) {
+    return mlx::core::set_memory_limit(limit);
+}
+
+size_t get_memory_limit() {
+    return mlx::core::get_memory_limit();
+}
+
+size_t set_cache_limit(size_t limit) {
+    return mlx::core::set_cache_limit(limit);
+}
+
+void reset_peak_memory() {
+    mlx::core::reset_peak_memory();
+}
+
 size_t gpu_max_memory_size() {
     auto& info = mlx::core::device_info();
     // Metal backend uses "max_recommended_working_set_size"

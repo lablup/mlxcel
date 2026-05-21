@@ -42,6 +42,9 @@ Environment Variables:
                            unset/\"max\" — use MLX gpu_max_memory_size (default)
                            \"0\"/\"none\" — disable the wired limit
                            \"96GB\" — explicit limit (supports GB, MB, or bytes)
+  MLXCEL_MEMORY_LIMIT    Soft MLX allocator memory cap (fails fast on overflow)
+                           unset/\"0\"/\"none\" — let MLX use its backend default (default)
+                           \"32GB\" — explicit limit (supports GB, MB, or bytes)
 
 Tensor Parallel Runtime:
   Current multi-rank support: dense Llama, Qwen2/2.5, Qwen3, Qwen3.5 text, Gemma 3 text, Gemma 4 text, ERNIE 4.5, Hunyuan v1 Dense

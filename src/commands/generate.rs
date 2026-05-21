@@ -96,6 +96,14 @@ fn print_runtime_setup(runtime: &RuntimeSetup) {
             max_memory as f64 / (1024.0 * 1024.0 * 1024.0)
         );
     }
+    // Issue #55: surface the soft allocator cap when the operator set one
+    // via MLXCEL_MEMORY_LIMIT, so the preflight intent is visible at boot.
+    if let Some(memory_limit) = runtime.memory_limit_bytes {
+        println!(
+            "MLX allocator memory limit: {:.1} GB (MLXCEL_MEMORY_LIMIT)",
+            memory_limit as f64 / (1024.0 * 1024.0 * 1024.0)
+        );
+    }
 }
 
 fn load_generation_model(
@@ -122,7 +130,29 @@ fn load_generation_model(
         load_model(&args.model.model)
     }?;
     let load_elapsed = load_start.elapsed();
-    println!("Model loaded in {:.3}s.", load_elapsed.as_secs_f64());
+    // Issue #55: surface "resident after load" so operators (and the
+    // capstone preflight #56) can see how much MLX-allocator memory the
+    // model actually consumed once weight realisation finished. On
+    // Apple Silicon (Metal) this reads from the Metal allocator; on
+    // Linux/CUDA from the CUDA allocator; on CPU-only it reads from the
+    // no-gpu common allocator. Each backend may use a different
+    // definition of "active", but the number is always whatever MLX
+    // itself will compare against `memory_limit()` next.
+    let snap = mlxcel_core::memory::snapshot();
+    println!(
+        "Model loaded in {:.3}s (resident: {:.2} GB, peak: {:.2} GB).",
+        load_elapsed.as_secs_f64(),
+        snap.active_bytes as f64 / (1024.0 * 1024.0 * 1024.0),
+        snap.peak_bytes as f64 / (1024.0 * 1024.0 * 1024.0),
+    );
+    tracing::info!(
+        active_bytes = snap.active_bytes,
+        peak_bytes = snap.peak_bytes,
+        cache_bytes = snap.cache_bytes,
+        limit_bytes = snap.limit_bytes,
+        load_seconds = load_elapsed.as_secs_f64(),
+        "Model resident after load",
+    );
     Ok(result)
 }
 

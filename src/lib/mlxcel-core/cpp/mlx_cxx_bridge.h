@@ -1082,6 +1082,25 @@ void set_default_device(bool gpu);
 size_t set_wired_limit(size_t limit);
 size_t get_wired_limit();
 
+// MLX runtime memory accounting (issue #55).
+//
+// These wrap `mlx::core::get_active_memory()` / `get_peak_memory()` /
+// `get_cache_memory()` / `set_memory_limit()` / `get_memory_limit()` /
+// `set_cache_limit()` / `reset_peak_memory()` from `mlx/memory.h`. The
+// numbers are populated by whichever allocator is active (Metal, CUDA, or
+// the no-gpu common allocator) — see the per-backend implementations in
+// `mlx/backend/<metal|cuda|no_gpu>/allocator.cpp`. On the no-gpu CPU
+// allocator `get_cache_memory()` / `set_cache_limit()` are inert no-ops
+// and return 0 by design; this matches MLX upstream semantics and lets
+// the same Rust wrapper compile and run on Linux without panicking.
+size_t get_active_memory();
+size_t get_peak_memory();
+size_t get_cache_memory();
+size_t set_memory_limit(size_t limit);
+size_t get_memory_limit();
+size_t set_cache_limit(size_t limit);
+void reset_peak_memory();
+
 // GPU memory info (works across Metal and CUDA backends)
 size_t gpu_max_memory_size();
 

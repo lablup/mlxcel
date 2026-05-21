@@ -22,6 +22,14 @@ use std::fmt;
 
 const RUNTIME_DEVICE_ENV: &str = "MLXCEL_DEVICE";
 const WIRED_LIMIT_ENV: &str = "MLXCEL_WIRED_LIMIT";
+/// Issue #55: optional soft cap on the MLX allocator. When set, the
+/// runtime calls `mlxcel_core::memory::set_memory_limit(...)` at startup
+/// so MLX raises an exception once allocations would push the working
+/// set past this value, instead of thrashing or OOM-killing the process.
+/// Used by the future preflight capstone (#56). Accepts the same syntax
+/// as `MLXCEL_WIRED_LIMIT`: plain bytes, `NGB`, or `NMB`. Unset means
+/// "do not override MLX's default limit".
+const MEMORY_LIMIT_ENV: &str = "MLXCEL_MEMORY_LIMIT";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RuntimeDevice {
@@ -55,6 +63,10 @@ impl fmt::Display for RuntimeDevice {
 pub struct RuntimeSetup {
     pub device: RuntimeDevice,
     pub wired_limit_bytes: Option<usize>,
+    /// Soft MLX allocator memory limit applied via `MLXCEL_MEMORY_LIMIT`
+    /// (issue #55). `None` when the env var was unset or invalid and
+    /// MLX's default limit is in effect.
+    pub memory_limit_bytes: Option<usize>,
     pub invalid_device_override: Option<String>,
 }
 
@@ -78,9 +90,16 @@ pub fn initialize_runtime() -> RuntimeSetup {
         None
     };
 
+    // Issue #55: apply optional soft allocator cap regardless of device.
+    // The MLX no-gpu CPU allocator also honours `set_memory_limit()`, so
+    // the preflight (#56) can use this on Linux/CI just as on Apple
+    // Silicon.
+    let memory_limit_bytes = resolve_memory_limit();
+
     RuntimeSetup {
         device,
         wired_limit_bytes,
+        memory_limit_bytes,
         invalid_device_override,
     }
 }
@@ -116,6 +135,26 @@ fn resolve_wired_limit() -> Option<usize> {
     } else {
         None
     }
+}
+
+/// Resolve the MLX allocator soft limit from MLXCEL_MEMORY_LIMIT (issue #55).
+///
+/// Returns the limit actually applied to MLX, or `None` when the env var
+/// is unset / explicitly disabled. This is the hook the capstone preflight
+/// (#56) drives when a model is too large to fit comfortably — calling
+/// `mlxcel_core::memory::set_memory_limit` makes MLX raise an exception
+/// during evaluation instead of thrashing the system allocator.
+fn resolve_memory_limit() -> Option<usize> {
+    let raw = std::env::var(MEMORY_LIMIT_ENV).ok();
+    let bytes = match raw.as_deref() {
+        Some("0") | Some("none") | Some("NONE") | None | Some("") => return None,
+        Some(s) => parse_memory_size(s)?,
+    };
+    if bytes == 0 {
+        return None;
+    }
+    mlxcel_core::memory::set_memory_limit(bytes as u64);
+    Some(bytes)
 }
 
 /// Parse a memory size string: plain bytes, "NGB", or "NMB".

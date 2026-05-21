@@ -1560,6 +1560,37 @@ mod ffi {
         /// Get current wired memory limit
         fn get_wired_limit() -> usize;
 
+        // MLX runtime memory accounting (issue #55).
+        //
+        // These are raw bridge entry points wired to `mlx::core::get_*_memory`
+        // and friends in `mlx/memory.h`. The active allocator (Metal /
+        // CUDA / no-gpu CommonAllocator) decides what each value means.
+        // Prefer the typed wrappers in `crate::memory` over calling these
+        // directly — they return `u64` for cross-platform clarity and
+        // bundle the four most useful counters into a single snapshot.
+
+        /// Bytes actively allocated by the MLX allocator (excludes cache).
+        fn get_active_memory() -> usize;
+
+        /// Peak active bytes seen since process start or last reset.
+        fn get_peak_memory() -> usize;
+
+        /// Bytes held in the allocator's free-buffer cache (0 on CPU-only backend).
+        fn get_cache_memory() -> usize;
+
+        /// Set the soft allocator memory limit in bytes. Returns previous limit.
+        fn set_memory_limit(limit: usize) -> usize;
+
+        /// Get the current soft allocator memory limit in bytes.
+        fn get_memory_limit() -> usize;
+
+        /// Set the allocator cache limit in bytes. Returns previous limit.
+        /// On the no-gpu CPU backend this is a no-op that returns 0.
+        fn set_cache_limit(limit: usize) -> usize;
+
+        /// Reset the recorded peak memory counter to 0.
+        fn reset_peak_memory();
+
         /// Get max GPU memory size (works across Metal and CUDA backends)
         fn gpu_max_memory_size() -> usize;
 
@@ -2513,6 +2544,11 @@ pub mod dtype;
 // Runtime Apple Silicon generation detection.
 // Public so that mlxcel (the main crate) can log hardware info at startup.
 pub mod hardware;
+
+// Typed wrappers around MLX's runtime memory accounting APIs (issue #55).
+// Public so that the CLI generate path can surface post-load resident
+// memory and the preflight (#56) can call `set_memory_limit` to fail fast.
+pub mod memory;
 
 // RoPE variants that are not exposed directly by `mlx::core::fast::rope`.
 // Currently: proportional RoPE used by Gemma 4 full-attention layers.

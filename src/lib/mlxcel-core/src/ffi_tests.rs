@@ -672,6 +672,45 @@ fn test_memory_functions() {
 }
 
 #[test]
+fn test_runtime_memory_apis_smoke(/* issue #55 */) {
+    // FFI smoke test: the raw runtime memory APIs (`get_active_memory`,
+    // `get_peak_memory`, `get_memory_limit`, `set_memory_limit`,
+    // `reset_peak_memory`) compile, link, and return plausible values on
+    // every backend mlxcel currently builds for. The typed-wrapper
+    // module `crate::memory` has the cross-platform / monotonicity
+    // assertions; this test just guards the raw cxx surface.
+
+    // Force at least one allocation against the MLX allocator so the
+    // counters have something to report.
+    let arr = from_slice_f32(&[1.0_f32; 1024], &[1024]);
+    eval(&arr);
+
+    // Counters return usize on the cxx boundary.
+    let _active = get_active_memory();
+    let _peak = get_peak_memory();
+    let _cache = get_cache_memory();
+    let _limit = get_memory_limit();
+
+    // `set_memory_limit` must return the previous limit so callers can
+    // restore it. Round-trip with a huge cap to avoid evicting any live
+    // arrays held by parallel tests.
+    let original = get_memory_limit();
+    let huge: usize = 1usize << 40;
+    let prev = set_memory_limit(huge);
+    assert_eq!(
+        prev, original,
+        "set_memory_limit should return the previous limit",
+    );
+    // Restore.
+    let _ = set_memory_limit(original);
+
+    // `reset_peak_memory` must execute without panicking. We do not
+    // assert what `get_peak_memory` returns afterwards because parallel
+    // tests sharing this process keep allocating arrays.
+    reset_peak_memory();
+}
+
+#[test]
 fn test_scalar_helpers_preserve_bf16_and_f16_dtype() {
     for dtype in [dtype::BFLOAT16, dtype::FLOAT16] {
         let x = astype(&from_slice_f32(&[1.0, 2.0, 3.0, 4.0], &[1, 4]), dtype);
