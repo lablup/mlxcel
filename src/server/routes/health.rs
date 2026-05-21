@@ -25,7 +25,7 @@ use crate::server::types::{BatchStatusInfo, HealthResponse};
 /// Build model-level health fields once the model is confirmed loaded.
 ///
 /// Returns `(context_size, tool_call_parser)`:
-/// - `context_size`: the configured `--ctx-size` value (0 = model default).
+/// - `context_size`: the effective per-slot context window (0 = model default).
 /// - `tool_call_parser`: `Some("mlxcel")` when the chat template supports
 ///   tool calls; `None` when the template does not expose the `tools`
 ///   variable and tool-call parsing will therefore never activate.

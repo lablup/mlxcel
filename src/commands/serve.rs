@@ -30,7 +30,8 @@ use mlxcel::server::{
     env_fallback_lang_bias, env_fallback_lang_bias_include_byte_fragments,
     env_fallback_prompt_cache_capacity_bytes, env_fallback_prompt_cache_enabled,
     env_fallback_prompt_cache_max_entries, env_fallback_prompt_cache_min_prefix,
-    env_fallback_prompt_cache_ttl, env_fallback_reasoning_budget, start_server,
+    env_fallback_prompt_cache_ttl, env_fallback_reasoning_budget, resolve_parallel_context_size,
+    start_server,
 };
 use mlxcel_core::cache::KVCacheMode;
 
@@ -86,7 +87,7 @@ fn run_serve_memory_preflight(args: &crate::ServeArgs) -> anyhow::Result<()> {
             return Err(anyhow::anyhow!(
                 "--estimate-memory: total {} exceeds available {} by {}. \
                  Pass --force (or --no-memory-check) to override, or rerun with \
-                 a smaller --ctx-size / a smaller model.",
+                 a smaller --ctx-size, smaller --max-batch-size, or a smaller model.",
                 format_bytes(estimate.total_bytes),
                 format_bytes(estimate.available_bytes),
                 format_bytes(estimate.overflow_bytes()),
@@ -100,9 +101,16 @@ fn run_serve_memory_preflight(args: &crate::ServeArgs) -> anyhow::Result<()> {
 fn serve_preflight_ctx_len(args: &crate::ServeArgs) -> u64 {
     // `--ctx-size 0` is the "use model default" sentinel; in that case we
     // fall back to 8192 to match the historical sizing used by
-    // `--recommend-quant`. `--max-kv-size` caps the plain KV cache length.
+    // `--recommend-quant`. Explicit `--ctx-size` is a total budget shared by
+    // active slots, matching llama.cpp server semantics. `--max-kv-size`
+    // caps the plain KV cache length after the per-slot window is resolved.
     let mut ctx_len = if args.ctx_size > 0 {
-        args.ctx_size as u64
+        resolve_parallel_context_size(
+            args.ctx_size,
+            args.n_parallel,
+            args.max_batch_size,
+            args.no_batch,
+        ) as u64
     } else {
         mlxcel::memory_estimate::DEFAULT_CTX_LEN
     };

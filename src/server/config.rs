@@ -221,6 +221,12 @@ pub struct ServerConfig {
     pub api_key: Option<String>,
     pub timeout_seconds: u64,
     pub model_alias: Option<String>,
+    /// Effective per-slot context window in tokens (`0` = model default).
+    ///
+    /// Startup lowers `--ctx-size C --parallel N` to `C / N` for continuous
+    /// batching, matching llama.cpp server semantics. An explicit
+    /// `--max-batch-size` override becomes the divisor because it controls the
+    /// maximum number of concurrent decode sequences.
     pub context_size: usize,
     pub n_parallel: usize,
     pub enable_slots_endpoint: bool,
@@ -384,12 +390,13 @@ pub struct ServerConfig {
     /// both the legacy `kv_cache_mode` flag and the per-layer modes
     /// resolved from `batch_kv_quant`.
     ///
-    /// Resolved from `--max-kv-size` CLI flag and `LLAMA_ARG_MAX_KV_SIZE`
-    /// env var, then validated by
+    /// Resolved from the effective per-slot `--ctx-size` and the
+    /// `--max-kv-size` CLI flag / `LLAMA_ARG_MAX_KV_SIZE` env var. The
+    /// explicit max-KV value is validated by
     /// [`crate::server::cli_input::resolve_max_kv_size`] against the
     /// accepted range (`0` = disabled, or
-    /// `[MAX_KV_SIZE_MIN, i32::MAX]`). `None` (the default) preserves
-    /// the legacy unbounded behaviour.
+    /// `[MAX_KV_SIZE_MIN, i32::MAX]`). If both are present, the lower value
+    /// wins so the configured context window remains an upper bound.
     pub max_kv_size: Option<usize>,
 }
 

@@ -178,8 +178,26 @@ fn serve_preflight_ctx_len_uses_default_and_max_kv_cap() {
     );
 
     args.ctx_size = 8192;
+    assert_eq!(serve_preflight_ctx_len(&args), 2048);
+
+    args.ctx_size = 8192;
     args.max_kv_size = 2048;
     assert_eq!(serve_preflight_ctx_len(&args), 2048);
+}
+
+#[test]
+fn serve_preflight_ctx_len_uses_parallel_context_semantics() {
+    let mut args = sample_args();
+    args.ctx_size = 4096;
+    args.max_batch_size = None;
+    args.n_parallel = 4;
+    assert_eq!(serve_preflight_ctx_len(&args), 1024);
+
+    args.max_batch_size = Some(2);
+    assert_eq!(serve_preflight_ctx_len(&args), 2048);
+
+    args.no_batch = true;
+    assert_eq!(serve_preflight_ctx_len(&args), 4096);
 }
 
 #[test]

@@ -15,11 +15,12 @@
 use std::path::PathBuf;
 
 use super::{
-    ServerStartupConfig, build_server_config, detect_model_media_support, resolve_api_key,
+    MIN_PARALLEL_CONTEXT_SIZE, ServerStartupConfig, build_server_config,
+    detect_model_media_support, effective_parallel_context_slots, resolve_api_key,
     resolve_chat_template, resolve_decode_storage_backend, resolve_default_max_tokens,
-    resolve_dry_penalty_last_n, resolve_remote_pipeline_topology,
-    resolve_tensor_parallel_runtime_support, validate_pipeline_parallel_startup,
-    validate_tensor_parallel_startup,
+    resolve_dry_penalty_last_n, resolve_parallel_context_size, resolve_remote_pipeline_topology,
+    resolve_tensor_parallel_runtime_support, validate_parallel_context_startup,
+    validate_pipeline_parallel_startup, validate_tensor_parallel_startup,
 };
 use crate::distributed::{ClusterConfig, TransportBackend};
 use crate::server::chat_template::ChatMessage;
@@ -128,7 +129,7 @@ fn build_server_config_applies_normalized_startup_values() {
     assert_eq!(config.api_key, Some("token".to_string()));
     assert_eq!(config.timeout_seconds, 42);
     assert_eq!(config.model_alias.as_deref(), Some("alias"));
-    assert_eq!(config.context_size, 2048);
+    assert_eq!(config.context_size, 682);
     assert_eq!(config.n_parallel, 3);
     assert!(!config.enable_slots_endpoint);
     assert!(config.enable_props_endpoint);
@@ -153,6 +154,7 @@ fn build_server_config_applies_normalized_startup_values() {
     // max_queue_depth comes from the startup config default (32).
     assert_eq!(config.max_batch_size, 3);
     assert_eq!(config.max_queue_depth, 32);
+    assert_eq!(config.max_kv_size, Some(682));
 }
 
 #[test]
@@ -164,6 +166,83 @@ fn build_server_config_max_batch_size_is_at_least_one() {
     };
     let config = build_server_config(&startup, None);
     assert_eq!(config.max_batch_size, 1);
+}
+
+#[test]
+fn parallel_context_size_divides_total_budget_by_active_slots() {
+    for (ctx_size, slots, expected_per_slot) in [(4096, 1, 4096), (4096, 2, 2048), (4096, 4, 1024)]
+    {
+        assert_eq!(
+            resolve_parallel_context_size(ctx_size, slots, None, false),
+            expected_per_slot
+        );
+        assert_eq!(
+            resolve_parallel_context_size(ctx_size, slots, None, false)
+                * effective_parallel_context_slots(slots, None, false),
+            ctx_size
+        );
+    }
+
+    assert_eq!(resolve_parallel_context_size(4097, 4, None, false), 1024);
+}
+
+#[test]
+fn build_server_config_uses_max_batch_size_as_context_divisor() {
+    let startup = ServerStartupConfig {
+        ctx_size: 8192,
+        n_parallel: 2,
+        max_batch_size: Some(4),
+        ..ServerStartupConfig::default()
+    };
+
+    let config = build_server_config(&startup, None);
+    assert_eq!(config.context_size, 2048);
+    assert_eq!(config.max_batch_size, 4);
+    assert_eq!(config.max_kv_size, Some(2048));
+}
+
+#[test]
+fn build_server_config_honors_no_batch_as_single_slot_context() {
+    let startup = ServerStartupConfig {
+        ctx_size: 8192,
+        n_parallel: 4,
+        no_batch: true,
+        ..ServerStartupConfig::default()
+    };
+
+    let config = build_server_config(&startup, None);
+    assert_eq!(config.context_size, 8192);
+    assert_eq!(config.max_kv_size, Some(8192));
+}
+
+#[test]
+fn build_server_config_keeps_lower_explicit_max_kv_size() {
+    let startup = ServerStartupConfig {
+        ctx_size: 8192,
+        n_parallel: 2,
+        max_kv_size: Some(1024),
+        ..ServerStartupConfig::default()
+    };
+
+    let config = build_server_config(&startup, None);
+    assert_eq!(config.context_size, 4096);
+    assert_eq!(config.max_kv_size, Some(1024));
+}
+
+#[test]
+fn validate_parallel_context_startup_rejects_too_small_per_slot_window() {
+    let startup = ServerStartupConfig {
+        ctx_size: MIN_PARALLEL_CONTEXT_SIZE,
+        n_parallel: 2,
+        ..ServerStartupConfig::default()
+    };
+
+    let err = validate_parallel_context_startup(&startup).expect_err("must reject below floor");
+    assert!(
+        err.to_string()
+            .contains("below the minimum supported per-slot context size"),
+        "unexpected error: {err}"
+    );
 }
 
 #[test]

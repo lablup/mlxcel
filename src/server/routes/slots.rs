@@ -31,6 +31,7 @@ pub async fn slots(State(state): State<AppState>) -> Json<Vec<SlotInfo>> {
     let active_count = state.batch_metrics.active_count();
     let queue_depth = state.batch_metrics.queue_depth();
     let model_id = state.display_model_id().to_string();
+    let context_size = state.config.context_size;
 
     let mut slots: Vec<SlotInfo> = Vec::with_capacity(max_slots + queue_depth);
 
@@ -45,6 +46,7 @@ pub async fn slots(State(state): State<AppState>) -> Json<Vec<SlotInfo>> {
                 "idle".to_string()
             },
             model: model_id.clone(),
+            context_size,
             is_processing: is_active,
             prompt_tokens: None,
             generated_tokens: None,
@@ -58,6 +60,7 @@ pub async fn slots(State(state): State<AppState>) -> Json<Vec<SlotInfo>> {
             id: max_slots + i,
             state: "queued".to_string(),
             model: model_id.clone(),
+            context_size,
             is_processing: false,
             prompt_tokens: None,
             generated_tokens: None,

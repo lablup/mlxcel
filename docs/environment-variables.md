@@ -37,6 +37,22 @@ and cached on first use. Set them before starting `mlxcel` or `mlxcel-server`.
 | `MLXCEL_SERVER_DECODE_STORAGE` | `auto`, `dense`, `paged` | `auto` | Server continuous-batching decode storage. `--decode-storage-backend` takes precedence. Invalid values warn and fall back to `auto`. |
 | `MLXCEL_SURGERY` | YAML file path | unset | Feature-gated weight-load surgery configuration. `--surgery` takes precedence when the `surgery` feature is built. |
 
+## Server context sizing
+
+`mlxcel serve` and `mlxcel-server` follow llama.cpp server semantics for the
+llama-compatible flags `--ctx-size` / `LLAMA_ARG_CTX_SIZE` and `--parallel` /
+`LLAMA_ARG_N_PARALLEL`: an explicit `--ctx-size C` is a total context budget
+shared by the active request slots, so each slot receives `floor(C / N)` tokens
+when `--parallel N` is used. If `--max-batch-size M` is set, `M` is the divisor
+because it controls the maximum number of concurrent decode sequences. With
+`--no-batch`, the divisor is `1`.
+
+Startup fails when the effective per-slot context window is below 512 tokens.
+The `/slots` endpoint and `/health.context_size` report the effective per-slot
+window, not the total `--ctx-size` budget. The `--estimate-memory` preflight uses
+the same per-slot window and active-sequence count so increasing `--parallel`
+does not multiply KV memory for a fixed explicit `--ctx-size`.
+
 ## Build-time variables
 
 These are read by the `mlxcel-core` build script.

@@ -72,5 +72,8 @@ pub use prompt_cache::{
     multimodal_digest_from_vecs,
 };
 pub use speculative_dispatch::{SpeculativeDispatch, SpeculativeDispatchError};
-pub use startup::{ServerStartupConfig, start_server};
+pub use startup::{
+    MIN_PARALLEL_CONTEXT_SIZE, ServerStartupConfig, effective_parallel_context_slots,
+    resolve_parallel_context_size, start_server,
+};
 pub use state::{AppState, BatchMetrics, Metrics, ModelMediaSupport};

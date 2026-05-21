@@ -163,7 +163,7 @@ struct ServerArgs {
     #[arg(long, env = "LLAMA_ARG_PORT", default_value_t = 8080)]
     port: u16,
 
-    /// Context size limit (0 = use model default)
+    /// Total context budget shared across parallel slots (0 = use model default)
     #[arg(
         short = 'c',
         long = "ctx-size",
@@ -182,7 +182,7 @@ struct ServerArgs {
     )]
     predict: i32,
 
-    /// Number of parallel request slots
+    /// Number of parallel request slots that share --ctx-size
     #[arg(long = "parallel", env = "LLAMA_ARG_N_PARALLEL", default_value_t = 1)]
     parallel: usize,
 
@@ -215,7 +215,7 @@ struct ServerArgs {
     )]
     draft: usize,
 
-    /// Maximum number of concurrent decode sequences (default: --parallel value)
+    /// Maximum concurrent decode sequences; explicit value shares --ctx-size
     #[arg(long = "max-batch-size", value_name = "N")]
     max_batch_size: Option<usize>,
 

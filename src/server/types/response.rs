@@ -371,10 +371,10 @@ pub struct HealthResponse {
     pub observability: Option<crate::server::batch::ObservabilitySnapshot>,
     /// Effective context window size in tokens.
     ///
-    /// Reports the configured `--ctx-size` value. When the server was started
-    /// without an explicit `--ctx-size` override this is 0, which means the
-    /// model's own `max_position_embeddings` applies. Monitoring tools may use
-    /// this as a hint; `0` should be treated as "model default / unknown".
+    /// Reports the effective per-slot `--ctx-size` value. When the server was
+    /// started without an explicit `--ctx-size` override this is 0, which means
+    /// the model's own `max_position_embeddings` applies. Monitoring tools may
+    /// use this as a hint; `0` should be treated as "model default / unknown".
     ///
     /// Present only when the model is loaded.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -497,6 +497,8 @@ pub struct SlotInfo {
     pub id: usize,
     pub state: String,
     pub model: String,
+    /// Effective per-slot context window in tokens (`0` = model default).
+    pub context_size: usize,
     pub is_processing: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prompt_tokens: Option<usize>,
@@ -609,6 +611,23 @@ mod tests {
 
         let json = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["usage"]["prompt_tokens_details"]["cached_tokens"], 0);
+    }
+
+    #[test]
+    fn slot_info_serializes_effective_context_size() {
+        let slot = SlotInfo {
+            id: 0,
+            state: "idle".to_string(),
+            model: "model".to_string(),
+            context_size: 2048,
+            is_processing: false,
+            prompt_tokens: None,
+            generated_tokens: None,
+            elapsed_ms: None,
+        };
+
+        let json = serde_json::to_value(&slot).unwrap();
+        assert_eq!(json["context_size"], 2048);
     }
 
     // -- OpenAI/llama.cpp/vLLM tool-call content=null shape --

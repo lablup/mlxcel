@@ -455,11 +455,11 @@ pub(crate) struct ServeArgs {
     #[arg(long, value_name = "PATH")]
     api_key_file: Option<PathBuf>,
 
-    /// Number of parallel request slots
+    /// Number of parallel request slots that share --ctx-size
     #[arg(long, env = "LLAMA_ARG_N_PARALLEL", default_value_t = 1)]
     n_parallel: usize,
 
-    /// Context size limit (0 = use model default)
+    /// Total context budget shared across parallel slots (0 = use model default)
     #[arg(long, env = "LLAMA_ARG_CTX_SIZE", default_value_t = 0)]
     ctx_size: usize,
 
@@ -475,7 +475,7 @@ pub(crate) struct ServeArgs {
     #[arg(long, env = "LLAMA_ARG_DRAFT_MAX", default_value_t = 16)]
     draft_max: usize,
 
-    /// Maximum number of concurrent decode sequences (default: --n-parallel value)
+    /// Maximum concurrent decode sequences; explicit value shares --ctx-size
     #[arg(long, value_name = "N")]
     max_batch_size: Option<usize>,
 

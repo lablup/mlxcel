@@ -49,6 +49,14 @@ struct ResolvedDistributedStartup {
     remote_stage_service: Option<RemoteStageServiceConfig>,
 }
 
+/// Minimum effective context window accepted for each request slot.
+///
+/// `llama-server` treats `--ctx-size` as a total context budget shared by
+/// parallel slots. Below this floor, a process can start successfully but
+/// become unusable for normal chat/completion traffic, so fail early with a
+/// clear operator-facing error.
+pub const MIN_PARALLEL_CONTEXT_SIZE: usize = 512;
+
 /// Startup configuration for the server (shared between `mlxcel serve` and `mlxcel-server`).
 #[derive(Debug)]
 pub struct ServerStartupConfig {
@@ -433,6 +441,82 @@ impl Default for ServerStartupConfig {
     }
 }
 
+/// Return the number of slots that share the total context budget.
+///
+/// Continuous batching can admit `--max-batch-size` concurrent decode
+/// sequences, so an explicit override becomes the sizing divisor. The legacy
+/// sequential worker processes one request at a time and therefore keeps the
+/// full context budget for that single active slot.
+pub fn effective_parallel_context_slots(
+    n_parallel: usize,
+    max_batch_size: Option<usize>,
+    no_batch: bool,
+) -> usize {
+    if no_batch {
+        1
+    } else {
+        max_batch_size.unwrap_or(n_parallel).max(1)
+    }
+}
+
+/// Resolve the effective per-slot context window from a total context budget.
+pub fn resolve_parallel_context_size(
+    ctx_size: usize,
+    n_parallel: usize,
+    max_batch_size: Option<usize>,
+    no_batch: bool,
+) -> usize {
+    if ctx_size == 0 {
+        return 0;
+    }
+
+    let slots = effective_parallel_context_slots(n_parallel, max_batch_size, no_batch);
+    ctx_size / slots
+}
+
+fn resolve_context_kv_cap(
+    per_slot_context_size: usize,
+    explicit_max_kv_size: Option<usize>,
+) -> Option<usize> {
+    if per_slot_context_size == 0 {
+        return explicit_max_kv_size;
+    }
+
+    Some(match explicit_max_kv_size {
+        Some(max_kv_size) => max_kv_size.min(per_slot_context_size),
+        None => per_slot_context_size,
+    })
+}
+
+fn validate_parallel_context_startup(startup: &ServerStartupConfig) -> Result<()> {
+    if startup.ctx_size == 0 {
+        return Ok(());
+    }
+
+    let slots = effective_parallel_context_slots(
+        startup.n_parallel,
+        startup.max_batch_size,
+        startup.no_batch,
+    );
+    let per_slot_context_size = resolve_parallel_context_size(
+        startup.ctx_size,
+        startup.n_parallel,
+        startup.max_batch_size,
+        startup.no_batch,
+    );
+
+    anyhow::ensure!(
+        per_slot_context_size >= MIN_PARALLEL_CONTEXT_SIZE,
+        "--ctx-size {} divided across {} active slot(s) gives {} tokens per slot, below the minimum supported per-slot context size of {}; increase --ctx-size, reduce --parallel/--max-batch-size, or use --no-batch for single-slot serving",
+        startup.ctx_size,
+        slots,
+        per_slot_context_size,
+        MIN_PARALLEL_CONTEXT_SIZE
+    );
+
+    Ok(())
+}
+
 /// Resolve the elastic repartition configuration from CLI flags.
 ///
 /// Returns `None` when `--enable-elastic-pp` is not set, which is the
@@ -638,12 +722,20 @@ pub(super) fn build_server_config(
         &startup.tp_lm_head_mode,
     )
     .expect("tensor parallel config was already validated during startup");
+    let max_batch_size = startup.max_batch_size.unwrap_or(startup.n_parallel).max(1);
+    let context_size = resolve_parallel_context_size(
+        startup.ctx_size,
+        startup.n_parallel,
+        startup.max_batch_size,
+        startup.no_batch,
+    );
+    let max_kv_size = resolve_context_kv_cap(context_size, startup.max_kv_size);
 
     ServerConfig {
         api_key,
         timeout_seconds: startup.timeout,
         model_alias: startup.model_alias.clone(),
-        context_size: startup.ctx_size,
+        context_size,
         n_parallel: startup.n_parallel,
         enable_slots_endpoint: startup.enable_slots,
         enable_props_endpoint: startup.enable_props,
@@ -672,7 +764,7 @@ pub(super) fn build_server_config(
         // the resolved kind are known.
         draft_kind: startup.draft_kind.clone(),
         draft_block_size: startup.draft_block_size,
-        max_batch_size: startup.max_batch_size.unwrap_or(startup.n_parallel).max(1),
+        max_batch_size,
         max_queue_depth: startup.max_queue_depth,
         prefill_chunk_size: startup.prefill_chunk_size,
         enable_preemption: startup.enable_preemption,
@@ -704,10 +796,11 @@ pub(super) fn build_server_config(
         // the continuous-batching scheduler can apply per-layer modes
         // (with the last-layer skip) at sequence allocation time.
         batch_kv_quant: startup.batch_kv_quant,
-        // Issue #603: forward the resolved `--max-kv-size` so the scheduler
-        // can apply a head-trim policy to plain `KVCache` instances. `None`
-        // disables the cap and preserves the legacy unbounded behaviour.
-        max_kv_size: startup.max_kv_size,
+        // Issue #57/#603: forward the resolved per-slot context cap (optionally
+        // tightened by `--max-kv-size`) so the scheduler can apply a head-trim
+        // policy to plain `KVCache` instances. `None` means no explicit
+        // context or max-KV bound was configured.
+        max_kv_size,
     }
 }
 
@@ -1297,6 +1390,7 @@ pub async fn start_server(mut startup: ServerStartupConfig) -> Result<()> {
         anyhow::bail!("--dry-run was requested but --pp-auto was not provided; nothing to plan");
     }
 
+    validate_parallel_context_startup(&startup)?;
     validate_pipeline_parallel_startup(&startup)?;
     let tp_support = resolve_tensor_parallel_runtime_support(&startup)?;
 
