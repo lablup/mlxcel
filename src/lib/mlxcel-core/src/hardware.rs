@@ -421,10 +421,8 @@ pub fn kv_cache_bytes(
 ) -> u64 {
     // Round ctx_len up to the next multiple of KV_CACHE_ALLOC_STEP so the
     // estimate matches the actual buffer reservation.
-    let rounded_ctx = ctx_len
-        .saturating_add(KV_CACHE_ALLOC_STEP - 1)
-        / KV_CACHE_ALLOC_STEP
-        * KV_CACHE_ALLOC_STEP;
+    let rounded_ctx =
+        ctx_len.saturating_add(KV_CACHE_ALLOC_STEP - 1) / KV_CACHE_ALLOC_STEP * KV_CACHE_ALLOC_STEP;
 
     num_layers
         .saturating_mul(2) // K and V
@@ -459,12 +457,7 @@ pub struct KvCacheParams {
 
 impl KvCacheParams {
     /// Create params with `int8_kv = false` and `batch = 1`.
-    pub fn new(
-        num_layers: u64,
-        num_kv_heads: u64,
-        head_dim: u64,
-        ctx_len: u64,
-    ) -> Self {
+    pub fn new(num_layers: u64, num_kv_heads: u64, head_dim: u64, ctx_len: u64) -> Self {
         Self {
             num_layers,
             num_kv_heads,
@@ -881,7 +874,10 @@ mod tests {
             batch: 1,
         };
         // elem_bytes = 2 for FP16.
-        assert_eq!(kv_cache_bytes_from_params(&params), kv_cache_bytes(32, 8, 128, 2, 8192, 1));
+        assert_eq!(
+            kv_cache_bytes_from_params(&params),
+            kv_cache_bytes(32, 8, 128, 2, 8192, 1)
+        );
     }
 
     #[test]
@@ -905,7 +901,10 @@ mod tests {
         let params = KvCacheParams::new(32, 8, 128, 8192);
         assert!(!params.int8_kv);
         assert_eq!(params.batch, 1);
-        assert_eq!(kv_cache_bytes_from_params(&params), kv_cache_bytes(32, 8, 128, 2, 8192, 1));
+        assert_eq!(
+            kv_cache_bytes_from_params(&params),
+            kv_cache_bytes(32, 8, 128, 2, 8192, 1)
+        );
     }
 
     // ── recommend_quantization with computed KV headroom ─────────────────────

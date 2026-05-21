@@ -233,8 +233,7 @@ pub fn advise_quantization(
     // Attempt to derive KV cache headroom from the model config.
     let kv_bytes = estimate_kv_cache_bytes_from_path(model_path, 8192, false);
 
-    let recommendation =
-        recommend_quantization(params, hw.unified_memory_gb, hw, kv_bytes);
+    let recommendation = recommend_quantization(params, hw.unified_memory_gb, hw, kv_bytes);
 
     let uses_bf16 = model_uses_bfloat16(model_path);
 
