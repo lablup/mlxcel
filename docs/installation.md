@@ -76,17 +76,22 @@ CUDA_HOME=/opt/cuda cargo build --release --features cuda
 
 `src/lib/mlxcel-core/build.rs` reads `MLX_CUDA_ARCHITECTURES`. If it is unset,
 the build script tries to detect the compute capability with `nvidia-smi` and
-falls back to `90` when detection fails.
+falls back to `90a` when detection fails. For SM 90 and above it appends CUDA's
+architecture-specific `a` suffix (so `90` becomes `90a`), because the dedicated
+Hopper quantized kernel (`qmm_sm90`) is only compiled when `90a` is in the arch
+list. An explicitly set `MLX_CUDA_ARCHITECTURES` is used verbatim, so include the
+suffix yourself for Hopper (`90a`).
 
 ```bash
-# Hopper / GH200-style target.
-MLX_CUDA_ARCHITECTURES=90 cargo build --release --features cuda
+# Hopper / GH200-style target. The `a` suffix is required for the Hopper
+# quantized kernel; plain `90` builds without it.
+MLX_CUDA_ARCHITECTURES=90a cargo build --release --features cuda
 
 # GB10 / DGX Spark-style target used by the release workflow.
 MLX_CUDA_ARCHITECTURES=121 cargo build --release --features cuda
 
 # Multiple targets, if your MLX/CUDA toolchain supports them.
-MLX_CUDA_ARCHITECTURES="90;121" cargo build --release --features cuda
+MLX_CUDA_ARCHITECTURES="90a;121" cargo build --release --features cuda
 ```
 
 The repository release workflow currently builds Linux ARM64 CUDA artifacts for
@@ -98,7 +103,7 @@ combinations as source builds that need local validation.
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `CUDA_HOME` | CUDA toolkit root used by the build script | `/usr/local/cuda` when present |
-| `MLX_CUDA_ARCHITECTURES` | CUDA SM target list, build-time | auto-detect via `nvidia-smi`, then `90` fallback |
+| `MLX_CUDA_ARCHITECTURES` | CUDA SM target list, build-time | auto-detect via `nvidia-smi`, then `90a` fallback |
 | `MLXCEL_DEVICE` | Runtime device hint (`gpu` or `cpu`) | auto |
 | `MLXCEL_WIRED_LIMIT` | Apple Silicon wired-memory ceiling, e.g. `64GB`; `0`/`none` disables it | `max` |
 | `LLAMA_ARG_*` | Environment-backed server options accepted by clap | unset |

@@ -217,9 +217,19 @@ fn build_mlx() -> PathBuf {
             config.define("CMAKE_CUDA_COMPILER", "/usr/local/cuda/bin/nvcc");
         }
 
-        // Set CUDA architecture - use env var or auto-detect via nvidia-smi
+        // CUDA architecture selection. An explicitly set MLX_CUDA_ARCHITECTURES is
+        // honored verbatim (escape hatch); otherwise we auto-detect via nvidia-smi
+        // and fall back to Hopper's sm_90a.
+        //
+        // The `a` suffix is load-bearing: MLX only defines MLX_CUDA_SM90A_ENABLED
+        // (which compiles the dedicated Hopper `qmm_sm90` quantized kernel) when
+        // "90a" is in the arch list. MLX's own CMake appends that suffix for
+        // cc >= 90, but only inside its `if(NOT DEFINED MLX_CUDA_ARCHITECTURES)`
+        // branch. Because we always pass MLX_CUDA_ARCHITECTURES explicitly, that
+        // branch never runs, so we apply the same rule ourselves here and in
+        // detect_cuda_arch. See docs/installation.md (CUDA architecture selection).
         let cuda_arch = env::var("MLX_CUDA_ARCHITECTURES")
-            .unwrap_or_else(|_| detect_cuda_arch().unwrap_or_else(|| "90".to_string()));
+            .unwrap_or_else(|_| detect_cuda_arch().unwrap_or_else(|| "90a".to_string()));
         config.define("MLX_CUDA_ARCHITECTURES", &cuda_arch);
     }
 
@@ -248,14 +258,15 @@ fn detect_cuda_arch() -> Option<String> {
         .output()
         .ok()?;
     let caps = String::from_utf8_lossy(&output.stdout);
-    // Parse "X.Y" compute capabilities, convert to SM number (e.g. "9.0" -> "90")
+    // Parse "X.Y" compute capabilities, convert to SM number (e.g. "9.0" -> "90"),
+    // and append the architecture-specific "a" suffix for cc >= 90 (e.g. "90a").
     let archs: Vec<String> = caps
         .lines()
         .filter_map(|line| {
             let line = line.trim();
             let parts: Vec<&str> = line.split('.').collect();
             if parts.len() == 2 {
-                Some(format!("{}{}", parts[0], parts[1]))
+                Some(sm_arch_with_suffix(&format!("{}{}", parts[0], parts[1])))
             } else {
                 None
             }
@@ -269,6 +280,21 @@ fn detect_cuda_arch() -> Option<String> {
         unique.sort();
         unique.dedup();
         Some(unique.join(";"))
+    }
+}
+
+/// Append CUDA's architecture-specific `a` suffix for SM >= 90, mirroring MLX's
+/// own CMake logic (`MLX_CUDA_ARCHITECTURES GREATER_EQUAL 90` -> append `a`).
+///
+/// The `a` suffix enables architecture-specific features (e.g. Hopper wgmma/TMA)
+/// the dedicated quantized kernels rely on, and it gates MLX_CUDA_SM90A_ENABLED on
+/// "90a" (not "90"). SM < 90 (e.g. Ampere sm_80/sm_86) has no `a` variant and is
+/// returned unchanged.
+#[cfg(feature = "cuda")]
+fn sm_arch_with_suffix(sm: &str) -> String {
+    match sm.parse::<u32>() {
+        Ok(n) if n >= 90 => format!("{sm}a"),
+        _ => sm.to_string(),
     }
 }
 
