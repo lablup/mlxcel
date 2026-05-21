@@ -211,8 +211,7 @@ pub fn advise_quantization(
     // bytes; dividing by 1e9 converts to billions. This is conservative for
     // INT8/INT4 models (they will appear larger than they are), which is the
     // safe direction for memory-fit recommendations.
-    let exact_params_billions: Option<f64> =
-        exact_weight_bytes.map(|b| b as f64 / 2.0 / 1e9);
+    let exact_params_billions: Option<f64> = exact_weight_bytes.map(|b| b as f64 / 2.0 / 1e9);
 
     let params = model_params_override
         .or(exact_params_billions)
@@ -425,8 +424,8 @@ mod tests {
 
     #[test]
     fn advise_quantization_uses_exact_bytes_from_index() {
-        use std::io::Write;
         use mlxcel_core::hardware::{AppleSiliconGen, HardwareCapabilities};
+        use std::io::Write;
 
         let hw = HardwareCapabilities {
             silicon_gen: AppleSiliconGen::M5,
@@ -440,7 +439,8 @@ mod tests {
 
         // Write an index.json with a known total_size (7B FP16 = ~14 GB = 14_000_000_000 bytes).
         let tmp = tempfile::tempdir().unwrap();
-        let index_json = r#"{"metadata": {"total_size": 14000000000}, "weight_map": {"w": "x.safetensors"}}"#;
+        let index_json =
+            r#"{"metadata": {"total_size": 14000000000}, "weight_map": {"w": "x.safetensors"}}"#;
         let mut f = std::fs::File::create(tmp.path().join("model.safetensors.index.json")).unwrap();
         f.write_all(index_json.as_bytes()).unwrap();
 

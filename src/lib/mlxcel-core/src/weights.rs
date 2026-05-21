@@ -200,8 +200,7 @@ fn read_safetensors_header_bytes(path: &Path) -> Option<u64> {
 
     let mut header_bytes = vec![0u8; header_len as usize];
     f.read_exact(&mut header_bytes).ok()?;
-    let header_json =
-        serde_json::from_slice::<serde_json::Value>(&header_bytes).ok()?;
+    let header_json = serde_json::from_slice::<serde_json::Value>(&header_bytes).ok()?;
 
     let obj = header_json.as_object()?;
     let mut total: u64 = 0;
@@ -831,8 +830,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         write_index_with_total_size(dir.path(), 12_345_678);
 
-        let result = parse_shard_index_with_total_size(dir.path())
-            .expect("should succeed");
+        let result = parse_shard_index_with_total_size(dir.path()).expect("should succeed");
         assert!(result.is_some());
         let (_shards, total_size) = result.unwrap();
         assert_eq!(total_size, Some(12_345_678));
@@ -843,8 +841,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         write_index_without_total_size(dir.path());
 
-        let result = parse_shard_index_with_total_size(dir.path())
-            .expect("should succeed");
+        let result = parse_shard_index_with_total_size(dir.path()).expect("should succeed");
         assert!(result.is_some());
         let (_shards, total_size) = result.unwrap();
         assert_eq!(total_size, None);
@@ -853,8 +850,7 @@ mod tests {
     #[test]
     fn test_parse_shard_index_with_total_size_no_file() {
         let dir = tempfile::tempdir().unwrap();
-        let result = parse_shard_index_with_total_size(dir.path())
-            .expect("should succeed");
+        let result = parse_shard_index_with_total_size(dir.path()).expect("should succeed");
         assert!(result.is_none());
     }
 
