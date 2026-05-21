@@ -1028,6 +1028,25 @@ impl CxxGenerator {
                         ffi::export_to_dot_pair(&path, &next_tok, &next_log);
                     }
                 }
+                // Optional Metal GPU capture of one warm decode token for
+                // per-kernel profiling vs mlx-lm. Fires at n==2 so
+                // all decode kernels are JIT-cached. Requires the process to be
+                // launched with `MTL_CAPTURE_ENABLED=1`; writes a `.gputrace`
+                // bundle to the given path, comparable with mlx-lm's
+                // `mx.metal.start_capture`.
+                if n == 2 {
+                    if let Ok(path) = std::env::var("MLXCEL_CAPTURE_DECODE") {
+                        ffi::metal_start_capture(&path);
+                        ffi::eval(&next_tok);
+                        ffi::metal_stop_capture();
+                        // Exit immediately so the GPU trace document finalizes
+                        // with exactly one captured decode token and no further
+                        // GPU work polluting it (mirrors mlx-lm's capture-script
+                        // lifecycle). Capture mode is a profiling-only path.
+                        eprintln!("[capture] wrote one decode token to {path}");
+                        std::process::exit(0);
+                    }
+                }
                 if force_sync {
                     ffi::eval(&next_tok);
                 } else {
