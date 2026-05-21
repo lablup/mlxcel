@@ -33,6 +33,9 @@ use mlxcel::{
         resolve_model_shard_plan, shard_config_from_cli, validate_supported_runtime,
     },
     initialize_runtime, load_model, load_model_with_adapter, load_model_with_tensor_parallel,
+    memory_estimate::{
+        MemoryEstimate, QuantHint, estimate_total_memory, format_bytes, format_estimate,
+    },
     quant_advisor::{advise_quantization, print_quant_advice},
     sampling::{ResolvedSamplingParams, build_sampling_config},
     server::chat_template::{ChatMessage, ChatTemplateProcessor},
@@ -108,6 +111,7 @@ fn print_runtime_setup(runtime: &RuntimeSetup) {
 
 fn load_generation_model(
     args: &GenerateArgs,
+    preflight: Option<&MemoryEstimate>,
 ) -> Result<(mlxcel::LoadedModel, mlxcel::tokenizer::MlxcelTokenizer)> {
     println!("Loading model from {:?}...", args.model.model);
     let load_start = Instant::now();
@@ -153,7 +157,149 @@ fn load_generation_model(
         load_seconds = load_elapsed.as_secs_f64(),
         "Model resident after load",
     );
+
+    // Issue #56: compare the pre-load estimate against MLX's
+    // observed active memory once loading is complete. The delta
+    // feeds future headroom-factor calibration (see the recipe on
+    // `memory_estimate::DEFAULT_HEADROOM_FACTOR`).
+    //
+    // On Linux/CPU MLX returns zero for most memory metrics, so we
+    // skip the delta when `snap.active_bytes == 0` — it would just
+    // print misleading "100% under-estimate" lines. The structural
+    // wiring is verified by the call site and the unit tests; the
+    // numerical delta is meaningful only on Apple Silicon (Metal) /
+    // CUDA backends that populate the active counter.
+    if let Some(est) = preflight {
+        log_estimate_vs_actual_delta(est, &snap);
+    }
     Ok(result)
+}
+
+/// Log the delta between a pre-load `MemoryEstimate` and the
+/// post-load MLX allocator snapshot.
+///
+/// Skips when MLX reports zero active bytes (Linux/CPU has no
+/// per-process allocator counter on the no-gpu backend). When active
+/// bytes are nonzero, prints a `delta` line and emits a tracing
+/// event so an off-line collector can chart preflight accuracy
+/// across loads — feeding the manual recalibration recipe on
+/// `DEFAULT_HEADROOM_FACTOR`.
+fn log_estimate_vs_actual_delta(est: &MemoryEstimate, snap: &mlxcel_core::memory::MemorySnapshot) {
+    if snap.active_bytes == 0 {
+        // No allocator counter to compare against (no-gpu CPU
+        // backend). Surface the no-op so operators reading the log
+        // know the preflight estimate is structurally wired but
+        // can't be validated numerically on this host.
+        println!(
+            "Memory estimate vs actual: skipped (MLX active_memory() is 0 — \
+             non-Metal/CUDA backend; estimate was {} and is structurally valid \
+             but cannot be verified without a populated allocator counter)",
+            format_bytes(est.total_bytes),
+        );
+        tracing::info!(
+            estimate_total = est.total_bytes,
+            actual_active = snap.active_bytes,
+            skipped = true,
+            reason = "active_memory zero on this backend",
+            "Memory estimate vs actual delta",
+        );
+        return;
+    }
+
+    let est_bytes = est.total_bytes;
+    let actual = snap.active_bytes;
+    let (delta_label, delta_bytes) = if actual >= est_bytes {
+        ("over-estimated by", actual.saturating_sub(est_bytes))
+    } else {
+        ("under-estimated by", est_bytes.saturating_sub(actual))
+    };
+    let ratio = if est_bytes > 0 {
+        actual as f64 / est_bytes as f64
+    } else {
+        0.0
+    };
+    println!(
+        "Memory estimate vs actual: estimate {} | actual {} | {} {} (ratio {:.3})",
+        format_bytes(est_bytes),
+        format_bytes(actual),
+        delta_label,
+        format_bytes(delta_bytes),
+        ratio,
+    );
+    tracing::info!(
+        estimate_total = est_bytes,
+        actual_active = actual,
+        delta_bytes,
+        ratio,
+        headroom_factor = est.headroom_factor,
+        weights_bytes = est.weights_bytes,
+        kv_cache_bytes = est.kv_cache_bytes,
+        runtime_headroom_bytes = est.runtime_headroom_bytes,
+        "Memory estimate vs actual delta",
+    );
+}
+
+/// Run the `--estimate-memory` preflight for `mlxcel generate`.
+///
+/// Returns `Some(estimate)` when the user passed `--estimate-memory`
+/// (so the caller can later log the estimate-vs-actual delta), and
+/// `None` when the preflight was not requested. The function never
+/// allocates on MLX and never touches the model.
+///
+/// When `total > available` and `--force` was not set, returns
+/// `Err(...)` with an actionable message that names the over-budget
+/// figure and the override flags. Always prints the formatted
+/// breakdown before aborting so operators can see the same byte
+/// table `mlxcel inspect` would have shown.
+fn run_memory_preflight(args: &GenerateArgs) -> Result<Option<MemoryEstimate>> {
+    if !args.generation.estimate_memory {
+        return Ok(None);
+    }
+
+    // Derive int8 KV from the existing --cache-type-k / --cache-type-v
+    // pair so the preflight reflects what the loaded cache will
+    // actually allocate. Mixed-precision configurations fall back to
+    // FP16 sizing because the size formula does not model them
+    // directly — surfaced in the printed breakdown.
+    let kv_int8 = matches!(
+        (
+            args.generation.turbo.cache_type_k.as_deref(),
+            args.generation.turbo.cache_type_v.as_deref(),
+        ),
+        (Some("int8"), Some("int8")) | (Some("i8"), Some("i8"))
+    );
+
+    // Use the user's `--max-tokens` as the KV ctx_len input. This
+    // matches the way `mlxcel inspect --max-tokens N` sizes the KV
+    // estimate, so the preflight and the inspect view never disagree.
+    let ctx_len = args.generation.max_tokens.max(1) as u64;
+
+    let estimate =
+        estimate_total_memory(&args.model.model, ctx_len, 1, QuantHint::Default, kv_int8);
+
+    let banner = format_estimate(&args.model.model, &estimate);
+    println!("{banner}");
+
+    if !estimate.fits {
+        if args.generation.force_memory {
+            eprintln!(
+                "WARNING: --estimate-memory preflight says this load is over budget by {}. \
+                 Continuing because --force was set.",
+                format_bytes(estimate.overflow_bytes()),
+            );
+        } else {
+            return Err(anyhow::anyhow!(
+                "--estimate-memory: total {} exceeds available {} by {}. \
+                 Pass --force (or --no-memory-check) to override, or rerun with \
+                 a smaller --max-tokens / a smaller model.",
+                format_bytes(estimate.total_bytes),
+                format_bytes(estimate.available_bytes),
+                format_bytes(estimate.overflow_bytes()),
+            ));
+        }
+    }
+
+    Ok(Some(estimate))
 }
 
 fn cli_pipeline_requested(args: &GenerateArgs) -> bool {
@@ -906,6 +1052,15 @@ pub(crate) fn run_generate(args: GenerateArgs) -> Result<()> {
         }
     }
 
+    // Memory preflight (issue #56). Runs the unified estimator and
+    // aborts when total > available. Skipped when --estimate-memory
+    // was not passed. --force / --no-memory-check downgrades the
+    // abort to a warning. Sub-issue C's `MLXCEL_MEMORY_LIMIT` env hook
+    // is honoured transparently by the estimator's
+    // `resolve_available_memory` step (MLX allocator soft cap wins
+    // over OS RAM when nonzero).
+    let preflight_estimate = run_memory_preflight(&args)?;
+
     let pipeline_requested = cli_pipeline_requested(&args);
     let tokenizer = load_tokenizer(&args.model.model)?;
     let prompt = load_cli_prompt(
@@ -1047,7 +1202,7 @@ pub(crate) fn run_generate(args: GenerateArgs) -> Result<()> {
             &args,
         )?
     } else {
-        let (model, _loaded_tokenizer) = load_generation_model(&args)?;
+        let (model, _loaded_tokenizer) = load_generation_model(&args, preflight_estimate.as_ref())?;
         let vlm_embeddings = generate_vlm::compute_vlm_embeddings(
             &model,
             &mut prompt_tokens,

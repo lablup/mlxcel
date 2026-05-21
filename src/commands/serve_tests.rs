@@ -93,6 +93,8 @@ fn sample_args() -> crate::ServeArgs {
         _mlock: false,
         _no_mmap: false,
         _cont_batching: false,
+        estimate_memory: false,
+        force_memory: false,
         turbo: mlxcel::cli::turbo_args::TurboKvCacheArgs::default(),
         batch_quant: mlxcel::cli::batch_quant_args::BatchKvQuantArgs::default(),
         speculative: mlxcel::cli::speculative_args::SpeculativeArgs::default(),

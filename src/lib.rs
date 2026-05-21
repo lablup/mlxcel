@@ -58,6 +58,7 @@ mod lang_analyzer_tests;
 mod sampling_observability_tests;
 
 // Re-export mlxcel-core generate module
+pub use execution::memory_estimate;
 pub use execution::quant_advisor;
 pub use execution::runtime::{RuntimeDevice, RuntimeSetup, initialize_runtime};
 pub use execution::sampling;

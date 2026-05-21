@@ -40,16 +40,36 @@ brew install mlxcel
 # Download an MLX-format checkpoint from Hugging Face.
 mlxcel download mlx-community/Qwen3.5-0.8B-4bit
 
+# Check the memory budget before loading anything.
+mlxcel inspect -m models/Qwen3.5-0.8B-4bit --max-tokens 32768
+
 # One-off generation.
 mlxcel generate \
     -m models/Qwen3.5-0.8B-4bit \
     -p "Hello, world!" -n 100
+
+# Same generation, but refuse to start if the model + 32K KV cache will not fit.
+mlxcel generate \
+    -m models/Qwen3.5-0.8B-4bit \
+    -p "Hello, world!" -n 32768 \
+    --estimate-memory
 
 # OpenAI-compatible server.
 mlxcel-server \
     -m models/Qwen3.5-0.8B-4bit \
     --port 8080
 ```
+
+`mlxcel inspect` is read-only and prints a byte-level breakdown of weights /
+KV cache / runtime headroom against available unified memory without loading
+any tensors. `--estimate-memory` on `mlxcel generate` and `mlxcel serve`
+runs the same estimator as a preflight and aborts when the model will not
+fit; pass `--force` (alias `--no-memory-check`) to override the abort.
+`MLXCEL_MEMORY_LIMIT=NGB` tightens the "available" figure to a chosen soft
+cap so the preflight is meaningful even on hosts with plenty of RAM. The
+runtime headroom factor defaults to `1.20×` and is overridable via
+`MLXCEL_HEADROOM_FACTOR=<f>` for calibration runs — see the in-code recipe
+in `src/execution/memory_estimate.rs`.
 
 If you build from source instead, use `./target/release/mlxcel` and
 `./target/release/mlxcel-server` in place of the installed commands above.

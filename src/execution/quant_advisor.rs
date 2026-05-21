@@ -24,7 +24,6 @@ use mlxcel_core::hardware::{
     HardwareCapabilities, KvCacheParams, QuantRecommendation, kv_cache_bytes_from_params,
     recommend_quantization,
 };
-use mlxcel_core::weights::weight_footprint_bytes;
 
 // ── Model-size estimation ─────────────────────────────────────────────────────
 
@@ -215,23 +214,53 @@ pub fn advise_quantization(
     model_params_override: Option<f64>,
 ) -> QuantAdvice {
     let estimated_params = estimate_model_params_billions(model_path);
-    let exact_weight_bytes = weight_footprint_bytes(model_path);
 
-    // Convert exact bytes to a billions-of-parameters estimate.
+    // Route weight + KV inputs through the unified estimator so the
+    // advisor, the `mlxcel inspect` printer, and the
+    // `--estimate-memory` preflight never disagree on the same model
+    // (issue #56, epic #52 capstone). The estimator's resolution order
+    // is the same one this function used historically:
+    //   1. safetensors header (issue #53) — exact bytes.
+    //   2. analytical estimate from config.json — fp16-equivalent.
+    //   3. 7 B fallback.
+    let estimate = crate::execution::memory_estimate::estimate_total_memory(
+        model_path,
+        crate::execution::memory_estimate::DEFAULT_CTX_LEN,
+        1,
+        crate::execution::memory_estimate::QuantHint::Default,
+        false,
+    );
+
+    // The legacy `QuantAdvice` exposes `exact_weight_bytes: Option<u64>`,
+    // which is `Some(_)` only when the safetensors header was read.
+    let exact_weight_bytes = match estimate.weights_source {
+        crate::execution::memory_estimate::WeightsSource::ExactSafetensors => {
+            Some(estimate.weights_bytes)
+        }
+        _ => None,
+    };
+
+    // Convert weight-bytes to a billions-of-parameters estimate.
     // The safetensors total_size is raw parameter bytes (e.g. 2 bytes per BF16
     // parameter). Dividing by 2 yields an FP16-equivalent parameter count in
     // bytes; dividing by 1e9 converts to billions. This is conservative for
     // INT8/INT4 models (they will appear larger than they are), which is the
     // safe direction for memory-fit recommendations.
-    let exact_params_billions: Option<f64> = exact_weight_bytes.map(|b| b as f64 / 2.0 / 1e9);
+    let estimate_params_billions: Option<f64> = exact_weight_bytes.map(|b| b as f64 / 2.0 / 1e9);
 
     let params = model_params_override
-        .or(exact_params_billions)
+        .or(estimate_params_billions)
         .or(estimated_params)
         .unwrap_or(7.0); // safe fallback: assume 7B when unknown
 
-    // Attempt to derive KV cache headroom from the model config.
-    let kv_bytes = estimate_kv_cache_bytes_from_path(model_path, 8192, false);
+    // Carry KV bytes through directly when the estimator could read
+    // the architecture; otherwise pass `None` so `recommend_quantization`
+    // falls back to its built-in 2 GiB constant. Matches the legacy
+    // contract on `kv_cache_headroom_bytes`.
+    let kv_bytes = match estimate.kv_source {
+        crate::execution::memory_estimate::KvSource::Config => Some(estimate.kv_cache_bytes),
+        crate::execution::memory_estimate::KvSource::Unavailable => None,
+    };
 
     let recommendation = recommend_quantization(params, hw.unified_memory_gb, hw, kv_bytes);
 
@@ -308,11 +337,8 @@ fn estimate_kv_cache_bytes_from_config(
         .unwrap_or(num_heads);
 
     // head_dim is usually hidden_size / num_heads; fall back to 64 if num_heads is 0.
-    let head_dim = if num_heads > 0 {
-        hidden_size / num_heads
-    } else {
-        64
-    };
+    // Uses `checked_div` to satisfy clippy::manual_checked_ops (Rust 1.95+).
+    let head_dim = hidden_size.checked_div(num_heads).unwrap_or(64);
 
     let params = KvCacheParams {
         num_layers,

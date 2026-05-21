@@ -72,6 +72,20 @@ enum Commands {
     #[command(visible_alias = "ls")]
     List,
 
+    /// Print a pre-load memory budget for a model without running generation.
+    ///
+    /// Reports the byte breakdown for weights / KV cache / runtime
+    /// activation headroom and compares against available unified
+    /// memory. Use this before launching `mlxcel generate` or `mlxcel
+    /// serve` to decide whether a model + context length will fit.
+    ///
+    /// Examples:
+    ///
+    ///     mlxcel inspect models/llama-3.2-1b-4bit
+    ///     mlxcel inspect models/llama-3.2-1b-4bit --max-tokens 32768
+    ///     mlxcel inspect models/llama-3.2-1b-4bit --cache-type-k int8 --cache-type-v int8
+    Inspect(InspectArgs),
+
     /// Download a HuggingFace model repository snapshot
     Download(DownloadArgs),
 }
@@ -203,10 +217,73 @@ pub(crate) struct GenerationOptions {
     #[arg(long, default_value_t = false)]
     pub(crate) recommend_quant: bool,
 
+    /// Run a pre-load memory estimate; abort when the model will not fit.
+    ///
+    /// Computes weights + KV cache + runtime activation headroom and
+    /// compares the total against available unified memory. When the
+    /// total exceeds the available budget, generation aborts with a
+    /// clear error pointing at the over-budget figure. Use `--force`
+    /// (alias `--no-memory-check`) to bypass the preflight when you
+    /// have verified the estimate is conservative.
+    ///
+    /// Always runs before model load. Safe to combine with
+    /// `--recommend-quant`: both consume the same estimator.
+    #[arg(long, default_value_t = false)]
+    pub(crate) estimate_memory: bool,
+
+    /// Bypass the `--estimate-memory` preflight abort.
+    ///
+    /// When `--estimate-memory` would refuse to load a model because
+    /// total > available, `--force` (or its alias `--no-memory-check`)
+    /// downgrades the abort to a warning and continues. No-op when
+    /// `--estimate-memory` is not set.
+    #[arg(long = "force", alias = "no-memory-check", default_value_t = false)]
+    pub(crate) force_memory: bool,
+
     // Shared TurboQuant KV-cache flag group (--cache-type-k, --cache-type-v,
     // --kv-cache-mode, --turbo-boundary-v). Defined once in
     // mlxcel::cli::turbo_args so all three binaries (mlxcel generate,
     // mlxcel serve, mlxcel-server) expose identical help text and flags.
+    #[command(flatten)]
+    pub(crate) turbo: TurboKvCacheArgs,
+}
+
+/// Arguments for the `mlxcel inspect` subcommand.
+///
+/// Read-only: prints the unified memory estimate (weights / KV cache /
+/// runtime headroom / total vs available unified memory) and exits
+/// without loading the model. Mirrors the relevant flag surface of
+/// `mlxcel generate` so an operator can sanity-check a configuration
+/// before launching a real load.
+#[derive(Args, Debug)]
+#[command(next_help_heading = "Inspect Options")]
+pub(crate) struct InspectArgs {
+    /// Path to the model directory.
+    #[arg(short, long, value_name = "PATH")]
+    pub(crate) model: std::path::PathBuf,
+
+    /// Maximum number of tokens to estimate KV cache for.
+    ///
+    /// Treated as the context length input to the KV cache estimator.
+    /// Larger values yield larger KV-cache totals. Defaults to 8192 to
+    /// match the historical sizing used by `--recommend-quant`.
+    #[arg(short = 'n', long, default_value_t = 8192, value_name = "N")]
+    pub(crate) max_tokens: u64,
+
+    /// Batch size used in the KV-cache estimate. Defaults to 1 for
+    /// interactive use.
+    #[arg(long, default_value_t = 1, value_name = "N")]
+    pub(crate) batch: u64,
+
+    /// Quantization mode label (does not affect the byte total — the
+    /// safetensors header is taken at face value because mlxcel
+    /// quantizes lazily). One of: default, fp16, int8, int4.
+    #[arg(long, default_value = "default", value_name = "MODE")]
+    pub(crate) quant: String,
+
+    // Shared TurboQuant KV-cache flag group — gives `inspect` the same
+    // `--cache-type-k` / `--cache-type-v` surface as `generate` so the
+    // estimate matches what the loaded model would actually allocate.
     #[command(flatten)]
     pub(crate) turbo: TurboKvCacheArgs,
 }
@@ -881,6 +958,26 @@ pub(crate) struct ServeArgs {
     #[arg(long = "debug-pp-trace", value_name = "PATH")]
     debug_pp_trace: Option<PathBuf>,
 
+    /// Run a pre-load memory estimate; refuse to start when the model will not fit.
+    ///
+    /// Computes weights + KV cache + runtime activation headroom and
+    /// compares the total against available unified memory before the
+    /// server begins loading. When the total exceeds the available
+    /// budget the process exits with a non-zero status and a clear
+    /// over-budget message. Use `--force` (alias `--no-memory-check`)
+    /// to bypass.
+    #[arg(long, default_value_t = false)]
+    estimate_memory: bool,
+
+    /// Bypass the `--estimate-memory` preflight abort.
+    ///
+    /// When `--estimate-memory` would refuse to start the server
+    /// because total > available, `--force` (or its alias
+    /// `--no-memory-check`) downgrades the abort to a warning and
+    /// continues. No-op when `--estimate-memory` is not set.
+    #[arg(long = "force", alias = "no-memory-check", default_value_t = false)]
+    force_memory: bool,
+
     // Shared TurboQuant KV-cache flag group (--cache-type-k, --cache-type-v,
     // --kv-cache-mode, --turbo-boundary-v). Defined once in
     // mlxcel::cli::turbo_args so all three binaries (mlxcel generate,
@@ -1077,6 +1174,7 @@ fn main() -> anyhow::Result<()> {
             print_supported_models();
             Ok(())
         }
+        Commands::Inspect(args) => commands::run_inspect(args),
         Commands::Download(args) => commands::run_download(args),
     }
 }

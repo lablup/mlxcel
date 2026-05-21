@@ -20,6 +20,7 @@
 //! on schema and routing.
 
 use mlxcel::cli::speculative_args::{env_fallback_draft_block_size, env_fallback_draft_kind};
+use mlxcel::memory_estimate::{QuantHint, estimate_total_memory, format_bytes, format_estimate};
 use mlxcel::server::{
     ServerStartupInput, env_fallback_apc_block_size, env_fallback_apc_enabled,
     env_fallback_apc_hash, env_fallback_apc_num_blocks, env_fallback_cache_type_k,
@@ -34,7 +35,70 @@ use mlxcel::server::{
 /// Run the `mlxcel serve` subcommand.
 #[tokio::main]
 pub(crate) async fn run_serve(args: crate::ServeArgs) -> anyhow::Result<()> {
+    // Issue #56: preflight memory check before the server begins
+    // accepting connections. Refuses to start when total > available
+    // unless --force was passed. Skipped when --estimate-memory is
+    // off.
+    run_serve_memory_preflight(&args)?;
+
     start_server(build_startup_input(args)?.into_startup_config()?).await
+}
+
+/// Run the `--estimate-memory` preflight for `mlxcel serve`.
+///
+/// Mirrors `commands::generate::run_memory_preflight` but routed off
+/// `ServeArgs`. Uses the configured `ctx_size` when nonzero, falling
+/// back to the estimator's default 8192 sizing otherwise (matching
+/// what `--recommend-quant` historically used). When `total >
+/// available` and `--force` was not set, returns `Err` so the server
+/// aborts before any worker thread is spawned.
+fn run_serve_memory_preflight(args: &crate::ServeArgs) -> anyhow::Result<()> {
+    if !args.estimate_memory {
+        return Ok(());
+    }
+
+    let kv_int8 = matches!(
+        (
+            args.turbo.cache_type_k.as_deref(),
+            args.turbo.cache_type_v.as_deref(),
+        ),
+        (Some("int8"), Some("int8")) | (Some("i8"), Some("i8"))
+    );
+
+    // `--ctx-size 0` is the "use model default" sentinel; in that
+    // case we fall back to 8192 to match the historical sizing used
+    // by `--recommend-quant`.
+    let ctx_len = if args.ctx_size > 0 {
+        args.ctx_size as u64
+    } else {
+        mlxcel::memory_estimate::DEFAULT_CTX_LEN
+    };
+
+    let estimate = estimate_total_memory(&args.model, ctx_len, 1, QuantHint::Default, kv_int8);
+
+    let banner = format_estimate(&args.model, &estimate);
+    println!("{banner}");
+
+    if !estimate.fits {
+        if args.force_memory {
+            eprintln!(
+                "WARNING: --estimate-memory preflight says this load is over budget by {}. \
+                 Continuing because --force was set.",
+                format_bytes(estimate.overflow_bytes()),
+            );
+        } else {
+            return Err(anyhow::anyhow!(
+                "--estimate-memory: total {} exceeds available {} by {}. \
+                 Pass --force (or --no-memory-check) to override, or rerun with \
+                 a smaller --ctx-size / a smaller model.",
+                format_bytes(estimate.total_bytes),
+                format_bytes(estimate.available_bytes),
+                format_bytes(estimate.overflow_bytes()),
+            ));
+        }
+    }
+
+    Ok(())
 }
 
 fn build_startup_input(mut args: crate::ServeArgs) -> anyhow::Result<ServerStartupInput> {

@@ -21,8 +21,10 @@
 pub(crate) mod download;
 pub(crate) mod generate;
 mod generate_vlm;
+pub(crate) mod inspect;
 mod serve;
 
 pub(crate) use download::run_download;
 pub(crate) use generate::run_generate;
+pub(crate) use inspect::run_inspect;
 pub(crate) use serve::run_serve;
