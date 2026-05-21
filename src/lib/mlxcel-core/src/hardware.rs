@@ -372,6 +372,142 @@ fn estimate_bandwidth(gen: AppleSiliconGen, memory_gb: u32) -> f64 {
     }
 }
 
+// ── KV cache memory estimation ────────────────────────────────────────────────
+
+/// The pre-allocation step used by [`KVCache`](crate::cache::KVCache).
+///
+/// All buffer allocations are rounded up to the next multiple of this value so
+/// that the estimated reservation matches what the runtime actually allocates.
+pub const KV_CACHE_ALLOC_STEP: u64 = 256;
+
+/// Estimate the KV-cache memory reservation in bytes.
+///
+/// The formula is:
+/// ```text
+/// num_layers × 2 (K + V) × num_kv_heads × head_dim × elem_bytes
+///     × round_up(ctx_len, 256) × batch
+/// ```
+///
+/// `ctx_len` is rounded up to the next multiple of [`KV_CACHE_ALLOC_STEP`]
+/// (256) to match the actual buffer pre-allocation performed by
+/// [`KVCache`](crate::cache::KVCache).
+///
+/// # Arguments
+/// * `num_layers`  — number of transformer layers.
+/// * `num_kv_heads` — number of KV attention heads (may be < `num_heads` for GQA/MQA).
+/// * `head_dim`    — per-head dimension (usually `hidden_size / num_heads`).
+/// * `elem_bytes`  — bytes per element: 2 for FP16/BF16, 1 for INT8 KV.
+/// * `ctx_len`     — requested context length in tokens.
+/// * `batch`       — batch size (typically 1 for interactive generation).
+///
+/// # Examples
+/// ```
+/// use mlxcel_core::hardware::kv_cache_bytes;
+///
+/// // 32-layer, 8-head GQA model, 128-dim heads, FP16, 8K context, batch 1.
+/// let bytes = kv_cache_bytes(32, 8, 128, 2, 8192, 1);
+/// // ctx_len rounded to 8192 (already a multiple of 256).
+/// // 32 × 2 × 8 × 128 × 2 × 8192 × 1 = 1_073_741_824 (1 GiB)
+/// assert_eq!(bytes, 1_073_741_824);
+/// ```
+#[must_use]
+pub fn kv_cache_bytes(
+    num_layers: u64,
+    num_kv_heads: u64,
+    head_dim: u64,
+    elem_bytes: u64,
+    ctx_len: u64,
+    batch: u64,
+) -> u64 {
+    // Round ctx_len up to the next multiple of KV_CACHE_ALLOC_STEP so the
+    // estimate matches the actual buffer reservation.
+    let rounded_ctx = ctx_len
+        .saturating_add(KV_CACHE_ALLOC_STEP - 1)
+        / KV_CACHE_ALLOC_STEP
+        * KV_CACHE_ALLOC_STEP;
+
+    num_layers
+        .saturating_mul(2) // K and V
+        .saturating_mul(num_kv_heads)
+        .saturating_mul(head_dim)
+        .saturating_mul(elem_bytes)
+        .saturating_mul(rounded_ctx)
+        .saturating_mul(batch)
+}
+
+/// Model architecture parameters needed to compute KV cache memory.
+///
+/// Passed to [`kv_cache_bytes_from_params`] to avoid long argument lists and
+/// to give the unified estimator a single stable entry point.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KvCacheParams {
+    /// Number of transformer layers.
+    pub num_layers: u64,
+    /// Number of KV attention heads (may be < `num_heads` for GQA/MQA).
+    pub num_kv_heads: u64,
+    /// Per-head dimension (`hidden_size / num_heads`).
+    pub head_dim: u64,
+    /// `true` when INT8 KV cache is active (`--cache-type-k int8` /
+    /// `--cache-type-v int8` / `--kv-cache-mode int8`).  INT8 storage halves
+    /// `elem_bytes` relative to FP16.
+    pub int8_kv: bool,
+    /// Requested context length in tokens.
+    pub ctx_len: u64,
+    /// Batch size (typically 1 for interactive generation).
+    pub batch: u64,
+}
+
+impl KvCacheParams {
+    /// Create params with `int8_kv = false` and `batch = 1`.
+    pub fn new(
+        num_layers: u64,
+        num_kv_heads: u64,
+        head_dim: u64,
+        ctx_len: u64,
+    ) -> Self {
+        Self {
+            num_layers,
+            num_kv_heads,
+            head_dim,
+            int8_kv: false,
+            ctx_len,
+            batch: 1,
+        }
+    }
+}
+
+/// Compute KV-cache memory reservation from a [`KvCacheParams`] struct.
+///
+/// `elem_bytes` is derived from `params.int8_kv`: `1` for INT8, `2` for FP16/BF16.
+///
+/// # Examples
+/// ```
+/// use mlxcel_core::hardware::{KvCacheParams, kv_cache_bytes_from_params};
+///
+/// let params = KvCacheParams {
+///     num_layers: 32,
+///     num_kv_heads: 8,
+///     head_dim: 128,
+///     int8_kv: false,
+///     ctx_len: 8192,
+///     batch: 1,
+/// };
+/// let bytes = kv_cache_bytes_from_params(&params);
+/// assert_eq!(bytes, 1_073_741_824); // 1 GiB
+/// ```
+#[must_use]
+pub fn kv_cache_bytes_from_params(params: &KvCacheParams) -> u64 {
+    let elem_bytes = if params.int8_kv { 1 } else { 2 };
+    kv_cache_bytes(
+        params.num_layers,
+        params.num_kv_heads,
+        params.head_dim,
+        elem_bytes,
+        params.ctx_len,
+        params.batch,
+    )
+}
+
 // ── Quantization recommendation ───────────────────────────────────────────────
 
 /// Recommended quantization mode for a given hardware + model combination.
@@ -423,21 +559,36 @@ impl QuantRecommendation {
 /// * `available_memory_gb` — total unified memory in GB (`unified_memory_gb`
 ///   from [`HardwareCapabilities`]).
 /// * `hw` — hardware capabilities from [`get_hardware`].
+/// * `kv_cache_headroom_bytes` — KV cache memory reservation in bytes. When
+///   `None`, falls back to a conservative 2 GiB default for backward
+///   compatibility. Pass the result of [`kv_cache_bytes`] or
+///   [`kv_cache_bytes_from_params`] when model architecture info is available.
 pub fn recommend_quantization(
     model_params_billions: f64,
     available_memory_gb: u32,
     hw: &HardwareCapabilities,
+    kv_cache_headroom_bytes: Option<u64>,
 ) -> QuantRecommendation {
-    // Rough memory footprints (parameters only — add 2 GB headroom for KV cache
-    // and activations):
+    // Rough memory footprints (parameters only — add KV cache headroom):
     //   FP16: ~2 bytes/param  →  model_params_billions * 2 GB
     //   INT8: ~1 byte/param   →  model_params_billions * 1 GB
     //   INT4: ~0.5 bytes/param →  model_params_billions * 0.5 GB
-    const KV_CACHE_HEADROOM_GB: u32 = 2;
+    //
+    // KV headroom is computed from model architecture when available; fall back
+    // to a conservative 2 GiB constant for callers that do not supply it.
+    const FALLBACK_KV_HEADROOM_GB: u32 = 2;
+    let kv_headroom_gb = match kv_cache_headroom_bytes {
+        Some(bytes) => {
+            // Convert bytes → GiB, rounding up so the headroom is never
+            // under-estimated (1 GiB = 1_073_741_824 bytes).
+            bytes.div_ceil(1_073_741_824) as u32
+        }
+        None => FALLBACK_KV_HEADROOM_GB,
+    };
 
-    let mem_fp16_gb = (model_params_billions * 2.0).ceil() as u32 + KV_CACHE_HEADROOM_GB;
-    let mem_8bit_gb = (model_params_billions * 1.0).ceil() as u32 + KV_CACHE_HEADROOM_GB;
-    let mem_4bit_gb = (model_params_billions * 0.5).ceil() as u32 + KV_CACHE_HEADROOM_GB;
+    let mem_fp16_gb = (model_params_billions * 2.0).ceil() as u32 + kv_headroom_gb;
+    let mem_8bit_gb = (model_params_billions * 1.0).ceil() as u32 + kv_headroom_gb;
+    let mem_4bit_gb = (model_params_billions * 0.5).ceil() as u32 + kv_headroom_gb;
 
     // M5 Neural Accelerator path: 2x INT8 throughput over FP16.
     if hw.has_neural_accelerator && hw.macos_supports_na {
@@ -573,7 +724,7 @@ mod tests {
         // 7B model needs ~7 GB for INT8 + 2 GB headroom = 9 GB.
         // 32 GB memory gives ample headroom → INT8.
         let hw = make_hw(true, true, 32);
-        let rec = recommend_quantization(7.0, 32, &hw);
+        let rec = recommend_quantization(7.0, 32, &hw, None);
         assert_eq!(
             rec,
             QuantRecommendation::Int8 {
@@ -588,7 +739,7 @@ mod tests {
         // 70B model: INT8 needs 70 + 2 = 72 GB, exceeds 64 GB.
         // INT4 needs 35 + 2 = 37 GB — fits in 64 GB → INT4.
         let hw = make_hw(true, true, 64);
-        let rec = recommend_quantization(70.0, 64, &hw);
+        let rec = recommend_quantization(70.0, 64, &hw, None);
         assert_eq!(
             rec,
             QuantRecommendation::Int4Affine {
@@ -601,7 +752,7 @@ mod tests {
     fn recommends_fp16_on_m4_with_small_model() {
         // 1B model: FP16 needs 2 + 2 = 4 GB, fits in 24 GB → FP16.
         let hw = make_hw(false, false, 24);
-        let rec = recommend_quantization(1.0, 24, &hw);
+        let rec = recommend_quantization(1.0, 24, &hw, None);
         assert_eq!(
             rec,
             QuantRecommendation::Fp16 {
@@ -616,7 +767,7 @@ mod tests {
         // 8B model: FP16 needs 16 + 2 = 18 GB, exceeds 16 GB.
         // INT4 needs 4 + 2 = 6 GB, fits → INT4.
         let hw = make_hw(false, false, 16);
-        let rec = recommend_quantization(8.0, 16, &hw);
+        let rec = recommend_quantization(8.0, 16, &hw, None);
         assert_eq!(
             rec,
             QuantRecommendation::Int4Affine {
@@ -629,7 +780,7 @@ mod tests {
     fn recommends_int4_on_m5_without_na_os_support() {
         // M5 hardware but macOS < 26.2: NA path skipped, falls through to FP16/INT4.
         let hw = make_hw(true, false, 32);
-        let rec = recommend_quantization(7.0, 32, &hw);
+        let rec = recommend_quantization(7.0, 32, &hw, None);
         // 7B FP16 = 14 + 2 = 16 GB, fits in 32 GB → FP16 (no NA).
         assert_eq!(
             rec,
@@ -643,7 +794,7 @@ mod tests {
     fn recommends_int4_on_memory_constrained_m5() {
         // 30B model on 16 GB M5: INT8 = 30 + 2 = 32 GB (too big), INT4 = 15 + 2 = 17 GB (too big).
         let hw = make_hw(true, true, 16);
-        let rec = recommend_quantization(30.0, 16, &hw);
+        let rec = recommend_quantization(30.0, 16, &hw, None);
         assert_eq!(
             rec,
             QuantRecommendation::Int4Affine {
@@ -659,5 +810,165 @@ mod tests {
             reason: "test reason",
         };
         assert_eq!(rec.reason(), "test reason");
+    }
+
+    // ── kv_cache_bytes tests ──────────────────────────────────────────────────
+
+    #[test]
+    fn kv_cache_dense_mha() {
+        // Dense MHA: 32 layers, 32 kv_heads, 128 head_dim, FP16, 8K ctx, batch 1.
+        // ctx_len 8192 is already a multiple of 256 — no rounding needed.
+        // 32 × 2 × 32 × 128 × 2 × 8192 × 1 = 4_294_967_296 bytes (4 GiB)
+        let bytes = kv_cache_bytes(32, 32, 128, 2, 8192, 1);
+        assert_eq!(bytes, 4_294_967_296);
+    }
+
+    #[test]
+    fn kv_cache_gqa_fewer_kv_heads() {
+        // GQA: 32 layers, 8 kv_heads (e.g. Llama-3 8B), 128 head_dim, FP16, 8K ctx, batch 1.
+        // 32 × 2 × 8 × 128 × 2 × 8192 × 1 = 1_073_741_824 bytes (1 GiB)
+        let bytes = kv_cache_bytes(32, 8, 128, 2, 8192, 1);
+        assert_eq!(bytes, 1_073_741_824);
+    }
+
+    #[test]
+    fn kv_cache_long_context_128k() {
+        // 32 layers, 8 kv_heads, 128 head_dim, FP16, 128K ctx, batch 1.
+        // ctx_len 131072 is a multiple of 256 — no rounding.
+        // 32 × 2 × 8 × 128 × 2 × 131_072 × 1 = 17_179_869_184 bytes (16 GiB)
+        let bytes = kv_cache_bytes(32, 8, 128, 2, 131_072, 1);
+        assert_eq!(bytes, 17_179_869_184);
+    }
+
+    #[test]
+    fn kv_cache_int8_half_memory() {
+        // INT8 KV (elem_bytes = 1) should be exactly half of FP16 (elem_bytes = 2).
+        let fp16 = kv_cache_bytes(32, 8, 128, 2, 8192, 1);
+        let int8 = kv_cache_bytes(32, 8, 128, 1, 8192, 1);
+        assert_eq!(int8 * 2, fp16);
+    }
+
+    #[test]
+    fn kv_cache_256_token_rounding() {
+        // ctx_len not a multiple of 256 must be rounded up.
+        // ctx_len = 257 → rounded = 512.
+        let bytes_257 = kv_cache_bytes(1, 1, 1, 1, 257, 1);
+        let bytes_512 = kv_cache_bytes(1, 1, 1, 1, 512, 1);
+        // rounded_ctx for 257 should be 512 → same result as passing 512 directly.
+        assert_eq!(bytes_257, bytes_512);
+
+        // ctx_len = 256 → no rounding (already aligned).
+        let bytes_256 = kv_cache_bytes(1, 1, 1, 1, 256, 1);
+        assert_eq!(bytes_256, 512_u64); // num_layers=1 * K+V=2 * kv_heads=1 * head_dim=1 * elem=1 * 256 * batch=1
+
+        // ctx_len = 255 → rounds up to 256.
+        let bytes_255 = kv_cache_bytes(1, 1, 1, 1, 255, 1);
+        assert_eq!(bytes_255, bytes_256);
+
+        // ctx_len = 1 → rounds up to 256.
+        let bytes_1 = kv_cache_bytes(1, 1, 1, 1, 1, 1);
+        assert_eq!(bytes_1, bytes_256);
+    }
+
+    #[test]
+    fn kv_cache_from_params_fp16() {
+        let params = KvCacheParams {
+            num_layers: 32,
+            num_kv_heads: 8,
+            head_dim: 128,
+            int8_kv: false,
+            ctx_len: 8192,
+            batch: 1,
+        };
+        // elem_bytes = 2 for FP16.
+        assert_eq!(kv_cache_bytes_from_params(&params), kv_cache_bytes(32, 8, 128, 2, 8192, 1));
+    }
+
+    #[test]
+    fn kv_cache_from_params_int8() {
+        let params = KvCacheParams {
+            num_layers: 32,
+            num_kv_heads: 8,
+            head_dim: 128,
+            int8_kv: true,
+            ctx_len: 8192,
+            batch: 1,
+        };
+        // elem_bytes = 1 for INT8 → half of FP16.
+        let expected = kv_cache_bytes(32, 8, 128, 1, 8192, 1);
+        assert_eq!(kv_cache_bytes_from_params(&params), expected);
+    }
+
+    #[test]
+    fn kv_cache_new_constructor() {
+        // KvCacheParams::new sets int8_kv=false, batch=1.
+        let params = KvCacheParams::new(32, 8, 128, 8192);
+        assert!(!params.int8_kv);
+        assert_eq!(params.batch, 1);
+        assert_eq!(kv_cache_bytes_from_params(&params), kv_cache_bytes(32, 8, 128, 2, 8192, 1));
+    }
+
+    // ── recommend_quantization with computed KV headroom ─────────────────────
+
+    #[test]
+    fn recommend_quant_uses_computed_kv_headroom() {
+        // A 7B FP16 model needs 14 GB for weights.
+        // With a 2 GB flat headroom (None), it fits in 16 GB: 14 + 2 = 16 GB.
+        // With a 4 GB computed headroom, it does NOT fit in 16 GB: 14 + 4 = 18 GB → INT4.
+        let hw = make_hw(false, false, 16);
+
+        // Flat headroom (None = 2 GB) → FP16 fits.
+        let rec_flat = recommend_quantization(7.0, 16, &hw, None);
+        assert_eq!(
+            rec_flat,
+            QuantRecommendation::Fp16 {
+                reason: "Model fits in memory as FP16; no quantization needed",
+            }
+        );
+
+        // Computed headroom: 4 GiB (passes as bytes) → FP16 no longer fits → INT4.
+        let kv_headroom_bytes: u64 = 4 * 1_073_741_824; // 4 GiB
+        let rec_computed = recommend_quantization(7.0, 16, &hw, Some(kv_headroom_bytes));
+        assert_eq!(
+            rec_computed,
+            QuantRecommendation::Int4Affine {
+                reason: "Best balance of speed and memory on this hardware",
+            }
+        );
+    }
+
+    #[test]
+    fn recommend_quant_long_context_tightens_headroom() {
+        // 8B model (FP16 = 16 GB) on 24 GB M4.
+        // Short context (8K): KV headroom = 1 GiB → FP16 total = 17 GB, fits.
+        // Long context (128K): KV headroom = 16 GiB → FP16 total = 32 GB, does NOT fit
+        //   → decision flips from FP16 to INT4.
+        let hw = make_hw(false, false, 24);
+
+        // 8K ctx, 32 layers, 8 kv_heads, 128 head_dim, FP16 KV.
+        // kv_cache_bytes(32, 8, 128, 2, 8192, 1) = 1_073_741_824 bytes = 1 GiB.
+        // headroom_gb = ceil(1 GiB / 1 GiB) = 1 GB.
+        // mem_fp16_gb = ceil(8 * 2) + 1 = 17 GB ≤ 24 GB → FP16.
+        let kv_8k = kv_cache_bytes(32, 8, 128, 2, 8_192, 1);
+        let rec_8k = recommend_quantization(8.0, 24, &hw, Some(kv_8k));
+        assert_eq!(
+            rec_8k,
+            QuantRecommendation::Fp16 {
+                reason: "Model fits in memory as FP16; no quantization needed",
+            }
+        );
+
+        // 128K ctx — KV headroom balloons to 16 GiB.
+        // kv_cache_bytes(32, 8, 128, 2, 131_072, 1) = 17_179_869_184 bytes = 16 GiB.
+        // headroom_gb = ceil(16 GiB / 1 GiB) = 16 GB.
+        // mem_fp16_gb = 16 + 16 = 32 GB > 24 GB → can't use FP16.
+        // mem_4bit_gb = ceil(8 * 0.5) + 16 = 20 GB ≤ 24 GB → INT4.
+        let kv_128k = kv_cache_bytes(32, 8, 128, 2, 131_072, 1);
+        let rec_128k = recommend_quantization(8.0, 24, &hw, Some(kv_128k));
+        assert!(
+            matches!(rec_128k, QuantRecommendation::Int4Affine { .. }),
+            "Expected INT4 for 128K context on tight memory, got: {:?}",
+            rec_128k
+        );
     }
 }
