@@ -208,11 +208,7 @@ fn log_estimate_vs_actual_delta(est: &MemoryEstimate, snap: &mlxcel_core::memory
 
     let est_bytes = est.total_bytes;
     let actual = snap.active_bytes;
-    let (delta_label, delta_bytes) = if actual >= est_bytes {
-        ("over-estimated by", actual.saturating_sub(est_bytes))
-    } else {
-        ("under-estimated by", est_bytes.saturating_sub(actual))
-    };
+    let (delta_label, delta_bytes) = estimate_delta_label_and_bytes(est_bytes, actual);
     let ratio = if est_bytes > 0 {
         actual as f64 / est_bytes as f64
     } else {
@@ -239,6 +235,19 @@ fn log_estimate_vs_actual_delta(est: &MemoryEstimate, snap: &mlxcel_core::memory
     );
 }
 
+fn estimate_delta_label_and_bytes(estimate: u64, actual: u64) -> (&'static str, u64) {
+    if actual >= estimate {
+        ("under-estimated by", actual.saturating_sub(estimate))
+    } else {
+        ("over-estimated by", estimate.saturating_sub(actual))
+    }
+}
+
+fn memory_preflight_ctx_len(prompt_tokens: usize, max_tokens: usize) -> u64 {
+    let total = prompt_tokens.saturating_add(max_tokens).max(1);
+    u64::try_from(total).unwrap_or(u64::MAX)
+}
+
 /// Run the `--estimate-memory` preflight for `mlxcel generate`.
 ///
 /// Returns `Some(estimate)` when the user passed `--estimate-memory`
@@ -251,28 +260,27 @@ fn log_estimate_vs_actual_delta(est: &MemoryEstimate, snap: &mlxcel_core::memory
 /// figure and the override flags. Always prints the formatted
 /// breakdown before aborting so operators can see the same byte
 /// table `mlxcel inspect` would have shown.
-fn run_memory_preflight(args: &GenerateArgs) -> Result<Option<MemoryEstimate>> {
+fn run_memory_preflight(
+    args: &GenerateArgs,
+    prompt_token_count: usize,
+) -> Result<Option<MemoryEstimate>> {
     if !args.generation.estimate_memory {
         return Ok(None);
     }
 
-    // Derive int8 KV from the existing --cache-type-k / --cache-type-v
-    // pair so the preflight reflects what the loaded cache will
-    // actually allocate. Mixed-precision configurations fall back to
-    // FP16 sizing because the size formula does not model them
-    // directly — surfaced in the printed breakdown.
-    let kv_int8 = matches!(
-        (
-            args.generation.turbo.cache_type_k.as_deref(),
-            args.generation.turbo.cache_type_v.as_deref(),
-        ),
-        (Some("int8"), Some("int8")) | (Some("i8"), Some("i8"))
-    );
+    let kv_cache_mode = resolve_kv_cache_mode(
+        args.generation.turbo.cache_type_k.as_deref(),
+        args.generation.turbo.cache_type_v.as_deref(),
+        args.generation.turbo.kv_cache_mode.as_deref(),
+    )
+    .map_err(|e| anyhow::anyhow!("{}", e))?;
+    let kv_int8 = matches!(kv_cache_mode, KVCacheMode::Int8);
 
-    // Use the user's `--max-tokens` as the KV ctx_len input. This
-    // matches the way `mlxcel inspect --max-tokens N` sizes the KV
-    // estimate, so the preflight and the inspect view never disagree.
-    let ctx_len = args.generation.max_tokens.max(1) as u64;
+    // Size the KV cache for the tokens that can actually enter the cache:
+    // rendered prompt tokens plus the requested decode budget. This still runs
+    // before model load, but after tokenizer/template processing has made the
+    // prompt length knowable.
+    let ctx_len = memory_preflight_ctx_len(prompt_token_count, args.generation.max_tokens);
 
     let estimate =
         estimate_total_memory(&args.model.model, ctx_len, 1, QuantHint::Default, kv_int8);
@@ -1052,15 +1060,6 @@ pub(crate) fn run_generate(args: GenerateArgs) -> Result<()> {
         }
     }
 
-    // Memory preflight (issue #56). Runs the unified estimator and
-    // aborts when total > available. Skipped when --estimate-memory
-    // was not passed. --force / --no-memory-check downgrades the
-    // abort to a warning. Sub-issue C's `MLXCEL_MEMORY_LIMIT` env hook
-    // is honoured transparently by the estimator's
-    // `resolve_available_memory` step (MLX allocator soft cap wins
-    // over OS RAM when nonzero).
-    let preflight_estimate = run_memory_preflight(&args)?;
-
     let pipeline_requested = cli_pipeline_requested(&args);
     let tokenizer = load_tokenizer(&args.model.model)?;
     let prompt = load_cli_prompt(
@@ -1070,6 +1069,11 @@ pub(crate) fn run_generate(args: GenerateArgs) -> Result<()> {
         args.generation.image.len(),
     );
     let mut prompt_tokens = tokenize_prompt(&tokenizer, &prompt)?;
+
+    // Memory preflight (issue #56). Runs after prompt rendering/tokenization so
+    // long prompts are included in the KV-cache budget, but still before the
+    // model weights are loaded.
+    let preflight_estimate = run_memory_preflight(&args, prompt_tokens.len())?;
 
     let sampling_config =
         build_cli_sampling_config(&args, mlxcel::read_eos_token_ids(&args.model.model));

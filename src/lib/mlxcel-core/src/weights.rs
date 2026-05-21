@@ -212,10 +212,10 @@ fn read_safetensors_header_bytes(path: &Path) -> Option<u64> {
         let dtype = meta.get("dtype").and_then(|v| v.as_str())?;
         let shape = meta.get("shape").and_then(|v| v.as_array())?;
         let itemsize = safetensors_dtype_itemsize(dtype)?;
-        let numel: u64 = shape
-            .iter()
-            .filter_map(|d| d.as_u64())
-            .fold(1u64, |acc, d| acc.saturating_mul(d));
+        let mut numel: u64 = 1;
+        for dim in shape {
+            numel = numel.saturating_mul(dim.as_u64()?);
+        }
         total = total.saturating_add(numel.saturating_mul(itemsize));
     }
     Some(total)
@@ -227,10 +227,15 @@ fn read_safetensors_header_bytes(path: &Path) -> Option<u64> {
 /// loading any tensors into memory.
 ///
 /// Resolution order:
-/// 1. `metadata.total_size` from `model.safetensors.index.json` (sharded models).
-/// 2. Safetensors binary header of a single `model.safetensors` file (sum of
+/// 1. `metadata.total_size` from a valid `model.safetensors.index.json`
+///    whose referenced shards exist (sharded models).
+/// 2. Sum of safetensors binary headers for valid index shards when the index
+///    lacks `metadata.total_size`.
+/// 3. Safetensors binary header of a single `model.safetensors` file (sum of
 ///    dtype × shape-product for every tensor entry — no tensor data is read).
-/// 3. Returns `None` when neither source is available; callers should fall back
+/// 4. Sum of all local `*.safetensors` headers when the index is stale but the
+///    directory contains loadable safetensors files.
+/// 5. Returns `None` when no source is available; callers should fall back
 ///    to an analytical estimate (e.g. `ModelProfile::total_param_bytes`).
 ///
 /// The returned value is the exact number of weight-parameter bytes on disk.
@@ -238,9 +243,18 @@ fn read_safetensors_header_bytes(path: &Path) -> Option<u64> {
 pub fn weight_footprint_bytes<P: AsRef<Path>>(model_dir: P) -> Option<u64> {
     let dir = model_dir.as_ref();
 
-    // 1. Try sharded index first.
-    if let Ok(Some((_shards, Some(total_size)))) = parse_shard_index_with_total_size(dir) {
-        return Some(total_size);
+    // 1. Try sharded index first, but only trust it if the loader would use the
+    // same shard list. Repackaged mlx-community quants can ship stale upstream
+    // indexes; using their metadata.total_size would over-reject preflight.
+    if let Ok(Some((shards, total_size))) = parse_shard_index_with_total_size(dir) {
+        if let Ok(paths) = validate_index_shards(dir, &shards) {
+            if let Some(total_size) = total_size {
+                return Some(total_size);
+            }
+            if let Some(total) = sum_safetensors_header_bytes(&paths) {
+                return Some(total);
+            }
+        }
     }
 
     // 2. Try single-file safetensors header.
@@ -249,7 +263,21 @@ pub fn weight_footprint_bytes<P: AsRef<Path>>(model_dir: P) -> Option<u64> {
         return read_safetensors_header_bytes(&single_file);
     }
 
-    None
+    // 3. Mirror the loader's stale-index fallback: all local *.safetensors
+    // files in deterministic order.
+    let paths = glob_safetensors(dir).ok()?;
+    sum_safetensors_header_bytes(&paths)
+}
+
+fn sum_safetensors_header_bytes(paths: &[std::path::PathBuf]) -> Option<u64> {
+    if paths.is_empty() {
+        return None;
+    }
+    let mut total: u64 = 0;
+    for path in paths {
+        total = total.saturating_add(read_safetensors_header_bytes(path)?);
+    }
+    Some(total)
 }
 
 /// Check if a path is a broken symlink (exists as a symlink but target is missing).
@@ -825,6 +853,15 @@ mod tests {
         // No data region written — the header reader only needs the JSON.
     }
 
+    fn write_safetensors_raw_header(path: &std::path::PathBuf, header_json: &str) {
+        use std::io::Write;
+        let header_bytes = header_json.as_bytes();
+        let mut f = std::fs::File::create(path).unwrap();
+        f.write_all(&(header_bytes.len() as u64).to_le_bytes())
+            .unwrap();
+        f.write_all(header_bytes).unwrap();
+    }
+
     #[test]
     fn test_parse_shard_index_with_total_size_present() {
         let dir = tempfile::tempdir().unwrap();
@@ -859,6 +896,7 @@ mod tests {
         // Sharded model with index.json providing total_size.
         let dir = tempfile::tempdir().unwrap();
         write_index_with_total_size(dir.path(), 999_000);
+        touch_safetensors(dir.path(), "model-00001-of-00001.safetensors");
 
         let footprint = weight_footprint_bytes(dir.path());
         assert_eq!(footprint, Some(999_000));
@@ -895,6 +933,41 @@ mod tests {
 
         let footprint = weight_footprint_bytes(dir.path());
         assert_eq!(footprint, Some(512 * 128 * 2));
+    }
+
+    #[test]
+    fn test_weight_footprint_bytes_index_without_total_size_sums_valid_shards() {
+        let dir = tempfile::tempdir().unwrap();
+        write_index_without_total_size(dir.path());
+        let shard = dir.path().join("model-00001-of-00001.safetensors");
+        write_safetensors_stub(&shard, "F16", &[2, 8]);
+
+        let footprint = weight_footprint_bytes(dir.path());
+        assert_eq!(footprint, Some(2 * 8 * 2));
+    }
+
+    #[test]
+    fn test_weight_footprint_bytes_ignores_stale_index_total_size() {
+        let dir = tempfile::tempdir().unwrap();
+        write_index_with_total_size(dir.path(), 999_000);
+        let file = dir.path().join("model.safetensors");
+        write_safetensors_stub(&file, "F32", &[4, 4]);
+
+        let footprint = weight_footprint_bytes(dir.path());
+        assert_eq!(footprint, Some(4 * 4 * 4));
+    }
+
+    #[test]
+    fn test_weight_footprint_bytes_rejects_non_numeric_shape_dim() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("model.safetensors");
+        write_safetensors_raw_header(
+            &file,
+            r#"{"bad_tensor": {"dtype": "F32", "shape": [2, "bad"], "data_offsets": [0, 0]}}"#,
+        );
+
+        let footprint = weight_footprint_bytes(dir.path());
+        assert_eq!(footprint, None);
     }
 
     #[test]

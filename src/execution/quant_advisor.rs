@@ -60,6 +60,8 @@ fn estimate_params_from_config(config: &serde_json::Value) -> Option<f64> {
     let hidden_size = text_cfg
         .get("hidden_size")
         .or_else(|| text_cfg.get("d_model"))
+        .or_else(|| text_cfg.get("dim"))
+        .or_else(|| text_cfg.get("model_dim"))
         .and_then(|v| v.as_f64())?;
 
     let num_layers = text_cfg
@@ -94,16 +96,31 @@ fn estimate_params_from_config(config: &serde_json::Value) -> Option<f64> {
     let num_heads = text_cfg
         .get("num_attention_heads")
         .or_else(|| text_cfg.get("num_heads"))
+        .or_else(|| text_cfg.get("n_heads"))
+        .or_else(|| text_cfg.get("n_head"))
         .and_then(|v| v.as_f64())
         .unwrap_or(hidden_size / 64.0);
 
     let kv_heads = text_cfg
         .get("num_key_value_heads")
+        .or_else(|| text_cfg.get("num_kv_heads"))
+        .or_else(|| text_cfg.get("n_kv_heads"))
+        .or_else(|| text_cfg.get("n_head_kv"))
+        .or_else(|| text_cfg.get("multi_query_group_num"))
         .and_then(|v| v.as_f64())
         .unwrap_or(num_heads);
 
-    // head_dim inferred from hidden_size / num_heads.
-    let head_dim = (hidden_size / num_heads).round();
+    let head_dim = text_cfg
+        .get("head_dim")
+        .or_else(|| text_cfg.get("head_size"))
+        .and_then(|v| v.as_f64())
+        .unwrap_or_else(|| {
+            if num_heads > 0.0 && num_heads.is_finite() {
+                (hidden_size / num_heads).round()
+            } else {
+                64.0
+            }
+        });
 
     // Parameter count estimate:
     //   embedding:  vocab_size × hidden_size (input + output embedding shared)
@@ -323,22 +340,38 @@ fn estimate_kv_cache_bytes_from_config(
     let hidden_size = text_cfg
         .get("hidden_size")
         .or_else(|| text_cfg.get("d_model"))
-        .and_then(|v| v.as_u64())?;
+        .or_else(|| text_cfg.get("dim"))
+        .or_else(|| text_cfg.get("model_dim"))
+        .and_then(|v| v.as_u64());
 
     let num_heads = text_cfg
         .get("num_attention_heads")
         .or_else(|| text_cfg.get("num_heads"))
+        .or_else(|| text_cfg.get("n_heads"))
+        .or_else(|| text_cfg.get("n_head"))
         .and_then(|v| v.as_u64())
         .unwrap_or(1);
 
     let num_kv_heads = text_cfg
         .get("num_key_value_heads")
+        .or_else(|| text_cfg.get("num_kv_heads"))
+        .or_else(|| text_cfg.get("n_kv_heads"))
+        .or_else(|| text_cfg.get("n_head_kv"))
+        .or_else(|| text_cfg.get("multi_query_group_num"))
         .and_then(|v| v.as_u64())
         .unwrap_or(num_heads);
 
-    // head_dim is usually hidden_size / num_heads; fall back to 64 if num_heads is 0.
-    // Uses `checked_div` to satisfy clippy::manual_checked_ops (Rust 1.95+).
-    let head_dim = hidden_size.checked_div(num_heads).unwrap_or(64);
+    let explicit_head_dim = text_cfg
+        .get("head_dim")
+        .or_else(|| text_cfg.get("head_size"))
+        .and_then(|v| v.as_u64());
+    let head_dim = if let Some(head_dim) = explicit_head_dim {
+        head_dim
+    } else if let Some(hidden_size) = hidden_size {
+        hidden_size.checked_div(num_heads).unwrap_or(64)
+    } else {
+        return None;
+    };
 
     let params = KvCacheParams {
         num_layers,
@@ -464,6 +497,22 @@ mod tests {
     }
 
     #[test]
+    fn kv_cache_estimate_prefers_explicit_head_dim() {
+        let config = serde_json::json!({
+            "text_config": {
+                "hidden_size": 1536,
+                "num_hidden_layers": 35,
+                "num_attention_heads": 8,
+                "num_key_value_heads": 1,
+                "head_dim": 256
+            }
+        });
+
+        let bytes = estimate_kv_cache_bytes_from_config(&config, 256, false).unwrap();
+        assert_eq!(bytes, 35 * 2 * 256 * 2 * 256);
+    }
+
+    #[test]
     fn returns_none_for_empty_config() {
         let config = serde_json::json!({});
         let result = estimate_params_from_config(&config);
@@ -551,6 +600,7 @@ mod tests {
             r#"{"metadata": {"total_size": 14000000000}, "weight_map": {"w": "x.safetensors"}}"#;
         let mut f = std::fs::File::create(tmp.path().join("model.safetensors.index.json")).unwrap();
         f.write_all(index_json.as_bytes()).unwrap();
+        std::fs::File::create(tmp.path().join("x.safetensors")).unwrap();
 
         let advice = advise_quantization(tmp.path(), &hw, None);
         assert_eq!(advice.exact_weight_bytes, Some(14_000_000_000));

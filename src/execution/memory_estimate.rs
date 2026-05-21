@@ -52,7 +52,7 @@ use mlxcel_core::hardware::{
 };
 use mlxcel_core::weights::weight_footprint_bytes;
 
-use super::quant_advisor::{estimate_kv_cache_bytes_from_path, estimate_model_params_billions};
+use super::quant_advisor::estimate_model_params_billions;
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -99,6 +99,13 @@ pub const DEFAULT_HEADROOM_FACTOR: f64 = 1.20;
 /// log a warning. Used during calibration on Apple Silicon (see the
 /// recipe on [`DEFAULT_HEADROOM_FACTOR`]).
 pub const HEADROOM_FACTOR_ENV: &str = "MLXCEL_HEADROOM_FACTOR";
+
+/// Env var applied by `execution::runtime` as an MLX allocator soft cap.
+///
+/// `mlxcel inspect` and the `serve --estimate-memory` preflight run before
+/// that runtime initializer, so the estimator must read this env var directly
+/// as well as checking `mlxcel_core::memory::memory_limit()`.
+const MEMORY_LIMIT_ENV: &str = "MLXCEL_MEMORY_LIMIT";
 
 /// Default context length when the caller does not pass one (e.g. the
 /// quant advisor's legacy 8K sizing). Matches the previous
@@ -200,9 +207,9 @@ pub struct MemoryEstimate {
     /// this is `HardwareCapabilities::unified_memory_gb << 30`. On
     /// Linux/CUDA it falls back to `/proc/meminfo::MemAvailable` (or
     /// `MemTotal` when the former is missing). On any platform a
-    /// nonzero MLX allocator soft limit (`memory_limit()`) caps this
-    /// figure — the preflight is meaningful even with no OS query
-    /// because operators can pin a budget via `MLXCEL_MEMORY_LIMIT`.
+    /// nonzero `MLXCEL_MEMORY_LIMIT` / MLX allocator soft limit caps
+    /// this figure — the preflight is meaningful even with no OS
+    /// query because operators can pin a budget explicitly.
     pub available_bytes: u64,
     /// `total_bytes <= available_bytes`. The preflight uses this
     /// directly.
@@ -276,8 +283,8 @@ pub fn estimate_total_memory(
 
     // ── KV cache ─────────────────────────────────────────────────────────────
     let (kv_cache_bytes, kv_source) =
-        match estimate_kv_cache_bytes_from_path(model_dir, ctx_len, kv_dtype_int8) {
-            Some(b) => (b, KvSource::Config),
+        match kv_cache_params_from_path(model_dir, ctx_len, kv_dtype_int8, batch) {
+            Some(params) => (kv_cache_bytes_from_params(&params), KvSource::Config),
             None => (0, KvSource::Unavailable),
         };
 
@@ -386,18 +393,29 @@ fn resolve_weight_bytes(model_dir: &Path) -> (u64, WeightsSource) {
 /// Resolve the best-known "available unified memory" figure in bytes.
 ///
 /// Resolution order:
-/// 1. `mlxcel_core::memory::memory_limit()` when nonzero — the MLX
-///    allocator soft cap (set by `MLXCEL_MEMORY_LIMIT`) is the most
-///    authoritative "what will MLX actually let me allocate" signal.
-/// 2. `HardwareCapabilities::unified_memory_gb << 30` when nonzero —
+/// 1. `MLXCEL_MEMORY_LIMIT` when set to a nonzero value — this catches
+///    estimate-only commands that run before the MLX runtime initializer
+///    applies the allocator soft cap.
+/// 2. `mlxcel_core::memory::memory_limit()` when nonzero — the already-applied
+///    MLX allocator soft cap is the next most authoritative "what will MLX
+///    actually let me allocate" signal.
+/// 3. `HardwareCapabilities::unified_memory_gb << 30` when nonzero —
 ///    populated by `sysctl(hw.memsize)` on macOS.
-/// 3. `/proc/meminfo::MemAvailable` (then `MemTotal`) on Linux —
+/// 4. `/proc/meminfo::MemAvailable` (then `MemTotal`) on Linux —
 ///    fallback when running on dev hardware without Apple Silicon
 ///    detection. Mirrors what `free -b` shows.
-/// 4. `0` when nothing is detectable. The preflight then reports
+/// 5. `0` when nothing is detectable. The preflight then reports
 ///    `fits = false` for any nonzero `total_bytes`, which is the safe
 ///    direction.
 fn resolve_available_memory(hw: &HardwareCapabilities) -> u64 {
+    // Honour the env var before runtime initialization. `generate` applies the
+    // cap via `initialize_runtime()` before calling the estimator, but `inspect`
+    // and `serve --estimate-memory` intentionally estimate before runtime
+    // bring-up.
+    if let Some(env_limit) = resolve_env_memory_limit_bytes() {
+        return env_limit;
+    }
+
     // Honour an explicit MLX allocator cap first — that's what
     // generation will actually be limited by once it runs.
     let mlx_limit = mlxcel_core::memory::memory_limit();
@@ -414,6 +432,40 @@ fn resolve_available_memory(hw: &HardwareCapabilities) -> u64 {
         }
     }
     0
+}
+
+fn resolve_env_memory_limit_bytes() -> Option<u64> {
+    let raw = std::env::var(MEMORY_LIMIT_ENV).ok()?;
+    parse_optional_memory_size_bytes(&raw)
+}
+
+fn parse_optional_memory_size_bytes(raw: &str) -> Option<u64> {
+    let s = raw.trim();
+    if s.is_empty() || s == "0" || s.eq_ignore_ascii_case("none") {
+        return None;
+    }
+
+    let upper = s.to_ascii_uppercase();
+    if let Some(n) = upper.strip_suffix("GB") {
+        return parse_scaled_memory_size(n, 1024.0 * 1024.0 * 1024.0);
+    }
+    if let Some(n) = upper.strip_suffix("MB") {
+        return parse_scaled_memory_size(n, 1024.0 * 1024.0);
+    }
+
+    s.parse::<u64>().ok().filter(|v| *v > 0)
+}
+
+fn parse_scaled_memory_size(raw: &str, scale: f64) -> Option<u64> {
+    let value = raw.trim().parse::<f64>().ok()?;
+    if !value.is_finite() || value <= 0.0 {
+        return None;
+    }
+    let bytes = value * scale;
+    if !bytes.is_finite() || bytes <= 0.0 {
+        return None;
+    }
+    Some(bytes.min(u64::MAX as f64) as u64)
 }
 
 /// Parse `/proc/meminfo` for `MemAvailable` (preferred) or `MemTotal`.
@@ -477,21 +529,36 @@ pub fn kv_cache_params_from_path(
     let hidden_size = text_cfg
         .get("hidden_size")
         .or_else(|| text_cfg.get("d_model"))
-        .and_then(|v| v.as_u64())?;
+        .or_else(|| text_cfg.get("dim"))
+        .or_else(|| text_cfg.get("model_dim"))
+        .and_then(|v| v.as_u64());
     let num_heads = text_cfg
         .get("num_attention_heads")
         .or_else(|| text_cfg.get("num_heads"))
+        .or_else(|| text_cfg.get("n_heads"))
+        .or_else(|| text_cfg.get("n_head"))
         .and_then(|v| v.as_u64())
         .unwrap_or(1);
     let num_kv_heads = text_cfg
         .get("num_key_value_heads")
+        .or_else(|| text_cfg.get("num_kv_heads"))
+        .or_else(|| text_cfg.get("n_kv_heads"))
+        .or_else(|| text_cfg.get("n_head_kv"))
+        .or_else(|| text_cfg.get("multi_query_group_num"))
         .and_then(|v| v.as_u64())
         .unwrap_or(num_heads);
-    // Use `checked_div` to satisfy clippy::manual_checked_ops (Rust
-    // 1.95+). 64 is the historical fallback used in
-    // `quant_advisor::estimate_kv_cache_bytes_from_config` for the
-    // same `num_heads == 0` edge case.
-    let head_dim = hidden_size.checked_div(num_heads).unwrap_or(64);
+    let explicit_head_dim = text_cfg
+        .get("head_dim")
+        .or_else(|| text_cfg.get("head_size"))
+        .and_then(|v| v.as_u64());
+    let head_dim = if let Some(head_dim) = explicit_head_dim {
+        head_dim
+    } else if let Some(hidden_size) = hidden_size {
+        // 64 is the historical fallback for malformed configs with zero heads.
+        hidden_size.checked_div(num_heads).unwrap_or(64)
+    } else {
+        return None;
+    };
 
     Some(KvCacheParams {
         num_layers,
@@ -640,6 +707,34 @@ mod tests {
     use super::*;
     use std::io::Write;
 
+    struct EnvRestore {
+        key: &'static str,
+        previous: Option<String>,
+    }
+
+    impl EnvRestore {
+        fn set(key: &'static str, value: &str) -> Self {
+            let previous = std::env::var(key).ok();
+            // SAFETY: callers hold crate::test_support::env_lock() while this
+            // guard is alive, serializing process-global environment mutation.
+            unsafe { std::env::set_var(key, value) };
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvRestore {
+        fn drop(&mut self) {
+            // SAFETY: the creating test holds crate::test_support::env_lock()
+            // until after this guard is dropped.
+            unsafe {
+                match &self.previous {
+                    Some(value) => std::env::set_var(self.key, value),
+                    None => std::env::remove_var(self.key),
+                }
+            }
+        }
+    }
+
     fn write_minimal_config(dir: &Path) {
         let cfg = serde_json::json!({
             "hidden_size": 4096,
@@ -662,6 +757,7 @@ mod tests {
         );
         let mut f = std::fs::File::create(dir.join("model.safetensors.index.json")).unwrap();
         f.write_all(s.as_bytes()).unwrap();
+        std::fs::File::create(dir.join("x.safetensors")).unwrap();
     }
 
     #[test]
@@ -743,6 +839,65 @@ mod tests {
         let int8 = estimate_total_memory(tmp.path(), 8192, 1, QuantHint::Default, true);
         assert!(int8.kv_dtype_int8);
         assert_eq!(int8.kv_cache_bytes * 2, fp16.kv_cache_bytes);
+    }
+
+    #[test]
+    fn estimate_scales_kv_cache_by_batch() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_minimal_config(tmp.path());
+
+        let batch1 = estimate_total_memory(tmp.path(), 8192, 1, QuantHint::Default, false);
+        let batch4 = estimate_total_memory(tmp.path(), 8192, 4, QuantHint::Default, false);
+
+        assert_eq!(batch4.batch, 4);
+        assert_eq!(batch4.kv_cache_bytes, batch1.kv_cache_bytes * 4);
+    }
+
+    #[test]
+    fn kv_params_prefer_explicit_head_dim_when_hidden_division_differs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = serde_json::json!({
+            "text_config": {
+                "hidden_size": 1536,
+                "num_hidden_layers": 35,
+                "num_attention_heads": 8,
+                "num_key_value_heads": 1,
+                "head_dim": 256
+            }
+        });
+        std::fs::write(
+            tmp.path().join("config.json"),
+            serde_json::to_string(&cfg).unwrap(),
+        )
+        .unwrap();
+
+        let params = kv_cache_params_from_path(tmp.path(), 256, false, 1).unwrap();
+        assert_eq!(params.head_dim, 256);
+        assert_eq!(kv_cache_bytes_from_params(&params), 35 * 2 * 256 * 2 * 256);
+    }
+
+    #[test]
+    fn available_memory_honors_env_limit_before_runtime_init() {
+        let _env = crate::test_support::env_lock::env_lock();
+        let _restore = EnvRestore::set(MEMORY_LIMIT_ENV, "512MB");
+
+        let tmp = tempfile::tempdir().unwrap();
+        write_minimal_config(tmp.path());
+
+        let est = estimate_total_memory(tmp.path(), 1024, 1, QuantHint::Default, false);
+        assert_eq!(est.available_bytes, 512 * 1024 * 1024);
+    }
+
+    #[test]
+    fn parse_optional_memory_size_rejects_non_positive_and_non_finite() {
+        assert_eq!(parse_optional_memory_size_bytes("0"), None);
+        assert_eq!(parse_optional_memory_size_bytes("none"), None);
+        assert_eq!(parse_optional_memory_size_bytes("-1GB"), None);
+        assert_eq!(parse_optional_memory_size_bytes("NaNGB"), None);
+        assert_eq!(
+            parse_optional_memory_size_bytes("1.5GB"),
+            Some((1.5 * 1024.0 * 1024.0 * 1024.0) as u64),
+        );
     }
 
     #[test]

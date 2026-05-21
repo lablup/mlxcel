@@ -13,9 +13,10 @@
 // limitations under the License.
 
 use super::{
-    apply_user_chat_template, cli_pipeline_requested, generated_suffix,
-    generation_stats_from_duration, resolve_cli_pipeline_assignments, resolve_cli_prompt,
-    validate_pipeline_parallel_args, validate_tensor_parallel_args,
+    apply_user_chat_template, cli_pipeline_requested, estimate_delta_label_and_bytes,
+    generated_suffix, generation_stats_from_duration, memory_preflight_ctx_len,
+    resolve_cli_pipeline_assignments, resolve_cli_prompt, validate_pipeline_parallel_args,
+    validate_tensor_parallel_args,
 };
 use mlxcel::server::chat_template::ChatTemplateProcessor;
 use std::fs;
@@ -38,6 +39,24 @@ fn generation_stats_from_duration_handles_zero_elapsed_time() {
 
     assert_eq!(stats.decode_time_ms, 0.0);
     assert_eq!(stats.decode_tok_per_sec, 0.0);
+}
+
+#[test]
+fn estimate_delta_labels_match_actual_direction() {
+    assert_eq!(
+        estimate_delta_label_and_bytes(100, 125),
+        ("under-estimated by", 25)
+    );
+    assert_eq!(
+        estimate_delta_label_and_bytes(125, 100),
+        ("over-estimated by", 25)
+    );
+}
+
+#[test]
+fn memory_preflight_ctx_len_includes_prompt_and_generation_budget() {
+    assert_eq!(memory_preflight_ctx_len(4096, 128), 4224);
+    assert_eq!(memory_preflight_ctx_len(0, 0), 1);
 }
 
 #[test]

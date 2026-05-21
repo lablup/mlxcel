@@ -14,7 +14,7 @@
 
 use std::path::PathBuf;
 
-use super::build_startup_input;
+use super::{build_startup_input, serve_preflight_batch, serve_preflight_ctx_len};
 
 fn sample_args() -> crate::ServeArgs {
     crate::ServeArgs {
@@ -150,6 +150,36 @@ fn build_startup_input_preserves_edge_flags_for_normalization() {
         vec!["\n".to_string(), "\t".to_string()]
     );
     assert_eq!(input.decode_storage_backend, None);
+}
+
+#[test]
+fn serve_preflight_batch_uses_max_batch_size_when_batching_enabled() {
+    let args = sample_args();
+    assert_eq!(serve_preflight_batch(&args), 4);
+}
+
+#[test]
+fn serve_preflight_batch_falls_back_to_parallelism_and_honors_no_batch() {
+    let mut args = sample_args();
+    args.max_batch_size = None;
+    assert_eq!(serve_preflight_batch(&args), 3);
+
+    args.no_batch = true;
+    assert_eq!(serve_preflight_batch(&args), 1);
+}
+
+#[test]
+fn serve_preflight_ctx_len_uses_default_and_max_kv_cap() {
+    let mut args = sample_args();
+    args.ctx_size = 0;
+    assert_eq!(
+        serve_preflight_ctx_len(&args),
+        mlxcel::memory_estimate::DEFAULT_CTX_LEN
+    );
+
+    args.ctx_size = 8192;
+    args.max_kv_size = 2048;
+    assert_eq!(serve_preflight_ctx_len(&args), 2048);
 }
 
 #[test]

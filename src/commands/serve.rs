@@ -20,6 +20,7 @@
 //! on schema and routing.
 
 use mlxcel::cli::speculative_args::{env_fallback_draft_block_size, env_fallback_draft_kind};
+use mlxcel::cli::turbo_args::resolve_kv_cache_mode;
 use mlxcel::memory_estimate::{QuantHint, estimate_total_memory, format_bytes, format_estimate};
 use mlxcel::server::{
     ServerStartupInput, env_fallback_apc_block_size, env_fallback_apc_enabled,
@@ -31,6 +32,7 @@ use mlxcel::server::{
     env_fallback_prompt_cache_max_entries, env_fallback_prompt_cache_min_prefix,
     env_fallback_prompt_cache_ttl, env_fallback_reasoning_budget, start_server,
 };
+use mlxcel_core::cache::KVCacheMode;
 
 /// Run the `mlxcel serve` subcommand.
 #[tokio::main]
@@ -57,24 +59,18 @@ fn run_serve_memory_preflight(args: &crate::ServeArgs) -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let kv_int8 = matches!(
-        (
-            args.turbo.cache_type_k.as_deref(),
-            args.turbo.cache_type_v.as_deref(),
-        ),
-        (Some("int8"), Some("int8")) | (Some("i8"), Some("i8"))
-    );
+    let kv_cache_mode = resolve_kv_cache_mode(
+        args.turbo.cache_type_k.as_deref(),
+        args.turbo.cache_type_v.as_deref(),
+        args.turbo.kv_cache_mode.as_deref(),
+    )
+    .map_err(|e| anyhow::anyhow!("{}", e))?;
+    let kv_int8 = matches!(kv_cache_mode, KVCacheMode::Int8);
 
-    // `--ctx-size 0` is the "use model default" sentinel; in that
-    // case we fall back to 8192 to match the historical sizing used
-    // by `--recommend-quant`.
-    let ctx_len = if args.ctx_size > 0 {
-        args.ctx_size as u64
-    } else {
-        mlxcel::memory_estimate::DEFAULT_CTX_LEN
-    };
+    let ctx_len = serve_preflight_ctx_len(args);
+    let batch = serve_preflight_batch(args);
 
-    let estimate = estimate_total_memory(&args.model, ctx_len, 1, QuantHint::Default, kv_int8);
+    let estimate = estimate_total_memory(&args.model, ctx_len, batch, QuantHint::Default, kv_int8);
 
     let banner = format_estimate(&args.model, &estimate);
     println!("{banner}");
@@ -99,6 +95,29 @@ fn run_serve_memory_preflight(args: &crate::ServeArgs) -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+fn serve_preflight_ctx_len(args: &crate::ServeArgs) -> u64 {
+    // `--ctx-size 0` is the "use model default" sentinel; in that case we
+    // fall back to 8192 to match the historical sizing used by
+    // `--recommend-quant`. `--max-kv-size` caps the plain KV cache length.
+    let mut ctx_len = if args.ctx_size > 0 {
+        args.ctx_size as u64
+    } else {
+        mlxcel::memory_estimate::DEFAULT_CTX_LEN
+    };
+    if args.max_kv_size > 0 {
+        ctx_len = ctx_len.min(args.max_kv_size as u64);
+    }
+    ctx_len.max(1)
+}
+
+fn serve_preflight_batch(args: &crate::ServeArgs) -> u64 {
+    if args.no_batch {
+        return 1;
+    }
+    let active_sequences = args.max_batch_size.unwrap_or(args.n_parallel).max(1);
+    u64::try_from(active_sequences).unwrap_or(u64::MAX)
 }
 
 fn build_startup_input(mut args: crate::ServeArgs) -> anyhow::Result<ServerStartupInput> {

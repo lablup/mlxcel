@@ -24,7 +24,9 @@
 
 use anyhow::{Result, anyhow};
 
+use mlxcel::cli::turbo_args::resolve_kv_cache_mode;
 use mlxcel::memory_estimate::{QuantHint, estimate_total_memory, format_estimate};
+use mlxcel_core::cache::KVCacheMode;
 
 use crate::InspectArgs;
 
@@ -40,18 +42,13 @@ pub(crate) fn run_inspect(args: InspectArgs) -> Result<()> {
     // Translate the user-facing `--quant` label into the typed hint.
     let quant = parse_quant_hint(&args.quant)?;
 
-    // Translate the K/V cache flag pair into the int8/fp16 decision the
-    // estimator understands. Both flags must point at int8 for KV
-    // bytes to halve; any other combination is treated as fp16 (the
-    // default) since mixed-precision KV is not directly modelled in
-    // the size formula. Surface the consequence in the printed output.
-    let kv_int8 = matches!(
-        (
-            args.turbo.cache_type_k.as_deref(),
-            args.turbo.cache_type_v.as_deref(),
-        ),
-        (Some("int8"), Some("int8")) | (Some("i8"), Some("i8"))
-    );
+    let kv_cache_mode = resolve_kv_cache_mode(
+        args.turbo.cache_type_k.as_deref(),
+        args.turbo.cache_type_v.as_deref(),
+        args.turbo.kv_cache_mode.as_deref(),
+    )
+    .map_err(|e| anyhow!("{}", e))?;
+    let kv_int8 = matches!(kv_cache_mode, KVCacheMode::Int8);
 
     let estimate = estimate_total_memory(&args.model, args.max_tokens, args.batch, quant, kv_int8);
 
