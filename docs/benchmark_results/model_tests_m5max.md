@@ -54,7 +54,7 @@ Compatibility and performance testing for mlxcel models on **MacBook Pro M5 Max 
 | gemma3 (4B) | gemma-3-4b-it-4bit | ✅ | 819.97 | 182.16 | **1.83x** | 81 tokens; full-budget raw prompt 183.77 tok/s |
 | gemma3n (E2B) | gemma-3n-E2B-it-4bit | ✅ | 812.25 | 158.71 | **2.06x** | 71 tokens |
 | gemma3n (E4B) | gemma-3n-E4B-it-4bit | ✅ | 601.09 | 110.24 | **1.83x** | 71 tokens |
-| gemma3n (E4B bf16) | gemma-3n-E4B-it (bf16) | ✅ | 348.30 | 39.19 | **1.14x** | 72 tokens; issue #716; Gemma3n language MLP bf16 preserved, other bf16 materialized as f16; 78% of mlx-lm decode |
+| gemma3n (E4B bf16) | gemma-3n-E4B-it (bf16) | ✅ | 348.30 | 39.05 | 1.10x | Gemma3n language MLP bf16 preserved, other bf16 materialized as f16; M5 (Neural Accelerator) uses the split decode path while other Apple Silicon uses the fused path; ~80% of mlx-lm decode |
 | gemma4 (26B MoE) | gemma-4-26b-a4b-it-4bit | ✅ | 539.57 | 137.12 | **1.87x** | 37 tokens |
 | gemma4 (31B) | gemma-4-31b-4bit | ✅ | 71.51 | 28.59 | **1.42x** | 100 tokens |
 | gemma4 (31B IT) | gemma-4-31b-it-4bit | ✅ | 144.09 | 27.34 | **1.43x** | 25 tokens |
@@ -299,7 +299,7 @@ snapshot.
 | gemma3-4b-4bit | 182.16 | 181.66 | **100%** |
 | gemma3n-e2b-4bit | 158.71 | FAIL | - |
 | gemma3n-e4b-4bit | 110.24 | FAIL | - |
-| gemma3n-e4b-bf16 | 39.19 | 48.72 | 80% |
+| gemma3n-e4b-bf16 | 39.05 | 48.72 | 80% |
 | glm4-flash-4bit | 104.30 | 104.03 | **100%** |
 | gpt-oss-120b-4bit | 114.03 | 110.35 | **103%** |
 | gpt-oss-20b-mxfp4 | 172.33 | 168.33 | **102%** |
