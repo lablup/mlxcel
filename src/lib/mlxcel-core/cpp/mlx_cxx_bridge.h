@@ -554,6 +554,22 @@ std::unique_ptr<MlxArray> compiled_gelu_mlp_forward_fp16(
     const MlxArray* down_bias
 );
 
+// Gemma3n dense MLP forward for non-quantized bf16 language MLP weights:
+//   cast input to bf16 -> gate/up -> gelu_approx or gelu_topk -> down -> bf16.
+// Keeps the same bf16 semantics as the Rust op-at-a-time path while collapsing
+// the decode-hot MLP graph construction into one C++ bridge call.
+std::unique_ptr<MlxArray> gemma3n_mlp_forward(
+    const MlxArray& x,
+    const MlxArray& gate_weight,
+    const MlxArray& up_weight,
+    const MlxArray& down_weight,
+    const MlxArray* gate_bias,
+    const MlxArray* up_bias,
+    const MlxArray* down_bias,
+    float activation_sparsity,
+    float std_multiplier
+);
+
 // Full transformer layer forward (maximum FFI reduction)
 // Combines: attention + MLP + residuals + norms
 std::unique_ptr<MlxArray> transformer_layer_forward(

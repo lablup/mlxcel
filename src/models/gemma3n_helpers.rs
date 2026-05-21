@@ -29,6 +29,51 @@ pub(crate) fn stack_arrays(arrays: &[UniquePtr<MlxArray>], axis: i32) -> UniqueP
     mlxcel_core::stack(&ptrs, axis)
 }
 
+/// Slice one AltUp plane from a stacked `[altup, batch, seq, hidden]` tensor.
+pub(crate) fn slice_altup_plane(stacked: &MlxArray, index: usize) -> UniquePtr<MlxArray> {
+    let shape = mlxcel_core::array_shape(stacked);
+    debug_assert_eq!(shape.len(), 4, "AltUp stack must be rank-4");
+    let idx = index as i32;
+    let sliced = mlxcel_core::slice(
+        stacked,
+        &[idx, 0, 0, 0],
+        &[idx + 1, shape[1], shape[2], shape[3]],
+    );
+    mlxcel_core::squeeze_axis(&sliced, 0)
+}
+
+/// Split a stacked `[altup, batch, seq, hidden]` tensor into per-plane arrays.
+pub(crate) fn split_altup_planes(
+    stacked: &MlxArray,
+    altup_num_inputs: usize,
+) -> Vec<UniquePtr<MlxArray>> {
+    let mut result = Vec::with_capacity(altup_num_inputs);
+    for i in 0..altup_num_inputs {
+        result.push(slice_altup_plane(stacked, i));
+    }
+    result
+}
+
+/// Split a stacked AltUp tensor back into per-plane arrays, adding the
+/// per-layer prediction to planes `1..` to match mlx-lm's
+/// `corrected_predictions[1:] += first_prediction` update.
+pub(crate) fn split_altup_after_per_layer_update(
+    stacked: &MlxArray,
+    first_prediction: &MlxArray,
+    altup_num_inputs: usize,
+) -> Vec<UniquePtr<MlxArray>> {
+    let mut result = Vec::with_capacity(altup_num_inputs);
+    for i in 0..altup_num_inputs {
+        let plane = slice_altup_plane(stacked, i);
+        if i == 0 {
+            result.push(plane);
+        } else {
+            result.push(mlxcel_core::add(&plane, first_prediction));
+        }
+    }
+    result
+}
+
 /// Compute magnitude (RMS) of an array along the last axis.
 pub(crate) fn compute_magnitude(x: &MlxArray) -> UniquePtr<MlxArray> {
     let sq = mlxcel_core::square(x);

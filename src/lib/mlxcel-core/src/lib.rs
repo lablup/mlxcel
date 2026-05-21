@@ -683,6 +683,23 @@ mod ffi {
             down_bias: *const MlxArray,
         ) -> UniquePtr<MlxArray>;
 
+        /// Gemma3n dense MLP forward for non-quantized bf16 language MLP weights:
+        /// cast input to bf16, run gate/up + gelu_approx or gelu_topk + down,
+        /// then cast back to bf16. Preserves the Gemma3n precision policy
+        /// while avoiding several Rust↔C++ bridge round-trips per layer.
+        /// Used by: Gemma3n bf16 language MLP decode path
+        unsafe fn gemma3n_mlp_forward(
+            x: &MlxArray,
+            gate_weight: &MlxArray,
+            up_weight: &MlxArray,
+            down_weight: &MlxArray,
+            gate_bias: *const MlxArray,
+            up_bias: *const MlxArray,
+            down_bias: *const MlxArray,
+            activation_sparsity: f32,
+            std_multiplier: f32,
+        ) -> UniquePtr<MlxArray>;
+
         /// Full transformer layer forward (maximum FFI reduction)
         unsafe fn transformer_layer_forward(
             x: &MlxArray,

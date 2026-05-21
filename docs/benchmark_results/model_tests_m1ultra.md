@@ -82,7 +82,7 @@ Compatibility and performance testing for mlxcel models on **Mac Studio M1 Ultra
 | gemma4 (E4B 8bit) | gemma-4-e4b-it-8bit | ✅ | 165.49 | 59.35 | - | mlx-lm: FAIL; only 39 tokens |
 | gemma3n | gemma-3n-E2B-it-4bit | ✅ | 238.51 | 76.86 | - | mlx-lm: FAIL; only 69 tokens |
 | gemma3n (E4B) | gemma-3n-E4B-it-4bit | ✅ | 169.94 | 60.18 | - | mlx-lm: FAIL; only 74 tokens |
-| gemma3n (E4B bf16) | gemma-3n-E4B-it (bf16) | ✅ | 169.01 | 34.41 | 88% | mlx-lm: 39.02; bf16 prefill path retune (PR #727); bf16; only 72 tokens |
+| gemma3n (E4B bf16) | gemma-3n-E4B-it (bf16) | ✅ | 169.01 | 35.65 | 91% | mlx-lm: 39.02; bf16; AltUp/MLP decode graph scheduling |
 | recurrent_gemma | - | ⏳ | - | - | - | Griffin SSM+attention hybrid |
 
 ## EXAONE
@@ -294,7 +294,7 @@ Numbers are decode tok/s. `mlxcel vs mlx-lm` is `mlxcel / mlx-lm` as a percentag
 
 - **Comparable text pairs**: 73
 - **mlxcel >= mlx-lm**: 20 / 73 (27%)
-- **mlxcel >= 90% parity**: 65 / 73 (89%)
+- **mlxcel >= 90% parity**: 66 / 73 (90%)
 - **Average mlxcel/mlx-lm**: 96% (median 97%, range 47%-113%)
 
 ### Aggregate (VLM, models with >=5 generated tokens both sides)
@@ -341,7 +341,7 @@ Numbers are decode tok/s. `mlxcel vs mlx-lm` is `mlxcel / mlx-lm` as a percentag
 | gemma3-4b-4bit | 112.95 | 109.48 | **103%** |
 | gemma3n-e2b-4bit | 76.86 | FAIL | - |
 | gemma3n-e4b-4bit | 60.18 | FAIL | - |
-| gemma3n-e4b-bf16 | 34.41 | 39.02 | 88% |
+| gemma3n-e4b-bf16 | 35.65 | 39.02 | 91% |
 | glm4-flash-4bit | 47.32 | 49.47 | 96% |
 | gpt-oss-120b-4bit | 58.89 | 57.58 | **102%** |
 | gpt-oss-20b-mxfp4 | 88.89 | 89.51 | 99% |

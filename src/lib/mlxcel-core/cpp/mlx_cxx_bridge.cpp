@@ -1991,6 +1991,56 @@ std::unique_ptr<MlxArray> compiled_gelu_mlp_forward_fp16(
     return std::make_unique<MlxArray>(std::move(down));
 }
 
+// Gemma3n dense MLP forward for non-quantized bf16 language MLP weights:
+//   cast input to bf16 -> gate/up -> gelu_approx or gelu_topk -> down -> bf16.
+//
+// Matmul operations intentionally stay outside mx::compile for the same reason
+// as compiled_swiglu_mlp_forward_fp16 / compiled_gelu_mlp_forward_fp16: compiled
+// matmul+transpose graphs can reuse the wrong constants across layers. The
+// element-wise activation still uses the cached compiled kernels, while the
+// whole MLP is built through one C++ bridge call instead of four Rust calls.
+std::unique_ptr<MlxArray> gemma3n_mlp_forward(
+    const MlxArray& x,
+    const MlxArray& gate_weight,
+    const MlxArray& up_weight,
+    const MlxArray& down_weight,
+    const MlxArray* gate_bias,
+    const MlxArray* up_bias,
+    const MlxArray* down_bias,
+    float activation_sparsity,
+    float std_multiplier
+) {
+    auto x_mlp = x.inner.dtype() == mlx::core::bfloat16
+        ? x.inner
+        : mlx::core::astype(x.inner, mlx::core::bfloat16);
+
+    auto gate_t = mlx::core::transpose(gate_weight.inner);
+    auto gate = mlx::core::matmul(x_mlp, gate_t);
+    if (gate_bias) gate = mlx::core::add(gate, gate_bias->inner);
+
+    auto up_t = mlx::core::transpose(up_weight.inner);
+    auto up = mlx::core::matmul(x_mlp, up_t);
+    if (up_bias) up = mlx::core::add(up, up_bias->inner);
+
+    auto hidden = [&]() {
+        if (activation_sparsity > 0.0f) {
+            static auto compiled_topk = get_compiled_gelu_topk();
+            auto mult = array(std_multiplier);
+            auto activated = compiled_topk({gate, mult});
+            return mlx::core::multiply(activated[0], up);
+        }
+        static auto compiled_geglu_approx = get_compiled_geglu_approx();
+        auto activated = compiled_geglu_approx({gate, up});
+        return activated[0];
+    }();
+
+    auto down_t = mlx::core::transpose(down_weight.inner);
+    auto down = mlx::core::matmul(hidden, down_t);
+    if (down_bias) down = mlx::core::add(down, down_bias->inner);
+
+    return std::make_unique<MlxArray>(mlx::core::astype(down, mlx::core::bfloat16));
+}
+
 std::unique_ptr<MlxArray> transformer_layer_forward(
     const MlxArray& x,
     const MlxArray& attn_norm_weight,

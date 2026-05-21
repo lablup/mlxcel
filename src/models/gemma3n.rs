@@ -25,7 +25,8 @@
 
 use crate::models::gemma3n_helpers::{
     apply_softcap, compute_magnitude, mean_arrays, normalize_magnitudes,
-    normalize_magnitudes_from_idx, slice_layer_input, stack_arrays,
+    normalize_magnitudes_from_idx, slice_altup_plane, slice_layer_input,
+    split_altup_after_per_layer_update, split_altup_planes, stack_arrays,
 };
 use mlxcel_core::generate::LanguageModel;
 use mlxcel_core::layers::{KVCache, Linear, RMSNorm, UnifiedEmbedding, UnifiedLinear};
@@ -249,8 +250,14 @@ impl AltUp {
         mlxcel_core::tanh(&routed)
     }
 
-    /// Predict: expand inputs through altup_num_inputs parallel paths
-    pub fn predict(&self, x: &[UniquePtr<MlxArray>]) -> Vec<UniquePtr<MlxArray>> {
+    /// Predict: expand inputs through altup_num_inputs parallel paths.
+    ///
+    /// The decode-hot layer path consumes the stacked tensor directly and
+    /// avoids immediately slicing the four AltUp planes only to stack them
+    /// again during correction. Keeping this as one `[altup, B, L, hidden]`
+    /// graph island mirrors mlx-lm's tensor scheduling more closely while
+    /// preserving the public Vec-returning wrapper below for parity tests.
+    pub fn predict_stacked(&self, x: &[UniquePtr<MlxArray>]) -> UniquePtr<MlxArray> {
         // x is [altup_num_inputs] arrays, each [B, L, hidden_size]
         // Get active input for routing
         let active = &x[self.altup_active_idx];
@@ -269,14 +276,11 @@ impl AltUp {
         let all_coefs = mlxcel_core::reshape(&coefs, &[b, l, n, n]);
         let all_coefs = mlxcel_core::transpose_axes(&all_coefs, &[0, 1, 3, 2]);
 
-        // Convert x to float32 for computation
-        let x_f32: Vec<_> = x
-            .iter()
-            .map(|arr| mlxcel_core::astype(arr, mlxcel_core::dtype::FLOAT32))
-            .collect();
-
-        // Stack x to [B, L, hidden, altup]
-        let x_stacked = stack_arrays(&x_f32, 0);
+        // Stack first, then cast once to match mlx-lm's `x.astype(mx.float32)`
+        // scheduling. This keeps the four AltUp planes in one graph island
+        // instead of creating one bf16→f32 cast node per plane.
+        let x_stacked_native = stack_arrays(x, 0);
+        let x_stacked = mlxcel_core::astype(&x_stacked_native, mlxcel_core::dtype::FLOAT32);
         // x_stacked shape: [altup, B, L, hidden]
         let x_permuted = mlxcel_core::transpose_axes(&x_stacked, &[1, 2, 3, 0]);
         // x_permuted shape: [B, L, hidden, altup]
@@ -288,28 +292,22 @@ impl AltUp {
 
         // Add residual
         let predictions = mlxcel_core::add(&predictions, &x_stacked);
-        let predictions = mlxcel_core::astype(&predictions, mlxcel_core::array_dtype(&x[0]));
-
-        // Split back to individual arrays
-        let mut result = Vec::with_capacity(self.altup_num_inputs);
-        for i in 0..self.altup_num_inputs {
-            let start = vec![i as i32, 0, 0, 0];
-            let hidden = mlxcel_core::array_shape(&x_f32[0])[2];
-            let stop = vec![(i + 1) as i32, b, l, hidden];
-            let sliced = mlxcel_core::slice(&predictions, &start, &stop);
-            let squeezed = mlxcel_core::squeeze_axis(&sliced, 0);
-            result.push(squeezed);
-        }
-
-        result
+        mlxcel_core::astype(&predictions, mlxcel_core::array_dtype(&x[0]))
     }
 
-    /// Correct: apply correction to predictions based on activated output
-    pub fn correct(
+    /// Predict: expand inputs through altup_num_inputs parallel paths.
+    pub fn predict(&self, x: &[UniquePtr<MlxArray>]) -> Vec<UniquePtr<MlxArray>> {
+        let predictions = self.predict_stacked(x);
+        split_altup_planes(&predictions, self.altup_num_inputs)
+    }
+
+    /// Correct: apply correction to stacked predictions based on activated output.
+    pub fn correct_stacked(
         &self,
-        predictions: &[UniquePtr<MlxArray>],
+        predictions: &MlxArray,
+        active_prediction: &MlxArray,
         activated: &MlxArray,
-    ) -> Vec<UniquePtr<MlxArray>> {
+    ) -> UniquePtr<MlxArray> {
         let modalities = self.compute_router_modalities(activated);
 
         // correction_coefs output shape: [B, L, altup_num_inputs]
@@ -317,10 +315,8 @@ impl AltUp {
         let one = mlxcel_core::full_f32(&[1], 1.0, mlxcel_core::array_dtype(&all_coefs));
         let all_coefs = mlxcel_core::add(&all_coefs, &one);
 
-        // Get active prediction
-        let active_x = &predictions[self.altup_active_idx];
         // innovation = activated - active_prediction
-        let innovation = mlxcel_core::subtract(activated, active_x);
+        let innovation = mlxcel_core::subtract(activated, active_prediction);
 
         let shape = mlxcel_core::array_shape(&all_coefs);
         let b = shape[0];
@@ -340,25 +336,24 @@ impl AltUp {
         // Element-wise multiply: [1, B, L, hidden] * [altup, B, L, 1] = [altup, B, L, hidden]
         let correction = mlxcel_core::multiply(&innovation_expanded, &coefs_expanded);
 
-        // Stack predictions and add correction
-        let preds_stacked = stack_arrays(predictions, 0);
-        let corrected = mlxcel_core::add(&preds_stacked, &correction);
+        // Add correction to the existing stacked prediction tensor.
+        let corrected = mlxcel_core::add(predictions, &correction);
 
         // Cast back to original dtype
         let original_dtype = mlxcel_core::array_dtype(activated);
-        let corrected = mlxcel_core::astype(&corrected, original_dtype);
+        mlxcel_core::astype(&corrected, original_dtype)
+    }
 
-        // Split back to individual arrays
-        let mut result = Vec::with_capacity(self.altup_num_inputs);
-        for i in 0..self.altup_num_inputs {
-            let start = vec![i as i32, 0, 0, 0];
-            let stop = vec![(i + 1) as i32, b, l, hidden];
-            let sliced = mlxcel_core::slice(&corrected, &start, &stop);
-            let squeezed = mlxcel_core::squeeze_axis(&sliced, 0);
-            result.push(squeezed);
-        }
-
-        result
+    /// Correct: apply correction to predictions based on activated output.
+    pub fn correct(
+        &self,
+        predictions: &[UniquePtr<MlxArray>],
+        activated: &MlxArray,
+    ) -> Vec<UniquePtr<MlxArray>> {
+        let predictions_stacked = stack_arrays(predictions, 0);
+        let active_prediction = &predictions[self.altup_active_idx];
+        let corrected = self.correct_stacked(&predictions_stacked, active_prediction, activated);
+        split_altup_planes(&corrected, self.altup_num_inputs)
     }
 
     pub fn from_weights(
@@ -691,6 +686,41 @@ impl MLP {
     }
 
     pub fn forward(&self, x: &MlxArray) -> UniquePtr<MlxArray> {
+        if let (Some(gate), Some(up), Some(down)) = (
+            self.gate_proj.regular_weight(),
+            self.up_proj.regular_weight(),
+            self.down_proj.regular_weight(),
+        ) {
+            let gate_bias_ptr = gate
+                .bias
+                .as_ref()
+                .map(|b| b.as_ref().unwrap() as *const MlxArray)
+                .unwrap_or(std::ptr::null());
+            let up_bias_ptr = up
+                .bias
+                .as_ref()
+                .map(|b| b.as_ref().unwrap() as *const MlxArray)
+                .unwrap_or(std::ptr::null());
+            let down_bias_ptr = down
+                .bias
+                .as_ref()
+                .map(|b| b.as_ref().unwrap() as *const MlxArray)
+                .unwrap_or(std::ptr::null());
+            return unsafe {
+                mlxcel_core::gemma3n_mlp_forward(
+                    x,
+                    &gate.weight,
+                    &up.weight,
+                    &down.weight,
+                    gate_bias_ptr,
+                    up_bias_ptr,
+                    down_bias_ptr,
+                    self.activation_sparsity,
+                    self.std_multiplier,
+                )
+            };
+        }
+
         let x_cast;
         let x_mlp = if mlxcel_core::array_dtype(x) == mlxcel_core::dtype::BFLOAT16 {
             x
@@ -784,12 +814,14 @@ impl DecoderLayer {
         cache: &mut KVCache,
         per_layer_input: &MlxArray,
     ) -> Vec<UniquePtr<MlxArray>> {
-        // AltUp predict
-        let predictions = self.altup.predict(x);
-        let active_prediction = &predictions[self.altup_active_idx];
+        // AltUp predict. Keep the prediction tensor stacked until correction
+        // so decode avoids slicing four planes and stacking them again within
+        // the same layer.
+        let predictions = self.altup.predict_stacked(x);
+        let active_prediction = slice_altup_plane(&predictions, self.altup_active_idx);
 
         // Input layernorm
-        let active_normed = self.input_layernorm.forward(active_prediction);
+        let active_normed = self.input_layernorm.forward(&active_prediction);
 
         // LAUREL
         let laurel_output = self.laurel.forward(&active_normed);
@@ -799,7 +831,7 @@ impl DecoderLayer {
         let attn = self.post_attention_layernorm.forward(&attn);
 
         // Residual + LAUREL
-        let attn_gated = mlxcel_core::add(active_prediction, &attn);
+        let attn_gated = mlxcel_core::add(&active_prediction, &attn);
 
         let sum = mlxcel_core::add(&attn_gated, &laurel_output);
         let attn_laurel = mlxcel_core::multiply_scalar(&sum, std::f32::consts::FRAC_1_SQRT_2);
@@ -812,14 +844,16 @@ impl DecoderLayer {
         let ffw_gated = mlxcel_core::astype(&ffw_gated, mlxcel_core::dtype::BFLOAT16);
 
         // AltUp correct
-        let corrected = self.altup.correct(&predictions, &ffw_gated);
+        let corrected = self
+            .altup
+            .correct_stacked(&predictions, &active_prediction, &ffw_gated);
 
         // Per-layer input processing
-        let first = &corrected[self.altup_active_idx];
+        let first = slice_altup_plane(&corrected, self.altup_active_idx);
         let first = if self.altup_correct_scale {
-            mlxcel_core::multiply(first, &self.altup.correct_output_scale)
+            mlxcel_core::multiply(&first, &self.altup.correct_output_scale)
         } else {
-            mlxcel_core::copy(first)
+            first
         };
 
         let first = self.per_layer_input_gate.forward(&first);
@@ -827,14 +861,12 @@ impl DecoderLayer {
         let first = self.per_layer_projection.forward(&first);
         let first_prediction = self.post_per_layer_input_norm.forward(&first);
 
-        // Add first_prediction to corrected[1:]
-        let mut result = Vec::with_capacity(corrected.len());
-        result.push(mlxcel_core::copy(&corrected[0]));
-        for item in corrected.iter().skip(1) {
-            result.push(mlxcel_core::add(item, &first_prediction));
-        }
-
-        result
+        // Add first_prediction to corrected[1:] and split for the next layer.
+        split_altup_after_per_layer_update(
+            &corrected,
+            &first_prediction,
+            self.altup.altup_num_inputs,
+        )
     }
 
     pub fn from_weights(
