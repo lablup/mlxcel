@@ -28,6 +28,14 @@ use std::path::Path;
 /// Loaded model weights as a map of tensor names to mlx-cxx arrays
 pub type WeightMap = HashMap<String, UniquePtr<MlxArray>>;
 
+/// Return type for [`parse_shard_index_with_total_size`]:
+/// `(shard_filenames, metadata_total_size)`.
+///
+/// `metadata_total_size` is `None` when the `metadata.total_size` field is
+/// absent from the index JSON; `shard_filenames` is always non-empty on the
+/// `Some` branch.
+pub type ShardIndexResult = Result<Option<(Vec<String>, Option<u64>)>, String>;
+
 /// Hook for mutating an in-memory [`WeightMap`] after load and basic
 /// sanitization, before the model graph consumes it.
 ///
@@ -69,6 +77,22 @@ pub trait WeightTransform {
 /// Returns `Ok(Some(shards))` if the file exists and is valid, `Ok(None)` if the file
 /// does not exist, or `Err(...)` if the file exists but cannot be parsed.
 pub fn parse_shard_index<P: AsRef<Path>>(dir: P) -> Result<Option<Vec<String>>, String> {
+    parse_shard_index_inner(dir).map(|opt| opt.map(|(shards, _)| shards))
+}
+
+/// Parse a `model.safetensors.index.json` file and return shard filenames plus
+/// the optional `metadata.total_size` field (exact total weight bytes when present).
+///
+/// Returns `Ok(Some((shards, total_size)))` on success, `Ok(None)` when the file
+/// does not exist, or `Err(...)` when the file exists but cannot be parsed.
+/// `total_size` is `None` when the `metadata` block or its `total_size` field is absent.
+pub fn parse_shard_index_with_total_size<P: AsRef<Path>>(dir: P) -> ShardIndexResult {
+    parse_shard_index_inner(dir)
+}
+
+/// Internal implementation shared by [`parse_shard_index`] and
+/// [`parse_shard_index_with_total_size`].
+fn parse_shard_index_inner<P: AsRef<Path>>(dir: P) -> ShardIndexResult {
     let index_path = dir.as_ref().join("model.safetensors.index.json");
     if !index_path.exists() {
         return Ok(None);
@@ -77,16 +101,23 @@ pub fn parse_shard_index<P: AsRef<Path>>(dir: P) -> Result<Option<Vec<String>>, 
     let content = std::fs::read_to_string(&index_path)
         .map_err(|e| format!("Failed to read {}: {e}", index_path.display()))?;
 
-    let shards = extract_shards_from_index_json(&content)
+    let (shards, total_size) = extract_shards_and_total_size(&content)
         .map_err(|e| format!("Failed to parse {}: {e}", index_path.display()))?;
 
-    Ok(Some(shards))
+    Ok(Some((shards, total_size)))
 }
 
-/// Extract unique shard filenames from a HuggingFace safetensors index JSON string.
-fn extract_shards_from_index_json(json: &str) -> Result<Vec<String>, String> {
+/// Extract unique shard filenames and the optional `metadata.total_size` from
+/// a HuggingFace safetensors index JSON string.
+fn extract_shards_and_total_size(json: &str) -> Result<(Vec<String>, Option<u64>), String> {
     let parsed: serde_json::Value =
         serde_json::from_str(json).map_err(|e| format!("Invalid JSON: {e}"))?;
+
+    // Extract total_size from metadata block (may be absent in older models).
+    let total_size = parsed
+        .get("metadata")
+        .and_then(|m| m.get("total_size"))
+        .and_then(|v| v.as_u64());
 
     let weight_map = parsed
         .get("weight_map")
@@ -108,7 +139,118 @@ fn extract_shards_from_index_json(json: &str) -> Result<Vec<String>, String> {
     }
 
     shards.sort();
-    Ok(shards)
+    Ok((shards, total_size))
+}
+
+/// Delegates to [`extract_shards_and_total_size`], discarding the total_size.
+/// Used by unit tests that were written against the original single-return-value API.
+#[cfg(test)]
+fn extract_shards_from_index_json(json: &str) -> Result<Vec<String>, String> {
+    extract_shards_and_total_size(json).map(|(shards, _)| shards)
+}
+
+// ── Safetensors header reader ─────────────────────────────────────────────────
+
+/// Itemsize in bytes for each safetensors dtype tag.
+///
+/// Source: <https://github.com/huggingface/safetensors/blob/main/safetensors/src/tensor.rs>
+fn safetensors_dtype_itemsize(dtype: &str) -> Option<u64> {
+    match dtype {
+        "F64" | "I64" | "U64" => Some(8),
+        "F32" | "I32" | "U32" => Some(4),
+        "BF16" | "F16" | "I16" | "U16" => Some(2),
+        "F8_E5M2" | "F8_E4M3" | "I8" | "U8" | "BOOL" => Some(1),
+        _ => None,
+    }
+}
+
+/// Read the safetensors binary header from a single `model.safetensors` file
+/// and return the exact total weight-byte count by summing dtype × shape-product
+/// for every tensor entry.
+///
+/// The safetensors binary format begins with:
+/// - 8 bytes: little-endian `u64` header length `n`
+/// - `n` bytes: UTF-8 JSON object mapping tensor name → metadata
+///
+/// Tensor metadata entries have the shape:
+/// ```json
+/// { "dtype": "F32", "shape": [1024, 1024], "data_offsets": [0, 4194304] }
+/// ```
+///
+/// This function computes byte sizes from `dtype` and `shape` rather than
+/// `data_offsets` so it works on stub/fixture files used in unit tests too.
+///
+/// Returns `None` when the file does not exist or cannot be parsed; callers
+/// should fall back to the analytical estimate in that case.
+fn read_safetensors_header_bytes(path: &Path) -> Option<u64> {
+    use std::io::Read;
+
+    let mut f = std::fs::File::open(path).ok()?;
+
+    // Read the 8-byte header-length prefix.
+    let mut len_buf = [0u8; 8];
+    f.read_exact(&mut len_buf).ok()?;
+    let header_len = u64::from_le_bytes(len_buf);
+
+    // Sanity guard: reject absurdly large headers (> 256 MiB) to avoid OOM.
+    const MAX_HEADER_BYTES: u64 = 256 * 1024 * 1024;
+    if header_len == 0 || header_len > MAX_HEADER_BYTES {
+        return None;
+    }
+
+    let mut header_bytes = vec![0u8; header_len as usize];
+    f.read_exact(&mut header_bytes).ok()?;
+    let header_json =
+        serde_json::from_slice::<serde_json::Value>(&header_bytes).ok()?;
+
+    let obj = header_json.as_object()?;
+    let mut total: u64 = 0;
+    for (key, meta) in obj {
+        // The special "__metadata__" key is not a tensor entry.
+        if key == "__metadata__" {
+            continue;
+        }
+        let dtype = meta.get("dtype").and_then(|v| v.as_str())?;
+        let shape = meta.get("shape").and_then(|v| v.as_array())?;
+        let itemsize = safetensors_dtype_itemsize(dtype)?;
+        let numel: u64 = shape
+            .iter()
+            .filter_map(|d| d.as_u64())
+            .fold(1u64, |acc, d| acc.saturating_mul(d));
+        total = total.saturating_add(numel.saturating_mul(itemsize));
+    }
+    Some(total)
+}
+
+// ── Public footprint accessor ─────────────────────────────────────────────────
+
+/// Compute the byte-accurate weight footprint for a model directory **before**
+/// loading any tensors into memory.
+///
+/// Resolution order:
+/// 1. `metadata.total_size` from `model.safetensors.index.json` (sharded models).
+/// 2. Safetensors binary header of a single `model.safetensors` file (sum of
+///    dtype × shape-product for every tensor entry — no tensor data is read).
+/// 3. Returns `None` when neither source is available; callers should fall back
+///    to an analytical estimate (e.g. `ModelProfile::total_param_bytes`).
+///
+/// The returned value is the exact number of weight-parameter bytes on disk.
+/// It does **not** include activation memory, KV-cache, or framework overhead.
+pub fn weight_footprint_bytes<P: AsRef<Path>>(model_dir: P) -> Option<u64> {
+    let dir = model_dir.as_ref();
+
+    // 1. Try sharded index first.
+    if let Ok(Some((_shards, Some(total_size)))) = parse_shard_index_with_total_size(dir) {
+        return Some(total_size);
+    }
+
+    // 2. Try single-file safetensors header.
+    let single_file = dir.join("model.safetensors");
+    if single_file.exists() {
+        return read_safetensors_header_bytes(&single_file);
+    }
+
+    None
 }
 
 /// Check if a path is a broken symlink (exists as a symlink but target is missing).
@@ -640,5 +782,145 @@ mod tests {
             err.contains("Missing shard file"),
             "expected missing-shard error, got: {err}"
         );
+    }
+
+    // ── weight_footprint_bytes tests ──────────────────────────────────────────
+
+    /// Write an `model.safetensors.index.json` with the given `total_size`.
+    fn write_index_with_total_size(dir: &Path, total_size: u64) {
+        use std::io::Write;
+        let json = format!(
+            r#"{{"metadata": {{"total_size": {total_size}}}, "weight_map": {{"w.weight": "model-00001-of-00001.safetensors"}}}}"#
+        );
+        let mut f = std::fs::File::create(dir.join("model.safetensors.index.json")).unwrap();
+        f.write_all(json.as_bytes()).unwrap();
+    }
+
+    /// Write an `model.safetensors.index.json` without a `total_size` field.
+    fn write_index_without_total_size(dir: &Path) {
+        use std::io::Write;
+        let json = r#"{"weight_map": {"w.weight": "model-00001-of-00001.safetensors"}}"#;
+        let mut f = std::fs::File::create(dir.join("model.safetensors.index.json")).unwrap();
+        f.write_all(json.as_bytes()).unwrap();
+    }
+
+    /// Write a minimal valid safetensors binary file with a single F32 tensor of the
+    /// given shape. The tensor data region is intentionally empty (zero bytes), since
+    /// `read_safetensors_header_bytes` only inspects the header JSON.
+    fn write_safetensors_stub(path: &std::path::PathBuf, dtype: &str, shape: &[u64]) {
+        use std::io::Write;
+        // Build the header JSON.
+        let shape_str = shape
+            .iter()
+            .map(|d| d.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        let header_json = format!(
+            r#"{{"test_tensor": {{"dtype": "{dtype}", "shape": [{shape_str}], "data_offsets": [0, 0]}}}}"#
+        );
+        let header_bytes = header_json.as_bytes();
+        let header_len = header_bytes.len() as u64;
+        let mut f = std::fs::File::create(path).unwrap();
+        f.write_all(&header_len.to_le_bytes()).unwrap();
+        f.write_all(header_bytes).unwrap();
+        // No data region written — the header reader only needs the JSON.
+    }
+
+    #[test]
+    fn test_parse_shard_index_with_total_size_present() {
+        let dir = tempfile::tempdir().unwrap();
+        write_index_with_total_size(dir.path(), 12_345_678);
+
+        let result = parse_shard_index_with_total_size(dir.path())
+            .expect("should succeed");
+        assert!(result.is_some());
+        let (_shards, total_size) = result.unwrap();
+        assert_eq!(total_size, Some(12_345_678));
+    }
+
+    #[test]
+    fn test_parse_shard_index_with_total_size_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        write_index_without_total_size(dir.path());
+
+        let result = parse_shard_index_with_total_size(dir.path())
+            .expect("should succeed");
+        assert!(result.is_some());
+        let (_shards, total_size) = result.unwrap();
+        assert_eq!(total_size, None);
+    }
+
+    #[test]
+    fn test_parse_shard_index_with_total_size_no_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let result = parse_shard_index_with_total_size(dir.path())
+            .expect("should succeed");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_weight_footprint_bytes_from_sharded_index() {
+        // Sharded model with index.json providing total_size.
+        let dir = tempfile::tempdir().unwrap();
+        write_index_with_total_size(dir.path(), 999_000);
+
+        let footprint = weight_footprint_bytes(dir.path());
+        assert_eq!(footprint, Some(999_000));
+    }
+
+    #[test]
+    fn test_weight_footprint_bytes_from_single_file_header() {
+        // Single-file model with no index.json — computed from the binary header.
+        // Tensor: F32 (4 bytes) with shape [1024, 256] → 1024 * 256 * 4 = 1_048_576 bytes.
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("model.safetensors");
+        write_safetensors_stub(&file, "F32", &[1024, 256]);
+
+        let footprint = weight_footprint_bytes(dir.path());
+        assert_eq!(footprint, Some(1024 * 256 * 4));
+    }
+
+    #[test]
+    fn test_weight_footprint_bytes_missing_no_file() {
+        // Directory with neither index.json nor model.safetensors → None.
+        let dir = tempfile::tempdir().unwrap();
+        let footprint = weight_footprint_bytes(dir.path());
+        assert_eq!(footprint, None);
+    }
+
+    #[test]
+    fn test_weight_footprint_bytes_index_without_total_size_falls_to_header() {
+        // Index exists but has no total_size; single file present → reads header.
+        let dir = tempfile::tempdir().unwrap();
+        write_index_without_total_size(dir.path());
+        let file = dir.path().join("model.safetensors");
+        // BF16 tensor shape [512, 128] → 512 * 128 * 2 = 131_072 bytes.
+        write_safetensors_stub(&file, "BF16", &[512, 128]);
+
+        let footprint = weight_footprint_bytes(dir.path());
+        assert_eq!(footprint, Some(512 * 128 * 2));
+    }
+
+    #[test]
+    fn test_safetensors_dtype_itemsize() {
+        assert_eq!(safetensors_dtype_itemsize("F32"), Some(4));
+        assert_eq!(safetensors_dtype_itemsize("BF16"), Some(2));
+        assert_eq!(safetensors_dtype_itemsize("F16"), Some(2));
+        assert_eq!(safetensors_dtype_itemsize("I8"), Some(1));
+        assert_eq!(safetensors_dtype_itemsize("F64"), Some(8));
+        assert_eq!(safetensors_dtype_itemsize("BOOL"), Some(1));
+        assert_eq!(safetensors_dtype_itemsize("UNKNOWN_DTYPE"), None);
+    }
+
+    #[test]
+    fn test_weight_footprint_bytes_scalar_tensor() {
+        // Scalar tensors have shape [] (product = 1).
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("model.safetensors");
+        write_safetensors_stub(&file, "F32", &[]);
+
+        let footprint = weight_footprint_bytes(dir.path());
+        // 1 element × 4 bytes = 4
+        assert_eq!(footprint, Some(4));
     }
 }
