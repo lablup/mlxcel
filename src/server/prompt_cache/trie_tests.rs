@@ -340,26 +340,37 @@ fn pop_prefixes_subtree_count_consistent_after_drain() {
     assert_eq!(m.depth(), 3);
 }
 
+// The O(N²) adversarial build at N=4096 is far too slow under Miri; the smaller
+// structural trie tests already give full UB coverage of the iterative unsafe
+// paths, so skip this one when running under Miri.
 #[test]
+#[cfg_attr(miri, ignore)]
 fn pop_prefixes_deep_branching_chain_does_not_overflow() {
-    // Regression test for stack-overflow DoS: an adversarial pattern
-    // `[t₀,X₀], [t₀,t₁,X₁], [t₀,t₁,t₂,X₂], …` defeats path compression
+    // Regression guard for the stack-overflow DoS. An adversarial
+    // pattern `[t₀,X₀], [t₀,t₁,X₁], [t₀,t₁,t₂,X₂], …` defeats path compression
     // because each sibling branch is unique, so the trie builds one node per
-    // token along the chain. The old recursive `pop_prefixes_from` would
-    // stack-overflow a Tokio worker (2 MB stack). The iterative two-pass
-    // implementation must handle N=16_384 without overflow.
+    // token along the chain. On such input *every* public trie operation must
+    // be iterative — a recursive insert, remove, longest-prefix candidate walk
+    // (DFS), drain, or Drop would overflow Tokio's ~2 MiB worker stack.
     //
-    // Strategy: build the trie on a large-stack thread (inserts are still
-    // recursive in `insert_into`), then ship the trie to a 2 MB thread —
-    // matching a Tokio worker — and call `pop_prefixes` there. If
-    // `pop_prefixes` is recursive it will overflow; if iterative it will not.
-    const N: i32 = 16_384;
+    // Earlier only `pop_prefixes` and `Drop` were iterative while `insert_into`,
+    // `remove_from`, and `dfs` still recursed; the recursive *insert* used to
+    // overflow even the test's old 32 MiB build thread in the full debug build,
+    // aborting the whole `cargo test` process. So we now build AND exercise the
+    // entire trie — insert, longest-prefix lookup + candidate walk, remove,
+    // pop_prefixes, and the final Drop — directly on a 2 MiB stack matching a
+    // Tokio worker. If any path is still recursive it overflows and aborts the
+    // process, so the spawned thread's join() returns Err and the test fails.
+    //
+    // N is chosen well above the ~1 k-frame depth that overflows a 2 MiB stack
+    // with recursive code (≈4× margin), while keeping the O(N²) adversarial
+    // build fast.
+    const N: i32 = 4_096;
 
-    // Phase 1: build the adversarial trie on a 32 MB thread so insert_into
-    // (which is still recursive) has enough headroom.
-    let trie = std::thread::Builder::new()
-        .stack_size(32 * 1024 * 1024) // 32 MB for recursive inserts
+    let result = std::thread::Builder::new()
+        .stack_size(2 * 1024 * 1024) // 2 MiB — matches Tokio worker default
         .spawn(move || {
+            // insert: build the adversarial one-node-per-token trie.
             let mut t = RadixTrie::new();
             for d in 1..=N {
                 let chain: Vec<i32> = (0..d).collect();
@@ -370,24 +381,32 @@ fn pop_prefixes_deep_branching_chain_does_not_overflow() {
                 *sibling.last_mut().unwrap() = -(d + N); // guaranteed distinct
                 t.insert(&sibling, digest(((d.wrapping_neg()) & 0xff) as u8));
             }
-            t
-        })
-        .expect("spawn failed")
-        .join()
-        .expect("build thread panicked");
+            assert_eq!(t.len(), (2 * N) as usize, "two entries per depth");
 
-    // Phase 2: run pop_prefixes on a 2 MB stack (Tokio worker size).
-    // The old recursive pop_prefixes_from would overflow here; the new
-    // iterative implementation must complete successfully.
-    let chain: Vec<i32> = (0..N).collect();
-    let result = std::thread::Builder::new()
-        .stack_size(2 * 1024 * 1024) // 2 MB — matches Tokio worker default
-        .spawn(move || {
-            let mut t = trie;
-            let drained = t.pop_prefixes(&chain);
+            let full_chain: Vec<i32> = (0..N).collect();
+
+            // lookup + for_each_candidate: a short prefix surfaces a subtree
+            // spanning the full depth, exercising the iterative DFS walk.
+            let m = t
+                .find_longest_prefix(&[0, 1], 0)
+                .expect("short prefix must hit the deep subtree");
+            let mut visited = 0usize;
+            m.for_each_candidate(|_| visited += 1);
+            assert!(visited > 0, "DFS must visit candidates");
+
+            // remove: deleting the deepest chain descends the full depth.
+            assert!(
+                t.remove(&full_chain, digest((N & 0xff) as u8)),
+                "deepest chain must be removable"
+            );
+
+            // pop_prefixes: drain every strict-prefix entry along the chain.
+            let drained = t.pop_prefixes(&full_chain);
             assert!(!drained.is_empty(), "must have drained strict prefixes");
+
+            // Drop of `t` at end of scope drains the deep trie iteratively.
         })
         .expect("spawn failed")
         .join();
-    result.expect("pop_prefixes overflowed the 2 MB Tokio-worker-equivalent stack");
+    result.expect("a deep-trie operation overflowed the 2 MiB Tokio-worker-equivalent stack");
 }
