@@ -30,7 +30,8 @@ use mlxcel::server::{
     env_fallback_lang_bias, env_fallback_lang_bias_include_byte_fragments,
     env_fallback_prompt_cache_capacity_bytes, env_fallback_prompt_cache_enabled,
     env_fallback_prompt_cache_max_entries, env_fallback_prompt_cache_min_prefix,
-    env_fallback_prompt_cache_ttl, env_fallback_reasoning_budget, start_server,
+    env_fallback_prompt_cache_ttl, env_fallback_reasoning_budget, long_cli_flag_was_set,
+    start_server,
 };
 
 /// mlxcel-server: llama-server compatible HTTP server for MLX inference
@@ -49,7 +50,7 @@ use mlxcel::server::{
 /// 2. Subcommand mode:
 ///    `mlxcel-server download <REPO_ID>`
 ///    `download` fetches a HuggingFace model snapshot using the same
-///    downloader the `mlxcel` CLI uses (issue #457). Server flags are
+///    downloader the `mlxcel` CLI uses. Server flags are
 ///    rejected when a subcommand is supplied.
 #[derive(Parser, Debug)]
 #[command(
@@ -101,7 +102,7 @@ Thunderbolt mode:
 Subcommands:
   download <REPO_ID>    Fetch a HuggingFace model snapshot into models/<basename>
 
-See also: docs/PIPELINE_PARALLELISM.md"
+See also: docs/distributed.md"
 )]
 struct Cli {
     /// Subcommand to run. When omitted, the binary boots the HTTP server
@@ -269,7 +270,7 @@ struct ServerArgs {
     /// When set to `N > 0`, the batch scheduler caps each per-sequence plain
     /// `KVCache` to `N` tokens by dropping the oldest entries once `offset`
     /// exceeds the bound. Mirrors upstream mlx-lm's
-    /// `BatchGenerator(max_kv_size=N)` parameter (PR #1106).
+    /// `BatchGenerator(max_kv_size=N)` parameter.
     ///
     /// Sliding-window models that already build their own `RotatingKVCache`
     /// (Gemma 3/4, Exaone 4, RecurrentGemma, Step 3.5, gpt-oss) are
@@ -288,7 +289,7 @@ struct ServerArgs {
     )]
     max_kv_size: usize,
 
-    /// Issue #622: maximum number of responses persisted by the OpenAI
+    /// Maximum number of responses persisted by the OpenAI
     /// `/v1/responses` store (in-memory). `0` disables persistence
     /// entirely. Also reads `LLAMA_ARG_RESPONSES_STORE_MAX_ENTRIES`.
     #[arg(
@@ -299,7 +300,7 @@ struct ServerArgs {
     )]
     responses_store_max_entries: usize,
 
-    /// Issue #622: TTL (seconds) for in-memory Responses-API response
+    /// TTL (seconds) for in-memory Responses-API response
     /// entries. `0` disables TTL.
     /// Also reads `LLAMA_ARG_RESPONSES_STORE_TTL_SECS`.
     #[arg(
@@ -310,7 +311,7 @@ struct ServerArgs {
     )]
     responses_store_ttl_secs: u64,
 
-    /// Issue #622: maximum number of conversation transcripts persisted
+    /// Maximum number of conversation transcripts persisted
     /// for the OpenAI Responses API `conversation` field. `0` disables.
     /// Also reads `LLAMA_ARG_CONVERSATION_STORE_MAX_ENTRIES`.
     #[arg(
@@ -321,7 +322,7 @@ struct ServerArgs {
     )]
     conversation_store_max_entries: usize,
 
-    /// Issue #622: TTL (seconds) for conversation transcript entries.
+    /// TTL (seconds) for conversation transcript entries.
     /// `0` disables TTL.
     /// Also reads `LLAMA_ARG_CONVERSATION_STORE_TTL_SECS`.
     #[arg(
@@ -440,7 +441,7 @@ struct ServerArgs {
     #[arg(long, value_name = "PATH")]
     distributed_config: Option<PathBuf>,
 
-    /// Role this node plays in the cluster (prefill, decode, pipeline_stage, tensor_parallel_rank, hybrid)
+    /// Role this node plays in the cluster (prefill, decode, pipeline_stage, tensor_parallel_rank, pipeline_tensor_parallel, hybrid)
     #[arg(long, value_name = "ROLE")]
     node_role: Option<String>,
 
@@ -675,11 +676,9 @@ struct ServerArgs {
 
     /// Enable experimental elastic pipeline-parallel repartitioning.
     ///
-    /// When set, `mlxcel-server` constructs a repartition coordinator (see
-    /// `docs_internal/architecture/elastic-pipeline-repartition-20260418.md`)
-    /// that can drain in-flight requests, recompute the partition plan, and
-    /// reload layer weights without a full cluster restart. Off by default —
-    /// v1 is explicitly opt-in.
+    /// When set, `mlxcel-server` constructs a repartition coordinator that can
+    /// drain in-flight requests, recompute the partition plan, and reload
+    /// layer weights without a full cluster restart. Off by default.
     #[arg(long = "enable-elastic-pp", default_value_t = false)]
     enable_elastic_pp: bool,
 
@@ -717,7 +716,7 @@ struct ServerArgs {
     /// Currently the Prometheus endpoint is multiplexed onto the same HTTP
     /// port as the OpenAI API. Passing this flag enables the endpoint.
     /// A warning is logged when the requested port differs from `--port`
-    /// because a separate socket is deferred to a follow-up rollout.
+    /// because metrics are currently served on the main HTTP listener.
     #[arg(long = "metrics-port", value_name = "PORT")]
     metrics_port: Option<u16>,
 
@@ -742,7 +741,7 @@ struct ServerArgs {
     #[command(flatten)]
     turbo: TurboKvCacheArgs,
 
-    /// Issue #545: continuous-batching KV quantization flag group
+    /// Continuous-batching KV quantization flag group
     /// (`--kv-bits`, `--kv-group-size`, `--kv-quant-scheme`,
     /// `--kv-skip-last-layer`). Defined once in
     /// `mlxcel::cli::batch_quant_args` so both server binaries
@@ -761,16 +760,16 @@ struct ServerArgs {
     #[command(flatten)]
     speculative: SpeculativeArgs,
 
-    /// Axis B Epic #362 (B8): language-bias options for server-wide output
+    /// Language-bias options for server-wide output
     /// steering. See `--lang-bias`, `--lang-bias-config`, `--lang-bias-policy`,
     /// and the `--lang-bias-include-*` family of flags.
     ///
-    /// The `--lang-bias` flag also reads from the `LLAMA_ARG_LANG_BIAS` env var
-    /// (plan §6.4, B7). CLI flag takes precedence over the env var.
+    /// The `--lang-bias` flag also reads from the `LLAMA_ARG_LANG_BIAS` env var.
+    /// CLI flag takes precedence over the env var.
     #[command(flatten)]
     lang_bias: LangBiasCliArgs,
 
-    /// Issue #409: default thinking-token budget for Qwen3-family models.
+    /// Default thinking-token budget for Qwen3-family models.
     ///
     /// Caps the number of tokens generated inside the `<think>...</think>`
     /// reasoning block. Matches llama.cpp `--reasoning-budget` semantics:
@@ -792,7 +791,7 @@ struct ServerArgs {
     )]
     reasoning_budget: i32,
 
-    /// Issue #410: default chat-template kwargs (JSON object).
+    /// Default chat-template kwargs (JSON object).
     ///
     /// Forwarded verbatim as Jinja template kwargs when rendering chat
     /// conversations. Matches llama.cpp's `--chat-template-kwargs` shape.
@@ -829,7 +828,11 @@ struct ServerArgs {
     #[arg(
         long = "prompt-cache-enabled",
         default_value_t = true,
-        value_name = "BOOL"
+        value_name = "BOOL",
+        num_args = 0..=1,
+        require_equals = true,
+        default_missing_value = "true",
+        action = clap::ArgAction::Set
     )]
     prompt_cache_enabled: bool,
 
@@ -886,7 +889,15 @@ struct ServerArgs {
     /// into hashable blocks.
     ///
     /// Also reads `APC_ENABLED` (parity with upstream `mlx-vlm`).
-    #[arg(long = "apc-enabled", default_value_t = false, value_name = "BOOL")]
+    #[arg(
+        long = "apc-enabled",
+        default_value_t = false,
+        value_name = "BOOL",
+        num_args = 0..=1,
+        require_equals = true,
+        default_missing_value = "true",
+        action = clap::ArgAction::Set
+    )]
     apc_enabled: bool,
 
     /// Tokens per APC block (default: 16).
@@ -929,8 +940,7 @@ struct ServerArgs {
     ///
     ///     mlxcel-server -m models/foo --surgery surgery.yaml --port 8080
     ///
-    /// The YAML schema is documented in
-    /// `docs_internal/architecture/structural-finetuning-overview-20260419.md`.
+    /// The supported surgery operations are summarised in the project README.
     #[cfg(feature = "surgery")]
     #[arg(long = "surgery", value_name = "FILE", env = "MLXCEL_SURGERY")]
     surgery: Option<PathBuf>,
@@ -980,16 +990,13 @@ fn build_startup_input(mut args: ServerArgs) -> anyhow::Result<ServerStartupInpu
     // Issue #410 — env-var fallback for the chat-template kwargs default.
     env_fallback_chat_template_kwargs(&mut args.chat_template_kwargs);
 
-    // Issue #424 — env-var fallbacks for prompt-cache knobs.
-    // `prompt_cache_enabled` clap default is `true`, so we must detect
-    // whether the flag was explicitly set. Since clap doesn't expose a
-    // "was this flag explicitly set" predicate for boolean defaults without
-    // using an `Option<bool>`, we pass `false` for `cli_was_set` here so
-    // that the env-var path is always consulted. CLI-sourced `false` is also
-    // correctly propagated because clap will have already stored `false`
-    // in `args.prompt_cache_enabled` when the user passes
-    // `--prompt-cache-enabled=false`.
-    env_fallback_prompt_cache_enabled(&mut args.prompt_cache_enabled, false);
+    // Env-var fallbacks for prompt-cache knobs. Detect explicit boolean flags
+    // from argv so `--prompt-cache-enabled=false` keeps CLI-over-env precedence
+    // while the compiled-in default still allows env overrides.
+    env_fallback_prompt_cache_enabled(
+        &mut args.prompt_cache_enabled,
+        long_cli_flag_was_set("prompt-cache-enabled"),
+    );
     env_fallback_prompt_cache_capacity_bytes(&mut args.prompt_cache_capacity_bytes);
     env_fallback_prompt_cache_max_entries(&mut args.prompt_cache_max_entries);
     env_fallback_prompt_cache_ttl(&mut args.prompt_cache_ttl);
@@ -997,7 +1004,7 @@ fn build_startup_input(mut args: ServerArgs) -> anyhow::Result<ServerStartupInpu
 
     // Issue #552 — env-var fallbacks for the APC knobs (parity with upstream
     // mlx-vlm `APC_*` env vars).
-    env_fallback_apc_enabled(&mut args.apc_enabled, false);
+    env_fallback_apc_enabled(&mut args.apc_enabled, long_cli_flag_was_set("apc-enabled"));
     env_fallback_apc_block_size(&mut args.apc_block_size);
     env_fallback_apc_num_blocks(&mut args.apc_num_blocks);
     env_fallback_apc_hash(&mut args.apc_hash);

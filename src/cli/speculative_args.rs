@@ -116,7 +116,7 @@ impl SpeculativeArgs {
     ///
     /// Note that we intentionally **do not** accept the third
     /// `internal-mtp` variant of [`DrafterKind`] on the CLI — that
-    /// variant is auto-detected from the target checkpoint (epic #647)
+    /// variant is auto-detected from the target checkpoint
     /// and is not user-selectable today. The accepted set on the CLI is
     /// the upstream `KNOWN_DRAFTER_KINDS = {"dflash", "mtp"}` only;
     /// passing `internal-mtp` returns a parse error with a hint.

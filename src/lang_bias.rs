@@ -276,7 +276,7 @@ pub fn load_yaml_config(path: &PathBuf) -> Result<LangBiasYamlConfig, CliError> 
 #[derive(Args, Debug, Default, Clone)]
 #[command(next_help_heading = "Language Bias Options")]
 pub struct LangBiasCliArgs {
-    /// Language bias entries, e.g. `ja=-inf,zh=-10,ko=+5.0` (plan §6.1).
+    /// Language bias entries, e.g. `ja=-inf,zh=-10,ko=+5.0`.
     ///
     /// Syntax: `<lang_code>=<bias>[,<lang_code>=<bias>]*`
     /// where `<bias>` is `-inf`, `+inf`, `inf`, or a float.
@@ -284,43 +284,43 @@ pub struct LangBiasCliArgs {
     #[arg(long = "lang-bias", value_name = "ENTRIES")]
     pub lang_bias: Option<String>,
 
-    /// Path to a YAML file containing language bias configuration (plan §6.2).
+    /// Path to a YAML file containing language bias configuration.
     ///
     /// CLI flags take precedence over YAML config values.
     #[arg(long = "lang-bias-config", value_name = "PATH")]
     pub lang_bias_config: Option<PathBuf>,
 
-    /// Language token inclusion policy: `conservative` (default) or `strict` (plan §6.3).
+    /// Language token inclusion policy: `conservative` (default) or `strict`.
     ///
     /// Conservative: any token containing at least one character of a target script.
     /// Strict: only tokens whose entire script set is contained in the target set.
     #[arg(long = "lang-bias-policy", value_name = "POLICY")]
     pub lang_bias_policy: Option<String>,
 
-    /// Include special tokens (BOS/EOS/PAD/…) in language sets (plan §6.3).
+    /// Include special tokens (BOS/EOS/PAD/…) in language sets.
     ///
     /// By default, special tokens are excluded from all language sets.
     #[arg(long = "lang-bias-include-special", default_value_t = false)]
     pub include_special: bool,
 
-    /// Include purely numeric tokens in language sets (plan §6.3).
+    /// Include purely numeric tokens in language sets.
     ///
     /// By default, purely numeric tokens are excluded from all language sets.
     #[arg(long = "lang-bias-include-numeric", default_value_t = false)]
     pub include_numeric: bool,
 
-    /// Include purely punctuation tokens in language sets (plan §6.3).
+    /// Include purely punctuation tokens in language sets.
     ///
     /// By default, purely punctuation tokens are excluded from all language sets.
     #[arg(long = "lang-bias-include-punctuation", default_value_t = false)]
     pub include_punctuation: bool,
 
-    /// Include byte-fragment tokens in language sets (issue #405).
+    /// Include byte-fragment tokens in language sets.
     ///
     /// Byte-level BPE tokenizers (Qwen, GPT-2, LLaMA, Mistral) represent
     /// less-common CJK characters as sequences of individual byte tokens.
     /// Each byte decodes to `U+FFFD` on its own and is classified as
-    /// `Other` by the Phase 1 decode path, bypassing filters like
+    /// `Other` by the standard decode-path classifier, bypassing filters like
     /// `zh=-inf` even though the fragments reassemble into the target
     /// character at generation time.
     ///
@@ -333,11 +333,11 @@ pub struct LangBiasCliArgs {
     /// `mlxcel_lang_bias_byte_fragment_suppressions_total` metric to
     /// observe how much suppression comes from byte-fragment entries.
     ///
-    /// **Default:** off (behavior bit-exact identical to Phase 1).
+    /// **Default:** off (behavior is unchanged unless this flag is enabled).
     #[arg(long = "lang-bias-include-byte-fragments", default_value_t = false)]
     pub include_byte_fragments: bool,
 
-    /// Force a rebuild of the `TokenLanguageIndex` cache (plan §6.3).
+    /// Force a rebuild of the `TokenLanguageIndex` cache.
     ///
     /// Normally the cache is rebuilt only when the tokenizer vocab changes.
     /// Use this flag to force a rebuild regardless of cache state.

@@ -134,8 +134,7 @@ pub(crate) struct GenerateArgs {
     ///
     ///     mlxcel generate -m models/foo --surgery surgery.yaml -p "Hello"
     ///
-    /// The YAML schema is documented in
-    /// `docs_internal/architecture/structural-finetuning-overview-20260419.md`.
+    /// The supported surgery operations are summarised in the project README.
     #[cfg(feature = "surgery")]
     #[arg(long = "surgery", value_name = "FILE", env = "MLXCEL_SURGERY")]
     pub(crate) surgery: Option<PathBuf>,
@@ -181,14 +180,14 @@ pub(crate) struct GenerationOptions {
     /// Video file paths for VLMs that support video inputs (e.g. Gemma4
     /// with video). Pass the flag multiple times for multiple videos:
     /// `--video clip1.mp4 --video clip2.mp4`. Frame extraction requires
-    /// `ffmpeg` on PATH (issue #553).
+    /// `ffmpeg` on PATH.
     #[arg(long, value_name = "PATH", num_args = 1..)]
     pub(crate) video: Vec<PathBuf>,
 
     /// Target sampling FPS for `--video` decoding. Frames are
     /// uniformly resampled to this rate before being fed to the
     /// vision tower. Defaults to 2.0 to match the upstream mlx-vlm
-    /// behaviour (issue #553).
+    /// behaviour.
     #[arg(long, value_name = "FLOAT", default_value_t = 2.0)]
     pub(crate) fps: f64,
 
@@ -425,7 +424,7 @@ Thunderbolt mode:
   Thunderbolt Bridge IP (for example 169.254.x.x). The current Thunderbolt
   path uses the shared TCP transport core over the Bridge network.
 
-See also: docs/PIPELINE_PARALLELISM.md")]
+See also: docs/distributed.md")]
 pub(crate) struct ServeArgs {
     /// Path to the model directory
     #[arg(short, long, env = "LLAMA_ARG_MODEL", value_name = "PATH")]
@@ -543,7 +542,7 @@ pub(crate) struct ServeArgs {
     /// When set to `N > 0`, the batch scheduler caps each per-sequence plain
     /// `KVCache` to `N` tokens by dropping the oldest entries once `offset`
     /// exceeds the bound. Mirrors upstream mlx-lm's
-    /// `BatchGenerator(max_kv_size=N)` parameter (PR #1106). Sliding-window
+    /// `BatchGenerator(max_kv_size=N)` parameter. Sliding-window
     /// models (Gemma 3/4, Exaone 4, RecurrentGemma, Step 3.5, gpt-oss) keep
     /// their model-specific window. Not supported with Turbo KV quantization.
     /// Also reads `LLAMA_ARG_MAX_KV_SIZE`.
@@ -555,7 +554,7 @@ pub(crate) struct ServeArgs {
     )]
     max_kv_size: usize,
 
-    /// Issue #622: maximum number of responses persisted by the OpenAI
+    /// Maximum number of responses persisted by the OpenAI
     /// `/v1/responses` store (in-memory). `0` disables persistence
     /// entirely, in which case `GET /v1/responses/:id` and
     /// `previous_response_id` chaining return 400.
@@ -568,7 +567,7 @@ pub(crate) struct ServeArgs {
     )]
     responses_store_max_entries: usize,
 
-    /// Issue #622: TTL (seconds) for in-memory Responses-API response
+    /// TTL (seconds) for in-memory Responses-API response
     /// entries. `0` disables TTL — entries are evicted only when the
     /// max-entries cap is hit.
     /// Also reads `LLAMA_ARG_RESPONSES_STORE_TTL_SECS`.
@@ -580,7 +579,7 @@ pub(crate) struct ServeArgs {
     )]
     responses_store_ttl_secs: u64,
 
-    /// Issue #622: maximum number of conversation transcripts persisted
+    /// Maximum number of conversation transcripts persisted
     /// for the OpenAI Responses API `conversation` field. `0` disables
     /// the conversation store; requests referencing `conversation` are
     /// still accepted but operate against an empty transcript.
@@ -593,7 +592,7 @@ pub(crate) struct ServeArgs {
     )]
     conversation_store_max_entries: usize,
 
-    /// Issue #622: TTL (seconds) for conversation transcript entries.
+    /// TTL (seconds) for conversation transcript entries.
     /// `0` disables TTL.
     /// Also reads `LLAMA_ARG_CONVERSATION_STORE_TTL_SECS`.
     #[arg(
@@ -716,7 +715,7 @@ pub(crate) struct ServeArgs {
     #[arg(long, value_name = "PATH")]
     distributed_config: Option<std::path::PathBuf>,
 
-    /// Role this node plays in the cluster (prefill, decode, pipeline_stage, tensor_parallel_rank, hybrid)
+    /// Role this node plays in the cluster (prefill, decode, pipeline_stage, tensor_parallel_rank, pipeline_tensor_parallel, hybrid)
     #[arg(long, value_name = "ROLE")]
     node_role: Option<String>,
 
@@ -746,8 +745,8 @@ pub(crate) struct ServeArgs {
 
     /// Zero-config pipeline bring-up: coordinator declares N stages.
     ///
-    /// See `docs/en/distributed/pipeline-parallelism.md` "Zero-config startup"
-    /// for the full operator workflow. Mutually exclusive with
+    /// See the "Pipeline parallelism" section of `docs/distributed.md` for the
+    /// full operator workflow. Mutually exclusive with
     /// `--distributed-config`.
     #[arg(long = "pp-auto", value_name = "N")]
     pp_auto: Option<u32>,
@@ -992,7 +991,7 @@ pub(crate) struct ServeArgs {
     #[command(flatten)]
     turbo: TurboKvCacheArgs,
 
-    /// Issue #545: continuous-batching KV quantization flag group
+    /// Continuous-batching KV quantization flag group
     /// (`--kv-bits`, `--kv-group-size`, `--kv-quant-scheme`,
     /// `--kv-skip-last-layer`). Defined once in
     /// `mlxcel::cli::batch_quant_args` so both server binaries
@@ -1012,15 +1011,15 @@ pub(crate) struct ServeArgs {
     #[command(flatten)]
     speculative: SpeculativeArgs,
 
-    /// Axis B Epic #362 (B8): language-bias options for server-wide output
+    /// Language-bias options for server-wide output
     /// steering. Mirrors the same flags exposed on the `generate` subcommand.
     ///
     /// The `--lang-bias` flag also reads from the `LLAMA_ARG_LANG_BIAS` env var
-    /// when running as a server (plan §6.4, B7). CLI flag takes precedence.
+    /// when running as a server. CLI flag takes precedence.
     #[command(flatten)]
     lang_bias: LangBiasCliArgs,
 
-    /// Issue #409: default thinking-token budget for Qwen3-family models.
+    /// Default thinking-token budget for Qwen3-family models.
     ///
     /// Caps the number of tokens generated inside the `<think>...</think>`
     /// reasoning block. Matches llama.cpp `--reasoning-budget` semantics:
@@ -1035,7 +1034,7 @@ pub(crate) struct ServeArgs {
     #[arg(long = "reasoning-budget", default_value_t = -1, value_name = "N")]
     reasoning_budget: i32,
 
-    /// Issue #410: default chat-template kwargs (JSON object).
+    /// Default chat-template kwargs (JSON object).
     ///
     /// Forwarded verbatim as Jinja template kwargs when rendering chat
     /// conversations. Matches llama.cpp's `--chat-template-kwargs` shape so
@@ -1074,7 +1073,11 @@ pub(crate) struct ServeArgs {
     #[arg(
         long = "prompt-cache-enabled",
         default_value_t = true,
-        value_name = "BOOL"
+        value_name = "BOOL",
+        num_args = 0..=1,
+        require_equals = true,
+        default_missing_value = "true",
+        action = clap::ArgAction::Set
     )]
     prompt_cache_enabled: bool,
 
@@ -1113,7 +1116,15 @@ pub(crate) struct ServeArgs {
     /// state cannot be decomposed into hashable blocks.
     ///
     /// Also reads `APC_ENABLED` (parity with upstream `mlx-vlm`).
-    #[arg(long = "apc-enabled", default_value_t = false, value_name = "BOOL")]
+    #[arg(
+        long = "apc-enabled",
+        default_value_t = false,
+        value_name = "BOOL",
+        num_args = 0..=1,
+        require_equals = true,
+        default_missing_value = "true",
+        action = clap::ArgAction::Set
+    )]
     apc_enabled: bool,
 
     /// Tokens per APC block (default: 16).
@@ -1157,8 +1168,7 @@ pub(crate) struct ServeArgs {
     ///
     ///     mlxcel serve -m models/foo --surgery surgery.yaml
     ///
-    /// The YAML schema is documented in
-    /// `docs_internal/architecture/structural-finetuning-overview-20260419.md`.
+    /// The supported surgery operations are summarised in the project README.
     #[cfg(feature = "surgery")]
     #[arg(long = "surgery", value_name = "FILE", env = "MLXCEL_SURGERY")]
     pub(crate) surgery: Option<PathBuf>,

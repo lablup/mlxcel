@@ -241,8 +241,7 @@ async fn multi_turn_chat_reports_cached_tokens_and_lowers_prefill_latency() {
         "1",
         "--no-warmup",
         "--metrics",
-        "--prompt-cache-enabled",
-        "true",
+        "--prompt-cache-enabled=true",
         "--prompt-cache-capacity-bytes",
         "268435456", // 256 MiB is plenty for a 0.6B model and 5 turns
         "--prompt-cache-max-entries",
@@ -450,8 +449,7 @@ async fn multi_turn_chat_with_cache_disabled_never_reports_cached_tokens() {
         "--batch-size",
         "1",
         "--no-warmup",
-        "--prompt-cache-enabled",
-        "false",
+        "--prompt-cache-enabled=false",
     ]);
 
     let client = reqwest::Client::builder()

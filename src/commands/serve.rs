@@ -30,8 +30,8 @@ use mlxcel::server::{
     env_fallback_lang_bias, env_fallback_lang_bias_include_byte_fragments,
     env_fallback_prompt_cache_capacity_bytes, env_fallback_prompt_cache_enabled,
     env_fallback_prompt_cache_max_entries, env_fallback_prompt_cache_min_prefix,
-    env_fallback_prompt_cache_ttl, env_fallback_reasoning_budget, resolve_parallel_context_size,
-    start_server,
+    env_fallback_prompt_cache_ttl, env_fallback_reasoning_budget, long_cli_flag_was_set,
+    resolve_parallel_context_size, start_server,
 };
 use mlxcel_core::cache::KVCacheMode;
 
@@ -151,13 +151,16 @@ fn build_startup_input(mut args: crate::ServeArgs) -> anyhow::Result<ServerStart
     // Issue #410 — env-var fallback for the chat-template kwargs default.
     env_fallback_chat_template_kwargs(&mut args.chat_template_kwargs);
     // Issue #424 — env-var fallbacks for prompt-cache knobs.
-    env_fallback_prompt_cache_enabled(&mut args.prompt_cache_enabled, false);
+    env_fallback_prompt_cache_enabled(
+        &mut args.prompt_cache_enabled,
+        long_cli_flag_was_set("prompt-cache-enabled"),
+    );
     env_fallback_prompt_cache_capacity_bytes(&mut args.prompt_cache_capacity_bytes);
     env_fallback_prompt_cache_max_entries(&mut args.prompt_cache_max_entries);
     env_fallback_prompt_cache_ttl(&mut args.prompt_cache_ttl);
     env_fallback_prompt_cache_min_prefix(&mut args.prompt_cache_min_prefix);
     // Issue #552 — env-var fallbacks for the APC knobs.
-    env_fallback_apc_enabled(&mut args.apc_enabled, false);
+    env_fallback_apc_enabled(&mut args.apc_enabled, long_cli_flag_was_set("apc-enabled"));
     env_fallback_apc_block_size(&mut args.apc_block_size);
     env_fallback_apc_num_blocks(&mut args.apc_num_blocks);
     env_fallback_apc_hash(&mut args.apc_hash);

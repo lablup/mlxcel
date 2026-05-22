@@ -1011,6 +1011,21 @@ pub(super) fn build_prompt_cache_config(
     Ok(cfg)
 }
 
+/// Return true when the current process argv explicitly contains a long flag.
+///
+/// This is used for boolean flags whose compiled-in default can also be
+/// overridden by environment variables. Clap stores the default and the
+/// explicit value in the same `bool`, so startup code needs this lightweight
+/// argv check to preserve CLI-over-env precedence.
+pub fn long_cli_flag_was_set(name: &str) -> bool {
+    let flag = format!("--{name}");
+    let with_value = format!("--{name}=");
+    std::env::args_os().any(|arg| {
+        let arg = arg.to_string_lossy();
+        arg == flag || arg.starts_with(&with_value)
+    })
+}
+
 /// Apply `MLXCEL_PROMPT_CACHE_ENABLED` and the llama.cpp-compat
 /// `LLAMA_ARG_CACHE_REUSE` alias to the raw CLI bool.
 ///

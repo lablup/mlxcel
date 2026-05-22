@@ -319,9 +319,12 @@ async fn sweep_depths(cache_enabled: bool) -> Vec<DepthSample> {
         "--batch-size",
         "1",
         "--no-warmup",
-        "--prompt-cache-enabled",
     ];
-    args.push(if cache_enabled { "true" } else { "false" });
+    args.push(if cache_enabled {
+        "--prompt-cache-enabled=true"
+    } else {
+        "--prompt-cache-enabled=false"
+    });
     if cache_enabled {
         args.extend_from_slice(&[
             "--prompt-cache-capacity-bytes",
