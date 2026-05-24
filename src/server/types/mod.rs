@@ -14,6 +14,9 @@
 
 //! OpenAI-compatible API types
 
+pub mod anthropic_request;
+pub mod anthropic_response;
+pub mod anthropic_stream;
 pub mod request;
 pub mod response;
 pub mod responses_request;
@@ -21,6 +24,9 @@ pub mod responses_response;
 pub mod responses_stream;
 pub mod stream;
 
+// Anthropic types are accessed through their module paths (e.g.
+// `types::anthropic_request::AnthropicRequest`) to avoid colliding with the
+// OpenAI type glob below (both define `Tool`, `Role`, `MessageContent`, etc.).
 pub use request::*;
 pub use response::*;
 pub use responses_request::*;

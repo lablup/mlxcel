@@ -103,6 +103,12 @@ pub fn create_app(state: AppState) -> Router {
             get(routes::retrieve_response).delete(routes::delete_response),
         )
         .route("/v1/responses/:id/cancel", post(routes::cancel_response))
+        // Anthropic Messages API (/v1/messages surface).
+        .route("/v1/messages", post(routes::anthropic_messages))
+        .route(
+            "/v1/messages/count_tokens",
+            post(routes::anthropic_count_tokens),
+        )
         // Issue #552: prompt-cache observability endpoints (always mounted —
         // the handlers return a stable "disabled" payload when the cache is
         // off so monitoring clients can poll without conditional logic).
@@ -118,6 +124,11 @@ pub fn create_app(state: AppState) -> Router {
             get(routes::retrieve_response).delete(routes::delete_response),
         )
         .route("/responses/:id/cancel", post(routes::cancel_response))
+        .route("/messages", post(routes::anthropic_messages))
+        .route(
+            "/messages/count_tokens",
+            post(routes::anthropic_count_tokens),
+        )
         // llama-server compatible endpoints
         .route("/completion", post(routes::native_completion))
         .route("/tokenize", post(routes::tokenize))

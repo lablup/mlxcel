@@ -18,6 +18,7 @@
 //! policy belongs in `server/request_options.rs`, `server/chat_request.rs`,
 //! `server/media.rs`, `server/streaming.rs`, and `server/model_worker.rs`.
 
+pub mod anthropic;
 pub mod cache;
 pub mod chat;
 pub mod completions;
@@ -31,6 +32,7 @@ pub mod responses;
 pub mod slots;
 pub mod tokenize;
 
+pub use anthropic::{anthropic_count_tokens, anthropic_messages};
 pub use cache::{cache_reset, cache_stats};
 pub use chat::chat_completions;
 pub use completions::completions;

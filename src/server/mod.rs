@@ -14,6 +14,7 @@
 
 //! OpenAI/llama-server compatible HTTP server for mlxcel
 
+pub mod anthropic_translator;
 pub mod app;
 pub mod batch;
 mod chat_request;
@@ -33,6 +34,7 @@ pub mod speculative_dispatch;
 mod startup;
 mod state;
 mod streaming;
+pub mod streaming_anthropic;
 pub mod streaming_responses;
 pub mod structured;
 pub mod thinking_budget;
