@@ -88,6 +88,19 @@ enum Commands {
 
     /// Download a HuggingFace model repository snapshot
     Download(DownloadArgs),
+
+    /// Detect objects in an image with an RT-DETRv2 model.
+    ///
+    /// Loads an RT-DETRv2 object-detection checkpoint and prints bounding
+    /// boxes (`l, t, r, b`), class labels, and confidences in original-image
+    /// pixel coordinates. Detection models output boxes rather than a token
+    /// stream, so this is a separate surface from `generate`.
+    ///
+    /// Examples:
+    ///
+    ///     mlxcel detect -m models/docling-layout-heron-mlx-bf16 -i page.png
+    ///     mlxcel detect -m models/rt-detr-v2 -i img.jpg --threshold 0.5 --format json
+    Detect(DetectArgs),
 }
 
 #[derive(Args, Debug)]
@@ -285,6 +298,26 @@ pub(crate) struct InspectArgs {
     // estimate matches what the loaded model would actually allocate.
     #[command(flatten)]
     pub(crate) turbo: TurboKvCacheArgs,
+}
+
+/// Arguments for the `mlxcel detect` subcommand.
+#[derive(Args, Debug)]
+pub(crate) struct DetectArgs {
+    /// Path to the RT-DETRv2 model directory (config.json + safetensors).
+    #[arg(short, long, value_name = "PATH")]
+    pub(crate) model: std::path::PathBuf,
+
+    /// Path to the input image file (PNG, JPEG, etc.).
+    #[arg(short, long, value_name = "PATH")]
+    pub(crate) image: std::path::PathBuf,
+
+    /// Confidence threshold in [0, 1]; detections below it are dropped.
+    #[arg(short, long, default_value_t = 0.3, value_name = "FLOAT")]
+    pub(crate) threshold: f32,
+
+    /// Output format.
+    #[arg(long, value_enum, default_value_t = commands::detect::OutputFormat::Text)]
+    pub(crate) format: commands::detect::OutputFormat,
 }
 
 /// Sampling strategy options
@@ -1186,6 +1219,7 @@ fn main() -> anyhow::Result<()> {
         }
         Commands::Inspect(args) => commands::run_inspect(args),
         Commands::Download(args) => commands::run_download(args),
+        Commands::Detect(args) => commands::run_detect(args),
     }
 }
 

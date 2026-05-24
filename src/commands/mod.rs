@@ -18,12 +18,14 @@
 //! argument/schema wiring while command-specific execution logic evolves in
 //! isolated modules.
 
+pub(crate) mod detect;
 pub(crate) mod download;
 pub(crate) mod generate;
 mod generate_vlm;
 pub(crate) mod inspect;
 mod serve;
 
+pub(crate) use detect::run_detect;
 pub(crate) use download::run_download;
 pub(crate) use generate::run_generate;
 pub(crate) use inspect::run_inspect;

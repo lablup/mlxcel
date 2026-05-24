@@ -29,6 +29,7 @@ use anyhow::Result;
 
 pub mod config;
 pub mod connectors;
+pub mod detection;
 pub mod encoders;
 pub mod feature_cache;
 pub mod merge;
