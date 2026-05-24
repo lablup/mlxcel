@@ -424,6 +424,190 @@ pub(crate) fn load_minicpmo_vlm(model_path: &Path) -> Result<LoadedModel> {
     }))
 }
 
+/// Remap MiniCPM-V 4.6 checkpoint weight keys to flat namespaces.
+///
+/// Checkpoint layout → mlxcel layout:
+///   `model.language_model.*`               → `language_model.*`
+///   `model.lm_head.*`                      → `lm_head.*`
+///   `model.vision_tower.vit_merger.*`      → `vit_merger.*`
+///   `model.vision_tower.*`                 → `vision_tower.*`
+///   `model.vpm.*`                          → `vision_tower.*`
+///   `model.vit_merger.*`                   → `vit_merger.*`
+///   `model.merger.*`                       → `merger.*`
+///   `model.llm.*`                          → `language_model.*`  (compat)
+///   `model.visual.*`                       → `vision_tower.*`  (compat)
+fn remap_minicpmv4_6_weights(raw_weights: &WeightMap) -> WeightMap {
+    let mut weights = WeightMap::new();
+
+    for (key, value) in raw_weights {
+        if key.contains("position_ids") {
+            continue;
+        }
+
+        let stripped = key.strip_prefix("model.").unwrap_or(key.as_str());
+
+        let new_key = if let Some(rest) = stripped.strip_prefix("language_model.") {
+            format!("language_model.{}", rest)
+        } else if let Some(rest) = stripped.strip_prefix("lm_head.") {
+            format!("lm_head.{}", rest)
+        } else if let Some(rest) = stripped.strip_prefix("vision_tower.vit_merger.") {
+            format!("vit_merger.{}", rest)
+        } else if let Some(rest) = stripped.strip_prefix("vision_tower.") {
+            format!("vision_tower.{}", rest)
+        } else if let Some(rest) = stripped.strip_prefix("vpm.") {
+            format!("vision_tower.{}", rest)
+        } else if let Some(rest) = stripped.strip_prefix("vit_merger.") {
+            format!("vit_merger.{}", rest)
+        } else if let Some(rest) = stripped.strip_prefix("merger.") {
+            format!("merger.{}", rest)
+        } else if let Some(rest) = stripped.strip_prefix("llm.") {
+            // Backward-compat: older naming
+            format!("language_model.{}", rest)
+        } else if let Some(rest) = stripped.strip_prefix("visual.") {
+            format!("vision_tower.{}", rest)
+        } else {
+            continue;
+        };
+
+        weights.insert(new_key, mlxcel_core::copy(value));
+    }
+
+    weights
+}
+
+/// Extract text-model weights from the full remapped map.
+/// Qwen35Model::from_weights expects keys WITHOUT a "language_model." prefix.
+fn minicpmv4_6_text_weights(weights: &WeightMap) -> WeightMap {
+    let mut text_weights = WeightMap::new();
+    for (key, value) in weights {
+        if let Some(rest) = key.strip_prefix("language_model.") {
+            text_weights.insert(rest.to_string(), mlxcel_core::copy(value));
+        } else if key.starts_with("lm_head.") {
+            text_weights.insert(key.clone(), mlxcel_core::copy(value));
+        }
+    }
+    text_weights
+}
+
+pub(crate) fn load_minicpmv4_6_vlm(model_path: &Path) -> Result<LoadedModel> {
+    use vision::encoders::minicpmv4_6::{
+        MiniCPMV46Config, MiniCPMV46VisionConfig, MiniCPMV46VisionModel,
+    };
+    use vision::minicpmv4_6_vl::MiniCPMV46VLModel;
+    use vision::processors::minicpmo::MiniCPMOProcessor;
+
+    let (_config_str, full_config) = read_sanitized_vlm_config(model_path)?;
+
+    // MiniCPM-V 4.6 uses Qwen3.5-Text (hybrid linear+full-attention) as the
+    // language backbone. The LLM fields are nested under "text_config"; fall
+    // back to root if absent (future-proofing and test configs).
+    let text_config_value = full_config
+        .get("text_config")
+        .cloned()
+        .unwrap_or_else(|| full_config.clone());
+    let text_config: models::qwen3_5::Qwen35Config = serde_json::from_value(text_config_value)
+        .map_err(|e| anyhow::anyhow!("Failed to parse MiniCPM-V 4.6 text config: {}", e))?;
+
+    let vision_config: MiniCPMV46VisionConfig =
+        parse_required_vlm_subconfig(&full_config, "vision_config", "MiniCPM-V 4.6 vision config")?;
+
+    let model_cfg: MiniCPMV46Config = serde_json::from_value(full_config.clone())
+        .map_err(|e| anyhow::anyhow!("Failed to parse MiniCPM-V 4.6 model config: {}", e))?;
+
+    let processor_config = minicpmo_processor_config_value(model_path, &full_config)
+        .unwrap_or_else(|| full_config.clone());
+
+    let raw_weights = load_vlm_weights_common(model_path, None)?;
+    let (group_size, bits) = parse_quantization_params(&full_config);
+
+    // Remap all keys to flat namespaces.
+    let weights = remap_minicpmv4_6_weights(&raw_weights);
+
+    // Build text-only weight map (de-prefixed for Qwen35Model).
+    let mut text_weights = minicpmv4_6_text_weights(&weights);
+
+    // Apply bf16→f16 for non-quantized text model weights on Apple Silicon.
+    if bits == 0 {
+        let hw = mlxcel_core::hardware::get_hardware();
+        if hw.silicon_gen != mlxcel_core::hardware::AppleSiliconGen::Unknown {
+            let had_bf16 = models::convert_bf16_weights_with_keep(&mut text_weights, |key| {
+                key.ends_with(".scales") || key.ends_with(".biases")
+            });
+            if had_bf16 {
+                models::warn_bf16_precision();
+            }
+        }
+    }
+
+    // Qwen3.5 hybrid-backbone sanitization. Applies the GatedDelta
+    // `conv1d.weight` transpose and the RMSNorm `+1.0` shift, and (for MoE
+    // checkpoints) stacks `switch_mlp` experts / splits `gate_up_proj`.
+    // Without this, raw-layout / MTP / MoE Qwen3.5 checkpoints load with the
+    // WRONG weights. Mirrors the Qwen3.5 VLM loader (`vlm_qwen.rs`) and the
+    // special Qwen3.5 text loader (`special.rs`). `sanitize_weights` covers
+    // both dense and MoE layouts (steps 6-8), and the text weights are
+    // already de-prefixed to the `model.*` / `lm_head.*` namespace it expects.
+    let mut text_weights = models::qwen3_5::sanitize_weights(text_weights, &text_config);
+
+    models::sanitize_tied_embeddings(&mut text_weights, &full_config);
+
+    let text_model = models::Qwen35Model::from_weights(&text_weights, &text_config)
+        .map_err(|e| anyhow::anyhow!("Failed to load MiniCPM-V 4.6 text model: {}", e))?;
+
+    // MiniCPMV46VisionModel::from_weights uses the remapped weight map with:
+    //   vision tower   prefix = "vision_tower"
+    //   vit_merger     prefix = "vit_merger"
+    //   merger         prefix = "merger"
+    let vision_model = MiniCPMV46VisionModel::from_weights(
+        &weights,
+        &vision_config,
+        &model_cfg,
+        "vision_tower",
+        "vit_merger",
+        "merger",
+        group_size,
+        bits,
+    )
+    .map_err(|e| anyhow::anyhow!("Failed to load MiniCPM-V 4.6 vision model: {}", e))?;
+
+    // "query_num" is the mlx-vlm upstream field; "image_feature_size" appears in
+    // the processor_config.json image_processor dict of real checkpoints.
+    let image_feature_size = processor_config
+        .get("query_num")
+        .or_else(|| processor_config.get("image_feature_size"))
+        .or_else(|| full_config.get("query_num"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(64) as usize;
+
+    let patch_size = processor_config
+        .get("patch_size")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(14) as usize;
+
+    let scale_resolution = processor_config
+        .get("scale_resolution")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(448) as usize;
+
+    let processor = MiniCPMOProcessor::new(patch_size, scale_resolution, image_feature_size);
+
+    let eos_token_ids = match full_config.get("eos_token_id") {
+        Some(Value::Array(values)) => values
+            .iter()
+            .filter_map(|v| v.as_i64().map(|id| id as i32))
+            .collect(),
+        Some(Value::Number(value)) => value.as_i64().map(|id| vec![id as i32]).unwrap_or_default(),
+        _ => Vec::new(),
+    };
+
+    Ok(LoadedModel::MiniCPMV46VLM(MiniCPMV46VLModel {
+        text_model,
+        vision_model,
+        processor,
+        eos_token_ids,
+    }))
+}
+
 pub(crate) fn load_moondream3_vlm(model_path: &Path) -> Result<LoadedModel> {
     use vision::encoders::moondream3::{Moondream3VisionConfig, Moondream3VisionModel};
     use vision::processors::moondream3::Moondream3Processor;

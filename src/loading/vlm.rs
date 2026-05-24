@@ -67,8 +67,8 @@ pub(crate) use qwen::{
 };
 pub(crate) use siglip::{load_aya_vision_vlm, load_paligemma_vlm};
 pub(crate) use special::{
-    load_llama4_vlm, load_minicpmo_vlm, load_molmo_point_vlm, load_molmo_vlm, load_molmo2_vlm,
-    load_moondream3_vlm, load_phi3_vlm, load_phi4_siglip_vlm, load_phi4mm_vlm,
+    load_llama4_vlm, load_minicpmo_vlm, load_minicpmv4_6_vlm, load_molmo_point_vlm, load_molmo_vlm,
+    load_molmo2_vlm, load_moondream3_vlm, load_phi3_vlm, load_phi4_siglip_vlm, load_phi4mm_vlm,
 };
 pub(crate) use youtu_vl_loader::load_youtu_vl_vlm;
 

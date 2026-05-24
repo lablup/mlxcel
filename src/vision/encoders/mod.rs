@@ -21,6 +21,7 @@ pub mod gemma4;
 pub mod internvl;
 pub mod llama4;
 pub mod minicpmo;
+pub mod minicpmv4_6;
 pub mod molmo;
 pub mod molmo2;
 pub mod molmo_point;

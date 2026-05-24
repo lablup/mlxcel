@@ -30,6 +30,7 @@ use crate::{qwen_vl, vision, vlm_prompt};
 pub enum VlmRuntimeRef<'a> {
     Qwen(&'a dyn qwen_vl::QwenVlRuntime),
     MiniCPMO(&'a vision::MiniCPMOVLModel),
+    MiniCPMV46(&'a vision::MiniCPMV46VLModel),
     Moondream3(&'a vision::Moondream3VLModel),
     Gemma3n(&'a vision::Gemma3nVLModel),
     Gemma4(&'a vision::Gemma4VLModel),
@@ -131,6 +132,7 @@ impl LoadedModel {
             Self::Qwen3VLMoe(model) => Some(VlmRuntimeRef::Qwen(model)),
             Self::Qwen35VLM(model) | Self::Qwen35MoeVLM(model) => Some(VlmRuntimeRef::Qwen(model)),
             Self::MiniCPMOVLM(model) => Some(VlmRuntimeRef::MiniCPMO(model)),
+            Self::MiniCPMV46VLM(model) => Some(VlmRuntimeRef::MiniCPMV46(model)),
             Self::Moondream3VLM(model) => Some(VlmRuntimeRef::Moondream3(model)),
             Self::Gemma3nVLM(model) => Some(VlmRuntimeRef::Gemma3n(model)),
             Self::Gemma4VLM(model) => Some(VlmRuntimeRef::Gemma4(model)),

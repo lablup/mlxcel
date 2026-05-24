@@ -434,6 +434,39 @@ impl MiniCPMOVisionModel {
         }
         self.post_layernorm.forward(&hidden_states)
     }
+
+    // ── Per-layer access used by MiniCPM-V 4.6 ─────────────────
+    //
+    // MiniCPM-V 4.6 injects a VitMerger after a specific encoder layer, so we
+    // expose the patch embedding, individual layer forward, and post_layernorm
+    // as separate methods.
+    //
+    // Used by: MiniCPMO (via full forward above), MiniCPMV46VLM (per-layer)
+
+    /// Run only the patch embedding + positional embedding step.
+    /// Returns hidden states with shape `[1, seq_len, hidden_size]`.
+    pub fn forward_embeddings(
+        &self,
+        pixel_values: &MlxArray,
+        spatial_shape: (i32, i32),
+    ) -> UniquePtr<MlxArray> {
+        self.embeddings.forward(pixel_values, spatial_shape)
+    }
+
+    /// Run a single encoder layer by index.
+    pub fn forward_layer(&self, hidden_states: &MlxArray, layer_idx: usize) -> UniquePtr<MlxArray> {
+        self.layers[layer_idx].forward(hidden_states)
+    }
+
+    /// Apply the post-layernorm.
+    pub fn forward_post_layernorm(&self, hidden_states: &MlxArray) -> UniquePtr<MlxArray> {
+        self.post_layernorm.forward(hidden_states)
+    }
+
+    /// Total number of encoder layers.
+    pub fn num_layers(&self) -> usize {
+        self.layers.len()
+    }
 }
 
 struct MiniCPMOCrossAttention {

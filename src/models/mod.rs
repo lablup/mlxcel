@@ -220,6 +220,7 @@ pub enum ModelType {
     YoutuVLM,        // Youtu-VL (SigLIP2 windowed-attn + DeepSeek-V3-style MLA)
     InternVLChatVLM, // InternVL (internvl_chat): InternViT + pixel-shuffle mlp1 + Qwen2 text
     MiniCPMOVLM,     // MiniCPM-o (dynamic SigLIP + resampler + Qwen3-VL text)
+    MiniCPMV46VLM,   // MiniCPM-V 4.6 (SigLIP + VitMerger + Merger + Qwen3.5 text)
     Moondream3VLM,   // Moondream3 (custom ViT + custom text decoder, query/caption image path)
     Gemma3n,         // Gemma 3n (text-only)
     Gemma3nVLM,      // Gemma 3n VLM (MobileNetV5 + Gemma3n)
@@ -352,6 +353,7 @@ pub const ALL_MODEL_TYPES: &[ModelType] = &[
     ModelType::YoutuVLM,
     ModelType::InternVLChatVLM,
     ModelType::MiniCPMOVLM,
+    ModelType::MiniCPMV46VLM,
     ModelType::Moondream3VLM,
     ModelType::Gemma3n,
     ModelType::Gemma3nVLM,
@@ -601,6 +603,10 @@ impl ModelType {
             ModelType::Moondream3VLM => ("Moondream 3 (custom ViT + custom decoder)", "Other VLM"),
             ModelType::MiniCPMOVLM => (
                 "MiniCPM-o (dynamic SigLIP + resampler + Qwen3-VL text)",
+                "Other VLM",
+            ),
+            ModelType::MiniCPMV46VLM => (
+                "MiniCPM-V 4.6 (SigLIP + VitMerger + Merger + Qwen3.5 text)",
                 "Other VLM",
             ),
             ModelType::YoutuVLM => (

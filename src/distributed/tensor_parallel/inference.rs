@@ -234,6 +234,9 @@ fn fallback_architecture(model_type: ModelType) -> &'static str {
         // does not panic on the dispatch table lookup. The actual loader
         // refuses TP routing earlier than this for VLM-kind models.
         ModelType::YoutuVLM => "youtu_vl",
+        // MiniCPM-V 4.6 uses Qwen3.5 backbone; TP is not supported for VLM-kind
+        // models and the loader refuses TP routing earlier. Return placeholder.
+        ModelType::MiniCPMV46VLM => "minicpmv4_6",
     }
 }
 

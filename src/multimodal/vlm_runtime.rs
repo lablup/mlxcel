@@ -310,6 +310,35 @@ where
                 }),
             }))
         }
+        // MiniCPM-V 4.6 shares the same prompt token format as MiniCPM-O
+        // (`<image><unk>...<unk></image>`) but uses Qwen3.5 text backbone +
+        // the VitMerger+Merger vision pipeline instead of the resampler.
+        VlmRuntimeRef::MiniCPMV46(minicpmv46) => {
+            let prepared = prepare_minicpmo_prompt_tokens(
+                prompt,
+                images.len(),
+                minicpmv46.processor.image_feature_size,
+                &mut encode,
+            )
+            .map_err(|err| anyhow::anyhow!("{}", err))?;
+            *prompt_tokens = prepared.tokens;
+
+            let processed_images = minicpmv46.processor.preprocess(images);
+            let input_ids_arr = prompt_ids_array(prompt_tokens);
+            let embeddings = minicpmv46.get_input_embeddings(
+                &input_ids_arr,
+                &processed_images,
+                &prepared.image_bounds,
+            );
+
+            Ok(Some(PreparedVlmEmbeddings {
+                embeddings,
+                preparation: Some(VlmPreparationSummary::MiniCPMO {
+                    image_slots: prepared.image_slots,
+                    total_tokens: prompt_tokens.len(),
+                }),
+            }))
+        }
         VlmRuntimeRef::Moondream3(moondream3) => {
             let prepared = prepare_moondream3_prompt_tokens(prompt, images.len(), &mut encode)
                 .map_err(|err| anyhow::anyhow!("{}", err))?;

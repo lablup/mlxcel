@@ -15,12 +15,12 @@
 use super::{
     cap_molmo2_vit_num_layers, dequantize_moondream3_weight, inherit_quantization_if_missing,
     llama4_mm_tokens_per_image, llama4_quantization_params, llama4_token_ids, llama4_vision_prefix,
-    molmo2_max_crops, moondream3_text_config_value, moondream3_vision_config_value,
-    parse_molmo2_vit_layers, phi3_num_crops, phi4_siglip_text_config_value,
-    phi4mm_text_config_value, phi4mm_vision_config_value, remap_minicpmo_text_weights,
-    rewrite_molmo2_weight_key, rewrite_moondream3_weight_key, rewrite_phi3_weight_key,
-    rewrite_phi4_siglip_weight_key, rewrite_phi4mm_vision_key,
-    should_transpose_phi3_patch_embedding,
+    minicpmv4_6_text_weights, molmo2_max_crops, moondream3_text_config_value,
+    moondream3_vision_config_value, parse_molmo2_vit_layers, phi3_num_crops,
+    phi4_siglip_text_config_value, phi4mm_text_config_value, phi4mm_vision_config_value,
+    remap_minicpmo_text_weights, remap_minicpmv4_6_weights, rewrite_molmo2_weight_key,
+    rewrite_moondream3_weight_key, rewrite_phi3_weight_key, rewrite_phi4_siglip_weight_key,
+    rewrite_phi4mm_vision_key, should_transpose_phi3_patch_embedding,
 };
 use mlxcel_core::dtype;
 use mlxcel_core::weights::WeightMap;
@@ -46,6 +46,80 @@ fn remap_minicpmo_text_weights_strips_language_model_prefix() {
     assert!(remapped.contains_key("model.embed_tokens.weight"));
     assert!(remapped.contains_key("lm_head.weight"));
     assert!(remapped.contains_key("vision_tower.embeddings.patch_embedding.weight"));
+}
+
+#[test]
+fn remap_minicpmv4_6_weights_maps_all_namespaces_and_skips_position_ids() {
+    let mut weights = WeightMap::new();
+    for key in [
+        "model.language_model.model.layers.0.input_layernorm.weight",
+        "model.lm_head.weight",
+        "model.vision_tower.vit_merger.linear_1.weight",
+        "model.vision_tower.encoder.layers.0.layer_norm1.weight",
+        "model.vpm.post_layernorm.weight",
+        "model.vit_merger.pre_norm.weight",
+        "model.merger.mlp.0.linear_1.weight",
+        // Backward-compat prefixes.
+        "model.llm.model.norm.weight",
+        "model.visual.embeddings.patch_embedding.weight",
+        // Must be dropped.
+        "model.vision_tower.embeddings.position_ids",
+    ] {
+        weights.insert(key.to_string(), mlxcel_core::ones(&[2, 2], dtype::FLOAT32));
+    }
+
+    let remapped = remap_minicpmv4_6_weights(&weights);
+
+    // language_model / lm_head namespaces.
+    assert!(remapped.contains_key("language_model.model.layers.0.input_layernorm.weight"));
+    assert!(remapped.contains_key("lm_head.weight"));
+    // vit_merger (both `vision_tower.vit_merger.*` and bare `vit_merger.*`).
+    assert!(remapped.contains_key("vit_merger.linear_1.weight"));
+    assert!(remapped.contains_key("vit_merger.pre_norm.weight"));
+    // vision_tower (encoder, vpm-aliased, and visual-aliased).
+    assert!(remapped.contains_key("vision_tower.encoder.layers.0.layer_norm1.weight"));
+    assert!(remapped.contains_key("vision_tower.post_layernorm.weight"));
+    assert!(remapped.contains_key("vision_tower.embeddings.patch_embedding.weight"));
+    // merger.
+    assert!(remapped.contains_key("merger.mlp.0.linear_1.weight"));
+    // llm.* backward-compat maps into the language_model namespace.
+    assert!(remapped.contains_key("language_model.model.norm.weight"));
+    // position_ids dropped.
+    assert!(!remapped.keys().any(|k| k.contains("position_ids")));
+}
+
+#[test]
+fn minicpmv4_6_text_weights_strips_language_model_prefix_and_keeps_lm_head() {
+    let mut weights = WeightMap::new();
+    weights.insert(
+        "language_model.model.embed_tokens.weight".to_string(),
+        mlxcel_core::ones(&[2, 2], dtype::FLOAT32),
+    );
+    weights.insert(
+        "language_model.model.layers.0.input_layernorm.weight".to_string(),
+        mlxcel_core::ones(&[2], dtype::FLOAT32),
+    );
+    weights.insert(
+        "lm_head.weight".to_string(),
+        mlxcel_core::ones(&[2, 2], dtype::FLOAT32),
+    );
+    // Vision weights must NOT leak into the text weight map.
+    weights.insert(
+        "vision_tower.encoder.layers.0.layer_norm1.weight".to_string(),
+        mlxcel_core::ones(&[2], dtype::FLOAT32),
+    );
+    weights.insert(
+        "merger.mlp.0.linear_1.weight".to_string(),
+        mlxcel_core::ones(&[2, 2], dtype::FLOAT32),
+    );
+
+    let text = minicpmv4_6_text_weights(&weights);
+    // The Qwen35Model loader expects the de-prefixed `model.*` namespace.
+    assert!(text.contains_key("model.embed_tokens.weight"));
+    assert!(text.contains_key("model.layers.0.input_layernorm.weight"));
+    assert!(text.contains_key("lm_head.weight"));
+    assert!(!text.contains_key("vision_tower.encoder.layers.0.layer_norm1.weight"));
+    assert!(!text.contains_key("merger.mlp.0.linear_1.weight"));
 }
 
 #[test]

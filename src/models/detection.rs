@@ -188,6 +188,7 @@ pub fn get_model_type(model_path: &Path) -> Result<ModelType> {
         "youtu_vl" => Ok(ModelType::YoutuVLM),
         "internvl_chat" => Ok(ModelType::InternVLChatVLM),
         "minicpmo" => Ok(ModelType::MiniCPMOVLM),
+        "minicpmv4_6" => Ok(ModelType::MiniCPMV46VLM),
         "moondream3" => Ok(ModelType::Moondream3VLM),
         "llava" | "llava_next" => Ok(ModelType::LlavaVLM),
         "llava_bunny" | "bunny-llama" | "llava-qwen2" => Ok(ModelType::LlavaBunnyVLM),
