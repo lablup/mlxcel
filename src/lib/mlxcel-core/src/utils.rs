@@ -109,6 +109,100 @@ pub fn create_causal_mask(size: i32, offset: i32) -> UniquePtr<MlxArray> {
     ffi::where_cond(&bool_mask, &zeros, &neg_inf)
 }
 
+/// Create a causal attention mask with per-sequence left-padding support.
+///
+/// Mirrors the Python `mlx_lm.models.base.create_causal_mask` with the
+/// `left_padding` argument.  Used by [`crate::cache::batch_quant::BatchQuantizedKVCache::make_mask`]
+/// and [`crate::cache::batch_quant::BatchTurboQuantKVCache::make_mask`].
+///
+/// # Arguments
+/// * `n` — Number of query tokens in the current step (usually 1 for decode).
+/// * `offset` — Actual number of tokens already in the KV buffer (`_idx` in Python
+///   terminology, **not** the logical `offset` that starts negative for padded
+///   sequences).  The total key length returned is `n + offset`.
+/// * `left_padding` — Per-sequence number of leading padding tokens.  The mask
+///   zeroes out (sets to −∞) key positions that are padding for each sequence.
+///   When empty or all-zero the result is identical to [`create_causal_mask`].
+///
+/// # Returns
+/// Additive mask with 0 for attended positions and −∞ for masked positions.
+///
+/// # Shape note
+/// * **No padding** (`left_padding` empty or all-zero): `[n, n+offset]`, same
+///   as [`create_causal_mask`].
+/// * **With padding** (`left_padding` has at least one non-zero element):
+///   `[B, 1, n, n+offset]` where `B = left_padding.len()`.  The `[B, 1]`
+///   leading dims allow broadcasting against a `[B, H, n, n+offset]` score
+///   tensor in batched SDPA.
+///
+/// Used by: BatchQuantizedKVCache, BatchTurboQuantKVCache
+pub fn create_causal_mask_with_left_padding(
+    n: i32,
+    offset: i32,
+    left_padding: &[i32],
+) -> UniquePtr<MlxArray> {
+    let total_len = n + offset;
+
+    // ── Base causal (lower-triangular) mask ─────────────────────────────────
+    // Shape: [n, total_len]  (0 = attend, -inf = mask after conversion)
+    let ones = ffi::ones(&[n, total_len], dtype::FLOAT32);
+    // `tril(ones, offset)` keeps the lower triangle starting `offset` columns
+    // to the right of the main diagonal — i.e. the first `offset + q` entries
+    // of query row `q`.  That matches the causal condition
+    // `q_pos (= q + offset) >= k_pos`.
+    let causal_tril = ffi::tril(&ones, offset);
+
+    if left_padding.is_empty() || left_padding.iter().all(|&p| p == 0) {
+        // Fast path: no per-sequence padding — identical to create_causal_mask.
+        let zeros = ffi::zeros(&[n, total_len], dtype::FLOAT32);
+        let neg_inf = ffi::full_f32(&[n, total_len], f32::NEG_INFINITY, dtype::FLOAT32);
+        let bool_mask = ffi::greater(&causal_tril, &zeros);
+        return ffi::where_cond(&bool_mask, &zeros, &neg_inf);
+    }
+
+    // ── Left-padding filter ─────────────────────────────────────────────────
+    // For each sequence `b`, key positions `k < left_padding[b]` are padding
+    // and must be masked.  We build:
+    //
+    //   lp_tensor : [B, 1, 1, 1]  — per-sequence padding count
+    //   rinds     : [1, 1, 1, total_len]  — key position indices
+    //   lp_mask   : [B, 1, 1, total_len]  — True where key pos >= lp[b]
+    //
+    // Then broadcast-multiply with the causal mask.
+
+    let b = left_padding.len() as i32;
+
+    // Key position indices: 0, 1, …, total_len-1  (shape [1, 1, 1, total_len])
+    let rinds_1d = ffi::arange_i32(0, total_len, 1);
+    let rinds = ffi::reshape(&rinds_1d, &[1, 1, 1, total_len]);
+
+    // Per-sequence left-padding: shape [B, 1, 1, 1]
+    let lp_tensor = ffi::from_slice_i32(left_padding, &[b, 1, 1, 1]);
+
+    // lp_mask[b,0,0,k] = (k >= left_padding[b])  — True = attend, False = mask
+    // Using `greater_equal(rinds, lp_tensor)` broadcasts [B,1,1,total_len].
+    let lp_mask = ffi::greater_equal(&rinds, &lp_tensor);
+
+    // Causal mask broadcast: [1, 1, n, total_len]
+    let causal_4d = ffi::reshape(&causal_tril, &[1, 1, n, total_len]);
+
+    // Cast lp_mask to float for multiply (it is currently bool/int8 from the
+    // greater_equal; we need float 0/1 to combine with the causal float mask).
+    // Trick: use where_cond with ones/zeros to convert.
+    let ones_lp = ffi::ones(&[b, 1, 1, total_len], dtype::FLOAT32);
+    let zeros_lp = ffi::zeros(&[b, 1, 1, total_len], dtype::FLOAT32);
+    let lp_mask_f32 = ffi::where_cond(&lp_mask, &ones_lp, &zeros_lp);
+
+    // Combined: shape [B, 1, n, total_len]  (causal broadcasts over B)
+    let combined = ffi::multiply(&causal_4d, &lp_mask_f32);
+
+    // Convert 0/1 float mask to additive 0 / -inf mask.
+    let zeros_out = ffi::zeros(&[b, 1, n, total_len], dtype::FLOAT32);
+    let neg_inf_out = ffi::full_f32(&[b, 1, n, total_len], f32::NEG_INFINITY, dtype::FLOAT32);
+    let bool_out = ffi::greater(&combined, &zeros_out);
+    ffi::where_cond(&bool_out, &zeros_out, &neg_inf_out)
+}
+
 /// Create a boolean causal attention mask.
 /// Used by: same as `create_causal_mask` (experimental path)
 ///

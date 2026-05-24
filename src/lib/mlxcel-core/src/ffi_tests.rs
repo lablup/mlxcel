@@ -1410,3 +1410,231 @@ fn test_wht_fp16_preserves_dtype() {
         "wht(wht(x)) must round-trip in fp16 to within 5e-3",
     );
 }
+
+// ── batched quantized KV cache mask offset regression ────────────
+
+/// `create_causal_mask_with_left_padding` (no padding) must produce the same
+/// result as `create_causal_mask` (the non-batched version).
+///
+/// This guards the fast-path branch in the function.
+#[test]
+fn test_create_causal_mask_with_left_padding_no_padding_matches_causal_mask() {
+    let n = 3_i32;
+    let offset = 5_i32; // 5 tokens already cached
+
+    let reference = crate::utils::create_causal_mask(n, offset);
+    let tested = crate::utils::create_causal_mask_with_left_padding(n, offset, &[]);
+
+    eval(&reference);
+    eval(&tested);
+
+    // Shapes must match
+    let ref_shape = array_shape(&reference);
+    let test_shape = array_shape(&tested);
+    assert_eq!(
+        ref_shape, test_shape,
+        "shape mismatch: {ref_shape:?} vs {test_shape:?}"
+    );
+
+    // Values must match via allclose
+    let close = allclose(&reference, &tested, 1e-5, 1e-5);
+    eval(&close);
+    assert!(
+        item_bool(&close),
+        "create_causal_mask_with_left_padding(no padding) must equal create_causal_mask"
+    );
+}
+
+/// `create_causal_mask_with_left_padding` with left-padding must produce a
+/// `[B, 1, n, n+offset]` shaped mask where the padded key positions for each
+/// sequence are set to −∞.
+///
+/// Mirrors upstream `TestMakeMask::test_make_mask_matches_batch_kv_cache_with_left_padding`
+/// from mlx-vlm PR #1208 (`test_batch_quantized_cache.py`).
+#[test]
+fn test_create_causal_mask_with_left_padding_masks_padding_positions() {
+    // B=2: seq 0 has 2 padding tokens, seq 1 has none.
+    // After 5 tokens cached (offset=5, including padding), n=2 new query tokens.
+    let left_padding = [2_i32, 0];
+    let offset = 5_i32; // actual tokens in buffer (_idx)
+    let n = 2_i32; // query tokens this step
+
+    let mask = crate::utils::create_causal_mask_with_left_padding(n, offset, &left_padding);
+    eval(&mask);
+
+    // Shape: [B=2, 1, n=2, total_len=7]
+    let total_len = n + offset;
+    let b = left_padding.len() as i32;
+    let shape = array_shape(&mask);
+    assert_eq!(
+        shape,
+        vec![b, 1, n, total_len],
+        "expected shape [{b}, 1, {n}, {total_len}], got {shape:?}"
+    );
+
+    // For sequence 0 (left_padding=2): key positions 0 and 1 must be -inf.
+    // For sequence 1 (left_padding=0): all key positions within causal reach
+    // must be 0 (attended).
+    //
+    // Check: the minimum value of the mask is -inf (there is at least one
+    // masked slot: the first 2 key positions of sequence 0).
+    let min_val = min_all(&mask);
+    eval(&min_val);
+    let min_f = item_f32(&min_val);
+    assert!(
+        min_f.is_infinite() && min_f < 0.0,
+        "mask must contain at least one -inf (padded slot for seq 0), got min={min_f}"
+    );
+
+    // Check: the maximum value is 0.0 (attended positions).
+    let max_val = max_all(&mask);
+    eval(&max_val);
+    let max_f = item_f32(&max_val);
+    assert_eq!(
+        max_f, 0.0,
+        "attended positions must be 0.0, got max={max_f}"
+    );
+}
+
+/// `BatchQuantizedKVCache::make_mask` must return `None` for the single-token
+/// decode case when there is no left-padding (the common fast path).
+#[test]
+fn test_batch_quantized_kv_cache_make_mask_none_for_single_token_no_padding() {
+    use crate::cache::batch_quant::{BatchKvQuantConfig, BatchQuantizedKVCache, KvQuantScheme};
+
+    let cfg = BatchKvQuantConfig::new(KvQuantScheme::Uniform, 8, 64, false).unwrap();
+    let mut cache = BatchQuantizedKVCache::new(cfg, 2, vec![0, 0]).unwrap();
+    cache.update_after_decode(5).unwrap();
+
+    // Single query token, no left padding → None (no mask needed)
+    let mask = cache.make_mask(1);
+    assert!(
+        mask.is_none(),
+        "make_mask(1) with no left_padding should return None"
+    );
+}
+
+/// `BatchQuantizedKVCache::make_mask` must use `idx` (actual buffer tokens),
+/// not `offset` (which starts negative for padded sequences).
+///
+/// After `update_after_decode(5)` on a cache with `left_padding=[2,0]`:
+/// - `offset = [-2+5, 0+5] = [3, 5]`  ← wrong value for mask offset
+/// - `idx = 5`  ← correct: 5 tokens actually in the buffer
+///
+/// The mask must have shape `[B=2, 1, n, n + idx=5]`, not `[B=2, 1, n, n+3]`
+/// or some other shape derived from `offset`.
+///
+/// Mirrors upstream `test_make_mask_matches_batch_kv_cache_with_left_padding`
+/// (mlx-vlm PR #1208).
+#[test]
+fn test_batch_quantized_kv_cache_make_mask_uses_idx_not_offset() {
+    use crate::cache::batch_quant::{BatchKvQuantConfig, BatchQuantizedKVCache, KvQuantScheme};
+
+    // B=2: seq 0 has 2 padding tokens, seq 1 has none.
+    let left_padding = vec![2_i32, 0];
+    let cfg = BatchKvQuantConfig::new(KvQuantScheme::Uniform, 8, 64, false).unwrap();
+    let mut cache = BatchQuantizedKVCache::new(cfg, 2, left_padding).unwrap();
+
+    // Simulate: prefill deposited `max(left_padding)=2` padding tokens +
+    // 3 real tokens = 5 total. Then 0 decode steps.
+    // We model this by setting idx manually via update_after_decode(5)
+    // (as if the prefill advanced the counter).
+    cache.update_after_decode(5).unwrap();
+
+    // At this point:
+    //   cache.offset = [-2+5, 0+5] = [3, 5]  ← logical positions
+    //   cache.idx    = 5                       ← actual tokens stored
+    assert_eq!(cache.idx, 5, "idx must be 5 after update_after_decode(5)");
+
+    // Request mask for n=2 new query tokens.
+    let n = 2_i32;
+    let mask_opt = cache.make_mask(n);
+    assert!(
+        mask_opt.is_some(),
+        "make_mask(2) with left_padding=[2,0] must return Some (not None)"
+    );
+    let mask = mask_opt.unwrap();
+    eval(&mask);
+
+    // Expected shape: [B=2, 1, n=2, n + idx = 2+5 = 7]
+    let expected_shape = vec![2_i32, 1, n, n + 5];
+    let actual_shape = array_shape(&mask);
+    assert_eq!(
+        actual_shape, expected_shape,
+        "make_mask shape must be {expected_shape:?} (using idx=5, not offset), got {actual_shape:?}"
+    );
+
+    // Verify that the mask contains -inf values (at the padded positions of seq 0).
+    let min_val = min_all(&mask);
+    eval(&min_val);
+    assert!(
+        item_f32(&min_val).is_infinite(),
+        "mask must contain -inf for padded positions in seq 0"
+    );
+}
+
+/// `BatchTurboQuantKVCache::make_mask` mirrors the same fix as
+/// `BatchQuantizedKVCache::make_mask`.
+///
+/// Mirrors upstream `test_batch_turboquant_make_mask_matches_batch_kv_cache_with_left_padding`
+/// (`test_turboquant.py`, mlx-vlm PR #1208).
+#[test]
+fn test_batch_turboquant_kv_cache_make_mask_uses_idx_not_offset() {
+    use crate::cache::batch_quant::{BatchKvQuantConfig, BatchTurboQuantKVCache, KvQuantScheme};
+
+    let left_padding = vec![2_i32, 0];
+    let cfg = BatchKvQuantConfig::new(KvQuantScheme::TurboQuant, 4, 64, false).unwrap();
+    let mut cache = BatchTurboQuantKVCache::new(cfg, 4, left_padding).unwrap();
+    cache.update_after_decode(5).unwrap();
+
+    assert_eq!(cache.idx, 5, "idx must be 5 after update_after_decode(5)");
+
+    let n = 2_i32;
+    let mask_opt = cache.make_mask(n);
+    assert!(mask_opt.is_some(), "make_mask(2) must return Some");
+    let mask = mask_opt.unwrap();
+    eval(&mask);
+
+    let expected_shape = vec![2_i32, 1, n, n + 5];
+    let actual_shape = array_shape(&mask);
+    assert_eq!(
+        actual_shape, expected_shape,
+        "TurboQuant make_mask shape must be {expected_shape:?}, got {actual_shape:?}"
+    );
+
+    let min_val = min_all(&mask);
+    eval(&min_val);
+    assert!(
+        item_f32(&min_val).is_infinite(),
+        "mask must contain -inf for padded positions"
+    );
+}
+
+/// `BatchQuantizedKVCache::make_mask` with no left-padding and n>1 must return
+/// a standard causal mask (not None), matching `BatchKVCache.make_mask` shape.
+#[test]
+fn test_batch_quantized_kv_cache_make_mask_no_padding_multi_token() {
+    use crate::cache::batch_quant::{BatchKvQuantConfig, BatchQuantizedKVCache, KvQuantScheme};
+
+    let cfg = BatchKvQuantConfig::new(KvQuantScheme::Uniform, 8, 64, false).unwrap();
+    let mut cache = BatchQuantizedKVCache::new(cfg, 2, vec![0, 0]).unwrap();
+    cache.update_after_decode(5).unwrap();
+
+    // n>1 with no left-padding: must return Some (prefill-like scenario).
+    let n = 3_i32;
+    let mask_opt = cache.make_mask(n);
+    assert!(
+        mask_opt.is_some(),
+        "make_mask(3) must return Some even with no left_padding"
+    );
+    let mask = mask_opt.unwrap();
+    eval(&mask);
+
+    // Without left_padding → shape is [n, n+idx] (2D causal mask)
+    let expected_shape = vec![n, n + 5];
+    let actual_shape = array_shape(&mask);
+    assert_eq!(
+        actual_shape, expected_shape,
+        "no-padding multi-token mask shape must be {expected_shape:?}, got {actual_shape:?}"
+    );
+}
