@@ -932,12 +932,23 @@ impl Qwen35DecoderLayer {
                 None,
                 snapshot_sink,
             ),
+            // MTP target-verify pass: full-attention layers
+            // compute per-query-position causal attention so the verify
+            // logits stay bit-aligned with single-token decode. Mirrors
+            // upstream `Qwen3_5DecoderLayer.__call__`'s `target_verify=True`
+            // propagation into `Qwen3_5Attention`.
             (Qwen35AttentionVariant::FullAttention(attn), Qwen3NextCache::Attention(c)) => {
-                attn.forward_with_position_ids(&normed, c, mask, position_ids)
+                attn.forward_with_position_ids_verify(&normed, c, mask, position_ids, true)
             }
             (Qwen35AttentionVariant::FullAttention(attn), _) => {
                 let mut temp_cache = KVCache::new();
-                attn.forward_with_position_ids(&normed, &mut temp_cache, mask, position_ids)
+                attn.forward_with_position_ids_verify(
+                    &normed,
+                    &mut temp_cache,
+                    mask,
+                    position_ids,
+                    true,
+                )
             }
         };
 
@@ -1159,6 +1170,20 @@ impl Qwen35Model {
     /// for both `Qwen35Model` and `Qwen35VLModel` text-only DFlash bursts
     /// (issues #670 and #691).
     pub(crate) fn make_speculative_caches(&self) -> Vec<Qwen3NextCache> {
+        self.make_internal_caches()
+    }
+
+    /// Public test seam: construct the heterogeneous attention +
+    /// linear-attention cache vector the verify pass expects.
+    ///
+    /// Functionally identical to [`Self::make_speculative_caches`], exposed
+    /// so out-of-crate integration tests (notably the
+    /// verify-vs-decode logit-parity test in `tests/`) can drive
+    /// [`Self::forward_speculative`] directly without going through the
+    /// server burst dispatch. Not intended for production callers — the
+    /// server path uses `make_speculative_caches` internally.
+    #[doc(hidden)]
+    pub fn make_speculative_caches_for_test(&self) -> Vec<Qwen3NextCache> {
         self.make_internal_caches()
     }
 

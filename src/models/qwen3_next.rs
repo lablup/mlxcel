@@ -525,7 +525,39 @@ impl Qwen3NextAttention {
         mask: Option<&MlxArray>,
         position_ids: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
-        let output = self.forward_hidden_with_position_ids(x, cache, mask, position_ids);
+        self.forward_with_position_ids_verify(x, cache, mask, position_ids, false)
+    }
+
+    /// Variant of [`Self::forward_with_position_ids`] that opts into the
+    /// MTP target-verify attention path when `target_verify` is set.
+    ///
+    /// `target_verify == false` is byte-identical to
+    /// [`Self::forward_with_position_ids`] (the standard decode / prefill
+    /// path). `target_verify == true` with a multi-token verify block routes
+    /// scaled-dot-product attention through the per-query-position causal
+    /// loop in [`Self::forward_hidden_with_position_ids_verify`], mirroring
+    /// upstream `Qwen3_5Attention.__call__`'s `target_verify and L > 1`
+    /// branch (`mlx-vlm/mlx_vlm/models/qwen3_5/language.py`). This eliminates
+    /// the batched-SDPA-vs-decode logit drift that flips speculative
+    /// accept/reject decisions away from the drafter-less greedy pass.
+    ///
+    /// Used by: `Qwen35DecoderLayer::forward_with_capture` (the Qwen 3.5 MTP
+    /// verify pass).
+    pub(crate) fn forward_with_position_ids_verify(
+        &self,
+        x: &MlxArray,
+        cache: &mut KVCache,
+        mask: Option<&MlxArray>,
+        position_ids: Option<&MlxArray>,
+        target_verify: bool,
+    ) -> UniquePtr<MlxArray> {
+        let output = self.forward_hidden_with_position_ids_verify(
+            x,
+            cache,
+            mask,
+            position_ids,
+            target_verify,
+        );
         self.o_proj.forward(&output)
     }
 
@@ -535,6 +567,31 @@ impl Qwen3NextAttention {
         cache: &mut KVCache,
         mask: Option<&MlxArray>,
         position_ids: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        self.forward_hidden_with_position_ids_verify(x, cache, mask, position_ids, false)
+    }
+
+    /// Hidden-state attention forward with an opt-in MTP target-verify path.
+    ///
+    /// When `target_verify` is `true` and the query block spans more than one
+    /// position (`l > 1`), scaled-dot-product attention is computed **per
+    /// query position**: query `i` attends only to keys/values
+    /// `[.. prefix_len + i + 1]`, exactly as it would during single-token
+    /// decode. This is a faithful port of upstream's
+    /// `target_verify and L > 1` attention branch and guarantees the verify
+    /// logits match the per-token decode logits bit-for-bit modulo the
+    /// kernel's own reduction order, so the speculative walk's greedy argmax
+    /// agrees with the drafter-less greedy decode.
+    ///
+    /// When `target_verify` is `false`, the body is byte-identical to the
+    /// historical [`Self::forward_hidden_with_position_ids`] decode path.
+    pub(crate) fn forward_hidden_with_position_ids_verify(
+        &self,
+        x: &MlxArray,
+        cache: &mut KVCache,
+        mask: Option<&MlxArray>,
+        position_ids: Option<&MlxArray>,
+        target_verify: bool,
     ) -> UniquePtr<MlxArray> {
         let shape = mlxcel_core::array_shape(x);
         let b = shape[0];
@@ -621,8 +678,17 @@ impl Qwen3NextAttention {
         // Update KV cache
         let (cache_k, cache_v) = cache.update_and_fetch(keys, values);
 
-        // Scaled dot-product attention
-        let attn_out = if l > 1 && mask.is_none() {
+        // Scaled dot-product attention.
+        //
+        // MTP target-verify path: when verifying a multi-token
+        // draft block, attention is computed per query position so each
+        // position sees exactly the prefix it would see during single-token
+        // decode. This mirrors upstream `Qwen3_5Attention.__call__`'s
+        // `target_verify and L > 1` branch and keeps the verify logits from
+        // drifting away from the drafter-less greedy decode.
+        let attn_out = if target_verify && l > 1 {
+            self.attend_per_position(&queries, &cache_k, &cache_v)
+        } else if l > 1 && mask.is_none() {
             mlxcel_core::causal_attention(&queries, &cache_k, &cache_v, self.scale, 0.0, 0)
         } else {
             let mask_ptr = mask.map(|m| m as *const _).unwrap_or(std::ptr::null());
@@ -640,6 +706,58 @@ impl Qwen3NextAttention {
         // Apply sigmoid gating to output
         let gate_sigmoid = mlxcel_core::sigmoid(&gate);
         mlxcel_core::multiply(&output, &gate_sigmoid)
+    }
+
+    /// Per-query-position causal attention for the MTP target-verify pass.
+    ///
+    /// `queries`/`keys`/`values` are `[B, H, L_q, D]` / `[B, H_kv, L_kv, D]`
+    /// after the KV cache update, so `L_kv = prefix_len + L_q`. For each
+    /// query position `i` we attend `queries[:, :, i:i+1, :]` to the
+    /// causal prefix `keys[:, :, .. prefix_len + i + 1, :]` (and the matching
+    /// `values` slice) with no mask — the slice itself enforces causality, so
+    /// each position computes exactly the attention it would compute during
+    /// single-token decode. Results are concatenated back along the query
+    /// axis into `[B, H, L_q, D]`.
+    ///
+    /// Faithful port of upstream
+    /// `mlx-vlm/mlx_vlm/models/qwen3_5/language.py::Qwen3_5Attention.__call__`
+    /// (`target_verify and L > 1` branch). This is the load-bearing fix for
+    /// Qwen 3.5 MTP verification drift / sampling parity.
+    fn attend_per_position(
+        &self,
+        queries: &MlxArray,
+        keys: &MlxArray,
+        values: &MlxArray,
+    ) -> UniquePtr<MlxArray> {
+        let q_shape = mlxcel_core::array_shape(queries);
+        let k_shape = mlxcel_core::array_shape(keys);
+        let v_shape = mlxcel_core::array_shape(values);
+        let b = q_shape[0];
+        let n_q_heads = q_shape[1];
+        let l_q = q_shape[2];
+        let head_dim = q_shape[3];
+        let n_kv_heads = k_shape[1];
+        let l_kv = k_shape[2];
+        let prefix_len = l_kv - l_q;
+
+        let mut out: Option<UniquePtr<MlxArray>> = None;
+        for i in 0..l_q {
+            // queries[:, :, i:i+1, :]
+            let q_i = mlxcel_core::slice(queries, &[0, 0, i, 0], &[b, n_q_heads, i + 1, head_dim]);
+            // keys/values[:, :, : prefix_len + i + 1, :]
+            let kv_len = prefix_len + i + 1;
+            let k_i = mlxcel_core::slice(keys, &[0, 0, 0, 0], &[b, n_kv_heads, kv_len, head_dim]);
+            let v_i =
+                mlxcel_core::slice(values, &[0, 0, 0, 0], &[b, n_kv_heads, kv_len, v_shape[3]]);
+            // Single-query attention, no mask: the K/V slice is already the
+            // exact causal prefix, matching the single-token decode call.
+            let attn_i = mlxcel_core::layers::attention(&q_i, &k_i, &v_i, self.scale, None, 0.0, 0);
+            out = Some(match out {
+                None => attn_i,
+                Some(prev) => mlxcel_core::concatenate(&prev, &attn_i, 2),
+            });
+        }
+        out.expect("attend_per_position requires l_q >= 1")
     }
 
     pub(crate) fn from_weights(
