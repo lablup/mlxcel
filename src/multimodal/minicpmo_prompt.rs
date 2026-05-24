@@ -41,6 +41,13 @@ pub fn minicpmo_image_placeholder(image_feature_size: usize) -> String {
     )
 }
 
+fn minicpmo_image_placeholders(image_feature_sizes: &[usize]) -> Vec<String> {
+    image_feature_sizes
+        .iter()
+        .map(|&size| minicpmo_image_placeholder(size))
+        .collect()
+}
+
 pub fn count_minicpmo_image_markers(prompt: &str) -> usize {
     prompt.matches(MINICPMO_IMAGE_INLINE_MARKER).count()
         + prompt.matches(MINICPMO_IMAGE_START_TOKEN).count()
@@ -52,7 +59,15 @@ pub fn ensure_minicpmo_image_placeholders(
     num_images: usize,
     image_feature_size: usize,
 ) -> Result<String, String> {
-    let placeholder = minicpmo_image_placeholder(image_feature_size);
+    ensure_minicpmo_image_placeholders_with_sizes(prompt, &vec![image_feature_size; num_images])
+}
+
+pub fn ensure_minicpmo_image_placeholders_with_sizes(
+    prompt: &str,
+    image_feature_sizes: &[usize],
+) -> Result<String, String> {
+    let num_images = image_feature_sizes.len();
+    let placeholders = minicpmo_image_placeholders(image_feature_sizes);
 
     let normalized = prompt.replace(MINICPMO_IMAGE_INLINE_MARKER, MINICPMO_IMAGE_MARKER_SENTINEL);
     let marker_count = normalized.matches(MINICPMO_IMAGE_START_TOKEN).count();
@@ -69,7 +84,17 @@ pub fn ensure_minicpmo_image_placeholders(
                 total_markers, num_images
             ));
         }
-        let expanded = normalized.replace(MINICPMO_IMAGE_MARKER_SENTINEL, &placeholder);
+        let mut expanded = String::with_capacity(
+            normalized.len() + placeholders.iter().map(String::len).sum::<usize>(),
+        );
+        let mut parts = normalized.split(MINICPMO_IMAGE_MARKER_SENTINEL);
+        if let Some(first) = parts.next() {
+            expanded.push_str(first);
+        }
+        for (placeholder, part) in placeholders.iter().zip(parts) {
+            expanded.push_str(placeholder);
+            expanded.push_str(part);
+        }
         // If prompt already has chat formatting, return as-is
         if expanded.contains("<|im_start|>") {
             return Ok(expanded);
@@ -85,7 +110,7 @@ pub fn ensure_minicpmo_image_placeholders(
         return Ok(prompt.to_string());
     }
 
-    let image_prefix = placeholder.repeat(num_images);
+    let image_prefix = placeholders.concat();
     if let Some(pos) = prompt.rfind("<|im_start|>user\n") {
         let insert_pos = pos + "<|im_start|>user\n".len();
         Ok(format!(
@@ -162,7 +187,23 @@ pub fn prepare_minicpmo_prompt_tokens<E>(
 where
     E: FnMut(&str, bool) -> Vec<i32>,
 {
-    let text = ensure_minicpmo_image_placeholders(prompt, num_images, image_feature_size)?;
+    prepare_minicpmo_prompt_tokens_with_image_feature_sizes(
+        prompt,
+        &vec![image_feature_size; num_images],
+        &mut encode,
+    )
+}
+
+pub fn prepare_minicpmo_prompt_tokens_with_image_feature_sizes<E>(
+    prompt: &str,
+    image_feature_sizes: &[usize],
+    mut encode: E,
+) -> Result<MiniCPMOPromptTokens, String>
+where
+    E: FnMut(&str, bool) -> Vec<i32>,
+{
+    let num_images = image_feature_sizes.len();
+    let text = ensure_minicpmo_image_placeholders_with_sizes(prompt, image_feature_sizes)?;
     let tokens = encode(&text, true);
 
     if num_images == 0 {

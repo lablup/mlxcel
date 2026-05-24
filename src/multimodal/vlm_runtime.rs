@@ -26,7 +26,9 @@ use image::DynamicImage;
 use mlxcel_core::MlxArray;
 
 use crate::internvl_prompt::insert_internvl_image_tokens;
-use crate::minicpmo_prompt::prepare_minicpmo_prompt_tokens;
+use crate::minicpmo_prompt::{
+    prepare_minicpmo_prompt_tokens, prepare_minicpmo_prompt_tokens_with_image_feature_sizes,
+};
 use crate::moondream3_prompt::{Moondream3PromptMode, prepare_moondream3_prompt_tokens};
 use crate::phi3v_prompt::prepare_phi3v_prompt_tokens;
 use crate::phi4_siglip_prompt::prepare_phi4_siglip_prompt_tokens;
@@ -314,16 +316,24 @@ where
         // (`<image><unk>...<unk></image>`) but uses Qwen3.5 text backbone +
         // the VitMerger+Merger vision pipeline instead of the resampler.
         VlmRuntimeRef::MiniCPMV46(minicpmv46) => {
-            let prepared = prepare_minicpmo_prompt_tokens(
+            let processed_images = minicpmv46.processor.preprocess(images);
+            let image_feature_sizes: Vec<usize> = processed_images
+                .iter()
+                .map(|processed| {
+                    minicpmv46
+                        .image_feature_size_for_processed(processed)
+                        .map_err(|err| anyhow::anyhow!("{}", err))
+                })
+                .collect::<Result<Vec<_>>>()?;
+
+            let prepared = prepare_minicpmo_prompt_tokens_with_image_feature_sizes(
                 prompt,
-                images.len(),
-                minicpmv46.processor.image_feature_size,
+                &image_feature_sizes,
                 &mut encode,
             )
             .map_err(|err| anyhow::anyhow!("{}", err))?;
             *prompt_tokens = prepared.tokens;
 
-            let processed_images = minicpmv46.processor.preprocess(images);
             let input_ids_arr = prompt_ids_array(prompt_tokens);
             let embeddings = minicpmv46.get_input_embeddings(
                 &input_ids_arr,

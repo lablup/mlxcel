@@ -29,23 +29,48 @@ pub struct MiniCPMOProcessor {
     pub patch_size: usize,
     pub scale_resolution: usize,
     pub image_feature_size: usize,
+    resize_multiple_h: usize,
+    resize_multiple_w: usize,
     mean: [f32; 3],
     std: [f32; 3],
 }
 
 impl MiniCPMOProcessor {
     pub fn new(patch_size: usize, scale_resolution: usize, image_feature_size: usize) -> Self {
+        Self::new_with_resize_multiples(
+            patch_size,
+            scale_resolution,
+            image_feature_size,
+            patch_size,
+            patch_size,
+        )
+    }
+
+    /// Create a processor whose resized dimensions are rounded to caller
+    /// supplied multiples.
+    ///
+    /// Used by: MiniCPM-O (`patch_size`) and MiniCPM-V 4.6
+    /// (`patch_size * VitMerger * Merger`) preprocessing paths.
+    pub fn new_with_resize_multiples(
+        patch_size: usize,
+        scale_resolution: usize,
+        image_feature_size: usize,
+        resize_multiple_h: usize,
+        resize_multiple_w: usize,
+    ) -> Self {
         Self {
             patch_size,
             scale_resolution,
             image_feature_size,
+            resize_multiple_h: resize_multiple_h.max(1),
+            resize_multiple_w: resize_multiple_w.max(1),
             mean: [0.5, 0.5, 0.5],
             std: [0.5, 0.5, 0.5],
         }
     }
 
-    fn ensure_divide(&self, length: usize) -> usize {
-        ((length.max(self.patch_size) + self.patch_size / 2) / self.patch_size) * self.patch_size
+    fn ensure_divide(&self, length: usize, divisor: usize) -> usize {
+        ((length.max(divisor) + divisor / 2) / divisor) * divisor
     }
 
     pub(crate) fn find_best_resize(&self, width: usize, height: usize) -> (usize, usize) {
@@ -63,8 +88,8 @@ impl MiniCPMOProcessor {
         }
 
         (
-            self.ensure_divide(resized_w.max(self.patch_size)),
-            self.ensure_divide(resized_h.max(self.patch_size)),
+            self.ensure_divide(resized_w.max(self.patch_size), self.resize_multiple_w),
+            self.ensure_divide(resized_h.max(self.patch_size), self.resize_multiple_h),
         )
     }
 

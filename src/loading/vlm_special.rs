@@ -589,7 +589,34 @@ pub(crate) fn load_minicpmv4_6_vlm(model_path: &Path) -> Result<LoadedModel> {
         .and_then(|v| v.as_u64())
         .unwrap_or(448) as usize;
 
-    let processor = MiniCPMOProcessor::new(patch_size, scale_resolution, image_feature_size);
+    let resize_multiple_for_axis = |axis: usize| -> Result<usize> {
+        let vit_factor = vision_config.window_kernel_size[axis].max(1);
+        let merge_factor = model_cfg.merge_kernel_size[axis].max(1);
+        let mut downsample = vit_factor;
+        for _ in 0..model_cfg.merger_times {
+            downsample = downsample.checked_mul(merge_factor).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "MiniCPM-V 4.6 image downsample factor overflowed while building processor"
+                )
+            })?;
+        }
+        patch_size.checked_mul(downsample).ok_or_else(|| {
+            anyhow::anyhow!("MiniCPM-V 4.6 resize alignment overflowed while building processor")
+        })
+    };
+
+    // Upstream MiniCPM-V 4.6 `_find_best_resize` aligns dimensions to
+    // `patch_size * 4` for the default 2x2 VitMerger followed by a 2x2
+    // Merger.  Compute that alignment from config instead of hardcoding 4 so
+    // rectangular images still reserve the same number of text placeholders as
+    // vision tokens emitted by the dynamic grid.
+    let processor = MiniCPMOProcessor::new_with_resize_multiples(
+        patch_size,
+        scale_resolution,
+        image_feature_size,
+        resize_multiple_for_axis(0)?,
+        resize_multiple_for_axis(1)?,
+    );
 
     let eos_token_ids = match full_config.get("eos_token_id") {
         Some(Value::Array(values)) => values

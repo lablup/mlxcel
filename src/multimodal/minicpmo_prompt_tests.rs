@@ -14,8 +14,9 @@
 
 use super::{
     MINICPMO_IMAGE_END_TOKEN, MINICPMO_IMAGE_START_TOKEN, MINICPMO_UNK_TOKEN,
-    compute_minicpmo_image_bounds, ensure_minicpmo_image_placeholders, minicpmo_image_placeholder,
-    prepare_minicpmo_prompt_tokens,
+    compute_minicpmo_image_bounds, ensure_minicpmo_image_placeholders,
+    ensure_minicpmo_image_placeholders_with_sizes, minicpmo_image_placeholder,
+    prepare_minicpmo_prompt_tokens, prepare_minicpmo_prompt_tokens_with_image_feature_sizes,
 };
 
 fn fake_encode(text: &str, add_special: bool) -> Vec<i32> {
@@ -62,6 +63,16 @@ fn ensure_minicpmo_placeholders_replaces_existing_markers() {
 }
 
 #[test]
+fn ensure_minicpmo_placeholders_replaces_markers_with_per_image_sizes() {
+    let prompt = "<|im_start|>user\n<image>first <image>second<|im_end|>";
+    let text = ensure_minicpmo_image_placeholders_with_sizes(prompt, &[2, 4]).unwrap();
+
+    assert!(
+        text.contains("<image><unk><unk></image>first <image><unk><unk><unk><unk></image>second")
+    );
+}
+
+#[test]
 fn ensure_minicpmo_placeholders_inserts_after_user_tag_when_missing() {
     let prompt = "<|im_start|>user\nDescribe this.<|im_end|>";
     let text = ensure_minicpmo_image_placeholders(prompt, 1, 2).unwrap();
@@ -95,4 +106,24 @@ fn prepare_minicpmo_prompt_tokens_encodes_prompt_and_bounds() {
         &prepared.tokens[image_start_pos..=image_end_pos],
         &[10, 12, 12, 12, 11]
     );
+}
+
+#[test]
+fn prepare_minicpmo_prompt_tokens_uses_per_image_feature_sizes() {
+    let prepared = prepare_minicpmo_prompt_tokens_with_image_feature_sizes(
+        "<|im_start|>user\n<image> A <image> B<|im_end|>",
+        &[2, 4],
+        fake_encode,
+    )
+    .unwrap();
+
+    assert_eq!(prepared.image_slots, 2);
+    assert_eq!(prepared.image_bounds.len(), 2);
+
+    let spans: Vec<usize> = prepared
+        .image_bounds
+        .iter()
+        .map(|&(start, end)| end - start)
+        .collect();
+    assert_eq!(spans, vec![2, 4]);
 }

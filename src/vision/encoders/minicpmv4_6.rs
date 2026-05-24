@@ -251,6 +251,11 @@ impl VitMerger {
     ) -> Result<Self, String> {
         let group_h = merge_group_size[0];
         let group_w = merge_group_size[1];
+        if group_h == 0 || group_w == 0 {
+            return Err(
+                "MiniCPM-V 4.6 VitMerger window_kernel_size entries must be positive".to_string(),
+            );
+        }
         let group_tokens = (group_h * group_w) as i32;
         let group_hidden_size = (vision_hidden_size * group_h * group_w) as i32;
 
@@ -406,6 +411,12 @@ impl MiniCPMV46Merger {
         group_size: i32,
         bits: i32,
     ) -> Result<Self, String> {
+        if merge_kernel_size[0] == 0 || merge_kernel_size[1] == 0 {
+            return Err(
+                "MiniCPM-V 4.6 merger merge_kernel_size entries must be positive".to_string(),
+            );
+        }
+
         let mut blocks = Vec::with_capacity(merger_times);
         for i in 0..merger_times {
             blocks.push(MergerBlock::from_weights(
@@ -423,6 +434,27 @@ impl MiniCPMV46Merger {
             merge_h: merge_kernel_size[0],
             merge_w: merge_kernel_size[1],
         })
+    }
+
+    /// Validate and compute the output spatial grid for the configured
+    /// post-ViT Merger blocks without running any MLX kernels.
+    pub fn output_grid_size(
+        &self,
+        mut grid_h: usize,
+        mut grid_w: usize,
+    ) -> Result<(usize, usize), String> {
+        for _ in &self.blocks {
+            if !grid_h.is_multiple_of(self.merge_h) || !grid_w.is_multiple_of(self.merge_w) {
+                return Err(format!(
+                    "MiniCPM-V 4.6 patch grid {}x{} is not divisible by merger kernel {}x{}",
+                    grid_h, grid_w, self.merge_h, self.merge_w
+                ));
+            }
+            grid_h /= self.merge_h;
+            grid_w /= self.merge_w;
+        }
+
+        Ok((grid_h, grid_w))
     }
 
     /// `x` shape: `[seq_len, hidden_size]`  (no batch dim).
@@ -528,6 +560,41 @@ impl MiniCPMV46VisionModel {
             insert_layer_id: model_cfg.insert_layer_id,
             num_layers: vision_cfg.num_hidden_layers,
         })
+    }
+
+    /// Compute how many vision tokens the full MiniCPM-V 4.6 vision pipeline
+    /// emits for a preprocessed patch grid.
+    ///
+    /// Used by request-time prompt preparation to reserve exactly one
+    /// `<unk>` placeholder per emitted vision token before text tokenization.
+    pub fn output_token_count_for_spatial_shape(
+        &self,
+        spatial_shape: (i32, i32),
+    ) -> Result<usize, String> {
+        if spatial_shape.0 <= 0 || spatial_shape.1 <= 0 {
+            return Err(format!(
+                "MiniCPM-V 4.6 spatial shape must be positive, got {:?}",
+                spatial_shape
+            ));
+        }
+
+        let grid_h = spatial_shape.0 as usize;
+        let grid_w = spatial_shape.1 as usize;
+        if !grid_h.is_multiple_of(self.vit_merger.group_h)
+            || !grid_w.is_multiple_of(self.vit_merger.group_w)
+        {
+            return Err(format!(
+                "MiniCPM-V 4.6 patch grid {}x{} is not divisible by VitMerger group {}x{}",
+                grid_h, grid_w, self.vit_merger.group_h, self.vit_merger.group_w
+            ));
+        }
+
+        let grid_h = grid_h / self.vit_merger.group_h;
+        let grid_w = grid_w / self.vit_merger.group_w;
+        let (grid_h, grid_w) = self.merger.output_grid_size(grid_h, grid_w)?;
+        grid_h
+            .checked_mul(grid_w)
+            .ok_or_else(|| "MiniCPM-V 4.6 output token count overflowed usize".to_string())
     }
 
     /// Run the full vision forward pass on a single image.

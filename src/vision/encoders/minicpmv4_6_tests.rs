@@ -155,3 +155,31 @@ fn merger_single_round_honors_4x4_merge_kernel_size() {
     assert_eq!(mlxcel_core::array_shape(&tokens), vec![64, out_dim]);
     assert_eq!((h, w), (8, 8));
 }
+
+#[test]
+fn merger_output_grid_size_rejects_non_divisible_spatial_grid() {
+    let inner_dim = 2i32;
+    let merge_tokens = 4i32;
+    let in_dim = inner_dim * merge_tokens;
+    let mid_dim = 2i32;
+    let out_dim = 2i32;
+
+    let mut weights = WeightMap::new();
+    insert_merger_block_weights(&mut weights, "merger", 0, in_dim, mid_dim, out_dim);
+
+    let merger = MiniCPMV46Merger::from_weights(&weights, "merger", 1, [2, 2], 1e-6, 0, 0).unwrap();
+
+    assert_eq!(merger.output_grid_size(16, 12).unwrap(), (8, 6));
+    assert!(merger.output_grid_size(15, 12).is_err());
+}
+
+#[test]
+fn merger_rejects_zero_merge_kernel_size() {
+    let weights = WeightMap::new();
+    let err = match MiniCPMV46Merger::from_weights(&weights, "merger", 0, [0, 2], 1e-6, 0, 0) {
+        Ok(_) => panic!("expected zero merge_kernel_size to be rejected"),
+        Err(err) => err,
+    };
+
+    assert!(err.contains("merge_kernel_size"));
+}

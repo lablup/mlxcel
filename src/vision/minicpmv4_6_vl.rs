@@ -39,6 +39,14 @@ pub struct MiniCPMV46VLModel {
 }
 
 impl MiniCPMV46VLModel {
+    pub fn image_feature_size_for_processed(
+        &self,
+        processed: &processors::minicpmo::MiniCPMOImageInput,
+    ) -> Result<usize, String> {
+        self.vision_model
+            .output_token_count_for_spatial_shape(processed.spatial_shape)
+    }
+
     pub fn get_input_embeddings(
         &self,
         input_ids: &MlxArray,
