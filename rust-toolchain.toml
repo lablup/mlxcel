@@ -1,0 +1,11 @@
+# Pinned so rustfmt/clippy are reproducible and do not drift between
+# checkouts, CI, and the internal development repo. The drift this prevents:
+# with an unpinned `stable`, two checkouts formatted at different times pick
+# up different rustfmt/clippy releases and diverge purely by timing.
+#
+# Bump this deliberately (and re-run `cargo fmt` across the tree) rather than
+# letting `stable` float. Keep this version identical in mlxcel and the
+# internal development repo.
+[toolchain]
+channel = "1.95.0"
+components = ["rustfmt", "clippy"]
