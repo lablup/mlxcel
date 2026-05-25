@@ -17,7 +17,7 @@ Cargo.lock
 # Local documentation and plans
 DISCUSSION.md
 plan/
-/models/
+/models
 AGENTS.md
 CLAUDE.md
 /references/
