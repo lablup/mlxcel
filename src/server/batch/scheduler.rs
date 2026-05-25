@@ -1511,6 +1511,16 @@ impl BatchScheduler {
         // everything that is not a Gemma 4 VLM.
         self.model.bind_gemma4_per_layer_inputs_to_sequence(seq_id);
 
+        // Issue #85: same lifecycle invariant for Gemma 3n VLM. The
+        // legacy `Gemma3nVLModel.cached_per_layer_inputs` cell was a
+        // single fallback slot with no per-sequence binding; under a
+        // burst of Gemma 3n VLM requests the next prepare would
+        // overwrite the slot before the first prefill consumed it (or
+        // panic on `Option::unwrap` when the timing flipped). The
+        // call below is a no-op for everything that is not a
+        // Gemma 3n VLM.
+        self.model.bind_gemma3n_per_layer_inputs_to_sequence(seq_id);
+
         let decode_state = StreamingDecodeState::new(&self.tokenizer, &prompt_tokens);
 
         // Issue #409: resolve the effective thinking-token budget for this
@@ -2924,6 +2934,14 @@ impl BatchScheduler {
             // it out before `release_sequence_caches` drains the map.
             let pli_snapshot = self.model.take_gemma4_per_layer_inputs_entry(victim.seq_id);
 
+            // Issue #85: same for Gemma 3n VLM `per_layer_inputs`.
+            // Without this round trip the re-prefill would panic in
+            // `Gemma3nVLModel::forward_with_embeddings_and_sequence_id`
+            // (per_layer_inputs missing for this sequence).
+            let pli3n_snapshot = self
+                .model
+                .take_gemma3n_per_layer_inputs_entry(victim.seq_id);
+
             // Release its KV cache
             self.release_sequence_caches(victim.seq_id);
 
@@ -2958,6 +2976,9 @@ impl BatchScheduler {
                     // input_ids (no decode-time updates).
                     self.model
                         .install_gemma4_per_layer_inputs_entry(new_id, pli_snapshot);
+                    // Issue #85: same for Gemma 3n `per_layer_inputs`.
+                    self.model
+                        .install_gemma3n_per_layer_inputs_entry(new_id, pli3n_snapshot);
                     if let Err(err) = victim.state.transition_to(SequenceState::Queued) {
                         tracing::error!("Eviction state transition error: {err}");
                         self.release_sequence_caches(new_id);

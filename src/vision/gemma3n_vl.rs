@@ -16,17 +16,32 @@
 //!
 //! MobileNetV5 vision encoder + Gemma3n language model
 
-use super::{encoders, merge, processors};
+use super::{
+    encoders, gemma3n_per_layer_inputs_state::Gemma3nPerLayerInputsState, merge, processors,
+};
 use crate::LanguageModel;
+use mlxcel_core::cache::SequenceId;
 use mlxcel_core::layers::KVCache;
 use mlxcel_core::{MlxArray, UniquePtr};
 
 /// Gemma 3n VLM: MobileNetV5 vision encoder + Gemma3n language model
 ///
 /// Unlike ViT-based VLMs, Gemma 3n uses a convolutional MobileNetV5 encoder
-/// with Multi-Scale Fusion Adapter. The language model has a unique per_layer_inputs
-/// mechanism that requires special handling (cached between get_input_embeddings
-/// and forward_with_embeddings).
+/// with Multi-Scale Fusion Adapter. The language model has a unique
+/// `per_layer_inputs` mechanism that requires special handling: the
+/// projected tensor is produced during `get_input_embeddings` and consumed
+/// later by the prefill `forward_with_embeddings_and_sequence_id` call.
+///
+/// Issue #85: the `per_layer_inputs` tensor used to live in a single
+/// `RefCell<Option<UniquePtr<MlxArray>>>` field on this struct. Under
+/// concurrent VLM requests on `mlxcel-server`, two prepares could overwrite
+/// the slot before either prefill consumed it, leaking one row's tensor
+/// into another row's prefill (or panicking on `Option::unwrap()` when the
+/// slot was already drained). The state is now held in
+/// [`Gemma3nPerLayerInputsState`], a per-`SequenceId` map with a fallback
+/// slot for legacy single-instance callers, mirroring the Gemma 4
+/// [`Gemma4PerLayerInputsState`](crate::vision::gemma4_per_layer_inputs_state::Gemma4PerLayerInputsState)
+/// container.
 pub struct Gemma3nVLModel {
     pub text_model: crate::models::Gemma3nModel,
     pub vision_tower: encoders::gemma3n::Gemma3nVisionModel,
@@ -36,8 +51,11 @@ pub struct Gemma3nVLModel {
     pub boi_token_id: i32,                              // 255_999 (<start_of_image>)
     pub eoi_token_id: i32,                              // 262_144 (<end_of_image>)
     pub vision_hidden_size: usize,                      // 2048
-    /// Store per_layer_inputs between get_input_embeddings and forward_with_embeddings
-    cached_per_layer_inputs: std::cell::RefCell<Option<UniquePtr<MlxArray>>>,
+    /// Per-sequence storage for the projected `per_layer_inputs` tensor
+    /// that is produced during embedding prep and consumed during the
+    /// prefill `forward_with_embeddings_and_sequence_id` call. See module
+    /// [`crate::vision::gemma3n_per_layer_inputs_state`] for the lifecycle.
+    per_layer_inputs_state: Gemma3nPerLayerInputsState,
 }
 
 impl Gemma3nVLModel {
@@ -60,11 +78,19 @@ impl Gemma3nVLModel {
             boi_token_id,
             eoi_token_id,
             vision_hidden_size,
-            cached_per_layer_inputs: std::cell::RefCell::new(None),
+            per_layer_inputs_state: Gemma3nPerLayerInputsState::new(),
         }
     }
 
-    /// Get input embeddings with vision features merged in
+    /// Get input embeddings with vision features merged in.
+    ///
+    /// Side effect: writes the freshly projected `per_layer_inputs` tensor
+    /// into the per-layer-inputs state container's fallback slot. The
+    /// scheduler binds it to a `SequenceId` right after
+    /// `prepare_request_vlm_embeddings` returns (see issue #85). Legacy
+    /// single-row callers (CLI `mlxcel generate`, `mlxcel-bench-decode`,
+    /// single-row tests) consume it via `take_fallback` on the next
+    /// prefill.
     pub fn get_input_embeddings(
         &self,
         input_ids: &MlxArray,
@@ -116,10 +142,76 @@ impl Gemma3nVLModel {
             input_ids,
         );
 
-        // 6. Cache per_layer_inputs for use in forward_with_embeddings
-        *self.cached_per_layer_inputs.borrow_mut() = Some(per_layer_inputs);
+        // 6. Park the projected per_layer_inputs in the state container's
+        //    fallback slot. The scheduler's
+        //    `bind_gemma3n_per_layer_inputs_to_sequence` immediately
+        //    transfers it into the per-sequence map under the request's
+        //    `SequenceId`. Single-row callers (bench / CLI) consume it
+        //    via `take_fallback` on the next prefill.
+        self.per_layer_inputs_state
+            .set_fallback(Some(per_layer_inputs));
 
         merged
+    }
+
+    // -- Per-sequence per_layer_inputs (issue #85) --------------------
+    //
+    // Thin wrappers around `Gemma3nPerLayerInputsState`. The scheduler
+    // calls them via `LoadedModel::*` capability helpers (see
+    // `loaded_model_capabilities.rs`) right after
+    // `prepare_request_vlm_embeddings`, mirroring the Gemma 4 binding
+    // flow in `gemma4_per_layer_inputs_state`.
+
+    /// Drain the container's fallback slot into the per-`SequenceId` map
+    /// under `seq_id`. No-op when the slot is empty (text-only request
+    /// after a Gemma 3n VLM model load).
+    pub fn bind_per_layer_inputs_to_sequence(&self, seq_id: SequenceId) {
+        self.per_layer_inputs_state
+            .bind_fallback_to_sequence(seq_id);
+    }
+
+    /// Drop a sequence's stored `per_layer_inputs`. Called from
+    /// [`Self::release_sequence_state_by_id`] so the map drains in step
+    /// with the scheduler's per-sequence cache cleanup.
+    pub fn release_per_layer_inputs(&self, seq_id: SequenceId) {
+        self.per_layer_inputs_state.release_sequence(seq_id);
+    }
+
+    /// Take a sequence's tensor out of the map without dropping the
+    /// `UniquePtr`. Used by the scheduler's preemption path so the
+    /// tensor can be carried across the eviction (which releases the old
+    /// sequence id) and reinstalled under the freshly allocated id with
+    /// [`Self::install_per_layer_inputs_for_sequence`].
+    pub fn take_per_layer_inputs_for_sequence(
+        &self,
+        seq_id: SequenceId,
+    ) -> Option<UniquePtr<MlxArray>> {
+        self.per_layer_inputs_state.take_for_sequence(seq_id)
+    }
+
+    /// Re-install a previously taken tensor under `seq_id`. No-op when
+    /// the snapshot is `None`.
+    pub fn install_per_layer_inputs_for_sequence(
+        &self,
+        seq_id: SequenceId,
+        snapshot: Option<UniquePtr<MlxArray>>,
+    ) {
+        if let Some(value) = snapshot {
+            self.per_layer_inputs_state.bind_for_sequence(seq_id, value);
+        }
+    }
+
+    /// Internal helper: resolve the active per_layer_inputs tensor for a
+    /// VLM prefill. Prefers the per-`SequenceId` slot (server flow) and
+    /// falls back to the fallback slot (CLI / bench / single-row).
+    fn take_per_layer_inputs(&self, seq_id: Option<SequenceId>) -> Option<UniquePtr<MlxArray>> {
+        match seq_id {
+            Some(id) => self
+                .per_layer_inputs_state
+                .take_for_sequence(id)
+                .or_else(|| self.per_layer_inputs_state.take_fallback()),
+            None => self.per_layer_inputs_state.take_fallback(),
+        }
     }
 
     fn align_per_layer_inputs_to_embeddings(
@@ -166,11 +258,37 @@ impl LanguageModel for Gemma3nVLModel {
         input_ids: &MlxArray,
         input_embeddings: Option<&MlxArray>,
         caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        // No `seq_id` plumbed through (legacy CLI / bench / direct call).
+        // Route to the per-sequence dispatch with `seq_id == None`, which
+        // resolves the per_layer_inputs from the fallback slot.
+        self.forward_with_embeddings_and_sequence_id(
+            input_ids,
+            input_embeddings,
+            None,
+            caches,
+            mask,
+        )
+    }
+
+    fn forward_with_embeddings_and_sequence_id(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        seq_id: Option<SequenceId>,
+        caches: &mut [KVCache],
         _mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
         if let Some(embeds) = input_embeddings {
-            // VLM prefill: use cached per_layer_inputs
-            let pli = self.cached_per_layer_inputs.borrow_mut().take().unwrap();
+            // VLM prefill: resolve the request's projected per_layer_inputs
+            // from the per-`SequenceId` map (server flow) or the fallback
+            // slot (CLI / bench). An absent tensor at this point is an
+            // internal invariant violation: `get_input_embeddings` must
+            // have populated the fallback slot before this consumer ran.
+            let pli = self
+                .take_per_layer_inputs(seq_id)
+                .expect("gemma3n VLM prefill: per_layer_inputs missing for this sequence");
             // Issue #736: M5 tile-aligned prefill pads the token stream and
             // merged embeddings to an NA tile length. The projected
             // per-layer tensor is produced before that generic padding step,
@@ -201,6 +319,20 @@ impl LanguageModel for Gemma3nVLModel {
 
     fn eos_token_ids(&self) -> Vec<i32> {
         mlxcel_core::generate::LanguageModel::eos_token_ids(&self.text_model)
+    }
+
+    fn release_sequence_state_by_id(&self, seq_id: SequenceId) {
+        // Issue #85: drop the per-sequence `per_layer_inputs` alongside
+        // the text model's per-sequence cache release so the map cannot
+        // grow without bound across long-running server sessions.
+        self.per_layer_inputs_state.release_sequence(seq_id);
+        // The text model (Gemma3nModel) uses the trait's default no-op
+        // for release_sequence_state_by_id today; the call below is kept
+        // for forward-compat when the text backbone gains per-seq state.
+        mlxcel_core::generate::LanguageModel::release_sequence_state_by_id(
+            &self.text_model,
+            seq_id,
+        );
     }
 }
 

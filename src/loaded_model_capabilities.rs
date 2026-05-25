@@ -276,6 +276,62 @@ impl LoadedModel {
         }
     }
 
+    /// Drain the freshly written Gemma 3n VLM `per_layer_inputs` fallback
+    /// slot into the per-`SequenceId` map under `seq_id` (issue #85).
+    ///
+    /// This is a no-op for non-Gemma-3n models. The caller passes the id
+    /// the scheduler already allocated for the request; the VLM runtime
+    /// transfers the fallback slot's tensor into its per-`SequenceId`
+    /// map. When the fallback is empty (text-only request after a
+    /// Gemma 3n VLM model load), the binding leaves the map without an
+    /// entry — the prefill consumer then surfaces `None` for
+    /// `per_layer_inputs`, matching the no-VLM-prefill semantics.
+    pub fn bind_gemma3n_per_layer_inputs_to_sequence(
+        &self,
+        seq_id: mlxcel_core::cache::SequenceId,
+    ) {
+        if let Some(VlmRuntimeRef::Gemma3n(gemma3n)) = self.vlm_runtime() {
+            gemma3n.bind_per_layer_inputs_to_sequence(seq_id);
+        }
+    }
+
+    /// Take the per-sequence Gemma 3n `per_layer_inputs` tensor out of
+    /// the underlying VL model. Used by the scheduler's preemption path
+    /// so the tensor survives the eviction (which releases the old
+    /// sequence id) and can be reinstalled under the freshly allocated
+    /// id — `prepare_request_vlm_embeddings` does not run again on
+    /// re-prefill, so without the take/install round trip the re-prefill
+    /// would observe `per_layer_inputs == None` and panic in
+    /// `Gemma3nVLModel::forward_with_embeddings_and_sequence_id`.
+    ///
+    /// Returns `None` for non-Gemma-3n models or when no entry exists
+    /// for `seq_id`.
+    pub fn take_gemma3n_per_layer_inputs_entry(
+        &self,
+        seq_id: mlxcel_core::cache::SequenceId,
+    ) -> Option<mlxcel_core::UniquePtr<mlxcel_core::MlxArray>> {
+        if let Some(VlmRuntimeRef::Gemma3n(gemma3n)) = self.vlm_runtime() {
+            return gemma3n.take_per_layer_inputs_for_sequence(seq_id);
+        }
+        None
+    }
+
+    /// Re-install a previously taken Gemma 3n `per_layer_inputs` tensor
+    /// under `seq_id`. No-op for non-Gemma-3n models or when the
+    /// snapshot is `None`.
+    pub fn install_gemma3n_per_layer_inputs_entry(
+        &self,
+        seq_id: mlxcel_core::cache::SequenceId,
+        snapshot: Option<mlxcel_core::UniquePtr<mlxcel_core::MlxArray>>,
+    ) {
+        if snapshot.is_none() {
+            return;
+        }
+        if let Some(VlmRuntimeRef::Gemma3n(gemma3n)) = self.vlm_runtime() {
+            gemma3n.install_per_layer_inputs_for_sequence(seq_id, snapshot);
+        }
+    }
+
     pub fn image_token_block_info(&self) -> Option<vlm_prompt::ImageTokenBlockInfo> {
         image_token_block_info_from_runtime(self.vlm_runtime()?)
     }
