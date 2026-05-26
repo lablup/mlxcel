@@ -363,6 +363,60 @@ fn build_raw_json_messages_includes_tool_fields() {
     assert_eq!(arr[1]["role"].as_str().unwrap(), "tool");
 }
 
+#[test]
+fn deserialize_tool_call_request_without_assistant_content() {
+    // Issue #89: OpenAI-compatible clients omit `content` on the assistant
+    // `tool_calls` message of a multi-turn tool loop. The follow-up request
+    // must deserialize instead of being rejected with HTTP 422.
+    let json = r#"{
+        "model": "test",
+        "messages": [
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "tool_calls": [{
+                "id": "call_1",
+                "type": "function",
+                "function": {"name": "get_system_info", "arguments": "{}"}
+            }]},
+            {"role": "tool", "tool_call_id": "call_1", "content": "mem: 12GB free"}
+        ]
+    }"#;
+    let req: ChatCompletionRequest =
+        serde_json::from_str(json).expect("missing assistant content must deserialize");
+    assert_eq!(req.messages.len(), 3);
+    assert_eq!(req.messages[1].content.text(), "");
+    assert!(req.messages[1].tool_calls.is_some());
+}
+
+#[test]
+fn build_raw_json_messages_emits_empty_content_for_missing_field() {
+    // Issue #89 follow-up: a `tool_calls` message that omitted `content` must
+    // still render a `"content"` key (empty string) so Jinja chat templates
+    // that reference `message.content` keep rendering.
+    let json = r#"{
+        "model": "test",
+        "messages": [
+            {"role": "user", "content": "Call weather"},
+            {"role": "assistant", "tool_calls": [{
+                "id": "call_abc",
+                "type": "function",
+                "function": {"name": "get_weather", "arguments": "{}"}
+            }]}
+        ]
+    }"#;
+    let request: ChatCompletionRequest = serde_json::from_str(json).unwrap();
+    let raw = build_raw_json_messages(&request);
+    let arr = raw.as_array().unwrap();
+    assert_eq!(arr.len(), 2);
+
+    let assistant = &arr[1];
+    assert!(assistant.get("tool_calls").is_some());
+    assert_eq!(
+        assistant.get("content").and_then(|c| c.as_str()),
+        Some(""),
+        "content key must be present and empty for Jinja templates"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Issue #410 — preserve_thinking plumbing through prepare_chat_request
 // ---------------------------------------------------------------------------

@@ -269,10 +269,44 @@ impl MessageContent {
     }
 }
 
+impl Default for MessageContent {
+    /// Empty text — the canonical "no content" value.
+    ///
+    /// Assistant messages whose payload is a `tool_calls` array legitimately
+    /// omit `content` or send `null` (issue #89); both map to this.
+    fn default() -> Self {
+        MessageContent::Text(String::new())
+    }
+}
+
+/// Deserialize [`MessageContent`], tolerating an explicit JSON `null`.
+///
+/// Paired with `#[serde(default)]` on the field, this lets `content` accept
+/// the three shapes OpenAI-compatible clients emit on assistant messages that
+/// carry `tool_calls` (issue #89): the key is absent (handled by `default`),
+/// the value is `null` (mapped to empty content here), or the value is a
+/// normal string / multimodal array. Without it, axum's `Json` extractor
+/// rejects the follow-up request of a tool-calling loop with HTTP 422
+/// (`missing field 'content'`).
+fn deserialize_message_content<'de, D>(deserializer: D) -> Result<MessageContent, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Option::<MessageContent>::deserialize(deserializer)?.unwrap_or_default())
+}
+
 /// Chat message
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
     pub role: Role,
+    /// Message content.
+    ///
+    /// Optional and nullable per the OpenAI Chat Completions spec: assistant
+    /// messages that carry `tool_calls` may omit `content` or send `null`. A
+    /// missing or `null` value deserializes to empty text (issue #89), keeping
+    /// the `content` field present for Jinja chat templates that read
+    /// `message.content`.
+    #[serde(default, deserialize_with = "deserialize_message_content")]
     pub content: MessageContent,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
@@ -703,4 +737,64 @@ pub struct TokenizeRequest {
 pub struct DetokenizeRequest {
     /// Token IDs to decode
     pub tokens: Vec<i32>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn message_content_default_is_empty_text() {
+        let c = MessageContent::default();
+        assert_eq!(c.text(), "");
+        assert!(matches!(c, MessageContent::Text(_)));
+    }
+
+    #[test]
+    fn message_without_content_field_deserializes_to_empty() {
+        // OpenAI-compatible clients omit `content` on assistant messages whose
+        // payload is a `tool_calls` array (issue #89).
+        let json = r#"{
+            "role": "assistant",
+            "tool_calls": [
+                {"id": "call_1", "type": "function",
+                 "function": {"name": "get_system_info", "arguments": "{}"}}
+            ]
+        }"#;
+        let msg: Message = serde_json::from_str(json).expect("missing content must deserialize");
+        assert_eq!(msg.content.text(), "");
+        assert!(msg.tool_calls.is_some());
+    }
+
+    #[test]
+    fn message_with_null_content_deserializes_to_empty() {
+        // Some clients send `"content": null` rather than omitting the key.
+        let json = r#"{"role": "assistant", "content": null}"#;
+        let msg: Message = serde_json::from_str(json).expect("null content must deserialize");
+        assert_eq!(msg.content.text(), "");
+        assert!(matches!(msg.content, MessageContent::Text(_)));
+    }
+
+    #[test]
+    fn message_with_string_content_deserializes() {
+        let json = r#"{"role": "user", "content": "hello"}"#;
+        let msg: Message = serde_json::from_str(json).unwrap();
+        assert_eq!(msg.content.text(), "hello");
+        assert!(matches!(msg.content, MessageContent::Text(_)));
+    }
+
+    #[test]
+    fn message_with_multimodal_content_deserializes() {
+        let json = r#"{"role": "user", "content": [
+            {"type": "text", "text": "describe"},
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}}
+        ]}"#;
+        let msg: Message = serde_json::from_str(json).unwrap();
+        assert!(matches!(msg.content, MessageContent::Parts(_)));
+        assert_eq!(msg.content.text(), "describe");
+        assert_eq!(
+            msg.content.image_urls(),
+            vec!["data:image/png;base64,AAAA".to_string()]
+        );
+    }
 }
