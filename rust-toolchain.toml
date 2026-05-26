@@ -7,5 +7,5 @@
 # letting `stable` float. Keep this version identical in mlxcel and the
 # internal development repo.
 [toolchain]
-channel = "1.95.0"
+channel = "1.93.1"
 components = ["rustfmt", "clippy"]
