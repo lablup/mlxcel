@@ -157,8 +157,15 @@ pub(crate) struct GenerateArgs {
 #[derive(Args, Debug)]
 #[command(next_help_heading = "Model Options")]
 pub(crate) struct ModelOptions {
-    /// Path to the model directory
-    #[arg(short, long, value_name = "PATH")]
+    /// Path to a local model directory, or a HuggingFace `owner/name`
+    /// repo-id to auto-download.
+    ///
+    /// An existing local path is used as-is. Otherwise an `owner/name`
+    /// repo-id (e.g. `mlx-community/Qwen3-4B-4bit`) is resolved from a
+    /// legacy `./models/<name>` directory, the HuggingFace cache, or the
+    /// mlxcel store, and downloaded into the mlxcel store on a miss so it
+    /// runs from any directory.
+    #[arg(short, long, value_name = "PATH_OR_REPO_ID")]
     pub(crate) model: PathBuf,
 
     /// Path to LoRA adapter directory (optional)
@@ -270,8 +277,14 @@ pub(crate) struct GenerationOptions {
 #[derive(Args, Debug)]
 #[command(next_help_heading = "Inspect Options")]
 pub(crate) struct InspectArgs {
-    /// Path to the model directory.
-    #[arg(short, long, value_name = "PATH")]
+    /// Path to a local model directory, or a HuggingFace `owner/name`
+    /// repo-id to auto-download.
+    ///
+    /// An existing local path is used as-is; an `owner/name` repo-id
+    /// (e.g. `mlx-community/Qwen3-4B-4bit`) is resolved from a legacy
+    /// `./models/<name>` directory, the HuggingFace cache, or the mlxcel
+    /// store, and downloaded into the mlxcel store on a miss.
+    #[arg(short, long, value_name = "PATH_OR_REPO_ID")]
     pub(crate) model: std::path::PathBuf,
 
     /// Maximum number of tokens to estimate KV cache for.
@@ -459,8 +472,14 @@ Thunderbolt mode:
 
 See also: docs/distributed.md")]
 pub(crate) struct ServeArgs {
-    /// Path to the model directory
-    #[arg(short, long, env = "LLAMA_ARG_MODEL", value_name = "PATH")]
+    /// Path to a local model directory, or a HuggingFace `owner/name`
+    /// repo-id to auto-download.
+    ///
+    /// An existing local path is used as-is; an `owner/name` repo-id
+    /// (e.g. `mlx-community/Qwen3-4B-4bit`) is resolved from a legacy
+    /// `./models/<name>` directory, the HuggingFace cache, or the mlxcel
+    /// store, and downloaded into the mlxcel store on a miss.
+    #[arg(short, long, env = "LLAMA_ARG_MODEL", value_name = "PATH_OR_REPO_ID")]
     model: PathBuf,
 
     /// Path to LoRA adapter directory
