@@ -617,6 +617,11 @@ fn validate_token_rejects_control_chars() {
 /// operator explicitly opts out.
 #[test]
 fn require_secure_endpoint_refuses_plaintext_with_token() {
+    // For the http+token case, `require_secure_endpoint_for_token` reads
+    // MLXCEL_ALLOW_INSECURE_ENDPOINT (via `is_insecure_endpoint_opt_out`).
+    // Serialize through the crate-wide ENV_LOCK so this read cannot observe the
+    // value mid-window from the opt-out tests, which set that var under the lock.
+    let _env_guard = env_lock();
     let err = require_secure_endpoint_for_token("http://mirror.internal/", Some("hf_xxx"))
         .expect_err("plaintext endpoint with token must error");
     let msg = err.to_string();
