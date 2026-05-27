@@ -117,7 +117,7 @@ Linux/CUDA builds use the `cuda` feature and require the CUDA toolkit plus the s
 ## Performance
 
 mlxcel targets near-`mlx-lm` / `mlx-vlm` decode throughput for MLX-format
-checkpoints while keeping a native Rust runtime. In the mlxcel 0.0.28 M5 Max
+checkpoints while keeping a native Rust runtime. In the mlxcel 0.1.0 M5 Max
 128GB benchmark set, the headline result has two parts: faster short-prompt
 text prefill and near-reference decode throughput.
 

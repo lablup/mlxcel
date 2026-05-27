@@ -8,14 +8,14 @@ Compatibility and performance testing for mlxcel models on **MacBook Pro M5 Max 
 |------|-------|
 | **Hardware** | MacBook Pro M5 Max, 128GB RAM |
 | **OS** | macOS 26.4 (Tahoe) |
-| **mlxcel version** | 0.0.28 |
+| **mlxcel version** | 0.1.0 |
 | **MLX version** | 0.31.2 (via mlxcel-core; pinned commit `84961223`) |
 | **mlx-lm baseline** | 0.31.3 (dev checkout `references/mlx-lm`, commit `ed1fca4`) |
 | **mlx-vlm baseline** | 0.4.4 |
 | **Test Prompt** | "Hello, how are you today?" (text) / "What is in this image?" (VLM) |
 | **Max Tokens** | 100 |
-| **Test Date** | 2026-05-19 full sweep; 2026-05-20 Molmo v1 spot-check; 2026-05-20 Phi-3.5 spot-check; 2026-05-20 Gemma2/Gemma3 dense spot-check; 2026-05-20 Jamba spot-check; 2026-05-21 near-parity remeasure |
-| **Benchmark Status** | Full text + VLM sweep on mlxcel using `mlxcel-bench-decode`, 98 text + 98 VLM-mode passes with `--cooldown 15 --big-cooldown 15`. mlx-lm / mlx-vlm baseline sub-sweeps are from the same benchmark campaign; their CSV filenames carry 2026-05-18 because the run crossed calendar midnight. |
+| **Test Date** | 2026-05-19 full sweep; 2026-05-20 Molmo v1 spot-check; 2026-05-20 Phi-3.5 spot-check; 2026-05-20 Gemma2/Gemma3 dense spot-check; 2026-05-20 Jamba spot-check; 2026-05-21 near-parity remeasure; 2026-05-27 full text + VLM re-benchmark (0.1.0) |
+| **Benchmark Status** | Full text + VLM sweep on mlxcel using `mlxcel-bench-decode`, 98 text + 98 VLM-mode passes with `--cooldown 15 --big-cooldown 15`. mlx-lm / mlx-vlm baseline sub-sweeps are from the same benchmark campaign; their CSV filenames carry 2026-05-18 because the run crossed calendar midnight. Current per-model values reflect the 2026-05-27 full re-benchmark (mlxcel 0.1.0, MLX 0.31.2, `--cooldown 30 --big-cooldown 30`). |
 
 ## Legend
 
@@ -178,13 +178,13 @@ Compatibility and performance testing for mlxcel models on **MacBook Pro M5 Max 
 | mistral-small | mistral-small-3.1-24b-4bit | ✅ | 90.62 | 41.41 | **1.31x** | 100 tokens |
 | molmo2 | molmo2-4b | ✅ | 540.64 | 64.09 | 1.07x | 33 tokens |
 | molmo-7b | molmo-7b | ✅ | 338.65 | 78.74 | - | 24 tokens; text spot-check |
-| internvl3 | internvl3-1b | ❌ | - | FAIL | - | FAIL:bench |
+| internvl3 | internvl3-1b | ✅ | 8628.27 | 661.48 | - | 37 tokens; #747 |
 | smollm-135m | SmolLM-135M-Instruct-4bit | ✅ | 6058.41 | 905.24 | **2.22x** | 100 tokens |
 | smollm3-3b | SmolLM3-3B-4bit | ✅ | 2242.59 | 232.79 | **1.71x** | 46 tokens |
 | stablelm-1.6b | stablelm-2-1_6b-chat-4bit | ✅ | 2887.08 | 425.14 | **1.52x** | 59 tokens |
 | starcoder2-3b | starcoder2-3b-4bit | ✅ | 455.12 | 216.48 | **1.26x** | 100 tokens |
 | pixtral-12b | pixtral-12b-4bit | ✅ | 149.44 | 76.56 | **1.11x** | 100 tokens; text-only |
-| paligemma2-3b | paligemma2-3b (6-bit) | ✅ | 448.78 | 149.98 | - | 100 tokens; text-only |
+| paligemma2-3b | paligemma2-3b (6-bit) | ✅ | 496.59 | 168.83 | - | 100 tokens; text-only; #744 |
 
 ## VLM (image input) — full sweep
 
@@ -207,7 +207,7 @@ All entries use the VLM prompt 'What is in this image?' with
 | gemma4 (E2B 8bit) | gemma-4-e2b-it-8bit | ✅ | 2674.11 | 133.74 | **1.66x** | 43 tokens |
 | gemma4 (E4B 4bit) | gemma-4-e4b-it-4bit | ✅ | 2064.85 | 134.10 | **1.84x** | 29 tokens |
 | gemma4 (E4B 8bit) | gemma-4-e4b-it-8bit | ✅ | 1911.38 | 76.28 | **1.39x** | 12 tokens |
-| internvl3 (1B) | internvl3-1b | ❌ | - | FAIL | - | FAIL:bench (unsupported architecture) |
+| internvl3 (1B) | internvl3-1b | ✅ | 6482.30 | 601.50 | - | 8 tokens; #747 |
 | llama4 (Scout) | llama-4-scout-17b-4bit | ✅ | 398.13 | 48.33 | **1.52x** | 100 tokens |
 | llava-1.5-7b | llava-1.5-7b-4bit | ✅ | 3141.70 | 117.70 | **1.16x** | 100 tokens |
 | llava-interleave | llava-interleave-qwen-0.5b-bf16 | ✅ | 13171.77 | 343.53 | **1.27x** | 36 tokens |
@@ -222,18 +222,18 @@ All entries use the VLM prompt 'What is in this image?' with
 | qwen2-vl (2B) | qwen2-vl-2b-4bit | ✅ | 2485.82 | 247.21 | - | 12 tokens; EOS-terminate |
 | qwen2.5-vl (3B) | qwen2.5-vl-3b-4bit | ✅ | 1696.53 | 156.83 | **1.61x** | 22 tokens; EOS-terminate; fixed by #34 |
 | qwen3-vl (2B) | qwen3-vl-2b-4bit | ✅ | 934.98 | 281.37 | **1.65x** | 100 tokens |
-| qwen3-vl (30B MoE) | qwen3-vl-30b-a3b-4bit | ✅ | 260.23 | 36.23 | **1.37x** | 2 tokens; #719 |
+| qwen3-vl (30B MoE) | qwen3-vl-30b-a3b-4bit | ✅ | 436.81 | 56.38 | - | 45 tokens; #719 |
 | qwen3-vl (32B) | qwen3-vl-32b-4bit | ✅ | 117.14 | 19.65 | 1.05x | 100 tokens; #719 |
 
 ## Summary Statistics
 
 | Status | Count |
 |--------|-------|
-| ✅ Pass | 93 |
+| ✅ Pass | 94 |
 | ⚠️ Partial | 2 (falcon-mamba-7b-4bit, phi-2-4bit) |
-| ❌ Fail | 3 (deepseek-v3-4bit, internvl3-1b, qwen3-next-480b-4bit) |
+| ❌ Fail | 2 (deepseek-v3-4bit, qwen3-next-480b-4bit) |
 
-98 models tested in total. `qwen2-vl-2b-4bit` was already counted under ✅ (its text mode passed); the VLM image-mode fix flipped its VLM-table row from ⚠️ to ✅ without changing the per-model total. Adding Molmo v1 support flips `molmo-7b` from FAIL to ✅ in both the text spot-check row and the VLM table.
+98 models tested in total. `qwen2-vl-2b-4bit` was already counted under ✅ (its text mode passed); the VLM image-mode fix flipped its VLM-table row from ⚠️ to ✅ without changing the per-model total. Adding Molmo v1 support flips `molmo-7b` from FAIL to ✅ in both the text spot-check row and the VLM table. The InternVL3 port flips `internvl3-1b` from FAIL to ✅ in both tables, raising the ✅ total to 94.
 
 ## Performance vs mlx-lm / mlx-vlm baseline (2026-05-19 benchmark campaign)
 
@@ -308,7 +308,7 @@ snapshot.
 | hunyuan-moe-a13b-bf16 | 64.09 | FAIL | - |
 | internlm2-7b-4bit | 117.25 | 117.98 | 99% |
 | internlm3-8b-4bit | 101.23 | FAIL | - |
-| internvl3-1b | - | FAIL | - |
+| internvl3-1b | 661.48 | FAIL | - |
 | jamba-v0.1-4bit | 215.84 | 219.38 | 98% |
 | llama-3.1-8b-4bit | 116.65 | 117.43 | 99% |
 | llama-3.1-8b-bf16 | 33.93 | 34.29 | 99% |
@@ -332,7 +332,7 @@ snapshot.
 | olmo-1b-4bit | 243.15 | FAIL | - |
 | olmo2-7b-4bit | 116.88 | 120.79 | 97% |
 | olmo3-32b-4bit | 29.11 | 28.99 | **100%** |
-| paligemma2-3b-6bit | 149.98 | FAIL | - |
+| paligemma2-3b-6bit | 168.83 | FAIL | - |
 | phi-2-4bit | 79.60 | FAIL | - |
 | phi-3-mini-4bit | 207.89 | 212.74 | 98% |
 | phi-3.5-mini-4bit | 204.63 | 207.79 | 98% |
@@ -388,7 +388,7 @@ snapshot.
 | gemma3n-e2b-4bit | 151.36 | 124.63 | **121%** |
 | gemma3n-e4b-4bit | 106.01 | 93.55 | **113%** |
 | gemma3n-e4b-bf16 | 36.95 | 49.88 | 74% |
-| internvl3-1b | FAIL | 529.33 | - |
+| internvl3-1b | 601.50 | 529.33 | **114%** |
 | llama-4-scout-17b-4bit | 48.33 | FAIL | - |
 | llava-1.5-7b-4bit | 117.70 | FAIL | - |
 | llava-interleave-qwen-0.5b-bf16 | 343.53 | 345.08 | **100%** |
@@ -403,7 +403,7 @@ snapshot.
 | qwen2-vl-2b-4bit | 247.21 | 279.55 | 88% |
 | qwen2.5-vl-3b-4bit | 156.83 | FAIL | - |
 | qwen3-vl-2b-4bit | 281.37 | FAIL | - |
-| qwen3-vl-30b-a3b-4bit | 36.23 | FAIL | - |
+| qwen3-vl-30b-a3b-4bit | 56.38 | FAIL | - |
 | qwen3-vl-32b-4bit | 19.65 | FAIL | - |
 | qwen3.5-0.8b-4bit | 505.94 | 410.96 | **123%** |
 | qwen3.5-27b-4bit | 32.84 | 33.44 | 98% |
@@ -536,7 +536,6 @@ increase and 96% of mlx-lm's 555.43 tok/s on the same prompt.
 | falcon-mamba-7b-4bit | Generic chat prompt exits after `<|im_end|>`; use a non-chat code prompt for perf checks | Low |
 | phi-2-4bit | Generates only 1 token — likely EOS handling | Low |
 | llama-3.1-8b-bf16 | bf16 → f16 conversion path is functional but slow | Low |
-| internvl3-1b | unsupported architecture | Low |
 
 ## Notes
 

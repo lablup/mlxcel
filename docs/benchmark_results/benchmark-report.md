@@ -144,7 +144,7 @@ decode results sit near mlx-vlm median parity on both Apple Silicon hosts.
 |------|----------|--------|
 | Hardware | Mac Studio M1 Ultra, 128 GB RAM | MacBook Pro M5 Max, 128 GB RAM |
 | OS | macOS 26.4 | macOS 26.4 |
-| mlxcel | 0.0.28 | 0.0.28 |
+| mlxcel | 0.0.28 | 0.1.0 |
 | MLX pin | `84961223` via mlxcel-core | `84961223` via mlxcel-core |
 | Bench harness | `mlxcel-bench-decode`: one process loads the model, runs a 20-token warmup, then a 100-token measured pass | `mlxcel-bench-decode`: one process loads the model, runs warmup, then a 100-token measured pass |
 | Text prompt | `Hello, how are you today?` | `Hello, how are you today?` |
