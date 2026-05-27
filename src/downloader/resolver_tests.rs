@@ -147,12 +147,15 @@ fn existing_path_shaped_like_repo_id_is_still_used_verbatim() {
     assert_eq!(resolved, model);
 }
 
-// ── resolve_model_source: branch 3 (error) ──────────────────────────────────
+// ── resolve_model_source: branch 4 (error) ──────────────────────────────────
 
 #[test]
 fn nonexistent_non_repo_id_value_errors_clearly() {
-    // A value that is neither an existing path nor `owner/name` shape.
-    let err = resolve_model_source(Path::new("definitely-not-here")).unwrap_err();
+    // A value that is neither an existing path, an `owner/name` repo-id, nor a
+    // bare model-name segment. Since issue #112 a bare segment (e.g.
+    // `definitely-not-here`) resolves as `mlx-community/<name>`, so the error
+    // arm now requires an illegal segment character such as a space.
+    let err = resolve_model_source(Path::new("not a model name")).unwrap_err();
     let msg = format!("{err}");
     assert!(msg.contains("neither an existing path"), "got: {msg}");
     assert!(msg.contains("owner/name"), "got: {msg}");
@@ -505,4 +508,122 @@ fn legacy_models_dir_basename_roundtrip() {
     assert_eq!(LEGACY_MODELS_DIR, "models");
     let legacy = PathBuf::from(LEGACY_MODELS_DIR).join(repo_basename("owner/model"));
     assert_eq!(legacy, PathBuf::from("models/model"));
+}
+
+// ── resolve_model_source: branch 3 (bare name → default org, issue #112) ─────
+
+#[test]
+fn bare_name_expands_to_default_org_and_reuses_store() {
+    // A bare, prefix-less name resolves as `mlx-community/<name>` and, when that
+    // repo is already in the mlxcel store, reuses it with no network access.
+    let tmp = tempfile::tempdir().unwrap();
+    let store_root = tmp.path().join("store");
+    let store_dir = store_root
+        .join("models")
+        .join("mlx-community")
+        .join("Qwen3-4B-4bit");
+    make_complete_snapshot(&store_dir);
+    let empty_hf = tmp.path().join("hf");
+    fs::create_dir_all(&empty_hf).unwrap();
+    let run_dir = tmp.path().join("run");
+    fs::create_dir_all(&run_dir).unwrap();
+
+    let _guard = env_lock();
+    let prev_cache_dir = std::env::var("MLXCEL_CACHE_DIR").ok();
+    let prev_default_org = std::env::var("MLXCEL_DEFAULT_ORG").ok();
+    let prev_hf_cache = std::env::var("HF_HUB_CACHE").ok();
+    let prev_hf_home = std::env::var("HF_HOME").ok();
+    let prev_cwd = std::env::current_dir().ok();
+    unsafe {
+        std::env::set_var("MLXCEL_CACHE_DIR", &store_root);
+        std::env::remove_var("MLXCEL_DEFAULT_ORG");
+        std::env::set_var("HF_HUB_CACHE", &empty_hf);
+        std::env::remove_var("HF_HOME");
+    }
+    std::env::set_current_dir(&run_dir).unwrap();
+
+    let resolved = resolve_model_source(Path::new("Qwen3-4B-4bit"));
+
+    if let Some(cwd) = prev_cwd {
+        let _ = std::env::set_current_dir(cwd);
+    }
+    restore_env("MLXCEL_CACHE_DIR", prev_cache_dir);
+    restore_env("MLXCEL_DEFAULT_ORG", prev_default_org);
+    restore_env("HF_HUB_CACHE", prev_hf_cache);
+    restore_env("HF_HOME", prev_hf_home);
+
+    assert_eq!(resolved.unwrap(), store_dir);
+}
+
+#[test]
+fn bare_name_honors_default_org_override() {
+    // `MLXCEL_DEFAULT_ORG` overrides the `mlx-community` default.
+    let tmp = tempfile::tempdir().unwrap();
+    let store_root = tmp.path().join("store");
+    let store_dir = store_root.join("models").join("acme").join("my-model");
+    make_complete_snapshot(&store_dir);
+    let empty_hf = tmp.path().join("hf");
+    fs::create_dir_all(&empty_hf).unwrap();
+    let run_dir = tmp.path().join("run");
+    fs::create_dir_all(&run_dir).unwrap();
+
+    let _guard = env_lock();
+    let prev_cache_dir = std::env::var("MLXCEL_CACHE_DIR").ok();
+    let prev_default_org = std::env::var("MLXCEL_DEFAULT_ORG").ok();
+    let prev_hf_cache = std::env::var("HF_HUB_CACHE").ok();
+    let prev_hf_home = std::env::var("HF_HOME").ok();
+    let prev_cwd = std::env::current_dir().ok();
+    unsafe {
+        std::env::set_var("MLXCEL_CACHE_DIR", &store_root);
+        std::env::set_var("MLXCEL_DEFAULT_ORG", "acme");
+        std::env::set_var("HF_HUB_CACHE", &empty_hf);
+        std::env::remove_var("HF_HOME");
+    }
+    std::env::set_current_dir(&run_dir).unwrap();
+
+    let resolved = resolve_model_source(Path::new("my-model"));
+
+    if let Some(cwd) = prev_cwd {
+        let _ = std::env::set_current_dir(cwd);
+    }
+    restore_env("MLXCEL_CACHE_DIR", prev_cache_dir);
+    restore_env("MLXCEL_DEFAULT_ORG", prev_default_org);
+    restore_env("HF_HUB_CACHE", prev_hf_cache);
+    restore_env("HF_HOME", prev_hf_home);
+
+    assert_eq!(resolved.unwrap(), store_dir);
+}
+
+#[test]
+fn default_org_falls_back_when_unset_or_blank() {
+    let _guard = env_lock();
+    let prev = std::env::var("MLXCEL_DEFAULT_ORG").ok();
+
+    unsafe { std::env::remove_var("MLXCEL_DEFAULT_ORG") };
+    assert_eq!(default_org(), "mlx-community");
+
+    unsafe { std::env::set_var("MLXCEL_DEFAULT_ORG", "   ") };
+    assert_eq!(default_org(), "mlx-community");
+
+    unsafe { std::env::set_var("MLXCEL_DEFAULT_ORG", "acme") };
+    assert_eq!(default_org(), "acme");
+
+    restore_env("MLXCEL_DEFAULT_ORG", prev);
+}
+
+#[test]
+fn bare_name_with_invalid_default_org_errors_without_network() {
+    // A slash in MLXCEL_DEFAULT_ORG would yield a multi-segment repo-id; the
+    // resolver rejects it up front rather than attempting a malformed download.
+    let _guard = env_lock();
+    let prev = std::env::var("MLXCEL_DEFAULT_ORG").ok();
+    unsafe { std::env::set_var("MLXCEL_DEFAULT_ORG", "owner/extra") };
+
+    let err = resolve_model_source(Path::new("my-model")).unwrap_err();
+    let msg = format!("{err}");
+
+    restore_env("MLXCEL_DEFAULT_ORG", prev);
+
+    assert!(msg.contains("MLXCEL_DEFAULT_ORG"), "got: {msg}");
+    assert!(msg.contains("invalid repo-id"), "got: {msg}");
 }

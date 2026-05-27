@@ -150,6 +150,9 @@ struct ServerArgs {
     /// invoked without supplying `-m`. An existing path is used as-is; a
     /// repo-id is resolved from a legacy `./models/<name>` directory, the
     /// HuggingFace cache, or the mlxcel store, and auto-downloaded on a miss.
+    /// A bare name without a slash (e.g. `Qwen3-4B-4bit`) is resolved as
+    /// `mlx-community/<name>`; override the org with the
+    /// `MLXCEL_DEFAULT_ORG` environment variable.
     #[arg(
         short = 'm',
         long = "model",

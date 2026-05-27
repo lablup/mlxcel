@@ -78,7 +78,10 @@ const MULTILINE_FENCE: &str = "\"\"\"";
 pub struct ChatOptions {
     /// Local model directory **or** a HuggingFace `owner/name` repo-id. Passed
     /// verbatim to [`mlxcel::downloader::resolve_model_source_with_override`],
-    /// so a repo-id auto-downloads exactly like `generate -m <repo-id>`.
+    /// so a repo-id auto-downloads exactly like `generate -m <repo-id>`. A bare
+    /// name without a slash (e.g. `Qwen3-4B-4bit`) is resolved as
+    /// `mlx-community/<name>`; override the org with the `MLXCEL_DEFAULT_ORG`
+    /// environment variable.
     pub model: PathBuf,
     /// Model-store root override (`--models-dir`, issue #107) threaded into the
     /// `-m` resolver so a repo-id resolves to / downloads under this root. `None`

@@ -69,7 +69,11 @@ enum Commands {
     ///
     ///     mlxcel run mlx-community/Qwen3-4B-4bit            # interactive chat
     ///     mlxcel run mlx-community/Qwen3-4B-4bit -p "Hi"    # one-shot, then exit
+    ///     mlxcel run Qwen3-4B-4bit                          # bare name -> mlx-community/Qwen3-4B-4bit
     ///     mlxcel run                                        # default model, interactive
+    ///
+    /// A bare name without a slash (e.g. `Qwen3-4B-4bit`) is resolved as
+    /// `mlx-community/<name>`; override the org with `MLXCEL_DEFAULT_ORG`.
     ///
     /// With no `-p/--prompt`, `run` drops into the interactive multi-turn chat
     /// REPL. With `-p`, it produces a single completion and exits — identical
@@ -247,7 +251,9 @@ pub(crate) struct ModelOptions {
     /// repo-id (e.g. `mlx-community/Qwen3-4B-4bit`) is resolved from a
     /// legacy `./models/<name>` directory, the HuggingFace cache, or the
     /// mlxcel store, and downloaded into the mlxcel store on a miss so it
-    /// runs from any directory.
+    /// runs from any directory. A bare name without a slash (e.g.
+    /// `Qwen3-4B-4bit`) is resolved as `mlx-community/<name>`; override
+    /// the org with the `MLXCEL_DEFAULT_ORG` environment variable.
     #[arg(short, long, value_name = "PATH_OR_REPO_ID")]
     pub(crate) model: PathBuf,
 
@@ -380,7 +386,10 @@ pub(crate) struct InspectArgs {
     /// An existing local path is used as-is; an `owner/name` repo-id
     /// (e.g. `mlx-community/Qwen3-4B-4bit`) is resolved from a legacy
     /// `./models/<name>` directory, the HuggingFace cache, or the mlxcel
-    /// store, and downloaded into the mlxcel store on a miss.
+    /// store, and downloaded into the mlxcel store on a miss. A bare name
+    /// without a slash (e.g. `Qwen3-4B-4bit`) is resolved as
+    /// `mlx-community/<name>`; override the org with the
+    /// `MLXCEL_DEFAULT_ORG` environment variable.
     #[arg(short, long, value_name = "PATH_OR_REPO_ID")]
     pub(crate) model: std::path::PathBuf,
 
@@ -613,7 +622,10 @@ pub(crate) struct ServeArgs {
     /// An existing local path is used as-is; an `owner/name` repo-id
     /// (e.g. `mlx-community/Qwen3-4B-4bit`) is resolved from a legacy
     /// `./models/<name>` directory, the HuggingFace cache, or the mlxcel
-    /// store, and downloaded into the mlxcel store on a miss.
+    /// store, and downloaded into the mlxcel store on a miss. A bare name
+    /// without a slash (e.g. `Qwen3-4B-4bit`) is resolved as
+    /// `mlx-community/<name>`; override the org with the
+    /// `MLXCEL_DEFAULT_ORG` environment variable.
     #[arg(short, long, env = "LLAMA_ARG_MODEL", value_name = "PATH_OR_REPO_ID")]
     model: PathBuf,
 

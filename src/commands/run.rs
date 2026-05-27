@@ -72,6 +72,9 @@ pub(crate) struct RunArgs {
     /// `mlx-community/Llama-3.2-3B-Instruct-4bit` (mlx-lm parity) and
     /// auto-downloads it into the mlxcel store on first use. Given as a
     /// positional argument so `mlxcel run <repo-id>` reads like `ollama run`.
+    /// A bare name without a slash (e.g. `Qwen3-4B-4bit`) is resolved as
+    /// `mlx-community/<name>`; override the org with the `MLXCEL_DEFAULT_ORG`
+    /// environment variable.
     #[arg(value_name = "MODEL_OR_REPO_ID")]
     pub(crate) model: Option<PathBuf>,
 

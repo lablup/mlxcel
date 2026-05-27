@@ -19,7 +19,7 @@
 //! downloading the snapshot on a cache miss. The model is then runnable from
 //! any directory — the mlx-lm / ollama / LM Studio convenience UX.
 //!
-//! # Resolution order (locked design, epic #92)
+//! # Resolution order (locked design, epic #92, extended by issue #112)
 //!
 //! [`resolve_model_source`] applies exactly this precedence:
 //!
@@ -36,9 +36,20 @@
 //!    snapshot ([`store::hf_cache_snapshot`], read-only reuse); (c) the mlxcel
 //!    global store ([`store::model_dir`]) if complete; (d) on a miss, download
 //!    the snapshot into the mlxcel global store via the shared hardened
-//!    downloader ([`download_repo`]) and use it.
-//! 3. **Neither** — a clear, actionable error (not an existing path and not a
-//!    valid `owner/name` repo-id).
+//!    downloader ([`download_repo`]) and use it. Steps 1 and 2 take precedence
+//!    over step 3, so an explicit `owner/name` and an existing local path are
+//!    always resolved exactly as provided.
+//! 3. **Bare single segment (issue #112)** — a single valid segment with no `/`
+//!    (passes `is_repo_segment`, fails `is_repo_id_shape`) is resolved as
+//!    `<DEFAULT_ORG>/<segment>`, where `DEFAULT_ORG` is read from
+//!    `$MLXCEL_DEFAULT_ORG` (default `mlx-community`). This covers the common
+//!    case where `mlx-community` is the source of MLX-format checkpoints, so
+//!    `mlxcel run Qwen3-4B-4bit` resolves to
+//!    `mlx-community/Qwen3-4B-4bit` without requiring the user to type the full
+//!    `owner/name`. The resolved repo-id is printed before download/load so the
+//!    expansion is never a silent surprise.
+//! 4. **Neither** — a clear, actionable error (not an existing path, not a
+//!    valid `owner/name` repo-id, and not a bare single segment).
 //!
 //! The "completeness" gate for the legacy and store directories keys on a
 //! present `config.json`, mirroring the downloader's own `snapshot_complete`
@@ -64,6 +75,13 @@ const LEGACY_MODELS_DIR: &str = "models";
 /// load. Mirrors the downloader's `snapshot_complete` gate and
 /// [`store::hf_cache_snapshot`], both of which key on `config.json`.
 const SNAPSHOT_MARKER: &str = "config.json";
+
+/// Default HuggingFace org prepended to a bare, prefix-less model name
+/// (issue #112) when `MLXCEL_DEFAULT_ORG` is unset or empty.
+const DEFAULT_ORG: &str = "mlx-community";
+
+/// Environment variable overriding [`DEFAULT_ORG`] for bare-name resolution.
+const DEFAULT_ORG_ENV: &str = "MLXCEL_DEFAULT_ORG";
 
 /// Resolve a `-m/--model` value into a concrete on-disk model directory,
 /// auto-downloading a HuggingFace repo-id on a cache miss.
@@ -106,12 +124,29 @@ pub fn resolve_model_source_with_override(
         return Err(not_a_model_error(value));
     };
 
-    // 2. `owner/name` repo-id shape → reuse-or-download.
+    // 2. `owner/name` repo-id shape → reuse-or-download. An explicit
+    //    `owner/name` always wins over the bare-name default org below.
     if is_repo_id_shape(value_str) {
         return resolve_repo_id(value_str, None, models_dir);
     }
 
-    // 3. Neither an existing path nor a valid repo-id.
+    // 3. Bare, prefix-less model name (issue #112): a single valid segment with
+    //    no `/`. Prepend the default org ($MLXCEL_DEFAULT_ORG, else
+    //    `mlx-community`) and resolve the result as a repo-id, so
+    //    `mlxcel run gemma-4-e4b-it-4bit` means
+    //    `mlx-community/gemma-4-e4b-it-4bit`. Steps 1 and 2 take precedence, so
+    //    an existing local path and an explicit `owner/name` are unaffected.
+    if is_repo_segment(value_str) {
+        let org = default_org();
+        let repo_id = format!("{org}/{value_str}");
+        if !is_repo_id_shape(&repo_id) {
+            return Err(bad_default_org_error(&org, value_str));
+        }
+        println!("[mlxcel] '{value_str}' -> {repo_id}");
+        return resolve_repo_id(&repo_id, None, models_dir);
+    }
+
+    // 4. Neither an existing path, a valid repo-id, nor a bare model name.
     Err(not_a_model_error(value))
 }
 
@@ -249,6 +284,28 @@ fn not_a_model_error(value: &Path) -> anyhow::Error {
          repo-id (expected `owner/name`, e.g. `mlx-community/Qwen3-4B-4bit`). \
          Pass a local model directory or a repo-id to auto-download.",
         value.display()
+    )
+}
+
+/// The org to prepend to a bare model name: the trimmed value of
+/// `$MLXCEL_DEFAULT_ORG` when set and non-empty, else [`DEFAULT_ORG`]
+/// (`mlx-community`). A blank/whitespace value falls back to the default.
+fn default_org() -> String {
+    std::env::var(DEFAULT_ORG_ENV)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| DEFAULT_ORG.to_string())
+}
+
+/// Build the error for when `$MLXCEL_DEFAULT_ORG` expands a bare name into a
+/// value that is not a valid `owner/name` repo-id (e.g. the org contains a `/`
+/// or an illegal character).
+fn bad_default_org_error(org: &str, name: &str) -> anyhow::Error {
+    anyhow!(
+        "MLXCEL_DEFAULT_ORG='{org}' expands the bare model name '{name}' to an \
+         invalid repo-id '{org}/{name}'; the org must be a single path segment \
+         ([A-Za-z0-9._-]). Pass a full `owner/name` repo-id instead."
     )
 }
 

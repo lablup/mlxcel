@@ -83,11 +83,12 @@ mlxcel download mlx-community/Qwen3.5-0.8B-4bit --models-dir /Volumes/Models
 
 The model-store root resolves in this order: a `--models-dir <PATH>` flag (on `download`, `generate`, `serve`, `inspect`, `run`, `list --local`, `rm`, and the `mlxcel-server` server-start path), then the `MLXCEL_MODELS_DIR` environment variable, then `${MLXCEL_CACHE_DIR:-$HOME/.cache/mlxcel}/models`. The dedicated `--models-dir` / `MLXCEL_MODELS_DIR` root holds snapshots directly at `<root>/<owner>/<name>`; only the cache-root fallback adds the `models/` segment. `--local-dir` is a different knob that writes one snapshot verbatim at an exact path and wins over `--models-dir` for the download destination.
 
-`-m/--model` on `mlxcel generate`, `mlxcel serve`, `mlxcel inspect`, and the `mlxcel-server` server-start path accepts a HuggingFace `owner/name` repo-id directly, so the explicit `download` step is optional — pass the repo-id and mlxcel reuses a local `./models/<name>` directory, the HuggingFace cache, or the mlxcel store, and downloads into the mlxcel store on a miss:
+`-m/--model` on `mlxcel generate`, `mlxcel serve`, `mlxcel inspect`, and the `mlxcel-server` server-start path accepts a HuggingFace `owner/name` repo-id directly, so the explicit `download` step is optional — pass the repo-id and mlxcel reuses a local `./models/<name>` directory, the HuggingFace cache, or the mlxcel store, and downloads into the mlxcel store on a miss. A bare, prefix-less name (no slash) is resolved as `mlx-community/<name>` automatically; set `MLXCEL_DEFAULT_ORG` to use a different org:
 
 ```bash
 # Auto-download on first use, reuse from the store afterwards — runs from any directory.
 mlxcel generate -m mlx-community/Qwen3.5-0.8B-4bit -p "Hello, world!" -n 100
+mlxcel generate -m Qwen3.5-0.8B-4bit -p "Hello, world!" -n 100  # -> mlx-community/Qwen3.5-0.8B-4bit
 mlxcel inspect -m mlx-community/Qwen3.5-0.8B-4bit --max-tokens 32768
 mlxcel serve -m mlx-community/Qwen3.5-0.8B-4bit --port 8080
 mlxcel-server -m mlx-community/Qwen3.5-0.8B-4bit --port 8080
@@ -100,6 +101,9 @@ For an `ollama run`-style one-liner, use `mlxcel run`. It takes the model as a p
 ```bash
 # Interactive multi-turn chat REPL (no -p).
 mlxcel run mlx-community/Qwen3.5-0.8B-4bit
+
+# Bare name — resolved as mlx-community/Qwen3.5-0.8B-4bit.
+mlxcel run Qwen3.5-0.8B-4bit
 
 # One-shot generation, then exit (-p). Identical output to the equivalent `generate`.
 mlxcel run mlx-community/Qwen3.5-0.8B-4bit -p "Hello, world!" -n 100
