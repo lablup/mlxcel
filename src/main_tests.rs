@@ -14,7 +14,45 @@
 
 use clap::Parser;
 
-use super::{Cli, Commands, FAMILY_ORDER, write_supported_models};
+use super::{
+    Cli, Commands, FAMILY_ORDER, PipelineParallelOptions, TensorParallelOptions,
+    write_supported_models,
+};
+
+/// The `Default` impls for the parallelism option groups (used by the `mlxcel
+/// run` lowering in `commands::run`) MUST match the values clap fills when the
+/// corresponding flags are absent on `mlxcel generate`. If a `#[arg(default_*)]`
+/// attribute ever changes without updating the matching `Default` impl, the
+/// `run`-dispatched one-shot path would silently diverge from a plain
+/// `generate`. This test pins the two together.
+#[test]
+fn run_defaults_match_clap_defaults() {
+    let cli = Cli::try_parse_from(["mlxcel", "generate", "-m", "models/foo", "-p", "hi"])
+        .expect("minimal generate must parse");
+    let Commands::Generate(args) = cli.command else {
+        panic!("expected generate command");
+    };
+
+    let tp_default = TensorParallelOptions::default();
+    assert_eq!(args.tensor_parallel.tp_size, tp_default.tp_size);
+    assert_eq!(args.tensor_parallel.tp_moe_mode, tp_default.tp_moe_mode);
+    assert_eq!(
+        args.tensor_parallel.tp_embedding_mode,
+        tp_default.tp_embedding_mode
+    );
+    assert_eq!(
+        args.tensor_parallel.tp_lm_head_mode,
+        tp_default.tp_lm_head_mode
+    );
+
+    let pp_default = PipelineParallelOptions::default();
+    assert_eq!(args.pipeline_parallel.pp_size, pp_default.pp_size);
+    assert_eq!(args.pipeline_parallel.pp_layers, pp_default.pp_layers);
+    assert_eq!(
+        args.pipeline_parallel.pp_micro_batch_size,
+        pp_default.pp_micro_batch_size
+    );
+}
 
 /// Issue #26: the rendered `mlxcel list` output must mention every model
 /// that is registered in `ALL_MODEL_TYPES`. This is the safety net that

@@ -25,6 +25,7 @@ pub(crate) mod generate;
 mod generate_vlm;
 pub(crate) mod inspect;
 pub(crate) mod models;
+pub(crate) mod run;
 mod serve;
 
 pub(crate) use chat::{ChatOptions, run_chat};
@@ -33,4 +34,5 @@ pub(crate) use download::run_download;
 pub(crate) use generate::run_generate;
 pub(crate) use inspect::run_inspect;
 pub(crate) use models::{run_list_local, run_remove};
+pub(crate) use run::{RunArgs, run_run};
 pub(crate) use serve::run_serve;

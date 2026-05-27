@@ -83,6 +83,22 @@ mlxcel serve -m mlx-community/Qwen3.5-0.8B-4bit --port 8080
 
 An existing local path is still used as-is, so `-m ./models/...` and `-m ~/.cache/mlxcel/...` behave exactly as before.
 
+For an `ollama run`-style one-liner, use `mlxcel run`. It takes the model as a positional argument (repo-id or local path, resolved and auto-downloaded exactly like `-m` above) and chooses interactive chat or one-shot generation based on whether you pass `-p`:
+
+```bash
+# Interactive multi-turn chat REPL (no -p).
+mlxcel run mlx-community/Qwen3.5-0.8B-4bit
+
+# One-shot generation, then exit (-p). Identical output to the equivalent `generate`.
+mlxcel run mlx-community/Qwen3.5-0.8B-4bit -p "Hello, world!" -n 100
+
+# No model argument → falls back to the default model
+# `mlx-community/Llama-3.2-3B-Instruct-4bit` (mlx-lm parity), auto-downloaded on first use.
+mlxcel run
+```
+
+`mlxcel run` shares `mlxcel generate`'s sampling and generation flags (`-n`, `--temp`, `--top-p`, `--no-chat-template`, the TurboQuant KV-cache flags, …), so it is a thin convenience wrapper over the same code path — not a separate engine.
+
 `mlxcel inspect` is read-only and prints a byte-level breakdown of weights /
 KV cache / runtime headroom against available unified memory without loading
 any tensors. `--estimate-memory` on `mlxcel generate` and `mlxcel serve`

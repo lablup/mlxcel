@@ -61,6 +61,23 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Commands {
+    /// Run a model: interactive chat, or one-shot generation with `-p`.
+    ///
+    /// Mirrors `ollama run` / mlx-lm ergonomics. Pass a HuggingFace
+    /// `owner/name` repo-id or a local model directory (auto-downloaded and
+    /// resolved exactly like `mlxcel generate -m`):
+    ///
+    ///     mlxcel run mlx-community/Qwen3-4B-4bit            # interactive chat
+    ///     mlxcel run mlx-community/Qwen3-4B-4bit -p "Hi"    # one-shot, then exit
+    ///     mlxcel run                                        # default model, interactive
+    ///
+    /// With no `-p/--prompt`, `run` drops into the interactive multi-turn chat
+    /// REPL. With `-p`, it produces a single completion and exits — identical
+    /// to the equivalent `mlxcel generate` invocation. With no model argument,
+    /// it falls back to the default model
+    /// `mlx-community/Llama-3.2-3B-Instruct-4bit` (mlx-lm parity).
+    Run(commands::RunArgs),
+
     /// Generate text from a prompt
     #[command(visible_alias = "gen")]
     Generate(GenerateArgs),
@@ -487,6 +504,35 @@ pub(crate) struct PipelineParallelOptions {
     /// Micro-batch size for pipeline parallelism.
     #[arg(long = "pp-micro-batch-size", default_value_t = 1, value_name = "N")]
     pub(crate) pp_micro_batch_size: usize,
+}
+
+// `Default` impls for the parallelism option groups so the `mlxcel run`
+// dispatcher (`commands::run`) can build a `GenerateArgs` while leaving these
+// advanced groups at their inert single-device defaults — `run` deliberately
+// does not expose tensor/pipeline parallelism. These MUST stay in lock-step
+// with the `#[arg(default_value*)]` attributes above; the
+// `run_defaults_match_clap_defaults` test in `main_tests.rs` fails the build if
+// they ever drift.
+
+impl Default for TensorParallelOptions {
+    fn default() -> Self {
+        Self {
+            tp_size: 1,
+            tp_moe_mode: "expert_parallel".to_string(),
+            tp_embedding_mode: "replicated".to_string(),
+            tp_lm_head_mode: "replicated".to_string(),
+        }
+    }
+}
+
+impl Default for PipelineParallelOptions {
+    fn default() -> Self {
+        Self {
+            pp_size: 1,
+            pp_layers: None,
+            pp_micro_batch_size: 1,
+        }
+    }
 }
 
 /// Server options
@@ -1284,6 +1330,7 @@ fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
+        Commands::Run(args) => commands::run_run(args),
         Commands::Generate(args) => commands::run_generate(args),
         Commands::Serve(args) => commands::run_serve(args),
         Commands::List(args) => {

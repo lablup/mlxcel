@@ -214,6 +214,49 @@ fn mlxcel_server_help_lists_all_turbo_flags_and_modes() {
     assert_invariants("mlxcel-server", &help);
 }
 
+/// Issue #95: `mlxcel run` flattens the same `GenerationOptions` group as
+/// `mlxcel generate` (which carries the shared `TurboKvCacheArgs`), so its
+/// `--help` MUST expose the identical TurboQuant KV-cache flag block. This
+/// locks the new `run` verb into the same cross-binary invariant the other
+/// surfaces already satisfy.
+#[test]
+fn mlxcel_run_help_lists_all_turbo_flags_and_modes() {
+    let help = help_output("mlxcel", &["run", "--help"]);
+    assert_invariants("mlxcel run", &help);
+}
+
+/// Issue #95: `mlxcel run` shares `generate`'s sampling/generation flag groups
+/// and documents the mlx-lm-style default-model fallback. Assert the shared
+/// flags and the documented default repo-id are present so the `run` surface
+/// cannot silently drop them or change the default without updating this test.
+#[test]
+fn mlxcel_run_help_lists_shared_flags_and_default_model() {
+    let help = help_output("mlxcel", &["run", "--help"]);
+
+    // Shared generation/sampling flags (the same clap groups `generate` uses).
+    for sig in [
+        "--prompt <TEXT>",
+        "--max-tokens <N>",
+        "--temp <FLOAT>",
+        "--top-p <FLOAT>",
+        "--top-k <K>",
+        "--no-chat-template",
+        "--adapter <PATH>",
+    ] {
+        assert!(
+            help.contains(sig),
+            "mlxcel run help is missing shared flag {sig:?}.\nHelp was:\n{help}"
+        );
+    }
+
+    // The documented default model (mlx-lm parity). If the default repo-id
+    // changes, this test forces the help text + README to be updated too.
+    assert!(
+        help.contains("mlx-community/Llama-3.2-3B-Instruct-4bit"),
+        "mlxcel run help must document the default model repo-id.\nHelp was:\n{help}"
+    );
+}
+
 /// Cross-binary equivalence: the four shared flags should appear with the
 /// same names and same value-name in every binary's help block. We do NOT
 /// require byte-identical blocks because clap interleaves binary-specific
@@ -225,6 +268,9 @@ fn turbo_flag_signatures_match_across_binaries() {
     let generate_help = help_output("mlxcel", &["generate", "--help"]);
     let serve_help = help_output("mlxcel", &["serve", "--help"]);
     let server_help = help_output("mlxcel-server", &["--help"]);
+    // Issue #95: `run` flattens the same `GenerationOptions` (TurboKvCacheArgs)
+    // group, so it must carry the identical flag signatures.
+    let run_help = help_output("mlxcel", &["run", "--help"]);
 
     let signatures = [
         "--cache-type-k <TYPE>",
@@ -244,6 +290,10 @@ fn turbo_flag_signatures_match_across_binaries() {
         assert!(
             server_help.contains(sig),
             "mlxcel-server is missing flag signature {sig:?}"
+        );
+        assert!(
+            run_help.contains(sig),
+            "mlxcel run is missing flag signature {sig:?}"
         );
     }
 }
