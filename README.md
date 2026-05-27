@@ -72,6 +72,17 @@ mlxcel-server \
 mlxcel download mlx-community/Qwen3.5-0.8B-4bit --local-dir ./models/Qwen3.5-0.8B-4bit
 ```
 
+`-m/--model` on `mlxcel generate`, `mlxcel serve`, and `mlxcel inspect` accepts a HuggingFace `owner/name` repo-id directly, so the explicit `download` step is optional — pass the repo-id and mlxcel reuses a local `./models/<name>` directory, the HuggingFace cache, or the mlxcel store, and downloads into the mlxcel store on a miss:
+
+```bash
+# Auto-download on first use, reuse from the store afterwards — runs from any directory.
+mlxcel generate -m mlx-community/Qwen3.5-0.8B-4bit -p "Hello, world!" -n 100
+mlxcel inspect -m mlx-community/Qwen3.5-0.8B-4bit --max-tokens 32768
+mlxcel serve -m mlx-community/Qwen3.5-0.8B-4bit --port 8080
+```
+
+An existing local path is still used as-is, so `-m ./models/...` and `-m ~/.cache/mlxcel/...` behave exactly as before.
+
 `mlxcel inspect` is read-only and prints a byte-level breakdown of weights /
 KV cache / runtime headroom against available unified memory without loading
 any tensors. `--estimate-memory` on `mlxcel generate` and `mlxcel serve`
