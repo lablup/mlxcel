@@ -137,13 +137,13 @@ in the prefill path.
 ### Decode: steady-state token generation
 
 Decode stays close to the Python MLX references on the same host. For M5 Max,
-text decode averaged **98%** of `mlx-lm` with a **99%** median, while VLM decode
-averaged **101%** of `mlx-vlm` with a **100%** median.
+text decode averaged **99%** of `mlx-lm` with a **99%** median, while VLM decode
+averaged **102%** of `mlx-vlm` with a **101%** median.
 
 | Mode | Baseline | Comparable pairs | Average vs baseline | Median vs baseline | >=90% parity | >= baseline | Range |
 |------|----------|-----------------:|--------------------:|-------------------:|-------------:|------------:|------:|
-| Text | `mlx-lm` | 66 | 98% | **99%** | 62 / 66 (94%) | 27 / 66 (41%) | 72%-127% |
-| VLM | `mlx-vlm` | 20 | 101% | **100%** | 17 / 20 (85%) | 10 / 20 (50%) | 74%-123% |
+| Text | `mlx-lm` | 66 | 99% | **99%** | 62 / 66 (94%) | 27 / 66 (41%) | 72%-127% |
+| VLM | `mlx-vlm` | 22 | 102% | **101%** | 18 / 22 (82%) | 11 / 22 (50%) | 74%-123% |
 
 Representative decode throughput is shown below in tokens per second. M5 Max
 reference columns are same-host `mlx-lm` or `mlx-vlm` runs; M1 Ultra values are
@@ -159,6 +159,9 @@ family, quantization, prompt shape, decode length, and hardware. See
 | Qwen2.5 7B 4bit | 110 tok/s | 126 tok/s | 124 tok/s | 102% |
 | Gemma 2B 4bit | 190 tok/s | 217 tok/s | 223 tok/s | 97% |
 | Gemma 3 4B 4bit | 114 tok/s | 182 tok/s | 182 tok/s | 100% |
+| Gemma 2 2B 4bit | 129 tok/s | 242 tok/s | 242 tok/s | 100% |
+| Phi-3.5-mini 4bit | 121 tok/s | 205 tok/s | 208 tok/s | 98% |
+| Jamba v0.1 4bit (hybrid SSM) | 112 tok/s | 216 tok/s | 219 tok/s | 98% |
 | Gemma 4 26B-A4B 4bit | 73 tok/s | 137 tok/s | 141 tok/s | 97% |
 | Qwen3 MoE 30B 4bit | 71 tok/s | 156 tok/s | 147 tok/s | 106% |
 | GLM-4 Flash 4bit | 47 tok/s | 104 tok/s | 104 tok/s | 100% |
@@ -178,6 +181,7 @@ family, quantization, prompt shape, decode length, and hardware. See
 | Qwen3.5 35B-A3B 4bit | 71 tok/s | 151 tok/s | 129 tok/s | 117% |
 | Gemma 4 E2B 4bit | 107 tok/s | 217 tok/s | 202 tok/s | 108% |
 | Gemma 3n E2B 4bit | 72 tok/s | 151 tok/s | 125 tok/s | 121% |
+| InternVL3 1B | - | 601 tok/s | 529 tok/s | 114% |
 | Gemma 4 26B-A4B 4bit | 63 tok/s | 134 tok/s | 137 tok/s | 98% |
 | Molmo2 4B | 59 tok/s | 64 tok/s | 67 tok/s | 96% |
 | Phi 3.5 Vision 4bit | 94 tok/s | 123 tok/s | 160 tok/s | 77% |

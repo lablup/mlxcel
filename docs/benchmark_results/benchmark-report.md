@@ -20,9 +20,9 @@ includes image encoder and projector work.
 
 | Host | Mode | Baseline | Comparable pairs | Prefill median vs baseline | Decode median vs baseline | Decode result |
 |------|------|----------|-----------------:|---------------------------:|--------------------------:|---------------|
-| M5 Max | Text | mlx-lm | 66 | **2.70x** | **99%** | 58/66 at >=90% parity |
+| M5 Max | Text | mlx-lm | 66 | **2.70x** | **99%** | 62/66 at >=90% parity |
 | M1 Ultra | Text | mlx-lm | 73 | **1.76x** | **97%** | 62/73 at >=90% parity |
-| M5 Max | VLM | mlx-vlm | 20 | 0.94x | **100%** | 16/20 at >=90% parity |
+| M5 Max | VLM | mlx-vlm | 22 | 0.94x | **101%** | 18/22 at >=90% parity |
 | M1 Ultra | VLM | mlx-vlm | 17 | **1.33x** | **98%** | 11/17 at >=90% parity |
 
 Ratios above use successful runs only. Baseline rows use exact CSV model
@@ -48,9 +48,9 @@ complete in this sweep. With a generated-token threshold of 5 tokens:
 
 | Host | Mode | mlxcel successful, Python baseline unavailable or failed | Comparable successful pairs |
 |------|------|---------------------------------------------------------:|----------------------------:|
-| M5 Max | Text | 25 | 66 |
+| M5 Max | Text | 26 | 66 |
 | M1 Ultra | Text | 22 | 73 |
-| M5 Max | VLM | 12 | 20 |
+| M5 Max | VLM | 12 | 22 |
 | M1 Ultra | VLM | 20 | 17 |
 
 This is the useful public framing: mlxcel is a Rust inference engine with

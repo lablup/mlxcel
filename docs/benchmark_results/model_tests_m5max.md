@@ -259,14 +259,14 @@ snapshot.
 - **Comparable text pairs**: 66 (models with >=5 generated tokens both sides)
 - **mlxcel >= mlx-lm**: 27 / 66 (41%)
 - **mlxcel >= 90% parity**: 62 / 66 (94%, the Phi-3.5, Gemma dense, and Jamba fixes raise four models past 90%)
-- **Average mlxcel/mlx-lm**: 98% (median 99%, range 72%-127%)
+- **Average mlxcel/mlx-lm**: 99% (median 99%, range 72%-127%)
 
 ### Aggregate (VLM, models with >=5 generated tokens both sides)
 
-- **Comparable VLM pairs**: 20
-- **mlxcel >= mlx-vlm**: 10 / 20 (50%, the Phi-3.5 vision fix raises it from 77% to 106%)
-- **mlxcel >= 90% parity**: 17 / 20 (85%)
-- **Average mlxcel/mlx-vlm**: 101% (median 100%, range 74%-123%)
+- **Comparable VLM pairs**: 22
+- **mlxcel >= mlx-vlm**: 11 / 22 (50%)
+- **mlxcel >= 90% parity**: 18 / 22 (82%)
+- **Average mlxcel/mlx-vlm**: 102% (median 101%, range 74%-123%)
 
 ### Text decode (tok/s)
 
