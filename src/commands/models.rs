@@ -36,7 +36,8 @@ use std::path::Path;
 use anyhow::{Result, anyhow};
 
 use mlxcel::downloader::{
-    RemoveOutcome, StoredModel, list_models_with_override, models_root, remove_model_with_override,
+    RemoveOutcome, StoredModel, dir_size, list_models_with_override, models_root,
+    remove_model_with_override,
 };
 
 /// Run `mlxcel list --local`: print downloaded models from the global store.
@@ -200,7 +201,7 @@ pub(crate) fn run_remove(
 
     // Store hit. Confirm unless --yes.
     if !yes {
-        let size = dir_size_for_prompt(&target, models_dir);
+        let size = dir_size_for_prompt(&target);
         if !confirm_removal(repo_id, &target.display().to_string(), &size)? {
             println!("Aborted; nothing was removed.");
             return Ok(());
@@ -225,21 +226,13 @@ pub(crate) fn run_remove(
     }
 }
 
-/// Best-effort size string for the confirmation prompt. Recomputed from the
-/// store helper's public listing is overkill for a single dir, so we sum here
-/// via the same walk the library uses; failures degrade to "unknown size".
-fn dir_size_for_prompt(dir: &Path, models_dir: Option<&Path>) -> String {
-    // Reuse the library's listing to find this exact path's size when present,
-    // avoiding a second size-walk implementation in the binary. Listing uses
-    // the same `--models-dir` override so the path matches the probe target.
-    let target = dir.to_path_buf();
-    if let Some(m) = list_models_with_override(models_dir)
-        .into_iter()
-        .find(|m| m.path == target)
-    {
-        return mlxcel::memory_estimate::format_bytes(m.size_bytes);
-    }
-    "unknown size".to_string()
+/// Best-effort size string for the `rm` confirmation prompt. Sizes the single
+/// target directory directly via the library's shared walk, rather than listing
+/// and summing every model in the store: pointing `--models-dir` /
+/// `MLXCEL_MODELS_DIR` at a large volume with many snapshots should not make the
+/// prompt pay an O(whole-store) stat cost just to show one model's size.
+fn dir_size_for_prompt(dir: &Path) -> String {
+    mlxcel::memory_estimate::format_bytes(dir_size(dir))
 }
 
 /// Prompt on the controlling TTY for a yes/no confirmation. Returns `Ok(true)`

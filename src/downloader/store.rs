@@ -79,7 +79,7 @@ pub fn store_root() -> Option<PathBuf> {
 ///
 /// The dedicated knobs (1, 2) place snapshots directly at
 /// `<root>/<owner>/<name>` with no extra `models/` subdir; only the legacy
-/// cache-root path (3) appends [`MODELS_SUBDIR`]. This is the single source of
+/// cache-root path (3) appends the `MODELS_SUBDIR` (`models/`). This is the single source of
 /// truth for the env var — no other function reads `MLXCEL_MODELS_DIR`.
 ///
 /// Returns `None` only when no override / env var is set **and** [`store_root`]
@@ -97,13 +97,15 @@ pub fn models_root(override_dir: Option<&Path>) -> Option<PathBuf> {
 /// Resolve the global store directory for a given HuggingFace `repo_id`,
 /// using the default (cache-root) models root.
 ///
-/// Returns `store_root()/models/<owner>/<name>`. When `repo_id` has no `/`
-/// separator (e.g. a bare `gpt2`), the whole id is used as the final path
-/// component so the layout stays well-formed.
+/// With neither `--models-dir` nor `MLXCEL_MODELS_DIR` set this returns
+/// `store_root()/models/<owner>/<name>`; when `MLXCEL_MODELS_DIR` is set it
+/// returns `$MLXCEL_MODELS_DIR/<owner>/<name>` (no `models/` subdir). This is a
+/// thin `None`-delegating wrapper over [`model_dir_with_override`], which
+/// resolves the override-aware [`models_root`]. When `repo_id` has no `/`
+/// separator (e.g. a bare `gpt2`), the whole id is the final path component.
 ///
-/// Returns `None` when [`store_root`] cannot be resolved (no
-/// `MLXCEL_CACHE_DIR` and no home directory). Thin `None`-delegating wrapper
-/// over [`model_dir_with_override`] for back-compat with pre-#107 callers.
+/// Returns `None` when [`models_root`] cannot be resolved (no
+/// `MLXCEL_MODELS_DIR`/`MLXCEL_CACHE_DIR` and no home directory).
 pub fn model_dir(repo_id: &str) -> Option<PathBuf> {
     model_dir_with_override(repo_id, None)
 }
@@ -145,7 +147,7 @@ fn model_dir_in(root: &Path, repo_id: &str) -> PathBuf {
 /// Pure helper: compose `<models_root>/<owner>/<name>` from an explicit
 /// **models** root (the directory that directly holds snapshots — no
 /// `models/` subdir is appended here). The single sanitized-segment join used
-/// by both the cache-root layout ([`model_dir_in`]) and the override-aware
+/// by both the cache-root layout (`model_dir_in`) and the override-aware
 /// layout ([`model_dir_with_override`]).
 ///
 /// `repo_id` segments are sanitized via [`sanitize_repo_id_segments`] so an
@@ -429,7 +431,10 @@ fn list_models_under(models_root: &Path) -> Vec<StoredModel> {
 /// snapshot containing symlinks counts the link entry itself rather than its
 /// (possibly out-of-tree) target. I/O errors on individual entries contribute
 /// zero rather than aborting, keeping the size best-effort but never panicking.
-fn dir_size(dir: &Path) -> u64 {
+///
+/// Public so the CLI can size a single snapshot directory (e.g. the `mlxcel rm`
+/// confirmation prompt) without re-listing or re-walking the whole store.
+pub fn dir_size(dir: &Path) -> u64 {
     let mut total: u64 = 0;
     let mut stack: Vec<PathBuf> = vec![dir.to_path_buf()];
     while let Some(current) = stack.pop() {
@@ -476,7 +481,7 @@ pub enum RemoveError {
     NoStoreRoot,
     /// The resolved target escaped the active models root (whichever
     /// [`models_root`] resolved). This is a safety stop: it should be
-    /// unreachable given the path sanitization in [`model_dir_under`], but is
+    /// unreachable given the path sanitization in `model_dir_under`, but is
     /// enforced defensively so a future regression can never delete outside
     /// the store.
     OutsideStore(PathBuf),
@@ -494,7 +499,8 @@ impl std::fmt::Display for RemoveError {
             RemoveError::NoStoreRoot => write!(
                 f,
                 "cannot resolve the mlxcel model store root \
-                 (set MLXCEL_CACHE_DIR or ensure a home directory is available)"
+                 (pass --models-dir, or set MLXCEL_MODELS_DIR or MLXCEL_CACHE_DIR, \
+                 or ensure a home directory is available)"
             ),
             RemoveError::OutsideStore(p) => write!(
                 f,
@@ -622,7 +628,7 @@ fn remove_model_under(
 /// Both paths are first canonicalized when they exist; for the (common) case
 /// where `child` does not exist yet, we canonicalize `base` and compare the
 /// canonical base against `child` after stripping any `.`/`..` we can resolve
-/// lexically. Because [`model_dir_in`] never emits `..` components, a plain
+/// lexically. Because `model_dir_under` never emits `..` components, a plain
 /// `starts_with` against the canonical (or, if canonicalization fails, the raw)
 /// base is sound here; the explicit check is the defensive backstop.
 fn is_within(base: &Path, child: &Path) -> bool {

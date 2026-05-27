@@ -169,7 +169,9 @@ pub(crate) struct RmArgs {
     /// Model-store root to remove from instead of the default location.
     ///
     /// Removes the snapshot at `<PATH>/<owner>/<name>` (no extra `models/`
-    /// subdir). Overrides the `MLXCEL_MODELS_DIR` environment variable.
+    /// subdir). Overrides the `MLXCEL_MODELS_DIR` environment variable. The
+    /// path is used verbatim as the store root: deletion only ever touches
+    /// `<PATH>/<owner>/<name>`, so point it at a real model store.
     #[arg(long, value_name = "PATH")]
     pub(crate) models_dir: Option<PathBuf>,
 
