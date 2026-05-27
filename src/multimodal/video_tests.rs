@@ -266,22 +266,13 @@ fn load_video_rejects_oversized_resolution() {
         }
     };
 
-    // Temporarily set a very small pixel cap (e.g. 50x50 = 2500 pixels).
-    // We can't set env vars in a truly isolated way in unit tests without
-    // side effects, so we use a helper that reads the env var at call time.
-    // Run the actual check: create a wrapper that overrides the environment.
-    let result = {
-        // SAFETY: standard test, no multi-threading inside this block that
-        // reads MLXCEL_VIDEO_MAX_PIXELS.
-        unsafe {
-            std::env::set_var("MLXCEL_VIDEO_MAX_PIXELS", "2500");
-        }
-        let r = load_video(&video_path, Some(2.0), None);
-        unsafe {
-            std::env::remove_var("MLXCEL_VIDEO_MAX_PIXELS");
-        }
-        r
+    // Inject a tiny pixel cap (50×50 = 2500) via VideoLimits so the test never
+    // touches the process-global environment (issue #103).
+    let limits = VideoLimits {
+        max_pixels: 2500,
+        ..VideoLimits::default()
     };
+    let result = load_video_with_limits(&video_path, Some(2.0), None, &limits);
 
     // Clean up the temp video.
     let _ = std::fs::remove_file(&video_path);
@@ -296,7 +287,7 @@ fn load_video_rejects_oversized_resolution() {
             assert_eq!(width, 100, "width should match");
             assert_eq!(height, 100, "height should match");
             assert_eq!(pixels, 10_000, "pixels should be width*height");
-            assert_eq!(max_pixels, 2500, "max_pixels should match the env var");
+            assert_eq!(max_pixels, 2500, "max_pixels should match the injected cap");
         }
         Err(other) => panic!("expected ResolutionTooLarge, got: {other:?}"),
         Ok(_) => panic!("expected ResolutionTooLarge error, but load_video succeeded"),
@@ -319,16 +310,13 @@ fn load_video_rejects_overlong_duration() {
         }
     };
 
-    let result = {
-        unsafe {
-            std::env::set_var("MLXCEL_VIDEO_MAX_DURATION_SEC", "2");
-        }
-        let r = load_video(&video_path, Some(2.0), None);
-        unsafe {
-            std::env::remove_var("MLXCEL_VIDEO_MAX_DURATION_SEC");
-        }
-        r
+    // Inject a 2-second cap via VideoLimits so the test never touches the
+    // process-global environment (issue #103).
+    let limits = VideoLimits {
+        max_duration_sec: 2.0,
+        ..VideoLimits::default()
     };
+    let result = load_video_with_limits(&video_path, Some(2.0), None, &limits);
 
     let _ = std::fs::remove_file(&video_path);
 
@@ -341,7 +329,10 @@ fn load_video_rejects_overlong_duration() {
                 seconds > 2.0,
                 "reported duration {seconds:.2}s should exceed the cap"
             );
-            assert_eq!(max_seconds, 2.0, "max_seconds should match the env var");
+            assert_eq!(
+                max_seconds, 2.0,
+                "max_seconds should match the injected cap"
+            );
         }
         Err(other) => panic!("expected DurationTooLong, got: {other:?}"),
         Ok(_) => panic!("expected DurationTooLong error, but load_video succeeded"),
@@ -405,6 +396,7 @@ fn probe_video_missing_width_trips_resolution_cap() {
         None, // width missing
         Some(100),
         Some(10.0),
+        &VideoLimits::default(),
     );
     match result {
         Err(VideoError::ResolutionTooLarge {
@@ -437,6 +429,7 @@ fn probe_video_missing_height_trips_resolution_cap() {
         Some(100),
         None, // height missing
         Some(10.0),
+        &VideoLimits::default(),
     );
     match result {
         Err(VideoError::ResolutionTooLarge { width, height, .. }) => {
@@ -464,6 +457,7 @@ fn probe_video_missing_duration_trips_duration_cap() {
         Some(100),
         Some(100),
         None, // duration missing
+        &VideoLimits::default(),
     );
     match result {
         Err(VideoError::DurationTooLong {
@@ -494,6 +488,7 @@ fn probe_video_both_dimensions_missing_saturates_not_overflows() {
         None, // width missing
         None, // height missing
         Some(10.0),
+        &VideoLimits::default(),
     );
     match result {
         Err(VideoError::ResolutionTooLarge {
@@ -532,21 +527,12 @@ fn probe_video_both_dimensions_missing_saturates_not_overflows() {
 fn split_png_stream_rejects_oversized_frame() {
     use std::path::Path;
 
-    // Set a tiny cap so we don't need to allocate 256 MiB in the test.
-    // SAFETY: no other threads read MLXCEL_VIDEO_MAX_PNG_FRAME_BYTES here.
-    unsafe {
-        std::env::set_var("MLXCEL_VIDEO_MAX_PNG_FRAME_BYTES", "1024");
-    }
-
-    // Feed 2 KiB of random-ish bytes with no IEND marker.
-    // The cap is 1 KiB, so the function must reject before reading all 2 KiB.
+    // Feed 2 KiB of random-ish bytes with no IEND marker, with a tiny 1 KiB cap
+    // passed directly (no env mutation, issue #103) so the function must reject
+    // before reading all 2 KiB rather than allocating 256 MiB.
     let bogus: Vec<u8> = (0u8..=255).cycle().take(2048).collect();
     let path = Path::new("/synthetic/no-iend.png");
-    let result = split_png_stream(bogus.as_slice(), path, 1);
-
-    unsafe {
-        std::env::remove_var("MLXCEL_VIDEO_MAX_PNG_FRAME_BYTES");
-    }
+    let result = split_png_stream(bogus.as_slice(), path, 1, 1024);
 
     match result {
         Err(VideoError::Extract { message, .. }) => {
@@ -558,6 +544,24 @@ fn split_png_stream_rejects_oversized_frame() {
         Err(other) => panic!("expected Extract error for oversized frame, got: {other:?}"),
         Ok(_) => panic!("expected rejection of stream without IEND, but got frames"),
     }
+}
+
+/// `VideoLimits::from_raw` parses overrides and falls back to the compile-time
+/// defaults — exercised purely (no process env touched, issue #103).
+#[test]
+fn video_limits_from_raw_parses_overrides_and_falls_back() {
+    let defaults = VideoLimits::default();
+
+    let parsed = VideoLimits::from_raw(Some("2500"), Some("2"), Some("1024"));
+    assert_eq!(parsed.max_pixels, 2500);
+    assert_eq!(parsed.max_duration_sec, 2.0);
+    assert_eq!(parsed.max_png_frame_bytes, 1024);
+
+    // Missing or unparseable values fall back to the defaults.
+    let fallback = VideoLimits::from_raw(None, Some("not-a-number"), None);
+    assert_eq!(fallback.max_pixels, defaults.max_pixels);
+    assert_eq!(fallback.max_duration_sec, defaults.max_duration_sec);
+    assert_eq!(fallback.max_png_frame_bytes, defaults.max_png_frame_bytes);
 }
 
 // ─── Issue #601: VideoSource fd path through ffmpeg ──────────────────────────
@@ -640,10 +644,14 @@ fn load_video_source_fd_variant_matches_path_variant_frame_count() {
         }
     };
 
-    // Path-based decode (baseline). Use a cap above the synthetic clip's
-    // 4-second duration so this parity test exercises fd-vs-path decoding
-    // rather than the unrelated max-duration guard.
-    let path_frames = load_video(&video_path, Some(5.0), None)
+    // Decode with explicit default limits so this parity test is independent of
+    // the ambient environment (issue #103). `Some(5.0)` is the target FPS, not a
+    // duration cap; the shared default limits keep fd and path on equal footing
+    // for the frame-count comparison.
+    let limits = VideoLimits::default();
+
+    // Path-based decode (baseline).
+    let path_frames = load_video_with_limits(&video_path, Some(5.0), None, &limits)
         .expect("path-based load_video must succeed for synthetic video");
 
     // Fd-based decode (the issue #601 path).
@@ -651,7 +659,7 @@ fn load_video_source_fd_variant_matches_path_variant_frame_count() {
     let owned_fd = std::os::fd::OwnedFd::from(std_file);
     let canonical = std::fs::canonicalize(&video_path).expect("canonicalise");
     let source = VideoSource::from_fd(owned_fd, canonical);
-    let fd_frames = load_video_source(&source, Some(5.0), None)
+    let fd_frames = load_video_source_with_limits(&source, Some(5.0), None, &limits)
         .expect("fd-based load_video_source must succeed for the same synthetic video");
 
     let _ = std::fs::remove_file(&video_path);

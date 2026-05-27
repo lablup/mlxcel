@@ -123,6 +123,76 @@ const DEFAULT_MAX_DURATION_SEC: f64 = 600.0;
 /// Default = 256 MiB.
 const DEFAULT_MAX_PNG_FRAME_BYTES: usize = 256 * 1024 * 1024;
 
+/// Resource caps for video decoding (resolution, duration, per-PNG-frame size).
+///
+/// Resolved once from the environment at the public entry point via
+/// [`VideoLimits::from_env`] and threaded through the probe/extract path, so the
+/// decode hot path never reads process-global `std::env`. This lets tests inject
+/// explicit caps instead of calling `std::env::set_var`, which mutates the
+/// process-global environment and races across the threaded test runner (and is
+/// `unsafe` for exactly that reason) — see issue #103.
+#[derive(Debug, Clone, Copy)]
+pub struct VideoLimits {
+    /// Max source pixel count (width × height).
+    pub max_pixels: u64,
+    /// Max source duration in seconds.
+    pub max_duration_sec: f64,
+    /// Max bytes accumulated for a single PNG frame before the stream is
+    /// rejected as malformed.
+    pub max_png_frame_bytes: usize,
+}
+
+impl Default for VideoLimits {
+    /// The compile-time defaults (`DEFAULT_MAX_*`), used when the corresponding
+    /// env var is unset or unparseable.
+    fn default() -> Self {
+        Self {
+            max_pixels: DEFAULT_MAX_PIXELS,
+            max_duration_sec: DEFAULT_MAX_DURATION_SEC,
+            max_png_frame_bytes: DEFAULT_MAX_PNG_FRAME_BYTES,
+        }
+    }
+}
+
+impl VideoLimits {
+    /// Resolve caps from `MLXCEL_VIDEO_MAX_{PIXELS,DURATION_SEC,PNG_FRAME_BYTES}`,
+    /// each falling back to its compile-time default on a missing or unparseable
+    /// value. This is the single place these env vars are read.
+    pub fn from_env() -> Self {
+        Self::from_raw(
+            std::env::var("MLXCEL_VIDEO_MAX_PIXELS").ok().as_deref(),
+            std::env::var("MLXCEL_VIDEO_MAX_DURATION_SEC")
+                .ok()
+                .as_deref(),
+            std::env::var("MLXCEL_VIDEO_MAX_PNG_FRAME_BYTES")
+                .ok()
+                .as_deref(),
+        )
+    }
+
+    /// Pure parser shared by [`from_env`](Self::from_env): maps already-fetched
+    /// env strings to caps, falling back to the defaults. Kept env-free so it is
+    /// unit-testable without mutating the process environment.
+    fn from_raw(
+        pixels: Option<&str>,
+        duration_sec: Option<&str>,
+        png_frame_bytes: Option<&str>,
+    ) -> Self {
+        let defaults = Self::default();
+        Self {
+            max_pixels: pixels
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(defaults.max_pixels),
+            max_duration_sec: duration_sec
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(defaults.max_duration_sec),
+            max_png_frame_bytes: png_frame_bytes
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(defaults.max_png_frame_bytes),
+        }
+    }
+}
+
 /// PNG file format constants used by the single-pass stream splitter.
 const PNG_SIGNATURE: &[u8; 8] = b"\x89PNG\r\n\x1a\n";
 const PNG_IEND_CHUNK_LEN: usize = 12; // 4-byte length + 4-byte "IEND" + 4-byte CRC
@@ -623,7 +693,7 @@ struct VideoMeta {
 /// pass an opened fd (issue #601) instead of the canonical path. The fd
 /// path closes the TOCTOU window between the resolver's `canonicalize`
 /// and ffmpeg's `open`.
-fn probe_video(source: &VideoSource) -> Result<VideoMeta, VideoError> {
+fn probe_video(source: &VideoSource, limits: &VideoLimits) -> Result<VideoMeta, VideoError> {
     let canonical_path = source.canonical_path();
     // For path-variant sources we still verify the path exists; for fd-variant
     // sources the fd was opened by the resolver and the file is guaranteed
@@ -719,7 +789,15 @@ fn probe_video(source: &VideoSource) -> Result<VideoMeta, VideoError> {
         .filter(|f| f.is_finite() && *f > 0.0)
         .unwrap_or(1.0);
 
-    apply_probe_caps(canonical_path, nb_frames, fps, width, height, duration)
+    apply_probe_caps(
+        canonical_path,
+        nb_frames,
+        fps,
+        width,
+        height,
+        duration,
+        limits,
+    )
 }
 
 /// Enforce resolution and duration caps on raw ffprobe field values, returning
@@ -743,6 +821,7 @@ fn apply_probe_caps(
     width: Option<u32>,
     height: Option<u32>,
     duration: Option<f64>,
+    limits: &VideoLimits,
 ) -> Result<VideoMeta, VideoError> {
     // If ffprobe did not report duration, default to +∞ so the duration cap
     // trips immediately rather than silently bypassing the check.
@@ -771,7 +850,7 @@ fn apply_probe_caps(
     let h = height.unwrap_or(u32::MAX);
 
     // ── Resolution cap check ─────────────────────────────────────────────
-    let max_pixels = read_env_u64("MLXCEL_VIDEO_MAX_PIXELS", DEFAULT_MAX_PIXELS);
+    let max_pixels = limits.max_pixels;
     // Use saturating_mul so that u32::MAX * u32::MAX saturates to u64::MAX
     // instead of overflowing back to 0 and silently bypassing the cap.
     let pixels = (w as u64).saturating_mul(h as u64);
@@ -785,7 +864,7 @@ fn apply_probe_caps(
     }
 
     // ── Duration cap check ───────────────────────────────────────────────
-    let max_duration = read_env_f64("MLXCEL_VIDEO_MAX_DURATION_SEC", DEFAULT_MAX_DURATION_SEC);
+    let max_duration = limits.max_duration_sec;
     if duration_sec > max_duration {
         return Err(VideoError::DurationTooLong {
             seconds: duration_sec,
@@ -800,24 +879,6 @@ fn apply_probe_caps(
         height: h,
         duration_sec,
     })
-}
-
-/// Read an environment variable as a `u64`, returning `default` on missing
-/// or parse failure.
-fn read_env_u64(name: &str, default: u64) -> u64 {
-    std::env::var(name)
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(default)
-}
-
-/// Read an environment variable as an `f64`, returning `default` on missing
-/// or parse failure.
-fn read_env_f64(name: &str, default: f64) -> f64 {
-    std::env::var(name)
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(default)
 }
 
 /// Parse `"30000/1001"` style rationals returned by ffprobe.
@@ -893,6 +954,18 @@ pub fn load_video(
     load_video_source(&source, target_fps, target_nframes)
 }
 
+/// Like [`load_video`] but with explicit resource [`VideoLimits`] instead of
+/// resolving them from the environment.
+pub fn load_video_with_limits(
+    path: &Path,
+    target_fps: Option<f64>,
+    target_nframes: Option<usize>,
+    limits: &VideoLimits,
+) -> Result<Vec<DynamicImage>, VideoError> {
+    let source = VideoSource::from_path(path.to_path_buf());
+    load_video_source_with_limits(&source, target_fps, target_nframes, limits)
+}
+
 /// Decode a [`VideoSource`] into uniformly-sampled frames.
 ///
 /// Equivalent to [`load_video`] but accepts a [`VideoSource`] so the
@@ -904,11 +977,24 @@ pub fn load_video_source(
     target_fps: Option<f64>,
     target_nframes: Option<usize>,
 ) -> Result<Vec<DynamicImage>, VideoError> {
+    load_video_source_with_limits(source, target_fps, target_nframes, &VideoLimits::from_env())
+}
+
+/// Like [`load_video_source`] but with explicit resource [`VideoLimits`]
+/// instead of resolving them from the environment. Lets callers (and tests)
+/// pin the caps deterministically; [`load_video_source`] is the env-resolving
+/// convenience wrapper over this.
+pub fn load_video_source_with_limits(
+    source: &VideoSource,
+    target_fps: Option<f64>,
+    target_nframes: Option<usize>,
+    limits: &VideoLimits,
+) -> Result<Vec<DynamicImage>, VideoError> {
     if !ffmpeg_available() {
         return Err(VideoError::FfmpegMissing);
     }
     let canonical = source.canonical_path().to_path_buf();
-    let meta = probe_video(source)?;
+    let meta = probe_video(source, limits)?;
     let nframes =
         smart_nframes(meta.total_frames, meta.fps, target_fps, target_nframes).map_err(|err| {
             match err {
@@ -921,7 +1007,7 @@ pub fn load_video_source(
         })?;
 
     let indices = uniform_indices(meta.total_frames, nframes);
-    let frames = extract_frames_single_pass(source, &indices, meta.fps)?;
+    let frames = extract_frames_single_pass(source, &indices, meta.fps, limits)?;
 
     if frames.is_empty() {
         return Err(VideoError::EmptyVideo(canonical));
@@ -996,6 +1082,7 @@ fn extract_frames_single_pass(
     source: &VideoSource,
     indices: &[usize],
     _video_fps: f64,
+    limits: &VideoLimits,
 ) -> Result<Vec<DynamicImage>, VideoError> {
     if indices.is_empty() {
         return Ok(Vec::new());
@@ -1064,7 +1151,12 @@ fn extract_frames_single_pass(
         .take()
         .expect("stdout was piped but is None — this is a bug");
 
-    let frames = split_png_stream(stdout, source.canonical_path(), indices.len())?;
+    let frames = split_png_stream(
+        stdout,
+        source.canonical_path(),
+        indices.len(),
+        limits.max_png_frame_bytes,
+    )?;
 
     // Collect stderr and wait for the process exit status.
     let output = child.wait_with_output().map_err(|err| VideoError::Io {
@@ -1106,6 +1198,7 @@ fn split_png_stream<R: Read>(
     mut reader: R,
     path: &Path,
     expected_frames: usize,
+    max_png_frame_bytes: usize,
 ) -> Result<Vec<DynamicImage>, VideoError> {
     // IEND chunk bytes: length (4 bytes = 0) + type "IEND" (4) + CRC (4).
     // The CRC of IEND with no data is always 0xAE426082.
@@ -1113,12 +1206,9 @@ fn split_png_stream<R: Read>(
         0x00, 0x00, 0x00, 0x00, b'I', b'E', b'N', b'D', 0xAE, 0x42, 0x60, 0x82,
     ];
 
-    // Per-frame accumulation cap. A stream that never emits IEND would grow
-    // buf without bound; reject it once the cap is exceeded.
-    let max_png_frame_bytes = read_env_u64(
-        "MLXCEL_VIDEO_MAX_PNG_FRAME_BYTES",
-        DEFAULT_MAX_PNG_FRAME_BYTES as u64,
-    ) as usize;
+    // Per-frame accumulation cap (resolved by the caller from `VideoLimits`).
+    // A stream that never emits IEND would grow buf without bound; reject it
+    // once the cap is exceeded.
 
     let mut frames = Vec::with_capacity(expected_frames);
     let mut buf: Vec<u8> = Vec::new();
