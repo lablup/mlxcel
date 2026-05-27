@@ -1024,7 +1024,15 @@ pub(crate) fn build_generation_result_with_cache(
 /// indefinitely on pathological model outputs.
 const BYTE_FALLBACK_BUFFER_MAX: usize = 4;
 
-pub(crate) struct StreamingDecodeState {
+/// Incremental, byte-fallback-safe detokenizer for streaming generation.
+///
+/// Owns the running token-id buffer and emits only the newly-resolved UTF-8
+/// suffix as each token arrives, holding back incomplete multi-byte sequences
+/// (byte-fallback `<0xXX>` tokens and split byte-level BPE pieces) until they
+/// form valid UTF-8. This is the canonical detokenizer for the server's
+/// streaming responses and is also reused by the offline interactive chat
+/// REPL (epic #92 / issue #96) so the two surfaces never diverge.
+pub struct StreamingDecodeState {
     all_ids: Vec<u32>,
     prev_decoded_len: usize,
     generated_text: String,
@@ -1038,7 +1046,7 @@ pub(crate) struct StreamingDecodeState {
 }
 
 impl StreamingDecodeState {
-    pub(crate) fn new(tokenizer: &MlxcelTokenizer, prompt_tokens: &[i32]) -> Self {
+    pub fn new(tokenizer: &MlxcelTokenizer, prompt_tokens: &[i32]) -> Self {
         let all_ids: Vec<u32> = prompt_tokens.iter().map(|&x| x as u32).collect();
         let prev_decoded_len = tokenizer.decode(&all_ids, false).unwrap_or_default().len();
 
@@ -1052,11 +1060,7 @@ impl StreamingDecodeState {
         }
     }
 
-    pub(crate) fn on_token(
-        &mut self,
-        token_id: i32,
-        tokenizer: &MlxcelTokenizer,
-    ) -> Option<String> {
+    pub fn on_token(&mut self, token_id: i32, tokenizer: &MlxcelTokenizer) -> Option<String> {
         if self.first_token_time.is_none() {
             self.first_token_time = Some(Instant::now());
         }
@@ -1193,7 +1197,7 @@ impl StreamingDecodeState {
     /// Also drains the byte-fallback buffer: any accumulated bytes that did not
     /// form a complete UTF-8 sequence are emitted as U+FFFD replacement
     /// characters so that the streamed output matches the non-streaming result.
-    pub(crate) fn flush(&mut self, tokenizer: &MlxcelTokenizer) {
+    pub fn flush(&mut self, tokenizer: &MlxcelTokenizer) {
         // Drain the byte-fallback buffer first. Any incomplete byte sequences
         // are flushed as replacement characters here; we then skip past the
         // corresponding replacement chars in the full-decode result below so

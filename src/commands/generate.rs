@@ -1016,7 +1016,74 @@ fn install_surgery_pipeline_from_cli(args: &GenerateArgs) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn run_generate(mut args: GenerateArgs) -> Result<()> {
+/// Build [`ChatOptions`] for the interactive REPL from the parsed generate
+/// args. Reuses the same sampling-knob mapping `build_cli_sampling_config`
+/// uses (so the REPL and one-shot `generate` sample identically) and resolves
+/// the KV-cache mode through the shared `resolve_kv_cache_mode` helper.
+///
+/// `stop_token_ids` is left empty here and filled in by `run_chat` from the
+/// model's config once the model directory is resolved, mirroring the one-shot
+/// path's `read_eos_token_ids(&args.model.model)`.
+fn chat_options_from_args(args: &GenerateArgs) -> Result<crate::commands::ChatOptions> {
+    let kv_cache_mode = resolve_kv_cache_mode(
+        args.generation.turbo.cache_type_k.as_deref(),
+        args.generation.turbo.cache_type_v.as_deref(),
+        args.generation.turbo.kv_cache_mode.as_deref(),
+    )
+    .map_err(|e| anyhow::anyhow!("{}", e))?;
+
+    let sampling = ResolvedSamplingParams {
+        temperature: args.sampling.temp,
+        top_k: args.sampling.top_k,
+        top_p: args.sampling.top_p,
+        min_p: args.sampling.min_p,
+        seed: None,
+        repetition_penalty: args.sampling.repetition_penalty,
+        dry_multiplier: args.sampling.dry_multiplier,
+        dry_base: args.sampling.dry_base,
+        dry_allowed_length: args.sampling.dry_allowed_length,
+        dry_penalty_last_n: args.sampling.dry_penalty_last_n,
+        dry_sequence_breakers: Vec::new(),
+        frequency_penalty: 0.0,
+        presence_penalty: 0.0,
+        stop_token_ids: Vec::new(),
+    };
+
+    let mut opts = crate::commands::ChatOptions::new(
+        args.model.model.clone(),
+        args.generation.max_tokens,
+        sampling,
+    );
+    opts.kv_cache_mode = kv_cache_mode;
+    opts.no_chat_template = args.generation.no_chat_template;
+    Ok(opts)
+}
+
+pub(crate) fn run_generate(args: GenerateArgs) -> Result<()> {
+    // Epic #92 / issue #96: no `-p/--prompt` means "interactive chat". Route to
+    // the reusable REPL entry point before any one-shot-only setup. The REPL
+    // initializes its own runtime, resolves `-m` (repo-id auto-download), loads
+    // the model + tokenizer, and reuses the same chat-template / SamplingConfig
+    // / streaming-generation path as the one-shot flow below. Advanced
+    // parallelism / speculative / surgery flags are not applied in the
+    // interactive scope (per #96: "scoped to the CLI run/generate path only").
+    if args.generation.prompt.is_none() {
+        let opts = chat_options_from_args(&args)?;
+        return crate::commands::run_chat(opts);
+    }
+
+    run_generate_once(args)
+}
+
+/// One-shot (`-p`-supplied) text generation — the historical `generate` flow.
+fn run_generate_once(mut args: GenerateArgs) -> Result<()> {
+    // Safe: the only caller (`run_generate`) guarantees `prompt` is `Some`.
+    let user_prompt = args
+        .generation
+        .prompt
+        .clone()
+        .expect("run_generate_once requires a prompt");
+
     let runtime = initialize_runtime();
     print_runtime_setup(&runtime);
 
@@ -1078,7 +1145,7 @@ pub(crate) fn run_generate(mut args: GenerateArgs) -> Result<()> {
     let tokenizer = load_tokenizer(&args.model.model)?;
     let prompt = load_cli_prompt(
         &args.model.model,
-        &args.generation.prompt,
+        &user_prompt,
         args.generation.no_chat_template,
         args.generation.image.len(),
     );
@@ -1210,7 +1277,7 @@ pub(crate) fn run_generate(mut args: GenerateArgs) -> Result<()> {
             pipeline_sampling.token_bias = token_bias.clone();
         }
         let num_layers = resolve_cli_pipeline_num_layers(&args.model.model)?;
-        print_generation_preamble(&args.generation.prompt)?;
+        print_generation_preamble(&user_prompt)?;
         generate_pipeline_text(
             &args.model.model,
             num_layers,
@@ -1231,7 +1298,7 @@ pub(crate) fn run_generate(mut args: GenerateArgs) -> Result<()> {
             args.generation.fps,
             &tokenizer,
         )?;
-        print_generation_preamble(&args.generation.prompt)?;
+        print_generation_preamble(&user_prompt)?;
         run_generation_mode(
             &model,
             &args,

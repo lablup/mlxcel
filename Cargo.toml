@@ -99,6 +99,13 @@ blake3 = "1.8"
 # CLI
 clap = { version = "4.6.1", features = ["derive", "env"] }
 
+# Interactive chat REPL line editing (epic #92, issue #96). `rustyline`
+# provides the readline-style line editor (history, cursor movement,
+# Ctrl-C / Ctrl-D handling) for `mlxcel`'s interactive chat loop. Only the
+# offline CLI REPL uses it; the server is unaffected. Default features pull
+# in the terminal backend so arrow-key history works out of the box.
+rustyline = "14"
+
 # Image processing (for VLM)
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
 

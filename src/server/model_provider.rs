@@ -88,8 +88,14 @@ pub struct GenerationResult {
     pub cached_tokens: usize,
 }
 
+// `pub` (not `pub(crate)`) so the offline interactive chat REPL
+// (`mlxcel::commands::chat`, epic #92 / issue #96) can reuse
+// [`model_worker::StreamingDecodeState`] for incremental, byte-fallback-safe
+// detokenization instead of forking a second detokenizer. The server's
+// streaming path is the canonical owner of this logic; the REPL is a second
+// consumer of the exact same code.
 #[path = "model_worker.rs"]
-pub(crate) mod model_worker;
+pub mod model_worker;
 
 /// Thread-safe model provider using channels
 pub struct ModelProvider {

@@ -116,7 +116,7 @@ fn sample_generate_args(model_path: PathBuf) -> crate::GenerateArgs {
             num_draft_tokens: 3,
         },
         generation: crate::GenerationOptions {
-            prompt: "Hello".to_string(),
+            prompt: Some("Hello".to_string()),
             image: Vec::new(),
             audio: None,
             video: Vec::new(),

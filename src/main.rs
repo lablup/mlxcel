@@ -234,9 +234,14 @@ pub(crate) struct ModelOptions {
 #[derive(Args, Debug)]
 #[command(next_help_heading = "Generation Options")]
 pub(crate) struct GenerationOptions {
-    /// The prompt to generate text from
+    /// The prompt to generate text from.
+    ///
+    /// When omitted, `mlxcel generate` drops into an interactive multi-turn
+    /// chat REPL (streaming output, `/bye` / `/clear` / `/?` slash commands,
+    /// and `"""` multiline blocks) instead of running a single completion —
+    /// mirroring `mlx_lm.chat` / `ollama run`.
     #[arg(short, long, value_name = "TEXT")]
-    pub(crate) prompt: String,
+    pub(crate) prompt: Option<String>,
 
     /// Image file paths for vision-language models (VLM)
     #[arg(long, value_name = "PATH", num_args = 1..)]

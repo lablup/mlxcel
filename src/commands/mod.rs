@@ -18,6 +18,7 @@
 //! argument/schema wiring while command-specific execution logic evolves in
 //! isolated modules.
 
+pub(crate) mod chat;
 pub(crate) mod detect;
 pub(crate) mod download;
 pub(crate) mod generate;
@@ -26,6 +27,7 @@ pub(crate) mod inspect;
 pub(crate) mod models;
 mod serve;
 
+pub(crate) use chat::{ChatOptions, run_chat};
 pub(crate) use detect::run_detect;
 pub(crate) use download::run_download;
 pub(crate) use generate::run_generate;
