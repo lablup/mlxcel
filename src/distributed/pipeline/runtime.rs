@@ -460,7 +460,6 @@ impl PipelineModelRuntime for RemotePipelineRuntime {
 
 #[cfg(test)]
 mod tests {
-    use std::net::TcpListener;
     use std::sync::{Arc, Mutex};
     use std::thread;
 
@@ -497,7 +496,7 @@ mod tests {
                 runtime.block_on(async move {
                     let transport = Arc::new(
                         TcpTransport::bind(TcpTransportConfig {
-                            bind_address: reserve_bind_address(),
+                            bind_address: "127.0.0.1:0".to_string(),
                             ..Default::default()
                         })
                         .await?,
@@ -653,13 +652,6 @@ mod tests {
         }
     }
 
-    fn reserve_bind_address() -> String {
-        let listener = TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
-        let addr = listener.local_addr().expect("local addr");
-        drop(listener);
-        addr.to_string()
-    }
-
     async fn send_stub_response(
         transport: &Arc<TcpTransport>,
         peer: &str,
@@ -715,7 +707,7 @@ mod tests {
         let runtime = RemotePipelineRuntime::new(RemotePipelineRuntimeConfig {
             stage_peers: vec![stage.addr().to_string()],
             transport_backend: TransportBackend::Tcp,
-            bind_address: reserve_bind_address(),
+            bind_address: "127.0.0.1:0".to_string(),
             stage_timeout: Duration::from_secs(1),
         })
         .expect("create runtime");
@@ -742,7 +734,7 @@ mod tests {
         let runtime = RemotePipelineRuntime::new(RemotePipelineRuntimeConfig {
             stage_peers: vec![stage.addr().to_string()],
             transport_backend: TransportBackend::Tcp,
-            bind_address: reserve_bind_address(),
+            bind_address: "127.0.0.1:0".to_string(),
             stage_timeout: Duration::from_millis(100),
         })
         .expect("create runtime");
