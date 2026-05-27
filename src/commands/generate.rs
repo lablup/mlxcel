@@ -32,7 +32,7 @@ use mlxcel::{
         },
         resolve_model_shard_plan, shard_config_from_cli, validate_supported_runtime,
     },
-    downloader::resolve_model_source,
+    downloader::resolve_model_source_with_override,
     initialize_runtime, load_model, load_model_with_adapter, load_model_with_tensor_parallel,
     memory_estimate::{
         MemoryEstimate, QuantHint, estimate_total_memory, format_bytes, format_estimate,
@@ -1054,6 +1054,7 @@ fn chat_options_from_args(args: &GenerateArgs) -> Result<crate::commands::ChatOp
         args.generation.max_tokens,
         sampling,
     );
+    opts.models_dir = args.model.models_dir.clone();
     opts.kv_cache_mode = kv_cache_mode;
     opts.no_chat_template = args.generation.no_chat_template;
     Ok(opts)
@@ -1108,7 +1109,8 @@ fn run_generate_once(mut args: GenerateArgs) -> Result<()> {
     // tensor/pipeline-parallel validators and the quantization-advice,
     // tokenizer, memory-preflight, and model-load steps — all of which read
     // the model directory and therefore need the resolved path.
-    args.model.model = resolve_model_source(&args.model.model)?;
+    args.model.model =
+        resolve_model_source_with_override(&args.model.model, args.model.models_dir.as_deref())?;
 
     validate_tensor_parallel_args(&args)?;
     validate_pipeline_parallel_args(&args)?;

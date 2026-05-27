@@ -190,7 +190,7 @@ fn locate_prefers_legacy_cwd_models_when_complete() {
         std::env::remove_var("HF_HOME");
     }
 
-    let hit = locate_cached_snapshot("mlx-community/Qwen3-4B-4bit", None, &cwd_models);
+    let hit = locate_cached_snapshot("mlx-community/Qwen3-4B-4bit", None, &cwd_models, None);
 
     restore_env("MLXCEL_CACHE_DIR", prev_cache_dir);
     restore_env("HF_HUB_CACHE", prev_hf_cache);
@@ -219,7 +219,7 @@ fn locate_ignores_incomplete_legacy_dir() {
         std::env::remove_var("HF_HOME");
     }
 
-    let hit = locate_cached_snapshot("mlx-community/Qwen3-4B-4bit", None, &cwd_models);
+    let hit = locate_cached_snapshot("mlx-community/Qwen3-4B-4bit", None, &cwd_models, None);
 
     restore_env("MLXCEL_CACHE_DIR", prev_cache_dir);
     restore_env("HF_HUB_CACHE", prev_hf_cache);
@@ -257,7 +257,7 @@ fn locate_reuses_hf_cache_snapshot() {
         std::env::remove_var("HF_HOME");
     }
 
-    let hit = locate_cached_snapshot("owner/model", None, &cwd_models);
+    let hit = locate_cached_snapshot("owner/model", None, &cwd_models, None);
 
     restore_env("MLXCEL_CACHE_DIR", prev_cache_dir);
     restore_env("HF_HUB_CACHE", prev_hf_cache);
@@ -291,13 +291,100 @@ fn locate_uses_mlxcel_store_when_complete() {
         std::env::remove_var("HF_HOME");
     }
 
-    let hit = locate_cached_snapshot("owner/model", None, &cwd_models);
+    let hit = locate_cached_snapshot("owner/model", None, &cwd_models, None);
 
     restore_env("MLXCEL_CACHE_DIR", prev_cache_dir);
     restore_env("HF_HUB_CACHE", prev_hf_cache);
     restore_env("HF_HOME", prev_hf_home);
 
     assert_eq!(hit, Some(store_dir));
+}
+
+// ── locate_cached_snapshot: --models-dir override (issue #107) ───────────────
+
+#[test]
+fn locate_uses_override_models_root_for_store_probe() {
+    let tmp = tempfile::tempdir().unwrap();
+    // The OVERRIDE models root holds the snapshot directly (no `models/`
+    // subdir): <override>/<owner>/<name>/config.json.
+    let override_root = tmp.path().join("custom-store");
+    let store_dir = override_root.join("owner").join("model");
+    make_complete_snapshot(&store_dir);
+
+    // Decoy cache-root store that must be IGNORED when the override is passed.
+    // Stage a different (also-complete) snapshot there to prove we do not read
+    // it. Empty legacy + empty HF cache so only the store probe can hit.
+    let cwd_models = tmp.path().join("no-models");
+    let decoy_cache = tmp.path().join("decoy-cache");
+    make_complete_snapshot(&decoy_cache.join("models").join("owner").join("model"));
+    let empty_hf = tmp.path().join("hf");
+    fs::create_dir_all(&empty_hf).unwrap();
+
+    let _guard = env_lock();
+    let prev_cache_dir = std::env::var("MLXCEL_CACHE_DIR").ok();
+    let prev_models_dir = std::env::var("MLXCEL_MODELS_DIR").ok();
+    let prev_hf_cache = std::env::var("HF_HUB_CACHE").ok();
+    let prev_hf_home = std::env::var("HF_HOME").ok();
+    unsafe {
+        std::env::set_var("MLXCEL_CACHE_DIR", &decoy_cache);
+        std::env::remove_var("MLXCEL_MODELS_DIR");
+        std::env::set_var("HF_HUB_CACHE", &empty_hf);
+        std::env::remove_var("HF_HOME");
+    }
+
+    let hit = locate_cached_snapshot("owner/model", None, &cwd_models, Some(&override_root));
+
+    restore_env("MLXCEL_CACHE_DIR", prev_cache_dir);
+    restore_env("MLXCEL_MODELS_DIR", prev_models_dir);
+    restore_env("HF_HUB_CACHE", prev_hf_cache);
+    restore_env("HF_HOME", prev_hf_home);
+
+    // The hit must be the override-root snapshot, not the decoy cache-root one.
+    assert_eq!(hit, Some(store_dir));
+}
+
+#[test]
+fn resolve_model_source_with_override_reuses_override_store() {
+    // End-to-end (network-free): a repo-id that is not a path but IS present
+    // under the override models root resolves there with no download.
+    let tmp = tempfile::tempdir().unwrap();
+    let override_root = tmp.path().join("custom-store");
+    let store_dir = override_root.join("owner").join("model");
+    make_complete_snapshot(&store_dir);
+    let empty_hf = tmp.path().join("hf");
+    fs::create_dir_all(&empty_hf).unwrap();
+
+    // Run from a CWD with no `./models` so the legacy probe misses.
+    let run_dir = tmp.path().join("run");
+    fs::create_dir_all(&run_dir).unwrap();
+
+    let _guard = env_lock();
+    let prev_cache_dir = std::env::var("MLXCEL_CACHE_DIR").ok();
+    let prev_models_dir = std::env::var("MLXCEL_MODELS_DIR").ok();
+    let prev_hf_cache = std::env::var("HF_HUB_CACHE").ok();
+    let prev_hf_home = std::env::var("HF_HOME").ok();
+    let prev_cwd = std::env::current_dir().ok();
+    unsafe {
+        // Point the cache-root store elsewhere (empty) to prove the override wins.
+        std::env::set_var("MLXCEL_CACHE_DIR", tmp.path().join("empty-cache"));
+        std::env::remove_var("MLXCEL_MODELS_DIR");
+        std::env::set_var("HF_HUB_CACHE", &empty_hf);
+        std::env::remove_var("HF_HOME");
+    }
+    std::env::set_current_dir(&run_dir).unwrap();
+
+    let resolved =
+        resolve_model_source_with_override(Path::new("owner/model"), Some(&override_root));
+
+    if let Some(cwd) = prev_cwd {
+        let _ = std::env::set_current_dir(cwd);
+    }
+    restore_env("MLXCEL_CACHE_DIR", prev_cache_dir);
+    restore_env("MLXCEL_MODELS_DIR", prev_models_dir);
+    restore_env("HF_HUB_CACHE", prev_hf_cache);
+    restore_env("HF_HOME", prev_hf_home);
+
+    assert_eq!(resolved.unwrap(), store_dir);
 }
 
 #[test]
@@ -318,7 +405,7 @@ fn locate_returns_none_on_total_miss() {
         std::env::remove_var("HF_HOME");
     }
 
-    let hit = locate_cached_snapshot("owner/never-downloaded", None, &cwd_models);
+    let hit = locate_cached_snapshot("owner/never-downloaded", None, &cwd_models, None);
 
     restore_env("MLXCEL_CACHE_DIR", prev_cache_dir);
     restore_env("HF_HUB_CACHE", prev_hf_cache);
@@ -359,7 +446,7 @@ fn legacy_cwd_wins_over_hf_and_store() {
         std::env::remove_var("HF_HOME");
     }
 
-    let hit = locate_cached_snapshot("owner/model", None, &cwd_models);
+    let hit = locate_cached_snapshot("owner/model", None, &cwd_models, None);
 
     restore_env("MLXCEL_CACHE_DIR", prev_cache_dir);
     restore_env("HF_HUB_CACHE", prev_hf_cache);

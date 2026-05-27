@@ -149,6 +149,14 @@ pub(crate) struct ListArgs {
     /// <repo-id>` to remove one.
     #[arg(long)]
     pub(crate) local: bool,
+
+    /// Model-store root to list instead of the default location.
+    ///
+    /// Lists snapshots directly under `<PATH>/<owner>/<name>` (no extra
+    /// `models/` subdir). Overrides the `MLXCEL_MODELS_DIR` environment
+    /// variable. Only meaningful with `--local`.
+    #[arg(long, value_name = "PATH")]
+    pub(crate) models_dir: Option<PathBuf>,
 }
 
 /// Arguments for `mlxcel rm`.
@@ -157,6 +165,13 @@ pub(crate) struct RmArgs {
     /// HuggingFace repository id to remove, e.g. `mlx-community/Qwen3-4B-4bit`.
     #[arg(value_name = "REPO_ID")]
     pub(crate) repo_id: String,
+
+    /// Model-store root to remove from instead of the default location.
+    ///
+    /// Removes the snapshot at `<PATH>/<owner>/<name>` (no extra `models/`
+    /// subdir). Overrides the `MLXCEL_MODELS_DIR` environment variable.
+    #[arg(long, value_name = "PATH")]
+    pub(crate) models_dir: Option<PathBuf>,
 
     /// Skip the interactive confirmation prompt.
     #[arg(long, short = 'y', default_value_t = false)]
@@ -233,6 +248,15 @@ pub(crate) struct ModelOptions {
     /// runs from any directory.
     #[arg(short, long, value_name = "PATH_OR_REPO_ID")]
     pub(crate) model: PathBuf,
+
+    /// Model-store root for resolving / downloading an `owner/name` repo-id.
+    ///
+    /// Sets the directory that directly holds snapshots, so a repo-id resolves
+    /// to / downloads at `<PATH>/<owner>/<name>` (no extra `models/` subdir).
+    /// Overrides the `MLXCEL_MODELS_DIR` environment variable. No effect when
+    /// the model argument is already an existing local path.
+    #[arg(long, value_name = "PATH")]
+    pub(crate) models_dir: Option<PathBuf>,
 
     /// Path to LoRA adapter directory (optional)
     #[arg(long, value_name = "PATH")]
@@ -357,6 +381,15 @@ pub(crate) struct InspectArgs {
     /// store, and downloaded into the mlxcel store on a miss.
     #[arg(short, long, value_name = "PATH_OR_REPO_ID")]
     pub(crate) model: std::path::PathBuf,
+
+    /// Model-store root for resolving / downloading an `owner/name` repo-id.
+    ///
+    /// Sets the directory that directly holds snapshots, so a repo-id resolves
+    /// to / downloads at `<PATH>/<owner>/<name>` (no extra `models/` subdir).
+    /// Overrides the `MLXCEL_MODELS_DIR` environment variable. No effect when
+    /// the model argument is already an existing local path.
+    #[arg(long, value_name = "PATH")]
+    pub(crate) models_dir: Option<PathBuf>,
 
     /// Maximum number of tokens to estimate KV cache for.
     ///
@@ -581,6 +614,15 @@ pub(crate) struct ServeArgs {
     /// store, and downloaded into the mlxcel store on a miss.
     #[arg(short, long, env = "LLAMA_ARG_MODEL", value_name = "PATH_OR_REPO_ID")]
     model: PathBuf,
+
+    /// Model-store root for resolving / downloading an `owner/name` repo-id.
+    ///
+    /// Sets the directory that directly holds snapshots, so a repo-id resolves
+    /// to / downloads at `<PATH>/<owner>/<name>` (no extra `models/` subdir).
+    /// Overrides the `MLXCEL_MODELS_DIR` environment variable. No effect when
+    /// the model argument is already an existing local path.
+    #[arg(long, value_name = "PATH")]
+    models_dir: Option<PathBuf>,
 
     /// Path to LoRA adapter directory
     #[arg(long, visible_alias = "lora", value_name = "PATH")]
@@ -1335,7 +1377,7 @@ fn main() -> anyhow::Result<()> {
         Commands::Serve(args) => commands::run_serve(args),
         Commands::List(args) => {
             if args.local {
-                commands::run_list_local()
+                commands::run_list_local(args.models_dir.as_deref())
             } else {
                 print_supported_models();
                 Ok(())
@@ -1344,9 +1386,12 @@ fn main() -> anyhow::Result<()> {
         Commands::Inspect(args) => commands::run_inspect(args),
         Commands::Download(args) => commands::run_download(args),
         Commands::Detect(args) => commands::run_detect(args),
-        Commands::Rm(args) => {
-            commands::run_remove(&args.repo_id, args.yes, args.revision.as_deref())
-        }
+        Commands::Rm(args) => commands::run_remove(
+            &args.repo_id,
+            args.yes,
+            args.revision.as_deref(),
+            args.models_dir.as_deref(),
+        ),
     }
 }
 

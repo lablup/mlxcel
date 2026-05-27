@@ -161,6 +161,29 @@ fn run_accepts_adapter_flag() {
 }
 
 #[test]
+fn run_threads_models_dir_into_generate_args() {
+    // Issue #107: `--models-dir` on `run` must lower onto the same
+    // `ModelOptions.models_dir` the shared `-m` resolver reads, so the model
+    // resolves under the override root via `run_generate`.
+    let args = parse_run(&[
+        "mlxcel",
+        "run",
+        "mlx-community/Qwen3-4B-4bit",
+        "--models-dir",
+        "/data/store",
+    ]);
+    assert_eq!(
+        args.models_dir.as_deref(),
+        Some(std::path::Path::new("/data/store"))
+    );
+    let gen_args = args.into_generate_args();
+    assert_eq!(
+        gen_args.model.models_dir,
+        Some(PathBuf::from("/data/store"))
+    );
+}
+
+#[test]
 fn run_lowers_advanced_groups_to_inert_defaults() {
     // `run` does not expose tensor/pipeline parallelism or speculative
     // decoding; the lowered GenerateArgs must leave them at the same inert

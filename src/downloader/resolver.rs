@@ -79,6 +79,20 @@ const SNAPSHOT_MARKER: &str = "config.json";
 /// required but failed (network / auth / disk — the underlying
 /// [`download_repo`] error is propagated with context).
 pub fn resolve_model_source(value: &Path) -> Result<PathBuf> {
+    resolve_model_source_with_override(value, None)
+}
+
+/// Override-aware variant of [`resolve_model_source`] (issue #107).
+///
+/// `models_dir` is the inline `--models-dir <path>` flag (or `None`). It is
+/// threaded into the store-probe and download steps so a repo-id is reused
+/// from / downloaded into the override-aware models root (see
+/// [`store::models_root`]). The existing-path and legacy-CWD / HF-cache reuse
+/// steps are unaffected. [`resolve_model_source`] delegates here with `None`.
+pub fn resolve_model_source_with_override(
+    value: &Path,
+    models_dir: Option<&Path>,
+) -> Result<PathBuf> {
     // 1. Existing on-disk path wins unconditionally — byte-identical to the
     //    pre-#94 local-path behavior. Checked before any repo-id shape test so
     //    a local directory literally named `owner/name` is still used as-is.
@@ -94,7 +108,7 @@ pub fn resolve_model_source(value: &Path) -> Result<PathBuf> {
 
     // 2. `owner/name` repo-id shape → reuse-or-download.
     if is_repo_id_shape(value_str) {
-        return resolve_repo_id(value_str, None);
+        return resolve_repo_id(value_str, None, models_dir);
     }
 
     // 3. Neither an existing path nor a valid repo-id.
@@ -108,23 +122,33 @@ pub fn resolve_model_source(value: &Path) -> Result<PathBuf> {
 /// `revision` selects the HF-cache snapshot revision (branch / tag / commit);
 /// `None` means `main`. The CLI subcommands do not currently expose a
 /// `--revision` flag, so they pass `None`, matching `mlxcel download`'s default.
-fn resolve_repo_id(repo_id: &str, revision: Option<&str>) -> Result<PathBuf> {
+///
+/// `models_dir` is the inline `--models-dir <path>` override (issue #107),
+/// threaded into the store-probe (step 2c) and the download destination
+/// (step 2d) so reuse and writes target the override-aware models root.
+fn resolve_repo_id(
+    repo_id: &str,
+    revision: Option<&str>,
+    models_dir: Option<&Path>,
+) -> Result<PathBuf> {
     let cwd_models = PathBuf::from(LEGACY_MODELS_DIR);
 
     // 2a–2c: reuse an existing snapshot without re-downloading.
-    if let Some(hit) = locate_cached_snapshot(repo_id, revision, &cwd_models) {
+    if let Some(hit) = locate_cached_snapshot(repo_id, revision, &cwd_models, models_dir) {
         return Ok(hit);
     }
 
     // 2d: cache miss → download into the mlxcel global store (local_dir: None),
-    //     then re-locate where it landed. We reuse the shared hardened
-    //     downloader rather than forking it, so allow-list filtering, token
-    //     handling, progress UX, and HF-cache reuse all stay in lock-step with
+    //     honoring the --models-dir override for the destination root, then
+    //     re-locate where it landed. We reuse the shared hardened downloader
+    //     rather than forking it, so allow-list filtering, token handling,
+    //     progress UX, and HF-cache reuse all stay in lock-step with
     //     `mlxcel download`.
     println!("[mlxcel] model '{repo_id}' not found locally; downloading into the mlxcel store...");
     download_repo(DownloadOptions {
         repo_id: repo_id.to_string(),
         local_dir: None,
+        models_dir: models_dir.map(Path::to_path_buf),
         revision: revision.map(str::to_string),
         token: None,
         force: false,
@@ -134,7 +158,7 @@ fn resolve_repo_id(repo_id: &str, revision: Option<&str>) -> Result<PathBuf> {
     // After a successful download the snapshot is reachable via either the HF
     // cache (download_repo reuses an existing HF snapshot read-only) or the
     // mlxcel store. Re-run the same lookup to return the real landing path.
-    locate_cached_snapshot(repo_id, revision, &cwd_models).ok_or_else(|| {
+    locate_cached_snapshot(repo_id, revision, &cwd_models, models_dir).ok_or_else(|| {
         anyhow!(
             "downloaded model '{repo_id}' but could not locate its snapshot \
              afterwards (expected under the mlxcel store or HuggingFace cache)"
@@ -147,12 +171,15 @@ fn resolve_repo_id(repo_id: &str, revision: Option<&str>) -> Result<PathBuf> {
 /// HuggingFace Hub cache, then the mlxcel global store.
 ///
 /// `cwd_models` is the legacy models root (normally `./models`); it is a
-/// parameter so unit tests can point it at a temp dir. Returns the first
-/// complete snapshot found, or `None` when every location misses.
+/// parameter so unit tests can point it at a temp dir. `models_dir` is the
+/// inline `--models-dir <path>` override (issue #107) used for the mlxcel-store
+/// probe in step 2c. Returns the first complete snapshot found, or `None` when
+/// every location misses.
 fn locate_cached_snapshot(
     repo_id: &str,
     revision: Option<&str>,
     cwd_models: &Path,
+    models_dir: Option<&Path>,
 ) -> Option<PathBuf> {
     // 2a. Legacy per-CWD `./models/<basename>` (pre-#93 default location).
     let legacy = cwd_models.join(repo_basename(repo_id));
@@ -166,8 +193,10 @@ fn locate_cached_snapshot(
         return Some(hf);
     }
 
-    // 2c. mlxcel global store (`${MLXCEL_CACHE_DIR}/models/<owner>/<name>`).
-    if let Some(store_dir) = store::model_dir(repo_id)
+    // 2c. mlxcel global store under the override-aware models root: the
+    //     `--models-dir` / `MLXCEL_MODELS_DIR` root directly, or the legacy
+    //     `${MLXCEL_CACHE_DIR}/models/<owner>/<name>`.
+    if let Some(store_dir) = store::model_dir_with_override(repo_id, models_dir)
         && snapshot_is_complete(&store_dir)
     {
         return Some(store_dir);

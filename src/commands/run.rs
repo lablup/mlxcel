@@ -75,6 +75,15 @@ pub(crate) struct RunArgs {
     #[arg(value_name = "MODEL_OR_REPO_ID")]
     pub(crate) model: Option<PathBuf>,
 
+    /// Model-store root for resolving / downloading an `owner/name` repo-id.
+    ///
+    /// Sets the directory that directly holds snapshots, so a repo-id resolves
+    /// to / downloads at `<PATH>/<owner>/<name>` (no extra `models/` subdir).
+    /// Overrides the `MLXCEL_MODELS_DIR` environment variable. No effect when
+    /// the model argument is already an existing local path.
+    #[arg(long, value_name = "PATH")]
+    pub(crate) models_dir: Option<PathBuf>,
+
     /// Path to LoRA adapter directory (optional). Mirrors `mlxcel generate
     /// --adapter`.
     #[arg(long, value_name = "PATH")]
@@ -106,6 +115,7 @@ impl RunArgs {
         GenerateArgs {
             model: ModelOptions {
                 model,
+                models_dir: self.models_dir,
                 adapter: self.adapter,
                 // `run` does not surface offline speculative decoding; keep the
                 // same defaults `mlxcel generate` uses when the flags are absent.

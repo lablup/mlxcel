@@ -25,7 +25,7 @@
 use anyhow::{Result, anyhow};
 
 use mlxcel::cli::turbo_args::resolve_kv_cache_mode;
-use mlxcel::downloader::resolve_model_source;
+use mlxcel::downloader::resolve_model_source_with_override;
 use mlxcel::memory_estimate::{QuantHint, estimate_total_memory, format_estimate};
 use mlxcel_core::cache::KVCacheMode;
 
@@ -40,7 +40,7 @@ pub(crate) fn run_inspect(mut args: InspectArgs) -> Result<()> {
     // miss-and-error this returns a clear message; on success `args.model` is
     // guaranteed to name an existing snapshot, so the downstream estimator
     // path is unchanged.
-    args.model = resolve_model_source(&args.model)?;
+    args.model = resolve_model_source_with_override(&args.model, args.models_dir.as_deref())?;
 
     // Translate the user-facing `--quant` label into the typed hint.
     let quant = parse_quant_hint(&args.quant)?;

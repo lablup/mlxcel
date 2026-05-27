@@ -77,9 +77,13 @@ const MULTILINE_FENCE: &str = "\"\"\"";
 #[derive(Debug, Clone)]
 pub struct ChatOptions {
     /// Local model directory **or** a HuggingFace `owner/name` repo-id. Passed
-    /// verbatim to [`mlxcel::downloader::resolve_model_source`], so a repo-id
-    /// auto-downloads exactly like `generate -m <repo-id>`.
+    /// verbatim to [`mlxcel::downloader::resolve_model_source_with_override`],
+    /// so a repo-id auto-downloads exactly like `generate -m <repo-id>`.
     pub model: PathBuf,
+    /// Model-store root override (`--models-dir`, issue #107) threaded into the
+    /// `-m` resolver so a repo-id resolves to / downloads under this root. `None`
+    /// keeps the `MLXCEL_MODELS_DIR`-then-cache-root resolution.
+    pub models_dir: Option<PathBuf>,
     /// Maximum number of tokens to generate per assistant turn.
     pub max_tokens: usize,
     /// Resolved sampling knobs (temperature / top-k / top-p / min-p /
@@ -103,6 +107,7 @@ impl ChatOptions {
     pub fn new(model: PathBuf, max_tokens: usize, sampling: ResolvedSamplingParams) -> Self {
         Self {
             model,
+            models_dir: None,
             max_tokens,
             sampling,
             kv_cache_mode: KVCacheMode::Fp16,
@@ -152,8 +157,12 @@ pub fn run_chat(opts: ChatOptions) -> Result<()> {
     println!("Runtime device: {}", runtime.device);
 
     // Reuse the exact `-m` resolver `generate` / `serve` / `inspect` use, so a
-    // repo-id auto-downloads into the global store (epic #92, issues #93/#94).
-    let model_path = mlxcel::downloader::resolve_model_source(&opts.model)?;
+    // repo-id auto-downloads into the global store (epic #92, issues #93/#94),
+    // honoring the `--models-dir` override (issue #107).
+    let model_path = mlxcel::downloader::resolve_model_source_with_override(
+        &opts.model,
+        opts.models_dir.as_deref(),
+    )?;
 
     println!("Loading model from {model_path:?}...");
     let load_start = Instant::now();

@@ -70,7 +70,15 @@ mlxcel-server \
 # Prefer a project-local checkout? Opt out of the global store with --local-dir;
 # the snapshot lands exactly where you point it.
 mlxcel download mlx-community/Qwen3.5-0.8B-4bit --local-dir ./models/Qwen3.5-0.8B-4bit
+
+# Want the whole store on another volume? Point the store root at it with
+# --models-dir (or the MLXCEL_MODELS_DIR env var). Snapshots keep the
+# <owner>/<name> layout directly under that root, with no extra models/ subdir.
+mlxcel download mlx-community/Qwen3.5-0.8B-4bit --models-dir /Volumes/Models
+# -> /Volumes/Models/mlx-community/Qwen3.5-0.8B-4bit
 ```
+
+The model-store root resolves in this order: a `--models-dir <PATH>` flag (on `download`, `generate`, `serve`, `inspect`, `run`, `list --local`, and `rm`), then the `MLXCEL_MODELS_DIR` environment variable, then `${MLXCEL_CACHE_DIR:-$HOME/.cache/mlxcel}/models`. The dedicated `--models-dir` / `MLXCEL_MODELS_DIR` root holds snapshots directly at `<root>/<owner>/<name>`; only the cache-root fallback adds the `models/` segment. `--local-dir` is a different knob that writes one snapshot verbatim at an exact path and wins over `--models-dir` for the download destination.
 
 `-m/--model` on `mlxcel generate`, `mlxcel serve`, and `mlxcel inspect` accepts a HuggingFace `owner/name` repo-id directly, so the explicit `download` step is optional — pass the repo-id and mlxcel reuses a local `./models/<name>` directory, the HuggingFace cache, or the mlxcel store, and downloads into the mlxcel store on a miss:
 
@@ -131,10 +139,12 @@ mlxcel rm mlx-community/Qwen3.5-0.8B-4bit --yes
 
 `mlxcel list` without `--local` still prints the supported model
 architectures. `mlxcel list --local` instead enumerates the snapshots under
-`${MLXCEL_CACHE_DIR:-$HOME/.cache/mlxcel}/models/`. `mlxcel rm <repo-id>`
-deletes only inside that store; a model that exists solely in the read-only
-HuggingFace cache (`HF_HUB_CACHE` / `HF_HOME`) is reported but never deleted,
-since mlxcel does not manage the HuggingFace cache.
+the resolved store root (`${MLXCEL_CACHE_DIR:-$HOME/.cache/mlxcel}/models/` by
+default, or wherever `--models-dir` / `MLXCEL_MODELS_DIR` points). `mlxcel rm
+<repo-id>` deletes only inside that store and honors the same `--models-dir`
+override; a model that exists solely in the read-only HuggingFace cache
+(`HF_HUB_CACHE` / `HF_HOME`) is reported but never deleted, since mlxcel does
+not manage the HuggingFace cache.
 
 ### Build from source on Apple Silicon
 

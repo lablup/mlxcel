@@ -88,9 +88,11 @@ pub use errors::map_hf_error;
 pub use filters::{is_wanted_file, repo_basename};
 pub use progress::should_show_progress;
 pub use resolver::resolve_model_source;
+pub use resolver::resolve_model_source_with_override;
 pub use store::{
-    RemoveError, RemoveOutcome, StoredModel, hf_cache_snapshot, list_models, model_dir,
-    remove_model, store_root,
+    RemoveError, RemoveOutcome, StoredModel, hf_cache_snapshot, list_models,
+    list_models_with_override, model_dir, model_dir_with_override, models_root, remove_model,
+    remove_model_with_override, store_root,
 };
 
 use anyhow::{Context, Result, anyhow};
@@ -167,6 +169,12 @@ pub struct DownloadOptions {
     /// (issue #93). `Some(path)` is the explicit opt-out and writes the
     /// snapshot at `path` verbatim.
     pub local_dir: Option<PathBuf>,
+    /// Override for the model-store ROOT (issue #107), set from `--models-dir`.
+    /// When `Some(root)` and `local_dir` is `None`, the snapshot lands at
+    /// `<root>/<owner>/<name>` (no `models/` subdir). `None` keeps the
+    /// `MLXCEL_MODELS_DIR`-then-cache-root resolution in [`store::models_root`].
+    /// Ignored when `local_dir` is `Some` (the verbatim path wins).
+    pub models_dir: Option<PathBuf>,
     /// Repository revision (branch, tag, or commit). Defaults to `main` when
     /// `None`.
     pub revision: Option<String>,
@@ -184,6 +192,7 @@ impl DownloadOptions {
         Self {
             repo_id: args.repo_id.clone(),
             local_dir: args.local_dir.clone(),
+            models_dir: args.models_dir.clone(),
             revision: args.revision.clone(),
             token: args.token.clone(),
             force: args.force,
@@ -192,15 +201,19 @@ impl DownloadOptions {
 
     /// Resolve the destination directory for a fresh download.
     ///
-    /// - An explicit `--local-dir PATH` is honored verbatim (the opt-out).
-    /// - Otherwise the default is the location-independent global store at
+    /// - An explicit `--local-dir PATH` is honored verbatim (the opt-out) and
+    ///   retains ultimate precedence over `--models-dir` / `MLXCEL_MODELS_DIR`.
+    /// - Otherwise the destination is the location-independent global store
+    ///   under the override-aware models root (issue #107): `--models-dir
+    ///   <root>` or `MLXCEL_MODELS_DIR` place the snapshot directly at
+    ///   `<root>/<owner>/<name>`, falling back to
     ///   `${MLXCEL_CACHE_DIR:-$HOME/.cache/mlxcel}/models/<owner>/<name>`
-    ///   (issue #93), so a model downloaded once is runnable from any
-    ///   directory.
-    /// - As a last-resort fallback (no home directory *and* `MLXCEL_CACHE_DIR`
-    ///   unset — practically never on a supported platform), we degrade to the
-    ///   legacy per-CWD `models/<repo_basename>` so the downloader still
-    ///   produces a usable path instead of panicking.
+    ///   (issue #93) so a model downloaded once is runnable from any directory.
+    /// - As a last-resort fallback (no override, no `MLXCEL_MODELS_DIR`, no
+    ///   home directory *and* `MLXCEL_CACHE_DIR` unset — practically never on a
+    ///   supported platform), we degrade to the legacy per-CWD
+    ///   `models/<repo_basename>` so the downloader still produces a usable
+    ///   path instead of panicking.
     ///
     /// Note: this returns the *write* destination only. HuggingFace-cache
     /// read-reuse (skipping the download entirely when a snapshot already
@@ -209,7 +222,7 @@ impl DownloadOptions {
     pub fn resolve_local_dir(&self) -> PathBuf {
         match &self.local_dir {
             Some(path) => path.clone(),
-            None => store::model_dir(&self.repo_id)
+            None => store::model_dir_with_override(&self.repo_id, self.models_dir.as_deref())
                 .unwrap_or_else(|| PathBuf::from("models").join(repo_basename(&self.repo_id))),
         }
     }

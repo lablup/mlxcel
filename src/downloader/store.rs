@@ -45,6 +45,13 @@ use std::path::{Path, PathBuf};
 /// snapshots, e.g. `${MLXCEL_CACHE_DIR}/models/<owner>/<name>`.
 pub const MODELS_SUBDIR: &str = "models";
 
+/// Dedicated environment variable naming the model-store root directly
+/// (issue #107). When set to a non-empty value, snapshots live at
+/// `$MLXCEL_MODELS_DIR/<owner>/<name>` with **no** intervening `models/`
+/// subdir — unlike the legacy `${MLXCEL_CACHE_DIR}/models` path. Read in
+/// exactly one place ([`models_root`]) so the precedence stays in one spot.
+pub const MODELS_DIR_ENV: &str = "MLXCEL_MODELS_DIR";
+
 /// HuggingFace Hub cache sub-directory (under `HF_HOME`) and the trailing
 /// segment of the default `~/.cache/huggingface/hub` path.
 const HF_HUB_SUBDIR: &str = "hub";
@@ -60,22 +67,64 @@ pub fn store_root() -> Option<PathBuf> {
     mlxcel_core::cache_root()
 }
 
-/// Resolve the global store directory for a given HuggingFace `repo_id`.
+/// Resolve the **models root** — the directory that directly contains
+/// `<owner>/<name>` snapshots — honoring the issue #107 precedence
+/// (highest priority first):
+///
+/// 1. `override_dir` (an inline `--models-dir <path>` CLI flag) — used
+///    verbatim as the models root.
+/// 2. `MLXCEL_MODELS_DIR` env var — used verbatim as the models root.
+/// 3. `${MLXCEL_CACHE_DIR:-$HOME/.cache/mlxcel}/models` — the legacy cache-root
+///    path, kept for backward compatibility.
+///
+/// The dedicated knobs (1, 2) place snapshots directly at
+/// `<root>/<owner>/<name>` with no extra `models/` subdir; only the legacy
+/// cache-root path (3) appends [`MODELS_SUBDIR`]. This is the single source of
+/// truth for the env var — no other function reads `MLXCEL_MODELS_DIR`.
+///
+/// Returns `None` only when no override / env var is set **and** [`store_root`]
+/// cannot be resolved (no `MLXCEL_CACHE_DIR` and no home directory).
+pub fn models_root(override_dir: Option<&Path>) -> Option<PathBuf> {
+    if let Some(dir) = override_dir {
+        return Some(dir.to_path_buf());
+    }
+    if let Some(env_dir) = non_empty_env(MODELS_DIR_ENV) {
+        return Some(PathBuf::from(env_dir));
+    }
+    store_root().map(|r| r.join(MODELS_SUBDIR))
+}
+
+/// Resolve the global store directory for a given HuggingFace `repo_id`,
+/// using the default (cache-root) models root.
 ///
 /// Returns `store_root()/models/<owner>/<name>`. When `repo_id` has no `/`
 /// separator (e.g. a bare `gpt2`), the whole id is used as the final path
 /// component so the layout stays well-formed.
 ///
 /// Returns `None` when [`store_root`] cannot be resolved (no
-/// `MLXCEL_CACHE_DIR` and no home directory).
+/// `MLXCEL_CACHE_DIR` and no home directory). Thin `None`-delegating wrapper
+/// over [`model_dir_with_override`] for back-compat with pre-#107 callers.
 pub fn model_dir(repo_id: &str) -> Option<PathBuf> {
-    let root = store_root()?;
-    Some(model_dir_in(&root, repo_id))
+    model_dir_with_override(repo_id, None)
 }
 
-/// Pure helper: compose `<root>/models/<owner>/<name>` from an explicit store
-/// root. Split out so unit tests can assert the layout without depending on
-/// process-wide env state.
+/// Resolve the per-model directory for `repo_id` under the override-aware
+/// [`models_root`] (issue #107).
+///
+/// `override_dir` is the inline `--models-dir <path>` flag (or `None`). The
+/// resolved path is `<models_root>/<owner>/<name>` — the dedicated knobs
+/// (`--models-dir` / `MLXCEL_MODELS_DIR`) add no `models/` subdir, while the
+/// legacy cache-root path keeps the `models/` segment via [`models_root`].
+///
+/// Returns `None` when [`models_root`] cannot be resolved.
+pub fn model_dir_with_override(repo_id: &str, override_dir: Option<&Path>) -> Option<PathBuf> {
+    models_root(override_dir).map(|root| model_dir_under(&root, repo_id))
+}
+
+/// Pure helper: compose `<root>/models/<owner>/<name>` from an explicit
+/// **cache** root. Split out so unit tests can assert the legacy cache-root
+/// layout without depending on process-wide env state. Reimplemented on top of
+/// [`model_dir_under`] so the sanitization posture stays in one place.
 ///
 /// `repo_id` segments are sanitized to stay inside the per-model directory:
 /// only the `<owner>` and `<name>` components are honored, and any path
@@ -83,8 +132,27 @@ pub fn model_dir(repo_id: &str) -> Option<PathBuf> {
 /// to a single safe `<name>` component. This mirrors the downloader's
 /// `is_safe_relative_path` posture so an adversarial repo id cannot escape the
 /// store root.
+///
+/// Test-only since #107: production paths go through [`model_dir_under`] via
+/// the override-aware [`model_dir_with_override`]; this wrapper is retained so
+/// the pre-#107 cache-root layout tests keep asserting the `models/`-subdir
+/// semantics directly.
+#[cfg(test)]
 fn model_dir_in(root: &Path, repo_id: &str) -> PathBuf {
-    let mut dir = root.join(MODELS_SUBDIR);
+    model_dir_under(&root.join(MODELS_SUBDIR), repo_id)
+}
+
+/// Pure helper: compose `<models_root>/<owner>/<name>` from an explicit
+/// **models** root (the directory that directly holds snapshots — no
+/// `models/` subdir is appended here). The single sanitized-segment join used
+/// by both the cache-root layout ([`model_dir_in`]) and the override-aware
+/// layout ([`model_dir_with_override`]).
+///
+/// `repo_id` segments are sanitized via [`sanitize_repo_id_segments`] so an
+/// adversarial id (`../../etc`, an absolute path, backslash shapes) collapses
+/// to safe `Normal` components and can never escape `models_root`.
+fn model_dir_under(models_root: &Path, repo_id: &str) -> PathBuf {
+    let mut dir = models_root.to_path_buf();
     for segment in sanitize_repo_id_segments(repo_id) {
         dir.push(segment);
     }
@@ -253,24 +321,54 @@ pub struct StoredModel {
 /// `models/` subtree does not exist yet. I/O errors on individual entries are
 /// skipped rather than aborting the whole listing, so one unreadable directory
 /// does not hide every other model.
+///
+/// Thin `None`-delegating wrapper over [`list_models_with_override`] for
+/// back-compat with pre-#107 callers (default cache-root models root).
 pub fn list_models() -> Vec<StoredModel> {
-    let Some(root) = store_root() else {
+    list_models_with_override(None)
+}
+
+/// Enumerate complete model snapshots under the override-aware
+/// [`models_root`] (issue #107).
+///
+/// `override_dir` is the inline `--models-dir <path>` flag (or `None`). The
+/// scan walks whichever models root [`models_root`] resolves — the dedicated
+/// `--models-dir` / `MLXCEL_MODELS_DIR` root directly, or the legacy
+/// `${MLXCEL_CACHE_DIR}/models` subtree. Results are sorted by `repo_id`.
+/// Returns an empty vector when the models root cannot be resolved or does not
+/// exist yet.
+pub fn list_models_with_override(override_dir: Option<&Path>) -> Vec<StoredModel> {
+    let Some(models_root) = models_root(override_dir) else {
         return Vec::new();
     };
-    let mut out = list_models_in(&root);
+    let mut out = list_models_under(&models_root);
     out.sort_by(|a, b| a.repo_id.cmp(&b.repo_id));
     out
 }
 
 /// Pure helper behind [`list_models`]: enumerate snapshots under an explicit
-/// store root. Split out so unit tests can assert against a temp directory
-/// without touching process-wide env state. The returned order is filesystem
-/// order; [`list_models`] sorts the public result.
+/// **cache** root. Split out so unit tests can assert against a temp directory
+/// without touching process-wide env state. Delegates to
+/// [`list_models_under`] after appending the legacy `models/` subdir.
+///
+/// Test-only since #107: production listing goes through [`list_models_under`]
+/// via the override-aware [`list_models_with_override`]; this wrapper preserves
+/// the pre-#107 cache-root listing tests.
+#[cfg(test)]
 fn list_models_in(root: &Path) -> Vec<StoredModel> {
-    let models_root = root.join(MODELS_SUBDIR);
+    list_models_under(&root.join(MODELS_SUBDIR))
+}
+
+/// Pure helper: enumerate snapshots under an explicit **models** root (the
+/// directory that directly holds `<owner>/<name>` snapshots — no `models/`
+/// subdir is appended here). Shared by the cache-root listing
+/// ([`list_models_in`]) and the override-aware listing
+/// ([`list_models_with_override`]). The returned order is filesystem order;
+/// callers sort the public result.
+fn list_models_under(models_root: &Path) -> Vec<StoredModel> {
     let mut out: Vec<StoredModel> = Vec::new();
 
-    let Ok(top_entries) = std::fs::read_dir(&models_root) else {
+    let Ok(top_entries) = std::fs::read_dir(models_root) else {
         return out;
     };
 
@@ -376,10 +474,11 @@ pub enum RemoveError {
     /// The store root could not be resolved (no `MLXCEL_CACHE_DIR` and no home
     /// directory).
     NoStoreRoot,
-    /// The resolved target escaped the `store_root()/models/` subtree. This is
-    /// a safety stop — it should be unreachable given the path sanitization in
-    /// [`model_dir`], but is enforced defensively so a future regression can
-    /// never delete outside the store.
+    /// The resolved target escaped the active models root (whichever
+    /// [`models_root`] resolved). This is a safety stop: it should be
+    /// unreachable given the path sanitization in [`model_dir_under`], but is
+    /// enforced defensively so a future regression can never delete outside
+    /// the store.
     OutsideStore(PathBuf),
     /// Deleting the store directory failed (I/O error), with the offending
     /// path and underlying error.
@@ -435,28 +534,66 @@ impl std::error::Error for RemoveError {
 ///
 /// `revision` is only used for the HF-cache probe (the mlxcel store is not
 /// revision-namespaced); pass `None` for the default `main`.
+///
+/// Thin `None`-delegating wrapper over [`remove_model_with_override`] for
+/// back-compat with pre-#107 callers (default cache-root models root).
 pub fn remove_model(repo_id: &str, revision: Option<&str>) -> Result<RemoveOutcome, RemoveError> {
-    let root = store_root().ok_or(RemoveError::NoStoreRoot)?;
-    remove_model_in(&root, repo_id, revision)
+    remove_model_with_override(repo_id, revision, None)
 }
 
-/// Pure-ish helper behind [`remove_model`] operating against an explicit store
-/// root. Split out so unit tests can drive deletion against a temp directory.
-/// The HF-cache probe still consults the process env via [`hf_cache_snapshot`]
-/// (only reached on a store miss).
+/// Remove a model snapshot from the override-aware [`models_root`]
+/// (issue #107).
+///
+/// `override_dir` is the inline `--models-dir <path>` flag (or `None`). The
+/// containment safety check (`is_within`) uses the resolved models root as its
+/// base, so a deletion can only ever touch a directory under whichever root
+/// won the precedence — never the HF cache, never a `..` escape. Behavior is
+/// otherwise identical to [`remove_model`].
+pub fn remove_model_with_override(
+    repo_id: &str,
+    revision: Option<&str>,
+    override_dir: Option<&Path>,
+) -> Result<RemoveOutcome, RemoveError> {
+    let models_root = models_root(override_dir).ok_or(RemoveError::NoStoreRoot)?;
+    remove_model_under(&models_root, repo_id, revision)
+}
+
+/// Pure-ish helper behind [`remove_model`] operating against an explicit
+/// **cache** root. Split out so unit tests can drive deletion against a temp
+/// directory. Delegates to [`remove_model_under`] after appending the legacy
+/// `models/` subdir.
+///
+/// Test-only since #107: production removal goes through [`remove_model_under`]
+/// via the override-aware [`remove_model_with_override`]; this wrapper preserves
+/// the pre-#107 cache-root removal tests.
+#[cfg(test)]
 fn remove_model_in(
     root: &Path,
     repo_id: &str,
     revision: Option<&str>,
 ) -> Result<RemoveOutcome, RemoveError> {
-    let models_root = root.join(MODELS_SUBDIR);
-    let target = model_dir_in(root, repo_id);
+    remove_model_under(&root.join(MODELS_SUBDIR), repo_id, revision)
+}
 
-    // Defense-in-depth containment check. `model_dir_in` already strips `..`
+/// Pure-ish helper operating against an explicit **models** root (the
+/// directory that directly holds snapshots — no `models/` subdir is appended
+/// here). Shared by the cache-root removal ([`remove_model_in`]) and the
+/// override-aware removal ([`remove_model_with_override`]). The HF-cache probe
+/// still consults the process env via [`hf_cache_snapshot`] (only reached on a
+/// store miss).
+fn remove_model_under(
+    models_root: &Path,
+    repo_id: &str,
+    revision: Option<&str>,
+) -> Result<RemoveOutcome, RemoveError> {
+    let target = model_dir_under(models_root, repo_id);
+
+    // Defense-in-depth containment check. `model_dir_under` already strips `..`
     // and absolute components, but we re-assert that the composed path stays
-    // under `models/` so a deletion can never escape the store. Use a
-    // lexical/canonical comparison that does not require the target to exist.
-    if !is_within(&models_root, &target) {
+    // under the resolved models root so a deletion can never escape the store.
+    // Use a lexical/canonical comparison that does not require the target to
+    // exist.
+    if !is_within(models_root, &target) {
         return Err(RemoveError::OutsideStore(target));
     }
 
@@ -594,6 +731,124 @@ mod tests {
         // A repo id that sanitizes to nothing collapses to a contained marker.
         let only_dots = model_dir_in(&root, "..");
         assert_eq!(only_dots, PathBuf::from("/store/models/_unknown_"));
+    }
+
+    // ── models_root / model_dir_with_override precedence ladder (issue #107) ──
+
+    /// Capture, then clear, both env vars that feed [`models_root`] so each
+    /// precedence case starts from a known state. Returns the prior values for
+    /// restoration. Must be called while holding the env lock.
+    fn clear_models_env() -> (Option<String>, Option<String>) {
+        let prev_models = std::env::var("MLXCEL_MODELS_DIR").ok();
+        let prev_cache = std::env::var("MLXCEL_CACHE_DIR").ok();
+        unsafe {
+            std::env::remove_var("MLXCEL_MODELS_DIR");
+            std::env::remove_var("MLXCEL_CACHE_DIR");
+        }
+        (prev_models, prev_cache)
+    }
+
+    fn restore_models_env(prev: (Option<String>, Option<String>)) {
+        restore_env("MLXCEL_MODELS_DIR", prev.0);
+        restore_env("MLXCEL_CACHE_DIR", prev.1);
+    }
+
+    #[test]
+    fn models_root_inline_override_beats_env_and_cache_dir() {
+        let _guard = env_lock();
+        let prev = clear_models_env();
+        // Set BOTH env knobs so we prove the inline override wins over both.
+        unsafe {
+            std::env::set_var("MLXCEL_MODELS_DIR", "/env/models");
+            std::env::set_var("MLXCEL_CACHE_DIR", "/cache");
+        }
+        let root = models_root(Some(Path::new("/inline/models")));
+        let dir = model_dir_with_override("owner/name", Some(Path::new("/inline/models")));
+        restore_models_env(prev);
+
+        // Inline override is the models root verbatim — no `models/` subdir.
+        assert_eq!(root, Some(PathBuf::from("/inline/models")));
+        assert_eq!(dir, Some(PathBuf::from("/inline/models/owner/name")));
+    }
+
+    #[test]
+    fn models_root_env_var_beats_cache_dir_with_no_models_subdir() {
+        let _guard = env_lock();
+        let prev = clear_models_env();
+        unsafe {
+            std::env::set_var("MLXCEL_MODELS_DIR", "/env/models");
+            std::env::set_var("MLXCEL_CACHE_DIR", "/cache");
+        }
+        let root = models_root(None);
+        let dir = model_dir_with_override("owner/name", None);
+        restore_models_env(prev);
+
+        // The dedicated env var is the models root verbatim: snapshots live at
+        // `$MLXCEL_MODELS_DIR/<owner>/<name>`, NOT `.../models/<owner>/<name>`.
+        assert_eq!(root, Some(PathBuf::from("/env/models")));
+        assert_eq!(dir, Some(PathBuf::from("/env/models/owner/name")));
+    }
+
+    #[test]
+    fn models_root_falls_back_to_cache_dir_models_subdir() {
+        let _guard = env_lock();
+        let prev = clear_models_env();
+        // Only the legacy cache-dir knob is set: the `models/` subdir IS
+        // appended (backward-compat semantics).
+        unsafe {
+            std::env::set_var("MLXCEL_CACHE_DIR", "/cache");
+        }
+        let root = models_root(None);
+        let dir = model_dir_with_override("owner/name", None);
+        restore_models_env(prev);
+
+        assert_eq!(root, Some(PathBuf::from("/cache/models")));
+        assert_eq!(dir, Some(PathBuf::from("/cache/models/owner/name")));
+    }
+
+    #[test]
+    fn models_root_empty_env_var_is_ignored() {
+        let _guard = env_lock();
+        let prev = clear_models_env();
+        // An exported-but-empty MLXCEL_MODELS_DIR must NOT short-circuit the
+        // fallback to the cache-dir path.
+        unsafe {
+            std::env::set_var("MLXCEL_MODELS_DIR", "   ");
+            std::env::set_var("MLXCEL_CACHE_DIR", "/cache");
+        }
+        let root = models_root(None);
+        restore_models_env(prev);
+
+        assert_eq!(root, Some(PathBuf::from("/cache/models")));
+    }
+
+    #[test]
+    fn model_dir_with_override_rejects_path_traversal_under_override_root() {
+        // An adversarial repo id must never escape the override models root.
+        let override_root = Path::new("/inline/store");
+        let escaped = model_dir_under(override_root, "../../etc/passwd");
+        assert!(
+            escaped.starts_with(override_root),
+            "sanitized path {escaped:?} escaped the override models root"
+        );
+        assert_eq!(
+            escaped,
+            PathBuf::from("/inline/store/etc/passwd"),
+            "only Normal components should survive sanitization"
+        );
+
+        // And via the public override entry point (inline override given).
+        let _guard = env_lock();
+        let prev = clear_models_env();
+        let dir = model_dir_with_override("../../etc/passwd", Some(override_root));
+        restore_models_env(prev);
+        assert_eq!(dir, Some(PathBuf::from("/inline/store/etc/passwd")));
+
+        // A repo id that sanitizes to nothing collapses to a contained marker.
+        assert_eq!(
+            model_dir_under(override_root, ".."),
+            PathBuf::from("/inline/store/_unknown_")
+        );
     }
 
     #[test]
@@ -939,6 +1194,106 @@ mod tests {
         assert!(
             outside.exists(),
             "file outside the store must not be removed"
+        );
+    }
+
+    // ── list / remove under an override models root (issue #107) ─────────────
+
+    /// Materialize a complete snapshot directly under a **models root** (no
+    /// `models/` subdir): `<models_root>/<repo_id>` with a `config.json`.
+    fn make_snapshot_under(models_root: &Path, repo_id: &str) -> PathBuf {
+        let dir = model_dir_under(models_root, repo_id);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("config.json"), b"{}").unwrap();
+        dir
+    }
+
+    #[test]
+    fn list_models_with_override_walks_override_root_without_models_subdir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let override_root = tmp.path().join("custom-store");
+        // Snapshots land directly under the override root: no `models/` segment.
+        make_snapshot_under(&override_root, "owner/model");
+        make_snapshot_under(&override_root, "gpt2");
+
+        let _guard = env_lock();
+        let prev = clear_models_env();
+        // Set decoy env knobs that must be ignored when an inline override is
+        // passed. The cache-dir decoy points at an empty temp dir.
+        let decoy_cache = tmp.path().join("decoy-cache");
+        std::fs::create_dir_all(&decoy_cache).unwrap();
+        unsafe {
+            std::env::set_var("MLXCEL_MODELS_DIR", tmp.path().join("decoy-env"));
+            std::env::set_var("MLXCEL_CACHE_DIR", &decoy_cache);
+        }
+        let found = list_models_with_override(Some(&override_root));
+        restore_models_env(prev);
+
+        let ids: Vec<&str> = found.iter().map(|m| m.repo_id.as_str()).collect();
+        assert_eq!(ids, vec!["gpt2", "owner/model"]);
+        // Path is under the override root directly, not under `<root>/models`.
+        let model = found.iter().find(|m| m.repo_id == "owner/model").unwrap();
+        assert_eq!(model.path, override_root.join("owner").join("model"));
+    }
+
+    #[test]
+    fn remove_model_with_override_deletes_from_override_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let override_root = tmp.path().join("custom-store");
+        let dir = make_snapshot_under(&override_root, "owner/model");
+        assert!(dir.is_dir());
+
+        let _guard = env_lock();
+        let prev = clear_models_env();
+        // Point HF cache at an empty dir so the store-miss probe is deterministic.
+        let prev_hf_cache = std::env::var("HF_HUB_CACHE").ok();
+        let prev_hf_home = std::env::var("HF_HOME").ok();
+        let empty_hf = tmp.path().join("hf");
+        std::fs::create_dir_all(&empty_hf).unwrap();
+        unsafe {
+            std::env::set_var("HF_HUB_CACHE", &empty_hf);
+            std::env::remove_var("HF_HOME");
+        }
+        let outcome = remove_model_with_override("owner/model", None, Some(&override_root));
+        restore_env("HF_HUB_CACHE", prev_hf_cache);
+        restore_env("HF_HOME", prev_hf_home);
+        restore_models_env(prev);
+
+        match outcome.unwrap() {
+            RemoveOutcome::Removed { path, .. } => assert_eq!(path, dir),
+            other => panic!("expected Removed, got {other:?}"),
+        }
+        assert!(!dir.exists(), "directory should be gone after removal");
+    }
+
+    #[test]
+    fn remove_model_with_override_contains_traversal_to_override_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let override_root = tmp.path().join("custom-store");
+        std::fs::create_dir_all(&override_root).unwrap();
+        // Stage a victim OUTSIDE the override root that `..` must never reach.
+        let outside = tmp.path().join("victim.txt");
+        std::fs::write(&outside, b"do not delete").unwrap();
+
+        let _guard = env_lock();
+        let prev = clear_models_env();
+        let prev_hf_cache = std::env::var("HF_HUB_CACHE").ok();
+        let prev_hf_home = std::env::var("HF_HOME").ok();
+        let empty_hf = tmp.path().join("hf");
+        std::fs::create_dir_all(&empty_hf).unwrap();
+        unsafe {
+            std::env::set_var("HF_HUB_CACHE", &empty_hf);
+            std::env::remove_var("HF_HOME");
+        }
+        let outcome = remove_model_with_override("../../victim.txt", None, Some(&override_root));
+        restore_env("HF_HUB_CACHE", prev_hf_cache);
+        restore_env("HF_HOME", prev_hf_home);
+        restore_models_env(prev);
+
+        assert_eq!(outcome.unwrap(), RemoveOutcome::NotFound);
+        assert!(
+            outside.exists(),
+            "file outside the override root must not be removed"
         );
     }
 }

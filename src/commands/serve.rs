@@ -21,7 +21,7 @@
 
 use mlxcel::cli::speculative_args::{env_fallback_draft_block_size, env_fallback_draft_kind};
 use mlxcel::cli::turbo_args::resolve_kv_cache_mode;
-use mlxcel::downloader::resolve_model_source;
+use mlxcel::downloader::resolve_model_source_with_override;
 use mlxcel::memory_estimate::{QuantHint, estimate_total_memory, format_bytes, format_estimate};
 use mlxcel::server::{
     ServerStartupInput, env_fallback_apc_block_size, env_fallback_apc_enabled,
@@ -46,7 +46,7 @@ pub(crate) async fn run_serve(mut args: crate::ServeArgs) -> anyhow::Result<()> 
     // / mlxcel store, or auto-downloaded into the mlxcel store on a miss. Done
     // here (not in `build_startup_input`) so the preflight estimate also sees
     // the resolved path.
-    args.model = resolve_model_source(&args.model)?;
+    args.model = resolve_model_source_with_override(&args.model, args.models_dir.as_deref())?;
 
     // Issue #56: preflight memory check before the server begins
     // accepting connections. Refuses to start when total > available

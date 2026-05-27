@@ -26,6 +26,7 @@ fn args(repo_id: &str) -> DownloadArgs {
     DownloadArgs {
         repo_id: repo_id.to_string(),
         local_dir: None,
+        models_dir: None,
         revision: None,
         token: None,
         force: false,
@@ -87,10 +88,57 @@ fn explicit_local_dir_is_respected() {
 }
 
 #[test]
+fn models_dir_override_places_snapshot_without_models_subdir() {
+    // Issue #107: with --models-dir set (and no --local-dir), the snapshot
+    // lands directly at `<models_dir>/<owner>/<name>` — NO `models/` subdir —
+    // and the override beats MLXCEL_CACHE_DIR.
+    let _guard = env_lock();
+    let prev = std::env::var("MLXCEL_CACHE_DIR").ok();
+    let prev_models = std::env::var("MLXCEL_MODELS_DIR").ok();
+    unsafe {
+        std::env::set_var("MLXCEL_CACHE_DIR", "/tmp/should-be-ignored");
+        std::env::remove_var("MLXCEL_MODELS_DIR");
+    }
+    let mut a = args("mlx-community/Qwen3-4B-4bit");
+    a.models_dir = Some(PathBuf::from("/data/store"));
+    let opts = DownloadOptions::from_args(&a);
+    let resolved = opts.resolve_local_dir();
+    restore_env("MLXCEL_CACHE_DIR", prev);
+    restore_env("MLXCEL_MODELS_DIR", prev_models);
+
+    assert_eq!(
+        resolved,
+        PathBuf::from("/data/store")
+            .join("mlx-community")
+            .join("Qwen3-4B-4bit")
+    );
+}
+
+#[test]
+fn local_dir_wins_over_models_dir_override() {
+    // Issue #107: --local-dir is the verbatim opt-out and retains ultimate
+    // precedence for the download destination, even when --models-dir is set.
+    let _guard = env_lock();
+    let prev_models = std::env::var("MLXCEL_MODELS_DIR").ok();
+    unsafe {
+        std::env::remove_var("MLXCEL_MODELS_DIR");
+    }
+    let mut a = args("owner/model");
+    a.local_dir = Some(PathBuf::from("/tmp/verbatim"));
+    a.models_dir = Some(PathBuf::from("/data/store"));
+    let opts = DownloadOptions::from_args(&a);
+    let resolved = opts.resolve_local_dir();
+    restore_env("MLXCEL_MODELS_DIR", prev_models);
+
+    assert_eq!(resolved, PathBuf::from("/tmp/verbatim"));
+}
+
+#[test]
 fn from_args_carries_all_fields() {
     let a = DownloadArgs {
         repo_id: "owner/repo".to_string(),
         local_dir: Some(PathBuf::from("/tmp/x")),
+        models_dir: Some(PathBuf::from("/tmp/store")),
         revision: Some("v1".to_string()),
         token: Some("hf_xxx".to_string()),
         force: true,
@@ -98,6 +146,7 @@ fn from_args_carries_all_fields() {
     let opts = DownloadOptions::from_args(&a);
     assert_eq!(opts.repo_id, "owner/repo");
     assert_eq!(opts.local_dir, Some(PathBuf::from("/tmp/x")));
+    assert_eq!(opts.models_dir, Some(PathBuf::from("/tmp/store")));
     assert_eq!(opts.revision.as_deref(), Some("v1"));
     assert_eq!(opts.token.as_deref(), Some("hf_xxx"));
     assert!(opts.force);
@@ -440,6 +489,7 @@ fn live_download_smoke_test() {
     let opts = DownloadOptions {
         repo_id: "hf-internal-testing/tiny-random-gpt2".to_string(),
         local_dir: Some(dir.path().to_path_buf()),
+        models_dir: None,
         revision: None,
         token: None,
         force: true,

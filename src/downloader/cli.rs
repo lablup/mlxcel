@@ -66,6 +66,17 @@ pub struct DownloadArgs {
     #[arg(long, value_name = "PATH")]
     pub local_dir: Option<PathBuf>,
 
+    /// Model-store root under which the `<owner>/<name>` layout is created.
+    ///
+    /// Sets the directory that directly holds snapshots, so the download lands
+    /// at `<PATH>/<owner>/<name>` (no extra `models/` subdir). Overrides the
+    /// `MLXCEL_MODELS_DIR` environment variable. Distinct from `--local-dir`,
+    /// which writes the snapshot verbatim at that exact path (a single-directory
+    /// opt-out); when both are given, `--local-dir` wins for the download
+    /// destination.
+    #[arg(long, value_name = "PATH")]
+    pub models_dir: Option<PathBuf>,
+
     /// Repository revision (branch, tag, or commit hash). Defaults to
     /// `main`.
     #[arg(long, value_name = "REV")]
