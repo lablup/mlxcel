@@ -66,6 +66,9 @@ mlxcel generate \
 mlxcel-server \
     -m ~/.cache/mlxcel/models/mlx-community/Qwen3.5-0.8B-4bit \
     --port 8080
+# The server binary also accepts a repo-id and resolves / downloads it like
+# `mlxcel serve -m`.
+mlxcel-server -m mlx-community/Qwen3.5-0.8B-4bit --port 8080
 
 # Prefer a project-local checkout? Opt out of the global store with --local-dir;
 # the snapshot lands exactly where you point it.
@@ -78,15 +81,16 @@ mlxcel download mlx-community/Qwen3.5-0.8B-4bit --models-dir /Volumes/Models
 # -> /Volumes/Models/mlx-community/Qwen3.5-0.8B-4bit
 ```
 
-The model-store root resolves in this order: a `--models-dir <PATH>` flag (on `download`, `generate`, `serve`, `inspect`, `run`, `list --local`, and `rm`), then the `MLXCEL_MODELS_DIR` environment variable, then `${MLXCEL_CACHE_DIR:-$HOME/.cache/mlxcel}/models`. The dedicated `--models-dir` / `MLXCEL_MODELS_DIR` root holds snapshots directly at `<root>/<owner>/<name>`; only the cache-root fallback adds the `models/` segment. `--local-dir` is a different knob that writes one snapshot verbatim at an exact path and wins over `--models-dir` for the download destination.
+The model-store root resolves in this order: a `--models-dir <PATH>` flag (on `download`, `generate`, `serve`, `inspect`, `run`, `list --local`, `rm`, and the `mlxcel-server` server-start path), then the `MLXCEL_MODELS_DIR` environment variable, then `${MLXCEL_CACHE_DIR:-$HOME/.cache/mlxcel}/models`. The dedicated `--models-dir` / `MLXCEL_MODELS_DIR` root holds snapshots directly at `<root>/<owner>/<name>`; only the cache-root fallback adds the `models/` segment. `--local-dir` is a different knob that writes one snapshot verbatim at an exact path and wins over `--models-dir` for the download destination.
 
-`-m/--model` on `mlxcel generate`, `mlxcel serve`, and `mlxcel inspect` accepts a HuggingFace `owner/name` repo-id directly, so the explicit `download` step is optional — pass the repo-id and mlxcel reuses a local `./models/<name>` directory, the HuggingFace cache, or the mlxcel store, and downloads into the mlxcel store on a miss:
+`-m/--model` on `mlxcel generate`, `mlxcel serve`, `mlxcel inspect`, and the `mlxcel-server` server-start path accepts a HuggingFace `owner/name` repo-id directly, so the explicit `download` step is optional — pass the repo-id and mlxcel reuses a local `./models/<name>` directory, the HuggingFace cache, or the mlxcel store, and downloads into the mlxcel store on a miss:
 
 ```bash
 # Auto-download on first use, reuse from the store afterwards — runs from any directory.
 mlxcel generate -m mlx-community/Qwen3.5-0.8B-4bit -p "Hello, world!" -n 100
 mlxcel inspect -m mlx-community/Qwen3.5-0.8B-4bit --max-tokens 32768
 mlxcel serve -m mlx-community/Qwen3.5-0.8B-4bit --port 8080
+mlxcel-server -m mlx-community/Qwen3.5-0.8B-4bit --port 8080
 ```
 
 An existing local path is still used as-is, so `-m ./models/...` and `-m ~/.cache/mlxcel/...` behave exactly as before.

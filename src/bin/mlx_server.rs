@@ -20,7 +20,9 @@ use mlxcel::cli::speculative_args::{
     SpeculativeArgs, env_fallback_draft_block_size, env_fallback_draft_kind,
 };
 use mlxcel::cli::turbo_args::TurboKvCacheArgs;
-use mlxcel::downloader::{DownloadArgs, DownloadOptions, download_repo};
+use mlxcel::downloader::{
+    DownloadArgs, DownloadOptions, download_repo, resolve_model_source_with_override,
+};
 use mlxcel::lang_bias::LangBiasCliArgs;
 use mlxcel::server::{
     ServerStartupInput, env_fallback_apc_block_size, env_fallback_apc_enabled,
@@ -44,8 +46,10 @@ use mlxcel::server::{
 ///
 /// 1. Legacy flag-only invocation (backward-compatible default):
 ///    `mlxcel-server -m models/foo --port 8080`
+///    `mlxcel-server -m mlx-community/Qwen3-4B-4bit --port 8080`
 ///    With no subcommand, the binary boots the HTTP server using the
-///    flattened server flags below.
+///    flattened server flags below. `-m/--model` accepts the same local-path
+///    or HuggingFace `owner/name` repo-id values as `mlxcel serve -m`.
 ///
 /// 2. Subcommand mode:
 ///    `mlxcel-server download <REPO_ID>`
@@ -66,6 +70,13 @@ Tensor Parallel Runtime:
   Current constraints: --tp-embedding-mode replicated, --tp-lm-head-mode replicated
                        LoRA unsupported, server batching supported for listed dense runtimes
                        except Gemma 4 E2B-style conservative fallback checkpoints
+
+Model store:
+  -m/--model accepts either a local path or a HuggingFace owner/name repo-id.
+  Repo-ids are resolved exactly like `mlxcel serve -m`: legacy ./models/<name>,
+  then the HuggingFace cache, then the mlxcel store, with auto-download on miss.
+  Use --models-dir (or MLXCEL_MODELS_DIR) to point the mlxcel store at another
+  volume; snapshots live at <root>/<owner>/<name> under that root.
 
 Remote Pipeline Parallel Example (TCP):
   1. Generate a shared cluster config:
@@ -132,18 +143,29 @@ enum Commands {
 
 #[derive(ClapArgs, Debug)]
 struct ServerArgs {
-    /// Path to the model directory.
+    /// Path to the model directory, or a HuggingFace `owner/name` repo-id.
     ///
     /// Required when running in legacy server-start mode (no subcommand).
     /// Modeled as `Option<PathBuf>` so the `download` subcommand can be
-    /// invoked without supplying `-m`.
+    /// invoked without supplying `-m`. An existing path is used as-is; a
+    /// repo-id is resolved from a legacy `./models/<name>` directory, the
+    /// HuggingFace cache, or the mlxcel store, and auto-downloaded on a miss.
     #[arg(
         short = 'm',
         long = "model",
         env = "LLAMA_ARG_MODEL",
-        value_name = "PATH"
+        value_name = "PATH_OR_REPO_ID"
     )]
     model: Option<PathBuf>,
+
+    /// Model-store root for resolving / downloading an `owner/name` repo-id.
+    ///
+    /// Sets the directory that directly holds snapshots, so a repo-id resolves
+    /// to / downloads at `<PATH>/<owner>/<name>` (no extra `models/` subdir).
+    /// Overrides the `MLXCEL_MODELS_DIR` environment variable. No effect when
+    /// `-m/--model` is already an existing local path.
+    #[arg(long, value_name = "PATH")]
+    models_dir: Option<PathBuf>,
 
     /// Model alias (shown in API responses instead of directory name)
     #[arg(
@@ -1050,9 +1072,11 @@ fn build_startup_input(mut args: ServerArgs) -> anyhow::Result<ServerStartupInpu
 
     let model_path = args.model.ok_or_else(|| {
         anyhow::anyhow!(
-            "--model/-m is required to start the server (set the LLAMA_ARG_MODEL env var or pass -m <PATH>)"
+            "--model/-m is required to start the server \
+             (set the LLAMA_ARG_MODEL env var or pass -m <PATH_OR_REPO_ID>)"
         )
     })?;
+    let model_path = resolve_model_source_with_override(&model_path, args.models_dir.as_deref())?;
 
     Ok(ServerStartupInput {
         model_path,
@@ -1191,4 +1215,71 @@ fn build_startup_input(mut args: ServerArgs) -> anyhow::Result<ServerStartupInpu
         #[cfg(feature = "surgery")]
         surgery_config_path: args.surgery,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::path::{Path, PathBuf};
+
+    fn parse_server_args(argv: &[&str]) -> ServerArgs {
+        let cli = Cli::try_parse_from(argv).expect("mlxcel-server args should parse");
+        assert!(
+            cli.command.is_none(),
+            "test argv should exercise legacy server-start mode"
+        );
+        cli.server
+    }
+
+    fn make_complete_snapshot(models_root: &Path, repo_id: &str) -> PathBuf {
+        let mut dir = models_root.to_path_buf();
+        for segment in repo_id.split('/') {
+            dir.push(segment);
+        }
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("config.json"), b"{}").unwrap();
+        dir
+    }
+
+    #[test]
+    fn legacy_server_mode_resolves_repo_id_from_models_dir_override() {
+        let tmp = tempfile::tempdir().unwrap();
+        let models_root = tmp.path().join("custom-model-store");
+        let repo_id = "zz-mlxcel-test-owner/zz-mlxcel-test-model";
+        let expected = make_complete_snapshot(&models_root, repo_id);
+        let models_root_arg = models_root.to_string_lossy().to_string();
+
+        let args = parse_server_args(&[
+            "mlxcel-server",
+            "-m",
+            repo_id,
+            "--models-dir",
+            &models_root_arg,
+        ]);
+        let input = build_startup_input(args).expect("repo-id should resolve from override store");
+
+        assert_eq!(input.model_path, expected);
+    }
+
+    #[test]
+    fn legacy_server_mode_keeps_existing_model_path_verbatim() {
+        let tmp = tempfile::tempdir().unwrap();
+        let local_model = tmp.path().join("local-model");
+        fs::create_dir_all(&local_model).unwrap();
+        let decoy_models_root = tmp.path().join("decoy-store");
+        let local_model_arg = local_model.to_string_lossy().to_string();
+        let decoy_arg = decoy_models_root.to_string_lossy().to_string();
+
+        let args = parse_server_args(&[
+            "mlxcel-server",
+            "-m",
+            &local_model_arg,
+            "--models-dir",
+            &decoy_arg,
+        ]);
+        let input = build_startup_input(args).expect("existing path should be accepted");
+
+        assert_eq!(input.model_path, local_model);
+    }
 }
