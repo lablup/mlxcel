@@ -1020,24 +1020,28 @@ pub(crate) fn run_generate(mut args: GenerateArgs) -> Result<()> {
     let runtime = initialize_runtime();
     print_runtime_setup(&runtime);
 
-    // Resolve `-m` into a concrete model directory (epic #92, issue #94)
-    // before any consumer reads it. An existing path is used verbatim
-    // (byte-identical to the pre-#94 local-path behavior); an `owner/name`
-    // HuggingFace repo-id is reused from the legacy CWD / HF cache / mlxcel
-    // store, or auto-downloaded into the mlxcel store on a miss. Done up front
-    // so quantization advice, tokenizer load, memory preflight, and model load
-    // all see the resolved path with no further changes.
-    args.model.model = resolve_model_source(&args.model.model)?;
-
     // Axis A weight-load surgery (Epic #363, issue #371). Parse the
     // YAML and install the pipeline *before* any heavier validation
     // so a malformed / missing surgery config fails fast with a clear
     // error rather than being masked by an unrelated tensor-parallel
     // or pipeline-parallel diagnostic. When `--surgery` is absent this
     // is a no-op and the load path remains bit-exact identical to the
-    // pre-#371 baseline.
+    // pre-#371 baseline. This reads only the `--surgery` YAML path, never
+    // the model directory, so it must stay ahead of the `-m` resolver below
+    // — a malformed surgery config never triggers an auto-download.
     #[cfg(feature = "surgery")]
     install_surgery_pipeline_from_cli(&args)?;
+
+    // Resolve `-m` into a concrete model directory (epic #92, issue #94)
+    // before any consumer reads it. An existing path is used verbatim
+    // (byte-identical to the pre-#94 local-path behavior); an `owner/name`
+    // HuggingFace repo-id is reused from the legacy CWD / HF cache / mlxcel
+    // store, or auto-downloaded into the mlxcel store on a miss. Placed after
+    // the (model-independent) surgery YAML validation but before the
+    // tensor/pipeline-parallel validators and the quantization-advice,
+    // tokenizer, memory-preflight, and model-load steps — all of which read
+    // the model directory and therefore need the resolved path.
+    args.model.model = resolve_model_source(&args.model.model)?;
 
     validate_tensor_parallel_args(&args)?;
     validate_pipeline_parallel_args(&args)?;
