@@ -36,103 +36,49 @@ brew install mlxcel
 
 ### Run a model
 
-```bash
-# Download an MLX-format checkpoint from Hugging Face. By default it lands in
-# the location-independent global store at
-# ${MLXCEL_CACHE_DIR:-$HOME/.cache/mlxcel}/models/<owner>/<name>, so a model
-# downloaded once is runnable from any directory. If the repo is already in
-# your HuggingFace cache (HF_HUB_CACHE / HF_HOME), the existing snapshot is
-# reused instead of re-downloading.
-mlxcel download mlx-community/Qwen3.5-0.8B-4bit
-# -> ~/.cache/mlxcel/models/mlx-community/Qwen3.5-0.8B-4bit
-
-# Check the memory budget before loading anything.
-mlxcel inspect \
-    -m ~/.cache/mlxcel/models/mlx-community/Qwen3.5-0.8B-4bit \
-    --max-tokens 32768
-
-# One-off generation.
-mlxcel generate \
-    -m ~/.cache/mlxcel/models/mlx-community/Qwen3.5-0.8B-4bit \
-    -p "Hello, world!" -n 100
-
-# Same generation, but refuse to start if the model + 32K KV cache will not fit.
-mlxcel generate \
-    -m ~/.cache/mlxcel/models/mlx-community/Qwen3.5-0.8B-4bit \
-    -p "Hello, world!" -n 32768 \
-    --estimate-memory
-
-# OpenAI-compatible server.
-mlxcel-server \
-    -m ~/.cache/mlxcel/models/mlx-community/Qwen3.5-0.8B-4bit \
-    --port 8080
-# The server binary also accepts a repo-id and resolves / downloads it like
-# `mlxcel serve -m`.
-mlxcel-server -m mlx-community/Qwen3.5-0.8B-4bit --port 8080
-
-# Prefer a project-local checkout? Opt out of the global store with --local-dir;
-# the snapshot lands exactly where you point it.
-mlxcel download mlx-community/Qwen3.5-0.8B-4bit --local-dir ./models/Qwen3.5-0.8B-4bit
-
-# Want the whole store on another volume? Point the store root at it with
-# --models-dir (or the MLXCEL_MODELS_DIR env var). Snapshots keep the
-# <owner>/<name> layout directly under that root, with no extra models/ subdir.
-mlxcel download mlx-community/Qwen3.5-0.8B-4bit --models-dir /Volumes/Models
-# -> /Volumes/Models/mlx-community/Qwen3.5-0.8B-4bit
-```
-
-The model-store root resolves in this order: a `--models-dir <PATH>` flag (on `download`, `generate`, `serve`, `inspect`, `run`, `list --local`, `rm`, and the `mlxcel-server` server-start path), then the `MLXCEL_MODELS_DIR` environment variable, then `${MLXCEL_CACHE_DIR:-$HOME/.cache/mlxcel}/models`. The dedicated `--models-dir` / `MLXCEL_MODELS_DIR` root holds snapshots directly at `<root>/<owner>/<name>`; only the cache-root fallback adds the `models/` segment. `--local-dir` is a different knob that writes one snapshot verbatim at an exact path and wins over `--models-dir` for the download destination.
-
-`-m/--model` on `mlxcel generate`, `mlxcel serve`, `mlxcel inspect`, and the `mlxcel-server` server-start path accepts a HuggingFace `owner/name` repo-id directly, so the explicit `download` step is optional — pass the repo-id and mlxcel reuses a local `./models/<name>` directory, the HuggingFace cache, or the mlxcel store, and downloads into the mlxcel store on a miss. A bare, prefix-less name (no slash) is resolved as `mlx-community/<name>` automatically; set `MLXCEL_DEFAULT_ORG` to use a different org:
+The quickest path is `mlxcel run`: it resolves the model argument, auto-downloads
+on first use, reuses it afterward, and runs from any directory.
 
 ```bash
-# Auto-download on first use, reuse from the store afterwards — runs from any directory.
-mlxcel generate -m mlx-community/Qwen3.5-0.8B-4bit -p "Hello, world!" -n 100
-mlxcel generate -m Qwen3.5-0.8B-4bit -p "Hello, world!" -n 100  # -> mlx-community/Qwen3.5-0.8B-4bit
-mlxcel inspect -m mlx-community/Qwen3.5-0.8B-4bit --max-tokens 32768
-mlxcel serve -m mlx-community/Qwen3.5-0.8B-4bit --port 8080
-mlxcel-server -m mlx-community/Qwen3.5-0.8B-4bit --port 8080
-```
-
-An existing local path is still used as-is, so `-m ./models/...` and `-m ~/.cache/mlxcel/...` behave exactly as before.
-
-For an `ollama run`-style one-liner, use `mlxcel run`. It takes the model as a positional argument (repo-id or local path, resolved and auto-downloaded exactly like `-m` above) and chooses interactive chat or one-shot generation based on whether you pass `-p`:
-
-```bash
-# Interactive multi-turn chat REPL (no -p).
+# Interactive chat REPL.
 mlxcel run mlx-community/Qwen3.5-0.8B-4bit
 
-# Bare name — resolved as mlx-community/Qwen3.5-0.8B-4bit.
+# Bare name resolves to mlx-community/<name>.
 mlxcel run Qwen3.5-0.8B-4bit
 
-# One-shot generation, then exit (-p). Identical output to the equivalent `generate`.
-mlxcel run mlx-community/Qwen3.5-0.8B-4bit -p "Hello, world!" -n 100
+# One-shot generation with -p, then exit.
+mlxcel run Qwen3.5-0.8B-4bit -p "Hello, world!" -n 100
 
-# No model argument → falls back to the default model
-# `mlx-community/Llama-3.2-3B-Instruct-4bit` (mlx-lm parity), auto-downloaded on first use.
+# No model argument falls back to the default
+# mlx-community/Llama-3.2-3B-Instruct-4bit (mlx-lm parity).
 mlxcel run
 ```
 
-`mlxcel run` shares `mlxcel generate`'s sampling and generation flags (`-n`, `--temp`, `--top-p`, `--no-chat-template`, the TurboQuant KV-cache flags, …), so it is a thin convenience wrapper over the same code path — not a separate engine.
+`generate`, `serve`, and `inspect` take the same model argument via `-m` — a HuggingFace `owner/name` repo-id (auto-downloaded into the store and reused after), a bare name (resolved as `mlx-community/<name>`), or an existing local path. `mlxcel run` is a thin wrapper over `mlxcel generate` and shares its sampling and generation flags.
 
-`mlxcel inspect` is read-only and prints a byte-level breakdown of weights /
-KV cache / runtime headroom against available unified memory without loading
-any tensors. `--estimate-memory` on `mlxcel generate` and `mlxcel serve`
-runs the same estimator as a preflight and aborts when the model will not
-fit; pass `--force` (alias `--no-memory-check`) to override the abort.
-`MLXCEL_MEMORY_LIMIT=NGB` tightens the "available" figure to a chosen soft
-cap so the preflight is meaningful even on hosts with plenty of RAM. The
-runtime headroom factor defaults to `1.20×` and is overridable via
-`MLXCEL_HEADROOM_FACTOR=<f>` for calibration runs — see the in-code recipe
-in `src/execution/memory_estimate.rs`.
+```bash
+# One-off generation.
+mlxcel generate -m Qwen3.5-0.8B-4bit -p "Hello, world!" -n 100
+
+# OpenAI-compatible server (mlxcel serve is the subcommand equivalent).
+mlxcel-server -m Qwen3.5-0.8B-4bit --port 8080
+
+# Read-only memory budget: weights + KV cache vs. available unified memory.
+mlxcel inspect -m Qwen3.5-0.8B-4bit --max-tokens 32768
+
+# Preflight that aborts if the model + 32K KV cache will not fit
+# (--force, alias --no-memory-check, overrides the abort).
+mlxcel generate -m Qwen3.5-0.8B-4bit -p "Hello, world!" -n 32768 --estimate-memory
+```
+
+Downloaded models land in a location-independent global store at `${MLXCEL_CACHE_DIR:-$HOME/.cache/mlxcel}/models/<owner>/<name>`, shared across every working directory. To relocate the store, write a snapshot to an exact path, change the default org, or tune the memory preflight, see [Environment variables](docs/environment-variables.md) — `MLXCEL_MODELS_DIR` / `--models-dir`, `--local-dir`, `MLXCEL_DEFAULT_ORG`, and `MLXCEL_MEMORY_LIMIT` / `MLXCEL_HEADROOM_FACTOR`.
 
 If you build from source instead, use `./target/release/mlxcel` and
 `./target/release/mlxcel-server` in place of the installed commands above.
 
 ### Manage downloaded models
 
-The global store is shared across every directory, so list and prune it from
-anywhere:
+List and prune the global store from any directory:
 
 ```bash
 # List downloaded models with their on-disk size and path.
@@ -145,14 +91,10 @@ mlxcel rm mlx-community/Qwen3.5-0.8B-4bit
 mlxcel rm mlx-community/Qwen3.5-0.8B-4bit --yes
 ```
 
-`mlxcel list` without `--local` still prints the supported model
-architectures. `mlxcel list --local` instead enumerates the snapshots under
-the resolved store root (`${MLXCEL_CACHE_DIR:-$HOME/.cache/mlxcel}/models/` by
-default, or wherever `--models-dir` / `MLXCEL_MODELS_DIR` points). `mlxcel rm
-<repo-id>` deletes only inside that store and honors the same `--models-dir`
-override; a model that exists solely in the read-only HuggingFace cache
-(`HF_HUB_CACHE` / `HF_HOME`) is reported but never deleted, since mlxcel does
-not manage the HuggingFace cache.
+`mlxcel list` without `--local` prints the supported model architectures
+instead. `mlxcel rm <repo-id>` deletes only inside the mlxcel store and honors
+the same `--models-dir` override; a model that exists solely in the read-only
+HuggingFace cache (`HF_HUB_CACHE` / `HF_HOME`) is reported but never deleted.
 
 ### Build from source on Apple Silicon
 
