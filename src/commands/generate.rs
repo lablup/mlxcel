@@ -32,6 +32,7 @@ use mlxcel::{
         },
         resolve_model_shard_plan, shard_config_from_cli, validate_supported_runtime,
     },
+    downloader::resolve_model_source,
     initialize_runtime, load_model, load_model_with_adapter, load_model_with_tensor_parallel,
     memory_estimate::{
         MemoryEstimate, QuantHint, estimate_total_memory, format_bytes, format_estimate,
@@ -1015,9 +1016,18 @@ fn install_surgery_pipeline_from_cli(args: &GenerateArgs) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn run_generate(args: GenerateArgs) -> Result<()> {
+pub(crate) fn run_generate(mut args: GenerateArgs) -> Result<()> {
     let runtime = initialize_runtime();
     print_runtime_setup(&runtime);
+
+    // Resolve `-m` into a concrete model directory (epic #92, issue #94)
+    // before any consumer reads it. An existing path is used verbatim
+    // (byte-identical to the pre-#94 local-path behavior); an `owner/name`
+    // HuggingFace repo-id is reused from the legacy CWD / HF cache / mlxcel
+    // store, or auto-downloaded into the mlxcel store on a miss. Done up front
+    // so quantization advice, tokenizer load, memory preflight, and model load
+    // all see the resolved path with no further changes.
+    args.model.model = resolve_model_source(&args.model.model)?;
 
     // Axis A weight-load surgery (Epic #363, issue #371). Parse the
     // YAML and install the pipeline *before* any heavier validation

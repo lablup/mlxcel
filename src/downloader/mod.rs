@@ -80,12 +80,14 @@ mod cli;
 mod errors;
 mod filters;
 mod progress;
+mod resolver;
 mod store;
 
 pub use cli::DownloadArgs;
 pub use errors::map_hf_error;
 pub use filters::{is_wanted_file, repo_basename};
 pub use progress::should_show_progress;
+pub use resolver::resolve_model_source;
 pub use store::{hf_cache_snapshot, model_dir, store_root};
 
 use anyhow::{Context, Result, anyhow};

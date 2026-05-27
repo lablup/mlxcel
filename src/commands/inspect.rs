@@ -25,19 +25,22 @@
 use anyhow::{Result, anyhow};
 
 use mlxcel::cli::turbo_args::resolve_kv_cache_mode;
+use mlxcel::downloader::resolve_model_source;
 use mlxcel::memory_estimate::{QuantHint, estimate_total_memory, format_estimate};
 use mlxcel_core::cache::KVCacheMode;
 
 use crate::InspectArgs;
 
 /// Run the `mlxcel inspect` subcommand.
-pub(crate) fn run_inspect(args: InspectArgs) -> Result<()> {
-    if !args.model.exists() {
-        return Err(anyhow!(
-            "Model directory does not exist: {}",
-            args.model.display()
-        ));
-    }
+pub(crate) fn run_inspect(mut args: InspectArgs) -> Result<()> {
+    // Resolve `-m` into a concrete model directory (epic #92, issue #94): an
+    // existing path is used as-is (byte-identical to the pre-#94 behavior),
+    // while an `owner/name` HuggingFace repo-id is reused from the legacy CWD /
+    // HF cache / mlxcel store or auto-downloaded into the mlxcel store. On a
+    // miss-and-error this returns a clear message; on success `args.model` is
+    // guaranteed to name an existing snapshot, so the downstream estimator
+    // path is unchanged.
+    args.model = resolve_model_source(&args.model)?;
 
     // Translate the user-facing `--quant` label into the typed hint.
     let quant = parse_quant_hint(&args.quant)?;

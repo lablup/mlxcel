@@ -21,6 +21,7 @@
 
 use mlxcel::cli::speculative_args::{env_fallback_draft_block_size, env_fallback_draft_kind};
 use mlxcel::cli::turbo_args::resolve_kv_cache_mode;
+use mlxcel::downloader::resolve_model_source;
 use mlxcel::memory_estimate::{QuantHint, estimate_total_memory, format_bytes, format_estimate};
 use mlxcel::server::{
     ServerStartupInput, env_fallback_apc_block_size, env_fallback_apc_enabled,
@@ -37,7 +38,16 @@ use mlxcel_core::cache::KVCacheMode;
 
 /// Run the `mlxcel serve` subcommand.
 #[tokio::main]
-pub(crate) async fn run_serve(args: crate::ServeArgs) -> anyhow::Result<()> {
+pub(crate) async fn run_serve(mut args: crate::ServeArgs) -> anyhow::Result<()> {
+    // Resolve `-m` into a concrete model directory (epic #92, issue #94)
+    // before the memory preflight or the server reads it. An existing path is
+    // used verbatim (byte-identical to the pre-#94 local-path behavior); an
+    // `owner/name` HuggingFace repo-id is reused from the legacy CWD / HF cache
+    // / mlxcel store, or auto-downloaded into the mlxcel store on a miss. Done
+    // here (not in `build_startup_input`) so the preflight estimate also sees
+    // the resolved path.
+    args.model = resolve_model_source(&args.model)?;
+
     // Issue #56: preflight memory check before the server begins
     // accepting connections. Refuses to start when total > available
     // unless --force was passed. Skipped when --estimate-memory is
