@@ -442,11 +442,12 @@ fn stream_turn<M: LanguageModel>(
         .collect();
 
     // Stream display through the shared incremental detokenizer (byte-fallback
-    // safe), while separately collecting the raw generated ids so the
-    // transcript reply is decoded byte-exactly at the end — independent of any
-    // tail bytes the streaming view held back.
+    // safe), accumulating exactly what was printed. The raw generated ids are
+    // collected in parallel so the final turn text is decoded byte-exactly,
+    // independent of any tail bytes the streaming view held back mid-stream.
     let mut decode_state = StreamingDecodeState::new(tokenizer, &prompt_tokens);
     let mut generated_ids: Vec<u32> = Vec::with_capacity(max_tokens);
+    let mut streamed = String::new();
     let mut stdout = io::stdout();
 
     generator.generate_streaming(
@@ -459,20 +460,26 @@ fn stream_turn<M: LanguageModel>(
             if let Some(text) = decode_state.on_token(token_id, tokenizer) {
                 print!("{text}");
                 let _ = stdout.flush();
+                streamed.push_str(&text);
             }
             true
         },
     );
 
-    // Resolve any byte-fallback / split-UTF-8 remainder held back mid-stream so
-    // the displayed line is complete, then close out the assistant block.
-    decode_state.flush(tokenizer);
+    // Decode the full assistant turn (skip special tokens so template markers do
+    // not leak into the next turn's rendered history). This is the byte-exact
+    // turn text used both for the transcript and to flush any tail the streaming
+    // view held back (e.g. a multi-byte char split across the final tokens).
+    let reply = tokenizer.decode(&generated_ids, true).unwrap_or_default();
+    if let Some(tail) = reply.strip_prefix(&streamed)
+        && !tail.is_empty()
+    {
+        print!("{tail}");
+        let _ = stdout.flush();
+    }
     println!();
     println!();
 
-    // Decode the full assistant turn for the transcript (skip special tokens so
-    // template markers do not leak into the next turn's rendered history).
-    let reply = tokenizer.decode(&generated_ids, true).unwrap_or_default();
     Ok(reply)
 }
 
