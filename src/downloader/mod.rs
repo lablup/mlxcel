@@ -88,7 +88,10 @@ pub use errors::map_hf_error;
 pub use filters::{is_wanted_file, repo_basename};
 pub use progress::should_show_progress;
 pub use resolver::resolve_model_source;
-pub use store::{hf_cache_snapshot, model_dir, store_root};
+pub use store::{
+    RemoveError, RemoveOutcome, StoredModel, hf_cache_snapshot, list_models, model_dir,
+    remove_model, store_root,
+};
 
 use anyhow::{Context, Result, anyhow};
 use futures::StreamExt;

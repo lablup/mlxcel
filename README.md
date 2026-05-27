@@ -97,6 +97,29 @@ in `src/execution/memory_estimate.rs`.
 If you build from source instead, use `./target/release/mlxcel` and
 `./target/release/mlxcel-server` in place of the installed commands above.
 
+### Manage downloaded models
+
+The global store is shared across every directory, so list and prune it from
+anywhere:
+
+```bash
+# List downloaded models with their on-disk size and path.
+mlxcel list --local
+
+# Remove a model from the global store (prompts for confirmation).
+mlxcel rm mlx-community/Qwen3.5-0.8B-4bit
+
+# Remove without the prompt (for scripts / non-interactive shells).
+mlxcel rm mlx-community/Qwen3.5-0.8B-4bit --yes
+```
+
+`mlxcel list` without `--local` still prints the supported model
+architectures. `mlxcel list --local` instead enumerates the snapshots under
+`${MLXCEL_CACHE_DIR:-$HOME/.cache/mlxcel}/models/`. `mlxcel rm <repo-id>`
+deletes only inside that store; a model that exists solely in the read-only
+HuggingFace cache (`HF_HUB_CACHE` / `HF_HOME`) is reported but never deleted,
+since mlxcel does not manage the HuggingFace cache.
+
 ### Build from source on Apple Silicon
 
 Prerequisites:

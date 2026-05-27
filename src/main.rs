@@ -68,9 +68,9 @@ enum Commands {
     /// Start an OpenAI/llama-server compatible HTTP server
     Serve(ServeArgs),
 
-    /// List supported model architectures
+    /// List supported model architectures, or downloaded models with `--local`
     #[command(visible_alias = "ls")]
-    List,
+    List(ListArgs),
 
     /// Print a pre-load memory budget for a model without running generation.
     ///
@@ -101,6 +101,55 @@ enum Commands {
     ///     mlxcel detect -m models/docling-layout-heron-mlx-bf16 -i page.png
     ///     mlxcel detect -m models/rt-detr-v2 -i img.jpg --threshold 0.5 --format json
     Detect(DetectArgs),
+
+    /// Remove a downloaded model from the global store.
+    ///
+    /// Deletes `${MLXCEL_CACHE_DIR:-$HOME/.cache/mlxcel}/models/<owner>/<name>`
+    /// for the given repo-id and frees the space. Prompts for confirmation
+    /// unless `--yes` is passed. Models that exist only in the read-only
+    /// HuggingFace cache are reported but never deleted (mlxcel does not manage
+    /// the HuggingFace cache).
+    ///
+    /// Examples:
+    ///
+    ///     mlxcel rm mlx-community/Qwen3-4B-4bit
+    ///     mlxcel rm mlx-community/Qwen3-4B-4bit --yes
+    Rm(RmArgs),
+}
+
+/// Arguments for `mlxcel list`.
+///
+/// Without flags, `list` prints the supported model-architecture summary
+/// (unchanged behavior). `--local` switches it to enumerate downloaded models
+/// in the global store (repo-id, on-disk size, path), mirroring `ollama list`.
+#[derive(Args, Debug)]
+pub(crate) struct ListArgs {
+    /// List downloaded models in the global store instead of supported
+    /// architectures.
+    ///
+    /// Shows each model's repo-id, on-disk size, and absolute path under
+    /// `${MLXCEL_CACHE_DIR:-$HOME/.cache/mlxcel}/models/`. Use `mlxcel rm
+    /// <repo-id>` to remove one.
+    #[arg(long)]
+    pub(crate) local: bool,
+}
+
+/// Arguments for `mlxcel rm`.
+#[derive(Args, Debug)]
+pub(crate) struct RmArgs {
+    /// HuggingFace repository id to remove, e.g. `mlx-community/Qwen3-4B-4bit`.
+    #[arg(value_name = "REPO_ID")]
+    pub(crate) repo_id: String,
+
+    /// Skip the interactive confirmation prompt.
+    #[arg(long, short = 'y', default_value_t = false)]
+    pub(crate) yes: bool,
+
+    /// Repository revision used only to locate an HF-cache snapshot when the
+    /// model is not in the mlxcel store (defaults to `main`). The mlxcel store
+    /// itself is not revision-namespaced.
+    #[arg(long, value_name = "REV")]
+    pub(crate) revision: Option<String>,
 }
 
 #[derive(Args, Debug)]
@@ -1232,13 +1281,20 @@ fn main() -> anyhow::Result<()> {
     match cli.command {
         Commands::Generate(args) => commands::run_generate(args),
         Commands::Serve(args) => commands::run_serve(args),
-        Commands::List => {
-            print_supported_models();
-            Ok(())
+        Commands::List(args) => {
+            if args.local {
+                commands::run_list_local()
+            } else {
+                print_supported_models();
+                Ok(())
+            }
         }
         Commands::Inspect(args) => commands::run_inspect(args),
         Commands::Download(args) => commands::run_download(args),
         Commands::Detect(args) => commands::run_detect(args),
+        Commands::Rm(args) => {
+            commands::run_remove(&args.repo_id, args.yes, args.revision.as_deref())
+        }
     }
 }
 

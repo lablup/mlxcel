@@ -217,6 +217,289 @@ fn snapshot_is_complete(dir: &Path) -> bool {
     dir.is_dir() && dir.join("config.json").exists()
 }
 
+// ── Local model management (issue #97) ──────────────────────────────────────
+
+/// A model snapshot found in the mlxcel global store.
+///
+/// Produced by [`list_models`] for the `mlxcel list --local` surface. Holds
+/// the reconstructed HuggingFace `repo_id` (`<owner>/<name>` or a bare
+/// `<name>`), the absolute on-disk directory, and the recursively-summed
+/// byte size of that directory.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredModel {
+    /// Reconstructed repo id: `<owner>/<name>`, or a bare `<name>` for
+    /// snapshots stored directly under `models/` (e.g. a download of `gpt2`).
+    pub repo_id: String,
+    /// Absolute path to the snapshot directory under the store root.
+    pub path: PathBuf,
+    /// Recursive on-disk size of `path`, in bytes.
+    pub size_bytes: u64,
+}
+
+/// Enumerate complete model snapshots in the mlxcel global store.
+///
+/// Walks `store_root()/models/` and returns one [`StoredModel`] per directory
+/// that looks like a materialized snapshot (contains a `config.json`, the same
+/// completeness gate used by the downloader and [`hf_cache_snapshot`]). Both
+/// layouts written by issue #93 are recognized:
+///
+/// - `models/<owner>/<name>/` — the standard HuggingFace namespacing; the
+///   reconstructed `repo_id` is `<owner>/<name>`.
+/// - `models/<name>/` — a bare-id download (e.g. `gpt2`); the reconstructed
+///   `repo_id` is `<name>`.
+///
+/// Results are sorted by `repo_id` for stable, golden-test-friendly output.
+/// Returns an empty vector when the store root cannot be resolved or the
+/// `models/` subtree does not exist yet. I/O errors on individual entries are
+/// skipped rather than aborting the whole listing, so one unreadable directory
+/// does not hide every other model.
+pub fn list_models() -> Vec<StoredModel> {
+    let Some(root) = store_root() else {
+        return Vec::new();
+    };
+    let mut out = list_models_in(&root);
+    out.sort_by(|a, b| a.repo_id.cmp(&b.repo_id));
+    out
+}
+
+/// Pure helper behind [`list_models`]: enumerate snapshots under an explicit
+/// store root. Split out so unit tests can assert against a temp directory
+/// without touching process-wide env state. The returned order is filesystem
+/// order; [`list_models`] sorts the public result.
+fn list_models_in(root: &Path) -> Vec<StoredModel> {
+    let models_root = root.join(MODELS_SUBDIR);
+    let mut out: Vec<StoredModel> = Vec::new();
+
+    let Ok(top_entries) = std::fs::read_dir(&models_root) else {
+        return out;
+    };
+
+    for top in top_entries.flatten() {
+        let top_path = top.path();
+        // `read_dir` -> `DirEntry::path` does not follow the entry itself, but
+        // an owner directory could in principle be a symlink; only descend
+        // into real directories so a symlinked `models/<owner>` cannot make us
+        // walk outside the store.
+        if !top_path.is_dir() || top_path.symlink_metadata().is_ok_and(|m| m.is_symlink()) {
+            continue;
+        }
+        let Some(top_name) = top.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+
+        // Case 1: a bare-id snapshot stored directly at models/<name>.
+        if snapshot_is_complete(&top_path) {
+            out.push(StoredModel {
+                repo_id: top_name.clone(),
+                path: top_path.clone(),
+                size_bytes: dir_size(&top_path),
+            });
+            // A bare-id snapshot directory is terminal; do not also treat it
+            // as an owner directory.
+            continue;
+        }
+
+        // Case 2: an owner directory holding models/<owner>/<name> snapshots.
+        let Ok(inner_entries) = std::fs::read_dir(&top_path) else {
+            continue;
+        };
+        for inner in inner_entries.flatten() {
+            let inner_path = inner.path();
+            if !inner_path.is_dir() || inner_path.symlink_metadata().is_ok_and(|m| m.is_symlink()) {
+                continue;
+            }
+            if !snapshot_is_complete(&inner_path) {
+                continue;
+            }
+            let Some(inner_name) = inner.file_name().to_str().map(str::to_owned) else {
+                continue;
+            };
+            out.push(StoredModel {
+                repo_id: format!("{top_name}/{inner_name}"),
+                path: inner_path.clone(),
+                size_bytes: dir_size(&inner_path),
+            });
+        }
+    }
+
+    out
+}
+
+/// Recursively sum the byte sizes of every regular file under `dir`.
+///
+/// Symlinks are not followed (sizes are taken from `symlink_metadata`), so a
+/// snapshot containing symlinks counts the link entry itself rather than its
+/// (possibly out-of-tree) target. I/O errors on individual entries contribute
+/// zero rather than aborting, keeping the size best-effort but never panicking.
+fn dir_size(dir: &Path) -> u64 {
+    let mut total: u64 = 0;
+    let mut stack: Vec<PathBuf> = vec![dir.to_path_buf()];
+    while let Some(current) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&current) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Ok(meta) = path.symlink_metadata() else {
+                continue;
+            };
+            if meta.is_dir() {
+                stack.push(path);
+            } else {
+                // Regular files and symlink entries both contribute their own
+                // on-disk length; we intentionally do not follow symlinks.
+                total = total.saturating_add(meta.len());
+            }
+        }
+    }
+    total
+}
+
+/// Outcome of a [`remove_model`] request.
+#[derive(Debug, PartialEq, Eq)]
+pub enum RemoveOutcome {
+    /// The store directory existed and was deleted. Carries the freed size in
+    /// bytes (measured before deletion) and the removed path.
+    Removed { path: PathBuf, size_bytes: u64 },
+    /// No snapshot for this repo id exists in the mlxcel store, but a complete
+    /// snapshot was found in the read-only HuggingFace cache. mlxcel refuses to
+    /// touch the HF cache (it is not ours to manage). Carries the HF snapshot
+    /// path for the caller's warning message.
+    HfCacheOnly { hf_path: PathBuf },
+    /// No snapshot for this repo id exists anywhere mlxcel manages or reads.
+    NotFound,
+}
+
+/// Errors that can abort a [`remove_model`] request before any deletion.
+#[derive(Debug)]
+pub enum RemoveError {
+    /// The store root could not be resolved (no `MLXCEL_CACHE_DIR` and no home
+    /// directory).
+    NoStoreRoot,
+    /// The resolved target escaped the `store_root()/models/` subtree. This is
+    /// a safety stop — it should be unreachable given the path sanitization in
+    /// [`model_dir`], but is enforced defensively so a future regression can
+    /// never delete outside the store.
+    OutsideStore(PathBuf),
+    /// Deleting the store directory failed (I/O error), with the offending
+    /// path and underlying error.
+    Io {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+}
+
+impl std::fmt::Display for RemoveError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RemoveError::NoStoreRoot => write!(
+                f,
+                "cannot resolve the mlxcel model store root \
+                 (set MLXCEL_CACHE_DIR or ensure a home directory is available)"
+            ),
+            RemoveError::OutsideStore(p) => write!(
+                f,
+                "refusing to remove {}: resolved path is outside the model store",
+                p.display()
+            ),
+            RemoveError::Io { path, source } => {
+                write!(f, "failed to remove {}: {source}", path.display())
+            }
+        }
+    }
+}
+
+impl std::error::Error for RemoveError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            RemoveError::Io { source, .. } => Some(source),
+            _ => None,
+        }
+    }
+}
+
+/// Remove a model snapshot from the mlxcel global store.
+///
+/// Resolves the target via [`model_dir`] (which already sanitizes the repo id
+/// against path traversal) and, before deleting, re-verifies that the target
+/// is contained inside `store_root()/models/`. The deletion therefore can only
+/// ever touch a directory under the store — never the HF cache, never a path
+/// reached via `..`, never an absolute escape.
+///
+/// Behavior:
+/// - **Store hit** → recursively deletes the directory and returns
+///   [`RemoveOutcome::Removed`] with the freed size.
+/// - **Store miss but HF-cache hit** → returns [`RemoveOutcome::HfCacheOnly`]
+///   without deleting anything (the HF cache is read-only to mlxcel).
+/// - **Miss everywhere** → returns [`RemoveOutcome::NotFound`].
+///
+/// `revision` is only used for the HF-cache probe (the mlxcel store is not
+/// revision-namespaced); pass `None` for the default `main`.
+pub fn remove_model(repo_id: &str, revision: Option<&str>) -> Result<RemoveOutcome, RemoveError> {
+    let root = store_root().ok_or(RemoveError::NoStoreRoot)?;
+    remove_model_in(&root, repo_id, revision)
+}
+
+/// Pure-ish helper behind [`remove_model`] operating against an explicit store
+/// root. Split out so unit tests can drive deletion against a temp directory.
+/// The HF-cache probe still consults the process env via [`hf_cache_snapshot`]
+/// (only reached on a store miss).
+fn remove_model_in(
+    root: &Path,
+    repo_id: &str,
+    revision: Option<&str>,
+) -> Result<RemoveOutcome, RemoveError> {
+    let models_root = root.join(MODELS_SUBDIR);
+    let target = model_dir_in(root, repo_id);
+
+    // Defense-in-depth containment check. `model_dir_in` already strips `..`
+    // and absolute components, but we re-assert that the composed path stays
+    // under `models/` so a deletion can never escape the store. Use a
+    // lexical/canonical comparison that does not require the target to exist.
+    if !is_within(&models_root, &target) {
+        return Err(RemoveError::OutsideStore(target));
+    }
+
+    if target.is_dir() {
+        let size = dir_size(&target);
+        std::fs::remove_dir_all(&target).map_err(|source| RemoveError::Io {
+            path: target.clone(),
+            source,
+        })?;
+        return Ok(RemoveOutcome::Removed {
+            path: target,
+            size_bytes: size,
+        });
+    }
+
+    // Store miss: is it sitting read-only in the HuggingFace cache?
+    if let Some(hf_path) = hf_cache_snapshot(repo_id, revision) {
+        return Ok(RemoveOutcome::HfCacheOnly { hf_path });
+    }
+
+    Ok(RemoveOutcome::NotFound)
+}
+
+/// True when `child` is `base` itself or lexically nested under it.
+///
+/// Both paths are first canonicalized when they exist; for the (common) case
+/// where `child` does not exist yet, we canonicalize `base` and compare the
+/// canonical base against `child` after stripping any `.`/`..` we can resolve
+/// lexically. Because [`model_dir_in`] never emits `..` components, a plain
+/// `starts_with` against the canonical (or, if canonicalization fails, the raw)
+/// base is sound here; the explicit check is the defensive backstop.
+fn is_within(base: &Path, child: &Path) -> bool {
+    let base_c = base.canonicalize().unwrap_or_else(|_| base.to_path_buf());
+    // If the child exists, compare canonical forms (resolves symlinks too).
+    if let Ok(child_c) = child.canonicalize() {
+        return child_c.starts_with(&base_c) || child_c == base_c;
+    }
+    // Child does not exist yet (typical for a not-downloaded repo): compare the
+    // raw child against the canonical base, and also against the raw base, so a
+    // symlinked store root does not produce a false negative.
+    child.starts_with(&base_c) || child.starts_with(base)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -473,5 +756,189 @@ mod tests {
         restore_env("HF_HOME", prev_home);
 
         assert_eq!(found, None);
+    }
+
+    // ── list_models_in / dir_size (issue #97) ────────────────────────────────
+
+    /// Materialize a complete snapshot at `<root>/models/<repo_id>` with a
+    /// `config.json` plus an extra payload file of `extra_bytes` so the
+    /// recursive size is non-trivial. Returns the snapshot directory.
+    fn make_store_snapshot(root: &Path, repo_id: &str, extra_bytes: usize) -> PathBuf {
+        let dir = model_dir_in(root, repo_id);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("config.json"), b"{}").unwrap();
+        std::fs::write(dir.join("model.safetensors"), vec![0u8; extra_bytes]).unwrap();
+        dir
+    }
+
+    #[test]
+    fn list_models_in_finds_owner_name_and_bare() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        make_store_snapshot(root, "mlx-community/Qwen3-4B-4bit", 100);
+        make_store_snapshot(root, "Qwen/Qwen3-4B-4bit", 200);
+        make_store_snapshot(root, "gpt2", 300); // bare id
+
+        let mut found = list_models_in(root);
+        found.sort_by(|a, b| a.repo_id.cmp(&b.repo_id));
+
+        let ids: Vec<&str> = found.iter().map(|m| m.repo_id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec!["Qwen/Qwen3-4B-4bit", "gpt2", "mlx-community/Qwen3-4B-4bit"]
+        );
+
+        // Sizes include config.json (2 bytes) + payload.
+        let gpt2 = found.iter().find(|m| m.repo_id == "gpt2").unwrap();
+        assert_eq!(gpt2.size_bytes, 2 + 300);
+        assert_eq!(gpt2.path, root.join("models").join("gpt2"));
+    }
+
+    #[test]
+    fn list_models_in_skips_incomplete_dirs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        // Complete model.
+        make_store_snapshot(root, "owner/good", 10);
+        // Incomplete: owner dir with a child lacking config.json.
+        let bad = root.join("models").join("owner").join("partial");
+        std::fs::create_dir_all(&bad).unwrap();
+        std::fs::write(bad.join("model.safetensors"), b"xxxx").unwrap();
+        // A stray non-model directory directly under models/.
+        std::fs::create_dir_all(root.join("models").join("scratch")).unwrap();
+
+        let found = list_models_in(root);
+        let ids: Vec<&str> = found.iter().map(|m| m.repo_id.as_str()).collect();
+        assert_eq!(ids, vec!["owner/good"]);
+    }
+
+    #[test]
+    fn list_models_in_empty_when_no_models_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        // No models/ subdir created at all.
+        assert!(list_models_in(tmp.path()).is_empty());
+    }
+
+    #[test]
+    fn dir_size_sums_nested_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        std::fs::write(root.join("a.bin"), vec![0u8; 1000]).unwrap();
+        let sub = root.join("sub");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::write(sub.join("b.bin"), vec![0u8; 2345]).unwrap();
+        assert_eq!(dir_size(root), 1000 + 2345);
+    }
+
+    // ── remove_model_in (issue #97) ──────────────────────────────────────────
+
+    #[test]
+    fn remove_model_in_deletes_store_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let dir = make_store_snapshot(root, "owner/model", 500);
+        assert!(dir.is_dir());
+
+        let outcome = remove_model_in(root, "owner/model", None).unwrap();
+        match outcome {
+            RemoveOutcome::Removed { path, size_bytes } => {
+                assert_eq!(path, dir);
+                assert_eq!(size_bytes, 2 + 500);
+            }
+            other => panic!("expected Removed, got {other:?}"),
+        }
+        assert!(!dir.exists(), "directory should be gone after removal");
+    }
+
+    #[test]
+    fn remove_model_in_not_found_when_absent_everywhere() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        // Point the HF cache at an empty dir so the probe also misses.
+        let hub = tmp.path().join("hub");
+        std::fs::create_dir_all(&hub).unwrap();
+
+        let _guard = env_lock();
+        let prev_cache = std::env::var("HF_HUB_CACHE").ok();
+        let prev_home = std::env::var("HF_HOME").ok();
+        unsafe {
+            std::env::set_var("HF_HUB_CACHE", &hub);
+            std::env::remove_var("HF_HOME");
+        }
+        let outcome = remove_model_in(root, "owner/never", None);
+        restore_env("HF_HUB_CACHE", prev_cache);
+        restore_env("HF_HOME", prev_home);
+
+        assert_eq!(outcome.unwrap(), RemoveOutcome::NotFound);
+    }
+
+    #[test]
+    fn remove_model_in_reports_hf_cache_only_without_deleting() {
+        let store_tmp = tempfile::tempdir().unwrap();
+        let root = store_tmp.path();
+        // Not in the mlxcel store; only in the HF cache.
+        let hf_tmp = tempfile::tempdir().unwrap();
+        let hub = hf_tmp.path().join("hub");
+        let sha = "3333333333333333333333333333333333333333";
+        make_hf_cache(&hub, "owner/cached", sha, "main", true);
+        let expected_hf = hub
+            .join(hf_repo_folder("owner/cached"))
+            .join("snapshots")
+            .join(sha);
+
+        let _guard = env_lock();
+        let prev_cache = std::env::var("HF_HUB_CACHE").ok();
+        let prev_home = std::env::var("HF_HOME").ok();
+        unsafe {
+            std::env::set_var("HF_HUB_CACHE", &hub);
+            std::env::remove_var("HF_HOME");
+        }
+        let outcome = remove_model_in(root, "owner/cached", None);
+        restore_env("HF_HUB_CACHE", prev_cache);
+        restore_env("HF_HOME", prev_home);
+
+        assert_eq!(
+            outcome.unwrap(),
+            RemoveOutcome::HfCacheOnly {
+                hf_path: expected_hf.clone()
+            }
+        );
+        // The HF snapshot must remain untouched.
+        assert!(expected_hf.join("config.json").exists());
+    }
+
+    #[test]
+    fn remove_model_in_contains_traversal_to_store() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        // Stage a file OUTSIDE the models/ subtree that a naive join+remove
+        // could have reached via `..`. It must survive.
+        let outside = root.join("victim.txt");
+        std::fs::write(&outside, b"do not delete").unwrap();
+        // Point HF cache at an empty dir so the store-miss probe is
+        // deterministic and never consults the host's real HF cache.
+        let hub = tmp.path().join("hub");
+        std::fs::create_dir_all(&hub).unwrap();
+
+        // A traversal repo id sanitizes (via model_dir_in) to a path contained
+        // under models/, never escaping to the sibling file. Removal of the
+        // (non-existent) sanitized path is NotFound, and the outside file is
+        // untouched.
+        let _guard = env_lock();
+        let prev_cache = std::env::var("HF_HUB_CACHE").ok();
+        let prev_home = std::env::var("HF_HOME").ok();
+        unsafe {
+            std::env::set_var("HF_HUB_CACHE", &hub);
+            std::env::remove_var("HF_HOME");
+        }
+        let outcome = remove_model_in(root, "../../victim.txt", None);
+        restore_env("HF_HUB_CACHE", prev_cache);
+        restore_env("HF_HOME", prev_home);
+
+        assert_eq!(outcome.unwrap(), RemoveOutcome::NotFound);
+        assert!(
+            outside.exists(),
+            "file outside the store must not be removed"
+        );
     }
 }
