@@ -36,6 +36,28 @@ use super::{LangAnalyzerError, TokenLanguageIndex, CURRENT_VERSION};
 pub const CACHE_SUBDIR: &str = "tokenizer-scripts";
 
 // ============================================================================
+// Cache root resolution
+// ============================================================================
+
+/// Resolve the mlxcel cache root directory.
+///
+/// Reads `MLXCEL_CACHE_DIR` from the environment; falls back to
+/// `$HOME/.cache/mlxcel` via [`dirs::home_dir`]. Returns `None` only when
+/// neither `MLXCEL_CACHE_DIR` nor a home directory can be determined.
+///
+/// This is the single source of truth for the cache root across the codebase.
+/// The tokenizer language-analysis disk cache stores its files under
+/// `cache_root()/tokenizer-scripts/`, and the downloader's global model store
+/// (issue #93) stores model snapshots under `cache_root()/models/`. Sharing
+/// one resolver keeps the `MLXCEL_CACHE_DIR` override semantics identical for
+/// every consumer.
+pub fn cache_root() -> Option<PathBuf> {
+    std::env::var_os("MLXCEL_CACHE_DIR")
+        .map(PathBuf::from)
+        .or_else(|| dirs::home_dir().map(|h| h.join(".cache/mlxcel")))
+}
+
+// ============================================================================
 // Cache path resolution
 // ============================================================================
 
@@ -48,10 +70,7 @@ pub const CACHE_SUBDIR: &str = "tokenizer-scripts";
 /// Panics only if neither `MLXCEL_CACHE_DIR` nor a home directory can be
 /// determined. In practice this should not happen on any supported platform.
 pub fn cache_path(vocab_hash: &str) -> PathBuf {
-    let base = std::env::var_os("MLXCEL_CACHE_DIR")
-        .map(PathBuf::from)
-        .or_else(|| dirs::home_dir().map(|h| h.join(".cache/mlxcel")))
-        .expect("no home directory and MLXCEL_CACHE_DIR not set");
+    let base = cache_root().expect("no home directory and MLXCEL_CACHE_DIR not set");
     base.join(CACHE_SUBDIR).join(format!("{vocab_hash}.bin"))
 }
 

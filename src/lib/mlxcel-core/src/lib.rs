@@ -2291,6 +2291,12 @@ pub use lang_analyzer::{
     ExceptionConfig, InclusionPolicy, LangAnalyzerError, LangBiasConfig, LangBiasSet, LanguageCode,
 };
 
+// Re-export the shared mlxcel cache-root resolver (`${MLXCEL_CACHE_DIR:-$HOME/.cache/mlxcel}`)
+// so downstream crates (e.g. the `mlxcel` CLI downloader's global model store, issue #93)
+// derive their on-disk locations from the exact same root and env-var semantics the
+// tokenizer language-analysis disk cache already uses.
+pub use lang_analyzer::cache_root;
+
 fn use_single_query_maskless_path() -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ENABLED.get_or_init(|| {

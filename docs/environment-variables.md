@@ -33,7 +33,7 @@ and cached on first use. Set them before starting `mlxcel` or `mlxcel-server`.
 | `MLXCEL_WIRED_LIMIT` | `max`, `0`, `none`, bytes, `NGB`, `NMB` | `max` | Apple Silicon GPU wired-memory limit. Unset/empty/`max` sets MLX's reported GPU max memory size; `0`/`none` disables the limit; numeric values set an explicit limit. |
 | `MLXCEL_MEMORY_LIMIT` | `0`, `none`, bytes, `NGB`, `NMB` | unset | Soft MLX allocator memory cap. Unset/`0`/`none` lets MLX use its backend default; numeric values cap the allocator and make MLX raise an exception once allocations would push the working set past this value. Also feeds the `mlxcel inspect` / `--estimate-memory` preflight as the authoritative "available unified memory" figure when nonzero. |
 | `MLXCEL_HEADROOM_FACTOR` | positive `f64` | `1.20` | Runtime/activation headroom multiplier used by the unified memory estimator (`mlxcel inspect`, `--estimate-memory`, `--recommend-quant`). Positive values `<= 1.0` disable the headroom term; invalid or non-positive values warn and fall back to the default. Override only for calibration runs — see the in-code recipe in `src/execution/memory_estimate.rs`. |
-| `MLXCEL_CACHE_DIR` | directory path | `$HOME/.cache/mlxcel` | Root for the tokenizer language-analysis disk cache used by language-bias features. Files live under `tokenizer-scripts/`. |
+| `MLXCEL_CACHE_DIR` | directory path | `$HOME/.cache/mlxcel` | Root for mlxcel's on-disk caches. The tokenizer language-analysis disk cache (language-bias features) lives under `tokenizer-scripts/`, and `mlxcel download`'s location-independent global model store lives under `models/<owner>/<name>`. |
 | `MLXCEL_SERVER_DECODE_STORAGE` | `auto`, `dense`, `paged` | `auto` | Server continuous-batching decode storage. `--decode-storage-backend` takes precedence. Invalid values warn and fall back to `auto`. |
 | `MLXCEL_SURGERY` | YAML file path | unset | Feature-gated weight-load surgery configuration. `--surgery` takes precedence when the `surgery` feature is built. |
 
@@ -71,6 +71,8 @@ CUDA builds also use non-`MLXCEL_*` variables such as `CUDA_HOME` and
 |----------|--------|---------|-------|
 | `MLXCEL_NO_PROGRESS` | any non-empty value | unset | Suppresses interactive download progress bars. `NO_COLOR` and `CI=true` also suppress bars. |
 | `MLXCEL_ALLOW_INSECURE_ENDPOINT` | any non-empty value | unset | Allows sending a Hugging Face token to a non-HTTPS `HF_ENDPOINT`. Leave unset outside audited internal mirrors. |
+| `HF_HUB_CACHE` | directory path | unset | Probed read-only for an already-downloaded snapshot before `mlxcel download` fetches anything (the existing copy is reused, never re-fetched). Used verbatim as the HuggingFace Hub cache directory. mlxcel never writes into the HF content-addressed layout. |
+| `HF_HOME` | directory path | `$HOME/.cache/huggingface` | Fallback HuggingFace cache root when `HF_HUB_CACHE` is unset; the hub lives under `HF_HOME/hub`. Same read-only reuse semantics as `HF_HUB_CACHE`. |
 
 ## Server prompt-cache variables
 

@@ -106,6 +106,14 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg",
 base64 = "0.22"
 
 # Utils
+# `dirs` resolves the platform home directory for the downloader's HF-cache
+# read-reuse default (`~/.cache/huggingface/hub`) when neither `HF_HUB_CACHE`
+# nor `HF_HOME` is set (issue #93). Already present transitively via
+# mlxcel-core; promoted to a direct dependency so `src/downloader/store.rs`
+# can call `dirs::home_dir()` without leaning on a transitive re-export. The
+# mlxcel store root itself comes from `mlxcel_core::cache_root()`, which uses
+# the same crate.
+dirs = "6"
 glob = "0.3.2"
 path-clean = "1.0.1"
 minijinja = { version = "2.20", features = ["loop_controls"] }

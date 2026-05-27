@@ -37,27 +37,39 @@ brew install mlxcel
 ### Run a model
 
 ```bash
-# Download an MLX-format checkpoint from Hugging Face.
+# Download an MLX-format checkpoint from Hugging Face. By default it lands in
+# the location-independent global store at
+# ${MLXCEL_CACHE_DIR:-$HOME/.cache/mlxcel}/models/<owner>/<name>, so a model
+# downloaded once is runnable from any directory. If the repo is already in
+# your HuggingFace cache (HF_HUB_CACHE / HF_HOME), the existing snapshot is
+# reused instead of re-downloading.
 mlxcel download mlx-community/Qwen3.5-0.8B-4bit
+# -> ~/.cache/mlxcel/models/mlx-community/Qwen3.5-0.8B-4bit
 
 # Check the memory budget before loading anything.
-mlxcel inspect -m models/Qwen3.5-0.8B-4bit --max-tokens 32768
+mlxcel inspect \
+    -m ~/.cache/mlxcel/models/mlx-community/Qwen3.5-0.8B-4bit \
+    --max-tokens 32768
 
 # One-off generation.
 mlxcel generate \
-    -m models/Qwen3.5-0.8B-4bit \
+    -m ~/.cache/mlxcel/models/mlx-community/Qwen3.5-0.8B-4bit \
     -p "Hello, world!" -n 100
 
 # Same generation, but refuse to start if the model + 32K KV cache will not fit.
 mlxcel generate \
-    -m models/Qwen3.5-0.8B-4bit \
+    -m ~/.cache/mlxcel/models/mlx-community/Qwen3.5-0.8B-4bit \
     -p "Hello, world!" -n 32768 \
     --estimate-memory
 
 # OpenAI-compatible server.
 mlxcel-server \
-    -m models/Qwen3.5-0.8B-4bit \
+    -m ~/.cache/mlxcel/models/mlx-community/Qwen3.5-0.8B-4bit \
     --port 8080
+
+# Prefer a project-local checkout? Opt out of the global store with --local-dir;
+# the snapshot lands exactly where you point it.
+mlxcel download mlx-community/Qwen3.5-0.8B-4bit --local-dir ./models/Qwen3.5-0.8B-4bit
 ```
 
 `mlxcel inspect` is read-only and prints a byte-level breakdown of weights /

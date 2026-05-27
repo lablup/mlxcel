@@ -46,20 +46,44 @@ fn repo_basename_strips_owner() {
 }
 
 #[test]
-fn default_local_dir_is_models_basename() {
+fn default_local_dir_is_global_store() {
+    // Issue #93: with no --local-dir, the default is the location-independent
+    // global store at `${MLXCEL_CACHE_DIR}/models/<owner>/<name>` (not the
+    // legacy per-CWD `models/<basename>`).
+    let _guard = env_lock();
+    let prev = std::env::var("MLXCEL_CACHE_DIR").ok();
+    unsafe {
+        std::env::set_var("MLXCEL_CACHE_DIR", "/tmp/mlxcel-resolve-test");
+    }
     let opts = DownloadOptions::from_args(&args("mlx-community/Qwen3-4B-4bit"));
+    let resolved = opts.resolve_local_dir();
+    restore_env("MLXCEL_CACHE_DIR", prev);
+
     assert_eq!(
-        opts.resolve_local_dir(),
-        PathBuf::from("models").join("Qwen3-4B-4bit")
+        resolved,
+        PathBuf::from("/tmp/mlxcel-resolve-test")
+            .join("models")
+            .join("mlx-community")
+            .join("Qwen3-4B-4bit")
     );
 }
 
 #[test]
 fn explicit_local_dir_is_respected() {
+    // An explicit --local-dir is the opt-out: it is honored verbatim and does
+    // not consult MLXCEL_CACHE_DIR / the global store.
+    let _guard = env_lock();
+    let prev = std::env::var("MLXCEL_CACHE_DIR").ok();
+    unsafe {
+        std::env::set_var("MLXCEL_CACHE_DIR", "/tmp/should-be-ignored");
+    }
     let mut a = args("mlx-community/Qwen3-4B-4bit");
     a.local_dir = Some(PathBuf::from("/tmp/custom-dir"));
     let opts = DownloadOptions::from_args(&a);
-    assert_eq!(opts.resolve_local_dir(), PathBuf::from("/tmp/custom-dir"));
+    let resolved = opts.resolve_local_dir();
+    restore_env("MLXCEL_CACHE_DIR", prev);
+
+    assert_eq!(resolved, PathBuf::from("/tmp/custom-dir"));
 }
 
 #[test]

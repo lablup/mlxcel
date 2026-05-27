@@ -117,9 +117,11 @@ For the complete `MLXCEL_*` reference, see
 ./target/release/mlxcel --version
 ./target/release/mlxcel-server --version
 
+# `download` defaults to the global store at
+# ${MLXCEL_CACHE_DIR:-$HOME/.cache/mlxcel}/models/<owner>/<name>.
 ./target/release/mlxcel download mlx-community/Qwen3-0.6B-4bit
 ./target/release/mlxcel generate \
-    -m models/Qwen3-0.6B-4bit \
+    -m ~/.cache/mlxcel/models/mlx-community/Qwen3-0.6B-4bit \
     -p "Hello" -n 1
 ```
 

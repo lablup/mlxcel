@@ -25,7 +25,7 @@
 //! - **B4** (`cache` submodule): disk cache for `TokenLanguageIndex` (vocab-hash keyed, postcard 1.x).
 
 pub mod cache;
-pub use cache::{cache_path, load_or_build, save, try_load};
+pub use cache::{cache_path, cache_root, load_or_build, save, try_load};
 
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;

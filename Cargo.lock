@@ -1892,6 +1892,7 @@ dependencies = [
  "bytes",
  "chrono",
  "clap",
+ "dirs",
  "fancy-regex 0.17.0",
  "futures",
  "glob",

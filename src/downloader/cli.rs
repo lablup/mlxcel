@@ -31,11 +31,15 @@ use std::path::PathBuf;
 #[derive(Args, Debug, Clone)]
 #[command(after_help = "\
 Examples:
-  # Default destination is `models/<repo_basename>`:
+  # Default destination is the global store at
+  # ${MLXCEL_CACHE_DIR:-$HOME/.cache/mlxcel}/models/<owner>/<name>:
   mlxcel download mlx-community/Qwen3-4B-4bit
-  # → models/Qwen3-4B-4bit/
+  # -> ~/.cache/mlxcel/models/mlx-community/Qwen3-4B-4bit/
 
-  # Explicit local directory:
+  # If the repo is already in your HuggingFace cache (HF_HUB_CACHE / HF_HOME),
+  # the download is skipped and the existing snapshot is reused.
+
+  # Explicit local directory (opt-out of the global store):
   mlxcel download mlx-community/Qwen3-4B-4bit --local-dir /tmp/qwen
 
   # Specific revision (branch, tag, or commit hash):
@@ -51,11 +55,14 @@ pub struct DownloadArgs {
     #[arg(value_name = "REPO_ID")]
     pub repo_id: String,
 
-    /// Local destination directory.
+    /// Local destination directory (opt-out of the global store).
     ///
-    /// Defaults to `models/<repo_basename>` under the current working
-    /// directory (e.g. `mlx-community/Qwen3-4B-4bit` →
-    /// `models/Qwen3-4B-4bit`).
+    /// When omitted, the snapshot lands in the location-independent global
+    /// store at `${MLXCEL_CACHE_DIR:-$HOME/.cache/mlxcel}/models/<owner>/<name>`
+    /// (e.g. `mlx-community/Qwen3-4B-4bit` ->
+    /// `~/.cache/mlxcel/models/mlx-community/Qwen3-4B-4bit`). An existing
+    /// HuggingFace cache copy is reused instead of re-downloading. Pass this
+    /// flag to write the snapshot to an explicit path instead.
     #[arg(long, value_name = "PATH")]
     pub local_dir: Option<PathBuf>,
 

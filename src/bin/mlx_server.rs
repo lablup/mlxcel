@@ -100,7 +100,9 @@ Thunderbolt mode:
   path uses the shared TCP transport core over the Bridge network.
 
 Subcommands:
-  download <REPO_ID>    Fetch a HuggingFace model snapshot into models/<basename>
+  download <REPO_ID>    Fetch a HuggingFace model snapshot into the global store
+                        (${MLXCEL_CACHE_DIR:-$HOME/.cache/mlxcel}/models/<owner>/<name>);
+                        reuses an existing HuggingFace cache copy. --local-dir opts out.
 
 See also: docs/distributed.md"
 )]

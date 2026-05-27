@@ -29,8 +29,12 @@
 //!   `HUGGING_FACE_HUB_TOKEN` env > anonymous. Tokens are validated to be
 //!   pure printable-ASCII (no control chars) before they are used in an
 //!   `Authorization` header (issue #650, L3).
-//! - **Default destination** — `models/<repo_basename>` under the current
-//!   working directory, mirroring the `CLAUDE.md` "Testing Models" convention.
+//! - **Default destination** — the location-independent global store at
+//!   `${MLXCEL_CACHE_DIR:-$HOME/.cache/mlxcel}/models/<owner>/<name>` (issue
+//!   #93), so a model downloaded once runs from any directory. `--local-dir`
+//!   is the explicit opt-out. Before downloading, an existing HuggingFace Hub
+//!   cache snapshot of the same repo is reused read-only (no re-fetch). See
+//!   [`store`] for the path resolution and HF-cache probing.
 //! - **Caching** — without `--force`, an existing snapshot with all expected
 //!   files at the right size is treated as a no-op. With `--force`, every file
 //!   is re-fetched and overwritten.
@@ -76,11 +80,13 @@ mod cli;
 mod errors;
 mod filters;
 mod progress;
+mod store;
 
 pub use cli::DownloadArgs;
 pub use errors::map_hf_error;
 pub use filters::{is_wanted_file, repo_basename};
 pub use progress::should_show_progress;
+pub use store::{hf_cache_snapshot, model_dir, store_root};
 
 use anyhow::{Context, Result, anyhow};
 use futures::StreamExt;
@@ -151,8 +157,10 @@ const PARTIAL_TEMPFILE_STALE_AGE: Duration = Duration::from_secs(60 * 60);
 pub struct DownloadOptions {
     /// HuggingFace repository identifier, e.g. `mlx-community/Qwen3-4B-4bit`.
     pub repo_id: String,
-    /// Local destination directory. When `None`, defaults to
-    /// `models/<repo_basename>` under the current working directory.
+    /// Local destination directory. When `None`, defaults to the global store
+    /// at `${MLXCEL_CACHE_DIR:-$HOME/.cache/mlxcel}/models/<owner>/<name>`
+    /// (issue #93). `Some(path)` is the explicit opt-out and writes the
+    /// snapshot at `path` verbatim.
     pub local_dir: Option<PathBuf>,
     /// Repository revision (branch, tag, or commit). Defaults to `main` when
     /// `None`.
@@ -177,13 +185,27 @@ impl DownloadOptions {
         }
     }
 
-    /// Resolve the destination directory, applying the
-    /// `models/<repo_basename>` default when no explicit `--local-dir` was
-    /// given.
+    /// Resolve the destination directory for a fresh download.
+    ///
+    /// - An explicit `--local-dir PATH` is honored verbatim (the opt-out).
+    /// - Otherwise the default is the location-independent global store at
+    ///   `${MLXCEL_CACHE_DIR:-$HOME/.cache/mlxcel}/models/<owner>/<name>`
+    ///   (issue #93), so a model downloaded once is runnable from any
+    ///   directory.
+    /// - As a last-resort fallback (no home directory *and* `MLXCEL_CACHE_DIR`
+    ///   unset — practically never on a supported platform), we degrade to the
+    ///   legacy per-CWD `models/<repo_basename>` so the downloader still
+    ///   produces a usable path instead of panicking.
+    ///
+    /// Note: this returns the *write* destination only. HuggingFace-cache
+    /// read-reuse (skipping the download entirely when a snapshot already
+    /// exists under `$HF_HUB_CACHE` / `$HF_HOME`) is handled separately in
+    /// [`download_repo`] so that `--local-dir` continues to mean "write here".
     pub fn resolve_local_dir(&self) -> PathBuf {
         match &self.local_dir {
             Some(path) => path.clone(),
-            None => PathBuf::from("models").join(repo_basename(&self.repo_id)),
+            None => store::model_dir(&self.repo_id)
+                .unwrap_or_else(|| PathBuf::from("models").join(repo_basename(&self.repo_id))),
         }
     }
 }
@@ -550,6 +572,28 @@ async fn stream_to_tempfile(
 /// invalid repo id, missing authentication on a gated repo, missing revision,
 /// network failure, and on-disk I/O errors.
 pub fn download_repo(opts: DownloadOptions) -> Result<()> {
+    // HF-cache read-reuse (issue #93): when the caller did not pin an explicit
+    // `--local-dir` and is not forcing a refresh, reuse a complete snapshot
+    // already present in the HuggingFace Hub cache (`$HF_HUB_CACHE` /
+    // `$HF_HOME` / `~/.cache/huggingface/hub`). This lets users who already
+    // pulled a model with mlx-lm / transformers skip re-fetching gigabytes.
+    // The reuse is strictly read-only — we never write into the HF
+    // content-addressed layout. An explicit `--local-dir` keeps "write here"
+    // semantics and bypasses this short-circuit entirely.
+    if opts.local_dir.is_none()
+        && !opts.force
+        && let Some(hf_snapshot) = store::hf_cache_snapshot(&opts.repo_id, opts.revision.as_deref())
+    {
+        println!(
+            "[mlxcel download] repo={} revision={} already present in HuggingFace cache; \
+             reusing without re-download: {}",
+            opts.repo_id,
+            opts.revision.as_deref().unwrap_or("main"),
+            hf_snapshot.display(),
+        );
+        return Ok(());
+    }
+
     let local_dir = opts.resolve_local_dir();
     let token = resolve_token(opts.token.as_deref());
     let endpoint = hf_endpoint();
