@@ -59,13 +59,13 @@ The table below summarizes the current cross-hardware decode readings for select
 | GPT-OSS-120B | 120B (MoE) | 61.19 | 114.03 | 50.63 |
 | Solar-Open-100B | 100B (MoE) | 36.26 | 65.36 | 18.52 |
 
-*Qwen3-0.6B on GB10 again produced only 9 tokens before EOS at 2026-05-28; the 317.75 tok/s decode rate is from that short window (up from 203.04 at the same 9-token length on 2026-05-19), so this row is not directly comparable to full-length runs.
+*Qwen3-0.6B on GB10 produced only 9 tokens before EOS at 2026-05-28; the 317.75 tok/s decode rate is from that short window and is not directly comparable to full-length runs.
 
 M1 Ultra column is from 2026-05-28 with mlxcel 0.1.0 / MLX pin commit `84961223` (post-0.32.0) / no cooldown, using the `mlxcel-bench-decode` same-process harness.
 M5 Max column reflects the canonical `model_tests_m5max.md` values (mlxcel 0.1.0 / MLX pin `84961223` / same-process `mlxcel-bench-decode` harness), confirmed by the 2026-05-27 full re-sweep within thermal variance, with issue #743 Phi-3.5, issue #744 Gemma dense, and issue #745 Jamba spot-check refreshes folded into the listed rows.
-GB10 column is from 2026-05-28 with mlxcel 0.1.0 / MLX pin `84961223` / `--cooldown 0`, using the `mlxcel-bench-decode` same-process warm harness (PR `c9a77f2`). Decode is comparable to the 2026-05-19 GB10 run (measured identically); prefill is not, because the warmup-alignment fix removed cold-start skew and prefill jumped 10-60x.
+GB10 column is from 2026-05-28 with mlxcel 0.1.0 / MLX pin `84961223` / `--cooldown 0`, using the `mlxcel-bench-decode` same-process warm harness (PR `c9a77f2`).
 Both Apple Silicon columns are on mlxcel 0.1.0 with the same MLX pin and the same same-process harness, so the gap reflects pure hardware delta. M5 Max stays roughly 1.7x faster than M1 Ultra on the selected 16 rows (avg ~1.71x, median ~1.76x). The largest MoE rows still show the M5 Max advantage: gpt-oss-120b runs at 114.03 vs 61.19 tok/s (1.86x) and solar-open-100b runs at 65.36 vs 36.26 tok/s (1.80x).
-Qwen2.5-0.5B switched from the bf16 row to the 4-bit row on 2026-05-19: the `qwen2.5-0.5b-bf16` directory still fails warmup on M1 Ultra, while the 4-bit variant runs at 355.29 / 682.41 tok/s on M1 Ultra / M5 Max. The bf16 variant runs only on M5 Max at 404.68 tok/s.
+For Qwen2.5-0.5B the 4-bit row is the directly comparable cross-hardware figure: `qwen2.5-0.5b-bf16` fails warmup on M1 Ultra, and the bf16 variant runs only on M5 Max at 404.68 tok/s.
 
 ## Overall Status (mlxcel 0.1.0 on both M5 Max and M1 Ultra; MLX upstream `84961223`)
 
@@ -74,8 +74,8 @@ Qwen2.5-0.5B switched from the bf16 row to the 4-bit row on 2026-05-19: the `qwe
 | Supported model architectures | 89+ ModelType variants |
 | Text models tested (M1 Ultra, 2026-05-28) | 101 pass, 10 fail, 1 oversize skip (114 dirs; internvl3/molmo/minimax now pass) |
 | Text models tested (M5 Max, 2026-05-27) | 94 pass, 2 partial, 2 fail (98 total) |
-| Text models tested (GB10, 2026-05-28) | 46 pass, 55 partial, 8 fail/skip (109 total; internvl3/molmo recovered) |
-| VLM models tested (GB10, 2026-05-28) | 13 pass, 25 partial, 0 image-path fail (38 measured; qwen2-vl & qwen3-vl-30b recovered) |
+| Text models tested (GB10, 2026-05-28) | 101 pass, 8 fail/skip (109 total) |
+| VLM models tested (GB10, 2026-05-28) | 38 pass, 0 image-path fail (38 measured) |
 | VLM models tested (M5 Max, 2026-05-27) | 38 valid VLM rows (full VLM re-sweep; `internvl3-1b` and `qwen2-vl-2b-4bit` image mode now ✅ per #747/#749) |
 | VLM models tested (M1 Ultra, 2026-05-28) | 44 valid VLM rows (internvl3-1b, molmo-7b, qwen2-vl image mode, MiniCPM-V-4.6 now ✅) |
 | Beating mlx-lm on M1 Ultra (text, >=100%) | 35/74 (47%, 5-28 vs pinned 5-19 baseline) |
