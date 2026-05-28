@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+- **`chat_template.jinja` is now downloaded** alongside the rest of the model snapshot. The downloader allow-list in `src/downloader/filters.rs::is_wanted_file` only accepted exact-name `chat_template` (no extension) plus the broader `*.json` / `*.safetensors` / `*.tiktoken` / `*.model` / constrained `*.txt` allowances, but the actual HuggingFace convention is `chat_template.jinja`. The file was being filtered out at download time, leaving `ChatTemplateProcessor::from_model_path`'s `chat_template.jinja` fallback dead and forcing the REPL into the raw-text path for any model that ships its template as a separate Jinja file (e.g. `mlx-community/gemma-4-e4b-it-4bit`). `is_wanted_file` now also accepts `*.jinja` files; the `is_safe_relative_path` and `is_explicitly_denied` guards still run before the allow-list so no new attack surface is opened (#132, PR #134).
+- **`mlxcel run` warning for models without a chat template is now actionable**: it states that the model is likely a base / non-instruction-tuned model, that chat replies will be incoherent or repetitive, suggests trying an `-it` (instruction-tuned) variant on the Hub (e.g. for `gemma-4-e4b-4bit`, try `gemma-4-e4b-it-4bit`), and explains how to proceed silently (`--no-chat-template`) or with one-shot completion (`mlxcel generate -p <prompt>`). The explicit `--no-chat-template` path remains completely silent (no regression) (#132, PR #134).
+
 ## [v0.1.0] - 2026-05-28
 
 ### Added
