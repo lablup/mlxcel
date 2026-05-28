@@ -170,6 +170,7 @@ fn allow_list_includes_configs_and_tokenizer_files() {
     assert!(is_wanted_file("preprocessor_config.json"));
     assert!(is_wanted_file("processor_config.json"));
     assert!(is_wanted_file("chat_template.json"));
+    assert!(is_wanted_file("chat_template.jinja"));
     assert!(is_wanted_file("merges.txt"));
     assert!(is_wanted_file("vocab.json"));
     assert!(is_wanted_file("vocab.txt"));

@@ -69,6 +69,10 @@ pub fn is_wanted_file(path: &str) -> bool {
     if has_extension(base, "tiktoken") {
         return true;
     }
+    // HuggingFace ships chat templates as chat_template.jinja, not inlined JSON.
+    if has_extension(base, "jinja") {
+        return true;
+    }
     if has_extension(base, "model") {
         // sentencepiece tokenizer.model and friends.
         return true;
