@@ -186,14 +186,24 @@ pub fn run_chat(opts: ChatOptions) -> Result<()> {
             .flatten()
     };
     if processor.is_none() && !opts.no_chat_template {
-        eprintln!("Note: this model ships no chat template and is likely a base (non-instruction-tuned) model.");
-        eprintln!("      Chat responses will likely be incoherent or repetitive — base models are not designed");
+        eprintln!(
+            "Note: this model ships no chat template and is likely a base (non-instruction-tuned) model."
+        );
+        eprintln!(
+            "      Chat responses will likely be incoherent or repetitive — base models are not designed"
+        );
         eprintln!("      for interactive conversation.");
         eprintln!();
-        eprintln!("      Try an instruction-tuned variant instead. On the HuggingFace Hub these are typically");
-        eprintln!("      named with an \"-it\" suffix (e.g. for gemma-4-e4b-4bit, try gemma-4-e4b-it-4bit).");
+        eprintln!(
+            "      Try an instruction-tuned variant instead. On the HuggingFace Hub these are typically"
+        );
+        eprintln!(
+            "      named with an \"-it\" suffix (e.g. for gemma-4-e4b-4bit, try gemma-4-e4b-it-4bit)."
+        );
         eprintln!();
-        eprintln!("      To proceed without this warning: pass --no-chat-template (raw text mode, silent),");
+        eprintln!(
+            "      To proceed without this warning: pass --no-chat-template (raw text mode, silent),"
+        );
         eprintln!("      or use `mlxcel generate -p <prompt>` for one-shot text completion.");
     }
 
