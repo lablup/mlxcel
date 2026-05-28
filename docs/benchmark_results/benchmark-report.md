@@ -21,9 +21,9 @@ includes image encoder and projector work.
 | Host | Mode | Baseline | Comparable pairs | Prefill median vs baseline | Decode median vs baseline | Decode result |
 |------|------|----------|-----------------:|---------------------------:|--------------------------:|---------------|
 | M5 Max | Text | mlx-lm | 66 | **2.70x** | **99%** | 62/66 at >=90% parity |
-| M1 Ultra | Text | mlx-lm | 73 | **1.76x** | **97%** | 62/73 at >=90% parity |
+| M1 Ultra | Text | mlx-lm | 74 | **1.76x** | **99%** | 64/74 at >=90% parity |
 | M5 Max | VLM | mlx-vlm | 22 | 0.94x | **101%** | 18/22 at >=90% parity |
-| M1 Ultra | VLM | mlx-vlm | 17 | **1.33x** | **98%** | 11/17 at >=90% parity |
+| M1 Ultra | VLM | mlx-vlm | 18 | **1.33x** | **98%** | 12/18 at >=90% parity |
 
 Ratios above use successful runs only. Baseline rows use exact CSV model
 identifiers and compare mlxcel and the Python stack on the same host. Decode
@@ -49,9 +49,9 @@ complete in this sweep. With a generated-token threshold of 5 tokens:
 | Host | Mode | mlxcel successful, Python baseline unavailable or failed | Comparable successful pairs |
 |------|------|---------------------------------------------------------:|----------------------------:|
 | M5 Max | Text | 26 | 66 |
-| M1 Ultra | Text | 22 | 73 |
+| M1 Ultra | Text | 23 | 74 |
 | M5 Max | VLM | 12 | 22 |
-| M1 Ultra | VLM | 20 | 17 |
+| M1 Ultra | VLM | 20 | 18 |
 
 This is the useful public framing: mlxcel is a Rust inference engine with
 direct MLX bindings that is already near Python decode performance for many
@@ -72,12 +72,12 @@ host.
 | M5 Max | solar-open-100b-4bit | Large MoE | 210.91 | 65.36 | 66.30 | 99% |
 | M5 Max | qwen3.5-35b-a3b-4bit | Hybrid MoE | 480.89 | 151.63 | 152.96 | 99% |
 | M5 Max | nemotron-h-30b-4bit | Hybrid SSM/MoE | 414.31 | 177.18 | 178.80 | 99% |
-| M1 Ultra | phi-3.5-moe-4bit | MoE | 107.87 | 76.24 | 69.28 | **110%** |
-| M1 Ultra | minicpm3-4b-4bit | MLA | 230.24 | 80.24 | 73.26 | **110%** |
-| M1 Ultra | qwen2.5-0.5b-4bit | Small dense | 1094.10 | 355.29 | 315.48 | **113%** |
-| M1 Ultra | gpt-oss-120b-4bit | Large MoE | 161.69 | 58.89 | 57.58 | **102%** |
-| M1 Ultra | command-r7b-4bit | Dense 7B | 92.20 | 110.22 | 107.75 | **102%** |
-| M1 Ultra | solar-open-100b-4bit | Large MoE | 73.74 | 35.88 | 35.69 | **100%** |
+| M1 Ultra | phi-3.5-moe-4bit | MoE | 112.10 | 77.71 | 69.28 | **112%** |
+| M1 Ultra | minicpm3-4b-4bit | MLA | 241.44 | 80.78 | 73.26 | **110%** |
+| M1 Ultra | qwen2.5-0.5b-4bit | Small dense | 1243.98 | 349.52 | 315.48 | **111%** |
+| M1 Ultra | gpt-oss-120b-4bit | Large MoE | 114.12 | 61.19 | 57.58 | **106%** |
+| M1 Ultra | command-r7b-4bit | Dense 7B | 81.17 | 114.34 | 107.75 | **106%** |
+| M1 Ultra | solar-open-100b-4bit | Large MoE | 75.37 | 36.26 | 35.69 | **102%** |
 
 The table shows the central performance claim without cross-hardware ranking:
 mlxcel is already close to mlx-lm on the same machine for dense 7B models,
@@ -96,11 +96,11 @@ comparison.
 | M5 Max | gemma-4-e2b-it-4bit | Gemma 4 VLM | 2787.47 | 217.32 | 201.70 | **108%** |
 | M5 Max | gemma3n-e2b-4bit | Gemma 3n VLM | 2893.48 | 151.36 | 124.63 | **121%** |
 | M5 Max | molmo2-4b | Molmo2 vision encoder | 2512.31 | 64.01 | 66.80 | 96% |
-| M1 Ultra | llava-interleave-qwen-0.5b-bf16 | SigLIP + Qwen2 | 8589.48 | 269.86 | 225.15 | **120%** |
-| M1 Ultra | aya-vision-8b | SigLIP + Cohere2 | 591.80 | 109.36 | 103.74 | **105%** |
-| M1 Ultra | molmo2-4b | Molmo2 vision encoder | 1011.99 | 59.36 | 60.87 | 98% |
-| M1 Ultra | phi-3.5-vision-4bit | CLIP + HD tiling | 1164.87 | 94.10 | 92.53 | **102%** |
-| M1 Ultra | pixtral-12b-4bit | Pixtral ViT + Mistral | 473.22 | 59.17 | - | - |
+| M1 Ultra | llava-interleave-qwen-0.5b-bf16 | SigLIP + Qwen2 | 3961.62 | 265.57 | 225.15 | **118%** |
+| M1 Ultra | aya-vision-8b | SigLIP + Cohere2 | 444.01 | 113.59 | 103.74 | **110%** |
+| M1 Ultra | molmo2-4b | Molmo2 vision encoder | 727.26 | 60.31 | 60.87 | 99% |
+| M1 Ultra | phi-3.5-vision-4bit | CLIP + HD tiling | 991.67 | 122.63 | 92.53 | **133%** |
+| M1 Ultra | pixtral-12b-4bit | Pixtral ViT + Mistral | 447.97 | 60.25 | - | - |
 
 The VLM data is most compelling as a coverage and decode-throughput story:
 mlxcel runs many VLM paths in the same benchmark matrix, and its comparable
@@ -110,14 +110,14 @@ decode results sit near mlx-vlm median parity on both Apple Silicon hosts.
 
 - **Steady-state decode:** M5 Max text decode is within 1% of mlx-lm median
   parity and VLM decode reaches mlx-vlm median parity. M1 Ultra shows
-  the same pattern, with 97% text median parity and 98% VLM median parity.
+  the same pattern, with 99% text median parity and 98% VLM median parity.
 - **Short-prompt text prefill:** mlxcel prefill is 2.70x mlx-lm median on M5
   Max text and 1.76x mlx-lm median on M1 Ultra text. Representative M5 Max
   values include gpt-oss-120b at 334.68 tok/s and nemotron-h-30b at
   414.31 tok/s.
 - **Large MoE practicality:** GPT-OSS 120B reaches 114.03 tok/s on M5 Max and
-  58.89 tok/s on M1 Ultra, both at or slightly above mlx-lm parity on the same
-  host. Solar-Open 100B reaches 65.36 tok/s (M5 Max) / 35.88 tok/s (M1 Ultra),
+  61.19 tok/s on M1 Ultra, both at or slightly above mlx-lm parity on the same
+  host. Solar-Open 100B reaches 65.36 tok/s (M5 Max) / 36.26 tok/s (M1 Ultra),
   also at mlx-lm parity.
 - **Model coverage:** mlxcel completes many runs where the Python baseline
   fails or is unavailable in the same benchmark matrix. This is especially

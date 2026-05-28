@@ -10,7 +10,7 @@ M5 Max, and mlx-lm / mlx-vlm baselines, see
 
 | Hardware | File | Status | Last Updated |
 |----------|------|--------|-------------|
-| Mac Studio M1 Ultra 128GB | [model_tests_m1ultra.md](model_tests_m1ultra.md) | Active | 2026-05-19 |
+| Mac Studio M1 Ultra 128GB | [model_tests_m1ultra.md](model_tests_m1ultra.md) | Active | 2026-05-28 |
 | MacBook Pro M5 Max 128GB | [model_tests_m5max.md](model_tests_m5max.md) | Active | 2026-05-27 |
 | NVIDIA GB10 (DIGITS) | [model_tests_gb10.md](model_tests_gb10.md) | Active | 2026-05-19 |
 
