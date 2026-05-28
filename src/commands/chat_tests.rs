@@ -116,15 +116,56 @@ fn finalize_multiline_trims_and_detects_empty() {
 #[test]
 fn concat_plaintext_joins_turns_with_newlines() {
     let convo = vec![user("first"), assistant("second"), user("third")];
+    // `concat_plaintext` is the raw `--no-chat-template` path: content only,
+    // no role markers, one newline between turns.
     assert_eq!(concat_plaintext(&convo), "first\nsecond\nthird\n");
 }
 
 #[test]
-fn render_prompt_without_template_falls_back_to_plaintext() {
+fn user_assistant_fallback_labels_all_turns_and_cues_assistant() {
+    let convo = vec![user("hi"), assistant("hello"), user("again")];
+    let rendered = concat_userassistant_fallback(&convo);
+    assert_eq!(
+        rendered,
+        "User: hi\n\nAssistant: hello\n\nUser: again\n\nAssistant:"
+    );
+    // Trailing `Assistant:` without a newline is the cue that nudges the
+    // model to produce an assistant turn next instead of continuing the
+    // transcript with another `User:` line.
+    assert!(rendered.ends_with("Assistant:"));
+    assert!(!rendered.ends_with('\n'));
+}
+
+#[test]
+fn user_assistant_fallback_marks_unknown_roles_instead_of_dropping_them() {
+    let convo = vec![ChatMessage {
+        role: "tool".to_string(),
+        content: "result".to_string(),
+    }];
+    let rendered = concat_userassistant_fallback(&convo);
+    // Unknown role is preserved verbatim with the same `Role: ` pattern so
+    // the model can still anchor on a turn boundary.
+    assert!(rendered.starts_with("tool: result"));
+    assert!(rendered.ends_with("Assistant:"));
+}
+
+#[test]
+fn render_prompt_without_template_uses_user_assistant_fallback() {
     let convo = vec![user("hello")];
-    // No processor and not forced: plain-text fallback.
-    assert_eq!(render_prompt(None, &convo, false), "hello\n");
-    // `no_chat_template` forces plain-text even if a processor were present.
+    // No processor, not forced raw: structured User/Assistant fallback so
+    // base models do not collapse into echo loops (issue #133).
+    assert_eq!(
+        render_prompt(None, &convo, false),
+        "User: hello\n\nAssistant:"
+    );
+}
+
+#[test]
+fn render_prompt_no_chat_template_flag_uses_raw_concatenation() {
+    let convo = vec![user("hello")];
+    // Explicit `--no-chat-template` is the completion-style opt-in: raw
+    // concat, no role markers. The new structured fallback must not leak
+    // into this path.
     assert_eq!(render_prompt(None, &convo, true), "hello\n");
 }
 

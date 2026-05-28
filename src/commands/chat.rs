@@ -202,9 +202,10 @@ pub fn run_chat(opts: ChatOptions) -> Result<()> {
         );
         eprintln!();
         eprintln!(
-            "      To proceed without this warning: pass --no-chat-template (raw text mode, silent),"
+            "      Falling back to a generic User/Assistant prompt format to mitigate echo loops."
         );
-        eprintln!("      or use `mlxcel generate -p <prompt>` for one-shot text completion.");
+        eprintln!("      For raw text mode without role markers, pass --no-chat-template;");
+        eprintln!("      for one-shot completion, use `mlxcel generate -p <prompt>`.");
     }
 
     // Build the SamplingConfig once via the shared assembly used by `generate`.
@@ -419,9 +420,21 @@ fn print_help() {
 
 /// Render the accumulated conversation into a model prompt.
 ///
-/// Uses the chat template when available (the exact path `generate` uses for a
-/// single user turn, generalized to the full transcript). Without a template
-/// (or with `--no-chat-template`) it concatenates the turns as plain text.
+/// Three paths, in priority order:
+///
+/// 1. `--no-chat-template` (explicit user opt-in) → [`concat_plaintext`]: raw
+///    content-only concatenation, no role markers. Mirrors the offline
+///    `generate --no-chat-template` mode for completion-style usage.
+/// 2. A chat template is present → [`ChatTemplateProcessor::apply`]: the exact
+///    path `generate` uses for a single turn, generalized to the full
+///    transcript. Template render failure falls back to (3).
+/// 3. No template found and the user did not opt out →
+///    [`concat_userassistant_fallback`]: a minimal `User:` / `Assistant:`
+///    pseudo-template (issue #133). A bare concatenation here leaves base
+///    models without any structural cue and they collapse into raw-text echo
+///    loops; labeling turns and cueing the next assistant turn substantially
+///    reduces that pathology without claiming to give base models
+///    chat-grade behavior.
 fn render_prompt(
     processor: Option<&ChatTemplateProcessor>,
     conversation: &[ChatMessage],
@@ -433,18 +446,58 @@ fn render_prompt(
     match processor {
         Some(p) => p
             .apply(conversation, None)
-            .unwrap_or_else(|_| concat_plaintext(conversation)),
-        None => concat_plaintext(conversation),
+            .unwrap_or_else(|_| concat_userassistant_fallback(conversation)),
+        None => concat_userassistant_fallback(conversation),
     }
 }
 
-/// Plain-text transcript fallback when no chat template is in play.
+/// Raw, role-less concatenation for the explicit `--no-chat-template` path
+/// (and template render-failure fallback when the user has opted into raw
+/// mode). One newline between turns, nothing else — mirrors offline
+/// `generate --no-chat-template` so completion-style usage is unaffected by
+/// the structured fallback added in issue #133.
 fn concat_plaintext(conversation: &[ChatMessage]) -> String {
     let mut out = String::new();
     for msg in conversation {
         out.push_str(&msg.content);
         out.push('\n');
     }
+    out
+}
+
+/// Generic `User:` / `Assistant:` pseudo-template fallback for models that
+/// ship no chat template (issue #133).
+///
+/// This is *not* a true chat template — no BOS/EOS markers, no model-specific
+/// special tokens — and the upstream `processor.is_none()` warning still
+/// fires telling the user the model is likely a base / non-instruction-tuned
+/// variant. The point is narrower: a bare content-only concatenation leaves
+/// the model without any structural cue and base models tend to collapse
+/// into echo loops where they parrot the user's last line indefinitely. A
+/// minimal role-labeled format with a trailing `Assistant:` cue (no newline)
+/// nudges the model to produce an assistant turn next instead of continuing
+/// to complete its own prompt.
+fn concat_userassistant_fallback(conversation: &[ChatMessage]) -> String {
+    let mut out = String::new();
+    for msg in conversation {
+        match msg.role.as_str() {
+            "user" => out.push_str("User: "),
+            "assistant" => out.push_str("Assistant: "),
+            "system" => out.push_str("System: "),
+            other => {
+                // Unknown role (e.g. "tool"): still mark it so the model has
+                // something to anchor on rather than silently merging it into
+                // the prior turn.
+                out.push_str(other);
+                out.push_str(": ");
+            }
+        }
+        out.push_str(&msg.content);
+        out.push_str("\n\n");
+    }
+    // No trailing newline: the bare `Assistant:` token is the cue that asks
+    // the model for an assistant turn next.
+    out.push_str("Assistant:");
     out
 }
 
