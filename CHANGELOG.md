@@ -4,6 +4,11 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Fixed
+- **Base-model warning no longer presents `-it` as a universal instruction-tuned naming convention.** The warning `mlxcel run` / `mlxcel generate` prints when a model ships no chat template (added in PR #134) recommended trying a variant "named with an `-it` suffix" — but `-it` is the Gemma convention. For other families the advice was wrong: Llama and Qwen2.5 instruction-tuned checkpoints use `-Instruct`, and Qwen3 / Qwen3.5 use the plain repo name (with `-Base` marking the non-instruct variant), so a user running `Qwen3.5-0.8B-Base` was pointed at a non-existent `-it` repo instead of being told to drop `-Base`. The advice now names the per-family conventions (Gemma `-it`; Llama / Qwen2.5 `-Instruct`; Qwen3 / Qwen3.5 plain name vs. `-Base`). Base-model detection is unchanged — it keys on chat-template absence, never on the model name.
+
 ## [v0.1.2] - 2026-05-29
 
 ### Fixed

@@ -195,11 +195,15 @@ pub fn run_chat(opts: ChatOptions) -> Result<()> {
         eprintln!("      for interactive conversation.");
         eprintln!();
         eprintln!(
-            "      Try an instruction-tuned variant instead. On the HuggingFace Hub these are typically"
+            "      Try an instruction-tuned variant instead. Naming conventions vary by family:"
         );
         eprintln!(
-            "      named with an \"-it\" suffix (e.g. for gemma-4-e4b-4bit, try gemma-4-e4b-it-4bit)."
+            "      Gemma uses an \"-it\" suffix (e.g. gemma-4-e4b-it-4bit); Llama and Qwen2.5 use"
         );
+        eprintln!(
+            "      \"-Instruct\"; Qwen3/Qwen3.5 use the plain name, with \"-Base\" marking the"
+        );
+        eprintln!("      non-instruct variant.");
         eprintln!();
         eprintln!(
             "      Falling back to a generic User/Assistant prompt format to mitigate echo loops."
