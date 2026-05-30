@@ -1,4 +1,4 @@
-# Attention-head pruning example (Axis A, issue #376, A7).
+# Attention-head pruning example (Axis A, A7).
 #
 # Zeroes Q-head 3 and Q-head 7 of layer 12 in a Llama-family model.
 # The op interprets `head_ids` as **Q head ids** under the GQA-safe
@@ -8,8 +8,7 @@
 # silently kill more Q heads than the user asked for). See
 # `src/lib/mlxcel-surgery/src/ops/prune.rs` for the full policy.
 #
-# Use this YAML with the (in-progress) `--surgery` CLI flag (A4,
-# issue #371) or programmatically by passing the parsed pipeline as
+# Use this YAML with the (in-progress) `--surgery` CLI flag (A4, #) or programmatically by passing the parsed pipeline as
 # the `WeightTransform` argument to `load_text_weights`.
 #
 # Equivalent variants:

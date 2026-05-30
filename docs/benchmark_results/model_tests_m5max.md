@@ -89,8 +89,8 @@ Compatibility and performance testing for mlxcel models on **MacBook Pro M5 Max 
 | qwen3-30b-a3b | Qwen3-30B-A3B-4bit | ✅ | 414.20 | 156.15 | **2.20x** | 34 tokens |
 | qwen3-moe | Qwen3-MoE-30B-4bit | ✅ | 414.14 | 157.16 | **2.20x** | 34 tokens |
 | qwen3-vl (2B) | Qwen3-VL-2B-Instruct-4bit | ✅ | 1367.27 | 365.31 | **1.69x** | 58 tokens; text-only |
-| qwen3-vl (30B MoE) | Qwen3-VL-30B-A3B-Instruct-4bit | ✅ | 322.02 | 151.16 | **2.17x** | 35 tokens; text-only; #719 |
-| qwen3-vl (32B) | Qwen3-VL-32B-Instruct-4bit | ✅ | 119.55 | 27.51 | **1.33x** | 30 tokens; text-only; #719 |
+| qwen3-vl (30B MoE) | Qwen3-VL-30B-A3B-Instruct-4bit | ✅ | 322.02 | 151.16 | **2.17x** | 35 tokens; text-only |
+| qwen3-vl (32B) | Qwen3-VL-32B-Instruct-4bit | ✅ | 119.55 | 27.51 | **1.33x** | 30 tokens; text-only |
 | qwen3-next (480B) | Qwen3-Next-480B-4bit | ❌ | - | FAIL | - | SKIP:oom_estimate |
 | qwen3.5 (0.8B) | Qwen3.5-0.8B-4bit | ✅ | 2346.25 | 517.47 | **2.13x** | 29 tokens |
 | qwen3.5 (2B) | Qwen3.5-2B-4bit | ✅ | 1266.52 | 320.84 | **1.86x** | 19 tokens |
@@ -127,8 +127,8 @@ Compatibility and performance testing for mlxcel models on **MacBook Pro M5 Max 
 | minimax | MiniMax-M2-3bit | ✅ | 185.84 | 73.76 | - | 100 tokens |
 | mixtral | Mixtral-8x7B-Instruct-v0.1-4bit | ✅ | 83.19 | 65.20 | **1.22x** | 73 tokens |
 | gpt_oss (20B) | gpt-oss-20b-MXFP4-Q4 | ✅ | 960.63 | 172.33 | **1.94x** | 100 tokens |
-| gpt_oss (120B) | gpt-oss-120b-4bit | ✅ | 334.68 | 114.03 | **1.94x** | 78 tokens; issue #715 fix |
-| solar-open-100b | Solar-Open-100B-4bit | ✅ | 210.91 | 65.36 | **1.82x** | 100 tokens; issue #717 fix |
+| gpt_oss (120B) | gpt-oss-120b-4bit | ✅ | 334.68 | 114.03 | **1.94x** | 78 tokens |
+| solar-open-100b | Solar-Open-100B-4bit | ✅ | 210.91 | 65.36 | **1.82x** | 100 tokens |
 
 ## DeepSeek Family
 
@@ -178,13 +178,13 @@ Compatibility and performance testing for mlxcel models on **MacBook Pro M5 Max 
 | mistral-small | mistral-small-3.1-24b-4bit | ✅ | 90.62 | 41.41 | **1.31x** | 100 tokens |
 | molmo2 | molmo2-4b | ✅ | 540.64 | 64.09 | 1.07x | 33 tokens |
 | molmo-7b | molmo-7b | ✅ | 338.65 | 78.74 | - | 24 tokens; text spot-check |
-| internvl3 | internvl3-1b | ✅ | 8628.27 | 661.48 | - | 37 tokens; #747 |
+| internvl3 | internvl3-1b | ✅ | 8628.27 | 661.48 | - | 37 tokens |
 | smollm-135m | SmolLM-135M-Instruct-4bit | ✅ | 6058.41 | 905.24 | **2.22x** | 100 tokens |
 | smollm3-3b | SmolLM3-3B-4bit | ✅ | 2242.59 | 232.79 | **1.71x** | 46 tokens |
 | stablelm-1.6b | stablelm-2-1_6b-chat-4bit | ✅ | 2887.08 | 425.14 | **1.52x** | 59 tokens |
 | starcoder2-3b | starcoder2-3b-4bit | ✅ | 455.12 | 216.48 | **1.26x** | 100 tokens |
 | pixtral-12b | pixtral-12b-4bit | ✅ | 149.44 | 76.56 | **1.11x** | 100 tokens; text-only |
-| paligemma2-3b | paligemma2-3b (6-bit) | ✅ | 496.59 | 168.83 | - | 100 tokens; text-only; #744 |
+| paligemma2-3b | paligemma2-3b (6-bit) | ✅ | 496.59 | 168.83 | - | 100 tokens; text-only |
 
 ## VLM (image input) — full sweep
 
@@ -207,7 +207,7 @@ All entries use the VLM prompt 'What is in this image?' with
 | gemma4 (E2B 8bit) | gemma-4-e2b-it-8bit | ✅ | 2674.11 | 133.74 | **1.66x** | 43 tokens |
 | gemma4 (E4B 4bit) | gemma-4-e4b-it-4bit | ✅ | 2064.85 | 134.10 | **1.84x** | 29 tokens |
 | gemma4 (E4B 8bit) | gemma-4-e4b-it-8bit | ✅ | 1911.38 | 76.28 | **1.39x** | 12 tokens |
-| internvl3 (1B) | internvl3-1b | ✅ | 6482.30 | 601.50 | - | 8 tokens; #747 |
+| internvl3 (1B) | internvl3-1b | ✅ | 6482.30 | 601.50 | - | 8 tokens |
 | llama4 (Scout) | llama-4-scout-17b-4bit | ✅ | 398.13 | 48.33 | **1.52x** | 100 tokens |
 | llava-1.5-7b | llava-1.5-7b-4bit | ✅ | 3141.70 | 117.70 | **1.16x** | 100 tokens |
 | llava-interleave | llava-interleave-qwen-0.5b-bf16 | ✅ | 13171.77 | 343.53 | **1.27x** | 36 tokens |
@@ -222,8 +222,8 @@ All entries use the VLM prompt 'What is in this image?' with
 | qwen2-vl (2B) | qwen2-vl-2b-4bit | ✅ | 2485.82 | 247.21 | - | 12 tokens; EOS-terminate |
 | qwen2.5-vl (3B) | qwen2.5-vl-3b-4bit | ✅ | 1696.53 | 156.83 | **1.61x** | 22 tokens; EOS-terminate; fixed by #34 |
 | qwen3-vl (2B) | qwen3-vl-2b-4bit | ✅ | 934.98 | 281.37 | **1.65x** | 100 tokens |
-| qwen3-vl (30B MoE) | qwen3-vl-30b-a3b-4bit | ✅ | 436.81 | 56.38 | - | 45 tokens; #719 |
-| qwen3-vl (32B) | qwen3-vl-32b-4bit | ✅ | 117.14 | 19.65 | 1.05x | 100 tokens; #719 |
+| qwen3-vl (30B MoE) | qwen3-vl-30b-a3b-4bit | ✅ | 436.81 | 56.38 | - | 45 tokens |
+| qwen3-vl (32B) | qwen3-vl-32b-4bit | ✅ | 117.14 | 19.65 | 1.05x | 100 tokens |
 
 ## Summary Statistics
 
@@ -431,10 +431,10 @@ crash (`olmo-1b-4bit`). These are mlx-lm/mlx-vlm regressions in the
 development checkout under `references/`, not silent mlxcel wins.
 
 
-## Issue #722 FP32 Promotion Audit
+## FP32 Promotion Audit
 
 Short prompt A/B runs on 2026-05-18 used `origin/main` at `5ebc074` as the
-baseline and the issue #722 branch as the candidate. Each row used:
+baseline and the branch as the candidate. Each row used:
 
 ```text
 mlxcel generate -m models/<model> -p "Hello, how are you today?" -n 20 --profile --no-chat-template
@@ -444,7 +444,7 @@ The intent is a hot-path regression/impact check, not a replacement for the
 100-token full sweep above. The clearest gains are the MoE rows that still used
 the `nkh,nk->nh` expert combine contraction.
 
-| Model | main prefill tok/s | #722 prefill tok/s | main decode tok/s | #722 decode tok/s | Decode change |
+| Model | main prefill tok/s | prefill tok/s | main decode tok/s | decode tok/s | Decode change |
 |---|---:|---:|---:|---:|---:|
 | `glm4-flash-4bit` | 5.54 | 15.82 | 54.85 | 108.23 | **+97.3%** |
 | `solar-open-100b-4bit` | 9.51 | 7.98 | 17.04 | 42.72 | **+150.7%** |
@@ -463,7 +463,7 @@ the `nkh,nk->nh` expert combine contraction.
 Reading:
 
 - `glm4-flash-4bit` and `solar-open-100b-4bit` confirm the same FP32-promotion
-  class as #715 in remaining MoE expert-weight combines.
+  class as in remaining MoE expert-weight combines.
 - Qwen3/Qwen3.5/Qwen3.6 A3B, Qwen3-VL A3B, Mixtral, and gpt-oss are effectively
   guardrail-neutral in this short run. Their MoE combines now share the same
   dtype-preserving helper, but the previous contraction was not the dominant
@@ -473,17 +473,17 @@ Reading:
   the compiled activation, softcap, scalar-helper, or intentional-FP32 comments
   and tests added for this audit.
 
-## Issue #717 SolarOpen Decode Sync Audit
+## SolarOpen Decode Sync Audit
 
-Issue #722 removed the accidental FP32 expert-weight combine and raised
-`solar-open-100b-4bit` decode into the low 40 tok/s range, but #717 still missed
+ removed the accidental FP32 expert-weight combine and raised
+`solar-open-100b-4bit` decode into the low 40 tok/s range, but still missed
 the >=85% mlx-lm decode gate. The remaining SolarOpen-specific difference was
 the Rust implementation forcing `eval_all()` after every decoder layer. That is
 useful for multi-token prefill graph size control, but in single-token decode it
 adds 48 GPU synchronizations per generated token. mlx-lm does not synchronize at
 each layer in the decode path.
 
-The #717 branch keeps per-layer eval for prefill and skips it only when the input
+The branch keeps per-layer eval for prefill and skips it only when the input
 sequence length is one token. Validation used the same direct real-model command:
 
 ```text
@@ -492,22 +492,22 @@ mlxcel generate -m models/solar-open-100b-4bit -p "Hello, how are you today?" -n
 
 | Build | Prefill tok/s | Decode tok/s | vs mlx-lm 66.30 tok/s |
 |---|---:|---:|---:|
-| `origin/main` after #723 (`616c470`) | 9.19 | 41.35 | 62% |
-| #717 branch | 34.02 | 65.66 | **99%** |
+| `origin/main` after (`616c470`) | 9.19 | 41.35 | 62% |
+| branch | 34.02 | 65.66 | **99%** |
 
 This is +58.8% decode over current main and +298.4% over the original 16.48
 tok/s issue baseline. The issue acceptance gate (>=56 tok/s) is met.
 
-## Issue #720 Moderate Gap Triage
+## Moderate Gap Triage
 
-The four #720 rows were rechecked on the M5 Max after #722, #717, #718, and
-#719 had landed on `main`. The original `falcon-mamba` row used a generic chat
+The four rows were rechecked on the M5 Max after, and
+ had landed on `main`. The original `falcon-mamba` row used a generic chat
 prompt that exits after `<|im_end|>` in both mlxcel and mlx-lm, so the useful
 comparison uses a raw code prompt that generates the full 100-token budget.
 
 | Model | Triage | Refreshed mlxcel decode | mlx-lm decode | Result |
 |---|---|---:|---:|---:|
-| `glm4-flash-4bit` | Real regression fixed by the already-merged #722 MoE combine change | 111.09 | 108.32 | **103%** |
+| `glm4-flash-4bit` | Real regression fixed by the already-merged MoE combine change | 111.09 | 108.32 | **103%** |
 | `falcon-mamba-7b-4bit` | Measurement artifact from early EOS on the generic chat prompt | 94.49 | 94.32 | **100%** |
 | `starcoder2-3b-4bit` | Already fixed on current `main`; dense transformer row now matches mlx-lm | 214.85 | 213.95 | **100%** |
 | `qwen3.5-0.8b-4bit` | Real GatedDeltaNet decode overhead fixed here via fast RMSNorm q/k and gated norm paths | 535.43 | 555.43 | 96% |
@@ -551,7 +551,7 @@ increase and 96% of mlx-lm's 555.43 tok/s on the same prompt.
   similar can span ±15% across back-to-back runs because 100 tokens generate in
   under 300 ms).
 
-## TurboQuant KV cache — M5 Max results (epic #458)
+## TurboQuant KV cache — M5 Max results
 
 > Note: The 2026-04-26 benchmark run (`benchmarks/turbo_kv/2026-04-26_Mac.localdomain.csv`)
 > was performed on a development machine (`Mac.localdomain`), not on the
@@ -570,21 +570,21 @@ on the MLX graph execution path, not peak generation throughput.
 |---|---|---|---|---|
 | Meta-Llama-3.1-8B-Instruct-4bit | fp16 | 733.76 | 111,617 | baseline |
 | Meta-Llama-3.1-8B-Instruct-4bit | turbo4asym | 490.32 | 167,034 | **pass** |
-| Qwen2.5-1.5B-Instruct-4bit (superseded) | fp16 | 3205.54 | 25,550 | superseded — see #506 |
-| Qwen2.5-1.5B-Instruct-4bit (superseded) | turbo4asym | 2227.09 | 36,775 | superseded — see #506 |
+| Qwen2.5-1.5B-Instruct-4bit (superseded) | fp16 | 3205.54 | 25,550 | superseded — |
+| Qwen2.5-1.5B-Instruct-4bit (superseded) | turbo4asym | 2227.09 | 36,775 | superseded — |
 
-The Qwen2.5-1.5B-Instruct-4bit rows above are retained for historical reference. Issue #506 found that fixture collapses on raw wikitext without a chat template; the B3 gate now uses the base variant `Qwen2.5-1.5B-4bit`. Re-run pending.
+The Qwen2.5-1.5B-Instruct-4bit rows above are retained for historical reference. found that fixture collapses on raw wikitext without a chat template; the B3 gate now uses the base variant `Qwen2.5-1.5B-4bit`. Re-run pending.
 
 For the full interpretation and per-model recommendations see
 [`docs/turbo-kv-cache.md`](turbo-kv-cache.md).
 
-## TurboQuant KV cache — M5 Max speed gate readings (issue #509)
+## TurboQuant KV cache — M5 Max speed gate readings
 
-First dedicated M5 Max reading of the epic-#458 KV speed gate matrix.
+First dedicated M5 Max reading of the epic- KV speed gate matrix.
 Hardware: Apple M5 Max, 128 GB unified memory, macOS 26.4.1 (build 25E253).
 Model: `mlx-community/Meta-Llama-3.1-8B-Instruct-4bit` (local dir
 `models/llama-3.1-8b-4bit`). Date: 2026-05-03. Binary: mlxcel 0.0.25
-post-#511 (fused Sparse-V Metal kernel landed). Reproducer:
+post- (fused Sparse-V Metal kernel landed). Reproducer:
 
 ```bash
 ./scripts/bench_kv_cache.sh \
@@ -611,28 +611,28 @@ Full CSV at `benchmarks/turbo_kv/2026-05-03_Apple_M5_Max_llama-3.1-8b-4bit.csv`.
 | `int8`             |  72.79 | 0.719× | (no gate; tracking) | tracking |
 | `turbo4-asym`      |   9.15 | 0.090× | ≥0.97× | **fail** |
 | `turbo4`           |  20.76 | 0.205× | ≥0.93× | **fail** |
-| `turbo4-delegated` |  27.28 | 0.269× | ≥0.97× | **fail** (issue #521; partial fix landed) |
+| `turbo4-delegated` |  27.28 | 0.269× | ≥0.97× | **fail** (partial fix landed) |
 | `turbo3-asym`      |   6.36 | 0.063× | (tracking only) | tracking |
 
-Issue #521 (PR #525) caches the cold-V dequant graph across decode steps;
+ caches the cold-V dequant graph across decode steps;
 informal in-tree A/B (100-token decode at the same 4K prompt) measures
 `turbo4-delegated` at ~41 tok/s post-fix vs ~27 tok/s on v0.0.25, a ~1.5×
 decode speedup that scales sharply at longer contexts.
 
-**PR #529 Phase-1b (K-side unification, issue #527):** Removes `cold_keys` and
+** Phase-1b (K-side unification):** Removes `cold_keys` and
 the per-step `concat(cold_k, hot_k)` graph node. Informal A/B on M5 Max
 (3 warm runs each, `llama-3.1-8b-4bit`, 4109-token prompt, 100 generated
-tokens): fp16 baseline 101.5–102.7 tok/s; turbo4-delegated post-PR #529
+tokens): fp16 baseline 101.5–102.7 tok/s; turbo4-delegated post-
 43.0–43.7 tok/s (~0.43× FP16, up from ~0.41× pre-fix). The modest speedup is
 explained by `SliceUpdate::eval_gpu` semantics: MLX copies the full source
 buffer before writing the update region, so per-step K-side memory traffic is
 approximately conserved between the old concat layout and the new slice-update
 layout. The remaining cost is the V-side `concat(cold_v_dequant, hot_v)`
-graph node (Phase 2, issue #528).
+graph node (Phase 2).
 
-**Issue #528 Phase-2 (fused dequant + SDPA kernel):** Adds a Metal kernel
+** Phase-2 (fused dequant + SDPA kernel):** Adds a Metal kernel
 that reads the packed cold V indices directly inside the kernel, removing
-the PR-#525 `cold_v_dequant_cache` memo and the per-step
+the earlier `cold_v_dequant_cache` memo and the per-step
 `concat(cold_v_dequant, hot_v)` graph node. The dequantised cold V never
 materialises in global memory — V-memory budget stays at 4-bit packed.
 
@@ -645,24 +645,24 @@ Measured on `llama-3.1-8b-4bit`, 4109-token prompt, 100 generated tokens
 | `turbo4-delegated` default (no memo) | 29.60 | 0.291× | ≥0.97× — **fail** |
 | `turbo4-delegated` fused kernel (`MLXCEL_TURBO4_DELEGATED_FUSED=1`) | 18.90 | 0.186× | ≥0.97× — **fail** |
 
-Removing the PR-#525 memo (per the issue body's "creates dead state, must
+Removing the earlier memo (per the issue body's "creates dead state, must
 not remain" requirement) drops the legacy `update_and_fetch` route from
 ~0.43× to 0.29×. The fused kernel runs slower than the no-memo legacy
 route because the host pipeline now composes Q·K + softmax + cold-kernel +
 hot-matmul + sum out of many small MLX graph ops; the memo path could feed
 the dequantised cold V into a single steel-attention SDPA call. The
-0.97× M5 Max decode gate is **not cleared** by issue #528. Bringing the
+0.97× M5 Max decode gate is **not cleared**. Bringing the
 kernel inside the steel-attention envelope is left to follow-up work.
 
-**Issue #531 Phase-3 (steel-attention-envelope kernel, M5 Max measurement).**
-PR #532 lands `turbo4_delegated_steel_sdpa` — a JIT-compiled Metal kernel
+** Phase-3 (steel-attention-envelope kernel, M5 Max measurement).**
+ lands `turbo4_delegated_steel_sdpa` — a JIT-compiled Metal kernel
 that runs the entire post-Q·K SDPA inline (per-Q numerically stable
 softmax, cold-V dequant + weighted sum, hot-V FP16 weighted sum, all
 normalised against the same softmax denominator). Bit-parity is gate-1
 and was validated at PR-landing time (RMS < 5e-3 over 200 decode steps,
 two new parity tests in `cache::turbo_tests`). M5 Max throughput was
 deferred to a follow-up bench run because the kernel-author agent had no
-M5 Max access from PR #532's run.
+M5 Max access's run.
 
 Measured on `llama-3.1-8b-4bit`, 4109-token prompt, 100 generated tokens
 (`benchmarks/turbo_kv/2026-05-06_Apple_M5_Max_issue_531_steel_envelope.csv`):
@@ -670,50 +670,49 @@ Measured on `llama-3.1-8b-4bit`, 4109-token prompt, 100 generated tokens
 | Path | tok/s | × FP16 | gate |
 |---|---:|---:|---:|
 | `fp16` | 102.97 | 1.000× | baseline |
-| `turbo4-delegated` legacy `update_and_fetch + attention()` (env unset) | 29.60* | 0.291× | ≥0.97× — **fail** (issue #528 reading) |
-| `turbo4-delegated` cold-only fused kernel (`MLXCEL_TURBO4_DELEGATED_FUSED=1`, pre-#532) | 18.90* | 0.186× | ≥0.97× — **fail** (issue #528 reading) |
-| `turbo4-delegated` steel envelope (`MLXCEL_TURBO4_DELEGATED_FUSED=1`, post-#532) | 16.23 | 0.158× | ≥0.97× — **fail** |
+| `turbo4-delegated` legacy `update_and_fetch + attention()` (env unset) | 29.60* | 0.291× | ≥0.97× — **fail** (reading) |
+| `turbo4-delegated` cold-only fused kernel (`MLXCEL_TURBO4_DELEGATED_FUSED=1`, earlier) | 18.90* | 0.186× | ≥0.97× — **fail** (reading) |
+| `turbo4-delegated` steel envelope (`MLXCEL_TURBO4_DELEGATED_FUSED=1`, post-) | 16.23 | 0.158× | ≥0.97× — **fail** |
 
-`*` cross-referenced from the 2026-05-04 issue #528 CSV.
+`*` cross-referenced from the 2026-05-04 CSV.
 
 The steel envelope runs slower than both the cold-only fused kernel and
 the legacy fetch route. The likely cause is the kernel's single-thread-per-Q
 softmax + V accumulation pass — at decode time (`Tq=1`, `B=1`, `Hkv=8` on
 llama-3.1-8b) only 8 threads are dispatched per kernel call, each scanning
-the full T_total range serially. The PR #532 implementation note
+the full T_total range serially. The implementation note
 acknowledges this design ("single thread; T_total reads << kernel launch
 overhead, avoids threadgroup tree-reduction barriers") — the assumption
 held on M1 Ultra at parity contexts but breaks on M5 Max where the
 threadgroup tree-reduction would actually be faster than the serial scan.
 
-**Issue #534 readings (Pass 1 parallelization + cold-loop sparse cutoff on top
-of #532).** Issue #534 splits the kernel's Pass 1 (per-Q max + sum_exp) across
+** readings (Pass 1 parallelization + cold-loop sparse cutoff on top).** splits the kernel's Pass 1 (per-Q max + sum_exp) across
 all D threads of each threadgroup with a tree reduction. The follow-up in this
 PR also precomputes a score-space sparse-V cutoff
 `max + log(threshold * sum_exp)`, letting the cold loop reject fully-dead tokens
 before paying the exp + dequant cost. Pass 2's weighted-sum remains
-D-parallelized exactly as in #532. Measured on `llama-3.1-8b-4bit`,
+D-parallelized exactly as. Measured on `llama-3.1-8b-4bit`,
 4109-token prompt, 100 generated tokens
 (`benchmarks/turbo_kv/2026-05-06_Apple_M5_Max_issue_534_post_fix.csv`):
 
 | Path | tok/s | × FP16 | gate |
 |---|---:|---:|---:|
 | `fp16` | 103.28 | 1.000× | baseline |
-| `turbo4-delegated` steel envelope **pre-#534** (PR #533 reading) | 16.23 | 0.158× | ≥0.97× — **fail** |
-| `turbo4-delegated` steel envelope **post-#534** (this fix)        | 19.21 | 0.186× | ≥0.97× — **still fail** |
+| `turbo4-delegated` steel envelope **earlier** (reading) | 16.23 | 0.158× | ≥0.97× — **fail** |
+| `turbo4-delegated` steel envelope **post-** (this fix)        | 19.21 | 0.186× | ≥0.97× — **still fail** |
 
 Pass 1 parallelization plus the score-space cutoff nudges the steel envelope
-slightly past the issue #528 cold-only fused kernel at 4K (19.21 vs 18.90)
+slightly past the cold-only fused kernel at 4K (19.21 vs 18.90)
 but does not move the needle far enough to clear the 0.97× gate. The residual
 cost is in Pass 2's per-token T_total scan. A simdgroup broadcast experiment
-was also measured during #534 and regressed 4K decode, so it was not retained.
+was also measured during and regressed 4K decode, so it was not retained.
 The broader simdgroup-hybrid pattern from MLX upstream's
 `metal::steel::SDPA` (per-simdgroup `simd_max` / `simd_sum` plus
 per-simdgroup partial-sum accumulators in Pass 2) is the proposed next
 iteration; it would change the per-token per-thread T_total scan into a
 per-token per-simdgroup scan (4–8× fewer scans on M5 Max for D=128 / D=256).
 
-#### Post-#534 TurboQuant+ delegated FP16 working-set experiment (4K)
+#### Post- TurboQuant+ delegated FP16 working-set experiment (4K)
 
 Follow-up on 2026-05-07 after comparing `references/turboquant_plus`: the MLX
 delegated KVCache keeps FP16 K/V in an internal native cache and routes decode
@@ -729,11 +728,11 @@ without putting that cost in decode timing. Measured on `llama-3.1-8b-4bit`,
 | Path | tok/s | x FP16 | gate |
 |---|---:|---:|---:|
 | `fp16` | 105.23 | 1.000x | baseline |
-| `turbo4-delegated` steel envelope **post-#534** | 19.21 | 0.183x | >=0.97x — **fail** |
+| `turbo4-delegated` steel envelope **post-** | 19.21 | 0.183x | >=0.97x — **fail** |
 | `turbo4-delegated` FP16 fast path + pre-decode compact | 104.09 | 0.989x | >=0.97x — **pass** |
 
-The fast path is 5.4x faster than the post-#534 steel envelope at 4K and 3.5x
-faster than the legacy `update_and_fetch + attention()` reading from issue #528
+The fast path is 5.4x faster than the post- steel envelope at 4K and 3.5x
+faster than the legacy `update_and_fetch + attention` reading
 (29.60 tok/s). It clears the 0.97x gate because the one-time sidecar
 compaction is no longer charged to the first decode forward. This remains a
 speed-path experiment, not the compressed-only memory target, because the full
@@ -741,7 +740,7 @@ FP16 V working set is retained while the env var is enabled. The handoff is
 still visible in prefill timing for the decode-stage row: 2462.77 ms vs
 1271.07 ms for FP16 at 4K.
 
-#### Post-#536 lazy sidecar policy experiment (4K)
+#### Post- lazy sidecar policy experiment (4K)
 
 Follow-up on the pre-decode handoff: `MLXCEL_TURBO4_DELEGATED_FP16_SIDECARS=lazy`
 skips foreground packed sidecar folds during generation and compacts missing
@@ -768,7 +767,7 @@ FP16 is now ~211 ms at 4K instead of ~1194 ms.
 | `int8`             | 36.35 | 0.572× | 80 | (no gate; tracking) | tracking |
 | `turbo4-asym`      |  3.87 | 0.061× | 26 | ≥0.95× | **fail** |
 | `turbo4`           |  6.76 | 0.106× | 80 | ≥0.90× | **fail** |
-| `turbo4-delegated` |  3.41 | 0.054× | 21 | ≥0.95× | **fail** (issue #528 — see below) |
+| `turbo4-delegated` |  3.41 | 0.054× | 21 | ≥0.95× | **fail** (— see below) |
 | `turbo3-asym`      |  1.85 | 0.029× | 54 | (tracking only) | tracking |
 
 The repeated-paragraph prompt hits an EOS early on `fp16`, `turbo4-asym`,
@@ -776,7 +775,7 @@ The repeated-paragraph prompt hits an EOS early on `fp16`, `turbo4-asym`,
 computed over the actually generated tokens. `int8` and symmetric `turbo4`
 ran the full 80 tokens.
 
-#### Issue #528 16K reading (50-token decode, no EOS early-exit)
+#### 16K reading (50-token decode, no EOS early-exit)
 
 Measured on `llama-3.1-8b-4bit`, ~16065-token prompt
 (`benchmarks/turbo_kv/2026-05-04_Apple_M5_Max_issue_528_fused_delegated_sdpa.csv`):
@@ -787,14 +786,13 @@ Measured on `llama-3.1-8b-4bit`, ~16065-token prompt
 | `turbo4-delegated` default (no memo) | 6.03 | 0.081× | ≥0.95× — **fail** |
 | `turbo4-delegated` fused kernel | 5.12 | 0.069× | ≥0.95× — **fail** |
 
-Same shape as the 4K reading: removing the PR-#525 memo (issue #528
-requirement) regressed the legacy fetch path; the fused kernel is slower
+Same shape as the 4K reading: removing the earlier memo (requirement) regressed the legacy fetch path; the fused kernel is slower
 still. The gate is wider here because at 16K the dequant cost dominates;
 the per-step memo materialised ~52 MB / layer of FP16 cold V, which is
 gone, but the kernel cannot replace the steel-attention SDPA pipeline
 the memo enabled.
 
-#### Issue #531 16K reading (early-EOS at 19 generated tokens)
+#### 16K reading (early-EOS at 19 generated tokens)
 
 Measured on `llama-3.1-8b-4bit`, 16163-token prompt, 100 requested decode
 tokens (early EOS at 19 on both modes — same prompt shape early-exits FP16
@@ -805,31 +803,31 @@ fair). Same CSV as the 4K reading
 | Path | tok/s | Generated | × FP16 | gate |
 |---|---:|---:|---:|---:|
 | `fp16` | 63.94 | 19 | 1.000× | baseline |
-| `turbo4-delegated` steel envelope (post-#532) | 2.39 | 19 | 0.037× | ≥0.95× — **fail** |
+| `turbo4-delegated` steel envelope (post-) | 2.39 | 19 | 0.037× | ≥0.95× — **fail** |
 
 The 16K decode ratio (3.7% of FP16) is the gate's worst-case shortfall in
-the epic-#458 matrix to date, ~1.4× worse than the cold-only kernel
-reading from issue #528 (5.12 tok/s, 0.069× FP16). At 16K the per-token
+the epic- matrix to date, ~1.4× worse than the cold-only kernel
+reading (5.12 tok/s, 0.069× FP16). At 16K the per-token
 serial scan over T_total is ~16K reads × 8 threads, completely dwarfing
 the tens of milliseconds the FP16 attention path needs for the same step.
 
-#### Issue #534 16K reading (Pass 1 parallelization, early-EOS at 19–21 tokens)
+#### 16K reading (Pass 1 parallelization, early-EOS at 19–21 tokens)
 
-Same prompt shape as the issue #531 reading; FP16 early-exits at 19 and
-the post-#534 turbo4-delegated path at 21 (one extra token before EOS).
+Same prompt shape as the reading; FP16 early-exits at 19 and
+the post- turbo4-delegated path at 21 (one extra token before EOS).
 CSV: `benchmarks/turbo_kv/2026-05-06_Apple_M5_Max_issue_534_post_fix.csv`.
 
 | Path | tok/s | Generated | × FP16 | gate |
 |---|---:|---:|---:|---:|
 | `fp16` | 64.78 | 19 | 1.000× | baseline |
-| `turbo4-delegated` steel envelope **pre-#534** (PR #533) | 2.39 | 19 | 0.037× | ≥0.95× — **fail** |
-| `turbo4-delegated` steel envelope **post-#534** (this fix) | 2.99 | 21 | 0.046× | ≥0.95× — **still fail** |
+| `turbo4-delegated` steel envelope **earlier** | 2.39 | 19 | 0.037× | ≥0.95× — **fail** |
+| `turbo4-delegated` steel envelope **post-** (this fix) | 2.99 | 21 | 0.046× | ≥0.95× — **still fail** |
 
-The #534 fixes move the 16K ratio from 3.7% to 4.6% of FP16 (a 25% relative
+The fixes move the 16K ratio from 3.7% to 4.6% of FP16 (a 25% relative
 improvement) but do not clear the gate. The residual gap is in Pass 2; see the
 simdgroup-hybrid follow-up note in the 4K subsection above.
 
-#### Post-#534 TurboQuant+ delegated FP16 working-set experiment (16K)
+#### Post- TurboQuant+ delegated FP16 working-set experiment (16K)
 
 Same fast-path experiment as the 4K subsection, measured on the 16163-token
 prompt. Both modes early-exited at 19 generated tokens
@@ -838,7 +836,7 @@ prompt. Both modes early-exited at 19 generated tokens
 | Path | tok/s | Generated | x FP16 | gate |
 |---|---:|---:|---:|---:|
 | `fp16` | 65.55 | 19 | 1.000x | baseline |
-| `turbo4-delegated` steel envelope **post-#534** | 2.99 | 21 | 0.046x | >=0.95x — **fail** |
+| `turbo4-delegated` steel envelope **post-** | 2.99 | 21 | 0.046x | >=0.95x — **fail** |
 | `turbo4-delegated` FP16 fast path + pre-decode compact | 70.37 | 19 | 1.074x | >=0.95x — **pass** |
 
 This confirms the earlier fast-path bottleneck was the first-decode sidecar
@@ -848,7 +846,7 @@ decode uses the same unified FP16 K/V native-SDPA hot path as FP16 mode. The
 FP16-class rather than a stable speedup claim. The handoff cost moved into the
 decode-stage prefill timing: 11070.22 ms vs 7952.33 ms for FP16 at 16K.
 
-#### Post-#536 lazy sidecar policy experiment (16K)
+#### Post- lazy sidecar policy experiment (16K)
 
 Same lazy-sidecar experiment as the 4K subsection, measured on the 16163-token
 prompt with early EOS at 19 generated tokens
@@ -883,7 +881,7 @@ prefill commits.
 
 ### M5 Max reading
 
-The Turbo decode gates from epic #458 do **not** pass on the
+The Turbo decode gates do **not** pass on the
 v0.0.25 binary as of 2026-05-03, on any of the three Turbo modes. The
 shortfall is largest on `turbo4-asym` (~10× off the 4K gate) and smallest
 on `turbo4-delegated` (~3.6× off). Cross-checking against the 2026-04-29
@@ -900,7 +898,7 @@ default kernel-on path:
 | `turbo4`           | 20.76 | 20.68 | parity |
 | `turbo4-delegated` | 27.28 | 27.09 | parity |
 
-The fused Sparse-V Metal kernel from #511 is a measured regression vs.
+The fused Sparse-V Metal kernel is a measured regression vs.
 the graph reference for `turbo4-asym` on M5 Max — likely the per-thread
 skip path is paying more in kernel-launch and codebook-load overhead than
 it recovers from skipping below the `1e-6` threshold for an 8B-model
@@ -930,7 +928,7 @@ kernel is not a fix on its own.
   unpack saturates the Metal command-queue overhead; the wall-clock
   decode rate is only 0.063× of FP16 at 4K and degrades further at 16K.
 
-### Acceptance criteria status (issue #509)
+### Acceptance criteria status
 
 | Criterion | Status |
 |---|---|
@@ -938,7 +936,7 @@ kernel is not a fix on its own.
 | 16K decode reading on M5 Max (primary M5 Max gate cell) | done |
 | `turbo3-asym` reading on M5 Max (tracking only per epic) | done |
 | 32K decode reading | deferred — best-effort per epic; useful only after the kernel regression for `turbo4-asym` is investigated |
-| Cross-hardware consistency check vs. M1 Ultra (PR #515) | done — M5 Max numbers are 1.4–2.4× M1 Ultra on Turbo decode |
+| Cross-hardware consistency check vs. M1 Ultra | done — M5 Max numbers are 1.4–2.4× M1 Ultra on Turbo decode |
 | CSV committed under `benchmarks/turbo_kv/` | done |
 | Docs summary in `docs/model_tests_m5max.md` | done (this section) |
 | Failed-gate perf bug filed | follow-up — file an issue tracking (a) the `turbo4-asym` fused-kernel regression vs. graph fallback on M5 Max, and (b) the 0.27× ceiling on `turbo4-delegated` 4K decode |

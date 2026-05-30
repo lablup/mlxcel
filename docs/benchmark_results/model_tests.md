@@ -62,7 +62,7 @@ The table below summarizes the current cross-hardware decode readings for select
 *Qwen3-0.6B on GB10 produced only 9 tokens before EOS at 2026-05-28; the 317.75 tok/s decode rate is from that short window and is not directly comparable to full-length runs.
 
 M1 Ultra column is from 2026-05-28 with mlxcel 0.1.0 / MLX pin commit `84961223` (post-0.32.0) / no cooldown, using the `mlxcel-bench-decode` same-process harness.
-M5 Max column reflects the canonical `model_tests_m5max.md` values (mlxcel 0.1.0 / MLX pin `84961223` / same-process `mlxcel-bench-decode` harness), confirmed by the 2026-05-27 full re-sweep within thermal variance, with issue #743 Phi-3.5, issue #744 Gemma dense, and issue #745 Jamba spot-check refreshes folded into the listed rows.
+M5 Max column reflects the canonical `model_tests_m5max.md` values (mlxcel 0.1.0 / MLX pin `84961223` / same-process `mlxcel-bench-decode` harness), confirmed by the 2026-05-27 full re-sweep within thermal variance, with Phi-3.5, Gemma dense, and Jamba spot-check refreshes folded into the listed rows.
 GB10 column is from 2026-05-28 with mlxcel 0.1.0 / MLX pin `84961223` / `--cooldown 0`, using the `mlxcel-bench-decode` same-process warm harness (PR `c9a77f2`).
 Both Apple Silicon columns are on mlxcel 0.1.0 with the same MLX pin and the same same-process harness, so the gap reflects pure hardware delta. M5 Max stays roughly 1.7x faster than M1 Ultra on the selected 16 rows (avg ~1.71x, median ~1.76x). The largest MoE rows still show the M5 Max advantage: gpt-oss-120b runs at 114.03 vs 61.19 tok/s (1.86x) and solar-open-100b runs at 65.36 vs 36.26 tok/s (1.80x).
 For Qwen2.5-0.5B the 4-bit row is the directly comparable cross-hardware figure: `qwen2.5-0.5b-bf16` fails warmup on M1 Ultra, and the bf16 variant runs only on M5 Max at 404.68 tok/s.
@@ -76,14 +76,14 @@ For Qwen2.5-0.5B the 4-bit row is the directly comparable cross-hardware figure:
 | Text models tested (M5 Max, 2026-05-27) | 94 pass, 2 partial, 2 fail (98 total) |
 | Text models tested (GB10, 2026-05-28) | 101 pass, 8 fail/skip (109 total) |
 | VLM models tested (GB10, 2026-05-28) | 38 pass, 0 image-path fail (38 measured) |
-| VLM models tested (M5 Max, 2026-05-27) | 38 valid VLM rows (full VLM re-sweep; `internvl3-1b` and `qwen2-vl-2b-4bit` image mode now ✅ per #747/#749) |
+| VLM models tested (M5 Max, 2026-05-27) | 38 valid VLM rows (full VLM re-sweep; `internvl3-1b` and `qwen2-vl-2b-4bit` image mode now ✅) |
 | VLM models tested (M1 Ultra, 2026-05-28) | 44 valid VLM rows (internvl3-1b, molmo-7b, qwen2-vl image mode, MiniCPM-V-4.6 now ✅) |
 | Beating mlx-lm on M1 Ultra (text, >=100%) | 35/74 (47%, 5-28 vs pinned 5-19 baseline) |
 | At 90%+ parity on M1 Ultra (text) | 64/74 (86%, 5-28 vs pinned 5-19 baseline) |
 | Average vs mlx-lm on M1 Ultra (text) | 97% decode speed (median 99%, 5-28 vs pinned 5-19 baseline) |
-| Beating mlx-lm on M5 Max (text, >=100%) | 27/67 (40%, 5-19 same-process vs 5-18 mlx-lm, with #743/#744/#745 spot-check refreshes) |
-| At 90%+ parity on M5 Max (text) | 62/67 (93%, 5-19 same-process vs 5-18 mlx-lm, with #743/#744/#745 spot-check refreshes) |
-| Average vs mlx-lm on M5 Max (text) | 98% decode speed (median 99%, 5-19 same-process vs 5-18 mlx-lm, with #743/#744/#745 spot-check refreshes) |
+| Beating mlx-lm on M5 Max (text, >=100%) | 27/67 (40%, 5-19 same-process vs 5-18 mlx-lm, with spot-check refreshes) |
+| At 90%+ parity on M5 Max (text) | 62/67 (93%, 5-19 same-process vs 5-18 mlx-lm, with spot-check refreshes) |
+| Average vs mlx-lm on M5 Max (text) | 98% decode speed (median 99%, 5-19 same-process vs 5-18 mlx-lm, with spot-check refreshes) |
 | Average vs mlx-vlm on M5 Max (VLM) | 100% decode speed (median 100%, 5-19 same-process vs 5-18 mlx-vlm; 17 pairs) |
 
 ## Generating Benchmarks

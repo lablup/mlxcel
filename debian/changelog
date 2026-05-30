@@ -283,84 +283,84 @@ mlxcel (0.0.27-1~jammy1) jammy; urgency=medium
 
   * Feat: Speculative decoding Phase 2 — end-to-end Gemma 4 MTP and
     Qwen 3.5 DFlash drafter pipelines. Drafter trait + DrafterKind
-    enum + model_type auto-detection (#624); MaskedEmbedder for E2B/E4B
-    drafters (#627); drafter masks (bidirectional full + SWA) +
-    normalize_batched_shared_kv_states (#628); Gemma4AssistantDraftModel
-    4-layer drafter + pre/post projections (#626); DFlashDraftModel
-    5-layer drafter + DFlashAttention + DFlashKVCache (#635);
+    enum + model_type auto-detection; MaskedEmbedder for E2B/E4B
+    drafters; drafter masks (bidirectional full + SWA) +
+    normalize_batched_shared_kv_states; Gemma4AssistantDraftModel
+    4-layer drafter + pre/post projections; DFlashDraftModel
+    5-layer drafter + DFlashAttention + DFlashKVCache;
     Gemma 4 return_hidden / return_shared_kv / rollback_speculative_cache
-    target hooks (#625); Qwen 3.5 return_hidden + capture_layer_ids +
-    GDN-aware rollback_speculative_cache (#634)
-  * Feat: Speculative round loops — DFlash single-batch round loop
-    (#636), MtpGenerator single-batch round loop (#629), batched
-    DFlash round loop with continuous batching + GDN-aware rollback
-    (#637), batched MTP round loop with continuous batching +
-    left-padding normalization (#631)
+    target hooks; Qwen 3.5 return_hidden + capture_layer_ids +
+    GDN-aware rollback_speculative_cache
+  * Feat: Speculative round loops — DFlash single-batch round loop,
+    MtpGenerator single-batch round loop, batched
+    DFlash round loop with continuous batching + GDN-aware rollback,
+    batched MTP round loop with continuous batching +
+    left-padding normalization
   * Feat: CLI — --draft-kind {dflash,mtp} and --draft-block-size
-    flags (#630); test(speculative) greedy-parity + perf benchmarks
-    for drafter pairings (#632)
+    flags; test(speculative) greedy-parity + perf benchmarks
+    for drafter pairings
   * Feat: Server speculative dispatch — wire speculative dispatch
-    resolution and MtpTarget adapters (#666); wire real MaskedEmbedder
+    resolution and MtpTarget adapters; wire real MaskedEmbedder
     and make_drafter_masks for Gemma 4 assistant; wire speculative
-    dispatch into scheduler via B=1 bursts (#670); B>1 batched
-    speculative dispatch via MtpBatchedGenerator / DFlashBatchedGenerator
-    (#684); cancellation propagation through MtpGenerator and
-    DFlashGenerator (#681); thread token_history through speculative-burst
-    first sample (#682); logprobs support in speculative-burst (#686);
-    thinking-budget enforcement in speculative-burst (#687); wire
-    donate_finished_sequence_cache symmetric with classic path (#680)
-    and into the B>1 batched arm (#689); real-model byte-equality
-    end-to-end tests (#685); harden speculative drafter epic follow-ups
+    dispatch into scheduler via B=1 bursts; B>1 batched
+    speculative dispatch via MtpBatchedGenerator / DFlashBatchedGenerator;
+    cancellation propagation through MtpGenerator and
+    DFlashGenerator; thread token_history through speculative-burst
+    first sample; logprobs support in speculative-burst;
+    thinking-budget enforcement in speculative-burst; wire
+    donate_finished_sequence_cache symmetric with classic path
+    and into the B>1 batched arm; real-model byte-equality
+    end-to-end tests; harden speculative drafter epic follow-ups
   * Fix: DFlash drafter lazy-bind for upstream z-lab/Qwen3.5-4B-DFlash
-    checkpoint (#683); enable DFlash for Qwen 3.5 VLM text requests
-    (#694); avoid slow Gemma 4 MTP singleton bursts (#698); validate
+    checkpoint; enable DFlash for Qwen 3.5 VLM text requests;
+    avoid slow Gemma 4 MTP singleton bursts; validate
     trimmable cache and reserve last token in prefill for speculative
-    rollback safety (#612)
+    rollback safety
   * Perf: Qwen 3.5 DFlash decode-path greedy argmax optimization
   * Feat: OpenAI Responses API (Phase 1) — /v1/responses endpoint
     with conversation store, streaming events, reasoning-trace
     forwarding, response cancellation, and four new CLI flags on both
-    binaries (#622, #623)
+    binaries
   * Feat: APC block-level partial cache adoption in the scheduler —
     when APC is on, a prompt sharing the first N blocks with a cached
     entry but diverging at block N+1 now reuses blocks 0..N and
     re-prefills only from the divergence boundary via
     DetachedKVCache::trim_to / DetachedCacheSet::truncate_to (FP16,
     INT8, Turbo4, Turbo4Delegated sidecars). APC-off retains bit-exact
-    prior behaviour (#580, #607)
+    prior behaviour
   * Feat: Nemotron H Nano Omni audio modality — Parakeet/Conformer
     sound encoder, mel-spectrogram feature extractor, audio projector,
     interleaved audio+vision token merging at sound_context_token_id
-    in generate_vlm (#582, #609)
+    in generate_vlm
   * Feat: mlxcel download / mlxcel-server download per-file +
     aggregate progress bars with terminal-aware suppression, reqwest
-    streaming, and atomic tempfile rename (#648, #649); follow-up
+    streaming, and atomic tempfile rename; follow-up
     security hardening — plaintext HF_ENDPOINT + token warning
     (M1), client connect/read timeouts (M2), URL path percent-encoding
     for ?/#/% in filenames (L1), O_NOFOLLOW tempfile creation (L2),
     Result-based token ASCII handling (L3), stale .mlxcel-partial.*
     cleanup at start (L5), parallel HEAD with buffer_unordered(8)
-    (L6) (#650, #652)
+    (L6)
   * Feat: Server --max-kv-size flag (matching llama-server) and
-    tighter chat-completion response shape (#618)
+    tighter chat-completion response shape
   * Feat: Tokenizer multi-token think and tool-call sequence support
-    (#590, #613)
-  * Fix: MiniMax M2 parallel tool calling parser (#616); preserve
-    token positions when buffering parallel tool calls (#615); skip
-    tool→normal transition when tool_call_end is empty (#614);
+
+  * Fix: MiniMax M2 parallel tool calling parser; preserve
+    token positions when buffering parallel tool calls; skip
+    tool→normal transition when tool_call_end is empty;
     pop_prefixes in RadixTrie with correct immediate-prefix semantics
-    for the prompt cache (#617)
+    for the prompt cache
   * Fix: Close TOCTOU race in video allowlist by passing fd to
-    ffmpeg (#601, #611); Gemma 4 skip k_proj/v_proj/k_norm load for
-    KV-shared layers (#608); Nemotron H default time_step_limit to
-    (0.0, inf) regardless of time_step_min/max (#619); gated_delta
+    ffmpeg; Gemma 4 skip k_proj/v_proj/k_norm load for
+    KV-shared layers; Nemotron H default time_step_limit to
+    (0.0, inf) regardless of time_step_min/max; gated_delta
     zero-init y[dv_idx] when mask is false in masked Metal kernel
-    variants (#610); upstream-sync review follow-ups
+    variants; upstream-sync review follow-ups
   * Chore: clippy 1.93 — replace .map_or(false, ...) with
-    .is_some_and(...) in tokenizer (#651); test fixture adds
-    max_kv_size field to ServeArgs (#620)
+    .is_some_and(...) in tokenizer; test fixture adds
+    max_kv_size field to ServeArgs
   * CI: bump GitHub Actions to Node 24 runtime
-  * Docs: refresh README to match current code and benchmarks (#700);
+  * Docs: refresh README to match current code and benchmarks;
     update speculative decoding guidance
 
  -- Jeongkyu Shin <inureyes@gmail.com>  Sat, 16 May 2026 18:00:00 +0900
@@ -368,64 +368,63 @@ mlxcel (0.0.27-1~jammy1) jammy; urgency=medium
 mlxcel (0.0.26-1~jammy1) jammy; urgency=medium
 
   * Feat: TurboQuant KV cache — Walsh-Hadamard transform op + PolarQuant
-    Lloyd-Max codebook generator porting (#470, #472), KVCacheMode::Turbo4
-    symmetric (#476), Turbo4Asym Fp16-K + Turbo4-V (#474), Turbo3Asym
-    Fp16-K + Turbo3-V (#477), Turbo4Delegated FP16 hot tail + packed
-    turbo cold body (#479), TurboQuant + RotatingKVCache sliding window
-    B9, sparse-V dequant scaffolding (#480), Boundary-V layer protection
-    (#478), packed-aware PagedKvLayout (#482)
+    Lloyd-Max codebook generator porting, KVCacheMode::Turbo4
+    symmetric, Turbo4Asym Fp16-K + Turbo4-V, Turbo3Asym
+    Fp16-K + Turbo3-V, Turbo4Delegated FP16 hot tail + packed
+    turbo cold body, TurboQuant + RotatingKVCache sliding window
+    B9, sparse-V dequant scaffolding, Boundary-V layer protection,
+    packed-aware PagedKvLayout
   * Feat: --cache-type-k / --cache-type-v server flag parity with
-    llama-server for TurboQuant modes (#484)
-  * Feat: KV cache quantization for continuous batching (#545); unified
-    TurboQuant KV-cache CLI flags across mlxcel binaries (#567);
-    compressed dequant-SDPA paths (#562)
-  * Perf: Fused Sparse-V Metal kernel skipping per-thread SDPA (#505);
+    llama-server for TurboQuant modes
+  * Feat: KV cache quantization for continuous batching; unified
+    TurboQuant KV-cache CLI flags across mlxcel binaries;
+    compressed dequant-SDPA paths
+  * Perf: Fused Sparse-V Metal kernel skipping per-thread SDPA;
     precomputed Sparse-V kernel rescale dropping per-token threadgroup
-    barriers (#520); cold-V dequant cache + Metal kernel for
-    Turbo4Delegated (#525, #530); unified K storage dropping per-step K
-    concat (#527); steel-attention-envelope fused SDPA kernel (#531);
-    parallelized Pass 1 softmax in turbo4_delegated_steel_sdpa (#534);
-    delegated FP16 predecode compaction + lazy sidecars (#536, #537)
-  * Test: TurboQuant wikitext-2 PPL + NIAH quality gate (#475, #492,
-    #493); VLM B3 quality gates (PPL + NIAH + image-token kurtosis) for
-    #510; KV speed gate matrix on M1 Ultra and M5 Max (#509)
-  * Feat: Automatic Prefix Caching (APC) with hash blocks (#552)
+    barriers; cold-V dequant cache + Metal kernel for
+    Turbo4Delegated; unified K storage dropping per-step K
+    concat; steel-attention-envelope fused SDPA kernel;
+    parallelized Pass 1 softmax in turbo4_delegated_steel_sdpa;
+    delegated FP16 predecode compaction + lazy sidecars
+  * Test: TurboQuant wikitext-2 PPL + NIAH quality gate; VLM B3 quality gates (PPL + NIAH + image-token kurtosis) for;
+    KV speed gate matrix on M1 Ultra and M5 Max
+  * Feat: Automatic Prefix Caching (APC) with hash blocks
   * Feat: OpenAI-compatible response_format json_schema constrained
-    decoding via llguidance with schema size/depth/$ref limits (#550)
+    decoding via llguidance with schema size/depth/$ref limits
   * Feat: mlxcel download / mlxcel-server download HuggingFace
     subcommand with allow-list filter, atomic writes, and path-traversal
-    defense (#457, #486)
+    defense
   * Feat: /health endpoint exposes context_size and tool_call_parser
-    (#549)
-  * Feat: Paged scheduler dispatch on PagedKvLayout::cache_mode (#508);
-    thread-local generation stream and uniform-batch RoPE collapse (#556)
-  * Feat: Gemma 4 video support and VLM video input infrastructure
-    (#553); Youtu-VL model (#555); Nemotron H Nano Omni vision (#554);
-    video_url content blocks wired through chat completion handler
-    (#596); single-pass ffmpeg frame extraction with Drop guard (#597)
-  * Fix: Per-sequence MRoPE alignment for mixed VL+text batches (#558);
-    per-sequence per_layer_inputs for Gemma 4 E2B/E4B VLM (#561);
-    mixed-length batching for Gemma 4 (#560); relaxed cached-position
-    shape check in Qwen VL chunked prefill (#557); Qwen3.5-MoE batch
-    size validation on cached position_ids reuse (#559)
-  * Fix: Streamed detokenization for byte-fallback tokens (#570); top_p
-    filter for batched logits (#569); token queue timeout during long
-    prefills (#571); tool-call markup stripped from streamed
+
+  * Feat: Paged scheduler dispatch on PagedKvLayout::cache_mode;
+    thread-local generation stream and uniform-batch RoPE collapse
+  * Feat: Gemma 4 video support and VLM video input infrastructure;
+    Youtu-VL model; Nemotron H Nano Omni vision;
+    video_url content blocks wired through chat completion handler;
+    single-pass ffmpeg frame extraction with Drop guard
+  * Fix: Per-sequence MRoPE alignment for mixed VL+text batches;
+    per-sequence per_layer_inputs for Gemma 4 E2B/E4B VLM;
+    mixed-length batching for Gemma 4; relaxed cached-position
+    shape check in Qwen VL chunked prefill; Qwen3.5-MoE batch
+    size validation on cached position_ids reuse
+  * Fix: Streamed detokenization for byte-fallback tokens; top_p
+    filter for batched logits; token queue timeout during long
+    prefills; tool-call markup stripped from streamed
     delta.content covering Hermes <tool_call> and Mistral Nemo
-    [TOOL_CALLS] (#551, #576)
-  * Fix: TurboQuant batch cache offset merging (#564); Turbo3 split-flag
-    + ENV_LOCK race (#573)
-  * Fix: Gemma3-4B attention SIGABRT — sliding-window mask T_k mismatch
-    (#507); Qwen2 fused QKV bias preservation (#517);
-    nemotron-h-nano-omni post-merge validation gaps (#583)
+    [TOOL_CALLS]
+  * Fix: TurboQuant batch cache offset merging; Turbo3 split-flag
+    + ENV_LOCK race
+  * Fix: Gemma3-4B attention SIGABRT — sliding-window mask T_k mismatch;
+    Qwen2 fused QKV bias preservation;
+    nemotron-h-nano-omni post-merge validation gaps
   * Update: MLX upstream pin bumped twice — first to v0.32.0
-    (c9aa5605, #565), then to 84961223 covering CUDA QMM kernel split,
+    (c9aa5605), then to 84961223 covering CUDA QMM kernel split,
     JIT preamble rename, and AsStrided contiguity-flag fix (PRs #3443
     #3463 #3475)
-  * Docs: TurboQuant KV cache user guide and validated config matrix
-    (#485); mlx-lm version reference 0.31.2 → 0.31.3 (#606); M1 Ultra
-    benchmark refresh to 2026-05-08 (#577) and benchmarks-by-hardware.md
-    full M1 Ultra column resync (#578)
+  * Docs: TurboQuant KV cache user guide and validated config matrix;
+    mlx-lm version reference 0.31.2 → 0.31.3; M1 Ultra
+    benchmark refresh to 2026-05-08 and benchmarks-by-hardware.md
+    full M1 Ultra column resync
 
  -- Jeongkyu Shin <inureyes@gmail.com>  Sun, 10 May 2026 18:00:00 +0900
 

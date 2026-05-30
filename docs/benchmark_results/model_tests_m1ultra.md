@@ -11,8 +11,8 @@ Compatibility and performance testing for mlxcel models on **Mac Studio M1 Ultra
 | **mlxcel version** | 0.1.0 |
 | **MLX version** | post-0.32.0 pin (commit 84961223, via mlxcel-core) |
 | **Bench harness** | `mlxcel-bench-decode` (model load, warmup, and measured pass in one process) |
-| **mlx-lm baseline** | 0.31.3 (dev checkout `references/mlx-lm` @ `df1d3f3` — "Fix Gemma 4 sanitize() not stripping KV projections for shared layers" #1240) |
-| **mlx-vlm baseline** | dev checkout `references/mlx-vlm` @ `d85ca4d` — "Compatibility bridge for non-VL models" #1181 |
+| **mlx-lm baseline** | 0.31.3 (dev checkout `references/mlx-lm` @ `df1d3f3` — "Fix Gemma 4 sanitize() not stripping KV projections for shared layers" ml-explore/mlx-lm#1240) |
+| **mlx-vlm baseline** | dev checkout `references/mlx-vlm` @ `d85ca4d` — "Compatibility bridge for non-VL models" Blaizzy/mlx-vlm#1181 |
 | **Test Prompt** | "Hello, how are you today?" (text) / "What is in this image?" (VLM) |
 | **Max Tokens** | 100 (measured pass); 20 (warmup pass, same process) |
 | **Test Date** | 2026-05-19 full sweep (baseline); 2026-05-28 full text + VLM re-benchmark on mlxcel 0.1.0 (`--cooldown 0`) |
@@ -110,11 +110,11 @@ Compatibility and performance testing for mlxcel models on **Mac Studio M1 Ultra
 | qwen3_moe | Qwen3-30B-A3B-4bit | ✅ | 191.96 | 72.17 | **103%** | mlx-lm: 70.18 |
 | qwen3_5_moe | qwen3.5-35B-A3B-4bit | ✅ | 239.05 | 71.38 | 93% | mlx-lm: 76.44; Hybrid GatedDeltaNet + MoE (256 experts); only 34 tokens |
 | phimoe | Phi-3.5-MoE-instruct-4bit | ✅ | 112.10 | 77.71 | **112%** | mlx-lm: 69.28 |
-| solar_open | Solar-Open-100B-4bit | ✅ | 75.37 | 36.26 | **102%** | mlx-lm: 35.69; 128 experts, top-8; layer-eval skip (PR #724); 54GB |
+| solar_open | Solar-Open-100B-4bit | ✅ | 75.37 | 36.26 | **102%** | mlx-lm: 35.69; 128 experts, top-8; layer-eval skip; 54GB |
 | solar_open (int4) | Solar-Open-100B-int4 | ✅ | - | 11.55 | - | mlx-lm: fails to load; 128 experts, top-8; int4 quantization; 54GB |
 | olmoe | - | ⏳ | - | - | - | |
-| gpt_oss (20B) | gpt-oss-20b-MXFP4-Q4 | ✅ | 286.09 | 93.46 | **104%** | mlx-lm: 89.51; MXFP4 quantization; 32 experts; bf16 decode fix (PR #721) |
-| gpt_oss (120B) | gpt-oss-120b-4bit | ✅ | 114.12 | 61.19 | **106%** | mlx-lm: 57.58; 128 experts, top-4; 61GB model; bf16 decode fix (PR #721) |
+| gpt_oss (20B) | gpt-oss-20b-MXFP4-Q4 | ✅ | 286.09 | 93.46 | **104%** | mlx-lm: 89.51; MXFP4 quantization; 32 experts; bf16 decode fix |
+| gpt_oss (120B) | gpt-oss-120b-4bit | ✅ | 114.12 | 61.19 | **106%** | mlx-lm: 57.58; 128 experts, top-4; 61GB model; bf16 decode fix |
 
 ## DeepSeek Family
 
@@ -185,7 +185,7 @@ Compatibility and performance testing for mlxcel models on **Mac Studio M1 Ultra
 |-------|------------|--------|---------|--------|------------|-------|
 | gemma3 | gemma-3-4b-it-4bit | ✅ | 241.77 | 87.01 | 93% | mlx-vlm: 93.79; SigLIP + AvgPool; 275 prompt, 16 gen |
 | gemma3n (E2B) | gemma-3n-E2B-it-4bit | ✅ | 771.21 | 72.83 | **122%** | mlx-vlm: 59.57; MobileNetV5 + MSFA; 273 prompt, 29 gen |
-| gemma3n (E4B bf16) | gemma-3n-E4B-it (bf16) | ✅ | 659.78 | 32.46 | 90% | mlx-vlm: 36.18; MobileNetV5 + MSFA; bf16 prefill path retune (PR #727); bf16; 273 prompt, 24 gen |
+| gemma3n (E4B bf16) | gemma-3n-E4B-it (bf16) | ✅ | 659.78 | 32.46 | 90% | mlx-vlm: 36.18; MobileNetV5 + MSFA; bf16 prefill path retune; bf16; 273 prompt, 24 gen |
 | gemma3n (E4B 4bit) | gemma-3n-E4B-it-4bit | ✅ | 492.52 | 57.50 | **115%** | mlx-vlm: 50.00; 273 prompt, 33 gen |
 | gemma4 (E2B 4bit) | gemma-4-e2b-it-4bit | ✅ | 732.53 | 106.92 | **110%** | mlx-vlm: 97.19; 274 prompt, 100 gen |
 | gemma4 (E2B 8bit) | gemma-4-e2b-it-8bit | ✅ | 724.08 | 81.98 | 90% | mlx-vlm: 91.06; 274 prompt, 100 gen |
@@ -213,20 +213,20 @@ Compatibility and performance testing for mlxcel models on **Mac Studio M1 Ultra
 | internvl3 | InternVL3-1B | ✅ | 1902.58 | 228.83 | 87% | mlx-vlm: 264.40; InternViT + pixel-shuffle + Qwen2; 293 prompt, 8 gen |
 | nemotron-omni | Nemotron-3-Nano-Omni-30B-A3B-Reasoning-4bit | ✅ | 263.15 | 69.37 | - | mlx-vlm: FAIL; NEW (5-19); Mamba2+Transformer+MoE+Parakeet audio; 100 gen |
 | youtu-vl | youtu-vl-4b-instruct | ⚠️ | 408.21 | 24.47 | - | mlx-vlm: FAIL; NEW (5-19); only 1 gen token |
-| qwen2-vl | Qwen2-VL-2B-Instruct-4bit | ✅ | 788.00 | 124.99 | - | Custom ViT + MRoPE; VLM image mode fixed (#749); 100 gen |
+| qwen2-vl | Qwen2-VL-2B-Instruct-4bit | ✅ | 788.00 | 124.99 | - | Custom ViT + MRoPE; VLM image mode fixed; 100 gen |
 | qwen2.5-vl | Qwen2.5-VL-3B-Instruct-4bit | ✅ | 599.48 | 97.81 | - | Windowed ViT + MRoPE; 91 prompt, 46 gen; mlx-vlm requires PyTorch |
-| qwen3-vl | Qwen3-VL-2B-Instruct-4bit | ✅ | 766.49 | 162.21 | - | mlx-vlm: FAIL; DeepStack + vectorized MRoPE (PR #729); 100 gen |
-| qwen3-vl (4B) | Qwen3-VL-4B-Instruct-4bit | ✅ | 490.85 | 90.14 | - | mlx-vlm: FAIL; DeepStack + vectorized MRoPE (PR #729); 100 gen |
-| qwen3-vl (8B) | Qwen3-VL-8B-Instruct-4bit | ✅ | 313.03 | 62.62 | - | mlx-vlm: FAIL; DeepStack + vectorized MRoPE (PR #729); 100 gen |
-| qwen3-vl (32B) | Qwen3-VL-32B-Instruct-4bit | ✅ | 92.07 | 17.92 | - | mlx-vlm: FAIL; DeepStack + vectorized MRoPE (PR #729); 100 gen |
-| qwen3-vl-moe | Qwen3-VL-30B-A3B-Instruct-4bit | ✅ | 296.81 | 40.88 | - | mlx-vlm: FAIL; MoE (128 experts) + DeepStack (PR #729); 100 gen |
+| qwen3-vl | Qwen3-VL-2B-Instruct-4bit | ✅ | 766.49 | 162.21 | - | mlx-vlm: FAIL; DeepStack + vectorized MRoPE; 100 gen |
+| qwen3-vl (4B) | Qwen3-VL-4B-Instruct-4bit | ✅ | 490.85 | 90.14 | - | mlx-vlm: FAIL; DeepStack + vectorized MRoPE; 100 gen |
+| qwen3-vl (8B) | Qwen3-VL-8B-Instruct-4bit | ✅ | 313.03 | 62.62 | - | mlx-vlm: FAIL; DeepStack + vectorized MRoPE; 100 gen |
+| qwen3-vl (32B) | Qwen3-VL-32B-Instruct-4bit | ✅ | 92.07 | 17.92 | - | mlx-vlm: FAIL; DeepStack + vectorized MRoPE; 100 gen |
+| qwen3-vl-moe | Qwen3-VL-30B-A3B-Instruct-4bit | ✅ | 296.81 | 40.88 | - | mlx-vlm: FAIL; MoE (128 experts) + DeepStack; 100 gen |
 | qwen3.5-vl (0.8B) | qwen3.5-0.8B-4bit | ✅ | 946.46 | 233.81 | - | mlx-vlm: FAIL; Hybrid GatedDeltaNet VLM; 57 prompt, 53 gen |
 | qwen3.5-vl (2B) | qwen3.5-2B-4bit | ✅ | 546.64 | 172.92 | - | mlx-vlm: FAIL; Hybrid GatedDeltaNet VLM; 57 prompt, 58 gen |
 | qwen3.5-vl (4B) | qwen3.5-4B-4bit | ✅ | 332.57 | 100.46 | - | mlx-vlm: FAIL; Hybrid GatedDeltaNet VLM; 57 prompt, 30 gen |
 | qwen3.5-vl (9B 4bit) | qwen3.5-9B-4bit | ✅ | 196.03 | 74.05 | - | mlx-vlm: FAIL; Hybrid GatedDeltaNet VLM; 57 prompt, 62 gen |
 | qwen3.5-vl (9B bf16) | qwen3.5-9B (bf16) | ✅ | 279.39 | 32.74 | - | mlx-vlm: FAIL; Hybrid GatedDeltaNet VLM; 57 prompt, 78 gen; bf16 |
 | qwen3.5-vl (27B) | qwen3.5-27B-4bit | ✅ | 74.86 | 25.24 | - | mlx-vlm: FAIL; Hybrid GatedDeltaNet VLM; 57 prompt, 42 gen |
-| qwen3.5-vl-moe | qwen3.5-35B-A3B-4bit | ✅ | 274.14 | 70.22 | - | mlx-vlm: FAIL; Hybrid GatedDeltaNet + MoE VLM; 57 prompt, 47 gen; gated delta decode RMSNorm fix (PR #730) |
+| qwen3.5-vl-moe | qwen3.5-35B-A3B-4bit | ✅ | 274.14 | 70.22 | - | mlx-vlm: FAIL; Hybrid GatedDeltaNet + MoE VLM; 57 prompt, 47 gen; gated delta decode RMSNorm fix |
 | qwen3.6-vl-moe | qwen3.6-35B-A3B-4bit | ✅ | 274.13 | 66.80 | - | mlx-vlm: FAIL; Hybrid GatedDeltaNet + MoE VLM; 100 gen |
 | molmo-point | - | ⏳ | - | - | - | Molmo-Point (point detection); implemented but no MLX model available |
 
@@ -288,7 +288,7 @@ Source CSVs (same M1 Ultra host; mlxcel 0.1.0 measured 2026-05-28 with `--cooldo
 
 The mlx-lm / mlx-vlm baselines are the pinned 2026-05-19 reference checkout (the reference is fixed, so its decode on this host is stable); the mlxcel side is the 2026-05-28 full sweep. All sweeps use `--max-tokens 100` and the same `Hello, how are you today?` / `What is in this image?` prompts. `deepseek-v3-4bit` and `qwen3-next-480b-4bit` exceed the 128GB host on both sides; `minimax-m2-3bit` now fits and runs on the mlxcel side (32.62 tok/s) but mlx-lm still fails it, so it stays outside the comparable set.
 
-Numbers are decode tok/s. `mlxcel vs mlx-lm` is `mlxcel / mlx-lm` as a percentage; **bold** = mlxcel >= mlx-lm. `FAIL` cells are real load/runtime errors on that backend with this configuration. The mlx-lm checkout used here (`df1d3f3` — "Fix Gemma 4 sanitize() not stripping KV projections for shared layers" #1240) is newer than the M5 Max page's `ed1fca4`, so some FAIL categories differ.
+Numbers are decode tok/s. `mlxcel vs mlx-lm` is `mlxcel / mlx-lm` as a percentage; **bold** = mlxcel >= mlx-lm. `FAIL` cells are real load/runtime errors on that backend with this configuration. The mlx-lm checkout used here (`df1d3f3` — "Fix Gemma 4 sanitize() not stripping KV projections for shared layers" ml-explore/mlx-lm#1240) is newer than the M5 Max page's `ed1fca4`, so some FAIL categories differ.
 
 ### Aggregate (text)
 
@@ -515,9 +515,9 @@ Ran all 80 local models (45GB threshold) to verify text/image generation.
 | SentencePiece | `tokenizer.model` | Gemma, Llama 1/2, older models | `sentencepiece` |
 | Tiktoken | `*.tiktoken` | HunYuan MoE (13B) | Custom BPE (fancy-regex) |
 
-## TurboQuant KV cache — M1 Ultra speed gate readings (issue #509)
+## TurboQuant KV cache — M1 Ultra speed gate readings
 
-First dedicated M1 Ultra reading of the epic-#458 KV speed gate matrix.
+First dedicated M1 Ultra reading of the epic- KV speed gate matrix.
 Hardware: Apple M1 Ultra, 128 GB unified memory. Model:
 `Meta-Llama-3.1-8B-Instruct-4bit`. Date: 2026-04-29. Reproducer:
 `./scripts/bench_kv_cache.sh --modes fp16,int8,turbo4-asym,turbo4,turbo4-delegated --contexts 4096 --prefill-contexts 8192`.
@@ -555,7 +555,7 @@ modes ran the full 80 tokens.
 
 ### M1 Ultra reading
 
-Per epic #458 §"Cross-hardware regression", the M5 Max gates are tracking
+ §"Cross-hardware regression", the M5 Max gates are tracking
 only on pre-M3 hardware. The numbers above match that guidance: `turbo4`
 and `turbo4-asym` decode are well below the M5 gates on M1 Ultra, while
 `turbo4-delegated` prefill is bit-identical to FP16 because the cold pages
@@ -563,7 +563,7 @@ keep their FP16 representation and only the hot tail is packed.
 
 The decode regression is consistent with the L2-cache wall documented in
 `references/turboquant_plus/`. The fused Sparse-V Metal kernel that lands
-in #505 targets the per-thread skip path inside the SDPA inner loop and is
+ targets the per-thread skip path inside the SDPA inner loop and is
 expected to recover most of the M5 decode budget; the M1/M2 ceiling stays
 limited by L2 bandwidth and is documented but not gated.
 
@@ -572,7 +572,7 @@ limited by L2 bandwidth and is documented but not gated.
 - **`turbo4-delegated` is the only currently shipping mode that holds the
   prefill gate on M1 Ultra.** Use it when prefill latency matters more than
   the maximum compression ratio.
-- **`turbo4-asym` on M1 Ultra needs the #505 fused kernel** to be a viable
+- **`turbo4-asym` on M1 Ultra needs the fused kernel** to be a viable
   decode option. The graph-level path measured here pays a per-token
   dequant cost that the fused kernel folds into the SDPA inner loop.
 - **Avoid `turbo3` on M1 Ultra** for decode-bound workloads. The 3-bit
@@ -582,13 +582,12 @@ limited by L2 bandwidth and is documented but not gated.
   still delivers approximately 0.39× of the FP16 baseline KV footprint at the
   default boundary-v 2 on a 32-layer model, but the decode shortfall above
   makes `turbo4-delegated` the better practical choice on this generation
-  until the #505 fused kernel lands. Pick `fp16+turbo4` only if the memory
+  until the fused kernel lands. Pick `fp16+turbo4` only if the memory
   savings outweigh the per-token decode cost for your workload.
 
 ### Deferred
 
-- 32K decode reading (best-effort per epic; benefits from #505 fused kernel
-  before the gate is meaningful on any hardware).
+- 32K decode reading (best-effort per epic; benefits fused kernel before the gate is meaningful on any hardware).
 - Per-mode 16K decode (skipped for the initial run; M5 Max is the primary
   target for the 16K gate).
 - Multi-model expansion (Qwen 2.5, Gemma 3, etc.).

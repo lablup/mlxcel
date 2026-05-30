@@ -1,4 +1,4 @@
-# SLERP-based model interpolation example (issue #378 / A9).
+# SLERP-based model interpolation example (A9).
 #
 # Blends every per-layer tensor of the base model with the
 # corresponding tensors from `model_a.safetensors` and

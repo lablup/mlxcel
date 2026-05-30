@@ -49,7 +49,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - README "Run a model" section now leads with the `mlxcel run` one-liner instead of the verbose explicit-download flow, and collapses the core verbs (`generate`, `serve`, `inspect`, `--estimate-memory`) into a single one-line-comment block. Store-root precedence, `-m` resolution rules, `--local-dir` / `--models-dir`, `MLXCEL_DEFAULT_ORG`, and the memory preflight env vars now live behind a single link to `docs/environment-variables.md` (which already documents them) and a compressed model-management paragraph. Net: README drops about 58 lines with no loss of documented behavior (#114).
 - M5 Max detailed table, README headline version, and the benchmark report method table refreshed to the 2026-05-27 full-sweep state on mlxcel 0.1.0. `internvl3-1b` now passes in both text (661 tok/s) and VLM (601 tok/s, ahead of mlx-vlm's 529 tok/s), raising the M5 Max pass count to 94. `paligemma2-3b-6bit` text decode is 168.83 tok/s and `qwen3-vl-30b-a3b-4bit` VLM is 56.38 tok/s over a 45-token sample. Aggregate parity statistics and the M1 Ultra / GB10 columns remain on the 2026-05-19 baseline campaign that was not re-run (#115).
 - M5 Max decode aggregates recomputed against the unchanged `mlx-lm` / `mlx-vlm` baselines (baselines unchanged, only mlxcel-derived ratios recomputed). Text decode average 98% to 99% (median 99%), 62 of 66 at >=90% parity; the benchmark report headline is corrected from the stale 58 of 66. VLM decode average 101% to 102%, median 100% to 101%, 22 comparable pairs (was 20), 18 of 22 at >=90% parity (coverage counts reflect internvl3). README decode tables add Gemma 2 2B (100%), Phi-3.5-mini (98%), Jamba (98%), and InternVL3 1B (114% vs mlx-vlm) (#127).
-- 2026-05-28 M1 Ultra full sweep mirrored into the public benchmark docs (mlxcel 0.1.0; `mlx-lm` / `mlx-vlm` baselines unchanged). README M1 Ultra column refreshed across both representative decode tables (Phi-3.5-vision M5 VLM row corrected to its post-#743 value, 169 tok/s, 106%); benchmark report headline updated to text 74 pairs / 99% median / 64 of 74 at >=90%, VLM 18 pairs / 98% median / 12 of 18 at >=90%; `model_tests_m1ultra.md` per-model refresh with aggregate blocks (text avg 97% / median 99%; VLM avg 101% / median 98%) and `internvl3` now passing on M1. The cross-hardware quick table stays a labeled 2026-05-19 same-version snapshot (#130).
+- 2026-05-28 M1 Ultra full sweep mirrored into the public benchmark docs (mlxcel 0.1.0; `mlx-lm` / `mlx-vlm` baselines unchanged). README M1 Ultra column refreshed across both representative decode tables (Phi-3.5-vision M5 VLM row corrected to its post- value, 169 tok/s, 106%); benchmark report headline updated to text 74 pairs / 99% median / 64 of 74 at >=90%, VLM 18 pairs / 98% median / 12 of 18 at >=90%; `model_tests_m1ultra.md` per-model refresh with aggregate blocks (text avg 97% / median 99%; VLM avg 101% / median 98%) and `internvl3` now passing on M1. The cross-hardware quick table stays a labeled 2026-05-19 same-version snapshot (#130).
 - Reword the v0.0.31 #86 entry in CHANGELOG.md and `debian/changelog` to match the GitHub release note. The fix landed at the batch scheduler level: a burst of concurrent VLM requests overwrote a single shared `per_layer_inputs` cell before prefill consumed it, reading the wrong sequence's tensor. The earlier wording described the symptom as a per-layer input shape issue, which understated the concurrency cause.
 
 ## [v0.0.31] - 2026-05-27
@@ -140,113 +140,113 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [v0.0.27] - 2026-05-16
 
 ### Added
-- **End-to-end speculative decoding for Gemma 4 MTP and Qwen 3.5 DFlash drafter families** (epic #633, #632). New `Drafter` trait + `DrafterKind` enum + `model_type` auto-detection (#624). Ported drafter components: `MaskedEmbedder` for Gemma 4 E2B / E4B (#627), drafter masks (bidirectional full + sliding-window) and `normalize_batched_shared_kv_states` helper (#628), `Gemma4AssistantDraftModel` (4-layer drafter + pre/post projections) (#626), and `DFlashDraftModel` (5-layer drafter + `DFlashAttention` + `DFlashKVCache`) (#635). Target-side hooks: Gemma 4 `return_hidden` / `return_shared_kv` / `rollback_speculative_cache` for MTP (#625); Qwen 3.5 `return_hidden` + `capture_layer_ids` + GDN-aware `rollback_speculative_cache` for DFlash (#634). Round loops: DFlash single-batch (#636), `MtpGenerator` single-batch (#629), batched DFlash with continuous batching + GDN-aware rollback (#637), and batched MTP with continuous batching + left-padding normalization (#631). Greedy-parity + perf benchmark scaffolding under `src/bin/speculative_bench.rs` (#632) and real-model byte-equality end-to-end tests (#685).
-- **Server speculative dispatch.** Speculative dispatch resolution and `MtpTarget` adapters wired into the inference server (#666); the assistant model paths now plug into the real `MaskedEmbedder` and `make_drafter_masks`; speculative dispatch is wired into the scheduler via per-request B=1 bursts (#670) and a B>1 batched path via `MtpBatchedGenerator` / `DFlashBatchedGenerator` (#684). Per-request properties propagated through the speculative-burst path: cancellation propagation through `MtpGenerator` / `DFlashGenerator` (#681), `token_history` threading through the speculative-burst first sample (#682), logprobs support (#686), thinking-budget enforcement (#687), and prompt-cache donate symmetric with the classic path (#680) and into the B>1 batched arm (#689).
-- **CLI:** `--draft-kind {dflash,mtp}` and `--draft-block-size` flags on both `mlxcel` and `mlxcel-server` (#630).
-- **OpenAI Responses API (Phase 1)** at `/v1/responses` for both binaries (#622, #623). New modules `responses_store`, `responses_translator`, `conversation_store`, `streaming_responses`, `routes/responses`, and request/response/stream type modules under `types/responses_*`. Implements conversation store with shared-LRU semantics, `response.created` / `response.in_progress` / `response.completed` SSE event stream, reasoning-trace forwarding, response cancellation, and four new CLI flags. User guide at `docs/responses-api.md`.
-- **APC block-level partial cache adoption in the scheduler** (issue #580). When Automatic Prefix Caching is enabled, a request whose prompt shares the first N blocks with a cached entry but diverges at block N+1 now reuses blocks 0..N and re-prefills only from the divergence boundary — rather than cold-prefilling the entire prompt. Three components: `DetachedKVCache::trim_to` and `DetachedCacheSet::truncate_to` in `mlxcel-core` perform per-layer KV tensor slicing on the detached handle (mirroring `KVCache::trim` semantics, covering FP16/INT8/Turbo4/Turbo4Delegated sidecars); the `PromptCacheStore` lookup relaxes the legacy "stored prefix must be fully contained in request" gate when APC is on, routing the actual common-prefix depth through the existing `apc_consistent_prefix_len` block-hash discriminator; and `Scheduler::try_adopt_cached_prefix` calls `truncate_to(matched_len)` before adoption when the lookup returns a sub-entry-length match. APC-off retains the pre-#580 behaviour bit-exactly. Wall-clock bench procedure on Apple Silicon documented in `docs/apc-partial-adoption-bench.md` (#580, #607).
-- **Nemotron H Nano Omni audio modality** (issue #582). Ports the Parakeet/Conformer sound encoder (`NemotronOmniSoundEncoder`), mel-spectrogram feature extractor (`NemotronOmniFeatureExtractor`), and audio projector (`NemotronOmniSoundProjection`) from the upstream `mlx-vlm` Python reference. The encoder implements depthwise/pointwise Conv2D subsampling, Transformer-XL relative positional encoding, multi-head self-attention with per-head u/v bias terms, a GLU+BatchNorm convolution module, and half-weight feed-forward blocks. Audio weights are loaded conditionally when `sound_config` is present in `config.json`; the loader applies the upstream `sanitize_audio_weights` transpose pass before population. The VLM runtime path (`generate_vlm`) accepts `--audio <wav>`, runs the feature extractor and encoder, merges the resulting token embeddings at `sound_context_token_id` slots, and interleaves them with vision tokens when both modalities are present. Bring-up procedure for Apple Silicon engineers documented in `docs/nemotron-h-nano-omni-audio-bringup.md` (#582, #609).
-- **`mlxcel download` / `mlxcel-server download` progress bars** (#648, #649). New `src/downloader/progress.rs` module provides terminal-aware suppression (`should_show_progress`), a `MultiProgress` factory, and 6 suppression unit tests. The downloader streams files via `reqwest` to a `NamedTempFile` and atomically renames into place; outer `stream_file` and inner `stream_to_tempfile` are split so the progress bar covers the network read and the rename is observable.
-- **Server `--max-kv-size` flag** matching llama-server, plus a tightened chat-completion response envelope (#618).
-- **Tokenizer support for multi-token think and tool-call sequences** so chat templates that emit `<think>` / `<tool_call>` across multiple BPE tokens stream and parse correctly (#590, #613).
+- **End-to-end speculative decoding for Gemma 4 MTP and Qwen 3.5 DFlash drafter families**. New `Drafter` trait + `DrafterKind` enum + `model_type` auto-detection. Ported drafter components: `MaskedEmbedder` for Gemma 4 E2B / E4B, drafter masks (bidirectional full + sliding-window) and `normalize_batched_shared_kv_states` helper, `Gemma4AssistantDraftModel` (4-layer drafter + pre/post projections), and `DFlashDraftModel` (5-layer drafter + `DFlashAttention` + `DFlashKVCache`). Target-side hooks: Gemma 4 `return_hidden` / `return_shared_kv` / `rollback_speculative_cache` for MTP; Qwen 3.5 `return_hidden` + `capture_layer_ids` + GDN-aware `rollback_speculative_cache` for DFlash. Round loops: DFlash single-batch, `MtpGenerator` single-batch, batched DFlash with continuous batching + GDN-aware rollback, and batched MTP with continuous batching + left-padding normalization. Greedy-parity + perf benchmark scaffolding under `src/bin/speculative_bench.rs` and real-model byte-equality end-to-end tests.
+- **Server speculative dispatch.** Speculative dispatch resolution and `MtpTarget` adapters wired into the inference server; the assistant model paths now plug into the real `MaskedEmbedder` and `make_drafter_masks`; speculative dispatch is wired into the scheduler via per-request B=1 bursts and a B>1 batched path via `MtpBatchedGenerator` / `DFlashBatchedGenerator`. Per-request properties propagated through the speculative-burst path: cancellation propagation through `MtpGenerator` / `DFlashGenerator`, `token_history` threading through the speculative-burst first sample, logprobs support, thinking-budget enforcement, and prompt-cache donate symmetric with the classic path and into the B>1 batched arm.
+- **CLI:** `--draft-kind {dflash,mtp}` and `--draft-block-size` flags on both `mlxcel` and `mlxcel-server`.
+- **OpenAI Responses API (Phase 1)** at `/v1/responses` for both binaries. New modules `responses_store`, `responses_translator`, `conversation_store`, `streaming_responses`, `routes/responses`, and request/response/stream type modules under `types/responses_*`. Implements conversation store with shared-LRU semantics, `response.created` / `response.in_progress` / `response.completed` SSE event stream, reasoning-trace forwarding, response cancellation, and four new CLI flags. User guide at `docs/responses-api.md`.
+- **APC block-level partial cache adoption in the scheduler**. When Automatic Prefix Caching is enabled, a request whose prompt shares the first N blocks with a cached entry but diverges at block N+1 now reuses blocks 0..N and re-prefills only from the divergence boundary — rather than cold-prefilling the entire prompt. Three components: `DetachedKVCache::trim_to` and `DetachedCacheSet::truncate_to` in `mlxcel-core` perform per-layer KV tensor slicing on the detached handle (mirroring `KVCache::trim` semantics, covering FP16/INT8/Turbo4/Turbo4Delegated sidecars); the `PromptCacheStore` lookup relaxes the legacy "stored prefix must be fully contained in request" gate when APC is on, routing the actual common-prefix depth through the existing `apc_consistent_prefix_len` block-hash discriminator; and `Scheduler::try_adopt_cached_prefix` calls `truncate_to(matched_len)` before adoption when the lookup returns a sub-entry-length match. APC-off retains the earlier behaviour bit-exactly. Wall-clock bench procedure on Apple Silicon documented in `docs/apc-partial-adoption-bench.md`.
+- **Nemotron H Nano Omni audio modality**. Ports the Parakeet/Conformer sound encoder (`NemotronOmniSoundEncoder`), mel-spectrogram feature extractor (`NemotronOmniFeatureExtractor`), and audio projector (`NemotronOmniSoundProjection`) from the upstream `mlx-vlm` Python reference. The encoder implements depthwise/pointwise Conv2D subsampling, Transformer-XL relative positional encoding, multi-head self-attention with per-head u/v bias terms, a GLU+BatchNorm convolution module, and half-weight feed-forward blocks. Audio weights are loaded conditionally when `sound_config` is present in `config.json`; the loader applies the upstream `sanitize_audio_weights` transpose pass before population. The VLM runtime path (`generate_vlm`) accepts `--audio <wav>`, runs the feature extractor and encoder, merges the resulting token embeddings at `sound_context_token_id` slots, and interleaves them with vision tokens when both modalities are present. Bring-up procedure for Apple Silicon engineers documented in `docs/nemotron-h-nano-omni-audio-bringup.md`.
+- **`mlxcel download` / `mlxcel-server download` progress bars**. New `src/downloader/progress.rs` module provides terminal-aware suppression (`should_show_progress`), a `MultiProgress` factory, and 6 suppression unit tests. The downloader streams files via `reqwest` to a `NamedTempFile` and atomically renames into place; outer `stream_file` and inner `stream_to_tempfile` are split so the progress bar covers the network read and the rename is observable.
+- **Server `--max-kv-size` flag** matching llama-server, plus a tightened chat-completion response envelope.
+- **Tokenizer support for multi-token think and tool-call sequences** so chat templates that emit `<think>` / `<tool_call>` across multiple BPE tokens stream and parse correctly.
 
 ### Changed
-- **`StreamFilter` extended** to handle multi-token markers and reset state when a partial marker is broken by a non-marker token (#613).
+- **`StreamFilter` extended** to handle multi-token markers and reset state when a partial marker is broken by a non-marker token.
 - **Speculative drafter epic follow-ups hardened** post-merge — covers misc invariants surfaced by integration testing against the real `z-lab/Qwen3.5-4B-DFlash` checkpoint and the `mlx-community/gemma-4-*` drafter variants.
-- **README and speculative decoding guidance refreshed** to match the current code paths and the latest M1 Ultra / M5 Max benchmarks (#700).
+- **README and speculative decoding guidance refreshed** to match the current code paths and the latest M1 Ultra / M5 Max benchmarks.
 
 ### Performance
 - **Qwen 3.5 DFlash greedy-argmax decode-path optimization** that drops the per-decode-step copy and an unnecessary argmax temporary, restoring decode tok/s on Qwen 3.5 32B / 9B DFlash configurations.
-- **Avoid slow Gemma 4 MTP singleton bursts** — the speculative-burst path now correctly short-circuits to the classic path when the batch size collapses to 1 with no draft tokens accepted, eliminating a per-step over-evaluation regression introduced by the initial dispatch wiring (#698).
+- **Avoid slow Gemma 4 MTP singleton bursts** — the speculative-burst path now correctly short-circuits to the classic path when the batch size collapses to 1 with no draft tokens accepted, eliminating a per-step over-evaluation regression introduced by the initial dispatch wiring.
 
 ### Fixed
-- **DFlash drafter lazy-bind** for the upstream `z-lab/Qwen3.5-4B-DFlash` checkpoint — `Drafter::bind` was previously not called on the DFlash family, causing an internal cache mis-binding on the first speculative burst. The drafter now performs lazy-bind on first use, matching the MTP path (#683).
-- **Enable DFlash for Qwen 3.5 VLM text requests** — pure-text generations against a Qwen 3.5 VLM checkpoint can now resolve a DFlash drafter when one is available, instead of silently falling back to the classic path (#694).
-- **Speculative-rollback safety:** validate trimmable cache and reserve the last token in prefill so a rolled-back speculative burst always lands on a valid sampling boundary (#612).
-- **Prompt cache RadixTrie:** `pop_prefixes` now uses correct immediate-prefix semantics (#617).
-- **MiniMax M2 parallel tool calling parser** correctly emits one `ChatToolCall` per parallel call instead of merging them into a single call (#616).
-- **Server tool-call buffering:** preserve token positions when buffering parallel tool calls (#615); skip the tool→normal transition when `tool_call_end` is empty so streaming continues correctly for templates without an explicit close marker (#614).
-- **`video_url` allowlist TOCTOU race** closed by passing the resolved `OwnedFd` to ffmpeg via `/dev/fd/N` instead of re-opening the path inside the subprocess. Symlink swaps between `metadata` and the subsequent open now cannot mis-route the subprocess. Audit hardening from #601 (#611).
-- **Gemma 4:** skip `k_proj` / `v_proj` / `k_norm` weight load for KV-shared layers — the previous load step would error out on real Gemma 4 E2B / E4B checkpoints that omit these tensors per KV-shared design (#608).
-- **Nemotron-H:** default `time_step_limit` to `(0.0, +inf)` regardless of `time_step_min` / `time_step_max` to match the upstream mlx-lm `time_step_limit` behaviour even when only one of the bounds is supplied (#619).
-- **`gated_delta` masked Metal kernel variants:** zero-init `y[dv_idx]` when the mask is false (#610).
-- Tests: add `max_kv_size` field to the `ServeArgs` test fixture (#620).
+- **DFlash drafter lazy-bind** for the upstream `z-lab/Qwen3.5-4B-DFlash` checkpoint — `Drafter::bind` was previously not called on the DFlash family, causing an internal cache mis-binding on the first speculative burst. The drafter now performs lazy-bind on first use, matching the MTP path.
+- **Enable DFlash for Qwen 3.5 VLM text requests** — pure-text generations against a Qwen 3.5 VLM checkpoint can now resolve a DFlash drafter when one is available, instead of silently falling back to the classic path.
+- **Speculative-rollback safety:** validate trimmable cache and reserve the last token in prefill so a rolled-back speculative burst always lands on a valid sampling boundary.
+- **Prompt cache RadixTrie:** `pop_prefixes` now uses correct immediate-prefix semantics.
+- **MiniMax M2 parallel tool calling parser** correctly emits one `ChatToolCall` per parallel call instead of merging them into a single call.
+- **Server tool-call buffering:** preserve token positions when buffering parallel tool calls; skip the tool→normal transition when `tool_call_end` is empty so streaming continues correctly for templates without an explicit close marker.
+- **`video_url` allowlist TOCTOU race** closed by passing the resolved `OwnedFd` to ffmpeg via `/dev/fd/N` instead of re-opening the path inside the subprocess. Symlink swaps between `metadata` and the subsequent open now cannot mis-route the subprocess. Audit hardening.
+- **Gemma 4:** skip `k_proj` / `v_proj` / `k_norm` weight load for KV-shared layers — the previous load step would error out on real Gemma 4 E2B / E4B checkpoints that omit these tensors per KV-shared design.
+- **Nemotron-H:** default `time_step_limit` to `(0.0, +inf)` regardless of `time_step_min` / `time_step_max` to match the upstream mlx-lm `time_step_limit` behaviour even when only one of the bounds is supplied.
+- **`gated_delta` masked Metal kernel variants:** zero-init `y[dv_idx]` when the mask is false.
+- Tests: add `max_kv_size` field to the `ServeArgs` test fixture.
 - Address upstream-sync review follow-ups carried over from the v0.0.26 sync cycle.
 
 ### Security
-- **Downloader security hardening** post-#649 (#650, #652): plaintext `HF_ENDPOINT` + token warning (M1), client connect / read timeouts (M2), URL path percent-encoding for `?` / `#` / `%` in filenames (L1), `O_NOFOLLOW` tempfile creation (L2), `Result`-based token-ASCII handling instead of `expect("token must be ASCII")` (L3), stale `.mlxcel-partial.*` cleanup at download start (L5), and parallel HEAD requests bounded by `buffer_unordered(8)` (L6).
-- **Closed the residual TOCTOU window in the `video_url` allowlist resolver** (issue #601, PR #611). The dominant canonicalise → ffmpeg-open race was already closed by passing an `OwnedFd` to ffmpeg via `/dev/fd/N`. This change hardens the narrowed metadata→open gap by opening every allowlisted video file with `O_NOFOLLOW`: a symlink swap that occurs between the `metadata` call and the `open` syscall now returns `ELOOP` instead of silently following the swapped-in link. Subprocesses continue to receive `/dev/fd/N` (never the path), so they cannot be misdirected post-open regardless. A startup warning is now also emitted on non-Unix targets when `MLXCEL_VIDEO_DIR_ALLOWLIST` is set, because `O_NOFOLLOW` and fd-passing are unavailable on those platforms.
+- **Downloader security hardening** post-plaintext `HF_ENDPOINT` + token warning (M1), client connect / read timeouts (M2), URL path percent-encoding for `?` / `#` / `%` in filenames (L1), `O_NOFOLLOW` tempfile creation (L2), `Result`-based token-ASCII handling instead of `expect("token must be ASCII")` (L3), stale `.mlxcel-partial.*` cleanup at download start (L5), and parallel HEAD requests bounded by `buffer_unordered(8)` (L6).
+- **Closed the residual TOCTOU window in the `video_url` allowlist resolver**. The dominant canonicalise → ffmpeg-open race was already closed by passing an `OwnedFd` to ffmpeg via `/dev/fd/N`. This change hardens the narrowed metadata→open gap by opening every allowlisted video file with `O_NOFOLLOW`: a symlink swap that occurs between the `metadata` call and the `open` syscall now returns `ELOOP` instead of silently following the swapped-in link. Subprocesses continue to receive `/dev/fd/N` (never the path), so they cannot be misdirected post-open regardless. A startup warning is now also emitted on non-Unix targets when `MLXCEL_VIDEO_DIR_ALLOWLIST` is set, because `O_NOFOLLOW` and fd-passing are unavailable on those platforms.
 
 ### CI
 - Bump GitHub Actions to Node 24 runtime to clear the Node 20 deprecation warning surfaced on the macOS runners.
 
 ### Chore
-- Replace `.map_or(false, ...)` with `.is_some_and(...)` in tokenizer call sites (clippy 1.93 lint clean-up) (#651).
+- Replace `.map_or(false, ...)` with `.is_some_and(...)` in tokenizer call sites (clippy 1.93 lint clean-up).
 
 ## [v0.0.26] - 2026-05-10
 
 ### Added
-- **TurboQuant KV cache.** New 3–4 bit KV cache compression family built on a Walsh–Hadamard transform op (#470) and a Lloyd-Max PolarQuant codebook generator ported to Rust (#472). Four KV cache modes wired through `KVCacheMode`: `Turbo4` symmetric with per-model allowlist (#476), `Turbo4Asym` Fp16-K + Turbo4-V (#474), `Turbo3Asym` 3-bit Fp16-K + Turbo3-V (#477), and `Turbo4Delegated` with a FP16 hot tail + packed turbo cold body (#479). TurboQuant + `RotatingKVCache` integration covers sliding-window attention (B9). Sparse-V dequant scaffolding (#480), Boundary-V layer protection that keeps the first/last layer at FP16 (#478), and a packed-aware `PagedKvLayout` (#482) round out the runtime. Quality gates: wikitext-2 PPL + NIAH harness (#475), full 283K-token test split fixture (#492), per-model PPL/NIAH results committed (#493), and VLM B3 quality gates with image-token kurtosis (#510). Speed gate matrix runner with M1 Ultra (#509) and M5 Max readings. User guide and validated config matrix published (#485).
-- **Server flag parity for KV quantization.** `--cache-type-k` and `--cache-type-v` flags accept `f16`, `q8_0`, `q4_0`, etc. matching llama-server semantics, with TurboQuant modes exposed as `mlxcel_turbo*` variants (#484). KV cache quantization extended to continuous batching (#545) and a unified `--kv-cache-mode` flag layout shared across `mlxcel`, `mlxcel-server`, and `mlxcel download` (#567).
-- **Automatic Prefix Caching (APC) with hash blocks** (#552). Hash-keyed block-table prefix reuse on top of v0.0.25's cross-sequence prompt-prefix KV cache, enabling shared physical blocks across requests with the same hashed prefix without per-request token-prefix matching cost.
-- **OpenAI-compatible `response_format: {"type": "json_schema", ...}`** structured-output support for `/v1/chat/completions` and `/v1/completions` (#550). Constrained decoding via `llguidance` (the same backend used by upstream mlx-vlm PR #1047) ensures every emitted token keeps the partial output conforming to the supplied schema. Per-request schema validation enforces a 64 KiB size cap, a 32-level nesting depth limit, and a 64-entry `$ref` count limit so an adversarial schema cannot exhaust CPU or memory during grammar compilation. The tokenizer environment is cached by SHA-256 fingerprint so consecutive requests to the same model share the build cost (~1–2 s for a 150k-vocab tokenizer). Reusable per-sequence `mask_buf` and `bias_buf` allocations eliminate per-token `Vec` allocation on the hot decode path. The legacy `json_object` mode is rejected with a clean 400 in this MVP; `json_schema` with a well-formed schema is the supported path. Supported on HuggingFace BPE tokenizers; SentencePiece and Tiktoken backends return a clean `UnsupportedTokenizer` error. Verbose llguidance internals are never surfaced in public error messages — they are routed to server-side tracing only.
-- **`mlxcel download` / `mlxcel-server download` subcommand** to fetch HuggingFace model repository snapshots without Python tooling (#457, #486). Uses `hf-hub` with an allow-list file filter (SafeTensors, tokenizer, and config files only), cache-hit detection, and formatted per-file progress output. Supports `--local-dir`, `--revision`, `--token`, and `--force`. Default destination mirrors the `models/<repo-basename>` convention from AGENTS.md.
-- **`/health` endpoint** now includes `context_size` (the configured `--ctx-size` value; `0` means model default) and `tool_call_parser` (`"mlxcel"` when the chat template exposes the `tools` variable, `null` otherwise) (#549, #572). Both fields are present once a model is loaded; `context_size` is absent while loading, `tool_call_parser` serializes as `null` during startup so monitoring clients can distinguish "template has no tool support" from "model not yet loaded". The tool-support heuristic is extracted into a shared `template_mentions_tools()` helper used by both the health route and the existing `compute_supports_tools` fallback path.
-- **Paged scheduler dispatch on `PagedKvLayout::cache_mode`** so the scheduler routes batches into the matching paged decode kernel for each KV cache mode (#508).
-- **Video input infrastructure for VLMs.** Gemma 4 video support with the new VLM video input pipeline (#553); ffmpeg-backed frame extraction with single-pass extraction and a `Drop` guard for cleanup of temporary frame files (#597); `video_url` content blocks wired through `/v1/chat/completions` (#596); content-preservation tests covering the frame extraction path (#598).
-- **New models.** Youtu-VL vision-language model (#555); Nemotron H Nano Omni vision (#554) plus follow-up correctness/validation hardening (#595).
-- Multi-task M1 Ultra benchmark refresh to 2026-05-08 (#577) and full M1 Ultra column resync in `benchmarks-by-hardware.md` (#578).
+- **TurboQuant KV cache.** New 3–4 bit KV cache compression family built on a Walsh–Hadamard transform op and a Lloyd-Max PolarQuant codebook generator ported to Rust. Four KV cache modes wired through `KVCacheMode`: `Turbo4` symmetric with per-model allowlist, `Turbo4Asym` Fp16-K + Turbo4-V, `Turbo3Asym` 3-bit Fp16-K + Turbo3-V, and `Turbo4Delegated` with a FP16 hot tail + packed turbo cold body. TurboQuant + `RotatingKVCache` integration covers sliding-window attention (B9). Sparse-V dequant scaffolding, Boundary-V layer protection that keeps the first/last layer at FP16, and a packed-aware `PagedKvLayout` round out the runtime. Quality gates: wikitext-2 PPL + NIAH harness, full 283K-token test split fixture, per-model PPL/NIAH results committed, and VLM B3 quality gates with image-token kurtosis. Speed gate matrix runner with M1 Ultra and M5 Max readings. User guide and validated config matrix published.
+- **Server flag parity for KV quantization.** `--cache-type-k` and `--cache-type-v` flags accept `f16`, `q8_0`, `q4_0`, etc. matching llama-server semantics, with TurboQuant modes exposed as `mlxcel_turbo*` variants. KV cache quantization extended to continuous batching and a unified `--kv-cache-mode` flag layout shared across `mlxcel`, `mlxcel-server`, and `mlxcel download`.
+- **Automatic Prefix Caching (APC) with hash blocks**. Hash-keyed block-table prefix reuse on top of v0.0.25's cross-sequence prompt-prefix KV cache, enabling shared physical blocks across requests with the same hashed prefix without per-request token-prefix matching cost.
+- **OpenAI-compatible `response_format: {"type": "json_schema", ...}`** structured-output support for `/v1/chat/completions` and `/v1/completions`. Constrained decoding via `llguidance` (the same backend used by upstream mlx-vlm PR #1047) ensures every emitted token keeps the partial output conforming to the supplied schema. Per-request schema validation enforces a 64 KiB size cap, a 32-level nesting depth limit, and a 64-entry `$ref` count limit so an adversarial schema cannot exhaust CPU or memory during grammar compilation. The tokenizer environment is cached by SHA-256 fingerprint so consecutive requests to the same model share the build cost (~1–2 s for a 150k-vocab tokenizer). Reusable per-sequence `mask_buf` and `bias_buf` allocations eliminate per-token `Vec` allocation on the hot decode path. The legacy `json_object` mode is rejected with a clean 400 in this MVP; `json_schema` with a well-formed schema is the supported path. Supported on HuggingFace BPE tokenizers; SentencePiece and Tiktoken backends return a clean `UnsupportedTokenizer` error. Verbose llguidance internals are never surfaced in public error messages — they are routed to server-side tracing only.
+- **`mlxcel download` / `mlxcel-server download` subcommand** to fetch HuggingFace model repository snapshots without Python tooling. Uses `hf-hub` with an allow-list file filter (SafeTensors, tokenizer, and config files only), cache-hit detection, and formatted per-file progress output. Supports `--local-dir`, `--revision`, `--token`, and `--force`. Default destination mirrors the `models/<repo-basename>` convention from AGENTS.md.
+- **`/health` endpoint** now includes `context_size` (the configured `--ctx-size` value; `0` means model default) and `tool_call_parser` (`"mlxcel"` when the chat template exposes the `tools` variable, `null` otherwise). Both fields are present once a model is loaded; `context_size` is absent while loading, `tool_call_parser` serializes as `null` during startup so monitoring clients can distinguish "template has no tool support" from "model not yet loaded". The tool-support heuristic is extracted into a shared `template_mentions_tools()` helper used by both the health route and the existing `compute_supports_tools` fallback path.
+- **Paged scheduler dispatch on `PagedKvLayout::cache_mode`** so the scheduler routes batches into the matching paged decode kernel for each KV cache mode.
+- **Video input infrastructure for VLMs.** Gemma 4 video support with the new VLM video input pipeline; ffmpeg-backed frame extraction with single-pass extraction and a `Drop` guard for cleanup of temporary frame files; `video_url` content blocks wired through `/v1/chat/completions`; content-preservation tests covering the frame extraction path.
+- **New models.** Youtu-VL vision-language model; Nemotron H Nano Omni vision plus follow-up correctness/validation hardening.
+- Multi-task M1 Ultra benchmark refresh to 2026-05-08 and full M1 Ultra column resync in `benchmarks-by-hardware.md`.
 
 ### Changed
-- **MLX upstream pin bumped twice.** First from the v0.0.25 baseline (`5d7e96cd`) to v0.32.0 / `c9aa5605` (#565), then forward to `84961223` covering 3 PRs: #3443 splits the CUDA `qmm_naive` / `qmm_sm80` kernel bodies into new `qmm_naive.cuh` / `qmm_sm80.cuh` headers without changing the public ABI consumed by mlxcel's `patches/mlx/backend/cuda/quantized/qmm/qmm.h`; #3463 routes the CPU JIT preamble through `JitCompiler::get_preamble()` and renames the prebuilt symbol from `get_kernel_preamble` to `get_prebuilt_preamble` (mlxcel does not call either directly); #3475 fixes contiguity-flag accuracy in `AsStrided` by computing `data_size` from the actually-occupied stride range. Three-location pin update applied to `src/lib/mlx-cpp/CMakeLists.txt`, `src/lib/mlxcel-core/build.rs`, and `.github/workflows/release.yml` per `CLAUDE.md`. Fused Metal kernel launchers in `src/lib/mlx-cpp/turbo/` re-validated against both bumps: `mlx::core::fast::metal_kernel`, `mlx::core::full`, `mlx::core::Shape`, `mlx::core::float32`, `mlx::core::int32`, and `metal::fast::exp` symbols unchanged.
-- **Refactor:** unified TurboQuant KV-cache CLI flags across `mlxcel`, `mlxcel-server`, and `mlxcel download` so all binaries accept the same `--kv-cache-mode` / `--cache-type-{k,v}` syntax (#567).
-- mlx-lm version reference in docs bumped from 0.31.2 to 0.31.3 (#606). The `bridge-overhead-microbench` reference at v0.31.2 is preserved because it pins the MLX C++ runtime, not the mlx-lm Python package.
+- **MLX upstream pin bumped twice.** First from the v0.0.25 baseline (`5d7e96cd`) to v0.32.0 / `c9aa5605`, then forward to `84961223` covering 3 PRs: #3443 splits the CUDA `qmm_naive` / `qmm_sm80` kernel bodies into new `qmm_naive.cuh` / `qmm_sm80.cuh` headers without changing the public ABI consumed by mlxcel's `patches/mlx/backend/cuda/quantized/qmm/qmm.h`; #3463 routes the CPU JIT preamble through `JitCompiler::get_preamble()` and renames the prebuilt symbol from `get_kernel_preamble` to `get_prebuilt_preamble` (mlxcel does not call either directly); #3475 fixes contiguity-flag accuracy in `AsStrided` by computing `data_size` from the actually-occupied stride range. Three-location pin update applied to `src/lib/mlx-cpp/CMakeLists.txt`, `src/lib/mlxcel-core/build.rs`, and `.github/workflows/release.yml` per `CLAUDE.md`. Fused Metal kernel launchers in `src/lib/mlx-cpp/turbo/` re-validated against both bumps: `mlx::core::fast::metal_kernel`, `mlx::core::full`, `mlx::core::Shape`, `mlx::core::float32`, `mlx::core::int32`, and `metal::fast::exp` symbols unchanged.
+- **Refactor:** unified TurboQuant KV-cache CLI flags across `mlxcel`, `mlxcel-server`, and `mlxcel download` so all binaries accept the same `--kv-cache-mode` / `--cache-type-{k,v}` syntax.
+- mlx-lm version reference in docs bumped from 0.31.2 to 0.31.3. The `bridge-overhead-microbench` reference at v0.31.2 is preserved because it pins the MLX C++ runtime, not the mlx-lm Python package.
 
 ### Performance
-- **Sparse-V kernel:** fused per-thread Metal kernel that skips the full SDPA pass when sparse-V dequant predicts zero contribution (#505); precomputed kernel rescale to drop per-token threadgroup barriers (#520).
-- **Turbo4Delegated decode hot path:** unified K storage to drop the per-step K concat (#527); cold-V dequant cache across decode steps (#525) followed by a cold-V dequant Metal kernel that retires the FP16 memo (#530); steel-attention-envelope fused SDPA kernel (#531) with parallelized Pass 1 softmax (#534); delegated FP16 predecode compaction (#536) and lazy delegated FP16 sidecars (#537); compressed fold moved before decode.
-- **Compressed dequant-SDPA paths** for TurboQuant decode (#562).
-- **Server hot-path:** thread-local generation stream and uniform-batch RoPE collapse to remove per-request allocation in the steady-state batching loop (#556).
+- **Sparse-V kernel:** fused per-thread Metal kernel that skips the full SDPA pass when sparse-V dequant predicts zero contribution; precomputed kernel rescale to drop per-token threadgroup barriers.
+- **Turbo4Delegated decode hot path:** unified K storage to drop the per-step K concat; cold-V dequant cache across decode steps followed by a cold-V dequant Metal kernel that retires the FP16 memo; steel-attention-envelope fused SDPA kernel with parallelized Pass 1 softmax; delegated FP16 predecode compaction and lazy delegated FP16 sidecars; compressed fold moved before decode.
+- **Compressed dequant-SDPA paths** for TurboQuant decode.
+- **Server hot-path:** thread-local generation stream and uniform-batch RoPE collapse to remove per-request allocation in the steady-state batching loop.
 
 ### Fixed
-- **TurboQuant continuous batching:** correct batch cache offset merging when batches with different cache offsets are joined or split (#564); Turbo3 split-flag, documentation alignment, and an `ENV_LOCK` race in concurrent process startup (#573).
-- **Vision / VLM mixed batching:** per-sequence MRoPE alignment for mixed VL+text batches (#558); per-sequence `per_layer_inputs` for Gemma 4 E2B/E4B VLM (#561); mixed-length batching support for Gemma 4 (#560); relaxed cached-position shape check in Qwen VL chunked prefill (#557); Qwen3.5-MoE batch-size validation on cached `position_ids` reuse (#559).
-- **Streaming and sampling:** correct streamed detokenization for byte-fallback tokens that previously leaked raw byte fragments to the client (#570); top-p filter correctness for batched logits (#569); token queue timeout handling during long prefills so clients no longer see spurious 408s on slow first-token paths (#571); `StreamFilter` extended to cover Hermes-style `<tool_call>` / `</tool_call>` and Mistral Nemo `[TOOL_CALLS]` markers, which previously leaked raw markup into `delta.content` during streaming (#551, #576). Partial-marker buffering at token boundaries correctly holds back prefixes (e.g. `<tool_`) until the full tag can be confirmed, then releases them to `delta.content` if they turn out not to be a boundary. Gemma 4 `<|tool_call>` suppression is unaffected; the delimiter table ordering ensures the Gemma 4 pipe-delimited form wins the tiebreak over the Hermes plain form.
-- **Models:** Gemma3-4B attention SIGABRT from a sliding-window mask `T_k` mismatch on long-context prompts (#507); preserve Qwen2 fused QKV bias when it is present in the checkpoint (#517); test fixture swap to Qwen2.5-1.5B base variant for the B3 quality gate (#506); harden post-merge review findings on the Nemotron-H Nano Omni vision PR.
+- **TurboQuant continuous batching:** correct batch cache offset merging when batches with different cache offsets are joined or split; Turbo3 split-flag, documentation alignment, and an `ENV_LOCK` race in concurrent process startup.
+- **Vision / VLM mixed batching:** per-sequence MRoPE alignment for mixed VL+text batches; per-sequence `per_layer_inputs` for Gemma 4 E2B/E4B VLM; mixed-length batching support for Gemma 4; relaxed cached-position shape check in Qwen VL chunked prefill; Qwen3.5-MoE batch-size validation on cached `position_ids` reuse.
+- **Streaming and sampling:** correct streamed detokenization for byte-fallback tokens that previously leaked raw byte fragments to the client; top-p filter correctness for batched logits; token queue timeout handling during long prefills so clients no longer see spurious 408s on slow first-token paths; `StreamFilter` extended to cover Hermes-style `<tool_call>` / `</tool_call>` and Mistral Nemo `[TOOL_CALLS]` markers, which previously leaked raw markup into `delta.content` during streaming. Partial-marker buffering at token boundaries correctly holds back prefixes (e.g. `<tool_`) until the full tag can be confirmed, then releases them to `delta.content` if they turn out not to be a boundary. Gemma 4 `<|tool_call>` suppression is unaffected; the delimiter table ordering ensures the Gemma 4 pipe-delimited form wins the tiebreak over the Hermes plain form.
+- **Models:** Gemma3-4B attention SIGABRT from a sliding-window mask `T_k` mismatch on long-context prompts; preserve Qwen2 fused QKV bias when it is present in the checkpoint; test fixture swap to Qwen2.5-1.5B base variant for the B3 quality gate; harden post-merge review findings on the Nemotron-H Nano Omni vision PR.
 
 ### Security
-- Path-traversal defense in the downloader: `is_safe_relative_path` pre-filters each sibling filename returned by the HuggingFace API (rejects absolute paths, `..` components, backslash separators, and empty components). A secondary canonicalized `starts_with` guard on the resolved destination path is applied before writing each file. Download target files are written to a temporary path and atomically renamed into place, preventing partial writes from leaving corrupt files in the output directory (fixes C1 and H1 from security review of #457).
-- Structured-output schema limits (64 KiB serialized size, 32 nesting depth, 64 `$ref` count) and tightened `llguidance` parser caps (`max_grammar_size: 100 000`, `max_lexer_states: 50 000`) applied before grammar compilation so an adversarial client cannot use the schema endpoint as a CPU/memory exhaustion vector. Schema content is never echoed in public error messages (#550).
+- Path-traversal defense in the downloader: `is_safe_relative_path` pre-filters each sibling filename returned by the HuggingFace API (rejects absolute paths, `..` components, backslash separators, and empty components). A secondary canonicalized `starts_with` guard on the resolved destination path is applied before writing each file. Download target files are written to a temporary path and atomically renamed into place, preventing partial writes from leaving corrupt files in the output directory (fixes C1 and H1 from security review).
+- Structured-output schema limits (64 KiB serialized size, 32 nesting depth, 64 `$ref` count) and tightened `llguidance` parser caps (`max_grammar_size: 100 000`, `max_lexer_states: 50 000`) applied before grammar compilation so an adversarial client cannot use the schema endpoint as a CPU/memory exhaustion vector. Schema content is never echoed in public error messages.
 
 ## [v0.0.25] - 2026-04-24
 
 ### Added
-- Cross-sequence prompt-prefix KV cache. New `KVCache::trim/detach/adopt` API enables adopting a previously-cached prefix on the next request. Backed by `PromptCacheStore`, an in-process LRU keyed by tokenized prompt prefix, plus a longest common token-prefix matcher (`PrefixMatcher`) for fast lookup. Paged KV cache gains block-table prefix reuse so adopted prefixes share physical blocks. Scheduler integration prefills only the unmatched suffix on cache hits. Wired into the server via `--prompt-cache-size`, `--prompt-cache-min-tokens`, and matching `LLAMA_ARG_*` env vars; multimodal/vision-aware cache key (`MultimodalDigest`) prevents cross-modality collisions. OpenAI-compatible `cached_tokens` is reported in `/v1/chat/completions` responses, mirrored to Prometheus counters, and verified by a multi-turn E2E test plus a prefill-latency benchmark. Design rationale and operator guide added to docs (#418, #419, #420, #421, #422, #423, #424, #425, #426, #427, #428, #429, #430, #431, #432, #433, #434, #435, #436, #437, #438).
-- Language-bias steering (Axis B, Phase 1). New `lang_analyzer` module with a Unicode script classifier (B2, #391) and `TokenLanguageIndex` builder that scans the tokenizer vocabulary, partitions tokens by script, and persists the result to disk for fast warm starts (B3 #392, B4 #394). Sampling primitive `TokenBiasMap` + `apply_token_bias` (#390) is wired through `LangBiasSet` with `Conservative` / `Strict` policies (B5 #393), exposed via CLI flags and a YAML config (B6 #395), `LLAMA_ARG_LANG_BIAS` env var in `mlxcel-server` (B7 #397), `LangBiasConfig` injection into the generator pipelines (B8 #398), tracing fields and Prometheus counters (B9 #400), byte-fragment CJK classification via UTF-8 start-byte analysis so byte-level BPE tokenizers correctly attribute fragments (#408, closes #405), byte-level reverse map for token decoding (#402, fixes #401), and integration tests for the steering matrix (B10 #399, #407). User guide and Quickstart published (B11 #396, #404).
-- `thinking_token_budget` sampling parameter for the Qwen3 family — caps tokens emitted between `<think>` / `</think>` markers without disabling streaming (#411).
-- `preserve_thinking` chat-template hook for Qwen 3.6 so multi-turn conversations retain prior `<think>` blocks instead of stripping them on subsequent turns (#412).
-- `StreamFilter` extended to recognize Qwen-style `<think>` / `</think>` token boundaries during streaming and route the segment into `reasoning_content` (#445).
-- `thinking_budget_tokens` extended to Gemma 4 (#442).
-- `feat(benchmarks)`: bridge-overhead microbench tool measuring per-op cost of the Rust cxx bridge against Python nanobind across MLX primitives, with a published baseline and reproduction steps (#450).
-- `feat(ci)`: multi-stage pipeline-parallel smoke job activated using a Qwen3-0.6B fixture so PR runs catch PP regressions (#415).
+- Cross-sequence prompt-prefix KV cache. New `KVCache::trim/detach/adopt` API enables adopting a previously-cached prefix on the next request. Backed by `PromptCacheStore`, an in-process LRU keyed by tokenized prompt prefix, plus a longest common token-prefix matcher (`PrefixMatcher`) for fast lookup. Paged KV cache gains block-table prefix reuse so adopted prefixes share physical blocks. Scheduler integration prefills only the unmatched suffix on cache hits. Wired into the server via `--prompt-cache-size`, `--prompt-cache-min-tokens`, and matching `LLAMA_ARG_*` env vars; multimodal/vision-aware cache key (`MultimodalDigest`) prevents cross-modality collisions. OpenAI-compatible `cached_tokens` is reported in `/v1/chat/completions` responses, mirrored to Prometheus counters, and verified by a multi-turn E2E test plus a prefill-latency benchmark. Design rationale and operator guide added to docs.
+- Language-bias steering (Axis B, Phase 1). New `lang_analyzer` module with a Unicode script classifier (B2) and `TokenLanguageIndex` builder that scans the tokenizer vocabulary, partitions tokens by script, and persists the result to disk for fast warm starts (B3, B4). Sampling primitive `TokenBiasMap` + `apply_token_bias` is wired through `LangBiasSet` with `Conservative` / `Strict` policies (B5), exposed via CLI flags and a YAML config (B6), `LLAMA_ARG_LANG_BIAS` env var in `mlxcel-server` (B7), `LangBiasConfig` injection into the generator pipelines (B8), tracing fields and Prometheus counters (B9), byte-fragment CJK classification via UTF-8 start-byte analysis so byte-level BPE tokenizers correctly attribute fragments, byte-level reverse map for token decoding, and integration tests for the steering matrix (B10). User guide and Quickstart published (B11).
+- `thinking_token_budget` sampling parameter for the Qwen3 family — caps tokens emitted between `<think>` / `</think>` markers without disabling streaming.
+- `preserve_thinking` chat-template hook for Qwen 3.6 so multi-turn conversations retain prior `<think>` blocks instead of stripping them on subsequent turns.
+- `StreamFilter` extended to recognize Qwen-style `<think>` / `</think>` token boundaries during streaming and route the segment into `reasoning_content`.
+- `thinking_budget_tokens` extended to Gemma 4.
+- `feat(benchmarks)`: bridge-overhead microbench tool measuring per-op cost of the Rust cxx bridge against Python nanobind across MLX primitives, with a published baseline and reproduction steps.
+- `feat(ci)`: multi-stage pipeline-parallel smoke job activated using a Qwen3-0.6B fixture so PR runs catch PP regressions.
 - Per-layer + per-sub-op decode profiling for Gemma 4, plus a Gemma 4 perf harness with the 2026-04-22 baseline used to drive the parity work below.
 
 ### Fixed
-- Prompt cache prefix isolation — sequences whose prompts share a non-trivial prefix no longer leak adopted KV state across each other after detach/adopt (#448).
-- `MultimodalDigest` propagated to all `PromptCacheKey` callers after the issue #421 + #425 merge so vision-aware cache lookups stay collision-free.
-- Gemma 4 `enable_thinking=false` no longer triggers degenerate output, and `reasoning_content` now streams correctly when `enable_thinking=true` (#440).
-- Tool-only assistant turns now emit `content: null` instead of `""` to match the OpenAI Chat Completions schema (#441).
-- `chat-template`: support flattened `extra_body` and pseudo-user tool responses so OpenAI-style tool flows render correctly under HF-style templates (#413).
-- `lang-analyzer`: decode tokens using the byte-level reverse map (#401) instead of the textual tokenizer view, so byte-level BPE (Qwen, Llama) tokens are classified by their actual code-point payload (#402).
-- `ci`: unblock Pipeline Parallel CI on Ubuntu by installing LAPACK and treating clippy `-D warnings` consistently (#414).
+- Prompt cache prefix isolation — sequences whose prompts share a non-trivial prefix no longer leak adopted KV state across each other after detach/adopt.
+- `MultimodalDigest` propagated to all `PromptCacheKey` callers after the + merge so vision-aware cache lookups stay collision-free.
+- Gemma 4 `enable_thinking=false` no longer triggers degenerate output, and `reasoning_content` now streams correctly when `enable_thinking=true`.
+- Tool-only assistant turns now emit `content: null` instead of `""` to match the OpenAI Chat Completions schema.
+- `chat-template`: support flattened `extra_body` and pseudo-user tool responses so OpenAI-style tool flows render correctly under HF-style templates.
+- `lang-analyzer`: decode tokens using the byte-level reverse map instead of the textual tokenizer view, so byte-level BPE (Qwen, Llama) tokens are classified by their actual code-point payload.
+- `ci`: unblock Pipeline Parallel CI on Ubuntu by installing LAPACK and treating clippy `-D warnings` consistently.
 - `vision`: read Gemma 4 encoder `hidden_size` from after `input_proj` so the multimodal projector wires the correct dimension on encoders that include a learned input projection.
-- Bumped `cc` to 1.2.60 to silence the BSD `ar` probe warning surfaced by recent `cc-rs` releases (#439).
+- Bumped `cc` to 1.2.60 to silence the BSD `ar` probe warning surfaced by recent `cc-rs` releases.
 
 ### Changed
-- Gemma 4 mlx-lm decode parity pass (closes the remaining gap on 26B / 31B / e2b, #454):
-  - Router RMS norm fused with top-k-then-softmax to remove a separate normalization pass (#451).
-  - SwitchGeGLU gate / up / geglu / down fused into a single `mlx::core::compile` window (#452).
-  - Metal-trace-driven attention / RoPE / per-layer chain fusion (#453).
+- Gemma 4 mlx-lm decode parity pass (closes the remaining gap on 26B / 31B / e2b):
+  - Router RMS norm fused with top-k-then-softmax to remove a separate normalization pass.
+  - SwitchGeGLU gate / up / geglu / down fused into a single `mlx::core::compile` window.
+  - Metal-trace-driven attention / RoPE / per-layer chain fusion.
   - Compiled Gemma 4 SwitchGeGLU decode path enabled.
   - Single-query causal masks skipped in decode.
   - BF16 decode graph aligned with mlx-lm.
@@ -256,95 +256,95 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   - Router top-k aligned with mlx-lm.
   - Load and MoE decode paths tuned.
   - Redundant residual copies in the decoder layer dropped.
-  - SwitchGeGLU `expand_dims` collapsed and a MoE inner profiler added (#447).
-- `Qwen 3.5`: SSM decode masks aligned with mlx-lm; benchmark artifacts cleanup (#455).
-- `MLX`: upstream pin upgraded to **v0.31.2**; in-tree SDPA and steel-attention overlays dropped now that upstream covers them. Three-location update (`src/lib/mlx-cpp/CMakeLists.txt`, `src/lib/mlxcel-core/build.rs`, `.github/workflows/release.yml`) per CLAUDE.md (#449).
-- `CUDA`: QMM patches updated for the new upstream `lhs/rhs_indices` signatures (#456).
-- `deploy`: SIGTERM the running `mlxcel-server` after binary copy so the respawned supervisor picks up the new binary (#443).
+  - SwitchGeGLU `expand_dims` collapsed and a MoE inner profiler added.
+- `Qwen 3.5`: SSM decode masks aligned with mlx-lm; benchmark artifacts cleanup.
+- `MLX`: upstream pin upgraded to **v0.31.2**; in-tree SDPA and steel-attention overlays dropped now that upstream covers them. Three-location update (`src/lib/mlx-cpp/CMakeLists.txt`, `src/lib/mlxcel-core/build.rs`, `.github/workflows/release.yml`) per CLAUDE.md.
+- `CUDA`: QMM patches updated for the new upstream `lhs/rhs_indices` signatures.
+- `deploy`: SIGTERM the running `mlxcel-server` after binary copy so the respawned supervisor picks up the new binary.
 - `style`: `cargo fmt` swept across server modules to land previously-unformatted blocks.
 
 ## [v0.0.24] - 2026-04-18
 
 ### Added
-- Zero-config multi-machine pipeline-parallel bring-up: `mlxcel-server --pp-auto N` declares pipeline depth; peers register via `--cluster-peers` seeds or opt-in mDNS discovery (`--cluster-discovery=mdns`). New `src/distributed/cluster_init.rs` owns deterministic stage assignment, port allocation, and byte-identical TOML emission consumed by the existing manual-TOML runtime path (#342, #352).
-- RDMA-aware transport backend with transparent TCP fallback. Negotiates `io_uring` registered buffers on Linux and `kqueue` batched send on macOS, emits exactly one structured log line on fallback, and preserves the `Arc<dyn Transport>` abstraction used by `activation_transfer.rs`. New `rdma_capabilities.rs`, `rdma_transport.rs`, and `bench_activation.rs` harness (#351, closes #343).
-- 2D `(pp_stage, tp_rank)` mesh composing PP with TP for Llama-70B-class topologies. Adds `NodeRole::PipelineTensorParallel`, validation for exact `pp_size × tp_size` coverage with unique coordinates, registry helpers, `TrafficClass` routing (`TpCollective` / `PpActivation`), and grid-coherent KV admission (`coordinated_2d_admission`) (#354, addresses #346).
-- Byte-accurate pipeline auto-partition with adjacency constraints. `ModelProfile` gains per-layer byte weights plus layer-adjacency constraints so the balancer refuses to cut MoE expert layers or Gemma 4 KV-shared source/consumer pairs. Drops the hand-specified `--pp-layers` requirement for MoE and gemma-4-e2b-it-4bit. Extracted into `partition_balance`, `partition_profile`, and `partition_quality` modules (#357, resolves #348).
-- Elastic pipeline-parallel repartitioning behind `--enable-elastic-pp`. `RepartitionCoordinator` drives `Idle → Draining → Rebalancing → Resuming → Idle` and emits `RepartitionEvent` to a transport-agnostic sink without a full cluster restart. CLI flags: `--elastic-pp-drain-timeout`, `--elastic-pp-pressure-fraction`, `--elastic-pp-cool-down` (#349, #358).
-- Per-stage LoRA adapter composition across pipeline ranks via the existing `--adapter` flag. Each stage loads only the adapter tensors inside its layer range through a new filtered safetensors loader (`load_safetensors_filtered`), fuses them in place with the same `fuse_lora_weights_into` primitive that backs the non-PP path, and unchanged-family guards (`ensure_no_adapter`) prevent silent drops. Llama family implements composition; parity integration test asserts bit-equality with the single-process adapter run (#347, #355).
-- Stage-executor coverage for five new families: Mistral dense, Mixtral 8x7B MoE, DeepSeek V3 (MLA + routed MoE with MTP-trailer strip), Llama 4 Scout text-only tower, and Mamba-family hybrids Jamba and Nemotron-H. `StageFamily` enum plus `supported_families()` surfaces per-family capability on the server startup log (#345, #356).
-- Pipeline-parallel observability: `/metrics` endpoint renders per-stage utilization, rolling bubble ratio, activation-transfer latency histograms (p50/p95/p99 per stage pair), and KV admission rejection counters labeled by stage and reason. `--metrics-port`, `--debug-pp-trace <PATH>` (chrome-tracing JSON), and `AdmissionDiagnostic` replace opaque 500s on rejection. Grafana dashboard JSON at `docs_internal/performance/pipeline-dashboard.json` (#350, #359).
-- Multi-host pipeline-parallel regression CI harness at `.github/workflows/pipeline-parallel-ci.yml`: `two-host-logical` on GitHub runners (path-filtered, intended as required status) plus `three-host-real-model` gated by the `ci:pp-three-host` PR label or manual dispatch. Shares shell entry points with local reproduction (#353, refs #344).
-- `VisionFeatureCache` LRU for multi-turn VLM image feature reuse, wired through Gemma 4 VLM, Qwen2.5-VL, and Qwen3-VL via `_with_cache` variants. Cache keys are filesystem paths or SHA-256 digests of inline payloads. New `--vision-cache-size N` CLI flag (default 20, 0 disables) (#334, matches #325).
-- Null/empty-cache safety guards in the batch scheduler. Pure-text requests with zero tokenized prompt tokens are rejected before admission (VLM image/audio injection paths unaffected); `execute_decode_step` and `execute_batched_decode` no-op on empty `seq_ids`. Mirrors the upstream mlx-lm BatchKVCache extend/filter/merge null guards (#333, closes #324).
+- Zero-config multi-machine pipeline-parallel bring-up: `mlxcel-server --pp-auto N` declares pipeline depth; peers register via `--cluster-peers` seeds or opt-in mDNS discovery (`--cluster-discovery=mdns`). New `src/distributed/cluster_init.rs` owns deterministic stage assignment, port allocation, and byte-identical TOML emission consumed by the existing manual-TOML runtime path.
+- RDMA-aware transport backend with transparent TCP fallback. Negotiates `io_uring` registered buffers on Linux and `kqueue` batched send on macOS, emits exactly one structured log line on fallback, and preserves the `Arc<dyn Transport>` abstraction used by `activation_transfer.rs`. New `rdma_capabilities.rs`, `rdma_transport.rs`, and `bench_activation.rs` harness.
+- 2D `(pp_stage, tp_rank)` mesh composing PP with TP for Llama-70B-class topologies. Adds `NodeRole::PipelineTensorParallel`, validation for exact `pp_size × tp_size` coverage with unique coordinates, registry helpers, `TrafficClass` routing (`TpCollective` / `PpActivation`), and grid-coherent KV admission (`coordinated_2d_admission`) (addresses).
+- Byte-accurate pipeline auto-partition with adjacency constraints. `ModelProfile` gains per-layer byte weights plus layer-adjacency constraints so the balancer refuses to cut MoE expert layers or Gemma 4 KV-shared source/consumer pairs. Drops the hand-specified `--pp-layers` requirement for MoE and gemma-4-e2b-it-4bit. Extracted into `partition_balance`, `partition_profile`, and `partition_quality` modules.
+- Elastic pipeline-parallel repartitioning behind `--enable-elastic-pp`. `RepartitionCoordinator` drives `Idle → Draining → Rebalancing → Resuming → Idle` and emits `RepartitionEvent` to a transport-agnostic sink without a full cluster restart. CLI flags: `--elastic-pp-drain-timeout`, `--elastic-pp-pressure-fraction`, `--elastic-pp-cool-down`.
+- Per-stage LoRA adapter composition across pipeline ranks via the existing `--adapter` flag. Each stage loads only the adapter tensors inside its layer range through a new filtered safetensors loader (`load_safetensors_filtered`), fuses them in place with the same `fuse_lora_weights_into` primitive that backs the non-PP path, and unchanged-family guards (`ensure_no_adapter`) prevent silent drops. Llama family implements composition; parity integration test asserts bit-equality with the single-process adapter run.
+- Stage-executor coverage for five new families: Mistral dense, Mixtral 8x7B MoE, DeepSeek V3 (MLA + routed MoE with MTP-trailer strip), Llama 4 Scout text-only tower, and Mamba-family hybrids Jamba and Nemotron-H. `StageFamily` enum plus `supported_families()` surfaces per-family capability on the server startup log.
+- Pipeline-parallel observability: `/metrics` endpoint renders per-stage utilization, rolling bubble ratio, activation-transfer latency histograms (p50/p95/p99 per stage pair), and KV admission rejection counters labeled by stage and reason. `--metrics-port`, `--debug-pp-trace <PATH>` (chrome-tracing JSON), and `AdmissionDiagnostic` replace opaque 500s on rejection. Grafana dashboard JSON at `docs_internal/performance/pipeline-dashboard.json`.
+- Multi-host pipeline-parallel regression CI harness at `.github/workflows/pipeline-parallel-ci.yml`: `two-host-logical` on GitHub runners (path-filtered, intended as required status) plus `three-host-real-model` gated by the `ci:pp-three-host` PR label or manual dispatch. Shares shell entry points with local reproduction (refs).
+- `VisionFeatureCache` LRU for multi-turn VLM image feature reuse, wired through Gemma 4 VLM, Qwen2.5-VL, and Qwen3-VL via `_with_cache` variants. Cache keys are filesystem paths or SHA-256 digests of inline payloads. New `--vision-cache-size N` CLI flag (default 20, 0 disables) (matches).
+- Null/empty-cache safety guards in the batch scheduler. Pure-text requests with zero tokenized prompt tokens are rejected before admission (VLM image/audio injection paths unaffected); `execute_decode_step` and `execute_batched_decode` no-op on empty `seq_ids`. Mirrors the upstream mlx-lm BatchKVCache extend/filter/merge null guards.
 
 ### Fixed
-- Auto-detect per-layer quantization bit overrides in `UnifiedLinear::from_weights_with_mode` and `FusedQKVLinear::from_weights_separate_with_mode`. New `infer_quantization_bits()` verifies the MLX invariant `packed_in * 32 == bits * num_groups * group_size` and infers the actual bit width from tensor shapes when the caller-supplied bits disagree. Enables qwen3.6-35b-a3b-4bit, which stores router-gate and shared-expert-gate at 8-bit while the rest of the model is 4-bit (#361).
-- Use additive f32 attention mask (0.0 attended, f32::MIN masked) in `prepare_inputs_for_multimodal` instead of the previous multiplicative INT32 0/1 mask. `mx.fast.scaled_dot_product_attention` treats non-bool masks as additive bias on pre-softmax scores, so the old form silently leaked padding tokens into the attention distribution whenever `attention_mask` contained a zero (#339, closes #337).
-- Mirror PR #326 conditional `embed_scale` to `TensorParallelGemma4Model::forward_impl`. Previously, `multiply_scalar` was applied unconditionally after `embed_tokens`, double-scaling text embeddings and incorrectly scaling image/audio features from VLM callers. Moved into the `None` arm only, matching `Gemma4TextModel::forward`. Added regression test asserting TP/non-TP logits match for both `input_embeddings` and `input_ids` paths (#338, closes #335).
-- Wrap every `cache.conv_state = Some(slice_axis(...))` assignment in `mlxcel_core::contiguous(&tail, false)` across mamba, mamba2, nemotron-h, and jamba, plus the two NemotronH fused-kernel paths. `slice_axis()` returns a lazy MLX `Slice` graph node that retains the source `padded_input` as a live input, causing per-step memory growth proportional to sequence length. 50-step shape-plateau regression test added per model (#340, closes #336).
-- Apply RMS norm BEFORE `embedding_projection` on the encoder-side dim in `Gemma4 Multimodal Embedder` (was previously AFTER, on the text-side `hidden_size`). Mirrors upstream mlx-vlm. Renamed field `post_projection_norm` → `pre_projection_norm`. **BREAKING** for pre-fix VLM checkpoints: re-download `mlx-community/gemma-4-*-it-4bit` to obtain the post-rename weights (#329).
-- Apply `sqrt(hidden_size)` `embed_scale` to text embeddings in `Gemma4VLModel::get_input_embeddings_with_audio` BEFORE merging vision/audio features, and make the scalar multiply in `Gemma4TextModel::forward` conditional on `input_embeddings` being `None`. Vision/audio features are already in language-model embedding space; double-scaling them degraded multimodal generation quality (#326, closes #317).
-- Implement proportional RoPE for Gemma 4 full-attention layers. Real Gemma 4 checkpoints declare `rope_type="proportional"` on full-attention and `rope_type="default"` on sliding-attention layers; the previous implementation silently dropped `rope_type` and normalized by the rotated-only slice instead of the full `head_dim`. New `mlxcel_core::rope_proportional` module with `compute_proportional_rope_freqs` and `apply_proportional_rope` matching the upstream slice/concat/fast_rope/re-splice pipeline. For head_dim=256, partial_rotary_factor=0.25, the two formulations differ by a factor-of-4 exponent shift (#332, closes #321).
-- Gemma 4 audio feature extractor: drop `+0.5` phase shift in Hann window so it uses the periodic form `w(i) = 0.5 - 0.5·cos(2π·i/N)` matching HuggingFace Gemma 4. Prepend `frame_length/2 (160)` zero samples before frame extraction for semicausal convention (first frame centered at t=0). Use `total_len` in `num_frames` calculation and correct `frame_size_for_unfold` to use `frame_length+1` only for non-HTK preemphasis. Restores the correct 100 frames for 1s 16 kHz audio with 10 ms hop (#327, closes #320).
-- Ensure `conv_input` cache slice is contiguous in GatedDeltaNet forward paths (Qwen 3.5, Kimi Linear, Qwen 3 Next). `mlxcel_core::slice()` calls `mlx::core::slice()` which creates a graph node holding source reference — without `contiguous()`, every cached entry holds the full `conv_input` buffer, preventing freeing and causing per-step memory growth proportional to sequence length. 50-step regression test added (#328, closes #323).
-- Default NemotronH `time_step_limit` to `(time_step_min.unwrap_or(0.0), time_step_max.unwrap_or(+inf))` unconditionally when absent. Changed from `(f32, f32)` to `Option<(f32, f32)>` so absent configs are distinguishable from explicit `(0.0, +inf)` sentinels. Matches upstream mlx-lm behavior (#330, closes #319).
+- Auto-detect per-layer quantization bit overrides in `UnifiedLinear::from_weights_with_mode` and `FusedQKVLinear::from_weights_separate_with_mode`. New `infer_quantization_bits()` verifies the MLX invariant `packed_in * 32 == bits * num_groups * group_size` and infers the actual bit width from tensor shapes when the caller-supplied bits disagree. Enables qwen3.6-35b-a3b-4bit, which stores router-gate and shared-expert-gate at 8-bit while the rest of the model is 4-bit.
+- Use additive f32 attention mask (0.0 attended, f32::MIN masked) in `prepare_inputs_for_multimodal` instead of the previous multiplicative INT32 0/1 mask. `mx.fast.scaled_dot_product_attention` treats non-bool masks as additive bias on pre-softmax scores, so the old form silently leaked padding tokens into the attention distribution whenever `attention_mask` contained a zero.
+- Mirror conditional `embed_scale` to `TensorParallelGemma4Model::forward_impl`. Previously, `multiply_scalar` was applied unconditionally after `embed_tokens`, double-scaling text embeddings and incorrectly scaling image/audio features from VLM callers. Moved into the `None` arm only, matching `Gemma4TextModel::forward`. Added regression test asserting TP/non-TP logits match for both `input_embeddings` and `input_ids` paths.
+- Wrap every `cache.conv_state = Some(slice_axis(...))` assignment in `mlxcel_core::contiguous(&tail, false)` across mamba, mamba2, nemotron-h, and jamba, plus the two NemotronH fused-kernel paths. `slice_axis()` returns a lazy MLX `Slice` graph node that retains the source `padded_input` as a live input, causing per-step memory growth proportional to sequence length. 50-step shape-plateau regression test added per model.
+- Apply RMS norm BEFORE `embedding_projection` on the encoder-side dim in `Gemma4 Multimodal Embedder` (was previously AFTER, on the text-side `hidden_size`). Mirrors upstream mlx-vlm. Renamed field `post_projection_norm` → `pre_projection_norm`. **BREAKING** for pre-fix VLM checkpoints: re-download `mlx-community/gemma-4-*-it-4bit` to obtain the post-rename weights.
+- Apply `sqrt(hidden_size)` `embed_scale` to text embeddings in `Gemma4VLModel::get_input_embeddings_with_audio` BEFORE merging vision/audio features, and make the scalar multiply in `Gemma4TextModel::forward` conditional on `input_embeddings` being `None`. Vision/audio features are already in language-model embedding space; double-scaling them degraded multimodal generation quality.
+- Implement proportional RoPE for Gemma 4 full-attention layers. Real Gemma 4 checkpoints declare `rope_type="proportional"` on full-attention and `rope_type="default"` on sliding-attention layers; the previous implementation silently dropped `rope_type` and normalized by the rotated-only slice instead of the full `head_dim`. New `mlxcel_core::rope_proportional` module with `compute_proportional_rope_freqs` and `apply_proportional_rope` matching the upstream slice/concat/fast_rope/re-splice pipeline. For head_dim=256, partial_rotary_factor=0.25, the two formulations differ by a factor-of-4 exponent shift.
+- Gemma 4 audio feature extractor: drop `+0.5` phase shift in Hann window so it uses the periodic form `w(i) = 0.5 - 0.5·cos(2π·i/N)` matching HuggingFace Gemma 4. Prepend `frame_length/2 (160)` zero samples before frame extraction for semicausal convention (first frame centered at t=0). Use `total_len` in `num_frames` calculation and correct `frame_size_for_unfold` to use `frame_length+1` only for non-HTK preemphasis. Restores the correct 100 frames for 1s 16 kHz audio with 10 ms hop.
+- Ensure `conv_input` cache slice is contiguous in GatedDeltaNet forward paths (Qwen 3.5, Kimi Linear, Qwen 3 Next). `mlxcel_core::slice()` calls `mlx::core::slice()` which creates a graph node holding source reference — without `contiguous()`, every cached entry holds the full `conv_input` buffer, preventing freeing and causing per-step memory growth proportional to sequence length. 50-step regression test added.
+- Default NemotronH `time_step_limit` to `(time_step_min.unwrap_or(0.0), time_step_max.unwrap_or(+inf))` unconditionally when absent. Changed from `(f32, f32)` to `Option<(f32, f32)>` so absent configs are distinguishable from explicit `(0.0, +inf)` sentinels. Matches upstream mlx-lm behavior.
 
 ### Changed
-- Replace Gemma 4 `ScaledLinear` wrapper with `UnifiedLinear` directly across both `Gemma4TextModel` and `Gemma4StageModel` (tensor-parallel path). New `per_layer_projection_scale: f32` field stores `(hidden_size as f32).powf(-0.5)` and is applied explicitly in `project_per_layer_inputs()` after the linear forward pass, preserving bit-identical math (#331, closes #322).
+- Replace Gemma 4 `ScaledLinear` wrapper with `UnifiedLinear` directly across both `Gemma4TextModel` and `Gemma4StageModel` (tensor-parallel path). New `per_layer_projection_scale: f32` field stores `(hidden_size as f32).powf(-0.5)` and is applied explicitly in `project_per_layer_inputs()` after the linear forward pass, preserving bit-identical math.
 
 ## [v0.0.23] - 2026-04-15
 
 ### Fixed
-- Render chat templates that use Python-style dict/string methods (#315). Extends minijinja's `unknown_method_callback` with shims for `.get`, `.items`, `.keys`, `.values`, `.strip`, `.lstrip`, `.rstrip`, `.startswith`, `.endswith`, `.split`, `.rsplit`, `.replace`, `.join`, `.upper`, `.lower`, `.title`, `.capitalize`, `.casefold`, `.swapcase`, `.find`, `.count`, `.is{digit,alpha,alnum,space,upper,lower}`. Previously rendering silently fell back to `to_prompt()`'s `User: ... Assistant:` format, and instruction-tuned models echoed `Assistant:` in a loop.
-- Pass `tools` as an empty iterable (not `None`) so `{% if tools is iterable and tools | length > 0 %}` guards work under minijinja. Fixes Qwen 3 Next, Nemotron-H, and Nemotron-NAS tool-free rendering (#315).
-- Strip HuggingFace `transformers`' `{% generation %}` / `{% endgeneration %}` extension markers during template preprocessing so SmolLM 3 parses cleanly (#315).
-- Apply the Gemma 4 structural-token stream filter and non-streaming cleanup unconditionally, not only when tool parsing is enabled, so plain chat responses no longer leak `<|channel>`, `<channel|>`, `<turn|>`, `<|turn>`, `<|tool_call>`, or `<tool_call|>` markers into content (#315).
-- Extend `clean_content_markers` with `<|channel>` / `<channel|>` / `<|tool_call>` / `<tool_call|>` so stray closing tags that Gemma 4 occasionally emits in non-thinking mode are stripped even without a matching open tag (#315).
+- Render chat templates that use Python-style dict/string methods. Extends minijinja's `unknown_method_callback` with shims for `.get`, `.items`, `.keys`, `.values`, `.strip`, `.lstrip`, `.rstrip`, `.startswith`, `.endswith`, `.split`, `.rsplit`, `.replace`, `.join`, `.upper`, `.lower`, `.title`, `.capitalize`, `.casefold`, `.swapcase`, `.find`, `.count`, `.is{digit,alpha,alnum,space,upper,lower}`. Previously rendering silently fell back to `to_prompt()`'s `User: ... Assistant:` format, and instruction-tuned models echoed `Assistant:` in a loop.
+- Pass `tools` as an empty iterable (not `None`) so `{% if tools is iterable and tools | length > 0 %}` guards work under minijinja. Fixes Qwen 3 Next, Nemotron-H, and Nemotron-NAS tool-free rendering.
+- Strip HuggingFace `transformers`' `{% generation %}` / `{% endgeneration %}` extension markers during template preprocessing so SmolLM 3 parses cleanly.
+- Apply the Gemma 4 structural-token stream filter and non-streaming cleanup unconditionally, not only when tool parsing is enabled, so plain chat responses no longer leak `<|channel>`, `<channel|>`, `<turn|>`, `<|turn>`, `<|tool_call>`, or `<tool_call|>` markers into content.
+- Extend `clean_content_markers` with `<|channel>` / `<channel|>` / `<|tool_call>` / `<tool_call|>` so stray closing tags that Gemma 4 occasionally emits in non-thinking mode are stripped even without a matching open tag.
 
 ### Added
-- `test_all_local_model_templates_render` ignored-by-default audit that renders every locally-available model against three canonical scenarios (simple user, system + user, multi-turn with `<think>` blocks). Current result: 85 models checked, 249/249 scenarios pass, 0 failures, 6 intentional template `raise_exception` rejections categorized separately (#315).
+- `test_all_local_model_templates_render` ignored-by-default audit that renders every locally-available model against three canonical scenarios (simple user, system + user, multi-turn with `<think>` blocks). Current result: 85 models checked, 249/249 scenarios pass, 0 failures, 6 intentional template `raise_exception` rejections categorized separately.
 
 ### Changed
-- Clean up pre-existing `cargo clippy --release -p mlxcel --lib` warnings (7 → 0): replace `unwrap()` after `is_some()` checks in `distributed/config.rs`, bind the MoE router via `if let` chain in the Gemma 4 TP path (`distributed/tensor_parallel/llama_runtime.rs`), collapse two character-identical QKV shard branches, auto-elide `'a` lifetimes, collapse a `thunderbolt_transport.rs` nested `if`, replace a manual `% != 0` with `is_multiple_of()` in NVFP4 sanitize, and drop a now-redundant `cache.as_deref_mut()` + `mut` annotation in Qwen 3.5 `GatedDeltaNet::forward` (#316).
-- Clean up pre-existing webpage `pnpm lint` / `tsc --noEmit` errors (20 / 4 warnings → 0 / 0): replace framer-motion wrapper `any`-typed props with `HTMLMotionProps`, `let` → `const` in `downloads.tsx`, swap `<img>` for `next/image`'s `<Image />` on the local Lablup logo, and rewrite `use-os.ts` to avoid synchronously setting state inside `useEffect` with proper `NavigatorUAData` / `WebGLDebugInfoExtension` typings (#316).
+- Clean up pre-existing `cargo clippy --release -p mlxcel --lib` warnings (7 → 0): replace `unwrap()` after `is_some()` checks in `distributed/config.rs`, bind the MoE router via `if let` chain in the Gemma 4 TP path (`distributed/tensor_parallel/llama_runtime.rs`), collapse two character-identical QKV shard branches, auto-elide `'a` lifetimes, collapse a `thunderbolt_transport.rs` nested `if`, replace a manual `% != 0` with `is_multiple_of()` in NVFP4 sanitize, and drop a now-redundant `cache.as_deref_mut()` + `mut` annotation in Qwen 3.5 `GatedDeltaNet::forward`.
+- Clean up pre-existing webpage `pnpm lint` / `tsc --noEmit` errors (20 / 4 warnings → 0 / 0): replace framer-motion wrapper `any`-typed props with `HTMLMotionProps`, `let` → `const` in `downloads.tsx`, swap `<img>` for `next/image`'s `<Image />` on the local Lablup logo, and rewrite `use-os.ts` to avoid synchronously setting state inside `useEffect` with proper `NavigatorUAData` / `WebGLDebugInfoExtension` typings.
 
 ## [v0.0.22] - 2026-04-13
 
 ### Added
-- Pipeline stage executor framework with per-family executors (#272)
-- Gemma 3 pipeline stage executor (#304)
-- Gemma 4 pipeline stage executor (#305)
-- Qwen3 pipeline stage executor (#306)
-- Qwen3.5 pipeline stage executor (#307)
-- GLM4-family pipeline stage executors (#308)
-- GLM MoE DSA pipeline stage executor (#310)
-- gpt-oss pipeline stage executor (#303)
-- In-process pipeline stage worker loop (#273)
-- CLI pipeline generate path (#274)
-- Server pipeline runtime integration (#275)
-- Pipeline transport lifecycle controls (#276)
-- TCP-backed remote pipeline stages (#288)
-- Thunderbolt transport backend for remote pipeline parallelism (#291)
-- Multi-machine validation for remote pipeline parallelism (#301)
+- Pipeline stage executor framework with per-family executors
+- Gemma 3 pipeline stage executor
+- Gemma 4 pipeline stage executor
+- Qwen3 pipeline stage executor
+- Qwen3.5 pipeline stage executor
+- GLM4-family pipeline stage executors
+- GLM MoE DSA pipeline stage executor
+- gpt-oss pipeline stage executor
+- In-process pipeline stage worker loop
+- CLI pipeline generate path
+- Server pipeline runtime integration
+- Pipeline transport lifecycle controls
+- TCP-backed remote pipeline stages
+- Thunderbolt transport backend for remote pipeline parallelism
+- Multi-machine validation for remote pipeline parallelism
 - bench_decode `--cooldown` and `--big-cooldown` for M5 Max thermal management
 - M5 Max benchmark refresh for 2026-04-13 (97 models, 88 pass; 8 multimodal models restored)
 
 ### Fixed
 - Tolerate stale `model.safetensors.index.json` in mlx-community repackaged quants (gemma3-4b, gemma3n-e2b/e4b, llama-4-scout-17b, mistral-small-3.1, molmo2)
 - Tolerate partial `text_config` (no `num_hidden_layers`) in single-rank tensor-parallel planning (LLaVA-1.5, LLaVA-Next-Mistral)
-- Prevent Gemma 4 special tokens from leaking into streaming content deltas (#312)
-- Complete remote pipeline lifecycle recovery (#290)
-- bench_decode single-model runs no longer truncate the day's full-suite CSV (#314, closes #313)
+- Prevent Gemma 4 special tokens from leaking into streaming content deltas
+- Complete remote pipeline lifecycle recovery
+- bench_decode single-model runs no longer truncate the day's full-suite CSV
 - Log lazy pipeline peer reconnects
 
 ### Changed
-- Generalize stage executor backends and remove legacy stage executor file (#302)
-- Transport-capable pipeline runtime seam (#287)
+- Generalize stage executor backends and remove legacy stage executor file
+- Transport-capable pipeline runtime seam
 
 ### Tests
-- Pipeline server smoke validation (#278)
-- Pipeline rollout real-model coverage (#277)
+- Pipeline server smoke validation
+- Pipeline rollout real-model coverage
 
 ### Docs
 - Remote pipeline usage examples
@@ -356,16 +356,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 - Paged KV cache substrate with batch scheduler integration
-- Native paged decode kernel paths for rotating and chunked caches (#260)
-- Paged compatibility for windowed caches (#256)
-- Default paged decode for supported server workers (#246)
-- Paged KV transfer observability (#258)
+- Native paged decode kernel paths for rotating and chunked caches
+- Paged compatibility for windowed caches
+- Default paged decode for supported server workers
+- Paged KV transfer observability
 - NVFP4 load-time dequantization for Gemma 4 nvfp4 checkpoints
 - F8_E4M3 / F8_E5M2 safetensors loading for nvfp4 checkpoints
-- Paged decode rollout benchmark matrix and eligibility tracking (#262)
+- Paged decode rollout benchmark matrix and eligibility tracking
 
 ### Changed
-- Unify model-owned sequence state with backend seam (#244)
+- Unify model-owned sequence state with backend seam
 - Vectorize batched decode positional metadata
 - CI: auto-promote pre-release to full release after successful builds
 
@@ -375,19 +375,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [v0.0.20] - 2026-04-10
 
 ### Added
-- In-process tensor parallel runtime for Llama (#235)
-- Tensor parallel support for Qwen2, Qwen3, and Qwen3.5 text models (#235)
-- Gemma 3 tensor-parallel runtime with tp4 parity stabilization (#235)
-- Gemma 4 tensor-parallel support (#235)
-- Dense TP support for ERNIE 4.5 and Hunyuan v1 models (#235)
-- Server batching support for tensor parallel runtimes (#235)
-- Tensor-parallel config wiring into CLI and server entrypoints (#235)
+- In-process tensor parallel runtime for Llama
+- Tensor parallel support for Qwen2, Qwen3, and Qwen3.5 text models
+- Gemma 3 tensor-parallel runtime with tp4 parity stabilization
+- Gemma 4 tensor-parallel support
+- Dense TP support for ERNIE 4.5 and Hunyuan v1 models
+- Server batching support for tensor parallel runtimes
+- Tensor-parallel config wiring into CLI and server entrypoints
 
 ### Fixed
-- Qwen 3.5 tensor-parallel parity on large CUDA models (#235)
+- Qwen 3.5 tensor-parallel parity on large CUDA models
 
 ### Changed
-- Expand tp4 parity coverage to larger models and server end-to-end tests (#235)
+- Expand tp4 parity coverage to larger models and server end-to-end tests
 
 ## [v0.0.19] - 2026-04-10
 
@@ -403,20 +403,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [v0.0.18] - 2026-04-08
 
 ### Added
-- GatherQMM CUDA implementation via upstream MLX upgrade to b98831ad (#226)
-- SM80 and naive QMM dispatch paths for non-Hopper CUDA GPUs (#226)
-- Gemma 4 CUDA support: all 7 variants (e2b, e4b, 26b, 31b in 4bit/8bit) (#227)
-- Qwen 3.5 CUDA support: 27b-4bit, 9b-bf16, 35b-MoE-4bit (#227)
+- GatherQMM CUDA implementation via upstream MLX upgrade to b98831ad
+- SM80 and naive QMM dispatch paths for non-Hopper CUDA GPUs
+- Gemma 4 CUDA support: all 7 variants (e2b, e4b, 26b, 31b in 4bit/8bit)
+- Qwen 3.5 CUDA support: 27b-4bit, 9b-bf16, 35b-MoE-4bit
 
 ### Fixed
-- Mixed-type bf16/float JIT compilation failures in CUDA binary_ops.cuh (#227)
-- Remove stale NO_GPU(BlockMaskedMM) override that conflicted with upstream implementation (#226)
-- Gemma 3-4b and Gemma 3n (e2b, e4b) recovered on CUDA via binary_ops fix (#227)
+- Mixed-type bf16/float JIT compilation failures in CUDA binary_ops.cuh
+- Remove stale NO_GPU(BlockMaskedMM) override that conflicted with upstream implementation
+- Gemma 3-4b and Gemma 3n (e2b, e4b) recovered on CUDA via binary_ops fix
 
 ### Changed
-- Upgrade MLX C++ upstream from 6a9a121d to b98831ad (#226)
-- Replace custom gather_qmv.cu with upstream integrated qmv.cu (#226)
-- Sync CUDA quantized.cpp with upstream SM80/naive dispatch paths (#226)
+- Upgrade MLX C++ upstream from 6a9a121d to b98831ad
+- Replace custom gather_qmv.cu with upstream integrated qmv.cu
+- Sync CUDA quantized.cpp with upstream SM80/naive dispatch paths
 
 ### Performance
 - GB10 CUDA: 14 models recovered from FAIL, 24 models improved >10%
@@ -425,54 +425,54 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [v0.0.17] - 2026-04-06
 
 ### Fixed
-- Resolve broadcast crash in Gemma 4 chunked prefill with undersized attention mask (#224)
+- Resolve broadcast crash in Gemma 4 chunked prefill with undersized attention mask
 
 ## [v0.0.16] - 2026-04-05
 
 ### Added
-- Audio input support for server chat completions endpoint (#217, #220)
-- Gemma 4 audio encoder and audio-language model support (#217, #218)
-- Metal 4 fused attention path (#197, #210)
-- OpenAI-compatible tool calling support (#212, #213)
-- M5 GPU acceleration experiments (#209)
-- M5 Neural Accelerator rollout research (#203)
+- Audio input support for server chat completions endpoint
+- Gemma 4 audio encoder and audio-language model support
+- Metal 4 fused attention path
+- OpenAI-compatible tool calling support
+- M5 GPU acceleration experiments
+- M5 Neural Accelerator rollout research
 
 ### Changed
-- Unify attention dispatch for Metal 4 path (#201)
+- Unify attention dispatch for Metal 4 path
 
 ### Fixed
-- Propagate client disconnection to BatchScheduler to prevent orphaned sequences (#219, #221)
-- Harden tool calling with input limits, parser improvements, and format handlers (#215, #216)
-- Remove eval() calls from qwen3_moe forward hot path (#211)
-- Resolve Gemma SDPA crash on M1 by reducing threadgroup memory for head_dim=256 (#208)
-- Update compiled.cpp patch for upstream MLX API change (#207)
-- Add str.split() support in chat template for Gemma 4 multi-turn (#206)
+- Propagate client disconnection to BatchScheduler to prevent orphaned sequences
+- Harden tool calling with input limits, parser improvements, and format handlers
+- Remove eval() calls from qwen3_moe forward hot path
+- Resolve Gemma SDPA crash on M1 by reducing threadgroup memory for head_dim=256
+- Update compiled.cpp patch for upstream MLX API change
+- Add str.split() support in chat template for Gemma 4 multi-turn
 
 ## [v0.0.15] - 2026-04-03
 
 ### Added
-- Gemma 4 text and VLM model support (#199)
-- User-facing warning when loading full-precision bf16 models (#195)
+- Gemma 4 text and VLM model support
+- User-facing warning when loading full-precision bf16 models
 - Download webpage with Next.js static site (EN/KO i18n)
 
 ### Changed
-- Extend bf16→f16 weight conversion to all Apple Silicon generations (#193)
-- Audit f32 upcasts and optimize MoE gate sigmoid for fp16 co-issue (#194)
-- Improve Metal 4 fused attention scaffolding with research documentation (#196)
-- Reuse cached MLX source for faster rebuilds (#200)
+- Extend bf16→f16 weight conversion to all Apple Silicon generations
+- Audit f32 upcasts and optimize MoE gate sigmoid for fp16 co-issue
+- Improve Metal 4 fused attention scaffolding with research documentation
+- Reuse cached MLX source for faster rebuilds
 
 ## [v0.0.14] - 2026-04-03
 
 ### Added
-- Logprobs support for chat completions and completions endpoints (#188)
-- Runtime Apple Silicon generation detection for hardware-specific optimizations (#161)
-- Prefill tile alignment for M5 Neural Accelerator (#162)
-- Batched speculative decode verification for NA utilization (#167)
-- Batched prefill in server mode (#169)
-- Layer pipelining with strategic async_eval (#170)
-- Metal 4 fused attention kernel scaffolding (#171)
-- KV cache INT8 quantization for memory savings (#172)
-- INT8 quantization optimization for M5 Neural Accelerator (#168)
+- Logprobs support for chat completions and completions endpoints
+- Runtime Apple Silicon generation detection for hardware-specific optimizations
+- Prefill tile alignment for M5 Neural Accelerator
+- Batched speculative decode verification for NA utilization
+- Batched prefill in server mode
+- Layer pipelining with strategic async_eval
+- Metal 4 fused attention kernel scaffolding
+- KV cache INT8 quantization for memory savings
+- INT8 quantization optimization for M5 Neural Accelerator
 - Multimodal chat template support for VLM image token placement
 - Apple Silicon precision hardware guide documentation
 
@@ -480,20 +480,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Centralize bf16→f16 weight conversion in shared VLM loading path
 - Skip bf16→f16 conversion for quantized models (restores +20% throughput)
 - Add compiled gelu_topk kernel matching Python mlx-lm `@mx.compile` pattern
-- Expand QKV projection fusion to GQA models (#164)
-- Expand compiled MLP fusion to non-quantized models (#166)
-- Fuse Q/K/V projections in Gemma v1 attention for faster decode (#183)
+- Expand QKV projection fusion to GQA models
+- Expand compiled MLP fusion to non-quantized models
+- Fuse Q/K/V projections in Gemma v1 attention for faster decode
 - Refactor AGENTS.md into focused reference docs (313→75 lines)
 
 ### Fixed
 - Auto-convert bf16 weights to f16 on M5 for Metal JIT compatibility
 - Skip add_special_tokens when prompt already contains BOS token (double-BOS fix)
-- Prevent NemotronH all-`<unk>` output on M5 Max by avoiding mixed float32/float16 ops (#187)
-- Prevent Nemotron-H/NAS GPU hang and state corruption on M5 Max (#186)
-- Trim NemotronH internal caches after padded prefill to prevent GPU hang (#184)
-- Fix PhiMoE expert activation from GeGLU to SwiGLU (#182)
-- Fix matmul outside compile boundary in FP MLP to fix output corruption (#181)
-- Replace gelu_approx power(x,3) with erf-based GELU to fix NaN in vision encoder (#179)
+- Prevent NemotronH all-`<unk>` output on M5 Max by avoiding mixed float32/float16 ops
+- Prevent Nemotron-H/NAS GPU hang and state corruption on M5 Max
+- Trim NemotronH internal caches after padded prefill to prevent GPU hang
+- Fix PhiMoE expert activation from GeGLU to SwiGLU
+- Fix matmul outside compile boundary in FP MLP to fix output corruption
+- Replace gelu_approx power(x,3) with erf-based GELU to fix NaN in vision encoder
 - Guard multimodal chat template to avoid garbled output on text-only VLMs
 - Skip compiled FP MLP for bfloat16 models
 - Patch MLX compiled kernel JIT to cast mixed bfloat16/float operands
@@ -503,9 +503,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [v0.0.13] - 2026-03-31
 
 ### Added
-- Mistral4 MLA (Multi-head Latent Attention) language model support (#144)
-- Molmo-Point VLM model support (#148)
-- NemotronSuper model support (upstream mlx-lm sync) (#131)
+- Mistral4 MLA (Multi-head Latent Attention) language model support
+- Molmo-Point VLM model support
+- NemotronSuper model support (upstream mlx-lm sync)
 - `sync-upstream` Claude Code command for tracking mlx-lm/mlx-vlm changes
 
 ### Changed
@@ -513,16 +513,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Apply MRoPE and position ID optimizations to Qwen3-VL-MoE
 - Fast-path single-token decode position IDs in Qwen3-VL
 - Vectorize Qwen3-VL interleaved MRoPE with `take_along_axis`
-- Optimize VLM vision encoding and sampling pipeline (#149)
+- Optimize VLM vision encoding and sampling pipeline
 - Use SDPA for NemotronH attention, boosting decode throughput 59%
 
 ### Fixed
-- Improve SSM/Mamba2 numerical precision with float32 dt computation (#133)
-- Improve GatedDelta numerical precision with float32 state (#132)
+- Improve SSM/Mamba2 numerical precision with float32 dt computation
+- Improve GatedDelta numerical precision with float32 state
 - Resolve Mamba/NemotronNAS output corruption with softplus overflow and fused norm grouping
-- Guard Qwen3.5 GatedDeltaNet state batch dimension mismatches (#145)
-- Use `h.shape` instead of `inputs.shape` for Ministral3 attn_scale (#146)
-- Document scalar offset invariant for Llama4 BatchKVCache compatibility (#147)
+- Guard Qwen3.5 GatedDeltaNet state batch dimension mismatches
+- Use `h.shape` instead of `inputs.shape` for Ministral3 attn_scale
+- Document scalar offset invariant for Llama4 BatchKVCache compatibility
 - Correct model_tests.md table placement and dedup nemotron entries
 
 ## [v0.0.12] - 2026-03-26

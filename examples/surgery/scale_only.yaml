@@ -1,5 +1,5 @@
 # Example surgery config: scale every attention output projection
-# weight by 1.2.  See `mlxcel-surgery` (issues #369 + #374) for the
+# weight by 1.2.  See `mlxcel-surgery` (+) for the
 # schema and operation semantics.
 #
 # Quantized-tensor handling:

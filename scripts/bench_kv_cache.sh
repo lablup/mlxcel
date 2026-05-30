@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# TurboQuant KV cache speed gate matrix runner (issue #509).
+# TurboQuant KV cache speed gate matrix runner.
 #
 # Sweeps the configured set of KVCacheModes against a model at the listed
 # decode contexts plus a prefill@8K reading. Thermal-aware sequential A/B
@@ -9,7 +9,7 @@
 #   - cooldown between measured runs and modes
 #   - record pmset thermal/performance warning state per run
 #
-# Acceptance gates per epic #458 (also issue #509):
+# Acceptance gates:
 #   Fp16-K + Turbo4-V (turbo4-asym): decode ≥0.97× FP16 @ 4K, ≥0.95× FP16 @ 16K
 #                                    prefill ≥1.00× FP16 @ 8K
 #   Symmetric Turbo4 (turbo4):       decode ≥0.93× FP16 @ 4K, ≥0.90× FP16 @ 16K
@@ -39,11 +39,11 @@ COOLDOWN_BETWEEN_MODES=60
 THERMAL_POLL_SECONDS=15
 
 # Decode contexts: prompt length seeded to ~target_tokens via repeated paragraph.
-# 4K, 16K, 32K decode + 8K prefill are the issue-#509 gate cells.
+# 4K, 16K, 32K decode + 8K prefill are the gate cells.
 DECODE_CONTEXTS=(4096 16384 32768)
 PREFILL_CONTEXTS=(8192)
 
-# Default mode sweep — covers the full epic-#458 gate matrix.
+# Default mode sweep — covers the full gate matrix.
 DEFAULT_MODES=(fp16 int8 turbo4-asym turbo4 turbo4-delegated turbo3-asym)
 MODES=()
 CONTEXTS_OVERRIDE=()

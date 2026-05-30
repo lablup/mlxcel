@@ -20,11 +20,11 @@ path = "src/main.rs"
 name = "mlxcel-server"
 path = "src/bin/mlx_server.rs"
 
-# Perf benchmark harness for the speculative drafter pairings shipped by
-# epic #633 / issue #632. Captures no-drafter baseline tok/s and scaffolds
-# the speculative numerator rows that follow-up #666 will fill in. See
+# Perf benchmark harness for the speculative drafter pairings.
+# Captures no-drafter baseline tok/s and scaffolds
+# the speculative numerator rows that follow-up will fill in. See
 # `src/bin/speculative_bench.rs` for the module docs and `docs/model_tests.md`
-# (`Speculative drafters (epic #633)`) for the deferral matrix.
+# (`Speculative drafters`) for the deferral matrix.
 [[bin]]
 name = "speculative_bench"
 path = "src/bin/speculative_bench.rs"
@@ -44,7 +44,7 @@ metal = ["mlxcel-core/metal"]
 accelerate = ["mlxcel-core/accelerate"]
 cuda = ["mlxcel-core/cuda"]
 test-utils = []
-# Axis A "weight-load surgery" framework (Epic #363, issues #367 / #369 / #371).
+# Axis A "weight-load surgery" framework.
 #
 # On by default so production `mlxcel` and `mlxcel-server` binaries expose
 # the `--surgery <config.yaml>` flag without rebuilds. Bit-exactness with
@@ -91,7 +91,7 @@ thiserror = "2.0.11"
 # Cryptographic hashing (for vision feature cache keys)
 sha2 = "0.10"
 
-# Fast non-cryptographic-grade hashing for prompt prefix cache keys (issue #419).
+# Fast non-cryptographic-grade hashing for prompt prefix cache keys.
 # BLAKE3 is used only for in-process cache-key digests; no security boundary
 # depends on it.
 blake3 = "1.8"
@@ -126,12 +126,12 @@ path-clean = "1.0.1"
 minijinja = { version = "2.20", features = ["loop_controls", "fuel"] }
 # Used by `src/downloader/mod.rs::file_url` to percent-encode `repo_id` /
 # `revision` / `filename` path segments before composing the HF download URL
-# (issue #650, L1). Already transitively present via reqwest -> url; promoting
+# (L1). Already transitively present via reqwest -> url; promoting
 # to a direct dep so the downloader can call into it without depending on
 # reqwest's transitive re-export.
 percent-encoding = "2"
 
-# Structured outputs / constrained decoding (issue #550).
+# Structured outputs / constrained decoding.
 #
 # `llguidance` is the same library used by mlx-vlm upstream PR #1047 for the
 # JSON-schema response_format MVP. The Rust crate exposes `Matcher` /

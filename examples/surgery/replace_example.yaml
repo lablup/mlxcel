@@ -1,4 +1,4 @@
-# Replace-op-only surgery config sample (issue #377).
+# Replace-op-only surgery config sample.
 #
 # Demonstrates substituting a base-model tensor with the equivalent
 # tensor from a donor safetensors file. The most common use case is

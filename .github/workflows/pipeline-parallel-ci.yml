@@ -18,7 +18,7 @@ name: Pipeline Parallel CI
 #     runner lab are expected to be available on hosts tagged with
 #     `pp-three-host`.
 #
-# Out of scope (see issue #344):
+# Out of scope:
 #   - running the 3-host job on every PR
 #   - cross-OS matrices on the self-hosted path
 #

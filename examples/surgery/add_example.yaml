@@ -13,7 +13,7 @@
 # - Paths in this file are resolved relative to this YAML's parent
 #   directory.  Absolute paths are taken verbatim.
 # - `alpha` is optional and defaults to 1.0 when omitted.
-# - The first cut of `add` (#375 / axis A6) supports floating-point
+# - The first cut of `add` (axis A6) supports floating-point
 #   task vectors on floating-point base tensors only.  Quantized
 #   models can still apply addition to the matching `.scales` /
 #   `.biases` keys, or first dequantize via a future surgery op.

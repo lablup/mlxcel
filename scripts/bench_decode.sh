@@ -232,7 +232,7 @@ EOF
 # what the human comparing two benchmark runs wants.
 #
 # Single-model invocations get their own auto-named CSV so that ad-hoc
-# sanity runs cannot truncate the day's full-suite CSV (#313). The full-
+# sanity runs cannot truncate the day's full-suite CSV. The full-
 # suite path is reserved exclusively for `all` runs and for any caller
 # that explicitly passes --output.
 default_output_path() {
