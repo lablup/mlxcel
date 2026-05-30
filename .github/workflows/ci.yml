@@ -101,5 +101,9 @@ jobs:
       # caught in review. Does not fail the build (a genuine lablup/mlxcel #N is
       # fine); run locally with STRICT=1 to gate. See CONTRIBUTING.md.
       - name: Flag unqualified cross-repository references
-        run: python3 scripts/ci/check_cross_repo_refs.py "origin/${{ github.base_ref }}"
+        # Pass the base ref via env (not interpolated into the shell) so a branch
+        # name can never reach shell parsing; the script reads BASE_REF as input.
+        env:
+          BASE_REF: origin/${{ github.base_ref }}
+        run: python3 scripts/ci/check_cross_repo_refs.py
 
