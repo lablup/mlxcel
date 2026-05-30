@@ -144,8 +144,10 @@ enum Commands {
 
 /// Arguments for `mlxcel list`.
 ///
-/// `list` enumerates the models you have downloaded into the global store
-/// (repo-id, on-disk size, path), mirroring `ollama list`. The supported
+/// `list` enumerates the models you have downloaded into the global store,
+/// mirroring `ollama list`. The default table shows NAME / SIZE / MODIFIED;
+/// `-v/--verbose` restores the absolute PATH column. `--json` and `-q/--quiet`
+/// give machine-readable and pipe-friendly output. The supported
 /// model-architecture catalog lives under the separate `mlxcel arch` verb.
 #[derive(Args, Debug)]
 pub(crate) struct ListArgs {
@@ -156,6 +158,30 @@ pub(crate) struct ListArgs {
     /// variable.
     #[arg(long, value_name = "PATH")]
     pub(crate) models_dir: Option<PathBuf>,
+
+    /// Emit a JSON array of `{repo_id, size_bytes, path, modified}` (modified is
+    /// Unix epoch seconds, or null). Disables the table, header, and styling.
+    ///
+    /// Mutually exclusive with `--quiet` and `--verbose`.
+    #[arg(long, conflicts_with_all = ["quiet", "verbose"])]
+    pub(crate) json: bool,
+
+    /// Print only repo-ids, one per line — no header or columns — so the output
+    /// pipes cleanly (e.g. `mlxcel list -q | xargs -n1 mlxcel rm`).
+    ///
+    /// Mutually exclusive with `--json` and `--verbose`.
+    #[arg(short, long, conflicts_with = "verbose")]
+    pub(crate) quiet: bool,
+
+    /// Append the absolute on-disk PATH column back to the default table.
+    #[arg(short, long)]
+    pub(crate) verbose: bool,
+
+    /// Sort order: `name` (repo-id, default), `size` (largest first), or
+    /// `modified` (most-recent first; unknown mtimes last). Applies to the
+    /// table and `--json` alike.
+    #[arg(long, value_enum, default_value_t = commands::models::SortKey::Name)]
+    pub(crate) sort: commands::models::SortKey,
 }
 
 /// Arguments for `mlxcel arch`.
@@ -1391,7 +1417,7 @@ fn main() -> anyhow::Result<()> {
         Commands::Run(args) => commands::run_run(args),
         Commands::Generate(args) => commands::run_generate(args),
         Commands::Serve(args) => commands::run_serve(args),
-        Commands::List(args) => commands::run_list_local(args.models_dir.as_deref()),
+        Commands::List(args) => commands::run_list_local(args.models_dir.as_deref(), &args),
         Commands::Arch(_) => {
             print_supported_models();
             Ok(())

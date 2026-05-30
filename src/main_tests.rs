@@ -311,6 +311,77 @@ fn list_command_accepts_models_dir() {
 }
 
 #[test]
+fn list_command_defaults_output_flags() {
+    use crate::commands::models::SortKey;
+    let cli = Cli::try_parse_from(["mlxcel", "list"]).expect("bare `list` must parse");
+    let Commands::List(args) = cli.command else {
+        panic!("expected list command");
+    };
+    assert!(!args.json, "--json must default off");
+    assert!(!args.quiet, "--quiet must default off");
+    assert!(!args.verbose, "--verbose must default off");
+    assert_eq!(args.sort, SortKey::Name, "--sort must default to name");
+}
+
+#[test]
+fn list_command_parses_output_flags_and_sort() {
+    use crate::commands::models::SortKey;
+    let cli = Cli::try_parse_from(["mlxcel", "list", "-v", "--sort", "size"])
+        .expect("`list -v --sort size` must parse");
+    let Commands::List(args) = cli.command else {
+        panic!("expected list command");
+    };
+    assert!(args.verbose, "-v must set verbose");
+    assert_eq!(args.sort, SortKey::Size, "--sort size must parse");
+
+    let cli = Cli::try_parse_from(["mlxcel", "list", "--sort", "modified"])
+        .expect("`--sort modified` must parse");
+    let Commands::List(args) = cli.command else {
+        panic!("expected list command");
+    };
+    assert_eq!(args.sort, SortKey::Modified);
+}
+
+#[test]
+fn list_command_quiet_short_flag() {
+    let cli = Cli::try_parse_from(["mlxcel", "list", "-q"]).expect("`list -q` must parse");
+    let Commands::List(args) = cli.command else {
+        panic!("expected list command");
+    };
+    assert!(args.quiet, "-q must set quiet");
+}
+
+#[test]
+fn list_command_rejects_conflicting_output_modes() {
+    // --json is mutually exclusive with --quiet and --verbose; --quiet with -v.
+    assert!(
+        Cli::try_parse_from(["mlxcel", "list", "--json", "--quiet"]).is_err(),
+        "--json and --quiet must conflict"
+    );
+    assert!(
+        Cli::try_parse_from(["mlxcel", "list", "--json", "--verbose"]).is_err(),
+        "--json and --verbose must conflict"
+    );
+    assert!(
+        Cli::try_parse_from(["mlxcel", "list", "--quiet", "--verbose"]).is_err(),
+        "--quiet and --verbose must conflict"
+    );
+    // --sort is allowed alongside any single mode.
+    assert!(
+        Cli::try_parse_from(["mlxcel", "list", "--json", "--sort", "size"]).is_ok(),
+        "--sort must be allowed with --json"
+    );
+}
+
+#[test]
+fn list_command_rejects_unknown_sort() {
+    assert!(
+        Cli::try_parse_from(["mlxcel", "list", "--sort", "bogus"]).is_err(),
+        "an unknown --sort value must be rejected"
+    );
+}
+
+#[test]
 fn list_command_rejects_removed_local_flag() {
     // The `--local` flag was removed (issue #138): local is now the default,
     // so clap must reject it as an unknown argument. This pins the removal so

@@ -304,6 +304,11 @@ pub struct StoredModel {
     pub path: PathBuf,
     /// Recursive on-disk size of `path`, in bytes.
     pub size_bytes: u64,
+    /// Last-modified time of the snapshot directory (its own mtime, taken from
+    /// `std::fs::metadata(path).modified()`). Surfaced as the `MODIFIED` column
+    /// of `mlxcel list`. `None` when the directory could not be `stat`'d or the
+    /// platform does not expose a modification time; callers render it as `-`.
+    pub modified: Option<std::time::SystemTime>,
 }
 
 /// Enumerate complete model snapshots in the mlxcel global store.
@@ -391,8 +396,9 @@ fn list_models_under(models_root: &Path) -> Vec<StoredModel> {
         if snapshot_is_complete(&top_path) {
             out.push(StoredModel {
                 repo_id: top_name.clone(),
-                path: top_path.clone(),
+                modified: std::fs::metadata(&top_path).and_then(|m| m.modified()).ok(),
                 size_bytes: dir_size(&top_path),
+                path: top_path.clone(),
             });
             // A bare-id snapshot directory is terminal; do not also treat it
             // as an owner directory.
@@ -416,8 +422,11 @@ fn list_models_under(models_root: &Path) -> Vec<StoredModel> {
             };
             out.push(StoredModel {
                 repo_id: format!("{top_name}/{inner_name}"),
-                path: inner_path.clone(),
+                modified: std::fs::metadata(&inner_path)
+                    .and_then(|m| m.modified())
+                    .ok(),
                 size_bytes: dir_size(&inner_path),
+                path: inner_path.clone(),
             });
         }
     }
