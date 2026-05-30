@@ -85,3 +85,21 @@ jobs:
           components: rustfmt
       - run: cargo fmt --all -- --check
 
+  cross-repo-refs:
+    name: cross-repo refs
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      # Advisory: lists bare 3+-digit '#NNN' added on this PR so unqualified
+      # upstream refs (-> org/repo#NNN) and any leaked private-repo numbers are
+      # caught in review. Does not fail the build (a genuine lablup/mlxcel #N is
+      # fine); run locally with STRICT=1 to gate. See CONTRIBUTING.md.
+      - name: Flag unqualified cross-repository references
+        run: python3 scripts/ci/check_cross_repo_refs.py "origin/${{ github.base_ref }}"
+

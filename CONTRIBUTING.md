@@ -72,6 +72,23 @@ Write commits, PR titles, and issue comments in **English**. Use Conventional Co
 - When modifying a function shared by multiple models, update the `// Used by: Model1, Model2, …` comment above it. See [`docs/code-guidelines.md`](docs/code-guidelines.md).
 - Do not introduce Python on the inference request path. Python is acceptable only for benchmarks and out-of-band tooling.
 
+### Cross-repository issue references
+
+`#NNN` auto-links to `lablup/mlxcel`, so use a bare `#NNN` **only** for issues and PRs in this repository. Any reference to another repository must be qualified so it resolves correctly and never leaks a private-repo number:
+
+- Upstream references are written `org/repo#NNN` — `ml-explore/mlx-lm#1240`, `Blaizzy/mlx-vlm#1181`, `ml-explore/mlx#3475`, `huggingface/transformers#NNN`.
+- `mlxcel-internal` (private) numbers must never appear anywhere — code comments, docs, commit subjects, or PR bodies. Map an internal reference to its public-equivalent PR/issue when one demonstrably exists; otherwise describe the change without a number.
+
+Pre-flight before pushing — review every bare 3+-digit reference you add:
+
+```bash
+git diff origin/main...HEAD | grep -nE '#[0-9]{3,}'
+# or, scoped and classified (advisory by default; STRICT=1 to gate):
+python3 scripts/ci/check_cross_repo_refs.py
+```
+
+CI runs the same check on every pull request (advisory).
+
 ### Adding a new model family
 
 See [`docs/adding-models.md`](docs/adding-models.md) for the full checklist. The short version: land one working checkpoint plus tests before broadening, mirror the `mlx-lm` / `mlx-vlm` directory shape where it helps, and update [`docs/supported-models.md`](docs/supported-models.md) plus the detection table in `src/models/detection.rs`.
