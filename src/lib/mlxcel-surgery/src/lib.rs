@@ -22,8 +22,8 @@
 //!   implements. Operations transform an in-memory [`WeightMap`] in
 //!   place.
 //! - [`SurgeryPipeline`] — an ordered collection of `SurgeryOp` that
-//!   itself implements [`mlxcel_core::weights::WeightTransform`] from
-//! (A1). Plugging a `SurgeryPipeline` into
+//!   itself implements [`mlxcel_core::weights::WeightTransform`]
+//!   (A1). Plugging a `SurgeryPipeline` into
 //!   `mlxcel::models::load_text_weights(path, Some(&pipeline))` (or
 //!   the VLM equivalent) is the entire integration surface with the
 //!   load path.

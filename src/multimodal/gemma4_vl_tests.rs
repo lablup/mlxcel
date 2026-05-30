@@ -18,7 +18,7 @@
 //!
 //! 1. The per-row prompt-kwarg alignment helpers ([`prompt_kwarg_row`],
 //!    [`pad_sequence_aligned_prompt_kwarg`], [`align_per_row_prompt_kwarg`]).
-//! will extend the same helpers to handle Gemma 4 E4B/E2B
+//!    A follow-up will extend the same helpers to handle Gemma 4 E4B/E2B
 //!    `per_layer_inputs` (shape `[B, T, num_layers, hidden_per_layer]`),
 //!    so the 4D-shape coverage here is also forward-looking guard rails
 //!    for that follow-up.

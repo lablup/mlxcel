@@ -45,8 +45,8 @@
 //!   `mlxcel_core::drafter::gemma4_assistant::Gemma4AssistantDraftModel::from_path`,
 //!   `Gemma4Wrapper` exposes the underlying primitives
 //!   (`forward_with_speculative_sinks`, `rollback_speculative_cache`), and
-//!   the server-side MTP burst dispatch + `MtpTarget` adapter were wired
-//! The `greedy_parity_mtp_gemma4_31b`
+//!   the server-side MTP burst dispatch + `MtpTarget` adapter were wired.
+//!   The `greedy_parity_mtp_gemma4_31b`
 //!   test runs the structural load pin *and* the end-to-end
 //!   byte-equality phase (`mlxcel-server` with vs without `--draft-kind
 //!   mtp` at temp=0).

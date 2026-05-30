@@ -573,8 +573,8 @@ impl DFlashGenerator {
     ///   round** (not per token) at the top of the round loop; when set,
     ///   the loop returns early with whatever tokens it has already
     ///   emitted. The server-side burst path passes `&seq.cancelled` so
-    ///   a client disconnect mid-burst stops occupying the worker thread
-    /// The offline CLI path passes
+    ///   a client disconnect mid-burst stops occupying the worker thread.
+    ///   The offline CLI path passes
     ///   `&AtomicBool::new(false)`.
     /// - `logprobs_config` — per-token log-probability capture control.
     ///   When [`LogprobsConfig::enabled`] is false the returned
