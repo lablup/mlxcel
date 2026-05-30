@@ -22,7 +22,7 @@
 //! same file: per-frame uniform sampling, aspect-ratio-preserving resize
 //! to a smaller per-frame token budget (default 70 soft tokens), rescale
 //! to `[0, 1]`, and concatenate channel-first frames into one
-//! `(N_total_frames, C, H, W)` tensor (issue #553).
+//! `(N_total_frames, C, H, W)` tensor.
 
 use image::DynamicImage;
 use image::imageops::FilterType;

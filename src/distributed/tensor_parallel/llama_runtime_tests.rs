@@ -1547,10 +1547,10 @@ fn tensor_parallel_gemma4_matches_full_model_logits() {
     assert!(mlxcel_core::item_bool(&close));
 }
 
-/// Regression test for issue #335: TP Gemma4 must not double-apply embed_scale
+/// Regression test for TP Gemma4 must not double-apply embed_scale
 /// when `input_embeddings` is supplied.
 ///
-/// The non-TP path was fixed in PR #326 (issue #317). This test verifies that
+/// The non-TP path was fixed. This test verifies that
 /// `TensorParallelGemma4Model::forward_impl` applies the same conditional:
 /// `sqrt(hidden_size)` scale only for the `input_ids` path, not for the
 /// pre-merged `input_embeddings` path.

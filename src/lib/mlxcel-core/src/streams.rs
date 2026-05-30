@@ -18,14 +18,14 @@
 //! [`crate::speculative::SpeculativeGenerator`], and the server-side
 //! `BatchScheduler`) create a dedicated MLX stream up front and install
 //! it as the default for the worker thread that drives the generation
-//! loop. Until issue #556, that stream was a plain
+//! loop. Until that stream was a plain
 //! `mlx::core::new_stream(Device::gpu)` instance, which means every
 //! owner had to be constructed on the same thread that ran the loop —
 //! otherwise the stream would be "owned" by the wrong thread and any
 //! `synchronize()` call would target a different physical stream than
 //! the one that dispatched the work.
 //!
-//! Issue #556 / upstream `mlx-vlm` PR #1050 (commit `728fab1`)
+//! upstream `mlx-vlm` PR #1050 (commit `728fab1`)
 //! introduces `mlx::core::ThreadLocalStream`: a TLS-backed handle that
 //! resolves to a per-thread `Stream` on demand. The generation owners
 //! now hold a `ThreadLocalStream` and resolve it on the worker thread
@@ -153,10 +153,10 @@ impl Drop for DefaultStreamGuard {
 /// [`new_thread_local_generation_stream`] instead.
 ///
 /// Used by: external crates only; in-tree generation owners now use
-/// [`new_thread_local_generation_stream`] (issue #556).
+/// [`new_thread_local_generation_stream`].
 #[deprecated(
     since = "26.5.9",
-    note = "Use `new_thread_local_generation_stream` so dispatch and synchronization stay on the same per-thread stream (issue #556)."
+    note = "Use `new_thread_local_generation_stream` so dispatch and synchronization stay on the same per-thread stream."
 )]
 pub fn new_generation_stream() -> Option<UniquePtr<MlxStream>> {
     if ffi::is_gpu_available() {
@@ -171,10 +171,10 @@ pub fn new_generation_stream() -> Option<UniquePtr<MlxStream>> {
 ///
 /// Used together with the deprecated
 /// [`new_generation_stream`]. Prefer
-/// [`install_thread_local_default_stream`] in new code (issue #556).
+/// [`install_thread_local_default_stream`] in new code.
 #[deprecated(
     since = "26.5.9",
-    note = "Use `install_thread_local_default_stream` to bind the per-thread MLX stream (issue #556)."
+    note = "Use `install_thread_local_default_stream` to bind the per-thread MLX stream."
 )]
 pub fn install_default_stream(stream: Option<&UniquePtr<MlxStream>>) {
     if let Some(stream) = stream {

@@ -40,7 +40,7 @@
 //! carry extra per-layer state (window masks, Llama-4 attention scaling,
 //! compressed latent attention, MoE routers) that requires its own stage
 //! executor. Issue tracker note: those families are follow-up work outside
-//! the scope of #345.
+//! the scope.
 
 use std::path::Path;
 

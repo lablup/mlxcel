@@ -19,8 +19,8 @@
 //! [`LanguageModel::forward_batched_with_context_and_ids`] so each row of a
 //! batched call reaches the text model's seq-aware forward path with its
 //! own `seq_id`. Without the override, the trait default discards `seq_ids`
-//! before they reach the model — the bug fixed for Qwen VL by PR #558 and
-//! for Gemma 4 by issue #542.
+//! before they reach the model — the bug fixed for Qwen VL and
+//! for Gemma 4.
 //!
 //! The helper is generic over `M: LanguageModel` so families with different
 //! per-sequence state (Qwen MRoPE deltas, Gemma 4 sliding-window caches)
@@ -51,8 +51,8 @@ use mlxcel_core::{MlxArray, UniquePtr};
 ///
 /// Used by:
 /// - Qwen2VLModel, Qwen25VLModel, Qwen3VLModel, Qwen3VLMoeModel
-///   (Qwen VL families — fixed in PR #558 for issue #540).
-/// - Gemma4VLModel (Gemma 4 mixed-length batching — issue #542).
+///   (Qwen VL families — fixed).
+/// - Gemma4VLModel (Gemma 4 mixed-length batching —).
 ///
 /// Not used by Qwen35VLModel: that family's text model already implements
 /// a native batched-with-ids fast path (per-row dispatch and a true batched-

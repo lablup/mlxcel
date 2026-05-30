@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Unit tests for the Turbo4-aware paged KV layout (sub-issue #482, B10).
+//! Unit tests for the Turbo4-aware paged KV layout (B10).
 //!
 //! Organised as:
 //! 1. `PagedKvLayout` Turbo4 construction + validation.

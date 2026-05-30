@@ -58,7 +58,7 @@ impl MlxcelTokenizer {
     }
 
     /// Create a minimal tokenizer with byte-fallback support for regression tests
-    /// (issue #547). The vocabulary includes:
+    /// The vocabulary includes:
     ///
     /// - Tokens 0/1: `<BOS>` / `<EOS>` (special)
     /// - Token 2: `Hello` (regular ASCII)
@@ -140,7 +140,7 @@ impl MlxcelTokenizer {
     /// instance was constructed from a `tokenizer.json` file.
     ///
     /// `None` for SentencePiece or Tiktoken tokenizers. Used by Axis B
-    /// (#362) language steering to feed the tokenizer vocabulary into the
+    /// language steering to feed the tokenizer vocabulary into the
     /// [`mlxcel_core::lang_analyzer`] classifier.
     pub fn hf_tokenizer(&self) -> Option<&tokenizers::Tokenizer> {
         match self {
@@ -659,7 +659,7 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // ThinkingMarkers / infer_thinking_markers (issue #590)
+    // ThinkingMarkers / infer_thinking_markers
     //
     // We can't easily construct full `MlxcelTokenizer` instances backed by
     // real model files inside unit tests, so these cases build minimal HF
@@ -799,7 +799,7 @@ mod tests {
         assert_eq!(merged, markers);
     }
 
-    // -- issue #591: empty tool_call_end (Mistral-like tokenizers) --------
+    // -- empty tool_call_end (Mistral-like tokenizers) --------
 
     #[test]
     fn with_tool_call_markers_empty_end_skips_end_transition() {
@@ -864,7 +864,7 @@ mod tests {
         );
     }
 
-    // -- find_think_* / rfind_think_* via subseq helpers (#590) ----------
+    // -- find_think_* / rfind_think_* via subseq helpers ----------
     //
     // The `ThinkingMarkers::find_*` / `rfind_*` helpers are the Rust analogue
     // of upstream's `TokenizerWrapper.find_think_start` etc. These tests verify

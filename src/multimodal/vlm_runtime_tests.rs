@@ -110,7 +110,7 @@ fn molmo_v1_image_input_idx_shifts_only_valid_positions_for_bos() {
     );
 }
 
-// -- Gemma 4 video token expansion (issue #553) ----------------------
+// -- Gemma 4 video token expansion ----------------------
 
 #[test]
 fn expand_gemma4_video_tokens_replaces_explicit_placeholder() {

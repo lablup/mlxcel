@@ -106,7 +106,7 @@ fn pp_tp_2x2_llama_real_model_parity() {
 /// This test only asserts that the validator does not reject the combination
 /// upfront; it does not run the model. It is kept in the non-ignored test
 /// surface because it is cheap and directly verifies the validator change
-/// required by issue #346.
+/// required.
 #[test]
 fn pp_tp_2d_validator_accepts_combination() {
     // Unlike the parity test above, this one does not require any model

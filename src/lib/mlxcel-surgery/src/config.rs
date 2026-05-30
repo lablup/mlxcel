@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! YAML configuration schema for Axis A weight-load surgery (#369).
+//! YAML configuration schema for Axis A weight-load surgery.
 //!
 //! Schema overview (see `examples/surgery/*.yaml` for full samples):
 //!
@@ -277,7 +277,7 @@ fn materialize_op(
             source,
             alpha,
         } => {
-            // A6 (#375) — concrete factory hook for `op: add`.
+            // A6 — concrete factory hook for `op: add`.
             // The compiled glob is built once here for validation and
             // then handed off to `AddOp::from_compiled` so the
             // operation does not re-parse it.

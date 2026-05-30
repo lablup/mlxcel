@@ -34,8 +34,7 @@ struct MlxStream {
 // across threads gives every thread its own dedicated MLX stream
 // without any explicit coordination between them. Used by
 // `mlxcel-core` to back the generation stream of `BatchScheduler`,
-// `CxxGenerator`, and `SpeculativeGenerator` (issue #556 / upstream
-// MLX commit `728fab1` in mlx-vlm PR #1050).
+// `CxxGenerator`, and `SpeculativeGenerator` (upstream MLX commit `728fab1` in mlx-vlm PR #1050).
 struct MlxThreadLocalStream {
     mlx::core::ThreadLocalStream inner;
 
@@ -1674,13 +1673,13 @@ std::unique_ptr<MlxArray> fused_metal4_attention(
     bool use_metal4
 );
 
-// Issue #505 / #520 — Fused Sparse-V SDPA Metal kernel launcher.
+// Fused Sparse-V SDPA Metal kernel launcher.
 // Wraps `mlxcel::turbo::sparse_v_weighted_sum` so the cxx bridge can expose it
 // via the `turbo_sparse_v_weighted_sum` FFI symbol. Implementation lives in
 // `src/lib/mlx-cpp/turbo/sparse_v_sdpa.cpp`.
 //
 // `v_rescale` (4th argument) carries the precomputed per-token rescale
-// `norm[t] / |y_hat[t]|` introduced in issue #520. The previous kernel
+// `norm[t] / |y_hat[t]|` introduced. The previous kernel
 // computed this scalar per token via a threadgroup tree reduction; the
 // precompute moves that work to quantize time and removes the per-token
 // threadgroup barrier chain that dominated decode latency on M5 Max.
@@ -1693,7 +1692,7 @@ std::unique_ptr<MlxArray> turbo_sparse_v_weighted_sum(
     int32_t n_rep,
     float threshold);
 
-// Issue #528 — Fused Turbo4Delegated cold-V weighted-sum kernel launcher.
+// Fused Turbo4Delegated cold-V weighted-sum kernel launcher.
 // Wraps `mlxcel::turbo::turbo4_delegated_cold_weighted_sum` so the cxx bridge
 // can expose it via the `turbo4_delegated_cold_weighted_sum` FFI symbol.
 // Implementation lives in `src/lib/mlx-cpp/turbo/turbo4_delegated_sdpa.cpp`.
@@ -1702,8 +1701,7 @@ std::unique_ptr<MlxArray> turbo_sparse_v_weighted_sum(
 // host caller applies the inverse Turbo4 rotation to that result and adds
 // the hot-V matmul contribution to produce the final FP16 SDPA output. The
 // dequantised cold V never materialises in global memory — that property is
-// the reason this kernel exists (vs. the pre-#528 path which built an FP16
-// `cold_v_dequant` memo plus a per-step concat with hot V).
+// the reason this kernel exists (vs. the earlier path which built an FP16 `cold_v_dequant` memo plus a per-step concat with hot V).
 std::unique_ptr<MlxArray> turbo4_delegated_cold_weighted_sum(
     const MlxArray& attn_weights_cold,
     const MlxArray& v_packed_cold,
@@ -1722,7 +1720,7 @@ std::unique_ptr<MlxArray> turbo4_delegated_bulk_dequant_rotated(
     const MlxArray& codebook,
     int32_t dim);
 
-// Issue #531 — Steel-attention-envelope fused Turbo4Delegated SDPA launcher.
+// Steel-attention-envelope fused Turbo4Delegated SDPA launcher.
 // Wraps `mlxcel::turbo::turbo4_delegated_steel_sdpa`. Returns a pair of MLX
 // arrays (`out_cold_pre`, `out_hot`) that the host sums after applying the
 // linear inverse Turbo4 rotation to the cold output. The pair is exposed

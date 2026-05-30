@@ -12,13 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Unit tests for the HuggingFace snapshot downloader (issue #457).
+//! Unit tests for the HuggingFace snapshot downloader.
 
 use super::*;
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
 // Env-var-sensitive tests must serialize through the crate-wide `ENV_LOCK`
-// (issue #573); without it, two test threads can call `setenv`/`getenv`
+// without it, two test threads can call `setenv`/`getenv`
 // concurrently — undefined behavior under Rust 2024's unsafe env contract.
 use crate::test_support::env_lock::env_lock;
 
@@ -231,7 +231,7 @@ fn allow_list_handles_subdirectories() {
 }
 
 // ---------------------------------------------------------------------------
-// Path-traversal regression tests for security finding C1 on PR #486.
+// Path-traversal regression tests for security finding C1 on.
 //
 // A malicious HuggingFace repo (or MitM) can return a sibling whose
 // `rfilename` is `/etc/cron.d/evil` or `../../etc/passwd.json`. Before the
@@ -280,7 +280,7 @@ fn allow_list_still_accepts_normal_subdir_paths() {
 /// Live PoC: simulate a malicious `info.siblings` payload and assert that
 /// every adversarial `rfilename` is rejected by `is_wanted_file` before any
 /// IO can occur. This mirrors the exploit shape the security checker
-/// empirically verified on PR #486.
+/// empirically verified on.
 #[test]
 fn malicious_siblings_payload_is_filtered_out() {
     let malicious_siblings = vec![
@@ -500,7 +500,7 @@ fn live_download_smoke_test() {
 }
 
 // ---------------------------------------------------------------------------
-// Hardening tests (issue #650)
+// Hardening tests
 // ---------------------------------------------------------------------------
 
 /// L1 — Adversarial filenames containing reserved URL characters must be

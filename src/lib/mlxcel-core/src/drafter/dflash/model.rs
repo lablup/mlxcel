@@ -566,7 +566,7 @@ mod tests {
 
     /// A self-contained DFlash checkpoint that *does* ship its own
     /// `embed_tokens.weight` must eager-load it — no tombstone, no
-    /// regression to the pre-#675 behavior.
+    /// regression to the earlier behavior.
     #[test]
     fn from_weights_eager_loads_when_embed_tokens_present() {
         let mut weights = tiny_weights_without_embed();

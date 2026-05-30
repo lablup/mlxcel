@@ -432,12 +432,12 @@ fn bind_rejects_target_without_embed_tokens_override() {
     }
 }
 
-// ── Centroid LM head (MaskedEmbedder, issue #627) ───────────────────────
+// ── Centroid LM head (MaskedEmbedder) ───────────────────────
 
 #[test]
 fn bind_accepts_centroid_lm_head_via_masked_embedder() {
     // E2B / E4B drafters: `use_ordered_embeddings=true` selects the centroid
-    // (MaskedEmbedder) LM head. With #627 and #628 merged, this path must
+    // (MaskedEmbedder) LM head. With and merged, this path must
     // now succeed — `bind()` constructs the real `MaskedEmbedder` from the
     // pre-built centroid head and sets `lm_head = Some(LmHead::Centroid(...))`.
     let mut cfg = make_test_config(2, true);
@@ -450,7 +450,7 @@ fn bind_accepts_centroid_lm_head_via_masked_embedder() {
     let target = MockLanguageModel::new(16, 64);
     model
         .bind(&target)
-        .expect("bind must succeed when MaskedEmbedder is wired in (#627)");
+        .expect("bind must succeed when MaskedEmbedder is wired in");
 }
 
 /// Full E-series Centroid path: `bind` → `set_shared_kv` → `draft_block`.
@@ -584,7 +584,7 @@ fn gemma4_assistant_drafter_is_object_safe_via_box_dyn() {
     assert_eq!(boxed.kind(), DrafterKind::Mtp);
 }
 
-// ── Batched draft path (issue #631) ──────────────────────────────────────
+// ── Batched draft path ──────────────────────────────────────
 
 /// `draft_block_batched` produces `B` rows of `block_size - 1` proposals
 /// each. Pins the shape contract.
@@ -696,7 +696,7 @@ fn draft_block_batched_rejects_call_before_set_shared_kv() {
 }
 
 /// `set_shared_kv` with `left_padding > 0` routes through the masks
-/// normalizer (issue #631). Pins the path: drafter accepts the call
+/// normalizer. Pins the path: drafter accepts the call
 /// without trying to forward through invalid shared K/V buffers.
 #[test]
 fn set_shared_kv_with_left_padding_routes_through_normalizer() {

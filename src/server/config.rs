@@ -57,7 +57,7 @@ impl std::str::FromStr for DecodeStorageBackend {
 
 /// Per-request metadata that the scheduler needs to compose a
 /// [`crate::server::prompt_cache::key::PromptCacheKey`] without re-running
-/// the chat template pipeline on the worker thread (epic #416 / issue #421).
+/// the chat template pipeline on the worker thread.
 ///
 /// Route handlers build this once — when
 /// [`crate::server::state::AppState::prompt_cache`] is installed — and hand
@@ -90,7 +90,7 @@ pub struct ServerGenerateOptions {
     pub priority: RequestPriority,
     /// Log probability configuration; disabled by default (zero overhead).
     pub logprobs: LogprobsConfig,
-    /// Issue #409: per-request thinking-token budget. `None` means "inherit
+    /// per-request thinking-token budget. `None` means "inherit
     /// whatever server default is configured"; `Some(budget)` explicitly sets
     /// a value for this request (including reverting to unbounded via
     /// the raw `-1` request value, which the routes translate to a sentinel
@@ -101,7 +101,7 @@ pub struct ServerGenerateOptions {
     /// scheduler sees a single effective value.
     pub reasoning_budget: ReasoningBudgetOverride,
 
-    /// Issue #409: whether the first generated token should be treated as
+    /// whether the first generated token should be treated as
     /// "already inside the `<think>` block" because the prompt primed it.
     ///
     /// `true` for chat endpoints (`/v1/chat/completions`) whose chat template
@@ -114,7 +114,7 @@ pub struct ServerGenerateOptions {
     /// reasoning tokens.
     pub thinking_enter_block_on_start: bool,
 
-    /// Epic #416 / issue #421: cache-key metadata the scheduler uses to look
+    /// cache-key metadata the scheduler uses to look
     /// up a stored prompt prefix and adopt its detached KV cache. `None` when
     /// the route did not install a
     /// [`crate::server::prompt_cache::PromptCacheStore`] (the feature flag is
@@ -122,7 +122,7 @@ pub struct ServerGenerateOptions {
     /// raw text-completion endpoints that do not render a chat template).
     pub prompt_cache_ctx: Option<PromptCacheRequestContext>,
 
-    /// Issue #550: optional structured-output constraint produced by
+    /// optional structured-output constraint produced by
     /// [`crate::server::structured::build_constraint_from_response_format`].
     ///
     /// `None` when the request did not supply a `response_format` of type
@@ -248,7 +248,7 @@ pub struct ServerConfig {
     pub default_dry_penalty_last_n: usize,
     pub draft_model_path: Option<PathBuf>,
     pub num_draft_tokens: usize,
-    /// Issue #630: raw `--draft-kind` override string from the CLI / env
+    /// raw `--draft-kind` override string from the CLI / env
     /// var (`LLAMA_ARG_DRAFT_KIND` / `MLXCEL_DRAFT_KIND`).
     ///
     /// `None` means the server should auto-detect the drafter kind from
@@ -261,7 +261,7 @@ pub struct ServerConfig {
     /// user-selectable) and the parse error must surface at the
     /// dispatch site where the operator-facing error message lives.
     pub draft_kind: Option<String>,
-    /// Issue #630: explicit `--draft-block-size` override. `None` means
+    /// explicit `--draft-block-size` override. `None` means
     /// "use the per-kind default" — `4` for MTP, `16` for DFlash. See
     /// [`crate::cli::speculative_args::default_block_size_for_kind`].
     pub draft_block_size: Option<u32>,
@@ -310,19 +310,19 @@ pub struct ServerConfig {
     /// multimodal embedder on subsequent turns. Default is
     /// [`DEFAULT_VISION_CACHE_SIZE`](crate::vision::feature_cache::DEFAULT_VISION_CACHE_SIZE).
     pub vision_cache_size: usize,
-    /// Axis B Epic #362 (B8): server-wide language bias configuration, if
+    /// Axis B (B8): server-wide language bias configuration, if
     /// resolved at startup from CLI flags or the `LLAMA_ARG_LANG_BIAS` env
     /// var. Every batch sequence inherits this same policy (Phase 1 single
     /// policy per batch; per-request overrides reserved for B12).
     pub lang_bias_config: Option<LangBiasConfig>,
 
-    /// Issue #409: server-wide default thinking-token budget for Qwen3-family
+    /// server-wide default thinking-token budget for Qwen3-family
     /// models. `None` = unrestricted reasoning (default, bit-exact baseline).
     /// Per-request `thinking_budget_tokens` overrides this value (including
     /// a per-request `-1` reverting to unbounded for that one request).
     pub reasoning_budget: Option<crate::server::thinking_budget::ThinkingBudget>,
 
-    /// Issue #410: server-wide default chat-template kwargs resolved from
+    /// server-wide default chat-template kwargs resolved from
     /// `--chat-template-kwargs` and/or `LLAMA_ARG_CHAT_TEMPLATE_KWARGS`.
     ///
     /// `None` means "no server-default kwargs"; per-request kwargs may still
@@ -332,16 +332,16 @@ pub struct ServerConfig {
     /// inherits the same precedence rules.
     pub chat_template_kwargs: Option<crate::server::chat_template_kwargs::ChatTemplateKwargs>,
 
-    /// Issue #419 / epic #416: cross-request prompt-prefix KV cache policy.
+    /// cross-request prompt-prefix KV cache policy.
     ///
     /// Defaults to the baseline policy (enabled with 2 GiB / 1024 entries /
     /// 1-hour TTL). When `enabled = false` the store is skipped entirely at
     /// startup so no memory is reserved. CLI/env parsing for the individual
-    /// fields is tracked separately in sub-issue #424; for now operators set
+    /// fields is tracked separately in for now operators set
     /// the policy via the Rust API or keep the default.
     pub prompt_cache: crate::server::prompt_cache::PromptCacheConfig,
 
-    /// Issue #484 (B11): server-wide KV cache mode.
+    /// (B11): server-wide KV cache mode.
     ///
     /// Resolved from `--cache-type-k`/`--cache-type-v` (llama-server split
     /// flags) or the legacy `--kv-cache-mode` shorthand.  Defaults to
@@ -350,7 +350,7 @@ pub struct ServerConfig {
     /// sequence in the batch sees the same KV quantization policy.
     pub kv_cache_mode: mlxcel_core::cache::KVCacheMode,
 
-    /// Issue #545: batch KV cache quantization configuration for the
+    /// batch KV cache quantization configuration for the
     /// continuous-batching scheduler.
     ///
     /// Resolved from the `--kv-bits`, `--kv-group-size`,
@@ -363,7 +363,7 @@ pub struct ServerConfig {
     /// `skip_last_layer == true`).
     pub batch_kv_quant: mlxcel_core::cache::BatchKvQuantConfig,
 
-    /// Issue #603: upper bound on the **live KV window** of plain
+    /// upper bound on the **live KV window** of plain
     /// (non-sliding) `KVCache` instances.
     ///
     /// Mirrors upstream mlx-lm's
@@ -427,7 +427,7 @@ impl Default for ServerConfig {
             default_dry_penalty_last_n: 0,
             draft_model_path: None,
             num_draft_tokens: 3,
-            // Issue #630: default to "auto-detect from drafter config"
+            // default to "auto-detect from drafter config"
             // when a drafter is supplied; the classic
             // `SpeculativeGenerator` path runs when no drafter is set.
             draft_kind: None,

@@ -13,7 +13,6 @@
 // limitations under the License.
 
 //! [`MtpGenerator`] — round-loop driver for Gemma 4 MTP speculative decoding
-//! (issue #629).
 //!
 //! Top-level lifecycle (single-batch path):
 //!
@@ -171,7 +170,7 @@ fn duration_ms(duration: Duration) -> f64 {
 /// Single-threaded by design. The MTP round-loop's drafter ↔ target
 /// dependence is too tight for the classic generator's
 /// `install_thread_local_default_stream` pattern to help. Future
-/// concurrency lands in #631 (batched MTP).
+/// concurrency lands (batched MTP).
 pub struct MtpGenerator<T: MtpTarget> {
     target: T,
     drafter: Box<dyn Drafter>,
@@ -223,7 +222,7 @@ impl<T: MtpTarget> MtpGenerator<T> {
 
     /// Consume the generator and return the boxed drafter handle.
     ///
-    /// Used by the server-side speculative burst path (issue #670) so a
+    /// Used by the server-side speculative burst path so a
     /// loaded drafter can be reused across multiple requests on the same
     /// worker thread without re-loading from disk. The caller is
     /// expected to [`Drafter::reset`] the returned handle before the
@@ -245,19 +244,19 @@ impl<T: MtpTarget> MtpGenerator<T> {
     ///   bonus.
     /// - `sampling`: sampling config. **Greedy parity requires
     ///   `temperature == 0`** — this is the load-bearing correctness
-    ///   gate of the MTP path (see issue #629).
+    ///   gate of the MTP path.
     /// - `token_history`: history-dependent-penalty context forwarded to
     ///   [`MtpTarget::prefill_and_seed`] for the first-bonus sample
     ///   (repetition / frequency / presence / DRY). The server burst
     ///   path passes `initial_token_history(&prompt, ..)` so the first
     ///   bonus is byte-identical to the classic decode path; callers
-    ///   with no penalty configured pass `&[]` (issue #677).
+    ///   with no penalty configured pass `&[]`.
     /// - `cancel`: cooperative-cancellation flag. Checked **once per
     ///   round** (not per token) at the top of the round loop; when set,
     ///   the generator returns early with whatever tokens it has already
     ///   emitted (at minimum the first bonus). The server-side burst
     ///   path passes `&seq.cancelled` so a client disconnect mid-burst
-    ///   stops occupying the worker thread (issue #672). The offline CLI
+    ///   stops occupying the worker thread. The offline CLI
     ///   path passes `&AtomicBool::new(false)`.
     /// - `logprobs_config`: per-token log-probability capture control.
     ///   When [`LogprobsConfig::enabled`] is false the returned logprobs
@@ -266,7 +265,7 @@ impl<T: MtpTarget> MtpGenerator<T> {
     ///   with the returned `tokens` vec. The server burst path forwards
     ///   this to `finalize_burst_success` so speculative responses carry
     ///   the same `TokenWithLogprobs` payload as the classic decode
-    ///   path (issue #678).
+    ///   path.
     ///
     /// # Returns
     ///
@@ -365,7 +364,7 @@ impl<T: MtpTarget> MtpGenerator<T> {
             // disconnect mid-burst the server flips `seq.cancelled` and
             // this loop bails out with the tokens emitted so far rather
             // than running the full `max_tokens` budget and
-            // head-of-line-blocking the next request (issue #672).
+            // head-of-line-blocking the next request.
             if cancel.load(Ordering::Relaxed) {
                 break;
             }
@@ -407,7 +406,7 @@ impl<T: MtpTarget> MtpGenerator<T> {
                     // Drafter failed — bail out cleanly. We've already
                     // emitted at least the seed bonus, so return what
                     // we have rather than panicking. Future hardening
-                    // (#632) can surface this through GenerationStats.
+                    // can surface this through GenerationStats.
                     let _ = e;
                     break;
                 }
@@ -455,7 +454,7 @@ impl<T: MtpTarget> MtpGenerator<T> {
             // for every `i` (accepted draft tokens matched the target by
             // construction; the final entry is the target's bonus), so
             // `target_logprobs[i]` is the correct log-probability for
-            // `walk.new_tokens[i]` (issue #678).
+            // `walk.new_tokens[i]`.
             for (i, &tok) in walk.new_tokens.iter().enumerate() {
                 emitted.push(tok);
                 if logprobs_config.enabled {
@@ -520,7 +519,7 @@ impl<T: MtpTarget> MtpGenerator<T> {
     /// Best-effort: the round-loop continues even if the drafter
     /// rejects the call (the next `draft_block` will fail closed and
     /// the outer loop bails out). Tests assert the slabs reach the
-    /// drafter; real-model integration (#632) gates on a stricter
+    /// drafter; real-model integration gates on a stricter
     /// error path via `GenerationStats.errors` or similar.
     fn set_shared_kv_from_verify(&mut self, verify_out: &MtpVerifyOutput) {
         let refs = verify_out.shared_kv_refs();

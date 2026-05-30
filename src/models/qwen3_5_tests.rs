@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Unit tests for the Qwen 3.5 DFlash speculative-decoding hooks (issue #634).
+//! Unit tests for the Qwen 3.5 DFlash speculative-decoding hooks.
 //!
 //! These tests cover the *standalone* helpers — `rebuild_with_zero_tail`,
 //! `zero_per_row_kv_tail`, and `sanitize_weights`'s MTP-stripping path — without
@@ -159,7 +159,7 @@ fn rebuild_with_zero_tail_no_op_when_start_equals_kv_len() {
 fn rebuild_with_zero_tail_preserves_input_dtype() {
     // Apple Silicon precision rule: the zeroed buffer must keep the original
     // KV dtype — promoting bf16/f16 to f32 here would silently corrupt the
-    // verify-pass path. (Issue #634, docs/apple-silicon-precision.md.)
+    // verify-pass path. (docs/apple-silicon-precision.md.)
     let data = vec![1.0_f32; 16];
     let tensor_f32 = mlxcel_core::from_slice_f32(&data, &[2, 2, 2, 2]);
     let tensor_bf16 = mlxcel_core::astype(&tensor_f32, dtype::BFLOAT16);
@@ -238,7 +238,7 @@ fn zero_per_row_kv_tail_no_op_on_empty_cache() {
 // ---------------------------------------------------------------------------
 // `sanitize_weights` MTP stripping — the acceptance criterion that Qwen 3.5
 // checkpoints' `mtp.*` weights are dropped without breaking the existing
-// load path. Issue #634 mirrors the mlx-lm / mlx-vlm behavior.
+// load path. mirrors the mlx-lm / mlx-vlm behavior.
 // ---------------------------------------------------------------------------
 
 #[test]

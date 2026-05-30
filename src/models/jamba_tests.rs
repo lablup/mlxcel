@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Regression tests for Jamba conv_state contiguous fix (issue #336).
+//! Regression tests for Jamba conv_state contiguous fix.
 
 use mlxcel_core::utils::slice_axis;
 

@@ -13,7 +13,7 @@
 // limitations under the License.
 
 //! Multi-Token Prediction (MTP) round-loop generator for the Gemma 4
-//! assistant drafter family (issue #629, epic #633).
+//! assistant drafter family.
 //!
 //! This module is a **peer** to [`crate::speculative::SpeculativeGenerator`],
 //! not an extension. The classic speculative path and the MTP path differ in

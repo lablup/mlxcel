@@ -13,7 +13,7 @@
 // limitations under the License.
 //
 //! Chrome-tracing compatible trace writer for pipeline-parallel scheduler
-//! actions (issue #350).
+//! actions.
 //!
 //! When `mlxcel-server --debug-pp-trace <file>` is passed the runtime
 //! constructs a [`PpTracer`] and hands it out as an `Arc` so every stage

@@ -80,7 +80,7 @@ pub const DEFAULT_TOP_K: usize = 32;
 /// Weight key under which the centroid token ordering is stored in the
 /// assistant drafter checkpoint. Exposed as a constant so the
 /// [`sanitize_token_ordering`] hook and the `Gemma4AssistantDraftModel`
-/// (sub-3 / #626) can refer to the same name without drift.
+/// (sub-3) can refer to the same name without drift.
 pub const TOKEN_ORDERING_KEY: &str = "masked_embedding.token_ordering";
 
 /// Centroid-routed sparse softmax LM head.
@@ -249,8 +249,7 @@ impl MaskedEmbedder {
     /// - `hidden_states`: `[B, L, hidden_size]` in the model's native dtype
     ///   (bf16 or f16 on Apple Silicon).
     /// - `lm_head_weight`: `[vocab_size, hidden_size]`. Tied to the drafter's
-    ///   `embed_tokens.weight` by the caller (see `Gemma4AssistantDraftModel`
-    ///   in sub-3 / #626).
+    ///   `embed_tokens.weight` by the caller (see `Gemma4AssistantDraftModel` in sub-3).
     ///
     /// Returns `[B, L, vocab_size]` with the same dtype as `hidden_states`.
     /// Non-selected vocab positions are filled with `min(selected) - 1` so
@@ -780,7 +779,7 @@ mod tests {
 
     #[test]
     fn default_constants_match_canonical_gemma4_e2b_e4b_drafter() {
-        // Pins issue #627's canonical defaults (per Gemma4AssistantConfig:
+        // Pins's canonical defaults (per Gemma4AssistantConfig:
         // num_centroids=2048, centroid_intermediate_top_k=32). Changing
         // these in code without updating the README / config is a
         // regression source — this test fences that.

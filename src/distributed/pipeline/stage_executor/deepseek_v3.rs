@@ -28,7 +28,7 @@
 //!   are stacked via the `sanitize_weights` helper on the full model weight
 //!   map. Auto-partitioner callers should note that expert-heavy layers carry
 //!   a larger parameter footprint than the dense head; that bookkeeping lives
-//!   on the partitioner (feeds sub-issue 7 / #348), not on the stage executor.
+//!   on the partitioner (feeds sub-issue 7), not on the stage executor.
 //! - **Multi-token-prediction (MTP) trailer layer** — the last entry of
 //!   `config.num_hidden_layers` is an MTP layer and is excluded from the
 //!   decoder stack. `DeepSeekV3Model::num_layers()` already reports the

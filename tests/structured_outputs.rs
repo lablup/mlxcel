@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Integration test for issue #550 (`response_format: {"type": "json_schema", ...}`).
+//! Integration test (`response_format: {"type": "json_schema",...}`).
 //!
 //! These tests build a real `llguidance` matcher over a synthetic byte-level
 //! tokenizer and walk it through a known-conforming JSON output. Failures
@@ -312,7 +312,7 @@ fn extract_response_format_helper_round_trips() {
 }
 
 // ---------------------------------------------------------------------------
-// apply_structured_mask_to_logits — issue #550 follow-up
+// apply_structured_mask_to_logits — follow-up
 //
 // These tests exercise the additive-bias construction directly so the
 // vocab-size handling stays correct in both directions
@@ -551,7 +551,7 @@ fn apply_mask_returns_error_when_no_reachable_token_is_allowed() {
 }
 
 // ---------------------------------------------------------------------------
-// PR #575 H1 / L3: public error messages must NOT leak llguidance internals.
+// H1 / L3: public error messages must NOT leak llguidance internals.
 //
 // `verbose_errors: false` (configured in `build_json_schema_constraint`) plus
 // the `tracing::error!` redaction policy means that even when the schema is

@@ -12,8 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Greedy-parity verification for speculative drafter pairings (epic #633,
-//! sub-9 / issue #632).
+//! Greedy-parity verification for speculative drafter pairings (sub-9).
 //!
 //! ## What this file pins
 //!
@@ -30,16 +29,14 @@
 //!   `models/Qwen3.5-4B-DFlash`, `block_size = 16`). The DFlash drafter
 //!   is loadable via `mlxcel_core::drafter::dflash::DFlashDrafter::load`
 //!   and the Qwen 3.5 text / VLM wrappers implement
-//!   `mlxcel_core::drafter::dflash::SpeculativeTarget` (PR #663 wired the
-//!   B>1 path too; issue #691 enables the VLM-wrapped text-only server
-//!   dispatch). The published upstream `z-lab/Qwen3.5-4B-DFlash`
-//!   checkpoint omits `embed_tokens.weight`; issue #675 ported upstream's
+//!   `mlxcel_core::drafter::dflash::SpeculativeTarget` (wired the B>1 path too; enables the VLM-wrapped text-only server dispatch). The published upstream `z-lab/Qwen3.5-4B-DFlash`
+//!   checkpoint omits `embed_tokens.weight`; ported upstream's
 //!   lazy-bind shape so the drafter loads with a tombstone and resolves
 //!   its embedding from the target during `Drafter::bind`. The
 //!   `greedy_parity_dflash_qwen35_4b` test runs the structural load +
-//!   bind pin *and* the issue #676 end-to-end byte-equality phase
+//!   bind pin *and* the end-to-end byte-equality phase
 //!   (`mlxcel-server` with vs without `--draft-kind dflash` at temp=0),
-//!   plus an issue #691 log assertion that the speculative server emitted
+//!   plus an log assertion that the speculative server emitted
 //!   `Speculative burst completed` instead of silently falling back.
 //!
 //! - **Gemma 4 31B + MTP assistant** (`models/gemma-4-31b-it-4bit` target,
@@ -49,8 +46,8 @@
 //!   `Gemma4Wrapper` exposes the underlying primitives
 //!   (`forward_with_speculative_sinks`, `rollback_speculative_cache`), and
 //!   the server-side MTP burst dispatch + `MtpTarget` adapter were wired
-//!   by issues #666 / #670 / #671. The `greedy_parity_mtp_gemma4_31b`
-//!   test runs the structural load pin *and* the issue #676 end-to-end
+//! The `greedy_parity_mtp_gemma4_31b`
+//!   test runs the structural load pin *and* the end-to-end
 //!   byte-equality phase (`mlxcel-server` with vs without `--draft-kind
 //!   mtp` at temp=0).
 //!
@@ -59,19 +56,18 @@
 //! - **Gemma 4 E2B / E4B** — drafter checkpoints (`gemma-4-E2B-it-assistant-bf16`,
 //!   `gemma-4-E4B-it-assistant-bf16`) are not on local disk and the E-family
 //!   pairings additionally depend on the centroid LM head integration tracked
-//!   by follow-up #660.
+//!   by follow-up.
 //! - **Gemma 4 26B-A4B** — drafter checkpoint (`gemma-4-26B-A4B-it-assistant-bf16`)
 //!   is not on local disk. Skipped pending checkpoint availability.
 //!
-//! ## End-to-end byte-equality (issue #676)
+//! ## End-to-end byte-equality
 //!
 //! `greedy_parity_dflash_qwen35_4b` and `greedy_parity_mtp_gemma4_31b` each
 //! run a two-phase check:
 //!
 //! 1. **Structural phase** (in-process): load the target, assert the model
 //!    variant, resolve the drafter kind, load the drafter, and — for
-//!    DFlash — `bind()` the drafter to the target (the issue #675
-//!    lazy-bind pin). The in-process models are then dropped and the MLX
+//!    DFlash — `bind()` the drafter to the target (the lazy-bind pin). The in-process models are then dropped and the MLX
 //!    memory cache cleared before phase 2.
 //! 2. **Byte-equality phase** (subprocess): spawn `mlxcel-server` twice
 //!    against the same target — once with `--model-draft --draft-kind
@@ -286,7 +282,7 @@ async fn server_round(
     }
 }
 
-/// Issue #676 byte-equality phase: spawn `mlxcel-server` twice against the
+/// byte-equality phase: spawn `mlxcel-server` twice against the
 /// same `target_path` — once speculative (drafter attached via
 /// `--model-draft --draft-kind --draft-block-size`), once drafter-less —
 /// and assert the `/v1/chat/completions` responses are byte-identical.
@@ -461,7 +457,7 @@ fn pairing_kind_resolution_matches_declaration() {
 
 /// Greedy parity for the Qwen 3.5 4B + DFlash pairing.
 ///
-/// **Status:** end-to-end byte-equality (issue #676).
+/// **Status:** end-to-end byte-equality.
 ///
 /// Two-phase test (see the module docstring):
 ///
@@ -470,14 +466,12 @@ fn pairing_kind_resolution_matches_declaration() {
 ///    `DrafterKind::Dflash`, loads the DFlash drafter against the
 ///    published upstream `z-lab/Qwen3.5-4B-DFlash` checkpoint — which
 ///    omits `embed_tokens.weight` — and `bind()`s it to the target,
-///    resolving `embed_tokens` lazily from the target (the issue #675
-///    pin). The in-process models are then dropped.
+///    resolving `embed_tokens` lazily from the target (the pin). The in-process models are then dropped.
 /// 2. **Byte-equality phase** (subprocess): spawns `mlxcel-server` with
 ///    `--model-draft --draft-kind dflash --draft-block-size 16` and again
 ///    without any `--draft-*` flag, submits the same fixed prompt to
 ///    `/v1/chat/completions` at `temperature = 0`, asserts the speculative
-///    server logged `Speculative burst completed` (issue #691: no silent
-///    fallback), and asserts the two responses are byte-identical.
+///    server logged `Speculative burst completed` (no silent fallback), and asserts the two responses are byte-identical.
 ///
 /// `#[ignore]`-gated as real-model heavy: it loads the Qwen 3.5 4B target
 /// + DFlash drafter and spawns `mlxcel-server` subprocesses. The CI
@@ -538,14 +532,14 @@ async fn greedy_parity_dflash_qwen35_4b() {
 
         // `load_drafter` constructs the full DFlashDrafter (weight loading
         // + sanitize). The upstream `z-lab/Qwen3.5-4B-DFlash` checkpoint
-        // does NOT ship `embed_tokens.weight`; issue #675 ported upstream's
+        // does NOT ship `embed_tokens.weight`; ported upstream's
         // lazy-bind shape so the loader builds an `embed_tokens = None`
-        // tombstone instead of failing. A `LoadFailed` here is a #675
+        // tombstone instead of failing. A `LoadFailed` here is a
         // regression.
         let (mut drafter, drafter_kind) =
             mlxcel_core::drafter::load_drafter(&draft_path, Some(DrafterKind::Dflash)).expect(
                 "DFlash drafter must load against the published z-lab/Qwen3.5-4B-DFlash \
-                 checkpoint (issue #675: embed_tokens.weight is absent and the loader \
+                 checkpoint (embed_tokens.weight is absent and the loader \
                  builds a lazy-bind tombstone instead of failing)",
             );
         assert_eq!(drafter_kind, DrafterKind::Dflash);
@@ -555,13 +549,12 @@ async fn greedy_parity_dflash_qwen35_4b() {
         );
 
         // `bind` resolves the drafter's `embed_tokens` from the target's
-        // embedding module (`LanguageModel::embed_tokens_module`,
-        // implemented by the Qwen 3.5 family — issue #675). A `BindFailed`
+        // embedding module (`LanguageModel::embed_tokens_module`, implemented by the Qwen 3.5 family —). A `BindFailed`
         // here means either the target does not expose
         // `embed_tokens_module` or the lazy-bind tombstone was not wired.
         drafter
             .bind(&loaded_target)
-            .expect("DFlash drafter must bind to the Qwen 3.5 target (issue #675 lazy-bind)");
+            .expect("DFlash drafter must bind to the Qwen 3.5 target (lazy-bind)");
         eprintln!(
             "[{}] Drafter bound to target; embed_tokens resolved via lazy-bind",
             pairing.name,
@@ -582,7 +575,7 @@ async fn greedy_parity_dflash_qwen35_4b() {
 
 /// Greedy parity for the Gemma 4 31B + MTP assistant pairing.
 ///
-/// **Status:** end-to-end byte-equality (issue #676).
+/// **Status:** end-to-end byte-equality.
 ///
 /// Two-phase test (see the module docstring):
 ///
@@ -598,7 +591,6 @@ async fn greedy_parity_dflash_qwen35_4b() {
 ///    `/v1/chat/completions` at `temperature = 0`, and asserts the two
 ///    responses are byte-identical. The server-side MTP burst dispatch
 ///    and the `MtpTarget` adapter for `Gemma4Wrapper` were wired by
-///    issues #666 / #670 / #671.
 ///
 /// Note on dtype: this pairing uses a 4-bit quantized target with a bf16
 /// drafter. The 4-bit target keeps bf16 scales/biases as-is per
@@ -683,7 +675,7 @@ async fn greedy_parity_mtp_gemma4_31b() {
     assert_server_byte_equality(pairing, &target_path, &draft_path).await;
 }
 
-/// Issue #674 acceptance item 1: a B = 4 batched MTP burst produces
+/// acceptance item 1: a B = 4 batched MTP burst produces
 /// per-row token streams that are **byte-identical** to running the
 /// B = 1 MTP burst in isolation on each row's prompt.
 ///
@@ -768,14 +760,9 @@ fn greedy_parity_mtp_gemma4_batched_b4_matches_b1() {
             .expect("drafter bind");
         let mut generator = MtpGenerator::new(adapter, drafter, block_size);
         // Offline test: greedy sampling needs no token history (issue
-        // #682's `token_history` parameter is `&[]` for a config where
+        //'s `token_history` parameter is `&[]` for a config where
         // `needs_token_history()` is false), no cooperative
-        // cancellation (issue #672 / PR #681 added the `cancel`
-        // parameter; the offline path passes a never-set flag, matching
-        // `src/commands/generate.rs`), and no logprobs (issue #678 / PR
-        // #686 added the `logprobs_config` parameter; this byte-parity
-        // test compares only token streams, so a disabled-default
-        // `LogprobsConfig` keeps the zero-overhead path).
+        // cancellation (added the `cancel` parameter; the offline path passes a never-set flag, matching `src/commands/generate.rs`), and no logprobs (added the `logprobs_config` parameter; this byte-parity test compares only token streams, so a disabled-default `LogprobsConfig` keeps the zero-overhead path).
         let no_cancel = std::sync::atomic::AtomicBool::new(false);
         let logprobs_config = mlxcel_core::sampling::LogprobsConfig::default();
         let (tokens, _logprobs, _stats) = generator.generate(

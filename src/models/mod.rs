@@ -296,7 +296,7 @@ pub enum ModelType {
     Jamba,
     NemotronH,
     /// Nemotron H Nano Omni — vision-capable variant of `nemotron_h`
-    /// (issue #554). Audio support is tracked separately as a follow-up.
+    /// Audio support is tracked separately as a follow-up.
     NemotronHNanoOmniVLM,
     NemotronNAS,
 

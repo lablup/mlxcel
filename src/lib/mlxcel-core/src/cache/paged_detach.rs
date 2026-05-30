@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Paged KV cache detach / adopt / park primitives (epic #416, sub-issue #418).
+//! Paged KV cache detach / adopt / park primitives.
 //!
 //! Mirrors the dense surface implemented in `cache/detach.rs` for the paged
 //! decode backend. Paged sequences carry two independent pieces of state:
@@ -92,7 +92,7 @@ pub struct DetachedPagedCacheSet {
     /// [`PagedBlockPool`] at detach time. Keyed by `PagedBlockId`. Empty for
     /// `Fp16`/`Int8` cache modes; on adopt the entries are reinstalled into
     /// the active pool so quantization state survives the round-trip
-    /// bit-identically (issue #482).
+    /// bit-identically.
     pub(super) v_packed_pages: HashMap<PagedBlockId, UniquePtr<MlxArray>>,
     pub(super) v_norms_pages: HashMap<PagedBlockId, UniquePtr<MlxArray>>,
     pub(super) k_packed_pages: HashMap<PagedBlockId, UniquePtr<MlxArray>>,
@@ -283,7 +283,7 @@ impl CachePool {
     /// any of them while the detached set is alive — the set is responsible
     /// for releasing those pins on adopt or explicit release.
     ///
-    /// Used by: prompt prefix cache store (#418), scheduler request-boundary
+    /// Used by: prompt prefix cache store, scheduler request-boundary
     /// handoff for `DecodeStorageBackend::Paged`.
     pub fn detach_paged(&mut self, seq_id: SequenceId) -> Option<DetachedPagedCacheSet> {
         {
@@ -352,7 +352,7 @@ impl CachePool {
 
         // Lift per-page Turbo4 sidecar tensors out of the pool so the round-
         // trip captures them losslessly. For non-Turbo4 modes every map stays
-        // empty and the dispatch below is a no-op (#482).
+        // empty and the dispatch below is a no-op.
         let mut v_packed_pages: HashMap<PagedBlockId, UniquePtr<MlxArray>> = HashMap::new();
         let mut v_norms_pages: HashMap<PagedBlockId, UniquePtr<MlxArray>> = HashMap::new();
         let mut k_packed_pages: HashMap<PagedBlockId, UniquePtr<MlxArray>> = HashMap::new();
@@ -413,7 +413,7 @@ impl CachePool {
     /// **and** release all block pins so the caller never has to hand-roll
     /// cleanup.
     ///
-    /// Used by: prompt prefix cache re-entry (#418), scheduler fast-path for
+    /// Used by: prompt prefix cache re-entry, scheduler fast-path for
     /// paged decode sequences.
     pub fn adopt_paged(
         &mut self,
@@ -498,7 +498,7 @@ impl CachePool {
         let created_at = detached.created_at;
         let retained_blocks = detached.retained_blocks.take();
         // Lift the per-page Turbo4 sidecars out of the detached set so we can
-        // reinstall them on the active pool below (#482). For Fp16/Int8
+        // reinstall them on the active pool below. For Fp16/Int8
         // round-trips every map is empty and the work below short-circuits.
         let v_packed_pages = std::mem::take(&mut detached.v_packed_pages);
         let v_norms_pages = std::mem::take(&mut detached.v_norms_pages);

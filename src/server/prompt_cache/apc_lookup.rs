@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Automatic Prefix Caching (APC, issue #552) — request-path helpers used by
+//! Automatic Prefix Caching (APC) — request-path helpers used by
 //! [`super::store::PromptCacheStore`].
 //!
 //! The store delegates two pieces of APC-specific logic here so its main file

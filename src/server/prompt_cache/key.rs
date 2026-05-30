@@ -92,7 +92,7 @@ impl fmt::Display for PromptCacheKeyDigest {
 }
 
 // ---------------------------------------------------------------------------
-// Multimodal digest (issue #425)
+// Multimodal digest
 // ---------------------------------------------------------------------------
 
 /// A 32-byte BLAKE3 digest of the multimodal (image + audio) content present
@@ -242,14 +242,14 @@ pub struct PromptCacheKey<'a> {
     pub model_id: &'a str,
     /// LoRA adapter identifier; `None` for the base model.
     pub lora_id: Option<&'a str>,
-    /// Chat-template signature. Full wiring is #422; for now any stable
+    /// Chat-template signature. Full wiring is; for now any stable
     /// digest of the template + tool-schema inputs is acceptable and will
     /// simply slot into this field.
     pub template_sig: &'a str,
     /// Caller-supplied tenancy / conversation scope. `None` means global.
     pub session_key: Option<&'a str>,
     /// Stable, order-preserving digest of all multimodal (image + audio)
-    /// content resolved from the request messages (issue #425).
+    /// content resolved from the request messages.
     ///
     /// Ensures two requests with the same text but different images produce
     /// different cache keys. Use [`MultimodalDigest::empty()`] for text-only
@@ -330,7 +330,7 @@ impl<'a> PromptCacheKey<'a> {
     ///     lora_id               (len-prefixed utf-8 bytes, empty if None)
     ///     template_sig          (len-prefixed utf-8 bytes)
     ///     session_key           (len-prefixed utf-8 bytes, empty if None)
-    ///     mm_digest             (32 raw bytes from MultimodalDigest, issue #425)
+    ///     mm_digest             (32 raw bytes from MultimodalDigest)
     ///     prefix_len            (u64 little-endian)
     ///     tokens[..prefix_len]  (each token as i32 little-endian)
     /// ```
@@ -338,14 +338,14 @@ impl<'a> PromptCacheKey<'a> {
     /// Length prefixes and the fixed `v2` tag keep the digest resistant to
     /// accidental collisions between fields with overlapping bytes, and make
     /// it safe to extend the schema later (new fields bump the version tag).
-    /// The version changed from `v1` to `v2` when issue #425 added `mm_digest`
+    /// The version changed from `v1` to `v2` when added `mm_digest`
     /// to prevent old v1 buckets from accidentally matching new multimodal keys.
     pub fn digest(&self) -> PromptCacheKeyDigest {
         let mut hasher = blake3::Hasher::new();
 
         // Domain separator so this digest cannot be reused from a different
         // hashing context accidentally.
-        // NOTE: bumped to v2 when mm_digest was added (issue #425) so that
+        // NOTE: bumped to v2 when mm_digest was added so that
         // stale v1 cache entries do not collide with new multimodal-aware keys.
         hasher.update(b"mlxcel:prompt-cache:v2");
 
@@ -360,7 +360,7 @@ impl<'a> PromptCacheKey<'a> {
             self.session_key.map(str::as_bytes).unwrap_or_default(),
         );
 
-        // Multimodal digest (issue #425): 32 raw bytes, already a BLAKE3 hash
+        // Multimodal digest: 32 raw bytes, already a BLAKE3 hash
         // so no length-prefix needed — the fixed size makes it unambiguous.
         hasher.update(self.mm_digest.as_bytes());
 
@@ -382,7 +382,7 @@ fn write_field(hasher: &mut blake3::Hasher, bytes: &[u8]) {
 }
 
 // ---------------------------------------------------------------------------
-// Session-key resolution (issue #422)
+// Session-key resolution
 // ---------------------------------------------------------------------------
 
 /// Sentinel bucket name used when neither a `prompt_cache_key` nor a `user`
@@ -399,7 +399,7 @@ pub const ANONYMOUS_SESSION_SENTINEL: &str = "__mlxcel_anon__";
 /// hints.
 ///
 /// Precedence (first non-empty wins):
-///   1. `prompt_cache_key` — explicit client hint (issue #422 addition).
+///   1. `prompt_cache_key` — explicit client hint (addition).
 ///   2. `user` — OpenAI-standard stable end-user identifier.
 ///   3. [`ANONYMOUS_SESSION_SENTINEL`] — shared fallback bucket.
 ///
@@ -425,7 +425,7 @@ pub fn resolve_session_key<'a>(
 }
 
 // ---------------------------------------------------------------------------
-// Template signature (issue #422)
+// Template signature
 // ---------------------------------------------------------------------------
 
 /// BLAKE3-based stable hash of the chat-template rendering pipeline inputs.
@@ -494,7 +494,7 @@ pub fn template_sig(
     hex
 }
 
-/// Compute a stable digest of the `tools` array (issue #422).
+/// Compute a stable digest of the `tools` array.
 ///
 /// The digest is **order-preserving**: reordering the tools list changes the
 /// output. This is intentional — HuggingFace chat templates iterate tools in

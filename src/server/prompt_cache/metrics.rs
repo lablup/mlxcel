@@ -14,7 +14,7 @@
 
 //! Pluggable metrics hooks for the prompt prefix cache store.
 //!
-//! Sub-issue #423 is responsible for wiring these hooks into
+//! is responsible for wiring these hooks into
 //! [`super::super::state::BatchMetrics`] / Prometheus counters. Until then a
 //! no-op default is supplied so the store can be constructed without any
 //! explicit metrics dependency (tests, unit benchmarks, etc.).
@@ -67,7 +67,7 @@ pub struct NoopPromptCacheMetrics;
 impl PromptCacheMetrics for NoopPromptCacheMetrics {}
 
 /// Lightweight atomic-counter implementation. Intended for tests and for
-/// ad-hoc diagnostics; #423 will add a real Prometheus-backed implementor.
+/// ad-hoc diagnostics will add a real Prometheus-backed implementor.
 #[derive(Debug, Default)]
 pub struct AtomicPromptCacheMetrics {
     pub inserts: AtomicU64,

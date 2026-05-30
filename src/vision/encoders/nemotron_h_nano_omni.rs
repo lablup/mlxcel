@@ -16,7 +16,7 @@
 //!
 //! Faithful Rust port of
 //! `references/mlx-vlm/mlx_vlm/models/nemotron_h_nano_omni/vision.py`
-//! (issue #554, vision-only scope). The encoder is a Vision Transformer
+//! (vision-only scope). The encoder is a Vision Transformer
 //! with NVIDIA's RADIO patch generator: a learned `[CLS]` token (with
 //! optional teacher-tied registers), a 1D learned positional embedding,
 //! and a stack of pre-norm transformer blocks. Each block uses standard

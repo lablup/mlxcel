@@ -443,7 +443,7 @@ pub enum ThinkingDecision {
 mod tests {
     use super::*;
     // Env-var fallback tests must serialize through the crate-wide
-    // `ENV_LOCK` (issue #573); per-module locks race with env mutations
+    // `ENV_LOCK`; per-module locks race with env mutations
     // in unrelated modules of the same test binary.
     use crate::test_support::env_lock::env_lock;
 

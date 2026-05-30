@@ -15,7 +15,7 @@
 //! Zero-config cluster bring-up for multi-machine pipeline-parallel runs.
 //!
 //! This module implements the intent-based launch path described in issue
-//! #342. The operator declares the desired number of stages with `--pp-auto N`
+//! The operator declares the desired number of stages with `--pp-auto N`
 //! on the coordinator, peers announce themselves (either explicitly via static
 //! seeds or opt-in via LAN discovery), and the coordinator:
 //!

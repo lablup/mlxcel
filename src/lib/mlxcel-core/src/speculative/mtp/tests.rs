@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Unit tests for the MTP round-loop (issue #629).
+//! Unit tests for the MTP round-loop.
 //!
 //! Tests build a fixture `MtpTarget` (`MockMtpTarget`) and a fixture
 //! `Drafter` (`MockMtpDrafter`) that produce deterministic outputs.
@@ -20,9 +20,9 @@
 //! invariants against hand-computed expected outputs, without needing
 //! real Gemma 4 weights.
 //!
-//! The full real-model greedy parity check (#632) requires a real
+//! The full real-model greedy parity check requires a real
 //! Gemma 4 target + drafter pairing; we document this in the PR body
-//! and defer the on-hardware check to #632.
+//! and defer the on-hardware check to.
 
 use super::generator::MtpGenerator;
 use super::target::{MtpTarget, MtpVerifyOutput, VerifyCaptured, VerifyForwardOutput};
@@ -541,7 +541,7 @@ fn round_loop_rebinds_drafter_after_each_round() {
 
 // ----- Greedy parity gate (acceptance criterion) -----
 //
-// The full real-model greedy parity check (#632) requires the actual
+// The full real-model greedy parity check requires the actual
 // Gemma 4 target + drafter pairing. Here we exercise the
 // **structural** parity gate: with a synthetic target where the
 // drafter is ALWAYS perfect (returns argmax of the target), the

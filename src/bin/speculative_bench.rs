@@ -13,17 +13,17 @@
 // limitations under the License.
 
 //! Perf benchmark harness for the speculative drafter pairings shipped by
-//! epic #633 (issue #632 / sub-9).
+//! (sub-9).
 //!
 //! ## Scope today
 //!
 //! Captures **no-drafter baseline** throughput numbers for the two reachable
 //! target models (`models/qwen3.5-4b-4bit`, `models/gemma-4-31b-it-4bit`).
 //! These numbers are the denominator of every "speedup vs no-drafter" cell
-//! in `docs/model_tests.md::Speculative drafters (epic #633)` and can be
+//! in `docs/model_tests.md::Speculative drafters` and can be
 //! captured today against real on-disk checkpoints.
 //!
-//! ## Scope deferred to #666
+//! ## Scope deferred to
 //!
 //! Speculative-decoding numerators (`--kind mtp` / `--kind dflash`) require:
 //!
@@ -35,14 +35,14 @@
 //!    (`forward_with_speculative_sinks`, `rollback_speculative_cache`) are
 //!    all public, but the trait adapter that wires them to
 //!    `prefill_and_seed` / `verify_forward` / `verify_finalize` is the work
-//!    explicitly deferred by PR #665.
+//!    explicitly deferred.
 //! 3. **A lazy-bind fix for `DFlashDrafter`**. The upstream
 //!    `z-lab/Qwen3.5-4B-DFlash` checkpoint omits `embed_tokens.weight`
 //!    because upstream Python binds to the target's `embed_tokens` at
 //!    `bind()` time, but the Rust loader currently requires the weight at
 //!    construction. See `tests/speculative_parity.rs` for the diagnostic.
 //!
-//! All three are scoped into follow-up #666. Until they land, this binary
+//! All three are scoped into follow-up. Until they land, this binary
 //! prints a clear `[DEFERRED]` row for the speculative paths instead of
 //! silently emitting fake numbers.
 //!
@@ -92,11 +92,11 @@ enum BenchKind {
     /// reachable today via `LanguageModel::forward`.
     None,
     /// MTP speculative path (Gemma 4 assistant). DEFERRED: requires
-    /// `MtpTarget` impl on `Gemma4Wrapper` (follow-up #666).
+    /// `MtpTarget` impl on `Gemma4Wrapper` (follow-up).
     Mtp,
     /// DFlash speculative path (Qwen 3.5 DFlash). DEFERRED: requires
     /// (a) public cache-construction API on `Qwen35Model` and (b) lazy-bind
-    /// fix on `DFlashDrafter` (follow-up #666).
+    /// fix on `DFlashDrafter` (follow-up).
     Dflash,
 }
 
@@ -113,10 +113,10 @@ impl std::fmt::Display for BenchKind {
 #[derive(Parser, Debug)]
 #[command(
     name = "speculative_bench",
-    about = "Speculative drafter perf benchmark (epic #633, issue #632).",
+    about = "Speculative drafter perf benchmark.",
     long_about = "Captures no-drafter baseline tok/s for the speculative \
                   target models. Speculative paths are scaffolded but \
-                  deferred to follow-up #666 — see the module docs."
+                  deferred to follow-up — see the module docs."
 )]
 struct Args {
     /// Path to the target model directory.
@@ -359,7 +359,7 @@ fn run_baseline(target_dir: &Path, prompt: &str, max_tokens: usize) -> Result<(f
 /// `docs/model_tests.md`.
 fn print_markdown_table(rows: &[Row]) {
     println!();
-    println!("### Speculative drafter perf table (epic #633, issue #632)");
+    println!("### Speculative drafter perf table");
     println!();
     println!("| Pairing | Kind | B | block_size | tok/s | speedup vs no-drafter | status |");
     println!("|---------|------|---|------------|-------|------------------------|--------|");
@@ -383,8 +383,8 @@ fn print_markdown_table(rows: &[Row]) {
         );
     }
     println!();
-    println!("Note: speculative rows are deferred to follow-up #666 — see");
-    println!("`docs/model_tests.md::Speculative drafters (epic #633)` for the");
+    println!("Note: speculative rows are deferred to follow-up — see");
+    println!("`docs/model_tests.md::Speculative drafters` for the");
     println!("wiring details. Baseline rows are real perf numbers captured on");
     println!("the host this binary ran on.");
 }
@@ -487,7 +487,7 @@ fn bench_one_pairing(p: &Pairing, prompt: &str, batch: usize, max_tokens: usize)
             p.kind,
             batch,
             p.block_size,
-            "DEFERRED to #666 — needs MtpTarget for Gemma4Wrapper",
+            "DEFERRED to — needs MtpTarget for Gemma4Wrapper",
         ),
         BenchKind::Dflash => Row::deferred(
             p.name,
@@ -495,7 +495,7 @@ fn bench_one_pairing(p: &Pairing, prompt: &str, batch: usize, max_tokens: usize)
             p.kind,
             batch,
             p.block_size,
-            "DEFERRED to #666 — DFlash loader + public Qwen3NextCache API",
+            "DEFERRED to — DFlash loader + public Qwen3NextCache API",
         ),
     }
 }
@@ -585,7 +585,7 @@ fn main() -> Result<()> {
                     args.kind,
                     args.batch,
                     args.block_size,
-                    "DEFERRED to #666 — see module docs",
+                    "DEFERRED to — see module docs",
                 ),
             }
         };

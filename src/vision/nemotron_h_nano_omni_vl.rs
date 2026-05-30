@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Nemotron H Nano Omni vision-language model wrapper (issues #554, #582).
+//! Nemotron H Nano Omni vision-language model wrapper.
 //!
 //! Faithful Rust port of the multimodal path in
 //! `references/mlx-vlm/mlx_vlm/models/nemotron_h_nano_omni/nemotron_h_nano_omni.py`.
@@ -24,7 +24,7 @@
 //! - the multimodal projector (`mlp1`): `RMSNorm -> Linear -> ReLU² ->
 //!   Linear` with the upstream "pixel shuffle" downsample applied to
 //!   the patch grid before projection
-//! - **(issue #582)** an optional audio path:
+//! - **** an optional audio path:
 //!   `crate::audio::nemotron_h_nano_omni::{NemotronOmniSoundEncoder,
 //!   NemotronOmniSoundProjection, NemotronOmniFeatureExtractor}`,
 //!   wired only when `sound_config` is present in the released
@@ -130,7 +130,7 @@ impl NemotronHNanoOmniProjector {
 
 /// Top-level Nemotron H Nano Omni VLM.
 ///
-/// Issue #554 introduced this struct with vision-only scope; issue #582
+/// introduced this struct with vision-only scope;
 /// added the optional audio path (`audio` field set to `Some` when the
 /// checkpoint ships a `sound_config`).
 pub struct NemotronHNanoOmniVlModel {

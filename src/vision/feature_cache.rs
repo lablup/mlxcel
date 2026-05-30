@@ -17,7 +17,7 @@
 //! Stores post-projection image features keyed by image identity so the server
 //! can skip the vision tower + multimodal embedder on subsequent turns that
 //! reference the same image. Mirrors the upstream `VisionFeatureCache` that
-//! landed in mlx-vlm. See issue #325.
+//! landed in mlx-vlm..
 //!
 //! The cache is generic over a [`CloneableFeatures`] implementor so each VLM
 //! family can store the feature shape it actually needs (a single projected

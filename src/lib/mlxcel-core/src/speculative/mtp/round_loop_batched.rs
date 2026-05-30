@@ -16,19 +16,19 @@
 //!
 //! Rust port of upstream
 //! `references/mlx-vlm/mlx_vlm/generate.py::_mtp_rounds_batch` (and the
-//! `_batch_cache_left_padding` helper). Issue #631 / epic #633 sub-7.
+//! `_batch_cache_left_padding` helper). sub-7.
 //!
 //! ## Scope
 //!
 //! **B > 1, with continuous batching and per-row early-EOS.** The B = 1
-//! fast path lives in the sibling [`super::generator`] module (#662 merged)
+//! fast path lives in the sibling [`super::generator`] module (merged)
 //! and must NOT regress as a result of this implementation. The two drivers
 //! share the [`MtpTarget`] trait surface and the [`speculative_walk_batched`]
 //! helper; everything else is duplicated to keep both hot paths obvious and
 //! optimal.
 //!
 //! Mirrors the design of the companion batched DFlash round-loop in
-//! [`crate::drafter::dflash::round_loop_batched`] (#663 merged):
+//! [`crate::drafter::dflash::round_loop_batched`] (merged):
 //!
 //! 1. **Active-rows-only `bs` computation.** Finished rows are frozen in
 //!    place and excluded from the per-round block-size minimum — otherwise
@@ -42,7 +42,7 @@
 //! 3. **Left-padding normalization on rebind.** Each round's drafter
 //!    rebind passes the per-row `left_padding[b]` so the drafter's
 //!    `set_shared_kv` can re-normalize via
-//!    [`crate::drafter::masks::normalize_batched_shared_kv_states`] (#657).
+//!    [`crate::drafter::masks::normalize_batched_shared_kv_states`].
 //! 4. **Per-row stop-token / max-tokens emission gate.** Rows that hit EOS
 //!    or saturate `max_new_tokens` remain in the batch (no cache filter)
 //!    but emit nothing further on subsequent rounds.
@@ -174,8 +174,7 @@ impl<T: MtpTarget> MtpBatchedGenerator<T> {
 
     /// Consume the generator and return the boxed drafter handle.
     ///
-    /// Used by the server-side batched speculative burst path (issue
-    /// #674) so a loaded drafter can be reused across multiple batched
+    /// Used by the server-side batched speculative burst path so a loaded drafter can be reused across multiple batched
     /// bursts on the same worker thread without re-loading from disk.
     /// The caller is expected to [`Drafter::reset`] the returned handle
     /// before the next burst so per-run drafter state is cleared. Mirrors
@@ -446,8 +445,8 @@ impl<T: MtpTarget> MtpBatchedGenerator<T> {
             // tokens. We accepted `accepted[r] + 1` positions per row;
             // the target trims by `bs - max(accepted) - 1` (global) and
             // per-row zeros the tails of rows with smaller accept counts.
-            // This is the per-row rollback contract from #655 (Gemma 4
-            // `rollback_speculative_cache`) and #657 (per-row mask
+            // This is the per-row rollback contract (Gemma 4
+            // `rollback_speculative_cache`) and (per-row mask
             // normalization).
             verify_out =
                 self.target

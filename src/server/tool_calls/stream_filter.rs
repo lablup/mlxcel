@@ -197,7 +197,7 @@ enum DelimiterAction {
 ///   It is placed after the `<tag>` families so angle-bracket markers still
 ///   benefit from the tighter (shorter) partial-match window that `<` gives.
 ///
-/// TODO (#444): Consider extracting this into a startup-time configurable
+/// TODO: Consider extracting this into a startup-time configurable
 /// owned by the model worker so new reasoning families don't require a rebuild.
 const CHAT_DELIMITERS: &[(&str, DelimiterAction)] = &[
     // Qwen-style reasoning (Qwen3.x, Exaone4, Hunyuan, GLM4, Nemotron-H, SmolLM3, …)
@@ -214,7 +214,7 @@ const CHAT_DELIMITERS: &[(&str, DelimiterAction)] = &[
     ("<|think|>", DelimiterAction::Strip),
     ("<|turn>", DelimiterAction::Strip),
     ("<turn|>", DelimiterAction::Strip),
-    // Hermes / Qwen / DeepSeek tool call markers (issue #551).
+    // Hermes / Qwen / DeepSeek tool call markers.
     // Exit before enter so the closer is matched when both appear in one fragment.
     ("</tool_call>", DelimiterAction::ExitToolCall),
     ("<tool_call>", DelimiterAction::EnterToolCall),
@@ -862,7 +862,7 @@ mod tests {
         assert!(flushed.reasoning.is_none());
     }
 
-    // -- Qwen-style <think> / </think> reasoning (issue #444) --
+    // -- Qwen-style <think> / </think> reasoning --
 
     #[test]
     fn qwen_think_full_chunk() {
@@ -955,7 +955,7 @@ mod tests {
         assert_eq!(total_content, "content");
     }
 
-    // -- Gemma 4 regression guard (issue #444) --
+    // -- Gemma 4 regression guard --
 
     #[test]
     fn gemma4_regression_channel_reasoning_and_content() {
@@ -971,7 +971,7 @@ mod tests {
         assert!(!out.content.as_deref().unwrap_or("").contains("<channel|>"));
     }
 
-    // -- Hermes / Qwen / DeepSeek tool-call markup suppression (issue #551) --
+    // -- Hermes / Qwen / DeepSeek tool-call markup suppression --
 
     #[test]
     fn hermes_tool_call_only_suppressed() {
@@ -1109,7 +1109,7 @@ mod tests {
         );
     }
 
-    // -- Regression: Gemma 4 tool-call markers must not be confused with Hermes (issue #551) --
+    // -- Regression: Gemma 4 tool-call markers must not be confused with Hermes --
 
     #[test]
     fn gemma4_tool_call_not_confused_with_hermes() {
@@ -1192,7 +1192,7 @@ mod tests {
         );
     }
 
-    // -- Mistral Nemo `[TOOL_CALLS]` suppression (issue #551) --
+    // -- Mistral Nemo `[TOOL_CALLS]` suppression --
 
     #[test]
     fn mistral_nemo_tool_calls_marker_suppressed() {
@@ -1246,7 +1246,7 @@ mod tests {
         );
     }
 
-    // -- Token-position preservation for parallel tool calls (issue #592) --
+    // -- Token-position preservation for parallel tool calls --
     //
     // Upstream mlx-lm PR #1170 (commit aa4f880) fixed `_process_control_tokens`
     // so that matched tokens are re-emitted with `text=""` instead of being
@@ -1416,7 +1416,7 @@ mod tests {
     // bytes contributed to the matched delimiter — **not** merely 1 per
     // delimiter match.
     //
-    // This is the HIGH-1 fix from PR #615 review: the old code did
+    // This is the HIGH-1 fix review: the old code did
     // `suppressed_positions += 1` per match, which under-counted for
     // multi-token delimiters. The new code tracks per-fragment byte lengths
     // and counts how many fragments were consumed by each match.

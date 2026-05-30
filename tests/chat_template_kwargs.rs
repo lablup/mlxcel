@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Integration tests for issue #410 `chat_template_kwargs` / `preserve_thinking`.
+//! Integration tests `chat_template_kwargs` / `preserve_thinking`.
 //!
 //! The end-to-end tests spin up `mlxcel-server` against a real Qwen3-family
 //! model and exercise the HTTP `/v1/chat/completions` surface in all three
@@ -114,7 +114,7 @@ fn make_multi_turn_body(chat_template_kwargs: Option<serde_json::Value>) -> serd
     body
 }
 
-/// Issue #410 integration: per-request top-level `chat_template_kwargs.preserve_thinking=true`
+/// integration: per-request top-level `chat_template_kwargs.preserve_thinking=true`
 /// must produce a 200 response. The actual prompt-rendering correctness is
 /// covered by unit tests — this test only confirms that the server accepts
 /// the shape end-to-end without 4xx/5xx errors.

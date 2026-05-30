@@ -129,7 +129,7 @@ pub struct BatchScheduler {
     // if construction and execution happen on different threads.
     // Currently constructed and run on the same thread; the TLS design
     // leaves room to separate them in the future if needed.
-    // See `mlxcel_core::streams` and issue #556.
+    // See `mlxcel_core::streams` and.
     generation_stream: Option<UniquePtr<MlxThreadLocalStream>>,
 
     // -- Request channel --
@@ -167,7 +167,7 @@ pub struct BatchScheduler {
     /// Decode-time sequence-state backend used by this scheduler.
     decode_storage_backend: DecodeStorageBackend,
 
-    /// Server-wide KV cache quantization mode (issue #484 / #508).
+    /// Server-wide KV cache quantization mode.
     ///
     /// When non-Fp16 the scheduler upgrades each newly-allocated sequence's
     /// per-layer `KVCache` to the configured mode (with Boundary-V policy
@@ -179,7 +179,7 @@ pub struct BatchScheduler {
     /// Defaults to [`KVCacheMode::Fp16`] (bit-exact baseline).
     kv_cache_mode: KVCacheMode,
 
-    /// Issue #545: server-wide batch KV quantization configuration.
+    /// server-wide batch KV quantization configuration.
     ///
     /// When [`BatchKvQuantConfig::is_enabled`] returns `true`, the
     /// scheduler resolves per-layer modes from this config (with the
@@ -189,7 +189,7 @@ pub struct BatchScheduler {
     /// (the default), the legacy path is bit-exact preserved.
     batch_kv_quant: BatchKvQuantConfig,
 
-    /// Issue #603: maximum KV cache size for plain (non-sliding) `KVCache`
+    /// maximum KV cache size for plain (non-sliding) `KVCache`
     /// instances managed by this scheduler's `CachePool`.
     ///
     /// When `Some(N)`, the scheduler enforces a hard cap on the **live KV
@@ -199,8 +199,7 @@ pub struct BatchScheduler {
     /// invoked on each cache whose `live_len()` exceeds `N`, dropping the
     /// oldest excess tokens. **Crucially, the cache's monotonic `offset`
     /// is never decremented** — `trim_front` advances `live_start` so
-    /// RoPE relative positions stay correct (issue #603, see
-    /// [`KVCache::trim_front`] for the position invariant).
+    /// RoPE relative positions stay correct (see [`KVCache::trim_front`] for the position invariant).
     ///
     /// Sliding-window models that manage their own internal
     /// `RotatingKVCache` go through a separate model-level code path and
@@ -225,7 +224,7 @@ pub struct BatchScheduler {
     /// when the scheduler (and thus this loaded model) is dropped.
     vision_caches: Rc<ModelVisionCaches>,
 
-    // -- Axis B / Epic #362 — language-bias token map --
+    // -- Axis B / — language-bias token map --
     /// Cached per-scheduler `TokenBiasMap` resolved once from the server-level
     /// `LangBiasConfig` at worker startup.
     ///
@@ -242,7 +241,7 @@ pub struct BatchScheduler {
     /// Empty map = bit-exact baseline path (no sampling change, no alloc).
     token_bias: TokenBiasMap,
 
-    // -- Issue #409 — thinking-token budget --
+    // -- — thinking-token budget --
     /// Server-wide default thinking-token budget. `None` means unrestricted.
     /// Per-request `thinking_budget_tokens` overrides this at enqueue time.
     reasoning_budget: Option<ThinkingBudget>,
@@ -252,7 +251,7 @@ pub struct BatchScheduler {
     /// regardless of any budget configuration.
     thinking_token_ids: Option<ThinkingTokenIds>,
 
-    // -- Epic #416 / issue #421: cross-request prompt-prefix KV cache --
+    // -- cross-request prompt-prefix KV cache --
     /// Shared store that hands out detached KV caches on prefix match and
     /// absorbs donated caches on sequence finish. `None` when the feature is
     /// disabled at config time so the hot path has zero overhead.
@@ -265,7 +264,7 @@ pub struct BatchScheduler {
     /// removed from the map on finish / error.
     prompt_cache_seq_ctx: std::collections::HashMap<SequenceId, PromptCacheRequestContext>,
 
-    /// Issue #666: resolved speculative-decoding dispatch shape.
+    /// resolved speculative-decoding dispatch shape.
     ///
     /// Defaults to [`crate::server::SpeculativeDispatch::Disabled`]
     /// (constructed by [`Self::with_config`]). When the scheduler is
@@ -288,14 +287,14 @@ pub struct BatchScheduler {
     /// still falls back to classic decode at request time. This is the
     /// minimum-viable architectural foundation; full B=1 / B>1 decode
     /// integration completes in the peer follow-up sketched in the
-    /// issue #666 implementation plan.
+    /// implementation plan.
     speculative_dispatch: crate::server::SpeculativeDispatch,
 
-    /// Issue #670: lazy-loaded drafter handle for the speculative burst
+    /// lazy-loaded drafter handle for the speculative burst
     /// path. Constructed empty alongside the dispatch; the drafter's
     /// weights are loaded from disk on the **first** speculative
     /// request and cached for subsequent requests on the same worker
-    /// (mandate 2 of issue #670). For
+    /// (mandate 2). For
     /// [`crate::server::SpeculativeDispatch::Disabled`] this slot stays
     /// empty for the worker's lifetime and the burst path is never
     /// entered.
@@ -322,7 +321,7 @@ impl BatchScheduler {
     ///
     /// Currently unused at the call site (`with_config` is what production
     /// constructs) but retained as a convenience for future tests/benches.
-    /// The scheduler API is `pub(crate)` after the issue #601 refactor so
+    /// The scheduler API is `pub(crate)` after the refactor so
     /// `dead_code` is silenced explicitly rather than dropped, keeping the
     /// preserved-behavior intent visible.
     #[allow(dead_code)]
@@ -419,12 +418,12 @@ impl BatchScheduler {
             kv_cache_mode: KVCacheMode::Fp16,
             batch_kv_quant: BatchKvQuantConfig::default(),
             max_kv_size: None,
-            // Issue #666: dispatch defaults to Disabled so the scheduler's
+            // dispatch defaults to Disabled so the scheduler's
             // hot path stays bit-exact for the non-speculative case. The
             // worker thread overrides this via `with_speculative_dispatch`
             // when the operator passed `--draft-model`.
             speculative_dispatch: crate::server::SpeculativeDispatch::Disabled,
-            // Issue #670: empty slot, populated lazily on the first
+            // empty slot, populated lazily on the first
             // speculative request when `speculative_dispatch` is
             // kind-specific. `with_speculative_dispatch` rebuilds this
             // slot from the dispatch passed by the worker.
@@ -434,14 +433,14 @@ impl BatchScheduler {
         }
     }
 
-    /// Attach the server-wide KV cache quantization mode (issue #484 / #508).
+    /// Attach the server-wide KV cache quantization mode.
     ///
     /// When `mode == KVCacheMode::Fp16` this builder is a no-op — every new
     /// sequence keeps the default Fp16 caches and the paged layout uses
     /// `PagedKvLayout::uniform`. For Turbo4 modes (`Turbo4Asym`, `Turbo4`,
     /// `Turbo4Delegated`) the scheduler additionally picks
     /// [`PagedKvLayout::uniform_with_mode`] so per-page sidecars are
-    /// reserved, preserving the cross-tenant isolation contract from #482.
+    /// reserved, preserving the cross-tenant isolation contract.
     pub fn with_kv_cache_mode(mut self, mode: KVCacheMode) -> Self {
         self.kv_cache_mode = mode;
         self
@@ -453,7 +452,6 @@ impl BatchScheduler {
     }
 
     /// Attach the server-wide batch KV quantization configuration
-    /// (issue #545).
     ///
     /// When `config.is_enabled()` returns `true`, every newly-allocated
     /// sequence's per-layer caches are upgraded from the default Fp16
@@ -473,7 +471,7 @@ impl BatchScheduler {
         self.batch_kv_quant
     }
 
-    /// Set the maximum KV cache size for plain (non-sliding) caches (issue #603).
+    /// Set the maximum KV cache size for plain (non-sliding) caches.
     ///
     /// When `max_kv_size.is_some()`, the scheduler advances `live_start` on
     /// every plain `KVCache` after each prefill chunk and each decode step
@@ -487,7 +485,7 @@ impl BatchScheduler {
     /// Turbo-quantized caches (`Turbo4Asym` / `Turbo4` / `Turbo4Delegated`
     /// / `Turbo3Asym`) are silently skipped by `KVCache::trim_front` — a
     /// warning is emitted here so the operator knows the combination is
-    /// unsupported. **Issue #603 H3**: the warning now inspects *both* the
+    /// unsupported. ** H3**: the warning now inspects *both* the
     /// legacy `kv_cache_mode` flag *and* the per-layer modes resolved
     /// from `batch_kv_quant` so the combination
     /// `--kv-bits=N --kv-quant-scheme=turboquant --max-kv-size=M` is
@@ -498,7 +496,7 @@ impl BatchScheduler {
         if max_kv_size.is_some() {
             // Legacy `--kv-cache-mode`-driven path.
             let legacy_is_turbo = Self::is_turbo_mode(self.kv_cache_mode);
-            // Issue #545 `--kv-bits` / `--kv-quant-scheme` path. When
+            // `--kv-bits` / `--kv-quant-scheme` path. When
             // batch KV quant is enabled, `base_mode()` reports the
             // effective per-layer mode driving the paged-layout
             // selection; we treat any Turbo base mode the same way as
@@ -530,7 +528,7 @@ impl BatchScheduler {
         self.max_kv_size
     }
 
-    /// Attach the resolved speculative-decoding dispatch (issue #666).
+    /// Attach the resolved speculative-decoding dispatch.
     ///
     /// Default (constructed by [`Self::with_config`]) is
     /// [`crate::server::SpeculativeDispatch::Disabled`], so callers that
@@ -570,7 +568,7 @@ impl BatchScheduler {
         mut self,
         dispatch: crate::server::SpeculativeDispatch,
     ) -> Self {
-        // Issue #670: rebuild the (still-empty) drafter slot to carry
+        // rebuild the (still-empty) drafter slot to carry
         // the path + kind from the new dispatch. The drafter weights
         // are NOT loaded here — `ensure_loaded` on the first
         // speculative request is what reads from disk.
@@ -587,14 +585,13 @@ impl BatchScheduler {
     }
 
     /// Whether the scheduler has a kind-specific speculative dispatch
-    /// configured (issue #666; issue #670 wired this into the actual
-    /// runtime dispatch).
+    /// configured (wired this into the actual runtime dispatch).
     ///
     /// Returns `true` when [`Self::speculative_dispatch`] is one of the
     /// kind-specific variants ([`crate::server::SpeculativeDispatch::Mtp`]
     /// or [`crate::server::SpeculativeDispatch::DFlash`]).
     ///
-    /// **Semantics (issue #670)**: a `true` return only means a
+    /// **Semantics**: a `true` return only means a
     /// speculative *path* is configured — the actual per-request
     /// decision happens inside [`Self::execute_prefill`] via
     /// [`super::speculative_burst::should_burst_for_sequence`], which
@@ -607,12 +604,11 @@ impl BatchScheduler {
     /// B-size of concurrent classic requests is independent of whether
     /// this gate fires for a speculative request.
     ///
-    /// Backwards compatibility: pre-#670 callers (the worker-startup
-    /// log and the integration tests in #669) used this method as a
+    /// Backwards compatibility: earlier callers (the worker-startup log and the integration tests) used this method as a
     /// "would we dispatch?" probe. The semantics remain compatible:
     /// `true` ↔ "speculative is on and a future request could enter
     /// the burst path"; `false` ↔ "every request takes the classic
-    /// path." The active-batch-size restriction was a pre-#670
+    /// path." The active-batch-size restriction was a earlier
     /// over-approximation that the burst design removes.
     pub fn should_dispatch_speculative(&self) -> bool {
         self.speculative_dispatch.is_kind_specific()
@@ -652,7 +648,7 @@ impl BatchScheduler {
     }
 
     /// Attach the server-wide thinking-token budget and resolved
-    /// `<think>` / `</think>` token ids (issue #409).
+    /// `<think>` / `</think>` token ids.
     ///
     /// `token_ids == None` means the model is non-thinking; the budget is
     /// then silently ignored for every sequence. Callers resolve the token
@@ -670,7 +666,6 @@ impl BatchScheduler {
     }
 
     /// Attach the shared prompt-prefix KV cache store
-    /// (epic #416 / issue #421).
     ///
     /// When `Some(..)`, the scheduler:
     /// * Looks up a longest-prefix match on each new request and calls
@@ -688,7 +683,7 @@ impl BatchScheduler {
     }
 
     /// Whether the installed prompt-cache store is currently accepting
-    /// lookups and inserts (scheduler-level gate for #424).
+    /// lookups and inserts (scheduler-level gate).
     #[inline]
     fn prompt_cache_active(&self) -> bool {
         self.prompt_cache
@@ -756,7 +751,7 @@ impl BatchScheduler {
             return None;
         }
 
-        // APC block-level partial adoption (issue #580). When APC clamps
+        // APC block-level partial adoption. When APC clamps
         // `matched_len` to a block boundary shorter than the cached entry's
         // full token length, the request diverged from the cached prefix at
         // the next block. Truncate the detached KV state to exactly
@@ -795,7 +790,7 @@ impl BatchScheduler {
                 );
                 self.batch_observability
                     .record_prompt_cache_hit(matched_len);
-                // Issue #423: also increment BatchMetrics Prometheus counters.
+                // also increment BatchMetrics Prometheus counters.
                 self.batch_metrics.record_prompt_cache_hit(matched_len);
                 // Update byte/entry gauges so /metrics reflects current state.
                 if let Some(ref store) = self.prompt_cache {
@@ -883,7 +878,7 @@ impl BatchScheduler {
         match store.insert(&key, entry) {
             Ok(()) => {
                 self.batch_observability.record_prompt_cache_insert();
-                // Issue #423: refresh byte/entry gauges after a successful insert.
+                // refresh byte/entry gauges after a successful insert.
                 self.batch_metrics
                     .update_prompt_cache_gauges(store.bytes(), store.len());
             }
@@ -899,7 +894,7 @@ impl BatchScheduler {
         }
     }
 
-    /// Apply issue #409 thinking-budget enforcement to a freshly sampled
+    /// Apply thinking-budget enforcement to a freshly sampled
     /// token for a single sequence.
     ///
     /// Returns the final token id to commit to the sequence (either the
@@ -930,7 +925,7 @@ impl BatchScheduler {
         final_id
     }
 
-    /// Issue #550: apply the structured-output mask (if any) to logits before
+    /// apply the structured-output mask (if any) to logits before
     /// sampling.
     ///
     /// Returns either the masked logits or `Err(_)` describing why the
@@ -956,7 +951,7 @@ impl BatchScheduler {
         Ok(masked)
     }
 
-    /// Issue #550: advance the matcher state by the just-sampled token.
+    /// advance the matcher state by the just-sampled token.
     ///
     /// Returns `Ok(())` on success, `Err(msg)` when `consume_token` fails or
     /// the matcher is in an error state. The caller transitions the sequence
@@ -973,7 +968,7 @@ impl BatchScheduler {
         guard.consume_token(token).map_err(|e| e.to_string())
     }
 
-    /// Issue #550: send a clean SSE error event and transition the sequence
+    /// send a clean SSE error event and transition the sequence
     /// to `Finished(Error(msg))`. Used by the structured-output path to
     /// abort cleanly when the matcher refuses to advance.
     fn abort_sequence_with_error(seq: Option<&mut SequenceInfo>, prefix: &str, msg: &str) {
@@ -1096,7 +1091,7 @@ impl BatchScheduler {
         let seq_id = self
             .cache_pool
             .allocate_with_layout(&self.model, layout_override)?;
-        // Issue #484 / #508: apply the configured KV cache mode (with
+        // apply the configured KV cache mode (with
         // Boundary-V policy for Turbo4 modes) to the freshly allocated
         // per-layer caches. `model.make_caches()` always returns Fp16
         // caches; this step upgrades them to the requested mode while
@@ -1114,15 +1109,15 @@ impl BatchScheduler {
     /// FP16 caches from `model.make_caches()`. For Turbo4 modes the
     /// per-layer mode is resolved via
     /// [`mlxcel_core::cache::turbo::resolve_layer_modes`] so boundary
-    /// layers stay FP16 (issue #478) for quality.
+    /// layers stay FP16 for quality.
     ///
-    /// Issue #545: when [`BatchKvQuantConfig::is_enabled`] returns
+    /// when [`BatchKvQuantConfig::is_enabled`] returns
     /// `true`, the per-layer mode table is sourced from
     /// [`BatchKvQuantConfig::resolve_layer_modes`] instead — that table
     /// honours the `skip_last_layer` policy, which is distinct from
     /// (and composes with) the existing Boundary-V mechanism.
     ///
-    /// Used by: [`Self::allocate_sequence_state`] (#508, #545).
+    /// Used by: [`Self::allocate_sequence_state`].
     fn apply_kv_cache_mode_to(&mut self, seq_id: SequenceId) {
         let Some(caches) = self.cache_pool.get_caches_mut(seq_id) else {
             return;
@@ -1135,7 +1130,7 @@ impl BatchScheduler {
         }
         let n_layers = caches.len();
 
-        // Issue #545: when the batched KV quant config is active, it
+        // when the batched KV quant config is active, it
         // takes precedence over the legacy `kv_cache_mode` path. The
         // resolved table already encodes the per-layer mode (with the
         // last-layer skip applied), so apply it directly.
@@ -1147,7 +1142,7 @@ impl BatchScheduler {
             return;
         }
 
-        // Legacy path (issue #484 / #508): nominal mode + Boundary-V
+        // Legacy path: nominal mode + Boundary-V
         // protection only.
         let nominal = self.kv_cache_mode;
         if nominal == KVCacheMode::Fp16 {
@@ -1175,7 +1170,7 @@ impl BatchScheduler {
         }
     }
 
-    /// Enforce the `--max-kv-size` cap on a sequence's KV caches (issue #603).
+    /// Enforce the `--max-kv-size` cap on a sequence's KV caches.
     ///
     /// Trims the oldest `live_len(cache) - max_kv_size` tokens from every
     /// plain `KVCache` layer whose live window exceeds the configured
@@ -1185,7 +1180,7 @@ impl BatchScheduler {
     /// `RotatingKVCache` and are never stored in the pool's
     /// `Vec<KVCache>`, so they are unaffected.
     ///
-    /// **Issue #603 H1**: `max_kv_size` has already been validated to fit
+    /// ** H1**: `max_kv_size` has already been validated to fit
     /// in `i32` by [`crate::server::cli_input::resolve_max_kv_size`], so
     /// the `i32::try_from` here is a defensive belt-and-suspenders fallback
     /// — it returns silently rather than panicking, because the validation
@@ -1194,7 +1189,7 @@ impl BatchScheduler {
     /// cap is enforced on the **live window** — the monotonic `offset`
     /// keeps growing past the cap by design.
     ///
-    /// **Issue #603 H2**: called from every cache-mutating path:
+    /// ** H2**: called from every cache-mutating path:
     /// [`Self::execute_full_prefill`], [`Self::start_chunked_prefill`],
     /// [`Self::continue_chunked_prefill`], [`Self::decode_single_step`],
     /// and [`Self::execute_batched_decode`].
@@ -1221,8 +1216,7 @@ impl BatchScheduler {
         for cache in caches {
             // `live_len() = offset - live_start`. We trim against the live
             // window length (what attention sees), not the monotonic
-            // `offset` (which keeps growing by design — see #603 RoPE
-            // invariant in `KVCache::trim_front`).
+            // `offset` (which keeps growing by design — RoPE invariant in `KVCache::trim_front`).
             let live_len = cache.live_len();
             // `checked_sub` so a future arithmetic regression cannot
             // silently wrap into a negative trim depth that produces a
@@ -1241,7 +1235,7 @@ impl BatchScheduler {
         }
 
         let num_layers = self.model.num_layers();
-        // Issue #545: prefer the batched KV quant config when active so
+        // prefer the batched KV quant config when active so
         // its `base_mode()` drives paged-layout selection (Turbo-aware
         // when scheme is TurboQuant, otherwise the legacy uniform path).
         let effective_mode = if self.batch_kv_quant.is_enabled() {
@@ -1249,11 +1243,11 @@ impl BatchScheduler {
         } else {
             self.kv_cache_mode
         };
-        // Issue #508: when a Turbo4 cache mode is configured, build a
-        // packed-aware paged layout (PR #502 / issue #482) so per-page
+        // when a Turbo4 cache mode is configured, build a
+        // packed-aware paged layout so per-page
         // sidecar accounting and detach/adopt round-trip work correctly.
         // Fp16/Int8 keep the historical `PagedKvLayout::uniform` path —
-        // bit-identical to pre-#508.
+        // bit-identical to earlier.
         let paged_layout = if Self::is_turbo_mode(effective_mode) {
             // The actual per-token packed sidecar size depends on the
             // model's V head_dim, which is not known to the scheduler
@@ -1287,20 +1281,20 @@ impl BatchScheduler {
 
     /// Whether the supplied KV cache mode requires Turbo*-aware paged
     /// layout (per-page sidecar storage on `PagedBlockPool`) and is
-    /// **incompatible** with the issue #603 `--max-kv-size` cap.
+    /// **incompatible** with the `--max-kv-size` cap.
     ///
     /// All Turbo modes carry per-token rotation state in their sidecars
     /// (`turbo_params` / `turbo3_params` / `v_packed` / `v_norms` /
     /// `cold_offset`) that `KVCache::trim_front` cannot safely truncate
-    /// from the head. Issue #603 H3: `Turbo3Asym` belongs in this set —
+    /// from the head. H3: `Turbo3Asym` belongs in this set
     /// the 3-bit V sidecars (`v_packed` with 24-bit groups + `v_norms`)
     /// have the same per-token contract as `Turbo4*`. Omitting it from
     /// this match silently allowed `--max-kv-size` + `fp16+turbo3` to ship
     /// without the operator-facing warning that the cap will not be
     /// honoured on the V side.
     ///
-    /// Used by: scheduler dispatch for sequence allocation (#508), the
-    /// `--max-kv-size` + Turbo combination warning (#603).
+    /// Used by: scheduler dispatch for sequence allocation, the
+    /// `--max-kv-size` + Turbo combination warning.
     #[inline]
     fn is_turbo_mode(mode: KVCacheMode) -> bool {
         matches!(
@@ -1426,7 +1420,7 @@ impl BatchScheduler {
             sampling.token_bias = self.token_bias.clone();
         }
 
-        // Epic #416 / issue #421: before allocating a fresh KV-cache slot,
+        // before allocating a fresh KV-cache slot,
         // probe the prompt-prefix cache for a reusable detached set. On a
         // hit, adopt under a brand-new SequenceId and record how many
         // leading tokens the prefill can skip. On a miss (which includes
@@ -1438,7 +1432,7 @@ impl BatchScheduler {
         // and video frame placeholders expand later inside
         // `prepare_request_vlm_embeddings`), so matching against it risks
         // reusing a KV slice built for a different media payload. Support
-        // for image-aware cache keys is tracked separately in issue #425.
+        // for image-aware cache keys is tracked separately.
         let is_multimodal = !images.is_empty() || !audio.is_empty() || !videos.is_empty();
         let ctx_ref = if is_multimodal {
             None
@@ -1450,7 +1444,7 @@ impl BatchScheduler {
                 Some((adopted_id, matched_len)) => (adopted_id, matched_len, matched_len),
                 None => {
                     // Miss or feature disabled → regular allocate.
-                    // Issue #423: count misses only when the cache is actually
+                    // count misses only when the cache is actually
                     // active (ctx_ref is Some) to avoid inflating the miss
                     // counter for multimodal or cache-disabled requests.
                     if ctx_ref.is_some() {
@@ -1490,7 +1484,7 @@ impl BatchScheduler {
             }
         };
 
-        // Issue #540 / mlx-vlm PR #1095: per-sequence MRoPE alignment.
+        // mlx-vlm PR #1095: per-sequence MRoPE alignment.
         //
         // The Qwen VL families compute the MRoPE position-id tensor and
         // `rope_deltas` scalar inside `prepare_request_vlm_embeddings`
@@ -1502,7 +1496,7 @@ impl BatchScheduler {
         // the call is a no-op for everything else.
         self.model.bind_qwen_vl_mrope_state_to_sequence(seq_id);
 
-        // Issue #543: per-sequence `per_layer_inputs` for Gemma 4
+        // per-sequence `per_layer_inputs` for Gemma 4
         // E2B/E4B. `prepare_request_vlm_embeddings` writes the
         // freshly projected tensor to the VL model's fallback slot;
         // this call drains the slot into a per-`SequenceId` map so a
@@ -1523,7 +1517,7 @@ impl BatchScheduler {
 
         let decode_state = StreamingDecodeState::new(&self.tokenizer, &prompt_tokens);
 
-        // Issue #409: resolve the effective thinking-token budget for this
+        // resolve the effective thinking-token budget for this
         // sequence from the per-request override + server default. The route
         // layer supplies `thinking_enter_block_on_start` as `true` when the
         // rendered prompt primes `<think>` (chat endpoints) and `false` for
@@ -1588,7 +1582,7 @@ impl BatchScheduler {
             token_history: Vec::new(),
             merged_eos: Vec::new(),
             thinking,
-            // Issue #550: forward the structured-output constraint built by
+            // forward the structured-output constraint built by
             // the route layer so the per-step sampling path can consult it.
             structured: options.structured.clone(),
         };
@@ -1708,7 +1702,7 @@ impl BatchScheduler {
             None => return,
         };
 
-        // Issue #670 / #674: speculative-decoding burst path.
+        // speculative-decoding burst path.
         //
         // Why: the existing speculative round loops
         // (`MtpGenerator::generate`, `DFlashGenerator::run`, plus their
@@ -1726,7 +1720,7 @@ impl BatchScheduler {
         // prefix — see
         // `speculative_burst::should_burst_for_sequence`).
         //
-        // Issue #674 adds the B>1 batched burst: when `max_batch_size >
+        // adds the B>1 batched burst: when `max_batch_size >
         // 1` and the dequeued head sequence is speculative-eligible, the
         // scheduler collects an equal-prompt-length window of additional
         // eligible requests and drives them all through the batched
@@ -1776,8 +1770,7 @@ impl BatchScheduler {
     }
 
     /// Attempt to handle the dequeued head sequence through the
-    /// speculative-decoding burst path (issue #670 B=1 / issue #674
-    /// batched B>1).
+    /// speculative-decoding burst path (B=1 / batched B>1).
     ///
     /// Returns:
     /// - `None` — a burst (B=1 or batched) handled the request(s)
@@ -1797,8 +1790,7 @@ impl BatchScheduler {
     /// [`super::queue::PrefillQueue::drain_matching_window`]). The
     /// batched MTP target adapter requires a rectangular `[B, L]`
     /// prefill, and equal-length prompts make the batched prefill
-    /// byte-identical to B separate B=1 prefills (acceptance item 1 of
-    /// issue #674). The window also requires matching `max_tokens` and
+    /// byte-identical to B separate B=1 prefills (acceptance item 1). The window also requires matching `max_tokens` and
     /// sampling config so the single per-window sampler / budget the
     /// batched round loop takes is correct for every row. B > 1 also
     /// applies [`super::speculative_burst::can_join_batched_burst_window`]
@@ -1925,7 +1917,7 @@ impl BatchScheduler {
                     // record its per-sequence metric — the batched
                     // analogue of the B=1 cleanup below.
                     //
-                    // Issue #688: `BatchedBurstRow` now carries the
+                    // `BatchedBurstRow` now carries the
                     // per-row prompt/committed token vectors and the
                     // healthy-finish flag, so the batched arm calls
                     // `donate_finished_sequence_cache` per row BEFORE
@@ -2019,7 +2011,7 @@ impl BatchScheduler {
                 }) => {
                     // Burst handled the full request lifecycle inline.
                     //
-                    // Issue #673: donate the finished sequence's KV
+                    // donate the finished sequence's KV
                     // cache back to the prompt-cache store BEFORE the
                     // `remove`/`release` below — `donate_finished_sequence_cache`
                     // both consumes the `prompt_cache_seq_ctx` entry and
@@ -2132,7 +2124,7 @@ impl BatchScheduler {
             return;
         }
 
-        // Epic #416 / issue #421: any sequence that adopted a cached prefix
+        // any sequence that adopted a cached prefix
         // cannot participate in the padded batched prefill path because the
         // KV-history offsets differ across sequences. Take the single-
         // sequence path for those so their `prefill_start_offset` is
@@ -2285,7 +2277,7 @@ impl BatchScheduler {
 
     /// Full-prompt prefill: process the entire prompt in one pass.
     ///
-    /// Epic #416 / issue #421: when `seq.prefill_start_offset > 0`, a
+    /// when `seq.prefill_start_offset > 0`, a
     /// prompt-cache hit has installed the first `prefill_start_offset` tokens
     /// of KV state on this sequence. Only the suffix tokens are fed to the
     /// model. The VLM-prefix path deliberately opts out of cache adoption at
@@ -2425,7 +2417,7 @@ impl BatchScheduler {
         };
         self.sync_sequence_storage(seq.seq_id);
 
-        // Issue #603 H2: enforce the `--max-kv-size` cap at the end of a
+        // H2: enforce the `--max-kv-size` cap at the end of a
         // full prefill before the sequence transitions to decode. A long
         // prompt can overshoot the cap during a single forward pass; without
         // this trim the first decode step would start with a too-wide live
@@ -2444,7 +2436,7 @@ impl BatchScheduler {
     /// Begin a chunked prefill: process the first chunk and store the
     /// sequence for continuation on subsequent ticks.
     ///
-    /// Epic #416 / issue #421: `seq.prefill_start_offset` skips over the
+    /// `seq.prefill_start_offset` skips over the
     /// leading tokens that the adopted prompt-cache entry already covers,
     /// so the first chunk starts *after* the cached prefix.
     fn start_chunked_prefill(&mut self, mut seq: SequenceInfo) {
@@ -2544,7 +2536,7 @@ impl BatchScheduler {
         }
         self.sync_sequence_storage(seq.seq_id);
 
-        // Issue #603 H2: enforce the `--max-kv-size` cap after each
+        // H2: enforce the `--max-kv-size` cap after each
         // prefill chunk so the live window cannot grow unbounded across
         // chunks of a long prompt. A 100k-token prompt with `--max-kv-size
         // 4096` would otherwise see the cap engage only after the entire
@@ -2654,7 +2646,7 @@ impl BatchScheduler {
         };
         self.sync_sequence_storage(seq.seq_id);
 
-        // Issue #603 H2: enforce the `--max-kv-size` cap after each
+        // H2: enforce the `--max-kv-size` cap after each
         // continuation chunk so a multi-chunk prefill stays bounded across
         // all chunks, not just at the very end. Cheap early-return when no
         // cap is configured.
@@ -2697,7 +2689,7 @@ impl BatchScheduler {
         mut token_history: Vec<i32>,
         needs_history: bool,
     ) {
-        // Issue #550: apply structured-output mask to the prefill logits
+        // apply structured-output mask to the prefill logits
         // before sampling the first token so the very first emitted token
         // already conforms to the schema.
         let logits_for_sampling = if let Some(constraint) = seq.structured.clone() {
@@ -2730,7 +2722,7 @@ impl BatchScheduler {
         mlxcel_core::eval(&first_token_arr);
         let sampled_first_token = mlxcel_core::item_i32(&first_token_arr);
 
-        // Issue #550: advance the matcher state with the just-sampled token.
+        // advance the matcher state with the just-sampled token.
         // If consume_token errors, transition the sequence to Finished(Error)
         // and surface a clean SSE error event rather than leaking
         // non-conforming output.
@@ -2751,14 +2743,14 @@ impl BatchScheduler {
             return;
         }
 
-        // Issue #409: thinking-budget override. Qwen3 chat templates prime
+        // thinking-budget override. Qwen3 chat templates prime
         // `<think>\n`, so the first prefill-completion token is already
         // inside the reasoning block when `enter_block_on_start == true`.
         let first_token = Self::apply_thinking_budget(&mut seq.thinking, sampled_first_token);
 
         seq.first_token_time = Some(Instant::now());
 
-        // Issue #409: if the budget fired and substituted the first token,
+        // if the budget fired and substituted the first token,
         // drop the logprob below (computed against the sampled token) so the
         // streamed metadata stays consistent with the emitted token text.
         let override_fired = first_token != sampled_first_token;
@@ -2804,7 +2796,7 @@ impl BatchScheduler {
         // Optionally compute logprobs for the first token. When the override
         // fired, the sampled token differs from the emitted `first_token`;
         // suppress logprob emission in that case to keep token text and
-        // logprob metadata consistent (issue #409).
+        // logprob metadata consistent.
         let token_lp = if override_fired {
             None
         } else {
@@ -2913,7 +2905,7 @@ impl BatchScheduler {
                 victim.generated_tokens.len()
             );
 
-            // Issue #540 follow-up: when the victim is a VL request the
+            // follow-up: when the victim is a VL request the
             // text model holds a per-sequence MRoPE entry under the old
             // seq id. `release_sequence_caches` below would drop it, but
             // `prepare_request_vlm_embeddings` does NOT re-run on
@@ -2925,7 +2917,7 @@ impl BatchScheduler {
             // an empty snapshot and the rebind is a no-op.
             let mrope_snapshot = self.model.take_qwen_vl_mrope_entry(victim.seq_id);
 
-            // Issue #543: same lifecycle invariant for Gemma 4 E2B/E4B
+            // same lifecycle invariant for Gemma 4 E2B/E4B
             // `per_layer_inputs`. The tensor is projected exactly once
             // by `prepare_request_vlm_embeddings` at enqueue time and
             // is consumed at prefill time; preemption-and-reallocate
@@ -2967,10 +2959,10 @@ impl BatchScheduler {
                     // Re-install the previously-saved MRoPE entry under
                     // the new seq id so re-prefill resolves the same
                     // per-row delta the original prefill computed
-                    // (issue #540 follow-up).
+                    // (follow-up).
                     self.model
                         .install_qwen_vl_mrope_entry(new_id, mrope_snapshot);
-                    // Issue #543: same for Gemma 4 `per_layer_inputs`.
+                    // same for Gemma 4 `per_layer_inputs`.
                     // The tensor is reused unchanged across re-prefill
                     // because both depend only on the request's
                     // input_ids (no decode-time updates).
@@ -3019,7 +3011,7 @@ impl BatchScheduler {
 
     /// Select the eviction victim based on the configured policy.
     ///
-    /// Issue #550 follow-up: sequences with an attached structured-output
+    /// follow-up: sequences with an attached structured-output
     /// constraint are excluded from the candidate set. Preemption resets
     /// `generated_tokens`, the streaming decoder, and the KV cache, but the
     /// `llguidance` matcher carries grammar progress that cannot be safely
@@ -3109,7 +3101,7 @@ impl BatchScheduler {
 
         let b = seq_ids.len();
 
-        // Issue #603: trim per-sequence plain KVCache layers before the batched
+        // trim per-sequence plain KVCache layers before the batched
         // forward pass so all sequences stay within the --max-kv-size bound.
         // Sliding-window (model-internal RotatingKVCache) and Turbo-quantized
         // caches are unaffected (trim_front returns 0 for Turbo modes).
@@ -3180,7 +3172,7 @@ impl BatchScheduler {
             let seq_logits =
                 mlxcel_core::slice(&logits, &[i as i32, 0, 0], &[i as i32 + 1, 1, i32::MAX]);
 
-            // Issue #550: when the sequence has a structured-output
+            // when the sequence has a structured-output
             // constraint, apply the schema mask to the per-sequence logits
             // before sampling. Failures here surface as a clean
             // FinishReason::Error rather than silent non-conforming output.
@@ -3210,7 +3202,7 @@ impl BatchScheduler {
             // Use cached token_history (incrementally maintained) instead of
             // rebuilding per step. Use cached merged_eos computed once at prefill.
             //
-            // Issue #550 follow-up: we capture `sampled` separately from
+            // follow-up: we capture `sampled` separately from
             // `final_id` so the structured-output matcher (below) can be
             // advanced by the *pre-override* token. The matcher's mask
             // describes which token ids are grammatically legal at this
@@ -3226,7 +3218,7 @@ impl BatchScheduler {
                     sample_token_optimized(&logits_for_sampling, &seq.sampling, &seq.token_history);
                 mlxcel_core::eval(&token_arr);
                 let sampled = mlxcel_core::item_i32(&token_arr);
-                // Issue #409: apply the thinking-budget override first so that
+                // apply the thinking-budget override first so that
                 // when the override fires (sampled != final_id) we can skip
                 // the log-softmax work entirely. The logprob metadata would
                 // be dropped anyway because the emitted `</think>` differs
@@ -3243,7 +3235,7 @@ impl BatchScheduler {
                 (sampled, final_id, lp)
             };
 
-            // Issue #550: advance the matcher state with the *pre-override*
+            // advance the matcher state with the *pre-override*
             // sampled token (`sampled_token`), not the post-override
             // `token_val`. The matcher derived its mask from the unaltered
             // logits, so feeding it `final_id` after a thinking-budget
@@ -3334,7 +3326,7 @@ impl BatchScheduler {
             *seq.generated_tokens.last().unwrap_or(&0)
         };
 
-        // Issue #603: trim the oldest tokens from plain KVCache layers so the
+        // trim the oldest tokens from plain KVCache layers so the
         // live window stays within the configured --max-kv-size bound before
         // each decode forward pass. Sliding-window layers are managed by the
         // model and bypass this pool path; Turbo-quantized caches silently skip
@@ -3355,7 +3347,7 @@ impl BatchScheduler {
         };
         self.sync_sequence_storage(seq_id);
 
-        // Issue #550: apply structured-output mask to per-step logits when
+        // apply structured-output mask to per-step logits when
         // the sequence has an attached constraint. Errors abort the
         // sequence cleanly rather than emitting non-conforming output.
         let constraint_clone = self
@@ -3384,7 +3376,7 @@ impl BatchScheduler {
         // and cached merged_eos (computed once during prefill) to avoid
         // per-step allocation and reconstruction overhead.
         //
-        // Issue #550 follow-up: we capture `sampled` separately from
+        // follow-up: we capture `sampled` separately from
         // `final_id`. The structured-output matcher (below) must be
         // advanced by the pre-override token because its mask was derived
         // from the unaltered logits; passing the post-override forced
@@ -3395,7 +3387,7 @@ impl BatchScheduler {
                 sample_token_optimized(&logits_for_sampling, &seq.sampling, &seq.token_history);
             mlxcel_core::eval(&token_arr);
             let sampled = mlxcel_core::item_i32(&token_arr);
-            // Issue #409: apply the thinking-budget override first so that
+            // apply the thinking-budget override first so that
             // when the override fires the log-softmax work is skipped — the
             // logprob metadata for the sampled token would be dropped anyway
             // (token text and logprob `token_id` must stay consistent), so
@@ -3409,7 +3401,7 @@ impl BatchScheduler {
             (sampled, final_id, lp)
         };
 
-        // Issue #550: advance the matcher state with the *pre-override*
+        // advance the matcher state with the *pre-override*
         // sampled token. See the parallel comment in
         // `execute_batched_decode` for why this must not be `token_val`.
         if let Some(constraint) = constraint_clone
@@ -3557,7 +3549,7 @@ impl BatchScheduler {
                 );
                 let _ = seq.response_tx.send(GenerateEvent::Done(result));
 
-                // Epic #416 / issue #421: donate the full KV cache back to
+                // donate the full KV cache back to
                 // the prompt-cache store on *healthy* finishes (Stop /
                 // Length / Cancelled) so the next turn of the same
                 // conversation can adopt it. `Finished(Error)` paths bypass

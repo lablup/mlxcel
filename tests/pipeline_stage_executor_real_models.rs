@@ -351,7 +351,7 @@ fn pipeline_stage_worker_loop_glm_moe_dsa_real_model_parity() {
     );
 }
 
-// Issue #345 families — stage executor parity against the non-PP reference
+// families — stage executor parity against the non-PP reference
 // path on a short prompt. Each test is gated behind `#[ignore]` because it
 // requires real model weights to be present under `models/`; operators can
 // opt in by downloading the listed HuggingFace MLX Community checkpoint.

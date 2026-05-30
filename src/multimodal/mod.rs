@@ -21,8 +21,8 @@
 //! Modules:
 //! - `batched_dispatch`: shared per-row batched dispatch helper used by every
 //!   vision wrapper that needs `forward_batched_with_context_and_ids` to route
-//!   each row through `forward_with_sequence_id` (PR #558 / issue #542).
-//! - `gemma4_vl`: Gemma 4 mixed-length batching helpers (issue #542)
+//!   each row through `forward_with_sequence_id`.
+//! - `gemma4_vl`: Gemma 4 mixed-length batching helpers
 //! - `phi4mm_prompt`: Phi4MM `<|image_N|>` normalization and audio guard
 //! - `phi4_siglip_prompt`: Phi4-SigLIP `<image>` placeholder handling
 //! - `minicpmo_prompt`: MiniCPM-o image placeholder expansion and bounds
@@ -31,7 +31,7 @@
 //! - `phi3v_prompt`: Phi3V image-tag normalization
 //! - `vlm_prompt`: generic image-token block expansion
 //! - `vlm_runtime`: image preprocessing and embedding preparation shared by CLI/server
-//! - `video`: generic VLM video frame extraction and FPS sampling (issue #553)
+//! - `video`: generic VLM video frame extraction and FPS sampling
 
 pub mod batched_dispatch;
 pub mod gemma4_vl;

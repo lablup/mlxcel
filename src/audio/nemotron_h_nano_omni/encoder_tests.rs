@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Synthetic-weight encoder tests for the Parakeet path (issue #582).
+//! Synthetic-weight encoder tests for the Parakeet path.
 //!
 //! These tests build a tiny `NemotronOmniSoundEncoder` from manually
 //! crafted weights and verify shape / dtype contracts. They do NOT
@@ -409,7 +409,7 @@ fn rel_position_first_row_matches_analytic_frequencies() {
 /// and verify the post-subsampling token count matches the
 /// configured-formula prediction.
 ///
-/// This is the integration regression guard for issue #582 CRITICAL
+/// This is the integration regression guard CRITICAL
 /// #2: the bug we are guarding against is a length/shape mismatch
 /// between what the prompt-expansion path expects (`subsampling_output_length(num_frames)`)
 /// and what the encoder actually emits.

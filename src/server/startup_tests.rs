@@ -27,7 +27,7 @@ use crate::server::chat_template::ChatMessage;
 use crate::server::media::scan_insecure_allowlist_dirs;
 use crate::server::{DecodeStorageBackend, PipelineParallelRuntimeConfig};
 // Env-var-sensitive tests must serialize through the crate-wide `ENV_LOCK`
-// (issue #573); per-module locks race with env mutations in unrelated
+// per-module locks race with env mutations in unrelated
 // modules of the same test binary.
 use crate::test_support::env_lock::env_lock;
 
@@ -979,7 +979,7 @@ fn validate_tensor_parallel_startup_accepts_gemma4_multi_rank_runtime() {
 }
 
 // -------------------------------------------------------------------------
-// Issue #424 — prompt-cache startup integration tests
+// prompt-cache startup integration tests
 // -------------------------------------------------------------------------
 
 /// `build_server_config` with `enabled=false` produces a `ServerConfig`
@@ -1033,7 +1033,7 @@ fn build_server_config_propagates_prompt_cache_capacity() {
     assert_eq!(config.prompt_cache.capacity_bytes, CUSTOM_CAP);
 }
 
-// -- Issue #596: detect_model_media_support ----------------------------------
+// -- detect_model_media_support ----------------------------------
 
 /// `detect_model_media_support` reports `video=true` only when the
 /// `config.json` resolves to a Gemma 4 VLM. Other VLM types (e.g. plain
@@ -1103,7 +1103,7 @@ fn detect_model_media_support_text_only_disables_video() {
     std::fs::remove_dir_all(dir).unwrap();
 }
 
-// -- PR #600 review (MEDIUM-2): startup TOCTOU writability scan --------------
+// -- review (MEDIUM-2): startup TOCTOU writability scan --------------
 
 /// Unix-only: `scan_insecure_allowlist_dirs` reports a world-writable
 /// directory so the server's startup hook can warn the operator. The

@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Real-model regression tests for the auto-partitioner (issue #348).
+//! Real-model regression tests for the auto-partitioner.
 //!
 //! These tests require local model weights and the compiled `mlxcel`
 //! binary. They are `#[ignore]`-gated so the default CI run skips them;
@@ -21,7 +21,7 @@
 //!
 //! What the test verifies: the auto-partitioner now produces a valid
 //! 2-stage plan for Gemma 4 without any manual `--pp-layers` flag. Before
-//! issue #348, operators had to specify layer ranges by hand because the
+//! operators had to specify layer ranges by hand because the
 //! partitioner did not understand KV-shared layer adjacency.
 
 mod common;
@@ -45,7 +45,7 @@ fn run_generate(args: &[&str]) -> (bool, String, String) {
 /// Run `gemma-4-e2b-it-4bit` across 2 stages with zero manual partitioning
 /// and assert the generated output is non-empty.
 ///
-/// Without the issue #348 work, this invocation fails because the naive
+/// Without the work, this invocation fails because the naive
 /// partitioner cuts the model between a KV-shared source layer and its
 /// consumer, stranding the cache on the wrong stage. With the adjacency-
 /// aware partitioner the plan is valid by default and generation
@@ -83,7 +83,7 @@ fn gemma4_auto_partition_two_stage_no_manual_layers() {
     let single_body = extract_generated_body(&single_stdout).expect("missing single-stage body");
 
     // Auto-partition 2-stage path. No `--pp-layers`. This is the
-    // regression guard for issue #348 — before this sub-issue landed, the
+    // regression guard — before this sub-issue landed, the
     // same invocation required a manual layer specification.
     let (ok_pp, pp_stdout, pp_stderr) = run_generate(&[
         "generate",
@@ -101,7 +101,7 @@ fn gemma4_auto_partition_two_stage_no_manual_layers() {
     ]);
     assert!(
         ok_pp,
-        "auto-partition 2-stage generation failed (issue #348 regression):\n\
+        "auto-partition 2-stage generation failed (regression):\n\
          stdout: {pp_stdout}\nstderr: {pp_stderr}"
     );
     let pp_body = extract_generated_body(&pp_stdout).expect("missing 2-stage body");

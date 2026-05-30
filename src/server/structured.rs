@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Issue #550: OpenAI-compatible `response_format: {"type": "json_schema", ...}`
+//! OpenAI-compatible `response_format: {"type": "json_schema",...}`
 //! support via constrained decoding.
 //!
 //! Mirrors the upstream mlx-vlm PR #1047 design but in pure Rust:
@@ -74,8 +74,7 @@ use crate::tokenizer::MlxcelTokenizer;
 
 /// Maximum serialized size (UTF-8 bytes) for a user-supplied JSON schema.
 ///
-/// 64 KiB is generous for hand-written schemas (the OpenAI examples that
-/// motivated issue #550 are all under 4 KiB) but small enough that an
+/// 64 KiB is generous for hand-written schemas (the OpenAI examples that motivated are all under 4 KiB) but small enough that an
 /// attacker cannot use the schema as a payload-size amplification vector
 /// against the grammar compiler.
 pub(crate) const MAX_SCHEMA_BYTES: usize = 64 * 1024;
@@ -136,7 +135,7 @@ pub enum StructuredOutputError {
 
     /// The active tokenizer is incompatible with `llguidance`. mlxcel's
     /// SentencePiece and Tiktoken backends do not yet expose a byte-level
-    /// vocabulary that `llguidance` can drive (issue #550 MVP scope).
+    /// vocabulary that `llguidance` can drive (MVP scope).
     #[error("tokenizer backend not supported for structured outputs: {0}")]
     UnsupportedTokenizer(String),
 
@@ -277,7 +276,7 @@ fn resolve_tok_env(serialized_bytes: &[u8]) -> Result<(TokenizerFingerprint, Tok
 // Per-request constraint
 // ---------------------------------------------------------------------------
 
-/// Per-request constrained-decoding state (issue #550).
+/// Per-request constrained-decoding state.
 ///
 /// One [`StructuredOutputConstraint`] is built per HTTP request that supplies
 /// a `response_format: {"type": "json_schema", ...}`. The scheduler keeps it
@@ -663,7 +662,7 @@ pub fn extract_json_schema_from_response_format(
         }
         "json_object" => Err(StructuredOutputError::InvalidRequest(
             "response_format type \"json_object\" is not supported; supply \
-             type=\"json_schema\" with a schema (issue #550)"
+             type=\"json_schema\" with a schema"
                 .to_string(),
         )),
         other => Err(StructuredOutputError::InvalidRequest(format!(

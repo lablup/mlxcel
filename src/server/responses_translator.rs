@@ -13,7 +13,7 @@
 // limitations under the License.
 
 //! Bidirectional translator between the OpenAI Responses API and the
-//! internal chat-completions request/response pipeline (issue #622).
+//! internal chat-completions request/response pipeline.
 //!
 //! ## Inbound
 //!

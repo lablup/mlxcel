@@ -13,7 +13,7 @@
 // limitations under the License.
 
 //! Concrete [`crate::SurgeryOp`] implementations for Axis A
-//! (Epic #363, issues A5–A9).
+//! (issues A5–A9).
 //!
 //! The submodules in here each own a single operation. They share two
 //! conventions:

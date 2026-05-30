@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! `InterpolateOp` — Axis A operation #9 (issue #378).
+//! `InterpolateOp` — Axis A operation #9.
 //!
 //! Blends two donor checkpoints tensor-by-tensor and writes the
 //! result back into the base [`WeightMap`]. Supported methods:
@@ -51,7 +51,7 @@
 //!   precision when blending two bf16 checkpoints.
 //! - **Quantized layouts (`u8`/`u32`/integer-coded tensors)**:
 //!   interpolation is *not* defined on the packed quantized
-//!   representation. The first-cut policy (see issue #378 §"Scope")
+//!   representation. The first-cut policy (§"Scope")
 //!   is to require the base, source_a, and source_b to share the
 //!   exact same dtype. Any integer dtype encountered errors with a
 //!   clear message directing the user to either dequantize ahead of
@@ -147,7 +147,7 @@ pub struct InterpolateOp {
     /// Donor B safetensors path. Loaded on every `apply` call.
     source_b: PathBuf,
     /// Mixing ratio `t`. Validated to `[0.0, 1.0]` by the config
-    /// parser (#369); defended again here against direct construction.
+    /// parser; defended again here against direct construction.
     ratio: f32,
     /// Interpolation method (SLERP or LERP).
     method: InterpolateMethod,
@@ -452,7 +452,7 @@ fn slerp_in_f32(a: &MlxArray, b: &MlxArray, t: f32) -> UniquePtr<MlxArray> {
 
 #[cfg(test)]
 mod tests {
-    //! Unit tests covering the acceptance criteria in issue #378:
+    //! Unit tests covering the acceptance criteria in
     //!
     //! - (a-1) SLERP on a small known fixture.
     //! - (a-2) LERP on a small fixture.

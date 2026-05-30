@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Unit and property tests for `cache/detach.rs` (sub-issue #417).
+//! Unit and property tests for `cache/detach.rs`.
 //!
 //! Organised as:
 //! 1. `KVCache::trim_to` semantics (mid-buffer, trim-to-zero, error paths).
@@ -626,7 +626,7 @@ fn property_detach_adopt_decode_matches_fresh_prefill_int8_within_tolerance() {
 }
 
 // ---------------------------------------------------------------------------
-// DetachedKVCache::trim_to / DetachedCacheSet::truncate_to (issue #580)
+// DetachedKVCache::trim_to / DetachedCacheSet::truncate_to
 // ---------------------------------------------------------------------------
 
 /// Build a [`DetachedCacheSet`] with `num_layers` Fp16 layers, each carrying
@@ -859,7 +859,7 @@ fn detached_cache_set_truncate_to_negative_returns_error() {
 
 #[test]
 fn detached_cache_set_truncate_to_then_adopt_then_decode_matches_partial_prefill() {
-    // The key correctness property for issue #580: truncate the detached
+    // The key correctness property for truncate the detached
     // set to N tokens, adopt, then decode M more tokens. The resulting
     // cache state must equal a fresh prefill of the first N tokens followed
     // by the same M tokens — i.e. truncate is a faithful "rewind to N"

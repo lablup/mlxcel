@@ -101,7 +101,7 @@ fn test_fast_rope_batched_matches_per_sequence_offsets() {
     assert!(item_bool(&close));
 }
 
-/// Uniform-batch fast path (issue #556 / mlx-vlm PR #1055): when every
+/// Uniform-batch fast path (mlx-vlm PR #1055): when every
 /// row shares the same RoPE offset, `fast_rope_batched` collapses to a
 /// single full-batch `fast_rope` call. The collapsed result must be
 /// bit-equivalent (within float tolerance) to the per-row slice / concat
@@ -837,7 +837,7 @@ fn test_compiled_gelu_topk_preserves_bf16_and_f16_dtype() {
 #[test]
 fn test_gelu_approx_bf16_negative_values() {
     // Verify gelu_approx does not produce NaN for negative bf16 inputs.
-    // This was the root cause of issue #174: Gemma3 VLM 0-token generation.
+    // This was the root cause of Gemma3 VLM 0-token generation.
     let x_f32 = from_slice_f32(&[-10.0, -5.0, -1.0, 0.0, 1.0, 5.0, 10.0], &[1, 7]);
     let x_bf16 = astype(&x_f32, crate::dtype::BFLOAT16);
 
@@ -1178,7 +1178,7 @@ fn bench_compiled_vs_uncompiled_swiglu() {
     }
 }
 
-/// Regression test for issue #323: conv_input cache slice must be contiguous.
+/// Regression test for conv_input cache slice must be contiguous.
 ///
 /// MLX's `slice()` returns a lazy view that retains a reference to the source
 /// array in the computation graph (`{a}` input). Without wrapping the slice
@@ -1279,7 +1279,7 @@ fn test_conv_state_slice_is_contiguous_after_fix() {
 }
 
 // =================================================================================
-// Walsh–Hadamard Transform (WHT) tests for issue #470 / epic #458 (TurboQuant).
+// Walsh–Hadamard Transform (WHT) tests (TurboQuant).
 //
 // The MLX `hadamard_transform` op (bridged in lib.rs:1645 and wrapped as
 // `mlxcel_core::wht` in ops.rs) is the foundational primitive for the

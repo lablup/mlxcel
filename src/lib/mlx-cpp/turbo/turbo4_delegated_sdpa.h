@@ -15,22 +15,20 @@
 #pragma once
 
 // Fused dequant + SDPA Metal kernel launcher for `KVCacheMode::Turbo4Delegated`
-// (issue #528, follow-up to issue #527's K-side unification).
+// (follow-up to's K-side unification).
 //
 // The Turbo4Delegated cache stores V in two regions:
 // - cold body — `[B, H_kv, T_cold, D/2]` u8 packed Turbo4 indices plus
-//   `[B, H_kv, T_cold, 1]` fp16 per-token kernel rescale (`norm/|y_hat|`,
-//   issue #520).
+//   `[B, H_kv, T_cold, 1]` fp16 per-token kernel rescale (`norm/|y_hat|`).
 // - hot ring — `[B, H_kv, T_hot, D]` fp16 plain V tokens (no rotation).
 //
-// Pre-#528 the read path materialised the full FP16 cold body (via
-// `dequantize_v_turbo4` plus a memo from PR #525) and then ran a graph-level
+// Pre- the read path materialised the full FP16 cold body (via `dequantize_v_turbo4` plus a memo) and then ran a graph-level
 // `concatenate(cold_v_dequant, hot_v, axis=2)` plus standard SDPA. The memo
 // alone consumed `[B, H_kv, cold_offset, D]` fp16 of working set, undoing the
-// 4-bit V compression that defines the mode. Issue #528 retires that memo.
+// 4-bit V compression that defines the mode. retires that memo.
 //
 // `turbo4_delegated_sdpa_cold_weighted_sum` mirrors the Sparse-V kernel
-// `sparse_v_weighted_sum` (issue #505 / #520) — runtime-JIT-compiled via
+// `sparse_v_weighted_sum` — runtime-JIT-compiled via
 // `mlx::core::fast::metal_kernel`, identical input layout, identical
 // "unrotated weighted sum" output contract. The host caller composes:
 //
@@ -38,7 +36,7 @@
 //
 // where `cold_pre` is what this launcher returns. The packed cold V is read
 // directly inside the kernel; the dequantised cold V is **never** written to
-// global memory. That is the whole point of issue #528.
+// global memory. That is the whole point.
 //
 // The hot-side weighted sum (`attn_hot @ hot_v`) is kept in the host MLX
 // graph (single small matmul, T_hot ≤ DELEGATED_HOT_MAX = 1024) — the per-
@@ -50,7 +48,7 @@
 // `mlx::core::Shape`, `mlx::core::float32`.
 //
 // Used by: `cpp/mlx_cxx_bridge.cpp::turbo4_delegated_cold_weighted_sum`,
-//          `cpp/mlx_cxx_bridge.cpp::turbo4_delegated_steel_sdpa` (issue #531).
+//          `cpp/mlx_cxx_bridge.cpp::turbo4_delegated_steel_sdpa`.
 
 #include <mlx/array.h>
 
@@ -69,7 +67,7 @@ namespace mlxcel::turbo {
 // - `v_packed_cold`:     `[B*Hkv, T_cold, D/2]` UINT8 — nibble-packed Turbo4
 //   V indices for the cold body.
 // - `v_rescale_cold`:    `[B*Hkv, T_cold]` FP16 — precomputed per-token
-//   rescale `norm[t] / max(|y_hat[t]|, 1e-10)` (issue #520).
+//   rescale `norm[t] / max(|y_hat[t]|, 1e-10)`.
 // - `codebook`:          `[16]` FP32 — Lloyd-Max centroids (4-bit).
 //
 // Template parameters (passed to the kernel as `int` template args):
@@ -94,7 +92,7 @@ namespace mlxcel::turbo {
 mlx::core::array turbo4_delegated_cold_weighted_sum(
     const mlx::core::array& attn_weights_cold,  // [B*Hq, Tq, T_cold] f32
     const mlx::core::array& v_packed_cold,      // [B*Hkv, T_cold, D/2] u8
-    const mlx::core::array& v_rescale_cold,     // [B*Hkv, T_cold] f16 (#520)
+    const mlx::core::array& v_rescale_cold,     // [B*Hkv, T_cold] f16
     const mlx::core::array& codebook,           // [16] f32
     int dim,
     int n_rep,
@@ -115,7 +113,7 @@ mlx::core::array turbo4_delegated_bulk_dequant_rotated(
     int dim);
 
 // Run the steel-attention-envelope fused SDPA kernel for Turbo4Delegated
-// (issue #531). One Metal dispatch performs the entire post-Q·K SDPA inline:
+// One Metal dispatch performs the entire post-Q·K SDPA inline:
 // numerically stable softmax over the full (cold + hot) score range, cold-V
 // dequant + weighted-sum from packed 4-bit storage, hot-V FP16 weighted-sum,
 // and per-Q normalisation. The kernel returns two FP32 buffers; the host
@@ -139,7 +137,7 @@ mlx::core::array turbo4_delegated_bulk_dequant_rotated(
 //   indices. May be empty (`T_cold == 0`) pre-fold; in that case pass a
 //   zero-shaped placeholder.
 // - `cold_rescale`:  `[B*Hkv, T_cold]` FP16 — precomputed per-token cold-V
-//   rescale `norm[t] / max(|y_hat[t]|, 1e-10)` (issue #520).
+//   rescale `norm[t] / max(|y_hat[t]|, 1e-10)`.
 // - `hot_v`:         `[B*Hkv, T_hot, D]` FP16 — plain FP16 hot V tokens. May
 //   be empty (`T_hot == 0`) immediately after a fold.
 // - `codebook`:      `[16]` FP32 — Lloyd-Max centroids.

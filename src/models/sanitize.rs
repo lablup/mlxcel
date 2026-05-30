@@ -972,14 +972,14 @@ pub fn load_and_sanitize_weights<P: AsRef<std::path::Path>>(
 /// keep bf16 as-is since they may support it natively.
 ///
 /// The optional `transform` parameter is the Axis A "weight-load
-/// surgery" hook (Epic #363, issue #365). It is invoked *after* basic
+/// surgery" hook. It is invoked *after* basic
 /// sanitization (tied embeddings, NVFP4 dequant, KV-shared stripping)
 /// and *before* the Apple Silicon bf16 → f16 conversion, so any
 /// transform observes weights in the same layout the model graph would
 /// see them. When `transform` is `None` the call is bit-exact identical
 /// to the pre-refactor `load_and_sanitize_weights` path.
 ///
-/// ## Active-pipeline fallback (issue #371 — A4)
+/// ## Active-pipeline fallback (— A4)
 ///
 /// When the explicit `transform` parameter is `None` *and* the
 /// `surgery` feature is enabled *and* the CLI has installed an active
@@ -992,7 +992,7 @@ pub fn load_and_sanitize_weights<P: AsRef<std::path::Path>>(
 /// When no `--surgery` flag is provided the active-pipeline slot is
 /// `None`, the snapshot fast-path returns `None` (a single relaxed
 /// `OnceLock::get` load), and the load path is byte-for-byte identical
-/// to the pre-#371 baseline. The same is true at compile time on
+/// to the earlier baseline. The same is true at compile time on
 /// builds with `--no-default-features` (no `surgery` feature → the
 /// active-pipeline lookup is compiled out entirely).
 ///
@@ -1045,11 +1045,11 @@ pub fn load_text_weights<P: AsRef<std::path::Path>>(
                 .is_some();
     }
 
-    // Axis A weight-load surgery hook (Epic #363). Runs after sanitization
+    // Axis A weight-load surgery hook. Runs after sanitization
     // and before precision conversion so transforms observe weights in
     // their final tied/dequantized layout.
     //
-    // Resolution order (issue #371, A4):
+    // Resolution order (A4):
     //   1. Explicit `transform` argument — used as-is (test fixtures and
     //      future programmatic callers that want to bypass the global slot).
     //   2. `surgery` feature active + CLI-installed active pipeline —

@@ -2,8 +2,8 @@
 // Direct C++ bridge implementation for MLX via cxx
 
 #include "mlx_cxx_bridge.h"
-#include "sparse_v_sdpa.h"  // Issue #505: fused Sparse-V SDPA kernel.
-#include "turbo4_delegated_sdpa.h"  // Issue #528: fused Turbo4Delegated SDPA kernel.
+#include "sparse_v_sdpa.h"  // fused Sparse-V SDPA kernel.
+#include "turbo4_delegated_sdpa.h"  // fused Turbo4Delegated SDPA kernel.
 #include "mlx/ops.h"
 #include "mlx/transforms.h"
 #include "mlx/compile.h"
@@ -110,7 +110,7 @@ void synchronize_stream(const MlxStream& stream) {
     mlx::core::synchronize(stream.inner);
 }
 
-// Thread-local stream surface (issue #556 / mlx-vlm PR #1050).
+// Thread-local stream surface (mlx-vlm PR #1050).
 //
 // Each `ThreadLocalStream` registers a TLS slot keyed by a stream
 // index. When a different thread first calls
@@ -5997,7 +5997,7 @@ std::unique_ptr<MlxArray> fused_metal4_attention(
     ));
 }
 
-// Issue #505 — Fused Sparse-V SDPA Metal kernel launcher. Implementation in
+// Fused Sparse-V SDPA Metal kernel launcher. Implementation in
 // `src/lib/mlx-cpp/turbo/sparse_v_sdpa.cpp`; we forward the call here so the
 // new symbol shows up in the cxx-bridge ABI without bloating the bridge .cpp.
 std::unique_ptr<MlxArray> turbo_sparse_v_weighted_sum(
@@ -6019,12 +6019,12 @@ std::unique_ptr<MlxArray> turbo_sparse_v_weighted_sum(
     return std::make_unique<MlxArray>(std::move(out));
 }
 
-// Issue #528 — Fused Turbo4Delegated cold-V weighted-sum kernel launcher.
+// Fused Turbo4Delegated cold-V weighted-sum kernel launcher.
 // Implementation in `src/lib/mlx-cpp/turbo/turbo4_delegated_sdpa.cpp`; we
 // forward the call here so the new symbol shows up in the cxx-bridge ABI
 // without bloating the bridge .cpp. The unrotated cold weighted sum returned
 // here is paired with a host-side hot V matmul; the dequantised cold V never
-// materialises in global memory (the whole point of issue #528).
+// materialises in global memory (the whole point).
 std::unique_ptr<MlxArray> turbo4_delegated_cold_weighted_sum(
     const MlxArray& attn_weights_cold,
     const MlxArray& v_packed_cold,
@@ -6057,7 +6057,7 @@ std::unique_ptr<MlxArray> turbo4_delegated_bulk_dequant_rotated(
     return std::make_unique<MlxArray>(std::move(out));
 }
 
-// Issue #531 — Steel-attention-envelope fused Turbo4Delegated SDPA bridge.
+// Steel-attention-envelope fused Turbo4Delegated SDPA bridge.
 // Wraps the launcher in `src/lib/mlx-cpp/turbo/turbo4_delegated_sdpa.cpp` and
 // repackages the std::vector<mlx::core::array> return into the `cxx`-friendly
 // `Turbo4DelegatedSteelOutputs` struct (cxx does not directly model multiple
@@ -6118,7 +6118,7 @@ std::unique_ptr<MlxArray> loaded_weights_take(MlxLoadedWeights& w, size_t index)
     return std::move(w.arrays.at(index));
 }
 
-// Issue #531 — steel SDPA output takers. The cxx bridge does not directly
+// steel SDPA output takers. The cxx bridge does not directly
 // model destructuring a struct returned over the FFI boundary; we expose two
 // simple `move-out` accessors that the Rust caller invokes once each. After
 // both calls the struct's `unique_ptr` slots are empty (a second call would

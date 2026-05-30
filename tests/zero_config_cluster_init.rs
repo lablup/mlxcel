@@ -13,7 +13,7 @@
 // limitations under the License.
 
 //! Integration tests for the zero-config multi-machine PP bring-up path
-//! introduced by issue #342.
+//! introduced.
 //!
 //! The `#[ignore]` test at the bottom drives the full coordinator +
 //! remote-stage pipeline against a real Llama 3.2 1B-4bit checkpoint. It

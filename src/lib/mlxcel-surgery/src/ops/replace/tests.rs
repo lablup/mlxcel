@@ -14,7 +14,7 @@
 
 //! Unit tests for `ReplaceOp`.
 //!
-//! Covers issue #377 acceptance criterion (a):
+//! Covers acceptance criterion (a):
 //! - construction-time validation (wildcard count, empty inputs);
 //! - single-tensor replace;
 //! - multi-tensor replace via glob;

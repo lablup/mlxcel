@@ -44,7 +44,7 @@ fn supported_families_names_are_unique() {
 
 #[test]
 fn new_issue_345_families_are_registered() {
-    // Explicitly confirm the five families added in issue #345 appear in
+    // Explicitly confirm the five families added appear in
     // the registry. This is a floor test: removing one of these without
     // bumping the pipeline capability protocol version would be a breaking
     // change for running multi-host deployments.
@@ -59,7 +59,7 @@ fn new_issue_345_families_are_registered() {
     ] {
         assert!(
             families.contains(&family),
-            "StageFamily::{family:?} must appear in supported_families() (regression for #345)",
+            "StageFamily::{family:?} must appear in supported_families() (regression)",
         );
     }
 }

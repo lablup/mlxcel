@@ -25,7 +25,7 @@ use super::block_hash::{ApcHashAlgo, DEFAULT_APC_BLOCK_SIZE};
 
 /// Runtime configuration for the prompt-prefix cache store.
 ///
-/// CLI/env parsing for these fields is tracked in sub-issue #424. Until then
+/// CLI/env parsing for these fields is tracked. Until then
 /// construct an instance via [`PromptCacheConfig::default`] or the explicit
 /// constructor and hand it to [`super::PromptCacheStore::with_config`].
 #[derive(Clone, Debug)]
@@ -49,13 +49,13 @@ pub struct PromptCacheConfig {
     /// to be inserted. Helps avoid polluting the cache with tiny prefixes
     /// that can't really amortize the detach/adopt overhead.
     pub min_prefix_tokens: usize,
-    /// Automatic Prefix Caching (APC) configuration (issue #552).
+    /// Automatic Prefix Caching (APC) configuration.
     ///
     /// APC is an additive, opt-in feature layered on top of the existing
     /// prompt-prefix cache. It computes block-granularity hash chains so
     /// finer-grained KV reuse becomes possible. When [`ApcConfig::enabled`]
     /// is `false` (the default) no extra work is done and behaviour is
-    /// identical to the pre-#552 store.
+    /// identical to the earlier store.
     pub apc: ApcConfig,
 }
 
@@ -174,7 +174,7 @@ impl Default for PromptCacheConfig {
 }
 
 /// Aggregate store statistics, intended for both tests and the metrics
-/// bridge tracked in sub-issue #423.
+/// bridge tracked.
 ///
 /// This is a pure snapshot: values are captured under the store's lock and
 /// returned by value so callers can release the lock immediately.

@@ -514,7 +514,7 @@ impl NemotronHMamba2Mixer {
         // Wrap slice in contiguous() to force MLX to materialize a fresh,
         // independent buffer. Without this, the slice is a lazy view that
         // retains a reference to the full padded_input allocation, causing a
-        // memory leak proportional to the sequence length. (issue #336)
+        // memory leak proportional to the sequence length.
         if let Some(c) = cache.as_deref_mut() {
             let padded_shape = mlxcel_core::array_shape(&padded_input);
             let len = padded_shape[1] as usize;
@@ -916,7 +916,7 @@ impl NemotronHMamba2Mixer {
 
         // The C++ fused kernel builds new_conv_state via slice(padded_input, ...)
         // which is a lazy alias. Wrap with contiguous() to materialize a compact
-        // buffer and drop the upstream padded_input graph reference. (issue #336)
+        // buffer and drop the upstream padded_input graph reference.
         cache.conv_state = Some(mlxcel_core::contiguous(&new_conv_state, false));
         cache.ssm_state = Some(new_ssm_state);
 
@@ -1834,7 +1834,7 @@ impl NemotronHModel {
         // The full-decode C++ kernel calls fused_mamba2_forward internally,
         // which builds conv states via slice(padded_input, ...) — a lazy alias.
         // Wrap each conv_state with contiguous() to materialize a compact buffer
-        // and drop the upstream padded_input graph reference. (issue #336)
+        // and drop the upstream padded_input graph reference.
         let mut mamba_idx = 0;
         for c in caches.iter_mut() {
             if let NemotronLayerCache::Mamba(mc) = c {
@@ -1893,7 +1893,7 @@ impl NemotronHModel {
 
     /// Run the full layer stack starting from a pre-computed hidden
     /// state. Used by the VLM path that produces multimodal embeddings
-    /// upstream of the text backbone (issue #554, Nemotron H Nano Omni).
+    /// upstream of the text backbone (Nemotron H Nano Omni).
     ///
     /// Used by: Nemotron H Nano Omni VLM
     pub fn forward_with_inputs_embeds(&self, inputs_embeds: &MlxArray) -> UniquePtr<MlxArray> {

@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! End-to-end integration test for `AddOp` (issue #375 — A6).
+//! End-to-end integration test for `AddOp` (— A6).
 //!
 //! Drives the full public surface — `SurgeryPipeline` constructed
 //! via `parse_config_file` and also directly via `push` — over a
@@ -23,7 +23,7 @@
 //! it lands, this integration test stands in for the "the pipeline
 //! integrates with the load path" acceptance criterion by exercising
 //! the same `WeightTransform::apply` entry point that the
-//! consolidated text/VLM loaders use (#365 / A1).
+//! consolidated text/VLM loaders use (A1).
 //!
 //! Used by: `cargo test -p mlxcel-surgery`.
 

@@ -403,7 +403,7 @@ mod tests {
         assert_eq!(result, "final");
     }
 
-    // -- Gemma 4 full-path parse tests (issue #311) --
+    // -- Gemma 4 full-path parse tests --
 
     #[test]
     fn gemma4_thinking_only() {

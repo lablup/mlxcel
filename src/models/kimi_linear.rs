@@ -282,7 +282,7 @@ impl ShortConv1d {
         // Wrap slice in contiguous() to force MLX to materialize a fresh,
         // independent buffer. Without this, the slice is a lazy view that
         // retains a reference to the full conv_input allocation, causing a
-        // memory leak proportional to the sequence length. (issue #323)
+        // memory leak proportional to the sequence length.
         let n_keep = (self.kernel_size - 1) as i32;
         let conv_shape = mlxcel_core::array_shape(&conv_input);
         let total_len = conv_shape[1];

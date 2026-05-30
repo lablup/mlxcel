@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! HuggingFace model repository downloader (issues #457, #648, #650).
+//! HuggingFace model repository downloader.
 //!
 //! Provides a single source of truth for downloading model snapshots from the
 //! HuggingFace Hub. Both the `mlxcel` CLI and the `mlxcel-server` binary call
@@ -28,7 +28,7 @@
 //! - **Token resolution order** — explicit `--token` > `HF_TOKEN` env >
 //!   `HUGGING_FACE_HUB_TOKEN` env > anonymous. Tokens are validated to be
 //!   pure printable-ASCII (no control chars) before they are used in an
-//!   `Authorization` header (issue #650, L3).
+//!   `Authorization` header (L3).
 //! - **Default destination** — the location-independent global store at
 //!   `${MLXCEL_CACHE_DIR:-$HOME/.cache/mlxcel}/models/<owner>/<name>` (issue
 //!   #93), so a model downloaded once runs from any directory. `--local-dir`
@@ -40,12 +40,12 @@
 //!   is re-fetched and overwritten.
 //! - **Progress** — when stderr is a tty and progress is not suppressed via
 //!   env vars, per-file and aggregate `indicatif` progress bars render during
-//!   the actual byte stream (Path B2 direct reqwest streaming, issue #648).
+//!   the actual byte stream (Path B2 direct reqwest streaming).
 //!   When bars are suppressed (CI, piped output, `MLXCEL_NO_PROGRESS=1`,
 //!   `NO_COLOR=1`), one stdout line per file is emitted instead so CI logs
 //!   remain golden-text-stable.
 //!
-//! # Hardening (issue #650)
+//! # Hardening
 //!
 //! - **Plaintext-endpoint refusal** — if `HF_ENDPOINT` is set to a non-HTTPS
 //!   URL *and* a token is resolved, [`download_repo`] aborts with a clear
@@ -148,7 +148,7 @@ const SEGMENT_ENCODE_SET: &AsciiSet = &CONTROLS
     .add(b'!')
     .add(b'$');
 
-/// Age threshold for `.mlxcel-partial.*` orphan cleanup (issue #650, L5).
+/// Age threshold for `.mlxcel-partial.*` orphan cleanup (L5).
 ///
 /// Younger partial files are left in place to avoid racing against a concurrent
 /// `mlxcel` process that is mid-download in the same destination directory.
@@ -235,7 +235,7 @@ impl DownloadOptions {
 /// Empty values from environment variables are treated as anonymous so that
 /// `HF_TOKEN=""` does not poison the request with a malformed `Authorization`
 /// header. Tokens containing non-ASCII bytes or ASCII control characters
-/// (issue #650, L3) are still returned here so the caller can produce a
+/// (L3) are still returned here so the caller can produce a
 /// targeted error message that names the env var or flag — see
 /// [`validate_token`] which is invoked at HTTP-client construction time.
 pub fn resolve_token(explicit: Option<&str>) -> Option<String> {
@@ -257,7 +257,7 @@ pub fn resolve_token(explicit: Option<&str>) -> Option<String> {
 }
 
 /// Reject HF tokens containing non-ASCII bytes or ASCII control characters
-/// (issue #650, L3). Returns the original token slice on success.
+/// (L3). Returns the original token slice on success.
 ///
 /// `HeaderValue::from_str` would also reject these values, but we want a
 /// domain-specific error message (mentions HF token, env var, control chars)
@@ -280,7 +280,7 @@ fn validate_token(token: &str) -> Result<&str> {
 /// Build a configured `hf-hub` [`Api`] honoring the resolved auth token.
 ///
 /// We keep `with_progress(false)` because progress is driven by our own
-/// indicatif bars (issue #648). hf-hub is used only for `info()` (manifest
+/// indicatif bars. hf-hub is used only for `info()` (manifest
 /// fetch) — the actual file bytes come from direct reqwest streaming.
 fn build_api(token: Option<String>) -> Result<Api> {
     let mut builder = ApiBuilder::from_env().with_progress(false);
@@ -311,7 +311,7 @@ fn hf_endpoint() -> String {
         .unwrap_or_else(|| "https://huggingface.co".to_string())
 }
 
-/// Env var that opts out of the M1 plaintext-endpoint refusal (issue #650).
+/// Env var that opts out of the M1 plaintext-endpoint refusal.
 ///
 /// When set to any non-empty value, [`require_secure_endpoint_for_token`]
 /// allows a `Bearer` token to be sent over a non-HTTPS endpoint. Intended
@@ -356,7 +356,7 @@ fn require_secure_endpoint_for_token(endpoint: &str, token: Option<&str>) -> Res
     ))
 }
 
-/// Best-effort cleanup of stale `.mlxcel-partial.*` orphans (issue #650, L5).
+/// Best-effort cleanup of stale `.mlxcel-partial.*` orphans (L5).
 ///
 /// Walks `local_dir` (non-recursive) and removes regular files whose basename
 /// starts with `.mlxcel-partial.` and whose last-modified timestamp is older
@@ -430,7 +430,7 @@ fn encode_path_segments(path: &str) -> String {
 /// Build the download URL for a single file in a HuggingFace repository.
 ///
 /// Every path segment of `repo_id`, `revision`, and `filename` is
-/// percent-encoded (issue #650, L1) so adversarial metadata containing `?`,
+/// percent-encoded (L1) so adversarial metadata containing `?`,
 /// `#`, or other reserved characters cannot smuggle a query string or
 /// fragment past the URL composition step. `endpoint` is treated as a
 /// trusted base URL (env-controlled by the operator) and is not re-encoded.
@@ -474,7 +474,7 @@ async fn stream_file(
     result
 }
 
-/// Open the partial-download tempfile in a symlink-safe way (issue #650, L2).
+/// Open the partial-download tempfile in a symlink-safe way (L2).
 ///
 /// On Unix we open with `O_CREAT | O_EXCL | O_NOFOLLOW` (translated by
 /// `OpenOptions`: `create_new(true)` provides `O_CREAT|O_EXCL`, and the
@@ -533,7 +533,7 @@ async fn stream_to_tempfile(
 ) -> Result<u64> {
     // Open the tempfile FIRST so that an adversary cannot pre-stage a symlink
     // at `tmp` between the HTTP response and the actual write. `O_NOFOLLOW`
-    // + `O_EXCL` fail closed on any pre-existing path (issue #650, L2).
+    // + `O_EXCL` fail closed on any pre-existing path (L2).
     let mut out = open_tempfile_no_symlink(tmp)
         .await
         .with_context(|| format!("Failed to create tempfile for {filename}"))?;
@@ -617,7 +617,7 @@ pub fn download_repo(opts: DownloadOptions) -> Result<()> {
     let endpoint = hf_endpoint();
 
     // M1 — refuse plaintext endpoints when a token would be sent over the
-    // wire (issue #650). A bearer token sent over `http://` exposes the
+    // wire. A bearer token sent over `http://` exposes the
     // long-lived credential to anyone on-path. The opt-out env var exists
     // for operators who genuinely run an HTTPS-terminated reverse proxy
     // in front of an internal HTTP mirror on a trusted network.
@@ -666,7 +666,7 @@ pub fn download_repo(opts: DownloadOptions) -> Result<()> {
     })?;
 
     // L5 — opportunistic cleanup of stale `.mlxcel-partial.*` orphans
-    // (issue #650). Best-effort: any I/O error here is logged but does
+    // Best-effort: any I/O error here is logged but does
     // not fail the download. Only files older than `PARTIAL_TEMPFILE_STALE_AGE`
     // are removed so concurrent in-flight downloads from a sibling process
     // are not disturbed.
@@ -693,7 +693,7 @@ pub fn download_repo(opts: DownloadOptions) -> Result<()> {
 
     // Build the reqwest client once and share across all file downloads.
     //
-    // Timeouts (issue #650, M2): `connect_timeout(10s)` aborts the TCP/TLS
+    // Timeouts (M2): `connect_timeout(10s)` aborts the TCP/TLS
     // handshake if a mirror is unreachable. `read_timeout(30s)` aborts when
     // the response body stalls for 30s — the correct semantics for a long
     // download where total elapsed time is unbounded but any 30s window of
@@ -701,7 +701,7 @@ pub fn download_repo(opts: DownloadOptions) -> Result<()> {
     // set because legitimate large weight files take more than the global
     // default.
     //
-    // Redirect downgrade defense (issue #650, M1 reinforcement): reqwest's
+    // Redirect downgrade defense (M1 reinforcement): reqwest's
     // default `remove_sensitive_headers` only strips `Authorization` on
     // cross-host redirects, NOT on same-host scheme downgrades. Without
     // `https_only(true)` a malicious HTTPS->HTTP 302 on the same host would
@@ -715,7 +715,7 @@ pub fn download_repo(opts: DownloadOptions) -> Result<()> {
     let client = rt.block_on(async {
         let mut headers = reqwest::header::HeaderMap::new();
         if let Some(ref tok) = token {
-            // L3 (issue #650): reject non-ASCII or control-char tokens with
+            // L3: reject non-ASCII or control-char tokens with
             // a domain-specific error instead of the panic that the prior
             // `.expect("token must be ASCII")` would produce. `validate_token`
             // also rejects more characters than `HeaderValue::from_str` would
@@ -744,7 +744,7 @@ pub fn download_repo(opts: DownloadOptions) -> Result<()> {
 
     // Build per-file sizes map for accurate bar lengths. `hf-hub 0.5` does
     // not expose per-file sizes in the manifest (Siblings only has `rfilename`),
-    // so we issue concurrent HEAD requests here. Issue #650, L6: previously
+    // so we issue concurrent HEAD requests here. L6: previously
     // sequential (N RTTs before the first byte streamed); now bounded-parallel
     // via `futures::stream::iter(...).buffer_unordered(8)` so total pre-stream
     // wallclock is roughly one RTT for a small repo. 8 is well below any HF

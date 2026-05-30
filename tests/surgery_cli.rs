@@ -13,7 +13,7 @@
 // limitations under the License.
 
 //! End-to-end integration tests for the `--surgery <config.yaml>` CLI
-//! flag (Epic #363, issue #371 — A4).
+//! flag (— A4).
 //!
 //! These tests exercise the full plumbing from clap argument parsing
 //! through `crate::surgery::set_active_pipeline` into the consolidated

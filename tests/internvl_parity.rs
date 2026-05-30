@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! InternVL (`internvl_chat`) real-model parity / smoke tests (issue #738).
+//! InternVL (`internvl_chat`) real-model parity / smoke tests.
 //!
 //! These tests are gated on the presence of `models/internvl3-1b`; they
 //! `eprintln!` + return when the model is absent, so they are inert in CI and

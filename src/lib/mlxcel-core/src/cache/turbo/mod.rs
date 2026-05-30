@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! TurboQuant KV cache compression (epic #458).
+//! TurboQuant KV cache compression.
 //!
 //! This module is the entry point for all TurboQuant / PolarQuant components
 //! used by the KV cache compression pipeline. Sub-modules are added
@@ -20,13 +20,13 @@
 //!
 //! | Sub-module    | Sub-issue   | Status   | Description                          |
 //! |---------------|-------------|----------|--------------------------------------|
-//! | `codebook`    | B1 (#472)   | done     | Lloyd-Max centroid generator         |
-//! | `quant`       | B2/B4 (#474, #476) | done | V-side + K-side PolarQuant pipeline |
-//! | `pack3`       | B5 (#477)   | done     | 3-bit pack/unpack helpers (24-bit grouping) |
-//! | `quant3`      | B5 (#477)   | done     | 3-bit V-side PolarQuant pipeline (asymmetric only) |
-//! | `allowlist`   | B4 (#476)   | done     | Per-model symmetric Turbo4 gating    |
-//! | `boundary`    | B6 (#478)   | done     | First/last layer V protection policy |
-//! | `sparse_v`    | B8 (#480)   | done     | Attention-gated V-dequant scaffold   |
+//! | `codebook`    | B1   | done     | Lloyd-Max centroid generator         |
+//! | `quant`       | B2/B4 | done | V-side + K-side PolarQuant pipeline |
+//! | `pack3`       | B5   | done     | 3-bit pack/unpack helpers (24-bit grouping) |
+//! | `quant3`      | B5   | done     | 3-bit V-side PolarQuant pipeline (asymmetric only) |
+//! | `allowlist`   | B4   | done     | Per-model symmetric Turbo4 gating    |
+//! | `boundary`    | B6   | done     | First/last layer V protection policy |
+//! | `sparse_v`    | B8   | done     | Attention-gated V-dequant scaffold   |
 //! | (more to come)| B10–B12     | pending  | paged KV / docs / turbo2             |
 //!
 //! # Usage by downstream sub-issues
@@ -67,7 +67,7 @@ pub use quant::{
     BLOCK_SIZE, K_BIT_WIDTH, K_SEED_OFFSET, V_BIT_WIDTH,
 };
 
-/// Default hot-tail threshold for `KVCacheMode::Turbo4Delegated` (issue #479).
+/// Default hot-tail threshold for `KVCacheMode::Turbo4Delegated`.
 ///
 /// When the FP16 hot tail exceeds this many tokens, the oldest
 /// [`DELEGATED_FOLD_BLOCK`]-token block is folded into cold packed storage on

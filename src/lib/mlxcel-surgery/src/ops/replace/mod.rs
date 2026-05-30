@@ -14,7 +14,6 @@
 
 //! `ReplaceOp` — substitute base-model tensors with the matching
 //! tensors from an external donor `.safetensors` checkpoint
-//! (Epic #363 / issue #377).
 //!
 //! ## Semantics
 //!
@@ -36,7 +35,7 @@
 //!   All sibling shapes and dtypes must match between base and
 //!   donor, otherwise the op fails before mutating anything. This
 //!   enforces the "donor must share the exact quantization layout"
-//!   requirement from issue #377 with no implicit re-quantization.
+//!   requirement with no implicit re-quantization.
 //! - On any error, [`crate::SurgeryError`] is returned and the
 //!   underlying [`WeightMap`] is left unchanged ("atomic on
 //!   error").
@@ -321,7 +320,7 @@ const QUANT_SIBLING_SUFFIXES: &[&str] = &[".scales", ".biases"];
 
 /// Verify that `donor` is a drop-in substitute for `base` — same
 /// shape and same dtype. The exact-equality requirement keeps the
-/// issue #377 contract simple: no implicit re-quantization, no
+/// contract simple: no implicit re-quantization, no
 /// implicit precision conversion.
 ///
 /// Used by: [`ReplaceOp::apply`]

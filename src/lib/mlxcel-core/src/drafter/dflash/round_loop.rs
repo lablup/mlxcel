@@ -16,7 +16,7 @@
 //!
 //! Rust port of upstream
 //! `references/mlx-vlm/mlx_vlm/generate.py::_dflash_rounds`
-//! (`mlx-vlm` HEAD, lines 856–942). Issue #636 / epic #633 sub-12.
+//! (`mlx-vlm` HEAD, lines 856–942). sub-12.
 //!
 //! ## What this module does
 //!
@@ -39,12 +39,12 @@
 //!    trims both KV caches (attention layers) AND replays the GDN state
 //!    to the accepted position (linear-attention layers). This dual
 //!    rollback is what distinguishes DFlash from the Gemma 4 MTP path
-//!    (sub-6 / #629) and from the classic `SpeculativeGenerator`.
+//!    (sub-6) and from the classic `SpeculativeGenerator`.
 //!
 //! ## Scope
 //!
 //! **B=1 only.** The batched DFlash round loop (B>1) lands in sub-13
-//! (#637); this module deliberately omits the per-row tail-zeroing and
+//! this module deliberately omits the per-row tail-zeroing and
 //! continuous-batching plumbing that the upstream
 //! `_dflash_rounds_batch` carries.
 //!
@@ -57,9 +57,7 @@
 //! hooks the round loop needs (verify forward, rollback, accepted-prefix
 //! hidden slice, last-token sampling), with associated types for the
 //! target's cache slice (`Cache`) and verify-output (`VerifyOut`). The
-//! binary side implements this trait once on `Qwen35Model` (#634 lands
-//! the `forward_speculative` / `rollback_speculative_cache` methods that
-//! the impl wraps) and the round loop becomes target-agnostic.
+//! binary side implements this trait once on `Qwen35Model` (lands the `forward_speculative` / `rollback_speculative_cache` methods that the impl wraps) and the round loop becomes target-agnostic.
 //!
 //! ## Greedy parity gate
 //!
@@ -94,7 +92,7 @@ pub const DEFAULT_BLOCK_SIZE: u32 = 16;
 /// `config.mask_token_id` from its own loaded `DFlashConfig`. This
 /// constant exists so binary-side CLI plumbing can plumb an override
 /// through the same numeric path the round loop would honor on a future
-/// `--draft-mask-id` flag (sub-7 / #630).
+/// `--draft-mask-id` flag (sub-7).
 pub const DEFAULT_MASK_TOKEN_ID: i32 = 248_070;
 
 /// Trait the round loop calls into for the target side of speculative
@@ -222,7 +220,7 @@ pub trait SpeculativeTarget {
     ///
     /// For Qwen 3.5 this delegates directly to
     /// `Qwen35Model::rollback_speculative_cache(caches, verify_out.gdn_states, accepted, block_size)`,
-    /// which already supports a per-row `accepted` slice (issue #634).
+    /// which already supports a per-row `accepted` slice.
     ///
     /// The default implementation delegates to [`Self::rollback_partial`]
     /// when `accepted.len() == 1` so single-row targets don't need a
@@ -289,7 +287,7 @@ pub struct DFlashGenerator {
     /// its own `DFlashConfig::mask_token_id` directly; this field
     /// exists so a future CLI override can be plumbed through a single
     /// numeric path without touching the drafter signature. Stored here
-    /// because a `--draft-mask-id` flag (planned in sub-7 / #630) would
+    /// because a `--draft-mask-id` flag (planned in sub-7) would
     /// configure the generator, not the drafter, to keep the drafter
     /// itself stateless wrt round-loop runtime options.
     #[allow(dead_code)]
@@ -365,7 +363,7 @@ impl DFlashGenerator {
 
     /// Consume the generator and return the boxed drafter handle.
     ///
-    /// Used by the server-side speculative burst path (issue #670) so a
+    /// Used by the server-side speculative burst path so a
     /// loaded drafter can be reused across multiple requests on the same
     /// worker thread without re-loading from disk. The caller is
     /// expected to [`Drafter::reset`] the returned handle before the
@@ -461,7 +459,7 @@ pub struct DFlashRunOutput {
     /// path forwards this (prepended with the first bonus's logprob,
     /// which the caller computes) to `finalize_burst_success` so
     /// speculative responses carry the same `TokenWithLogprobs` payload
-    /// as the classic decode path (issue #678).
+    /// as the classic decode path.
     pub logprobs: Vec<Option<crate::sampling::TokenLogprobData>>,
     /// Per-round accept counts for diagnostic logging and tests.
     pub accept_lens: Vec<u32>,
@@ -469,7 +467,7 @@ pub struct DFlashRunOutput {
     /// responsibility (the loop runs after prefill).
     pub stats: GenerationStats,
     /// Acceptance counters and per-phase timings for real-model
-    /// performance diagnosis (issue #692).
+    /// performance diagnosis.
     pub diagnostics: DFlashDiagnostics,
 }
 
@@ -576,7 +574,7 @@ impl DFlashGenerator {
     ///   the loop returns early with whatever tokens it has already
     ///   emitted. The server-side burst path passes `&seq.cancelled` so
     ///   a client disconnect mid-burst stops occupying the worker thread
-    ///   (issue #672). The offline CLI path passes
+    /// The offline CLI path passes
     ///   `&AtomicBool::new(false)`.
     /// - `logprobs_config` — per-token log-probability capture control.
     ///   When [`LogprobsConfig::enabled`] is false the returned
@@ -586,8 +584,7 @@ impl DFlashGenerator {
     ///   The round loop is greedy-only today, so the per-position logits
     ///   ARE the penalty-adjusted logits the classic decode path feeds
     ///   `compute_logprobs` — making the resulting logprobs
-    ///   byte-identical to the classic path for greedy sampling (issue
-    ///   #678).
+    ///   byte-identical to the classic path for greedy sampling.
     ///
     /// # Returns
     ///
@@ -681,7 +678,7 @@ impl DFlashGenerator {
             // disconnect mid-burst the server flips `seq.cancelled` and
             // this loop bails out with the tokens emitted so far rather
             // than running the full `max_tokens` budget and
-            // head-of-line-blocking the next request (issue #672).
+            // head-of-line-blocking the next request.
             if cancel.load(Ordering::Relaxed) {
                 break;
             }
@@ -728,7 +725,7 @@ impl DFlashGenerator {
 
             // ---- Argmax sample of target's per-position logits ----
             // Greedy at temp=0.0 / top_k=1 — the only mode this sub-issue
-            // gates parity on. Stochastic sampling for DFlash is sub-9 / #632.
+            // gates parity on. Stochastic sampling for DFlash is sub-9.
             let verify_logits = target.verify_logits(&verify_out);
             let phase_start = Instant::now();
             let target_tokens_arr = argmax_logits_to_array(verify_logits, bs as i32);
@@ -765,7 +762,7 @@ impl DFlashGenerator {
             // loop ⇒ the per-position verify logits ARE the
             // penalty-adjusted logits the classic decode path feeds
             // `compute_logprobs`, so these logprobs are byte-identical
-            // to the classic path for greedy sampling (issue #678).
+            // to the classic path for greedy sampling.
             let phase_start = Instant::now();
             let target_logprobs =
                 per_position_logprobs(verify_logits, &target_tokens, logprobs_config);
@@ -795,7 +792,7 @@ impl DFlashGenerator {
             // for every `i` (accepted draft tokens matched the target by
             // construction; the final entry is the target's bonus), so
             // `target_logprobs[i]` is the correct log-probability for
-            // `new_tokens[i]` (issue #678).
+            // `new_tokens[i]`.
             let mut hit_eos = false;
             for (i, tok) in new_tokens.iter().enumerate() {
                 self.generated_tokens.push(*tok);
@@ -912,7 +909,7 @@ impl DFlashGenerator {
 ///
 /// Equivalent to upstream `sampler(verify_out.logits)` with the greedy
 /// `sampler = argmax(axis=-1)`. Stochastic samplers are out of scope
-/// for this sub-issue (sub-9 / #632 covers stochastic DFlash parity).
+/// for this sub-issue (sub-9 covers stochastic DFlash parity).
 fn argmax_logits_to_array(logits: &MlxArray, seq_len: i32) -> UniquePtr<MlxArray> {
     let shape = ffi::array_shape(logits);
     debug_assert!(shape.len() == 3, "expected [1, seq_len, vocab] logits");
@@ -945,7 +942,7 @@ fn materialize_draft_and_target_tokens(
 
 /// Compute per-position [`crate::sampling::TokenLogprobData`] for a
 /// `[1, seq_len, vocab]` verify-logits tensor, one entry per position
-/// aligned 1:1 with `target_tokens` (issue #678).
+/// aligned 1:1 with `target_tokens`.
 ///
 /// The DFlash round loop is greedy-only today (`temperature == 0`, pure
 /// argmax — see [`argmax_logits_to_array`]), so the per-position verify
@@ -1626,7 +1623,7 @@ mod tests {
     }
 
     /// Pins the expected accept-len progression for 3 rounds at
-    /// block_size = 8 (the issue #636 acceptance criterion).
+    /// block_size = 8 (the acceptance criterion).
     #[test]
     fn round_loop_accept_lens_progress_pins_three_rounds_at_block_size_8() {
         // Round 1: drafter matches the first 1 position (accept 1).

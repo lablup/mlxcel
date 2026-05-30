@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Boundary-V layer protection (B6, issue #478, epic #458).
+//! Boundary-V layer protection (B6).
 //!
 //! TurboQuant+ measured that the first 2 and last 2 transformer layers'
 //! V quantization error contributes disproportionately to perplexity
@@ -39,9 +39,7 @@
 //!
 //! # Configuration
 //!
-//! - `MLXCEL_KV_BOUNDARY_V_LAYERS` env var (also accepted as
-//!   `MLXCEL_TURBO_BOUNDARY_V` for compatibility with the wording in
-//!   issue #478): integer count of boundary layers to protect on each
+//! - `MLXCEL_KV_BOUNDARY_V_LAYERS` env var (also accepted as `MLXCEL_TURBO_BOUNDARY_V` for compatibility with the wording): integer count of boundary layers to protect on each
 //!   end. Default `2`. Setting `0` disables the policy.
 //! - The count is clamped to `min(boundary, n_layers / 2)` so a
 //!   too-aggressive setting on a shallow model doesn't end up
@@ -158,7 +156,7 @@ pub fn is_boundary_layer(layer_idx: usize, n_layers: usize, boundary: i32) -> bo
 ///
 /// Used by: [`resolve_layer_mode`] — kept as a separate helper so the
 /// "boundary precision choice" is a single edit point if we later
-/// follow up with a true partial-V override (issue #478 follow-up).
+/// follow up with a true partial-V override (follow-up).
 #[inline]
 pub fn boundary_mode_for(nominal: KVCacheMode) -> KVCacheMode {
     match nominal {

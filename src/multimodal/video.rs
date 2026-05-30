@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Generic VLM video utilities (issue #553, perf follow-up #597).
+//! Generic VLM video utilities (perf follow-up).
 //!
 //! Translates the upstream Python `mlx_vlm/video_generate.py` pipeline into
 //! Rust so that any vision-language model can accept `--video` inputs through
@@ -30,7 +30,7 @@
 //! - We only need uniform frame sampling (no per-codec hot path), so the
 //!   subprocess overhead is amortised across all frames in a single invocation.
 //!
-//! ## Single-pass extraction (issue #597)
+//! ## Single-pass extraction
 //!
 //! [`load_video`] now invokes `ffmpeg` exactly **once** per video, streaming
 //! all sampled frames as a concatenated PNG sequence through stdout
@@ -41,7 +41,7 @@
 //! place before moving on to the next frame. Peak memory during extraction
 //! is bounded by approximately one decoded frame at a time.
 //!
-//! ## Resolution and duration caps (issue #597)
+//! ## Resolution and duration caps
 //!
 //! Before decoding, [`probe_video`] checks:
 //!
@@ -312,7 +312,7 @@ impl Drop for TempFile {
     }
 }
 
-// ─── VideoSource (issue #601): TOCTOU-safe video handle ─────────────────────
+// ─── VideoSource: TOCTOU-safe video handle ─────────────────────
 
 /// A video input that can be safely passed to `ffmpeg` / `ffprobe` without
 /// re-opening by path.
@@ -690,7 +690,7 @@ struct VideoMeta {
 /// - `MLXCEL_VIDEO_MAX_DURATION_SEC` — duration in seconds (default 600)
 ///
 /// Accepts a [`VideoSource`] so the resolver in `src/server/media.rs` can
-/// pass an opened fd (issue #601) instead of the canonical path. The fd
+/// pass an opened fd instead of the canonical path. The fd
 /// path closes the TOCTOU window between the resolver's `canonicalize`
 /// and ffmpeg's `open`.
 fn probe_video(source: &VideoSource, limits: &VideoLimits) -> Result<VideoMeta, VideoError> {
@@ -938,7 +938,7 @@ fn parse_rational(value: &str) -> Option<f64> {
 /// }).await??;
 /// ```
 ///
-/// # Path vs fd input (issue #601)
+/// # Path vs fd input
 ///
 /// This function operates on a [`Path`]. Server callers that source the
 /// video from an untrusted user request should instead use
@@ -969,8 +969,7 @@ pub fn load_video_with_limits(
 /// Decode a [`VideoSource`] into uniformly-sampled frames.
 ///
 /// Equivalent to [`load_video`] but accepts a [`VideoSource`] so the
-/// fd-backed variant (used by the chat-completion video resolver, issue
-/// #601) can pipe the file through `/dev/fd/N` instead of re-opening the
+/// fd-backed variant (used by the chat-completion video resolver) can pipe the file through `/dev/fd/N` instead of re-opening the
 /// canonical path. See [`VideoSource`] for the security rationale.
 pub fn load_video_source(
     source: &VideoSource,
@@ -1069,7 +1068,7 @@ fn uniform_indices(total_frames: usize, nframes: usize) -> Vec<usize> {
 /// presentation number `n` against each operand and outputs a frame when
 /// any equality holds. The `+` operator is a logical OR.
 ///
-/// ## Issue #601: fd-bearing source support
+/// ## fd-bearing source support
 ///
 /// Accepts a [`VideoSource`] so the resolver in `src/server/media.rs` can
 /// pass an opened fd instead of the canonical path. When the source is

@@ -532,7 +532,7 @@ fn clear_drops_everything() {
     assert_eq!(store.bytes(), 0);
 }
 
-// #420-specific two-tier matcher tests live in
+// specific two-tier matcher tests live in
 // `super::prefix_matcher_tests`; keeping them in a sibling test module
 // keeps this file focused on store-level invariants (insert/evict/lookup
 // mechanics) and cleanly below the 500-line code-file limit.

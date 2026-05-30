@@ -111,7 +111,7 @@ pub(crate) struct BlockingSseSender {
 /// The `keepalive` value must be attached to the `Sse` response via
 /// `Sse::new(stream).keep_alive(keepalive.0)` in the route handler. This
 /// ensures proxy idle timeouts do not close the connection during long prefill
-/// phases before the first generated token arrives (issue #548).
+/// phases before the first generated token arrives.
 ///
 /// Used by: chat.rs, completions.rs, native_completion.rs
 pub(crate) fn sse_channel(

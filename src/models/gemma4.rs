@@ -674,7 +674,7 @@ impl Cache {
     /// upstream Python `hasattr(c, "trim")` dispatch in
     /// `Gemma4 LanguageModel.rollback_speculative_cache`.
     ///
-    /// Used by: Gemma 4 MTP `rollback_speculative_cache` (issue #625).
+    /// Used by: Gemma 4 MTP `rollback_speculative_cache`.
     pub(crate) fn trim_speculative(&mut self, n: i32) -> i32 {
         match self {
             Self::Standard(cache) => cache.trim(n),
@@ -721,7 +721,7 @@ impl Cache {
     /// its monotonic offset and the next decode write overwrites the
     /// trimmed slot.
     ///
-    /// Used by: Gemma 4 MTP `rollback_speculative_cache` (issue #625).
+    /// Used by: Gemma 4 MTP `rollback_speculative_cache`.
     pub(crate) fn zero_partial_accept_tail(
         &mut self,
         valid_ends: &[i32],
@@ -1592,7 +1592,6 @@ pub struct Gemma4TextModel {
 }
 
 /// Output sinks for the Gemma 4 MTP speculative-decoding target hooks
-/// (issue #625).
 ///
 /// All fields are `Option` so callers that do not need a hook pay zero cost
 /// on the hot path — the `forward_with_speculative_sinks` consumer only
@@ -1616,8 +1615,8 @@ pub struct Gemma4TextModel {
 ///   per K and V: `[B, num_kv_heads, kv_len, head_dim]` in the model's
 ///   native dtype.
 ///
-/// Used by: future `Gemma4AssistantDraftModel` (issue #626) and
-/// `MtpGenerator` (issue #629).
+/// Used by: future `Gemma4AssistantDraftModel` and
+/// `MtpGenerator`.
 #[derive(Default)]
 pub struct Gemma4SpeculativeSinks {
     pub hidden_sink: Option<Vec<UniquePtr<MlxArray>>>,
@@ -1678,7 +1677,7 @@ impl Gemma4TextModel {
     }
 
     /// Forward pass with optional speculative-decoding hooks for the Gemma 4
-    /// MTP target path (issue #625).
+    /// MTP target path.
     ///
     /// When `sinks` is `None`, behaves exactly like [`Self::forward`] (zero
     /// overhead beyond the wrapping struct).
@@ -1719,7 +1718,7 @@ impl Gemma4TextModel {
         // `sqrt(hidden_size)` embed scale to the text portion *before*
         // merging. Scaling here would double-scale the text tokens and
         // incorrectly scale image/audio features that are already in the
-        // language-model embedding space. See issue #317.
+        // language-model embedding space..
         let mut h = if let Some(embeddings) = input_embeddings {
             mlxcel_core::copy(embeddings)
         } else {
@@ -1780,7 +1779,7 @@ impl Gemma4TextModel {
         let profile_layer_build = std::env::var("MLXCEL_PROFILE_LAYER_BUILD").is_ok();
         let profile_subops = std::env::var("MLXCEL_PROFILE_LAYER_SUBOPS").is_ok();
 
-        // Speculative-decoding capture (issue #625). The `capture_set` mirrors
+        // Speculative-decoding capture. The `capture_set` mirrors
         // upstream's `set(capture_layer_ids)`; when non-empty the
         // `hidden_sink` is appended to inside the loop at each matching idx,
         // otherwise the sink receives the final pre-norm `h` after the loop.
@@ -2173,7 +2172,7 @@ impl Gemma4Model {
     }
 
     /// Sink-aware variant of [`Self::forward_with_caches_and_embeddings`]
-    /// used by the Gemma 4 MTP target path (issue #625). Delegates the
+    /// used by the Gemma 4 MTP target path. Delegates the
     /// transformer pass to
     /// [`Gemma4TextModel::forward_with_speculative_sinks`] then applies
     /// the embedding tied LM head + optional final-logit softcap exactly
@@ -2769,7 +2768,7 @@ impl Gemma4StageModel {
 
 /// Wrapper for [`Gemma4Model`] that implements [`LanguageModel`] with
 /// per-`SequenceId` cache isolation so the server scheduler can run
-/// mixed-length batches correctly (issue #542).
+/// mixed-length batches correctly.
 ///
 /// Gemma 4's `Cache` enum (`KVCache | RotatingKVCache`) is a sliding-
 /// window-aware cache that the model owns internally — it cannot be
@@ -2934,12 +2933,11 @@ impl Gemma4Wrapper {
     /// `sqrt(hidden_size)` embed scale to text embeddings before merging in
     /// vision / audio features. Vision and audio features must NOT be scaled
     /// again since they are already in the language-model embedding space
-    /// (see issue #317).
     pub fn hidden_size(&self) -> usize {
         self.model.config.hidden_size
     }
 
-    /// Sink-aware forward used by the Gemma 4 MTP target path (issue #625).
+    /// Sink-aware forward used by the Gemma 4 MTP target path.
     ///
     /// Mirrors [`Self::forward_with_inputs_and_sequence_id`] but additionally
     /// captures the LAST decoder hidden state (or per-layer hidden states
@@ -2948,7 +2946,7 @@ impl Gemma4Wrapper {
     /// [`Gemma4SpeculativeSinks`]. Resolves to the per-`SequenceId` cache
     /// slot via [`ModelOwnedSequenceState::with_or_create_sequence_state`]
     /// — the same isolation the rest of Gemma 4 already uses for batched
-    /// decode (issue #542), so the speculative loop does not need to
+    /// decode, so the speculative loop does not need to
     /// allocate a side cache.
     ///
     /// When `sinks` is `None` and `capture_layer_ids` is `None`, this is
@@ -2956,8 +2954,8 @@ impl Gemma4Wrapper {
     /// optional final-logit softcap, zero allocation overhead beyond the
     /// `Option`s.
     ///
-    /// Used by: future `Gemma4AssistantDraftModel` consumer (issue #626) and
-    /// `MtpGenerator` (issue #629).
+    /// Used by: future `Gemma4AssistantDraftModel` consumer and
+    /// `MtpGenerator`.
     pub fn forward_with_speculative_sinks(
         &self,
         input_ids: &MlxArray,
@@ -2986,7 +2984,7 @@ impl Gemma4Wrapper {
     }
 
     /// Sink-aware forward against a **caller-owned** `[B, ...]` cache
-    /// vector (issue #674, batched MTP dispatch).
+    /// vector (batched MTP dispatch).
     ///
     /// Unlike [`Self::forward_with_speculative_sinks`], this variant does
     /// NOT resolve the cache through [`ModelOwnedSequenceState`] /
@@ -3075,7 +3073,7 @@ impl Gemma4Wrapper {
     }
 
     /// Allocate a fresh per-layer cache vector for a batched MTP burst
-    /// (issue #674). Every cache starts empty; the batched verify pass
+    /// Every cache starts empty; the batched verify pass
     /// grows them with a leading batch dim `B` once the first `[B, L]`
     /// prefill flows through
     /// [`Self::forward_with_speculative_sinks_explicit_cache`].
@@ -3092,7 +3090,7 @@ impl Gemma4Wrapper {
     }
 
     /// Rewind the per-sequence target KV caches after a Gemma 4 MTP
-    /// speculative-decoding round (issue #625). Mirrors the upstream Python
+    /// speculative-decoding round. Mirrors the upstream Python
     /// hook
     /// (`references/mlx-vlm/mlx_vlm/models/gemma4/language.py` lines
     /// 608-646) bit-for-bit:
@@ -3124,7 +3122,7 @@ impl Gemma4Wrapper {
     /// (e.g. mismatched batch shape between cache buffer and `accepted`,
     /// or rotating-cache write index that predates the verify pass).
     ///
-    /// Used by: future `MtpGenerator` Gemma 4 verify loop (issue #629).
+    /// Used by: future `MtpGenerator` Gemma 4 verify loop.
     pub fn rollback_speculative_cache(
         &self,
         seq_id: Option<SequenceId>,
@@ -3177,7 +3175,7 @@ impl Gemma4Wrapper {
     }
 
     /// Per-row tail-zero rollback against a **caller-owned** `[B, ...]`
-    /// cache vector (issue #674, batched MTP dispatch).
+    /// cache vector (batched MTP dispatch).
     ///
     /// Identical trim + per-row tail-zero logic as
     /// [`Self::rollback_speculative_cache`], but operates on an explicit
@@ -3366,7 +3364,7 @@ impl LanguageModel for Gemma4Wrapper {
         self.model.eos_token_ids.clone()
     }
 
-    /// Issue #542: Gemma 4 supports batched decode now that
+    /// Gemma 4 supports batched decode now that
     /// [`ModelOwnedSequenceState`] isolates per-`SequenceId` cache state.
     /// The vision wrapper's `forward_batched_with_context_and_ids`
     /// override (in `vision::Gemma4VLModel`) routes each row through

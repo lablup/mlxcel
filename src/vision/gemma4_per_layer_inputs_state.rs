@@ -12,8 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Per-sequence `per_layer_inputs` state for Gemma 4 E2B/E4B VLM (issue
-//! #543).
+//! Per-sequence `per_layer_inputs` state for Gemma 4 E2B/E4B VLM.
 //!
 //! `Gemma4VLModel::get_input_embeddings_with_audio_and_cache` projects
 //! the Gemma 4 E2B/E4B `per_layer_inputs` tensor (shape `[1, T, L, h]`)
@@ -33,12 +32,12 @@
 //! prefill then `take()`s **the latest writer's** `per_layer_inputs`
 //! instead of its own — every subsequent request runs against the wrong
 //! per-layer projection. That is the production root cause behind issue
-//! #543; the upstream mlx-vlm PR #1123 fix is for a related
+//! the upstream mlx-vlm PR #1123 fix is for a related
 //! batched-concat shape mismatch that does not apply to mlxcel's
 //! sequential VLM prefill path.
 //!
 //! The container below mirrors [`crate::models::qwen_mrope_state::MRopeState`]
-//! (issue #540 / PR #558) so the scheduler wires both per-sequence
+//! so the scheduler wires both per-sequence
 //! states identically:
 //!
 //! - **Per-`SequenceId` map** is the primary slot; `bind_fallback_to_sequence`
@@ -106,7 +105,6 @@ impl Gemma4PerLayerInputsState {
     /// Move the fallback slot's contents into the per-sequence map under
     /// `seq_id`. Drains the fallback so the next request cannot inherit
     /// the previous row's tensor — this is the burst-enqueue race fix
-    /// from issue #543.
     ///
     /// If the fallback slot is empty (E1B variant or text-only request
     /// after a Gemma 4 VLM model load — `prepare_request_vlm_embeddings`

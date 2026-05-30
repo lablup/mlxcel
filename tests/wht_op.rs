@@ -13,7 +13,7 @@
 // limitations under the License.
 
 //! End-to-end integration test for the public `mlxcel_core::wht` op
-//! (issue #470, B0 spike for epic #458 — TurboQuant KV cache compression).
+//! (B0 spike — TurboQuant KV cache compression).
 //!
 //! This file exists deliberately at the top-level `tests/` directory rather
 //! than as a `#[cfg(test)] mod` inside `mlxcel-core`. The point is to prove
@@ -46,7 +46,7 @@ fn make_random_normal(shape: &[i32], seed: u64) -> UniquePtr<MlxArray> {
 }
 
 /// `wht` is reachable as `mlxcel_core::wht` from a consumer crate.
-/// (The acceptance criterion in #470 names `mlxcel-core::ops::wht(...)`;
+/// (The acceptance criterion names `mlxcel-core::ops::wht(...)`;
 /// we re-export at the crate root for ergonomics, mirroring `concatenate`,
 /// `multiply_scalar`, etc.)
 #[test]

@@ -68,7 +68,7 @@ pub(crate) fn structured_error_to_response(err: StructuredOutputError) -> ErrorR
     }
 }
 
-/// Build the per-request prompt-cache context (epic #416 / issue #421).
+/// Build the per-request prompt-cache context.
 ///
 /// Returns `None` when the store is not installed on `state`, signalling to
 /// the scheduler that no cache lookup or donate-back should run for this
@@ -201,7 +201,7 @@ pub async fn chat_completions(
         .into_response();
     }
 
-    // Issue #596: reject `video_url` content blocks early for models that do
+    // reject `video_url` content blocks early for models that do
     // not support video. Detected once at startup from `config.json` and
     // cached on `AppState.media_support`. Returning a 400 keeps the client
     // contract honest — silently dropping video frames would still consume
@@ -247,7 +247,7 @@ pub async fn chat_completions(
         .into_response();
     }
 
-    // Issue #409: validate thinking_budget_tokens early so malformed values
+    // validate thinking_budget_tokens early so malformed values
     // surface as 400 before any generation work begins.
     let effective_max_tokens = request
         .params
@@ -275,7 +275,7 @@ pub async fn chat_completions(
         }
     };
 
-    // Issue #550 + PR #575 H2: build the structured-output constraint up
+    // + H2: build the structured-output constraint up
     // front so any schema validation error surfaces as a 400 before
     // generation work starts. Grammar compilation can be ~hundreds of ms
     // and (worst case, before the size guard) hundreds of MB — running
@@ -340,7 +340,7 @@ async fn non_stream_chat_completion(
     let request_id = format!("chatcmpl-{}", uuid::Uuid::new_v4());
     let model_id = state.display_model_id().to_string();
 
-    // Issue #422: when the prompt-prefix cache is installed, enter the
+    // when the prompt-prefix cache is installed, enter the
     // prefix-stable rendering path so unset preserve_thinking defaults to
     // true. The store is built by startup.rs only when configured, so
     // `state.prompt_cache.is_some()` is the operator-visible flag here.
@@ -369,7 +369,7 @@ async fn non_stream_chat_completion(
     // counting ordinary content tokens as reasoning when the prompt
     // wasn't primed.
     options.thinking_enter_block_on_start = primed_open_thinking;
-    // Issue #550: attach the structured-output constraint built at the
+    // attach the structured-output constraint built at the
     // request boundary so the scheduler runs constrained sampling for this
     // sequence.
     options.structured = structured;
@@ -384,7 +384,7 @@ async fn non_stream_chat_completion(
     }
 
     // Generate (blocking call handled by model provider's worker thread).
-    // Issue #596: forward resolved video paths alongside images and audio.
+    // forward resolved video paths alongside images and audio.
     // For non-video models the route guard above already rejected the
     // request, so `prepared.videos` is always empty here unless the
     // model supports video.
@@ -503,7 +503,7 @@ async fn stream_chat_completion(
 
     let request_id = format!("chatcmpl-{}", uuid::Uuid::new_v4());
     let model_id = state.display_model_id().to_string();
-    // Issue #422: same prompt-cache flag as the non-streaming path so that
+    // same prompt-cache flag as the non-streaming path so that
     // both endpoints default preserve_thinking=true identically when the
     // cache is installed.
     let prompt_cache_enabled = state.prompt_cache.is_some();
@@ -536,7 +536,7 @@ async fn stream_chat_completion(
     // counting ordinary content tokens as reasoning when the prompt
     // wasn't primed.
     options.thinking_enter_block_on_start = primed_open_thinking;
-    // Issue #550: forward the constraint built at the request boundary so
+    // forward the constraint built at the request boundary so
     // streamed generation is also constrained.
     options.structured = structured;
 
@@ -565,7 +565,7 @@ async fn stream_chat_completion(
     };
     let tool_choice = request.tool_choice.clone();
 
-    // Issue #548: sse_channel also returns an SseKeepAlive that sends periodic
+    // sse_channel also returns an SseKeepAlive that sends periodic
     // SSE comment events. This prevents proxy/client idle-timeout disconnects
     // during long prefill phases (32k+ token prompts) where no token event is
     // emitted until the first generated token arrives.
@@ -955,7 +955,7 @@ pub(crate) fn build_generate_options(
             dry_sequence_breakers: params.dry_sequence_breakers.clone(),
             stop_sequences: params.stop.clone(),
             priority: RequestPriority::default(),
-            // Issue #409: the caller (non_stream_chat_completion /
+            // the caller (non_stream_chat_completion /
             // stream_chat_completion) sets `options.reasoning_budget`
             // explicitly after `build_generate_options` returns, so the
             // default here is just a placeholder.
@@ -1076,7 +1076,7 @@ mod tests {
         );
     }
 
-    // -- Issue #596: video_url block detection ---------------------------
+    // -- video_url block detection ---------------------------
 
     use crate::server::types::request::{ImageUrl, VideoUrl};
     use crate::server::types::{ContentPart, Message, MessageContent, Role, SamplingParams};

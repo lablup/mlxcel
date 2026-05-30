@@ -14,7 +14,7 @@
 
 //! Unit tests for Gemma 4 configuration parsing and RoPE handling.
 //!
-//! These tests lock in the behavior described in GitHub issue #321:
+//! These tests lock in the behavior described in GitHub
 //!
 //! 1. Real Gemma 4 checkpoints declare `rope_type: "proportional"` on every
 //!    `full_attention` layer and `rope_type: "default"` on every
@@ -32,14 +32,14 @@ fn parse_text_config(json: serde_json::Value) -> TextConfig {
 }
 
 // -----------------------------------------------------------------
-// Issue #542: per-`SequenceId` cache isolation tests for `Gemma4Wrapper`.
+// per-`SequenceId` cache isolation tests for `Gemma4Wrapper`.
 //
 // These tests build a tiny synthetic Gemma 4 model (1 layer, hidden=4,
 // vocab=8, sliding-attention only) and verify that
 // `Gemma4Wrapper::forward_with_sequence_id` resolves to a distinct
 // per-sequence `Vec<Cache>` so a mixed-length batch cannot leak cache
-// state across rows. This is the runtime fix for issue #542 — the
-// per-row dispatch helper added in PR #560 only routes correctly if
+// state across rows. This is the runtime fix — the
+// per-row dispatch helper added only routes correctly if
 // the underlying wrapper isolates cache state per `SequenceId`.
 //
 // The fixture is duplicated from
@@ -231,7 +231,7 @@ mod cache_isolation {
             .collect()
     }
 
-    /// Issue #542: `Gemma4Wrapper` must declare `supports_batching == true`
+    /// `Gemma4Wrapper` must declare `supports_batching == true`
     /// so the server scheduler actually drives the batched-decode dispatch
     /// path that calls `forward_with_sequence_id` per row.
     #[test]
@@ -239,13 +239,13 @@ mod cache_isolation {
         let wrapper = build_wrapper();
         assert!(
             wrapper.supports_batching(),
-            "Gemma4Wrapper must support batching after issue #542 (server batched decode \
+            "Gemma4Wrapper must support batching after (server batched decode \
              requires per-`SequenceId` cache isolation, which the wrapper now provides via \
              ModelOwnedSequenceState<Cache>)"
         );
     }
 
-    /// Issue #542: `Gemma4Wrapper` must declare a `ModelOwned` sequence
+    /// `Gemma4Wrapper` must declare a `ModelOwned` sequence
     /// state layout so the cache pool allocates a placeholder
     /// (empty `Vec<KVCache>`) per sequence and the wrapper itself owns
     /// the real `Vec<Cache>` keyed on `SequenceId`. A `DenseKvCache`
@@ -275,11 +275,11 @@ mod cache_isolation {
         );
     }
 
-    /// Issue #542: per-`SequenceId` cache isolation. Two sequences with
+    /// per-`SequenceId` cache isolation. Two sequences with
     /// distinct `SequenceId`s must produce row-correct logits even when
     /// driven through the same wrapper instance back-to-back.
     ///
-    /// Prior to issue #542 the wrapper held a single `RefCell<Vec<Cache>>`
+    /// Prior to the wrapper held a single `RefCell<Vec<Cache>>`
     /// shared across every call, so seq B's first decode step would
     /// inherit seq A's KV state and produce wrong logits. After the
     /// fix, each `SequenceId` resolves to its own slot in
@@ -324,7 +324,7 @@ mod cache_isolation {
         let prefill_a_mixed = mlxcel_core::from_slice_i32(&[3, 4], &[1, 2]);
         let _ = mixed.forward_with_sequence_id(&prefill_a_mixed, Some(seq_a), &mut [], None);
 
-        // Prefill seq B: longer/different tokens [1, 2, 6] — issue #542
+        // Prefill seq B: longer/different tokens [1, 2, 6]
         // explicitly requires the case where the two prompts differ in
         // length. If cache state leaks, seq A's offset would be stomped.
         let prefill_b_mixed = mlxcel_core::from_slice_i32(&[1, 2, 6], &[1, 3]);
@@ -368,7 +368,7 @@ mod cache_isolation {
         reference.release_sequence_state_by_id(seq_a_ref);
     }
 
-    /// Issue #542 acceptance criterion 1: a batch of two Gemma 4
+    /// acceptance criterion 1: a batch of two Gemma 4
     /// requests with different prompt lengths produces output for each
     /// row that matches the unbatched baseline within tolerance.
     ///
@@ -392,7 +392,7 @@ mod cache_isolation {
         baseline.prepare_sequence_state(seq_a);
         baseline.prepare_sequence_state(seq_b);
 
-        // Different-length prompts: the explicit reproducer for issue #542.
+        // Different-length prompts: the explicit reproducer.
         let prompt_a = mlxcel_core::from_slice_i32(&[3, 4], &[1, 2]);
         let prompt_b = mlxcel_core::from_slice_i32(&[1, 2, 6], &[1, 3]);
         let _ = baseline.forward_with_sequence_id(&prompt_a, Some(seq_a), &mut [], None);
@@ -456,7 +456,7 @@ mod cache_isolation {
             assert!(
                 abs_err < 1e-3 || rel_err < 1e-3,
                 "row A logit[{i}] differs: batched={got} vs unbatched={want} \
-                 (abs={abs_err}, rel={rel_err}) — issue #542 acceptance criterion 1 \
+                 (abs={abs_err}, rel={rel_err}) — acceptance criterion 1 \
                  violated"
             );
         }
@@ -466,7 +466,7 @@ mod cache_isolation {
             assert!(
                 abs_err < 1e-3 || rel_err < 1e-3,
                 "row B logit[{i}] differs: batched={got} vs unbatched={want} \
-                 (abs={abs_err}, rel={rel_err}) — issue #542 acceptance criterion 1 \
+                 (abs={abs_err}, rel={rel_err}) — acceptance criterion 1 \
                  violated"
             );
         }
@@ -589,7 +589,7 @@ fn real_gemma4_e2b_text_config() -> serde_json::Value {
 
 #[test]
 fn gemma4_config_parses_real_checkpoint_rope_parameters() {
-    // The primary regression target for issue #321: make sure we can in fact
+    // The primary regression target for make sure we can in fact
     // read `rope_type` out of the real checkpoint config without erroring,
     // and that both per-layer-type entries deserialize correctly.
     let cfg = parse_text_config(real_gemma4_e2b_text_config());
@@ -627,7 +627,7 @@ fn gemma4_rope_parameters_rope_type_defaults_when_absent() {
 
 #[test]
 fn gemma4_proportional_rope_freqs_match_python_semantics() {
-    // Lock in the numerical semantics of issue #321 Case A:
+    // Lock in the numerical semantics Case A:
     //
     //   freqs[i] = base^(2 * i / head_dim)   for i in [0, rope_angles)
     //
@@ -638,7 +638,7 @@ fn gemma4_proportional_rope_freqs_match_python_semantics() {
     //
     // If this test regresses, it means the RoPE frequencies diverged from
     // upstream `mlx_vlm.models.gemma4.rope_utils.ProportionalRoPE`, which
-    // is exactly the hazard that motivated issue #321.
+    // is exactly the hazard that motivated.
     let head_dim = 256_i32;
     let prf = 0.25_f32;
     let base = 1_000_000.0_f32;
@@ -702,14 +702,14 @@ fn gemma4_proportional_rope_freqs_match_python_semantics() {
 }
 
 // -----------------------------------------------------------------
-// Issue #625: Gemma 4 MTP target hooks — `rollback_speculative_cache`
+// Gemma 4 MTP target hooks — `rollback_speculative_cache`
 // + sink-aware forward.
 //
 // The tests below cover the cache-rewind primitives in isolation
 // (`RotatingKVCache::trim` + `Cache::zero_partial_accept_tail`) and
 // then exercise the sink path end-to-end through the synthetic
 // 1-layer Gemma 4 fixture defined in the `cache_isolation` sub-module
-// above (the same fixture issue #542's batching tests use). The
+// above (the same fixture's batching tests use). The
 // sink-path test is gated on serial MLX execution because the
 // fixture's forward pass touches the global MLX runtime.
 mod mtp_hooks {

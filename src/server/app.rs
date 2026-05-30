@@ -96,7 +96,7 @@ pub fn create_app(state: AppState) -> Router {
         .route("/v1/chat/completions", post(routes::chat_completions))
         .route("/v1/completions", post(routes::completions))
         .route("/v1/models", get(routes::list_models))
-        // Issue #622: Responses API (OpenAI /v1/responses surface).
+        // Responses API (OpenAI /v1/responses surface).
         .route("/v1/responses", post(routes::create_response))
         .route(
             "/v1/responses/:id",
@@ -109,7 +109,7 @@ pub fn create_app(state: AppState) -> Router {
             "/v1/messages/count_tokens",
             post(routes::anthropic_count_tokens),
         )
-        // Issue #552: prompt-cache observability endpoints (always mounted —
+        // prompt-cache observability endpoints (always mounted
         // the handlers return a stable "disabled" payload when the cache is
         // off so monitoring clients can poll without conditional logic).
         .route("/v1/cache/stats", get(routes::cache_stats))

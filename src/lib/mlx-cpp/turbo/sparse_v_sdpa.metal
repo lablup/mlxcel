@@ -13,7 +13,7 @@
 // limitations under the License.
 //
 // Reference Metal source for the fused Sparse-V SDPA weighted-sum kernel
-// (issue #505; rescale precompute landed in #520).
+// (rescale precompute landed).
 //
 // This file is a faithful copy of the source string embedded in
 // `sparse_v_sdpa.cpp`. Keeping it as a standalone .metal file makes it
@@ -37,9 +37,7 @@
 // Inputs (per launch):
 //   weights     — [B*Hq, Tq, Tk] f32  : post-softmax attention weights
 //   rescale     — [B*Hkv, Tk]    f16  : precomputed `norm[t] / |y_hat[t]|`
-//                                       (issue #520; replaced the previous
-//                                       `norms` input + in-kernel tree
-//                                       reduction)
+//                                       (replaced the previous `norms` input + in-kernel tree reduction)
 //   packed      — [B*Hkv, Tk, D/2] u8 : nibble-packed V indices (2 per byte)
 //   codebook    — [16]           f32  : Lloyd-Max centroids
 //
@@ -56,7 +54,7 @@
 // Per-thread compute proceeds dim-by-dim over D, sweeping all Tq tokens
 // (RepeatCount) and accumulating the unrotated weighted sum.
 //
-// Issue #520 kernel-body change summary:
+// kernel-body change summary:
 //   - Removed `tg_y_hat[Dim]` shared scratch and `tg_norm[1]` broadcast.
 //   - Removed the `log2(Dim)`-step threadgroup tree reduction over `code²`.
 //   - Removed the `if (tg_d == 0) compute rescale; barrier; broadcast` chain.

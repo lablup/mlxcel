@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Server-side speculative-decoding dispatch resolution (issue #666).
+//! Server-side speculative-decoding dispatch resolution.
 //!
 //! When `mlxcel-server` is started with the `--draft-model` flag (plus the
 //! optional `--draft-kind` / `--draft-block-size` overrides from the
@@ -38,8 +38,7 @@
 //! fields into one of:
 //!
 //! - [`SpeculativeDispatch::Disabled`] — no `--draft-model`; classic decode
-//!   path runs (issue #380's [`crate::SpeculativeGenerator`] is itself NOT
-//!   used by the server today, only by the offline `mlxcel generate` path).
+//!   path runs ('s [`crate::SpeculativeGenerator`] is itself NOT used by the server today, only by the offline `mlxcel generate` path).
 //! - [`SpeculativeDispatch::Classic { .. }`] — `--draft-model` set,
 //!   `--draft-kind` unset, drafter's `config.json::model_type` resolves to
 //!   a kind that the server has not yet wired to its kind-specific round
@@ -252,7 +251,7 @@ impl SpeculativeDispatch {
         // - explicit MTP / DFlash → kind-specific generator
         // - auto-detected MTP / DFlash → kind-specific generator
         //   (the scheduler logs the auto-detect for visibility)
-        // - InternalMtp (peer epic #647) is auto-detected only and falls
+        // - InternalMtp (peer) is auto-detected only and falls
         //   back to the Classic path until it has a server-side round
         //   loop.
         match resolved_kind {

@@ -12,8 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Sparse-V dequant — attention-gated V-side dequantization (issues #498,
-//! #505, epic #458).
+//! Sparse-V dequant — attention-gated V-side dequantization.
 //!
 //! At long context the post-softmax attention distribution is sparse: most
 //! KV positions receive a near-zero attention weight. The TurboQuant+ paper
@@ -24,12 +23,12 @@
 //!
 //! This module provides two execution paths for the sparse-V optimization:
 //!
-//! 1. **Graph-level reference path** (issue #498, [`attention_sparse_v_turbo4`]).
+//! 1. **Graph-level reference path** ([`attention_sparse_v_turbo4`]).
 //!    Computes attention scores, builds an alive mask, dequantizes V in full,
 //!    zeros dead rows, then runs `attn @ V_masked`. The V dequant kernel still
 //!    runs over the complete `[B, H, T, D]` tensor — this path is
 //!    correctness-only and does not deliver the `+22.8 %` throughput benefit.
-//! 2. **Fused Metal kernel path** (issue #505, [`attention_sparse_v_turbo4_fused`]).
+//! 2. **Fused Metal kernel path** ([`attention_sparse_v_turbo4_fused`]).
 //!    Dispatches the JIT-compiled `turbo_sparse_v_weighted_sum` Metal kernel,
 //!    which does the per-thread `if (attn_weight <= threshold) continue;` skip
 //!    inside the SDPA inner loop. This is the production speed path validated
@@ -51,8 +50,8 @@
 //! `dequant(...)` for every position because MLX evaluates both branches
 //! eagerly. The skip can only happen inside the Metal kernel where the
 //! `if (attn_weight < 1e-6f) continue;` predicate gates a single thread's
-//! work. Issue #498 established the graph scaffold and correctness gate;
-//! issue #505 landed the fused kernel that delivers the actual throughput
+//! work. established the graph scaffold and correctness gate;
+//! landed the fused kernel that delivers the actual throughput
 //! benefit.
 //!
 //! Used by: `KVCache::update_and_sparse_v_attention` (Turbo4Asym mode) when
@@ -160,7 +159,7 @@ pub fn kernel_enabled() -> bool {
 }
 
 /// Environment variable that opts callers into the fused Turbo4Delegated
-/// dequant + SDPA kernel path (issue #528). Default: kernel path is **off**;
+/// dequant + SDPA kernel path. Default: kernel path is **off**;
 /// callers route through the legacy `update_and_fetch + attention()` pair
 /// until follow-up work brings the fused pipeline inside the steel-attention
 /// envelope on M5 Max at the gate contexts.
@@ -213,9 +212,7 @@ fn parse_env_default_on(var_name: &str) -> bool {
 /// Mirrors the [`kernel_enabled`] caching pattern: the env var is parsed once
 /// per process and cached in a `OnceLock<bool>` so per-token, per-layer
 /// attention forwards pay only an atomic load instead of an env-table lookup
-/// (`std::env::var` allocates a fresh `String` and takes a process-wide lock,
-/// which is ~3,200 calls/sec/sequence on a 32-layer model — see the security
-/// review on PR #530).
+/// (`std::env::var` allocates a fresh `String` and takes a process-wide lock, which is ~3,200 calls/sec/sequence on a 32-layer model — see the security review on).
 ///
 /// Used by: per-model attention call sites (Llama 3, Qwen 3, ...) that want
 /// to opt into [`KVCache::update_and_turbo4_delegated_attention`] over the
@@ -377,7 +374,7 @@ pub fn compute_alive_mask(
 /// `[B, Hq, Tq, D]` FP16 attention output, the same shape and dtype as the
 /// standard SDPA path returns.
 ///
-/// Used by: tests under `cache/turbo_tests.rs` (issue #480 unit tests).
+/// Used by: tests under `cache/turbo_tests.rs` (unit tests).
 /// Production attention call sites continue to use the standard
 /// `attention()` path until the Metal kernel lands.
 #[allow(clippy::too_many_arguments)]
@@ -485,7 +482,7 @@ pub fn attention_sparse_v_turbo4(
     ffi::astype(&out_f32, dtype::FLOAT16)
 }
 
-/// Fused-skip Sparse-V SDPA path (issue #505, optimized by issue #520).
+/// Fused-skip Sparse-V SDPA path (optimized).
 ///
 /// Drops the explicit `dequantize_v_turbo4` step in favour of the fused
 /// Metal kernel `turbo_sparse_v_weighted_sum`, which does the per-thread
@@ -503,7 +500,7 @@ pub fn attention_sparse_v_turbo4(
 /// - `k`: `[B, Hkv, Tk, D]` key tensor (FP16) — Turbo4Asym keeps K in FP16.
 /// - `v_packed`: `[B, Hkv, Tk, D/2]` u8 — packed V indices.
 /// - `v_rescale`: `[B, Hkv, Tk, 1]` FP16 — precomputed per-token kernel
-///   rescale `norm[t] / max(|y_hat[t]|, 1e-10)`. Issue #520 moved this
+///   rescale `norm[t] / max(|y_hat[t]|, 1e-10)`. moved this
 ///   computation from a per-token threadgroup tree reduction inside the
 ///   kernel to a one-time host-side precompute at quantize time. The
 ///   value matches the kernel's previous on-the-fly `vn / yh_safe` exactly,
@@ -526,7 +523,7 @@ pub fn attention_sparse_v_turbo4(
 /// [`attention_sparse_v_turbo4`] (which still consumes `v_norms`) in that
 /// case.
 ///
-/// Used by: [`KVCache::sparse_v_attention`] (issue #505).
+/// Used by: [`KVCache::sparse_v_attention`].
 #[allow(clippy::too_many_arguments)]
 pub fn attention_sparse_v_turbo4_fused(
     q: &MlxArray,
@@ -605,8 +602,7 @@ pub fn attention_sparse_v_turbo4_fused(
     let v_packed_flat = ffi::reshape(v_packed, &[bhkv, tk, head_dim / 2]);
     // v_rescale graph shape is `[B, Hkv, Tk, 1]`. The kernel expects
     // `[B*Hkv, Tk]` — drop the trailing axis and flatten the first two.
-    // (Same memory layout as the previous `v_norms` plumbing; only the
-    // semantic content changed — see issue #520.)
+    // (Same memory layout as the previous `v_norms` plumbing; only the semantic content changed —.)
     let v_rescale_flat = ffi::reshape(v_rescale, &[bhkv, tk]);
     let codebook_vec: Vec<f32> = params.codebook.centroids.as_ref().to_vec();
     let codebook_arr = ffi::from_slice_f32(&codebook_vec, &[codebook_vec.len() as i32]);
@@ -634,12 +630,12 @@ pub fn attention_sparse_v_turbo4_fused(
     Some(ffi::astype(&post_d1, dtype::FLOAT16))
 }
 
-/// Fused dequant + SDPA path for `KVCacheMode::Turbo4Delegated` (issue #528).
+/// Fused dequant + SDPA path for `KVCacheMode::Turbo4Delegated`.
 ///
 /// The Turbo4Delegated cache stores V in two regions: a packed cold body
 /// (`[B, Hkv, T_cold, D/2]` u8 + `[B, Hkv, T_cold, 1]` fp16 rescale) and an
-/// FP16 hot ring (`[B, Hkv, T_hot, D]`). Pre-#528 the read path materialised
-/// the full FP16 cold body via `dequantize_v_turbo4` (memoised by PR #525)
+/// FP16 hot ring (`[B, Hkv, T_hot, D]`). Pre- the read path materialised
+/// the full FP16 cold body via `dequantize_v_turbo4` (memoised)
 /// and ran a graph-level `concat(cold_v_dequant, hot_v, axis=2)` plus
 /// standard SDPA. The memo's working set was `[B, Hkv, cold_offset, D]` fp16
 /// — at 4K context that is 50–100 MB per layer per sequence and undoes the
@@ -667,18 +663,18 @@ pub fn attention_sparse_v_turbo4_fused(
 /// At no point does the dequantised cold V exist as a tensor in global
 /// memory. The dequant is computed inside the kernel into thread-local
 /// registers and consumed by the weighted sum in the same dispatch — that
-/// is the whole point of issue #528.
+/// is the whole point.
 ///
 /// # Inputs
 ///
 /// - `q`: `[B, Hq, Tq, D]` query tensor (FP16 or FP32). Must already have
 ///   RoPE / Q-norm applied (matches the standard attention call contract).
 /// - `unified_k`: `[B, Hkv, T_total, D]` FP16 — the full unified K buffer
-///   (issue #527 unified the K side, dropping the cold/hot split for K).
+///   (unified the K side, dropping the cold/hot split for K).
 /// - `v_packed`: `[B, Hkv, T_cold, D/2]` u8 — packed cold V indices. May be
 ///   empty (`T_cold == 0`) on the very first decode step before any fold.
 /// - `v_rescale`: `[B, Hkv, T_cold, 1]` FP16 — precomputed per-token kernel
-///   rescale `norm[t] / max(|y_hat[t]|, 1e-10)` (issue #520). Same lockstep
+///   rescale `norm[t] / max(|y_hat[t]|, 1e-10)`. Same lockstep
 ///   shape as the Turbo4Asym path.
 /// - `hot_v`: `[B, Hkv, T_hot, D]` FP16 — plain FP16 hot V tokens. May be
 ///   empty (`T_hot == 0`) immediately after a full fold.
@@ -698,7 +694,7 @@ pub fn attention_sparse_v_turbo4_fused(
 /// `MLXCEL_SPARSE_V_KERNEL=0`). Callers should fall back to
 /// [`KVCache::update_and_fetch`] + `attention()` in that case.
 ///
-/// Used by: `KVCache::update_and_turbo4_delegated_attention` (issue #528).
+/// Used by: `KVCache::update_and_turbo4_delegated_attention`.
 #[allow(clippy::too_many_arguments)]
 pub fn attention_turbo4_delegated_fused(
     q: &MlxArray,
@@ -1015,7 +1011,7 @@ fn dequantize_v_turbo4_rotated_fused(
 }
 
 /// Steel-attention-envelope fused dequant + SDPA path for
-/// `KVCacheMode::Turbo4Delegated` (issue #531).
+/// `KVCacheMode::Turbo4Delegated`.
 ///
 /// Compresses the post-Q·K SDPA pipeline of [`attention_turbo4_delegated_fused`]
 /// from ~14 MLX dispatches into ~5: one Q·K matmul, one steel-envelope kernel
@@ -1037,8 +1033,7 @@ fn dequantize_v_turbo4_rotated_fused(
 /// `Some([B, Hq, Tq, D])` FP16 attention output, or `None` when the kernel
 /// path is gated off (non-macOS, non-power-of-2 head dim, or
 /// `MLXCEL_SPARSE_V_KERNEL=0`). Callers should fall back to
-/// [`attention_turbo4_delegated_fused`] (which still routes through the
-/// post-#528 cold-only kernel + host composition) or to
+/// [`attention_turbo4_delegated_fused`] (which still routes through the post- cold-only kernel + host composition) or to
 /// [`KVCache::delegated_graph_attention`] in that case.
 ///
 /// # Numerical equivalence
@@ -1054,7 +1049,7 @@ fn dequantize_v_turbo4_rotated_fused(
 /// verifies RMS < 5e-3 across at least two fold boundaries.
 ///
 /// Used by: [`KVCache::update_and_turbo4_delegated_attention`] when the steel
-/// envelope is preferred (issue #531).
+/// envelope is preferred.
 #[allow(clippy::too_many_arguments)]
 pub fn attention_turbo4_delegated_steel(
     q: &MlxArray,

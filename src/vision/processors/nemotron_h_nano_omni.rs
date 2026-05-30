@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Nemotron H Nano Omni image preprocessor (issue #554).
+//! Nemotron H Nano Omni image preprocessor.
 //!
 //! Faithful Rust port of
 //! `references/mlx-vlm/mlx_vlm/models/nemotron_h_nano_omni/image_processing_nemotron_h_nano_omni.py`.

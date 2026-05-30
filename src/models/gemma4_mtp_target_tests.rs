@@ -13,7 +13,6 @@
 // limitations under the License.
 
 //! Structural unit tests for the Gemma 4 [`MtpTarget`] adapter
-//! (issue #666).
 //!
 //! These tests pin the adapter's **trait surface** without loading real
 //! Gemma 4 weights. The full on-hardware greedy-parity test for the
@@ -116,7 +115,7 @@ fn argmax_per_position_returns_one_id_per_position() {
 }
 
 // ===========================================================================
-// Batched MTP target adapter helper tests (issue #674)
+// Batched MTP target adapter helper tests
 //
 // These pin the pure-tensor helper methods of `Gemma4MtpBatchedTargetAdapter`
 // without loading real Gemma 4 weights. The full on-hardware B = 4

@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Per-sequence MRoPE state tests for issue #540.
+//! Per-sequence MRoPE state tests.
 
 use super::{MRopeEntry, MRopeState};
 use mlxcel_core::cache::SequenceId;
@@ -57,7 +57,7 @@ fn fallback_clear_resets_entry() {
     });
 }
 
-/// Issue #540 invariant: per-sequence deltas must be isolated. Set the
+/// invariant: per-sequence deltas must be isolated. Set the
 /// fallback to a "VL-row" delta of 5, then register a text-only sequence
 /// with delta 0 — looking up either by seq id should yield delta=0, while
 /// a lookup with `None` still returns the fallback's delta=5.
@@ -112,7 +112,7 @@ fn release_drops_only_target_sequence() {
     });
 }
 
-/// Acceptance criterion #3 from issue #540 (unit-test variant): for a
+/// Acceptance criterion #3 (unit-test variant): for a
 /// contrived mixed batch where row 0 has delta=5 and row 1 has delta=0,
 /// the per-row delta tensor produced by stacking each sequence's entry
 /// is `[5, 0]`. We construct this by reading back each row's stored
@@ -206,7 +206,7 @@ fn text_only_request_does_not_inherit_vl_delta_after_bind() {
     });
 }
 
-/// Issue #540 follow-up: preemption regression coverage.
+/// follow-up: preemption regression coverage.
 ///
 /// The server preemption path evicts a victim sequence (releasing its old
 /// id), then re-allocates a fresh id and re-queues the same request. The

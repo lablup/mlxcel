@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Integration tests for `KVCacheMode::Turbo4Asym` (issue #474, epic #458).
+//! Integration tests for `KVCacheMode::Turbo4Asym`.
 //!
 //! Covers:
 //! 1. Mode-string parsing (`fp16+turbo4`, `turbo4-asym`).
@@ -59,8 +59,8 @@ fn turbo4_asym_display_round_trip() {
 
 #[test]
 fn unknown_mode_string_errors() {
-    // "turbo2" is intentionally not a recognised alias — issue #477 is the
-    // 3-bit mode, and 2-bit (Turbo2) is an explicit non-goal of epic #458.
+    // "turbo2" is intentionally not a recognised alias — is the
+    // 3-bit mode, and 2-bit (Turbo2) is an explicit non-goal.
     let r: Result<KVCacheMode, _> = "turbo2".parse();
     assert!(r.is_err());
     let err = r.unwrap_err();
@@ -293,7 +293,7 @@ fn turbo4_asym_clone_handle_clears_turbo_params_on_source() {
     let _handle = cache.clone_handle();
 
     // Source cache must have turbo_params cleared after clone_handle so a
-    // fresh sequence can start with a clean slate (LOW-1 fix, #474).
+    // fresh sequence can start with a clean slate (LOW-1 fix).
     assert!(
         cache.turbo_params.is_none(),
         "clone_handle must clear turbo_params on source (LOW-1)"
@@ -495,7 +495,7 @@ fn turbo4_asym_nbytes_includes_v_sidecars_and_excludes_values() {
 }
 
 // ---------------------------------------------------------------------------
-// RotatingKVCache + Turbo4Asym (B9, issue #481)
+// RotatingKVCache + Turbo4Asym (B9)
 // ---------------------------------------------------------------------------
 
 /// Constructor must reject non-32-aligned `max_size` for `Turbo4Asym`.
@@ -843,7 +843,7 @@ fn rotating_turbo4_clone_handle_clears_turbo_params_on_source() {
 }
 
 // ---------------------------------------------------------------------------
-// Boundary-V (B6, issue #478) integration tests
+// Boundary-V (B6) integration tests
 // ---------------------------------------------------------------------------
 //
 // These integration tests cover the cache-side behavior of the boundary
@@ -1167,7 +1167,7 @@ fn turbo4_dequant_sdpa_matches_full_dequant_attention() {
 }
 
 // ===========================================================================
-// Turbo3Asym (issue #477, epic #458) — 3-bit V-side PolarQuant
+// Turbo3Asym — 3-bit V-side PolarQuant
 // ===========================================================================
 
 // ---------------------------------------------------------------------------
@@ -1330,7 +1330,7 @@ fn turbo3_asym_trim_to_zero_clears_all_buffers_and_params() {
     assert!(cache.v_packed.is_none());
     assert!(cache.v_norms.is_none());
     // turbo3_params must be cleared so the slot can be reused with a
-    // different head_dim (mirrors the LOW-1 fix from #474 for the 4-bit path).
+    // different head_dim (mirrors the LOW-1 fix for the 4-bit path).
     assert!(cache.turbo3_params.is_none());
 }
 
@@ -1683,12 +1683,12 @@ fn turbo3_asym_layer_modes_apply_boundary_upgrade() {
 // Turbo4Delegated decode helpers
 // ---------------------------------------------------------------------------
 //
-// The PR-#525 cold-V dequant memo tests that previously lived here were
-// retired by issue #528 — the fused dequant + SDPA Metal kernel reads packed
+// The earlier cold-V dequant memo tests that previously lived here were
+// retired — the fused dequant + SDPA Metal kernel reads packed
 // cold V directly so there is no host-side memo state to verify. The two
-// helpers below are still used by the issue #527 unified-K tests further
+// helpers below are still used by the unified-K tests further
 // down (`delegated_unified_k_*`, `delegated_nbytes_no_cold_k_buffer_after_fold`)
-// and the issue #528 fused-kernel parity test.
+// and the fused-kernel parity test.
 
 /// Build a Turbo4Delegated cache with a small hot threshold so folds are
 /// triggered after a handful of decode steps. The threshold is rounded up to
@@ -1715,10 +1715,10 @@ fn delegated_decode_run(cache: &mut KVCache, head_dim: i32, prefill_len: i32, de
 }
 
 // ---------------------------------------------------------------------------
-// Turbo4Delegated unified-K storage (issue #527)
+// Turbo4Delegated unified-K storage
 // ---------------------------------------------------------------------------
 //
-// Issue #527 unifies the K side of `KVCacheMode::Turbo4Delegated` into a
+// unifies the K side of `KVCacheMode::Turbo4Delegated` into a
 // single growing FP16 buffer (same shape contract as `KVCacheMode::Fp16`),
 // dropping the cold/hot split for K. These tests verify:
 // 1. `keys` is a single buffer that holds all `offset` tokens after folds.
@@ -1731,7 +1731,7 @@ fn delegated_decode_run(cache: &mut KVCache, head_dim: i32, prefill_len: i32, de
 /// After enough decode steps to trigger at least one fold, the unified `keys`
 /// buffer must hold all `offset` tokens (i.e. its shape's seq dim is at least
 /// `offset`) and SDPA-visible K from `update_and_fetch` must be the FP16
-/// slice `[0..offset]` — no separate cold-K buffer should exist (issue #527).
+/// slice `[0..offset]` — no separate cold-K buffer should exist.
 #[test]
 fn delegated_unified_k_buffer_grows_with_offset() {
     let head_dim = 64;
@@ -1748,7 +1748,7 @@ fn delegated_unified_k_buffer_grows_with_offset() {
 
     // The unified K buffer must hold at least `offset` tokens (capacity may
     // be rounded up to step). There must be no separate cold-K buffer
-    // (issue #527 removed the field).
+    // (removed the field).
     let keys = cache
         .keys
         .as_ref()
@@ -1772,7 +1772,7 @@ fn delegated_unified_k_buffer_grows_with_offset() {
     assert_eq!(
         k_out_shape,
         vec![1_i32, 1, total_offset + 1, head_dim],
-        "fetched K shape must be [B, H, offset, K_dim] (no cold/hot concat, issue #527)"
+        "fetched K shape must be [B, H, offset, K_dim] (no cold/hot concat)"
     );
     assert_eq!(
         ffi::array_dtype(&k_out),
@@ -1783,7 +1783,7 @@ fn delegated_unified_k_buffer_grows_with_offset() {
 
 /// `clone_handle` / `install_detached` must round-trip the unified K buffer
 /// bit-identically when the source has been through at least one fold
-/// (issue #527).  A subsequent decode step on the installed target must
+/// A subsequent decode step on the installed target must
 /// produce a K slice equal to the same step on the source before detach.
 #[test]
 fn delegated_clone_handle_preserves_unified_k_data() {
@@ -1859,7 +1859,7 @@ fn delegated_clone_handle_preserves_unified_k_data() {
 /// both caches perform, not a delegated-mode approximation).  V is
 /// *not* expected to match — V is still compressed in the delegated mode
 /// via `quantize_v_turbo4` and has bounded reconstruction error.
-/// Issue #527 unifies the K storage so that `Turbo4Delegated` uses the
+/// unifies the K storage so that `Turbo4Delegated` uses the
 /// same single growing FP16 buffer as `Fp16`, eliminating the per-step
 /// K concat entirely.
 #[test]
@@ -2213,9 +2213,8 @@ fn delegated_fp16_fast_path_survives_detach_adopt() {
 }
 
 /// `nbytes()` after a fold must reflect a single unified K buffer, not a
-/// hot ring + a separate cold K buffer (issue #527 removes the cold-K
-/// allocation).  V-side accounting (packed sidecars + dequant memo) must
-/// be unchanged from PR #525's contract.
+/// hot ring + a separate cold K buffer (removes the cold-K allocation).  V-side accounting (packed sidecars + dequant memo) must
+/// be unchanged's contract.
 #[test]
 fn delegated_nbytes_no_cold_k_buffer_after_fold() {
     let head_dim = 64;
@@ -2255,7 +2254,7 @@ fn delegated_nbytes_no_cold_k_buffer_after_fold() {
         cache.v_rescale.is_some(),
         "v_rescale must exist after a fold"
     );
-    // Issue #528 retired the PR-#525 cold-V dequant memo, so there is no
+    // retired the earlier cold-V dequant memo, so there is no
     // memo field to assert here. The packed cold V is consumed directly by
     // the fused kernel (`update_and_turbo4_delegated_attention`) without
     // ever being expanded to FP16 in global memory.
@@ -2275,11 +2274,11 @@ fn max_abs_diff(a: &ffi::MlxArray, b: &ffi::MlxArray) -> f32 {
 }
 
 // ---------------------------------------------------------------------------
-// Turbo4Delegated fused kernel parity (issue #528)
+// Turbo4Delegated fused kernel parity
 // ---------------------------------------------------------------------------
 //
 // The fused dequant + SDPA kernel (`update_and_turbo4_delegated_attention`)
-// must produce attention output that is RMS-equivalent to the pre-#528 path
+// must produce attention output that is RMS-equivalent to the earlier path
 // (`update_and_fetch` + standard SDPA on the `concat(cold_v_dequant, hot_v)`
 // tensor). The contract is RMS < 5e-3 over 200 decode steps spanning at least
 // three folds, matching the `sparse_v_kernel_threshold_zero_matches_graph`
@@ -2605,12 +2604,11 @@ fn delegated_dequant_sdpa_matches_reference_attention() {
     );
 }
 
-/// Steel-envelope vs cold-only fused composition parity (issue #531).
+/// Steel-envelope vs cold-only fused composition parity.
 ///
 /// `update_and_turbo4_delegated_attention` first tries the steel-envelope
-/// kernel (issue #531, single Metal dispatch covering softmax, cold-V dequant,
-/// and hot-V accumulate). On the same hardware where the cold-only fused
-/// composition path (issue #528) already produces correct output, the
+/// kernel (single Metal dispatch covering softmax, cold-V dequant, and hot-V accumulate). On the same hardware where the cold-only fused
+/// composition path already produces correct output, the
 /// steel-envelope path must produce numerically equivalent output (within
 /// FP16 round-off) — both paths funnel through the same MLX softmax algebra
 /// and the same Turbo4 inverse rotation; the only difference is whether the
@@ -2636,10 +2634,9 @@ fn delegated_steel_envelope_matches_cold_only_fused_over_200_steps() {
     let scale = 1.0 / (head_dim as f32).sqrt();
 
     // Cache A: drives `update_and_turbo4_delegated_attention`, which prefers
-    // the steel-envelope kernel on macOS + power-of-2 head_dim (issue #531
-    // wiring in `cache::update_and_turbo4_delegated_attention`).
+    // the steel-envelope kernel on macOS + power-of-2 head_dim (wiring in `cache::update_and_turbo4_delegated_attention`).
     let mut cache_steel = build_delegated_cache_with_small_threshold(32);
-    // Cache B: drives the cold-only fused composition (issue #528) directly
+    // Cache B: drives the cold-only fused composition directly
     // by calling `attention_turbo4_delegated_fused` after `update`. Bypasses
     // the wrapper so the steel envelope is not selected.
     let mut cache_cold_only = build_delegated_cache_with_small_threshold(32);
@@ -2662,7 +2659,7 @@ fn delegated_steel_envelope_matches_cold_only_fused_over_200_steps() {
         let v_b = ffi::copy(&v_a);
         let q = synth_kv_tensor(1, 1, 1, head_dim, 9000 + step as u32);
 
-        // Steel-envelope path (default after issue #531).
+        // Steel-envelope path (default after).
         let q_for_steel = ffi::copy(&q);
         let out_steel =
             cache_steel.update_and_turbo4_delegated_attention(&q_for_steel, k_a, v_a, scale, None);
@@ -2795,7 +2792,7 @@ fn delegated_steel_envelope_matches_cold_only_fused_over_200_steps() {
     );
 }
 
-/// Steel-envelope grouped-attention + additive-mask parity (issue #531).
+/// Steel-envelope grouped-attention + additive-mask parity.
 ///
 /// The 200-step parity tests above use `Hkv = Hq = 1` (no grouping) and no
 /// additive mask. Production decode call sites in `models/llama3.rs` and
@@ -2943,7 +2940,7 @@ fn delegated_steel_envelope_grouped_attention_with_mask_parity() {
     );
 }
 
-/// Graph-fallback parity (issue #528 / PR #530 security review HIGH-1).
+/// Graph-fallback parity (security review HIGH-1).
 ///
 /// `update_and_turbo4_delegated_attention` must always produce a sane
 /// attention output, even when the fused Metal kernel cannot dispatch
@@ -3056,7 +3053,7 @@ fn delegated_graph_fallback_matches_reference_attention() {
 
 /// Per-token V byte budget: the V-side memory footprint must stay at the
 /// 4-bit packed form (D/2 bytes plus one fp16 norm + one fp16 rescale per
-/// cold token, plus 2 bytes per hot fp16 dim). Issue #528 retired the FP16
+/// cold token, plus 2 bytes per hot fp16 dim). retired the FP16
 /// `cold_v_dequant_cache` so the only working set above the packed form is
 /// the small hot ring; cold V never goes above D/2 bytes per token in
 /// global memory.
@@ -3145,7 +3142,7 @@ fn delegated_per_token_v_budget_after_issue_528() {
         cache.nbytes() < visible_buffer_sum + memo_size_if_reintroduced,
         "nbytes()={} would tolerate a re-introduced FP16 cold-V memo of \
          {} bytes (visible buffer sum = {}); any value at or above \
-         {} indicates a likely PR-#525 cold-V memo regression",
+         {} indicates a likely earlier cold-V memo regression",
         cache.nbytes(),
         memo_size_if_reintroduced,
         visible_buffer_sum,
@@ -3154,7 +3151,7 @@ fn delegated_per_token_v_budget_after_issue_528() {
 }
 
 // ---------------------------------------------------------------------------
-// Issue #544 regression — TurboQuant continuous batching, batch grow / shrink
+// regression — TurboQuant continuous batching, batch grow / shrink
 // mid-decode.
 //
 // These tests use real `KVCache::update_and_fetch` calls in `Turbo4Asym`
@@ -3162,7 +3159,7 @@ fn delegated_per_token_v_budget_after_issue_528() {
 // extend / filter shape transitions that would happen in the scheduler
 // when a sequence is admitted into or evicted from an active batch.
 //
-// The acceptance criterion in issue #544 is: the per-row decode output is
+// The acceptance criterion is: the per-row decode output is
 // equivalent (RMS within tolerance) to running the same prompts
 // sequentially. We approximate that at the unit-test level by asserting
 // that the dequantized V tensor returned by `update_and_fetch` for each
@@ -3224,7 +3221,7 @@ fn turbo4_asym_sequential_decode_trace(
     traces
 }
 
-/// Issue #544 acceptance criterion (unit-level): a continuous-batching
+/// acceptance criterion (unit-level): a continuous-batching
 /// scenario where the batch composition changes mid-decode produces decode
 /// output equivalent (RMS within tolerance) to running the same prompts
 /// sequentially.
@@ -3305,7 +3302,7 @@ fn turbo4_asym_continuous_batching_grow_shrink_matches_sequential() {
         assert_eq!(
             metadata.rope_offsets,
             vec![prompt_len_a + 1, prompt_len_b],
-            "batch grow must keep per-row offsets correct (issue #544)"
+            "batch grow must keep per-row offsets correct"
         );
         assert_eq!(metadata.kv_lens, vec![prompt_len_a + 2, prompt_len_b + 1]);
         metadata.assert_consistent().unwrap();

@@ -336,7 +336,7 @@ fn load_and_sanitize_weights_dequantizes_nvfp4_gemma4_checkpoint() {
 }
 
 // --- Tests for the consolidated `load_text_weights` entry point and the
-// optional `WeightTransform` hook introduced for Axis A (issue #365). ---
+// optional `WeightTransform` hook introduced for Axis A. ---
 
 /// Build a minimal text model fixture: tiny config.json with no
 /// quantization plus a single safetensors shard containing
@@ -391,7 +391,7 @@ fn load_text_weights_with_none_transform_matches_legacy_path() {
     // doubles as a regression guard against accidental divergence
     // between the alias and the new entry point.
     //
-    // Issue #371 (A4): the `load_text_weights(_, None)` call below
+    // (A4): the `load_text_weights(_, None)` call below
     // reads the process-global active-pipeline slot. Acquire
     // `env_lock` so a parallel test in `surgery_integration` can't
     // install a pipeline mid-test and leak it into the consolidated
@@ -475,7 +475,7 @@ fn load_text_weights_invokes_transform_when_supplied() {
     // transform the produced `WeightMap` must match the `None` path
     // bit-for-bit.
     //
-    // Issue #371 (A4): baseline call reads the active-pipeline slot,
+    // (A4): baseline call reads the active-pipeline slot,
     // so we need the same `env_lock` discipline as the other tests
     // touching `load_text_weights(_, None)`.
     #[cfg(feature = "surgery")]
@@ -545,7 +545,7 @@ fn load_text_weights_propagates_transform_error() {
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
-// --- Integration tests for the Axis A `mlxcel-surgery` crate (#367).
+// --- Integration tests for the Axis A `mlxcel-surgery` crate.
 // Gated on the `surgery` feature so the default build still passes
 // without pulling the new crate into the dependency graph. ---
 
@@ -587,7 +587,7 @@ mod surgery_integration {
         // really does implement A1's `WeightTransform` trait at the
         // type level (the call would not type-check otherwise).
         //
-        // Issue #371 (A4): `load_text_weights(_, None)` reads the
+        // (A4): `load_text_weights(_, None)` reads the
         // process-global active-pipeline slot, so any test that calls
         // it must serialise on the same `env_lock` as the tests that
         // mutate the slot — otherwise a parallel mutator can leak a
@@ -630,7 +630,7 @@ mod surgery_integration {
         // not mutate weights), which proves that "no-op" semantics
         // hold end-to-end.
         //
-        // Issue #371: env_lock as in `empty_surgery_pipeline_*` — the
+        // env_lock as in `empty_surgery_pipeline_*` — the
         // baseline `load_text_weights(_, None)` reads the active slot.
         let _env_guard = crate::test_support::env_lock::env_lock();
 
@@ -719,12 +719,12 @@ mod surgery_integration {
     #[test]
     fn empty_yaml_config_pipeline_is_bit_exact_with_none() {
         // End-to-end YAML → SurgeryPipeline → load_text_weights(Some(&p))
-        // for the empty-config case. Demonstrates the issue #369
+        // for the empty-config case. Demonstrates the
         // acceptance criterion (e): when `operations: []`, the
         // produced pipeline behaves bit-exact identically to the
         // `transform = None` path.
         //
-        // Issue #371: baseline call needs env_lock — same rationale
+        // baseline call needs env_lock — same rationale
         // as `empty_surgery_pipeline_is_bit_exact_with_none`.
         let _env_guard = crate::test_support::env_lock::env_lock();
 
@@ -763,7 +763,7 @@ mod surgery_integration {
         // Acceptance criterion (b) — the parser returns a real
         // `SurgeryPipeline` that consumes through A1's hook, and
         // op-level errors propagate end-to-end. With all five Axis A
-        // ops now landed (#365 / A1 → #378 / A9), the canonical
+        // ops now landed (A1 → / A9), the canonical
         // op-level error to assert on is the "zero matches" condition
         // every real op emits when its glob does not select any
         // tensor. This test pins that error reaching the caller via
@@ -819,7 +819,7 @@ operations:
         // non-zero numerical check lives in the synthetic
         // WeightMap unit tests inside `mlxcel-surgery`.
         //
-        // Issue #371: the second `load_text_weights(_, None)` call
+        // the second `load_text_weights(_, None)` call
         // below consults the process-global active-pipeline slot, so
         // we must hold `env_lock` to keep parallel tests that touch
         // that slot from polluting our baseline read.
@@ -930,7 +930,7 @@ operations:
         }
     }
 
-    /// Issue #371 (A4): when the CLI installs an active pipeline via
+    /// (A4): when the CLI installs an active pipeline via
     /// `crate::surgery::set_active_pipeline`, the consolidated loader
     /// must pick it up for `load_text_weights(_, None)` callers. This
     /// is the integration glue that lets `mlxcel generate --surgery
@@ -951,7 +951,7 @@ operations:
         // None)`. The active-pipeline slot must be consulted because
         // the explicit `transform` is None, and the zero-match error
         // emitted by `ScaleOp::apply` must propagate out. All five
-        // Axis A ops (#365 / A1 → #378 / A9) are now real, so we use
+        // Axis A ops (A1 → / A9) are now real, so we use
         // the zero-match diagnostic — every real op emits one — as
         // the load-path-visible signal.
         let yaml = r#"version: 1
@@ -984,10 +984,9 @@ operations:
         std::fs::remove_dir_all(&dir_with_slot).unwrap();
     }
 
-    /// Issue #371 (A4): explicit `transform` argument takes precedence
+    /// (A4): explicit `transform` argument takes precedence
     /// over the active-pipeline slot. This is the contract callers
-    /// (e.g. future programmatic users and the existing #365/#367
-    /// integration tests) rely on to bypass the global slot.
+    /// (e.g. future programmatic users and the existing integration tests) rely on to bypass the global slot.
     #[test]
     fn explicit_transform_arg_wins_over_active_pipeline_slot() {
         let _env_guard = crate::test_support::env_lock::env_lock();
@@ -1028,7 +1027,7 @@ operations:
     }
 
     /// Write a Llama-shaped synthetic fixture suitable for a prune
-    /// end-to-end test (#376). The fixture sets `num_attention_heads=4`,
+    /// end-to-end test. The fixture sets `num_attention_heads=4`,
     /// `num_key_value_heads=4` (MHA so the test does not have to assert
     /// on GQA-skip semantics here), `hidden_size=32`, `head_dim=8`,
     /// `intermediate_size=64`, and one transformer block.
@@ -1136,7 +1135,7 @@ operations:
 
     #[test]
     fn prune_op_runs_through_load_text_weights() {
-        // Acceptance criterion (b) for #376 — a concrete PruneOp
+        // Acceptance criterion (b) — a concrete PruneOp
         // routed through the consolidated text-weight load path must
         // actually zero the right slice of the right tensor without
         // crashing or returning NaN/Inf. This is the end-to-end
@@ -1238,7 +1237,7 @@ operations:
 
     #[test]
     fn replace_yaml_swaps_targeted_tensor_through_load_text_weights() {
-        // Issue #377 acceptance criterion (b) — the real ReplaceOp,
+        // acceptance criterion (b) — the real ReplaceOp,
         // built from YAML, replaces the targeted base tensor with
         // the donor's content when invoked through A1's
         // `load_text_weights` hook. Untouched tensors stay
@@ -1246,7 +1245,7 @@ operations:
         // matching keys; A4's `--surgery` flag will route this
         // exact pipeline through the same loader path).
         //
-        // Issue #371: the baseline `load_text_weights(_, None)` call
+        // the baseline `load_text_weights(_, None)` call
         // below consults the process-global active-pipeline slot, so
         // we must hold `env_lock` to keep parallel tests that touch
         // that slot from polluting our baseline read.

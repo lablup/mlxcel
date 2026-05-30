@@ -289,7 +289,7 @@ impl LanguageModel for Gemma3nVLModel {
             let pli = self
                 .take_per_layer_inputs(seq_id)
                 .expect("gemma3n VLM prefill: per_layer_inputs missing for this sequence");
-            // Issue #736: M5 tile-aligned prefill pads the token stream and
+            // M5 tile-aligned prefill pads the token stream and
             // merged embeddings to an NA tile length. The projected
             // per-layer tensor is produced before that generic padding step,
             // so align it here before Gemma3n's per-layer blend.

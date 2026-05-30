@@ -14,9 +14,8 @@
 
 //! Pipeline-parallel stage executor for Qwen 3.5.
 //!
-//! Speculative-decoding hooks (`forward_speculative`,
-//! `rollback_speculative_cache` — issue #634) are **NOT** propagated through
-//! this stage executor in epic #633's Phase 1. Rationale:
+//! Speculative-decoding hooks (`forward_speculative`, `rollback_speculative_cache` —) are **NOT** propagated through
+//! this stage executor's Phase 1. Rationale:
 //!
 //! - The DFlash drafter must run against a *single coherent* target. The
 //!   speculative round loop needs the verify-pass logits, per-layer hidden

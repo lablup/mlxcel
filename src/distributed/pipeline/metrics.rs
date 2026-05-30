@@ -18,9 +18,8 @@
 //! the pipeline schedule. Metrics are collected per-step and can be
 //! aggregated for reporting.
 //!
-//! Also exposes counters/histograms for elastic repartition events (issue
-//! #349). The sink API is intentionally transport-agnostic — the Prometheus
-//! endpoint (#350) reads from [`RepartitionMetricsSnapshot`] while unit tests
+//! Also exposes counters/histograms for elastic repartition events. The sink API is intentionally transport-agnostic — the Prometheus
+//! endpoint reads from [`RepartitionMetricsSnapshot`] while unit tests
 //! inspect the raw [`RepartitionMetrics`] struct.
 //!
 //! Used by: pipeline schedule, pipeline execution loop, server metrics endpoint
@@ -326,7 +325,7 @@ impl fmt::Display for MetricsSummary {
 }
 
 // ---------------------------------------------------------------------------
-// Activation transfer latency histogram (#350)
+// Activation transfer latency histogram
 // ---------------------------------------------------------------------------
 
 /// Monotonic-merge histogram for activation transfer latency samples.
@@ -444,7 +443,7 @@ impl LatencyBuckets {
 }
 
 // ---------------------------------------------------------------------------
-// KV cache admission rejection counters (#350)
+// KV cache admission rejection counters
 // ---------------------------------------------------------------------------
 
 /// Counters for KV cache admission rejections, keyed by
@@ -494,7 +493,7 @@ pub struct AdmissionRejectionEntry {
 }
 
 // ---------------------------------------------------------------------------
-// Stage utilization snapshot (#350)
+// Stage utilization snapshot
 // ---------------------------------------------------------------------------
 
 /// Compact per-stage utilization snapshot intended for Prometheus rendering.
@@ -593,7 +592,7 @@ pub struct PipelineObservability {
     pub activation_latency: ActivationLatencyHistogram,
     /// KV cache admission rejection counters.
     pub admission_rejections: AdmissionRejectionCounters,
-    /// Elastic repartition event counters (issue #349 emission path).
+    /// Elastic repartition event counters (emission path).
     pub repartition: RepartitionMetrics,
     /// Rolling bubble ratio sample (best-effort; scheduler updates this when
     /// it closes out a pipeline step).
@@ -650,15 +649,15 @@ pub struct PipelineObservabilitySnapshot {
 }
 
 // ---------------------------------------------------------------------------
-// Elastic repartition counters (consumed by #350's /metrics endpoint)
+// Elastic repartition counters (consumed's /metrics endpoint)
 // ---------------------------------------------------------------------------
 
 /// Atomic counters + histogram totals for elastic repartition events.
 ///
 /// This is the low-level container the coordinator writes to; the
 /// Prometheus endpoint reads a [`RepartitionMetricsSnapshot`] to render
-/// stable text output. Used by: #349 elastic coordinator (writer),
-/// #350 Prometheus endpoint (reader).
+/// stable text output. Used by: elastic coordinator (writer),
+/// Prometheus endpoint (reader).
 #[derive(Debug, Default)]
 pub struct RepartitionMetrics {
     /// Total repartition events, partitioned by trigger kind + outcome.

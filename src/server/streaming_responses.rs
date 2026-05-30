@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! SSE encoder for the OpenAI Responses API (issue #622).
+//! SSE encoder for the OpenAI Responses API.
 //!
 //! Unlike `/v1/chat/completions` — which sends a single chat-completion-chunk
 //! shape on every `data:` line — the Responses API uses typed SSE events:

@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Progress bar helpers for the mlxcel downloader (issue #648).
+//! Progress bar helpers for the mlxcel downloader.
 //!
 //! Wraps `indicatif::MultiProgress` with TTY detection and env-var opt-out so
 //! that CI logs and piped output remain clean plain-text while interactive

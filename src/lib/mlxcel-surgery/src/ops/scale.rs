@@ -14,7 +14,7 @@
 
 //! `ScaleOp` — multiply every matched tensor by a scalar factor.
 //!
-//! YAML shape (#369 — A3):
+//! YAML shape (— A3):
 //!
 //! ```yaml
 //! - op: scale

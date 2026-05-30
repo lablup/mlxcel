@@ -571,7 +571,7 @@ async fn ci_concurrent_operations() {
 // ---------------------------------------------------------------------------
 //
 // These tests verify that the runtime plumbing for the 2D parallelism
-// introduced by issue #346 is wired end-to-end: config parsing, registry
+// introduced is wired end-to-end: config parsing, registry
 // lookups, 2D-aware routing, and the cache-manager admission grid.
 
 use mlxcel::distributed::config::ClusterConfig;

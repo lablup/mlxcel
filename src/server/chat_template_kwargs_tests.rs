@@ -18,7 +18,7 @@ use super::{
     resolve_server_default_kwargs, strip_rolling_checkpoint, strip_think_block,
 };
 // Env-var fallback tests must serialize through the crate-wide `ENV_LOCK`
-// (issue #573); per-module locks race with env mutations in unrelated
+// per-module locks race with env mutations in unrelated
 // modules of the same test binary.
 use crate::test_support::env_lock::env_lock as lock_env;
 use serde_json::{Map, Value, json};
@@ -99,7 +99,7 @@ fn preserve_thinking_accessor_ignores_non_bool_values() {
 // Env-var fallback tests share both `LLAMA_ARG_CHAT_TEMPLATE_KWARGS` and
 // the process-wide env block. They serialize through the crate-wide
 // `ENV_LOCK` imported above — per-module locks would race with env
-// mutations in unrelated modules of the same test binary (issue #573).
+// mutations in unrelated modules of the same test binary.
 
 #[test]
 fn env_fallback_cli_none_takes_env() {

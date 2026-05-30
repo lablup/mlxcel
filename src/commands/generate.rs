@@ -383,7 +383,7 @@ fn resolve_cli_pipeline_assignments(
 ) -> Result<Vec<mlxcel::distributed::StageAssignment>> {
     // Use the model-aware profile builder so MoE expert variation and
     // Gemma 4 KV-shared adjacency are honoured by default. This drops the
-    // pre-#348 requirement for manual `--pp-layers` on those models.
+    // earlier requirement for manual `--pp-layers` on those models.
     let (assignments, report) =
         mlxcel::distributed::pipeline::resolve_in_process_stage_assignments_for_model(
             model_dir,
@@ -631,7 +631,7 @@ fn tokenize_prompt(
 /// the loaded tokenizer, or return an empty map when no language bias is
 /// active.
 ///
-/// The empty-map path is the **baseline bit-exact** contract for Epic #362
+/// The empty-map path is the **baseline bit-exact** contract
 /// Axis B — no disk I/O, no vocab scan, no sampling-path changes.
 ///
 /// # Errors
@@ -849,7 +849,7 @@ fn run_generation_mode<M: LanguageModel>(
     token_bias: TokenBiasMap,
 ) -> Result<(Vec<i32>, GenerationStats)> {
     let output = if let Some(ref draft_model_path) = args.model.draft_model {
-        // Issue #630: resolve the effective DrafterKind from
+        // resolve the effective DrafterKind from
         // (a) the explicit `--draft-kind` CLI flag, OR
         // (b) the drafter's `config.json::model_type` auto-detection.
         //
@@ -882,10 +882,10 @@ fn run_generation_mode<M: LanguageModel>(
             },
         );
 
-        // Issue #630: when the operator explicitly opted into MTP /
+        // when the operator explicitly opted into MTP /
         // DFlash via `--draft-kind`, we MUST dispatch to the kind-specific
         // generator. The concrete `MtpGenerator<T>` / `DFlashGenerator`
-        // round loops are wired in sub-6 / #629 and sub-12 / #636,
+        // round loops are wired in sub-6 and sub-12,
         // respectively, but those round loops require model-specific
         // `MtpTarget` / `SpeculativeTarget` impls that this offline CLI
         // path does not yet provide. Surface a clear, actionable error
@@ -898,7 +898,7 @@ fn run_generation_mode<M: LanguageModel>(
         // backward-compatible.
         if user_requested_explicit_kind {
             return Err(anyhow!(
-                "--draft-kind {kind} is plumbed end-to-end (issue #630) but \
+                "--draft-kind {kind} is plumbed end-to-end but \
                  the offline `mlxcel generate` path does not yet construct the \
                  kind-specific `{generator}` round loop on this target model. \
                  The runtime wiring lands in {tracker}. For now, omit \
@@ -916,10 +916,10 @@ fn run_generation_mode<M: LanguageModel>(
                 },
                 tracker = match resolved_kind {
                     DrafterKind::Mtp =>
-                        "issue #629 (MtpGenerator round loop) and the per-target MtpTarget impls",
+                        " (MtpGenerator round loop) and the per-target MtpTarget impls",
                     DrafterKind::Dflash =>
-                        "issue #636 (DFlashGenerator round loop) and the per-target SpeculativeTarget impls",
-                    DrafterKind::InternalMtp => "epic #647 sub-issues",
+                        " (DFlashGenerator round loop) and the per-target SpeculativeTarget impls",
+                    DrafterKind::InternalMtp => " sub-issues",
                     _ => "follow-up speculative-decoding sub-issues",
                 },
             ));
@@ -988,7 +988,7 @@ fn run_generation_mode<M: LanguageModel>(
 /// parsed, the file is missing, or any referenced donor checkpoint
 /// (`source*` field) cannot be located. Surfacing these errors *before*
 /// any model weights are touched mirrors the contract called out in
-/// issue #371 acceptance criterion (a).
+/// acceptance criterion (a).
 ///
 /// When the flag is absent, this is a no-op: the active-pipeline slot
 /// stays at `None` and the load path follows the bit-exact baseline.
@@ -1088,13 +1088,13 @@ fn run_generate_once(mut args: GenerateArgs) -> Result<()> {
     let runtime = initialize_runtime();
     print_runtime_setup(&runtime);
 
-    // Axis A weight-load surgery (Epic #363, issue #371). Parse the
+    // Axis A weight-load surgery. Parse the
     // YAML and install the pipeline *before* any heavier validation
     // so a malformed / missing surgery config fails fast with a clear
     // error rather than being masked by an unrelated tensor-parallel
     // or pipeline-parallel diagnostic. When `--surgery` is absent this
     // is a no-op and the load path remains bit-exact identical to the
-    // pre-#371 baseline. This reads only the `--surgery` YAML path, never
+    // earlier baseline. This reads only the `--surgery` YAML path, never
     // the model directory, so it must stay ahead of the `-m` resolver below
     // — a malformed surgery config never triggers an auto-download.
     #[cfg(feature = "surgery")]
@@ -1117,7 +1117,7 @@ fn run_generate_once(mut args: GenerateArgs) -> Result<()> {
 
     // Parse and validate language bias arguments early (before model load).
     // Empty/absent CLI flags resolve to `None`, which keeps the generation
-    // path bit-exact identical to the pre-B8 baseline (Epic #362 acceptance).
+    // path bit-exact identical to the pre-B8 baseline (acceptance).
     let lang_bias_config: Option<LangBiasConfig> = args
         .lang_bias
         .resolve()
@@ -1189,7 +1189,7 @@ fn run_generate_once(mut args: GenerateArgs) -> Result<()> {
         } else {
             (String::new(), "conservative")
         };
-        // Issue #405 — emit byte_fragment_entries only when non-zero so the
+        // emit byte_fragment_entries only when non-zero so the
         // existing B9 field shape is preserved for Phase 1 configs.
         let byte_fragment_entries = token_bias.byte_fragment_len();
         if byte_fragment_entries > 0 {

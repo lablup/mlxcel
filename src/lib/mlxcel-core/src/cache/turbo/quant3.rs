@@ -12,8 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! V-side 3-bit PolarQuant pipeline for `KVCacheMode::Turbo3Asym` (issue
-//! #477, epic #458).
+//! V-side 3-bit PolarQuant pipeline for `KVCacheMode::Turbo3Asym`.
 //!
 //! This module mirrors [`super::quant`] (the 4-bit pipeline used by
 //! `Turbo4Asym` / `Turbo4`) but uses a **3-bit** Lloyd-Max codebook and the
@@ -44,14 +43,14 @@
 //!
 //! # Asymmetric-only
 //!
-//! Issue #477 explicitly defers the symmetric `Turbo3` variant. Symmetric
-//! 3-bit on dense Q4_K_M weights is catastrophic per epic #458's
+//! explicitly defers the symmetric `Turbo3` variant. Symmetric
+//! 3-bit on dense Q4_K_M weights is catastrophic's
 //! "Quality–compression tradeoff control" section. This PR ships only
 //! `KVCacheMode::Turbo3Asym` (Fp16-K + Turbo3-V). The allowlist gating in
 //! [`super::allowlist`] does not apply because asymmetric Turbo* is always
 //! safe.
 //!
-//! Used by: `KVCache::update_turbo3_asym` (cache.rs, issue #477).
+//! Used by: `KVCache::update_turbo3_asym` (cache.rs).
 
 use std::sync::Arc;
 
@@ -73,7 +72,7 @@ pub const V_BIT_WIDTH_3: u8 = 3;
 /// Mirrors [`super::quant::TurboQuantParams`] but carries a 3-bit codebook
 /// (8 centroids) instead of 4-bit (16 centroids). The K-side sign vectors
 /// from the 4-bit struct are intentionally absent — symmetric Turbo3 is
-/// out of scope for issue #477 and the asymmetric path leaves K in FP16.
+/// out of scope and the asymmetric path leaves K in FP16.
 ///
 /// One instance is built per `KVCache` at construction time when the cache
 /// is in `KVCacheMode::Turbo3Asym` mode, parameterised by the V `head_dim`

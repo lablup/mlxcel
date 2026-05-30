@@ -218,7 +218,7 @@ pub(crate) struct GenerateArgs {
     #[command(flatten)]
     pub(crate) speculative: SpeculativeArgs,
 
-    // Axis A weight-load surgery configuration (Epic #363, issue #371).
+    // Axis A weight-load surgery configuration.
     // The closed-repo references stay in this non-doc comment so the
     // user-facing `--help` block does not advertise tracker URLs (see
     // `tests/cli_help_consistency.rs::FORBIDDEN_SUBSTRINGS`).
@@ -1268,7 +1268,7 @@ pub(crate) struct ServeArgs {
     #[arg(long = "chat-template-kwargs", value_name = "JSON")]
     chat_template_kwargs: Option<String>,
 
-    // Issue #424: cross-request prompt-prefix KV cache knobs.
+    // cross-request prompt-prefix KV cache knobs.
     /// Enable or disable the cross-request prompt-prefix KV cache (default: true).
     ///
     /// When disabled, the server performs no prefix-match lookup and no memory
@@ -1313,7 +1313,7 @@ pub(crate) struct ServeArgs {
     #[arg(long = "prompt-cache-min-prefix", value_name = "N")]
     prompt_cache_min_prefix: Option<usize>,
 
-    // Issue #552: Automatic Prefix Caching (APC) knobs.
+    // Automatic Prefix Caching (APC) knobs.
     /// Enable Automatic Prefix Caching (APC) with block-granularity hash chains
     /// (default: false).
     ///
@@ -1359,7 +1359,7 @@ pub(crate) struct ServeArgs {
     #[arg(long = "apc-hash", value_name = "ALGO")]
     apc_hash: Option<String>,
 
-    // Axis A weight-load surgery configuration (Epic #363, issue #371).
+    // Axis A weight-load surgery configuration.
     // Closed-repo references kept in a non-doc comment to avoid leaking
     // tracker URLs into `--help` text.
     /// Apply weight-load surgery configuration from a YAML file.

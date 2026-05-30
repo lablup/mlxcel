@@ -82,14 +82,14 @@ pub struct ServerStartupConfig {
     // Speculative decoding
     pub draft_model_path: Option<PathBuf>,
     pub draft_max: usize,
-    /// Issue #630: raw `--draft-kind` value. `None` means
+    /// raw `--draft-kind` value. `None` means
     /// "auto-detect from the drafter `config.json::model_type`" when
     /// `draft_model_path` is also supplied. Parsing into
     /// [`mlxcel_core::drafter::DrafterKind`] and reconciliation against
     /// the drafter config happens at the dispatch site via
     /// [`mlxcel_core::drafter::resolve_drafter_kind`].
     pub draft_kind: Option<String>,
-    /// Issue #630: explicit `--draft-block-size` override. `None` means
+    /// explicit `--draft-block-size` override. `None` means
     /// "use the per-kind default" — `4` for MTP, `16` for DFlash. See
     /// [`crate::cli::speculative_args::default_block_size_for_kind`].
     pub draft_block_size: Option<u32>,
@@ -165,7 +165,7 @@ pub struct ServerStartupConfig {
     /// Micro-batch size for in-process pipeline execution.
     pub pp_micro_batch_size: usize,
 
-    // Zero-config multi-machine pipeline bring-up (issue #342).
+    // Zero-config multi-machine pipeline bring-up.
     /// Zero-config coordinator intent: pipeline depth for `mlxcel-server --pp-auto N`.
     pub pp_auto: Option<u32>,
     /// Zero-config peer intent: `mlxcel-server --pp-peer` joins a running cluster.
@@ -212,7 +212,7 @@ pub struct ServerStartupConfig {
     /// Maximum decoder allocation budget passed to `image::Limits`.
     pub max_image_decode_alloc_bytes: u64,
 
-    // Elastic pipeline-parallel repartitioning (issue #349).
+    // Elastic pipeline-parallel repartitioning.
     /// When `true`, the runtime constructs the elastic repartition coordinator
     /// described in `docs_internal/architecture/elastic-pipeline-repartition-
     /// 20260418.md`. Off by default so existing deployments are unaffected.
@@ -226,7 +226,7 @@ pub struct ServerStartupConfig {
     /// same stage.
     pub elastic_pp_cool_down: u64,
 
-    // Observability (issue #350).
+    // Observability.
     /// Port operators requested for `/metrics`. Currently informational —
     /// the endpoint is multiplexed onto `port` because the server has a
     /// single HTTP listener.
@@ -235,12 +235,12 @@ pub struct ServerStartupConfig {
     /// actions. `Some(path)` constructs a `PpTracer`.
     pub debug_pp_trace: Option<PathBuf>,
 
-    /// Axis B Epic #362 (B8): server-wide language-bias configuration
+    /// Axis B (B8): server-wide language-bias configuration
     /// already resolved from CLI flags (B6) or the `LLAMA_ARG_LANG_BIAS`
     /// env-var path (B7). `None` preserves the bit-exact baseline path.
     pub lang_bias_config: Option<mlxcel_core::lang_analyzer::LangBiasConfig>,
 
-    /// Issue #409: server-wide default for the thinking-token budget.
+    /// server-wide default for the thinking-token budget.
     ///
     /// Normalized from the raw `i32` on [`super::ServerStartupInput`] via
     /// [`super::thinking_budget::ThinkingBudget::from_raw_i32`]. `None` means
@@ -251,14 +251,14 @@ pub struct ServerStartupConfig {
     /// to `None` and the budget is silently ignored.
     pub reasoning_budget: Option<super::thinking_budget::ThinkingBudget>,
 
-    /// Issue #410: server-wide default chat-template kwargs.
+    /// server-wide default chat-template kwargs.
     ///
     /// Parsed from the raw JSON string on [`super::ServerStartupInput`] via
     /// [`super::chat_template_kwargs::ChatTemplateKwargs::from_json_str`].
     /// `None` means no server defaults; per-request kwargs may still apply.
     pub chat_template_kwargs: Option<super::chat_template_kwargs::ChatTemplateKwargs>,
 
-    /// Issue #424: resolved prompt-prefix KV cache policy.
+    /// resolved prompt-prefix KV cache policy.
     ///
     /// Built from CLI flags and env vars via
     /// [`super::cli_input::build_prompt_cache_config`] inside
@@ -267,7 +267,7 @@ pub struct ServerStartupConfig {
     /// (enabled, 2 GiB cap, 1024 entries, 3600 s TTL, 32 token min).
     pub prompt_cache: super::prompt_cache::PromptCacheConfig,
 
-    /// Issue #484 (B11): resolved KV cache mode for per-sequence cache
+    /// (B11): resolved KV cache mode for per-sequence cache
     /// construction.
     ///
     /// Resolved from `--cache-type-k`/`--cache-type-v` (split flags,
@@ -280,7 +280,7 @@ pub struct ServerStartupConfig {
     /// Unsupported K/V combinations are rejected at startup.
     pub kv_cache_mode: mlxcel_core::cache::KVCacheMode,
 
-    /// Issue #545: resolved batch KV cache quantization configuration
+    /// resolved batch KV cache quantization configuration
     /// (uniform `mx.quantize` or TurboQuant variant) for the
     /// continuous-batching path.
     ///
@@ -294,7 +294,7 @@ pub struct ServerStartupConfig {
     /// quality on deep models such as gemma-4-31b.
     pub batch_kv_quant: mlxcel_core::cache::BatchKvQuantConfig,
 
-    /// Issue #603: maximum KV cache size for plain (non-sliding) KVCache
+    /// maximum KV cache size for plain (non-sliding) KVCache
     /// instances. `None` preserves the legacy unbounded behaviour.
     ///
     /// Resolved from `--max-kv-size` / `LLAMA_ARG_MAX_KV_SIZE`. See the
@@ -302,25 +302,25 @@ pub struct ServerStartupConfig {
     /// semantics.
     pub max_kv_size: Option<usize>,
 
-    /// Issue #622: maximum number of responses kept in the
+    /// maximum number of responses kept in the
     /// [`crate::server::responses_store::ResponsesStore`]. `0` disables
     /// response persistence entirely, in which case `GET /v1/responses/:id`
     /// and `previous_response_id` return 400. Resolved from
     /// `--responses-store-max-entries` / `LLAMA_ARG_RESPONSES_STORE_MAX_ENTRIES`.
     pub responses_store_max_entries: usize,
-    /// Issue #622: TTL (seconds) for in-memory response store entries.
+    /// TTL (seconds) for in-memory response store entries.
     /// `0` disables TTL (entries are evicted only by capacity pressure).
     /// Resolved from `--responses-store-ttl-secs` / `LLAMA_ARG_RESPONSES_STORE_TTL_SECS`.
     pub responses_store_ttl_secs: u64,
-    /// Issue #622: capacity cap for the conversation transcript store.
+    /// capacity cap for the conversation transcript store.
     /// `0` disables the store; requests referencing `conversation` still
     /// succeed but operate as if the transcript is empty.
     pub conversation_store_max_entries: usize,
-    /// Issue #622: TTL (seconds) for conversation transcripts. `0`
+    /// TTL (seconds) for conversation transcripts. `0`
     /// disables TTL.
     pub conversation_store_ttl_secs: u64,
 
-    /// Issue #371 (A4): resolved path to a YAML weight-load surgery
+    /// (A4): resolved path to a YAML weight-load surgery
     /// configuration. `None` keeps the bit-exact baseline load path.
     ///
     /// The path is parsed into a [`mlxcel_surgery::SurgeryPipeline`]
@@ -353,7 +353,7 @@ impl Default for ServerStartupConfig {
             timeout: 600,
             draft_model_path: None,
             draft_max: 16,
-            // Issue #630: speculative-decoding selector defaults.
+            // speculative-decoding selector defaults.
             // `draft_kind = None` means "auto-detect when a drafter is
             // supplied, otherwise inert"; `draft_block_size = None`
             // means "fall back to the per-kind default once the kind
@@ -570,7 +570,7 @@ pub(super) fn resolve_api_key(
 
 /// Walk the directories named in `MLXCEL_VIDEO_DIR_ALLOWLIST` once at
 /// startup and emit a `tracing::warn!` for any entry whose group or world
-/// write bits are set (issue #596 hardening / PR #600 follow-up).
+/// write bits are set (hardening / follow-up).
 ///
 /// Reads the env var via [`super::media::video_dir_allowlist_from_env`]
 /// and delegates the actual permission check to
@@ -578,7 +578,7 @@ pub(super) fn resolve_api_key(
 /// when the env var is empty/unset, so this runs as a no-op for operators
 /// who haven't opted into the feature.
 ///
-/// Issue #601 closed the dominant canonicalise → ffmpeg-open TOCTOU window
+/// closed the dominant canonicalise → ffmpeg-open TOCTOU window
 /// at the kernel level: every file open now uses `O_NOFOLLOW` (so a symlink
 /// swap in the metadata→open gap returns `ELOOP` instead of silently
 /// following the link), and subprocesses receive `/dev/fd/N` rather than a
@@ -600,7 +600,7 @@ pub(super) fn resolve_api_key(
 /// the server up with a loose-mode directory while they fix the
 /// permissions; the resolver itself is safe against the static path
 /// checks (canonicalise + allowlist prefix + regular-file + extension)
-/// and the issue #601 fd-passing + `O_NOFOLLOW` guarantee.
+/// and the fd-passing + `O_NOFOLLOW` guarantee.
 fn warn_on_insecure_video_allowlist() {
     let allowlist = super::media::video_dir_allowlist_from_env();
     if allowlist.is_empty() {
@@ -610,7 +610,7 @@ fn warn_on_insecure_video_allowlist() {
     {
         tracing::warn!(
             "{} is set but the O_NOFOLLOW + fd-passing security layer \
-             (issue #601) is only available on Unix (Linux, macOS). \
+ is only available on Unix (Linux, macOS). \
              On this platform the video resolver falls back to path-only \
              mode, which retains a residual TOCTOU window. Leave \
              MLXCEL_VIDEO_DIR_ALLOWLIST unset on non-Unix deployments.",
@@ -624,7 +624,7 @@ fn warn_on_insecure_video_allowlist() {
             tracing::warn!(
                 "Allowlist directory '{}' is world/group-writable. The dominant \
                  TOCTOU race against video resolution is closed at the kernel level \
-                 by the issue #601 O_NOFOLLOW + fd-passing fix, but a writable \
+                 by the O_NOFOLLOW + fd-passing fix, but a writable \
                  upload directory remains a policy red flag. Restrict permissions \
                  to 0750 or stricter.",
                 dir.display()
@@ -634,7 +634,7 @@ fn warn_on_insecure_video_allowlist() {
 }
 
 /// Inspect the model's `config.json` and decide which media inputs the chat
-/// handler should accept (issue #596).
+/// handler should accept.
 ///
 /// Failure modes are intentionally tolerant: if `config.json` is missing or
 /// the type cannot be determined, the loaded model would have failed earlier
@@ -756,7 +756,7 @@ pub(super) fn build_server_config(
         default_dry_penalty_last_n: resolve_dry_penalty_last_n(startup.dry_penalty_last_n),
         draft_model_path: startup.draft_model_path.clone(),
         num_draft_tokens: startup.draft_max,
-        // Issue #630: forward the speculative-decoding selector flags
+        // forward the speculative-decoding selector flags
         // verbatim. Reconciliation against the drafter `config.json`
         // and dispatch into `MtpGenerator` / `DFlashGenerator` / the
         // classic `SpeculativeGenerator` happens later inside the
@@ -786,13 +786,13 @@ pub(super) fn build_server_config(
         lang_bias_config: startup.lang_bias_config.clone(),
         reasoning_budget: startup.reasoning_budget,
         chat_template_kwargs: startup.chat_template_kwargs.clone(),
-        // Issue #424: wire the CLI/env-resolved policy through instead of
+        // wire the CLI/env-resolved policy through instead of
         // always using the compiled-in default.
         prompt_cache: startup.prompt_cache.clone(),
-        // Issue #484 (B11): wire the resolved KV cache mode through so the
+        // (B11): wire the resolved KV cache mode through so the
         // model worker can apply it when constructing per-sequence generators.
         kv_cache_mode: startup.kv_cache_mode,
-        // Issue #545: wire the resolved batch KV quant config through so
+        // wire the resolved batch KV quant config through so
         // the continuous-batching scheduler can apply per-layer modes
         // (with the last-layer skip) at sequence allocation time.
         batch_kv_quant: startup.batch_kv_quant,
@@ -840,7 +840,7 @@ fn warmup_model(model_provider: &ModelProvider) -> Result<()> {
             priority: crate::server::batch::RequestPriority::Normal,
             logprobs: Default::default(),
             reasoning_budget: Default::default(),
-            // Issue #409: warmup prompt is the raw literal "Hello", not a
+            // warmup prompt is the raw literal "Hello", not a
             // chat-templated prompt with `<think>\n` priming, so treat the
             // first token as not-yet-in-block.
             thinking_enter_block_on_start: false,
@@ -1175,7 +1175,7 @@ fn build_cluster_init_request(startup: &ServerStartupConfig) -> Result<ClusterIn
     })
 }
 
-/// Run the zero-config bring-up path (issue #342): resolve peers (static or
+/// Run the zero-config bring-up path: resolve peers (static or
 /// mDNS broadcast), emit a deterministic cluster TOML, and rewrite the
 /// startup config so the downstream distributed resolution path sees a
 /// normal `distributed_config` + `node_id` tuple.
@@ -1229,7 +1229,7 @@ async fn run_zero_config_bring_up(
         anyhow::ensure!(
             startup.distributed_config.is_some(),
             "--pp-peer currently requires --distributed-config pointing at the coordinator-emitted cluster TOML. \
-             Future work will remove this once the coordinator push-assigns stages (issue #342 follow-up)."
+             Future work will remove this once the coordinator push-assigns stages (follow-up)."
         );
         anyhow::ensure!(
             startup.node_id.is_some(),
@@ -1360,15 +1360,15 @@ pub async fn start_server(mut startup: ServerStartupConfig) -> Result<()> {
         max_decode_alloc_bytes: startup.max_image_decode_alloc_bytes,
     });
 
-    // Axis A weight-load surgery (Epic #363, issue #371). Install the
+    // Axis A weight-load surgery. Install the
     // pipeline *before* worker startup so the spawned model loader
     // thread observes it through the active-pipeline snapshot. When
     // `--surgery` is absent this is a no-op and the load path stays
-    // bit-exact with the pre-#371 baseline.
+    // bit-exact with the earlier baseline.
     #[cfg(feature = "surgery")]
     install_surgery_pipeline_for_server(&startup)?;
 
-    // Zero-config multi-machine pipeline bring-up (issue #342). Runs before
+    // Zero-config multi-machine pipeline bring-up. Runs before
     // the tensor-parallel / pipeline-parallel validators so the emitted TOML
     // passes through the existing distributed resolution path unchanged.
     let zero_config_plan = run_zero_config_bring_up(&mut startup).await?;
@@ -1496,7 +1496,7 @@ pub async fn start_server(mut startup: ServerStartupConfig) -> Result<()> {
     )?;
     let tokenizer = crate::tokenizer::load_tokenizer(&startup.model_path)?;
 
-    // Issue #590: align the chat-template `enable_thinking` Jinja kwarg
+    // align the chat-template `enable_thinking` Jinja kwarg
     // default with upstream `TokenizerWrapper.apply_chat_template`'s
     // `enable_thinking=self.has_thinking` behavior. When the underlying
     // tokenizer recognizes a think marker pair (single-token `<think>` /
@@ -1523,7 +1523,7 @@ pub async fn start_server(mut startup: ServerStartupConfig) -> Result<()> {
                 .map(Vec::len)
                 .unwrap_or(0),
             "Tokenizer recognizes a think marker pair; defaulting \
-             chat_template kwarg `enable_thinking=true` (issue #590, \
+             chat_template kwarg `enable_thinking=true` (\
              upstream PR #1114)"
         );
         chat_template.set_default_enable_thinking(true);
@@ -1534,7 +1534,7 @@ pub async fn start_server(mut startup: ServerStartupConfig) -> Result<()> {
     let batch_metrics = Arc::new(BatchMetrics::new());
     let batch_observability = Arc::new(BatchObservability::new());
 
-    // Issue #552: hybrid SSM / linear-attention models cannot use APC because
+    // hybrid SSM / linear-attention models cannot use APC because
     // their recurrent state cannot be reconstructed from a token-prefix hash.
     // Detect by reading model_type / architectures from config.json and
     // force-disable APC at runtime (the whole-prefix prompt cache is still
@@ -1552,9 +1552,9 @@ pub async fn start_server(mut startup: ServerStartupConfig) -> Result<()> {
         config.prompt_cache.apc.enabled = false;
     }
 
-    // Cross-request prompt-prefix KV cache store (epic #416 / issue #419).
+    // Cross-request prompt-prefix KV cache store.
     // Gated on the config flag so a disabled policy reserves zero memory.
-    // Issue #423: wire BatchMetrics into the store so hits/misses/evictions
+    // wire BatchMetrics into the store so hits/misses/evictions
     // are counted and exposed via /metrics.
     let prompt_cache_store = if config.prompt_cache.is_enabled() {
         let cache_metrics = Arc::new(crate::server::state::BatchMetricsCacheAdapter::new(
@@ -1572,7 +1572,7 @@ pub async fn start_server(mut startup: ServerStartupConfig) -> Result<()> {
             apc_enabled = config.prompt_cache.apc.enabled,
             apc_block_size = config.prompt_cache.apc.block_size,
             apc_hash = %config.prompt_cache.apc.hash,
-            "Prompt-prefix KV cache store enabled (epic #416 / issue #419 + APC #552)"
+            "Prompt-prefix KV cache store enabled (+ APC)"
         );
         Some(store)
     } else {
@@ -1580,7 +1580,7 @@ pub async fn start_server(mut startup: ServerStartupConfig) -> Result<()> {
         None
     };
 
-    // Issue #548: `--timeout` is validated inside `new_with_server_config_and_prompt_cache` and
+    // `--timeout` is validated inside `new_with_server_config_and_prompt_cache` and
     // the resolved `Duration` is stashed on `ModelProvider`, where it flows into the drain loops.
     // A zero value triggers a logged warning and falls back to the 300 s default.
     let model_provider = Arc::new(ModelProvider::new_with_server_config_and_prompt_cache(
@@ -1622,14 +1622,14 @@ pub async fn start_server(mut startup: ServerStartupConfig) -> Result<()> {
         Arc::new(crate::distributed::pipeline::PpTracer::new(path.clone()))
     });
 
-    // Issue #596: detect static media-input capabilities once at startup so
+    // detect static media-input capabilities once at startup so
     // the chat handler can short-circuit unsupported requests with a 400.
     let media_support = detect_model_media_support(&startup.model_path);
 
-    // Issue #596 hardening: scan the operator-provided
+    // hardening: scan the operator-provided
     // `MLXCEL_VIDEO_DIR_ALLOWLIST` directories for world/group-writable
     // entries. The technical TOCTOU race (attacker swaps the file between
-    // canonicalize and ffmpeg open) is now closed by issue #601's
+    // canonicalize and ffmpeg open) is now closed's
     // fd-passing fix in `media::extract_chat_video_paths_with_allowlist`,
     // but a loose-mode allowlist directory still violates operator-policy
     // hygiene and can re-enable the race if a future ffmpeg version
@@ -1637,7 +1637,7 @@ pub async fn start_server(mut startup: ServerStartupConfig) -> Result<()> {
     // defence-in-depth.
     warn_on_insecure_video_allowlist();
 
-    // Issue #622: build the Responses-API stores from the resolved limits.
+    // build the Responses-API stores from the resolved limits.
     // `max_entries = 0` disables the store entirely; otherwise build with
     // the configured TTL (a TTL of 0 means "no TTL" which we map to a
     // very large duration so the sweep is a no-op).

@@ -79,7 +79,7 @@ pub struct SpeculativeGenerator {
     draft_caches: Vec<KVCache>,
     generated_tokens: Vec<i32>,
     /// Thread-local generation stream — see `mlxcel_core::streams`
-    /// (issue #556). Resolves to a per-thread `MlxStream` on the
+    /// Resolves to a per-thread `MlxStream` on the
     /// worker thread that calls `generate`, so dispatch and
     /// synchronization stay paired even when the generator is moved
     /// across threads after construction.
@@ -772,7 +772,7 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // Issue #589 — trimmable cache validation and last-token reservation
+    // trimmable cache validation and last-token reservation
     // ------------------------------------------------------------------
 
     /// All freshly-constructed KVCache entries must report `is_trimmable()`.

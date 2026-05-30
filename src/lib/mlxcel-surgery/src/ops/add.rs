@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! `AddOp` — task-vector addition (issue #375, axis A6).
+//! `AddOp` — task-vector addition (axis A6).
 //!
 //! For every tensor key in the in-memory `WeightMap` whose name
 //! matches the glob `pattern`, look up the same-named tensor in an

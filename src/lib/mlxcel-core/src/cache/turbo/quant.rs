@@ -12,18 +12,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! TurboQuant K/V-side PolarQuant pipeline (B2 + B4, issues #474 and #476,
-//! epic #458).
+//! TurboQuant K/V-side PolarQuant pipeline (B2 + B4, and).
 //!
 //! Implements the per-token compression used by `KVCacheMode::Turbo4Asym`
 //! (V only) and `KVCacheMode::Turbo4` (both K and V):
 //!
 //! 1. Per-token L2 norm extraction.
 //! 2. Sign-flip × Walsh–Hadamard × sign-flip rotation (the structured fast
-//!    rotation `D2 · H · D1` from the TurboQuant+ reference). See B0 (#470)
+//!    rotation `D2 · H · D1` from the TurboQuant+ reference). See B0
 //!    for the WHT op.
 //! 3. Per-coordinate nearest-centroid lookup using the Lloyd-Max codebook
-//!    from B1 (#472).
+//!    from B1.
 //! 4. Nibble-packing of the 4-bit indices into a `[..., head_dim/2]` u8 buffer.
 //!
 //! The dequantize path is the exact inverse: unpack nibbles → centroid
@@ -68,7 +67,7 @@
 //! magnitude information; without it, the dequantized vector underestimates
 //! the original V by a few percent.
 //!
-//! Used by: `KVCacheMode::Turbo4Asym` V-cache update/read (B2, epic #458).
+//! Used by: `KVCacheMode::Turbo4Asym` V-cache update/read (B2).
 
 use std::sync::Arc;
 
@@ -86,8 +85,8 @@ use crate::ops::wht;
 pub const V_BIT_WIDTH: u8 = 4;
 
 /// K-side PolarQuant bit-width. Locked to 4 bits for symmetric `Turbo4`
-/// (issue #476). The K side is only quantized in symmetric mode; in
-/// `Turbo4Asym` (issue #474) the K side stays in FP16.
+/// The K side is only quantized in symmetric mode; in
+/// `Turbo4Asym` the K side stays in FP16.
 pub const K_BIT_WIDTH: u8 = 4;
 
 /// Seed offset added to the cache's `turbo_seed` before deriving the K-side
@@ -141,13 +140,13 @@ impl Lcg32 {
 /// runtime model and a deterministic seed. The codebook is fetched from the
 /// global `OnceLock`-backed cache so multiple caches share the centroids.
 ///
-/// In symmetric `Turbo4` mode (issue #476) the *same* params struct also
+/// In symmetric `Turbo4` mode the *same* params struct also
 /// carries an independent pair of K-side sign vectors (`k_signs1` /
 /// `k_signs2`) so K compression decorrelates from V. The codebook is
 /// re-used as the post-WHT coordinate distribution is identical for K and V.
 ///
 /// Used by: `KVCache::update_turbo4_asym` (cache.rs),
-/// `KVCache::update_turbo4_sym` (cache.rs, issue #476),
+/// `KVCache::update_turbo4_sym` (cache.rs),
 /// `turbo::quant::dequantize_v_turbo4` (this module),
 /// `turbo::quant::dequantize_k_turbo4` (this module).
 #[derive(Clone, Debug)]
@@ -242,7 +241,7 @@ pub fn generate_signs(len: usize, seed: u32) -> Arc<[f32]> {
 /// is shape `[B, H, T, D/2]` u8 (low nibble = even coord, high nibble = odd
 /// coord); the norm tensor is shape `[B, H, T, 1]` fp16.
 ///
-/// # Returns (issue #520, fused Sparse-V kernel rescale precompute)
+/// # Returns (fused Sparse-V kernel rescale precompute)
 ///
 /// `(v_packed, v_norms, v_rescale)` where the third element is a precomputed
 /// per-token rescale factor:
@@ -255,7 +254,7 @@ pub fn generate_signs(len: usize, seed: u32) -> Arc<[f32]> {
 /// per token by the previous fused kernel via a threadgroup tree reduction
 /// over `Dim` threads. Precomputing it at quantize time eliminates the
 /// per-cache-token threadgroup reduction (and its `log2(Dim) + 2` barrier
-/// chain) from the kernel hot path — see issue #520 for measurements.
+/// chain) from the kernel hot path — for measurements.
 ///
 /// V-side callers store `v_rescale` alongside `v_packed` / `v_norms` so the
 /// fused kernel (`turbo::sparse_v::attention_sparse_v_turbo4_fused`) can read
@@ -329,13 +328,13 @@ fn quantize_into_packed(
     //    correctness story dominates and a fully-fused on-GPU implementation
     //    is the natural follow-up (likely B7's delegated KVCache or B11+).
     //
-    //    TODO(#474 follow-up): replace this readback with an on-device
+    //    TODO(follow-up): replace this readback with an on-device
     //    nearest-centroid lookup (broadcast-compare against the 15 boundaries
     //    and reduce). The dequantize path was migrated to on-device unpacking
-    //    in PR #490 because it dominates decode latency (`O(visible_tokens)`
+    // because it dominates decode latency (`O(visible_tokens)`
     //    per layer per step). The quantize path is `O(new_tokens)` per layer
     //    per step — typically 1 token at decode — so the readback cost here
-    //    is dwarfed by dequantize and was deferred to keep PR #490 scoped.
+    //    is dwarfed by dequantize and was deferred to keep scoped.
     ffi::eval(&v_rot);
     let coord_count = (shape[0] * shape[1] * t * d) as usize;
     let v_rot_bytes = ffi::array_to_raw_bytes(&v_rot);
@@ -381,11 +380,10 @@ fn quantize_into_packed(
     let v_norms = ffi::astype(&norm_full, dtype::FLOAT16);
 
     // 6. Precompute the per-token rescale factor `norm[t] / max(|y_hat|, eps)`
-    //    consumed by the fused Sparse-V kernel (issue #520). The previous
+    //    consumed by the fused Sparse-V kernel. The previous
     //    kernel implementation derived this on-GPU per token via a
     //    `log2(Dim) + 2`-barrier threadgroup tree reduction, which dominated
-    //    decode latency on M5 Max at 4 K context for `turbo4-asym` (the kernel
-    //    was 2.0× slower than the graph fallback in PR #519's A/B). Because
+    //    decode latency on M5 Max at 4 K context for `turbo4-asym` (the kernel was 2.0× slower than the graph fallback's A/B). Because
     //    `|y_hat|` is a pure function of the packed indices and the codebook
     //    — both fixed at quantize time — we can compute it once here on the
     //    host and store the resulting fp16 scalar alongside `v_norms`.
@@ -447,7 +445,7 @@ fn quantize_into_packed(
 /// - `v_norms`:   `[B, H, T, 1]`   fp16 — per-token L2 norm of the *original*
 ///   V vector (used for rescaling on the graph dequantize path).
 /// - `v_rescale`: `[B, H, T, 1]`   fp16 — precomputed `norm[t] / |y_hat[t]|`
-///   used by the fused Sparse-V kernel (issue #520) to skip the per-token
+///   used by the fused Sparse-V kernel to skip the per-token
 ///   threadgroup tree reduction. See [`quantize_into_packed`] for details.
 ///
 /// Used by: `KVCache::update` (Turbo4Asym mode, Turbo4 mode, Turbo4Delegated
@@ -470,13 +468,11 @@ pub fn quantize_v_turbo4(
 ///
 /// Returns `(k_packed, k_norms)` analogous to [`quantize_v_turbo4`] but
 /// without the K-side rescale precompute — the symmetric-Turbo4 K-side has
-/// no analogue of the fused V-side kernel today (issue #476's K dequant runs
-/// on the standard graph path), so the precompute would be wasted work.
+/// no analogue of the fused V-side kernel today ('s K dequant runs on the standard graph path), so the precompute would be wasted work.
 /// Storage layout otherwise matches the V-side path bit-for-bit, so the cache
 /// layer can reuse the same packing/unpacking helpers.
 ///
-/// Used by: `KVCache::update` (Turbo4 symmetric mode, issue #476, epic
-/// #458).
+/// Used by: `KVCache::update` (Turbo4 symmetric mode).
 pub fn quantize_k_turbo4(
     k: &MlxArray,
     params: &TurboQuantParams,
@@ -667,7 +663,7 @@ pub fn dequantize_v_turbo4(
 /// portion of the cache (the same way the V-side path does in
 /// `KVCache::update_and_fetch`).
 ///
-/// Used by: `KVCache::update_and_fetch` (Turbo4 symmetric mode, issue #476).
+/// Used by: `KVCache::update_and_fetch` (Turbo4 symmetric mode).
 pub fn dequantize_k_turbo4(
     k_packed: &MlxArray,
     k_norms: &MlxArray,
@@ -703,7 +699,7 @@ pub fn dequantize_k_turbo4(
 /// (TurboQuant+ reports kurtosis ~900 → ~2.9 on Qwen3-1.7B K caches) on
 /// actual model weights.
 ///
-/// Used by: `tests/turbo_kv_e2e.rs` kurtosis sanity test (issue #475).
+/// Used by: `tests/turbo_kv_e2e.rs` kurtosis sanity test.
 // doc(hidden) keeps this out of the public rustdoc while still being visible
 // to external crates (including the integration test crate).
 #[doc(hidden)]

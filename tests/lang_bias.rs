@@ -125,7 +125,7 @@ fn strip_prompt_echo<'a>(body: &'a str, prompt: &str) -> &'a str {
 /// contain no Hangul). Without stripping, the prompt-echo dominates the
 /// measurement and makes biased vs. baseline comparison unreliable.
 ///
-/// See issue #406 for the full analysis of the false-negative root cause.
+/// for the full analysis of the false-negative root cause.
 fn run_scenario_generated_only(
     model_path: &Path,
     prompts: &[String],
@@ -424,7 +424,7 @@ fn scenario_b_suppresses_ja_zh() {
 ///   `c_hangul >= 0.05`.  When neither run produces Hangul, the ratio difference
 ///   is below the signal floor; we emit a diagnostic and skip the assertion.
 ///   Note: Conservative `ko` set = {Hangul, Han}, so `ko=+5` can be absorbed by
-///   Han tokens when no Hangul gradient exists — see issue #406.
+///   Han tokens when no Hangul gradient exists —.
 /// - When `a_hangul >= 0.01`, keep the multiplicative rule `c_hangul >= 1.2 * a_hangul`.
 #[test]
 #[ignore = "requires local model weights and the mlxcel binary"]
@@ -481,7 +481,7 @@ fn scenario_c_promotes_ko() {
                 "Scenario C: both a_hangul ({a_hangul:.4}) and c_hangul ({c_hangul:.4}) are \
                  below the signal floor (0.01 / 0.05). Skipping assertion. \
                  Note: Conservative ko set = {{Hangul, Han}}, so ko=+5 can be absorbed by Han \
-                 tokens when no Hangul gradient exists — see issue #406."
+                 tokens when no Hangul gradient exists —."
             );
         }
         return;
@@ -504,7 +504,7 @@ fn scenario_c_promotes_ko() {
 /// construction** when the feature works, because strict `ko=-inf` drives
 /// generated Hangul to zero while the baseline continuation (when present) has
 /// non-zero Hangul. Previously, both A and D measured identical prompt-echo
-/// Hangul, masking any difference — see issue #406.
+/// Hangul, masking any difference —.
 ///
 /// Asserts:
 /// - Hangul ratio in the generated continuation drops compared to scenario A.
@@ -526,7 +526,7 @@ fn scenario_d_strict_ko_suppress_preserves_han() {
 
     // KO prompts: scenario D tests strict Hangul suppression under the natural
     // Korean-prompt use case. Generated-only measurement removes the prompt echo
-    // that caused the d_hangul == a_hangul false-negative (issue #406).
+    // that caused the d_hangul == a_hangul false-negative.
     let prompts = load_ko_prompts();
 
     let a = run_scenario_generated_only(&model_path, &prompts, &[]);

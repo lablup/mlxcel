@@ -20,8 +20,7 @@
 //!    binary flattens the same `TurboKvCacheArgs`, so the `--help` text
 //!    for `--cache-type-k`, `--cache-type-v`, `--kv-cache-mode`, and
 //!    `--turbo-boundary-v` MUST be identical across binaries.
-//! 2. **Speculative decoding** (`Speculative Decoding Options`, issue
-//!    #630) — every binary flattens the same `SpeculativeArgs`, so the
+//! 2. **Speculative decoding** (`Speculative Decoding Options`) — every binary flattens the same `SpeculativeArgs`, so the
 //!    `--help` text for `--draft-kind` and `--draft-block-size` MUST be
 //!    identical across binaries.
 //!
@@ -298,7 +297,7 @@ fn turbo_flag_signatures_match_across_binaries() {
     }
 }
 
-// ── Speculative decoding flag group (issue #630) ─────────────────────────────
+// ── Speculative decoding flag group ─────────────────────────────
 
 /// Heading set by `SpeculativeArgs` (`src/cli/speculative_args.rs`).
 const SPECULATIVE_HEADING: &str = "Speculative Decoding Options";

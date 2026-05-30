@@ -231,7 +231,7 @@ async fn extract_chat_image_data_collects_images_across_messages() {
     assert_eq!(images, vec![b"hello".to_vec(), b"world".to_vec()]);
 }
 
-// -- Video URL handling (issue #553, security guard issue #596) -------
+// -- Video URL handling (security guard) -------
 
 /// Create a per-test sandbox under `std::env::temp_dir()` and return the
 /// canonicalised path. Returning the canonicalised form mirrors the runtime
@@ -375,7 +375,7 @@ async fn extract_chat_video_paths_rejects_non_video_local_file() {
     fs::remove_dir_all(sandbox).unwrap();
 }
 
-// -- Issue #596: path-traversal / sandbox guard --------------------------
+// -- path-traversal / sandbox guard --------------------------
 
 #[tokio::test]
 async fn extract_chat_video_paths_rejects_when_allowlist_empty() {
@@ -529,7 +529,7 @@ async fn extract_chat_video_paths_accepts_path_inside_allowlist() {
     fs::remove_dir_all(sandbox).unwrap();
 }
 
-// -- New tests for PR #600 review fixes ---------------------------------------
+// -- New tests review fixes ---------------------------------------
 
 /// MEDIUM-1 follow-through: the async refactor of
 /// `extract_chat_video_paths_with_allowlist` must still resolve a happy-path
@@ -689,9 +689,9 @@ fn scan_insecure_allowlist_dirs_flags_world_writable_directory() {
     fs::remove_dir_all(dir).unwrap();
 }
 
-// -- Issue #601: fd-based TOCTOU closure ----------------------------------
+// -- fd-based TOCTOU closure ----------------------------------
 
-/// Issue #601 regression test: the resolver retains a read-only fd on the
+/// regression test: the resolver retains a read-only fd on the
 /// originally-validated file, so an attacker who swaps the path for a
 /// symlink to `/etc/passwd` (or any other out-of-sandbox file) between
 /// resolution and consumption cannot trick the server into reading the
@@ -703,7 +703,7 @@ fn scan_insecure_allowlist_dirs_flags_world_writable_directory() {
 /// read `/etc/passwd`. Because we read from the open file description the
 /// resolver opened *before* the swap, we get the original bytes back.
 ///
-/// This test would FAIL on the pre-#601 path-based resolver: the path
+/// This test would FAIL on the earlier path-based resolver: the path
 /// returned by the resolver is itself the symlink target (after
 /// canonicalize) — opening it after the swap yields `/etc/passwd`. With
 /// the fd-based resolver, we hold the open file description before the
@@ -823,7 +823,7 @@ async fn extract_chat_video_paths_fd_survives_symlink_swap() {
     fs::remove_dir_all(decoy_dir).unwrap();
 }
 
-/// Issue #601: when the file is unlinked between resolution and use, the
+/// when the file is unlinked between resolution and use, the
 /// fd-based path must still surface the originally-validated bytes. This
 /// is the simpler companion to the symlink-swap test — same property,
 /// different attacker move (unlink vs swap).

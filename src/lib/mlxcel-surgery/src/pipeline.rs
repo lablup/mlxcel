@@ -14,7 +14,7 @@
 
 //! `SurgeryPipeline` — ordered collection of `SurgeryOp` that itself
 //! implements the [`mlxcel_core::weights::WeightTransform`] hook
-//! from issue #365 (A1).
+//! (A1).
 
 use mlxcel_core::weights::{WeightMap, WeightTransform};
 
@@ -25,7 +25,7 @@ use crate::{SharedSurgeryOp, SurgeryOp};
 /// `SurgeryPipeline` is the only public type that gets handed to the
 /// consolidated weight loaders. It is constructed either
 /// programmatically (`SurgeryPipeline::new()` followed by `push`) or
-/// by the config layer (issue #369), and then passed to
+/// by the config layer, and then passed to
 /// `mlxcel::models::load_text_weights(path, Some(&pipeline))` or the
 /// VLM equivalent.
 ///
@@ -34,8 +34,7 @@ use crate::{SharedSurgeryOp, SurgeryOp};
 /// every concurrent model loader without re-parsing the config.
 ///
 /// Used by: future `mlxcel::surgery` integration glue (CLI flag —
-/// A4), text and VLM consolidated loaders (via the WeightTransform
-/// hook from #365)
+/// A4), text and VLM consolidated loaders (via the WeightTransform hook)
 #[derive(Default, Clone)]
 pub struct SurgeryPipeline {
     ops: Vec<SharedSurgeryOp>,
@@ -88,7 +87,7 @@ impl WeightTransform for SurgeryPipeline {
 }
 
 /// Convenience constructor: build a pipeline from any iterator of
-/// shared ops. Useful for the config layer (issue #369) which yields
+/// shared ops. Useful for the config layer which yields
 /// ops one at a time as it parses YAML.
 impl FromIterator<SharedSurgeryOp> for SurgeryPipeline {
     fn from_iter<I: IntoIterator<Item = SharedSurgeryOp>>(iter: I) -> Self {

@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Qwen 3.5 DFlash drafter (issue #635).
+//! Qwen 3.5 DFlash drafter.
 //!
 //! ## What this module ports
 //!
@@ -43,7 +43,7 @@
 //!   the concatenation of the target's hidden states at
 //!   `target_layer_ids = [1, 8, 15, 22, 29]`, projected through `fc`
 //!   from `5 * hidden_size` down to `hidden_size`. This pipeline is fed
-//!   by the Qwen 3.5 target hooks that landed in #654/#634.
+//!   by the Qwen 3.5 target hooks that landed.
 //! - **Mask-token block.** `block = [bonus, mask_id, mask_id, ...,
 //!   mask_id]` of shape `[B, block_size]`. The drafter runs ONE forward
 //!   and samples per position from `logits[:, 1 - block_size:]` —
@@ -64,11 +64,10 @@ pub mod drafter;
 pub mod layer;
 pub mod mlp;
 pub mod model;
-/// DFlash speculative-decoding round-loop driver (issue #636 / epic #633
-/// sub-12). B=1 only; batched DFlash lives in [`round_loop_batched`].
+/// DFlash speculative-decoding round-loop driver (sub-12). B=1 only; batched DFlash lives in [`round_loop_batched`].
 pub mod round_loop;
 /// DFlash speculative-decoding round-loop driver, B > 1 with continuous
-/// batching and per-row GDN-aware rollback (issue #637 / epic #633 sub-13).
+/// batching and per-row GDN-aware rollback (sub-13).
 pub mod round_loop_batched;
 
 pub use attention::DFlashAttention;

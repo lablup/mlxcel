@@ -226,7 +226,7 @@ use tokenizers::Tokenizer;
 /// - v2: classify via `decode` so byte-level BPE tokenizers (Qwen, GPT-2, LLaMA)
 ///   produce correct script assignments instead of defaulting every non-ASCII
 ///   token to Latin.
-/// - v3 (issue #405): adds optional byte-fragment classification for byte-level
+/// - v3: adds optional byte-fragment classification for byte-level
 ///   BPE tokenizers. Tokens that decode to `U+FFFD` (byte-fragment leaves) are
 ///   tagged via UTF-8 start-byte analysis and flagged with
 ///   [`TokenScriptInfo::is_byte_fragment`]. The index layout itself is
@@ -245,7 +245,7 @@ pub struct TokenScriptInfo {
     pub is_punctuation: bool,
     pub is_whitespace: bool,
     /// `true` when this token was classified via byte-fragment UTF-8 start-byte
-    /// analysis (issue #405), i.e. the decode path produced `U+FFFD` / empty
+    /// analysis, i.e. the decode path produced `U+FFFD` / empty
     /// and the token is a byte-level BPE leaf. Always `false` for tokens that
     /// classified via the Phase 1 decode path. Populated only when the vocab
     /// scan ran with byte-fragment analysis enabled; older v2 cache files lack
@@ -324,7 +324,7 @@ impl TokenLanguageIndex {
     ///    language filtering.
     /// 3. Classify using B2 helpers on the decoded string.
     /// 4. Set `is_special` from the tokenizer's added-tokens decoder.
-    /// 5. (Issue #405) If the tokenizer has a `ByteLevel` pre-tokenizer in its
+    /// 5. If the tokenizer has a `ByteLevel` pre-tokenizer in its
     ///    chain, run a second pass: for tokens that decoded to `U+FFFD` /
     ///    empty AND have no Phase 1 script, reverse-map the byte-level char
     ///    back to its raw byte and classify by UTF-8 start-byte range. See
@@ -378,7 +378,7 @@ impl TokenLanguageIndex {
             let mut is_punct = is_punctuation(&token_str);
             let is_ws = is_whitespace(&token_str);
 
-            // Issue #405 — byte-fragment second pass.
+            // byte-fragment second pass.
             //
             // Only runs when the tokenizer actually uses byte-level BPE and
             // when the Phase 1 decode path produced no script information.
@@ -445,7 +445,7 @@ impl TokenLanguageIndex {
 }
 
 // ============================================================================
-// Issue #405 — Byte-fragment CJK classification via UTF-8 start-byte analysis
+// Byte-fragment CJK classification via UTF-8 start-byte analysis
 // ============================================================================
 
 /// Return `true` if the tokenizer's pre-tokenizer chain contains a
@@ -552,7 +552,7 @@ fn reverse_byte_for_token(
 /// | `0xE0`          | Other   | Indic overflow — too ambiguous. |
 /// | `0xE0–0xE2`     | Other   | Devanagari / Thai span prefixes are 3-byte but the full start byte is always `0xE0` with a specific second-byte range; leave to the decode path. |
 /// | `0xE3`          | Hiragana| CJK Kana / Bopomofo (U+3040..U+312F live in `0xE3` space). Tagged as Hiragana because it catches the majority of kana fragment leaks on Qwen/GPT-2 tokenizers; Katakana-specific disambiguation would require continuation-byte analysis which is out of scope. |
-/// | `0xE4`–`0xE9`   | Han     | 3-byte start for CJK Unified Ideographs (U+4E00..U+9FFF). Also catches some Latin Extended Additional blocks — acceptable per issue #405 design (opt-in + operator metric). |
+/// | `0xE4`–`0xE9`   | Han     | 3-byte start for CJK Unified Ideographs (U+4E00..U+9FFF). Also catches some Latin Extended Additional blocks — acceptable design (opt-in + operator metric). |
 /// | `0xEA`–`0xED`   | Hangul  | 3-byte start for Hangul Syllables (U+AC00..U+D7AF). |
 /// | `0xEE`–`0xEF`   | Other   | Private Use Area / CJK Compatibility / specials. |
 /// | `0xF0`–`0xF4`   | Han     | 4-byte start for supplementary planes — dominated by CJK Extension B–F. Tagged as Han for consistency with the 3-byte Han range. |
@@ -688,7 +688,7 @@ pub struct ExceptionConfig {
     pub include_numeric: bool,
     /// If `true`, purely punctuation tokens are included.
     pub include_punctuation: bool,
-    /// If `true`, byte-fragment tokens (issue #405) participate in language
+    /// If `true`, byte-fragment tokens participate in language
     /// script matching via UTF-8 start-byte classification.
     ///
     /// Byte-level BPE tokenizers (Qwen, GPT-2, LLaMA, Mistral) represent
@@ -787,7 +787,7 @@ impl TokenLanguageIndex {
     /// 2. Special tokens are excluded unless `exceptions.include_special`.
     /// 3. Numeric tokens are excluded unless `exceptions.include_numeric`.
     /// 4. Punctuation tokens are excluded unless `exceptions.include_punctuation`.
-    /// 5. Byte-fragment tokens (issue #405) are excluded unless
+    /// 5. Byte-fragment tokens are excluded unless
     ///    `exceptions.include_byte_fragments`.
     /// 6. Tokens with no identified scripts (empty `scripts` field) never match.
     ///
@@ -816,7 +816,7 @@ impl TokenLanguageIndex {
                 if info.is_punctuation && !exceptions.include_punctuation {
                     return false;
                 }
-                // Issue #405 — byte-fragment tokens only participate when the
+                // byte-fragment tokens only participate when the
                 // opt-in flag is set. When disabled, behavior is bit-exact
                 // identical to Phase 1 regardless of what the vocab scan
                 // recorded.
@@ -837,7 +837,7 @@ impl TokenLanguageIndex {
     /// 1. Iterate `lang_bias.ordered` in order (index 0 = highest priority).
     /// 2. For each `(code, bias)`, resolve `tokens_for_language(code, policy, exceptions)`.
     /// 3. For each token id, insert `(id, bias)` into the map **only if not already
-    ///    present** — first-language-wins. Byte-fragment entries (issue #405)
+    ///    present** — first-language-wins. Byte-fragment entries
     ///    are inserted via `TokenBiasMap::insert_byte_fragment` so they can be
     ///    counted separately in the observability path.
     /// 4. Return the populated `TokenBiasMap`.
@@ -1604,7 +1604,7 @@ mod tests {
     // `mlxcel_core::test_support::env_lock`. Per-module locks would race
     // with env mutations in unrelated modules of the same test binary —
     // libc's env block has no internal lock and concurrent
-    // `setenv`/`getenv` is undefined behavior (issue #573).
+    // `setenv`/`getenv` is undefined behavior.
     use crate::test_support::env_lock::env_lock;
 
     fn resolve_mock_tokenizer_json(marker: &str) -> String {
@@ -1767,12 +1767,12 @@ mod tests {
     }
 
     // =========================================================================
-    // Issue #405 — Byte-fragment CJK classification (UTF-8 start-byte analysis)
+    // Byte-fragment CJK classification (UTF-8 start-byte analysis)
     // =========================================================================
 
     /// `classify_byte_start` honors the documented start-byte → Script table.
     ///
-    /// Covers the six anchor bytes called out in issue #405: `0xC2` (Latin
+    /// Covers the six anchor bytes called out in `0xC2` (Latin
     /// Extended), `0xE3` (Hiragana/Katakana/Bopomofo), `0xE4`/`0xE5` (Han),
     /// `0xEA` (Hangul), and `0xF0` (supplementary planes → Han). Also
     /// explicitly verifies that continuation bytes stay unclassified.
@@ -1924,7 +1924,7 @@ mod tests {
     /// With `include_byte_fragments = true`, byte-fragment tokens participate
     /// in language matching using their start-byte Script tag.
     ///
-    /// This is the core of the issue #405 contract: the ` 年` leak described
+    /// This is the core of the contract: the ` 年` leak described
     /// in the issue (`[74577, 112]` on Qwen2.5) classifies the leading
     /// fragment `74577` via its `0xE5`-family start byte and tags it as Han,
     /// so `zh=-inf` catches it.
@@ -2016,7 +2016,7 @@ mod tests {
 
     /// Phase 1 (decode-path) tokens with a real script must NEVER be tagged as
     /// byte-fragments — even when they co-exist in the same index. This guards
-    /// the "avoid double-counting" rule from issue #405.
+    /// the "avoid double-counting" rule.
     #[test]
     fn byte_fragment_does_not_override_phase1_classification() {
         // Merged-token Han (like `年` → id 7948 on Qwen2.5), added manually.
@@ -2217,7 +2217,7 @@ mod tests {
             index.tokens_for_language(LanguageCode::Zh, InclusionPolicy::Conservative, &ex_on);
         assert!(
             zh_on.contains(&2),
-            "flag on: byte-fragment Han token MUST be in zh (issue #405 leak caught): {zh_on:?}"
+            "flag on: byte-fragment Han token MUST be in zh (leak caught): {zh_on:?}"
         );
     }
 

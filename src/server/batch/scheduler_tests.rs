@@ -448,7 +448,7 @@ fn chunked_prefill_interleaving_pattern() {
 }
 
 // -------------------------------------------------------------------
-// VLM embedding guard routing tests (issue #738 server-prefill fixes)
+// VLM embedding guard routing tests (server-prefill fixes)
 // -------------------------------------------------------------------
 //
 // The two server-side guards added for InternVL (and all VLM image prefills)
@@ -793,7 +793,7 @@ fn auto_decode_storage_prefers_paged_only_for_supported_workers() {
 }
 
 // -------------------------------------------------------------------
-// Null / empty-cache safety tests (issue #324)
+// Null / empty-cache safety tests
 //
 // These tests cover the same transition edges that upstream mlx-lm
 // landed null-guards for in `mlx_lm/models/cache.py`:
@@ -992,7 +992,7 @@ fn test_merge_all_empty() {
 }
 
 // -------------------------------------------------------------------
-// Issue #508 — Server scheduler dispatch on PagedKvLayout::cache_mode
+// Server scheduler dispatch on PagedKvLayout::cache_mode
 // -------------------------------------------------------------------
 
 /// Reproduce the `is_turbo_mode` classification policy from
@@ -1020,10 +1020,10 @@ fn is_turbo_mode_classifies_turbo4_variants() {
 fn is_turbo_mode_excludes_fp16_int8_and_turbo3_today() {
     use mlxcel_core::cache::KVCacheMode;
     // Fp16 / Int8 must take the historical `PagedKvLayout::uniform` path
-    // (no per-page sidecar accounting). Bit-identical to pre-#508.
+    // (no per-page sidecar accounting). Bit-identical to earlier.
     assert!(!is_turbo_mode_policy(KVCacheMode::Fp16));
     assert!(!is_turbo_mode_policy(KVCacheMode::Int8));
-    // Turbo3Asym is a valid `KVCacheMode` (issue #477) but the paged
+    // Turbo3Asym is a valid `KVCacheMode` but the paged
     // data plane does not yet support per-page 3-bit sidecars; the
     // dispatch intentionally falls through to `PagedKvLayout::uniform`
     // so callers that pair `--kv-cache-mode fp16+turbo3` with paged
@@ -1066,7 +1066,7 @@ fn scheduler_paged_turbo_layout_arguments_are_valid() {
 }
 
 // -------------------------------------------------------------------
-// Issue #545 — Batched KV quantization config plumbing
+// Batched KV quantization config plumbing
 // -------------------------------------------------------------------
 //
 // These tests exercise the resolver in `cli_input.rs` and the per-layer
@@ -1167,7 +1167,7 @@ fn skip_last_layer_default_is_true_in_resolver() {
 }
 
 // -------------------------------------------------------------------
-// Issue #545 — Per-layer mode table for batched scheduler
+// Per-layer mode table for batched scheduler
 // -------------------------------------------------------------------
 
 /// The scheduler's `apply_kv_cache_mode_to` method reads the resolved
@@ -1185,9 +1185,8 @@ fn batch_kv_quant_per_layer_table_skips_last_layer_only() {
     .unwrap();
     let modes = cfg.resolve_layer_modes(40); // gemma-4-31b-class
     assert_eq!(modes.len(), 40);
-    // Issue #545: ONLY the last layer is skipped, NOT first 2 + last 2
-    // (that latter behaviour is the existing Boundary-V from #478, which
-    // is a separate orthogonal mechanism).
+    // ONLY the last layer is skipped, NOT first 2 + last 2
+    // (that latter behaviour is the existing Boundary-V, which is a separate orthogonal mechanism).
     assert_eq!(
         modes[0],
         mlxcel_core::cache::KVCacheMode::Int8,

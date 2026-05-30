@@ -229,7 +229,7 @@ impl MambaBlock {
         // Wrap slice in contiguous() to force MLX to materialize a fresh,
         // independent buffer. Without this, the slice is a lazy view that
         // retains a reference to the full padded_input allocation, causing a
-        // memory leak proportional to the sequence length. (issue #336)
+        // memory leak proportional to the sequence length.
         if let Some(c) = cache {
             let n_keep = k - 1;
             let padded_shape = mlxcel_core::array_shape(&padded_input);

@@ -25,7 +25,7 @@ use mlxcel_core::cache::KVCacheMode;
 use super::{TurboKvCacheArgs, resolve_kv_cache_mode};
 // `std::env::set_var` / `remove_var` are not thread-safe. Tests that touch
 // the process environment must serialize through the crate-wide
-// `ENV_LOCK` (issue #573) — a per-module lock would race with the env
+// `ENV_LOCK` — a per-module lock would race with the env
 // mutations in unrelated modules of the same test binary.
 use crate::test_support::env_lock::env_lock;
 
@@ -110,7 +110,7 @@ fn apply_to_environment_preserves_negative_inputs_for_runtime_clamping() {
     }
 }
 
-// Issue #573 Finding 1 — `--cache-type-k fp16 --cache-type-v turbo3` was
+// Finding 1 — `--cache-type-k fp16 --cache-type-v turbo3` was
 // rejected by the split-flag resolver even though the legacy
 // `--kv-cache-mode fp16+turbo3` shorthand worked, and the help text on all
 // three binaries advertises `fp16+turbo3` as a supported value. Pin the

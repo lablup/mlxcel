@@ -13,7 +13,7 @@
 // limitations under the License.
 
 //! `mlxcel-surgery` — Axis A "weight-load surgery" framework
-//! (Epic #363, issues #367 / #369 / A5–A9).
+//! (A5–A9).
 //!
 //! This crate is the structural fine-tuning machinery. It owns:
 //!
@@ -23,7 +23,7 @@
 //!   place.
 //! - [`SurgeryPipeline`] — an ordered collection of `SurgeryOp` that
 //!   itself implements [`mlxcel_core::weights::WeightTransform`] from
-//!   issue #365 (A1). Plugging a `SurgeryPipeline` into
+//! (A1). Plugging a `SurgeryPipeline` into
 //!   `mlxcel::models::load_text_weights(path, Some(&pipeline))` (or
 //!   the VLM equivalent) is the entire integration surface with the
 //!   load path.

@@ -12,13 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Scheduler-facing prompt-prefix cache integration tests (epic #416 / issue
-//! #421).
+//! Scheduler-facing prompt-prefix cache integration tests.
 //!
 //! Full end-to-end adopt/donate coverage that exercises a real `LoadedModel`
 //! lives in the worker-thread integration tests; those need the server binary
 //! and are out of scope for `cargo test --lib`. The cases in this file isolate
-//! the **scheduler-visible invariants** that the #421 implementation adds and
+//! the **scheduler-visible invariants** that the implementation adds and
 //! that the store / key / entry data flow relies on:
 //!
 //! * Cache hit reports the matched prefix length and leaves the detached
@@ -343,7 +342,7 @@ fn batched_prefill_path_detects_adopted_sequences() {
 }
 
 // ---------------------------------------------------------------------------
-// APC block-level partial adoption (issue #580)
+// APC block-level partial adoption
 // ---------------------------------------------------------------------------
 
 const APC_BLOCK_SIZE: usize = 16;
@@ -394,7 +393,7 @@ fn make_text_key<'a>(
 
 #[test]
 fn apc_block_aligned_partial_match_truncates_to_block_boundary() {
-    // The headline property for issue #580: when a request shares the first
+    // The headline property for when a request shares the first
     // 32 tokens (= 2 blocks) of a 48-token cached entry but diverges at
     // token 32 (= start of block 2), the store's APC discriminator must
     // return matched_len == 32, NOT 48. This is the value the scheduler then
@@ -514,7 +513,7 @@ fn apc_full_match_yields_entry_length_matched_len_no_truncate_path() {
     // Sanity: when the request's first N tokens fully agree with all blocks
     // of the cached entry, matched_len equals the entry's full token length.
     // The scheduler then skips the truncate branch entirely (no work, no
-    // allocations). This is the bit-exact full-prefix path that pre-#580
+    // allocations). This is the bit-exact full-prefix path that earlier
     // already worked.
     let store = apc_on_test_store();
 
@@ -580,7 +579,7 @@ fn apc_disabled_lookup_ignores_block_divergence_returns_full_prefix() {
 
 #[test]
 fn scheduler_partial_adoption_synthetic_savings_match_expected_fraction() {
-    // Synthetic prefill-cost microbench for issue #580. We model the
+    // Synthetic prefill-cost microbench. We model the
     // scheduler's prefill workload as `prompt_tokens.len() - matched_len`
     // and confirm that block-aligned partial adoption recovers the
     // expected fraction of work compared to a cold prefill (matched_len 0).

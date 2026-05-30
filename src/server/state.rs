@@ -87,7 +87,7 @@ pub struct BatchMetrics {
     /// Cumulative number of preemptive evictions.
     pub preemptions_total: AtomicU64,
 
-    // -- Epic #416 / issue #423: prompt-prefix cache Prometheus counters --
+    // -- prompt-prefix cache Prometheus counters --
     /// Cumulative successful prompt-cache adoptions (hits). Incremented by the
     /// scheduler's `try_adopt_cached_prefix` when an entry is adopted.
     pub prompt_cache_hits_total: AtomicU64,
@@ -168,7 +168,7 @@ impl BatchMetrics {
         self.preemptions_total.fetch_add(1, Ordering::Relaxed);
     }
 
-    // -- Prompt-prefix cache helpers (epic #416 / issue #423) --
+    // -- Prompt-prefix cache helpers --
 
     /// Record a prompt-cache hit and the number of tokens that were reused.
     ///
@@ -265,7 +265,7 @@ impl PromptCacheMetrics for BatchMetricsCacheAdapter {
 }
 
 /// Static media-input capability flags resolved once at server startup
-/// (issue #596). Used by HTTP handlers to short-circuit unsupported requests
+/// Used by HTTP handlers to short-circuit unsupported requests
 /// with a clear 400 before reaching the model worker.
 ///
 /// The flags reflect the model type detected from `config.json`, not the
@@ -289,7 +289,7 @@ pub struct AppState {
     pub tokenizer: Arc<MlxcelTokenizer>,
     /// Model directory path (for props/info).
     pub model_path: PathBuf,
-    /// Static media-input capability flags resolved once at startup (issue #596).
+    /// Static media-input capability flags resolved once at startup.
     pub media_support: ModelMediaSupport,
     /// Batch-level metrics (active sequences, queue depth) for admission
     /// control and status reporting.
@@ -298,24 +298,24 @@ pub struct AppState {
     pub batch_observability: Arc<BatchObservability>,
     /// Server metrics (request counts, token throughput).
     pub metrics: Arc<Metrics>,
-    /// Pipeline-parallel observability aggregator (issue #350). Always
+    /// Pipeline-parallel observability aggregator. Always
     /// present even on non-PP deployments — counters stay at zero.
     pub pp_observability: Arc<PipelineObservability>,
-    /// Optional chrome-tracing writer (issue #350, `--debug-pp-trace`).
+    /// Optional chrome-tracing writer (`--debug-pp-trace`).
     /// `None` when tracing is disabled.
     pub pp_tracer: Option<Arc<PpTracer>>,
-    /// Cross-request prompt-prefix KV cache (epic #416 / issue #419). `None`
+    /// Cross-request prompt-prefix KV cache. `None`
     /// when the feature is disabled via [`super::config::ServerConfig::prompt_cache`].
     /// The store is shared with [`ModelProvider`] so the worker thread can
     /// publish and adopt detached caches. HTTP handlers may only call
     /// read-only observation methods on this store.
     pub prompt_cache: Option<Arc<PromptCacheStore>>,
-    /// Issue #622: in-memory store backing `POST /v1/responses` with
+    /// in-memory store backing `POST /v1/responses` with
     /// `store=true`, `GET /v1/responses/:id`, and `previous_response_id`
     /// chaining. `None` when the operator passed
     /// `--responses-store-max-entries 0`.
     pub responses_store: Option<Arc<ResponsesStore>>,
-    /// Issue #622: in-memory conversation transcripts referenced by the
+    /// in-memory conversation transcripts referenced by the
     /// `conversation` field in Responses-API requests. `None` when the
     /// store is disabled.
     pub conversation_store: Option<Arc<ConversationStore>>,
@@ -382,7 +382,7 @@ impl AppState {
 
     /// Override the static media-support flags resolved at startup. Used by
     /// the startup pipeline to record whether the loaded model supports
-    /// `video_url` content blocks (issue #596).
+    /// `video_url` content blocks.
     #[must_use]
     pub fn with_media_support(mut self, support: ModelMediaSupport) -> Self {
         self.media_support = support;
@@ -398,7 +398,7 @@ impl AppState {
         self
     }
 
-    /// Attach the Responses-API in-memory response store (issue #622).
+    /// Attach the Responses-API in-memory response store.
     /// Pass `None` to disable response persistence (and reject any request
     /// that depends on it: `GET /v1/responses/:id`, `previous_response_id`).
     #[must_use]
@@ -407,7 +407,7 @@ impl AppState {
         self
     }
 
-    /// Attach the Responses-API conversation store (issue #622). Pass
+    /// Attach the Responses-API conversation store. Pass
     /// `None` to disable; requests referencing `conversation` will still
     /// be accepted but will not be replayed against the missing transcript.
     #[must_use]

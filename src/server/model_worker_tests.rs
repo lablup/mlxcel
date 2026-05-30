@@ -177,7 +177,7 @@ fn parse_byte_fallback_token_rejects_leading_sign() {
     assert_eq!(parse_byte_fallback_token("<0xff>"), Some(0xff));
 }
 
-// ── Byte-fallback streaming regression tests (issue #547) ───────────────────
+// ── Byte-fallback streaming regression tests ───────────────────
 
 /// Helper: simulate streaming a sequence of tokens and collect the emitted
 /// chunks. Returns (chunks, final_text_from_finish).

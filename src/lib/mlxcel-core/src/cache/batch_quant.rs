@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Batch-aware quantized KV caches for continuous batching (issue #545).
+//! Batch-aware quantized KV caches for continuous batching.
 //!
 //! Mirrors upstream `mlx-vlm` PR #1030 (commit `b027538`) which added two
 //! batched-cache variants used by the Python continuous-batching server:
@@ -53,7 +53,7 @@
 //! regression tests in `mod tests` below — those tests are the entire
 //! current consumer set.
 //!
-//! This intentionally matches the pattern from PR #564 / issue #544 for
+//! This intentionally matches the pattern for
 //! [`super::BatchedAttentionMetadata::extend`] and
 //! [`super::BatchedAttentionMetadata::filter_in_place`]: a metadata-shaped
 //! API is added before any tensor-level integration so that the contract
@@ -80,9 +80,9 @@
 //! (see [`super::turbo::boundary`]), because the two policies overlap
 //! intentionally:
 //!
-//! - **Boundary-V** (issue #478) protects the first 2 *and* last 2 layers
+//! - **Boundary-V** protects the first 2 *and* last 2 layers
 //!   for `Turbo4*` modes. That mechanism stays unchanged.
-//! - **`skip_last_layer`** (issue #545) protects *only* the final layer
+//! - **`skip_last_layer`** protects *only* the final layer
 //!   and applies to every quantization scheme exposed via
 //!   [`KvQuantScheme`], including the new [`KvQuantScheme::Uniform`]
 //!   variant which is not covered by Boundary-V.
@@ -375,7 +375,7 @@ impl BatchKvQuantConfig {
 ///
 /// # Status: forward-looking stable seam (not on the live decode path)
 ///
-/// As of this PR (issue #545) **this struct is not instantiated by the
+/// As of this PR **this struct is not instantiated by the
 /// live decode path**. mlxcel's continuous-batching scheduler quantizes
 /// the KV cache by reading [`BatchKvQuantConfig`] directly and applying
 /// the per-layer [`KVCacheMode`] table from
@@ -386,8 +386,8 @@ impl BatchKvQuantConfig {
 /// This struct exists as a **forward-looking stable seam** that mirrors
 /// the upstream PR #1030 contract surface so future batch-aware tensor
 /// work has a stable Rust API to plug into without churning the public
-/// surface again. This intentionally matches the pattern from PR #564 /
-/// issue #544 for [`super::BatchedAttentionMetadata::extend`] and
+/// surface again. This intentionally matches the pattern from
+/// for [`super::BatchedAttentionMetadata::extend`] and
 /// [`super::BatchedAttentionMetadata::filter_in_place`].
 ///
 /// # Layer-mode policy
@@ -501,8 +501,7 @@ impl BatchQuantizedKVCache {
     ///    [`super::BatchedAttentionMetadata::assert_consistent`] —
     ///    callers that build instances by direct field assignment should
     ///    invoke this in debug builds to catch any future regression
-    ///    that re-introduces a uniformity-collapsing optimization (the
-    ///    PR #1110 hazard from issue #544).
+    ///    that re-introduces a uniformity-collapsing optimization (the PR #1110 hazard).
     /// 2. `caches` is non-empty. A batched cache with zero layers has
     ///    no transformer state to track and almost always indicates a
     ///    constructor bug (e.g., a model whose `n_layers` resolved to
@@ -694,13 +693,13 @@ impl BatchQuantizedKVCache {
 /// contract — but uses mlxcel's existing [`KVCacheMode::Turbo4Asym`]
 /// storage backend for each per-layer cache. Attention dispatch is via
 /// dequantize + standard SDPA — custom batch-aware Metal kernels are
-/// explicitly out of scope for issue #545 (the single-stream
+/// explicitly out of scope (the single-stream
 /// [`super::turbo::sparse_v`] kernels are not used here because they
 /// assume `B == 1`).
 ///
 /// # Status: forward-looking stable seam (not on the live decode path)
 ///
-/// As of this PR (issue #545) **this struct is not instantiated by the
+/// As of this PR **this struct is not instantiated by the
 /// live decode path**. The live continuous-batching decode path drives
 /// quantization through [`BatchKvQuantConfig`] +
 /// [`BatchKvQuantConfig::resolve_layer_modes`] applied directly to the
@@ -713,7 +712,7 @@ impl BatchQuantizedKVCache {
 /// dispatch (e.g., a fused batched TurboQuant attention kernel that
 /// wants a single struct holding `(per_layer_caches, left_padding,
 /// offset)`) has a stable Rust API to slot into. This intentionally
-/// matches the pattern from PR #564 / issue #544 for
+/// matches the pattern for
 /// [`super::BatchedAttentionMetadata::extend`] and
 /// [`super::BatchedAttentionMetadata::filter_in_place`].
 ///

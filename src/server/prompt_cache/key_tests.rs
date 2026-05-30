@@ -146,7 +146,7 @@ fn token_order_matters() {
 }
 
 // ---------------------------------------------------------------------------
-// Issue #422 — session-key resolution
+// session-key resolution
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -188,7 +188,7 @@ fn resolve_session_key_all_empty_returns_sentinel() {
 }
 
 // ---------------------------------------------------------------------------
-// Issue #422 — template signature
+// template signature
 // ---------------------------------------------------------------------------
 
 fn sample_tool(name: &str) -> Tool {
@@ -365,7 +365,7 @@ fn template_sig_fits_into_prompt_cache_key() {
 }
 
 // ---------------------------------------------------------------------------
-// Issue #425 — multimodal digest
+// multimodal digest
 // ---------------------------------------------------------------------------
 
 /// Fake image bytes for testing — a minimal 1×1 PNG header stub.
@@ -504,7 +504,7 @@ fn hex_representation_of_multimodal_digest_is_64_chars() {
 }
 
 // ---------------------------------------------------------------------------
-// Issue #425 — integration: multimodal multi-turn prefix stability
+// integration: multimodal multi-turn prefix stability
 // ---------------------------------------------------------------------------
 
 #[test]

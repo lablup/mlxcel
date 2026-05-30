@@ -123,7 +123,7 @@ pub async fn completions(
             .into_response();
     }
 
-    // Issue #409: validate thinking_budget_tokens early.
+    // validate thinking_budget_tokens early.
     let effective_max_tokens = request
         .params
         .max_tokens
@@ -150,7 +150,7 @@ pub async fn completions(
         }
     };
 
-    // Issue #550 + PR #575 H2: build the structured-output constraint up
+    // + H2: build the structured-output constraint up
     // front. Grammar compilation can be slow on adversarial schemas, so
     // we run it on `spawn_blocking` rather than blocking the Tokio
     // runtime thread. Returns `None` when no `response_format` was
@@ -206,13 +206,13 @@ async fn non_stream_completion(
     let mut options = build_generate_options(&request.params, &state.config);
     options.priority = priority;
     options.reasoning_budget = budget_override;
-    // Issue #409: `/v1/completions` takes a raw prompt just like `/completion`;
+    // `/v1/completions` takes a raw prompt just like `/completion`;
     // the request body is not routed through the chat template so the prompt
     // is not primed with `<think>\n`. Override the chat-oriented default from
     // `build_generate_options` so the scheduler waits for the model to emit
     // `<think>` itself before counting reasoning tokens.
     options.thinking_enter_block_on_start = false;
-    // Issue #550: forward structured-output constraint into the worker.
+    // forward structured-output constraint into the worker.
     options.structured = structured;
 
     // In the legacy format, `logprobs` is a number (top-k); 0 means return only
@@ -279,11 +279,11 @@ async fn stream_completion(
     let mut options = build_generate_options(&request.params, &state.config);
     options.priority = priority;
     options.reasoning_budget = budget_override;
-    // Issue #409: see non_stream_completion — raw-text endpoint, no
+    // see non_stream_completion — raw-text endpoint, no
     // `<think>\n` priming, so the scheduler must wait for the model to
     // emit `<think>` itself before counting reasoning tokens.
     options.thinking_enter_block_on_start = false;
-    // Issue #550: forward structured-output constraint into the worker.
+    // forward structured-output constraint into the worker.
     options.structured = structured;
 
     // Extract include_usage before request is moved into the closure
@@ -304,7 +304,7 @@ async fn stream_completion(
         };
     }
 
-    // Issue #548: sse_channel also returns an SseKeepAlive that sends periodic
+    // sse_channel also returns an SseKeepAlive that sends periodic
     // SSE comment events to prevent proxy/client idle-timeout disconnects
     // during long prefill phases.
     let (events, stream, cancelled, keepalive) = sse_channel(100);

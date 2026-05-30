@@ -13,7 +13,7 @@
 // limitations under the License.
 
 //! Integration tests for the server-side speculative-decoding dispatch
-//! matrix (issue #666).
+//! matrix.
 //!
 //! These tests cover the **operator-facing dispatch contract** end-to-end:
 //! they build a `ServerConfig` exactly like `mlxcel-server`'s CLI plumbing
@@ -292,7 +292,7 @@ fn dispatch_reports_drafter_kind_for_kind_specific_variants() {
 }
 
 // =============================================================================
-// Tick-level dispatch (issue #670 — burst path)
+// Tick-level dispatch (— burst path)
 //
 // These tests pin the **runtime gating** of the speculative dispatch:
 // they cannot construct a real `BatchScheduler` from outside the crate
@@ -375,7 +375,7 @@ fn dispatch_classic_fallback_is_not_burstable() {
     // it stays on the historical `SpeculativeGenerator` dispatch
     // (which the server today doesn't expose; the scheduler falls
     // back to classic decode). This is the operator-facing
-    // backward-compat guarantee from #666 / PR #669.
+    // backward-compat guarantee /.
     //
     // We can't easily construct a `Classic` variant from outside
     // (auto-detect requires `model_type` field that resolves to

@@ -85,7 +85,7 @@ unsafe impl Sync for DetachedHolder {}
 ///   by the LRU / TTL policy).
 /// * `size_bytes` — cached byte footprint at insert time. We snapshot this
 ///   once instead of recomputing on every eviction pass.
-/// * `apc_block_hashes` — Automatic Prefix Caching (APC, issue #552)
+/// * `apc_block_hashes` — Automatic Prefix Caching (APC)
 ///   block-granularity hash chain over `tokens`. Populated only when APC
 ///   is enabled at insert time; `None` otherwise. The chain is computed
 ///   from `tokens`, the configured block size, the configured hash algo,

@@ -12,13 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Regression tests for chunked-prefill MRoPE position-IDs shape check (issues #539, #541).
+//! Regression tests for chunked-prefill MRoPE position-IDs shape check.
 //!
 //! These tests verify:
-//! - Issue #539: the sufficiency check (`shape[-1] >= cache_offset + seq_len`) correctly
+//! - the sufficiency check (`shape[-1] >= cache_offset + seq_len`) correctly
 //!   replaces the old strict-equality guard, allowing cached position_ids to be reused
 //!   across chunked-prefill passes without panicking on shape mismatch.
-//! - Issue #541: the batch-size check (`shape[1] == batch_size`) is validated alongside
+//! - the batch-size check (`shape[1] == batch_size`) is validated alongside
 //!   the seq-length check, so sequential requests with different batch_sizes do not reuse
 //!   stale position IDs and crash on broadcast_shapes.
 
@@ -39,7 +39,7 @@ fn make_position_ids(total_len: i32) -> mlxcel_core::UniquePtr<mlxcel_core::MlxA
 }
 
 /// Emulates the shape-check and slice logic from all Qwen VL text-model
-/// `forward_with_mrope_state` / `forward_impl` functions after issues #539 and #541.
+/// `forward_with_mrope_state` / `forward_impl` functions after and.
 ///
 /// Returns `Some(sliced_ids)` when the cached tensor is sufficient (matching both batch
 /// dimension and seq-length range), `None` otherwise.
@@ -50,7 +50,7 @@ fn try_reuse_position_ids(
     seq_len: i32,
 ) -> Option<mlxcel_core::UniquePtr<mlxcel_core::MlxArray>> {
     let pos_shape = mlxcel_core::array_shape(stored_pos);
-    // Issue #541: validate batch dimension (pos_shape[1]) in addition to seq-length
+    // validate batch dimension (pos_shape[1]) in addition to seq-length
     // sufficiency (pos_shape[2] >= cache_offset + seq_len), matching upstream Python:
     //   self._position_ids.shape[1] == batch_size
     //   and self._position_ids.shape[-1] >= cache_offset + seq_length
@@ -203,7 +203,7 @@ fn old_strict_equality_guard_would_reject_second_chunk() {
 }
 
 /// Verify that a cached [3, 1, 8] position_ids tensor is REJECTED when the next request
-/// has batch_size=2 (issue #541 regression guard).
+/// has batch_size=2 (regression guard).
 ///
 /// This covers the upstream mlx-vlm PR #1040 fix: sequential requests with different
 /// batch_sizes must not reuse stale position IDs, which would produce wrong RoPE

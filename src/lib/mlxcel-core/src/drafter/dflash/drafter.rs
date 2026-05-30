@@ -22,7 +22,7 @@
 //!
 //! The fully end-to-end DFlash round loop (target prefill → capture
 //! hiddens → drafter `draft_block` → target verify → rollback) lands
-//! in epic-#633 sub-12 (#636). This file ships only what the trait
+//! in epic- sub-12. This file ships only what the trait
 //! surface needs today.
 
 use crate::cache::KVCache;
@@ -74,7 +74,7 @@ pub struct DFlashDrafter {
     caches: Vec<KVCache>,
 
     /// Records whether `bind` has been called at least once. The DFlash
-    /// round-loop driver in sub-12 (#636) reads this flag to confirm
+    /// round-loop driver in sub-12 reads this flag to confirm
     /// the drafter is wired before invoking `draft_block`.
     bound: bool,
 }
@@ -386,7 +386,7 @@ impl Drafter for DFlashDrafter {
         }
         let inputs = ffi::from_slice_i32(&block, &[batch_size as i32, block_size as i32]);
 
-        // The model's forward already handles [B, L] inputs (issue #635); the
+        // The model's forward already handles [B, L] inputs; the
         // returned logits are [B, L, vocab].
         let logits = self.model.forward(&inputs, target_hidden, &mut self.caches);
 
@@ -418,7 +418,7 @@ impl Drafter for DFlashDrafter {
 /// Stochastic uses `fused_sample` per position over the `[1, vocab]`
 /// slice for that position.
 ///
-/// Used by: `DFlashDrafter::draft_block_batched` (issue #637).
+/// Used by: `DFlashDrafter::draft_block_batched`.
 fn sample_block_per_position_batched(
     logits: &MlxArray,
     batch_size: usize,
@@ -445,7 +445,7 @@ fn sample_block_per_position_batched(
         // materialize all token ids with one contiguous host copy. The old
         // row-by-row implementation performed `(B * (K - 1))` slice/eval/item
         // synchronizations per round, which showed up as a dominant short-run
-        // Qwen3.5-4B overhead in issue #692.
+        // Qwen3.5-4B overhead.
         let masked_logits = ffi::slice(
             logits,
             &[0_i32, 1_i32, 0_i32],
@@ -513,7 +513,6 @@ fn sample_block_per_position(
         // positions in one op and copy all token ids at once. This removes
         // the per-position slice/eval/item synchronization loop that made the
         // Qwen3.5-4B DFlash path slower than baseline for short generations
-        // (issue #692).
         let masked_logits = ffi::slice(
             logits,
             &[0_i32, 1_i32, 0_i32],
@@ -557,7 +556,7 @@ fn sample_block_per_position(
 /// `draft_tokens = draft_model.draft_block(...); verify_input =
 /// mx.concatenate([bonus, draft_tokens], axis=1)` pipeline. Stochastic
 /// sampling falls back to the scalar helper because stochastic DFlash parity
-/// is outside the hot path optimized by issue #692.
+/// is outside the hot path optimized.
 fn sample_block_per_position_array(
     logits: &MlxArray,
     block_size: usize,

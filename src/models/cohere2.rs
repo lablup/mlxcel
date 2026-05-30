@@ -179,7 +179,7 @@ impl Cohere2Attention {
         // Scaled dot-product attention
         let attn_out = if l > 1 {
             // Prefill: use mask. If a windowed mask was supplied for a
-            // sliding-window layer, post-PR-#513 it is shaped
+            // sliding-window layer, post-earlier it is shaped
             // `(l, window_size)` (capped). Plain `KVCache` returns
             // full-length K/V, so slice K/V to the last `window_size` slots
             // here, mirroring `causal_attention`'s internal slicing.

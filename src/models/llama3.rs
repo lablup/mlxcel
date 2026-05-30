@@ -199,7 +199,7 @@ impl Attention {
             (q, k, v)
         };
 
-        // Issue #505: Try the fused sparse-V SDPA path for the decode case
+        // Try the fused sparse-V SDPA path for the decode case
         // (l == 1) when the cache is Turbo4Asym and
         // `MLXCEL_SPARSE_V_THRESHOLD > 0`. Skipped on prefill (l > 1) —
         // the per-token skip only wins at long context, and prefill builds

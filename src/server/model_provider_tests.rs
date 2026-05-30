@@ -112,7 +112,7 @@ fn model_provider_relies_on_auto_traits_for_shared_state() {
     assert_send_sync::<ModelProvider>();
 }
 
-// ── validated_decode_hang_timeout tests (issue #548) ─────────────────────────
+// ── validated_decode_hang_timeout tests ─────────────────────────
 
 /// A non-zero timeout must be returned as-is without any warning.
 #[test]
@@ -132,12 +132,12 @@ fn validated_decode_hang_timeout_uses_fallback_when_timeout_is_zero() {
     assert_eq!(dur, DECODE_HANG_TIMEOUT);
 }
 
-// ── Long-prefill regression tests (issue #548) ───────────────────────────────
+// ── Long-prefill regression tests ───────────────────────────────
 
 /// Verifies that `drain_generation_events_impl` (the private core loop used by
 /// every drain function) does not apply any timeout during the prefill phase
 /// (before the first token arrives). A prompt with 32k tokens may take tens of
-/// seconds to prefill on real hardware; before issue #548 a coarse timeout was
+/// seconds to prefill on real hardware; before a coarse timeout was
 /// applied uniformly across both phases and would prematurely abort such
 /// requests.
 ///
@@ -181,7 +181,7 @@ fn drain_generation_events_impl_survives_long_prefill_before_first_token() {
     // without a timeout. If Phase 1 ever applied this 5 s as a recv_timeout
     // we would still pass — the meaningful regression to catch is a Phase-1
     // bound *shorter* than the 80 ms prefill, which is exactly what the
-    // pre-issue-#548 code did.
+    // pre-issue- code did.
     let mut received_tokens: Vec<String> = Vec::new();
     let mut final_result: Option<GenerationResult> = None;
 
@@ -211,7 +211,7 @@ fn drain_generation_events_impl_survives_long_prefill_before_first_token() {
     assert_eq!(result.finish_reason, "stop");
 }
 
-// ── Phase 2 decode hang regression test (issue #548) ─────────────────────────
+// ── Phase 2 decode hang regression test ─────────────────────────
 
 /// Verifies that `drain_generation_events_impl` correctly detects a Phase 2
 /// (decode phase) hang: once the first token has arrived, any subsequent wait

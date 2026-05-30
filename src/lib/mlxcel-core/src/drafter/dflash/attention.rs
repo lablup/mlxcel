@@ -322,7 +322,7 @@ mod tests {
         DFlashAttention::from_weights(&weights, "self_attn", &cfg, 64, 4).unwrap()
     }
 
-    /// Acceptance pin (issue #635):
+    /// Acceptance pin:
     ///
     /// > `DFlashAttention`: with a fixed ctx and prop input and a synthetic
     /// > cache, the cache after `update_and_fetch` contains ONLY context K/V

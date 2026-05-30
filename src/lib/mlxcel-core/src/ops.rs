@@ -69,8 +69,7 @@ pub fn divide_scalar(a: &ffi::MlxArray, scalar: f32) -> UniquePtr<ffi::MlxArray>
     ffi::divide(a, &scalar_array)
 }
 
-/// Walsh–Hadamard Transform along the last axis (B0 spike for issue #470,
-/// epic #458 — TurboQuant KV cache compression).
+/// Walsh–Hadamard Transform along the last axis (B0 spike — TurboQuant KV cache compression).
 ///
 /// Applies an orthonormal Hadamard transform to the last axis of `x`, scaled by
 /// `1/sqrt(N)` where `N` is the size of the last axis. This is the "graph-only"
@@ -100,8 +99,7 @@ pub fn divide_scalar(a: &ffi::MlxArray, scalar: f32) -> UniquePtr<ffi::MlxArray>
 /// this path is unreachable in normal usage; the guard exists so future B2
 /// integration can rely on a sane error contract.)
 ///
-/// Used by: TurboQuant cache compression (planned: cache::turbo, sub-issues
-/// #472–#485 under epic #458).
+/// Used by: TurboQuant cache compression (planned: cache::turbo, sub-– under).
 pub fn wht(x: &ffi::MlxArray) -> UniquePtr<ffi::MlxArray> {
     let shape = ffi::array_shape(x);
     let last = shape.last().copied().unwrap_or(0);

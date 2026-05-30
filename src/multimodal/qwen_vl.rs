@@ -83,7 +83,7 @@ pub trait QwenVlRuntime {
 
     /// Bind the MRoPE state computed during embedding preparation to a
     /// specific `SequenceId` so the per-row delta cannot leak into other
-    /// requests' decode steps (issue #540 / mlx-vlm PR #1095).
+    /// requests' decode steps (mlx-vlm PR #1095).
     ///
     /// The default implementation is a no-op for runtimes that do not use
     /// MRoPE (in mlxcel today this trait only covers Qwen VL families that
@@ -119,10 +119,10 @@ pub trait QwenVlRuntime {
 
 /// Per-row batched dispatch helper. Re-exported for backwards
 /// compatibility with the Qwen VL wrappers that imported this symbol
-/// when the helper lived in this module (PR #558). The implementation
-/// now lives in [`super::batched_dispatch`] so Gemma 4 (issue #542) and
+/// when the helper lived in this module. The implementation
+/// now lives in [`super::batched_dispatch`] so Gemma 4 and
 /// the Qwen VL families share a single source of truth — see the
-/// duplication report flagged on PR #560 (M-2).
+/// duplication report flagged on (M-2).
 ///
 /// Used by: Qwen2VLModel, Qwen25VLModel, Qwen3VLModel, Qwen3VLMoeModel.
 pub use super::batched_dispatch::forward_batched_with_seq_ids_dispatch;

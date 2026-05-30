@@ -48,12 +48,12 @@ pub struct ChatTemplateProcessor {
     ///
     /// Mirrors upstream `TokenizerWrapper.apply_chat_template`'s
     /// `enable_thinking=self.has_thinking` default added in mlx-lm PR #1114
-    /// (issue #590). Plumbed in by `server::startup::resolve_chat_template`
+    /// Plumbed in by `server::startup::resolve_chat_template`
     /// from [`crate::tokenizer::ThinkingMarkers::has_thinking`] right after
     /// the tokenizer loads — so a thinking model defaults to `enable_thinking=true`
     /// while a non-thinking model defaults to `false`.
     ///
-    /// `false` is the conservative pre-#590 default and is kept for any
+    /// `false` is the conservative earlier default and is kept for any
     /// path that constructs a processor without a corresponding tokenizer
     /// (template-string overrides, `Default`, tests).
     default_enable_thinking: bool,
@@ -137,7 +137,7 @@ impl ChatTemplateProcessor {
     /// any think marker pair (single or multi token) — see
     /// [`crate::tokenizer::ThinkingMarkers::has_thinking`].
     ///
-    /// The default is `false` for backward compatibility with pre-#590
+    /// The default is `false` for backward compatibility with earlier
     /// behavior so callers that do not explicitly enable this still see the
     /// historic default; `server::startup` opts into the upstream-aligned
     /// default for thinking models.
@@ -156,7 +156,7 @@ impl ChatTemplateProcessor {
 
     /// Raw Jinja template source post-preprocessing.
     ///
-    /// Used by the prompt-cache key composer (epic #416 / issue #422) to hash
+    /// Used by the prompt-cache key composer to hash
     /// a stable identifier of the rendering pipeline into `template_sig`. The
     /// returned slice is the exact string used as the minijinja template, so
     /// any non-determinism that depends on template text will be captured.
@@ -336,7 +336,7 @@ impl ChatTemplateProcessor {
     /// under its original name (with a handful of canonical keys such as
     /// `enable_thinking` overriding our default context entries so templates
     /// that rely on those names see the operator-provided value). This is the
-    /// plumbing path used by issue #410's `preserve_thinking` feature and
+    /// plumbing path used's `preserve_thinking` feature and
     /// generalizes to any future kwarg a HuggingFace chat template expects.
     ///
     /// When a kwarg key duplicates an already-provided context entry
@@ -458,11 +458,9 @@ impl ChatTemplateProcessor {
 /// from kwargs overlay — a request cannot overwrite the canonical conversation
 /// or tool list by smuggling those keys through `chat_template_kwargs`.
 ///
-/// `enable_thinking` defaults to `default_enable_thinking` (issue #590,
-/// upstream PR #1114) — `true` when the underlying tokenizer recognizes a
+/// `enable_thinking` defaults to `default_enable_thinking` (upstream PR #1114) — `true` when the underlying tokenizer recognizes a
 /// think marker pair, `false` otherwise.  The default is overridable through
-/// `kwargs` (the same mechanism that lets issue #410's `preserve_thinking`
-/// reach the template).  Any other kwarg key — including future
+/// `kwargs` (the same mechanism that lets's `preserve_thinking` reach the template).  Any other kwarg key — including future
 /// template-specific hints — is passed through unchanged.
 fn build_template_context(
     messages: minijinja::Value,
@@ -485,7 +483,7 @@ fn build_template_context(
     );
     ctx.insert("tools", tools);
     // Tokenizer-derived default: `has_thinking` for thinking models, `false`
-    // otherwise (issue #590; upstream PR #1114). Overridden below by any
+    // otherwise (upstream PR #1114). Overridden below by any
     // matching kwarg from the request / server-default merge.
     ctx.insert(
         "enable_thinking",
@@ -1454,7 +1452,7 @@ TOOL
 
     #[test]
     fn test_apply_with_kwargs_exposes_preserve_thinking() {
-        // Issue #410: verify that kwargs reach the Jinja template under the
+        // verify that kwargs reach the Jinja template under the
         // provided names. The template branches on preserve_thinking to emit
         // a marker we can assert on.
         let template = r#"{% if preserve_thinking %}[KEEP]{% else %}[STRIP]{% endif %}{% for m in messages %}{{ m.content }}{% endfor %}"#;
@@ -1504,11 +1502,11 @@ TOOL
         assert!(out.contains("flag=42"));
     }
 
-    // -- enable_thinking default plumbing (issue #590) -----------------------
+    // -- enable_thinking default plumbing -----------------------
 
     #[test]
     fn default_enable_thinking_defaults_to_false_for_back_compat() {
-        // Pre-#590 behavior: a freshly constructed processor leaves
+        // Pre- behavior: a freshly constructed processor leaves
         // `enable_thinking` at `false` so callers that never opt in see the
         // historic default.
         let template = r#"{% if enable_thinking %}[THINK]{% else %}[NOTHINK]{% endif %}"#;
@@ -1529,7 +1527,7 @@ TOOL
 
     #[test]
     fn set_default_enable_thinking_flips_default_for_thinking_models() {
-        // Issue #590 / upstream PR #1114: when the tokenizer recognizes a
+        // upstream PR #1114: when the tokenizer recognizes a
         // think marker pair, the chat-template default flips to `true`. The
         // request must then render the THINK branch without setting any
         // kwarg.
@@ -1868,7 +1866,7 @@ TOOL
 
     #[test]
     fn patch_gemma4_generation_prompt_uses_default_enable_thinking_when_kwarg_absent() {
-        // Regression guard for HIGH-1 (PR #613 review): when the server startup
+        // Regression guard for HIGH-1 (review): when the server startup
         // hook sets `default_enable_thinking=true` for a Gemma 4 thinking model,
         // a request that arrives with empty kwargs must still trigger the
         // `<|channel>thought\n` priming. Before the fix, `kwargs.get("enable_thinking")`

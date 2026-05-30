@@ -13,7 +13,7 @@
 // limitations under the License.
 
 //! Speculative drafter abstraction shared by both MTP and DFlash drafter
-//! families being ported from `mlx-vlm` (epic #633).
+//! families being ported from `mlx-vlm`.
 //!
 //! ## Why a trait?
 //!
@@ -36,8 +36,7 @@
 //!   trim.
 //!
 //! The [`Drafter`] trait defined here unifies these shapes behind a single
-//! interface so the round-loop drivers (sub-6 / #629 for MTP, sub-12 /
-//! #636 for DFlash) can drive any drafter uniformly. Each concrete drafter
+//! interface so the round-loop drivers (sub-6 for MTP, sub-12 for DFlash) can drive any drafter uniformly. Each concrete drafter
 //! overrides only the methods it actually needs and lets the trait's
 //! default no-ops cover the rest.
 //!
@@ -54,11 +53,11 @@
 //!
 //! The Rust port mirrors these constants and the [`resolve_drafter_kind`]
 //! reconciliation semantics exactly. A third variant
-//! [`DrafterKind::InternalMtp`] is added for the peer epic #647
-//! (Qwen 3.5 / 3.6 built-in MTP head) per the in-issue amendment on #624;
+//! [`DrafterKind::InternalMtp`] is added for the peer
+//! (Qwen 3.5 / 3.6 built-in MTP head) per the in-issue amendment on;
 //! see [`DrafterKind`] for details.
 //!
-//! ## Scope of this sub-issue (#624)
+//! ## Scope of this sub-issue
 //!
 //! This module ships **only** the trait, the kind enum, the auto-detector,
 //! and the [`load_drafter`] factory shell. The concrete drafter
@@ -66,9 +65,9 @@
 //!
 //! | Variant | Concrete impl | Wired by |
 //! |---------|---------------|----------|
-//! | [`DrafterKind::Mtp`] | `Gemma4AssistantDraftModel` | #626 |
-//! | [`DrafterKind::Dflash`] | `DFlashDraftModel` | #635 |
-//! | [`DrafterKind::InternalMtp`] | `InternalMtpDrafter` | #640 (epic #647) |
+//! | [`DrafterKind::Mtp`] | `Gemma4AssistantDraftModel` | |
+//! | [`DrafterKind::Dflash`] | `DFlashDraftModel` | |
+//! | [`DrafterKind::InternalMtp`] | `InternalMtpDrafter` | |
 //!
 //! Until those land, [`load_drafter`] returns a typed
 //! [`DrafterError::NotYetImplemented`] error pointing at the responsible
@@ -90,11 +89,11 @@ use std::sync::OnceLock;
 
 pub mod dflash;
 /// Concrete Gemma 4 MTP "assistant" drafter implementation. Wired into
-/// [`load_drafter`]'s `Mtp` arm in issue #626.
+/// [`load_drafter`]'s `Mtp` arm.
 pub mod gemma4_assistant;
 /// Centroid-routed sparse softmax LM head used by Gemma 4 E2B / E4B
 /// assistant drafters. Wired into `Gemma4AssistantDraftModel` in sub-3
-/// (#626) — landed here independently per issue #627 so the layer can
+/// — landed here independently so the layer can
 /// be unit-tested in isolation before integration.
 pub mod masked_embedder;
 
@@ -112,7 +111,7 @@ pub mod masked_embedder;
 ///   rollback).
 /// - `"internal-mtp"` — built-in MTP head carried by Qwen 3.5 / 3.6
 ///   checkpoints as `mtp.layers.0.*` weights; no separate drafter
-///   checkpoint required. Added for the peer epic #647.
+///   checkpoint required. Added for the peer.
 ///
 /// The enum is marked `#[non_exhaustive]` so adding new drafter shapes in
 /// follow-up epics does not break downstream `match` exhaustiveness
@@ -130,7 +129,7 @@ pub enum DrafterKind {
     Mtp,
     /// Built-in MTP head living inside the target checkpoint
     /// (`mtp.layers.0.*` weights on Qwen 3.5 / 3.6). Auto-detected by
-    /// checkpoint inspection in epic #647 sub-H (#645), not by drafter
+    /// checkpoint inspection sub-H, not by drafter
     /// `model_type`.
     InternalMtp,
 }
@@ -155,7 +154,7 @@ impl std::fmt::Display for DrafterKind {
 /// Parse a canonical drafter-kind name produced by [`DrafterKind::as_str`].
 ///
 /// Implemented via the standard [`std::str::FromStr`] trait so CLI flag
-/// parsing (sub-7 / #630) can use `"dflash".parse::<DrafterKind>()`
+/// parsing (sub-7) can use `"dflash".parse::<DrafterKind>()`
 /// directly. Returns [`DrafterError::UnknownKind`] when the string does
 /// not match any known variant.
 impl std::str::FromStr for DrafterKind {
@@ -178,7 +177,7 @@ impl std::str::FromStr for DrafterKind {
 /// build the "known kinds" hint in [`DrafterError::UnknownKind`].
 ///
 /// Mirrors upstream `KNOWN_DRAFTER_KINDS = {"dflash", "mtp"}` plus
-/// `"internal-mtp"` from the #624 amendment for peer epic #647.
+/// `"internal-mtp"` from the amendment for peer.
 pub const KNOWN_DRAFTER_KINDS: &[&str] = &["dflash", "mtp", "internal-mtp"];
 
 /// Default drafter kind selected when the drafter's `config.json` does not
@@ -247,7 +246,7 @@ pub enum DrafterError {
 
     /// Weight loading or model construction failed (missing key,
     /// quantization mismatch, etc.). Carries the underlying reason for
-    /// operator triage. Used by the DFlash drafter load path (#635).
+    /// operator triage. Used by the DFlash drafter load path.
     #[error("drafter load failed: {reason}")]
     LoadFailed { reason: String },
 
@@ -272,7 +271,7 @@ pub enum DrafterError {
     /// Failure while loading drafter weights (missing tensor, malformed
     /// safetensors, etc.). Used by the Gemma 4 assistant drafter
     /// [`Gemma4AssistantDraftModel::from_weights`](crate::drafter::gemma4_assistant::Gemma4AssistantDraftModel::from_weights)
-    /// path (#626). Sibling of [`Self::LoadFailed`], kept distinct so the
+    /// path. Sibling of [`Self::LoadFailed`], kept distinct so the
     /// two drafter families surface different operator hints.
     #[error("drafter weight load failed: {reason}")]
     WeightLoad { reason: String },
@@ -299,7 +298,7 @@ pub enum DrafterError {
 
     /// Drafter has a layer of the named layer-type but the round-loop did
     /// not supply matching shared K/V tensors. Typically means the target's
-    /// shared K/V capture (issue #625) and the drafter's `layer_types` field
+    /// shared K/V capture and the drafter's `layer_types` field
     /// are out of sync.
     #[error(
         "drafter layer needs shared K/V for layer_type {layer_type:?} but the round-loop \
@@ -452,7 +451,7 @@ pub fn resolve_drafter_kind(
 /// Borrowed (`&'a MlxArray`) rather than owned so the target retains
 /// ownership of its KV cache contents — the drafter is forbidden from
 /// mutating them in place. This is foundational scaffolding; the exact
-/// shape of the shared K/V transfer is finalised by sub-2 / #625 (Gemma 4
+/// shape of the shared K/V transfer is finalised by sub-2 (Gemma 4
 /// target-side speculative hooks). Until then, the slice carries the
 /// upstream `[k_full, v_full, k_swa, v_swa]` four-tensor convention
 /// (Gemma 4's last full-attention + last sliding-window-attention layer
@@ -461,7 +460,7 @@ pub fn resolve_drafter_kind(
 ///
 /// No-op for DFlash and InternalMtp (both have their own KV cache).
 pub struct SharedKv<'a> {
-    /// Borrowed shared K/V tensors from the target. Layout finalised by #625.
+    /// Borrowed shared K/V tensors from the target. Layout finalised.
     pub tensors: &'a [&'a MlxArray],
 }
 
@@ -700,7 +699,7 @@ pub trait Drafter {
     /// `out[r]` is the proposal sequence for row `r`, with length
     /// `block_size - 1` (DFlash) or `block_size` (MTP / InternalMtp).
     ///
-    /// **Issue #637 (DFlash B>1 path)**: implemented by `DFlashDrafter`.
+    /// ** (DFlash B>1 path)**: implemented by `DFlashDrafter`.
     /// MTP / InternalMtp drafters return [`DrafterError::DraftFailed`] by
     /// default — their batched paths land in their own respective sub-issues.
     ///
@@ -745,7 +744,7 @@ pub trait Drafter {
     ///   `references/mlx-lm/mlx_lm/models/qwen3_5.py:308-313`
     ///   (`weights.pop("lm_head.weight", None)` and friends).
     /// - **InternalMtp**: pass-through. The actual `mtp.*` extraction
-    ///   happens in epic #647 sub-B (#639) *before* the drafter sees
+    ///   happens sub-B *before* the drafter sees
     ///   the weight map.
     fn sanitize(&mut self, weights: &mut WeightMap) -> Result<(), DrafterError>;
 
@@ -766,11 +765,11 @@ pub type LoadedDrafter = (Box<dyn Drafter>, DrafterKind);
 /// Factory entrypoint: load a drafter from a model directory, reconciling
 /// the caller's optional `kind` with the drafter's `config.json`.
 ///
-/// The signature is final and downstream sub-issues (#626, #635, #640)
+/// The signature is final and downstream sub-issues
 /// fill in their concrete arms in this function. Until those arms land,
 /// each variant returns [`DrafterError::NotYetImplemented`] referencing
 /// the responsible sub-issue, so the round-loop driver and the CLI
-/// flag plumbing (sub-7 / #630) can wire against this signature today.
+/// flag plumbing (sub-7) can wire against this signature today.
 ///
 /// Auto-detection (`kind == None`) is delegated to
 /// [`resolve_drafter_kind`].
@@ -778,17 +777,17 @@ pub fn load_drafter(path: &Path, kind: Option<DrafterKind>) -> Result<LoadedDraf
     let resolved = resolve_drafter_kind(path, kind)?;
     match resolved {
         DrafterKind::Dflash => {
-            // Wired in by #635: load weights, sanitize, build the model,
+            // Wired in by load weights, sanitize, build the model,
             // hand back the boxed trait object.
             let drafter = dflash::drafter::DFlashDrafter::load(path)?;
             Ok((Box::new(drafter), resolved))
         }
         DrafterKind::Mtp => {
-            // Wired in by issue #626 — Gemma 4 MTP assistant drafter.
+            // Wired in — Gemma 4 MTP assistant drafter.
             let model = gemma4_assistant::Gemma4AssistantDraftModel::from_path(path)?;
             Ok((Box::new(model), resolved))
         }
-        // Remaining variant lands in peer epic #647 — returning a typed
+        // Remaining variant lands in peer — returning a typed
         // error rather than `unimplemented!()` here gives users an
         // actionable hint instead of a panic.
         DrafterKind::InternalMtp => Err(DrafterError::NotYetImplemented {
@@ -966,7 +965,7 @@ mod tests {
         // model_type == "gemma4_assistant" maps to Mtp, but the caller
         // explicitly asked for DFlash. Resolver MUST honor the explicit
         // choice (DFlash) and emit a `tracing::warn!` so the operator
-        // sees the mismatch. This pins the issue #624 acceptance
+        // sees the mismatch. This pins the acceptance
         // criterion verbatim: "when the caller passes
         // Some(DrafterKind::Dflash) but the model_type says
         // gemma4_assistant, the resolver returns Dflash and emits a
@@ -1021,8 +1020,7 @@ mod tests {
     fn load_drafter_dflash_fails_without_weights_with_typed_load_error() {
         // The stub `config.json` is present but no safetensors files
         // accompany it. `DFlashDrafter::load` must surface a typed
-        // `LoadFailed` (not `NotYetImplemented` — DFlash is wired in
-        // by #635). Pin this to make sure a future re-stub of the
+        // `LoadFailed` (not `NotYetImplemented` — DFlash is wired in). Pin this to make sure a future re-stub of the
         // `Dflash` arm cannot silently regress to `NotYetImplemented`.
         let dir = tempdir().unwrap();
         write_drafter_config(&dir, None);
@@ -1035,7 +1033,7 @@ mod tests {
                 assert!(!reason.is_empty(), "LoadFailed reason must not be empty");
             }
             DrafterError::NotYetImplemented { .. } => {
-                panic!("DFlash must NOT be NotYetImplemented after #635 lands");
+                panic!("DFlash must NOT be NotYetImplemented after lands");
             }
             other => panic!("expected LoadFailed, got {other:?}"),
         }
@@ -1043,7 +1041,7 @@ mod tests {
 
     #[test]
     fn load_drafter_routes_mtp_to_gemma4_assistant() {
-        // The Mtp arm is wired by issue #626. With a fixture that has the
+        // The Mtp arm is wired. With a fixture that has the
         // gemma4_assistant `model_type` but no full text_config, the
         // factory should reach into Gemma4AssistantDraftModel::from_path
         // and fail at config parsing (no text_config) rather than the
@@ -1055,7 +1053,7 @@ mod tests {
         match err {
             DrafterError::NotYetImplemented { .. } => panic!(
                 "Mtp arm should no longer return NotYetImplemented; \
-                 issue #626 wired the concrete loader"
+ wired the concrete loader"
             ),
             DrafterError::ConfigParse { .. } | DrafterError::Config(_) => {
                 // Expected: factory got past the stub gate and into the
@@ -1087,7 +1085,7 @@ mod tests {
     /// adds a generic method or a Self-by-value method, this will fail
     /// to compile and fence the regression at the trait boundary
     /// instead of at every call site. This is the foundational
-    /// invariant the rest of epic #633 depends on.
+    /// invariant the rest depends on.
     #[test]
     fn drafter_trait_is_object_safe() {
         struct StubDrafter;

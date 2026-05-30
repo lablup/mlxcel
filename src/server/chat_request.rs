@@ -19,7 +19,7 @@
 //!
 //! Used by: routes/chat
 //!
-//! # Prefix stability guarantees (epic #416, issue #422)
+//! # Prefix stability guarantees
 //!
 //! When the prompt prefix cache is enabled, [`prepare_chat_request`]
 //! guarantees that rendering the same conversation across turns yields a
@@ -78,7 +78,7 @@ pub(crate) struct PreparedChatRequest {
     pub(crate) prompt: String,
     pub(crate) image_data: Vec<Vec<u8>>,
     pub(crate) audio_data: Vec<Vec<u8>>,
-    /// Resolved video items (issue #596, hardened by issue #601).
+    /// Resolved video items (hardened).
     ///
     /// Each entry holds:
     /// * a [`crate::multimodal::video::VideoSource`] handle that the
@@ -112,7 +112,7 @@ pub(super) fn log_once_sessions() -> &'static Mutex<HashSet<String>> {
 
 /// Legacy wrapper preserved for tests and any callers outside the hot
 /// route path. Delegates to [`prepare_chat_request_with_cache`] with
-/// the cache-enabled flag set to `false`, matching pre-#422 behavior.
+/// the cache-enabled flag set to `false`, matching earlier behavior.
 ///
 /// Production HTTP handlers (see `src/server/routes/chat.rs`) use the
 /// `_with_cache` variant directly so they can honor the installed
@@ -127,7 +127,7 @@ pub(crate) async fn prepare_chat_request(
 }
 
 /// Full variant of [`prepare_chat_request`] with explicit prompt-cache
-/// awareness (issue #422).
+/// awareness.
 ///
 /// When `prompt_cache_enabled` is `true` and the caller has not explicitly
 /// set `preserve_thinking` anywhere in the request, this function defaults
@@ -148,7 +148,7 @@ pub(crate) async fn prepare_chat_request_with_cache(
     let effective_tools = effective_tools(request);
     let merged_extra_body = request.merged_extra_body();
 
-    // Issue #410: resolve merged kwargs once up-front.
+    // resolve merged kwargs once up-front.
     //
     // Precedence: top-level `chat_template_kwargs` >
     // nested/flattened `extra_body.chat_template_kwargs` >
@@ -162,7 +162,7 @@ pub(crate) async fn prepare_chat_request_with_cache(
     );
     let mut merged_kwargs = merge_server_and_request(server_default_kwargs, &per_request_kwargs);
 
-    // Issue #422: default preserve_thinking=true when the prompt cache is on
+    // default preserve_thinking=true when the prompt cache is on
     // and no layer of the precedence chain set it. The per-request-kwargs
     // object already reflects top-level + flattened-SDK + nested-extra_body
     // + DashScope flat shape, and `merged_kwargs` folds in the server
@@ -272,14 +272,14 @@ fn has_tool_fields(request: &ChatCompletionRequest) -> bool {
 /// multi-turn tool-use conversations.
 ///
 /// Thin wrapper with `preserve_thinking=true` — used by tests that predate
-/// issue #410 and by any caller that does not want rolling-checkpoint
+/// and by any caller that does not want rolling-checkpoint
 /// stripping.
 #[cfg(test)]
 pub(super) fn build_raw_json_messages(request: &ChatCompletionRequest) -> serde_json::Value {
     build_raw_json_messages_with_thinking(request, true)
 }
 
-/// Issue #410: build raw JSON messages with optional rolling-checkpoint
+/// build raw JSON messages with optional rolling-checkpoint
 /// stripping of `<think>` blocks.
 ///
 /// When `preserve_thinking` is `true`, all `<think>...</think>` blocks reach
@@ -383,7 +383,7 @@ fn render_simple_fallback(messages: &[ChatMessage]) -> String {
     prompt
 }
 
-/// Issue #410: flatten request messages into [`ChatMessage`] with optional
+/// flatten request messages into [`ChatMessage`] with optional
 /// rolling-checkpoint stripping.
 ///
 /// See [`build_raw_json_messages_with_thinking`] for the stripping rules. The

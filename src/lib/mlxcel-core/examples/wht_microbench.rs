@@ -12,8 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Walsh–Hadamard Transform microbenchmark for issue #470 (B0 spike,
-//! epic #458 — TurboQuant KV cache compression).
+//! Walsh–Hadamard Transform microbenchmark (B0 spike, — TurboQuant KV cache compression).
 //!
 //! This is the empirical evidence for the spike question:
 //!
@@ -172,7 +171,7 @@ fn synth_heavy_tail(shape: &[i32], seed: u64) -> UniquePtr<MlxArray> {
 }
 
 fn main() {
-    println!("=== WHT microbench (issue #470, B0 spike) ===");
+    println!("=== WHT microbench (B0 spike) ===");
     println!("fp16 along last axis, MLX hadamard_transform via mlxcel-core::ops::wht\n");
 
     println!(

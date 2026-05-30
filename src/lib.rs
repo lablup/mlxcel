@@ -38,8 +38,7 @@ mod loading;
 mod model_metadata;
 
 // Crate-wide helpers for `#[cfg(test)]` paths. Provides the single shared
-// `ENV_LOCK` that every env-mutating test in this crate must acquire (issue
-// #573); see `test_support::env_lock` for the rationale. `pub(crate)` so
+// `ENV_LOCK` that every env-mutating test in this crate must acquire; see `test_support::env_lock` for the rationale. `pub(crate)` so
 // that test modules at any depth (e.g. `crate::server::cli_input::tests`)
 // can name it as `crate::test_support::env_lock`.
 #[cfg(test)]

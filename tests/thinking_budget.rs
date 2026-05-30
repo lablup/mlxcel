@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Integration tests for issue #409 thinking-token budget.
+//! Integration tests thinking-token budget.
 //!
 //! The correctness tests spin up the `mlxcel-server` binary against a real
 //! Qwen3 model and verify the generation loop enforces the configured cap

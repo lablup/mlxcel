@@ -654,7 +654,7 @@ fn broadcast_2d_eviction_clears_all_slots() {
 }
 
 // -----------------------------------------------------------------------------
-// Issue #350: enriched OOM diagnostic via coordinated_admission_with_attribution.
+// enriched OOM diagnostic via coordinated_admission_with_attribution.
 // -----------------------------------------------------------------------------
 
 mod attribution {

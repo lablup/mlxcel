@@ -12,8 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Axis A "weight-load surgery" CLI integration glue (Epic #363, issue
-//! #371 — A4).
+//! Axis A "weight-load surgery" CLI integration glue (— A4).
 //!
 //! This module owns the **active-pipeline slot**: a process-wide
 //! `Option<Arc<SurgeryPipeline>>` set by the CLI/server entry points
@@ -23,7 +22,7 @@
 //!
 //! ## Why a global slot
 //!
-//! The consolidated loaders introduced by A1 (issue #365) accept
+//! The consolidated loaders introduced by A1 accept
 //! `Option<&dyn WeightTransform>` so any caller can plug in a transform
 //! at load time. The CLI entry points (`mlxcel generate`, `mlxcel serve`,
 //! `mlxcel-server`) call `crate::load_model` (and friends), which in
@@ -48,9 +47,9 @@
 //!   loader, look up the slot, find `None`, and skip the transform hook
 //!   entirely.
 //! - The runtime call sequence is byte-for-byte identical to the
-//!   pre-#371 baseline.
+//!   earlier baseline.
 //!
-//! This satisfies the hard guarantee in #363 §5 (isolation table) and
+//! This satisfies the hard guarantee §5 (isolation table) and
 //! is exercised end-to-end by the integration test in
 //! `tests/surgery_cli.rs`.
 //!

@@ -16,7 +16,7 @@
 //!
 //! This executor covers only the **text-only language tower** of Llama 4
 //! Scout. Vision encoder stage splitting is explicitly out of scope of
-//! issue #345 and of the parent epic #341; VLM inputs that require the
+//! and of the parent VLM inputs that require the
 //! vision tower should not be routed through this stage executor.
 //!
 //! Structural notes:

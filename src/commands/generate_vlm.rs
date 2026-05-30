@@ -192,7 +192,7 @@ pub(crate) fn compute_vlm_embeddings(
     target_fps: f64,
     tokenizer: &MlxcelTokenizer,
 ) -> Result<Option<InputEmbeddings>> {
-    // Handle video-only or video + image mode for Gemma4 (issue #553).
+    // Handle video-only or video + image mode for Gemma4.
     // Video and audio cannot coexist in this CLI surface yet — surface a
     // clean error rather than silently accept one.
     if !video_paths.is_empty() {
@@ -232,7 +232,7 @@ pub(crate) fn compute_vlm_embeddings(
     }
 
     // Nemotron H Nano Omni — audio-only or combined image + audio
-    // (issue #582). Mirrors the Gemma 4 dispatch above; the helper
+    // Mirrors the Gemma 4 dispatch above; the helper
     // handles both branches so a single match arm covers both modes.
     if let Some(audio) = audio_path
         && let LoadedModel::NemotronHNanoOmniVLM(nemotron_vl) = model
@@ -468,7 +468,7 @@ fn compute_gemma4_multimodal_embeddings(
 }
 
 /// Compute video embeddings (and optional preceding image embeddings)
-/// for the Gemma 4 VLM (issue #553).
+/// for the Gemma 4 VLM.
 ///
 /// Decodes each video via `mlxcel::video::load_video` (subprocess
 /// `ffmpeg`), processes frames through
@@ -690,7 +690,7 @@ fn expand_nemotron_h_nano_omni_audio_tokens(
 }
 
 /// Compute audio embeddings (with optional preceding images) for the
-/// Nemotron H Nano Omni VLM (issue #582).
+/// Nemotron H Nano Omni VLM.
 ///
 /// Mirrors upstream `_extract_sound_features` + `_merge_features`:
 /// 1. Loads the WAV via the shared `audio::load_wav_file` helper.

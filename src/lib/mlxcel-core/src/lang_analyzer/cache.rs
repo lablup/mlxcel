@@ -194,7 +194,7 @@ mod tests {
     // `mlxcel_core::test_support::env_lock`. Per-module locks would race
     // with env mutations in unrelated modules of the same test binary —
     // libc's env block has no internal lock and concurrent
-    // `setenv`/`getenv` is undefined behavior (issue #573).
+    // `setenv`/`getenv` is undefined behavior.
     use crate::test_support::env_lock::env_lock;
 
     // -----------------------------------------------------------------------
@@ -323,9 +323,9 @@ mod tests {
         );
     }
 
-    /// Issue #405 — a v2 cache file must auto-invalidate and rebuild to v3.
+    /// a v2 cache file must auto-invalidate and rebuild to v3.
     ///
-    /// Simulates a pre-#405 deployment: writes a cache file carrying the old
+    /// Simulates a earlier deployment: writes a cache file carrying the old
     /// `version = 2` tag and exercises `load_or_build` with `rebuild=false`.
     /// The old file must be discarded and a fresh v3 index written in its
     /// place. This is the key backward-compatibility guarantee for Phase 1

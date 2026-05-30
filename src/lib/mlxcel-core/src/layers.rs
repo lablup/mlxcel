@@ -3047,7 +3047,7 @@ mod tests {
         let window_size = 2_i32; // k_len > window, mask is required.
 
         let out = crate::causal_attention(&q, &k, &v, scale, 0.0, window_size);
-        // After PR #513, `create_causal_mask_with_window` caps T_k to
+        // After `create_causal_mask_with_window` caps T_k to
         // `window_size` when `q_len + offset > window`. The explicit-mask
         // reference must therefore receive K/V sliced to the last
         // `window_size` slots so its score tensor lines up with the mask —
@@ -3098,7 +3098,7 @@ mod tests {
             &[1, 1, 5, 4],
         );
         let scale = 0.5_f32;
-        // Use window_size=3 (not 2) so the post-PR-#513 cap path produces a
+        // Use window_size=3 (not 2) so the post-earlier cap path produces a
         // non-degenerate mask: with q_len=3, window=3, tril_offset = w - size
         // = 0, so q=0 attends to k=0. With window=2 the row-0 mask is fully
         // masked, which produces NaN under the now-correct semantics (a

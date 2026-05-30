@@ -12,20 +12,20 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Unit tests for the Gemma 4 mixed-length batching helpers (issue #542).
+//! Unit tests for the Gemma 4 mixed-length batching helpers.
 //!
 //! These tests cover two distinct surfaces:
 //!
 //! 1. The per-row prompt-kwarg alignment helpers ([`prompt_kwarg_row`],
 //!    [`pad_sequence_aligned_prompt_kwarg`], [`align_per_row_prompt_kwarg`]).
-//!    Issue #543 will extend the same helpers to handle Gemma 4 E4B/E2B
+//! will extend the same helpers to handle Gemma 4 E4B/E2B
 //!    `per_layer_inputs` (shape `[B, T, num_layers, hidden_per_layer]`),
 //!    so the 4D-shape coverage here is also forward-looking guard rails
 //!    for that follow-up.
 //!
 //! 2. The per-row batched dispatch helper
 //!    ([`forward_batched_with_seq_ids_dispatch`]). Mirrors the integration
-//!    tests added for Qwen VL in PR #558.
+//!    tests added for Qwen VL.
 
 use super::{
     PadSide, align_per_row_prompt_kwarg, forward_batched_with_seq_ids_dispatch,
@@ -86,7 +86,7 @@ fn prompt_kwarg_row_extracts_each_row_of_a_full_batch() {
 #[ignore = "requires serial MLX execution"]
 fn prompt_kwarg_row_handles_4d_per_layer_inputs_shape() {
     // 4D `per_layer_inputs`-shaped tensor `[B=2, T=3, L=2, H=4]`. Issue
-    // #543 will exercise this exact rank for Gemma 4 E4B/E2B.
+    // will exercise this exact rank for Gemma 4 E4B/E2B.
     let total = 2 * 3 * 2 * 4;
     let data: Vec<f32> = (0..total).map(|x| x as f32).collect();
     let v = mlxcel_core::from_slice_f32(&data, &[2, 3, 2, 4]);
@@ -194,8 +194,8 @@ fn pad_sequence_aligned_right_pads_3d_inputs_embeds() {
 #[ignore = "requires serial MLX execution"]
 fn pad_sequence_aligned_left_pads_4d_per_layer_inputs() {
     // 4D `per_layer_inputs`-shaped tensor `[1, T=2, L=2, H=2]`. Pad to T=3.
-    // This is the exact rank issue #543 will exercise — the helper must
-    // already produce correct output for this case so #543 only has to
+    // This is the exact rank will exercise — the helper must
+    // already produce correct output for this case so only has to
     // touch the call site (not re-derive the math).
     let data: Vec<f32> = (1..=8).map(|x| x as f32).collect();
     let v = mlxcel_core::from_slice_f32(&data, &[1, 2, 2, 2]);

@@ -136,7 +136,7 @@ impl DraftInner {
 /// `"sliding_attention"`). This matches the upstream Python dict layout
 /// `shared_kv_states[layer_type] = (K, V)`.
 ///
-/// Until issue #625 finalises the shape of `SharedKv::tensors`, this struct
+/// Until finalises the shape of `SharedKv::tensors`, this struct
 /// expects the tensor order `[k_full, v_full, k_swa, v_swa]` documented on
 /// [`SharedKv`].
 struct OwnedSharedKv {
@@ -650,7 +650,7 @@ impl Gemma4AssistantDraftModel {
         // The current `LanguageModel` trait does not expose `layer_types`
         // so the drafter falls back to the drafter's own text_config
         // layer_types (which mirror the target by construction on all four
-        // supported pairings). When #629 wires a richer round-loop API,
+        // supported pairings). When wires a richer round-loop API,
         // pass the target's actual layer_types in here.
         self.config.target_layer_types = self.config.text_config().layer_types.clone();
 
@@ -834,7 +834,7 @@ impl Drafter for Gemma4AssistantDraftModel {
         position: usize,
         left_padding: usize,
     ) -> Result<(), DrafterError> {
-        // Per issue #631 (batched MTP): when the round-loop is running B > 1
+        // (batched MTP): when the round-loop is running B > 1
         // with left-padded shared K/V, the drafter normalizes each row so
         // the cross-attention forward sees the simpler invariant: each
         // row's real keys occupy `[0, kv_valid_len)` and the tail is
@@ -952,7 +952,7 @@ impl Drafter for Gemma4AssistantDraftModel {
         block_size: usize,
         sampler: &SamplingConfig,
     ) -> Result<Vec<Vec<i32>>, DrafterError> {
-        // Batched autoregressive draft (issue #631). Performs `K-1` small
+        // Batched autoregressive draft. Performs `K-1` small
         // forwards with `[B, 1, ...]` shapes, sampling one token per row
         // each step. Mirrors the B = 1 path in [`Self::draft_block`] but
         // keeps the batch dim throughout.

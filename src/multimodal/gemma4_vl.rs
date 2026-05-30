@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Gemma 4 VLM batching helpers (issue #542 / mlx-vlm PR #1127).
+//! Gemma 4 VLM batching helpers (mlx-vlm PR #1127).
 //!
 //! This module owns the **per-row prompt-kwarg alignment** helpers used
 //! when a batched VLM call ships a `[B, T_max, ...]` tensor (sequence-
@@ -25,16 +25,16 @@
 //!
 //! Per-row batched dispatch on `LanguageModel::forward_batched_with_context_and_ids`
 //! lives in [`super::batched_dispatch::forward_batched_with_seq_ids_dispatch`]
-//! and is shared with the Qwen VL families (PR #558). Both Qwen VL and
+//! and is shared with the Qwen VL families. Both Qwen VL and
 //! Gemma 4's vision wrappers route their override through that helper so
 //! mixed-length batches reach `forward_with_sequence_id` row-by-row with
-//! the correct `seq_id`. After issue #542's runtime fix landed in this
+//! the correct `seq_id`. After's runtime fix landed in this
 //! same PR, [`crate::vision::Gemma4VLModel::supports_batching`] returns
 //! `true` and the scheduler actually drives this batched path on
 //! Gemma 4.
 //!
 //! The kwarg-alignment helpers here are scoped narrow enough that issue
-//! #543 (Gemma 4 E4B/E2B `per_layer_inputs` alignment in batched prefill)
+//! (Gemma 4 E4B/E2B `per_layer_inputs` alignment in batched prefill)
 //! can extend them with the 4D `per_layer_inputs` shape without
 //! duplicating the row-slice / pad-to-max-length math.
 
@@ -67,8 +67,8 @@ pub enum PadSide {
 ///
 /// Returns `None` when the tensor has rank 0 or an empty leading axis.
 ///
-/// Used by: Gemma 4 mixed-length batching prep (issue #542) and — when
-/// extended for `per_layer_inputs` — issue #543.
+/// Used by: Gemma 4 mixed-length batching prep and — when
+/// extended for `per_layer_inputs` —.
 #[must_use]
 pub fn prompt_kwarg_row(
     v: &MlxArray,
@@ -107,14 +107,14 @@ pub fn prompt_kwarg_row(
 /// covers all sequence-aligned prompt kwargs the upstream fix touches:
 /// 2D (`attention_mask`, `position_ids`), 3D (`inputs_embeds`,
 /// `decoder_inputs_embeds`, `deepstack_visual_embeds`), and 4D
-/// (`per_layer_inputs`, the shape that issue #543 will exercise).
+/// (`per_layer_inputs`, the shape that will exercise).
 ///
 /// # Panics
 /// Panics if `v` has rank < 2 — sequence-aligned kwargs always have at
 /// least a `[B, T]` shape, so a smaller rank is a programmer error.
 ///
-/// Used by: Gemma 4 mixed-length batching prep (issue #542); designed
-/// for re-use by issue #543.
+/// Used by: Gemma 4 mixed-length batching prep; designed
+/// for re-use.
 #[must_use]
 pub fn pad_sequence_aligned_prompt_kwarg(
     v: &MlxArray,
@@ -153,8 +153,8 @@ pub fn pad_sequence_aligned_prompt_kwarg(
 /// kwargs (e.g. `pixel_values` shaped `[B, ...]`) should call
 /// [`prompt_kwarg_row`] directly and skip the padding step.
 ///
-/// Used by: Gemma 4 mixed-length batching prep (issue #542); re-used
-/// by issue #543 for `per_layer_inputs`.
+/// Used by: Gemma 4 mixed-length batching prep; re-used
+/// for `per_layer_inputs`.
 #[must_use]
 pub fn align_per_row_prompt_kwarg(
     v: &MlxArray,

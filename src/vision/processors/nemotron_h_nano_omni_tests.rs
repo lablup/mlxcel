@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Unit tests for the Nemotron H Nano Omni image processor (issue #554).
+//! Unit tests for the Nemotron H Nano Omni image processor.
 
 use super::*;
 use image::{DynamicImage, RgbImage};

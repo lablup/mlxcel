@@ -135,7 +135,7 @@ impl Attention {
         q = mlxcel_core::fast_rope(&q, self.rope_dims, false, self.rope_base, 1.0, offset);
         k = mlxcel_core::fast_rope(&k, self.rope_dims, false, self.rope_base, 1.0, offset);
 
-        // Issue #505: Try the fused sparse-V SDPA path for the decode case
+        // Try the fused sparse-V SDPA path for the decode case
         // (l == 1) when the cache is in Turbo4Asym mode
         // and `MLXCEL_SPARSE_V_THRESHOLD > 0`. Skipped on prefill (l > 1)
         // because the per-token skip only wins at long context — and

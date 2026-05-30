@@ -11,10 +11,10 @@ Attribution: Wikipedia contributors, Salesforce AI Research
 Slice      : full test split (all 4358 rows concatenated)
 GPT-2 BPE tokens (tiktoken): 283287
 At PPL_CHUNK_LEN=4096 this yields 69 non-overlapping chunks,
-comfortably exceeding the 20-chunk requirement of the B3 quality gate (issue #492).
+comfortably exceeding the 20-chunk requirement of the B3 quality gate.
 
 This file is used as a fixture for the TurboQuant KV cache perplexity gate
-(tests/turbo_kv_e2e.rs, epic #458, issue #475 / #492).
+(tests/turbo_kv_e2e.rs).
 Any derivative use must retain this CC BY-SA 3.0 attribution.
 
  = Robert Boulter = 

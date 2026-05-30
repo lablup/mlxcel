@@ -42,9 +42,9 @@ pub(crate) struct RequestOptionOverrides {
     pub dry_sequence_breakers: Option<Vec<i32>>,
     pub stop_sequences: Option<Vec<String>>,
     pub priority: RequestPriority,
-    /// Issue #409: per-request thinking-token budget override.
+    /// per-request thinking-token budget override.
     pub reasoning_budget: ReasoningBudgetOverride,
-    /// Issue #409: whether the rendered prompt primes `<think>\n` (true for
+    /// whether the rendered prompt primes `<think>\n` (true for
     /// chat endpoints) vs. takes a free-form prompt (false for raw text
     /// completion endpoints).
     pub thinking_enter_block_on_start: bool,
@@ -94,7 +94,7 @@ pub(crate) fn build_server_generate_options(
         // Default unset; chat routes populate this when the prompt cache
         // store is installed (see `src/server/routes/chat.rs`).
         prompt_cache_ctx: None,
-        // Issue #550: defaults to `None` (unconstrained generation). Routes
+        // defaults to `None` (unconstrained generation). Routes
         // that handle `response_format` populate this after the helper
         // returns — see `chat.rs` and `completions.rs`.
         structured: None,

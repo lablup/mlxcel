@@ -65,7 +65,7 @@
 //! - [`PipelineMetrics`] — bubble ratio, utilization, latency breakdown
 //! - [`MetricsCollector`] — accumulates metrics across pipeline steps
 //!
-//! Elastic repartitioning (issue #349):
+//! Elastic repartitioning:
 //!
 //! - [`ElasticPpConfig`] — runtime configuration for `--enable-elastic-pp`
 //! - [`RepartitionCoordinator`] — drain → rebalance → resume state machine

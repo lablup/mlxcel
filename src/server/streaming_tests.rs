@@ -194,7 +194,7 @@ fn completion_usage_chunk_has_empty_choices_and_populated_usage() {
     assert_eq!(json["usage"]["total_tokens"], 20);
 }
 
-// ── Cache-aware usage chunk tests (issue #423) ───────────────────────────────
+// ── Cache-aware usage chunk tests ───────────────────────────────
 
 /// `usage_with_cache` with `cache_enabled=true` must include
 /// `prompt_tokens_details.cached_tokens` in the final chunk.
@@ -296,7 +296,7 @@ fn sender_without_cancellation_token_does_not_panic_on_dropped_receiver() {
     sender.text("hello");
 }
 
-// ── Long-prefill keepalive regression tests (issue #548) ────────────────────
+// ── Long-prefill keepalive regression tests ────────────────────
 
 /// The SSE keepalive interval must be less than typical proxy idle timeouts
 /// (nginx 60 s, HAProxy 60 s, AWS ALB 60 s) so that long-prefill requests
@@ -314,7 +314,7 @@ const _: () = assert!(
 /// channel must remain open and operational. This test exercises the token
 /// queue flow without a real model: the sender holds the channel open while
 /// a background thread simulates the prefill delay before sending the first
-/// token. The receiver must not error out during the wait (issue #548).
+/// token. The receiver must not error out during the wait.
 #[test]
 fn long_prefill_channel_stays_open_before_first_token() {
     use std::thread;
@@ -356,7 +356,7 @@ fn long_prefill_channel_stays_open_before_first_token() {
 }
 
 // TODO: add a test that verifies the SSE keepalive comment frame is emitted
-// before the first event arrives (issue #548 LOW #2). This requires an axum
+// before the first event arrives (LOW #2). This requires an axum
 // integration test harness to drive `Sse::new(stream).keep_alive(...)` end-to-end
 // and read raw SSE frames from the response body. The existing unit-level
 // `payload_channel` tests cannot reach the axum `KeepAlive` layer. A suitable

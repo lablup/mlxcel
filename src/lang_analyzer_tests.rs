@@ -24,7 +24,7 @@ use mlxcel_core::lang_analyzer::{
     is_whitespace,
 };
 // Env-var-sensitive tests must serialize through the crate-wide `ENV_LOCK`
-// (issue #573); per-module locks race with env mutations in unrelated
+// per-module locks race with env mutations in unrelated
 // modules of the same test binary.
 use crate::test_support::env_lock::env_lock;
 
@@ -296,7 +296,7 @@ fn build_vocab_hash_differs_across_tokenizers() {
 fn version_constant_is_three() {
     // v1 → v2 bumped when classify switched from id_to_token to decode so
     // byte-level BPE tokenizers produce correct script assignments.
-    // v2 → v3 bumped (issue #405) when TokenScriptInfo gained the
+    // v2 → v3 bumped when TokenScriptInfo gained the
     // `is_byte_fragment` field and the opt-in byte-fragment classifier.
     assert_eq!(CURRENT_VERSION, 3, "CURRENT_VERSION must be 3");
 
@@ -793,7 +793,7 @@ fn b8_cxx_generator_with_token_bias_caches_map() {
 }
 
 // ============================================================================
-// Issue #589 — trimmable cache validation and last-token reservation
+// trimmable cache validation and last-token reservation
 // ============================================================================
 
 use mlxcel_core::cache::can_trim_prompt_cache;

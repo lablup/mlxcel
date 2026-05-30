@@ -343,7 +343,7 @@ fn load_video_rejects_overlong_duration() {
 fn load_video_single_pass_produces_correct_frame_count() {
     // Verify that the single-pass implementation produces the expected
     // number of frames for a short synthetic video. This is the key
-    // regression test for the single-pass refactor (issue #597).
+    // regression test for the single-pass refactor.
     if !ffmpeg_available() {
         eprintln!("SKIP: ffmpeg not available");
         return;
@@ -564,10 +564,10 @@ fn video_limits_from_raw_parses_overrides_and_falls_back() {
     assert_eq!(fallback.max_png_frame_bytes, defaults.max_png_frame_bytes);
 }
 
-// ─── Issue #601: VideoSource fd path through ffmpeg ──────────────────────────
+// ─── VideoSource fd path through ffmpeg ──────────────────────────
 
 /// Verify `load_video_source` works against an opened file descriptor passed
-/// via `/dev/fd/N` (issue #601). This is the primary smoke test for the
+/// via `/dev/fd/N`. This is the primary smoke test for the
 /// fd-based pipeline: ffmpeg/ffprobe must accept `/dev/fd/N` as an input
 /// path on the project's supported platforms (Linux + macOS) and produce
 /// the same decoded frames as the path variant.
@@ -611,7 +611,7 @@ fn load_video_source_fd_variant_decodes_via_dev_fd_n() {
     let frames = frames_result.expect(
         "load_video_source must succeed against /dev/fd/N; if this fails the runtime ffmpeg \
          build does not honor /dev/fd/N as an input — investigate the ffmpeg version on the \
-         host or fall back to a different fd-passing strategy (issue #601)",
+         host or fall back to a different fd-passing strategy",
     );
     assert!(
         !frames.is_empty(),
@@ -654,7 +654,7 @@ fn load_video_source_fd_variant_matches_path_variant_frame_count() {
     let path_frames = load_video_with_limits(&video_path, Some(5.0), None, &limits)
         .expect("path-based load_video must succeed for synthetic video");
 
-    // Fd-based decode (the issue #601 path).
+    // Fd-based decode (the path).
     let std_file = std::fs::File::open(&video_path).expect("open synthetic video");
     let owned_fd = std::os::fd::OwnedFd::from(std_file);
     let canonical = std::fs::canonicalize(&video_path).expect("canonicalise");
@@ -728,7 +728,7 @@ fn video_source_fd_dev_fd_n_resolves_to_owned_file_description() {
     assert_eq!(
         buf, payload,
         "bytes read via /dev/fd/N must match the original fixture; this is the \
-         /dev/fd/N kernel contract that the issue #601 fix relies on"
+         /dev/fd/N kernel contract that the fix relies on"
     );
 
     drop(source); // closes the OwnedFd
@@ -801,7 +801,7 @@ fn bench_single_pass_768_frames() {
 
 // ─── Content-preservation tests (require ffmpeg) ─────────────────────────────
 //
-// Issue #598: These tests verify that load_video preserves pixel content, not
+// These tests verify that load_video preserves pixel content, not
 // just shape. They catch:
 //   - Wrong color channel order (BGR vs RGB)
 //   - Wrong sample timing (off-by-one in frame indexing)

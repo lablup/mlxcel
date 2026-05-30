@@ -13,7 +13,6 @@
 // limitations under the License.
 
 //! Per-model allowlist for **symmetric** `KVCacheMode::Turbo4`
-//! (issue #476, epic #458).
 //!
 //! # Why an allowlist?
 //!
@@ -104,7 +103,7 @@ pub static ALLOWED_SYMMETRIC_TURBO_FAMILIES: &[&str] = &[
     // initial list because mlxcel does not yet read the weight quantization
     // tier from `config.json` — adding a `model_type` entry would also
     // greenlight Q4_K_M variants of the same family, which is exactly what
-    // the safety story forbids. Re-evaluate when issue #485 (B12 docs)
+    // the safety story forbids. Re-evaluate when (B12 docs)
     // wires up a richer model-fingerprint lookup.
 ];
 

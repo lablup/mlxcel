@@ -247,7 +247,7 @@ impl LanguageModel for Qwen25VLModel {
         caches: &mut [KVCache],
         mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
-        // Issue #540: route through the per-sequence MRoPE path so the
+        // route through the per-sequence MRoPE path so the
         // cached scalar delta cannot leak across requests.
         self.text_model
             .forward_for_sequence(input_ids, None, caches, mask, seq_id)
@@ -269,7 +269,7 @@ impl LanguageModel for Qwen25VLModel {
         self.text_model.release_mrope_sequence(seq_id);
     }
 
-    /// Issue #540: per-row batched dispatch with seq_ids so each row's
+    /// per-row batched dispatch with seq_ids so each row's
     /// MRoPE state resolves correctly in mixed VL+text batches.
     fn forward_batched_with_context_and_ids(
         &self,

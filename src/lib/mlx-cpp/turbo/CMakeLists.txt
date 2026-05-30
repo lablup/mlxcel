@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-# mlxcel TurboQuant fused kernel launchers (issue #505).
+# mlxcel TurboQuant fused kernel launchers.
 #
 # Currently only Sparse-V SDPA on Metal. The kernels themselves are runtime-
 # JIT-compiled via `mlx::core::fast::metal_kernel(...)`; this CMake target

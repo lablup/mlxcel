@@ -17,8 +17,8 @@
 //! This module owns the single canonical clap definition for the
 //! `--draft-kind` and `--draft-block-size` flags that select between the
 //! classic [`SpeculativeGenerator`](mlxcel_core::speculative::SpeculativeGenerator),
-//! the MTP round-loop driver (`MtpGenerator`, sub-6 / #629), and the
-//! DFlash round-loop driver (`DFlashGenerator`, sub-12 / #636).
+//! the MTP round-loop driver (`MtpGenerator`, sub-6), and the
+//! DFlash round-loop driver (`DFlashGenerator`, sub-12).
 //!
 //! Every mlxcel binary that exposes a generation surface flattens
 //! [`SpeculativeArgs`] via `#[command(flatten)]`, which means:
@@ -162,7 +162,7 @@ pub fn default_block_size_for_kind(kind: DrafterKind) -> u32 {
         DrafterKind::Mtp => DEFAULT_MTP_BLOCK_SIZE,
         // DFlash and the future InternalMtp variant both share the
         // upstream-published 16-token default. InternalMtp's user-facing
-        // override surface lands in epic #647; for now its CLI knob
+        // override surface lands in for now its CLI knob
         // shares the DFlash default.
         DrafterKind::Dflash | DrafterKind::InternalMtp => DEFAULT_DFLASH_BLOCK_SIZE,
         // `DrafterKind` is `#[non_exhaustive]` so future variants force a

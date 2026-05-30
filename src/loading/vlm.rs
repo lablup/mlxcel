@@ -128,7 +128,7 @@ pub(super) fn require_object_mut<'a>(
 /// remap which runs in the caller after we return). Surgery operations
 /// inspecting dtype therefore see the dtype the model graph will see.
 ///
-/// ## Active-pipeline fallback (issue #371 — A4)
+/// ## Active-pipeline fallback (— A4)
 ///
 /// When the explicit `transform` argument is `None` *and* the
 /// `surgery` feature is enabled *and* the CLI has installed an active
@@ -171,13 +171,13 @@ pub(crate) fn load_vlm_weights_common(
         }
     }
 
-    // Axis A weight-load surgery hook (Epic #363). Invoked with the
+    // Axis A weight-load surgery hook. Invoked with the
     // parsed config.json so transforms can inspect quantization or
     // structural metadata. When both `transform` and the active
     // surgery slot are absent, the hook is bypassed entirely and the
-    // load path matches the pre-#371 baseline bit-for-bit.
+    // load path matches the earlier baseline bit-for-bit.
     //
-    // Resolution order (issue #371, A4) mirrors `load_text_weights`:
+    // Resolution order (A4) mirrors `load_text_weights`:
     //   1. Explicit `transform` argument (test fixtures, programmatic).
     //   2. CLI-installed active pipeline (--surgery flag).
     //   3. Baseline — no transform applied.

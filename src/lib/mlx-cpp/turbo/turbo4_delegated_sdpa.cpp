@@ -65,7 +65,7 @@ namespace {
 //    Two launchers, two test entries, no shared mutable state.
 //
 // If you change one kernel body, you must consider whether the other needs
-// the matching change. As of issue #528 the bodies are bit-identical.
+// the matching change. As the bodies are bit-identical.
 constexpr const char* TURBO4_DELEGATED_COLD_WEIGHTED_SUM_SOURCE = R"(
     auto d = thread_position_in_grid.x;
     auto n = thread_position_in_grid.z;
@@ -112,7 +112,7 @@ constexpr const char* TURBO4_DELEGATED_COLD_WEIGHTED_SUM_SOURCE = R"(
     // and gate by per-Q attention weight.
     //
     // No threadgroup memory and no barriers in the inner loop — the same
-    // discipline issue #520 introduced for the Sparse-V kernel applies here.
+    // discipline introduced for the Sparse-V kernel applies here.
     for (uint t = 0; t < t_count; t++) {
         bool any_alive = false;
         for (int r = 0; r < RepeatCount; r++) {
@@ -137,7 +137,7 @@ constexpr const char* TURBO4_DELEGATED_COLD_WEIGHTED_SUM_SOURCE = R"(
         }
 
         // Per-token rescale `norm[t] / max(|y_hat[t]|, 1e-10)` was computed
-        // on the host at quantize time (issue #520). Each thread loads the
+        // on the host at quantize time. Each thread loads the
         // same fp16 scalar; Apple's L1 / per-threadgroup cache coalesces the
         // broadcast so the bandwidth cost is effectively one read per
         // threadgroup per token.
@@ -242,15 +242,15 @@ inline Turbo4BulkDequantRotatedKernelHolder& get_turbo4_bulk_dequant_rotated_ker
     return holder;
 }
 
-} // namespace (cold-only kernel internals; #528)
+} // namespace (cold-only kernel internals)
 
-namespace {  // anonymous namespace for issue #531 steel-envelope kernel internals
+namespace {  // anonymous namespace steel-envelope kernel internals
 
 // =============================================================================
-// Issue #531 — Steel-attention-envelope fused SDPA kernel for Turbo4Delegated.
+// Steel-attention-envelope fused SDPA kernel for Turbo4Delegated.
 // =============================================================================
 //
-// The cold-V weighted-sum kernel above (#528) fixed the V-memory budget by
+// The cold-V weighted-sum kernel above fixed the V-memory budget by
 // reading packed 4-bit cold V directly inside the kernel. But the host-side
 // composition in `attention_turbo4_delegated_fused` still issues 14+ MLX
 // dispatches per decode step (Q·K, scale, mask add, softmax, slice cold,
@@ -335,18 +335,17 @@ constexpr const char* TURBO4_DELEGATED_STEEL_SDPA_SOURCE = R"(
     // -------------------------------------------------------------------------
     // Pass 1: per-Q max + sum_exp scan over the full T_total score range.
     //
-    // History: PR #532 ran this entire pass on thread 0 only and parked the
-    // other D-1 threads at a single barrier, citing issue #520 as precedent
+    // History: ran this entire pass on thread 0 only and parked the
+    // other D-1 threads at a single barrier, citing as precedent
     // for avoiding threadgroup tree-reduction barriers. That assumption held
-    // on M1 Ultra at parity contexts but failed by 6×–25× on M5 Max (PR
-    // #533) because the M5 Max GPU has higher thread occupancy and each
+    // on M1 Ultra at parity contexts but failed by 6×–25× on M5 Max because the M5 Max GPU has higher thread occupancy and each
     // idle thread now costs more in opportunity terms than the barrier
-    // chain itself. Issue #534 inverts the choice for this kernel: split
+    // chain itself. inverts the choice for this kernel: split
     // both Pass 1a (max) and Pass 1b (sum_exp) across all D threads with a
     // tree reduction. With D=128 and T_total=16K each thread reads 128
     // positions instead of 16K — a 128× cut in per-thread serial work.
     //
-    // Why issue #520's pattern still applies to `sparse_v_sdpa.cpp`: that
+    // Why's pattern still applies to `sparse_v_sdpa.cpp`: that
     // kernel does no pre-pass; it only does a single accumulation loop with
     // per-thread skip. There is no cross-thread dependency in that loop, so
     // there is no barrier to eliminate. Here we have an explicit reduction.
@@ -482,11 +481,11 @@ constexpr const char* TURBO4_DELEGATED_STEEL_SDPA_SOURCE = R"(
     uint nibble_shift = ((uint)d & 1u) * 4u;
 
     // Cold loop. Mirror the alive-skip discipline of the cold-only kernel
-    // (issue #528): if the post-softmax weight for this token is below the
+    // if the post-softmax weight for this token is below the
     // threshold for every Q slot, skip the dequant + rescale + accumulate
     // work entirely. We compare `exp_score > thresh * sum_exp` instead of
     // the equivalent `exp_score / sum_exp > thresh` to avoid a divide in the
-    // hot path — `sum_exp` is loop-invariant per r. Issue #534 follow-up:
+    // hot path — `sum_exp` is loop-invariant per r. follow-up:
     // make that comparison in score-space first so fully-dead tokens also
     // avoid the exp calls.
     bool threshold_enabled = thresh > 0.0f && isfinite(thresh);
@@ -740,7 +739,7 @@ mlx::core::array turbo4_delegated_bulk_dequant_rotated(
 }
 
 // =============================================================================
-// Issue #531 — Steel-attention-envelope fused SDPA launcher.
+// Steel-attention-envelope fused SDPA launcher.
 // =============================================================================
 //
 // Wraps the JIT-compiled `mlxcel_turbo4_delegated_steel_sdpa` kernel. The

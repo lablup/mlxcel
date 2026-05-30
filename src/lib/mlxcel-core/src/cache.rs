@@ -25,13 +25,13 @@
 //! method always returns FP16 tensors (dequantized on read), so the attention
 //! computation is unaffected.
 //!
-//! `KVCacheMode::Turbo4Asym` (issue #474, epic #458) keeps the K side as FP16
+//! `KVCacheMode::Turbo4Asym` keeps the K side as FP16
 //! and compresses the V side to 4-bit PolarQuant indices plus per-token norms,
 //! reducing total KV memory by ~26% at long context. The compressed V buffers
 //! live in dedicated sidecar fields (`v_packed`, `v_norms`) and the
 //! quantize/dequantize helpers in [`turbo::quant`] handle the math.
 //!
-//! `KVCacheMode::Turbo3Asym` (issue #477, epic #458) is the 3-bit sibling of
+//! `KVCacheMode::Turbo3Asym` is the 3-bit sibling of
 //! `Turbo4Asym` — same Fp16-K + asymmetric layout, but the V side uses the
 //! 8-centroid (3-bit) Lloyd-Max codebook and the 24-bit-grouped packing
 //! layout from [`turbo::pack3`]. Compression climbs to ~5.1× total KV
@@ -39,7 +39,7 @@
 //! V-reconstruction error. Symmetric Turbo3 is an explicit non-goal of
 //! this PR — see [`turbo::quant3`] for rationale.
 //!
-//! `KVCacheMode::Turbo4` (issue #476, epic #458) extends Turbo4Asym to a
+//! `KVCacheMode::Turbo4` extends Turbo4Asym to a
 //! **symmetric** 4-bit K + 4-bit V layout, reducing KV memory by ~73% at
 //! long context. The K side mirrors the V side bit-for-bit but uses an
 //! independent pair of sign vectors (see [`turbo::quant::K_SEED_OFFSET`]).
@@ -47,12 +47,12 @@
 //! [`turbo::allowlist`] module for the per-model allowlist that gates
 //! end-user opt-in.
 //!
-//! `KVCacheMode::Turbo4Delegated` (issue #479, epic #458) extends the
+//! `KVCacheMode::Turbo4Delegated` extends the
 //! asymmetric mode with a V-only hot/cold split that recovers 97–100% of FP16
 //! decode speed at long context. The K side is a single unified FP16 buffer
 //! that grows in lockstep with `offset` (identical shape contract to
 //! `KVCacheMode::Fp16`); only V is split into a packed cold body plus an FP16
-//! hot ring (issue #527). During prefill tokens accumulate in the standard
+//! hot ring. During prefill tokens accumulate in the standard
 //! FP16 `keys`/`values` buffers (zero overhead). On the first decode step the
 //! V hot body is "folded" into cold storage by quantizing it into packed
 //! Turbo4 in `v_packed`/`v_norms`. The K side does *not* move — it stays in
@@ -64,7 +64,7 @@
 //! `cold_offset += block`). SDPA always reads FP16: reads return
 //! `slice(keys, 0, offset)` for K and `concat(dequant(v_packed), hot_V)` for
 //! V. The K side has no per-step concat — that was the dominant residual
-//! cost vs FP16 mode (~7 ms/step at 4 K context, issue #527). See
+//! cost vs FP16 mode (~7 ms/step at 4 K context). See
 //! `references/turboquant_plus/README.md` §"MLX Framework Port" for the
 //! original architecture.
 //!
@@ -143,7 +143,7 @@ pub enum KVCacheMode {
     Int8,
     /// Asymmetric Fp16-K + Turbo4-V. K side stays in FP16; V side uses 4-bit
     /// PolarQuant with Walsh–Hadamard rotation for ~26% net KV memory savings
-    /// at long context. See issue #474 / epic #458.
+    /// at long context..
     Turbo4Asym,
     /// Asymmetric Fp16-K + Turbo3-V. K side stays in FP16; V side uses 3-bit
     /// PolarQuant with Walsh–Hadamard rotation for ~5.1× total KV memory
@@ -151,22 +151,19 @@ pub enum KVCacheMode {
     /// V-reconstruction error. The 3-bit packing is awkward (8 coords share
     /// 3 bytes / 24 bits — see [`turbo::pack3`]), so the dequant path runs
     /// a host round-trip rather than the 4-bit path's pure on-device unpack.
-    /// Symmetric Turbo3 is **not** offered in this mode (epic #458's
-    /// "Quality–compression tradeoff control" explicitly defers it). See
-    /// issue #477 / epic #458.
+    /// Symmetric Turbo3 is **not** offered in this mode ('s "Quality–compression tradeoff control" explicitly defers it). See
     Turbo3Asym,
     /// Symmetric Turbo4-K + Turbo4-V. Both K and V use 4-bit PolarQuant with
     /// independent Walsh–Hadamard rotations for ~73% net KV memory savings
     /// at long context. **Dangerous on dense Q4_K_M weights** — gated by
-    /// the per-model allowlist in [`turbo::allowlist`]. See issue #476 /
-    /// epic #458.
+    /// the per-model allowlist in [`turbo::allowlist`]. See
     Turbo4,
     /// Delegated hot/cold split on top of `Turbo4Asym`. Prefill stores raw
     /// FP16; on the first decode step the prefilled body is folded into cold
     /// storage (FP16 cold K + Turbo4 packed cold V); subsequent decode tokens
     /// flow through a small FP16 hot tail with zero-alloc slice-update. SDPA
     /// always reads FP16. Targets ≥97%-of-FP16 decode speed at 4K and ≥95%
-    /// at 16K on M5 Max. See issue #479 / epic #458.
+    /// at 16K on M5 Max..
     /// `MLXCEL_TURBO4_DELEGATED_FP16_FAST_PATH=1` keeps an FP16 V working set
     /// for native-SDPA decode while still maintaining packed sidecars.
     Turbo4Delegated,
@@ -183,7 +180,7 @@ impl std::str::FromStr for KVCacheMode {
             // ("fp16+turbo4") makes the asymmetric K/V split explicit, while
             // "turbo4-asym" is a shorter alias for scripts and tests.
             "turbo4-asym" | "fp16+turbo4" => Ok(Self::Turbo4Asym),
-            // Turbo3Asym (3-bit V, asymmetric only — issue #477). Same alias
+            // Turbo3Asym (3-bit V, asymmetric only —). Same alias
             // pattern as Turbo4Asym: "fp16+turbo3" is the canonical string,
             // "turbo3-asym" / "turbo3" are shorter forms used in scripts and
             // tests. There is intentionally no symmetric "turbo3" alias —
@@ -195,7 +192,7 @@ impl std::str::FromStr for KVCacheMode {
             // tests/scripts when readers benefit from the K/V symmetry being
             // spelled out.
             "turbo4" | "turbo4-sym" => Ok(Self::Turbo4),
-            // Delegated hot/cold split (B7, issue #479). Same K=FP16 +
+            // Delegated hot/cold split (B7). Same K=FP16 +
             // V=Turbo4 contract as Turbo4Asym but uses the delegated KVCache
             // architecture for decode speed at long context.
             "turbo4-delegated" | "fp16+turbo4-delegated" => Ok(Self::Turbo4Delegated),
@@ -295,7 +292,7 @@ pub(crate) const TURBO_DEFAULT_SEED: u32 = 0x7B4_70404; // "TUR" 0x474 + B2 issu
 /// and shared codebook used by the quantize/dequantize helpers in
 /// [`turbo::quant`]. The standard `values` field stays `None` in this mode.
 ///
-/// When `mode` is `KVCacheMode::Turbo4` (symmetric, issue #476), the K
+/// When `mode` is `KVCacheMode::Turbo4` (symmetric), the K
 /// buffers are *also* replaced by `k_packed` + `k_norms` sidecars; the
 /// `keys` field stays `None`. The same `turbo_params` instance carries an
 /// independent K-side sign-vector pair so the K and V quantization noise
@@ -305,8 +302,7 @@ pub(crate) const TURBO_DEFAULT_SEED: u32 = 0x7B4_70404; // "TUR" 0x474 + B2 issu
 /// `update`, `update_and_fetch`, `trim`, `nbytes`, and
 /// `bytes_per_reserved_token` methods dispatch over `mode` and support
 /// `KVCacheMode::Fp16`, `KVCacheMode::Int8`, `KVCacheMode::Turbo4Asym`
-/// (epic #458, issue #474), and `KVCacheMode::Turbo4` (epic #458,
-/// issue #476) without per-model branching.
+/// and `KVCacheMode::Turbo4` without per-model branching.
 pub struct KVCache {
     pub keys: Option<UniquePtr<MlxArray>>,
     pub values: Option<UniquePtr<MlxArray>>,
@@ -314,7 +310,7 @@ pub struct KVCache {
     /// position for new K/Q tokens and as the upper bound of the live window.
     /// Once a token has been written at position `p`, this value never
     /// decreases through any operation that preserves on-device K — in
-    /// particular `trim_front` (issue #603) increments [`Self::live_start`]
+    /// particular `trim_front` increments [`Self::live_start`]
     /// instead of decrementing `offset`, so the relative position
     /// `offset - i` between a cached K at monotonic slot `i` and a freshly
     /// rotated Q stays invariant after the live window is bounded.
@@ -329,7 +325,7 @@ pub struct KVCache {
     /// (see [`Self::trim_front`]).
     ///
     /// Together with `offset`, this preserves the RoPE invariant under
-    /// the `--max-kv-size` cap (issue #603): K stored at buffer slot `i` was
+    /// the `--max-kv-size` cap: K stored at buffer slot `i` was
     /// rotated at monotonic position `live_start + i` *at write time*, Q is
     /// rotated at the current monotonic `offset`, and attention sees the
     /// correct relative position `offset - (live_start + i)`.
@@ -344,13 +340,13 @@ pub struct KVCache {
     pub(crate) v_packed: Option<UniquePtr<MlxArray>>,
     // Turbo4Asym/Turbo4-mode V-side per-token norms: [B, H, L, 1] fp16
     pub(crate) v_norms: Option<UniquePtr<MlxArray>>,
-    // Turbo4-V precomputed kernel rescale `norm[t] / |y_hat[t]|` (issue #520).
+    // Turbo4-V precomputed kernel rescale `norm[t] / |y_hat[t]|`.
     // Same `[B, H, L, 1]` fp16 shape as `v_norms` and slice/concat/trimmed
     // lockstep with it. Populated only on Turbo4Asym / Turbo4 / Turbo4Delegated
     // updates — Turbo3Asym leaves this `None` because the 3-bit V kernel does
     // not exist. Consumed by `attention_sparse_v_turbo4_fused` to skip the
     // per-cache-token threadgroup tree reduction that previously dominated
-    // decode latency at 4 K context (PR #519 A/B; issue #520).
+    // decode latency at 4 K context (A/B).
     pub(crate) v_rescale: Option<UniquePtr<MlxArray>>,
     // Turbo4-mode (symmetric) K-side packed indices: [B, H, L, head_dim/2] u8
     pub(crate) k_packed: Option<UniquePtr<MlxArray>>,
@@ -365,7 +361,7 @@ pub struct KVCache {
     /// symmetric `Turbo4` mode the same params carry both V and K sign
     /// vectors (`signs1`/`signs2` for V, `k_signs1`/`k_signs2` for K).
     pub(crate) turbo_params: Option<turbo::TurboQuantParams>,
-    /// Cached PolarQuant params for `Turbo3Asym` (issue #477). The 3-bit
+    /// Cached PolarQuant params for `Turbo3Asym`. The 3-bit
     /// codebook (8 centroids) is incompatible with the 4-bit `turbo_params`
     /// codebook so a separate field is required. Lazily initialised on the
     /// first `Turbo3Asym` update once the V `head_dim` is known. Stays
@@ -377,7 +373,7 @@ pub struct KVCache {
     /// Number of tokens currently folded into cold V storage (Turbo4Delegated
     /// only).
     ///
-    /// **Issue #527** — K side is no longer split into hot/cold. The unified
+    /// **** — K side is no longer split into hot/cold. The unified
     /// `keys` buffer holds all `offset` tokens at FP16 (same contract as
     /// `KVCacheMode::Fp16`). Only V has a hot/cold split: the cold body lives
     /// in the packed `v_packed`/`v_norms`/`v_rescale` sidecars (length
@@ -433,8 +429,8 @@ impl KVCache {
     ///
     /// Use `KVCacheMode::Int8` to store accumulated keys/values in INT8 format.
     /// Use `KVCacheMode::Turbo4Asym` for asymmetric Fp16-K + Turbo4-V
-    /// compression (issue #474). Use `KVCacheMode::Turbo4` for symmetric
-    /// Turbo4-K + Turbo4-V compression (issue #476) — note that this mode
+    /// compression. Use `KVCacheMode::Turbo4` for symmetric
+    /// Turbo4-K + Turbo4-V compression — note that this mode
     /// is dangerous on dense Q4_K_M weights and must be gated by the
     /// per-model allowlist in [`turbo::allowlist`] before being exposed
     /// to end users. The `update_and_fetch` method will transparently
@@ -603,7 +599,7 @@ impl KVCache {
     /// drops the oldest `n` tokens, this returns `offset - live_start`
     /// rather than the monotonic `offset` so callers that build masks /
     /// allocate per-token sidecars (e.g., paged accounting, server gauges,
-    /// detach handles) see the post-trim length. Pre-#603 callers that never
+    /// detach handles) see the post-trim length. Pre- callers that never
     /// trim observe identical behaviour because `live_start == 0`.
     pub fn seq_len(&self) -> i32 {
         self.offset - self.live_start
@@ -623,7 +619,7 @@ impl KVCache {
     /// Slot `i` in the on-device buffer maps to monotonic position
     /// `live_start + i`; the next write lands at monotonic position
     /// `self.offset`, i.e. buffer slot `self.offset - self.live_start`.
-    /// Pre-#603 callers (those that never trim) see this equal to
+    /// Pre- callers (those that never trim) see this equal to
     /// `self.offset` because `live_start == 0`.
     #[inline]
     fn buffer_idx(&self) -> i32 {
@@ -655,8 +651,7 @@ impl KVCache {
     /// storage; scale factors are accumulated in a parallel `[B, H, L, 1]`
     /// buffer. In `KVCacheMode::Turbo4Asym` the K side stays FP16 while the V
     /// side is quantized to packed 4-bit indices plus per-token norms via
-    /// [`turbo::quant::quantize_v_turbo4`]. In `KVCacheMode::Turbo4` (issue
-    /// #476) **both** K and V are quantized via the symmetric Turbo4 path
+    /// [`turbo::quant::quantize_v_turbo4`]. In `KVCacheMode::Turbo4` **both** K and V are quantized via the symmetric Turbo4 path
     /// using independent sign-vector pairs. In `KVCacheMode::Fp16` this
     /// behaves identically to the original implementation.
     pub fn update(&mut self, new_keys: UniquePtr<MlxArray>, new_values: UniquePtr<MlxArray>) {
@@ -764,7 +759,7 @@ impl KVCache {
         let key_shape = ffi::array_shape(&k_int8);
         let new_seq_len = key_shape[2];
         // Use buffer-slot coordinates so `--max-kv-size` trim_front stays
-        // RoPE-correct (#603): `prev` is the slot where the next token is
+        // RoPE-correct: `prev` is the slot where the next token is
         // written, not the monotonic position.
         let prev = self.buffer_idx();
 
@@ -882,7 +877,6 @@ impl KVCache {
     /// [`turbo::quant::dequantize_v_turbo4`].
     ///
     /// Used by: `KVCache::update` dispatch when `mode == KVCacheMode::Turbo4Asym`
-    /// (epic #458, issue #474).
     fn update_turbo4_asym(
         &mut self,
         new_keys: UniquePtr<MlxArray>,
@@ -1026,7 +1020,6 @@ impl KVCache {
     /// 4-bit `turbo_params` is not perturbed.
     ///
     /// Used by: `KVCache::update` dispatch when `mode == KVCacheMode::Turbo3Asym`
-    /// (epic #458, issue #477).
     fn update_turbo3_asym(
         &mut self,
         new_keys: UniquePtr<MlxArray>,
@@ -1150,7 +1143,6 @@ impl KVCache {
     /// [`turbo::allowlist`] for the rationale.
     ///
     /// Used by: `KVCache::update` dispatch when `mode == KVCacheMode::Turbo4`
-    /// (epic #458, issue #476).
     fn update_turbo4_sym(
         &mut self,
         new_keys: UniquePtr<MlxArray>,
@@ -1309,7 +1301,6 @@ impl KVCache {
     }
 
     /// Turbo4Delegated update path — V-only hot/cold split with unified K
-    /// (issue #527).
     ///
     /// **Phase 1: prefill / single-token append into hot tail.** Tokens land
     /// directly in the FP16 `keys`/`values` buffers, identical to the
@@ -1334,7 +1325,7 @@ impl KVCache {
     /// — no K data movement). If the hot V ring ever exceeds
     /// [`turbo::DELEGATED_HOT_MAX`], an extra fold runs synchronously.
     ///
-    /// Layout of stored buffers in delegated mode (issue #527):
+    /// Layout of stored buffers in delegated mode:
     /// - `keys`: unified FP16 K buffer, `[B, H, k_capacity, K_dim]`. Visible
     ///   length is `offset` — same shape contract as `KVCacheMode::Fp16`.
     ///   No cold/hot split for K.
@@ -1347,7 +1338,7 @@ impl KVCache {
     /// - `v_norms`: cold V per-token norms, `[B, H, cold_capacity, 1]` fp16.
     ///
     /// Used by: `KVCache::update` dispatch when `mode == KVCacheMode::Turbo4Delegated`
-    /// (epic #458, issue #479; K unification: issue #527).
+    /// (K unification:).
     fn update_turbo4_delegated(
         &mut self,
         new_keys: UniquePtr<MlxArray>,
@@ -1378,7 +1369,7 @@ impl KVCache {
             self.fold_hot_to_cold_full();
             // After fold_hot_to_cold_full(), `values` is reset to a fresh hot
             // V ring of capacity = ceil_step(hot_threshold); `keys` is
-            // untouched (unified-K invariant, issue #527).
+            // untouched (unified-K invariant).
         }
 
         // K side: ensure the unified `keys` buffer can hold `offset + new_seq_len`.
@@ -1390,7 +1381,7 @@ impl KVCache {
         }
 
         // V side: ensure the hot V ring can hold `prev_hot + new_seq_len`.
-        // Hot ring is anchored at `hot_threshold` (issue #479) so the first
+        // Hot ring is anchored at `hot_threshold` so the first
         // decode-time allocation absorbs roughly one fold-period of tokens.
         let prev_hot = self.offset - self.cold_offset;
         let needed_v = prev_hot + new_seq_len;
@@ -1495,7 +1486,7 @@ impl KVCache {
     }
 
     /// Capacity (sequence dimension) of the unified `keys` buffer in
-    /// Turbo4Delegated mode (issue #527). Returns 0 when `keys` is None.
+    /// Turbo4Delegated mode. Returns 0 when `keys` is None.
     fn k_buffer_seq_len(&self) -> i32 {
         match self.keys.as_ref() {
             Some(k) => {
@@ -1511,7 +1502,7 @@ impl KVCache {
     }
 
     /// Capacity (sequence dimension) of the V hot ring `values` buffer in
-    /// Turbo4Delegated mode (issue #527). Returns 0 when `values` is None.
+    /// Turbo4Delegated mode. Returns 0 when `values` is None.
     fn v_hot_buffer_seq_len(&self) -> i32 {
         match self.values.as_ref() {
             Some(v) => {
@@ -1527,7 +1518,6 @@ impl KVCache {
     }
 
     /// Allocate (or grow) the unified FP16 K buffer for Turbo4Delegated mode
-    /// (issue #527).
     ///
     /// Capacity is rounded up to a multiple of `step`, identical to
     /// `update_fp16`'s growth policy. Existing visible `offset` K tokens are
@@ -1641,14 +1631,13 @@ impl KVCache {
         }
     }
 
-    /// Fold the entire FP16 V hot body into cold V storage (issue #527).
+    /// Fold the entire FP16 V hot body into cold V storage.
     ///
     /// Used for the prefill→decode transition: the V hot body is quantized
     /// into the packed `v_packed`/`v_norms`/`v_rescale` sidecars and the V
     /// hot ring is then re-allocated empty so subsequent decode tokens see a
     /// fresh ring. The K side does *not* move — the unified `keys` buffer
-    /// stays untouched (issue #527 unifies K storage and removes the cold/hot
-    /// split for K). `cold_offset` advances by `prev_hot`; the K data at
+    /// stays untouched (unifies K storage and removes the cold/hot split for K). `cold_offset` advances by `prev_hot`; the K data at
     /// positions `[0..cold_offset]` is logically the "cold K" but lives in
     /// the same buffer as the hot K tokens.
     ///
@@ -1686,7 +1675,7 @@ impl KVCache {
         // Reset the V hot ring to a freshly-allocated buffer sized for the
         // configured hot_threshold (rounded up to step). K is unified —
         // `keys` already holds all `offset` tokens at FP16 and is left
-        // untouched (issue #527).
+        // untouched.
         let b = hv_shape[0];
         let n_kv_heads = hv_shape[1];
         let v_head_dim = hv_shape[3];
@@ -1702,7 +1691,6 @@ impl KVCache {
 
     /// Fold the oldest `block` tokens of the V hot ring into cold V storage
     /// and shift the remaining hot V tokens left by `block` positions
-    /// (issue #527).
     ///
     /// The K side is unified — `keys[cold_offset..cold_offset+block]` already
     /// holds the K tokens that are logically being "folded". `cold_offset`
@@ -1762,7 +1750,7 @@ impl KVCache {
         // Append V into cold storage (which is non-empty here — the cold V
         // prefix was already populated by the prefill→decode full fold).
         // `cold_offset` advances by `block`; the K side is unified and needs
-        // no data movement (issue #527).
+        // no data movement.
         self.append_cold_block(&v_packed_new, &v_norms_new, &v_rescale_new, block);
 
         // Shift the remaining V hot tail [block..prev_hot] left into
@@ -1778,7 +1766,7 @@ impl KVCache {
         }
         // self.offset is unchanged: cold_offset += block, hot_len -= block.
         // The total length stays the same. K side is unaffected — `keys`
-        // already holds all `offset` tokens at FP16 (issue #527).
+        // already holds all `offset` tokens at FP16.
     }
 
     /// Fold an absolute `[start, start + block)` window from the unified FP16
@@ -1827,13 +1815,13 @@ impl KVCache {
 
     /// Append a `block`-token chunk to the cold V storage buffers, growing
     /// them (in `step`-sized increments) when the existing capacity does not
-    /// fit (issue #527: V-only — K is unified, no cold-K buffer to update).
+    /// fit (V-only — K is unified, no cold-K buffer to update).
     ///
     /// Inputs are the freshly-prepared cold V tensors:
     /// - `v_packed_block`:  `[B, H, block, V_dim/2]` u8   — appended to `v_packed`.
     /// - `v_norms_block`:   `[B, H, block, 1]`      fp16  — appended to `v_norms`.
     /// - `v_rescale_block`: `[B, H, block, 1]`      fp16  — appended to `v_rescale`
-    ///   (issue #520; precomputed Sparse-V kernel rescale, lockstep with `v_norms`).
+    ///   (precomputed Sparse-V kernel rescale, lockstep with `v_norms`).
     ///
     /// Updates `cold_offset` by `block`. Used by both the full prefill→decode
     /// fold and the steady-state per-block fold.
@@ -1944,7 +1932,7 @@ impl KVCache {
         ));
 
         self.cold_offset += block;
-        // Issue #528 retired the `cold_v_dequant_cache` memo: the fused
+        // retired the `cold_v_dequant_cache` memo: the fused
         // kernel reads packed cold V directly, so the cold body changing has
         // no host-side cached state to invalidate.
     }
@@ -2004,7 +1992,7 @@ impl KVCache {
         // After `self.offset -= n`, the live window length is
         // `self.offset - self.live_start`. Use that for the buffer-slot
         // slice upper bound so trim stays consistent under a non-zero
-        // `live_start` (issue #603 + speculative-decode rewind composing).
+        // `live_start` (+ speculative-decode rewind composing).
         // `live_start` stays at `0` for Turbo modes because `trim_front`
         // refuses to advance it for them, so the Turbo branches below that
         // still use `self.offset` continue to be correct.
@@ -2022,13 +2010,13 @@ impl KVCache {
             self.cold_offset = 0;
             // Clear turbo_params so the next quantize call rebuilds it from
             // scratch (required if the caller reuses this cache slot with a
-            // different head_dim). LOW-1 fix (#474). The 3-bit
-            // `turbo3_params` (issue #477) follows the same contract.
+            // different head_dim). LOW-1 fix. The 3-bit
+            // `turbo3_params` follows the same contract.
             self.turbo_params = None;
             self.turbo3_params = None;
-            // Issue #528 retired the cold-V dequant memo — nothing to drop.
+            // retired the cold-V dequant memo — nothing to drop.
         } else if self.mode == KVCacheMode::Turbo4Delegated {
-            // Issue #527: K is unified — slice `keys` to `self.offset` like
+            // K is unified — slice `keys` to `self.offset` like
             // `Fp16` mode. V hot ring trims to the new hot length first; cold
             // V sidecars trim only when the requested depth exceeded the hot
             // V tail (`cold_trim > 0`).
@@ -2085,7 +2073,7 @@ impl KVCache {
                         &[vr_shape[0], vr_shape[1], self.cold_offset, 1],
                     ));
                 }
-                // Issue #528 retired the cold-V dequant memo — nothing to
+                // retired the cold-V dequant memo — nothing to
                 // drop when the cold V body shrinks.
             }
             // Suppress unused-variable warnings in non-delegated branches.
@@ -2095,7 +2083,7 @@ impl KVCache {
             // The slice upper bound is the post-trim *live* window length
             // (`live_len_after`), not the monotonic `self.offset`. For
             // Turbo modes `live_start == 0` so `live_len_after == self.offset`
-            // and behaviour is bit-identical to the pre-#603 implementation.
+            // and behaviour is bit-identical to the earlier implementation.
             // Trim keys (always present except in Turbo4Asym pre-init).
             if let Some(ref k) = self.keys {
                 let k_shape = ffi::array_shape(k);
@@ -2136,7 +2124,7 @@ impl KVCache {
             // Trim Turbo4* V sidecars (per-token; speculative-decode rewinds
             // <1 block at a time so we never need to re-quantize a partial
             // block — the trimmed tail is already block-aligned in the buffer).
-            // `Turbo4Asym`, `Turbo4`, and `Turbo3Asym` (issue #477) all carry
+            // `Turbo4Asym`, `Turbo4`, and `Turbo3Asym` all carry
             // the V sidecars; only `Turbo4` (symmetric) additionally carries
             // the K-side sidecars.
             if matches!(
@@ -2159,7 +2147,7 @@ impl KVCache {
                         &[vn_shape[0], vn_shape[1], self.offset, 1],
                     ));
                 }
-                // v_rescale (issue #520): tracks v_norms lockstep. Turbo3Asym
+                // v_rescale: tracks v_norms lockstep. Turbo3Asym
                 // never populates v_rescale (3-bit V kernel does not exist),
                 // so the `if let Some(...)` guard handles that case.
                 if let Some(ref vr) = self.v_rescale {
@@ -2198,7 +2186,7 @@ impl KVCache {
     ///
     /// This is the dual of [`KVCache::trim`] (which removes the *newest* `n`
     /// entries for speculative-decode rewinds). `trim_front` is used by the
-    /// batch scheduler's `--max-kv-size` bound (issue #603) to cap the
+    /// batch scheduler's `--max-kv-size` bound to cap the
     /// memory footprint of a plain `KVCache` by evicting the oldest tokens
     /// once the live size exceeds the configured cap. Sliding-window models
     /// that already use [`RotatingKVCache`] manage their own circular
@@ -2247,8 +2235,7 @@ impl KVCache {
     /// slice `[0..self.offset]` continue to be correct.
     ///
     /// Used by: [`crate::cache::CachePool`] consumers that need to enforce
-    /// a max KV size on otherwise-unbounded `KVCache` instances (server
-    /// batch scheduler, issue #603).
+    /// a max KV size on otherwise-unbounded `KVCache` instances (server batch scheduler).
     pub fn trim_front(&mut self, n: i32) -> i32 {
         // Clamp against the live window length, not the monotonic offset:
         // the live window is what attention sees, and that is what we are
@@ -2339,7 +2326,7 @@ impl KVCache {
     /// reconstructed from the packed 4-bit indices + per-token norms.
     /// In `KVCacheMode::Turbo4` (symmetric) **both** K and V are reconstructed
     /// from packed 4-bit indices using independent sign-vector pairs.
-    /// In `KVCacheMode::Turbo4Delegated` (issue #527: K unified) returns
+    /// In `KVCacheMode::Turbo4Delegated` (K unified) returns
     /// `slice(keys, 0, offset)` for K (no concat — same shape contract as
     /// `Fp16` mode) and
     /// `[dequant(v_packed[:cold_offset]); hot_values[:hot_offset]]` for V.
@@ -2464,13 +2451,12 @@ impl KVCache {
         }
     }
 
-    /// Read path for `KVCacheMode::Turbo4Delegated` (issue #527: K unified;
-    /// issue #528: cold-V dequant memo retired).
+    /// Read path for `KVCacheMode::Turbo4Delegated` (K unified; cold-V dequant memo retired).
     ///
-    /// K is a single unified FP16 buffer (issue #527) — returns
+    /// K is a single unified FP16 buffer — returns
     /// `slice(keys, 0, offset)`, identical to `KVCacheMode::Fp16`. No
     /// per-step concat on the K side; that was the dominant residual cost
-    /// vs FP16 mode (~7 ms/step at 4 K context, issue #527).
+    /// vs FP16 mode (~7 ms/step at 4 K context).
     ///
     /// V still uses a packed cold body + FP16 hot ring: returns
     /// `concat(dequant(v_packed[:cold_offset]), hot_V)`. When
@@ -2479,10 +2465,10 @@ impl KVCache {
     /// `hot_offset() == 0` (just after a full fold with no decode token yet)
     /// this returns just the dequantized cold V body.
     ///
-    /// **Per-step cost (issue #528).** This fallback rebuilds the full
+    /// **Per-step cost.** This fallback rebuilds the full
     /// `dequantize_v_turbo4(v_packed[:cold_offset], v_norms[:cold_offset])`
-    /// graph on every call — the PR-#525 `cold_v_dequant_cache` memo was
-    /// retired by issue #528 because the fused kernel path
+    /// graph on every call — the earlier `cold_v_dequant_cache` memo was
+    /// retired because the fused kernel path
     /// ([`Self::update_and_turbo4_delegated_attention`]) reads packed cold V
     /// directly without ever materialising the FP16 cold V tensor. This
     /// fallback is now only reached on the prefill-shaped path (multi-token
@@ -2494,7 +2480,7 @@ impl KVCache {
     /// In that mode this read path returns `slice(values, 0, offset)` and never
     /// materializes cold V from packed sidecars.
     fn fetch_turbo4_delegated(&mut self) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
-        // K side (issue #527): unified buffer — same path as FP16 mode.
+        // K side: unified buffer — same path as FP16 mode.
         let k = self.keys.as_ref().expect("unified keys must exist");
         let ks = ffi::array_shape(k);
         let k_slice = ffi::slice(k, &[0, 0, 0, 0], &[ks[0], ks[1], self.offset, ks[3]]);
@@ -2533,8 +2519,7 @@ impl KVCache {
             );
         }
 
-        // Cold V dequant: rebuild from packed every call (issue #528 retired
-        // the memo). On the fused-attention decode path the kernel reads
+        // Cold V dequant: rebuild from packed every call (retired the memo). On the fused-attention decode path the kernel reads
         // `v_packed` directly — this fallback only runs for prefill-shaped
         // calls and unported call sites.
         let vp = self.v_packed.as_ref().expect("v_packed must exist");
@@ -2572,14 +2557,11 @@ impl KVCache {
     /// V-norm sidecars; the original FP16 values tensor is not stored.
     /// In Turbo4 (symmetric) mode this counts only the K- and V-side packed
     /// sidecars; both the FP16 keys and FP16 values tensors are absent.
-    /// In Turbo4Delegated mode (issue #527: K unified; issue #528: cold-V
-    /// dequant memo retired) this counts the unified FP16 K buffer (under
+    /// In Turbo4Delegated mode (K unified; cold-V dequant memo retired) this counts the unified FP16 K buffer (under
     /// `keys`, identical footprint to `Fp16` mode), the FP16 V hot ring
     /// (under `values`), and the packed cold V sidecars
     /// (`v_packed`/`v_norms`/`v_rescale`). There is no separate cold-K
-    /// buffer (issue #527 removed it) and no FP16 cold-V working set (issue
-    /// #528 replaced the PR-#525 memo with a fused kernel that reads packed
-    /// cold V directly). When `MLXCEL_TURBO4_DELEGATED_FP16_FAST_PATH=1`,
+    /// buffer (removed it) and no FP16 cold-V working set (replaced the earlier memo with a fused kernel that reads packed cold V directly). When `MLXCEL_TURBO4_DELEGATED_FP16_FAST_PATH=1`,
     /// `values` is instead a unified FP16 V working set and `nbytes()` counts
     /// both that buffer and the packed sidecars by design.
     /// In Turbo3Asym mode this counts the FP16 keys plus the 3-bit packed-V
@@ -2597,7 +2579,7 @@ impl KVCache {
         let vr_bytes = self.v_rescale.as_ref().map_or(0, |v| ffi::array_nbytes(v));
         let kp_bytes = self.k_packed.as_ref().map_or(0, |v| ffi::array_nbytes(v));
         let kn_bytes = self.k_norms.as_ref().map_or(0, |v| ffi::array_nbytes(v));
-        // Issue #528 retired the PR-#525 `cold_v_dequant_cache` memo: the
+        // retired the earlier `cold_v_dequant_cache` memo: the
         // fused kernel reads packed cold V directly so there is no longer a
         // FP16 cold-V working set to count here.
         k_bytes
@@ -2698,7 +2680,7 @@ impl KVCache {
     }
 
     /// Borrow the per-token V Sparse-V kernel rescale paired with
-    /// [`Self::v_packed`] (issue #520).
+    /// [`Self::v_packed`].
     ///
     /// Stores `norm[t] / max(|y_hat[t]|, 1e-10)` in fp16 — the exact value the
     /// fused kernel previously derived per-token via a threadgroup tree
@@ -2745,7 +2727,7 @@ impl KVCache {
     /// Used by: future model attention call sites that have been ported
     /// to the split-SDPA path. Standard call sites continue to use
     /// `cache.update_and_fetch(...)` followed by `attention(...)`.
-    /// Combined update + sparse-V attention dispatch (issue #505).
+    /// Combined update + sparse-V attention dispatch.
     ///
     /// The standard `update_and_fetch + attention()` pair pays the full V
     /// dequant cost inside `update_and_fetch` even when sparse-V is enabled.
@@ -2822,7 +2804,7 @@ impl KVCache {
         // For Turbo4Asym the packed shapes are:
         //   v_packed:  [B, H, capacity, D/2] u8
         //   v_norms:   [B, H, capacity, 1]   f16
-        //   v_rescale: [B, H, capacity, 1]   f16  (issue #520)
+        //   v_rescale: [B, H, capacity, 1]   f16
         // We slice axis 2 (the token axis) to [0, self.offset).
         let vp_shape = ffi::array_shape(v_packed_buf);
         let vn_shape = ffi::array_shape(v_norms_buf);
@@ -2843,7 +2825,7 @@ impl KVCache {
             &[vr_shape[0], vr_shape[1], self.offset, 1],
         );
 
-        // Prefer the fused Metal kernel path (issue #505 + #520) when
+        // Prefer the fused Metal kernel path (+) when
         // available. Falls through to the graph-level reference path on
         // non-macOS, when the kernel is disabled via
         // `MLXCEL_SPARSE_V_KERNEL=0`, or when the model uses a non-power-of-2
@@ -2852,7 +2834,7 @@ impl KVCache {
         // The fused kernel reads the precomputed `v_rescale` (norm/|y_hat|)
         // directly, eliminating the per-token threadgroup tree reduction
         // that previously dominated decode latency on M5 Max at 4 K context
-        // (issue #520). The graph fallback continues to use `v_norms` only.
+        // The graph fallback continues to use `v_norms` only.
         if let Some(out) = turbo::sparse_v::attention_sparse_v_turbo4_fused(
             q,
             k,
@@ -2949,7 +2931,7 @@ impl KVCache {
     }
 
     /// Returns `true` iff this cache is in `KVCacheMode::Turbo4Delegated` mode
-    /// and the fused dequant + SDPA decode path (issue #528) is reachable.
+    /// and the fused dequant + SDPA decode path is reachable.
     ///
     /// The fused kernel is Apple-Silicon-only (the runtime JIT requires Metal)
     /// and supports the Turbo4Delegated mode regardless of whether
@@ -2966,7 +2948,7 @@ impl KVCache {
         self.mode == KVCacheMode::Turbo4Delegated
     }
 
-    /// Combined update + Turbo4Delegated attention dispatch (issue #528).
+    /// Combined update + Turbo4Delegated attention dispatch.
     ///
     /// The standard `update_and_fetch + attention()` pair pays the full
     /// `dequantize_v_turbo4(v_packed[:cold_offset])` graph cost on every
@@ -3060,7 +3042,7 @@ impl KVCache {
         }
 
         // Slice the unified K buffer down to the visible token range
-        // [0, offset). Same shape contract as `KVCacheMode::Fp16` (issue #527).
+        // [0, offset). Same shape contract as `KVCacheMode::Fp16`.
         let k_buf = self
             .keys
             .as_ref()
@@ -3150,11 +3132,11 @@ impl KVCache {
             }
         }
 
-        // Issue #531 — Prefer the steel-attention-envelope kernel when
+        // Prefer the steel-attention-envelope kernel when
         // available. It collapses softmax + cold-V dequant + hot-V accum into
         // a single Metal dispatch, eliminating the per-step FFI / dispatch
         // overhead of the host composition path. The cold-only kernel from
-        // #528 remains as a fallback for the same correctness contract.
+        // remains as a fallback for the same correctness contract.
         if let Some(out) = turbo::sparse_v::attention_turbo4_delegated_steel(
             q,
             &k_slice,
@@ -3173,7 +3155,7 @@ impl KVCache {
 
         // Steel envelope unavailable (non-macOS, non-power-of-2 head_dim, or
         // `MLXCEL_SPARSE_V_KERNEL=0`). Try the cold-only fused composition
-        // (issue #528) before falling all the way back to the graph SDPA.
+        // before falling all the way back to the graph SDPA.
         // The cold-only path keeps the V-budget guarantee and is still
         // measurably faster than the full graph fallback for some
         // configurations.
@@ -3202,7 +3184,7 @@ impl KVCache {
         self.delegated_graph_attention(q, scale, mask)
     }
 
-    /// Graph-only Turbo4Delegated attention reference (issue #528 fallback).
+    /// Graph-only Turbo4Delegated attention reference (fallback).
     ///
     /// Computes attention against the **already-updated** Turbo4Delegated cache
     /// using the legacy compositional path:
@@ -3276,7 +3258,7 @@ impl Default for KVCache {
 /// (`[B, H, max_size, 1]` FP16); the `values` field stays `None`. K stays
 /// FP16 in the regular `keys` buffer.
 ///
-/// ## Block alignment invariant (B9, issue #481, epic #458)
+/// ## Block alignment invariant (B9)
 ///
 /// TurboQuant V quantization is **per-token**: each token's `head_dim` vector
 /// is rotated and quantized independently along the last axis. There is no
@@ -3290,7 +3272,7 @@ impl Default for KVCache {
 /// However, we still require `max_size` to be a multiple of
 /// [`turbo::BLOCK_SIZE`] (32) when `mode == Turbo4Asym` for two reasons:
 ///
-/// 1. **Future-proofing**: B5 (3-bit packing, issue #477) introduces 24-bit
+/// 1. **Future-proofing**: B5 (3-bit packing) introduces 24-bit
 ///    groups that span byte boundaries. A non-32-aligned ring would force
 ///    partial-block re-quantization on every wraparound. Locking the
 ///    invariant here means B5 only has to revisit pack/unpack, not the cache.
@@ -3333,7 +3315,7 @@ pub struct RotatingKVCache {
     /// Turbo4Asym-mode V-side per-token norms: `[B, H, max_size, 1]` fp16.
     pub(crate) v_norms: Option<UniquePtr<MlxArray>>,
     /// Turbo4-V precomputed Sparse-V kernel rescale `norm[t] / |y_hat[t]|`
-    /// (issue #520). Same shape and lockstep lifecycle as `v_norms`. See the
+    /// Same shape and lockstep lifecycle as `v_norms`. See the
     /// dense `KVCache::v_rescale` docs for the rationale.
     pub(crate) v_rescale: Option<UniquePtr<MlxArray>>,
     /// Cached PolarQuant params (sign vectors + codebook) for Turbo4Asym.
@@ -3440,30 +3422,30 @@ impl RotatingKVCache {
             KVCacheMode::Fp16 => self.update_and_fetch_fp16(new_keys, new_values),
             KVCacheMode::Int8 => {
                 // INT8 support for RotatingKVCache is not part of B9 / issue
-                // #481. Fall back to FP16 storage so the path is correct, even
+                // Fall back to FP16 storage so the path is correct, even
                 // if mis-configured. A future sub-issue can wire INT8 in.
                 self.update_and_fetch_fp16(new_keys, new_values)
             }
             KVCacheMode::Turbo4Asym => self.update_and_fetch_turbo4_asym(new_keys, new_values),
             KVCacheMode::Turbo4 => {
-                // Symmetric Turbo4 (issue #476) is not wired into RotatingKVCache
-                // by B9 / issue #481 (RotatingKVCache currently supports only
+                // Symmetric Turbo4 is not wired into RotatingKVCache
+                // by B9 / (RotatingKVCache currently supports only
                 // Fp16/Int8/Turbo4Asym). Fall back to FP16 so a mis-configured
                 // sliding-window model does not panic; a future sub-issue can
                 // wire symmetric K/V quantization in.
                 self.update_and_fetch_fp16(new_keys, new_values)
             }
             KVCacheMode::Turbo4Delegated => {
-                // Delegated hot/cold (issue #479) is not wired into RotatingKVCache
-                // by B7 / issue #479 (the delegated path targets dense caches).
+                // Delegated hot/cold is not wired into RotatingKVCache
+                // by B7 / (the delegated path targets dense caches).
                 // Fall back to FP16 so a mis-configured sliding-window model does
                 // not panic.
                 self.update_and_fetch_fp16(new_keys, new_values)
             }
             KVCacheMode::Turbo3Asym => {
-                // Turbo3Asym (issue #477) is not wired into RotatingKVCache in
+                // Turbo3Asym is not wired into RotatingKVCache in
                 // this PR — wraparound + 3-bit re-pack alignment requires its
-                // own analysis (mirrors B9 / issue #481 for Turbo4Asym). Fall
+                // own analysis (mirrors B9 / for Turbo4Asym). Fall
                 // back to FP16 so sliding-window models with `--kv-cache-mode
                 // fp16+turbo3` do not panic; a follow-up sub-issue can wire
                 // Turbo3 into the rotating path once dense Turbo3 is validated.
@@ -4016,7 +3998,7 @@ impl RotatingKVCache {
     }
 
     // -----------------------------------------------------------------------
-    // Turbo4Asym update path (B9, issue #481, epic #458)
+    // Turbo4Asym update path (B9)
     //
     // Storage layout when `mode == KVCacheMode::Turbo4Asym`:
     //   - keys     : [B, H, max_size, K_dim]    FP16 — same as Fp16 path
@@ -4374,7 +4356,7 @@ impl RotatingKVCache {
     /// Internal write position in the ring buffer.
     ///
     /// Mirrors Python `mlx_lm.models.cache.RotatingKVCache._idx`. Used by the
-    /// Gemma 4 MTP `rollback_speculative_cache` hook (issue #625) to compute
+    /// Gemma 4 MTP `rollback_speculative_cache` hook to compute
     /// `kv_len` for per-row tail zeroing of partial-accept verify passes.
     /// Equal to `self.offset` while the cache has not yet wrapped, and
     /// otherwise tracks the next physical write slot in the rotating buffer.
@@ -4398,7 +4380,7 @@ impl RotatingKVCache {
     /// `block_size - accepted - 1`, far below the sliding window's
     /// `max_size`).
     ///
-    /// Used by: Gemma 4 MTP `rollback_speculative_cache` (issue #625).
+    /// Used by: Gemma 4 MTP `rollback_speculative_cache`.
     pub fn trim(&mut self, n: i32) -> i32 {
         let n = if self.buffer_size > 0 {
             n.min(self.idx).min(self.offset)
@@ -4644,8 +4626,7 @@ impl ChunkedKVCache {
 /// 1. Downstream kernel and graph code (paged decode, fused RoPE, padded
 ///    SDPA) indexes per batch row directly. A scalar fallback would break
 ///    those callers silently.
-/// 2. It mirrors the upstream `mlx-vlm` PR #1110 fix pattern (issue #544 in
-///    this repo) for `BatchTurboQuantKVCache`. There, an "init-time scalar
+/// 2. It mirrors the upstream `mlx-vlm` PR #1110 fix pattern (in this repo) for `BatchTurboQuantKVCache`. There, an "init-time scalar
 ///    fast-path when all `left_padding` entries are equal" caused
 ///    `extend()` and `filter()` to crash later when the batch composition
 ///    changed mid-decode and the still-scalar `offset` was passed to
@@ -4672,7 +4653,7 @@ impl BatchedAttentionMetadata {
     ///
     /// Always emits per-row `Vec<i32>` arrays of length `caches.len()`,
     /// even when every cache has the same offset. See the struct-level docs
-    /// for the rationale (issue #544 / upstream `mlx-vlm` PR #1110).
+    /// for the rationale (upstream `mlx-vlm` PR #1110).
     pub fn from_kv_caches(
         caches: &[&mut KVCache],
         query_lens: &[i32],
@@ -4732,7 +4713,7 @@ impl BatchedAttentionMetadata {
     /// only to the caller-supplied `query_len` and `window_size` being the
     /// same for every batch row; per-row offsets are still read from each
     /// cache. **Do not** add a scalar fast-path here — see the
-    /// [`BatchedAttentionMetadata`] struct-level docs (issue #544) for
+    /// [`BatchedAttentionMetadata`] struct-level docs for
     /// why.
     pub fn uniform_kv_caches(
         caches: &[&mut KVCache],
@@ -4762,7 +4743,7 @@ impl BatchedAttentionMetadata {
     /// [`Self::uniform_kv_caches`]) should call this method in debug
     /// builds.
     ///
-    /// This mirrors the upstream `mlx-vlm` PR #1110 (issue #544) pattern of
+    /// This mirrors the upstream `mlx-vlm` PR #1110 pattern of
     /// keeping per-row offset state shape-stable across batch grow / shrink
     /// transitions. See the struct-level docs for the full rationale.
     ///
@@ -4795,7 +4776,7 @@ impl BatchedAttentionMetadata {
     /// the per-row vector shape.
     ///
     /// This is the mlxcel analogue of upstream `mlx-vlm` PR #1110's
-    /// `BatchTurboQuantKVCache.extend()` (issue #544): when the batch
+    /// `BatchTurboQuantKVCache.extend()`: when the batch
     /// scheduler grows the active batch by adopting one or more newly
     /// prefilled sequences, the resulting metadata must remain a per-row
     /// `Vec<i32>` even when both halves were uniform. The Python upstream
@@ -4810,7 +4791,7 @@ impl BatchedAttentionMetadata {
     /// rebuilds metadata from scratch on every step via
     /// [`Self::from_kv_caches`], which already preserves the invariant; this
     /// helper is provided as a stable seam for upcoming continuous-batching
-    /// fusion work and as a regression target for issue #544.
+    /// fusion work and as a regression target.
     pub fn extend(&mut self, other: &Self) -> Result<(), String> {
         self.assert_consistent()?;
         other.assert_consistent()?;
@@ -4824,7 +4805,7 @@ impl BatchedAttentionMetadata {
     /// Drop rows not in `indices`, preserving the per-row vector shape.
     ///
     /// The mlxcel analogue of upstream `mlx-vlm` PR #1110's
-    /// `BatchTurboQuantKVCache.filter()` (issue #544). Indexing is
+    /// `BatchTurboQuantKVCache.filter()`. Indexing is
     /// position-based: `indices[k] = i` means "row `i` of the current
     /// batch becomes row `k` of the filtered batch".
     ///
@@ -4834,7 +4815,7 @@ impl BatchedAttentionMetadata {
     /// inconsistent state).
     ///
     /// Used by: regression coverage for batch-shrink transitions
-    /// (issue #544); not yet wired into the live decode path because the
+    /// not yet wired into the live decode path because the
     /// scheduler currently rebuilds metadata each step rather than
     /// filtering in place. Provided as a stable seam for upcoming
     /// continuous-batching fusion work.
@@ -5388,7 +5369,7 @@ impl CachePool {
         // itself rather than by any individual `SequenceCacheSet`, so they
         // are not visible to the per-sequence `nbytes()` walk above. Add
         // them explicitly so admission-control sees the true KV footprint
-        // for paged Turbo4 deployments (#482).
+        // for paged Turbo4 deployments.
         let pool_sidecar_bytes: usize = self
             .paged_pool
             .as_ref()
@@ -5781,7 +5762,7 @@ mod tests {
         assert_eq!(to_f32(&visible), vec![3.0, 4.0, 5.0, 6.0, 7.0]);
     }
 
-    // Issue #603: `trim_front` drops the oldest `n` tokens from a KVCache's
+    // `trim_front` drops the oldest `n` tokens from a KVCache's
     // live window so the server scheduler can enforce a `--max-kv-size`
     // bound on otherwise unbounded plain `KVCache` instances.
     //
@@ -5906,7 +5887,7 @@ mod tests {
         assert_eq!(cache.live_start, 0);
     }
 
-    // Issue #603: `trim_front` must preserve the RoPE relative-position
+    // `trim_front` must preserve the RoPE relative-position
     // invariant after the live window is bounded — K at buffer slot `i`
     // was rotated at monotonic position `live_start + i` at write time,
     // and Q for the next decode step is rotated at the *current*
@@ -5961,7 +5942,7 @@ mod tests {
         assert_eq!(&v_data[..3], &[7.0, 8.0, 10.0]);
     }
 
-    // Issue #603 correctness regression test — RoPE relative-position
+    // correctness regression test — RoPE relative-position
     // invariant under `--max-kv-size`.
     //
     // Builds two caches that should produce identical attention outputs:
@@ -6832,7 +6813,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // Issue #544 regression coverage — TurboQuant continuous-batching
+    // regression coverage — TurboQuant continuous-batching
     // batch-grow / batch-shrink mid-decode.
     //
     // These tests mirror upstream `mlx-vlm` PR #1110's
@@ -6934,7 +6915,7 @@ mod tests {
         metadata.assert_consistent().unwrap();
     }
 
-    /// Issue #603 follow-up: `rope_offsets` live on the monotonic RoPE
+    /// follow-up: `rope_offsets` live on the monotonic RoPE
     /// position axis, but `kv_lens` must describe the visible cache window
     /// after `KVCache::trim_front` advances `live_start`.
     #[test]
@@ -6964,7 +6945,7 @@ mod tests {
     /// End-to-end batch grow + shrink sequence: start with one sequence,
     /// admit a second mid-decode (extend), then evict the first
     /// (filter_in_place). Per-row offsets must remain coherent throughout.
-    /// This is the strongest unit-level regression for issue #544.
+    /// This is the strongest unit-level regression.
     #[test]
     fn batched_metadata_extend_grow_then_shrink_preserves_per_row_state() {
         let mut cache_a = KVCache::new();
@@ -7105,7 +7086,7 @@ mod tests {
     /// scalar `cache.offset` semantics are identical, so the per-row
     /// metadata stays correct across modes — the property that makes
     /// the upstream Python crash impossible to reach in mlxcel's
-    /// architecture (issue #544).
+    /// architecture.
     #[test]
     fn batched_metadata_handles_mixed_mode_caches() {
         let mut fp16_cache = KVCache::new();

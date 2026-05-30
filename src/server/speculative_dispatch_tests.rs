@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Unit tests for [`SpeculativeDispatch::resolve`] (issue #666).
+//! Unit tests for [`SpeculativeDispatch::resolve`].
 //!
 //! These tests pin the dispatch matrix without touching the MLX FFI:
 //! every test builds a minimal `ServerConfig` (defaults + selective

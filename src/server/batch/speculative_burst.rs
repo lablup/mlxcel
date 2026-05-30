@@ -13,7 +13,7 @@
 // limitations under the License.
 
 //! Speculative-decoding burst driver for the continuous-batching scheduler
-//! (issue #670, follow-up to #666 / PR #669).
+//! (follow-up to).
 //!
 //! ## Why a "burst" rather than per-tick dispatch
 //!
@@ -30,7 +30,7 @@
 //! and risks regressing the offline CLI path that still consumes
 //! `generate()` / `run()` end-to-end. That refactor is genuinely larger
 //! than this issue's scope; see the central architectural decision
-//! discussion in issue #670 ("Option A vs Option B").
+//! discussion ("Option A vs Option B").
 //!
 //! Instead, this module takes **Option B**: when the scheduler decides a
 //! sequence is speculative, it delegates the *entire* prefill + decode
@@ -106,17 +106,17 @@
 //! presence / DRY) are **not** a gate: the burst threads
 //! `initial_token_history(&prompt, ..)` into the first-bonus sample so a
 //! penalty-bearing request's first bonus is byte-identical to the
-//! classic decode path (issue #677).
+//! classic decode path.
 //!
 //! Logprobs are **not** a gate: the burst threads `logprobs_config`
 //! through `MtpGenerator::generate` / `DFlashGenerator::run` and emits
 //! `TokenWithLogprobs` events from `finalize_burst_success` — the same
-//! payload the classic decode path produces (issue #678).
+//! payload the classic decode path produces.
 //!
 //! Thinking-budget enforcement is **not** a gate: `finalize_burst_success`
 //! runs the same per-token `decide_override` + `observe` cycle as the
 //! classic path's `apply_thinking_budget`, injecting a forced `</think>`
-//! at the budget boundary (issue #679).
+//! at the budget boundary.
 //!
 //! Each declined request is logged with the gate reason (at `debug` for
 //! ordinary gates, and at `warn` for DFlash multimodal requests so operators
@@ -131,8 +131,7 @@
 //!
 //! ## Lazy-load model
 //!
-//! The drafter checkpoint is NOT read from disk at worker startup (issue #670,
-//! mandate 2). [`WorkerDrafterSlot`] holds the path and an `Option<Box<dyn
+//! The drafter checkpoint is NOT read from disk at worker startup (mandate 2). [`WorkerDrafterSlot`] holds the path and an `Option<Box<dyn
 //! Drafter>>` that starts as `None`. The first speculative request triggers
 //! [`WorkerDrafterSlot::ensure_loaded`], which calls
 //! [`mlxcel_core::drafter::load_drafter`] and stores the handle. Subsequent
@@ -167,7 +166,7 @@ use super::sequence::{FinishReason, SequenceInfo, SequenceState};
 /// the VLM wrapper delegates speculative hooks to its inner text backbone and
 /// allocates the same cache shape. This lets text-only requests against
 /// VLM-wrapped checkpoints run DFlash without opening the true multimodal tail
-/// path yet (issue #691).
+/// path yet.
 trait Qwen35DFlashTarget:
     LanguageModel
     + SpeculativeTarget<
@@ -195,7 +194,7 @@ impl Qwen35DFlashTarget for crate::vision::Qwen35VLModel {
 /// The scheduler thread is single-threaded (every request goes through
 /// the same MLX dispatch stream), so a simple `Option<Box<dyn Drafter>>`
 /// is sufficient — no atomic-once / `RwLock` is needed. The "lazy load"
-/// requirement from issue #670 (mandate 2) means: the drafter weights
+/// requirement (mandate 2) means: the drafter weights
 /// MUST NOT be read from disk at worker startup; the first speculative
 /// request triggers the load. Subsequent requests on the same worker
 /// reuse the loaded drafter.
@@ -315,18 +314,16 @@ impl WorkerDrafterSlot {
 ///    the leading tokens.
 ///
 /// History-dependent sampling penalties (repetition / frequency /
-/// presence / DRY) are **no longer** a gate (issue #677): the burst
+/// presence / DRY) are **no longer** a gate: the burst
 /// threads `initial_token_history(&prompt, ..)` into the first-bonus
 /// sample, so a penalty-bearing request's first bonus is byte-identical
 /// to the classic decode path.
 ///
-/// `logprobs_config.enabled` is likewise **no longer** a gate (issue
-/// #678): the burst threads `logprobs_config` through the round-loop
+/// `logprobs_config.enabled` is likewise **no longer** a gate: the burst threads `logprobs_config` through the round-loop
 /// drivers and emits `TokenWithLogprobs` events from
 /// `finalize_burst_success`, the same payload the classic path produces.
 ///
-/// Thinking-budget enforcement is likewise **no longer** a gate (issue
-/// #679): `finalize_burst_success` runs the same per-token
+/// Thinking-budget enforcement is likewise **no longer** a gate: `finalize_burst_success` runs the same per-token
 /// `decide_override` + `observe` cycle as the classic path's
 /// `apply_thinking_budget`, injecting a forced `</think>` at the budget
 /// boundary.
@@ -375,22 +372,19 @@ pub(crate) fn should_burst_for_sequence(
         return false;
     }
     // History-dependent sampling penalties (repetition / frequency /
-    // presence / DRY) are NO LONGER a decline-to-classic gate (issue
-    // #677). The burst now threads `initial_token_history(&prompt, ..)`
+    // presence / DRY) are NO LONGER a decline-to-classic gate. The burst now threads `initial_token_history(&prompt, ..)`
     // into the first-bonus sample via `MtpTarget::prefill_and_seed` /
     // `sample_token_optimized`, so a penalty-bearing request's first
     // bonus is byte-identical to the classic decode path. The
     // subsequent round-loop tokens come from the target's greedy
     // argmax, which carries no history dependence.
     //
-    // `logprobs_config.enabled` is likewise NO LONGER a gate (issue
-    // #678). The burst threads `logprobs_config` through
+    // `logprobs_config.enabled` is likewise NO LONGER a gate. The burst threads `logprobs_config` through
     // `MtpGenerator::generate` / `DFlashGenerator::run` and emits
     // `TokenWithLogprobs` events from `finalize_burst_success` — the
     // same payload the classic decode path produces.
     //
-    // Thinking-budget enforcement is likewise NO LONGER a gate (issue
-    // #679). `finalize_burst_success` runs the same per-token
+    // Thinking-budget enforcement is likewise NO LONGER a gate. `finalize_burst_success` runs the same per-token
     // `decide_override` + `observe` cycle the classic path's
     // `apply_thinking_budget` uses, injecting a forced `</think>` at the
     // budget boundary.
@@ -403,7 +397,7 @@ pub(crate) fn should_burst_for_sequence(
 /// the B = 1 burst path can emit per-token logprob payloads, but the
 /// batched MTP/DFlash round loops return token IDs only. Keeping
 /// logprobs-enabled requests out of B > 1 windows makes them fall back
-/// to the B = 1 burst, where issue #678's `TokenWithLogprobs` contract
+/// to the B = 1 burst, where's `TokenWithLogprobs` contract
 /// is preserved.
 pub(crate) fn can_join_batched_burst_window(seq: &SequenceInfo) -> bool {
     if seq.logprobs_config.enabled {
@@ -418,7 +412,7 @@ pub(crate) fn can_join_batched_burst_window(seq: &SequenceInfo) -> bool {
 
 /// Whether to force the Gemma 4 MTP B=1 burst path.
 ///
-/// Issue #693 real-model measurements showed the assistant drafter is not
+/// real-model measurements showed the assistant drafter is not
 /// profitable for single-request Gemma 4 31B serving: the upstream reference
 /// speedups are reported for B>1 windows, while the B=1 path spends an extra
 /// drafter forward per token at very low acceptance. Production therefore
@@ -454,7 +448,7 @@ pub(crate) fn mtp_batched_burst_enabled() -> bool {
 /// `batch_metrics.record_sequence_completed(tokens_generated)` call
 /// inside `finalize_completed`).
 ///
-/// Issue #673: the prompt + generated token vectors and the
+/// the prompt + generated token vectors and the
 /// `healthy_finish` flag are surfaced so the scheduler can call
 /// [`crate::server::batch::scheduler::BatchScheduler::donate_finished_sequence_cache`]
 /// for the burst path exactly as `finalize_completed` does for the
@@ -571,7 +565,7 @@ pub(crate) fn try_run_burst_b1(
                     seq_id,
                     tokens_generated: 0,
                     // Transition failure is an error outcome — no
-                    // healthy cache to donate (issue #673).
+                    // healthy cache to donate.
                     prompt_tokens: Vec::new(),
                     generated_tokens: Vec::new(),
                     healthy_finish: false,
@@ -581,10 +575,9 @@ pub(crate) fn try_run_burst_b1(
             // `finalize_burst_success` streams the tokens, classifies
             // the finish reason, and hands back the prompt + committed
             // token vectors so the scheduler can mirror the classic
-            // path's prompt-cache donate (issue #673). `logprobs` is
+            // path's prompt-cache donate. `logprobs` is
             // forwarded so a speculative response carries the same
             // `TokenWithLogprobs` payload as the classic decode path
-            // (issue #678).
             let finalized =
                 finalize_burst_success(ctx, seq, tokens, logprobs, prefill_time_ms, decode_time_ms);
             Ok(BurstFinalized {
@@ -619,7 +612,7 @@ pub(crate) fn try_run_burst_b1(
                 seq_id,
                 tokens_generated: 0,
                 // Error outcome: the KV cache is assumed tainted, so
-                // no donate (issue #673, mirrors the classic path's
+                // no donate (mirrors the classic path's
                 // `Finished(Error)` bypass in `finalize_completed`).
                 prompt_tokens: Vec::new(),
                 generated_tokens: Vec::new(),
@@ -638,7 +631,7 @@ struct BurstSuccess {
     /// `Option<TokenLogprobData>` per token, forwarded to
     /// `finalize_burst_success` which emits `TokenWithLogprobs` events
     /// so speculative responses carry the same logprob payload as the
-    /// classic decode path (issue #678).
+    /// classic decode path.
     logprobs: Vec<Option<TokenLogprobData>>,
     prefill_time_ms: f64,
     decode_time_ms: f64,
@@ -646,7 +639,7 @@ struct BurstSuccess {
 
 /// Outcome of [`finalize_burst_success`].
 ///
-/// Issue #673: in addition to the streamed token count (used for the
+/// in addition to the streamed token count (used for the
 /// Prometheus per-sequence histogram), this carries the data the
 /// scheduler needs to mirror the classic path's prompt-cache donate —
 /// the full prompt token stream, the tokens actually committed to the
@@ -815,20 +808,20 @@ fn run_mtp_burst(
     // empty vec otherwise — exactly what the classic decode path seeds
     // its first-token sample with (`scheduler.rs::finish_prefill`). This
     // is what makes the burst's first bonus byte-identical to the
-    // classic path for penalty-bearing requests (issue #677).
+    // classic path for penalty-bearing requests.
     let token_history = initial_token_history(&prompt, sampling.needs_token_history());
 
     // Cooperative-cancellation flag plumbed into the round-loop driver.
     // The burst owns the worker thread for its full lifetime; on a
     // client disconnect mid-burst the scheduler flips `seq.cancelled`
     // and the generator bails out after the current round instead of
-    // running the whole `max_tokens` budget (issue #672).
+    // running the whole `max_tokens` budget.
     let cancel: &AtomicBool = &seq.cancelled;
     // Per-token log-probability capture control. When enabled, the
     // generator returns one logprob entry per emitted token; the burst
     // forwards them through `finalize_burst_success` which emits
     // `TokenWithLogprobs` events so speculative responses carry the
-    // same payload as the classic decode path (issue #678).
+    // same payload as the classic decode path.
     let logprobs_config = seq.logprobs_config.clone();
     let (output, stats) = match ctx.model {
         LoadedModel::Gemma4(wrapper) => {
@@ -907,7 +900,7 @@ struct DriveMtpOutput {
     emitted: Vec<i32>,
     /// Per-token log-probability data, index-aligned 1:1 with
     /// [`Self::emitted`]. Empty when the caller's `LogprobsConfig` is
-    /// disabled (issue #678).
+    /// disabled.
     logprobs: Vec<Option<TokenLogprobData>>,
     recovered_drafter: Box<dyn Drafter>,
 }
@@ -927,17 +920,16 @@ struct DriveMtpOutput {
 /// to [`MtpGenerator::generate`] (then on to
 /// [`mlxcel_core::speculative::mtp::target::MtpTarget::prefill_and_seed`])
 /// for the first-bonus sample, so a penalty-bearing request's first
-/// bonus is byte-identical to the classic decode path (issue #677).
+/// bonus is byte-identical to the classic decode path.
 ///
 /// `cancel` is the cooperative-cancellation flag forwarded to
 /// [`MtpGenerator::generate`]; it is checked once per round so a
 /// disconnected client's burst stops occupying the worker thread
-/// (issue #672).
 ///
 /// `logprobs_config` is forwarded to [`MtpGenerator::generate`]; when
 /// enabled the returned [`DriveMtpOutput::logprobs`] carries one
 /// `Option<TokenLogprobData>` per emitted token, index-aligned with
-/// [`DriveMtpOutput::emitted`] (issue #678).
+/// [`DriveMtpOutput::emitted`].
 #[allow(clippy::too_many_arguments)]
 fn drive_mtp_generator<T>(
     target: T,
@@ -1043,20 +1035,20 @@ fn run_dflash_burst(
     // empty vec otherwise — exactly what the classic decode path seeds
     // its first-token sample with (`scheduler.rs::finish_prefill`). This
     // is what makes the burst's first bonus byte-identical to the
-    // classic path for penalty-bearing requests (issue #677).
+    // classic path for penalty-bearing requests.
     let token_history = initial_token_history(&prompt, sampling.needs_token_history());
 
     // Cooperative-cancellation flag plumbed into the round-loop driver.
     // The burst owns the worker thread for its full lifetime; on a
     // client disconnect mid-burst the scheduler flips `seq.cancelled`
     // and the generator bails out after the current round instead of
-    // running the whole `max_tokens` budget (issue #672).
+    // running the whole `max_tokens` budget.
     let cancel: &AtomicBool = &seq.cancelled;
     // Per-token log-probability capture control. When enabled, the
     // burst returns one logprob entry per emitted token; the burst
     // forwards them through `finalize_burst_success` which emits
     // `TokenWithLogprobs` events so speculative responses carry the
-    // same payload as the classic decode path (issue #678).
+    // same payload as the classic decode path.
     let logprobs_config = seq.logprobs_config.clone();
 
     // DFlash supports Qwen35 text models and Qwen35 VLM wrappers for
@@ -1121,15 +1113,13 @@ fn run_dflash_burst(
 /// `token_history` is the history-dependent-penalty context for the
 /// first-bonus sample (repetition / frequency / presence / DRY); it is
 /// forwarded to `sample_token_optimized` so a penalty-bearing request's
-/// first bonus is byte-identical to the classic decode path (issue
-/// #677). The round loop itself runs greedy at temp=0 today, so the
+/// first bonus is byte-identical to the classic decode path. The round loop itself runs greedy at temp=0 today, so the
 /// per-round target argmax is unaffected — only the first bonus reads
 /// the history.
 ///
 /// `cancel` is the cooperative-cancellation flag forwarded to
 /// [`DFlashGenerator::run`]; it is checked once per round so a
 /// disconnected client's burst stops occupying the worker thread
-/// (issue #672).
 ///
 /// `logprobs_config` controls per-token log-probability capture. When
 /// enabled, the returned `Vec<Option<TokenLogprobData>>` carries one
@@ -1137,7 +1127,6 @@ fn run_dflash_burst(
 /// the first-bonus logprob is computed here from the same
 /// penalty-adjusted logits the bonus was sampled from, and the
 /// round-loop tokens' logprobs come back in `DFlashRunOutput::logprobs`
-/// (issue #678).
 #[allow(clippy::too_many_arguments)]
 fn run_dflash_on_qwen35<T>(
     qwen: &T,
@@ -1197,14 +1186,13 @@ where
     );
     // `token_history` carries the history-dependent-penalty context
     // (repetition / frequency / presence / DRY) so the first bonus is
-    // byte-identical to the classic decode path's first token (issue
-    // #677). The subsequent round-loop tokens are produced by the
+    // byte-identical to the classic decode path's first token. The subsequent round-loop tokens are produced by the
     // target's greedy argmax inside `DFlashGenerator::run` (DFlash is
     // greedy-only today), which carries no history dependence.
     // `adjusted_logits` is the penalty-adjusted `[1, vocab]` slice the
     // bonus was sampled from; it feeds `compute_logprobs` so the
     // first-bonus logprob is byte-identical to the classic path's
-    // first-token logprob (issue #678).
+    // first-token logprob.
     let (first_bonus_arr, first_bonus_adjusted_logits) =
         mlxcel_core::sampling::sample_token_optimized(&last_logits, sampling, token_history);
     mlxcel_core::eval(&first_bonus_arr);
@@ -1316,7 +1304,7 @@ where
             // round loop returns an empty `output.logprobs` and
             // `first_bonus_lp` is `None`, so the burst's
             // `finalize_burst_success` falls through to plain `Token`
-            // events (issue #678).
+            // events.
             let logprobs: Vec<Option<TokenLogprobData>> = if logprobs_config.enabled {
                 let mut lp = Vec::with_capacity(output.logprobs.len() + 1);
                 lp.push(first_bonus_lp);
@@ -1333,7 +1321,7 @@ where
     }
 }
 
-/// Apply issue #409 thinking-budget enforcement to one burst-produced
+/// Apply thinking-budget enforcement to one burst-produced
 /// token, mirroring the classic decode path's
 /// `BatchScheduler::apply_thinking_budget` (`scheduler.rs`).
 ///
@@ -1394,7 +1382,7 @@ pub(crate) fn apply_burst_thinking_budget(
 /// `batch_metrics.record_sequence_completed(...)` so the Prometheus
 /// counters cover the burst path as well as the classic path, and uses
 /// the token vectors + flag to call `donate_finished_sequence_cache`
-/// (issue #673) exactly as `finalize_completed` does for the classic
+/// exactly as `finalize_completed` does for the classic
 /// path.
 fn finalize_burst_success(
     ctx: BurstContext<'_>,
@@ -1417,7 +1405,7 @@ fn finalize_burst_success(
     // one logprob entry per emitted token, index-aligned with `tokens`.
     // We emit `GenerateEvent::TokenWithLogprobs` in that case so a
     // speculative response carries the same payload as the classic
-    // decode path's `decode_single_step` (issue #678). The empty-vec
+    // decode path's `decode_single_step`. The empty-vec
     // case (logprobs disabled) falls through to plain `Token` events.
     let logprobs_enabled = seq.logprobs_config.enabled && !logprobs.is_empty();
 
@@ -1427,7 +1415,7 @@ fn finalize_burst_success(
             break;
         }
 
-        // Issue #409 / #679: thinking-budget enforcement, applied
+        // thinking-budget enforcement, applied
         // per-emitted-token. See [`apply_burst_thinking_budget`].
         // `override_fired` gates logprob emission below: when the
         // thinking-budget substituted a different token, the
@@ -1479,7 +1467,7 @@ fn finalize_burst_success(
         // still accurate.
         FinishReason::Stop
     };
-    // Issue #673: classify the finish for the prompt-cache donate gate
+    // classify the finish for the prompt-cache donate gate
     // BEFORE `finish_reason` is moved into `transition_to`. Mirrors the
     // `healthy` gate in `scheduler.rs::finalize_completed` — only
     // `Stop` / `Length` / `Cancelled` finishes donate their cache back.
@@ -1516,7 +1504,7 @@ fn finalize_burst_success(
     );
     let _ = seq.response_tx.send(GenerateEvent::Done(result));
     // Move the prompt + committed token vectors out of `seq` for the
-    // scheduler's prompt-cache donate (issue #673). `seq` is dropped
+    // scheduler's prompt-cache donate. `seq` is dropped
     // immediately after this — these are its last readers.
     FinalizeOutcome {
         tokens_generated,
@@ -1548,7 +1536,7 @@ fn emit_error_and_finalize(_ctx: BurstContext<'_>, seq: SequenceInfo, msg: &str)
 }
 
 // ===========================================================================
-// Batched burst (B > 1) — issue #674
+// Batched burst (B > 1)
 // ===========================================================================
 //
 // The B = 1 burst above runs the full prefill + decode lifecycle of ONE
@@ -1564,8 +1552,7 @@ fn emit_error_and_finalize(_ctx: BurstContext<'_>, seq: SequenceInfo, msg: &str)
 // The batched MTP target adapter forwards the `[B, max_prompt_len]`
 // prompt batch in one pass. With equal-length prompts the 2-D causal
 // masks broadcast cleanly across the batch and the result is
-// byte-identical to running B separate B = 1 prefills (acceptance item 1
-// of issue #674). The scheduler's window collector
+// byte-identical to running B separate B = 1 prefills (acceptance item 1). The scheduler's window collector
 // (`BatchScheduler::execute_speculative_burst`) therefore only groups
 // speculative-eligible requests of the *same prompt length* into one
 // batched window. A request whose prompt length differs from the window
@@ -1585,11 +1572,11 @@ fn emit_error_and_finalize(_ctx: BurstContext<'_>, seq: SequenceInfo, msg: &str)
 /// One finalized row of a batched burst — the per-row analogue of
 /// [`BurstFinalized`].
 ///
-/// Issue #674: originally `BatchedBurstFinalized.rows` carried only
+/// originally `BatchedBurstFinalized.rows` carried only
 /// `(seq_id, tokens_generated)`, so the scheduler's batched arm could
 /// release each row's cache slot and record its Prometheus metric, but
 /// it had no handle on the prompt / committed token vectors a
-/// prompt-cache donate needs. Issue #688 widens each row to the same
+/// prompt-cache donate needs. widens each row to the same
 /// donate-payload shape as the B = 1 [`BurstFinalized`] so the batched
 /// arm can call
 /// [`crate::server::batch::scheduler::BatchScheduler::donate_finished_sequence_cache`]
@@ -1710,8 +1697,7 @@ pub(crate) fn try_run_burst_batched(
                         &format!("State transition error: {err}"),
                     );
                     // Transition failure is an error outcome — no
-                    // healthy cache to donate (issue #688, mirrors the
-                    // B = 1 arm's transition-failure `BurstFinalized`).
+                    // healthy cache to donate (mirrors the B = 1 arm's transition-failure `BurstFinalized`).
                     finalized_rows.push(BatchedBurstRow {
                         seq_id,
                         tokens_generated: 0,
@@ -1729,7 +1715,6 @@ pub(crate) fn try_run_burst_batched(
                 // window-admission gate (`can_join_batched_burst_window`)
                 // rejects any logprobs-enabled request so it falls back
                 // to the B = 1 burst, which captures logprobs correctly
-                // (issue #678).
                 let finalized = finalize_burst_success(
                     ctx.reborrow(),
                     seq,
@@ -1741,7 +1726,6 @@ pub(crate) fn try_run_burst_batched(
                 // Surface the per-row prompt + committed token vectors
                 // and the healthy-finish flag so the scheduler can
                 // mirror the B = 1 arm's prompt-cache donate per row
-                // (issue #688).
                 finalized_rows.push(BatchedBurstRow {
                     seq_id,
                     tokens_generated: finalized.tokens_generated,
@@ -1772,9 +1756,7 @@ pub(crate) fn try_run_burst_batched(
                 let seq_id = seq.seq_id;
                 emit_error_and_finalize(ctx.reborrow(), seq, &msg);
                 // Error outcome: every row's KV cache is assumed
-                // tainted, so no donate — empty/false payload (issue
-                // #688, mirrors the B = 1 arm's `BurstOutcome::Error`
-                // `BurstFinalized`).
+                // tainted, so no donate — empty/false payload (mirrors the B = 1 arm's `BurstOutcome::Error` `BurstFinalized`).
                 finalized_rows.push(BatchedBurstRow {
                     seq_id,
                     tokens_generated: 0,
@@ -2190,7 +2172,7 @@ fn scalar_tokens_from_array(token_arr: &mlxcel_core::MlxArray, batch_size: usize
 ///
 /// ## History-dependent penalties are excluded from the batched window
 ///
-/// Issue #682 removed the `should_burst_for_sequence` decline gates for
+/// removed the `should_burst_for_sequence` decline gates for
 /// the four history-dependent penalty fields (`repetition_penalty`,
 /// `frequency_penalty`, `presence_penalty`, `dry_*`) — the **B=1** burst
 /// now threads `initial_token_history(&prompt, ..)` into its first-bonus
@@ -2217,8 +2199,7 @@ pub(crate) fn sampling_config_eq(a: &SamplingConfig, b: &SamplingConfig) -> bool
         && b.token_bias.is_empty()
         // The batched path's first-bonus sample uses an empty token
         // history; a penalty-bearing request must not join a batched
-        // window (it runs as a B=1 burst, which threads token history
-        // correctly since #682).
+        // window (it runs as a B=1 burst, which threads token history correctly since).
         && !a.needs_token_history()
         && !b.needs_token_history()
 }

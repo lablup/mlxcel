@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Integration test for the Axis A `InterpolateOp` (issue #378).
+//! Integration test for the Axis A `InterpolateOp`.
 //!
 //! Verifies the end-to-end flow that the consolidated weight loader
 //! will exercise once A4 wires the `--surgery` CLI flag: parse a
@@ -205,7 +205,7 @@ fn direct_interpolate_op_via_pipeline_loads_safetensors_from_disk() {
 #[test]
 fn pipeline_without_interpolate_op_leaves_weights_untouched() {
     // Acceptance (e): without the op in the pipeline, bit-exact to
-    // baseline (inherited from A4 / #365). An empty pipeline is the
+    // baseline (inherited from A4). An empty pipeline is the
     // strongest version of this guarantee.
     let pipeline = SurgeryPipeline::new();
     let mut weights = synth_base_zeros();
@@ -248,7 +248,7 @@ fn interpolate_op_surfaces_missing_donor_file_error() {
 
 #[test]
 fn yaml_parser_rejects_nonexistent_donor_at_parse_time() {
-    // The config layer (#369) refuses to construct a pipeline when
+    // The config layer refuses to construct a pipeline when
     // any donor file does not exist. This is the first line of
     // defense and means surgery never gets as far as touching
     // weights for a clearly-broken config.

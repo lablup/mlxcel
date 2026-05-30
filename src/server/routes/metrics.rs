@@ -16,12 +16,12 @@
 //!
 //! This route is read-only and should remain separate from generation policy.
 //! Includes both server-level request counters and batch observability gauges,
-//! plus the pipeline-parallel families added by issue #350:
+//! plus the pipeline-parallel families added by
 //!
 //! - Per-stage utilization and bubble ratio.
 //! - Activation transfer latency histograms (p50/p95/p99 per stage pair).
 //! - KV cache admission rejection counters (labeled by stage + reason).
-//! - Elastic repartition event counters consumed from issue #349's emission
+//! - Elastic repartition event counters consumed's emission
 //!   path.
 
 use std::fmt::Write;
@@ -48,7 +48,7 @@ pub async fn metrics(State(state): State<AppState>) -> Response {
     // B9 — read process-wide lang-bias observability counters.
     let lang_bias_applied = mlxcel_core::lang_bias_applied_total();
     let lang_bias_suppressed = mlxcel_core::lang_bias_tokens_suppressed_total();
-    // Issue #405 — byte-fragment suppression counter. Strict subset of
+    // byte-fragment suppression counter. Strict subset of
     // `lang_bias_suppressed`; tracks suppressions that came from the opt-in
     // byte-fragment classifier so operators can observe over-suppression.
     let lang_bias_byte_fragment = mlxcel_core::lang_bias_byte_fragment_suppressions_total();
@@ -58,7 +58,7 @@ pub async fn metrics(State(state): State<AppState>) -> Response {
     let slots_available = slots_total.saturating_sub(active);
     let queue_depth = state.batch_metrics.queue_depth();
 
-    // Epic #416 / issue #423: prompt-prefix cache Prometheus counters
+    // prompt-prefix cache Prometheus counters
     let pc_hits = state
         .batch_metrics
         .prompt_cache_hits_total
@@ -169,7 +169,7 @@ pub async fn metrics(State(state): State<AppState>) -> Response {
          # HELP mlxcel_lang_bias_tokens_suppressed_total Sampling steps where the pre-bias top-1 token was neg-inf suppressed\n\
          # TYPE mlxcel_lang_bias_tokens_suppressed_total counter\n\
          mlxcel_lang_bias_tokens_suppressed_total {lang_bias_suppressed}\n\
-         # HELP mlxcel_lang_bias_byte_fragment_suppressions_total Suppressions where the neg-inf top-1 token was classified via UTF-8 start-byte (issue #405)\n\
+         # HELP mlxcel_lang_bias_byte_fragment_suppressions_total Suppressions where the neg-inf top-1 token was classified via UTF-8 start-byte\n\
          # TYPE mlxcel_lang_bias_byte_fragment_suppressions_total counter\n\
          mlxcel_lang_bias_byte_fragment_suppressions_total {lang_bias_byte_fragment}\n\
          # HELP mlxcel_prompt_cache_hits_total Successful prompt-prefix cache adoptions\n\
@@ -311,7 +311,7 @@ fn append_pipeline_metrics(body: &mut String, snap: &PipelineObservabilitySnapsh
         );
     }
 
-    // --- Elastic repartition counters (issue #349 emission path) ---
+    // --- Elastic repartition counters (emission path) ---
     let _ = writeln!(
         body,
         "# HELP mlxcel_pp_repartition_events_total Total elastic pipeline repartition events\n\

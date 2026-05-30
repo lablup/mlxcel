@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Real-model observability integration test (issue #350).
+//! Real-model observability integration test.
 //!
 //! This `#[ignore]`-gated test drives a simulated traffic workload through a
 //! 2-stage in-process pipeline observability aggregator, scrapes the
@@ -144,7 +144,7 @@ fn pp_observability_populates_all_four_metric_families() {
         .record(diag.stage_index, diag.reason.metric_label());
 
     // Repartition counters: drive one completed repartition event so the
-    // #349 emission path is also visible.
+    // emission path is also visible.
     let event = RepartitionEvent {
         trigger: mlxcel::distributed::pipeline::RepartitionTrigger::Explicit,
         to_state: RepartitionState::Idle,

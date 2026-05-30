@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Quality gate for the TurboQuant KV cache compression (epic #458, B3 / issue #475).
+//! Quality gate for the TurboQuant KV cache compression (B3).
 //!
 //! Tests two quality dimensions for `KVCacheMode::Turbo4Asym` vs `KVCacheMode::Fp16`
 //! baseline on a curated set of small MLX models:
@@ -72,10 +72,10 @@
 //! Note: The B3 Qwen2.5-1.5B fixture uses the **base** (non-instruct) variant
 //! `Qwen2.5-1.5B-4bit`. The instruct variant collapses on raw wikitext without
 //! the chat template (`<|im_start|>user\n...<|im_end|>`), producing PPL ≈ 2×10⁷
-//! and NIAH=0/12 (see issue #506). This gate measures TurboQuant compression
+//! and NIAH=0/12. This gate measures TurboQuant compression
 //! quality, not chat performance, so the base model is the correct fixture.
 //!
-//! # VLM gates (issue #510)
+//! # VLM gates
 //!
 //! VLM gates run a smaller PPL+NIAH harness on text-only inputs because the
 //! prefill cost on a vision-aware checkpoint is dominated by the decoder, not
@@ -587,8 +587,7 @@ fn run_quality_gate(model_dir_name: &str) -> Option<(f64, f64, usize, usize)> {
 //
 // The instruct-tuned `Qwen2.5-1.5B-Instruct-4bit` collapses on raw wikitext
 // without the chat template, producing PPL ≈ 2×10⁷ and NIAH=0/12 — values
-// six orders of magnitude off a healthy ~10–15 baseline (see issue #506 and
-// issue #493 comment). The relative turbo4asym gate would still pass in that
+// six orders of magnitude off a healthy ~10–15 baseline (and comment). The relative turbo4asym gate would still pass in that
 // case (both fp16 and turbo degenerate together), making the test a
 // meaningless noise check rather than a real quality signal.
 //
@@ -610,7 +609,7 @@ fn test_qwen25_15b_quality_gate() {
         (QWEN25_15B_BASE_PPL_MIN..=QWEN25_15B_BASE_PPL_MAX).contains(&ppl_fp16),
         "Qwen2.5-1.5B base fp16 PPL {ppl_fp16:.4} is outside the healthy raw-wikitext \
          range [{QWEN25_15B_BASE_PPL_MIN:.1}, {QWEN25_15B_BASE_PPL_MAX:.1}]. \
-         This gate exists to catch the degenerate instruct-fixture behavior from issue #506."
+         This gate exists to catch the degenerate instruct-fixture behavior."
     );
     assert!(
         niah_baseline > 0,
@@ -830,7 +829,7 @@ fn apply_rotation_to_data(data: &[f32], seed: u32) -> Vec<f32> {
 /// validates that `turbo4_v_rotate` is numerically correct and that the rotation
 /// does not *increase* kurtosis.
 ///
-/// Used by: `tests/turbo_kv_e2e.rs` (issue #475 kurtosis sanity check).
+/// Used by: `tests/turbo_kv_e2e.rs` (kurtosis sanity check).
 #[test]
 #[ignore = "requires at least one non-quantized (bf16/fp16) model checkout: \
             qwen2.5-0.5b-bf16 preferred. Quantized 4bit models are rejected \
@@ -847,7 +846,7 @@ fn test_rotation_kurtosis_sanity() {
         "gemma3n-e4b-bf16",
         "Qwen2.5-7B-Instruct-4bit",
         "qwen2.5-7b-4bit",
-        // base model used by B3 quality gate since issue #506
+        // base model used by B3 quality gate since
         "Qwen2.5-1.5B-4bit",
         "Qwen2.5-1.5B-Instruct-4bit",
         "Meta-Llama-3.1-8B-Instruct-4bit",
@@ -899,7 +898,7 @@ fn test_rotation_kurtosis_sanity() {
 }
 
 // ---------------------------------------------------------------------------
-// VLM (multimodal) quality gates — issue #510
+// VLM (multimodal) quality gates
 // ---------------------------------------------------------------------------
 
 // VLM-specific PPL sizing.
@@ -1244,9 +1243,9 @@ fn measure_vlm_image_token_kurtosis(model_dir_name: &str) -> Option<(f64, f64, u
     Some((kurt_before, kurt_after, image_len))
 }
 
-/// VLM image-token K-side kurtosis sanity test (issue #510).
+/// VLM image-token K-side kurtosis sanity test.
 ///
-/// Issue #475 establishes that the WHT + sign-flip rotation drops K-side
+/// establishes that the WHT + sign-flip rotation drops K-side
 /// kurtosis on **text** activations (TurboQuant+ paper reports ~900 → ~2.9
 /// on Qwen3-1.7B). This test repeats the measurement on the **image-token**
 /// slice of the K cache for every locally-cached VLM checkpoint to confirm
@@ -1272,7 +1271,7 @@ fn measure_vlm_image_token_kurtosis(model_dir_name: &str) -> Option<(f64, f64, u
 fn test_vlm_image_token_kurtosis() {
     // Order matters: smaller checkpoints first so the soft-skip walk is fast
     // when only the larger ones are available; aya-vision-8b and gemma-4-e4b
-    // are both healthy 4-bit VLM fixtures shipped during the #517 follow-up.
+    // are both healthy 4-bit VLM fixtures shipped during the follow-up.
     let candidates = [
         "qwen2-vl-2b-4bit",
         "qwen2.5-vl-3b-4bit",
@@ -1302,7 +1301,7 @@ fn test_vlm_image_token_kurtosis() {
         return;
     }
 
-    eprintln!("\n  Summary: VLM image-token K-side kurtosis pre/post WHT rotation (issue #510)");
+    eprintln!("\n  Summary: VLM image-token K-side kurtosis pre/post WHT rotation");
     for (model_name, kurt_before, kurt_after, image_tokens) in &results {
         eprintln!(
             "    {model_name:<24} n={image_tokens:<5} before={kurt_before:>10.4} → after={kurt_after:>8.4} \
@@ -1336,9 +1335,9 @@ fn test_vlm_image_token_kurtosis() {
     }
 }
 
-/// VLM Turbo4Asym B3 quality gate — Qwen2-VL 2B, text-only path (issue #510).
+/// VLM Turbo4Asym B3 quality gate — Qwen2-VL 2B, text-only path.
 ///
-/// Surrogate for the Qwen2.5-VL 3B fixture suggested in #510: same Qwen-VL
+/// Surrogate for the Qwen2.5-VL 3B fixture suggested in same Qwen-VL
 /// architecture (insert/expand image tokens via mRoPE-aware runtime) at a
 /// smaller size that loads under typical M1 Ultra dev RAM. Gates the relative
 /// PPL increase ≤ [`PPL_GATE_REL`] and NIAH retrieval not regressing.
@@ -1370,11 +1369,11 @@ fn test_qwen2_vl_2b_quality_gate() {
     );
 }
 
-/// VLM Turbo4Asym B3 quality gate — Aya-Vision 8B, text-only path (issue #510).
+/// VLM Turbo4Asym B3 quality gate — Aya-Vision 8B, text-only path.
 ///
 /// Aya-Vision is a Cohere2-decoder + SigLIP vision tower checkpoint (the
 /// "Standard" VLM family in `LoadedModel::vlm_runtime`). Together with
-/// Qwen2-VL 2B this satisfies the "at least 2 VLM models" criterion in #510.
+/// Qwen2-VL 2B this satisfies the "at least 2 VLM models" criterion.
 #[test]
 #[ignore = "requires aya-vision-8b weights — \
             run with --release -- --ignored test_aya_vision_8b_quality_gate --nocapture"]

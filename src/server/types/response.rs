@@ -516,7 +516,7 @@ pub struct SlotInfo {
 mod tests {
     use super::*;
 
-    // -- Usage serialization (issue #423) ------------------------------------
+    // -- Usage serialization ------------------------------------
 
     /// When `prompt_tokens_details` is `None` the field must be omitted from
     /// the JSON output entirely (wire compatibility for disabled-cache mode).

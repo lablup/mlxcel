@@ -418,7 +418,7 @@ fn build_raw_json_messages_emits_empty_content_for_missing_field() {
 }
 
 // ---------------------------------------------------------------------------
-// Issue #410 — preserve_thinking plumbing through prepare_chat_request
+// preserve_thinking plumbing through prepare_chat_request
 // ---------------------------------------------------------------------------
 
 use crate::server::chat_template_kwargs::ChatTemplateKwargs;
@@ -926,7 +926,7 @@ async fn rolling_checkpoint_ignores_pseudo_user_tool_response_anchor() {
 }
 
 // ---------------------------------------------------------------------------
-// Issue #422 — prompt_cache_key and user field deserialization round-trips
+// prompt_cache_key and user field deserialization round-trips
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -1048,7 +1048,7 @@ fn session_key_collapses_to_anonymous_sentinel_without_hints() {
 }
 
 // ---------------------------------------------------------------------------
-// Issue #422 — preserve_thinking defaulting when prompt cache is enabled
+// preserve_thinking defaulting when prompt cache is enabled
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -1127,7 +1127,7 @@ async fn prompt_cache_on_respects_explicit_false_via_extra_body() {
 #[tokio::test]
 async fn prompt_cache_off_preserves_pre_422_behavior() {
     // When the cache flag is off, the defaulting must NOT run. With no
-    // explicit preserve_thinking the pre-#422 behavior (rolling-checkpoint
+    // explicit preserve_thinking the earlier behavior (rolling-checkpoint
     // strip) applies.
     let request = three_turn_request_with_think_blocks();
     let processor = ChatTemplateProcessor::with_template(dump_template());
@@ -1136,7 +1136,7 @@ async fn prompt_cache_off_preserves_pre_422_behavior() {
         .unwrap();
     assert!(
         !prepared.prompt.contains("<think>"),
-        "cache off → pre-#422 strip remains the default"
+        "cache off → earlier strip remains the default"
     );
 }
 
@@ -1267,7 +1267,7 @@ async fn preserve_thinking_defaulting_logs_per_distinct_session() {
 }
 
 // ---------------------------------------------------------------------------
-// Issue #422 — tool-call request still produces a correct cache key
+// tool-call request still produces a correct cache key
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -1320,7 +1320,7 @@ fn tool_call_message_history_round_trips_and_digests() {
 }
 
 // ---------------------------------------------------------------------------
-// PR #600 review fix (HIGH-1): temp-file lifetime tied to PreparedChatRequest
+// review fix (HIGH-1): temp-file lifetime tied to PreparedChatRequest
 // ---------------------------------------------------------------------------
 
 /// A `data:video/...;base64,...` URL produces a server-owned temp file that

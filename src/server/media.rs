@@ -36,14 +36,14 @@ use super::types::ChatCompletionRequest;
 use super::types::request::{InputAudio, VideoUrl};
 
 /// Resolved video request item produced by
-/// [`extract_chat_video_paths_with_allowlist`] (issue #601).
+/// [`extract_chat_video_paths_with_allowlist`].
 ///
 /// Carries:
 /// * the [`VideoSource`] handle that downstream consumers must pass to
 ///   [`crate::multimodal::video::load_video_source`]. The fd-backed variant
 ///   is what closes the TOCTOU race against an attacker swapping the
 ///   resolved file for a symlink between the resolver's `canonicalize`
-///   and ffmpeg's `open` (issue #601);
+///   and ffmpeg's `open`;
 /// * the optional per-video FPS override from
 ///   [`crate::server::types::request::VideoUrl::fps`];
 /// * an optional [`TempFile`] guard that owns the cleanup of any
@@ -88,7 +88,7 @@ impl ResolvedVideo {
     /// request preparation logging. Subprocesses must still consume the
     /// [`VideoSource`] via [`Self::source`], not the path — passing the
     /// path to ffmpeg would re-introduce the canonicalise → ffmpeg-open
-    /// TOCTOU window the fd-based design closed (issue #601).
+    /// TOCTOU window the fd-based design closed.
     #[allow(dead_code)]
     pub(crate) fn canonical_path(&self) -> &Path {
         self.source.canonical_path()
@@ -191,12 +191,12 @@ pub(crate) async fn try_extract_chat_image_data(
 
 /// Environment variable holding the comma-separated list of canonical
 /// directories permitted to be referenced via `file://` URIs and bare local
-/// paths in `video_url` content blocks (issue #596).
+/// paths in `video_url` content blocks.
 ///
 /// Empty or unset = fail-closed: every local-filesystem video reference is
 /// rejected. Operators must opt in explicitly to enable file uploads.
 ///
-/// Issue #601 closed the canonicalise → ffmpeg-open TOCTOU window by
+/// closed the canonicalise → ffmpeg-open TOCTOU window by
 /// passing an opened fd down to ffmpeg. The startup helper
 /// [`scan_insecure_allowlist_dirs`] still flags world- or group-writable
 /// allowlist directories because a writable allowlist directory remains
@@ -205,7 +205,7 @@ pub(crate) async fn try_extract_chat_image_data(
 pub(crate) const VIDEO_DIR_ALLOWLIST_ENV: &str = "MLXCEL_VIDEO_DIR_ALLOWLIST";
 
 /// Resolve `video_url` content blocks from a chat request to opened video
-/// handles (issue #553, wired up in #596, hardened in #601).
+/// handles (wired up, hardened).
 ///
 /// For `file://` and bare local paths the path is canonicalised and
 /// validated against the directory allowlist from
@@ -213,7 +213,7 @@ pub(crate) const VIDEO_DIR_ALLOWLIST_ENV: &str = "MLXCEL_VIDEO_DIR_ALLOWLIST";
 /// and the fd retained** (Unix only). The fd is what subprocesses ultimately
 /// read from — never the path — so the dominant TOCTOU window
 /// (canonicalise → allowlist check → metadata → open) is closed at the
-/// kernel level (issue #601). `O_NOFOLLOW` hardens the narrowed
+/// kernel level. `O_NOFOLLOW` hardens the narrowed
 /// metadata→open window further: a symlink swap that occurs in that
 /// microsecond gap causes the open to return `ELOOP` rather than silently
 /// following the swapped link.
@@ -306,7 +306,7 @@ pub(crate) fn video_dir_allowlist_from_env() -> Vec<PathBuf> {
 /// Used by the server startup hook to surface a `tracing::warn!` when an
 /// operator opts into the video-URL feature with a loose-mode directory.
 /// The resolver in this module canonicalises, stats, and then **opens**
-/// the file (issue #601), passing the fd down to ffmpeg via `/dev/fd/N`,
+/// the file, passing the fd down to ffmpeg via `/dev/fd/N`,
 /// so the canonicalise → ffmpeg-open TOCTOU race is closed at the kernel
 /// level. The startup warning remains as defence-in-depth: a writable
 /// upload directory is still an operator-policy red flag (anyone with
@@ -404,7 +404,7 @@ async fn resolve_video_url(video: &VideoUrl, allowlist: &[PathBuf]) -> Option<Re
 /// [`VideoSource`]. On non-Unix targets the resolver falls back to the
 /// path-only variant.
 ///
-/// This is the heart of the issue #601 TOCTOU fix: the resolver opens the
+/// This is the heart of the TOCTOU fix: the resolver opens the
 /// file once, retains the fd, and surrenders that fd (via `/dev/fd/N`) to
 /// every subsequent ffmpeg/ffprobe invocation. Even if an attacker swaps
 /// the underlying path for a symlink to `/etc/passwd` between this open
@@ -477,9 +477,9 @@ async fn open_video_source(canonical: &Path, original_url: &str) -> Option<Video
 }
 
 /// Resolve a bare local path or the path component of a `file://` URI to a
-/// canonical, allowlisted, regular video file (issue #596).
+/// canonical, allowlisted, regular video file.
 ///
-/// Async-friendly variant (#596 follow-up): uses `tokio::fs::canonicalize` and
+/// Async-friendly variant (follow-up): uses `tokio::fs::canonicalize` and
 /// `tokio::fs::metadata` so a slow disk or NFS mount cannot stall a Tokio
 /// worker thread. Each `.await` boundary lets the runtime schedule other
 /// requests while the lookup is in flight.
@@ -572,7 +572,7 @@ async fn decode_video_data_uri(url: &str) -> Option<(PathBuf, TempFile)> {
 }
 
 /// Fetch a remote video URL with size enforcement applied **incrementally**
-/// (issue #596 hardening).
+/// (hardening).
 ///
 /// Implementation note — buffer-then-check is a DoS vector. `response.bytes()`
 /// would read the entire response body into memory before we could enforce
@@ -657,7 +657,7 @@ fn infer_video_extension(metadata: &str) -> &str {
 /// must remain on disk (e.g., until ffmpeg has finished probing it).
 ///
 /// Returning the guard alongside the path is the fix for the temp-file leak
-/// reported during PR #600 review: every previous version returned a bare
+/// reported during review: every previous version returned a bare
 /// `PathBuf` and relied on no-one to call cleanup explicitly. With the guard
 /// in place a panic, an early-return error path, or a normal completion all
 /// converge on the same cleanup behaviour.

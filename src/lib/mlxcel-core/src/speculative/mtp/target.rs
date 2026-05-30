@@ -21,10 +21,10 @@
 //!
 //! 1. A sink-aware verify forward that returns logits AND captures the
 //!    target's last-layer hidden + last full/SWA shared K/V slabs — this
-//!    is the Gemma 4 `forward_with_speculative_sinks` hook (#625).
+//!    is the Gemma 4 `forward_with_speculative_sinks` hook.
 //! 2. A per-sequence cache rollback that trims by `block_size - accepted - 1`
 //!    with per-row tail-zeroing for batched paths — this is the Gemma 4
-//!    `rollback_speculative_cache` hook (#625).
+//!    `rollback_speculative_cache` hook.
 //!
 //! Both hooks are Gemma-4-specific. Other model families (Llama, Qwen, …)
 //! do not implement them today. Surfacing them through a trait keeps
@@ -104,7 +104,7 @@ pub struct VerifyForwardOutput {
     /// Per-position log-probability data, aligned 1:1 with
     /// `target_tokens`. `None` when the caller's [`LogprobsConfig`] is
     /// disabled (zero-overhead path); `Some(vec)` with one entry per
-    /// verify position when logprobs are requested (issue #678). The
+    /// verify position when logprobs are requested. The
     /// round loop forwards the entries for *accepted* positions on to
     /// the burst's `finalize_burst_success` so speculative responses
     /// carry the same `TokenWithLogprobs` payload as the classic path.
@@ -228,7 +228,7 @@ pub trait MtpTarget {
     /// true it carries the first bonus's log-probability data computed
     /// from the same penalty-adjusted logits the bonus was sampled from
     /// — byte-identical to the classic decode path's first-token
-    /// logprobs (issue #678).
+    /// logprobs.
     ///
     /// **Cache state on return**: the target's per-sequence cache has
     /// `prompt.len()` entries (the prompt prefill). The bonus token is
@@ -279,7 +279,7 @@ pub trait MtpTarget {
     /// When disabled the impl MUST leave `VerifyForwardOutput::target_logprobs`
     /// as `None` (zero-overhead path); when enabled it populates one
     /// [`TokenLogprobData`] per verify position, aligned 1:1 with
-    /// `target_tokens` (issue #678).
+    /// `target_tokens`.
     fn verify_forward(
         &self,
         verify_input: &[i32],
@@ -322,7 +322,7 @@ pub trait MtpTarget {
     fn eos_token_ids(&self) -> Vec<i32>;
 
     // ------------------------------------------------------------
-    // Batched MTP path (B > 1) — issue #631.
+    // Batched MTP path (B > 1) —.
     // ------------------------------------------------------------
     //
     // The trait carries default impls that error out so existing single-batch
@@ -390,7 +390,7 @@ pub trait MtpTarget {
     /// The implementation MUST trim the caches by `block_size - max(accepted) - 1`
     /// (the global trim amount) and per-row zero the tail for rows whose
     /// accept count is below `max(accepted)`. This mirrors the Gemma 4
-    /// `Cache::zero_partial_accept_tail` hook (issue #655) and the
+    /// `Cache::zero_partial_accept_tail` hook and the
     /// `rollback_speculative_cache(..., accepted: &[i32], block_size)` API.
     #[allow(unused_variables)]
     fn verify_finalize_batched(
@@ -408,7 +408,7 @@ pub trait MtpTarget {
 }
 
 // ---------------------------------------------------------------------------
-// Batched MTP types (issue #631)
+// Batched MTP types
 // ---------------------------------------------------------------------------
 
 /// Output of [`MtpTarget::verify_forward_batched`] — per-row target argmax

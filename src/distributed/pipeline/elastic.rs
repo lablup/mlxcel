@@ -12,12 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Elastic pipeline repartitioning state machine (issue #349).
+//! Elastic pipeline repartitioning state machine.
 //!
 //! Drives the `Idle → Draining → Rebalancing → Resuming → Idle` flow behind
 //! `--enable-elastic-pp`. The coordinator owns the state and emits
 //! [`RepartitionEvent`] values for every transition so the metrics/obervability
-//! layer (issue #350) can surface them. All RPC / network fan-out (drain fan
+//! layer can surface them. All RPC / network fan-out (drain fan
 //! out, probe polling, reload) is performed by [`ElasticRuntimeDriver`]
 //! implementations — this module is intentionally transport-agnostic so it
 //! can be unit-tested deterministically with fake drivers.
@@ -235,7 +235,7 @@ pub struct RepartitionEvent {
 /// Sink that receives [`RepartitionEvent`] values as they are emitted.
 ///
 /// The default wiring forwards events to the pipeline metrics subsystem
-/// (issue #350 adds counters + histograms). Tests can plug in a
+/// (adds counters + histograms). Tests can plug in a
 /// [`RecordingEventSink`] to capture emitted events for assertion.
 pub trait RepartitionEventSink: Send + Sync {
     fn record_event(&self, event: &RepartitionEvent);

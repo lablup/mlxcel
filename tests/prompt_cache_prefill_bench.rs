@@ -13,7 +13,6 @@
 // limitations under the License.
 //
 //! Prefill-latency benchmark for the cross-request prompt-prefix KV cache
-//! (epic #416, sub-issue #426).
 //!
 //! This harness is intentionally test-shaped (not a Criterion bench) because
 //! the project does not yet depend on `criterion` and the spec explicitly

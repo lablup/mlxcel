@@ -150,7 +150,7 @@ pub enum ContentPart {
     /// and `http(s)` URLs)
     #[serde(rename = "image_url")]
     ImageUrl { image_url: ImageUrl },
-    /// Video URL content for VLMs that support video inputs (issue #553).
+    /// Video URL content for VLMs that support video inputs.
     /// Mirrors the `image_url` shape for symmetry. Accepts local paths,
     /// `file://...`, and (where the model supports it) `http(s)://...`.
     /// Frame extraction relies on `ffmpeg` being available on the server
@@ -171,7 +171,7 @@ pub struct ImageUrl {
     pub url: String,
 }
 
-/// Video URL reference (issue #553). Same wire shape as [`ImageUrl`] for
+/// Video URL reference. Same wire shape as [`ImageUrl`] for
 /// symmetry with the OpenAI vision content blocks.
 ///
 /// `fps` is an optional sampling rate. When omitted, the server falls
@@ -254,7 +254,7 @@ impl MessageContent {
         }
     }
 
-    /// Extract video URL references from multimodal content (issue #553).
+    /// Extract video URL references from multimodal content.
     pub fn video_urls(&self) -> Vec<VideoUrl> {
         match self {
             MessageContent::Text(_) => Vec::new(),
@@ -371,7 +371,7 @@ pub struct SamplingParams {
     /// Presence penalty (0.0 = disabled) - penalizes based on presence
     pub presence_penalty: Option<f32>,
 
-    // Issue #409: thinking-token budget (Qwen3-family reasoning cap).
+    // thinking-token budget (Qwen3-family reasoning cap).
     //
     // Three aliases accepted, first non-None wins (see
     // `thinking_budget::pick_budget_alias`). llama.cpp-compatible primary
@@ -425,7 +425,7 @@ pub struct ChatCompletionRequest {
     #[serde(default)]
     pub parallel_tool_calls: Option<bool>,
 
-    /// Issue #410: top-level `chat_template_kwargs` (llama.cpp shape).
+    /// top-level `chat_template_kwargs` (llama.cpp shape).
     ///
     /// A JSON object whose keys are forwarded as Jinja template kwargs when
     /// rendering the conversation. Primary shape; wins over nested
@@ -436,7 +436,7 @@ pub struct ChatCompletionRequest {
     #[serde(default)]
     pub chat_template_kwargs: Option<serde_json::Map<String, serde_json::Value>>,
 
-    /// Issue #410: nested `extra_body` compatibility (vLLM / manual callers).
+    /// nested `extra_body` compatibility (vLLM / manual callers).
     ///
     /// Some callers send an actual top-level `extra_body` object. Only the
     /// keys we currently recognize are read back out; unknown keys are
@@ -444,7 +444,7 @@ pub struct ChatCompletionRequest {
     #[serde(default)]
     pub extra_body: Option<serde_json::Map<String, serde_json::Value>>,
 
-    /// Issue #422: OpenAI-compatible prompt-cache key hint.
+    /// OpenAI-compatible prompt-cache key hint.
     ///
     /// Clients can send this to pin a conversation to a specific prompt-cache
     /// session bucket. When present it wins over the standard OpenAI `user`
@@ -460,7 +460,7 @@ pub struct ChatCompletionRequest {
     #[serde(default)]
     pub prompt_cache_key: Option<String>,
 
-    /// OpenAI-standard stable end-user identifier (issue #422).
+    /// OpenAI-standard stable end-user identifier.
     ///
     /// Used as a session-bucket fallback for the prompt-prefix cache when
     /// `prompt_cache_key` is not supplied. See
@@ -471,7 +471,7 @@ pub struct ChatCompletionRequest {
     #[serde(default)]
     pub user: Option<String>,
 
-    /// Issue #410: OpenAI SDK `extra_body={...}` flattened into the request root.
+    /// OpenAI SDK `extra_body={...}` flattened into the request root.
     ///
     /// The official OpenAI Python client merges `extra_body` into the top-level
     /// JSON object instead of emitting a nested `"extra_body": {...}` wrapper.
@@ -480,7 +480,7 @@ pub struct ChatCompletionRequest {
     #[serde(default, flatten)]
     pub extra_body_fields: serde_json::Map<String, serde_json::Value>,
 
-    /// Issue #550: OpenAI-compatible structured-output spec.
+    /// OpenAI-compatible structured-output spec.
     ///
     /// Accepts the OpenAI Chat Completions shape:
     ///
@@ -525,7 +525,7 @@ pub struct CompletionRequest {
     /// Number of top log-probability alternatives to return (legacy format: 0–5)
     #[serde(default)]
     pub logprobs: Option<u8>,
-    /// Issue #550: OpenAI-compatible structured-output spec; see the
+    /// OpenAI-compatible structured-output spec; see the
     /// matching field on [`ChatCompletionRequest`] for shape details.
     #[serde(default)]
     pub response_format: Option<serde_json::Value>,
@@ -554,7 +554,7 @@ impl ChatCompletionRequest {
         }
     }
 
-    /// Resolve the request-level `prompt_cache_key` (issue #422).
+    /// Resolve the request-level `prompt_cache_key`.
     ///
     /// Precedence (first non-empty wins):
     ///   1. Top-level `prompt_cache_key`.
@@ -588,7 +588,7 @@ impl ChatCompletionRequest {
         None
     }
 
-    /// Resolve the request-level OpenAI-standard `user` identifier (#422).
+    /// Resolve the request-level OpenAI-standard `user` identifier.
     ///
     /// Same precedence rules as [`Self::resolve_prompt_cache_key`]: top-level
     /// field, then flattened `extra_body`, then nested `extra_body`. Empty
@@ -656,7 +656,7 @@ impl ChatCompletionRequest {
             .collect()
     }
 
-    /// Extract all video URL references from messages (issue #553).
+    /// Extract all video URL references from messages.
     pub fn video_urls(&self) -> Vec<VideoUrl> {
         self.messages
             .iter()
@@ -705,7 +705,7 @@ pub struct NativeCompletionRequest {
     /// DRY sequence breaker token IDs
     pub dry_sequence_breakers: Option<Vec<i32>>,
 
-    // Issue #409: thinking-token budget (Qwen3-family reasoning cap).
+    // thinking-token budget (Qwen3-family reasoning cap).
     /// Primary / llama.cpp-compatible name for the reasoning-token cap.
     pub thinking_budget_tokens: Option<i32>,
     /// vLLM-compatible alias for `thinking_budget_tokens`.
@@ -713,7 +713,7 @@ pub struct NativeCompletionRequest {
     /// Qwen-official alias for `thinking_budget_tokens`.
     pub thinking_budget: Option<i32>,
 
-    /// Issue #550: structured-output `response_format` is **not** supported
+    /// structured-output `response_format` is **not** supported
     /// on the native llama-server `/completion` endpoint. The field is
     /// captured here only so the route can reject the request with a clear
     /// 400 instead of silently ignoring the schema and emitting

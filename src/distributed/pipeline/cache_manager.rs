@@ -249,7 +249,7 @@ impl fmt::Display for RejectionReason {
 impl RejectionReason {
     /// Short, low-cardinality label for metric dimensions and traces.
     ///
-    /// Used by: `/metrics` admission rejection counters (#350),
+    /// Used by: `/metrics` admission rejection counters,
     /// chrome-tracing rejection events.
     pub fn metric_label(&self) -> &'static str {
         match self {
@@ -262,7 +262,7 @@ impl RejectionReason {
 }
 
 /// Enriched OOM diagnostic produced by [`coordinated_admission_with_attribution`]
-/// (issue #350). Operators see which stage rejected, why, and where the
+/// Operators see which stage rejected, why, and where the
 /// offending stage's KV occupancy sits at the moment of rejection.
 ///
 /// Used by: server HTTP error path, `/metrics` counters, chrome-tracing
@@ -1013,7 +1013,7 @@ pub fn broadcast_2d_eviction(
 /// mutation is performed anywhere, mirroring the existing dry-run-then-
 /// commit contract.
 ///
-/// Used by: `/metrics` admission rejection pipeline (#350).
+/// Used by: `/metrics` admission rejection pipeline.
 pub fn coordinated_admission_with_attribution(
     managers: &mut [&mut PipelineCacheManager],
     req: &CacheAdmissionRequest,

@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Tests for issue #550 structured-output preparation.
+//! Tests structured-output preparation.
 //!
 //! These tests focus on the request-shape parser and the basic Matcher
 //! lifecycle — they intentionally avoid running real model inference so they

@@ -52,12 +52,12 @@ pub struct ServerStartupInput {
     pub timeout: u64,
     pub draft_model_path: Option<PathBuf>,
     pub draft_max: usize,
-    /// Issue #630: explicit drafter-kind override from `--draft-kind`.
+    /// explicit drafter-kind override from `--draft-kind`.
     /// `None` means "auto-detect from the drafter's `config.json`" when
     /// `draft_model_path` is supplied; otherwise the field is inert and
     /// the classic [`crate::SpeculativeGenerator`] path is used.
     pub draft_kind: Option<String>,
-    /// Issue #630: explicit draft-block-size override from
+    /// explicit draft-block-size override from
     /// `--draft-block-size`. `None` means "use the per-kind default"
     /// ([`crate::cli::speculative_args::default_block_size_for_kind`])
     /// once the kind has been resolved.
@@ -121,7 +121,7 @@ pub struct ServerStartupInput {
     /// Micro-batch size for in-process pipeline execution.
     pub pp_micro_batch_size: usize,
 
-    // Zero-config multi-machine pipeline bring-up (issue #342).
+    // Zero-config multi-machine pipeline bring-up.
     /// When set (>= 2), run the zero-config coordinator bring-up and populate
     /// `distributed_config` with a freshly emitted TOML.
     pub pp_auto: Option<u32>,
@@ -160,7 +160,7 @@ pub struct ServerStartupInput {
     pub max_image_height: u32,
     pub max_image_decode_alloc_bytes: u64,
 
-    // Elastic pipeline-parallel repartitioning (issue #349).
+    // Elastic pipeline-parallel repartitioning.
     /// Enable `--enable-elastic-pp`. Off by default.
     pub enable_elastic_pp: bool,
     /// Drain timeout seconds for elastic repartitioning.
@@ -170,7 +170,7 @@ pub struct ServerStartupInput {
     /// Cool-down seconds between memory-pressure triggers.
     pub elastic_pp_cool_down: u64,
 
-    // Observability (issue #350).
+    // Observability.
     /// Requested port for the Prometheus `/metrics` endpoint. `Some(p)`
     /// enables the endpoint; `p` is informational only in v1 because the
     /// endpoint is multiplexed onto the main HTTP port.
@@ -178,7 +178,7 @@ pub struct ServerStartupInput {
     /// Chrome-tracing JSON output path for the pipeline scheduler.
     pub debug_pp_trace: Option<PathBuf>,
 
-    /// Axis B Epic #362 (B8): already-resolved server-wide language-bias
+    /// Axis B (B8): already-resolved server-wide language-bias
     /// configuration, if the CLI provided `--lang-bias` / `--lang-bias-config`.
     ///
     /// The binary's `serve` command calls `LangBiasCliArgs::resolve()` before
@@ -189,7 +189,7 @@ pub struct ServerStartupInput {
     /// the env-var and CLI paths share a single normalization point.
     pub lang_bias_config: Option<LangBiasConfig>,
 
-    /// Issue #409: server-wide thinking-token budget for Qwen3-family models.
+    /// server-wide thinking-token budget for Qwen3-family models.
     ///
     /// Raw `i32` value preserving llama.cpp semantics:
     /// - `-1` (default) — unrestricted reasoning (bit-exact baseline).
@@ -203,7 +203,7 @@ pub struct ServerStartupInput {
     /// [`env_fallback_reasoning_budget`] before this struct is constructed.
     pub reasoning_budget: i32,
 
-    /// Issue #410: raw JSON string for the default chat-template kwargs.
+    /// raw JSON string for the default chat-template kwargs.
     ///
     /// Mirrors llama.cpp's `--chat-template-kwargs` flag and the
     /// `LLAMA_ARG_CHAT_TEMPLATE_KWARGS` env var. `None` or an empty string
@@ -218,7 +218,7 @@ pub struct ServerStartupInput {
     /// consistently.
     pub chat_template_kwargs: Option<String>,
 
-    // Issue #484 (B11): llama-server-compatible K/V cache type split flags.
+    // (B11): llama-server-compatible K/V cache type split flags.
     //
     // These hold the raw CLI strings from `--cache-type-k` / `--cache-type-v`
     // (and their env var aliases `LLAMA_ARG_CACHE_TYPE_K` /
@@ -246,7 +246,7 @@ pub struct ServerStartupInput {
     /// `None` means the flag was not provided (= default FP16).
     pub kv_cache_mode_legacy: Option<String>,
 
-    // Issue #424: prompt-prefix KV cache knobs.
+    // prompt-prefix KV cache knobs.
     // Each field stores the raw CLI/env value before normalization into
     // `PromptCacheConfig`. `None` on the `Option`-typed fields means "not
     // provided by the CLI flag"; defaults come from `PromptCacheConfig::default()`.
@@ -275,14 +275,14 @@ pub struct ServerStartupInput {
     /// Also accepts `MLXCEL_PROMPT_CACHE_MIN_PREFIX`.
     pub prompt_cache_min_prefix: Option<usize>,
 
-    // Issue #552: Automatic Prefix Caching (APC) knobs.
+    // Automatic Prefix Caching (APC) knobs.
     //
     // APC layers block-granularity hash chains on top of the existing
     // prompt-prefix cache so finer-grained reuse becomes possible. The
     // raw fields here are normalised into [`super::prompt_cache::ApcConfig`]
     // by [`build_prompt_cache_config`].
     /// `--apc-enabled`: master switch for APC. Defaults to `false` so
-    /// behaviour matches the pre-#552 server. Also accepts
+    /// behaviour matches the earlier server. Also accepts
     /// `APC_ENABLED` (parity with upstream `mlx-vlm`).
     pub apc_enabled: bool,
 
@@ -299,7 +299,7 @@ pub struct ServerStartupInput {
     /// compiled-in default (sha256)". Also accepts `APC_HASH`.
     pub apc_hash: Option<String>,
 
-    // Issue #545: continuous-batching KV quantization knobs.
+    // continuous-batching KV quantization knobs.
     //
     // These mirror the upstream `mlx-vlm` PR #1030 server CLI flags. The
     // raw fields are kept here in [`ServerStartupInput`] form so binaries
@@ -324,13 +324,11 @@ pub struct ServerStartupInput {
     /// flag without `--kv-bits` does not enable quantization on its own —
     /// `kv_bits` is the master switch.
     pub kv_quant_scheme: Option<String>,
-    /// `--kv-skip-last-layer` value. Defaults to `true` (the
-    /// gemma-4-31b-style last-layer skip is on by default per the
-    /// issue #545 acceptance criterion). Set to `false` to opt out
+    /// `--kv-skip-last-layer` value. Defaults to `true` (the gemma-4-31b-style last-layer skip is on by default per the acceptance criterion). Set to `false` to opt out
     /// for benchmarking.
     pub kv_skip_last_layer: bool,
 
-    // Issue #603: maximum KV cache size for plain (non-sliding) caches.
+    // maximum KV cache size for plain (non-sliding) caches.
     //
     // Mirrors upstream mlx-lm's `--max-kv-size` flag on `BatchGenerator`.
     // `0` (the default) preserves the legacy unbounded behaviour. Any
@@ -350,18 +348,18 @@ pub struct ServerStartupInput {
     /// `--max-kv-size` value (`0` = disabled, the default).
     pub max_kv_size: usize,
 
-    /// Issue #622: `--responses-store-max-entries` value (`0` disables
+    /// `--responses-store-max-entries` value (`0` disables
     /// the OpenAI Responses API response store entirely).
     pub responses_store_max_entries: usize,
-    /// Issue #622: `--responses-store-ttl-secs` value (`0` disables TTL).
+    /// `--responses-store-ttl-secs` value (`0` disables TTL).
     pub responses_store_ttl_secs: u64,
-    /// Issue #622: `--conversation-store-max-entries` value (`0` disables
+    /// `--conversation-store-max-entries` value (`0` disables
     /// the OpenAI Responses API conversation transcript store entirely).
     pub conversation_store_max_entries: usize,
-    /// Issue #622: `--conversation-store-ttl-secs` value (`0` disables TTL).
+    /// `--conversation-store-ttl-secs` value (`0` disables TTL).
     pub conversation_store_ttl_secs: u64,
 
-    /// Issue #371 (A4): path to a YAML weight-load surgery configuration.
+    /// (A4): path to a YAML weight-load surgery configuration.
     ///
     /// `None` (the default) keeps the server on the bit-exact baseline
     /// weight-load path — no surgery crate work, no observable
@@ -386,14 +384,14 @@ impl ServerStartupInput {
     ///
     /// Returns an error when any edge input has a malformed shape that we
     /// cannot reasonably paper over at runtime. Today the only hard-fail
-    /// input is `--chat-template-kwargs` (issue #410) because a malformed
+    /// input is `--chat-template-kwargs` because a malformed
     /// JSON object cannot be silently "ignored" without degrading into a
     /// confusing state where the operator thinks they configured kwargs but
     /// didn't.
     pub fn into_startup_config(self) -> anyhow::Result<ServerStartupConfig> {
         let resolution =
             resolve_prefill_chunk_size(self.prefill_chunk_size, self.batch_size, self.ubatch_size);
-        // Issue #409: resolve the server-wide thinking budget once, up-front.
+        // resolve the server-wide thinking budget once, up-front.
         // Invalid values are logged and treated as unbounded so the server
         // still starts (per-request errors are surfaced as 400s at the route).
         let reasoning_budget = match ThinkingBudget::from_raw_i32(self.reasoning_budget) {
@@ -409,15 +407,15 @@ impl ServerStartupInput {
                 None
             }
         };
-        // Issue #410: resolve the server-wide chat-template kwargs. Invalid
+        // resolve the server-wide chat-template kwargs. Invalid
         // JSON is a hard failure (see doc comment above) — return early with
         // a clear error that the binary will surface as an exit code.
         let chat_template_kwargs =
             resolve_server_default_kwargs(self.chat_template_kwargs.as_deref())
                 .map_err(|e| anyhow::anyhow!("--chat-template-kwargs: {e}"))?;
-        // Issue #424: build PromptCacheConfig from raw CLI/env-resolved values.
+        // build PromptCacheConfig from raw CLI/env-resolved values.
         // Any field left at `None` picks up the compiled-in default.
-        // Issue #552: layer APC config on top.
+        // layer APC config on top.
         let prompt_cache = build_prompt_cache_config(
             self.prompt_cache_enabled,
             self.prompt_cache_capacity_bytes,
@@ -431,7 +429,7 @@ impl ServerStartupInput {
         )
         .map_err(|e| anyhow::anyhow!("--apc-hash: {e}"))?;
 
-        // Issue #484 (B11): resolve the effective KV cache mode from split flags,
+        // (B11): resolve the effective KV cache mode from split flags,
         // legacy shorthand, or the default (FP16).
         let kv_cache_mode = resolve_kv_cache_mode(
             self.cache_type_k.as_deref(),
@@ -440,7 +438,7 @@ impl ServerStartupInput {
         )
         .map_err(|e| anyhow::anyhow!("KV cache mode error: {e}"))?;
 
-        // Issue #545: resolve the batch KV quantization config from the
+        // resolve the batch KV quantization config from the
         // new `--kv-bits` / `--kv-group-size` / `--kv-quant-scheme` /
         // `--kv-skip-last-layer` flags. When `kv_bits == 0` this falls
         // through to the disabled default which is bit-exact equivalent
@@ -453,7 +451,7 @@ impl ServerStartupInput {
         )
         .map_err(|e| anyhow::anyhow!("batch KV cache quant error: {e}"))?;
 
-        // Issue #603 H1: validate `--max-kv-size` bounds before we lower
+        // H1: validate `--max-kv-size` bounds before we lower
         // the raw `usize` into the semantic `Option<usize>` downstream.
         //
         // The scheduler casts this value to `i32` when computing
@@ -479,7 +477,7 @@ impl ServerStartupInput {
             timeout: self.timeout,
             draft_model_path: self.draft_model_path,
             draft_max: self.draft_max,
-            // Issue #630: forward the new speculative-decoding selector
+            // forward the new speculative-decoding selector
             // flags through the normalization step verbatim. Parsing the
             // raw `draft_kind` string into a `DrafterKind` and resolving
             // it against the drafter's `config.json` happens later, at
@@ -557,16 +555,16 @@ impl ServerStartupInput {
             prompt_cache,
             kv_cache_mode,
             batch_kv_quant,
-            // Issue #603: lower the raw `usize` (0 = disabled) into a
+            // lower the raw `usize` (0 = disabled) into a
             // semantic `Option<usize>` after `resolve_max_kv_size` has
             // validated upper and lower bounds (H1 fix).
             max_kv_size: resolved_max_kv_size,
-            // Issue #622: forward the Responses-API store limits.
+            // forward the Responses-API store limits.
             responses_store_max_entries: self.responses_store_max_entries,
             responses_store_ttl_secs: self.responses_store_ttl_secs,
             conversation_store_max_entries: self.conversation_store_max_entries,
             conversation_store_ttl_secs: self.conversation_store_ttl_secs,
-            // Issue #371 (A4): forward the surgery YAML path verbatim.
+            // (A4): forward the surgery YAML path verbatim.
             // start_server() parses the YAML and installs the pipeline
             // exactly once before spawning the model worker.
             #[cfg(feature = "surgery")]
@@ -575,7 +573,7 @@ impl ServerStartupInput {
     }
 }
 
-/// Issue #603 H1: validate `--max-kv-size` (and `LLAMA_ARG_MAX_KV_SIZE`)
+/// H1: validate `--max-kv-size` (and `LLAMA_ARG_MAX_KV_SIZE`)
 /// against the operational limits enforced by the scheduler.
 ///
 /// Returns:
@@ -635,7 +633,7 @@ pub use crate::cli::turbo_args::{
     env_fallback_cache_type_k, env_fallback_cache_type_v, resolve_kv_cache_mode,
 };
 
-// ── Issue #545 — batched KV-cache quantization knobs ─────────────────────────
+// ── — batched KV-cache quantization knobs ─────────────────────────
 
 /// Resolve the [`BatchKvQuantConfig`] from the raw CLI string fields.
 ///
@@ -687,7 +685,7 @@ pub fn resolve_batch_kv_quant_config(
 }
 
 /// Apply `LLAMA_ARG_KV_BITS` env var fallback to the raw `--kv-bits` CLI
-/// value (issue #545).
+/// value.
 ///
 /// Precedence rule: CLI flag beats env var.
 ///
@@ -725,7 +723,7 @@ pub fn env_fallback_kv_bits(value: &mut i32) {
 }
 
 /// Apply `LLAMA_ARG_KV_GROUP_SIZE` env var fallback to the raw
-/// `--kv-group-size` CLI value (issue #545).
+/// `--kv-group-size` CLI value.
 ///
 /// Same precedence rule as [`env_fallback_kv_bits`]. The CLI default is
 /// [`DEFAULT_KV_GROUP_SIZE`] (`64`); the env var only takes effect when
@@ -763,7 +761,7 @@ pub fn env_fallback_kv_group_size(value: &mut i32) {
 }
 
 /// Apply `LLAMA_ARG_KV_QUANT_SCHEME` env var fallback to the raw
-/// `--kv-quant-scheme` CLI value (issue #545).
+/// `--kv-quant-scheme` CLI value.
 ///
 /// Same precedence rule as [`env_fallback_cache_type_k`].
 pub fn env_fallback_kv_quant_scheme(value: &mut Option<String>) {
@@ -771,7 +769,7 @@ pub fn env_fallback_kv_quant_scheme(value: &mut Option<String>) {
 }
 
 /// Apply `LLAMA_ARG_KV_SKIP_LAST_LAYER` / `MLXCEL_KV_SKIP_LAST_LAYER` env
-/// var fallbacks to the raw `--kv-skip-last-layer` value (issue #545).
+/// var fallbacks to the raw `--kv-skip-last-layer` value.
 ///
 /// The CLI default is `true`. The env var only takes effect when the CLI
 /// value matches that default. Acceptable env values are
@@ -857,7 +855,7 @@ fn apply_optional_string_env_fallback(value: &mut Option<String>, key: &str, fla
 }
 
 /// Apply the `LLAMA_ARG_REASONING_BUDGET` env-var fallback to the raw CLI
-/// `--reasoning-budget` value (issue #409).
+/// `--reasoning-budget` value.
 ///
 /// Precedence rule (matches existing `LLAMA_ARG_*` precedence helpers):
 /// - CLI flag wins over env var.
@@ -900,7 +898,7 @@ pub fn env_fallback_lang_bias(args: &mut LangBiasCliArgs) {
 }
 
 /// Apply `LLAMA_ARG_LANG_BIAS_INCLUDE_BYTE_FRAGMENTS` env var fallback to the
-/// `include_byte_fragments` field (issue #405).
+/// `include_byte_fragments` field.
 ///
 /// Precedence rule: CLI flag beats env var, mirroring the B7 pattern for
 /// [`env_fallback_lang_bias`]. The env value is parsed permissively and
@@ -960,7 +958,7 @@ pub fn resolve_seed(seed: i64) -> Option<u64> {
     if seed < 0 { None } else { Some(seed as u64) }
 }
 
-// ── Issue #424 — prompt cache config resolution ──────────────────────────────
+// ── — prompt cache config resolution ──────────────────────────────
 
 /// Build a [`crate::server::prompt_cache::PromptCacheConfig`] from the raw
 /// values captured from CLI flags and env vars.
@@ -968,7 +966,7 @@ pub fn resolve_seed(seed: i64) -> Option<u64> {
 /// `None` for any numeric field falls back to the compiled-in default from
 /// [`crate::server::prompt_cache::PromptCacheConfig::default`].
 ///
-/// Issue #552: also accepts the APC knobs (`apc_enabled`, `apc_block_size`,
+/// also accepts the APC knobs (`apc_enabled`, `apc_block_size`,
 /// `apc_num_blocks`, `apc_hash`) and assembles them into the
 /// [`crate::server::prompt_cache::ApcConfig`] sub-struct. Returns an error
 /// when `apc_hash` is supplied but cannot be parsed.
@@ -1142,7 +1140,7 @@ pub fn env_fallback_prompt_cache_min_prefix(value: &mut Option<usize>) {
     );
 }
 
-// ── Issue #552 — Automatic Prefix Caching env-var fallbacks ─────────────────
+// ── — Automatic Prefix Caching env-var fallbacks ─────────────────
 //
 // Mirrors the upstream `mlx-vlm` env-var surface (`APC_ENABLED`,
 // `APC_BLOCK_SIZE`, `APC_NUM_BLOCKS`, `APC_HASH`) so operators migrating from

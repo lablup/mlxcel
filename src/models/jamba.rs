@@ -697,7 +697,7 @@ impl JambaMambaMixer {
         // Wrap slice in contiguous() to force MLX to materialize a fresh,
         // independent buffer. Without this, the slice is a lazy view that
         // retains a reference to the full padded_input allocation, causing a
-        // memory leak proportional to the sequence length. (issue #336)
+        // memory leak proportional to the sequence length.
         if let Some(c) = cache.as_deref_mut() {
             let padded_shape = mlxcel_core::array_shape(&padded_input);
             let len = padded_shape[1] as usize;

@@ -13,7 +13,7 @@
 // limitations under the License.
 //
 // Parity integration test for pipeline parallelism composed with LoRA
-// adapters (issue #347). The test runs two generations — a single-process
+// adapters. The test runs two generations — a single-process
 // `--adapter` run and a two-stage `--pp-size 2 --adapter` run — and asserts
 // that the decoded token stream matches bit-for-bit. It is `#[ignore]`d
 // because it requires a published Llama checkpoint and a paired LoRA

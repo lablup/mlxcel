@@ -147,7 +147,7 @@ fn metrics_summary_display() {
 }
 
 // -----------------------------------------------------------------------------
-// Elastic repartition counters (issue #349 emission path, #350 read path).
+// Elastic repartition counters (emission path read path).
 // -----------------------------------------------------------------------------
 
 mod repartition {
@@ -251,7 +251,7 @@ mod repartition {
 }
 
 // -----------------------------------------------------------------------------
-// Issue #350: activation latency histogram, admission rejection counters,
+// activation latency histogram, admission rejection counters,
 // stage utilization registry, and the top-level PipelineObservability
 // aggregator.
 // -----------------------------------------------------------------------------

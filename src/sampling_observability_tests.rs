@@ -14,7 +14,7 @@
 
 //! B9 — Observability unit tests for `mlxcel_core::sampling`.
 //!
-//! Covers the acceptance criteria in GitHub issue #381:
+//! Covers the acceptance criteria in GitHub
 //!
 //! - `metric_not_incremented_when_bias_empty` — empty `TokenBiasMap` leaves
 //!   both counters at zero after N sampling calls.
@@ -197,7 +197,7 @@ fn tokens_suppressed_metric_increments_only_on_neg_inf_top1() {
 }
 
 // ---------------------------------------------------------------------------
-// Issue #405 — byte-fragment suppression counter
+// byte-fragment suppression counter
 // ---------------------------------------------------------------------------
 
 /// When a `-inf`-suppressed top-1 token was tagged via

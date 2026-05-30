@@ -150,17 +150,17 @@ fn build_startup_input(mut args: crate::ServeArgs) -> anyhow::Result<ServerStart
     // for the full precondition.
     args.turbo.apply_to_environment();
 
-    // Axis B Epic #362 (B7): apply `LLAMA_ARG_LANG_BIAS` env-var fallback
+    // Axis B (B7): apply `LLAMA_ARG_LANG_BIAS` env-var fallback
     // before resolving, so env-supplied values flow through the same
     // validation path as CLI flags. CLI flag wins on conflict.
     env_fallback_lang_bias(&mut args.lang_bias);
-    // Issue #405 — env-var fallback for the byte-fragment opt-in flag.
+    // env-var fallback for the byte-fragment opt-in flag.
     env_fallback_lang_bias_include_byte_fragments(&mut args.lang_bias);
-    // Issue #409 — env-var fallback for the thinking-budget default.
+    // env-var fallback for the thinking-budget default.
     env_fallback_reasoning_budget(&mut args.reasoning_budget);
-    // Issue #410 — env-var fallback for the chat-template kwargs default.
+    // env-var fallback for the chat-template kwargs default.
     env_fallback_chat_template_kwargs(&mut args.chat_template_kwargs);
-    // Issue #424 — env-var fallbacks for prompt-cache knobs.
+    // env-var fallbacks for prompt-cache knobs.
     env_fallback_prompt_cache_enabled(
         &mut args.prompt_cache_enabled,
         long_cli_flag_was_set("prompt-cache-enabled"),
@@ -169,18 +169,18 @@ fn build_startup_input(mut args: crate::ServeArgs) -> anyhow::Result<ServerStart
     env_fallback_prompt_cache_max_entries(&mut args.prompt_cache_max_entries);
     env_fallback_prompt_cache_ttl(&mut args.prompt_cache_ttl);
     env_fallback_prompt_cache_min_prefix(&mut args.prompt_cache_min_prefix);
-    // Issue #552 — env-var fallbacks for the APC knobs.
+    // env-var fallbacks for the APC knobs.
     env_fallback_apc_enabled(&mut args.apc_enabled, long_cli_flag_was_set("apc-enabled"));
     env_fallback_apc_block_size(&mut args.apc_block_size);
     env_fallback_apc_num_blocks(&mut args.apc_num_blocks);
     env_fallback_apc_hash(&mut args.apc_hash);
-    // Issue #484 (B11): env-var fallbacks for KV cache type split flags.
+    // (B11): env-var fallbacks for KV cache type split flags.
     // The clap `env = "..."` attribute already reads these env vars; the
     // explicit calls below maintain the warn-on-conflict pattern used by
     // other LLAMA_ARG_* pairs.
     env_fallback_cache_type_k(&mut args.turbo.cache_type_k);
     env_fallback_cache_type_v(&mut args.turbo.cache_type_v);
-    // Issue #545: env-var fallbacks for the continuous-batching KV
+    // env-var fallbacks for the continuous-batching KV
     // quantization knobs. The flags themselves live in
     // `mlxcel::cli::batch_quant_args::BatchKvQuantArgs` (flattened on
     // `ServeArgs`); these helpers honor the warn-on-CLI-conflict pattern
@@ -190,7 +190,7 @@ fn build_startup_input(mut args: crate::ServeArgs) -> anyhow::Result<ServerStart
     env_fallback_kv_quant_scheme(&mut args.batch_quant.kv_quant_scheme);
     env_fallback_kv_skip_last_layer(&mut args.batch_quant.kv_skip_last_layer);
 
-    // Issue #630: env-var fallbacks for the speculative-decoding selector
+    // env-var fallbacks for the speculative-decoding selector
     // flags. `clap` already reads `LLAMA_ARG_DRAFT_KIND` /
     // `LLAMA_ARG_DRAFT_BLOCK_SIZE` via the `env = "..."` attr on each flag;
     // the helpers below layer the mlxcel-native `MLXCEL_DRAFT_KIND` /
@@ -199,7 +199,7 @@ fn build_startup_input(mut args: crate::ServeArgs) -> anyhow::Result<ServerStart
     env_fallback_draft_kind(&mut args.speculative.draft_kind);
     env_fallback_draft_block_size(&mut args.speculative.draft_block_size);
 
-    // Axis B Epic #362 (B8): resolve --lang-bias / --lang-bias-config early so
+    // Axis B (B8): resolve --lang-bias / --lang-bias-config early so
     // errors surface before the server starts. Empty resolution = None =
     // baseline bit-exact path.
     let lang_bias_config = args
@@ -221,7 +221,7 @@ fn build_startup_input(mut args: crate::ServeArgs) -> anyhow::Result<ServerStart
         timeout: args.timeout,
         draft_model_path: args.draft_model,
         draft_max: args.draft_max,
-        // Issue #630: forward the speculative-decoding selector flags
+        // forward the speculative-decoding selector flags
         // resolved above via env-var fallbacks. Reconciliation into a
         // typed `DrafterKind` happens later, at the dispatch site.
         draft_kind: args.speculative.draft_kind,
@@ -295,40 +295,40 @@ fn build_startup_input(mut args: crate::ServeArgs) -> anyhow::Result<ServerStart
         lang_bias_config,
         reasoning_budget: args.reasoning_budget,
         chat_template_kwargs: args.chat_template_kwargs,
-        // Issue #424: prompt-cache knobs already resolved via env-var fallbacks above.
+        // prompt-cache knobs already resolved via env-var fallbacks above.
         prompt_cache_enabled: args.prompt_cache_enabled,
         prompt_cache_capacity_bytes: args.prompt_cache_capacity_bytes,
         prompt_cache_max_entries: args.prompt_cache_max_entries,
         prompt_cache_ttl_seconds: args.prompt_cache_ttl,
         prompt_cache_min_prefix: args.prompt_cache_min_prefix,
-        // Issue #552: APC knobs already resolved via env-var fallbacks above.
+        // APC knobs already resolved via env-var fallbacks above.
         apc_enabled: args.apc_enabled,
         apc_block_size: args.apc_block_size,
         apc_num_blocks: args.apc_num_blocks,
         apc_hash: args.apc_hash,
-        // Issue #484 (B11): KV cache type split flags already resolved via
+        // (B11): KV cache type split flags already resolved via
         // env-var fallbacks (and clap `env = "..."`) above.
         cache_type_k: args.turbo.cache_type_k,
         cache_type_v: args.turbo.cache_type_v,
         kv_cache_mode_legacy: args.turbo.kv_cache_mode,
-        // Issue #545: continuous-batching KV quantization knobs (flattened
+        // continuous-batching KV quantization knobs (flattened
         // from `BatchKvQuantArgs`).
         kv_bits: args.batch_quant.kv_bits,
         kv_group_size: args.batch_quant.kv_group_size,
         kv_quant_scheme: args.batch_quant.kv_quant_scheme,
         kv_skip_last_layer: args.batch_quant.kv_skip_last_layer,
-        // Issue #603: maximum KV cache size for plain (non-sliding) caches.
+        // maximum KV cache size for plain (non-sliding) caches.
         // clap reads `LLAMA_ARG_MAX_KV_SIZE` directly via the `env = ...`
         // attribute on the flag, so no separate env-fallback helper is needed.
         max_kv_size: args.max_kv_size,
-        // Issue #622: Responses API in-memory store limits. clap reads the
+        // Responses API in-memory store limits. clap reads the
         // matching `LLAMA_ARG_*` env vars directly via the `env = ...`
         // attributes on the flags.
         responses_store_max_entries: args.responses_store_max_entries,
         responses_store_ttl_secs: args.responses_store_ttl_secs,
         conversation_store_max_entries: args.conversation_store_max_entries,
         conversation_store_ttl_secs: args.conversation_store_ttl_secs,
-        // Issue #371 (A4): forward the surgery YAML path. clap reads
+        // (A4): forward the surgery YAML path. clap reads
         // `MLXCEL_SURGERY` directly via the `env = ...` attribute on
         // the flag, so no separate env-fallback helper is needed.
         #[cfg(feature = "surgery")]

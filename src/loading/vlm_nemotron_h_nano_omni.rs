@@ -12,11 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Nemotron H Nano Omni VLM loader (issues #554, #582).
+//! Nemotron H Nano Omni VLM loader.
 //!
 //! Constructs [`crate::vision::NemotronHNanoOmniVlModel`] from a HF
-//! `mlx-community` checkpoint. The vision path landed in #554; the
-//! audio path was added in #582 and only activates when the checkpoint
+//! `mlx-community` checkpoint. The vision path landed; the
+//! audio path was added and only activates when the checkpoint
 //! ships a `sound_config` block.
 //!
 //! Wire-up:
@@ -67,8 +67,8 @@ use crate::vision::processors::nemotron_h_nano_omni::{
 
 /// Strip audio-only weights when the checkpoint has no `sound_config`.
 ///
-/// Issue #554 dropped every `sound_*`/`audio_tower.*` weight at load
-/// time. Issue #582 keeps them when the checkpoint advertises a
+/// dropped every `sound_*`/`audio_tower.*` weight at load
+/// time. keeps them when the checkpoint advertises a
 /// `sound_config` (so the audio encoder can pick them up) and only
 /// strips them when audio is genuinely absent. This preserves
 /// backwards-compatibility for older Nemotron H Nano Omni snapshots
@@ -338,9 +338,9 @@ pub(crate) fn load_nemotron_h_nano_omni_vlm(model_path: &Path) -> Result<LoadedM
         .and_then(Value::as_i64)
         .unwrap_or(0) as i32;
 
-    // Parse audio config (issue #582). Audio is opt-in: when
+    // Parse audio config. Audio is opt-in: when
     // `sound_config` is absent the loader stays bit-for-bit identical
-    // to the issue-#554 path.
+    // to the issue- path.
     let audio_config = full_config
         .get("sound_config")
         .map(|value| -> Result<NemotronOmniAudioConfig> {

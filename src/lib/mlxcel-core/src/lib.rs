@@ -33,8 +33,7 @@ mod ffi {
         /// Opaque wrapper for mlx::core::ThreadLocalStream.
         ///
         /// Holds a TLS handle that resolves to a per-thread `MlxStream`
-        /// on demand. Used by the generation stream owners (issue
-        /// #556) so dispatch and synchronization stay on the same
+        /// on demand. Used by the generation stream owners so dispatch and synchronization stay on the same
         /// per-thread stream.
         type MlxThreadLocalStream;
 
@@ -2071,10 +2070,9 @@ mod ffi {
             -> UniquePtr<MlxArray>;
 
         // -------------------------------------------------------------------
-        // Issue #505 / #520 — Fused Sparse-V SDPA Metal kernel.
+        // Fused Sparse-V SDPA Metal kernel.
         // -------------------------------------------------------------------
-        /// Fused-skip Sparse-V weighted sum (Turbo4Asym KV cache, issue #505;
-        /// optimized in #520).
+        /// Fused-skip Sparse-V weighted sum (Turbo4Asym KV cache, optimized).
         ///
         /// Runs a Metal kernel that computes
         ///   `out[b, h, q, d] = Σ_t attn_weights[b, h, q, t] * V_dq[b, h, t, d]`
@@ -2087,11 +2085,11 @@ mod ffi {
         /// - `attn_weights`: `[B*Hq, Tq, Tk]` FP32 — post-softmax weights.
         /// - `v_packed`:     `[B*Hkv, Tk, D/2]` UINT8 — nibble-packed indices.
         /// - `v_rescale`:    `[B*Hkv, Tk]` FP16 — precomputed per-token
-        ///   rescale `norm[t] / max(|y_hat[t]|, 1e-10)` (issue #520). The
+        ///   rescale `norm[t] / max(|y_hat[t]|, 1e-10)`. The
         ///   previous kernel implementation re-derived this on-GPU per token
         ///   via a `log2(Dim) + 2`-barrier threadgroup tree reduction; that
         ///   reduction dominated decode latency on M5 Max at 4 K context
-        ///   for `turbo4-asym` (PR #519 A/B). Precomputing eliminates the
+        ///   for `turbo4-asym` (A/B). Precomputing eliminates the
         ///   threadgroup barriers from the kernel hot path.
         /// - `codebook`:     `[16]` FP32 — Lloyd-Max centroids.
         /// - `dim`: head dimension `D`.
@@ -2114,15 +2112,15 @@ mod ffi {
         ) -> UniquePtr<MlxArray>;
 
         // -------------------------------------------------------------------
-        // Issue #528 — Fused Turbo4Delegated cold-V weighted-sum kernel.
+        // Fused Turbo4Delegated cold-V weighted-sum kernel.
         // -------------------------------------------------------------------
-        /// Fused Turbo4Delegated cold-V weighted sum (issue #528).
+        /// Fused Turbo4Delegated cold-V weighted sum.
         ///
         /// Runs a Metal kernel that computes
         ///   `out_cold[b, h, q, d] = Σ_t attn_cold[b, h, q, t] * V_dq[b, h, t, d]`
         /// over the cold token range, reading the packed Turbo4 V indices
         /// directly. The dequantised cold V never materialises in global
-        /// memory; that is the point of issue #528 (replaces the PR-#525
+        /// memory; that is the point (replaces the earlier
         /// `cold_v_dequant_cache` memo + per-step `concat(cold_v, hot_v)`).
         ///
         /// The output is unrotated — the caller must apply the inverse
@@ -2137,8 +2135,7 @@ mod ffi {
         /// - `v_packed_cold`:     `[B*Hkv, T_cold, D/2]` UINT8 — nibble-
         ///   packed Turbo4 indices for the cold body.
         /// - `v_rescale_cold`:    `[B*Hkv, T_cold]` FP16 — precomputed
-        ///   per-token rescale `norm[t] / max(|y_hat[t]|, 1e-10)` (same
-        ///   semantic content as the Sparse-V kernel rescale, issue #520).
+        ///   per-token rescale `norm[t] / max(|y_hat[t]|, 1e-10)` (same semantic content as the Sparse-V kernel rescale).
         /// - `codebook`:          `[16]` FP32 — Lloyd-Max centroids.
         /// - `dim`: head dimension `D`.
         /// - `n_rep`: `Hq / Hkv` (1 for non-grouped attention).
@@ -2179,7 +2176,7 @@ mod ffi {
             dim: i32,
         ) -> UniquePtr<MlxArray>;
 
-        // Issue #531 — Steel-attention-envelope fused Turbo4Delegated SDPA
+        // Steel-attention-envelope fused Turbo4Delegated SDPA
         // kernel launcher. One Metal dispatch performs the entire post-Q·K
         // SDPA inline (numerically stable softmax over T_total + cold-V
         // dequant + hot-V accumulation), returning two FP32 outputs that
@@ -2205,7 +2202,7 @@ mod ffi {
         //   cold V indices, or a 1-token zero placeholder when `T_cold == 0`
         //   (MLX `metal_kernel` rejects zero-shape buffers).
         // - `cold_rescale`:  `[B*Hkv, T_cold]` FP16 — precomputed per-token
-        //   cold-V rescale `norm[t] / max(|y_hat[t]|, 1e-10)` (issue #520).
+        //   cold-V rescale `norm[t] / max(|y_hat[t]|, 1e-10)`.
         // - `hot_v`:         `[B*Hkv, T_hot, D]` FP16 — plain FP16 hot V, or
         //   a 1-token zero placeholder when `T_hot == 0`.
         // - `codebook`:      `[16]` FP32 — Lloyd-Max centroids.
@@ -2279,7 +2276,7 @@ pub use ops::{concatenate, divide_scalar, multiply_scalar, stack, stack_owned, w
 pub use sampling::TokenBiasMap;
 // Re-export B9 observability counter accessors so the server `/metrics` handler
 // can read process-wide lang-bias counters without a struct dependency.
-// Includes the byte-fragment suppression counter added in issue #405.
+// Includes the byte-fragment suppression counter added.
 pub use sampling::{
     lang_bias_applied_total, lang_bias_byte_fragment_suppressions_total,
     lang_bias_tokens_suppressed_total,
@@ -2329,7 +2326,7 @@ fn use_bool_causal_mask_path() -> bool {
 /// the batch dimension and reuses MLX's scalar-offset fast kernel for each
 /// sequence, then concatenates the results back together.
 ///
-/// Uniform-batch fast path (issue #556 / upstream `mlx-vlm` PR #1055): when
+/// Uniform-batch fast path (upstream `mlx-vlm` PR #1055): when
 /// every row in `offsets` has the same value, the helper bypasses the
 /// per-row slice / concat loop and dispatches a single
 /// `fast_rope(x, ..., offsets[0])` call over the whole batch. RoPE is
@@ -2532,12 +2529,11 @@ pub mod sampling;
 // Speculative decoding
 pub mod speculative;
 
-// Drafter trait + DrafterKind enum + model_type auto-detection (issue #624,
-// epic #633). Foundational scaffolding for the Gemma 4 MTP and Qwen 3.5
-// DFlash drafter ports. Concrete drafter impls land in #626 / #635 / #640.
+// Drafter trait + DrafterKind enum + model_type auto-detection. Foundational scaffolding for the Gemma 4 MTP and Qwen 3.5
+// DFlash drafter ports. Concrete drafter impls land.
 // The existing classic `SpeculativeGenerator` above is unchanged — MTP and
 // DFlash are peer code paths, not replacements.
-// TODO(#629, #636): wrap the existing SpeculativeGenerator in a
+// TODO: wrap the existing SpeculativeGenerator in a
 // Drafter-trait adapter so the round-loop drivers can dispatch uniformly.
 pub mod drafter;
 
@@ -2566,8 +2562,7 @@ pub mod rope_proportional;
 pub mod lang_analyzer;
 
 // Crate-wide helpers for `#[cfg(test)]` paths. Provides the single shared
-// `ENV_LOCK` that every env-mutating test in this crate must acquire (issue
-// #573); see `test_support::env_lock` for the rationale. `pub(crate)` so
+// `ENV_LOCK` that every env-mutating test in this crate must acquire; see `test_support::env_lock` for the rationale. `pub(crate)` so
 // that test modules at any depth (e.g. `crate::lang_analyzer::cache::tests`)
 // can name it as `crate::test_support::env_lock`.
 #[cfg(test)]

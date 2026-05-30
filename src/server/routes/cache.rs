@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Prompt-cache observability endpoints (issue #552).
+//! Prompt-cache observability endpoints.
 //!
 //! - `GET /v1/cache/stats` — returns a snapshot of the current cache state
 //!   (entries, byte footprint, hit/miss counters, APC config).
@@ -33,7 +33,7 @@ use crate::server::AppState;
 pub struct CacheStatsResponse {
     /// Whether the prompt-prefix cache is enabled at all.
     pub enabled: bool,
-    /// Whether APC (block-granularity hash chains, issue #552) is active.
+    /// Whether APC (block-granularity hash chains) is active.
     pub apc_enabled: bool,
     /// APC block size in tokens. Always reported even when APC is off so the
     /// configured value is visible.

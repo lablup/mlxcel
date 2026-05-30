@@ -236,7 +236,7 @@ pub struct ExceptionYaml {
     pub include_numeric: bool,
     #[serde(default)]
     pub include_punctuation: bool,
-    /// Issue #405 — include byte-fragment tokens classified via UTF-8
+    /// include byte-fragment tokens classified via UTF-8
     /// start-byte analysis. Default: `false`.
     #[serde(default)]
     pub include_byte_fragments: bool,
@@ -695,7 +695,7 @@ unknown_field: value
         );
     }
 
-    /// Issue #405 — `--lang-bias-include-byte-fragments` flips the resolved
+    /// `--lang-bias-include-byte-fragments` flips the resolved
     /// `ExceptionConfig.include_byte_fragments` field and otherwise leaves the
     /// exception set identical to Phase 1 defaults.
     #[test]
@@ -717,7 +717,7 @@ unknown_field: value
         assert!(!config.exceptions.include_punctuation);
     }
 
-    /// Issue #405 — the CLI flag alone makes `is_active()` true so the
+    /// the CLI flag alone makes `is_active` true so the
     /// resolver runs even without any `--lang-bias` entries. This matters for
     /// operator workflows that only want to rebuild the cache with the
     /// byte-fragment pass enabled.

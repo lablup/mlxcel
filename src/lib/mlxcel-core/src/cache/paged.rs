@@ -34,7 +34,7 @@ impl std::fmt::Display for PagedBlockId {
 /// main K and V buffers (`bytes_per_block`) and, when the cache mode is one of
 /// the Turbo4 variants, the per-block byte budget for the packed sidecars
 /// (`turbo_sidecar_bytes_per_block`). The dense `KVCache::nbytes` accounting
-/// in turbo modes always reflects packed storage; see B10 (issue #482).
+/// in turbo modes always reflects packed storage; see B10.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PagedKvLayout {
     pub num_layers: usize,
@@ -308,7 +308,7 @@ impl PagedSequenceState {
 /// `in_use` is retained as a derived mirror of `refcount > 0` so the existing
 /// `stats_for_sequences` and internal debug assertions stay backwards
 /// compatible with call sites that inspected the flag directly before
-/// refcounts were introduced (#418).
+/// refcounts were introduced.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct PagedBlockRecord {
     layer_idx: usize,
@@ -397,7 +397,7 @@ impl PagedTurboPageSidecars {
 /// each [`super::SequenceCacheSet`]. In Turbo4 modes the pool also owns per-
 /// page sidecar MLX arrays (`v_packed`, `v_norms`, optionally `k_packed`,
 /// `k_norms`, `cold_keys`) so packed quantization state survives across
-/// detach/adopt round-trips and prefix-cache handoffs (issue #482).
+/// detach/adopt round-trips and prefix-cache handoffs.
 pub struct PagedBlockPool {
     layout: PagedKvLayout,
     next_block_id: u64,
@@ -584,7 +584,7 @@ impl PagedBlockPool {
 
     /// Current refcount of `block_id`, or `0` if the block is free or unknown.
     ///
-    /// Used by: paged detach/adopt invariants (#418), diagnostics.
+    /// Used by: paged detach/adopt invariants, diagnostics.
     pub fn refcount(&self, block_id: PagedBlockId) -> u32 {
         self.blocks
             .get(&block_id)
@@ -618,9 +618,9 @@ impl PagedBlockPool {
     /// list (and becomes eligible for recycling) only once the refcount
     /// reaches zero. Per-page Turbo4 sidecars (if any) are dropped at the same
     /// moment so a recycled block can never serve stale packed data to a new
-    /// sequence (#482).
+    /// sequence.
     ///
-    /// Used by: paged detach/adopt cleanup (#418), internal sequence tear-down.
+    /// Used by: paged detach/adopt cleanup, internal sequence tear-down.
     pub fn release_block(&mut self, block_id: PagedBlockId) -> Result<(), String> {
         let layer_idx = {
             let record = self
@@ -646,7 +646,7 @@ impl PagedBlockPool {
     }
 
     // -----------------------------------------------------------------------
-    // Turbo4 sidecar installation API (issue #482)
+    // Turbo4 sidecar installation API
     // -----------------------------------------------------------------------
 
     /// Install or replace the per-page packed-V tensor for `block_id`.

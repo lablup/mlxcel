@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! OpenAI Responses API response types (issue #622).
+//! OpenAI Responses API response types.
 //!
 //! Wire shape mirrors `openai-python` `response.py`. Phase 1 emits the
 //! discriminated union variants exercised by the acceptance criteria —

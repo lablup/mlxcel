@@ -13,7 +13,6 @@
 // limitations under the License.
 
 //! End-to-end integration test for the cross-request prompt-prefix KV cache
-//! (epic #416, sub-issue #426).
 //!
 //! This test boots a real `mlxcel-server` binary with the prompt-prefix
 //! cache enabled and drives it through the public OpenAI-compatible HTTP
@@ -58,7 +57,7 @@ const QWEN3_MODEL: &str = "qwen3-0.6b-4bit";
 const NUM_TURNS: usize = 5;
 
 /// Upper bound on turn-N prefill latency relative to turn-1 prefill latency.
-/// The spec (#426) calls for <= 1.3x. We keep the literal here so any
+/// The spec calls for <= 1.3x. We keep the literal here so any
 /// future tightening happens in one place.
 const PREFILL_LATENCY_UPPER_RATIO: f64 = 1.3;
 
@@ -143,7 +142,7 @@ async fn one_turn(
         "max_tokens": max_tokens,
         "temperature": 0.0,
         // Route through the session-key path so the prompt cache can bucket
-        // the turns together (issue #422 wiring).
+        // the turns together (wiring).
         "user": "prompt-cache-e2e-user",
     });
 
@@ -225,7 +224,7 @@ async fn multi_turn_chat_reports_cached_tokens_and_lowers_prefill_latency() {
 
     // Prompt cache explicitly enabled via CLI; small caps so we stay within
     // memory even on CI hosts. Dense decode storage is the only backend
-    // that can currently donate back to the store (issue #421 gate).
+    // that can currently donate back to the store (gate).
     let mut child = spawn_server(&[
         "--model",
         &model_str,
@@ -306,7 +305,7 @@ async fn multi_turn_chat_reports_cached_tokens_and_lowers_prefill_latency() {
 
     // ---------------------------------------------------------------
     // Assertion 1: wire contract — cached_tokens field present on every
-    // turn when the cache is enabled on the server (issue #423).
+    // turn when the cache is enabled on the server.
     // ---------------------------------------------------------------
     for (i, t) in turns.iter().enumerate() {
         assert!(

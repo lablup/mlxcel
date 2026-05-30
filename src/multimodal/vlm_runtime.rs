@@ -66,7 +66,7 @@ pub enum VlmPreparationSummary {
         audio_tokens: usize,
         total_tokens: usize,
     },
-    /// Issue #553: Gemma 4 expanded `<|video|>` placeholders for one or
+    /// Gemma 4 expanded `<|video|>` placeholders for one or
     /// more decoded videos. `frame_slots` is the total number of frames
     /// across all videos (each frame consumes
     /// `boi + image_token * num_soft_tokens_per_frame + eoi`).
@@ -100,7 +100,7 @@ pub enum VlmPreparationSummary {
         image_slots: usize,
         total_tokens: usize,
     },
-    /// Issue #582: Nemotron H Nano Omni expanded one or more audio
+    /// Nemotron H Nano Omni expanded one or more audio
     /// clip placeholders. `audio_clips` is the number of clips
     /// processed; `audio_tokens` is the post-subsampling encoder
     /// output token count fed into the merge step.
@@ -113,7 +113,7 @@ pub enum VlmPreparationSummary {
         image_blocks: usize,
         total_image_tokens: i32,
     },
-    /// Issue #738: InternVL expanded each `<image>`/`<IMG_CONTEXT>` placeholder
+    /// InternVL expanded each `<image>`/`<IMG_CONTEXT>` placeholder
     /// into `<img> + <IMG_CONTEXT> * (num_image_token * tiles) + </img>`.
     InternVL {
         image_blocks: usize,
@@ -894,7 +894,7 @@ pub fn expand_gemma4_image_tokens_pub(
 }
 
 /// Expand a Gemma 4 video token placeholder into per-frame
-/// `<boi> image_token * N <eoi>` runs (issue #553).
+/// `<boi> image_token * N <eoi>` runs.
 ///
 /// Mirrors the upstream Python `Gemma4Processor.__call__(videos=...)`
 /// expansion: every `video_token_id` in `prompt_tokens` is replaced by

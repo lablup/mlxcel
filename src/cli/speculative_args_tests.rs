@@ -52,7 +52,7 @@ fn parse_kind_returns_none_when_unset() {
 #[test]
 fn parse_kind_rejects_internal_mtp_with_helpful_error() {
     // internal-mtp is intentionally NOT user-selectable on the CLI; it is
-    // auto-detected from the target checkpoint (epic #647). The error
+    // auto-detected from the target checkpoint. The error
     // message must explain this so an operator typing the flag gets a
     // hint instead of "unknown value".
     let args = SpeculativeArgs {
@@ -107,7 +107,7 @@ fn default_block_size_for_dflash_is_16() {
 
 #[test]
 fn default_block_size_for_internal_mtp_shares_dflash_default() {
-    // InternalMtp's CLI surface lands in epic #647; for now we share the
+    // InternalMtp's CLI surface lands in for now we share the
     // DFlash 16-token default to keep the helper exhaustive.
     assert_eq!(
         default_block_size_for_kind(DrafterKind::InternalMtp),

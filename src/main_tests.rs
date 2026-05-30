@@ -185,7 +185,7 @@ fn generate_command_parses_tensor_parallel_flags() {
     assert_eq!(args.tensor_parallel.tp_lm_head_mode, "replicated");
 }
 
-// Issue #371 (A4): CLI argument-parsing tests for the `--surgery <FILE>`
+// (A4): CLI argument-parsing tests for the `--surgery <FILE>`
 // flag on the `generate` and `serve` subcommands. These tests only cover
 // the clap surface — they do not invoke the surgery pipeline or touch
 // any model weights. The end-to-end behavior is exercised by the
@@ -221,7 +221,7 @@ fn generate_command_accepts_surgery_flag_with_path() {
 #[test]
 fn generate_command_surgery_flag_defaults_to_none() {
     // Baseline path: omitting the flag yields `None`, which keeps the
-    // load path bit-exact with pre-#371 main (acceptance criterion (e)).
+    // load path bit-exact with earlier main (acceptance criterion (e)).
     let cli = Cli::try_parse_from(["mlxcel", "generate", "-m", "models/foo", "-p", "hello"])
         .expect("clap must accept generate without --surgery");
 

@@ -154,7 +154,7 @@ fn sample_generate_args(model_path: PathBuf) -> crate::GenerateArgs {
         },
         lang_bias: mlxcel::lang_bias::LangBiasCliArgs::default(),
         speculative: mlxcel::cli::speculative_args::SpeculativeArgs::default(),
-        // Issue #371 (A4): default to None so existing tests stay on
+        // (A4): default to None so existing tests stay on
         // the bit-exact baseline load path; tests that need surgery
         // override this field explicitly.
         #[cfg(feature = "surgery")]
@@ -376,8 +376,7 @@ fn validate_pipeline_parallel_args_rejects_incompatible_modes() {
     assert!(validate_pipeline_parallel_args(&args).is_err());
     args.model.draft_model = None;
 
-    // Tensor parallelism + PP is now accepted (2D PP × TP composition landed
-    // via #346). Positive coverage for the 2D path lives in
+    // Tensor parallelism + PP is now accepted (2D PP × TP composition landed). Positive coverage for the 2D path lives in
     // `validate_pipeline_parallel_args_accepts_2d_pp_tp` below.
 
     fs::remove_dir_all(args.model.model).unwrap();
@@ -398,7 +397,7 @@ fn validate_pipeline_parallel_args_accepts_adapter() {
 
 #[test]
 fn validate_pipeline_parallel_args_accepts_2d_pp_tp() {
-    // Issue #346: the validator no longer rejects PP + TP.
+    // the validator no longer rejects PP + TP.
     let mut args = sample_generate_args(temp_model_dir("pp-tp-2d"));
     args.pipeline_parallel.pp_size = 2;
     args.tensor_parallel.tp_size = 2;

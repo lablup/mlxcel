@@ -12,10 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! OpenAI Responses API request types (issue #622).
+//! OpenAI Responses API request types.
 //!
 //! Wire shape mirrors `openai-python` `response_create_params.py`. Phase 1
-//! supports the subset documented in the acceptance criteria of #622 —
+//! supports the subset documented in the acceptance criteria
 //! text input (string or typed item array), function tools, structured
 //! output via `text.format.json_schema`, `previous_response_id` and
 //! string-form `conversation` chaining, plus standard sampling overrides.

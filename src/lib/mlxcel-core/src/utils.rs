@@ -818,7 +818,7 @@ mod tests {
         assert_eq!(ref_shape, vec![8, 8]);
     }
 
-    // --- Sliding window mask shape regression tests (issue #507) -------------
+    // --- Sliding window mask shape regression tests -------------
 
     /// Gemma3-4B trigger: seq_len=4096, window=1024, offset=0.
     ///

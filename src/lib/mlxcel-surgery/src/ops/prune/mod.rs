@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! `PruneOp` — Axis A "Operation: Prune" (issue #376, Epic #363).
+//! `PruneOp` — Axis A "Operation: Prune".
 //!
 //! Zero-masks selected slices of model weight tensors at one of three
 //! structural granularities:

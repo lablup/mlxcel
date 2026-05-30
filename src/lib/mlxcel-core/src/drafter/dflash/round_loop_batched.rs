@@ -17,13 +17,13 @@
 //!
 //! Rust port of upstream
 //! `references/mlx-vlm/mlx_vlm/generate.py::_dflash_rounds_batch`
-//! (`mlx-vlm` HEAD, lines 944-1098). Issue #637 / epic #633 sub-13.
+//! (`mlx-vlm` HEAD, lines 944-1098). sub-13.
 //!
 //! ## Scope
 //!
 //! **B >= 1, with continuous batching and per-row GDN-aware rollback.**
 //! The B = 1 fast path lives in the sibling
-//! [`crate::drafter::dflash::round_loop`] module (issue #636 / sub-12)
+//! [`crate::drafter::dflash::round_loop`] module (sub-12)
 //! and must NOT regress as a result of this implementation. The two
 //! drivers share the [`SpeculativeTarget`] trait and the
 //! [`speculative_walk`] helper; everything else is duplicated to keep
@@ -164,7 +164,7 @@ pub(crate) fn speculative_walk_batched(
 ///
 /// Mirrors upstream `sampler(verify_out.logits)` with the greedy
 /// `sampler = argmax(axis=-1)` — stochastic batched DFlash sampling is
-/// a follow-up (#632).
+/// a follow-up.
 fn argmax_logits_per_row(logits: &MlxArray, batch_size: i32, seq_len: i32) -> Vec<Vec<i32>> {
     let shape = ffi::array_shape(logits);
     debug_assert_eq!(shape.len(), 3, "expected [B, seq_len, vocab] logits");
@@ -267,8 +267,7 @@ impl DFlashBatchedGenerator {
 
     /// Consume the generator and return the boxed drafter handle.
     ///
-    /// Used by the server-side batched speculative burst path (issue
-    /// #674) so a loaded drafter can be reused across multiple batched
+    /// Used by the server-side batched speculative burst path so a loaded drafter can be reused across multiple batched
     /// bursts on the same worker thread without re-loading from disk.
     /// Mirrors [`super::round_loop::DFlashGenerator::into_drafter`] for
     /// the B > 1 driver.

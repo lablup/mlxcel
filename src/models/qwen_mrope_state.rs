@@ -14,7 +14,7 @@
 
 //! Per-sequence MRoPE state for Qwen VL families.
 //!
-//! Issue #540 / mlx-vlm PR #1095 (commit `e94b76`): when a single text-model
+//! mlx-vlm PR #1095 (commit `e94b76`): when a single text-model
 //! instance serves several sequences in a server (or a mixed batch with both
 //! VL and text-only rows), the cached MRoPE `rope_deltas` and the spatially
 //! computed `position_ids` must be tracked **per sequence**. A shared scalar
@@ -136,7 +136,7 @@ impl MRopeState {
     /// the server scheduler associates the MRoPE state computed by
     /// `set_fallback` (during the vision-encoder pass that did not yet
     /// know the sequence id) with the sequence that will eventually
-    /// consume it (issue #540).
+    /// consume it.
     ///
     /// If the fallback slot is empty (no VL prefill ran for this row),
     /// an empty entry is registered so subsequent decode steps see
@@ -157,7 +157,7 @@ impl MRopeState {
     /// dropping the contained `UniquePtr<MlxArray>`. Used by the server
     /// preemption path so the entry can be carried across the eviction
     /// (which releases the old sequence id) and reinstalled under the
-    /// freshly allocated id (issue #540 follow-up).
+    /// freshly allocated id (follow-up).
     ///
     /// Returns `None` when the map has no entry for `seq_id`.
     ///

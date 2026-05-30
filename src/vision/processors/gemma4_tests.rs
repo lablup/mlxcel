@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Unit tests for the Gemma 4 image / video preprocessor (issue #553).
+//! Unit tests for the Gemma 4 image / video preprocessor.
 //!
 //! These tests use synthetic in-memory frames so they run on any
 //! platform without an actual video file or `ffmpeg` install.

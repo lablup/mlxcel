@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Tests for the Nemotron H Nano Omni vision tower (issue #554).
+//! Tests for the Nemotron H Nano Omni vision tower.
 //!
 //! These tests build the encoder from synthetic, deterministic weights
 //! and confirm:

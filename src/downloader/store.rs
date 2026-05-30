@@ -647,7 +647,7 @@ fn is_within(base: &Path, child: &Path) -> bool {
 mod tests {
     use super::*;
     // Env-var-sensitive tests must serialize through the crate-wide `ENV_LOCK`
-    // (issue #573): Rust 2024's `set_var`/`remove_var` are `unsafe` because
+    // Rust 2024's `set_var`/`remove_var` are `unsafe` because
     // libc's env block has no internal lock and concurrent mutation is UB.
     use crate::test_support::env_lock::env_lock;
 

@@ -112,7 +112,7 @@ fn insert_qwen_vl_image_tokens_supports_multiple_images() {
     );
 }
 
-// -- Issue #540: dispatch helper integration tests ----------------------
+// -- dispatch helper integration tests ----------------------
 //
 // Drives `forward_batched_with_seq_ids_dispatch` against a tiny stub
 // `LanguageModel` so we can assert that each row of a batched call

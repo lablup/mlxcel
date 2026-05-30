@@ -88,7 +88,7 @@ pub fn serialize_cache_state(state: &SerializableCacheState) -> Result<Vec<u8>> 
 /// Used by: prefill node when preparing cache state for transfer.
 pub fn extract_kv_cache_entry(cache: &mlxcel_core::cache::KVCache) -> SerializableCacheEntry {
     // Use `live_len() = offset - live_start` (not the monotonic `offset`) so
-    // this remains correct after issue #603's `trim_front` has advanced
+    // this remains correct after's `trim_front` has advanced
     // `live_start`. With `live_start == 0` this is bit-identical to slicing
     // at `cache.offset`.
     let live_len = cache.live_len();
@@ -183,7 +183,7 @@ pub fn serialize_sequence_cache_set(
         // Re-base the serialized offset to the live window length so the
         // receiving node restores `(offset=live_len, live_start=0)` —
         // equivalent in RoPE relative positions to the original
-        // `(offset, live_start)` pair, but without leaking the post-#603
+        // `(offset, live_start)` pair, but without leaking the post-
         // monotonic position through the wire format. With `live_start == 0`
         // this is bit-identical to recording `cache.offset` directly.
         layer_offsets.push(cache.live_len());

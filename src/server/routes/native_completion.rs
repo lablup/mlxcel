@@ -43,7 +43,7 @@ pub async fn native_completion(
     headers: HeaderMap,
     Json(request): Json<NativeCompletionRequest>,
 ) -> Response {
-    // Issue #550: the native `/completion` endpoint does not support
+    // the native `/completion` endpoint does not support
     // `response_format`. Reject up front with a clear 400 so the client
     // does not assume their schema was honored — the chat-completions
     // route is the supported path for constrained decoding.
@@ -66,7 +66,7 @@ pub async fn native_completion(
         }
     }
 
-    // Issue #409: validate thinking_budget_tokens early (semantics match
+    // validate thinking_budget_tokens early (semantics match
     // /v1/chat/completions but the cap is checked against n_predict).
     let effective_n_predict = request.n_predict.unwrap_or(state.config.default_max_tokens);
     let raw_budget = pick_budget_alias(
@@ -192,7 +192,7 @@ async fn stream_native_completion(
     options.reasoning_budget = budget_override;
     let prompt = request.prompt.clone();
 
-    // Issue #548: sse_channel also returns an SseKeepAlive for proxy
+    // sse_channel also returns an SseKeepAlive for proxy
     // idle-timeout prevention during long prefill phases.
     let (events, stream, cancelled, keepalive) = sse_channel(100);
     let finish_events = events.clone();
@@ -261,10 +261,10 @@ fn build_native_generate_options(
             dry_sequence_breakers: request.dry_sequence_breakers.clone(),
             stop_sequences: request.stop.clone(),
             priority: RequestPriority::default(),
-            // Issue #409: the caller fills this from the validated request
+            // the caller fills this from the validated request
             // body + server default after `build_native_options` returns.
             reasoning_budget: ReasoningBudgetOverride::default(),
-            // Issue #409: `/completion` takes a raw prompt; the caller is
+            // `/completion` takes a raw prompt; the caller is
             // responsible for priming `<think>` in the prompt if they want
             // in-block counting to start at the first decoded token.
             thinking_enter_block_on_start: false,

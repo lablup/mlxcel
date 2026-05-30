@@ -53,7 +53,7 @@ pub static LANG_BIAS_APPLIED_TOTAL: AtomicU64 = AtomicU64::new(0);
 pub static LANG_BIAS_TOKENS_SUPPRESSED_TOTAL: AtomicU64 = AtomicU64::new(0);
 
 /// Total sampling calls where the pre-bias top-1 token was both
-/// `-inf`-suppressed AND was a byte-fragment entry (issue #405).
+/// `-inf`-suppressed AND was a byte-fragment entry.
 ///
 /// Exposed via `/metrics` as
 /// `mlxcel_lang_bias_byte_fragment_suppressions_total`. This counter is a
@@ -81,7 +81,7 @@ pub fn lang_bias_tokens_suppressed_total() -> u64 {
 }
 
 /// Read the current value of
-/// `mlxcel_lang_bias_byte_fragment_suppressions_total` (issue #405).
+/// `mlxcel_lang_bias_byte_fragment_suppressions_total`.
 #[inline]
 pub fn lang_bias_byte_fragment_suppressions_total() -> u64 {
     LANG_BIAS_BYTE_FRAGMENT_SUPPRESSIONS_TOTAL.load(Ordering::Relaxed)
@@ -95,7 +95,7 @@ pub fn lang_bias_byte_fragment_suppressions_total() -> u64 {
 /// When empty, `apply_token_bias` short-circuits without any array operations,
 /// preserving bit-exact baseline behavior.
 ///
-/// Issue #405 — tokens that were classified via byte-fragment UTF-8 start-byte
+/// tokens that were classified via byte-fragment UTF-8 start-byte
 /// analysis are tracked in a separate set so the observability path can count
 /// how many suppressions originated from that opt-in classifier.
 #[derive(Debug, Clone, Default)]
@@ -124,7 +124,7 @@ impl TokenBiasMap {
         self.entries.insert(token_id, bias);
     }
 
-    /// Insert a bias and tag the token as a byte-fragment entry (issue #405).
+    /// Insert a bias and tag the token as a byte-fragment entry.
     ///
     /// Used by `TokenLanguageIndex::to_token_bias` when the opt-in
     /// `include_byte_fragments` flag is set. Equivalent to [`Self::insert`]
@@ -165,7 +165,7 @@ impl TokenBiasMap {
         self.byte_fragment_ids.contains(&token_id)
     }
 
-    /// Number of byte-fragment entries currently in the map (issue #405).
+    /// Number of byte-fragment entries currently in the map.
     ///
     /// Used by the tracing debug field `byte_fragment_entries` emitted
     /// alongside the B9 `lang_bias resolved` event.
@@ -248,7 +248,7 @@ pub fn sample_token_optimized(
             .is_some_and(|b| b.is_infinite() && b.is_sign_negative())
         {
             LANG_BIAS_TOKENS_SUPPRESSED_TOTAL.fetch_add(1, Ordering::Relaxed);
-            // Issue #405 — separate counter for suppressions that originated
+            // separate counter for suppressions that originated
             // from the opt-in byte-fragment classifier. Strict subset of the
             // total-suppressed counter above.
             if config.token_bias.is_byte_fragment(top_id) {
@@ -1002,7 +1002,7 @@ mod tests {
 
     #[test]
     fn top_p_filter_batched_equals_per_row() {
-        // Regression test for issue #546 (upstream mlx-vlm PR #1094, commit c7aaf2d).
+        // Regression test (upstream mlx-vlm PR #1094, commit c7aaf2d).
         //
         // Construct a [2, 6] logits tensor where the two rows have deliberately
         // different distributions so a buggy global sort would give wrong results.

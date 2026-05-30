@@ -14,7 +14,7 @@
 
 //! Ignored real-model VLM server concurrency smoke tests.
 //!
-//! Issue #731 fixed a Gemma 3n VLM race where the MobileNet/MSFA
+//! fixed a Gemma 3n VLM race where the MobileNet/MSFA
 //! `per_layer_inputs` tensor was parked in one model-wide fallback slot. A
 //! burst of two server requests could have one row consume the other's tensor
 //! or panic after the slot was drained. The test below runs the real HTTP

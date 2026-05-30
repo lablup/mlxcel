@@ -361,7 +361,7 @@ fn pipeline_remote_runtime_glm_moe_dsa_real_model_parity_and_cleanup() {
 }
 
 // ---------------------------------------------------------------------------
-// RDMA backend real-model coverage (issue #343)
+// RDMA backend real-model coverage
 // ---------------------------------------------------------------------------
 //
 // This test runs the full 2-stage remote pipeline over the RDMA-aware

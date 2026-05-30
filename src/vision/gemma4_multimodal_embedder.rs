@@ -15,8 +15,7 @@
 //! Gemma 4 multimodal embedder (vision and audio share the same shape).
 //!
 //! Pulled out of `gemma4_vl.rs` so that file stays under the project's
-//! 500-line hard cap (issue #543 added per-sequence `per_layer_inputs`
-//! plumbing alongside the existing VLM/audio code paths).
+//! 500-line hard cap (added per-sequence `per_layer_inputs` plumbing alongside the existing VLM/audio code paths).
 //!
 //! Both `embed_vision` and `embed_audio` on
 //! [`crate::vision::Gemma4VLModel`] use this module's

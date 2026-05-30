@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! MLX-using unit tests for the sparse-V dequant scaffold (issue #480).
+//! MLX-using unit tests for the sparse-V dequant scaffold.
 //!
 //! Pure-Rust env-var tests live inline in `cache/turbo/sparse_v.rs` so they
 //! still run when the Metal/CUDA features are off. The tests in this file
@@ -359,7 +359,7 @@ fn sparse_v_available_returns_false_for_turbo4_delegated() {
     // and hot-FP16 V. The current `sparse_v_attention` dispatcher only
     // handles a contiguous `0..self.offset` range, so delegated mode must
     // report `sparse_v_available == false` until the hot+cold composition
-    // pass lands. Regression guard for issue #505 narrowing.
+    // pass lands. Regression guard narrowing.
     let _guard = SparseVThresholdGuard::set("1e-6");
     let cache = super::KVCache::new_with_mode(super::KVCacheMode::Turbo4Delegated);
     assert!(
@@ -477,8 +477,7 @@ fn sparse_v_attention_returns_none_when_not_available() {
 ///
 /// The guard takes the crate-wide `ENV_LOCK` for its full lifetime so that
 /// `set_var`/`remove_var` calls cannot race with env mutations in any other
-/// `#[cfg(test)]` module of the same test binary (issue #573 — libc's env
-/// block has no internal lock).
+/// `#[cfg(test)]` module of the same test binary (— libc's env block has no internal lock).
 struct SparseVThresholdGuard {
     prev: Option<String>,
     // The lock guard outlives the env mutations: it is taken in `set` and
@@ -552,7 +551,7 @@ fn sparse_v_attention_threshold_default_keeps_quality() {
 }
 
 // ---------------------------------------------------------------------------
-// Issue #505 — fused Metal kernel correctness equivalence
+// fused Metal kernel correctness equivalence
 // ---------------------------------------------------------------------------
 
 /// Kernel-vs-graph numerical equivalence at threshold=0.
@@ -579,7 +578,7 @@ fn sparse_v_kernel_threshold_zero_matches_graph() {
     let (v_packed, v_norms, v_rescale) = turbo::quant::quantize_v_turbo4(&v_f16, &params);
 
     let scale = 1.0_f32 / (head_dim as f32).sqrt();
-    // Issue #520: the fused kernel now consumes the precomputed `v_rescale`
+    // the fused kernel now consumes the precomputed `v_rescale`
     // sidecar instead of `v_norms`. The graph fallback still consumes
     // `v_norms`. Both paths must produce identical output within FP16
     // round-off — that is the parity bound this test enforces.

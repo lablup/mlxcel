@@ -13,7 +13,7 @@
 // limitations under the License.
 
 //! Multi-stage pipeline-parallel integration tests driven by the
-//! `pipeline-parallel-ci.yml` workflow (issue #344).
+//! `pipeline-parallel-ci.yml` workflow.
 //!
 //! These tests exist specifically so the CI harness has a stable,
 //! versioned entry point for:
@@ -31,7 +31,7 @@
 //! The tests that need model weights are `#[ignore]`d so `cargo test`
 //! defaults stay cheap; the partition and admission regressions run by
 //! default, which is how the heterogeneous-memory scenario from issue
-//! #344 becomes a true guardrail on every PR.
+//! becomes a true guardrail on every PR.
 
 mod common;
 
@@ -312,7 +312,7 @@ fn pipeline_multi_stage_three_host_real_model_parity() {
 
 /// Heterogeneous-memory partition regression.
 ///
-/// Scenario from the issue #344 acceptance list: stage 0 sits on a
+/// Scenario from the acceptance list: stage 0 sits on a
 /// memory-smaller machine, stage 1 sits on a memory-larger machine. The
 /// auto-partitioner must assign fewer layers to stage 0 than to stage 1
 /// and the resulting assignment must pass `validate_partition` +

@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! In-memory conversation store for the OpenAI Responses API (issue #622).
+//! In-memory conversation store for the OpenAI Responses API.
 //!
 //! Phase 1 keeps a single ordered transcript per `conversation` id, holding
 //! both prior inputs and prior outputs. Each `POST /v1/responses` that

@@ -34,7 +34,7 @@
 //!   without it, the first `draft_block` call returns
 //!   [`DrafterError::BindNotCalled`] which the round loop silently
 //!   swallows, and the request finalizes with exactly one seed-bonus
-//!   token. The first PR-review cycle of #670 missed this because the
+//!   token. The first PR-review cycle missed this because the
 //!   real-model parity test was deferred to a CI hardware lane; cycle
 //!   2 ([this file]) pins the invariant with a fast-running mock test.
 //!
@@ -255,7 +255,7 @@ fn burst_declined_for_adopted_prompt_cache_prefix() {
 }
 
 // History-dependent sampling penalties are NO LONGER a decline-to-classic
-// gate (issue #677): the burst threads `initial_token_history(&prompt, ..)`
+// gate: the burst threads `initial_token_history(&prompt, ..)`
 // into the first-bonus sample, so a penalty-bearing request's first bonus
 // is byte-identical to the classic decode path. The four tests below
 // (formerly `burst_declined_for_{repetition,frequency,presence,dry}_penalty`)
@@ -273,7 +273,7 @@ fn burst_allowed_for_repetition_penalty() {
     assert!(
         should_burst_for_sequence(&dispatch, &seq),
         "repetition_penalty != 1.0 must NOT decline to classic — the burst \
-         now threads token_history into the first-bonus sample (issue #677)"
+         now threads token_history into the first-bonus sample"
     );
 }
 
@@ -285,7 +285,7 @@ fn burst_allowed_for_frequency_penalty() {
     assert!(
         should_burst_for_sequence(&dispatch, &seq),
         "frequency_penalty != 0.0 must NOT decline to classic — the burst \
-         now threads token_history into the first-bonus sample (issue #677)"
+         now threads token_history into the first-bonus sample"
     );
 }
 
@@ -297,7 +297,7 @@ fn burst_allowed_for_presence_penalty() {
     assert!(
         should_burst_for_sequence(&dispatch, &seq),
         "presence_penalty != 0.0 must NOT decline to classic — the burst \
-         now threads token_history into the first-bonus sample (issue #677)"
+         now threads token_history into the first-bonus sample"
     );
 }
 
@@ -309,12 +309,12 @@ fn burst_allowed_for_dry_penalty() {
     assert!(
         should_burst_for_sequence(&dispatch, &seq),
         "dry_multiplier != 0.0 must NOT decline to classic — the burst \
-         now threads token_history into the first-bonus sample (issue #677)"
+         now threads token_history into the first-bonus sample"
     );
 }
 
 // `logprobs_config.enabled` is NO LONGER a decline-to-classic gate
-// (issue #678): the burst threads `logprobs_config` through
+// the burst threads `logprobs_config` through
 // `MtpGenerator::generate` / `DFlashGenerator::run` and emits
 // `TokenWithLogprobs` events from `finalize_burst_success`. The test
 // below (formerly `burst_declined_when_logprobs_enabled`) now asserts
@@ -333,7 +333,7 @@ fn burst_allowed_when_logprobs_enabled() {
     assert!(
         should_burst_for_sequence(&dispatch, &seq),
         "logprobs_config.enabled=true must NOT decline to classic — the burst \
-         now threads logprobs through and emits TokenWithLogprobs (issue #678)"
+         now threads logprobs through and emits TokenWithLogprobs"
     );
 }
 
@@ -364,7 +364,7 @@ fn batched_window_rejects_logprobs_enabled_sequences() {
 }
 
 // Thinking-budget enforcement is NO LONGER a decline-to-classic gate
-// (issue #679): `finalize_burst_success` runs the same per-token
+// `finalize_burst_success` runs the same per-token
 // `decide_override` + `observe` cycle as the classic path's
 // `apply_thinking_budget`, injecting a forced `</think>` at the budget
 // boundary. The test below (formerly
@@ -390,7 +390,7 @@ fn burst_allowed_when_thinking_state_active() {
     assert!(
         should_burst_for_sequence(&dispatch, &seq),
         "thinking-budget enforcement must NOT decline to classic — the burst \
-         now injects forced </think> at the budget boundary (issue #679)"
+         now injects forced </think> at the budget boundary"
     );
 }
 
@@ -436,7 +436,7 @@ fn dummy_tensor() -> UniquePtr<MlxArray> {
 /// Deterministic synthetic [`mlxcel_core::sampling::TokenLogprobData`]
 /// for a token id — `logprob = -(token_id as f32) * 0.01`. The mock
 /// `MtpTarget` returns this from `prefill_and_seed` / `verify_forward`
-/// so the issue #678 logprobs-threading test can assert the *right*
+/// so the logprobs-threading test can assert the *right*
 /// logprob (the one keyed to a given token) reached
 /// `finalize_burst_success` unchanged. A real Gemma 4 / Qwen 3.5
 /// target computes the value from log-softmax of the verify logits;
@@ -458,7 +458,7 @@ struct MockMtpTarget {
     /// `token_history` slice the most recent `prefill_and_seed` call
     /// received. `None` until `prefill_and_seed` runs. Used by
     /// `drive_mtp_generator_round_loop_threads_token_history_into_prefill_and_seed`
-    /// to pin the issue #677 plumbing.
+    /// to pin the plumbing.
     seen_token_history: RefCell<Option<Vec<i32>>>,
 }
 
@@ -508,13 +508,13 @@ impl MtpTarget for MockMtpTarget {
         MtpVerifyOutput,
         Option<mlxcel_core::sampling::TokenLogprobData>,
     ) {
-        // Record what the generator handed us so the issue #677 test can
+        // Record what the generator handed us so the test can
         // assert the burst threaded the real token_history through.
         *self.seen_token_history.borrow_mut() = Some(token_history.to_vec());
         let seed = self.build_verify_output(1);
         // Synthetic first-bonus logprob: `None` when disabled; otherwise
         // a deterministic function of the token id (`synthetic_logprob`)
-        // so the issue #678 test can assert the right logprob reached
+        // so the test can assert the right logprob reached
         // the right token.
         let first_bonus_lp = logprobs_config
             .enabled
@@ -696,7 +696,7 @@ impl LanguageModel for MinimalLm {
 // =============================================================================
 // MTP bind regression — the CRITICAL test
 //
-// Cycle 1 of #670 / PR #671 shipped a `run_mtp_burst` that omitted
+// Cycle 1 / shipped a `run_mtp_burst` that omitted
 // `drafter.bind(target)` before `MtpGenerator::new`. The result: every
 // MTP burst request returned exactly one token (the seed bonus) because
 // the first `draft_block` call inside the round loop returned
@@ -856,13 +856,13 @@ fn drive_mtp_generator_round_loop_returns_only_seed_when_drafter_is_unbound() {
 }
 
 // =============================================================================
-// Cancellation propagation regression — issue #672
+// Cancellation propagation regression
 //
-// PR #671 (issue #670) landed Option-B speculative-burst dispatch but
+// landed Option-B speculative-burst dispatch but
 // `MtpGenerator::generate` / `DFlashGenerator::run` never inspected
 // `seq.cancelled`. A client that disconnected mid-burst would keep the
 // worker thread busy for the full `max_tokens` budget, wasting compute
-// AND head-of-line-blocking the next request. Issue #672 threads an
+// AND head-of-line-blocking the next request. threads an
 // `&AtomicBool` through both generator APIs, checked once per round.
 //
 // The test below pins the MTP side at the `MtpGenerator::generate`
@@ -922,7 +922,7 @@ fn drive_mtp_generator_round_loop_returns_only_seed_when_cancelled_before_first_
         "a pre-flagged cancellation flag must break the round loop before \
          the first draft_block call, leaving only the seed bonus. Got \
          {emitted:?} — the per-round cancel.load(..) check in \
-         MtpGenerator::generate may have regressed (issue #672)."
+         MtpGenerator::generate may have regressed."
     );
     assert_eq!(
         emitted[0], 100,
@@ -943,12 +943,12 @@ fn drive_mtp_generator_round_loop_returns_only_seed_when_cancelled_before_first_
 }
 
 // =============================================================================
-// History-dependent sampling penalties through the burst — issue #677
+// History-dependent sampling penalties through the burst
 //
-// PR #671 (issue #670) gated penalty-bearing requests
+// gated penalty-bearing requests
 // (repetition / frequency / presence / DRY) to the classic decode path
 // because the burst's first-bonus sample passed `&[]` for token_history.
-// Issue #677 threads `initial_token_history(&prompt, ..)` through
+// threads `initial_token_history(&prompt,..)` through
 // `MtpGenerator::generate` → `MtpTarget::prefill_and_seed` (and through
 // `sample_token_optimized` on the DFlash side), and removes the four
 // decline-to-classic gate predicates.
@@ -998,7 +998,7 @@ fn drive_mtp_generator_round_loop_threads_token_history_into_prefill_and_seed() 
     // The generator must have forwarded the caller's token_history
     // verbatim into `MtpTarget::prefill_and_seed` — if it dropped it (or
     // re-passed `&[]`), penalty-bearing requests would silently diverge
-    // from the classic decode path. This is the load-bearing issue #677
+    // from the classic decode path. This is the load-bearing
     // plumbing assertion.
     let seen = generator
         .target()
@@ -1009,16 +1009,16 @@ fn drive_mtp_generator_round_loop_threads_token_history_into_prefill_and_seed() 
     assert_eq!(
         seen, token_history,
         "MtpGenerator::generate must forward the caller's token_history \
-         into MtpTarget::prefill_and_seed unchanged (issue #677); got {seen:?}"
+         into MtpTarget::prefill_and_seed unchanged; got {seen:?}"
     );
 }
 
 // =============================================================================
-// Logprobs through the burst — issue #678
+// Logprobs through the burst
 //
-// PR #671 (issue #670) gated `logprobs_config.enabled` requests to the
+// gated `logprobs_config.enabled` requests to the
 // classic decode path because `finalize_burst_success` emitted plain
-// `Token(text)` events. Issue #678 threads `logprobs_config` through
+// `Token(text)` events. threads `logprobs_config` through
 // `MtpGenerator::generate` → `MtpTarget::prefill_and_seed` /
 // `verify_forward` (and through `DFlashGenerator::run` on the DFlash
 // side), returns a per-token `Vec<Option<TokenLogprobData>>` aligned
@@ -1055,7 +1055,7 @@ fn drive_mtp_generator_round_loop_threads_logprobs_through_to_emitted_tokens() {
     let prompt = vec![1, 2, 3];
     let sampling = SamplingConfig::greedy();
     let cancel = AtomicBool::new(false);
-    // Logprobs ENABLED — exercise the issue #678 capture path.
+    // Logprobs ENABLED — exercise the capture path.
     let logprobs_config = LogprobsConfig {
         enabled: true,
         top_k: 0,
@@ -1095,8 +1095,7 @@ fn drive_mtp_generator_round_loop_threads_logprobs_through_to_emitted_tokens() {
 
     // Every entry must be `Some` and carry the deterministic synthetic
     // logprob keyed to *that* token — proving the right logprob reached
-    // the right position through the round loop's walk + emit (issue
-    // #678).
+    // the right position through the round loop's walk + emit.
     for (i, (&tok, lp)) in emitted.iter().zip(logprobs.iter()).enumerate() {
         let lp = lp.as_ref().unwrap_or_else(|| {
             panic!("logprobs[{i}] must be Some for token {tok} when logprobs enabled")
@@ -1109,7 +1108,7 @@ fn drive_mtp_generator_round_loop_threads_logprobs_through_to_emitted_tokens() {
         assert_eq!(
             lp.logprob, expected.logprob,
             "logprobs[{i}].logprob for token {tok} must be the synthetic value \
-             threaded from the mock target (issue #678)"
+             threaded from the mock target"
         );
     }
 }
@@ -1190,11 +1189,11 @@ fn drive_mtp_generator_round_loop_returns_empty_logprobs_when_disabled() {
 // =============================================================================
 
 // =============================================================================
-// Thinking-budget enforcement through the burst — issue #679
+// Thinking-budget enforcement through the burst
 //
-// PR #671 (issue #670) gated requests with active thinking-budget
+// gated requests with active thinking-budget
 // enforcement to the classic decode path because the burst path never
-// implemented the forced `</think>` injection. Issue #679 has
+// implemented the forced `</think>` injection. has
 // `finalize_burst_success` run the same per-token `decide_override` +
 // `observe` cycle the classic path's `apply_thinking_budget` uses,
 // factored into the `apply_burst_thinking_budget` helper.
@@ -1270,7 +1269,7 @@ fn apply_burst_thinking_budget_injects_close_at_budget_boundary() {
     assert_eq!(
         t3, 101,
         "at the budget boundary the burst token must be replaced with the \
-         forced </think> close id (issue #679)"
+         forced </think> close id"
     );
     assert!(
         o3,
@@ -1338,7 +1337,7 @@ fn burst_module_exports_required_for_scheduler_integration_compile() {
 }
 
 // =============================================================================
-// Issue #673: `BurstFinalized` prompt-cache donate plumbing.
+// `BurstFinalized` prompt-cache donate plumbing.
 //
 // `try_run_burst_b1` returns a `BurstFinalized` whose `prompt_tokens`,
 // `generated_tokens`, and `healthy_finish` fields the scheduler feeds
@@ -1412,12 +1411,12 @@ fn burst_finalized_error_outcome_has_empty_donate_payload() {
 
 #[test]
 fn batched_burst_module_exports_required_for_scheduler_integration_compile() {
-    // Issue #674: the batched-burst entry point and its result type must
+    // the batched-burst entry point and its result type must
     // stay exported under their current names — `BatchScheduler::try_speculative_burst`
     // depends on both. A re-org that renames either breaks this at
     // compile time before runtime tests fire.
     let _ = std::mem::size_of::<super::speculative_burst::BatchedBurstFinalized>();
-    // Issue #688: the per-row payload type `BatchedBurstRow` is also
+    // the per-row payload type `BatchedBurstRow` is also
     // load-bearing — the scheduler's batched arm destructures it to feed
     // `donate_finished_sequence_cache`. A rename breaks this test at the
     // same time as the scheduler.
@@ -1433,7 +1432,7 @@ fn batched_burst_module_exports_required_for_scheduler_integration_compile() {
 }
 
 // =============================================================================
-// Issue #688: `BatchedBurstRow` prompt-cache donate plumbing.
+// `BatchedBurstRow` prompt-cache donate plumbing.
 //
 // `try_run_burst_batched` returns a `BatchedBurstFinalized` whose `rows`
 // each carry the same donate-payload shape as the B = 1 `BurstFinalized`
@@ -1551,7 +1550,7 @@ fn batched_burst_finalized_rows_preserve_per_row_donate_payloads() {
 }
 
 // =============================================================================
-// sampling_config_eq (issue #674 — batched-window admission predicate)
+// sampling_config_eq (— batched-window admission predicate)
 // =============================================================================
 
 #[test]
@@ -1662,7 +1661,7 @@ fn sampling_config_eq_requires_empty_token_bias_on_both_sides() {
 
 #[test]
 fn sampling_config_eq_excludes_history_dependent_penalty_configs() {
-    // Issue #682 lets penalty-bearing requests enter the burst path
+    // lets penalty-bearing requests enter the burst path
     // (the B=1 burst threads token history). But the BATCHED path
     // samples each row's first bonus with an empty token history, so
     // `sampling_config_eq` (the batched-window admission gate) must

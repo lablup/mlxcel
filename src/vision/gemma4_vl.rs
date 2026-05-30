@@ -42,7 +42,7 @@ pub struct Gemma4VLModel {
     pub boa_token_id: i32,
     pub eoa_token_id: i32,
     /// Per-`SequenceId` storage for projected `per_layer_inputs`
-    /// (issue #543). Mirrors `MRopeState` (#540).
+    /// Mirrors `MRopeState`.
     per_layer_inputs_state: Gemma4PerLayerInputsState,
     _weight_backing: crate::models::Gemma4WeightBacking,
 }
@@ -106,7 +106,7 @@ impl Gemma4VLModel {
         self.get_input_embeddings_with_audio_and_cache(input_ids, images, None, None, None, None)
     }
 
-    /// Compute input embeddings from video features (issue #553).
+    /// Compute input embeddings from video features.
     ///
     /// Each [`processors::gemma4::Gemma4VideoFeatures`] supplies one
     /// `[1, 3, H, W]` tensor per sampled frame. We reuse the existing
@@ -206,7 +206,7 @@ impl Gemma4VLModel {
         // the language-model embedding space, so they must NOT be scaled
         // again. `Gemma4TextModel::forward` detects that we are passing
         // `input_embeddings` and skips its own embed scale to avoid
-        // double-scaling the text tokens. See issue #317.
+        // double-scaling the text tokens..
         let inputs_embeds = self.text_model.input_embeddings(input_ids);
         let inputs_embeds = mlxcel_core::multiply_scalar(
             &inputs_embeds,
@@ -334,7 +334,7 @@ impl Gemma4VLModel {
             result_embeds.inputs_embeds = scattered;
         }
 
-        // Issue #543: park the freshly projected tensor in the
+        // park the freshly projected tensor in the
         // container's fallback slot. The scheduler binds it to a
         // `SequenceId` right after `prepare_request_vlm_embeddings`
         // returns; legacy CLI/single-row callers consume it via
@@ -343,14 +343,14 @@ impl Gemma4VLModel {
         result_embeds
     }
 
-    // -- Per-sequence per_layer_inputs (issue #543) --------------------
+    // -- Per-sequence per_layer_inputs --------------------
     //
     // These thin wrappers route through `Gemma4PerLayerInputsState`. The
     // scheduler calls them via `LoadedModel::*` capability helpers (see
     // `loaded_model_capabilities.rs`) right after
     // `prepare_request_vlm_embeddings` so a burst of Gemma 4 VLM
     // requests cannot have one row's prefill consume another row's
-    // tensor. Mirrors the Qwen MRoPE binding flow from issue #540.
+    // tensor. Mirrors the Qwen MRoPE binding flow.
 
     /// Drain the container's fallback slot into the per-`SequenceId`
     /// map under `seq_id`. No-op when the slot is empty (E1B variant
@@ -391,10 +391,10 @@ impl Gemma4VLModel {
         }
     }
 
-    // -- Gemma 4 MTP speculative-decoding hooks (issue #625) --------------
+    // -- Gemma 4 MTP speculative-decoding hooks --------------
     //
-    // These pass-through methods give the future MTP drafter (issue #626) /
-    // generator (issue #629) the same opt-in sink + rollback surface on the
+    // These pass-through methods give the future MTP drafter /
+    // generator the same opt-in sink + rollback surface on the
     // VLM-wrapped Gemma 4 path as on the text-only path. The multimodal
     // prefill (image / audio merge into the input embeddings) is unchanged —
     // speculative decoding kicks in only AFTER the prefill tail, at which
@@ -414,7 +414,7 @@ impl Gemma4VLModel {
     /// case. Mirrors the `gemma4_vl.py` __call__ → text_model.__call__
     /// flow in `references/mlx-vlm`.
     ///
-    /// Used by: future Gemma 4 VLM MTP consumer (issue #629).
+    /// Used by: future Gemma 4 VLM MTP consumer.
     pub fn forward_with_speculative_sinks(
         &self,
         input_ids: &MlxArray,
@@ -499,7 +499,7 @@ impl LanguageModel for Gemma4VLModel {
         mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
         if let Some(embeds) = input_embeddings {
-            // Issue #543: prefer the per-`SequenceId` slot so each
+            // prefer the per-`SequenceId` slot so each
             // row of a burst-enqueued batch sees its own projection.
             // Fall back to the legacy fallback slot when there is no
             // `seq_id` (CLI/single-row) or the bind step did not run
@@ -560,7 +560,7 @@ impl LanguageModel for Gemma4VLModel {
     }
 
     fn release_sequence_state_by_id(&self, seq_id: SequenceId) {
-        // Issue #543: drop the per-sequence `per_layer_inputs`
+        // drop the per-sequence `per_layer_inputs`
         // alongside the text model's per-sequence cache release so
         // the map cannot grow without bound across long-running
         // server sessions.
@@ -580,7 +580,7 @@ impl LanguageModel for Gemma4VLModel {
         false
     }
 
-    /// Issue #542: Gemma 4 supports batched decode now that the inner
+    /// Gemma 4 supports batched decode now that the inner
     /// [`crate::models::Gemma4Wrapper`] uses per-`SequenceId` cache
     /// isolation via `ModelOwnedSequenceState<Cache>`. The
     /// `forward_batched_with_context_and_ids` override below routes each
@@ -590,9 +590,9 @@ impl LanguageModel for Gemma4VLModel {
         true
     }
 
-    /// Issue #542: per-row batched dispatch with seq_ids so each row of a
+    /// per-row batched dispatch with seq_ids so each row of a
     /// mixed-length batch reaches the text model's seq-aware forward path
-    /// independently. Mirrors the Qwen VL fix in PR #558 and shares the
+    /// independently. Mirrors the Qwen VL fix and shares the
     /// same helper (`multimodal::batched_dispatch`).
     fn forward_batched_with_context_and_ids(
         &self,

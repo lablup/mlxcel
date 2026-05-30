@@ -60,14 +60,14 @@ pub(crate) struct WorkerSchedulerConfig {
     /// Maximum number of cached post-projection image features per loaded
     /// VLM. `0` disables caching.
     pub vision_cache_size: usize,
-    /// Axis B Epic #362 (B8): optional server-wide language-bias config.
+    /// Axis B (B8): optional server-wide language-bias config.
     /// Resolved once on the worker thread into a `TokenBiasMap` after the
     /// tokenizer loads, and attached to the batch scheduler for the rest of
     /// the worker's lifetime.
     pub lang_bias_config: Option<mlxcel_core::lang_analyzer::LangBiasConfig>,
-    /// Issue #409: server-wide default thinking-token budget.
+    /// server-wide default thinking-token budget.
     pub reasoning_budget: Option<crate::server::thinking_budget::ThinkingBudget>,
-    /// Epic #416 / issue #419: cross-request prompt-prefix KV cache store.
+    /// cross-request prompt-prefix KV cache store.
     ///
     /// `None` when the feature is disabled by
     /// [`crate::server::prompt_cache::PromptCacheConfig::enabled`]. When
@@ -77,16 +77,16 @@ pub(crate) struct WorkerSchedulerConfig {
     ///
     /// Store handle passed to [`BatchScheduler::with_prompt_cache`] so the
     /// scheduler can adopt detached prefixes on cache hits and donate-back
-    /// finished sequences (epic #416 / issue #421).
+    /// finished sequences.
     pub prompt_cache: Option<Arc<crate::server::prompt_cache::PromptCacheStore>>,
-    /// Issue #484 (B11) / #508: server-wide KV cache quantization mode.
+    /// (B11) / server-wide KV cache quantization mode.
     ///
     /// Defaults to [`mlxcel_core::cache::KVCacheMode::Fp16`] (bit-exact
     /// baseline). When a Turbo4 variant is configured, the scheduler
     /// applies it to each new sequence's per-layer cache and picks the
-    /// Turbo4-aware paged layout (#482).
+    /// Turbo4-aware paged layout.
     pub kv_cache_mode: mlxcel_core::cache::KVCacheMode,
-    /// Issue #545: continuous-batching KV quantization configuration.
+    /// continuous-batching KV quantization configuration.
     ///
     /// When enabled (`bits > 0`), the scheduler resolves per-layer
     /// [`mlxcel_core::cache::KVCacheMode`] values from this config (with
@@ -95,7 +95,7 @@ pub(crate) struct WorkerSchedulerConfig {
     /// Defaults to a disabled config so existing deployments stay
     /// bit-exact.
     pub batch_kv_quant: mlxcel_core::cache::BatchKvQuantConfig,
-    /// Issue #603: maximum KV cache size for plain (non-sliding) caches.
+    /// maximum KV cache size for plain (non-sliding) caches.
     ///
     /// When `Some(N)`, the batch scheduler caps each per-sequence plain
     /// `KVCache` to `N` tokens by trimming the oldest entries once
@@ -103,7 +103,7 @@ pub(crate) struct WorkerSchedulerConfig {
     /// window and bypass this cap. `None` (the default) preserves the
     /// legacy unbounded behaviour.
     pub max_kv_size: Option<usize>,
-    /// Issue #666: resolved speculative-decoding dispatch shape.
+    /// resolved speculative-decoding dispatch shape.
     ///
     /// Constructed once at worker construction (or
     /// [`crate::server::SpeculativeDispatch::Disabled`] when the operator
@@ -205,7 +205,7 @@ pub(crate) fn spawn_model_worker_with_batch_config(
             tracing::info!("EOS tokens from config: {:?}", config_eos);
         }
 
-        // Axis B Epic #362 (B8): resolve the server-wide LangBiasConfig once,
+        // Axis B (B8): resolve the server-wide LangBiasConfig once,
         // after the tokenizer is available. Empty bias set or an HF-less
         // tokenizer yields an empty map — bit-exact baseline preserved.
         let token_bias = resolve_worker_token_bias(
@@ -232,7 +232,7 @@ pub(crate) fn spawn_model_worker_with_batch_config(
             } else {
                 "conservative"
             };
-            // Issue #405 — emit byte_fragment_entries only when non-zero so
+            // emit byte_fragment_entries only when non-zero so
             // the existing B9 field shape is preserved for Phase 1 configs.
             let byte_fragment_entries = token_bias.byte_fragment_len();
             if byte_fragment_entries > 0 {
@@ -273,7 +273,7 @@ pub(crate) fn spawn_model_worker_with_batch_config(
         } else {
             String::new()
         };
-        // Issue #666: log the resolved speculative dispatch once at
+        // log the resolved speculative dispatch once at
         // startup. This makes the operator-visible "which path is
         // active" explicit in the worker log without forcing the
         // scheduler to log per request.
@@ -292,26 +292,26 @@ pub(crate) fn spawn_model_worker_with_batch_config(
             sched_config.max_queue_depth,
         );
 
-        // Issue #670 / #674: speculative dispatch is wired end-to-end via
+        // speculative dispatch is wired end-to-end via
         // the burst path in `BatchScheduler::execute_prefill`. With
         // `max_batch_size > 1` the scheduler assembles an
         // equal-prompt-length window of concurrently-queued speculative
         // requests and drives them through the batched round-loop driver
         // (`MtpBatchedGenerator` / `DFlashBatchedGenerator`) in one tick
-        // — true B>1 batched speculative decoding (issue #674). A
+        // — true B>1 batched speculative decoding. A
         // speculative request whose prompt length, `max_tokens`, or
         // sampling config does not match the current window head, or
         // that arrives alone, still runs as a B=1 burst; in that case
         // the burst occupies the worker thread for its full duration and
         // concurrent classic-decode rows head-of-line-block behind it
-        // until it completes. The previous PR-#671 wording described the
-        // B=1-only behaviour; this reflects the #674 batched path.
+        // until it completes. The previous earlier wording described the
+        // B=1-only behaviour; this reflects the batched path.
         if sched_config.speculative_dispatch.is_kind_specific() && sched_config.max_batch_size > 1 {
             tracing::info!(
                 "Speculative decoding active ({}) with max_batch_size={}: \
                  concurrently-queued speculative requests that share a \
                  prompt length, max_tokens, and sampling config are driven \
-                 as a single B>1 batched burst (issue #674). A speculative \
+                 as a single B>1 batched burst. A speculative \
                  request that does not match the current window head, or \
                  that arrives alone, runs as a B=1 burst and head-of-line-\
                  blocks concurrent classic-decode rows for its full \
@@ -322,7 +322,7 @@ pub(crate) fn spawn_model_worker_with_batch_config(
             );
         }
 
-        // Issue #409: resolve the thinking-token id pair once, after the
+        // resolve the thinking-token id pair once, after the
         // tokenizer is loaded. For models without `<think>`/`</think>` tokens
         // (non-thinking models) this returns `None` and the scheduler silently
         // ignores any budget parameter (logging once per model load).
@@ -356,9 +356,9 @@ pub(crate) fn spawn_model_worker_with_batch_config(
         .with_prompt_cache(sched_config.prompt_cache)
         .with_kv_cache_mode(sched_config.kv_cache_mode)
         .with_batch_kv_quant(sched_config.batch_kv_quant)
-        // Issue #603: cap plain KVCache growth to --max-kv-size when set.
+        // cap plain KVCache growth to --max-kv-size when set.
         .with_max_kv_size(sched_config.max_kv_size)
-        // Issue #666: attach the resolved speculative dispatch so the
+        // attach the resolved speculative dispatch so the
         // scheduler can branch per-request once the round-loop dispatch
         // hook is wired in `decode_single_step`.
         .with_speculative_dispatch(sched_config.speculative_dispatch);
@@ -501,7 +501,7 @@ pub(crate) fn spawn_legacy_model_worker(
              (max_batch_size=1, prefill_chunk_size=disabled)"
         );
 
-        // Issue #409: resolve the thinking-token id pair once, after the
+        // resolve the thinking-token id pair once, after the
         // tokenizer is loaded. Mirrors the batched-worker path in
         // `spawn_model_worker_with_batch_config`. For models without
         // `<think>`/`</think>` tokens the helper returns `None` and the
@@ -631,7 +631,7 @@ pub(crate) fn prepare_request_vlm_embeddings(
         return Ok(None);
     }
 
-    // Issue #596: video inputs route to the Gemma 4 video embedding path,
+    // video inputs route to the Gemma 4 video embedding path,
     // mirroring the CLI dispatch in `commands/generate_vlm.rs::compute_vlm_embeddings`.
     // Combining --video with --audio is rejected upstream and at the route
     // layer; this branch additionally surfaces a clear error if those happen
@@ -822,7 +822,7 @@ fn prepare_gemma4_audio_embeddings(
     Ok(Some(embeddings))
 }
 
-/// Resolve `videos` into Gemma 4 video embeddings (issue #596).
+/// Resolve `videos` into Gemma 4 video embeddings.
 ///
 /// Mirrors the CLI's `compute_gemma4_video_embeddings` in
 /// `src/commands/generate_vlm.rs`: probes for ffmpeg, decodes each video into
@@ -867,7 +867,7 @@ fn prepare_request_video_embeddings(
     // Decode each video honoring the per-video FPS override when supplied;
     // otherwise fall back to `multimodal::video::DEFAULT_FPS`.
     //
-    // Issue #601: every `ResolvedVideo` carries a [`VideoSource`] handle —
+    // every `ResolvedVideo` carries a [`VideoSource`] handle
     // on Unix this is fd-backed, so the call to `load_video_source` reads
     // from the open file description the resolver already validated. ffmpeg
     // never re-opens the canonical path, so an attacker cannot win the
@@ -990,7 +990,7 @@ pub(crate) fn build_generation_result(
 /// Build a `GenerationResult` with prompt-prefix cache information.
 ///
 /// `cached_tokens` is the number of leading prompt tokens that were satisfied
-/// by the KV prefix cache (issue #423). Pass `0` for non-cached requests.
+/// by the KV prefix cache. Pass `0` for non-cached requests.
 pub(crate) fn build_generation_result_with_cache(
     text: String,
     prompt_tokens: usize,
@@ -1067,7 +1067,7 @@ impl StreamingDecodeState {
         self.completion_tokens += 1;
         self.all_ids.push(token_id as u32);
 
-        // --- Byte-fallback buffering (issue #547) ---
+        // --- Byte-fallback buffering ---
         // Tokenizers that use byte-fallback (e.g. Gemma variants with
         // `byte_fallback = true`) map each byte of a multi-byte UTF-8
         // character to an individual token in the form `<0xXX>`. When decoded
@@ -1233,7 +1233,7 @@ impl StreamingDecodeState {
     }
 
     /// Like [`finish`] but records how many prompt tokens were served from
-    /// the KV prefix cache (epic #416 / issue #423).
+    /// the KV prefix cache.
     pub(crate) fn finish_with_cache(
         self,
         start: Instant,

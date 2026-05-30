@@ -593,7 +593,7 @@ pub struct Qwen3VLModel {
     norm: RMSNorm,
     lm_head: UnifiedLinear,
     _config: Qwen3VLConfig,
-    /// Per-sequence MRoPE state (issue #540 / mlx-vlm PR #1095). Each row
+    /// Per-sequence MRoPE state (mlx-vlm PR #1095). Each row
     /// in a server batch needs its own delta — the legacy fallback slot
     /// preserves CLI/single-row behavior when no `SequenceId` is plumbed.
     mrope_state: MRopeState,
@@ -646,7 +646,7 @@ impl Qwen3VLModel {
     }
 
     /// Set MRoPE state for a specific server-side sequence so the cached
-    /// per-sequence delta no longer leaks across requests (issue #540).
+    /// per-sequence delta no longer leaks across requests.
     pub fn set_mrope_state_for_sequence(
         &self,
         seq_id: SequenceId,
@@ -672,7 +672,7 @@ impl Qwen3VLModel {
     /// under `seq_id`. Called by the scheduler right after the vision
     /// wrapper's `get_input_embeddings` has populated the fallback slot,
     /// so subsequent decode steps for this sequence resolve the MRoPE
-    /// state by id instead of by leaky scalar (issue #540).
+    /// state by id instead of by leaky scalar.
     pub fn bind_mrope_state_to_sequence(&self, seq_id: SequenceId) {
         self.mrope_state.bind_fallback_to_sequence(seq_id);
     }
@@ -680,7 +680,7 @@ impl Qwen3VLModel {
     /// Remove and return the per-sequence MRoPE entry under `seq_id`
     /// without dropping the contained position-id tensor. Used by the
     /// server preemption path so the entry can survive an evict-and-
-    /// reallocate cycle (issue #540 follow-up).
+    /// reallocate cycle (follow-up).
     pub(crate) fn take_mrope_entry(
         &self,
         seq_id: SequenceId,
@@ -817,7 +817,7 @@ impl Qwen3VLModel {
     }
 
     /// Internal forward path that takes an optional `SequenceId` so the
-    /// cached MRoPE state is resolved per row (issue #540).
+    /// cached MRoPE state is resolved per row.
     pub(crate) fn forward_for_sequence(
         &self,
         input_ids: &MlxArray,
@@ -854,7 +854,7 @@ impl Qwen3VLModel {
                 // This matches upstream mlx-vlm PR #1048 (commit 1bf7742) which relaxed
                 // the equality guard to shape[-1] >= cache_offset + seq_length.
                 //
-                // Issue #541 (upstream mlx-vlm PR #1040, commit 58e2435): also validate
+                // (upstream mlx-vlm PR #1040, commit 58e2435): also validate
                 // pos_shape[1] == batch so sequential requests with different batch_sizes
                 // do not reuse stale position IDs and crash on broadcast_shapes.
                 let pos_shape = mlxcel_core::array_shape(stored_pos);

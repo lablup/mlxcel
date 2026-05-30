@@ -12,8 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! 3-bit pack/unpack helpers for `KVCacheMode::Turbo3Asym` (issue #477,
-//! epic #458).
+//! 3-bit pack/unpack helpers for `KVCacheMode::Turbo3Asym`.
 //!
 //! 3 bits do not divide a byte cleanly, so we pack **8 coordinates into 3
 //! bytes** (8 × 3 = 24 bits = 3 bytes). The cache calls into these helpers
@@ -237,7 +236,7 @@ mod tests {
 
     #[test]
     fn packed_bytes_matches_supported_head_dims() {
-        // Issue #477 spec: head_dim ∈ {64, 80, 96, 128, 192, 256} → bytes
+        // spec: head_dim ∈ {64, 80, 96, 128, 192, 256} → bytes
         // {24, 30, 36, 48, 72, 96}.
         assert_eq!(packed_bytes_per_token_3bit(64), 24);
         assert_eq!(packed_bytes_per_token_3bit(80), 30);
@@ -344,7 +343,7 @@ mod tests {
     }
 
     /// head_dim=80 (Mistral-class). 80 * 3 = 240 bits = exactly 30 bytes per
-    /// token; verifies the awkward but valid alignment from issue #477's
+    /// token; verifies the awkward but valid alignment's
     /// design notes.
     #[test]
     fn round_trip_per_token_head_dim_80() {

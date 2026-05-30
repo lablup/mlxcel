@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! In-memory store for OpenAI Responses API objects (issue #622).
+//! In-memory store for OpenAI Responses API objects.
 //!
 //! Phase 1 keeps the store entirely in-process: a synchronous
 //! [`std::sync::RwLock`] guards a `HashMap<id, Entry>` with an LRU eviction

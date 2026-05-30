@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Streaming events for the OpenAI Responses API (issue #622).
+//! Streaming events for the OpenAI Responses API.
 //!
 //! Wire shape:
 //!

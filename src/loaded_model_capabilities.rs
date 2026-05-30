@@ -40,11 +40,11 @@ pub enum VlmRuntimeRef<'a> {
     Molmo(&'a vision::MolmoVLModel),
     Molmo2(&'a vision::Molmo2VLModel),
     MolmoPoint(&'a vision::MolmoPointVLModel),
-    /// Nemotron H Nano Omni vision runtime (issue #554, vision-only scope).
+    /// Nemotron H Nano Omni vision runtime (vision-only scope).
     NemotronHNanoOmni(&'a vision::NemotronHNanoOmniVlModel),
-    /// Youtu-VL runtime (issue #555).
+    /// Youtu-VL runtime.
     YoutuVL(&'a vision::YoutuVLModel),
-    /// InternVL (internvl_chat) runtime (issue #738).
+    /// InternVL (internvl_chat) runtime.
     InternVL(&'a vision::InternVLChatVLM),
     Standard(&'a vision::VisionModule),
 }
@@ -167,7 +167,7 @@ impl LoadedModel {
 
     /// Bind any pending MRoPE state (the per-row deltas just set by a Qwen
     /// VL `get_input_embeddings` pass) to a specific server sequence id so
-    /// the cached scalar can no longer leak across requests (issue #540).
+    /// the cached scalar can no longer leak across requests.
     ///
     /// This is a no-op for non-Qwen-VL models. The caller passes the id
     /// the scheduler already allocated for this request — the VLM runtime
@@ -185,7 +185,7 @@ impl LoadedModel {
     /// underlying Qwen VL text model. Used by the server preemption
     /// path so the entry survives the eviction (which releases the old
     /// sequence id) and can be reinstalled under the freshly allocated
-    /// id (issue #540 follow-up).
+    /// id (follow-up).
     ///
     /// Returns an empty snapshot for non-Qwen-VL models or when no
     /// entry exists for `seq_id`.
@@ -223,7 +223,7 @@ impl LoadedModel {
     /// projected by `get_input_embeddings_with_audio_and_cache`) to a
     /// specific server sequence id so a burst of Gemma 4 VLM requests
     /// in a single drain tick cannot have one row's prefill consume
-    /// another row's tensor (issue #543).
+    /// another row's tensor.
     ///
     /// This is a no-op for non-Gemma-4 models. The caller passes the
     /// id the scheduler already allocated for the request; the VLM
@@ -246,7 +246,7 @@ impl LoadedModel {
     /// allocated id — `prepare_request_vlm_embeddings` does not run
     /// again on re-prefill, so without the take/install round trip
     /// the re-prefill would observe `per_layer_inputs == None` and
-    /// produce wrong logits for E2B/E4B variants (issue #543).
+    /// produce wrong logits for E2B/E4B variants.
     ///
     /// Returns `None` for non-Gemma-4 models, the E1B variant, or
     /// when no entry exists for `seq_id`.

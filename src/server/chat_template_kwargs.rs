@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Shared chat-template kwargs plumbing (issue #410).
+//! Shared chat-template kwargs plumbing.
 //!
 //! Provides the generic `chat_template_kwargs` dictionary pass-through that
 //! matches llama.cpp's `--chat-template-kwargs` flag and vLLM's

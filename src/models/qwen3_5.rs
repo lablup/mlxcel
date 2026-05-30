@@ -357,7 +357,7 @@ impl Qwen35GatedDeltaNet {
         // Wrap slice in contiguous() to force MLX to materialize a fresh,
         // independent buffer. Without this, the slice is a lazy view that
         // retains a reference to the full conv_input allocation, causing a
-        // memory leak proportional to the sequence length. (issue #323)
+        // memory leak proportional to the sequence length.
         if let Some(c) = cache.as_deref_mut() {
             let n_keep = (self.conv_kernel_size - 1) as i32;
             let conv_shape = mlxcel_core::array_shape(&conv_input);
@@ -462,18 +462,18 @@ impl Qwen35GatedDeltaNet {
     ///
     /// Mirrors the `gdn_sink` parameter in upstream
     /// `mlx-vlm/mlx_vlm/models/qwen3_5/language.py:Qwen3_5GatedDeltaNet`
-    /// (issue #634). The snapshot is captured *before* `gated_delta_update`
+    /// The snapshot is captured *before* `gated_delta_update`
     /// runs, holding the same per-step inputs and the pre-block recurrent
     /// state — exactly what is needed to replay the block over a truncated
     /// `[B, n]` slice during DFlash rollback.
     ///
-    /// Apple Silicon precision (issue #634, `docs/apple-silicon-precision.md`):
+    /// Apple Silicon precision (`docs/apple-silicon-precision.md`):
     /// captured `q/k/v/a/b/conv_input` retain their bf16/f16 dtype from the
     /// projections; `init_state`, when present, stays float32. The rollback
     /// path must preserve these dtypes to avoid numerical drift from the
     /// cold-pass reference the drafter was trained against.
     ///
-    /// Used by: `Qwen35Model::forward_speculative` (issue #634)
+    /// Used by: `Qwen35Model::forward_speculative`
     fn forward_hidden_internal_with_capture(
         &self,
         layer_idx: usize,
@@ -903,7 +903,7 @@ impl Qwen35DecoderLayer {
     /// linear-attention, also pushes a [`GdnRollbackSnapshot`] into
     /// `snapshot_sink`; attention layers behave identically to `forward`.
     ///
-    /// Issue #634: used by `Qwen35Model::forward_speculative` to drive the
+    /// used by `Qwen35Model::forward_speculative` to drive the
     /// DFlash drafter without duplicating the prefill / decode forward path.
     fn forward_with_capture(
         &self,
@@ -1035,7 +1035,7 @@ impl Qwen35DecoderLayer {
 ///   prev-conv-state + qkv. Used to recover the post-rollback `conv_state` window.
 /// - `layer_idx`: which decoder layer this snapshot belongs to (for replay).
 ///
-/// Dtype policy (issue #634, Apple Silicon precision rules — `docs/apple-silicon-precision.md`):
+/// Dtype policy (Apple Silicon precision rules — `docs/apple-silicon-precision.md`):
 /// the captured tensors retain the dtype produced by the verify-pass kernels
 /// (typically bf16 / f16 for activations; float32 for `init_state`). The rollback
 /// path must NOT promote them to float32, otherwise the rewound state diverges
@@ -1079,7 +1079,7 @@ pub struct Qwen35Model {
     pub(crate) config: Qwen35Config,
     /// Internal and per-sequence mixed cache state.
     sequence_state: ModelOwnedSequenceState<Qwen3NextCache>,
-    /// Per-sequence MRoPE state (issue #540 / mlx-vlm PR #1095). Each row
+    /// Per-sequence MRoPE state (mlx-vlm PR #1095). Each row
     /// in a server batch needs its own delta — the legacy fallback slot
     /// preserves CLI/single-row behavior when no `SequenceId` is plumbed.
     mrope_state: MRopeState,
@@ -1154,7 +1154,7 @@ impl Qwen35Model {
     }
 
     /// Construct a fresh heterogeneous cache vec for the DFlash
-    /// speculative round loop (issue #670).
+    /// speculative round loop.
     ///
     /// Distinct name from the trait
     /// [`LanguageModel::make_caches`] (which returns `Vec<KVCache>` —
@@ -1168,7 +1168,6 @@ impl Qwen35Model {
     /// Used by:
     /// [`crate::server::batch::speculative_burst::run_dflash_on_qwen35`]
     /// for both `Qwen35Model` and `Qwen35VLModel` text-only DFlash bursts
-    /// (issues #670 and #691).
     pub(crate) fn make_speculative_caches(&self) -> Vec<Qwen3NextCache> {
         self.make_internal_caches()
     }
@@ -1307,11 +1306,11 @@ impl Qwen35Model {
         // not only when cache_offset == 0.  During chunked prefill (cache_offset > 0)
         // the stored array is sliced to the needed window rather than recomputed.
         //
-        // Issue #540: the MRoPE entry is resolved per `SequenceId` so a row
+        // the MRoPE entry is resolved per `SequenceId` so a row
         // that just finished a VL prefill cannot poison a subsequent
         // text-only sequence's decode delta.
         //
-        // Issue #541 (upstream mlx-vlm PR #1040, commit 58e2435): also validate
+        // (upstream mlx-vlm PR #1040, commit 58e2435): also validate
         // pos_shape[1] == batch before reusing, matching the upstream Python check:
         //   self._position_ids.shape[1] == batch_size
         //   and self._position_ids.shape[-1] >= cache_offset + seq_length
@@ -1462,7 +1461,7 @@ impl Qwen35Model {
     }
 
     /// Set MRoPE state for a specific server-side sequence so the cached
-    /// per-sequence delta no longer leaks across requests (issue #540).
+    /// per-sequence delta no longer leaks across requests.
     pub fn set_mrope_state_for_sequence(
         &self,
         seq_id: SequenceId,
@@ -1483,7 +1482,7 @@ impl Qwen35Model {
     /// under `seq_id`. Called by the scheduler right after the vision
     /// wrapper's `get_input_embeddings` has populated the fallback slot,
     /// so subsequent decode steps for this sequence resolve the MRoPE
-    /// state by id instead of by leaky scalar (issue #540).
+    /// state by id instead of by leaky scalar.
     pub fn bind_mrope_state_to_sequence(&self, seq_id: SequenceId) {
         self.mrope_state.bind_fallback_to_sequence(seq_id);
     }
@@ -1491,7 +1490,7 @@ impl Qwen35Model {
     /// Remove and return the per-sequence MRoPE entry under `seq_id`
     /// without dropping the contained position-id tensor. Used by the
     /// server preemption path so the entry can survive an evict-and-
-    /// reallocate cycle (issue #540 follow-up).
+    /// reallocate cycle (follow-up).
     pub(crate) fn take_mrope_entry(
         &self,
         seq_id: SequenceId,
@@ -1513,7 +1512,7 @@ impl Qwen35Model {
     ///
     /// Returns `Some([3, batch, seq_len])` when `delta` is provided (VLM decode
     /// path), or `None` for text-only models where fast_rope handles positioning
-    /// internally. Issue #540 makes this static so the caller passes the
+    /// internally. makes this static so the caller passes the
     /// per-`SequenceId` delta resolved through `MRopeState::with_entry`.
     // Used by: forward_with_mrope_state
     fn compute_decode_position_ids_with_delta(
@@ -1574,7 +1573,7 @@ impl Qwen35Model {
     /// states at `capture_layer_ids` and per-GDN-layer rollback snapshots.
     ///
     /// This is the verify-pass hot path consumed by the DFlash drafter
-    /// round loop (epic #633, sub-12). It mirrors upstream
+    /// round loop (sub-12). It mirrors upstream
     /// `mlx-vlm/mlx_vlm/models/qwen3_5/language.py::LanguageModel.__call__`
     /// when called with `capture_layer_ids` set, with two changes:
     ///   1. `return_hidden` is implied by `capture_layer_ids.is_some()` —
@@ -1585,11 +1584,11 @@ impl Qwen35Model {
     ///      KV (attention) caches and GDN (linear-attention) caches to the
     ///      accepted position.
     ///
-    /// Apple Silicon precision (issue #634, `docs/apple-silicon-precision.md`):
+    /// Apple Silicon precision (`docs/apple-silicon-precision.md`):
     /// captured hidden tensors keep the verify-pass dtype (bf16/f16); GDN
     /// snapshot tensors keep their per-field dtype. Do not promote to f32.
     ///
-    /// Used by: DFlash drafter round loop (epic #633, sub-12).
+    /// Used by: DFlash drafter round loop (sub-12).
     pub fn forward_speculative(
         &self,
         input_ids: &MlxArray,
@@ -1678,7 +1677,7 @@ impl Qwen35Model {
     ///
     /// Mirrors upstream
     /// `mlx-vlm/mlx_vlm/models/qwen3_5/language.py::LanguageModel.rollback_speculative_cache`
-    /// (issue #634). Returns `max(accepted)`.
+    /// Returns `max(accepted)`.
     ///
     /// Arguments:
     ///   * `caches` — the per-layer cache slice the verify pass just mutated.
@@ -1696,12 +1695,12 @@ impl Qwen35Model {
     /// `accepted == block_size - 1`) keep both cache types as the verify-pass
     /// produced them.
     ///
-    /// Apple Silicon precision (issue #634, `docs/apple-silicon-precision.md`):
+    /// Apple Silicon precision (`docs/apple-silicon-precision.md`):
     /// GDN replay re-uses the captured `q/k/v/a/b` and `init_state` tensors
     /// at their original dtype (bf16/f16/float32 as captured). Do not promote
     /// to f32 — the drafter's reference forward stays in the activation dtype.
     ///
-    /// Used by: DFlash drafter round loop (epic #633, sub-12).
+    /// Used by: DFlash drafter round loop (sub-12).
     pub fn rollback_speculative_cache(
         &self,
         caches: &mut [Qwen3NextCache],
@@ -1876,9 +1875,9 @@ impl Qwen35Model {
 /// model.
 ///
 /// Bridges `Qwen35Model::forward_speculative` /
-/// `Qwen35Model::rollback_speculative_cache` (issue #634) to the
+/// `Qwen35Model::rollback_speculative_cache` to the
 /// drafter-side [`mlxcel_core::drafter::dflash::SpeculativeTarget`]
-/// trait (issue #636). This is what lets the
+/// trait. This is what lets the
 /// `DFlashGenerator` round loop call into the binary's concrete model
 /// type without mlxcel-core having to name `Qwen3NextCache` /
 /// `VerifyOutput` / `GdnRollbackSnapshot`.
@@ -1888,8 +1887,8 @@ impl Qwen35Model {
 /// instance methods on `Qwen35Model` without any extra allocation or
 /// state.
 ///
-/// Used by: DFlash B=1 round loop (issue #636); future B>1 round loop
-/// (issue #637) will provide a peer impl with batched accept slices.
+/// Used by: DFlash B=1 round loop; future B>1 round loop
+/// will provide a peer impl with batched accept slices.
 impl mlxcel_core::drafter::dflash::SpeculativeTarget for Qwen35Model {
     type Cache = super::qwen3_next::Qwen3NextCache;
     type VerifyOut = VerifyOutput;
@@ -1948,7 +1947,7 @@ impl mlxcel_core::drafter::dflash::SpeculativeTarget for Qwen35Model {
         // Delegates to the per-Qwen-3.5 rollback that combines KV
         // attention-cache trim with GDN linear-attention state replay.
         // For B = 1 the accepted slice is a single-element view; the
-        // batched B > 1 path uses `rollback_partial_batched` (#637).
+        // batched B > 1 path uses `rollback_partial_batched`.
         let _ = self.rollback_speculative_cache(
             caches,
             &verify_out.gdn_states,
@@ -1967,10 +1966,10 @@ impl mlxcel_core::drafter::dflash::SpeculativeTarget for Qwen35Model {
         // For B > 1 the rollback path uses the same `rollback_speculative_cache`
         // entrypoint with a multi-element `accepted` slice. The per-row
         // KV tail-zeroing and per-row GDN-state replay (with per-row
-        // conv_state slicing) already lives inside that method (issue #634);
+        // conv_state slicing) already lives inside that method;
         // we just thread the slice through.
         //
-        // Apple Silicon precision (issue #634, `docs/apple-silicon-precision.md`):
+        // Apple Silicon precision (`docs/apple-silicon-precision.md`):
         // both the KV per-row tail zero buffer and the GDN replay tensors
         // keep their captured dtype (bf16/f16 activations + float32
         // init_state); no f32 promotion.
@@ -2008,7 +2007,7 @@ impl mlxcel_core::drafter::dflash::SpeculativeTarget for Qwen35Model {
 /// `KVCache`. Used by [`Qwen35Model::rollback_speculative_cache`] for batched
 /// verify-pass rollback when rows accepted different numbers of tokens.
 ///
-/// Apple Silicon precision (issue #634): the zero buffer is built with the
+/// Apple Silicon precision: the zero buffer is built with the
 /// same dtype as the K/V tensors so no implicit f32 promotion happens.
 ///
 /// Used by: `Qwen35Model::rollback_speculative_cache`
@@ -2555,7 +2554,7 @@ impl LanguageModel for Qwen35Model {
     /// the DFlash drafter's lazy-bind path. The upstream
     /// `z-lab/Qwen3.5-4B-DFlash` checkpoint omits `embed_tokens.weight`
     /// and resolves it from this Qwen 3.5 target during
-    /// `mlxcel_core::drafter::Drafter::bind` (issue #675).
+    /// `mlxcel_core::drafter::Drafter::bind`.
     fn embed_tokens_module(&self) -> Option<UnifiedEmbedding> {
         Some(self.embed_tokens.clone_shared())
     }
@@ -2613,7 +2612,7 @@ impl LanguageModel for Qwen35Model {
 
     fn release_sequence_state_by_id(&self, seq_id: SequenceId) {
         self.sequence_state.release_sequence_state(seq_id);
-        // Issue #540: drop the per-sequence MRoPE entry alongside the
+        // drop the per-sequence MRoPE entry alongside the
         // cache state so the map cannot grow as sequences cycle through.
         self.release_mrope_sequence(seq_id);
     }

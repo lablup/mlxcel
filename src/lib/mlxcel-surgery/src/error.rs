@@ -67,7 +67,7 @@ pub enum SurgeryError {
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
 
-    /// A failure from the config layer (issue #369) or any
+    /// A failure from the config layer or any
     /// downstream that has chosen to surface its errors as
     /// `anyhow::Error`.
     #[error(transparent)]

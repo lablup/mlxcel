@@ -40,7 +40,7 @@ namespace {
 // and (D × RepeatCount) accumulator updates that the graph-level
 // `where(alive, V_dq, 0)` path still pays.
 //
-// Issue #520 — precomputed rescale.
+// precomputed rescale.
 //
 // The previous implementation derived `|y_hat[t]| = sqrt(Σ_d codebook[idx]²)`
 // per token via a `log2(Dim) + 2`-barrier threadgroup tree reduction over a
@@ -48,7 +48,7 @@ namespace {
 // `turbo4-asym` this reduction dominated decode latency: ~9 barriers per
 // cache token × 4 K tokens × 32 layers × ~32 threadgroups produced tens of
 // millions of `threadgroup_barrier` calls per decode step, making the kernel
-// 2.0× slower than the graph fallback (PR #519 A/B).
+// 2.0× slower than the graph fallback (A/B).
 //
 // Because `|y_hat|` is a pure function of the packed indices (themselves
 // fixed at quantize time), the entire rescale `rescale[t] = norm[t] / |y_hat[t]|`
@@ -94,7 +94,7 @@ constexpr const char* SPARSE_V_WEIGHTED_SUM_SOURCE = R"(
     }
 
     auto wt = weights + bhq * (uint)RepeatCount * t_count; // [Tq, Tk]
-    auto rs = rescale + bhkv * t_count;                     // [Tk] f16 (issue #520)
+    auto rs = rescale + bhkv * t_count;                     // [Tk] f16
     auto pk = packed + bhkv * t_count * (uint)(Dim / 2);    // [Tk, D/2]
 
     // Thresholds passed as a 1-element array so MLX accepts them as a regular
@@ -118,8 +118,8 @@ constexpr const char* SPARSE_V_WEIGHTED_SUM_SOURCE = R"(
     // and gate by per-Q attention weight.
     //
     // No threadgroup memory and no barriers in the inner loop — this is the
-    // entire point of issue #520. The previous tree-reduction body lived
-    // here; see git history for the pre-#520 form.
+    // entire point. The previous tree-reduction body lived
+    // here; see git history for the earlier form.
     for (uint t = 0; t < t_count; t++) {
         // Aliveness check: scan RepeatCount Q slots and short-circuit if all
         // are below threshold for this (b, h, t). For RepeatCount=1 (decode
@@ -134,7 +134,7 @@ constexpr const char* SPARSE_V_WEIGHTED_SUM_SOURCE = R"(
             }
         }
         if (!any_alive) {
-            // Per-thread skip — the speed gate of this kernel. With #520's
+            // Per-thread skip — the speed gate of this kernel. With's
             // precomputed rescale there is no in-flight threadgroup state to
             // synchronize against, so the skip is a clean continue without
             // any cross-thread divergence concerns.
@@ -153,7 +153,7 @@ constexpr const char* SPARSE_V_WEIGHTED_SUM_SOURCE = R"(
         }
 
         // Per-token rescale `norm[t] / max(|y_hat[t]|, 1e-10)` was computed
-        // on the host at quantize time (issue #520). Each thread loads the
+        // on the host at quantize time. Each thread loads the
         // same fp16 scalar; Apple's L1 / per-threadgroup cache coalesces the
         // broadcast so the bandwidth cost is effectively one read per
         // threadgroup per token.
@@ -200,7 +200,7 @@ struct SparseVKernelHolder {
             kernel = mlx::core::fast::metal_kernel(
                 "mlxcel_sparse_v_weighted_sum",
                 // Input names — must match the launcher's `inputs` vector
-                // order in `sparse_v_weighted_sum`. `rescale` (issue #520) is
+                // order in `sparse_v_weighted_sum`. `rescale` is
                 // the precomputed `norm[t] / |y_hat[t]|` fp16 sidecar that
                 // replaced the in-kernel `norms` + threadgroup tree
                 // reduction.
@@ -255,7 +255,7 @@ mlx::core::array sparse_v_weighted_sum(
     // below: {"weights", "rescale", "packed", "threshold", "codebook"}.
     std::vector<mlx::core::array> inputs = {
         attn_weights,   // [B*Hq, Tq, Tk]    f32
-        v_rescale,      // [B*Hkv, Tk]       f16  (issue #520 precompute)
+        v_rescale,      // [B*Hkv, Tk]       f16  (precompute)
         v_packed,       // [B*Hkv, Tk, D/2]  u8
         threshold_arr,  // [1]               f32
         codebook,       // [16]              f32

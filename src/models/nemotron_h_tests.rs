@@ -306,7 +306,7 @@ fn post_init_only_time_step_max_defaults_to_zero_inf() {
 /// Config with both time_step_min: 0.001 and time_step_max: 0.1 set, but no
 /// time_step_limit. This is the typical real-world Nemotron-H config. After
 /// post_init, time_step_limit must be (0.0, +inf), NOT (0.001, 0.1).
-/// Regression test for issue #604.
+/// Regression test.
 #[test]
 fn post_init_both_time_step_min_max_set_defaults_to_zero_inf() {
     let json = minimal_config_json(r#", "time_step_min": 0.001, "time_step_max": 0.1"#);
@@ -363,7 +363,7 @@ fn post_init_explicit_time_step_limit_is_preserved() {
 }
 
 // ---------------------------------------------------------------------------
-// conv_state contiguous regression (issue #336)
+// conv_state contiguous regression
 // ---------------------------------------------------------------------------
 
 /// Simulate 50 decode steps of conv-state update and assert the stored shape

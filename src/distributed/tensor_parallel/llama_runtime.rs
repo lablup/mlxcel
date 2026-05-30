@@ -947,7 +947,7 @@ impl TensorParallelGemma4Model {
         // double-scale text tokens and incorrectly scale image/audio features
         // that are already in the language-model embedding space.
         // See `Gemma4VLModel::get_input_embeddings_with_audio` in
-        // `src/vision/gemma4_vl.rs` and issue #317 / PR #326 for the non-TP
+        // `src/vision/gemma4_vl.rs` and for the non-TP
         // equivalent fix.
         let text_config = &self.ranks[0].text_model.config;
         let mut h = match input_embeddings {

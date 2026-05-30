@@ -29,7 +29,7 @@
 //!   within a few percent for every production MoE model we ship.
 //! - It does not tune for hardware generations (M1 Ultra vs. M5 Max etc.).
 //!   The cost model is pure byte-count; hardware-specific calibration is
-//!   future work (explicitly out of scope for issue #348).
+//!   future work (explicitly out of scope).
 //!
 //! Used by: `resolve_in_process_stage_assignments`,
 //! `mlxcel-server` startup, CLI `mlxcel generate --pp-*`

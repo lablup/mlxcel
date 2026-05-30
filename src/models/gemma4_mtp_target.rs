@@ -12,13 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! MTP target adapter for Gemma 4 (issue #666).
+//! MTP target adapter for Gemma 4.
 //!
 //! Glue layer that wires the binary-side
 //! [`crate::models::gemma4::Gemma4Wrapper`] (and its VLM variant
 //! [`crate::vision::Gemma4VLModel`]) to the
 //! [`mlxcel_core::speculative::mtp::target::MtpTarget`] trait defined in
-//! `mlxcel-core` (issue #662). The trait sits between the round-loop
+//! `mlxcel-core`. The trait sits between the round-loop
 //! driver [`mlxcel_core::speculative::mtp::MtpGenerator`] and the concrete
 //! Gemma 4 wrapper so the driver can stay in the core crate without
 //! pulling in `mlxcel`-binary types.
@@ -314,7 +314,7 @@ impl<'a> Gemma4MtpTargetAdapter<'a> {
 
     /// Compute per-position [`mlxcel_core::sampling::TokenLogprobData`]
     /// for a `[1, block_size, vocab]` verify-logits tensor, one entry
-    /// per position aligned 1:1 with `target_tokens` (issue #678).
+    /// per position aligned 1:1 with `target_tokens`.
     ///
     /// The verify forward is greedy-only today (`temperature == 0`,
     /// pure argmax — see [`Self::argmax_per_position`]), so the
@@ -398,12 +398,11 @@ impl<'a> MtpTarget for Gemma4MtpTargetAdapter<'a> {
         // `token_history` carries the history-dependent-penalty context
         // (repetition / frequency / presence / DRY) so the first bonus
         // is byte-identical to the classic decode path's first token
-        // (issue #677). `sample_token_optimized` returns
+        // `sample_token_optimized` returns
         // `(token_arr, adjusted_logits)`; `adjusted_logits` is the
         // penalty-adjusted `[1, vocab]` slice the bonus was sampled
         // from, and feeds `compute_logprobs` so the first-bonus logprob
         // is byte-identical to the classic path's first-token logprob
-        // (issue #678).
         let (token_arr, adjusted_logits) = sample_token_optimized(&logits, sampler, token_history);
         mlxcel_core::eval(&token_arr);
         let first_bonus = mlxcel_core::item_i32(&token_arr);
@@ -544,7 +543,7 @@ impl<'a> MtpTarget for Gemma4MtpTargetAdapter<'a> {
         // Per-position log-probability data, aligned 1:1 with
         // `target_tokens`. `None` (zero-overhead) when logprobs are
         // disabled; the round loop forwards the entries for accepted
-        // positions on to `finalize_burst_success` (issue #678).
+        // positions on to `finalize_burst_success`.
         let target_logprobs = logits.as_ref().and_then(|logits| {
             Self::per_position_logprobs(logits, &target_tokens, logprobs_config)
         });
@@ -736,7 +735,7 @@ impl<'a> MtpTarget for Gemma4VLMtpTargetAdapter<'a> {
 }
 
 // ===========================================================================
-// Batched MTP target adapter (B > 1) — issue #674
+// Batched MTP target adapter (B > 1)
 // ===========================================================================
 
 /// Drafter-requested capture-layer ids for the batched verify path.
@@ -750,7 +749,7 @@ impl<'a> MtpTarget for Gemma4VLMtpTargetAdapter<'a> {
 const BATCHED_CAPTURE_LAYER_IDS: Option<&[usize]> = None;
 
 /// Batched MTP target adapter binding a [`Gemma4Wrapper`] to a
-/// **caller-owned** `[B, ...]` cache vector (issue #674).
+/// **caller-owned** `[B, ...]` cache vector.
 ///
 /// ## Why this is a distinct struct from [`Gemma4MtpTargetAdapter`]
 ///
@@ -1093,11 +1092,7 @@ impl<'a> MtpTarget for Gemma4MtpBatchedTargetAdapter<'a> {
     // The B = 1 surface is required by the trait but never driven on the
     // batched adapter — the batched round-loop driver only calls the
     // `*_batched` methods. We panic rather than silently mis-routing so a
-    // wiring bug surfaces loudly in tests. (`token_history` is part of
-    // the B = 1 signature since issue #682 and `logprobs_config` since
-    // issue #678; the batched path's history-aware and logprobs-aware
-    // sampling is gated at the scheduler's window collector — see
-    // `prefill_and_seed_batched` below.)
+    // wiring bug surfaces loudly in tests. (`token_history` is part of the B = 1 signature since and `logprobs_config` since the batched path's history-aware and logprobs-aware sampling is gated at the scheduler's window collector — see `prefill_and_seed_batched` below.)
     fn prefill_and_seed(
         &self,
         _prompt_tokens: &[i32],
@@ -1389,8 +1384,8 @@ impl<'a> Gemma4VLMtpBatchedTargetAdapter<'a> {
 impl<'a> MtpTarget for Gemma4VLMtpBatchedTargetAdapter<'a> {
     // The B = 1 surface forwards to the inner batched adapter, whose B = 1
     // stubs panic — the batched VLM adapter is only ever driven through
-    // the `*_batched` methods. `token_history` (issue #682) and
-    // `logprobs_config` (issue #678) are forwarded verbatim so the
+    // the `*_batched` methods. `token_history` and
+    // `logprobs_config` are forwarded verbatim so the
     // signature matches the trait even though the inner panics.
     fn prefill_and_seed(
         &self,

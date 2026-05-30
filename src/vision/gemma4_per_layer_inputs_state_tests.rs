@@ -13,7 +13,6 @@
 // limitations under the License.
 
 //! Unit tests for the Gemma 4 per-layer-inputs per-sequence state container
-//! (issue #543).
 //!
 //! These cover the burst-enqueue race the container is designed to close:
 //! when 2+ Gemma 4 VLM requests are enqueued within one
@@ -112,7 +111,7 @@ fn bind_fallback_with_empty_slot_leaves_seq_absent() {
     );
 }
 
-/// Issue #543 root-cause regression: simulate the burst-enqueue race.
+/// root-cause regression: simulate the burst-enqueue race.
 ///
 /// `prepare_request_vlm_embeddings` writes the fallback slot once per
 /// request; the scheduler's bind step claims it before the next

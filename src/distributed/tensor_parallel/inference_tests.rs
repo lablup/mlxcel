@@ -64,7 +64,7 @@ fn resolve_model_shard_plan_uses_text_config_layer_count() {
 fn resolve_model_shard_plan_tolerates_partial_text_config_when_single_rank() {
     // Regression: LLaVA-1.5 / LLaVA-Next ship a partial `text_config` that
     // doesn't include `num_hidden_layers` — the layer count is implied by
-    // the base model referenced via `_name_or_path`. PR #233's strict layer
+    // the base model referenced via `_name_or_path`.'s strict layer
     // detection was breaking the single-rank generate path for these models.
     // For tp_size=1 the layer count is never used downstream, so resolve
     // must tolerate a missing layer count and return a summary with

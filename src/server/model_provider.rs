@@ -41,7 +41,7 @@ pub(crate) enum ModelRequest {
         /// Raw audio bytes for audio-language models (empty for text/vision-only)
         audio: Vec<Vec<u8>>,
         /// Resolved video items with optional per-video FPS overrides
-        /// (issue #596, hardened in #601). Each entry carries a
+        /// (hardened). Each entry carries a
         /// [`crate::multimodal::video::VideoSource`] handle the worker
         /// passes to [`crate::multimodal::video::load_video_source`]. On
         /// Unix the handle is fd-backed: the resolver opened the file
@@ -105,11 +105,11 @@ pub struct ModelProvider {
     loaded: Arc<AtomicBool>,
     batch_metrics: Arc<BatchMetrics>,
     batch_observability: Arc<BatchObservability>,
-    /// Shared cross-request prompt-prefix KV cache (epic #416 / issue #419).
+    /// Shared cross-request prompt-prefix KV cache.
     /// `None` when the feature is disabled by config.
     prompt_cache: Option<Arc<crate::server::prompt_cache::PromptCacheStore>>,
     /// Bounded wait applied during the decode phase of `drain_generation_events*`
-    /// to detect a hung model worker (issue #548).
+    /// to detect a hung model worker.
     ///
     /// Resolved at startup from the `--timeout` CLI flag via
     /// [`validated_decode_hang_timeout`]. Constructors that do not receive a
@@ -170,7 +170,7 @@ impl ModelProvider {
     }
 
     /// Same as [`Self::new_with_server_config`] but also wires the
-    /// cross-request prompt-prefix KV cache store (epic #416 / issue #419).
+    /// cross-request prompt-prefix KV cache store.
     /// The legacy (`config.no_batch`) worker ignores the store because that
     /// path never calls the batch scheduler that manages the cache.
     pub fn new_with_server_config_and_prompt_cache(
@@ -183,11 +183,11 @@ impl ModelProvider {
     ) -> Result<Self> {
         // Validate `--timeout` once at construction time and stash it on the
         // provider so the same `Duration` is used by every drain loop. Issue
-        // #548: a value of 0 falls back to `DECODE_HANG_TIMEOUT` with a logged
+        // a value of 0 falls back to `DECODE_HANG_TIMEOUT` with a logged
         // warning so an operator typo never silently expires every request.
         let decode_hang_timeout = validated_decode_hang_timeout(config.timeout_seconds);
 
-        // Issue #666: resolve the speculative-decoding dispatch once
+        // resolve the speculative-decoding dispatch once
         // from the `ServerConfig::{draft_model_path, draft_kind,
         // draft_block_size}` fields. The resolution reads the drafter's
         // `config.json` so it must happen on the main thread before we
@@ -211,7 +211,7 @@ impl ModelProvider {
             // be able to observe it via the model provider handle.
             provider.prompt_cache = prompt_cache_store;
             provider.decode_hang_timeout = decode_hang_timeout;
-            // Issue #666: log a warning if the operator asked for
+            // log a warning if the operator asked for
             // speculative decoding but selected `--no-batch`. The legacy
             // sequential worker bypasses the BatchScheduler entirely so
             // the dispatch is inactive on this path.
@@ -246,7 +246,7 @@ impl ModelProvider {
                 prompt_cache_store,
                 config.kv_cache_mode,
                 config.batch_kv_quant,
-                // Issue #603: forward the --max-kv-size cap to the scheduler.
+                // forward the --max-kv-size cap to the scheduler.
                 config.max_kv_size,
                 speculative_dispatch,
                 batch_metrics,
@@ -347,11 +347,11 @@ impl ModelProvider {
     /// `vision_cache_size` maps directly to the `--vision-cache-size` CLI
     /// flag. `0` disables per-image vision feature caching entirely.
     ///
-    /// `lang_bias_config` is the Axis B / Epic #362 (B8) server-wide
+    /// `lang_bias_config` is the Axis B / (B8) server-wide
     /// language-bias configuration. Pass `None` for the baseline bit-exact
     /// path (no sampling changes, no tokenizer-vocab scan).
     ///
-    /// `reasoning_budget` (issue #409) is the server-wide default
+    /// `reasoning_budget` is the server-wide default
     /// thinking-token budget for Qwen3-family models. Pass `None` for
     /// unrestricted reasoning (bit-exact baseline); per-request
     /// `thinking_budget_tokens` still takes precedence.
@@ -390,7 +390,7 @@ impl ModelProvider {
             None,
             mlxcel_core::cache::KVCacheMode::Fp16,
             mlxcel_core::cache::BatchKvQuantConfig::default(),
-            None, // max_kv_size: unbounded (issue #603)
+            None, // max_kv_size: unbounded
             batch_metrics,
             batch_observability,
         )
@@ -399,7 +399,7 @@ impl ModelProvider {
     /// Full constructor variant that also accepts a shared prompt-prefix
     /// KV cache store.
     ///
-    /// Introduced by issue #419. `prompt_cache_store` is `None` when
+    /// Introduced. `prompt_cache_store` is `None` when
     /// [`crate::server::prompt_cache::PromptCacheConfig::enabled`] is
     /// `false`; in that case the feature is a total no-op.
     #[allow(clippy::too_many_arguments)]
@@ -420,13 +420,13 @@ impl ModelProvider {
         prompt_cache_store: Option<Arc<crate::server::prompt_cache::PromptCacheStore>>,
         kv_cache_mode: mlxcel_core::cache::KVCacheMode,
         batch_kv_quant: mlxcel_core::cache::BatchKvQuantConfig,
-        // Issue #603: maximum KV cache size for plain (non-sliding) caches.
+        // maximum KV cache size for plain (non-sliding) caches.
         // `None` preserves the legacy unbounded behaviour.
         max_kv_size: Option<usize>,
         batch_metrics: Arc<BatchMetrics>,
         batch_observability: Arc<BatchObservability>,
     ) -> Result<Self> {
-        // Issue #666: backward-compatible wrapper that defaults the
+        // backward-compatible wrapper that defaults the
         // speculative dispatch to `Disabled`. Callers wiring `--draft-model`
         // / `--draft-kind` use the `_with_speculative_dispatch` variant
         // below.
@@ -454,7 +454,7 @@ impl ModelProvider {
         )
     }
 
-    /// Issue #666: variant that also accepts the resolved
+    /// variant that also accepts the resolved
     /// [`crate::server::SpeculativeDispatch`].
     ///
     /// Use this from `new_with_server_config_and_prompt_cache` so the
@@ -514,9 +514,9 @@ impl ModelProvider {
             prompt_cache: prompt_cache_store.clone(),
             kv_cache_mode,
             batch_kv_quant,
-            // Issue #603: cap plain KVCache growth when configured.
+            // cap plain KVCache growth when configured.
             max_kv_size,
-            // Issue #666: forward the resolved speculative dispatch.
+            // forward the resolved speculative dispatch.
             speculative_dispatch,
         };
 
@@ -588,8 +588,8 @@ impl ModelProvider {
             prompt_cache: None,
             kv_cache_mode: mlxcel_core::cache::KVCacheMode::Fp16,
             batch_kv_quant: mlxcel_core::cache::BatchKvQuantConfig::default(),
-            max_kv_size: None, // issue #603: unbounded in minimal test path
-            // Issue #666: minimal test path has no drafter; the dispatch
+            max_kv_size: None, // unbounded in minimal test path
+            // minimal test path has no drafter; the dispatch
             // defaults to `Disabled` which short-circuits the scheduler
             // hot path to the classic decode loop.
             speculative_dispatch: crate::server::SpeculativeDispatch::Disabled,
@@ -683,12 +683,12 @@ impl ModelProvider {
     }
 
     /// Generate text with optional images, audio, and videos, returning the
-    /// full result (issue #596).
+    /// full result.
     ///
     /// Server video routes pass `videos` through here once the path-traversal
     /// guard in [`crate::server::media::extract_chat_video_paths`] has cleared
     /// each entry against `MLXCEL_VIDEO_DIR_ALLOWLIST`. Empty `videos` matches
-    /// pre-#596 behavior bit-for-bit.
+    /// earlier behavior bit-for-bit.
     ///
     /// Restricted to `pub(crate)` because the input type [`ResolvedVideo`] is
     /// crate-internal — it carries an [`crate::multimodal::video::VideoSource`]
@@ -813,7 +813,7 @@ impl ModelProvider {
     }
 
     /// Like [`Self::generate_streaming_with_logprobs_cancellable`] but also
-    /// forwards resolved video paths to the worker (issue #596). Empty
+    /// forwards resolved video paths to the worker. Empty
     /// `videos` is bit-exact with the no-video variant.
     ///
     /// `pub(crate)` for the same reason as
@@ -893,7 +893,7 @@ fn send_shutdown_signal(request_tx: &mpsc::Sender<ModelRequest>) -> bool {
 }
 
 /// Default timeout applied after the first generated token has been received
-/// to detect a hung model worker (issue #548).
+/// to detect a hung model worker.
 ///
 /// Once the prefill is complete and decoding has begun, each subsequent decode
 /// step should finish within a bounded wall-clock time. The model worker thread
@@ -921,8 +921,7 @@ pub(crate) const DECODE_HANG_TIMEOUT: Duration = Duration::from_secs(300);
 ///
 /// Returns the configured duration on success. Logs a warning and returns the
 /// fallback ([`DECODE_HANG_TIMEOUT`]) when the value is `0`, which would cause
-/// every request to time out instantly (issue #548 — "invalid timeout config
-/// values produce a clean log message").
+/// every request to time out instantly (— "invalid timeout config values produce a clean log message").
 ///
 /// Used by: `ModelProvider::new_with_server_config_and_prompt_cache` (the only
 /// constructor that receives a `ServerConfig`); other constructors default to
@@ -1007,7 +1006,7 @@ where
 }
 
 /// Core receive loop that distinguishes "prefill still running" from "hung
-/// model" (issue #548).
+/// model".
 ///
 /// Two-phase timeout strategy:
 ///
@@ -1049,7 +1048,7 @@ where
                 Err(mpsc::RecvTimeoutError::Timeout) => {
                     return Err(anyhow::anyhow!(
                         "model worker did not produce a token within {}s after decode started; \
-                         possible hang or crash (issue #548). \
+                         possible hang or crash. \
                          Increase --timeout if this model legitimately takes longer.",
                         decode_hang_timeout.as_secs()
                     ));

@@ -3,7 +3,7 @@
 // Experimental Metal 4 fused attention kernel scaffold.
 //
 // This file is intentionally kept separate from MLX upstream overlay kernels so
-// we can iterate on a mlxcel-specific TensorOps kernel body for issue #197.
+// we can iterate on a mlxcel-specific TensorOps kernel body.
 // Runtime wiring still lives in `cpp/mlx_cxx_bridge.cpp`.
 
 #include <metal_stdlib>

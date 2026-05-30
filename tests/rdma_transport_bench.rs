@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! 2-node loopback activation-transfer benchmark harness for issue #343.
+//! 2-node loopback activation-transfer benchmark harness.
 //!
 //! Run with:
 //!   cargo test --release --test rdma_transport_bench rdma_vs_tcp_activation_transfer \

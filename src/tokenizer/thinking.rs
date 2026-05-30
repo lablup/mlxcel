@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Multi-token think / tool-call sequence detection (issue #590).
+//! Multi-token think / tool-call sequence detection.
 //!
 //! Mirrors the upstream `mlx_lm.tokenizer_utils._infer_thinking()` helper and
 //! the `find_think_*` / `rfind_think_*` lookup methods on `TokenizerWrapper`

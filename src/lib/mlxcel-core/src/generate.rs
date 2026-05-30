@@ -641,7 +641,7 @@ pub struct CxxGenerator {
     /// This keeps dispatch and synchronization paired even if the
     /// generator is constructed on one thread (e.g. the request
     /// dispatcher) and run on another (e.g. the model worker), per
-    /// upstream `mlx-vlm` PR #1050 / mlxcel issue #556.
+    /// upstream `mlx-vlm` PR #1050 / mlxcel.
     generation_stream: Option<UniquePtr<MlxThreadLocalStream>>,
     /// KV cache quantization mode applied to all layer caches.
     /// Default: `KVCacheMode::Fp16` (no quantization).
@@ -656,7 +656,7 @@ pub struct CxxGenerator {
     /// language steering pay no per-token or per-call cost (see
     /// [`Self::compose_sampling`]).
     ///
-    /// Axis B / Epic #362: populated by B8 wiring for the CLI `generate`
+    /// Axis B / populated by B8 wiring for the CLI `generate`
     /// path; the server batch scheduler caches its own copy on `BatchScheduler`.
     token_bias: TokenBiasMap,
 }
@@ -679,7 +679,7 @@ impl CxxGenerator {
     /// small per-token quantization error.
     ///
     /// When `kv_cache_mode` is one of the `Turbo4*` variants, the
-    /// **Boundary-V** policy (B6, issue #478, epic #458) is applied: the
+    /// **Boundary-V** policy (B6) is applied: the
     /// first / last N transformer layers' caches are upgraded to
     /// `KVCacheMode::Fp16` to recover the per-layer V-quantization quality
     /// gap measured in `references/turboquant_plus/docs/papers/
@@ -778,7 +778,7 @@ impl CxxGenerator {
     /// Must call `reset_with_model` instead when the model uses internal caches
     /// (e.g. Gemma3, Jamba, Mamba, NemotronH, etc.) to ensure those are also reset.
     ///
-    /// Preserves the per-layer Boundary-V mode mapping (issue #478, epic #458)
+    /// Preserves the per-layer Boundary-V mode mapping
     /// computed at construction time: each layer's pre-existing
     /// `KVCacheMode` (which may differ from `self.kv_cache_mode` for
     /// boundary layers) is reused so quality protection survives a reset.
@@ -801,7 +801,7 @@ impl CxxGenerator {
     /// single-row caches are cleared.
     /// The kv_cache_mode is applied to the freshly created caches.
     ///
-    /// Honors the Boundary-V policy (issue #478): when `self.kv_cache_mode`
+    /// Honors the Boundary-V policy: when `self.kv_cache_mode`
     /// is one of the `Turbo4*` variants, the first / last N caches are
     /// re-resolved to `KVCacheMode::Fp16` instead of the nominal mode.
     /// The boundary count is read from `MLXCEL_KV_BOUNDARY_V_LAYERS` so a
@@ -826,7 +826,7 @@ impl CxxGenerator {
     /// Called from each generation entry point right after `ensure_model_caches`
     /// rebuilds caches from `model.make_caches()` (which always uses the
     /// default Fp16 mode). Centralizes the per-layer mode resolution so the
-    /// Boundary-V policy (issue #478) survives the entire generation lifecycle
+    /// Boundary-V policy survives the entire generation lifecycle
     /// including `reset_with_model` boundary cases.
     ///
     /// No-op when `self.kv_cache_mode == Fp16` — every layer is already FP16
@@ -890,7 +890,7 @@ impl CxxGenerator {
         // (which always uses the default Fp16 mode), so re-apply kv_cache_mode
         // afterwards when a non-default mode is configured.
         ensure_model_caches(&mut self.caches, model);
-        // Honor the Boundary-V policy (issue #478) when applying the
+        // Honor the Boundary-V policy when applying the
         // nominal mode to per-layer caches: the first/last N layers stay
         // at FP16 to recover the V-quantization quality gap.
         self.apply_kv_cache_mode_with_boundary_policy();
@@ -1172,7 +1172,7 @@ impl CxxGenerator {
 
         ensure_model_caches(&mut self.caches, model);
         // Re-apply kv_cache_mode in case ensure_model_caches rebuilt caches
-        // Honor the Boundary-V policy (issue #478) when applying the
+        // Honor the Boundary-V policy when applying the
         // nominal mode to per-layer caches: the first/last N layers stay
         // at FP16 to recover the V-quantization quality gap.
         self.apply_kv_cache_mode_with_boundary_policy();
@@ -1317,7 +1317,7 @@ impl CxxGenerator {
         seed_rng_if_needed(sampling);
         ensure_model_caches(&mut self.caches, model);
         // Re-apply kv_cache_mode in case ensure_model_caches rebuilt caches
-        // Honor the Boundary-V policy (issue #478) when applying the
+        // Honor the Boundary-V policy when applying the
         // nominal mode to per-layer caches: the first/last N layers stay
         // at FP16 to recover the V-quantization quality gap.
         self.apply_kv_cache_mode_with_boundary_policy();
@@ -1470,7 +1470,7 @@ impl CxxGenerator {
         // Ensure caches are initialized for this model.
         // Re-apply kv_cache_mode in case ensure_model_caches rebuilt caches.
         ensure_model_caches(&mut self.caches, model);
-        // Honor the Boundary-V policy (issue #478) when applying the
+        // Honor the Boundary-V policy when applying the
         // nominal mode to per-layer caches: the first/last N layers stay
         // at FP16 to recover the V-quantization quality gap.
         self.apply_kv_cache_mode_with_boundary_policy();
@@ -1613,8 +1613,7 @@ impl CxxGenerator {
     /// Returns `Vec<f32>` of length `prompt_tokens.len() - 1`, where entry `i`
     /// is `log P(prompt_tokens[i + 1] | prompt_tokens[..=i])` under the model.
     ///
-    /// This is the building block for offline perplexity evaluation (epic
-    /// #458 / issue #475 — the wikitext-2 PPL gate). Callers chunk the corpus
+    /// This is the building block for offline perplexity evaluation (— the wikitext-2 PPL gate). Callers chunk the corpus
     /// into windows of length `≤ context_len` and accumulate `-sum(logprobs) /
     /// total_target_tokens` across windows; `exp(mean_nll)` is the perplexity.
     ///
@@ -1631,10 +1630,10 @@ impl CxxGenerator {
     /// One forward pass over the entire `prompt_tokens` window, plus an
     /// `O(seq_len * vocab)` log-softmax + gather. Suitable for tractable
     /// window sizes (≤ 4 K) and small models. For larger contexts, batching
-    /// many independent windows would be a follow-up; epic #458's gate runs
+    /// many independent windows would be a follow-up;'s gate runs
     /// 20 windows × 4 K which fits in a single-pass-per-window budget on M-series.
     ///
-    /// Used by: `tests/turbo_kv_e2e.rs` wikitext-2 PPL harness (issue #475).
+    /// Used by: `tests/turbo_kv_e2e.rs` wikitext-2 PPL harness.
     pub fn evaluate_loglikelihoods<M: LanguageModel>(
         &mut self,
         model: &M,

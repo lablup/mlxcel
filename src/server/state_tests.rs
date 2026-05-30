@@ -112,7 +112,7 @@ fn admission_control_rejects_when_queue_at_or_above_limit() {
 }
 
 // ------------------------------------------------------------------
-// Prompt-prefix cache integration (issue #419)
+// Prompt-prefix cache integration
 // ------------------------------------------------------------------
 
 /// `PromptCacheConfig` is wired onto `ServerConfig` with a sensible default
@@ -150,7 +150,7 @@ fn prompt_cache_store_is_send_sync_via_arc() {
 }
 
 // ------------------------------------------------------------------
-// Prompt-cache BatchMetrics counters (issue #423)
+// Prompt-cache BatchMetrics counters
 // ------------------------------------------------------------------
 
 #[test]

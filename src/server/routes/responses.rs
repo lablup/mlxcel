@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! HTTP handlers for the OpenAI Responses API (issue #622).
+//! HTTP handlers for the OpenAI Responses API.
 //!
 //! Phase 1 endpoints:
 //!

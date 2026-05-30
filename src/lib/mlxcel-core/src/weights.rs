@@ -40,7 +40,7 @@ pub type ShardIndexResult = Result<Option<(Vec<String>, Option<u64>)>, String>;
 /// sanitization, before the model graph consumes it.
 ///
 /// This trait is the single insertion point for Axis A "weight-load
-/// surgery" (see Epic #363, issue #365). The consolidated text and VLM
+/// surgery". The consolidated text and VLM
 /// weight loaders accept an `Option<&dyn WeightTransform>`; when `None`,
 /// the load path is bit-exact identical to the pre-refactor behavior.
 ///

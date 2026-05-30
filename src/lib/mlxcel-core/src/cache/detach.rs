@@ -15,8 +15,7 @@
 //! Cross-sequence KV cache reuse: trim / detach / adopt primitives.
 //!
 //! This module extends [`super::KVCache`] and [`super::CachePool`] with the
-//! primitives required by the cross-request prompt prefix cache (epic #416,
-//! sub-issue #417):
+//! primitives required by the cross-request prompt prefix cache:
 //!
 //! * [`KVCache::trim_to`] — shrink the logical cache length to an exact value
 //!   while keeping the pre-allocated backing buffer around.
@@ -30,7 +29,7 @@
 //!
 //! Only the **dense** KV cache backend (`SequenceStateBackend::DenseKvCache`)
 //! is handled directly by this file. Paged sequences are handled by the
-//! parallel API surface in [`super::paged_detach`] (sub-issue #418); this
+//! parallel API surface in [`super::paged_detach`]; this
 //! module delegates through the shared `DetachedHandle` namespace so parking
 //! remains a single pool-level abstraction.
 //!
@@ -90,7 +89,7 @@ use super::{
 /// can rebuild [`crate::cache::turbo::TurboQuantParams`] without referring
 /// back to the originating `KVCache`.
 /// Turbo4 (symmetric) caches also carry packed-K + per-token K norms.
-/// Turbo4Delegated-mode caches (issue #479; K unified in issue #527) carry
+/// Turbo4Delegated-mode caches (K unified) carry
 /// the unified FP16 K buffer in `keys` (same shape contract as `Fp16` mode),
 /// the V-side cold/hot split state (`cold_offset`), and the configured
 /// hot-V fold threshold so the adopted cache resumes decoding from the same
@@ -101,7 +100,7 @@ use super::{
 /// `delegated_fp16_sidecar_policy` preserves the foreground compaction policy.
 /// Turbo3Asym-mode caches use the same `(keys, v_packed, v_norms)` triple
 /// as `Turbo4Asym` but the V buffer carries the 24-bit-grouped 3-bit indices
-/// (issue #477). The `mode` field on the handle preserves the bit-width
+/// The `mode` field on the handle preserves the bit-width
 /// distinction so adopt rebuilds the right `TurboQuantParams3` instance.
 pub struct DetachedKVCache {
     pub(super) keys: Option<UniquePtr<MlxArray>>,
@@ -113,7 +112,7 @@ pub struct DetachedKVCache {
     pub(super) val_scales: Option<UniquePtr<MlxArray>>,
     pub(super) v_packed: Option<UniquePtr<MlxArray>>,
     pub(super) v_norms: Option<UniquePtr<MlxArray>>,
-    /// Turbo4-V Sparse-V kernel rescale sidecar (issue #520). Lockstep with
+    /// Turbo4-V Sparse-V kernel rescale sidecar. Lockstep with
     /// `v_norms`; round-trips through detach/adopt so paged + prefix-cache
     /// reuse paths preserve the precomputed rescale.
     pub(super) v_rescale: Option<UniquePtr<MlxArray>>,
@@ -140,7 +139,7 @@ impl DetachedKVCache {
 
     /// Total byte footprint of the detached tensors (keys + values + INT8
     /// scales + Turbo4Asym v_packed/v_norms + Turbo4 symmetric
-    /// k_packed/k_norms). Issue #527: Turbo4Delegated caches no longer carry
+    /// k_packed/k_norms). Turbo4Delegated caches no longer carry
     /// a separate `cold_keys` tensor — the unified K buffer is already
     /// counted under `keys`.
     pub fn nbytes(&self) -> usize {
@@ -194,7 +193,7 @@ impl DetachedKVCache {
     /// This is the inert-side counterpart of [`KVCache::trim_to`] and is the
     /// load-bearing primitive that lets the scheduler adopt only the first
     /// `matched_len` tokens' worth of KV state when an Automatic Prefix
-    /// Caching (APC, issue #552) lookup returns a block-aligned matched
+    /// Caching (APC) lookup returns a block-aligned matched
     /// length shorter than the full cached entry. See server-side
     /// `try_adopt_cached_prefix` in `src/server/batch/scheduler.rs`.
     ///
@@ -203,8 +202,7 @@ impl DetachedKVCache {
     /// so a subsequent install + dequantize stays bit-identical to the
     /// already-trimmed live cache.
     ///
-    /// Used by: [`DetachedCacheSet::truncate_to`] (issue #580 — APC
-    /// block-level partial cache adoption in the scheduler).
+    /// Used by: [`DetachedCacheSet::truncate_to`] (— APC block-level partial cache adoption in the scheduler).
     pub fn trim_to(&mut self, new_len: i32) -> Result<(), String> {
         if new_len < 0 {
             return Err(format!(
@@ -412,7 +410,7 @@ impl KVCache {
     /// INT8 mode: the per-token scale buffers are trimmed in lock-step so
     /// subsequent `update_and_fetch` dequantization stays consistent.
     ///
-    /// Used by: prompt prefix cache reuse (#417), speculative decode rewinds,
+    /// Used by: prompt prefix cache reuse, speculative decode rewinds,
     /// server scheduler trim-to-exact-prefix paths.
     pub fn trim_to(&mut self, new_len: i32) -> Result<(), String> {
         if new_len < 0 {
@@ -452,7 +450,7 @@ impl KVCache {
     /// sidecars so lazy generation can skip foreground folds without donating
     /// a sidecar-incomplete prompt-cache entry.
     ///
-    /// Used by: prompt prefix cache detach/adopt (#417), cross-request reuse
+    /// Used by: prompt prefix cache detach/adopt, cross-request reuse
     /// handoff inside `CachePool::detach`.
     pub fn clone_handle(&mut self) -> DetachedKVCache {
         self.compact_turbo4_delegated_fp16_sidecars();
@@ -478,11 +476,11 @@ impl KVCache {
         };
         // Clear turbo_params on the source so the next quantize call rebuilds
         // it from scratch (required if the slot is reused with a different
-        // head_dim after detach). LOW-1 fix (#474). The 3-bit
-        // `turbo3_params` (issue #477) follows the same contract.
+        // head_dim after detach). LOW-1 fix. The 3-bit
+        // `turbo3_params` follows the same contract.
         self.turbo_params = None;
         self.turbo3_params = None;
-        // Issue #528 retired the cold-V dequant memo — nothing to drop on
+        // retired the cold-V dequant memo — nothing to drop on
         // the source.
         handle
     }
@@ -540,7 +538,7 @@ impl KVCache {
                 }
             }
         }
-        // Turbo3Asym (issue #477): rebuild the 3-bit params from v_packed
+        // Turbo3Asym: rebuild the 3-bit params from v_packed
         // shape. Inverse of `head_dim * 3 / 8`: head_dim = packed_dim * 8 / 3.
         // Mirrors the Turbo4 prebuild above so dequantize-only consumers see
         // a ready-to-go cache after install.
@@ -561,7 +559,7 @@ impl KVCache {
 }
 
 // ---------------------------------------------------------------------------
-// DetachedRotatingKVCache (B9, issue #481)
+// DetachedRotatingKVCache (B9)
 // ---------------------------------------------------------------------------
 
 /// Inert snapshot of a single [`RotatingKVCache`] (sliding-window cache) that
@@ -576,7 +574,7 @@ impl KVCache {
 /// state would silently fall back to "no wraparound yet" semantics.
 ///
 /// Used by: prompt prefix cache reuse for sliding-window models (Gemma 3/4,
-/// Ministral 3, GPT-OSS, RecurrentGemma, Exaone) under the same #416/#417
+/// Ministral 3, GPT-OSS, RecurrentGemma, Exaone) under the same
 /// architecture as the dense `DetachedKVCache`.
 pub struct DetachedRotatingKVCache {
     pub(super) keys: Option<UniquePtr<MlxArray>>,
@@ -590,7 +588,7 @@ pub struct DetachedRotatingKVCache {
     pub(super) val_scales: Option<UniquePtr<MlxArray>>,
     pub(super) v_packed: Option<UniquePtr<MlxArray>>,
     pub(super) v_norms: Option<UniquePtr<MlxArray>>,
-    /// Sparse-V rescale sidecar (issue #520) for rotating Turbo4Asym caches.
+    /// Sparse-V rescale sidecar for rotating Turbo4Asym caches.
     pub(super) v_rescale: Option<UniquePtr<MlxArray>>,
     pub(super) turbo_seed: u32,
 }
@@ -658,8 +656,7 @@ impl RotatingKVCache {
     /// tensors unchanged — including `v_packed` / `v_norms` for `Turbo4Asym`
     /// — so adopt is a zero-copy operation.
     ///
-    /// Used by: sliding-window prompt prefix cache detach/adopt (B9 of #481;
-    /// dense counterpart is [`KVCache::clone_handle`]).
+    /// Used by: sliding-window prompt prefix cache detach/adopt (B9; dense counterpart is [`KVCache::clone_handle`]).
     pub fn clone_handle(&mut self) -> DetachedRotatingKVCache {
         let handle = DetachedRotatingKVCache {
             keys: self.keys.take(),
@@ -676,7 +673,7 @@ impl RotatingKVCache {
             v_rescale: self.v_rescale.take(),
             turbo_seed: self.turbo_seed,
         };
-        // Mirror `KVCache::clone_handle` (LOW-1 from #474): clear cached
+        // Mirror `KVCache::clone_handle` (LOW-1): clear cached
         // turbo_params on the source so the next quantize call rebuilds them
         // from scratch (slot may be reused with a different head_dim).
         self.turbo_params = None;
@@ -737,7 +734,7 @@ impl RotatingKVCache {
 ///
 /// Produced by [`CachePool::detach`] and consumed by [`CachePool::adopt`].
 /// Only the dense backend is supported; paged sequences produce `None` on
-/// detach per sub-issue #418.
+/// detach.
 pub struct DetachedCacheSet {
     /// Per-layer detached caches, one per model layer.
     pub caches: Vec<DetachedKVCache>,
@@ -784,7 +781,7 @@ impl DetachedCacheSet {
     /// equal to the existing length is a no-op.
     ///
     /// The intended caller is the scheduler's `try_adopt_cached_prefix` when
-    /// an APC (issue #552) lookup returns a block-aligned `matched_len`
+    /// an APC lookup returns a block-aligned `matched_len`
     /// shorter than the candidate entry's full token length — i.e. the
     /// request and the cached entry agree on the first N blocks but diverge
     /// at block N+1. Truncating the detached set to `matched_len` before
@@ -797,7 +794,7 @@ impl DetachedCacheSet {
     /// the new length — the caller should drop the set rather than retry.
     ///
     /// Used by: [`crate::cache::CachePool::adopt`] callers that need
-    /// per-block partial adoption (issue #580).
+    /// per-block partial adoption.
     #[must_use = "truncate_to returns Err on partial failure; on error some layers are already trimmed and the set must be dropped, not retried"]
     pub fn truncate_to(&mut self, new_len: i32) -> Result<(), String> {
         if new_len < 0 {
@@ -913,15 +910,14 @@ impl CachePool {
     ///
     /// Returns `None` if:
     /// * `seq_id` is not currently active, or
-    /// * the sequence uses the paged backend (paged detach is #418's
-    ///   responsibility — this method deliberately rejects it).
+    /// * the sequence uses the paged backend (paged detach is's responsibility — this method deliberately rejects it).
     ///
     /// The caller is responsible for re-homing the detached set, either by
     /// passing it to [`CachePool::adopt`] or by parking it via
     /// [`CachePool::park_detached`]. Dropping the returned set releases the
     /// underlying MLX memory normally.
     ///
-    /// Used by: prompt prefix cache store (#418), scheduler request-boundary
+    /// Used by: prompt prefix cache store, scheduler request-boundary
     /// handoff.
     pub fn detach(&mut self, seq_id: SequenceId) -> Option<DetachedCacheSet> {
         // Peek first so we can refuse non-dense backends without destructive
@@ -965,7 +961,7 @@ impl CachePool {
     /// freed) to avoid leaks. Use [`CachePool::adopt_preserving`] when the
     /// caller wants the set back on failure.
     ///
-    /// Used by: prompt prefix cache re-entry (#418), scheduler fast-path
+    /// Used by: prompt prefix cache re-entry, scheduler fast-path
     /// when a new request reuses an existing prefix.
     pub fn adopt(
         &mut self,
@@ -987,7 +983,7 @@ impl CachePool {
         if detached.backend != SequenceStateBackend::DenseKvCache {
             return Err((
                 format!(
-                    "CachePool::adopt: backend {:?} is not supported (paged adopt is tracked in #418)",
+                    "CachePool::adopt: backend {:?} is not supported (paged adopt is tracked)",
                     detached.backend
                 ),
                 detached,

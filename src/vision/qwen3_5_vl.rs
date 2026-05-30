@@ -86,13 +86,13 @@ impl Qwen35VLModel {
     /// Speculative-decode verify pass that mirrors the text model's
     /// [`Qwen35Model::forward_speculative`].
     ///
-    /// Issue #634: DFlash's drafter consumes per-layer hidden captures and
+    /// DFlash's drafter consumes per-layer hidden captures and
     /// per-GDN-layer rollback snapshots. The VLM wrapper exposes the same
     /// hooks so multimodal prefill + speculative tail can compose. The
     /// vision pathway runs in the standard prefill before this method is
     /// invoked, so the verify pass only needs the text-side caches.
     ///
-    /// Used by: DFlash drafter round loop (epic #633, sub-12).
+    /// Used by: DFlash drafter round loop (sub-12).
     pub fn forward_speculative(
         &self,
         input_ids: &MlxArray,
@@ -105,7 +105,7 @@ impl Qwen35VLModel {
 
     /// Rewind both attention and GDN caches to the accepted-prefix
     /// position. Delegates to the text model — the VLM wrapper holds no
-    /// cache state of its own (see issue #634).
+    /// cache state of its own.
     pub fn rollback_speculative_cache(
         &self,
         caches: &mut [Qwen3NextCache],
@@ -214,7 +214,7 @@ impl Qwen35VLModel {
 /// before the verify/rollback loop begins, so the round loop interacts
 /// only with the text backbone.
 ///
-/// Used by: DFlash B=1 round loop (issue #636).
+/// Used by: DFlash B=1 round loop.
 impl mlxcel_core::drafter::dflash::SpeculativeTarget for Qwen35VLModel {
     type Cache = crate::models::qwen3_next::Qwen3NextCache;
     type VerifyOut = crate::models::qwen3_5::VerifyOutput;
@@ -268,7 +268,7 @@ impl mlxcel_core::drafter::dflash::SpeculativeTarget for Qwen35VLModel {
         );
     }
 
-    /// Batched B > 1 rollback for the VLM wrapper. Issue #666 — overrides
+    /// Batched B > 1 rollback for the VLM wrapper. — overrides
     /// the trait default (which panics for B > 1) so the batched DFlash
     /// round loop can drive a Qwen 3.5 VLM target with batched-prefill
     /// served by the continuous-batching scheduler.
@@ -276,7 +276,7 @@ impl mlxcel_core::drafter::dflash::SpeculativeTarget for Qwen35VLModel {
     /// Mirrors the inner text-model `rollback_partial_batched`: the
     /// per-row K/V tail-zero and per-row GDN replay live inside
     /// `Qwen35Model::rollback_speculative_cache`, which already accepts a
-    /// multi-element `accepted` slice (issue #634).
+    /// multi-element `accepted` slice.
     fn rollback_partial_batched(
         &self,
         caches: &mut [Self::Cache],
@@ -340,7 +340,7 @@ impl LanguageModel for Qwen35VLModel {
         caches: &mut [KVCache],
         mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
-        // Issue #540: forward through the underlying Qwen3.5 model's
+        // forward through the underlying Qwen3.5 model's
         // seq-id-aware path so the per-sequence MRoPE entry resolves
         // for this specific request.
         mlxcel_core::generate::LanguageModel::forward_with_sequence_id(
@@ -385,7 +385,7 @@ impl LanguageModel for Qwen35VLModel {
         mlxcel_core::generate::LanguageModel::reset_runtime_state(&self.text_model);
     }
 
-    /// Issue #540: forward `seq_ids` to the underlying Qwen3.5 model so
+    /// forward `seq_ids` to the underlying Qwen3.5 model so
     /// each row's MRoPE state resolves correctly in mixed VL+text
     /// batches. `Qwen35Model::forward_batched_with_context_and_ids`
     /// already implements per-row dispatch and the batched-prefill fast
@@ -434,7 +434,7 @@ impl LanguageModel for Qwen35VLModel {
 
     /// Delegate to the inner text model so a DFlash drafter can lazy-bind
     /// the Qwen 3.5 embedding table even when the target is a VLM-wrapped
-    /// Qwen 3.5 checkpoint (issue #675). The vision tower owns no token
+    /// Qwen 3.5 checkpoint. The vision tower owns no token
     /// embedding of its own — token embedding always lives on the text
     /// model.
     fn embed_tokens_module(&self) -> Option<mlxcel_core::layers::UnifiedEmbedding> {

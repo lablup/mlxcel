@@ -159,7 +159,7 @@ pub struct OLMo3Attention {
     pub rope_base: f32,
     pub is_sliding: bool,
     /// Sliding-window size for sliding layers (0 for full-attention layers).
-    /// Used to slice K/V to match the post-PR-#513 capped sliding mask.
+    /// Used to slice K/V to match the post-earlier capped sliding mask.
     pub window_size: i32,
 }
 
@@ -206,7 +206,7 @@ impl OLMo3Attention {
         // Scaled dot-product attention
         let attn_out = if l > 1 && mask.is_some() {
             // Prefill with mask. If this is a sliding layer the windowed
-            // mask is capped to `(l, window_size)` post-PR-#513. Plain
+            // mask is capped to `(l, window_size)` post-earlier. Plain
             // `KVCache` returns full-length K/V, so slice K/V to the last
             // `window_size` slots to match the mask.
             let k_shape = mlxcel_core::array_shape(&cache_k);

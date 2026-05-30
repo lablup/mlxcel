@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Cross-request prompt-prefix KV cache (epic #416).
+//! Cross-request prompt-prefix KV cache.
 //!
 //! This module holds the shared, thread-safe store that retains detached
 //! KV caches keyed by `(model_id, lora_id, template_sig, session_key,
@@ -23,14 +23,14 @@
 //!
 //! ## Sub-issues
 //!
-//! * #417 — [`mlxcel_core::cache::DetachedCacheSet`] and the
+//! * — [`mlxcel_core::cache::DetachedCacheSet`] and the
 //!   [`mlxcel_core::cache::CachePool`] detach/adopt API (upstream).
-//! * #419 — this module, PromptCacheStore itself.
-//! * #420 — radix trie inside [`store::PromptCacheStore::lookup_longest_prefix`]
+//! * — this module, PromptCacheStore itself.
+//! * — radix trie inside [`store::PromptCacheStore::lookup_longest_prefix`]
 //!   (via [`trie`]).
-//! * #422 — full `template_sig` wiring.
-//! * #423 — metrics bridge to [`super::state::BatchMetrics`].
-//! * #424 — CLI/env wiring for [`PromptCacheConfig`].
+//! * — full `template_sig` wiring.
+//! * — metrics bridge to [`super::state::BatchMetrics`].
+//! * — CLI/env wiring for [`PromptCacheConfig`].
 //!
 //! Integration: [`super::startup`] constructs a shared `Arc<PromptCacheStore>`
 //! when [`PromptCacheConfig::enabled`] is true and installs it on both

@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! #420 — two-tier longest-prefix matcher tests.
+//! two-tier longest-prefix matcher tests.
 //!
 //! Tests that exercise the exact-session vs cross-session fallback
 //! behaviour, the same-session tie-break preference, MRU disambiguation

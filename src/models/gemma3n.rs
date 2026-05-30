@@ -475,7 +475,7 @@ impl Gemma3nAttention {
             // For KV-shared layers, return slice view of filled portion only.
             // cache.keys is a pre-allocated buffer; we must slice to the live
             // window length (`live_len() = offset - live_start`) — NOT the
-            // monotonic `offset` — so this stays correct when issue #603's
+            // monotonic `offset` — so this stays correct when's
             // `--max-kv-size` trim_front advances `live_start`. With no trim
             // (`live_start == 0`) this is bit-identical to slicing at
             // `cache.offset`.
@@ -516,7 +516,7 @@ impl Gemma3nAttention {
         } else {
             // Single token or explicit mask path. If the caller supplied a
             // windowed mask and this layer is a sliding-window layer, the
-            // mask is shaped `(q_len, window_size)` post-PR-#513 cap. Plain
+            // mask is shaped `(q_len, window_size)` post-earlier cap. Plain
             // `KVCache` returns full-length K/V, so we must slice K/V to
             // match the capped mask, mirroring `causal_attention` internals.
             let k_shape = mlxcel_core::array_shape(&keys);

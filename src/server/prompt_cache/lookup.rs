@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Two-tier longest-prefix matcher (#420).
+//! Two-tier longest-prefix matcher.
 //!
 //! This module hosts the selection logic invoked by
 //! [`super::store::PromptCacheStore::lookup_longest_prefix`]. The actual
@@ -75,7 +75,7 @@ impl BestCandidate {
 /// * `tokens` — the incoming request's token prefix.
 /// * `min_len` — the minimum number of matching tokens required before
 ///   the candidate is even considered.
-/// * `apc_partial_allowed` — when `true` (issue #580), accept candidates
+/// * `apc_partial_allowed` — when `true`, accept candidates
 ///   whose stored token prefix is **not** fully contained in the request
 ///   (i.e. the request and the entry diverge somewhere inside the entry's
 ///   prefix). The reported `matched` field then carries the actual
@@ -118,7 +118,7 @@ where
         // token prefix is contained in the incoming prompt. If the request
         // diverged before the stored entry ended, adopting that entry would
         // import KV state for tokens the caller did not send — UNLESS APC
-        // partial adoption is enabled (issue #580), in which case the
+        // partial adoption is enabled, in which case the
         // store's caller will clamp the matched length to the longest
         // block-aligned consistent prefix and pass that to the model
         // worker's truncate path.

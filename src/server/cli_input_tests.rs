@@ -23,7 +23,7 @@ use super::{
 use crate::lang_bias::LangBiasCliArgs;
 // Tests that mutate env vars (via `EnvGuard` or directly) must acquire the
 // crate-wide `ENV_LOCK` *before* the guard so the lock outlives the
-// guard's `Drop` (which calls `remove_var`). See issue #573 — a per-module
+// guard's `Drop` (which calls `remove_var`). — a per-module
 // lock would race with env mutations in unrelated modules of the same
 // test binary.
 use crate::test_support::env_lock::env_lock;
@@ -43,7 +43,7 @@ fn sample_input() -> ServerStartupInput {
         timeout: 600,
         draft_model_path: Some(PathBuf::from("models/draft")),
         draft_max: 8,
-        // Issue #630: speculative-decoding selector flags default off
+        // speculative-decoding selector flags default off
         // (None = auto-detect at dispatch time when a drafter is set).
         draft_kind: None,
         draft_block_size: None,
@@ -116,34 +116,34 @@ fn sample_input() -> ServerStartupInput {
         lang_bias_config: None,
         reasoning_budget: -1,
         chat_template_kwargs: None,
-        // Issue #424: prompt-cache knobs — use defaults for the helper.
+        // prompt-cache knobs — use defaults for the helper.
         prompt_cache_enabled: true,
         prompt_cache_capacity_bytes: None,
         prompt_cache_max_entries: None,
         prompt_cache_ttl_seconds: None,
         prompt_cache_min_prefix: None,
-        // Issue #552: APC knobs — disabled by default.
+        // APC knobs — disabled by default.
         apc_enabled: false,
         apc_block_size: None,
         apc_num_blocks: None,
         apc_hash: None,
-        // Issue #484 (B11): KV cache type split flags — default to None (FP16).
+        // (B11): KV cache type split flags — default to None (FP16).
         cache_type_k: None,
         cache_type_v: None,
         kv_cache_mode_legacy: None,
-        // Issue #545: continuous-batching KV quantization knobs (off by default).
+        // continuous-batching KV quantization knobs (off by default).
         kv_bits: 0,
         kv_group_size: mlxcel_core::cache::DEFAULT_KV_GROUP_SIZE,
         kv_quant_scheme: None,
         kv_skip_last_layer: true,
-        // Issue #603: max KV cache size (0 = unbounded, the default).
+        // max KV cache size (0 = unbounded, the default).
         max_kv_size: 0,
-        // Issue #622: Responses API store defaults.
+        // Responses API store defaults.
         responses_store_max_entries: 1024,
         responses_store_ttl_secs: 3600,
         conversation_store_max_entries: 256,
         conversation_store_ttl_secs: 3600,
-        // Issue #371 (A4): default to None for baseline-path tests.
+        // (A4): default to None for baseline-path tests.
         #[cfg(feature = "surgery")]
         surgery_config_path: None,
     }
@@ -296,7 +296,7 @@ fn into_startup_config_propagates_pp_micro_batch_size() {
 }
 
 // -------------------------------------------------------------------------
-// Issue #410 — chat_template_kwargs normalization
+// chat_template_kwargs normalization
 // -------------------------------------------------------------------------
 
 #[test]
@@ -508,7 +508,7 @@ fn cli_overrides_env() {
 }
 
 // -------------------------------------------------------------------------
-// Issue #405 — LLAMA_ARG_LANG_BIAS_INCLUDE_BYTE_FRAGMENTS env-var fallback
+// LLAMA_ARG_LANG_BIAS_INCLUDE_BYTE_FRAGMENTS env-var fallback
 //
 // Mirrors the B7 tests above. The env-var fallback for the byte-fragment
 // opt-in is permissive about truthiness (accepts `true`/`false`/`1`/`0`) and
@@ -597,7 +597,7 @@ fn byte_fragments_env_var_unparseable_is_ignored() {
 }
 
 // -------------------------------------------------------------------------
-// Issue #424 — prompt-cache CLI/env config tests
+// prompt-cache CLI/env config tests
 // -------------------------------------------------------------------------
 
 /// Default construction of `ServerStartupInput` with prompt-cache defaults
@@ -892,7 +892,7 @@ fn prompt_cache_e2e_cli_capacity_bytes_flows_to_startup_config() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Issue #484 (B11) — resolve_kv_cache_mode tests
+// (B11) — resolve_kv_cache_mode tests
 //
 // These tests cover the K/V-to-KVCacheMode mapping logic: all supported pairs,
 // unsupported combinations, and legacy/split flag interaction.
@@ -1106,7 +1106,7 @@ fn into_startup_config_kv_cache_mode_unsupported_pair_errors() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Issue #484 (B11) — env-var fallback tests for LLAMA_ARG_CACHE_TYPE_K/V
+// (B11) — env-var fallback tests for LLAMA_ARG_CACHE_TYPE_K/V
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// `LLAMA_ARG_CACHE_TYPE_K` is applied when the CLI flag is absent.
@@ -1168,7 +1168,7 @@ fn cache_type_k_empty_env_var_is_ignored() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Issue #545 — env-var fallback tests for kv-bits / kv-group-size /
+// env-var fallback tests for kv-bits / kv-group-size /
 // kv-quant-scheme / kv-skip-last-layer (Fix 1, Fix 2)
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -1297,7 +1297,7 @@ fn kv_skip_last_layer_both_unparseable_keeps_cli_default() {
     );
 }
 
-// ── Issue #603 H1: `--max-kv-size` validation ───────────────────────────────
+// ── H1: `--max-kv-size` validation ───────────────────────────────
 
 #[test]
 fn resolve_max_kv_size_zero_is_disabled() {

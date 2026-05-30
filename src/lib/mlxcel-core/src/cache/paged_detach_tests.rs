@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Unit + property tests for `cache/paged_detach.rs` (sub-issue #418).
+//! Unit + property tests for `cache/paged_detach.rs`.
 //!
 //! Organised as:
 //! 1. `PagedBlockPool` refcount plumbing (`retain_block` / `release_block`).

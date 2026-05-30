@@ -27,7 +27,7 @@
 //! 2. The drafter's `update_and_fetch` writes ONLY context K/V into the
 //!    cache; proposal K/V is concatenated post-hoc in the attention
 //!    forward. Encoding this constraint in the alias' documentation is
-//!    load-bearing for #635 acceptance.
+//!    load-bearing acceptance.
 
 use crate::layers::KVCache;
 

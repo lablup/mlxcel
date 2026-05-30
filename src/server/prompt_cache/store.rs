@@ -19,7 +19,7 @@
 //! `Arc<RwLock<Inner>>`: concurrent lookups take a read lock and match
 //! prefixes, while inserts/evictions take an exclusive write lock.
 //!
-//! The two-tier longest-prefix matcher (#420) lives in
+//! The two-tier longest-prefix matcher lives in
 //! [`super::lookup`]; this module wires the matcher into the store's
 //! locking + metrics discipline. See that module and
 //! [`super::trie`] for the lookup algorithm and data structure choice.
@@ -236,7 +236,7 @@ impl PromptCacheStore {
     }
 
     /// Build a store with a caller-supplied configuration and metrics
-    /// implementor. Sub-issue #423 uses this entry point to hand in the
+    /// implementor. uses this entry point to hand in the
     /// Prometheus / `BatchMetrics` bridge.
     pub fn with_metrics(config: PromptCacheConfig, metrics: Arc<dyn PromptCacheMetrics>) -> Self {
         Self {
@@ -342,7 +342,7 @@ impl PromptCacheStore {
     /// entry-count and byte-budget caps. Returns [`InsertError`] if the
     /// store is disabled or if the single entry is too large to ever fit.
     ///
-    /// When Automatic Prefix Caching (APC, issue #552) is enabled on this
+    /// When Automatic Prefix Caching (APC) is enabled on this
     /// store, the entry's APC block-hash chain is computed during insert
     /// from the entry's tokens, the configured block size, the configured
     /// hash algo, and the request's `MultimodalDigest` (carried by `key`).
@@ -389,7 +389,7 @@ impl PromptCacheStore {
             guard.evictions_lru = guard.evictions_lru.saturating_add(1);
         }
 
-        // APC integration (issue #552): when APC is on, fold the block-hash
+        // APC integration: when APC is on, fold the block-hash
         // chain into the entry. The chain is computed against the entry's
         // own token prefix and the request's mm_digest (carried by `key`),
         // so two entries with identical tokens but different multimodal
@@ -455,7 +455,7 @@ impl PromptCacheStore {
     /// Underlying lookup uses the per-`(model, lora, template)` radix
     /// trie from [`super::trie::RadixTrie`]: `O(L)` in the matched depth.
     ///
-    /// When Automatic Prefix Caching (APC, issue #552) is enabled, the
+    /// When Automatic Prefix Caching (APC) is enabled, the
     /// candidate selected by the trie / scan tier is additionally
     /// verified against the request's APC block-hash chain. The chain is
     /// computed from the request's tokens with the same block size, hash
@@ -497,13 +497,13 @@ impl PromptCacheStore {
         let best = {
             let guard = self.inner.read().expect("prompt cache inner lock");
             let min_len = guard.config.min_prefix_tokens;
-            // Issue #580: when APC is on, the trie / scan tiers may surface
+            // when APC is on, the trie / scan tiers may surface
             // candidates whose stored prefix is **not** fully contained in
             // the request. The block-hash discriminator below clamps the
             // resulting `matched` value to the last block boundary where
             // the chains agree. When APC is off, retain the legacy
             // whole-prefix-contained check inside both tiers so the
-            // pre-#580 hot path is bit-exact.
+            // earlier hot path is bit-exact.
             let apc_partial_allowed = guard.config.apc_enabled();
             let trie = match guard.tries.get(&sessionless) {
                 Some(t) => t,
@@ -702,7 +702,7 @@ fn select_best_by_scan(
         }
         // Compute the longest common prefix between the request tokens
         // and the entry's stored tokens. When APC partial adoption is
-        // enabled (issue #580) we surface candidates whose stored prefix
+        // enabled we surface candidates whose stored prefix
         // diverges inside the request — the caller will clamp the
         // matched length to a block boundary via the APC discriminator
         // before adopting. With APC off, the legacy "stored prefix must
@@ -758,7 +758,7 @@ fn select_best_by_scan(
 }
 
 /// Length of the longest common token prefix between `a` and `b`. Used by
-/// the APC partial-adoption scan path (issue #580) so a candidate whose
+/// the APC partial-adoption scan path so a candidate whose
 /// stored prefix diverges inside the request still surfaces with its
 /// actual common-prefix length, ready for the block-hash discriminator
 /// to clamp.

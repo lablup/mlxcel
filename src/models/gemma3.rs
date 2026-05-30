@@ -1212,7 +1212,6 @@ impl mlxcel_core::generate::LanguageModel for Gemma3Wrapper {
         // intentionally empty/ignored. Reset the fallback slot before each
         // fresh CLI / benchmark generation so a second VLM prefill does not
         // reuse offsets from a previous run with a stale 4D attention mask
-        // (issue #731).
         self.reset_caches();
     }
 

@@ -22,7 +22,7 @@
 //! state beyond the KV cache, splitting between any two adjacent decoder
 //! layers is safe — stage boundaries behave identically to the Llama family.
 //!
-//! Expert-balance considerations (sub-issue 7 / #348): the auto-partitioner
+//! Expert-balance considerations: the auto-partitioner
 //! can treat each Mixtral layer as a uniform cost block because every layer
 //! carries the same expert count. MoE-specific weight accounting is not
 //! required here; it is surfaced via the `ModelProfile` layer cost, not via

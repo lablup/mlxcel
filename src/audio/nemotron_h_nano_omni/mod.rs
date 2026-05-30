@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Nemotron H Nano Omni audio modality (issue #582).
+//! Nemotron H Nano Omni audio modality.
 //!
 //! Faithful Rust port of upstream
 //! `references/mlx-vlm/mlx_vlm/models/nemotron_h_nano_omni/audio.py`

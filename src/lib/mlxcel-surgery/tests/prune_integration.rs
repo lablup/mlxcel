@@ -12,14 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Integration tests for `mlxcel-surgery` PruneOp (issue #376).
+//! Integration tests for `mlxcel-surgery` PruneOp.
 //!
 //! These tests exercise the **public** API path that the rest of the
 //! workspace will use: parse a YAML file -> get a `SurgeryPipeline` ->
 //! invoke it through `WeightTransform::apply`. They replicate the
 //! load-pipeline integration without requiring a real model on disk
-//! (the actual end-to-end run against `mlx-community/Qwen2.5-0.5B-
-//! Instruct-4bit` happens via the CLI integration in #379 / A4).
+//! (the actual end-to-end run against `mlx-community/Qwen2.5-0.5B- Instruct-4bit` happens via the CLI integration / A4).
 
 use std::collections::HashMap;
 use std::io::Write;
@@ -227,8 +226,7 @@ operations:
 #[test]
 fn programmatic_pipeline_builder_works_without_yaml() {
     // Build a pipeline directly via `SurgeryPipeline::push` to prove
-    // the public API supports programmatic construction (the path
-    // used by tests in #378 / A4 until the CLI flag is wired).
+    // the public API supports programmatic construction (the path used by tests / A4 until the CLI flag is wired).
     let mut pipeline = SurgeryPipeline::new();
     let op = PruneOp::new(
         "model.layers.0.self_attn.*",

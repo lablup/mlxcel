@@ -244,7 +244,7 @@ pub struct SequenceInfo {
     /// `prefill_chunk_size`.
     pub prefill_offset: usize,
 
-    // -- Epic #416 / issue #421: prompt prefix cache --
+    // -- prompt prefix cache --
     /// Token count from the head of `prompt_tokens` that was already present
     /// in the adopted KV cache. When `> 0`, prefill **skips** those leading
     /// tokens and feeds only `prompt_tokens[prefill_start_offset..]` to the
@@ -258,7 +258,7 @@ pub struct SequenceInfo {
     /// (e.g. chunked prefill continuation math) without affecting the stat.
     pub already_cached_tokens: usize,
 
-    // -- Issue #409: thinking-token budget --
+    // -- thinking-token budget --
     /// Per-sequence thinking-budget state. Drives forced `</think>` injection
     /// when the in-block token count reaches the configured cap. Set to
     /// [`crate::server::thinking_budget::ThinkingState::disabled`] when the
@@ -266,7 +266,7 @@ pub struct SequenceInfo {
     /// no budget, or when the server default is unbounded.
     pub(crate) thinking: ThinkingState,
 
-    // -- Issue #550: structured-output constraint --
+    // -- structured-output constraint --
     /// Optional `llguidance` matcher state for constrained decoding. When
     /// `Some(_)`, the scheduler computes a per-step token mask before sampling
     /// and consumes the sampled token after sampling so the partial output

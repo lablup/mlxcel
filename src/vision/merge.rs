@@ -171,7 +171,7 @@ pub fn prepare_inputs_for_multimodal(
 ///
 /// Used by: LLaVA/Bunny, Aya Vision, Pixtral, Mistral3, Gemma3n,
 /// Qwen2/2.5/3/3.5-VL, Phi3V, Molmo2, Llama4, Nemotron H Nano Omni
-/// (vision + audio modalities, issues #554 and #582)
+/// (vision + audio modalities, and)
 pub fn merge_llava(
     image_token_index: i32,
     image_features: &MlxArray,

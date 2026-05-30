@@ -105,7 +105,7 @@ impl PrefillQueue {
     /// `lane` priority lane for which `predicate` returns `true`, stopping
     /// at the first sequence that does not match.
     ///
-    /// Issue #674: used by the speculative-burst scheduler to assemble a
+    /// used by the speculative-burst scheduler to assemble a
     /// B > 1 batched-burst window. The caller dequeues the head sequence
     /// normally via [`Self::dequeue`], then calls this with the head's
     /// priority lane and a predicate that matches "speculative-eligible
@@ -521,7 +521,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // drain_matching_window (issue #674 — batched speculative burst)
+    // drain_matching_window (— batched speculative burst)
     // -----------------------------------------------------------------
 
     #[test]

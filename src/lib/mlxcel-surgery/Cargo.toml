@@ -17,17 +17,16 @@ default = []
 # `mlxcel::loading::vlm`.
 mlxcel-core = { path = "../mlxcel-core", default-features = false }
 
-# Public API surfaces serde-derived types (#369 builds on top by
-# adding `serde_yaml` for the YAML config schema).
+# Public API surfaces serde-derived types (builds on top by # adding `serde_yaml` for the YAML config schema).
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 
-# YAML configuration schema parser (#369). Pinned to the same version
+# YAML configuration schema parser. Pinned to the same version
 # the top-level `mlxcel` crate already uses to keep the dependency
 # graph small.
 serde_yaml = "0.9"
 
-# Glob-style tensor key patterns (#369). The same `globset` version is
+# Glob-style tensor key patterns. The same `globset` version is
 # transitively present via tracing-subscriber's fluent layer, so we
 # don't add a new transitive subtree here.
 globset = "0.4"

@@ -46,7 +46,7 @@
 //! pair during model initialisation. Results are cached in a `OnceLock`-backed
 //! `HashMap` so repeated calls are free.
 //!
-//! Used by: TurboQuant KV cache (B2 onward, epic #458)
+//! Used by: TurboQuant KV cache (B2 onward)
 
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
@@ -66,7 +66,7 @@ use std::sync::{Arc, OnceLock};
 /// shared with the dequantize-on-read path inside the cache, which references
 /// them once per layer/forward at minimal overhead.
 ///
-/// Used by: TurboQuant V-side quantize/dequantize (B2, epic #458).
+/// Used by: TurboQuant V-side quantize/dequantize (B2).
 #[derive(Clone, Debug)]
 pub struct Codebook {
     /// Sorted centroid values for `N(0, 1/d)`. Length = `2^bit_width`.
@@ -177,7 +177,7 @@ pub fn optimal_centroids(bit_width: u8, head_dim: u32) -> Vec<f32> {
 ///
 /// Same panic conditions as [`optimal_centroids`].
 ///
-/// Used by: TurboQuant V-side quantize/dequantize (B2, epic #458).
+/// Used by: TurboQuant V-side quantize/dequantize (B2).
 pub fn optimal_codebook(bit_width: u8, head_dim: u32) -> Codebook {
     assert!(bit_width > 0, "bit_width must be >= 1");
     assert!(
@@ -247,7 +247,7 @@ pub fn compute_centroids(bit_width: u8, head_dim: u32) -> Vec<f32> {
 ///
 /// Returns integer indices in `[0, n_centroids)`.
 ///
-/// Used by: unit tests; B2 quantization path (epic #458). On hot paths prefer
+/// Used by: unit tests; B2 quantization path. On hot paths prefer
 /// [`nearest_centroid_indices_with_boundaries`] (or use the [`Codebook`]
 /// returned by [`optimal_codebook`]) so the midpoint boundary array is only
 /// built once per `(bit_width, head_dim)` instead of per-call.
@@ -274,7 +274,7 @@ pub fn nearest_centroid_indices(values: &[f32], centroids: &[f32]) -> Vec<usize>
 /// `boundaries.len()` must equal `n_centroids - 1` (i.e., the boundary
 /// invariant established by [`Codebook::from_centroids`]).
 ///
-/// Used by: TurboQuant V-side quantize loop (B2, epic #458).
+/// Used by: TurboQuant V-side quantize loop (B2).
 pub fn nearest_centroid_indices_with_boundaries(
     values: &[f32],
     boundaries: &[f32],
@@ -650,7 +650,7 @@ mod tests {
 
     // -----------------------------------------------------------------------
     // Full fixture comparison — byte-for-byte against Python reference
-    // This is the acceptance-gate test required by epic #458.
+    // This is the acceptance-gate test required.
     // Reads tests/fixtures/turbo_codebooks/codebooks_hex.json and compares
     // every (b, d) pair from b ∈ {2,3,4}, d ∈ {64,80,96,128,192,256}.
     // -----------------------------------------------------------------------

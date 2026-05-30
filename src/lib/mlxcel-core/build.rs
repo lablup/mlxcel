@@ -31,11 +31,11 @@ fn main() {
     let mut bridge = cxx_build::bridge("src/lib.rs");
     bridge
         .file("cpp/mlx_cxx_bridge.cpp")
-        // Issue #505: Fused Sparse-V SDPA kernel launcher. Lives under
+        // Fused Sparse-V SDPA kernel launcher. Lives under
         // `src/lib/mlx-cpp/turbo/` so the MLX-upstream-commit upgrade
         // checklist (CLAUDE.md) treats this directory as in-scope.
         .file("../mlx-cpp/turbo/sparse_v_sdpa.cpp")
-        // Issue #528: Fused Turbo4Delegated cold-V weighted-sum kernel
+        // Fused Turbo4Delegated cold-V weighted-sum kernel
         // launcher. Reads the packed cold V directly so the dequantised
         // FP16 cold body never materialises in global memory; the host
         // pairs this with a hot-V matmul to produce the final SDPA output.
@@ -120,12 +120,12 @@ fn main() {
     println!("cargo:rerun-if-changed=metal/fused_attention_metal4.metal");
     println!("cargo:rerun-if-changed=../mlx-cpp/CMakeLists.txt");
     println!("cargo:rerun-if-changed=../mlx-cpp/patches");
-    // Issue #505: Sparse-V fused-skip Metal kernel launchers.
+    // Sparse-V fused-skip Metal kernel launchers.
     println!("cargo:rerun-if-changed=../mlx-cpp/turbo/CMakeLists.txt");
     println!("cargo:rerun-if-changed=../mlx-cpp/turbo/sparse_v_sdpa.h");
     println!("cargo:rerun-if-changed=../mlx-cpp/turbo/sparse_v_sdpa.cpp");
     println!("cargo:rerun-if-changed=../mlx-cpp/turbo/sparse_v_sdpa.metal");
-    // Issue #528: Turbo4Delegated cold-V fused weighted-sum kernel launcher.
+    // Turbo4Delegated cold-V fused weighted-sum kernel launcher.
     println!("cargo:rerun-if-changed=../mlx-cpp/turbo/turbo4_delegated_sdpa.h");
     println!("cargo:rerun-if-changed=../mlx-cpp/turbo/turbo4_delegated_sdpa.cpp");
     println!("cargo:rerun-if-env-changed=MLX_CUDA_ARCHITECTURES");

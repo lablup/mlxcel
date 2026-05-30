@@ -134,7 +134,7 @@ pub enum LoadedModel {
     Mamba2(models::Mamba2Model),
     Jamba(models::JambaModel),
     NemotronH(models::NemotronHModel),
-    /// Nemotron H Nano Omni — vision-capable variant (issue #554, vision-only).
+    /// Nemotron H Nano Omni — vision-capable variant (vision-only).
     NemotronHNanoOmniVLM(vision::NemotronHNanoOmniVlModel),
     NemotronNAS(models::NemotronNASModel),
     Step3p5(models::Step3p5Model),

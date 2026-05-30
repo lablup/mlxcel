@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! End-to-end integration tests for Automatic Prefix Caching (APC, #552).
+//! End-to-end integration tests for Automatic Prefix Caching (APC).
 //!
 //! These tests cover behavioural properties spanning multiple modules:
 //!
@@ -64,8 +64,7 @@ fn apc_chains_for_same_tokens_different_images_share_no_block() {
 
     let (key_a, _) = key_with(&tokens, mm_a);
     let (key_b, _) = key_with(&tokens, mm_b);
-    // Whole-prefix bucket digests must also differ (this is the existing
-    // bucket-level guarantee from issue #425).
+    // Whole-prefix bucket digests must also differ (this is the existing bucket-level guarantee).
     assert_ne!(key_a.digest(), key_b.digest());
 
     // Block-hash chain divergence: every single block must differ.

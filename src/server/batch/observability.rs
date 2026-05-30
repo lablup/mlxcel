@@ -73,7 +73,7 @@ pub struct BatchObservability {
     /// Times paged decode was requested but fell back to dense.
     pub decode_storage_fallbacks: AtomicU64,
 
-    // -- Epic #416 / issue #421: prompt-prefix cache --
+    // -- prompt-prefix cache --
     /// Cumulative count of successful prompt-cache adoptions (hits).
     pub prompt_cache_hits: AtomicU64,
     /// Cumulative count of prompt tokens that bypassed prefill because they
@@ -155,7 +155,7 @@ impl BatchObservability {
             .fetch_add(1, Ordering::Relaxed);
     }
 
-    /// Record a successful prompt-cache hit (epic #416 / issue #421).
+    /// Record a successful prompt-cache hit.
     ///
     /// `matched_tokens` is the number of leading tokens covered by the
     /// adopted detached KV cache — exactly the count subtracted from the
@@ -271,14 +271,14 @@ pub struct ObservabilitySnapshot {
     pub cache_pool_paged_bytes_reserved: u64,
     pub cache_pool_paged_bytes_in_use: u64,
     pub decode_storage_fallbacks: u64,
-    /// Epic #416 / issue #421: successful prompt-cache adoptions.
+    /// successful prompt-cache adoptions.
     pub prompt_cache_hits: u64,
-    /// Epic #416 / issue #421: tokens skipped due to cache hits (Σ
+    /// tokens skipped due to cache hits (Σ
     /// matched-prefix lengths across all hits).
     pub prompt_cache_hit_tokens: u64,
-    /// Epic #416 / issue #421: successful donate-back inserts.
+    /// successful donate-back inserts.
     pub prompt_cache_inserts: u64,
-    /// Epic #416 / issue #421: rejected donate-back inserts (oversized
+    /// rejected donate-back inserts (oversized
     /// entry, store disabled, prefix too short, …).
     pub prompt_cache_insert_rejects: u64,
 }

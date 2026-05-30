@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Real-model integration test for elastic pipeline repartitioning (#349).
+//! Real-model integration test for elastic pipeline repartitioning.
 //!
 //! This `#[ignore]`-gated test simulates an operator-initiated repartition on
 //! a running 2-stage cluster backed by a real model checkpoint. It:
