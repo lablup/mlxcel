@@ -1408,7 +1408,7 @@ fn main() -> anyhow::Result<()> {
     }
 }
 
-/// Preferred family ordering for the `mlxcel list` output. Any family that
+/// Preferred family ordering for the `mlxcel arch` output. Any family that
 /// appears in `ModelType::family()` but is missing from this slice is
 /// appended after these, sorted alphabetically — so the output remains
 /// exhaustive even if a new family is introduced without updating this
@@ -1455,7 +1455,7 @@ fn print_supported_models() {
     print!("{out}");
 }
 
-/// Render the human-readable `mlxcel list` output into `out`.
+/// Render the human-readable `mlxcel arch` output into `out`.
 ///
 /// Separated from [`print_supported_models`] so unit tests can capture the
 /// exact bytes that the CLI would print without spawning a subprocess.

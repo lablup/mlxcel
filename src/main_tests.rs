@@ -54,7 +54,7 @@ fn run_defaults_match_clap_defaults() {
     );
 }
 
-/// Issue #26: the rendered `mlxcel list` output must mention every model
+/// Issue #26: the rendered `mlxcel arch` output must mention every model
 /// that is registered in `ALL_MODEL_TYPES`. This is the safety net that
 /// catches the case where someone adds a `ModelType` variant but the
 /// renderer silently drops it.

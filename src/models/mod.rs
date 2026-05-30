@@ -316,7 +316,7 @@ pub enum ModelType {
 }
 
 /// All `ModelType` variants, in declaration order. Used as the iteration
-/// source for `mlxcel list` so that the rendered output stays in sync with
+/// source for `mlxcel arch` so that the rendered output stays in sync with
 /// the registry. The exhaustiveness contract is enforced by
 /// `ModelType::metadata()` (an exhaustive `match`) and by the
 /// `all_model_types_covers_every_variant` unit test, which both asserts a
@@ -434,11 +434,11 @@ pub const ALL_MODEL_TYPES: &[ModelType] = &[
 ];
 
 impl ModelType {
-    /// User-facing metadata for `mlxcel list`: `(display_name, family)`.
+    /// User-facing metadata for `mlxcel arch`: `(display_name, family)`.
     ///
     /// The match is intentionally exhaustive — adding a new variant to
     /// `ModelType` without supplying both fields is a compile error. This
-    /// is the single source of truth that prevents `mlxcel list` from
+    /// is the single source of truth that prevents `mlxcel arch` from
     /// drifting away from the registry the way the previous hand-written
     /// block did (see issue #26).
     ///
@@ -616,7 +616,7 @@ impl ModelType {
         }
     }
 
-    /// Short human-readable label for `mlxcel list`. See [`metadata`].
+    /// Short human-readable label for `mlxcel arch`. See [`metadata`].
     ///
     /// [`metadata`]: ModelType::metadata
     pub const fn display_name(self) -> &'static str {
@@ -636,7 +636,7 @@ impl ModelType {
 mod metadata_tests {
     use super::{ALL_MODEL_TYPES, ModelType};
 
-    /// `ALL_MODEL_TYPES` is the iteration source for `mlxcel list`. The
+    /// `ALL_MODEL_TYPES` is the iteration source for `mlxcel arch`. The
     /// list must contain every `ModelType` variant or rendered output
     /// will silently miss models. We catch drift two ways:
     ///
