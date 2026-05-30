@@ -588,6 +588,31 @@ fn configure_environment(env: &mut Environment<'_>) {
     env.set_trim_blocks(true);
     env.set_lstrip_blocks(true);
 
+    // Bound rendering cost as defense-in-depth against denial-of-service from a
+    // pathological chat template (e.g. deeply nested or effectively unbounded
+    // `{% for %}` loops). `set_fuel` caps the number of VM instructions a single
+    // render may execute; once the budget is exhausted minijinja returns an
+    // `ErrorKind::OutOfFuel` error rather than spinning on CPU/memory. Both
+    // render call sites propagate that error via `Result` (`apply*`), and the
+    // load-time `supports_tools` probe already degrades to a string heuristic on
+    // render failure, so exhaustion never panics on any path.
+    //
+    // Template source is operator-controlled today (the model the operator loads
+    // at startup, or the `--chat-template` flag), so this is a low-severity
+    // preventive control; it becomes materially important in a multi-tenant
+    // deployment where untrusted parties could cause arbitrary models — and thus
+    // arbitrary templates — to be loaded.
+    //
+    // The budget is deliberately generous. Real templates — including tool-rich
+    // Qwen/Nemotron-style templates rendered over long multi-turn histories —
+    // execute well under ~1M instructions (verified against every locally
+    // available model template via `test_all_local_model_templates_render`),
+    // while an unbounded loop blows past 50M almost immediately, bounding a
+    // malicious render to a fraction of a second of CPU instead of forever. Note
+    // that fuel bounds instruction *count*, not output size, so it does not by
+    // itself cap memory from a single very large emit; that is out of scope.
+    env.set_fuel(Some(50_000_000));
+
     env.add_function(
         "raise_exception",
         |msg: String| -> std::result::Result<Value, minijinja::Error> {
@@ -1195,6 +1220,47 @@ TOOL
         assert!(result.contains("<|turn>user"));
         assert!(result.contains("containerization question"));
         assert!(result.contains("<|turn>model"));
+    }
+
+    #[test]
+    fn test_pathological_template_is_bounded_by_fuel() {
+        // Defense-in-depth: a maliciously expensive template (here, a nested
+        // loop whose iteration count dwarfs the fuel budget) must be terminated
+        // by minijinja's fuel ceiling rather than running until CPU/memory
+        // exhaustion. The control case uses the identical template shape with
+        // tiny bounds, proving the failure below is the fuel ceiling and not a
+        // parse/structural error. Nested *bounded* ranges (rather than one
+        // enormous `range(...)`) keep per-iteration allocation small while still
+        // exceeding the budget near-instantly — each loop pass costs fuel via
+        // the `Iterate` instruction even with an empty body.
+        let messages = vec![ChatMessage {
+            role: "user".to_string(),
+            content: "hi".to_string(),
+        }];
+
+        let bounded = ChatTemplateProcessor::with_template(
+            "{% for a in range(3) %}{% for b in range(3) %}{% endfor %}{% endfor %}".to_string(),
+        );
+        assert!(
+            bounded.apply(&messages, None).is_ok(),
+            "a small bounded nested loop must render within the fuel budget"
+        );
+
+        let pathological = ChatTemplateProcessor::with_template(
+            "{% for a in range(100000) %}{% for b in range(100000) %}{% endfor %}{% endfor %}"
+                .to_string(),
+        );
+        let err = pathological
+            .apply(&messages, None)
+            .expect_err("an unbounded loop must be terminated by the fuel budget");
+        // Confirm the failure is specifically fuel exhaustion, not some other
+        // render error. minijinja's `ErrorKind::OutOfFuel` displays as
+        // "engine ran out of fuel".
+        let chain = format!("{err:#}");
+        assert!(
+            chain.contains("fuel"),
+            "expected a fuel-exhaustion error, got: {chain}"
+        );
     }
 
     /// Renders every locally-available model's chat template with a few
