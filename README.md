@@ -81,8 +81,17 @@ If you build from source instead, use `./target/release/mlxcel` and
 List and prune the global store from any directory:
 
 ```bash
-# List downloaded models with their on-disk size and path.
+# List downloaded models with name, size, and last-modified time.
 mlxcel list
+
+# Machine-readable output (stable JSON array: repo_id, size_bytes, path, modified).
+mlxcel list --json
+
+# Repo-ids only — pipe-friendly for scripting (e.g. xargs mlxcel rm).
+mlxcel list -q
+
+# Restore the absolute path column.
+mlxcel list -v
 
 # Remove a model from the global store (prompts for confirmation).
 mlxcel rm mlx-community/Qwen3.5-0.8B-4bit
