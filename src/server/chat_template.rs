@@ -1253,13 +1253,15 @@ TOOL
         let err = pathological
             .apply(&messages, None)
             .expect_err("an unbounded loop must be terminated by the fuel budget");
-        // Confirm the failure is specifically fuel exhaustion, not some other
-        // render error. minijinja's `ErrorKind::OutOfFuel` displays as
-        // "engine ran out of fuel".
-        let chain = format!("{err:#}");
-        assert!(
-            chain.contains("fuel"),
-            "expected a fuel-exhaustion error, got: {chain}"
+        // Confirm the failure is specifically fuel exhaustion (not some other
+        // render error) by inspecting the underlying minijinja error kind
+        // through the anyhow context chain — asserting the kind is more precise
+        // and durable than substring-matching the rendered message.
+        let kind = err.downcast_ref::<minijinja::Error>().map(|e| e.kind());
+        assert_eq!(
+            kind,
+            Some(ErrorKind::OutOfFuel),
+            "expected ErrorKind::OutOfFuel, got: {err:#}"
         );
     }
 
