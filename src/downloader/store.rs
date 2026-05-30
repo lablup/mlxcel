@@ -291,7 +291,7 @@ fn snapshot_is_complete(dir: &Path) -> bool {
 
 /// A model snapshot found in the mlxcel global store.
 ///
-/// Produced by [`list_models`] for the `mlxcel list --local` surface. Holds
+/// Produced by [`list_models`] for the `mlxcel list` surface. Holds
 /// the reconstructed HuggingFace `repo_id` (`<owner>/<name>` or a bare
 /// `<name>`), the absolute on-disk directory, and the recursively-summed
 /// byte size of that directory.

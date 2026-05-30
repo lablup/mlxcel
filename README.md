@@ -82,7 +82,7 @@ List and prune the global store from any directory:
 
 ```bash
 # List downloaded models with their on-disk size and path.
-mlxcel list --local
+mlxcel list
 
 # Remove a model from the global store (prompts for confirmation).
 mlxcel rm mlx-community/Qwen3.5-0.8B-4bit
@@ -91,10 +91,10 @@ mlxcel rm mlx-community/Qwen3.5-0.8B-4bit
 mlxcel rm mlx-community/Qwen3.5-0.8B-4bit --yes
 ```
 
-`mlxcel list` without `--local` prints the supported model architectures
-instead. `mlxcel rm <repo-id>` deletes only inside the mlxcel store and honors
-the same `--models-dir` override; a model that exists solely in the read-only
-HuggingFace cache (`HF_HUB_CACHE` / `HF_HOME`) is reported but never deleted.
+`mlxcel arch` prints the supported model-architecture catalog instead. `mlxcel
+rm <repo-id>` deletes only inside the mlxcel store and honors the same
+`--models-dir` override; a model that exists solely in the read-only HuggingFace
+cache (`HF_HUB_CACHE` / `HF_HOME`) is reported but never deleted.
 
 ### Build from source on Apple Silicon
 
@@ -199,7 +199,7 @@ hardware before using these numbers for capacity planning.
 Model support is architecture- and checkpoint-dependent. Run:
 
 ```bash
-mlxcel list
+mlxcel arch
 ```
 
 for the CLI summary, and see [Supported models](docs/supported-models.md) for the maintained architecture table, known limitations, and VLM coverage notes.

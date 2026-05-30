@@ -101,7 +101,7 @@ checkpoint pair are compatible.
   preparation beyond text-only generation.
 - TurboQuant, TP, PP, and speculative decoding are not uniformly validated for
   every family.
-- The `mlxcel list` output is a CLI summary and may lag the detailed enum count;
+- The `mlxcel arch` output is a CLI summary and may lag the detailed enum count;
   the canonical source remains `src/models/mod.rs` and `src/models/detection.rs`.
 
 ## Adding support

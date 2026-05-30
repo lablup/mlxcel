@@ -89,9 +89,13 @@ enum Commands {
     /// Start an OpenAI/llama-server compatible HTTP server
     Serve(ServeArgs),
 
-    /// List supported model architectures, or downloaded models with `--local`
+    /// List downloaded models in the local store
     #[command(visible_alias = "ls")]
     List(ListArgs),
+
+    /// List supported model architectures
+    #[command(visible_alias = "supported")]
+    Arch(ArchArgs),
 
     /// Print a pre-load memory budget for a model without running generation.
     ///
@@ -140,28 +144,26 @@ enum Commands {
 
 /// Arguments for `mlxcel list`.
 ///
-/// Without flags, `list` prints the supported model-architecture summary
-/// (unchanged behavior). `--local` switches it to enumerate downloaded models
-/// in the global store (repo-id, on-disk size, path), mirroring `ollama list`.
+/// `list` enumerates the models you have downloaded into the global store
+/// (repo-id, on-disk size, path), mirroring `ollama list`. The supported
+/// model-architecture catalog lives under the separate `mlxcel arch` verb.
 #[derive(Args, Debug)]
 pub(crate) struct ListArgs {
-    /// List downloaded models in the global store instead of supported
-    /// architectures.
-    ///
-    /// Shows each model's repo-id, on-disk size, and absolute path under
-    /// `${MLXCEL_CACHE_DIR:-$HOME/.cache/mlxcel}/models/`. Use `mlxcel rm
-    /// <repo-id>` to remove one.
-    #[arg(long)]
-    pub(crate) local: bool,
-
     /// Model-store root to list instead of the default location.
     ///
     /// Lists snapshots directly under `<PATH>/<owner>/<name>` (no extra
     /// `models/` subdir). Overrides the `MLXCEL_MODELS_DIR` environment
-    /// variable. Only meaningful with `--local`.
+    /// variable.
     #[arg(long, value_name = "PATH")]
     pub(crate) models_dir: Option<PathBuf>,
 }
+
+/// Arguments for `mlxcel arch`.
+///
+/// Currently takes no flags; the empty struct lets the verb grow options
+/// later without a breaking signature change.
+#[derive(Args, Debug)]
+pub(crate) struct ArchArgs {}
 
 /// Arguments for `mlxcel rm`.
 #[derive(Args, Debug)]
@@ -1389,13 +1391,10 @@ fn main() -> anyhow::Result<()> {
         Commands::Run(args) => commands::run_run(args),
         Commands::Generate(args) => commands::run_generate(args),
         Commands::Serve(args) => commands::run_serve(args),
-        Commands::List(args) => {
-            if args.local {
-                commands::run_list_local(args.models_dir.as_deref())
-            } else {
-                print_supported_models();
-                Ok(())
-            }
+        Commands::List(args) => commands::run_list_local(args.models_dir.as_deref()),
+        Commands::Arch(_) => {
+            print_supported_models();
+            Ok(())
         }
         Commands::Inspect(args) => commands::run_inspect(args),
         Commands::Download(args) => commands::run_download(args),

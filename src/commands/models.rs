@@ -18,10 +18,9 @@
 //! independent global store introduced by issue #93
 //! (`${MLXCEL_CACHE_DIR:-$HOME/.cache/mlxcel}/models/<owner>/<name>`):
 //!
-//! - **`mlxcel list --local`** — enumerates downloaded snapshots with repo-id,
-//!   on-disk size, and path (mirrors `ollama list` / `lms ls`). The bare
-//!   `mlxcel list` (architecture summary) is unchanged; `--local` switches the
-//!   command to this store listing instead.
+//! - **`mlxcel list`** — enumerates downloaded snapshots with repo-id,
+//!   on-disk size, and path (mirrors `ollama list` / `lms ls`). The supported
+//!   model-architecture catalog lives under the separate `mlxcel arch` verb.
 //! - **`mlxcel rm <repo-id>`** — removes a snapshot directory from the store
 //!   (confirms unless `--yes`). It never touches the read-only HuggingFace
 //!   cache: a repo that exists only there is reported, not deleted.
@@ -40,7 +39,7 @@ use mlxcel::downloader::{
     remove_model_with_override,
 };
 
-/// Run `mlxcel list --local`: print downloaded models from the global store.
+/// Run `mlxcel list`: print downloaded models from the global store.
 ///
 /// `models_dir` is the inline `--models-dir <path>` override (issue #107):
 /// when `Some`, the listing operates against that models root directly; when
@@ -60,7 +59,7 @@ fn store_root_display(models_dir: Option<&Path>) -> Option<String> {
     models_root(models_dir).map(|p| p.display().to_string())
 }
 
-/// Render the `mlxcel list --local` output into `out`.
+/// Render the `mlxcel list` output into `out`.
 ///
 /// Separated from [`run_list_local`] so unit tests can capture the exact bytes
 /// without filesystem state. The format is intentionally simple and stable
@@ -80,13 +79,15 @@ fn render_local_models<W: std::fmt::Write>(
             Some(dir) => writeln!(
                 out,
                 "No models downloaded in the mlxcel store ({dir}).\n\
-                 Download one with: mlxcel download <owner>/<name>"
+                 Download one with: mlxcel download <owner>/<name>\n\
+                 To see supported architectures, run `mlxcel arch`."
             ),
             None => writeln!(
                 out,
                 "No models downloaded (mlxcel store root is unavailable; \
                  set MLXCEL_MODELS_DIR or MLXCEL_CACHE_DIR, or pass --models-dir).\n\
-                 Download one with: mlxcel download <owner>/<name>"
+                 Download one with: mlxcel download <owner>/<name>\n\
+                 To see supported architectures, run `mlxcel arch`."
             ),
         };
         return;
@@ -182,7 +183,7 @@ pub(crate) fn run_remove(
             RemoveOutcome::NotFound => {
                 return Err(anyhow!(
                     "'{repo_id}' is not in the mlxcel store (looked in {}).\n\
-                     Run `mlxcel list --local` to see downloaded models.",
+                     Run `mlxcel list` to see downloaded models.",
                     target.display()
                 ));
             }
@@ -303,6 +304,7 @@ mod tests {
         assert!(out.contains("No models downloaded"));
         assert!(out.contains("/store/models"));
         assert!(out.contains("mlxcel download"));
+        assert!(out.contains("mlxcel arch"));
     }
 
     #[test]
@@ -311,6 +313,7 @@ mod tests {
         render_local_models(&mut out, &[], None);
         assert!(out.contains("No models downloaded"));
         assert!(out.contains("MLXCEL_CACHE_DIR"));
+        assert!(out.contains("mlxcel arch"));
     }
 
     #[test]
