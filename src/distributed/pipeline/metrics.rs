@@ -649,7 +649,7 @@ pub struct PipelineObservabilitySnapshot {
 }
 
 // ---------------------------------------------------------------------------
-// Elastic repartition counters (consumed's /metrics endpoint)
+// Elastic repartition counters (consumed by the /metrics endpoint)
 // ---------------------------------------------------------------------------
 
 /// Atomic counters + histogram totals for elastic repartition events.

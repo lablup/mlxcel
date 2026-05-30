@@ -921,7 +921,7 @@ pub(crate) const DECODE_HANG_TIMEOUT: Duration = Duration::from_secs(300);
 ///
 /// Returns the configured duration on success. Logs a warning and returns the
 /// fallback ([`DECODE_HANG_TIMEOUT`]) when the value is `0`, which would cause
-/// every request to time out instantly (— "invalid timeout config values produce a clean log message").
+/// every request to time out instantly ("invalid timeout config values produce a clean log message").
 ///
 /// Used by: `ModelProvider::new_with_server_config_and_prompt_cache` (the only
 /// constructor that receives a `ServerConfig`); other constructors default to

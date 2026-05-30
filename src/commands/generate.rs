@@ -916,10 +916,10 @@ fn run_generation_mode<M: LanguageModel>(
                 },
                 tracker = match resolved_kind {
                     DrafterKind::Mtp =>
-                        " (MtpGenerator round loop) and the per-target MtpTarget impls",
+                        "the MtpGenerator round loop and the per-target MtpTarget impls",
                     DrafterKind::Dflash =>
-                        " (DFlashGenerator round loop) and the per-target SpeculativeTarget impls",
-                    DrafterKind::InternalMtp => " sub-issues",
+                        "the DFlashGenerator round loop and the per-target SpeculativeTarget impls",
+                    DrafterKind::InternalMtp => "follow-up sub-issues",
                     _ => "follow-up speculative-decoding sub-issues",
                 },
             ));

@@ -424,7 +424,7 @@ fn scenario_b_suppresses_ja_zh() {
 ///   `c_hangul >= 0.05`.  When neither run produces Hangul, the ratio difference
 ///   is below the signal floor; we emit a diagnostic and skip the assertion.
 ///   Note: Conservative `ko` set = {Hangul, Han}, so `ko=+5` can be absorbed by
-///   Han tokens when no Hangul gradient exists —.
+///   Han tokens when no Hangul gradient exists.
 /// - When `a_hangul >= 0.01`, keep the multiplicative rule `c_hangul >= 1.2 * a_hangul`.
 #[test]
 #[ignore = "requires local model weights and the mlxcel binary"]
@@ -481,7 +481,7 @@ fn scenario_c_promotes_ko() {
                 "Scenario C: both a_hangul ({a_hangul:.4}) and c_hangul ({c_hangul:.4}) are \
                  below the signal floor (0.01 / 0.05). Skipping assertion. \
                  Note: Conservative ko set = {{Hangul, Han}}, so ko=+5 can be absorbed by Han \
-                 tokens when no Hangul gradient exists —."
+                 tokens when no Hangul gradient exists."
             );
         }
         return;
@@ -504,7 +504,7 @@ fn scenario_c_promotes_ko() {
 /// construction** when the feature works, because strict `ko=-inf` drives
 /// generated Hangul to zero while the baseline continuation (when present) has
 /// non-zero Hangul. Previously, both A and D measured identical prompt-echo
-/// Hangul, masking any difference —.
+/// Hangul, masking any difference.
 ///
 /// Asserts:
 /// - Hangul ratio in the generated continuation drops compared to scenario A.

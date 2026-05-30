@@ -21,7 +21,7 @@
 //! - Per-stage utilization and bubble ratio.
 //! - Activation transfer latency histograms (p50/p95/p99 per stage pair).
 //! - KV cache admission rejection counters (labeled by stage + reason).
-//! - Elastic repartition event counters consumed's emission
+//! - Elastic repartition event counter emission
 //!   path.
 
 use std::fmt::Write;

@@ -1033,7 +1033,7 @@ mod tests {
                 assert!(!reason.is_empty(), "LoadFailed reason must not be empty");
             }
             DrafterError::NotYetImplemented { .. } => {
-                panic!("DFlash must NOT be NotYetImplemented after lands");
+                panic!("DFlash must NOT be NotYetImplemented after the drafter lands");
             }
             other => panic!("expected LoadFailed, got {other:?}"),
         }

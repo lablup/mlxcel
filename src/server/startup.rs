@@ -796,7 +796,7 @@ pub(super) fn build_server_config(
         // the continuous-batching scheduler can apply per-layer modes
         // (with the last-layer skip) at sequence allocation time.
         batch_kv_quant: startup.batch_kv_quant,
-        // Issue #57/#603: forward the resolved per-slot context cap (optionally
+        // Issue #57: forward the resolved per-slot context cap (optionally
         // tightened by `--max-kv-size`) so the scheduler can apply a head-trim
         // policy to plain `KVCache` instances. `None` means no explicit
         // context or max-KV bound was configured.

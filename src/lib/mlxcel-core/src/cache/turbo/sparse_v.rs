@@ -602,7 +602,7 @@ pub fn attention_sparse_v_turbo4_fused(
     let v_packed_flat = ffi::reshape(v_packed, &[bhkv, tk, head_dim / 2]);
     // v_rescale graph shape is `[B, Hkv, Tk, 1]`. The kernel expects
     // `[B*Hkv, Tk]` — drop the trailing axis and flatten the first two.
-    // (Same memory layout as the previous `v_norms` plumbing; only the semantic content changed —.)
+    // (Same memory layout as the previous `v_norms` plumbing; only the semantic content changed.)
     let v_rescale_flat = ffi::reshape(v_rescale, &[bhkv, tk]);
     let codebook_vec: Vec<f32> = params.codebook.centroids.as_ref().to_vec();
     let codebook_arr = ffi::from_slice_f32(&codebook_vec, &[codebook_vec.len() as i32]);

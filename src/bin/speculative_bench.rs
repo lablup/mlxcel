@@ -487,7 +487,7 @@ fn bench_one_pairing(p: &Pairing, prompt: &str, batch: usize, max_tokens: usize)
             p.kind,
             batch,
             p.block_size,
-            "DEFERRED to — needs MtpTarget for Gemma4Wrapper",
+            "DEFERRED — needs MtpTarget for Gemma4Wrapper",
         ),
         BenchKind::Dflash => Row::deferred(
             p.name,
@@ -495,7 +495,7 @@ fn bench_one_pairing(p: &Pairing, prompt: &str, batch: usize, max_tokens: usize)
             p.kind,
             batch,
             p.block_size,
-            "DEFERRED to — DFlash loader + public Qwen3NextCache API",
+            "DEFERRED — DFlash loader + public Qwen3NextCache API",
         ),
     }
 }
@@ -585,7 +585,7 @@ fn main() -> Result<()> {
                     args.kind,
                     args.batch,
                     args.block_size,
-                    "DEFERRED to — see module docs",
+                    "DEFERRED — see module docs",
                 ),
             }
         };

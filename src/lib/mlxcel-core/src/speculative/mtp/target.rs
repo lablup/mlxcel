@@ -322,7 +322,7 @@ pub trait MtpTarget {
     fn eos_token_ids(&self) -> Vec<i32>;
 
     // ------------------------------------------------------------
-    // Batched MTP path (B > 1) —.
+    // Batched MTP path (B > 1).
     // ------------------------------------------------------------
     //
     // The trait carries default impls that error out so existing single-batch

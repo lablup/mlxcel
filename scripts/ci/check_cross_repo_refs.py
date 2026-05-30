@@ -30,7 +30,11 @@ import re
 import subprocess
 import sys
 
-BARE = re.compile(r"(?<![\w/])#([0-9]{3,})(?![0-9a-fA-F])")
+# Exclude a leading word char (a qualified `org/repo#NNN` and URL `…html#NNN`
+# anchors both have a word char right before `#`) but NOT a leading `/`, so a
+# bare ref written after a slash (a milestone label or an issue range, not an
+# actual `org/repo`) is still caught.
+BARE = re.compile(r"(?<!\w)#([0-9]{3,})(?![0-9a-fA-F])")
 # Lines naming an upstream project: a bare ref here is almost certainly an
 # unqualified upstream reference that should become org/repo#NNN.
 UPSTREAM = re.compile(

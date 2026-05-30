@@ -80,7 +80,7 @@ use crate::ffi::MlxArray;
 use crate::ops::wht;
 
 /// V-side PolarQuant bit-width. Locked to 4 bits for `Turbo4Asym` and
-/// symmetric `Turbo4`. (B5/#477 will add 3-bit, but lives in its own
+/// symmetric `Turbo4`. (B5 will add 3-bit, but lives in its own
 /// variant.)
 pub const V_BIT_WIDTH: u8 = 4;
 

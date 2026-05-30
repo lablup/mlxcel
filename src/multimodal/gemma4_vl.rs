@@ -68,7 +68,7 @@ pub enum PadSide {
 /// Returns `None` when the tensor has rank 0 or an empty leading axis.
 ///
 /// Used by: Gemma 4 mixed-length batching prep and — when
-/// extended for `per_layer_inputs` —.
+/// extended for `per_layer_inputs`.
 #[must_use]
 pub fn prompt_kwarg_row(
     v: &MlxArray,

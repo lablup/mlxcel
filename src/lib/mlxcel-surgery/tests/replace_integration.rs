@@ -16,7 +16,7 @@
 //! parser and the `SurgeryPipeline` `WeightTransform` hook.
 //!
 //! These tests exercise the public API surface a downstream caller
-//! (`mlxcel::models::load_text_weights` after lands the `--surgery` CLI flag) would use:
+//! (`mlxcel::models::load_text_weights` once the `--surgery` CLI flag lands) would use:
 //!
 //! ```text
 //! YAML -> parse_config_file -> SurgeryPipeline
