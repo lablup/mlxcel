@@ -23,6 +23,10 @@ Current GitHub-facing docs:
 8. `responses-api.md` — implemented `/v1/responses` subset and gaps.
 9. `adding-models.md` — contribution guide for new model architectures.
 
+## Architecture Decision Records
+
+`adr/` holds numbered Architecture Decision Records, one significant decision per file, immutable once Accepted. See `adr/README.md` for the index.
+
 Expected future layout examples:
 
 - `docs/en/...` and `docs/ko/...` for MkDocs/manual pages.
