@@ -46,8 +46,8 @@ use std::time::{Duration, Instant};
 
 use clap::Parser;
 use mlxcel_core::{
-    eval, fast_scaled_dot_product_attention, from_slice_i32, reshape, slice_update,
-    synchronize_default, take, transpose_axes, zeros, MlxArray, UniquePtr,
+    MlxArray, UniquePtr, eval, fast_scaled_dot_product_attention, from_slice_i32, reshape,
+    slice_update, synchronize_default, take, transpose_axes, zeros,
 };
 
 // MLX dtype ids (see src/lib/mlxcel-core/cpp/mlx_cxx_bridge.cpp:50-51).

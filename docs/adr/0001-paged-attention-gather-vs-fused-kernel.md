@@ -21,7 +21,7 @@ This ADR is backed by the synthetic op-level measurements in `examples/page_gath
 
 Adopt **(A) gather-then-SDPA** for Phases 1 through 5 (#118 through #122). Defer the **(B)** fused Metal paged-attention kernel to Phase 6 (#123), and build it only if the measured gather overhead at the target context lengths is material.
 
-Rationale: the microbench shows gather overhead stays under <!--FILL_CROSSOVER-->% of SDPA time below ~<!--FILL_CROSSOVER_CTX--> tokens of context. Below that crossover, the gather is dominated by the attention it feeds, so (A) is within noise of the fused-kernel lower bound while needing no new kernel. Above it, the gather copy starts to cost enough that (B) is worth its complexity, which is why (B) stays on the roadmap rather than being dropped.
+Rationale: the microbench shows gather overhead (layout A, measured against the contiguous-SDPA lower bound) stays under ~15% of SDPA time below ~4096 tokens of single-sequence context. Below that crossover the gather is dominated by the attention it feeds, so (A) is within noise of the fused-kernel lower bound while needing no new kernel. Overhead then grows with both context length and batch: single-sequence decode reaches ~56% at 16384 tokens and ~67% at 32768, and batched decode (batch 4) is already ~48% at 1024 tokens and runs 2x to 3x the contiguous SDPA cost past 4096. So (B) earns its complexity for long-context or batched serving, which is why it stays on the roadmap rather than being dropped; the concrete trigger for building it is single-sequence context past ~16384 tokens, or any sustained batched decode.
 
 ### Pool tensor layout
 
@@ -30,11 +30,11 @@ Two candidate per-layer pool layouts were measured:
 - Layout A: `[num_blocks, block_size, n_kv_heads, head_dim]`.
 - Layout B (head-split): `[n_kv_heads, num_blocks, block_size, head_dim]`.
 
-Both reach the same `[batch, n_kv_heads, ctx, head_dim]` SDPA input after one `take`, one `reshape`, and one `transpose`; they differ in the `take` axis (0 for A, 1 for B) and in the `slice_update` shape used to append a fresh block each step. The recommendation, finalized from the `take` and `slice_update` numbers in the Results table, is: <!--FILL_LAYOUT_DECISION-->
+Both reach the same `[batch, n_kv_heads, ctx, head_dim]` SDPA input after one `take`, one `reshape`, and one `transpose`; they differ in the `take` axis (0 for A, 1 for B) and in the `slice_update` shape used to append a fresh block each step. The recommendation, finalized from the `take` and `slice_update` numbers in the Results table, is **layout A**, `[num_blocks, block_size, n_kv_heads, head_dim]`. Its gather-then-SDPA step is on average 2.1x faster than head-split layout B (1.2x to 3.2x across the sweep): taking on axis 0 keeps each block's `[block_size, n_kv_heads, head_dim]` slab contiguous, and MLX folds the trailing `[0, 2, 1, 3]` transpose into the SDPA read. Layout B takes on axis 1 and needs a `[1, 0, 2, 3]` transpose across the leading head axis, a scattered pattern MLX does not fuse into SDPA as cheaply, so `gatherB_sdpa` runs from roughly 2x the contiguous baseline at 4096 tokens to more than 4x at 16384. Block-append cost is layout-insensitive (`slice_update` averages ~680us for A and ~700us for B, within noise), so it does not offset layout A's gather advantage.
 
 ### Block size
 
-Keep the existing default block size (32) unless the data argues otherwise. <!--FILL_BLOCK_SIZE_NOTE--> The tradeoff the sweep exercises is fragmentation against gather dispatch cost: a smaller block (16) cuts internal fragmentation (fewer wasted slots in the last partial block of each sequence) but raises the number of `take` indices and therefore the gather dispatch, while a larger block (64) does the reverse.
+Keep the existing default block size (32) unless the data argues otherwise. Block size has little effect on the gather-then-SDPA cost at a fixed context length: layout A overhead varies by only a few points across 16 / 32 / 64 (batch 1 at 4096 tokens is 12%, 15%, and 16% for blocks 16, 32, 64). The swept context lengths are exact multiples of every block size, so `frag%` is 0 throughout the Results table; in production the internal waste is at most one partial block per sequence, below `block_size / ctx`. The tradeoff the sweep exercises is fragmentation against gather dispatch cost: a smaller block (16) cuts internal fragmentation (fewer wasted slots in the last partial block of each sequence) but raises the number of `take` indices and therefore the gather dispatch, while a larger block (64) does the reverse.
 
 ## Microbench methodology and reproduce
 
@@ -61,13 +61,34 @@ Run it under `caffeinate -i` so the host does not idle-throttle the GPU mid-run,
 
 ## Results
 
-**Hardware:** <!--FILL_HARDWARE-->
+**Hardware:** Apple M1 Ultra (Mac Studio), 128 GB unified memory, macOS 26.5 (build 25F71). Built `--release --features metal,accelerate`. Each cell is the minimum of two full sweeps (the cooler run), 50 timed iterations after 20 warmup, dtype f16.
 
 | batch | ctx | block | frag% | contig_sdpa_us | gatherA_only_us | gatherA_sdpa_us | gatherB_only_us | gatherB_sdpa_us | sliceupd_A_us | sliceupd_B_us | overheadA% | overheadB% |
 |------:|----:|------:|------:|---------------:|----------------:|----------------:|----------------:|----------------:|--------------:|--------------:|-----------:|-----------:|
-| 1 | 1024 | 32 | 0.00 | _tbd_ | _tbd_ | _tbd_ | _tbd_ | _tbd_ | _tbd_ | _tbd_ | _tbd_ | _tbd_ |
-
-<!-- BENCH_RESULTS_PLACEHOLDER: orchestrator fills the measured table + hardware line here -->
+| 1 | 1024 | 16 | 0.00 | 333 | 598 | 382 | 767 | 533 | 327 | 320 | 14 | 60 |
+| 1 | 1024 | 32 | 0.00 | 341 | 627 | 375 | 747 | 452 | 303 | 304 | 10 | 33 |
+| 1 | 1024 | 64 | 0.00 | 303 | 575 | 336 | 676 | 405 | 294 | 302 | 11 | 34 |
+| 1 | 4096 | 16 | 0.00 | 341 | 618 | 383 | 895 | 661 | 320 | 320 | 12 | 94 |
+| 1 | 4096 | 32 | 0.00 | 333 | 612 | 385 | 910 | 662 | 317 | 321 | 15 | 99 |
+| 1 | 4096 | 64 | 0.00 | 335 | 598 | 390 | 902 | 661 | 321 | 321 | 16 | 97 |
+| 1 | 16384 | 16 | 0.00 | 455 | 716 | 692 | 1861 | 1829 | 397 | 434 | 52 | 302 |
+| 1 | 16384 | 32 | 0.00 | 437 | 733 | 686 | 1877 | 1843 | 426 | 424 | 57 | 322 |
+| 1 | 16384 | 64 | 0.00 | 437 | 727 | 691 | 1884 | 1853 | 441 | 425 | 58 | 324 |
+| 1 | 32768 | 16 | 0.00 | 646 | 986 | 1070 | 3322 | 3338 | 683 | 687 | 66 | 417 |
+| 1 | 32768 | 32 | 0.00 | 635 | 987 | 1074 | 3360 | 3395 | 679 | 697 | 69 | 435 |
+| 1 | 32768 | 64 | 0.00 | 646 | 983 | 1065 | 3413 | 3461 | 681 | 685 | 65 | 436 |
+| 4 | 1024 | 16 | 0.00 | 339 | 609 | 513 | 946 | 732 | 334 | 316 | 52 | 116 |
+| 4 | 1024 | 32 | 0.00 | 340 | 614 | 514 | 904 | 739 | 314 | 323 | 51 | 118 |
+| 4 | 1024 | 64 | 0.00 | 362 | 643 | 516 | 892 | 710 | 312 | 317 | 42 | 96 |
+| 4 | 4096 | 16 | 0.00 | 483 | 727 | 1186 | 1880 | 2511 | 432 | 433 | 146 | 420 |
+| 4 | 4096 | 32 | 0.00 | 490 | 724 | 1209 | 1903 | 2552 | 437 | 433 | 147 | 421 |
+| 4 | 4096 | 64 | 0.00 | 500 | 729 | 1197 | 1920 | 2228 | 436 | 444 | 140 | 346 |
+| 4 | 16384 | 16 | 0.00 | 940 | 1383 | 3446 | 5987 | 7371 | 1039 | 1047 | 267 | 684 |
+| 4 | 16384 | 32 | 0.00 | 1018 | 1379 | 3408 | 6051 | 7685 | 1203 | 1266 | 235 | 655 |
+| 4 | 16384 | 64 | 0.00 | 1513 | 1874 | 4503 | 9275 | 9108 | 1202 | 1284 | 198 | 502 |
+| 4 | 32768 | 16 | 0.00 | 1757 | 2090 | 6551 | 11371 | 14245 | 1792 | 1850 | 273 | 711 |
+| 4 | 32768 | 32 | 0.00 | 2110 | 2947 | 6567 | 12089 | 15233 | 1817 | 2048 | 211 | 622 |
+| 4 | 32768 | 64 | 0.00 | 2289 | 3041 | 6695 | 13334 | 18431 | 1763 | 1761 | 193 | 705 |
 
 ## Consequences
 
