@@ -90,6 +90,8 @@ Run it under `caffeinate -i` so the host does not idle-throttle the GPU mid-run,
 | 4 | 32768 | 32 | 0.00 | 2110 | 2947 | 6567 | 12089 | 15233 | 1817 | 2048 | 211 | 622 |
 | 4 | 32768 | 64 | 0.00 | 2289 | 3041 | 6695 | 13334 | 18431 | 1763 | 1761 | 193 | 705 |
 
+Reading the table: layout A's `gatherA_only` can exceed `gatherA_sdpa` at short context (batch 1 at 1024 tokens is ~600us vs ~380us) because timing the gather alone forces MLX to materialize the full contiguous K/V, while the gather-then-SDPA path lets MLX fuse the `take`, `reshape`, and `transpose` into the fused-SDPA read without ever materializing that intermediate. The decode-relevant cost is `gatherA_sdpa` and the `overheadA%` derived from it, not `gatherA_only`. That fusion is the main reason strategy (A) stays cheap at the common context lengths: the per-step gather does not pay for a separate full copy of the sequence KV.
+
 ## Consequences
 
 Phases 1 through 3 inherit the following from this decision:
