@@ -106,6 +106,98 @@ fn per_call_us(total: Duration, iters: usize) -> f64 {
     (total.as_nanos() as f64 / iters as f64) / 1000.0
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    // --- parse_usize_list ---
+
+    #[test]
+    fn parse_usize_list_single() {
+        assert_eq!(parse_usize_list("42"), vec![42]);
+    }
+
+    #[test]
+    fn parse_usize_list_multi() {
+        assert_eq!(parse_usize_list("1,4,16"), vec![1, 4, 16]);
+    }
+
+    #[test]
+    fn parse_usize_list_whitespace() {
+        assert_eq!(parse_usize_list(" 8 , 32 , 64 "), vec![8, 32, 64]);
+    }
+
+    #[test]
+    fn parse_usize_list_trailing_comma() {
+        // A trailing comma produces an empty token that is filtered out.
+        assert_eq!(parse_usize_list("1,2,"), vec![1, 2]);
+    }
+
+    #[test]
+    fn parse_usize_list_empty() {
+        assert!(parse_usize_list("").is_empty());
+    }
+
+    // --- per_call_us ---
+
+    #[test]
+    fn per_call_us_round() {
+        // 10ms total / 10 iters = 1000us per call.
+        let total = Duration::from_millis(10);
+        assert!((per_call_us(total, 10) - 1000.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn per_call_us_fractional() {
+        // 1ms total / 4 iters = 250us per call.
+        let total = Duration::from_millis(1);
+        assert!((per_call_us(total, 4) - 250.0).abs() < 1e-6);
+    }
+
+    // --- ctx_pad / frag_pct math (inlined from run_config) ---
+
+    fn ctx_frag(ctx: usize, block: usize) -> (usize, f64) {
+        let nb = ctx.div_ceil(block);
+        let ctx_pad = nb * block;
+        let frag_pct = (ctx_pad - ctx) as f64 / ctx as f64 * 100.0;
+        (ctx_pad, frag_pct)
+    }
+
+    #[test]
+    fn ctx_pad_exact_multiple() {
+        // ctx=1024, block=32 → already aligned, 0% fragmentation.
+        let (pad, frag) = ctx_frag(1024, 32);
+        assert_eq!(pad, 1024);
+        assert!(frag.abs() < 1e-9);
+    }
+
+    #[test]
+    fn ctx_pad_non_multiple() {
+        // ctx=1000, block=32 → rounds up to 1024 (32 * 32), frag = 24/1000 * 100.
+        let (pad, frag) = ctx_frag(1000, 32);
+        assert_eq!(pad, 1024);
+        let expected = 24.0 / 1000.0 * 100.0;
+        assert!((frag - expected).abs() < 1e-9);
+    }
+
+    #[test]
+    fn ctx_pad_block_size_1() {
+        // block=1 always produces 0% frag.
+        let (pad, frag) = ctx_frag(777, 1);
+        assert_eq!(pad, 777);
+        assert!(frag.abs() < 1e-9);
+    }
+
+    #[test]
+    fn ctx_pad_ctx_equals_block() {
+        // ctx == block → exactly one block, 0% frag.
+        let (pad, frag) = ctx_frag(64, 64);
+        assert_eq!(pad, 64);
+        assert!(frag.abs() < 1e-9);
+    }
+}
+
 /// Human-readable line for a single measured body.
 fn fmt_per_call(label: &str, total: Duration, iters: usize) {
     println!(
