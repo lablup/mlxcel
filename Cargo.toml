@@ -158,7 +158,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tower-http = { version = "0.5", features = ["cors", "trace"] }
 tower = { version = "0.4", features = ["util"] }
-hyper = { version = "1.1", features = ["server"] }
+hyper = { version = "1.10", features = ["server"] }
 hyper-util = { version = "0.1", features = ["tokio", "server-auto"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 indicatif = "0.18"
