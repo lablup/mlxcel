@@ -80,6 +80,9 @@ mod detach;
 mod paged;
 mod paged_detach;
 #[cfg(test)]
+#[path = "cache/paged_pool_tests.rs"]
+mod paged_pool_tests;
+#[cfg(test)]
 #[path = "cache/paged_turbo_tests.rs"]
 mod paged_turbo_tests;
 #[cfg(test)]
@@ -96,7 +99,7 @@ pub use batch_quant::{
 };
 pub use detach::{DetachedCacheSet, DetachedHandle, DetachedKVCache, DetachedRotatingKVCache};
 pub use paged::{
-    PagedBlockId, PagedBlockPool, PagedCacheStats, PagedKvLayout, PagedLayerState,
+    GatheredKv, PagedBlockId, PagedBlockPool, PagedCacheStats, PagedKvLayout, PagedLayerState,
     PagedSequenceState,
 };
 pub use paged_detach::DetachedPagedCacheSet;
@@ -5365,17 +5368,20 @@ impl CachePool {
     pub fn memory_usage_bytes(&self) -> usize {
         let active_bytes: usize = self.active.values().map(|s| s.nbytes()).sum();
         let parked_bytes: usize = self.detached.values().map(|d| d.nbytes()).sum();
-        // Per-page Turbo4 sidecars in the paged pool are owned by the pool
-        // itself rather than by any individual `SequenceCacheSet`, so they
-        // are not visible to the per-sequence `nbytes()` walk above. Add
-        // them explicitly so admission-control sees the true KV footprint
-        // for paged Turbo4 deployments.
-        let pool_sidecar_bytes: usize = self
+        // Per-page Turbo4 sidecars and physical main-K/V pool tensors in the
+        // paged pool are owned by the pool itself rather than by any individual
+        // `SequenceCacheSet`, so they are not visible to the per-sequence
+        // `nbytes()` walk above. Add them explicitly so admission-control sees
+        // the true KV footprint for paged deployments. The main-K/V pool
+        // tensors are lazily allocated, so this contributes 0 until a writer is
+        // wired (#120) and never perturbs the layout-derived scheduling budgets
+        // (`reserved_bytes`/`used_bytes`).
+        let pool_bytes: usize = self
             .paged_pool
             .as_ref()
-            .map(|pool| pool.turbo_sidecar_bytes())
+            .map(|pool| pool.turbo_sidecar_bytes() + pool.pool_tensor_bytes())
             .unwrap_or(0);
-        active_bytes + parked_bytes + pool_sidecar_bytes
+        active_bytes + parked_bytes + pool_bytes
     }
 
     pub fn append_paged_tokens(

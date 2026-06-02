@@ -390,14 +390,42 @@ impl PagedTurboPageSidecars {
     }
 }
 
+/// Inferred per-layer geometry of a physical main-K/V pool tensor.
+///
+/// `PagedKvLayout` only carries the per-block byte budget; the head count,
+/// head dim, and element dtype are not known until the first block is written.
+/// They are captured here on the first [`PagedBlockPool::write_block`] for the
+/// layer and then validated against on every subsequent write.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PagedPoolMeta {
+    n_kv_heads: i32,
+    head_dim: i32,
+    /// MLX dtype code of the stored K/V (e.g. `dtype::FLOAT16`, `dtype::INT8`).
+    dtype: i32,
+    /// Number of physical block rows the current pool tensor can hold along
+    /// axis 0. Grown in chunks as new rows are assigned.
+    capacity_blocks: usize,
+}
+
 /// Physical block allocator shared across every active paged sequence.
 ///
-/// In `Fp16`/`Int8` modes the pool tracks block-table metadata only — the
-/// actual KV tensors live in dense [`super::KVCache`] placeholders attached to
-/// each [`super::SequenceCacheSet`]. In Turbo4 modes the pool also owns per-
-/// page sidecar MLX arrays (`v_packed`, `v_norms`, optionally `k_packed`,
-/// `k_norms`, `cold_keys`) so packed quantization state survives across
-/// detach/adopt round-trips and prefix-cache handoffs.
+/// The pool can own the physical main K and V tensors (layout A from
+/// ADR 0001: each block occupies `[block_size, n_kv_heads, head_dim]` and a
+/// layer's pool tensor is `[capacity_blocks, block_size, n_kv_heads, head_dim]`,
+/// separate tensors for K and V per layer). Storage is lazily allocated on the
+/// first [`PagedBlockPool::write_block`] for a layer, so an `Fp16`/`Int8`
+/// sequence that never writes (the current live flow, where dense
+/// [`super::KVCache`] placeholders still carry live K/V) adds zero tensor or
+/// row overhead. Removal of the dense placeholders from the live flow lands
+/// with the decode-read (#119) / prefill-write (#120) reader/writer switch;
+/// until then the pool storage added here is exercised only by unit tests.
+///
+/// In Turbo4 modes the pool also owns per-page sidecar MLX arrays (`v_packed`,
+/// `v_norms`, optionally `k_packed`, `k_norms`, `cold_keys`) so packed
+/// quantization state survives across detach/adopt round-trips and
+/// prefix-cache handoffs. INT8 quantization scales stay in the dense
+/// `DetachedKVCache` path; only the INT8 main K/V int-typed array flows
+/// through the pool.
 pub struct PagedBlockPool {
     layout: PagedKvLayout,
     next_block_id: u64,
@@ -407,16 +435,55 @@ pub struct PagedBlockPool {
     /// `Fp16`/`Int8` cache modes; populated by Turbo4 sequences via
     /// [`PagedBlockPool::install_turbo_sidecar`].
     turbo_sidecars: PagedTurboPageSidecars,
+    /// Per-layer physical K pool tensor (layout A). `None` until the first
+    /// write to that layer lazily allocates it.
+    pool_k: Vec<Option<UniquePtr<MlxArray>>>,
+    /// Per-layer physical V pool tensor (layout A). `None` until first write.
+    pool_v: Vec<Option<UniquePtr<MlxArray>>>,
+    /// Per-layer inferred geometry/capacity of the pool tensors. `None` until
+    /// first write.
+    pool_meta: Vec<Option<PagedPoolMeta>>,
+    /// Per-layer `block_id -> physical row` map keeping the pool tensors
+    /// compact. Global `PagedBlockId`s remain unique across layers; rows are
+    /// layer-local and assigned lazily on first write to a block.
+    block_rows: Vec<HashMap<PagedBlockId, usize>>,
+    /// Per-layer free row list. A row is pushed here when its block hits
+    /// refcount 0 and is reused by the next first-write to a fresh block.
+    free_rows: Vec<Vec<usize>>,
+    /// Per-layer monotonic next-row cursor for rows never yet handed out.
+    next_row: Vec<usize>,
 }
+
+/// Number of physical block rows the pool tensor grows by when a freshly
+/// assigned row exceeds the current capacity. Mirrors the chunked-growth
+/// discipline of the dense `KVCache` (which pre-allocates in steps) so an
+/// append is O(block) amortised rather than O(rows) on every write.
+const POOL_GROW_CHUNK_BLOCKS: usize = 32;
+
+/// Gathered visible K and V tensors for one layer, each shaped
+/// `[1, n_kv_heads, visible_len, head_dim]` (SDPA-ready). Returned by
+/// [`PagedBlockPool::gather_visible`].
+pub type GatheredKv = (UniquePtr<MlxArray>, UniquePtr<MlxArray>);
+
+/// A normalized layout-A slot update (`[1, n_slots, n_kv_heads, head_dim]`)
+/// paired with its `(n_slots, n_kv_heads, head_dim)` geometry.
+type NormalizedBlock = (UniquePtr<MlxArray>, (i32, i32, i32));
 
 impl PagedBlockPool {
     pub fn new(layout: PagedKvLayout) -> Self {
+        let num_layers = layout.num_layers;
         Self {
-            free_lists: vec![Vec::new(); layout.num_layers],
+            free_lists: vec![Vec::new(); num_layers],
             layout,
             next_block_id: 0,
             blocks: HashMap::new(),
             turbo_sidecars: PagedTurboPageSidecars::default(),
+            pool_k: (0..num_layers).map(|_| None).collect(),
+            pool_v: (0..num_layers).map(|_| None).collect(),
+            pool_meta: vec![None; num_layers],
+            block_rows: vec![HashMap::new(); num_layers],
+            free_rows: vec![Vec::new(); num_layers],
+            next_row: vec![0; num_layers],
         }
     }
 
@@ -616,9 +683,11 @@ impl PagedBlockPool {
 
     /// Drop one logical reference to `block_id`. The block returns to the free
     /// list (and becomes eligible for recycling) only once the refcount
-    /// reaches zero. Per-page Turbo4 sidecars (if any) are dropped at the same
-    /// moment so a recycled block can never serve stale packed data to a new
-    /// sequence.
+    /// reaches zero. Per-page Turbo4 sidecars (if any) and the block's main
+    /// K/V pool row (if assigned) are released at the same moment so a recycled
+    /// block can never serve stale data to a new sequence. The recycled row is
+    /// overwritten before any read, so it needs no zeroing — only to become
+    /// reusable.
     ///
     /// Used by: paged detach/adopt cleanup, internal sequence tear-down.
     pub fn release_block(&mut self, block_id: PagedBlockId) -> Result<(), String> {
@@ -641,6 +710,10 @@ impl PagedBlockPool {
         // Block has hit refcount 0 — drop any associated Turbo4 sidecars so
         // recycle-time aliasing cannot leak old packed contents.
         self.turbo_sidecars.forget(block_id);
+        // Free the main-K/V pool row, if one was assigned, so it can be reused.
+        if let Some(row) = self.block_rows[layer_idx].remove(&block_id) {
+            self.free_rows[layer_idx].push(row);
+        }
         self.free_lists[layer_idx].push(block_id);
         Ok(())
     }
@@ -809,6 +882,298 @@ impl PagedBlockPool {
             || self.turbo_sidecars.cold_keys.contains_key(&block_id)
     }
 
+    // -----------------------------------------------------------------------
+    // Physical main K/V pool storage (layout A)
+    // -----------------------------------------------------------------------
+
+    /// Write one block's worth of K/V into the layer's physical pool tensors.
+    ///
+    /// Routes both `Fp16` and `Int8` main K/V through pool storage (INT8 is
+    /// just an int-typed array to `slice_update`; quantization scales stay in
+    /// the dense path and are not touched here). The row for `block_id` is
+    /// assigned lazily on the first write (reusing a freed row when available),
+    /// and the pool tensor is grown in [`POOL_GROW_CHUNK_BLOCKS`] chunks when a
+    /// fresh row exceeds capacity. The write reassigns the pool tensor via
+    /// `slice_update` so MLX donates the buffer (O(block), per ADR 0001's
+    /// append discipline).
+    ///
+    /// Accepted `k_block` / `v_block` shapes (the same for both):
+    /// - `[1, n_kv_heads, n_slots, head_dim]` — the SDPA-style layout the
+    ///   attention path produces (primary convention), or
+    /// - `[n_slots, n_kv_heads, head_dim]` — the bare layout-A row slab.
+    ///
+    /// `slot_start` is the first slot within the block; `slot_start + n_slots`
+    /// must not exceed `block_size`. dtype/geometry are validated against the
+    /// layer's `PagedPoolMeta` (captured on the first write) on every call.
+    pub fn write_block(
+        &mut self,
+        block_id: PagedBlockId,
+        layer_idx: usize,
+        slot_start: usize,
+        k_block: &MlxArray,
+        v_block: &MlxArray,
+    ) -> Result<(), String> {
+        self.validate_layer(layer_idx)?;
+        if !self.blocks.contains_key(&block_id) {
+            return Err(format!("PagedBlockPool: unknown block {block_id}"));
+        }
+
+        // Normalize both inputs to a `[1, n_slots, n_kv_heads, head_dim]` slot
+        // update matching layout A, and extract (n_slots, n_kv_heads, head_dim).
+        let (k_slot, k_geom) = normalize_block_for_layout_a(k_block, "k_block")?;
+        let (v_slot, v_geom) = normalize_block_for_layout_a(v_block, "v_block")?;
+        if k_geom != v_geom {
+            return Err(format!(
+                "PagedBlockPool::write_block: K geometry {k_geom:?} does not match V geometry {v_geom:?}"
+            ));
+        }
+        let (n_slots, n_kv_heads, head_dim) = k_geom;
+        let k_dtype = ffi::array_dtype(k_block);
+        let v_dtype = ffi::array_dtype(v_block);
+        if k_dtype != v_dtype {
+            return Err(format!(
+                "PagedBlockPool::write_block: K dtype {k_dtype} does not match V dtype {v_dtype}"
+            ));
+        }
+
+        let block_size = self.layout.block_size as i32;
+        if n_slots <= 0 || slot_start as i32 + n_slots > block_size {
+            return Err(format!(
+                "PagedBlockPool::write_block: slot range [{slot_start}, {}) out of bounds for block_size {block_size}",
+                slot_start as i32 + n_slots
+            ));
+        }
+
+        // Capture or validate the layer's pool geometry.
+        match self.pool_meta[layer_idx] {
+            Some(meta) => {
+                if meta.n_kv_heads != n_kv_heads
+                    || meta.head_dim != head_dim
+                    || meta.dtype != k_dtype
+                {
+                    return Err(format!(
+                        "PagedBlockPool::write_block: layer {layer_idx} expects (n_kv_heads={}, head_dim={}, dtype={}); got (n_kv_heads={n_kv_heads}, head_dim={head_dim}, dtype={k_dtype})",
+                        meta.n_kv_heads, meta.head_dim, meta.dtype
+                    ));
+                }
+            }
+            None => {
+                let capacity = POOL_GROW_CHUNK_BLOCKS;
+                let shape = [capacity as i32, block_size, n_kv_heads, head_dim];
+                self.pool_k[layer_idx] = Some(ffi::zeros(&shape, k_dtype));
+                self.pool_v[layer_idx] = Some(ffi::zeros(&shape, k_dtype));
+                self.pool_meta[layer_idx] = Some(PagedPoolMeta {
+                    n_kv_heads,
+                    head_dim,
+                    dtype: k_dtype,
+                    capacity_blocks: capacity,
+                });
+            }
+        }
+
+        // Resolve (and grow for) the physical row for this block.
+        let row = self.assign_row(block_id, layer_idx)?;
+
+        // Reassign the pool tensors with the slot update so MLX donates the
+        // buffer (in-place append, O(block)).
+        let starts = [row as i32, slot_start as i32, 0, 0];
+        let stops = [
+            row as i32 + 1,
+            slot_start as i32 + n_slots,
+            n_kv_heads,
+            head_dim,
+        ];
+        let old_k = self.pool_k[layer_idx]
+            .take()
+            .expect("pool_k allocated above");
+        self.pool_k[layer_idx] = Some(ffi::slice_update(&old_k, &k_slot, &starts, &stops));
+        let old_v = self.pool_v[layer_idx]
+            .take()
+            .expect("pool_v allocated above");
+        self.pool_v[layer_idx] = Some(ffi::slice_update(&old_v, &v_slot, &starts, &stops));
+        Ok(())
+    }
+
+    /// Gather the visible K/V window for one layer of a sequence into the
+    /// SDPA-ready shape `[1, n_kv_heads, visible_len, head_dim]`.
+    ///
+    /// Builds the physical-row index array from the layer's `block_ids` (in
+    /// block-table order — works for fragmented / out-of-order rows), takes
+    /// those rows out of the pool on axis 0, flattens the block dimension,
+    /// slices the visible window `[logical_start, len)` (dropping any trimmed
+    /// prefix and trailing padding), and transposes into the fused-SDPA layout.
+    /// The result is byte-identical to the equivalent dense contiguous buffer's
+    /// visible slice. Returns `Ok(None)` when the layer has no visible tokens
+    /// or no pool storage yet.
+    pub fn gather_visible(
+        &self,
+        state: &PagedSequenceState,
+        layer_idx: usize,
+    ) -> Result<Option<GatheredKv>, String> {
+        let layer = state.layer(layer_idx).ok_or_else(|| {
+            format!(
+                "PagedBlockPool::gather_visible: layer {layer_idx} out of range for {} layers",
+                state.layers.len()
+            )
+        })?;
+        let visible_len = layer.visible_len();
+        if visible_len == 0 || layer.block_ids.is_empty() {
+            return Ok(None);
+        }
+
+        let (pool_k, pool_v) = match (
+            self.pool_k.get(layer_idx).and_then(|p| p.as_ref()),
+            self.pool_v.get(layer_idx).and_then(|p| p.as_ref()),
+        ) {
+            (Some(k), Some(v)) => (k, v),
+            _ => return Ok(None),
+        };
+        let meta = self.pool_meta[layer_idx]
+            .expect("pool_meta present whenever pool tensors are allocated");
+
+        // Map each block id (in block-table order) to its physical row.
+        let mut rows_i32 = Vec::with_capacity(layer.block_ids.len());
+        for block_id in &layer.block_ids {
+            let row = *self.block_rows[layer_idx].get(block_id).ok_or_else(|| {
+                format!(
+                    "PagedBlockPool::gather_visible: block {block_id} on layer {layer_idx} has no pool row (was it written?)"
+                )
+            })?;
+            rows_i32.push(row as i32);
+        }
+
+        let block_size = self.layout.block_size as i32;
+        let n_blocks = rows_i32.len() as i32;
+        let logical_start = layer.logical_start as i32;
+        let len = layer.len as i32;
+        if len > n_blocks * block_size {
+            return Err(format!(
+                "PagedBlockPool::gather_visible: layer {layer_idx} len {len} exceeds {n_blocks} blocks * block_size {block_size}"
+            ));
+        }
+
+        let idx = ffi::from_slice_i32(&rows_i32, &[n_blocks]);
+
+        let gather = |pool: &MlxArray| -> UniquePtr<MlxArray> {
+            // [n_blocks, block_size, H, D]
+            let gathered = ffi::take(pool, &idx, 0);
+            // [n_blocks * block_size, H, D]
+            let flat = ffi::reshape(
+                &gathered,
+                &[n_blocks * block_size, meta.n_kv_heads, meta.head_dim],
+            );
+            // [visible_len, H, D] — drop trimmed prefix and trailing padding.
+            let window = ffi::slice(
+                &flat,
+                &[logical_start, 0, 0],
+                &[len, meta.n_kv_heads, meta.head_dim],
+            );
+            // [1, visible_len, H, D]
+            let batched = ffi::reshape(
+                &window,
+                &[1, len - logical_start, meta.n_kv_heads, meta.head_dim],
+            );
+            // [1, H, visible_len, D]
+            ffi::transpose_axes(&batched, &[0, 2, 1, 3])
+        };
+
+        Ok(Some((gather(pool_k), gather(pool_v))))
+    }
+
+    /// Sum of every allocated physical main-K/V pool tensor (K and V, all
+    /// layers). Additive to the layout-derived scheduling budgets in
+    /// `reserved_bytes`/`used_bytes`, which are unchanged.
+    ///
+    /// Used by: `CachePool::memory_usage_bytes` to reflect the true pool
+    /// footprint once the live writer is wired (#120).
+    pub fn pool_tensor_bytes(&self) -> usize {
+        let sum = |pools: &[Option<UniquePtr<MlxArray>>]| -> usize {
+            pools
+                .iter()
+                .filter_map(|p| p.as_ref())
+                .map(|a| ffi::array_nbytes(a))
+                .sum()
+        };
+        sum(&self.pool_k) + sum(&self.pool_v)
+    }
+
+    /// Resolve the physical pool row for `block_id` on `layer_idx`, assigning
+    /// one lazily on first write (reusing a freed row when available) and
+    /// growing the pool tensors if the new row exceeds capacity.
+    fn assign_row(&mut self, block_id: PagedBlockId, layer_idx: usize) -> Result<usize, String> {
+        if let Some(&row) = self.block_rows[layer_idx].get(&block_id) {
+            return Ok(row);
+        }
+        let row = match self.free_rows[layer_idx].pop() {
+            Some(row) => row,
+            None => {
+                let row = self.next_row[layer_idx];
+                self.next_row[layer_idx] += 1;
+                row
+            }
+        };
+        if row
+            >= self.pool_meta[layer_idx]
+                .map(|m| m.capacity_blocks)
+                .unwrap_or(0)
+        {
+            self.grow_pool(layer_idx, row + 1)?;
+        }
+        self.block_rows[layer_idx].insert(block_id, row);
+        Ok(row)
+    }
+
+    /// Grow the layer's K and V pool tensors so they hold at least
+    /// `min_capacity` rows, rounding up to the next [`POOL_GROW_CHUNK_BLOCKS`]
+    /// multiple. Existing rows are copied into the larger buffer via
+    /// `slice_update`.
+    fn grow_pool(&mut self, layer_idx: usize, min_capacity: usize) -> Result<(), String> {
+        let meta = self.pool_meta[layer_idx].ok_or_else(|| {
+            format!("PagedBlockPool::grow_pool: layer {layer_idx} has no pool tensors")
+        })?;
+        if min_capacity <= meta.capacity_blocks {
+            return Ok(());
+        }
+        let new_capacity = min_capacity
+            .div_ceil(POOL_GROW_CHUNK_BLOCKS)
+            .saturating_mul(POOL_GROW_CHUNK_BLOCKS)
+            .max(POOL_GROW_CHUNK_BLOCKS);
+        let block_size = self.layout.block_size as i32;
+        let new_shape = [
+            new_capacity as i32,
+            block_size,
+            meta.n_kv_heads,
+            meta.head_dim,
+        ];
+        let copy_stops = [
+            meta.capacity_blocks as i32,
+            block_size,
+            meta.n_kv_heads,
+            meta.head_dim,
+        ];
+        let starts = [0, 0, 0, 0];
+
+        let old_k = self.pool_k[layer_idx]
+            .take()
+            .expect("pool_k present when meta present");
+        let mut new_k = ffi::zeros(&new_shape, meta.dtype);
+        new_k = ffi::slice_update(&new_k, &old_k, &starts, &copy_stops);
+        self.pool_k[layer_idx] = Some(new_k);
+
+        let old_v = self.pool_v[layer_idx]
+            .take()
+            .expect("pool_v present when meta present");
+        let mut new_v = ffi::zeros(&new_shape, meta.dtype);
+        new_v = ffi::slice_update(&new_v, &old_v, &starts, &copy_stops);
+        self.pool_v[layer_idx] = Some(new_v);
+
+        self.pool_meta[layer_idx] = Some(PagedPoolMeta {
+            capacity_blocks: new_capacity,
+            ..meta
+        });
+        Ok(())
+    }
+
     fn assert_turbo_mode(&self, op: &str) -> Result<(), String> {
         if !self.layout.is_turbo_mode() {
             return Err(format!(
@@ -880,5 +1245,37 @@ impl PagedBlockPool {
             ));
         }
         Ok(())
+    }
+}
+
+/// Normalize a write block into the layout-A slot update shape
+/// `[1, n_slots, n_kv_heads, head_dim]` and return its geometry
+/// `(n_slots, n_kv_heads, head_dim)`.
+///
+/// Accepts either the SDPA-style `[1, n_kv_heads, n_slots, head_dim]` (4D) or
+/// the bare layout-A `[n_slots, n_kv_heads, head_dim]` (3D). No dtype
+/// conversion is performed: `reshape`/`transpose_axes` preserve dtype, so an
+/// FP16 block stays FP16 and an INT8 block stays INT8.
+fn normalize_block_for_layout_a(block: &MlxArray, label: &str) -> Result<NormalizedBlock, String> {
+    let shape = ffi::array_shape(block);
+    match shape.as_slice() {
+        // [1, n_kv_heads, n_slots, head_dim] -> [1, n_slots, n_kv_heads, head_dim]
+        [batch, n_kv_heads, n_slots, head_dim] => {
+            if *batch != 1 {
+                return Err(format!(
+                    "PagedBlockPool::write_block: {label} 4D batch dim must be 1, got {batch} (shape {shape:?})"
+                ));
+            }
+            let slot = ffi::transpose_axes(block, &[0, 2, 1, 3]);
+            Ok((slot, (*n_slots, *n_kv_heads, *head_dim)))
+        }
+        // [n_slots, n_kv_heads, head_dim] -> [1, n_slots, n_kv_heads, head_dim]
+        [n_slots, n_kv_heads, head_dim] => {
+            let slot = ffi::reshape(block, &[1, *n_slots, *n_kv_heads, *head_dim]);
+            Ok((slot, (*n_slots, *n_kv_heads, *head_dim)))
+        }
+        _ => Err(format!(
+            "PagedBlockPool::write_block: {label} must be [1, n_kv_heads, n_slots, head_dim] or [n_slots, n_kv_heads, head_dim], got shape {shape:?}"
+        )),
     }
 }
