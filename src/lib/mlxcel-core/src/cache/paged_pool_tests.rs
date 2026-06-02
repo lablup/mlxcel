@@ -22,6 +22,7 @@
 //! 3. Partial final block gathers exactly `visible_len` tokens (no padding).
 //! 4. `logical_start > 0` (post-trim) gathers the correct visible window.
 //! 5. INT8 main K/V round-trips byte-identically (dtype preserved, no astype).
+//! 5b. FP16 main K/V round-trips byte-identically (dtype preserved, no astype).
 //! 6. `release_block` to refcount 0 frees and recycles a row with fresh data.
 //! 7. `pool_tensor_bytes` reflects allocated pool tensors.
 //! 8. Turbo4 sidecars coexist with main-K/V rows.
@@ -398,6 +399,73 @@ fn int8_main_kv_round_trips_byte_identically() {
     dense_v = ffi::slice_update(
         &dense_v,
         &make_int8_block(-40, 4),
+        &[0, 0, 4, 0],
+        &[1, H, 8, D],
+    );
+    assert_eq!(raw_bytes(&gv), raw_bytes(&dense_v));
+}
+
+// ---------------------------------------------------------------------------
+// 5b. FP16 main K/V round-trips byte-identically (dtype preserved, no astype)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn fp16_main_kv_round_trips_byte_identically() {
+    // Build FP16 blocks by casting FP32 data through astype.  FP16 is exact
+    // through pure data-movement ops (take/reshape/slice/transpose), so a
+    // raw-byte comparison is meaningful and proves no silent dtype coercion.
+    let block_size = 4usize;
+    let mut pool = fp16_pool(block_size, 1);
+    let mut state = PagedSequenceState::new(pool.layout());
+
+    pool.append_tokens(&mut state, 0, 8).unwrap(); // 2 blocks
+    let ids = state.layer(0).unwrap().block_ids.clone();
+
+    // Create FP16 blocks by casting known FP32 data.
+    let k0 = ffi::astype(&make_block(1.0, 4), dtype::FLOAT16);
+    let v0 = ffi::astype(&make_block(50.0, 4), dtype::FLOAT16);
+    let k1 = ffi::astype(&make_block(100.0, 4), dtype::FLOAT16);
+    let v1 = ffi::astype(&make_block(150.0, 4), dtype::FLOAT16);
+
+    pool.write_block(ids[0], 0, 0, &k0, &v0).unwrap();
+    pool.write_block(ids[1], 0, 0, &k1, &v1).unwrap();
+
+    let (gk, gv) = pool
+        .gather_visible(&state, 0)
+        .unwrap()
+        .expect("gather must return data");
+
+    // dtype must remain FLOAT16 — no astype coercion on the K/V path.
+    assert_eq!(ffi::array_dtype(&gk), dtype::FLOAT16);
+    assert_eq!(ffi::array_dtype(&gv), dtype::FLOAT16);
+    assert_eq!(ffi::array_shape(&gk), vec![1, H, 8, D]);
+
+    // Byte-identity vs a dense FP16 reference built the same way.
+    let mut dense_k = ffi::zeros(&[1, H, 8, D], dtype::FLOAT16);
+    dense_k = ffi::slice_update(
+        &dense_k,
+        &ffi::astype(&make_block(1.0, 4), dtype::FLOAT16),
+        &[0, 0, 0, 0],
+        &[1, H, 4, D],
+    );
+    dense_k = ffi::slice_update(
+        &dense_k,
+        &ffi::astype(&make_block(100.0, 4), dtype::FLOAT16),
+        &[0, 0, 4, 0],
+        &[1, H, 8, D],
+    );
+    assert_eq!(raw_bytes(&gk), raw_bytes(&dense_k));
+
+    let mut dense_v = ffi::zeros(&[1, H, 8, D], dtype::FLOAT16);
+    dense_v = ffi::slice_update(
+        &dense_v,
+        &ffi::astype(&make_block(50.0, 4), dtype::FLOAT16),
+        &[0, 0, 0, 0],
+        &[1, H, 4, D],
+    );
+    dense_v = ffi::slice_update(
+        &dense_v,
+        &ffi::astype(&make_block(150.0, 4), dtype::FLOAT16),
         &[0, 0, 4, 0],
         &[1, H, 8, D],
     );
