@@ -321,6 +321,440 @@ fn test_paged_decode_attention_rotating_compat_matches_fallback_after_wrap() {
     assert!(item_bool(&close));
 }
 
+// ---------------------------------------------------------------------------
+// Pooled paged decode (#119): parity vs the dense fallback baseline.
+//
+// `paged_decode_attention_pooled_fallback` gathers each sequence's visible K/V
+// from a `PagedBlockPool` (real, possibly fragmented physical block tables),
+// whereas `paged_decode_attention_dense_fallback` slices contiguous dense
+// buffers with identity metadata. Both feed the same fused SDPA, so for
+// identical K/V/q values the two outputs must match tightly. FP32 K/V/q is used
+// so the gather (pure take/reshape/slice/transpose) and the dense slice/concat
+// stay bit-exact and the only residual delta is SDPA float ordering.
+// ---------------------------------------------------------------------------
+
+/// Deterministic, seed-varying FP32 values in roughly `[-1, 1]`. Avoids an RNG
+/// dependency while giving every decode step a fresh, non-degenerate q/k/v.
+fn pooled_pseudo_f32(seed: u64, n: usize) -> Vec<f32> {
+    let mut s = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15).wrapping_add(1);
+    let mut out = Vec::with_capacity(n);
+    for _ in 0..n {
+        // xorshift64* step.
+        s ^= s >> 12;
+        s ^= s << 25;
+        s ^= s >> 27;
+        let bits = s.wrapping_mul(0x2545_F491_4F6C_DD1D);
+        // Map the top 24 bits to [-1, 1).
+        let unit = ((bits >> 40) as f32) / ((1u64 << 24) as f32); // [0, 1)
+        out.push(unit * 2.0 - 1.0);
+    }
+    out
+}
+
+/// Root-mean-square of the element-wise difference of two equal-length slices.
+fn pooled_rms(a: &[f32], b: &[f32]) -> f32 {
+    assert_eq!(a.len(), b.len(), "RMS operands must be equal length");
+    let sum_sq: f64 = a
+        .iter()
+        .zip(b.iter())
+        .map(|(x, y)| {
+            let d = (*x - *y) as f64;
+            d * d
+        })
+        .sum();
+    (sum_sq / a.len() as f64).sqrt() as f32
+}
+
+/// A `PagedKvLayout` whose per-block byte budget is a positive placeholder; the
+/// real geometry is inferred from the first written block.
+fn pooled_layout(
+    block_size: usize,
+    num_layers: usize,
+    n_kv_heads: i32,
+    head_dim: i32,
+) -> crate::cache::PagedKvLayout {
+    crate::cache::PagedKvLayout::uniform(
+        num_layers,
+        block_size,
+        block_size * n_kv_heads as usize * head_dim as usize * 2,
+    )
+    .unwrap()
+}
+
+/// 200-step decode acceptance test (issue #119 / epic #116 acceptance criterion).
+///
+/// Maintains one sequence in lockstep in (i) a `PagedBlockPool` and (ii) a
+/// contiguous dense `[1, H, T, D]` buffer, forcing the pool sequence onto
+/// NON-CONTIGUOUS physical rows by interleaving a spacer sequence's block
+/// writes between the target's. Each step appends one fresh token's K/V to both
+/// stores, picks a fresh pseudo-random `q [1, H, 1, D]`, runs the pooled and
+/// dense fallbacks, and asserts the RMS of their outputs stays < 5e-3.
+#[test]
+fn test_pooled_paged_decode_matches_dense_over_200_steps() {
+    use crate::cache::{PagedBlockPool, PagedSequenceState};
+
+    const STEPS: usize = 200;
+    let n_kv_heads: i32 = 4;
+    let head_dim: i32 = 8;
+    let block_size = 4usize;
+    let layer_idx = 0usize;
+    let scale = 1.0f32 / (head_dim as f32).sqrt();
+
+    let mut pool = PagedBlockPool::new(pooled_layout(block_size, 1, n_kv_heads, head_dim));
+    let mut target = PagedSequenceState::new(pool.layout());
+    // Spacer sequence: its block writes are interleaved between the target's so
+    // the target's physical rows (assigned in first-write order) are scattered.
+    let mut spacer = PagedSequenceState::new(pool.layout());
+
+    // Growing dense reference buffer `[1, H, T, D]`, rebuilt each step at the
+    // exact visible length so the dense fallback's identity metadata lines up.
+    let mut dense_k: Option<UniquePtr<MlxArray>> = None;
+    let mut dense_v: Option<UniquePtr<MlxArray>> = None;
+
+    let mut max_rms = 0.0f32;
+    let mut prev_blocks = 0usize;
+
+    for step in 0..STEPS {
+        let t = step as i32; // logical token index being appended
+        let visible_len = t + 1;
+
+        // --- grow the pooled target by one token ---
+        pool.append_tokens(&mut target, layer_idx, 1).unwrap();
+        let block_ids = target.layer(layer_idx).unwrap().block_ids.clone();
+
+        // On every NEW target block boundary, first write a full spacer block so
+        // the spacer claims the next physical row, fragmenting the target rows.
+        if block_ids.len() > prev_blocks {
+            pool.append_tokens(&mut spacer, layer_idx, block_size)
+                .unwrap();
+            let spacer_ids = spacer.layer(layer_idx).unwrap().block_ids.clone();
+            let spacer_block = *spacer_ids.last().unwrap();
+            let spacer_seed = 0xCAFE_u64.wrapping_add(step as u64);
+            let sk = from_slice_f32(
+                &pooled_pseudo_f32(
+                    spacer_seed,
+                    (n_kv_heads * block_size as i32 * head_dim) as usize,
+                ),
+                &[1, n_kv_heads, block_size as i32, head_dim],
+            );
+            let sv = from_slice_f32(
+                &pooled_pseudo_f32(
+                    spacer_seed.wrapping_mul(3),
+                    (n_kv_heads * block_size as i32 * head_dim) as usize,
+                ),
+                &[1, n_kv_heads, block_size as i32, head_dim],
+            );
+            pool.write_block(spacer_block, layer_idx, 0, &sk, &sv)
+                .unwrap();
+            prev_blocks = block_ids.len();
+        }
+
+        // Write the target's single new token into its (last) block / slot.
+        let slot = (t as usize) % block_size;
+        let block_index = (t as usize) / block_size;
+        let target_block = block_ids[block_index];
+        let k_tok_vals = pooled_pseudo_f32(step as u64 + 1, (n_kv_heads * head_dim) as usize);
+        let v_tok_vals = pooled_pseudo_f32(
+            (step as u64 + 1).wrapping_mul(7),
+            (n_kv_heads * head_dim) as usize,
+        );
+        let k_tok = from_slice_f32(&k_tok_vals, &[1, n_kv_heads, 1, head_dim]);
+        let v_tok = from_slice_f32(&v_tok_vals, &[1, n_kv_heads, 1, head_dim]);
+        pool.write_block(target_block, layer_idx, slot, &k_tok, &v_tok)
+            .unwrap();
+
+        // --- grow the dense reference identically ---
+        dense_k = Some(match dense_k.take() {
+            None => k_tok,
+            Some(prev) => concatenate(&prev, &k_tok, 2),
+        });
+        dense_v = Some(match dense_v.take() {
+            None => v_tok,
+            Some(prev) => concatenate(&prev, &v_tok, 2),
+        });
+        let dk = dense_k.as_ref().unwrap();
+        let dv = dense_v.as_ref().unwrap();
+        assert_eq!(array_shape(dk), vec![1, n_kv_heads, visible_len, head_dim]);
+
+        // --- fresh query for this step ---
+        let q_vals = pooled_pseudo_f32(
+            (step as u64).wrapping_mul(0x1000_0001) + 13,
+            (n_kv_heads * head_dim) as usize,
+        );
+        let q = from_slice_f32(&q_vals, &[1, n_kv_heads, 1, head_dim]);
+
+        // --- pooled path ---
+        let states: [&PagedSequenceState; 1] = [&target];
+        let pooled_out = crate::layers::paged_decode_attention_pooled_fallback(
+            &q, &pool, &states, layer_idx, scale,
+        )
+        .unwrap();
+
+        // --- dense fallback (identity block table) ---
+        let metadata = crate::cache::PagedDecodeMetadata::from_visible_lengths(
+            &[visible_len],
+            block_size as i32,
+        )
+        .unwrap();
+        let cache_keys = vec![dk.as_ref().unwrap() as *const MlxArray];
+        let cache_values = vec![dv.as_ref().unwrap() as *const MlxArray];
+        let dense_out = crate::layers::paged_decode_attention_dense_fallback(
+            &q,
+            &cache_keys,
+            &cache_values,
+            &metadata,
+            scale,
+        )
+        .unwrap();
+
+        let p = flatten_f32_local(&pooled_out);
+        let d = flatten_f32_local(&dense_out);
+        let rms = pooled_rms(&p, &d);
+        assert!(
+            rms < 5e-3,
+            "step {step}: pooled vs dense RMS {rms} exceeded 5e-3"
+        );
+        max_rms = max_rms.max(rms);
+    }
+
+    // The target eventually spans ceil(200/4) = 50 blocks; assert its block ids
+    // are NON-CONTIGUOUS (spacer ids interleaved), which - since the pool
+    // assigns physical rows in first-write order - means the target's physical
+    // pool rows are genuinely fragmented, not a dense ascending run.
+    let target_ids = target.layer(layer_idx).unwrap().block_ids.clone();
+    assert_eq!(target_ids.len(), 50, "expected 50 target blocks");
+    let raws: Vec<u64> = target_ids.iter().map(|id| id.as_u64()).collect();
+    let min = *raws.iter().min().unwrap();
+    let max = *raws.iter().max().unwrap();
+    assert!(
+        (max - min + 1) as usize > raws.len(),
+        "target block ids {raws:?} are contiguous - fragmentation was not forced"
+    );
+
+    // Sanity: the run actually exercised a meaningful number of steps and the
+    // worst-case RMS is reported for the implementation summary.
+    assert!(
+        max_rms < 5e-3,
+        "max RMS {max_rms} over 200 steps exceeded 5e-3"
+    );
+    println!("test_pooled_paged_decode_matches_dense_over_200_steps: max RMS = {max_rms:e}");
+}
+
+/// Sliding-window parity: a sequence with `logical_start > 0` (post-trim) must
+/// gather/decode exactly the visible window and match the dense reference of
+/// just that window.
+#[test]
+fn test_pooled_paged_decode_sliding_window_via_logical_start() {
+    use crate::cache::{PagedBlockPool, PagedSequenceState};
+
+    let n_kv_heads: i32 = 4;
+    let head_dim: i32 = 8;
+    let block_size = 4usize;
+    let layer_idx = 0usize;
+    let scale = 1.0f32 / (head_dim as f32).sqrt();
+
+    let mut pool = PagedBlockPool::new(pooled_layout(block_size, 1, n_kv_heads, head_dim));
+    let mut state = PagedSequenceState::new(pool.layout());
+
+    // 12 tokens => 3 full blocks. Write each token with distinct pseudo-random
+    // K/V and keep a parallel dense `[1, H, 12, D]` buffer.
+    let total = 12i32;
+    let mut dense_k: Option<UniquePtr<MlxArray>> = None;
+    let mut dense_v: Option<UniquePtr<MlxArray>> = None;
+    for t in 0..total {
+        pool.append_tokens(&mut state, layer_idx, 1).unwrap();
+        let block_ids = state.layer(layer_idx).unwrap().block_ids.clone();
+        let slot = (t as usize) % block_size;
+        let block_index = (t as usize) / block_size;
+        let k_tok = from_slice_f32(
+            &pooled_pseudo_f32(t as u64 + 100, (n_kv_heads * head_dim) as usize),
+            &[1, n_kv_heads, 1, head_dim],
+        );
+        let v_tok = from_slice_f32(
+            &pooled_pseudo_f32(
+                (t as u64 + 100).wrapping_mul(11),
+                (n_kv_heads * head_dim) as usize,
+            ),
+            &[1, n_kv_heads, 1, head_dim],
+        );
+        pool.write_block(block_ids[block_index], layer_idx, slot, &k_tok, &v_tok)
+            .unwrap();
+        dense_k = Some(match dense_k.take() {
+            None => k_tok,
+            Some(prev) => concatenate(&prev, &k_tok, 2),
+        });
+        dense_v = Some(match dense_v.take() {
+            None => v_tok,
+            Some(prev) => concatenate(&prev, &v_tok, 2),
+        });
+    }
+
+    // Slide the window forward by 5 tokens (as `trim_tokens` would after a
+    // sliding-window eviction): visible window is now [5, 12) = 7 tokens.
+    let window_start = 5i32;
+    state.layer_mut(layer_idx).unwrap().logical_start = window_start as usize;
+    assert_eq!(state.layer(layer_idx).unwrap().visible_len(), 7);
+
+    let q = from_slice_f32(
+        &pooled_pseudo_f32(9999, (n_kv_heads * head_dim) as usize),
+        &[1, n_kv_heads, 1, head_dim],
+    );
+
+    // Pooled path gathers the [5, 12) window from the pool.
+    let states: [&PagedSequenceState; 1] = [&state];
+    let pooled_out =
+        crate::layers::paged_decode_attention_pooled_fallback(&q, &pool, &states, layer_idx, scale)
+            .unwrap();
+
+    // Dense reference: slice the full dense buffer to the visible window and run
+    // the dense fallback over just those 7 tokens with identity metadata.
+    let dk = dense_k.as_ref().unwrap();
+    let dv = dense_v.as_ref().unwrap();
+    let window_k = slice(
+        dk,
+        &[0, 0, window_start, 0],
+        &[1, n_kv_heads, total, head_dim],
+    );
+    let window_v = slice(
+        dv,
+        &[0, 0, window_start, 0],
+        &[1, n_kv_heads, total, head_dim],
+    );
+    let visible_len = total - window_start;
+    let metadata =
+        crate::cache::PagedDecodeMetadata::from_visible_lengths(&[visible_len], block_size as i32)
+            .unwrap();
+    let cache_keys = vec![window_k.as_ref().unwrap() as *const MlxArray];
+    let cache_values = vec![window_v.as_ref().unwrap() as *const MlxArray];
+    let dense_out = crate::layers::paged_decode_attention_dense_fallback(
+        &q,
+        &cache_keys,
+        &cache_values,
+        &metadata,
+        scale,
+    )
+    .unwrap();
+
+    let rms = pooled_rms(
+        &flatten_f32_local(&pooled_out),
+        &flatten_f32_local(&dense_out),
+    );
+    assert!(
+        rms < 5e-3,
+        "sliding-window pooled vs dense RMS {rms} exceeded 5e-3"
+    );
+}
+
+/// Batch parity: a 2-sequence batch with different kv_lens, pooled vs dense,
+/// exercising the batch-concat tail of both fallbacks.
+#[test]
+fn test_pooled_paged_decode_batch_of_two() {
+    use crate::cache::{PagedBlockPool, PagedSequenceState};
+
+    let n_kv_heads: i32 = 4;
+    let head_dim: i32 = 8;
+    let block_size = 4usize;
+    let layer_idx = 0usize;
+    let scale = 1.0f32 / (head_dim as f32).sqrt();
+
+    let mut pool = PagedBlockPool::new(pooled_layout(block_size, 1, n_kv_heads, head_dim));
+
+    // Two sequences with different visible lengths (9 and 6 tokens). Build both
+    // in the pool and a dense buffer each.
+    let lens = [9i32, 6i32];
+    let mut states_owned: Vec<PagedSequenceState> = Vec::new();
+    let mut dense_ks: Vec<UniquePtr<MlxArray>> = Vec::new();
+    let mut dense_vs: Vec<UniquePtr<MlxArray>> = Vec::new();
+
+    for (seq, &len) in lens.iter().enumerate() {
+        let mut state = PagedSequenceState::new(pool.layout());
+        let mut dk: Option<UniquePtr<MlxArray>> = None;
+        let mut dv: Option<UniquePtr<MlxArray>> = None;
+        for t in 0..len {
+            pool.append_tokens(&mut state, layer_idx, 1).unwrap();
+            let block_ids = state.layer(layer_idx).unwrap().block_ids.clone();
+            let slot = (t as usize) % block_size;
+            let block_index = (t as usize) / block_size;
+            let seed = (seq as u64 + 1) * 1000 + t as u64;
+            let k_tok = from_slice_f32(
+                &pooled_pseudo_f32(seed, (n_kv_heads * head_dim) as usize),
+                &[1, n_kv_heads, 1, head_dim],
+            );
+            let v_tok = from_slice_f32(
+                &pooled_pseudo_f32(seed.wrapping_mul(13), (n_kv_heads * head_dim) as usize),
+                &[1, n_kv_heads, 1, head_dim],
+            );
+            pool.write_block(block_ids[block_index], layer_idx, slot, &k_tok, &v_tok)
+                .unwrap();
+            dk = Some(match dk.take() {
+                None => k_tok,
+                Some(prev) => concatenate(&prev, &k_tok, 2),
+            });
+            dv = Some(match dv.take() {
+                None => v_tok,
+                Some(prev) => concatenate(&prev, &v_tok, 2),
+            });
+        }
+        states_owned.push(state);
+        dense_ks.push(dk.unwrap());
+        dense_vs.push(dv.unwrap());
+    }
+
+    // Batched query `[2, H, 1, D]`.
+    let q = from_slice_f32(
+        &pooled_pseudo_f32(424242, (2 * n_kv_heads * head_dim) as usize),
+        &[2, n_kv_heads, 1, head_dim],
+    );
+
+    // Pooled path over both sequences.
+    let states: Vec<&PagedSequenceState> = states_owned.iter().collect();
+    let pooled_out =
+        crate::layers::paged_decode_attention_pooled_fallback(&q, &pool, &states, layer_idx, scale)
+            .unwrap();
+    assert_eq!(array_shape(&pooled_out), vec![2, n_kv_heads, 1, head_dim]);
+
+    // Dense fallback over the two dense buffers with identity metadata.
+    let metadata =
+        crate::cache::PagedDecodeMetadata::from_visible_lengths(&lens, block_size as i32).unwrap();
+    let cache_keys = vec![
+        dense_ks[0].as_ref().unwrap() as *const MlxArray,
+        dense_ks[1].as_ref().unwrap() as *const MlxArray,
+    ];
+    let cache_values = vec![
+        dense_vs[0].as_ref().unwrap() as *const MlxArray,
+        dense_vs[1].as_ref().unwrap() as *const MlxArray,
+    ];
+    let dense_out = crate::layers::paged_decode_attention_dense_fallback(
+        &q,
+        &cache_keys,
+        &cache_values,
+        &metadata,
+        scale,
+    )
+    .unwrap();
+
+    let rms = pooled_rms(
+        &flatten_f32_local(&pooled_out),
+        &flatten_f32_local(&dense_out),
+    );
+    assert!(
+        rms < 5e-3,
+        "batch-of-two pooled vs dense RMS {rms} exceeded 5e-3"
+    );
+}
+
+/// Flatten any tensor to a row-major `Vec<f32>` (after an FP32 cast). Local to
+/// these pooled tests; mirrors the pool-test `flatten_fp32` helper.
+fn flatten_f32_local(arr: &MlxArray) -> Vec<f32> {
+    let a = astype(arr, dtype::FLOAT32);
+    eval(&a);
+    let bytes = array_to_raw_bytes(&a);
+    bytes
+        .chunks_exact(4)
+        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+        .collect()
+}
+
 #[test]
 fn test_rms_norm() {
     let x = ones(&[1, 4], dtype::FLOAT32);

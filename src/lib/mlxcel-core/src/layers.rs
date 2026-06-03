@@ -2347,6 +2347,121 @@ pub fn paged_decode_attention_dense_fallback(
     Ok(result)
 }
 
+fn validate_pooled_paged_decode_inputs(
+    q: &MlxArray,
+    states: &[&crate::cache::PagedSequenceState],
+) -> Result<(), String> {
+    let q_shape = ffi::array_shape(q);
+    if q_shape.len() != 4 {
+        return Err(format!(
+            "pooled paged decode attention expected q rank 4, got shape {:?}",
+            q_shape
+        ));
+    }
+    if q_shape[2] != 1 {
+        return Err(format!(
+            "pooled paged decode attention only supports decode-only q_len == 1, got {}",
+            q_shape[2]
+        ));
+    }
+
+    let batch = q_shape[0].max(0) as usize;
+    if states.len() != batch {
+        return Err(format!(
+            "pooled paged decode attention expected {batch} sequence states, got {}",
+            states.len()
+        ));
+    }
+
+    Ok(())
+}
+
+/// Reference paged decode path that gathers K/V from the [`PagedBlockPool`].
+///
+/// This is the Phase 2 (#119) pooled read path of the unified paged KV cache
+/// (epic #116). It is the pooled analogue of [`paged_decode_attention_dense_fallback`],
+/// which stays the live decode path and the parity baseline this function is
+/// validated against. The two differ only in where the per-sequence visible
+/// K/V comes from: the dense fallback slices contiguous dense compatibility
+/// buffers, while this function calls [`crate::cache::PagedBlockPool::gather_visible`]
+/// to pull each sequence's physical blocks out of the pool by block-table order.
+/// Everything downstream — the per-batch `q` slice, the fused SDPA dispatch via
+/// [`attention_from_ptr`], and the axis-0 batch concat — is identical.
+///
+/// Per ADR 0001 (`docs/adr/0001-paged-attention-gather-vs-fused-kernel.md`) this
+/// is strategy option A, *gather-then-SDPA*: `gather_visible` builds a
+/// `take`/`reshape`/`transpose` MLX graph that MLX fuses into the fused-SDPA
+/// read, so the scattered-block gather adds no separate full-copy of the
+/// sequence KV at the common context lengths. The fused Metal paged-attention
+/// kernel (option B) is deferred to #123; this Rust path remains its correctness
+/// reference and fallback. Live model routing onto this path is #121 (it needs
+/// the pool to be populated by the #120 prefill writer and routed by the #121
+/// scheduler), so this function is additive machinery and the live decode path
+/// is unchanged until then.
+///
+/// The path handles full-attention and sliding-window sequences uniformly. In
+/// the paged model there is no ring-buffer wrap: the visible window is encoded
+/// entirely in the per-sequence block table plus `logical_start` (which
+/// `trim_tokens` advances as the window slides), so `gather_visible` returns
+/// exactly the `[logical_start, len)` window already shaped
+/// `[1, n_kv_heads, visible_len, head_dim]` (SDPA-ready). That is why there is
+/// no separate "rotating" pooled variant mirroring
+/// [`paged_decode_attention_rotating_fallback`].
+///
+/// `gather_visible` returning `Ok(None)` (no visible tokens, or the layer has no
+/// pool storage yet) is treated as an error here, because decode requires a
+/// non-empty visible window — the pooled analogue of the dense fallback's
+/// `kv_len > 0` precondition.
+pub fn paged_decode_attention_pooled_fallback(
+    q: &MlxArray,
+    pool: &crate::cache::PagedBlockPool,
+    states: &[&crate::cache::PagedSequenceState],
+    layer_idx: usize,
+    scale: f32,
+) -> Result<UniquePtr<MlxArray>, String> {
+    validate_pooled_paged_decode_inputs(q, states)?;
+
+    let q_shape = ffi::array_shape(q);
+    let batch = q_shape[0].max(0) as usize;
+    let mut outputs: Vec<UniquePtr<MlxArray>> = Vec::with_capacity(batch);
+
+    for (batch_idx, state) in states.iter().enumerate() {
+        let q_i = ffi::slice(
+            q,
+            &[batch_idx as i32, 0, 0, 0],
+            &[batch_idx as i32 + 1, i32::MAX, 1, i32::MAX],
+        );
+
+        let (key_visible, value_visible) =
+            pool.gather_visible(state, layer_idx)?.ok_or_else(|| {
+                format!(
+                    "pooled paged decode requires visible tokens for batch index {batch_idx} on layer {layer_idx}, but the pool gathered none"
+                )
+            })?;
+
+        outputs.push(unsafe {
+            attention_from_ptr(
+                &q_i,
+                &key_visible,
+                &value_visible,
+                scale,
+                std::ptr::null(),
+                0.0,
+                0,
+            )
+        });
+    }
+
+    let mut result = outputs
+        .drain(..1)
+        .next()
+        .ok_or_else(|| "pooled paged decode fallback received an empty batch".to_string())?;
+    for output in outputs {
+        result = crate::concatenate(&result, &output, 0);
+    }
+    Ok(result)
+}
+
 /// Native paged decode path over dense compatibility KV caches.
 ///
 /// The C++ bridge consumes the logical block table metadata and performs the
