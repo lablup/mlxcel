@@ -743,6 +743,172 @@ fn test_pooled_paged_decode_batch_of_two() {
     );
 }
 
+/// End-to-end prefill -> decode parity (#120 acceptance criterion 1).
+///
+/// Writes a T-token prompt into the pool via the BULK `write_prefill` writer
+/// (the #120 path) and into a parallel dense `[1, H, T, D]` buffer, then runs N
+/// decode steps appending one fresh token to each store (pool via `write_block`,
+/// dense via concat) and compares the pooled vs dense fallback attention each
+/// step. This proves prefill-write + decode-read is end-to-end correct: the
+/// bulk prefill must store K/V byte-identically to the dense prefill so the
+/// gather-then-SDPA decode matches the dense-slice decode. The pooled sequence
+/// is forced onto NON-CONTIGUOUS physical rows by a spacer so the gather
+/// genuinely reorders fragmented blocks.
+#[test]
+fn test_pooled_prefill_then_decode_matches_dense() {
+    use crate::cache::{PagedBlockPool, PagedSequenceState};
+
+    const PROMPT: i32 = 13; // non-block-aligned prompt (spans 4 blocks @ bs 4)
+    const STEPS: usize = 24; // >= 20 decode steps
+    let n_kv_heads: i32 = 4;
+    let head_dim: i32 = 8;
+    let block_size = 4usize;
+    let layer_idx = 0usize;
+    let scale = 1.0f32 / (head_dim as f32).sqrt();
+
+    let mut pool = PagedBlockPool::new(pooled_layout(block_size, 1, n_kv_heads, head_dim));
+    let mut target = PagedSequenceState::new(pool.layout());
+    // Spacer claims a physical row up front so the target's prefill blocks are
+    // not a dense ascending run.
+    let mut spacer = PagedSequenceState::new(pool.layout());
+    pool.append_tokens(&mut spacer, layer_idx, block_size)
+        .unwrap();
+    {
+        let spacer_block = *spacer.layer(layer_idx).unwrap().block_ids.last().unwrap();
+        let sk = from_slice_f32(
+            &pooled_pseudo_f32(0xABCD, (n_kv_heads * block_size as i32 * head_dim) as usize),
+            &[1, n_kv_heads, block_size as i32, head_dim],
+        );
+        let sv = from_slice_f32(
+            &pooled_pseudo_f32(0xDCBA, (n_kv_heads * block_size as i32 * head_dim) as usize),
+            &[1, n_kv_heads, block_size as i32, head_dim],
+        );
+        pool.write_block(spacer_block, layer_idx, 0, &sk, &sv)
+            .unwrap();
+    }
+
+    // Build the prompt as one [1, H, PROMPT, D] prefill tensor (and an identical
+    // dense buffer) by concatenating per-token K/V along axis 2.
+    let mut dense_k: Option<UniquePtr<MlxArray>> = None;
+    let mut dense_v: Option<UniquePtr<MlxArray>> = None;
+    for t in 0..PROMPT {
+        let kt = from_slice_f32(
+            &pooled_pseudo_f32(t as u64 + 7, (n_kv_heads * head_dim) as usize),
+            &[1, n_kv_heads, 1, head_dim],
+        );
+        let vt = from_slice_f32(
+            &pooled_pseudo_f32(
+                (t as u64 + 7).wrapping_mul(5),
+                (n_kv_heads * head_dim) as usize,
+            ),
+            &[1, n_kv_heads, 1, head_dim],
+        );
+        dense_k = Some(match dense_k.take() {
+            None => kt,
+            Some(prev) => concatenate(&prev, &kt, 2),
+        });
+        dense_v = Some(match dense_v.take() {
+            None => vt,
+            Some(prev) => concatenate(&prev, &vt, 2),
+        });
+    }
+    assert_eq!(
+        array_shape(dense_k.as_ref().unwrap()),
+        vec![1, n_kv_heads, PROMPT, head_dim]
+    );
+
+    // BULK prefill write into the pool (the #120 path). The dense buffers double
+    // as the prefill input here — passed by reference, they keep growing as the
+    // dense decode reference below.
+    pool.write_prefill(
+        &mut target,
+        layer_idx,
+        dense_k.as_ref().unwrap(),
+        dense_v.as_ref().unwrap(),
+    )
+    .unwrap();
+    assert_eq!(target.layer(layer_idx).unwrap().len, PROMPT as usize);
+    // Prefill spanned ceil(13/4)=4 blocks; the spacer holds row 0, so the
+    // target's physical rows start at 1 (fragmented relative to a 0-based run).
+    assert_eq!(target.layer(layer_idx).unwrap().block_ids.len(), 4);
+
+    let mut max_rms = 0.0f32;
+
+    for step in 0..STEPS {
+        let t = PROMPT + step as i32; // absolute token index being appended
+        let visible_len = t + 1;
+
+        // Append one fresh decode token to the pooled target.
+        pool.append_tokens(&mut target, layer_idx, 1).unwrap();
+        let block_ids = target.layer(layer_idx).unwrap().block_ids.clone();
+        let slot = (t as usize) % block_size;
+        let block_index = (t as usize) / block_size;
+        let k_tok = from_slice_f32(
+            &pooled_pseudo_f32(t as u64 + 1000, (n_kv_heads * head_dim) as usize),
+            &[1, n_kv_heads, 1, head_dim],
+        );
+        let v_tok = from_slice_f32(
+            &pooled_pseudo_f32(
+                (t as u64 + 1000).wrapping_mul(3),
+                (n_kv_heads * head_dim) as usize,
+            ),
+            &[1, n_kv_heads, 1, head_dim],
+        );
+        pool.write_block(block_ids[block_index], layer_idx, slot, &k_tok, &v_tok)
+            .unwrap();
+
+        // Grow the dense reference identically.
+        dense_k = Some(concatenate(dense_k.as_ref().unwrap(), &k_tok, 2));
+        dense_v = Some(concatenate(dense_v.as_ref().unwrap(), &v_tok, 2));
+        let dk = dense_k.as_ref().unwrap();
+        let dv = dense_v.as_ref().unwrap();
+        assert_eq!(array_shape(dk), vec![1, n_kv_heads, visible_len, head_dim]);
+
+        // Fresh query for this step.
+        let q = from_slice_f32(
+            &pooled_pseudo_f32(
+                (step as u64).wrapping_mul(0x1000_0001) + 99,
+                (n_kv_heads * head_dim) as usize,
+            ),
+            &[1, n_kv_heads, 1, head_dim],
+        );
+
+        let states: [&PagedSequenceState; 1] = [&target];
+        let pooled_out = crate::layers::paged_decode_attention_pooled_fallback(
+            &q, &pool, &states, layer_idx, scale,
+        )
+        .unwrap();
+
+        let metadata = crate::cache::PagedDecodeMetadata::from_visible_lengths(
+            &[visible_len],
+            block_size as i32,
+        )
+        .unwrap();
+        let cache_keys = vec![dk.as_ref().unwrap() as *const MlxArray];
+        let cache_values = vec![dv.as_ref().unwrap() as *const MlxArray];
+        let dense_out = crate::layers::paged_decode_attention_dense_fallback(
+            &q,
+            &cache_keys,
+            &cache_values,
+            &metadata,
+            scale,
+        )
+        .unwrap();
+
+        let rms = pooled_rms(
+            &flatten_f32_local(&pooled_out),
+            &flatten_f32_local(&dense_out),
+        );
+        assert!(
+            rms < 5e-3,
+            "prefill->decode step {step} (abs token {t}): pooled vs dense RMS {rms} exceeded 5e-3"
+        );
+        max_rms = max_rms.max(rms);
+    }
+
+    println!("test_pooled_prefill_then_decode_matches_dense: max RMS = {max_rms:e}");
+}
+
 /// Flatten any tensor to a row-major `Vec<f32>` (after an FP32 cast). Local to
 /// these pooled tests; mirrors the pool-test `flatten_fp32` helper.
 fn flatten_f32_local(arr: &MlxArray) -> Vec<f32> {

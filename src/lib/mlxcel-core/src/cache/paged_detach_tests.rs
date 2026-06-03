@@ -104,6 +104,80 @@ fn default_layout() -> PagedKvLayout {
     PagedKvLayout::uniform(2, 4, 128).unwrap()
 }
 
+/// Drive `PagedBlockPool::write_prefill` for an active sequence at the
+/// `CachePool` level. This is the split-borrow `append_paged_tokens` already
+/// uses internally; it is replicated here (the test module is a descendant of
+/// `cache.rs`, so it may touch the private `paged_pool` / `active` fields)
+/// because the live forward/scheduler wiring of `write_prefill` is #121 and is
+/// out of scope for #120. `k`/`v` are `[1, n_kv_heads, n_new, head_dim]`.
+fn write_prefill_for(
+    pool: &mut CachePool,
+    id: SequenceId,
+    layer_idx: usize,
+    k: &MlxArray,
+    v: &MlxArray,
+) -> Result<(), String> {
+    let block_pool = pool
+        .paged_pool
+        .as_mut()
+        .ok_or_else(|| "paged backend not initialized".to_string())?;
+    let state = pool
+        .active
+        .get_mut(&id)
+        .ok_or_else(|| format!("sequence {id} not found"))?
+        .paged_state_mut()
+        .ok_or_else(|| format!("sequence {id} is not paged"))?;
+    block_pool.write_prefill(state, layer_idx, k, v)
+}
+
+/// Deterministic `[1, H, n_tokens, D]` FP32 prefill block whose per-token
+/// values are distinct (encodes head/token/dim), so misplacement is caught
+/// exactly and FP32 round-trips bit-for-bit. Mirrors `paged_pool_tests::make_block`.
+fn prefill_block(base: f32, n_kv_heads: i32, n_tokens: i32, head_dim: i32) -> UniquePtr<MlxArray> {
+    let mut values = Vec::with_capacity((n_kv_heads * n_tokens * head_dim) as usize);
+    for head in 0..n_kv_heads {
+        for tok in 0..n_tokens {
+            for dim in 0..head_dim {
+                values.push(base + head as f32 * 1000.0 + tok as f32 * 10.0 + dim as f32 * 0.1);
+            }
+        }
+    }
+    crate::ffi::from_slice_f32(&values, &[1, n_kv_heads, n_tokens, head_dim])
+}
+
+/// Flatten a tensor to a row-major `Vec<f32>` (after an FP32 cast) for content
+/// comparison. Mirrors `paged_pool_tests::flatten_fp32`.
+fn flatten_fp32(arr: &MlxArray) -> Vec<f32> {
+    let a = crate::ffi::astype(arr, crate::dtype::FLOAT32);
+    crate::ffi::eval(&a);
+    crate::ffi::array_to_raw_bytes(&a)
+        .chunks_exact(4)
+        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+        .collect()
+}
+
+/// Build the dense contiguous reference `[1, H, total, D]` by writing each
+/// `[1, H, n, D]` block at its token offset. Mirrors
+/// `paged_pool_tests::dense_reference` (no trimming; full visible window).
+fn dense_reference(
+    blocks: &[(UniquePtr<MlxArray>, usize)],
+    n_kv_heads: i32,
+    total: i32,
+    head_dim: i32,
+) -> UniquePtr<MlxArray> {
+    let mut dense = crate::ffi::zeros(&[1, n_kv_heads, total, head_dim], crate::dtype::FLOAT32);
+    for (block, offset) in blocks {
+        let n = crate::ffi::array_shape(block)[2];
+        dense = crate::ffi::slice_update(
+            &dense,
+            block,
+            &[0, 0, *offset as i32, 0],
+            &[1, n_kv_heads, *offset as i32 + n, head_dim],
+        );
+    }
+    dense
+}
+
 // ---------------------------------------------------------------------------
 // 1. PagedBlockPool refcount plumbing
 // ---------------------------------------------------------------------------
@@ -748,6 +822,141 @@ fn release_detached_paged_is_safe_after_take_no_double_release() {
     let detached_b = pool.detach_paged(seq_b).unwrap();
     pool.release_detached_paged(detached_b);
     assert_eq!(pool.parked_count(), 0);
+}
+
+// ---------------------------------------------------------------------------
+// 9. write_prefill (#120) over the real detach/adopt machinery: a shared-prefix
+//    request allocates blocks ONLY for its suffix (acceptance criterion 2),
+//    verified via PagedCacheStats, and the adopted sequence reads back its own
+//    prefix + suffix correctly.
+//
+// The simultaneous two-live-sharers copy-on-write proof lives in
+// `paged_pool_tests::write_prefill_cow_forks_shared_partial_tail_block`:
+// `CachePool::adopt_paged` is move-semantics (it consumes the detached set and
+// transfers the block pins), so it cannot stand up two live sequences whose
+// block tables alias the same physical prefix blocks at the same instant — that
+// aliasing is produced with `retain_block` at the pool level. Here we exercise
+// the real detach -> park -> adopt path and prove the block-accounting half of
+// the acceptance criteria with `PagedCacheStats`.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn write_prefill_after_shared_prefix_adopt_allocates_only_suffix_blocks() {
+    let n_kv_heads = 2i32;
+    let head_dim = 3i32;
+    let block_size = 4usize;
+    // Single-layer paged layout so the block accounting is unambiguous.
+    let layout = PagedKvLayout::uniform(
+        1,
+        block_size,
+        block_size * n_kv_heads as usize * head_dim as usize * 2,
+    )
+    .unwrap();
+    let model = PagedStubModel::new(layout.clone());
+    let mut pool = CachePool::new(4);
+
+    // --- Build an 8-token (block-aligned: 2 whole blocks) prefix on a seed. ---
+    let seed = pool.allocate(&model).unwrap();
+    let prefix_len = 8i32;
+    let prefix_k = prefill_block(1000.0, n_kv_heads, prefix_len, head_dim);
+    let prefix_v = prefill_block(5000.0, n_kv_heads, prefix_len, head_dim);
+    write_prefill_for(&mut pool, seed, 0, &prefix_k, &prefix_v).unwrap();
+    let prefix_blocks = pool
+        .get_paged_state(seed)
+        .unwrap()
+        .layer(0)
+        .unwrap()
+        .block_ids
+        .clone();
+    assert_eq!(prefix_blocks.len(), 2, "8 tokens => 2 whole prefix blocks");
+
+    // --- Detach + park + adopt: the consumer inherits the prefix block table
+    //     (the real shared-prefix path). ---
+    let detached = pool.detach_paged(seed).unwrap();
+    let handle = pool.park_detached_paged(detached);
+    let consumer = pool.adopt_parked_paged(&model, handle).unwrap();
+    assert_eq!(
+        pool.get_paged_state(consumer)
+            .unwrap()
+            .layer(0)
+            .unwrap()
+            .block_ids,
+        prefix_blocks,
+        "adopted consumer must reuse the prefix blocks, not fresh copies"
+    );
+
+    // Live blocks right after adoption: exactly the 2 prefix blocks.
+    let live_before = pool.paged_stats().unwrap().live_blocks;
+    assert_eq!(live_before, 2, "only the 2 shared prefix blocks are live");
+
+    // --- write_prefill a 6-token suffix (positions [8, 14)). 8 is block-
+    //     aligned, so this allocates 2 fresh suffix blocks and touches no
+    //     prefix block. ---
+    let suffix_len = 6i32;
+    let suffix_k = prefill_block(2000.0, n_kv_heads, suffix_len, head_dim);
+    let suffix_v = prefill_block(6000.0, n_kv_heads, suffix_len, head_dim);
+    write_prefill_for(&mut pool, consumer, 0, &suffix_k, &suffix_v).unwrap();
+
+    let live_after = pool.paged_stats().unwrap().live_blocks;
+    // Suffix is 6 tokens over 2 blocks; prefix blocks are untouched. So live
+    // grows by EXACTLY the suffix block count, NOT by another copy of the
+    // prefix. This is the "allocates blocks only for its suffix" criterion.
+    assert_eq!(
+        live_after - live_before,
+        2,
+        "shared-prefix request must allocate blocks only for its suffix"
+    );
+    let suffix_blocks = pool
+        .get_paged_state(consumer)
+        .unwrap()
+        .layer(0)
+        .unwrap()
+        .block_ids
+        .clone();
+    assert_eq!(suffix_blocks.len(), 4, "2 prefix + 2 suffix blocks");
+    // The prefix blocks are still the SAME physical blocks (no reallocation).
+    assert_eq!(&suffix_blocks[..2], &prefix_blocks[..]);
+
+    // --- Correctness: the consumer gathers prefix [0,8) + suffix [8,14). ---
+    let total = prefix_len + suffix_len; // 14
+    let state = pool.get_paged_state(consumer).unwrap();
+    let (gk, gv) = pool
+        .paged_pool_ref()
+        .unwrap()
+        .gather_visible(state, 0)
+        .unwrap()
+        .expect("gather must return data");
+    assert_eq!(
+        crate::ffi::array_shape(&gk),
+        vec![1, n_kv_heads, total, head_dim]
+    );
+
+    let dense_k = dense_reference(
+        &[
+            (prefill_block(1000.0, n_kv_heads, prefix_len, head_dim), 0),
+            (
+                prefill_block(2000.0, n_kv_heads, suffix_len, head_dim),
+                prefix_len as usize,
+            ),
+        ],
+        n_kv_heads,
+        total,
+        head_dim,
+    );
+    let dense_v = dense_reference(
+        &[
+            (prefill_block(5000.0, n_kv_heads, prefix_len, head_dim), 0),
+            (
+                prefill_block(6000.0, n_kv_heads, suffix_len, head_dim),
+                prefix_len as usize,
+            ),
+        ],
+        n_kv_heads,
+        total,
+        head_dim,
+    );
+    assert_eq!(flatten_fp32(&gk), flatten_fp32(&dense_k));
+    assert_eq!(flatten_fp32(&gv), flatten_fp32(&dense_v));
 }
 
 /// Free reference to DetachedPagedCacheSet to keep the import alive.

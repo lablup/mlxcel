@@ -26,6 +26,13 @@
 //! 7. `release_block` to refcount 0 frees and recycles a row with fresh data.
 //! 8. `pool_tensor_bytes` reflects allocated pool tensors.
 //! 9. Turbo4 sidecars coexist with main-K/V rows.
+//!
+//! Plus the bulk prefill writer added in #120 (Phase 3):
+//!
+//! - `write_prefill` cold round-trip is byte-identical to a dense prefill.
+//! - `write_prefill` of a block-aligned prompt round-trips.
+//! - `write_prefill` copy-on-write forks a shared partial tail block so two
+//!   sequences' suffixes never corrupt each other or the shared prefix.
 
 use super::paged::{PagedBlockId, PagedBlockPool, PagedKvLayout, PagedSequenceState};
 use super::KVCacheMode;
@@ -670,4 +677,207 @@ fn write_rejects_unknown_block_and_oob_slot() {
     let two = make_block(1.0, 2);
     let err = pool.write_block(id, 0, 3, &two, &two).unwrap_err();
     assert!(err.contains("out of bounds"), "{err}");
+}
+
+// ---------------------------------------------------------------------------
+// 11. write_prefill (#120): cold bulk write -> gather is byte-identical to dense
+// ---------------------------------------------------------------------------
+
+#[test]
+fn write_prefill_cold_round_trip_is_byte_identical_to_dense() {
+    // T = 10 with block_size 4 => 2 full blocks + a half-full third block, so
+    // the bulk write must chunk across a partial last block.
+    let block_size = 4usize;
+    let total = 10i32;
+    let mut pool = fp16_pool(block_size, 1);
+    let mut state = PagedSequenceState::new(pool.layout());
+
+    // A single [1, H, T, D] prefill whose per-token values are distinct so any
+    // mis-slotting is caught exactly (make_block encodes slot index in value).
+    let k_prefill = make_block(100.0, total);
+    let v_prefill = make_block(500.0, total);
+
+    pool.write_prefill(&mut state, 0, &k_prefill, &v_prefill)
+        .unwrap();
+
+    // The bulk write must have allocated ceil(10/4) = 3 blocks and advanced len.
+    assert_eq!(state.layer(0).unwrap().block_ids.len(), 3);
+    assert_eq!(state.layer(0).unwrap().len, total as usize);
+    assert_eq!(state.layer(0).unwrap().visible_len(), total as usize);
+
+    let (gk, gv) = pool
+        .gather_visible(&state, 0)
+        .unwrap()
+        .expect("gather must return data");
+    assert_eq!(ffi::array_shape(&gk), vec![1, H, total, D]);
+
+    // Dense reference: the same [1, H, T, D] buffer written at offset 0.
+    let dense_k = dense_reference(&[(make_block(100.0, total), 0)], total, 0, total);
+    let dense_v = dense_reference(&[(make_block(500.0, total), 0)], total, 0, total);
+    assert_eq!(flatten_fp32(&gk), flatten_fp32(&dense_k));
+    assert_eq!(flatten_fp32(&gv), flatten_fp32(&dense_v));
+}
+
+#[test]
+fn write_prefill_block_aligned_prompt_round_trips() {
+    // Block-aligned T (== 2 * block_size) takes the no-COW fresh-block path.
+    let block_size = 4usize;
+    let total = 8i32;
+    let mut pool = fp16_pool(block_size, 1);
+    let mut state = PagedSequenceState::new(pool.layout());
+
+    let k_prefill = make_block(11.0, total);
+    let v_prefill = make_block(77.0, total);
+    pool.write_prefill(&mut state, 0, &k_prefill, &v_prefill)
+        .unwrap();
+    assert_eq!(state.layer(0).unwrap().block_ids.len(), 2);
+
+    let (gk, gv) = pool
+        .gather_visible(&state, 0)
+        .unwrap()
+        .expect("gather must return data");
+    let dense_k = dense_reference(&[(make_block(11.0, total), 0)], total, 0, total);
+    let dense_v = dense_reference(&[(make_block(77.0, total), 0)], total, 0, total);
+    assert_eq!(flatten_fp32(&gk), flatten_fp32(&dense_k));
+    assert_eq!(flatten_fp32(&gv), flatten_fp32(&dense_v));
+}
+
+// ---------------------------------------------------------------------------
+// 12. write_prefill copy-on-write: a shared partial tail block is forked so two
+//     sequences' suffixes never corrupt each other or the shared prefix.
+//
+// This is the PagedBlockPool-level COW proof. Two sequence states share the
+// same block table (the second adopts the first's block_ids with a refcount
+// bump via retain_block, exactly as CachePool::adopt_paged does), where the
+// last shared block is PARTIALLY filled (the prefix ends mid-block). Each
+// sequence then write_prefills a DIFFERENT suffix; the partial tail block is
+// refcount==2 at suffix time, so write_prefill must copy-on-write it for the
+// writer rather than mutating the block the sibling still references.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn write_prefill_cow_forks_shared_partial_tail_block() {
+    let block_size = 4usize;
+    let prefix_len = 6i32; // 2 blocks; second block half-full (slots 0,1).
+    let mut pool = fp16_pool(block_size, 1);
+
+    // --- Build the shared prefix on sequence A. ---
+    let mut state_a = PagedSequenceState::new(pool.layout());
+    let prefix_k = make_block(1000.0, prefix_len);
+    let prefix_v = make_block(5000.0, prefix_len);
+    pool.write_prefill(&mut state_a, 0, &prefix_k, &prefix_v)
+        .unwrap();
+    let prefix_blocks = state_a.layer(0).unwrap().block_ids.clone();
+    assert_eq!(prefix_blocks.len(), 2);
+    let tail_block = prefix_blocks[1];
+    assert_eq!(pool.refcount(tail_block), 1);
+
+    // --- Sequence B adopts the SAME block table, pinning every prefix block
+    //     (this is what CachePool::adopt_paged does for a shared prefix). ---
+    let mut state_b = PagedSequenceState::new(pool.layout());
+    {
+        let layer_b = state_b.layer_mut(0).unwrap();
+        layer_b.block_ids = prefix_blocks.clone();
+        layer_b.len = prefix_len as usize;
+        layer_b.logical_start = 0;
+    }
+    for &id in &prefix_blocks {
+        pool.retain_block(id).unwrap();
+    }
+    // The partial tail block is now shared by both sequences.
+    assert_eq!(pool.refcount(tail_block), 2);
+
+    // --- Each sequence writes a DIFFERENT 5-token suffix (positions [6, 11)).
+    //     The first suffix block is the shared partial tail (slots 2,3), which
+    //     must be copy-on-written for each writer. ---
+    let suffix_a_k = make_block(2000.0, 5);
+    let suffix_a_v = make_block(6000.0, 5);
+    pool.write_prefill(&mut state_a, 0, &suffix_a_k, &suffix_a_v)
+        .unwrap();
+
+    let suffix_b_k = make_block(3000.0, 5);
+    let suffix_b_v = make_block(7000.0, 5);
+    pool.write_prefill(&mut state_b, 0, &suffix_b_k, &suffix_b_v)
+        .unwrap();
+
+    // --- COW accounting. A wrote first: at that moment the tail was shared
+    //     (refcount 2), so A copy-on-wrote it to a fresh block and released its
+    //     reference to the original (2 -> 1). B wrote second: by then B was the
+    //     SOLE owner of the original tail (refcount 1), so the in-place write is
+    //     safe and no fork is needed — B keeps the original block. This is
+    //     exactly the refcount-driven COW contract: copy only while shared. ---
+    let a_tail = state_a.layer(0).unwrap().block_ids[1];
+    let b_tail = state_b.layer(0).unwrap().block_ids[1];
+    assert_ne!(
+        a_tail, tail_block,
+        "A wrote while the tail was shared, so it must have forked a fresh copy"
+    );
+    assert_eq!(
+        b_tail, tail_block,
+        "B wrote while it was the sole owner of the tail, so it keeps the block in place"
+    );
+    assert_ne!(a_tail, b_tail, "A and B must hold independent tail blocks");
+    assert_eq!(
+        pool.refcount(tail_block),
+        1,
+        "the original tail is now solely owned by B"
+    );
+    assert_eq!(
+        pool.refcount(a_tail),
+        1,
+        "A's forked tail copy is solely owned by A"
+    );
+    // The first shared block (fully inside the prefix) is never written, so it
+    // is still shared by both sequences.
+    assert_eq!(pool.refcount(prefix_blocks[0]), 2);
+
+    // --- Correctness: each sequence gathers its OWN shared-prefix + own suffix,
+    //     proving the two suffixes did not corrupt each other or the prefix. ---
+    // Sequence A: prefix tokens [0,6) (base 1000) then suffix tokens [6,11)
+    // (base 2000, i.e. dense-token index 6 carries suffix slot 0).
+    let total = 11i32;
+    let (gk_a, gv_a) = pool.gather_visible(&state_a, 0).unwrap().expect("gather A");
+    let dense_a_k = dense_reference(
+        &[
+            (make_block(1000.0, prefix_len), 0),
+            (make_block(2000.0, 5), prefix_len as usize),
+        ],
+        total,
+        0,
+        total,
+    );
+    let dense_a_v = dense_reference(
+        &[
+            (make_block(5000.0, prefix_len), 0),
+            (make_block(6000.0, 5), prefix_len as usize),
+        ],
+        total,
+        0,
+        total,
+    );
+    assert_eq!(flatten_fp32(&gk_a), flatten_fp32(&dense_a_k));
+    assert_eq!(flatten_fp32(&gv_a), flatten_fp32(&dense_a_v));
+
+    // Sequence B: same prefix, DIFFERENT suffix (base 3000 / 7000).
+    let (gk_b, gv_b) = pool.gather_visible(&state_b, 0).unwrap().expect("gather B");
+    let dense_b_k = dense_reference(
+        &[
+            (make_block(1000.0, prefix_len), 0),
+            (make_block(3000.0, 5), prefix_len as usize),
+        ],
+        total,
+        0,
+        total,
+    );
+    let dense_b_v = dense_reference(
+        &[
+            (make_block(5000.0, prefix_len), 0),
+            (make_block(7000.0, 5), prefix_len as usize),
+        ],
+        total,
+        0,
+        total,
+    );
+    assert_eq!(flatten_fp32(&gk_b), flatten_fp32(&dense_b_k));
+    assert_eq!(flatten_fp32(&gv_b), flatten_fp32(&dense_b_v));
 }
