@@ -22,10 +22,10 @@
 //! 3. Partial final block gathers exactly `visible_len` tokens (no padding).
 //! 4. `logical_start > 0` (post-trim) gathers the correct visible window.
 //! 5. INT8 main K/V round-trips byte-identically (dtype preserved, no astype).
-//! 5b. FP16 main K/V round-trips byte-identically (dtype preserved, no astype).
-//! 6. `release_block` to refcount 0 frees and recycles a row with fresh data.
-//! 7. `pool_tensor_bytes` reflects allocated pool tensors.
-//! 8. Turbo4 sidecars coexist with main-K/V rows.
+//! 6. FP16 main K/V round-trips byte-identically (dtype preserved, no astype).
+//! 7. `release_block` to refcount 0 frees and recycles a row with fresh data.
+//! 8. `pool_tensor_bytes` reflects allocated pool tensors.
+//! 9. Turbo4 sidecars coexist with main-K/V rows.
 
 use super::paged::{PagedBlockId, PagedBlockPool, PagedKvLayout, PagedSequenceState};
 use super::KVCacheMode;
