@@ -1124,4 +1124,84 @@ mod tests {
             }
         }
     }
+
+    /// Ragged batched MTP **verify-round** left-padding regression (issue #161 /
+    /// PR #162).
+    ///
+    /// Greedy parity for a variable-length B>1 burst requires that EVERY verify
+    /// round mask each row's resident `[0, left_padding[r])` prompt-padding keys
+    /// — not just the prefill. The padding K/V (token 0) is never evicted from
+    /// the unbounded full-attention cache, so a verify query at a nonzero cache
+    /// offset that attends those padding columns diverges from the row's
+    /// standalone B=1 run, and the divergence scales with `left_padding[r]`
+    /// (only the most-padded / shortest row breaks in the real-model gate).
+    ///
+    /// This pins the verify-frame mask the fixed `mask == None` forward path
+    /// builds: `create_causal_mask_with_left_padding(width, offset, left_padding)`
+    /// with `offset > 0` (cache already holds the padded prompt plus accepted
+    /// tokens) and a LARGE per-row padding gap. For the most-padded row the
+    /// leading `left_padding` key columns must be `-inf` and every real key
+    /// (the columns the standalone B=1 run would expose) must be `0.0`.
+    #[test]
+    fn left_padding_mask_masks_padding_in_verify_round_with_large_gap() {
+        // Verify round: width=2 query tokens, cache offset O=10 (e.g. padded
+        // prompt max_len=8 + 2 accepted), so the key axis is O+width=12.
+        // Row 0 (shortest / most padded): left_padding=6 — keys [0,6) are
+        //   prompt padding, real keys live at [6, 12).
+        // Row 1 (full length): left_padding=0 — every key is real.
+        let width = 2_i32;
+        let offset = 10_i32;
+        let total = width + offset; // 12
+        let mask = create_causal_mask_with_left_padding(width, offset, &[6, 0]);
+        assert_eq!(
+            ffi::array_shape(&mask),
+            vec![2, 1, width, total],
+            "verify left-padding mask must be [B, 1, width, offset+width]",
+        );
+
+        let cell = |b: i32, q: i32, k: i32| -> f32 {
+            ffi::item_f32(&ffi::slice(&mask, &[b, 0, q, k], &[b + 1, 1, q + 1, k + 1]))
+        };
+
+        // Row 0: the leading 6 padding columns must be masked for every query.
+        for q in 0..width {
+            for k in 0..6 {
+                let v = cell(0, q, k);
+                assert!(
+                    v.is_infinite() && v < 0.0,
+                    "row0 (lp=6) padding key {k} for query {q} must be -inf, got {v}",
+                );
+            }
+        }
+        // Row 0: real keys [6, offset) are in the causal past of both queries
+        // (query absolute positions are offset and offset+1) and must attend.
+        for q in 0..width {
+            for k in 6..offset {
+                let v = cell(0, q, k);
+                assert_eq!(
+                    v, 0.0,
+                    "row0 real key {k} for query {q} must attend (0.0), got {v}",
+                );
+            }
+        }
+        // Row 0: causal upper bound still holds for the appended query columns —
+        // query q (absolute offset+q) must not see future key offset+q+1.
+        assert!(
+            cell(0, 0, offset + 1).is_infinite() && cell(0, 0, offset + 1) < 0.0,
+            "row0 query 0 must not attend future key {}",
+            offset + 1,
+        );
+
+        // Row 1 (no padding): the same real-key columns are attended and no
+        // column is spuriously masked — the byte-identical baseline.
+        for q in 0..width {
+            for k in 0..=(offset + q) {
+                let v = cell(1, q, k);
+                assert_eq!(
+                    v, 0.0,
+                    "row1 (lp=0) key {k} for query {q} must attend (0.0), got {v}",
+                );
+            }
+        }
+    }
 }

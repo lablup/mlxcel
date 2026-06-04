@@ -36,7 +36,8 @@ use mlxcel_core::layers::{
     compiled_gelu_mlp_fp16,
 };
 use mlxcel_core::utils::{
-    create_causal_mask, create_causal_mask_with_window, pipeline_hint, slice_axis,
+    create_causal_mask, create_causal_mask_with_left_padding, create_causal_mask_with_window,
+    create_causal_mask_with_window_and_left_padding, pipeline_hint, slice_axis,
 };
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
@@ -1754,6 +1755,7 @@ impl Gemma4TextModel {
             None,
             false,
             None,
+            None,
         )
     }
 
@@ -1794,6 +1796,7 @@ impl Gemma4TextModel {
         mut sinks: Option<&mut Gemma4SpeculativeSinks>,
         skip_final_norm: bool,
         bidirectional_block_ids: Option<&MlxArray>,
+        left_padding: Option<&[i32]>,
     ) -> UniquePtr<MlxArray> {
         // When `input_embeddings` is supplied (e.g. from the VLM path where
         // vision/audio features have already been merged into the embedding
@@ -1829,17 +1832,68 @@ impl Gemma4TextModel {
         } else if l > 1 {
             let global_offset = first_cache_offset(caches, "full_attention");
             let sliding_offset = first_cache_offset(caches, "sliding_attention");
-            let sliding_effective_offset =
-                sliding_offset.min((self.config.sliding_window as i32 - l).max(0));
+            let window = self.config.sliding_window as i32;
+            let sliding_effective_offset = sliding_offset.min((window - l).max(0));
 
-            (
-                Some(create_causal_mask(l, global_offset)),
-                Some(create_causal_mask_with_window(
-                    l,
-                    sliding_effective_offset,
-                    Some(self.config.sliding_window as i32),
-                )),
-            )
+            // Ragged batched MTP (variable-length B>1 burst) threads the per-row
+            // leading-padding column count so the verify forward masks each
+            // row's `[0, left_padding[r])` padding keys — exactly as the ragged
+            // prefill does. Without this the verify query attends the prompt's
+            // padding K/V (token 0), which is retained in the unbounded
+            // full-attention cache forever and breaks greedy parity for the
+            // most-left-padded row (the error scales with `left_padding[r]`).
+            //
+            // When `left_padding` is absent or all-zero (every non-ragged path,
+            // including the equal-length batched burst and ordinary decode) this
+            // is byte-identical to the plain causal / windowed masks below.
+            let has_padding = left_padding
+                .map(|lp| lp.iter().any(|&p| p > 0))
+                .unwrap_or(false);
+
+            if has_padding {
+                let lp = left_padding.expect("has_padding implies Some");
+                // Full attention never evicts the padding (unbounded KVCache), so
+                // it always needs the per-row left-padding column filter.
+                let global_mask = create_causal_mask_with_left_padding(l, global_offset, lp);
+                // The sliding (RotatingKVCache) cache only retains the padding
+                // while it has not yet wrapped past it. `sliding_offset + l <=
+                // window` is the non-capped condition (matching
+                // `create_causal_mask_with_window_and_left_padding`'s own
+                // precondition): the key axis is still the full
+                // `[0, sliding_offset + l)` and column k maps 1:1 to logical key
+                // position k, so the left-padding column filter is valid. The
+                // ragged-burst eligibility gate (`max_prompt_len <=
+                // sliding_window`) plus realistic generation lengths keep the
+                // SWA cache non-capped for the whole burst, so this branch is
+                // the one actually exercised. Once the cache wraps (capped
+                // regime), the oldest keys — the padding `[0, lp)` first — are
+                // evicted, so the plain windowed mask is padding-free and
+                // matches the row's standalone B=1 SWA window. (The narrow wrap
+                // transition `window < sliding_offset + l < window + lp`, where
+                // a residual padding tail briefly survives in the capped buffer,
+                // only occurs for pathologically long outputs that the eligible
+                // regime does not reach.)
+                let sliding_mask = if sliding_offset + l <= window {
+                    create_causal_mask_with_window_and_left_padding(
+                        l,
+                        sliding_effective_offset,
+                        Some(window),
+                        lp,
+                    )
+                } else {
+                    create_causal_mask_with_window(l, sliding_effective_offset, Some(window))
+                };
+                (Some(global_mask), Some(sliding_mask))
+            } else {
+                (
+                    Some(create_causal_mask(l, global_offset)),
+                    Some(create_causal_mask_with_window(
+                        l,
+                        sliding_effective_offset,
+                        Some(window),
+                    )),
+                )
+            }
         } else {
             (None, None)
         };
@@ -2297,6 +2351,7 @@ impl Gemma4Model {
             None,
             false,
             bidirectional_block_ids,
+            None,
         );
         let mut logits = self.text_model.embed_tokens.as_linear(&hidden);
         if let Some(cap) = self.config.final_logit_softcapping {
@@ -2314,6 +2369,7 @@ impl Gemma4Model {
     /// `sinks` is `None`.
     ///
     /// Used by: [`Gemma4Wrapper::forward_with_speculative_sinks`].
+    #[allow(clippy::too_many_arguments)]
     fn forward_with_caches_and_speculative_sinks(
         &self,
         input_ids: &MlxArray,
@@ -2323,6 +2379,7 @@ impl Gemma4Model {
         per_layer_inputs: Option<&MlxArray>,
         capture_layer_ids: Option<&[usize]>,
         sinks: Option<&mut Gemma4SpeculativeSinks>,
+        left_padding: Option<&[i32]>,
     ) -> UniquePtr<MlxArray> {
         let hidden = self.text_model.forward_with_speculative_sinks(
             input_ids,
@@ -2334,6 +2391,7 @@ impl Gemma4Model {
             sinks,
             false,
             None,
+            left_padding,
         );
         let mut logits = self.text_model.embed_tokens.as_linear(&hidden);
         if let Some(cap) = self.config.final_logit_softcapping {
@@ -2347,6 +2405,7 @@ impl Gemma4Model {
     /// Used by: Gemma 4 MTP deferred greedy verification, which needs the
     /// pre-norm hidden states and shared K/V slabs but can project only the
     /// positions required by the speculative walk.
+    #[allow(clippy::too_many_arguments)]
     fn forward_hidden_with_caches_and_speculative_sinks(
         &self,
         input_ids: &MlxArray,
@@ -2357,6 +2416,7 @@ impl Gemma4Model {
         capture_layer_ids: Option<&[usize]>,
         sinks: Option<&mut Gemma4SpeculativeSinks>,
         skip_final_norm: bool,
+        left_padding: Option<&[i32]>,
     ) -> UniquePtr<MlxArray> {
         self.text_model.forward_with_speculative_sinks(
             input_ids,
@@ -2368,6 +2428,7 @@ impl Gemma4Model {
             sinks,
             skip_final_norm,
             None,
+            left_padding,
         )
     }
 
@@ -3165,6 +3226,7 @@ impl Gemma4Wrapper {
                     per_layer_inputs,
                     capture_layer_ids,
                     sinks,
+                    None,
                 )
             },
         )
@@ -3189,6 +3251,7 @@ impl Gemma4Wrapper {
     /// projection.
     ///
     /// Used by: [`crate::models::gemma4_mtp_target::Gemma4MtpBatchedTargetAdapter`].
+    #[allow(clippy::too_many_arguments)]
     pub fn forward_with_speculative_sinks_explicit_cache(
         &self,
         input_ids: &MlxArray,
@@ -3198,6 +3261,7 @@ impl Gemma4Wrapper {
         caches: &mut [Cache],
         capture_layer_ids: Option<&[usize]>,
         sinks: Option<&mut Gemma4SpeculativeSinks>,
+        left_padding: Option<&[i32]>,
     ) -> UniquePtr<MlxArray> {
         self.model.forward_with_caches_and_speculative_sinks(
             input_ids,
@@ -3207,6 +3271,7 @@ impl Gemma4Wrapper {
             per_layer_inputs,
             capture_layer_ids,
             sinks,
+            left_padding,
         )
     }
 
@@ -3238,6 +3303,7 @@ impl Gemma4Wrapper {
                     capture_layer_ids,
                     sinks,
                     skip_final_norm,
+                    None,
                 )
             },
         )

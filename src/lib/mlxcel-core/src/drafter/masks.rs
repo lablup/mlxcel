@@ -616,10 +616,36 @@ fn make_swa_mask_with_local_offsets(
     kv_valid_len: &BatchScalar<'_>,
     dtype: i32,
 ) -> Option<UniquePtr<MlxArray>> {
+    // The shared K/V handed to the drafter is normalized so every row's valid
+    // keys occupy `[0, kv_valid_len[r])` in the **prefix-valid** frame (see
+    // `normalize_batched_shared_kv_states`). The SWA window distance must
+    // therefore be measured in that same frame: the bonus query is logically
+    // the last valid token, i.e. at position `kv_valid_len - 1`. The caller's
+    // `query_offset` is the drafter's **RoPE anchor** in the **padded** frame
+    // (`bonus_position = left_padding + kv_valid_len - 1`); using it directly
+    // for the SWA distance would inject a spurious `+left_padding` shift that
+    // over-masks the front keys of a left-padded (ragged batched MTP) row by
+    // exactly `left_padding`, breaking greedy parity for the most-padded row
+    // while leaving the others untouched.
+    //
+    // For every non-padded path the established invariant is `query_offset ==
+    // kv_valid_len - 1` (B = 1 decode, equal-length batched, rotating-cache
+    // slice), so deriving the SWA query position from `kv_valid_len - 1` is
+    // byte-identical there and only diverges (correctly) when `left_padding >
+    // 0`. `key_offset` stays 0 because the normalized keys start at logical 0.
+    //
+    // `query_offset` is now unused for the SWA distance; it is retained in the
+    // signature for symmetry with the full-attention path and potential future
+    // callers that pass already-valid-frame offsets.
+    let _ = query_offset;
     let key_offset = BatchScalar::Scalar(0);
-    match (query_offset, kv_valid_len) {
-        (BatchScalar::Scalar(q), BatchScalar::Scalar(v)) => {
-            let local_query = BatchScalar::Scalar((*q).min(kv_len));
+    match kv_valid_len {
+        BatchScalar::Scalar(v) => {
+            // Valid-frame query position: clamp `kv_valid_len - 1` into
+            // `[0, kv_len]` (the local K/V axis). The clamp matches the prior
+            // `min(.., kv_len)` behaviour and additionally floors at 0 so a
+            // degenerate `kv_valid_len == 0` cannot produce a negative offset.
+            let local_query = BatchScalar::Scalar((*v - 1).clamp(0, kv_len));
             let local_valid = BatchScalar::Scalar((*v).min(kv_len));
             bidirectional_swa_mask_with_key_offset(
                 query_len,
@@ -631,38 +657,9 @@ fn make_swa_mask_with_local_offsets(
                 dtype,
             )
         }
-        (BatchScalar::PerRow(q_arr), BatchScalar::Scalar(v)) => {
-            let local_query_arr = local_window_offset_array(q_arr, kv_len);
-            let local_query = BatchScalar::PerRow(&local_query_arr);
-            let local_valid = BatchScalar::Scalar((*v).min(kv_len));
-            bidirectional_swa_mask_with_key_offset(
-                query_len,
-                &local_query,
-                kv_len,
-                sliding_window,
-                Some(&local_valid),
-                &key_offset,
-                dtype,
-            )
-        }
-        (BatchScalar::Scalar(q), BatchScalar::PerRow(v_arr)) => {
-            let batch = ffi::array_shape(v_arr)[0];
-            let local_query_arr = scalar_batch_vector((*q).min(kv_len), batch);
-            let local_valid_arr = local_window_offset_array(v_arr, kv_len);
-            let local_query = BatchScalar::PerRow(&local_query_arr);
-            let local_valid = BatchScalar::PerRow(&local_valid_arr);
-            bidirectional_swa_mask_with_key_offset(
-                query_len,
-                &local_query,
-                kv_len,
-                sliding_window,
-                Some(&local_valid),
-                &key_offset,
-                dtype,
-            )
-        }
-        (BatchScalar::PerRow(q_arr), BatchScalar::PerRow(v_arr)) => {
-            let local_query_arr = local_window_offset_array(q_arr, kv_len);
+        BatchScalar::PerRow(v_arr) => {
+            // local_query[r] = clamp(kv_valid_len[r] - 1, 0, kv_len).
+            let local_query_arr = local_query_offset_array(v_arr, kv_len);
             let local_valid_arr = local_window_offset_array(v_arr, kv_len);
             let local_query = BatchScalar::PerRow(&local_query_arr);
             let local_valid = BatchScalar::PerRow(&local_valid_arr);
@@ -677,6 +674,21 @@ fn make_swa_mask_with_local_offsets(
             )
         }
     }
+}
+
+/// Per-row valid-frame SWA query offset: `clamp(kv_valid_len[r] - 1, 0, kv_len)`.
+///
+/// The bonus query is the last valid token, so its position relative to the
+/// normalized `[0, kv_valid_len)` key prefix is `kv_valid_len - 1`. The clamp
+/// floors at 0 (degenerate empty prefix) and caps at the local K/V axis
+/// length, matching [`local_window_offset_array`]'s upper bound.
+fn local_query_offset_array(kv_valid_len: &MlxArray, kv_len: i32) -> UniquePtr<MlxArray> {
+    let one = ffi::from_slice_i32(&[1], &[1]);
+    let minus_one = ffi::subtract(kv_valid_len, &one);
+    let zero = ffi::from_slice_i32(&[0], &[1]);
+    let kv_len_arr = ffi::from_slice_i32(&[kv_len], &[1]);
+    let floored = ffi::maximum(&minus_one, &zero);
+    ffi::minimum(&floored, &kv_len_arr)
 }
 
 fn local_window_offset_array(value: &MlxArray, kv_len: i32) -> UniquePtr<MlxArray> {
@@ -1206,6 +1218,113 @@ mod tests {
                 .is_none(),
             "SWA should be mask-free after mapping absolute position 9 to local offset 4",
         );
+    }
+
+    /// Ragged batched MTP greedy-parity regression (issue #161 / PR #162).
+    ///
+    /// When a B > 1 burst mixes prompt lengths, each row's shared K/V is
+    /// normalized (rolled left by `left_padding[r]`) so its valid keys occupy
+    /// `[0, kv_valid_len[r])` in the **prefix-valid** frame, while the drafter
+    /// query's RoPE anchor stays in the **padded** frame at `bonus_position[r]
+    /// = left_padding[r] + kv_valid_len[r] - 1` (so the query's RoPE phase
+    /// matches the baked keys' `+left_padding[r]` phase). The SWA mask distance,
+    /// however, is computed against the normalized keys at `[0, kv_valid_len)`,
+    /// so it MUST use the valid-frame query position `kv_valid_len[r] - 1`, NOT
+    /// the padded `bonus_position[r]`. Conflating the two over-masks the
+    /// most-left-padded (shortest) row's SWA layers by exactly `left_padding[r]`
+    /// keys — the bonus query can attend to ZERO valid keys, which is why the
+    /// shortest prompt emitted empty content and never hit EOS in the real-model
+    /// gate while the other rows were byte-identical.
+    ///
+    /// Numeric reproduction (the unit proxy for the 31B parity gate):
+    /// - kv_len (padded buffer width) = 8, sliding_window = 4.
+    /// - Row 0 (shortest, most padded): kv_valid_len = 3, left_padding = 5, so
+    ///   bonus_position = 5 + 3 - 1 = 7 = kv_len - 1. Its valid keys are [0, 3).
+    ///   Correct SWA distance uses query position kv_valid_len-1 = 2, so dist[k]
+    ///   = 2 - k and every valid key k in {0,1,2} is inside the window. With the
+    ///   bug (query position = 7) dist[k] = 7 - k, so `dist < window` (= 4)
+    ///   requires k > 3 while `k < kv_valid_len` requires k < 3 — an empty set,
+    ///   i.e. the bonus query attends to nothing.
+    /// - Row 1 (full length): kv_valid_len = 8, left_padding = 0, so
+    ///   bonus_position = 7 = kv_valid_len - 1 (the unaffected baseline).
+    ///
+    /// The test asserts row 0's three valid SWA keys are attended (bias 0.0) and
+    /// its padded tail is masked, which fails on the pre-fix code and passes
+    /// after the SWA query offset is derived from kv_valid_len.
+    #[test]
+    fn swa_mask_ragged_left_padding_attends_short_rows_valid_keys() {
+        let kv_len = 8_i32;
+        let query_len = 1_i32;
+        let sliding_window = 4_i32;
+
+        // Padded-frame RoPE anchors (bonus_position) — uniform max_len - 1.
+        let query_offsets = ffi::from_slice_i32(&[7, 7], &[2]);
+        let query_offset = BatchScalar::PerRow(&query_offsets);
+        // Per-row valid prefix lengths after K/V normalization.
+        let kv_valid_lens = ffi::from_slice_i32(&[3, 8], &[2]);
+        let kv_valid_len = BatchScalar::PerRow(&kv_valid_lens);
+
+        let k_swa = ffi::zeros(&[2, 1, kv_len, 1], dtype::FLOAT32);
+        let v_swa = ffi::zeros(&[2, 1, kv_len, 1], dtype::FLOAT32);
+
+        let mut shared: HashMap<LayerType, (&MlxArray, &MlxArray)> = HashMap::new();
+        shared.insert(LayerType::SlidingWindowAttention, (&k_swa, &v_swa));
+
+        let masks = make_drafter_masks_with_valid_len(
+            &shared,
+            query_len,
+            &query_offset,
+            sliding_window,
+            dtype::FLOAT32,
+            Some(&kv_valid_len),
+        );
+
+        let swa = masks
+            .get(&LayerType::SlidingWindowAttention)
+            .expect("SWA entry present")
+            .as_ref()
+            .expect("per-row SWA mask must materialise (kv_valid differs from kv_len)");
+        assert_eq!(
+            ffi::array_shape(swa),
+            vec![2, 1, query_len, kv_len],
+            "per-row SWA mask must be [B, 1, query_len, kv_len]",
+        );
+
+        // Row 0 (most padded): its three valid keys [0, 3) must be attended.
+        // Pre-fix these are all -inf because the padded query offset 7 pushes
+        // every valid key outside the window.
+        for k in 0..3 {
+            let v = mask_at_qk(swa, &[0, 0, 0, k]);
+            assert_eq!(
+                v, 0.0,
+                "row 0 (lp=5) valid SWA key {k} must be attended (0.0), got {v}",
+            );
+        }
+        // Row 0 padded tail [3, kv_len) must remain masked.
+        for k in 3..kv_len {
+            let v = mask_at_qk(swa, &[0, 0, 0, k]);
+            assert!(
+                v.is_infinite() && v < 0.0,
+                "row 0 padded SWA key {k} must be masked (-inf), got {v}",
+            );
+        }
+
+        // Row 1 (full length, lp=0) is the byte-identical baseline: with window
+        // 4 and query position 7 it attends keys {4,5,6,7} and masks {0,1,2,3}.
+        for k in 0..4 {
+            let v = mask_at_qk(swa, &[1, 0, 0, k]);
+            assert!(
+                v.is_infinite() && v < 0.0,
+                "row 1 SWA key {k} must be outside the window (-inf), got {v}",
+            );
+        }
+        for k in 4..kv_len {
+            let v = mask_at_qk(swa, &[1, 0, 0, k]);
+            assert_eq!(
+                v, 0.0,
+                "row 1 SWA key {k} must be inside the window (0.0), got {v}",
+            );
+        }
     }
 
     // ----- dtype preservation ----------------------------------------------

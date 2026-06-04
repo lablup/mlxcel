@@ -343,6 +343,7 @@ impl Gemma4UnifiedModel {
     /// The Unified wrapper holds no batched speculative state of its own — the
     /// batched MTP target adapter owns the `[B, ...]` cache and the inner text
     /// model advances all rows through one forward.
+    #[allow(clippy::too_many_arguments)]
     pub fn forward_with_speculative_sinks_explicit_cache(
         &self,
         input_ids: &MlxArray,
@@ -352,6 +353,7 @@ impl Gemma4UnifiedModel {
         caches: &mut [crate::models::gemma4::Cache],
         capture_layer_ids: Option<&[usize]>,
         sinks: Option<&mut crate::models::Gemma4SpeculativeSinks>,
+        left_padding: Option<&[i32]>,
     ) -> UniquePtr<MlxArray> {
         self.text_model
             .forward_with_speculative_sinks_explicit_cache(
@@ -362,6 +364,7 @@ impl Gemma4UnifiedModel {
                 caches,
                 capture_layer_ids,
                 sinks,
+                left_padding,
             )
     }
 

@@ -1177,25 +1177,51 @@ impl<'a> Gemma4MtpBatchedTargetAdapter<'a> {
         UniquePtr<MlxArray>,
         Vec<UniquePtr<MlxArray>>,
     ) {
-        self.batched_sink_forward_with_mask(input_arr, None)
+        // Verify rounds (and the equal-length prefill) take the `mask == None`
+        // path, where the forward derives both attention-family masks from the
+        // cache offsets. For a ragged burst the prompt's per-row leading
+        // padding is still resident in the shared cache, so we thread the
+        // stashed per-row `left_padding` so the verify forward masks each row's
+        // `[0, left_padding[r])` padding keys — without it the verify query
+        // attends the padding K/V and breaks greedy parity for the
+        // most-left-padded row. For the equal-length path `left_padding` is
+        // all-zero, so the forward takes its byte-identical plain-mask branch.
+        let left_padding: Vec<i32> = self
+            .left_padding
+            .borrow()
+            .iter()
+            .map(|&p| p as i32)
+            .collect();
+        let lp_ref: Option<&[i32]> = if left_padding.iter().any(|&p| p > 0) {
+            Some(&left_padding)
+        } else {
+            None
+        };
+        self.batched_sink_forward_with_mask(input_arr, None, lp_ref)
     }
 
     /// Sink-aware batched forward with an optional explicit attention mask.
     ///
-    /// `mask` is `None` for the equal-length path (the forward derives both the
-    /// full-attention and sliding-window causal masks from `offset == 0`). For
-    /// the ragged (variable-length) prefill the caller passes a single
-    /// **left-padding** causal mask: in the eligible regime
-    /// (`max_prompt_len <= sliding_window`, non-capped key axis) the windowed
-    /// left-padding mask is byte-identical to the plain left-padding mask, so
-    /// one `[B, 1, max_len, max_len]` mask is correct for *both* the
-    /// full-attention and sliding-window layers (the forward copies the single
-    /// mask into both slots). This equivalence is unit-tested in
+    /// `mask` is `None` for the equal-length path and for every verify round
+    /// (the forward derives both the full-attention and sliding-window causal
+    /// masks from the cache offsets). In the `mask == None` path, `left_padding`
+    /// (per-row leading padding columns) is threaded so the verify forward masks
+    /// each ragged row's resident `[0, left_padding[r])` padding keys; it is
+    /// `None` / all-zero for the equal-length path (byte-identical plain masks).
+    ///
+    /// For the ragged **prefill** the caller instead passes a single explicit
+    /// **left-padding** causal mask (with `left_padding == None`): in the
+    /// eligible regime (`max_prompt_len <= sliding_window`, non-capped key axis)
+    /// the windowed left-padding mask is byte-identical to the plain
+    /// left-padding mask, so one `[B, 1, max_len, max_len]` mask is correct for
+    /// *both* the full-attention and sliding-window layers (the forward copies
+    /// the single mask into both slots). This equivalence is unit-tested in
     /// `mlxcel_core::utils` (`windowed_left_padding_mask_matches_plain_left_padding_when_uncapped`).
     fn batched_sink_forward_with_mask(
         &self,
         input_arr: &MlxArray,
         mask: Option<&MlxArray>,
+        left_padding: Option<&[i32]>,
     ) -> (
         UniquePtr<MlxArray>,
         UniquePtr<MlxArray>,
@@ -1212,6 +1238,7 @@ impl<'a> Gemma4MtpBatchedTargetAdapter<'a> {
                 &mut caches,
                 BATCHED_CAPTURE_LAYER_IDS,
                 Some(&mut sinks),
+                left_padding,
             )
         };
 
@@ -1401,8 +1428,13 @@ impl<'a> Gemma4MtpBatchedTargetAdapter<'a> {
             &left_padding_i32,
         );
 
-        let (logits, hidden_full, shared_kv) =
-            self.batched_sink_forward_with_mask(&prompt_arr, Some(mask.as_ref().unwrap()));
+        let (logits, hidden_full, shared_kv) = self.batched_sink_forward_with_mask(
+            &prompt_arr,
+            Some(mask.as_ref().unwrap()),
+            // Prefill passes an explicit left-padding mask above, so the
+            // `mask == None` left-padding plumbing is not needed here.
+            None,
+        );
         self.enable_rotating_cache_buffer();
 
         // Every row's last real token sits at the shared padded index
