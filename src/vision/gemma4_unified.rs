@@ -223,9 +223,15 @@ impl Gemma4UnifiedModel {
             for image in images {
                 let patch_feat = self.vision_embedder.forward(&image.patches, &image.positions);
                 let projected = self.embed_vision.forward(&patch_feat);
-                // [num_soft_tokens, hidden] -> [1, num_soft_tokens, hidden].
+                // Keep only the real (non-padding) patch rows so the count
+                // aligns exactly with the image placeholder tokens the
+                // processor emitted (`image.num_soft_tokens`). The padded rows
+                // sit at the tail (indices >= num_soft_tokens) and are dropped.
                 let shape = mlxcel_core::array_shape(&projected);
-                features.push(mlxcel_core::reshape(&projected, &[1, shape[0], shape[1]]));
+                let real = (image.num_soft_tokens as i32).min(shape[0]);
+                let trimmed = mlxcel_core::slice(&projected, &[0, 0], &[real, shape[1]]);
+                // [real, hidden] -> [1, real, hidden].
+                features.push(mlxcel_core::reshape(&trimmed, &[1, real, shape[1]]));
             }
             let merged = if features.len() == 1 {
                 mlxcel_core::astype(
