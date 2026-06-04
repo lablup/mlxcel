@@ -36,9 +36,11 @@ use super::{parse_vlm_config, read_sanitized_vlm_config};
 ///   `language_model.model.<x>` unless it already starts with
 ///   `language_model.model.`;
 /// * split fused MoE experts `…experts.gate_up_proj` into
-///   `…experts.switch_glu.gate_proj.weight` / `…up_proj.weight` (swap the last
-///   two axes, split the doubled dim in half) and rename
-///   `…experts.down_proj` → `…experts.switch_glu.down_proj.weight`;
+///   `…experts.switch_glu.gate_proj` / `…up_proj` and rename
+///   `…experts.down_proj` → `…experts.switch_glu.down_proj`. This handles
+///   both the non-quantized bare `.weight` and the quantized triplet
+///   (`.weight` + `.scales` + `.biases`); see
+///   [`split_fused_gate_up_component`] for the per-component axis handling;
 /// * drop `embed_audio*` when `has_audio` is false.
 pub(crate) fn sanitize_gemma4_unified_weights(
     raw: mlxcel_core::weights::WeightMap,
@@ -56,27 +58,25 @@ pub(crate) fn sanitize_gemma4_unified_weights(
             continue;
         }
 
-        // Fused MoE experts: split gate_up_proj, rename down_proj. Only the
-        // non-quantized `.weight` path is fused in upstream Gemma 4 Unified
-        // MoE checkpoints; quantized scales/biases follow the same split when
-        // present.
-        if key.ends_with("experts.gate_up_proj") {
-            let prefix = key.trim_end_matches("gate_up_proj");
-            // value: [num_experts, in, 2*ffn]; swap last two axes →
-            // [num_experts, 2*ffn, in], then split the doubled dim in half.
-            let swapped = mlxcel_core::transpose_axes(&value, &[0, 2, 1]);
-            let shape = mlxcel_core::array_shape(&swapped);
-            let doubled = shape[1];
-            let half = doubled / 2;
-            let gate = mlxcel_core::slice(&swapped, &[0, 0, 0], &[shape[0], half, shape[2]]);
-            let up = mlxcel_core::slice(&swapped, &[0, half, 0], &[shape[0], doubled, shape[2]]);
-            out.insert(format!("{prefix}switch_glu.gate_proj.weight"), gate);
-            out.insert(format!("{prefix}switch_glu.up_proj.weight"), up);
+        // Fused MoE experts: split `gate_up_proj`, rename `down_proj`. Both the
+        // non-quantized bare `.weight` and the quantized triplet (`.weight` +
+        // `.scales` + `.biases`) are handled: each present component is split
+        // along the output (doubled-FFN) axis at the same half boundary into
+        // `…switch_glu.gate_proj.<c>` (first half) and `…switch_glu.up_proj.<c>`
+        // (second half). MLX affine quantization groups along the input
+        // (contract) axis, so splitting the output axis partitions `weight`,
+        // `scales`, and `biases` cleanly with no group straddling and no
+        // dequantize/unpack — see [`split_fused_gate_up_component`].
+        if let Some((prefix, component)) = split_fused_moe_key(&key, "gate_up_proj") {
+            let (gate, up) = split_fused_gate_up_component(&value, component);
+            out.insert(format!("{prefix}switch_glu.gate_proj{component}"), gate);
+            out.insert(format!("{prefix}switch_glu.up_proj{component}"), up);
             continue;
         }
-        if key.ends_with("experts.down_proj") {
-            let prefix = key.trim_end_matches("down_proj");
-            out.insert(format!("{prefix}switch_glu.down_proj.weight"), value);
+        if let Some((prefix, component)) = split_fused_moe_key(&key, "down_proj") {
+            // `down_proj` is not doubled: rename each present component
+            // (`.weight` / `.scales` / `.biases`) under `switch_glu` unchanged.
+            out.insert(format!("{prefix}switch_glu.down_proj{component}"), value);
             continue;
         }
 
@@ -87,6 +87,82 @@ pub(crate) fn sanitize_gemma4_unified_weights(
     }
 
     out
+}
+
+/// Match a fused MoE expert key (`base` = `gate_up_proj` / `down_proj`) in both
+/// the non-quantized and quantized forms, returning `(prefix, component)` where
+/// `prefix` is everything up to and including `experts.` and `component` is the
+/// quantization-component suffix: `""` for the bare non-quantized tensor, or
+/// `".weight"` / `".scales"` / `".biases"` for one leg of a quantized triplet.
+///
+/// Examples (with `base = "gate_up_proj"`):
+/// * `…experts.gate_up_proj`         → `("…experts.", "")`
+/// * `…experts.gate_up_proj.weight`  → `("…experts.", ".weight")`
+/// * `…experts.gate_up_proj.scales`  → `("…experts.", ".scales")`
+/// * `…experts.gate_up_proj.biases`  → `("…experts.", ".biases")`
+fn split_fused_moe_key<'a>(key: &'a str, base: &str) -> Option<(&'a str, &'static str)> {
+    // Bare (non-quantized) tensor: `…experts.<base>`.
+    if let Some(prefix) = key.strip_suffix(base) {
+        if prefix.ends_with("experts.") {
+            return Some((prefix, ""));
+        }
+    }
+    // Quantized triplet legs: `…experts.<base>.<component>`.
+    for component in [".weight", ".scales", ".biases"] {
+        let needle = format!("{base}{component}");
+        if let Some(prefix) = key.strip_suffix(&needle) {
+            if prefix.ends_with("experts.") {
+                return Some((prefix, component));
+            }
+        }
+    }
+    None
+}
+
+/// Split one component of a fused `gate_up_proj` expert tensor along its output
+/// (doubled-FFN) axis into the gate (first half) and up (second half) legs.
+///
+/// Orientation:
+/// * The bare non-quantized `.weight` is stored `[num_experts, in, 2*ffn]`
+///   (the doubled FFN dim is the **last** axis). It is transposed to
+///   `[num_experts, 2*ffn, in]` so the doubled dim becomes the output axis 1,
+///   then sliced in half — matching the `Regular` `SwitchLinear` layout
+///   (`gather_mm` swaps the last two axes back at forward time).
+/// * Quantized components (`.weight` packed ints, `.scales`, `.biases`) are
+///   already stored in the post-transpose `[num_experts, 2*ffn, in/…]` layout
+///   that `gather_qmm(transpose=true)` consumes, with MLX affine grouping along
+///   the **last (input/contract)** axis. They are therefore split on axis 1
+///   directly — **no transpose**: transposing packed ints or per-group
+///   scales/biases would corrupt them, and slicing the independent output rows
+///   partitions `weight`/`scales`/`biases` at the identical half boundary with
+///   no group straddling. This mirrors the `mistral4` / `qwen3_5_moe` fused
+///   splits, which likewise slice the output axis of the already-`[E, out, in]`
+///   tensor without transposing.
+fn split_fused_gate_up_component(
+    value: &mlxcel_core::MlxArray,
+    component: &str,
+) -> (
+    mlxcel_core::UniquePtr<mlxcel_core::MlxArray>,
+    mlxcel_core::UniquePtr<mlxcel_core::MlxArray>,
+) {
+    use mlxcel_core::utils::slice_axis;
+
+    if component.is_empty() {
+        // Non-quantized: [num_experts, in, 2*ffn] → transpose to
+        // [num_experts, 2*ffn, in], then split the doubled (output) axis 1.
+        let swapped = mlxcel_core::transpose_axes(value, &[0, 2, 1]);
+        let half = mlxcel_core::array_shape(&swapped)[1] / 2;
+        let gate = slice_axis(&swapped, 1, 0, half);
+        let up = slice_axis(&swapped, 1, half, -1);
+        (gate, up)
+    } else {
+        // Quantized leg: already [num_experts, 2*ffn, in/…]; split the output
+        // axis 1 in place (group/packed axis is the last axis, left intact).
+        let half = mlxcel_core::array_shape(value)[1] / 2;
+        let gate = slice_axis(value, 1, 0, half);
+        let up = slice_axis(value, 1, half, -1);
+        (gate, up)
+    }
 }
 
 /// Normalize a single `gemma4_unified` weight key (prefix handling only).
