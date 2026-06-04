@@ -45,6 +45,61 @@ arguments may evolve, so inspect each script before publishing results.
 ./scripts/bench_all_models.sh --hardware <name> --cooldown 45 --big-cooldown 60
 ```
 
+## Speculative decoding (MTP)
+
+MTP speculative decoding pairs a decode target with a small assistant drafter
+that proposes a block of tokens, which the target then verifies in a single
+forward pass. At `temperature 0` the accelerated output is byte-identical to
+classic decode, so the only metric that moves is decode throughput; confirm
+correctness by diffing the two completions.
+
+For each pairing, record both the baseline (no drafter) and the MTP run:
+
+- decode tok/s for each, and the speedup ratio (MTP divided by baseline);
+- mean acceptance length (accepted draft tokens per verify), read from the
+  `MTP round-loop diagnostics` log line;
+- the block size (`--draft-block-size`), and whether the singleton burst
+  engaged or was declined.
+
+Measure with the `speculative_bench` harness or the server:
+
+```bash
+# In-process harness: baseline vs MTP on the same target.
+./target/release/speculative_bench --target <target_dir> --kind none --max-tokens 256
+./target/release/speculative_bench --target <target_dir> --draft <drafter_dir> --kind mtp --max-tokens 256
+
+# Server (production path): time a fixed temperature-0 completion with and
+# without the drafter. The server logs decode tok/s and acceptance per request.
+mlxcel serve -m <target> --draft-model <drafter> --draft-kind mtp
+```
+
+### Gemma 4 Unified (12B) + 4-bit assistant
+
+Measured on Apple M5 Max (128 GB) with `mlx-community/gemma-4-12b-it-4bit` as the
+target and `mlx-community/gemma-4-12B-it-assistant-4bit` as the drafter, block
+size 4, `temperature 0`, 200 decode tokens:
+
+| Path                        | decode tok/s | speedup |
+| --------------------------- | -----------: | ------: |
+| classic decode (no drafter) |         ~39  |  1.00x  |
+| MTP                         |         ~74  | ~1.87x  |
+
+The accelerated output is byte-identical to classic decode. The Gemma 4 Unified
+target does not batch (`supports_batching()` is false), so B=1 is its only decode
+path and the scheduler runs B=1 MTP for it by default. `MLXCEL_ENABLE_MTP_B1=1`
+additionally forces B=1 MTP on batch-capable targets, which is useful for parity
+and debugging.
+
+### Gemma 4 31B + bf16 assistant
+
+The 31B text target is batch-capable, and its MTP speedup comes from batched
+(B>1) verify windows rather than the singleton path. The scheduler declines B=1
+MTP there because the bf16 assistant's single-stream acceptance is too low to
+offset the extra drafter forward per token. This pairing is wired into
+`speculative_bench` (`REACHABLE_PAIRINGS`) and runs once the
+`gemma-4-31b-it-4bit` and `gemma-4-31B-it-assistant-bf16` checkpoints are present
+in the model store.
+
 ## Recommended output layout
 
 Add benchmark artifacts under a dedicated directory before publishing a release,

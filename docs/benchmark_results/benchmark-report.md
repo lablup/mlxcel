@@ -124,6 +124,21 @@ decode results sit near mlx-vlm median parity on both Apple Silicon hosts.
   visible for VLM wrappers, Gemma 4 variants, ERNIE, Hunyuan, ExaOne4, and
   several newer hybrid/MoE families.
 
+## Speculative Decoding (MTP)
+
+Added 2026-06-04 on Apple M5 Max (128 GB). Unlike the rows above, this compares
+mlxcel against itself, classic decode versus MTP speculative decode on the same
+target, rather than against a Python baseline.
+
+| Target (family)                        | Drafter                       | block | classic tok/s | MTP tok/s | speedup |
+| -------------------------------------- | ----------------------------- | ----: | ------------: | --------: | ------: |
+| gemma-4-12b-it-4bit (Gemma 4 Unified)  | gemma-4-12B-it-assistant-4bit |     4 |          ~39  |      ~74  | ~1.87x  |
+
+Output is byte-identical at `temperature 0` (MTP is exactness-preserving). The
+Gemma 4 Unified target cannot batch, so the scheduler runs its B=1 MTP path by
+default. See [Benchmarks, Speculative decoding (MTP)](../benchmarks.md) for the
+measurement method and the Gemma 4 31B batched-window notes.
+
 ## Reading the Numbers Correctly
 
 - **Decode tok/s** is the headline metric. It measures autoregressive token
