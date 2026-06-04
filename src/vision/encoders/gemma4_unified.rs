@@ -109,10 +109,17 @@ impl Gemma4UnifiedVisionEmbedder {
     ///
     /// Returns `[num_soft_tokens, mm_embed_dim]` (== `output_proj_dims`).
     pub fn forward(&self, patches: &MlxArray, positions: &MlxArray) -> UniquePtr<MlxArray> {
+        // Run the patch path in the model's native dtype (the dtype of the
+        // learned weights, e.g. bf16/f16) so the positional-embedding `add`
+        // below does not mix f32 patches with bf16 tables.
+        let native = mlxcel_core::array_dtype(&self.pos_embedding);
+        let patches = mlxcel_core::astype(patches, native);
+
         // 1. patch_ln1 over patch_dim.
-        let h = self.patch_ln1.forward(patches);
+        let h = self.patch_ln1.forward(&patches);
         // 2. patch_dense: patch_dim -> mm_embed_dim.
         let h = self.patch_dense.forward(&h);
+        let h = mlxcel_core::astype(&h, native);
         // 3. patch_ln2 over mm_embed_dim.
         let h = self.patch_ln2.forward(&h);
 
