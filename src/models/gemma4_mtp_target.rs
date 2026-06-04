@@ -101,6 +101,38 @@ fn mtp_draft_position(kv_valid_len: usize) -> usize {
     kv_valid_len.saturating_sub(1)
 }
 
+/// Derive the per-row `(kv_offset, bonus_position)` anchors for a batched MTP
+/// seed/finalize from each row's logical `kv_valid_len` and constant
+/// `left_padding`, using the shifted-frame formula that keeps both the
+/// equal-length and ragged (left-padded) paths byte-identical to standalone
+/// B = 1 runs:
+///
+/// - `kv_offset[r] = left_padding[r] + kv_valid_len[r]` — the physical/padded
+///   absolute offset, i.e. the drafter's RoPE frame for row `r`. The shared
+///   K/V is baked at padded positions `[left_padding[r], kv_offset[r])`, so the
+///   drafter's query must rotate in the same `+left_padding[r]` shifted frame.
+/// - `bonus_position[r] = kv_offset[r] - 1` — the row's frozen bonus anchor
+///   (the last valid token's padded position).
+///
+/// For equal-length rows (`left_padding[r] == 0`) this reduces to
+/// `kv_offset == kv_valid_len` and `bonus_position == kv_valid_len - 1`,
+/// exactly the legacy equal-length metadata.
+fn seed_anchors_from_valid_len(
+    kv_valid_len: &[usize],
+    left_padding: &[usize],
+) -> (Vec<usize>, Vec<usize>) {
+    let kv_offset_per_row: Vec<usize> = kv_valid_len
+        .iter()
+        .zip(left_padding)
+        .map(|(&valid, &lp)| lp + valid)
+        .collect();
+    let bonus_position_per_row: Vec<usize> = kv_offset_per_row
+        .iter()
+        .map(|&offset| mtp_draft_position(offset))
+        .collect();
+    (kv_offset_per_row, bonus_position_per_row)
+}
+
 /// Output of [`Gemma4MtpBatchedTargetAdapter::left_padded_input`].
 ///
 /// Carries the left-padded `[B, max_len]` prefill tensor plus the per-row
@@ -873,19 +905,26 @@ const BATCHED_CAPTURE_LAYER_IDS: Option<&[usize]> = None;
 /// is released before the method returns, so no two borrows ever
 /// overlap.
 ///
-/// ## Scope: equal-length prompts within a burst window
+/// ## Scope: equal-length and variable-length prompts within a window
 ///
 /// `prefill_and_seed_batched` forwards the `[B, max_prompt_len]` prompt
-/// batch in one pass. When every row's prompt is the **same length**,
-/// the 2-D causal masks (`create_causal_mask(L, 0)`) broadcast cleanly
-/// across the batch and the result is byte-identical to running B
-/// separate B = 1 prefills. Variable-length prompts would need a per-row
-/// left-padding mask that the current Gemma 4 speculative forward does
-/// not build; the scheduler's burst-window collector
-/// ([`crate::server::batch::speculative_burst`]) only groups
-/// equal-length-prompt speculative requests into a batched window for
-/// this reason. The verify rounds are always uniform width (`block_size`
-/// per row) so they are unconditionally batched.
+/// batch in one pass. When every row's prompt is the **same length**, the
+/// 2-D causal masks (`create_causal_mask(L, 0)`) broadcast cleanly across
+/// the batch and the result is byte-identical to running B separate B = 1
+/// prefills.
+///
+/// **Variable-length (ragged)** prompts are handled by
+/// [`Self::prefill_and_seed_batched_ragged`] (routed automatically when the
+/// rows differ in length), gated upstream by the
+/// `MLXCEL_ENABLE_MTP_BATCH_RAGGED` opt-in. Each row is left-padded to
+/// `max_prompt_len` with a per-row left-padding causal mask; in the eligible
+/// non-capped regime (`max_prompt_len <= sliding_window`) that single mask is
+/// byte-identical to the windowed left-padding mask, so it is correct for both
+/// the full-attention and sliding-window layers. Greedy parity is preserved by
+/// the left-padding uniform per-row position shift (see that method's docs).
+/// The verify rounds are always uniform width (`block_size` per row) so they
+/// are unconditionally batched; the constant per-row `left_padding` stashed at
+/// prefill keeps every round in each row's shifted RoPE frame.
 pub struct Gemma4MtpBatchedTargetAdapter<'a> {
     /// Borrowed target wrapper. The wrapper owns its weights; this
     /// adapter owns the per-burst `[B, ...]` cache separately.
@@ -1414,15 +1453,8 @@ impl<'a> Gemma4MtpBatchedTargetAdapter<'a> {
         kv_valid_len: &[usize],
         left_padding: &[usize],
     ) -> MtpBatchedVerifyOutput {
-        let kv_offset_per_row: Vec<usize> = kv_valid_len
-            .iter()
-            .zip(left_padding)
-            .map(|(&valid, &lp)| lp + valid)
-            .collect();
-        let bonus_position_per_row: Vec<usize> = kv_offset_per_row
-            .iter()
-            .map(|&offset| mtp_draft_position(offset))
-            .collect();
+        let (kv_offset_per_row, bonus_position_per_row) =
+            seed_anchors_from_valid_len(kv_valid_len, left_padding);
         MtpBatchedVerifyOutput {
             next_hidden,
             next_shared_kv,

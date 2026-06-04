@@ -289,6 +289,20 @@ mod tests {
         make_test_sequence_with_priority(id_val, RequestPriority::Normal)
     }
 
+    /// Build a test `SequenceInfo` with a prompt of the requested length so
+    /// variable-length-window formation can be exercised.
+    fn make_test_sequence_with_prompt_len(
+        id_val: u64,
+        prompt_len: usize,
+    ) -> (SequenceInfo, mpsc::Receiver<GenerateEvent>) {
+        let (mut seq, rx) = make_test_sequence_with_priority(id_val, RequestPriority::Normal);
+        let prompt_tokens: Vec<i32> = (0..prompt_len as i32).map(|i| i + 1).collect();
+        let tokenizer = crate::tokenizer::MlxcelTokenizer::stub();
+        seq.decode_state = StreamingDecodeState::new(&tokenizer, &prompt_tokens);
+        seq.prompt_tokens = prompt_tokens;
+        (seq, rx)
+    }
+
     #[test]
     fn new_queue_is_empty() {
         let queue = PrefillQueue::new();
@@ -608,5 +622,100 @@ mod tests {
         let mut queue = PrefillQueue::new();
         let window = queue.drain_matching_window(RequestPriority::Low, 5, |_| true);
         assert!(window.is_empty());
+    }
+
+    // -----------------------------------------------------------------
+    // Variable-length (ragged) batched MTP window formation (issue #161)
+    //
+    // The scheduler's `try_speculative_burst` window predicate gates the
+    // prompt-length equality behind an `allow_ragged` flag:
+    //     (allow_ragged || candidate.prompt_tokens.len() == head_prompt_len)
+    //         && ...other matching checks...
+    // These tests pin that exact gating against `drain_matching_window`,
+    // which is the mechanism the scheduler drives.
+    // -----------------------------------------------------------------
+
+    /// With ragged disabled the length-equality gate keeps different-length
+    /// candidates out of the head's window (the legacy same-length behaviour).
+    #[test]
+    fn ragged_disabled_window_excludes_different_length_prompts() {
+        let mut queue = PrefillQueue::new();
+        let head_prompt_len = 4usize;
+        // Head-equivalent length 4; sibling 20 differs (length 7); sibling 30
+        // matches length 4 again but is behind 20, so FIFO scanning stops at 20.
+        let (s10, _r10) = make_test_sequence_with_prompt_len(10, 4);
+        let (s20, _r20) = make_test_sequence_with_prompt_len(20, 7);
+        let (s30, _r30) = make_test_sequence_with_prompt_len(30, 4);
+        queue.enqueue(s10).unwrap();
+        queue.enqueue(s20).unwrap();
+        queue.enqueue(s30).unwrap();
+
+        let allow_ragged = false;
+        let window = queue.drain_matching_window(RequestPriority::Normal, 10, |candidate| {
+            allow_ragged || candidate.prompt_tokens.len() == head_prompt_len
+        });
+        let ids: Vec<u64> = window.iter().map(|s| s.seq_id.as_u64()).collect();
+        // 10 matches; 20 fails the length gate and scanning stops there.
+        assert_eq!(ids, vec![10], "ragged-off must stop at the first length mismatch");
+        assert_eq!(queue.len(), 2);
+    }
+
+    /// With ragged enabled the length-equality gate is dropped, so
+    /// burst-eligible candidates of different prompt lengths all join one
+    /// window in FIFO order.
+    #[test]
+    fn ragged_enabled_window_groups_different_length_prompts() {
+        let mut queue = PrefillQueue::new();
+        let head_prompt_len = 4usize;
+        let (s10, _r10) = make_test_sequence_with_prompt_len(10, 4);
+        let (s20, _r20) = make_test_sequence_with_prompt_len(20, 7);
+        let (s30, _r30) = make_test_sequence_with_prompt_len(30, 2);
+        queue.enqueue(s10).unwrap();
+        queue.enqueue(s20).unwrap();
+        queue.enqueue(s30).unwrap();
+
+        let allow_ragged = true;
+        let window = queue.drain_matching_window(RequestPriority::Normal, 10, |candidate| {
+            allow_ragged || candidate.prompt_tokens.len() == head_prompt_len
+        });
+        let ids: Vec<u64> = window.iter().map(|s| s.seq_id.as_u64()).collect();
+        assert_eq!(
+            ids,
+            vec![10, 20, 30],
+            "ragged-on must group different-length candidates into one window"
+        );
+        // Confirm the lengths actually differ — a true ragged window.
+        let lens: Vec<usize> = window.iter().map(|s| s.prompt_tokens.len()).collect();
+        assert_eq!(lens, vec![4, 7, 2]);
+        assert!(queue.is_empty());
+    }
+
+    /// Even with ragged enabled, the *other* window constraints still apply.
+    /// Here the `max_tokens` mismatch (mirroring the scheduler's
+    /// `candidate.max_tokens == head_max_tokens` check) excludes a row whose
+    /// prompt length differs AND whose budget differs.
+    #[test]
+    fn ragged_enabled_window_still_honors_other_matching_checks() {
+        let mut queue = PrefillQueue::new();
+        let head_max_tokens = 100usize; // make_test_sequence default
+        let (s10, _r10) = make_test_sequence_with_prompt_len(10, 4);
+        let (mut s20, _r20) = make_test_sequence_with_prompt_len(20, 7);
+        s20.max_tokens = 200; // differs from head -> must be excluded
+        queue.enqueue(s10).unwrap();
+        queue.enqueue(s20).unwrap();
+
+        let allow_ragged = true;
+        let window = queue.drain_matching_window(RequestPriority::Normal, 10, |candidate| {
+            // Length gate dropped, but max_tokens equality still enforced.
+            (allow_ragged || candidate.prompt_tokens.len() == 4)
+                && candidate.max_tokens == head_max_tokens
+        });
+        let ids: Vec<u64> = window.iter().map(|s| s.seq_id.as_u64()).collect();
+        assert_eq!(
+            ids,
+            vec![10],
+            "ragged-on must still respect the non-length window checks"
+        );
+        assert_eq!(queue.len(), 1);
     }
 }

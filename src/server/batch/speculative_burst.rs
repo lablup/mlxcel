@@ -2404,6 +2404,22 @@ mod tests {
         );
     }
 
+    /// The ragged-window flag is off by default (env var unset), so even with
+    /// `MLXCEL_ENABLE_MTP_BATCH=1` the validated same-length batched burst stays
+    /// the behaviour of that flag until the operator also opts into ragged.
+    #[test]
+    fn mtp_batched_ragged_window_flag_defaults_off() {
+        // Only assert the default when the env var is genuinely unset; some CI
+        // shells may export it. This keeps the test deterministic without
+        // mutating process-global env state from a parallel test.
+        if std::env::var("MLXCEL_ENABLE_MTP_BATCH_RAGGED").is_err() {
+            assert!(
+                !mtp_batched_ragged_window_enabled(),
+                "ragged window flag must default to off when unset"
+            );
+        }
+    }
+
     #[test]
     fn should_burst_for_sequence_rejects_disabled_dispatch() {
         let dispatch = crate::server::SpeculativeDispatch::Disabled;

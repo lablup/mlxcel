@@ -306,6 +306,13 @@ pub(crate) fn spawn_model_worker_with_batch_config(
         // concurrent classic-decode rows head-of-line-block behind it
         // until it completes. The previous earlier wording described the
         // B=1-only behaviour; this reflects the batched path.
+        //
+        // Variable-length-prompt MTP bursts (different prompt lengths in one
+        // B>1 window) are implemented behind the `MLXCEL_ENABLE_MTP_BATCH_RAGGED`
+        // opt-in (subordinate to `MLXCEL_ENABLE_MTP_BATCH`): when enabled the
+        // MTP adapter left-pads the window to `max_prompt_len` (eligible while
+        // `max_prompt_len <= sliding_window`), preserving greedy parity via the
+        // left-padding uniform per-row position shift.
         if sched_config.speculative_dispatch.is_kind_specific() && sched_config.max_batch_size > 1 {
             tracing::info!(
                 "Speculative decoding active ({}) with max_batch_size={}: \
@@ -315,8 +322,9 @@ pub(crate) fn spawn_model_worker_with_batch_config(
                  request that does not match the current window head, or \
                  that arrives alone, runs as a B=1 burst and head-of-line-\
                  blocks concurrent classic-decode rows for its full \
-                 duration. Variable-length-prompt batched bursts are a \
-                 documented follow-up.",
+                 duration. Variable-length-prompt MTP batched bursts are \
+                 available behind MLXCEL_ENABLE_MTP_BATCH_RAGGED=1 (with \
+                 MLXCEL_ENABLE_MTP_BATCH=1).",
                 sched_config.speculative_dispatch.summary(),
                 sched_config.max_batch_size,
             );

@@ -348,3 +348,121 @@ fn unified_batched_adapter_implements_mtp_target() {
         a.batch_size()
     }
 }
+
+// ===========================================================================
+// Ragged (variable-length-prompt) batched MTP prefill helpers (issue #161)
+//
+// These pin the pure left-padding builder and the shifted-frame seed-anchor
+// formula without loading real Gemma 4 weights. The on-hardware greedy-parity
+// validation of the ragged forward ships behind the orchestrator's real-model
+// gate.
+// ===========================================================================
+
+/// `left_padded_input` right-aligns each row to `max_prompt_len`, reports the
+/// per-row left-padding (`max_len - L_r`) and valid length (`L_r`), and builds
+/// a `[B, max_len]` tensor.
+#[test]
+fn ragged_left_padded_input_right_aligns_rows() {
+    let _runtime = crate::initialize_runtime();
+    // Rows of length 2, 5, 3 -> max_len = 5.
+    let per_row = vec![vec![10, 11], vec![20, 21, 22, 23, 24], vec![30, 31, 32]];
+    let prefill =
+        Gemma4MtpBatchedTargetAdapter::left_padded_input(&per_row, 3).expect("left-padded");
+    assert_eq!(prefill.max_len, 5);
+    assert_eq!(prefill.left_padding, vec![3, 0, 2], "lp = max_len - L_r");
+    assert_eq!(prefill.valid_len, vec![2, 5, 3], "valid = L_r");
+    let shape = mlxcel_core::array_shape(prefill.arr.as_ref().unwrap());
+    assert_eq!(shape, vec![3, 5], "must build a [B, max_len] tensor");
+}
+
+/// The padded tensor places each row's real tokens at indices `[lp, max_len)`
+/// with the leading `lp` columns zeroed (the padding token id).
+#[test]
+fn ragged_left_padded_input_places_tokens_at_suffix() {
+    let _runtime = crate::initialize_runtime();
+    let per_row = vec![vec![7, 8], vec![1, 2, 3, 4]];
+    let prefill =
+        Gemma4MtpBatchedTargetAdapter::left_padded_input(&per_row, 2).expect("left-padded");
+    assert_eq!(prefill.max_len, 4);
+    assert_eq!(prefill.left_padding, vec![2, 0]);
+
+    // Read individual cells of the [2, 4] tensor.
+    let cell = |r: i32, c: i32| -> i32 {
+        let v = mlxcel_core::slice(prefill.arr.as_ref().unwrap(), &[r, c], &[r + 1, c + 1]);
+        let scalar = mlxcel_core::reshape(&v, &[]);
+        mlxcel_core::item_i32(&scalar)
+    };
+    // Row 0 (lp=2): [PAD, PAD, 7, 8].
+    assert_eq!(cell(0, 0), 0, "row0 leading pad");
+    assert_eq!(cell(0, 1), 0, "row0 leading pad");
+    assert_eq!(cell(0, 2), 7, "row0 first real token at index lp=2");
+    assert_eq!(cell(0, 3), 8);
+    // Row 1 (lp=0): [1, 2, 3, 4].
+    assert_eq!(cell(1, 0), 1);
+    assert_eq!(cell(1, 3), 4);
+}
+
+/// Empty / zero-length rows are rejected.
+#[test]
+fn ragged_left_padded_input_rejects_empty_row() {
+    let _runtime = crate::initialize_runtime();
+    let per_row = vec![vec![1, 2], vec![], vec![3]];
+    let msg = match Gemma4MtpBatchedTargetAdapter::left_padded_input(&per_row, 3) {
+        Ok(_) => panic!("empty row must be rejected"),
+        Err(e) => format!("{e}"),
+    };
+    assert!(
+        msg.contains("non-empty"),
+        "error must explain the non-empty requirement, got: {msg}"
+    );
+}
+
+/// Shifted-frame seed-anchor formula: `kv_offset = left_padding + kv_valid_len`,
+/// `bonus_position = kv_offset - 1`. This is the load-bearing per-row position
+/// derivation that keeps each ragged row in its own RoPE frame.
+#[test]
+fn ragged_seed_anchors_use_shifted_frame() {
+    // Ragged window: max_len = 5, rows of valid length 2, 5, 3 ->
+    // left_padding = [3, 0, 2].
+    let kv_valid_len = vec![2_usize, 5, 3];
+    let left_padding = vec![3_usize, 0, 2];
+    let (kv_offset, bonus_position) =
+        super::seed_anchors_from_valid_len(&kv_valid_len, &left_padding);
+    // Every row's physical/padded offset collapses to max_len = 5 at the seed.
+    assert_eq!(kv_offset, vec![5, 5, 5], "kv_offset = lp + valid (== max_len)");
+    assert_eq!(bonus_position, vec![4, 4, 4], "bonus = kv_offset - 1");
+}
+
+/// Equal-length rows (`left_padding == 0`) reduce to the legacy metadata:
+/// `kv_offset == kv_valid_len`, `bonus_position == kv_valid_len - 1`.
+#[test]
+fn ragged_seed_anchors_equal_length_reduces_to_legacy() {
+    let kv_valid_len = vec![7_usize, 7, 7];
+    let left_padding = vec![0_usize, 0, 0];
+    let (kv_offset, bonus_position) =
+        super::seed_anchors_from_valid_len(&kv_valid_len, &left_padding);
+    assert_eq!(kv_offset, vec![7, 7, 7]);
+    assert_eq!(bonus_position, vec![6, 6, 6]);
+}
+
+/// After a verify round, each row advances its logical valid length by its own
+/// `accepted + 1` while `left_padding` stays constant — so per-row anchors
+/// diverge correctly. Models the `verify_finalize_batched` bookkeeping.
+#[test]
+fn ragged_seed_anchors_track_per_row_round_advance() {
+    // Seed valid lengths (= unpadded prompt lengths) and constant lp.
+    let mut kv_valid_len = vec![2_usize, 5, 3];
+    let left_padding = vec![3_usize, 0, 2];
+    // Round 1 per-row accepts: row0 accepts 0, row1 accepts 3, row2 accepts 1.
+    let accepted = [0_usize, 3, 1];
+    for (v, a) in kv_valid_len.iter_mut().zip(accepted) {
+        *v += a + 1;
+    }
+    // Logical valid lengths now 3, 9, 5.
+    assert_eq!(kv_valid_len, vec![3, 9, 5]);
+    let (kv_offset, bonus_position) =
+        super::seed_anchors_from_valid_len(&kv_valid_len, &left_padding);
+    // Physical/padded offsets: lp + valid.
+    assert_eq!(kv_offset, vec![6, 9, 7]);
+    assert_eq!(bonus_position, vec![5, 8, 6]);
+}
