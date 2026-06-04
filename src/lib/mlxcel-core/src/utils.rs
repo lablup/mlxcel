@@ -203,6 +203,113 @@ pub fn create_causal_mask_with_left_padding(
     ffi::where_cond(&bool_out, &zeros_out, &neg_inf_out)
 }
 
+/// Create a sliding-window causal attention mask with per-sequence
+/// left-padding support.
+///
+/// This is the windowed counterpart of [`create_causal_mask_with_left_padding`]
+/// and the left-padding-aware counterpart of [`create_causal_mask_with_window`].
+/// It is used by the **ragged batched MTP prefill** path
+/// ([`crate::speculative::mtp`] via the Gemma 4 batched target adapter): when a
+/// B > 1 burst window mixes prompts of different lengths, every row is
+/// left-padded to `max_prompt_len` and the sliding-attention layers need a mask
+/// that (a) enforces the sliding-window causal band AND (b) prevents real query
+/// positions from attending to a row's leading padding keys.
+///
+/// # Arguments
+/// * `size` — Number of query tokens in the current step (the padded prompt
+///   width `max_prompt_len` for prefill).
+/// * `offset` — Tokens already in the KV buffer before this call. For a fresh
+///   prefill this is `0`. The total (uncapped) key length is `size + offset`.
+/// * `window` — Sliding window size. `None` collapses to
+///   [`create_causal_mask_with_left_padding`] (no windowing).
+/// * `left_padding` — Per-sequence number of leading padding tokens. Key
+///   positions `k < left_padding[b]` are masked for sequence `b`. When empty or
+///   all-zero the result is byte-identical to [`create_causal_mask_with_window`].
+///
+/// # Returns
+/// Additive mask (0 for attended positions, −∞ for masked positions).
+///
+/// # Shape note
+/// * **No padding** (`left_padding` empty or all-zero): same shape as
+///   [`create_causal_mask_with_window`] — `[size, T_k]` where
+///   `T_k = min(size + offset, window)`.
+/// * **With padding**: `[B, 1, size, T_k]` where `B = left_padding.len()`. The
+///   `[B, 1]` leading dims broadcast against a `[B, H, size, T_k]` score tensor.
+///
+/// # Capped-window caveat
+/// When `size + offset > window` the underlying [`RotatingKVCache`] caps the K
+/// axis to the most-recent `window` slots, which re-indexes key positions and
+/// makes the left-padding column filter non-trivial. The ragged batched MTP
+/// caller therefore restricts itself to `max_prompt_len <= window` (the
+/// non-capped regime) and declines the burst window otherwise, so this helper's
+/// left-padding filter is only ever exercised in the non-capped path. The
+/// implementation still asserts the non-capped precondition in debug builds.
+///
+/// Used by: ragged batched MTP prefill (Gemma 4 batched target adapter).
+#[must_use]
+pub fn create_causal_mask_with_window_and_left_padding(
+    size: i32,
+    offset: i32,
+    window: Option<i32>,
+    left_padding: &[i32],
+) -> UniquePtr<MlxArray> {
+    let no_padding = left_padding.is_empty() || left_padding.iter().all(|&p| p == 0);
+
+    // Fast path: no per-sequence padding -> identical to the windowed mask.
+    if no_padding {
+        return create_causal_mask_with_window(size, offset, window);
+    }
+
+    let uncapped_len = size + offset;
+
+    // The left-padding filter below assumes a non-capped key axis (column k maps
+    // 1:1 to logical key position k). The ragged batched MTP caller guarantees
+    // this by only forming ragged windows when `max_prompt_len <= window`.
+    debug_assert!(
+        window.map(|w| uncapped_len <= w).unwrap_or(true),
+        "create_causal_mask_with_window_and_left_padding: capped window \
+         (size + offset = {uncapped_len} > window) is unsupported; the caller \
+         must restrict ragged windows to the non-capped regime",
+    );
+
+    let total_len = uncapped_len;
+
+    // ── Windowed causal (band) base mask, [size, total_len] ─────────────────
+    let ones = ffi::ones(&[size, total_len], dtype::FLOAT32);
+    let mut band = ffi::tril(&ones, offset);
+    if let Some(w) = window {
+        // Enforce the sliding-window upper bound q <= k + window - 1, identical
+        // to the non-capped branch of `create_causal_mask_with_window`.
+        let upper_mask = ffi::triu(&ones, offset - w + 1);
+        band = ffi::multiply(&band, &upper_mask);
+    }
+
+    // ── Left-padding column filter ──────────────────────────────────────────
+    // For sequence `b`, key positions `k < left_padding[b]` are padding and must
+    // be masked. Build a [B, 1, 1, total_len] boolean (k >= lp[b]) and multiply
+    // with the band mask broadcast to [1, 1, size, total_len].
+    let b = left_padding.len() as i32;
+
+    let rinds_1d = ffi::arange_i32(0, total_len, 1);
+    let rinds = ffi::reshape(&rinds_1d, &[1, 1, 1, total_len]);
+    let lp_tensor = ffi::from_slice_i32(left_padding, &[b, 1, 1, 1]);
+    let lp_mask = ffi::greater_equal(&rinds, &lp_tensor);
+
+    let band_4d = ffi::reshape(&band, &[1, 1, size, total_len]);
+
+    let ones_lp = ffi::ones(&[b, 1, 1, total_len], dtype::FLOAT32);
+    let zeros_lp = ffi::zeros(&[b, 1, 1, total_len], dtype::FLOAT32);
+    let lp_mask_f32 = ffi::where_cond(&lp_mask, &ones_lp, &zeros_lp);
+
+    let combined = ffi::multiply(&band_4d, &lp_mask_f32);
+
+    // Convert the 0/1 float mask to an additive 0 / -inf mask.
+    let zeros_out = ffi::zeros(&[b, 1, size, total_len], dtype::FLOAT32);
+    let neg_inf_out = ffi::full_f32(&[b, 1, size, total_len], f32::NEG_INFINITY, dtype::FLOAT32);
+    let bool_out = ffi::greater(&combined, &zeros_out);
+    ffi::where_cond(&bool_out, &zeros_out, &neg_inf_out)
+}
+
 /// Create a boolean causal attention mask.
 /// Used by: same as `create_causal_mask` (experimental path)
 ///
@@ -892,5 +999,129 @@ mod tests {
         // q=3 attends to both cache keys
         assert_eq!(row3_col0, 0.0, "row3_col0 should be 0.0 (attend)");
         assert_eq!(row3_col1, 0.0, "row3_col1 should be 0.0 (attend)");
+    }
+
+    // --- Windowed left-padding mask (ragged batched MTP prefill) ----------
+
+    /// No-padding fast path must be byte-identical to the plain windowed mask.
+    #[test]
+    fn windowed_left_padding_mask_no_padding_matches_windowed() {
+        // Non-capped regime: size=6, offset=0, window=8 (>= size). No padding.
+        let ref_mask = create_causal_mask_with_window(6, 0, Some(8));
+        let lp_mask = create_causal_mask_with_window_and_left_padding(6, 0, Some(8), &[0, 0]);
+        let ref_shape = ffi::array_shape(&ref_mask);
+        let lp_shape = ffi::array_shape(&lp_mask);
+        assert_eq!(ref_shape, vec![6, 6], "non-capped windowed mask is [size, size]");
+        assert_eq!(
+            ref_shape, lp_shape,
+            "no-padding windowed left-padding mask must match plain windowed mask shape"
+        );
+
+        // Empty left_padding slice also collapses to the windowed mask.
+        let lp_empty = create_causal_mask_with_window_and_left_padding(6, 0, Some(8), &[]);
+        assert_eq!(ffi::array_shape(&lp_empty), ref_shape);
+
+        // Spot-check a couple of cells are identical (additive 0 / -inf).
+        for (q, k) in [(0_i32, 0_i32), (3, 0), (3, 3), (5, 1), (5, 5)] {
+            let a = ffi::item_f32(&ffi::slice(&ref_mask, &[q, k], &[q + 1, k + 1]));
+            let b = ffi::item_f32(&ffi::slice(&lp_mask, &[q, k], &[q + 1, k + 1]));
+            assert_eq!(
+                a.is_finite(),
+                b.is_finite(),
+                "cell ({q},{k}) finiteness must match: ref={a}, lp={b}"
+            );
+            if a.is_finite() {
+                assert_eq!(a, b, "cell ({q},{k}) value mismatch: ref={a}, lp={b}");
+            }
+        }
+    }
+
+    /// With per-row left-padding the mask is `[B, 1, size, total_len]` and the
+    /// padding columns are masked for the padded rows while remaining unmasked
+    /// for the non-padded row.
+    #[test]
+    fn windowed_left_padding_mask_masks_padding_columns() {
+        // B=2, size=4 (padded width), offset=0, window large enough not to
+        // trigger sliding-window upper-bound masking (window >= size).
+        // Row 0: left_padding=2 (real tokens at padded indices 2,3).
+        // Row 1: left_padding=0 (all real).
+        let mask =
+            create_causal_mask_with_window_and_left_padding(4, 0, Some(4), &[2, 0]);
+        let shape = ffi::array_shape(&mask);
+        assert_eq!(shape, vec![2, 1, 4, 4], "padded mask must be [B,1,size,total]");
+
+        // Helper to read cell [b,0,q,k].
+        let cell = |b: i32, q: i32, k: i32| -> f32 {
+            ffi::item_f32(&ffi::slice(&mask, &[b, 0, q, k], &[b + 1, 1, q + 1, k + 1]))
+        };
+
+        // Row 0 (left_padding=2): the first real query is at padded index q=2.
+        // It must NOT attend to padding keys k=0,1, but MUST attend to k=2.
+        assert!(
+            cell(0, 2, 0).is_infinite() && cell(0, 2, 0) < 0.0,
+            "row0 q=2 -> padding k=0 must be -inf"
+        );
+        assert!(
+            cell(0, 2, 1).is_infinite() && cell(0, 2, 1) < 0.0,
+            "row0 q=2 -> padding k=1 must be -inf"
+        );
+        assert_eq!(cell(0, 2, 0 + 2), 0.0, "row0 q=2 -> real k=2 must attend");
+        // Causal upper bound: q=2 must NOT see future k=3.
+        assert!(
+            cell(0, 2, 3).is_infinite() && cell(0, 2, 3) < 0.0,
+            "row0 q=2 -> future k=3 must be -inf (causal)"
+        );
+
+        // Row 1 (no padding): standard causal band, k=0 attended by q=0.
+        assert_eq!(cell(1, 0, 0), 0.0, "row1 q=0 -> k=0 must attend (no padding)");
+        assert!(
+            cell(1, 0, 1).is_infinite() && cell(1, 0, 1) < 0.0,
+            "row1 q=0 -> future k=1 must be -inf (causal)"
+        );
+    }
+
+    /// In the non-capped prefill regime (`offset == 0`, `size <= window`) the
+    /// sliding-window upper bound is inert, so for the real-token sub-block the
+    /// windowed left-padding mask is byte-identical to the plain (non-windowed)
+    /// left-padding mask. This is the exact invariant the ragged batched MTP
+    /// prefill relies on: a short prefix prefill within the window sees no
+    /// windowing effect, only causal + left-padding.
+    #[test]
+    fn windowed_left_padding_mask_matches_plain_left_padding_when_uncapped() {
+        // size=5 <= window=8, offset=0 -> non-capped, upper bound inert.
+        let windowed =
+            create_causal_mask_with_window_and_left_padding(5, 0, Some(8), &[1, 0]);
+        let plain = create_causal_mask_with_left_padding(5, 0, &[1, 0]);
+
+        let wshape = ffi::array_shape(&windowed);
+        let pshape = ffi::array_shape(&plain);
+        assert_eq!(wshape, vec![2, 1, 5, 5]);
+        assert_eq!(
+            wshape, pshape,
+            "non-capped windowed left-padding mask must share the plain shape"
+        );
+
+        let wcell = |b: i32, q: i32, k: i32| -> f32 {
+            ffi::item_f32(&ffi::slice(&windowed, &[b, 0, q, k], &[b + 1, 1, q + 1, k + 1]))
+        };
+        let pcell = |b: i32, q: i32, k: i32| -> f32 {
+            ffi::item_f32(&ffi::slice(&plain, &[b, 0, q, k], &[b + 1, 1, q + 1, k + 1]))
+        };
+        for b in 0..2 {
+            for q in 0..5 {
+                for k in 0..5 {
+                    let w = wcell(b, q, k);
+                    let p = pcell(b, q, k);
+                    assert_eq!(
+                        w.is_finite(),
+                        p.is_finite(),
+                        "cell ({b},{q},{k}) finiteness mismatch: windowed={w}, plain={p}"
+                    );
+                    if w.is_finite() {
+                        assert_eq!(w, p, "cell ({b},{q},{k}) value mismatch");
+                    }
+                }
+            }
+        }
     }
 }
