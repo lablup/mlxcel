@@ -56,7 +56,9 @@ mod special;
 #[path = "vlm_youtu_vl.rs"]
 mod youtu_vl_loader;
 
-pub(crate) use gemma::{load_gemma3_vlm, load_gemma3n_vlm, load_gemma4_vlm};
+pub(crate) use gemma::{
+    load_gemma3_vlm, load_gemma3n_vlm, load_gemma4_unified, load_gemma4_vlm,
+};
 pub(crate) use internvl::load_internvl_vlm;
 pub(crate) use llava::{load_llava_bunny_vlm, load_llava_vlm};
 pub(crate) use nemotron_h_nano_omni::load_nemotron_h_nano_omni_vlm;

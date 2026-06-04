@@ -173,7 +173,8 @@ pub use recurrent_gemma::GriffinModel;
 pub use rwkv7::Rwkv7;
 pub(crate) use sanitize::{
     Gemma4WeightBacking, load_gemma4_text_weights_with_backing,
-    load_gemma4_vlm_weights_with_backing, strip_gemma4_kv_shared_weights,
+    load_gemma4_unified_weights_with_backing, load_gemma4_vlm_weights_with_backing,
+    strip_gemma4_kv_shared_weights,
 };
 pub use sanitize::{
     convert_bf16_weights, convert_bf16_weights_with_keep, gemma3n_language_mlp_bf16_key,
@@ -207,6 +208,7 @@ pub enum ModelType {
     Gemma4,          // Gemma 4 text-only route
     Gemma3VLM,       // Gemma 3 VLM (vision-language)
     Gemma4VLM,       // Gemma 4 VLM (vision-language)
+    Gemma4Unified,   // Gemma 4 Unified (encoder-free text + vision + audio)
     LlavaVLM,        // LLaVA (CLIP/SigLIP + Llama/Qwen2)
     LlavaBunnyVLM,   // LLaVA-Bunny (SigLIP + Qwen2)
     AyaVisionVLM,    // Aya Vision (SigLIP + Cohere2)
@@ -340,6 +342,7 @@ pub const ALL_MODEL_TYPES: &[ModelType] = &[
     ModelType::Gemma4,
     ModelType::Gemma3VLM,
     ModelType::Gemma4VLM,
+    ModelType::Gemma4Unified,
     ModelType::LlavaVLM,
     ModelType::LlavaBunnyVLM,
     ModelType::AyaVisionVLM,
@@ -484,6 +487,9 @@ impl ModelType {
             ModelType::Gemma3VLM => ("Gemma 3 VLM", "Gemma VLM"),
             ModelType::Gemma3nVLM => ("Gemma 3n VLM (MobileNetV5 + Gemma3n)", "Gemma VLM"),
             ModelType::Gemma4VLM => ("Gemma 4 VLM", "Gemma VLM"),
+            ModelType::Gemma4Unified => {
+                ("Gemma 4 Unified (encoder-free text + vision + audio)", "Gemma VLM")
+            }
             ModelType::PaliGemmaVLM => ("PaliGemma (SigLIP + Gemma)", "Gemma VLM"),
 
             // ----- Mistral (text) -----

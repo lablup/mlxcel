@@ -110,6 +110,7 @@ macro_rules! for_each_model_registration {
             Gemma4 => { kind: Text, directory: ConfigBacked, weight: Some(WeightLoadRoute::ConfigBacked), adapter: None, config_backed: { dir_loader: models::Gemma4Model::load, args: models::gemma4::ModelArgs, weight_builder: models::Gemma4Model::from_weights, wrap: |m| LoadedModel::Gemma4(models::Gemma4Wrapper::new(m)) } };
             Gemma3VLM => { kind: Vlm, directory: Vlm, weight: None, adapter: Some("Gemma3 VLM cannot be loaded with LoRA adapters yet") };
             Gemma4VLM => { kind: Vlm, directory: Vlm, weight: None, adapter: Some("Gemma4 VLM cannot be loaded with LoRA adapters yet") };
+            Gemma4Unified => { kind: Vlm, directory: Vlm, weight: None, adapter: Some("Gemma4 Unified cannot be loaded with LoRA adapters yet") };
             LlavaVLM => { kind: Vlm, directory: Vlm, weight: None, adapter: Some("LLaVA VLM cannot be loaded with LoRA adapters yet") };
             LlavaBunnyVLM => { kind: Vlm, directory: Vlm, weight: None, adapter: Some("LLaVA VLM cannot be loaded with LoRA adapters yet") };
             AyaVisionVLM => { kind: Vlm, directory: Vlm, weight: None, adapter: Some("Aya Vision VLM cannot be loaded with LoRA adapters yet") };

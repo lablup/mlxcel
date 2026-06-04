@@ -643,8 +643,13 @@ pub(crate) fn prepare_request_vlm_embeddings(
         return prepare_request_video_embeddings(model, prompt_tokens, images, videos);
     }
 
-    // Audio-only or audio+images for Gemma4
+    // Audio-only or audio+images for Gemma4 / Gemma4 Unified
     if !audio.is_empty() {
+        if let Some(embeddings) =
+            prepare_gemma4_unified_audio_embeddings(model, prompt_tokens, images, audio)?
+        {
+            return Ok(Some(embeddings));
+        }
         match prepare_gemma4_audio_embeddings(model, prompt_tokens, images, audio)? {
             Some(embeddings) => return Ok(Some(embeddings)),
             None => {
@@ -817,6 +822,86 @@ fn prepare_gemma4_audio_embeddings(
         &processed_images,
         Some(&audio_features),
         Some(&audio_mask),
+    );
+
+    Ok(Some(embeddings))
+}
+
+/// Process audio (and optionally images) for Gemma 4 Unified models.
+///
+/// Encoder-free: the raw waveform is chunked into `audio_samples_per_token`
+/// frames (no mel spectrogram, no Conformer) and projected by `embed_audio`.
+/// Returns `Ok(None)` when the model is not a Gemma 4 Unified model with audio.
+fn prepare_gemma4_unified_audio_embeddings(
+    model: &LoadedModel,
+    prompt_tokens: &mut Vec<i32>,
+    images: &[Vec<u8>],
+    audio_data: &[Vec<u8>],
+) -> Result<Option<InputEmbeddings>> {
+    use crate::audio;
+
+    let unified = match model {
+        LoadedModel::Gemma4Unified(m) => m,
+        _ => return Ok(None),
+    };
+
+    if unified.embed_audio.is_none() {
+        tracing::warn!("Gemma4 Unified model has no audio embedder; ignoring audio input");
+        return Ok(None);
+    }
+
+    if audio_data.len() > 1 {
+        tracing::warn!(
+            "Multiple audio inputs provided ({}); only the first will be processed",
+            audio_data.len()
+        );
+    }
+
+    let (samples, sample_rate) = audio::load_wav_from_bytes(&audio_data[0])
+        .map_err(|e| anyhow!("Failed to decode audio: {}", e))?;
+    tracing::info!(
+        "Gemma4 Unified audio input: {} samples at {} Hz ({:.1}s)",
+        samples.len(),
+        sample_rate,
+        samples.len() as f64 / sample_rate.max(1) as f64
+    );
+
+    let audio_input = unified.processor.process_audio(&samples);
+    let num_audio_tokens = audio_input.num_frames;
+
+    crate::vlm_runtime::expand_gemma4_audio_tokens_for_server(
+        prompt_tokens,
+        unified.audio_token_id,
+        unified.boa_token_id,
+        unified.eoa_token_id,
+        num_audio_tokens,
+    );
+
+    // Process images alongside audio (encoder-free patch projector).
+    let processed_images = if !images.is_empty() {
+        let decoded_images = decode_request_images(images)?;
+        let processed = unified.processor.preprocess(&decoded_images);
+        let num_soft_tokens: Vec<usize> =
+            processed.iter().map(|img| img.num_soft_tokens).collect();
+        crate::vlm_runtime::expand_gemma4_image_tokens_pub(
+            prompt_tokens,
+            unified.image_token_id,
+            unified.boi_token_id,
+            unified.eoi_token_id,
+            &num_soft_tokens,
+        )?;
+        processed
+    } else {
+        Vec::new()
+    };
+
+    let input_ids_arr =
+        mlxcel_core::from_slice_i32(prompt_tokens, &[1, prompt_tokens.len() as i32]);
+    let embeddings = unified.get_input_embeddings_with_audio(
+        &input_ids_arr,
+        &processed_images,
+        Some(&audio_input.features),
+        Some(&audio_input.mask),
     );
 
     Ok(Some(embeddings))

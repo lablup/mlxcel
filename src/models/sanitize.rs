@@ -60,6 +60,19 @@ fn is_gemma4_vlm_weight(name: &str) -> bool {
         || name.starts_with("embed_audio.")
 }
 
+/// Weight filter for the encoder-free `gemma4_unified` architecture.
+///
+/// Differs from [`is_gemma4_vlm_weight`] by accepting the patch-projector
+/// prefix `vision_embedder.` (the unified vision front-end) instead of the ViT
+/// `vision_tower.` / Conformer `audio_tower.` towers, which this architecture
+/// does not have.
+fn is_gemma4_unified_weight(name: &str) -> bool {
+    is_gemma4_text_weight(name)
+        || name.starts_with("vision_embedder.")
+        || name.starts_with("embed_vision.")
+        || name.starts_with("embed_audio.")
+}
+
 /// Convert a single F8_E4M3 byte to f32.
 ///
 /// F8_E4M3FN format: 1 sign bit, 4 exponent bits (bias=7), 3 mantissa bits.
@@ -848,6 +861,25 @@ pub(crate) fn load_gemma4_text_weights_with_backing<P: AsRef<Path>>(
 pub(crate) fn load_gemma4_vlm_weights_with_backing<P: AsRef<Path>>(
     model_dir: P,
 ) -> Result<(mlxcel_core::weights::WeightMap, Gemma4WeightBacking), String> {
+    load_gemma4_family_weights_with_backing(model_dir, is_gemma4_vlm_weight)
+}
+
+/// Load `gemma4_unified` checkpoint weights (text backbone + encoder-free
+/// `vision_embedder.*` + `embed_vision.*` / `embed_audio.*`) with backing.
+pub(crate) fn load_gemma4_unified_weights_with_backing<P: AsRef<Path>>(
+    model_dir: P,
+) -> Result<(mlxcel_core::weights::WeightMap, Gemma4WeightBacking), String> {
+    load_gemma4_family_weights_with_backing(model_dir, is_gemma4_unified_weight)
+}
+
+/// Shared Gemma 4 family weight loader with a caller-supplied prefix filter.
+fn load_gemma4_family_weights_with_backing<P: AsRef<Path>, F>(
+    model_dir: P,
+    keep: F,
+) -> Result<(mlxcel_core::weights::WeightMap, Gemma4WeightBacking), String>
+where
+    F: Fn(&str) -> bool + Copy,
+{
     let model_dir = model_dir.as_ref();
     let mut weights = mlxcel_core::weights::WeightMap::new();
     let mut backing = Gemma4WeightBacking::default();
@@ -870,7 +902,7 @@ pub(crate) fn load_gemma4_vlm_weights_with_backing<P: AsRef<Path>>(
         load_filtered_shard(
             &path,
             &mut weights,
-            is_gemma4_vlm_weight,
+            keep,
             false,
             SelectiveLoadMode::DeferredMaterialize,
             Some(&mut backing.mmaps),

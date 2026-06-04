@@ -68,6 +68,7 @@ pub enum LoadedModel {
     // Vision-language models
     Gemma3VLM(vision::VisionLanguageModel),
     Gemma4VLM(vision::Gemma4VLModel),
+    Gemma4Unified(vision::Gemma4UnifiedModel),
     Llama4VLM(vision::VisionLanguageModel),
     LlavaVLM(vision::VisionLanguageModel),
     Qwen2VL(vision::Qwen2VLModel),
@@ -175,6 +176,7 @@ macro_rules! delegate_language_model {
             LoadedModel::Gemma4(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::Gemma3VLM(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::Gemma4VLM(inner) => LanguageModel::$method(inner, $($arg),*),
+            LoadedModel::Gemma4Unified(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::Llama4VLM(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::LlavaVLM(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::Qwen2VL(inner) => LanguageModel::$method(inner, $($arg),*),

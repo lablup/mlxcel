@@ -432,6 +432,33 @@ where
                 }),
             }))
         }
+        VlmRuntimeRef::Gemma4Unified(unified) => {
+            // Encoder-free patch projector: preprocess to flat patch matrices +
+            // 2-D positions, expand BOI/IMAGE/EOI placeholders, then merge.
+            let processed_images = unified.processor.preprocess(images);
+            let num_soft_tokens: Vec<usize> = processed_images
+                .iter()
+                .map(|image| image.num_soft_tokens)
+                .collect();
+            expand_gemma4_image_tokens(
+                prompt_tokens,
+                unified.image_token_id,
+                unified.boi_token_id,
+                unified.eoi_token_id,
+                &num_soft_tokens,
+            )?;
+
+            let input_ids_arr = prompt_ids_array(prompt_tokens);
+            let embeddings = unified.get_input_embeddings(&input_ids_arr, &processed_images);
+
+            Ok(Some(PreparedVlmEmbeddings {
+                embeddings,
+                preparation: Some(VlmPreparationSummary::Gemma4 {
+                    image_slots: processed_images.len(),
+                    total_tokens: prompt_tokens.len(),
+                }),
+            }))
+        }
         VlmRuntimeRef::Phi4MM(phi4mm) => {
             // 1. Preprocess images first to get num_img_tokens per image
             let processed_images = phi4mm.processor.preprocess(images);

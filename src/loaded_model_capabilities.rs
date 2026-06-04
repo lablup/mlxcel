@@ -34,6 +34,7 @@ pub enum VlmRuntimeRef<'a> {
     Moondream3(&'a vision::Moondream3VLModel),
     Gemma3n(&'a vision::Gemma3nVLModel),
     Gemma4(&'a vision::Gemma4VLModel),
+    Gemma4Unified(&'a vision::Gemma4UnifiedModel),
     Phi4MM(&'a vision::Phi4MMVLModel),
     Phi4SigLip(&'a vision::Phi4SigLipVLModel),
     Phi3V(&'a vision::Phi3VLModel),
@@ -136,6 +137,7 @@ impl LoadedModel {
             Self::Moondream3VLM(model) => Some(VlmRuntimeRef::Moondream3(model)),
             Self::Gemma3nVLM(model) => Some(VlmRuntimeRef::Gemma3n(model)),
             Self::Gemma4VLM(model) => Some(VlmRuntimeRef::Gemma4(model)),
+            Self::Gemma4Unified(model) => Some(VlmRuntimeRef::Gemma4Unified(model)),
             Self::Phi4MMVLM(model) => Some(VlmRuntimeRef::Phi4MM(model)),
             Self::Phi4SigLipVLM(model) => Some(VlmRuntimeRef::Phi4SigLip(model)),
             Self::Phi3VLM(model) => Some(VlmRuntimeRef::Phi3V(model)),
@@ -234,8 +236,14 @@ impl LoadedModel {
     /// then surfaces `None` for `per_layer_inputs`, matching the
     /// no-VLM-prefill semantics.
     pub fn bind_gemma4_per_layer_inputs_to_sequence(&self, seq_id: mlxcel_core::cache::SequenceId) {
-        if let Some(VlmRuntimeRef::Gemma4(gemma4)) = self.vlm_runtime() {
-            gemma4.bind_per_layer_inputs_to_sequence(seq_id);
+        match self.vlm_runtime() {
+            Some(VlmRuntimeRef::Gemma4(gemma4)) => {
+                gemma4.bind_per_layer_inputs_to_sequence(seq_id);
+            }
+            Some(VlmRuntimeRef::Gemma4Unified(unified)) => {
+                unified.bind_per_layer_inputs_to_sequence(seq_id);
+            }
+            _ => {}
         }
     }
 
@@ -254,10 +262,13 @@ impl LoadedModel {
         &self,
         seq_id: mlxcel_core::cache::SequenceId,
     ) -> Option<mlxcel_core::UniquePtr<mlxcel_core::MlxArray>> {
-        if let Some(VlmRuntimeRef::Gemma4(gemma4)) = self.vlm_runtime() {
-            return gemma4.take_per_layer_inputs_for_sequence(seq_id);
+        match self.vlm_runtime() {
+            Some(VlmRuntimeRef::Gemma4(gemma4)) => gemma4.take_per_layer_inputs_for_sequence(seq_id),
+            Some(VlmRuntimeRef::Gemma4Unified(unified)) => {
+                unified.take_per_layer_inputs_for_sequence(seq_id)
+            }
+            _ => None,
         }
-        None
     }
 
     /// Re-install a previously taken Gemma 4 `per_layer_inputs`
@@ -271,8 +282,14 @@ impl LoadedModel {
         if snapshot.is_none() {
             return;
         }
-        if let Some(VlmRuntimeRef::Gemma4(gemma4)) = self.vlm_runtime() {
-            gemma4.install_per_layer_inputs_for_sequence(seq_id, snapshot);
+        match self.vlm_runtime() {
+            Some(VlmRuntimeRef::Gemma4(gemma4)) => {
+                gemma4.install_per_layer_inputs_for_sequence(seq_id, snapshot);
+            }
+            Some(VlmRuntimeRef::Gemma4Unified(unified)) => {
+                unified.install_per_layer_inputs_for_sequence(seq_id, snapshot);
+            }
+            _ => {}
         }
     }
 

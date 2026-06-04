@@ -113,6 +113,11 @@ pub fn get_model_type(model_path: &Path) -> Result<ModelType> {
         } else {
             ModelType::Gemma4
         }),
+        // Gemma 4 Unified is always multimodal (text + vision [+ audio]); it
+        // carries `vision_embedder.*` patch-projector weights rather than the
+        // `vision_tower.*` ViT used by `gemma4`/Gemma4VLM, so it is detected by
+        // model_type alone and never misrouted to Gemma4VLM.
+        "gemma4_unified" => Ok(ModelType::Gemma4Unified),
         "gemma3n" | "gemma3n_text" => Ok(detect_text_or_vlm(
             &v,
             ModelType::Gemma3n,
