@@ -111,6 +111,19 @@ pub struct TextConfig {
     pub final_logit_softcapping: Option<f32>,
     #[serde(default)]
     pub use_double_wide_mlp: bool,
+    /// Gemma 4 Unified blockwise bidirectional attention selector.
+    ///
+    /// When set to `"vision"` (the only value emitted by current
+    /// `gemma4_unified` checkpoints), image/video token spans attend
+    /// bidirectionally *within each contiguous span* during prefill, while
+    /// everything else stays causal/windowed. `None`/absent (the value on
+    /// every `gemma4`/`gemma4_text` checkpoint) preserves the standard
+    /// fully-causal behaviour. The blockwise overlay itself is driven by the
+    /// `bidirectional_block_ids` argument passed into
+    /// [`Gemma4TextModel::forward_with_speculative_sinks`]; this flag only
+    /// records the checkpoint's intent.
+    #[serde(default)]
+    pub use_bidirectional_attention: Option<String>,
     #[serde(default)]
     pub enable_moe_block: bool,
     #[serde(default)]
@@ -154,6 +167,14 @@ impl TextConfig {
 
     fn is_sliding_layer(&self, layer_idx: usize) -> bool {
         self.layer_type(layer_idx) == "sliding_attention"
+    }
+
+    /// Whether the checkpoint requests blockwise bidirectional attention over
+    /// vision token spans (the `gemma4_unified` `"vision"` mode). Used by the
+    /// Gemma 4 Unified runtime to decide whether to build the `same_block`
+    /// overlay during image/video prefill.
+    pub fn uses_bidirectional_vision_attention(&self) -> bool {
+        self.use_bidirectional_attention.as_deref() == Some("vision")
     }
 
     fn head_dim_for_layer(&self, layer_idx: usize) -> i32 {
@@ -253,6 +274,61 @@ fn get_weight_copy(weights: &WeightMap, name: &str) -> Result<UniquePtr<MlxArray
         .get(name)
         .map(|w| mlxcel_core::copy(w))
         .ok_or_else(|| format!("Weight not found: {}", name))
+}
+
+/// Overlay a blockwise bidirectional span onto an additive attention mask.
+///
+/// `base` is an additive f32 mask (`0.0` = attend, `-inf` = masked) of shape
+/// `[q, k]` (= `[seq_len, seq_len + offset]`). `block_ids` is an int32 `[seq_len]`
+/// tensor assigning each query/key position a *block id*: positions inside the
+/// same contiguous image/video span share a non-negative id, and every other
+/// position is `-1`. The returned mask additionally allows attention (sets the
+/// additive value to `0`) wherever the query and key positions share the same
+/// non-negative block id — making each vision span bidirectional in both
+/// directions while leaving text↔text, text↔vision and cross-block pairs at the
+/// base causal/windowed value.
+///
+/// This mirrors the upstream `gemma4_unified` mask construction
+/// (`new_mask = base_mask | same_block`): for the Gemma 4 Unified prefill the
+/// vision span is never split across a chunk (the loader sets
+/// `no_chunked_prefill`), so `offset == 0` and `block_ids` aligns with both the
+/// query and key axes.
+fn overlay_block_bidirectional(base: &MlxArray, block_ids: &MlxArray) -> UniquePtr<MlxArray> {
+    let base_shape = mlxcel_core::array_shape(base);
+    debug_assert!(
+        base_shape.len() >= 2,
+        "base attention mask must be at least 2-D, got shape {base_shape:?}",
+    );
+    let q = base_shape[base_shape.len() - 2];
+    let k = base_shape[base_shape.len() - 1];
+
+    // Align the per-position block ids to the query (rows) and key (cols)
+    // axes. For single-chunk prefill q == k == seq_len; when the cache holds a
+    // prefix (offset > 0) the key axis is longer than the block-id vector, so
+    // the leading `k - q` key columns (the already-cached prefix) get id -1 and
+    // never participate in a same-block match.
+    let ids_shape = mlxcel_core::array_shape(block_ids);
+    let id_len = if ids_shape.is_empty() { 1 } else { ids_shape[0] };
+    let q_ids = mlxcel_core::reshape(block_ids, &[q, 1]);
+    let k_ids = if k == id_len {
+        mlxcel_core::reshape(block_ids, &[1, k])
+    } else {
+        // Pad the key-side ids on the left with -1 so cached-prefix columns
+        // are non-matching. pad_width is [(before, after)] per axis.
+        let pad_before = (k - id_len).max(0);
+        let padded = mlxcel_core::pad(block_ids, &[pad_before, 0], -1.0);
+        mlxcel_core::reshape(&padded, &[1, k])
+    };
+
+    // same_block[q, k] = (q_ids >= 0) && (q_ids == k_ids).
+    let zero = mlxcel_core::from_slice_i32(&[0], &[1]);
+    let q_non_neg = mlxcel_core::greater_equal(&q_ids, &zero);
+    let eq = mlxcel_core::equal(&q_ids, &k_ids);
+    let same_block = mlxcel_core::logical_and(&q_non_neg, &eq);
+
+    // new_mask = where(same_block, 0.0, base).
+    let zero_f32 = mlxcel_core::full_f32(&base_shape, 0.0, mlxcel_core::dtype::FLOAT32);
+    mlxcel_core::where_cond(&same_block, &zero_f32, base)
 }
 
 pub struct RMSNormNoScale {
@@ -1673,6 +1749,7 @@ impl Gemma4TextModel {
             None,
             None,
             false,
+            None,
         )
     }
 
@@ -1701,6 +1778,7 @@ impl Gemma4TextModel {
     /// The hidden-state and shared-K/V captures intentionally preserve the
     /// model's native bf16/f16 dtype — no f32 promotion (per
     /// `docs/apple-silicon-precision.md`).
+    #[allow(clippy::too_many_arguments)]
     pub fn forward_with_speculative_sinks(
         &self,
         input_ids: &MlxArray,
@@ -1711,6 +1789,7 @@ impl Gemma4TextModel {
         capture_layer_ids: Option<&[usize]>,
         mut sinks: Option<&mut Gemma4SpeculativeSinks>,
         skip_final_norm: bool,
+        bidirectional_block_ids: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
         // When `input_embeddings` is supplied (e.g. from the VLM path where
         // vision/audio features have already been merged into the embedding
@@ -1759,6 +1838,25 @@ impl Gemma4TextModel {
             )
         } else {
             (None, None)
+        };
+
+        // Gemma 4 Unified blockwise bidirectional overlay. When the caller
+        // (the `gemma4_unified` runtime) supplies per-position vision block
+        // ids during prefill, allow bidirectional attention *within* each
+        // image/video span on both the full-attention and sliding-window base
+        // masks. Text↔text, text↔vision and cross-block pairs keep the causal
+        // (and, for sliding layers, windowed) base value. Decode (`l == 1`)
+        // leaves the masks `None` and is unaffected.
+        let (global_mask, sliding_mask) = match bidirectional_block_ids {
+            Some(block_ids) if l > 1 => (
+                global_mask
+                    .as_ref()
+                    .map(|m| overlay_block_bidirectional(m.as_ref().unwrap(), block_ids)),
+                sliding_mask
+                    .as_ref()
+                    .map(|m| overlay_block_bidirectional(m.as_ref().unwrap(), block_ids)),
+            ),
+            _ => (global_mask, sliding_mask),
         };
 
         let mut shared_kv_store: HashMap<usize, (UniquePtr<MlxArray>, UniquePtr<MlxArray>, i32)> =
@@ -2171,6 +2269,38 @@ impl Gemma4Model {
         logits
     }
 
+    /// Gemma 4 Unified forward with the optional blockwise bidirectional
+    /// vision overlay. Identical to [`Self::forward_with_caches_and_embeddings`]
+    /// except it forwards `bidirectional_block_ids` (per-position image/video
+    /// span ids; `None` for fully-causal prefill) into the text model so a
+    /// vision span attends bidirectionally within itself during prefill.
+    fn forward_unified_with_caches_and_embeddings(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        caches: &mut [Cache],
+        mask: Option<&MlxArray>,
+        per_layer_inputs: Option<&MlxArray>,
+        bidirectional_block_ids: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        let hidden = self.text_model.forward_with_speculative_sinks(
+            input_ids,
+            input_embeddings,
+            caches,
+            mask,
+            per_layer_inputs,
+            None,
+            None,
+            false,
+            bidirectional_block_ids,
+        );
+        let mut logits = self.text_model.embed_tokens.as_linear(&hidden);
+        if let Some(cap) = self.config.final_logit_softcapping {
+            logits = mlxcel_core::compiled_softcap(&logits, cap);
+        }
+        logits
+    }
+
     /// Sink-aware variant of [`Self::forward_with_caches_and_embeddings`]
     /// used by the Gemma 4 MTP target path. Delegates the
     /// transformer pass to
@@ -2199,6 +2329,7 @@ impl Gemma4Model {
             capture_layer_ids,
             sinks,
             false,
+            None,
         );
         let mut logits = self.text_model.embed_tokens.as_linear(&hidden);
         if let Some(cap) = self.config.final_logit_softcapping {
@@ -2232,6 +2363,7 @@ impl Gemma4Model {
             capture_layer_ids,
             sinks,
             skip_final_norm,
+            None,
         )
     }
 
@@ -2869,6 +3001,47 @@ impl Gemma4Wrapper {
                 )
             },
         )
+    }
+
+    /// Gemma 4 Unified VLM-prefill / step forward.
+    ///
+    /// Mirrors [`Self::forward_with_inputs_and_sequence_id`] but additionally
+    /// forwards `bidirectional_block_ids` so image/video token spans attend
+    /// bidirectionally within themselves during prefill (the `gemma4_unified`
+    /// `use_bidirectional_attention == "vision"` behaviour). `None` block ids
+    /// (audio present, decode, or a non-vision prompt) keep the standard
+    /// causal/windowed masks. Used by
+    /// [`crate::vision::Gemma4UnifiedModel::forward_with_embeddings_and_sequence_id`].
+    pub(crate) fn forward_unified_with_inputs_and_sequence_id(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        per_layer_inputs: Option<&MlxArray>,
+        mask: Option<&MlxArray>,
+        seq_id: Option<SequenceId>,
+        bidirectional_block_ids: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        self.sequence_state.with_or_create_sequence_state(
+            seq_id,
+            || self.model.make_caches(),
+            |sequence_caches| {
+                self.model.forward_unified_with_caches_and_embeddings(
+                    input_ids,
+                    input_embeddings,
+                    sequence_caches,
+                    mask,
+                    per_layer_inputs,
+                    bidirectional_block_ids,
+                )
+            },
+        )
+    }
+
+    /// Read-only access to the wrapped text config (for the Gemma 4 Unified
+    /// runtime to inspect `use_bidirectional_attention`, `sliding_window`,
+    /// etc. without re-parsing the checkpoint).
+    pub(crate) fn text_config(&self) -> &TextConfig {
+        &self.model.config
     }
 
     pub(crate) fn num_layers_value(&self) -> usize {
