@@ -344,6 +344,59 @@ mod tests {
         assert_eq!(rope.rope_type, "proportional");
     }
 
+    /// The Gemma 4 Unified 12B drafter ships `model_type:
+    /// gemma4_unified_assistant` with `text_config.model_type:
+    /// gemma4_unified_text` and `backbone_hidden_size: 3840`. The config must
+    /// parse and normalize exactly like the non-unified assistant spelling —
+    /// neither `model_type` is hard-rejected (both are free-form strings).
+    #[test]
+    fn deserialize_gemma4_unified_assistant_config_parses_and_normalizes() {
+        let json = r#"{
+            "model_type": "gemma4_unified_assistant",
+            "backbone_hidden_size": 3840,
+            "use_ordered_embeddings": false,
+            "num_centroids": 2048,
+            "centroid_intermediate_top_k": 32,
+            "tie_word_embeddings": true,
+            "block_size": 4,
+            "text_config": {
+                "model_type": "gemma4_unified_text",
+                "hidden_size": 1024,
+                "num_hidden_layers": 4,
+                "intermediate_size": 2048,
+                "num_attention_heads": 4,
+                "head_dim": 256,
+                "global_head_dim": 512,
+                "rms_norm_eps": 1.0e-6,
+                "vocab_size": 262144,
+                "num_key_value_heads": 1,
+                "rope_parameters": {
+                    "full_attention": {"rope_theta": 1000000.0, "partial_rotary_factor": 1.0, "rope_type": "proportional"},
+                    "sliding_attention": {"rope_theta": 10000.0, "partial_rotary_factor": 1.0, "rope_type": "default"}
+                },
+                "sliding_window": 1024,
+                "sliding_window_pattern": 4,
+                "max_position_embeddings": 131072,
+                "layer_types": ["sliding_attention", "sliding_attention", "sliding_attention", "full_attention"]
+            }
+        }"#;
+        let cfg: Gemma4AssistantConfig = serde_json::from_str(json).expect("parse unified config");
+        let cfg = cfg.normalize().expect("normalize");
+
+        assert_eq!(cfg.model_type, "gemma4_unified_assistant");
+        assert_eq!(cfg.backbone_hidden_size, 3840);
+        let tc = cfg.text_config();
+        assert_eq!(tc.model_type, "gemma4_unified_text");
+        assert_eq!(tc.hidden_size, 1024);
+        assert_eq!(tc.num_hidden_layers, 4);
+        // num_kv_shared_layers was omitted (0) in JSON; normalize() promotes it
+        // to num_hidden_layers per upstream __post_init__.
+        assert_eq!(tc.num_kv_shared_layers, 4);
+        // The full-attention head uses global_head_dim when present.
+        assert_eq!(tc.head_dim_for_layer(0), 256);
+        assert_eq!(tc.head_dim_for_layer(3), 512);
+    }
+
     #[test]
     fn normalize_rejects_missing_text_config() {
         let cfg = Gemma4AssistantConfig {

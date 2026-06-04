@@ -453,6 +453,94 @@ fn bind_accepts_centroid_lm_head_via_masked_embedder() {
         .expect("bind must succeed when MaskedEmbedder is wired in");
 }
 
+// ── Target↔drafter compatibility guard (validate_target_compat) ─────────────
+
+#[test]
+fn validate_target_compat_accepts_matching_hidden_size() {
+    // make_test_config sets backbone_hidden_size = 32. A target whose
+    // embed_tokens reports hidden = 32 is a compatible pairing, so the
+    // pre-bind compat guard must accept it. The MockLanguageModel does not
+    // expose embed_tokens_module, so the vocab arm is skipped — the
+    // hidden-size gate is what we exercise here.
+    let cfg = make_test_config(2, true);
+    let weights = make_test_weights(&cfg);
+    let model = Gemma4AssistantDraftModel::from_weights(weights, cfg).expect("load");
+
+    let target = MockLanguageModel::new(16, 32);
+    model
+        .validate_target_compat(&target)
+        .expect("matching hidden size must pass the compat guard");
+}
+
+#[test]
+fn validate_target_compat_rejects_hidden_size_mismatch() {
+    // make_test_config sets backbone_hidden_size = 32. A target whose
+    // embed_tokens reports hidden = 64 is an incompatible pairing (the MTP
+    // drafter concatenates the target hidden into a 2×backbone input), so the
+    // pre-bind compat guard must reject it with a clear BindFailed error that
+    // names both sizes.
+    let cfg = make_test_config(2, true);
+    let weights = make_test_weights(&cfg);
+    let model = Gemma4AssistantDraftModel::from_weights(weights, cfg).expect("load");
+
+    let target = MockLanguageModel::new(16, 64);
+    let err = model
+        .validate_target_compat(&target)
+        .expect_err("mismatched hidden size must be rejected");
+    match err {
+        DrafterError::BindFailed { reason } => {
+            assert!(
+                reason.contains("32") && reason.contains("64"),
+                "error must name both the drafter backbone (32) and target hidden (64): {reason}"
+            );
+            assert!(
+                reason.contains("hidden size"),
+                "error must explain the hidden-size mismatch: {reason}"
+            );
+        }
+        other => panic!("expected BindFailed, got {other:?}"),
+    }
+}
+
+#[test]
+fn validate_target_compat_rejects_target_without_embed_tokens() {
+    // A target that does not override embed_tokens cannot be probed for its
+    // hidden size; the compat guard surfaces TargetMissingFeature so the
+    // operator sees the same actionable message bind() would emit.
+    struct BareTarget;
+    impl LanguageModel for BareTarget {
+        fn forward(
+            &self,
+            _input_ids: &MlxArray,
+            _caches: &mut [crate::layers::KVCache],
+            _mask: Option<&MlxArray>,
+        ) -> UniquePtr<MlxArray> {
+            unreachable!()
+        }
+        fn make_caches(&self) -> Vec<crate::layers::KVCache> {
+            Vec::new()
+        }
+        fn num_layers(&self) -> usize {
+            0
+        }
+        fn eos_token_ids(&self) -> Vec<i32> {
+            Vec::new()
+        }
+    }
+
+    let cfg = make_test_config(2, true);
+    let weights = make_test_weights(&cfg);
+    let model = Gemma4AssistantDraftModel::from_weights(weights, cfg).expect("load");
+
+    let err = model
+        .validate_target_compat(&BareTarget)
+        .expect_err("target without embed_tokens must be rejected");
+    match err {
+        DrafterError::TargetMissingFeature { feature } => assert_eq!(feature, "embed_tokens"),
+        other => panic!("expected TargetMissingFeature, got {other:?}"),
+    }
+}
+
 /// Full E-series Centroid path: `bind` → `set_shared_kv` → `draft_block`.
 ///
 /// Asserts:

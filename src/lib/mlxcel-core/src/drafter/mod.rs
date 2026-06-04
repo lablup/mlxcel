@@ -47,7 +47,10 @@
 //!
 //! ```python
 //! KNOWN_DRAFTER_KINDS = {"dflash", "mtp"}
-//! DRAFTER_KIND_BY_MODEL_TYPE = {"gemma4_assistant": "mtp"}
+//! DRAFTER_KIND_BY_MODEL_TYPE = {
+//!     "gemma4_assistant": "mtp",
+//!     "gemma4_unified_assistant": "mtp",
+//! }
 //! DEFAULT_DRAFTER_KIND = "dflash"
 //! ```
 //!
@@ -192,7 +195,8 @@ pub const DEFAULT_DRAFTER_KIND: DrafterKind = DrafterKind::Dflash;
 
 /// Static map from `config.json::model_type` to the required
 /// [`DrafterKind`]. Mirrors upstream
-/// `DRAFTER_KIND_BY_MODEL_TYPE = {"gemma4_assistant": "mtp"}`.
+/// `DRAFTER_KIND_BY_MODEL_TYPE = {"gemma4_assistant": "mtp",
+/// "gemma4_unified_assistant": "mtp"}`.
 ///
 /// Returned as `&'static HashMap` so call sites can perform `.get()`
 /// without rebuilding the map on every call. Built lazily on first
@@ -202,6 +206,11 @@ pub fn drafter_kind_by_model_type() -> &'static HashMap<&'static str, DrafterKin
     MAP.get_or_init(|| {
         let mut m = HashMap::new();
         m.insert("gemma4_assistant", DrafterKind::Mtp);
+        // The Gemma 4 Unified target ships its own MTP "assistant" drafter under
+        // the `gemma4_unified_assistant` model_type. It loads with the same
+        // `Gemma4AssistantDraftModel` class (identical centroid head + 4-layer
+        // shared-K/V stack) and therefore resolves to the same MTP round loop.
+        m.insert("gemma4_unified_assistant", DrafterKind::Mtp);
         m
     })
 }
@@ -527,6 +536,29 @@ pub trait Drafter {
     /// Returns `Err` if the target lacks a feature the drafter needs
     /// (e.g. no `embed_tokens` override for MTP).
     fn bind(&mut self, target: &dyn LanguageModel) -> Result<(), DrafterError>;
+
+    /// Validate that this drafter is compatible with the supplied target
+    /// **before** [`Self::bind`] is called.
+    ///
+    /// This is the dimension/vocabulary compatibility gate. The MTP
+    /// assistant drafter consumes the target's last backbone hidden state
+    /// concatenated with the target's token embeddings as a
+    /// `2 × backbone_hidden_size` input, so its `backbone_hidden_size` MUST
+    /// equal the target's text hidden size and its LM-head vocabulary MUST
+    /// match the target vocabulary. A mismatched pairing (e.g. a 12B Unified
+    /// target fed an assistant built for a different backbone) would either
+    /// crash deep inside the first `draft_block` matmul or — worse — produce
+    /// silently wrong drafts. Catching it here yields a clear, actionable
+    /// operator error at dispatch time instead.
+    ///
+    /// The default implementation is a no-op (`Ok(())`); shapes that do not
+    /// require a strict dimension match (DFlash, InternalMtp) keep the
+    /// default. Concrete MTP drafters override this to compare
+    /// `backbone_hidden_size` / vocab against the bound target.
+    #[allow(unused_variables)]
+    fn validate_target_compat(&self, target: &dyn LanguageModel) -> Result<(), DrafterError> {
+        Ok(())
+    }
 
     /// Inform the drafter of the target's freshly-captured shared K/V
     /// tensors at the start of a new draft block.
@@ -881,9 +913,15 @@ mod tests {
     fn drafter_kind_by_model_type_maps_gemma4_assistant_to_mtp() {
         let map = drafter_kind_by_model_type();
         assert_eq!(map.get("gemma4_assistant"), Some(&DrafterKind::Mtp));
-        // No other entries: parity with upstream
-        // `DRAFTER_KIND_BY_MODEL_TYPE = {"gemma4_assistant": "mtp"}`.
-        assert_eq!(map.len(), 1);
+        // The Gemma 4 Unified assistant resolves to the same MTP round loop.
+        assert_eq!(
+            map.get("gemma4_unified_assistant"),
+            Some(&DrafterKind::Mtp)
+        );
+        // Both assistant spellings, nothing else: parity with upstream
+        // `DRAFTER_KIND_BY_MODEL_TYPE = {"gemma4_assistant": "mtp",
+        // "gemma4_unified_assistant": "mtp"}`.
+        assert_eq!(map.len(), 2);
     }
 
     // ----- resolve_drafter_kind -------------------------------------------
@@ -892,6 +930,17 @@ mod tests {
     fn auto_detect_gemma4_assistant_resolves_to_mtp() {
         let dir = tempdir().unwrap();
         write_drafter_config(&dir, Some("gemma4_assistant"));
+        let resolved = resolve_drafter_kind(dir.path(), None).unwrap();
+        assert_eq!(resolved, DrafterKind::Mtp);
+    }
+
+    #[test]
+    fn auto_detect_gemma4_unified_assistant_resolves_to_mtp() {
+        // The Gemma 4 Unified 12B drafter ships model_type
+        // `gemma4_unified_assistant`; it must auto-detect to the MTP round
+        // loop exactly like the non-unified `gemma4_assistant`.
+        let dir = tempdir().unwrap();
+        write_drafter_config(&dir, Some("gemma4_unified_assistant"));
         let resolved = resolve_drafter_kind(dir.path(), None).unwrap();
         assert_eq!(resolved, DrafterKind::Mtp);
     }
