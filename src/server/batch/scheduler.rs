@@ -1880,13 +1880,19 @@ impl BatchScheduler {
             )
             && !super::speculative_burst::mtp_batched_burst_enabled()
         {
+            // The B>1 batched MTP burst is off by default because it is not
+            // consistently faster than classic batched decode on the 31B
+            // (M5 Max: ~1.06x for a same-length window, ~0.78x once prompt
+            // lengths differ and requests serialize into head-of-line-blocking
+            // B=1 bursts). M5 Max runs observed greedy parity holding at
+            // temperature 0. Set MLXCEL_ENABLE_MTP_BATCH=1 to force the path.
             let mut rejected_window = window;
             let head = rejected_window.remove(0);
             tracing::info!(
-                "MTP batched speculative burst declined for seq {}: current Gemma 4 \
-                 B>1 MTP validation does not preserve greedy parity on real 31B; \
-                 falling back to classic decode. Set MLXCEL_ENABLE_MTP_BATCH=1 to force \
-                 the experimental batched MTP path",
+                "MTP batched speculative burst declined for seq {}: B>1 MTP is not \
+                 consistently faster than classic batched decode on the 31B; falling \
+                 back to classic decode. Set MLXCEL_ENABLE_MTP_BATCH=1 to force the \
+                 experimental batched MTP path",
                 head.seq_id,
             );
             for sibling in rejected_window {

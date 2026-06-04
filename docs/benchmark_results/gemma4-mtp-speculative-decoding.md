@@ -79,10 +79,25 @@ it is consistently above 1.0x, which is why B=1 MTP is now on by default for
 batch-capable targets too. Lower-bandwidth Apple Silicon, where the earlier
 "slower" calibration may still hold, can opt out with `MLXCEL_ENABLE_MTP_B1=0`.
 
-**B>1 (batched)** stays declined regardless: the batched MTP burst is not
-consistently faster than classic batched decode on the 31B and does not preserve
-greedy parity there yet (`MLXCEL_ENABLE_MTP_BATCH=1` forces the experimental
-path).
+#### B>1 (batched) stays off by default
+
+Forcing the batched burst with `MLXCEL_ENABLE_MTP_BATCH=1`, 4 concurrent
+requests, 160 tokens each, `temperature 0`:
+
+| Case                                   | classic agg tok/s | B>1 MTP agg tok/s | speedup | parity |
+| -------------------------------------- | ----------------: | ----------------: | ------: | ------ |
+| same-length window (true B>1 burst)    |              31.8 |              33.7 |  1.06x  | identical |
+| variable-length mix (realistic)        |              32.0 |              24.8 |  0.78x  | identical |
+
+The batched burst only groups requests that share a prompt length. A true
+same-length window is a marginal 1.06x. Once prompt lengths differ, the requests
+serialize into per-request B=1 bursts that head-of-line-block each other, so the
+realistic mixed case is **slower** (0.78x). Output stayed byte-identical to
+classic decode in both cases on M5 Max, so the earlier greedy-parity concern did
+not reproduce here, though it has not been exhaustively re-validated. Because the
+throughput is at best marginal and negative under realistic load, B>1 MTP stays
+off by default. The real bottleneck, variable-length batched bursts, is tracked
+as a follow-up.
 
 ### Gemma 4 26B-A4B (MoE)
 

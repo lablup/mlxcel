@@ -434,15 +434,25 @@ pub(crate) fn mtp_b1_burst_enabled() -> bool {
         .unwrap_or(true)
 }
 
-/// Whether to force the Gemma 4 MTP B>1 batched burst path.
+/// Whether to force the Gemma 4 MTP B>1 batched burst path. Off by default.
 ///
 /// Reference Gemma 4 MTP gets its advertised speedups from batched verify
-/// windows. The Rust path now preserves per-row cache positions / RoPE
-/// anchors after mixed accepts, but real 31B validation still shows the
-/// forced B>1 MTP burst is not consistently faster than classic batched
-/// decode. Keep the path available behind an explicit operator/debug flag
-/// while production falls back to the known-profitable classic scheduler
-/// path.
+/// windows, but on Apple Silicon (M5 Max, 31B + bf16 assistant, 4 concurrent
+/// requests, temperature 0) the forced B>1 burst is not worth enabling by
+/// default:
+/// - A true same-length batched burst is only ~1.06x faster than classic
+///   batched decode (aggregate ~33.7 vs ~31.8 tok/s).
+/// - The batched burst only groups requests that share a prompt length; a
+///   variable-length mix serializes into per-request B=1 bursts that
+///   head-of-line-block each other, so the realistic case is ~0.78x (slower).
+///   Variable-length batched bursts are the real bottleneck and a tracked
+///   follow-up.
+///
+/// Greedy parity: M5 Max runs (160 tokens, temperature 0) observed
+/// byte-identical output vs classic decode in both the same-length and
+/// variable-length cases, so parity held; it has not been exhaustively
+/// re-validated across longer generations / samplers, so the path stays behind
+/// this flag and production uses the classic scheduler.
 pub(crate) fn mtp_batched_burst_enabled() -> bool {
     std::env::var("MLXCEL_ENABLE_MTP_BATCH")
         .ok()
