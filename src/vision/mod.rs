@@ -42,6 +42,7 @@ pub mod gemma4_multimodal_embedder;
 pub mod gemma4_per_layer_inputs_state;
 pub mod gemma4_unified;
 pub mod gemma4_unified_config;
+pub mod gemma4_unified_mask;
 pub mod gemma4_vl;
 pub mod internvl;
 pub mod minicpmo_vl;
