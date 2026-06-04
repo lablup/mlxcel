@@ -58,7 +58,7 @@ fn patch_dim_and_padding() {
     // patches: [num_soft_tokens, patch_dim]; positions: [num_soft_tokens, 2].
     assert_eq!(
         mlxcel_core::array_shape(&single.patches),
-        vec![6, (48 * 48 * 3) as i32]
+        vec![6, 48 * 48 * 3]
     );
     assert_eq!(mlxcel_core::array_shape(&single.positions), vec![6, 2]);
 

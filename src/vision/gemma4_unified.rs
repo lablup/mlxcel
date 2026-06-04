@@ -90,7 +90,7 @@ pub fn compute_vision_block_ids(
     let has_vision = types
         .iter()
         .any(|&t| t == token_type::IMAGE || t == token_type::VIDEO);
-    let has_audio = types.iter().any(|&t| t == token_type::AUDIO);
+    let has_audio = types.contains(&token_type::AUDIO);
     if !has_vision || has_audio {
         return None;
     }
