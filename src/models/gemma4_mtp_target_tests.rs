@@ -330,7 +330,7 @@ fn unified_b1_adapter_implements_mtp_target() {
     // adapter implements `MtpTarget` for an arbitrary borrow lifetime. Never
     // called — it exists purely to fail compilation on a broken impl.
     #[allow(dead_code)]
-    fn assert_mtp_target<'a, T: MtpTarget>() {}
+    fn assert_mtp_target<T: MtpTarget>() {}
     let _ = assert_mtp_target::<Gemma4UnifiedMtpTargetAdapter<'_>>;
 }
 
@@ -340,7 +340,7 @@ fn unified_b1_adapter_implements_mtp_target() {
 #[test]
 fn unified_batched_adapter_implements_mtp_target() {
     #[allow(dead_code)]
-    fn assert_mtp_target<'a, T: MtpTarget>() {}
+    fn assert_mtp_target<T: MtpTarget>() {}
     let _ = assert_mtp_target::<Gemma4UnifiedMtpBatchedTargetAdapter<'_>>;
     // Pin the accessor name/signature the dispatch + tests rely on.
     #[allow(dead_code)]
