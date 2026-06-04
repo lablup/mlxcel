@@ -206,6 +206,42 @@ fn unified_sanitize_splits_moe_switch_glu() {
 }
 
 #[test]
+fn unified_sanitize_moe_split_normalizes_model_prefix() {
+    // A `model.`-prefixed fused expert key must land under the normalized
+    // `language_model.model.…` namespace, like every other sanitized tensor —
+    // the split branch runs its output keys through `normalize_gemma4_unified_key`.
+    let mut raw = WeightMap::new();
+    raw.insert(
+        "model.language_model.layers.0.mlp.experts.gate_up_proj".to_string(),
+        mlxcel_core::ones(&[2, 3, 8], dtype::FLOAT32),
+    );
+    raw.insert(
+        "model.language_model.layers.0.mlp.experts.down_proj".to_string(),
+        mlxcel_core::ones(&[2, 4, 3], dtype::FLOAT32),
+    );
+
+    let out = sanitize_gemma4_unified_weights(raw, true);
+
+    // Split keys are normalized (no leftover raw `model.language_model.` prefix).
+    assert!(
+        out.contains_key("language_model.model.layers.0.mlp.experts.switch_glu.gate_proj.weight"),
+        "gate_proj split present under normalized prefix"
+    );
+    assert!(
+        out.contains_key("language_model.model.layers.0.mlp.experts.switch_glu.up_proj.weight"),
+        "up_proj split present under normalized prefix"
+    );
+    assert!(
+        out.contains_key("language_model.model.layers.0.mlp.experts.switch_glu.down_proj.weight"),
+        "down_proj renamed under normalized prefix"
+    );
+    assert!(
+        !out.keys().any(|k| k.starts_with("model.language_model.")),
+        "no raw model.language_model.* prefix should survive the split"
+    );
+}
+
+#[test]
 fn unified_sanitize_splits_quantized_moe_switch_glu() {
     // Quantized fused triplet: gate_up_proj.{weight,scales,biases} in the
     // [num_experts=2, 2*ffn=8, in/…] on-disk layout, plus a down_proj triplet.

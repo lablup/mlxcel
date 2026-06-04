@@ -70,18 +70,30 @@ pub(crate) fn sanitize_gemma4_unified_weights(
         if let Some((prefix, component)) = split_fused_moe_key(&key, "gate_up_proj") {
             // The bare non-quantized key carries no suffix but emits `.weight`
             // (preserving the original behavior); quantized legs keep their own.
+            // Run the split keys through the same prefix normalization as every
+            // other tensor so a `model.`-prefixed checkpoint lands under
+            // `language_model.model.…` (idempotent for already-normalized keys).
             let suffix = emit_component_suffix(component);
             let (gate, up) = split_fused_gate_up_component(&value, component);
-            out.insert(format!("{prefix}switch_glu.gate_proj{suffix}"), gate);
-            out.insert(format!("{prefix}switch_glu.up_proj{suffix}"), up);
+            out.insert(
+                normalize_gemma4_unified_key(&format!("{prefix}switch_glu.gate_proj{suffix}")),
+                gate,
+            );
+            out.insert(
+                normalize_gemma4_unified_key(&format!("{prefix}switch_glu.up_proj{suffix}")),
+                up,
+            );
             continue;
         }
         if let Some((prefix, component)) = split_fused_moe_key(&key, "down_proj") {
             // `down_proj` is not doubled: rename each present component
             // (bare `.weight` / quantized `.weight` / `.scales` / `.biases`)
-            // under `switch_glu` unchanged.
+            // under `switch_glu` unchanged, then normalize the prefix as above.
             let suffix = emit_component_suffix(component);
-            out.insert(format!("{prefix}switch_glu.down_proj{suffix}"), value);
+            out.insert(
+                normalize_gemma4_unified_key(&format!("{prefix}switch_glu.down_proj{suffix}")),
+                value,
+            );
             continue;
         }
 
