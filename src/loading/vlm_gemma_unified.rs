@@ -68,15 +68,20 @@ pub(crate) fn sanitize_gemma4_unified_weights(
         // `scales`, and `biases` cleanly with no group straddling and no
         // dequantize/unpack — see [`split_fused_gate_up_component`].
         if let Some((prefix, component)) = split_fused_moe_key(&key, "gate_up_proj") {
+            // The bare non-quantized key carries no suffix but emits `.weight`
+            // (preserving the original behavior); quantized legs keep their own.
+            let suffix = emit_component_suffix(component);
             let (gate, up) = split_fused_gate_up_component(&value, component);
-            out.insert(format!("{prefix}switch_glu.gate_proj{component}"), gate);
-            out.insert(format!("{prefix}switch_glu.up_proj{component}"), up);
+            out.insert(format!("{prefix}switch_glu.gate_proj{suffix}"), gate);
+            out.insert(format!("{prefix}switch_glu.up_proj{suffix}"), up);
             continue;
         }
         if let Some((prefix, component)) = split_fused_moe_key(&key, "down_proj") {
             // `down_proj` is not doubled: rename each present component
-            // (`.weight` / `.scales` / `.biases`) under `switch_glu` unchanged.
-            out.insert(format!("{prefix}switch_glu.down_proj{component}"), value);
+            // (bare `.weight` / quantized `.weight` / `.scales` / `.biases`)
+            // under `switch_glu` unchanged.
+            let suffix = emit_component_suffix(component);
+            out.insert(format!("{prefix}switch_glu.down_proj{suffix}"), value);
             continue;
         }
 
@@ -102,21 +107,33 @@ pub(crate) fn sanitize_gemma4_unified_weights(
 /// * `…experts.gate_up_proj.biases`  → `("…experts.", ".biases")`
 fn split_fused_moe_key<'a>(key: &'a str, base: &str) -> Option<(&'a str, &'static str)> {
     // Bare (non-quantized) tensor: `…experts.<base>`.
-    if let Some(prefix) = key.strip_suffix(base) {
-        if prefix.ends_with("experts.") {
-            return Some((prefix, ""));
-        }
+    if let Some(prefix) = key.strip_suffix(base)
+        && prefix.ends_with("experts.")
+    {
+        return Some((prefix, ""));
     }
     // Quantized triplet legs: `…experts.<base>.<component>`.
     for component in [".weight", ".scales", ".biases"] {
         let needle = format!("{base}{component}");
-        if let Some(prefix) = key.strip_suffix(&needle) {
-            if prefix.ends_with("experts.") {
-                return Some((prefix, component));
-            }
+        if let Some(prefix) = key.strip_suffix(&needle)
+            && prefix.ends_with("experts.")
+        {
+            return Some((prefix, component));
         }
     }
     None
+}
+
+/// Map a matched component to the suffix written under `switch_glu`. The bare
+/// non-quantized tensor (matched `component == ""`) is emitted as `.weight` to
+/// preserve the original `switch_glu.<proj>.weight` naming; quantized legs keep
+/// their own `.weight` / `.scales` / `.biases` suffix verbatim.
+fn emit_component_suffix(component: &str) -> &str {
+    if component.is_empty() {
+        ".weight"
+    } else {
+        component
+    }
 }
 
 /// Split one component of a fused `gate_up_proj` expert tensor along its output
