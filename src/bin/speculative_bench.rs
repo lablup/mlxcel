@@ -458,7 +458,9 @@ fn run_mtp(
         eprintln!("[bench/mtp] Warm-up (4 tokens)...");
         let (mut warm_drafter, _) =
             load_drafter(draft_dir, Some(DrafterKind::Mtp)).context("warm-up drafter load")?;
-        warm_drafter.bind(target_lm).context("warm-up drafter bind")?;
+        warm_drafter
+            .bind(target_lm)
+            .context("warm-up drafter bind")?;
         let warm_seq = mlxcel_core::cache::SequenceId::from_raw(99_000);
         let warm_adapter =
             Gemma4UnifiedMtpTargetAdapter::new_with_block_size(unified, Some(warm_seq), block_size);
@@ -474,8 +476,14 @@ fn run_mtp(
         Gemma4UnifiedMtpTargetAdapter::new_with_block_size(unified, Some(seq_id), block_size);
     let mut generator = MtpGenerator::new(adapter, drafter, block_size);
     let started = Instant::now();
-    let (tokens, _logprobs, stats) =
-        generator.generate(&prompt_tokens, max_tokens, &sampling, &[], &cancel, &logprobs);
+    let (tokens, _logprobs, stats) = generator.generate(
+        &prompt_tokens,
+        max_tokens,
+        &sampling,
+        &[],
+        &cancel,
+        &logprobs,
+    );
     mlxcel_core::synchronize_default();
     let elapsed = started.elapsed();
     unified.release_sequence_state_by_id(seq_id);
@@ -637,13 +645,7 @@ fn bench_one_pairing(p: &Pairing, prompt: &str, batch: usize, max_tokens: usize)
                 );
             };
             let draft_path = resolve_model_dir(draft_sub);
-            match run_mtp(
-                &target_path,
-                &draft_path,
-                prompt,
-                max_tokens,
-                p.block_size,
-            ) {
+            match run_mtp(&target_path, &draft_path, prompt, max_tokens, p.block_size) {
                 Ok((decode_ms, generated)) => Row {
                     pairing: p.name.to_string(),
                     target_dir: target_path,

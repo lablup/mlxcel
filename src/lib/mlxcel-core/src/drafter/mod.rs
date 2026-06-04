@@ -914,10 +914,7 @@ mod tests {
         let map = drafter_kind_by_model_type();
         assert_eq!(map.get("gemma4_assistant"), Some(&DrafterKind::Mtp));
         // The Gemma 4 Unified assistant resolves to the same MTP round loop.
-        assert_eq!(
-            map.get("gemma4_unified_assistant"),
-            Some(&DrafterKind::Mtp)
-        );
+        assert_eq!(map.get("gemma4_unified_assistant"), Some(&DrafterKind::Mtp));
         // Both assistant spellings, nothing else: parity with upstream
         // `DRAFTER_KIND_BY_MODEL_TYPE = {"gemma4_assistant": "mtp",
         // "gemma4_unified_assistant": "mtp"}`.

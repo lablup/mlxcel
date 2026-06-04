@@ -353,15 +353,16 @@ impl Gemma4UnifiedModel {
         capture_layer_ids: Option<&[usize]>,
         sinks: Option<&mut crate::models::Gemma4SpeculativeSinks>,
     ) -> UniquePtr<MlxArray> {
-        self.text_model.forward_with_speculative_sinks_explicit_cache(
-            input_ids,
-            input_embeddings,
-            per_layer_inputs,
-            mask,
-            caches,
-            capture_layer_ids,
-            sinks,
-        )
+        self.text_model
+            .forward_with_speculative_sinks_explicit_cache(
+                input_ids,
+                input_embeddings,
+                per_layer_inputs,
+                mask,
+                caches,
+                capture_layer_ids,
+                sinks,
+            )
     }
 
     /// Rewind the inner text model's per-sequence KV caches after a Gemma 4
