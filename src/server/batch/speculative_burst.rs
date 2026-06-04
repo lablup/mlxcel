@@ -46,12 +46,14 @@
 //!
 //! This module implements the B = 1 burst for:
 //!
-//! - **MTP / Gemma 4** — [`crate::LoadedModel::Gemma4`] and
-//!   [`crate::LoadedModel::Gemma4VLM`] (text-only requests; vision
+//! - **MTP / Gemma 4** — [`crate::LoadedModel::Gemma4`],
+//!   [`crate::LoadedModel::Gemma4VLM`], and
+//!   [`crate::LoadedModel::Gemma4Unified`] (text-only requests; multimodal
 //!   inputs are rejected with a clear error). Drives
 //!   [`mlxcel_core::speculative::mtp::MtpGenerator`] through
 //!   [`crate::models::gemma4_mtp_target::Gemma4MtpTargetAdapter`] /
-//!   [`crate::models::gemma4_mtp_target::Gemma4VLMtpTargetAdapter`].
+//!   [`crate::models::gemma4_mtp_target::Gemma4VLMtpTargetAdapter`] /
+//!   [`crate::models::gemma4_mtp_target::Gemma4UnifiedMtpTargetAdapter`].
 //! - **DFlash / Qwen 3.5** — [`crate::LoadedModel::Qwen35`],
 //!   [`crate::LoadedModel::Qwen35Moe`], and their Qwen 3.5 VLM-wrapped
 //!   variants for text-only requests. True multimodal requests still
@@ -152,7 +154,8 @@ use mlxcel_core::speculative::mtp::{MtpBatchedGenerator, MtpGenerator};
 
 use crate::LoadedModel;
 use crate::models::gemma4_mtp_target::{
-    Gemma4MtpBatchedTargetAdapter, Gemma4MtpTargetAdapter, Gemma4VLMtpBatchedTargetAdapter,
+    Gemma4MtpBatchedTargetAdapter, Gemma4MtpTargetAdapter, Gemma4UnifiedMtpBatchedTargetAdapter,
+    Gemma4VLMtpBatchedTargetAdapter,
 };
 use crate::server::model_provider::GenerateEvent;
 
@@ -751,10 +754,11 @@ fn run_mtp_burst(
     let target_lm: &dyn LanguageModel = match ctx.model {
         LoadedModel::Gemma4(wrapper) => wrapper as &dyn LanguageModel,
         LoadedModel::Gemma4VLM(vlm) => vlm as &dyn LanguageModel,
+        LoadedModel::Gemma4Unified(unified) => unified as &dyn LanguageModel,
         _ => {
             tracing::warn!(
                 "MTP speculative dispatch declined: target is {:?}, expected \
-                 Gemma 4 (text or VLM); falling back to classic decode",
+                 Gemma 4 (text, VLM, or Unified); falling back to classic decode",
                 model_variant_label(ctx.model),
             );
             return Err(BurstOutcome::DeclineToClassic);
@@ -794,6 +798,17 @@ fn run_mtp_burst(
     // the handle keeps the slot in a clean state for the (rare) case
     // where the operator hot-swaps the drafter checkpoint between
     // requests.
+    // Compatibility gate BEFORE binding: reject a target↔drafter pairing whose
+    // hidden size / vocabulary do not match (e.g. a 12B Unified target fed an
+    // assistant built for a different backbone). The default trait impl is a
+    // no-op, so DFlash/InternalMtp are unaffected; the Gemma 4 assistant
+    // overrides it to compare backbone_hidden_size (3840) against the target's
+    // text hidden size and vocab. Surfaced as a clear burst error.
+    if let Err(e) = owned_drafter.validate_target_compat(target_lm) {
+        return Err(BurstOutcome::Error(format!(
+            "MTP drafter incompatible with target: {e}"
+        )));
+    }
     if let Err(e) = owned_drafter.bind(target_lm) {
         return Err(BurstOutcome::Error(format!("MTP drafter bind failed: {e}")));
     }
@@ -843,6 +858,25 @@ fn run_mtp_burst(
             let adapter =
                 crate::models::gemma4_mtp_target::Gemma4VLMtpTargetAdapter::new_with_block_size(
                     vlm,
+                    Some(seq.seq_id),
+                    block_size,
+                );
+            drive_mtp_generator(
+                adapter,
+                owned_drafter,
+                &prompt,
+                max_tokens,
+                &sampling,
+                &token_history,
+                block_size,
+                cancel,
+                &logprobs_config,
+            )
+        }
+        LoadedModel::Gemma4Unified(unified) => {
+            let adapter =
+                crate::models::gemma4_mtp_target::Gemma4UnifiedMtpTargetAdapter::new_with_block_size(
+                    unified,
                     Some(seq.seq_id),
                     block_size,
                 );
@@ -1799,10 +1833,11 @@ fn run_mtp_burst_batched(
     let target_lm: &dyn LanguageModel = match ctx.model {
         LoadedModel::Gemma4(wrapper) => wrapper as &dyn LanguageModel,
         LoadedModel::Gemma4VLM(vlm) => vlm as &dyn LanguageModel,
+        LoadedModel::Gemma4Unified(unified) => unified as &dyn LanguageModel,
         _ => {
             tracing::warn!(
                 "MTP batched speculative dispatch declined: target is {:?}, expected \
-                 Gemma 4 (text or VLM); falling back to classic decode",
+                 Gemma 4 (text, VLM, or Unified); falling back to classic decode",
                 model_variant_label(ctx.model),
             );
             return Err(BurstOutcome::DeclineToClassic);
@@ -1821,6 +1856,12 @@ fn run_mtp_burst_batched(
     // as `run_mtp_burst`. `MtpBatchedGenerator::run_batched` does NOT
     // bind internally; without this the first `draft_block_batched`
     // returns `BindNotCalled`.
+    // Compatibility gate before binding — same contract as `run_mtp_burst`.
+    if let Err(e) = owned_drafter.validate_target_compat(target_lm) {
+        return Err(BurstOutcome::Error(format!(
+            "MTP batched drafter incompatible with target: {e}"
+        )));
+    }
     if let Err(e) = owned_drafter.bind(target_lm) {
         return Err(BurstOutcome::Error(format!(
             "MTP batched drafter bind failed: {e}"
@@ -1853,6 +1894,19 @@ fn run_mtp_burst_batched(
         LoadedModel::Gemma4VLM(vlm) => {
             let adapter =
                 Gemma4VLMtpBatchedTargetAdapter::new_with_block_size(vlm, batch_size, block_size);
+            drive_mtp_batched_generator(
+                adapter,
+                owned_drafter,
+                &prompts,
+                max_tokens,
+                &sampling,
+                block_size,
+            )?
+        }
+        LoadedModel::Gemma4Unified(unified) => {
+            let adapter = Gemma4UnifiedMtpBatchedTargetAdapter::new_with_block_size(
+                unified, batch_size, block_size,
+            );
             drive_mtp_batched_generator(
                 adapter,
                 owned_drafter,
@@ -2214,6 +2268,7 @@ fn model_variant_label(model: &LoadedModel) -> &'static str {
     match model {
         LoadedModel::Gemma4(_) => "Gemma4",
         LoadedModel::Gemma4VLM(_) => "Gemma4VLM",
+        LoadedModel::Gemma4Unified(_) => "Gemma4Unified",
         LoadedModel::Qwen35(_) => "Qwen35",
         LoadedModel::Qwen35VLM(_) => "Qwen35VLM",
         LoadedModel::Qwen35Moe(_) => "Qwen35Moe",

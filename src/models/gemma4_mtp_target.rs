@@ -734,6 +734,91 @@ impl<'a> MtpTarget for Gemma4VLMtpTargetAdapter<'a> {
     }
 }
 
+/// MTP target adapter for the Gemma 4 Unified wrapper.
+///
+/// Reuses [`Gemma4MtpTargetAdapter`] internally by delegating to the Unified
+/// wrapper's inner text model. Identical rationale to
+/// [`Gemma4VLMtpTargetAdapter`]: any multimodal (image / audio) features are
+/// fully prefilled before the MTP round loop begins, so the round loop only
+/// interacts with the text backbone — draft and verify operate on text tokens.
+/// The encoder-free vision embedder and per-layer-inputs state of
+/// [`crate::vision::Gemma4UnifiedModel`] hold no speculative state.
+pub struct Gemma4UnifiedMtpTargetAdapter<'a> {
+    inner: Gemma4MtpTargetAdapter<'a>,
+}
+
+impl<'a> Gemma4UnifiedMtpTargetAdapter<'a> {
+    /// Construct an adapter that routes every trait call through the inner
+    /// text model's per-sequence cache slot at `seq_id`.
+    pub fn new(unified: &'a crate::vision::Gemma4UnifiedModel, seq_id: Option<SequenceId>) -> Self {
+        Self::new_with_block_size(unified, seq_id, 4)
+    }
+
+    /// Construct an adapter with the effective MTP block size requested by the
+    /// dispatch path.
+    pub fn new_with_block_size(
+        unified: &'a crate::vision::Gemma4UnifiedModel,
+        seq_id: Option<SequenceId>,
+        block_size: usize,
+    ) -> Self {
+        Self {
+            inner: Gemma4MtpTargetAdapter::new_with_block_size(
+                &unified.text_model,
+                seq_id,
+                block_size,
+            ),
+        }
+    }
+}
+
+impl<'a> MtpTarget for Gemma4UnifiedMtpTargetAdapter<'a> {
+    fn prefill_and_seed(
+        &self,
+        prompt_tokens: &[i32],
+        sampler: &SamplingConfig,
+        token_history: &[i32],
+        logprobs_config: &mlxcel_core::sampling::LogprobsConfig,
+    ) -> (
+        i32,
+        MtpVerifyOutput,
+        Option<mlxcel_core::sampling::TokenLogprobData>,
+    ) {
+        self.inner
+            .prefill_and_seed(prompt_tokens, sampler, token_history, logprobs_config)
+    }
+
+    fn embed_token(&self, token_id: i32) -> UniquePtr<MlxArray> {
+        self.inner.embed_token(token_id)
+    }
+
+    fn verify_forward(
+        &self,
+        verify_input: &[i32],
+        sampler: &SamplingConfig,
+        logprobs_config: &mlxcel_core::sampling::LogprobsConfig,
+    ) -> VerifyForwardOutput {
+        self.inner
+            .verify_forward(verify_input, sampler, logprobs_config)
+    }
+
+    fn verify_finalize(
+        &self,
+        accepted: usize,
+        block_size: usize,
+        captured: VerifyCaptured,
+    ) -> MtpVerifyOutput {
+        self.inner.verify_finalize(accepted, block_size, captured)
+    }
+
+    fn num_layers(&self) -> usize {
+        self.inner.num_layers()
+    }
+
+    fn eos_token_ids(&self) -> Vec<i32> {
+        self.inner.eos_token_ids()
+    }
+}
+
 // ===========================================================================
 // Batched MTP target adapter (B > 1)
 // ===========================================================================
@@ -1387,6 +1472,125 @@ impl<'a> MtpTarget for Gemma4VLMtpBatchedTargetAdapter<'a> {
     // the `*_batched` methods. `token_history` and
     // `logprobs_config` are forwarded verbatim so the
     // signature matches the trait even though the inner panics.
+    fn prefill_and_seed(
+        &self,
+        prompt_tokens: &[i32],
+        sampler: &SamplingConfig,
+        token_history: &[i32],
+        logprobs_config: &mlxcel_core::sampling::LogprobsConfig,
+    ) -> (
+        i32,
+        MtpVerifyOutput,
+        Option<mlxcel_core::sampling::TokenLogprobData>,
+    ) {
+        self.inner
+            .prefill_and_seed(prompt_tokens, sampler, token_history, logprobs_config)
+    }
+
+    fn embed_token(&self, token_id: i32) -> UniquePtr<MlxArray> {
+        self.inner.embed_token(token_id)
+    }
+
+    fn verify_forward(
+        &self,
+        verify_input: &[i32],
+        sampler: &SamplingConfig,
+        logprobs_config: &mlxcel_core::sampling::LogprobsConfig,
+    ) -> VerifyForwardOutput {
+        self.inner
+            .verify_forward(verify_input, sampler, logprobs_config)
+    }
+
+    fn verify_finalize(
+        &self,
+        accepted: usize,
+        block_size: usize,
+        captured: VerifyCaptured,
+    ) -> MtpVerifyOutput {
+        self.inner.verify_finalize(accepted, block_size, captured)
+    }
+
+    fn num_layers(&self) -> usize {
+        self.inner.num_layers()
+    }
+
+    fn eos_token_ids(&self) -> Vec<i32> {
+        self.inner.eos_token_ids()
+    }
+
+    fn prefill_and_seed_batched(
+        &self,
+        prompt_tokens_per_row: &[Vec<i32>],
+        sampler: &SamplingConfig,
+    ) -> Result<(Vec<i32>, MtpBatchedVerifyOutput), DrafterError> {
+        self.inner
+            .prefill_and_seed_batched(prompt_tokens_per_row, sampler)
+    }
+
+    fn verify_forward_batched(
+        &self,
+        verify_input_per_row: &[Vec<i32>],
+        sampler: &SamplingConfig,
+    ) -> Result<MtpBatchedVerifyForwardOutput, DrafterError> {
+        self.inner
+            .verify_forward_batched(verify_input_per_row, sampler)
+    }
+
+    fn verify_finalize_batched(
+        &self,
+        accepted_per_row: &[usize],
+        block_size: usize,
+        captured: VerifyCaptured,
+    ) -> Result<MtpBatchedVerifyOutput, DrafterError> {
+        self.inner
+            .verify_finalize_batched(accepted_per_row, block_size, captured)
+    }
+}
+
+/// Batched MTP target adapter for the Gemma 4 Unified wrapper.
+///
+/// Reuses [`Gemma4MtpBatchedTargetAdapter`] internally by delegating to the
+/// Unified wrapper's inner text model. Same rationale as the B = 1
+/// [`Gemma4UnifiedMtpTargetAdapter`]: any multimodal features are fully
+/// prefilled before the MTP round loop begins, so the round loop only
+/// interacts with the text backbone.
+pub struct Gemma4UnifiedMtpBatchedTargetAdapter<'a> {
+    inner: Gemma4MtpBatchedTargetAdapter<'a>,
+}
+
+impl<'a> Gemma4UnifiedMtpBatchedTargetAdapter<'a> {
+    /// Construct a batched adapter routing every trait call through the inner
+    /// text model's own `[B, ...]` cache.
+    pub fn new(unified: &'a crate::vision::Gemma4UnifiedModel, batch_size: usize) -> Self {
+        Self::new_with_block_size(unified, batch_size, 4)
+    }
+
+    /// Construct a batched Unified MTP adapter with the effective requested
+    /// block size.
+    pub fn new_with_block_size(
+        unified: &'a crate::vision::Gemma4UnifiedModel,
+        batch_size: usize,
+        block_size: usize,
+    ) -> Self {
+        Self {
+            inner: Gemma4MtpBatchedTargetAdapter::new_with_block_size(
+                &unified.text_model,
+                batch_size,
+                block_size,
+            ),
+        }
+    }
+
+    /// Batch size accessor (test / diagnostic).
+    pub fn batch_size(&self) -> usize {
+        self.inner.batch_size()
+    }
+}
+
+impl<'a> MtpTarget for Gemma4UnifiedMtpBatchedTargetAdapter<'a> {
+    // The B = 1 surface forwards to the inner batched adapter, whose B = 1
+    // stubs panic — the batched Unified adapter is only ever driven through
+    // the `*_batched` methods.
     fn prefill_and_seed(
         &self,
         prompt_tokens: &[i32],

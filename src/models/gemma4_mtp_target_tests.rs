@@ -307,3 +307,44 @@ fn batched_capture_layer_ids_is_last_layer_only() {
         "batched MTP adapter must capture the last layer only (None)"
     );
 }
+
+// ===========================================================================
+// Gemma 4 Unified MTP adapter — structural / trait-surface pins (issue #154)
+//
+// The Unified adapters are pure delegators to `Gemma4MtpTargetAdapter` /
+// `Gemma4MtpBatchedTargetAdapter` over `unified.text_model`, mirroring the VL
+// adapters. Constructing a real `Gemma4UnifiedModel` requires the encoder-free
+// vision embedder + multimodal embedder + processor, which are out of scope
+// for a weights-free unit test, so the full forward-driving greedy-parity
+// round-trip ships in `tests/speculative_parity.rs`
+// (`greedy_parity_mtp_gemma4_unified_12b`, `#[ignore]`). These pins guarantee
+// the delegation types are wired correctly at compile time.
+// ===========================================================================
+
+/// The Unified B = 1 adapter must implement [`MtpTarget`] and be usable as a
+/// trait object — the burst dispatch drives it via a generic `T: MtpTarget`,
+/// and the type must satisfy that bound for any borrowed `&Gemma4UnifiedModel`.
+#[test]
+fn unified_b1_adapter_implements_mtp_target() {
+    // Type-level assertion: a no-op function that only type-checks if the
+    // adapter implements `MtpTarget` for an arbitrary borrow lifetime. Never
+    // called — it exists purely to fail compilation on a broken impl.
+    #[allow(dead_code)]
+    fn assert_mtp_target<'a, T: MtpTarget>() {}
+    let _ = assert_mtp_target::<Gemma4UnifiedMtpTargetAdapter<'_>>;
+}
+
+/// The Unified batched adapter must implement [`MtpTarget`] (including the
+/// `*_batched` surface forwarded to the inner batched adapter) and expose the
+/// `batch_size` accessor used by diagnostics.
+#[test]
+fn unified_batched_adapter_implements_mtp_target() {
+    #[allow(dead_code)]
+    fn assert_mtp_target<'a, T: MtpTarget>() {}
+    let _ = assert_mtp_target::<Gemma4UnifiedMtpBatchedTargetAdapter<'_>>;
+    // Pin the accessor name/signature the dispatch + tests rely on.
+    #[allow(dead_code)]
+    fn assert_batch_size_accessor(a: &Gemma4UnifiedMtpBatchedTargetAdapter<'_>) -> usize {
+        a.batch_size()
+    }
+}

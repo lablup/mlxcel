@@ -294,6 +294,97 @@ impl Gemma4UnifiedModel {
         }
     }
 
+    // -- Gemma 4 MTP speculative-decoding hooks ------------------------------
+    //
+    // Pass-through methods that give the MTP drafter / generator the same
+    // opt-in sink + rollback surface on the Unified-wrapped Gemma 4 path as on
+    // the text-only and VLM paths. Mirrors `src/vision/gemma4_vl.rs` exactly:
+    // the (optionally multimodal) prefill flows through the unified forward
+    // that merges vision/audio features and seeds the cache + first hidden;
+    // speculative decode then kicks in only AFTER the prefill tail, at which
+    // point the rotating + dense KV caches owned by the inner `Gemma4Wrapper`
+    // are the sole state the MTP loop touches. The encoder-free vision
+    // embedder and `per_layer_inputs_state` do not participate.
+
+    /// Sink-aware forward for the Unified-wrapped Gemma 4 text model.
+    ///
+    /// Delegates to [`crate::models::Gemma4Wrapper::forward_with_speculative_sinks`]
+    /// on the inner text model. Like the VLM path, the caller routes the
+    /// (optionally multimodal) prefill through the existing
+    /// [`LanguageModel::forward_with_embeddings_and_sequence_id`] path FIRST;
+    /// subsequent speculative decode steps consume `input_ids` only and pass
+    /// `input_embeddings = None`, so no multimodal merge occurs during decode.
+    pub fn forward_with_speculative_sinks(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        per_layer_inputs: Option<&MlxArray>,
+        mask: Option<&MlxArray>,
+        seq_id: Option<SequenceId>,
+        capture_layer_ids: Option<&[usize]>,
+        sinks: Option<&mut crate::models::Gemma4SpeculativeSinks>,
+    ) -> UniquePtr<MlxArray> {
+        self.text_model.forward_with_speculative_sinks(
+            input_ids,
+            input_embeddings,
+            per_layer_inputs,
+            mask,
+            seq_id,
+            capture_layer_ids,
+            sinks,
+        )
+    }
+
+    /// Sink-aware forward against a **caller-owned** `[B, ...]` cache vector
+    /// (batched MTP dispatch).
+    ///
+    /// Pure pass-through to
+    /// [`crate::models::Gemma4Wrapper::forward_with_speculative_sinks_explicit_cache`].
+    /// The Unified wrapper holds no batched speculative state of its own — the
+    /// batched MTP target adapter owns the `[B, ...]` cache and the inner text
+    /// model advances all rows through one forward.
+    pub fn forward_with_speculative_sinks_explicit_cache(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        per_layer_inputs: Option<&MlxArray>,
+        mask: Option<&MlxArray>,
+        caches: &mut [crate::models::gemma4::Cache],
+        capture_layer_ids: Option<&[usize]>,
+        sinks: Option<&mut crate::models::Gemma4SpeculativeSinks>,
+    ) -> UniquePtr<MlxArray> {
+        self.text_model.forward_with_speculative_sinks_explicit_cache(
+            input_ids,
+            input_embeddings,
+            per_layer_inputs,
+            mask,
+            caches,
+            capture_layer_ids,
+            sinks,
+        )
+    }
+
+    /// Rewind the inner text model's per-sequence KV caches after a Gemma 4
+    /// MTP verify pass. Pure pass-through to
+    /// [`crate::models::Gemma4Wrapper::rollback_speculative_cache`] — the
+    /// Unified wrapper holds no additional speculative state to undo.
+    pub fn rollback_speculative_cache(
+        &self,
+        seq_id: Option<SequenceId>,
+        accepted: &[i32],
+        block_size: i32,
+    ) -> Result<(), String> {
+        self.text_model
+            .rollback_speculative_cache(seq_id, accepted, block_size)
+    }
+
+    /// Normalize a pre-norm hidden state with the Gemma 4 final norm before it
+    /// is handed to the MTP assistant drafter. Pure pass-through to
+    /// [`crate::models::Gemma4Wrapper::speculative_draft_hidden`].
+    pub fn speculative_draft_hidden(&self, hidden: &MlxArray) -> UniquePtr<MlxArray> {
+        self.text_model.speculative_draft_hidden(hidden)
+    }
+
     /// Build the per-position vision block-id tensor from `input_ids` for the
     /// bidirectional overlay during the embeddings-driven prefill forward, or
     /// `None` when the overlay is disabled.

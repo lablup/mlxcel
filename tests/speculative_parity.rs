@@ -390,7 +390,19 @@ const REACHABLE_PAIRINGS: &[Pairing] = &[
         kind: "mtp",
         block_size: 4,
     },
+    Pairing {
+        name: "Gemma 4 Unified 12B + MTP assistant (b=4)",
+        target_dir: "gemma-4-12b-it-4bit",
+        draft_dir: "gemma-4-12B-it-assistant-4bit",
+        kind: "mtp",
+        block_size: 4,
+    },
 ];
+
+/// Index of the Gemma 4 Unified 12B + MTP assistant pairing in
+/// [`REACHABLE_PAIRINGS`]. Kept as a named constant so the unified parity test
+/// stays correct if the pairing list is reordered.
+const UNIFIED_12B_MTP_PAIRING: usize = 2;
 
 /// Returns the target / drafter paths and whether both are present on disk.
 fn pairing_present(pairing: &Pairing) -> (std::path::PathBuf, std::path::PathBuf, bool) {
@@ -665,6 +677,96 @@ async fn greedy_parity_mtp_gemma4_31b() {
         // Drop the in-process target + drafter and clear the MLX memory
         // cache before phase 2 so the spawned servers do not contend with
         // these weights for GPU memory.
+        drop(drafter);
+        drop(loaded_target);
+        mlxcel_core::synchronize_default();
+        mlxcel_core::clear_memory_cache();
+    }
+
+    // ---- Phase 2: end-to-end byte-equality (subprocess) ----
+    assert_server_byte_equality(pairing, &target_path, &draft_path).await;
+}
+
+/// Greedy parity for the Gemma 4 Unified 12B + MTP assistant pairing
+/// (issue #154).
+///
+/// **Status:** end-to-end byte-equality on real models.
+///
+/// Identical two-phase structure to [`greedy_parity_mtp_gemma4_31b`], but the
+/// target is the `gemma4_unified` 12B checkpoint (loads as
+/// [`mlxcel::LoadedModel::Gemma4Unified`]) and the drafter is the
+/// `gemma4_unified_assistant` 12B assistant (`backbone_hidden_size = 3840`,
+/// centroid LM head). The MTP burst dispatch routes `Gemma4Unified` through
+/// `Gemma4UnifiedMtpTargetAdapter` → the inner `Gemma4MtpTargetAdapter` over
+/// `unified.text_model`, exactly as the VLM path routes through the VL adapter.
+///
+/// 1. **Structural phase** (in-process): loads the target, asserts it is the
+///    `Gemma4Unified` variant, resolves the drafter kind to `DrafterKind::Mtp`
+///    (auto-detected from `model_type: "gemma4_unified_assistant"`), and loads
+///    the assistant drafter from its checkpoint.
+/// 2. **Byte-equality phase** (subprocess): spawns `mlxcel-server` with
+///    `--model-draft --draft-kind mtp --draft-block-size 4` and again without
+///    any `--draft-*` flag, submits the same fixed prompt at `temperature = 0`,
+///    and asserts the two responses are byte-identical (MTP speculative decode
+///    is exactness-preserving).
+///
+/// `#[ignore]`-gated as real-model heavy: loads the Gemma 4 Unified 12B target
+/// + assistant drafter and spawns `mlxcel-server` subprocesses. Runs in the CI
+/// hardware lane / the orchestrator's real-model measurement gate.
+#[tokio::test]
+#[ignore = "real-model heavy (loads Gemma-4-Unified-12B target + drafter, spawns mlxcel-server); runs in CI hardware lane only"]
+async fn greedy_parity_mtp_gemma4_unified_12b() {
+    use mlxcel::{LoadedModel, initialize_runtime, load_model};
+    use mlxcel_core::drafter::{DrafterKind, resolve_drafter_kind};
+
+    let pairing = &REACHABLE_PAIRINGS[UNIFIED_12B_MTP_PAIRING];
+    let (target_path, draft_path, present) = pairing_present(pairing);
+    if !present {
+        eprintln!(
+            "Skipping {}: target={:?} draft={:?}",
+            pairing.name, target_path, draft_path,
+        );
+        return;
+    }
+
+    // ---- Phase 1: structural check (in-process) ----
+    {
+        let _runtime = initialize_runtime();
+        mlxcel_core::synchronize_default();
+        mlxcel_core::clear_memory_cache();
+
+        eprintln!("[{}] Loading target from {:?}", pairing.name, target_path);
+        let (loaded_target, _target_tokenizer) =
+            load_model(&target_path).expect("target model must load");
+
+        // The 12B Unified checkpoint loads as the encoder-free
+        // `Gemma4Unified` variant; the MTP path operates on the inner text
+        // model (multimodal placeholders are absent for a text prompt).
+        assert!(
+            matches!(loaded_target, LoadedModel::Gemma4Unified(_)),
+            "Unified MTP pairing requires a Gemma4Unified target but load_model returned a \
+             different variant; check the pairing target_dir matches the gemma4_unified \
+             12B 4-bit checkpoint",
+        );
+        eprintln!("[{}] Target loaded as Gemma4Unified", pairing.name);
+
+        eprintln!("[{}] Loading drafter from {:?}", pairing.name, draft_path);
+        let resolved_kind =
+            resolve_drafter_kind(&draft_path, None).expect("drafter config.json must be readable");
+        assert_eq!(
+            resolved_kind,
+            DrafterKind::Mtp,
+            "gemma4_unified_assistant must auto-detect to the MTP round loop",
+        );
+
+        let (drafter, _kind) =
+            mlxcel_core::drafter::load_drafter(&draft_path, Some(DrafterKind::Mtp))
+                .expect("Gemma 4 Unified MTP assistant drafter must load from checkpoint");
+        eprintln!(
+            "[{}] Drafter loaded; block_size={}",
+            pairing.name, pairing.block_size
+        );
+
         drop(drafter);
         drop(loaded_target);
         mlxcel_core::synchronize_default();
