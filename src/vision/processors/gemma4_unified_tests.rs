@@ -45,43 +45,56 @@ fn patch_dim_and_padding() {
     let proc = Gemma4UnifiedProcessor::new(48, 280, 640);
     assert_eq!(proc.patch_dim(), 48 * 48 * 3);
 
-    // A 48x48 image yields exactly one real patch; the rest are padding.
-    let img = solid_image(48, 48, [255, 0, 0]);
-    let out = proc.preprocess(std::slice::from_ref(&img));
+    // A 96x96 image with budget 6 produces a 2x2 patch grid (4 real patches,
+    // factor == sqrt(1.5) → target stays 96x96) plus 2 padding rows. This
+    // exercises the padding path deterministically.
+    let small = Gemma4UnifiedProcessor::new(48, 6, 640);
+    let img = solid_image(96, 96, [255, 0, 0]);
+    let out = small.preprocess(std::slice::from_ref(&img));
     assert_eq!(out.len(), 1);
     let single = &out[0];
-    assert_eq!(single.num_soft_tokens, 1);
+    assert_eq!(single.num_soft_tokens, 4);
 
     // patches: [num_soft_tokens, patch_dim]; positions: [num_soft_tokens, 2].
     assert_eq!(
         mlxcel_core::array_shape(&single.patches),
-        vec![280, (48 * 48 * 3) as i32]
+        vec![6, (48 * 48 * 3) as i32]
     );
-    assert_eq!(mlxcel_core::array_shape(&single.positions), vec![280, 2]);
+    assert_eq!(mlxcel_core::array_shape(&single.positions), vec![6, 2]);
 
     // First patch position is (0, 0); first channel value is 255/255 = 1.0.
     assert_eq!(read_i32_at(&single.positions, &[0, 0]), 0);
     assert_eq!(read_i32_at(&single.positions, &[0, 1]), 0);
     assert!((read_f32_at(&single.patches, &[0, 0]) - 1.0).abs() < 1e-6);
 
-    // A padding patch carries position -1 on both axes and zeros.
-    assert_eq!(read_i32_at(&single.positions, &[1, 0]), -1);
-    assert_eq!(read_i32_at(&single.positions, &[1, 1]), -1);
-    assert_eq!(read_f32_at(&single.patches, &[1, 0]), 0.0);
+    // A padding patch (index 4, beyond the 4 real patches) carries position -1
+    // on both axes and zeros.
+    assert_eq!(read_i32_at(&single.positions, &[4, 0]), -1);
+    assert_eq!(read_i32_at(&single.positions, &[4, 1]), -1);
+    assert_eq!(read_f32_at(&single.patches, &[4, 0]), 0.0);
 }
 
 #[test]
 fn multi_patch_positions_are_grid_indexed() {
-    let proc = Gemma4UnifiedProcessor::new(48, 280, 640);
-    // 96x48 → 2 patches wide, 1 tall → positions (0,0) and (1,0).
-    let img = solid_image(96, 48, [10, 20, 30]);
+    // A 96x96 image with budget 4 lands on a 2x2 grid (factor == 1). The patch
+    // loop is (py outer, px inner), so positions are row-major over (x, y).
+    let proc = Gemma4UnifiedProcessor::new(48, 4, 640);
+    let img = solid_image(96, 96, [10, 20, 30]);
     let out = proc.preprocess(std::slice::from_ref(&img));
     let single = &out[0];
-    assert_eq!(single.num_soft_tokens, 2);
-    assert_eq!(read_i32_at(&single.positions, &[0, 0]), 0); // x
-    assert_eq!(read_i32_at(&single.positions, &[0, 1]), 0); // y
-    assert_eq!(read_i32_at(&single.positions, &[1, 0]), 1); // x
-    assert_eq!(read_i32_at(&single.positions, &[1, 1]), 0); // y
+    assert_eq!(single.num_soft_tokens, 4);
+    // patch 0 = (x0, y0)
+    assert_eq!(read_i32_at(&single.positions, &[0, 0]), 0);
+    assert_eq!(read_i32_at(&single.positions, &[0, 1]), 0);
+    // patch 1 = (x1, y0)
+    assert_eq!(read_i32_at(&single.positions, &[1, 0]), 1);
+    assert_eq!(read_i32_at(&single.positions, &[1, 1]), 0);
+    // patch 2 = (x0, y1)
+    assert_eq!(read_i32_at(&single.positions, &[2, 0]), 0);
+    assert_eq!(read_i32_at(&single.positions, &[2, 1]), 1);
+    // patch 3 = (x1, y1)
+    assert_eq!(read_i32_at(&single.positions, &[3, 0]), 1);
+    assert_eq!(read_i32_at(&single.positions, &[3, 1]), 1);
 }
 
 #[test]
