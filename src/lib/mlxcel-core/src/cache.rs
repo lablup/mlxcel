@@ -104,6 +104,9 @@ pub use paged::{
 };
 pub use paged_detach::DetachedPagedCacheSet;
 
+use std::cell::RefCell;
+use std::rc::Rc;
+
 use crate::concatenate;
 use crate::dtype;
 use crate::ffi;
@@ -399,6 +402,55 @@ pub struct KVCache {
     /// Packed sidecar maintenance cadence for the opt-in delegated FP16 fast
     /// path. Ignored unless `delegated_fp16_fast_path` is true.
     pub(crate) delegated_fp16_sidecar_policy: turbo::DelegatedFp16SidecarPolicy,
+    /// Optional transparent pool backing.
+    ///
+    /// `None` for every dense cache (the default for all existing
+    /// constructors), so the dense `update`/`update_and_fetch` path and every
+    /// existing call site are byte-for-byte unchanged. When `Some`,
+    /// [`Self::update_and_fetch`] routes K/V writes into a shared
+    /// [`PagedBlockPool`] (via `write_prefill`) and reads the visible window
+    /// back (via `gather_visible`) instead of touching the dense `keys`/
+    /// `values` buffers. Built only by [`Self::new_paged`].
+    ///
+    /// This is the single-stream groundwork for the scheduler-driven paged KV
+    /// cache (#121): one sequence, one pool, caches visited sequentially per
+    /// layer, so the simple `Rc<RefCell<…>>` sharing is sound (see the Step-0
+    /// `Send` analysis in the introducing PR — `KVCache` is never required to
+    /// be `Send`/`Sync`).
+    pub(crate) paged_backing: Option<PagedBacking>,
+}
+
+/// Shared handle that makes one [`KVCache`] write/read through a pooled paged
+/// KV store instead of its own dense buffers.
+///
+/// All layers of a single sequence share the same `pool` and `state` handles
+/// (cheap `Rc` clones); `layer_idx` selects this cache's slice of the
+/// per-sequence [`PagedSequenceState`]. Interior mutability via `RefCell` is
+/// required because [`KVCache::update_and_fetch`] needs `&mut` access to both
+/// the pool (to append/allocate blocks) and the per-sequence state while the
+/// model only hands the cache out behind `&mut [KVCache]` one layer at a time.
+///
+/// # Why `Rc<RefCell<…>>` and not raw pointers
+///
+/// `KVCache` is not required to be `Send`/`Sync` anywhere in the tree (no
+/// `unsafe impl`, no `assert_send_sync::<KVCache>()`, and the only async-context
+/// `Vec<KVCache>` — the pipeline stage service — is built and driven entirely
+/// inside a single OS thread via `block_on` on a current-thread runtime, never
+/// crossing a `tokio::spawn` boundary). The safe shared-ownership form is
+/// therefore preferred over raw pointers.
+#[derive(Clone)]
+pub(crate) struct PagedBacking {
+    pub(crate) pool: Rc<RefCell<PagedBlockPool>>,
+    pub(crate) state: Rc<RefCell<PagedSequenceState>>,
+    pub(crate) layer_idx: usize,
+}
+
+impl std::fmt::Debug for PagedBacking {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PagedBacking")
+            .field("layer_idx", &self.layer_idx)
+            .finish_non_exhaustive()
+    }
 }
 
 impl KVCache {
@@ -425,6 +477,7 @@ impl KVCache {
             hot_threshold: turbo::DELEGATED_HOT_THRESHOLD,
             delegated_fp16_fast_path: turbo::delegated_fp16_fast_path_enabled(),
             delegated_fp16_sidecar_policy: turbo::delegated_fp16_sidecar_policy(),
+            paged_backing: None,
         }
     }
 
@@ -472,7 +525,44 @@ impl KVCache {
             hot_threshold: turbo::DELEGATED_HOT_THRESHOLD,
             delegated_fp16_fast_path: turbo::delegated_fp16_fast_path_enabled(),
             delegated_fp16_sidecar_policy: turbo::delegated_fp16_sidecar_policy(),
+            paged_backing: None,
         }
+    }
+
+    /// Create a transparently pool-backed empty KV cache for one layer.
+    ///
+    /// The returned cache is `KVCacheMode::Fp16` with default step size, but
+    /// instead of accumulating K/V in its own dense `keys`/`values` buffers it
+    /// writes new tokens into the shared [`PagedBlockPool`] (`write_prefill`)
+    /// and reads the visible window back (`gather_visible`) inside
+    /// [`Self::update_and_fetch`]. All other dense state (`offset`,
+    /// `live_start`, …) is still tracked so RoPE positions stay correct; the
+    /// `keys`/`values` buffers simply remain `None`.
+    ///
+    /// `pool` and `state` are shared (cheap `Rc` clones) across every layer of
+    /// the same sequence; `layer_idx` selects this cache's slice of the
+    /// per-sequence [`PagedSequenceState`]. This is the single-stream (`B == 1`)
+    /// verification path for the paged KV cache (#118/#119/#120) — the
+    /// scheduler-driven multi-sequence wiring is #121.
+    ///
+    /// # Panics / errors
+    ///
+    /// This constructor never fails. Geometry mismatches (wrong `layer_idx`,
+    /// non-`[1, n_kv_heads, n_new, head_dim]` K/V, `B != 1`) surface as a
+    /// panic from [`Self::update_and_fetch`] on first write, because the model
+    /// forward signature cannot return a `Result`.
+    pub fn new_paged(
+        pool: Rc<RefCell<PagedBlockPool>>,
+        state: Rc<RefCell<PagedSequenceState>>,
+        layer_idx: usize,
+    ) -> Self {
+        let mut cache = Self::new();
+        cache.paged_backing = Some(PagedBacking {
+            pool,
+            state,
+            layer_idx,
+        });
+        cache
     }
 
     /// Override the Turbo4Delegated hot-tail fold threshold for this cache.
@@ -2341,6 +2431,15 @@ impl KVCache {
         new_keys: UniquePtr<MlxArray>,
         new_values: UniquePtr<MlxArray>,
     ) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
+        // Transparent pool-backed path (`new_paged`). Writes the new K/V into
+        // the shared `PagedBlockPool` and returns the gathered visible window,
+        // so the model `forward` is unchanged. Returns early; the dense
+        // `self.update(...)` below is intentionally skipped so we never
+        // double-write or allocate dense buffers. See `new_paged`.
+        if self.paged_backing.is_some() {
+            return self.update_and_fetch_paged(&new_keys, &new_values);
+        }
+
         self.update(new_keys, new_values);
 
         // After `update`, the live window length equals `buffer_idx()` —
@@ -2452,6 +2551,88 @@ impl KVCache {
                 )
             }
         }
+    }
+
+    /// Transparent pool-backed `update_and_fetch` for single-stream
+    /// (`B == 1`) sequences created with [`Self::new_paged`].
+    ///
+    /// Appends the new K/V tokens to this layer's tail inside the shared
+    /// [`PagedBlockPool`] (`write_prefill` handles both bulk prefill and a
+    /// single decode token), advances the monotonic `offset`, and returns the
+    /// gathered visible window in the SDPA-ready shape
+    /// `[1, n_kv_heads, visible_len, head_dim]` — byte-identical to what the
+    /// dense Fp16 path would have returned. The dense `keys`/`values` buffers
+    /// stay `None`.
+    ///
+    /// `offset` is advanced by `n_new` here for the same reason
+    /// [`Self::update_fp16`] advances it: RoPE reads `cache.offset` *before*
+    /// the next step's `update_and_fetch`, so it must reflect the
+    /// pre-call position during RoPE and the post-call position afterward. The
+    /// paged `state.layers[layer_idx].len` is bumped in lockstep by
+    /// `write_prefill`, so with `live_start == 0` (no head-trim on this path)
+    /// `buffer_idx() == offset == state len`.
+    ///
+    /// # Panics
+    ///
+    /// Panics (with a descriptive message) if the backing is missing, the K/V
+    /// batch dim is not `1`, the pool `write_prefill`/`gather_visible` calls
+    /// fail (e.g. geometry mismatch), or the gather is unexpectedly empty after
+    /// a non-empty write. The model `forward` signature returns a plain tuple,
+    /// so there is no `Result` to thread these through; a misuse is a hard bug,
+    /// not a recoverable condition.
+    fn update_and_fetch_paged(
+        &mut self,
+        new_keys: &MlxArray,
+        new_values: &MlxArray,
+    ) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
+        let backing = self
+            .paged_backing
+            .clone()
+            .expect("update_and_fetch_paged called without paged backing");
+        let layer_idx = backing.layer_idx;
+
+        let k_shape = ffi::array_shape(new_keys);
+        assert_eq!(
+            k_shape.len(),
+            4,
+            "update_and_fetch_paged: K must be [1, n_kv_heads, n_new, head_dim], got shape {k_shape:?}"
+        );
+        assert_eq!(
+            k_shape[0], 1,
+            "update_and_fetch_paged: only single-stream (B == 1) is supported, got batch {} (shape {k_shape:?})",
+            k_shape[0]
+        );
+        let n_new = k_shape[2];
+        if n_new <= 0 {
+            // Nothing to append; gather whatever is currently visible (the
+            // gather expects to return a non-empty window only when tokens
+            // exist — mirror the dense early paths by returning the current
+            // visible slice).
+            let state = backing.state.borrow();
+            let pool = backing.pool.borrow();
+            return pool
+                .gather_visible(&state, layer_idx)
+                .expect("gather_visible failed on empty append")
+                .expect("gather_visible returned None for a zero-token update");
+        }
+
+        {
+            let mut pool = backing.pool.borrow_mut();
+            let mut state = backing.state.borrow_mut();
+            pool.write_prefill(&mut state, layer_idx, new_keys, new_values)
+                .expect("PagedBlockPool::write_prefill failed");
+        }
+
+        // Advance the monotonic write position. RoPE for the *next* step reads
+        // `cache.offset` before calling back into `update_and_fetch`, so this
+        // mirrors the dense `update_fp16` bump exactly.
+        self.offset += n_new;
+
+        let state = backing.state.borrow();
+        let pool = backing.pool.borrow();
+        pool.gather_visible(&state, layer_idx)
+            .expect("PagedBlockPool::gather_visible failed after write_prefill")
+            .expect("gather_visible returned None despite a non-empty write")
     }
 
     /// Read path for `KVCacheMode::Turbo4Delegated` (K unified; cold-V dequant memo retired).
