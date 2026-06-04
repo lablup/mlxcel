@@ -45,6 +45,7 @@ requirements. If a checkpoint fails detection or loading, inspect its
 Implemented VLM variants include:
 
 - Gemma 3 VL, Gemma 3n VL, Gemma 4 VL
+- Gemma 4 Unified (`gemma4_unified`): encoder-free text + image + audio. Patch-projection vision embedder and waveform-chunk audio path feed the shared Gemma 4 backbone, with blockwise bidirectional attention over image/video token spans during prefill. Video input is not yet supported.
 - Llama 4 VLM
 - LLaVA and LLaVA-Bunny
 - Aya Vision and PaliGemma

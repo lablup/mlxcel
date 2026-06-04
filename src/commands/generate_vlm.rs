@@ -231,6 +231,18 @@ pub(crate) fn compute_vlm_embeddings(
         return compute_gemma4_multimodal_embeddings(gemma4_vl, prompt_tokens, image_paths, audio);
     }
 
+    // Handle audio-only and image+audio for Gemma 4 Unified (encoder-free).
+    if let Some(audio) = audio_path
+        && let LoadedModel::Gemma4Unified(unified) = model
+    {
+        return compute_gemma4_unified_multimodal_embeddings(
+            unified,
+            prompt_tokens,
+            image_paths,
+            audio,
+        );
+    }
+
     // Nemotron H Nano Omni — audio-only or combined image + audio
     // Mirrors the Gemma 4 dispatch above; the helper
     // handles both branches so a single match arm covers both modes.
@@ -463,6 +475,84 @@ fn compute_gemma4_multimodal_embeddings(
         Some(&audio_features),
         Some(&audio_mask),
     );
+
+    Ok(Some(embeddings))
+}
+
+/// Compute audio-only or combined image + audio embeddings for Gemma 4
+/// Unified (encoder-free: waveform chunking, no mel spectrogram / Conformer).
+fn compute_gemma4_unified_multimodal_embeddings(
+    unified: &mlxcel::vision::Gemma4UnifiedModel,
+    prompt_tokens: &mut Vec<i32>,
+    image_paths: &[PathBuf],
+    audio_path: &Path,
+) -> Result<Option<InputEmbeddings>> {
+    use mlxcel::audio;
+
+    if unified.embed_audio.is_none() {
+        return Err(anyhow::anyhow!(
+            "This Gemma 4 Unified model has no audio embedder. Audio input is not supported."
+        ));
+    }
+
+    // Process images (optional) through the encoder-free patch projector.
+    let processed_images = if image_paths.is_empty() {
+        Vec::new()
+    } else {
+        let images: Vec<image::DynamicImage> = image_paths
+            .iter()
+            .map(|path| {
+                image::open(path)
+                    .map_err(|e| anyhow::anyhow!("Failed to load image {:?}: {}", path, e))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        println!("Loaded {} image(s).", images.len());
+        let processed = unified.processor.preprocess(&images);
+        let num_soft_tokens: Vec<usize> =
+            processed.iter().map(|i| i.num_soft_tokens).collect();
+        mlxcel::vlm_runtime::expand_gemma4_image_tokens_pub(
+            prompt_tokens,
+            unified.image_token_id,
+            unified.boi_token_id,
+            unified.eoi_token_id,
+            &num_soft_tokens,
+        )?;
+        processed
+    };
+
+    // Process audio: raw waveform chunked into audio_samples_per_token frames.
+    let (samples, sample_rate) =
+        audio::load_wav_file(audio_path).map_err(|e| anyhow::anyhow!("{}", e))?;
+    println!(
+        "Loaded audio: {} samples at {} Hz ({:.1}s)",
+        samples.len(),
+        sample_rate,
+        samples.len() as f64 / sample_rate.max(1) as f64
+    );
+
+    let audio_input = unified.processor.process_audio(&samples);
+    let num_audio_tokens = audio_input.num_frames;
+    expand_gemma4_audio_tokens(
+        prompt_tokens,
+        unified.audio_token_id,
+        unified.boa_token_id,
+        unified.eoa_token_id,
+        num_audio_tokens,
+    );
+
+    let input_ids_arr =
+        mlxcel_core::from_slice_i32(prompt_tokens, &[1, prompt_tokens.len() as i32]);
+    let embeddings = unified.get_input_embeddings_with_audio(
+        &input_ids_arr,
+        &processed_images,
+        Some(&audio_input.features),
+        Some(&audio_input.mask),
+    );
+
+    print_preparation_summary(VlmPreparationSummary::Gemma4Audio {
+        audio_tokens: num_audio_tokens,
+        total_tokens: prompt_tokens.len(),
+    });
 
     Ok(Some(embeddings))
 }

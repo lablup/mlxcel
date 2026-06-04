@@ -935,6 +935,12 @@ fn prepare_request_video_embeddings(
 
     let gemma4_vl = match model {
         LoadedModel::Gemma4VLM(model) => model,
+        LoadedModel::Gemma4Unified(_) => {
+            return Err(anyhow!(
+                "video input is not yet supported for gemma4_unified models; \
+                 text and image (and image+audio) inputs are supported"
+            ));
+        }
         _ => {
             return Err(anyhow!(
                 "video inputs are only supported by Gemma 4 VLM models in this build"
