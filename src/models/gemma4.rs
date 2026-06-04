@@ -308,7 +308,11 @@ fn overlay_block_bidirectional(base: &MlxArray, block_ids: &MlxArray) -> UniqueP
     // the leading `k - q` key columns (the already-cached prefix) get id -1 and
     // never participate in a same-block match.
     let ids_shape = mlxcel_core::array_shape(block_ids);
-    let id_len = if ids_shape.is_empty() { 1 } else { ids_shape[0] };
+    let id_len = if ids_shape.is_empty() {
+        1
+    } else {
+        ids_shape[0]
+    };
     let q_ids = mlxcel_core::reshape(block_ids, &[q, 1]);
     let k_ids = if k == id_len {
         mlxcel_core::reshape(block_ids, &[1, k])
@@ -3619,7 +3623,10 @@ mod gemma4_unified_mask_tests {
         // img at index 1 must NOT attend forward to img at index 3 (different
         // block) — stays causal (-inf).
         let v = mask_at(&out, 1, 3);
-        assert!(v.is_infinite() && v < 0.0, "cross-block forward stays masked");
+        assert!(
+            v.is_infinite() && v < 0.0,
+            "cross-block forward stays masked"
+        );
         // Backward (3 -> 1) is allowed only by causality, not by same-block.
         assert_eq!(mask_at(&out, 3, 1), 0.0);
     }

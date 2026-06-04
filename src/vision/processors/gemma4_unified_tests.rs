@@ -110,7 +110,7 @@ fn resize_respects_soft_token_budget() {
 #[test]
 fn audio_chunks_into_frames_with_mask() {
     let proc = Gemma4UnifiedProcessor::new(48, 280, 640);
-    // 1.5 frames worth of samples → 2 frames, second is a padded partial.
+    // 1.5 frames worth of samples → 2 frames; the second is zero-padded.
     let samples = vec![0.5f32; 640 + 320];
     let audio = proc.process_audio(&samples);
     assert_eq!(audio.num_frames, 2);
@@ -118,11 +118,17 @@ fn audio_chunks_into_frames_with_mask() {
     assert_eq!(mlxcel_core::array_shape(&audio.mask), vec![2]);
     assert_eq!(proc.audio_num_frames(samples.len()), 2);
 
-    // Frame 0 is fully valid; frame 1 (partial) is invalid.
+    // Both frames are valid soft tokens: the trailing partial frame is
+    // zero-padded to a full token and counts as a real audio soft token.
+    // The placeholder count, mask length, and projected-feature count all
+    // equal num_frames (2).
     let mask0 = mlxcel_core::item_bool(&mlxcel_core::slice(&audio.mask, &[0], &[1]));
     let mask1 = mlxcel_core::item_bool(&mlxcel_core::slice(&audio.mask, &[1], &[2]));
     assert!(mask0, "first full frame must be valid");
-    assert!(!mask1, "trailing partial frame must be invalid");
+    assert!(
+        mask1,
+        "trailing partial frame is a valid soft token (zero-padded)"
+    );
 
     // The padded tail of frame 1 is zero (samples ran out at index 320).
     assert_eq!(read_f32_at(&audio.features, &[1, 500]), 0.0);

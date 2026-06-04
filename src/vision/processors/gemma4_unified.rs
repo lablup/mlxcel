@@ -89,8 +89,7 @@ impl Gemma4UnifiedProcessor {
 
     fn preprocess_single(&self, image: &DynamicImage) -> Gemma4UnifiedImageInput {
         let rgb = image.to_rgb8();
-        let (target_h, target_w) =
-            self.resize_dims(rgb.height() as usize, rgb.width() as usize);
+        let (target_h, target_w) = self.resize_dims(rgb.height() as usize, rgb.width() as usize);
 
         let resized = if rgb.height() as usize == target_h && rgb.width() as usize == target_w {
             rgb
@@ -142,10 +141,7 @@ impl Gemma4UnifiedProcessor {
                 &patch_data,
                 &[self.num_soft_tokens as i32, patch_dim as i32],
             ),
-            positions: mlxcel_core::from_slice_i32(
-                &positions,
-                &[self.num_soft_tokens as i32, 2],
-            ),
+            positions: mlxcel_core::from_slice_i32(&positions, &[self.num_soft_tokens as i32, 2]),
             num_soft_tokens: real_patches,
         }
     }
@@ -191,29 +187,34 @@ impl Gemma4UnifiedProcessor {
 
     /// Chunk a raw waveform into `audio_samples_per_token`-sample frames.
     ///
-    /// The final partial frame is zero-padded; its mask entry is `false`. All
-    /// full frames have mask `true`.
+    /// The trailing partial frame is zero-padded to a full `audio_samples_per_token`
+    /// vector and is treated as a real audio soft token — the checkpoint is built
+    /// expecting exactly `num_frames = ceil(samples / audio_samples_per_token)` soft
+    /// tokens, including the zero-padded tail. All frames in the returned mask are
+    /// therefore marked valid (`true`). The placeholder count, the mask length, and
+    /// the projected-feature count all equal `num_frames`.
     pub fn process_audio(&self, samples: &[f32]) -> Gemma4UnifiedAudioInput {
         let frame = self.audio_samples_per_token;
         let num_frames = samples.len().div_ceil(frame).max(1);
         let mut data = vec![0.0f32; num_frames * frame];
-        let mut mask = vec![false; num_frames];
 
-        for (f, m) in mask.iter_mut().enumerate() {
+        for f in 0..num_frames {
             let start = f * frame;
             if start >= samples.len() {
                 break;
             }
             let end = (start + frame).min(samples.len());
             data[start..start + (end - start)].copy_from_slice(&samples[start..end]);
-            // A frame is valid when it is completely filled with real samples.
-            *m = (end - start) == frame;
+            // Any remaining bytes in this frame slot stay at 0.0 (zero-pad).
         }
+
+        // Every frame slot — including the zero-padded trailing partial — is a
+        // real audio soft token and is marked valid.
+        let mask_i32 = vec![1i32; num_frames];
 
         Gemma4UnifiedAudioInput {
             features: mlxcel_core::from_slice_f32(&data, &[num_frames as i32, frame as i32]),
             mask: {
-                let mask_i32: Vec<i32> = mask.iter().map(|&b| if b { 1 } else { 0 }).collect();
                 let arr = mlxcel_core::from_slice_i32(&mask_i32, &[num_frames as i32]);
                 mlxcel_core::astype(&arr, mlxcel_core::dtype::BOOL)
             },

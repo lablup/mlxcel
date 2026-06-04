@@ -263,7 +263,9 @@ impl LoadedModel {
         seq_id: mlxcel_core::cache::SequenceId,
     ) -> Option<mlxcel_core::UniquePtr<mlxcel_core::MlxArray>> {
         match self.vlm_runtime() {
-            Some(VlmRuntimeRef::Gemma4(gemma4)) => gemma4.take_per_layer_inputs_for_sequence(seq_id),
+            Some(VlmRuntimeRef::Gemma4(gemma4)) => {
+                gemma4.take_per_layer_inputs_for_sequence(seq_id)
+            }
             Some(VlmRuntimeRef::Gemma4Unified(unified)) => {
                 unified.take_per_layer_inputs_for_sequence(seq_id)
             }

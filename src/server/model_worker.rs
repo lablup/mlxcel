@@ -881,8 +881,7 @@ fn prepare_gemma4_unified_audio_embeddings(
     let processed_images = if !images.is_empty() {
         let decoded_images = decode_request_images(images)?;
         let processed = unified.processor.preprocess(&decoded_images);
-        let num_soft_tokens: Vec<usize> =
-            processed.iter().map(|img| img.num_soft_tokens).collect();
+        let num_soft_tokens: Vec<usize> = processed.iter().map(|img| img.num_soft_tokens).collect();
         crate::vlm_runtime::expand_gemma4_image_tokens_pub(
             prompt_tokens,
             unified.image_token_id,

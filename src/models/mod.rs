@@ -487,9 +487,10 @@ impl ModelType {
             ModelType::Gemma3VLM => ("Gemma 3 VLM", "Gemma VLM"),
             ModelType::Gemma3nVLM => ("Gemma 3n VLM (MobileNetV5 + Gemma3n)", "Gemma VLM"),
             ModelType::Gemma4VLM => ("Gemma 4 VLM", "Gemma VLM"),
-            ModelType::Gemma4Unified => {
-                ("Gemma 4 Unified (encoder-free text + vision + audio)", "Gemma VLM")
-            }
+            ModelType::Gemma4Unified => (
+                "Gemma 4 Unified (encoder-free text + vision + audio)",
+                "Gemma VLM",
+            ),
             ModelType::PaliGemmaVLM => ("PaliGemma (SigLIP + Gemma)", "Gemma VLM"),
 
             // ----- Mistral (text) -----

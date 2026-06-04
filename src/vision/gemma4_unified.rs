@@ -72,7 +72,9 @@ impl Gemma4UnifiedModel {
         boi_token_id: i32,
         eoi_token_id: i32,
     ) -> Self {
-        let use_bidirectional_vision = text_model.text_config().uses_bidirectional_vision_attention();
+        let use_bidirectional_vision = text_model
+            .text_config()
+            .uses_bidirectional_vision_attention();
         Self {
             text_model,
             vision_embedder,
@@ -150,7 +152,9 @@ impl Gemma4UnifiedModel {
         } else {
             let mut features = Vec::with_capacity(images.len());
             for image in images {
-                let patch_feat = self.vision_embedder.forward(&image.patches, &image.positions);
+                let patch_feat = self
+                    .vision_embedder
+                    .forward(&image.patches, &image.positions);
                 let projected = self.embed_vision.forward(&patch_feat);
                 // Keep only the real (non-padding) patch rows so the count
                 // aligns exactly with the image placeholder tokens the
@@ -183,15 +187,15 @@ impl Gemma4UnifiedModel {
 
             let audio_token_arr = mlxcel_core::from_slice_i32(&[self.audio_token_id], &[1]);
             let is_audio = mlxcel_core::equal(input_ids, &audio_token_arr);
-            // Optionally gate by the per-frame validity mask via the scatter
-            // alignment: invalid frames simply are not referenced because the
-            // placeholder count equals the valid frame count.
+            // The validity mask is not needed for the scatter: every chunked
+            // frame is a real audio soft token (zero-padded if partial), so the
+            // placeholder count equals num_frames equals the projected-feature
+            // count. The mask field is carried for callers that introspect frame
+            // validity but is not consumed during embedding merge.
             let _ = audio_mask;
             let audio_mask_expanded = mlxcel_core::expand_dims(&is_audio, -1);
-            let audio_mask_expanded = mlxcel_core::broadcast_to(
-                &audio_mask_expanded,
-                &mlxcel_core::array_shape(current),
-            );
+            let audio_mask_expanded =
+                mlxcel_core::broadcast_to(&audio_mask_expanded, &mlxcel_core::array_shape(current));
             let scattered = masked_scatter(current, &audio_mask_expanded, &audio_encodings);
             result_embeds.inputs_embeds = scattered;
         }
@@ -269,7 +273,8 @@ impl Gemma4UnifiedModel {
     // -- per-sequence per_layer_inputs binding (mirrors Gemma4VLModel) --------
 
     pub fn bind_per_layer_inputs_to_sequence(&self, seq_id: SequenceId) {
-        self.per_layer_inputs_state.bind_fallback_to_sequence(seq_id);
+        self.per_layer_inputs_state
+            .bind_fallback_to_sequence(seq_id);
     }
 
     pub fn take_per_layer_inputs_for_sequence(

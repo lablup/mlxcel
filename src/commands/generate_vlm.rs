@@ -508,8 +508,7 @@ fn compute_gemma4_unified_multimodal_embeddings(
             .collect::<Result<Vec<_>>>()?;
         println!("Loaded {} image(s).", images.len());
         let processed = unified.processor.preprocess(&images);
-        let num_soft_tokens: Vec<usize> =
-            processed.iter().map(|i| i.num_soft_tokens).collect();
+        let num_soft_tokens: Vec<usize> = processed.iter().map(|i| i.num_soft_tokens).collect();
         mlxcel::vlm_runtime::expand_gemma4_image_tokens_pub(
             prompt_tokens,
             unified.image_token_id,

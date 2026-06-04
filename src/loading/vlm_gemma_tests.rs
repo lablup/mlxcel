@@ -109,4 +109,3 @@ fn sanitize_gemma3n_weights_strips_model_prefix_and_transposes_conv_weights() {
         vec![8, 3, 3, 16]
     );
 }
-

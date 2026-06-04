@@ -54,7 +54,11 @@ pub struct Gemma4UnifiedVisionEmbedder {
 }
 
 /// Build a [`LayerNorm`] (weight + bias) from a weight-map prefix.
-fn layer_norm_from_weights(weights: &WeightMap, prefix: &str, eps: f32) -> Result<LayerNorm, String> {
+fn layer_norm_from_weights(
+    weights: &WeightMap,
+    prefix: &str,
+    eps: f32,
+) -> Result<LayerNorm, String> {
     let weight = weights
         .get(&format!("{prefix}.weight"))
         .map(|w| mlxcel_core::copy(w))
@@ -142,19 +146,11 @@ impl Gemma4UnifiedVisionEmbedder {
 
         // Split into x and y index vectors of shape [num_patches].
         let x_ids = mlxcel_core::reshape(
-            &mlxcel_core::slice(
-                &pos_i32,
-                &[0, 0],
-                &[num_patches, 1],
-            ),
+            &mlxcel_core::slice(&pos_i32, &[0, 0], &[num_patches, 1]),
             &[num_patches],
         );
         let y_ids = mlxcel_core::reshape(
-            &mlxcel_core::slice(
-                &pos_i32,
-                &[0, 1],
-                &[num_patches, 2],
-            ),
+            &mlxcel_core::slice(&pos_i32, &[0, 1], &[num_patches, 2]),
             &[num_patches],
         );
 
