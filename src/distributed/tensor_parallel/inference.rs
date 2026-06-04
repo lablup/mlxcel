@@ -161,7 +161,7 @@ fn fallback_architecture(model_type: ModelType) -> &'static str {
         ModelType::Gemma | ModelType::PaliGemmaVLM => "gemma",
         ModelType::Gemma2 => "gemma2",
         ModelType::Gemma3 | ModelType::Gemma3VLM => "gemma3",
-        ModelType::Gemma4 | ModelType::Gemma4VLM => "gemma4",
+        ModelType::Gemma4 | ModelType::Gemma4VLM | ModelType::Gemma4Unified => "gemma4",
         ModelType::Gemma3n | ModelType::Gemma3nVLM => "gemma3n",
         ModelType::Phi => "phi",
         ModelType::Phi3 | ModelType::Phi3VLM => "phi3",
