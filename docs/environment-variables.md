@@ -98,7 +98,7 @@ provided.
 |----------|--------|---------|-------|
 | `MLXCEL_DRAFT_KIND` | `dflash`, `mtp` | auto/none | Alias for `--draft-kind` when the CLI flag and `LLAMA_ARG_DRAFT_KIND` are absent. |
 | `MLXCEL_DRAFT_BLOCK_SIZE` | unsigned integer | per drafter (`4` for MTP, `16` for DFlash) | Alias for `--draft-block-size` when the CLI flag and `LLAMA_ARG_DRAFT_BLOCK_SIZE` are absent. |
-| `MLXCEL_ENABLE_MTP_B1` | truthy value | off | **Advanced.** Forces the singleton Gemma 4 MTP burst path for parity/debug testing. |
+| `MLXCEL_ENABLE_MTP_B1` | truthy value | off | **Advanced.** Enables the singleton (B=1) MTP burst path for `gemma4_unified` (and `gemma4`/`gemma4_vlm`) targets. Required today to observe the measured ~1.87× decode speedup on the 12B Unified + 4-bit-assistant pair (≈39→74 tok/s at temperature 0, byte-identical output); the scheduler guard that declines singleton MTP by default was calibrated on the 31B. Making B=1 MTP the default for the 12B class is tracked in #158. |
 | `MLXCEL_ENABLE_MTP_BATCH` | truthy value | off | **Advanced.** Forces the batched Gemma 4 MTP burst path for parity/debug testing. |
 | `MLXCEL_ENABLE_MTP_DEFERRED` | `1` | off | **Advanced.** Enables the deferred greedy verifier path for Gemma 4 MTP when sampling settings allow it. |
 
