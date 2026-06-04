@@ -42,7 +42,7 @@ use crate::drafter::masks::{make_drafter_masks_with_valid_len, BatchScalar, Laye
 use crate::drafter::{Drafter, DrafterError, DrafterKind, SharedKv};
 use crate::ffi::{self, MlxArray};
 use crate::generate::{LanguageModel, SamplingConfig};
-use crate::layers::{KVCache, Linear, RMSNorm, UnifiedEmbedding};
+use crate::layers::{KVCache, Linear, RMSNorm, UnifiedEmbedding, UnifiedLinear};
 use crate::weights::WeightMap;
 use cxx::UniquePtr;
 use std::collections::HashMap;
@@ -340,8 +340,8 @@ fn str_to_layer_type(s: &str) -> Result<LayerType, DrafterError> {
 pub struct Gemma4AssistantDraftModel {
     config: Gemma4AssistantConfig,
     inner: DraftInner,
-    pre_projection: Linear,
-    post_projection: Linear,
+    pre_projection: UnifiedLinear,
+    post_projection: UnifiedLinear,
     /// Explicit `lm_head` weight when `tie_word_embeddings == false`. `None`
     /// means the LM head is one of the tied / centroid variants resolved by
     /// `bind()`.
@@ -461,10 +461,27 @@ impl Gemma4AssistantDraftModel {
         let inner = DraftInner::from_weights(&weights, &text_cfg, "model")
             .map_err(|e| DrafterError::WeightLoad { reason: e })?;
 
-        let pre_projection = Linear::from_weights(&weights, "pre_projection")
-            .map_err(|e| DrafterError::WeightLoad { reason: e })?;
-        let post_projection = Linear::from_weights(&weights, "post_projection")
-            .map_err(|e| DrafterError::WeightLoad { reason: e })?;
+        // Use the quantization-aware `UnifiedLinear` so 4-bit assistant
+        // drafters (e.g. `gemma-4-12B-it-assistant-4bit`) load their packed
+        // pre/post projection weights and run them through `quantized_matmul`.
+        // `UnifiedLinear::from_weights` auto-detects quantization via the
+        // `.scales` sister tensor and falls back to a plain `Linear` when it is
+        // absent, so this is behavior-preserving for bf16 drafters (e.g. the
+        // 31B assistant) while fixing the 4-bit `[matmul]` shape-mismatch crash.
+        let pre_projection = UnifiedLinear::from_weights(
+            &weights,
+            "pre_projection",
+            text_cfg.group_size(),
+            text_cfg.bits(),
+        )
+        .map_err(|e| DrafterError::WeightLoad { reason: e })?;
+        let post_projection = UnifiedLinear::from_weights(
+            &weights,
+            "post_projection",
+            text_cfg.group_size(),
+            text_cfg.bits(),
+        )
+        .map_err(|e| DrafterError::WeightLoad { reason: e })?;
 
         let lm_head_weight = if config.tie_word_embeddings {
             None
