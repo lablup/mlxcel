@@ -3560,3 +3560,67 @@ impl LanguageModel for Gemma4Wrapper {
         false
     }
 }
+
+#[cfg(test)]
+mod gemma4_unified_mask_tests {
+    use super::*;
+
+    /// Read one f32 from a 2-D additive mask at `[q, k]`.
+    fn mask_at(mask: &MlxArray, q: i32, k: i32) -> f32 {
+        let scalar = mlxcel_core::slice(mask, &[q, k], &[q + 1, k + 1]);
+        mlxcel_core::item_f32(&scalar)
+    }
+
+    #[test]
+    fn overlay_opens_intra_block_bidirectionally() {
+        // Sequence layout (block ids): text(-1) img(0) img(0) text(-1).
+        // Base mask is plain causal [4, 4]; the overlay must additionally allow
+        // the two image positions (1, 2) to attend to each other in BOTH
+        // directions while leaving everything else causal.
+        let base = create_causal_mask(4, 0);
+        let block_ids = mlxcel_core::from_slice_i32(&[-1, 0, 0, -1], &[4]);
+        let out = overlay_block_bidirectional(&base, &block_ids);
+        mlxcel_core::eval(&out);
+
+        let neg_inf_is = |v: f32| v.is_infinite() && v < 0.0;
+
+        // Image position 1 may now attend forward to image position 2 (causal
+        // would have masked this future key).
+        assert_eq!(mask_at(&out, 1, 2), 0.0, "img1 must attend to img2");
+        // And img2 -> img1 stays allowed (already causal).
+        assert_eq!(mask_at(&out, 2, 1), 0.0, "img2 must attend to img1");
+        // Self-attention within the block is allowed.
+        assert_eq!(mask_at(&out, 1, 1), 0.0);
+
+        // Text token 0 cannot attend forward to image token 1 (cross-block /
+        // text→vision stays causal).
+        assert!(
+            neg_inf_is(mask_at(&out, 0, 1)),
+            "text0 must NOT attend forward to img1",
+        );
+        // Text token 3 attends backward to images (causal) — unchanged.
+        assert_eq!(mask_at(&out, 3, 1), 0.0);
+        // Image token 1 cannot attend forward to text token 3.
+        assert!(
+            neg_inf_is(mask_at(&out, 1, 3)),
+            "img1 must NOT attend forward to text3",
+        );
+    }
+
+    #[test]
+    fn overlay_separate_blocks_do_not_cross_attend() {
+        // text img(0) text img(1): the two images are in different blocks and
+        // must NOT attend to each other bidirectionally.
+        let base = create_causal_mask(4, 0);
+        let block_ids = mlxcel_core::from_slice_i32(&[-1, 0, -1, 1], &[4]);
+        let out = overlay_block_bidirectional(&base, &block_ids);
+        mlxcel_core::eval(&out);
+
+        // img at index 1 must NOT attend forward to img at index 3 (different
+        // block) — stays causal (-inf).
+        let v = mask_at(&out, 1, 3);
+        assert!(v.is_infinite() && v < 0.0, "cross-block forward stays masked");
+        // Backward (3 -> 1) is allowed only by causality, not by same-block.
+        assert_eq!(mask_at(&out, 3, 1), 0.0);
+    }
+}

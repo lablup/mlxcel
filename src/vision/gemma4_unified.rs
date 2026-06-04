@@ -44,6 +44,73 @@ pub mod token_type {
     pub const AUDIO: i32 = 3;
 }
 
+/// Multimodal token ids that drive `mm_token_type_ids` and the block overlay.
+#[derive(Debug, Clone, Copy)]
+pub struct UnifiedTokenIds {
+    pub image: i32,
+    pub video: i32,
+    pub audio: i32,
+}
+
+/// Derive `mm_token_type_ids` (issue §6) from a host token-id slice: 0 text,
+/// 1 image, 2 video, 3 audio.
+pub fn derive_mm_token_type_ids(input_ids: &[i32], ids: UnifiedTokenIds) -> Vec<i32> {
+    input_ids
+        .iter()
+        .map(|&t| {
+            if t == ids.image {
+                token_type::IMAGE
+            } else if t == ids.video {
+                token_type::VIDEO
+            } else if t == ids.audio {
+                token_type::AUDIO
+            } else {
+                token_type::TEXT
+            }
+        })
+        .collect()
+}
+
+/// Compute the per-position vision block-id vector for the blockwise
+/// bidirectional overlay, or `None` when the overlay must be disabled.
+///
+/// Enabled only when (issue §6): `use_bidirectional` is set, prefill
+/// (`len > 1`), at least one image/video token present, and **no** audio
+/// token present. Each contiguous image/video run gets a distinct non-negative
+/// id; every other position is `-1`.
+pub fn compute_vision_block_ids(
+    input_ids: &[i32],
+    ids: UnifiedTokenIds,
+    use_bidirectional: bool,
+) -> Option<Vec<i32>> {
+    if !use_bidirectional || input_ids.len() <= 1 {
+        return None;
+    }
+    let types = derive_mm_token_type_ids(input_ids, ids);
+    let has_vision = types
+        .iter()
+        .any(|&t| t == token_type::IMAGE || t == token_type::VIDEO);
+    let has_audio = types.iter().any(|&t| t == token_type::AUDIO);
+    if !has_vision || has_audio {
+        return None;
+    }
+
+    let mut block_ids = vec![-1i32; types.len()];
+    let mut current_block = -1i32;
+    let mut prev_vision = false;
+    for (i, &t) in types.iter().enumerate() {
+        let is_vision = t == token_type::IMAGE || t == token_type::VIDEO;
+        if is_vision {
+            if !prev_vision {
+                current_block += 1;
+            }
+            block_ids[i] = current_block;
+        }
+        prev_vision = is_vision;
+    }
+    Some(block_ids)
+}
+
 /// Gemma 4 Unified model.
 pub struct Gemma4UnifiedModel {
     pub text_model: crate::models::Gemma4Wrapper,
@@ -233,65 +300,35 @@ impl Gemma4UnifiedModel {
         mask
     }
 
-    /// Derive `mm_token_type_ids` (issue §6) from `input_ids` as an i32 host
-    /// vector. Returns one value per token: 0 text, 1 image, 2 video, 3 audio.
+    /// Multimodal token ids used for type/block derivation.
+    fn unified_token_ids(&self) -> UnifiedTokenIds {
+        UnifiedTokenIds {
+            image: self.image_token_id,
+            video: self.video_token_id,
+            // When audio is disabled, use an out-of-range sentinel so no token
+            // is ever classified as audio.
+            audio: if self.embed_audio.is_some() {
+                self.audio_token_id
+            } else {
+                i32::MIN
+            },
+        }
+    }
+
+    /// Derive `mm_token_type_ids` (issue §6) from a host token-id slice.
     pub fn mm_token_type_ids(&self, input_ids_host: &[i32]) -> Vec<i32> {
-        input_ids_host
-            .iter()
-            .map(|&t| {
-                if t == self.image_token_id {
-                    token_type::IMAGE
-                } else if t == self.video_token_id {
-                    token_type::VIDEO
-                } else if t == self.audio_token_id {
-                    token_type::AUDIO
-                } else {
-                    token_type::TEXT
-                }
-            })
-            .collect()
+        derive_mm_token_type_ids(input_ids_host, self.unified_token_ids())
     }
 
     /// Compute the per-position vision block-id vector for the blockwise
-    /// bidirectional overlay, or `None` when the overlay must be disabled.
-    ///
-    /// The overlay is enabled only when (issue §6):
-    /// * the checkpoint requests `use_bidirectional_attention == "vision"`,
-    /// * this is prefill (`seq_len > 1`),
-    /// * at least one image/video token is present, and
-    /// * **no** audio token is present (audio-grounded prompts stay fully
-    ///   causal).
-    ///
-    /// When enabled, each contiguous run of image/video tokens gets a distinct
-    /// non-negative block id (incrementing per run); every non-vision token is
-    /// `-1`.
+    /// bidirectional overlay from a host token-id slice (see
+    /// [`compute_vision_block_ids`]).
     pub fn vision_block_ids(&self, input_ids_host: &[i32]) -> Option<Vec<i32>> {
-        if !self.use_bidirectional_vision || input_ids_host.len() <= 1 {
-            return None;
-        }
-        let types = self.mm_token_type_ids(input_ids_host);
-        let has_vision = types
-            .iter()
-            .any(|&t| t == token_type::IMAGE || t == token_type::VIDEO);
-        let has_audio = types.iter().any(|&t| t == token_type::AUDIO);
-        if !has_vision || has_audio {
-            return None;
-        }
-
-        let mut block_ids = vec![-1i32; types.len()];
-        let mut current_block = -1i32;
-        let mut prev_vision = false;
-        for (i, &t) in types.iter().enumerate() {
-            let is_vision = t == token_type::IMAGE || t == token_type::VIDEO;
-            if is_vision {
-                if !prev_vision {
-                    current_block += 1;
-                }
-                block_ids[i] = current_block;
-            }
-            prev_vision = is_vision;
-        }
-        Some(block_ids)
+        compute_vision_block_ids(
+            input_ids_host,
+            self.unified_token_ids(),
+            self.use_bidirectional_vision,
+        )
     }
 
     // -- per-sequence per_layer_inputs binding (mirrors Gemma4VLModel) --------
