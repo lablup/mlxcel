@@ -101,6 +101,20 @@ fn mtp_draft_position(kv_valid_len: usize) -> usize {
     kv_valid_len.saturating_sub(1)
 }
 
+/// Output of [`Gemma4MtpBatchedTargetAdapter::left_padded_input`].
+///
+/// Carries the left-padded `[B, max_len]` prefill tensor plus the per-row
+/// padding bookkeeping the ragged prefill seed needs:
+/// - `max_len`: padded prompt width (= `max(prompt_len)` across the window).
+/// - `left_padding[r]`: leading padding columns for row `r` (`max_len - L_r`).
+/// - `valid_len[r]`: row `r`'s real prompt length `L_r`.
+struct LeftPaddedPrefill {
+    arr: UniquePtr<MlxArray>,
+    max_len: usize,
+    left_padding: Vec<usize>,
+    valid_len: Vec<usize>,
+}
+
 /// Upstream mlx-vlm buffers Gemma 4 MTP rotating target caches by
 /// `max(32, min(128, max(configured, requested) * 8))` tokens. The Rust
 /// adapter receives the effective requested block size from the server-side
@@ -887,11 +901,21 @@ pub struct Gemma4MtpBatchedTargetAdapter<'a> {
     batch_size: usize,
     /// Buffered rotating-cache slack for MTP verify append + rollback.
     rotating_buffer_size: i32,
-    /// Per-row logical target cache lengths. The physical cache offset is
-    /// the global max after rollback, but shorter rows have their tails
-    /// zeroed and must pass their own valid length to the drafter masks and
-    /// RoPE anchor.
+    /// Per-row logical target cache lengths (= each row's `kv_valid_len`). The
+    /// physical cache offset is the global max after rollback, but shorter rows
+    /// have their tails zeroed and must pass their own valid length to the
+    /// drafter masks and RoPE anchor. For the equal-length path every entry
+    /// equals the shared prompt length; for the ragged (left-padded) path each
+    /// entry is the row's unpadded prompt length plus the tokens accepted so
+    /// far.
     positions: RefCell<Vec<usize>>,
+    /// Per-row left-padding extent in the shared K/V seq-len axis. `0` for every
+    /// row on the equal-length path; `max_prompt_len - prompt_len[r]` on the
+    /// ragged path, constant across the whole burst (the prompt's leading
+    /// padding is never trimmed). Threaded into every seed so the drafter rolls
+    /// each row's K/V into the prefix-valid layout and rotates queries in the
+    /// row's shifted frame.
+    left_padding: RefCell<Vec<usize>>,
 }
 
 impl<'a> Gemma4MtpBatchedTargetAdapter<'a> {
@@ -923,6 +947,7 @@ impl<'a> Gemma4MtpBatchedTargetAdapter<'a> {
             batch_size,
             rotating_buffer_size,
             positions: RefCell::new(vec![0; batch_size]),
+            left_padding: RefCell::new(vec![0; batch_size]),
         }
     }
 
@@ -976,6 +1001,69 @@ impl<'a> Gemma4MtpBatchedTargetAdapter<'a> {
         }
         let arr = mlxcel_core::from_slice_i32(&flat, &[expected_batch as i32, width as i32]);
         Ok((arr, width as i32))
+    }
+
+    /// Build a **left-padded** `[B, max_prompt_len]` i32 tensor from per-row
+    /// prompt slices of (possibly) different lengths, returning the padded
+    /// tensor plus per-row `(max_len, left_padding, valid_len)` metadata.
+    ///
+    /// Row `r` (length `L_r`) is placed at padded indices
+    /// `[max_len - L_r, max_len)`; the leading `left_padding[r] = max_len - L_r`
+    /// columns hold a padding token (`0`). Left-padding is the parity-preserving
+    /// layout: every real token in a row is shifted right by the same constant
+    /// `left_padding[r]`, so the proportional-RoPE phase applied uniformly across
+    /// the batch (scalar offset `0` → position == padded index) preserves every
+    /// intra-row relative position. The leading padding columns are masked out by
+    /// the caller-supplied left-padding attention mask, so they never affect any
+    /// real query's output, and each row's last real token lands at the shared
+    /// padded index `max_len - 1` (so the seed bonus is sampled from the uniform
+    /// last position, exactly as the equal-length path does).
+    ///
+    /// Returns `Err` on batch-size mismatch or an empty / zero-length row.
+    fn left_padded_input(
+        per_row: &[Vec<i32>],
+        expected_batch: usize,
+    ) -> Result<LeftPaddedPrefill, DrafterError> {
+        if per_row.len() != expected_batch {
+            return Err(DrafterError::DraftFailed {
+                reason: format!(
+                    "Gemma4 batched MTP target: expected {expected_batch} rows, got {}",
+                    per_row.len()
+                ),
+            });
+        }
+        if per_row.is_empty() {
+            return Err(DrafterError::DraftFailed {
+                reason: "Gemma4 batched MTP target: empty batch".to_string(),
+            });
+        }
+        let mut max_len = 0usize;
+        for (r, row) in per_row.iter().enumerate() {
+            if row.is_empty() {
+                return Err(DrafterError::DraftFailed {
+                    reason: format!("Gemma4 batched MTP target: prompt row {r} must be non-empty"),
+                });
+            }
+            max_len = max_len.max(row.len());
+        }
+
+        let mut flat: Vec<i32> = vec![0; expected_batch * max_len];
+        let mut left_padding: Vec<usize> = Vec::with_capacity(expected_batch);
+        let mut valid_len: Vec<usize> = Vec::with_capacity(expected_batch);
+        for (r, row) in per_row.iter().enumerate() {
+            let lp = max_len - row.len();
+            let base = r * max_len + lp;
+            flat[base..base + row.len()].copy_from_slice(row);
+            left_padding.push(lp);
+            valid_len.push(row.len());
+        }
+        let arr = mlxcel_core::from_slice_i32(&flat, &[expected_batch as i32, max_len as i32]);
+        Ok(LeftPaddedPrefill {
+            arr,
+            max_len,
+            left_padding,
+            valid_len,
+        })
     }
 
     /// Per-row argmax over a `[B, width, vocab]` logits tensor.
@@ -1050,6 +1138,30 @@ impl<'a> Gemma4MtpBatchedTargetAdapter<'a> {
         UniquePtr<MlxArray>,
         Vec<UniquePtr<MlxArray>>,
     ) {
+        self.batched_sink_forward_with_mask(input_arr, None)
+    }
+
+    /// Sink-aware batched forward with an optional explicit attention mask.
+    ///
+    /// `mask` is `None` for the equal-length path (the forward derives both the
+    /// full-attention and sliding-window causal masks from `offset == 0`). For
+    /// the ragged (variable-length) prefill the caller passes a single
+    /// **left-padding** causal mask: in the eligible regime
+    /// (`max_prompt_len <= sliding_window`, non-capped key axis) the windowed
+    /// left-padding mask is byte-identical to the plain left-padding mask, so
+    /// one `[B, 1, max_len, max_len]` mask is correct for *both* the
+    /// full-attention and sliding-window layers (the forward copies the single
+    /// mask into both slots). This equivalence is unit-tested in
+    /// `mlxcel_core::utils` (`windowed_left_padding_mask_matches_plain_left_padding_when_uncapped`).
+    fn batched_sink_forward_with_mask(
+        &self,
+        input_arr: &MlxArray,
+        mask: Option<&MlxArray>,
+    ) -> (
+        UniquePtr<MlxArray>,
+        UniquePtr<MlxArray>,
+        Vec<UniquePtr<MlxArray>>,
+    ) {
         let mut sinks = Gemma4SpeculativeSinks::with_hidden_and_shared_kv();
         let logits = {
             let mut caches = self.caches.borrow_mut();
@@ -1057,7 +1169,7 @@ impl<'a> Gemma4MtpBatchedTargetAdapter<'a> {
                 input_arr,
                 None,
                 None,
-                None,
+                mask,
                 &mut caches,
                 BATCHED_CAPTURE_LAYER_IDS,
                 Some(&mut sinks),
@@ -1171,6 +1283,155 @@ impl<'a> Gemma4MtpBatchedTargetAdapter<'a> {
             .wrapper
             .speculative_draft_hidden(hidden.as_ref().unwrap()))
     }
+
+    /// Variable-length-prompt (ragged) prefill + seed.
+    ///
+    /// Left-pads every row to `max_prompt_len`, runs one sink-aware forward
+    /// with a per-row left-padding causal mask, and emits per-row seed metadata
+    /// so each row's later verify rounds and drafter cross-attention stay
+    /// byte-identical to that row's standalone B = 1 run.
+    ///
+    /// ## Greedy-parity mechanism (left-padding uniform shift)
+    ///
+    /// Row `r` (length `L_r`) is placed at padded indices `[lp_r, max_len)`
+    /// with `lp_r = max_len - L_r`. Proportional RoPE is applied with a single
+    /// scalar offset (`0` at prefill), so a token at padded index `i` is rotated
+    /// to absolute position `i`. Every real token of row `r` is therefore
+    /// shifted right by the same constant `lp_r` versus a standalone run that
+    /// would place it at `[0, L_r)`. Because attention depends only on the
+    /// *relative* RoPE phase `q_pos - k_pos`, and both query and key of any
+    /// in-row pair carry the same `+lp_r` shift, every in-row relative phase —
+    /// and thus every attention score and every argmax — is preserved. The
+    /// left-padding mask blocks all real queries from attending to the leading
+    /// padding keys, so padding contributes nothing. In subsequent verify
+    /// rounds the shared physical cache offset is `max_len` for every row, so
+    /// each row's appended verify tokens land at absolute positions
+    /// `max_len + j`, again a uniform `+lp_r` shift versus the standalone
+    /// `L_r + j` — parity is preserved end-to-end.
+    ///
+    /// Consequently the seed's `kv_offset_per_row` and `bonus_position_per_row`
+    /// are **uniform** (`max_len` / `max_len - 1`, the padded frame), while
+    /// `left_padding_per_row[r] = lp_r` and `kv_valid_len_per_row[r] = L_r` are
+    /// per-row. The drafter's `set_shared_kv_batched` consumes the per-row
+    /// left-padding / valid-length to left-roll each row's shared K/V into the
+    /// prefix-valid layout (`normalize_batched_shared_kv_states`) and mask the
+    /// padded tail.
+    ///
+    /// ## Eligibility
+    ///
+    /// Restricted to `max_prompt_len <= sliding_window` (non-capped
+    /// RotatingKVCache regime). In that regime the windowed left-padding mask is
+    /// byte-identical to the plain left-padding mask, so the single mask passed
+    /// to the forward is correct for both full-attention and sliding-window
+    /// layers. Outside it, the function returns `Err(DrafterError::DraftFailed)`
+    /// so the burst driver declines the window and the scheduler re-enqueues the
+    /// rows for per-row B = 1 service.
+    fn prefill_and_seed_batched_ragged(
+        &self,
+        prompt_tokens_per_row: &[Vec<i32>],
+        sampler: &SamplingConfig,
+    ) -> Result<(Vec<i32>, MtpBatchedVerifyOutput), DrafterError> {
+        let LeftPaddedPrefill {
+            arr: prompt_arr,
+            max_len,
+            left_padding,
+            valid_len,
+        } = Self::left_padded_input(prompt_tokens_per_row, self.batch_size)?;
+
+        // Eligibility: only the non-capped sliding-window regime is supported.
+        let sliding_window = self.wrapper.sliding_window_value();
+        if sliding_window > 0 && max_len > sliding_window {
+            return Err(DrafterError::DraftFailed {
+                reason: format!(
+                    "Gemma4 ragged batched MTP prefill declined: max_prompt_len {max_len} \
+                     exceeds sliding_window {sliding_window} (capped RotatingKVCache regime is \
+                     not supported by the windowed left-padding mask); falling back to per-row \
+                     B=1 service"
+                ),
+            });
+        }
+
+        // Build the per-row left-padding causal mask `[B, 1, max_len, max_len]`.
+        // In the eligible non-capped regime this is correct for both the
+        // full-attention and sliding-window layers (proven equivalent to the
+        // windowed left-padding mask in `mlxcel_core::utils`).
+        let left_padding_i32: Vec<i32> = left_padding.iter().map(|&p| p as i32).collect();
+        let mask = mlxcel_core::utils::create_causal_mask_with_left_padding(
+            max_len as i32,
+            0,
+            &left_padding_i32,
+        );
+
+        let (logits, hidden_full, shared_kv) =
+            self.batched_sink_forward_with_mask(&prompt_arr, Some(mask.as_ref().unwrap()));
+        self.enable_rotating_cache_buffer();
+
+        // Every row's last real token sits at the shared padded index
+        // `max_len - 1` (left-padding right-aligns the prompts), so the seed
+        // bonus is sampled from the uniform last position — the same op
+        // sequence as the equal-length path. At temperature 0 each row's bonus
+        // is byte-identical to that row's standalone B = 1 seed.
+        let (token_arr, _) = sample_token_optimized(&logits, sampler, &[]);
+        mlxcel_core::eval(&token_arr);
+        let first_bonus_per_row = scalar_tokens_per_row(&token_arr, self.batch_size);
+
+        let next_hidden = self.last_position_draft_hidden(&hidden_full);
+
+        // Stash per-row logical valid lengths (= unpadded prompt lengths) and
+        // the constant per-row left-padding for the verify-round bookkeeping in
+        // `verify_finalize_batched`. The physical/padded anchors are uniform at
+        // `max_len`; only `kv_valid_len` and `left_padding` are per-row.
+        {
+            let mut positions = self.positions.borrow_mut();
+            *positions = valid_len.clone();
+        }
+        {
+            let mut lp = self.left_padding.borrow_mut();
+            *lp = left_padding.clone();
+        }
+        let seed = self.build_seed_metadata(next_hidden, shared_kv, &valid_len, &left_padding);
+        Ok((first_bonus_per_row, seed))
+    }
+
+    /// Assemble the per-row seed/finalize metadata from each row's logical
+    /// `kv_valid_len` and constant `left_padding`, using the uniform shifted-
+    /// frame formula that keeps both the equal-length and ragged paths
+    /// byte-identical to standalone B = 1 runs:
+    ///
+    /// - `kv_valid_len[r]` — count of real K/V entries (prompt + accepted).
+    /// - `left_padding[r]` — leading padding columns (constant per burst).
+    /// - `kv_offset[r] = left_padding[r] + kv_valid_len[r]` — physical/padded
+    ///   absolute offset (the drafter's RoPE frame for row `r`).
+    /// - `bonus_position[r] = kv_offset[r] - 1` — the row's frozen bonus anchor.
+    ///
+    /// For the equal-length path `left_padding[r] == 0`, so this reduces to
+    /// `kv_offset == kv_valid_len == positions[r]` and `bonus_position ==
+    /// positions[r] - 1` — exactly the legacy equal-length metadata.
+    fn build_seed_metadata(
+        &self,
+        next_hidden: UniquePtr<MlxArray>,
+        next_shared_kv: Vec<UniquePtr<MlxArray>>,
+        kv_valid_len: &[usize],
+        left_padding: &[usize],
+    ) -> MtpBatchedVerifyOutput {
+        let kv_offset_per_row: Vec<usize> = kv_valid_len
+            .iter()
+            .zip(left_padding)
+            .map(|(&valid, &lp)| lp + valid)
+            .collect();
+        let bonus_position_per_row: Vec<usize> = kv_offset_per_row
+            .iter()
+            .map(|&offset| mtp_draft_position(offset))
+            .collect();
+        MtpBatchedVerifyOutput {
+            next_hidden,
+            next_shared_kv,
+            kv_offset_per_row,
+            bonus_position_per_row,
+            kv_valid_len_per_row: kv_valid_len.to_vec(),
+            left_padding_per_row: left_padding.to_vec(),
+        }
+    }
 }
 
 impl<'a> MtpTarget for Gemma4MtpBatchedTargetAdapter<'a> {
@@ -1246,10 +1507,18 @@ impl<'a> MtpTarget for Gemma4MtpBatchedTargetAdapter<'a> {
         prompt_tokens_per_row: &[Vec<i32>],
         sampler: &SamplingConfig,
     ) -> Result<(Vec<i32>, MtpBatchedVerifyOutput), DrafterError> {
-        // Build the rectangular [B, L] prompt batch. `rectangular_input`
-        // rejects variable-length rows — the burst-window collector only
-        // groups equal-length prompts for the batched path (see the
-        // struct docstring).
+        // Route by prompt-length uniformity. Equal-length rows take the
+        // original rectangular [B, L] prefill (mask derived internally from
+        // offset 0); variable-length rows take the left-padding path.
+        let first_len = prompt_tokens_per_row.first().map(Vec::len).unwrap_or(0);
+        let is_ragged = prompt_tokens_per_row
+            .iter()
+            .any(|row| row.len() != first_len);
+        if is_ragged {
+            return self.prefill_and_seed_batched_ragged(prompt_tokens_per_row, sampler);
+        }
+
+        // Build the rectangular [B, L] prompt batch.
         let (prompt_arr, prompt_len) =
             Self::rectangular_input(prompt_tokens_per_row, self.batch_size)?;
 
@@ -1280,23 +1549,13 @@ impl<'a> MtpTarget for Gemma4MtpBatchedTargetAdapter<'a> {
             let mut positions = self.positions.borrow_mut();
             *positions = vec![prompt_len_usize; self.batch_size];
         }
-        let logical_positions = self.positions.borrow().clone();
-        let kv_offset_per_row = logical_positions.clone();
-        let bonus_position_per_row: Vec<usize> = logical_positions
-            .iter()
-            .map(|&pos| mtp_draft_position(pos))
-            .collect();
-        let kv_valid_len_per_row = logical_positions;
-        let left_padding_per_row = vec![0_usize; self.batch_size];
-
-        let seed = MtpBatchedVerifyOutput {
-            next_hidden,
-            next_shared_kv: shared_kv,
-            kv_offset_per_row,
-            bonus_position_per_row,
-            kv_valid_len_per_row,
-            left_padding_per_row,
-        };
+        {
+            let mut lp = self.left_padding.borrow_mut();
+            *lp = vec![0; self.batch_size];
+        }
+        let valid_len = self.positions.borrow().clone();
+        let left_padding = self.left_padding.borrow().clone();
+        let seed = self.build_seed_metadata(next_hidden, shared_kv, &valid_len, &left_padding);
         Ok((first_bonus_per_row, seed))
     }
 
@@ -1391,9 +1650,11 @@ impl<'a> MtpTarget for Gemma4MtpBatchedTargetAdapter<'a> {
         // Post-rollback per-row logical metadata. The physical cache offset
         // remains the global post-rollback max (used above for slicing the
         // captured K/V slabs), but each row advanced by its own
-        // accepted+bonus count. Thread those logical positions through so
-        // the drafter masks zeroed tails and rotates queries at the row's
-        // own bonus-token anchor.
+        // accepted+bonus count. `self.positions` tracks each row's logical
+        // valid length (`kv_valid_len`); advance it by `accepted + 1`. The
+        // constant per-row `left_padding` (0 for equal-length, `max_prompt_len
+        // - prompt_len[r]` for ragged) was stashed at prefill and persists
+        // unchanged — the prompt's leading padding is never trimmed.
         {
             let mut positions = self.positions.borrow_mut();
             if positions.len() != self.batch_size {
@@ -1403,26 +1664,15 @@ impl<'a> MtpTarget for Gemma4MtpBatchedTargetAdapter<'a> {
                 *row_pos += accepted + 1;
             }
         }
-        let logical_positions = self.positions.borrow().clone();
-        let kv_offset_per_row = logical_positions.clone();
-        let bonus_position_per_row: Vec<usize> = logical_positions
-            .iter()
-            .map(|&pos| mtp_draft_position(pos))
-            .collect();
-        // With equal-length prompts and uniform verify width there is no
-        // left-padding; the K/V valid length per row equals that row's
-        // logical post-rollback position in the prefix-valid layout.
-        let kv_valid_len_per_row = logical_positions;
-        let left_padding_per_row = vec![0_usize; self.batch_size];
-
-        Ok(MtpBatchedVerifyOutput {
-            next_hidden,
-            next_shared_kv,
-            kv_offset_per_row,
-            bonus_position_per_row,
-            kv_valid_len_per_row,
-            left_padding_per_row,
-        })
+        let kv_valid_len = self.positions.borrow().clone();
+        let left_padding = self.left_padding.borrow().clone();
+        // `build_seed_metadata` derives `kv_offset = left_padding + kv_valid_len`
+        // and `bonus_position = kv_offset - 1`, threading the row's shifted RoPE
+        // frame so the drafter masks zeroed tails and rotates queries at the
+        // row's own bonus anchor. For equal-length rows (`left_padding == 0`)
+        // this reduces to the legacy `kv_offset == kv_valid_len` metadata.
+        let out = self.build_seed_metadata(next_hidden, next_shared_kv, &kv_valid_len, &left_padding);
+        Ok(out)
     }
 }
 

@@ -460,6 +460,45 @@ pub(crate) fn mtp_batched_burst_enabled() -> bool {
         .unwrap_or(false)
 }
 
+/// Whether to allow a B>1 batched MTP burst window to span rows with
+/// **different prompt lengths** (variable-length / ragged batched burst).
+///
+/// Off by default and strictly subordinate to [`mtp_batched_burst_enabled`]:
+/// even with `MLXCEL_ENABLE_MTP_BATCH=1`, ragged windows only form when
+/// `MLXCEL_ENABLE_MTP_BATCH_RAGGED=1` is *also* set. This keeps the validated
+/// same-length batched burst (the only batched path exercised on real-model
+/// greedy-parity runs to date) as the default behaviour of the
+/// `MLXCEL_ENABLE_MTP_BATCH` flag, and isolates the experimental ragged path
+/// behind its own opt-in.
+///
+/// ## Why a separate flag
+///
+/// The ragged path left-pads every row to `max_prompt_len` and relies on the
+/// left-padding *uniform per-row position shift* to preserve greedy parity:
+/// because every token in a given row (prefill prompt AND every later verify
+/// round) is shifted by the same constant `left_padding[row]` (equal to
+/// `max_prompt_len - prompt_len[row]`), all intra-row relative RoPE distances
+/// are preserved, so each row's argmax stream is byte-identical to its
+/// standalone B=1 run. The
+/// drafter already honours per-row `kv_valid_len` / `left_padding` /
+/// `position` metadata (`set_shared_kv_batched`), and the batched round loop
+/// already retires finished rows per-row. The remaining real-model-only
+/// unknown is the Gemma 4 left-padded prefill forward (mask + sink capture);
+/// keeping it behind this flag lets the orchestrator's real-model greedy-parity
+/// gate validate it without ever touching the production default path.
+///
+/// ## Eligibility constraint
+///
+/// Ragged windows additionally require `max_prompt_len <= sliding_window` (the
+/// non-capped RotatingKVCache regime) so the windowed left-padding mask is
+/// well-defined; the burst driver declines and re-enqueues otherwise.
+pub(crate) fn mtp_batched_ragged_window_enabled() -> bool {
+    std::env::var("MLXCEL_ENABLE_MTP_BATCH_RAGGED")
+        .ok()
+        .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "yes" | "on"))
+        .unwrap_or(false)
+}
+
 /// Successful burst outcome returned to the scheduler.
 ///
 /// The scheduler uses `tokens_generated` to update the per-request
@@ -1683,11 +1722,13 @@ pub(crate) struct BatchedBurstFinalized {
 /// kind, or the drafter load failed) — the scheduler then re-routes
 /// every rejected sequence through the classic non-speculative path.
 ///
-/// **Caller contract**: every sequence in `seqs` MUST already have
-/// passed [`should_burst_for_sequence`] AND have an identical
-/// `prompt_tokens.len()` (the batched MTP adapter requires a rectangular
-/// `[B, L]` prefill — see its docstring). The scheduler's window
-/// collector enforces both.
+/// **Caller contract**: every sequence in `seqs` MUST already have passed
+/// [`should_burst_for_sequence`]. For the DFlash dispatch and for the
+/// same-length MTP path, every `prompt_tokens.len()` MUST be identical (the
+/// rectangular `[B, L]` prefill requirement). Variable-length MTP windows are
+/// admitted only when [`mtp_batched_ragged_window_enabled`] is set; the MTP
+/// adapter then left-pads the rows to `max_prompt_len`. The scheduler's window
+/// collector enforces the matching length policy.
 //
 // `result_large_err`: the `Err` variant carries the full window so the
 // scheduler can route every rejected sequence into the classic prefill
@@ -1701,12 +1742,20 @@ pub(crate) fn try_run_burst_batched(
     let batch_size = seqs.len();
     debug_assert!(batch_size >= 2, "try_run_burst_batched requires B >= 2");
 
-    // Defensive: every row must have a non-empty prompt and all prompts
-    // must be the same length (the scheduler's window collector
-    // guarantees this; re-assert so a future caller bug fails loudly
-    // rather than corrupting a verify forward).
+    // Defensive: every row must have a non-empty prompt. Equal prompt length
+    // is required for every path EXCEPT the variable-length MTP window (gated
+    // by `MLXCEL_ENABLE_MTP_BATCH_RAGGED`), where the MTP adapter left-pads to
+    // `max_prompt_len`. DFlash never supports ragged prompts, so it keeps the
+    // strict equality. Re-asserting here makes a future window-collector bug
+    // fail loudly (re-enqueue via `Err`) rather than corrupting a verify
+    // forward.
+    let any_empty = seqs.iter().any(|s| s.prompt_tokens.is_empty());
     let prompt_len = seqs[0].prompt_tokens.len();
-    if prompt_len == 0 || seqs.iter().any(|s| s.prompt_tokens.len() != prompt_len) {
+    let ragged = seqs.iter().any(|s| s.prompt_tokens.len() != prompt_len);
+    let ragged_mtp_allowed = ragged
+        && matches!(ctx.dispatch, crate::server::SpeculativeDispatch::Mtp { .. })
+        && mtp_batched_ragged_window_enabled();
+    if any_empty || (ragged && !ragged_mtp_allowed) {
         return Err(seqs);
     }
 

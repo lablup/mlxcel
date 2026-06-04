@@ -1821,6 +1821,15 @@ impl BatchScheduler {
         // `ActiveBatch::new(max_batch_size)`).
         let max_batch_size = self.active_batch.max_size();
         let head_can_join_batched = super::speculative_burst::can_join_batched_burst_window(&seq);
+        // Ragged (variable-length-prompt) windows are gated behind a separate
+        // opt-in subordinate to `MLXCEL_ENABLE_MTP_BATCH`. When off (the
+        // default), the window collector keeps its original equal-prompt-length
+        // constraint so the validated same-length batched burst is unchanged.
+        // When on, the prompt-length equality is dropped and burst-eligible
+        // rows of different lengths join one window; the batched MTP adapter
+        // left-pads them to `max_prompt_len` and threads per-row positions /
+        // valid lengths so greedy parity is preserved.
+        let allow_ragged = super::speculative_burst::mtp_batched_ragged_window_enabled();
         let window: Vec<SequenceInfo> = if max_batch_size > 1 && head_can_join_batched {
             let head_prompt_len = seq.prompt_tokens.len();
             let head_max_tokens = seq.max_tokens;
@@ -1832,7 +1841,7 @@ impl BatchScheduler {
             let extra =
                 self.prefill_queue
                     .drain_matching_window(head_lane, max_extra, |candidate| {
-                        candidate.prompt_tokens.len() == head_prompt_len
+                        (allow_ragged || candidate.prompt_tokens.len() == head_prompt_len)
                             && candidate.max_tokens == head_max_tokens
                             && super::speculative_burst::sampling_config_eq(
                                 &candidate.sampling,

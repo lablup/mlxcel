@@ -3052,6 +3052,16 @@ impl Gemma4Wrapper {
         self.model.text_model.layers.len()
     }
 
+    /// Sliding-window size of the sliding-attention layers.
+    ///
+    /// Used by the ragged batched MTP target adapter to gate variable-length
+    /// prefill eligibility: ragged left-padded prefill is only admitted when
+    /// `max_prompt_len <= sliding_window` (the non-capped RotatingKVCache
+    /// regime), where the windowed left-padding mask is well-defined.
+    pub(crate) fn sliding_window_value(&self) -> usize {
+        self.model.config.sliding_window
+    }
+
     pub(crate) fn eos_token_ids_value(&self) -> Vec<i32> {
         self.model.eos_token_ids.clone()
     }
