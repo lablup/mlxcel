@@ -1857,22 +1857,17 @@ impl BatchScheduler {
                 crate::server::SpeculativeDispatch::Mtp { .. }
             )
             && !super::speculative_burst::mtp_b1_burst_enabled()
-            && self.model.supports_batching()
         {
-            // Decline the singleton (B=1) MTP burst only for batch-capable
-            // targets (e.g. Gemma 4 31B text): there B=1 MTP measured slower
-            // than classic decode, and the batched (B>1) MTP window is the
-            // intended speedup path. Targets that cannot batch (e.g.
-            // `gemma4_unified`, `supports_batching() == false`) have no batched
-            // alternative, so they fall through and run B=1 MTP by default —
-            // real-model measurement shows ~1.87x decode speedup there with
-            // byte-identical output. `MLXCEL_ENABLE_MTP_B1=1` still force-enables
-            // B=1 MTP on batch-capable targets for parity/debug.
+            // B=1 (single-request) MTP runs by default for every MTP target
+            // (~1.87x on the 12B Unified pair, ~1.2 to 1.4x on the 31B, both
+            // byte-identical on M5 Max). This decline fires only when an operator
+            // opts out with `MLXCEL_ENABLE_MTP_B1=0`, e.g. on lower-bandwidth
+            // Apple Silicon where the B=1 verify forward may not pay for itself;
+            // the request then falls back to classic decode.
             let seq = window.into_iter().next().expect("singleton window");
             tracing::info!(
-                "MTP speculative burst declined for seq {}: singleton B=1 window is \
-                 slower than classic decode on this batch-capable target; the batched \
-                 MTP window is preferred (set MLXCEL_ENABLE_MTP_B1=1 to force B=1 MTP)",
+                "MTP B=1 speculative burst disabled for seq {} via MLXCEL_ENABLE_MTP_B1=0; \
+                 falling back to classic decode",
                 seq.seq_id,
             );
             return Some(seq);

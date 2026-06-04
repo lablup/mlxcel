@@ -413,19 +413,25 @@ pub(crate) fn can_join_batched_burst_window(seq: &SequenceInfo) -> bool {
     true
 }
 
-/// Whether to force the Gemma 4 MTP B=1 burst path.
+/// Whether the Gemma 4 MTP B=1 (single-request) burst path runs.
 ///
-/// real-model measurements showed the assistant drafter is not
-/// profitable for single-request Gemma 4 31B serving: the upstream reference
-/// speedups are reported for B>1 windows, while the B=1 path spends an extra
-/// drafter forward per token at very low acceptance. Production therefore
-/// routes singleton MTP requests through classic decode by default and keeps
-/// this override for parity/debug investigations.
+/// On by default. Apple Silicon (M5 Max) measurements show the assistant
+/// drafter is profitable for single-request Gemma 4 serving, with byte-identical
+/// output at `temperature 0`: ~1.87x on the 12B Unified pair and ~1.2 to 1.4x on
+/// the 31B + bf16 assistant. (The Unified target cannot batch at all, so B=1 is
+/// its only path; the 31B is batch-capable but its single-request window is
+/// still B=1.) The gain is smaller than the ~3x reported on an idle H100 because
+/// Apple Silicon decode is bandwidth-bound, but it stays above 1.0x.
+///
+/// Set `MLXCEL_ENABLE_MTP_B1=0` (or `false`/`no`/`off`) to opt out, e.g. on
+/// lower-bandwidth Apple Silicon where the B=1 verify forward may not pay for
+/// itself. The batched B>1 path is governed separately by
+/// [`mtp_batched_burst_enabled`] and stays off by default.
 pub(crate) fn mtp_b1_burst_enabled() -> bool {
     std::env::var("MLXCEL_ENABLE_MTP_B1")
         .ok()
-        .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "yes" | "on"))
-        .unwrap_or(false)
+        .map(|v| !matches!(v.as_str(), "0" | "false" | "FALSE" | "no" | "off"))
+        .unwrap_or(true)
 }
 
 /// Whether to force the Gemma 4 MTP B>1 batched burst path.

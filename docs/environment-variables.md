@@ -98,7 +98,7 @@ provided.
 |----------|--------|---------|-------|
 | `MLXCEL_DRAFT_KIND` | `dflash`, `mtp` | auto/none | Alias for `--draft-kind` when the CLI flag and `LLAMA_ARG_DRAFT_KIND` are absent. |
 | `MLXCEL_DRAFT_BLOCK_SIZE` | unsigned integer | per drafter (`4` for MTP, `16` for DFlash) | Alias for `--draft-block-size` when the CLI flag and `LLAMA_ARG_DRAFT_BLOCK_SIZE` are absent. |
-| `MLXCEL_ENABLE_MTP_B1` | truthy value | off | **Advanced.** Enables the singleton (B=1) MTP burst path for `gemma4_unified` (and `gemma4`/`gemma4_vlm`) targets. Required today to observe the measured ~1.87× decode speedup on the 12B Unified + 4-bit-assistant pair (≈39→74 tok/s at temperature 0, byte-identical output); the scheduler guard that declines singleton MTP by default was calibrated on the 31B. Making B=1 MTP the default for the 12B class is tracked in #158. |
+| `MLXCEL_ENABLE_MTP_B1` | `0`/`false`/`no`/`off` to disable | **on** | The singleton (B=1) MTP burst runs by default for all MTP targets (`gemma4_unified`, `gemma4`, `gemma4_vlm`). On Apple Silicon (M5 Max) it produces byte-identical output at temperature 0 with a measured ~1.87× speedup on the 12B Unified + 4-bit-assistant pair (≈39→74 tok/s) and ~1.2 to 1.4× on the 31B + bf16 assistant. Set to `0` to opt out, e.g. on lower-bandwidth Apple Silicon where the B=1 verify forward may not pay for itself. |
 | `MLXCEL_ENABLE_MTP_BATCH` | truthy value | off | **Advanced.** Forces the batched Gemma 4 MTP burst path for parity/debug testing. |
 | `MLXCEL_ENABLE_MTP_DEFERRED` | `1` | off | **Advanced.** Enables the deferred greedy verifier path for Gemma 4 MTP when sampling settings allow it. |
 

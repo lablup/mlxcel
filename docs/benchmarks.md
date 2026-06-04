@@ -84,11 +84,11 @@ size 4, `temperature 0`, 200 decode tokens:
 | classic decode (no drafter) |         ~39  |  1.00x  |
 | MTP                         |         ~74  | ~1.87x  |
 
-The accelerated output is byte-identical to classic decode. The Gemma 4 Unified
-target does not batch (`supports_batching()` is false), so B=1 is its only decode
-path and the scheduler runs B=1 MTP for it by default. `MLXCEL_ENABLE_MTP_B1=1`
-additionally forces B=1 MTP on batch-capable targets, which is useful for parity
-and debugging.
+The accelerated output is byte-identical to classic decode. B=1 (single-request)
+MTP runs by default for every MTP target; the Gemma 4 Unified target cannot batch
+at all, so B=1 is also its only decode path. The batch-capable 31B + bf16
+assistant measures ~1.2 to 1.4x on the same host. Set `MLXCEL_ENABLE_MTP_B1=0` to
+opt out on hardware where the B=1 verify forward does not pay for itself.
 
 ### Gemma 4 31B + bf16 assistant
 
