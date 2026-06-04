@@ -23,28 +23,23 @@
 //! in `docs/model_tests.md::Speculative drafters` and can be
 //! captured today against real on-disk checkpoints.
 //!
-//! ## Scope deferred to
+//! ## MTP speculative path (active for the Gemma 4 Unified pair)
 //!
-//! Speculative-decoding numerators (`--kind mtp` / `--kind dflash`) require:
+//! The `--kind mtp` path is wired for the Gemma 4 Unified target
+//! (`gemma4_unified`) + `gemma4_unified_assistant` drafter (issue #154). It
+//! loads the target, binds the MTP assistant drafter, drives
+//! `MtpGenerator` through `Gemma4UnifiedMtpTargetAdapter`, and records the
+//! real decode tok/s + speedup vs the no-drafter baseline. Mean acceptance
+//! length per verification round is emitted by the round loop's tracing
+//! diagnostics (`MtpRoundDiagnostics`) during the run.
 //!
-//! 1. **A public way to construct the speculative target's per-layer cache**.
-//!    For Qwen 3.5 that is `Qwen3NextCache` (the `pub(crate) fn make_caches`
-//!    on `Qwen35Model`). For Gemma 4 that is the per-`SequenceId` cache slot
-//!    on `Gemma4Wrapper`. Both are currently binary-private.
-//! 2. **An `MtpTarget` impl on `Gemma4Wrapper`**. The hooks
-//!    (`forward_with_speculative_sinks`, `rollback_speculative_cache`) are
-//!    all public, but the trait adapter that wires them to
-//!    `prefill_and_seed` / `verify_forward` / `verify_finalize` is the work
-//!    explicitly deferred.
-//! 3. **A lazy-bind fix for `DFlashDrafter`**. The upstream
-//!    `z-lab/Qwen3.5-4B-DFlash` checkpoint omits `embed_tokens.weight`
-//!    because upstream Python binds to the target's `embed_tokens` at
-//!    `bind()` time, but the Rust loader currently requires the weight at
-//!    construction. See `tests/speculative_parity.rs` for the diagnostic.
+//! ## Scope still deferred
 //!
-//! All three are scoped into follow-up. Until they land, this binary
-//! prints a clear `[DEFERRED]` row for the speculative paths instead of
-//! silently emitting fake numbers.
+//! The DFlash numerator (`--kind dflash`) remains deferred: it needs a public
+//! way to construct the Qwen 3.5 `Qwen3NextCache` and the lazy-bind handling
+//! for the published `z-lab/Qwen3.5-4B-DFlash` checkpoint (which omits
+//! `embed_tokens.weight`). Until those land, the DFlash row prints a clear
+//! `[DEFERRED]` note instead of a fake number.
 //!
 //! ## Invocation
 //!
@@ -91,8 +86,9 @@ enum BenchKind {
     /// No-drafter baseline. The denominator of the speedup column. Always
     /// reachable today via `LanguageModel::forward`.
     None,
-    /// MTP speculative path (Gemma 4 assistant). DEFERRED: requires
-    /// `MtpTarget` impl on `Gemma4Wrapper` (follow-up).
+    /// MTP speculative path (Gemma 4 assistant). Active for the Gemma 4
+    /// Unified target + `gemma4_unified_assistant` drafter (issue #154):
+    /// records real decode tok/s + speedup vs the no-drafter baseline.
     Mtp,
     /// DFlash speculative path (Qwen 3.5 DFlash). DEFERRED: requires
     /// (a) public cache-construction API on `Qwen35Model` and (b) lazy-bind
@@ -251,6 +247,23 @@ const REACHABLE_PAIRINGS: &[Pairing] = &[
         kind: BenchKind::Mtp,
         block_size: Some(4),
     },
+    // Gemma 4 Unified 12B family — baseline + gemma4_unified_assistant drafter
+    // (issue #154). This is the measured pair: the MTP row records real decode
+    // tok/s + speedup vs the baseline row below.
+    Pairing {
+        name: "Gemma 4 Unified 12B (no drafter)",
+        target_subdir: "gemma-4-12b-it-4bit",
+        draft_subdir: None,
+        kind: BenchKind::None,
+        block_size: None,
+    },
+    Pairing {
+        name: "Gemma 4 Unified 12B + MTP assistant",
+        target_subdir: "gemma-4-12b-it-4bit",
+        draft_subdir: Some("gemma-4-12B-it-assistant-4bit"),
+        kind: BenchKind::Mtp,
+        block_size: Some(4),
+    },
 ];
 
 /// Resolve a model directory against the canonical `models/` layout,
@@ -354,6 +367,134 @@ fn run_baseline(target_dir: &Path, prompt: &str, max_tokens: usize) -> Result<(f
     Ok((stats.decode_time_ms, generated))
 }
 
+/// Run the MTP speculative path against a real on-disk Gemma 4 Unified
+/// target + `gemma4_unified_assistant` drafter (issue #154). Returns the
+/// decode wall-clock (ms) and the number of generated tokens so the caller
+/// can fill in a `Row`.
+///
+/// Mirrors [`run_baseline`]: same runtime init, warm-up, and streaming
+/// progress, but drives the MTP round loop through
+/// [`Gemma4UnifiedMtpTargetAdapter`] + `MtpGenerator` instead of the plain
+/// `CxxGenerator`. The drafter is bound after a compatibility check that
+/// rejects a mismatched target↔drafter pair (the same guard the server burst
+/// path runs).
+///
+/// `block_size` is the effective MTP block size (defaults to the drafter's
+/// configured 4 when the caller passes `None`).
+fn run_mtp(
+    target_dir: &Path,
+    draft_dir: &Path,
+    prompt: &str,
+    max_tokens: usize,
+    block_size: Option<u32>,
+) -> Result<(f64, usize)> {
+    use std::sync::atomic::AtomicBool;
+
+    use mlxcel::LoadedModel;
+    use mlxcel::models::gemma4_mtp_target::Gemma4UnifiedMtpTargetAdapter;
+    use mlxcel_core::drafter::{DrafterKind, load_drafter};
+    use mlxcel_core::generate::LanguageModel as _;
+    use mlxcel_core::sampling::LogprobsConfig;
+    use mlxcel_core::speculative::mtp::MtpGenerator;
+
+    let block_size = block_size.unwrap_or(4) as usize;
+    if block_size < 2 {
+        anyhow::bail!("MTP bench: block_size={block_size} < 2 produces no draft proposals");
+    }
+
+    eprintln!(
+        "[bench/mtp] Loading target from {:?} (block_size={block_size})",
+        target_dir
+    );
+
+    let _runtime = initialize_runtime();
+    mlxcel_core::synchronize_default();
+    mlxcel_core::clear_memory_cache();
+
+    let (model, tokenizer) = load_model(target_dir).context("load_model failed")?;
+
+    // The MTP bench targets the Gemma 4 Unified decode path. Accept the
+    // Gemma 4 family broadly so a future text-only/VLM pairing reuses this
+    // harness, but the issue's measured pair is the Unified 12B target.
+    let unified = match &model {
+        LoadedModel::Gemma4Unified(u) => u,
+        other => anyhow::bail!(
+            "MTP bench currently supports a Gemma 4 Unified target; \
+             load_model returned a different variant ({:?})",
+            std::mem::discriminant(other)
+        ),
+    };
+
+    let prompt_tokens = encode_prompt(&tokenizer, prompt);
+    eprintln!(
+        "[bench/mtp] Prompt {} tokens, max_new {}",
+        prompt_tokens.len(),
+        max_tokens
+    );
+
+    // Load + compat-check + bind the MTP assistant drafter. The compat guard
+    // rejects a mismatched backbone_hidden_size / vocab pairing before bind.
+    eprintln!("[bench/mtp] Loading drafter from {:?}", draft_dir);
+    let (mut drafter, kind) =
+        load_drafter(draft_dir, Some(DrafterKind::Mtp)).context("MTP drafter load failed")?;
+    anyhow::ensure!(
+        kind == DrafterKind::Mtp,
+        "drafter did not resolve to MTP (got {kind:?})"
+    );
+    let target_lm: &dyn mlxcel_core::generate::LanguageModel = unified;
+    drafter
+        .validate_target_compat(target_lm)
+        .context("MTP drafter incompatible with target")?;
+    drafter.bind(target_lm).context("MTP drafter bind failed")?;
+
+    let sampling = SamplingConfig::greedy();
+    let logprobs = LogprobsConfig::default();
+    let cancel = AtomicBool::new(false);
+
+    // Warm-up: a single short MTP burst pulls lazy MLX kernels onto the GPU
+    // before the timed run (same rationale as the baseline warm-up). A fresh
+    // drafter + generator is used so the timed run starts from a clean state.
+    {
+        eprintln!("[bench/mtp] Warm-up (4 tokens)...");
+        let (mut warm_drafter, _) =
+            load_drafter(draft_dir, Some(DrafterKind::Mtp)).context("warm-up drafter load")?;
+        warm_drafter.bind(target_lm).context("warm-up drafter bind")?;
+        let warm_seq = mlxcel_core::cache::SequenceId::from_raw(99_000);
+        let warm_adapter =
+            Gemma4UnifiedMtpTargetAdapter::new_with_block_size(unified, Some(warm_seq), block_size);
+        let mut warm_gen = MtpGenerator::new(warm_adapter, warm_drafter, block_size);
+        let _ = warm_gen.generate(&prompt_tokens, 4, &sampling, &[], &cancel, &logprobs);
+        unified.release_sequence_state_by_id(warm_seq);
+        mlxcel_core::synchronize_default();
+    }
+
+    eprintln!("[bench/mtp] Timed run starts");
+    let seq_id = mlxcel_core::cache::SequenceId::from_raw(99_001);
+    let adapter =
+        Gemma4UnifiedMtpTargetAdapter::new_with_block_size(unified, Some(seq_id), block_size);
+    let mut generator = MtpGenerator::new(adapter, drafter, block_size);
+    let started = Instant::now();
+    let (tokens, _logprobs, stats) =
+        generator.generate(&prompt_tokens, max_tokens, &sampling, &[], &cancel, &logprobs);
+    mlxcel_core::synchronize_default();
+    let elapsed = started.elapsed();
+    unified.release_sequence_state_by_id(seq_id);
+
+    let generated = tokens.len();
+    eprintln!(
+        "[bench/mtp] Done: prompt={} prefill_ms={:.1} decode_ms={:.1} \
+         generated={} tok/s={:.1} (wall {:.1}s) — mean acceptance length is \
+         logged by MtpRoundDiagnostics above",
+        stats.prompt_tokens,
+        stats.prefill_time_ms,
+        stats.decode_time_ms,
+        generated,
+        stats.decode_tok_per_sec,
+        elapsed.as_secs_f64(),
+    );
+    Ok((stats.decode_time_ms, generated))
+}
+
 /// Render a Markdown perf table from the collected rows. Output goes to
 /// stdout; the parent script captures this and pastes it into
 /// `docs/model_tests.md`.
@@ -383,10 +524,10 @@ fn print_markdown_table(rows: &[Row]) {
         );
     }
     println!();
-    println!("Note: speculative rows are deferred to follow-up — see");
-    println!("`docs/model_tests.md::Speculative drafters` for the");
-    println!("wiring details. Baseline rows are real perf numbers captured on");
-    println!("the host this binary ran on.");
+    println!("Note: MTP rows (Gemma 4 Unified + gemma4_unified_assistant) are real");
+    println!("decode numbers captured on the host this binary ran on; the speedup");
+    println!("column is MTP tok/s ÷ the matching no-drafter baseline. The DFlash");
+    println!("row remains deferred — see `docs/model_tests.md::Speculative drafters`.");
 }
 
 /// Fill in `speedup_vs_baseline` for every row against the matching
@@ -481,14 +622,54 @@ fn bench_one_pairing(p: &Pairing, prompt: &str, batch: usize, max_tokens: usize)
                 &format!("baseline run failed: {e}"),
             ),
         },
-        BenchKind::Mtp => Row::deferred(
-            p.name,
-            &target_path,
-            p.kind,
-            batch,
-            p.block_size,
-            "DEFERRED — needs MtpTarget for Gemma4Wrapper",
-        ),
+        BenchKind::Mtp => {
+            // The MTP path needs the drafter directory; report missing
+            // drafter as DEFERRED (already handled above, but a None
+            // draft_subdir is a config error worth a clear note).
+            let Some(draft_sub) = p.draft_subdir else {
+                return Row::deferred(
+                    p.name,
+                    &target_path,
+                    p.kind,
+                    batch,
+                    p.block_size,
+                    "MTP pairing missing draft_subdir",
+                );
+            };
+            let draft_path = resolve_model_dir(draft_sub);
+            match run_mtp(
+                &target_path,
+                &draft_path,
+                prompt,
+                max_tokens,
+                p.block_size,
+            ) {
+                Ok((decode_ms, generated)) => Row {
+                    pairing: p.name.to_string(),
+                    target_dir: target_path,
+                    kind: p.kind,
+                    batch,
+                    block_size: p.block_size,
+                    tok_per_sec: if decode_ms > 0.0 {
+                        Some(generated as f64 / (decode_ms / 1000.0))
+                    } else {
+                        None
+                    },
+                    decode_ms: Some(decode_ms),
+                    generated_tokens: Some(generated),
+                    speedup_vs_baseline: None,
+                    status_note: None,
+                },
+                Err(e) => Row::deferred(
+                    p.name,
+                    &target_path,
+                    p.kind,
+                    batch,
+                    p.block_size,
+                    &format!("MTP run failed: {e}"),
+                ),
+            }
+        }
         BenchKind::Dflash => Row::deferred(
             p.name,
             &target_path,
@@ -579,13 +760,55 @@ fn main() -> Result<()> {
                         &format!("baseline run failed: {e}"),
                     ),
                 },
-                BenchKind::Mtp | BenchKind::Dflash => Row::deferred(
+                BenchKind::Mtp => match args.draft.as_deref() {
+                    Some(draft) => match run_mtp(
+                        &target,
+                        draft,
+                        &args.prompt,
+                        args.max_tokens,
+                        args.block_size,
+                    ) {
+                        Ok((decode_ms, generated)) => Row {
+                            pairing: synthetic.name.to_string(),
+                            target_dir: target.clone(),
+                            kind: args.kind,
+                            batch: args.batch,
+                            block_size: args.block_size,
+                            tok_per_sec: if decode_ms > 0.0 {
+                                Some(generated as f64 / (decode_ms / 1000.0))
+                            } else {
+                                None
+                            },
+                            decode_ms: Some(decode_ms),
+                            generated_tokens: Some(generated),
+                            speedup_vs_baseline: None,
+                            status_note: None,
+                        },
+                        Err(e) => Row::deferred(
+                            synthetic.name,
+                            &target,
+                            args.kind,
+                            args.batch,
+                            args.block_size,
+                            &format!("MTP run failed: {e}"),
+                        ),
+                    },
+                    None => Row::deferred(
+                        synthetic.name,
+                        &target,
+                        args.kind,
+                        args.batch,
+                        args.block_size,
+                        "MTP run requires --draft <drafter-dir>",
+                    ),
+                },
+                BenchKind::Dflash => Row::deferred(
                     synthetic.name,
                     &target,
                     args.kind,
                     args.batch,
                     args.block_size,
-                    "DEFERRED — see module docs",
+                    "DEFERRED — DFlash loader + public Qwen3NextCache API",
                 ),
             }
         };
