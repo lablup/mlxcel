@@ -713,7 +713,7 @@ mod gemma3n_helpers_tests;
 
 #[cfg(test)]
 #[path = "gemma4_tests.rs"]
-mod gemma4_tests;
+pub(crate) mod gemma4_tests;
 
 #[cfg(test)]
 #[path = "llama4_helpers_tests.rs"]

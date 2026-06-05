@@ -499,6 +499,26 @@ pub(crate) fn mtp_batched_ragged_window_enabled() -> bool {
         .unwrap_or(false)
 }
 
+/// Sliding-window size of a ragged-capable Gemma 4 target, or `None` for any
+/// non-Gemma-4 model.
+///
+/// The ragged batched MTP prefill is only well-defined in the non-capped
+/// RotatingKVCache regime (`max_prompt_len <= sliding_window`); outside it the
+/// windowed left-padding mask is invalid and the adapter declines. That decline
+/// must be detected *before* the burst commits so the rows fall back cleanly to
+/// per-row classic decode (`Err(seqs)` re-enqueue) rather than surfacing a
+/// client-facing error mid-burst. The three ragged-eligible variants
+/// (`Gemma4`, `Gemma4VLM`, `Gemma4Unified`) all wrap a `Gemma4Wrapper`, so the
+/// window value is read uniformly via [`Gemma4Wrapper::sliding_window_value`].
+fn ragged_target_sliding_window(model: &LoadedModel) -> Option<usize> {
+    match model {
+        LoadedModel::Gemma4(wrapper) => Some(wrapper.sliding_window_value()),
+        LoadedModel::Gemma4VLM(vlm) => Some(vlm.text_model.sliding_window_value()),
+        LoadedModel::Gemma4Unified(unified) => Some(unified.text_model.sliding_window_value()),
+        _ => None,
+    }
+}
+
 /// Successful burst outcome returned to the scheduler.
 ///
 /// The scheduler uses `tokens_generated` to update the per-request
@@ -1759,6 +1779,31 @@ pub(crate) fn try_run_burst_batched(
         return Err(seqs);
     }
 
+    // Ragged-eligibility pre-gate. The ragged MTP prefill is only valid in the
+    // non-capped RotatingKVCache regime (`max_prompt_len <= sliding_window`);
+    // outside it `prefill_and_seed_batched_ragged` returns `Err`, but by then
+    // the burst has committed and that `Err` is mapped to a client-facing error
+    // (`emit_error_and_finalize`) for every row instead of a clean fallback. The
+    // scheduler's window collector does not know the model's sliding window, so
+    // it can form such a window. Detect it here, BEFORE committing, and decline
+    // via `Err(seqs)` so the scheduler re-enqueues every row for per-row B=1
+    // classic service (correct output) — matching the documented contract.
+    if ragged_mtp_allowed
+        && let Some(window_size) = ragged_target_sliding_window(ctx.model)
+        && window_size > 0
+    {
+        let max_prompt_len = seqs.iter().map(|s| s.prompt_tokens.len()).max().unwrap_or(0);
+        if max_prompt_len > window_size {
+            tracing::debug!(
+                max_prompt_len,
+                sliding_window = window_size,
+                batch_size,
+                "ragged batched MTP window declined: max_prompt_len exceeds                  sliding_window (capped RotatingKVCache regime is unsupported by the                  windowed left-padding mask); re-enqueueing rows for per-row B=1                  classic decode",
+            );
+            return Err(seqs);
+        }
+    }
+
     // Mark every row's prefill timer; do NOT transition state yet — the
     // burst may decline on the model variant, in which case the rows
     // fall back to the classic prefill path which itself transitions
@@ -2418,6 +2463,30 @@ mod tests {
                 "ragged window flag must default to off when unset"
             );
         }
+    }
+
+    /// `ragged_target_sliding_window` reads the Gemma 4 family's sliding window
+    /// (the synthetic fixture uses `sliding_window = 8`) and returns `None` for
+    /// non-Gemma-4 models. This is the value the ragged-eligibility pre-gate in
+    /// `try_run_burst_batched` compares `max_prompt_len` against to decline a
+    /// capped (`max_prompt_len > sliding_window`) window via `Err(seqs)` —
+    /// re-enqueueing for per-row B=1 classic decode instead of committing the
+    /// burst and erroring every row when the in-adapter prefill later declines.
+    #[test]
+    fn ragged_target_sliding_window_reads_gemma4_window() {
+        let _runtime = crate::initialize_runtime();
+        let wrapper = crate::models::gemma4_tests::build_synthetic_wrapper();
+        let model = LoadedModel::Gemma4(wrapper);
+
+        let window = ragged_target_sliding_window(&model)
+            .expect("Gemma4 is a ragged-capable target with a sliding window");
+        assert_eq!(window, 8, "synthetic Gemma4 fixture sliding_window is 8");
+
+        // Gate arithmetic: a window whose longest prompt exceeds `sliding_window`
+        // is the capped regime the pre-gate must decline; one within it is
+        // eligible.
+        assert!(9 > window, "max_prompt_len 9 > window 8 must be declined (capped)");
+        assert!(8 <= window, "max_prompt_len 8 == window 8 is eligible (non-capped)");
     }
 
     #[test]
