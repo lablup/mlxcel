@@ -1792,7 +1792,11 @@ pub(crate) fn try_run_burst_batched(
         && let Some(window_size) = ragged_target_sliding_window(ctx.model)
         && window_size > 0
     {
-        let max_prompt_len = seqs.iter().map(|s| s.prompt_tokens.len()).max().unwrap_or(0);
+        let max_prompt_len = seqs
+            .iter()
+            .map(|s| s.prompt_tokens.len())
+            .max()
+            .unwrap_or(0);
         if max_prompt_len > window_size {
             tracing::debug!(
                 max_prompt_len,
@@ -2485,8 +2489,14 @@ mod tests {
         // Gate arithmetic: a window whose longest prompt exceeds `sliding_window`
         // is the capped regime the pre-gate must decline; one within it is
         // eligible.
-        assert!(9 > window, "max_prompt_len 9 > window 8 must be declined (capped)");
-        assert!(8 <= window, "max_prompt_len 8 == window 8 is eligible (non-capped)");
+        assert!(
+            9 > window,
+            "max_prompt_len 9 > window 8 must be declined (capped)"
+        );
+        assert!(
+            8 <= window,
+            "max_prompt_len 8 == window 8 is eligible (non-capped)"
+        );
     }
 
     #[test]

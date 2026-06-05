@@ -656,7 +656,11 @@ mod tests {
         });
         let ids: Vec<u64> = window.iter().map(|s| s.seq_id.as_u64()).collect();
         // 10 matches; 20 fails the length gate and scanning stops there.
-        assert_eq!(ids, vec![10], "ragged-off must stop at the first length mismatch");
+        assert_eq!(
+            ids,
+            vec![10],
+            "ragged-off must stop at the first length mismatch"
+        );
         assert_eq!(queue.len(), 2);
     }
 

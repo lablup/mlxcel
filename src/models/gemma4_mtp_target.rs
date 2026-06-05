@@ -1735,7 +1735,8 @@ impl<'a> MtpTarget for Gemma4MtpBatchedTargetAdapter<'a> {
         // frame so the drafter masks zeroed tails and rotates queries at the
         // row's own bonus anchor. For equal-length rows (`left_padding == 0`)
         // this reduces to the legacy `kv_offset == kv_valid_len` metadata.
-        let out = self.build_seed_metadata(next_hidden, next_shared_kv, &kv_valid_len, &left_padding);
+        let out =
+            self.build_seed_metadata(next_hidden, next_shared_kv, &kv_valid_len, &left_padding);
         Ok(out)
     }
 }

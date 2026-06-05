@@ -429,7 +429,11 @@ fn ragged_seed_anchors_use_shifted_frame() {
     let (kv_offset, bonus_position) =
         super::seed_anchors_from_valid_len(&kv_valid_len, &left_padding);
     // Every row's physical/padded offset collapses to max_len = 5 at the seed.
-    assert_eq!(kv_offset, vec![5, 5, 5], "kv_offset = lp + valid (== max_len)");
+    assert_eq!(
+        kv_offset,
+        vec![5, 5, 5],
+        "kv_offset = lp + valid (== max_len)"
+    );
     assert_eq!(bonus_position, vec![4, 4, 4], "bonus = kv_offset - 1");
 }
 

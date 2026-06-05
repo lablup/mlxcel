@@ -1023,7 +1023,11 @@ mod tests {
         let lp_mask = create_causal_mask_with_window_and_left_padding(6, 0, Some(8), &[0, 0]);
         let ref_shape = ffi::array_shape(&ref_mask);
         let lp_shape = ffi::array_shape(&lp_mask);
-        assert_eq!(ref_shape, vec![6, 6], "non-capped windowed mask is [size, size]");
+        assert_eq!(
+            ref_shape,
+            vec![6, 6],
+            "non-capped windowed mask is [size, size]"
+        );
         assert_eq!(
             ref_shape, lp_shape,
             "no-padding windowed left-padding mask must match plain windowed mask shape"
@@ -1057,10 +1061,13 @@ mod tests {
         // trigger sliding-window upper-bound masking (window >= size).
         // Row 0: left_padding=2 (real tokens at padded indices 2,3).
         // Row 1: left_padding=0 (all real).
-        let mask =
-            create_causal_mask_with_window_and_left_padding(4, 0, Some(4), &[2, 0]);
+        let mask = create_causal_mask_with_window_and_left_padding(4, 0, Some(4), &[2, 0]);
         let shape = ffi::array_shape(&mask);
-        assert_eq!(shape, vec![2, 1, 4, 4], "padded mask must be [B,1,size,total]");
+        assert_eq!(
+            shape,
+            vec![2, 1, 4, 4],
+            "padded mask must be [B,1,size,total]"
+        );
 
         // Helper to read cell [b,0,q,k].
         let cell = |b: i32, q: i32, k: i32| -> f32 {
@@ -1085,7 +1092,11 @@ mod tests {
         );
 
         // Row 1 (no padding): standard causal band, k=0 attended by q=0.
-        assert_eq!(cell(1, 0, 0), 0.0, "row1 q=0 -> k=0 must attend (no padding)");
+        assert_eq!(
+            cell(1, 0, 0),
+            0.0,
+            "row1 q=0 -> k=0 must attend (no padding)"
+        );
         assert!(
             cell(1, 0, 1).is_infinite() && cell(1, 0, 1) < 0.0,
             "row1 q=0 -> future k=1 must be -inf (causal)"
@@ -1101,8 +1112,7 @@ mod tests {
     #[test]
     fn windowed_left_padding_mask_matches_plain_left_padding_when_uncapped() {
         // size=5 <= window=8, offset=0 -> non-capped, upper bound inert.
-        let windowed =
-            create_causal_mask_with_window_and_left_padding(5, 0, Some(8), &[1, 0]);
+        let windowed = create_causal_mask_with_window_and_left_padding(5, 0, Some(8), &[1, 0]);
         let plain = create_causal_mask_with_left_padding(5, 0, &[1, 0]);
 
         let wshape = ffi::array_shape(&windowed);
@@ -1114,10 +1124,18 @@ mod tests {
         );
 
         let wcell = |b: i32, q: i32, k: i32| -> f32 {
-            ffi::item_f32(&ffi::slice(&windowed, &[b, 0, q, k], &[b + 1, 1, q + 1, k + 1]))
+            ffi::item_f32(&ffi::slice(
+                &windowed,
+                &[b, 0, q, k],
+                &[b + 1, 1, q + 1, k + 1],
+            ))
         };
         let pcell = |b: i32, q: i32, k: i32| -> f32 {
-            ffi::item_f32(&ffi::slice(&plain, &[b, 0, q, k], &[b + 1, 1, q + 1, k + 1]))
+            ffi::item_f32(&ffi::slice(
+                &plain,
+                &[b, 0, q, k],
+                &[b + 1, 1, q + 1, k + 1],
+            ))
         };
         for b in 0..2 {
             for q in 0..5 {
@@ -1243,7 +1261,8 @@ mod tests {
         let offset = 11_i32;
         let window = 8_i32;
         let total = size + offset; // 12
-        let mask = create_causal_mask_with_window_and_left_padding(size, offset, Some(window), &[5, 0]);
+        let mask =
+            create_causal_mask_with_window_and_left_padding(size, offset, Some(window), &[5, 0]);
         assert_eq!(
             ffi::array_shape(&mask),
             vec![2, 1, size, total],
