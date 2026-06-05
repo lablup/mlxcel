@@ -31,6 +31,25 @@ fn parse_text_config(json: serde_json::Value) -> TextConfig {
     serde_json::from_value(json).expect("TextConfig must deserialize")
 }
 
+/// Re-export the tiny synthetic 1-layer Gemma 4 wrapper builder so sibling
+/// test modules (e.g. `gemma4_mtp_target_tests`) can drive the *real*
+/// speculative forward against a hermetic in-process model instead of
+/// requiring 31B checkpoints. The fixture is a single `sliding_attention`
+/// layer (hidden=4, vocab=8, `sliding_window=8`), exactly the model used by
+/// the cache-isolation tests below.
+pub(crate) fn build_synthetic_wrapper() -> super::Gemma4Wrapper {
+    cache_isolation::build_wrapper()
+}
+
+/// Like [`build_synthetic_wrapper`] but lets the caller pick the single layer's
+/// attention family (`"sliding_attention"` or `"full_attention"`). The
+/// full-attention variant is the one that exercises the *unbounded* KVCache
+/// verify-round left-padding mask (the sliding fixture alone cannot, since it
+/// only ever drives the windowed mask path).
+pub(crate) fn build_synthetic_wrapper_with_layer(layer_type: &str) -> super::Gemma4Wrapper {
+    cache_isolation::build_wrapper_with_layer(layer_type)
+}
+
 // -----------------------------------------------------------------
 // per-`SequenceId` cache isolation tests for `Gemma4Wrapper`.
 //
@@ -57,7 +76,7 @@ mod cache_isolation {
     use mlxcel_core::weights::WeightMap;
     use std::collections::HashMap;
 
-    fn make_test_gemma4_args() -> ModelArgs {
+    pub(super) fn make_test_gemma4_args_with_layer(layer_type: &str) -> ModelArgs {
         let mut rope_parameters: HashMap<String, Gemma4RopeParameters> = HashMap::new();
         rope_parameters.insert(
             "sliding_attention".to_string(),
@@ -104,7 +123,7 @@ mod cache_isolation {
                 "num_experts": null,
                 "top_k_experts": null,
                 "moe_intermediate_size": null,
-                "layer_types": ["sliding_attention"],
+                "layer_types": [layer_type],
                 "quantization": null
             }),
             eos_token_id: Some(serde_json::json!([1])),
@@ -216,7 +235,11 @@ mod cache_isolation {
     }
 
     pub(super) fn build_wrapper() -> Gemma4Wrapper {
-        let args = make_test_gemma4_args();
+        build_wrapper_with_layer("sliding_attention")
+    }
+
+    pub(super) fn build_wrapper_with_layer(layer_type: &str) -> Gemma4Wrapper {
+        let args = make_test_gemma4_args_with_layer(layer_type);
         let weights = make_test_gemma4_weight_map();
         Gemma4Wrapper::new(Gemma4Model::from_weights(&weights, &args).unwrap())
     }

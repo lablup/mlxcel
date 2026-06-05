@@ -236,16 +236,26 @@ pub fn create_causal_mask_with_left_padding(
 /// * **With padding**: `[B, 1, size, T_k]` where `B = left_padding.len()`. The
 ///   `[B, 1]` leading dims broadcast against a `[B, H, size, T_k]` score tensor.
 ///
-/// # Capped-window caveat
-/// When `size + offset > window` the underlying [`RotatingKVCache`] caps the K
-/// axis to the most-recent `window` slots, which re-indexes key positions and
-/// makes the left-padding column filter non-trivial. The ragged batched MTP
-/// caller therefore restricts itself to `max_prompt_len <= window` (the
-/// non-capped regime) and declines the burst window otherwise, so this helper's
-/// left-padding filter is only ever exercised in the non-capped path. The
-/// implementation still asserts the non-capped precondition in debug builds.
+/// # Full-key-axis precondition (not "size + offset <= window")
+/// The left-padding column filter assumes the K axis is the **full**
+/// `size + offset` (column `k` maps 1:1 to logical key position `k`). The
+/// sliding-window upper bound is enforced by an explicit `triu` band term, so
+/// `size + offset > window` is fully supported as long as the backing cache has
+/// not evicted/compacted any front keys. This is exactly the **MTP-buffered**
+/// sliding-cache regime: the `RotatingKVCache` rollback buffer (`buffer_size`)
+/// keeps the cache uncompacted up to a logical capacity of
+/// `window + buffer_size`, so the resident prompt padding at `[0, lp)` stays in
+/// the returned K and must keep being masked every verify step even once
+/// `size + offset > window`. (An earlier version asserted `size + offset <=
+/// window` and the Gemma 4 caller fell back to a padding-UNAWARE plain windowed
+/// mask above the window, which leaked the resident padding into the
+/// most-left-padded row and broke greedy parity.) The only unsupported case is a
+/// genuinely *compacted* axis (`actual_kv_len < size + offset`); the ragged
+/// caller never reaches buffer compaction in the eligible regime, and a
+/// compacted axis has already evicted the (oldest) padding so a plain windowed
+/// mask is padding-free there.
 ///
-/// Used by: ragged batched MTP prefill (Gemma 4 batched target adapter).
+/// Used by: ragged batched MTP prefill + verify (Gemma 4 batched target adapter).
 #[must_use]
 pub fn create_causal_mask_with_window_and_left_padding(
     size: i32,
@@ -262,16 +272,18 @@ pub fn create_causal_mask_with_window_and_left_padding(
 
     let uncapped_len = size + offset;
 
-    // The left-padding filter below assumes a non-capped key axis (column k maps
-    // 1:1 to logical key position k). The ragged batched MTP caller guarantees
-    // this by only forming ragged windows when `max_prompt_len <= window`.
-    debug_assert!(
-        window.map(|w| uncapped_len <= w).unwrap_or(true),
-        "create_causal_mask_with_window_and_left_padding: capped window \
-         (size + offset = {uncapped_len} > window) is unsupported; the caller \
-         must restrict ragged windows to the non-capped regime",
-    );
-
+    // Precondition: the **key axis is the full `size + offset`** (column k maps
+    // 1:1 to logical key position k), i.e. the backing cache has NOT evicted /
+    // compacted any front keys. The sliding-window upper bound is then enforced
+    // by the `triu` band term below, so `size + offset > window` is fully
+    // supported — this is the MTP-buffered sliding-cache regime, where the
+    // rollback buffer (`buffer_size`) keeps the cache uncompacted (logical
+    // capacity `window + buffer_size`) and the resident prompt padding at
+    // `[0, lp)` must keep being masked even though `size + offset > window`. The
+    // only unsupported case is a *compacted* axis (`actual_kv_len < size +
+    // offset`), which the ragged caller avoids: the eligible regime never
+    // reaches buffer compaction, and a compacted axis has already evicted the
+    // (oldest) padding so a plain windowed mask would be padding-free anyway.
     let total_len = uncapped_len;
 
     // ── Windowed causal (band) base mask, [size, total_len] ─────────────────
@@ -1202,6 +1214,78 @@ mod tests {
                     "row1 (lp=0) key {k} for query {q} must attend (0.0), got {v}",
                 );
             }
+        }
+    }
+
+    /// Ragged batched MTP **buffered sliding-cache** verify regression (issue
+    /// #161 / PR #162).
+    ///
+    /// The MTP rollback buffer keeps the sliding `RotatingKVCache` UNCOMPACTED
+    /// far past the bare `sliding_window` (logical capacity `window +
+    /// buffer_size`), so the resident prompt padding survives at columns
+    /// `[0, lp)` even when `size + offset > window`. The verify forward must
+    /// therefore use `create_causal_mask_with_window_and_left_padding` with the
+    /// FULL key axis (`size + offset`) in this regime — enforcing BOTH the
+    /// sliding-window band AND the `[0, lp)` padding filter. (The pre-fix gate
+    /// fell back to a padding-UNAWARE plain windowed mask once `size + offset >
+    /// window`, leaking the resident padding into the most-padded row.)
+    ///
+    /// This pins that, with `size + offset > window`, the most-padded row's
+    /// leading padding is masked, the in-window real keys attend, and keys
+    /// OLDER than the sliding window are excluded by the band.
+    #[test]
+    fn windowed_left_padding_mask_masks_padding_and_band_when_buffered_over_window() {
+        // Single verify query (width=1) at cache offset 11 (buffered: 7-token
+        // padded prompt + 4 accepted), window=8 -> size+offset=12 > window, but
+        // the buffered cache returns the full 12-key axis (no compaction).
+        // Row 0 (most padded): lp=5; row 1: lp=0.
+        let size = 1_i32;
+        let offset = 11_i32;
+        let window = 8_i32;
+        let total = size + offset; // 12
+        let mask = create_causal_mask_with_window_and_left_padding(size, offset, Some(window), &[5, 0]);
+        assert_eq!(
+            ffi::array_shape(&mask),
+            vec![2, 1, size, total],
+            "buffered windowed left-padding mask must keep the FULL [B,1,size,size+offset] axis",
+        );
+
+        let cell = |b: i32, k: i32| -> f32 {
+            ffi::item_f32(&ffi::slice(&mask, &[b, 0, 0, k], &[b + 1, 1, 1, k + 1]))
+        };
+
+        // The single query is at absolute position `offset` (= 11). Its
+        // sliding-window admits keys [offset - window + 1, offset] = [4, 11].
+        // Row 0 padding occupies [0, 5); the *intersection* of "real" and
+        // "in-window" is [5, 11].
+        for k in 0..5 {
+            let v = cell(0, k);
+            assert!(
+                v.is_infinite() && v < 0.0,
+                "row0 padding key {k} must be -inf, got {v}",
+            );
+        }
+        // Key 4 is real but OUTSIDE the sliding window (4 < offset-window+1 = 4?
+        // 11-8+1 = 4, so key 4 is the oldest in-window slot) -> attends. Keys
+        // [4, 11] attend; here [5, 11] are real+in-window (key 4 is padding-free
+        // only for row 1).
+        for k in 5..=offset {
+            let v = cell(0, k);
+            assert_eq!(v, 0.0, "row0 real in-window key {k} must attend, got {v}");
+        }
+
+        // Row 1 (no padding): the sliding-window band excludes keys older than
+        // `offset - window + 1` = 4, i.e. keys [0, 4) are -inf, [4, 11] attend.
+        for k in 0..(offset - window + 1) {
+            let v = cell(1, k);
+            assert!(
+                v.is_infinite() && v < 0.0,
+                "row1 out-of-window key {k} must be -inf (sliding band), got {v}",
+            );
+        }
+        for k in (offset - window + 1)..=offset {
+            let v = cell(1, k);
+            assert_eq!(v, 0.0, "row1 in-window key {k} must attend, got {v}");
         }
     }
 }

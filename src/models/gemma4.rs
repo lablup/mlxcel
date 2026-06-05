@@ -1827,74 +1827,80 @@ impl Gemma4TextModel {
             None
         };
 
+        // Ragged batched MTP (variable-length B>1 burst) threads the per-row
+        // leading-padding column count so EVERY verify step masks each row's
+        // `[0, left_padding[r])` resident prompt padding. Without this the
+        // verify query attends the prompt's padding K/V (token 0) and breaks
+        // greedy parity for the most-left-padded row (the error scales with
+        // `left_padding[r]`). This MUST be honoured for single-token decode
+        // steps (`l == 1`) too, not only multi-token verify blocks — the
+        // padding stays resident in both the unbounded full-attention cache and
+        // the MTP-buffered sliding cache, so an `l == 1` step that took the
+        // `mask == None` fast path would silently attend it.
+        let has_padding = left_padding
+            .map(|lp| lp.iter().any(|&p| p > 0))
+            .unwrap_or(false);
+
         let (global_mask, sliding_mask) = if let Some(mask) = mask {
             (Some(mlxcel_core::copy(mask)), Some(mlxcel_core::copy(mask)))
+        } else if has_padding {
+            // Resident prompt padding present (ragged burst). Build per-row
+            // left-padding-aware masks for ANY query width, including `l == 1`.
+            let global_offset = first_cache_offset(caches, "full_attention");
+            let sliding_offset = first_cache_offset(caches, "sliding_attention");
+            let window = self.config.sliding_window as i32;
+            let lp = left_padding.expect("has_padding implies Some");
+
+            // Full attention: unbounded KVCache keeps the padding at columns
+            // `[0, lp)` for the whole run; mask it with the plain left-padding
+            // causal mask sized to the full key axis (`l + global_offset`).
+            let global_mask = create_causal_mask_with_left_padding(l, global_offset, lp);
+
+            // Sliding attention: the MTP rollback buffer (`buffer_size`) keeps
+            // the cache *uncompacted* far past the bare `sliding_window` — its
+            // logical capacity is `sliding_window + buffer_size` — so the
+            // resident prompt padding survives at columns `[0, lp)` long after
+            // `sliding_offset + l > sliding_window`. The previous gate
+            // (`sliding_offset + l <= window` -> windowed-left-padding mask,
+            // else a padding-UNAWARE plain windowed mask) therefore stopped
+            // masking the padding exactly when it was still resident, leaking
+            // `lp` padding keys into the most-padded row's window every verify
+            // step. While the buffer has not compacted, the key axis is the full
+            // `[0, sliding_offset + l)` (no eviction), so the windowed
+            // left-padding mask — which enforces both the sliding-window band
+            // (`tril(offset)` ∩ `triu(offset - window + 1)`) AND the `[0, lp)`
+            // padding filter — is the correct mask for `sliding_offset + l >
+            // window` too. The eligible regime (`max_prompt_len <=
+            // sliding_window`, realistic output lengths) never reaches the
+            // buffer-compaction point, so the full key axis always holds; if the
+            // cache ever did compact, the oldest keys (padding first) would be
+            // evicted and `trim_mask_to_keys` would crop the mask to the
+            // surviving (padding-free) suffix.
+            let sliding_mask = create_causal_mask_with_window_and_left_padding(
+                l,
+                sliding_offset,
+                Some(window),
+                lp,
+            );
+            (Some(global_mask), Some(sliding_mask))
         } else if l > 1 {
+            // Non-ragged prefill / multi-token verify: derive both masks from
+            // the cache offsets (byte-identical to the pre-ragged behaviour).
             let global_offset = first_cache_offset(caches, "full_attention");
             let sliding_offset = first_cache_offset(caches, "sliding_attention");
             let window = self.config.sliding_window as i32;
             let sliding_effective_offset = sliding_offset.min((window - l).max(0));
-
-            // Ragged batched MTP (variable-length B>1 burst) threads the per-row
-            // leading-padding column count so the verify forward masks each
-            // row's `[0, left_padding[r])` padding keys — exactly as the ragged
-            // prefill does. Without this the verify query attends the prompt's
-            // padding K/V (token 0), which is retained in the unbounded
-            // full-attention cache forever and breaks greedy parity for the
-            // most-left-padded row (the error scales with `left_padding[r]`).
-            //
-            // When `left_padding` is absent or all-zero (every non-ragged path,
-            // including the equal-length batched burst and ordinary decode) this
-            // is byte-identical to the plain causal / windowed masks below.
-            let has_padding = left_padding
-                .map(|lp| lp.iter().any(|&p| p > 0))
-                .unwrap_or(false);
-
-            if has_padding {
-                let lp = left_padding.expect("has_padding implies Some");
-                // Full attention never evicts the padding (unbounded KVCache), so
-                // it always needs the per-row left-padding column filter.
-                let global_mask = create_causal_mask_with_left_padding(l, global_offset, lp);
-                // The sliding (RotatingKVCache) cache only retains the padding
-                // while it has not yet wrapped past it. `sliding_offset + l <=
-                // window` is the non-capped condition (matching
-                // `create_causal_mask_with_window_and_left_padding`'s own
-                // precondition): the key axis is still the full
-                // `[0, sliding_offset + l)` and column k maps 1:1 to logical key
-                // position k, so the left-padding column filter is valid. The
-                // ragged-burst eligibility gate (`max_prompt_len <=
-                // sliding_window`) plus realistic generation lengths keep the
-                // SWA cache non-capped for the whole burst, so this branch is
-                // the one actually exercised. Once the cache wraps (capped
-                // regime), the oldest keys — the padding `[0, lp)` first — are
-                // evicted, so the plain windowed mask is padding-free and
-                // matches the row's standalone B=1 SWA window. (The narrow wrap
-                // transition `window < sliding_offset + l < window + lp`, where
-                // a residual padding tail briefly survives in the capped buffer,
-                // only occurs for pathologically long outputs that the eligible
-                // regime does not reach.)
-                let sliding_mask = if sliding_offset + l <= window {
-                    create_causal_mask_with_window_and_left_padding(
-                        l,
-                        sliding_effective_offset,
-                        Some(window),
-                        lp,
-                    )
-                } else {
-                    create_causal_mask_with_window(l, sliding_effective_offset, Some(window))
-                };
-                (Some(global_mask), Some(sliding_mask))
-            } else {
-                (
-                    Some(create_causal_mask(l, global_offset)),
-                    Some(create_causal_mask_with_window(
-                        l,
-                        sliding_effective_offset,
-                        Some(window),
-                    )),
-                )
-            }
+            (
+                Some(create_causal_mask(l, global_offset)),
+                Some(create_causal_mask_with_window(
+                    l,
+                    sliding_effective_offset,
+                    Some(window),
+                )),
+            )
         } else {
+            // Ordinary single-token decode with no resident padding: the
+            // attention kernels derive their own causal / windowed masks.
             (None, None)
         };
 
