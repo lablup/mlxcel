@@ -96,8 +96,9 @@ realistic mixed case is **slower** (0.78x). Output stayed byte-identical to
 classic decode in both cases on M5 Max, so the earlier greedy-parity concern did
 not reproduce here, though it has not been exhaustively re-validated. Because the
 throughput is at best marginal and negative under realistic load, B>1 MTP stays
-off by default. The real bottleneck, variable-length batched bursts, is tracked
-as a follow-up.
+off by default.
+
+Variable-length ragged batching is now available behind `MLXCEL_ENABLE_MTP_BATCH_RAGGED=1` (requires `MLXCEL_ENABLE_MTP_BATCH=1`). With this flag, requests with different prompt lengths form a single B>1 burst via left-padding to `max_prompt_len`, and greedy parity is confirmed on the 31B: every row's output is byte-identical to classic decode at temperature 0. Throughput measured ~0.94–1.13x vs classic batched decode across runs, which recovers the prior 0.78x serialization penalty but is not a consistent win. The flag stays off by default for this reason.
 
 ### Gemma 4 26B-A4B (MoE)
 
