@@ -1084,7 +1084,7 @@ mod tests {
             cell(0, 2, 1).is_infinite() && cell(0, 2, 1) < 0.0,
             "row0 q=2 -> padding k=1 must be -inf"
         );
-        assert_eq!(cell(0, 2, 0 + 2), 0.0, "row0 q=2 -> real k=2 must attend");
+        assert_eq!(cell(0, 2, 2), 0.0, "row0 q=2 -> real k=2 must attend");
         // Causal upper bound: q=2 must NOT see future k=3.
         assert!(
             cell(0, 2, 3).is_infinite() && cell(0, 2, 3) < 0.0,

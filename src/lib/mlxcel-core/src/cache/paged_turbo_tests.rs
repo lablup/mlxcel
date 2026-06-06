@@ -372,14 +372,16 @@ fn detach_adopt_round_trip_turbo4_asym_preserves_sidecars() {
             .collect()
     };
     assert!(!block_ids.is_empty());
-    let pool_ref = pool.paged_pool_mut().unwrap();
-    for &block_id in &block_ids {
-        pool_ref
-            .install_v_packed(block_id, dummy_array(&[1.0, 2.0, 3.0, 4.0], &[1, 1, 4, 1]))
-            .unwrap();
-        pool_ref
-            .install_v_norms(block_id, dummy_array(&[0.5, 0.5, 0.5, 0.5], &[1, 1, 4, 1]))
-            .unwrap();
+    {
+        let mut pool_ref = pool.paged_pool_mut().unwrap();
+        for &block_id in &block_ids {
+            pool_ref
+                .install_v_packed(block_id, dummy_array(&[1.0, 2.0, 3.0, 4.0], &[1, 1, 4, 1]))
+                .unwrap();
+            pool_ref
+                .install_v_norms(block_id, dummy_array(&[0.5, 0.5, 0.5, 0.5], &[1, 1, 4, 1]))
+                .unwrap();
+        }
     }
 
     let detached = pool.detach_paged(id).expect("detach must succeed");
@@ -423,7 +425,7 @@ fn detach_adopt_round_trip_turbo4_sym_preserves_k_sidecars() {
 
     let block_id = pool.get_paged_state(id).unwrap().layers[0].block_ids[0];
     {
-        let pool_ref = pool.paged_pool_mut().unwrap();
+        let mut pool_ref = pool.paged_pool_mut().unwrap();
         pool_ref
             .install_v_packed(block_id, dummy_array(&[1.0, 2.0], &[1, 1, 2, 1]))
             .unwrap();
@@ -459,7 +461,7 @@ fn detach_adopt_round_trip_turbo4_delegated_preserves_cold_keys() {
 
     let block_id = pool.get_paged_state(id).unwrap().layers[0].block_ids[0];
     {
-        let pool_ref = pool.paged_pool_mut().unwrap();
+        let mut pool_ref = pool.paged_pool_mut().unwrap();
         pool_ref
             .install_v_packed(block_id, dummy_array(&[1.0, 2.0], &[1, 1, 2, 1]))
             .unwrap();
@@ -581,7 +583,7 @@ fn cache_pool_memory_usage_includes_pool_sidecars() {
     let block_id = pool.get_paged_state(id).unwrap().layers[0].block_ids[0];
     let baseline = pool.memory_usage_bytes();
     {
-        let pool_ref = pool.paged_pool_mut().unwrap();
+        let mut pool_ref = pool.paged_pool_mut().unwrap();
         pool_ref
             .install_v_packed(block_id, dummy_array(&[1.0, 2.0, 3.0, 4.0], &[1, 1, 4, 1]))
             .unwrap();

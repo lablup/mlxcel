@@ -104,7 +104,7 @@ pub use paged::{
 };
 pub use paged_detach::DetachedPagedCacheSet;
 
-use std::cell::RefCell;
+use std::cell::{Ref, RefCell, RefMut};
 use std::rc::Rc;
 
 use crate::concatenate;
@@ -565,6 +565,19 @@ impl KVCache {
         cache
     }
 
+    /// Whether this cache writes/reads through a shared [`PagedBlockPool`]
+    /// (built via [`Self::new_paged`]) instead of its own dense buffers.
+    ///
+    /// The batched-decode dispatch in each transformer model uses this to skip
+    /// the native dense-pointer paged kernel (which reads `keys`/`values`, both
+    /// `None` here) and fall through to the per-sequence `update_and_fetch`
+    /// loop, whose pool intercept transparently writes to the pool and gathers
+    /// the visible window. See the model `forward_split_attention` dispatch.
+    #[inline]
+    pub fn is_paged_backed(&self) -> bool {
+        self.paged_backing.is_some()
+    }
+
     /// Override the Turbo4Delegated hot-tail fold threshold for this cache.
     ///
     /// Test-only entry point for the unit/integration tests in `turbo_tests.rs`
@@ -748,6 +761,18 @@ impl KVCache {
     /// using independent sign-vector pairs. In `KVCacheMode::Fp16` this
     /// behaves identically to the original implementation.
     pub fn update(&mut self, new_keys: UniquePtr<MlxArray>, new_values: UniquePtr<MlxArray>) {
+        // Transparent pool-backed path (`new_paged`): append straight into the
+        // shared `PagedBlockPool` instead of the dense buffers, mirroring the
+        // `update_and_fetch` intercept. This is reached by callers that write
+        // the cache without needing the gathered window back — notably the
+        // single-sequence fused causal prefill path (llama3), where the fused
+        // Metal kernel has already produced the attention output. Returns early
+        // so the dense `update_*` below never runs and no dense buffer is
+        // allocated. See `new_paged` / `write_paged`.
+        if self.paged_backing.is_some() {
+            self.write_paged(&new_keys, &new_values);
+            return;
+        }
         match self.mode {
             KVCacheMode::Int8 => self.update_int8(new_keys, new_values),
             KVCacheMode::Turbo4Asym => self.update_turbo4_asym(new_keys, new_values),
@@ -2068,6 +2093,14 @@ impl KVCache {
         if n <= 0 {
             return 0;
         }
+        // Pool-backed caches keep no dense `keys`/`values` buffers (#121); the
+        // block table is the authoritative store and is trimmed through the
+        // pool API (`CachePool::trim_paged_tokens` / `rewind_paged_tokens`),
+        // never the dense buffer slicing below (which would `unwrap` a `None`
+        // buffer). Treat a dense-side trim as a no-op for them.
+        if self.paged_backing.is_some() {
+            return 0;
+        }
         // Turbo4Delegated: hot-first trim. Tokens to remove from cold = max(0, n - hot_len).
         // We adjust cold_offset and offset, then fall through to the per-mode buffer slicing
         // logic below to keep the buffers consistent with the new offsets.
@@ -2339,6 +2372,16 @@ impl KVCache {
             return 0;
         }
 
+        // Pool-backed caches (#121) hold no dense head buffer to slice from the
+        // front, and advancing `live_start` here would desync the cache from the
+        // pool's authoritative block table (which the gather reads via the
+        // per-sequence state, not `live_start`). The `--max-kv-size` cap for
+        // paged sequences is a pool-side concern; treat the dense-side front
+        // trim as a no-op so it never silently diverges.
+        if self.paged_backing.is_some() {
+            return 0;
+        }
+
         // Only Fp16 and Int8 are supported; Turbo modes carry rotation
         // state in their sidecars that is not safe to truncate from the
         // head. `live_start` must remain `0` for those modes so the Turbo
@@ -2585,35 +2628,68 @@ impl KVCache {
         new_keys: &MlxArray,
         new_values: &MlxArray,
     ) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
+        // Append the new tokens (no-op for a zero-token call), then gather the
+        // full visible window. Splitting the write into `write_paged` lets the
+        // no-fetch `update` path reuse the exact same pool-append logic.
+        self.write_paged(new_keys, new_values);
+
         let backing = self
             .paged_backing
             .clone()
             .expect("update_and_fetch_paged called without paged backing");
+        let state = backing.state.borrow();
+        let pool = backing.pool.borrow();
+        pool.gather_visible(&state, backing.layer_idx)
+            .expect("PagedBlockPool::gather_visible failed for pool-backed cache")
+            .expect("gather_visible returned None for a pool-backed cache")
+    }
+
+    /// Pool-write half of the pool-backed cache path: append the new K/V
+    /// tokens to this layer's tail inside the shared [`PagedBlockPool`]
+    /// (`write_prefill` handles both bulk prefill and a single decode token)
+    /// and advance the monotonic `offset`.
+    ///
+    /// Shared by [`Self::update`] (no fetch) and
+    /// [`Self::update_and_fetch_paged`] (which gathers the visible window
+    /// afterward). A zero-token call is a no-op so callers can pass an empty
+    /// update without special-casing. The pool/state borrows are scoped tightly
+    /// to this method so they never nest with the gather in
+    /// `update_and_fetch_paged` or any scheduler-side borrow.
+    ///
+    /// `offset` is advanced by `n_new` for the same reason
+    /// [`Self::update_fp16`] advances it: RoPE reads `cache.offset` *before*
+    /// the next step's update, so it must reflect the pre-call position during
+    /// RoPE and the post-call position afterward. The paged
+    /// `state.layers[layer_idx].len` is bumped in lockstep by `write_prefill`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the backing is missing, the K/V batch dim is not `1`, or the
+    /// pool `write_prefill` fails (geometry mismatch). The model `forward`
+    /// signature returns plain tuples, so a misuse is a hard bug, not a
+    /// recoverable condition.
+    fn write_paged(&mut self, new_keys: &MlxArray, new_values: &MlxArray) {
+        let backing = self
+            .paged_backing
+            .clone()
+            .expect("write_paged called without paged backing");
         let layer_idx = backing.layer_idx;
 
         let k_shape = ffi::array_shape(new_keys);
         assert_eq!(
             k_shape.len(),
             4,
-            "update_and_fetch_paged: K must be [1, n_kv_heads, n_new, head_dim], got shape {k_shape:?}"
+            "write_paged: K must be [1, n_kv_heads, n_new, head_dim], got shape {k_shape:?}"
         );
         assert_eq!(
             k_shape[0], 1,
-            "update_and_fetch_paged: only single-stream (B == 1) is supported, got batch {} (shape {k_shape:?})",
+            "write_paged: only single-stream (B == 1) is supported, got batch {} (shape {k_shape:?})",
             k_shape[0]
         );
         let n_new = k_shape[2];
         if n_new <= 0 {
-            // Nothing to append; gather whatever is currently visible (the
-            // gather expects to return a non-empty window only when tokens
-            // exist — mirror the dense early paths by returning the current
-            // visible slice).
-            let state = backing.state.borrow();
-            let pool = backing.pool.borrow();
-            return pool
-                .gather_visible(&state, layer_idx)
-                .expect("gather_visible failed on empty append")
-                .expect("gather_visible returned None for a zero-token update");
+            // Nothing to append; leave the offset and pool untouched.
+            return;
         }
 
         {
@@ -2624,15 +2700,9 @@ impl KVCache {
         }
 
         // Advance the monotonic write position. RoPE for the *next* step reads
-        // `cache.offset` before calling back into `update_and_fetch`, so this
-        // mirrors the dense `update_fp16` bump exactly.
+        // `cache.offset` before calling back into the cache, so this mirrors
+        // the dense `update_fp16` bump exactly.
         self.offset += n_new;
-
-        let state = backing.state.borrow();
-        let pool = backing.pool.borrow();
-        pool.gather_visible(&state, layer_idx)
-            .expect("PagedBlockPool::gather_visible failed after write_prefill")
-            .expect("gather_visible returned None despite a non-empty write")
     }
 
     /// Read path for `KVCacheMode::Turbo4Delegated` (K unified; cold-V dequant memo retired).
@@ -5277,7 +5347,17 @@ pub struct SequenceCacheSet {
     /// Per-layer KV caches (one entry per model layer).
     pub caches: Vec<KVCache>,
     /// Paged block-table state when `backend == PagedKvCache`.
-    pub paged: Option<PagedSequenceState>,
+    ///
+    /// Wrapped in `Rc<RefCell<…>>` so a pool-backed sequence can share the
+    /// SAME state handle with every per-layer [`KVCache`] (each cache's
+    /// [`PagedBacking`] holds a cheap `Rc` clone). The pool-backed caches and
+    /// this set therefore observe one authoritative block table. Dense and
+    /// model-owned sequences leave this `None`. The interior mutability is only
+    /// ever exercised at request boundaries (allocate / sync / release) and
+    /// inside `update_and_fetch` during forward — never both at once — so the
+    /// borrows stay non-overlapping (see the borrow-discipline notes on the
+    /// `CachePool` paged methods).
+    pub paged: Option<Rc<RefCell<PagedSequenceState>>>,
     /// Unique identifier assigned by the pool.
     pub seq_id: SequenceId,
     /// Number of prompt tokens originally prefilled.
@@ -5294,7 +5374,7 @@ impl SequenceCacheSet {
         seq_id: SequenceId,
         backend: SequenceStateBackend,
         caches: Vec<KVCache>,
-        paged: Option<PagedSequenceState>,
+        paged: Option<Rc<RefCell<PagedSequenceState>>>,
         paged_layout: Option<PagedKvLayout>,
     ) -> Self {
         Self {
@@ -5327,7 +5407,7 @@ impl SequenceCacheSet {
             seq_id,
             SequenceStateBackend::PagedKvCache,
             Vec::new(),
-            Some(paged),
+            Some(Rc::new(RefCell::new(paged))),
             Some(paged_layout),
         )
     }
@@ -5350,28 +5430,42 @@ impl SequenceCacheSet {
             .paged
             .as_ref()
             .zip(self.paged_layout.as_ref())
-            .map_or(0, |(state, layout)| state.used_bytes(layout));
+            .map_or(0, |(state, layout)| state.borrow().used_bytes(layout));
         dense_bytes + paged_bytes
     }
 
-    pub fn paged_state(&self) -> Option<&PagedSequenceState> {
-        self.paged.as_ref()
+    /// Borrow this sequence's paged block-table state for reading.
+    ///
+    /// Returns a [`Ref`] guard; the borrow must be released before any code
+    /// path mutates the same state (e.g. `update_and_fetch` during forward or
+    /// `CachePool::sync_paged_state_with_*`). `None` for dense / model-owned
+    /// sequences.
+    pub fn paged_state(&self) -> Option<Ref<'_, PagedSequenceState>> {
+        self.paged.as_ref().map(|rc| rc.borrow())
     }
 
-    pub fn paged_state_mut(&mut self) -> Option<&mut PagedSequenceState> {
-        self.paged.as_mut()
+    /// Mutably borrow this sequence's paged block-table state.
+    ///
+    /// Returns a [`RefMut`] guard. See [`Self::paged_state`] for the borrow
+    /// discipline; never hold this across a call that re-borrows the same
+    /// state.
+    pub fn paged_state_mut(&mut self) -> Option<RefMut<'_, PagedSequenceState>> {
+        self.paged.as_ref().map(|rc| rc.borrow_mut())
     }
 
     pub fn paged_stats(&self) -> Option<PagedCacheStats> {
         self.paged
             .as_ref()
             .zip(self.paged_layout.as_ref())
-            .map(|(state, layout)| PagedCacheStats {
-                allocated_blocks: state.reserved_blocks(),
-                live_blocks: state.reserved_blocks(),
-                free_blocks: 0,
-                bytes_reserved: state.reserved_bytes(layout),
-                bytes_in_use: state.used_bytes(layout),
+            .map(|(state, layout)| {
+                let state = state.borrow();
+                PagedCacheStats {
+                    allocated_blocks: state.reserved_blocks(),
+                    live_blocks: state.reserved_blocks(),
+                    free_blocks: 0,
+                    bytes_reserved: state.reserved_bytes(layout),
+                    bytes_in_use: state.used_bytes(layout),
+                }
             })
     }
 
@@ -5392,7 +5486,15 @@ pub struct CachePool {
     next_id: AtomicU64,
     active: HashMap<SequenceId, SequenceCacheSet>,
     max_sequences: usize,
-    paged_pool: Option<PagedBlockPool>,
+    /// Shared paged block pool, lazily created on first paged allocation.
+    ///
+    /// Wrapped in `Rc<RefCell<…>>` so pool-backed [`KVCache`]s can hold a cheap
+    /// `Rc` clone and write/read the pool transparently from inside
+    /// `update_and_fetch` during forward, while the scheduler borrows the same
+    /// pool at request boundaries. The two never nest: the per-request pool
+    /// borrows here all drop before the model forward runs, and the forward's
+    /// `update_and_fetch` borrows drop before control returns to the scheduler.
+    paged_pool: Option<Rc<RefCell<PagedBlockPool>>>,
     /// Detached cache sets parked inside the pool during cross-request
     /// handoffs. See [`detach`] for the full design.
     detached: detach::DetachedMap,
@@ -5454,11 +5556,50 @@ impl CachePool {
                     "CachePool: paged backend requires a paged layout".to_string()
                 })?;
                 self.ensure_paged_pool(&paged_layout)?;
+                let state_rc = Rc::new(RefCell::new(PagedSequenceState::new(&paged_layout)));
+
+                // Build the per-layer caches. Pool-backed caches are wired only
+                // when BOTH hold:
+                //
+                //  * the model's NATURAL backend is the dense external KVCache
+                //    slice (`supports_batching()` transformers — qwen3 / llama3).
+                //    These actually read/write the caches handed to `forward`, so
+                //    pool-backing routes their `update_and_fetch` straight into
+                //    the shared `PagedBlockPool` (`write_prefill` + `gather_visible`).
+                //    Model-owned families (gemma3 / llama4 / qwen3_5) ignore the
+                //    caller's slice and drive their own `ModelOwnedSequenceState`;
+                //    the scheduler still routes them through the paged backend for
+                //    shadow block-table accounting (`sync_paged_state_with_lengths`),
+                //    so their placeholders stay dense — byte-identical to before.
+                //    Paged-natural test stubs likewise keep dense placeholders.
+                //
+                //  * the paged layout is Fp16. The pool-backed `update_and_fetch`
+                //    intercept stores raw Fp16 K/V (the #152-validated path);
+                //    Turbo4 paged layouts carry their own `cache_mode` and keep
+                //    the existing dense quantized path untouched.
+                let natural_backend = model.sequence_state_layout().backend;
+                let pool_backed = natural_backend == SequenceStateBackend::DenseKvCache
+                    && paged_layout.cache_mode == KVCacheMode::Fp16;
+                let caches = if pool_backed {
+                    let pool_rc = self
+                        .paged_pool
+                        .as_ref()
+                        .expect("paged pool exists after ensure_paged_pool")
+                        .clone();
+                    (0..paged_layout.num_layers)
+                        .map(|layer_idx| {
+                            KVCache::new_paged(pool_rc.clone(), state_rc.clone(), layer_idx)
+                        })
+                        .collect()
+                } else {
+                    model.make_caches()
+                };
+
                 SequenceCacheSet::with_backend(
                     id,
                     SequenceStateBackend::PagedKvCache,
-                    model.make_caches(),
-                    Some(PagedSequenceState::new(&paged_layout)),
+                    caches,
+                    Some(state_rc),
                     Some(paged_layout),
                 )
             }
@@ -5474,11 +5615,14 @@ impl CachePool {
         self.active.get_mut(&id)
     }
 
-    pub fn get_paged_state(&self, id: SequenceId) -> Option<&PagedSequenceState> {
+    pub fn get_paged_state(&self, id: SequenceId) -> Option<Ref<'_, PagedSequenceState>> {
         self.active.get(&id)?.paged_state()
     }
 
-    pub fn get_paged_state_mut(&mut self, id: SequenceId) -> Option<&mut PagedSequenceState> {
+    pub fn get_paged_state_mut(
+        &mut self,
+        id: SequenceId,
+    ) -> Option<RefMut<'_, PagedSequenceState>> {
         self.active.get_mut(&id)?.paged_state_mut()
     }
 
@@ -5522,11 +5666,14 @@ impl CachePool {
     ///
     /// This is a no-op if `id` is not currently active.
     pub fn release(&mut self, id: SequenceId) {
-        if let Some(mut sequence) = self.active.remove(&id) {
-            if let Some(pool) = self.paged_pool.as_mut() {
-                if let Some(state) = sequence.paged_state_mut() {
-                    let _ = pool.release_sequence(state);
-                }
+        if let Some(sequence) = self.active.remove(&id) {
+            // Borrow the pool and this sequence's state through their shared
+            // cells. The released sequence's pool-backed caches (if any) hold
+            // sibling `Rc` clones of `state`, but they are never forwarded at
+            // release time, so `borrow_mut` here cannot collide. Both borrows
+            // drop before `sequence` (and thus those caches) drop.
+            if let (Some(pool), Some(state)) = (self.paged_pool.as_ref(), sequence.paged.as_ref()) {
+                let _ = pool.borrow_mut().release_sequence(&mut state.borrow_mut());
             }
         }
     }
@@ -5560,9 +5707,40 @@ impl CachePool {
         let pool_bytes: usize = self
             .paged_pool
             .as_ref()
-            .map(|pool| pool.turbo_sidecar_bytes() + pool.pool_tensor_bytes())
+            .map(|pool| {
+                let pool = pool.borrow();
+                pool.turbo_sidecar_bytes() + pool.pool_tensor_bytes()
+            })
             .unwrap_or(0);
         active_bytes + parked_bytes + pool_bytes
+    }
+
+    /// Run `f` with mutable access to both the shared block pool and one
+    /// sequence's paged state, borrowing each cell exactly once.
+    ///
+    /// Centralizes the dual `borrow_mut` so the public paged-token mutators
+    /// keep tight, non-overlapping borrow scopes (the pool and the per-sequence
+    /// state are distinct `RefCell`s, so the two `borrow_mut`s never collide).
+    /// The closure must not re-borrow either cell.
+    fn with_pool_and_state<R>(
+        &self,
+        id: SequenceId,
+        f: impl FnOnce(&mut PagedBlockPool, &mut PagedSequenceState) -> Result<R, String>,
+    ) -> Result<R, String> {
+        let pool = self
+            .paged_pool
+            .as_ref()
+            .ok_or_else(|| "CachePool: paged backend is not initialized".to_string())?;
+        let state = self
+            .active
+            .get(&id)
+            .ok_or_else(|| format!("CachePool: sequence {id} not found"))?
+            .paged
+            .as_ref()
+            .ok_or_else(|| format!("CachePool: sequence {id} is not paged"))?;
+        let mut pool = pool.borrow_mut();
+        let mut state = state.borrow_mut();
+        f(&mut pool, &mut state)
     }
 
     pub fn append_paged_tokens(
@@ -5571,17 +5749,9 @@ impl CachePool {
         layer_idx: usize,
         token_count: usize,
     ) -> Result<(), String> {
-        let pool = self
-            .paged_pool
-            .as_mut()
-            .ok_or_else(|| "CachePool: paged backend is not initialized".to_string())?;
-        let state = self
-            .active
-            .get_mut(&id)
-            .ok_or_else(|| format!("CachePool: sequence {id} not found"))?
-            .paged_state_mut()
-            .ok_or_else(|| format!("CachePool: sequence {id} is not paged"))?;
-        pool.append_tokens(state, layer_idx, token_count)
+        self.with_pool_and_state(id, |pool, state| {
+            pool.append_tokens(state, layer_idx, token_count)
+        })
     }
 
     pub fn trim_paged_tokens(
@@ -5590,17 +5760,9 @@ impl CachePool {
         layer_idx: usize,
         token_count: usize,
     ) -> Result<usize, String> {
-        let pool = self
-            .paged_pool
-            .as_mut()
-            .ok_or_else(|| "CachePool: paged backend is not initialized".to_string())?;
-        let state = self
-            .active
-            .get_mut(&id)
-            .ok_or_else(|| format!("CachePool: sequence {id} not found"))?
-            .paged_state_mut()
-            .ok_or_else(|| format!("CachePool: sequence {id} is not paged"))?;
-        pool.trim_tokens(state, layer_idx, token_count)
+        self.with_pool_and_state(id, |pool, state| {
+            pool.trim_tokens(state, layer_idx, token_count)
+        })
     }
 
     pub fn rewind_paged_tokens(
@@ -5609,51 +5771,51 @@ impl CachePool {
         layer_idx: usize,
         token_count: usize,
     ) -> Result<usize, String> {
-        let pool = self
-            .paged_pool
-            .as_mut()
-            .ok_or_else(|| "CachePool: paged backend is not initialized".to_string())?;
-        let state = self
-            .active
-            .get_mut(&id)
-            .ok_or_else(|| format!("CachePool: sequence {id} not found"))?
-            .paged_state_mut()
-            .ok_or_else(|| format!("CachePool: sequence {id} is not paged"))?;
-        pool.rewind_tokens(state, layer_idx, token_count)
+        self.with_pool_and_state(id, |pool, state| {
+            pool.rewind_tokens(state, layer_idx, token_count)
+        })
     }
 
     pub fn paged_stats(&self) -> Option<PagedCacheStats> {
         let pool = self.paged_pool.as_ref()?;
+        // Collect the per-sequence borrows first, then hand `stats_for_sequences`
+        // plain references. The pool and each sequence state live in distinct
+        // `RefCell`s, so the pool borrow and these state borrows coexist.
+        let states: Vec<Ref<'_, PagedSequenceState>> = self
+            .active
+            .values()
+            .filter_map(|sequence| sequence.paged_state())
+            .collect();
         Some(
-            pool.stats_for_sequences(
-                self.active
-                    .values()
-                    .filter_map(|sequence| sequence.paged_state()),
-            ),
+            pool.borrow()
+                .stats_for_sequences(states.iter().map(|state| &**state)),
         )
     }
 
     pub fn paged_block_size(&self) -> Option<usize> {
         self.paged_pool
             .as_ref()
-            .map(|pool| pool.layout().block_size)
+            .map(|pool| pool.borrow().layout().block_size)
     }
 
     /// Read-only access to the underlying [`PagedBlockPool`].
     ///
-    /// Used by: tests and read-only diagnostics that need to peek at per-page
-    /// Turbo4 sidecar state without going through the higher-level
+    /// Returns a [`Ref`] guard; release it before any path that mutates the
+    /// pool. Used by: tests and read-only diagnostics that need to peek at
+    /// per-page Turbo4 sidecar state without going through the higher-level
     /// `CachePool` API.
-    pub fn paged_pool_ref(&self) -> Option<&PagedBlockPool> {
-        self.paged_pool.as_ref()
+    pub fn paged_pool_ref(&self) -> Option<Ref<'_, PagedBlockPool>> {
+        self.paged_pool.as_ref().map(|pool| pool.borrow())
     }
 
     /// Mutable access to the underlying [`PagedBlockPool`].
     ///
-    /// Used by: scheduler / model code that installs Turbo4 sidecar pages
-    /// directly on the pool, and by unit tests for the same purpose.
-    pub fn paged_pool_mut(&mut self) -> Option<&mut PagedBlockPool> {
-        self.paged_pool.as_mut()
+    /// Returns a [`RefMut`] guard tied to `&mut self`, so the compiler still
+    /// enforces exclusive pool access at the borrow site. Used by: scheduler /
+    /// model code that installs Turbo4 sidecar pages directly on the pool, and
+    /// by unit tests for the same purpose.
+    pub fn paged_pool_mut(&mut self) -> Option<RefMut<'_, PagedBlockPool>> {
+        self.paged_pool.as_ref().map(|pool| pool.borrow_mut())
     }
 
     /// Mirror the visible dense-cache offsets into the paged backend state for
@@ -5662,15 +5824,28 @@ impl CachePool {
     /// This keeps server decode/pre-fill lifecycle bookkeeping aligned while
     /// the actual model execution still runs on dense compatibility caches.
     pub fn sync_paged_state_with_dense(&mut self, id: SequenceId) -> Result<(), String> {
-        let sequence = self
-            .active
-            .get_mut(&id)
-            .ok_or_else(|| format!("CachePool: sequence {id} not found"))?;
-        let target_lens: Vec<usize> = sequence
-            .caches
-            .iter()
-            .map(|cache| cache.seq_len().max(0) as usize)
-            .collect();
+        let target_lens = {
+            let sequence = self
+                .active
+                .get(&id)
+                .ok_or_else(|| format!("CachePool: sequence {id} not found"))?;
+            // Pool-backed paged sequences are authoritative: `write_prefill`
+            // advances each layer's `len` in lockstep with the cache offset
+            // during forward, so mirroring the dense-cache lengths here is
+            // redundant — and the dense placeholder buffers are empty, so the
+            // mirror would trim the live block table to zero. Skip them.
+            // Model-owned families never reach this path; they override
+            // `sync_sequence_storage` to call `sync_paged_state_with_lengths`
+            // with their own model-owned cache lengths.
+            if sequence.caches.iter().any(|cache| cache.is_paged_backed()) {
+                return Ok(());
+            }
+            sequence
+                .caches
+                .iter()
+                .map(|cache| cache.seq_len().max(0) as usize)
+                .collect::<Vec<usize>>()
+        };
         self.sync_paged_state_with_lengths(id, &target_lens)
     }
 
@@ -5680,18 +5855,25 @@ impl CachePool {
         id: SequenceId,
         target_lens: &[usize],
     ) -> Result<(), String> {
-        let pool = match self.paged_pool.as_mut() {
+        let pool = match self.paged_pool.as_ref() {
             Some(pool) => pool,
             None => return Ok(()),
         };
-        let sequence = self
-            .active
-            .get_mut(&id)
-            .ok_or_else(|| format!("CachePool: sequence {id} not found"))?;
-        let state = match sequence.paged_state_mut() {
-            Some(state) => state,
-            None => return Ok(()),
+        let state_cell = match self.active.get(&id) {
+            Some(sequence) => match sequence.paged.as_ref() {
+                Some(state) => state,
+                None => return Ok(()),
+            },
+            None => return Err(format!("CachePool: sequence {id} not found")),
         };
+
+        // The pool and the per-sequence state live in distinct `RefCell`s, so
+        // both `borrow_mut`s coexist. For model-owned models (gemma3/llama4/
+        // qwen3_5) this is the authoritative length sync; for the pool-backed
+        // dense-natural path (qwen3/llama3) the lengths already match because
+        // `write_prefill` advanced them in lockstep, so the loop is a no-op.
+        let mut pool = pool.borrow_mut();
+        let mut state = state_cell.borrow_mut();
 
         if target_lens.len() != state.layers.len() {
             return Err(format!(
@@ -5704,9 +5886,9 @@ impl CachePool {
         for (layer_idx, target_len) in target_lens.iter().copied().enumerate() {
             let current_len = state.layers[layer_idx].len;
             if target_len > current_len {
-                pool.append_tokens(state, layer_idx, target_len - current_len)?;
+                pool.append_tokens(&mut state, layer_idx, target_len - current_len)?;
             } else if target_len < current_len {
-                pool.trim_tokens(state, layer_idx, current_len - target_len)?;
+                pool.trim_tokens(&mut state, layer_idx, current_len - target_len)?;
             }
         }
         Ok(())
@@ -5749,7 +5931,7 @@ impl CachePool {
             ));
         }
 
-        let mut existing = {
+        let existing = {
             let sequence = self
                 .active
                 .get_mut(&id)
@@ -5758,20 +5940,23 @@ impl CachePool {
         };
 
         self.ensure_paged_pool(&layout)?;
-        let pool = self
-            .paged_pool
-            .as_mut()
-            .expect("paged pool must exist after ensure_paged_pool");
-        if let Some(existing) = existing.as_mut() {
-            pool.release_sequence(existing)?;
+        {
+            let pool = self
+                .paged_pool
+                .as_ref()
+                .expect("paged pool must exist after ensure_paged_pool");
+            let mut pool = pool.borrow_mut();
+            if let Some(existing) = existing.as_ref() {
+                pool.release_sequence(&mut existing.borrow_mut())?;
+            }
+            pool.restore_sequence(&restored)?;
         }
-        pool.restore_sequence(&restored)?;
 
         let sequence = self
             .active
             .get_mut(&id)
             .ok_or_else(|| format!("CachePool: sequence {id} not found"))?;
-        sequence.paged = Some(restored);
+        sequence.paged = Some(Rc::new(RefCell::new(restored)));
         Ok(())
     }
 
@@ -5782,12 +5967,12 @@ impl CachePool {
 
     fn ensure_paged_pool(&mut self, layout: &PagedKvLayout) -> Result<(), String> {
         if let Some(pool) = self.paged_pool.as_ref() {
-            if pool.layout() != layout {
+            if pool.borrow().layout() != layout {
                 return Err("CachePool: paged layout mismatch for active paged backend".to_string());
             }
             return Ok(());
         }
-        self.paged_pool = Some(PagedBlockPool::new(layout.clone()));
+        self.paged_pool = Some(Rc::new(RefCell::new(PagedBlockPool::new(layout.clone()))));
         Ok(())
     }
 }
@@ -6462,6 +6647,43 @@ mod tests {
         }
     }
 
+    /// Paged sequence whose per-layer caches are dense placeholders driven by
+    /// the model (mirrors the gemma3 / llama4 model-owned + paged shape). Its
+    /// natural backend is `ModelOwned`, so the `allocate` pool-backed gate keeps
+    /// `make_caches()` dense — exercising the dense-length mirror path of
+    /// `sync_paged_state_with_dense` that #121 left in place for non-pool-backed
+    /// paged sequences.
+    struct ShadowDenseModel {
+        num_layers: usize,
+    }
+
+    impl crate::generate::LanguageModel for ShadowDenseModel {
+        fn forward(
+            &self,
+            _input_ids: &MlxArray,
+            _caches: &mut [KVCache],
+            _mask: Option<&MlxArray>,
+        ) -> UniquePtr<MlxArray> {
+            ffi::zeros(&[1], 0)
+        }
+
+        fn make_caches(&self) -> Vec<KVCache> {
+            (0..self.num_layers).map(|_| KVCache::new()).collect()
+        }
+
+        fn num_layers(&self) -> usize {
+            self.num_layers
+        }
+
+        fn eos_token_ids(&self) -> Vec<i32> {
+            vec![0]
+        }
+
+        fn sequence_state_layout(&self) -> SequenceStateLayout {
+            SequenceStateLayout::model_owned(self.num_layers)
+        }
+    }
+
     struct PagedModel {
         layout: PagedKvLayout,
     }
@@ -6823,7 +7045,8 @@ mod tests {
         pool.append_paged_tokens(id1, 0, 6).unwrap();
 
         let (first_block, second_block) = {
-            let layer = pool.get_paged_state(id1).unwrap().layer(0).unwrap();
+            let state = pool.get_paged_state(id1).unwrap();
+            let layer = state.layer(0).unwrap();
             assert_eq!(layer.len, 6);
             assert_eq!(layer.visible_len(), 6);
             assert_eq!(layer.reserved_blocks(), 2);
@@ -6855,7 +7078,8 @@ mod tests {
 
         assert_eq!(pool.rewind_paged_tokens(id1, 0, 2).unwrap(), 2);
         {
-            let layer = pool.get_paged_state(id1).unwrap().layer(0).unwrap();
+            let state = pool.get_paged_state(id1).unwrap();
+            let layer = state.layer(0).unwrap();
             assert_eq!(layer.len, 3);
             assert_eq!(layer.block_ids, vec![first_block]);
         }
@@ -6922,10 +7146,20 @@ mod tests {
 
     #[test]
     fn sync_paged_state_with_dense_cache_offsets_tracks_rewinds() {
-        let model = StubModel { num_layers: 1 };
+        // `ShadowDenseModel` is model-owned, so the `allocate` pool-backed gate
+        // keeps its caches dense — this is the path where the dense-length
+        // mirror is the authoritative length source (#121 keeps it for
+        // non-pool-backed paged sequences).
+        let model = ShadowDenseModel { num_layers: 1 };
         let mut pool = CachePool::new(4);
         let layout = SequenceStateLayout::paged_kv_cache(PagedKvLayout::uniform(1, 4, 4).unwrap());
         let id = pool.allocate_with_layout(&model, Some(layout)).unwrap();
+        // Sanity: this sequence must NOT be pool-backed, otherwise the dense
+        // mirror below would be (correctly) skipped.
+        assert!(
+            !pool.get_caches_mut(id).unwrap()[0].is_paged_backed(),
+            "model-owned paged sequence must keep dense placeholder caches"
+        );
 
         {
             let caches = pool.get_caches_mut(id).unwrap();
@@ -6942,6 +7176,37 @@ mod tests {
         }
         pool.sync_paged_state_with_dense(id).unwrap();
         assert_eq!(pool.get_paged_state(id).unwrap().layer(0).unwrap().len, 2);
+    }
+
+    #[test]
+    fn sync_paged_state_with_dense_skips_pool_backed_sequences() {
+        // A dense-natural Fp16 model gets pool-backed paged caches (#121). The
+        // pool is authoritative: `update` writes straight into it and advances
+        // `state.len` in lockstep, so `sync_paged_state_with_dense` must be a
+        // no-op and must NOT mirror (and thus zero out) the live block table
+        // from the empty dense placeholder buffers.
+        let model = StubModel { num_layers: 1 };
+        let mut pool = CachePool::new(4);
+        let layout = SequenceStateLayout::paged_kv_cache(PagedKvLayout::uniform(1, 4, 4).unwrap());
+        let id = pool.allocate_with_layout(&model, Some(layout)).unwrap();
+        assert!(
+            pool.get_caches_mut(id).unwrap()[0].is_paged_backed(),
+            "dense-natural Fp16 paged sequence must be pool-backed"
+        );
+
+        {
+            let caches = pool.get_caches_mut(id).unwrap();
+            let keys = ffi::from_slice_f32(&[1.0, 2.0, 3.0, 4.0], &[1, 1, 4, 1]);
+            let values = ffi::from_slice_f32(&[5.0, 6.0, 7.0, 8.0], &[1, 1, 4, 1]);
+            // Pool-backed `update` routes into the pool and bumps `state.len`.
+            caches[0].update(keys, values);
+        }
+        assert_eq!(pool.get_paged_state(id).unwrap().layer(0).unwrap().len, 4);
+
+        // The sync must leave the pool-driven length untouched (skip), rather
+        // than mirroring the empty dense buffers down to 0.
+        pool.sync_paged_state_with_dense(id).unwrap();
+        assert_eq!(pool.get_paged_state(id).unwrap().layer(0).unwrap().len, 4);
     }
 
     #[test]

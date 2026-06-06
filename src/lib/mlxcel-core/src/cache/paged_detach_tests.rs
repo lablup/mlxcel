@@ -119,15 +119,18 @@ fn write_prefill_for(
 ) -> Result<(), String> {
     let block_pool = pool
         .paged_pool
-        .as_mut()
+        .as_ref()
         .ok_or_else(|| "paged backend not initialized".to_string())?;
     let state = pool
         .active
-        .get_mut(&id)
+        .get(&id)
         .ok_or_else(|| format!("sequence {id} not found"))?
-        .paged_state_mut()
+        .paged
+        .as_ref()
         .ok_or_else(|| format!("sequence {id} is not paged"))?;
-    block_pool.write_prefill(state, layer_idx, k, v)
+    block_pool
+        .borrow_mut()
+        .write_prefill(&mut state.borrow_mut(), layer_idx, k, v)
 }
 
 /// Deterministic `[1, H, n_tokens, D]` FP32 prefill block whose per-token
@@ -570,7 +573,8 @@ fn paged_trim_to_releases_whole_blocks_past_n() {
     // Trim down to 4 tokens => exactly 1 block needed.
     let trimmed = pool.trim_paged_tokens(seq, 0, 5).unwrap();
     assert_eq!(trimmed, 5);
-    let layer = pool.get_paged_state(seq).unwrap().layer(0).unwrap();
+    let state = pool.get_paged_state(seq).unwrap();
+    let layer = state.layer(0).unwrap();
     assert_eq!(layer.len, 4);
     assert_eq!(layer.block_ids.len(), 1);
 }
@@ -596,7 +600,8 @@ fn paged_partial_block_trim_keeps_block_updates_logical_length() {
     assert_eq!(before_blocks.len(), 2);
 
     pool.trim_paged_tokens(seq, 0, 1).unwrap();
-    let layer = pool.get_paged_state(seq).unwrap().layer(0).unwrap();
+    let state = pool.get_paged_state(seq).unwrap();
+    let layer = state.layer(0).unwrap();
     assert_eq!(layer.len, 4);
     // Partial trim: still within the second block's span in token coords,
     // so reserved_blocks stays at 1 (the last block's worth of slots is
@@ -923,7 +928,7 @@ fn write_prefill_after_shared_prefix_adopt_allocates_only_suffix_blocks() {
     let (gk, gv) = pool
         .paged_pool_ref()
         .unwrap()
-        .gather_visible(state, 0)
+        .gather_visible(&state, 0)
         .unwrap()
         .expect("gather must return data");
     assert_eq!(

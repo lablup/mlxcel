@@ -168,7 +168,11 @@ pub fn restore_into_sequence_cache_set(
     match (&state.paged_state, cache_set.backend) {
         (Some(serialized), mlxcel_core::cache::SequenceStateBackend::PagedKvCache) => {
             let runtime = serialized.to_runtime()?;
-            cache_set.paged = Some(runtime);
+            // `SequenceCacheSet::paged` is a shared `Rc<RefCell<…>>` so pool-backed
+            // sequences can alias one block table across their per-layer caches
+            // (#121). A deserialized sequence is freshly restored with no live
+            // caches yet, so it is the sole owner.
+            cache_set.paged = Some(std::rc::Rc::new(std::cell::RefCell::new(runtime)));
         }
         (Some(_), _) => {
             bail!("cannot restore paged state into a non-paged sequence cache set");

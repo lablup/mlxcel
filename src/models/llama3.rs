@@ -313,6 +313,15 @@ impl Attention {
             if caches.iter().any(|cache| cache.mode != KVCacheMode::Fp16) {
                 return None;
             }
+            // Pool-backed caches (scheduler paged decode, #121) keep no dense
+            // `keys`/`values` buffers for the native paged kernel to read.
+            // Route them through the per-sequence `update_and_fetch` loop below,
+            // whose transparent pool intercept writes new K/V into the shared
+            // `PagedBlockPool` (`write_prefill`) and gathers the visible window
+            // back (`gather_visible`) — the #152-validated single-stream path.
+            if caches.iter().any(|cache| cache.is_paged_backed()) {
+                return None;
+            }
             let metadata =
                 PagedDecodeMetadata::from_attention_metadata(metadata, context.paged_block_size)
                     .ok()?;

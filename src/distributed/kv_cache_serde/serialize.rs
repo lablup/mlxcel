@@ -211,6 +211,6 @@ pub fn serialize_sequence_cache_set(
         paged_state: cache_set
             .paged_state()
             .zip(cache_set.paged_layout())
-            .map(|(state, layout)| SerializablePagedSequenceState::from_runtime(state, layout)),
+            .map(|(state, layout)| SerializablePagedSequenceState::from_runtime(&state, layout)),
     }
 }

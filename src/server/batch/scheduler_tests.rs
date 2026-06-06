@@ -776,6 +776,32 @@ fn paged_decode_storage_falls_back_when_batching_is_unavailable() {
     );
 }
 
+/// Hybrid-SSM carve-out (#121): Mamba / Mamba2 / Jamba / NemotronH /
+/// NemotronNAS / RecurrentGemma / Qwen3Next / RWKV7 all keep their recurrent
+/// state in internal model-owned caches, so they override
+/// `supports_batching()` to `false` and never opt into the paged decode
+/// backend (`supports_paged_decode_backend()` keeps the trait default
+/// `false`). Either flag alone already forces the dense backend; this test
+/// pins the combined SSM profile — `supports_batching == false` AND
+/// `supports_paged_decode_backend == false` — across batch sizes so a future
+/// model edit cannot accidentally route a recurrent worker onto the paged
+/// path even if it is explicitly requested.
+#[test]
+fn hybrid_ssm_workers_never_use_paged_decode_backend() {
+    for batch in [2usize, 4, 16, 64] {
+        assert_eq!(
+            effective_decode_storage_backend(DecodeStorageBackend::Paged, batch, false, false),
+            DecodeStorageBackend::Dense,
+            "hybrid SSM (batch={batch}) must fall back to dense even when Paged is requested"
+        );
+        assert_eq!(
+            effective_decode_storage_backend(DecodeStorageBackend::Auto, batch, false, false),
+            DecodeStorageBackend::Dense,
+            "hybrid SSM (batch={batch}) must resolve Auto to dense"
+        );
+    }
+}
+
 #[test]
 fn auto_decode_storage_prefers_paged_only_for_supported_workers() {
     assert_eq!(

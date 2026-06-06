@@ -45,7 +45,9 @@
 //! without any quantization loss on top of the one already introduced by the
 //! live cache.
 
+use std::cell::RefCell;
 use std::collections::HashMap;
+use std::rc::Rc;
 use std::sync::atomic::Ordering;
 use std::time::Instant;
 
@@ -273,6 +275,26 @@ impl ParkedCache {
     }
 }
 
+/// Take a shared paged-state handle by value, producing an owned
+/// [`PagedSequenceState`] for an inert detached set.
+///
+/// In the common case the handle is the sole owner (a dense-placeholder paged
+/// sequence, or a pool-backed sequence whose per-layer caches were already
+/// dropped) and `Rc::try_unwrap` hands back the inner value with no copy. When
+/// other `Rc` clones are still live — e.g. a pool-backed sequence detached
+/// while its caches still hold sibling handles (the #121 sub-step (b) radix
+/// path) — fall back to cloning the block table, which is cheap (`Vec<u64>` per
+/// layer) and behaviour-equivalent: the clone carries the identical block ids,
+/// and the originals are released without touching pool refcounts (dropping a
+/// `PagedSequenceState` does not release blocks). The detached set's refcount
+/// pins are taken separately by the caller via `retain_block`.
+fn into_owned_paged_state(state: Rc<RefCell<PagedSequenceState>>) -> PagedSequenceState {
+    match Rc::try_unwrap(state) {
+        Ok(cell) => cell.into_inner(),
+        Err(shared) => shared.borrow().clone(),
+    }
+}
+
 impl CachePool {
     /// Remove a paged-backed sequence from the active set and return it as an
     /// inert [`DetachedPagedCacheSet`].
@@ -301,10 +323,15 @@ impl CachePool {
             .paged_layout()
             .expect("paged sequences must carry a layout")
             .clone();
-        let paged_state = sequence
+        let paged_state_rc = sequence
             .paged
             .take()
             .expect("paged sequences must carry a paged state");
+        // Take the block table by value. For sub-step (a) paged sequences are
+        // dense-placeholder (refcount 1) so this never copies; the clone
+        // fallback inside the helper covers the forthcoming pool-backed detach
+        // (#121 sub-step b).
+        let paged_state = into_owned_paged_state(paged_state_rc);
 
         // Pin every block so the pool cannot recycle prefix pages out from
         // under us. Collect block ids for later release; this also serves as
@@ -316,7 +343,13 @@ impl CachePool {
             }
         }
 
-        if let Some(pool) = self.paged_pool.as_mut() {
+        // Pin under a single pool borrow, then drop it before any mutation of
+        // `self.active` (the rollback `insert` below). Pool and `active` are
+        // distinct fields, but keeping the borrow scoped avoids any future
+        // nesting hazard.
+        let pin_failed: Option<PagedBlockId> = if let Some(pool) = self.paged_pool.as_ref() {
+            let mut pool = pool.borrow_mut();
+            let mut failed = None;
             for &block_id in &retained {
                 // retain_block only fails if the block is unknown or already
                 // at refcount zero — neither should happen for a block that
@@ -335,13 +368,22 @@ impl CachePool {
                     for id in pinned_so_far.iter().rev() {
                         let _ = pool.release_block(*id);
                     }
-                    // Restore the original entry so the caller sees the
-                    // sequence as if detach had simply declined.
-                    sequence.paged = Some(paged_state);
-                    self.active.insert(seq_id, sequence);
-                    return None;
+                    failed = Some(block_id);
+                    break;
                 }
             }
+            failed
+        } else {
+            None
+        };
+
+        if pin_failed.is_some() {
+            // Restore the original entry so the caller sees the sequence as if
+            // detach had simply declined. The pool borrow above is already
+            // dropped here.
+            sequence.paged = Some(Rc::new(RefCell::new(paged_state)));
+            self.active.insert(seq_id, sequence);
+            return None;
         }
 
         let detached_caches: Vec<DetachedKVCache> = sequence
@@ -359,7 +401,8 @@ impl CachePool {
         let mut k_norms_pages: HashMap<PagedBlockId, UniquePtr<MlxArray>> = HashMap::new();
         let mut cold_keys_pages: HashMap<PagedBlockId, UniquePtr<MlxArray>> = HashMap::new();
         if paged_layout.is_turbo_mode() {
-            if let Some(pool) = self.paged_pool.as_mut() {
+            if let Some(pool) = self.paged_pool.as_ref() {
+                let mut pool = pool.borrow_mut();
                 for &block_id in &retained {
                     if let Some(t) = pool.take_v_packed(block_id) {
                         v_packed_pages.insert(block_id, t);
@@ -453,12 +496,19 @@ impl CachePool {
 
         // Validate layout compatibility with the active paged pool (if any).
         if let Some(pool) = self.paged_pool.as_ref() {
-            if pool.layout() != &detached.paged_layout {
+            let pool_block_size = {
+                let pool = pool.borrow();
+                if pool.layout() != &detached.paged_layout {
+                    Some(pool.layout().block_size)
+                } else {
+                    None
+                }
+            };
+            if let Some(pool_block_size) = pool_block_size {
                 return Err((
                     format!(
                         "CachePool::adopt_paged: paged layout mismatch (pool block_size={}, set block_size={})",
-                        pool.layout().block_size,
-                        detached.paged_layout.block_size
+                        pool_block_size, detached.paged_layout.block_size
                     ),
                     detached,
                 ));
@@ -519,7 +569,7 @@ impl CachePool {
         let id = SequenceId::from_raw(self.next_id.fetch_add(1, Ordering::Relaxed));
         let mut entry = SequenceCacheSet::paged(id, paged_layout.clone());
         entry.caches = live_caches;
-        entry.paged = Some(paged_state);
+        entry.paged = Some(Rc::new(RefCell::new(paged_state)));
         entry.backend = backend;
         entry.prompt_len = prompt_len;
         entry.current_offset = current_offset;
@@ -533,7 +583,8 @@ impl CachePool {
         // consumed the originals, so a failure here would otherwise drop
         // them silently.
         if paged_layout.is_turbo_mode() {
-            if let Some(pool) = self.paged_pool.as_mut() {
+            if let Some(pool) = self.paged_pool.as_ref() {
+                let mut pool = pool.borrow_mut();
                 for (block_id, t) in v_packed_pages {
                     if let Err(err) = pool.install_v_packed(block_id, t) {
                         eprintln!(
@@ -579,7 +630,8 @@ impl CachePool {
         // the invariant "refcount == number of active block_ids entries
         // owning the block".
         if let Some(blocks) = retained_blocks {
-            if let Some(pool) = self.paged_pool.as_mut() {
+            if let Some(pool) = self.paged_pool.as_ref() {
+                let mut pool = pool.borrow_mut();
                 for block_id in blocks {
                     if let Err(err) = pool.release_block(block_id) {
                         // Fatal: the pool now disagrees with the sequence
@@ -594,6 +646,9 @@ impl CachePool {
             }
         }
 
+        // The model hook must run with NO pool/state borrow held (it may, for
+        // model-owned families, touch the cache pool again). All `borrow_mut`s
+        // above are scoped to their `if let` blocks and already dropped here.
         model.prepare_sequence_state(id);
         // `detached.retained_blocks` is `None` now, so the `Drop` impl will
         // run quietly and not complain about leaked pins.
@@ -641,7 +696,8 @@ impl CachePool {
     /// blocks) — the function is idempotent.
     pub fn release_detached_paged(&mut self, mut detached: DetachedPagedCacheSet) {
         if let Some(blocks) = detached.retained_blocks.take() {
-            if let Some(pool) = self.paged_pool.as_mut() {
+            if let Some(pool) = self.paged_pool.as_ref() {
+                let mut pool = pool.borrow_mut();
                 for block_id in blocks {
                     if let Err(err) = pool.release_block(block_id) {
                         eprintln!(
@@ -687,7 +743,7 @@ impl CachePool {
         layout: &PagedKvLayout,
     ) -> Result<(), String> {
         if let Some(pool) = self.paged_pool.as_ref() {
-            if pool.layout() != layout {
+            if pool.borrow().layout() != layout {
                 return Err(
                     "CachePool::adopt_paged: paged layout mismatch for active paged backend"
                         .to_string(),
@@ -695,7 +751,7 @@ impl CachePool {
             }
             return Ok(());
         }
-        self.paged_pool = Some(PagedBlockPool::new(layout.clone()));
+        self.paged_pool = Some(Rc::new(RefCell::new(PagedBlockPool::new(layout.clone()))));
         Ok(())
     }
 }
