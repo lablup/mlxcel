@@ -2321,25 +2321,25 @@ fn use_bool_causal_mask_path() -> bool {
 
 /// Apply RoPE to a batched tensor using independent per-sequence offsets.
 ///
-/// This keeps batched decode call sites on a vectorized metadata path even
-/// before a native array-offset RoPE kernel exists. The current helper slices
-/// the batch dimension and reuses MLX's scalar-offset fast kernel for each
-/// sequence, then concatenates the results back together.
+/// Slices the batch dimension and applies MLX's scalar-offset `fast_rope`
+/// kernel to each `[1, n_heads, T, D]` slice independently, then
+/// concatenates the results back together.  For `batch == 1` the slice /
+/// concat overhead is skipped via an early return.
 ///
-/// Uniform-batch fast path (upstream `mlx-vlm` PR #1055): when
-/// every row in `offsets` has the same value, the helper bypasses the
-/// per-row slice / concat loop and dispatches a single
-/// `fast_rope(x, ..., offsets[0])` call over the whole batch. RoPE is
-/// applied along the last (head) dimension and `mlx::core::fast::rope`'s
-/// scalar-offset overload broadcasts the same offset to every leading axis,
-/// so this is bit-equivalent to the per-row path while saving `(batch - 1)`
-/// `slice` calls and `(batch - 1)` `concatenate` calls. Mixed-offset batches
-/// continue to take the original per-row path. The collapse is purely
-/// per-call: it never caches a "the batch is uniform" assumption across
-/// decode steps, so a future step with non-uniform offsets transparently
-/// falls back to per-row dispatch (compare with the explicit per-row state
-/// invariant on [`crate::cache::BatchedAttentionMetadata`], which exists to
-/// prevent shape-changing storage state across batch grow / shrink).
+/// **Why there is no uniform-batch fast path**: when every offset in
+/// `offsets` is the same value one might expect to call `fast_rope(x, ...,
+/// offsets[0])` directly on the full `[B, n_heads, T, D]` tensor.  In
+/// practice the attention key/value tensors arrive here after a
+/// `transpose_axes([0,2,1,3])` from `[B, T, n_heads, D]`, which produces a
+/// non-contiguous tensor whose batch stride equals the sequence stride when
+/// `T == 1` (decode step).  MLX's `fast::rope` Metal kernel confuses these
+/// equal strides and assigns position `offset + b` to batch-element `b`
+/// instead of `offset` for all `b`, producing asymmetric K/V rotations and
+/// causing divergence between batch rows even for identical input tokens.
+/// The per-row path calls `fast_rope` with `B == 1`, where a single batch
+/// element cannot encounter inter-batch confusion regardless of strides.
+/// See `ffi_tests::test_fast_rope_batched_non_contiguous_t1_symmetric` and
+/// the paged batched B=2 parity regression.
 ///
 /// Used by: Llama3 batched decode, Qwen3 batched decode, Gemma3 batched decode, Llama4 batched decode
 pub fn fast_rope_batched(
@@ -2367,16 +2367,33 @@ pub fn fast_rope_batched(
         return ffi::fast_rope(x, dims, traditional, base, scale, offsets[0]);
     }
 
-    // Uniform-batch fast path: every row sees the same offset. Dispatch a
-    // single RoPE on the full batch and skip the slice / concat loop.
-    // `offsets.iter().all(...)` short-circuits, so the check itself is
-    // O(batch) integer comparisons — negligible compared to the
-    // `(batch - 1)` graph-node allocations the loop would otherwise
-    // perform.
-    let first_offset = offsets[0];
-    if offsets[1..].iter().all(|&o| o == first_offset) {
-        return ffi::fast_rope(x, dims, traditional, base, scale, first_offset);
-    }
+    // NOTE: The uniform-batch fast path (calling fast_rope on the full
+    // [B, n_heads, T, D] tensor in one shot) is intentionally DISABLED.
+    //
+    // Root cause: in the batched decode path the Q/K/V tensors arrive here
+    // already transposed from [B, T, n_heads, D] → [B, n_heads, T, D].
+    // When T == 1 (single decode token), the transpose produces a
+    // non-contiguous tensor whose strides satisfy
+    //   stride[batch_dim] == stride[sequence_dim]   (= n_heads * D)
+    // because swapping a size-1 dimension does not change the physical
+    // memory layout.  MLX's fast::rope Metal kernel distinguishes
+    // sequence position from batch position using the stride ratio; when
+    // these two strides are equal the kernel confuses the batch offset for
+    // an intra-sequence offset, assigning position `offset + b` to
+    // batch-element `b` instead of `offset` for all `b`.  The result is
+    // asymmetric K/V rotations across the batch even when every sequence
+    // receives the same input token at the same cache position.
+    //
+    // The existing unit test (`test_fast_rope_batched_uniform_offsets_match_per_row_path`)
+    // uses a directly-constructed contiguous [3, 1, 2, 4] tensor where all
+    // strides are distinct, so the bug does not manifest there.
+    //
+    // The per-row path below slices to [1, n_heads, T, D] for each batch
+    // element and calls fast_rope with B == 1.  With only one batch row the
+    // kernel can never confuse a batch offset for a sequence offset, so the
+    // non-contiguous strides are harmless.  See the paged batched B=2 parity
+    // regression: row 1 diverged from the dense reference when the uniform
+    // path was in effect.
 
     let rank = shape.len();
     let mut begin = vec![0; rank];

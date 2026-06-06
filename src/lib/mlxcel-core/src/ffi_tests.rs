@@ -101,11 +101,13 @@ fn test_fast_rope_batched_matches_per_sequence_offsets() {
     assert!(item_bool(&close));
 }
 
-/// Uniform-batch fast path (mlx-vlm PR #1055): when every
-/// row shares the same RoPE offset, `fast_rope_batched` collapses to a
-/// single full-batch `fast_rope` call. The collapsed result must be
-/// bit-equivalent (within float tolerance) to the per-row slice / concat
-/// reference, otherwise the optimization would silently corrupt RoPE.
+/// When every row shares the same RoPE offset, `fast_rope_batched` must
+/// still produce the same result as the per-row slice / concat reference
+/// (the former uniform-batch fast path that collapsed to a single
+/// `fast_rope(full_tensor, ...)` call has been removed — see the
+/// regression test `test_fast_rope_batched_non_contiguous_t1_symmetric`
+/// for the reason).  This test uses a contiguous tensor so the bug does
+/// not manifest; it validates correctness of the per-row path itself.
 #[test]
 fn test_fast_rope_batched_uniform_offsets_match_per_row_path() {
     let x = from_slice_f32(
@@ -219,6 +221,53 @@ fn test_fast_rope_batched_uniform_zero_offsets_match_per_row_path() {
     let close = allclose(&actual, &expected, 1e-5, 1e-5);
     eval(&close);
     assert!(item_bool(&close));
+}
+
+/// Regression test for the non-contiguous T=1 stride-aliasing bug.
+///
+/// During batched decode (T=1) the attention key tensor arrives at
+/// `fast_rope_batched` as a transposed [B, n_heads, 1, D] tensor.  The
+/// transpose of [B, T=1, n_heads, D] sets `stride[batch] == stride[seq]`
+/// (both equal `n_heads * D`) because swapping a size-1 dimension leaves
+/// the physical layout unchanged.  MLX's `fast::rope` Metal kernel can
+/// confuse the batch stride for a sequence stride in this situation,
+/// applying position `offset + b` to batch-element `b` instead of
+/// `offset` for every `b`.
+///
+/// This test constructs such a non-contiguous tensor with symmetric inputs
+/// (batch row 0 == batch row 1) and uniform offsets, then asserts that
+/// `fast_rope_batched` outputs are also symmetric — i.e. both rows receive
+/// the same RoPE rotation.  The test should FAIL if the uniform-batch
+/// fast path (a single `fast_rope` on the full [B, n_heads, T, D] tensor)
+/// is re-enabled without first verifying it handles non-contiguous strides
+/// correctly.
+#[test]
+fn test_fast_rope_batched_non_contiguous_t1_symmetric() {
+    // Two identical rows — shape [2, 1, 2, 4] (B=2, T=1, n_heads=2, D=4).
+    let vals: Vec<f32> = (0..8).map(|i| i as f32).collect();
+    let row: Vec<f32> = vals.iter().chain(vals.iter()).cloned().collect(); // [row, row]
+    let x = from_slice_f32(&row, &[2, 1, 2, 4]);
+
+    // Transpose [B, T, n_heads, D] → [B, n_heads, T, D] = [2, 2, 1, 4].
+    // This is the decode-path layout.  After the transpose stride[batch]
+    // == stride[T] (both = n_heads * D = 8), replicating the production bug.
+    let x_t = transpose_axes(&x, &[0, 2, 1, 3]);
+
+    // Uniform offsets: both sequences are at position 16.
+    let result = fast_rope_batched(&x_t, 4, false, 10000.0, 1.0, &[16, 16]);
+    eval(&result);
+
+    // With symmetric inputs and equal offsets the output must be symmetric.
+    let r0 = slice(&result, &[0, 0, 0, 0], &[1, i32::MAX, i32::MAX, i32::MAX]);
+    let r1 = slice(&result, &[1, 0, 0, 0], &[2, i32::MAX, i32::MAX, i32::MAX]);
+    eval(&r0);
+    eval(&r1);
+    let close = allclose(&r0, &r1, 1e-5, 1e-5);
+    eval(&close);
+    assert!(
+        item_bool(&close),
+        "fast_rope_batched must give symmetric output for symmetric non-contiguous T=1 input"
+    );
 }
 
 #[test]
