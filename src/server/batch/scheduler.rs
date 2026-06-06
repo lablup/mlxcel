@@ -1269,10 +1269,19 @@ impl BatchScheduler {
             )
             .expect("valid paged Turbo4 decode layout")
         } else {
-            PagedKvLayout::uniform(
+            // Carry the actual cache mode so the pool-backing gate in
+            // `CachePool::allocate_with_layout` (`paged_layout.cache_mode ==
+            // Fp16`) pool-backs ONLY genuine Fp16 sequences. Int8 (and
+            // Turbo3Asym) keep their dense KV path — memory saving preserved —
+            // until the pool gains native quantized storage; these modes carry
+            // no per-page sidecars, so the sidecar budget is 0 (uniform_with_mode
+            // treats non-Turbo4 modes as sidecar-free).
+            PagedKvLayout::uniform_with_mode(
                 num_layers,
                 DEFAULT_PAGED_BLOCK_SIZE,
                 DEFAULT_PAGED_BLOCK_SIZE,
+                effective_mode,
+                0,
             )
             .expect("valid paged decode layout")
         };
