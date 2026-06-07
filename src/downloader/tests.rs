@@ -70,6 +70,40 @@ fn default_local_dir_is_global_store() {
 }
 
 #[test]
+fn bare_name_download_dest_lands_under_default_org() {
+    // Issue #171: a bare, prefix-less name normalizes to `mlx-community/<name>`
+    // BEFORE the store destination is derived, so the snapshot lands at
+    // `<cache>/models/mlx-community/<name>` — not the slashless `models/<bare>`.
+    // Composes the shared `normalize_repo_id` with `resolve_local_dir` to pin
+    // the download destination the `download` verb now produces (network-free).
+    let _guard = env_lock();
+    let prev_cache = std::env::var("MLXCEL_CACHE_DIR").ok();
+    let prev_org = std::env::var("MLXCEL_DEFAULT_ORG").ok();
+    let prev_models = std::env::var("MLXCEL_MODELS_DIR").ok();
+    unsafe {
+        std::env::set_var("MLXCEL_CACHE_DIR", "/tmp/mlxcel-171-dest-test");
+        std::env::remove_var("MLXCEL_DEFAULT_ORG");
+        std::env::remove_var("MLXCEL_MODELS_DIR");
+    }
+
+    let repo_id = normalize_repo_id("gemma-4-26B-A4B-it-qat-4bit").unwrap();
+    let opts = DownloadOptions::from_args(&args(&repo_id));
+    let resolved = opts.resolve_local_dir();
+
+    restore_env("MLXCEL_CACHE_DIR", prev_cache);
+    restore_env("MLXCEL_DEFAULT_ORG", prev_org);
+    restore_env("MLXCEL_MODELS_DIR", prev_models);
+
+    assert_eq!(
+        resolved,
+        PathBuf::from("/tmp/mlxcel-171-dest-test")
+            .join("models")
+            .join("mlx-community")
+            .join("gemma-4-26B-A4B-it-qat-4bit")
+    );
+}
+
+#[test]
 fn explicit_local_dir_is_respected() {
     // An explicit --local-dir is the opt-out: it is honored verbatim and does
     // not consult MLXCEL_CACHE_DIR / the global store.

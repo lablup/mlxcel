@@ -87,6 +87,7 @@ pub use cli::DownloadArgs;
 pub use errors::map_hf_error;
 pub use filters::{is_wanted_file, repo_basename};
 pub use progress::should_show_progress;
+pub use resolver::normalize_repo_id;
 pub use resolver::resolve_model_source;
 pub use resolver::resolve_model_source_with_override;
 pub use store::{
@@ -590,6 +591,21 @@ async fn stream_to_tempfile(
 /// invalid repo id, missing authentication on a gated repo, missing revision,
 /// network failure, and on-disk I/O errors.
 pub fn download_repo(opts: DownloadOptions) -> Result<()> {
+    // Issue #171: expand a bare, prefix-less model name (e.g. `Qwen3-4B-4bit`)
+    // to `<default-org>/<name>` BEFORE anything is derived from `opts.repo_id` —
+    // the HF-cache reuse probe below, the store destination
+    // (`resolve_local_dir`), the repo handle, and every per-file download URL
+    // all key off it. The bare-name → default-org expansion was wired only into
+    // the `-m`/run resolver (issue #112); the `download` verb bypassed it and
+    // 404'd on a slashless repo-id. `normalize_repo_id` is the shared funnel, so
+    // `mlxcel download` and `mlx-server download` now match the resolver-backed
+    // commands. An `owner/name` id (anything containing `/`) is returned
+    // unchanged, so resolver-driven calls — which already pass a full
+    // `owner/name` — are a no-op here (no double expansion, no duplicate info
+    // line).
+    let mut opts = opts;
+    opts.repo_id = normalize_repo_id(&opts.repo_id)?;
+
     // HF-cache read-reuse (issue #93): when the caller did not pin an explicit
     // `--local-dir` and is not forcing a refresh, reuse a complete snapshot
     // already present in the HuggingFace Hub cache (`$HF_HUB_CACHE` /

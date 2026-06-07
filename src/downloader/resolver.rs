@@ -137,12 +137,7 @@ pub fn resolve_model_source_with_override(
     //    `mlx-community/gemma-4-e4b-it-4bit`. Steps 1 and 2 take precedence, so
     //    an existing local path and an explicit `owner/name` are unaffected.
     if is_repo_segment(value_str) {
-        let org = default_org();
-        let repo_id = format!("{org}/{value_str}");
-        if !is_repo_id_shape(&repo_id) {
-            return Err(bad_default_org_error(&org, value_str));
-        }
-        println!("[mlxcel] '{value_str}' -> {repo_id}");
+        let repo_id = expand_bare_name(value_str)?;
         return resolve_repo_id(&repo_id, None, models_dir);
     }
 
@@ -307,6 +302,67 @@ fn bad_default_org_error(org: &str, name: &str) -> anyhow::Error {
          invalid repo-id '{org}/{name}'; the org must be a single path segment \
          ([A-Za-z0-9._-]). Pass a full `owner/name` repo-id instead."
     )
+}
+
+/// Expand a bare, prefix-less model name into a canonical `<org>/<name>`
+/// repo-id (issue #112), where `org` is [`default_org`].
+///
+/// This is the single source of truth for the bare-name expansion:
+/// [`resolve_model_source_with_override`]'s step 3 and [`normalize_repo_id`]
+/// (the `download`-verb entry point, issue #171) both funnel through it, so the
+/// resolver-backed commands and the `download` verb cannot drift.
+///
+/// Emits the `'name' -> owner/name` info line so the expansion is never a
+/// silent surprise, matching the resolver UX.
+///
+/// # Errors
+///
+/// Returns [`bad_default_org_error`] when `$MLXCEL_DEFAULT_ORG` expands the
+/// name into something that is not a valid `owner/name` repo-id (e.g. the org
+/// contains a `/` or an illegal character).
+fn expand_bare_name(name: &str) -> Result<String> {
+    let org = default_org();
+    let repo_id = format!("{org}/{name}");
+    if !is_repo_id_shape(&repo_id) {
+        return Err(bad_default_org_error(&org, name));
+    }
+    println!("[mlxcel] '{name}' -> {repo_id}");
+    Ok(repo_id)
+}
+
+/// Normalize a user-supplied model identifier into a canonical HuggingFace
+/// repo-id, applying the bare-name → default-org expansion (issue #112) shared
+/// with the `-m`/run resolver.
+///
+/// This is the shared funnel the `download` verb uses (issue #171) so
+/// `mlxcel download <bare-name>` and `mlx-server download <bare-name>` expand a
+/// prefix-less name to `<default-org>/<name>` exactly like the resolver-backed
+/// commands, instead of 404ing on a slashless repo-id. It is applied at the top
+/// of [`download_repo`] so both the download URL and the store destination use
+/// the canonical id.
+///
+/// Conservative and idempotent:
+///
+/// - A bare single segment (no `/`, passes [`is_repo_segment`]) is expanded via
+///   [`expand_bare_name`] to `<default-org>/<name>`.
+/// - Anything else — an `owner/name` id, a multi-segment value, or a string
+///   with characters illegal in a segment — has no expandable bare segment
+///   (`is_repo_segment` is false), so it is returned verbatim for the caller /
+///   HuggingFace to validate as before. An already-canonical `owner/name` id
+///   therefore round-trips unchanged (no double expansion, no duplicate info
+///   line), which is what makes the [`resolve_repo_id`] → [`download_repo`] path
+///   a no-op here.
+///
+/// # Errors
+///
+/// Propagates [`expand_bare_name`]'s error when a bare name expands to an
+/// invalid repo-id under a malformed `$MLXCEL_DEFAULT_ORG`.
+pub fn normalize_repo_id(value: &str) -> Result<String> {
+    if is_repo_segment(value) {
+        expand_bare_name(value)
+    } else {
+        Ok(value.to_string())
+    }
 }
 
 #[cfg(test)]

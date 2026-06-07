@@ -627,3 +627,85 @@ fn bare_name_with_invalid_default_org_errors_without_network() {
     assert!(msg.contains("MLXCEL_DEFAULT_ORG"), "got: {msg}");
     assert!(msg.contains("invalid repo-id"), "got: {msg}");
 }
+
+// ── normalize_repo_id (issue #171): shared bare-name → default-org expansion ──
+//
+// `normalize_repo_id` is the funnel the `download` verb uses so a bare,
+// prefix-less name expands to `<default-org>/<name>` exactly like resolver
+// step 3. These mirror the branch-3 (#112) cases above but exercise the shared
+// helper directly (no filesystem / network), asserting only the returned id.
+
+#[test]
+fn normalize_bare_name_prepends_default_org() {
+    let _guard = env_lock();
+    let prev = std::env::var("MLXCEL_DEFAULT_ORG").ok();
+    unsafe { std::env::remove_var("MLXCEL_DEFAULT_ORG") };
+
+    let resolved = normalize_repo_id("gemma-4-26B-A4B-it-qat-4bit").unwrap();
+
+    restore_env("MLXCEL_DEFAULT_ORG", prev);
+    assert_eq!(resolved, "mlx-community/gemma-4-26B-A4B-it-qat-4bit");
+}
+
+#[test]
+fn normalize_bare_name_honors_default_org_override() {
+    let _guard = env_lock();
+    let prev = std::env::var("MLXCEL_DEFAULT_ORG").ok();
+    unsafe { std::env::set_var("MLXCEL_DEFAULT_ORG", "acme") };
+
+    let resolved = normalize_repo_id("my-model").unwrap();
+
+    restore_env("MLXCEL_DEFAULT_ORG", prev);
+    assert_eq!(resolved, "acme/my-model");
+}
+
+#[test]
+fn normalize_bare_name_falls_back_on_blank_default_org() {
+    // A blank / whitespace-only override falls back to the `mlx-community`
+    // default, matching `default_org`.
+    let _guard = env_lock();
+    let prev = std::env::var("MLXCEL_DEFAULT_ORG").ok();
+    unsafe { std::env::set_var("MLXCEL_DEFAULT_ORG", "   ") };
+
+    let resolved = normalize_repo_id("my-model").unwrap();
+
+    restore_env("MLXCEL_DEFAULT_ORG", prev);
+    assert_eq!(resolved, "mlx-community/my-model");
+}
+
+#[test]
+fn normalize_passes_through_owner_name_unchanged() {
+    // An explicit `owner/name` id (or any multi-slash value) is not a bare
+    // segment, so it is returned verbatim — idempotent, no second org prefix.
+    // The default-org env var is irrelevant here; we pin it to a non-default
+    // value to prove the expansion branch never runs for a slash-bearing id.
+    let _guard = env_lock();
+    let prev = std::env::var("MLXCEL_DEFAULT_ORG").ok();
+    unsafe { std::env::set_var("MLXCEL_DEFAULT_ORG", "acme") };
+
+    assert_eq!(
+        normalize_repo_id("mlx-community/Qwen3-4B-4bit").unwrap(),
+        "mlx-community/Qwen3-4B-4bit"
+    );
+    assert_eq!(normalize_repo_id("a/b/c").unwrap(), "a/b/c");
+
+    restore_env("MLXCEL_DEFAULT_ORG", prev);
+}
+
+#[test]
+fn normalize_bare_name_with_invalid_default_org_errors() {
+    // A `/` in MLXCEL_DEFAULT_ORG expands the bare name into a multi-segment
+    // (invalid) repo-id; the normalizer rejects it up front with the same
+    // actionable `bad_default_org_error` the resolver uses.
+    let _guard = env_lock();
+    let prev = std::env::var("MLXCEL_DEFAULT_ORG").ok();
+    unsafe { std::env::set_var("MLXCEL_DEFAULT_ORG", "owner/extra") };
+
+    let err = normalize_repo_id("my-model").unwrap_err();
+    let msg = format!("{err}");
+
+    restore_env("MLXCEL_DEFAULT_ORG", prev);
+
+    assert!(msg.contains("MLXCEL_DEFAULT_ORG"), "got: {msg}");
+    assert!(msg.contains("invalid repo-id"), "got: {msg}");
+}
