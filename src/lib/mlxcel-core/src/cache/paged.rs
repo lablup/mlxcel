@@ -533,13 +533,20 @@ impl PagedBlockPool {
         self.block_budget = max_blocks;
     }
 
-    /// Free physical blocks still mintable before the budget is hit, or `None`
-    /// when unbounded. `Some(0)` means a new block would be refused (only freed
-    /// blocks can be reused). Lets the scheduler gate admission before it tries
-    /// to grow a sequence.
+    /// Physical blocks still **acquirable** before the budget is hit, or `None`
+    /// when unbounded. This is `budget − live_block_count`: a fresh
+    /// `acquire_block` succeeds whenever fewer than `budget` blocks are live,
+    /// because it can either reuse a freed (allocated-but-not-live) block or
+    /// mint a new one while `allocated < budget`. Eviction / preemption that
+    /// drops a block's refcount to 0 therefore *raises* this figure even though
+    /// `allocated_block_count` is unchanged (the freed row is retained for
+    /// reuse). The scheduler gates prefill admission on this value and reclaims
+    /// (evict cold prefixes, then preempt) until it covers the sequence's need.
+    /// `Some(0)` means every budgeted block is in use — admission must reclaim
+    /// or defer.
     pub fn free_block_budget(&self) -> Option<usize> {
         self.block_budget
-            .map(|max| max.saturating_sub(self.blocks.len()))
+            .map(|max| max.saturating_sub(self.live_block_count()))
     }
 
     /// Whether the pool's cache mode requires Turbo4 sidecar storage.

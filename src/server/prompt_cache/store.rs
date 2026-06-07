@@ -739,6 +739,24 @@ impl PromptCacheStore {
         drained_freed + ttl_freed + cap_freed
     }
 
+    /// Evict the single least-recently-used entry on demand, returning the
+    /// bytes it freed (0 when the store is empty or disabled).
+    ///
+    /// Unlike [`Self::evict_if_needed`] (which only acts when a cap / TTL is
+    /// exceeded), this unconditionally drops the oldest entry. The scheduler
+    /// uses it to reclaim paged pool blocks under block-budget pressure: the
+    /// evicted entry's paged pins are routed to the pending-release queue
+    /// (drainable via [`Self::drain_pending_paged_releases`]), so the caller
+    /// frees the underlying blocks by releasing them. Returns 0 to signal
+    /// "nothing left to evict" so the caller can stop.
+    pub fn evict_one_lru(&self) -> usize {
+        let mut guard = match self.inner.write() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        guard.evict_oldest()
+    }
+
     /// Drop every entry. Primarily for tests and shutdown paths.
     pub fn clear(&self) {
         let mut guard = self.inner.write().expect("prompt cache inner lock");

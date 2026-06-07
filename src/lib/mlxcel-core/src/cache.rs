@@ -5498,6 +5498,13 @@ pub struct CachePool {
     /// Detached cache sets parked inside the pool during cross-request
     /// handoffs. See [`detach`] for the full design.
     detached: detach::DetachedMap,
+    /// Paged block budget remembered across lazy pool creation. The pool is
+    /// built on the first paged allocation, which may happen after the
+    /// scheduler sets the budget, so the value is stored here and applied in
+    /// [`CachePool::ensure_paged_pool`] when the pool is born (and immediately
+    /// to a live pool in [`CachePool::set_paged_block_budget`]). `None` =
+    /// unbounded (the default).
+    paged_block_budget: Option<usize>,
 }
 
 impl CachePool {
@@ -5509,6 +5516,7 @@ impl CachePool {
             max_sequences,
             paged_pool: None,
             detached: HashMap::new(),
+            paged_block_budget: None,
         }
     }
 
@@ -5803,24 +5811,25 @@ impl CachePool {
     /// (the default) leaves the pool unbounded. No-op when there is no paged
     /// pool (dense-only configuration). The scheduler derives the value from
     /// the configured / estimated KV byte budget (#122).
-    pub fn set_paged_block_budget(&self, max_blocks: Option<usize>) {
+    pub fn set_paged_block_budget(&mut self, max_blocks: Option<usize>) {
+        self.paged_block_budget = max_blocks;
         if let Some(pool) = self.paged_pool.as_ref() {
             pool.borrow_mut().set_block_budget(max_blocks);
         }
     }
 
-    /// The paged pool's current block budget, or `None` when unbounded / no
-    /// paged pool.
+    /// The configured paged block budget, or `None` when unbounded. This is the
+    /// stored intent, so it is correct even before the pool is lazily created
+    /// (the value is applied to the pool on creation).
     pub fn paged_block_budget(&self) -> Option<usize> {
-        self.paged_pool
-            .as_ref()
-            .and_then(|pool| pool.borrow().block_budget())
+        self.paged_block_budget
     }
 
-    /// Blocks still mintable before the paged budget is hit, or `None` when
-    /// unbounded / no paged pool. `Some(0)` means only freed-block reuse
-    /// remains — the admission gate should evict or queue before growing a
-    /// sequence.
+    /// Blocks still **acquirable** before the paged budget is hit
+    /// (`budget − live`), or `None` when unbounded / no paged pool. `Some(0)`
+    /// means every budgeted block is in use; the admission gate must reclaim
+    /// (evict cold prefixes, then preempt) or defer. Eviction raises this even
+    /// though allocated rows are retained, because freed blocks are reusable.
     pub fn free_paged_block_budget(&self) -> Option<usize> {
         self.paged_pool
             .as_ref()
@@ -6001,7 +6010,11 @@ impl CachePool {
             }
             return Ok(());
         }
-        self.paged_pool = Some(Rc::new(RefCell::new(PagedBlockPool::new(layout.clone()))));
+        let mut pool = PagedBlockPool::new(layout.clone());
+        // Apply the budget remembered before the pool existed (set via
+        // `set_paged_block_budget` before the first paged allocation).
+        pool.set_block_budget(self.paged_block_budget);
+        self.paged_pool = Some(Rc::new(RefCell::new(pool)));
         Ok(())
     }
 }

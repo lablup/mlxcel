@@ -1070,3 +1070,88 @@ fn dense_eviction_does_not_queue_paged_releases() {
     );
     assert!(store.drain_pending_paged_releases().is_empty());
 }
+
+// ---------------------------------------------------------------------------
+// #122 sub-step b2: on-demand LRU eviction reclaims paged block budget.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn evict_one_lru_drops_oldest_and_queues_paged_pins() {
+    let store = Arc::new(PromptCacheStore::with_config(PromptCacheConfig::new(
+        true,
+        1 << 30,
+        32,
+        Duration::from_secs(3600),
+        1,
+    )));
+    let model = PagedStub {
+        layout: PagedKvLayout::uniform(1, 4, 128).unwrap(),
+    };
+    let mut pool = CachePool::new(4);
+    let (set, blocks) = mint_paged_set(&mut pool, &model, 6);
+    let tokens: Vec<i32> = (0..16).collect();
+    store
+        .insert(
+            &make_key("m", "s", "tpl", &tokens),
+            CacheEntry::new(tokens.clone(), set),
+        )
+        .expect("insert");
+    assert_eq!(store.len(), 1);
+
+    // On-demand eviction drops the entry and queues its pins.
+    assert!(
+        store.evict_one_lru() > 0,
+        "evicting a real entry frees bytes"
+    );
+    assert_eq!(store.len(), 0);
+    assert!(store.has_pending_paged_releases());
+
+    for paged in store.drain_pending_paged_releases() {
+        pool.release_detached_paged(paged);
+    }
+    for b in &blocks {
+        assert_eq!(pool.paged_pool_ref().unwrap().refcount(*b), 0);
+    }
+    // A second eviction is a no-op (store empty).
+    assert_eq!(store.evict_one_lru(), 0);
+}
+
+#[test]
+fn evicting_cold_prefix_restores_paged_block_budget() {
+    // The reclaim tier-1 the scheduler runs under block pressure: evict a cold
+    // prompt-cache prefix and release its pins, raising the acquirable budget.
+    let store = Arc::new(PromptCacheStore::with_config(PromptCacheConfig::new(
+        true,
+        1 << 30,
+        32,
+        Duration::from_secs(3600),
+        1,
+    )));
+    let model = PagedStub {
+        layout: PagedKvLayout::uniform(1, 4, 128).unwrap(),
+    };
+    let mut pool = CachePool::new(4);
+    pool.set_paged_block_budget(Some(8));
+    let (set, blocks) = mint_paged_set(&mut pool, &model, 8); // 2 blocks, live
+    assert_eq!(blocks.len(), 2);
+    let free_before = pool.free_paged_block_budget().expect("budgeted");
+
+    let tokens: Vec<i32> = (0..16).collect();
+    store
+        .insert(
+            &make_key("m", "s", "tpl", &tokens),
+            CacheEntry::new(tokens.clone(), set),
+        )
+        .expect("insert");
+
+    assert!(store.evict_one_lru() > 0);
+    for paged in store.drain_pending_paged_releases() {
+        pool.release_detached_paged(paged);
+    }
+    let free_after = pool.free_paged_block_budget().expect("budgeted");
+    assert_eq!(
+        free_after,
+        free_before + 2,
+        "evicting the cold prefix reclaimed its 2 blocks into the budget"
+    );
+}

@@ -323,6 +323,49 @@ fn free_block_budget_tracks_allocation() {
     assert_eq!(pool.free_block_budget(), Some(3));
 }
 
+#[test]
+fn free_block_budget_rises_when_blocks_are_freed() {
+    // free_block_budget is budget − LIVE, not budget − allocated: freeing a
+    // block restores acquirable headroom even though the row is retained for
+    // reuse. This is what lets eviction/preemption reclaim budget for admission.
+    let layout = PagedKvLayout::uniform(1, 4, 128).unwrap();
+    let mut pool = PagedBlockPool::new(layout.clone());
+    pool.set_block_budget(Some(4));
+    let mut state = PagedSequenceState::new(&layout);
+    pool.append_tokens(&mut state, 0, 16).unwrap(); // 4 blocks, all live
+    assert_eq!(pool.free_block_budget(), Some(0));
+
+    pool.release_sequence(&mut state).unwrap();
+    assert_eq!(pool.live_block_count(), 0);
+    assert_eq!(pool.allocated_block_count(), 4, "rows retained for reuse");
+    assert_eq!(
+        pool.free_block_budget(),
+        Some(4),
+        "freeing live blocks restores the full acquirable budget"
+    );
+}
+
+#[test]
+fn cache_pool_budget_set_before_pool_creation_applies_on_creation() {
+    // The scheduler may set the budget before the first paged allocation lazily
+    // creates the pool; CachePool stores the intent and applies it on creation.
+    let model = PagedStubModel::new(default_layout());
+    let mut pool = CachePool::new(4);
+    assert!(
+        pool.paged_pool_ref().is_none(),
+        "no pool before first allocate"
+    );
+    pool.set_paged_block_budget(Some(7));
+    assert_eq!(pool.paged_block_budget(), Some(7), "stored intent survives");
+
+    let _seq = pool.allocate(&model).unwrap(); // creates the paged pool
+    assert_eq!(
+        pool.paged_pool_ref().unwrap().block_budget(),
+        Some(7),
+        "the pre-set budget must apply when the pool is born"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // 2. CachePool detach / adopt happy path + edge cases
 // ---------------------------------------------------------------------------

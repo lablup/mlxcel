@@ -1805,6 +1805,96 @@ impl BatchScheduler {
     }
 
     // ------------------------------------------------------------------
+    // Paged KV block-budget admission (#122 b2)
+    // ------------------------------------------------------------------
+
+    /// Estimate the pool blocks a sequence's prefill will pin: one block per
+    /// `block_size` prompt tokens, per layer. Returns 0 when there is no paged
+    /// pool (the budget gate is then a no-op for this model).
+    fn estimate_prefill_blocks(&self, prompt_len: usize) -> usize {
+        match self.cache_pool.paged_block_size() {
+            Some(block_size) if block_size > 0 => prompt_len
+                .div_ceil(block_size)
+                .saturating_mul(self.model.num_layers()),
+            _ => 0,
+        }
+    }
+
+    /// Reclaim paged pool blocks until at least `need` are acquirable, or no
+    /// further reclamation is possible. First evicts cold prompt-cache prefixes
+    /// (LRU; releasing their pins frees real blocks), then preempts running
+    /// sequences (which re-prefill on resume). Returns whether `need` blocks are
+    /// now acquirable.
+    fn reclaim_paged_blocks(&mut self, need: usize) -> bool {
+        let room = |pool: &CachePool| pool.free_paged_block_budget().is_none_or(|f| f >= need);
+        // 1. Evict cold cross-request prefixes; releasing their pins frees blocks.
+        if let Some(store) = self.prompt_cache.clone() {
+            while !room(&self.cache_pool) {
+                if store.evict_one_lru() == 0 {
+                    break; // nothing left to evict
+                }
+                self.drain_store_paged_releases();
+            }
+        }
+        if room(&self.cache_pool) {
+            return true;
+        }
+        // 2. Preempt running sequences (drop their KV; they re-prefill on resume).
+        while !room(&self.cache_pool) {
+            if !self.try_evict_for_preemption() {
+                break; // no preemptible victim left
+            }
+        }
+        room(&self.cache_pool)
+    }
+
+    /// Paged block-budget admission gate. Returns `Some(seq)` to proceed with
+    /// the prefill, or `None` when the sequence was deferred (re-queued for a
+    /// later tick once decodes free blocks) or rejected (it cannot fit the whole
+    /// budget). A no-op (`Some(seq)`) when no budget is configured.
+    fn admit_paged_prefill(&mut self, seq: SequenceInfo) -> Option<SequenceInfo> {
+        // Opt-in: no budget configured ⇒ admit (default unbounded behaviour).
+        let total = match self.cache_pool.paged_block_budget() {
+            Some(t) => t,
+            None => return Some(seq),
+        };
+        let need = self.estimate_prefill_blocks(seq.prompt_tokens.len());
+        if need == 0 {
+            return Some(seq); // model does not use the paged pool
+        }
+        // If it cannot fit the entire budget, reject — deferring forever would
+        // wedge the queue behind a request that can never run.
+        if need > total {
+            self.abort_sequence(
+                seq,
+                &format!(
+                    "prompt needs {need} KV blocks, exceeding the {total}-block KV cache budget"
+                ),
+            );
+            return None;
+        }
+        // Acquirable blocks (budget − live). `None` means the pool is not yet
+        // created (nothing allocated ⇒ the whole budget is free).
+        let free = self.cache_pool.free_paged_block_budget().unwrap_or(total);
+        if need <= free {
+            return Some(seq);
+        }
+        if self.reclaim_paged_blocks(need) {
+            return Some(seq);
+        }
+        // Still no room — defer to a later tick. Decodes in flight will free
+        // blocks as their sequences finish; this request retries then.
+        if let Err(rejected) = self.prefill_queue.enqueue(seq) {
+            self.prompt_cache_seq_ctx.remove(&rejected.seq_id);
+            self.release_sequence_caches(rejected.seq_id);
+            let _ = rejected.response_tx.send(GenerateEvent::Error(
+                "Server busy: prefill queue full".to_string(),
+            ));
+        }
+        None
+    }
+
+    // ------------------------------------------------------------------
     // Prefill execution (chunked or full)
     // ------------------------------------------------------------------
 
@@ -1827,6 +1917,18 @@ impl BatchScheduler {
         }
 
         let seq = match self.prefill_queue.dequeue() {
+            Some(s) => s,
+            None => return,
+        };
+
+        // #122 b2: paged KV block-budget admission gate. Opt-in — a no-op
+        // unless a budget is configured (`free_paged_block_budget()` is `None`
+        // otherwise). When the sequence would not fit, this evicts cold
+        // prompt-cache prefixes, then preempts running sequences, and as a last
+        // resort re-queues the sequence for a later tick (or rejects it if it
+        // can never fit the whole budget). Returning `None` means the sequence
+        // was deferred or rejected and this tick is done.
+        let seq = match self.admit_paged_prefill(seq) {
             Some(s) => s,
             None => return,
         };
