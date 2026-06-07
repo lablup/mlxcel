@@ -13,12 +13,15 @@
 // limitations under the License.
 
 //! Real-model parity for the unified radix prompt-prefix cache over the paged
-//! block pool (#121 sub-step b).
+//! block pool (#121).
 //!
-//! Proves the headline behaviour of the sub-step: two requests sharing a prompt
-//! prefix store that prefix's KV **once** in the paged pool and the second
-//! request reuses it without re-prefilling — and still decodes bit-identically
-//! to a cold (no-cache) paged run.
+//! Proves the headline behaviour: two requests sharing a prompt prefix store
+//! that prefix's KV **once** in the paged pool and the second request reuses it
+//! without re-prefilling — and still decodes bit-identically to a cold
+//! (no-cache) paged run. The case runs for each pool-backed family with a small
+//! checkpoint — **qwen3** and **llama3** (Fp16 dense-natural backend). The
+//! adopt/donate machinery operates on the pool + block table, not model
+//! internals, so it is otherwise model-agnostic.
 //!
 //! ## What it drives
 //!
@@ -39,17 +42,18 @@
 //!
 //! ## Running
 //!
-//! `#[ignore]` (loads qwen3-0.6b-4bit and runs real GPU forwards). Run with:
+//! `#[ignore]` (loads a real checkpoint and runs real GPU forwards). Run with:
 //!
 //! ```text
 //! cargo test --test paged_prefix_share_parity --release \
-//!     --features metal,accelerate -- --ignored --nocapture
+//!     --features metal,accelerate -- --ignored --nocapture --test-threads=1
 //! ```
 //!
-//! Soft-skips when `models/qwen3-0.6b-4bit` is absent. Fetch with:
+//! Each case soft-skips when its model directory is absent. Fetch with:
 //!
 //! ```text
 //! ./target/release/mlxcel download mlx-community/Qwen3-0.6B-4bit
+//! ./target/release/mlxcel download mlx-community/Llama-3.2-1B-Instruct-4bit
 //! ```
 
 mod common;
@@ -64,8 +68,10 @@ use mlxcel::server::prompt_cache::{
 use mlxcel::{LanguageModel, initialize_runtime, load_model};
 use mlxcel_core::cache::{CachePool, PagedKvLayout, SequenceStateLayout};
 
-/// Model directory name (present at `models/qwen3-0.6b-4bit`).
-const MODEL_DIR_NAME: &str = "qwen3-0.6b-4bit";
+/// qwen3 checkpoint directory name (pool-backed family).
+const QWEN3_DIR: &str = "qwen3-0.6b-4bit";
+/// llama3 checkpoint directory name (pool-backed family).
+const LLAMA3_DIR: &str = "llama-3.2-1b-4bit";
 
 /// Paged block size (tokens per physical block) — matches the scheduler's
 /// `DEFAULT_PAGED_BLOCK_SIZE`.
@@ -131,30 +137,27 @@ fn prefill_and_decode(
     decoded
 }
 
-fn load_or_skip() -> Option<mlxcel::LoadedModel> {
-    let model_dir = repo_model_dir(MODEL_DIR_NAME);
+fn load_or_skip(model_dir_name: &str, fetch_repo: &str) -> Option<mlxcel::LoadedModel> {
+    let model_dir = repo_model_dir(model_dir_name);
     if !model_dir.exists() {
         eprintln!(
-            "Skipping {MODEL_DIR_NAME}: model directory not found at {}.\n\
-             Fetch with: ./target/release/mlxcel download mlx-community/Qwen3-0.6B-4bit",
+            "Skipping {model_dir_name}: model directory not found at {}.\n\
+             Fetch with: ./target/release/mlxcel download {fetch_repo}",
             model_dir.display()
         );
         return None;
     }
-    let (model, _tokenizer) = load_model(&model_dir).expect("load qwen3-0.6b-4bit");
+    let (model, _tokenizer) =
+        load_model(&model_dir).unwrap_or_else(|e| panic!("load {model_dir_name}: {e:?}"));
     Some(model)
 }
 
 /// Sequence A stores its prefix in the radix store; sequence B adopts it via the
 /// paged pool, shares A's prefix blocks (no re-prefill), and decodes identically
-/// to a cold no-cache run of the same `prefix + suffix` prompt.
-#[test]
-#[ignore = "loads qwen3-0.6b-4bit and runs real GPU forwards; run with --ignored"]
-fn paged_prefix_share_matches_cold_run() {
-    let _runtime = initialize_runtime();
-    let Some(model) = load_or_skip() else {
-        return;
-    };
+/// to a cold no-cache run of the same `prefix + suffix` prompt. `cache_model_key`
+/// is the `PromptCacheKey` model field (arbitrary, but must match between A's
+/// insert and B's lookup).
+fn assert_prefix_share_parity(model: &mlxcel::LoadedModel, label: &str, cache_model_key: &str) {
     let num_layers = model.num_layers();
     let prefix_len = PREFIX_TOKENS.len() as i32;
 
@@ -162,7 +165,7 @@ fn paged_prefix_share_matches_cold_run() {
     full_prompt.extend_from_slice(SUFFIX_TOKENS);
 
     eprintln!(
-        "\n=== paged prefix-share parity: {MODEL_DIR_NAME} ({num_layers} layers, \
+        "\n=== paged prefix-share parity: {label} ({num_layers} layers, \
          prefix={prefix_len}, suffix={}) ===",
         SUFFIX_TOKENS.len()
     );
@@ -171,10 +174,10 @@ fn paged_prefix_share_matches_cold_run() {
     let cold_tokens = {
         let mut pool = CachePool::new(2);
         let id = pool
-            .allocate_with_layout(&model, Some(scheduler_paged_layout(num_layers)))
+            .allocate_with_layout(model, Some(scheduler_paged_layout(num_layers)))
             .expect("cold paged allocate");
         let caches = pool.get_caches_mut(id).unwrap();
-        prefill_and_decode(&model, caches, &full_prompt, 0)
+        prefill_and_decode(model, caches, &full_prompt, 0)
     };
     eprintln!("cold   decoded: {cold_tokens:?}");
 
@@ -190,7 +193,7 @@ fn paged_prefix_share_matches_cold_run() {
 
     // A prefills ONLY the shared prefix (positions [0, prefix_len)).
     let seq_a = pool
-        .allocate_with_layout(&model, Some(scheduler_paged_layout(num_layers)))
+        .allocate_with_layout(model, Some(scheduler_paged_layout(num_layers)))
         .expect("A paged allocate");
     {
         let caches = pool.get_caches_mut(seq_a).unwrap();
@@ -223,7 +226,7 @@ fn paged_prefix_share_matches_cold_run() {
     );
     let entry = CacheEntry::new(PREFIX_TOKENS.to_vec(), DetachedKvSet::Paged(set_a));
     let insert_key = PromptCacheKey::new_full(
-        "qwen3",
+        cache_model_key,
         None,
         "tpl-v1",
         Some("sess"),
@@ -234,7 +237,7 @@ fn paged_prefix_share_matches_cold_run() {
 
     // B arrives with [prefix + suffix]; the store returns A's prefix entry.
     let lookup_key = PromptCacheKey::new_full(
-        "qwen3",
+        cache_model_key,
         None,
         "tpl-v1",
         Some("sess"),
@@ -256,7 +259,7 @@ fn paged_prefix_share_matches_cold_run() {
         DetachedKvSet::Paged(p) => p,
         DetachedKvSet::Dense(_) => panic!("paged backend must store a paged set"),
     };
-    let seq_b = pool.adopt_paged(&model, set_b).expect("B adopt_paged");
+    let seq_b = pool.adopt_paged(model, set_b).expect("B adopt_paged");
 
     // B SHARES A's prefix blocks (the prefix is stored once, not re-prefilled).
     let b_blocks = pool
@@ -284,7 +287,7 @@ fn paged_prefix_share_matches_cold_run() {
             caches.iter().all(|c| c.is_paged_backed()),
             "adopted B must have pool-backed caches"
         );
-        prefill_and_decode(&model, caches, SUFFIX_TOKENS, prefix_len)
+        prefill_and_decode(model, caches, SUFFIX_TOKENS, prefix_len)
     };
     eprintln!("cached decoded: {cached_tokens:?}");
 
@@ -297,4 +300,24 @@ fn paged_prefix_share_matches_cold_run() {
         "OK: B reused A's {}-block prefix and decoded {DECODE_STEPS} tokens identically to cold.",
         a_blocks.len()
     );
+}
+
+#[test]
+#[ignore = "loads qwen3-0.6b-4bit and runs real GPU forwards; run with --ignored"]
+fn paged_prefix_share_matches_cold_run_qwen3() {
+    let _runtime = initialize_runtime();
+    let Some(model) = load_or_skip(QWEN3_DIR, "mlx-community/Qwen3-0.6B-4bit") else {
+        return;
+    };
+    assert_prefix_share_parity(&model, QWEN3_DIR, "qwen3");
+}
+
+#[test]
+#[ignore = "loads llama-3.2-1b-4bit and runs real GPU forwards; run with --ignored"]
+fn paged_prefix_share_matches_cold_run_llama3() {
+    let _runtime = initialize_runtime();
+    let Some(model) = load_or_skip(LLAMA3_DIR, "mlx-community/Llama-3.2-1B-Instruct-4bit") else {
+        return;
+    };
+    assert_prefix_share_parity(&model, LLAMA3_DIR, "llama3");
 }
