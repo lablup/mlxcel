@@ -36,13 +36,16 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use mlxcel_core::cache::{CachePool, KVCache, PagedKvLayout, SequenceId, SequenceStateLayout};
+use mlxcel_core::cache::{
+    CachePool, KVCache, PagedBlockId, PagedKvLayout, SequenceId, SequenceStateLayout,
+};
 use mlxcel_core::generate::LanguageModel;
 use mlxcel_core::{MlxArray, UniquePtr};
 
 use crate::server::batch::BatchObservability;
 use crate::server::prompt_cache::{
-    ApcConfig, ApcHashAlgo, CacheEntry, DetachedKvSet, PromptCacheConfig, PromptCacheStore,
+    ApcConfig, ApcHashAlgo, CacheEntry, DetachedKvSet, InsertError, PromptCacheConfig,
+    PromptCacheStore,
     key::{MultimodalDigest, PromptCacheKey},
 };
 
@@ -853,4 +856,217 @@ fn empty_paged_detached_set_reports_empty() {
     if let DetachedKvSet::Paged(set) = kv_set {
         pool.release_detached_paged(set);
     }
+}
+
+// ---------------------------------------------------------------------------
+// #122 sub-step (a): paged pin-release plumbing.
+//
+// A paged `DetachedKvSet` pins pool blocks; its `Drop` only warns, so the
+// store's eviction / rejection paths (which have no `CachePool` handle) must
+// hand the set to the scheduler to release. These cover (1) the underlying
+// `release_detached_paged` fix that actually returns blocks to the pool, and
+// (2) the store queueing evicted / declined paged sets for that release.
+// ---------------------------------------------------------------------------
+
+/// Mint a real paged [`DetachedKvSet`] from a fresh sequence with `tokens`
+/// tokens appended to layer 0, returning the set plus that sequence's layer-0
+/// block ids so a test can assert pool refcounts across release. No MLX writes
+/// are needed — `append_paged_tokens` grows the block table directly.
+fn mint_paged_set(
+    pool: &mut CachePool,
+    model: &PagedStub,
+    tokens: usize,
+) -> (DetachedKvSet, Vec<PagedBlockId>) {
+    let seq = pool.allocate(model).unwrap();
+    pool.append_paged_tokens(seq, 0, tokens).unwrap();
+    let blocks = pool
+        .get_paged_state(seq)
+        .unwrap()
+        .layer(0)
+        .unwrap()
+        .block_ids
+        .clone();
+    let paged = pool.detach_paged(seq).expect("detach_paged must succeed");
+    (DetachedKvSet::Paged(paged), blocks)
+}
+
+/// `release_detached_paged` on the discard path (no adopt) must drive every
+/// block to refcount 0 so it returns to the pool's free list. Regression for
+/// the pre-existing leak where only the detach pin was released, leaving the
+/// origin sequence's allocation dangling at refcount 1.
+#[test]
+fn release_detached_paged_reclaims_blocks_to_pool() {
+    let model = PagedStub {
+        layout: PagedKvLayout::uniform(1, 4, 128).unwrap(),
+    };
+    let mut pool = CachePool::new(4);
+    let (set, blocks) = mint_paged_set(&mut pool, &model, 6);
+    assert!(!blocks.is_empty(), "a 6-token prefix spans >= 1 block");
+    // Parked (detached, not adopted) → the set owns alloc + pin == refcount 2.
+    assert_eq!(
+        pool.paged_pool_ref().unwrap().refcount(blocks[0]),
+        2,
+        "a detached, un-adopted block holds alloc + pin"
+    );
+
+    if let DetachedKvSet::Paged(paged) = set {
+        pool.release_detached_paged(paged);
+    }
+    for b in &blocks {
+        assert_eq!(
+            pool.paged_pool_ref().unwrap().refcount(*b),
+            0,
+            "discard must return every block to the pool (refcount 0)"
+        );
+    }
+}
+
+/// An LRU-evicted paged entry must hand its block pins to the release queue
+/// (its `Drop` only warns), and draining + releasing them returns the blocks
+/// to the pool. Before the fix the evicted set dropped and leaked its pins.
+#[test]
+fn evicted_paged_entry_queues_pins_then_pool_reclaims() {
+    // max_entries = 1 so the second insert evicts the first (oldest = A).
+    let store = Arc::new(PromptCacheStore::with_config(PromptCacheConfig::new(
+        true,
+        1 << 30,
+        1,
+        Duration::from_secs(3600),
+        1,
+    )));
+    let model = PagedStub {
+        layout: PagedKvLayout::uniform(1, 4, 128).unwrap(),
+    };
+    let mut pool = CachePool::new(8);
+
+    let (set_a, blocks_a) = mint_paged_set(&mut pool, &model, 6);
+    let tokens_a: Vec<i32> = (0..16).collect();
+    store
+        .insert(
+            &make_key("m", "s", "tpl", &tokens_a),
+            CacheEntry::new(tokens_a.clone(), set_a),
+        )
+        .expect("insert A");
+    assert!(!store.has_pending_paged_releases(), "no eviction yet");
+
+    // Insert B (distinct digest) → A is evicted under max_entries = 1.
+    let (set_b, _blocks_b) = mint_paged_set(&mut pool, &model, 6);
+    let tokens_b: Vec<i32> = (100..120).collect();
+    store
+        .insert(
+            &make_key("m", "s", "tpl", &tokens_b),
+            CacheEntry::new(tokens_b.clone(), set_b),
+        )
+        .expect("insert B");
+
+    // A's pins are queued (not dropped + leaked).
+    assert!(
+        store.has_pending_paged_releases(),
+        "eviction queued A's pins"
+    );
+    let drained = store.drain_pending_paged_releases();
+    assert_eq!(drained.len(), 1, "exactly A's paged set is queued");
+    assert!(
+        !store.has_pending_paged_releases(),
+        "drain empties the queue"
+    );
+
+    for paged in drained {
+        pool.release_detached_paged(paged);
+    }
+    for b in &blocks_a {
+        assert_eq!(
+            pool.paged_pool_ref().unwrap().refcount(*b),
+            0,
+            "evicted A's blocks are reclaimed by the pool"
+        );
+    }
+
+    // Clean up B (still parked in the store) so its set does not warn on drop.
+    let (b_entry, _) = store
+        .lookup_longest_prefix(&make_key("m", "s", "tpl", &tokens_b), &tokens_b)
+        .expect("B still cached");
+    if let Some(DetachedKvSet::Paged(p)) = b_entry.take_detached() {
+        pool.release_detached_paged(p);
+    }
+}
+
+/// An oversized paged entry the store declines on insert must likewise queue
+/// its pins for release rather than dropping (and leaking) them.
+#[test]
+fn oversized_paged_entry_decline_queues_pins_then_pool_reclaims() {
+    // capacity_bytes = 1 so any populated paged set is oversized.
+    let store = Arc::new(PromptCacheStore::with_config(PromptCacheConfig::new(
+        true,
+        1,
+        32,
+        Duration::from_secs(3600),
+        1,
+    )));
+    let model = PagedStub {
+        layout: PagedKvLayout::uniform(1, 4, 128).unwrap(),
+    };
+    let mut pool = CachePool::new(4);
+    let (set, blocks) = mint_paged_set(&mut pool, &model, 6);
+    let tokens: Vec<i32> = (0..16).collect();
+    let err = store
+        .insert(
+            &make_key("m", "s", "tpl", &tokens),
+            CacheEntry::new(tokens.clone(), set),
+        )
+        .expect_err("tiny capacity must reject the entry");
+    assert!(
+        matches!(err, InsertError::OversizedEntry { .. }),
+        "expected an oversized rejection, got {err:?}"
+    );
+
+    assert!(
+        store.has_pending_paged_releases(),
+        "the decline queued the pins"
+    );
+    let drained = store.drain_pending_paged_releases();
+    assert_eq!(drained.len(), 1);
+    for paged in drained {
+        pool.release_detached_paged(paged);
+    }
+    for b in &blocks {
+        assert_eq!(
+            pool.paged_pool_ref().unwrap().refcount(*b),
+            0,
+            "the declined entry's blocks are reclaimed"
+        );
+    }
+}
+
+/// A dense eviction frees its buffers on drop and owns no pool pins, so it must
+/// never land in the paged release queue.
+#[test]
+fn dense_eviction_does_not_queue_paged_releases() {
+    let store = Arc::new(PromptCacheStore::with_config(PromptCacheConfig::new(
+        true,
+        1 << 30,
+        1,
+        Duration::from_secs(3600),
+        1,
+    )));
+    let tokens_a: Vec<i32> = (0..16).collect();
+    store
+        .insert(
+            &make_key("m", "s", "tpl", &tokens_a),
+            fake_entry(tokens_a.clone(), 4096),
+        )
+        .expect("insert dense A");
+    let tokens_b: Vec<i32> = (100..120).collect();
+    store
+        .insert(
+            &make_key("m", "s", "tpl", &tokens_b),
+            fake_entry(tokens_b.clone(), 4096),
+        )
+        .expect("insert dense B");
+
+    assert!(
+        !store.has_pending_paged_releases(),
+        "dense eviction queues no paged pins"
+    );
+    assert!(store.drain_pending_paged_releases().is_empty());
 }

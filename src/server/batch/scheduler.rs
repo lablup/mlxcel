@@ -742,6 +742,10 @@ impl BatchScheduler {
         if !self.prompt_cache_active() {
             return None;
         }
+        // Return to the pool any paged pins a prior store op queued (an insert
+        // eviction, or a previous lookup's TTL / drained-shell sweep). The
+        // lookup below may sweep more; those drain on the next store touch.
+        self.drain_store_paged_releases();
 
         let store = self.prompt_cache.as_ref()?.clone();
         let key = Self::compose_prompt_cache_key(ctx, tokens);
@@ -864,6 +868,24 @@ impl BatchScheduler {
         }
     }
 
+    /// Return to the pool any paged block pins the prompt-cache store queued
+    /// for release. The store evicts (LRU / TTL) and declines (oversized)
+    /// paged entries but cannot return their pool pins — it holds no
+    /// `CachePool` handle — so it stashes them. The scheduler owns the pool,
+    /// so it drains the queue here and routes each set through
+    /// [`CachePool::release_detached_paged`]. Called from the store-touching
+    /// paths so pins are reclaimed promptly during serving; a cheap no-op when
+    /// the queue is empty (#122 sub-step a).
+    fn drain_store_paged_releases(&mut self) {
+        let store = match self.prompt_cache.as_ref() {
+            Some(s) if s.has_pending_paged_releases() => s.clone(),
+            _ => return,
+        };
+        for paged in store.drain_pending_paged_releases() {
+            self.cache_pool.release_detached_paged(paged);
+        }
+    }
+
     /// Donate a finished sequence's KV cache back to the store so future
     /// requests sharing a prefix can adopt it.
     ///
@@ -973,13 +995,12 @@ impl BatchScheduler {
                     .update_prompt_cache_gauges(store.bytes(), store.len());
             }
             Err(err) => {
-                // Oversized / disabled / prefix-too-short — `insert` drops the
-                // entry. For dense that frees the buffers; for a paged entry the
-                // length pre-screen above already filtered the common
-                // prefix-too-short case, but an oversized paged entry dropped
-                // here still leaks its block pins (its `Drop` warns). Returning
-                // store-declined paged pins to the pool is wired with the pool
-                // block-budget eviction work (#122).
+                // Oversized / disabled / prefix-too-short — `insert` declines
+                // the entry. For dense that frees the buffers; for a paged entry
+                // the store stashes its block pins on its pending-release queue
+                // (it has no `CachePool` handle), which the
+                // `drain_store_paged_releases()` below returns to the pool
+                // (#122 sub-step a).
                 tracing::debug!(
                     seq_id = %seq_id,
                     "prompt-cache donate-back skipped: {err:?}"
@@ -987,6 +1008,10 @@ impl BatchScheduler {
                 self.batch_observability.record_prompt_cache_insert_reject();
             }
         }
+        // Return to the pool any paged pins this insert's eviction / rejection
+        // paths queued: byte/entry-budget `enforce_caps` (LRU), idempotent
+        // replacement removal, or an oversized / disabled decline.
+        self.drain_store_paged_releases();
     }
 
     /// Apply thinking-budget enforcement to a freshly sampled

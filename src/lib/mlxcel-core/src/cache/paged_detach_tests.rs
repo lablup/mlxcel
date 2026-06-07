@@ -25,7 +25,7 @@
 //!    `prefill(N+M)` under paged (dense placeholder equivalence).
 //! 7. INT8 round-trip under paged detach/adopt.
 
-use super::super::paged::{PagedBlockPool, PagedKvLayout, PagedSequenceState};
+use super::super::paged::{PagedBlockId, PagedBlockPool, PagedKvLayout, PagedSequenceState};
 use super::super::{
     CachePool, KVCache, KVCacheMode, SequenceId, SequenceStateBackend, SequenceStateLayout,
 };
@@ -390,6 +390,64 @@ fn detach_paged_prevents_block_recycling_while_pinned() {
 
     // Cleanup — release the pin explicitly.
     pool.release_detached_paged(detached);
+}
+
+#[test]
+fn release_detached_paged_returns_blocks_to_free_list() {
+    // Regression for the discard-path leak: `release_detached_paged` must
+    // release BOTH the detach pin and the origin sequence's allocation so every
+    // block reaches refcount 0 and returns to the free list. Previously only
+    // the pin was released, leaking each block at refcount 1.
+    let layout = default_layout();
+    let model = PagedStubModel::new(layout.clone());
+    let mut pool = CachePool::new(4);
+
+    let seq = pool.allocate(&model).unwrap();
+    pool.append_paged_tokens(seq, 0, 6).unwrap();
+    pool.append_paged_tokens(seq, 1, 8).unwrap();
+    let blocks: Vec<PagedBlockId> = (0..layout.num_layers)
+        .flat_map(|l| {
+            pool.get_paged_state(seq)
+                .unwrap()
+                .layer(l)
+                .unwrap()
+                .block_ids
+                .clone()
+        })
+        .collect();
+    assert!(!blocks.is_empty(), "appended tokens must allocate blocks");
+
+    let detached = pool.detach_paged(seq).unwrap();
+    for b in &blocks {
+        assert_eq!(
+            pool.paged_pool_ref().unwrap().refcount(*b),
+            2,
+            "a parked block holds the origin allocation plus the detach pin"
+        );
+    }
+
+    pool.release_detached_paged(detached);
+    for b in &blocks {
+        assert_eq!(
+            pool.paged_pool_ref().unwrap().refcount(*b),
+            0,
+            "discard must drive every block to refcount 0 (returned to the pool)"
+        );
+    }
+
+    // The reclaimed blocks must be recyclable by a fresh sequence.
+    let seq2 = pool.allocate(&model).unwrap();
+    pool.append_paged_tokens(seq2, 0, 4).unwrap();
+    let reused = pool
+        .get_paged_state(seq2)
+        .unwrap()
+        .layer(0)
+        .unwrap()
+        .block_ids[0];
+    assert!(
+        blocks.contains(&reused),
+        "a freed block must be recycled by the next allocation"
+    );
 }
 
 #[test]

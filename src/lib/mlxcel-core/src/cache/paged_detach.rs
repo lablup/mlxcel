@@ -743,17 +743,43 @@ impl CachePool {
     /// Release every refcount held by a detached paged set. Call this when the
     /// set is no longer needed and adopt is not going to run.
     ///
+    /// A detached set carries **two** pool references per block: the detach
+    /// pin in `retained_blocks`, and the origin sequence's original allocation,
+    /// which [`detach_paged`](CachePool::detach_paged) left in place when it
+    /// removed the sequence from `active` (the block table moved into the set
+    /// without a `release_sequence`). The adopt path releases the pin and lets
+    /// the new sequence inherit the allocation; this discard path has no
+    /// inheritor, so it must release BOTH — otherwise every block leaks at
+    /// refcount 1 and never returns to the pool's free list. `retained_blocks`
+    /// lists each block once (built 1:1 from the block table), and a set that
+    /// is still parked in the store is the sole owner of its blocks (sharing
+    /// only happens through `adopt_paged`, which consumes the set), so
+    /// releasing the pin once and the allocation once drives an unshared block
+    /// to refcount 0.
+    ///
     /// Safe to call on an already-released set (which carries no retained
-    /// blocks) — the function is idempotent.
+    /// blocks) — the `retained_blocks.take()` guard makes the whole body a
+    /// no-op so neither reference is released twice.
     pub fn release_detached_paged(&mut self, mut detached: DetachedPagedCacheSet) {
         if let Some(blocks) = detached.retained_blocks.take() {
             if let Some(pool) = self.paged_pool.as_ref() {
                 let mut pool = pool.borrow_mut();
-                for block_id in blocks {
-                    if let Err(err) = pool.release_block(block_id) {
+                // Release the detach pins.
+                for block_id in &blocks {
+                    if let Err(err) = pool.release_block(*block_id) {
                         eprintln!(
-                            "[mlxcel::cache::paged_detach] CachePool::release_detached_paged: failed to release block {block_id}: {err}"
+                            "[mlxcel::cache::paged_detach] CachePool::release_detached_paged: failed to release pin for block {block_id}: {err}"
                         );
+                    }
+                }
+                // Release the origin allocation the block table still carries.
+                for layer in &detached.paged_state.layers {
+                    for &block_id in &layer.block_ids {
+                        if let Err(err) = pool.release_block(block_id) {
+                            eprintln!(
+                                "[mlxcel::cache::paged_detach] CachePool::release_detached_paged: failed to release allocation for block {block_id}: {err}"
+                            );
+                        }
                     }
                 }
             }

@@ -28,9 +28,11 @@ use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use std::time::Instant;
 
+use mlxcel_core::cache::DetachedPagedCacheSet;
+
 use super::apc_lookup::{ApcStoreStats, apc_consistent_prefix_len};
 use super::block_hash::{ApcBlockHash, BlockHashChain};
-use super::entry::CacheEntry;
+use super::entry::{CacheEntry, DetachedKvSet, DetachedKvSetHolder};
 use super::key::{PromptCacheKey, PromptCacheKeyDigest};
 use super::metrics::{NoopPromptCacheMetrics, PromptCacheMetrics};
 use super::policy::{PromptCacheConfig, PromptCacheStats};
@@ -66,6 +68,13 @@ struct Inner {
     hits: u64,
     evictions_lru: u64,
     evictions_ttl: u64,
+    /// Paged detached sets that an eviction or rejection path removed from
+    /// the store but could not release: returning a paged set's pool block
+    /// pins requires a `CachePool` handle, which the store does not hold.
+    /// The scheduler drains this (`drain_pending_paged_releases`) and routes
+    /// each set through `CachePool::release_detached_paged`. Held as the
+    /// Send/Sync [`DetachedKvSetHolder`] so `Inner` stays `Send + Sync`.
+    pending_paged_releases: Vec<DetachedKvSetHolder>,
 }
 
 impl Inner {
@@ -81,6 +90,23 @@ impl Inner {
             hits: 0,
             evictions_lru: 0,
             evictions_ttl: 0,
+            pending_paged_releases: Vec::new(),
+        }
+    }
+
+    /// Extract `entry`'s detached set and, when it is a **paged** set holding
+    /// pool block pins, stash it on [`Inner::pending_paged_releases`] for the
+    /// scheduler to return to the pool. The store cannot release pins itself
+    /// (no `CachePool` handle), and a paged set's `Drop` only warns. A dense
+    /// set frees its MLX buffers when it drops here, so it is not queued.
+    /// Idempotent for already-drained (adopted) shells — `take_detached`
+    /// yields `None` and nothing is queued.
+    fn stash_paged_pins_for_release(&mut self, entry: &CacheEntry) {
+        if let Some(set) = entry.take_detached()
+            && matches!(set, DetachedKvSet::Paged(_))
+        {
+            self.pending_paged_releases
+                .push(DetachedKvSetHolder::new(set));
         }
     }
 
@@ -103,6 +129,12 @@ impl Inner {
     ) -> Option<(BucketKey, Arc<CacheEntry>)> {
         let slot = self.entries.remove(digest)?;
         self.total_bytes = self.total_bytes.saturating_sub(slot.entry.size_bytes);
+
+        // Return any un-adopted paged block pins this entry holds to the
+        // release queue before it drops (its `Drop` only warns). Covers every
+        // eviction path that funnels through here: LRU, TTL, drained-shell
+        // sweep, and idempotent-replacement removal.
+        self.stash_paged_pins_for_release(&slot.entry);
 
         let trie_empty = if let Some(trie) = self.tries.get_mut(&slot.sessionless) {
             trie.remove(&slot.entry.tokens, *digest);
@@ -302,6 +334,39 @@ impl PromptCacheStore {
             .unwrap_or(0)
     }
 
+    /// Whether any paged detached sets are waiting to have their pool block
+    /// pins released. Cheap read-lock check the scheduler uses to skip the
+    /// write-locked drain on the common (empty) path.
+    pub fn has_pending_paged_releases(&self) -> bool {
+        self.inner
+            .read()
+            .map(|g| !g.pending_paged_releases.is_empty())
+            .unwrap_or(false)
+    }
+
+    /// Drain the paged detached sets that eviction / rejection paths removed
+    /// from the store but could not release (the store holds no `CachePool`
+    /// handle). The caller — the scheduler, which owns the pool — must return
+    /// each set's pins via `CachePool::release_detached_paged`. Dense sets are
+    /// freed on drop and never queued, so every element is a paged set.
+    ///
+    /// The returned `DetachedPagedCacheSet` is not `Send`; call this on the
+    /// thread that owns the `CachePool` (the model worker) and release the
+    /// pins before yielding it.
+    pub fn drain_pending_paged_releases(&self) -> Vec<DetachedPagedCacheSet> {
+        let mut guard = match self.inner.write() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let mut out = Vec::with_capacity(guard.pending_paged_releases.len());
+        for mut holder in guard.pending_paged_releases.drain(..) {
+            if let Some(DetachedKvSet::Paged(paged)) = holder.take() {
+                out.push(paged);
+            }
+        }
+        out
+    }
+
     /// Snapshot of the store's internal counters. Safe to call concurrently
     /// with inserts/lookups; values are captured under the read lock.
     pub fn stats(&self) -> PromptCacheStats {
@@ -371,10 +436,15 @@ impl PromptCacheStore {
 
         let mut guard = self.inner.write().expect("prompt cache inner lock");
 
+        // Every decline path drops the by-value `entry`. For a paged entry that
+        // would leak its pool block pins (its `Drop` only warns), so stash them
+        // for the scheduler to release before returning the error.
         if !guard.config.is_enabled() {
+            guard.stash_paged_pins_for_release(&entry);
             return Err(InsertError::Disabled);
         }
         if key.effective_prefix_len() < guard.config.min_prefix_tokens {
+            guard.stash_paged_pins_for_release(&entry);
             return Err(InsertError::PrefixTooShort {
                 got: key.effective_prefix_len(),
                 min_required: guard.config.min_prefix_tokens,
@@ -382,6 +452,7 @@ impl PromptCacheStore {
         }
         if entry_bytes > guard.config.capacity_bytes {
             guard.rejections_oversized = guard.rejections_oversized.saturating_add(1);
+            guard.stash_paged_pins_for_release(&entry);
             let metrics = Arc::clone(&self.metrics);
             drop(guard);
             metrics.record_reject_oversized(entry_bytes);
