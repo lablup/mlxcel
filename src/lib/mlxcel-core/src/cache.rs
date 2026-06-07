@@ -5798,6 +5798,35 @@ impl CachePool {
             .map(|pool| pool.borrow().layout().block_size)
     }
 
+    /// Set (or clear, with `None`) the paged pool's global block budget — the
+    /// cap on distinct physical blocks the pool may allocate. Opt-in; `None`
+    /// (the default) leaves the pool unbounded. No-op when there is no paged
+    /// pool (dense-only configuration). The scheduler derives the value from
+    /// the configured / estimated KV byte budget (#122).
+    pub fn set_paged_block_budget(&self, max_blocks: Option<usize>) {
+        if let Some(pool) = self.paged_pool.as_ref() {
+            pool.borrow_mut().set_block_budget(max_blocks);
+        }
+    }
+
+    /// The paged pool's current block budget, or `None` when unbounded / no
+    /// paged pool.
+    pub fn paged_block_budget(&self) -> Option<usize> {
+        self.paged_pool
+            .as_ref()
+            .and_then(|pool| pool.borrow().block_budget())
+    }
+
+    /// Blocks still mintable before the paged budget is hit, or `None` when
+    /// unbounded / no paged pool. `Some(0)` means only freed-block reuse
+    /// remains — the admission gate should evict or queue before growing a
+    /// sequence.
+    pub fn free_paged_block_budget(&self) -> Option<usize> {
+        self.paged_pool
+            .as_ref()
+            .and_then(|pool| pool.borrow().free_block_budget())
+    }
+
     /// Read-only access to the underlying [`PagedBlockPool`].
     ///
     /// Returns a [`Ref`] guard; release it before any path that mutates the

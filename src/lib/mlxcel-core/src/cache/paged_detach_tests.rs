@@ -257,6 +257,73 @@ fn block_pool_double_release_errors_cleanly() {
 }
 
 // ---------------------------------------------------------------------------
+// 1b. Global block budget (#122 sub-step b1)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn block_budget_refuses_new_blocks_beyond_cap() {
+    let layout = PagedKvLayout::uniform(1, 4, 128).unwrap();
+    let mut pool = PagedBlockPool::new(layout.clone());
+    pool.set_block_budget(Some(3));
+    assert_eq!(pool.block_budget(), Some(3));
+
+    let mut state = PagedSequenceState::new(&layout);
+    // block_size 4 → 12 tokens = exactly 3 blocks, filling the budget.
+    pool.append_tokens(&mut state, 0, 12).unwrap();
+    assert_eq!(pool.allocated_block_count(), 3);
+    assert_eq!(pool.free_block_budget(), Some(0));
+
+    // A 4th block cannot be minted while at the cap.
+    let err = pool.append_tokens(&mut state, 0, 4).unwrap_err();
+    assert!(err.contains("budget exhausted"), "got: {err}");
+}
+
+#[test]
+fn block_budget_allows_reuse_of_freed_blocks_at_cap() {
+    let layout = PagedKvLayout::uniform(1, 4, 128).unwrap();
+    let mut pool = PagedBlockPool::new(layout.clone());
+    pool.set_block_budget(Some(2));
+
+    let mut a = PagedSequenceState::new(&layout);
+    pool.append_tokens(&mut a, 0, 8).unwrap(); // 2 blocks → at the cap
+    assert_eq!(pool.free_block_budget(), Some(0));
+    pool.release_sequence(&mut a).unwrap(); // both freed (refcount 0), rows retained
+
+    // A fresh sequence reuses the freed blocks without minting — allowed at cap.
+    let mut b = PagedSequenceState::new(&layout);
+    pool.append_tokens(&mut b, 0, 8).unwrap();
+    assert_eq!(
+        pool.allocated_block_count(),
+        2,
+        "freed blocks must be reused, not re-minted, when at the budget"
+    );
+}
+
+#[test]
+fn block_budget_none_is_unbounded() {
+    let layout = PagedKvLayout::uniform(1, 4, 128).unwrap();
+    let mut pool = PagedBlockPool::new(layout.clone());
+    assert_eq!(pool.block_budget(), None);
+    assert_eq!(pool.free_block_budget(), None);
+
+    let mut state = PagedSequenceState::new(&layout);
+    pool.append_tokens(&mut state, 0, 400).unwrap(); // 100 blocks, no cap
+    assert_eq!(pool.allocated_block_count(), 100);
+}
+
+#[test]
+fn free_block_budget_tracks_allocation() {
+    let layout = PagedKvLayout::uniform(1, 4, 128).unwrap();
+    let mut pool = PagedBlockPool::new(layout.clone());
+    pool.set_block_budget(Some(5));
+    let mut state = PagedSequenceState::new(&layout);
+    pool.append_tokens(&mut state, 0, 8).unwrap(); // 2 blocks
+    assert_eq!(pool.allocated_block_count(), 2);
+    assert_eq!(pool.live_block_count(), 2);
+    assert_eq!(pool.free_block_budget(), Some(3));
+}
+
+// ---------------------------------------------------------------------------
 // 2. CachePool detach / adopt happy path + edge cases
 // ---------------------------------------------------------------------------
 

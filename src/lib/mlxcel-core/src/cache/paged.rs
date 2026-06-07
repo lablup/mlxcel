@@ -452,6 +452,15 @@ pub struct PagedBlockPool {
     free_rows: Vec<Vec<usize>>,
     /// Per-layer monotonic next-row cursor for rows never yet handed out.
     next_row: Vec<usize>,
+    /// Optional cap on the total number of distinct physical blocks the pool
+    /// may allocate (summed across all layers). `None` = unbounded (the pool
+    /// lazily grows on demand, the historical behaviour). When `Some(max)`,
+    /// [`PagedBlockPool::acquire_block`] refuses to mint a NEW block once
+    /// `blocks.len() >= max` (reusing a freed block is always allowed, since it
+    /// adds no memory). This is the global KV block budget #122 admits and
+    /// evicts against; the scheduler sets it from the configured / estimated KV
+    /// byte budget divided by the per-block byte size.
+    block_budget: Option<usize>,
 }
 
 /// Number of physical block rows the pool tensor grows by when a freshly
@@ -484,11 +493,53 @@ impl PagedBlockPool {
             block_rows: vec![HashMap::new(); num_layers],
             free_rows: vec![Vec::new(); num_layers],
             next_row: vec![0; num_layers],
+            block_budget: None,
         }
     }
 
     pub fn layout(&self) -> &PagedKvLayout {
         &self.layout
+    }
+
+    /// Total distinct physical blocks the pool has ever allocated (live +
+    /// freed-but-retained rows). This is the figure the [`block_budget`] caps
+    /// and the proxy for the pool tensors' peak row count.
+    ///
+    /// [`block_budget`]: PagedBlockPool::block_budget
+    pub fn allocated_block_count(&self) -> usize {
+        self.blocks.len()
+    }
+
+    /// Number of blocks currently held by at least one sequence / detached set
+    /// (refcount > 0).
+    pub fn live_block_count(&self) -> usize {
+        self.blocks.values().filter(|r| r.is_in_use()).count()
+    }
+
+    /// The current global block budget, or `None` when unbounded.
+    pub fn block_budget(&self) -> Option<usize> {
+        self.block_budget
+    }
+
+    /// Set (or clear, with `None`) the global cap on distinct physical blocks.
+    ///
+    /// Opt-in: the default is `None` (unbounded, the historical lazy-grow
+    /// behaviour). When set below the number already allocated the pool does not
+    /// shrink — it simply refuses to mint further new blocks until eviction
+    /// brings `allocated_block_count` back under the cap (freed rows are reused
+    /// without minting). The scheduler owns deriving the value from the KV byte
+    /// budget and reacting to the resulting allocation failures.
+    pub fn set_block_budget(&mut self, max_blocks: Option<usize>) {
+        self.block_budget = max_blocks;
+    }
+
+    /// Free physical blocks still mintable before the budget is hit, or `None`
+    /// when unbounded. `Some(0)` means a new block would be refused (only freed
+    /// blocks can be reused). Lets the scheduler gate admission before it tries
+    /// to grow a sequence.
+    pub fn free_block_budget(&self) -> Option<usize> {
+        self.block_budget
+            .map(|max| max.saturating_sub(self.blocks.len()))
     }
 
     /// Whether the pool's cache mode requires Turbo4 sidecar storage.
@@ -1394,6 +1445,17 @@ impl PagedBlockPool {
             );
             record.refcount = 1;
             return Ok(block_id);
+        }
+
+        // No freed block to reuse — minting a new one grows the pool, so it is
+        // subject to the global block budget (opt-in; `None` = unbounded).
+        if let Some(max) = self.block_budget {
+            if self.blocks.len() >= max {
+                return Err(format!(
+                    "PagedBlockPool: block budget exhausted ({} of {max} blocks allocated)",
+                    self.blocks.len()
+                ));
+            }
         }
 
         let block_id = PagedBlockId(self.next_block_id);
