@@ -36,6 +36,11 @@ Examples:
   mlxcel download mlx-community/Qwen3-4B-4bit
   # -> ~/.cache/mlxcel/models/mlx-community/Qwen3-4B-4bit/
 
+  # Bare name (no org prefix) expands to mlx-community/<name>.
+  # Set MLXCEL_DEFAULT_ORG to use a different org:
+  mlxcel download Qwen3-4B-4bit
+  # -> mlx-community/Qwen3-4B-4bit -> ~/.cache/mlxcel/models/mlx-community/Qwen3-4B-4bit/
+
   # If the repo is already in your HuggingFace cache (HF_HUB_CACHE / HF_HOME),
   # the download is skipped and the existing snapshot is reused.
 
