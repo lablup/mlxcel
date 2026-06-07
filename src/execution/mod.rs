@@ -18,6 +18,7 @@
 //! entry points easier to add without re-implementing environment parsing or
 //! generation defaults in multiple places.
 
+pub mod kv_arch;
 pub mod memory_estimate;
 pub mod quant_advisor;
 pub mod runtime;

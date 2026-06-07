@@ -47,9 +47,7 @@
 
 use std::path::Path;
 
-use mlxcel_core::hardware::{
-    HardwareCapabilities, KvCacheParams, get_hardware, kv_cache_bytes_from_params,
-};
+use mlxcel_core::hardware::{HardwareCapabilities, KvCacheParams, get_hardware};
 use mlxcel_core::weights::weight_footprint_bytes;
 
 use super::quant_advisor::estimate_model_params_billions;
@@ -218,6 +216,12 @@ pub struct MemoryEstimate {
     pub weights_source: WeightsSource,
     /// Where `kv_cache_bytes` came from.
     pub kv_source: KvSource,
+    /// One-line description of the architecture-aware KV handling (e.g.
+    /// "sliding-window: 27 layer(s) capped at 1024 tokens, 5 global", "MLA
+    /// compressed latent", "hybrid: 4 attention layer(s) hold KV"). Printed by
+    /// `mlxcel inspect` so the breakdown explains *why* the KV figure is what
+    /// it is. See [`crate::execution::kv_arch`].
+    pub kv_detail: String,
     /// Effective headroom factor used. Equal to
     /// [`DEFAULT_HEADROOM_FACTOR`] unless `MLXCEL_HEADROOM_FACTOR` is
     /// set. Exposed so `mlxcel inspect` can print it verbatim.
@@ -281,11 +285,19 @@ pub fn estimate_total_memory(
     // ── Weights ──────────────────────────────────────────────────────────────
     let (weights_bytes, weights_source) = resolve_weight_bytes(model_dir);
 
-    // ── KV cache ─────────────────────────────────────────────────────────────
-    let (kv_cache_bytes, kv_source) =
-        match kv_cache_params_from_path(model_dir, ctx_len, kv_dtype_int8, batch) {
-            Some(params) => (kv_cache_bytes_from_params(&params), KvSource::Config),
-            None => (0, KvSource::Unavailable),
+    // ── KV cache (architecture-aware) ─────────────────────────────────────────
+    // The flat per-layer formula mis-estimates sliding-window (Gemma), MLA
+    // (DeepSeek), hybrid attention+SSM (Jamba / NemotronH / …), and pure-SSM
+    // (Mamba) models; `kv_arch` parses the architecture and sums per-group.
+    let (kv_cache_bytes, kv_source, kv_detail) =
+        match crate::execution::kv_arch::estimate_kv_arch(model_dir, ctx_len, kv_dtype_int8, batch)
+        {
+            Some(a) => (a.total_bytes, KvSource::Config, a.detail),
+            None => (
+                0,
+                KvSource::Unavailable,
+                "unavailable (config.json missing architecture fields)".to_string(),
+            ),
         };
 
     // ── Headroom ─────────────────────────────────────────────────────────────
@@ -312,6 +324,7 @@ pub fn estimate_total_memory(
         fits,
         weights_source,
         kv_source,
+        kv_detail,
         headroom_factor,
         ctx_len,
         batch,
@@ -576,15 +589,12 @@ pub fn kv_cache_params_from_path(
 /// at-ctx total. Returns 0 when the architecture is unavailable.
 #[must_use]
 pub fn kv_cache_bytes_per_token(model_dir: &Path, int8_kv: bool, batch: u64) -> u64 {
-    let Some(mut params) = kv_cache_params_from_path(model_dir, 1, int8_kv, batch) else {
-        return 0;
-    };
-    params.ctx_len = 1;
-    // kv_cache_bytes_from_params rounds ctx up to next 256, so a single
-    // call with ctx_len=1 actually gives "bytes for the first 256-token
-    // block". We divide back out to surface a meaningful per-token rate.
-    let block_bytes = kv_cache_bytes_from_params(&params);
-    block_bytes / 256
+    // Steady-state marginal rate: full-context layers grow per token, while
+    // sliding-window / SSM layers stop growing once their window saturates and
+    // so contribute 0. `ctx_len` is irrelevant to the marginal figure.
+    crate::execution::kv_arch::estimate_kv_arch(model_dir, 1, int8_kv, batch)
+        .map(|a| a.marginal_bytes_per_token)
+        .unwrap_or(0)
 }
 
 // ── Output formatting ─────────────────────────────────────────────────────────
@@ -640,17 +650,14 @@ pub fn format_estimate(model_dir: &Path, est: &MemoryEstimate) -> String {
         out,
         "  KV cache:        {}  ({})",
         format_bytes(est.kv_cache_bytes),
-        match est.kv_source {
-            KvSource::Config => "from config.json architecture",
-            KvSource::Unavailable => "unavailable (config.json missing fields)",
-        },
+        est.kv_detail,
     );
     if let KvSource::Config = est.kv_source {
         let per_tok = kv_cache_bytes_per_token(model_dir, est.kv_dtype_int8, est.batch);
         if per_tok > 0 {
             let _ = writeln!(
                 out,
-                "                   ({} per token at the same dtype)",
+                "                   ({} per token at steady state, same dtype)",
                 format_bytes(per_tok),
             );
         }
@@ -705,6 +712,7 @@ impl FmtLeftPad for String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mlxcel_core::hardware::kv_cache_bytes_from_params;
     use std::io::Write;
 
     struct EnvRestore {

@@ -20,10 +20,7 @@
 
 use std::path::Path;
 
-use mlxcel_core::hardware::{
-    HardwareCapabilities, KvCacheParams, QuantRecommendation, kv_cache_bytes_from_params,
-    recommend_quantization,
-};
+use mlxcel_core::hardware::{HardwareCapabilities, QuantRecommendation, recommend_quantization};
 
 // ── Model-size estimation ─────────────────────────────────────────────────────
 
@@ -329,59 +326,10 @@ fn estimate_kv_cache_bytes_from_config(
     ctx_len: u64,
     int8_kv: bool,
 ) -> Option<u64> {
-    let text_cfg = config.get("text_config").unwrap_or(config);
-
-    let num_layers = text_cfg
-        .get("num_hidden_layers")
-        .or_else(|| text_cfg.get("n_layers"))
-        .or_else(|| text_cfg.get("num_layers"))
-        .and_then(|v| v.as_u64())?;
-
-    let hidden_size = text_cfg
-        .get("hidden_size")
-        .or_else(|| text_cfg.get("d_model"))
-        .or_else(|| text_cfg.get("dim"))
-        .or_else(|| text_cfg.get("model_dim"))
-        .and_then(|v| v.as_u64());
-
-    let num_heads = text_cfg
-        .get("num_attention_heads")
-        .or_else(|| text_cfg.get("num_heads"))
-        .or_else(|| text_cfg.get("n_heads"))
-        .or_else(|| text_cfg.get("n_head"))
-        .and_then(|v| v.as_u64())
-        .unwrap_or(1);
-
-    let num_kv_heads = text_cfg
-        .get("num_key_value_heads")
-        .or_else(|| text_cfg.get("num_kv_heads"))
-        .or_else(|| text_cfg.get("n_kv_heads"))
-        .or_else(|| text_cfg.get("n_head_kv"))
-        .or_else(|| text_cfg.get("multi_query_group_num"))
-        .and_then(|v| v.as_u64())
-        .unwrap_or(num_heads);
-
-    let explicit_head_dim = text_cfg
-        .get("head_dim")
-        .or_else(|| text_cfg.get("head_size"))
-        .and_then(|v| v.as_u64());
-    let head_dim = if let Some(head_dim) = explicit_head_dim {
-        head_dim
-    } else if let Some(hidden_size) = hidden_size {
-        hidden_size.checked_div(num_heads).unwrap_or(64)
-    } else {
-        return None;
-    };
-
-    let params = KvCacheParams {
-        num_layers,
-        num_kv_heads,
-        head_dim,
-        int8_kv,
-        ctx_len,
-        batch: 1,
-    };
-    Some(kv_cache_bytes_from_params(&params))
+    // Delegate to the architecture-aware estimator so this advisor utility and
+    // the unified `estimate_total_memory` path never diverge on KV sizing.
+    crate::execution::kv_arch::estimate_kv_arch_from_config(config, ctx_len, int8_kv, 1)
+        .map(|a| a.total_bytes)
 }
 
 /// Print a human-readable quantization recommendation to stdout.
