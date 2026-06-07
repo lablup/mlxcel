@@ -85,7 +85,7 @@ fn should_align_prefill() -> bool {
     hw.has_neural_accelerator && hw.macos_supports_na
 }
 
-const DEFAULT_PAGED_BLOCK_SIZE: usize = 32;
+pub(crate) const DEFAULT_PAGED_BLOCK_SIZE: usize = 32;
 
 fn effective_decode_storage_backend(
     requested: DecodeStorageBackend,
@@ -526,6 +526,23 @@ impl BatchScheduler {
     /// Returns the configured maximum KV cache size (for tests).
     pub fn max_kv_size(&self) -> Option<usize> {
         self.max_kv_size
+    }
+
+    /// Install the paged KV block budget (epic #116 #122 b3).
+    ///
+    /// `Some(n)` caps the paged pool at `n` blocks — the admission gate in
+    /// [`Self::admit_paged_prefill`] then evicts cold prefixes / preempts to
+    /// stay within it. `None` (the default) keeps the pool unbounded, the
+    /// behaviour-preserving path. The block count is resolved from the
+    /// operator's `--kv-cache-budget` directive by
+    /// [`crate::memory_estimate::resolve_paged_block_budget`] on the worker
+    /// thread (where the model geometry is known). Only meaningful for
+    /// pool-backed (Fp16, dense-natural-backend) sequences; inert for
+    /// model-owned / quantized families that keep dense caches and never mint
+    /// pool blocks.
+    pub fn with_paged_block_budget(mut self, budget: Option<usize>) -> Self {
+        self.cache_pool.set_paged_block_budget(budget);
+        self
     }
 
     /// Attach the resolved speculative-decoding dispatch.

@@ -321,6 +321,10 @@ fn build_startup_input(mut args: crate::ServeArgs) -> anyhow::Result<ServerStart
         // clap reads `LLAMA_ARG_MAX_KV_SIZE` directly via the `env = ...`
         // attribute on the flag, so no separate env-fallback helper is needed.
         max_kv_size: args.max_kv_size,
+        // paged KV pool block-budget directive (#122 b3). Already parsed by
+        // clap into a `PagedBudgetDirective` (`Bytes`/`Auto`); resolved to a
+        // block count on the worker thread.
+        kv_cache_budget: args.kv_cache_budget,
         // Responses API in-memory store limits. clap reads the
         // matching `LLAMA_ARG_*` env vars directly via the `env = ...`
         // attributes on the flags.

@@ -26,6 +26,7 @@ use std::time::Instant;
 
 use anyhow::{Result, anyhow};
 use image::{DynamicImage, ImageError, ImageReader};
+use mlxcel_core::generate::LanguageModel;
 
 use crate::LoadedModel;
 use crate::SamplingConfig;
@@ -103,6 +104,17 @@ pub(crate) struct WorkerSchedulerConfig {
     /// window and bypass this cap. `None` (the default) preserves the
     /// legacy unbounded behaviour.
     pub max_kv_size: Option<usize>,
+    /// paged KV pool block-budget directive (epic #116 #122 b3,
+    /// `--kv-cache-budget`).
+    ///
+    /// `None` (the default) keeps the paged pool unbounded — the
+    /// behaviour-preserving path. `Some(Bytes/Auto)` is resolved to a concrete
+    /// block count on this worker thread (where `model_path` + the loaded
+    /// model's geometry are both available) via
+    /// [`crate::memory_estimate::resolve_paged_block_budget`] and installed on
+    /// the scheduler's pool through
+    /// [`crate::server::batch::BatchScheduler::with_paged_block_budget`].
+    pub kv_cache_budget: Option<crate::memory_estimate::PagedBudgetDirective>,
     /// resolved speculative-decoding dispatch shape.
     ///
     /// Constructed once at worker construction (or
@@ -343,6 +355,17 @@ pub(crate) fn spawn_model_worker_with_batch_config(
             );
         }
 
+        // #122 b3: resolve the `--kv-cache-budget` directive into a paged
+        // block count now (the model's geometry is known) and install it on
+        // the scheduler's pool below. A no-op (unbounded) when the flag is
+        // unset. Computed before `model` is moved into `with_config`.
+        let paged_block_budget = resolve_worker_paged_block_budget(
+            &model_path,
+            &model,
+            sched_config.max_batch_size,
+            sched_config.kv_cache_budget,
+        );
+
         let mut scheduler = super::super::batch::BatchScheduler::with_config(
             model,
             tokenizer,
@@ -366,12 +389,69 @@ pub(crate) fn spawn_model_worker_with_batch_config(
         .with_batch_kv_quant(sched_config.batch_kv_quant)
         // cap plain KVCache growth to --max-kv-size when set.
         .with_max_kv_size(sched_config.max_kv_size)
+        // install the resolved paged KV block budget (epic #116 #122 b3).
+        .with_paged_block_budget(paged_block_budget)
         // attach the resolved speculative dispatch so the
         // scheduler can branch per-request once the round-loop dispatch
         // hook is wired in `decode_single_step`.
         .with_speculative_dispatch(sched_config.speculative_dispatch);
         scheduler.run();
     })
+}
+
+/// Resolve the operator's `--kv-cache-budget` directive into a concrete paged
+/// KV block count for this worker's scheduler pool (epic #116 #122 b3).
+///
+/// Returns `None` (leave the pool unbounded) when the flag is unset, the model
+/// geometry is unavailable, or the budget rounds below one block — in the last
+/// case a warning is logged rather than installing a zero budget that would
+/// reject every request. `batch` is the configured active-sequence count (it
+/// scales the activation reserve under [`PagedBudgetDirective::Auto`]).
+///
+/// [`PagedBudgetDirective::Auto`]: crate::memory_estimate::PagedBudgetDirective::Auto
+fn resolve_worker_paged_block_budget(
+    model_path: &std::path::Path,
+    model: &LoadedModel,
+    batch: usize,
+    directive: Option<crate::memory_estimate::PagedBudgetDirective>,
+) -> Option<usize> {
+    let directive = directive?;
+    let num_layers = model.num_layers();
+    let block_size = crate::server::batch::scheduler::DEFAULT_PAGED_BLOCK_SIZE;
+    // The paged pool stores Fp16; Int8 / Turbo sequences keep dense caches and
+    // ignore the budget, so the per-block cost is computed at Fp16.
+    let blocks = crate::memory_estimate::resolve_paged_block_budget(
+        model_path,
+        num_layers,
+        block_size,
+        batch.max(1) as u64,
+        false,
+        directive,
+    );
+    match blocks {
+        Some(n) if n > 0 => {
+            tracing::info!(
+                "Paged KV block budget: {n} blocks ({num_layers} layers, \
+                 {block_size}-token blocks)"
+            );
+            Some(n)
+        }
+        Some(_) => {
+            tracing::warn!(
+                "--kv-cache-budget resolves to 0 KV blocks at this configuration \
+                 (model too large for a meaningful paged budget at this batch / \
+                 available memory); leaving the paged pool unbounded"
+            );
+            None
+        }
+        None => {
+            tracing::warn!(
+                "--kv-cache-budget was set but the model's KV geometry is \
+                 unavailable; leaving the paged pool unbounded"
+            );
+            None
+        }
+    }
 }
 
 /// Resolve the worker-level Axis B `LangBiasConfig` into a concrete

@@ -211,6 +211,42 @@ impl QuantHint {
     }
 }
 
+/// How an operator asked the paged KV pool's block budget to be sized
+/// (the `--kv-cache-budget` server knob, epic #116 #122 b3).
+///
+/// Resolved to a concrete block count by [`resolve_paged_block_budget`]
+/// once the model geometry is known. `None` (the flag absent) keeps the
+/// pool unbounded — the default, behaviour-preserving path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PagedBudgetDirective {
+    /// An explicit byte cap on the paged KV pool, converted to a block
+    /// count via the model's per-block byte cost. Raw bytes, matching the
+    /// other byte-valued server knobs (e.g. `--prompt-cache-capacity-bytes`).
+    Bytes(u64),
+    /// Derive the cap from [`estimate_total_memory`]: the unified-memory
+    /// headroom left for KV after weights, activation, and the allocator
+    /// safety factor (`--kv-cache-budget auto`).
+    Auto,
+}
+
+impl std::str::FromStr for PagedBudgetDirective {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let trimmed = s.trim();
+        if trimmed.eq_ignore_ascii_case("auto") {
+            return Ok(Self::Auto);
+        }
+        // A plain byte count. Human-readable suffixes (8GiB) are
+        // intentionally not parsed, to stay consistent with the other
+        // byte-valued server knobs which all take raw bytes.
+        trimmed
+            .parse::<u64>()
+            .map(Self::Bytes)
+            .map_err(|_| format!("expected a byte count or 'auto', got '{s}'"))
+    }
+}
+
 /// Full memory breakdown returned by [`estimate_total_memory`].
 ///
 /// All `_bytes` fields are absolute byte counts. `fits` is a
@@ -727,6 +763,113 @@ pub fn kv_cache_bytes_per_token(model_dir: &Path, int8_kv: bool, batch: u64) -> 
         .unwrap_or(0)
 }
 
+// ── Paged KV block-budget resolution (epic #116 #122 b3) ──────────────────────
+
+/// Real byte cost of a single paged KV block: `block_size` tokens of one
+/// layer's K+V at the pool's storage dtype.
+///
+/// The paged pool counts its budget in **per-layer blocks** — one block holds
+/// `block_size` tokens for a single layer of a single sequence (see
+/// `BatchScheduler::estimate_prefill_blocks`, which sizes a prefill as
+/// `ceil(prompt / block_size) × num_layers`). This is therefore the unit a
+/// byte budget must be divided by.
+///
+/// Derived from the same architecture-aware geometry as
+/// [`estimate_total_memory`]: the steady-state per-token KV rate
+/// ([`kv_cache_bytes_per_token`] at `batch = 1`) summed across attention
+/// layers, divided by `num_layers` to recover the per-layer rate, times
+/// `block_size`. For the pure-attention Fp16 models that are pool-backed today
+/// (Llama, Qwen3) every layer is a full-attention layer, so the division is
+/// exact. For sliding-window / hybrid / MLA models the marginal rate counts
+/// only the layers that grow, so dividing by the total layer count
+/// *under*-estimates the per-block cost — but those families keep dense caches
+/// and never touch the pool, so the figure is inert for them. If such a family
+/// is ever pool-backed, swap this for the per-layer K/V geometry directly.
+///
+/// Returns `None` when the architecture is unavailable or
+/// `num_layers` / `block_size` is zero.
+#[must_use]
+pub fn paged_block_bytes(
+    model_dir: &Path,
+    num_layers: usize,
+    block_size: usize,
+    kv_dtype_int8: bool,
+) -> Option<u64> {
+    if num_layers == 0 || block_size == 0 {
+        return None;
+    }
+    let per_token_all_layers = kv_cache_bytes_per_token(model_dir, kv_dtype_int8, 1);
+    let per_layer_per_token = per_token_all_layers / num_layers as u64;
+    if per_layer_per_token == 0 {
+        return None;
+    }
+    Some(per_layer_per_token.saturating_mul(block_size as u64))
+}
+
+/// Unified-memory headroom (bytes) available for the paged KV pool under the
+/// `--kv-cache-budget auto` policy.
+///
+/// Inverts the [`estimate_total_memory`] fit inequality. Recall that
+/// `total = headroom_factor × (weights + kv) + activation` (the allocator
+/// overhead is `(factor − 1) × (weights + kv)`); requiring `total ≤ available`
+/// and solving for the KV term gives
+/// `kv ≤ (available − activation) / factor − weights`. Returns the clamped
+/// non-negative headroom; `0` when the model leaves no room for KV.
+fn auto_kv_budget_bytes(est: &MemoryEstimate) -> u64 {
+    let factor = if est.headroom_factor.is_finite() && est.headroom_factor > 1.0 {
+        est.headroom_factor
+    } else {
+        1.0
+    };
+    let after_activation = est.available_bytes.saturating_sub(est.activation_bytes);
+    // `after_activation / factor` in f64; byte magnitudes (≤ ~10^12) sit far
+    // inside f64's exact-integer range, and factor ≥ 1.0 only shrinks the value.
+    let scaled = (after_activation as f64 / factor).floor();
+    let scaled = if scaled.is_finite() && scaled >= 0.0 {
+        scaled.min(u64::MAX as f64) as u64
+    } else {
+        0
+    };
+    scaled.saturating_sub(est.weights_bytes)
+}
+
+/// Resolve a [`PagedBudgetDirective`] into a concrete paged-block count for the
+/// server's `CachePool::set_paged_block_budget`.
+///
+/// `batch` is the server's configured active-sequence count (it scales the
+/// activation reserve under [`PagedBudgetDirective::Auto`]). `block_size` is
+/// the pool's block size (`DEFAULT_PAGED_BLOCK_SIZE`). Returns the number of
+/// blocks the pool may mint, or `None` when the model geometry is unavailable
+/// (the caller should then leave the pool unbounded). A returned `Some(0)`
+/// means the budget rounds below one block — the caller decides whether to
+/// reject that config or leave the pool unbounded; it must not install a zero
+/// budget, which would wedge every request.
+#[must_use]
+pub fn resolve_paged_block_budget(
+    model_dir: &Path,
+    num_layers: usize,
+    block_size: usize,
+    batch: u64,
+    kv_dtype_int8: bool,
+    directive: PagedBudgetDirective,
+) -> Option<usize> {
+    let per_block = paged_block_bytes(model_dir, num_layers, block_size, kv_dtype_int8)?;
+    let budget_bytes = match directive {
+        PagedBudgetDirective::Bytes(bytes) => bytes,
+        PagedBudgetDirective::Auto => {
+            let est = estimate_total_memory(
+                model_dir,
+                DEFAULT_CTX_LEN,
+                batch.max(1),
+                QuantHint::Default,
+                kv_dtype_int8,
+            );
+            auto_kv_budget_bytes(&est)
+        }
+    };
+    Some(usize::try_from(budget_bytes / per_block).unwrap_or(usize::MAX))
+}
+
 // ── Output formatting ─────────────────────────────────────────────────────────
 
 /// Format a byte count as a human-readable string (GiB, MiB, or exact bytes).
@@ -1194,5 +1337,178 @@ mod tests {
         assert_eq!(dims.hidden, 1024);
         assert_eq!(dims.intermediate, 4096); // 4 × hidden fallback
         assert_eq!(dims.vocab, 0); // no logit term when absent
+    }
+
+    // ── #122 b3: paged KV block-budget resolution ───────────────────────────
+
+    #[test]
+    fn paged_budget_directive_parses_auto_and_bytes() {
+        assert_eq!(
+            "auto".parse::<PagedBudgetDirective>().unwrap(),
+            PagedBudgetDirective::Auto,
+        );
+        assert_eq!(
+            "AUTO".parse::<PagedBudgetDirective>().unwrap(),
+            PagedBudgetDirective::Auto,
+        );
+        assert_eq!(
+            " 8589934592 ".parse::<PagedBudgetDirective>().unwrap(),
+            PagedBudgetDirective::Bytes(8_589_934_592),
+        );
+        assert!("8GiB".parse::<PagedBudgetDirective>().is_err());
+        assert!("-5".parse::<PagedBudgetDirective>().is_err());
+    }
+
+    #[test]
+    fn paged_block_bytes_matches_uniform_geometry() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_minimal_config(tmp.path());
+        // 32 layers, 8 kv heads, head_dim 128, fp16:
+        //   per-token (all layers) = 32 × 2 × 8 × 128 × 2 = 131072
+        //   per-layer per-token    = 131072 / 32 = 4096
+        //   per-block              = 4096 × 32 (block_size) = 131072
+        assert_eq!(paged_block_bytes(tmp.path(), 32, 32, false), Some(131_072));
+        // int8 halves the per-block cost.
+        assert_eq!(paged_block_bytes(tmp.path(), 32, 32, true), Some(65_536));
+    }
+
+    #[test]
+    fn paged_block_bytes_none_on_zero_or_missing_geometry() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_minimal_config(tmp.path());
+        assert_eq!(paged_block_bytes(tmp.path(), 0, 32, false), None);
+        assert_eq!(paged_block_bytes(tmp.path(), 32, 0, false), None);
+        // No config.json ⇒ no architecture ⇒ None.
+        let empty = tempfile::tempdir().unwrap();
+        assert_eq!(paged_block_bytes(empty.path(), 32, 32, false), None);
+    }
+
+    #[test]
+    fn resolve_block_budget_explicit_bytes_floors_to_block_count() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_minimal_config(tmp.path());
+        let per_block = paged_block_bytes(tmp.path(), 32, 32, false).unwrap(); // 131072
+        // Exactly 100 blocks.
+        assert_eq!(
+            resolve_paged_block_budget(
+                tmp.path(),
+                32,
+                32,
+                1,
+                false,
+                PagedBudgetDirective::Bytes(per_block * 100),
+            ),
+            Some(100),
+        );
+        // 100 blocks + a partial ⇒ floors to 100.
+        assert_eq!(
+            resolve_paged_block_budget(
+                tmp.path(),
+                32,
+                32,
+                1,
+                false,
+                PagedBudgetDirective::Bytes(per_block * 100 + per_block / 2),
+            ),
+            Some(100),
+        );
+        // Below one block ⇒ 0 (caller leaves the pool unbounded rather than
+        // installing a wedging zero budget).
+        assert_eq!(
+            resolve_paged_block_budget(
+                tmp.path(),
+                32,
+                32,
+                1,
+                false,
+                PagedBudgetDirective::Bytes(per_block - 1),
+            ),
+            Some(0),
+        );
+    }
+
+    #[test]
+    fn auto_kv_budget_inverts_the_fit_inequality() {
+        // factor × (weights + kv) + activation ≤ available, solved for kv.
+        let est = MemoryEstimate {
+            weights_bytes: 10_000_000_000,
+            kv_cache_bytes: 0,
+            runtime_headroom_bytes: 0,
+            activation_bytes: 1_000_000_000,
+            total_bytes: 0,
+            available_bytes: 25_000_000_000,
+            fits: true,
+            weights_source: WeightsSource::AnalyticalConfig,
+            kv_source: KvSource::Config,
+            kv_detail: String::new(),
+            headroom_factor: 1.20,
+            ctx_len: DEFAULT_CTX_LEN,
+            batch: 1,
+            quant: QuantHint::Default,
+            kv_dtype_int8: false,
+        };
+        // (25e9 − 1e9) / 1.2 − 10e9 = 20e9 − 10e9 = 10e9.
+        let budget = auto_kv_budget_bytes(&est);
+        assert_eq!(budget, 10_000_000_000);
+        // The result preserves the fit (with equality here).
+        let reconstructed =
+            (1.20_f64 * (est.weights_bytes + budget) as f64) as u64 + est.activation_bytes;
+        assert!(reconstructed <= est.available_bytes);
+    }
+
+    #[test]
+    fn auto_kv_budget_saturates_to_zero_when_overcommitted() {
+        let est = MemoryEstimate {
+            weights_bytes: 30_000_000_000,
+            kv_cache_bytes: 0,
+            runtime_headroom_bytes: 0,
+            activation_bytes: 1_000_000_000,
+            total_bytes: 0,
+            available_bytes: 16_000_000_000,
+            fits: false,
+            weights_source: WeightsSource::AnalyticalConfig,
+            kv_source: KvSource::Config,
+            kv_detail: String::new(),
+            headroom_factor: 1.20,
+            ctx_len: DEFAULT_CTX_LEN,
+            batch: 1,
+            quant: QuantHint::Default,
+            kv_dtype_int8: false,
+        };
+        assert_eq!(auto_kv_budget_bytes(&est), 0);
+    }
+
+    #[test]
+    fn resolve_block_budget_auto_scales_with_available_memory() {
+        let _env = crate::test_support::env_lock::env_lock();
+        let tmp = tempfile::tempdir().unwrap();
+        write_minimal_config(tmp.path());
+
+        let auto = || {
+            resolve_paged_block_budget(tmp.path(), 32, 32, 1, false, PagedBudgetDirective::Auto)
+                .unwrap()
+        };
+
+        let big = {
+            let _r = EnvRestore::set(MEMORY_LIMIT_ENV, "256GB");
+            auto()
+        };
+        let small = {
+            let _r = EnvRestore::set(MEMORY_LIMIT_ENV, "32GB");
+            auto()
+        };
+        // More available memory ⇒ strictly more acquirable KV blocks.
+        assert!(
+            big > small,
+            "256GB budget {big} should exceed 32GB budget {small}"
+        );
+        assert!(big > 0);
+
+        // A limit below the (~12 GB) weight footprint leaves no KV room ⇒ 0.
+        let starved = {
+            let _r = EnvRestore::set(MEMORY_LIMIT_ENV, "1GB");
+            auto()
+        };
+        assert_eq!(starved, 0);
     }
 }

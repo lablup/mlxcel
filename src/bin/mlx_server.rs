@@ -141,6 +141,12 @@ enum Commands {
     Download(DownloadArgs),
 }
 
+/// clap value parser for `--kv-cache-budget`: a raw byte count or the literal
+/// `auto` (epic #116 #122 b3).
+fn parse_kv_cache_budget(s: &str) -> Result<mlxcel::memory_estimate::PagedBudgetDirective, String> {
+    s.parse()
+}
+
 #[derive(ClapArgs, Debug)]
 struct ServerArgs {
     /// Path to the model directory, or a HuggingFace `owner/name` repo-id.
@@ -315,6 +321,20 @@ struct ServerArgs {
         value_name = "N"
     )]
     max_kv_size: usize,
+
+    /// Paged KV-cache pool block budget — `auto` or a byte count (default: unbounded).
+    ///
+    /// Bounds the unified paged KV cache (epic #116): `auto` derives the cap
+    /// from the memory estimate, a raw byte count sets it explicitly. Only
+    /// affects pool-backed (Fp16) models under `--decode-storage-backend paged`.
+    /// Also reads `MLXCEL_KV_CACHE_BUDGET`.
+    #[arg(
+        long = "kv-cache-budget",
+        env = "MLXCEL_KV_CACHE_BUDGET",
+        value_name = "BYTES|auto",
+        value_parser = parse_kv_cache_budget
+    )]
+    kv_cache_budget: Option<mlxcel::memory_estimate::PagedBudgetDirective>,
 
     /// Maximum number of responses persisted by the OpenAI
     /// `/v1/responses` store (in-memory). `0` disables persistence
@@ -1205,6 +1225,9 @@ fn build_startup_input(mut args: ServerArgs) -> anyhow::Result<ServerStartupInpu
         // clap reads `LLAMA_ARG_MAX_KV_SIZE` directly via the `env = ...`
         // attribute on the flag, so no separate env-fallback helper is needed.
         max_kv_size: args.max_kv_size,
+        // paged KV pool block-budget directive (#122 b3); clap parses it into
+        // a `PagedBudgetDirective`, resolved to a block count on the worker.
+        kv_cache_budget: args.kv_cache_budget,
         // Responses API in-memory store limits. clap reads the
         // matching `LLAMA_ARG_*` env vars directly via the `env = ...`
         // attributes on the flags.

@@ -607,6 +607,13 @@ impl Default for PipelineParallelOptions {
     }
 }
 
+/// clap value parser for `--kv-cache-budget`: a raw byte count or the
+/// literal `auto` (epic #116 #122 b3). Delegates to
+/// [`mlxcel::memory_estimate::PagedBudgetDirective`]'s `FromStr`.
+fn parse_kv_cache_budget(s: &str) -> Result<mlxcel::memory_estimate::PagedBudgetDirective, String> {
+    s.parse()
+}
+
 /// Server options
 #[derive(Args, Debug)]
 #[command(after_help = "\
@@ -789,6 +796,25 @@ pub(crate) struct ServeArgs {
         value_name = "N"
     )]
     max_kv_size: usize,
+
+    /// Paged KV-cache pool block budget — `auto` or a byte count (default: unbounded).
+    ///
+    /// Bounds the unified paged KV cache (epic #116) so the server evicts cold
+    /// cross-request prompt prefixes (then preempts running sequences) instead
+    /// of growing the pool without limit. `auto` derives the cap from the
+    /// memory estimate (`(available − weights − activation) / per-block bytes`);
+    /// a raw byte count (e.g. `8589934592` for 8 GiB) sets an explicit cap.
+    /// Only affects pool-backed (Fp16, dense-natural-backend) models — model-
+    /// owned / quantized families keep dense caches and ignore it. Requires
+    /// `--decode-storage-backend paged` to have any effect.
+    /// Also reads `MLXCEL_KV_CACHE_BUDGET`.
+    #[arg(
+        long = "kv-cache-budget",
+        env = "MLXCEL_KV_CACHE_BUDGET",
+        value_name = "BYTES|auto",
+        value_parser = parse_kv_cache_budget
+    )]
+    kv_cache_budget: Option<mlxcel::memory_estimate::PagedBudgetDirective>,
 
     /// Maximum number of responses persisted by the OpenAI
     /// `/v1/responses` store (in-memory). `0` disables persistence

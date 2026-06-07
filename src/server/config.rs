@@ -398,6 +398,18 @@ pub struct ServerConfig {
     /// `[MAX_KV_SIZE_MIN, i32::MAX]`). If both are present, the lower value
     /// wins so the configured context window remains an upper bound.
     pub max_kv_size: Option<usize>,
+
+    /// Paged KV pool block-budget directive (epic #116 #122 b3,
+    /// `--kv-cache-budget`).
+    ///
+    /// `None` (the default) keeps the paged pool unbounded — the
+    /// behaviour-preserving path. `Some(Bytes)` / `Some(Auto)` is resolved to
+    /// a concrete block count on the worker thread (where the model geometry
+    /// is known) by [`crate::memory_estimate::resolve_paged_block_budget`] and
+    /// installed via
+    /// [`crate::server::batch::BatchScheduler::with_paged_block_budget`]. Only
+    /// meaningful for pool-backed (Fp16, dense-natural-backend) sequences.
+    pub kv_cache_budget: Option<crate::memory_estimate::PagedBudgetDirective>,
 }
 
 impl Default for ServerConfig {
@@ -451,6 +463,7 @@ impl Default for ServerConfig {
             kv_cache_mode: mlxcel_core::cache::KVCacheMode::Fp16,
             batch_kv_quant: mlxcel_core::cache::BatchKvQuantConfig::default(),
             max_kv_size: None,
+            kv_cache_budget: None,
         }
     }
 }

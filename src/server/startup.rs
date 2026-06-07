@@ -302,6 +302,11 @@ pub struct ServerStartupConfig {
     /// semantics.
     pub max_kv_size: Option<usize>,
 
+    /// Paged KV pool block-budget directive (`--kv-cache-budget`). See the
+    /// corresponding field on [`crate::server::ServerConfig`] for full
+    /// semantics. `None` (the default) keeps the pool unbounded.
+    pub kv_cache_budget: Option<crate::memory_estimate::PagedBudgetDirective>,
+
     /// maximum number of responses kept in the
     /// [`crate::server::responses_store::ResponsesStore`]. `0` disables
     /// response persistence entirely, in which case `GET /v1/responses/:id`
@@ -431,6 +436,7 @@ impl Default for ServerStartupConfig {
             kv_cache_mode: mlxcel_core::cache::KVCacheMode::Fp16,
             batch_kv_quant: mlxcel_core::cache::BatchKvQuantConfig::default(),
             max_kv_size: None,
+            kv_cache_budget: None,
             responses_store_max_entries: 1024,
             responses_store_ttl_secs: 3600,
             conversation_store_max_entries: 256,
@@ -801,6 +807,9 @@ pub(super) fn build_server_config(
         // policy to plain `KVCache` instances. `None` means no explicit
         // context or max-KV bound was configured.
         max_kv_size,
+        // forward the paged KV block-budget directive verbatim; the worker
+        // resolves it to a concrete block count once the model is loaded.
+        kv_cache_budget: startup.kv_cache_budget,
     }
 }
 

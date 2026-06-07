@@ -348,6 +348,12 @@ pub struct ServerStartupInput {
     /// `--max-kv-size` value (`0` = disabled, the default).
     pub max_kv_size: usize,
 
+    /// `--kv-cache-budget` directive (epic #116 #122 b3). `None` = unset
+    /// (unbounded paged pool, the default). Parsed at the clap layer into a
+    /// [`crate::memory_estimate::PagedBudgetDirective`] (`Bytes(n)` / `Auto`);
+    /// resolved to a concrete block count on the worker thread.
+    pub kv_cache_budget: Option<crate::memory_estimate::PagedBudgetDirective>,
+
     /// `--responses-store-max-entries` value (`0` disables
     /// the OpenAI Responses API response store entirely).
     pub responses_store_max_entries: usize,
@@ -559,6 +565,9 @@ impl ServerStartupInput {
             // semantic `Option<usize>` after `resolve_max_kv_size` has
             // validated upper and lower bounds (H1 fix).
             max_kv_size: resolved_max_kv_size,
+            // forward the paged KV block-budget directive verbatim (resolved
+            // to a block count on the worker thread).
+            kv_cache_budget: self.kv_cache_budget,
             // forward the Responses-API store limits.
             responses_store_max_entries: self.responses_store_max_entries,
             responses_store_ttl_secs: self.responses_store_ttl_secs,

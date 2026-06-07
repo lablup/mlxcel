@@ -138,6 +138,8 @@ fn sample_input() -> ServerStartupInput {
         kv_skip_last_layer: true,
         // max KV cache size (0 = unbounded, the default).
         max_kv_size: 0,
+        // paged KV pool block-budget directive (None = unbounded, the default).
+        kv_cache_budget: None,
         // Responses API store defaults.
         responses_store_max_entries: 1024,
         responses_store_ttl_secs: 3600,
