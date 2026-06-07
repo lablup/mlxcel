@@ -288,7 +288,11 @@ fn apc_stats_reflect_block_chain_after_inserts() {
         )
         .expect("insert B");
 
-    let resp = build_stats_response(Some(&store), &cfg);
+    let resp = build_stats_response(
+        Some(&store),
+        &cfg,
+        crate::server::routes::cache::PagedBlockStats::default(),
+    );
     assert!(resp.enabled);
     assert!(resp.apc_enabled);
     assert_eq!(resp.entries, 2);
@@ -335,7 +339,11 @@ fn apc_disabled_flow_still_works_but_apc_active_entries_is_zero() {
         .expect("lookup B hits");
     assert!(hit_b.apc_block_hashes().is_none(), "APC off -> no chain");
 
-    let resp = build_stats_response(Some(&store), &cfg);
+    let resp = build_stats_response(
+        Some(&store),
+        &cfg,
+        crate::server::routes::cache::PagedBlockStats::default(),
+    );
     assert!(resp.enabled);
     assert!(!resp.apc_enabled);
     assert_eq!(resp.entries, 2);

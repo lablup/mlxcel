@@ -70,6 +70,10 @@ pub struct BatchObservability {
     pub cache_pool_paged_bytes_reserved: AtomicU64,
     /// Visible bytes currently in use across active paged sequences.
     pub cache_pool_paged_bytes_in_use: AtomicU64,
+    /// Configured paged KV block-budget cap (epic #116 #122). `0` means
+    /// unbounded (no `--kv-cache-budget` set) — the acquirable headroom under
+    /// a cap is `budget - blocks_live`.
+    pub cache_pool_paged_block_budget: AtomicU64,
     /// Times paged decode was requested but fell back to dense.
     pub decode_storage_fallbacks: AtomicU64,
 
@@ -114,6 +118,7 @@ impl BatchObservability {
             cache_pool_paged_blocks_free: AtomicU64::new(0),
             cache_pool_paged_bytes_reserved: AtomicU64::new(0),
             cache_pool_paged_bytes_in_use: AtomicU64::new(0),
+            cache_pool_paged_block_budget: AtomicU64::new(0),
             decode_storage_fallbacks: AtomicU64::new(0),
             prompt_cache_hits: AtomicU64::new(0),
             prompt_cache_hit_tokens: AtomicU64::new(0),
@@ -189,6 +194,7 @@ impl BatchObservability {
         cache_bytes: u64,
         paged_block_size: usize,
         paged_stats: Option<PagedCacheStats>,
+        paged_block_budget: u64,
     ) {
         self.current_batch_size.store(batch_size, Ordering::Relaxed);
         self.current_queue_depth
@@ -210,6 +216,8 @@ impl BatchObservability {
             .store(stats.bytes_reserved as u64, Ordering::Relaxed);
         self.cache_pool_paged_bytes_in_use
             .store(stats.bytes_in_use as u64, Ordering::Relaxed);
+        self.cache_pool_paged_block_budget
+            .store(paged_block_budget, Ordering::Relaxed);
     }
 
     // -- Snapshot for HTTP handlers --
@@ -238,6 +246,9 @@ impl BatchObservability {
                 .load(Ordering::Relaxed),
             cache_pool_paged_bytes_in_use: self
                 .cache_pool_paged_bytes_in_use
+                .load(Ordering::Relaxed),
+            cache_pool_paged_block_budget: self
+                .cache_pool_paged_block_budget
                 .load(Ordering::Relaxed),
             decode_storage_fallbacks: self.decode_storage_fallbacks.load(Ordering::Relaxed),
             prompt_cache_hits: self.prompt_cache_hits.load(Ordering::Relaxed),
@@ -270,6 +281,7 @@ pub struct ObservabilitySnapshot {
     pub cache_pool_paged_blocks_free: u64,
     pub cache_pool_paged_bytes_reserved: u64,
     pub cache_pool_paged_bytes_in_use: u64,
+    pub cache_pool_paged_block_budget: u64,
     pub decode_storage_fallbacks: u64,
     /// successful prompt-cache adoptions.
     pub prompt_cache_hits: u64,
@@ -359,6 +371,7 @@ mod tests {
                 bytes_reserved: 8192,
                 bytes_in_use: 6144,
             }),
+            64,
         );
         let snap = obs.snapshot();
         assert_eq!(snap.current_batch_size, 4);
@@ -371,6 +384,7 @@ mod tests {
         assert_eq!(snap.cache_pool_paged_blocks_free, 4);
         assert_eq!(snap.cache_pool_paged_bytes_reserved, 8192);
         assert_eq!(snap.cache_pool_paged_bytes_in_use, 6144);
+        assert_eq!(snap.cache_pool_paged_block_budget, 64);
     }
 
     #[test]

@@ -160,6 +160,9 @@ pub async fn metrics(State(state): State<AppState>) -> Response {
          # HELP mlxcel_cache_pool_paged_bytes_in_use Visible bytes in use across paged sequences\n\
          # TYPE mlxcel_cache_pool_paged_bytes_in_use gauge\n\
          mlxcel_cache_pool_paged_bytes_in_use {paged_bytes_in_use}\n\
+         # HELP mlxcel_cache_pool_paged_block_budget Configured paged KV block-budget cap (0 = unbounded)\n\
+         # TYPE mlxcel_cache_pool_paged_block_budget gauge\n\
+         mlxcel_cache_pool_paged_block_budget {paged_block_budget}\n\
          # HELP mlxcel_decode_storage_fallbacks_total Number of paged decode fallback events\n\
          # TYPE mlxcel_decode_storage_fallbacks_total counter\n\
          mlxcel_decode_storage_fallbacks_total {decode_storage_fallbacks}\n\
@@ -207,6 +210,7 @@ pub async fn metrics(State(state): State<AppState>) -> Response {
         paged_blocks_free = obs.cache_pool_paged_blocks_free,
         paged_bytes_reserved = obs.cache_pool_paged_bytes_reserved,
         paged_bytes_in_use = obs.cache_pool_paged_bytes_in_use,
+        paged_block_budget = obs.cache_pool_paged_block_budget,
         decode_storage_fallbacks = obs.decode_storage_fallbacks,
         pc_hits = pc_hits,
         pc_misses = pc_misses,

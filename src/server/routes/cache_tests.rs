@@ -37,7 +37,7 @@ use crate::server::prompt_cache::{
     ApcConfig, ApcHashAlgo, CacheEntry, MultimodalDigest, PromptCacheConfig, PromptCacheKey,
     PromptCacheStore,
 };
-use crate::server::routes::cache::{CacheResetResponse, CacheStatsResponse};
+use crate::server::routes::cache::{CacheResetResponse, CacheStatsResponse, PagedBlockStats};
 
 fn enabled_store() -> Arc<PromptCacheStore> {
     let cfg = PromptCacheConfig::new(true, 1 << 20, 32, Duration::from_secs(3600), 4);
@@ -98,6 +98,13 @@ fn cache_stats_response_serializes_with_expected_keys() {
         total_blocks_stored: 6,
         unique_block_hashes: 5,
         apc_active_entries: 3,
+        paged_block_size: 32,
+        paged_blocks_allocated: 100,
+        paged_blocks_live: 80,
+        paged_blocks_free: 20,
+        paged_bytes_reserved: 65536,
+        paged_bytes_in_use: 49152,
+        paged_block_budget: 128,
     };
     let json = serde_json::to_string(&resp).expect("serialize");
     for key in [
@@ -119,6 +126,13 @@ fn cache_stats_response_serializes_with_expected_keys() {
         "\"total_blocks_stored\":6",
         "\"unique_block_hashes\":5",
         "\"apc_active_entries\":3",
+        "\"paged_block_size\":32",
+        "\"paged_blocks_allocated\":100",
+        "\"paged_blocks_live\":80",
+        "\"paged_blocks_free\":20",
+        "\"paged_bytes_reserved\":65536",
+        "\"paged_bytes_in_use\":49152",
+        "\"paged_block_budget\":128",
     ] {
         assert!(json.contains(key), "expected `{key}` in: {json}");
     }
@@ -205,6 +219,13 @@ fn cache_stats_response_disabled_payload_uses_zero_counters() {
         total_blocks_stored: 0,
         unique_block_hashes: 0,
         apc_active_entries: 0,
+        paged_block_size: 0,
+        paged_blocks_allocated: 0,
+        paged_blocks_live: 0,
+        paged_blocks_free: 0,
+        paged_bytes_reserved: 0,
+        paged_bytes_in_use: 0,
+        paged_block_budget: 0,
     };
     assert!(!resp.enabled);
     assert!(!resp.apc_enabled);
@@ -214,6 +235,77 @@ fn cache_stats_response_disabled_payload_uses_zero_counters() {
     assert_eq!(resp.total_blocks_stored, 0);
     assert_eq!(resp.unique_block_hashes, 0);
     assert_eq!(resp.apc_active_entries, 0);
+    // Paged pool defaults to all-zero when no worker reported gauges.
+    assert_eq!(resp.paged_block_size, 0);
+    assert_eq!(resp.paged_block_budget, 0);
+}
+
+#[test]
+fn build_stats_response_surfaces_paged_pool_independent_of_store() {
+    // The paged block-pool gauges come from observability, not the prompt
+    // cache, so they must appear whether or not a store is present (#122 c).
+    let paged = PagedBlockStats {
+        block_size: 32,
+        blocks_allocated: 200,
+        blocks_live: 150,
+        blocks_free: 50,
+        bytes_reserved: 131072,
+        bytes_in_use: 98304,
+        block_budget: 256,
+    };
+    let cfg = PromptCacheConfig::default();
+
+    // None store (prompt cache disabled) still reports the live paged pool.
+    let disabled = super::super::cache::build_stats_response(None, &cfg, paged);
+    assert!(!disabled.enabled);
+    assert_eq!(disabled.paged_block_size, 32);
+    assert_eq!(disabled.paged_blocks_live, 150);
+    assert_eq!(disabled.paged_block_budget, 256);
+    // Acquirable headroom under the cap = budget - live.
+    assert_eq!(
+        disabled.paged_block_budget - disabled.paged_blocks_live,
+        106
+    );
+
+    // With a live store the same paged values flow through unchanged.
+    let store = enabled_store();
+    let enabled = super::super::cache::build_stats_response(Some(store.as_ref()), &cfg, paged);
+    assert_eq!(enabled.paged_blocks_allocated, 200);
+    assert_eq!(enabled.paged_bytes_in_use, 98304);
+    assert_eq!(enabled.paged_block_budget, 256);
+}
+
+#[test]
+fn paged_block_stats_projects_from_observability_snapshot() {
+    // The full data path the handler uses: scheduler `update_gauges` →
+    // snapshot → `PagedBlockStats::from_observability` (#122 c).
+    use crate::server::batch::BatchObservability;
+    use mlxcel_core::cache::PagedCacheStats;
+
+    let obs = BatchObservability::new();
+    obs.update_gauges(
+        2,
+        0,
+        2,
+        4096,
+        32,
+        Some(PagedCacheStats {
+            allocated_blocks: 10,
+            live_blocks: 7,
+            free_blocks: 3,
+            bytes_reserved: 4096,
+            bytes_in_use: 2048,
+        }),
+        16, // block budget
+    );
+    let paged = PagedBlockStats::from_observability(&obs.snapshot());
+    assert_eq!(paged.block_size, 32);
+    assert_eq!(paged.blocks_allocated, 10);
+    assert_eq!(paged.blocks_live, 7);
+    assert_eq!(paged.blocks_free, 3);
+    assert_eq!(paged.bytes_reserved, 4096);
+    assert_eq!(paged.bytes_in_use, 2048);
+    assert_eq!(paged.block_budget, 16);
 }
 
 #[test]
@@ -241,7 +333,7 @@ fn hit_rate_handles_zero_lookups_without_nan() {
 #[test]
 fn build_stats_response_disabled_when_store_is_none() {
     let cfg = PromptCacheConfig::default();
-    let resp = super::super::cache::build_stats_response(None, &cfg);
+    let resp = super::super::cache::build_stats_response(None, &cfg, PagedBlockStats::default());
     assert!(!resp.enabled);
     assert!(!resp.apc_enabled);
     assert_eq!(resp.entries, 0);
@@ -261,7 +353,11 @@ fn build_stats_response_reflects_live_store() {
     let entry = CacheEntry::new_for_test(toks.clone(), 1024);
     store.insert(&key, entry).expect("insert");
 
-    let resp = super::super::cache::build_stats_response(Some(store.as_ref()), &cfg);
+    let resp = super::super::cache::build_stats_response(
+        Some(store.as_ref()),
+        &cfg,
+        PagedBlockStats::default(),
+    );
     assert!(resp.enabled);
     assert!(!resp.apc_enabled, "APC opt-in defaults to off");
     assert_eq!(resp.entries, 1);
@@ -298,7 +394,11 @@ fn build_stats_response_reflects_apc_blocks_when_enabled() {
         )
         .expect("insert b");
 
-    let resp = super::super::cache::build_stats_response(Some(store.as_ref()), &cfg);
+    let resp = super::super::cache::build_stats_response(
+        Some(store.as_ref()),
+        &cfg,
+        PagedBlockStats::default(),
+    );
     assert!(resp.enabled);
     assert!(resp.apc_enabled, "APC must be enabled in this fixture");
     assert_eq!(resp.entries, 2);
@@ -329,7 +429,11 @@ fn build_stats_response_apc_zero_when_disabled_with_inserts() {
             )
             .expect("insert");
     }
-    let resp = super::super::cache::build_stats_response(Some(store.as_ref()), &cfg);
+    let resp = super::super::cache::build_stats_response(
+        Some(store.as_ref()),
+        &cfg,
+        PagedBlockStats::default(),
+    );
     assert!(!resp.apc_enabled);
     assert_eq!(resp.entries, 3);
     assert_eq!(resp.apc_active_entries, 0);
@@ -371,7 +475,11 @@ fn apc_unique_block_hashes_reflects_dedup_potential() {
         )
         .expect("insert b");
 
-    let resp = super::super::cache::build_stats_response(Some(store.as_ref()), &cfg);
+    let resp = super::super::cache::build_stats_response(
+        Some(store.as_ref()),
+        &cfg,
+        PagedBlockStats::default(),
+    );
     assert_eq!(resp.entries, 2);
     assert_eq!(resp.apc_active_entries, 2);
     assert_eq!(resp.total_blocks_stored, 4);
@@ -446,6 +554,7 @@ async fn router_returns_stats_and_reset_with_correct_methods() {
         AxumJson(super::super::cache::build_stats_response(
             Some(s.store.as_ref()),
             s.cfg.as_ref(),
+            PagedBlockStats::default(),
         ))
     }
     async fn reset_handler(

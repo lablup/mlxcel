@@ -27,6 +27,40 @@ use axum::{Json, extract::State};
 use serde::{Deserialize, Serialize};
 
 use crate::server::AppState;
+use crate::server::batch::ObservabilitySnapshot;
+
+/// Paged KV block-pool view for the cache-stats body (epic #116 #122 c).
+///
+/// Sourced from the batch observability snapshot so the HTTP body mirrors the
+/// Prometheus `mlxcel_cache_pool_paged_*` gauges. Defaults to all-zero (the
+/// "no paged pool" state), which lets route-level tests build a response
+/// without standing up a worker / scheduler.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct PagedBlockStats {
+    pub block_size: usize,
+    pub blocks_allocated: u64,
+    pub blocks_live: u64,
+    pub blocks_free: u64,
+    pub bytes_reserved: u64,
+    pub bytes_in_use: u64,
+    pub block_budget: u64,
+}
+
+impl PagedBlockStats {
+    /// Project the paged block-pool gauges out of a batch observability
+    /// snapshot.
+    pub(crate) fn from_observability(snap: &ObservabilitySnapshot) -> Self {
+        Self {
+            block_size: snap.cache_pool_paged_block_size,
+            blocks_allocated: snap.cache_pool_paged_blocks_allocated,
+            blocks_live: snap.cache_pool_paged_blocks_live,
+            blocks_free: snap.cache_pool_paged_blocks_free,
+            bytes_reserved: snap.cache_pool_paged_bytes_reserved,
+            bytes_in_use: snap.cache_pool_paged_bytes_in_use,
+            block_budget: snap.cache_pool_paged_block_budget,
+        }
+    }
+}
 
 /// Snapshot of cache state returned by `GET /v1/cache/stats`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -74,6 +108,29 @@ pub struct CacheStatsResponse {
     /// Number of entries that carry a populated APC block-hash chain.
     /// Always `0` when APC is disabled.
     pub apc_active_entries: usize,
+
+    // ── Paged KV block pool (epic #116 #122 c) ───────────────────────────────
+    // Sourced from the batch observability gauges (not the prompt-cache store),
+    // so these are meaningful even when the prompt cache is disabled. They
+    // mirror the `mlxcel_cache_pool_paged_*` Prometheus gauges.
+    /// Paged decode block size in tokens. `0` when paged decode is inactive
+    /// for this worker (dense backend), so a `0` cleanly marks "no paged pool".
+    pub paged_block_size: usize,
+    /// Paged KV blocks tracked by the allocator (rows minted into the pool).
+    pub paged_blocks_allocated: u64,
+    /// Paged KV blocks currently held by live sequences.
+    pub paged_blocks_live: u64,
+    /// Paged KV blocks freed and retained on the pool's free list for reuse.
+    pub paged_blocks_free: u64,
+    /// Reserved bytes across active paged sequences.
+    pub paged_bytes_reserved: u64,
+    /// Visible bytes currently in use across active paged sequences.
+    pub paged_bytes_in_use: u64,
+    /// Configured paged KV block-budget cap (`--kv-cache-budget`). `0` means
+    /// unbounded; otherwise the admission gate holds `paged_blocks_live` at or
+    /// below this, so `paged_block_budget - paged_blocks_live` is the
+    /// acquirable headroom before eviction / preemption kicks in.
+    pub paged_block_budget: u64,
 }
 
 /// Response for `POST /v1/cache/reset`.
@@ -90,9 +147,11 @@ pub struct CacheResetResponse {
 
 /// `GET /v1/cache/stats` — return a snapshot of cache statistics.
 pub async fn cache_stats(State(state): State<AppState>) -> Json<CacheStatsResponse> {
+    let paged = PagedBlockStats::from_observability(&state.batch_observability.snapshot());
     Json(build_stats_response(
         state.prompt_cache.as_deref(),
         &state.config.prompt_cache,
+        paged,
     ))
 }
 
@@ -111,6 +170,7 @@ pub async fn cache_reset(State(state): State<AppState>) -> Json<CacheResetRespon
 pub(crate) fn build_stats_response(
     store: Option<&crate::server::prompt_cache::PromptCacheStore>,
     cfg: &crate::server::prompt_cache::PromptCacheConfig,
+    paged: PagedBlockStats,
 ) -> CacheStatsResponse {
     let apc = &cfg.apc;
     match store {
@@ -141,6 +201,14 @@ pub(crate) fn build_stats_response(
                 total_blocks_stored: apc_stats.total_blocks_stored,
                 unique_block_hashes: apc_stats.unique_block_hashes,
                 apc_active_entries: apc_stats.apc_active_entries,
+                // Paged block-pool gauges are store-independent.
+                paged_block_size: paged.block_size,
+                paged_blocks_allocated: paged.blocks_allocated,
+                paged_blocks_live: paged.blocks_live,
+                paged_blocks_free: paged.blocks_free,
+                paged_bytes_reserved: paged.bytes_reserved,
+                paged_bytes_in_use: paged.bytes_in_use,
+                paged_block_budget: paged.block_budget,
             }
         }
         None => CacheStatsResponse {
@@ -162,6 +230,15 @@ pub(crate) fn build_stats_response(
             total_blocks_stored: 0,
             unique_block_hashes: 0,
             apc_active_entries: 0,
+            // Paged decode can run with the prompt cache disabled, so these
+            // still reflect the live pool even on the `None` branch.
+            paged_block_size: paged.block_size,
+            paged_blocks_allocated: paged.blocks_allocated,
+            paged_blocks_live: paged.blocks_live,
+            paged_blocks_free: paged.blocks_free,
+            paged_bytes_reserved: paged.bytes_reserved,
+            paged_bytes_in_use: paged.bytes_in_use,
+            paged_block_budget: paged.block_budget,
         },
     }
 }

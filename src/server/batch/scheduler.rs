@@ -1220,6 +1220,9 @@ impl BatchScheduler {
             self.cache_pool.memory_usage_bytes() as u64,
             paged_block_size,
             paged_stats,
+            // #122 c: surface the configured block-budget cap (0 = unbounded)
+            // so `/v1/cache/stats` and `/metrics` can report admission headroom.
+            self.cache_pool.paged_block_budget().unwrap_or(0) as u64,
         );
     }
 
