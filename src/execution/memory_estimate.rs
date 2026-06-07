@@ -22,12 +22,18 @@
 //!   back to the analytical estimate in
 //!   [`super::quant_advisor::estimate_model_params_billions`] when no
 //!   safetensors header is present.
-//! - **KV cache** — bytes via [`mlxcel_core::hardware::kv_cache_bytes_from_params`]
-//!   (issue #54), context-length rounded up to the next 256 and honouring
-//!   int8/fp16 dtype.
-//! - **Runtime / activation headroom** — empirical multiplier on
-//!   `weights + kv_cache`. The default factor is 1.20 (20% overhead);
-//!   `MLXCEL_HEADROOM_FACTOR=<f>` overrides it for calibration runs.
+//! - **KV cache** — architecture-aware bytes via [`super::kv_arch`]
+//!   (sliding-window / MLA / hybrid / pure-SSM aware, not just the flat
+//!   per-layer formula), context-length rounded up to the next 256 and
+//!   honouring int8/fp16 dtype.
+//! - **Allocator overhead** — flat [`DEFAULT_HEADROOM_FACTOR`] (1.20, the
+//!   #55-calibrated band) on `weights + kv_cache`, modelling MLX's
+//!   allocator / graph working set. `MLXCEL_HEADROOM_FACTOR` overrides it.
+//! - **Activation** — workload-scaled reserve `mult × batch ×
+//!   min(ctx, prefill_chunk) × (hidden + intermediate) × 2` plus the
+//!   last-token logit buffer `batch × vocab × 2`, capturing the
+//!   batch / context / vocab growth the flat factor missed.
+//!   `MLXCEL_ACTIVATION_MULT` overrides the multiplier.
 //!
 //! The result feeds three callers that all use this exact function:
 //!
@@ -97,6 +103,28 @@ pub const DEFAULT_HEADROOM_FACTOR: f64 = 1.20;
 /// log a warning. Used during calibration on Apple Silicon (see the
 /// recipe on [`DEFAULT_HEADROOM_FACTOR`]).
 pub const HEADROOM_FACTOR_ENV: &str = "MLXCEL_HEADROOM_FACTOR";
+
+/// Multiplier on the per-token activation footprint `(hidden_size +
+/// intermediate_size)` to bound the working set live at the prefill-chunk peak.
+///
+/// During a prefill chunk, each transformer layer materialises hidden-state and
+/// MLP intermediate buffers; under MLX's lazy evaluation a small number of
+/// layers' worth can be resident at once. `2.0` is a deliberately conservative
+/// stand-in (it over-reserves rather than risking an OOM) covering ~two layers
+/// of `(hidden + intermediate)` working set. Recalibrate against
+/// `mlxcel_core::memory::peak_memory()` once Apple-Silicon data is collected;
+/// the [`ACTIVATION_MULT_ENV`] override makes that cheap.
+pub const ACTIVATION_BUFFER_MULT: f64 = 2.0;
+
+/// Env var to override [`ACTIVATION_BUFFER_MULT`]. Accepts a positive `f64`;
+/// invalid / non-positive values fall back to the default with a warning.
+pub const ACTIVATION_MULT_ENV: &str = "MLXCEL_ACTIVATION_MULT";
+
+/// Tokens of prompt processed per prefill step. Chunked prefill (the server's
+/// default `prefill_chunk_size = 512`) bounds the activation peak to this many
+/// tokens regardless of the full context length, so the activation term scales
+/// with `min(ctx, ACTIVATION_PREFILL_TOKENS)` — not the full context.
+pub const ACTIVATION_PREFILL_TOKENS: u64 = 512;
 
 /// Env var applied by `execution::runtime` as an MLX allocator soft cap.
 ///
@@ -195,10 +223,18 @@ pub struct MemoryEstimate {
     pub weights_bytes: u64,
     /// KV cache bytes at `ctx_len`/`batch`/dtype.
     pub kv_cache_bytes: u64,
-    /// Runtime/activation headroom — empirical multiplier on
-    /// `weights + kv_cache`. See [`DEFAULT_HEADROOM_FACTOR`] for the
-    /// derivation and override.
+    /// Total reserve beyond `weights + kv_cache`: the allocator overhead
+    /// (flat [`DEFAULT_HEADROOM_FACTOR`] on weights+kv) **plus**
+    /// [`Self::activation_bytes`]. This is the figure that lands in
+    /// `total_bytes`.
     pub runtime_headroom_bytes: u64,
+    /// Workload-scaled activation reserve — `mult × batch ×
+    /// min(ctx, prefill_chunk) × (hidden + intermediate) × 2` plus the
+    /// last-token logit buffer `batch × vocab × 2`. Part of
+    /// [`Self::runtime_headroom_bytes`]; surfaced separately so `mlxcel
+    /// inspect` can show the batch/context-sensitive component apart from the
+    /// flat allocator overhead. See [`ACTIVATION_BUFFER_MULT`].
+    pub activation_bytes: u64,
     /// `weights + kv_cache + runtime_headroom`.
     pub total_bytes: u64,
     /// Best-known available unified memory in bytes. On Apple Silicon
@@ -300,12 +336,25 @@ pub fn estimate_total_memory(
             ),
         };
 
-    // ── Headroom ─────────────────────────────────────────────────────────────
+    // ── Activation + allocator headroom ──────────────────────────────────────
+    // Two reserves beyond weights + KV:
+    //   • allocator overhead — MLX's allocator/graph working set, which tracks
+    //     weights+kv; the existing flat `headroom_factor` (the #55-calibrated
+    //     1.10..1.25 band) models it.
+    //   • activation — scales with the *workload* (batch × chunked-prefill
+    //     tokens × (hidden + intermediate) + last-token logits), which the flat
+    //     factor missed for batch>1 / long-prompt / large-vocab serving (#52
+    //     TIER 2). Added on top, so the total is never below the previous flat
+    //     estimate.
     let headroom_factor = resolve_headroom_factor();
-    let runtime_headroom_bytes = compute_runtime_headroom(
+    let allocator_overhead_bytes = compute_runtime_headroom(
         weights_bytes.saturating_add(kv_cache_bytes),
         headroom_factor,
     );
+    let activation_bytes = activation_dims_from_path(model_dir)
+        .map(|dims| compute_activation_bytes(&dims, ctx_len, batch, resolve_activation_mult()))
+        .unwrap_or(0);
+    let runtime_headroom_bytes = allocator_overhead_bytes.saturating_add(activation_bytes);
 
     let total_bytes = weights_bytes
         .saturating_add(kv_cache_bytes)
@@ -319,6 +368,7 @@ pub fn estimate_total_memory(
         weights_bytes,
         kv_cache_bytes,
         runtime_headroom_bytes,
+        activation_bytes,
         total_bytes,
         available_bytes,
         fits,
@@ -382,6 +432,86 @@ fn compute_runtime_headroom(base: u64, factor: f64) -> u64 {
         return 0;
     }
     scaled.min(u64::MAX as f64) as u64
+}
+
+/// Activation-relevant dimensions parsed from `config.json`.
+struct ActivationDims {
+    hidden: u64,
+    intermediate: u64,
+    vocab: u64,
+}
+
+/// Parse `hidden_size`, `intermediate_size`, and `vocab_size` (honouring the
+/// VLM `text_config` nesting). `intermediate_size` falls back to `4 × hidden`
+/// (the common rule of thumb) and `vocab_size` to 0 (no logit buffer term)
+/// when absent. Returns `None` only when `hidden_size` is unavailable.
+fn activation_dims_from_path(model_dir: &Path) -> Option<ActivationDims> {
+    let config: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(model_dir.join("config.json")).ok()?).ok()?;
+    let text = config.get("text_config").unwrap_or(&config);
+    let lookup = |keys: &[&str]| -> Option<u64> {
+        keys.iter()
+            .find_map(|k| text.get(*k).and_then(|v| v.as_u64()))
+    };
+    let hidden = lookup(&["hidden_size", "d_model", "dim", "model_dim"])?;
+    let intermediate = lookup(&["intermediate_size", "ffn_dim", "ffn_hidden_size"])
+        .unwrap_or_else(|| hidden.saturating_mul(4));
+    let vocab = lookup(&["vocab_size"]).unwrap_or(0);
+    Some(ActivationDims {
+        hidden,
+        intermediate,
+        vocab,
+    })
+}
+
+/// Resolve the activation working-set multiplier from [`ACTIVATION_MULT_ENV`],
+/// falling back to [`ACTIVATION_BUFFER_MULT`].
+fn resolve_activation_mult() -> f64 {
+    match std::env::var(ACTIVATION_MULT_ENV) {
+        Ok(raw) => match raw.trim().parse::<f64>() {
+            Ok(v) if v > 0.0 && v.is_finite() => v,
+            _ => {
+                tracing::warn!(
+                    env_var = ACTIVATION_MULT_ENV,
+                    value = raw,
+                    default = ACTIVATION_BUFFER_MULT,
+                    "{ACTIVATION_MULT_ENV} must be a positive finite f64; using default",
+                );
+                ACTIVATION_BUFFER_MULT
+            }
+        },
+        Err(_) => ACTIVATION_BUFFER_MULT,
+    }
+}
+
+/// Estimate the activation / working-set bytes that scale with the *workload*
+/// (batch, context, vocab) rather than the model weights.
+///
+/// `streaming` is the per-prefill-chunk working set: `mult × batch ×
+/// min(ctx, ACTIVATION_PREFILL_TOKENS) × (hidden + intermediate) × 2 bytes`.
+/// Activations are FP16 (2 bytes) regardless of weight/KV quantisation. Chunked
+/// prefill bounds the token count, so this does not grow with full context.
+/// `logits` is the last-token logit buffer `batch × vocab × 2` (prefill slices
+/// logits to the last position). This term is what the old flat
+/// weights-proportional headroom missed in the batch>1 / large-vocab regime.
+fn compute_activation_bytes(dims: &ActivationDims, ctx_len: u64, batch: u64, mult: f64) -> u64 {
+    const ACT_DTYPE_BYTES: u64 = 2; // activations are FP16 even with int8 KV/weights
+    let prefill_tokens = ctx_len.clamp(1, ACTIVATION_PREFILL_TOKENS);
+    let per_token = dims.hidden.saturating_add(dims.intermediate);
+    let streaming_base = per_token
+        .saturating_mul(batch)
+        .saturating_mul(prefill_tokens)
+        .saturating_mul(ACT_DTYPE_BYTES);
+    let streaming = if mult.is_finite() && mult > 0.0 {
+        ((streaming_base as f64) * mult).min(u64::MAX as f64) as u64
+    } else {
+        streaming_base
+    };
+    let logits = dims
+        .vocab
+        .saturating_mul(batch)
+        .saturating_mul(ACT_DTYPE_BYTES);
+    streaming.saturating_add(logits)
 }
 
 /// Pick the weight-bytes figure and label its source.
@@ -662,10 +792,20 @@ pub fn format_estimate(model_dir: &Path, est: &MemoryEstimate) -> String {
             );
         }
     }
+    let allocator_overhead = est
+        .runtime_headroom_bytes
+        .saturating_sub(est.activation_bytes);
     let _ = writeln!(
         out,
-        "  Runtime headroom:{}  (factor {:.2}x on weights+kv)",
-        format_bytes(est.runtime_headroom_bytes).fmt_left_pad(1),
+        "  Activation:      {}  (batch {} × ≤{} prefill tokens × (hidden+intermediate) + logits)",
+        format_bytes(est.activation_bytes),
+        est.batch,
+        ACTIVATION_PREFILL_TOKENS,
+    );
+    let _ = writeln!(
+        out,
+        "  Allocator ovhd:  {}  (factor {:.2}x on weights+kv)",
+        format_bytes(allocator_overhead),
         est.headroom_factor,
     );
     let _ = writeln!(out, "  -----");
@@ -692,19 +832,6 @@ pub fn format_estimate(model_dir: &Path, est: &MemoryEstimate) -> String {
     }
 
     out
-}
-
-/// Trivial trait to inject a single leading space in formatted output
-/// when the underlying renderer didn't supply one. Keeps the
-/// `format_estimate` block aligned without using format-string tricks.
-trait FmtLeftPad {
-    fn fmt_left_pad(self, n: usize) -> String;
-}
-
-impl FmtLeftPad for String {
-    fn fmt_left_pad(self, n: usize) -> String {
-        format!("{:>width$}{}", "", self, width = n)
-    }
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -961,7 +1088,8 @@ mod tests {
             "Context length:",
             "Weights:",
             "KV cache:",
-            "Runtime headroom",
+            "Activation:",
+            "Allocator ovhd:",
             "Total estimate",
             "Available:",
         ] {
@@ -975,5 +1103,96 @@ mod tests {
         assert_eq!(QuantHint::Fp16.label(), "fp16");
         assert_eq!(QuantHint::Int8.label(), "int8");
         assert_eq!(QuantHint::Int4.label(), "int4");
+    }
+
+    // ── TIER 2: activation model ────────────────────────────────────────────
+
+    #[test]
+    fn compute_activation_bytes_is_streaming_plus_logits() {
+        let dims = ActivationDims {
+            hidden: 4096,
+            intermediate: 11008,
+            vocab: 32000,
+        };
+        // ctx 8192 → prefill capped at ACTIVATION_PREFILL_TOKENS (512); mult 2.0.
+        let a = compute_activation_bytes(&dims, 8192, 1, 2.0);
+        let streaming = 2 * 512 * (4096 + 11008) * 2; // mult × prefill × (h+i) × 2 bytes
+        let logits = 32000 * 2; // vocab × batch(1) × 2 bytes
+        assert_eq!(a, streaming + logits);
+    }
+
+    #[test]
+    fn activation_scales_linearly_with_batch() {
+        let dims = ActivationDims {
+            hidden: 2048,
+            intermediate: 5632,
+            vocab: 50000,
+        };
+        let b1 = compute_activation_bytes(&dims, 4096, 1, 2.0);
+        let b4 = compute_activation_bytes(&dims, 4096, 4, 2.0);
+        // Both the streaming and logit terms scale with batch.
+        assert_eq!(b4, b1 * 4);
+    }
+
+    #[test]
+    fn activation_is_capped_by_prefill_chunk() {
+        let dims = ActivationDims {
+            hidden: 2048,
+            intermediate: 5632,
+            vocab: 0,
+        };
+        // Past the prefill chunk, activation does not grow with context.
+        let at_8k = compute_activation_bytes(&dims, 8192, 1, 2.0);
+        let at_32k = compute_activation_bytes(&dims, 32768, 1, 2.0);
+        assert_eq!(at_8k, at_32k);
+        // Below the chunk, it is smaller (prefill = ctx).
+        let at_256 = compute_activation_bytes(&dims, 256, 1, 2.0);
+        assert!(at_256 < at_8k);
+        assert_eq!(at_256 * (ACTIVATION_PREFILL_TOKENS / 256), at_8k);
+    }
+
+    #[test]
+    fn estimate_total_includes_activation_reserve() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_minimal_config(tmp.path());
+        let est = estimate_total_memory(tmp.path(), 8192, 4, QuantHint::Default, false);
+        assert!(
+            est.activation_bytes > 0,
+            "a config with hidden_size must yield a nonzero activation reserve"
+        );
+        // runtime_headroom_bytes = allocator overhead + activation; both included
+        // in the total.
+        assert!(est.runtime_headroom_bytes >= est.activation_bytes);
+        assert_eq!(
+            est.total_bytes,
+            est.weights_bytes + est.kv_cache_bytes + est.runtime_headroom_bytes
+        );
+    }
+
+    #[test]
+    fn activation_grows_with_batch_through_the_full_estimate() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_minimal_config(tmp.path());
+        let b1 = estimate_total_memory(tmp.path(), 8192, 1, QuantHint::Default, false);
+        let b8 = estimate_total_memory(tmp.path(), 8192, 8, QuantHint::Default, false);
+        // The old flat headroom was batch-blind; the activation term now makes
+        // the reserve grow with batch.
+        assert!(b8.activation_bytes > b1.activation_bytes);
+        assert_eq!(b8.activation_bytes, b1.activation_bytes * 8);
+    }
+
+    #[test]
+    fn activation_dims_default_intermediate_and_vocab() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = serde_json::json!({ "hidden_size": 1024 });
+        std::fs::write(
+            tmp.path().join("config.json"),
+            serde_json::to_string(&cfg).unwrap(),
+        )
+        .unwrap();
+        let dims = activation_dims_from_path(tmp.path()).unwrap();
+        assert_eq!(dims.hidden, 1024);
+        assert_eq!(dims.intermediate, 4096); // 4 × hidden fallback
+        assert_eq!(dims.vocab, 0); // no logit term when absent
     }
 }
