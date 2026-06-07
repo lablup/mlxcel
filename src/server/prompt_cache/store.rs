@@ -289,6 +289,19 @@ impl PromptCacheStore {
         self.inner.read().map(|g| g.config.max_entries).unwrap_or(0)
     }
 
+    /// Minimum prefix length (in tokens) an entry must reach to be insertable.
+    ///
+    /// Mirrors the [`PromptCacheConfig::min_prefix_tokens`] gate that
+    /// [`PromptCacheStore::insert`] enforces. Callers that must avoid taking
+    /// non-droppable resources (e.g. paged block pins) before an insert that
+    /// would be rejected can pre-screen against this value.
+    pub fn min_prefix_tokens(&self) -> usize {
+        self.inner
+            .read()
+            .map(|g| g.config.min_prefix_tokens)
+            .unwrap_or(0)
+    }
+
     /// Snapshot of the store's internal counters. Safe to call concurrently
     /// with inserts/lookups; values are captured under the read lock.
     pub fn stats(&self) -> PromptCacheStats {

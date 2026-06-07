@@ -58,7 +58,7 @@ pub use apc_lookup::ApcStoreStats;
 pub use block_hash::{
     ApcBlockHash, ApcHashAlgo, BlockHashChain, DEFAULT_APC_BLOCK_SIZE, ParseApcHashError,
 };
-pub use entry::CacheEntry;
+pub use entry::{CacheEntry, DetachedKvSet};
 pub use hybrid_ssm::{
     HYBRID_SSM_MODEL_TYPES, detect_hybrid_ssm, detect_hybrid_ssm_from_path,
     is_hybrid_ssm_model_type,

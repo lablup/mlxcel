@@ -964,6 +964,368 @@ fn write_prefill_after_shared_prefix_adopt_allocates_only_suffix_blocks() {
     assert_eq!(flatten_fp32(&gv), flatten_fp32(&dense_v));
 }
 
+// ---------------------------------------------------------------------------
+// 10. Pool-backed radix round-trip (#121 sub-step b): the adopt path must
+//     reconstruct POOL-BACKED caches (not empty dense placeholders) for a
+//     dense-natural Fp16 paged sequence, and the adopted sequence must SHARE
+//     the cached prefix's physical blocks (stored once, no re-prefill).
+// ---------------------------------------------------------------------------
+
+/// Dense-natural stub model: its NATURAL sequence-state backend is the dense
+/// external `KVCache` slice (the trait default), so `allocate_with_layout` with
+/// an Fp16 paged layout POOL-BACKS it (`new_paged` caches) — exactly the shape
+/// a real `supports_batching` transformer (qwen3 / llama3) gets under paged
+/// decode. Contrast with `PagedStubModel`, whose natural backend is paged and
+/// therefore keeps dense placeholder caches.
+struct DenseNaturalStubModel {
+    num_layers: usize,
+    prepared: std::cell::RefCell<Vec<SequenceId>>,
+}
+
+impl DenseNaturalStubModel {
+    fn new(num_layers: usize) -> Self {
+        Self {
+            num_layers,
+            prepared: std::cell::RefCell::new(Vec::new()),
+        }
+    }
+
+    fn prepared_ids(&self) -> Vec<SequenceId> {
+        self.prepared.borrow().clone()
+    }
+}
+
+impl LanguageModel for DenseNaturalStubModel {
+    fn forward(
+        &self,
+        _input_ids: &MlxArray,
+        _caches: &mut [KVCache],
+        _mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        crate::ffi::zeros(&[1], 0)
+    }
+
+    fn make_caches(&self) -> Vec<KVCache> {
+        (0..self.num_layers).map(|_| KVCache::new()).collect()
+    }
+
+    fn num_layers(&self) -> usize {
+        self.num_layers
+    }
+
+    fn eos_token_ids(&self) -> Vec<i32> {
+        vec![0]
+    }
+
+    // Deliberately DOES NOT override `sequence_state_layout`: the trait default
+    // reports `SequenceStateBackend::DenseKvCache`, which is the natural backend
+    // the pool-backing gate keys on.
+
+    fn prepare_sequence_state(&self, seq_id: SequenceId) {
+        self.prepared.borrow_mut().push(seq_id);
+    }
+}
+
+/// 1-layer Fp16 paged layout sized for `[1, n_kv_heads, *, head_dim]` blocks.
+fn fp16_pool_layout(block_size: usize, n_kv_heads: i32, head_dim: i32) -> PagedKvLayout {
+    let bytes_per_block = block_size * n_kv_heads as usize * head_dim as usize * 2;
+    let layout = PagedKvLayout::uniform(1, block_size, bytes_per_block).unwrap();
+    assert_eq!(
+        layout.cache_mode,
+        KVCacheMode::Fp16,
+        "pool-backing requires an Fp16 paged layout"
+    );
+    layout
+}
+
+#[test]
+fn adopt_paged_reconstructs_pool_backed_caches_and_shares_prefix() {
+    let n_kv_heads = 2i32;
+    let head_dim = 3i32;
+    let block_size = 4usize;
+    let layout = fp16_pool_layout(block_size, n_kv_heads, head_dim);
+    let model = DenseNaturalStubModel::new(1);
+    let mut pool = CachePool::new(4);
+
+    // --- Allocate a POOL-BACKED paged sequence (dense-natural + Fp16). ---
+    let seed = pool
+        .allocate_with_layout(&model, Some(SequenceStateLayout::paged_kv_cache(layout)))
+        .unwrap();
+    assert!(
+        pool.get_caches_mut(seed).unwrap()[0].is_paged_backed(),
+        "dense-natural Fp16 paged sequence must be pool-backed at allocate time"
+    );
+
+    // --- Prefill an 8-token (2 whole blocks) prefix through the POOL-BACKED
+    //     cache's real `update_and_fetch` path (routes to `write_paged`, which
+    //     writes the pool blocks AND advances the cache's monotonic offset —
+    //     exactly what `model.forward` does). The returned gather is the
+    //     reference visible window. ---
+    let prefix_len = 8i32;
+    let prefix_k = prefill_block(1000.0, n_kv_heads, prefix_len, head_dim);
+    let prefix_v = prefill_block(5000.0, n_kv_heads, prefix_len, head_dim);
+    let reference = {
+        let caches = pool.get_caches_mut(seed).unwrap();
+        let (gk, gv) = caches[0].update_and_fetch(prefix_k, prefix_v);
+        (flatten_fp32(&gk), flatten_fp32(&gv))
+    };
+    assert_eq!(
+        pool.get_caches_mut(seed).unwrap()[0].offset,
+        prefix_len,
+        "prefill through the pool-backed cache advances its monotonic offset"
+    );
+    let prefix_blocks = pool
+        .get_paged_state(seed)
+        .unwrap()
+        .layer(0)
+        .unwrap()
+        .block_ids
+        .clone();
+    assert_eq!(prefix_blocks.len(), 2, "8 tokens => 2 whole prefix blocks");
+    let live_before = pool.paged_stats().unwrap().live_blocks;
+    assert_eq!(
+        live_before, 2,
+        "only the 2 prefix blocks are live pre-detach"
+    );
+
+    // --- detach -> park -> adopt into a SECOND sequence (the radix path). ---
+    let detached = pool.detach_paged(seed).unwrap();
+    assert_eq!(detached.retained_block_count(), 2);
+    let handle = pool.park_detached_paged(detached);
+    let consumer = pool.adopt_parked_paged(&model, handle).unwrap();
+    assert_ne!(seed, consumer);
+    assert!(model.prepared_ids().contains(&consumer));
+
+    // (a) THE FIX: the adopted sequence's caches are POOL-BACKED. Before #121
+    //     sub-step (b) the adopt path rebuilt empty dense caches here, so the
+    //     adopted sequence would read garbage in a real model forward.
+    assert!(
+        pool.get_caches_mut(consumer).unwrap()[0].is_paged_backed(),
+        "adopt_paged must reconstruct POOL-BACKED caches for a pool-backed sequence"
+    );
+    // (a') the restored monotonic offset must equal the cached prefix length so
+    //      RoPE positions for the post-adopt prefill/decode are correct. A fresh
+    //      `new_paged` cache would report 0 here and mis-rotate the suffix.
+    assert_eq!(
+        pool.get_caches_mut(consumer).unwrap()[0].offset,
+        prefix_len,
+        "adopt must restore the cache offset to the cached prefix length"
+    );
+
+    // (b) the consumer SHARES the prefix's physical block ids (refcount-pinned
+    //     across the round-trip), not fresh copies.
+    let consumer_blocks = pool
+        .get_paged_state(consumer)
+        .unwrap()
+        .layer(0)
+        .unwrap()
+        .block_ids
+        .clone();
+    assert_eq!(
+        consumer_blocks, prefix_blocks,
+        "adopted consumer must reuse the prefix block ids"
+    );
+
+    // (d) the prefix is stored ONCE — adoption did not allocate a second copy.
+    let live_after = pool.paged_stats().unwrap().live_blocks;
+    assert_eq!(
+        live_after, live_before,
+        "shared prefix must not double the live block count"
+    );
+
+    // (c) gather_visible on the adopted sequence returns the SAME K/V.
+    let adopted = {
+        let state = pool.get_paged_state(consumer).unwrap();
+        let (gk, gv) = pool
+            .paged_pool_ref()
+            .unwrap()
+            .gather_visible(&state, 0)
+            .unwrap()
+            .expect("consumer gather must return data");
+        (flatten_fp32(&gk), flatten_fp32(&gv))
+    };
+    assert_eq!(
+        adopted.0, reference.0,
+        "adopted K equals original (no copy)"
+    );
+    assert_eq!(
+        adopted.1, reference.1,
+        "adopted V equals original (no copy)"
+    );
+
+    // --- A block-aligned suffix [8, 14) prefilled through the consumer's
+    //     pool-backed cache allocates ONLY its own blocks; the shared prefix
+    //     blocks are untouched and the offset continues from 8. ---
+    let suffix_len = 6i32;
+    let suffix_k = prefill_block(2000.0, n_kv_heads, suffix_len, head_dim);
+    let suffix_v = prefill_block(6000.0, n_kv_heads, suffix_len, head_dim);
+    {
+        let caches = pool.get_caches_mut(consumer).unwrap();
+        let _ = caches[0].update_and_fetch(suffix_k, suffix_v);
+    }
+    assert_eq!(
+        pool.get_caches_mut(consumer).unwrap()[0].offset,
+        prefix_len + suffix_len,
+        "post-adopt suffix prefill continues the monotonic offset from the prefix"
+    );
+    let live_suffix = pool.paged_stats().unwrap().live_blocks;
+    assert_eq!(
+        live_suffix - live_after,
+        2,
+        "shared-prefix request allocates blocks only for its 6-token suffix"
+    );
+    let after_blocks = pool
+        .get_paged_state(consumer)
+        .unwrap()
+        .layer(0)
+        .unwrap()
+        .block_ids
+        .clone();
+    assert_eq!(
+        &after_blocks[..2],
+        &prefix_blocks[..],
+        "prefix blocks unchanged"
+    );
+}
+
+#[test]
+fn pool_backed_sharers_cow_keeps_other_prefix_intact() {
+    // Two LIVE pool-backed sequences sharing a PARTIAL-tail prefix: a divergent
+    // suffix on one must copy-on-write the shared tail block, leaving the other
+    // sequence's prefix bit-identical. `CachePool::adopt_paged` is move-based
+    // (it cannot stand up two live aliasing sequences at once), so the sibling
+    // is constructed by aliasing the block table + `retain_block` — exactly the
+    // refcount>1 state two adopters of the same cached prefix would reach.
+    let n_kv_heads = 2i32;
+    let head_dim = 3i32;
+    let block_size = 4usize;
+    let layout = fp16_pool_layout(block_size, n_kv_heads, head_dim);
+    let model = DenseNaturalStubModel::new(1);
+    let mut pool = CachePool::new(4);
+
+    // --- Sequence A: pool-backed, 6-token prefix (2 blocks; tail half-full). ---
+    let seq_a = pool
+        .allocate_with_layout(
+            &model,
+            Some(SequenceStateLayout::paged_kv_cache(layout.clone())),
+        )
+        .unwrap();
+    assert!(pool.get_caches_mut(seq_a).unwrap()[0].is_paged_backed());
+    let prefix_len = 6i32;
+    let prefix_k = prefill_block(1000.0, n_kv_heads, prefix_len, head_dim);
+    let prefix_v = prefill_block(5000.0, n_kv_heads, prefix_len, head_dim);
+    write_prefill_for(&mut pool, seq_a, 0, &prefix_k, &prefix_v).unwrap();
+    let prefix_blocks = pool
+        .get_paged_state(seq_a)
+        .unwrap()
+        .layer(0)
+        .unwrap()
+        .block_ids
+        .clone();
+    assert_eq!(prefix_blocks.len(), 2);
+    let tail_block = prefix_blocks[1];
+    assert_eq!(pool.paged_pool_ref().unwrap().refcount(tail_block), 1);
+
+    let reference = {
+        let state = pool.get_paged_state(seq_a).unwrap();
+        let (gk, gv) = pool
+            .paged_pool_ref()
+            .unwrap()
+            .gather_visible(&state, 0)
+            .unwrap()
+            .expect("A gather");
+        (flatten_fp32(&gk), flatten_fp32(&gv))
+    };
+
+    // --- Sequence B: pool-backed, aliases A's prefix block table + pins it
+    //     (the refcount>1 state two concurrent adopters of the same cached
+    //     prefix reach). ---
+    let seq_b = pool
+        .allocate_with_layout(&model, Some(SequenceStateLayout::paged_kv_cache(layout)))
+        .unwrap();
+    assert!(pool.get_caches_mut(seq_b).unwrap()[0].is_paged_backed());
+    {
+        let set = pool.get_mut(seq_b).unwrap();
+        let mut state = set.paged.as_ref().unwrap().borrow_mut();
+        let layer = state.layer_mut(0).unwrap();
+        layer.block_ids = prefix_blocks.clone();
+        layer.len = prefix_len as usize;
+        layer.logical_start = 0;
+    }
+    for &id in &prefix_blocks {
+        pool.paged_pool
+            .as_ref()
+            .unwrap()
+            .borrow_mut()
+            .retain_block(id)
+            .unwrap();
+    }
+    assert_eq!(
+        pool.paged_pool_ref().unwrap().refcount(tail_block),
+        2,
+        "both live sequences now share the partial tail block"
+    );
+    // B reads the identical prefix before any divergent write.
+    {
+        let state = pool.get_paged_state(seq_b).unwrap();
+        let (gk, gv) = pool
+            .paged_pool_ref()
+            .unwrap()
+            .gather_visible(&state, 0)
+            .unwrap()
+            .expect("B gather");
+        assert_eq!(flatten_fp32(&gk), reference.0);
+        assert_eq!(flatten_fp32(&gv), reference.1);
+    }
+
+    // --- Divergent 5-token suffix into A. positions [6, 11): the first suffix
+    //     slot lands in the SHARED partial tail (slots 2,3), so write_prefill
+    //     must copy-on-write the tail for A. ---
+    let suffix_k = prefill_block(2000.0, n_kv_heads, 5, head_dim);
+    let suffix_v = prefill_block(6000.0, n_kv_heads, 5, head_dim);
+    write_prefill_for(&mut pool, seq_a, 0, &suffix_k, &suffix_v).unwrap();
+
+    let a_tail = pool
+        .get_paged_state(seq_a)
+        .unwrap()
+        .layer(0)
+        .unwrap()
+        .block_ids[1];
+    let b_tail = pool
+        .get_paged_state(seq_b)
+        .unwrap()
+        .layer(0)
+        .unwrap()
+        .block_ids[1];
+    assert_ne!(
+        a_tail, tail_block,
+        "A wrote while the tail was shared, so it must fork a fresh copy"
+    );
+    assert_eq!(
+        b_tail, tail_block,
+        "B keeps the original tail block (not corrupted by A's suffix)"
+    );
+    assert_eq!(
+        pool.paged_pool_ref().unwrap().refcount(tail_block),
+        1,
+        "after A's COW fork the original tail is solely owned by B"
+    );
+
+    // --- B's prefix is bit-identical to before A's divergent write. ---
+    let b_after = {
+        let state = pool.get_paged_state(seq_b).unwrap();
+        let (gk, gv) = pool
+            .paged_pool_ref()
+            .unwrap()
+            .gather_visible(&state, 0)
+            .unwrap()
+            .expect("B gather after A suffix");
+        (flatten_fp32(&gk), flatten_fp32(&gv))
+    };
+    assert_eq!(b_after.0, reference.0, "B's prefix K intact after A's COW");
+    assert_eq!(b_after.1, reference.1, "B's prefix V intact after A's COW");
+}
+
 /// Free reference to DetachedPagedCacheSet to keep the import alive.
 #[allow(dead_code)]
 fn _type_alive() -> Option<DetachedPagedCacheSet> {

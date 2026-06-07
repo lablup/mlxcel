@@ -36,11 +36,13 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use mlxcel_core::cache::SequenceId;
+use mlxcel_core::cache::{CachePool, KVCache, PagedKvLayout, SequenceId, SequenceStateLayout};
+use mlxcel_core::generate::LanguageModel;
+use mlxcel_core::{MlxArray, UniquePtr};
 
 use crate::server::batch::BatchObservability;
 use crate::server::prompt_cache::{
-    ApcConfig, ApcHashAlgo, CacheEntry, PromptCacheConfig, PromptCacheStore,
+    ApcConfig, ApcHashAlgo, CacheEntry, DetachedKvSet, PromptCacheConfig, PromptCacheStore,
     key::{MultimodalDigest, PromptCacheKey},
 };
 
@@ -727,5 +729,128 @@ fn scheduler_partial_adoption_invariant_matched_len_is_block_aligned() {
             0,
             "matched_len {matched_len} for divergence at {divergence} must be block-aligned"
         );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Paged entry round-trip through the store's CacheEntry (#121 sub-step b)
+//
+// The cross-request store now parks both dense and paged detached sets via the
+// `DetachedKvSet` union. These cases prove a real `DetachedPagedCacheSet` flows
+// through `CacheEntry::new` / `take_detached` one-shot semantics and that
+// `size_bytes` snapshots the paged set's byte footprint (eviction accounting).
+// ---------------------------------------------------------------------------
+
+/// Minimal paged-natural stub model so we can mint a real
+/// `DetachedPagedCacheSet` via `CachePool::detach_paged`.
+struct PagedStub {
+    layout: PagedKvLayout,
+}
+
+impl LanguageModel for PagedStub {
+    fn forward(
+        &self,
+        _input_ids: &MlxArray,
+        _caches: &mut [KVCache],
+        _mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        mlxcel_core::zeros(&[1], 0)
+    }
+
+    fn make_caches(&self) -> Vec<KVCache> {
+        (0..self.layout.num_layers)
+            .map(|_| KVCache::new())
+            .collect()
+    }
+
+    fn num_layers(&self) -> usize {
+        self.layout.num_layers
+    }
+
+    fn eos_token_ids(&self) -> Vec<i32> {
+        vec![0]
+    }
+
+    fn sequence_state_layout(&self) -> SequenceStateLayout {
+        SequenceStateLayout::paged_kv_cache(self.layout.clone())
+    }
+}
+
+#[test]
+fn paged_detached_set_round_trips_through_cache_entry() {
+    let layout = PagedKvLayout::uniform(2, 4, 128).unwrap();
+    let model = PagedStub {
+        layout: layout.clone(),
+    };
+    let mut pool = CachePool::new(4);
+
+    // Build a paged sequence with a populated block table (no MLX writes
+    // needed — `append_paged_tokens` grows the block table and reserves bytes).
+    let seq = pool.allocate(&model).unwrap();
+    pool.append_paged_tokens(seq, 0, 6).unwrap();
+    pool.append_paged_tokens(seq, 1, 8).unwrap();
+
+    let paged = pool.detach_paged(seq).expect("paged detach must succeed");
+    let expected_bytes = paged.nbytes();
+    assert!(
+        expected_bytes > 0,
+        "a populated paged set must report nonzero bytes"
+    );
+
+    // The union dispatches nbytes()/is_empty() to the paged arm.
+    let kv_set = DetachedKvSet::Paged(paged);
+    assert!(!kv_set.is_empty(), "a populated paged set is not empty");
+    assert_eq!(
+        kv_set.nbytes(),
+        expected_bytes,
+        "DetachedKvSet::nbytes dispatches to the paged set"
+    );
+
+    // CacheEntry snapshots size_bytes from the paged set for eviction
+    // accounting and stores the union behind its one-shot holder.
+    let tokens: Vec<i32> = (0..14).collect();
+    let entry = CacheEntry::new(tokens.clone(), kv_set);
+    assert_eq!(
+        entry.size_bytes, expected_bytes,
+        "size_bytes snapshots the paged set's nbytes"
+    );
+    assert_eq!(entry.tokens, tokens);
+    assert!(entry.has_detached());
+
+    // One-shot take returns the Paged variant; a second take is a miss.
+    let taken = entry.take_detached().expect("first take yields the set");
+    assert!(matches!(taken, DetachedKvSet::Paged(_)));
+    assert!(
+        entry.take_detached().is_none(),
+        "second take is a miss (one-shot)"
+    );
+    assert!(!entry.has_detached());
+
+    // The taken set still owns block pins; return them so the pool budget
+    // stays honest and the set's `Drop` does not warn.
+    if let DetachedKvSet::Paged(set) = taken {
+        pool.release_detached_paged(set);
+    }
+}
+
+#[test]
+fn empty_paged_detached_set_reports_empty() {
+    // A paged sequence with no appended tokens has an empty block table, so
+    // the union's variant-aware `is_empty()` must report it empty (the dense
+    // per-layer handles are empty by design for paged sets).
+    let layout = PagedKvLayout::uniform(1, 4, 128).unwrap();
+    let model = PagedStub {
+        layout: layout.clone(),
+    };
+    let mut pool = CachePool::new(4);
+    let seq = pool.allocate(&model).unwrap();
+    let paged = pool.detach_paged(seq).expect("paged detach must succeed");
+    let kv_set = DetachedKvSet::Paged(paged);
+    assert!(
+        kv_set.is_empty(),
+        "a paged set with no visible tokens / blocks must be reported empty"
+    );
+    if let DetachedKvSet::Paged(set) = kv_set {
+        pool.release_detached_paged(set);
     }
 }

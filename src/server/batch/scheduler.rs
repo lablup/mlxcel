@@ -33,8 +33,8 @@ use std::sync::mpsc;
 use std::time::Instant;
 
 use mlxcel_core::cache::{
-    BatchKvQuantConfig, CachePool, DetachedCacheSet, KVCacheMode, PagedKvLayout, SequenceId,
-    SequenceStateBackend, SequenceStateLayout,
+    BatchKvQuantConfig, CachePool, KVCacheMode, PagedKvLayout, SequenceId, SequenceStateBackend,
+    SequenceStateLayout,
 };
 use mlxcel_core::generate::{
     DecodeBatchContext, DecodeStorageBackend as CoreDecodeStorageBackend, LanguageModel,
@@ -62,7 +62,7 @@ use crate::server::model_provider::model_worker::{
 };
 use crate::server::model_provider::{GenerateEvent, ModelRequest};
 use crate::server::prompt_cache::key::{MultimodalDigest, PromptCacheKey};
-use crate::server::prompt_cache::{CacheEntry, PromptCacheStore};
+use crate::server::prompt_cache::{CacheEntry, DetachedKvSet, PromptCacheStore};
 use crate::server::state::BatchMetrics;
 use crate::server::thinking_budget::{
     ThinkingBudget, ThinkingDecision, ThinkingState, ThinkingTokenIds,
@@ -721,22 +721,25 @@ impl BatchScheduler {
     /// Gating (all of these yield `None`, which maps to a cold prefill):
     /// * feature disabled at config time,
     /// * request carried no [`PromptCacheRequestContext`] (non-chat endpoint),
-    /// * scheduler configured with the paged decode backend (paged adoption
-    ///   through the store is deferred — the store's [`CacheEntry`] type
-    ///   currently only carries dense detached sets),
     /// * store miss / match shorter than `min_prefix_tokens`,
     /// * race with another worker that already consumed the entry,
-    /// * empty-tensor detached set (e.g. stored against an aborted seq),
-    /// * [`CachePool::adopt`] error (capacity, unsupported backend, …).
+    /// * empty detached set (e.g. stored against an aborted seq),
+    /// * backend mismatch (a `Dense` entry under the paged decode backend, or
+    ///   a `Paged` entry under the dense backend — the entry's KV shape cannot
+    ///   be installed into the active pool),
+    /// * [`CachePool::adopt`] / [`CachePool::adopt_paged`] error (capacity,
+    ///   layout mismatch, …).
+    ///
+    /// Both dense and paged entries are adopted in-place: dense via
+    /// [`CachePool::adopt`], paged via [`CachePool::adopt_paged`] (which shares
+    /// the cached prefix's refcounted pool blocks so the prefix is never
+    /// re-prefilled — #121 sub-step b).
     fn try_adopt_cached_prefix(
         &mut self,
         ctx: &PromptCacheRequestContext,
         tokens: &[i32],
     ) -> Option<(SequenceId, usize)> {
         if !self.prompt_cache_active() {
-            return None;
-        }
-        if self.decode_storage_backend == DecodeStorageBackend::Paged {
             return None;
         }
 
@@ -746,40 +749,77 @@ impl BatchScheduler {
         // `take_detached` is one-shot: it returns `None` if a racing lookup
         // already consumed this entry. The miss path is safe — the current
         // sequence just does a fresh prefill.
-        let mut detached = entry.take_detached()?;
-        if detached.caches.is_empty() || detached.caches.iter().all(|c| c.is_empty()) {
+        let detached = entry.take_detached()?;
+        if detached.is_empty() {
+            // A paged set drained on this path would leak its block pins via
+            // `Drop`; release them explicitly so the pool budget stays honest.
+            self.release_unused_detached(detached);
             return None;
         }
 
-        // APC block-level partial adoption. When APC clamps
-        // `matched_len` to a block boundary shorter than the cached entry's
-        // full token length, the request diverged from the cached prefix at
-        // the next block. Truncate the detached KV state to exactly
-        // `matched_len` so the adopted cache covers only the consistent
-        // prefix; the prefill loop will then re-prefill the divergent tail
-        // starting at `matched_len`. When `matched_len == detached.seq_len()`
-        // this branch is skipped, preserving the bit-exact full-prefix
-        // adoption path.
-        let detached_seq_len = detached.seq_len();
-        if matched_len < detached_seq_len as usize {
-            let target = matched_len as i32;
-            if let Err(err) = detached.truncate_to(target) {
-                tracing::warn!(
-                    "prompt-cache adopt: APC partial truncate to {target} failed ({err}); falling back to cold prefill"
-                );
-                return None;
-            }
-            tracing::debug!(
-                from = detached_seq_len,
-                to = target,
-                "prompt-cache adopt: APC partial adoption truncated detached cache to block boundary"
-            );
+        // Reject cross-backend adoption: the active decode backend determines
+        // the KV shape the model worker can install. Adopting the wrong variant
+        // would corrupt the sequence, so fall through to a cold prefill (and
+        // release any paged pins we took).
+        let backend_mismatch = matches!(
+            (&detached, self.decode_storage_backend),
+            (DetachedKvSet::Dense(_), DecodeStorageBackend::Paged)
+                | (DetachedKvSet::Paged(_), DecodeStorageBackend::Dense)
+        );
+        if backend_mismatch {
+            self.release_unused_detached(detached);
+            return None;
         }
 
-        match self
-            .cache_pool
-            .adopt(&self.model as &dyn LanguageModel, detached)
-        {
+        let adopt_result = match detached {
+            DetachedKvSet::Dense(mut dense) => {
+                // APC block-level partial adoption. When APC clamps
+                // `matched_len` to a block boundary shorter than the cached
+                // entry's full token length, the request diverged from the
+                // cached prefix at the next block. Truncate the detached KV
+                // state to exactly `matched_len` so the adopted cache covers
+                // only the consistent prefix; the prefill loop then re-prefills
+                // the divergent tail. When `matched_len == seq_len` this branch
+                // is skipped, preserving the bit-exact full-prefix path.
+                let detached_seq_len = dense.seq_len();
+                if matched_len < detached_seq_len as usize {
+                    let target = matched_len as i32;
+                    if let Err(err) = dense.truncate_to(target) {
+                        tracing::warn!(
+                            "prompt-cache adopt: APC partial truncate to {target} failed ({err}); falling back to cold prefill"
+                        );
+                        return None;
+                    }
+                    tracing::debug!(
+                        from = detached_seq_len,
+                        to = target,
+                        "prompt-cache adopt: APC partial adoption truncated detached cache to block boundary"
+                    );
+                }
+                self.cache_pool
+                    .adopt(&self.model as &dyn LanguageModel, dense)
+            }
+            DetachedKvSet::Paged(paged) => {
+                // APC block-hash partial adoption for paged entries is deferred
+                // (a later #121 sub-step): the paged store path matches the full
+                // stored prefix only. If a partial match somehow surfaces,
+                // decline rather than adopt an over-long prefix.
+                let paged_seq_len = paged.seq_len();
+                if matched_len < paged_seq_len {
+                    tracing::debug!(
+                        from = paged_seq_len,
+                        to = matched_len,
+                        "prompt-cache adopt: paged partial adoption not yet supported; releasing and falling back to cold prefill"
+                    );
+                    self.cache_pool.release_detached_paged(paged);
+                    return None;
+                }
+                self.cache_pool
+                    .adopt_paged(&self.model as &dyn LanguageModel, paged)
+            }
+        };
+
+        match adopt_result {
             Ok(adopted_id) => {
                 tracing::debug!(
                     seq_id = %adopted_id,
@@ -800,8 +840,26 @@ impl BatchScheduler {
                 Some((adopted_id, matched_len))
             }
             Err(err) => {
+                // `adopt_paged` already releases paged pins on its error path;
+                // `adopt` (dense) simply drops the buffers. Nothing to reclaim.
                 tracing::debug!("prompt-cache adopt failed ({err}); falling back to cold prefill");
                 None
+            }
+        }
+    }
+
+    /// Release a detached set the adopt path decided not to use.
+    ///
+    /// A dense set just drops its MLX buffers. A paged set additionally owns
+    /// refcount pins on physical pool blocks, which [`Drop`] cannot release on
+    /// its own (it has no pool handle) — so route it through
+    /// [`CachePool::release_detached_paged`] to return the pins and keep the
+    /// block budget accurate.
+    fn release_unused_detached(&mut self, detached: DetachedKvSet) {
+        match detached {
+            DetachedKvSet::Dense(_) => {}
+            DetachedKvSet::Paged(paged) => {
+                self.cache_pool.release_detached_paged(paged);
             }
         }
     }
@@ -812,9 +870,16 @@ impl BatchScheduler {
     /// The caller must invoke this **before** calling
     /// [`Self::release_sequence_caches`] — once release runs the underlying
     /// tensors are gone. Safe to call unconditionally; all the gating checks
-    /// (feature enabled, healthy finish, context present, dense backend)
+    /// (feature enabled, healthy finish, context present, detachable backend)
     /// live inside this method so the caller can keep its hot-path code
     /// simple.
+    ///
+    /// Both dense and paged sequences are donated: dense via
+    /// [`CachePool::detach`] (→ [`DetachedKvSet::Dense`]) and paged via
+    /// [`CachePool::detach_paged`] (→ [`DetachedKvSet::Paged`], which pins the
+    /// prefix's physical pool blocks so a later `adopt_paged` can share them).
+    /// `ModelOwned` sequences carry no detachable cross-request KV and are
+    /// skipped.
     fn donate_finished_sequence_cache(
         &mut self,
         seq_id: SequenceId,
@@ -836,24 +901,15 @@ impl BatchScheduler {
             None => return,
         };
 
-        // Only dense sequences can travel through the store's
-        // `DetachedCacheSet` (paged follow-up work).
         let backend = self
             .cache_pool
             .get_mut(seq_id)
             .map(|s| s.backend)
             .unwrap_or(SequenceStateBackend::ModelOwned);
-        if backend != SequenceStateBackend::DenseKvCache {
-            return;
-        }
-
-        let detached: DetachedCacheSet = match self.cache_pool.detach(seq_id) {
-            Some(d) => d,
-            None => return,
-        };
-        if detached.caches.is_empty() || detached.caches.iter().all(|c| c.is_empty()) {
-            // Nothing to cache: aborted before any prefill completed, or
-            // the model never populated the KV tensors.
+        // `ModelOwned` families (heterogeneous attention+recurrent caches, e.g.
+        // Qwen 3.5 / Gemma 4) carry no detachable cross-request KV. Skip before
+        // building the token vector so the burst donate stays a cheap no-op.
+        if backend == SequenceStateBackend::ModelOwned {
             return;
         }
 
@@ -868,11 +924,45 @@ impl BatchScheduler {
             Some(s) => s.clone(),
             None => return,
         };
+
+        // Detach into the backend-appropriate variant.
+        let kv_set: DetachedKvSet = match backend {
+            SequenceStateBackend::DenseKvCache => match self.cache_pool.detach(seq_id) {
+                Some(d) => DetachedKvSet::Dense(d),
+                None => return,
+            },
+            SequenceStateBackend::PagedKvCache => {
+                // `detach_paged` pins every physical prefix block, and those
+                // pins can only be returned through `release_detached_paged`
+                // (the set's `Drop` cannot). If the store would reject the
+                // entry for being shorter than `min_prefix_tokens`, screen the
+                // length BEFORE detaching so we never take pins we'd have to
+                // immediately release. The dense path needs no such screen — a
+                // rejected dense entry just drops its buffers.
+                if tokens.len() < store.min_prefix_tokens() {
+                    return;
+                }
+                match self.cache_pool.detach_paged(seq_id) {
+                    Some(p) => DetachedKvSet::Paged(p),
+                    None => return,
+                }
+            }
+            SequenceStateBackend::ModelOwned => return,
+        };
+
+        if kv_set.is_empty() {
+            // Nothing to cache: aborted before any prefill completed, or the
+            // model never populated the KV state. Release any paged pins we
+            // took so the pool budget stays honest.
+            self.release_unused_detached(kv_set);
+            return;
+        }
+
         // The `CacheEntry` takes ownership of `tokens` and the key borrows
         // from the same buffer. Build the entry first, then form the key
         // against `entry.tokens` so both reference the same contiguous
         // allocation without copying the vector.
-        let entry = CacheEntry::new(tokens, detached);
+        let entry = CacheEntry::new(tokens, kv_set);
         let key_tokens = entry.tokens.clone();
         let key = Self::compose_prompt_cache_key(&ctx, &key_tokens);
         match store.insert(&key, entry) {
@@ -883,8 +973,13 @@ impl BatchScheduler {
                     .update_prompt_cache_gauges(store.bytes(), store.len());
             }
             Err(err) => {
-                // Oversized / disabled / prefix-too-short — drop the entry
-                // so the detached buffers are freed.
+                // Oversized / disabled / prefix-too-short — `insert` drops the
+                // entry. For dense that frees the buffers; for a paged entry the
+                // length pre-screen above already filtered the common
+                // prefix-too-short case, but an oversized paged entry dropped
+                // here still leaks its block pins (its `Drop` warns). Returning
+                // store-declined paged pins to the pool is wired with the pool
+                // block-budget eviction work (#122).
                 tracing::debug!(
                     seq_id = %seq_id,
                     "prompt-cache donate-back skipped: {err:?}"
@@ -2047,17 +2142,17 @@ impl BatchScheduler {
                     // needs the cache slot still attached. This mirrors
                     // the classic path's `finalize_completed`, keeping
                     // the burst and classic donate paths symmetric. The
-                    // donate helper is hard-gated on a dense KV-cache
-                    // backend; the two burst-eligible model families
-                    // today — Qwen 3.5 (DFlash) and Gemma 4 (MTP) — are
-                    // both `SequenceStateBackend::ModelOwned` with
-                    // heterogeneous attention+recurrent caches that the
-                    // `DetachedCacheSet` handoff cannot represent, so the
-                    // donate is a guarded no-op for them — identical to
-                    // the classic path's no-op for those same families.
-                    // Wiring it in removes the structural asymmetry
-                    // between the two paths and future-proofs the burst
-                    // for any dense-KV-cache model that later becomes
+                    // donate helper detaches dense and paged backends but
+                    // skips `SequenceStateBackend::ModelOwned`; the two
+                    // burst-eligible model families today — Qwen 3.5
+                    // (DFlash) and Gemma 4 (MTP) — are both `ModelOwned`
+                    // with heterogeneous attention+recurrent caches that
+                    // the detach handoff cannot represent, so the donate is
+                    // a guarded no-op for them — identical to the classic
+                    // path's no-op for those same families. Wiring it in
+                    // removes the structural asymmetry between the two
+                    // paths and future-proofs the burst for any
+                    // dense/paged-KV model that later becomes
                     // burst-eligible.
                     self.donate_finished_sequence_cache(
                         seq_id,

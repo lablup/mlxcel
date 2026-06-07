@@ -22,18 +22,79 @@
 use std::sync::Mutex;
 use std::time::Instant;
 
-use mlxcel_core::cache::DetachedCacheSet;
+use mlxcel_core::cache::{DetachedCacheSet, DetachedPagedCacheSet};
 
 use super::block_hash::ApcBlockHash;
 
-/// Send/Sync holder for a [`DetachedCacheSet`].
+/// A detached KV-cache set, one variant per decode-storage backend.
 ///
-/// The upstream type wraps `cxx::UniquePtr<MlxArray>` which is neither
-/// `Send` nor `Sync` because the underlying FFI buffer is an opaque C++
-/// pointer. The detach/adopt API explicitly guarantees that:
+/// * [`DetachedKvSet::Dense`] — the dense per-layer `KVCache` buffers
+///   produced by [`mlxcel_core::cache::CachePool::detach`].
+/// * [`DetachedKvSet::Paged`] — the paged block-table snapshot produced by
+///   [`mlxcel_core::cache::CachePool::detach_paged`]. For a pool-backed
+///   paged sequence the per-layer dense handles are EMPTY by design (the
+///   K/V lives in the shared `PagedBlockPool`); the set carries the block
+///   table plus a refcount pin on every physical block so a later
+///   `adopt_paged` can share the prefix without re-prefilling it.
 ///
-/// * Once `CachePool::detach` returns, the originating sequence no longer
-///   aliases the buffers (the pointers are moved, not cloned).
+/// This is the single payload the cross-request prompt-prefix store parks
+/// between a donate-back and a later adopt, so the radix store is unified
+/// across both backends (#121 sub-step b).
+//
+// The two variants differ substantially in size (the paged variant carries
+// several `HashMap`s of per-page sidecar tensors); boxing the larger arm
+// would add an allocation on the hot dense path, so we accept the size gap.
+#[allow(clippy::large_enum_variant)]
+pub enum DetachedKvSet {
+    /// Dense per-layer KV buffers (the [`SequenceStateBackend::DenseKvCache`]
+    /// backend).
+    ///
+    /// [`SequenceStateBackend::DenseKvCache`]: mlxcel_core::cache::SequenceStateBackend::DenseKvCache
+    Dense(DetachedCacheSet),
+    /// Paged block-table snapshot (the [`SequenceStateBackend::PagedKvCache`]
+    /// backend).
+    ///
+    /// [`SequenceStateBackend::PagedKvCache`]: mlxcel_core::cache::SequenceStateBackend::PagedKvCache
+    Paged(DetachedPagedCacheSet),
+}
+
+impl DetachedKvSet {
+    /// Total byte footprint of the detached set, dispatched per backend.
+    ///
+    /// Feeds [`CacheEntry::size_bytes`] so the store's byte-budget eviction
+    /// accounting is consistent across dense and paged entries.
+    pub fn nbytes(&self) -> usize {
+        match self {
+            DetachedKvSet::Dense(d) => d.nbytes(),
+            DetachedKvSet::Paged(p) => p.nbytes(),
+        }
+    }
+
+    /// Whether the set carries no reusable KV state.
+    ///
+    /// * Dense: the per-layer caches are absent or all empty (e.g. stored
+    ///   against a sequence aborted before any prefill completed).
+    /// * Paged: the per-layer dense handles are EMPTY by design, so we gate
+    ///   on the paged block table instead — a set is empty when it exposes no
+    ///   visible tokens or pins no physical blocks.
+    pub fn is_empty(&self) -> bool {
+        match self {
+            DetachedKvSet::Dense(d) => d.caches.is_empty() || d.caches.iter().all(|c| c.is_empty()),
+            DetachedKvSet::Paged(p) => p.seq_len() == 0 || p.retained_block_count() == 0,
+        }
+    }
+}
+
+/// Send/Sync holder for a [`DetachedKvSet`].
+///
+/// Both variants wrap `cxx::UniquePtr<MlxArray>` (directly for dense, or in
+/// the paged variant's per-page sidecar maps) which is neither `Send` nor
+/// `Sync` because the underlying FFI buffer is an opaque C++ pointer. The
+/// detach/adopt API explicitly guarantees that:
+///
+/// * Once `CachePool::detach` / `detach_paged` returns, the originating
+///   sequence no longer aliases the buffers (the pointers are moved, and the
+///   paged block pins are refcounted, not cloned).
 /// * Each buffer is functional: any MLX operation produces a fresh array,
 ///   so even if adopt runs on a different OS thread than detach, there is
 ///   no concurrent read/write on the same pointer.
@@ -44,13 +105,14 @@ use super::block_hash::ApcBlockHash;
 /// most one thread is reading or moving the tensors. This combination is
 /// sufficient to satisfy the soundness obligations documented in
 /// `src/lib/mlxcel-core/src/cache/detach.rs` (the "INT8 preservation" and
-/// "Aliasing with `MLXCEL_ENABLE_DIRECT_PREFILL_CACHE_STORE`" sections).
-pub(crate) struct DetachedHolder {
-    inner: Option<DetachedCacheSet>,
+/// "Aliasing with `MLXCEL_ENABLE_DIRECT_PREFILL_CACHE_STORE`" sections) and
+/// the analogous discipline in `cache/paged_detach.rs`.
+pub(crate) struct DetachedKvSetHolder {
+    inner: Option<DetachedKvSet>,
 }
 
-impl DetachedHolder {
-    pub(crate) fn new(set: DetachedCacheSet) -> Self {
+impl DetachedKvSetHolder {
+    pub(crate) fn new(set: DetachedKvSet) -> Self {
         Self { inner: Some(set) }
     }
 
@@ -58,21 +120,21 @@ impl DetachedHolder {
         self.inner.is_some()
     }
 
-    #[allow(dead_code)]
-    pub(crate) fn take(&mut self) -> Option<DetachedCacheSet> {
+    pub(crate) fn take(&mut self) -> Option<DetachedKvSet> {
         self.inner.take()
     }
 }
 
 // SAFETY: See the type-level doc-comment above. The detach/adopt API
-// moves buffer ownership rather than aliasing it, the holder sits behind a
-// Mutex inside `CacheEntry`, and each buffer is only touched by one thread
-// at a time (the worker thread at adopt time; no parallel MLX op is ever
-// issued against a parked tensor). This is the same discipline that
-// upstream `CachePool` uses for its own `DetachedMap`, which similarly
-// only guarantees "single-threaded access" at any given time.
-unsafe impl Send for DetachedHolder {}
-unsafe impl Sync for DetachedHolder {}
+// moves buffer ownership (and refcounts paged block pins) rather than
+// aliasing it, the holder sits behind a Mutex inside `CacheEntry`, and each
+// buffer is only touched by one thread at a time (the worker thread at adopt
+// time; no parallel MLX op is ever issued against a parked tensor). This is
+// the same discipline that upstream `CachePool` uses for its own
+// `DetachedMap`, which similarly only guarantees "single-threaded access" at
+// any given time.
+unsafe impl Send for DetachedKvSetHolder {}
+unsafe impl Sync for DetachedKvSetHolder {}
 
 /// A prompt-prefix cache entry.
 ///
@@ -94,7 +156,7 @@ unsafe impl Sync for DetachedHolder {}
 ///   trie/scan candidate selection.
 pub struct CacheEntry {
     pub tokens: Vec<i32>,
-    pub(crate) detached: Mutex<DetachedHolder>,
+    pub(crate) detached: Mutex<DetachedKvSetHolder>,
     pub last_used: Mutex<Instant>,
     pub size_bytes: usize,
     pub apc_block_hashes: Option<Vec<ApcBlockHash>>,
@@ -103,18 +165,19 @@ pub struct CacheEntry {
 impl CacheEntry {
     /// Build a new entry from a token prefix and its detached cache set.
     ///
-    /// `size_bytes` is captured from [`DetachedCacheSet::nbytes`] so the
-    /// store's byte-budget accounting is consistent even if the underlying
-    /// tensors are later adopted out of the entry.
+    /// `size_bytes` is captured from [`DetachedKvSet::nbytes`] so the
+    /// store's byte-budget accounting is consistent (across both dense and
+    /// paged backends) even if the underlying tensors are later adopted out
+    /// of the entry.
     ///
     /// The APC block-hash chain is left unset; callers that have APC
     /// enabled should attach it via [`CacheEntry::with_apc_block_hashes`]
     /// before inserting into the store.
-    pub fn new(tokens: Vec<i32>, detached: DetachedCacheSet) -> Self {
+    pub fn new(tokens: Vec<i32>, detached: DetachedKvSet) -> Self {
         let size_bytes = detached.nbytes();
         Self {
             tokens,
-            detached: Mutex::new(DetachedHolder::new(detached)),
+            detached: Mutex::new(DetachedKvSetHolder::new(detached)),
             last_used: Mutex::new(Instant::now()),
             size_bytes,
             apc_block_hashes: None,
@@ -151,7 +214,7 @@ impl CacheEntry {
     /// from any thread because the cache set is serialised through this
     /// entry's mutex; the actual adopt path must still run on the worker
     /// thread (or wherever the model's `CachePool` lives).
-    pub fn take_detached(&self) -> Option<DetachedCacheSet> {
+    pub fn take_detached(&self) -> Option<DetachedKvSet> {
         match self.detached.lock() {
             Ok(mut g) => g.take(),
             Err(poisoned) => poisoned.into_inner().take(),
@@ -215,7 +278,7 @@ impl CacheEntry {
         };
         Self {
             tokens,
-            detached: Mutex::new(DetachedHolder::new(detached)),
+            detached: Mutex::new(DetachedKvSetHolder::new(DetachedKvSet::Dense(detached))),
             last_used: Mutex::new(Instant::now()),
             size_bytes,
             apc_block_hashes: None,

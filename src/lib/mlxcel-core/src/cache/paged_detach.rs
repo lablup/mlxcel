@@ -556,20 +556,71 @@ impl CachePool {
         let k_norms_pages = std::mem::take(&mut detached.k_norms_pages);
         let cold_keys_pages = std::mem::take(&mut detached.cold_keys_pages);
 
-        // Reconstruct dense placeholder caches.
-        let mut live_caches: Vec<KVCache> = Vec::with_capacity(caches.len());
-        for detached_cache in caches {
-            let mut cache = KVCache::new_with_mode(detached_cache.mode);
-            cache
-                .install_detached(detached_cache)
-                .expect("freshly constructed KVCache is empty");
-            live_caches.push(cache);
-        }
-
         let id = SequenceId::from_raw(self.next_id.fetch_add(1, Ordering::Relaxed));
+        let state_rc = Rc::new(RefCell::new(paged_state));
+
+        // Decide pool-backing with the SAME gate `CachePool::allocate_with_layout`
+        // uses for a fresh paged allocation, so an adopted sequence is
+        // byte-identical in shape to one that allocated cold:
+        //
+        //  * the model's NATURAL backend is the dense external `KVCache` slice
+        //    (`supports_batching()` transformers — qwen3 / llama3), AND
+        //  * the paged layout is `Fp16`.
+        //
+        // When both hold, the live per-layer caches must be POOL-BACKED
+        // (`new_paged`) sharing the adopted block-table `state_rc` and the
+        // active pool. The block table already points at the pinned, refcounted
+        // pool blocks (detach captured it via `into_owned_paged_state` + pinned
+        // every block), so reads gather straight from the shared prefix pages
+        // with no copy. The empty `clone_handle` dense handles captured at
+        // detach time are intentionally ignored on this path — rebuilding dense
+        // caches from them (the pre-#121 behaviour) would hand the adopted
+        // sequence empty buffers and make it read garbage.
+        let pool_backed = model.sequence_state_layout().backend
+            == SequenceStateBackend::DenseKvCache
+            && paged_layout.cache_mode == KVCacheMode::Fp16;
+
+        let live_caches: Vec<KVCache> = if pool_backed {
+            let pool_rc = self
+                .paged_pool
+                .as_ref()
+                .expect("ensure_paged_pool_from_layout installed the pool above")
+                .clone();
+            // One pool-backed cache per layer, sharing the adopted block-table
+            // `state_rc`. Each cache's monotonic `offset` is restored from the
+            // detached handle (which `clone_handle` captured from the
+            // originating pool-backed cache at detach time) so RoPE positions
+            // for the post-adopt prefill/decode continue from the cached prefix
+            // length — a fresh `new_paged` cache would start at offset 0 and
+            // mis-rotate the suffix. The pool/state already hold the prefix
+            // K/V; only this dense-side offset bookkeeping needs carrying over.
+            caches
+                .into_iter()
+                .enumerate()
+                .map(|(layer_idx, handle)| {
+                    let mut cache =
+                        KVCache::new_paged(pool_rc.clone(), state_rc.clone(), layer_idx);
+                    cache.offset = handle.offset;
+                    cache
+                })
+                .collect()
+        } else {
+            // Dense-from-handles reconstruction (model-owned families, or any
+            // non-`Fp16` paged layout that keeps dense quantized placeholders).
+            let mut live = Vec::with_capacity(caches.len());
+            for detached_cache in caches {
+                let mut cache = KVCache::new_with_mode(detached_cache.mode);
+                cache
+                    .install_detached(detached_cache)
+                    .expect("freshly constructed KVCache is empty");
+                live.push(cache);
+            }
+            live
+        };
+
         let mut entry = SequenceCacheSet::paged(id, paged_layout.clone());
         entry.caches = live_caches;
-        entry.paged = Some(Rc::new(RefCell::new(paged_state)));
+        entry.paged = Some(state_rc);
         entry.backend = backend;
         entry.prompt_len = prompt_len;
         entry.current_offset = current_offset;
