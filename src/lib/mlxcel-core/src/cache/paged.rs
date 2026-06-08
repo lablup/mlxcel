@@ -1249,6 +1249,75 @@ impl PagedBlockPool {
         Ok(fresh)
     }
 
+    /// Read one block's full `[block_size, n_kv_heads, head_dim]` K and V slabs
+    /// out of the layer's physical pool tensors, for distributed transfer (#125).
+    ///
+    /// Mirrors the slab-read in [`Self::copy_on_write_block`]: it resolves the
+    /// block's physical row, slices the `[1, block_size, n_kv_heads, head_dim]`
+    /// window out of `pool_k`/`pool_v`, and reshapes each to the bare layout-A
+    /// `[block_size, n_kv_heads, head_dim]` slab that [`Self::write_block`]
+    /// accepts. The WHOLE block (including any trailing padding slots) is
+    /// returned, so a decode node can reconstruct a byte-identical block via
+    /// [`Self::acquire_and_write_block`].
+    pub fn read_block_contents(
+        &self,
+        block_id: PagedBlockId,
+        layer_idx: usize,
+    ) -> Result<(UniquePtr<MlxArray>, UniquePtr<MlxArray>), String> {
+        self.validate_layer(layer_idx)?;
+        let meta = self.pool_meta[layer_idx].ok_or_else(|| {
+            format!(
+                "PagedBlockPool::read_block_contents: layer {layer_idx} has no pool tensors to read from"
+            )
+        })?;
+        let src_row = *self.block_rows[layer_idx].get(&block_id).ok_or_else(|| {
+            format!(
+                "PagedBlockPool::read_block_contents: block {block_id} on layer {layer_idx} has no pool row (never written)"
+            )
+        })? as i32;
+        let block_size = self.layout.block_size as i32;
+
+        // Slice the source row's [block_size, H, D] slab out of K and V (the bare
+        // layout-A slab convention `write_block`/`acquire_and_write_block` accept).
+        let slab = |pool: &MlxArray| -> UniquePtr<MlxArray> {
+            let window = ffi::slice(
+                pool,
+                &[src_row, 0, 0, 0],
+                &[src_row + 1, block_size, meta.n_kv_heads, meta.head_dim],
+            );
+            ffi::reshape(&window, &[block_size, meta.n_kv_heads, meta.head_dim])
+        };
+        let k_slab = {
+            let pool_k = self.pool_k[layer_idx]
+                .as_ref()
+                .expect("pool_k present when pool_meta present");
+            slab(pool_k)
+        };
+        let v_slab = {
+            let pool_v = self.pool_v[layer_idx]
+                .as_ref()
+                .expect("pool_v present when pool_meta present");
+            slab(pool_v)
+        };
+        Ok((k_slab, v_slab))
+    }
+
+    /// Acquire a fresh block on `layer_idx` and write `k_block`/`v_block` (bare
+    /// layout-A `[block_size, n_kv_heads, head_dim]` slabs, as produced by
+    /// [`Self::read_block_contents`]) into it at slot 0. The returned block
+    /// starts at refcount 1. Used by the decode node to materialize a
+    /// transferred block on a fresh physical row (#125).
+    pub fn acquire_and_write_block(
+        &mut self,
+        layer_idx: usize,
+        k_block: &MlxArray,
+        v_block: &MlxArray,
+    ) -> Result<PagedBlockId, String> {
+        let id = self.acquire_block(layer_idx)?;
+        self.write_block(id, layer_idx, 0, k_block, v_block)?;
+        Ok(id)
+    }
+
     /// Gather the visible K/V window for one layer of a sequence into the
     /// SDPA-ready shape `[1, n_kv_heads, visible_len, head_dim]`.
     ///

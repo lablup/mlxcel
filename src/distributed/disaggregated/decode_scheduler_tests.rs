@@ -43,6 +43,7 @@ fn make_cache_state(prompt_len: usize) -> SerializableCacheState {
         sequence_id: 1,
         sequence_backend: SerializableSequenceBackend::DenseKvCache,
         paged_state: None,
+        paged_blocks: Vec::new(),
     }
 }
 

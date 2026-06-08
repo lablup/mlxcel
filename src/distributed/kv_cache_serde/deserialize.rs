@@ -197,18 +197,52 @@ pub fn restore_into_cache_pool_sequence(
     cache_pool: &mut mlxcel_core::cache::CachePool,
     seq_id: mlxcel_core::cache::SequenceId,
 ) -> Result<()> {
+    // A true pool-backed cross-node handoff carries the pool block CONTENTS in
+    // `paged_blocks` (#125). That path materializes fresh pool blocks rather
+    // than restoring dense per-layer buffers (empty for pool-backed sequences)
+    // or merely re-registering origin block-id metadata.
+    let content_path = !state.paged_blocks.is_empty();
+
     {
         let cache_set = cache_pool
             .get_mut(seq_id)
             .ok_or_else(|| anyhow::anyhow!("CachePool: sequence {seq_id} not found"))?;
-        if !state.entries.is_empty() || !cache_set.caches.is_empty() {
+        // Skip the dense per-layer restore on the content path: pool-backed
+        // caches keep their K/V in the shared pool (their dense entries are
+        // empty) and `restore_paged_state_with_contents` sets their RoPE
+        // offsets, so restoring dense buffers here would only zero those offsets.
+        if !content_path && (!state.entries.is_empty() || !cache_set.caches.is_empty()) {
             restore_into_kv_caches(state, &mut cache_set.caches)?;
         }
         cache_set.prompt_len = state.metadata.prompt_len;
         cache_set.current_offset = state.metadata.current_offset;
     }
 
-    if let Some(serialized) = state.paged_state.as_ref() {
+    if content_path {
+        let runtime = state
+            .paged_state
+            .as_ref()
+            .ok_or_else(|| {
+                anyhow::anyhow!("paged block contents present but paged_state metadata is missing")
+            })?
+            .to_runtime()?;
+        let mut contents = Vec::with_capacity(state.paged_blocks.len());
+        for (i, block) in state.paged_blocks.iter().enumerate() {
+            let keys =
+                reconstruct_mlx_array(&block.keys).with_context(|| format!("paged block {i} keys"))?;
+            let values = reconstruct_mlx_array(&block.values)
+                .with_context(|| format!("paged block {i} values"))?;
+            contents.push(mlxcel_core::cache::PagedBlockContents {
+                block_id: mlxcel_core::cache::PagedBlockId::from_raw(block.block_id),
+                layer_idx: block.layer_idx,
+                keys,
+                values,
+            });
+        }
+        cache_pool
+            .restore_paged_state_with_contents(seq_id, runtime, contents)
+            .map_err(anyhow::Error::msg)?;
+    } else if let Some(serialized) = state.paged_state.as_ref() {
         cache_pool
             .restore_paged_state(seq_id, serialized.to_runtime()?)
             .map_err(anyhow::Error::msg)?;

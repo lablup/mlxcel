@@ -65,11 +65,12 @@ pub use deserialize::{
 };
 pub use serialize::{
     CACHE_FORMAT_VERSION, extract_chunked_cache_entry, extract_kv_cache_entry,
-    extract_rotating_cache_entry, serialize_cache_state, serialize_sequence_cache_set,
+    extract_rotating_cache_entry, serialize_cache_pool_sequence, serialize_cache_state,
+    serialize_sequence_cache_set,
 };
 pub use types::{
     CACHE_FORMAT_VERSION_V1, CACHE_FORMAT_VERSION_V2, CacheMetadata, CacheType, RawTensorData,
-    SerializableCacheEntry, SerializableCacheState, SerializablePagedLayerState,
-    SerializablePagedSequenceState, SerializableSamplingState, SerializableSequenceBackend,
-    validate_raw_tensor,
+    SerializableCacheEntry, SerializableCacheState, SerializablePagedBlock,
+    SerializablePagedLayerState, SerializablePagedSequenceState, SerializableSamplingState,
+    SerializableSequenceBackend, validate_raw_tensor,
 };

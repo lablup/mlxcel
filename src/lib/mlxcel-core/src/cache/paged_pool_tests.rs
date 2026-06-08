@@ -41,6 +41,7 @@ use crate::dtype;
 use crate::ffi;
 use crate::ffi::MlxArray;
 use cxx::UniquePtr;
+use std::collections::HashMap;
 
 // ---------------------------------------------------------------------------
 // Shared helpers
@@ -880,4 +881,110 @@ fn write_prefill_cow_forks_shared_partial_tail_block() {
     );
     assert_eq!(flatten_fp32(&gk_b), flatten_fp32(&dense_b_k));
     assert_eq!(flatten_fp32(&gv_b), flatten_fp32(&dense_b_v));
+}
+
+// ---------------------------------------------------------------------------
+// 13. read_block_contents + acquire_and_write_block (#125): a multi-block
+//     prefill round-trips byte-identically through a SECOND (decode-node) pool.
+//
+// Models the cross-node block-content transfer: the origin pool's blocks are
+// read out slab-by-slab (`read_block_contents`), then re-materialized on a
+// fresh pool (`acquire_and_write_block`) with a remapped block table. The
+// gathered visible window must be byte-identical, the fresh ids must be
+// independent of (here, disjoint from) the origin ids, and block accounting
+// (per-block refcount + live count) must match the origin.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn extract_then_restore_with_contents_round_trips() {
+    let block_size = 4usize;
+    let total = 10i32; // 2 full blocks + a half-full third (partial-tail padding).
+    let mut origin = fp16_pool(block_size, 1);
+    let mut origin_state = PagedSequenceState::new(origin.layout());
+
+    let k_prefill = make_block(100.0, total);
+    let v_prefill = make_block(500.0, total);
+    origin
+        .write_prefill(&mut origin_state, 0, &k_prefill, &v_prefill)
+        .unwrap();
+
+    let origin_blocks = origin_state.layer(0).unwrap().block_ids.clone();
+    assert_eq!(origin_blocks.len(), 3);
+    let origin_live = origin.live_block_count();
+    assert_eq!(origin_live, 3);
+    let origin_max_id = origin_blocks
+        .iter()
+        .map(|b| b.as_u64())
+        .max()
+        .expect("non-empty block table");
+
+    // Baseline visible window from the origin pool.
+    let (origin_gk, origin_gv) = origin
+        .gather_visible(&origin_state, 0)
+        .unwrap()
+        .expect("origin gather must return data");
+
+    // "Transfer": read every block's full [block_size, H, D] slab out of origin.
+    let transferred: Vec<(u64, UniquePtr<MlxArray>, UniquePtr<MlxArray>)> = origin_blocks
+        .iter()
+        .map(|&block_id| {
+            let (k, v) = origin.read_block_contents(block_id, 0).unwrap();
+            (block_id.as_u64(), k, v)
+        })
+        .collect();
+
+    // Decode node: a fresh pool whose id counter is pre-advanced past the
+    // origin's max (a real decode pool is rarely pristine), so the restored
+    // blocks get provably disjoint fresh ids.
+    let mut decode = fp16_pool(block_size, 1);
+    let mut resident = PagedSequenceState::new(decode.layout());
+    decode
+        .append_tokens(&mut resident, 0, block_size * origin_blocks.len())
+        .unwrap();
+    let resident_live = decode.live_block_count();
+    assert_eq!(resident_live, origin_blocks.len());
+
+    // Acquire + write each transferred block, remapping origin id -> fresh id.
+    let mut id_map: HashMap<u64, PagedBlockId> = HashMap::new();
+    for (origin_id, k, v) in &transferred {
+        let fresh = decode.acquire_and_write_block(0, k, v).unwrap();
+        id_map.insert(*origin_id, fresh);
+    }
+
+    // Rebuild the block table over the fresh ids (same len / logical_start).
+    let mut decode_state = PagedSequenceState::new(decode.layout());
+    {
+        let layer = decode_state.layer_mut(0).unwrap();
+        layer.block_ids = origin_blocks
+            .iter()
+            .map(|origin_id| id_map[&origin_id.as_u64()])
+            .collect();
+        layer.len = origin_state.layer(0).unwrap().len;
+        layer.logical_start = origin_state.layer(0).unwrap().logical_start;
+    }
+
+    // Fresh ids are independent of the origin ids (disjoint here)...
+    for fresh in id_map.values() {
+        assert!(
+            fresh.as_u64() > origin_max_id,
+            "decode pool must allocate fresh ids past the origin's (got {}, origin max {origin_max_id})",
+            fresh.as_u64()
+        );
+    }
+
+    // ...but the gathered content is byte-identical to the origin window.
+    let (decode_gk, decode_gv) = decode
+        .gather_visible(&decode_state, 0)
+        .unwrap()
+        .expect("decode gather must return data");
+    assert_eq!(flatten_fp32(&origin_gk), flatten_fp32(&decode_gk));
+    assert_eq!(flatten_fp32(&origin_gv), flatten_fp32(&decode_gv));
+
+    // Block accounting matches the origin: every restored block is solely owned
+    // (refcount 1) and the decode pool's live count is the resident blocks plus
+    // exactly the origin's live count (no double-allocation, no leak).
+    for fresh in id_map.values() {
+        assert_eq!(decode.refcount(*fresh), 1);
+    }
+    assert_eq!(decode.live_block_count(), resident_live + origin_live);
 }

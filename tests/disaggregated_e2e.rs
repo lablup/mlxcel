@@ -98,6 +98,7 @@ fn test_cache_state(prompt_len: usize, num_layers: usize) -> SerializableCacheSt
         sequence_id: 0,
         sequence_backend: SerializableSequenceBackend::DenseKvCache,
         paged_state: None,
+        paged_blocks: Vec::new(),
     }
 }
 

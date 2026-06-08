@@ -114,6 +114,16 @@ use crate::ffi::MlxArray;
 use crate::ops::divide_scalar;
 use cxx::UniquePtr;
 
+/// One paged pool block's live K/V contents, used to ferry block data across
+/// the distributed serialization boundary (#125). Carries the ORIGIN node's
+/// physical block id and layer; the decode node remaps to fresh ids on restore.
+pub struct PagedBlockContents {
+    pub block_id: PagedBlockId,
+    pub layer_idx: usize,
+    pub keys: UniquePtr<MlxArray>,
+    pub values: UniquePtr<MlxArray>,
+}
+
 fn direct_prefill_cache_store_enabled() -> bool {
     std::env::var("MLXCEL_ENABLE_DIRECT_PREFILL_CACHE_STORE").is_ok()
 }
@@ -5248,7 +5258,7 @@ impl Default for ChunkedKVCache {
 
 // --- Per-sequence cache isolation for continuous batching ---
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
@@ -5615,6 +5625,12 @@ impl CachePool {
         };
         self.active.insert(id, entry);
         Ok(id)
+    }
+
+    /// Return an immutable reference to the full `SequenceCacheSet` for the
+    /// given sequence, or `None` if the ID is not active.
+    pub fn get(&self, id: SequenceId) -> Option<&SequenceCacheSet> {
+        self.active.get(&id)
     }
 
     /// Return a mutable reference to the full `SequenceCacheSet` for the
@@ -5995,6 +6011,208 @@ impl CachePool {
             .get_mut(&id)
             .ok_or_else(|| format!("CachePool: sequence {id} not found"))?;
         sequence.paged = Some(Rc::new(RefCell::new(restored)));
+        Ok(())
+    }
+
+    /// Extract the live K/V contents of every pool block backing a paged
+    /// sequence, for distributed transfer (#125).
+    ///
+    /// Returns one [`PagedBlockContents`] per distinct physical block in the
+    /// sequence's block table, carrying the ORIGIN node's block id + layer and
+    /// the block's full `[block_size, n_kv_heads, head_dim]` K/V slabs. The
+    /// decode node remaps these to fresh ids in
+    /// [`Self::restore_paged_state_with_contents`].
+    ///
+    /// Returns an empty vector for dense / model-owned sequences, for a paged
+    /// sequence with no block table, or when no paged pool exists.
+    pub fn extract_paged_blocks(&self, id: SequenceId) -> Result<Vec<PagedBlockContents>, String> {
+        let sequence = self
+            .active
+            .get(&id)
+            .ok_or_else(|| format!("CachePool: sequence {id} not found"))?;
+        if sequence.backend != SequenceStateBackend::PagedKvCache || sequence.paged.is_none() {
+            return Ok(Vec::new());
+        }
+        // Only POOL-BACKED (Fp16 paged) sequences keep their K/V in the shared
+        // pool. A model-owned paged sequence (gemma3 / llama4 / qwen3_5) holds
+        // dense placeholder caches and keeps its KV model-internal, with the pool
+        // tracking a shadow block table only, so there is nothing pool-paged to
+        // transfer. `caches.is_empty()` (a paged-natural stub) is vacuously
+        // pool-backed and falls through to the empty block-table fast path below.
+        if !sequence.caches.iter().all(|cache| cache.is_paged_backed()) {
+            return Ok(Vec::new());
+        }
+        let pool = match self.paged_pool.as_ref() {
+            Some(pool) => pool.borrow(),
+            None => return Ok(Vec::new()),
+        };
+        let state = sequence
+            .paged_state()
+            .expect("paged state present (checked above)");
+
+        let mut blocks = Vec::new();
+        // Block ids are globally unique and each belongs to exactly one layer, so
+        // a sequence-wide dedup never drops a needed block and prevents
+        // transferring the same physical block twice.
+        let mut seen: HashSet<u64> = HashSet::new();
+        for (layer_idx, layer) in state.layers.iter().enumerate() {
+            for &block_id in &layer.block_ids {
+                if !seen.insert(block_id.as_u64()) {
+                    continue;
+                }
+                let (keys, values) = pool.read_block_contents(block_id, layer_idx)?;
+                blocks.push(PagedBlockContents {
+                    block_id,
+                    layer_idx,
+                    keys,
+                    values,
+                });
+            }
+        }
+        Ok(blocks)
+    }
+
+    /// Restore externally serialized paged state INTO an active pool-backed
+    /// sequence, materializing transferred block CONTENTS on fresh physical
+    /// rows (#125).
+    ///
+    /// Unlike [`Self::restore_paged_state`] (which only re-registers the origin
+    /// node's block ids as metadata and assumes the contents already live in the
+    /// pool), this path is for a true cross-node handoff: it acquires a FRESH
+    /// block for every transferred [`PagedBlockContents`], writes the K/V slab,
+    /// and rebuilds the sequence's block table over the fresh ids. Each fresh
+    /// block starts at refcount 1, so block accounting matches the origin node.
+    ///
+    /// Requires the sequence to already be allocated with POOL-BACKED caches
+    /// (Fp16 paged, the #121 `new_paged` path), because the contents are stored
+    /// in the shared [`PagedBlockPool`]. The existing per-layer caches keep their
+    /// shared block-table cell (its contents are replaced IN PLACE, never the
+    /// `Rc` itself) so the restored state stays visible to them, and each cache's
+    /// RoPE `offset` is advanced to the restored prefix length (mirrors
+    /// `adopt_paged_preserving`; assumes the post-prefill `logical_start == 0`
+    /// invariant so `len` is the prefix length).
+    pub fn restore_paged_state_with_contents(
+        &mut self,
+        id: SequenceId,
+        restored: PagedSequenceState,
+        contents: Vec<PagedBlockContents>,
+    ) -> Result<(), String> {
+        let layout = {
+            let sequence = self
+                .active
+                .get(&id)
+                .ok_or_else(|| format!("CachePool: sequence {id} not found"))?;
+            if sequence.backend != SequenceStateBackend::PagedKvCache {
+                return Err(format!(
+                    "CachePool: sequence {id} is not using the paged backend"
+                ));
+            }
+            if !sequence.caches.iter().all(|c| c.is_paged_backed()) {
+                return Err(format!(
+                    "CachePool: restore_paged_state_with_contents requires a pool-backed sequence (sequence {id} has non-pool-backed caches)"
+                ));
+            }
+            sequence
+                .paged_layout
+                .clone()
+                .ok_or_else(|| format!("CachePool: sequence {id} is missing paged layout"))?
+        };
+        if restored.block_size != layout.block_size {
+            return Err(format!(
+                "CachePool: restored block size {} does not match layout block size {}",
+                restored.block_size, layout.block_size
+            ));
+        }
+        if restored.layers.len() != layout.num_layers {
+            return Err(format!(
+                "CachePool: restored layer count {} does not match layout layer count {}",
+                restored.layers.len(),
+                layout.num_layers
+            ));
+        }
+
+        self.ensure_paged_pool(&layout)?;
+
+        // Materialize the transferred contents on fresh rows and rebuild the
+        // block table over the new ids. The pool and the per-sequence state live
+        // in distinct `RefCell`s (and `pool_rc` is a cloned handle independent of
+        // `self`), so the pool `borrow_mut` here coexists with the state borrow.
+        let pool_rc = self
+            .paged_pool
+            .as_ref()
+            .expect("paged pool must exist after ensure_paged_pool")
+            .clone();
+        let (remapped, offsets) = {
+            let mut pool = pool_rc.borrow_mut();
+
+            // Release any blocks the sequence already holds (a freshly allocated
+            // sequence has none, so this is normally a no-op) so re-restoring
+            // never leaks. The shared state cell is KEPT (the caches clone it);
+            // only its contents are replaced below.
+            {
+                let sequence = self
+                    .active
+                    .get(&id)
+                    .ok_or_else(|| format!("CachePool: sequence {id} not found"))?;
+                if let Some(state_rc) = sequence.paged.as_ref() {
+                    pool.release_sequence(&mut state_rc.borrow_mut())?;
+                }
+            }
+
+            // Acquire + write a fresh block for every transferred origin block.
+            let mut map: HashMap<u64, PagedBlockId> = HashMap::new();
+            for content in &contents {
+                let fresh =
+                    pool.acquire_and_write_block(content.layer_idx, &content.keys, &content.values)?;
+                map.insert(content.block_id.as_u64(), fresh);
+            }
+
+            // Remap the block table over the fresh ids, preserving len /
+            // logical_start.
+            let mut layers = Vec::with_capacity(restored.layers.len());
+            for layer in &restored.layers {
+                let mut block_ids = Vec::with_capacity(layer.block_ids.len());
+                for origin in &layer.block_ids {
+                    let fresh = map.get(&origin.as_u64()).copied().ok_or_else(|| {
+                        format!("CachePool: missing transferred contents for block {origin}")
+                    })?;
+                    block_ids.push(fresh);
+                }
+                layers.push(PagedLayerState {
+                    block_ids,
+                    len: layer.len,
+                    logical_start: layer.logical_start,
+                });
+            }
+            let offsets: Vec<i32> = layers.iter().map(|layer| layer.len as i32).collect();
+            (
+                PagedSequenceState {
+                    block_size: restored.block_size,
+                    layers,
+                },
+                offsets,
+            )
+        };
+
+        // Install the remapped state IN PLACE (keep the shared cell the
+        // pool-backed caches clone) and advance each cache's RoPE offset to the
+        // restored prefix length.
+        let sequence = self
+            .active
+            .get_mut(&id)
+            .ok_or_else(|| format!("CachePool: sequence {id} not found"))?;
+        {
+            let state_rc = sequence
+                .paged
+                .as_ref()
+                .ok_or_else(|| format!("CachePool: sequence {id} has no paged state cell"))?;
+            *state_rc.borrow_mut() = remapped;
+        }
+        for (layer_idx, cache) in sequence.caches.iter_mut().enumerate() {
+            if let Some(&offset) = offsets.get(layer_idx) {
+                cache.offset = offset;
+            }
+        }
         Ok(())
     }
 
@@ -7073,6 +7291,121 @@ mod tests {
                 bytes_in_use: 352,
             })
         );
+    }
+
+    #[test]
+    fn cache_pool_extract_and_restore_with_contents_round_trips() {
+        // Drive a pool-backed (dense-natural StubModel + Fp16 paged layout)
+        // sequence on an origin CachePool, transfer its pool block CONTENTS to a
+        // fresh decode CachePool via extract_paged_blocks +
+        // restore_paged_state_with_contents, and assert content + block
+        // accounting parity (#125).
+        const H: i32 = 2;
+        const D: i32 = 3;
+        let block_size = 4usize;
+        let num_layers = 2usize;
+        let n_new = 6i32; // 2 blocks per layer (block 0 full, block 1 half-full).
+
+        let layout =
+            PagedKvLayout::uniform(num_layers, block_size, block_size * (H * D) as usize * 2)
+                .unwrap();
+        let model = StubModel { num_layers };
+
+        // FP32 [1, H, n, D] K/V whose values encode (layer, head, slot, dim) so
+        // every layer's blocks are distinct and any mis-slotting is caught. FP32
+        // is preserved through the pool (no astype), so a raw byte compare is
+        // meaningful.
+        let make_kv = |layer: usize, salt: f32| -> UniquePtr<MlxArray> {
+            let mut vals = Vec::with_capacity((H * n_new * D) as usize);
+            for head in 0..H {
+                for slot in 0..n_new {
+                    for dim in 0..D {
+                        vals.push(
+                            salt + layer as f32 * 10_000.0
+                                + head as f32 * 1000.0
+                                + slot as f32 * 10.0
+                                + dim as f32,
+                        );
+                    }
+                }
+            }
+            ffi::from_slice_f32(&vals, &[1, H, n_new, D])
+        };
+        let raw = |arr: &MlxArray| -> Vec<u8> {
+            ffi::eval(arr);
+            ffi::array_to_raw_bytes(arr)
+        };
+
+        // --- Origin pool: allocate a pool-backed paged seq + write content. ---
+        let mut origin = CachePool::new(4);
+        let id_a = origin
+            .allocate_with_layout(
+                &model,
+                Some(SequenceStateLayout::paged_kv_cache(layout.clone())),
+            )
+            .unwrap();
+        {
+            let caches = origin.get_caches_mut(id_a).unwrap();
+            assert!(caches.iter().all(|c| c.is_paged_backed()));
+            for (layer_idx, cache) in caches.iter_mut().enumerate() {
+                let k = make_kv(layer_idx, 100.0);
+                let v = make_kv(layer_idx, 500.0);
+                let _ = cache.update_and_fetch(k, v);
+            }
+        }
+
+        let contents_a = origin.extract_paged_blocks(id_a).unwrap();
+        // 2 layers * 2 blocks each = 4 transferred blocks.
+        assert_eq!(contents_a.len(), 4);
+        let origin_stats = origin.paged_stats();
+        let origin_live = origin.paged_pool_ref().unwrap().live_block_count();
+        // Runtime block table to ferry alongside the contents.
+        let runtime_a = (*origin.get_paged_state(id_a).unwrap()).clone();
+
+        // --- Decode pool: allocate a matching pool-backed seq + restore. ---
+        let mut decode = CachePool::new(4);
+        let id_b = decode
+            .allocate_with_layout(
+                &model,
+                Some(SequenceStateLayout::paged_kv_cache(layout.clone())),
+            )
+            .unwrap();
+        decode
+            .restore_paged_state_with_contents(id_b, runtime_a, contents_a)
+            .unwrap();
+
+        // Block accounting after restore matches the origin (no leak, no double).
+        assert_eq!(decode.paged_stats(), origin_stats);
+        assert_eq!(
+            decode.paged_pool_ref().unwrap().live_block_count(),
+            origin_live
+        );
+
+        // Restored caches are pool-backed and their RoPE offset is the prefix len.
+        {
+            let caches = decode.get_caches_mut(id_b).unwrap();
+            assert!(caches.iter().all(|c| c.is_paged_backed()));
+            for cache in caches.iter() {
+                assert_eq!(cache.offset, n_new);
+            }
+        }
+
+        // Content parity: extract iterates layers/blocks in the same order on
+        // both pools and the decode block table is the origin's remapped 1:1, so
+        // block i is the same logical (layer, position). The bytes are identical.
+        let check_a = origin.extract_paged_blocks(id_a).unwrap();
+        let check_b = decode.extract_paged_blocks(id_b).unwrap();
+        assert_eq!(check_a.len(), check_b.len());
+        for (a, b) in check_a.iter().zip(check_b.iter()) {
+            assert_eq!(a.layer_idx, b.layer_idx);
+            assert_eq!(raw(&a.keys), raw(&b.keys), "layer {} K mismatch", a.layer_idx);
+            assert_eq!(
+                raw(&a.values),
+                raw(&b.values),
+                "layer {} V mismatch",
+                a.layer_idx
+            );
+        }
     }
 
     #[test]

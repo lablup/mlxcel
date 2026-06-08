@@ -33,7 +33,8 @@ use anyhow::{Context, Result};
 
 use super::types::{
     CACHE_FORMAT_VERSION_V2, CacheMetadata, CacheType, RawTensorData, SerializableCacheEntry,
-    SerializableCacheState, SerializablePagedSequenceState, SerializableSequenceBackend,
+    SerializableCacheState, SerializablePagedBlock, SerializablePagedSequenceState,
+    SerializableSequenceBackend,
 };
 
 /// Current cache serialization format version.
@@ -212,5 +213,48 @@ pub fn serialize_sequence_cache_set(
             .paged_state()
             .zip(cache_set.paged_layout())
             .map(|(state, layout)| SerializablePagedSequenceState::from_runtime(&state, layout)),
+        // Pool block CONTENTS are not reachable from a bare `SequenceCacheSet`
+        // (they live in the shared `PagedBlockPool`). They are filled in by
+        // `serialize_cache_pool_sequence`, which has the owning `CachePool`.
+        paged_blocks: Vec::new(),
     }
+}
+
+/// Serialize a sequence directly from its owning [`CachePool`], including the
+/// paged pool block CONTENTS for a pool-backed (Fp16 paged) sequence (#125).
+///
+/// This is the pool-aware superset of [`serialize_sequence_cache_set`]: it
+/// assembles the dense entries, metadata, and paged block-table snapshot exactly
+/// as the cache-set path does, then attaches the live K/V slab of every physical
+/// pool block backing the sequence (via [`CachePool::extract_paged_blocks`]). For
+/// a dense / metadata-only sequence the block list is empty and the result is
+/// identical to [`serialize_sequence_cache_set`], so the wire format stays
+/// backward compatible.
+///
+/// Used by: the prefill node when handing a pool-backed sequence to a decode
+/// node. The scheduler / transport wiring that calls this is the #126 capstone.
+pub fn serialize_cache_pool_sequence(
+    cache_pool: &mlxcel_core::cache::CachePool,
+    id: mlxcel_core::cache::SequenceId,
+    sampling_state: Option<super::types::SerializableSamplingState>,
+    token_history: Vec<i32>,
+) -> Result<SerializableCacheState> {
+    let cache_set = cache_pool
+        .get(id)
+        .ok_or_else(|| anyhow::anyhow!("CachePool: sequence {id} not found"))?;
+    let mut state = serialize_sequence_cache_set(cache_set, sampling_state, token_history);
+
+    state.paged_blocks = cache_pool
+        .extract_paged_blocks(id)
+        .map_err(anyhow::Error::msg)?
+        .into_iter()
+        .map(|content| SerializablePagedBlock {
+            block_id: content.block_id.as_u64(),
+            layer_idx: content.layer_idx,
+            keys: extract_mlx_array_data(&content.keys),
+            values: extract_mlx_array_data(&content.values),
+        })
+        .collect();
+
+    Ok(state)
 }

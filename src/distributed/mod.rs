@@ -116,11 +116,12 @@ pub use heartbeat::{HEARTBEAT_OPERATION, HeartbeatConfig, HeartbeatPayload, Hear
 pub use kv_cache_serde::{
     CACHE_FORMAT_VERSION, CACHE_FORMAT_VERSION_V1, CACHE_FORMAT_VERSION_V2, CacheMetadata,
     CacheType, RawTensorData, SerializableCacheEntry, SerializableCacheState,
-    SerializablePagedLayerState, SerializablePagedSequenceState, SerializableSamplingState,
-    SerializableSequenceBackend, deserialize_cache_state, extract_chunked_cache_entry,
-    extract_kv_cache_entry, extract_rotating_cache_entry, reconstruct_mlx_array,
-    restore_into_cache_pool_sequence, restore_into_kv_caches, restore_into_sequence_cache_set,
-    serialize_cache_state, serialize_sequence_cache_set, validate_raw_tensor,
+    SerializablePagedBlock, SerializablePagedLayerState, SerializablePagedSequenceState,
+    SerializableSamplingState, SerializableSequenceBackend, deserialize_cache_state,
+    extract_chunked_cache_entry, extract_kv_cache_entry, extract_rotating_cache_entry,
+    reconstruct_mlx_array, restore_into_cache_pool_sequence, restore_into_kv_caches,
+    restore_into_sequence_cache_set, serialize_cache_pool_sequence, serialize_cache_state,
+    serialize_sequence_cache_set, validate_raw_tensor,
 };
 pub use kv_cache_transfer::{
     AdaptiveSelector, BandwidthEstimator, BandwidthSample, CacheQuantizationConfig,

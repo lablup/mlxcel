@@ -174,6 +174,7 @@ fn full_state_serialize_deserialize_round_trip() {
         sequence_id: 42,
         sequence_backend: SerializableSequenceBackend::DenseKvCache,
         paged_state: None,
+        paged_blocks: Vec::new(),
     };
 
     // Serialize
@@ -239,6 +240,7 @@ fn multi_layer_state_round_trip() {
         sequence_id: 7,
         sequence_backend: SerializableSequenceBackend::DenseKvCache,
         paged_state: None,
+        paged_blocks: Vec::new(),
     };
 
     let bytes = serialize_cache_state(&state).unwrap();
@@ -280,6 +282,7 @@ fn empty_cache_state_round_trip() {
         sequence_id: 0,
         sequence_backend: SerializableSequenceBackend::DenseKvCache,
         paged_state: None,
+        paged_blocks: Vec::new(),
     };
 
     let bytes = serialize_cache_state(&state).unwrap();
@@ -319,6 +322,7 @@ fn restore_into_kv_caches_round_trip() {
         sequence_id: 1,
         sequence_backend: SerializableSequenceBackend::DenseKvCache,
         paged_state: None,
+        paged_blocks: Vec::new(),
     };
 
     // Serialize and deserialize
@@ -396,6 +400,7 @@ fn restore_layer_count_mismatch_fails() {
         sequence_id: 0,
         sequence_backend: SerializableSequenceBackend::DenseKvCache,
         paged_state: None,
+        paged_blocks: Vec::new(),
     };
 
     let mut target = vec![mlxcel_core::cache::KVCache::new()]; // only 1 layer
@@ -588,6 +593,7 @@ fn restore_into_sequence_cache_set_round_trip() {
         sequence_id: 99,
         sequence_backend: SerializableSequenceBackend::DenseKvCache,
         paged_state: None,
+        paged_blocks: Vec::new(),
     };
 
     let bytes = serialize_cache_state(&state).unwrap();
@@ -680,6 +686,7 @@ fn restore_into_sequence_cache_set_restores_paged_state() {
                 },
             ],
         }),
+        paged_blocks: Vec::new(),
     };
 
     let mut cache_set = mlxcel_core::cache::SequenceCacheSet::paged(

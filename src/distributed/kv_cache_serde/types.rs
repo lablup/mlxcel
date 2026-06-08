@@ -207,6 +207,26 @@ pub struct SerializableCacheEntry {
     pub values: Option<RawTensorData>,
 }
 
+/// One paged pool block's K/V contents in serializable form (#125).
+///
+/// Carries the ORIGIN node's physical `block_id` + `layer_idx` and the block's
+/// full `[block_size, n_kv_heads, head_dim]` K and V slabs as [`RawTensorData`].
+/// The decode node reconstructs each slab, acquires a FRESH pool block, and
+/// remaps `block_id` to the new physical id so block accounting matches the
+/// origin. Like the dense `entries`, the tensor bytes ride inside the JSON
+/// metadata frame; a compact binary framing is deferred to the #126 capstone.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SerializablePagedBlock {
+    /// Origin-node physical block id (remapped on restore).
+    pub block_id: u64,
+    /// Layer the block belongs to.
+    pub layer_idx: usize,
+    /// Block's full K slab `[block_size, n_kv_heads, head_dim]`.
+    pub keys: RawTensorData,
+    /// Block's full V slab `[block_size, n_kv_heads, head_dim]`.
+    pub values: RawTensorData,
+}
+
 /// Metadata for the serialized cache state.
 ///
 /// Serialized as JSON within the wire format so it can evolve without
@@ -279,6 +299,14 @@ pub struct SerializableCacheState {
     /// Mirrored paged sequence state for paged-backed decode.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub paged_state: Option<SerializablePagedSequenceState>,
+    /// Transferred paged pool block CONTENTS for a pool-backed cross-node
+    /// handoff (#125). Empty for dense / metadata-only payloads (kept
+    /// wire-compatible via `serde(default)` + `skip_serializing_if`), populated
+    /// when a true pool-backed sequence is serialized. The tensor bytes ride
+    /// inside this JSON metadata frame, same as the dense `entries`; a compact
+    /// binary framing is deferred to #126.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub paged_blocks: Vec<SerializablePagedBlock>,
 }
 
 /// Convert MLX dtype code to `TensorDtype` for the tensor protocol.
