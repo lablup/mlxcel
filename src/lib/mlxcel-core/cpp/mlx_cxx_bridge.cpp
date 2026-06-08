@@ -217,6 +217,10 @@ std::unique_ptr<MlxArray> from_bytes(rust::Slice<const uint8_t> data, rust::Slic
             return make_array_typed<int64_t>(data.data(), mlx_shape, mlx_dtype);
         case 10:  // FLOAT32
             return make_array_typed<float>(data.data(), mlx_shape, mlx_dtype);
+        case 9:  // FLOAT16: reinterpret 2-byte halfs, not per-byte uint8 casts
+            return make_array_typed<mlx::core::float16_t>(data.data(), mlx_shape, mlx_dtype);
+        case 12:  // BFLOAT16: reinterpret 2-byte bf16, not per-byte uint8 casts
+            return make_array_typed<mlx::core::bfloat16_t>(data.data(), mlx_shape, mlx_dtype);
         case 1:  // UINT8
         default:
             return std::make_unique<MlxArray>(array(data.data(), mlx_shape, mlx_dtype));

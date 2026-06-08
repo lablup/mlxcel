@@ -335,8 +335,8 @@ pub fn mlx_dtype_element_size(mlx_dtype: i32) -> anyhow::Result<usize> {
         0 => Ok(1),               // BOOL
         1 => Ok(1),               // UINT8
         5 => Ok(1),               // INT8
-        2 | 6 | 9 => Ok(2),       // UINT16, INT16, FLOAT16
-        3 | 7 | 10 | 12 => Ok(4), // UINT32, INT32, FLOAT32, BFLOAT16
+        2 | 6 | 9 | 12 => Ok(2), // UINT16, INT16, FLOAT16, BFLOAT16
+        3 | 7 | 10 => Ok(4),     // UINT32, INT32, FLOAT32
         4 | 8 | 11 => Ok(8),      // UINT64, INT64, FLOAT64
         13 => Ok(8),              // COMPLEX64
         other => anyhow::bail!("unknown MLX dtype code: {other}"),

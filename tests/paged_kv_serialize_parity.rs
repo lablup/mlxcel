@@ -156,6 +156,19 @@ fn load_or_skip(model_dir_name: &str, fetch_repo: &str) -> Option<mlxcel::Loaded
     Some(model)
 }
 
+/// Gather one layer's visible K window directly from a sequence's pool and
+/// return its raw bytes, for cross-node KV-reconstruction parity checks.
+fn gather_layer_k_bytes(cp: &CachePool, id: mlxcel_core::cache::SequenceId, layer: usize) -> Vec<u8> {
+    let pool = cp.paged_pool_ref().expect("paged pool present");
+    let seq = cp.get(id).expect("sequence present");
+    let state = seq.paged_state().expect("paged state present");
+    let (k, _v) = pool
+        .gather_visible(&state, layer)
+        .expect("gather_visible ok")
+        .expect("gather_visible returned a window");
+    mlxcel_core::array_to_raw_bytes(&k)
+}
+
 /// Single-node reference vs a serialize -> wire -> deserialize -> restore handoff
 /// onto a fresh decode `CachePool`. The handoff must reproduce the reference
 /// decode exactly and reconstruct identical block accounting.
@@ -222,6 +235,32 @@ fn assert_serialize_handoff_parity(model: &mlxcel::LoadedModel, label: &str) {
         .expect("decode paged allocate");
     restore_into_cache_pool_sequence(&restored_state, &mut decode, id_d)
         .expect("restore handed-off paged sequence");
+
+    // KV reconstruction parity: every layer's gathered visible window on the
+    // decode node must be byte-identical to the origin's. This is the headline
+    // #125 guarantee and localizes any per-layer content/offset drift before the
+    // (noisier) end-to-end decode comparison below.
+    for layer in 0..num_layers {
+        assert_eq!(
+            gather_layer_k_bytes(&decode, id_d, layer),
+            gather_layer_k_bytes(&origin, id_o, layer),
+            "{label}: layer {layer} restored visible K window differs from the origin"
+        );
+    }
+
+    // RoPE continuation: each restored cache's monotonic offset must equal the
+    // prefilled prompt length so the first decode token rotates at the right
+    // position (gather above does not exercise `cache.offset`).
+    {
+        let caches = decode.get_caches_mut(id_d).expect("decode caches");
+        for (layer, cache) in caches.iter().enumerate() {
+            assert_eq!(
+                cache.offset,
+                PROMPT_TOKENS.len() as i32,
+                "{label}: layer {layer} restored cache offset"
+            );
+        }
+    }
 
     // Block accounting after restore matches the origin (no leak, no double-free).
     assert_eq!(

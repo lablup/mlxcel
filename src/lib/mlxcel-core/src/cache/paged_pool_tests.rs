@@ -988,3 +988,91 @@ fn extract_then_restore_with_contents_round_trips() {
     }
     assert_eq!(decode.live_block_count(), resident_live + origin_live);
 }
+
+/// The distributed handoff (#125) ships pool blocks through `array_to_raw_bytes`
+/// -> wire -> `from_bytes`. That byte round-trip must preserve 16-bit float
+/// content EXACTLY. A `from_bytes` bug used to read fp16/bf16 bytes as per-byte
+/// `uint8`->float casts (reading half the bytes, one value per byte), silently
+/// corrupting every transferred block; the single-layer FP32 round-trip above
+/// could not catch it because FP32 has an explicit `from_bytes` case. This
+/// exercises the exact serde path in both 16-bit dtypes across two physical
+/// blocks (one partial tail), comparing the gathered window byte-for-byte.
+fn assert_byte_roundtrip_preserves_content(cast_dtype: i32) {
+    let block_size = 4usize;
+    let total = 10i32; // 2 full blocks + a half-full third (partial tail).
+    let mut origin = fp16_pool(block_size, 1);
+    let mut origin_state = PagedSequenceState::new(origin.layout());
+
+    // Cast the deterministic content to the real pool-backed 16-bit dtype.
+    let k_prefill = ffi::astype(&make_block(100.0, total), cast_dtype);
+    let v_prefill = ffi::astype(&make_block(500.0, total), cast_dtype);
+    origin
+        .write_prefill(&mut origin_state, 0, &k_prefill, &v_prefill)
+        .unwrap();
+
+    let origin_blocks = origin_state.layer(0).unwrap().block_ids.clone();
+    let (origin_gk, origin_gv) = origin
+        .gather_visible(&origin_state, 0)
+        .unwrap()
+        .expect("origin gather");
+
+    // Transfer each block through the raw byte wire (read -> bytes -> from_bytes).
+    let transferred: Vec<(u64, UniquePtr<MlxArray>, UniquePtr<MlxArray>)> = origin_blocks
+        .iter()
+        .map(|&block_id| {
+            let (k, v) = origin.read_block_contents(block_id, 0).unwrap();
+            let kk = ffi::from_bytes(
+                &ffi::array_to_raw_bytes(&k),
+                &ffi::array_shape(&k),
+                ffi::array_dtype(&k),
+            );
+            let vv = ffi::from_bytes(
+                &ffi::array_to_raw_bytes(&v),
+                &ffi::array_shape(&v),
+                ffi::array_dtype(&v),
+            );
+            (block_id.as_u64(), kk, vv)
+        })
+        .collect();
+
+    let mut decode = fp16_pool(block_size, 1);
+    let mut decode_state = PagedSequenceState::new(decode.layout());
+    let mut id_map: HashMap<u64, PagedBlockId> = HashMap::new();
+    for (origin_id, k, v) in &transferred {
+        id_map.insert(*origin_id, decode.acquire_and_write_block(0, k, v).unwrap());
+    }
+    {
+        let layer = decode_state.layer_mut(0).unwrap();
+        layer.block_ids = origin_blocks
+            .iter()
+            .map(|o| id_map[&o.as_u64()])
+            .collect();
+        layer.len = origin_state.layer(0).unwrap().len;
+        layer.logical_start = origin_state.layer(0).unwrap().logical_start;
+    }
+    let (decode_gk, decode_gv) = decode
+        .gather_visible(&decode_state, 0)
+        .unwrap()
+        .expect("decode gather");
+
+    assert_eq!(
+        flatten_fp32(&origin_gk),
+        flatten_fp32(&decode_gk),
+        "K content corrupted by the byte round-trip (dtype {cast_dtype})"
+    );
+    assert_eq!(
+        flatten_fp32(&origin_gv),
+        flatten_fp32(&decode_gv),
+        "V content corrupted by the byte round-trip (dtype {cast_dtype})"
+    );
+}
+
+#[test]
+fn paged_block_byte_roundtrip_preserves_fp16() {
+    assert_byte_roundtrip_preserves_content(dtype::FLOAT16);
+}
+
+#[test]
+fn paged_block_byte_roundtrip_preserves_bf16() {
+    assert_byte_roundtrip_preserves_content(dtype::BFLOAT16);
+}
