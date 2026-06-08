@@ -122,6 +122,39 @@ fn kv_cache_extract_reconstruct_round_trip() {
     );
 }
 
+/// The serde restore path (`reconstruct_mlx_array` -> `from_bytes`) must
+/// round-trip 16-bit float tensors bit-exactly. Real model KV is fp16/bf16, and
+/// both the dense and paged (#125) KV serde carry it as `RawTensorData`; a
+/// `from_bytes` regression on 16-bit dtypes silently corrupts every transferred
+/// tensor. The other extract/reconstruct tests above use FP32 (which has an
+/// explicit `from_bytes` case), so they are blind to the 16-bit path that bit
+/// the distributed handoff.
+#[test]
+fn reconstruct_mlx_array_round_trips_16bit_floats() {
+    let vals: Vec<f32> = vec![
+        -2.5, -1.0, -0.25, 0.0, 0.5, 1.0, 2.0, 3.5, 42.0, -100.0, 0.125, 255.0,
+    ];
+    let shape = [3i32, 4];
+    for &dt in &[mlxcel_core::dtype::FLOAT16, mlxcel_core::dtype::BFLOAT16] {
+        let orig = ffi::astype(&ffi::from_slice_f32(&vals, &shape), dt);
+        ffi::eval(&orig);
+        // Build the RawTensorData exactly as the serialize path does.
+        let raw = RawTensorData {
+            data: ffi::array_to_raw_bytes(&orig),
+            shape: ffi::array_shape(&orig),
+            dtype: ffi::array_dtype(&orig),
+        };
+        let recon = reconstruct_mlx_array(&raw).unwrap();
+        ffi::eval(&recon);
+        assert_eq!(ffi::array_dtype(&recon), dt, "dtype {dt} must be preserved");
+        assert_eq!(
+            ffi::array_to_raw_bytes(&recon),
+            raw.data,
+            "reconstruct_mlx_array must reproduce the exact 16-bit bytes (dtype {dt})"
+        );
+    }
+}
+
 #[test]
 fn empty_kv_cache_extract_reconstruct() {
     let cache = mlxcel_core::cache::KVCache::new();

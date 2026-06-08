@@ -1160,6 +1160,40 @@ fn flatten_f32_local(arr: &MlxArray) -> Vec<f32> {
         .collect()
 }
 
+/// `from_bytes` must reinterpret raw bytes according to the declared dtype.
+/// FLOAT16 (9) and BFLOAT16 (12) are 2 bytes per element; a regression that
+/// routes them through the per-byte `uint8` path reads only half the data and
+/// silently corrupts the tensor. This bit the distributed KV serde (#125):
+/// every fp16/bf16 block transferred over the wire was mangled, surfacing only
+/// in a real-model run because the synthetic FP32 round-trip tests have an
+/// explicit `from_bytes` case and are blind to the 16-bit path. This is the
+/// low-level guard for any future change to `from_bytes`/`array_to_raw_bytes`.
+#[test]
+fn from_bytes_round_trips_16bit_floats_bit_exactly() {
+    let vals: Vec<f32> = vec![
+        -2.5, -1.0, -0.25, 0.0, 0.5, 1.0, 2.0, 3.5, 42.0, -100.0, 0.125, 255.0,
+    ];
+    let shape = [3i32, 4];
+    for &dt in &[dtype::FLOAT16, dtype::BFLOAT16, dtype::FLOAT32] {
+        let orig = astype(&from_slice_f32(&vals, &shape), dt);
+        eval(&orig);
+        let bytes = array_to_raw_bytes(&orig);
+        let recon = from_bytes(&bytes, &array_shape(&orig), array_dtype(&orig));
+        eval(&recon);
+        assert_eq!(array_dtype(&recon), dt, "dtype {dt} must be preserved");
+        assert_eq!(
+            array_shape(&recon),
+            array_shape(&orig),
+            "shape must be preserved (dtype {dt})"
+        );
+        assert_eq!(
+            array_to_raw_bytes(&recon),
+            bytes,
+            "from_bytes must reproduce the exact bytes for dtype {dt}; 16-bit types must be reinterpreted, not read one value per byte"
+        );
+    }
+}
+
 #[test]
 fn test_rms_norm() {
     let x = ones(&[1, 4], dtype::FLOAT32);
