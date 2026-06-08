@@ -102,6 +102,21 @@ Phases 1 through 3 inherit the following from this decision:
 
 The fused Metal paged-attention kernel (Phase 6, #123) stays deferred. The crossover context length above gives the downstream phases a concrete trigger: if real workloads run past it and the gather overhead shows up in end-to-end decode throughput, (B) is the planned next step, and the gather path built in Phases 1 and 2 remains the correctness reference and fallback for it.
 
+## Phase 6 outcome (#123): fused kernel built, gather stays the default
+
+Phase 6 implemented the (B) kernel and benchmarked it against the (A) gather path. The kernel (`src/lib/mlx-cpp/turbo/paged_attention.cpp`, JIT-compiled via `mlx::core::fast::metal_kernel`) is a split-K flash-decoding attention: one threadgroup per (batch, query head), `NumSplits` SIMD groups split the token range, and within each SIMD group the 32 lanes partition the head dimension so the per-token QK dot product is a single barrier-free `simd_sum`. It reads scattered KV blocks straight from the pool through the block table, with no gather copy. It is correct to fp32 round-off: RMS about 2e-8 against `paged_decode_attention_pooled_fallback` over 200 fragmented decode steps, plus grouped-query and batched cases.
+
+The throughput does not justify making (B) the default on Apple Silicon. Measured on the M1 Ultra spike machine (50 timed iterations after 20 warmup, f16 pool, head_dim 128, 32 q-heads, 8 kv-heads, block 32), the fused-vs-gather speedup (a value above 1 means the fused kernel is faster):
+
+| ctx | b=1 | b=4 | b=8 | b=16 |
+|----:|----:|----:|----:|-----:|
+| 4096 | 0.50x | 1.30x | 1.01x | 1.36x |
+| 16384 | 0.39x | 0.83x | 0.82x | 0.91x |
+
+The fused kernel wins at 4096 tokens once decode is batched (batch >= 4), and it scales better with batch than the gather path, the behaviour this ADR predicted from gather overhead growing with batch. At 16384 tokens it runs about 0.8 to 0.9x of the gather path across batch sizes, so it loses in the regime this ADR named as the primary trigger. The cause is the one the Decision section anticipated for unified memory: there is no host copy to avoid, and MLX folds the gather's `take` / `reshape` / `transpose` into its tuned fused SDPA, so the (A) path already runs near the contiguous lower bound. A hand-written JIT kernel reading scattered f16 blocks does not beat that tuned SDPA on memory bandwidth at long context.
+
+Phase 6 lands the kernel gated off. The native path is opt-in through the `MLXCEL_PAGED_ATTENTION_NATIVE` environment variable (or the `use_native_paged_kernel` argument on `paged_decode_attention_pooled`), and the default stays on the gather-then-SDPA path. The kernel keeps its value for the batched moderate-context regime where it wins, and as a starting point if a future device or a non-fused gather path shifts the trade-off. `examples/paged_attention_kernel_bench.rs` reproduces the table above.
+
 ## References
 
 - Epic #116, unified KV cache.

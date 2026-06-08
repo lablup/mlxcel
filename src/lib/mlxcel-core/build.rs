@@ -40,6 +40,11 @@ fn main() {
         // FP16 cold body never materialises in global memory; the host
         // pairs this with a hot-V matmul to produce the final SDPA output.
         .file("../mlx-cpp/turbo/turbo4_delegated_sdpa.cpp")
+        // Fused paged-attention decode kernel launcher (epic #116 Phase 6,
+        // #123). Reads scattered KV blocks out of the global pool via a block
+        // table with no separate gather copy; the gather-then-SDPA path stays
+        // the correctness reference and fallback.
+        .file("../mlx-cpp/turbo/paged_attention.cpp")
         .include(&mlx_include)
         .include("cpp")
         .include("../mlx-cpp/turbo")
@@ -128,6 +133,10 @@ fn main() {
     // Turbo4Delegated cold-V fused weighted-sum kernel launcher.
     println!("cargo:rerun-if-changed=../mlx-cpp/turbo/turbo4_delegated_sdpa.h");
     println!("cargo:rerun-if-changed=../mlx-cpp/turbo/turbo4_delegated_sdpa.cpp");
+    // Fused paged-attention decode kernel launcher (#123).
+    println!("cargo:rerun-if-changed=../mlx-cpp/turbo/paged_attention.h");
+    println!("cargo:rerun-if-changed=../mlx-cpp/turbo/paged_attention.cpp");
+    println!("cargo:rerun-if-changed=../mlx-cpp/turbo/paged_attention.metal");
     println!("cargo:rerun-if-env-changed=MLX_CUDA_ARCHITECTURES");
     println!("cargo:rerun-if-env-changed=MLXCEL_BUILD_METAL");
     println!("cargo:rerun-if-env-changed=MLXCEL_BUILD_ACCELERATE");

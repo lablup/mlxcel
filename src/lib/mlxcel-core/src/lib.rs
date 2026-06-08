@@ -1155,6 +1155,27 @@ mod ffi {
             scale: f32,
         ) -> UniquePtr<MlxArray>;
 
+        /// Fused paged-attention decode Metal kernel (epic #116 Phase 6, #123).
+        ///
+        /// Reads scattered KV blocks directly out of the global pool via the
+        /// block table, with no separate gather copy. `q` is `[B, Hq, 1, D]`
+        /// f32; `k_pool` / `v_pool` are the layer's pool tensors
+        /// `[num_blocks, block_size, Hkv, D]` f16. The metadata are i32 arrays:
+        /// `rows` is every sequence's physical pool rows concatenated in
+        /// block-table order, `row_offsets` (`[B + 1]`) the start of each
+        /// sequence's rows, and `logical_starts` / `visible_lens` (`[B]`) bound
+        /// each sequence's visible window. Returns `[B, Hq, 1, D]` f32.
+        fn paged_attention_decode(
+            q: &MlxArray,
+            k_pool: &MlxArray,
+            v_pool: &MlxArray,
+            rows: &MlxArray,
+            row_offsets: &MlxArray,
+            logical_starts: &MlxArray,
+            visible_lens: &MlxArray,
+            scale: f32,
+        ) -> UniquePtr<MlxArray>;
+
         fn sdpa_supports_fast_path(
             q: &MlxArray,
             k: &MlxArray,

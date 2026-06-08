@@ -1335,6 +1335,112 @@ impl PagedBlockPool {
         Ok(Some((gather(pool_k), gather(pool_v))))
     }
 
+    /// Fused paged-attention decode over the pool via the native Metal kernel
+    /// (epic #116 Phase 6, #123).
+    ///
+    /// Strategy (B) from ADR 0001: instead of gathering each sequence's visible
+    /// KV into a contiguous tensor and calling SDPA (what
+    /// [`Self::gather_visible`] feeds), this builds the flattened block-table
+    /// metadata and hands the pool tensors straight to
+    /// [`crate::paged_attention_decode`], which reads the scattered blocks
+    /// inside the attention kernel with no gather copy.
+    ///
+    /// `q` is `[B, Hq, 1, head_dim]`; `states[b]` is sequence b's per-layer
+    /// state (`states.len()` must equal `B`). Returns `[B, Hq, 1, head_dim]` in
+    /// `q`'s dtype, or `None` when the layer's pool tensors are not yet
+    /// allocated or no sequence has visible tokens (caller falls back to the
+    /// gather path). The output is a drop-in for
+    /// [`crate::layers::paged_decode_attention_pooled_fallback`].
+    pub fn paged_decode_fused(
+        &self,
+        q: &MlxArray,
+        states: &[&PagedSequenceState],
+        layer_idx: usize,
+        scale: f32,
+    ) -> Result<Option<UniquePtr<MlxArray>>, String> {
+        let (pool_k, pool_v) = match (
+            self.pool_k.get(layer_idx).and_then(|p| p.as_ref()),
+            self.pool_v.get(layer_idx).and_then(|p| p.as_ref()),
+        ) {
+            (Some(k), Some(v)) => (k, v),
+            _ => return Ok(None),
+        };
+        let block_size = self.layout.block_size as i32;
+
+        // Flatten every sequence's physical pool rows (block-table order) into
+        // one `rows` array, with `row_offsets[b]` the start of sequence b.
+        let mut rows: Vec<i32> = Vec::new();
+        let mut row_offsets: Vec<i32> = Vec::with_capacity(states.len() + 1);
+        let mut logical_starts: Vec<i32> = Vec::with_capacity(states.len());
+        let mut visible_lens: Vec<i32> = Vec::with_capacity(states.len());
+        row_offsets.push(0);
+
+        let mut any_visible = false;
+        for state in states {
+            let layer = state.layer(layer_idx).ok_or_else(|| {
+                format!(
+                    "PagedBlockPool::paged_decode_fused: layer {layer_idx} out of range for {} layers",
+                    state.layers.len()
+                )
+            })?;
+            if layer.visible_len() > 0 {
+                any_visible = true;
+            }
+            // Same front/back asymmetry guard as `gather_visible`: a slid
+            // sequence whose `len` outruns its retained blocks would read past
+            // the block table.
+            let n_blocks = layer.block_ids.len() as i32;
+            if layer.len as i32 > n_blocks * block_size {
+                return Err(format!(
+                    "PagedBlockPool::paged_decode_fused: layer {layer_idx} len {} exceeds {n_blocks} blocks * block_size {block_size}",
+                    layer.len
+                ));
+            }
+            for block_id in &layer.block_ids {
+                let row = *self.block_rows[layer_idx].get(block_id).ok_or_else(|| {
+                    format!(
+                        "PagedBlockPool::paged_decode_fused: block {block_id} on layer {layer_idx} has no pool row (was it written?)"
+                    )
+                })?;
+                rows.push(row as i32);
+            }
+            row_offsets.push(rows.len() as i32);
+            logical_starts.push(layer.logical_start as i32);
+            visible_lens.push(layer.visible_len() as i32);
+        }
+
+        if !any_visible {
+            return Ok(None);
+        }
+
+        let n_states = states.len() as i32;
+        let rows_arr = ffi::from_slice_i32(&rows, &[rows.len() as i32]);
+        let off_arr = ffi::from_slice_i32(&row_offsets, &[n_states + 1]);
+        let ls_arr = ffi::from_slice_i32(&logical_starts, &[n_states]);
+        let vl_arr = ffi::from_slice_i32(&visible_lens, &[n_states]);
+
+        // The kernel reads Q and writes its output in f32 deterministically (it
+        // never re-specialises by dtype). Cast Q in and the result back to Q's
+        // dtype so the fused path is byte-comparable with the gather fallback.
+        let q_dtype = ffi::array_dtype(q);
+        let q_f32 = if q_dtype == crate::dtype::FLOAT32 {
+            None
+        } else {
+            Some(ffi::astype(q, crate::dtype::FLOAT32))
+        };
+        let q_in: &MlxArray = q_f32.as_deref().unwrap_or(q);
+
+        let out_f32 = ffi::paged_attention_decode(
+            q_in, pool_k, pool_v, &rows_arr, &off_arr, &ls_arr, &vl_arr, scale,
+        );
+        let out = if q_dtype == crate::dtype::FLOAT32 {
+            out_f32
+        } else {
+            ffi::astype(&out_f32, q_dtype)
+        };
+        Ok(Some(out))
+    }
+
     /// Sum of every allocated physical main-K/V pool tensor (K and V, all
     /// layers). Additive to the layout-derived scheduling budgets in
     /// `reserved_bytes`/`used_bytes`, which are unchanged.

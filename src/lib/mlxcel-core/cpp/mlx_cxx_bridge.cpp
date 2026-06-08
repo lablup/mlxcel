@@ -4,6 +4,7 @@
 #include "mlx_cxx_bridge.h"
 #include "sparse_v_sdpa.h"  // fused Sparse-V SDPA kernel.
 #include "turbo4_delegated_sdpa.h"  // fused Turbo4Delegated SDPA kernel.
+#include "paged_attention.h"  // fused paged-attention decode kernel (#123).
 #include "mlx/ops.h"
 #include "mlx/transforms.h"
 #include "mlx/compile.h"
@@ -6088,6 +6089,31 @@ std::unique_ptr<Turbo4DelegatedSteelOutputs> turbo4_delegated_steel_sdpa(
     wrapper->out_cold_pre = std::make_unique<MlxArray>(std::move(outs[0]));
     wrapper->out_hot      = std::make_unique<MlxArray>(std::move(outs[1]));
     return wrapper;
+}
+
+// Fused paged-attention decode kernel launcher (epic #116 Phase 6, #123).
+// Implementation in `src/lib/mlx-cpp/turbo/paged_attention.cpp`; forwarded here
+// so the new symbol shows up in the cxx-bridge ABI. Reads scattered KV blocks
+// out of the global pool via the block table with no separate gather copy.
+std::unique_ptr<MlxArray> paged_attention_decode(
+    const MlxArray& q,
+    const MlxArray& k_pool,
+    const MlxArray& v_pool,
+    const MlxArray& rows,
+    const MlxArray& row_offsets,
+    const MlxArray& logical_starts,
+    const MlxArray& visible_lens,
+    float scale) {
+    auto out = mlxcel::turbo::paged_attention_decode(
+        q.inner,
+        k_pool.inner,
+        v_pool.inner,
+        rows.inner,
+        row_offsets.inner,
+        logical_starts.inner,
+        visible_lens.inner,
+        scale);
+    return std::make_unique<MlxArray>(std::move(out));
 }
 
 std::unique_ptr<MlxLoadedWeights> mlx_load_safetensors(rust::Str path) {

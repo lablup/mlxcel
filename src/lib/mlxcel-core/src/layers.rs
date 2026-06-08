@@ -2462,6 +2462,54 @@ pub fn paged_decode_attention_pooled_fallback(
     Ok(result)
 }
 
+/// Process-wide env override for the fused paged-attention kernel (#123).
+///
+/// `MLXCEL_PAGED_ATTENTION_NATIVE=1` (or `true` / `on` / `yes`) force-enables
+/// the native kernel regardless of the per-config `use_native_paged_kernel`
+/// flag, so operators can A/B the kernel without rebuilding. Read once and
+/// cached so the decode hot path never touches the environment.
+fn native_paged_kernel_env() -> bool {
+    use std::sync::OnceLock;
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("MLXCEL_PAGED_ATTENTION_NATIVE")
+            .map(|v| {
+                matches!(
+                    v.trim(),
+                    "1" | "true" | "on" | "yes" | "TRUE" | "ON" | "YES"
+                )
+            })
+            .unwrap_or(false)
+    })
+}
+
+/// Gated pooled paged decode attention (epic #116 Phase 6, #123).
+///
+/// When the native kernel is enabled (the per-config `use_native_paged_kernel`
+/// flag or the `MLXCEL_PAGED_ATTENTION_NATIVE` env override), dispatches to the
+/// fused Metal kernel ([`crate::cache::PagedBlockPool::paged_decode_fused`]),
+/// which reads scattered pool blocks directly with no gather copy (ADR 0001
+/// strategy B). Otherwise, and whenever the kernel declines (the layer's pool
+/// tensors are not yet allocated, or no sequence has visible tokens), it falls
+/// back to [`paged_decode_attention_pooled_fallback`], the gather-then-SDPA
+/// reference. The two paths agree within RMS < 5e-3, so the gate is a pure
+/// performance switch with no behavioural change.
+pub fn paged_decode_attention_pooled(
+    q: &MlxArray,
+    pool: &crate::cache::PagedBlockPool,
+    states: &[&crate::cache::PagedSequenceState],
+    layer_idx: usize,
+    scale: f32,
+    use_native_paged_kernel: bool,
+) -> Result<UniquePtr<MlxArray>, String> {
+    if use_native_paged_kernel || native_paged_kernel_env() {
+        if let Some(out) = pool.paged_decode_fused(q, states, layer_idx, scale)? {
+            return Ok(out);
+        }
+    }
+    paged_decode_attention_pooled_fallback(q, pool, states, layer_idx, scale)
+}
+
 /// Native paged decode path over dense compatibility KV caches.
 ///
 /// The C++ bridge consumes the logical block table metadata and performs the

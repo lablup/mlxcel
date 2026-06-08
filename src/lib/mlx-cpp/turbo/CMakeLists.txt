@@ -37,14 +37,17 @@ set(CMAKE_CXX_STANDARD 20)
 # add_subdirectory(turbo).
 set(MLXCEL_TURBO_KERNEL_HEADERS
     ${CMAKE_CURRENT_SOURCE_DIR}/sparse_v_sdpa.h
-    ${CMAKE_CURRENT_SOURCE_DIR}/turbo4_delegated_sdpa.h)
+    ${CMAKE_CURRENT_SOURCE_DIR}/turbo4_delegated_sdpa.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/paged_attention.h)
 
 set(MLXCEL_TURBO_KERNEL_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/sparse_v_sdpa.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/turbo4_delegated_sdpa.cpp)
+    ${CMAKE_CURRENT_SOURCE_DIR}/turbo4_delegated_sdpa.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/paged_attention.cpp)
 
 set(MLXCEL_TURBO_KERNEL_METAL_SOURCES
-    ${CMAKE_CURRENT_SOURCE_DIR}/sparse_v_sdpa.metal)
+    ${CMAKE_CURRENT_SOURCE_DIR}/sparse_v_sdpa.metal
+    ${CMAKE_CURRENT_SOURCE_DIR}/paged_attention.metal)
 
 add_library(mlxcel-turbo-kernels STATIC
     ${MLXCEL_TURBO_KERNEL_SOURCES})

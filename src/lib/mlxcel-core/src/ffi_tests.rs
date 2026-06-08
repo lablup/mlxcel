@@ -589,6 +589,196 @@ fn test_pooled_paged_decode_matches_dense_over_200_steps() {
     println!("test_pooled_paged_decode_matches_dense_over_200_steps: max RMS = {max_rms:e}");
 }
 
+/// #123 fused-kernel parity: the native fused paged-attention decode kernel
+/// (`paged_decode_attention_pooled` with `use_native = true`) must match the
+/// gather-then-SDPA reference (`paged_decode_attention_pooled_fallback`) within
+/// RMS < 5e-3 over 200 fragmented decode steps. Uses the same fragmented-pool
+/// construction as `test_pooled_paged_decode_matches_dense_over_200_steps`, so
+/// the target's physical pool rows are genuinely scattered and the kernel
+/// exercises its block-table indexing rather than a contiguous run.
+#[test]
+fn test_fused_paged_decode_matches_gather_over_200_steps() {
+    use crate::cache::{PagedBlockPool, PagedSequenceState};
+
+    const STEPS: usize = 200;
+    let n_kv_heads: i32 = 4;
+    let head_dim: i32 = 8;
+    let block_size = 4usize;
+    let layer_idx = 0usize;
+    let scale = 1.0f32 / (head_dim as f32).sqrt();
+
+    let mut pool = PagedBlockPool::new(pooled_layout(block_size, 1, n_kv_heads, head_dim));
+    let mut target = PagedSequenceState::new(pool.layout());
+    let mut spacer = PagedSequenceState::new(pool.layout());
+
+    let mut max_rms = 0.0f32;
+    let mut prev_blocks = 0usize;
+
+    for step in 0..STEPS {
+        let t = step as i32;
+
+        pool.append_tokens(&mut target, layer_idx, 1).unwrap();
+        let block_ids = target.layer(layer_idx).unwrap().block_ids.clone();
+
+        if block_ids.len() > prev_blocks {
+            pool.append_tokens(&mut spacer, layer_idx, block_size)
+                .unwrap();
+            let spacer_ids = spacer.layer(layer_idx).unwrap().block_ids.clone();
+            let spacer_block = *spacer_ids.last().unwrap();
+            let spacer_seed = 0xCAFE_u64.wrapping_add(step as u64);
+            let sk = from_slice_f32(
+                &pooled_pseudo_f32(
+                    spacer_seed,
+                    (n_kv_heads * block_size as i32 * head_dim) as usize,
+                ),
+                &[1, n_kv_heads, block_size as i32, head_dim],
+            );
+            let sv = from_slice_f32(
+                &pooled_pseudo_f32(
+                    spacer_seed.wrapping_mul(3),
+                    (n_kv_heads * block_size as i32 * head_dim) as usize,
+                ),
+                &[1, n_kv_heads, block_size as i32, head_dim],
+            );
+            pool.write_block(spacer_block, layer_idx, 0, &sk, &sv)
+                .unwrap();
+            prev_blocks = block_ids.len();
+        }
+
+        let slot = (t as usize) % block_size;
+        let block_index = (t as usize) / block_size;
+        let target_block = block_ids[block_index];
+        let k_tok = from_slice_f32(
+            &pooled_pseudo_f32(step as u64 + 1, (n_kv_heads * head_dim) as usize),
+            &[1, n_kv_heads, 1, head_dim],
+        );
+        let v_tok = from_slice_f32(
+            &pooled_pseudo_f32(
+                (step as u64 + 1).wrapping_mul(7),
+                (n_kv_heads * head_dim) as usize,
+            ),
+            &[1, n_kv_heads, 1, head_dim],
+        );
+        pool.write_block(target_block, layer_idx, slot, &k_tok, &v_tok)
+            .unwrap();
+
+        let q_vals = pooled_pseudo_f32(
+            (step as u64).wrapping_mul(0x1000_0001) + 13,
+            (n_kv_heads * head_dim) as usize,
+        );
+        let q = from_slice_f32(&q_vals, &[1, n_kv_heads, 1, head_dim]);
+
+        let states: [&PagedSequenceState; 1] = [&target];
+        let fused = crate::layers::paged_decode_attention_pooled(
+            &q, &pool, &states, layer_idx, scale, true,
+        )
+        .unwrap();
+        let gather = crate::layers::paged_decode_attention_pooled_fallback(
+            &q, &pool, &states, layer_idx, scale,
+        )
+        .unwrap();
+
+        let f = flatten_f32_local(&fused);
+        let g = flatten_f32_local(&gather);
+        let rms = pooled_rms(&f, &g);
+        assert!(
+            rms < 5e-3,
+            "step {step}: fused vs gather RMS {rms} exceeded 5e-3"
+        );
+        max_rms = max_rms.max(rms);
+    }
+
+    assert!(
+        max_rms < 5e-3,
+        "max RMS {max_rms} over 200 steps exceeded 5e-3"
+    );
+    println!("test_fused_paged_decode_matches_gather_over_200_steps: max RMS = {max_rms:e}");
+}
+
+/// #123 fused-kernel parity under grouped-query attention (Hq > Hkv) and
+/// batching (B = 2 with unequal visible lengths). Exercises the kernel's
+/// `kv_head = h / NRep` mapping and its per-batch `row_offsets` / `visible_lens`
+/// indexing, which the single-sequence NRep=1 test above does not cover. Two
+/// sequences are grown with interleaved token writes so their physical pool
+/// rows are scattered.
+#[test]
+fn test_fused_paged_decode_gqa_and_batched() {
+    use crate::cache::{PagedBlockPool, PagedSequenceState};
+
+    let n_kv_heads: i32 = 2; // Hkv
+    let n_q_heads: i32 = 8; // Hq -> NRep = 4
+    let head_dim: i32 = 8;
+    let block_size = 4usize;
+    let layer_idx = 0usize;
+    let scale = 1.0f32 / (head_dim as f32).sqrt();
+
+    let mut pool = PagedBlockPool::new(pooled_layout(block_size, 1, n_kv_heads, head_dim));
+    let mut s0 = PagedSequenceState::new(pool.layout());
+    let mut s1 = PagedSequenceState::new(pool.layout());
+
+    let len0 = 10i32;
+    let len1 = 17i32;
+    let write_token =
+        |pool: &mut PagedBlockPool, state: &mut PagedSequenceState, t: i32, seed: u64| {
+            pool.append_tokens(state, layer_idx, 1).unwrap();
+            let ids = state.layer(layer_idx).unwrap().block_ids.clone();
+            let k = from_slice_f32(
+                &pooled_pseudo_f32(seed, (n_kv_heads * head_dim) as usize),
+                &[1, n_kv_heads, 1, head_dim],
+            );
+            let v = from_slice_f32(
+                &pooled_pseudo_f32(seed.wrapping_mul(7), (n_kv_heads * head_dim) as usize),
+                &[1, n_kv_heads, 1, head_dim],
+            );
+            pool.write_block(
+                ids[(t as usize) / block_size],
+                layer_idx,
+                (t as usize) % block_size,
+                &k,
+                &v,
+            )
+            .unwrap();
+        };
+
+    // Interleave the two sequences' writes so their rows fragment.
+    for t in 0..len0.max(len1) {
+        if t < len0 {
+            write_token(&mut pool, &mut s0, t, t as u64 + 1);
+        }
+        if t < len1 {
+            write_token(&mut pool, &mut s1, t, t as u64 + 5000);
+        }
+    }
+
+    let q0 = from_slice_f32(
+        &pooled_pseudo_f32(111, (n_q_heads * head_dim) as usize),
+        &[1, n_q_heads, 1, head_dim],
+    );
+    let q1 = from_slice_f32(
+        &pooled_pseudo_f32(222, (n_q_heads * head_dim) as usize),
+        &[1, n_q_heads, 1, head_dim],
+    );
+    let q = concatenate(&q0, &q1, 0);
+
+    let states: [&PagedSequenceState; 2] = [&s0, &s1];
+    let fused =
+        crate::layers::paged_decode_attention_pooled(&q, &pool, &states, layer_idx, scale, true)
+            .unwrap();
+    let gather =
+        crate::layers::paged_decode_attention_pooled_fallback(&q, &pool, &states, layer_idx, scale)
+            .unwrap();
+    assert_eq!(array_shape(&fused), vec![2, n_q_heads, 1, head_dim]);
+
+    let f = flatten_f32_local(&fused);
+    let g = flatten_f32_local(&gather);
+    let rms = pooled_rms(&f, &g);
+    assert!(
+        rms < 5e-3,
+        "GQA+batched fused vs gather RMS {rms} exceeded 5e-3"
+    );
+    println!("test_fused_paged_decode_gqa_and_batched: RMS = {rms:e}");
+}
+
 /// Sliding-window parity: a sequence with `logical_start > 0` (post-trim) must
 /// gather/decode exactly the visible window and match the dense reference of
 /// just that window.

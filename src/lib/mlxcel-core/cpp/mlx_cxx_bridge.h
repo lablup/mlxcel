@@ -1757,6 +1757,22 @@ std::unique_ptr<Turbo4DelegatedSteelOutputs> turbo4_delegated_steel_sdpa(
 std::unique_ptr<MlxArray> steel_outputs_take_cold(Turbo4DelegatedSteelOutputs& o);
 std::unique_ptr<MlxArray> steel_outputs_take_hot(Turbo4DelegatedSteelOutputs& o);
 
+// Fused paged-attention decode kernel launcher (epic #116 Phase 6, #123).
+// Wraps `mlxcel::turbo::paged_attention_decode`. Reads scattered KV blocks out
+// of the global pool via the block table with no separate gather copy. `q` is
+// `[B, Hq, 1, D]` f32; `k_pool` / `v_pool` are `[num_blocks, block_size, Hkv,
+// D]` f16; `rows` / `row_offsets` / `logical_starts` / `visible_lens` are i32
+// block-table metadata. Returns `[B, Hq, 1, D]` f32.
+std::unique_ptr<MlxArray> paged_attention_decode(
+    const MlxArray& q,
+    const MlxArray& k_pool,
+    const MlxArray& v_pool,
+    const MlxArray& rows,
+    const MlxArray& row_offsets,
+    const MlxArray& logical_starts,
+    const MlxArray& visible_lens,
+    float scale);
+
 // Opaque holder for weights loaded via MLX's native load_safetensors().
 // Arrays are lazy — MLX manages the mmap internally, no eager copy needed.
 struct MlxLoadedWeights {
