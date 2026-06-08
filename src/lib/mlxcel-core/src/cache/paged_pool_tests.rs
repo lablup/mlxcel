@@ -1067,6 +1067,40 @@ fn assert_byte_roundtrip_preserves_content(cast_dtype: i32) {
     );
 }
 
+/// `acquire_and_write_block` mints a fresh block before the fallible write. If
+/// the write is rejected (a malformed or oversized transferred slab on the #125
+/// restore path) the just-minted block must be released, not leaked. After a
+/// rejected write the pool's live block count must be unchanged.
+#[test]
+fn acquire_and_write_block_releases_on_write_failure() {
+    let block_size = 4usize;
+    let mut pool = fp16_pool(block_size, 1);
+
+    // Capture this layer's geometry (n_kv_heads = H, head_dim = D) with one
+    // good block, so a later mismatched slab is rejected by write_block.
+    let _good = pool
+        .acquire_and_write_block(
+            0,
+            &make_block_3d(0.0, block_size as i32),
+            &make_block_3d(500.0, block_size as i32),
+        )
+        .unwrap();
+    assert_eq!(pool.live_block_count(), 1);
+
+    // A slab whose n_kv_heads disagrees with the captured meta (H + 1 vs H) is
+    // rejected by write_block; the block acquired for it must be released.
+    let bad = ffi::from_slice_f32(
+        &vec![0.0f32; (block_size as i32 * (H + 1) * D) as usize],
+        &[block_size as i32, H + 1, D],
+    );
+    assert!(pool.acquire_and_write_block(0, &bad, &bad).is_err());
+    assert_eq!(
+        pool.live_block_count(),
+        1,
+        "a rejected write must not leak the freshly acquired block"
+    );
+}
+
 #[test]
 fn paged_block_byte_roundtrip_preserves_fp16() {
     assert_byte_roundtrip_preserves_content(dtype::FLOAT16);

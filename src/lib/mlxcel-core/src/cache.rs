@@ -6160,11 +6160,30 @@ impl CachePool {
             }
 
             // Acquire + write a fresh block for every transferred origin block.
+            // Track the fresh ids so any failure mid-restore releases them
+            // instead of leaking pool blocks: a malformed/oversized transferred
+            // slab, an out-of-range layer, a write that exceeds the block
+            // budget, or a block-table entry with no matching contents must not
+            // strand already-acquired blocks (#125 hardening).
+            let mut acquired: Vec<PagedBlockId> = Vec::with_capacity(contents.len());
             let mut map: HashMap<u64, PagedBlockId> = HashMap::new();
             for content in &contents {
-                let fresh =
-                    pool.acquire_and_write_block(content.layer_idx, &content.keys, &content.values)?;
-                map.insert(content.block_id.as_u64(), fresh);
+                match pool.acquire_and_write_block(
+                    content.layer_idx,
+                    &content.keys,
+                    &content.values,
+                ) {
+                    Ok(fresh) => {
+                        acquired.push(fresh);
+                        map.insert(content.block_id.as_u64(), fresh);
+                    }
+                    Err(e) => {
+                        for id in acquired.drain(..) {
+                            let _ = pool.release_block(id);
+                        }
+                        return Err(e);
+                    }
+                }
             }
 
             // Remap the block table over the fresh ids, preserving len /
@@ -6173,9 +6192,17 @@ impl CachePool {
             for layer in &restored.layers {
                 let mut block_ids = Vec::with_capacity(layer.block_ids.len());
                 for origin in &layer.block_ids {
-                    let fresh = map.get(&origin.as_u64()).copied().ok_or_else(|| {
-                        format!("CachePool: missing transferred contents for block {origin}")
-                    })?;
+                    let fresh = match map.get(&origin.as_u64()).copied() {
+                        Some(fresh) => fresh,
+                        None => {
+                            for id in acquired.drain(..) {
+                                let _ = pool.release_block(id);
+                            }
+                            return Err(format!(
+                                "CachePool: missing transferred contents for block {origin}"
+                            ));
+                        }
+                    };
                     block_ids.push(fresh);
                 }
                 layers.push(PagedLayerState {
@@ -7406,6 +7433,84 @@ mod tests {
                 a.layer_idx
             );
         }
+    }
+
+    #[test]
+    fn restore_paged_state_with_contents_releases_blocks_on_missing_remap() {
+        // A handoff whose block table references a block with no matching
+        // transferred contents must fail the restore AND release every block the
+        // acquire loop already minted, never leaking pool blocks (#125 security
+        // hardening). Drive a pool-backed origin, drop one transferred block, and
+        // assert the decode pool's live block count is back to zero after the
+        // failed restore.
+        const H: i32 = 2;
+        const D: i32 = 3;
+        let block_size = 4usize;
+        let num_layers = 2usize;
+        let n_new = 6i32; // 2 blocks per layer.
+
+        let layout =
+            PagedKvLayout::uniform(num_layers, block_size, block_size * (H * D) as usize * 2)
+                .unwrap();
+        let model = StubModel { num_layers };
+
+        let make_kv = |layer: usize, salt: f32| -> UniquePtr<MlxArray> {
+            let mut vals = Vec::with_capacity((H * n_new * D) as usize);
+            for head in 0..H {
+                for slot in 0..n_new {
+                    for dim in 0..D {
+                        vals.push(
+                            salt + layer as f32 * 10_000.0
+                                + head as f32 * 1000.0
+                                + slot as f32 * 10.0
+                                + dim as f32,
+                        );
+                    }
+                }
+            }
+            ffi::from_slice_f32(&vals, &[1, H, n_new, D])
+        };
+
+        let mut origin = CachePool::new(4);
+        let id_a = origin
+            .allocate_with_layout(
+                &model,
+                Some(SequenceStateLayout::paged_kv_cache(layout.clone())),
+            )
+            .unwrap();
+        {
+            let caches = origin.get_caches_mut(id_a).unwrap();
+            for (layer_idx, cache) in caches.iter_mut().enumerate() {
+                let _ = cache.update_and_fetch(make_kv(layer_idx, 100.0), make_kv(layer_idx, 500.0));
+            }
+        }
+        let mut contents = origin.extract_paged_blocks(id_a).unwrap();
+        assert_eq!(contents.len(), 4);
+        let runtime = (*origin.get_paged_state(id_a).unwrap()).clone();
+
+        // Drop the last block's contents: the block table still references it, so
+        // the remap misses it AFTER the loop has already acquired the other three.
+        contents.pop();
+
+        let mut decode = CachePool::new(4);
+        let id_b = decode
+            .allocate_with_layout(
+                &model,
+                Some(SequenceStateLayout::paged_kv_cache(layout.clone())),
+            )
+            .unwrap();
+        assert_eq!(decode.paged_pool_ref().unwrap().live_block_count(), 0);
+
+        let result = decode.restore_paged_state_with_contents(id_b, runtime, contents);
+        assert!(
+            result.is_err(),
+            "restore must fail when a referenced block has no transferred contents"
+        );
+        assert_eq!(
+            decode.paged_pool_ref().unwrap().live_block_count(),
+            0,
+            "a failed restore must release every acquired block (no leak)"
+        );
     }
 
     #[test]

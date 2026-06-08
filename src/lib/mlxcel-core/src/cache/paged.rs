@@ -1314,7 +1314,13 @@ impl PagedBlockPool {
         v_block: &MlxArray,
     ) -> Result<PagedBlockId, String> {
         let id = self.acquire_block(layer_idx)?;
-        self.write_block(id, layer_idx, 0, k_block, v_block)?;
+        if let Err(e) = self.write_block(id, layer_idx, 0, k_block, v_block) {
+            // `acquire_block` already minted the block; if the write fails (e.g.
+            // a malformed or oversized transferred slab on the #125 restore
+            // path), release it so a failed write never leaks a pool block.
+            let _ = self.release_block(id);
+            return Err(e);
+        }
         Ok(id)
     }
 
