@@ -35,6 +35,33 @@ fn known_hybrid_model_types_match() {
     }
 }
 
+/// Drift guard (#124): every entry in the authoritative
+/// [`HYBRID_SSM_MODEL_TYPES`] constant must be detected by both the bare
+/// `model_type` predicate and the full `config.json` detector. Iterating the
+/// constant itself means a future addition (or the alias rows in the module
+/// doc table) cannot fall out of sync with the detection logic. This is the
+/// unified-cache carve-out's first line of defence: if a recurrent family is
+/// in the list but not detected, APC would not be disabled for it.
+#[test]
+fn all_hybrid_ssm_model_types_round_trip() {
+    assert!(
+        !HYBRID_SSM_MODEL_TYPES.is_empty(),
+        "the hybrid-SSM carve-out list must not be empty"
+    );
+    for &mt in HYBRID_SSM_MODEL_TYPES {
+        assert!(
+            is_hybrid_ssm_model_type(mt),
+            "{mt} is in HYBRID_SSM_MODEL_TYPES but is_hybrid_ssm_model_type rejected it"
+        );
+        let cfg = json!({ "model_type": mt });
+        assert_eq!(
+            detect_hybrid_ssm(&cfg).as_deref(),
+            Some(mt),
+            "detect_hybrid_ssm must flag the top-level model_type {mt}"
+        );
+    }
+}
+
 #[test]
 fn case_and_whitespace_insensitive() {
     assert!(is_hybrid_ssm_model_type("JAMBA"));

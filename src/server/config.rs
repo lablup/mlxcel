@@ -25,6 +25,7 @@ use crate::distributed::ShardConfig;
 use crate::distributed::TransportBackend;
 use crate::distributed::pipeline::RemotePipelineRuntimeConfig;
 use crate::server::batch::RequestPriority;
+use crate::server::prompt_cache::key::MultimodalDigest;
 use mlxcel_core::lang_analyzer::LangBiasConfig;
 use mlxcel_core::sampling::LogprobsConfig;
 
@@ -78,6 +79,18 @@ pub struct PromptCacheRequestContext {
     /// the scheduler can compose a [`crate::server::prompt_cache::key::PromptCacheKey`]
     /// on demand without reaching back into the route layer.
     pub session_key: String,
+    /// Stable digest of the request's resolved multimodal payload (image +
+    /// audio bytes), built by
+    /// [`crate::server::prompt_cache::key::multimodal_digest`] over the
+    /// post-resolution byte slices.
+    ///
+    /// [`MultimodalDigest::empty`] for text-only requests, so the composed
+    /// cache key stays byte-identical to the pre-#124 text path. Folding the
+    /// digest into the key is what lets a future multimodal-sharing step
+    /// (#124 step c) reuse image/audio prefixes without a text↔image bucket
+    /// collision; until that step lifts the scheduler's `is_multimodal` gate
+    /// the digest is carried but multimodal requests still take the cold path.
+    pub mm_digest: MultimodalDigest,
 }
 
 /// Bridge between server request params and `mlxcel-core` `SamplingConfig`.

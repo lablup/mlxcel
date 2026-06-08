@@ -402,6 +402,83 @@ fn cache_pool_detach_rejects_paged_backend() {
     assert_eq!(pool.active_count(), 1);
 }
 
+/// #124 SSM/hybrid carve-out: a recurrent model keeps its state in internal
+/// model-owned caches, so it overrides `supports_batching()` to `false`. The
+/// *default* `sequence_state_layout()` then maps it to
+/// `SequenceStateBackend::ModelOwned`, and a model-owned sequence must be
+/// rejected by BOTH detach paths: there is no detachable cross-request KV to
+/// donate. This is the load-bearing guarantee that keeps SSM/hybrid families
+/// (Mamba, Jamba, NemotronH, RWKV7, RecurrentGemma, Qwen3-Next, ...) out of the
+/// unified prompt-cache store: the store can never receive an entry for them,
+/// so every adopt attempt misses and decode output stays bit-identical to the
+/// dense path regardless of the requested decode backend.
+#[test]
+fn cache_pool_model_owned_recurrent_sequence_is_never_detachable() {
+    // Minimal stand-in for a recurrent / hybrid-SSM family. It only overrides
+    // `supports_batching()` to `false`; the `ModelOwned` layout is produced by
+    // the default `sequence_state_layout()` exactly as in production, so this
+    // pins the real mapping rather than a bespoke layout override.
+    struct RecurrentModel {
+        num_layers: usize,
+    }
+
+    impl LanguageModel for RecurrentModel {
+        fn forward(
+            &self,
+            _input_ids: &MlxArray,
+            _caches: &mut [KVCache],
+            _mask: Option<&MlxArray>,
+        ) -> UniquePtr<MlxArray> {
+            crate::ffi::zeros(&[1], 0)
+        }
+
+        fn make_caches(&self) -> Vec<KVCache> {
+            Vec::new()
+        }
+
+        fn num_layers(&self) -> usize {
+            self.num_layers
+        }
+
+        fn eos_token_ids(&self) -> Vec<i32> {
+            vec![0]
+        }
+
+        fn supports_batching(&self) -> bool {
+            false
+        }
+    }
+
+    let model = RecurrentModel { num_layers: 4 };
+
+    // The default layout maps `supports_batching() == false` to ModelOwned.
+    assert_eq!(
+        model.sequence_state_layout().backend,
+        crate::cache::SequenceStateBackend::ModelOwned,
+        "recurrent models must allocate model-owned sequence state"
+    );
+
+    let mut pool = CachePool::new(4);
+    let id = pool.allocate(&model).unwrap();
+    assert_eq!(
+        pool.get_mut(id).map(|s| s.backend),
+        Some(crate::cache::SequenceStateBackend::ModelOwned),
+        "allocated sequence must carry the ModelOwned backend"
+    );
+
+    // Neither detach path may produce a donatable set for a model-owned seq.
+    assert!(
+        pool.detach(id).is_none(),
+        "model-owned (recurrent) sequences must not be dense-detachable"
+    );
+    assert!(
+        pool.detach_paged(id).is_none(),
+        "model-owned (recurrent) sequences must not be paged-detachable"
+    );
+    // A rejected detach must leave the sequence active (no silent removal).
+    assert_eq!(pool.active_count(), 1);
+}
+
 #[test]
 fn cache_pool_adopt_respects_capacity_and_returns_preserving_set() {
     let model = RecordingModel::new(1);

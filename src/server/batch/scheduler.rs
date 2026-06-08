@@ -61,7 +61,7 @@ use crate::server::model_provider::model_worker::{
     prepare_request_vlm_embeddings,
 };
 use crate::server::model_provider::{GenerateEvent, ModelRequest};
-use crate::server::prompt_cache::key::{MultimodalDigest, PromptCacheKey};
+use crate::server::prompt_cache::key::PromptCacheKey;
 use crate::server::prompt_cache::{CacheEntry, DetachedKvSet, PromptCacheStore};
 use crate::server::state::BatchMetrics;
 use crate::server::thinking_budget::{
@@ -716,12 +716,19 @@ impl BatchScheduler {
         ctx: &'a PromptCacheRequestContext,
         tokens: &'a [i32],
     ) -> PromptCacheKey<'a> {
+        // The digest is computed over the request's resolved image/audio bytes
+        // in the route layer (#124 step b). For text-only requests it is
+        // `MultimodalDigest::empty()`, so the key is byte-identical to the
+        // pre-#124 path. Today multimodal requests still bypass adopt/donate at
+        // the `is_multimodal` gate, so a non-empty digest only starts mattering
+        // once that gate is lifted (#124 step c); folding it in now keeps the
+        // bucket safe from a text↔image collision the moment sharing turns on.
         PromptCacheKey::new_full(
             ctx.model_id.as_str(),
             ctx.lora_id.as_deref(),
             ctx.template_sig.as_str(),
             Some(ctx.session_key.as_str()),
-            MultimodalDigest::empty(),
+            ctx.mm_digest,
             tokens,
         )
     }

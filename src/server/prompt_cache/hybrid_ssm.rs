@@ -29,18 +29,46 @@
 //!
 //! ## Coverage
 //!
-//! The list below is authoritative. New hybrid families added in future MLX
-//! upstream syncs must be added here at the same time the model is wired in.
+//! [`HYBRID_SSM_MODEL_TYPES`] is authoritative. New hybrid families added in
+//! future MLX upstream syncs must be added there at the same time the model is
+//! wired in. The `all_hybrid_ssm_model_types_round_trip` test iterates the
+//! constant itself so the table below can never silently drift from it.
 //!
-//! | model_type        | Architecture                              |
-//! |-------------------|-------------------------------------------|
-//! | `jamba`           | Mamba + Transformer + MoE                 |
-//! | `mamba`           | Mamba 1                                   |
-//! | `mamba2`          | Mamba 2                                   |
-//! | `nemotron_h`      | Mamba2 + Attention + MLP/MoE              |
-//! | `gated_delta`     | Gated DeltaNet (Qwen3-Next family)        |
-//! | `kimi_linear`     | Kimi linear-attention hybrid              |
-//! | `qwen3_next`      | Full Attention + GatedDeltaNet + MoE      |
+//! | model_type             | Architecture                              |
+//! |------------------------|-------------------------------------------|
+//! | `jamba`                | Mamba + Transformer + MoE                 |
+//! | `mamba`                | Mamba 1                                   |
+//! | `mamba2`               | Mamba 2                                   |
+//! | `nemotron_h`           | Mamba2 + Attention + MLP/MoE              |
+//! | `gated_delta`          | Gated DeltaNet (Qwen3-Next family)        |
+//! | `kimi_linear`          | Kimi linear-attention hybrid              |
+//! | `qwen3_next`           | Full Attention + GatedDeltaNet + MoE      |
+//! | `falcon_mamba`         | Falcon Mamba (HF `model_type` alias)      |
+//! | `longcat_flash`        | LongCat-Flash linear hybrid               |
+//! | `longcat_flash_ngram`  | LongCat-Flash with n-gram speculation     |
+//! | `rwkv7`                | RWKV-7 recurrent                          |
+//! | `recurrent_gemma`      | Griffin (RecurrentGemma) local+recurrent  |
+//!
+//! ## Why this is safe under the unified paged cache (#124)
+//!
+//! Two independent mechanisms keep these families out of cross-request block
+//! sharing, so the unified paged store inherits the carve-out for free:
+//!
+//! 1. **APC opt-out (this module).** [`detect_hybrid_ssm`] runs at startup and
+//!    force-disables Automatic Prefix Caching, so no block-hash chain is ever
+//!    computed for a recurrent prompt.
+//! 2. **`ModelOwned` backend (the load-bearing guarantee).** Every family here
+//!    overrides `LanguageModel::supports_batching()` to `false`, which routes
+//!    the default `sequence_state_layout()` to
+//!    `SequenceStateBackend::ModelOwned`. A `ModelOwned` sequence is rejected by
+//!    both `CachePool::detach` and `CachePool::detach_paged` (they return
+//!    `None`), so the scheduler's donate-back path can never hand a recurrent
+//!    sequence to the prompt-cache store, so its store stays empty and every
+//!    adopt attempt misses. The same `supports_batching() == false` also forces
+//!    `effective_decode_storage_backend` to `Dense`, so `--decode-storage-backend
+//!    paged` is silently ignored for these models rather than corrupting their
+//!    recurrent state. The net effect is bit-identical output to the pre-epic
+//!    dense path regardless of the requested decode backend.
 //!
 //! ## Detection precedence
 //!

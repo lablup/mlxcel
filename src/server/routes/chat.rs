@@ -31,7 +31,9 @@ use crate::server::batch::RequestPriority;
 use crate::server::chat_request::prepare_chat_request_with_cache;
 use crate::server::chat_template_kwargs::{extract_request_kwargs, merge_server_and_request};
 use crate::server::config::{PromptCacheRequestContext, ReasoningBudgetOverride};
-use crate::server::prompt_cache::key::{resolve_session_key, template_sig};
+use crate::server::prompt_cache::key::{
+    multimodal_digest_from_vecs, resolve_session_key, template_sig,
+};
 use crate::server::request_options::{RequestOptionOverrides, build_server_generate_options};
 use crate::server::streaming::sse_channel;
 use crate::server::structured::{StructuredOutputError, build_constraint_from_response_format};
@@ -75,9 +77,20 @@ pub(crate) fn structured_error_to_response(err: StructuredOutputError) -> ErrorR
 /// request. When `Some`, the caller fills `options.prompt_cache_ctx` with
 /// the returned value so the scheduler can compose a stable
 /// [`crate::server::prompt_cache::key::PromptCacheKey`] on its own thread.
+///
+/// `image_data` / `audio_data` are the **resolved** multimodal byte payloads
+/// (post base64-decode / file-read / URL-fetch) from
+/// [`prepare_chat_request_with_cache`]. They are folded into the key via a
+/// [`crate::server::prompt_cache::key::MultimodalDigest`] so a text-only prefix
+/// can never collide with an image/audio one. Text-only requests pass empty
+/// slices, which yields `MultimodalDigest::empty()` and a key byte-identical to
+/// the pre-#124 path. Callers must therefore build the context **after**
+/// preparing the request so the resolved bytes are available.
 fn build_prompt_cache_request_context(
     state: &AppState,
     request: &ChatCompletionRequest,
+    image_data: &[Vec<u8>],
+    audio_data: &[Vec<u8>],
 ) -> Option<PromptCacheRequestContext> {
     state.prompt_cache.as_ref()?;
     // Mirror the kwargs merge that `prepare_chat_request_with_cache` performs
@@ -100,11 +113,15 @@ fn build_prompt_cache_request_context(
     );
     let session_key =
         resolve_session_key(request.resolve_prompt_cache_key(), request.resolve_user()).to_string();
+    // Digest the resolved multimodal payload. Empty slices (text-only) hash to
+    // `MultimodalDigest::empty()`, leaving the composed key unchanged.
+    let mm_digest = multimodal_digest_from_vecs(image_data, audio_data);
     Some(PromptCacheRequestContext {
         model_id: state.display_model_id().to_string(),
         lora_id: None,
         template_sig: template_signature,
         session_key,
+        mm_digest,
     })
 }
 
@@ -345,7 +362,6 @@ async fn non_stream_chat_completion(
     // true. The store is built by startup.rs only when configured, so
     // `state.prompt_cache.is_some()` is the operator-visible flag here.
     let prompt_cache_enabled = state.prompt_cache.is_some();
-    let prompt_cache_ctx = build_prompt_cache_request_context(&state, &request);
     let prepared = prepare_chat_request_with_cache(
         &state.chat_template,
         &request,
@@ -354,6 +370,14 @@ async fn non_stream_chat_completion(
     )
     .await
     .map_err(|err| ErrorResponse::new(err.to_string(), "invalid_request_error"))?;
+    // Build the prompt-cache context AFTER preparation so the multimodal
+    // digest sees the resolved image/audio bytes.
+    let prompt_cache_ctx = build_prompt_cache_request_context(
+        &state,
+        &request,
+        &prepared.image_data,
+        &prepared.audio_data,
+    );
     let primed_open_thinking = is_prompt_primed_open_thinking(&prepared.prompt);
     let mut options = build_generate_options(&request.params, &state.config);
     options.priority = priority;
@@ -507,7 +531,6 @@ async fn stream_chat_completion(
     // both endpoints default preserve_thinking=true identically when the
     // cache is installed.
     let prompt_cache_enabled = state.prompt_cache.is_some();
-    let prompt_cache_ctx = build_prompt_cache_request_context(&state, &request);
     let prepared = prepare_chat_request_with_cache(
         &state.chat_template,
         &request,
@@ -521,6 +544,14 @@ async fn stream_chat_completion(
             return ErrorResponse::new(err.to_string(), "invalid_request_error").into_response();
         }
     };
+    // Build the prompt-cache context AFTER preparation so the multimodal
+    // digest sees the resolved image/audio bytes.
+    let prompt_cache_ctx = build_prompt_cache_request_context(
+        &state,
+        &request,
+        &prepared.image_data,
+        &prepared.audio_data,
+    );
     let primed_open_thinking = is_prompt_primed_open_thinking(&prepared.prompt);
     let mut options = build_generate_options(&request.params, &state.config);
     options.priority = priority;

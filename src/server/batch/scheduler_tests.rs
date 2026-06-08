@@ -818,6 +818,69 @@ fn auto_decode_storage_prefers_paged_only_for_supported_workers() {
     );
 }
 
+/// #124 step b: the scheduler must fold the request context's multimodal
+/// digest into the composed prompt-cache key. This is the plumbing that lets a
+/// later step share image/audio prefixes without a text↔image bucket collision.
+/// Verified through the private `compose_prompt_cache_key` seam so we exercise
+/// the exact key the scheduler builds, not a hand-rolled copy.
+#[test]
+fn compose_prompt_cache_key_folds_request_multimodal_digest() {
+    use crate::server::config::PromptCacheRequestContext;
+    use crate::server::prompt_cache::key::{
+        MultimodalDigest, PromptCacheKey, multimodal_digest_from_vecs,
+    };
+
+    let tokens = [11_i32, 22, 33, 44];
+
+    let text_ctx = PromptCacheRequestContext {
+        model_id: "model".to_string(),
+        lora_id: None,
+        template_sig: "tpl".to_string(),
+        session_key: "sess".to_string(),
+        mm_digest: MultimodalDigest::empty(),
+    };
+    let image_a = PromptCacheRequestContext {
+        mm_digest: multimodal_digest_from_vecs(&[b"IMAGE-A".to_vec()], &[]),
+        ..text_ctx.clone()
+    };
+    let image_b = PromptCacheRequestContext {
+        mm_digest: multimodal_digest_from_vecs(&[b"IMAGE-B".to_vec()], &[]),
+        ..text_ctx.clone()
+    };
+
+    let k_text = super::BatchScheduler::compose_prompt_cache_key(&text_ctx, &tokens);
+    let k_image_a = super::BatchScheduler::compose_prompt_cache_key(&image_a, &tokens);
+    let k_image_b = super::BatchScheduler::compose_prompt_cache_key(&image_b, &tokens);
+
+    // Same tokens, text vs image: distinct buckets (no cross-modal collision).
+    assert_ne!(
+        k_text.digest(),
+        k_image_a.digest(),
+        "a text-only prefix must not collide with the same tokens carrying an image"
+    );
+    // Two different images, same tokens: distinct buckets.
+    assert_ne!(
+        k_image_a.digest(),
+        k_image_b.digest(),
+        "different image payloads must land in different buckets"
+    );
+    // Same image twice: identical bucket, the reuse the digest unlocks.
+    let k_image_a_again = super::BatchScheduler::compose_prompt_cache_key(&image_a, &tokens);
+    assert_eq!(k_image_a.digest(), k_image_a_again.digest());
+
+    // Text path stays byte-identical to building the key with an explicit empty
+    // digest, proving step b introduces zero behavior change for text requests.
+    let explicit_empty = PromptCacheKey::new_full(
+        "model",
+        None,
+        "tpl",
+        Some("sess"),
+        MultimodalDigest::empty(),
+        &tokens,
+    );
+    assert_eq!(k_text.digest(), explicit_empty.digest());
+}
+
 // -------------------------------------------------------------------
 // Null / empty-cache safety tests
 //
