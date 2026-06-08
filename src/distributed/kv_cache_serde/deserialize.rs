@@ -228,8 +228,8 @@ pub fn restore_into_cache_pool_sequence(
             .to_runtime()?;
         let mut contents = Vec::with_capacity(state.paged_blocks.len());
         for (i, block) in state.paged_blocks.iter().enumerate() {
-            let keys =
-                reconstruct_mlx_array(&block.keys).with_context(|| format!("paged block {i} keys"))?;
+            let keys = reconstruct_mlx_array(&block.keys)
+                .with_context(|| format!("paged block {i} keys"))?;
             let values = reconstruct_mlx_array(&block.values)
                 .with_context(|| format!("paged block {i} values"))?;
             contents.push(mlxcel_core::cache::PagedBlockContents {

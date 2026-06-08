@@ -158,7 +158,11 @@ fn load_or_skip(model_dir_name: &str, fetch_repo: &str) -> Option<mlxcel::Loaded
 
 /// Gather one layer's visible K window directly from a sequence's pool and
 /// return its raw bytes, for cross-node KV-reconstruction parity checks.
-fn gather_layer_k_bytes(cp: &CachePool, id: mlxcel_core::cache::SequenceId, layer: usize) -> Vec<u8> {
+fn gather_layer_k_bytes(
+    cp: &CachePool,
+    id: mlxcel_core::cache::SequenceId,
+    layer: usize,
+) -> Vec<u8> {
     let pool = cp.paged_pool_ref().expect("paged pool present");
     let seq = cp.get(id).expect("sequence present");
     let state = seq.paged_state().expect("paged state present");

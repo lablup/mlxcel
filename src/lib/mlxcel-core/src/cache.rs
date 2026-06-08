@@ -7425,7 +7425,12 @@ mod tests {
         assert_eq!(check_a.len(), check_b.len());
         for (a, b) in check_a.iter().zip(check_b.iter()) {
             assert_eq!(a.layer_idx, b.layer_idx);
-            assert_eq!(raw(&a.keys), raw(&b.keys), "layer {} K mismatch", a.layer_idx);
+            assert_eq!(
+                raw(&a.keys),
+                raw(&b.keys),
+                "layer {} K mismatch",
+                a.layer_idx
+            );
             assert_eq!(
                 raw(&a.values),
                 raw(&b.values),
@@ -7481,7 +7486,8 @@ mod tests {
         {
             let caches = origin.get_caches_mut(id_a).unwrap();
             for (layer_idx, cache) in caches.iter_mut().enumerate() {
-                let _ = cache.update_and_fetch(make_kv(layer_idx, 100.0), make_kv(layer_idx, 500.0));
+                let _ =
+                    cache.update_and_fetch(make_kv(layer_idx, 100.0), make_kv(layer_idx, 500.0));
             }
         }
         let mut contents = origin.extract_paged_blocks(id_a).unwrap();

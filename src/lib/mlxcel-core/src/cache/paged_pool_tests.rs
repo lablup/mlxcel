@@ -1043,10 +1043,7 @@ fn assert_byte_roundtrip_preserves_content(cast_dtype: i32) {
     }
     {
         let layer = decode_state.layer_mut(0).unwrap();
-        layer.block_ids = origin_blocks
-            .iter()
-            .map(|o| id_map[&o.as_u64()])
-            .collect();
+        layer.block_ids = origin_blocks.iter().map(|o| id_map[&o.as_u64()]).collect();
         layer.len = origin_state.layer(0).unwrap().len;
         layer.logical_start = origin_state.layer(0).unwrap().logical_start;
     }
