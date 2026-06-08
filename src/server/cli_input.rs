@@ -354,6 +354,11 @@ pub struct ServerStartupInput {
     /// resolved to a concrete block count on the worker thread.
     pub kv_cache_budget: Option<crate::memory_estimate::PagedBudgetDirective>,
 
+    /// `--enable-vlm-prefix-cache` (#124 step c). Default off. Enables
+    /// experimental VLM prompt-prefix cache sharing for multi-turn same-image
+    /// conversations; forwarded verbatim to the scheduler.
+    pub enable_vlm_prefix_cache: bool,
+
     /// `--responses-store-max-entries` value (`0` disables
     /// the OpenAI Responses API response store entirely).
     pub responses_store_max_entries: usize,
@@ -568,6 +573,8 @@ impl ServerStartupInput {
             // forward the paged KV block-budget directive verbatim (resolved
             // to a block count on the worker thread).
             kv_cache_budget: self.kv_cache_budget,
+            // forward the experimental VLM prefix-cache toggle (#124 step c).
+            enable_vlm_prefix_cache: self.enable_vlm_prefix_cache,
             // forward the Responses-API store limits.
             responses_store_max_entries: self.responses_store_max_entries,
             responses_store_ttl_secs: self.responses_store_ttl_secs,

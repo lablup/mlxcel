@@ -30,6 +30,7 @@ fn sample_args() -> crate::ServeArgs {
         ctx_size: 8192,
         max_kv_size: 0,
         kv_cache_budget: None,
+        enable_vlm_prefix_cache: false,
         n_predict: 128,
         draft_model: Some(PathBuf::from("models/draft")),
         draft_max: 4,

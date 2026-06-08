@@ -286,6 +286,17 @@ struct ServerArgs {
     #[arg(long = "enable-preemption")]
     enable_preemption: bool,
 
+    /// Enable experimental VLM (image/audio) prompt-prefix cache sharing
+    /// (default off). When on, multimodal chat requests may adopt and donate
+    /// KV prefixes for multi-turn same-image conversations (the prefilled
+    /// suffix is the newly-appended text turn). Text-only and non-VLM behavior
+    /// is unchanged. Also reads `MLXCEL_ENABLE_VLM_PREFIX_CACHE` (true/false/1/0).
+    #[arg(
+        long = "enable-vlm-prefix-cache",
+        env = "MLXCEL_ENABLE_VLM_PREFIX_CACHE"
+    )]
+    enable_vlm_prefix_cache: bool,
+
     /// Preemption policy: "longest-first" (default) or "lowest-priority"
     #[arg(long = "preemption-policy", default_value = "longest-first")]
     preemption_policy: String,
@@ -1228,6 +1239,8 @@ fn build_startup_input(mut args: ServerArgs) -> anyhow::Result<ServerStartupInpu
         // paged KV pool block-budget directive (#122 b3); clap parses it into
         // a `PagedBudgetDirective`, resolved to a block count on the worker.
         kv_cache_budget: args.kv_cache_budget,
+        // experimental VLM prompt-prefix cache toggle (#124 step c).
+        enable_vlm_prefix_cache: args.enable_vlm_prefix_cache,
         // Responses API in-memory store limits. clap reads the
         // matching `LLAMA_ARG_*` env vars directly via the `env = ...`
         // attributes on the flags.

@@ -762,6 +762,17 @@ pub(crate) struct ServeArgs {
     #[arg(long)]
     enable_preemption: bool,
 
+    /// Enable experimental VLM (image/audio) prompt-prefix cache sharing
+    /// (default off). When on, multimodal chat requests may adopt and donate
+    /// KV prefixes for multi-turn same-image conversations (the prefilled
+    /// suffix is the newly-appended text turn). Text-only and non-VLM behavior
+    /// is unchanged. Also reads `MLXCEL_ENABLE_VLM_PREFIX_CACHE` (true/false/1/0).
+    #[arg(
+        long = "enable-vlm-prefix-cache",
+        env = "MLXCEL_ENABLE_VLM_PREFIX_CACHE"
+    )]
+    enable_vlm_prefix_cache: bool,
+
     /// Preemption policy: "longest-first" (default) or "lowest-priority"
     ///
     /// Controls which active sequence is evicted when preemption is

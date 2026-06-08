@@ -325,6 +325,8 @@ fn build_startup_input(mut args: crate::ServeArgs) -> anyhow::Result<ServerStart
         // clap into a `PagedBudgetDirective` (`Bytes`/`Auto`); resolved to a
         // block count on the worker thread.
         kv_cache_budget: args.kv_cache_budget,
+        // experimental VLM prompt-prefix cache toggle (#124 step c).
+        enable_vlm_prefix_cache: args.enable_vlm_prefix_cache,
         // Responses API in-memory store limits. clap reads the
         // matching `LLAMA_ARG_*` env vars directly via the `env = ...`
         // attributes on the flags.

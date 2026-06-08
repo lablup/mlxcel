@@ -140,6 +140,8 @@ fn sample_input() -> ServerStartupInput {
         max_kv_size: 0,
         // paged KV pool block-budget directive (None = unbounded, the default).
         kv_cache_budget: None,
+        // experimental VLM prefix-cache toggle off in tests (#124 step c).
+        enable_vlm_prefix_cache: false,
         // Responses API store defaults.
         responses_store_max_entries: 1024,
         responses_store_ttl_secs: 3600,

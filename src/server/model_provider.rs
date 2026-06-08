@@ -250,6 +250,8 @@ impl ModelProvider {
                 config.max_kv_size,
                 // forward the --kv-cache-budget directive to the worker.
                 config.kv_cache_budget,
+                // experimental VLM prompt-prefix cache toggle (#124 step c).
+                config.enable_vlm_prefix_cache,
                 speculative_dispatch,
                 batch_metrics,
                 batch_observability,
@@ -392,8 +394,9 @@ impl ModelProvider {
             None,
             mlxcel_core::cache::KVCacheMode::Fp16,
             mlxcel_core::cache::BatchKvQuantConfig::default(),
-            None, // max_kv_size: unbounded
-            None, // kv_cache_budget: unbounded
+            None,  // max_kv_size: unbounded
+            None,  // kv_cache_budget: unbounded
+            false, // enable_vlm_prefix_cache: off
             batch_metrics,
             batch_observability,
         )
@@ -429,6 +432,7 @@ impl ModelProvider {
         // paged KV pool block-budget directive (`--kv-cache-budget`).
         // `None` keeps the pool unbounded.
         kv_cache_budget: Option<crate::memory_estimate::PagedBudgetDirective>,
+        enable_vlm_prefix_cache: bool,
         batch_metrics: Arc<BatchMetrics>,
         batch_observability: Arc<BatchObservability>,
     ) -> Result<Self> {
@@ -455,6 +459,7 @@ impl ModelProvider {
             batch_kv_quant,
             max_kv_size,
             kv_cache_budget,
+            enable_vlm_prefix_cache,
             crate::server::SpeculativeDispatch::Disabled,
             batch_metrics,
             batch_observability,
@@ -489,6 +494,7 @@ impl ModelProvider {
         batch_kv_quant: mlxcel_core::cache::BatchKvQuantConfig,
         max_kv_size: Option<usize>,
         kv_cache_budget: Option<crate::memory_estimate::PagedBudgetDirective>,
+        enable_vlm_prefix_cache: bool,
         speculative_dispatch: crate::server::SpeculativeDispatch,
         batch_metrics: Arc<BatchMetrics>,
         batch_observability: Arc<BatchObservability>,
@@ -527,6 +533,8 @@ impl ModelProvider {
             // paged KV pool block-budget directive; resolved to a block count
             // on the worker thread once the model geometry is known.
             kv_cache_budget,
+            // experimental VLM prompt-prefix cache toggle (#124 step c).
+            enable_vlm_prefix_cache,
             // forward the resolved speculative dispatch.
             speculative_dispatch,
         };
@@ -599,8 +607,9 @@ impl ModelProvider {
             prompt_cache: None,
             kv_cache_mode: mlxcel_core::cache::KVCacheMode::Fp16,
             batch_kv_quant: mlxcel_core::cache::BatchKvQuantConfig::default(),
-            max_kv_size: None,     // unbounded in minimal test path
-            kv_cache_budget: None, // unbounded in minimal test path
+            max_kv_size: None,              // unbounded in minimal test path
+            kv_cache_budget: None,          // unbounded in minimal test path
+            enable_vlm_prefix_cache: false, // off in minimal test path
             // minimal test path has no drafter; the dispatch
             // defaults to `Disabled` which short-circuits the scheduler
             // hot path to the classic decode loop.

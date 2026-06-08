@@ -114,6 +114,9 @@ pub struct ServerStartupConfig {
     pub ubatch_size_provided: bool,
     /// Enable preemptive eviction when batch is full.
     pub enable_preemption: bool,
+    /// Enable experimental VLM prompt-prefix cache sharing (#124 step c,
+    /// `--enable-vlm-prefix-cache`). Default off; forwarded to the scheduler.
+    pub enable_vlm_prefix_cache: bool,
     /// Preemption policy string from CLI (parsed into enum at build_server_config).
     pub preemption_policy: String,
     /// Force the legacy sequential worker, bypassing the batch scheduler.
@@ -371,6 +374,7 @@ impl Default for ServerStartupConfig {
             batch_size_conflict: false,
             ubatch_size_provided: false,
             enable_preemption: false,
+            enable_vlm_prefix_cache: false,
             preemption_policy: "longest-first".to_string(),
             no_batch: false,
             max_batch_prefill: 1,
@@ -810,6 +814,8 @@ pub(super) fn build_server_config(
         // forward the paged KV block-budget directive verbatim; the worker
         // resolves it to a concrete block count once the model is loaded.
         kv_cache_budget: startup.kv_cache_budget,
+        // forward the experimental VLM prefix-cache toggle (#124 step c).
+        enable_vlm_prefix_cache: startup.enable_vlm_prefix_cache,
     }
 }
 

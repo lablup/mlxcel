@@ -87,6 +87,25 @@ fn should_align_prefill() -> bool {
 
 pub(crate) const DEFAULT_PAGED_BLOCK_SIZE: usize = 32;
 
+/// Decide whether a request may participate in experimental VLM prompt-prefix
+/// cache sharing (#124 step c).
+///
+/// Sharing is allowed only when all three hold:
+/// 1. the operator opted in (`--enable-vlm-prefix-cache`),
+/// 2. the request actually carries multimodal content, and
+/// 3. it has no video payload (video frame bytes are NOT folded into the
+///    request's multimodal digest, so a video prefix could collide with a
+///    different video in the same bucket).
+///
+/// Text-only requests and any request with video always return `false`,
+/// preserving the legacy cold-prefill path. Keeping the decision in one pure
+/// function lets the safety conditions be pinned by a unit test so a future
+/// edit cannot silently enable-by-default or allow video sharing.
+#[inline]
+fn vlm_prefix_sharing_allowed(enabled: bool, is_multimodal: bool, has_videos: bool) -> bool {
+    enabled && is_multimodal && !has_videos
+}
+
 fn effective_decode_storage_backend(
     requested: DecodeStorageBackend,
     max_batch_size: usize,
@@ -213,6 +232,17 @@ pub struct BatchScheduler {
     /// `--kv-quant-scheme=turboquant --max-kv-size=M` is flagged even
     /// when the legacy `--kv-cache-mode` flag is left at FP16.
     max_kv_size: Option<usize>,
+
+    /// Experimental VLM prompt-prefix cache sharing toggle (#124 step c,
+    /// `--enable-vlm-prefix-cache`).
+    ///
+    /// `false` (the default) keeps every multimodal request on the cold-prefill
+    /// path (the pre-#124 behavior). When `true`, a multimodal chat request may
+    /// adopt a previously donated KV prefix and donate its own, restricted to a
+    /// whole-entry match so the prefilled suffix is the newly-appended text
+    /// turn (multi-turn same-image conversations). Text-only and non-VLM
+    /// requests are unaffected either way.
+    enable_vlm_prefix_cache: bool,
 
     // -- Vision feature cache --
     /// Per-model vision feature cache bundle. Contains LRU caches for
@@ -418,6 +448,9 @@ impl BatchScheduler {
             kv_cache_mode: KVCacheMode::Fp16,
             batch_kv_quant: BatchKvQuantConfig::default(),
             max_kv_size: None,
+            // multimodal prefix-cache sharing stays off until the operator
+            // opts in via `with_vlm_prefix_cache` (#124 step c).
+            enable_vlm_prefix_cache: false,
             // dispatch defaults to Disabled so the scheduler's
             // hot path stays bit-exact for the non-speculative case. The
             // worker thread overrides this via `with_speculative_dispatch`
@@ -526,6 +559,18 @@ impl BatchScheduler {
     /// Returns the configured maximum KV cache size (for tests).
     pub fn max_kv_size(&self) -> Option<usize> {
         self.max_kv_size
+    }
+
+    /// Enable experimental VLM prompt-prefix cache sharing (#124 step c,
+    /// `--enable-vlm-prefix-cache`).
+    ///
+    /// Default off. When on, multimodal chat requests may adopt and donate KV
+    /// prefixes for multi-turn same-image conversations (whole-entry match, so
+    /// the prefilled suffix is the newly-appended text turn). Text-only and
+    /// non-VLM behavior is unchanged.
+    pub fn with_vlm_prefix_cache(mut self, enabled: bool) -> Self {
+        self.enable_vlm_prefix_cache = enabled;
+        self
     }
 
     /// Install the paged KV block budget (epic #116 #122 b3).
@@ -751,8 +796,18 @@ impl BatchScheduler {
     /// * backend mismatch (a `Dense` entry under the paged decode backend, or
     ///   a `Paged` entry under the dense backend — the entry's KV shape cannot
     ///   be installed into the active pool),
+    /// * `require_whole_entry` is set (multimodal sharing) and the match is
+    ///   shorter than the full stored entry (see below),
     /// * [`CachePool::adopt`] / [`CachePool::adopt_paged`] error (capacity,
     ///   layout mismatch, …).
+    ///
+    /// `require_whole_entry` is set for multimodal requests (#124 step c). It
+    /// forces a whole-entry match so the prefilled suffix is guaranteed to be
+    /// the newly-appended text turn: every image/audio placeholder token sits
+    /// inside the matched prefix (a different media payload lands in a
+    /// different digest bucket), so the suffix can safely run through the
+    /// token path. Text-only requests pass `false` and keep accepting partial
+    /// (APC block-aligned) matches.
     ///
     /// Both dense and paged entries are adopted in-place: dense via
     /// [`CachePool::adopt`], paged via [`CachePool::adopt_paged`] (which shares
@@ -762,6 +817,7 @@ impl BatchScheduler {
         &mut self,
         ctx: &PromptCacheRequestContext,
         tokens: &[i32],
+        require_whole_entry: bool,
     ) -> Option<(SequenceId, usize)> {
         if !self.prompt_cache_active() {
             return None;
@@ -774,6 +830,15 @@ impl BatchScheduler {
         let store = self.prompt_cache.as_ref()?.clone();
         let key = Self::compose_prompt_cache_key(ctx, tokens);
         let (entry, matched_len) = store.lookup_longest_prefix(&key, tokens)?;
+        // #124 step c: multimodal sharing requires the matched prefix to cover
+        // the ENTIRE stored entry. A partial (e.g. APC block-clamped) match
+        // could leave image/audio placeholder tokens in the suffix, which the
+        // token-path suffix prefill would mis-handle. Decline here (falling
+        // back to a cold prefill) before consuming anything; the entry stays
+        // available for a later exact match.
+        if require_whole_entry && matched_len < entry.tokens.len() {
+            return None;
+        }
         // `take_detached` is one-shot: it returns `None` if a racing lookup
         // already consumed this entry. The miss path is safe — the current
         // sequence just does a fresh prefill.
@@ -1576,6 +1641,48 @@ impl BatchScheduler {
             sampling.token_bias = self.token_bias.clone();
         }
 
+        let is_multimodal = !images.is_empty() || !audio.is_empty() || !videos.is_empty();
+
+        // Experimental VLM prompt-prefix cache sharing (#124 step c). Off by
+        // default; the operator opts in with `--enable-vlm-prefix-cache`. Video
+        // payloads are excluded because video frame bytes are not folded into
+        // the request's multimodal digest yet, so a video prefix could collide
+        // with a different one in the same bucket.
+        let vlm_sharing_ok = vlm_prefix_sharing_allowed(
+            self.enable_vlm_prefix_cache,
+            is_multimodal,
+            !videos.is_empty(),
+        );
+
+        // For VLM sharing the image/audio placeholder tokens must be expanded
+        // BEFORE probing the cache: `prepare_request_vlm_embeddings` rewrites
+        // `prompt_tokens` into the post-injection stream the KV cache is built
+        // over, and both the cache key (via the request's multimodal digest)
+        // and the matched-prefix length are computed against that stream. No
+        // sequence id exists yet, so a preparation error just aborts the
+        // request with nothing to clean up. `Some(_)` marks "prepared early";
+        // the inner value is the optional merged embeddings.
+        let prepared_early = if vlm_sharing_ok {
+            match prepare_request_vlm_embeddings(
+                &self.model,
+                &self.tokenizer,
+                &prompt,
+                &mut prompt_tokens,
+                &images,
+                &audio,
+                &videos,
+                Some(self.vision_caches.as_ref()),
+            ) {
+                Ok(emb) => Some(emb),
+                Err(err) => {
+                    let _ = response_tx.send(GenerateEvent::Error(err.to_string()));
+                    return;
+                }
+            }
+        } else {
+            None
+        };
+
         // before allocating a fresh KV-cache slot,
         // probe the prompt-prefix cache for a reusable detached set. On a
         // hit, adopt under a brand-new SequenceId and record how many
@@ -1583,61 +1690,81 @@ impl BatchScheduler {
         // feature-disabled, no ctx, and race paths), fall through to the
         // cold-allocation path below.
         //
-        // VLM / audio / video requests opt out of the cache path entirely:
-        // their pre-injection token stream is not self-describing (image
-        // and video frame placeholders expand later inside
-        // `prepare_request_vlm_embeddings`), so matching against it risks
-        // reusing a KV slice built for a different media payload. Support
-        // for image-aware cache keys is tracked separately.
-        let is_multimodal = !images.is_empty() || !audio.is_empty() || !videos.is_empty();
-        let ctx_ref = if is_multimodal {
+        // Text-only requests use the cache whenever the route attached a
+        // context. Multimodal requests opt in only under `vlm_sharing_ok`;
+        // when they do, the adopt is restricted to a whole-entry match
+        // (`require_whole_entry == is_multimodal`) so the prefilled suffix is
+        // guaranteed to be the newly-appended text turn: every image/audio
+        // token sits inside the matched prefix, and a different media payload
+        // lands in a different digest bucket. Multimodal requests with sharing
+        // off keep the legacy cold-prefill path (their pre-injection token
+        // stream is not self-describing).
+        let ctx_ref = if is_multimodal && !vlm_sharing_ok {
             None
         } else {
             options.prompt_cache_ctx.as_ref()
         };
-        let (seq_id, prefill_start_offset, already_cached_tokens) =
-            match ctx_ref.and_then(|ctx| self.try_adopt_cached_prefix(ctx, &prompt_tokens)) {
-                Some((adopted_id, matched_len)) => (adopted_id, matched_len, matched_len),
-                None => {
-                    // Miss or feature disabled → regular allocate.
-                    // count misses only when the cache is actually
-                    // active (ctx_ref is Some) to avoid inflating the miss
-                    // counter for multimodal or cache-disabled requests.
-                    if ctx_ref.is_some() {
-                        self.batch_metrics.record_prompt_cache_miss();
-                    }
-                    let seq_id = match self.allocate_sequence_state() {
-                        Ok(id) => id,
-                        Err(err) => {
-                            tracing::warn!("Cache pool allocation failed: {err}");
-                            let _ = response_tx
-                                .send(GenerateEvent::Error(format!("Server busy: {err}")));
-                            return;
-                        }
-                    };
-                    (seq_id, 0, 0)
+        let (seq_id, prefill_start_offset, already_cached_tokens) = match ctx_ref
+            .and_then(|ctx| self.try_adopt_cached_prefix(ctx, &prompt_tokens, is_multimodal))
+        {
+            Some((adopted_id, matched_len)) => (adopted_id, matched_len, matched_len),
+            None => {
+                // Miss or feature disabled → regular allocate.
+                // count misses only when the cache is actually
+                // active (ctx_ref is Some) to avoid inflating the miss
+                // counter for multimodal or cache-disabled requests.
+                if ctx_ref.is_some() {
+                    self.batch_metrics.record_prompt_cache_miss();
                 }
-            };
-
-        let vlm_embeddings = match prepare_request_vlm_embeddings(
-            &self.model,
-            &self.tokenizer,
-            &prompt,
-            &mut prompt_tokens,
-            &images,
-            &audio,
-            &videos,
-            Some(self.vision_caches.as_ref()),
-        ) {
-            Ok(emb) => emb,
-            Err(err) => {
-                // Clean up the context map so a donate-back won't fire for
-                // a sequence that never reached a healthy finish.
-                self.prompt_cache_seq_ctx.remove(&seq_id);
-                self.release_sequence_caches(seq_id);
-                let _ = response_tx.send(GenerateEvent::Error(err.to_string()));
-                return;
+                let seq_id = match self.allocate_sequence_state() {
+                    Ok(id) => id,
+                    Err(err) => {
+                        tracing::warn!("Cache pool allocation failed: {err}");
+                        let _ =
+                            response_tx.send(GenerateEvent::Error(format!("Server busy: {err}")));
+                        return;
+                    }
+                };
+                (seq_id, 0, 0)
             }
+        };
+
+        // Resolve the per-sequence input embeddings. On the VLM-sharing path
+        // the tokens were already expanded above; if a prefix was adopted
+        // (`prefill_start_offset > 0`) the remaining suffix is the appended
+        // text turn, so the full-prompt embeddings are dropped and the suffix
+        // runs through the token path (the adopted KV already holds the image
+        // rows, and the MRoPE / per-layer state bound below covers the suffix
+        // positions). Otherwise the request prepares embeddings here exactly as
+        // before.
+        let vlm_embeddings = match prepared_early {
+            Some(emb) => {
+                if prefill_start_offset > 0 {
+                    None
+                } else {
+                    emb
+                }
+            }
+            None => match prepare_request_vlm_embeddings(
+                &self.model,
+                &self.tokenizer,
+                &prompt,
+                &mut prompt_tokens,
+                &images,
+                &audio,
+                &videos,
+                Some(self.vision_caches.as_ref()),
+            ) {
+                Ok(emb) => emb,
+                Err(err) => {
+                    // Clean up the context map so a donate-back won't fire for
+                    // a sequence that never reached a healthy finish.
+                    self.prompt_cache_seq_ctx.remove(&seq_id);
+                    self.release_sequence_caches(seq_id);
+                    let _ = response_tx.send(GenerateEvent::Error(err.to_string()));
+                    return;
+                }
+            },
         };
 
         // mlx-vlm PR #1095: per-sequence MRoPE alignment.
@@ -1687,10 +1814,11 @@ impl BatchScheduler {
         // path can compose the insert key without reaching back into the
         // HTTP layer. Only stored when the feature is active and the
         // request actually carried a context — otherwise the map stays
-        // empty and the donate-back short-circuits. Multimodal requests
-        // opt out of the cache altogether (see above).
+        // empty and the donate-back short-circuits. Multimodal requests are
+        // stored only when VLM sharing is enabled (#124 step c); otherwise
+        // they keep opting out of the cache entirely.
         if self.prompt_cache_active()
-            && !is_multimodal
+            && (!is_multimodal || vlm_sharing_ok)
             && let Some(ctx) = options.prompt_cache_ctx.clone()
         {
             self.prompt_cache_seq_ctx.insert(seq_id, ctx);

@@ -423,6 +423,11 @@ pub struct ServerConfig {
     /// [`crate::server::batch::BatchScheduler::with_paged_block_budget`]. Only
     /// meaningful for pool-backed (Fp16, dense-natural-backend) sequences.
     pub kv_cache_budget: Option<crate::memory_estimate::PagedBudgetDirective>,
+    /// `--enable-vlm-prefix-cache` (#124 step c). Default off. When on, the
+    /// scheduler permits VLM (image/audio) chat requests to adopt and donate
+    /// KV prefixes for multi-turn same-image conversations; text-only and
+    /// non-VLM behavior is unchanged.
+    pub enable_vlm_prefix_cache: bool,
 }
 
 impl Default for ServerConfig {
@@ -477,6 +482,7 @@ impl Default for ServerConfig {
             batch_kv_quant: mlxcel_core::cache::BatchKvQuantConfig::default(),
             max_kv_size: None,
             kv_cache_budget: None,
+            enable_vlm_prefix_cache: false,
         }
     }
 }

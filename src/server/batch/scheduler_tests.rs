@@ -25,7 +25,7 @@ use std::time::Instant;
 use mlxcel_core::cache::SequenceId;
 use mlxcel_core::generate::SamplingConfig;
 
-use super::effective_decode_storage_backend;
+use super::{effective_decode_storage_backend, vlm_prefix_sharing_allowed};
 use crate::server::batch::active::ActiveBatch;
 use crate::server::batch::queue::PrefillQueue;
 use crate::server::batch::sequence::{
@@ -816,6 +816,24 @@ fn auto_decode_storage_prefers_paged_only_for_supported_workers() {
         effective_decode_storage_backend(DecodeStorageBackend::Auto, 1, true, true),
         DecodeStorageBackend::Dense
     );
+}
+
+/// #124 step c: the VLM prompt-prefix sharing gate must stay off by default,
+/// reject text-only requests, and never share a request that carries video
+/// (video bytes are not in the multimodal digest, so a video prefix could
+/// collide). Only an opted-in, image/audio (no-video) request is eligible.
+#[test]
+fn vlm_prefix_sharing_gate_pins_safety_conditions() {
+    // Default off: even a clean image request is ineligible when the operator
+    // did not pass --enable-vlm-prefix-cache.
+    assert!(!vlm_prefix_sharing_allowed(false, true, false));
+    // Text-only requests never share, opt-in or not.
+    assert!(!vlm_prefix_sharing_allowed(true, false, false));
+    assert!(!vlm_prefix_sharing_allowed(false, false, false));
+    // Video is excluded because its bytes are not folded into the digest.
+    assert!(!vlm_prefix_sharing_allowed(true, true, true));
+    // The one eligible case: opted in, multimodal, no video.
+    assert!(vlm_prefix_sharing_allowed(true, true, false));
 }
 
 /// #124 step b: the scheduler must fold the request context's multimodal

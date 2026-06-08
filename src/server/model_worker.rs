@@ -115,6 +115,15 @@ pub(crate) struct WorkerSchedulerConfig {
     /// the scheduler's pool through
     /// [`crate::server::batch::BatchScheduler::with_paged_block_budget`].
     pub kv_cache_budget: Option<crate::memory_estimate::PagedBudgetDirective>,
+    /// experimental VLM prompt-prefix cache toggle (#124 step c,
+    /// `--enable-vlm-prefix-cache`).
+    ///
+    /// `false` (the default) preserves the legacy cold-prefill behavior for
+    /// every multimodal request. When `true`, the scheduler permits VLM
+    /// (image/audio) chat requests to adopt and donate KV prefixes for
+    /// multi-turn same-image conversations. Text-only and non-VLM requests are
+    /// unaffected either way.
+    pub enable_vlm_prefix_cache: bool,
     /// resolved speculative-decoding dispatch shape.
     ///
     /// Constructed once at worker construction (or
@@ -391,6 +400,8 @@ pub(crate) fn spawn_model_worker_with_batch_config(
         .with_max_kv_size(sched_config.max_kv_size)
         // install the resolved paged KV block budget (epic #116 #122 b3).
         .with_paged_block_budget(paged_block_budget)
+        // experimental VLM prompt-prefix cache sharing (#124 step c).
+        .with_vlm_prefix_cache(sched_config.enable_vlm_prefix_cache)
         // attach the resolved speculative dispatch so the
         // scheduler can branch per-request once the round-loop dispatch
         // hook is wired in `decode_single_step`.
