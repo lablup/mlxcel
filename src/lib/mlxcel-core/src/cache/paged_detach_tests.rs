@@ -1494,6 +1494,150 @@ fn pool_backed_sharers_cow_keeps_other_prefix_intact() {
     assert_eq!(b_after.1, reference.1, "B's prefix V intact after A's COW");
 }
 
+#[test]
+fn trim_across_shared_blocks_releases_only_the_trimming_sequences_refs() {
+    // Two LIVE pool-backed sequences share a 2-block prefix (refcount 2 on each
+    // block, the state two adopters of a cached prefix reach). Trimming one of
+    // them across the shared tail block must drop ONLY that sequence's ref: the
+    // physical block survives for the sibling (refcount 2 -> 1, never freed),
+    // the sibling's gathered prefix stays bit-identical, and the trimmed
+    // sequence's own window shrinks to the retained prefix. This is the
+    // "trim/rewind across shared blocks" correctness case for #126. (rewind is
+    // an alias of trim, so this covers both.)
+    let n_kv_heads = 2i32;
+    let head_dim = 3i32;
+    let block_size = 4usize;
+    let layout = fp16_pool_layout(block_size, n_kv_heads, head_dim);
+    let model = DenseNaturalStubModel::new(1);
+    let mut pool = CachePool::new(4);
+
+    // Sequence A: 6-token prefix => 2 blocks (head block full, tail half-full).
+    let seq_a = pool
+        .allocate_with_layout(
+            &model,
+            Some(SequenceStateLayout::paged_kv_cache(layout.clone())),
+        )
+        .unwrap();
+    let prefix_len = 6i32;
+    let prefix_k = prefill_block(1000.0, n_kv_heads, prefix_len, head_dim);
+    let prefix_v = prefill_block(5000.0, n_kv_heads, prefix_len, head_dim);
+    write_prefill_for(&mut pool, seq_a, 0, &prefix_k, &prefix_v).unwrap();
+    let prefix_blocks = pool
+        .get_paged_state(seq_a)
+        .unwrap()
+        .layer(0)
+        .unwrap()
+        .block_ids
+        .clone();
+    assert_eq!(prefix_blocks.len(), 2);
+    let head_block = prefix_blocks[0];
+    let tail_block = prefix_blocks[1];
+
+    let reference = {
+        let state = pool.get_paged_state(seq_a).unwrap();
+        let (gk, gv) = pool
+            .paged_pool_ref()
+            .unwrap()
+            .gather_visible(&state, 0)
+            .unwrap()
+            .expect("A gather");
+        (flatten_fp32(&gk), flatten_fp32(&gv))
+    };
+
+    // Sequence B aliases A's prefix block table and pins it (refcount 2),
+    // exactly the shared state two concurrent adopters of a cached prefix reach.
+    let seq_b = pool
+        .allocate_with_layout(&model, Some(SequenceStateLayout::paged_kv_cache(layout)))
+        .unwrap();
+    {
+        let set = pool.get_mut(seq_b).unwrap();
+        let mut state = set.paged.as_ref().unwrap().borrow_mut();
+        let layer = state.layer_mut(0).unwrap();
+        layer.block_ids = prefix_blocks.clone();
+        layer.len = prefix_len as usize;
+        layer.logical_start = 0;
+    }
+    for &id in &prefix_blocks {
+        pool.paged_pool
+            .as_ref()
+            .unwrap()
+            .borrow_mut()
+            .retain_block(id)
+            .unwrap();
+    }
+    assert_eq!(pool.paged_pool_ref().unwrap().refcount(tail_block), 2);
+    assert_eq!(pool.paged_pool_ref().unwrap().refcount(head_block), 2);
+    assert_eq!(pool.paged_pool_ref().unwrap().live_block_count(), 2);
+
+    // Trim A by 2 tokens: visible 6 -> 4, dropping the shared tail block from
+    // A's table. `release_block` decrements the tail's refcount but must NOT
+    // free it (B still owns it).
+    let trimmed = pool.trim_paged_tokens(seq_a, 0, 2).unwrap();
+    assert_eq!(trimmed, 2);
+    {
+        let state = pool.get_paged_state(seq_a).unwrap();
+        let layer = state.layer(0).unwrap();
+        assert_eq!(layer.len, 4);
+        assert_eq!(layer.block_ids, vec![head_block]);
+    }
+
+    assert_eq!(
+        pool.paged_pool_ref().unwrap().refcount(tail_block),
+        1,
+        "trim dropped only A's ref to the shared tail; B still owns it"
+    );
+    assert_eq!(
+        pool.paged_pool_ref().unwrap().refcount(head_block),
+        2,
+        "the head block is still shared by both sequences"
+    );
+    assert_eq!(
+        pool.paged_pool_ref().unwrap().live_block_count(),
+        2,
+        "the trimmed-away block stays live for the sibling (no premature free)"
+    );
+
+    // B's full 6-token prefix is untouched by A's trim.
+    {
+        let state = pool.get_paged_state(seq_b).unwrap();
+        let (gk, gv) = pool
+            .paged_pool_ref()
+            .unwrap()
+            .gather_visible(&state, 0)
+            .unwrap()
+            .expect("B gather after A trim");
+        assert_eq!(flatten_fp32(&gk), reference.0, "B keys intact after A trim");
+        assert_eq!(
+            flatten_fp32(&gv),
+            reference.1,
+            "B values intact after A trim"
+        );
+    }
+
+    // A's own window is exactly the retained 4-token prefix (the head block's
+    // data). `prefill_block` values are position-encoded and length-independent,
+    // so the first four tokens equal a fresh 4-token block.
+    {
+        let state = pool.get_paged_state(seq_a).unwrap();
+        let (gk, gv) = pool
+            .paged_pool_ref()
+            .unwrap()
+            .gather_visible(&state, 0)
+            .unwrap()
+            .expect("A gather post-trim");
+        assert_eq!(
+            flatten_fp32(&gk),
+            flatten_fp32(&prefill_block(1000.0, n_kv_heads, 4, head_dim)),
+            "A keys are the retained 4-token prefix"
+        );
+        assert_eq!(
+            flatten_fp32(&gv),
+            flatten_fp32(&prefill_block(5000.0, n_kv_heads, 4, head_dim)),
+            "A values are the retained 4-token prefix"
+        );
+    }
+}
+
 /// Free reference to DetachedPagedCacheSet to keep the import alive.
 #[allow(dead_code)]
 fn _type_alive() -> Option<DetachedPagedCacheSet> {

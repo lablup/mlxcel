@@ -382,3 +382,69 @@ pub fn validate_raw_tensor(tensor: &RawTensorData) -> anyhow::Result<()> {
 
     Ok(())
 }
+
+/// Bounds applied to a cache payload accepted from an (untrusted) peer node, so
+/// a malformed or hostile handoff cannot exhaust decode-node memory or smuggle
+/// oversized blocks past the frame reader.
+///
+/// The live disaggregated decode path derives tight values from the model and
+/// serving config; the [`Default`] values are generous backstops sized for
+/// in-process and test round-trips, not a security boundary on their own. The
+/// frame cap is the JSON-bloated wire size (the tensor bytes ride inside the
+/// metadata frame as number arrays, roughly 4x their raw size).
+#[derive(Debug, Clone, Copy)]
+pub struct CacheIngestLimits {
+    /// Maximum accepted wire frame size in bytes (whole buffer + metadata len).
+    pub max_frame_bytes: usize,
+    /// Maximum number of transferred paged blocks in one handoff.
+    pub max_paged_blocks: usize,
+    /// Maximum bytes for a single block slab (one K or one V slab).
+    pub max_block_slab_bytes: usize,
+}
+
+impl Default for CacheIngestLimits {
+    fn default() -> Self {
+        Self {
+            // 16 GiB: rejects absurd payloads while leaving headroom for a
+            // large model / long context handoff under the bloated JSON framing.
+            max_frame_bytes: 16 << 30,
+            // 1,048,576 per-layer blocks: far above any realistic single-sequence
+            // block table; the decode pool's block budget is the real bound.
+            max_paged_blocks: 1 << 20,
+            // 64 MiB: one [block_size, n_kv_heads, head_dim] slab is small even
+            // for wide-GQA models (e.g. 32 * 128 * 256 * 4 = 4 MiB).
+            max_block_slab_bytes: 64 << 20,
+        }
+    }
+}
+
+/// The decode model's real per-layer paged KV block geometry, used to anchor
+/// every transferred block slab at the deserialization boundary.
+///
+/// A fresh decode pool captures its geometry from the FIRST slab it is asked to
+/// write ([`mlxcel_core::cache`]'s `PagedBlockPool::write_block` only validates
+/// subsequent writes against the captured geometry), so without this anchor a
+/// peer could establish a wrong-shaped pool on the first write. Supplying the
+/// model's real `(block_size, n_kv_heads, head_dim, dtype)` rejects any slab
+/// that does not match before a single pool block is acquired.
+#[derive(Debug, Clone, Copy)]
+pub struct ExpectedBlockGeometry {
+    /// Number of layers the decode model exposes.
+    pub num_layers: usize,
+    /// Paged pool block size (slots per block).
+    pub block_size: usize,
+    /// Key/value head count.
+    pub n_kv_heads: i32,
+    /// Per-head dimension.
+    pub head_dim: i32,
+    /// MLX dtype code for the pool tensors (e.g. 9 = float16, 12 = bfloat16).
+    pub dtype: i32,
+}
+
+impl ExpectedBlockGeometry {
+    /// The canonical bare layout-A slab shape `[block_size, n_kv_heads, head_dim]`
+    /// that `read_block_contents` produces and `acquire_and_write_block` accepts.
+    pub fn slab_shape(&self) -> [i32; 3] {
+        [self.block_size as i32, self.n_kv_heads, self.head_dim]
+    }
+}

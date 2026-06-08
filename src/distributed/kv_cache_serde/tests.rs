@@ -586,9 +586,12 @@ fn mlx_dtype_element_size_known_types() {
         mlx_dtype_element_size(mlxcel_core::dtype::FLOAT16).unwrap(),
         2
     );
+    // BFLOAT16 is a 16-bit type: 2 bytes. (#125 fixed `mlx_dtype_element_size`
+    // to return 2 here so `validate_raw_tensor` stops rejecting valid bf16
+    // payloads; this assertion was left stale at the old, wrong value 4.)
     assert_eq!(
         mlx_dtype_element_size(mlxcel_core::dtype::BFLOAT16).unwrap(),
-        4
+        2
     );
     assert_eq!(mlx_dtype_element_size(0).unwrap(), 1); // BOOL
 }
@@ -761,4 +764,313 @@ fn chunked_cache_extract_round_trip() {
     assert_eq!(shape[1], 1);
     assert!(shape[2] >= 3);
     assert_eq!(shape[3], 1);
+}
+
+// ---------------------------------------------------------------------------
+// Untrusted-network handoff hardening tests (#126): frame caps, model-geometry
+// anchor, table <-> contents layer consistency, and empty-sequence routing.
+// These exercise `validate_paged_payload` / `deserialize_cache_state_with_limits`
+// over synthetic payloads, so they need no Metal device.
+// ---------------------------------------------------------------------------
+
+const HARDEN_BS: usize = 4;
+const HARDEN_H: i32 = 2;
+const HARDEN_D: i32 = 8;
+
+fn harden_slab() -> RawTensorData {
+    let dt = mlxcel_core::dtype::FLOAT16;
+    let elements = HARDEN_BS * HARDEN_H as usize * HARDEN_D as usize;
+    let bytes = elements * types::mlx_dtype_element_size(dt).unwrap();
+    RawTensorData {
+        data: vec![0u8; bytes],
+        shape: vec![HARDEN_BS as i32, HARDEN_H, HARDEN_D],
+        dtype: dt,
+    }
+}
+
+fn harden_block(block_id: u64, layer_idx: usize) -> SerializablePagedBlock {
+    SerializablePagedBlock {
+        block_id,
+        layer_idx,
+        keys: harden_slab(),
+        values: harden_slab(),
+    }
+}
+
+fn harden_expected() -> ExpectedBlockGeometry {
+    ExpectedBlockGeometry {
+        num_layers: 2,
+        block_size: HARDEN_BS,
+        n_kv_heads: HARDEN_H,
+        head_dim: HARDEN_D,
+        dtype: mlxcel_core::dtype::FLOAT16,
+    }
+}
+
+/// Coherent 2-layer pool-backed handoff: layer 0 references blocks 10 and 11
+/// (len 6 over block_size 4 = 2 blocks), layer 1 references block 20 (len 3 = 1
+/// block). Each referenced block has matching contents on its own layer.
+fn coherent_paged_payload() -> SerializableCacheState {
+    SerializableCacheState {
+        cache_type: CacheType::Standard,
+        entries: vec![],
+        metadata: CacheMetadata {
+            prompt_len: 6,
+            current_offset: 6,
+            num_layers: 2,
+            layer_offsets: vec![],
+            max_size: None,
+            layer_indices: None,
+            chunk_size: None,
+            start_positions: None,
+        },
+        sampling_state: None,
+        token_history: vec![],
+        sequence_id: 1,
+        sequence_backend: SerializableSequenceBackend::PagedKvCache,
+        paged_state: Some(SerializablePagedSequenceState {
+            block_size: HARDEN_BS,
+            bytes_per_block: vec![HARDEN_BS, HARDEN_BS],
+            layers: vec![
+                SerializablePagedLayerState {
+                    block_ids: vec![10, 11],
+                    len: 6,
+                    logical_start: 0,
+                },
+                SerializablePagedLayerState {
+                    block_ids: vec![20],
+                    len: 3,
+                    logical_start: 0,
+                },
+            ],
+        }),
+        paged_blocks: vec![
+            harden_block(10, 0),
+            harden_block(11, 0),
+            harden_block(20, 1),
+        ],
+    }
+}
+
+#[test]
+fn validate_paged_payload_accepts_coherent_handoff() {
+    let payload = coherent_paged_payload();
+    validate_paged_payload(&payload, &CacheIngestLimits::default(), None).unwrap();
+    validate_paged_payload(
+        &payload,
+        &CacheIngestLimits::default(),
+        Some(&harden_expected()),
+    )
+    .unwrap();
+}
+
+#[test]
+fn validate_paged_payload_passes_dense_payload_unchanged() {
+    let mut payload = coherent_paged_payload();
+    payload.sequence_backend = SerializableSequenceBackend::DenseKvCache;
+    payload.paged_state = None;
+    payload.paged_blocks = Vec::new();
+    validate_paged_payload(&payload, &CacheIngestLimits::default(), None).unwrap();
+}
+
+#[test]
+fn validate_paged_payload_rejects_geometry_shape_mismatch() {
+    let payload = coherent_paged_payload();
+    let mut expected = harden_expected();
+    expected.head_dim = HARDEN_D + 1;
+    let err = validate_paged_payload(&payload, &CacheIngestLimits::default(), Some(&expected))
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains("does not match decode model geometry"),
+        "{err}"
+    );
+}
+
+#[test]
+fn validate_paged_payload_rejects_geometry_dtype_mismatch() {
+    let payload = coherent_paged_payload();
+    let mut expected = harden_expected();
+    expected.dtype = mlxcel_core::dtype::BFLOAT16;
+    let err = validate_paged_payload(&payload, &CacheIngestLimits::default(), Some(&expected))
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("does not match decode model dtype"), "{err}");
+}
+
+#[test]
+fn validate_paged_payload_rejects_block_count_over_limit() {
+    let payload = coherent_paged_payload();
+    let limits = CacheIngestLimits {
+        max_paged_blocks: 2,
+        ..CacheIngestLimits::default()
+    };
+    let err = validate_paged_payload(&payload, &limits, None)
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("exceeds limit"), "{err}");
+}
+
+#[test]
+fn validate_paged_payload_rejects_oversized_slab() {
+    let payload = coherent_paged_payload();
+    let limits = CacheIngestLimits {
+        max_block_slab_bytes: 1,
+        ..CacheIngestLimits::default()
+    };
+    let err = validate_paged_payload(&payload, &limits, None)
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("exceeds limit"), "{err}");
+}
+
+#[test]
+fn validate_paged_payload_rejects_layer_out_of_range() {
+    let mut payload = coherent_paged_payload();
+    // A block declaring a layer beyond the table's layer count.
+    payload.paged_blocks.push(harden_block(99, 7));
+    payload
+        .paged_state
+        .as_mut()
+        .unwrap()
+        .layers
+        .push(SerializablePagedLayerState {
+            block_ids: vec![99],
+            len: 1,
+            logical_start: 0,
+        });
+    let err = validate_paged_payload(&payload, &CacheIngestLimits::default(), None)
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("out of range"), "{err}");
+}
+
+#[test]
+fn validate_paged_payload_rejects_missing_block_contents() {
+    let mut payload = coherent_paged_payload();
+    // Drop block 20's contents while the layer-1 table still references it.
+    payload.paged_blocks.retain(|b| b.block_id != 20);
+    let err = validate_paged_payload(&payload, &CacheIngestLimits::default(), None)
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("no transferred contents"), "{err}");
+}
+
+#[test]
+fn validate_paged_payload_rejects_cross_layer_block() {
+    let mut payload = coherent_paged_payload();
+    // Block 10 is referenced by layer 0, but its contents claim layer 1.
+    for block in &mut payload.paged_blocks {
+        if block.block_id == 10 {
+            block.layer_idx = 1;
+        }
+    }
+    let err = validate_paged_payload(&payload, &CacheIngestLimits::default(), None)
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("declare layer"), "{err}");
+}
+
+#[test]
+fn validate_paged_payload_rejects_orphan_contents() {
+    let mut payload = coherent_paged_payload();
+    // A block with contents that no layer table references (a pool-block leak).
+    payload.paged_blocks.push(harden_block(404, 0));
+    let err = validate_paged_payload(&payload, &CacheIngestLimits::default(), None)
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("not referenced by any layer table"), "{err}");
+}
+
+#[test]
+fn validate_paged_payload_rejects_metadata_only_handoff() {
+    let mut payload = coherent_paged_payload();
+    // Table still references blocks, but no contents are carried.
+    payload.paged_blocks = Vec::new();
+    let err = validate_paged_payload(&payload, &CacheIngestLimits::default(), None)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains("metadata-only paged restore is invalid"),
+        "{err}"
+    );
+}
+
+#[test]
+fn validate_paged_payload_rejects_empty_block_table() {
+    let mut payload = coherent_paged_payload();
+    payload.paged_blocks = Vec::new();
+    for layer in &mut payload.paged_state.as_mut().unwrap().layers {
+        layer.block_ids.clear();
+        layer.len = 0;
+    }
+    let err = validate_paged_payload(&payload, &CacheIngestLimits::default(), None)
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("empty block table"), "{err}");
+}
+
+#[test]
+fn validate_paged_payload_rejects_paged_backend_without_metadata() {
+    let mut payload = coherent_paged_payload();
+    payload.paged_state = None;
+    payload.paged_blocks = Vec::new();
+    let err = validate_paged_payload(&payload, &CacheIngestLimits::default(), None)
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("missing paged_state metadata"), "{err}");
+}
+
+#[test]
+fn deserialize_cache_state_rejects_oversized_frame() {
+    // A well-formed dense frame, then a limit below its size.
+    let state = SerializableCacheState {
+        cache_type: CacheType::Standard,
+        entries: vec![],
+        metadata: CacheMetadata {
+            prompt_len: 0,
+            current_offset: 0,
+            num_layers: 0,
+            layer_offsets: vec![],
+            max_size: None,
+            layer_indices: None,
+            chunk_size: None,
+            start_positions: None,
+        },
+        sampling_state: None,
+        token_history: vec![],
+        sequence_id: 1,
+        sequence_backend: SerializableSequenceBackend::DenseKvCache,
+        paged_state: None,
+        paged_blocks: Vec::new(),
+    };
+    let bytes = serialize_cache_state(&state).unwrap();
+    let limits = CacheIngestLimits {
+        max_frame_bytes: bytes.len() - 1,
+        ..CacheIngestLimits::default()
+    };
+    let err = deserialize_cache_state_with_limits(&bytes, &limits)
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("exceeds limit"), "{err}");
+    // The same bytes deserialize fine under the default cap.
+    deserialize_cache_state(&bytes).unwrap();
+}
+
+#[test]
+fn deserialize_cache_state_rejects_forged_metadata_length() {
+    // Header claims a metadata length far beyond the frame cap.
+    let mut buf = vec![0u8; 10];
+    buf[0] = CACHE_FORMAT_VERSION;
+    buf[1] = CacheType::Standard as u8;
+    buf[2..6].copy_from_slice(&0u32.to_le_bytes());
+    buf[6..10].copy_from_slice(&u32::MAX.to_le_bytes());
+    let limits = CacheIngestLimits {
+        max_frame_bytes: 4096,
+        ..CacheIngestLimits::default()
+    };
+    let err = deserialize_cache_state_with_limits(&buf, &limits)
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("exceeds frame limit"), "{err}");
 }

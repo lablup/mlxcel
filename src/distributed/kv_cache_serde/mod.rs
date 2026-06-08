@@ -60,8 +60,9 @@ pub mod types;
 mod tests;
 
 pub use deserialize::{
-    deserialize_cache_state, reconstruct_mlx_array, restore_into_cache_pool_sequence,
-    restore_into_kv_caches, restore_into_sequence_cache_set,
+    deserialize_cache_state, deserialize_cache_state_with_limits, reconstruct_mlx_array,
+    restore_into_cache_pool_sequence, restore_into_cache_pool_sequence_anchored,
+    restore_into_kv_caches, restore_into_sequence_cache_set, validate_paged_payload,
 };
 pub use serialize::{
     CACHE_FORMAT_VERSION, extract_chunked_cache_entry, extract_kv_cache_entry,
@@ -69,8 +70,8 @@ pub use serialize::{
     serialize_sequence_cache_set,
 };
 pub use types::{
-    CACHE_FORMAT_VERSION_V1, CACHE_FORMAT_VERSION_V2, CacheMetadata, CacheType, RawTensorData,
-    SerializableCacheEntry, SerializableCacheState, SerializablePagedBlock,
-    SerializablePagedLayerState, SerializablePagedSequenceState, SerializableSamplingState,
-    SerializableSequenceBackend, validate_raw_tensor,
+    CACHE_FORMAT_VERSION_V1, CACHE_FORMAT_VERSION_V2, CacheIngestLimits, CacheMetadata, CacheType,
+    ExpectedBlockGeometry, RawTensorData, SerializableCacheEntry, SerializableCacheState,
+    SerializablePagedBlock, SerializablePagedLayerState, SerializablePagedSequenceState,
+    SerializableSamplingState, SerializableSequenceBackend, validate_raw_tensor,
 };
