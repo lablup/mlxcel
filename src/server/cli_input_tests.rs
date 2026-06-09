@@ -86,6 +86,8 @@ fn sample_input() -> ServerStartupInput {
         node_role: None,
         node_id: None,
         peers: Vec::new(),
+        prefill_peers: Vec::new(),
+        decode_peers: Vec::new(),
         pp_layers: None,
         pp_micro_batch_size: 1,
         pp_auto: None,

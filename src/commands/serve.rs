@@ -265,6 +265,8 @@ fn build_startup_input(mut args: crate::ServeArgs) -> anyhow::Result<ServerStart
         node_role: args.node_role,
         node_id: args.node_id,
         peers: args.peers,
+        prefill_peers: args.prefill_peers,
+        decode_peers: args.decode_peers,
         pp_layers: args.pp_layers,
         pp_micro_batch_size: args.pp_micro_batch_size,
         pp_auto: args.pp_auto,

@@ -116,6 +116,12 @@ pub struct ServerStartupInput {
     pub node_id: Option<String>,
     /// Comma-separated list of peer addresses (CLI shorthand).
     pub peers: Vec<SocketAddr>,
+    /// Prefill-node peers a decode node receives handoffs from (disaggregated
+    /// serving, #126).
+    pub prefill_peers: Vec<SocketAddr>,
+    /// Decode-node peers a prefill node hands off to (disaggregated serving,
+    /// #126).
+    pub decode_peers: Vec<SocketAddr>,
     /// Manual pipeline-parallel layer partition spec (e.g. "0-15,16-31").
     pub pp_layers: Option<String>,
     /// Micro-batch size for in-process pipeline execution.

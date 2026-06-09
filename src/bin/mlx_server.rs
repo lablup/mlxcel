@@ -511,6 +511,16 @@ struct ServerArgs {
     #[arg(long, value_delimiter = ',', value_name = "ADDR")]
     peers: Vec<std::net::SocketAddr>,
 
+    /// Comma-separated prefill-node addresses a decode node receives handoffs
+    /// from (disaggregated serving, #126). Consumed when `--node-role decode`.
+    #[arg(long, value_delimiter = ',', value_name = "ADDR")]
+    prefill_peers: Vec<std::net::SocketAddr>,
+
+    /// Comma-separated decode-node addresses a prefill node hands off to
+    /// (disaggregated serving, #126). Consumed when `--node-role prefill`.
+    #[arg(long, value_delimiter = ',', value_name = "ADDR")]
+    decode_peers: Vec<std::net::SocketAddr>,
+
     /// Manual pipeline-parallel layer partition (e.g. "0-15,16-31")
     ///
     /// Specifies explicit layer ranges per pipeline stage. Each range is
@@ -1170,6 +1180,8 @@ fn build_startup_input(mut args: ServerArgs) -> anyhow::Result<ServerStartupInpu
         node_role: args.node_role,
         node_id: args.node_id,
         peers: args.peers,
+        prefill_peers: args.prefill_peers,
+        decode_peers: args.decode_peers,
         pp_layers: args.pp_layers,
         pp_micro_batch_size: args.pp_micro_batch_size,
         pp_auto: args.pp_auto,

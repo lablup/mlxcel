@@ -73,6 +73,8 @@ fn sample_args() -> crate::ServeArgs {
         node_role: None,
         node_id: None,
         peers: vec![],
+        prefill_peers: vec![],
+        decode_peers: vec![],
         pp_layers: None,
         pp_micro_batch_size: 1,
         pp_auto: None,

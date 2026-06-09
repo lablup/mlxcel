@@ -58,6 +58,7 @@ use mlxcel_core::generate::SamplingConfig;
 
 use super::handoff_impl::{recv_handoff_payload, send_handoff_payload};
 use super::serving::ServingMode;
+use crate::distributed::tcp_transport::{TcpTransport, TcpTransportConfig};
 use crate::distributed::transport::Transport;
 use crate::server::batch::BatchScheduler;
 use crate::server::model_provider::GenerateEvent;
@@ -270,6 +271,82 @@ pub struct DecodeRoleHandoff {
     /// Output channel for the decode node's half of the stream (the
     /// continuation after the prefill node's first token).
     pub response_tx: std::sync::mpsc::Sender<GenerateEvent>,
+}
+
+/// Drive the prefill serving role to completion on a fresh current-thread tokio
+/// runtime, binding the node's real TCP transport (#126 B3b1).
+///
+/// The model worker is a plain `std::thread` with no ambient tokio runtime, and
+/// the role-loop future is `!Send` (the scheduler owns the per-process MLX
+/// pool), so this builds a current-thread runtime and drives the loop on it via
+/// `block_on` (a current-thread runtime accepts a `!Send` future; the transport
+/// accept loop it spawns is `Send` and runs on the same runtime). `bind` is the
+/// node's own listener config, `peer` the decode node it hands off to, and
+/// `requests` the intake seam a networked request source feeds. When `ready` is
+/// set, the bound local address is reported once the listener is up so a caller
+/// that bound an ephemeral port can wire it as a peer (tests use this; the
+/// worker passes `None`).
+///
+/// `dead_code` is allowed until the worker flip wires the live caller (B3b2);
+/// the in-process two-node parity test drives it now.
+#[allow(dead_code)]
+pub(crate) fn serve_prefill_role_blocking(
+    bind: TcpTransportConfig,
+    peer: String,
+    scheduler: &mut BatchScheduler,
+    requests: tokio::sync::mpsc::Receiver<PrefillRoleRequest>,
+    ready: Option<std::sync::mpsc::Sender<String>>,
+) -> Result<()> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("serve prefill role: build current-thread runtime")?;
+    runtime.block_on(async move {
+        let transport = TcpTransport::bind(bind)
+            .await
+            .context("serve prefill role: bind transport")?;
+        if let Some(ready) = ready {
+            let _ = ready.send(transport.local_addr()?);
+        }
+        let coordinator =
+            ServingCoordinator::new(ServingMode::PrefillOnly, Box::new(transport), peer);
+        coordinator.run_prefill_role(scheduler, requests).await
+    })
+}
+
+/// Drive the decode serving role to completion on a fresh current-thread tokio
+/// runtime, binding the node's real TCP transport (#126 B3b1).
+///
+/// The decode counterpart of [`serve_prefill_role_blocking`]: `peer` is the
+/// prefill node it is paired with and `handoffs` the per-request coordination
+/// metadata the decode loop pairs with inbound frames. See that function for the
+/// runtime and `ready` rationale.
+///
+/// `dead_code` is allowed until the worker flip wires the live caller (B3b2);
+/// the in-process two-node parity test drives it now.
+#[allow(dead_code)]
+pub(crate) fn serve_decode_role_blocking(
+    bind: TcpTransportConfig,
+    peer: String,
+    scheduler: &mut BatchScheduler,
+    handoffs: tokio::sync::mpsc::Receiver<DecodeRoleHandoff>,
+    ready: Option<std::sync::mpsc::Sender<String>>,
+) -> Result<()> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("serve decode role: build current-thread runtime")?;
+    runtime.block_on(async move {
+        let transport = TcpTransport::bind(bind)
+            .await
+            .context("serve decode role: bind transport")?;
+        if let Some(ready) = ready {
+            let _ = ready.send(transport.local_addr()?);
+        }
+        let coordinator =
+            ServingCoordinator::new(ServingMode::DecodeOnly, Box::new(transport), peer);
+        coordinator.run_decode_role(scheduler, handoffs).await
+    })
 }
 
 #[cfg(test)]

@@ -55,6 +55,9 @@ use std::time::Instant;
 use mlxcel_core::generate::SamplingConfig;
 
 use super::BatchScheduler;
+use crate::distributed::disaggregated::coordinator::{
+    serve_decode_role_blocking, serve_prefill_role_blocking,
+};
 use crate::distributed::disaggregated::serving::ServingMode;
 use crate::distributed::disaggregated::{
     DecodeRoleHandoff, PrefillRoleRequest, ServingCoordinator,
@@ -476,4 +479,95 @@ fn serving_role_loop_parity_matches_single_node_qwen3() {
          node reconstructed and decoded it, and the concatenated stream is byte-identical to the \
          single-node run."
     );
+}
+
+/// The prefill-role driver (#126 B3b1) builds its own current-thread runtime,
+/// binds a real localhost TCP listener, and drives the role loop to a clean
+/// return when its request intake closes. This exercises the worker-flip glue
+/// (runtime + bind + graceful drive) the model worker uses to run a serving
+/// role; the request-by-request handoff behaviour is covered by
+/// `serving_role_loop_parity_matches_single_node_qwen3`, and the real
+/// two-process path lands in B3b2. A closed intake makes the loop return before
+/// any model forward, so this is fast, single-threaded, and needs no second node.
+#[test]
+#[ignore = "loads qwen3-0.6b-4bit to build a scheduler; run with --ignored"]
+fn serve_prefill_role_blocking_binds_then_returns_on_closed_intake() {
+    let _runtime = crate::initialize_runtime();
+    let dir = repo_model_dir(QWEN3_DIR);
+    if !dir.exists() {
+        eprintln!(
+            "Skipping {QWEN3_DIR}: model directory not found at {}.",
+            dir.display()
+        );
+        return;
+    }
+    let (model, tokenizer) =
+        crate::load_model(&dir).unwrap_or_else(|e| panic!("load {QWEN3_DIR}: {e:?}"));
+    let mut sched = build_paged_scheduler(model, tokenizer, crate::read_eos_token_ids(&dir));
+
+    // A closed intake makes the role loop drain nothing and return immediately,
+    // so the driver only exercises the runtime + bind + graceful-return glue.
+    let (requests_tx, requests_rx) = tokio::sync::mpsc::channel::<PrefillRoleRequest>(1);
+    drop(requests_tx);
+    let (ready_tx, ready_rx) = mpsc::channel();
+
+    serve_prefill_role_blocking(
+        loopback_tcp_config(),
+        "127.0.0.1:1".to_string(),
+        &mut sched,
+        requests_rx,
+        Some(ready_tx),
+    )
+    .expect("prefill role driver returns cleanly when the intake is closed");
+
+    let addr = ready_rx
+        .recv()
+        .expect("the prefill role driver reports its bound listener address");
+    assert!(
+        addr.starts_with("127.0.0.1:"),
+        "the driver bound a localhost listener, got {addr}"
+    );
+    eprintln!("OK: prefill-role driver bound {addr} and returned on a closed intake.");
+}
+
+/// The decode-role counterpart of
+/// [`serve_prefill_role_blocking_binds_then_returns_on_closed_intake`]: the same
+/// worker-flip glue, driving the decode role loop.
+#[test]
+#[ignore = "loads qwen3-0.6b-4bit to build a scheduler; run with --ignored"]
+fn serve_decode_role_blocking_binds_then_returns_on_closed_intake() {
+    let _runtime = crate::initialize_runtime();
+    let dir = repo_model_dir(QWEN3_DIR);
+    if !dir.exists() {
+        eprintln!(
+            "Skipping {QWEN3_DIR}: model directory not found at {}.",
+            dir.display()
+        );
+        return;
+    }
+    let (model, tokenizer) =
+        crate::load_model(&dir).unwrap_or_else(|e| panic!("load {QWEN3_DIR}: {e:?}"));
+    let mut sched = build_paged_scheduler(model, tokenizer, crate::read_eos_token_ids(&dir));
+
+    let (handoffs_tx, handoffs_rx) = tokio::sync::mpsc::channel::<DecodeRoleHandoff>(1);
+    drop(handoffs_tx);
+    let (ready_tx, ready_rx) = mpsc::channel();
+
+    serve_decode_role_blocking(
+        loopback_tcp_config(),
+        "127.0.0.1:1".to_string(),
+        &mut sched,
+        handoffs_rx,
+        Some(ready_tx),
+    )
+    .expect("decode role driver returns cleanly when the intake is closed");
+
+    let addr = ready_rx
+        .recv()
+        .expect("the decode role driver reports its bound listener address");
+    assert!(
+        addr.starts_with("127.0.0.1:"),
+        "the driver bound a localhost listener, got {addr}"
+    );
+    eprintln!("OK: decode-role driver bound {addr} and returned on a closed intake.");
 }
