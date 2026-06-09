@@ -461,7 +461,8 @@ fn chunked_prefill_interleaving_pattern() {
 // instead feeds an empty `[end..end]` chunk on the next tick, producing a
 // zero-length `[1, 0, vocab]` forward that crashes in `slice_last_logits`.
 
-/// Mirror of `start_chunked_prefill`'s chunk-0 range arithmetic.
+/// Thin wrapper around the production chunk range helper used by
+/// `start_chunked_prefill`.
 /// Returns `(chunk_len, is_terminal)` where `is_terminal` is true when chunk 0
 /// already covers the rest of the prompt and there is nothing to continue.
 fn first_chunk_is_terminal(
@@ -469,9 +470,9 @@ fn first_chunk_is_terminal(
     prefill_start_offset: usize,
     chunk_size: usize,
 ) -> (usize, bool) {
-    let start = prefill_start_offset;
-    let end = (start + chunk_size).min(prompt_len);
-    (end - start, end >= prompt_len)
+    let range = super::next_chunked_prefill_range(prompt_len, prefill_start_offset, chunk_size)
+        .expect("test scenarios must leave a non-empty suffix for chunk 0");
+    (range.end - range.start, range.is_terminal)
 }
 
 #[test]
@@ -481,7 +482,10 @@ fn chunked_prefill_first_chunk_terminal_on_long_cache_hit() {
     // whole suffix and reaches the prompt end -> must be terminal, never
     // stored for a continuation that would run an empty chunk.
     let (chunk_len, terminal) = first_chunk_is_terminal(593, 560, 512);
-    assert_eq!(chunk_len, 33, "chunk 0 should process only the short suffix");
+    assert_eq!(
+        chunk_len, 33,
+        "chunk 0 should process only the short suffix"
+    );
     assert!(
         terminal,
         "first chunk reaches the prompt end; it must finish the prefill, \
@@ -499,6 +503,26 @@ fn chunked_prefill_first_chunk_not_terminal_on_cold_long_prompt() {
     assert!(
         !terminal,
         "cold long prompt still has a suffix remaining after chunk 0"
+    );
+}
+
+#[test]
+fn chunked_prefill_range_rejects_empty_continuation() {
+    let range = super::next_chunked_prefill_range(593, 593, 512);
+    assert!(
+        range.is_none(),
+        "offset == prompt length has no suffix; the scheduler must not feed a \
+         zero-token chunk to MLX"
+    );
+}
+
+#[test]
+fn chunked_prefill_range_rejects_zero_chunk_size() {
+    let range = super::next_chunked_prefill_range(593, 560, 0);
+    assert!(
+        range.is_none(),
+        "a zero chunk size cannot make progress and must not create an empty \
+         MLX input"
     );
 }
 

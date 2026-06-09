@@ -103,6 +103,30 @@ fn effective_decode_storage_backend(
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ChunkedPrefillRange {
+    start: usize,
+    end: usize,
+    is_terminal: bool,
+}
+
+#[inline]
+fn next_chunked_prefill_range(
+    prompt_len: usize,
+    offset: usize,
+    chunk_size: usize,
+) -> Option<ChunkedPrefillRange> {
+    if chunk_size == 0 || offset >= prompt_len {
+        return None;
+    }
+    let end = offset.saturating_add(chunk_size).min(prompt_len);
+    Some(ChunkedPrefillRange {
+        start: offset,
+        end,
+        is_terminal: end >= prompt_len,
+    })
+}
+
 /// Core batch scheduler that drives the model worker loop.
 ///
 /// Replaces the old sequential `recv()` loop with an iteration-level scheduler
@@ -2726,9 +2750,6 @@ impl BatchScheduler {
             cached = seq.prefill_start_offset,
         )
         .entered();
-        // Counter reflects only the work the model actually runs.
-        let suffix_len = seq.prompt_tokens.len() - seq.prefill_start_offset;
-        self.batch_observability.record_prefill_start(suffix_len);
 
         // Reset internal caches for non-batching models (same as execute_full_prefill).
         if !self.model.supports_batching() {
@@ -2736,8 +2757,23 @@ impl BatchScheduler {
         }
 
         let chunk_size = self.prefill_chunk_size;
-        let start = seq.prefill_start_offset;
-        let end = (start + chunk_size).min(seq.prompt_tokens.len());
+        let chunk_range = match next_chunked_prefill_range(
+            seq.prompt_tokens.len(),
+            seq.prefill_start_offset,
+            chunk_size,
+        ) {
+            Some(range) => range,
+            None => {
+                self.abort_sequence(seq, "Chunked prefill start had no suffix tokens to process");
+                return;
+            }
+        };
+        // Counter reflects only the work the model actually runs.
+        let suffix_len = seq.prompt_tokens.len() - seq.prefill_start_offset;
+        self.batch_observability.record_prefill_start(suffix_len);
+
+        let start = chunk_range.start;
+        let end = chunk_range.end;
         let chunk = &seq.prompt_tokens[start..end];
 
         // Align the first chunk to a 32-token tile boundary on M5+ hardware.
@@ -2845,7 +2881,7 @@ impl BatchScheduler {
         // continuation instead would feed an empty `[end..end]` chunk on the
         // next tick, producing a zero-length forward whose `[1, 0, vocab]`
         // logits crash in `slice_last_logits` (issue #179).
-        if end >= seq.prompt_tokens.len() {
+        if chunk_range.is_terminal {
             let eos_tokens =
                 merged_eos_token_ids(self.model.eos_token_ids(), &seq.sampling.stop_token_ids);
             let needs_history = seq.sampling.needs_token_history();
@@ -2872,12 +2908,23 @@ impl BatchScheduler {
             total = seq.prompt_tokens.len(),
         )
         .entered();
-        self.batch_observability.record_prefill_chunk();
 
         let chunk_size = self.prefill_chunk_size;
         let offset = seq.prefill_offset;
         let total = seq.prompt_tokens.len();
-        let end = (offset + chunk_size).min(total);
+        let chunk_range = match next_chunked_prefill_range(total, offset, chunk_size) {
+            Some(range) => range,
+            None => {
+                self.abort_sequence(
+                    seq,
+                    "Chunked prefill continuation had no remaining tokens to process",
+                );
+                return;
+            }
+        };
+        self.batch_observability.record_prefill_chunk();
+
+        let end = chunk_range.end;
         let chunk = &seq.prompt_tokens[offset..end];
 
         // Align each continuation chunk to a 32-token tile boundary on M5+.
@@ -2960,7 +3007,7 @@ impl BatchScheduler {
             seq.seq_id,
         );
 
-        if end < total {
+        if !chunk_range.is_terminal {
             // More chunks remain -- store and yield back to the scheduler
             mlxcel_core::eval(&logits);
             mlxcel_core::clear_memory_cache();
