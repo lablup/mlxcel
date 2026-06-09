@@ -196,3 +196,7 @@ required-features = ["test-utils"]
 [[test]]
 name = "pipeline_e2e"
 required-features = ["test-utils"]
+
+[[test]]
+name = "paged_handoff_parity"
+required-features = ["test-utils"]

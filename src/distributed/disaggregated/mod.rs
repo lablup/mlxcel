@@ -30,6 +30,7 @@
 
 pub mod benchmark;
 pub mod decode_scheduler;
+pub mod handoff_impl;
 pub mod prefill_scheduler;
 pub mod request_router;
 pub mod serving;
@@ -43,6 +44,10 @@ pub use benchmark::{
 pub use decode_scheduler::{
     CompletionEvent, CompletionNotifier, CompletionReason, DecodeRequest, DecodeScheduler,
     DecodeSchedulerConfig, DecodeSequence, IngestionStats, SequenceStatus,
+};
+pub use handoff_impl::{
+    HANDOFF_TENSOR_ID, extract_sequence_handoff, ingest_sequence_handoff, probe_block_geometry,
+    recv_handoff_payload, send_handoff_payload,
 };
 pub use prefill_scheduler::{
     ChunkedPrefillCoordinator, HandoffProtocol, HandoffStatus, PrefillHandoff, PrefillRequest,

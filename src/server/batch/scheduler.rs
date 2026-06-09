@@ -329,6 +329,18 @@ pub struct BatchScheduler {
     /// empty for the worker's lifetime and the burst path is never
     /// entered.
     speculative_drafter_slot: super::speculative_burst::WorkerDrafterSlot,
+
+    // -- Disaggregated serving-role handoff --
+    /// Cached decode-model paged block geometry for cross-node KV handoff
+    /// ([`crate::distributed::disaggregated::handoff_impl`]).
+    ///
+    /// Lazily probed on the first [`Self::ingest_sequence_handoff`] and reused
+    /// for every later restore, so the one-token geometry probe runs at most
+    /// once per worker. `None` until the first ingest. Wired to a live caller by
+    /// the disaggregated decode serving role (a later step); the hooks below are
+    /// the in-crate seam it builds on.
+    #[allow(dead_code)]
+    paged_handoff_geometry: Option<crate::distributed::kv_cache_serde::ExpectedBlockGeometry>,
 }
 
 impl BatchScheduler {
@@ -345,6 +357,61 @@ impl BatchScheduler {
         seq.prefill_start = Some(Instant::now());
         seed_rng_if_needed(&seq.sampling);
         Ok(())
+    }
+
+    // ── Disaggregated serving-role handoff hooks ─────────────────────────
+    //
+    // The in-crate seam that lets a serving-role worker move a finished
+    // pool-backed sequence's KV across nodes. The mechanism (serialize /
+    // anchored restore / one-token geometry probe) lives in
+    // `crate::distributed::disaggregated::handoff_impl` and is exercised
+    // byte-for-byte against real models by `tests/paged_handoff_parity.rs`.
+    // A live caller (the decode / prefill role serve loop) lands in a later
+    // step, so these stay `#[allow(dead_code)]` until then.
+
+    /// Prefill role: serialize sequence `seq_id`'s pool-backed KV into a single
+    /// wire frame for handoff to a decode node. `token_history` is the
+    /// sequence's prompt token ids (so the decode node continues with the same
+    /// context).
+    #[allow(dead_code)]
+    pub(crate) fn extract_sequence_handoff(
+        &self,
+        seq_id: SequenceId,
+        token_history: Vec<i32>,
+    ) -> anyhow::Result<Vec<u8>> {
+        crate::distributed::disaggregated::handoff_impl::extract_sequence_handoff(
+            &self.cache_pool,
+            seq_id,
+            None,
+            token_history,
+        )
+    }
+
+    /// Decode role: reconstruct a handed-off sequence from `bytes` onto a fresh
+    /// pool-backed slot, anchored to this worker model's real block geometry,
+    /// and return the new local sequence id. The geometry probe runs once on
+    /// the first call and is cached in `paged_handoff_geometry`.
+    #[allow(dead_code)]
+    pub(crate) fn ingest_sequence_handoff(&mut self, bytes: &[u8]) -> anyhow::Result<SequenceId> {
+        let geometry = match self.paged_handoff_geometry {
+            Some(geometry) => geometry,
+            None => {
+                let probed = crate::distributed::disaggregated::handoff_impl::probe_block_geometry(
+                    &self.model,
+                    DEFAULT_PAGED_BLOCK_SIZE,
+                )?;
+                self.paged_handoff_geometry = Some(probed);
+                probed
+            }
+        };
+        crate::distributed::disaggregated::handoff_impl::ingest_sequence_handoff(
+            &mut self.cache_pool,
+            &self.model,
+            bytes,
+            &crate::distributed::kv_cache_serde::CacheIngestLimits::default(),
+            &geometry,
+            DEFAULT_PAGED_BLOCK_SIZE,
+        )
     }
 
     /// Create a new batch scheduler, taking ownership of the model and channel.
@@ -463,6 +530,7 @@ impl BatchScheduler {
             speculative_drafter_slot: super::speculative_burst::WorkerDrafterSlot::from_dispatch(
                 &crate::server::SpeculativeDispatch::Disabled,
             ),
+            paged_handoff_geometry: None,
         }
     }
 
