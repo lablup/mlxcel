@@ -29,6 +29,7 @@ pub mod prompt_cache;
 mod request_options;
 pub mod responses_store;
 pub mod responses_translator;
+pub mod router_front;
 pub mod routes;
 pub mod speculative_dispatch;
 mod startup;

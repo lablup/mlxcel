@@ -258,7 +258,10 @@ impl ServingCoordinator {
     ) -> Result<()> {
         loop {
             let message = match self.transport.recv().await {
-                Ok((_from, message)) => message,
+                Ok((from, message)) => {
+                    tracing::debug!(%from, "prefill role: received a transport frame");
+                    message
+                }
                 // Inbound channel closed: the node is shutting down. A graceful
                 // return rather than a hard error.
                 Err(_) => break,

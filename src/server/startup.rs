@@ -758,12 +758,23 @@ pub(super) fn build_server_config(
     // parse failure here falls back to the single-node `Hybrid` default rather
     // than erroring a second time. Absent `--node-role` is `Hybrid` (the
     // byte-identical single-node path).
-    let serving_mode = startup
+    // Special-case "router" before the NodeRole parse: the router has no
+    // NodeRole variant but does have a ServingMode variant.
+    let serving_mode = if startup
         .node_role
         .as_deref()
-        .and_then(|role| role.parse::<NodeRole>().ok())
-        .map(crate::distributed::disaggregated::ServingMode::from_node_role)
-        .unwrap_or(crate::distributed::disaggregated::ServingMode::Hybrid);
+        .map(|r| r.eq_ignore_ascii_case("router"))
+        .unwrap_or(false)
+    {
+        crate::distributed::disaggregated::ServingMode::Router
+    } else {
+        startup
+            .node_role
+            .as_deref()
+            .and_then(|role| role.parse::<NodeRole>().ok())
+            .map(crate::distributed::disaggregated::ServingMode::from_node_role)
+            .unwrap_or(crate::distributed::disaggregated::ServingMode::Hybrid)
+    };
 
     ServerConfig {
         api_key,
@@ -1315,6 +1326,15 @@ async fn resolve_distributed_startup(
 
     // CLI shorthand remains non-PP-only; remote PP requires an explicit cluster config.
     if let Some(ref role_str) = startup.node_role {
+        // The "router" role is not a cluster inference role; skip distributed
+        // cluster init and let the router startup path handle it.
+        if role_str.eq_ignore_ascii_case("router") {
+            return Ok(ResolvedDistributedStartup {
+                _node_registry: None,
+                pipeline_runtime: None,
+                remote_stage_service: None,
+            });
+        }
         let role: NodeRole = role_str.parse()?;
         let node_id = startup
             .node_id
@@ -1574,6 +1594,42 @@ pub async fn start_server(mut startup: ServerStartupConfig) -> Result<()> {
              upstream PR #1114)"
         );
         chat_template.set_default_enable_thinking(true);
+    }
+
+    // If the serving role is "router", start the lightweight HTTP router front-end
+    // and return without loading model weights.
+    if config.serving_mode == crate::distributed::disaggregated::ServingMode::Router {
+        let addr = config.serving_bind.ok_or_else(|| {
+            anyhow::anyhow!("the router (--node-role router) requires --serving-bind <host:port>")
+        })?;
+        let transport = std::sync::Arc::new(
+            crate::distributed::tcp_transport::TcpTransport::bind(
+                crate::distributed::tcp_transport::TcpTransportConfig {
+                    bind_address: addr.to_string(),
+                    ..Default::default()
+                },
+            )
+            .await?,
+        );
+        let reply_to = crate::distributed::transport::Transport::local_addr(transport.as_ref())?;
+        let config_arc = std::sync::Arc::new(config.clone());
+        let chat_template_arc = std::sync::Arc::new(chat_template);
+        let tokenizer_arc = std::sync::Arc::new(tokenizer);
+        let state = std::sync::Arc::new(crate::server::router_front::RouterState::build(
+            config_arc,
+            transport,
+            reply_to,
+            chat_template_arc,
+            tokenizer_arc,
+        )?);
+        crate::server::router_front::spawn_result_demux(state.clone());
+        let app = crate::server::router_front::create_router_app(state);
+        tracing::info!(
+            host = %startup.host,
+            port = startup.port,
+            "Starting disaggregated router front-end"
+        );
+        return serve_tcp(&startup, app).await;
     }
 
     // Create shared batch metrics and observability that both ModelProvider
