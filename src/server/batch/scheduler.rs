@@ -4280,3 +4280,7 @@ impl BatchScheduler {
 #[cfg(test)]
 #[path = "scheduler_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "serving_handoff_parity_tests.rs"]
+mod serving_handoff_parity_tests;
