@@ -207,6 +207,10 @@ pub fn serialize_sequence_cache_set(
         metadata,
         sampling_state,
         token_history,
+        // Filled in by the prefill-role handoff (#126 B2b) via
+        // `extract_sequence_handoff`; a bare cache-set serialization carries
+        // no generated tokens.
+        generated_tokens: Vec::new(),
         sequence_id: cache_set.seq_id.as_u64(),
         sequence_backend: SerializableSequenceBackend::from_runtime(cache_set.backend),
         paged_state: cache_set

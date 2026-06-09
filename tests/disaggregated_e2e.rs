@@ -95,6 +95,7 @@ fn test_cache_state(prompt_len: usize, num_layers: usize) -> SerializableCacheSt
         },
         sampling_state: Some(test_sampling_state()),
         token_history: (0..prompt_len as i32).collect(),
+        generated_tokens: Vec::new(),
         sequence_id: 0,
         sequence_backend: SerializableSequenceBackend::DenseKvCache,
         paged_state: None,

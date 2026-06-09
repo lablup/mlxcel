@@ -182,14 +182,18 @@ pub fn probe_block_geometry(
 /// whole `SerializableCacheState` to bytes. `token_history` is the sequence's
 /// prompt token ids (needed so the decode node can continue sampling with the
 /// same context); `sampling` carries the request's sampling parameters when the
-/// caller tracks them.
+/// caller tracks them; `generated_tokens` carries the prefill node's first
+/// sampled token(s) so the decode node seeds its continuation correctly (#126
+/// B2b) and the emitted stream matches a single-node run.
 pub fn extract_sequence_handoff(
     cache_pool: &CachePool,
     id: SequenceId,
     sampling: Option<SerializableSamplingState>,
     token_history: Vec<i32>,
+    generated_tokens: Vec<i32>,
 ) -> Result<Vec<u8>> {
-    let state = serialize_cache_pool_sequence(cache_pool, id, sampling, token_history)?;
+    let mut state = serialize_cache_pool_sequence(cache_pool, id, sampling, token_history)?;
+    state.generated_tokens = generated_tokens;
     serialize_cache_state(&state)
 }
 

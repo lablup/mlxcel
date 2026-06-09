@@ -254,8 +254,16 @@ fn assert_handoff_over_transport_parity(model: &mlxcel::LoadedModel, label: &str
     // `extract_sequence_handoff` is the prefill-role scheduler hook's core:
     // serialize the pool-backed sequence (metadata + block table + block
     // CONTENTS) to a single wire frame.
-    let wire = extract_sequence_handoff(&origin, id_o, None, PROMPT_TOKENS.to_vec())
-        .expect("extract origin sequence handoff");
+    // The prefill node's first sampled token rides with the handoff so the
+    // decode node seeds its continuation from it (#126 B2b).
+    let wire = extract_sequence_handoff(
+        &origin,
+        id_o,
+        None,
+        PROMPT_TOKENS.to_vec(),
+        vec![origin_first],
+    )
+    .expect("extract origin sequence handoff");
 
     let origin_live = origin.paged_pool_ref().unwrap().live_block_count();
     let origin_stats = origin.paged_stats();

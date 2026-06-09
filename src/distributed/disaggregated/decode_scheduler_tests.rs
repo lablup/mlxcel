@@ -40,6 +40,7 @@ fn make_cache_state(prompt_len: usize) -> SerializableCacheState {
         },
         sampling_state: Some(default_sampling()),
         token_history: Vec::new(),
+        generated_tokens: Vec::new(),
         sequence_id: 1,
         sequence_backend: SerializableSequenceBackend::DenseKvCache,
         paged_state: None,

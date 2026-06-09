@@ -378,12 +378,14 @@ impl BatchScheduler {
         &self,
         seq_id: SequenceId,
         token_history: Vec<i32>,
+        generated_tokens: Vec<i32>,
     ) -> anyhow::Result<Vec<u8>> {
         crate::distributed::disaggregated::handoff_impl::extract_sequence_handoff(
             &self.cache_pool,
             seq_id,
             None,
             token_history,
+            generated_tokens,
         )
     }
 
@@ -412,6 +414,64 @@ impl BatchScheduler {
             &geometry,
             DEFAULT_PAGED_BLOCK_SIZE,
         )
+    }
+
+    /// Prefill role (#126 B2b): run a full prefill for `seq`, then extract its
+    /// pool-backed KV as a handoff frame for a decode node and release the local
+    /// caches.
+    ///
+    /// Returns `Ok(None)` when the request completed during prefill (an immediate
+    /// EOS at the first token), in which case [`finish_prefill`] already finalized
+    /// and released it and there is nothing to hand off.
+    ///
+    /// This is the "reuse then extract" factoring (option C): it drives the
+    /// standard [`Self::execute_full_prefill`] path verbatim, so first-token
+    /// sampling, structured output, thinking budget, and logprobs are byte-for-byte
+    /// identical to a single-node prefill, then lifts the finished sequence back
+    /// out of the active batch before any local decode step runs. The hot
+    /// [`Self::run`] loop is never touched. Speculative burst is bypassed (it would
+    /// complete the request locally, defeating the handoff), and chunked prefill of
+    /// an over-long prompt is not yet supported on this path (deferred).
+    ///
+    /// [`finish_prefill`]: Self::finish_prefill
+    #[allow(dead_code)]
+    pub(crate) fn prefill_request_for_handoff(
+        &mut self,
+        mut seq: SequenceInfo,
+    ) -> anyhow::Result<Option<Vec<u8>>> {
+        if self.prefill_chunk_size > 0 && seq.prompt_tokens.len() > self.prefill_chunk_size {
+            anyhow::bail!(
+                "prefill-role handoff does not yet support chunked prefill \
+                 (prompt {} tokens > chunk size {})",
+                seq.prompt_tokens.len(),
+                self.prefill_chunk_size
+            );
+        }
+        let seq_id = seq.seq_id;
+        // The decode node restores the prompt context from `token_history`; the
+        // first sampled token rides in `generated_tokens` so it seeds decode.
+        let prompt_tokens = seq.prompt_tokens.clone();
+        if let Err(err) = Self::begin_prefill(&mut seq) {
+            self.abort_sequence(seq, &err);
+            anyhow::bail!("prefill-role handoff: begin_prefill failed: {err}");
+        }
+        // Reuse the standard full prefill: it samples the first token and
+        // transitions the sequence into the active batch (no speculative burst on
+        // the handoff path).
+        self.execute_full_prefill(seq);
+        // Lift the just-prefilled sequence back out before any local decode runs.
+        // If it finished at prefill (immediate EOS) it is already finalized and
+        // released, so there is nothing to hand off.
+        let Some(seq) = self.active_batch.remove(seq_id) else {
+            return Ok(None);
+        };
+        let generated_tokens = seq.generated_tokens.clone();
+        let bytes = self.extract_sequence_handoff(seq_id, prompt_tokens, generated_tokens)?;
+        // The KV now belongs to the decode node: release the local caches and any
+        // per-sequence tracking without donating back (the prefix left this node).
+        self.prompt_cache_seq_ctx.remove(&seq_id);
+        self.release_sequence_caches(seq_id);
+        Ok(Some(bytes))
     }
 
     /// Create a new batch scheduler, taking ownership of the model and channel.
