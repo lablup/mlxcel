@@ -48,8 +48,9 @@ pub use decode_scheduler::{
     DecodeSchedulerConfig, DecodeSequence, IngestionStats, SequenceStatus,
 };
 pub use handoff_impl::{
-    HANDOFF_TENSOR_ID, extract_sequence_handoff, ingest_sequence_handoff, probe_block_geometry,
-    recv_handoff_payload, send_handoff_payload,
+    HANDOFF_TENSOR_ID, extract_sequence_handoff, ingest_sequence_handoff,
+    ingest_sequence_handoff_state, probe_block_geometry, recv_handoff_payload,
+    send_handoff_payload,
 };
 pub use prefill_scheduler::{
     ChunkedPrefillCoordinator, HandoffProtocol, HandoffStatus, PrefillHandoff, PrefillRequest,

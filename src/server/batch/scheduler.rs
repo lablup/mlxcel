@@ -393,19 +393,27 @@ impl BatchScheduler {
     /// pool-backed slot, anchored to this worker model's real block geometry,
     /// and return the new local sequence id. The geometry probe runs once on
     /// the first call and is cached in `paged_handoff_geometry`.
+    /// Return this worker model's paged block geometry for handoff restores,
+    /// probing it once on the first call and caching it in
+    /// `paged_handoff_geometry`. `ExpectedBlockGeometry` is `Copy`, so the
+    /// cached value is returned by value and leaves no borrow on `self`.
+    fn ensure_handoff_geometry(
+        &mut self,
+    ) -> anyhow::Result<crate::distributed::kv_cache_serde::ExpectedBlockGeometry> {
+        if let Some(geometry) = self.paged_handoff_geometry {
+            return Ok(geometry);
+        }
+        let probed = crate::distributed::disaggregated::handoff_impl::probe_block_geometry(
+            &self.model,
+            DEFAULT_PAGED_BLOCK_SIZE,
+        )?;
+        self.paged_handoff_geometry = Some(probed);
+        Ok(probed)
+    }
+
     #[allow(dead_code)]
     pub(crate) fn ingest_sequence_handoff(&mut self, bytes: &[u8]) -> anyhow::Result<SequenceId> {
-        let geometry = match self.paged_handoff_geometry {
-            Some(geometry) => geometry,
-            None => {
-                let probed = crate::distributed::disaggregated::handoff_impl::probe_block_geometry(
-                    &self.model,
-                    DEFAULT_PAGED_BLOCK_SIZE,
-                )?;
-                self.paged_handoff_geometry = Some(probed);
-                probed
-            }
-        };
+        let geometry = self.ensure_handoff_geometry()?;
         crate::distributed::disaggregated::handoff_impl::ingest_sequence_handoff(
             &mut self.cache_pool,
             &self.model,
@@ -472,6 +480,120 @@ impl BatchScheduler {
         self.prompt_cache_seq_ctx.remove(&seq_id);
         self.release_sequence_caches(seq_id);
         Ok(Some(bytes))
+    }
+
+    /// Decode role (#126 B2b): reconstruct a handed-off sequence onto a fresh pool
+    /// slot and register it as a live decode sequence in the active batch, seeded
+    /// with the prefill node's generated token(s) so the next decode step feeds
+    /// the right token.
+    ///
+    /// `max_tokens`, `sampling`, and `response_tx` are coordination parameters
+    /// supplied by the decode node's request layer (the router / stream bridge in
+    /// a real deployment, the test harness in B2c): the KV handoff frame carries
+    /// the cache, the prompt token history, and the generated tokens, while the
+    /// per-request budget, sampling policy, and output stream stay with the node
+    /// that holds the client connection. The deserialization happens once here and
+    /// is reused for both the paged restore and the request context.
+    ///
+    /// Logprobs, thinking-budget, and structured-output continuation across the
+    /// handoff are out of scope for this step.
+    #[allow(dead_code)]
+    pub(crate) fn ingest_handoff_as_active(
+        &mut self,
+        bytes: &[u8],
+        max_tokens: usize,
+        sampling: mlxcel_core::generate::SamplingConfig,
+        response_tx: mpsc::Sender<GenerateEvent>,
+    ) -> anyhow::Result<SequenceId> {
+        let geometry = self.ensure_handoff_geometry()?;
+        let limits = crate::distributed::kv_cache_serde::CacheIngestLimits::default();
+        // Deserialize once: the restore below consumes the KV blocks, and the
+        // request context (prompt token history + the prefill node's generated
+        // tokens) seeds the live decode sequence.
+        let state = crate::distributed::kv_cache_serde::deserialize_cache_state_with_limits(
+            bytes, &limits,
+        )?;
+        let seq_id =
+            crate::distributed::disaggregated::handoff_impl::ingest_sequence_handoff_state(
+                &mut self.cache_pool,
+                &self.model,
+                &state,
+                &limits,
+                &geometry,
+                DEFAULT_PAGED_BLOCK_SIZE,
+            )?;
+
+        let prompt_tokens = state.token_history.clone();
+        let generated_tokens = state.generated_tokens.clone();
+        let needs_history = sampling.needs_token_history();
+        // Rebuild the penalty history exactly as a single-node run would have it
+        // after prefill: prompt prefix (when penalties need it) plus whatever the
+        // prefill node already generated.
+        let mut token_history = initial_token_history(&prompt_tokens, needs_history);
+        if needs_history {
+            token_history.extend_from_slice(&generated_tokens);
+        }
+        let merged_eos = merged_eos_token_ids(self.model.eos_token_ids(), &sampling.stop_token_ids);
+        // Seed the incremental detokenizer with everything already produced (the
+        // prompt plus the handed-off tokens) so the decode node's text continues
+        // from the correct boundary.
+        let detok_seed: Vec<i32> = prompt_tokens
+            .iter()
+            .chain(generated_tokens.iter())
+            .copied()
+            .collect();
+        let decode_state = StreamingDecodeState::new(&self.tokenizer, &detok_seed);
+        let prefill_offset = prompt_tokens.len();
+
+        let seq = SequenceInfo {
+            seq_id,
+            state: SequenceState::Decoding,
+            prompt_tokens,
+            sampling,
+            max_tokens,
+            eos_token_ids: self.config_eos.clone(),
+            priority: RequestPriority::default(),
+            logprobs_config: mlxcel_core::sampling::LogprobsConfig::default(),
+            vlm_embeddings: None,
+            images: Vec::new(),
+            audio: Vec::new(),
+            generated_tokens,
+            generated_text: String::new(),
+            decode_state,
+            prefill_offset,
+            prefill_start_offset: 0,
+            already_cached_tokens: 0,
+            response_tx,
+            cancelled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            created_at: Instant::now(),
+            prefill_start: None,
+            first_token_time: Some(Instant::now()),
+            token_history,
+            merged_eos,
+            thinking: crate::server::thinking_budget::ThinkingState::disabled(),
+            structured: None,
+        };
+
+        if self.active_batch.add(seq).is_err() {
+            // No room in the active batch: release the restored KV so the rejected
+            // handoff does not leak a sequence or its pool blocks.
+            self.release_sequence_caches(seq_id);
+            anyhow::bail!("handoff decode admission failed: active batch is full");
+        }
+        Ok(seq_id)
+    }
+
+    /// Decode role (#126 B2b): drive every active sequence to completion, reusing
+    /// the same per-tick `execute_decode_step` + `finalize_completed` that the hot
+    /// [`Self::run`] loop calls, without touching `run()` itself. Returns once the
+    /// active batch has drained (each sequence reached its EOS or token budget).
+    #[allow(dead_code)]
+    pub(crate) fn decode_handoff_until_idle(&mut self) {
+        while !self.active_batch.is_empty() {
+            let ids = self.active_batch.sequence_ids();
+            self.execute_decode_step(&ids);
+            self.finalize_completed();
+        }
     }
 
     /// Create a new batch scheduler, taking ownership of the model and channel.
