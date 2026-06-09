@@ -121,9 +121,55 @@ family-specific fallback; do not silently pad without a quality test.
 
 The paged decode layout accepts TurboQuant modes through
 `PagedKvLayout::uniform_with_mode`. Server dispatch routes Turbo modes to the
-paged layout when `--decode-storage-backend paged` is selected. This is a wiring
-statement, not a blanket performance claim: validate concurrent-prefix behavior
-and throughput on real hardware before publishing numbers.
+paged layout when `--decode-storage-backend paged` is selected.
+
+### Unified paged KV cache
+
+Under `--decode-storage-backend paged`, the continuous-batching server keeps
+both the cross-request prompt-prefix cache and per-sequence decode state in one
+refcounted, copy-on-write block pool (epic #116). Two requests that share a
+prompt prefix store that prefix's KV blocks once: the second request adopts the
+first request's blocks by reference rather than re-prefilling them, and a block
+forks (copy-on-write) only when one sequence's content diverges from a shared
+block. Paged adopt and donate are supported for the pool-backed Fp16 families
+(the dense-natural backends such as qwen3 and llama3); model-owned-state families
+(gemma3, llama4, qwen3.5) and recurrent or hybrid SSM models keep dense or
+model-owned caches and stay out of the pool.
+
+The block pool can be bounded with `--kv-cache-budget <bytes|auto>` (env
+`MLXCEL_KV_CACHE_BUDGET`); the default is unbounded. Under a budget the scheduler
+evicts cold cached prefixes, then preempts, before rejecting a request.
+`GET /v1/cache/stats` reports paged block usage (block size, allocated, live,
+free, bytes reserved/in use, and the budget).
+
+### Measured payoff
+
+Numbers below are from an M1 Ultra with `models/qwen3-0.6b-4bit` (28 layers, 8 KV
+heads, head dim 128, runtime KV dtype bf16, so about 112 KiB of KV per token).
+
+**Memory saved per shared prefix.** A shared prefix of `P` tokens across `N`
+concurrent requests occupies one pool copy instead of `N`. KV bytes per token are
+`2 (K and V) * n_kv_heads * head_dim * num_layers * dtype_bytes`. A shared
+1024-token system prompt is about 112 MiB; with 8 concurrent requests the pool
+stores it once instead of eight times, saving roughly `7 * 112 MiB ≈ 784 MiB`.
+
+**Prefill tokens avoided.** Only the first of `N` requests sharing a `P`-token
+prefix prefills it; the other `N - 1` adopt the cached blocks and skip
+`(N - 1) * P` prefill-token forward passes. `tests/paged_prefix_share_parity.rs`
+confirms an adopting request decodes byte-identically to a cold run while
+skipping the shared prefill.
+
+**Decode throughput.** Paged decode is byte-identical to the dense backend
+(`tests/paged_scheduler_parity.rs`, RMS 0). The live batched path uses the native
+block-table decode kernel (`DecodeBatchContext::use_native_paged_kernel`, set by
+the scheduler); a gather-then-SDPA path is kept as a correctness reference. At
+batch 4 the native kernel runs at 276 tok/s for a 512-token prompt and 84 tok/s
+for a 4096-token prompt, versus 146 and 7.7 tok/s for the gather reference (1.9x
+and 10.9x). The gather reference degrades sharply with context because it
+re-materializes the visible window every step, which is why the live path uses
+the native kernel. The separate fused split-K Metal kernel
+(`MLXCEL_PAGED_ATTENTION_NATIVE`) is opt-in and stays off by default; see
+[ADR 0001](adr/0001-paged-attention-gather-vs-fused-kernel.md).
 
 ## Recommended starting points
 

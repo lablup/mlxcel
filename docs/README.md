@@ -19,9 +19,10 @@ Current GitHub-facing docs:
 4. `supported-models.md` — maintained architecture/checkpoint support matrix.
 5. `architecture.md` — runtime architecture and major components.
 6. `distributed.md` — tensor/pipeline parallel setup and limitations.
-7. `turbo-kv-cache.md` — TurboQuant modes, quality/performance trade-offs, and flags.
-8. `responses-api.md` — implemented `/v1/responses` subset and gaps.
-9. `adding-models.md` — contribution guide for new model architectures.
+7. `turbo-kv-cache.md` — TurboQuant modes, the unified paged KV cache, quality/performance trade-offs, and flags.
+8. `CONTINUOUS_BATCHING.md` — continuous-batching scheduler, paged decode, and disaggregated prefill/decode/router serving.
+9. `responses-api.md` — implemented `/v1/responses` subset and gaps.
+10. `adding-models.md` — contribution guide for new model architectures.
 
 ## Architecture Decision Records
 
