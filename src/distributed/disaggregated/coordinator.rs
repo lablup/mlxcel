@@ -52,12 +52,17 @@
 
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
+use std::sync::mpsc;
 
 use anyhow::{Context, Result};
 use mlxcel_core::generate::SamplingConfig;
 
 use super::handoff_impl::{recv_handoff_payload, send_handoff_payload};
 use super::serving::ServingMode;
+use super::serving_protocol::{
+    DecodeMetaFrame, PrefillRequestFrame, ResultFrame, ResultPhase, control_parts,
+    sampling_from_serializable,
+};
 use crate::distributed::tcp_transport::{TcpTransport, TcpTransportConfig};
 use crate::distributed::transport::Transport;
 use crate::server::batch::BatchScheduler;
@@ -230,6 +235,197 @@ impl ServingCoordinator {
         }
         Ok(())
     }
+
+    /// Live prefill role loop (#126 B3b2a): drive prefill from networked request
+    /// frames and return results over the network.
+    ///
+    /// Unlike [`Self::run_prefill_role`] (driven by an in-process channel for the
+    /// single-process parity test), this is the loop a real prefill worker runs:
+    /// requests arrive as [`PrefillRequestFrame`] control frames over the
+    /// transport, and the prefill node returns its first token to the request's
+    /// `reply_to` and forwards the KV handoff (a [`DecodeMetaFrame`] followed by
+    /// the KV frame) to the decode peer ([`Self::peer`]). A request that finishes
+    /// at prefill (immediate EOS) produces no handoff: its first-token result is
+    /// the whole stream and is marked done.
+    ///
+    /// The loop returns when the transport's inbound channel closes (shutdown).
+    /// A non-request control frame is logged and skipped. The future is `!Send`
+    /// (the scheduler holds the per-process MLX pool), so a caller drives it on a
+    /// current-thread runtime ([`serve_prefill_role_networked_blocking`]).
+    pub(crate) async fn run_prefill_role_networked(
+        &self,
+        scheduler: &mut BatchScheduler,
+    ) -> Result<()> {
+        loop {
+            let message = match self.transport.recv().await {
+                Ok((_from, message)) => message,
+                // Inbound channel closed: the node is shutting down. A graceful
+                // return rather than a hard error.
+                Err(_) => break,
+            };
+            let (operation, payload) = match control_parts(message) {
+                Ok(parts) => parts,
+                Err(e) => {
+                    tracing::warn!("prefill role: ignoring non-control frame: {e}");
+                    continue;
+                }
+            };
+            if operation != PrefillRequestFrame::OPERATION {
+                tracing::warn!(
+                    "prefill role: ignoring unexpected control op '{operation}' \
+                     (expected '{}')",
+                    PrefillRequestFrame::OPERATION
+                );
+                continue;
+            }
+            let request = PrefillRequestFrame::decode(&payload)
+                .context("prefill role: decode prefill request frame")?;
+
+            // Drive the standard full-prefill + extract entry, capturing the
+            // first token on a local channel so it can be returned over the wire.
+            let (token_tx, token_rx) = mpsc::channel();
+            let frame = scheduler.prefill_text_request_for_handoff(
+                request.prompt_tokens,
+                sampling_from_serializable(&request.sampling),
+                request.max_tokens as usize,
+                token_tx,
+                Arc::new(AtomicBool::new(false)),
+            )?;
+            let (tokens, done, error) = drain_generation_events(&token_rx);
+
+            // Return the prefill node's first token to the client. When prefill
+            // produced no handoff frame (immediate EOS), this first-token result
+            // is the entire stream, so mark it done.
+            let first_result = ResultFrame {
+                request_id: request.request_id,
+                phase: ResultPhase::FirstToken,
+                tokens,
+                done: done || frame.is_none(),
+                error,
+            };
+            self.transport
+                .send(&request.reply_to, first_result.encode()?)
+                .await
+                .context("prefill role: return the first token to reply_to")?;
+
+            // Forward the handoff to the decode peer: the coordination metadata
+            // first, then the KV frame (the decode loop reads them in that order).
+            if let Some(bytes) = frame {
+                let meta = DecodeMetaFrame {
+                    request_id: request.request_id,
+                    max_tokens: request.max_tokens,
+                    sampling: request.sampling,
+                    reply_to: request.reply_to,
+                };
+                self.transport
+                    .send(self.peer(), meta.encode()?)
+                    .await
+                    .context("prefill role: forward decode metadata to the decode peer")?;
+                self.send_handoff(&bytes)
+                    .await
+                    .context("prefill role: ship the KV handoff to the decode peer")?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Live decode role loop (#126 B3b2a): reconstruct networked handoffs and
+    /// return the continuation over the network.
+    ///
+    /// The decode counterpart of [`Self::run_prefill_role_networked`]: each
+    /// iteration reads the prefill node's [`DecodeMetaFrame`] then the KV frame,
+    /// reconstructs the sequence on a fresh pool slot, decodes it to completion,
+    /// and returns the continuation tokens to the metadata's `reply_to` (the
+    /// client). The decode node has no fixed handoff peer: it replies to whatever
+    /// address each request carries, so the merged client stream is the prefill
+    /// node's first token plus this continuation.
+    ///
+    /// The loop returns when the transport's inbound channel closes. The future
+    /// is `!Send` for the same reason as the prefill loop.
+    pub(crate) async fn run_decode_role_networked(
+        &self,
+        scheduler: &mut BatchScheduler,
+    ) -> Result<()> {
+        loop {
+            let message = match self.transport.recv().await {
+                Ok((_from, message)) => message,
+                Err(_) => break,
+            };
+            let (operation, payload) = match control_parts(message) {
+                Ok(parts) => parts,
+                Err(e) => {
+                    tracing::warn!("decode role: ignoring non-control frame before KV: {e}");
+                    continue;
+                }
+            };
+            if operation != DecodeMetaFrame::OPERATION {
+                tracing::warn!(
+                    "decode role: ignoring unexpected control op '{operation}' \
+                     (expected '{}')",
+                    DecodeMetaFrame::OPERATION
+                );
+                continue;
+            }
+            let meta =
+                DecodeMetaFrame::decode(&payload).context("decode role: decode metadata frame")?;
+
+            // The KV handoff frame follows its metadata frame on the wire.
+            let (_from, bytes) = self
+                .recv_handoff()
+                .await
+                .context("decode role: receive the KV handoff after its metadata")?;
+
+            let (token_tx, token_rx) = mpsc::channel();
+            scheduler
+                .ingest_handoff_as_active(
+                    &bytes,
+                    meta.max_tokens as usize,
+                    sampling_from_serializable(&meta.sampling),
+                    token_tx,
+                )
+                .context("decode role: ingest the handoff as an active sequence")?;
+            scheduler.decode_handoff_until_idle();
+            let (tokens, _done, error) = drain_generation_events(&token_rx);
+
+            let result = ResultFrame {
+                request_id: meta.request_id,
+                phase: ResultPhase::Continuation,
+                tokens,
+                done: true,
+                error,
+            };
+            self.transport
+                .send(&meta.reply_to, result.encode()?)
+                .await
+                .context("decode role: return the continuation to reply_to")?;
+        }
+        Ok(())
+    }
+}
+
+/// Drain a finished generation channel into its text pieces, terminal flag, and
+/// any error.
+///
+/// The serving-role scheduler entries
+/// ([`BatchScheduler::prefill_text_request_for_handoff`] /
+/// [`BatchScheduler::decode_handoff_until_idle`]) run synchronously to
+/// completion and emit their [`GenerateEvent`]s on a local channel before
+/// returning, so a non-blocking drain after the call collects the whole half of
+/// the stream.
+fn drain_generation_events(
+    rx: &mpsc::Receiver<GenerateEvent>,
+) -> (Vec<String>, bool, Option<String>) {
+    let mut tokens = Vec::new();
+    let mut done = false;
+    let mut error = None;
+    while let Ok(event) = rx.try_recv() {
+        match event {
+            GenerateEvent::Token(t) | GenerateEvent::TokenWithLogprobs(t, _) => tokens.push(t),
+            GenerateEvent::Done(_) => done = true,
+            GenerateEvent::Error(e) => error = Some(e),
+        }
+    }
+    (tokens, done, error)
 }
 
 /// A prefill-role work item the serving-role prefill loop turns into a handoff.
@@ -346,6 +542,75 @@ pub(crate) fn serve_decode_role_blocking(
         let coordinator =
             ServingCoordinator::new(ServingMode::DecodeOnly, Box::new(transport), peer);
         coordinator.run_decode_role(scheduler, handoffs).await
+    })
+}
+
+/// Drive the prefill serving role over a real network transport on a fresh
+/// current-thread runtime, returning when the transport closes (#126 B3b2a).
+///
+/// The live counterpart of [`serve_prefill_role_blocking`]: instead of an
+/// in-process request channel, prefill requests arrive as
+/// [`PrefillRequestFrame`] control frames over the bound transport and results
+/// are returned over the network, so a model worker can run this directly. `bind`
+/// is the node's own role-transport listener, `decode_peer` the decode node it
+/// hands KV off to. When `ready` is set the bound local address is reported once
+/// the listener is up (tests learn an ephemeral port this way; the worker passes
+/// `None`).
+///
+/// [`PrefillRequestFrame`]: super::serving_protocol::PrefillRequestFrame
+pub(crate) fn serve_prefill_role_networked_blocking(
+    bind: TcpTransportConfig,
+    decode_peer: String,
+    scheduler: &mut BatchScheduler,
+    ready: Option<std::sync::mpsc::Sender<String>>,
+) -> Result<()> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("serve prefill role: build current-thread runtime")?;
+    runtime.block_on(async move {
+        let transport = TcpTransport::bind(bind)
+            .await
+            .context("serve prefill role: bind transport")?;
+        if let Some(ready) = ready {
+            let _ = ready.send(transport.local_addr()?);
+        }
+        let coordinator =
+            ServingCoordinator::new(ServingMode::PrefillOnly, Box::new(transport), decode_peer);
+        coordinator.run_prefill_role_networked(scheduler).await
+    })
+}
+
+/// Drive the decode serving role over a real network transport on a fresh
+/// current-thread runtime (#126 B3b2a).
+///
+/// The live counterpart of [`serve_decode_role_blocking`]: handoff frames (a
+/// [`DecodeMetaFrame`] then the KV frame) arrive over the bound transport and the
+/// continuation is returned to each request's `reply_to`. A decode node has no
+/// fixed handoff peer (it replies per request), so the coordinator is built with
+/// an empty peer. See [`serve_prefill_role_networked_blocking`] for the runtime
+/// and `ready` rationale.
+///
+/// [`DecodeMetaFrame`]: super::serving_protocol::DecodeMetaFrame
+pub(crate) fn serve_decode_role_networked_blocking(
+    bind: TcpTransportConfig,
+    scheduler: &mut BatchScheduler,
+    ready: Option<std::sync::mpsc::Sender<String>>,
+) -> Result<()> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("serve decode role: build current-thread runtime")?;
+    runtime.block_on(async move {
+        let transport = TcpTransport::bind(bind)
+            .await
+            .context("serve decode role: bind transport")?;
+        if let Some(ready) = ready {
+            let _ = ready.send(transport.local_addr()?);
+        }
+        let coordinator =
+            ServingCoordinator::new(ServingMode::DecodeOnly, Box::new(transport), String::new());
+        coordinator.run_decode_role_networked(scheduler).await
     })
 }
 

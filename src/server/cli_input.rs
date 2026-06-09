@@ -122,6 +122,10 @@ pub struct ServerStartupInput {
     /// Decode-node peers a prefill node hands off to (disaggregated serving,
     /// #126).
     pub decode_peers: Vec<SocketAddr>,
+    /// This node's own serving-role transport bind address (disaggregated
+    /// serving, #126). `Some` enables the live prefill/decode role loop on a
+    /// non-hybrid node; `None` keeps the standard single-node scheduler loop.
+    pub serving_bind: Option<SocketAddr>,
     /// Manual pipeline-parallel layer partition spec (e.g. "0-15,16-31").
     pub pp_layers: Option<String>,
     /// Micro-batch size for in-process pipeline execution.
@@ -539,6 +543,9 @@ impl ServerStartupInput {
             node_role: self.node_role,
             node_id: self.node_id,
             peers: self.peers,
+            prefill_peers: self.prefill_peers,
+            decode_peers: self.decode_peers,
+            serving_bind: self.serving_bind,
             pp_layers: self.pp_layers,
             pp_micro_batch_size: self.pp_micro_batch_size,
             pp_auto: self.pp_auto,

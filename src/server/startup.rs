@@ -162,6 +162,16 @@ pub struct ServerStartupConfig {
     pub node_id: Option<String>,
     /// Static peer addresses (CLI shorthand).
     pub peers: Vec<SocketAddr>,
+    /// Prefill-node peers a decode node receives handoffs from (disaggregated
+    /// serving, #126).
+    pub prefill_peers: Vec<SocketAddr>,
+    /// Decode-node peers a prefill node hands off to (disaggregated serving,
+    /// #126).
+    pub decode_peers: Vec<SocketAddr>,
+    /// This node's own serving-role transport bind address (disaggregated
+    /// serving, #126). `Some` enables the live prefill/decode role loop on a
+    /// non-hybrid node.
+    pub serving_bind: Option<SocketAddr>,
     /// Manual pipeline-parallel layer partition spec (e.g. "0-15,16-31").
     /// When `None`, auto-partition mode is used.
     pub pp_layers: Option<String>,
@@ -406,6 +416,9 @@ impl Default for ServerStartupConfig {
             node_role: None,
             node_id: None,
             peers: Vec::new(),
+            prefill_peers: Vec::new(),
+            decode_peers: Vec::new(),
+            serving_bind: None,
             pp_layers: None,
             pp_micro_batch_size: 1,
             pp_auto: None,
@@ -829,6 +842,12 @@ pub(super) fn build_server_config(
         enable_vlm_prefix_cache: startup.enable_vlm_prefix_cache,
         // disaggregated serving role derived from `--node-role` (#126 B2).
         serving_mode,
+        // disaggregated serving-role network addresses (#126 B3b2a): the
+        // worker uses these to bind its role transport and reach its handoff
+        // peer when `serving_mode` is non-hybrid.
+        prefill_peers: startup.prefill_peers.clone(),
+        decode_peers: startup.decode_peers.clone(),
+        serving_bind: startup.serving_bind,
     }
 }
 

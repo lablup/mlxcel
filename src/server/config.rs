@@ -437,6 +437,16 @@ pub struct ServerConfig {
     ///
     /// [`ServingMode`]: crate::distributed::disaggregated::ServingMode
     pub serving_mode: crate::distributed::disaggregated::ServingMode,
+    /// Prefill-node peers a decode node receives handoffs from (disaggregated
+    /// serving, #126 B3b2a). Threaded to the worker for the live serving role.
+    pub prefill_peers: Vec<std::net::SocketAddr>,
+    /// Decode-node peers a prefill node hands off to (disaggregated serving,
+    /// #126 B3b2a). The first entry is the prefill node's KV handoff target.
+    pub decode_peers: Vec<std::net::SocketAddr>,
+    /// This node's own serving-role transport bind address (#126 B3b2a). `Some`
+    /// on a non-hybrid node enables the live prefill/decode role loop; `None`
+    /// keeps the standard single-node scheduler loop.
+    pub serving_bind: Option<std::net::SocketAddr>,
 }
 
 impl Default for ServerConfig {
@@ -493,6 +503,9 @@ impl Default for ServerConfig {
             kv_cache_budget: None,
             enable_vlm_prefix_cache: false,
             serving_mode: crate::distributed::disaggregated::ServingMode::Hybrid,
+            prefill_peers: Vec::new(),
+            decode_peers: Vec::new(),
+            serving_bind: None,
         }
     }
 }

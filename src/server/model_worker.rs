@@ -136,6 +136,15 @@ pub(crate) struct WorkerSchedulerConfig {
     /// scheduler over the B1 handoff hooks in a later step (B2b); until then
     /// every mode runs the standard loop.
     pub serving_mode: crate::distributed::disaggregated::ServingMode,
+    /// disaggregated serving-role network addresses (#126 B3b2a).
+    ///
+    /// `serving_bind` is this node's own role-transport listener; `decode_peers`
+    /// holds the decode node a prefill worker hands KV off to (the first entry).
+    /// Empty / `None` on a `Hybrid` node, where the worker runs the standard
+    /// scheduler loop. (`--prefill-peers` is consumed by the future dedicated
+    /// router via `ServerConfig`, not by the worker, so it is not threaded here.)
+    pub decode_peers: Vec<std::net::SocketAddr>,
+    pub serving_bind: Option<std::net::SocketAddr>,
     /// resolved speculative-decoding dispatch shape.
     ///
     /// Constructed once at worker construction (or
@@ -419,24 +428,101 @@ pub(crate) fn spawn_model_worker_with_batch_config(
         // hook is wired in `decode_single_step`.
         .with_speculative_dispatch(sched_config.speculative_dispatch);
 
-        // #126 B2: a non-hybrid `--node-role` selects a disaggregated serving
-        // role. The serving-role coordinator
-        // (`distributed::disaggregated::ServingCoordinator`) that drives this
-        // scheduler over the B1 handoff hooks lands in B2b, and a real network
-        // transport in B3; until then every role runs the standard single-node
-        // loop, so `Hybrid` and a misconfigured single node both keep serving
-        // rather than hanging. `Hybrid` (the default) is byte-identical to
-        // before.
-        if sched_config.serving_mode != crate::distributed::disaggregated::ServingMode::Hybrid {
-            tracing::info!(
-                serving_mode = %sched_config.serving_mode,
-                "Disaggregated serving role configured; running the standard \
-                 single-node scheduler loop (serving-role coordinator wiring \
-                 lands in a later step)"
-            );
+        // #126 B3b2a: a non-hybrid `--node-role` runs the live disaggregated
+        // serving role rather than the standard single-node loop. The role loop
+        // binds this node's `--serving-bind` transport and drives prefill (or
+        // decode) over the B1 handoff hooks, returning only when the transport
+        // closes. A misconfigured role (no `--serving-bind`, or a prefill node
+        // without `--decode-peers`) logs an error and falls back to serving
+        // locally rather than hanging a half-configured node. `Hybrid` (the
+        // default) and `Router` run the standard loop, byte-identical to before
+        // (the dedicated router front lands in a later step).
+        use crate::distributed::disaggregated::ServingMode;
+        match sched_config.serving_mode {
+            ServingMode::PrefillOnly | ServingMode::DecodeOnly => {
+                if !run_disaggregated_serving_role(
+                    &mut scheduler,
+                    sched_config.serving_mode,
+                    sched_config.serving_bind,
+                    &sched_config.decode_peers,
+                ) {
+                    scheduler.run();
+                }
+            }
+            ServingMode::Hybrid | ServingMode::Router => scheduler.run(),
         }
-        scheduler.run();
     })
+}
+
+/// Drive the live disaggregated serving role for a non-hybrid worker (#126
+/// B3b2a).
+///
+/// Binds this node's `serving_bind` role transport and runs the prefill or
+/// decode role loop ([`serve_prefill_role_networked_blocking`] /
+/// [`serve_decode_role_networked_blocking`]), which returns when the transport
+/// closes. Returns `false` without starting a loop when the role is
+/// misconfigured (no `serving_bind`, or a prefill node with no `decode_peers`),
+/// so the caller falls back to the standard single-node scheduler loop rather
+/// than hanging a half-configured node. A role-loop error is logged before the
+/// worker exits.
+///
+/// [`serve_prefill_role_networked_blocking`]: crate::distributed::disaggregated::coordinator::serve_prefill_role_networked_blocking
+/// [`serve_decode_role_networked_blocking`]: crate::distributed::disaggregated::coordinator::serve_decode_role_networked_blocking
+fn run_disaggregated_serving_role(
+    scheduler: &mut crate::server::batch::BatchScheduler,
+    serving_mode: crate::distributed::disaggregated::ServingMode,
+    serving_bind: Option<std::net::SocketAddr>,
+    decode_peers: &[std::net::SocketAddr],
+) -> bool {
+    use crate::distributed::disaggregated::ServingMode;
+    use crate::distributed::disaggregated::coordinator::{
+        serve_decode_role_networked_blocking, serve_prefill_role_networked_blocking,
+    };
+    use crate::distributed::tcp_transport::TcpTransportConfig;
+
+    let Some(bind_addr) = serving_bind else {
+        tracing::error!(
+            serving_mode = %serving_mode,
+            "Disaggregated serving role requires --serving-bind; \
+             falling back to the single-node scheduler loop"
+        );
+        return false;
+    };
+    let bind = TcpTransportConfig {
+        bind_address: bind_addr.to_string(),
+        ..TcpTransportConfig::default()
+    };
+
+    let result = match serving_mode {
+        ServingMode::PrefillOnly => {
+            let Some(decode_peer) = decode_peers.first() else {
+                tracing::error!(
+                    "--node-role prefill requires --decode-peers (the decode node to \
+                     hand KV off to); falling back to the single-node scheduler loop"
+                );
+                return false;
+            };
+            tracing::info!(
+                bind = %bind_addr, decode_peer = %decode_peer,
+                "Starting the disaggregated prefill serving role"
+            );
+            serve_prefill_role_networked_blocking(bind, decode_peer.to_string(), scheduler, None)
+        }
+        ServingMode::DecodeOnly => {
+            tracing::info!(bind = %bind_addr, "Starting the disaggregated decode serving role");
+            serve_decode_role_networked_blocking(bind, scheduler, None)
+        }
+        // The caller only invokes this for a non-hybrid serving role.
+        ServingMode::Hybrid | ServingMode::Router => return false,
+    };
+
+    if let Err(e) = result {
+        tracing::error!(
+            serving_mode = %serving_mode,
+            "Disaggregated serving role loop exited with an error: {e:#}"
+        );
+    }
+    true
 }
 
 /// Resolve the operator's `--kv-cache-budget` directive into a concrete paged

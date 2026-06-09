@@ -35,6 +35,7 @@ pub mod handoff_impl;
 pub mod prefill_scheduler;
 pub mod request_router;
 pub mod serving;
+pub mod serving_protocol;
 pub mod stream_bridge;
 
 pub use benchmark::{
@@ -63,5 +64,9 @@ pub use request_router::{
 pub use serving::{
     DisaggregatedMetrics, DisaggregatedMetricsSnapshot, DisaggregatedServer,
     DisaggregatedServingConfig, HybridModeGuard, ServingMode,
+};
+pub use serving_protocol::{
+    DecodeMetaFrame, PrefillRequestFrame, ResultFrame, ResultPhase, control_parts,
+    sampling_from_serializable, sampling_to_serializable,
 };
 pub use stream_bridge::{StreamBridge, StreamBridgeError, StreamPhase, TokenEvent, TokenSource};

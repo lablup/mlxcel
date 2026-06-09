@@ -521,6 +521,13 @@ struct ServerArgs {
     #[arg(long, value_delimiter = ',', value_name = "ADDR")]
     decode_peers: Vec<std::net::SocketAddr>,
 
+    /// This node's own bind address (host:port) for the disaggregated
+    /// serving-role transport (#126). Required for a `--node-role prefill` or
+    /// `--node-role decode` node: the prefill node listens here for request
+    /// frames and the decode node for KV handoffs.
+    #[arg(long, value_name = "ADDR")]
+    serving_bind: Option<std::net::SocketAddr>,
+
     /// Manual pipeline-parallel layer partition (e.g. "0-15,16-31")
     ///
     /// Specifies explicit layer ranges per pipeline stage. Each range is
@@ -1182,6 +1189,7 @@ fn build_startup_input(mut args: ServerArgs) -> anyhow::Result<ServerStartupInpu
         peers: args.peers,
         prefill_peers: args.prefill_peers,
         decode_peers: args.decode_peers,
+        serving_bind: args.serving_bind,
         pp_layers: args.pp_layers,
         pp_micro_batch_size: args.pp_micro_batch_size,
         pp_auto: args.pp_auto,

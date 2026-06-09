@@ -254,6 +254,11 @@ impl ModelProvider {
                 config.enable_vlm_prefix_cache,
                 // disaggregated serving role from `--node-role` (#126 B2).
                 config.serving_mode,
+                // disaggregated serving-role network addresses (#126 B3b2a). The
+                // worker uses `decode_peers` + `serving_bind`; `--prefill-peers`
+                // stays in `ServerConfig` for the future dedicated router.
+                config.decode_peers.clone(),
+                config.serving_bind,
                 speculative_dispatch,
                 batch_metrics,
                 batch_observability,
@@ -401,6 +406,8 @@ impl ModelProvider {
             false, // enable_vlm_prefix_cache: off
             // serving_mode: single-node Hybrid (this wrapper has no --node-role).
             crate::distributed::disaggregated::ServingMode::Hybrid,
+            Vec::new(), // decode_peers: none (hybrid)
+            None,       // serving_bind: none (hybrid)
             batch_metrics,
             batch_observability,
         )
@@ -438,6 +445,8 @@ impl ModelProvider {
         kv_cache_budget: Option<crate::memory_estimate::PagedBudgetDirective>,
         enable_vlm_prefix_cache: bool,
         serving_mode: crate::distributed::disaggregated::ServingMode,
+        decode_peers: Vec<std::net::SocketAddr>,
+        serving_bind: Option<std::net::SocketAddr>,
         batch_metrics: Arc<BatchMetrics>,
         batch_observability: Arc<BatchObservability>,
     ) -> Result<Self> {
@@ -466,6 +475,8 @@ impl ModelProvider {
             kv_cache_budget,
             enable_vlm_prefix_cache,
             serving_mode,
+            decode_peers,
+            serving_bind,
             crate::server::SpeculativeDispatch::Disabled,
             batch_metrics,
             batch_observability,
@@ -502,6 +513,8 @@ impl ModelProvider {
         kv_cache_budget: Option<crate::memory_estimate::PagedBudgetDirective>,
         enable_vlm_prefix_cache: bool,
         serving_mode: crate::distributed::disaggregated::ServingMode,
+        decode_peers: Vec<std::net::SocketAddr>,
+        serving_bind: Option<std::net::SocketAddr>,
         speculative_dispatch: crate::server::SpeculativeDispatch,
         batch_metrics: Arc<BatchMetrics>,
         batch_observability: Arc<BatchObservability>,
@@ -547,6 +560,11 @@ impl ModelProvider {
             // onto the live scheduler later (B2b); `Hybrid` is the unchanged
             // single-node path.
             serving_mode,
+            // disaggregated serving-role network addresses (#126 B3b2a): the
+            // worker binds `serving_bind` and hands KV off to `decode_peers`
+            // when `serving_mode` is non-hybrid.
+            decode_peers,
+            serving_bind,
             // forward the resolved speculative dispatch.
             speculative_dispatch,
         };
@@ -624,6 +642,8 @@ impl ModelProvider {
             enable_vlm_prefix_cache: false, // off in minimal test path
             // minimal test path is single-node.
             serving_mode: crate::distributed::disaggregated::ServingMode::Hybrid,
+            decode_peers: Vec::new(), // single-node minimal test path
+            serving_bind: None,       // single-node minimal test path
             // minimal test path has no drafter; the dispatch
             // defaults to `Disabled` which short-circuits the scheduler
             // hot path to the classic decode loop.

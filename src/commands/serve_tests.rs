@@ -75,6 +75,7 @@ fn sample_args() -> crate::ServeArgs {
         peers: vec![],
         prefill_peers: vec![],
         decode_peers: vec![],
+        serving_bind: None,
         pp_layers: None,
         pp_micro_batch_size: 1,
         pp_auto: None,
