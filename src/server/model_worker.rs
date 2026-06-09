@@ -124,6 +124,18 @@ pub(crate) struct WorkerSchedulerConfig {
     /// multi-turn same-image conversations. Text-only and non-VLM requests are
     /// unaffected either way.
     pub enable_vlm_prefix_cache: bool,
+    /// disaggregated serving role for paged KV serving (#126 B2), derived from
+    /// `--node-role`.
+    ///
+    /// [`ServingMode::Hybrid`](crate::distributed::disaggregated::ServingMode::Hybrid)
+    /// (the default) is the single-node path: the worker runs the standard
+    /// scheduler loop, byte-identical to a server with no distributed flags.
+    /// `PrefillOnly` / `DecodeOnly` select a disaggregated serving role. The
+    /// worker carries the mode so a serving-role coordinator
+    /// ([`crate::distributed::disaggregated::ServingCoordinator`]) can drive the
+    /// scheduler over the B1 handoff hooks in a later step (B2b); until then
+    /// every mode runs the standard loop.
+    pub serving_mode: crate::distributed::disaggregated::ServingMode,
     /// resolved speculative-decoding dispatch shape.
     ///
     /// Constructed once at worker construction (or
@@ -406,6 +418,23 @@ pub(crate) fn spawn_model_worker_with_batch_config(
         // scheduler can branch per-request once the round-loop dispatch
         // hook is wired in `decode_single_step`.
         .with_speculative_dispatch(sched_config.speculative_dispatch);
+
+        // #126 B2: a non-hybrid `--node-role` selects a disaggregated serving
+        // role. The serving-role coordinator
+        // (`distributed::disaggregated::ServingCoordinator`) that drives this
+        // scheduler over the B1 handoff hooks lands in B2b, and a real network
+        // transport in B3; until then every role runs the standard single-node
+        // loop, so `Hybrid` and a misconfigured single node both keep serving
+        // rather than hanging. `Hybrid` (the default) is byte-identical to
+        // before.
+        if sched_config.serving_mode != crate::distributed::disaggregated::ServingMode::Hybrid {
+            tracing::info!(
+                serving_mode = %sched_config.serving_mode,
+                "Disaggregated serving role configured; running the standard \
+                 single-node scheduler loop (serving-role coordinator wiring \
+                 lands in a later step)"
+            );
+        }
         scheduler.run();
     })
 }

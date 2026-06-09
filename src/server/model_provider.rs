@@ -252,6 +252,8 @@ impl ModelProvider {
                 config.kv_cache_budget,
                 // experimental VLM prompt-prefix cache toggle (#124 step c).
                 config.enable_vlm_prefix_cache,
+                // disaggregated serving role from `--node-role` (#126 B2).
+                config.serving_mode,
                 speculative_dispatch,
                 batch_metrics,
                 batch_observability,
@@ -397,6 +399,8 @@ impl ModelProvider {
             None,  // max_kv_size: unbounded
             None,  // kv_cache_budget: unbounded
             false, // enable_vlm_prefix_cache: off
+            // serving_mode: single-node Hybrid (this wrapper has no --node-role).
+            crate::distributed::disaggregated::ServingMode::Hybrid,
             batch_metrics,
             batch_observability,
         )
@@ -433,6 +437,7 @@ impl ModelProvider {
         // `None` keeps the pool unbounded.
         kv_cache_budget: Option<crate::memory_estimate::PagedBudgetDirective>,
         enable_vlm_prefix_cache: bool,
+        serving_mode: crate::distributed::disaggregated::ServingMode,
         batch_metrics: Arc<BatchMetrics>,
         batch_observability: Arc<BatchObservability>,
     ) -> Result<Self> {
@@ -460,6 +465,7 @@ impl ModelProvider {
             max_kv_size,
             kv_cache_budget,
             enable_vlm_prefix_cache,
+            serving_mode,
             crate::server::SpeculativeDispatch::Disabled,
             batch_metrics,
             batch_observability,
@@ -495,6 +501,7 @@ impl ModelProvider {
         max_kv_size: Option<usize>,
         kv_cache_budget: Option<crate::memory_estimate::PagedBudgetDirective>,
         enable_vlm_prefix_cache: bool,
+        serving_mode: crate::distributed::disaggregated::ServingMode,
         speculative_dispatch: crate::server::SpeculativeDispatch,
         batch_metrics: Arc<BatchMetrics>,
         batch_observability: Arc<BatchObservability>,
@@ -535,6 +542,11 @@ impl ModelProvider {
             kv_cache_budget,
             // experimental VLM prompt-prefix cache toggle (#124 step c).
             enable_vlm_prefix_cache,
+            // disaggregated serving role from `--node-role` (#126 B2). The
+            // worker carries it so the serving-role coordinator can be wired
+            // onto the live scheduler later (B2b); `Hybrid` is the unchanged
+            // single-node path.
+            serving_mode,
             // forward the resolved speculative dispatch.
             speculative_dispatch,
         };
@@ -610,6 +622,8 @@ impl ModelProvider {
             max_kv_size: None,              // unbounded in minimal test path
             kv_cache_budget: None,          // unbounded in minimal test path
             enable_vlm_prefix_cache: false, // off in minimal test path
+            // minimal test path is single-node.
+            serving_mode: crate::distributed::disaggregated::ServingMode::Hybrid,
             // minimal test path has no drafter; the dispatch
             // defaults to `Disabled` which short-circuits the scheduler
             // hot path to the classic decode loop.

@@ -740,6 +740,17 @@ pub(super) fn build_server_config(
         startup.no_batch,
     );
     let max_kv_size = resolve_context_kv_cap(context_size, startup.max_kv_size);
+    // Derive the disaggregated serving role from `--node-role` (#126 B2). The
+    // role string was already validated in `resolve_distributed_startup`, so a
+    // parse failure here falls back to the single-node `Hybrid` default rather
+    // than erroring a second time. Absent `--node-role` is `Hybrid` (the
+    // byte-identical single-node path).
+    let serving_mode = startup
+        .node_role
+        .as_deref()
+        .and_then(|role| role.parse::<NodeRole>().ok())
+        .map(crate::distributed::disaggregated::ServingMode::from_node_role)
+        .unwrap_or(crate::distributed::disaggregated::ServingMode::Hybrid);
 
     ServerConfig {
         api_key,
@@ -816,6 +827,8 @@ pub(super) fn build_server_config(
         kv_cache_budget: startup.kv_cache_budget,
         // forward the experimental VLM prefix-cache toggle (#124 step c).
         enable_vlm_prefix_cache: startup.enable_vlm_prefix_cache,
+        // disaggregated serving role derived from `--node-role` (#126 B2).
+        serving_mode,
     }
 }
 
