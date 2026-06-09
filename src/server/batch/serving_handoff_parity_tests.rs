@@ -13,7 +13,7 @@
 // limitations under the License.
 
 //! Real-model parity for the serving-role KV handoff scheduler entries (#126
-//! B2b/B2c).
+//! B2b/B2c) and the disaggregated role loops over a real transport (#126 B3a).
 //!
 //! `tests/paged_handoff_parity.rs` proves the handoff at the `CachePool` + model
 //! level. This goes one layer up to the BatchScheduler serving-role entries that
@@ -23,6 +23,14 @@
 //! [`BatchScheduler::ingest_handoff_as_active`], and decodes the restored
 //! sequence. The decode token ids must be byte-identical to a single-node run of
 //! the same prompt through the same scheduler.
+//!
+//! [`serving_role_loop_parity_matches_single_node_qwen3`] goes one layer further:
+//! two independent schedulers run the [`ServingCoordinator::run_prefill_role`] /
+//! [`ServingCoordinator::run_decode_role`] loops over a real localhost
+//! [`TcpTransport`] (not the in-process MockTransport), the decode loop as a
+//! concurrent task. The prefill node streams the first token and the decode node
+//! streams the continuation, the same split a router merges for a client, so the
+//! concatenated text must match the single-node reference.
 //!
 //! This test is in-crate because `BatchScheduler` is `pub(crate)` and cannot be
 //! constructed from an integration test (same constraint noted in
@@ -47,9 +55,13 @@ use std::time::Instant;
 use mlxcel_core::generate::SamplingConfig;
 
 use super::BatchScheduler;
-use crate::distributed::disaggregated::ServingCoordinator;
 use crate::distributed::disaggregated::serving::ServingMode;
+use crate::distributed::disaggregated::{
+    DecodeRoleHandoff, PrefillRoleRequest, ServingCoordinator,
+};
 use crate::distributed::mock_transport::{MockRouter, MockTransport, MockTransportConfig};
+use crate::distributed::tcp_transport::{TcpTransport, TcpTransportConfig};
+use crate::distributed::transport::Transport;
 use crate::server::batch::BatchObservability;
 use crate::server::batch::sequence::{RequestPriority, SequenceInfo, SequenceState};
 use crate::server::config::{DecodeStorageBackend, PreemptionPolicy};
@@ -66,6 +78,12 @@ const DECODE_STEPS: usize = 16;
 
 /// A high per-request budget so neither run finishes before `DECODE_STEPS`.
 const MAX_TOKENS: usize = 64;
+
+/// Bounded token budget for the role-loop run (#126 B3a). Both the reference and
+/// the two-node handoff generate exactly this many tokens (the prefill first
+/// token plus the decode continuation), then stop on the length limit, so the
+/// comparison is deterministic and quick.
+const ROLE_LOOP_MAX_TOKENS: usize = 16;
 
 /// A fixed ~50-token prompt (> one 32-token block, so the sequence spans two
 /// physical blocks). Deterministic ids; matches `paged_handoff_parity`.
@@ -278,6 +296,184 @@ fn serving_handoff_parity_matches_single_node_qwen3() {
     eprintln!(
         "OK: prefill-role extracted, shipped over the coordinator transport, and the \
          decode-role reconstructed + decoded {DECODE_STEPS} tokens identically to the \
+         single-node run."
+    );
+}
+
+/// Drain a streamed generation channel into the concatenated token text,
+/// ignoring the terminal `Done` event. Panics on an error event so a failed
+/// generation surfaces loudly rather than as a silent text mismatch.
+fn collect_text(rx: &mpsc::Receiver<GenerateEvent>) -> String {
+    let mut text = String::new();
+    while let Ok(event) = rx.try_recv() {
+        match event {
+            GenerateEvent::Token(t) | GenerateEvent::TokenWithLogprobs(t, _) => text.push_str(&t),
+            GenerateEvent::Done(_) => {}
+            GenerateEvent::Error(e) => panic!("unexpected generation error event: {e}"),
+        }
+    }
+    text
+}
+
+/// A TCP transport config bound to an ephemeral localhost port. Two of these in
+/// one process simulate a prefill node and a decode node over a real socket.
+fn loopback_tcp_config() -> TcpTransportConfig {
+    TcpTransportConfig {
+        bind_address: "127.0.0.1:0".to_string(),
+        ..TcpTransportConfig::default()
+    }
+}
+
+#[test]
+#[ignore = "loads qwen3-0.6b-4bit (3x) and runs real GPU forwards; run with --ignored"]
+fn serving_role_loop_parity_matches_single_node_qwen3() {
+    let _runtime = crate::initialize_runtime();
+    let dir = repo_model_dir(QWEN3_DIR);
+    if !dir.exists() {
+        eprintln!(
+            "Skipping {QWEN3_DIR}: model directory not found at {}.\n\
+             Fetch with: ./target/release/mlxcel download mlx-community/Qwen3-0.6B-4bit",
+            dir.display()
+        );
+        return;
+    }
+
+    // ---- REFERENCE: single-node prefill + decode-to-idle, collecting the
+    // streamed text. The scheduler is dropped before the two nodes load. ----
+    let ref_text = {
+        let (model, sched_tokenizer) =
+            crate::load_model(&dir).unwrap_or_else(|e| panic!("load {QWEN3_DIR}: {e:?}"));
+        let seq_tokenizer = crate::tokenizer::load_tokenizer(&dir).expect("load tokenizer");
+        let config_eos = crate::read_eos_token_ids(&dir);
+        let mut sched = build_paged_scheduler(model, sched_tokenizer, config_eos);
+        let ref_id = sched
+            .allocate_sequence_state()
+            .expect("allocate reference sequence");
+        let (mut ref_seq, ref_rx) = make_request(ref_id, &seq_tokenizer);
+        ref_seq.max_tokens = ROLE_LOOP_MAX_TOKENS;
+        BatchScheduler::begin_prefill(&mut ref_seq).expect("begin reference prefill");
+        sched.execute_full_prefill(ref_seq);
+        sched.decode_handoff_until_idle();
+        let text = collect_text(&ref_rx);
+        assert!(!text.is_empty(), "reference run produced no text");
+        eprintln!("reference text: {text:?}");
+        text
+    };
+
+    // ---- TWO NODES: a prefill node and a decode node, each with its own model
+    // load and scheduler, connected over a real localhost TCP transport. ----
+    let (prefill_model, prefill_tokenizer) =
+        crate::load_model(&dir).unwrap_or_else(|e| panic!("load prefill node {QWEN3_DIR}: {e:?}"));
+    let (decode_model, decode_tokenizer) =
+        crate::load_model(&dir).unwrap_or_else(|e| panic!("load decode node {QWEN3_DIR}: {e:?}"));
+    let mut prefill_sched = build_paged_scheduler(
+        prefill_model,
+        prefill_tokenizer,
+        crate::read_eos_token_ids(&dir),
+    );
+    let mut decode_sched = build_paged_scheduler(
+        decode_model,
+        decode_tokenizer,
+        crate::read_eos_token_ids(&dir),
+    );
+
+    // The prefill node's first-token channel and the decode node's continuation
+    // channel; drained after the loops finish.
+    let (prefill_resp_tx, prefill_resp_rx) = mpsc::channel();
+    let (decode_resp_tx, decode_resp_rx) = mpsc::channel();
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("current-thread tokio runtime");
+    let local = tokio::task::LocalSet::new();
+    rt.block_on(local.run_until(async move {
+        // Bind both transports on an ephemeral localhost port and cross-wire the
+        // peers from the actual bound addresses.
+        let decode_transport = TcpTransport::bind(loopback_tcp_config())
+            .await
+            .expect("bind decode transport");
+        let prefill_transport = TcpTransport::bind(loopback_tcp_config())
+            .await
+            .expect("bind prefill transport");
+        let decode_addr = decode_transport.local_addr().expect("decode local addr");
+        let prefill_addr = prefill_transport.local_addr().expect("prefill local addr");
+        let prefill_coord = ServingCoordinator::new(
+            ServingMode::PrefillOnly,
+            Box::new(prefill_transport),
+            decode_addr,
+        );
+        let decode_coord = ServingCoordinator::new(
+            ServingMode::DecodeOnly,
+            Box::new(decode_transport),
+            prefill_addr,
+        );
+
+        let (prefill_req_tx, prefill_req_rx) = tokio::sync::mpsc::channel::<PrefillRoleRequest>(4);
+        let (decode_meta_tx, decode_meta_rx) = tokio::sync::mpsc::channel::<DecodeRoleHandoff>(4);
+
+        // The decode node runs its role loop as a concurrent local task: it owns
+        // its coordinator + scheduler, blocks on the inbound frame, and decodes
+        // it when the prefill node ships it. The future is `!Send` (the scheduler
+        // holds the MLX pool), so it must be `spawn_local`.
+        let decode_task = tokio::task::spawn_local(async move {
+            decode_coord
+                .run_decode_role(&mut decode_sched, decode_meta_rx)
+                .await
+        });
+
+        // Hand the decode node its per-request coordination metadata, then feed
+        // the prefill request. Closing each channel makes its loop return after
+        // the single item.
+        decode_meta_tx
+            .send(DecodeRoleHandoff {
+                max_tokens: ROLE_LOOP_MAX_TOKENS,
+                sampling: SamplingConfig::greedy(),
+                response_tx: decode_resp_tx,
+            })
+            .await
+            .expect("send decode metadata");
+        drop(decode_meta_tx);
+        prefill_req_tx
+            .send(PrefillRoleRequest {
+                prompt_tokens: PROMPT_TOKENS.to_vec(),
+                sampling: SamplingConfig::greedy(),
+                max_tokens: ROLE_LOOP_MAX_TOKENS,
+                response_tx: prefill_resp_tx,
+                cancelled: Arc::new(AtomicBool::new(false)),
+            })
+            .await
+            .expect("send prefill request");
+        drop(prefill_req_tx);
+
+        // Drive the prefill loop inline: it prefills the request and ships the
+        // extracted frame over TCP, which the decode task receives and decodes.
+        prefill_coord
+            .run_prefill_role(&mut prefill_sched, prefill_req_rx)
+            .await
+            .expect("prefill role loop");
+        decode_task
+            .await
+            .expect("join decode role task")
+            .expect("decode role loop");
+    }));
+
+    let first_token_text = collect_text(&prefill_resp_rx);
+    let continuation_text = collect_text(&decode_resp_rx);
+    let handoff_text = format!("{first_token_text}{continuation_text}");
+    eprintln!(
+        "handoff text: {handoff_text:?} \
+         (prefill first token: {first_token_text:?}, decode continuation: {continuation_text:?})"
+    );
+
+    assert_eq!(
+        handoff_text, ref_text,
+        "two-node role-loop handoff text must equal the single-node run\n\
+         reference: {ref_text:?}\nhandoff:   {handoff_text:?}"
+    );
+    eprintln!(
+        "OK: the prefill node prefilled and shipped the KV frame over localhost TCP, the decode \
+         node reconstructed and decoded it, and the concatenated stream is byte-identical to the \
          single-node run."
     );
 }

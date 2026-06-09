@@ -50,11 +50,17 @@
 //! [`MockTransport`]: crate::distributed::mock_transport::MockTransport
 //! [`Transport`]: crate::distributed::transport::Transport
 
-use anyhow::Result;
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
+
+use anyhow::{Context, Result};
+use mlxcel_core::generate::SamplingConfig;
 
 use super::handoff_impl::{recv_handoff_payload, send_handoff_payload};
 use super::serving::ServingMode;
 use crate::distributed::transport::Transport;
+use crate::server::batch::BatchScheduler;
+use crate::server::model_provider::GenerateEvent;
 
 /// Binds a serving role to a transport and its handoff peer.
 ///
@@ -143,6 +149,127 @@ impl ServingCoordinator {
     pub async fn recv_handoff(&self) -> Result<(String, Vec<u8>)> {
         recv_handoff_payload(&*self.transport).await
     }
+
+    /// Prefill role loop (#126 B3a): drain prefill requests, prefill each on
+    /// `scheduler`, and send the extracted handoff frame to the decode peer.
+    ///
+    /// Each request drives the standard full-prefill + extract entry
+    /// ([`BatchScheduler::prefill_text_request_for_handoff`]); the resulting
+    /// frame is shipped over the transport seam to the decode peer. A request
+    /// that finishes at prefill (immediate EOS) produces no frame: the prefill
+    /// node already emitted its terminal event on the request's own channel, so
+    /// there is nothing to hand off. The loop returns when the request channel
+    /// closes (a graceful drain).
+    ///
+    /// The scheduler is borrowed, not owned: a worker pairs its one scheduler
+    /// with the role loop, and the coordinator stays model-free so the transport
+    /// seam keeps its lightweight unit tests. The future is `!Send` (the
+    /// scheduler holds the per-process MLX cache pool), so a caller drives it on
+    /// a current-thread runtime (the worker thread, or a `LocalSet` in tests).
+    ///
+    /// `dead_code` is allowed until the worker flip wires the live caller (B3b);
+    /// the in-process two-node parity test drives it now.
+    #[allow(dead_code)]
+    pub(crate) async fn run_prefill_role(
+        &self,
+        scheduler: &mut BatchScheduler,
+        mut requests: tokio::sync::mpsc::Receiver<PrefillRoleRequest>,
+    ) -> Result<()> {
+        while let Some(req) = requests.recv().await {
+            let frame = scheduler.prefill_text_request_for_handoff(
+                req.prompt_tokens,
+                req.sampling,
+                req.max_tokens,
+                req.response_tx,
+                req.cancelled,
+            )?;
+            if let Some(bytes) = frame {
+                self.send_handoff(&bytes)
+                    .await
+                    .context("prefill role loop: send handoff frame to the decode peer")?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Decode role loop (#126 B3a): receive handoff frames from the prefill peer,
+    /// reconstruct each onto a fresh pool slot, and decode it to completion.
+    ///
+    /// Each iteration pairs the next inbound frame with the next coordination
+    /// metadata (the per-request budget, sampling policy, and client output
+    /// channel, which travel with the node holding the client connection rather
+    /// than inside the KV frame) and drives
+    /// [`BatchScheduler::ingest_handoff_as_active`] then
+    /// [`BatchScheduler::decode_handoff_until_idle`], which streams the decode
+    /// tokens out on the request's channel. The loop returns when the metadata
+    /// channel closes.
+    ///
+    /// Metadata is paired with frames in FIFO arrival order in this in-process
+    /// step; tagging frames with a request id for out-of-order delivery is a
+    /// later step (the router in a real two-process deployment). The future is
+    /// `!Send` for the same reason as [`Self::run_prefill_role`].
+    ///
+    /// `dead_code` is allowed until the worker flip wires the live caller (B3b);
+    /// the in-process two-node parity test drives it now.
+    #[allow(dead_code)]
+    pub(crate) async fn run_decode_role(
+        &self,
+        scheduler: &mut BatchScheduler,
+        mut handoffs: tokio::sync::mpsc::Receiver<DecodeRoleHandoff>,
+    ) -> Result<()> {
+        while let Some(meta) = handoffs.recv().await {
+            let (_from, bytes) = self
+                .recv_handoff()
+                .await
+                .context("decode role loop: receive handoff frame from the prefill peer")?;
+            scheduler
+                .ingest_handoff_as_active(&bytes, meta.max_tokens, meta.sampling, meta.response_tx)
+                .context("decode role loop: ingest handoff frame as an active sequence")?;
+            scheduler.decode_handoff_until_idle();
+        }
+        Ok(())
+    }
+}
+
+/// A prefill-role work item the serving-role prefill loop turns into a handoff.
+///
+/// Carries a request's raw parts; the disaggregated path is text-only over the
+/// pool-backed Fp16 families, so a request is fully described by its prompt
+/// token ids, sampling policy, and per-request token budget. `response_tx` is
+/// the channel the prefill node emits its first token on (the decode node emits
+/// the continuation); `cancelled` is the client's cancellation flag, polled by
+/// the scheduler to abort an orphaned sequence.
+pub struct PrefillRoleRequest {
+    /// The prompt token ids to prefill.
+    pub prompt_tokens: Vec<i32>,
+    /// Sampling policy for the request.
+    pub sampling: SamplingConfig,
+    /// Maximum tokens to generate (counted across the prefill first token and
+    /// the decode continuation).
+    pub max_tokens: usize,
+    /// Output channel for the prefill node's half of the stream (the first
+    /// sampled token).
+    pub response_tx: std::sync::mpsc::Sender<GenerateEvent>,
+    /// Client cancellation flag.
+    pub cancelled: Arc<AtomicBool>,
+}
+
+/// The per-request coordination metadata a decode node pairs with an inbound
+/// handoff frame.
+///
+/// The handoff frame carries the KV cache, the prompt token history, and the
+/// prefill node's generated token(s). The request's budget, sampling policy,
+/// and output stream stay with the node holding the client connection (the
+/// router in a real deployment, the test harness in this in-process step), so
+/// the decode loop supplies them alongside each frame.
+pub struct DecodeRoleHandoff {
+    /// Maximum tokens to generate (matches the originating request budget).
+    pub max_tokens: usize,
+    /// Sampling policy for the decode continuation.
+    pub sampling: SamplingConfig,
+    /// Output channel for the decode node's half of the stream (the
+    /// continuation after the prefill node's first token).
+    pub response_tx: std::sync::mpsc::Sender<GenerateEvent>,
 }
 
 #[cfg(test)]

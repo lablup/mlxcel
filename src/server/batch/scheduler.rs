@@ -506,6 +506,83 @@ impl BatchScheduler {
         Ok(Some(bytes))
     }
 
+    /// Prefill role (#126 B3a): build a queued text sequence from the raw request
+    /// parts the serving-role prefill loop carries, run a full prefill, and
+    /// extract the pool-backed KV as a handoff frame for a decode node.
+    ///
+    /// The disaggregated path is text-only over the pool-backed Fp16 families
+    /// (qwen3 / llama3), so this builds the minimal text sequence (no VLM
+    /// embeddings, prompt-prefix adoption, thinking budget, or structured
+    /// output) and reuses [`Self::prefill_request_for_handoff`] for the prefill
+    /// and extract. `response_tx` carries the first sampled token's text back to
+    /// the caller, which is the prefill node's half of the streamed output (the
+    /// decode node emits the continuation, mirroring the router's first-token +
+    /// decode-token merge). `cancelled` is the client's cancellation flag.
+    /// Returns `Ok(None)` when the request hit EOS at the first token, in which
+    /// case there is nothing to hand off.
+    ///
+    /// The empty-prompt and chunked-prefill guards run before a cache slot is
+    /// allocated, so a rejected request leaks no pool state. Chunked prefill of
+    /// an over-long prompt on the handoff path is not yet supported (deferred).
+    #[allow(dead_code)]
+    pub(crate) fn prefill_text_request_for_handoff(
+        &mut self,
+        prompt_tokens: Vec<i32>,
+        sampling: mlxcel_core::generate::SamplingConfig,
+        max_tokens: usize,
+        response_tx: mpsc::Sender<GenerateEvent>,
+        cancelled: Arc<AtomicBool>,
+    ) -> anyhow::Result<Option<Vec<u8>>> {
+        if prompt_tokens.is_empty() {
+            anyhow::bail!("prefill-role handoff: empty prompt has no tokens to prefill");
+        }
+        if self.prefill_chunk_size > 0 && prompt_tokens.len() > self.prefill_chunk_size {
+            anyhow::bail!(
+                "prefill-role handoff does not yet support chunked prefill \
+                 (prompt {} tokens > chunk size {})",
+                prompt_tokens.len(),
+                self.prefill_chunk_size
+            );
+        }
+        // Merge the model's configured stop tokens into the request sampling
+        // exactly as the single-node intake (`enqueue_request`) does, so the
+        // handoff prefill samples the first token identically.
+        let sampling = merge_config_stop_tokens(sampling, &self.config_eos);
+        let seq_id = self
+            .allocate_sequence_state()
+            .map_err(|e| anyhow::anyhow!("prefill-role handoff: allocate sequence: {e}"))?;
+        let decode_state = StreamingDecodeState::new(&self.tokenizer, &prompt_tokens);
+        let seq = SequenceInfo {
+            seq_id,
+            state: SequenceState::Queued,
+            prompt_tokens,
+            sampling,
+            max_tokens,
+            eos_token_ids: self.config_eos.clone(),
+            priority: RequestPriority::default(),
+            logprobs_config: mlxcel_core::sampling::LogprobsConfig::default(),
+            vlm_embeddings: None,
+            images: Vec::new(),
+            audio: Vec::new(),
+            generated_tokens: Vec::new(),
+            generated_text: String::new(),
+            decode_state,
+            prefill_offset: 0,
+            prefill_start_offset: 0,
+            already_cached_tokens: 0,
+            response_tx,
+            cancelled,
+            created_at: Instant::now(),
+            prefill_start: None,
+            first_token_time: None,
+            token_history: Vec::new(),
+            merged_eos: Vec::new(),
+            thinking: crate::server::thinking_budget::ThinkingState::disabled(),
+            structured: None,
+        };
+        self.prefill_request_for_handoff(seq)
+    }
+
     /// Decode role (#126 B2b): reconstruct a handed-off sequence onto a fresh pool
     /// slot and register it as a live decode sequence in the active batch, seeded
     /// with the prefill node's generated token(s) so the next decode step feeds
