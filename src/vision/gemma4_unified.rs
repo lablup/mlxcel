@@ -314,6 +314,7 @@ impl Gemma4UnifiedModel {
     /// [`LanguageModel::forward_with_embeddings_and_sequence_id`] path FIRST;
     /// subsequent speculative decode steps consume `input_ids` only and pass
     /// `input_embeddings = None`, so no multimodal merge occurs during decode.
+    #[allow(clippy::too_many_arguments)]
     pub fn forward_with_speculative_sinks(
         &self,
         input_ids: &MlxArray,
@@ -323,6 +324,7 @@ impl Gemma4UnifiedModel {
         seq_id: Option<SequenceId>,
         capture_layer_ids: Option<&[usize]>,
         sinks: Option<&mut crate::models::Gemma4SpeculativeSinks>,
+        per_row_valid_end: Option<&[i32]>,
     ) -> UniquePtr<MlxArray> {
         self.text_model.forward_with_speculative_sinks(
             input_ids,
@@ -332,6 +334,7 @@ impl Gemma4UnifiedModel {
             seq_id,
             capture_layer_ids,
             sinks,
+            per_row_valid_end,
         )
     }
 
@@ -354,6 +357,7 @@ impl Gemma4UnifiedModel {
         capture_layer_ids: Option<&[usize]>,
         sinks: Option<&mut crate::models::Gemma4SpeculativeSinks>,
         left_padding: Option<&[i32]>,
+        per_row_valid_end: Option<&[i32]>,
     ) -> UniquePtr<MlxArray> {
         self.text_model
             .forward_with_speculative_sinks_explicit_cache(
@@ -365,6 +369,7 @@ impl Gemma4UnifiedModel {
                 capture_layer_ids,
                 sinks,
                 left_padding,
+                per_row_valid_end,
             )
     }
 

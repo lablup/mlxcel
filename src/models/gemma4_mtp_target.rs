@@ -436,6 +436,7 @@ impl<'a> MtpTarget for Gemma4MtpTargetAdapter<'a> {
             self.seq_id,
             None,
             Some(&mut sinks),
+            None,
         );
         self.wrapper
             .enable_mtp_rotating_cache_buffer(self.seq_id, self.rotating_buffer_size);
@@ -567,6 +568,7 @@ impl<'a> MtpTarget for Gemma4MtpTargetAdapter<'a> {
                 self.seq_id,
                 None,
                 Some(&mut sinks),
+                None,
             ))
         };
 
@@ -1197,7 +1199,9 @@ impl<'a> Gemma4MtpBatchedTargetAdapter<'a> {
         } else {
             None
         };
-        self.batched_sink_forward_with_mask(input_arr, None, lp_ref)
+        // Prefill (offset 0) has no stale tail, so `per_row_valid_end` is None;
+        // the verify forward is the sole producer of `Some` (issue #163).
+        self.batched_sink_forward_with_mask(input_arr, None, lp_ref, None)
     }
 
     /// Sink-aware batched forward with an optional explicit attention mask.
@@ -1217,11 +1221,18 @@ impl<'a> Gemma4MtpBatchedTargetAdapter<'a> {
     /// *both* the full-attention and sliding-window layers (the forward copies
     /// the single mask into both slots). This equivalence is unit-tested in
     /// `mlxcel_core::utils` (`windowed_left_padding_mask_matches_plain_left_padding_when_uncapped`).
+    ///
+    /// `per_row_valid_end` (issue #163) is supplied ONLY by the verify forward:
+    /// it carries each row's logical valid key end (`left_padding[r] +
+    /// positions[r]`) so the offset-derived masks exclude the row's stale
+    /// `[valid_end, offset)` rejected-draft / zeroed tail after divergent
+    /// accepts. Both prefill paths pass `None` (offset 0 has no gap).
     fn batched_sink_forward_with_mask(
         &self,
         input_arr: &MlxArray,
         mask: Option<&MlxArray>,
         left_padding: Option<&[i32]>,
+        per_row_valid_end: Option<&[i32]>,
     ) -> (
         UniquePtr<MlxArray>,
         UniquePtr<MlxArray>,
@@ -1239,6 +1250,7 @@ impl<'a> Gemma4MtpBatchedTargetAdapter<'a> {
                 BATCHED_CAPTURE_LAYER_IDS,
                 Some(&mut sinks),
                 left_padding,
+                per_row_valid_end,
             )
         };
 
@@ -1433,6 +1445,8 @@ impl<'a> Gemma4MtpBatchedTargetAdapter<'a> {
             Some(mask.as_ref().unwrap()),
             // Prefill passes an explicit left-padding mask above, so the
             // `mask == None` left-padding plumbing is not needed here.
+            None,
+            // Prefill is at offset 0: no stale tail, so no per-row valid end.
             None,
         );
         self.enable_rotating_cache_buffer();
@@ -1631,9 +1645,39 @@ impl<'a> MtpTarget for Gemma4MtpBatchedTargetAdapter<'a> {
         // Build the rectangular [B, block_size] verify batch.
         let (verify_arr, width) = Self::rectangular_input(verify_input_per_row, self.batch_size)?;
 
+        // Per-row valid-length tail exclusion (issue #163). Compute each row's
+        // logical valid key end (`left_padding[r] + positions[r]`) BEFORE the
+        // forward: `positions` here reflects the state after the previous
+        // round's finalize, i.e. the pre-window logical end. After divergent
+        // accepts a shorter row's valid end lags the physical cache offset, so
+        // threading it lets the verify mask exclude that row's stale
+        // `[valid_end, offset)` rejected-draft / zeroed tail (this is the sole
+        // producer of `Some(per_row_valid_end)`). The first verify round after
+        // prefill is uniform (`valid_end == offset` for every row), a
+        // byte-identical no-op. `left_padding` is also threaded so a ragged
+        // burst keeps masking each row's resident `[0, left_padding[r])` keys;
+        // it is all-zero (→ None) for the equal-length path.
+        let (left_padding, valid_ends): (Vec<i32>, Vec<i32>) = {
+            let lp = self.left_padding.borrow();
+            let pos = self.positions.borrow();
+            let lp_i32: Vec<i32> = lp.iter().map(|&p| p as i32).collect();
+            let ve: Vec<i32> = lp
+                .iter()
+                .zip(pos.iter())
+                .map(|(&l, &p)| (l + p) as i32)
+                .collect();
+            (lp_i32, ve)
+        };
+        let lp_ref: Option<&[i32]> = if left_padding.iter().any(|&p| p > 0) {
+            Some(&left_padding)
+        } else {
+            None
+        };
+
         // Sink-aware verify forward. The [B, ...] cache grows by `width`
         // entries per row; `verify_finalize_batched` trims it back.
-        let (logits, hidden_full, shared_kv) = self.batched_sink_forward(&verify_arr);
+        let (logits, hidden_full, shared_kv) =
+            self.batched_sink_forward_with_mask(&verify_arr, None, lp_ref, Some(&valid_ends));
 
         // Greedy-parity: per-row argmax over the [B, width, vocab]
         // logits. At temperature 0 this matches the drafter-less

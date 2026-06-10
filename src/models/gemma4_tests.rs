@@ -965,6 +965,7 @@ mod mtp_hooks {
             Some(seq),
             /*capture_layer_ids=*/ None,
             Some(&mut sinks),
+            /*per_row_valid_end=*/ None,
         );
         mlxcel_core::eval(&logits);
 

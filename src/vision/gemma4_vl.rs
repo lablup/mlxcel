@@ -415,6 +415,10 @@ impl Gemma4VLModel {
     /// flow in `references/mlx-vlm`.
     ///
     /// Used by: future Gemma 4 VLM MTP consumer.
+    ///
+    /// `per_row_valid_end` (issue #163) is threaded into the inner text model's
+    /// batched-verify tail exclusion; this seq-id delegation passes it through.
+    #[allow(clippy::too_many_arguments)]
     pub fn forward_with_speculative_sinks(
         &self,
         input_ids: &MlxArray,
@@ -424,6 +428,7 @@ impl Gemma4VLModel {
         seq_id: Option<SequenceId>,
         capture_layer_ids: Option<&[usize]>,
         sinks: Option<&mut crate::models::Gemma4SpeculativeSinks>,
+        per_row_valid_end: Option<&[i32]>,
     ) -> UniquePtr<MlxArray> {
         self.text_model.forward_with_speculative_sinks(
             input_ids,
@@ -433,6 +438,7 @@ impl Gemma4VLModel {
             seq_id,
             capture_layer_ids,
             sinks,
+            per_row_valid_end,
         )
     }
 

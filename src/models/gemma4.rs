@@ -37,7 +37,7 @@ use mlxcel_core::layers::{
 };
 use mlxcel_core::utils::{
     create_causal_mask, create_causal_mask_with_left_padding, create_causal_mask_with_window,
-    create_causal_mask_with_window_and_left_padding, pipeline_hint, slice_axis,
+    create_causal_mask_with_window_and_left_padding, mask_stale_key_gap, pipeline_hint, slice_axis,
 };
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
@@ -1756,6 +1756,7 @@ impl Gemma4TextModel {
             false,
             None,
             None,
+            None,
         )
     }
 
@@ -1784,6 +1785,17 @@ impl Gemma4TextModel {
     /// The hidden-state and shared-K/V captures intentionally preserve the
     /// model's native bf16/f16 dtype — no f32 promotion (per
     /// `docs/apple-silicon-precision.md`).
+    ///
+    /// `per_row_valid_end` (issue #163) is the per-row logical valid key end
+    /// (`left_padding[r] + kv_valid_len[r]`) supplied only by the batched MTP
+    /// verify forward. After divergent accepts a shorter row's valid end lags
+    /// the physical cache offset; the keys in `[per_row_valid_end[r], offset)`
+    /// are that row's stale rejected-draft / zeroed tail. When `Some`, those gap
+    /// columns are excluded from the derived masks via [`mask_stale_key_gap`] so
+    /// each row's logits match its standalone B = 1 run (whose exact cache trim
+    /// has no such gap); the current window's keys `[offset, offset + l)` keep
+    /// base causal semantics. `None` (every non-batched-verify caller) is a
+    /// byte-identical no-op, as is a uniform round where every `ve[r] == offset`.
     #[allow(clippy::too_many_arguments)]
     pub fn forward_with_speculative_sinks(
         &self,
@@ -1797,6 +1809,7 @@ impl Gemma4TextModel {
         skip_final_norm: bool,
         bidirectional_block_ids: Option<&MlxArray>,
         left_padding: Option<&[i32]>,
+        per_row_valid_end: Option<&[i32]>,
     ) -> UniquePtr<MlxArray> {
         // When `input_embeddings` is supplied (e.g. from the VLM path where
         // vision/audio features have already been merged into the embedding
@@ -1902,6 +1915,56 @@ impl Gemma4TextModel {
             // Ordinary single-token decode with no resident padding: the
             // attention kernels derive their own causal / windowed masks.
             (None, None)
+        };
+
+        // Per-row valid-length tail exclusion (issue #163). After divergent
+        // accepts in a batched verify round, row `r`'s logical valid key end
+        // `per_row_valid_end[r]` lags the physical cache offset (the global max),
+        // so the offset-derived mask would let it attend the stale rejected-draft
+        // K/V (full-attention `Cache::Standard`, never zeroed) and the zeroed
+        // phantom tail (sliding `Cache::Rotating`) in `[ve[r], offset)`. The
+        // B = 1 reference trims its cache exactly and has no such gap, so masking
+        // the gap moves the batched logits onto the B = 1 semantics — it can only
+        // improve parity. A uniform round (every `ve[r] == offset`, always true
+        // for the first verify after prefill) is a byte-identical no-op.
+        let (global_mask, sliding_mask) = if let Some(ve) = per_row_valid_end {
+            // Full-attention family: the unbounded `Cache::Standard` keeps each
+            // row's rejected-draft K/V resident at `[ve[r], global_offset)`.
+            let global_offset = first_cache_offset(caches, "full_attention");
+            let global_mask = if ve.iter().any(|&v| v < global_offset) {
+                // Materialize the base when the fast branch left it `None`
+                // (covers the `l == 1` (None, None) decode branch).
+                let base = global_mask.unwrap_or_else(|| create_causal_mask(l, global_offset));
+                Some(mask_stale_key_gap(&base, ve, global_offset))
+            } else {
+                global_mask
+            };
+
+            // Sliding family: only safe when the sliding mask's key axis is the
+            // FULL uncompacted `[0, sliding_offset + l)` so column `k` maps 1:1
+            // to logical key position `k`. That holds in (1) the `has_padding`
+            // branch (the MTP rotating buffer never compacts in the eligible
+            // regime) and (2) any branch with `sliding_offset + l <= window`
+            // (the windowed mask is uncapped: `sliding_effective_offset ==
+            // sliding_offset`, plus the materialize-from-None path). If the axis
+            // may be capped we skip the sliding gap penalty and leave the
+            // rotating cache's `zero_partial_accept_tail` to approximate it (the
+            // eligible regime `max_prompt_len <= sliding_window` never caps).
+            let sliding_offset = first_cache_offset(caches, "sliding_attention");
+            let window = self.config.sliding_window as i32;
+            let sliding_axis_full = has_padding || sliding_offset + l <= window;
+            let sliding_mask = if sliding_axis_full && ve.iter().any(|&v| v < sliding_offset) {
+                let base = sliding_mask.unwrap_or_else(|| {
+                    create_causal_mask_with_window(l, sliding_offset, Some(window))
+                });
+                Some(mask_stale_key_gap(&base, ve, sliding_offset))
+            } else {
+                sliding_mask
+            };
+
+            (global_mask, sliding_mask)
+        } else {
+            (global_mask, sliding_mask)
         };
 
         // Gemma 4 Unified blockwise bidirectional overlay. When the caller
@@ -2358,6 +2421,7 @@ impl Gemma4Model {
             false,
             bidirectional_block_ids,
             None,
+            None,
         );
         let mut logits = self.text_model.embed_tokens.as_linear(&hidden);
         if let Some(cap) = self.config.final_logit_softcapping {
@@ -2386,6 +2450,7 @@ impl Gemma4Model {
         capture_layer_ids: Option<&[usize]>,
         sinks: Option<&mut Gemma4SpeculativeSinks>,
         left_padding: Option<&[i32]>,
+        per_row_valid_end: Option<&[i32]>,
     ) -> UniquePtr<MlxArray> {
         let hidden = self.text_model.forward_with_speculative_sinks(
             input_ids,
@@ -2398,6 +2463,7 @@ impl Gemma4Model {
             false,
             None,
             left_padding,
+            per_row_valid_end,
         );
         let mut logits = self.text_model.embed_tokens.as_linear(&hidden);
         if let Some(cap) = self.config.final_logit_softcapping {
@@ -2435,6 +2501,7 @@ impl Gemma4Model {
             skip_final_norm,
             None,
             left_padding,
+            None,
         )
     }
 
@@ -3210,6 +3277,11 @@ impl Gemma4Wrapper {
     ///
     /// Used by: future `Gemma4AssistantDraftModel` consumer and
     /// `MtpGenerator`.
+    ///
+    /// `per_row_valid_end` (issue #163) is forwarded to the inner text model's
+    /// batched-verify tail exclusion; the seq-id path is single-row so its only
+    /// callers pass `None`.
+    #[allow(clippy::too_many_arguments)]
     pub fn forward_with_speculative_sinks(
         &self,
         input_ids: &MlxArray,
@@ -3219,6 +3291,7 @@ impl Gemma4Wrapper {
         seq_id: Option<SequenceId>,
         capture_layer_ids: Option<&[usize]>,
         sinks: Option<&mut Gemma4SpeculativeSinks>,
+        per_row_valid_end: Option<&[i32]>,
     ) -> UniquePtr<MlxArray> {
         self.sequence_state.with_or_create_sequence_state(
             seq_id,
@@ -3233,6 +3306,7 @@ impl Gemma4Wrapper {
                     capture_layer_ids,
                     sinks,
                     None,
+                    per_row_valid_end,
                 )
             },
         )
@@ -3268,6 +3342,7 @@ impl Gemma4Wrapper {
         capture_layer_ids: Option<&[usize]>,
         sinks: Option<&mut Gemma4SpeculativeSinks>,
         left_padding: Option<&[i32]>,
+        per_row_valid_end: Option<&[i32]>,
     ) -> UniquePtr<MlxArray> {
         self.model.forward_with_caches_and_speculative_sinks(
             input_ids,
@@ -3278,6 +3353,7 @@ impl Gemma4Wrapper {
             capture_layer_ids,
             sinks,
             left_padding,
+            per_row_valid_end,
         )
     }
 
