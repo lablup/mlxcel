@@ -95,8 +95,26 @@ MLX_CUDA_ARCHITECTURES="90a;121" cargo build --release --features cuda
 ```
 
 The repository release workflow currently builds Linux ARM64 CUDA artifacts for
-GB10 (`121`) and GH200 (`90a`) on a self-hosted runner. Treat other GPU/OS
+GB10 (`121`) and GH200 (`90a`) on a self-hosted runner, and Linux x86-64 CUDA
+artifacts for SM 80 / 90a / 120 on GitHub-hosted runners. Treat other GPU/OS
 combinations as source builds that need local validation.
+
+### C++ ISA baseline (`MLXCEL_CXX_MARCH`)
+
+In release builds the C++ bridge defaults to `-march=native`, which tunes for
+— and only runs on — the build host's CPU. That is correct for builds that run
+where they are built (developer machines, the per-machine GB10/GH200 release
+assets). For a binary that must run on other machines, set `MLXCEL_CXX_MARCH`
+to a portable baseline; the release workflow's x86-64 assets use `x86-64-v3`
+(AVX2):
+
+```bash
+# Portable x86-64 build (any AVX2-capable CPU, ~2013+).
+MLXCEL_CXX_MARCH=x86-64-v3 cargo build --release --features cuda
+
+# Omit -march entirely (compiler default baseline).
+MLXCEL_CXX_MARCH=none cargo build --release --features cuda
+```
 
 ## Runtime environment variables
 
@@ -104,6 +122,7 @@ combinations as source builds that need local validation.
 |----------|-------------|---------|
 | `CUDA_HOME` | CUDA toolkit root used by the build script | `/usr/local/cuda` when present |
 | `MLX_CUDA_ARCHITECTURES` | CUDA SM target list, build-time | auto-detect via `nvidia-smi`, then `90a` fallback |
+| `MLXCEL_CXX_MARCH` | C++ bridge `-march` value, build-time; `none` omits the flag | `native` |
 | `MLXCEL_DEVICE` | Runtime device hint (`gpu` or `cpu`) | auto |
 | `MLXCEL_WIRED_LIMIT` | Apple Silicon wired-memory ceiling, e.g. `64GB`; `0`/`none` disables it | `max` |
 | `LLAMA_ARG_*` | Environment-backed server options accepted by clap | unset |
@@ -140,3 +159,13 @@ explicitly.
 MLX version are installed and discoverable by the linker. The root build script
 links CUDA runtime/math libraries directly and relies on the system driver for
 `libcuda`.
+
+**`gmake: *** Error 137` (SIGKILL) while compiling `qmm_*.cu`** — the build ran
+out of memory. The CUTLASS-heavy quantized-matmul kernels peak at ~4-5 GB of
+compiler memory per parallel job, so a default `-j$(nproc)` build needs roughly
+`5 GB × cores`. Cap the parallelism with `cargo build -j N ...` (cargo forwards
+`N` to the CMake subbuild); pick `N ≈ available_RAM_GB / 5`.
+
+**CMake error: `LAPACK_INCLUDE_DIRS ... NOTFOUND`** — install `liblapacke-dev`
+(MLX needs `lapacke.h`, which `liblapack-dev` alone does not provide) and
+`libopenblas-dev`.

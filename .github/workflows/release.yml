@@ -512,11 +512,136 @@ jobs:
             ${{ matrix.asset_name }}.zip.sha256
 
   # ============================================================================
+  # Linux x86-64 + CUDA builds (GitHub-hosted runner, build-only)
+  # ============================================================================
+  # Unlike the self-hosted aarch64 jobs above, these run on standard
+  # GitHub-hosted runners with no GPU. Compiling CUDA only needs the toolkit
+  # (nvcc compiles without a device; MLX upstream CI builds its CUDA wheels
+  # the same way), and this workflow intentionally runs no tests, so a GPU
+  # runner would buy nothing here. Runtime verification happens out-of-band
+  # on real x86-64 + NVIDIA hosts.
+  build-linux-x86-cuda:
+    name: Build Linux x86-64 CUDA (${{ matrix.variant }})
+    runs-on: ubuntu-24.04
+    environment: packaging
+    timeout-minutes: 300
+    # Hosted runners carry no self-hosted-pool risk, but keep the same
+    # repository guard as the other jobs so forks don't burn actions minutes
+    # uploading assets nowhere.
+    if: |
+      github.repository == 'lablup/mlxcel' && (
+        github.event_name == 'release' ||
+        github.event.inputs.targets == 'all' ||
+        github.event.inputs.targets == 'linux'
+      )
+    permissions:
+      contents: write
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # NVIDIA A100 (Ampere, SM 80)
+          - variant: sm80
+            cuda_arch: "80"
+            asset_name: mlxcel-linux-x86_64-cuda13-sm80
+
+          # NVIDIA H100 / H200 (Hopper, SM 90a — the `a` suffix gates MLX's
+          # dedicated qmm_sm90 quantized kernel, same as the gh200 asset)
+          - variant: sm90a
+            cuda_arch: "90a"
+            asset_name: mlxcel-linux-x86_64-cuda13-sm90a
+
+          # NVIDIA RTX 50-series / RTX PRO Blackwell (SM 120)
+          - variant: sm120
+            cuda_arch: "120"
+            asset_name: mlxcel-linux-x86_64-cuda13-sm120
+
+    steps:
+      # Self-healing release: see the macOS job for the rationale.
+      - name: Checkout code
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.release.tag_name || github.event.inputs.release_tag || github.sha }}
+
+      # Hosted runners have ~14 GB free on the root volume; the CUDA toolkit
+      # (~6 GB) plus the MLX + cargo build tree does not fit without evicting
+      # the large preinstalled toolchains we never use.
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+          df -h /
+
+      # CUDA 13 toolkit + cuDNN 9 from NVIDIA's network repo, plus the
+      # BLAS/LAPACK headers MLX's CPU fallback paths compile against
+      # (lapacke.h comes from liblapacke-dev, not liblapack-dev).
+      - name: Install CUDA toolkit and build dependencies
+        run: |
+          wget -q https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb
+          sudo dpkg -i cuda-keyring_1.1-1_all.deb
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            cuda-toolkit-13-3 \
+            libcudnn9-dev-cuda-13 \
+            libopenblas-dev \
+            liblapacke-dev \
+            cmake
+          echo "CUDA_HOME=/usr/local/cuda-13.3" >> $GITHUB_ENV
+          echo "/usr/local/cuda-13.3/bin" >> $GITHUB_PATH
+          /usr/local/cuda-13.3/bin/nvcc --version
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      # No tests here either — see the macOS job comment. This job's purpose
+      # is producing (and continuously verifying) the x86-64 build itself.
+      #
+      # -j 3: cap build parallelism below the runner's 4 cores. Cargo forwards
+      # this as the CMake build parallelism for the MLX subbuild, where the
+      # CUTLASS-heavy quantized-matmul kernels (qmm_*.cu) peak at ~4-5 GB of
+      # cicc memory PER JOB — four concurrent jobs OOM the hosted runner's
+      # 16 GB (observed as gmake "Error 137" / SIGKILL).
+      - name: Build release binaries
+        run: cargo build -j 3 --release --features cuda --locked
+        env:
+          MLX_CUDA_ARCHITECTURES: ${{ matrix.cuda_arch }}
+          # Redistributable asset: pin the C++ bridge and Rust code to the
+          # portable x86-64-v3 baseline (AVX2, ~2013+) instead of inheriting
+          # whatever ISA the hosted runner happens to expose (build.rs
+          # defaults to -march=native, which could bake in AVX-512 and
+          # SIGILL on older CPUs).
+          MLXCEL_CXX_MARCH: x86-64-v3
+          RUSTFLAGS: "-C target-cpu=x86-64-v3"
+
+      - name: Package binaries
+        run: |
+          mkdir -p package
+          cp target/release/mlxcel package/
+          cp target/release/mlxcel-server package/
+          cd package && zip -r "../${{ matrix.asset_name }}.zip" . && cd ..
+
+      - name: Generate checksum
+        run: sha256sum "${{ matrix.asset_name }}.zip" > "${{ matrix.asset_name }}.zip.sha256"
+
+      # Skipped when release_tag is empty: a tag-less workflow_dispatch run is
+      # the documented build-only verification mode (see the input description).
+      - name: Upload release artifacts
+        if: github.event_name == 'release' || github.event.inputs.release_tag != ''
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ github.event.release.tag_name || github.event.inputs.release_tag }}
+          files: |
+            ${{ matrix.asset_name }}.zip
+            ${{ matrix.asset_name }}.zip.sha256
+
+  # ============================================================================
   # Microsoft Teams release notification (Power Automate Workflows webhook)
   # ============================================================================
   notify-teams:
     name: Notify Teams on release
-    needs: [build-macos, build-linux-cuda]
+    needs: [build-macos, build-linux-cuda, build-linux-x86-cuda]
     if: github.repository == 'lablup/mlxcel' && github.event_name == 'release'
     runs-on: ubuntu-latest
     permissions: {}
@@ -570,8 +695,8 @@ jobs:
   # ============================================================================
   promote-release:
     name: Promote to full release
-    needs: [build-macos, build-linux-cuda]
-    if: always() && github.repository == 'lablup/mlxcel' && github.event_name == 'release' && github.event.release.prerelease && needs.build-macos.result == 'success' && needs.build-linux-cuda.result == 'success'
+    needs: [build-macos, build-linux-cuda, build-linux-x86-cuda]
+    if: always() && github.repository == 'lablup/mlxcel' && github.event_name == 'release' && github.event.release.prerelease && needs.build-macos.result == 'success' && needs.build-linux-cuda.result == 'success' && needs.build-linux-x86-cuda.result == 'success'
     runs-on: ubuntu-latest
     permissions:
       contents: write

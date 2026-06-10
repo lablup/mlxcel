@@ -61,8 +61,24 @@ fn main() {
         bridge
             .flag_if_supported("-O3")
             .flag_if_supported("-DNDEBUG")
-            .flag_if_supported("-ffast-math")
-            .flag_if_supported("-march=native");
+            .flag_if_supported("-ffast-math");
+        // ISA baseline for the bridge C++. Defaults to the build host's ISA
+        // (-march=native), which is correct for builds that run where they
+        // are built (developer machines, the per-machine gb10/gh200 release
+        // assets). Redistributable release builds must override this with a
+        // portable baseline via MLXCEL_CXX_MARCH (e.g. "x86-64-v3" for the
+        // generic Linux x86-64 asset), otherwise the binary inherits the
+        // build runner's ISA (possibly AVX-512) and SIGILLs on older CPUs.
+        // Set MLXCEL_CXX_MARCH=none to omit the flag entirely.
+        match env::var("MLXCEL_CXX_MARCH").as_deref() {
+            Err(_) => {
+                bridge.flag_if_supported("-march=native");
+            }
+            Ok("none") => {}
+            Ok(march) => {
+                bridge.flag_if_supported(&format!("-march={march}"));
+            }
+        }
         // On macOS, Clang produces LLVM bitcode with -flto, which is compatible
         // with Rust's LLVM LTO. On Linux with GCC, -flto produces GIMPLE IR
         // objects that are incompatible, causing undefined-reference linker errors.
@@ -140,6 +156,7 @@ fn main() {
     println!("cargo:rerun-if-env-changed=MLX_CUDA_ARCHITECTURES");
     println!("cargo:rerun-if-env-changed=MLXCEL_BUILD_METAL");
     println!("cargo:rerun-if-env-changed=MLXCEL_BUILD_ACCELERATE");
+    println!("cargo:rerun-if-env-changed=MLXCEL_CXX_MARCH");
 }
 
 /// Expected MLX git commit — must match GIT_TAG in mlx-cpp/CMakeLists.txt.

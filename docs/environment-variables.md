@@ -63,6 +63,7 @@ These are read by the `mlxcel-core` build script.
 |----------|--------|---------|-------|
 | `MLXCEL_BUILD_METAL` | `1/0`, `on/off`, `true/false`, `yes/no` | `on` on macOS | Overrides the CMake `MLX_BUILD_METAL` setting for local builds. Invalid values fail the build. |
 | `MLXCEL_BUILD_ACCELERATE` | `1/0`, `on/off`, `true/false`, `yes/no` | `on` on macOS | Overrides the CMake `MLX_BUILD_ACCELERATE` setting for local builds. Invalid values fail the build. |
+| `MLXCEL_CXX_MARCH` | a `-march=` value, or `none` | `native` | ISA baseline for the C++ bridge in release builds. Set a portable baseline (e.g. `x86-64-v3`) for binaries that run on machines other than the build host; `none` omits the flag. See [Installation](installation.md#c-isa-baseline-mlxcel_cxx_march). |
 
 CUDA builds also use non-`MLXCEL_*` variables such as `CUDA_HOME` and
 `MLX_CUDA_ARCHITECTURES`; see [Installation](installation.md#linux-with-cuda).
