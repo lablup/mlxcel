@@ -363,6 +363,77 @@ fn build_raw_json_messages_includes_tool_fields() {
     assert_eq!(arr[1]["role"].as_str().unwrap(), "tool");
 }
 
+/// Build a one-assistant-message request whose single tool call carries the
+/// given (wire-format string) `arguments`.
+fn req_with_tool_call_arguments(arguments: &str) -> ChatCompletionRequest {
+    ChatCompletionRequest {
+        model: "test".to_string(),
+        messages: vec![Message {
+            role: Role::Assistant,
+            content: MessageContent::Text(String::new()),
+            name: None,
+            tool_call_id: None,
+            tool_calls: Some(vec![ToolCallInMessage {
+                id: "call_1".to_string(),
+                call_type: "function".to_string(),
+                function: ToolCallFunction {
+                    name: "read_file".to_string(),
+                    arguments: arguments.to_string(),
+                },
+            }]),
+        }],
+        stream: false,
+        stream_options: None,
+        logprobs: None,
+        top_logprobs: None,
+        tools: None,
+        tool_choice: None,
+        parallel_tool_calls: None,
+        chat_template_kwargs: None,
+        extra_body: None,
+        prompt_cache_key: None,
+        user: None,
+        extra_body_fields: serde_json::Map::new(),
+        response_format: None,
+        params: SamplingParams::default(),
+    }
+}
+
+#[test]
+fn build_raw_json_messages_parses_tool_call_arguments_into_object() {
+    // Qwen3-Coder/3.5/3.6 templates do `tool_call.arguments|items`,
+    // which requires a dict. The OpenAI wire format echoes `arguments` back as
+    // a JSON-encoded STRING on later turns. Left as a string, minijinja's
+    // `|items` fails ("cannot convert value into pairs"), the render falls back
+    // to a default template, and the turn-2 prompt diverges from turn 1, which
+    // silently degrades multi-turn context and breaks prompt-cache prefix reuse
+    // (the real root cause of the "cache miss"). So an object-valued arguments
+    // string must be normalized to an object.
+    let request = req_with_tool_call_arguments(r#"{"path":"/foo","recursive":true}"#);
+    let raw = build_raw_json_messages(&request);
+    let args = &raw.as_array().unwrap()[0]["tool_calls"][0]["function"]["arguments"];
+    assert!(
+        args.is_object(),
+        "arguments must be normalized to an object so `|items` can iterate, got: {args}"
+    );
+    assert_eq!(args["path"].as_str().unwrap(), "/foo");
+    assert_eq!(args["recursive"], serde_json::json!(true));
+}
+
+#[test]
+fn build_raw_json_messages_leaves_non_object_tool_call_arguments_as_string() {
+    // Malformed / non-object arguments must stay a string so templates that do
+    // `| string` or `| tojson` (e.g. Gemma 4) still get a usable value.
+    let request = req_with_tool_call_arguments("not valid json");
+    let raw = build_raw_json_messages(&request);
+    let args = &raw.as_array().unwrap()[0]["tool_calls"][0]["function"]["arguments"];
+    assert!(
+        args.is_string(),
+        "malformed arguments must remain a string, got: {args}"
+    );
+    assert_eq!(args.as_str().unwrap(), "not valid json");
+}
+
 #[test]
 fn deserialize_tool_call_request_without_assistant_content() {
     // Issue #89: OpenAI-compatible clients omit `content` on the assistant

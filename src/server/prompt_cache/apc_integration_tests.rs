@@ -202,6 +202,70 @@ fn apc_off_config() -> PromptCacheConfig {
     )
 }
 
+// Regression: a request that is a STRICT PREFIX of (shorter than) a
+// longer stored entry. Donate-back stores `[prompt + generated]`, so a later
+// request carrying only `[prompt]` is shorter than every stored entry. mlx-serve
+// reuses the shared prefix (95%+); mlxcel was observed returning cached=0 even
+// for a byte-identical resent prompt. The matching logic is fully harness-side,
+// so this must be unit-reproducible with no model.
+#[test]
+fn apc_on_partial_hits_when_request_is_strict_prefix_of_longer_entry() {
+    let store = PromptCacheStore::with_config(apc_on_config());
+
+    // Stored entry = prompt(48 tokens) + generated tail(16 tokens) = 64 tokens.
+    let prompt: Vec<i32> = (0..48).collect();
+    let mut stored = prompt.clone();
+    stored.extend(1000..1016);
+    let mm = multimodal_digest_from_vecs(&[], &[]);
+
+    store
+        .insert(
+            &PromptCacheKey::new_full("model", None, "tpl", None, mm, &stored),
+            CacheEntry::new_for_test(stored.clone(), 1024),
+        )
+        .expect("insert stored entry");
+
+    // Later request is just the prompt (shorter, an exact prefix of `stored`).
+    let req_key = PromptCacheKey::new_full("model", None, "tpl", None, mm, &prompt);
+    let hit = store.lookup_longest_prefix(&req_key, &prompt);
+
+    let (_, matched) = hit.expect(
+        "APC on: a request that is a strict prefix of a longer stored entry must \
+         partial-match the shared prefix (regression: returned cached=0)",
+    );
+    // prompt is 48 tokens = 3 full 16-token blocks; all three match `stored`.
+    assert_eq!(
+        matched, 48,
+        "expected the full 48-token shared prefix to be reused"
+    );
+}
+
+#[test]
+fn apc_off_misses_when_request_is_strict_prefix_of_longer_entry() {
+    // Documents the legacy whole-entry-contained gate: with APC OFF the same
+    // shape returns no match, because the stored entry is longer than the
+    // request. This is the behavior APC is supposed to rescue.
+    let store = PromptCacheStore::with_config(apc_off_config());
+
+    let prompt: Vec<i32> = (0..48).collect();
+    let mut stored = prompt.clone();
+    stored.extend(1000..1016);
+    let mm = multimodal_digest_from_vecs(&[], &[]);
+
+    store
+        .insert(
+            &PromptCacheKey::new_full("model", None, "tpl", None, mm, &stored),
+            CacheEntry::new_for_test(stored.clone(), 1024),
+        )
+        .expect("insert stored entry");
+
+    let req_key = PromptCacheKey::new_full("model", None, "tpl", None, mm, &prompt);
+    assert!(
+        store.lookup_longest_prefix(&req_key, &prompt).is_none(),
+        "APC off: a shorter request cannot whole-entry-match a longer stored entry"
+    );
+}
+
 #[test]
 fn apc_stores_independent_entries_for_same_tokens_different_images() {
     // The headline regression: two requests with identical tokens but
