@@ -135,6 +135,21 @@ pub fn create_causal_mask(size: i32, offset: i32) -> UniquePtr<MlxArray> {
 ///   leading dims allow broadcasting against a `[B, H, n, n+offset]` score
 ///   tensor in batched SDPA.
 ///
+/// # NaN-safe invariant for fully-masked padding query rows
+/// A query row `q` whose absolute position `q + offset < left_padding[r]` is a
+/// leading-padding query: its causal-AND-padding key set is empty, so without
+/// special handling its mask row would be all −∞ and `softmax` over it yields
+/// NaN. This builder rescues exactly the self/diagonal column (`k == q + offset`)
+/// for those rows, so **every** query row attends at least one key and softmax
+/// over any row is finite regardless of the fused-SDPA masked-column
+/// semantics. The rescued column lies on the causal diagonal (distance 0), so
+/// the padding-row output is garbage-but-finite; it is never consumed because
+/// those padding key positions stay masked for every real query. Real query
+/// rows (`q + offset >= left_padding[r]`) are byte-identical to the pre-rescue
+/// construction. Removing the NaN at the source keeps every downstream layer's
+/// K/V at padding positions finite, instead of relying on the kernel's hard
+/// skip of additive −∞ columns to confine NaN to never-consumed slots.
+///
 /// Used by: BatchQuantizedKVCache, BatchTurboQuantKVCache
 pub fn create_causal_mask_with_left_padding(
     n: i32,
@@ -196,6 +211,26 @@ pub fn create_causal_mask_with_left_padding(
     // Combined: shape [B, 1, n, total_len]  (causal broadcasts over B)
     let combined = ffi::multiply(&causal_4d, &lp_mask_f32);
 
+    // ── NaN-safe diagonal rescue for fully-masked padding query rows ─────────
+    // A leading-padding query row `q` (absolute position `q + offset <
+    // left_padding[r]`) has an empty causal-AND-padding key set, so its
+    // `combined` row is all-zero and would convert to an all-−∞ mask row →
+    // NaN softmax. Re-enable exactly the self/diagonal column (`k == q +
+    // offset`) for those rows so every query row attends at least one key.
+    // Zero extra cost on real query rows: their `padding_query` factor is 0,
+    // so `rescue` is 0 and `combined` is unchanged (byte-identical).
+    let qinds_1d = ffi::arange_i32(offset, offset + n, 1);
+    let qinds = ffi::reshape(&qinds_1d, &[1, 1, n, 1]);
+    let one_f = ffi::ones(&[1, 1, 1, 1], dtype::FLOAT32);
+    let zero_f = ffi::zeros(&[1, 1, 1, 1], dtype::FLOAT32);
+    // self_cond[_,_,q,k] = 1.0 where k == q + offset  (shape [1,1,n,total_len]).
+    let self_cond = ffi::where_cond(&ffi::equal(&rinds, &qinds), &one_f, &zero_f);
+    // padding_query[r,_,q,_] = 1.0 where q + offset < left_padding[r] (shape [B,1,n,1]).
+    let padding_query = ffi::where_cond(&ffi::less(&qinds, &lp_tensor), &one_f, &zero_f);
+    // rescue[r,_,q,k] = 1.0 only at the self column of a padding query row.
+    let rescue = ffi::multiply(&self_cond, &padding_query);
+    let combined = ffi::add(&combined, &rescue);
+
     // Convert 0/1 float mask to additive 0 / -inf mask.
     let zeros_out = ffi::zeros(&[b, 1, n, total_len], dtype::FLOAT32);
     let neg_inf_out = ffi::full_f32(&[b, 1, n, total_len], f32::NEG_INFINITY, dtype::FLOAT32);
@@ -235,6 +270,15 @@ pub fn create_causal_mask_with_left_padding(
 ///   `T_k = min(size + offset, window)`.
 /// * **With padding**: `[B, 1, size, T_k]` where `B = left_padding.len()`. The
 ///   `[B, 1]` leading dims broadcast against a `[B, H, size, T_k]` score tensor.
+///
+/// # NaN-safe invariant for fully-masked padding query rows
+/// Like [`create_causal_mask_with_left_padding`], leading-padding query rows
+/// (`q + offset < left_padding[r]`) keep their self/diagonal column attended,
+/// so every query row has at least one attended key and softmax over any row is
+/// finite regardless of the fused-SDPA masked-column semantics. The self column
+/// is always inside the sliding-window band (distance 0 from the diagonal), so
+/// the rescue never re-admits an out-of-window key; padding-row outputs are
+/// garbage-but-finite and never consumed.
 ///
 /// # Full-key-axis precondition (not "size + offset <= window")
 /// The left-padding column filter assumes the K axis is the **full**
@@ -315,11 +359,96 @@ pub fn create_causal_mask_with_window_and_left_padding(
 
     let combined = ffi::multiply(&band_4d, &lp_mask_f32);
 
+    // ── NaN-safe diagonal rescue for fully-masked padding query rows ─────────
+    // Identical to the non-windowed builder: re-enable the self/diagonal column
+    // (`k == q + offset`) for leading-padding query rows (`q + offset <
+    // left_padding[r]`). The self column lies on the causal diagonal (distance
+    // 0), so it is always inside the sliding-window band — the rescue can never
+    // re-admit an out-of-window key. Real query rows are byte-identical.
+    let qinds_1d = ffi::arange_i32(offset, offset + size, 1);
+    let qinds = ffi::reshape(&qinds_1d, &[1, 1, size, 1]);
+    let one_f = ffi::ones(&[1, 1, 1, 1], dtype::FLOAT32);
+    let zero_f = ffi::zeros(&[1, 1, 1, 1], dtype::FLOAT32);
+    let self_cond = ffi::where_cond(&ffi::equal(&rinds, &qinds), &one_f, &zero_f);
+    let padding_query = ffi::where_cond(&ffi::less(&qinds, &lp_tensor), &one_f, &zero_f);
+    let rescue = ffi::multiply(&self_cond, &padding_query);
+    let combined = ffi::add(&combined, &rescue);
+
     // Convert the 0/1 float mask to an additive 0 / -inf mask.
     let zeros_out = ffi::zeros(&[b, 1, size, total_len], dtype::FLOAT32);
     let neg_inf_out = ffi::full_f32(&[b, 1, size, total_len], f32::NEG_INFINITY, dtype::FLOAT32);
     let bool_out = ffi::greater(&combined, &zeros_out);
     ffi::where_cond(&bool_out, &zeros_out, &neg_inf_out)
+}
+
+/// Exclude each row's stale key-tail gap from a batched additive attention mask.
+///
+/// After divergent (mixed) accepts in a B > 1 batched speculative verify round,
+/// row `r`'s logical valid key end `per_row_valid_end[r]` lags the physical
+/// cache offset (`gap_end`, the global max across rows). The keys in
+/// `[per_row_valid_end[r], gap_end)` are that row's stale rejected-draft K/V —
+/// resident in the unbounded full-attention `Cache::Standard` (whose
+/// `zero_partial_accept_tail` is a no-op) and present as zeroed phantom columns
+/// in the sliding `Cache::Rotating` (zeroed K still carries softmax weight).
+/// The `mask == None` verify forward derives its mask from the global offset, so
+/// row `r` would attend that gap; the standalone B = 1 reference trims its cache
+/// exactly and has no such gap. Adding `-inf` to exactly those columns moves the
+/// batched logits onto the B = 1 semantics, so it can only improve parity.
+///
+/// # Arguments
+/// * `base` — additive attention mask carrying 0 (attend) / −∞ (mask)
+///   sentinels, either 2-D `[n, K]` (broadcasts over the batch) or 4-D
+///   `[B | 1, 1, n, K]`.
+/// * `per_row_valid_end` — per-row logical valid key end (length `B`). Column
+///   `k` is penalised for row `r` when `per_row_valid_end[r] <= k < gap_end`.
+/// * `gap_end` — exclusive upper bound of the stale gap (the physical / global
+///   cache offset). Rows with `per_row_valid_end[r] >= gap_end` are unchanged.
+///
+/// # Returns
+/// `[B, 1, n, K]` = `base + penalty`. Penalty cells are 0 or −∞; adding 0/−∞ to
+/// the 0/−∞ `base` cannot produce a NaN (there are no `+∞` operands), so the
+/// result stays a clean additive mask.
+#[must_use]
+pub fn mask_stale_key_gap(
+    base: &MlxArray,
+    per_row_valid_end: &[i32],
+    gap_end: i32,
+) -> UniquePtr<MlxArray> {
+    let b = per_row_valid_end.len() as i32;
+    let shape = ffi::array_shape(base);
+    // The key axis is always the last dim (2-D `[n, K]` or 4-D `[B,1,n,K]`).
+    let k_len = *shape.last().expect("attention mask has at least one dim");
+
+    // Column indices [0, K): shape [1, 1, 1, K].
+    let kinds_1d = ffi::arange_i32(0, k_len, 1);
+    let kinds = ffi::reshape(&kinds_1d, &[1, 1, 1, k_len]);
+
+    // Per-row valid end and the (shared) gap end: shape [B,1,1,1] / [1,1,1,1].
+    let ve_tensor = ffi::from_slice_i32(per_row_valid_end, &[b, 1, 1, 1]);
+    let gap_end_tensor = ffi::from_slice_i32(&[gap_end], &[1, 1, 1, 1]);
+
+    let one_f = ffi::ones(&[1, 1, 1, 1], dtype::FLOAT32);
+    let zero_f = ffi::zeros(&[1, 1, 1, 1], dtype::FLOAT32);
+    // in_gap[r,_,_,k] = (k >= ve[r]) AND (k < gap_end)  -> 0/1 f32, shape [B,1,1,K].
+    let ge_ve = ffi::where_cond(&ffi::greater_equal(&kinds, &ve_tensor), &one_f, &zero_f);
+    let lt_end = ffi::where_cond(&ffi::less(&kinds, &gap_end_tensor), &one_f, &zero_f);
+    let in_gap = ffi::multiply(&ge_ve, &lt_end);
+
+    // penalty = in_gap ? -inf : 0   (shape [B,1,1,K]).
+    let neg_inf = ffi::full_f32(&[1, 1, 1, 1], f32::NEG_INFINITY, dtype::FLOAT32);
+    let gap_bool = ffi::greater(&in_gap, &zero_f);
+    let penalty = ffi::where_cond(&gap_bool, &neg_inf, &zero_f);
+
+    // base + penalty broadcasts base over B (when base is 2-D / B==1) and
+    // penalty over the query axis `n`. Result is [B, 1, n, K].
+    match shape.len() {
+        2 => {
+            let base_4d = ffi::reshape(base, &[1, 1, shape[0], shape[1]]);
+            ffi::add(&base_4d, &penalty)
+        }
+        4 => ffi::add(base, &penalty),
+        other => panic!("mask_stale_key_gap expects a 2-D or 4-D base mask, got {other}-D"),
+    }
 }
 
 /// Create a boolean causal attention mask.
@@ -1305,6 +1434,267 @@ mod tests {
         for k in (offset - window + 1)..=offset {
             let v = cell(1, k);
             assert_eq!(v, 0.0, "row1 in-window key {k} must attend, got {v}");
+        }
+    }
+
+    // --- NaN-safe diagonal rescue for fully-masked padding query rows (#163) --
+
+    /// (a) With `lp = [2, 0]` at prefill offset 0, batch row 0's leading-padding
+    /// query rows (`q < 2`) have an empty causal-AND-padding key set. The
+    /// diagonal rescue keeps their self column attended, so EVERY query row of
+    /// EVERY batch row has at least one attended (0.0) cell — softmax is finite.
+    #[test]
+    fn left_padding_mask_every_query_row_has_an_attended_cell() {
+        let n = 4_i32;
+        let offset = 0_i32;
+        let lp = [2_i32, 0];
+        let mask = create_causal_mask_with_left_padding(n, offset, &lp);
+        assert_eq!(ffi::array_shape(&mask), vec![2, 1, n, n]);
+        let cell = |b: i32, q: i32, k: i32| -> f32 {
+            ffi::item_f32(&ffi::slice(&mask, &[b, 0, q, k], &[b + 1, 1, q + 1, k + 1]))
+        };
+        for b in 0..2 {
+            for q in 0..n {
+                let any_attend = (0..n).any(|k| cell(b, q, k) == 0.0);
+                assert!(
+                    any_attend,
+                    "row b={b} q={q} must have at least one attended (0.0) cell"
+                );
+            }
+        }
+    }
+
+    /// (b) Leading-padding query rows attend EXACTLY their self/diagonal column
+    /// (`k == q + offset`) and nothing else. With `lp = [3, 0]` at offset 0,
+    /// batch row 0's padding query rows are `q in {0, 1, 2}`.
+    #[test]
+    fn left_padding_mask_padding_query_rows_attend_exactly_self_column() {
+        let n = 5_i32;
+        let offset = 0_i32;
+        let lp = [3_i32, 0];
+        let mask = create_causal_mask_with_left_padding(n, offset, &lp);
+        let cell = |b: i32, q: i32, k: i32| -> f32 {
+            ffi::item_f32(&ffi::slice(&mask, &[b, 0, q, k], &[b + 1, 1, q + 1, k + 1]))
+        };
+        for q in 0..3 {
+            for k in 0..n {
+                let v = cell(0, q, k);
+                if k == q {
+                    assert_eq!(v, 0.0, "padding query q={q} must attend self column k={k}");
+                } else {
+                    assert!(
+                        v.is_infinite() && v < 0.0,
+                        "padding query q={q} must mask non-self k={k}, got {v}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// (c) Real query rows (`q + offset >= lp[r]`) are byte-identical to the
+    /// pre-rescue causal-AND-padding construction: attend iff
+    /// `lp[r] <= k <= q + offset`. The rescue touches only padding query rows.
+    #[test]
+    fn left_padding_mask_real_query_rows_match_causal_and_padding() {
+        let n = 4_i32;
+        let offset = 0_i32;
+        let lp = [2_i32, 0];
+        let mask = create_causal_mask_with_left_padding(n, offset, &lp);
+        let cell = |b: i32, q: i32, k: i32| -> f32 {
+            ffi::item_f32(&ffi::slice(&mask, &[b, 0, q, k], &[b + 1, 1, q + 1, k + 1]))
+        };
+        for b in 0..2 {
+            let lp_b = lp[b as usize];
+            for q in 0..n {
+                let q_abs = q + offset;
+                if q_abs < lp_b {
+                    continue; // padding query row — covered by (a)/(b)
+                }
+                for k in 0..n {
+                    let expected_attend = k <= q_abs && k >= lp_b;
+                    let v = cell(b, q, k);
+                    if expected_attend {
+                        assert_eq!(v, 0.0, "real row b={b} q={q} k={k} must attend");
+                    } else {
+                        assert!(
+                            v.is_infinite() && v < 0.0,
+                            "real row b={b} q={q} k={k} must be -inf, got {v}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// (d) The windowed builder applies the identical rescue: with an ACTIVE
+    /// window (`window = 3 < n = 5`) at offset 0 and `lp = [2, 0]`, (i) every
+    /// query row has an attended cell, (ii) padding query rows attend exactly
+    /// the (always in-window) self column, and (iii) real query rows match
+    /// `lp[r] <= k <= q+offset` AND `k >= q+offset-window+1` (the band).
+    #[test]
+    fn windowed_left_padding_mask_nan_safe_rescue_trio() {
+        let size = 5_i32;
+        let offset = 0_i32;
+        let window = 3_i32;
+        let lp = [2_i32, 0];
+        let mask = create_causal_mask_with_window_and_left_padding(size, offset, Some(window), &lp);
+        assert_eq!(ffi::array_shape(&mask), vec![2, 1, size, size]);
+        let cell = |b: i32, q: i32, k: i32| -> f32 {
+            ffi::item_f32(&ffi::slice(&mask, &[b, 0, q, k], &[b + 1, 1, q + 1, k + 1]))
+        };
+        // (i) every query row has at least one attended cell.
+        for b in 0..2 {
+            for q in 0..size {
+                assert!(
+                    (0..size).any(|k| cell(b, q, k) == 0.0),
+                    "windowed row b={b} q={q} must have an attended cell"
+                );
+            }
+        }
+        // (ii) padding query rows (batch row 0, q < lp[0] = 2) attend exactly k == q.
+        for q in 0..2 {
+            for k in 0..size {
+                let v = cell(0, q, k);
+                if k == q {
+                    assert_eq!(
+                        v, 0.0,
+                        "windowed padding query q={q} must attend self k={k}"
+                    );
+                } else {
+                    assert!(
+                        v.is_infinite() && v < 0.0,
+                        "windowed padding query q={q} must mask non-self k={k}, got {v}"
+                    );
+                }
+            }
+        }
+        // (iii) real query rows match causal-AND-padding-AND-window.
+        for b in 0..2 {
+            let lp_b = lp[b as usize];
+            for q in 0..size {
+                let q_abs = q + offset;
+                if q_abs < lp_b {
+                    continue;
+                }
+                for k in 0..size {
+                    let expected = k <= q_abs && k >= lp_b && k > q_abs - window;
+                    let v = cell(b, q, k);
+                    if expected {
+                        assert_eq!(v, 0.0, "windowed real row b={b} q={q} k={k} must attend");
+                    } else {
+                        assert!(
+                            v.is_infinite() && v < 0.0,
+                            "windowed real row b={b} q={q} k={k} must be -inf, got {v}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    // --- mask_stale_key_gap: per-row valid-length tail exclusion (#163) -------
+
+    /// Gap columns `[ve[r], gap_end)` become −∞ for the right rows only; columns
+    /// `>= gap_end` and `< ve[r]` are untouched; a 2-D base broadcasts to
+    /// `[B, 1, n, K]`; and rows with `ve[r] == gap_end` are unchanged.
+    #[test]
+    fn mask_stale_key_gap_excludes_only_the_per_row_gap() {
+        // Base is a 2-D all-attend mask [n=2, K=8]; the helper must broadcast it
+        // over B and over the query axis. ve=[3, 6], gap_end=6.
+        let n = 2_i32;
+        let k_len = 8_i32;
+        let base = ffi::zeros(&[n, k_len], dtype::FLOAT32);
+        let ve = [3_i32, 6];
+        let gap_end = 6_i32;
+        let out = mask_stale_key_gap(&base, &ve, gap_end);
+        assert_eq!(
+            ffi::array_shape(&out),
+            vec![2, 1, n, k_len],
+            "2-D base must broadcast to [B,1,n,K]"
+        );
+        let cell = |b: i32, q: i32, k: i32| -> f32 {
+            ffi::item_f32(&ffi::slice(&out, &[b, 0, q, k], &[b + 1, 1, q + 1, k + 1]))
+        };
+        for q in 0..n {
+            // Row 0 (ve=3): only columns [3, 6) are -inf; [0,3) and [6,8) attend.
+            for k in 0..k_len {
+                let v = cell(0, q, k);
+                if (3..6).contains(&k) {
+                    assert!(
+                        v.is_infinite() && v < 0.0,
+                        "row0 gap col k={k} must be -inf, got {v}"
+                    );
+                } else {
+                    assert_eq!(v, 0.0, "row0 non-gap col k={k} must stay attended");
+                }
+            }
+            // Row 1 (ve=6 == gap_end): empty gap, every column unchanged.
+            for k in 0..k_len {
+                assert_eq!(
+                    cell(1, q, k),
+                    0.0,
+                    "row1 (ve==gap_end) col k={k} must be unchanged"
+                );
+            }
+        }
+    }
+
+    /// A 4-D base `[B,1,n,K]` is preserved cell-for-cell outside the gap, and the
+    /// additive penalty composes with existing −∞ base cells without NaN.
+    #[test]
+    fn mask_stale_key_gap_preserves_4d_base_outside_gap() {
+        // Base: a per-row left-padding causal mask at a nonzero offset (4-D
+        // [B,1,n,K]) so some cells are already -inf. Then carve a stale gap.
+        let n = 2_i32;
+        let offset = 4_i32;
+        let base = create_causal_mask_with_left_padding(n, offset, &[1, 0]);
+        let k_len = n + offset; // 6
+        assert_eq!(ffi::array_shape(&base), vec![2, 1, n, k_len]);
+        let base_cell = |b: i32, q: i32, k: i32| -> f32 {
+            ffi::item_f32(&ffi::slice(&base, &[b, 0, q, k], &[b + 1, 1, q + 1, k + 1]))
+        };
+        // Snapshot the base before consuming it.
+        let mut base_vals = [[[0.0_f32; 6]; 2]; 2];
+        for b in 0..2 {
+            for q in 0..n {
+                for k in 0..k_len {
+                    base_vals[b as usize][q as usize][k as usize] = base_cell(b, q, k);
+                }
+            }
+        }
+        let ve = [3_i32, 6]; // row 0 valid end 3 < gap_end 5; row 1 == gap_end.
+        let gap_end = 5_i32;
+        let out = mask_stale_key_gap(&base, &ve, gap_end);
+        assert_eq!(ffi::array_shape(&out), vec![2, 1, n, k_len]);
+        let cell = |b: i32, q: i32, k: i32| -> f32 {
+            ffi::item_f32(&ffi::slice(&out, &[b, 0, q, k], &[b + 1, 1, q + 1, k + 1]))
+        };
+        for b in 0..2 {
+            for q in 0..n {
+                for k in 0..k_len {
+                    let in_gap = b == 0 && (ve[0]..gap_end).contains(&k);
+                    let v = cell(b, q, k);
+                    if in_gap {
+                        assert!(
+                            v.is_infinite() && v < 0.0,
+                            "row {b} gap col k={k} must be -inf, got {v}"
+                        );
+                    } else {
+                        let base_v = base_vals[b as usize][q as usize][k as usize];
+                        assert_eq!(
+                            v.is_finite(),
+                            base_v.is_finite(),
+                            "row {b} q={q} k={k} finiteness must match base outside the gap"
+                        );
+                        if base_v.is_finite() {
+                            assert_eq!(
+                                v, base_v,
+                                "row {b} q={q} k={k} must equal base outside gap"
+                            );
+                        }
+                    }
+                }
+            }
         }
     }
 }
