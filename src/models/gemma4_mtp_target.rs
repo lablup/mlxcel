@@ -1815,7 +1815,7 @@ impl<'a> MtpTarget for Gemma4MtpBatchedTargetAdapter<'a> {
         // Per-row rollback on the adapter's own [B, ...] cache.
         //
         // Uniform rounds (every row's logical valid end still equals the
-        // shared physical write base — always true until the first divergent
+        // shared physical write base, which is always true until the first divergent
         // accept) keep the legacy contract:
         // `rollback_speculative_cache_explicit` trims by `block_size -
         // max(accepted) - 1` and per-row zeros the tails for rows below max.

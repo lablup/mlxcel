@@ -899,7 +899,7 @@ impl Cache {
     /// Both cache kinds are only ever Fp16 on this path
     /// (`make_speculative_caches` constructs plain `KVCache::new` /
     /// `RotatingKVCache::new`), so no quantization sidecars need moving.
-    /// Refuses front-compacted caches (buffer slot != logical position) —
+    /// Refuses front-compacted caches (buffer slot != logical position),
     /// the eligible batched MTP regime never compacts.
     pub(crate) fn compact_partial_accept_rows(
         &mut self,
@@ -1035,11 +1035,10 @@ impl Cache {
 /// Per-row context for a DIVERGENT batched MTP verify round (issue #203):
 /// some row's logical valid end lags the shared physical cache offset after
 /// mixed speculative accepts. Threaded from the model forward into every
-/// attention layer so queries/keys rotate at per-row logical positions and
-/// attention runs per row over the row's exact contiguous K/V (history prefix
-/// + current window), excluding the stale gap physically rather than via
-/// masking — which keeps each row's SDPA axis length, mask shape, and
-/// reduction order bitwise-identical to the row's standalone B = 1 run.
+/// attention layer so queries and keys rotate at per-row logical positions
+/// (`ve[r]`), while the model-level [`build_divergent_verify_mask`] excludes
+/// each row's leading padding and stale gap and applies the window causality
+/// at the row's logical positions.
 pub(crate) struct DivergentVerifyRows<'a> {
     /// Per-row logical valid end (`left_padding[r] + kv_valid_len[r]`): the
     /// RoPE offset for the row's window tokens and the end of the row's
@@ -1384,7 +1383,7 @@ impl Attention {
         let keys = if let Some(offsets) = rope_offsets {
             // Divergent batched MTP verify (issue #203): rotate each row's
             // new keys at the row's own logical positions, mirroring the
-            // per-row query rotation in `forward` — through the same kernels
+            // per-row query rotation in `forward`, through the same kernels
             // the uniform path uses, sliced per row.
             if let Some(ref freqs) = self.proportional_rope_freqs {
                 let rotated_dims = 2 * ((self.proportional_partial_rotary_factor as f64
@@ -2302,7 +2301,7 @@ impl Gemma4TextModel {
         // improve parity. A uniform round (every `ve[r] == offset`, always true
         // for the first verify after prefill) is a byte-identical no-op.
         // (Skipped when the divergent branch above already built exact
-        // per-row masks — the gap is part of those masks.)
+        // per-row masks; the gap is part of those masks.)
         let (global_mask, sliding_mask) = if let Some(ve) = per_row_valid_end
             && !divergent_verify
         {

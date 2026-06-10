@@ -404,8 +404,6 @@ const REACHABLE_PAIRINGS: &[Pairing] = &[
 /// stays correct if the pairing list is reordered.
 const UNIFIED_12B_MTP_PAIRING: usize = 2;
 
-/// Returns the target / drafter paths and whether both are present on disk.
-
 /// Issue #203 jitter verifier: greedy byte-parity between a B > 1 batched
 /// MTP run and its B = 1 references is only defined up to evaluation-path fp
 /// jitter. Measured on M1 Ultra: B = 2 vs B = 1 forwards of IDENTICAL
@@ -464,7 +462,7 @@ fn b1_top_gaps(
 /// stream pair (issue #203). Byte-equal streams pass outright. Otherwise the
 /// FIRST mismatch position is re-evaluated with a one-shot B = 1 forward over
 /// the (shared) prefix; BOTH the batched and the reference token must sit
-/// within [`EVAL_PATH_JITTER_MARGIN`] logits of that arbiter's top token —
+/// within [`EVAL_PATH_JITTER_MARGIN`] logits of that arbiter's top token,
 /// proving the position is an entropy cliff where evaluation-path fp jitter
 /// (incremental vs one-shot chunking, B = 1 vs B > 1 kernels, left-padding
 /// RoPE shift; measured ~1 logit on M1 Ultra at repetition-loop boundaries,
@@ -498,7 +496,7 @@ fn check_row_parity_with_near_tie(
     };
     let (Some(&got), Some(&want)) = (batched.get(i), reference.get(i)) else {
         return Some(format!(
-            "row {row}: length mismatch without token mismatch (batched {} vs ref {}) — \
+            "row {row}: length mismatch without token mismatch (batched {} vs ref {}): \
              EOS handling drift",
             batched.len(),
             reference.len()
@@ -517,12 +515,13 @@ fn check_row_parity_with_near_tie(
         return Some(format!(
             "row {row}: mismatch at token {i} (batched {got} vs b1 {want}) is NOT \
              evaluation-path jitter (top-gaps ref {gap_want:e} / batched {gap_got:e} \
-             exceed {EVAL_PATH_JITTER_MARGIN}) — structural parity break"
+             exceed {EVAL_PATH_JITTER_MARGIN}): structural parity break"
         ));
     }
     None
 }
 
+/// Returns the target / drafter paths and whether both are present on disk.
 fn pairing_present(pairing: &Pairing) -> (std::path::PathBuf, std::path::PathBuf, bool) {
     let target = repo_model_dir(pairing.target_dir);
     let draft = repo_model_dir(pairing.draft_dir);
@@ -1022,7 +1021,7 @@ fn greedy_parity_mtp_gemma4_batched_b4_matches_b1() {
     // Parity rule (issue #203): byte-equality wherever the model decides
     // decisively; a first mismatch is acceptable only if the B = 1 logits
     // prove it a near-tie (batch-size-dependent kernel fp noise, measured in
-    // `divergent_hidden_probe_31b`, flips only near-ties — a structural
+    // `divergent_hidden_probe_31b`, flips only near-ties; a structural
     // positional defect flips decisive tokens and still fails this gate).
     let mut failures: Vec<String> = Vec::new();
     for (row, (batched_row, reference_row)) in run.tokens.iter().zip(reference.iter()).enumerate() {
@@ -1475,7 +1474,7 @@ fn b1_batched_baseline_probe() {
         let mut batched_generator =
             MtpBatchedGenerator::new(batch_adapter, batched_drafter, block_size);
         let run = batched_generator
-            .run_batched(&[prompt.clone()], &sampling, max_tokens)
+            .run_batched(std::slice::from_ref(prompt), &sampling, max_tokens)
             .expect("B=1 batched MTP run must succeed");
         let got = &run.tokens[0];
         let first_mismatch = got
@@ -1562,7 +1561,7 @@ fn divergent_hidden_probe_31b() {
     //      (width-1 walk: each round keeps exactly the bonus). ----
     let walk = Gemma4MtpBatchedTargetAdapter::new(wrapper, 1);
     let (b0, _) = walk
-        .prefill_and_seed_batched(&[probe_prompt.clone()], &sampling)
+        .prefill_and_seed_batched(std::slice::from_ref(&probe_prompt), &sampling)
         .expect("walk prefill");
     let mut chain: Vec<i32> = vec![b0[0]];
     for _ in 0..12 {

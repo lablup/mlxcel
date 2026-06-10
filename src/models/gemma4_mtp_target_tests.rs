@@ -996,7 +996,7 @@ fn compact_partial_accept_rows_handles_overlapping_move() {
         for s in 0..7 {
             assert_eq!(cell(0, s), s as f32, "row 0 slot {s} must be untouched");
         }
-        // Row 1: [100, 101, 102, 104, 105, 106, 0] — the overlapping move
+        // Row 1: [100, 101, 102, 104, 105, 106, 0]; the overlapping move
         // must read the pre-move values, not its own partial output.
         let expected = [100.0, 101.0, 102.0, 104.0, 105.0, 106.0, 0.0];
         for (s, &want) in expected.iter().enumerate() {
@@ -1070,7 +1070,7 @@ fn divergent_round_hidden_matches_b1_replay() {
         let w_ref = build();
         let ref_adapter = Gemma4MtpBatchedTargetAdapter::new(&w_ref, 1);
         let (ref_bonuses, _seed) = ref_adapter
-            .prefill_and_seed_batched(&[prompt.clone()], &sampler)
+            .prefill_and_seed_batched(std::slice::from_ref(&prompt), &sampler)
             .expect("B=1 replay prefill");
         assert_eq!(
             ref_bonuses[0], bonuses[0],
