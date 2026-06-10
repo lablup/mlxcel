@@ -500,8 +500,12 @@ fn build_bias_from_bool(bool_mask: &MlxArray, dtype: i32) -> UniquePtr<MlxArray>
 ///   the keys' shape is consulted here (to read `kv_len = K.shape[-2]`),
 ///   the buffers themselves are not touched.
 /// - `query_len`: forwarded to the per-mask helpers.
-/// - `query_offset`: forwarded; also serves as the `kv_valid_len` upstream
-///   (see the reference: `kv_valid_len = query_offset`).
+/// - `query_offset`: forwarded. The wrapper supplies `kv_valid_len =
+///   query_offset + 1` to the `_with_valid_len` path so the documented
+///   invariant `query_offset == kv_valid_len - 1` holds and the SWA query
+///   position derives as `query_offset` (issue #163). Upstream's note
+///   `kv_valid_len = query_offset` refers to the position anchor, not the
+///   valid-length count, which is one greater.
 /// - `sliding_window`: SWA window size.
 /// - `dtype`: target mask dtype.
 ///
@@ -514,13 +518,30 @@ pub fn make_drafter_masks(
     sliding_window: i32,
     dtype: i32,
 ) -> HashMap<LayerType, Option<UniquePtr<MlxArray>>> {
+    // Honour the documented invariant `query_offset == kv_valid_len - 1`
+    // (issue #163). The `_with_valid_len` path falls back to `effective_valid =
+    // query_offset` when `kv_valid_len` is `None`, which makes
+    // `make_swa_mask_with_local_offsets` derive the SWA query position as
+    // `effective_valid - 1 = query_offset - 1` — one short of the invariant.
+    // Passing `kv_valid_len = query_offset + 1` recovers the SWA query position
+    // `query_offset`. Declare the owned per-row tensor BEFORE the `BatchScalar`
+    // that borrows it so it outlives the borrow.
+    let per_row_plus_one;
+    let kv_valid_len = match query_offset {
+        BatchScalar::Scalar(v) => BatchScalar::Scalar(v + 1),
+        BatchScalar::PerRow(arr) => {
+            let one = ffi::from_slice_i32(&[1], &[1]);
+            per_row_plus_one = ffi::add(arr, &one);
+            BatchScalar::PerRow(&per_row_plus_one)
+        }
+    };
     make_drafter_masks_with_valid_len(
         shared_kv_states,
         query_len,
         query_offset,
         sliding_window,
         dtype,
-        None,
+        Some(&kv_valid_len),
     )
 }
 
@@ -1218,6 +1239,72 @@ mod tests {
                 .is_none(),
             "SWA should be mask-free after mapping absolute position 9 to local offset 4",
         );
+    }
+
+    /// The `make_drafter_masks` wrapper restores `query_offset == kv_valid_len -
+    /// 1` by delegating with `kv_valid_len = query_offset + 1` (issue #163). Pin
+    /// that on a NON-fast-path shape where the SWA mask materializes (`kv_len >
+    /// sliding_window`), so a regression dropping the `+1` changes the emitted
+    /// mask. The wrapper output must be byte-identical to the explicit
+    /// `_with_valid_len(.., Some(query_offset + 1))` call.
+    #[test]
+    fn make_drafter_masks_wrapper_matches_valid_len_query_offset_plus_one() {
+        let kv_len = 6_i32;
+        let query_len = 1_i32;
+        let sliding_window = 3_i32;
+        let qo = 4_i32;
+
+        let k_swa = ffi::zeros(&[1, 1, kv_len, 1], dtype::FLOAT32);
+        let v_swa = ffi::zeros(&[1, 1, kv_len, 1], dtype::FLOAT32);
+        let mut shared: HashMap<LayerType, (&MlxArray, &MlxArray)> = HashMap::new();
+        shared.insert(LayerType::SlidingWindowAttention, (&k_swa, &v_swa));
+
+        let via_wrapper = make_drafter_masks(
+            &shared,
+            query_len,
+            &BatchScalar::Scalar(qo),
+            sliding_window,
+            dtype::FLOAT32,
+        );
+        let via_valid_len = make_drafter_masks_with_valid_len(
+            &shared,
+            query_len,
+            &BatchScalar::Scalar(qo),
+            sliding_window,
+            dtype::FLOAT32,
+            Some(&BatchScalar::Scalar(qo + 1)),
+        );
+
+        let wrapper_swa = via_wrapper
+            .get(&LayerType::SlidingWindowAttention)
+            .unwrap()
+            .as_ref()
+            .expect("non-fast-path SWA must materialize a mask");
+        let valid_swa = via_valid_len
+            .get(&LayerType::SlidingWindowAttention)
+            .unwrap()
+            .as_ref()
+            .expect("explicit valid-len SWA must materialize a mask");
+
+        let wshape = ffi::array_shape(wrapper_swa);
+        assert_eq!(
+            wshape,
+            ffi::array_shape(valid_swa),
+            "wrapper and explicit valid-len masks must share a shape"
+        );
+
+        // Flatten and compare element-wise (finite and -inf both matched).
+        let total: i32 = wshape.iter().product();
+        let wflat = ffi::astype(&ffi::reshape(wrapper_swa, &[total]), dtype::FLOAT32);
+        let vflat = ffi::astype(&ffi::reshape(valid_swa, &[total]), dtype::FLOAT32);
+        for i in 0..total {
+            let a = ffi::item_f32(&ffi::slice(&wflat, &[i], &[i + 1]));
+            let b = ffi::item_f32(&ffi::slice(&vflat, &[i], &[i + 1]));
+            assert_eq!(a.is_finite(), b.is_finite(), "elem {i} finiteness mismatch");
+            if a.is_finite() {
+                assert_eq!(a, b, "elem {i} value mismatch: wrapper={a} valid_len={b}");
+            }
+        }
     }
 
     /// Ragged batched MTP greedy-parity regression (issue #161 / PR #162).
