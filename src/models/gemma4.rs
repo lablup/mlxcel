@@ -1130,19 +1130,14 @@ impl Attention {
         let mut out: Option<UniquePtr<MlxArray>> = None;
         for (r, &offset) in offsets.iter().enumerate() {
             let r_i = r as i32;
-            let row = mlxcel_core::slice(
-                x,
-                &[r_i, 0, 0, 0],
-                &[r_i + 1, shape[1], shape[2], shape[3]],
-            );
+            let row =
+                mlxcel_core::slice(x, &[r_i, 0, 0, 0], &[r_i + 1, shape[1], shape[2], shape[3]]);
             let rotated = self.apply_rope(&row, offset);
             out = Some(match out {
                 None => rotated,
-                Some(acc) => mlxcel_core::concatenate(
-                    acc.as_ref().unwrap(),
-                    rotated.as_ref().unwrap(),
-                    0,
-                ),
+                Some(acc) => {
+                    mlxcel_core::concatenate(acc.as_ref().unwrap(), rotated.as_ref().unwrap(), 0)
+                }
             });
         }
         out.expect("apply_rope_per_row requires at least one batch row")
@@ -1186,11 +1181,9 @@ impl Attention {
             );
             out = Some(match out {
                 None => rotated,
-                Some(acc) => mlxcel_core::concatenate(
-                    acc.as_ref().unwrap(),
-                    rotated.as_ref().unwrap(),
-                    0,
-                ),
+                Some(acc) => {
+                    mlxcel_core::concatenate(acc.as_ref().unwrap(), rotated.as_ref().unwrap(), 0)
+                }
             });
         }
         out.expect("compiled_q_path_proportional_per_row requires at least one batch row")
@@ -1236,11 +1229,11 @@ impl Attention {
         // argmaxes cannot flip from a kernel-path change.
         let queries = if let Some(offsets) = rope_offsets {
             if let Some(ref freqs) = self.proportional_rope_freqs {
-                let rotated_dims = 2
-                    * ((self.proportional_partial_rotary_factor as f64 * self.head_dim as f64
-                        / 2.0)
-                        .floor() as i32)
-                        .max(0);
+                let rotated_dims = 2 * ((self.proportional_partial_rotary_factor as f64
+                    * self.head_dim as f64
+                    / 2.0)
+                    .floor() as i32)
+                    .max(0);
                 self.compiled_q_path_proportional_per_row(
                     &q_proj_out,
                     &self.q_norm.weight,
@@ -1394,11 +1387,11 @@ impl Attention {
             // per-row query rotation in `forward` — through the same kernels
             // the uniform path uses, sliced per row.
             if let Some(ref freqs) = self.proportional_rope_freqs {
-                let rotated_dims = 2
-                    * ((self.proportional_partial_rotary_factor as f64 * self.head_dim as f64
-                        / 2.0)
-                        .floor() as i32)
-                        .max(0);
+                let rotated_dims = 2 * ((self.proportional_partial_rotary_factor as f64
+                    * self.head_dim as f64
+                    / 2.0)
+                    .floor() as i32)
+                    .max(0);
                 self.compiled_q_path_proportional_per_row(
                     &raw_keys,
                     &k_norm.weight,
@@ -1410,8 +1403,7 @@ impl Attention {
                     offsets,
                 )
             } else {
-                let keys =
-                    mlxcel_core::reshape(&raw_keys, &[b, l, self.n_kv_heads, self.head_dim]);
+                let keys = mlxcel_core::reshape(&raw_keys, &[b, l, self.n_kv_heads, self.head_dim]);
                 let keys = k_norm.forward(&keys);
                 let keys = mlxcel_core::transpose_axes(&keys, &[0, 2, 1, 3]);
                 self.apply_rope_per_row(&keys, offsets)
@@ -1750,9 +1742,9 @@ impl DecoderLayer {
         // residual is only *read* by the final `add`.
         let h_attn = self.input_layernorm.forward(x);
         timer.tick("input_layernorm", &h_attn);
-        let (h_attn, stored_kv) = self
-            .self_attn
-            .forward(&h_attn, mask, cache, shared_kv, divergent_rows);
+        let (h_attn, stored_kv) =
+            self.self_attn
+                .forward(&h_attn, mask, cache, shared_kv, divergent_rows);
         timer.tick("self_attn", &h_attn);
         let h_attn = self.post_attention_layernorm.forward(&h_attn);
         timer.tick("post_attention_layernorm", &h_attn);
@@ -2190,6 +2182,7 @@ impl Gemma4TextModel {
         // entirely and stay byte-identical to the pre-#203 path.
         let global_offset_pre = first_cache_offset(caches, "full_attention");
         let divergent_verify = mask.is_none()
+            && !mtp_divergent_fix_disabled()
             && per_row_valid_end
                 .map(|ve| ve.iter().any(|&v| v != global_offset_pre))
                 .unwrap_or(false);
@@ -2200,11 +2193,13 @@ impl Gemma4TextModel {
         // row's standalone B = 1 run bitwise).
         let divergent_rows: Option<DivergentVerifyRows<'_>> = if divergent_verify {
             let ve = per_row_valid_end.expect("divergent_verify implies Some(per_row_valid_end)");
-            if std::env::var("MLXCEL_DEBUG_DIVERGENT_VERIFY").is_ok() {
-                eprintln!(
-                    "[divergent-verify] l={l} o_pre={global_offset_pre} ve={ve:?} lp={left_padding:?}"
-                );
-            }
+            tracing::debug!(
+                l,
+                o_pre = global_offset_pre,
+                ?ve,
+                ?left_padding,
+                "gemma4 batched MTP divergent verify round"
+            );
             let lp = match left_padding {
                 Some(lp) => lp.to_vec(),
                 None => vec![0; ve.len()],
@@ -2668,6 +2663,20 @@ impl Gemma4TextModel {
             })
             .collect()
     }
+}
+
+/// Safety valve for the issue #203 divergent-round batched MTP machinery
+/// (per-row logical RoPE + exact per-row masks + compacting rollback).
+/// `MLXCEL_MTP_DISABLE_DIVERGENT_FIX=1` restores the pre-#203 behavior
+/// (shared-physical-offset rotation + #163 stale-gap masks + global-max
+/// trim). Used by the parity gates to validate that a structural positional
+/// defect fails the jitter-aware parity check, and as an operational escape
+/// hatch for the opt-in batched MTP paths.
+pub(crate) fn mtp_divergent_fix_disabled() -> bool {
+    std::env::var("MLXCEL_MTP_DISABLE_DIVERGENT_FIX")
+        .ok()
+        .as_deref()
+        == Some("1")
 }
 
 /// Build the exact per-row additive attention mask for a DIVERGENT batched
@@ -4051,8 +4060,7 @@ impl Gemma4Wrapper {
         let max_a = *accepted.iter().max().unwrap();
         if accepted.iter().any(|&a| a < 0) {
             return Err(
-                "rollback_speculative_cache_divergent: accepted values must be non-negative"
-                    .into(),
+                "rollback_speculative_cache_divergent: accepted values must be non-negative".into(),
             );
         }
         if max_a > block_size - 1 {

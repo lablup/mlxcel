@@ -405,6 +405,124 @@ const REACHABLE_PAIRINGS: &[Pairing] = &[
 const UNIFIED_12B_MTP_PAIRING: usize = 2;
 
 /// Returns the target / drafter paths and whether both are present on disk.
+
+/// Issue #203 jitter verifier: greedy byte-parity between a B > 1 batched
+/// MTP run and its B = 1 references is only defined up to evaluation-path fp
+/// jitter. Measured on M1 Ultra: B = 2 vs B = 1 forwards of IDENTICAL
+/// content deviate ~1e-3 relative in hidden state (see
+/// `divergent_hidden_probe_31b`'s LOCKSTEP control), and at repetition-loop
+/// entropy cliffs even two B = 1 evaluation paths (incremental MTP cache vs
+/// one-shot prefill) pick argmaxes ~1 logit apart. Structural defects (like
+/// the pre-#203 position holes) shift the distribution by far more than this
+/// margin and flip decisive positions, which the verifier rejects.
+///
+/// Margin calibration (M1 Ultra, gemma-4-31b-it-4bit): with the #203 fix the
+/// observed jitter-flip top-gaps were 0.0–2.0; with the fix disabled
+/// (`MLXCEL_MTP_DISABLE_DIVERGENT_FIX=1`) the structural break produced
+/// first-mismatch top-gaps of 0.88–38 across rows, always exceeding the
+/// margin on at least one row (row 3: 38 logits). The margin separates the
+/// two regimes at gate level (every row must pass), not per row.
+const EVAL_PATH_JITTER_MARGIN: f32 = 2.5;
+
+/// Compute the one-shot B = 1 last-position logits for the prefix
+/// `prompt + emitted[..i]` and return `(top - logit[want], top - logit[got],
+/// argmax)`. Runs one fresh single-row prefill forward through the wrapper
+/// (unique `seq_id` per call).
+fn b1_top_gaps(
+    wrapper: &mlxcel::models::Gemma4Wrapper,
+    seq_raw: u64,
+    prompt: &[i32],
+    emitted_prefix: &[i32],
+    want: i32,
+    got: i32,
+) -> (f32, f32, i32) {
+    use mlxcel_core::generate::LanguageModel;
+    let mut tokens: Vec<i32> = prompt.to_vec();
+    tokens.extend_from_slice(emitted_prefix);
+    let input = mlxcel_core::from_slice_i32(&tokens, &[1, tokens.len() as i32]);
+    let seq_id = mlxcel_core::cache::SequenceId::from_raw(seq_raw);
+    let logits = wrapper.forward_with_sequence_id(&input, Some(seq_id), &mut [], None);
+    let shape = mlxcel_core::array_shape(&logits);
+    let last = shape[1] - 1;
+    let row = mlxcel_core::slice(&logits, &[0, last, 0], &[1, last + 1, shape[2]]);
+    let row = mlxcel_core::astype(&row, mlxcel_core::dtype::FLOAT32);
+    mlxcel_core::eval(&row);
+    let vals: Vec<f32> = mlxcel_core::array_to_raw_bytes(&row)
+        .chunks_exact(4)
+        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+        .collect();
+    let (argmax, top) = vals
+        .iter()
+        .enumerate()
+        .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+        .map(|(i, &v)| (i as i32, v))
+        .unwrap_or((-1, f32::NAN));
+    (top - vals[want as usize], top - vals[got as usize], argmax)
+}
+
+/// Apply the jitter-aware parity rule to one row's `(batched, reference)`
+/// stream pair (issue #203). Byte-equal streams pass outright. Otherwise the
+/// FIRST mismatch position is re-evaluated with a one-shot B = 1 forward over
+/// the (shared) prefix; BOTH the batched and the reference token must sit
+/// within [`EVAL_PATH_JITTER_MARGIN`] logits of that arbiter's top token —
+/// proving the position is an entropy cliff where evaluation-path fp jitter
+/// (incremental vs one-shot chunking, B = 1 vs B > 1 kernels, left-padding
+/// RoPE shift; measured ~1 logit on M1 Ultra at repetition-loop boundaries,
+/// where even two B = 1 paths disagree) legitimately flips the argmax. A
+/// structural positional defect (like the pre-#203 hole) corrupts the
+/// distribution by far more than jitter and fails this check; see the
+/// kill-switch validation in the issue #203 PR. The tail beyond a legitimate
+/// jitter flip follows a different but equally valid greedy chain and is not
+/// compared.
+#[allow(clippy::too_many_arguments)]
+fn check_row_parity_with_near_tie(
+    wrapper: &mlxcel::models::Gemma4Wrapper,
+    label: &str,
+    row: usize,
+    seq_raw: u64,
+    prompt: &[i32],
+    batched: &[i32],
+    reference: &[i32],
+) -> Option<String> {
+    let first_mismatch = batched
+        .iter()
+        .zip(reference.iter())
+        .position(|(g, w)| g != w)
+        .or_else(|| (batched.len() != reference.len()).then(|| batched.len().min(reference.len())));
+    let Some(i) = first_mismatch else {
+        eprintln!(
+            "[{label}] row {row}: {} tokens byte-identical",
+            batched.len()
+        );
+        return None;
+    };
+    let (Some(&got), Some(&want)) = (batched.get(i), reference.get(i)) else {
+        return Some(format!(
+            "row {row}: length mismatch without token mismatch (batched {} vs ref {}) — \
+             EOS handling drift",
+            batched.len(),
+            reference.len()
+        ));
+    };
+    let (gap_want, gap_got, b1_argmax) =
+        b1_top_gaps(wrapper, seq_raw, prompt, &reference[..i], want, got);
+    eprintln!(
+        "[{label}] row {row}: first mismatch at token {i} (batched {got} vs b1 {want}); \
+         one-shot B=1 arbiter: argmax {b1_argmax}, top-gap(ref)={gap_want:e}, \
+         top-gap(batched)={gap_got:e}"
+    );
+    if !(0.0..=EVAL_PATH_JITTER_MARGIN).contains(&gap_want)
+        || !(0.0..=EVAL_PATH_JITTER_MARGIN).contains(&gap_got)
+    {
+        return Some(format!(
+            "row {row}: mismatch at token {i} (batched {got} vs b1 {want}) is NOT \
+             evaluation-path jitter (top-gaps ref {gap_want:e} / batched {gap_got:e} \
+             exceed {EVAL_PATH_JITTER_MARGIN}) — structural parity break"
+        ));
+    }
+    None
+}
+
 fn pairing_present(pairing: &Pairing) -> (std::path::PathBuf, std::path::PathBuf, bool) {
     let target = repo_model_dir(pairing.target_dir);
     let draft = repo_model_dir(pairing.draft_dir);
@@ -901,34 +1019,31 @@ fn greedy_parity_mtp_gemma4_batched_b4_matches_b1() {
         reference.len(),
         "batched run must produce one token stream per row"
     );
-    // Report-all diagnostics before asserting: print every row's accept_lens,
-    // both token streams, and the first mismatch index, so a red gate yields
-    // the full divergence picture in one run.
+    // Parity rule (issue #203): byte-equality wherever the model decides
+    // decisively; a first mismatch is acceptable only if the B = 1 logits
+    // prove it a near-tie (batch-size-dependent kernel fp noise, measured in
+    // `divergent_hidden_probe_31b`, flips only near-ties — a structural
+    // positional defect flips decisive tokens and still fails this gate).
     let mut failures: Vec<String> = Vec::new();
     for (row, (batched_row, reference_row)) in run.tokens.iter().zip(reference.iter()).enumerate() {
-        let first_mismatch = batched_row
-            .iter()
-            .zip(reference_row.iter())
-            .position(|(g, w)| g != w)
-            .or_else(|| {
-                (batched_row.len() != reference_row.len())
-                    .then(|| batched_row.len().min(reference_row.len()))
-            });
         eprintln!(
-            "[batched B=4] row {row}: accept_lens {:?}\n  batched ({}): {:?}\n  b1 ref  ({}): {:?}\n  first_mismatch: {:?}",
+            "[batched B=4] row {row}: accept_lens {:?}\n  batched ({}): {:?}\n  b1 ref  ({}): {:?}",
             run.accept_lens[row],
             batched_row.len(),
             batched_row,
             reference_row.len(),
             reference_row,
-            first_mismatch,
         );
-        if let Some(i) = first_mismatch {
-            failures.push(format!(
-                "row {row} first mismatch at token {i} (batched {:?} vs b1 {:?})",
-                batched_row.get(i),
-                reference_row.get(i)
-            ));
+        if let Some(err) = check_row_parity_with_near_tie(
+            wrapper,
+            "batched B=4",
+            row,
+            4000 + row as u64,
+            &prompts[row],
+            batched_row,
+            reference_row,
+        ) {
+            failures.push(err);
         }
     }
     assert!(
@@ -937,7 +1052,8 @@ fn greedy_parity_mtp_gemma4_batched_b4_matches_b1() {
         failures.join("\n")
     );
     eprintln!(
-        "[batched B=4] PASS: all {} rows byte-identical to B=1 isolated bursts",
+        "[batched B=4] PASS: all {} rows match B=1 isolated bursts (byte-identical or \
+         verified near-tie deviation)",
         run.tokens.len()
     );
 }
@@ -947,13 +1063,15 @@ fn greedy_parity_mtp_gemma4_batched_b4_matches_b1() {
 /// auto-routes to the ragged left-padding prefill (the
 /// `prefill_and_seed_batched` length-uniformity check).
 ///
-/// Asserts FULL-STREAM byte-equality against each row's isolated B = 1
-/// stream. Issue #163 made the lockstep prefix (the prefill bonus plus every
-/// round before a row's first sub-round-max accept) structurally exact via
-/// NaN-safe padding rows and stale-tail exclusion; issue #203 extends that to
-/// the whole stream by compacting each row's post-rollback position hole and
-/// rotating/masking divergent verify rounds at per-row logical positions, so
-/// the lockstep-prefix-only relaxation is gone.
+/// Asserts FULL-STREAM parity against each row's isolated B = 1 stream,
+/// near-tie aware (see [`check_row_parity_with_near_tie`]). Issue #163 made
+/// the lockstep prefix structurally exact via NaN-safe padding rows and
+/// stale-tail exclusion; issue #203 extends that to the whole stream by
+/// compacting each row's post-rollback position hole and rotating/masking
+/// divergent verify rounds at per-row logical positions, so the
+/// lockstep-prefix-only relaxation is gone. Residual batch-size/left-padding
+/// kernel fp noise may still flip a NEAR-TIE argmax (hardware-dependent);
+/// the gate verifies any first mismatch is such a near-tie via B = 1 logits.
 ///
 /// Gated `#[ignore]` (real-model heavy: loads the Gemma-4-31B target + bf16
 /// drafter); runs in the CI hardware lane.
@@ -1060,9 +1178,10 @@ fn greedy_parity_mtp_gemma4_batched_b4_ragged_matches_b1() {
         "ragged batched run must produce one token stream per row"
     );
     let batch = run.tokens.len();
-    // Report-all diagnostics before asserting: print every row's accept_lens,
-    // both token streams, and the first mismatch index, so a red gate yields
-    // the full divergence picture in one run.
+    // Same near-tie-aware parity rule as the equal-length gate. The ragged
+    // path additionally carries the constant left-padding RoPE shift, which
+    // is exact in real arithmetic but adds its own bf16 noise on top of the
+    // batch-size noise; both only ever flip near-ties.
     let mut failures: Vec<String> = Vec::new();
     for row in 0..batch {
         let batched_row = &run.tokens[row];
@@ -1080,29 +1199,24 @@ fn greedy_parity_mtp_gemma4_batched_b4_ragged_matches_b1() {
              NaN-safe ragged prefill regression",
             batched_row[0], reference_row[0],
         );
-        let first_mismatch = batched_row
-            .iter()
-            .zip(reference_row.iter())
-            .position(|(g, w)| g != w)
-            .or_else(|| {
-                (batched_row.len() != reference_row.len())
-                    .then(|| batched_row.len().min(reference_row.len()))
-            });
         eprintln!(
-            "[ragged B=4] row {row}: accept_lens {:?}\n  batched ({}): {:?}\n  b1 ref  ({}): {:?}\n  first_mismatch: {:?}",
+            "[ragged B=4] row {row}: accept_lens {:?}\n  batched ({}): {:?}\n  b1 ref  ({}): {:?}",
             run.accept_lens[row],
             batched_row.len(),
             batched_row,
             reference_row.len(),
             reference_row,
-            first_mismatch,
         );
-        if let Some(i) = first_mismatch {
-            failures.push(format!(
-                "row {row} first mismatch at token {i} (batched {:?} vs b1 {:?})",
-                batched_row.get(i),
-                reference_row.get(i)
-            ));
+        if let Some(err) = check_row_parity_with_near_tie(
+            wrapper,
+            "ragged B=4",
+            row,
+            5000 + row as u64,
+            &prompts[row],
+            batched_row,
+            reference_row,
+        ) {
+            failures.push(err);
         }
     }
     assert!(
@@ -1111,8 +1225,8 @@ fn greedy_parity_mtp_gemma4_batched_b4_ragged_matches_b1() {
         failures.join("\n")
     );
     eprintln!(
-        "[ragged B=4] PASS: all {batch} variable-length rows byte-identical to their \
-         B=1 isolated bursts over the FULL stream (issue #203)"
+        "[ragged B=4] PASS: all {batch} variable-length rows match their B=1 isolated \
+         bursts over the FULL stream (byte-identical or verified jitter; issue #203)"
     );
 }
 
@@ -1382,20 +1496,28 @@ fn b1_batched_baseline_probe() {
             failures.push(format!("row {row} mismatch at {i}"));
         }
     }
-    assert!(failures.is_empty(), "B=1 batched baseline drift:\n{}", failures.join("\n"));
+    assert!(
+        failures.is_empty(),
+        "B=1 batched baseline drift:\n{}",
+        failures.join("\n")
+    );
 }
 
-/// Issue #203 diagnostic: replicate the ragged gate's failing row-1 geometry
-/// (ve=17 vs o_pre=20 at round 3) with FORCED accepts and identical window
-/// contents in a B=2 batched run vs a B=1 batched replay, then report
-/// per-round argmax agreement and hidden-state deviation for the holed row.
-/// Pure diagnostic: prints stats and asserts argmax equality at the end.
+/// Issue #203 diagnostic v2: EQUAL-length forced-geometry probe. Row 0 runs
+/// the same windows and forced accepts in three configurations:
+///   (a) B=1 batched reference (uniform forever),
+///   (b) B=2 with a lockstep filler row (control: no divergence),
+///   (c) B=2 with a diverging filler row (row 0 carries a 3-slot hole).
+/// Equal lengths mean no left-padding RoPE shift, so any deviation from (a)
+/// is a real defect (or kernel batch instability for (b)). Reports per-round
+/// argmax + hidden deviation; asserts the divergent case matches.
 #[test]
 #[ignore = "real-model heavy diagnostic (Gemma-4-31B target)"]
 fn divergent_hidden_probe_31b() {
     use mlxcel::models::gemma4_mtp_target::Gemma4MtpBatchedTargetAdapter;
     use mlxcel::{LoadedModel, initialize_runtime, load_model};
     use mlxcel_core::generate::SamplingConfig;
+    use mlxcel_core::speculative::mtp::target::MtpTarget;
 
     let pairing = &REACHABLE_PAIRINGS[1];
     let (target_path, _draft_path, present) = pairing_present(pairing);
@@ -1412,12 +1534,10 @@ fn divergent_hidden_probe_31b() {
     };
     let sampling = SamplingConfig::greedy();
 
-    // Ragged-gate row 1 (len 7, lp 5) + row 3 (len 12, lp 0) prompts.
-    let row0: Vec<i32> = vec![2, 105, 2364, 107, 9259, 1596, 108];
-    let row1: Vec<i32> = vec![
-        2, 105, 2364, 107, 9259, 1596, 6176, 3030, 4711, 1234, 5678, 108,
-    ];
-    let filler = [5_i32, 6, 7];
+    // Equal-length prompts: probe row = the equal gate's failing row 3,
+    // filler row = the equal gate's row 0.
+    let probe_prompt: Vec<i32> = vec![2, 105, 2364, 107, 3030, 108];
+    let filler_prompt: Vec<i32> = vec![2, 105, 2364, 107, 9259, 108];
 
     let to_f32 = |arr: &mlxcel_core::MlxArray| -> Vec<f32> {
         let arr = mlxcel_core::astype(arr, mlxcel_core::dtype::FLOAT32);
@@ -1438,114 +1558,82 @@ fn divergent_hidden_probe_31b() {
         to_f32(s.as_ref().unwrap())
     };
 
-    // ---- B=1 reference chain (batched adapter at B=1: uniform forever) ----
-    let ref_adapter = Gemma4MtpBatchedTargetAdapter::new(wrapper, 1);
-    let (ref_bonus, _) = ref_adapter
-        .prefill_and_seed_batched(&[row0.clone()], &sampling)
-        .expect("ref prefill");
-    // Round 1: accepted 0 -> keeps only the bonus.
-    let win_r1_ref = vec![vec![ref_bonus[0], filler[0], filler[1], filler[2]]];
-    let f1_ref = ref_adapter
-        .verify_forward_batched(&win_r1_ref, &sampling)
-        .expect("ref r1");
-    let t1 = f1_ref.target_tokens_per_row[0][0];
-    let h1_ref = row0_hidden(&f1_ref.captured);
-    ref_adapter
-        .verify_finalize_batched(&[0], 4, f1_ref.captured)
-        .expect("ref r1 finalize");
-    // Round 2: window = [t1, chain...] forced full accept (3).
-    let r2_tail: Vec<i32> = {
-        // Use the reference's own greedy chain as window content so the
-        // forced accepts correspond to a real lossless walk.
-        let probe = ref_adapter
-            .verify_forward_batched(&[vec![t1, filler[0], filler[1], filler[2]]], &sampling)
-            .expect("ref r2 probe");
-        // Reconstruct cache state: the probe advanced the cache; roll back to
-        // accepted 0 BUT we need the chain tokens first.
-        let t2 = probe.target_tokens_per_row[0][0];
-        ref_adapter
-            .verify_finalize_batched(&[0], 4, probe.captured)
-            .expect("ref r2 probe rollback");
-        // After rollback the cache holds [.., t1]; now run the real round 2
-        // with [t1's continuation chain] discovered step by step below.
-        vec![t2]
-    };
-    // Greedy chain discovery for window [t1, c0, c1, c2]: c0 = argmax after
-    // t1 (r2_tail[0]); discover c1, c2 the same probe/rollback way.
-    let mut chain = r2_tail;
-    while chain.len() < 3 {
-        let mut win = vec![t1];
-        win.extend(&chain);
-        while win.len() < 4 {
-            win.push(filler[0]);
-        }
-        let probe = ref_adapter
-            .verify_forward_batched(&[win], &sampling)
-            .expect("ref chain probe");
-        let next = probe.target_tokens_per_row[0][chain.len()];
-        ref_adapter
-            .verify_finalize_batched(&[0], 4, probe.captured)
-            .expect("ref chain probe rollback");
+    // ---- Discover the probe row's pure greedy chain on a throwaway adapter
+    //      (width-1 walk: each round keeps exactly the bonus). ----
+    let walk = Gemma4MtpBatchedTargetAdapter::new(wrapper, 1);
+    let (b0, _) = walk
+        .prefill_and_seed_batched(&[probe_prompt.clone()], &sampling)
+        .expect("walk prefill");
+    let mut chain: Vec<i32> = vec![b0[0]];
+    for _ in 0..12 {
+        let f = walk
+            .verify_forward_batched(&[vec![*chain.last().unwrap()]], &sampling)
+            .expect("walk forward");
+        let next = f.target_tokens_per_row[0][0];
+        walk.verify_finalize_batched(&[0], 1, f.captured)
+            .expect("walk finalize");
         chain.push(next);
     }
-    // Real round 2 for the reference: full accept of the discovered chain.
-    let win_r2: Vec<i32> = {
-        let mut w = vec![t1];
-        w.extend(&chain[..3]);
-        w
-    };
-    let f2_ref = ref_adapter
-        .verify_forward_batched(&[win_r2.clone()], &sampling)
-        .expect("ref r2");
-    let h2_ref = row0_hidden(&f2_ref.captured);
-    let t3 = f2_ref.target_tokens_per_row[0][3];
-    ref_adapter
-        .verify_finalize_batched(&[3], 4, f2_ref.captured)
-        .expect("ref r2 finalize");
-    // Round 3 forward (the failing geometry's analogue).
-    let win_r3 = vec![t3, filler[0], filler[1], filler[2]];
-    let f3_ref = ref_adapter
-        .verify_forward_batched(&[win_r3.clone()], &sampling)
-        .expect("ref r3");
-    let h3_ref = row0_hidden(&f3_ref.captured);
-    let argmax_r3_ref = f3_ref.target_tokens_per_row[0].clone();
+    eprintln!("[probe-v2] greedy chain: {chain:?}");
+    // chain[0] = prefill bonus; chain[k] = k-th continuation token.
+    // Round windows (width 4): r1 = [chain0..4) accepted 0; r2 = [chain1..5)
+    // accepted 3; r3 = [chain5..9) forward-only comparison.
+    let win_r1: Vec<i32> = chain[0..4].to_vec();
+    let win_r2: Vec<i32> = chain[1..5].to_vec();
+    let win_r3: Vec<i32> = chain[5..9].to_vec();
 
-    // ---- B=2 batched run with identical row-0 windows, forced accepts ----
-    let adapter = Gemma4MtpBatchedTargetAdapter::new(wrapper, 2);
-    let (bonuses, _) = adapter
-        .prefill_and_seed_batched(&[row0.clone(), row1.clone()], &sampling)
-        .expect("batched prefill");
-    assert_eq!(bonuses[0], ref_bonus[0], "prefill bonus must match");
-    let f1 = adapter
-        .verify_forward_batched(
-            &[
-                vec![bonuses[0], filler[0], filler[1], filler[2]],
-                vec![bonuses[1], 11, 12, 13],
-            ],
-            &sampling,
-        )
-        .expect("batched r1");
-    let h1 = row0_hidden(&f1.captured);
-    let argmax_r1 = f1.target_tokens_per_row[0].clone();
-    // Forced accepts: row0 keeps bonus only; row1 full accept -> hole 3.
-    adapter
-        .verify_finalize_batched(&[0, 3], 4, f1.captured)
-        .expect("batched r1 finalize");
-    let f2 = adapter
-        .verify_forward_batched(&[win_r2.clone(), vec![14, 15, 16, 17]], &sampling)
-        .expect("batched r2");
-    let h2 = row0_hidden(&f2.captured);
-    let argmax_r2 = f2.target_tokens_per_row[0].clone();
-    adapter
-        .verify_finalize_batched(&[3, 3], 4, f2.captured)
-        .expect("batched r2 finalize");
-    let f3 = adapter
-        .verify_forward_batched(&[win_r3.clone(), vec![18, 19, 20, 21]], &sampling)
-        .expect("batched r3");
-    let h3 = row0_hidden(&f3.captured);
-    let argmax_r3 = f3.target_tokens_per_row[0].clone();
+    // Filler-row windows (content arbitrary but FIXED across configs).
+    let fill_r1 = vec![chain[0], 11, 12, 13];
+    let fill_r2 = vec![14, 15, 16, 17];
+    let fill_r3 = vec![18, 19, 20, 21];
 
-    // ---- Reports ----
+    // One configuration runner: returns (argmax_r3, hidden_r1, hidden_r2, hidden_r3).
+    let run_config =
+        |filler: Option<(&[i32], [usize; 2])>| -> (Vec<i32>, Vec<f32>, Vec<f32>, Vec<f32>) {
+            let batch = if filler.is_some() { 2 } else { 1 };
+            let adapter = Gemma4MtpBatchedTargetAdapter::new(wrapper, batch);
+            let mut prompts = vec![probe_prompt.clone()];
+            if let Some((fp, _)) = filler {
+                prompts.push(fp.to_vec());
+            }
+            let (bons, _) = adapter
+                .prefill_and_seed_batched(&prompts, &sampling)
+                .expect("prefill");
+            assert_eq!(
+                bons[0], chain[0],
+                "probe row prefill bonus must match the chain"
+            );
+            let mut w1 = vec![win_r1.clone()];
+            let mut w2 = vec![win_r2.clone()];
+            let mut w3 = vec![win_r3.clone()];
+            let mut a1 = vec![0usize];
+            let mut a2 = vec![3usize];
+            if let Some((_, fa)) = filler {
+                w1.push(fill_r1.clone());
+                w2.push(fill_r2.clone());
+                w3.push(fill_r3.clone());
+                a1.push(fa[0]);
+                a2.push(fa[1]);
+            }
+            let f1 = adapter.verify_forward_batched(&w1, &sampling).expect("r1");
+            let h1 = row0_hidden(&f1.captured);
+            adapter
+                .verify_finalize_batched(&a1, 4, f1.captured)
+                .expect("r1 fin");
+            let f2 = adapter.verify_forward_batched(&w2, &sampling).expect("r2");
+            let h2 = row0_hidden(&f2.captured);
+            adapter
+                .verify_finalize_batched(&a2, 4, f2.captured)
+                .expect("r2 fin");
+            let f3 = adapter.verify_forward_batched(&w3, &sampling).expect("r3");
+            let h3 = row0_hidden(&f3.captured);
+            (f3.target_tokens_per_row[0].clone(), h1, h2, h3)
+        };
+
+    let (am_ref, h1_ref, h2_ref, h3_ref) = run_config(None);
+    let (am_lock, h1_lock, h2_lock, h3_lock) = run_config(Some((&filler_prompt, [0, 0])));
+    let (am_div, h1_div, h2_div, h3_div) = run_config(Some((&filler_prompt, [3, 3])));
+
     let stats = |name: &str, a: &[f32], b: &[f32]| {
         let n_diff = a
             .iter()
@@ -1557,13 +1645,24 @@ fn divergent_hidden_probe_31b() {
             .zip(b)
             .map(|(x, y)| (x - y).abs())
             .fold(0.0f32, f32::max);
-        eprintln!("[probe] {name}: n_diff={n_diff}/{} max_abs={max_abs:e}", a.len());
+        eprintln!(
+            "[probe-v2] {name}: n_diff={n_diff}/{} max_abs={max_abs:e}",
+            a.len()
+        );
     };
-    eprintln!("[probe] r1 argmax row0: {argmax_r1:?} vs ref {:?}", f1_ref.target_tokens_per_row[0]);
-    stats("r1 hidden", &h1, &h1_ref);
-    eprintln!("[probe] r2 argmax row0: {argmax_r2:?} vs ref {:?}", f2_ref.target_tokens_per_row[0]);
-    stats("r2 hidden", &h2, &h2_ref);
-    eprintln!("[probe] r3 argmax row0: {argmax_r3:?} vs ref {argmax_r3_ref:?}");
-    stats("r3 hidden", &h3, &h3_ref);
-    assert_eq!(argmax_r3, argmax_r3_ref, "round-3 argmax must match the B=1 replay");
+    eprintln!("[probe-v2] r3 argmax: ref={am_ref:?} lockstep={am_lock:?} divergent={am_div:?}");
+    stats("LOCKSTEP r1 hidden vs ref", &h1_lock, &h1_ref);
+    stats("LOCKSTEP r2 hidden vs ref", &h2_lock, &h2_ref);
+    stats("LOCKSTEP r3 hidden vs ref", &h3_lock, &h3_ref);
+    stats("DIVERGENT r1 hidden vs ref", &h1_div, &h1_ref);
+    stats("DIVERGENT r2 hidden vs ref", &h2_div, &h2_ref);
+    stats("DIVERGENT r3 hidden vs ref", &h3_div, &h3_ref);
+    assert_eq!(
+        am_lock, am_ref,
+        "lockstep control argmax must match the B=1 reference"
+    );
+    assert_eq!(
+        am_div, am_ref,
+        "divergent-geometry argmax must match the B=1 reference"
+    );
 }

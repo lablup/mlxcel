@@ -1845,35 +1845,27 @@ impl<'a> MtpTarget for Gemma4MtpBatchedTargetAdapter<'a> {
         let (post_rollback_kv_offset, next_shared_kv) = {
             let mut caches = self.caches.borrow_mut();
             let o_pre = first_cache_offset(caches.as_mut_slice(), "full_attention") - width;
-            let divergent = ve_pre
-                .as_ref()
-                .map(|ve| ve.iter().any(|&v| v != o_pre))
-                .unwrap_or(false);
+            let divergent = !crate::models::gemma4::mtp_divergent_fix_disabled()
+                && ve_pre
+                    .as_ref()
+                    .map(|ve| ve.iter().any(|&v| v != o_pre))
+                    .unwrap_or(false);
             if divergent {
                 let ve_pre = ve_pre.as_ref().expect("divergent implies Some(ve_pre)");
-                if std::env::var("MLXCEL_DEBUG_DIVERGENT_VERIFY").is_ok() {
-                    eprintln!(
-                        "[divergent-finalize] o_pre={o_pre} ve_pre={ve_pre:?} accepted={accepted_i32:?}"
-                    );
-                }
+                tracing::debug!(
+                    o_pre,
+                    ?ve_pre,
+                    accepted = ?accepted_i32,
+                    "gemma4 batched MTP divergent finalize (compacting rollback)"
+                );
                 let o_post = self
                     .wrapper
-                    .rollback_speculative_cache_divergent(
-                        &mut caches,
-                        ve_pre,
-                        &accepted_i32,
-                        width,
-                    )
+                    .rollback_speculative_cache_divergent(&mut caches, ve_pre, &accepted_i32, width)
                     .map_err(|e| DrafterError::DraftFailed {
                         reason: format!("Gemma4 batched MTP divergent rollback failed: {e}"),
                     })?;
-                let next_shared_kv = Self::compact_shared_kv_batched(
-                    tensors,
-                    ve_pre,
-                    &accepted_i32,
-                    o_pre,
-                    o_post,
-                )?;
+                let next_shared_kv =
+                    Self::compact_shared_kv_batched(tensors, ve_pre, &accepted_i32, o_pre, o_post)?;
                 (o_post.max(0) as usize, next_shared_kv)
             } else {
                 self.wrapper

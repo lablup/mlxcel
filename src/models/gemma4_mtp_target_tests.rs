@@ -1090,8 +1090,11 @@ fn divergent_round_hidden_matches_b1_replay() {
             .verify_forward_batched(&[vec![t0]], &sampler)
             .expect("B=1 replay round-2 verify");
         let ref_hidden = &ref_fwd2.captured.tensors[0];
-        let ref_row0 =
-            mlxcel_core::slice(ref_hidden.as_ref().unwrap(), &[0, 0, 0], &[1, 1, hidden_dim]);
+        let ref_row0 = mlxcel_core::slice(
+            ref_hidden.as_ref().unwrap(),
+            &[0, 0, 0],
+            &[1, 1, hidden_dim],
+        );
 
         // ---- Bitwise comparison (fp32 fixture: exact equality expected) ----
         let to_vec = |arr: &MlxArray| -> Vec<f32> {
@@ -1115,7 +1118,8 @@ fn divergent_round_hidden_matches_b1_replay() {
             .map(|(g, w)| (g - w).abs())
             .fold(0.0f32, f32::max);
         assert_eq!(
-            n_diff, 0,
+            n_diff,
+            0,
             "[{layer_type}] divergent-round hidden for the holed row deviates from \
              the B=1 replay: {n_diff}/{} cells differ, max_abs={max_abs:e} \
              (got[..4]={:?} want[..4]={:?})",
