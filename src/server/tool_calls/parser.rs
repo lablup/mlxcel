@@ -148,7 +148,7 @@ pub fn parse_tool_calls(raw_output: &str, tools: Option<&[Tool]>) -> ToolCallPar
         formats::try_minimax_m2, // <invoke name=...><parameter name=...>...</parameter></invoke>
         formats::try_mistral_nemo, // [TOOL_CALLS]
         formats::try_functionary_v31, // <function=name>{json}
-        formats::try_qwen3_coder, // <function=name><parameter=key>val</parameter> — after v31, which declines non-JSON bodies
+        formats::try_qwen3_coder, // <function=name><parameter=key>val</parameter> (after v31, which declines non-JSON bodies)
         formats::try_functionary_v32, // >>>name\n
         formats::try_llama3,      // {"name": ..., "parameters": ...}
         formats::try_generic_json, // {"name": ..., "arguments": ...}
@@ -660,7 +660,7 @@ mod tests {
 
     #[test]
     fn qwen3_coder_zero_parameter_call() {
-        // No `<parameter=` body at all — must still parse as a no-arg call,
+        // No `<parameter=` body at all: must still parse as a no-arg call,
         // not fall through to raw content.
         let output = "<tool_call><function=list_files></function></tool_call>";
         let tools = vec![make_tool("list_files")];

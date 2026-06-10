@@ -915,7 +915,7 @@ const QWEN3_CODER_MAX_PARAMS_PER_CALL: usize = 1024;
 /// the body: Qwen3-Coder emits `<parameter=key>val</parameter>` XML rather than a
 /// JSON object. The dispatcher runs this parser *after* [`try_functionary_v31`],
 /// which declines Qwen input because its non-JSON body fails the JSON-validity
-/// check — so functionary calls are never stolen, and zero-parameter Qwen calls
+/// check, so functionary calls are never stolen, and zero-parameter Qwen calls
 /// (an empty `<function=NAME></function>` body) are still handled here.
 ///
 /// The surrounding `<tool_call>` wrapper is not required: scanning for
@@ -1005,7 +1005,7 @@ fn extract_qwen_parameters(body: &str) -> String {
 
         // `break` (not `continue`) on a missing '>': a malformed `<parameter=`
         // prefix with no '>' anywhere left would otherwise re-match and rescan
-        // forever — the same O(N^2) guard as `extract_minimax_parameters`.
+        // forever: the same O(N^2) guard as `extract_minimax_parameters`.
         let Some(gt_pos) = remaining[after_tag..].find('>') else {
             break;
         };
