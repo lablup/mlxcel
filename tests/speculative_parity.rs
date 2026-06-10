@@ -1384,3 +1384,186 @@ fn b1_batched_baseline_probe() {
     }
     assert!(failures.is_empty(), "B=1 batched baseline drift:\n{}", failures.join("\n"));
 }
+
+/// Issue #203 diagnostic: replicate the ragged gate's failing row-1 geometry
+/// (ve=17 vs o_pre=20 at round 3) with FORCED accepts and identical window
+/// contents in a B=2 batched run vs a B=1 batched replay, then report
+/// per-round argmax agreement and hidden-state deviation for the holed row.
+/// Pure diagnostic: prints stats and asserts argmax equality at the end.
+#[test]
+#[ignore = "real-model heavy diagnostic (Gemma-4-31B target)"]
+fn divergent_hidden_probe_31b() {
+    use mlxcel::models::gemma4_mtp_target::Gemma4MtpBatchedTargetAdapter;
+    use mlxcel::{LoadedModel, initialize_runtime, load_model};
+    use mlxcel_core::generate::SamplingConfig;
+
+    let pairing = &REACHABLE_PAIRINGS[1];
+    let (target_path, _draft_path, present) = pairing_present(pairing);
+    if !present {
+        eprintln!("Skipping divergent_hidden_probe_31b");
+        return;
+    }
+    let _runtime = initialize_runtime();
+    let (loaded_target, _tok) = load_model(&target_path).expect("target model must load");
+    let wrapper: &mlxcel::models::Gemma4Wrapper = match &loaded_target {
+        LoadedModel::Gemma4(w) => w,
+        LoadedModel::Gemma4VLM(vlm) => &vlm.text_model,
+        _ => panic!("requires a Gemma 4 family target"),
+    };
+    let sampling = SamplingConfig::greedy();
+
+    // Ragged-gate row 1 (len 7, lp 5) + row 3 (len 12, lp 0) prompts.
+    let row0: Vec<i32> = vec![2, 105, 2364, 107, 9259, 1596, 108];
+    let row1: Vec<i32> = vec![
+        2, 105, 2364, 107, 9259, 1596, 6176, 3030, 4711, 1234, 5678, 108,
+    ];
+    let filler = [5_i32, 6, 7];
+
+    let to_f32 = |arr: &mlxcel_core::MlxArray| -> Vec<f32> {
+        let arr = mlxcel_core::astype(arr, mlxcel_core::dtype::FLOAT32);
+        mlxcel_core::eval(&arr);
+        mlxcel_core::array_to_raw_bytes(&arr)
+            .chunks_exact(4)
+            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .collect()
+    };
+    let row0_hidden = |captured: &mlxcel_core::speculative::mtp::target::VerifyCaptured| {
+        let hidden = &captured.tensors[0];
+        let shape = mlxcel_core::array_shape(hidden.as_ref().unwrap());
+        let s = mlxcel_core::slice(
+            hidden.as_ref().unwrap(),
+            &[0, 0, 0],
+            &[1, shape[1], shape[2]],
+        );
+        to_f32(s.as_ref().unwrap())
+    };
+
+    // ---- B=1 reference chain (batched adapter at B=1: uniform forever) ----
+    let ref_adapter = Gemma4MtpBatchedTargetAdapter::new(wrapper, 1);
+    let (ref_bonus, _) = ref_adapter
+        .prefill_and_seed_batched(&[row0.clone()], &sampling)
+        .expect("ref prefill");
+    // Round 1: accepted 0 -> keeps only the bonus.
+    let win_r1_ref = vec![vec![ref_bonus[0], filler[0], filler[1], filler[2]]];
+    let f1_ref = ref_adapter
+        .verify_forward_batched(&win_r1_ref, &sampling)
+        .expect("ref r1");
+    let t1 = f1_ref.target_tokens_per_row[0][0];
+    let h1_ref = row0_hidden(&f1_ref.captured);
+    ref_adapter
+        .verify_finalize_batched(&[0], 4, f1_ref.captured)
+        .expect("ref r1 finalize");
+    // Round 2: window = [t1, chain...] forced full accept (3).
+    let r2_tail: Vec<i32> = {
+        // Use the reference's own greedy chain as window content so the
+        // forced accepts correspond to a real lossless walk.
+        let probe = ref_adapter
+            .verify_forward_batched(&[vec![t1, filler[0], filler[1], filler[2]]], &sampling)
+            .expect("ref r2 probe");
+        // Reconstruct cache state: the probe advanced the cache; roll back to
+        // accepted 0 BUT we need the chain tokens first.
+        let t2 = probe.target_tokens_per_row[0][0];
+        ref_adapter
+            .verify_finalize_batched(&[0], 4, probe.captured)
+            .expect("ref r2 probe rollback");
+        // After rollback the cache holds [.., t1]; now run the real round 2
+        // with [t1's continuation chain] discovered step by step below.
+        vec![t2]
+    };
+    // Greedy chain discovery for window [t1, c0, c1, c2]: c0 = argmax after
+    // t1 (r2_tail[0]); discover c1, c2 the same probe/rollback way.
+    let mut chain = r2_tail;
+    while chain.len() < 3 {
+        let mut win = vec![t1];
+        win.extend(&chain);
+        while win.len() < 4 {
+            win.push(filler[0]);
+        }
+        let probe = ref_adapter
+            .verify_forward_batched(&[win], &sampling)
+            .expect("ref chain probe");
+        let next = probe.target_tokens_per_row[0][chain.len()];
+        ref_adapter
+            .verify_finalize_batched(&[0], 4, probe.captured)
+            .expect("ref chain probe rollback");
+        chain.push(next);
+    }
+    // Real round 2 for the reference: full accept of the discovered chain.
+    let win_r2: Vec<i32> = {
+        let mut w = vec![t1];
+        w.extend(&chain[..3]);
+        w
+    };
+    let f2_ref = ref_adapter
+        .verify_forward_batched(&[win_r2.clone()], &sampling)
+        .expect("ref r2");
+    let h2_ref = row0_hidden(&f2_ref.captured);
+    let t3 = f2_ref.target_tokens_per_row[0][3];
+    ref_adapter
+        .verify_finalize_batched(&[3], 4, f2_ref.captured)
+        .expect("ref r2 finalize");
+    // Round 3 forward (the failing geometry's analogue).
+    let win_r3 = vec![t3, filler[0], filler[1], filler[2]];
+    let f3_ref = ref_adapter
+        .verify_forward_batched(&[win_r3.clone()], &sampling)
+        .expect("ref r3");
+    let h3_ref = row0_hidden(&f3_ref.captured);
+    let argmax_r3_ref = f3_ref.target_tokens_per_row[0].clone();
+
+    // ---- B=2 batched run with identical row-0 windows, forced accepts ----
+    let adapter = Gemma4MtpBatchedTargetAdapter::new(wrapper, 2);
+    let (bonuses, _) = adapter
+        .prefill_and_seed_batched(&[row0.clone(), row1.clone()], &sampling)
+        .expect("batched prefill");
+    assert_eq!(bonuses[0], ref_bonus[0], "prefill bonus must match");
+    let f1 = adapter
+        .verify_forward_batched(
+            &[
+                vec![bonuses[0], filler[0], filler[1], filler[2]],
+                vec![bonuses[1], 11, 12, 13],
+            ],
+            &sampling,
+        )
+        .expect("batched r1");
+    let h1 = row0_hidden(&f1.captured);
+    let argmax_r1 = f1.target_tokens_per_row[0].clone();
+    // Forced accepts: row0 keeps bonus only; row1 full accept -> hole 3.
+    adapter
+        .verify_finalize_batched(&[0, 3], 4, f1.captured)
+        .expect("batched r1 finalize");
+    let f2 = adapter
+        .verify_forward_batched(&[win_r2.clone(), vec![14, 15, 16, 17]], &sampling)
+        .expect("batched r2");
+    let h2 = row0_hidden(&f2.captured);
+    let argmax_r2 = f2.target_tokens_per_row[0].clone();
+    adapter
+        .verify_finalize_batched(&[3, 3], 4, f2.captured)
+        .expect("batched r2 finalize");
+    let f3 = adapter
+        .verify_forward_batched(&[win_r3.clone(), vec![18, 19, 20, 21]], &sampling)
+        .expect("batched r3");
+    let h3 = row0_hidden(&f3.captured);
+    let argmax_r3 = f3.target_tokens_per_row[0].clone();
+
+    // ---- Reports ----
+    let stats = |name: &str, a: &[f32], b: &[f32]| {
+        let n_diff = a
+            .iter()
+            .zip(b)
+            .filter(|(x, y)| x.to_bits() != y.to_bits())
+            .count();
+        let max_abs = a
+            .iter()
+            .zip(b)
+            .map(|(x, y)| (x - y).abs())
+            .fold(0.0f32, f32::max);
+        eprintln!("[probe] {name}: n_diff={n_diff}/{} max_abs={max_abs:e}", a.len());
+    };
+    eprintln!("[probe] r1 argmax row0: {argmax_r1:?} vs ref {:?}", f1_ref.target_tokens_per_row[0]);
+    stats("r1 hidden", &h1, &h1_ref);
+    eprintln!("[probe] r2 argmax row0: {argmax_r2:?} vs ref {:?}", f2_ref.target_tokens_per_row[0]);
+    stats("r2 hidden", &h2, &h2_ref);
+    eprintln!("[probe] r3 argmax row0: {argmax_r3:?} vs ref {argmax_r3_ref:?}");
+    stats("r3 hidden", &h3, &h3_ref);
+    assert_eq!(argmax_r3, argmax_r3_ref, "round-3 argmax must match the B=1 replay");
+}
