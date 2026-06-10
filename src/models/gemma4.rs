@@ -880,6 +880,174 @@ impl Cache {
         cache.values = Some(new_values);
         Ok(())
     }
+
+    /// Issue #203: close each row's post-rollback position hole by moving the
+    /// row's accepted verify-window K/V down to the row's logical valid end,
+    /// so every row's cache content stays a contiguous prefix (physical slot
+    /// == logical position), exactly like its standalone B = 1 run.
+    ///
+    /// Coordinates: `ve_pre[r]` is row `r`'s logical valid end BEFORE this
+    /// round's verify window (`left_padding[r] + kv_valid_len[r]`); the
+    /// window of `width` tokens was appended at the shared physical offset
+    /// `o_pre = self.offset() - width`. Row `r` accepted `accepted[r] + 1`
+    /// window tokens (bonus + accepted drafts); they move from
+    /// `[o_pre, o_pre + accepted[r] + 1)` to `[ve_pre[r], ...)` (a no-op for
+    /// rows already at the shared offset) and the vacated region up to
+    /// `o_post = max(ve_pre[r] + accepted[r] + 1)` is zeroed. The caller
+    /// trims the cache offset down to `o_post` afterwards.
+    ///
+    /// Both cache kinds are only ever Fp16 on this path
+    /// (`make_speculative_caches` constructs plain `KVCache::new` /
+    /// `RotatingKVCache::new`), so no quantization sidecars need moving.
+    /// Refuses front-compacted caches (buffer slot != logical position) —
+    /// the eligible batched MTP regime never compacts.
+    pub(crate) fn compact_partial_accept_rows(
+        &mut self,
+        ve_pre: &[i32],
+        accepted: &[i32],
+        width: i32,
+    ) -> Result<(), String> {
+        if ve_pre.len() != accepted.len() {
+            return Err(format!(
+                "compact_partial_accept_rows: ve_pre rows ({}) != accepted rows ({})",
+                ve_pre.len(),
+                accepted.len()
+            ));
+        }
+        if ve_pre.is_empty() {
+            return Ok(());
+        }
+        let offset = self.offset();
+        let o_pre = offset - width;
+        if o_pre < 0 {
+            return Err(format!(
+                "compact_partial_accept_rows: width ({width}) exceeds cache offset ({offset})"
+            ));
+        }
+        let o_post = ve_pre
+            .iter()
+            .zip(accepted)
+            .map(|(&v, &a)| v + a + 1)
+            .max()
+            .unwrap();
+        // Buffer slot of logical position p is `p - slot_base`; the batched
+        // MTP regime never front-compacts either cache kind, so require a
+        // zero base rather than silently corrupting slots.
+        let slot_base = match self {
+            Self::Standard(c) => c.offset - c.live_len(),
+            Self::Rotating(c) => c.offset - c.buffer_write_idx(),
+        };
+        if slot_base != 0 {
+            return Err(format!(
+                "compact_partial_accept_rows: cache buffer is front-compacted \
+                 (slot base {slot_base}); the divergent batched MTP path requires \
+                 the uncompacted regime"
+            ));
+        }
+        let (keys_slot, values_slot) = match self {
+            Self::Standard(c) => (&mut c.keys, &mut c.values),
+            Self::Rotating(c) => (&mut c.keys, &mut c.values),
+        };
+        let (Some(keys), Some(values)) = (keys_slot.as_ref(), values_slot.as_ref()) else {
+            return Ok(());
+        };
+        let k_shape = mlxcel_core::array_shape(keys);
+        let v_shape = mlxcel_core::array_shape(values);
+        let batch = k_shape[0];
+        if batch != ve_pre.len() as i32 {
+            return Err(format!(
+                "compact_partial_accept_rows: cache batch ({batch}) does not match \
+                 row count ({})",
+                ve_pre.len()
+            ));
+        }
+        let k_dtype = mlxcel_core::array_dtype(keys);
+        let v_dtype = mlxcel_core::array_dtype(values);
+
+        let mut new_keys = mlxcel_core::copy(keys);
+        let mut new_values = mlxcel_core::copy(values);
+        for (r, (&ve, &a)) in ve_pre.iter().zip(accepted).enumerate() {
+            if ve > o_pre || a < 0 {
+                return Err(format!(
+                    "compact_partial_accept_rows: row {r} has ve_pre ({ve}) > o_pre \
+                     ({o_pre}) or negative accepted ({a})"
+                ));
+            }
+            let n = a + 1;
+            let bi = r as i32;
+            if ve < o_pre {
+                // Materialize the source slice with an explicit copy BEFORE
+                // the update: a bare slice is a lazy view of the same buffer,
+                // and `slice_update` may donate that buffer to its output, so
+                // an overlapping move (`ve + n > o_pre`) would read
+                // already-overwritten rows without the copy.
+                let src_k = mlxcel_core::copy(&mlxcel_core::slice(
+                    &new_keys,
+                    &[bi, 0, o_pre, 0],
+                    &[bi + 1, k_shape[1], o_pre + n, k_shape[3]],
+                ));
+                new_keys = mlxcel_core::slice_update(
+                    &new_keys,
+                    &src_k,
+                    &[bi, 0, ve, 0],
+                    &[bi + 1, k_shape[1], ve + n, k_shape[3]],
+                );
+                let src_v = mlxcel_core::copy(&mlxcel_core::slice(
+                    &new_values,
+                    &[bi, 0, o_pre, 0],
+                    &[bi + 1, v_shape[1], o_pre + n, v_shape[3]],
+                ));
+                new_values = mlxcel_core::slice_update(
+                    &new_values,
+                    &src_v,
+                    &[bi, 0, ve, 0],
+                    &[bi + 1, v_shape[1], ve + n, v_shape[3]],
+                );
+            }
+            // Zero the vacated region between the row's new valid end and the
+            // post-trim global end. Masked out next round anyway; zeroing
+            // keeps the buffers hygienic for any maskless fallback.
+            let z_start = ve + n;
+            if z_start < o_post {
+                let span = o_post - z_start;
+                let k_zero = mlxcel_core::zeros(&[1, k_shape[1], span, k_shape[3]], k_dtype);
+                let v_zero = mlxcel_core::zeros(&[1, v_shape[1], span, v_shape[3]], v_dtype);
+                new_keys = mlxcel_core::slice_update(
+                    &new_keys,
+                    &k_zero,
+                    &[bi, 0, z_start, 0],
+                    &[bi + 1, k_shape[1], o_post, k_shape[3]],
+                );
+                new_values = mlxcel_core::slice_update(
+                    &new_values,
+                    &v_zero,
+                    &[bi, 0, z_start, 0],
+                    &[bi + 1, v_shape[1], o_post, v_shape[3]],
+                );
+            }
+        }
+        *keys_slot = Some(new_keys);
+        *values_slot = Some(new_values);
+        Ok(())
+    }
+}
+
+/// Per-row context for a DIVERGENT batched MTP verify round (issue #203):
+/// some row's logical valid end lags the shared physical cache offset after
+/// mixed speculative accepts. Threaded from the model forward into every
+/// attention layer so queries/keys rotate at per-row logical positions and
+/// attention runs per row over the row's exact contiguous K/V (history prefix
+/// + current window), excluding the stale gap physically rather than via
+/// masking — which keeps each row's SDPA axis length, mask shape, and
+/// reduction order bitwise-identical to the row's standalone B = 1 run.
+pub(crate) struct DivergentVerifyRows<'a> {
+    /// Per-row logical valid end (`left_padding[r] + kv_valid_len[r]`): the
+    /// RoPE offset for the row's window tokens and the end of the row's
+    /// contiguous valid prefix in the shared cache.
+    pub(crate) ve: &'a [i32],
+    /// Per-row resident leading prompt padding (all zero for equal-length
+    /// bursts).
+    pub(crate) lp: Vec<i32>,
 }
 
 pub struct Attention {
@@ -942,12 +1110,99 @@ impl Attention {
         }
     }
 
+    /// Rotate a `[B, H, L, D]` tensor row-by-row, applying each batch row's
+    /// own RoPE offset.
+    ///
+    /// Used by the divergent batched MTP verify forward (issue #203): after
+    /// mixed speculative accepts each row's logical position lags the shared
+    /// physical cache offset, so the row's new window tokens must rotate at
+    /// the row's own logical positions to keep B = 1 relative RoPE distances.
+    /// B and L are tiny on that path (opt-in verify blocks), so the per-row
+    /// slice/rotate/concat loop is cheap relative to the layer matmuls.
+    fn apply_rope_per_row(&self, x: &MlxArray, offsets: &[i32]) -> UniquePtr<MlxArray> {
+        let shape = mlxcel_core::array_shape(x);
+        debug_assert_eq!(shape.len(), 4, "rope input must be [B, H, L, D]");
+        debug_assert_eq!(
+            shape[0] as usize,
+            offsets.len(),
+            "apply_rope_per_row needs exactly one offset per batch row"
+        );
+        let mut out: Option<UniquePtr<MlxArray>> = None;
+        for (r, &offset) in offsets.iter().enumerate() {
+            let r_i = r as i32;
+            let row = mlxcel_core::slice(
+                x,
+                &[r_i, 0, 0, 0],
+                &[r_i + 1, shape[1], shape[2], shape[3]],
+            );
+            let rotated = self.apply_rope(&row, offset);
+            out = Some(match out {
+                None => rotated,
+                Some(acc) => mlxcel_core::concatenate(
+                    acc.as_ref().unwrap(),
+                    rotated.as_ref().unwrap(),
+                    0,
+                ),
+            });
+        }
+        out.expect("apply_rope_per_row requires at least one batch row")
+    }
+
+    /// Per-row variant of the compiled proportional Q/K path: slice the
+    /// `[B, L, n_heads_or_kv * head_dim]` projection output row by row and
+    /// run each row through the SAME `compiled_q_path_proportional` fused
+    /// kernel the uniform path uses, with that row's own RoPE offset.
+    ///
+    /// Used by the divergent batched MTP verify forward (issue #203). The
+    /// offset flows into the compile window as a scalar array, so per-row
+    /// offsets reuse the cached graph (one extra compile per `[1, L, ...]`
+    /// shape, not per offset).
+    #[allow(clippy::too_many_arguments)]
+    fn compiled_q_path_proportional_per_row(
+        &self,
+        proj_out: &MlxArray,
+        norm_weight: &MlxArray,
+        norm_eps: f32,
+        freqs: &MlxArray,
+        n_heads: i32,
+        rotated_dims: i32,
+        l: i32,
+        offsets: &[i32],
+    ) -> UniquePtr<MlxArray> {
+        let width = n_heads * self.head_dim;
+        let mut out: Option<UniquePtr<MlxArray>> = None;
+        for (r, &offset) in offsets.iter().enumerate() {
+            let r_i = r as i32;
+            let row = mlxcel_core::slice(proj_out, &[r_i, 0, 0], &[r_i + 1, l, width]);
+            let rotated = mlxcel_core::compiled_q_path_proportional(
+                &row,
+                norm_weight,
+                freqs,
+                norm_eps,
+                n_heads,
+                self.head_dim,
+                rotated_dims,
+                offset,
+            );
+            out = Some(match out {
+                None => rotated,
+                Some(acc) => mlxcel_core::concatenate(
+                    acc.as_ref().unwrap(),
+                    rotated.as_ref().unwrap(),
+                    0,
+                ),
+            });
+        }
+        out.expect("compiled_q_path_proportional_per_row requires at least one batch row")
+    }
+
     pub(crate) fn forward(
         &self,
         x: &MlxArray,
         mask: Option<&MlxArray>,
         cache: &mut dyn CacheInterface,
         shared_kv: Option<(&MlxArray, &MlxArray)>,
+        divergent_rows: Option<&DivergentVerifyRows<'_>>,
     ) -> (
         UniquePtr<MlxArray>,
         Option<(UniquePtr<MlxArray>, UniquePtr<MlxArray>)>,
@@ -956,6 +1211,7 @@ impl Attention {
         let b = shape[0];
         let l = shape[1];
         let offset = cache.offset();
+        let rope_offsets: Option<&[i32]> = divergent_rows.map(|ctx| ctx.ve);
 
         let q_proj_out = match &self.projection {
             AttentionProjection::Fused(proj) => {
@@ -970,7 +1226,39 @@ impl Attention {
         // `reshape -> q_norm -> transpose -> full-head ProportionalRoPE`
         // inside a single `mx::core::compile` window. Sliding layers and
         // layers with non-proportional RoPE stay on the op-at-a-time chain.
-        let queries = if let Some(ref freqs) = self.proportional_rope_freqs {
+        //
+        // Divergent batched MTP verify rounds (issue #203) instead rotate
+        // each row at its own logical position; `rope_offsets` is `Some` only
+        // on that path. Each row goes through the SAME kernels the uniform
+        // path uses (the compiled fused chain for proportional layers, the
+        // op-at-a-time chain otherwise), just sliced per row, so lockstep
+        // rows stay bitwise-identical to the uniform rounds and near-tie
+        // argmaxes cannot flip from a kernel-path change.
+        let queries = if let Some(offsets) = rope_offsets {
+            if let Some(ref freqs) = self.proportional_rope_freqs {
+                let rotated_dims = 2
+                    * ((self.proportional_partial_rotary_factor as f64 * self.head_dim as f64
+                        / 2.0)
+                        .floor() as i32)
+                        .max(0);
+                self.compiled_q_path_proportional_per_row(
+                    &q_proj_out,
+                    &self.q_norm.weight,
+                    self.q_norm.eps,
+                    freqs,
+                    self.n_heads,
+                    rotated_dims,
+                    l,
+                    offsets,
+                )
+            } else {
+                let queries =
+                    mlxcel_core::reshape(&q_proj_out, &[b, l, self.n_heads, self.head_dim]);
+                let queries = self.q_norm.forward(&queries);
+                let queries = mlxcel_core::transpose_axes(&queries, &[0, 2, 1, 3]);
+                self.apply_rope_per_row(&queries, offsets)
+            }
+        } else if let Some(ref freqs) = self.proportional_rope_freqs {
             let rotated_dims = 2
                 * ((self.proportional_partial_rotary_factor as f64 * self.head_dim as f64 / 2.0)
                     .floor() as i32)
@@ -999,7 +1287,7 @@ impl Attention {
             return (self.project_output(&attn_out, b, l), None);
         }
 
-        let (keys, values) = self.project_kv(x, b, l, offset, cache);
+        let (keys, values) = self.project_kv(x, b, l, offset, cache, rope_offsets);
         let attn_out = self.attend(&queries, &keys, &values, mask);
         let stored = if self.store_full_length_kv {
             Some((keys, values))
@@ -1063,6 +1351,7 @@ impl Attention {
         l: i32,
         offset: i32,
         cache: &mut dyn CacheInterface,
+        rope_offsets: Option<&[i32]>,
     ) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
         let (raw_keys, raw_values) = match &self.projection {
             AttentionProjection::Fused(proj) => {
@@ -1099,7 +1388,35 @@ impl Attention {
             .k_norm
             .as_ref()
             .expect("k_norm must be Some for non-KV-shared layers");
-        let keys = if let Some(ref freqs) = self.proportional_rope_freqs {
+        let keys = if let Some(offsets) = rope_offsets {
+            // Divergent batched MTP verify (issue #203): rotate each row's
+            // new keys at the row's own logical positions, mirroring the
+            // per-row query rotation in `forward` — through the same kernels
+            // the uniform path uses, sliced per row.
+            if let Some(ref freqs) = self.proportional_rope_freqs {
+                let rotated_dims = 2
+                    * ((self.proportional_partial_rotary_factor as f64 * self.head_dim as f64
+                        / 2.0)
+                        .floor() as i32)
+                        .max(0);
+                self.compiled_q_path_proportional_per_row(
+                    &raw_keys,
+                    &k_norm.weight,
+                    k_norm.eps,
+                    freqs,
+                    self.n_kv_heads,
+                    rotated_dims,
+                    l,
+                    offsets,
+                )
+            } else {
+                let keys =
+                    mlxcel_core::reshape(&raw_keys, &[b, l, self.n_kv_heads, self.head_dim]);
+                let keys = k_norm.forward(&keys);
+                let keys = mlxcel_core::transpose_axes(&keys, &[0, 2, 1, 3]);
+                self.apply_rope_per_row(&keys, offsets)
+            }
+        } else if let Some(ref freqs) = self.proportional_rope_freqs {
             let rotated_dims = 2
                 * ((self.proportional_partial_rotary_factor as f64 * self.head_dim as f64 / 2.0)
                     .floor() as i32)
@@ -1406,9 +1723,11 @@ impl DecoderLayer {
             shared_kv,
             usize::MAX,
             false,
+            None,
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn forward_with_profile(
         &self,
         x: &MlxArray,
@@ -1418,6 +1737,7 @@ impl DecoderLayer {
         shared_kv: Option<(&MlxArray, &MlxArray)>,
         layer_idx: usize,
         profile_subops: bool,
+        divergent_rows: Option<&DivergentVerifyRows<'_>>,
     ) -> (
         UniquePtr<MlxArray>,
         Option<(UniquePtr<MlxArray>, UniquePtr<MlxArray>)>,
@@ -1430,7 +1750,9 @@ impl DecoderLayer {
         // residual is only *read* by the final `add`.
         let h_attn = self.input_layernorm.forward(x);
         timer.tick("input_layernorm", &h_attn);
-        let (h_attn, stored_kv) = self.self_attn.forward(&h_attn, mask, cache, shared_kv);
+        let (h_attn, stored_kv) = self
+            .self_attn
+            .forward(&h_attn, mask, cache, shared_kv, divergent_rows);
         timer.tick("self_attn", &h_attn);
         let h_attn = self.post_attention_layernorm.forward(&h_attn);
         timer.tick("post_attention_layernorm", &h_attn);
@@ -1854,7 +2176,64 @@ impl Gemma4TextModel {
             .map(|lp| lp.iter().any(|&p| p > 0))
             .unwrap_or(false);
 
-        let (global_mask, sliding_mask) = if let Some(mask) = mask {
+        // Divergent batched MTP verify round (issue #203): some row's logical
+        // valid end lags the shared physical cache offset after mixed
+        // speculative accepts. The finalize-side compaction
+        // (`rollback_speculative_cache_divergent`) keeps each row's cache
+        // content a contiguous prefix `[0, ve[r])`, so the exact per-row mask
+        // is: padding `[0, lp[r])` and the stale gap `[ve[r], offset)` are
+        // blocked, history `[lp[r], ve[r])` and the causal window prefix are
+        // visible, with the sliding band evaluated at each row's LOGICAL
+        // positions. Queries/keys rotate at per-row logical positions via
+        // `rope_offsets` below. Uniform rounds (`ve[r] == offset` for every
+        // row, always true until the first divergent accept) skip this branch
+        // entirely and stay byte-identical to the pre-#203 path.
+        let global_offset_pre = first_cache_offset(caches, "full_attention");
+        let divergent_verify = mask.is_none()
+            && per_row_valid_end
+                .map(|ve| ve.iter().any(|&v| v != global_offset_pre))
+                .unwrap_or(false);
+        // Per-row context for the divergent verify path (issue #203): the
+        // attention layers rotate queries/keys at per-row logical positions
+        // and run attention per row over each row's exact contiguous K/V, so
+        // no batch-level masks are needed (and the SDPA reduction matches the
+        // row's standalone B = 1 run bitwise).
+        let divergent_rows: Option<DivergentVerifyRows<'_>> = if divergent_verify {
+            let ve = per_row_valid_end.expect("divergent_verify implies Some(per_row_valid_end)");
+            if std::env::var("MLXCEL_DEBUG_DIVERGENT_VERIFY").is_ok() {
+                eprintln!(
+                    "[divergent-verify] l={l} o_pre={global_offset_pre} ve={ve:?} lp={left_padding:?}"
+                );
+            }
+            let lp = match left_padding {
+                Some(lp) => lp.to_vec(),
+                None => vec![0; ve.len()],
+            };
+            Some(DivergentVerifyRows { ve, lp })
+        } else {
+            None
+        };
+
+        let (global_mask, sliding_mask) = if let Some(ctx) = divergent_rows.as_ref() {
+            let sliding_offset = first_cache_offset(caches, "sliding_attention");
+            let window = self.config.sliding_window as i32;
+            (
+                Some(build_divergent_verify_mask(
+                    l,
+                    global_offset_pre,
+                    ctx.ve,
+                    &ctx.lp,
+                    None,
+                )),
+                Some(build_divergent_verify_mask(
+                    l,
+                    sliding_offset,
+                    ctx.ve,
+                    &ctx.lp,
+                    Some(window),
+                )),
+            )
+        } else if let Some(mask) = mask {
             (Some(mlxcel_core::copy(mask)), Some(mlxcel_core::copy(mask)))
         } else if has_padding {
             // Resident prompt padding present (ragged burst). Build per-row
@@ -1927,7 +2306,11 @@ impl Gemma4TextModel {
         // the gap moves the batched logits onto the B = 1 semantics; it can only
         // improve parity. A uniform round (every `ve[r] == offset`, always true
         // for the first verify after prefill) is a byte-identical no-op.
-        let (global_mask, sliding_mask) = if let Some(ve) = per_row_valid_end {
+        // (Skipped when the divergent branch above already built exact
+        // per-row masks — the gap is part of those masks.)
+        let (global_mask, sliding_mask) = if let Some(ve) = per_row_valid_end
+            && !divergent_verify
+        {
             // Full-attention family: the unbounded `Cache::Standard` keeps each
             // row's rejected-draft K/V resident at `[ve[r], global_offset)`.
             let global_offset = first_cache_offset(caches, "full_attention");
@@ -2059,6 +2442,7 @@ impl Gemma4TextModel {
                 shared_kv,
                 i,
                 profile_subops,
+                divergent_rows.as_ref(),
             );
             h = next_h;
             if let Some(start) = layer_build_start {
@@ -2284,6 +2668,63 @@ impl Gemma4TextModel {
             })
             .collect()
     }
+}
+
+/// Build the exact per-row additive attention mask for a DIVERGENT batched
+/// MTP verify round (issue #203).
+///
+/// Layout model (maintained by `rollback_speculative_cache_divergent`): row
+/// `r`'s cache content is a contiguous valid prefix `[0, ve[r])` (physical
+/// slot == logical position, with `[0, lp[r])` being resident prompt
+/// padding), followed by a stale gap `[ve[r], offset)`, followed by the
+/// current verify window at physical `[offset, offset + l)` whose token `j`
+/// sits at the row's LOGICAL position `ve[r] + j`.
+///
+/// Query `j` of row `r` (logical position `q_pos = ve[r] + j`) may attend:
+/// - history keys `k in [lp[r], ve[r])` (logical position == `k`), subject to
+///   the sliding band `k > q_pos - window` when `window` is `Some`;
+/// - window keys `k in [offset, offset + j]` (logical position
+///   `ve[r] + (k - offset)`), always inside the band for `l <= window`.
+///
+/// Everything else (leading padding, the stale gap, future window keys) is
+/// `-inf`. Returns a `[B, 1, l, offset + l]` f32 additive mask.
+pub(crate) fn build_divergent_verify_mask(
+    l: i32,
+    offset: i32,
+    per_row_valid_end: &[i32],
+    left_padding: &[i32],
+    window: Option<i32>,
+) -> UniquePtr<MlxArray> {
+    assert_eq!(
+        per_row_valid_end.len(),
+        left_padding.len(),
+        "build_divergent_verify_mask: one left_padding entry per row"
+    );
+    let b = per_row_valid_end.len();
+    let k_len = offset + l;
+    let mut data = vec![f32::NEG_INFINITY; b * l as usize * k_len as usize];
+    for (r, (&ve, &lp)) in per_row_valid_end.iter().zip(left_padding).enumerate() {
+        for j in 0..l {
+            let q_pos = ve + j;
+            let row_base = (r * l as usize + j as usize) * k_len as usize;
+            for k in 0..k_len {
+                let visible = if k < lp {
+                    false
+                } else if k < ve {
+                    window.map(|w| k > q_pos - w).unwrap_or(true)
+                } else if k < offset {
+                    false
+                } else {
+                    let k_pos = ve + (k - offset);
+                    k_pos <= q_pos && window.map(|w| k_pos > q_pos - w).unwrap_or(true)
+                };
+                if visible {
+                    data[row_base + k as usize] = 0.0;
+                }
+            }
+        }
+    }
+    mlxcel_core::from_slice_f32(&data, &[b as i32, 1, l, k_len])
 }
 
 pub(crate) fn first_cache_offset(caches: &mut [Cache], layer_type: &str) -> i32 {
@@ -3570,6 +4011,71 @@ impl Gemma4Wrapper {
             }
         }
         Ok(())
+    }
+
+    /// Issue #203: divergent-round batched MTP rollback. Replaces the
+    /// global-max trim + tail-zero contract of
+    /// [`Self::rollback_speculative_cache_explicit`] with per-row compaction:
+    /// each row's accepted verify-window K/V moves down to the row's logical
+    /// valid end (`ve_pre[r]`), restoring the contiguous-prefix layout
+    /// (physical slot == logical position) the per-row RoPE rotation and the
+    /// divergent verify mask assume. The cache offset is then trimmed to
+    /// `o_post = max(ve_pre[r] + accepted[r] + 1)`, which this returns.
+    ///
+    /// Called by the batched MTP adapter only when at least one row's
+    /// `ve_pre[r]` lags the shared physical write base (`o_pre`); uniform
+    /// rounds keep using `rollback_speculative_cache_explicit`, whose
+    /// behaviour this exactly reduces to when `ve_pre[r] == o_pre` for all
+    /// rows.
+    pub fn rollback_speculative_cache_divergent(
+        &self,
+        caches: &mut [Cache],
+        ve_pre: &[i32],
+        accepted: &[i32],
+        block_size: i32,
+    ) -> Result<i32, String> {
+        if accepted.is_empty() || ve_pre.len() != accepted.len() {
+            return Err(format!(
+                "rollback_speculative_cache_divergent: ve_pre rows ({}) and accepted rows \
+                 ({}) must match and be non-empty",
+                ve_pre.len(),
+                accepted.len()
+            ));
+        }
+        if block_size <= 0 {
+            return Err(format!(
+                "rollback_speculative_cache_divergent: block_size must be positive \
+                 (got {block_size})"
+            ));
+        }
+        let max_a = *accepted.iter().max().unwrap();
+        if accepted.iter().any(|&a| a < 0) {
+            return Err(
+                "rollback_speculative_cache_divergent: accepted values must be non-negative"
+                    .into(),
+            );
+        }
+        if max_a > block_size - 1 {
+            return Err(format!(
+                "rollback_speculative_cache_divergent: max(accepted) ({max_a}) cannot \
+                 exceed block_size - 1 ({})",
+                block_size - 1
+            ));
+        }
+        let o_post = ve_pre
+            .iter()
+            .zip(accepted)
+            .map(|(&v, &a)| v + a + 1)
+            .max()
+            .unwrap();
+        for cache in caches.iter_mut() {
+            cache.compact_partial_accept_rows(ve_pre, accepted, block_size)?;
+            let n = cache.offset() - o_post;
+            if n > 0 {
+                cache.trim_speculative(n);
+            }
+        }
+        Ok(o_post)
     }
 }
 

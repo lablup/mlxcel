@@ -901,22 +901,41 @@ fn greedy_parity_mtp_gemma4_batched_b4_matches_b1() {
         reference.len(),
         "batched run must produce one token stream per row"
     );
+    // Report-all diagnostics before asserting: print every row's accept_lens,
+    // both token streams, and the first mismatch index, so a red gate yields
+    // the full divergence picture in one run.
+    let mut failures: Vec<String> = Vec::new();
     for (row, (batched_row, reference_row)) in run.tokens.iter().zip(reference.iter()).enumerate() {
-        assert_eq!(
+        let first_mismatch = batched_row
+            .iter()
+            .zip(reference_row.iter())
+            .position(|(g, w)| g != w)
+            .or_else(|| {
+                (batched_row.len() != reference_row.len())
+                    .then(|| batched_row.len().min(reference_row.len()))
+            });
+        eprintln!(
+            "[batched B=4] row {row}: accept_lens {:?}\n  batched ({}): {:?}\n  b1 ref  ({}): {:?}\n  first_mismatch: {:?}",
+            run.accept_lens[row],
             batched_row.len(),
+            batched_row,
             reference_row.len(),
-            "row {row}: batched emitted {} tokens, B=1 reference emitted {}",
-            batched_row.len(),
-            reference_row.len(),
+            reference_row,
+            first_mismatch,
         );
-        for (i, (got, want)) in batched_row.iter().zip(reference_row.iter()).enumerate() {
-            assert_eq!(
-                got, want,
-                "row {row} token {i}: B=4 batched ({got}) != B=1 isolated ({want}) \
-                 — greedy-parity violation in the batched MTP dispatch",
-            );
+        if let Some(i) = first_mismatch {
+            failures.push(format!(
+                "row {row} first mismatch at token {i} (batched {:?} vs b1 {:?})",
+                batched_row.get(i),
+                reference_row.get(i)
+            ));
         }
     }
+    assert!(
+        failures.is_empty(),
+        "greedy-parity violation in the batched MTP dispatch:\n{}",
+        failures.join("\n")
+    );
     eprintln!(
         "[batched B=4] PASS: all {} rows byte-identical to B=1 isolated bursts",
         run.tokens.len()
@@ -928,16 +947,13 @@ fn greedy_parity_mtp_gemma4_batched_b4_matches_b1() {
 /// auto-routes to the ragged left-padding prefill (the
 /// `prefill_and_seed_batched` length-uniformity check).
 ///
-/// Asserts byte-equality against each row's isolated B = 1 stream over the
-/// row's hole-free LOCKSTEP PREFIX (the prefill bonus plus every round before
-/// the row's first sub-round-max accept), which is the region issue #163's
-/// NaN-safe padding rows and stale-tail exclusion make structurally exact.
-/// Full-stream equality after divergent accepts is blocked by the pre-existing
-/// per-row position holes tracked in issue #203 (the batched verify writes and
-/// rotates every row's window at the shared physical offset, so a sub-max row
-/// keeps an inflated relative RoPE distance no mask can repair); restore the
-/// full-stream assertion here when #203 lands. When a run stays lockstep
-/// throughout, this gate degenerates to the full strict assertion.
+/// Asserts FULL-STREAM byte-equality against each row's isolated B = 1
+/// stream. Issue #163 made the lockstep prefix (the prefill bonus plus every
+/// round before a row's first sub-round-max accept) structurally exact via
+/// NaN-safe padding rows and stale-tail exclusion; issue #203 extends that to
+/// the whole stream by compacting each row's post-rollback position hole and
+/// rotating/masking divergent verify rounds at per-row logical positions, so
+/// the lockstep-prefix-only relaxation is gone.
 ///
 /// Gated `#[ignore]` (real-model heavy: loads the Gemma-4-31B target + bf16
 /// drafter); runs in the CI hardware lane.
@@ -1032,41 +1048,22 @@ fn greedy_parity_mtp_gemma4_batched_b4_ragged_matches_b1() {
         .run_batched(&prompts, &sampling, max_tokens)
         .expect("ragged batched MTP run must succeed");
 
-    // ---- Lockstep-prefix byte-equality assertions (per row) ----
+    // ---- Full-stream byte-equality assertions (per row) ----
     //
-    // Full-stream parity after a divergent (mixed-accept) round is not
-    // structurally guaranteed today (issue #203: per-row position holes;
-    // observed on M1 Ultra, where the strict equal-length gate is red on main
-    // too). What #163 makes exact is the lockstep prefix: the prefill bonus
-    // plus every round up to (excluding) the row's first sub-max round.
+    // Issue #203's divergent-round compaction + per-row logical RoPE/masks
+    // make every row structurally identical to its standalone B = 1 run, so
+    // the gate asserts the WHOLE stream (the former lockstep-prefix-only
+    // relaxation is removed per the #203 acceptance criteria).
     assert_eq!(
         run.tokens.len(),
         reference.len(),
         "ragged batched run must produce one token stream per row"
     );
     let batch = run.tokens.len();
-    let rounds = run.accept_lens.iter().map(Vec::len).max().unwrap_or(0);
-    // lockstep_len[r] = 1 (prefill bonus) + sum of (accept + 1) over rounds
-    // in which row r accepted the round max, stopping at its first sub-max
-    // round (the hole never heals, so the prefix is frozen there).
-    let mut lockstep_len: Vec<usize> = vec![1; batch];
-    let mut holed: Vec<bool> = vec![false; batch];
-    for j in 0..rounds {
-        let round_max = (0..batch)
-            .filter_map(|r| run.accept_lens[r].get(j).copied())
-            .max()
-            .unwrap_or(0);
-        for r in 0..batch {
-            if holed[r] {
-                continue;
-            }
-            match run.accept_lens[r].get(j).copied() {
-                Some(a) if a == round_max => lockstep_len[r] += a as usize + 1,
-                Some(_) => holed[r] = true,
-                None => {}
-            }
-        }
-    }
+    // Report-all diagnostics before asserting: print every row's accept_lens,
+    // both token streams, and the first mismatch index, so a red gate yields
+    // the full divergence picture in one run.
+    let mut failures: Vec<String> = Vec::new();
     for row in 0..batch {
         let batched_row = &run.tokens[row];
         let reference_row = &reference[row];
@@ -1083,27 +1080,39 @@ fn greedy_parity_mtp_gemma4_batched_b4_ragged_matches_b1() {
              NaN-safe ragged prefill regression",
             batched_row[0], reference_row[0],
         );
-        let k = lockstep_len[row]
-            .min(batched_row.len())
-            .min(reference_row.len());
-        for i in 0..k {
-            assert_eq!(
-                batched_row[i], reference_row[i],
-                "row {row} token {i} (lockstep prefix {k}): ragged B=4 ({}) != \
-                 B=1 isolated ({}); greedy-parity violation inside the \
-                 hole-free lockstep region",
-                batched_row[i], reference_row[i],
-            );
-        }
+        let first_mismatch = batched_row
+            .iter()
+            .zip(reference_row.iter())
+            .position(|(g, w)| g != w)
+            .or_else(|| {
+                (batched_row.len() != reference_row.len())
+                    .then(|| batched_row.len().min(reference_row.len()))
+            });
         eprintln!(
-            "[ragged B=4] row {row}: lockstep prefix {k}/{} tokens byte-identical (accept_lens {:?})",
-            batched_row.len(),
+            "[ragged B=4] row {row}: accept_lens {:?}\n  batched ({}): {:?}\n  b1 ref  ({}): {:?}\n  first_mismatch: {:?}",
             run.accept_lens[row],
+            batched_row.len(),
+            batched_row,
+            reference_row.len(),
+            reference_row,
+            first_mismatch,
         );
+        if let Some(i) = first_mismatch {
+            failures.push(format!(
+                "row {row} first mismatch at token {i} (batched {:?} vs b1 {:?})",
+                batched_row.get(i),
+                reference_row.get(i)
+            ));
+        }
     }
+    assert!(
+        failures.is_empty(),
+        "greedy-parity violation after divergent accepts:\n{}",
+        failures.join("\n")
+    );
     eprintln!(
         "[ragged B=4] PASS: all {batch} variable-length rows byte-identical to their \
-         B=1 isolated bursts over the hole-free lockstep prefix (#203 tracks full-stream)"
+         B=1 isolated bursts over the FULL stream (issue #203)"
     );
 }
 
@@ -1283,3 +1292,95 @@ const _: () = {
          see docs/model_tests.md::Speculative drafters",
     );
 };
+
+/// Issue #203 debugging probe: run each equal-length gate prompt through the
+/// BATCHED adapter at batch size 1 (a configuration that can never diverge,
+/// so the whole run stays on the uniform path) and compare against the B = 1
+/// adapter reference. Any mismatch here implicates the batched adapter's
+/// baseline mechanics rather than the divergent-round geometry.
+#[test]
+#[ignore = "real-model heavy diagnostic (Gemma-4-31B target + drafter)"]
+fn b1_batched_baseline_probe() {
+    use mlxcel::models::gemma4_mtp_target::{
+        Gemma4MtpBatchedTargetAdapter, Gemma4MtpTargetAdapter,
+    };
+    use mlxcel::{LoadedModel, initialize_runtime, load_model};
+    use mlxcel_core::drafter::{DrafterKind, load_drafter};
+    use mlxcel_core::generate::SamplingConfig;
+    use mlxcel_core::speculative::mtp::{MtpBatchedGenerator, MtpGenerator};
+
+    let pairing = &REACHABLE_PAIRINGS[1];
+    let (target_path, draft_path, present) = pairing_present(pairing);
+    if !present {
+        eprintln!("Skipping b1_batched_baseline_probe");
+        return;
+    }
+    let _runtime = initialize_runtime();
+    let (loaded_target, _tok) = load_model(&target_path).expect("target model must load");
+    let wrapper: &mlxcel::models::Gemma4Wrapper = match &loaded_target {
+        LoadedModel::Gemma4(w) => w,
+        LoadedModel::Gemma4VLM(vlm) => &vlm.text_model,
+        _ => panic!("requires a Gemma 4 family target"),
+    };
+    let block_size = pairing.block_size as usize;
+    let sampling = SamplingConfig::greedy();
+    let max_tokens = 24_usize;
+    let prompts: Vec<Vec<i32>> = vec![
+        vec![2, 105, 2364, 107, 9259, 108],
+        vec![2, 105, 2364, 107, 1596, 108],
+        vec![2, 105, 2364, 107, 6176, 108],
+        vec![2, 105, 2364, 107, 3030, 108],
+    ];
+    let mut failures = Vec::new();
+    for (row, prompt) in prompts.iter().enumerate() {
+        let seq_id = mlxcel_core::cache::SequenceId::from_raw(3000 + row as u64);
+        let adapter = Gemma4MtpTargetAdapter::new(wrapper, Some(seq_id));
+        let (mut drafter, _) =
+            load_drafter(&draft_path, Some(DrafterKind::Mtp)).expect("MTP drafter must load");
+        drafter
+            .bind(wrapper as &dyn mlxcel_core::generate::LanguageModel)
+            .expect("drafter bind");
+        let mut generator = MtpGenerator::new(adapter, drafter, block_size);
+        let no_cancel = std::sync::atomic::AtomicBool::new(false);
+        let logprobs_config = mlxcel_core::sampling::LogprobsConfig::default();
+        let (reference, _, _) = generator.generate(
+            prompt,
+            max_tokens,
+            &sampling,
+            &[],
+            &no_cancel,
+            &logprobs_config,
+        );
+
+        let batch_adapter = Gemma4MtpBatchedTargetAdapter::new(wrapper, 1);
+        let (mut batched_drafter, _) =
+            load_drafter(&draft_path, Some(DrafterKind::Mtp)).expect("drafter must load");
+        batched_drafter
+            .bind(wrapper as &dyn mlxcel_core::generate::LanguageModel)
+            .expect("batched drafter bind");
+        let mut batched_generator =
+            MtpBatchedGenerator::new(batch_adapter, batched_drafter, block_size);
+        let run = batched_generator
+            .run_batched(&[prompt.clone()], &sampling, max_tokens)
+            .expect("B=1 batched MTP run must succeed");
+        let got = &run.tokens[0];
+        let first_mismatch = got
+            .iter()
+            .zip(reference.iter())
+            .position(|(g, w)| g != w)
+            .or_else(|| (got.len() != reference.len()).then(|| got.len().min(reference.len())));
+        eprintln!(
+            "[b1-batched probe] row {row}: accept_lens {:?}\n  b1-batched ({}): {:?}\n  b1 ref     ({}): {:?}\n  first_mismatch: {:?}",
+            run.accept_lens[0],
+            got.len(),
+            got,
+            reference.len(),
+            reference,
+            first_mismatch,
+        );
+        if let Some(i) = first_mismatch {
+            failures.push(format!("row {row} mismatch at {i}"));
+        }
+    }
+    assert!(failures.is_empty(), "B=1 batched baseline drift:\n{}", failures.join("\n"));
+}
