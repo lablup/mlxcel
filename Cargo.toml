@@ -68,7 +68,7 @@ mlxcel-surgery = { path = "src/lib/mlxcel-surgery", optional = true }
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
+serde_json = { version = "1.0", features = ["preserve_order"] }
 serde_yaml = "0.9"
 
 # Tensors & Models
@@ -123,7 +123,7 @@ base64 = "0.22"
 dirs = "6"
 glob = "0.3.2"
 path-clean = "1.0.1"
-minijinja = { version = "2.20", features = ["loop_controls", "fuel"] }
+minijinja = { version = "2.20", features = ["loop_controls", "fuel", "json", "preserve_order"] }
 # Used by `src/downloader/mod.rs::file_url` to percent-encode `repo_id` /
 # `revision` / `filename` path segments before composing the HF download URL
 # (L1). Already transitively present via reqwest -> url; promoting
