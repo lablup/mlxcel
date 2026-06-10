@@ -1924,7 +1924,7 @@ impl Gemma4TextModel {
         // K/V (full-attention `Cache::Standard`, never zeroed) and the zeroed
         // phantom tail (sliding `Cache::Rotating`) in `[ve[r], offset)`. The
         // B = 1 reference trims its cache exactly and has no such gap, so masking
-        // the gap moves the batched logits onto the B = 1 semantics — it can only
+        // the gap moves the batched logits onto the B = 1 semantics; it can only
         // improve parity. A uniform round (every `ve[r] == offset`, always true
         // for the first verify after prefill) is a byte-identical no-op.
         let (global_mask, sliding_mask) = if let Some(ve) = per_row_valid_end {

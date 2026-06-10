@@ -522,7 +522,7 @@ pub fn make_drafter_masks(
     // (issue #163). The `_with_valid_len` path falls back to `effective_valid =
     // query_offset` when `kv_valid_len` is `None`, which makes
     // `make_swa_mask_with_local_offsets` derive the SWA query position as
-    // `effective_valid - 1 = query_offset - 1` — one short of the invariant.
+    // `effective_valid - 1 = query_offset - 1`, one short of the invariant.
     // Passing `kv_valid_len = query_offset + 1` recovers the SWA query position
     // `query_offset`. Declare the owned per-row tensor BEFORE the `BatchScalar`
     // that borrows it so it outlives the borrow.

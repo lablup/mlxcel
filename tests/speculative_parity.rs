@@ -931,7 +931,7 @@ fn greedy_parity_mtp_gemma4_batched_b4_matches_b1() {
 /// isolated B = 1 stream token-for-token.
 ///
 /// Gated `#[ignore]` (real-model heavy: loads the Gemma-4-31B target + bf16
-/// drafter) — runs in the CI hardware lane.
+/// drafter); runs in the CI hardware lane.
 #[test]
 #[ignore = "real-model heavy (Gemma-4-31B target + drafter, ragged B=4 batched run); CI hardware lane only"]
 fn greedy_parity_mtp_gemma4_batched_b4_ragged_matches_b1() {
@@ -1041,7 +1041,7 @@ fn greedy_parity_mtp_gemma4_batched_b4_ragged_matches_b1() {
             assert_eq!(
                 got, want,
                 "row {row} token {i}: ragged B=4 ({got}) != B=1 isolated ({want}) \
-                 — greedy-parity violation in the ragged batched MTP dispatch",
+                 ; greedy-parity violation in the ragged batched MTP dispatch",
             );
         }
     }

@@ -363,7 +363,7 @@ pub fn create_causal_mask_with_window_and_left_padding(
     // Identical to the non-windowed builder: re-enable the self/diagonal column
     // (`k == q + offset`) for leading-padding query rows (`q + offset <
     // left_padding[r]`). The self column lies on the causal diagonal (distance
-    // 0), so it is always inside the sliding-window band — the rescue can never
+    // 0), so it is always inside the sliding-window band; the rescue can never
     // re-admit an out-of-window key. Real query rows are byte-identical.
     let qinds_1d = ffi::arange_i32(offset, offset + size, 1);
     let qinds = ffi::reshape(&qinds_1d, &[1, 1, size, 1]);
@@ -386,7 +386,7 @@ pub fn create_causal_mask_with_window_and_left_padding(
 /// After divergent (mixed) accepts in a B > 1 batched speculative verify round,
 /// row `r`'s logical valid key end `per_row_valid_end[r]` lags the physical
 /// cache offset (`gap_end`, the global max across rows). The keys in
-/// `[per_row_valid_end[r], gap_end)` are that row's stale rejected-draft K/V —
+/// `[per_row_valid_end[r], gap_end)` are that row's stale rejected-draft K/V:
 /// resident in the unbounded full-attention `Cache::Standard` (whose
 /// `zero_partial_accept_tail` is a no-op) and present as zeroed phantom columns
 /// in the sliding `Cache::Rotating` (zeroed K still carries softmax weight).
@@ -396,12 +396,12 @@ pub fn create_causal_mask_with_window_and_left_padding(
 /// batched logits onto the B = 1 semantics, so it can only improve parity.
 ///
 /// # Arguments
-/// * `base` — additive attention mask carrying 0 (attend) / −∞ (mask)
+/// * `base`: additive attention mask carrying 0 (attend) / −∞ (mask)
 ///   sentinels, either 2-D `[n, K]` (broadcasts over the batch) or 4-D
 ///   `[B | 1, 1, n, K]`.
-/// * `per_row_valid_end` — per-row logical valid key end (length `B`). Column
+/// * `per_row_valid_end`: per-row logical valid key end (length `B`). Column
 ///   `k` is penalised for row `r` when `per_row_valid_end[r] <= k < gap_end`.
-/// * `gap_end` — exclusive upper bound of the stale gap (the physical / global
+/// * `gap_end`: exclusive upper bound of the stale gap (the physical / global
 ///   cache offset). Rows with `per_row_valid_end[r] >= gap_end` are unchanged.
 ///
 /// # Returns
@@ -1442,7 +1442,7 @@ mod tests {
     /// (a) With `lp = [2, 0]` at prefill offset 0, batch row 0's leading-padding
     /// query rows (`q < 2`) have an empty causal-AND-padding key set. The
     /// diagonal rescue keeps their self column attended, so EVERY query row of
-    /// EVERY batch row has at least one attended (0.0) cell — softmax is finite.
+    /// EVERY batch row has at least one attended (0.0) cell, so softmax is finite.
     #[test]
     fn left_padding_mask_every_query_row_has_an_attended_cell() {
         let n = 4_i32;
@@ -1508,7 +1508,7 @@ mod tests {
             for q in 0..n {
                 let q_abs = q + offset;
                 if q_abs < lp_b {
-                    continue; // padding query row — covered by (a)/(b)
+                    continue; // padding query row, covered by (a)/(b)
                 }
                 for k in 0..n {
                     let expected_attend = k <= q_abs && k >= lp_b;
