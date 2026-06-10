@@ -1012,7 +1012,7 @@ mod tests {
         // array into the prompt with `{{ tools | tojson }}`. The `tojson` filter
         // is gated behind minijinja's `json` feature; without it the template
         // fails to render and the processor falls back to a default template
-        // that drops the tools section entirely — so the model never learns
+        // that drops the tools section entirely, so the model never learns
         // which tools exist and stops emitting tool calls.
         let template = r#"{% if tools %}<tools>{{ tools | tojson }}</tools>{% endif %}
 {% for m in messages %}{{ m.content }}{% endfor %}"#;
