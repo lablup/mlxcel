@@ -301,7 +301,10 @@ fn handle_diffusion_request(
         return;
     }
 
-    let opts = diffusion_options_from_server(options, defaults, config_eos);
+    let mut opts = diffusion_options_from_server(options, defaults, config_eos);
+    // Per-step cooperative cancellation: a disconnected/cancelled client
+    // aborts within one denoising step instead of finishing the block.
+    opts.cancel = Some(cancelled.clone());
     if let Some(seed) = options.sampling.seed {
         mlxcel_core::random_seed(seed);
     }

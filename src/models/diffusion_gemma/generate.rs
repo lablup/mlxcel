@@ -72,6 +72,10 @@ pub struct DiffusionGenerateOptions {
     /// Prompt prefill chunk size; prompts longer than this are prefilled in
     /// chunks with the cache evaluated between chunks.
     pub prefill_chunk_size: usize,
+    /// Cooperative cancellation flag, polled once per denoising step so a
+    /// cancelled request aborts within one step (~0.6 s on a 256 canvas)
+    /// instead of finishing the whole block. `None` disables polling (CLI).
+    pub cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 }
 
 impl Default for DiffusionGenerateOptions {
@@ -87,6 +91,7 @@ impl Default for DiffusionGenerateOptions {
             full_canvas: false,
             extra_eos_token_ids: Vec::new(),
             prefill_chunk_size: DEFAULT_PREFILL_CHUNK_SIZE,
+            cancel: None,
         }
     }
 }
@@ -380,6 +385,9 @@ struct DenoiseOutcome {
     /// Committed canvas ids for this block.
     commit: UniquePtr<MlxArray>,
     steps: usize,
+    /// True when `options.cancel` fired mid-block; the partial commit must
+    /// not be emitted.
+    aborted: bool,
 }
 
 impl DiffusionGemmaModel {
@@ -523,6 +531,11 @@ impl DiffusionGemmaModel {
             denoising_steps += outcome.steps;
             work_tokens += canvas_len * outcome.steps;
 
+            if outcome.aborted {
+                finish_reason = DiffusionFinishReason::Aborted;
+                break;
+            }
+
             mlxcel_core::eval(&outcome.commit);
             let commit_ids = to_vec_i32(&outcome.commit);
             if debug_mode {
@@ -611,6 +624,17 @@ impl DiffusionGemmaModel {
         let mut commit = mlxcel_core::copy(&current_canvas);
 
         for cur_step in (1..=max_denoising_steps).rev() {
+            if options
+                .cancel
+                .as_ref()
+                .is_some_and(|c| c.load(std::sync::atomic::Ordering::Relaxed))
+            {
+                return Ok(DenoiseOutcome {
+                    commit,
+                    steps,
+                    aborted: true,
+                });
+            }
             steps += 1;
             let self_conditioning_ref = self_conditioning
                 .as_ref()
@@ -779,6 +803,10 @@ impl DiffusionGemmaModel {
             }
         }
 
-        Ok(DenoiseOutcome { commit, steps })
+        Ok(DenoiseOutcome {
+            commit,
+            steps,
+            aborted: false,
+        })
     }
 }
