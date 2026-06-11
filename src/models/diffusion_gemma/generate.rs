@@ -583,9 +583,10 @@ impl DiffusionGemmaModel {
         let mut reveal_mask = vec![false; canvas_len];
         let mut draft_canvas = mlxcel_core::copy(&current_canvas);
 
-        // Committed canvas: the argmax canvas of the LAST executed step
-        // (or, for the confidence sampler's all-revealed early exit, the
-        // fully revealed draft canvas).
+        // Committed canvas: the argmax canvas of the LAST executed step in
+        // EVERY exit path, matching the reference (its post-loop
+        // `current_canvas = argmax_canvas` overwrites the confidence
+        // sampler's draft assignment, which is dead code there).
         let mut commit = mlxcel_core::copy(&current_canvas);
 
         for cur_step in (1..=max_denoising_steps).rev() {
@@ -716,8 +717,8 @@ impl DiffusionGemmaModel {
                     }
 
                     if reveal_mask.iter().all(|&r| r) {
-                        // All positions revealed: commit the draft canvas.
-                        commit = mlxcel_core::copy(&draft_canvas);
+                        // All positions revealed: stop denoising. The commit
+                        // stays this step's argmax canvas, like the reference.
                         break;
                     }
 
