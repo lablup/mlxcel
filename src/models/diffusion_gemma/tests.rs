@@ -433,9 +433,9 @@ fn dense_windowed_mask_is_correct_for_multi_token_offset_forward() {
 // Real-model regression tests (issue #217; #[ignore], need the checkpoint)
 // -------------------------------------------------------------------------
 
-/// Determinism regression for the steel GEMM safe-load overlay
-/// (`src/lib/mlx-cpp/patches/mlx/backend/metal/kernels/steel/gemm/mma.h`,
-/// upstream MLX PRs #3560/#3565).
+/// Determinism regression for the steel GEMM safe-load fix (upstream MLX
+/// PRs #3560/#3565), formerly a local `steel/gemm/mma.h` overlay under issue
+/// #217 and now native upstream at the vendored MLX pin (retired in #222).
 ///
 /// The DiffusionGemma canvas forward runs head_dim 256/512 SDPA through the
 /// unfused steel-GEMM path with non-tile-aligned key lengths, so the broken

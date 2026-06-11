@@ -2552,10 +2552,12 @@ fn paged_decode_fallbacks_reject_an_empty_batch() {
         pooled.as_ref().err()
     );
 }
-/// Regression test for the steel GEMM safe-load (edge-tile) overlay
-/// (`mlx-cpp/patches/mlx/backend/metal/kernels/steel/gemm/mma.h`, upstream
-/// MLX PRs #3560/#3565: `BaseMMAFrag<T, 8, 8>::load_safe` indexed columns
-/// with `off_x` instead of `off_y`).
+/// Regression test for the steel GEMM safe-load (edge-tile) fix
+/// (upstream MLX PRs #3560/#3565: `BaseMMAFrag<T, 8, 8>::load_safe` indexed
+/// columns with `off_x` instead of `off_y`). The fix was carried as a local
+/// `steel/gemm/mma.h` overlay under issue #217 and is now native upstream at
+/// the vendored MLX pin (overlay retired in issue #222); this test guards
+/// against a regression of that fix.
 ///
 /// A non-tile-aligned fp32 GEMM (m=64, k=256, n=83) exercises edge-tile
 /// safe loads on the N axis; with the bug, the loader pulls the wrong rows
