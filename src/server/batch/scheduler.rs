@@ -710,11 +710,27 @@ impl BatchScheduler {
     /// active batch has drained (each sequence reached its EOS or token budget).
     #[allow(dead_code)]
     pub(crate) fn decode_handoff_until_idle(&mut self) {
-        while !self.active_batch.is_empty() {
-            let ids = self.active_batch.sequence_ids();
-            self.execute_decode_step(&ids);
-            self.finalize_completed();
+        while self.decode_handoff_step() {}
+    }
+
+    /// One decode tick of the handoff drive loop (issue #199): run a single
+    /// `execute_decode_step` + `finalize_completed` over the active batch and
+    /// report whether any sequence remains. The networked decode role calls
+    /// this per tick so it can drain and ship newly produced tokens
+    /// incrementally instead of buffering the whole continuation.
+    ///
+    /// Returns `false` (without stepping) when the active batch is already
+    /// empty, so `while decode_handoff_step() {}` is exactly
+    /// [`Self::decode_handoff_until_idle`].
+    #[allow(dead_code)]
+    pub(crate) fn decode_handoff_step(&mut self) -> bool {
+        if self.active_batch.is_empty() {
+            return false;
         }
+        let ids = self.active_batch.sequence_ids();
+        self.execute_decode_step(&ids);
+        self.finalize_completed();
+        !self.active_batch.is_empty()
     }
 
     /// Create a new batch scheduler, taking ownership of the model and channel.

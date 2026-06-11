@@ -244,8 +244,10 @@ async fn disaggregated_two_process_handoff_matches_single_node() {
     let mut first_token_text = String::new();
     let mut continuation_text = String::new();
     let mut seen_first = false;
-    let mut seen_continuation = false;
-    while !(seen_first && seen_continuation) {
+    let mut continuation_done = false;
+    let mut continuation_frames = 0usize;
+    let mut next_sequence: u64 = 1;
+    while !(seen_first && continuation_done) {
         let received = tokio::time::timeout(Duration::from_secs(120), client.recv()).await;
         let (_from, message) = match received {
             Ok(Ok(message)) => message,
@@ -257,15 +259,27 @@ async fn disaggregated_two_process_handoff_matches_single_node() {
         if let Some(err) = frame.error {
             panic!("a serving node returned a generation error: {err}");
         }
-        let text = frame.tokens.concat();
         match frame.phase {
             ResultPhase::FirstToken => {
-                first_token_text = text;
+                first_token_text = frame.tokens.concat();
                 seen_first = true;
             }
             ResultPhase::Continuation => {
-                continuation_text = text;
-                seen_continuation = true;
+                // Issue #199: the decode node streams the continuation as
+                // multiple per-tick frames; accumulate them and verify the
+                // wire sequence tags are contiguous.
+                if !frame.tokens.is_empty() {
+                    assert_eq!(
+                        frame.start_sequence, next_sequence,
+                        "continuation frame sequence gap"
+                    );
+                    next_sequence += frame.tokens.len() as u64;
+                    continuation_frames += 1;
+                }
+                continuation_text.push_str(&frame.tokens.concat());
+                if frame.done {
+                    continuation_done = true;
+                }
             }
         }
     }
@@ -275,8 +289,15 @@ async fn disaggregated_two_process_handoff_matches_single_node() {
         "did not receive the prefill node's first-token result"
     );
     assert!(
-        seen_continuation,
-        "did not receive the decode node's continuation result"
+        continuation_done,
+        "did not receive the decode node's terminal continuation frame"
+    );
+    // The incremental-streaming acceptance: a multi-token continuation must
+    // arrive as MULTIPLE frames (per decode tick), not one buffered frame.
+    assert!(
+        continuation_frames > 1,
+        "expected the continuation streamed across multiple frames, got \
+         {continuation_frames}"
     );
 
     let merged = format!("{first_token_text}{continuation_text}");

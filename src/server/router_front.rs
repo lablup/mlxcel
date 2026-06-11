@@ -493,32 +493,50 @@ async fn drive_handoff_result(
         return Ok(());
     }
 
-    // Transition to the decode phase and wait for the continuation.
+    // Transition to the decode phase and consume the incrementally streamed
+    // continuation frames (issue #199) until the terminal `done` frame. The
+    // timeout applies per frame, so long generations keep streaming as long
+    // as the decode node makes progress.
     bridge
         .start_decode_stream()
         .map_err(|e| anyhow::anyhow!("stream bridge: {e}"))?;
 
-    let cont = tokio::time::timeout(handoff_timeout, rx.recv())
-        .await
-        .map_err(|_| anyhow::anyhow!("timed out waiting for the decode continuation"))?
-        .ok_or_else(|| anyhow::anyhow!("decode result channel closed before continuation"))?;
-
-    if let Some(e) = cont.error {
-        anyhow::bail!("decode node error: {e}");
-    }
     let mut seq: u64 = 1;
-    for text in &cont.tokens {
-        bridge
-            .submit_decode_token(&TokenEvent {
-                token_id: 0,
-                text: text.clone(),
-                sequence_number: seq,
-                source: TokenSource::Decode,
-                is_final: false,
-            })
-            .map_err(|e| anyhow::anyhow!("stream bridge: {e}"))?;
-        on_token(text);
-        seq += 1;
+    loop {
+        let cont = tokio::time::timeout(handoff_timeout, rx.recv())
+            .await
+            .map_err(|_| anyhow::anyhow!("timed out waiting for the decode continuation"))?
+            .ok_or_else(|| anyhow::anyhow!("decode result channel closed before continuation"))?;
+
+        if let Some(e) = cont.error {
+            anyhow::bail!("decode node error: {e}");
+        }
+        // Wire-level ordering check: a non-zero `start_sequence` must match
+        // the next expected position (frames could in principle reorder
+        // across pooled transport connections).
+        if cont.start_sequence != 0 && cont.start_sequence != seq {
+            anyhow::bail!(
+                "decode continuation frame out of order: expected sequence {seq}, \
+                 got {}",
+                cont.start_sequence
+            );
+        }
+        for text in &cont.tokens {
+            bridge
+                .submit_decode_token(&TokenEvent {
+                    token_id: 0,
+                    text: text.clone(),
+                    sequence_number: seq,
+                    source: TokenSource::Decode,
+                    is_final: false,
+                })
+                .map_err(|e| anyhow::anyhow!("stream bridge: {e}"))?;
+            on_token(text);
+            seq += 1;
+        }
+        if cont.done {
+            break;
+        }
     }
     bridge.finalize();
     Ok(())

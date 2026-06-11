@@ -71,6 +71,7 @@ fn result_frame_round_trips_both_phases() {
         request_id: 3,
         phase: ResultPhase::FirstToken,
         tokens: vec![" Hello".to_string()],
+        start_sequence: 0,
         done: false,
         error: None,
     };
@@ -78,6 +79,7 @@ fn result_frame_round_trips_both_phases() {
         request_id: 3,
         phase: ResultPhase::Continuation,
         tokens: vec![" world".to_string(), "!".to_string()],
+        start_sequence: 1,
         done: true,
         error: None,
     };
@@ -89,8 +91,25 @@ fn result_frame_round_trips_both_phases() {
         assert_eq!(decoded.request_id, frame.request_id);
         assert_eq!(decoded.phase, frame.phase);
         assert_eq!(decoded.tokens, frame.tokens);
+        assert_eq!(decoded.start_sequence, frame.start_sequence);
         assert_eq!(decoded.done, frame.done);
     }
+}
+
+/// `start_sequence` is `serde(default)` so frames from senders predating
+/// issue #199 decode with the "unchecked" 0.
+#[test]
+fn result_frame_start_sequence_defaults_to_zero() {
+    let payload = serde_json::json!({
+        "request_id": 7,
+        "phase": "continuation",
+        "tokens": ["x"],
+        "done": true,
+        "error": null
+    });
+    let decoded: ResultFrame =
+        serde_json::from_slice(&serde_json::to_vec(&payload).unwrap()).expect("decode");
+    assert_eq!(decoded.start_sequence, 0);
 }
 
 #[test]
