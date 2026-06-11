@@ -294,6 +294,9 @@ fn get_weight_copy(weights: &WeightMap, name: &str) -> Result<UniquePtr<MlxArray
 /// vision span is never split across a chunk (the loader sets
 /// `no_chunked_prefill`), so `offset == 0` and `block_ids` aligns with both the
 /// query and key axes.
+///
+/// Used by: Gemma 4 Unified prefill masks, DiffusionGemma image prefill
+/// (`DiffusionGemmaModel::forward_encoder_embeds`, issue #217 phase 2).
 pub(crate) fn overlay_block_bidirectional(
     base: &MlxArray,
     block_ids: &MlxArray,
