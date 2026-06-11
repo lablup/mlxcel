@@ -88,14 +88,28 @@ cross-implementation parity testing against the Python reference; output is not
 useful for normal generation. See [Environment variables](environment-variables.md)
 for details.
 
-## Phase 1 limitations
+## Image input
 
-This is phase 1 of issue #217. The following are not yet supported:
+Pass one or more `--image <path>` flags to include images in the prompt. The flag is repeatable for multi-image prompts.
 
-- **Image input**: DiffusionGemma's vision tower is loaded but not wired. Passing
-  `--image` raises an error with a note to wait for phase 2.
+```
+mlxcel generate -m google/diffusiongemma-26B-A4B-it \
+  --image photo.jpg \
+  -p "Describe what you see." \
+  --max-tokens 256 \
+  --seed 42
+```
+
+Preprocessing reuses the Gemma 4 vision pipeline: images are resized and padded to 768x768, then projected into 256 soft tokens per image. Each image block receives bidirectional attention during prefill, matching the same overlay used by Gemma 4 Unified. The image tokens are inserted into the prompt sequence between the `boi` and `eoi` sentinel tokens.
+
+Video and audio inputs are not supported and are rejected with a clear error message.
+
+## Remaining limitations (phase 2)
+
+The following are not yet supported:
+
 - **Server mode**: `mlxcel serve` and `mlxcel-server` reject DiffusionGemma at
-  load time. Use `mlxcel generate` from the CLI.
+  load time. Use `mlxcel generate` from the CLI. Server support is planned for phase 3 of issue #217.
 - **Tensor parallelism**: The TP planner has a placeholder arm for this family.
 
 ## Usage example

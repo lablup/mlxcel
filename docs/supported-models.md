@@ -44,15 +44,14 @@ requirements. If a checkpoint fails detection or loading, inspect its
 
 | Family | `model_type` key | Notes |
 |--------|-----------------|-------|
-| DiffusionGemma | `diffusion_gemma` / `diffusion_gemma_text` | Block-diffusion on a Gemma 4 MoE backbone. Generates a canvas of tokens per block through iterative denoising rather than token-by-token left-to-right decoding. Phase 1: text-only CLI (`mlxcel generate`). Image input and server mode are not yet supported. See [Block-diffusion generation](block-diffusion.md). |
+| DiffusionGemma | `diffusion_gemma` / `diffusion_gemma_text` | Block-diffusion on a Gemma 4 MoE backbone. Generates a canvas of tokens per block through iterative denoising rather than token-by-token left-to-right decoding. CLI (`mlxcel generate`) supports text and image input (`--image <path>`, repeatable). Server mode is not yet supported. See [Block-diffusion generation](block-diffusion.md). |
 
 DiffusionGemma uses a two-phase forward pass: an encoder prefill that caches the
 prompt into dense FP16 KV caches, then a canvas loop that attends bidirectionally
 within each output block while attending causally to the cached prefix.
 Load detection accepts `model_type: "diffusion_gemma"` (outer config) and
 `model_type: "diffusion_gemma_text"` (inner `text_config`).
-The fused MoE `gate_up_proj` weights are split at load time; vision-tower weights
-are skipped without error.
+The fused MoE `gate_up_proj` weights are split at load time. When a vision tower is present in the checkpoint, its weights are loaded and wired for image input; checkpoints without vision weights fall back to text-only mode without error.
 
 ## Vision-language and multimodal variants
 
