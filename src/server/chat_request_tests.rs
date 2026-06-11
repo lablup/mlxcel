@@ -435,6 +435,122 @@ fn build_raw_json_messages_leaves_non_object_tool_call_arguments_as_string() {
 }
 
 #[test]
+fn build_raw_json_messages_leaves_json_scalar_or_array_arguments_as_string() {
+    // Only object-valued JSON strings are promoted to mappings. Other valid
+    // JSON shapes are still OpenAI wire-format strings from the request model's
+    // point of view and must survive byte-for-byte.
+    for arguments in ["[1,2]", "42", "true", "null", r#""quoted""#] {
+        let request = req_with_tool_call_arguments(arguments);
+        let raw = build_raw_json_messages(&request);
+        let args = &raw.as_array().unwrap()[0]["tool_calls"][0]["function"]["arguments"];
+        assert!(
+            args.is_string(),
+            "non-object JSON arguments must remain a string, got {args} for {arguments}"
+        );
+        assert_eq!(args.as_str().unwrap(), arguments);
+    }
+}
+
+#[tokio::test]
+async fn prepare_chat_request_renders_tool_call_arguments_as_mapping() {
+    // End-to-end regression for issue #209: the raw-template path must receive
+    // object-valued tool-call arguments as a mapping, otherwise templates that
+    // iterate with `arguments|items` fail and prepare_chat_request falls back
+    // to the simple "User:/Assistant:" prompt.
+    let request = request_with_messages(vec![
+        Message {
+            role: Role::User,
+            content: MessageContent::Text("Read a file".to_string()),
+            name: None,
+            tool_call_id: None,
+            tool_calls: None,
+        },
+        Message {
+            role: Role::Assistant,
+            content: MessageContent::Text(String::new()),
+            name: None,
+            tool_call_id: None,
+            tool_calls: Some(vec![ToolCallInMessage {
+                id: "call_1".to_string(),
+                call_type: "function".to_string(),
+                function: ToolCallFunction {
+                    name: "read_file".to_string(),
+                    arguments: r#"{"path":"/foo","recursive":true}"#.to_string(),
+                },
+            }]),
+        },
+        Message {
+            role: Role::Tool,
+            content: MessageContent::Text("ok".to_string()),
+            name: None,
+            tool_call_id: Some("call_1".to_string()),
+            tool_calls: None,
+        },
+        Message {
+            role: Role::User,
+            content: MessageContent::Text("Continue".to_string()),
+            name: None,
+            tool_call_id: None,
+            tool_calls: None,
+        },
+    ]);
+    let processor = ChatTemplateProcessor::with_template(
+        r#"{% for message in messages %}
+{% if message.tool_calls is defined %}
+{% for tool_call in message.tool_calls %}
+TEMPLATE_OK:{{ tool_call.function.name }}
+{% for name, value in tool_call.function.arguments|items %}ARG:{{ name }}={{ value }};
+{% endfor %}
+{% endfor %}
+{% endif %}
+{% endfor %}
+{% if add_generation_prompt %}Assistant:{% endif %}"#
+            .to_string(),
+    );
+
+    let prepared = prepare_chat_request(&processor, &request, None)
+        .await
+        .unwrap();
+    assert!(
+        prepared.prompt.contains("TEMPLATE_OK:read_file"),
+        "real template must render instead of falling back: {:?}",
+        prepared.prompt
+    );
+    assert!(
+        prepared.prompt.contains("ARG:path=/foo;"),
+        "object string arguments must be iterable as a mapping: {:?}",
+        prepared.prompt
+    );
+    assert!(
+        prepared.prompt.contains("ARG:recursive=true;"),
+        "boolean argument value must survive mapping normalization: {:?}",
+        prepared.prompt
+    );
+    assert!(
+        !prepared.prompt.contains("User: Read a file"),
+        "fallback prompt indicates the `|items` render still failed: {:?}",
+        prepared.prompt
+    );
+}
+
+#[tokio::test]
+async fn prepare_chat_request_tojson_templates_render_normalized_arguments() {
+    // Templates that serialize assistant tool-call arguments with `tojson`
+    // remain valid after normalization: they now emit the JSON object the
+    // assistant originally produced, rather than an escaped JSON string.
+    let request = req_with_tool_call_arguments(r#"{"path":"/foo","recursive":true}"#);
+    let processor = ChatTemplateProcessor::with_template(
+        r#"{% for message in messages %}{% for tool_call in message.tool_calls %}{{ tool_call.function.arguments | tojson }}{% endfor %}{% endfor %}"#
+            .to_string(),
+    );
+
+    let prepared = prepare_chat_request(&processor, &request, None)
+        .await
+        .unwrap();
+    assert_eq!(prepared.prompt, r#"{"path":"/foo","recursive":true}"#);
+}
+
+#[test]
 fn deserialize_tool_call_request_without_assistant_content() {
     // Issue #89: OpenAI-compatible clients omit `content` on the assistant
     // `tool_calls` message of a multi-turn tool loop. The follow-up request

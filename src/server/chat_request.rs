@@ -360,10 +360,10 @@ fn build_raw_json_messages_with_thinking(
 /// silently degrading the model's multi-turn context and destroying
 /// prompt-cache prefix reuse (every tool turn re-prefills cold).
 ///
-/// We replace `arguments` only when the string parses to a JSON **object**, so
-/// templates that expect a string (e.g. Gemma 4 via `tojson` / `string`) and
-/// malformed/scalar arguments are left untouched. Mirrors mlx-serve's
-/// `chat.zig` workaround.
+/// We replace `arguments` only when the string parses to a JSON **object**;
+/// templates that serialize arguments via `tojson` then emit the original
+/// object shape, while malformed/scalar arguments stay strings for templates
+/// that treat them as text. Mirrors mlx-serve's `chat.zig` workaround.
 fn normalize_tool_call_arguments(tool_calls: &mut serde_json::Value) {
     let serde_json::Value::Array(calls) = tool_calls else {
         return;
