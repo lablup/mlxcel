@@ -297,6 +297,29 @@ struct ServerArgs {
     )]
     enable_vlm_prefix_cache: bool,
 
+    /// Maximum denoising steps per canvas block (diffusion models only;
+    /// default: the checkpoint's generation_config, typically 48)
+    #[arg(long = "max-denoising-steps", value_name = "N")]
+    max_denoising_steps: Option<usize>,
+
+    /// Per-step acceptance sampler for diffusion models (diffusion models only)
+    #[arg(
+        long = "diffusion-sampler",
+        value_name = "SAMPLER",
+        default_value = "entropy-bound",
+        value_parser = ["entropy-bound", "confidence-threshold"]
+    )]
+    diffusion_sampler: String,
+
+    /// Confidence threshold for `--diffusion-sampler confidence-threshold`
+    /// (diffusion models only)
+    #[arg(
+        long = "diffusion-threshold",
+        value_name = "FLOAT",
+        default_value_t = 0.9
+    )]
+    diffusion_threshold: f32,
+
     /// Preemption policy: "longest-first" (default) or "lowest-priority"
     #[arg(long = "preemption-policy", default_value = "longest-first")]
     preemption_policy: String,
@@ -1273,6 +1296,11 @@ fn build_startup_input(mut args: ServerArgs) -> anyhow::Result<ServerStartupInpu
         // the flag, so no separate env-fallback helper is needed.
         #[cfg(feature = "surgery")]
         surgery_config_path: args.surgery,
+        // serve-level block-diffusion knobs (#217 phase 3); diffusion models
+        // only.
+        max_denoising_steps: args.max_denoising_steps,
+        diffusion_sampler: args.diffusion_sampler.clone(),
+        diffusion_threshold: args.diffusion_threshold,
     })
 }
 

@@ -159,23 +159,20 @@ pub(crate) struct WorkerSchedulerConfig {
     /// short-circuits in [`BatchScheduler::decode_single_step`] with no
     /// overhead.
     pub speculative_dispatch: crate::server::SpeculativeDispatch,
-}
-
-/// Refuse model families the server runtime cannot drive yet, with a clear
-/// actionable error instead of a confusing downstream failure.
-///
-/// DiffusionGemma (issue #217 phase 1) generates by model-owned block
-/// diffusion; the batched scheduler and the SSE serving path have no
-/// diffusion round loop yet (phase 3), so the worker rejects the load
-/// outright and points the operator at the CLI.
-fn server_unsupported_model_error(model_path: &std::path::Path) -> Option<anyhow::Error> {
-    match crate::models::get_model_type(model_path) {
-        Ok(crate::models::ModelType::DiffusionGemma) => Some(anyhow::anyhow!(
-            "DiffusionGemma (block diffusion) is not supported in server mode yet; use the CLI: \
-             mlxcel generate -m <model> -p \"...\""
-        )),
-        _ => None,
-    }
+    /// serve-level `--max-denoising-steps` override (diffusion models only).
+    ///
+    /// `None` (the default) keeps the checkpoint's `generation_config` step
+    /// cap. Only the DiffusionGemma worker loop reads it; autoregressive
+    /// models ignore it.
+    pub max_denoising_steps: Option<usize>,
+    /// serve-level `--diffusion-sampler` selection (diffusion models only).
+    ///
+    /// `"entropy-bound"` (default) or `"confidence-threshold"`; parsed once on
+    /// the worker thread. Ignored by non-diffusion models.
+    pub diffusion_sampler: String,
+    /// serve-level `--diffusion-threshold` for the confidence-threshold
+    /// sampler (diffusion models only). Ignored by non-diffusion models.
+    pub diffusion_threshold: f32,
 }
 
 pub(crate) fn spawn_model_worker_with_batch_config(
@@ -192,9 +189,7 @@ pub(crate) fn spawn_model_worker_with_batch_config(
         tracing::info!("Model worker thread starting, loading model...");
 
         let load_start = Instant::now();
-        let result = if let Some(err) = server_unsupported_model_error(&model_path) {
-            Err(err)
-        } else if let Some(ref pipeline_runtime) = sched_config.pipeline_parallel_runtime {
+        let result = if let Some(ref pipeline_runtime) = sched_config.pipeline_parallel_runtime {
             match pipeline_runtime {
                 crate::server::PipelineParallelRuntimeConfig::InProcess {
                     layers,
@@ -265,6 +260,38 @@ pub(crate) fn spawn_model_worker_with_batch_config(
         if !config_eos.is_empty() {
             tracing::info!("EOS tokens from config: {:?}", config_eos);
         }
+
+        // DiffusionGemma (issue #217 phase 3): block-diffusion models are
+        // model-owned single-stream generators (`supports_batching() == false`)
+        // and cannot join the BatchScheduler. Serve them on a dedicated
+        // batch-1 loop off the same request channel and return; all the
+        // scheduler-specific setup below is skipped.
+        let model = match model {
+            LoadedModel::DiffusionGemma(diffusion) => {
+                let sampler = crate::server::diffusion_worker::parse_diffusion_sampler(
+                    &sched_config.diffusion_sampler,
+                )
+                .unwrap_or_else(|err| {
+                    tracing::warn!("{err}; defaulting to entropy-bound");
+                    crate::models::diffusion_gemma::DiffusionSamplerKind::EntropyBound
+                });
+                let defaults = crate::server::diffusion_worker::DiffusionServeDefaults {
+                    sampler,
+                    confidence_threshold: sched_config.diffusion_threshold,
+                    max_denoising_steps: sched_config.max_denoising_steps,
+                };
+                crate::server::diffusion_worker::run_diffusion_worker_loop(
+                    &diffusion,
+                    &tokenizer,
+                    &model_path,
+                    request_rx,
+                    defaults,
+                    &config_eos,
+                );
+                return;
+            }
+            other => other,
+        };
 
         // Axis B (B8): resolve the server-wide LangBiasConfig once,
         // after the tokenizer is available. Empty bias set or an HF-less
@@ -681,9 +708,7 @@ pub(crate) fn spawn_legacy_model_worker(
         );
 
         let load_start = Instant::now();
-        let result = if let Some(err) = server_unsupported_model_error(&model_path) {
-            Err(err)
-        } else if tensor_parallel.tp_size > 1 {
+        let result = if tensor_parallel.tp_size > 1 {
             crate::load_model_with_tensor_parallel(
                 &model_path,
                 adapter_path.as_deref(),
@@ -730,6 +755,26 @@ pub(crate) fn spawn_legacy_model_worker(
         if !config_eos.is_empty() {
             tracing::info!("EOS tokens from config: {:?}", config_eos);
         }
+
+        // DiffusionGemma (issue #217 phase 3): serve the block-diffusion model
+        // on its dedicated batch-1 loop. The legacy worker has no serve-level
+        // diffusion flags wired in (like `--vision-cache-size`), so it uses the
+        // engine defaults; operators who need to tune the diffusion knobs use
+        // the default batched worker.
+        let model = match model {
+            LoadedModel::DiffusionGemma(diffusion) => {
+                crate::server::diffusion_worker::run_diffusion_worker_loop(
+                    &diffusion,
+                    &tokenizer,
+                    &model_path,
+                    request_rx,
+                    crate::server::diffusion_worker::DiffusionServeDefaults::default(),
+                    &config_eos,
+                );
+                return;
+            }
+            other => other,
+        };
 
         tracing::info!(
             "Starting legacy sequential worker \

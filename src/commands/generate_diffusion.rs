@@ -27,63 +27,27 @@ use std::path::Path;
 use mlxcel::models::DiffusionGemmaModel;
 use mlxcel::models::diffusion_gemma::{
     DiffusionGenerateOptions, DiffusionGenerationStats, DiffusionSamplerKind,
-    DiffusionVisionPrefill,
+    DiffusionVisionPrefill, PreparedDiffusionImagePrompt,
 };
 use mlxcel::server::model_provider::model_worker::StreamingDecodeState;
 use mlxcel::tokenizer::MlxcelTokenizer;
-use mlxcel::vision::processors::gemma4::{Gemma4ImageInput, Gemma4Processor};
 
 use super::generate::print_generation_preamble;
 use crate::GenerateArgs;
 
-/// Build the Gemma 4 image processor for the DiffusionGemma checkpoint.
-///
-/// The diffusion checkpoint's `image_processor` is identical to the gemma-4
-/// VLM family (size 224x224, patch 16, pooling_kernel_size 3, 280 soft
-/// tokens). Values are read from `processor_config.json` when present and
-/// fall back to those defaults otherwise.
-fn build_image_processor(model_dir: &Path, default_soft_tokens: usize) -> Gemma4Processor {
-    let image_cfg = std::fs::read_to_string(model_dir.join("processor_config.json"))
-        .ok()
-        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
-        .and_then(|cfg| cfg.get("image_processor").cloned());
-    let get = |key: &str, default: usize| -> usize {
-        image_cfg
-            .as_ref()
-            .and_then(|cfg| cfg.get(key))
-            .and_then(|v| v.as_u64())
-            .map(|v| v as usize)
-            .unwrap_or(default)
-    };
-    Gemma4Processor::new(
-        get("patch_size", 16),
-        get("max_soft_tokens", default_soft_tokens),
-        get("pooling_kernel_size", 3),
-    )
-}
-
-/// Result of preparing image input: the expanded prompt ids (with each image
-/// placeholder rewritten to `boi + image_token * N + eoi`) and the prefill.
-struct PreparedDiffusionVision {
-    expanded_ids: Vec<i32>,
-    prefill: DiffusionVisionPrefill,
-}
-
 /// Preprocess `--image` paths, expand the prompt, and build the vision
 /// prefill (inputs_embeds + overlay block ids).
+///
+/// Loads the images from disk, then delegates the preprocessing / prompt
+/// expansion / prefill construction to the shared
+/// [`DiffusionGemmaModel::prepare_image_prompt`] helper so the CLI and the
+/// server diffusion worker share one image path.
 fn prepare_diffusion_vision(
     model: &DiffusionGemmaModel,
     model_dir: &Path,
     image_paths: &[std::path::PathBuf],
     prompt_tokens: &[i32],
-) -> Result<PreparedDiffusionVision> {
-    let vision = model.vision().ok_or_else(|| {
-        anyhow!(
-            "This DiffusionGemma checkpoint does not include a vision tower; \
-             run with a text-only prompt"
-        )
-    })?;
-
+) -> Result<PreparedDiffusionImagePrompt> {
     let images: Vec<image::DynamicImage> = image_paths
         .iter()
         .map(|path| {
@@ -92,34 +56,18 @@ fn prepare_diffusion_vision(
         .collect::<Result<Vec<_>>>()?;
     println!("Loaded {} image(s).", images.len());
 
-    let processor = build_image_processor(model_dir, vision.soft_tokens_per_image);
-    let processed: Vec<Gemma4ImageInput> = processor.preprocess(&images);
-    let num_soft_tokens: Vec<usize> = processed.iter().map(|img| img.num_soft_tokens).collect();
-
-    let mut expanded_ids = prompt_tokens.to_vec();
-    mlxcel::vlm_runtime::expand_gemma4_image_tokens_pub(
-        &mut expanded_ids,
-        vision.image_token_id,
-        vision.boi_token_id,
-        vision.eoi_token_id,
-        &num_soft_tokens,
-    )?;
-
-    let prefill = model
-        .prepare_vision_prefill(&expanded_ids, &processed)
+    let prepared = model
+        .prepare_image_prompt(model_dir, &images, prompt_tokens)
         .map_err(|e| anyhow!("{e}"))?;
 
     println!(
         "DiffusionGemma: expanded {} image(s) into {} soft token(s) ({} total prompt tokens)",
         images.len(),
-        num_soft_tokens.iter().sum::<usize>(),
-        expanded_ids.len()
+        prepared.num_soft_tokens.iter().sum::<usize>(),
+        prepared.expanded_ids.len()
     );
 
-    Ok(PreparedDiffusionVision {
-        expanded_ids,
-        prefill,
-    })
+    Ok(prepared)
 }
 
 fn parse_sampler_kind(name: &str) -> Result<DiffusionSamplerKind> {

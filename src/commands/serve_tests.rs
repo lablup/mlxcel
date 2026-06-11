@@ -136,6 +136,8 @@ fn sample_args() -> crate::ServeArgs {
         // (A4): keep tests on the baseline path by default.
         #[cfg(feature = "surgery")]
         surgery: None,
+        // serve-level diffusion knobs (#217 phase 3): engine defaults in tests.
+        diffusion: crate::DiffusionServeOptions::default(),
     }
 }
 

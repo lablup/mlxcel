@@ -353,6 +353,14 @@ pub struct ServerStartupConfig {
     /// trivial to construct.
     #[cfg(feature = "surgery")]
     pub surgery_config_path: Option<PathBuf>,
+
+    /// `--max-denoising-steps` (issue #217 phase 3). Serve-level diffusion
+    /// step-cap override; `None` keeps the checkpoint default.
+    pub max_denoising_steps: Option<usize>,
+    /// `--diffusion-sampler` (issue #217 phase 3).
+    pub diffusion_sampler: String,
+    /// `--diffusion-threshold` (issue #217 phase 3).
+    pub diffusion_threshold: f32,
 }
 
 impl Default for ServerStartupConfig {
@@ -460,6 +468,9 @@ impl Default for ServerStartupConfig {
             conversation_store_ttl_secs: 3600,
             #[cfg(feature = "surgery")]
             surgery_config_path: None,
+            max_denoising_steps: None,
+            diffusion_sampler: "entropy-bound".to_string(),
+            diffusion_threshold: 0.9,
         }
     }
 }
@@ -859,6 +870,11 @@ pub(super) fn build_server_config(
         prefill_peers: startup.prefill_peers.clone(),
         decode_peers: startup.decode_peers.clone(),
         serving_bind: startup.serving_bind,
+        // serve-level diffusion knobs (#217 phase 3); consumed only by the
+        // DiffusionGemma worker loop.
+        max_denoising_steps: startup.max_denoising_steps,
+        diffusion_sampler: startup.diffusion_sampler.clone(),
+        diffusion_threshold: startup.diffusion_threshold,
     }
 }
 

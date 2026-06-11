@@ -342,6 +342,11 @@ fn build_startup_input(mut args: crate::ServeArgs) -> anyhow::Result<ServerStart
         // the flag, so no separate env-fallback helper is needed.
         #[cfg(feature = "surgery")]
         surgery_config_path: args.surgery,
+        // serve-level block-diffusion knobs (#217 phase 3). Only diffusion
+        // models read them; autoregressive models ignore them.
+        max_denoising_steps: args.diffusion.max_denoising_steps,
+        diffusion_sampler: args.diffusion.diffusion_sampler,
+        diffusion_threshold: args.diffusion.diffusion_threshold,
     })
 }
 

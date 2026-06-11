@@ -42,8 +42,8 @@
 mod generate;
 
 pub use generate::{
-    DiffusionGenerateOptions, DiffusionGenerationStats, DiffusionSamplerKind,
-    diffusion_debug_canvas_enabled,
+    DiffusionFinishReason, DiffusionGenerateOptions, DiffusionGenerationStats,
+    DiffusionSamplerKind, diffusion_debug_canvas_enabled,
 };
 
 use crate::models::gemma4::{
@@ -53,7 +53,7 @@ use crate::models::gemma4::{
 use crate::vision::encoders::gemma4::{Gemma4VisionConfig, Gemma4VisionModel};
 use crate::vision::gemma4_multimodal_embedder::Gemma4MultimodalEmbedder;
 use crate::vision::gemma4_unified_mask::{UnifiedTokenIds, compute_vision_block_ids};
-use crate::vision::processors::gemma4::Gemma4ImageInput;
+use crate::vision::processors::gemma4::{Gemma4ImageInput, Gemma4Processor};
 use mlxcel_core::generate::LanguageModel;
 use mlxcel_core::layers::{KVCache, RMSNorm, UnifiedLinear};
 use mlxcel_core::weights::WeightMap;
@@ -558,6 +558,21 @@ pub struct DiffusionVisionPrefill {
     pub(crate) vision_block_ids: Option<Vec<i32>>,
 }
 
+/// Result of preparing image input for one diffusion prompt: the expanded
+/// prompt ids (with each image placeholder rewritten to
+/// `boi + image_token * N + eoi`) and the matching vision prefill.
+///
+/// Shared by the CLI `generate` driver
+/// ([`crate::commands::generate_diffusion`]) and the server diffusion worker
+/// so the two surfaces preprocess images, expand the prompt, and build the
+/// prefill through one code path.
+pub struct PreparedDiffusionImagePrompt {
+    pub expanded_ids: Vec<i32>,
+    pub prefill: DiffusionVisionPrefill,
+    /// Soft-token count contributed by each input image (in prompt order).
+    pub num_soft_tokens: Vec<usize>,
+}
+
 // ---------------------------------------------------------------------------
 // Model
 // ---------------------------------------------------------------------------
@@ -950,6 +965,80 @@ impl DiffusionGemmaModel {
         Ok(DiffusionVisionPrefill {
             inputs_embeds,
             vision_block_ids,
+        })
+    }
+
+    /// Build the Gemma 4 image processor for this checkpoint.
+    ///
+    /// The DiffusionGemma `image_processor` is identical to the gemma-4 VLM
+    /// family (size 224x224, patch 16, pooling_kernel_size 3, 280 soft
+    /// tokens). Values are read from `processor_config.json` when present and
+    /// fall back to those defaults otherwise. Returns `None` for a text-only
+    /// checkpoint (no vision tower).
+    pub fn build_image_processor(&self, model_dir: &Path) -> Option<Gemma4Processor> {
+        let vision = self.vision.as_ref()?;
+        let image_cfg = std::fs::read_to_string(model_dir.join("processor_config.json"))
+            .ok()
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+            .and_then(|cfg| cfg.get("image_processor").cloned());
+        let get = |key: &str, default: usize| -> usize {
+            image_cfg
+                .as_ref()
+                .and_then(|cfg| cfg.get(key))
+                .and_then(|v| v.as_u64())
+                .map(|v| v as usize)
+                .unwrap_or(default)
+        };
+        Some(Gemma4Processor::new(
+            get("patch_size", 16),
+            get("max_soft_tokens", vision.soft_tokens_per_image),
+            get("pooling_kernel_size", 3),
+        ))
+    }
+
+    /// Preprocess decoded images, expand the prompt with image placeholder
+    /// tokens, and build the vision prefill.
+    ///
+    /// Shared by the CLI `generate` driver and the server diffusion worker:
+    /// both decode their images upstream (CLI from `--image` paths, server
+    /// from request bytes) and hand the [`image::DynamicImage`] values here.
+    /// Errors when the checkpoint has no vision tower or no images are
+    /// supplied.
+    pub fn prepare_image_prompt(
+        &self,
+        model_dir: &Path,
+        images: &[image::DynamicImage],
+        prompt_tokens: &[i32],
+    ) -> Result<PreparedDiffusionImagePrompt, String> {
+        let vision = self.vision.as_ref().ok_or_else(|| {
+            "This DiffusionGemma checkpoint does not include a vision tower; \
+             run with a text-only prompt"
+                .to_string()
+        })?;
+        if images.is_empty() {
+            return Err("DiffusionGemma: image input requested but no images supplied".to_string());
+        }
+        let processor = self
+            .build_image_processor(model_dir)
+            .ok_or_else(|| "DiffusionGemma: this checkpoint has no vision tower".to_string())?;
+        let processed: Vec<Gemma4ImageInput> = processor.preprocess(images);
+        let num_soft_tokens: Vec<usize> = processed.iter().map(|img| img.num_soft_tokens).collect();
+
+        let mut expanded_ids = prompt_tokens.to_vec();
+        crate::vlm_runtime::expand_gemma4_image_tokens_pub(
+            &mut expanded_ids,
+            vision.image_token_id,
+            vision.boi_token_id,
+            vision.eoi_token_id,
+            &num_soft_tokens,
+        )
+        .map_err(|e| format!("{e}"))?;
+
+        let prefill = self.prepare_vision_prefill(&expanded_ids, &processed)?;
+        Ok(PreparedDiffusionImagePrompt {
+            expanded_ids,
+            prefill,
+            num_soft_tokens,
         })
     }
 

@@ -153,6 +153,10 @@ fn sample_input() -> ServerStartupInput {
         // (A4): default to None for baseline-path tests.
         #[cfg(feature = "surgery")]
         surgery_config_path: None,
+        // serve-level diffusion knobs (#217 phase 3): engine defaults in tests.
+        max_denoising_steps: None,
+        diffusion_sampler: "entropy-bound".to_string(),
+        diffusion_threshold: 0.9,
     }
 }
 

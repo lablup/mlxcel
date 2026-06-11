@@ -398,6 +398,13 @@ pub struct ServerStartupInput {
     /// error before any model load begins.
     #[cfg(feature = "surgery")]
     pub surgery_config_path: Option<PathBuf>,
+
+    /// `--max-denoising-steps` (issue #217 phase 3). Diffusion models only.
+    pub max_denoising_steps: Option<usize>,
+    /// `--diffusion-sampler` (issue #217 phase 3). Diffusion models only.
+    pub diffusion_sampler: String,
+    /// `--diffusion-threshold` (issue #217 phase 3). Diffusion models only.
+    pub diffusion_threshold: f32,
 }
 
 impl ServerStartupInput {
@@ -598,6 +605,10 @@ impl ServerStartupInput {
             // exactly once before spawning the model worker.
             #[cfg(feature = "surgery")]
             surgery_config_path: self.surgery_config_path,
+            // serve-level diffusion knobs (#217 phase 3).
+            max_denoising_steps: self.max_denoising_steps,
+            diffusion_sampler: self.diffusion_sampler,
+            diffusion_threshold: self.diffusion_threshold,
         })
     }
 }

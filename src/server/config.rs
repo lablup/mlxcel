@@ -447,6 +447,16 @@ pub struct ServerConfig {
     /// on a non-hybrid node enables the live prefill/decode role loop; `None`
     /// keeps the standard single-node scheduler loop.
     pub serving_bind: Option<std::net::SocketAddr>,
+    /// `--max-denoising-steps` (issue #217 phase 3). Serve-level override for
+    /// the DiffusionGemma per-block denoising step cap; `None` keeps the
+    /// checkpoint default. Only diffusion models read it.
+    pub max_denoising_steps: Option<usize>,
+    /// `--diffusion-sampler` (issue #217 phase 3). `"entropy-bound"` (default)
+    /// or `"confidence-threshold"`. Only diffusion models read it.
+    pub diffusion_sampler: String,
+    /// `--diffusion-threshold` (issue #217 phase 3). Confidence threshold for
+    /// the confidence-threshold sampler. Only diffusion models read it.
+    pub diffusion_threshold: f32,
 }
 
 impl Default for ServerConfig {
@@ -506,6 +516,9 @@ impl Default for ServerConfig {
             prefill_peers: Vec::new(),
             decode_peers: Vec::new(),
             serving_bind: None,
+            max_denoising_steps: None,
+            diffusion_sampler: "entropy-bound".to_string(),
+            diffusion_threshold: 0.9,
         }
     }
 }
