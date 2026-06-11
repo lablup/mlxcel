@@ -575,12 +575,19 @@ impl PagedBlockPool {
             return Ok(());
         }
 
-        let new_visible_len = layer.visible_len() + token_count;
-        let required_blocks = new_visible_len.div_ceil(self.layout.block_size);
+        // `block_ids` is indexed by ABSOLUTE position (`abs / block_size`),
+        // the convention `write_prefill` and `gather_visible` use, so the
+        // block count must cover the absolute length. With
+        // `logical_start == 0` this is identical to the old visible-length
+        // sizing; with `logical_start > 0` (a sliding-window owner,
+        // issue #196) visible-length sizing under-allocated and the next
+        // write indexed past the table.
+        let new_len = layer.len + token_count;
+        let required_blocks = new_len.div_ceil(self.layout.block_size);
         while layer.block_ids.len() < required_blocks {
             layer.block_ids.push(self.acquire_block(layer_idx)?);
         }
-        layer.len += token_count;
+        layer.len = new_len;
         Ok(())
     }
 
@@ -609,10 +616,22 @@ impl PagedBlockPool {
 
         layer.len -= trimmed;
         if layer.len == layer.logical_start {
+            // The back-trim consumed the whole visible window: the layer is
+            // logically empty, so reset to the origin and release everything
+            // (the old code only reset `logical_start`, which resurrected the
+            // slid-away prefix as visible, issue #196).
+            layer.len = 0;
             layer.logical_start = 0;
         }
 
-        let required_blocks = layer.visible_len().div_ceil(self.layout.block_size);
+        // `block_ids` is indexed by ABSOLUTE position; release only the tail
+        // blocks past the absolute length. Sizing by visible length here
+        // released tail blocks that still held visible tokens once
+        // `logical_start` crossed a block boundary (issue #196). Head blocks
+        // wholly before `logical_start` stay allocated; reclaiming them needs
+        // a block-base offset and is deferred until a sliding-window paged
+        // path exists.
+        let required_blocks = layer.len.div_ceil(self.layout.block_size);
         while layer.block_ids.len() > required_blocks {
             if let Some(block_id) = layer.block_ids.pop() {
                 self.release_block(block_id)?;
@@ -660,12 +679,14 @@ impl PagedBlockPool {
         }
 
         for (layer_idx, layer) in state.layers.iter().enumerate() {
-            let required_blocks = layer.visible_len().div_ceil(self.layout.block_size);
+            // Absolute-position indexing: the block table must cover the full
+            // absolute length, not just the visible window (issue #196).
+            let required_blocks = layer.len.div_ceil(self.layout.block_size);
             if layer.block_ids.len() < required_blocks {
                 return Err(format!(
-                    "PagedBlockPool: restored layer {layer_idx} has {} blocks for visible length {}, requires at least {}",
+                    "PagedBlockPool: restored layer {layer_idx} has {} blocks for length {}, requires at least {}",
                     layer.block_ids.len(),
-                    layer.visible_len(),
+                    layer.len,
                     required_blocks
                 ));
             }

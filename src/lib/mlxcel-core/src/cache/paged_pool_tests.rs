@@ -1107,3 +1107,106 @@ fn paged_block_byte_roundtrip_preserves_fp16() {
 fn paged_block_byte_roundtrip_preserves_bf16() {
     assert_byte_roundtrip_preserves_content(dtype::BFLOAT16);
 }
+
+// ---------------------------------------------------------------------------
+// Issue #196: absolute block indexing under logical_start > 0
+// ---------------------------------------------------------------------------
+
+/// `write_prefill` after a sliding-window advance (`logical_start > 0`) must
+/// land the suffix on the correct ABSOLUTE blocks and round-trip through
+/// `gather_visible`.
+#[test]
+fn write_prefill_round_trips_with_logical_start() {
+    let block_size = 4usize;
+    let mut pool = fp16_pool(block_size, 1);
+    let mut state = PagedSequenceState::new(pool.layout());
+
+    // Prefill 12 tokens cold (3 blocks), then slide the window forward by 5.
+    let k0 = make_block(100.0, 12);
+    let v0 = make_block(500.0, 12);
+    pool.write_prefill(&mut state, 0, &k0, &v0).unwrap();
+    state.layer_mut(0).unwrap().logical_start = 5;
+
+    // Write a 6-token suffix: absolute positions [12, 18) spanning blocks 3-4.
+    let k1 = make_block(112.0, 6);
+    let v1 = make_block(512.0, 6);
+    pool.write_prefill(&mut state, 0, &k1, &v1).unwrap();
+
+    let layer = state.layer(0).unwrap();
+    assert_eq!(layer.len, 18);
+    assert_eq!(layer.visible_len(), 13);
+    // Absolute sizing: ceil(18 / 4) = 5 blocks (visible-based sizing would
+    // have allocated only ceil(13 / 4) = 4 and written past the table).
+    assert_eq!(layer.block_ids.len(), 5);
+
+    let (gk, gv) = pool
+        .gather_visible(&state, 0)
+        .unwrap()
+        .expect("gather must return data");
+    assert_eq!(ffi::array_shape(&gk), vec![1, H, 13, D]);
+
+    // Dense reference: 18-token buffer (two writes), visible window [5, 18).
+    let dense_blocks = vec![(make_block(100.0, 12), 0), (make_block(112.0, 6), 12)];
+    let dense_k = dense_reference(&dense_blocks, 18, 5, 13);
+    let dense_blocks_v = vec![(make_block(500.0, 12), 0), (make_block(512.0, 6), 12)];
+    let dense_v = dense_reference(&dense_blocks_v, 18, 5, 13);
+    assert_eq!(flatten_fp32(&gk), flatten_fp32(&dense_k));
+    assert_eq!(flatten_fp32(&gv), flatten_fp32(&dense_v));
+}
+
+/// A back-trim with `logical_start` past a block boundary must NOT release
+/// tail blocks that still hold visible tokens (the old visible-length sizing
+/// released them, and `gather_visible` then failed).
+#[test]
+fn trim_preserves_visible_window_with_logical_start_past_block_boundary() {
+    let block_size = 4usize;
+    let mut pool = fp16_pool(block_size, 1);
+    let mut state = PagedSequenceState::new(pool.layout());
+
+    let k0 = make_block(100.0, 12);
+    let v0 = make_block(500.0, 12);
+    pool.write_prefill(&mut state, 0, &k0, &v0).unwrap();
+    // logical_start (5) is past the first block boundary (4).
+    state.layer_mut(0).unwrap().logical_start = 5;
+
+    // Back-trim 2 tokens: len 12 -> 10, visible window [5, 10).
+    let trimmed = pool.trim_tokens(&mut state, 0, 2).unwrap();
+    assert_eq!(trimmed, 2);
+    let layer = state.layer(0).unwrap();
+    assert_eq!(layer.len, 10);
+    assert_eq!(layer.visible_len(), 5);
+    // Absolute sizing keeps ceil(10 / 4) = 3 blocks (visible-based sizing
+    // would have popped block 2, which holds positions 8 and 9).
+    assert_eq!(layer.block_ids.len(), 3);
+
+    let (gk, _gv) = pool
+        .gather_visible(&state, 0)
+        .unwrap()
+        .expect("gather must return data");
+    assert_eq!(ffi::array_shape(&gk), vec![1, H, 5, D]);
+    let dense_k = dense_reference(&[(make_block(100.0, 12), 0)], 12, 5, 5);
+    assert_eq!(flatten_fp32(&gk), flatten_fp32(&dense_k));
+}
+
+/// A back-trim that consumes the whole visible window empties the layer:
+/// origin reset, all blocks released, nothing left to gather.
+#[test]
+fn trim_to_logical_start_empties_the_layer() {
+    let block_size = 4usize;
+    let mut pool = fp16_pool(block_size, 1);
+    let mut state = PagedSequenceState::new(pool.layout());
+
+    let k0 = make_block(100.0, 12);
+    let v0 = make_block(500.0, 12);
+    pool.write_prefill(&mut state, 0, &k0, &v0).unwrap();
+    state.layer_mut(0).unwrap().logical_start = 5;
+
+    // Trim the entire visible window (7 tokens).
+    let trimmed = pool.trim_tokens(&mut state, 0, 7).unwrap();
+    assert_eq!(trimmed, 7);
+    let layer = state.layer(0).unwrap();
+    assert_eq!(layer.len, 0);
+    assert_eq!(layer.logical_start, 0);
+    assert_eq!(layer.block_ids.len(), 0);
+    assert!(pool.gather_visible(&state, 0).unwrap().is_none());
+}

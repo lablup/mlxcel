@@ -2511,3 +2511,44 @@ fn test_batch_quantized_kv_cache_make_mask_no_padding_multi_token() {
         "no-padding multi-token mask shape must be {expected_shape:?}, got {actual_shape:?}"
     );
 }
+
+/// Issue #195: the paged-decode attention fallbacks must reject an empty
+/// batch with a clean `Err` instead of panicking in `drain(..1)`.
+#[test]
+fn paged_decode_fallbacks_reject_an_empty_batch() {
+    use crate::cache::{
+        PagedBlockPool, PagedDecodeMetadata, PagedKvLayout, PagedSequenceState,
+        RotatingPagedDecodeMetadata,
+    };
+
+    // A valid 4-D decode query shape with batch == 0.
+    let q = zeros(&[0, 1, 1, 2], crate::dtype::FLOAT32);
+
+    let dense_meta = PagedDecodeMetadata::from_visible_lengths(&[], 2).unwrap();
+    let dense =
+        crate::layers::paged_decode_attention_dense_fallback(&q, &[], &[], &dense_meta, 1.0);
+    assert!(
+        dense.as_ref().is_err_and(|e| e.contains("empty batch")),
+        "dense fallback must reject batch == 0, got error {:?}",
+        dense.as_ref().err()
+    );
+
+    let rot_meta = RotatingPagedDecodeMetadata::from_parts(&[], &[], 2).unwrap();
+    let rotating =
+        crate::layers::paged_decode_attention_rotating_fallback(&q, &[], &[], &rot_meta, 1.0);
+    assert!(
+        rotating.as_ref().is_err_and(|e| e.contains("empty batch")),
+        "rotating fallback must reject batch == 0, got error {:?}",
+        rotating.as_ref().err()
+    );
+
+    let layout = PagedKvLayout::uniform(1, 2, 32).unwrap();
+    let pool = PagedBlockPool::new(layout);
+    let states: Vec<&PagedSequenceState> = Vec::new();
+    let pooled = crate::layers::paged_decode_attention_pooled_fallback(&q, &pool, &states, 0, 1.0);
+    assert!(
+        pooled.as_ref().is_err_and(|e| e.contains("empty batch")),
+        "pooled fallback must reject batch == 0, got error {:?}",
+        pooled.as_ref().err()
+    );
+}

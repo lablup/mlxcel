@@ -2337,10 +2337,13 @@ pub fn paged_decode_attention_dense_fallback(
         });
     }
 
-    let mut result = outputs
-        .drain(..1)
-        .next()
-        .ok_or_else(|| "paged decode fallback received an empty batch".to_string())?;
+    // `drain(..1)` panics on an empty vec, so reject `batch == 0` explicitly
+    // with a clean error instead (issue #195).
+    if outputs.is_empty() {
+        return Err("paged decode fallback received an empty batch (batch == 0)".to_string());
+    }
+    let mut outputs = outputs.into_iter();
+    let mut result = outputs.next().expect("outputs is non-empty: checked above");
     for output in outputs {
         result = crate::concatenate(&result, &output, 0);
     }
@@ -2452,10 +2455,15 @@ pub fn paged_decode_attention_pooled_fallback(
         });
     }
 
-    let mut result = outputs
-        .drain(..1)
-        .next()
-        .ok_or_else(|| "pooled paged decode fallback received an empty batch".to_string())?;
+    // `drain(..1)` panics on an empty vec, so reject `batch == 0` explicitly
+    // with a clean error instead (issue #195).
+    if outputs.is_empty() {
+        return Err(
+            "pooled paged decode fallback received an empty batch (batch == 0)".to_string(),
+        );
+    }
+    let mut outputs = outputs.into_iter();
+    let mut result = outputs.next().expect("outputs is non-empty: checked above");
     for output in outputs {
         result = crate::concatenate(&result, &output, 0);
     }
@@ -2713,10 +2721,15 @@ pub fn paged_decode_attention_rotating_fallback(
         });
     }
 
-    let mut result = outputs
-        .drain(..1)
-        .next()
-        .ok_or_else(|| "rotating paged decode fallback received an empty batch".to_string())?;
+    // `drain(..1)` panics on an empty vec, so reject `batch == 0` explicitly
+    // with a clean error instead (issue #195).
+    if outputs.is_empty() {
+        return Err(
+            "rotating paged decode fallback received an empty batch (batch == 0)".to_string(),
+        );
+    }
+    let mut outputs = outputs.into_iter();
+    let mut result = outputs.next().expect("outputs is non-empty: checked above");
     for output in outputs {
         result = crate::concatenate(&result, &output, 0);
     }
