@@ -529,6 +529,19 @@ pub(crate) struct SamplingOptions {
     pub(crate) seed: Option<u64>,
 }
 
+/// Clap value parser: an f32 in the closed interval [0, 1].
+///
+/// Used by: `--diffusion-threshold` (fail fast at startup instead of
+/// surfacing a per-request engine error under the confidence sampler).
+fn parse_unit_interval(s: &str) -> Result<f32, String> {
+    let v: f32 = s.parse().map_err(|e| format!("not a number: {e}"))?;
+    if (0.0..=1.0).contains(&v) {
+        Ok(v)
+    } else {
+        Err(format!("must be between 0 and 1, got {v}"))
+    }
+}
+
 /// Block-diffusion generation options.
 ///
 /// These flags only affect diffusion models (e.g. DiffusionGemma); ordinary
@@ -555,7 +568,8 @@ pub(crate) struct DiffusionCliOptions {
     #[arg(
         long = "diffusion-threshold",
         value_name = "FLOAT",
-        default_value_t = 0.9
+        default_value_t = 0.9,
+        value_parser = parse_unit_interval
     )]
     pub(crate) diffusion_threshold: f32,
 
@@ -1577,7 +1591,8 @@ pub(crate) struct DiffusionServeOptions {
     #[arg(
         long = "diffusion-threshold",
         value_name = "FLOAT",
-        default_value_t = 0.9
+        default_value_t = 0.9,
+        value_parser = parse_unit_interval
     )]
     pub(crate) diffusion_threshold: f32,
 }

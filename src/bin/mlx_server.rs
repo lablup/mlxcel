@@ -56,6 +56,19 @@ use mlxcel::server::{
 ///    `download` fetches a HuggingFace model snapshot using the same
 ///    downloader the `mlxcel` CLI uses. Server flags are
 ///    rejected when a subcommand is supplied.
+/// Clap value parser: an f32 in the closed interval [0, 1].
+///
+/// Used by: `--diffusion-threshold` (fail fast at startup instead of
+/// surfacing a per-request engine error under the confidence sampler).
+fn parse_unit_interval(s: &str) -> Result<f32, String> {
+    let v: f32 = s.parse().map_err(|e| format!("not a number: {e}"))?;
+    if (0.0..=1.0).contains(&v) {
+        Ok(v)
+    } else {
+        Err(format!("must be between 0 and 1, got {v}"))
+    }
+}
+
 #[derive(Parser, Debug)]
 #[command(
     name = "mlxcel-server",
@@ -316,7 +329,8 @@ struct ServerArgs {
     #[arg(
         long = "diffusion-threshold",
         value_name = "FLOAT",
-        default_value_t = 0.9
+        default_value_t = 0.9,
+        value_parser = parse_unit_interval
     )]
     diffusion_threshold: f32,
 
