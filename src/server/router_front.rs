@@ -74,7 +74,7 @@ use crate::distributed::tcp_transport::TcpTransport;
 use crate::distributed::transport::{Transport, TransportBackend};
 use crate::server::ChatTemplateProcessor;
 use crate::server::config::ServerConfig;
-use crate::server::tool_calls::stream_filter::StreamFilter;
+use crate::server::tool_calls::stream_filter::{FilterOutput, StreamFilter};
 use crate::server::types::request::ChatCompletionRequest;
 use crate::tokenizer::MlxcelTokenizer;
 
@@ -370,7 +370,7 @@ async fn route_chat(state: Arc<RouterState>, request: ChatCompletionRequest) -> 
         tokio::spawn(async move {
             let _ = chunk_tx.send(Ok(sse_event(&chat_chunk_initial(&request_id_str2, &model))));
 
-            let emit_filtered = |emit: crate::server::tool_calls::stream_filter::FilterOutput| {
+            let emit_filtered = |emit: FilterOutput| {
                 if let Some(reasoning) = emit.reasoning
                     && !reasoning.is_empty()
                 {
@@ -425,7 +425,7 @@ async fn route_chat(state: Arc<RouterState>, request: ChatCompletionRequest) -> 
         let mut reasoning = String::new();
         let mut rx = rx;
         {
-            let mut absorb = |emit: crate::server::tool_calls::stream_filter::FilterOutput| {
+            let mut absorb = |emit: FilterOutput| {
                 if let Some(r) = emit.reasoning {
                     reasoning.push_str(&r);
                 }
