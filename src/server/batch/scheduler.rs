@@ -457,13 +457,14 @@ impl BatchScheduler {
     /// and released it and there is nothing to hand off.
     ///
     /// This is the "reuse then extract" factoring (option C): it drives the
-    /// standard [`Self::execute_full_prefill`] path verbatim, so first-token
-    /// sampling, structured output, thinking budget, and logprobs are byte-for-byte
-    /// identical to a single-node prefill, then lifts the finished sequence back
-    /// out of the active batch before any local decode step runs. The hot
-    /// [`Self::run`] loop is never touched. Speculative burst is bypassed (it would
-    /// complete the request locally, defeating the handoff), and chunked prefill of
-    /// an over-long prompt is not yet supported on this path (deferred).
+    /// standard [`Self::execute_full_prefill`] path (or, for prompts longer than
+    /// `--prefill-chunk-size`, the standard chunked-prefill path driven to
+    /// completion — issue #197) verbatim, so first-token sampling, structured
+    /// output, thinking budget, and logprobs are byte-for-byte identical to a
+    /// single-node prefill, then lifts the finished sequence back out of the
+    /// active batch before any local decode step runs. The hot [`Self::run`] loop
+    /// is never touched. Speculative burst is bypassed (it would complete the
+    /// request locally, defeating the handoff).
     ///
     /// [`finish_prefill`]: Self::finish_prefill
     #[allow(dead_code)]
@@ -471,13 +472,10 @@ impl BatchScheduler {
         &mut self,
         mut seq: SequenceInfo,
     ) -> anyhow::Result<Option<Vec<u8>>> {
-        if self.prefill_chunk_size > 0 && seq.prompt_tokens.len() > self.prefill_chunk_size {
-            anyhow::bail!(
-                "prefill-role handoff does not yet support chunked prefill \
-                 (prompt {} tokens > chunk size {})",
-                seq.prompt_tokens.len(),
-                self.prefill_chunk_size
-            );
+        // The serving-role intake is strictly sequential, so a chunked prefill
+        // left in progress would be a wiring bug; refuse rather than clobber it.
+        if self.chunked_prefill_seq.is_some() {
+            anyhow::bail!("prefill-role handoff: another chunked prefill is already in progress");
         }
         let seq_id = seq.seq_id;
         // The decode node restores the prompt context from `token_history`; the
@@ -487,10 +485,22 @@ impl BatchScheduler {
             self.abort_sequence(seq, &err);
             anyhow::bail!("prefill-role handoff: begin_prefill failed: {err}");
         }
-        // Reuse the standard full prefill: it samples the first token and
+        // Reuse the standard prefill machinery: it samples the first token and
         // transitions the sequence into the active batch (no speculative burst on
-        // the handoff path).
-        self.execute_full_prefill(seq);
+        // the handoff path). Long prompts take the same chunked path the run()
+        // loop uses, driven to completion here so the full prompt's KV is in the
+        // pool before extraction (issue #197); the final chunk samples the first
+        // token via finish_prefill exactly like a single-node chunked prefill.
+        // The handoff path is text-only, so the VLM-embeddings full-prefill
+        // exemption in execute_prefill's dispatch cannot apply.
+        if self.prefill_chunk_size > 0 && prompt_tokens.len() > self.prefill_chunk_size {
+            self.start_chunked_prefill(seq);
+            while self.chunked_prefill_seq.is_some() {
+                self.continue_chunked_prefill();
+            }
+        } else {
+            self.execute_full_prefill(seq);
+        }
         // Lift the just-prefilled sequence back out before any local decode runs.
         // If it finished at prefill (immediate EOS) it is already finalized and
         // released, so there is nothing to hand off.
@@ -521,9 +531,10 @@ impl BatchScheduler {
     /// Returns `Ok(None)` when the request hit EOS at the first token, in which
     /// case there is nothing to hand off.
     ///
-    /// The empty-prompt and chunked-prefill guards run before a cache slot is
-    /// allocated, so a rejected request leaks no pool state. Chunked prefill of
-    /// an over-long prompt on the handoff path is not yet supported (deferred).
+    /// The empty-prompt guard runs before a cache slot is allocated, so a
+    /// rejected request leaks no pool state. Prompts longer than
+    /// `--prefill-chunk-size` are prefilled in chunks by
+    /// [`Self::prefill_request_for_handoff`] (issue #197).
     #[allow(dead_code)]
     pub(crate) fn prefill_text_request_for_handoff(
         &mut self,
@@ -535,14 +546,6 @@ impl BatchScheduler {
     ) -> anyhow::Result<Option<Vec<u8>>> {
         if prompt_tokens.is_empty() {
             anyhow::bail!("prefill-role handoff: empty prompt has no tokens to prefill");
-        }
-        if self.prefill_chunk_size > 0 && prompt_tokens.len() > self.prefill_chunk_size {
-            anyhow::bail!(
-                "prefill-role handoff does not yet support chunked prefill \
-                 (prompt {} tokens > chunk size {})",
-                prompt_tokens.len(),
-                self.prefill_chunk_size
-            );
         }
         // Merge the model's configured stop tokens into the request sampling
         // exactly as the single-node intake (`enqueue_request`) does, so the
