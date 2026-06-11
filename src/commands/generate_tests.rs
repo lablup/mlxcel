@@ -129,6 +129,7 @@ fn sample_generate_args(model_path: PathBuf) -> crate::GenerateArgs {
             estimate_memory: false,
             force_memory: false,
             turbo: mlxcel::cli::turbo_args::TurboKvCacheArgs::default(),
+            diffusion: crate::DiffusionCliOptions::default(),
         },
         sampling: crate::SamplingOptions {
             temp: 0.0,
@@ -140,6 +141,7 @@ fn sample_generate_args(model_path: PathBuf) -> crate::GenerateArgs {
             dry_base: 1.75,
             dry_allowed_length: 2,
             dry_penalty_last_n: 0,
+            seed: None,
         },
         pipeline_parallel: crate::PipelineParallelOptions {
             pp_size: 1,

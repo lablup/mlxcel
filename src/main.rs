@@ -396,6 +396,12 @@ pub(crate) struct GenerationOptions {
     // mlxcel serve, mlxcel-server) expose identical help text and flags.
     #[command(flatten)]
     pub(crate) turbo: TurboKvCacheArgs,
+
+    // Block-diffusion flag group (--max-denoising-steps,
+    // --diffusion-sampler, ...). Only affects diffusion models such as
+    // DiffusionGemma; autoregressive models ignore it.
+    #[command(flatten)]
+    pub(crate) diffusion: DiffusionCliOptions,
 }
 
 /// Arguments for the `mlxcel inspect` subcommand.
@@ -515,6 +521,76 @@ pub(crate) struct SamplingOptions {
     /// DRY lookback window size (0 = use full history)
     #[arg(long, default_value_t = 0, value_name = "N")]
     pub(crate) dry_penalty_last_n: usize,
+
+    /// Random seed for MLX's global RNG. Makes sampled generation
+    /// reproducible, including the random canvas noise of diffusion models
+    /// (e.g. DiffusionGemma). Unset = nondeterministic.
+    #[arg(long, value_name = "N")]
+    pub(crate) seed: Option<u64>,
+}
+
+/// Block-diffusion generation options.
+///
+/// These flags only affect diffusion models (e.g. DiffusionGemma); ordinary
+/// autoregressive models ignore them. They mirror the mlx-vlm diffusion
+/// flag surface.
+#[derive(Args, Debug)]
+#[command(next_help_heading = "Diffusion Options")]
+pub(crate) struct DiffusionCliOptions {
+    /// Maximum denoising steps per canvas block (diffusion models only;
+    /// default: the checkpoint's generation_config, typically 48)
+    #[arg(long = "max-denoising-steps", value_name = "N")]
+    pub(crate) max_denoising_steps: Option<usize>,
+
+    /// Per-step acceptance sampler for diffusion models
+    #[arg(
+        long = "diffusion-sampler",
+        value_name = "SAMPLER",
+        default_value = "entropy-bound",
+        value_parser = ["entropy-bound", "confidence-threshold"]
+    )]
+    pub(crate) diffusion_sampler: String,
+
+    /// Confidence threshold for `--diffusion-sampler confidence-threshold`
+    #[arg(
+        long = "diffusion-threshold",
+        value_name = "FLOAT",
+        default_value_t = 0.9
+    )]
+    pub(crate) diffusion_threshold: f32,
+
+    /// Smallest canvas allocated for the generation tail (diffusion only)
+    #[arg(
+        long = "diffusion-min-canvas-length",
+        value_name = "N",
+        default_value_t = 64
+    )]
+    pub(crate) diffusion_min_canvas_length: usize,
+
+    /// Cap on the per-block canvas length (diffusion only; default: the
+    /// model's canvas_length, typically 256)
+    #[arg(long = "diffusion-max-canvas-length", value_name = "N")]
+    pub(crate) diffusion_max_canvas_length: Option<usize>,
+
+    /// Always allocate the model's full canvas length per block (diffusion
+    /// only)
+    #[arg(long = "diffusion-full-canvas", default_value_t = false)]
+    pub(crate) diffusion_full_canvas: bool,
+}
+
+// Manual `Default` kept in lock-step with the `#[arg(default_value*)]`
+// attributes above, same contract as the parallelism option groups.
+impl Default for DiffusionCliOptions {
+    fn default() -> Self {
+        Self {
+            max_denoising_steps: None,
+            diffusion_sampler: "entropy-bound".to_string(),
+            diffusion_threshold: 0.9,
+            diffusion_min_canvas_length: 64,
+            diffusion_max_canvas_length: None,
+            diffusion_full_canvas: false,
+        }
+    }
 }
 
 /// Tensor-parallel options

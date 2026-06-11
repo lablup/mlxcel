@@ -872,6 +872,25 @@ pub(crate) fn load_gemma4_unified_weights_with_backing<P: AsRef<Path>>(
     load_gemma4_family_weights_with_backing(model_dir, is_gemma4_unified_weight)
 }
 
+/// Weight filter for the DiffusionGemma text path (issue #217, phase 1).
+///
+/// Keeps the decoder backbone (`model.decoder.*`: embed, layers, norm,
+/// self_conditioning) and the encoder's per-layer scalars
+/// (`model.encoder.language_model.*`). Everything else in the checkpoint
+/// (`model.encoder.vision_tower.*`, `model.encoder.embed_vision.*`) is the
+/// phase-2 vision front-end and is intentionally skipped without error.
+fn is_diffusion_gemma_text_weight(name: &str) -> bool {
+    name.starts_with("model.decoder.") || name.starts_with("model.encoder.language_model.")
+}
+
+/// Load the DiffusionGemma text-backbone weights (decoder + encoder layer
+/// scalars) with retained mmap backing, skipping the vision tower.
+pub(crate) fn load_diffusion_gemma_text_weights_with_backing<P: AsRef<Path>>(
+    model_dir: P,
+) -> Result<(mlxcel_core::weights::WeightMap, Gemma4WeightBacking), String> {
+    load_gemma4_family_weights_with_backing(model_dir, is_diffusion_gemma_text_weight)
+}
+
 /// Shared Gemma 4 family weight loader with a caller-supplied prefix filter.
 fn load_gemma4_family_weights_with_backing<P: AsRef<Path>, F>(
     model_dir: P,

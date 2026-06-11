@@ -257,7 +257,7 @@ impl ModelArgs {
     }
 }
 
-fn parse_eos_ids(value: Option<&serde_json::Value>) -> Vec<i32> {
+pub(crate) fn parse_eos_ids(value: Option<&serde_json::Value>) -> Vec<i32> {
     match value {
         Some(serde_json::Value::Number(n)) => {
             n.as_i64().map(|v| vec![v as i32]).unwrap_or_default()
@@ -1445,6 +1445,164 @@ impl Attention {
         cache.update_and_fetch(keys, values)
     }
 
+    /// DiffusionGemma canvas (decoder-mode) attention (issue #217, additive
+    /// seam). Mirrors `diffusion_gemma.language.Attention.__call__` with
+    /// `decoder=True`, line by line:
+    ///
+    /// * Q/K are projected, normed, and rotated at `offset` (the encoder
+    ///   length) through the SAME kernels the encoder path uses (the compiled
+    ///   proportional fused chain on full-attention layers, the op-at-a-time
+    ///   chain on sliding layers), so canvas numerics match the reference.
+    /// * `values_raw = v_proj(x)` when the layer has a v_proj (sliding
+    ///   layers), otherwise the raw K projection (`use_k_eq_v` full-attention
+    ///   layers); `values = v_norm(values_raw)`.
+    /// * The read-only `encoder_kv` prefix is concatenated in front of the
+    ///   canvas K/V. On sliding layers the prefix is first trimmed to the
+    ///   last `sliding_window - 1` positions (the upstream O(window) trim);
+    ///   with the trim applied, the no-padding decoder mask is `None`
+    ///   (canvas positions attend bidirectionally to everything that
+    ///   remains), so SDPA runs maskless with `self.scale` (1.0).
+    /// * The cache is NEVER updated; the canvas changes every denoising step.
+    pub(crate) fn forward_canvas(
+        &self,
+        x: &MlxArray,
+        encoder_kv: Option<(&MlxArray, &MlxArray)>,
+        offset: i32,
+    ) -> UniquePtr<MlxArray> {
+        let shape = mlxcel_core::array_shape(x);
+        let b = shape[0];
+        let l = shape[1];
+
+        let q_proj_out = match &self.projection {
+            AttentionProjection::Fused(proj) => {
+                let (q, _, _) = proj.forward(x);
+                q
+            }
+            AttentionProjection::Separate { q_proj, .. }
+            | AttentionProjection::KvShared { q_proj } => q_proj.forward(x),
+        };
+
+        let queries = if let Some(ref freqs) = self.proportional_rope_freqs {
+            let rotated_dims = 2
+                * ((self.proportional_partial_rotary_factor as f64 * self.head_dim as f64 / 2.0)
+                    .floor() as i32)
+                    .max(0);
+            mlxcel_core::compiled_q_path_proportional(
+                &q_proj_out,
+                &self.q_norm.weight,
+                freqs,
+                self.q_norm.eps,
+                self.n_heads,
+                self.head_dim,
+                rotated_dims,
+                offset,
+            )
+        } else {
+            let queries = mlxcel_core::reshape(&q_proj_out, &[b, l, self.n_heads, self.head_dim]);
+            let queries = self.q_norm.forward(&queries);
+            let queries = mlxcel_core::transpose_axes(&queries, &[0, 2, 1, 3]);
+            self.apply_rope(&queries, offset)
+        };
+
+        let (raw_keys, raw_values) = match &self.projection {
+            AttentionProjection::Fused(proj) => {
+                let (_, k, v) = proj.forward(x);
+                (k, Some(v))
+            }
+            AttentionProjection::Separate { k_proj, v_proj, .. } => {
+                let raw_keys = k_proj.forward(x);
+                let raw_values = if self.use_k_eq_v {
+                    None
+                } else {
+                    Some(
+                        v_proj
+                            .as_ref()
+                            .expect("Gemma4 attention expected v_proj for non-k_eq_v layer")
+                            .forward(x),
+                    )
+                };
+                (raw_keys, raw_values)
+            }
+            AttentionProjection::KvShared { .. } => {
+                unreachable!(
+                    "forward_canvas must not be called on a KV-shared layer; \
+                     DiffusionGemma forces num_kv_shared_layers == 0"
+                )
+            }
+        };
+
+        let k_norm = self
+            .k_norm
+            .as_ref()
+            .expect("k_norm must be Some for non-KV-shared layers");
+        let keys = if let Some(ref freqs) = self.proportional_rope_freqs {
+            let rotated_dims = 2
+                * ((self.proportional_partial_rotary_factor as f64 * self.head_dim as f64 / 2.0)
+                    .floor() as i32)
+                    .max(0);
+            mlxcel_core::compiled_q_path_proportional(
+                &raw_keys,
+                &k_norm.weight,
+                freqs,
+                k_norm.eps,
+                self.n_kv_heads,
+                self.head_dim,
+                rotated_dims,
+                offset,
+            )
+        } else {
+            let keys = mlxcel_core::reshape(&raw_keys, &[b, l, self.n_kv_heads, self.head_dim]);
+            let keys = k_norm.forward(&keys);
+            let keys = mlxcel_core::transpose_axes(&keys, &[0, 2, 1, 3]);
+            self.apply_rope(&keys, offset)
+        };
+
+        let raw_values_ref = raw_values
+            .as_ref()
+            .map(|values| values.as_ref().unwrap())
+            .unwrap_or_else(|| raw_keys.as_ref().unwrap());
+        let values = mlxcel_core::reshape(raw_values_ref, &[b, l, self.n_kv_heads, self.head_dim]);
+        let values = self.v_norm.forward(&values);
+        let values = mlxcel_core::transpose_axes(&values, &[0, 2, 1, 3]);
+
+        let (keys, values) = if let Some((encoder_keys, encoder_values)) = encoder_kv {
+            // Sliding layers: the canvas only sees the last
+            // `sliding_window - 1` encoder positions, so drop the
+            // out-of-window prefix before SDPA instead of scoring thousands
+            // of positions the (implicit) mask would zero anyway. Safe for
+            // the dense KVCache because offset == encoder_len always holds
+            // (no trailing-invalid slots).
+            let window_prefix = (self.window_size - 1).max(0);
+            let encoder_len = mlxcel_core::array_shape(encoder_keys)[2];
+            let (encoder_keys, encoder_values) =
+                if self.window_size > 0 && encoder_len > window_prefix && offset >= encoder_len {
+                    (
+                        slice_axis(encoder_keys, 2, encoder_len - window_prefix, encoder_len),
+                        slice_axis(encoder_values, 2, encoder_len - window_prefix, encoder_len),
+                    )
+                } else {
+                    (
+                        mlxcel_core::copy(encoder_keys),
+                        mlxcel_core::copy(encoder_values),
+                    )
+                };
+            (
+                mlxcel_core::concatenate(&encoder_keys, &keys, 2),
+                mlxcel_core::concatenate(&encoder_values, &values, 2),
+            )
+        } else {
+            (keys, values)
+        };
+
+        // Full bidirectional attention over [trimmed encoder prefix, canvas]:
+        // batch-1 with no padding means mask == None in the reference decoder
+        // mask builder. `window_size` 0 keeps the dispatch on the plain
+        // (non-windowed) SDPA path.
+        let attn_out =
+            mlxcel_core::layers::attention(&queries, &keys, &values, self.scale, None, 0.0, 0);
+        self.project_output(&attn_out, b, l)
+    }
+
     pub fn from_weights(
         weights: &WeightMap,
         config: &TextConfig,
@@ -1755,44 +1913,7 @@ impl DecoderLayer {
         let after_attn = mlxcel_core::add(x, &h_attn);
         timer.tick("attn_residual_add", &after_attn);
 
-        let ffn_out = if let (Some(router), Some(experts)) = (&self.router, &self.experts) {
-            let h1 = self.pre_feedforward_layernorm.forward(&after_attn);
-            timer.tick("pre_ffn_ln_shared_mlp", &h1);
-            let h1 = self.mlp.forward(&h1);
-            timer.tick("shared_mlp", &h1);
-            let h1 = self
-                .post_feedforward_layernorm_1
-                .as_ref()
-                .expect("Missing Gemma4 MoE post_feedforward_layernorm_1")
-                .forward(&h1);
-            timer.tick("post_shared_mlp_ln", &h1);
-
-            let (top_k_indices, top_k_weights) = router.forward(&after_attn);
-            timer.tick("router", &top_k_indices);
-            let h2 = self
-                .pre_feedforward_layernorm_2
-                .as_ref()
-                .expect("Missing Gemma4 MoE pre_feedforward_layernorm_2")
-                .forward(&after_attn);
-            timer.tick("pre_moe_ln", &h2);
-            let h2 = experts.forward(&h2, &top_k_indices, &top_k_weights);
-            timer.tick("experts", &h2);
-            let h2 = self
-                .post_feedforward_layernorm_2
-                .as_ref()
-                .expect("Missing Gemma4 MoE post_feedforward_layernorm_2")
-                .forward(&h2);
-            timer.tick("post_moe_ln", &h2);
-            let combined = mlxcel_core::add(&h1, &h2);
-            timer.tick("moe_shared_add", &combined);
-            combined
-        } else {
-            let h_norm = self.pre_feedforward_layernorm.forward(&after_attn);
-            timer.tick("pre_ffn_ln", &h_norm);
-            let out = self.mlp.forward(&h_norm);
-            timer.tick("mlp", &out);
-            out
-        };
+        let ffn_out = self.ffn_branch(&after_attn, &mut timer);
 
         let ffn_out = self.post_feedforward_layernorm.forward(&ffn_out);
         timer.tick("post_ffn_ln", &ffn_out);
@@ -1847,6 +1968,109 @@ impl DecoderLayer {
         let h = mlxcel_core::multiply(&h, &self.layer_scalar);
         timer.tick("layer_scalar", &h);
         (h, stored_kv)
+    }
+
+    /// Shared feed-forward stage: dense MLP branch plus (when present) the
+    /// MoE branch, combined exactly like the upstream Gemma 4 layer. Extracted
+    /// from [`Self::forward_with_profile`] verbatim so the DiffusionGemma
+    /// encoder/canvas forwards (issue #217) reuse the identical op sequence;
+    /// the hot autoregressive path calls this with its own timer and is
+    /// byte-identical to the pre-extraction code.
+    fn ffn_branch(&self, after_attn: &MlxArray, timer: &mut SubopTimer) -> UniquePtr<MlxArray> {
+        if let (Some(router), Some(experts)) = (&self.router, &self.experts) {
+            let h1 = self.pre_feedforward_layernorm.forward(after_attn);
+            timer.tick("pre_ffn_ln_shared_mlp", &h1);
+            let h1 = self.mlp.forward(&h1);
+            timer.tick("shared_mlp", &h1);
+            let h1 = self
+                .post_feedforward_layernorm_1
+                .as_ref()
+                .expect("Missing Gemma4 MoE post_feedforward_layernorm_1")
+                .forward(&h1);
+            timer.tick("post_shared_mlp_ln", &h1);
+
+            let (top_k_indices, top_k_weights) = router.forward(after_attn);
+            timer.tick("router", &top_k_indices);
+            let h2 = self
+                .pre_feedforward_layernorm_2
+                .as_ref()
+                .expect("Missing Gemma4 MoE pre_feedforward_layernorm_2")
+                .forward(after_attn);
+            timer.tick("pre_moe_ln", &h2);
+            let h2 = experts.forward(&h2, &top_k_indices, &top_k_weights);
+            timer.tick("experts", &h2);
+            let h2 = self
+                .post_feedforward_layernorm_2
+                .as_ref()
+                .expect("Missing Gemma4 MoE post_feedforward_layernorm_2")
+                .forward(&h2);
+            timer.tick("post_moe_ln", &h2);
+            let combined = mlxcel_core::add(&h1, &h2);
+            timer.tick("moe_shared_add", &combined);
+            combined
+        } else {
+            let h_norm = self.pre_feedforward_layernorm.forward(after_attn);
+            timer.tick("pre_ffn_ln", &h_norm);
+            let out = self.mlp.forward(&h_norm);
+            timer.tick("mlp", &out);
+            out
+        }
+    }
+
+    /// DiffusionGemma encoder-mode layer forward (issue #217, additive seam).
+    ///
+    /// Identical to [`Self::forward`] for a layer without per-layer inputs or
+    /// KV sharing, except the final output scalar is the caller-provided
+    /// `layer_scalar` (the checkpoint's per-layer ENCODER scalar at
+    /// `model.encoder.language_model.layers.N.layer_scalar`) instead of the
+    /// layer's stored decoder `layer_scalar`. Mirrors the
+    /// `layer_scalar` override parameter on the upstream
+    /// `diffusion_gemma.language.DecoderLayer.__call__`.
+    pub(crate) fn forward_encoder_with_scalar(
+        &self,
+        x: &MlxArray,
+        mask: Option<&MlxArray>,
+        cache: &mut dyn CacheInterface,
+        layer_scalar: &MlxArray,
+    ) -> UniquePtr<MlxArray> {
+        let mut timer = SubopTimer::new(false, usize::MAX);
+        let h_attn = self.input_layernorm.forward(x);
+        let (h_attn, _stored_kv) = self.self_attn.forward(&h_attn, mask, cache, None, None);
+        let h_attn = self.post_attention_layernorm.forward(&h_attn);
+        let after_attn = mlxcel_core::add(x, &h_attn);
+
+        let ffn_out = self.ffn_branch(&after_attn, &mut timer);
+        let ffn_out = self.post_feedforward_layernorm.forward(&ffn_out);
+        let after_ffn = mlxcel_core::add(&after_attn, &ffn_out);
+
+        mlxcel_core::multiply(&after_ffn, layer_scalar)
+    }
+
+    /// DiffusionGemma canvas (decoder-mode) layer forward (issue #217,
+    /// additive seam).
+    ///
+    /// The canvas hidden states attend bidirectionally within themselves and
+    /// to the read-only `encoder_kv` prefix (the cache is never written);
+    /// everything after attention is the standard Gemma 4 layer with the
+    /// layer's stored DECODER `layer_scalar`. Mirrors the upstream
+    /// `decoder=True` path of `diffusion_gemma.language.DecoderLayer`.
+    pub(crate) fn forward_canvas(
+        &self,
+        x: &MlxArray,
+        encoder_kv: Option<(&MlxArray, &MlxArray)>,
+        offset: i32,
+    ) -> UniquePtr<MlxArray> {
+        let mut timer = SubopTimer::new(false, usize::MAX);
+        let h_attn = self.input_layernorm.forward(x);
+        let h_attn = self.self_attn.forward_canvas(&h_attn, encoder_kv, offset);
+        let h_attn = self.post_attention_layernorm.forward(&h_attn);
+        let after_attn = mlxcel_core::add(x, &h_attn);
+
+        let ffn_out = self.ffn_branch(&after_attn, &mut timer);
+        let ffn_out = self.post_feedforward_layernorm.forward(&ffn_out);
+        let after_ffn = mlxcel_core::add(&after_attn, &ffn_out);
+
+        mlxcel_core::multiply(&after_ffn, &self.layer_scalar)
     }
 
     pub fn from_weights(

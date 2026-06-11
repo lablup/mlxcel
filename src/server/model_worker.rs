@@ -161,6 +161,23 @@ pub(crate) struct WorkerSchedulerConfig {
     pub speculative_dispatch: crate::server::SpeculativeDispatch,
 }
 
+/// Refuse model families the server runtime cannot drive yet, with a clear
+/// actionable error instead of a confusing downstream failure.
+///
+/// DiffusionGemma (issue #217 phase 1) generates by model-owned block
+/// diffusion; the batched scheduler and the SSE serving path have no
+/// diffusion round loop yet (phase 3), so the worker rejects the load
+/// outright and points the operator at the CLI.
+fn server_unsupported_model_error(model_path: &std::path::Path) -> Option<anyhow::Error> {
+    match crate::models::get_model_type(model_path) {
+        Ok(crate::models::ModelType::DiffusionGemma) => Some(anyhow::anyhow!(
+            "DiffusionGemma (block diffusion) is not supported in server mode yet; use the CLI: \
+             mlxcel generate -m <model> -p \"...\""
+        )),
+        _ => None,
+    }
+}
+
 pub(crate) fn spawn_model_worker_with_batch_config(
     model_path: PathBuf,
     adapter_path: Option<PathBuf>,
@@ -175,7 +192,9 @@ pub(crate) fn spawn_model_worker_with_batch_config(
         tracing::info!("Model worker thread starting, loading model...");
 
         let load_start = Instant::now();
-        let result = if let Some(ref pipeline_runtime) = sched_config.pipeline_parallel_runtime {
+        let result = if let Some(err) = server_unsupported_model_error(&model_path) {
+            Err(err)
+        } else if let Some(ref pipeline_runtime) = sched_config.pipeline_parallel_runtime {
             match pipeline_runtime {
                 crate::server::PipelineParallelRuntimeConfig::InProcess {
                     layers,
@@ -662,7 +681,9 @@ pub(crate) fn spawn_legacy_model_worker(
         );
 
         let load_start = Instant::now();
-        let result = if tensor_parallel.tp_size > 1 {
+        let result = if let Some(err) = server_unsupported_model_error(&model_path) {
+            Err(err)
+        } else if tensor_parallel.tp_size > 1 {
             crate::load_model_with_tensor_parallel(
                 &model_path,
                 adapter_path.as_deref(),

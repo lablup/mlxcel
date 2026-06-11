@@ -113,6 +113,11 @@ pub fn get_model_type(model_path: &Path) -> Result<ModelType> {
         } else {
             ModelType::Gemma4
         }),
+        // DiffusionGemma (block-diffusion on the Gemma 4 MoE backbone). The
+        // checkpoint always ships a vision tower, but phase 1 is text-only:
+        // the loader skips the vision weights, so detection is by model_type
+        // alone. `diffusion_gemma_text` is accepted for text-only exports.
+        "diffusion_gemma" | "diffusion_gemma_text" => Ok(ModelType::DiffusionGemma),
         // Gemma 4 Unified is always multimodal (text + vision [+ audio]); it
         // carries `vision_embedder.*` patch-projector weights rather than the
         // `vision_tower.*` ViT used by `gemma4`/Gemma4VLM, so it is detected by

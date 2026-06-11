@@ -742,6 +742,39 @@ impl KVCache {
         self.offset - self.live_start
     }
 
+    /// Read-only view of the live K/V window without writing to the cache.
+    ///
+    /// Returns the `[B, n_kv_heads, live_len, head_dim]` slices of the dense
+    /// Fp16 buffers — exactly what [`Self::update_and_fetch`] would have
+    /// returned for a zero-token update, but as a `&self` accessor so callers
+    /// can concatenate the cached prefix with externally computed K/V
+    /// without mutating cache state.
+    ///
+    /// Returns `None` when the cache is empty, pool-backed (`new_paged`), or
+    /// not in plain `KVCacheMode::Fp16` — the only storage layout whose raw
+    /// buffers are directly attention-ready without dequantization.
+    ///
+    /// Used by: DiffusionGemma canvas (decoder-mode) attention (issue #217),
+    /// which reads the committed encoder prefix as a read-only context for
+    /// every denoising step.
+    pub fn visible_state(&self) -> Option<(UniquePtr<MlxArray>, UniquePtr<MlxArray>)> {
+        if self.mode != KVCacheMode::Fp16 || self.paged_backing.is_some() {
+            return None;
+        }
+        let keys = self.keys.as_ref()?;
+        let values = self.values.as_ref()?;
+        let live_len = self.buffer_idx();
+        if live_len <= 0 {
+            return None;
+        }
+        let ks = ffi::array_shape(keys);
+        let vs = ffi::array_shape(values);
+        Some((
+            ffi::slice(keys, &[0, 0, 0, 0], &[ks[0], ks[1], live_len, ks[3]]),
+            ffi::slice(values, &[0, 0, 0, 0], &[vs[0], vs[1], live_len, vs[3]]),
+        ))
+    }
+
     /// Get the allocated buffer size (sequence dimension)
     fn buffer_seq_len(&self) -> i32 {
         // In symmetric Turbo4 mode the `keys` field stays None and the

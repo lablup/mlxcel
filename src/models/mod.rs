@@ -35,6 +35,7 @@ pub mod deepseek;
 pub mod deepseek_v2;
 pub mod deepseek_v3;
 pub mod deepseek_v32;
+pub mod diffusion_gemma;
 pub mod ernie4_5;
 pub mod ernie4_5_moe;
 pub mod exaone;
@@ -112,6 +113,7 @@ pub use deepseek_v2::DeepSeekV2Model;
 pub use deepseek_v3::DeepSeekV3Model;
 pub use deepseek_v32::DeepSeekV32Model;
 pub use detection::get_model_type;
+pub use diffusion_gemma::DiffusionGemmaModel;
 pub use ernie4_5::Ernie45Model;
 pub use ernie4_5_moe::Ernie45MoeModel;
 pub use exaone::ExaOneModel;
@@ -206,6 +208,7 @@ pub enum ModelType {
     Gemma2,          // Gemma 2
     Gemma3,          // Gemma 3 (text-only)
     Gemma4,          // Gemma 4 text-only route
+    DiffusionGemma,  // DiffusionGemma (block-diffusion on the Gemma 4 MoE backbone)
     Gemma3VLM,       // Gemma 3 VLM (vision-language)
     Gemma4VLM,       // Gemma 4 VLM (vision-language)
     Gemma4Unified,   // Gemma 4 Unified (encoder-free text + vision + audio)
@@ -340,6 +343,7 @@ pub const ALL_MODEL_TYPES: &[ModelType] = &[
     ModelType::Gemma2,
     ModelType::Gemma3,
     ModelType::Gemma4,
+    ModelType::DiffusionGemma,
     ModelType::Gemma3VLM,
     ModelType::Gemma4VLM,
     ModelType::Gemma4Unified,
@@ -481,6 +485,10 @@ impl ModelType {
             ModelType::Gemma3 => ("Gemma 3", "Gemma"),
             ModelType::Gemma3n => ("Gemma 3n", "Gemma"),
             ModelType::Gemma4 => ("Gemma 4", "Gemma"),
+            ModelType::DiffusionGemma => (
+                "DiffusionGemma (block-diffusion, Gemma 4 MoE backbone)",
+                "Gemma",
+            ),
             ModelType::RecurrentGemma => ("RecurrentGemma (Griffin: RGLRU + attention)", "Gemma"),
 
             // ----- Gemma VLM -----

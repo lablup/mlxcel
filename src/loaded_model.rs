@@ -65,6 +65,10 @@ pub enum LoadedModel {
     // Sliding window models use wrappers that implement LanguageModel
     Gemma3(models::Gemma3Wrapper),
     Gemma4(models::Gemma4Wrapper),
+    /// DiffusionGemma block-diffusion text model (issue #217). The CLI
+    /// routes this family to the diffusion engine before the autoregressive
+    /// loop; the server rejects it (phase 3).
+    DiffusionGemma(models::DiffusionGemmaModel),
     // Vision-language models
     Gemma3VLM(vision::VisionLanguageModel),
     Gemma4VLM(vision::Gemma4VLModel),
@@ -174,6 +178,7 @@ macro_rules! delegate_language_model {
             LoadedModel::Gemma2(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::Gemma3(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::Gemma4(inner) => LanguageModel::$method(inner, $($arg),*),
+            LoadedModel::DiffusionGemma(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::Gemma3VLM(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::Gemma4VLM(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::Gemma4Unified(inner) => LanguageModel::$method(inner, $($arg),*),

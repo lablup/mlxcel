@@ -679,7 +679,7 @@ fn build_cli_sampling_config(args: &GenerateArgs, stop_token_ids: Vec<i32>) -> S
         top_k: args.sampling.top_k,
         top_p: args.sampling.top_p,
         min_p: args.sampling.min_p,
-        seed: None,
+        seed: args.sampling.seed,
         repetition_penalty: args.sampling.repetition_penalty,
         dry_multiplier: args.sampling.dry_multiplier,
         dry_base: args.sampling.dry_base,
@@ -692,7 +692,7 @@ fn build_cli_sampling_config(args: &GenerateArgs, stop_token_ids: Vec<i32>) -> S
     })
 }
 
-fn print_generation_preamble(user_prompt: &str) -> Result<()> {
+pub(super) fn print_generation_preamble(user_prompt: &str) -> Result<()> {
     println!("Generating...");
     print!("{}", user_prompt);
     io::stdout().flush()?;
@@ -1037,7 +1037,7 @@ fn chat_options_from_args(args: &GenerateArgs) -> Result<crate::commands::ChatOp
         top_k: args.sampling.top_k,
         top_p: args.sampling.top_p,
         min_p: args.sampling.min_p,
-        seed: None,
+        seed: args.sampling.seed,
         repetition_penalty: args.sampling.repetition_penalty,
         dry_multiplier: args.sampling.dry_multiplier,
         dry_base: args.sampling.dry_base,
@@ -1290,6 +1290,18 @@ fn run_generate_once(mut args: GenerateArgs) -> Result<()> {
         )?
     } else {
         let (model, _loaded_tokenizer) = load_generation_model(&args, preflight_estimate.as_ref())?;
+        // Block-diffusion models generate by canvas denoising, not
+        // autoregressive decoding: route them to the diffusion engine BEFORE
+        // the standard CxxGenerator loop (issue #217, phase 1).
+        if let mlxcel::LoadedModel::DiffusionGemma(diffusion_model) = &model {
+            return super::generate_diffusion::run_diffusion_generation(
+                diffusion_model,
+                &args,
+                &tokenizer,
+                &prompt_tokens,
+                &user_prompt,
+            );
+        }
         let vlm_embeddings = generate_vlm::compute_vlm_embeddings(
             &model,
             &mut prompt_tokens,

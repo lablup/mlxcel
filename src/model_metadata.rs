@@ -108,6 +108,7 @@ macro_rules! for_each_model_registration {
             Gemma2 => { kind: Text, directory: ConfigBacked, weight: Some(WeightLoadRoute::ConfigBacked), adapter: None, config_backed: { dir_loader: models::Gemma2Model::load, args: models::gemma2::ModelArgs, weight_builder: models::Gemma2Model::from_weights, wrap: LoadedModel::Gemma2 } };
             Gemma3 => { kind: Text, directory: ConfigBacked, weight: Some(WeightLoadRoute::ConfigBacked), adapter: None, config_backed: { dir_loader: models::Gemma3Model::load, args: models::gemma3::ModelArgs, weight_builder: models::Gemma3Model::from_weights, wrap: |m| LoadedModel::Gemma3(models::Gemma3Wrapper::new(m)) } };
             Gemma4 => { kind: Text, directory: ConfigBacked, weight: Some(WeightLoadRoute::ConfigBacked), adapter: None, config_backed: { dir_loader: models::Gemma4Model::load, args: models::gemma4::ModelArgs, weight_builder: models::Gemma4Model::from_weights, wrap: |m| LoadedModel::Gemma4(models::Gemma4Wrapper::new(m)) } };
+            DiffusionGemma => { kind: Text, directory: Nonstandard, weight: None, adapter: Some("DiffusionGemma cannot be loaded with LoRA adapters yet") };
             Gemma3VLM => { kind: Vlm, directory: Vlm, weight: None, adapter: Some("Gemma3 VLM cannot be loaded with LoRA adapters yet") };
             Gemma4VLM => { kind: Vlm, directory: Vlm, weight: None, adapter: Some("Gemma4 VLM cannot be loaded with LoRA adapters yet") };
             Gemma4Unified => { kind: Vlm, directory: Vlm, weight: None, adapter: Some("Gemma4 Unified cannot be loaded with LoRA adapters yet") };

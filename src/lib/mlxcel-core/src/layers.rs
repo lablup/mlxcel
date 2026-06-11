@@ -368,6 +368,35 @@ impl UnifiedEmbedding {
             Self::Regular(e) => e.weight.as_ref().expect("non-null embedding weight"),
         }
     }
+
+    /// Return a float `[vocab_size, hidden_size]` weight usable as
+    /// `probs @ weight`.
+    ///
+    /// For quantized embeddings this dequantizes the packed table (callers
+    /// should do this once per generation call and reuse the result; for a
+    /// 262144 x 2816 fp16 table the transient is roughly 1.4 GiB). For
+    /// non-quantized embeddings this is a cheap lazy-array share of the
+    /// existing tensor.
+    ///
+    /// Used by: DiffusionGemma self-conditioning soft embeddings (issue #217).
+    /// The reference implementation measured `quantized_matmul(...,
+    /// transpose=false)` several times slower at this shape, hence the
+    /// dequantize-once approach.
+    pub fn dequantized_weight(&self) -> UniquePtr<MlxArray> {
+        match self {
+            Self::Regular(e) => ffi::copy(&e.weight),
+            Self::Quantized(e) => unsafe {
+                ffi::dequantize(
+                    &e.weight,
+                    &e.scales,
+                    e.biases_ptr(),
+                    e.group_size,
+                    e.bits,
+                    &e.mode,
+                )
+            },
+        }
+    }
 }
 
 /// RMS Normalization layer

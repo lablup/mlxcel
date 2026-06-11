@@ -22,6 +22,7 @@ pub(crate) mod chat;
 pub(crate) mod detect;
 pub(crate) mod download;
 pub(crate) mod generate;
+mod generate_diffusion;
 mod generate_vlm;
 pub(crate) mod inspect;
 pub(crate) mod models;
