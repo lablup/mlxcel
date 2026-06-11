@@ -1162,6 +1162,20 @@ impl<'a> Gemma4MtpBatchedTargetAdapter<'a> {
                         ),
                     });
                 }
+                // Validate every row against the slab axis BEFORE any
+                // slice_update (mirrors compact_partial_accept_rows).
+                let slab_len = shape[2];
+                for (r, (&ve, &a)) in ve_pre.iter().zip(accepted).enumerate() {
+                    if ve > o_pre || a < 0 || o_pre + a + 1 > slab_len || o_post > slab_len {
+                        return Err(DrafterError::DraftFailed {
+                            reason: format!(
+                                "Gemma4 batched MTP target: slab compaction row {r} out \
+                                 of bounds (ve_pre {ve}, accepted {a}, o_pre {o_pre}, \
+                                 o_post {o_post}, slab_len {slab_len})"
+                            ),
+                        });
+                    }
+                }
                 let dtype = mlxcel_core::array_dtype(array);
                 let mut out = mlxcel_core::copy(array);
                 for (r, (&ve, &a)) in ve_pre.iter().zip(accepted).enumerate() {
@@ -1844,7 +1858,8 @@ impl<'a> MtpTarget for Gemma4MtpBatchedTargetAdapter<'a> {
         };
         let (post_rollback_kv_offset, next_shared_kv) = {
             let mut caches = self.caches.borrow_mut();
-            let o_pre = first_cache_offset(caches.as_mut_slice(), "full_attention") - width;
+            let o_pre =
+                crate::models::gemma4::first_present_cache_offset(caches.as_slice()) - width;
             let divergent = !crate::models::gemma4::mtp_divergent_fix_disabled()
                 && ve_pre
                     .as_ref()

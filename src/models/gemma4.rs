@@ -924,6 +924,17 @@ impl Cache {
                 "compact_partial_accept_rows: width ({width}) exceeds cache offset ({offset})"
             ));
         }
+        // Validate every row BEFORE computing the global o_post or touching
+        // any buffer: a single malformed row must not let an earlier row's
+        // zeroing slice_update run against an inflated o_post.
+        for (r, (&ve, &a)) in ve_pre.iter().zip(accepted).enumerate() {
+            if ve > o_pre || a < 0 || a > width - 1 {
+                return Err(format!(
+                    "compact_partial_accept_rows: row {r} out of bounds \
+                     (ve_pre {ve}, accepted {a}, o_pre {o_pre}, width {width})"
+                ));
+            }
+        }
         let o_post = ve_pre
             .iter()
             .zip(accepted)
@@ -967,12 +978,6 @@ impl Cache {
         let mut new_keys = mlxcel_core::copy(keys);
         let mut new_values = mlxcel_core::copy(values);
         for (r, (&ve, &a)) in ve_pre.iter().zip(accepted).enumerate() {
-            if ve > o_pre || a < 0 {
-                return Err(format!(
-                    "compact_partial_accept_rows: row {r} has ve_pre ({ve}) > o_pre \
-                     ({o_pre}) or negative accepted ({a})"
-                ));
-            }
             let n = a + 1;
             let bi = r as i32;
             if ve < o_pre {
@@ -2179,7 +2184,7 @@ impl Gemma4TextModel {
         // `rope_offsets` below. Uniform rounds (`ve[r] == offset` for every
         // row, always true until the first divergent accept) skip this branch
         // entirely and stay byte-identical to the pre-#203 path.
-        let global_offset_pre = first_cache_offset(caches, "full_attention");
+        let global_offset_pre = first_present_cache_offset(caches);
         let divergent_verify = mask.is_none()
             && !mtp_divergent_fix_disabled()
             && per_row_valid_end
@@ -2672,10 +2677,13 @@ impl Gemma4TextModel {
 /// defect fails the jitter-aware parity check, and as an operational escape
 /// hatch for the opt-in batched MTP paths.
 pub(crate) fn mtp_divergent_fix_disabled() -> bool {
-    std::env::var("MLXCEL_MTP_DISABLE_DIVERGENT_FIX")
-        .ok()
-        .as_deref()
-        == Some("1")
+    static DISABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *DISABLED.get_or_init(|| {
+        std::env::var("MLXCEL_MTP_DISABLE_DIVERGENT_FIX")
+            .ok()
+            .as_deref()
+            == Some("1")
+    })
 }
 
 /// Build the exact per-row additive attention mask for a DIVERGENT batched
@@ -2733,6 +2741,21 @@ pub(crate) fn build_divergent_verify_mask(
         }
     }
     mlxcel_core::from_slice_f32(&data, &[b as i32, 1, l, k_len])
+}
+
+/// Offset of the first per-layer cache regardless of attention family.
+///
+/// The batched MTP regime keeps every family's offset in lockstep (one
+/// logical token count), but a model may lack one family entirely (a
+/// sliding-only synthetic fixture has no `full_attention` cache, for which
+/// [`first_cache_offset`] would return a spurious `0`). Layer 0 is never a
+/// KV-shared placeholder, so its cache carries the real offset.
+pub(crate) fn first_present_cache_offset(caches: &[Cache]) -> i32 {
+    match caches.first() {
+        Some(Cache::Standard(c)) => c.offset,
+        Some(Cache::Rotating(c)) => c.offset,
+        None => 0,
+    }
 }
 
 pub(crate) fn first_cache_offset(caches: &mut [Cache], layer_type: &str) -> i32 {
