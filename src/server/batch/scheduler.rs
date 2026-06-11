@@ -459,7 +459,7 @@ impl BatchScheduler {
     /// This is the "reuse then extract" factoring (option C): it drives the
     /// standard [`Self::execute_full_prefill`] path (or, for prompts longer than
     /// `--prefill-chunk-size`, the standard chunked-prefill path driven to
-    /// completion — issue #197) verbatim, so first-token sampling, structured
+    /// completion, issue #197) verbatim, so first-token sampling, structured
     /// output, thinking budget, and logprobs are byte-for-byte identical to a
     /// single-node prefill, then lifts the finished sequence back out of the
     /// active batch before any local decode step runs. The hot [`Self::run`] loop
