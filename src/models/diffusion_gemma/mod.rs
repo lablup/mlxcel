@@ -905,6 +905,23 @@ impl DiffusionGemmaModel {
             .iter()
             .map(|&id| i32::from(id == vision.image_token_id || id == vision.video_token_id))
             .collect();
+
+        // The projected features must line up exactly with the image-token
+        // positions. `masked_scatter` wraps source indices modulo the feature
+        // count, so a mismatch (e.g. a config that points `image_token_id` at a
+        // common text token, or a tower/processor soft-token disagreement)
+        // would silently scatter the wrong rows rather than fault. Reject it.
+        let vision_positions = is_vision.iter().filter(|&&v| v != 0).count();
+        let feature_count = mlxcel_core::array_shape(&merged)
+            .get(1)
+            .copied()
+            .unwrap_or(0) as usize;
+        if vision_positions != feature_count {
+            return Err(format!(
+                "DiffusionGemma: image-token positions ({vision_positions}) do not match                  projected vision features ({feature_count}); check image_token_id and the                  soft-token expansion"
+            ));
+        }
+
         let mask_2d = mlxcel_core::from_slice_i32(&is_vision, &[1, l]);
         let mask_bool = mlxcel_core::astype(&mask_2d, dtype::BOOL);
         let mask_expanded =
