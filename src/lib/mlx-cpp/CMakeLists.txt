@@ -26,9 +26,20 @@ function(mlx_apply_source_overlays mlx_source_dir)
   # `#3422 Speed up NAX split-K`, `#3419 Segmented mm nax kernel`). Removing
   # the patches keeps our build binary-equivalent to the upstream Python
   # wheel and simplifies future upstream syncs.
+  # steel/gemm/mma.h: cherry-pick of upstream `2414e5df` / `423b5149`
+  # ("Fix steel GEMM safe load offset", PRs #3560/#3565): the pinned commit
+  # (2026-05-09) reads `(off_x + j) * str_y` instead of `(off_y + j) * str_y`
+  # in BaseMMAFrag<T, 8, 8>::load_safe, so every edge-tile (non-tile-aligned)
+  # steel GEMM load reads the wrong rows — and, through strided views, can
+  # read uninitialized parent-buffer regions, which made non-tile-aligned
+  # multi-token forwards (e.g. DiffusionGemma canvas SDPA fallback at
+  # head_dim 256/512, issue #217) nondeterministically corrupt under
+  # allocator churn. Drop this overlay when the GIT_TAG moves to a commit at
+  # or after 2026-05-19.
   set(_metal_patch_files
       "mlx/backend/metal/compiled.cpp"
-      "mlx/backend/metal/kernels/utils.h")
+      "mlx/backend/metal/kernels/utils.h"
+      "mlx/backend/metal/kernels/steel/gemm/mma.h")
   foreach(_patch_file ${_metal_patch_files})
     if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/patches/${_patch_file}")
       configure_file(

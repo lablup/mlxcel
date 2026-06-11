@@ -2552,3 +2552,37 @@ fn paged_decode_fallbacks_reject_an_empty_batch() {
         pooled.as_ref().err()
     );
 }
+/// Regression test for the steel GEMM safe-load (edge-tile) overlay
+/// (`mlx-cpp/patches/mlx/backend/metal/kernels/steel/gemm/mma.h`, upstream
+/// MLX PRs #3560/#3565: `BaseMMAFrag<T, 8, 8>::load_safe` indexed columns
+/// with `off_x` instead of `off_y`).
+///
+/// A non-tile-aligned fp32 GEMM (m=64, k=256, n=83) exercises edge-tile
+/// safe loads on the N axis; with the bug, the loader pulls the wrong rows
+/// and the result diverges wildly from a composite (multiply + sum)
+/// reference computed without steel GEMM. fp32 keeps the legitimate
+/// numerical gap tiny so the assertion threshold cleanly separates the two.
+#[test]
+fn steel_gemm_edge_tile_safe_load_matches_reference() {
+    crate::random_seed(31);
+    let a = unsafe { crate::random_normal(&[64, 256], crate::dtype::FLOAT32, std::ptr::null()) };
+    let b = unsafe { crate::random_normal(&[256, 83], crate::dtype::FLOAT32, std::ptr::null()) };
+    crate::eval(&a);
+    crate::eval(&b);
+
+    let gemm = crate::matmul(&a, &b);
+
+    // Composite reference: broadcast multiply + sum over K avoids the steel
+    // GEMM kernels entirely.
+    let a3 = crate::reshape(&a, &[64, 256, 1]);
+    let b3 = crate::reshape(&b, &[1, 256, 83]);
+    let reference = crate::sum_axis(&crate::multiply(&a3, &b3), 1, false);
+
+    let diff = crate::max_all(&crate::abs(&crate::subtract(&gemm, &reference)));
+    crate::eval(&diff);
+    let max_abs = crate::item_f32(&diff);
+    assert!(
+        max_abs < 1e-3,
+        "steel GEMM edge-tile result diverges from composite reference: max_abs = {max_abs}"
+    );
+}
