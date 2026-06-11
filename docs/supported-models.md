@@ -8,7 +8,7 @@ runtime source of truth is the code, not this prose page:
 - loading policy: `src/model_metadata.rs`
 - VLM loading routes: `src/loading/vlm*.rs`
 
-As of v0.0.27, `ModelType` contains 92 variants: 70 text/non-VLM variants
+As of v0.1.4, `ModelType` contains 93 variants: 71 text/non-VLM variants
 and 22 VLM variants. These are architecture/runtime variants, not a guarantee
 that every checkpoint under a marketing family name is supported.
 
@@ -39,6 +39,20 @@ Implemented model families include:
 Many of these families have checkpoint-specific config or weight-layout
 requirements. If a checkpoint fails detection or loading, inspect its
 `config.json::model_type` first and compare it with `src/models/detection.rs`.
+
+## Block-diffusion text models
+
+| Family | `model_type` key | Notes |
+|--------|-----------------|-------|
+| DiffusionGemma | `diffusion_gemma` / `diffusion_gemma_text` | Block-diffusion on a Gemma 4 MoE backbone. Generates a canvas of tokens per block through iterative denoising rather than token-by-token left-to-right decoding. Phase 1: text-only CLI (`mlxcel generate`). Image input and server mode are not yet supported. See [Block-diffusion generation](block-diffusion.md). |
+
+DiffusionGemma uses a two-phase forward pass: an encoder prefill that caches the
+prompt into dense FP16 KV caches, then a canvas loop that attends bidirectionally
+within each output block while attending causally to the cached prefix.
+Load detection accepts `model_type: "diffusion_gemma"` (outer config) and
+`model_type: "diffusion_gemma_text"` (inner `text_config`).
+The fused MoE `gate_up_proj` weights are split at load time; vision-tower weights
+are skipped without error.
 
 ## Vision-language and multimodal variants
 

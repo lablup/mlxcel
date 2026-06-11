@@ -154,6 +154,12 @@ recommended as normal deployment settings.
 | `MLXCEL_EXPERIMENTAL_BOOL_CAUSAL_MASK` | truthy enables | off | Enables an experimental boolean causal-mask path. |
 | `MLXCEL_PIPELINE_GRANULARITY` | `off`, `layer`, `block:N` | `off` | Inserts layer-boundary async-eval hints for pipeline experiments. |
 
+## Block-diffusion diagnostic variables
+
+| Variable | Values | Default | Purpose |
+|----------|--------|---------|---------|
+| `MLXCEL_DIFFUSION_DEBUG_CANVAS=1` | `1` enables | off | **Diagnostic.** Replaces all DiffusionGemma canvas random-noise initialization with a fixed deterministic pattern (`(i+1)*7919 + k*104729) % vocab_size`) and prints `DIFFUSION_COMMIT block=<n> ids=...` per committed block. Intended for cross-implementation parity testing against the mlx-vlm Python reference at temperature 0. Output is not suitable for normal generation. |
+
 ## Logging, profiling, and capture variables
 
 Most of these switches force synchronization or extra graph work and will change
