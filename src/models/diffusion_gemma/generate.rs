@@ -170,11 +170,11 @@ pub(crate) fn entropy_bound_accept_count(sorted_entropies: &[f32], bound: f32) -
 /// lower position index, matching `mx.argsort`).
 pub(crate) fn entropy_bound_acceptance_mask(entropies: &[f32], bound: f32) -> Vec<bool> {
     let mut order: Vec<usize> = (0..entropies.len()).collect();
-    order.sort_by(|&a, &b| {
-        entropies[a]
-            .partial_cmp(&entropies[b])
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
+    // `total_cmp` is a total order, so the stable sort never sees an
+    // inconsistent comparator (a NaN entropy would make `partial_cmp` return
+    // `None`); NaN sorts last and is therefore never accepted, which is the
+    // desired behavior for a maximally uncertain position.
+    order.sort_by(|&a, &b| entropies[a].total_cmp(&entropies[b]));
     let sorted: Vec<f32> = order.iter().map(|&i| entropies[i]).collect();
     let accept = entropy_bound_accept_count(&sorted, bound);
     let mut mask = vec![false; entropies.len()];
