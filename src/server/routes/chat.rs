@@ -929,7 +929,7 @@ const OPEN_THINKING_SUFFIXES: &[&str] = &["<|channel>thought\n", "<think>\n"];
 ///   emitted token from the start (otherwise the state would wait for an
 ///   opening token that never appears because the prompt already contains
 ///   it).
-fn is_prompt_primed_open_thinking(prompt: &str) -> bool {
+pub(crate) fn is_prompt_primed_open_thinking(prompt: &str) -> bool {
     OPEN_THINKING_SUFFIXES
         .iter()
         .any(|suffix| prompt.ends_with(suffix))
