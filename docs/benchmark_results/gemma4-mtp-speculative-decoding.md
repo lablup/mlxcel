@@ -11,7 +11,7 @@ behavior mlxcel ships today, and a local Apple Silicon measurement.
 | -------------------------------------- | -------------------------------- | --------------------- | --------------------- |
 | Gemma 4 Unified 12B (`gemma4_unified`) | `gemma-4-12B-it-assistant-4bit`  | ~1.87x (measured)       | **on** (B=1, all hardware)  |
 | Gemma 4 31B (`gemma4`)                 | `gemma-4-31B-it-assistant-bf16`  | ~1.2 to 1.4x (measured) | **on** (B=1, M5+ only)  |
-| Gemma 4 26B-A4B MoE (`gemma4`)         | `gemma-4-26B-A4B-it-assistant`   | limited at B=1 (MoE)    | on (B=1)      |
+| Gemma 4 26B-A4B MoE (`gemma4`)         | `gemma-4-26B-A4B-it-assistant`   | limited at B=1 (MoE)    | on (B=1, M5+ only)  |
 
 Both the 12B Unified and the 31B see a real B=1 MTP speedup on M5 Max (1.87x and
 ~1.3x), and mlxcel now runs B=1 (single-request) MTP by default for every MTP
