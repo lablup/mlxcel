@@ -872,23 +872,67 @@ pub(crate) fn load_gemma4_unified_weights_with_backing<P: AsRef<Path>>(
     load_gemma4_family_weights_with_backing(model_dir, is_gemma4_unified_weight)
 }
 
-/// Weight filter for the DiffusionGemma text path (issue #217, phase 1).
-///
-/// Keeps the decoder backbone (`model.decoder.*`: embed, layers, norm,
-/// self_conditioning) and the encoder's per-layer scalars
-/// (`model.encoder.language_model.*`). Everything else in the checkpoint
-/// (`model.encoder.vision_tower.*`, `model.encoder.embed_vision.*`) is the
-/// phase-2 vision front-end and is intentionally skipped without error.
+/// Trailing suffixes of the Gemma 4 vision clipped-linear calibration
+/// tensors. These exist only when `vision_config.use_clipped_linears` is
+/// true; otherwise they are dropped at load time (mirroring the mlx-vlm
+/// `DiffusionGemma` sanitize, which never materializes them for the
+/// unclipped tower the chat checkpoint ships).
+const VISION_CLIP_CALIBRATION_SUFFIXES: [&str; 4] =
+    [".input_max", ".input_min", ".output_max", ".output_min"];
+
+/// Whether a checkpoint key belongs to the DiffusionGemma text backbone
+/// (issue #217, phase 1): the decoder (`model.decoder.*`: embed, layers,
+/// norm, self_conditioning) and the encoder's per-layer scalars
+/// (`model.encoder.language_model.*`).
 fn is_diffusion_gemma_text_weight(name: &str) -> bool {
     name.starts_with("model.decoder.") || name.starts_with("model.encoder.language_model.")
 }
 
-/// Load the DiffusionGemma text-backbone weights (decoder + encoder layer
-/// scalars) with retained mmap backing, skipping the vision tower.
-pub(crate) fn load_diffusion_gemma_text_weights_with_backing<P: AsRef<Path>>(
+/// Whether a checkpoint key belongs to the DiffusionGemma vision front-end
+/// (issue #217, phase 2): the vision tower (`model.encoder.vision_tower.*`)
+/// and the multimodal embedder (`model.encoder.embed_vision.*`).
+fn is_diffusion_gemma_vision_weight(name: &str) -> bool {
+    name.starts_with("model.encoder.vision_tower.")
+        || name.starts_with("model.encoder.embed_vision.")
+}
+
+/// Weight filter for the full DiffusionGemma checkpoint.
+///
+/// Keeps the text backbone unconditionally and the vision front-end when
+/// present. When `use_clipped_linears` is false, the unused clipped-linear
+/// calibration tensors (`*.input_max` / `*.input_min` / `*.output_max` /
+/// `*.output_min`) are dropped from the vision tower, matching the upstream
+/// sanitize. Text-only checkpoints simply carry no vision keys, so vision
+/// loading is skipped downstream.
+pub(crate) fn keep_diffusion_gemma_weight(name: &str, use_clipped_linears: bool) -> bool {
+    if is_diffusion_gemma_text_weight(name) {
+        return true;
+    }
+    if is_diffusion_gemma_vision_weight(name) {
+        if !use_clipped_linears
+            && VISION_CLIP_CALIBRATION_SUFFIXES
+                .iter()
+                .any(|suffix| name.ends_with(suffix))
+        {
+            return false;
+        }
+        return true;
+    }
+    false
+}
+
+/// Load the DiffusionGemma weights (text backbone plus the vision front-end
+/// when present) with retained mmap backing.
+///
+/// `use_clipped_linears` mirrors `vision_config.use_clipped_linears`: when
+/// false the vision tower's clipped-linear calibration tensors are dropped.
+pub(crate) fn load_diffusion_gemma_weights_with_backing<P: AsRef<Path>>(
     model_dir: P,
+    use_clipped_linears: bool,
 ) -> Result<(mlxcel_core::weights::WeightMap, Gemma4WeightBacking), String> {
-    load_gemma4_family_weights_with_backing(model_dir, is_diffusion_gemma_text_weight)
+    load_gemma4_family_weights_with_backing(model_dir, move |name| {
+        keep_diffusion_gemma_weight(name, use_clipped_linears)
+    })
 }
 
 /// Shared Gemma 4 family weight loader with a caller-supplied prefix filter.

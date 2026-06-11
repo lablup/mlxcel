@@ -12,25 +12,115 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! CLI driver for block-diffusion text generation (issue #217, phase 1).
+//! CLI driver for block-diffusion text generation (issue #217, phases 1-2).
 //!
 //! Thin bridge between the parsed [`crate::GenerateArgs`] flag surface and
 //! [`DiffusionGemmaModel::generate_diffusion_streaming`]: resolves the
-//! diffusion options, seeds the RNG, streams decoded text through the shared
-//! incremental detokenizer, and prints the generation stats.
+//! diffusion options, seeds the RNG, optionally preprocesses image input and
+//! expands the prompt with image tokens, streams decoded text through the
+//! shared incremental detokenizer, and prints the generation stats.
 
 use anyhow::{Result, anyhow};
 use std::io::{self, Write as IoWrite};
+use std::path::Path;
 
 use mlxcel::models::DiffusionGemmaModel;
 use mlxcel::models::diffusion_gemma::{
     DiffusionGenerateOptions, DiffusionGenerationStats, DiffusionSamplerKind,
+    DiffusionVisionPrefill,
 };
 use mlxcel::server::model_provider::model_worker::StreamingDecodeState;
 use mlxcel::tokenizer::MlxcelTokenizer;
+use mlxcel::vision::processors::gemma4::{Gemma4ImageInput, Gemma4Processor};
 
 use super::generate::print_generation_preamble;
 use crate::GenerateArgs;
+
+/// Build the Gemma 4 image processor for the DiffusionGemma checkpoint.
+///
+/// The diffusion checkpoint's `image_processor` is identical to the gemma-4
+/// VLM family (size 224x224, patch 16, pooling_kernel_size 3, 280 soft
+/// tokens). Values are read from `processor_config.json` when present and
+/// fall back to those defaults otherwise.
+fn build_image_processor(model_dir: &Path, default_soft_tokens: usize) -> Gemma4Processor {
+    let image_cfg = std::fs::read_to_string(model_dir.join("processor_config.json"))
+        .ok()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+        .and_then(|cfg| cfg.get("image_processor").cloned());
+    let get = |key: &str, default: usize| -> usize {
+        image_cfg
+            .as_ref()
+            .and_then(|cfg| cfg.get(key))
+            .and_then(|v| v.as_u64())
+            .map(|v| v as usize)
+            .unwrap_or(default)
+    };
+    Gemma4Processor::new(
+        get("patch_size", 16),
+        get("max_soft_tokens", default_soft_tokens),
+        get("pooling_kernel_size", 3),
+    )
+}
+
+/// Result of preparing image input: the expanded prompt ids (with each image
+/// placeholder rewritten to `boi + image_token * N + eoi`) and the prefill.
+struct PreparedDiffusionVision {
+    expanded_ids: Vec<i32>,
+    prefill: DiffusionVisionPrefill,
+}
+
+/// Preprocess `--image` paths, expand the prompt, and build the vision
+/// prefill (inputs_embeds + overlay block ids).
+fn prepare_diffusion_vision(
+    model: &DiffusionGemmaModel,
+    model_dir: &Path,
+    image_paths: &[std::path::PathBuf],
+    prompt_tokens: &[i32],
+) -> Result<PreparedDiffusionVision> {
+    let vision = model.vision().ok_or_else(|| {
+        anyhow!(
+            "This DiffusionGemma checkpoint does not include a vision tower; \
+             run with a text-only prompt"
+        )
+    })?;
+
+    let images: Vec<image::DynamicImage> = image_paths
+        .iter()
+        .map(|path| {
+            image::open(path).map_err(|e| anyhow!("Failed to load image {:?}: {}", path, e))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    println!("Loaded {} image(s).", images.len());
+
+    let processor = build_image_processor(model_dir, vision.soft_tokens_per_image);
+    let processed: Vec<Gemma4ImageInput> = processor.preprocess(&images);
+    let num_soft_tokens: Vec<usize> = processed.iter().map(|img| img.num_soft_tokens).collect();
+
+    let mut expanded_ids = prompt_tokens.to_vec();
+    mlxcel::vlm_runtime::expand_gemma4_image_tokens_pub(
+        &mut expanded_ids,
+        vision.image_token_id,
+        vision.boi_token_id,
+        vision.eoi_token_id,
+        &num_soft_tokens,
+    )?;
+
+    let prefill = model
+        .prepare_vision_prefill(&expanded_ids, &processed)
+        .map_err(|e| anyhow!("{e}"))?;
+
+    println!(
+        "DiffusionGemma: expanded {} image(s) into {} soft token(s) ({} total prompt tokens)",
+        images.len(),
+        num_soft_tokens.iter().sum::<usize>(),
+        expanded_ids.len()
+    );
+
+    Ok(PreparedDiffusionVision {
+        expanded_ids,
+        prefill,
+    })
+}
 
 fn parse_sampler_kind(name: &str) -> Result<DiffusionSamplerKind> {
     match name {
@@ -85,8 +175,8 @@ fn print_diffusion_stats(stats: &DiffusionGenerationStats, profile: bool) {
 
 /// Run one block-diffusion generation for the CLI `generate` flow.
 ///
-/// Phase 1 is text-only; image/audio/video inputs are rejected with a clear
-/// error (phase 2).
+/// Text-only (phase 1) and single/multi image input (phase 2) are supported;
+/// audio and video inputs are rejected with a clear error.
 pub(crate) fn run_diffusion_generation(
     model: &DiffusionGemmaModel,
     args: &GenerateArgs,
@@ -94,13 +184,20 @@ pub(crate) fn run_diffusion_generation(
     prompt_tokens: &[i32],
     user_prompt: &str,
 ) -> Result<()> {
-    if !args.generation.image.is_empty()
-        || args.generation.audio.is_some()
-        || !args.generation.video.is_empty()
-    {
+    if args.generation.audio.is_some() {
         return Err(anyhow!(
-            "DiffusionGemma image/audio/video input is not supported yet (phase 2 of issue \
-             #217); run with a text-only prompt"
+            "DiffusionGemma audio input is not supported; run with text or --image input"
+        ));
+    }
+    if !args.generation.video.is_empty() {
+        return Err(anyhow!(
+            "DiffusionGemma video input is not supported; run with text or --image input"
+        ));
+    }
+    if !args.generation.image.is_empty() && !model.supports_images() {
+        return Err(anyhow!(
+            "This DiffusionGemma checkpoint does not include a vision tower; \
+             run with a text-only prompt"
         ));
     }
     if args.model.draft_model.is_some() {
@@ -115,18 +212,36 @@ pub(crate) fn run_diffusion_generation(
         mlxcel_core::random_seed(seed);
     }
 
+    // Image input: preprocess + expand the prompt before seeding the decode
+    // state, so the generated-token detokenizer sees the expanded prefix.
+    let prepared_vision = if args.generation.image.is_empty() {
+        None
+    } else {
+        Some(prepare_diffusion_vision(
+            model,
+            Path::new(&args.model.model),
+            &args.generation.image,
+            prompt_tokens,
+        )?)
+    };
+    let (engine_prompt_tokens, vision_prefill): (&[i32], Option<&DiffusionVisionPrefill>) =
+        match &prepared_vision {
+            Some(prepared) => (&prepared.expanded_ids, Some(&prepared.prefill)),
+            None => (prompt_tokens, None),
+        };
+
     print_generation_preamble(user_prompt)?;
 
     // Stream through the shared incremental detokenizer (byte-fallback
     // safe); raw ids are collected in parallel so any held-back tail bytes
     // can be flushed from a byte-exact full decode afterward.
-    let mut decode_state = StreamingDecodeState::new(tokenizer, prompt_tokens);
+    let mut decode_state = StreamingDecodeState::new(tokenizer, engine_prompt_tokens);
     let mut generated_ids: Vec<u32> = Vec::with_capacity(options.max_new_tokens);
     let mut streamed = String::new();
     let mut stdout = io::stdout();
 
     let stats = model
-        .generate_diffusion_streaming(prompt_tokens, &options, |token_id| {
+        .generate_diffusion_streaming(engine_prompt_tokens, &options, vision_prefill, |token_id| {
             generated_ids.push(token_id as u32);
             if let Some(text) = decode_state.on_token(token_id, tokenizer) {
                 print!("{text}");

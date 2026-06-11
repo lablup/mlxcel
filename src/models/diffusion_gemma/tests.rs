@@ -202,6 +202,22 @@ const REAL_CONFIG_SNIPPET: &str = r#"{
   "image_token_id": 258880,
   "tie_word_embeddings": true,
   "vision_soft_tokens_per_image": 280,
+  "vision_config": {
+    "model_type": "gemma4_vision",
+    "hidden_size": 1152,
+    "intermediate_size": 4304,
+    "num_hidden_layers": 27,
+    "num_attention_heads": 16,
+    "num_key_value_heads": 16,
+    "head_dim": 72,
+    "global_head_dim": 72,
+    "patch_size": 16,
+    "pooling_kernel_size": 3,
+    "rms_norm_eps": 1e-06,
+    "standardize": true,
+    "use_clipped_linears": false,
+    "rope_parameters": {"rope_theta": 100.0, "rope_type": "default"}
+  },
   "generation_config": {
     "confidence_threshold": 0.005,
     "eos_token_id": [1, 106, 50],
@@ -485,4 +501,275 @@ fn real_model_forward_determinism() {
         canvas_a, canvas_b,
         "canvas forward must be byte-deterministic across runs"
     );
+}
+
+// -------------------------------------------------------------------------
+// Vision config parsing (phase 2)
+// -------------------------------------------------------------------------
+
+#[test]
+fn parses_vision_config_fields() {
+    let args: ModelArgs = serde_json::from_str(REAL_CONFIG_SNIPPET).expect("config parses");
+    assert_eq!(args.image_token_id(), 258_880);
+    assert_eq!(args.boi_token_id(), 255_999);
+    assert_eq!(args.eoi_token_id(), 258_882);
+    // The chat checkpoint has no video token; the accessor must fall back to
+    // -1 so the video branch is cleanly disabled (never matches a real id).
+    assert_eq!(args.video_token_id(), -1);
+    assert_eq!(args.vision_soft_tokens_per_image(), 280);
+
+    let vision = args
+        .vision_config()
+        .expect("vision_config parses")
+        .expect("vision_config present");
+    assert_eq!(vision.hidden_size, 1152);
+    assert_eq!(vision.num_hidden_layers, 27);
+    assert_eq!(vision.patch_size, 16);
+    assert_eq!(vision.pooling_kernel_size, 3);
+    assert!(!vision.use_clipped_linears);
+    assert!((vision.rms_norm_eps() - 1e-6).abs() < 1e-9);
+}
+
+#[test]
+fn vision_config_absent_for_text_only_export() {
+    // A text-only export drops the vision fields entirely.
+    let mut value: serde_json::Value =
+        serde_json::from_str(REAL_CONFIG_SNIPPET).expect("config parses");
+    let obj = value.as_object_mut().expect("object");
+    obj.remove("vision_config");
+    obj.remove("image_token_id");
+    let args: ModelArgs = serde_json::from_value(value).expect("text-only config parses");
+    assert!(
+        args.vision_config().expect("ok").is_none(),
+        "no vision_config => None"
+    );
+    // The image token id falls back to the family default even when absent.
+    assert_eq!(args.image_token_id(), 258_880);
+}
+
+// -------------------------------------------------------------------------
+// Prompt image-token expansion (phase 2)
+// -------------------------------------------------------------------------
+
+const IMAGE_TOKEN: i32 = 258_880;
+const BOI_TOKEN: i32 = 255_999;
+const EOI_TOKEN: i32 = 258_882;
+
+#[test]
+fn expands_single_image_placeholder() {
+    // BOS, <start_of_image> placeholder, then a text token.
+    let mut tokens = vec![2, BOI_TOKEN, 9999];
+    crate::vlm_runtime::expand_gemma4_image_tokens_pub(
+        &mut tokens,
+        IMAGE_TOKEN,
+        BOI_TOKEN,
+        EOI_TOKEN,
+        &[4],
+    )
+    .expect("expansion succeeds");
+    // The placeholder becomes boi + image*4 + eoi.
+    let mut expected = vec![2, BOI_TOKEN];
+    expected.extend(std::iter::repeat_n(IMAGE_TOKEN, 4));
+    expected.push(EOI_TOKEN);
+    expected.push(9999);
+    assert_eq!(tokens, expected);
+    assert_eq!(
+        tokens.iter().filter(|&&t| t == IMAGE_TOKEN).count(),
+        4,
+        "exactly 4 image soft tokens"
+    );
+}
+
+#[test]
+fn expands_two_image_placeholders_into_separate_blocks() {
+    let mut tokens = vec![2, BOI_TOKEN, 7, BOI_TOKEN, 8];
+    crate::vlm_runtime::expand_gemma4_image_tokens_pub(
+        &mut tokens,
+        IMAGE_TOKEN,
+        BOI_TOKEN,
+        EOI_TOKEN,
+        &[2, 3],
+    )
+    .expect("expansion succeeds");
+    // Two contiguous blocks, the first with 2 soft tokens, the second with 3.
+    let mut expected = vec![
+        2,
+        BOI_TOKEN,
+        IMAGE_TOKEN,
+        IMAGE_TOKEN,
+        EOI_TOKEN,
+        7,
+        BOI_TOKEN,
+    ];
+    expected.extend(std::iter::repeat_n(IMAGE_TOKEN, 3));
+    expected.push(EOI_TOKEN);
+    expected.push(8);
+    assert_eq!(tokens, expected);
+    // boi count equals the number of blocks (2).
+    assert_eq!(tokens.iter().filter(|&&t| t == BOI_TOKEN).count(), 2);
+}
+
+// -------------------------------------------------------------------------
+// mm_token_type_ids + vision block ids (phase 2 overlay inputs)
+// -------------------------------------------------------------------------
+
+#[test]
+fn derives_mm_token_type_ids_for_image_block() {
+    use crate::vision::gemma4_unified_mask::{
+        UnifiedTokenIds, derive_mm_token_type_ids, token_type,
+    };
+    let ids = UnifiedTokenIds {
+        image: IMAGE_TOKEN,
+        video: -1,
+        audio: -1,
+    };
+    // text, boi(text), image, image, eoi(text), text
+    let input = vec![2, BOI_TOKEN, IMAGE_TOKEN, IMAGE_TOKEN, EOI_TOKEN, 7];
+    let types = derive_mm_token_type_ids(&input, ids);
+    assert_eq!(
+        types,
+        vec![
+            token_type::TEXT,
+            token_type::TEXT,
+            token_type::IMAGE,
+            token_type::IMAGE,
+            token_type::TEXT,
+            token_type::TEXT,
+        ]
+    );
+}
+
+#[test]
+fn computes_contiguous_vision_block_ids() {
+    use crate::vision::gemma4_unified_mask::{UnifiedTokenIds, compute_vision_block_ids};
+    let ids = UnifiedTokenIds {
+        image: IMAGE_TOKEN,
+        video: -1,
+        audio: -1,
+    };
+    // Two separate image blocks: block 0 = positions 2..4, block 1 = 6..9.
+    let input = vec![
+        2,
+        BOI_TOKEN,
+        IMAGE_TOKEN,
+        IMAGE_TOKEN,
+        EOI_TOKEN,
+        BOI_TOKEN,
+        IMAGE_TOKEN,
+        IMAGE_TOKEN,
+        IMAGE_TOKEN,
+        EOI_TOKEN,
+        7,
+    ];
+    let block_ids = compute_vision_block_ids(&input, ids, true).expect("blocks present");
+    assert_eq!(block_ids, vec![-1, -1, 0, 0, -1, -1, 1, 1, 1, -1, -1]);
+}
+
+// -------------------------------------------------------------------------
+// Bidirectional vision-block overlay on the dense masks (phase 2)
+// -------------------------------------------------------------------------
+
+#[test]
+fn overlay_makes_image_block_bidirectional_keeps_text_causal() {
+    // 5-token prompt at offset 0: positions 1..3 are one image block, 0/3/4
+    // are text. The overlay must let the image block attend to itself in
+    // BOTH directions while text stays causal and the sliding window is
+    // preserved.
+    let block_ids = [-1i32, 0, 0, -1, -1];
+    let l = block_ids.len() as i32;
+
+    // Build the same causal base mask forward_encoder_embeds uses (offset 0).
+    let base = mlxcel_core::utils::create_causal_mask(l, 0);
+    let ids = mlxcel_core::from_slice_i32(&block_ids, &[l]);
+    let overlaid = crate::models::gemma4::overlay_block_bidirectional(&base, &ids);
+    mlxcel_core::eval(&overlaid);
+    assert_eq!(mlxcel_core::array_shape(&overlaid), vec![l, l]);
+
+    let at = |q: i32, k: i32| -> f32 {
+        let scalar = mlxcel_core::slice(&overlaid, &[q, k], &[q + 1, k + 1]);
+        mlxcel_core::item_f32(&scalar)
+    };
+    let blocked = |v: f32| v.is_infinite() && v < 0.0;
+
+    // Image block (positions 1,2) is now bidirectional: 1 can see 2.
+    assert_eq!(at(1, 2), 0.0, "image position 1 attends forward to 2");
+    assert_eq!(at(2, 1), 0.0, "image position 2 attends back to 1");
+    // Text positions stay strictly causal.
+    assert!(blocked(at(0, 1)), "text 0 cannot see future token 1");
+    assert!(blocked(at(3, 4)), "text 3 cannot see future token 4");
+    // Cross text<->image pairs keep the causal base (text 3 may attend
+    // back to image 1, but image 1 cannot attend forward to text 3).
+    assert_eq!(at(3, 1), 0.0, "later text sees earlier image (causal)");
+    assert!(
+        blocked(at(1, 3)),
+        "image cannot attend forward to later text"
+    );
+}
+
+// -------------------------------------------------------------------------
+// Sanitize keep/skip rules (phase 2 vision weights)
+// -------------------------------------------------------------------------
+
+#[test]
+fn sanitize_keeps_text_and_vision_weights() {
+    use crate::models::sanitize::keep_diffusion_gemma_weight;
+    // Text backbone + encoder scalars are always kept.
+    assert!(keep_diffusion_gemma_weight(
+        "model.decoder.layers.0.self_attn.q_proj.weight",
+        false
+    ));
+    assert!(keep_diffusion_gemma_weight(
+        "model.encoder.language_model.layers.5.layer_scalar",
+        false
+    ));
+    // Vision tower + embedder are kept (phase 2).
+    assert!(keep_diffusion_gemma_weight(
+        "model.encoder.vision_tower.encoder.layers.0.mlp.gate_proj.linear.weight",
+        false
+    ));
+    assert!(keep_diffusion_gemma_weight(
+        "model.encoder.embed_vision.embedding_projection.weight",
+        false
+    ));
+    // Unrelated keys are dropped.
+    assert!(!keep_diffusion_gemma_weight("lm_head.weight", false));
+}
+
+#[test]
+fn sanitize_drops_clip_calibration_when_unclipped() {
+    use crate::models::sanitize::keep_diffusion_gemma_weight;
+    let clip_key = "model.encoder.vision_tower.encoder.layers.0.mlp.gate_proj.input_max";
+    // use_clipped_linears == false: drop the calibration tensors.
+    assert!(!keep_diffusion_gemma_weight(clip_key, false));
+    assert!(!keep_diffusion_gemma_weight(
+        "model.encoder.vision_tower.encoder.layers.0.self_attn.q_proj.output_min",
+        false
+    ));
+    // use_clipped_linears == true: keep them.
+    assert!(keep_diffusion_gemma_weight(clip_key, true));
+}
+
+/// Real-model vision load smoke test (issue #217, phase 2): assert the vision
+/// tower and embedder load alongside the text backbone. No forward pass.
+///
+/// `cargo test --release --lib models::diffusion_gemma::tests::real_model_loads_vision_front_end -- --ignored --nocapture`
+#[test]
+#[ignore]
+fn real_model_loads_vision_front_end() {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("models/diffusiongemma-26B-A4B-it-4bit");
+    if !dir.exists() {
+        eprintln!("skip: checkpoint not present");
+        return;
+    }
+    let model = DiffusionGemmaModel::load(&dir).expect("load");
+    assert!(
+        model.supports_images(),
+        "the chat checkpoint ships a vision tower; vision must load"
+    );
+    let vision = model.vision().expect("vision front-end present");
+    assert_eq!(vision.image_token_id, 258_880);
+    assert_eq!(vision.boi_token_id, 255_999);
+    assert_eq!(vision.eoi_token_id, 258_882);
+    assert_eq!(vision.soft_tokens_per_image, 280);
 }

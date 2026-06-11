@@ -23,7 +23,7 @@
 //! on a stable-and-confident canvas, then commit the block to the KV-cached
 //! prefix and stream its tokens.
 
-use super::{DiffusionGemmaModel, DiffusionStoppingConfig};
+use super::{DiffusionGemmaModel, DiffusionStoppingConfig, DiffusionVisionPrefill};
 use mlxcel_core::layers::KVCache;
 use mlxcel_core::{MlxArray, UniquePtr, dtype};
 use std::collections::VecDeque;
@@ -388,10 +388,19 @@ impl DiffusionGemmaModel {
     /// `on_token` receives each emitted token id and returns `false` to
     /// abort. EOS ids stop the generation WITHOUT being emitted. Mirrors
     /// `stream_diffusion_generate` (batch-1, no padding, dynamic cache).
+    ///
+    /// `vision`, when present, supplies the pre-built `inputs_embeds` and the
+    /// vision-block overlay for the prompt prefill (image input, phase 2).
+    /// `prompt_tokens` must then be the EXPANDED prompt ids (so its length
+    /// matches `inputs_embeds`). With an image present the prompt prefill runs
+    /// as a single embeddings pass (chunked prefill is disabled, mirroring the
+    /// reference `_diffusion_should_chunk_prefill`); committed-block appends
+    /// remain token-based and overlay-free.
     pub fn generate_diffusion_streaming<F: FnMut(i32) -> bool>(
         &self,
         prompt_tokens: &[i32],
         options: &DiffusionGenerateOptions,
+        vision: Option<&DiffusionVisionPrefill>,
         mut on_token: F,
     ) -> Result<DiffusionGenerationStats, String> {
         if prompt_tokens.is_empty() {
@@ -436,10 +445,22 @@ impl DiffusionGemmaModel {
         let mut rng = CanvasRng::new(vocab_size);
         let debug_mode = rng.debug;
 
-        // Prompt prefill (chunked for long prompts; batch-1 / no padding
-        // always holds on this path).
+        // Prompt prefill. With vision input, run a single embeddings pass with
+        // the bidirectional overlay (chunked prefill disabled, like the
+        // reference). Text-only prompts use the token path (chunked for long
+        // prompts; batch-1 / no padding always holds here).
         let prefill_start = Instant::now();
-        if prompt_tokens.len() > options.prefill_chunk_size {
+        if let Some(vision) = vision {
+            let _ = self.forward_encoder_embeds(
+                &vision.inputs_embeds,
+                &mut caches,
+                None,
+                vision.vision_block_ids.as_deref(),
+            );
+            for cache in &caches {
+                cache.eval_state();
+            }
+        } else if prompt_tokens.len() > options.prefill_chunk_size {
             for chunk in prompt_tokens.chunks(options.prefill_chunk_size) {
                 let ids = mlxcel_core::from_slice_i32(chunk, &[1, chunk.len() as i32]);
                 let _ = self.forward_encoder(&ids, &mut caches, None);

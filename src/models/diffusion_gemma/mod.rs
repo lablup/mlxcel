@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! DiffusionGemma block-diffusion text model (issue #217, phase 1).
+//! DiffusionGemma block-diffusion model (issue #217, phases 1-2).
 //!
 //! `google/diffusiongemma-26B-A4B-it` reuses the Gemma 4 26B-A4B MoE text
 //! backbone but generates by denoising a canvas of up to `canvas_length`
@@ -30,10 +30,14 @@
 //! Reference: `references/mlx-vlm/mlx_vlm/models/diffusion_gemma/` and
 //! `references/mlx-vlm/mlx_vlm/generate/diffusion.py`.
 //!
-//! Phase 1 is text-only: the checkpoint's vision tower
-//! (`model.encoder.vision_tower.*`, `model.encoder.embed_vision.*`) is
-//! intentionally skipped at load time. Image input is phase 2; server
-//! serving is phase 3.
+//! Phase 2 adds image input: when the checkpoint ships the Gemma 4 vision
+//! tower (`model.encoder.vision_tower.*`) and the multimodal embedder
+//! (`model.encoder.embed_vision.*`), the prompt prefill runs as an
+//! embeddings pass that masked-scatters projected image features into the
+//! image-token positions and applies the `use_bidirectional_attention ==
+//! "vision"` overlay. Text-only checkpoints load with [`DiffusionVision`] =
+//! `None` and the text path stays byte-identical to phase 1. Server serving
+//! is phase 3.
 
 mod generate;
 
@@ -43,8 +47,13 @@ pub use generate::{
 };
 
 use crate::models::gemma4::{
-    Gemma4TextModel, QuantizationArgs, RMSNormNoScale, RootQuantization, TextConfig, parse_eos_ids,
+    Gemma4TextModel, QuantizationArgs, RMSNormNoScale, RootQuantization, TextConfig,
+    overlay_block_bidirectional, parse_eos_ids,
 };
+use crate::vision::encoders::gemma4::{Gemma4VisionConfig, Gemma4VisionModel};
+use crate::vision::gemma4_multimodal_embedder::Gemma4MultimodalEmbedder;
+use crate::vision::gemma4_unified_mask::{UnifiedTokenIds, compute_vision_block_ids};
+use crate::vision::processors::gemma4::Gemma4ImageInput;
 use mlxcel_core::generate::LanguageModel;
 use mlxcel_core::layers::{KVCache, RMSNorm, UnifiedLinear};
 use mlxcel_core::weights::WeightMap;
@@ -165,6 +174,9 @@ impl DiffusionGenerationConfig {
     }
 }
 
+/// Default soft tokens contributed by one image (`config.json` omits it).
+const DEFAULT_VISION_SOFT_TOKENS_PER_IMAGE: usize = 280;
+
 /// Top-level `config.json` arguments for `model_type == "diffusion_gemma"`.
 #[derive(Debug, Clone, Deserialize)]
 pub struct ModelArgs {
@@ -178,6 +190,19 @@ pub struct ModelArgs {
     generation_config: Option<GenerationConfigRaw>,
     #[serde(default)]
     pub quantization: Option<RootQuantization>,
+    // Vision front-end (phase 2). All optional: text-only exports omit them.
+    #[serde(default)]
+    pub boi_token_id: Option<i32>,
+    #[serde(default)]
+    pub eoi_token_id: Option<i32>,
+    #[serde(default)]
+    pub image_token_id: Option<i32>,
+    #[serde(default)]
+    pub video_token_id: Option<i32>,
+    #[serde(default)]
+    pub vision_soft_tokens_per_image: Option<usize>,
+    #[serde(default)]
+    pub vision_config: Option<serde_json::Value>,
 }
 
 impl ModelArgs {
@@ -228,6 +253,43 @@ impl ModelArgs {
 
     pub fn canvas_length(&self) -> usize {
         self.canvas_length.unwrap_or(DEFAULT_CANVAS_LENGTH)
+    }
+
+    pub fn image_token_id(&self) -> i32 {
+        self.image_token_id.unwrap_or(258_880)
+    }
+
+    pub fn boi_token_id(&self) -> i32 {
+        self.boi_token_id.unwrap_or(255_999)
+    }
+
+    pub fn eoi_token_id(&self) -> i32 {
+        self.eoi_token_id.unwrap_or(258_882)
+    }
+
+    /// Video token id, or `-1` when the checkpoint has none (DiffusionGemma
+    /// chat checkpoints set `video_token_id: null`). `-1` never matches a
+    /// real token id, so it cleanly disables the video branch.
+    pub fn video_token_id(&self) -> i32 {
+        self.video_token_id.unwrap_or(-1)
+    }
+
+    pub fn vision_soft_tokens_per_image(&self) -> usize {
+        self.vision_soft_tokens_per_image
+            .unwrap_or(DEFAULT_VISION_SOFT_TOKENS_PER_IMAGE)
+    }
+
+    /// Parse the nested `vision_config` into a [`Gemma4VisionConfig`], or
+    /// `None` when the checkpoint omits it (text-only export).
+    pub fn vision_config(&self) -> Result<Option<Gemma4VisionConfig>, String> {
+        match &self.vision_config {
+            Some(value) => {
+                let config: Gemma4VisionConfig = serde_json::from_value(value.clone())
+                    .map_err(|e| format!("DiffusionGemma: failed to parse vision_config: {e}"))?;
+                Ok(Some(config))
+            }
+            None => Ok(None),
+        }
     }
 
     /// EOS ids: union of the top-level `eos_token_id`, the embedded
@@ -454,6 +516,49 @@ impl SelfConditioning {
 }
 
 // ---------------------------------------------------------------------------
+// Vision front-end (phase 2)
+// ---------------------------------------------------------------------------
+
+/// DiffusionGemma vision front-end: the Gemma 4 vision tower plus the
+/// multimodal embedder that projects tower features into the language
+/// model's embedding space (`model.encoder.vision_tower.*`,
+/// `model.encoder.embed_vision.*`).
+///
+/// Present only when the checkpoint ships vision weights; text-only exports
+/// leave [`DiffusionGemmaModel::vision`] as `None`.
+pub struct DiffusionVision {
+    vision_tower: Gemma4VisionModel,
+    embed_vision: Gemma4MultimodalEmbedder,
+    pub image_token_id: i32,
+    pub boi_token_id: i32,
+    pub eoi_token_id: i32,
+    pub video_token_id: i32,
+    pub soft_tokens_per_image: usize,
+}
+
+impl DiffusionVision {
+    /// Run the vision tower and the multimodal embedder for one preprocessed
+    /// image, returning projected features `[1, num_soft_tokens, hidden]`.
+    fn image_features(&self, image: &Gemma4ImageInput) -> UniquePtr<MlxArray> {
+        let pixel_values = image
+            .pixel_values
+            .as_ref()
+            .expect("DiffusionGemma image pixel_values must be non-null");
+        let tower = self.vision_tower.forward(pixel_values, image.patch_grid);
+        self.embed_vision.forward(&tower)
+    }
+}
+
+/// Vision inputs prepared for one diffusion prefill: the scattered,
+/// embed-scaled `inputs_embeds` for the expanded prompt and the per-position
+/// vision block ids that drive the bidirectional overlay (or `None` when no
+/// vision block is present / the overlay is disabled).
+pub struct DiffusionVisionPrefill {
+    pub(crate) inputs_embeds: UniquePtr<MlxArray>,
+    pub(crate) vision_block_ids: Option<Vec<i32>>,
+}
+
+// ---------------------------------------------------------------------------
 // Model
 // ---------------------------------------------------------------------------
 
@@ -468,6 +573,11 @@ pub struct DiffusionGemmaModel {
     pub(crate) generation_config: DiffusionGenerationConfig,
     pub(crate) eos_token_ids: Vec<i32>,
     pub(crate) embed_scale: f32,
+    /// Vision front-end, present only when the checkpoint ships a tower.
+    pub(crate) vision: Option<DiffusionVision>,
+    /// Whether `text_config.use_bidirectional_attention == "vision"`: gates
+    /// the bidirectional vision-block overlay on the encoder prefill.
+    pub(crate) use_bidirectional_vision: bool,
     _weight_backing: super::sanitize::Gemma4WeightBacking,
 }
 
@@ -481,8 +591,18 @@ impl DiffusionGemmaModel {
         let args: ModelArgs = serde_json::from_str(&config_str)
             .map_err(|e| format!("Failed to parse config.json: {e}"))?;
 
+        // `use_clipped_linears` from the vision config decides whether the
+        // tower's clipped-linear calibration tensors are kept. Text-only
+        // checkpoints have no vision config; default to false (drop them).
+        let use_clipped_linears = args
+            .vision_config()?
+            .map(|vc| vc.use_clipped_linears)
+            .unwrap_or(false);
         let (mut weights, weight_backing) =
-            super::sanitize::load_diffusion_gemma_text_weights_with_backing(model_dir)?;
+            super::sanitize::load_diffusion_gemma_weights_with_backing(
+                model_dir,
+                use_clipped_linears,
+            )?;
         let mut model = Self::from_weights(&mut weights, &args)?;
         model._weight_backing = weight_backing;
         Ok(model)
@@ -517,6 +637,16 @@ impl DiffusionGemmaModel {
         let eos_token_ids = args.eos_token_ids(&generation_config);
         let embed_scale = (config.hidden_size as f32).sqrt();
 
+        // Vision front-end: build it only when both a parsed vision config and
+        // the tower weights are present. A text-only export (no vision_config,
+        // no `model.encoder.vision_tower.*` keys) leaves `vision` as None.
+        let vision = Self::build_vision(weights, &config, args)?;
+        let use_bidirectional_vision = config
+            .use_bidirectional_attention
+            .as_deref()
+            .map(|s| s == "vision")
+            .unwrap_or(false);
+
         Ok(Self {
             text,
             self_conditioning,
@@ -525,8 +655,76 @@ impl DiffusionGemmaModel {
             generation_config,
             eos_token_ids,
             embed_scale,
+            vision,
+            use_bidirectional_vision,
             _weight_backing: super::sanitize::Gemma4WeightBacking::default(),
         })
+    }
+
+    /// Build the optional vision front-end from `model.encoder.vision_tower.*`
+    /// and `model.encoder.embed_vision.*`. Returns `None` for text-only
+    /// checkpoints (no `vision_config`, or no tower weights present).
+    fn build_vision(
+        weights: &WeightMap,
+        config: &TextConfig,
+        args: &ModelArgs,
+    ) -> Result<Option<DiffusionVision>, String> {
+        let Some(vision_config) = args.vision_config()? else {
+            return Ok(None);
+        };
+        // Tolerate a vision_config without tower weights (text-only shard set):
+        // the projection weight is the canonical marker of a real front-end.
+        if !weights.contains_key("model.encoder.embed_vision.embedding_projection.weight") {
+            return Ok(None);
+        }
+
+        let group_size = config
+            .quantization
+            .as_ref()
+            .map(|q| q.group_size as i32)
+            .unwrap_or(64);
+        let bits = config
+            .quantization
+            .as_ref()
+            .map(|q| q.bits as i32)
+            .unwrap_or(4);
+
+        let vision_tower = Gemma4VisionModel::from_weights(
+            weights,
+            "model.encoder.vision_tower",
+            &vision_config,
+            group_size,
+            bits,
+        )?;
+        let embed_vision = Gemma4MultimodalEmbedder::from_weights(
+            weights,
+            "model.encoder.embed_vision",
+            vision_config.hidden_size,
+            vision_config.rms_norm_eps(),
+            group_size,
+            bits,
+        )?;
+
+        Ok(Some(DiffusionVision {
+            vision_tower,
+            embed_vision,
+            image_token_id: args.image_token_id(),
+            boi_token_id: args.boi_token_id(),
+            eoi_token_id: args.eoi_token_id(),
+            video_token_id: args.video_token_id(),
+            soft_tokens_per_image: args.vision_soft_tokens_per_image(),
+        }))
+    }
+
+    /// Whether this checkpoint loaded a vision front-end (phase 2 capable).
+    pub fn supports_images(&self) -> bool {
+        self.vision.is_some()
+    }
+
+    /// Vision token ids / soft-token count for prompt expansion, or `None`
+    /// for a text-only checkpoint.
+    pub fn vision(&self) -> Option<&DiffusionVision> {
+        self.vision.as_ref()
     }
 
     pub fn config(&self) -> &TextConfig {
@@ -569,9 +767,31 @@ impl DiffusionGemmaModel {
         mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
         let embeds = self.text.embed_tokens.forward(input_ids);
-        let mut h = mlxcel_core::multiply_scalar(&embeds, self.embed_scale);
+        let embeds = mlxcel_core::multiply_scalar(&embeds, self.embed_scale);
+        // Text path: no vision-block overlay. Byte-identical to the phase-1
+        // forward_encoder for an all-text prompt.
+        self.forward_encoder_embeds(&embeds, caches, mask, None)
+    }
 
-        let shape = mlxcel_core::array_shape(&h);
+    /// Embeddings-input encoder forward (issue #217, phase 2).
+    ///
+    /// `inputs_embeds` is the already-`embed_scale`-scaled (and, for vision,
+    /// feature-scattered) hidden state `[1, L, hidden]`. `vision_block_ids`,
+    /// when present, is the per-position vision block-id vector that drives
+    /// the bidirectional overlay (OR-ed on top of the causal / sliding-window
+    /// masks for every layer), matching `_vision_block_overlay` /
+    /// `_make_encoder_masks` in the reference. The overlay applies only when
+    /// this routine builds its own masks (`mask == None`), i.e. the prompt
+    /// prefill at cache offset 0; continuation encoder passes over committed
+    /// blocks pass `vision_block_ids == None`.
+    pub(crate) fn forward_encoder_embeds(
+        &self,
+        inputs_embeds: &MlxArray,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        vision_block_ids: Option<&[i32]>,
+    ) -> UniquePtr<MlxArray> {
+        let shape = mlxcel_core::array_shape(inputs_embeds);
         let l = shape[1];
         let offset = caches.first().map(|c| c.offset).unwrap_or(0);
         let window = self.text.config.sliding_window as i32;
@@ -580,7 +800,7 @@ impl DiffusionGemmaModel {
         // the FULL key axis [0, offset + l), so the rotating-cache-shaped
         // helpers (which cap the sliding mask to the window width) do not
         // apply here.
-        let (global_mask, sliding_mask) = match mask {
+        let (mut global_mask, mut sliding_mask) = match mask {
             Some(m) => (mlxcel_core::copy(m), mlxcel_core::copy(m)),
             None => (
                 mlxcel_core::utils::create_causal_mask(l, offset),
@@ -588,20 +808,132 @@ impl DiffusionGemmaModel {
             ),
         };
 
+        // Bidirectional vision-block overlay: every contiguous image block
+        // attends to itself in both directions, OR-ed onto the causal /
+        // sliding base masks for ALL layers.
+        if let Some(block_ids) = vision_block_ids {
+            let ids = mlxcel_core::from_slice_i32(block_ids, &[block_ids.len() as i32]);
+            global_mask = overlay_block_bidirectional(&global_mask, &ids);
+            sliding_mask = overlay_block_bidirectional(&sliding_mask, &ids);
+        }
+
+        let mut h: Option<UniquePtr<MlxArray>> = None;
         for (i, layer) in self.text.layers.iter().enumerate() {
             let local_mask = if layer.layer_type == "full_attention" {
                 &global_mask
             } else {
                 &sliding_mask
             };
-            h = layer.forward_encoder_with_scalar(
-                &h,
+            let input = h
+                .as_ref()
+                .map(|p| p.as_ref().expect("non-null encoder hidden") as &MlxArray)
+                .unwrap_or(inputs_embeds);
+            let out = layer.forward_encoder_with_scalar(
+                input,
                 Some(local_mask),
                 &mut caches[i],
                 &self.encoder_layer_scalars[i],
             );
+            h = Some(out);
         }
-        h
+        h.unwrap_or_else(|| mlxcel_core::copy(inputs_embeds))
+    }
+
+    /// Build the embed-scaled, feature-scattered `inputs_embeds` for one
+    /// vision prompt and the per-position vision block ids for the overlay.
+    ///
+    /// Mirrors `EncoderModel._embed_inputs`: image-token positions are
+    /// replaced by `pad_token_id` for the embedding lookup, the text
+    /// embeddings are scaled by `embed_scale`, and the RAW (unscaled) image
+    /// features are masked-scattered into the image positions.
+    ///
+    /// `expanded_ids` is the prompt after image-placeholder expansion
+    /// (`boi + image_token * soft_tokens + eoi`); batch is always 1.
+    pub fn prepare_vision_prefill(
+        &self,
+        expanded_ids: &[i32],
+        images: &[Gemma4ImageInput],
+    ) -> Result<DiffusionVisionPrefill, String> {
+        let vision = self.vision.as_ref().ok_or_else(|| {
+            "DiffusionGemma: this checkpoint has no vision tower; image input is unsupported"
+                .to_string()
+        })?;
+        if expanded_ids.is_empty() {
+            return Err("DiffusionGemma: prompt must contain at least one token".to_string());
+        }
+
+        let l = expanded_ids.len() as i32;
+        let hidden = self.text.config.hidden_size as i32;
+
+        // Pad image/video positions to id 0 for the lookup (Gemma pad_token_id
+        // == 0); those rows are overwritten by the scatter below.
+        let lookup_ids: Vec<i32> = expanded_ids
+            .iter()
+            .map(|&id| {
+                if id == vision.image_token_id || id == vision.video_token_id {
+                    0
+                } else {
+                    id
+                }
+            })
+            .collect();
+        let lookup_arr = mlxcel_core::from_slice_i32(&lookup_ids, &[1, l]);
+        let text_embeds = self.text.embed_tokens.forward(&lookup_arr);
+        let inputs_embeds = mlxcel_core::multiply_scalar(&text_embeds, self.embed_scale);
+
+        // Image features (raw embedder output, NOT scaled by embed_scale),
+        // concatenated along the sequence axis in prompt order.
+        let mut features: Vec<UniquePtr<MlxArray>> = Vec::with_capacity(images.len());
+        for image in images {
+            features.push(vision.image_features(image));
+        }
+        if features.is_empty() {
+            return Err("DiffusionGemma: image input requested but no images supplied".to_string());
+        }
+        let mut merged = mlxcel_core::copy(features[0].as_ref().expect("non-null image features"));
+        for next in features.iter().skip(1) {
+            merged = mlxcel_core::concatenate(
+                &merged,
+                next.as_ref().expect("non-null image features"),
+                1,
+            );
+        }
+        let merged = mlxcel_core::astype(&merged, mlxcel_core::array_dtype(&inputs_embeds));
+
+        // Vision mask broadcast to the embedding shape, then masked-scatter.
+        let is_vision: Vec<i32> = expanded_ids
+            .iter()
+            .map(|&id| i32::from(id == vision.image_token_id || id == vision.video_token_id))
+            .collect();
+        let mask_2d = mlxcel_core::from_slice_i32(&is_vision, &[1, l]);
+        let mask_bool = mlxcel_core::astype(&mask_2d, dtype::BOOL);
+        let mask_expanded =
+            mlxcel_core::broadcast_to(&mlxcel_core::expand_dims(&mask_bool, -1), &[1, l, hidden]);
+        let inputs_embeds = crate::vision::gemma4_multimodal_embedder::masked_scatter(
+            &inputs_embeds,
+            &mask_expanded,
+            &merged,
+        );
+
+        // Per-position vision block ids for the bidirectional overlay.
+        let vision_block_ids = if self.use_bidirectional_vision {
+            compute_vision_block_ids(
+                expanded_ids,
+                UnifiedTokenIds {
+                    image: vision.image_token_id,
+                    video: vision.video_token_id,
+                    audio: -1,
+                },
+                true,
+            )
+        } else {
+            None
+        };
+
+        Ok(DiffusionVisionPrefill {
+            inputs_embeds,
+            vision_block_ids,
+        })
     }
 
     /// Canvas (decoder-mode) forward: denoise one canvas against the

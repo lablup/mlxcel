@@ -294,7 +294,10 @@ fn get_weight_copy(weights: &WeightMap, name: &str) -> Result<UniquePtr<MlxArray
 /// vision span is never split across a chunk (the loader sets
 /// `no_chunked_prefill`), so `offset == 0` and `block_ids` aligns with both the
 /// query and key axes.
-fn overlay_block_bidirectional(base: &MlxArray, block_ids: &MlxArray) -> UniquePtr<MlxArray> {
+pub(crate) fn overlay_block_bidirectional(
+    base: &MlxArray,
+    block_ids: &MlxArray,
+) -> UniquePtr<MlxArray> {
     let base_shape = mlxcel_core::array_shape(base);
     debug_assert!(
         base_shape.len() >= 2,
