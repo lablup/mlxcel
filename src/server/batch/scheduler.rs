@@ -508,12 +508,15 @@ impl BatchScheduler {
             return Ok(None);
         };
         let generated_tokens = seq.generated_tokens.clone();
-        let bytes = self.extract_sequence_handoff(seq_id, prompt_tokens, generated_tokens)?;
-        // The KV now belongs to the decode node: release the local caches and any
-        // per-sequence tracking without donating back (the prefix left this node).
+        let bytes = self.extract_sequence_handoff(seq_id, prompt_tokens, generated_tokens);
+        // Release the local caches and per-sequence tracking on BOTH outcomes:
+        // on success the KV now belongs to the decode node (no donate-back, the
+        // prefix left this node); on an extract error the sequence was already
+        // lifted out of the active batch, so skipping the release would leak
+        // its pool slot.
         self.prompt_cache_seq_ctx.remove(&seq_id);
         self.release_sequence_caches(seq_id);
-        Ok(Some(bytes))
+        Ok(Some(bytes?))
     }
 
     /// Prefill role (#126 B3a): build a queued text sequence from the raw request
@@ -546,6 +549,20 @@ impl BatchScheduler {
     ) -> anyhow::Result<Option<Vec<u8>>> {
         if prompt_tokens.is_empty() {
             anyhow::bail!("prefill-role handoff: empty prompt has no tokens to prefill");
+        }
+        // Admission cap for the network-facing intake: with chunked prefill
+        // supported (issue #197) the old chunk-size bail no longer bounds the
+        // accepted prompt, so an oversized PrefillRequestFrame could drive a
+        // multi-minute synchronous chunk loop on the node's only prefill
+        // worker. 1M tokens matches the CacheIngestLimits philosophy (far
+        // above any realistic context; the pool budget is the real bound).
+        const MAX_HANDOFF_PROMPT_TOKENS: usize = 1 << 20;
+        if prompt_tokens.len() > MAX_HANDOFF_PROMPT_TOKENS {
+            anyhow::bail!(
+                "prefill-role handoff: prompt of {} tokens exceeds the admission cap \
+                 ({MAX_HANDOFF_PROMPT_TOKENS})",
+                prompt_tokens.len()
+            );
         }
         // Merge the model's configured stop tokens into the request sampling
         // exactly as the single-node intake (`enqueue_request`) does, so the
