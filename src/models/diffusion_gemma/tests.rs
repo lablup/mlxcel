@@ -412,3 +412,77 @@ fn dense_windowed_mask_is_correct_for_multi_token_offset_forward() {
     assert_eq!(at(2, 2002), 0.0, "self-attention allowed");
     assert!(blocked(at(1, 2002)), "row 1 cannot see row 2's key");
 }
+
+// -------------------------------------------------------------------------
+// Real-model regression tests (issue #217; #[ignore], need the checkpoint)
+// -------------------------------------------------------------------------
+
+/// Determinism regression for the steel GEMM safe-load overlay
+/// (`src/lib/mlx-cpp/patches/mlx/backend/metal/kernels/steel/gemm/mma.h`,
+/// upstream MLX PRs #3560/#3565).
+///
+/// The DiffusionGemma canvas forward runs head_dim 256/512 SDPA through the
+/// unfused steel-GEMM path with non-tile-aligned key lengths, so the broken
+/// edge-tile loader read junk through strided views and the SAME 30-layer
+/// lazy graph produced different bytes run to run. Both forward modes must
+/// be byte-deterministic.
+///
+/// `cargo test --release --lib models::diffusion_gemma::tests::real_model_forward_determinism -- --ignored --nocapture`
+#[test]
+#[ignore]
+fn real_model_forward_determinism() {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("models/diffusiongemma-26B-A4B-it-4bit");
+    if !dir.exists() {
+        eprintln!("skip: checkpoint not present");
+        return;
+    }
+    let model = DiffusionGemmaModel::load(&dir).expect("load");
+    // "Why is the sky blue?" through chat_template.jinja.
+    let prompt: Vec<i32> = vec![
+        2, 105, 2364, 107, 11355, 563, 506, 7217, 3730, 236881, 106, 107, 105, 4368, 107, 100,
+        45518, 107, 101,
+    ];
+    let ids = mlxcel_core::from_slice_i32(&prompt, &[1, prompt.len() as i32]);
+
+    // Warm the Metal buffer cache first: the historical failure modes (the
+    // steel GEMM safe-load typo and the strided split-weight gather_qmm
+    // reads) only turned nondeterministic once recycled buffers carried
+    // changing junk, so a fresh-process run could pass with the bug present.
+    {
+        let warm_ids = super::generate::debug_canvas_pattern(64, 262144, 1);
+        let warm = mlxcel_core::from_slice_i32(&warm_ids, &[1, 64]);
+        for _ in 0..3 {
+            let mut caches = model.make_diffusion_caches();
+            let h = model.forward_encoder(&warm, &mut caches, None);
+            mlxcel_core::eval(&h);
+        }
+    }
+    let canvas_ids = super::generate::debug_canvas_pattern(64, 262144, 0);
+    let canvas = mlxcel_core::from_slice_i32(&canvas_ids, &[1, 64]);
+
+    let run = || -> (Vec<u8>, Vec<u8>) {
+        let mut caches = model.make_diffusion_caches();
+        let hidden = model.forward_encoder(&ids, &mut caches, None);
+        let hidden = mlxcel_core::astype(&hidden, mlxcel_core::dtype::FLOAT32);
+        mlxcel_core::eval(&hidden);
+        let encoder_bytes = mlxcel_core::array_to_raw_bytes(&hidden);
+
+        let logits = model.forward_canvas(&canvas, &caches, None);
+        let logits = mlxcel_core::astype(&logits, mlxcel_core::dtype::FLOAT32);
+        mlxcel_core::eval(&logits);
+        let canvas_bytes = mlxcel_core::array_to_raw_bytes(&logits);
+        (encoder_bytes, canvas_bytes)
+    };
+
+    let (encoder_a, canvas_a) = run();
+    let (encoder_b, canvas_b) = run();
+    assert_eq!(
+        encoder_a, encoder_b,
+        "encoder forward must be byte-deterministic across runs"
+    );
+    assert_eq!(
+        canvas_a, canvas_b,
+        "canvas forward must be byte-deterministic across runs"
+    );
+}

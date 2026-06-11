@@ -258,6 +258,14 @@ impl ModelArgs {
 /// Affine quantization is per-output-row (weight `[E, out, packed_in]`,
 /// scales/biases `[E, out, in / group_size]`), so this split is numerically
 /// exact for the packed weight, scales, and biases alike.
+///
+/// The split is performed on HOST bytes, building pristine dense arrays via
+/// `from_bytes`. The obvious `slice` + `copy` graph route produces arrays
+/// that `gather_qmm` reads incorrectly on the pinned MLX (out-of-bounds
+/// style corruption that turns nondeterministic under allocator churn);
+/// gather_qmm with byte-identical rebuilt buffers is deterministic, so the
+/// host-side rebuild is load-bearing, not an optimization. This runs once
+/// per layer at load time.
 pub(crate) fn split_gate_up_tensor(
     tensor: &MlxArray,
     moe_dim: i32,
@@ -276,11 +284,54 @@ pub(crate) fn split_gate_up_tensor(
             2 * moe_dim
         ));
     }
-    let gate = mlxcel_core::slice(tensor, &[0, 0, 0], &[shape[0], moe_dim, shape[2]]);
-    let up = mlxcel_core::slice(tensor, &[0, moe_dim, 0], &[shape[0], 2 * moe_dim, shape[2]]);
-    // Materialize contiguous copies so the downstream gather_qmm sees plain
-    // row-major expert tensors rather than strided views.
-    Ok((mlxcel_core::copy(&gate), mlxcel_core::copy(&up)))
+    let dtype = mlxcel_core::array_dtype(tensor);
+    let element_size = match dtype {
+        d if d == dtype::UINT32 || d == dtype::INT32 || d == dtype::FLOAT32 => 4usize,
+        d if d == dtype::FLOAT16 || d == dtype::BFLOAT16 => 2usize,
+        other => {
+            return Err(format!(
+                "DiffusionGemma: unsupported fused gate_up dtype {other}"
+            ));
+        }
+    };
+    mlxcel_core::eval(tensor);
+    let bytes = mlxcel_core::array_to_raw_bytes(tensor);
+    let (num_experts, fused_rows, cols) = (shape[0] as usize, shape[1] as usize, shape[2] as usize);
+    let half_rows = moe_dim as usize;
+    let row_bytes = cols * element_size;
+    let expected = num_experts * fused_rows * row_bytes;
+    if bytes.len() != expected {
+        return Err(format!(
+            "DiffusionGemma: fused gate_up byte size mismatch (got {}, expected {expected})",
+            bytes.len()
+        ));
+    }
+    let half_bytes = half_rows * row_bytes;
+    let mut gate_bytes = Vec::with_capacity(num_experts * half_bytes);
+    let mut up_bytes = Vec::with_capacity(num_experts * half_bytes);
+    for expert in 0..num_experts {
+        let base = expert * fused_rows * row_bytes;
+        gate_bytes.extend_from_slice(&bytes[base..base + half_bytes]);
+        up_bytes.extend_from_slice(&bytes[base + half_bytes..base + 2 * half_bytes]);
+    }
+    let half_shape = [shape[0], moe_dim, shape[2]];
+    // 16-bit dtypes must go through the f16 constructor: the generic
+    // `from_bytes` path reads half the bytes for them (see
+    // `from_bytes_f16` docs / the #125 serde corruption fix).
+    let build = |data: &[u8]| -> UniquePtr<MlxArray> {
+        if dtype == dtype::BFLOAT16 {
+            mlxcel_core::from_bytes_f16(data, &half_shape, true)
+        } else if dtype == dtype::FLOAT16 {
+            mlxcel_core::from_bytes_f16(data, &half_shape, false)
+        } else {
+            mlxcel_core::from_bytes(data, &half_shape, dtype)
+        }
+    };
+    let gate = build(&gate_bytes);
+    let up = build(&up_bytes);
+    mlxcel_core::eval(&gate);
+    mlxcel_core::eval(&up);
+    Ok((gate, up))
 }
 
 /// Rewrite the checkpoint's fused expert tensors onto the key layout
