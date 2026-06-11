@@ -104,12 +104,31 @@ Preprocessing reuses the Gemma 4 vision pipeline: images are resized and padded 
 
 Video and audio inputs are not supported and are rejected with a clear error message.
 
-## Remaining limitations (phase 2)
+## Server mode
 
-The following are not yet supported:
+`mlxcel-server --model <diffusion-model>` (or `mlxcel serve -m <diffusion-model>`) loads the checkpoint and serves `/v1/chat/completions` and `/v1/completions`. Both streaming (SSE) and non-streaming responses are supported. Requests are served serially: DiffusionGemma cannot join the batch scheduler, so the server queues them in arrival order and processes one at a time. That is the intended design, not a temporary limitation.
 
-- **Server mode**: `mlxcel serve` and `mlxcel-server` reject DiffusionGemma at
-  load time. Use `mlxcel generate` from the CLI. Server support is planned for phase 3 of issue #217.
+Serve-level flags that affect diffusion models:
+
+| Flag | Default | Notes |
+|------|---------|-------|
+| `--diffusion-sampler entropy-bound\|confidence-threshold` | `entropy-bound` | Per-step token acceptance strategy. |
+| `--diffusion-threshold FLOAT` | `0.9` | Confidence threshold; validated to `[0, 1]` at startup. |
+| `--max-denoising-steps N` | checkpoint default (typically 48) | Maximum denoising iterations per canvas block. |
+
+Image input follows the standard OpenAI `image_url` content part format. Requests that include video or audio are rejected with a clear error; the connection stays open and the next request is served normally.
+
+### Operational caveats
+
+The checkpoint is a thinking-channel model. The assistant fills a `reasoning_content` channel before writing the visible reply. A few practical consequences:
+
+- **Give requests enough `max_tokens`.** With a budget of 64 tokens a simple question may produce only reasoning, leaving `content` empty with `finish_reason: "length"`. A budget of 256 produces the full answer for most short prompts.
+- **Non-streaming responses omit reasoning.** The server's existing convention is to strip `reasoning_content` from non-streaming chat completions. Streaming responses carry it as `delta.reasoning_content`.
+- **`/v1/completions` works but raw prompts degrade.** The endpoint accepts un-templated text mechanically, but the model depends on its chat structure, so output quality degrades significantly. Prefer `/v1/chat/completions`.
+- **Cancellation resolution.** A cancelled request is aborted within at most one denoising step, not instantaneously.
+
+## Remaining limitations
+
 - **Tensor parallelism**: The TP planner has a placeholder arm for this family.
 
 ## Usage example

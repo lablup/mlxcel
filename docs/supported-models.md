@@ -44,7 +44,7 @@ requirements. If a checkpoint fails detection or loading, inspect its
 
 | Family | `model_type` key | Notes |
 |--------|-----------------|-------|
-| DiffusionGemma | `diffusion_gemma` / `diffusion_gemma_text` | Block-diffusion on a Gemma 4 MoE backbone. Generates a canvas of tokens per block through iterative denoising rather than token-by-token left-to-right decoding. CLI (`mlxcel generate`) supports text and image input (`--image <path>`, repeatable). Server mode is not yet supported. See [Block-diffusion generation](block-diffusion.md). |
+| DiffusionGemma | `diffusion_gemma` / `diffusion_gemma_text` | Block-diffusion on a Gemma 4 MoE backbone. Generates a canvas of tokens per block through iterative denoising rather than token-by-token left-to-right decoding. CLI (`mlxcel generate`) supports text and image input (`--image <path>`, repeatable). Served in `mlxcel-server` (serial, batch-1 by design) via `/v1/chat/completions` and `/v1/completions`; image input follows the standard `image_url` content part format. See [Block-diffusion generation](block-diffusion.md). |
 
 DiffusionGemma uses a two-phase forward pass: an encoder prefill that caches the
 prompt into dense FP16 KV caches, then a canvas loop that attends bidirectionally
