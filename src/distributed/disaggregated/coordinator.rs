@@ -422,8 +422,9 @@ impl ServingCoordinator {
                 }
             }
 
-            // Terminal frame: any stragglers emitted by the final
-            // finalize_completed pass, then `done`.
+            // Terminal frame. The per-tick drain above runs after each
+            // finalize_completed, so this drain is normally empty; it exists
+            // as a defensive catch-all so no event can be dropped.
             let (tokens, _done, error) = drain_generation_events(&token_rx);
             let result = ResultFrame {
                 request_id: meta.request_id,
