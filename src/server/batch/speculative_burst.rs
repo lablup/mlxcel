@@ -413,25 +413,46 @@ pub(crate) fn can_join_batched_burst_window(seq: &SequenceInfo) -> bool {
     true
 }
 
-/// Whether the Gemma 4 MTP B=1 (single-request) burst path runs.
+/// Whether the Gemma 4 MTP B=1 (single-request) burst path runs for a target
+/// with the given batching capability.
 ///
-/// On by default. Apple Silicon (M5 Max) measurements show the assistant
-/// drafter is profitable for single-request Gemma 4 serving, with byte-identical
-/// output at `temperature 0`: ~1.87x on the 12B Unified pair and ~1.2 to 1.4x on
-/// the 31B + bf16 assistant. (The Unified target cannot batch at all, so B=1 is
-/// its only path; the 31B is batch-capable but its single-request window is
-/// still B=1.) The gain is smaller than the ~3x reported on an idle H100 because
-/// Apple Silicon decode is bandwidth-bound, but it stays above 1.0x.
+/// Default policy (issue #165, per-hardware):
+/// - Non-batchable targets (the 12B Unified family, whose only decode path is
+///   B=1): **on** everywhere. Measured profitable on both chip classes
+///   (~1.87x on M5 Max, ~1.1 to 1.4x on M1 Ultra).
+/// - Batch-capable targets (the 31B + bf16 assistant): **on only on M5+**
+///   (Neural Accelerator generation). M5 Max measured ~1.2 to 1.4x, but
+///   M1 Ultra measured a consistent regression (~0.75 to 0.96x, four greedy
+///   160-token prompts), so pre-M5 chips default to classic decode. The
+///   discriminator is GPU compute generation rather than memory bandwidth:
+///   M1 Ultra has datacenter-class bandwidth yet the drafter + K-wide verify
+///   forwards do not pay for themselves on its older GPU cores.
 ///
-/// Set `MLXCEL_ENABLE_MTP_B1=0` (or `false`/`no`/`off`) to opt out, e.g. on
-/// lower-bandwidth Apple Silicon where the B=1 verify forward may not pay for
-/// itself. The batched B>1 path is governed separately by
+/// `MLXCEL_ENABLE_MTP_B1` overrides the default in both directions: any value
+/// other than `0`/`false`/`no`/`off` forces it on, those values force it off.
+/// The batched B>1 path is governed separately by
 /// [`mtp_batched_burst_enabled`] and stays off by default.
-pub(crate) fn mtp_b1_burst_enabled() -> bool {
-    std::env::var("MLXCEL_ENABLE_MTP_B1")
-        .ok()
-        .map(|v| !matches!(v.as_str(), "0" | "false" | "FALSE" | "no" | "off"))
-        .unwrap_or(true)
+pub(crate) fn mtp_b1_burst_enabled(target_supports_batching: bool) -> bool {
+    mtp_b1_default(
+        std::env::var("MLXCEL_ENABLE_MTP_B1").ok().as_deref(),
+        target_supports_batching,
+        mlxcel_core::hardware::get_hardware().has_neural_accelerator,
+    )
+}
+
+/// Pure decision core of [`mtp_b1_burst_enabled`], separated for unit testing.
+pub(crate) fn mtp_b1_default(
+    env_override: Option<&str>,
+    target_supports_batching: bool,
+    has_neural_accelerator: bool,
+) -> bool {
+    if let Some(v) = env_override {
+        return !matches!(v, "0" | "false" | "FALSE" | "no" | "off");
+    }
+    if !target_supports_batching {
+        return true;
+    }
+    has_neural_accelerator
 }
 
 /// Whether to force the Gemma 4 MTP B>1 batched burst path. Off by default.
@@ -2393,6 +2414,30 @@ fn model_variant_label(model: &LoadedModel) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    /// Issue #165: per-hardware B=1 MTP default decision table.
+    #[test]
+    fn mtp_b1_default_policy_table() {
+        use super::mtp_b1_default;
+        // Env override wins in both directions, regardless of hardware.
+        for &batching in &[true, false] {
+            for &na in &[true, false] {
+                assert!(mtp_b1_default(Some("1"), batching, na));
+                assert!(mtp_b1_default(Some("on"), batching, na));
+                assert!(!mtp_b1_default(Some("0"), batching, na));
+                assert!(!mtp_b1_default(Some("false"), batching, na));
+                assert!(!mtp_b1_default(Some("off"), batching, na));
+                assert!(!mtp_b1_default(Some("no"), batching, na));
+            }
+        }
+        // No override: non-batchable targets stay on everywhere (B=1 is their
+        // only decode path and measured profitable on both chip classes).
+        assert!(mtp_b1_default(None, false, true));
+        assert!(mtp_b1_default(None, false, false));
+        // Batch-capable targets: on only on M5+ (Neural Accelerator) chips.
+        assert!(mtp_b1_default(None, true, true));
+        assert!(!mtp_b1_default(None, true, false));
+    }
+
     use super::*;
 
     #[test]

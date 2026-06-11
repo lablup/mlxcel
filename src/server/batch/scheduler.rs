@@ -2638,18 +2638,18 @@ impl BatchScheduler {
                 self.speculative_dispatch,
                 crate::server::SpeculativeDispatch::Mtp { .. }
             )
-            && !super::speculative_burst::mtp_b1_burst_enabled()
+            && !super::speculative_burst::mtp_b1_burst_enabled(self.model.supports_batching())
         {
-            // B=1 (single-request) MTP runs by default for every MTP target
-            // (~1.87x on the 12B Unified pair, ~1.2 to 1.4x on the 31B, both
-            // byte-identical on M5 Max). This decline fires only when an operator
-            // opts out with `MLXCEL_ENABLE_MTP_B1=0`, e.g. on lower-bandwidth
-            // Apple Silicon where the B=1 verify forward may not pay for itself;
-            // the request then falls back to classic decode.
+            // Per-hardware B=1 MTP default (issue #165): non-batchable targets
+            // (12B Unified) keep B=1 MTP on everywhere; batch-capable targets
+            // (31B) default it on only on M5+ chips, because pre-M5 GPU cores
+            // measured a consistent regression (~0.87x avg on M1 Ultra).
+            // `MLXCEL_ENABLE_MTP_B1` overrides in both directions; on decline
+            // the request falls back to classic decode.
             let seq = window.into_iter().next().expect("singleton window");
             tracing::info!(
-                "MTP B=1 speculative burst disabled for seq {} via MLXCEL_ENABLE_MTP_B1=0; \
-                 falling back to classic decode",
+                "MTP B=1 speculative burst declined for seq {} (per-hardware default \
+                 or MLXCEL_ENABLE_MTP_B1=0); falling back to classic decode",
                 seq.seq_id,
             );
             return Some(seq);
