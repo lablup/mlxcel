@@ -138,13 +138,16 @@ impl SerializablePagedSequenceState {
                     layer.len
                 );
             }
-            let visible_len = layer.len.saturating_sub(layer.logical_start);
-            let required_blocks = visible_len.div_ceil(layout.block_size);
+            // Absolute-position indexing (issue #196): the block table must
+            // cover the full absolute length, matching the pool-side
+            // `restore_sequence` gate so the wire boundary and the pool
+            // encode the same invariant.
+            let required_blocks = layer.len.div_ceil(layout.block_size);
             if layer.block_ids.len() < required_blocks {
                 anyhow::bail!(
-                    "paged layer {layer_idx} has {} blocks for visible length {}, requires at least {}",
+                    "paged layer {layer_idx} has {} blocks for length {}, requires at least {}",
                     layer.block_ids.len(),
-                    visible_len,
+                    layer.len,
                     required_blocks
                 );
             }
