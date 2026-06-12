@@ -15,7 +15,7 @@
 //! Block-diffusion generation engine for DiffusionGemma (issue #217).
 //!
 //! Mirrors `stream_diffusion_generate` in
-//! `references/mlx-vlm/mlx_vlm/generate/diffusion.py` for the batch-1,
+//! https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/generate/diffusion.py for the batch-1,
 //! no-padding, dynamic-cache CLI case: per block, initialize a random
 //! canvas, denoise it for up to `max_denoising_steps` iterations under a
 //! linear temperature schedule with self-conditioning, accept positions via

@@ -21,7 +21,7 @@
 //! - PatchMerger with RMSNorm
 //!
 //! Used by: Qwen2.5-VL
-//! Reference: references/mlx-vlm/mlx_vlm/models/qwen2_5_vl/vision.py
+//! Reference: https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/models/qwen2_5_vl/vision.py
 
 use super::VisionEncoderOutput;
 use super::qwen2_vl::{VisionRotaryEmbedding, apply_rotary_pos_emb_vision, concat_many};

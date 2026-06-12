@@ -13,7 +13,7 @@
 // limitations under the License.
 
 // Nemotron-NAS: NVIDIA's Neural Architecture Search model for mlxcel-core
-// Reference: mlx-lm/mlx_lm/models/nemotron-nas.py
+// Reference: https://github.com/ml-explore/mlx-lm/blob/main/mlx_lm/models/nemotron-nas.py
 //
 // Key features:
 // - Per-layer configuration via block_configs (AttentionConfig, FFNConfig)

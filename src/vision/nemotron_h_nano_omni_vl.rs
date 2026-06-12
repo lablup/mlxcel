@@ -15,7 +15,7 @@
 //! Nemotron H Nano Omni vision-language model wrapper.
 //!
 //! Faithful Rust port of the multimodal path in
-//! `references/mlx-vlm/mlx_vlm/models/nemotron_h_nano_omni/nemotron_h_nano_omni.py`.
+//! https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/models/nemotron_h_nano_omni/nemotron_h_nano_omni.py.
 //! Composes:
 //! - the existing Nemotron-H text backbone
 //!   ([`crate::models::NemotronHModel`])
@@ -507,7 +507,7 @@ impl LanguageModel for NemotronHNanoOmniVlModel {
 /// Apply N stages of upstream `_get_output_length` (same kernel/stride
 /// per stage) on an int32 length tensor. Mirrors
 /// `_get_subsampling_output_length` from
-/// `references/.../nemotron_h_nano_omni/audio.py`.
+/// https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/models/nemotron_h_nano_omni/audio.py.
 fn subsampling_output_lengths(
     lengths: &MlxArray,
     kernel_size: i32,

@@ -32,7 +32,7 @@
 //! `att_proj` carries a bias (`qkv_bias: true`) and is 4-bit quantized; the
 //! `UnifiedLinear` loader picks up the optional `.bias` automatically.
 //!
-//! Reference: references/mlx-vlm/mlx_vlm/models/molmo/language.py
+//! Reference: https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/models/molmo/language.py
 
 use mlxcel_core::generate::LanguageModel;
 use mlxcel_core::layers::{KVCache, RMSNorm, UnifiedLinear};

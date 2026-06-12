@@ -32,7 +32,7 @@
 //! This implementation targets the single-image / single-crop-batch inference
 //! path used by the CLI and server (`batch=1`).
 //!
-//! Reference: references/mlx-vlm/mlx_vlm/models/molmo/vision.py
+//! Reference: https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/models/molmo/vision.py
 
 use mlxcel_core::layers::{LayerNorm, Linear, UnifiedLinear};
 use mlxcel_core::weights::WeightMap;

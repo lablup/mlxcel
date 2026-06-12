@@ -18,7 +18,7 @@
 //! MRoPE uses 3D position IDs [T, H, W] for encoding spatial structure of vision tokens.
 //!
 //! Used by: Qwen2-VL
-//! Reference: references/mlx-vlm/mlx_vlm/models/qwen2_vl/language.py
+//! Reference: https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/models/qwen2_vl/language.py
 
 use crate::models::qwen_mrope_state::MRopeState;
 use mlxcel_core::cache::SequenceId;

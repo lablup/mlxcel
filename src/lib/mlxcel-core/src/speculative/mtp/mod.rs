@@ -35,7 +35,7 @@
 //! ## Round-loop reference
 //!
 //! Mirrors the upstream Python `_mtp_rounds` and `_speculative_walk` in
-//! `references/mlx-vlm/mlx_vlm/generate.py` (lines 456-619).
+//! https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/speculative/mtp.py.
 //!
 //! ## Submodules
 //!

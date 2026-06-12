@@ -23,7 +23,7 @@
 //! V quantization error contributes disproportionately to perplexity
 //! regression: keeping these 4 layers at higher precision recovers
 //! 37–91% of the quality gap at zero speed cost. See
-//! `turboquant_plus/docs/papers/layer-aware-v-compression.md`
+//! https://github.com/TheTom/turboquant_plus/blob/main/docs/papers/layer-aware-v-compression.md
 //! for the original measurements (LA-V7 policy: q8_0 boundary V, turbo
 //! middle V, K unchanged).
 //!

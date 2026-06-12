@@ -14,7 +14,7 @@
 
 //! DFlash drafter K/V cache type alias.
 //!
-//! Upstream `mlx-vlm/speculative/drafters/qwen3_dflash/dflash.py` declares
+//! Upstream https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/speculative/drafters/qwen3_dflash/dflash.py declares
 //! `DFlashKVCache = KVCache` at the module bottom. The DFlash drafter
 //! reuses MLX-LM's stock `KVCache` shape and `update_and_fetch` semantics
 //! verbatim — no new cache layout is required.

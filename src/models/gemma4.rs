@@ -784,7 +784,7 @@ impl Cache {
 
     /// Per-row tail-zero of the rotating cache for partial-accept rows in a
     /// batched verify pass. Mirrors the Python `hasattr(c, "_idx")` branch in
-    /// `rollback_speculative_cache` (references/mlx-vlm/mlx_vlm/models/gemma4
+    /// `rollback_speculative_cache` (https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/models/gemma4
     /// /language.py lines 637-645):
     ///
     /// ```text
@@ -4129,7 +4129,7 @@ impl Gemma4Wrapper {
     /// Rewind the per-sequence target KV caches after a Gemma 4 MTP
     /// speculative-decoding round. Mirrors the upstream Python
     /// hook
-    /// (`references/mlx-vlm/mlx_vlm/models/gemma4/language.py` lines
+    /// (https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/models/gemma4/language.py lines
     /// 608-646) bit-for-bit:
     ///
     /// 1. `n = max(accepted) + 1`, `trim = block_size - n`.

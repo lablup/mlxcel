@@ -14,7 +14,7 @@
 
 //! Youtu-VL language model (text backbone).
 //!
-//! Faithful port of `references/mlx-vlm/mlx_vlm/models/youtu_vl/language.py`.
+//! Faithful port of https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/models/youtu_vl/language.py.
 //!
 //! Architecture summary:
 //! - Multi-Latent Attention (MLA) — identical to DeepSeek-V3's MLA layout

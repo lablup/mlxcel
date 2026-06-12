@@ -16,8 +16,8 @@
 //!
 //! Mirrors the upstream `Gemma4AssistantConfig` (HF-compatible, flattened) and
 //! its nested `TextConfig`. See
-//! `references/mlx-vlm/mlx_vlm/speculative/drafters/gemma4_assistant/config.py`
-//! and `references/mlx-vlm/mlx_vlm/models/gemma4/config.py`.
+//! https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/speculative/drafters/gemma4_assistant/config.py
+//! and https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/models/gemma4/config.py.
 //!
 //! The drafter `TextConfig` is intentionally a self-contained subset that lives
 //! inside `mlxcel-core`. The full Gemma 4 target `TextConfig` lives in

@@ -49,9 +49,9 @@ use mlxcel_core::drafter::{DrafterKind, KNOWN_DRAFTER_KINDS};
 /// Values match upstream:
 ///
 /// - **MTP** → `4` — the Gemma 4 MTP "assistant" draft block length used
-///   by `references/mlx-vlm/mlx_vlm/speculative/drafters/gemma4_assistant/config.py`.
+///   by https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/speculative/drafters/gemma4_assistant/config.py.
 /// - **DFlash** → `16` — the Qwen 3.5 DFlash drafter's `block_size`
-///   declared in `references/mlx-vlm/mlx_vlm/speculative/drafters/qwen3_dflash/config.py:31`.
+///   declared in https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/speculative/drafters/qwen3_dflash/config.py#L31.
 ///   Mirrors [`mlxcel_core::drafter::dflash::DEFAULT_BLOCK_SIZE`].
 pub const DEFAULT_MTP_BLOCK_SIZE: u32 = 4;
 pub const DEFAULT_DFLASH_BLOCK_SIZE: u32 = 16;

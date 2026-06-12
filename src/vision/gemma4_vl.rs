@@ -412,7 +412,7 @@ impl Gemma4VLModel {
     /// subsequent speculative decode steps consume `input_ids` only and
     /// must pass `input_embeddings = None` exactly like the text-only
     /// case. Mirrors the `gemma4_vl.py` __call__ → text_model.__call__
-    /// flow in `references/mlx-vlm`.
+    /// flow in https://github.com/Blaizzy/mlx-vlm.
     ///
     /// Used by: future Gemma 4 VLM MTP consumer.
     ///

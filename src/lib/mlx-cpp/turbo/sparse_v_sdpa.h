@@ -31,8 +31,9 @@
 // attention scores → softmax pre-stage and then applies the inverse rotation
 // `D2·H·D1` *outside* the kernel on the smaller `[B, Hq, Tq, D]` output, so
 // the rotation cost is independent of T (the cache length). This matches the
-// "rotate after accumulation" pattern used in `references/mlx-vlm/mlx_vlm/
-// turboquant.py::_single_tile_value_weighted_sum_kernel`.
+// "rotate after accumulation" pattern used in
+// https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/turboquant.py
+// (_single_tile_value_weighted_sum_kernel).
 //
 // Used by: `cpp/mlx_cxx_bridge.cpp` (`turbo_sparse_v_weighted_sum`).
 

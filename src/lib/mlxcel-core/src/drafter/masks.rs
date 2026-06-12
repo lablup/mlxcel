@@ -18,7 +18,7 @@
 //! the end of the target's KV cache) over the target's last-layer K/V —
 //! bidirectionally for both full-attention and sliding-window layers. The
 //! masks here mirror the upstream Python reference at
-//! `references/mlx-vlm/mlx_vlm/speculative/drafters/gemma4_assistant/masks.py`.
+//! https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/speculative/drafters/gemma4_assistant/masks.py.
 //!
 //! ## Scope
 //!

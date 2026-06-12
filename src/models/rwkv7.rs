@@ -13,7 +13,7 @@
 // limitations under the License.
 
 // RWKV7: Recurrent neural network with time mixing and channel mixing
-// Reference: mlx-lm/mlx_lm/models/rwkv7.py
+// Reference: https://github.com/ml-explore/mlx-lm/blob/main/mlx_lm/models/rwkv7.py
 
 use mlxcel_core::generate::LanguageModel;
 use mlxcel_core::layers::{RMSNorm, UnifiedEmbedding, UnifiedLinear};

@@ -24,8 +24,8 @@
 //! - [`model`] — `Gemma4AssistantDraftModel` implementing
 //!   [`crate::drafter::Drafter`].
 //!
-//! Upstream reference: `references/mlx-vlm/mlx_vlm/speculative/drafters/
-//! gemma4_assistant/`.
+//! Upstream reference:
+//! https://github.com/Blaizzy/mlx-vlm/tree/main/mlx_vlm/speculative/drafters/gemma4_assistant.
 
 pub mod config;
 pub mod layer;

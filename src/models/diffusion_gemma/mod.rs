@@ -27,8 +27,8 @@
 //!   self-conditioning GeGLU module.
 //! * The block-diffusion generation engine lives in [`generate`].
 //!
-//! Reference: `references/mlx-vlm/mlx_vlm/models/diffusion_gemma/` and
-//! `references/mlx-vlm/mlx_vlm/generate/diffusion.py`.
+//! Reference: https://github.com/Blaizzy/mlx-vlm/tree/main/mlx_vlm/models/diffusion_gemma and
+//! https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/generate/diffusion.py.
 //!
 //! Phase 2 adds image input: when the checkpoint ships the Gemma 4 vision
 //! tower (`model.encoder.vision_tower.*`) and the multimodal embedder

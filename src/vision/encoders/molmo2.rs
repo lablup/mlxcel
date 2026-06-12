@@ -20,7 +20,7 @@
 //! - Adapter: Attention pooling 2D + SwiGLU image projector
 //! - Layer selection: [-3, -9] = [22, 16] → concatenate → pool_dim = 2*1152
 //!
-//! Reference: references/mlx-vlm/mlx_vlm/models/molmo2/vision.py
+//! Reference: https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/models/molmo2/vision.py
 
 use mlxcel_core::layers::{LayerNorm, Linear};
 use mlxcel_core::weights::WeightMap;

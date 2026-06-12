@@ -13,7 +13,7 @@
 // limitations under the License.
 
 // Nemotron-H: NVIDIA's hybrid Mamba2+Transformer model for mlxcel-core
-// Reference: mlx-lm/mlx_lm/models/nemotron_h.py
+// Reference: https://github.com/ml-explore/mlx-lm/blob/main/mlx_lm/models/nemotron_h.py
 //
 // Key features:
 // - Hybrid architecture with configurable block types (M/*/−/E)
@@ -231,7 +231,7 @@ pub struct NemotronHConfig {
     pub quantization: Option<Quantization>,
 
     /// Softplus initialization bounds retained for config-schema parity with
-    /// upstream `mlx_lm/models/nemotron_h.py`. They do NOT participate in the
+    /// upstream https://github.com/ml-explore/mlx-lm/blob/main/mlx_lm/models/nemotron_h.py. They do NOT participate in the
     /// `time_step_limit` default (which is always `(0.0, +inf)` when absent;
     /// see upstream PR #1026 / commit `6ddfdda`).
     #[serde(default)]

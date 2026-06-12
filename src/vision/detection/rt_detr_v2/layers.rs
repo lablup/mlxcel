@@ -21,7 +21,7 @@
 //! `grid_sample` follows PyTorch `mode="bilinear", padding_mode="zeros",
 //! align_corners=False`, the exact semantics the upstream Metal kernel and its
 //! pure-MLX fallback implement (see
-//! `references/mlx-vlm/mlx_vlm/models/kernels.py::grid_sample`).
+//! https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/models/kernels.py (grid_sample)).
 
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
@@ -246,7 +246,7 @@ pub fn max_pool2d(x: &MlxArray, kernel: i32, stride: i32, pad: i32) -> UniquePtr
 
 /// Nearest-neighbour 2x upsample of an NHWC tensor along H and W.
 ///
-/// Matches `references/.../vision.py::_upsample_nearest_2x`:
+/// Matches https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/models/rt_detr_v2/vision.py (_upsample_nearest_2x):
 /// `broadcast x[:, :, None, :, None, :] -> (B, H, 2, W, 2, C)` then reshape.
 pub fn upsample_nearest_2x(x: &MlxArray) -> UniquePtr<MlxArray> {
     let shape = mlxcel_core::array_shape(x);
@@ -266,7 +266,7 @@ pub fn upsample_nearest_2x(x: &MlxArray) -> UniquePtr<MlxArray> {
 ///
 /// Returns `(B, gN, gM, C)`. This is a faithful Rust port of the pure-MLX
 /// fallback `_grid_sample_mlx` in
-/// `references/mlx-vlm/mlx_vlm/models/kernels.py`, which is numerically
+/// https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/models/kernels.py, which is numerically
 /// identical to the upstream Metal kernel.
 pub fn grid_sample(x: &MlxArray, grid: &MlxArray) -> UniquePtr<MlxArray> {
     let xs = mlxcel_core::array_shape(x);

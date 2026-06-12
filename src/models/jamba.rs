@@ -13,7 +13,7 @@
 // limitations under the License.
 
 // Jamba: Hybrid Mamba + Transformer architecture for mlxcel-core
-// Reference: mlx-lm/mlx_lm/models/jamba.py
+// Reference: https://github.com/ml-explore/mlx-lm/blob/main/mlx_lm/models/jamba.py
 //
 // Key features:
 // - Interleaved Mamba and Attention blocks (configurable pattern)

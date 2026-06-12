@@ -14,7 +14,7 @@
 
 //! RT-DETRv2 postprocessing and predictor.
 //!
-//! Port of `references/mlx-vlm/mlx_vlm/models/rt_detr_v2/generate.py`. The
+//! Port of https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/models/rt_detr_v2/generate.py. The
 //! predictor runs the model on one image and decodes detections: it does a flat
 //! top-K over the `(queries x labels)` score space (so one query can yield
 //! multiple detections — matching `RTDetrImageProcessor.post_process_object_

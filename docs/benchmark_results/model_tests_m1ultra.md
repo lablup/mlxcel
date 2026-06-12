@@ -11,8 +11,8 @@ Compatibility and performance testing for mlxcel models on **Mac Studio M1 Ultra
 | **mlxcel version** | 0.1.4 |
 | **MLX version** | 0.32.0-dev pin (commit a6ec712, 2026-06-11 upstream main, via mlxcel-core) |
 | **Bench harness** | `mlxcel-bench-decode` (model load, warmup, and measured pass in one process) |
-| **mlx-lm baseline** | 0.31.3 (dev checkout `references/mlx-lm` @ `df1d3f3` — "Fix Gemma 4 sanitize() not stripping KV projections for shared layers" ml-explore/mlx-lm#1240) |
-| **mlx-vlm baseline** | dev checkout `references/mlx-vlm` @ `d85ca4d` — "Compatibility bridge for non-VL models" Blaizzy/mlx-vlm#1181 |
+| **mlx-lm baseline** | 0.31.3 (dev checkout https://github.com/ml-explore/mlx-lm @ `df1d3f3` — "Fix Gemma 4 sanitize() not stripping KV projections for shared layers" ml-explore/mlx-lm#1240) |
+| **mlx-vlm baseline** | dev checkout https://github.com/Blaizzy/mlx-vlm @ `d85ca4d` — "Compatibility bridge for non-VL models" Blaizzy/mlx-vlm#1181 |
 | **Test Prompt** | "Hello, how are you today?" (text) / "What is in this image?" (VLM) |
 | **Max Tokens** | 100 (measured pass); 20 (warmup pass, same process) |
 | **Test Date** | 2026-05-19 full sweep (baseline); 2026-05-28 full text + VLM re-benchmark on mlxcel 0.1.0 (`--cooldown 0`); 2026-06-12 full text + VLM re-benchmark on mlxcel 0.1.4 (MLX pin a6ec712, post issue #222 bump) |
@@ -305,8 +305,8 @@ Source CSVs (same M1 Ultra host; mlxcel 0.1.4 measured 2026-06-12 on the a6ec712
 
 - mlxcel: `benchmarks/metal_m1ultra_2026-06-12.csv`
 - mlxcel VLM: `benchmarks/metal_m1ultra_vlm_2026-06-12.csv`
-- mlx-lm: `benchmarks/pylm_m1ultra_2026-05-19.csv` (mlx-lm 0.31.3 dev checkout in `references/mlx-lm` @ `df1d3f3`)
-- mlx-vlm: `benchmarks/pylm_m1ultra_vlm_2026-05-19.csv` (mlx-vlm dev checkout in `references/mlx-vlm` @ `d85ca4d`)
+- mlx-lm: `benchmarks/pylm_m1ultra_2026-05-19.csv` (mlx-lm 0.31.3 dev checkout in https://github.com/ml-explore/mlx-lm @ `df1d3f3`)
+- mlx-vlm: `benchmarks/pylm_m1ultra_vlm_2026-05-19.csv` (mlx-vlm dev checkout in https://github.com/Blaizzy/mlx-vlm @ `d85ca4d`)
 
 The mlx-lm / mlx-vlm baselines are the pinned 2026-05-19 reference checkout (the reference is fixed, so its decode on this host is stable); the mlxcel side is the 2026-06-12 full sweep. All sweeps use `--max-tokens 100` and the same `Hello, how are you today?` / `What is in this image?` prompts. `deepseek-v3-4bit` and `qwen3-next-480b-4bit` exceed the 128GB host on both sides; `minimax-m2-3bit` fits and runs on the mlxcel side (33.14 tok/s) but mlx-lm still fails it, so it stays outside the comparable set. Models added in the 06-12 sweep (gemma-4-12b-it, the Gemma 4 QAT variants, diffusiongemma, MiniCPM-V-4.6, plus internvl3-1b and molmo-7b on the text path) have no Python baseline and carry "-" in the comparison columns.
 
@@ -601,7 +601,7 @@ and `turbo4-asym` decode are well below the M5 gates on M1 Ultra, while
 keep their FP16 representation and only the hot tail is packed.
 
 The decode regression is consistent with the L2-cache wall documented in
-`turboquant_plus/`. The fused Sparse-V Metal kernel that lands
+https://github.com/TheTom/turboquant_plus. The fused Sparse-V Metal kernel that lands
  targets the per-thread skip path inside the SDPA inner loop and is
 expected to recover most of the M5 decode budget; the M1/M2 ceiling stays
 limited by L2 bandwidth and is documented but not gated.

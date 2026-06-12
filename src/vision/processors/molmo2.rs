@@ -20,7 +20,7 @@
 //! 3. Combine: [low_res, hi_res_crops...] → flatten to patches
 //! 4. Build pooling indices for 2D attention pooling
 //!
-//! Reference: references/mlx-vlm/mlx_vlm/models/molmo2/processing.py
+//! Reference: https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/models/molmo2/processing.py
 
 /// Molmo2 image processor configuration and state
 pub struct Molmo2Processor {

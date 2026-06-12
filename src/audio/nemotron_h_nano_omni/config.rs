@@ -15,7 +15,7 @@
 //! Nemotron H Nano Omni audio config — Parakeet flavour.
 //!
 //! Mirrors upstream
-//! `references/mlx-vlm/mlx_vlm/models/nemotron_h_nano_omni/config.py::AudioConfig`.
+//! https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/models/nemotron_h_nano_omni/config.py (AudioConfig).
 //!
 //! Used by: Nemotron H Nano Omni audio modality.
 

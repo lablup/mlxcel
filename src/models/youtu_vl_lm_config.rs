@@ -25,7 +25,7 @@ use crate::models::deepseek_v3;
 
 /// Youtu-VL text-side configuration.
 ///
-/// Mirrors `references/mlx-vlm/mlx_vlm/models/youtu_vl/config.py::TextConfig`.
+/// Mirrors https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/models/youtu_vl/config.py (TextConfig).
 /// MoE-related fields are kept for forward compatibility with possible larger
 /// variants but are not exercised by the standard `youtu_vl` checkpoint.
 #[derive(Debug, Clone, Deserialize)]

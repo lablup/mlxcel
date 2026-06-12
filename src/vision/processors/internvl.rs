@@ -15,7 +15,7 @@
 //! InternVL (`internvl_chat`) image processor.
 //!
 //! Faithful port of
-//! `references/mlx-vlm/mlx_vlm/models/internvl_chat/processor.py`.
+//! https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/models/internvl_chat/processor.py.
 //!
 //! Dynamic tiling:
 //! 1. Pick the target aspect ratio (i, j) with `min_dynamic_patch <= i*j <=

@@ -13,7 +13,7 @@
 // limitations under the License.
 
 // Mamba (v1): SSM-based architecture for mlxcel-core
-// Reference: mlx-lm/mlx_lm/models/mamba.py
+// Reference: https://github.com/ml-explore/mlx-lm/blob/main/mlx_lm/models/mamba.py
 
 use mlxcel_core::generate::LanguageModel;
 use mlxcel_core::layers::{KVCache, RMSNorm, UnifiedEmbedding, UnifiedLinear};

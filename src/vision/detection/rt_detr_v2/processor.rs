@@ -14,7 +14,7 @@
 
 //! RT-DETRv2 image preprocessing.
 //!
-//! Port of `references/mlx-vlm/mlx_vlm/models/rt_detr_v2/processing_rt_detr_v2.py`:
+//! Port of https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/models/rt_detr_v2/processing_rt_detr_v2.py:
 //! resize to `image_size` (bilinear), rescale by `rescale_factor` (1/255), and
 //! optionally normalize with `image_mean` / `image_std`. The default
 //! RT-DETRv2 preprocessor does NOT normalize (`do_normalize: false`); silently

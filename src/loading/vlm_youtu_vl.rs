@@ -14,7 +14,7 @@
 
 //! Youtu-VL loader.
 //!
-//! Mirrors `references/mlx-vlm/mlx_vlm/models/youtu_vl/youtu_vl.py::Model.sanitize`
+//! Mirrors https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/models/youtu_vl/youtu_vl.py (Model.sanitize)
 //! and `Model.__init__` to translate a HuggingFace `model_type = "youtu_vl"`
 //! safetensors checkpoint into a fully-wired [`crate::vision::YoutuVLModel`].
 //!

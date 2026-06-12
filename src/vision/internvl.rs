@@ -15,7 +15,7 @@
 //! InternVL (`internvl_chat`) Vision-Language Model.
 //!
 //! Faithful port of
-//! `references/mlx-vlm/mlx_vlm/models/internvl_chat/internvl_chat.py`.
+//! https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/models/internvl_chat/internvl_chat.py.
 //!
 //! Composition (for `internvl3-1b`):
 //! - `vision_model` — [`InternVitVisionModel`] (non-quantized bf16, converted
@@ -111,7 +111,7 @@ impl InternVLConnector {
 }
 
 /// Pixel shuffle (spatial -> channel) port of
-/// `references/mlx-vlm/mlx_vlm/models/base.py:311-333`.
+/// https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/models/base.py#L311-L333.
 ///
 /// Input `x`: `[B, N, C]` where `N = p*p` is a square patch grid.
 /// Output: `[B, N*r^2, C/r^2]` (for the default `r = 0.5`, `[B, 4N, C*4]`).

@@ -14,7 +14,7 @@
 
 //! Mistral 3 Multi-Modal Projector
 //!
-//! Port of references/mlx-vlm/mlx_vlm/models/mistral3/mistral3.py
+//! Port of https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/models/mistral3/mistral3.py
 //!
 //! Architecture: RMSNorm → PatchMerger(unfold 2×2, Linear(4*D→D)) → Linear(D→H) → GELU → Linear(H→H)
 //!

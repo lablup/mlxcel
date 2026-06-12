@@ -14,7 +14,7 @@
 
 //! Nemotron model implementation using mlxcel-core
 //!
-//! Reference: mlx-lm/mlx_lm/models/nemotron.py
+//! Reference: https://github.com/ml-explore/mlx-lm/blob/main/mlx_lm/models/nemotron.py
 //!
 //! Key features:
 //! - NemotronLayerNorm1P: uses (weight + 1) instead of just weight

@@ -21,7 +21,7 @@
 //!
 //! All spatial operations use NHWC layout (channels-last).
 //!
-//! Reference: references/mlx-vlm/mlx_vlm/models/gemma3n/vision.py
+//! Reference: https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/models/gemma3n/vision.py
 
 #[path = "gemma3n_helpers.rs"]
 mod helpers;

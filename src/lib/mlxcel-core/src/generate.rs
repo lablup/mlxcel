@@ -682,8 +682,9 @@ impl CxxGenerator {
     /// **Boundary-V** policy (B6) is applied: the
     /// first / last N transformer layers' caches are upgraded to
     /// `KVCacheMode::Fp16` to recover the per-layer V-quantization quality
-    /// gap measured in `turboquant_plus/docs/papers/
-    /// layer-aware-v-compression.md`. The boundary count is read from the
+    /// gap measured in
+    /// https://github.com/TheTom/turboquant_plus/blob/main/docs/papers/layer-aware-v-compression.md.
+    /// The boundary count is read from the
     /// `MLXCEL_KV_BOUNDARY_V_LAYERS` env var (default 2; `0` disables) and
     /// clamped to `n_layers / 2`. For non-Turbo4 modes the policy is inert
     /// — every layer's cache uses `kv_cache_mode` unchanged.

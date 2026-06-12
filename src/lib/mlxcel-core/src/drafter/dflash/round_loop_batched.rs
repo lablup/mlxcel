@@ -16,7 +16,7 @@
 //! batching).
 //!
 //! Rust port of upstream
-//! `references/mlx-vlm/mlx_vlm/generate.py::_dflash_rounds_batch`
+//! https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/speculative/dflash.py (_dflash_rounds_batch)
 //! (`mlx-vlm` HEAD, lines 944-1098). sub-13.
 //!
 //! ## Scope
@@ -78,7 +78,7 @@ use super::round_loop::SpeculativeTarget;
 /// Per-row speculative-decoding walk (B >= 1).
 ///
 /// Rust port of upstream
-/// `references/mlx-vlm/mlx_vlm/generate.py::_speculative_walk_batch`.
+/// https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/speculative/common.py (_speculative_walk_batch).
 ///
 /// Given `draft_tokens` of shape `[B][K-1]` (per-row drafter proposals)
 /// and `target_tokens` of shape `[B][K]` (per-row target argmax over

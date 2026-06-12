@@ -99,7 +99,7 @@ fn default_block_size_for_mtp_is_4() {
 
 #[test]
 fn default_block_size_for_dflash_is_16() {
-    // Matches references/mlx-vlm/mlx_vlm/speculative/drafters/qwen3_dflash/config.py:31
+    // Matches https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/speculative/drafters/qwen3_dflash/config.py#L31
     // and DEFAULT_BLOCK_SIZE in mlxcel_core::drafter::dflash::round_loop.
     assert_eq!(default_block_size_for_kind(DrafterKind::Dflash), 16);
     assert_eq!(DEFAULT_DFLASH_BLOCK_SIZE, 16);

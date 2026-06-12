@@ -27,7 +27,7 @@
 //! # Reference
 //!
 //! This is a pure-Rust port of
-//! `turboquant_plus/turboquant/codebook.py::optimal_centroids`.
+//! https://github.com/TheTom/turboquant_plus/blob/main/turboquant/codebook.py (optimal_centroids).
 //! The algorithm is:
 //!
 //! * `b = 1`: closed-form `±sqrt(2 / (π·d))`.

@@ -15,7 +15,7 @@
 //! Pixtral Vision Encoder
 //!
 //! Custom ViT with 2D RoPE and SwiGLU MLP for Mistral's Pixtral VLM.
-//! Port of references/mlx-vlm/mlx_vlm/models/pixtral/vision.py
+//! Port of https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/models/pixtral/vision.py
 //!
 //! Architecture:
 //!   patch_conv (Conv2d, stride=patch_size) → ln_pre (RMSNorm)

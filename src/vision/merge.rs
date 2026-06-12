@@ -30,8 +30,8 @@
 //!   (`0.0` at attended positions, `f32::MIN` at masked positions)
 //! - LLaVA-style merge keeps standard causal masking and returns `None`
 //!
-//! Reference: references/mlx-vlm/mlx_vlm/models/gemma3/gemma3.py:121-168
-//! Reference: references/mlx-vlm/mlx_vlm/models/llava/llava.py:85-111
+//! Reference: https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/models/gemma3/gemma3.py#L121-L168
+//! Reference: https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/models/llava/llava.py#L85-L111
 
 use mlxcel_core::{MlxArray, UniquePtr};
 

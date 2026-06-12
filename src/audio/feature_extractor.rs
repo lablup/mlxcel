@@ -18,7 +18,7 @@
 //! (Universal Speech Model) preprocessing pipeline. Pure DSP -- no neural
 //! network weights involved.
 //!
-//! Ported from: references/mlx-vlm/mlx_vlm/models/gemma4/audio_feature_extractor.py
+//! Ported from: https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/models/gemma4/audio_feature_extractor.py
 //!
 //! Used by: Gemma4 VLM (audio modality)
 

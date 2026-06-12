@@ -14,7 +14,7 @@
 
 //! Gemma4 Conformer chunked local attention with relative position embeddings.
 //!
-//! Ported from: references/mlx-vlm/mlx_vlm/models/gemma4/audio.py (AudioAttention)
+//! Ported from: https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/models/gemma4/audio.py (AudioAttention)
 //!
 //! Used by: Gemma4 audio encoder (ConformerBlock)
 

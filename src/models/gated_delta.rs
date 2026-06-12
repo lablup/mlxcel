@@ -19,7 +19,7 @@
 //!
 //! Used by: Qwen3Next, Qwen3.5, KimiLinear
 //!
-//! Reference: mlx-lm/mlx_lm/models/gated_delta.py
+//! Reference: https://github.com/ml-explore/mlx-lm/blob/main/mlx_lm/models/gated_delta.py
 
 use mlxcel_core::utils::{silu, softplus, stack_arrays};
 use mlxcel_core::{MlxArray, UniquePtr, dtype};

@@ -14,7 +14,7 @@
 
 //! LLaVA MLP Multi-Modal Projector
 //!
-//! Port of references/mlx-vlm/mlx_vlm/models/llava/llava.py:13-28
+//! Port of https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/models/llava/llava.py#L13-L28
 //!
 //! Architecture: Linear(vision_hidden → text_hidden) → GELU → Linear(text_hidden → text_hidden)
 //!

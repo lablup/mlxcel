@@ -21,7 +21,7 @@
 //! This module re-exports the Molmo2 text model components and adds the
 //! extended LM head needed for point prediction.
 //!
-//! Reference: references/mlx-vlm/mlx_vlm/models/molmo_point/language.py
+//! Reference: https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/models/molmo_point/language.py
 
 use mlxcel_core::layers::KVCache;
 use mlxcel_core::weights::WeightMap;

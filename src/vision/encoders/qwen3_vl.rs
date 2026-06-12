@@ -23,7 +23,7 @@
 //! - Fused SDPA head-dim padding to match upstream MLX kernel preferences
 //!
 //! Used by: Qwen3-VL
-//! Reference: references/mlx-vlm/mlx_vlm/models/qwen3_vl/vision.py
+//! Reference: https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/models/qwen3_vl/vision.py
 
 use super::qwen2_vl::{VisionRotaryEmbedding, apply_rotary_pos_emb_vision, concat_many};
 use mlxcel_core::layers::{LayerNorm, UnifiedLinear};

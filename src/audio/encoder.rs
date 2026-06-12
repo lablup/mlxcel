@@ -15,7 +15,7 @@
 //! Gemma4 Conformer audio encoder.
 //!
 //! Architecture: SSCP -> 12x ConformerBlock -> output projection.
-//! Ported from: references/mlx-vlm/mlx_vlm/models/gemma4/audio.py
+//! Ported from: https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/models/gemma4/audio.py
 //!
 //! Used by: Gemma4 VLM (audio modality)
 

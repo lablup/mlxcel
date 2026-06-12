@@ -15,7 +15,7 @@
 //! HuggingFace -> MLX weight-key translation for RT-DETRv2.
 //!
 //! Mirrors the rename pipeline in
-//! `references/mlx-vlm/mlx_vlm/models/rt_detr_v2/convert.py` (the single
+//! https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/models/rt_detr_v2/convert.py (the single
 //! source of truth upstream). Two transformations are applied per key:
 //!
 //!   1. Name rewrite: strip the `model.` prefix, then apply submodule-specific

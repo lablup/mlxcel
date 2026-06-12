@@ -189,7 +189,7 @@ fn convert_bf16_to_f16_non_quantized(weights: &mut WeightMap) {
 impl Drafter for DFlashDrafter {
     fn bind(&mut self, target: &dyn LanguageModel) -> Result<(), DrafterError> {
         // Two embedding cases, mirroring upstream Python's lazy-bind shape
-        // (`references/mlx-vlm/mlx_vlm/speculative/drafters/qwen3_dflash/dflash.py`
+        // (https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/speculative/drafters/qwen3_dflash/dflash.py
         // lines 88, 92-108):
         //
         // 1. Lazy-bind checkpoint (the published `z-lab/Qwen3.5-4B-DFlash`):

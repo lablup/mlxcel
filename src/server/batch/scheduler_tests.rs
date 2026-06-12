@@ -982,7 +982,7 @@ fn compose_prompt_cache_key_folds_request_multimodal_digest() {
 // Null / empty-cache safety tests
 //
 // These tests cover the same transition edges that upstream mlx-lm
-// landed null-guards for in `mlx_lm/models/cache.py`:
+// landed null-guards for in https://github.com/ml-explore/mlx-lm/blob/main/mlx_lm/models/cache.py:
 //
 //   - `BatchKVCache.extend`: both inputs empty (offset == 0, no keys).
 //   - `BatchKVCache.extend`: one input empty, one populated.

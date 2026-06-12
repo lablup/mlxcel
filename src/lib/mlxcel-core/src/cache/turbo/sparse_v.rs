@@ -21,7 +21,7 @@
 //!
 //! At long context the post-softmax attention distribution is sparse: most
 //! KV positions receive a near-zero attention weight. The TurboQuant+ paper
-//! [`docs/papers/sparse-v-dequant.md`] reports `~90%` sparsity at 32 K
+//! [https://github.com/TheTom/turboquant_plus/blob/main/docs/papers/sparse-v-dequant.md] reports `~90%` sparsity at 32 K
 //! context on a 35 B MoE model. Dequantizing those V vectors is wasted work.
 //! Skipping them on a fused Metal kernel yields `+22.8 %` decode at 32 K
 //! with no measurable PPL change.

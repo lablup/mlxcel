@@ -14,7 +14,7 @@
 
 //! Linear Multi-Modal Projector (single linear layer, no activation, no bias)
 //!
-//! Port of references/mlx-vlm/mlx_vlm/models/llama4/vision.py:Llama4MultiModalProjector
+//! Port of https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/models/llama4/vision.py (Llama4MultiModalProjector)
 //!
 //! Architecture: Linear(vision_output_dim → text_hidden_size, bias=False)
 //!

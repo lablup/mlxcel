@@ -14,7 +14,7 @@
 
 //! Gemma3 AvgPool Multi-Modal Projector
 //!
-//! Port of references/mlx-vlm/mlx_vlm/models/gemma3/gemma3.py:13-51
+//! Port of https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/models/gemma3/gemma3.py#L13-L51
 //!
 //! Architecture:
 //! 1. Reshape + transpose vision features to spatial grid

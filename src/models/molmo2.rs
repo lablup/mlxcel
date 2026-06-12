@@ -22,7 +22,7 @@
 //! - Dual embedding: base embedding (151936) + new_embedding (128)
 //! - RoPE theta=5000000
 //!
-//! Reference: references/mlx-vlm/mlx_vlm/models/molmo2/language.py
+//! Reference: https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/models/molmo2/language.py
 
 use mlxcel_core::generate::LanguageModel;
 use mlxcel_core::layers::{KVCache, RMSNorm, UnifiedLinear};

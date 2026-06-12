@@ -14,7 +14,7 @@
 
 //! Molmo v1 Image Processor.
 //!
-//! Mirrors `references/mlx-vlm/mlx_vlm/models/molmo/processing_molmo.py`:
+//! Mirrors https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/models/molmo/processing_molmo.py:
 //! a single global (resized) image plus overlapping high-res crops selected by
 //! `select_tiling`, each rearranged into 14x14 patches. It also produces the
 //! `image_input_idx` array (where each image patch's pooled feature lands in the

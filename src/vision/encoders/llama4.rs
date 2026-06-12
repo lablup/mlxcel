@@ -14,7 +14,7 @@
 
 //! Llama 4 Vision Encoder
 //!
-//! Port of references/mlx-vlm/mlx_vlm/models/llama4/vision.py
+//! Port of https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/models/llama4/vision.py
 //!
 //! Architecture:
 //! - UnfoldConvolution (im2col patch embedding, not Conv2d)

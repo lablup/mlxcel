@@ -332,7 +332,7 @@ impl<'a> Gemma4MtpTargetAdapter<'a> {
     /// At temperature > 0 the caller is expected to override this with
     /// a real sampler; this helper handles only the greedy-parity path
     /// (`temperature == 0`). The MTP greedy-parity invariant
-    /// (referenced in `references/mlx-vlm`) requires the
+    /// (referenced in https://github.com/Blaizzy/mlx-vlm) requires the
     /// target tokens to match the target's own argmax extension, so for
     /// `temperature == 0` this is the load-bearing choice.
     ///

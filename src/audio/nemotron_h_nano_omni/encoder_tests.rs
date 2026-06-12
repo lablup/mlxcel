@@ -318,7 +318,7 @@ fn config_subsampling_output_matches_iteration_count() {
 /// Pins the relative-position vector for T=4 to the upstream-equivalent
 /// descending order `[3, 2, 1, 0, -1, -2, -3]` (mirrors
 /// `mx.arange(seq_length - 1, -seq_length, -1)` from
-/// `references/mlx-vlm/.../audio.py`).
+/// https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/models/nemotron_h_nano_omni/audio.py).
 ///
 /// This is the regression guard for the bug where the position vector
 /// was double-reversed into ascending order (`[-3, -2, -1, 0, 1, 2, 3]`),

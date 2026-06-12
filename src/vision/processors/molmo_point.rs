@@ -18,7 +18,7 @@
 //! multi-scale overlapping crop preprocessing with the same parameters.
 //! This module re-exports the Molmo2 processor directly.
 //!
-//! Reference: references/mlx-vlm/mlx_vlm/models/molmo_point/image_processing.py
+//! Reference: https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/models/molmo_point/image_processing.py
 
 /// Molmo-Point uses the same image processor as Molmo2.
 /// Re-export for clarity in the loading code.

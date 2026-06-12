@@ -21,7 +21,7 @@
 //! - NgramEmbedding with n-gram hash lookups (ngram variant)
 //! - CacheList per layer (2 KVCaches) + ArraysCache for ngram context
 //!
-//! Reference: mlx-lm/mlx_lm/models/longcat_flash.py, longcat_flash_ngram.py
+//! Reference: https://github.com/ml-explore/mlx-lm/blob/main/mlx_lm/models/longcat_flash.py, longcat_flash_ngram.py
 
 use crate::models::switch_layers::SwitchGLU;
 use mlxcel_core::dtype;

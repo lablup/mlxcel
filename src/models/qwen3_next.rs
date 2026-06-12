@@ -23,7 +23,7 @@
 //! - Gated output in attention blocks (sigmoid gating)
 //! - Q/K normalization
 //!
-//! Reference: mlx-lm/mlx_lm/models/qwen3_next.py
+//! Reference: https://github.com/ml-explore/mlx-lm/blob/main/mlx_lm/models/qwen3_next.py
 
 #[path = "qwen3_next_helpers.rs"]
 mod helpers;
@@ -537,7 +537,7 @@ impl Qwen3NextAttention {
     /// scaled-dot-product attention through the per-query-position causal
     /// loop in [`Self::forward_hidden_with_position_ids_verify`], mirroring
     /// upstream `Qwen3_5Attention.__call__`'s `target_verify and L > 1`
-    /// branch (`mlx-vlm/mlx_vlm/models/qwen3_5/language.py`). This eliminates
+    /// branch (https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/models/qwen3_5/language.py). This eliminates
     /// the batched-SDPA-vs-decode logit drift that flips speculative
     /// accept/reject decisions away from the drafter-less greedy pass.
     ///
@@ -720,7 +720,7 @@ impl Qwen3NextAttention {
     /// axis into `[B, H, L_q, D]`.
     ///
     /// Faithful port of upstream
-    /// `mlx-vlm/mlx_vlm/models/qwen3_5/language.py::Qwen3_5Attention.__call__`
+    /// https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/models/qwen3_5/language.py (Qwen3_5Attention.__call__)
     /// (`target_verify and L > 1` branch). This is the load-bearing fix for
     /// Qwen 3.5 MTP verification drift / sampling parity.
     fn attend_per_position(

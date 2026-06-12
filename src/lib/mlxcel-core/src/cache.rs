@@ -65,7 +65,7 @@
 //! `slice(keys, 0, offset)` for K and `concat(dequant(v_packed), hot_V)` for
 //! V. The K side has no per-step concat — that was the dominant residual
 //! cost vs FP16 mode (~7 ms/step at 4 K context). See
-//! `turboquant_plus/README.md` §"MLX Framework Port" for the
+//! https://github.com/TheTom/turboquant_plus/blob/main/README.md §"MLX Framework Port" for the
 //! original architecture.
 //!
 //! Setting `MLXCEL_TURBO4_DELEGATED_FP16_FAST_PATH=1` switches this mode to a
@@ -131,7 +131,7 @@ fn direct_prefill_cache_store_enabled() -> bool {
 /// Check that all `KVCache` entries in `caches` support cache trimming.
 ///
 /// Mirrors the upstream mlx-lm `can_trim_prompt_cache` function
-/// (`mlx_lm/models/cache.py`). Speculative decoding requires a trimmable
+/// (https://github.com/ml-explore/mlx-lm/blob/main/mlx_lm/models/cache.py). Speculative decoding requires a trimmable
 /// cache so it can rewind cache entries after a draft-token rejection.
 ///
 /// All current `KVCache` mode variants (Fp16, Int8, Turbo4Asym, Turbo4,
@@ -594,7 +594,7 @@ impl KVCache {
     /// and the speed benchmarks. Production callers should leave the default
     /// [`turbo::DELEGATED_HOT_THRESHOLD`] in place; tuning this changes the
     /// fold cadence and therefore the speed/quality trade-off documented in
-    /// `turboquant_plus/README.md`. Setting `threshold <= 0` is
+    /// https://github.com/TheTom/turboquant_plus/blob/main/README.md. Setting `threshold <= 0` is
     /// rejected so the fold path stays well-defined.
     pub fn set_hot_threshold(&mut self, threshold: i32) {
         if threshold > 0 {
@@ -2382,7 +2382,7 @@ impl KVCache {
     /// 3. **Leaves `self.offset` unchanged** so RoPE for the next Q stays
     ///    rotated at the correct monotonic position.
     ///
-    /// Upstream `RotatingKVCache` (`mlx_lm/models/cache.py:410-510`) uses
+    /// Upstream `RotatingKVCache` (https://github.com/ml-explore/mlx-lm/blob/main/mlx_lm/models/cache.py#L410-L510) uses
     /// the same `offset` monotonic / `_idx` rotating split for the same
     /// reason; the names differ but the invariant is identical.
     ///
@@ -2894,7 +2894,7 @@ impl KVCache {
     /// tensors returned by the model's `forward` pass.
     ///
     /// Upstream mlx-lm evaluates `[c.state for c in cache]` after each
-    /// chunked-prefill step (see `mlx_lm/generate.py` ~line 583). This method
+    /// chunked-prefill step (see https://github.com/ml-explore/mlx-lm/blob/main/mlx_lm/generate.py ~line 583). This method
     /// mirrors that pattern: it calls `ffi::eval` on every non-`None` tensor
     /// field that contributes to the cache state (`keys`, `values`,
     /// `key_scales`, `val_scales`, `v_packed`, `v_norms`, `v_rescale`,

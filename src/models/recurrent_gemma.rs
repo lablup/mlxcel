@@ -13,7 +13,7 @@
 // limitations under the License.
 
 // Griffin (RecurrentGemma): Hybrid Mamba + Local Attention architecture for mlxcel-core
-// Reference: mlx-lm/mlx_lm/models/recurrent_gemma.py
+// Reference: https://github.com/ml-explore/mlx-lm/blob/main/mlx_lm/models/recurrent_gemma.py
 //
 // Key features:
 // - Hybrid architecture with both recurrent (RGLRU) and local attention blocks

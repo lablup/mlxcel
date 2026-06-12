@@ -13,7 +13,7 @@
 // limitations under the License.
 
 // Mamba2: Multi-head SSM-based architecture for mlxcel-core
-// Reference: mlx-lm/mlx_lm/models/mamba2.py
+// Reference: https://github.com/ml-explore/mlx-lm/blob/main/mlx_lm/models/mamba2.py
 
 use mlxcel_core::generate::LanguageModel;
 use mlxcel_core::layers::{RMSNorm, UnifiedEmbedding, UnifiedLinear};
