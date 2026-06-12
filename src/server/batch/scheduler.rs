@@ -2127,7 +2127,7 @@ impl BatchScheduler {
         let (seq_id, prefill_start_offset, already_cached_tokens) = match ctx_ref
             .and_then(|ctx| self.try_adopt_cached_prefix(ctx, &prompt_tokens, is_multimodal))
         {
-            Some((adopted_id, matched_len)) => (adopted_id, matched_len, matched_len),
+            Some((adopted_id, adopted_len)) => (adopted_id, adopted_len, adopted_len),
             None => {
                 // Miss or feature disabled → regular allocate.
                 // count misses only when the cache is actually

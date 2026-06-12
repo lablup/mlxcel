@@ -843,7 +843,12 @@ impl CachePool {
             retained.retain(|id| !dropped.contains(id));
         }
         for handle in set.caches.iter_mut() {
-            handle.offset = handle.offset.min(target_tokens as i32);
+            // The adopted prefix is exactly `target_tokens` long; a freshly
+            // detached pool-backed handle always satisfies
+            // `offset == seq_len > target_tokens` here, so this is a clamp in
+            // practice and an explicit statement of intent either way.
+            debug_assert!(handle.offset >= target_tokens as i32);
+            handle.offset = target_tokens as i32;
         }
         set.current_offset = set.current_offset.min(target_tokens as i32);
         set.prompt_len = set.prompt_len.min(target_tokens);
