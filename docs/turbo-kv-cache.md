@@ -202,8 +202,18 @@ for a 4096-token prompt, versus 146 and 7.7 tok/s for the gather reference (1.9x
 and 10.9x). The gather reference degrades sharply with context because it
 re-materializes the visible window every step, which is why the live path uses
 the native kernel. The separate fused split-K Metal kernel
-(`MLXCEL_PAGED_ATTENTION_NATIVE`) is opt-in and stays off by default; see
+(`MLXCEL_PAGED_ATTENTION_NATIVE`) is opt-in and stays off by default; with the
+chunked slab storage the pool is a list of fixed-size slab tensors, so the
+kernel also declines (falling back to gather) on any layer that has grown past
+one slab. See
 [ADR 0001](adr/0001-paged-attention-gather-vs-fused-kernel.md).
+
+Pool growth appends fixed-size slabs instead of reallocating one big tensor
+per layer, so extending the pool never copies existing KV and never strands a
+ladder of old buffer sizes in the allocator cache. Eight concurrent requests
+with distinct ~4k-token prompts (qwen3-0.6b, the nothing-shareable stress)
+peak at 3739 MiB versus 5013 MiB before the change, 1.13x of the dense
+backend on the same workload.
 
 ## Recommended starting points
 

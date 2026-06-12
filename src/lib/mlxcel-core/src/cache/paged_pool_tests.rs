@@ -1309,3 +1309,113 @@ fn write_prefill_after_presize_grows_incrementally_and_round_trips() {
     assert_eq!(flatten_fp32(&gk), flatten_fp32(&dense_k));
     assert_eq!(flatten_fp32(&gv), flatten_fp32(&dense_v));
 }
+
+// ---------------------------------------------------------------------------
+// 13. Chunked slabs (#235): growth appends slabs without copying, and gather
+//     stays byte-identical when a block table crosses slabs non-monotonically.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn slab_growth_appends_without_copy_and_fragmented_gather_round_trips() {
+    let block_size = 4usize;
+    let mut pool = fp16_pool(block_size, 1);
+
+    // A: 40 blocks (160 tokens) -> rows 0..39, spanning two 32-row slabs.
+    let mut state_a = PagedSequenceState::new(pool.layout());
+    let a_tokens = 160i32;
+    pool.write_prefill(
+        &mut state_a,
+        0,
+        &make_block(100.0, a_tokens),
+        &make_block(500.0, a_tokens),
+    )
+    .unwrap();
+    let bytes_two_slabs = pool.pool_tensor_bytes();
+    assert_eq!(
+        pool.pool_grow_events(),
+        0,
+        "the presized first prefill creates slabs; creation is not growth"
+    );
+
+    // B: 26 more blocks push past the presized 64-row capacity (40 + 26 = 66)
+    // and need a third slab. Exactly one growth episode and exactly one
+    // slab's worth of new bytes per side (no copy, no ladder).
+    let mut state_b = PagedSequenceState::new(pool.layout());
+    let b_tokens = 104i32;
+    pool.write_prefill(
+        &mut state_b,
+        0,
+        &make_block(200.0, b_tokens),
+        &make_block(600.0, b_tokens),
+    )
+    .unwrap();
+    let slab_bytes_per_side = 32 * block_size * (H as usize) * (D as usize) * 4;
+    assert_eq!(pool.pool_grow_events(), 1);
+    assert_eq!(
+        pool.pool_tensor_bytes(),
+        bytes_two_slabs + 2 * slab_bytes_per_side,
+        "growth must append exactly one slab per side"
+    );
+
+    // D: 6 more blocks (rows 66..71) so two release batches can interleave.
+    let mut state_d = PagedSequenceState::new(pool.layout());
+    pool.write_prefill(
+        &mut state_d,
+        0,
+        &make_block(400.0, 24),
+        &make_block(800.0, 24),
+    )
+    .unwrap();
+
+    // Release A then D: the free list ends with D's rows, so C's LIFO reuse
+    // starts in the THIRD slab (rows 66..71) and then drops back to row 0,
+    // crossing slab boundaries non-monotonically. The gather must split the
+    // row list into per-slab runs and still round-trip byte-identically.
+    pool.release_sequence(&mut state_a).unwrap();
+    pool.release_sequence(&mut state_d).unwrap();
+    let mut state_c = PagedSequenceState::new(pool.layout());
+    let c_tokens = 184i32;
+    pool.write_prefill(
+        &mut state_c,
+        0,
+        &make_block(300.0, c_tokens),
+        &make_block(700.0, c_tokens),
+    )
+    .unwrap();
+    {
+        let layer = state_c.layer(0).unwrap();
+        let rows: Vec<usize> = layer
+            .block_ids
+            .iter()
+            .map(|id| pool.debug_row_of(*id, 0).unwrap())
+            .collect();
+        assert!(
+            rows.windows(2).any(|w| w[0] > w[1]),
+            "C must reuse freed rows non-monotonically to exercise run splitting (rows: {rows:?})"
+        );
+        let crosses = rows.windows(2).any(|w| w[0] / 32 != w[1] / 32);
+        assert!(
+            crosses,
+            "C's rows must cross a slab boundary (rows: {rows:?})"
+        );
+    }
+
+    let (gk, gv) = pool
+        .gather_visible(&state_c, 0)
+        .unwrap()
+        .expect("gather must return data");
+    let dense_k = dense_reference(&[(make_block(300.0, c_tokens), 0)], c_tokens, 0, c_tokens);
+    let dense_v = dense_reference(&[(make_block(700.0, c_tokens), 0)], c_tokens, 0, c_tokens);
+    assert_eq!(flatten_fp32(&gk), flatten_fp32(&dense_k));
+    assert_eq!(flatten_fp32(&gv), flatten_fp32(&dense_v));
+
+    // B (rows spanning the second and third slabs) still round-trips too.
+    let (gk_b, gv_b) = pool
+        .gather_visible(&state_b, 0)
+        .unwrap()
+        .expect("gather must return data");
+    let dense_kb = dense_reference(&[(make_block(200.0, b_tokens), 0)], b_tokens, 0, b_tokens);
+    let dense_vb = dense_reference(&[(make_block(600.0, b_tokens), 0)], b_tokens, 0, b_tokens);
+    assert_eq!(flatten_fp32(&gk_b), flatten_fp32(&dense_kb));
+    assert_eq!(flatten_fp32(&gv_b), flatten_fp32(&dense_vb));
+}

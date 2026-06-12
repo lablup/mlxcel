@@ -247,6 +247,31 @@ def scen_shared_prefix_burst(client, sampler, n_parallel=8):
     return {"shared_prefix_tokens": prompt_tokens, "parallel": n_parallel}
 
 
+def scen_distinct_burst(client, sampler, n_parallel=8):
+    """8 concurrent requests with per-request UNIQUE long system prompts.
+
+    Nothing is shareable, so every prefill extends the paged pool: this is
+    the slab-growth stress the shared scenarios no longer exercise once
+    prefix sharing engages (issue #235)."""
+    sampler.mark("burst")
+
+    def one(i):
+        sysmsg = ("You are an archival research assistant. "
+                  + long_text(16000, salt=f"D{i}"))
+        return client.chat(
+            [{"role": "system", "content": sysmsg},
+             {"role": "user", "content": "Reply with the single word OK."}],
+            max_tokens=32,
+        )
+
+    with ThreadPoolExecutor(max_workers=n_parallel) as ex:
+        list(ex.map(one, range(n_parallel)))
+    sampler.mark("settle")
+    time.sleep(8)
+    return {"parallel": n_parallel,
+            "prompt_tokens_each": client.last_prompt_tokens}
+
+
 def scen_seqshare(client, sampler, n=8):
     sampler.mark("seqshare")
     cached = []
@@ -301,6 +326,7 @@ def scen_churn(client, sampler, n=32):
 SCENARIOS = {
     "idle": scen_idle,
     "shared_prefix_burst": scen_shared_prefix_burst,
+    "distinct_burst": scen_distinct_burst,
     "seqshare": scen_seqshare,
     "multiturn": scen_multiturn,
     "churn": scen_churn,
