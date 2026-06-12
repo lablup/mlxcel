@@ -58,7 +58,9 @@ use crate::server::types::responses_response::{
 };
 use crate::server::types::responses_stream::ResponseStreamEvent;
 
-use super::chat::{build_generate_options, parse_priority_header};
+use super::chat::{
+    build_generate_options, build_prompt_cache_request_context, parse_priority_header,
+};
 
 /// POST /v1/responses
 pub async fn create_response(
@@ -193,6 +195,17 @@ async fn non_stream_create_response(
     options.priority = priority;
     options.reasoning_budget = budget_override;
     options.structured = structured;
+    // Wire the cross-request prompt-prefix KV cache (epic #116) into the
+    // Responses path, mirroring the chat-completions handler. Built after
+    // `prepare_chat_request_with_cache` so the digest sees the resolved
+    // multimodal bytes; text-only requests yield a key byte-identical to the
+    // chat path.
+    options.prompt_cache_ctx = build_prompt_cache_request_context(
+        &state,
+        &translated.chat_request,
+        &prepared.image_data,
+        &prepared.audio_data,
+    );
 
     let result = state.model_provider.generate_with_media_and_videos(
         prepared.prompt,
@@ -290,6 +303,14 @@ async fn stream_create_response(
     options.priority = priority;
     options.reasoning_budget = budget_override;
     options.structured = structured;
+    // Wire the prompt-prefix KV cache (epic #116) into the streaming Responses
+    // path too, before `options`/`translated` move into the spawned task.
+    options.prompt_cache_ctx = build_prompt_cache_request_context(
+        &state,
+        &translated.chat_request,
+        &prepared.image_data,
+        &prepared.audio_data,
+    );
 
     let (sender, stream, cancelled, keepalive) = responses_sse_channel(128);
 
