@@ -306,9 +306,8 @@ impl PagedSequenceState {
 /// `refcount == 0` and is not eligible for recycling as long as `refcount > 0`.
 ///
 /// `in_use` is retained as a derived mirror of `refcount > 0` so the existing
-/// `stats_for_sequences` and internal debug assertions stay backwards
-/// compatible with call sites that inspected the flag directly before
-/// refcounts were introduced.
+/// `stats` and internal debug assertions stay backwards compatible with call
+/// sites that inspected the flag directly before refcounts were introduced.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct PagedBlockRecord {
     layer_idx: usize,
@@ -711,10 +710,7 @@ impl PagedBlockPool {
         Ok(())
     }
 
-    pub fn stats_for_sequences<'a>(
-        &self,
-        sequences: impl IntoIterator<Item = &'a PagedSequenceState>,
-    ) -> PagedCacheStats {
+    pub fn stats(&self) -> PagedCacheStats {
         let allocated_blocks = self.blocks.len();
         let free_blocks = self
             .blocks
@@ -722,14 +718,19 @@ impl PagedBlockPool {
             .filter(|record| !record.is_in_use())
             .count();
         let live_blocks = allocated_blocks.saturating_sub(free_blocks);
-        let states: Vec<&PagedSequenceState> = sequences.into_iter().collect();
-        let bytes_reserved = states
-            .iter()
-            .map(|state| state.reserved_bytes(&self.layout))
-            .sum();
-        let bytes_in_use = states
-            .iter()
-            .map(|state| state.used_bytes(&self.layout))
+        // Real pool memory, not the layout's nominal scheduling placeholder
+        // (#226): reserved = every allocated slab byte (capacity, including
+        // grow slack); in use = bytes of the rows mapped to a live block,
+        // which covers ACTIVE sequences and PARKED prompt-cache pins alike
+        // (release_block unmaps a row at refcount 0). The per-sequence
+        // nominal sums these replaced systematically under-reported
+        // (32 B/block) and missed parked retention entirely.
+        let bytes_reserved = self.pool_tensor_bytes();
+        let bytes_in_use = (0..self.block_rows.len())
+            .map(|layer_idx| {
+                self.block_rows[layer_idx].len()
+                    * self.real_block_bytes(layer_idx).unwrap_or_default()
+            })
             .sum();
 
         PagedCacheStats {
@@ -739,6 +740,18 @@ impl PagedBlockPool {
             bytes_reserved,
             bytes_in_use,
         }
+    }
+
+    /// REAL bytes one physical block of `layer_idx` occupies in the pool's K
+    /// and V slabs combined: `block_size x n_kv_heads x head_dim x
+    /// element_size x 2`. `None` until the layer's first write captures its
+    /// geometry (or for an unknown dtype). This is the actual memory cost a
+    /// pinned block imposes, unlike the layout's nominal `bytes_per_block`
+    /// scheduling placeholder (#226).
+    pub fn real_block_bytes(&self, layer_idx: usize) -> Option<usize> {
+        let meta = self.pool_meta.get(layer_idx).copied().flatten()?;
+        let esize = crate::dtype::size_bytes(meta.dtype)?;
+        Some(self.layout.block_size * meta.n_kv_heads as usize * meta.head_dim as usize * esize * 2)
     }
 
     /// Current refcount of `block_id`, or `0` if the block is free or unknown.

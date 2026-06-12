@@ -5834,19 +5834,10 @@ impl CachePool {
     }
 
     pub fn paged_stats(&self) -> Option<PagedCacheStats> {
-        let pool = self.paged_pool.as_ref()?;
-        // Collect the per-sequence borrows first, then hand `stats_for_sequences`
-        // plain references. The pool and each sequence state live in distinct
-        // `RefCell`s, so the pool borrow and these state borrows coexist.
-        let states: Vec<Ref<'_, PagedSequenceState>> = self
-            .active
-            .values()
-            .filter_map(|sequence| sequence.paged_state())
-            .collect();
-        Some(
-            pool.borrow()
-                .stats_for_sequences(states.iter().map(|state| &**state)),
-        )
+        // Pool-wide stats (#226): block counts and REAL slab bytes come from
+        // the pool itself, covering active sequences and parked prompt-cache
+        // pins alike, so no per-sequence borrows are needed anymore.
+        self.paged_pool.as_ref().map(|pool| pool.borrow().stats())
     }
 
     pub fn paged_block_size(&self) -> Option<usize> {
@@ -7335,8 +7326,8 @@ mod tests {
                 allocated_blocks: 3,
                 live_blocks: 3,
                 free_blocks: 0,
-                bytes_reserved: 384,
-                bytes_in_use: 288,
+                bytes_reserved: 0,
+                bytes_in_use: 0,
             })
         );
 
@@ -7347,8 +7338,8 @@ mod tests {
                 allocated_blocks: 4,
                 live_blocks: 4,
                 free_blocks: 0,
-                bytes_reserved: 512,
-                bytes_in_use: 352,
+                bytes_reserved: 0,
+                bytes_in_use: 0,
             })
         );
     }
@@ -7577,8 +7568,8 @@ mod tests {
                 allocated_blocks: 2,
                 live_blocks: 2,
                 free_blocks: 0,
-                bytes_reserved: 256,
-                bytes_in_use: 192,
+                bytes_reserved: 0,
+                bytes_in_use: 0,
             }
         );
         assert_eq!(pool.memory_usage_bytes(), 192);
@@ -7590,8 +7581,8 @@ mod tests {
                 allocated_blocks: 2,
                 live_blocks: 2,
                 free_blocks: 0,
-                bytes_reserved: 256,
-                bytes_in_use: 160,
+                bytes_reserved: 0,
+                bytes_in_use: 0,
             }
         );
 
@@ -7608,8 +7599,8 @@ mod tests {
                 allocated_blocks: 2,
                 live_blocks: 1,
                 free_blocks: 1,
-                bytes_reserved: 128,
-                bytes_in_use: 96,
+                bytes_reserved: 0,
+                bytes_in_use: 0,
             }
         );
 
@@ -7620,8 +7611,8 @@ mod tests {
                 allocated_blocks: 3,
                 live_blocks: 2,
                 free_blocks: 1,
-                bytes_reserved: 256,
-                bytes_in_use: 224,
+                bytes_reserved: 0,
+                bytes_in_use: 0,
             }
         );
 

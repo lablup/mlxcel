@@ -90,6 +90,11 @@ pub struct DetachedPagedCacheSet {
     /// `None` after successful adoption so `Drop` can run without triggering
     /// a leak warning.
     pub(super) retained_blocks: Option<Vec<PagedBlockId>>,
+    /// REAL bytes the pinned pool blocks occupy, captured from the pool's
+    /// per-layer geometry at detach time (#226). `None` when no layer had
+    /// pool-resident K/V (then [`Self::nbytes`] falls back to the layout's
+    /// nominal accounting).
+    pub(super) real_pool_bytes: Option<usize>,
     /// Per-page Turbo4 sidecar tensors lifted out of the originating
     /// [`PagedBlockPool`] at detach time. Keyed by `PagedBlockId`. Empty for
     /// `Fp16`/`Int8` cache modes; on adopt the entries are reinstalled into
@@ -172,7 +177,12 @@ impl DetachedPagedCacheSet {
     /// Turbo4 sidecar tensors carried directly by this set.
     pub fn nbytes(&self) -> usize {
         let dense: usize = self.caches.iter().map(|c| c.nbytes()).sum();
-        let paged: usize = self.paged_state.reserved_bytes(&self.paged_layout);
+        // Prefer the REAL pool bytes captured at detach time (#226); the
+        // layout-derived value is a nominal scheduling placeholder that
+        // under-reported pool-backed sets by orders of magnitude.
+        let paged: usize = self
+            .real_pool_bytes
+            .unwrap_or_else(|| self.paged_state.reserved_bytes(&self.paged_layout));
         let sidecars: usize = self.turbo_sidecar_bytes();
         dense + paged + sidecars
     }
@@ -267,10 +277,20 @@ pub(super) enum ParkedCache {
 }
 
 impl ParkedCache {
+    /// Bytes this parked set contributes to
+    /// [`CachePool::memory_usage_bytes`]. For paged sets the pool-resident
+    /// K/V bytes are EXCLUDED: `memory_usage_bytes` already adds the pool's
+    /// `pool_tensor_bytes()` (which physically contains the pinned blocks),
+    /// so counting the set's real pool bytes here again would double-count
+    /// (#226). Dense handles and lifted Turbo4 sidecars are owned by the set
+    /// itself and stay counted.
     pub(super) fn nbytes(&self) -> usize {
         match self {
             ParkedCache::Dense(set) => set.nbytes(),
-            ParkedCache::Paged(set) => set.nbytes(),
+            ParkedCache::Paged(set) => {
+                let dense: usize = set.caches.iter().map(|c| c.nbytes()).sum();
+                dense + set.turbo_sidecar_bytes()
+            }
         }
     }
 }
@@ -427,6 +447,27 @@ impl CachePool {
             }
         }
 
+        // Capture the REAL pool bytes the pinned blocks occupy (#226). The
+        // layout's nominal `bytes_per_block` is a scheduling placeholder, so
+        // accounting the set (and thus the prompt-cache ledger) with it made
+        // the capacity cap ineffective. Layers whose geometry was never
+        // written (no pool meta, e.g. an Int8 dense-compat sequence whose
+        // K/V live in the dense handles) contribute nothing here; if NO layer
+        // has real bytes the field stays `None` and `nbytes` falls back to
+        // the nominal value.
+        let real_pool_bytes: Option<usize> = self.paged_pool.as_ref().and_then(|pool| {
+            let pool = pool.borrow();
+            let mut total = 0usize;
+            let mut any = false;
+            for (layer_idx, layer) in paged_state.layers.iter().enumerate() {
+                if let Some(per_block) = pool.real_block_bytes(layer_idx) {
+                    total += layer.block_ids.len() * per_block;
+                    any = true;
+                }
+            }
+            any.then_some(total)
+        });
+
         Some(DetachedPagedCacheSet {
             caches: detached_caches,
             paged_state,
@@ -438,6 +479,7 @@ impl CachePool {
             detached_at: Instant::now(),
             origin_seq_id: sequence.seq_id,
             retained_blocks: Some(retained),
+            real_pool_bytes,
             v_packed_pages,
             v_norms_pages,
             k_packed_pages,
@@ -816,16 +858,19 @@ impl CachePool {
 
         let keep_blocks = target_tokens / block_size;
         let mut dropped: HashSet<PagedBlockId> = HashSet::new();
+        let mut dropped_real_bytes = 0usize;
         let mut first_err: Option<String> = None;
         {
             let mut pool = pool.borrow_mut();
-            for layer in set.paged_state.layers.iter_mut() {
+            for (layer_idx, layer) in set.paged_state.layers.iter_mut().enumerate() {
+                let per_block_real = pool.real_block_bytes(layer_idx).unwrap_or_default();
                 while layer.block_ids.len() > keep_blocks {
                     let block_id = layer
                         .block_ids
                         .pop()
                         .expect("len > keep_blocks implies non-empty");
                     dropped.insert(block_id);
+                    dropped_real_bytes += per_block_real;
                     // Allocation reference carried by the block table, then the
                     // detach pin from `retained_blocks`.
                     for _ in 0..2 {
@@ -838,6 +883,9 @@ impl CachePool {
                 }
                 layer.len = target_tokens;
             }
+        }
+        if let Some(real) = set.real_pool_bytes.as_mut() {
+            *real = real.saturating_sub(dropped_real_bytes);
         }
         if let Some(retained) = set.retained_blocks.as_mut() {
             retained.retain(|id| !dropped.contains(id));
