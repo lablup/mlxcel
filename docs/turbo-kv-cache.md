@@ -125,13 +125,26 @@ paged layout when `--decode-storage-backend paged` is selected.
 
 ### Unified paged KV cache
 
-Under `--decode-storage-backend paged`, the continuous-batching server keeps
-both the cross-request prompt-prefix cache and per-sequence decode state in one
-refcounted, copy-on-write block pool (epic #116). Two requests that share a
-prompt prefix store that prefix's KV blocks once: the second request adopts the
-first request's blocks by reference rather than re-prefilling them, and a block
-forks (copy-on-write) only when one sequence's content diverges from a shared
-block. Paged adopt and donate are supported for the pool-backed Fp16 families
+The continuous-batching server keeps both the cross-request prompt-prefix cache
+and per-sequence decode state in one refcounted, copy-on-write block pool
+(epic #116). The paged backend is the default for batch-capable pool-backed
+families (`--decode-storage-backend auto` resolves to paged when batching);
+`dense` forces the legacy per-sequence caches.
+
+Two requests that share a prompt prefix store that prefix's KV blocks once.
+Adoption is non-consuming clone-and-pin: a borrower clones pinned references to
+the matched prefix blocks, so the stored entry survives for concurrent siblings
+and for deeper future matches, and any number of in-flight requests can share
+one stored prefix simultaneously. Partial matches adopt too: with Automatic
+Prefix Caching (APC, on by default) the match is verified per 16-token hash
+block, floored to the 32-token pool block boundary, and the borrower
+re-prefills only its divergent suffix on fresh blocks (full shared blocks are
+never mutated; a shared partial tail forks copy-on-write). Cache entries are
+accounted at their REAL pool bytes, so `--prompt-cache-capacity-bytes`
+(default 2 GiB) genuinely bounds retention and the LRU eviction actually
+triggers.
+
+Paged adopt and donate are supported for the pool-backed Fp16 families
 (the dense-natural backends such as qwen3 and llama3); model-owned-state families
 (gemma3, llama4, qwen3.5) and recurrent or hybrid SSM models keep dense or
 model-owned caches and stay out of the pool.
@@ -158,6 +171,27 @@ prefix prefills it; the other `N - 1` adopt the cached blocks and skip
 `(N - 1) * P` prefill-token forward passes. `tests/paged_prefix_share_parity.rs`
 confirms an adopting request decodes byte-identically to a cold run while
 skipping the shared prefill.
+
+**End-to-end server footprint.** Whole-process physical footprint
+(`/usr/bin/footprint`) of `mlxcel serve` under fixed HTTP workloads
+(`scripts/bench_memory_footprint.py`, `models/llama-3.2-1b-4bit`, M1 Ultra,
+defaults, peak during the scenario phase):
+
+| scenario | v0.1.4 | current default | shared tokens |
+|---|---|---|---|
+| idle (weights only) | 957 MiB | 983 MiB | - |
+| 8 concurrent requests, shared ~3.7k-token system prompt | 1653 MiB | 1627 MiB | 29184 (all 8 adopt) |
+| same prefix, 8 sequential requests | 1650 MiB | 1413 MiB | 25536 |
+| one conversation, 8 turns | 2104 MiB | 1301 MiB | 10976 |
+| 32 distinct prompts (churn) | 1558 MiB | 2276 MiB | 1984 |
+
+v0.1.4 never engaged the prompt cache from the HTTP path (zero reuse), so its
+footprint is the no-cache floor. The current default matches or beats it on
+every sharing scenario while also skipping the shared prefill work (the
+8-way burst completes its request phase 3.4x faster). The churn number is
+higher because donated entries are now retained for future reuse; that
+retention is real memory governed by `--prompt-cache-capacity-bytes` and is
+released by LRU eviction at the cap.
 
 **Decode throughput.** Paged decode is byte-identical to the dense backend
 (`tests/paged_scheduler_parity.rs`, RMS 0). The live batched path uses the native

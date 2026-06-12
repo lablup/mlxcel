@@ -125,7 +125,8 @@ fn sample_input() -> ServerStartupInput {
         prompt_cache_max_entries: None,
         prompt_cache_ttl_seconds: None,
         prompt_cache_min_prefix: None,
-        // APC knobs — disabled by default.
+        // APC knobs — the fixture keeps APC off so existing whole-prefix
+        // expectations stay exact (the serve binaries default it ON).
         apc_enabled: false,
         apc_block_size: None,
         apc_num_blocks: None,

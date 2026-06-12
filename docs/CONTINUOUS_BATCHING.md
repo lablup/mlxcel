@@ -24,11 +24,15 @@ token, then streams the new tokens out. Relevant flags:
 
 ### Paged decode and the prompt-prefix cache
 
-With `--decode-storage-backend paged`, decode state and the cross-request
-prompt-prefix cache share one refcounted, copy-on-write block pool. Concurrent
-requests that share a prompt prefix store that prefix's KV once and skip
-re-prefilling it. The mechanism, the memory and prefill-token savings, the
-measured decode throughput, and `--kv-cache-budget` are documented in
+Decode state and the cross-request prompt-prefix cache share one refcounted,
+copy-on-write block pool (the default for batch-capable pool-backed families;
+`--decode-storage-backend dense` opts out). Concurrent requests that share a
+prompt prefix store that prefix's KV once and skip re-prefilling it: adoption
+is non-consuming (clone-and-pin), so one stored prefix serves any number of
+simultaneous borrowers, and Automatic Prefix Caching (on by default, disable
+with `--apc-enabled=false`) lets requests that diverge after a shared prefix
+reuse the common part. The mechanism, the measured memory and prefill-token
+savings, the decode throughput, and `--kv-cache-budget` are documented in
 [turbo-kv-cache.md](turbo-kv-cache.md#unified-paged-kv-cache). Paged decode is
 byte-identical to the dense backend; it is the storage backend the disaggregated
 roles below build on.

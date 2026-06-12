@@ -1487,18 +1487,23 @@ pub(crate) struct ServeArgs {
 
     // Automatic Prefix Caching (APC) knobs.
     /// Enable Automatic Prefix Caching (APC) with block-granularity hash chains
-    /// (default: false).
+    /// (default: true). Disable with `--apc-enabled=false`.
     ///
     /// APC layers on top of the existing prompt-prefix cache to enable
-    /// finer-grained KV reuse. When enabled on a hybrid SSM/attention model
-    /// (jamba, mamba, mamba2, nemotron_h, gated_delta, kimi_linear,
-    /// qwen3_next), APC is automatically disabled at runtime since SSM
-    /// state cannot be decomposed into hashable blocks.
+    /// finer-grained KV reuse: without it, a stored prefix is reusable only
+    /// when it is fully contained in the new request, so requests that share
+    /// a long system prompt but diverge afterwards never reuse KV. With the
+    /// non-consuming paged adoption a partial match shares the prefix blocks
+    /// without copying or destroying the stored entry, so APC is on by
+    /// default. When enabled on a hybrid SSM/attention model (jamba, mamba,
+    /// mamba2, nemotron_h, gated_delta, kimi_linear, qwen3_next), APC is
+    /// automatically disabled at runtime since SSM state cannot be
+    /// decomposed into hashable blocks.
     ///
     /// Also reads `APC_ENABLED` (parity with upstream `mlx-vlm`).
     #[arg(
         long = "apc-enabled",
-        default_value_t = false,
+        default_value_t = true,
         value_name = "BOOL",
         num_args = 0..=1,
         require_equals = true,

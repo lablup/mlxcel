@@ -991,7 +991,7 @@ struct ServerArgs {
 
     // Automatic Prefix Caching (APC) knobs.
     /// Enable Automatic Prefix Caching (APC) with block-granularity hash chains
-    /// (default: false).
+    /// (default: true). Disable with `--apc-enabled=false`.
     ///
     /// APC layers on top of the existing prompt-prefix cache to enable
     /// finer-grained KV reuse with chained `(parent_hash, tokens, extra_hash)`
@@ -1003,7 +1003,7 @@ struct ServerArgs {
     /// Also reads `APC_ENABLED` (parity with upstream `mlx-vlm`).
     #[arg(
         long = "apc-enabled",
-        default_value_t = false,
+        default_value_t = true,
         value_name = "BOOL",
         num_args = 0..=1,
         require_equals = true,
