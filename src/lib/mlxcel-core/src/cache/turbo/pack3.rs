@@ -79,10 +79,11 @@ pub const V_BIT_WIDTH_3: u8 = 3;
 /// Compute the number of packed bytes needed to store `head_dim` 3-bit
 /// indices for one token.
 ///
-/// Panics in debug if `head_dim` is not a multiple of [`COORDS_PER_GROUP`]
-/// (8). The release-mode behaviour is to silently truncate to the nearest
-/// 8-coord boundary, which is wrong but safe — callers are expected to have
-/// already validated `head_dim` against the supported grid before calling.
+/// Panics in every build profile if `head_dim` is not a positive multiple of
+/// [`COORDS_PER_GROUP`] (8): the result sizes downstream packed buffers, so a
+/// silently truncated count must never escape (#234). Callers are expected to
+/// have validated `head_dim` against the supported grid before calling;
+/// `TurboQuantParams3::new` already enforces it at init.
 #[inline]
 pub fn packed_bytes_per_token_3bit(head_dim: i32) -> i32 {
     assert!(
