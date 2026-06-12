@@ -359,7 +359,10 @@ fn build_stats_response_reflects_live_store() {
         PagedBlockStats::default(),
     );
     assert!(resp.enabled);
-    assert!(!resp.apc_enabled, "APC opt-in defaults to off");
+    assert!(
+        !resp.apc_enabled,
+        "the library-level ApcConfig default is off (the serve binaries default it on)"
+    );
     assert_eq!(resp.entries, 1);
     assert_eq!(resp.bytes, 1024);
     assert_eq!(resp.inserts, 1);

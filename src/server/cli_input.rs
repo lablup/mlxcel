@@ -291,9 +291,10 @@ pub struct ServerStartupInput {
     // prompt-prefix cache so finer-grained reuse becomes possible. The
     // raw fields here are normalised into [`super::prompt_cache::ApcConfig`]
     // by [`build_prompt_cache_config`].
-    /// `--apc-enabled`: master switch for APC. Defaults to `false` so
-    /// behaviour matches the earlier server. Also accepts
-    /// `APC_ENABLED` (parity with upstream `mlx-vlm`).
+    /// `--apc-enabled`: master switch for APC. The serve binaries default
+    /// it to `true` (disable with `--apc-enabled=false`); this raw field just
+    /// carries whatever clap resolved. Also accepts `APC_ENABLED` (parity
+    /// with upstream `mlx-vlm`).
     pub apc_enabled: bool,
 
     /// `--apc-block-size`: tokens per APC block. `None` means "use the
@@ -1192,9 +1193,10 @@ pub fn env_fallback_prompt_cache_min_prefix(value: &mut Option<usize>) {
 /// Apply `APC_ENABLED` env var fallback to the raw `--apc-enabled` value.
 ///
 /// `cli_was_set` must be `true` when clap explicitly received the flag (i.e.
-/// the operator typed `--apc-enabled=true|false`); a default `false` from
-/// clap should be reported as `cli_was_set = false` so a `true` env value
-/// can still take effect.
+/// the operator typed `--apc-enabled` or `--apc-enabled=...`); a value that
+/// merely came from the compiled-in default must be reported as
+/// `cli_was_set = false` so the env var can still override it in either
+/// direction (the detection scans argv, not the default).
 pub fn env_fallback_apc_enabled(enabled: &mut bool, cli_was_set: bool) {
     const KEY: &str = "APC_ENABLED";
     if cli_was_set {

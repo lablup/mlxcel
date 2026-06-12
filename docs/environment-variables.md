@@ -87,10 +87,19 @@ These variables are applied when the corresponding CLI flag is absent.
 | `MLXCEL_PROMPT_CACHE_MAX_ENTRIES` | unsigned integer | `1024` | `--prompt-cache-max-entries` |
 | `MLXCEL_PROMPT_CACHE_TTL` | unsigned integer seconds | `3600` | `--prompt-cache-ttl` |
 | `MLXCEL_PROMPT_CACHE_MIN_PREFIX` | unsigned integer tokens | `32` | `--prompt-cache-min-prefix` |
+| `APC_ENABLED` | boolean | `true` | `--apc-enabled` |
+| `APC_BLOCK_SIZE` | unsigned integer tokens | `16` | `--apc-block-size` |
+| `APC_NUM_BLOCKS` | unsigned integer | derived from max entries | `--apc-num-blocks` |
+| `APC_HASH` | `sha256` or `blake3` | `sha256` | `--apc-hash` |
 
 `MLXCEL_PROMPT_CACHE_ENABLED` has higher precedence than the llama.cpp
 compatibility alias `LLAMA_ARG_CACHE_REUSE` when both are set and no CLI flag is
 provided.
+
+Automatic Prefix Caching is on by default; pass `--apc-enabled=false` or set
+`APC_ENABLED=false` to fall back to whole-prefix matching only (a stored prefix
+is then reusable only when it is fully contained in the new request). The
+`APC_*` names mirror the upstream `mlx-vlm` env surface.
 
 ## Speculative-decoding variables
 
