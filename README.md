@@ -242,6 +242,6 @@ Apache License 2.0 unless otherwise noted, see [LICENSE](LICENSE). Third-party a
 ## Acknowledgments
 
 - [MLX](https://github.com/ml-explore/mlx) — Apple's machine learning framework
-- [mlx-lm](https://github.com/ml-explore/mlx-lm) and [mlx-vlm](https://github.com/Blaizzy/mlx-vlm) — Python projects that guide model-family compatibility
+- [mlx-lm](https://github.com/ml-explore/mlx-lm) (MIT, Copyright 2023 Apple Inc.) and [mlx-vlm](https://github.com/Blaizzy/mlx-vlm) (MIT, Copyright 2025 Prince Canuma): Python projects whose model coverage and behavior mlxcel ports and mirrors. See [NOTICE](NOTICE).
 - [MLX Community](https://huggingface.co/mlx-community) — pre-converted MLX model checkpoints
 - [turboquant_plus](https://github.com/TheTom/turboquant_plus): TurboQuant KV cache compression algorithms ported in `src/lib/mlxcel-core/src/cache/turbo/` (Apache-2.0, Copyright 2026 Tom Turney). See [NOTICE](NOTICE).
