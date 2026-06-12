@@ -154,10 +154,10 @@ pub async fn metrics(State(state): State<AppState>) -> Response {
          # HELP mlxcel_cache_pool_paged_blocks_free Paged KV blocks currently free for reuse\n\
          # TYPE mlxcel_cache_pool_paged_blocks_free gauge\n\
          mlxcel_cache_pool_paged_blocks_free {paged_blocks_free}\n\
-         # HELP mlxcel_cache_pool_paged_bytes_reserved Reserved bytes across paged sequences\n\
+         # HELP mlxcel_cache_pool_paged_bytes_reserved Real bytes of allocated paged pool slabs (capacity, including grow slack)\n\
          # TYPE mlxcel_cache_pool_paged_bytes_reserved gauge\n\
          mlxcel_cache_pool_paged_bytes_reserved {paged_bytes_reserved}\n\
-         # HELP mlxcel_cache_pool_paged_bytes_in_use Visible bytes in use across paged sequences\n\
+         # HELP mlxcel_cache_pool_paged_bytes_in_use Real bytes of pool rows mapped to live blocks (active sequences plus parked prompt-cache pins)\n\
          # TYPE mlxcel_cache_pool_paged_bytes_in_use gauge\n\
          mlxcel_cache_pool_paged_bytes_in_use {paged_bytes_in_use}\n\
          # HELP mlxcel_cache_pool_paged_block_budget Configured paged KV block-budget cap (0 = unbounded)\n\

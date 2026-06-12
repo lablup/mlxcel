@@ -728,8 +728,15 @@ impl PagedBlockPool {
         let bytes_reserved = self.pool_tensor_bytes();
         let bytes_in_use = (0..self.block_rows.len())
             .map(|layer_idx| {
-                self.block_rows[layer_idx].len()
-                    * self.real_block_bytes(layer_idx).unwrap_or_default()
+                let per_block = self.real_block_bytes(layer_idx);
+                // A layer with mapped rows must have written geometry; an
+                // unknown dtype silently zeroing its bytes would be a future
+                // regression, so surface it in debug builds.
+                debug_assert!(
+                    per_block.is_some() || self.block_rows[layer_idx].is_empty(),
+                    "layer {layer_idx} has mapped rows but no real block size"
+                );
+                self.block_rows[layer_idx].len() * per_block.unwrap_or_default()
             })
             .sum();
 
