@@ -1236,66 +1236,70 @@ impl BatchScheduler {
         // matches. The one-shot take below destroyed the entry on first use;
         // combined with the #225 trim, a short partial match (even the
         // chat-template preamble) could gut a multi-thousand-token entry.
-        // `with_detached` returns:
-        //   None              -> entry already drained: fall through, the
-        //                        take below also yields None (cold prefill).
-        //   Some(None)        -> dense set: legacy take path below.
-        //   Some(Some(Err))   -> paged but clone-ineligible or below the
-        //                        minimum: cold prefill, entry untouched.
-        //   Some(Some(Ok));   -> adoptable clone, source preserved.
+        enum PagedCloneOutcome {
+            /// Adoptable clone built; the source entry stays in the store.
+            Cloned(Box<DetachedPagedCacheSet>, usize),
+            /// Cold prefill, entry untouched (below minimum, pin failure,
+            /// or cross-backend).
+            Decline(String),
+            /// Dense entry, or a clone-ineligible paged shape (dense-compat
+            /// handles, Turbo4, sliding-window): the consuming take path
+            /// below can still adopt those.
+            TakePath,
+        }
         let backend_is_paged = matches!(self.decode_storage_backend, DecodeStorageBackend::Paged);
         let min_prefix = store.min_prefix_tokens().max(1);
         let cache_pool = &mut self.cache_pool;
-        let clone_attempt: Option<Option<Result<(DetachedPagedCacheSet, usize), String>>> = entry
-            .with_detached(|set| match set {
-                DetachedKvSet::Paged(paged) if backend_is_paged => {
-                    let block_size = paged.layout().block_size.max(1);
-                    let seq_len = paged.seq_len();
-                    let adoptable = if matched_len < seq_len {
-                        (matched_len / block_size) * block_size
-                    } else {
-                        seq_len
-                    };
-                    if adoptable < min_prefix {
-                        return Some(Err(format!(
-                            "block-floored match {adoptable} below the minimum prefix {min_prefix}"
-                        )));
-                    }
-                    Some(
-                        cache_pool
-                            .clone_detached_paged_prefix(paged, adoptable)
-                            .map(|clone| (clone, adoptable)),
-                    )
+        // `with_detached` itself returns `None` for a drained shell; the take
+        // below then also yields `None` (cold prefill).
+        let clone_attempt: Option<PagedCloneOutcome> = entry.with_detached(|set| match set {
+            DetachedKvSet::Paged(paged) if backend_is_paged && paged.clone_eligible() => {
+                let block_size = paged.layout().block_size.max(1);
+                // Floor BOTH the partial and the whole-entry match to the
+                // pool block boundary: a donated entry's length
+                // (prompt + generated tokens) is almost never block-aligned,
+                // and the clone shares whole blocks only. The caller
+                // re-prefills everything past the adopted length, which
+                // re-covers the dropped partial tail.
+                let adoptable = (matched_len.min(paged.seq_len()) / block_size) * block_size;
+                if adoptable < min_prefix {
+                    return PagedCloneOutcome::Decline(format!(
+                        "block-floored match {adoptable} below the minimum prefix {min_prefix}"
+                    ));
                 }
-                // Paged entry under a dense decode backend: cross-backend
-                // adoption is invalid; decline without touching the entry.
-                DetachedKvSet::Paged(_) => {
-                    Some(Err("paged entry under a dense decode backend".into()))
+                match cache_pool.clone_detached_paged_prefix(paged, adoptable) {
+                    Ok(clone) => PagedCloneOutcome::Cloned(Box::new(clone), adoptable),
+                    Err(err) => PagedCloneOutcome::Decline(err),
                 }
-                DetachedKvSet::Dense(_) => None,
-            });
-        let cloned = match clone_attempt {
-            Some(Some(Ok((clone, adoptable)))) => {
-                adopted_len = adoptable;
-                Some(clone)
             }
-            Some(Some(Err(reason))) => {
+            // Paged entry under a dense decode backend: cross-backend
+            // adoption is invalid; decline without touching the entry
+            // (the old path took the set just to release it).
+            DetachedKvSet::Paged(_) if !backend_is_paged => {
+                PagedCloneOutcome::Decline("paged entry under a dense decode backend".into())
+            }
+            // Clone-ineligible paged shapes and dense entries.
+            DetachedKvSet::Paged(_) | DetachedKvSet::Dense(_) => PagedCloneOutcome::TakePath,
+        });
+        match clone_attempt {
+            Some(PagedCloneOutcome::Cloned(clone, adoptable)) => {
+                adopted_len = adoptable;
+                let adopt_result = self
+                    .cache_pool
+                    .adopt_paged(&self.model as &dyn LanguageModel, *clone);
+                return self.finish_prompt_cache_adopt(adopt_result, adopted_len, tokens.len());
+            }
+            Some(PagedCloneOutcome::Decline(reason)) => {
                 tracing::debug!(
                     "prompt-cache adopt: paged clone declined ({reason}); falling back to cold prefill (entry preserved)"
                 );
                 return None;
             }
-            Some(None) | None => None,
-        };
-        if let Some(clone) = cloned {
-            let adopt_result = self
-                .cache_pool
-                .adopt_paged(&self.model as &dyn LanguageModel, clone);
-            return self.finish_prompt_cache_adopt(adopt_result, adopted_len, tokens.len());
+            Some(PagedCloneOutcome::TakePath) | None => {}
         }
 
-        // Dense entries keep the legacy one-shot consume: their adoption
-        // copies buffers into the sequence, so the set genuinely moves.
+        // Dense entries (and clone-ineligible paged shapes) keep the legacy
+        // one-shot consume: their adoption genuinely moves buffers.
         // `take_detached` returns `None` if a racing lookup already consumed
         // this entry; the miss path is safe (fresh prefill).
         let detached = entry.take_detached()?;

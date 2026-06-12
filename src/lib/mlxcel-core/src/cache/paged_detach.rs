@@ -162,6 +162,27 @@ impl DetachedPagedCacheSet {
         &self.caches
     }
 
+    /// Whether [`CachePool::clone_detached_paged_prefix`] can serve this set
+    /// (#227): a pool-backed Fp16 shape with no Turbo4 sidecars, absolute
+    /// indexing (no sliding-window `logical_start`), live block pins, and
+    /// metadata-only dense handles. Ineligible sets (e.g. dense-compat Int8
+    /// whose K/V lives in the handles) must go through the consuming take
+    /// path instead, which can still adopt them.
+    pub fn clone_eligible(&self) -> bool {
+        self.backend == SequenceStateBackend::PagedKvCache
+            && !self.paged_layout.is_turbo_mode()
+            && self.retained_blocks.is_some()
+            && self
+                .paged_state
+                .layers
+                .iter()
+                .all(|layer| layer.logical_start == 0)
+            && self
+                .caches
+                .iter()
+                .all(|handle| handle.pool_backed_handle_clone(0).is_some())
+    }
+
     /// Paged layout the set was captured under.
     pub fn layout(&self) -> &PagedKvLayout {
         &self.paged_layout

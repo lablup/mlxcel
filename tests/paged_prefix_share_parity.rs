@@ -614,3 +614,82 @@ fn paged_clone_and_pin_share_matches_cold_runs_llama3() {
     };
     assert_clone_and_pin_share_parity(&model, LLAMA3_DIR);
 }
+
+/// Whole-entry match with an UNALIGNED stored length (the multi-turn
+/// continuation case: donated entries carry prompt + generated tokens, which
+/// is almost never a multiple of the pool block size). The scheduler floors
+/// the adoptable length to the block boundary even for whole-entry matches;
+/// the re-prefill covers the dropped partial tail plus the new turn.
+#[test]
+#[ignore = "loads llama-3.2-1b-4bit and runs real GPU forwards; run with --ignored"]
+fn paged_clone_whole_entry_unaligned_floors_and_matches_cold_llama3() {
+    let _runtime = initialize_runtime();
+    let Some(model) = load_or_skip(LLAMA3_DIR, "mlx-community/Llama-3.2-1B-Instruct-4bit") else {
+        return;
+    };
+    let num_layers = model.num_layers();
+
+    // Stored entry: 52 tokens (NOT a multiple of BLOCK_SIZE = 32).
+    let mut stored_tokens = PREFIX_TOKENS.to_vec();
+    stored_tokens.extend_from_slice(STORED_TAIL_TOKENS);
+    assert_ne!(stored_tokens.len() % BLOCK_SIZE, 0);
+    // Continuation request: the stored stream plus a new turn, so the match
+    // covers the WHOLE entry (matched_len == seq_len == 52, unaligned).
+    let mut request = stored_tokens.clone();
+    request.extend_from_slice(SUFFIX_TOKENS);
+
+    let cold = {
+        let mut pool = CachePool::new(2);
+        let id = pool
+            .allocate_with_layout(&model, Some(scheduler_paged_layout(num_layers)))
+            .expect("cold paged allocate");
+        let caches = pool.get_caches_mut(id).unwrap();
+        prefill_and_decode(&model, caches, &request, 0)
+    };
+
+    let mut pool = CachePool::new(4);
+    let seq_a = pool
+        .allocate_with_layout(&model, Some(scheduler_paged_layout(num_layers)))
+        .expect("A paged allocate");
+    {
+        let caches = pool.get_caches_mut(seq_a).unwrap();
+        let len = stored_tokens.len() as i32;
+        let prompt = mlxcel_core::from_slice_i32(&stored_tokens, &[1, len]);
+        let mask = mlxcel_core::utils::create_causal_mask(len, 0);
+        let logits = model.forward(&prompt, caches, Some(&mask));
+        mlxcel_core::eval(&logits);
+    }
+    let set_a = pool.detach_paged(seq_a).expect("A detach_paged");
+    let entry = CacheEntry::new(stored_tokens.clone(), DetachedKvSet::Paged(set_a));
+
+    // Scheduler mirror: matched_len == seq_len (whole entry), floored.
+    let matched_len = stored_tokens.len();
+    let adoptable = (matched_len.min(stored_tokens.len()) / BLOCK_SIZE) * BLOCK_SIZE;
+    assert_eq!(adoptable, 32, "52 floors to one 32-token pool block");
+    let clone = entry
+        .with_detached(|set| match set {
+            DetachedKvSet::Paged(p) => {
+                assert!(p.clone_eligible());
+                pool.clone_detached_paged_prefix(p, adoptable)
+            }
+            DetachedKvSet::Dense(_) => panic!("expected a paged set"),
+        })
+        .expect("entry live")
+        .expect("clone must succeed for the floored whole-entry match");
+    let seq_b = pool.adopt_paged(&model, clone).expect("adopt clone");
+    let got = {
+        let caches = pool.get_caches_mut(seq_b).unwrap();
+        prefill_and_decode(&model, caches, &request[adoptable..], adoptable as i32)
+    };
+    assert_eq!(
+        got, cold,
+        "unaligned whole-entry continuation must decode identically to cold"
+    );
+
+    // Entry survived the whole-entry borrow.
+    assert!(
+        entry
+            .with_detached(|set| matches!(set, DetachedKvSet::Paged(_)))
+            .unwrap_or(false)
+    );
+}
