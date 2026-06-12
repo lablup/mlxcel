@@ -246,7 +246,7 @@ fn main() {
     } else {
         println!(
             "  -> graph-only WHT exceeds 5% budget. Consider custom Metal \
-             kernel (see references/turboquant_plus llama.cpp half4 butterfly).",
+             kernel (see turboquant_plus llama.cpp half4 butterfly).",
         );
     }
 }

@@ -5,6 +5,8 @@ The implementation is experimental in the sense that quality and speed vary by
 model family, cache mode, hardware, and server path. Use the default FP16 cache
 unless you have measured the target model and workload.
 
+The TurboQuant algorithms (PolarQuant rotation, Lloyd-Max codebooks, layer-aware V protection, sparse-V dequant) are a Rust port of [turboquant_plus](https://github.com/TheTom/turboquant_plus), Copyright 2026 Tom Turney, licensed under the Apache License 2.0. See the top-level [NOTICE](../NOTICE) file for the attribution carried forward under Apache-2.0 Section 4(d).
+
 Implementation entry points:
 
 - CLI flags: `src/cli/turbo_args.rs`

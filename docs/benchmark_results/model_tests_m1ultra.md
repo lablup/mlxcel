@@ -601,7 +601,7 @@ and `turbo4-asym` decode are well below the M5 gates on M1 Ultra, while
 keep their FP16 representation and only the hot tail is packed.
 
 The decode regression is consistent with the L2-cache wall documented in
-`references/turboquant_plus/`. The fused Sparse-V Metal kernel that lands
+`turboquant_plus/`. The fused Sparse-V Metal kernel that lands
  targets the per-thread skip path inside the SDPA inner loop and is
 expected to recover most of the M5 decode budget; the M1/M2 ceiling stays
 limited by L2 bandwidth and is documented but not gated.

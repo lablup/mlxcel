@@ -237,10 +237,11 @@ For security vulnerabilities, see [`SECURITY.md`](SECURITY.md) — do **not** fi
 
 ## License
 
-Apache License 2.0 unless otherwise noted — see [LICENSE](LICENSE).
+Apache License 2.0 unless otherwise noted, see [LICENSE](LICENSE). Third-party attributions carried forward under Apache-2.0 Section 4(d) are listed in [NOTICE](NOTICE).
 
 ## Acknowledgments
 
 - [MLX](https://github.com/ml-explore/mlx) — Apple's machine learning framework
 - [mlx-lm](https://github.com/ml-explore/mlx-lm) and [mlx-vlm](https://github.com/Blaizzy/mlx-vlm) — Python projects that guide model-family compatibility
 - [MLX Community](https://huggingface.co/mlx-community) — pre-converted MLX model checkpoints
+- [turboquant_plus](https://github.com/TheTom/turboquant_plus): TurboQuant KV cache compression algorithms ported in `src/lib/mlxcel-core/src/cache/turbo/` (Apache-2.0, Copyright 2026 Tom Turney). See [NOTICE](NOTICE).

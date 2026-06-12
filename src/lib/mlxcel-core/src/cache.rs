@@ -65,7 +65,7 @@
 //! `slice(keys, 0, offset)` for K and `concat(dequant(v_packed), hot_V)` for
 //! V. The K side has no per-step concat — that was the dominant residual
 //! cost vs FP16 mode (~7 ms/step at 4 K context). See
-//! `references/turboquant_plus/README.md` §"MLX Framework Port" for the
+//! `turboquant_plus/README.md` §"MLX Framework Port" for the
 //! original architecture.
 //!
 //! Setting `MLXCEL_TURBO4_DELEGATED_FP16_FAST_PATH=1` switches this mode to a
@@ -594,7 +594,7 @@ impl KVCache {
     /// and the speed benchmarks. Production callers should leave the default
     /// [`turbo::DELEGATED_HOT_THRESHOLD`] in place; tuning this changes the
     /// fold cadence and therefore the speed/quality trade-off documented in
-    /// `references/turboquant_plus/README.md`. Setting `threshold <= 0` is
+    /// `turboquant_plus/README.md`. Setting `threshold <= 0` is
     /// rejected so the fold path stays well-defined.
     pub fn set_hot_threshold(&mut self, threshold: i32) {
         if threshold > 0 {

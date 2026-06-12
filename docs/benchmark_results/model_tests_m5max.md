@@ -714,7 +714,7 @@ per-token per-simdgroup scan (4–8× fewer scans on M5 Max for D=128 / D=256).
 
 #### Post- TurboQuant+ delegated FP16 working-set experiment (4K)
 
-Follow-up on 2026-05-07 after comparing `references/turboquant_plus`: the MLX
+Follow-up on 2026-05-07 after comparing `turboquant_plus`: the MLX
 delegated KVCache keeps FP16 K/V in an internal native cache and routes decode
 through native SDPA, while packed storage is compacted outside the hot path.
 mlxcel now has an opt-in analogue via
