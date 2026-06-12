@@ -1240,6 +1240,12 @@ fn write_prefill_presizes_pool_in_one_step_for_multi_chunk_span() {
     let expected_bytes = 2 * expected_capacity_rows * block_size * (H as usize) * (D as usize) * 4;
     assert_eq!(pool.pool_tensor_bytes(), expected_bytes);
 
+    // The regression #224 fixes: presize allocates the pool at the final size
+    // directly, so NO slab-copy growth happened. The old incremental path
+    // converged to the same 128 rows via three grow_pool reallocations, so
+    // this assertion (not the final capacity above) is what pins presize.
+    assert_eq!(pool.pool_grow_events(), 0);
+
     // Round-trip stays byte-identical to the dense reference.
     let (gk, gv) = pool
         .gather_visible(&state, 0)
@@ -1272,6 +1278,10 @@ fn write_prefill_after_presize_grows_incrementally_and_round_trips() {
     pool.write_prefill(&mut state, 0, &k2, &v2).unwrap();
     assert!(pool.pool_tensor_bytes() > bytes_after_first);
     assert_eq!(state.layer(0).unwrap().len, (first + second) as usize);
+
+    // The second span needed 40 more rows past the presized 32: exactly one
+    // grow_pool reallocation (32 -> 64), not one per 32-row chunk.
+    assert_eq!(pool.pool_grow_events(), 1);
 
     let total = first + second;
     let (gk, gv) = pool

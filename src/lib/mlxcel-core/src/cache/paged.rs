@@ -461,6 +461,11 @@ pub struct PagedBlockPool {
     /// evicts against; the scheduler sets it from the configured / estimated KV
     /// byte budget divided by the per-block byte size.
     block_budget: Option<usize>,
+    /// Number of [`Self::grow_pool`] reallocations that actually grew a slab
+    /// (across all layers). Each one copies an entire layer tensor, so this is
+    /// the observable cost #224's presize exists to avoid; tests pin it and
+    /// observability can surface it.
+    grow_events: u64,
 }
 
 /// Number of physical block rows the pool tensor grows by when a freshly
@@ -494,7 +499,15 @@ impl PagedBlockPool {
             free_rows: vec![Vec::new(); num_layers],
             next_row: vec![0; num_layers],
             block_budget: None,
+            grow_events: 0,
         }
+    }
+
+    /// Number of slab-copy pool growths since construction (see
+    /// [`Self::grow_pool`]). A long prefill should presize instead of
+    /// accumulating these.
+    pub fn pool_grow_events(&self) -> u64 {
+        self.grow_events
     }
 
     pub fn layout(&self) -> &PagedKvLayout {
@@ -1256,7 +1269,7 @@ impl PagedBlockPool {
         if minted == 0 {
             return Ok(());
         }
-        let target = self.next_row[layer_idx] + minted;
+        let target = self.next_row[layer_idx].saturating_add(minted);
         match self.pool_meta[layer_idx] {
             Some(meta) if target <= meta.capacity_blocks => Ok(()),
             Some(_) => self.grow_pool(layer_idx, target),
@@ -1698,6 +1711,7 @@ impl PagedBlockPool {
             capacity_blocks: new_capacity,
             ..meta
         });
+        self.grow_events += 1;
         // Materialize the grown copies immediately. The old slabs then return
         // to the MLX buffer cache before the next layer grows, so a
         // multi-layer growth episode transiently holds one layer's old+new
