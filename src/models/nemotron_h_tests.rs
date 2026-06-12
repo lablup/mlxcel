@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use super::{NemotronHConfig, NemotronLayerCache, NemotronMambaCache};
-use mlxcel_core::layers::KVCache;
+use mlxcel_core::{dtype, generate::ModelStateSnapshot, layers::KVCache};
 
 // ---------------------------------------------------------------------------
 // NemotronMambaCache state management
@@ -36,6 +36,66 @@ fn mamba_cache_default_matches_new() {
     assert!(b.conv_state.is_none());
     assert!(a.ssm_state.is_none());
     assert!(b.ssm_state.is_none());
+}
+
+#[test]
+fn mamba_cache_snapshot_restore_round_trips_state_shapes() {
+    let mut cache = NemotronMambaCache::new();
+    cache.conv_state = Some(mlxcel_core::zeros(&[1, 3, 8], dtype::FLOAT32));
+    cache.ssm_state = Some(mlxcel_core::zeros(&[1, 2, 4, 8], dtype::FLOAT32));
+
+    let mut snapshot = ModelStateSnapshot::new("nemotron_h", 13);
+    cache.snapshot_into(&mut snapshot, "layer2.mamba");
+
+    let mut restored = NemotronMambaCache::new();
+    restored.restore_from(&snapshot, "layer2.mamba");
+
+    let conv = restored
+        .conv_state
+        .as_ref()
+        .and_then(|a| a.as_ref())
+        .expect("conv_state restored");
+    let ssm = restored
+        .ssm_state
+        .as_ref()
+        .and_then(|a| a.as_ref())
+        .expect("ssm_state restored");
+    assert_eq!(mlxcel_core::array_shape(conv), vec![1, 3, 8]);
+    assert_eq!(mlxcel_core::array_shape(ssm), vec![1, 2, 4, 8]);
+}
+
+#[test]
+fn attention_layer_snapshot_restore_round_trips_kv_state() {
+    let mut kv = KVCache::new();
+    kv.keys = Some(mlxcel_core::zeros(&[1, 2, 13, 4], dtype::FLOAT32));
+    kv.values = Some(mlxcel_core::zeros(&[1, 2, 13, 4], dtype::FLOAT32));
+    kv.offset = 13;
+    let cache = NemotronLayerCache::Attention(kv);
+
+    let mut snapshot = ModelStateSnapshot::new("nemotron_h", 13);
+    cache.snapshot_into(&mut snapshot, "layer0");
+
+    let mut restored = NemotronLayerCache::Attention(KVCache::new());
+    restored.restore_from(&snapshot, "layer0");
+
+    match restored {
+        NemotronLayerCache::Attention(kv) => {
+            let keys = kv
+                .keys
+                .as_ref()
+                .and_then(|a| a.as_ref())
+                .expect("keys restored");
+            let values = kv
+                .values
+                .as_ref()
+                .and_then(|a| a.as_ref())
+                .expect("values restored");
+            assert_eq!(kv.offset, 13);
+            assert_eq!(mlxcel_core::array_shape(keys), vec![1, 2, 13, 4]);
+            assert_eq!(mlxcel_core::array_shape(values), vec![1, 2, 13, 4]);
+        }
+        NemotronLayerCache::Mamba(_) => panic!("restored wrong cache variant"),
+    }
 }
 
 // ---------------------------------------------------------------------------

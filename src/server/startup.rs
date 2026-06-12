@@ -1687,11 +1687,14 @@ pub async fn start_server(mut startup: ServerStartupConfig) -> Result<()> {
             capacity_bytes = config.prompt_cache.capacity_bytes,
             max_entries = config.prompt_cache.max_entries,
             ttl_seconds = config.prompt_cache.ttl.as_secs(),
+            snapshot_capacity_bytes = config.prompt_cache.snapshot_capacity_bytes,
+            snapshot_max_entries = config.prompt_cache.snapshot_max_entries,
+            snapshot_ttl_seconds = config.prompt_cache.snapshot_ttl.as_secs(),
             min_prefix_tokens = config.prompt_cache.min_prefix_tokens,
             apc_enabled = config.prompt_cache.apc.enabled,
             apc_block_size = config.prompt_cache.apc.block_size,
             apc_hash = %config.prompt_cache.apc.hash,
-            "Prompt-prefix KV cache store enabled (+ APC)"
+            "Prompt-prefix cache store enabled (+ APC, snapshots)"
         );
         Some(store)
     } else {

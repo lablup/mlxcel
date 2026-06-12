@@ -47,6 +47,35 @@ impl GatedDeltaCache {
     pub fn advance(&mut self, step: i32) {
         self.offset += step;
     }
+
+    pub fn snapshot_into(
+        &self,
+        snapshot: &mut mlxcel_core::generate::ModelStateSnapshot,
+        prefix: &str,
+    ) {
+        super::recurrent_snapshot::push_optional(
+            snapshot,
+            format!("{prefix}.conv_state"),
+            &self.conv_state,
+        );
+        super::recurrent_snapshot::push_optional(
+            snapshot,
+            format!("{prefix}.state_cache"),
+            &self.state_cache,
+        );
+    }
+
+    pub fn restore_from(
+        &mut self,
+        snapshot: &mlxcel_core::generate::ModelStateSnapshot,
+        prefix: &str,
+    ) {
+        self.conv_state =
+            super::recurrent_snapshot::restore_optional(snapshot, format!("{prefix}.conv_state"));
+        self.state_cache =
+            super::recurrent_snapshot::restore_optional(snapshot, format!("{prefix}.state_cache"));
+        self.offset = snapshot.token_len() as i32;
+    }
 }
 
 impl Default for GatedDeltaCache {

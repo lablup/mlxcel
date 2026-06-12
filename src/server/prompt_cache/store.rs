@@ -32,7 +32,7 @@ use mlxcel_core::cache::DetachedPagedCacheSet;
 
 use super::apc_lookup::{ApcStoreStats, apc_consistent_prefix_len};
 use super::block_hash::{ApcBlockHash, BlockHashChain};
-use super::entry::{CacheEntry, DetachedKvSet, DetachedKvSetHolder};
+use super::entry::{CacheEntry, DetachedKvSet, DetachedKvSetHolder, ModelSnapshotEntry};
 use super::key::{PromptCacheKey, PromptCacheKeyDigest};
 use super::metrics::{NoopPromptCacheMetrics, PromptCacheMetrics};
 use super::policy::{PromptCacheConfig, PromptCacheStats};
@@ -51,6 +51,12 @@ pub(super) struct EntrySlot {
     sessionless: SessionlessBucketKey,
 }
 
+pub(super) struct SnapshotSlot {
+    pub(super) entry: Arc<ModelSnapshotEntry>,
+    pub(super) bucket: BucketKey,
+    sessionless: SessionlessBucketKey,
+}
+
 struct Inner {
     config: PromptCacheConfig,
     // Primary map: digest -> entry.
@@ -61,13 +67,24 @@ struct Inner {
     // matched depth. Cross-session reuse is handled at candidate-scoring
     // time inside `lookup_longest_prefix`.
     tries: HashMap<SessionlessBucketKey, RadixTrie>,
+    // Exact-prefix recurrent/model-owned snapshots. These are deliberately
+    // separate from `entries`/`tries`: SSM state cannot be truncated or shared
+    // by radix blocks, so lookup scans whole stored prefixes only.
+    snapshots: HashMap<PromptCacheKeyDigest, SnapshotSlot>,
     total_bytes: usize,
+    snapshot_bytes: usize,
     inserts: u64,
     rejections_oversized: u64,
     lookups: u64,
     hits: u64,
     evictions_lru: u64,
     evictions_ttl: u64,
+    snapshot_inserts: u64,
+    snapshot_rejections_oversized: u64,
+    snapshot_lookups: u64,
+    snapshot_hits: u64,
+    snapshot_evictions_lru: u64,
+    snapshot_evictions_ttl: u64,
     /// Paged detached sets that an eviction or rejection path removed from
     /// the store but could not release: returning a paged set's pool block
     /// pins requires a `CachePool` handle, which the store does not hold.
@@ -83,13 +100,21 @@ impl Inner {
             config,
             entries: HashMap::new(),
             tries: HashMap::new(),
+            snapshots: HashMap::new(),
             total_bytes: 0,
+            snapshot_bytes: 0,
             inserts: 0,
             rejections_oversized: 0,
             lookups: 0,
             hits: 0,
             evictions_lru: 0,
             evictions_ttl: 0,
+            snapshot_inserts: 0,
+            snapshot_rejections_oversized: 0,
+            snapshot_lookups: 0,
+            snapshot_hits: 0,
+            snapshot_evictions_lru: 0,
+            snapshot_evictions_ttl: 0,
             pending_paged_releases: Vec::new(),
         }
     }
@@ -112,14 +137,22 @@ impl Inner {
 
     fn stats(&self) -> PromptCacheStats {
         PromptCacheStats {
-            entries: self.entries.len(),
-            bytes: self.total_bytes,
+            entries: self.entries.len() + self.snapshots.len(),
+            bytes: self.total_bytes + self.snapshot_bytes,
             inserts: self.inserts,
             rejections_oversized: self.rejections_oversized,
             lookups: self.lookups,
             hits: self.hits,
             evictions_lru: self.evictions_lru,
             evictions_ttl: self.evictions_ttl,
+            snapshot_entries: self.snapshots.len(),
+            snapshot_bytes: self.snapshot_bytes,
+            snapshot_inserts: self.snapshot_inserts,
+            snapshot_rejections_oversized: self.snapshot_rejections_oversized,
+            snapshot_lookups: self.snapshot_lookups,
+            snapshot_hits: self.snapshot_hits,
+            snapshot_evictions_lru: self.snapshot_evictions_lru,
+            snapshot_evictions_ttl: self.snapshot_evictions_ttl,
         }
     }
 
@@ -148,6 +181,15 @@ impl Inner {
         Some((slot.bucket, slot.entry))
     }
 
+    fn remove_snapshot(
+        &mut self,
+        digest: &PromptCacheKeyDigest,
+    ) -> Option<(BucketKey, Arc<ModelSnapshotEntry>)> {
+        let slot = self.snapshots.remove(digest)?;
+        self.snapshot_bytes = self.snapshot_bytes.saturating_sub(slot.entry.size_bytes);
+        Some((slot.bucket, slot.entry))
+    }
+
     /// Sweep every entry that has been idle for longer than `config.ttl`.
     /// Returns `(bytes_freed, evicted_count)`.
     fn sweep_ttl(&mut self, now: Instant) -> (usize, usize) {
@@ -169,6 +211,28 @@ impl Inner {
         }
         let count = stale.len();
         self.evictions_ttl = self.evictions_ttl.saturating_add(count as u64);
+        (bytes, count)
+    }
+
+    fn sweep_snapshot_ttl(&mut self, now: Instant) -> (usize, usize) {
+        if self.config.snapshot_ttl.is_zero() || self.snapshots.is_empty() {
+            return (0, 0);
+        }
+        let ttl = self.config.snapshot_ttl;
+        let stale: Vec<PromptCacheKeyDigest> = self
+            .snapshots
+            .iter()
+            .filter(|(_, slot)| now.duration_since(slot.entry.last_used()) >= ttl)
+            .map(|(d, _)| *d)
+            .collect();
+        let mut bytes = 0;
+        for digest in &stale {
+            if let Some((_, entry)) = self.remove_snapshot(digest) {
+                bytes += entry.size_bytes;
+            }
+        }
+        let count = stale.len();
+        self.snapshot_evictions_ttl = self.snapshot_evictions_ttl.saturating_add(count as u64);
         (bytes, count)
     }
 
@@ -219,6 +283,24 @@ impl Inner {
         }
     }
 
+    fn evict_oldest_snapshot(&mut self) -> usize {
+        let oldest = self
+            .snapshots
+            .iter()
+            .min_by_key(|(_, slot)| slot.entry.last_used())
+            .map(|(d, _)| *d);
+        match oldest {
+            Some(digest) => match self.remove_snapshot(&digest) {
+                Some((_, entry)) => {
+                    self.snapshot_evictions_lru = self.snapshot_evictions_lru.saturating_add(1);
+                    entry.size_bytes
+                }
+                None => 0,
+            },
+            None => 0,
+        }
+    }
+
     /// Enforce both caps: max_entries, then capacity_bytes. Returns the
     /// number of bytes freed.
     fn enforce_caps(&mut self, metrics: &dyn PromptCacheMetrics) -> usize {
@@ -237,6 +319,27 @@ impl Inner {
                 break;
             }
             metrics.record_evict_lru(n);
+            freed += n;
+        }
+        freed
+    }
+
+    fn enforce_snapshot_caps(&mut self, metrics: &dyn PromptCacheMetrics) -> usize {
+        let mut freed = 0;
+        while self.snapshots.len() > self.config.snapshot_max_entries {
+            let n = self.evict_oldest_snapshot();
+            if n == 0 {
+                break;
+            }
+            metrics.record_snapshot_evict_lru(n);
+            freed += n;
+        }
+        while self.snapshot_bytes > self.config.snapshot_capacity_bytes {
+            let n = self.evict_oldest_snapshot();
+            if n == 0 {
+                break;
+            }
+            metrics.record_snapshot_evict_lru(n);
             freed += n;
         }
         freed
@@ -295,7 +398,10 @@ impl PromptCacheStore {
 
     /// Number of entries currently stored.
     pub fn len(&self) -> usize {
-        self.inner.read().map(|g| g.entries.len()).unwrap_or(0)
+        self.inner
+            .read()
+            .map(|g| g.entries.len() + g.snapshots.len())
+            .unwrap_or(0)
     }
 
     /// Whether the store is empty.
@@ -305,7 +411,10 @@ impl PromptCacheStore {
 
     /// Current cumulative byte footprint of all entries.
     pub fn bytes(&self) -> usize {
-        self.inner.read().map(|g| g.total_bytes).unwrap_or(0)
+        self.inner
+            .read()
+            .map(|g| g.total_bytes + g.snapshot_bytes)
+            .unwrap_or(0)
     }
 
     /// Capacity in bytes as configured. Does not change at runtime.
@@ -518,6 +627,69 @@ impl PromptCacheStore {
         Ok(())
     }
 
+    /// Insert an exact-prefix recurrent/model-owned state snapshot.
+    ///
+    /// Snapshot entries are keyed by the same request identity dimensions as
+    /// detached KV entries, but they live in a separate bucket with independent
+    /// LRU / TTL limits. Lookups only restore whole stored prefixes; no radix
+    /// truncation or APC block adoption is attempted for recurrent state.
+    pub fn insert_snapshot(
+        &self,
+        key: &PromptCacheKey<'_>,
+        entry: ModelSnapshotEntry,
+    ) -> Result<(), InsertError> {
+        let digest = key.digest();
+        let entry_bytes = entry.size_bytes;
+        let bucket = BucketKey::from_key(key);
+        let sessionless = SessionlessBucketKey::from_key(key);
+
+        let mut guard = self.inner.write().expect("prompt cache inner lock");
+        if !guard.config.is_enabled() {
+            return Err(InsertError::Disabled);
+        }
+        if key.effective_prefix_len() < guard.config.min_prefix_tokens {
+            return Err(InsertError::PrefixTooShort {
+                got: key.effective_prefix_len(),
+                min_required: guard.config.min_prefix_tokens,
+            });
+        }
+        if entry_bytes > guard.config.snapshot_capacity_bytes {
+            guard.snapshot_rejections_oversized =
+                guard.snapshot_rejections_oversized.saturating_add(1);
+            let metrics = Arc::clone(&self.metrics);
+            drop(guard);
+            metrics.record_reject_oversized(entry_bytes);
+            return Err(InsertError::OversizedEntry {
+                entry_bytes,
+                capacity_bytes: self
+                    .inner
+                    .read()
+                    .map(|g| g.config.snapshot_capacity_bytes)
+                    .unwrap_or(0),
+            });
+        }
+
+        if guard.remove_snapshot(&digest).is_some() {
+            guard.snapshot_evictions_lru = guard.snapshot_evictions_lru.saturating_add(1);
+        }
+
+        guard.snapshot_bytes = guard.snapshot_bytes.saturating_add(entry_bytes);
+        guard.snapshots.insert(
+            digest,
+            SnapshotSlot {
+                entry: Arc::new(entry),
+                bucket,
+                sessionless,
+            },
+        );
+        guard.snapshot_inserts = guard.snapshot_inserts.saturating_add(1);
+
+        let metrics = Arc::clone(&self.metrics);
+        metrics.record_snapshot_insert(entry_bytes);
+        guard.enforce_snapshot_caps(metrics.as_ref());
+        Ok(())
+    }
+
     /// Find the best cached entry whose stored token prefix forms the
     /// longest common prefix of `tokens` and is reusable under `key`.
     ///
@@ -706,6 +878,102 @@ impl PromptCacheStore {
         entry.map(|e| (e, matched_len))
     }
 
+    /// Find the longest exact stored snapshot prefix for `tokens`.
+    ///
+    /// Unlike [`Self::lookup_longest_prefix`], this path does not surface
+    /// partial/radix/APC candidates. A snapshot is reusable only when its whole
+    /// token vector is a prefix of the incoming request and the session bucket
+    /// matches exactly. That preserves the recurrent-state invariant: a full
+    /// SSM / linear-attention state cannot be truncated to an arbitrary earlier
+    /// token boundary.
+    pub fn lookup_snapshot_prefix(
+        &self,
+        key: &PromptCacheKey<'_>,
+        tokens: &[i32],
+    ) -> Option<(Arc<ModelSnapshotEntry>, usize)> {
+        {
+            let now = Instant::now();
+            let mut guard = self.inner.write().expect("prompt cache inner lock");
+            if !guard.config.is_enabled() {
+                return None;
+            }
+            let (freed, count) = guard.sweep_snapshot_ttl(now);
+            if let Some(per_entry) = freed.checked_div(count) {
+                let metrics = Arc::clone(&self.metrics);
+                for _ in 0..count {
+                    metrics.record_snapshot_evict_ttl(per_entry);
+                }
+            }
+        }
+
+        let sessionless = SessionlessBucketKey::from_key(key);
+        let best = {
+            let guard = self.inner.read().expect("prompt cache inner lock");
+            let min_len = guard.config.min_prefix_tokens;
+            let mut best: Option<(PromptCacheKeyDigest, usize, Instant)> = None;
+            for (digest, slot) in &guard.snapshots {
+                if slot.sessionless != sessionless {
+                    continue;
+                }
+                let same_session = match (&slot.bucket.session_key, key.session_key) {
+                    (Some(a), Some(b)) => a.as_str() == b,
+                    (None, None) => true,
+                    _ => false,
+                };
+                if !same_session {
+                    continue;
+                }
+                let len = slot.entry.tokens.len();
+                if len < min_len || len > tokens.len() {
+                    continue;
+                }
+                if slot.entry.tokens.as_slice() != &tokens[..len] {
+                    continue;
+                }
+                let last_used = slot.entry.last_used();
+                let replace = match best {
+                    None => true,
+                    Some((_, best_len, best_used)) => {
+                        len > best_len || (len == best_len && last_used > best_used)
+                    }
+                };
+                if replace {
+                    best = Some((*digest, len, last_used));
+                }
+            }
+            best
+        };
+
+        let (entry, matched_len) = {
+            let mut guard = self.inner.write().expect("prompt cache inner lock");
+            guard.snapshot_lookups = guard.snapshot_lookups.saturating_add(1);
+            match best {
+                Some((digest, matched, _)) => {
+                    let entry = match guard.snapshots.get(&digest) {
+                        Some(slot) => Arc::clone(&slot.entry),
+                        None => {
+                            drop(guard);
+                            let metrics = Arc::clone(&self.metrics);
+                            metrics.record_snapshot_lookup(false, 0);
+                            return None;
+                        }
+                    };
+                    guard.snapshot_hits = guard.snapshot_hits.saturating_add(1);
+                    entry.touch();
+                    (Some(entry), matched)
+                }
+                None => (None, 0),
+            }
+        };
+
+        let metrics = Arc::clone(&self.metrics);
+        match &entry {
+            Some(_) => metrics.record_snapshot_lookup(true, matched_len),
+            None => metrics.record_snapshot_lookup(false, 0),
+        }
+        entry.map(|e| (e, matched_len))
+    }
+
     /// Account a lookup miss and return `None`. Factored out so the
     /// two-tier fast-path `return` sites don't duplicate the metric /
     /// counter bookkeeping.
@@ -736,7 +1004,17 @@ impl PromptCacheStore {
         }
         let metrics = Arc::clone(&self.metrics);
         let cap_freed = guard.enforce_caps(metrics.as_ref());
-        drained_freed + ttl_freed + cap_freed
+        let now = Instant::now();
+        let (snapshot_ttl_freed, snapshot_ttl_count) = guard.sweep_snapshot_ttl(now);
+        if let Some(per_entry) = snapshot_ttl_freed.checked_div(snapshot_ttl_count) {
+            let metrics = Arc::clone(&self.metrics);
+            for _ in 0..snapshot_ttl_count {
+                metrics.record_snapshot_evict_ttl(per_entry);
+            }
+        }
+        let metrics = Arc::clone(&self.metrics);
+        let snapshot_cap_freed = guard.enforce_snapshot_caps(metrics.as_ref());
+        drained_freed + ttl_freed + cap_freed + snapshot_ttl_freed + snapshot_cap_freed
     }
 
     /// Evict the single least-recently-used entry on demand, returning the
@@ -762,7 +1040,9 @@ impl PromptCacheStore {
         let mut guard = self.inner.write().expect("prompt cache inner lock");
         guard.entries.clear();
         guard.tries.clear();
+        guard.snapshots.clear();
         guard.total_bytes = 0;
+        guard.snapshot_bytes = 0;
     }
 }
 

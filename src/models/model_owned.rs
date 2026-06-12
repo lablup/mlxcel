@@ -44,6 +44,15 @@ impl<T> ModelOwnedSequenceState<T> {
         self.sequences.borrow_mut().insert(seq_id, state);
     }
 
+    pub(crate) fn with_sequence_state_ref<R>(
+        &self,
+        seq_id: SequenceId,
+        f: impl FnOnce(&[T]) -> R,
+    ) -> Option<R> {
+        let sequences = self.sequences.borrow();
+        sequences.get(&seq_id).map(|state| f(state.as_slice()))
+    }
+
     pub(crate) fn with_sequence_state<R>(
         &self,
         seq_id: Option<SequenceId>,

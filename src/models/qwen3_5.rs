@@ -2594,6 +2594,10 @@ impl LanguageModel for Qwen35Model {
         true
     }
 
+    fn supports_snapshot_reuse(&self) -> bool {
+        true
+    }
+
     fn prepare_sequence_state(&self, seq_id: SequenceId) {
         self.sequence_state
             .prepare_sequence_state(seq_id, self.make_internal_caches());
@@ -2615,6 +2619,41 @@ impl LanguageModel for Qwen35Model {
         // drop the per-sequence MRoPE entry alongside the
         // cache state so the map cannot grow as sequences cycle through.
         self.release_mrope_sequence(seq_id);
+    }
+
+    fn snapshot_sequence_state(
+        &self,
+        seq_id: SequenceId,
+        token_len: usize,
+    ) -> Option<mlxcel_core::generate::ModelStateSnapshot> {
+        self.sequence_state
+            .with_sequence_state_ref(seq_id, |state| {
+                let mut snapshot =
+                    mlxcel_core::generate::ModelStateSnapshot::new("qwen3_5", token_len);
+                for (idx, cache) in state.iter().enumerate() {
+                    cache.snapshot_into(&mut snapshot, &format!("layer{idx}"));
+                }
+                snapshot
+            })
+    }
+
+    fn restore_sequence_state(
+        &self,
+        seq_id: SequenceId,
+        snapshot: &mlxcel_core::generate::ModelStateSnapshot,
+    ) -> Result<(), String> {
+        if snapshot.family() != "qwen3_5" {
+            return Err(format!(
+                "cannot restore {} snapshot into Qwen 3.5",
+                snapshot.family()
+            ));
+        }
+        let mut state = self.make_internal_caches();
+        for (idx, cache) in state.iter_mut().enumerate() {
+            cache.restore_from(snapshot, &format!("layer{idx}"));
+        }
+        self.sequence_state.replace_sequence_state(seq_id, state);
+        Ok(())
     }
 
     fn forward_with_sequence_id(

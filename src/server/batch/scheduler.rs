@@ -62,7 +62,9 @@ use crate::server::model_provider::model_worker::{
 };
 use crate::server::model_provider::{GenerateEvent, ModelRequest};
 use crate::server::prompt_cache::key::PromptCacheKey;
-use crate::server::prompt_cache::{CacheEntry, DetachedKvSet, PromptCacheStore};
+use crate::server::prompt_cache::{
+    CacheEntry, DetachedKvSet, ModelSnapshotEntry, PromptCacheStore,
+};
 use crate::server::state::BatchMetrics;
 use crate::server::thinking_budget::{
     ThinkingBudget, ThinkingDecision, ThinkingState, ThinkingTokenIds,
@@ -1117,10 +1119,12 @@ impl BatchScheduler {
     /// Attach the shared prompt-prefix KV cache store
     ///
     /// When `Some(..)`, the scheduler:
-    /// * Looks up a longest-prefix match on each new request and calls
-    ///   [`CachePool::adopt`] on hit to skip re-prefill of the shared prefix.
-    /// * Donates the sequence's full cache back to the store on a healthy
-    ///   finish (normal stop / length / cancelled without error).
+    /// * Looks up either a longest-prefix KV match or an exact-prefix
+    ///   recurrent-state snapshot on each new request, then adopts/restores on
+    ///   hit to skip re-prefill of the shared prefix.
+    /// * Donates the sequence's full KV cache or model-owned snapshot back to
+    ///   the store on a healthy finish (normal stop / length / cancelled
+    ///   without error).
     /// * Never donates back on OOM, transition errors, or
     ///   `Finished(FinishReason::Error(..))`.
     ///
@@ -1216,6 +1220,47 @@ impl BatchScheduler {
 
         let store = self.prompt_cache.as_ref()?.clone();
         let key = Self::compose_prompt_cache_key(ctx, tokens);
+        if self.model.supports_snapshot_reuse()
+            && let Some((snapshot_entry, matched_len)) = store.lookup_snapshot_prefix(&key, tokens)
+        {
+            let seq_id = match self.allocate_sequence_state() {
+                Ok(id) => id,
+                Err(err) => {
+                    tracing::warn!("Cache pool allocation failed during snapshot restore: {err}");
+                    return None;
+                }
+            };
+            let restore = snapshot_entry
+                .with_snapshot(|snapshot| self.model.restore_sequence_state(seq_id, snapshot));
+            match restore {
+                Ok(()) => {
+                    tracing::debug!(
+                        seq_id = %seq_id,
+                        matched = matched_len,
+                        total = tokens.len(),
+                        "prompt-cache snapshot hit: restored {matched_len}/{} tokens",
+                        tokens.len()
+                    );
+                    self.batch_observability
+                        .record_prompt_cache_hit(matched_len);
+                    self.batch_metrics
+                        .record_prompt_cache_snapshot_hit(matched_len);
+                    if let Some(ref store) = self.prompt_cache {
+                        self.batch_metrics
+                            .update_prompt_cache_gauges(store.bytes(), store.len());
+                    }
+                    return Some((seq_id, matched_len));
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        seq_id = %seq_id,
+                        "prompt-cache snapshot restore failed ({err}); falling back to cold prefill"
+                    );
+                    self.release_sequence_caches(seq_id);
+                    return None;
+                }
+            }
+        }
         let (entry, matched_len) = store.lookup_longest_prefix(&key, tokens)?;
         // #124 step c: multimodal sharing requires the matched prefix to cover
         // the ENTIRE stored entry. A partial (e.g. APC block-clamped) match
@@ -1488,8 +1533,9 @@ impl BatchScheduler {
     /// [`CachePool::detach`] (→ [`DetachedKvSet::Dense`]) and paged via
     /// [`CachePool::detach_paged`] (→ [`DetachedKvSet::Paged`], which pins the
     /// prefix's physical pool blocks so a later `adopt_paged` can share them).
-    /// `ModelOwned` sequences carry no detachable cross-request KV and are
-    /// skipped.
+    /// `ModelOwned` sequences carry no detachable cross-request KV; families
+    /// that opt into snapshot reuse donate a copied model-owned snapshot, while
+    /// the rest are skipped.
     fn donate_finished_sequence_cache(
         &mut self,
         seq_id: SequenceId,
@@ -1511,24 +1557,80 @@ impl BatchScheduler {
             None => return,
         };
 
+        // Tokens stored against both KV entries and recurrent snapshots are
+        // the full prompt + generated tail, so the next turn can restore the
+        // exact previous conversation prefix and prefill only the appended
+        // user turn.
+        let mut tokens = Vec::with_capacity(prompt_tokens.len() + generated_tokens.len());
+        tokens.extend_from_slice(prompt_tokens);
+        tokens.extend_from_slice(generated_tokens);
+
+        // Families with model-owned recurrent or linear-attention state opt
+        // into exact-prefix snapshots explicitly. Check this capability before
+        // consulting the allocated storage backend: under the paged decode
+        // override these families may still carry a shadow `PagedKvCache`
+        // placeholder even though the real state lives in
+        // `ModelOwnedSequenceState` and cannot be detached as KV blocks.
+        if self.model.supports_snapshot_reuse() {
+            let store = match self.prompt_cache.as_ref() {
+                Some(s) => s.clone(),
+                None => return,
+            };
+            if tokens.len() < store.min_prefix_tokens() {
+                return;
+            }
+            let snapshot = match self.model.snapshot_sequence_state(seq_id, tokens.len()) {
+                Some(s) if !s.is_empty() => s,
+                Some(_) => {
+                    tracing::debug!(
+                        seq_id = %seq_id,
+                        token_len = tokens.len(),
+                        "prompt-cache snapshot donate skipped: captured snapshot was empty"
+                    );
+                    return;
+                }
+                None => {
+                    tracing::debug!(
+                        seq_id = %seq_id,
+                        token_len = tokens.len(),
+                        "prompt-cache snapshot donate skipped: no model-owned state for sequence"
+                    );
+                    return;
+                }
+            };
+            let entry = ModelSnapshotEntry::new(tokens, snapshot);
+            let key_tokens = entry.tokens.clone();
+            let key = Self::compose_prompt_cache_key(&ctx, &key_tokens);
+            match store.insert_snapshot(&key, entry) {
+                Ok(()) => {
+                    tracing::debug!(
+                        seq_id = %seq_id,
+                        token_len = key_tokens.len(),
+                        bytes = store.stats().snapshot_bytes,
+                        "prompt-cache snapshot inserted"
+                    );
+                    self.batch_observability.record_prompt_cache_insert();
+                    self.batch_metrics
+                        .update_prompt_cache_gauges(store.bytes(), store.len());
+                }
+                Err(err) => {
+                    tracing::debug!("prompt-cache snapshot insert skipped: {err}");
+                    self.batch_observability.record_prompt_cache_insert_reject();
+                }
+            }
+            return;
+        }
+
         let backend = self
             .cache_pool
             .get_mut(seq_id)
             .map(|s| s.backend)
             .unwrap_or(SequenceStateBackend::ModelOwned);
-        // `ModelOwned` families (heterogeneous attention+recurrent caches, e.g.
-        // Qwen 3.5 / Gemma 4) carry no detachable cross-request KV. Skip before
-        // building the token vector so the burst donate stays a cheap no-op.
+
+        // Other `ModelOwned` families carry no detachable cross-request KV.
         if backend == SequenceStateBackend::ModelOwned {
             return;
         }
-
-        // Tokens stored against the entry are the full prompt + generated
-        // tail, so the next turn's `prompt + new user turn` can match at
-        // least up through the previous assistant reply.
-        let mut tokens = Vec::with_capacity(prompt_tokens.len() + generated_tokens.len());
-        tokens.extend_from_slice(prompt_tokens);
-        tokens.extend_from_slice(generated_tokens);
 
         let store = match self.prompt_cache.as_ref() {
             Some(s) => s.clone(),
@@ -2828,17 +2930,13 @@ impl BatchScheduler {
                     // `donate_finished_sequence_cache` per row BEFORE
                     // the `remove`/`release` — symmetric with the B=1
                     // arm and the classic `finalize_completed` path.
-                    // The donate helper is hard-gated on a dense
-                    // KV-cache backend; both batched-eligible model
-                    // families today — Gemma 4 (MTP) and Qwen 3.5
-                    // (DFlash) — are `SequenceStateBackend::ModelOwned`
-                    // with heterogeneous attention+recurrent caches, so
-                    // the donate is a guarded no-op for them, identical
-                    // to the B=1 arm's no-op for those same families.
-                    // Wiring it in removes the structural asymmetry
-                    // between the two burst arms and future-proofs the
-                    // batched path for any dense-KV-cache model that
-                    // later becomes batched-burst-eligible. Error /
+                    // The donate helper chooses the model's supported
+                    // cross-request reuse path: exact-prefix snapshots for
+                    // opt-in model-owned families, otherwise detached KV for
+                    // dense/paged families. Wiring it in removes the structural
+                    // asymmetry between the two burst arms and future-proofs
+                    // the batched path for any reusable family that later
+                    // becomes batched-burst-eligible. Error /
                     // transition-failure rows carry an empty/`false`
                     // payload so the donate is a guaranteed no-op on
                     // those tainted-cache rows.
@@ -2923,18 +3021,11 @@ impl BatchScheduler {
                     // needs the cache slot still attached. This mirrors
                     // the classic path's `finalize_completed`, keeping
                     // the burst and classic donate paths symmetric. The
-                    // donate helper detaches dense and paged backends but
-                    // skips `SequenceStateBackend::ModelOwned`; the two
-                    // burst-eligible model families today — Qwen 3.5
-                    // (DFlash) and Gemma 4 (MTP) — are both `ModelOwned`
-                    // with heterogeneous attention+recurrent caches that
-                    // the detach handoff cannot represent, so the donate is
-                    // a guarded no-op for them — identical to the classic
-                    // path's no-op for those same families. Wiring it in
-                    // removes the structural asymmetry between the two
-                    // paths and future-proofs the burst for any
-                    // dense/paged-KV model that later becomes
-                    // burst-eligible.
+                    // donate helper snapshots opt-in model-owned families and
+                    // detaches dense/paged KV for the regular backends. Wiring
+                    // it in removes the structural asymmetry between the two
+                    // paths and future-proofs the burst for any reusable model
+                    // family that later becomes burst-eligible.
                     self.donate_finished_sequence_cache(
                         seq_id,
                         &prompt_tokens,

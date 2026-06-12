@@ -57,6 +57,12 @@ pub struct PromptCacheConfig {
     /// is `false` (the default) no extra work is done and behaviour is
     /// identical to the earlier store.
     pub apc: ApcConfig,
+    /// Byte budget dedicated to exact-prefix recurrent/model-owned snapshots.
+    pub snapshot_capacity_bytes: usize,
+    /// Maximum live exact-prefix snapshot entries.
+    pub snapshot_max_entries: usize,
+    /// Time-to-live for snapshot entries since their last successful restore.
+    pub snapshot_ttl: Duration,
 }
 
 /// Automatic Prefix Caching configuration knobs.
@@ -111,6 +117,14 @@ impl PromptCacheConfig {
     pub const DEFAULT_TTL_SECONDS: u64 = 3600;
     /// Default minimum prompt-prefix length before caching kicks in.
     pub const DEFAULT_MIN_PREFIX_TOKENS: usize = 32;
+    /// Default snapshot capacity: snapshots are smaller than KV blocks, so
+    /// reserve one quarter of the KV budget for them by default.
+    pub const DEFAULT_SNAPSHOT_CAPACITY_BYTES: usize = Self::DEFAULT_CAPACITY_BYTES / 4;
+    /// Default snapshot entry count: exact-prefix snapshots are smaller, so
+    /// keep more of them than detached KV entries.
+    pub const DEFAULT_SNAPSHOT_MAX_ENTRIES: usize = Self::DEFAULT_MAX_ENTRIES * 4;
+    /// Default snapshot TTL: allow longer multi-turn chat reuse than KV blocks.
+    pub const DEFAULT_SNAPSHOT_TTL_SECONDS: u64 = Self::DEFAULT_TTL_SECONDS * 2;
 
     /// Build a fully-specified config. Prefer [`PromptCacheConfig::default`]
     /// unless a caller has a reason to deviate.
@@ -128,6 +142,9 @@ impl PromptCacheConfig {
             ttl,
             min_prefix_tokens,
             apc: ApcConfig::default(),
+            snapshot_capacity_bytes: Self::DEFAULT_SNAPSHOT_CAPACITY_BYTES,
+            snapshot_max_entries: Self::DEFAULT_SNAPSHOT_MAX_ENTRIES,
+            snapshot_ttl: Duration::from_secs(Self::DEFAULT_SNAPSHOT_TTL_SECONDS),
         }
     }
 
@@ -136,6 +153,20 @@ impl PromptCacheConfig {
     #[must_use]
     pub fn with_apc(mut self, apc: ApcConfig) -> Self {
         self.apc = apc;
+        self
+    }
+
+    /// Builder-style: override exact-prefix snapshot limits.
+    #[must_use]
+    pub fn with_snapshot_limits(
+        mut self,
+        capacity_bytes: usize,
+        max_entries: usize,
+        ttl: Duration,
+    ) -> Self {
+        self.snapshot_capacity_bytes = capacity_bytes;
+        self.snapshot_max_entries = max_entries;
+        self.snapshot_ttl = ttl;
         self
     }
 
@@ -169,6 +200,9 @@ impl Default for PromptCacheConfig {
             ttl: Duration::from_secs(Self::DEFAULT_TTL_SECONDS),
             min_prefix_tokens: Self::DEFAULT_MIN_PREFIX_TOKENS,
             apc: ApcConfig::default(),
+            snapshot_capacity_bytes: Self::DEFAULT_SNAPSHOT_CAPACITY_BYTES,
+            snapshot_max_entries: Self::DEFAULT_SNAPSHOT_MAX_ENTRIES,
+            snapshot_ttl: Duration::from_secs(Self::DEFAULT_SNAPSHOT_TTL_SECONDS),
         }
     }
 }
@@ -198,13 +232,29 @@ pub struct PromptCacheStats {
     pub evictions_lru: u64,
     /// Lifetime count of entries evicted because the TTL expired.
     pub evictions_ttl: u64,
+    /// Number of live exact-prefix recurrent/model-owned snapshots.
+    pub snapshot_entries: usize,
+    /// Sum of bytes across live snapshot entries.
+    pub snapshot_bytes: usize,
+    /// Lifetime count of successful snapshot inserts.
+    pub snapshot_inserts: u64,
+    /// Lifetime count of snapshot inserts rejected as oversized.
+    pub snapshot_rejections_oversized: u64,
+    /// Lifetime count of snapshot lookups.
+    pub snapshot_lookups: u64,
+    /// Lifetime count of snapshot lookup hits.
+    pub snapshot_hits: u64,
+    /// Lifetime count of snapshot LRU evictions.
+    pub snapshot_evictions_lru: u64,
+    /// Lifetime count of snapshot TTL evictions.
+    pub snapshot_evictions_ttl: u64,
 }
 
 impl fmt::Display for PromptCacheStats {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "entries={} bytes={} inserts={} hits={}/{} lru_evict={} ttl_evict={} reject_oversized={}",
+            "entries={} bytes={} inserts={} hits={}/{} lru_evict={} ttl_evict={} reject_oversized={} snapshot_entries={} snapshot_bytes={} snapshot_hits={}/{}",
             self.entries,
             self.bytes,
             self.inserts,
@@ -213,6 +263,10 @@ impl fmt::Display for PromptCacheStats {
             self.evictions_lru,
             self.evictions_ttl,
             self.rejections_oversized,
+            self.snapshot_entries,
+            self.snapshot_bytes,
+            self.snapshot_hits,
+            self.snapshot_lookups,
         )
     }
 }

@@ -164,6 +164,51 @@ impl Qwen3NextCache {
             Qwen3NextCache::Linear(gd) => gd.offset,
         }
     }
+
+    pub fn snapshot_into(
+        &self,
+        snapshot: &mut mlxcel_core::generate::ModelStateSnapshot,
+        prefix: &str,
+    ) {
+        match self {
+            Qwen3NextCache::Attention(kv) => {
+                super::recurrent_snapshot::push_optional(
+                    snapshot,
+                    format!("{prefix}.attention.keys"),
+                    &kv.keys,
+                );
+                super::recurrent_snapshot::push_optional(
+                    snapshot,
+                    format!("{prefix}.attention.values"),
+                    &kv.values,
+                );
+            }
+            Qwen3NextCache::Linear(gd) => gd.snapshot_into(snapshot, &format!("{prefix}.linear")),
+        }
+    }
+
+    pub fn restore_from(
+        &mut self,
+        snapshot: &mlxcel_core::generate::ModelStateSnapshot,
+        prefix: &str,
+    ) {
+        match self {
+            Qwen3NextCache::Attention(kv) => {
+                kv.keys = super::recurrent_snapshot::restore_optional(
+                    snapshot,
+                    format!("{prefix}.attention.keys"),
+                );
+                kv.values = super::recurrent_snapshot::restore_optional(
+                    snapshot,
+                    format!("{prefix}.attention.values"),
+                );
+                kv.offset = snapshot.token_len() as i32;
+            }
+            Qwen3NextCache::Linear(gd) => {
+                gd.restore_from(snapshot, &format!("{prefix}.linear"));
+            }
+        }
+    }
 }
 
 // GatedDeltaNet - Linear Attention Layer.
@@ -1473,5 +1518,79 @@ impl LanguageModel for Qwen3NextModel {
 
     fn eos_token_ids(&self) -> Vec<i32> {
         vec![151645] // Qwen3 EOS token
+    }
+}
+
+#[cfg(test)]
+mod cache_tests {
+    use super::Qwen3NextCache;
+    use crate::models::gated_delta::GatedDeltaCache;
+    use mlxcel_core::{dtype, generate::ModelStateSnapshot, layers::KVCache};
+
+    #[test]
+    fn qwen3_next_attention_cache_snapshot_restore_round_trips_kv_state() {
+        let mut kv = KVCache::new();
+        kv.keys = Some(mlxcel_core::zeros(&[1, 2, 23, 4], dtype::FLOAT32));
+        kv.values = Some(mlxcel_core::zeros(&[1, 2, 23, 4], dtype::FLOAT32));
+        kv.offset = 23;
+        let cache = Qwen3NextCache::Attention(kv);
+
+        let mut snapshot = ModelStateSnapshot::new("qwen3_5", 23);
+        cache.snapshot_into(&mut snapshot, "layer0");
+
+        let mut restored = Qwen3NextCache::Attention(KVCache::new());
+        restored.restore_from(&snapshot, "layer0");
+
+        match restored {
+            Qwen3NextCache::Attention(kv) => {
+                let keys = kv
+                    .keys
+                    .as_ref()
+                    .and_then(|a| a.as_ref())
+                    .expect("keys restored");
+                let values = kv
+                    .values
+                    .as_ref()
+                    .and_then(|a| a.as_ref())
+                    .expect("values restored");
+                assert_eq!(kv.offset, 23);
+                assert_eq!(mlxcel_core::array_shape(keys), vec![1, 2, 23, 4]);
+                assert_eq!(mlxcel_core::array_shape(values), vec![1, 2, 23, 4]);
+            }
+            Qwen3NextCache::Linear(_) => panic!("restored wrong cache variant"),
+        }
+    }
+
+    #[test]
+    fn qwen3_next_linear_cache_snapshot_restore_round_trips_state() {
+        let mut gd = GatedDeltaCache::new();
+        gd.conv_state = Some(mlxcel_core::zeros(&[1, 3, 8], dtype::FLOAT32));
+        gd.state_cache = Some(mlxcel_core::zeros(&[1, 2, 4, 8], dtype::FLOAT32));
+        let cache = Qwen3NextCache::Linear(gd);
+
+        let mut snapshot = ModelStateSnapshot::new("qwen3_5", 29);
+        cache.snapshot_into(&mut snapshot, "layer1");
+
+        let mut restored = Qwen3NextCache::Linear(GatedDeltaCache::new());
+        restored.restore_from(&snapshot, "layer1");
+
+        match restored {
+            Qwen3NextCache::Linear(gd) => {
+                let conv = gd
+                    .conv_state
+                    .as_ref()
+                    .and_then(|a| a.as_ref())
+                    .expect("conv_state restored");
+                let state = gd
+                    .state_cache
+                    .as_ref()
+                    .and_then(|a| a.as_ref())
+                    .expect("state_cache restored");
+                assert_eq!(gd.offset, 29);
+                assert_eq!(mlxcel_core::array_shape(conv), vec![1, 3, 8]);
+                assert_eq!(mlxcel_core::array_shape(state), vec![1, 2, 4, 8]);
+            }
+            Qwen3NextCache::Attention(_) => panic!("restored wrong cache variant"),
+        }
     }
 }

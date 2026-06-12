@@ -14,7 +14,7 @@
 
 //! Regression tests for Jamba conv_state contiguous fix.
 
-use mlxcel_core::utils::slice_axis;
+use mlxcel_core::{dtype, generate::ModelStateSnapshot, layers::KVCache, utils::slice_axis};
 
 /// Simulate 50 decode steps of conv-state update and assert the stored shape
 /// stays at [B=1, k-1=3, channels=8] regardless of how many steps we run.
@@ -71,4 +71,64 @@ fn jamba_cache_default_has_no_state() {
     let cache = super::JambaMambaCache::default();
     assert!(cache.conv_state.is_none());
     assert!(cache.ssm_state.is_none());
+}
+
+#[test]
+fn jamba_mamba_cache_snapshot_restore_round_trips_state_shapes() {
+    let mut cache = super::JambaMambaCache::new();
+    cache.conv_state = Some(mlxcel_core::zeros(&[1, 3, 8], dtype::FLOAT32));
+    cache.ssm_state = Some(mlxcel_core::zeros(&[1, 2, 4, 8], dtype::FLOAT32));
+
+    let mut snapshot = ModelStateSnapshot::new("jamba", 11);
+    cache.snapshot_into(&mut snapshot, "layer1.mamba");
+
+    let mut restored = super::JambaMambaCache::new();
+    restored.restore_from(&snapshot, "layer1.mamba");
+
+    let conv = restored
+        .conv_state
+        .as_ref()
+        .and_then(|a| a.as_ref())
+        .expect("conv_state restored");
+    let ssm = restored
+        .ssm_state
+        .as_ref()
+        .and_then(|a| a.as_ref())
+        .expect("ssm_state restored");
+    assert_eq!(mlxcel_core::array_shape(conv), vec![1, 3, 8]);
+    assert_eq!(mlxcel_core::array_shape(ssm), vec![1, 2, 4, 8]);
+}
+
+#[test]
+fn jamba_attention_layer_snapshot_restore_round_trips_kv_state() {
+    let mut kv = KVCache::new();
+    kv.keys = Some(mlxcel_core::zeros(&[1, 2, 11, 4], dtype::FLOAT32));
+    kv.values = Some(mlxcel_core::zeros(&[1, 2, 11, 4], dtype::FLOAT32));
+    kv.offset = 11;
+    let cache = super::JambaLayerCache::Attention(kv);
+
+    let mut snapshot = ModelStateSnapshot::new("jamba", 11);
+    cache.snapshot_into(&mut snapshot, "layer0");
+
+    let mut restored = super::JambaLayerCache::Attention(KVCache::new());
+    restored.restore_from(&snapshot, "layer0");
+
+    match restored {
+        super::JambaLayerCache::Attention(kv) => {
+            let keys = kv
+                .keys
+                .as_ref()
+                .and_then(|a| a.as_ref())
+                .expect("keys restored");
+            let values = kv
+                .values
+                .as_ref()
+                .and_then(|a| a.as_ref())
+                .expect("values restored");
+            assert_eq!(kv.offset, 11);
+            assert_eq!(mlxcel_core::array_shape(keys), vec![1, 2, 11, 4]);
+            assert_eq!(mlxcel_core::array_shape(values), vec![1, 2, 11, 4]);
+        }
+        super::JambaLayerCache::Mamba(_) => panic!("restored wrong cache variant"),
+    }
 }

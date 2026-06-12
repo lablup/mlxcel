@@ -21,6 +21,7 @@ mod gemma3n_helpers;
 mod llama4_helpers;
 mod model_owned;
 pub(crate) mod qwen_mrope_state;
+mod recurrent_snapshot;
 mod sanitize;
 
 // Shared modules

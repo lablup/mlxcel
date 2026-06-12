@@ -89,6 +89,43 @@ impl Rwkv7Cache {
             ffn_cache: None,
         }
     }
+
+    pub fn snapshot_into(
+        &self,
+        snapshot: &mut mlxcel_core::generate::ModelStateSnapshot,
+        prefix: &str,
+    ) {
+        super::recurrent_snapshot::push_optional(
+            snapshot,
+            format!("{prefix}.token_shift_cache"),
+            &self.token_shift_cache,
+        );
+        super::recurrent_snapshot::push_optional(
+            snapshot,
+            format!("{prefix}.state_cache"),
+            &self.state_cache,
+        );
+        super::recurrent_snapshot::push_optional(
+            snapshot,
+            format!("{prefix}.ffn_cache"),
+            &self.ffn_cache,
+        );
+    }
+
+    pub fn restore_from(
+        &mut self,
+        snapshot: &mlxcel_core::generate::ModelStateSnapshot,
+        prefix: &str,
+    ) {
+        self.token_shift_cache = super::recurrent_snapshot::restore_optional(
+            snapshot,
+            format!("{prefix}.token_shift_cache"),
+        );
+        self.state_cache =
+            super::recurrent_snapshot::restore_optional(snapshot, format!("{prefix}.state_cache"));
+        self.ffn_cache =
+            super::recurrent_snapshot::restore_optional(snapshot, format!("{prefix}.ffn_cache"));
+    }
 }
 
 impl Default for Rwkv7Cache {
@@ -1000,5 +1037,44 @@ impl LanguageModel for Rwkv7 {
     fn eos_token_ids(&self) -> Vec<i32> {
         // Default EOS token ID, should be loaded from tokenizer config
         vec![0]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Rwkv7Cache;
+    use mlxcel_core::{dtype, generate::ModelStateSnapshot};
+
+    #[test]
+    fn rwkv7_cache_snapshot_restore_round_trips_state_shapes() {
+        let mut cache = Rwkv7Cache::new();
+        cache.token_shift_cache = Some(mlxcel_core::zeros(&[1, 8], dtype::FLOAT32));
+        cache.state_cache = Some(mlxcel_core::zeros(&[1, 2, 4, 8], dtype::FLOAT32));
+        cache.ffn_cache = Some(mlxcel_core::zeros(&[1, 8], dtype::FLOAT32));
+
+        let mut snapshot = ModelStateSnapshot::new("rwkv7", 19);
+        cache.snapshot_into(&mut snapshot, "layer0");
+
+        let mut restored = Rwkv7Cache::new();
+        restored.restore_from(&snapshot, "layer0");
+
+        let token_shift = restored
+            .token_shift_cache
+            .as_ref()
+            .and_then(|a| a.as_ref())
+            .expect("token_shift_cache restored");
+        let state = restored
+            .state_cache
+            .as_ref()
+            .and_then(|a| a.as_ref())
+            .expect("state_cache restored");
+        let ffn = restored
+            .ffn_cache
+            .as_ref()
+            .and_then(|a| a.as_ref())
+            .expect("ffn_cache restored");
+        assert_eq!(mlxcel_core::array_shape(token_shift), vec![1, 8]);
+        assert_eq!(mlxcel_core::array_shape(state), vec![1, 2, 4, 8]);
+        assert_eq!(mlxcel_core::array_shape(ffn), vec![1, 8]);
     }
 }

@@ -104,6 +104,15 @@ pub struct BatchMetrics {
     pub prompt_cache_evictions_lru_total: AtomicU64,
     pub prompt_cache_evictions_ttl_total: AtomicU64,
     pub prompt_cache_evictions_capacity_total: AtomicU64,
+    /// Cumulative exact-prefix snapshot hits.
+    pub prompt_cache_snapshot_hits_total: AtomicU64,
+    /// Cumulative exact-prefix snapshot misses.
+    pub prompt_cache_snapshot_misses_total: AtomicU64,
+    /// Cumulative tokens reused through exact-prefix snapshots.
+    pub prompt_cache_snapshot_tokens_reused_total: AtomicU64,
+    /// Cumulative snapshot evictions.
+    pub prompt_cache_snapshot_evictions_lru_total: AtomicU64,
+    pub prompt_cache_snapshot_evictions_ttl_total: AtomicU64,
     /// Current byte footprint of all live prompt-cache entries (gauge).
     pub prompt_cache_bytes: AtomicU64,
     /// Current number of live prompt-cache entries (gauge).
@@ -130,6 +139,11 @@ impl BatchMetrics {
             prompt_cache_evictions_lru_total: AtomicU64::new(0),
             prompt_cache_evictions_ttl_total: AtomicU64::new(0),
             prompt_cache_evictions_capacity_total: AtomicU64::new(0),
+            prompt_cache_snapshot_hits_total: AtomicU64::new(0),
+            prompt_cache_snapshot_misses_total: AtomicU64::new(0),
+            prompt_cache_snapshot_tokens_reused_total: AtomicU64::new(0),
+            prompt_cache_snapshot_evictions_lru_total: AtomicU64::new(0),
+            prompt_cache_snapshot_evictions_ttl_total: AtomicU64::new(0),
             prompt_cache_bytes: AtomicU64::new(0),
             prompt_cache_entries: AtomicU64::new(0),
         }
@@ -206,6 +220,28 @@ impl BatchMetrics {
             .fetch_add(1, Ordering::Relaxed);
     }
 
+    pub fn record_prompt_cache_snapshot_hit(&self, matched_tokens: usize) {
+        self.prompt_cache_snapshot_hits_total
+            .fetch_add(1, Ordering::Relaxed);
+        self.prompt_cache_snapshot_tokens_reused_total
+            .fetch_add(matched_tokens as u64, Ordering::Relaxed);
+    }
+
+    pub fn record_prompt_cache_snapshot_miss(&self) {
+        self.prompt_cache_snapshot_misses_total
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_prompt_cache_snapshot_eviction_lru(&self) {
+        self.prompt_cache_snapshot_evictions_lru_total
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_prompt_cache_snapshot_eviction_ttl(&self) {
+        self.prompt_cache_snapshot_evictions_ttl_total
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
     /// Overwrite the prompt-cache byte and entry gauges.
     ///
     /// Called after every insert or eviction so `/metrics` always reflects
@@ -261,6 +297,22 @@ impl PromptCacheMetrics for BatchMetricsCacheAdapter {
 
     fn record_evict_ttl(&self, _bytes: usize) {
         self.inner.record_prompt_cache_eviction_ttl();
+    }
+
+    fn record_snapshot_lookup(&self, hit: bool, matched_len: usize) {
+        if hit {
+            self.inner.record_prompt_cache_snapshot_hit(matched_len);
+        } else {
+            self.inner.record_prompt_cache_snapshot_miss();
+        }
+    }
+
+    fn record_snapshot_evict_lru(&self, _bytes: usize) {
+        self.inner.record_prompt_cache_snapshot_eviction_lru();
+    }
+
+    fn record_snapshot_evict_ttl(&self, _bytes: usize) {
+        self.inner.record_prompt_cache_snapshot_eviction_ttl();
     }
 }
 

@@ -37,6 +37,16 @@ savings, the decode throughput, and `--kv-cache-budget` are documented in
 byte-identical to the dense backend; it is the storage backend the disaggregated
 roles below build on.
 
+Recurrent and hybrid SSM / linear-attention families cannot safely reuse
+arbitrary KV blocks, so they keep the hybrid-SSM/APC exclusion. Families that
+opt into `supports_snapshot_reuse()` (Mamba, Mamba2, Jamba, Nemotron-H, and
+Qwen 3.5 / Qwen3-Next variants) instead use a separate exact-prefix snapshot
+bucket: on a healthy finish the scheduler copies the model-owned state, and on
+the next turn it restores that state only when the stored token vector is a
+whole prefix of the incoming request in the same session. The unmatched suffix
+is still prefilled normally, with no recurrent state truncation or
+cross-session sharing.
+
 ## Disaggregated serving
 
 Prefill is compute-bound and decode is memory-bound, so a deployment can run them
@@ -104,8 +114,10 @@ curl http://127.0.0.1:8300/v1/chat/completions \
 ### Scope and limitations
 
 - Pool-backed Fp16 families only (the dense-natural backends such as qwen3 and
-  llama3). Model-owned-state families (gemma3, llama4, qwen3.5) and recurrent or
-  hybrid SSM models are excluded from the paged handoff.
+  llama3). Model-owned-state families and recurrent/hybrid SSM models are
+  excluded from the paged handoff; the exact-prefix snapshot cache described
+  above is a single-node prompt-cache optimization and is not serialized across
+  disaggregated prefill/decode roles.
 - Text-only. The router serves `/v1/chat/completions`; multimodal requests are
   rejected by the router.
 - The router does not yet apply the chat stream filter that the single-node chat

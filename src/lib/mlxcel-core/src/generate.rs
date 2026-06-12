@@ -39,6 +39,101 @@ use crate::streams::{install_thread_local_default_stream, new_thread_local_gener
 use crate::utils::{align_to_na_tile, create_padded_prefill_mask};
 use cxx::UniquePtr;
 
+/// One named tensor captured from a model-owned recurrent sequence state.
+///
+/// The prompt-cache snapshot path stores these tensors outside the model and
+/// later asks the same model family to restore them into a fresh sequence id.
+/// The names are intentionally model-defined: the core runtime only provides a
+/// small typed container and byte accounting, while each model validates the
+/// fields it understands during restore.
+pub struct ModelStateTensor {
+    name: String,
+    array: UniquePtr<MlxArray>,
+}
+
+impl ModelStateTensor {
+    /// Capture a materialized copy of `array` under `name`.
+    pub fn new(name: impl Into<String>, array: &MlxArray) -> Self {
+        Self {
+            name: name.into(),
+            array: ffi::copy(array),
+        }
+    }
+
+    /// Field name chosen by the model snapshot implementation.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Borrow the captured tensor.
+    pub fn array(&self) -> &MlxArray {
+        self.array
+            .as_ref()
+            .expect("model-state snapshot tensor must not be null")
+    }
+
+    /// Byte footprint of this captured tensor.
+    pub fn nbytes(&self) -> usize {
+        ffi::array_nbytes(self.array())
+    }
+}
+
+/// Inert copy of a model-owned recurrent/cache state at an exact token prefix.
+///
+/// This is deliberately separate from detached KV-cache entries: recurrent
+/// SSM / linear-attention families cannot safely share arbitrary KV blocks, so
+/// the server parks a full-state snapshot and restores copies only on an exact
+/// stored-prefix hit.
+pub struct ModelStateSnapshot {
+    family: String,
+    token_len: usize,
+    tensors: Vec<ModelStateTensor>,
+}
+
+impl ModelStateSnapshot {
+    /// Build an empty snapshot for `family` at `token_len` tokens.
+    pub fn new(family: impl Into<String>, token_len: usize) -> Self {
+        Self {
+            family: family.into(),
+            token_len,
+            tensors: Vec::new(),
+        }
+    }
+
+    /// Model-family tag used to reject accidental cross-family restores.
+    pub fn family(&self) -> &str {
+        &self.family
+    }
+
+    /// Number of tokens represented by this exact-prefix state.
+    pub fn token_len(&self) -> usize {
+        self.token_len
+    }
+
+    /// Append a named tensor copy.
+    pub fn push_tensor(&mut self, name: impl Into<String>, array: &MlxArray) {
+        self.tensors.push(ModelStateTensor::new(name, array));
+    }
+
+    /// Borrow the named tensor if present.
+    pub fn tensor(&self, name: &str) -> Option<&MlxArray> {
+        self.tensors
+            .iter()
+            .find(|t| t.name() == name)
+            .map(ModelStateTensor::array)
+    }
+
+    /// Whether no tensor payload was captured.
+    pub fn is_empty(&self) -> bool {
+        self.tensors.is_empty()
+    }
+
+    /// Sum of all captured tensor byte footprints.
+    pub fn nbytes(&self) -> usize {
+        self.tensors.iter().map(ModelStateTensor::nbytes).sum()
+    }
+}
+
 /// Returns true when the current hardware is M5+ with a Neural Accelerator
 /// and tile-aligned prefill should be applied.
 ///
@@ -263,6 +358,35 @@ pub trait LanguageModel {
 
     /// Release model-owned/runtime sequence state by its scheduler `SequenceId`.
     fn release_sequence_state_by_id(&self, _seq_id: SequenceId) {}
+
+    /// Whether this model can donate and restore exact-prefix model-owned
+    /// state snapshots for cross-request prompt-cache reuse.
+    fn supports_snapshot_reuse(&self) -> bool {
+        false
+    }
+
+    /// Capture an exact-prefix snapshot for a scheduler-owned sequence.
+    ///
+    /// Models that return `true` from [`Self::supports_snapshot_reuse`] should
+    /// override this and return a full copy of the recurrent/model-owned state
+    /// for `seq_id`. The default keeps all existing families on the legacy
+    /// dense/paged KV-cache donation path.
+    fn snapshot_sequence_state(
+        &self,
+        _seq_id: SequenceId,
+        _token_len: usize,
+    ) -> Option<ModelStateSnapshot> {
+        None
+    }
+
+    /// Restore a previously captured exact-prefix snapshot into `seq_id`.
+    fn restore_sequence_state(
+        &self,
+        _seq_id: SequenceId,
+        _snapshot: &ModelStateSnapshot,
+    ) -> Result<(), String> {
+        Err("model does not support exact-prefix state snapshots".to_string())
+    }
 
     /// Describe how one sequence's runtime state should be allocated.
     ///

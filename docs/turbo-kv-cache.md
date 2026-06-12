@@ -148,8 +148,27 @@ triggers.
 
 Paged adopt and donate are supported for the pool-backed Fp16 families
 (the dense-natural backends such as qwen3 and llama3); model-owned-state families
-(gemma3, llama4, qwen3.5) and recurrent or hybrid SSM models keep dense or
-model-owned caches and stay out of the pool.
+and recurrent or hybrid SSM models keep dense or model-owned caches and stay out
+of the pool.
+
+### Exact-prefix snapshots for recurrent state
+
+Hybrid-SSM and linear-attention families remain excluded from block sharing:
+their recurrent hidden state cannot be reconstructed from a radix/APC token
+prefix, and it cannot be truncated to an arbitrary earlier token. For those
+families, `mlxcel-server` has an orthogonal exact-prefix snapshot bucket. Models
+that implement `supports_snapshot_reuse()` can copy their full model-owned
+state at turn end and restore it into a fresh sequence when the next request's
+tokens begin with that exact stored prefix under the same session key.
+
+The snapshot bucket has its own byte cap, entry cap, TTL, LRU counters, and
+hit/miss metrics. `GET /v1/cache/stats` reports `snapshot_*` fields, while
+`/metrics` exposes `mlxcel_prompt_cache_snapshot_hits_total`,
+`mlxcel_prompt_cache_snapshot_misses_total`,
+`mlxcel_prompt_cache_snapshot_tokens_reused_total`, and labeled snapshot
+evictions. This path is deliberately whole-prefix only: it does not participate
+in APC block matching, does not share SSM state across sessions, and does not
+modify the block-sharing carve-out for hybrid SSM families.
 
 The block pool can be bounded with `--kv-cache-budget <bytes|auto>` (env
 `MLXCEL_KV_CACHE_BUDGET`); the default is unbounded. Under a budget the scheduler

@@ -91,6 +91,26 @@ pub async fn metrics(State(state): State<AppState>) -> Response {
         .batch_metrics
         .prompt_cache_entries
         .load(Ordering::Relaxed);
+    let pc_snapshot_hits = state
+        .batch_metrics
+        .prompt_cache_snapshot_hits_total
+        .load(Ordering::Relaxed);
+    let pc_snapshot_misses = state
+        .batch_metrics
+        .prompt_cache_snapshot_misses_total
+        .load(Ordering::Relaxed);
+    let pc_snapshot_reused_tokens = state
+        .batch_metrics
+        .prompt_cache_snapshot_tokens_reused_total
+        .load(Ordering::Relaxed);
+    let pc_snapshot_evict_lru = state
+        .batch_metrics
+        .prompt_cache_snapshot_evictions_lru_total
+        .load(Ordering::Relaxed);
+    let pc_snapshot_evict_ttl = state
+        .batch_metrics
+        .prompt_cache_snapshot_evictions_ttl_total
+        .load(Ordering::Relaxed);
 
     // Batch observability counters
     let obs = state.batch_observability.snapshot();
@@ -194,7 +214,20 @@ pub async fn metrics(State(state): State<AppState>) -> Response {
          mlxcel_prompt_cache_bytes {pc_bytes}\n\
          # HELP mlxcel_prompt_cache_entries Current number of live prompt-cache entries\n\
          # TYPE mlxcel_prompt_cache_entries gauge\n\
-         mlxcel_prompt_cache_entries {pc_entries}\n",
+         mlxcel_prompt_cache_entries {pc_entries}\n\
+         # HELP mlxcel_prompt_cache_snapshot_hits_total Successful exact-prefix recurrent-state snapshot restores\n\
+         # TYPE mlxcel_prompt_cache_snapshot_hits_total counter\n\
+         mlxcel_prompt_cache_snapshot_hits_total {pc_snapshot_hits}\n\
+         # HELP mlxcel_prompt_cache_snapshot_misses_total Exact-prefix recurrent-state snapshot lookups that missed\n\
+         # TYPE mlxcel_prompt_cache_snapshot_misses_total counter\n\
+         mlxcel_prompt_cache_snapshot_misses_total {pc_snapshot_misses}\n\
+         # HELP mlxcel_prompt_cache_snapshot_tokens_reused_total Total prompt tokens reused from recurrent-state snapshots\n\
+         # TYPE mlxcel_prompt_cache_snapshot_tokens_reused_total counter\n\
+         mlxcel_prompt_cache_snapshot_tokens_reused_total {pc_snapshot_reused_tokens}\n\
+         # HELP mlxcel_prompt_cache_snapshot_evictions_total Snapshot evictions labeled by reason\n\
+         # TYPE mlxcel_prompt_cache_snapshot_evictions_total counter\n\
+         mlxcel_prompt_cache_snapshot_evictions_total{{reason=\"lru\"}} {pc_snapshot_evict_lru}\n\
+         mlxcel_prompt_cache_snapshot_evictions_total{{reason=\"ttl\"}} {pc_snapshot_evict_ttl}\n",
         gen_time_sec = gen_time_ms as f64 / 1000.0,
         seq_started = obs.sequences_started,
         seq_completed = obs.sequences_completed,
@@ -220,6 +253,11 @@ pub async fn metrics(State(state): State<AppState>) -> Response {
         pc_evict_capacity = pc_evict_capacity,
         pc_bytes = pc_bytes,
         pc_entries = pc_entries,
+        pc_snapshot_hits = pc_snapshot_hits,
+        pc_snapshot_misses = pc_snapshot_misses,
+        pc_snapshot_reused_tokens = pc_snapshot_reused_tokens,
+        pc_snapshot_evict_lru = pc_snapshot_evict_lru,
+        pc_snapshot_evict_ttl = pc_snapshot_evict_ttl,
     );
 
     let mut body = body;

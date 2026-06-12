@@ -23,6 +23,9 @@ use mlxcel_core::{MlxArray, UniquePtr, concatenate};
 use serde::Deserialize;
 use std::path::Path;
 
+use super::model_owned::ModelOwnedSequenceState;
+use super::recurrent_snapshot::{push_optional, restore_optional};
+
 /// Parse eos_token_id from config.json. Can be a single int, an array of ints, or absent.
 /// Used by: Mamba, Mamba2
 pub fn parse_eos_token_ids(value: &Option<serde_json::Value>, default: i32) -> Vec<i32> {
@@ -145,6 +148,24 @@ impl MambaCache {
             conv_state: None,
             ssm_state: None,
         }
+    }
+
+    pub fn snapshot_into(
+        &self,
+        snapshot: &mut mlxcel_core::generate::ModelStateSnapshot,
+        prefix: &str,
+    ) {
+        push_optional(snapshot, format!("{prefix}.conv_state"), &self.conv_state);
+        push_optional(snapshot, format!("{prefix}.ssm_state"), &self.ssm_state);
+    }
+
+    pub fn restore_from(
+        &mut self,
+        snapshot: &mlxcel_core::generate::ModelStateSnapshot,
+        prefix: &str,
+    ) {
+        self.conv_state = restore_optional(snapshot, format!("{prefix}.conv_state"));
+        self.ssm_state = restore_optional(snapshot, format!("{prefix}.ssm_state"));
     }
 }
 
@@ -400,7 +421,6 @@ impl ResidualBlock {
 }
 
 // Full Mamba Model.
-use std::cell::RefCell;
 
 #[allow(dead_code)]
 pub struct MambaModel {
@@ -410,7 +430,7 @@ pub struct MambaModel {
     norm_f: RMSNorm,
     lm_head: Option<UnifiedLinear>,
     /// Internal caches for LanguageModel trait compatibility
-    internal_caches: RefCell<Vec<MambaCache>>,
+    sequence_state: ModelOwnedSequenceState<MambaCache>,
 }
 
 impl MambaModel {
@@ -637,7 +657,7 @@ impl MambaModel {
             layers,
             norm_f,
             lm_head,
-            internal_caches: RefCell::new(internal_caches),
+            sequence_state: ModelOwnedSequenceState::new(internal_caches),
         })
     }
 }
@@ -651,14 +671,16 @@ impl LanguageModel for MambaModel {
         _mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
         // Mamba v1 uses internal caching (MambaCache) instead of KV cache.
-        // We use internal RefCell caches to maintain state through shared reference.
-        let mut internal = self.internal_caches.borrow_mut();
-        self.forward_with_caches(input, &mut internal)
+        // We use model-owned state to isolate scheduler sequence ids while
+        // retaining a fallback slot for CLI / benchmark paths.
+        self.sequence_state
+            .with_sequence_state(None, |internal| self.forward_with_caches(input, internal))
     }
 
     fn make_caches(&self) -> Vec<KVCache> {
-        // Reset internal caches
-        *self.internal_caches.borrow_mut() = MambaModel::make_caches(self);
+        // Reset fallback internal caches
+        self.sequence_state
+            .replace_internal(MambaModel::make_caches(self));
         // Return dummy KV caches for trait compatibility
         (0..self.config.num_hidden_layers)
             .map(|_| KVCache::new())
@@ -675,6 +697,68 @@ impl LanguageModel for MambaModel {
 
     fn supports_batching(&self) -> bool {
         false // Mamba uses internal MambaCache state, not compatible with per-sequence KV isolation
+    }
+
+    fn prepare_sequence_state(&self, seq_id: mlxcel_core::cache::SequenceId) {
+        self.sequence_state
+            .prepare_sequence_state(seq_id, MambaModel::make_caches(self));
+    }
+
+    fn release_sequence_state_by_id(&self, seq_id: mlxcel_core::cache::SequenceId) {
+        self.sequence_state.release_sequence_state(seq_id);
+    }
+
+    fn forward_with_sequence_id(
+        &self,
+        input_ids: &MlxArray,
+        seq_id: Option<mlxcel_core::cache::SequenceId>,
+        _caches: &mut [KVCache],
+        _mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        self.sequence_state.with_or_create_sequence_state(
+            seq_id,
+            || MambaModel::make_caches(self),
+            |internal| self.forward_with_caches(input_ids, internal),
+        )
+    }
+
+    fn supports_snapshot_reuse(&self) -> bool {
+        true
+    }
+
+    fn snapshot_sequence_state(
+        &self,
+        seq_id: mlxcel_core::cache::SequenceId,
+        token_len: usize,
+    ) -> Option<mlxcel_core::generate::ModelStateSnapshot> {
+        self.sequence_state
+            .with_sequence_state_ref(seq_id, |state| {
+                let mut snapshot =
+                    mlxcel_core::generate::ModelStateSnapshot::new("mamba", token_len);
+                for (idx, cache) in state.iter().enumerate() {
+                    cache.snapshot_into(&mut snapshot, &format!("layer{idx}"));
+                }
+                snapshot
+            })
+    }
+
+    fn restore_sequence_state(
+        &self,
+        seq_id: mlxcel_core::cache::SequenceId,
+        snapshot: &mlxcel_core::generate::ModelStateSnapshot,
+    ) -> Result<(), String> {
+        if snapshot.family() != "mamba" {
+            return Err(format!(
+                "cannot restore {} snapshot into Mamba",
+                snapshot.family()
+            ));
+        }
+        let mut state = MambaModel::make_caches(self);
+        for (idx, cache) in state.iter_mut().enumerate() {
+            cache.restore_from(snapshot, &format!("layer{idx}"));
+        }
+        self.sequence_state.replace_sequence_state(seq_id, state);
+        Ok(())
     }
 
     fn eos_token_ids(&self) -> Vec<i32> {

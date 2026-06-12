@@ -329,6 +329,26 @@ impl LanguageModel for LoadedModel {
         delegate_language_model!(self, release_sequence_state_by_id(seq_id))
     }
 
+    fn supports_snapshot_reuse(&self) -> bool {
+        delegate_language_model!(self, supports_snapshot_reuse())
+    }
+
+    fn snapshot_sequence_state(
+        &self,
+        seq_id: mlxcel_core::cache::SequenceId,
+        token_len: usize,
+    ) -> Option<mlxcel_core::generate::ModelStateSnapshot> {
+        delegate_language_model!(self, snapshot_sequence_state(seq_id, token_len))
+    }
+
+    fn restore_sequence_state(
+        &self,
+        seq_id: mlxcel_core::cache::SequenceId,
+        snapshot: &mlxcel_core::generate::ModelStateSnapshot,
+    ) -> Result<(), String> {
+        delegate_language_model!(self, restore_sequence_state(seq_id, snapshot))
+    }
+
     fn sequence_state_layout(&self) -> mlxcel_core::cache::SequenceStateLayout {
         delegate_language_model!(self, sequence_state_layout())
     }
