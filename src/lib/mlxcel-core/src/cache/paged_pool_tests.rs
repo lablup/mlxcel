@@ -1217,10 +1217,10 @@ fn trim_to_logical_start_empties_the_layer() {
 
 #[test]
 fn write_prefill_presizes_pool_in_one_step_for_multi_chunk_span() {
-    // 100 blocks of 4 slots = 400 tokens, spanning four 32-block grow chunks.
-    // presize_for_span must allocate the layer pool once at ceil(100/32)*32 =
-    // 128 rows instead of growing 32 -> 64 -> 96 -> 128 with a full slab copy
-    // at each step.
+    // 100 blocks of 4 slots = 400 tokens, spanning four 32-row slabs.
+    // presize_for_span must create the layer pool in one step at
+    // ceil(100/32)*32 = 128 rows (four slabs) instead of growing through
+    // intermediate capacities.
     let block_size = 4usize;
     let total = 400i32;
     let mut pool = fp16_pool(block_size, 1);
@@ -1240,10 +1240,10 @@ fn write_prefill_presizes_pool_in_one_step_for_multi_chunk_span() {
     let expected_bytes = 2 * expected_capacity_rows * block_size * (H as usize) * (D as usize) * 4;
     assert_eq!(pool.pool_tensor_bytes(), expected_bytes);
 
-    // The regression #224 fixes: presize allocates the pool at the final size
-    // directly, so NO slab-copy growth happened. The old incremental path
-    // converged to the same 128 rows via three grow_pool reallocations, so
-    // this assertion (not the final capacity above) is what pins presize.
+    // The regression #224 fixed: presize allocates the pool at the final
+    // size directly, so NO growth episode happened. The old incremental path
+    // converged to the same 128 rows via three growth steps, so this
+    // assertion (not the final capacity above) is what pins presize.
     assert_eq!(pool.pool_grow_events(), 0);
 
     // Round-trip stays byte-identical to the dense reference.
@@ -1260,8 +1260,8 @@ fn write_prefill_presizes_pool_in_one_step_for_multi_chunk_span() {
 #[test]
 fn write_prefill_after_presize_grows_incrementally_and_round_trips() {
     // First prefill presizes to 32 rows (8 blocks used). A second prefill
-    // pushing past the presized capacity must take the grow_pool path (now
-    // with eager eval) and stay byte-identical.
+    // pushing past the presized capacity must take the growth path
+    // (ensure_layer_capacity appending a slab) and stay byte-identical.
     let block_size = 4usize;
     let first = 32i32; // 8 blocks
     let second = 160i32; // 40 more blocks -> 48 total, beyond the 32-row chunk
@@ -1280,7 +1280,7 @@ fn write_prefill_after_presize_grows_incrementally_and_round_trips() {
     assert_eq!(state.layer(0).unwrap().len, (first + second) as usize);
 
     // The second span needed 40 more rows past the presized 32: exactly one
-    // grow_pool reallocation (32 -> 64), not one per 32-row chunk.
+    // growth episode (one ensure_layer_capacity call appending slabs).
     assert_eq!(pool.pool_grow_events(), 1);
 
     let total = first + second;

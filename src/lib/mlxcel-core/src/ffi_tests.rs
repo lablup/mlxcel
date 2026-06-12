@@ -613,6 +613,8 @@ fn test_fused_paged_decode_matches_gather_over_200_steps() {
 
     let mut max_rms = 0.0f32;
     let mut prev_blocks = 0usize;
+    let mut fused_steps = 0usize;
+    let mut declined_steps = 0usize;
 
     for step in 0..STEPS {
         let t = step as i32;
@@ -669,10 +671,31 @@ fn test_fused_paged_decode_matches_gather_over_200_steps() {
         let q = from_slice_f32(&q_vals, &[1, n_kv_heads, 1, head_dim]);
 
         let states: [&PagedSequenceState; 1] = [&target];
-        let fused = crate::layers::paged_decode_attention_pooled(
-            &q, &pool, &states, layer_idx, scale, true,
-        )
-        .unwrap();
+        // With chunked slabs (#235) the fused kernel serves only layers that
+        // still fit one slab; past that it declines and the pooled wrapper
+        // silently falls back to gather, which would turn this parity loop
+        // into a gather-vs-gather tautology. Pin the availability contract
+        // explicitly and compare parity only while the kernel is live.
+        let total_rows = target.layer(layer_idx).unwrap().block_ids.len()
+            + spacer.layer(layer_idx).unwrap().block_ids.len();
+        let single_slab = total_rows <= 32; // POOL_SLAB_BLOCKS
+        let fused = pool
+            .paged_decode_fused(&q, &states, layer_idx, scale)
+            .unwrap();
+        match (&fused, single_slab) {
+            (Some(_), true) | (None, false) => {}
+            (Some(_), false) => panic!(
+                "step {step}: fused kernel must decline once the layer spans multiple slabs (rows {total_rows})"
+            ),
+            (None, true) => panic!(
+                "step {step}: fused kernel must serve a single-slab layer (rows {total_rows})"
+            ),
+        }
+        let Some(fused) = fused else {
+            declined_steps += 1;
+            continue;
+        };
+        fused_steps += 1;
         let gather = crate::layers::paged_decode_attention_pooled_fallback(
             &q, &pool, &states, layer_idx, scale,
         )
@@ -689,10 +712,18 @@ fn test_fused_paged_decode_matches_gather_over_200_steps() {
     }
 
     assert!(
-        max_rms < 5e-3,
-        "max RMS {max_rms} over 200 steps exceeded 5e-3"
+        fused_steps > 0 && declined_steps > 0,
+        "the loop must exercise both the live-kernel and the declined regime \
+         (fused {fused_steps}, declined {declined_steps})"
     );
-    println!("test_fused_paged_decode_matches_gather_over_200_steps: max RMS = {max_rms:e}");
+    assert!(
+        max_rms < 5e-3,
+        "max RMS {max_rms} over {fused_steps} fused steps exceeded 5e-3"
+    );
+    println!(
+        "test_fused_paged_decode_matches_gather_over_200_steps: max RMS = {max_rms:e} \
+         ({fused_steps} fused steps, {declined_steps} declined past one slab)"
+    );
 }
 
 /// #123 fused-kernel parity under grouped-query attention (Hq > Hkv) and
