@@ -1099,7 +1099,10 @@ impl PagedBlockPool {
         let (slab_i, row_in_slab) = Self::slab_coords(row);
 
         // Reassign the row's slab with the slot update so MLX donates the
-        // buffer (in-place append, O(block)).
+        // buffer (in-place append, O(block)). The null placeholder makes the
+        // moved-out slab the buffer's sole owner for the donation; the slot
+        // is reassigned on the very next line, so the null never escapes a
+        // non-panicking path.
         let starts = [row_in_slab, slot_start as i32, 0, 0];
         let stops = [
             row_in_slab + 1,
