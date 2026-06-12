@@ -85,7 +85,7 @@ pub const V_BIT_WIDTH_3: u8 = 3;
 /// already validated `head_dim` against the supported grid before calling.
 #[inline]
 pub fn packed_bytes_per_token_3bit(head_dim: i32) -> i32 {
-    debug_assert!(
+    assert!(
         head_dim > 0 && (head_dim as usize).is_multiple_of(COORDS_PER_GROUP),
         "packed_bytes_per_token_3bit: head_dim must be a positive multiple of 8; \
          got {head_dim}"
@@ -107,14 +107,14 @@ pub fn packed_bytes_per_token_3bit(head_dim: i32) -> i32 {
 /// Used by: [`pack_3bit_per_token`] (per-row packing in the V-side quant
 /// pipeline).
 pub fn pack_3bit_indices(indices: &[u8], out: &mut [u8]) {
-    debug_assert!(
+    assert!(
         indices.len().is_multiple_of(COORDS_PER_GROUP),
         "pack_3bit_indices: index count ({}) must be a multiple of {}",
         indices.len(),
         COORDS_PER_GROUP
     );
     let n_groups = indices.len() / COORDS_PER_GROUP;
-    debug_assert_eq!(
+    assert_eq!(
         out.len(),
         n_groups * BYTES_PER_GROUP,
         "pack_3bit_indices: output buffer must be {} bytes, got {}",
@@ -145,14 +145,14 @@ pub fn pack_3bit_indices(indices: &[u8], out: &mut [u8]) {
 /// Used by: [`unpack_3bit_per_token`] (per-row unpacking on the V-side
 /// dequant path).
 pub fn unpack_3bit_indices(packed: &[u8], out: &mut [u8]) {
-    debug_assert!(
+    assert!(
         packed.len().is_multiple_of(BYTES_PER_GROUP),
         "unpack_3bit_indices: packed byte count ({}) must be a multiple of {}",
         packed.len(),
         BYTES_PER_GROUP
     );
     let n_groups = packed.len() / BYTES_PER_GROUP;
-    debug_assert_eq!(
+    assert_eq!(
         out.len(),
         n_groups * COORDS_PER_GROUP,
         "unpack_3bit_indices: output buffer must be {} bytes, got {}",
@@ -182,7 +182,7 @@ pub fn unpack_3bit_indices(packed: &[u8], out: &mut [u8]) {
 pub fn pack_3bit_per_token(indices: &[u8], head_dim: i32, total_tokens: usize) -> Vec<u8> {
     let bytes_per_token = packed_bytes_per_token_3bit(head_dim) as usize;
     let coords_per_token = head_dim as usize;
-    debug_assert_eq!(
+    assert_eq!(
         indices.len(),
         total_tokens * coords_per_token,
         "pack_3bit_per_token: index count mismatch"
@@ -209,7 +209,7 @@ pub fn pack_3bit_per_token(indices: &[u8], head_dim: i32, total_tokens: usize) -
 pub fn unpack_3bit_per_token(packed: &[u8], head_dim: i32, total_tokens: usize) -> Vec<u8> {
     let bytes_per_token = packed_bytes_per_token_3bit(head_dim) as usize;
     let coords_per_token = head_dim as usize;
-    debug_assert_eq!(
+    assert_eq!(
         packed.len(),
         total_tokens * bytes_per_token,
         "unpack_3bit_per_token: packed byte count mismatch"
@@ -249,7 +249,9 @@ mod tests {
     #[test]
     #[should_panic(expected = "must be a positive multiple of 8")]
     fn packed_bytes_rejects_non_multiple_of_8() {
-        // 7 is not a multiple of 8 → should panic in debug.
+        // 7 is not a multiple of 8 → must panic in every build profile: the
+        // contract sizes downstream packed buffers, and a release build that
+        // silently truncated (7 * 3 / 8 = 2) would mis-size them (#234).
         let _ = packed_bytes_per_token_3bit(7);
     }
 
