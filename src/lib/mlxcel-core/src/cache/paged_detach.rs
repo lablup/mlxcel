@@ -782,6 +782,156 @@ impl CachePool {
         }
     }
 
+    /// Build an adoptable copy of `set`'s first `target_tokens` WITHOUT
+    /// consuming the source (#227).
+    ///
+    /// The one-shot `take_detached` consume meant the first adopter destroyed
+    /// the stored entry: concurrent same-prefix siblings cold-prefilled, and
+    /// combined with the #225 trim a short partial match could gut a
+    /// multi-thousand-token entry. This clone leaves the source intact: the
+    /// copy references the SAME physical pool blocks, with every cloned block
+    /// retained twice (the clone's block-table allocation plus its detach-style
+    /// pin, the exact shape `detach_paged` produces), so a subsequent
+    /// [`CachePool::adopt_paged`] of the clone transfers ownership the same
+    /// way while the source keeps its own two references per block.
+    ///
+    /// `target_tokens` must be a positive multiple of the pool block size and
+    /// at most the set's length, so no partially filled tail block is shared
+    /// and the adopter's suffix re-prefill starts on a fresh block (full
+    /// shared blocks are never mutated; a fork would copy-on-write).
+    ///
+    /// Restrictions mirror [`CachePool::trim_detached_paged_to`]: Turbo4
+    /// sidecar layouts and sliding-window states are rejected, and so are
+    /// sets whose dense handles carry tensors (a dense-compat set cannot be
+    /// shallow-cloned without aliasing buffers).
+    pub fn clone_detached_paged_prefix(
+        &mut self,
+        set: &DetachedPagedCacheSet,
+        target_tokens: usize,
+    ) -> Result<DetachedPagedCacheSet, String> {
+        if set.backend != SequenceStateBackend::PagedKvCache {
+            return Err(format!(
+                "CachePool::clone_detached_paged_prefix: expected paged backend, got {:?}",
+                set.backend
+            ));
+        }
+        if set.paged_layout.is_turbo_mode() {
+            return Err(
+                "CachePool::clone_detached_paged_prefix: Turbo4 sidecar clone is not supported"
+                    .into(),
+            );
+        }
+        let block_size = set.paged_layout.block_size;
+        if block_size == 0 || target_tokens == 0 || !target_tokens.is_multiple_of(block_size) {
+            return Err(format!(
+                "CachePool::clone_detached_paged_prefix: target {target_tokens} is not a positive multiple of block size {block_size}"
+            ));
+        }
+        let seq_len = set.seq_len();
+        if target_tokens > seq_len {
+            return Err(format!(
+                "CachePool::clone_detached_paged_prefix: target {target_tokens} exceeds set length {seq_len}"
+            ));
+        }
+        if set
+            .paged_state
+            .layers
+            .iter()
+            .any(|layer| layer.logical_start != 0)
+        {
+            return Err(
+                "CachePool::clone_detached_paged_prefix: sliding-window state (logical_start > 0) is not supported"
+                    .into(),
+            );
+        }
+        if set.retained_blocks.is_none() {
+            return Err(
+                "CachePool::clone_detached_paged_prefix: source no longer owns its block pins"
+                    .into(),
+            );
+        }
+        let pool = self
+            .paged_pool
+            .as_ref()
+            .ok_or("CachePool::clone_detached_paged_prefix: no active paged pool")?
+            .clone();
+
+        // Metadata-only handle clones, re-anchored at the cloned length so a
+        // later adopt restores RoPE offsets at the adopted prefix boundary.
+        let caches: Vec<DetachedKVCache> = set
+            .caches
+            .iter()
+            .map(|h| h.pool_backed_handle_clone(target_tokens as i32))
+            .collect::<Option<Vec<_>>>()
+            .ok_or(
+                "CachePool::clone_detached_paged_prefix: dense handles carry tensors (non-pool-backed set)",
+            )?;
+
+        let keep_blocks = target_tokens / block_size;
+        let mut paged_state = PagedSequenceState::new(&set.paged_layout);
+        for (layer_idx, layer) in set.paged_state.layers.iter().enumerate() {
+            paged_state.layers[layer_idx].block_ids = layer.block_ids[..keep_blocks].to_vec();
+            paged_state.layers[layer_idx].len = target_tokens;
+        }
+        let retained: Vec<PagedBlockId> = paged_state
+            .layers
+            .iter()
+            .flat_map(|layer| layer.block_ids.iter().copied())
+            .collect();
+
+        // Pin every cloned block twice, with rollback on the first failure so
+        // a declined clone leaves the pool untouched.
+        {
+            let mut pool = pool.borrow_mut();
+            let mut pinned: Vec<PagedBlockId> = Vec::with_capacity(retained.len() * 2);
+            for &block_id in &retained {
+                for _ in 0..2 {
+                    if let Err(err) = pool.retain_block(block_id) {
+                        for &undo in pinned.iter().rev() {
+                            let _ = pool.release_block(undo);
+                        }
+                        return Err(format!(
+                            "CachePool::clone_detached_paged_prefix: failed to pin block {block_id}: {err}"
+                        ));
+                    }
+                    pinned.push(block_id);
+                }
+            }
+        }
+
+        let real_pool_bytes: Option<usize> = {
+            let pool = pool.borrow();
+            let mut total = 0usize;
+            let mut any = false;
+            for layer_idx in 0..paged_state.layers.len() {
+                if let Some(per_block) = pool.real_block_bytes(layer_idx) {
+                    total += keep_blocks * per_block;
+                    any = true;
+                }
+            }
+            any.then_some(total)
+        };
+
+        Ok(DetachedPagedCacheSet {
+            caches,
+            paged_state,
+            paged_layout: set.paged_layout.clone(),
+            backend: set.backend,
+            prompt_len: set.prompt_len.min(target_tokens),
+            current_offset: target_tokens as i32,
+            created_at: set.created_at,
+            detached_at: Instant::now(),
+            origin_seq_id: set.origin_seq_id,
+            retained_blocks: Some(retained),
+            real_pool_bytes,
+            v_packed_pages: HashMap::new(),
+            v_norms_pages: HashMap::new(),
+            k_packed_pages: HashMap::new(),
+            k_norms_pages: HashMap::new(),
+            cold_keys_pages: HashMap::new(),
+        })
+    }
+
     /// Trim a detached paged set to `target_tokens` before adoption (#225).
     ///
     /// A partial prefix match (an APC block-clamped lookup, or a request that

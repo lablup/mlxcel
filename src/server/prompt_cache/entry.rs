@@ -123,6 +123,10 @@ impl DetachedKvSetHolder {
     pub(crate) fn take(&mut self) -> Option<DetachedKvSet> {
         self.inner.take()
     }
+
+    pub(crate) fn peek(&self) -> Option<&DetachedKvSet> {
+        self.inner.as_ref()
+    }
 }
 
 // SAFETY: See the type-level doc-comment above. The detach/adopt API
@@ -219,6 +223,21 @@ impl CacheEntry {
             Ok(mut g) => g.take(),
             Err(poisoned) => poisoned.into_inner().take(),
         }
+    }
+
+    /// Run `f` against the parked set WITHOUT consuming it (#227).
+    ///
+    /// Returns `None` when the set was already taken (a drained shell).
+    /// Used by the non-consuming clone-and-pin adoption path: the closure
+    /// clones pinned block references out of a paged set while the entry
+    /// stays live in the store for concurrent siblings and deeper future
+    /// matches. The entry lock is held for the duration of `f`.
+    pub fn with_detached<R>(&self, f: impl FnOnce(&DetachedKvSet) -> R) -> Option<R> {
+        let guard = match self.detached.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        guard.peek().map(f)
     }
 
     /// Update the `last_used` timestamp. Called on every successful lookup

@@ -492,3 +492,125 @@ fn paged_partial_prefix_share_matches_cold_run_llama3() {
     };
     assert_partial_prefix_share_parity(&model, LLAMA3_DIR, "llama3");
 }
+
+// ---------------------------------------------------------------------------
+// Non-consuming clone-and-pin adoption (#227): one stored entry serves
+// multiple borrowers and survives them all.
+// ---------------------------------------------------------------------------
+
+fn assert_clone_and_pin_share_parity(model: &mlxcel::LoadedModel, label: &str) {
+    let num_layers = model.num_layers();
+    let prefix_len = PREFIX_TOKENS.len() as i32;
+
+    // Two divergent continuations of the same shared prefix.
+    let mut prompt_b = PREFIX_TOKENS.to_vec();
+    prompt_b.extend_from_slice(SUFFIX_TOKENS);
+    let mut prompt_c = PREFIX_TOKENS.to_vec();
+    prompt_c.extend_from_slice(PARTIAL_SUFFIX_TOKENS);
+
+    eprintln!("\n=== paged clone-and-pin share parity: {label} ({num_layers} layers) ===");
+
+    // Cold references.
+    let cold = |prompt: &[i32]| {
+        let mut pool = CachePool::new(2);
+        let id = pool
+            .allocate_with_layout(model, Some(scheduler_paged_layout(num_layers)))
+            .expect("cold paged allocate");
+        let caches = pool.get_caches_mut(id).unwrap();
+        prefill_and_decode(model, caches, prompt, 0)
+    };
+    let cold_b = cold(&prompt_b);
+    let cold_c = cold(&prompt_c);
+
+    // A prefills the shared prefix and donates it.
+    let mut pool = CachePool::new(8);
+    let seq_a = pool
+        .allocate_with_layout(model, Some(scheduler_paged_layout(num_layers)))
+        .expect("A paged allocate");
+    {
+        let caches = pool.get_caches_mut(seq_a).unwrap();
+        let prompt = mlxcel_core::from_slice_i32(PREFIX_TOKENS, &[1, prefix_len]);
+        let mask = mlxcel_core::utils::create_causal_mask(prefix_len, 0);
+        let logits = model.forward(&prompt, caches, Some(&mask));
+        mlxcel_core::eval(&logits);
+    }
+    let a_blocks = pool
+        .get_paged_state(seq_a)
+        .unwrap()
+        .layer(0)
+        .unwrap()
+        .block_ids
+        .clone();
+    let set_a = pool.detach_paged(seq_a).expect("A detach_paged");
+    let entry = CacheEntry::new(PREFIX_TOKENS.to_vec(), DetachedKvSet::Paged(set_a));
+
+    // The scheduler's #227 path: clone the matched prefix (floored to the
+    // pool block boundary) WITHOUT consuming the entry, adopt the clone.
+    let adoptable = (PREFIX_TOKENS.len() / BLOCK_SIZE) * BLOCK_SIZE; // 40 -> 32
+    let mut borrow = |prompt: &[i32]| -> Vec<i32> {
+        let clone = entry
+            .with_detached(|set| match set {
+                DetachedKvSet::Paged(p) => pool.clone_detached_paged_prefix(p, adoptable),
+                DetachedKvSet::Dense(_) => panic!("expected a paged set"),
+            })
+            .expect("entry must not be drained")
+            .expect("clone must succeed");
+        let seq = pool.adopt_paged(model, clone).expect("adopt clone");
+        let caches = pool.get_caches_mut(seq).unwrap();
+        let decoded = prefill_and_decode(model, caches, &prompt[adoptable..], adoptable as i32);
+        pool.release(seq);
+        decoded
+    };
+
+    let got_b = borrow(&prompt_b);
+    assert_eq!(
+        got_b, cold_b,
+        "borrower B (clone-adopted) must equal its cold run"
+    );
+    let got_c = borrow(&prompt_c);
+    assert_eq!(
+        got_c, cold_c,
+        "borrower C (clone-adopted, after B) must equal its cold run"
+    );
+
+    // The entry SURVIVED both borrowers: its set is still present and still
+    // pins the original prefix blocks.
+    let still_there = entry
+        .with_detached(|set| match set {
+            DetachedKvSet::Paged(p) => p.seq_len(),
+            DetachedKvSet::Dense(_) => 0,
+        })
+        .expect("entry must still hold its set after clone-based borrows");
+    assert_eq!(still_there, PREFIX_TOKENS.len());
+    assert!(
+        pool.paged_pool_ref().unwrap().refcount(a_blocks[0]) >= 2,
+        "the stored entry must still pin the shared prefix blocks"
+    );
+
+    // Cleanup: take and release the source set; everything returns to zero.
+    if let Some(DetachedKvSet::Paged(p)) = entry.take_detached() {
+        pool.release_detached_paged(p);
+    }
+    assert_eq!(pool.paged_pool_ref().unwrap().refcount(a_blocks[0]), 0);
+    eprintln!("OK: one stored entry served two borrowers byte-identically and survived.");
+}
+
+#[test]
+#[ignore = "loads qwen3-0.6b-4bit and runs real GPU forwards; run with --ignored"]
+fn paged_clone_and_pin_share_matches_cold_runs_qwen3() {
+    let _runtime = initialize_runtime();
+    let Some(model) = load_or_skip(QWEN3_DIR, "mlx-community/Qwen3-0.6B-4bit") else {
+        return;
+    };
+    assert_clone_and_pin_share_parity(&model, QWEN3_DIR);
+}
+
+#[test]
+#[ignore = "loads llama-3.2-1b-4bit and runs real GPU forwards; run with --ignored"]
+fn paged_clone_and_pin_share_matches_cold_runs_llama3() {
+    let _runtime = initialize_runtime();
+    let Some(model) = load_or_skip(LLAMA3_DIR, "mlx-community/Llama-3.2-1B-Instruct-4bit") else {
+        return;
+    };
+    assert_clone_and_pin_share_parity(&model, LLAMA3_DIR);
+}

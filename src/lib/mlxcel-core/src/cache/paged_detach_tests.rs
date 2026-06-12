@@ -1864,3 +1864,148 @@ fn detached_paged_set_without_pool_writes_falls_back_to_nominal_bytes() {
     assert_eq!(set.nbytes(), nominal);
     pool.release_detached_paged(set);
 }
+
+// ---------------------------------------------------------------------------
+// 14. Non-consuming clone-and-pin adoption (#227): clones share the source's
+//     physical blocks and the source survives for further borrowers.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn clone_detached_paged_prefix_shares_blocks_and_preserves_source() {
+    let n_kv_heads = 2i32;
+    let head_dim = 3i32;
+    let block_size = 4usize;
+    let layout = PagedKvLayout::uniform(
+        1,
+        block_size,
+        block_size * n_kv_heads as usize * head_dim as usize * 2,
+    )
+    .unwrap();
+    let model = PagedStubModel::new(layout.clone());
+    let mut pool = CachePool::new(8);
+
+    // Source: 12 tokens = 3 blocks of distinct values.
+    let seed = pool.allocate(&model).unwrap();
+    let k = prefill_block(1000.0, n_kv_heads, 12, head_dim);
+    let v = prefill_block(5000.0, n_kv_heads, 12, head_dim);
+    write_prefill_for(&mut pool, seed, 0, &k, &v).unwrap();
+    let source = pool.detach_paged(seed).unwrap();
+    let source_blocks = source.paged_state().layer(0).unwrap().block_ids.clone();
+    // Detached source holds 2 references per block.
+    assert_eq!(pool.paged_pool_ref().unwrap().refcount(source_blocks[0]), 2);
+
+    // Borrower 1 clones the first 8 tokens (2 blocks).
+    let clone_a = pool.clone_detached_paged_prefix(&source, 8).unwrap();
+    assert_eq!(clone_a.seq_len(), 8);
+    assert_eq!(
+        clone_a.paged_state().layer(0).unwrap().block_ids,
+        source_blocks[..2].to_vec(),
+        "the clone must reference the SAME physical blocks"
+    );
+    // Source 2 refs + clone 2 refs.
+    assert_eq!(pool.paged_pool_ref().unwrap().refcount(source_blocks[0]), 4);
+    // Source untouched.
+    assert_eq!(source.seq_len(), 12);
+    assert_eq!(
+        source.paged_state().layer(0).unwrap().block_ids,
+        source_blocks
+    );
+
+    // Borrower 2 clones the whole entry concurrently.
+    let clone_b = pool.clone_detached_paged_prefix(&source, 12).unwrap();
+    assert_eq!(pool.paged_pool_ref().unwrap().refcount(source_blocks[0]), 6);
+
+    // Adopt clone A: its detach-style pin is released, the table ref stays.
+    let seq_a = pool.adopt_paged(&model, clone_a).unwrap();
+    assert_eq!(pool.paged_pool_ref().unwrap().refcount(source_blocks[0]), 5);
+
+    // The adopted borrower appends a divergent suffix on FRESH blocks and
+    // gathers prefix + suffix byte-identically to the dense reference.
+    let suffix = prefill_block(2000.0, n_kv_heads, 6, head_dim);
+    let suffix_v = prefill_block(6000.0, n_kv_heads, 6, head_dim);
+    write_prefill_for(&mut pool, seq_a, 0, &suffix, &suffix_v).unwrap();
+    {
+        let state = pool.get_paged_state(seq_a).unwrap();
+        let blocks = &state.layer(0).unwrap().block_ids;
+        assert_eq!(blocks.len(), 4, "2 shared prefix + 2 fresh suffix blocks");
+        assert_eq!(&blocks[..2], &source_blocks[..2]);
+        assert!(!source_blocks.contains(&blocks[2]));
+    }
+    let (gk, gv) = {
+        let state = pool.get_paged_state(seq_a).unwrap();
+        pool.paged_pool_ref()
+            .unwrap()
+            .gather_visible(&state, 0)
+            .unwrap()
+            .expect("gather must return data")
+    };
+    let prefix8 = |base: f32| {
+        let full = prefill_block(base, n_kv_heads, 12, head_dim);
+        crate::ffi::slice(&full, &[0, 0, 0, 0], &[1, n_kv_heads, 8, head_dim])
+    };
+    let dense_k = dense_reference(
+        &[
+            (prefix8(1000.0), 0),
+            (prefill_block(2000.0, n_kv_heads, 6, head_dim), 8usize),
+        ],
+        n_kv_heads,
+        14,
+        head_dim,
+    );
+    let dense_v = dense_reference(
+        &[
+            (prefix8(5000.0), 0),
+            (prefill_block(6000.0, n_kv_heads, 6, head_dim), 8usize),
+        ],
+        n_kv_heads,
+        14,
+        head_dim,
+    );
+    assert_eq!(flatten_fp32(&gk), flatten_fp32(&dense_k));
+    assert_eq!(flatten_fp32(&gv), flatten_fp32(&dense_v));
+
+    // The source's ledger view is unchanged; releasing everything drives the
+    // shared blocks back to zero with no leaks.
+    let per_block_real = block_size * n_kv_heads as usize * head_dim as usize * 4 * 2;
+    assert_eq!(source.nbytes(), 3 * per_block_real);
+    pool.release_detached_paged(clone_b);
+    assert_eq!(pool.paged_pool_ref().unwrap().refcount(source_blocks[0]), 3);
+    pool.release(seq_a);
+    assert_eq!(pool.paged_pool_ref().unwrap().refcount(source_blocks[0]), 2);
+    pool.release_detached_paged(source);
+    assert_eq!(pool.paged_pool_ref().unwrap().refcount(source_blocks[0]), 0);
+}
+
+#[test]
+fn clone_detached_paged_prefix_rejects_bad_targets() {
+    let n_kv_heads = 2i32;
+    let head_dim = 3i32;
+    let block_size = 4usize;
+    let layout = PagedKvLayout::uniform(
+        1,
+        block_size,
+        block_size * n_kv_heads as usize * head_dim as usize * 2,
+    )
+    .unwrap();
+    let model = PagedStubModel::new(layout.clone());
+    let mut pool = CachePool::new(4);
+
+    let seed = pool.allocate(&model).unwrap();
+    let k = prefill_block(1.0, n_kv_heads, 12, head_dim);
+    let v = prefill_block(2.0, n_kv_heads, 12, head_dim);
+    write_prefill_for(&mut pool, seed, 0, &k, &v).unwrap();
+    let source = pool.detach_paged(seed).unwrap();
+    let first_block = source.paged_state().layer(0).unwrap().block_ids[0];
+
+    // Misaligned, zero, and oversized targets are declined without pinning.
+    assert!(pool.clone_detached_paged_prefix(&source, 6).is_err());
+    assert!(pool.clone_detached_paged_prefix(&source, 0).is_err());
+    assert!(pool.clone_detached_paged_prefix(&source, 16).is_err());
+    assert_eq!(
+        pool.paged_pool_ref().unwrap().refcount(first_block),
+        2,
+        "declined clones must not leak pins"
+    );
+
+    pool.release_detached_paged(source);
+}

@@ -33,8 +33,8 @@ use std::sync::mpsc;
 use std::time::Instant;
 
 use mlxcel_core::cache::{
-    BatchKvQuantConfig, CachePool, KVCacheMode, PagedKvLayout, SequenceId, SequenceStateBackend,
-    SequenceStateLayout,
+    BatchKvQuantConfig, CachePool, DetachedPagedCacheSet, KVCacheMode, PagedKvLayout, SequenceId,
+    SequenceStateBackend, SequenceStateLayout,
 };
 use mlxcel_core::generate::{
     DecodeBatchContext, DecodeStorageBackend as CoreDecodeStorageBackend, LanguageModel,
@@ -1226,9 +1226,78 @@ impl BatchScheduler {
         if require_whole_entry && matched_len < entry.tokens.len() {
             return None;
         }
-        // `take_detached` is one-shot: it returns `None` if a racing lookup
-        // already consumed this entry. The miss path is safe — the current
-        // sequence just does a fresh prefill.
+        // Length the adopted cache actually covers. The dense path truncates
+        // to exactly `matched_len`; the paged paths floor to the pool block
+        // boundary (#225), so they report their own value.
+        let mut adopted_len = matched_len;
+
+        // #227: pool-backed paged entries adopt by CLONE, leaving the stored
+        // entry intact for concurrent same-prefix siblings and deeper future
+        // matches. The one-shot take below destroyed the entry on first use;
+        // combined with the #225 trim, a short partial match (even the
+        // chat-template preamble) could gut a multi-thousand-token entry.
+        // `with_detached` returns:
+        //   None              -> entry already drained: fall through, the
+        //                        take below also yields None (cold prefill).
+        //   Some(None)        -> dense set: legacy take path below.
+        //   Some(Some(Err))   -> paged but clone-ineligible or below the
+        //                        minimum: cold prefill, entry untouched.
+        //   Some(Some(Ok));   -> adoptable clone, source preserved.
+        let backend_is_paged = matches!(self.decode_storage_backend, DecodeStorageBackend::Paged);
+        let min_prefix = store.min_prefix_tokens().max(1);
+        let cache_pool = &mut self.cache_pool;
+        let clone_attempt: Option<Option<Result<(DetachedPagedCacheSet, usize), String>>> = entry
+            .with_detached(|set| match set {
+                DetachedKvSet::Paged(paged) if backend_is_paged => {
+                    let block_size = paged.layout().block_size.max(1);
+                    let seq_len = paged.seq_len();
+                    let adoptable = if matched_len < seq_len {
+                        (matched_len / block_size) * block_size
+                    } else {
+                        seq_len
+                    };
+                    if adoptable < min_prefix {
+                        return Some(Err(format!(
+                            "block-floored match {adoptable} below the minimum prefix {min_prefix}"
+                        )));
+                    }
+                    Some(
+                        cache_pool
+                            .clone_detached_paged_prefix(paged, adoptable)
+                            .map(|clone| (clone, adoptable)),
+                    )
+                }
+                // Paged entry under a dense decode backend: cross-backend
+                // adoption is invalid; decline without touching the entry.
+                DetachedKvSet::Paged(_) => {
+                    Some(Err("paged entry under a dense decode backend".into()))
+                }
+                DetachedKvSet::Dense(_) => None,
+            });
+        let cloned = match clone_attempt {
+            Some(Some(Ok((clone, adoptable)))) => {
+                adopted_len = adoptable;
+                Some(clone)
+            }
+            Some(Some(Err(reason))) => {
+                tracing::debug!(
+                    "prompt-cache adopt: paged clone declined ({reason}); falling back to cold prefill (entry preserved)"
+                );
+                return None;
+            }
+            Some(None) | None => None,
+        };
+        if let Some(clone) = cloned {
+            let adopt_result = self
+                .cache_pool
+                .adopt_paged(&self.model as &dyn LanguageModel, clone);
+            return self.finish_prompt_cache_adopt(adopt_result, adopted_len, tokens.len());
+        }
+
+        // Dense entries keep the legacy one-shot consume: their adoption
+        // copies buffers into the sequence, so the set genuinely moves.
+        // `take_detached` returns `None` if a racing lookup already consumed
+        // this entry; the miss path is safe (fresh prefill).
         let detached = entry.take_detached()?;
         if detached.is_empty() {
             // A paged set drained on this path would leak its block pins via
@@ -1251,10 +1320,6 @@ impl BatchScheduler {
             return None;
         }
 
-        // Length the adopted cache actually covers. The dense path truncates
-        // to exactly `matched_len`; the paged path floors to the pool block
-        // boundary (#225), so it reports its own value.
-        let mut adopted_len = matched_len;
         let adopt_result = match detached {
             DetachedKvSet::Dense(mut dense) => {
                 // APC block-level partial adoption. When APC clamps
@@ -1332,14 +1397,24 @@ impl BatchScheduler {
             }
         };
 
+        self.finish_prompt_cache_adopt(adopt_result, adopted_len, tokens.len())
+    }
+
+    /// Shared tail of [`Self::try_adopt_cached_prefix`]: record hit metrics
+    /// and gauges on success, log and fall back to a cold prefill on failure.
+    fn finish_prompt_cache_adopt(
+        &mut self,
+        adopt_result: Result<SequenceId, String>,
+        adopted_len: usize,
+        total_tokens: usize,
+    ) -> Option<(SequenceId, usize)> {
         match adopt_result {
             Ok(adopted_id) => {
                 tracing::debug!(
                     seq_id = %adopted_id,
                     matched = adopted_len,
-                    total = tokens.len(),
-                    "prompt-cache hit: adopted {adopted_len}/{} tokens",
-                    tokens.len()
+                    total = total_tokens,
+                    "prompt-cache hit: adopted {adopted_len}/{total_tokens} tokens"
                 );
                 self.batch_observability
                     .record_prompt_cache_hit(adopted_len);
