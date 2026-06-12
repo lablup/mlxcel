@@ -1210,3 +1210,92 @@ fn trim_to_logical_start_empties_the_layer() {
     assert_eq!(layer.block_ids.len(), 0);
     assert!(pool.gather_visible(&state, 0).unwrap().is_none());
 }
+
+// ---------------------------------------------------------------------------
+// 12. write_prefill presize (#224): one allocation for a multi-chunk span
+// ---------------------------------------------------------------------------
+
+#[test]
+fn write_prefill_presizes_pool_in_one_step_for_multi_chunk_span() {
+    // 100 blocks of 4 slots = 400 tokens, spanning four 32-block grow chunks.
+    // presize_for_span must allocate the layer pool once at ceil(100/32)*32 =
+    // 128 rows instead of growing 32 -> 64 -> 96 -> 128 with a full slab copy
+    // at each step.
+    let block_size = 4usize;
+    let total = 400i32;
+    let mut pool = fp16_pool(block_size, 1);
+    let mut state = PagedSequenceState::new(pool.layout());
+
+    let k_prefill = make_block(100.0, total);
+    let v_prefill = make_block(500.0, total);
+    pool.write_prefill(&mut state, 0, &k_prefill, &v_prefill)
+        .unwrap();
+
+    assert_eq!(state.layer(0).unwrap().block_ids.len(), 100);
+    assert_eq!(state.layer(0).unwrap().len, total as usize);
+
+    // Capacity must be the single presized target: 128 rows for K and V, in
+    // FP32 (make_block writes f32), 4 bytes per element.
+    let expected_capacity_rows = 128usize;
+    let expected_bytes = 2 * expected_capacity_rows * block_size * (H as usize) * (D as usize) * 4;
+    assert_eq!(pool.pool_tensor_bytes(), expected_bytes);
+
+    // Round-trip stays byte-identical to the dense reference.
+    let (gk, gv) = pool
+        .gather_visible(&state, 0)
+        .unwrap()
+        .expect("gather must return data");
+    let dense_k = dense_reference(&[(make_block(100.0, total), 0)], total, 0, total);
+    let dense_v = dense_reference(&[(make_block(500.0, total), 0)], total, 0, total);
+    assert_eq!(flatten_fp32(&gk), flatten_fp32(&dense_k));
+    assert_eq!(flatten_fp32(&gv), flatten_fp32(&dense_v));
+}
+
+#[test]
+fn write_prefill_after_presize_grows_incrementally_and_round_trips() {
+    // First prefill presizes to 32 rows (8 blocks used). A second prefill
+    // pushing past the presized capacity must take the grow_pool path (now
+    // with eager eval) and stay byte-identical.
+    let block_size = 4usize;
+    let first = 32i32; // 8 blocks
+    let second = 160i32; // 40 more blocks -> 48 total, beyond the 32-row chunk
+    let mut pool = fp16_pool(block_size, 1);
+    let mut state = PagedSequenceState::new(pool.layout());
+
+    let k1 = make_block(100.0, first);
+    let v1 = make_block(500.0, first);
+    pool.write_prefill(&mut state, 0, &k1, &v1).unwrap();
+    let bytes_after_first = pool.pool_tensor_bytes();
+
+    let k2 = make_block(200.0, second);
+    let v2 = make_block(600.0, second);
+    pool.write_prefill(&mut state, 0, &k2, &v2).unwrap();
+    assert!(pool.pool_tensor_bytes() > bytes_after_first);
+    assert_eq!(state.layer(0).unwrap().len, (first + second) as usize);
+
+    let total = first + second;
+    let (gk, gv) = pool
+        .gather_visible(&state, 0)
+        .unwrap()
+        .expect("gather must return data");
+    let dense_k = dense_reference(
+        &[
+            (make_block(100.0, first), 0),
+            (make_block(200.0, second), first as usize),
+        ],
+        total,
+        0,
+        total,
+    );
+    let dense_v = dense_reference(
+        &[
+            (make_block(500.0, first), 0),
+            (make_block(600.0, second), first as usize),
+        ],
+        total,
+        0,
+        total,
+    );
+    assert_eq!(flatten_fp32(&gk), flatten_fp32(&dense_k));
+    assert_eq!(flatten_fp32(&gv), flatten_fp32(&dense_v));
+}
