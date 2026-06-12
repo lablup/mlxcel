@@ -1643,3 +1643,143 @@ fn trim_across_shared_blocks_releases_only_the_trimming_sequences_refs() {
 fn _type_alive() -> Option<DetachedPagedCacheSet> {
     None
 }
+
+// ---------------------------------------------------------------------------
+// 12. Partial prefix adoption (#225): trim a detached set to a block boundary
+//     and adopt only the matched prefix.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn trim_detached_paged_to_enables_partial_prefix_adoption() {
+    let n_kv_heads = 2i32;
+    let head_dim = 3i32;
+    let block_size = 4usize;
+    let layout = PagedKvLayout::uniform(
+        1,
+        block_size,
+        block_size * n_kv_heads as usize * head_dim as usize * 2,
+    )
+    .unwrap();
+    let model = PagedStubModel::new(layout.clone());
+    let mut pool = CachePool::new(4);
+
+    // Seed: 12 tokens = 3 whole blocks, distinct per-token values.
+    let seed = pool.allocate(&model).unwrap();
+    let full_len = 12i32;
+    let full_k = prefill_block(1000.0, n_kv_heads, full_len, head_dim);
+    let full_v = prefill_block(5000.0, n_kv_heads, full_len, head_dim);
+    write_prefill_for(&mut pool, seed, 0, &full_k, &full_v).unwrap();
+
+    let mut set = pool.detach_paged(seed).unwrap();
+    assert_eq!(set.seq_len(), 12);
+    let live_before = pool.paged_stats().unwrap().live_blocks;
+    assert_eq!(live_before, 3);
+
+    // A request matched only 10 tokens; the scheduler floors to 8 (2 blocks).
+    pool.trim_detached_paged_to(&mut set, 8).unwrap();
+    assert_eq!(set.seq_len(), 8);
+    assert_eq!(
+        pool.paged_stats().unwrap().live_blocks,
+        2,
+        "the dropped tail block must fully release (both pins)"
+    );
+
+    // Adopt the trimmed set and append a divergent 6-token suffix at 8.
+    let consumer = pool.adopt_paged(&model, set).unwrap();
+    {
+        let state = pool.get_paged_state(consumer).unwrap();
+        let layer = state.layer(0).unwrap();
+        assert_eq!(layer.block_ids.len(), 2);
+        assert_eq!(layer.len, 8);
+    }
+    let suffix_len = 6i32;
+    let suffix_k = prefill_block(2000.0, n_kv_heads, suffix_len, head_dim);
+    let suffix_v = prefill_block(6000.0, n_kv_heads, suffix_len, head_dim);
+    write_prefill_for(&mut pool, consumer, 0, &suffix_k, &suffix_v).unwrap();
+
+    // Gather must return the kept 8-token prefix plus the fresh suffix,
+    // byte-identical to the dense reference.
+    let total = 8 + suffix_len;
+    let state = pool.get_paged_state(consumer).unwrap();
+    let (gk, gv) = pool
+        .paged_pool_ref()
+        .unwrap()
+        .gather_visible(&state, 0)
+        .unwrap()
+        .expect("gather must return data");
+    let prefix8_k = {
+        let full = prefill_block(1000.0, n_kv_heads, full_len, head_dim);
+        crate::ffi::slice(&full, &[0, 0, 0, 0], &[1, n_kv_heads, 8, head_dim])
+    };
+    let prefix8_v = {
+        let full = prefill_block(5000.0, n_kv_heads, full_len, head_dim);
+        crate::ffi::slice(&full, &[0, 0, 0, 0], &[1, n_kv_heads, 8, head_dim])
+    };
+    let dense_k = dense_reference(
+        &[
+            (prefix8_k, 0),
+            (
+                prefill_block(2000.0, n_kv_heads, suffix_len, head_dim),
+                8usize,
+            ),
+        ],
+        n_kv_heads,
+        total,
+        head_dim,
+    );
+    let dense_v = dense_reference(
+        &[
+            (prefix8_v, 0),
+            (
+                prefill_block(6000.0, n_kv_heads, suffix_len, head_dim),
+                8usize,
+            ),
+        ],
+        n_kv_heads,
+        total,
+        head_dim,
+    );
+    assert_eq!(flatten_fp32(&gk), flatten_fp32(&dense_k));
+    assert_eq!(flatten_fp32(&gv), flatten_fp32(&dense_v));
+}
+
+#[test]
+fn trim_detached_paged_to_rejects_bad_targets() {
+    let n_kv_heads = 2i32;
+    let head_dim = 3i32;
+    let block_size = 4usize;
+    let layout = PagedKvLayout::uniform(
+        1,
+        block_size,
+        block_size * n_kv_heads as usize * head_dim as usize * 2,
+    )
+    .unwrap();
+    let model = PagedStubModel::new(layout.clone());
+    let mut pool = CachePool::new(4);
+
+    let seed = pool.allocate(&model).unwrap();
+    let full_k = prefill_block(1.0, n_kv_heads, 12, head_dim);
+    let full_v = prefill_block(2.0, n_kv_heads, 12, head_dim);
+    write_prefill_for(&mut pool, seed, 0, &full_k, &full_v).unwrap();
+    let mut set = pool.detach_paged(seed).unwrap();
+
+    // Not block aligned.
+    assert!(pool.trim_detached_paged_to(&mut set, 6).is_err());
+    // Beyond the stored length.
+    assert!(pool.trim_detached_paged_to(&mut set, 16).is_err());
+    // No-op full-length trim succeeds and changes nothing.
+    pool.trim_detached_paged_to(&mut set, 12).unwrap();
+    assert_eq!(set.seq_len(), 12);
+    assert_eq!(pool.paged_stats().unwrap().live_blocks, 3);
+
+    // The set still adopts cleanly afterwards.
+    let consumer = pool.adopt_paged(&model, set).unwrap();
+    assert_eq!(
+        pool.get_paged_state(consumer)
+            .unwrap()
+            .layer(0)
+            .unwrap()
+            .len,
+        12
+    );
+}

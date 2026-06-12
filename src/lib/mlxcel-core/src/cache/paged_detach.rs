@@ -46,7 +46,7 @@
 //! live cache.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::atomic::Ordering;
 use std::time::Instant;
@@ -737,6 +737,119 @@ impl CachePool {
             None => Err(format!(
                 "CachePool::adopt_parked_paged: unknown handle {handle}"
             )),
+        }
+    }
+
+    /// Trim a detached paged set to `target_tokens` before adoption (#225).
+    ///
+    /// A partial prefix match (an APC block-clamped lookup, or a request that
+    /// diverges inside the stored entry) covers only `target_tokens` of the
+    /// set. The caller floors that value to the pool block size, so no
+    /// partially filled tail block survives the trim: the adopting sequence's
+    /// suffix re-prefill then starts on a fresh block and never mutates a
+    /// shared tail (no copy-on-write needed at adopt time).
+    ///
+    /// Every dropped tail block releases BOTH references this set holds (the
+    /// block-table allocation and the detach-time pin), mirroring
+    /// [`CachePool::release_detached_paged`]. Release failures are reported
+    /// after the trim finishes so the set's bookkeeping never goes
+    /// inconsistent halfway. The dense placeholder handles' offsets and the
+    /// set's bookkeeping lengths are clamped so the subsequent
+    /// [`CachePool::adopt_paged`] restores RoPE offsets at the trimmed length.
+    ///
+    /// Turbo4 layouts are rejected: their per-page sidecars are keyed by the
+    /// dropped blocks and no current caller trims them. Sliding-window states
+    /// (`logical_start > 0`) are rejected for the same reason `write_prefill`
+    /// assumes absolute indexing from zero.
+    pub fn trim_detached_paged_to(
+        &mut self,
+        set: &mut DetachedPagedCacheSet,
+        target_tokens: usize,
+    ) -> Result<(), String> {
+        if set.backend != SequenceStateBackend::PagedKvCache {
+            return Err(format!(
+                "CachePool::trim_detached_paged_to: expected paged backend, got {:?}",
+                set.backend
+            ));
+        }
+        if set.paged_layout.is_turbo_mode() {
+            return Err(
+                "CachePool::trim_detached_paged_to: Turbo4 sidecar trim is not supported".into(),
+            );
+        }
+        let block_size = set.paged_layout.block_size;
+        if block_size == 0 || !target_tokens.is_multiple_of(block_size) {
+            return Err(format!(
+                "CachePool::trim_detached_paged_to: target {target_tokens} is not a multiple of block size {block_size}"
+            ));
+        }
+        let seq_len = set.seq_len();
+        if target_tokens > seq_len {
+            return Err(format!(
+                "CachePool::trim_detached_paged_to: target {target_tokens} exceeds set length {seq_len}"
+            ));
+        }
+        if set
+            .paged_state
+            .layers
+            .iter()
+            .any(|layer| layer.logical_start != 0)
+        {
+            return Err(
+                "CachePool::trim_detached_paged_to: sliding-window state (logical_start > 0) is not supported"
+                    .into(),
+            );
+        }
+        if target_tokens == seq_len {
+            return Ok(());
+        }
+        if set.retained_blocks.is_none() {
+            return Err(
+                "CachePool::trim_detached_paged_to: set no longer owns its block pins".into(),
+            );
+        }
+        let pool = self
+            .paged_pool
+            .as_ref()
+            .ok_or("CachePool::trim_detached_paged_to: no active paged pool")?
+            .clone();
+
+        let keep_blocks = target_tokens / block_size;
+        let mut dropped: HashSet<PagedBlockId> = HashSet::new();
+        let mut first_err: Option<String> = None;
+        {
+            let mut pool = pool.borrow_mut();
+            for layer in set.paged_state.layers.iter_mut() {
+                while layer.block_ids.len() > keep_blocks {
+                    let block_id = layer
+                        .block_ids
+                        .pop()
+                        .expect("len > keep_blocks implies non-empty");
+                    dropped.insert(block_id);
+                    // Allocation reference carried by the block table, then the
+                    // detach pin from `retained_blocks`.
+                    for _ in 0..2 {
+                        if let Err(err) = pool.release_block(block_id) {
+                            first_err.get_or_insert(format!(
+                                "failed to release dropped block {block_id}: {err}"
+                            ));
+                        }
+                    }
+                }
+                layer.len = target_tokens;
+            }
+        }
+        if let Some(retained) = set.retained_blocks.as_mut() {
+            retained.retain(|id| !dropped.contains(id));
+        }
+        for handle in set.caches.iter_mut() {
+            handle.offset = handle.offset.min(target_tokens as i32);
+        }
+        set.current_offset = set.current_offset.min(target_tokens as i32);
+        set.prompt_len = set.prompt_len.min(target_tokens);
+        match first_err {
+            Some(err) => Err(format!("CachePool::trim_detached_paged_to: {err}")),
+            None => Ok(()),
         }
     }
 

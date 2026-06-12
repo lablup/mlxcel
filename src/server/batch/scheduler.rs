@@ -1251,6 +1251,10 @@ impl BatchScheduler {
             return None;
         }
 
+        // Length the adopted cache actually covers. The dense path truncates
+        // to exactly `matched_len`; the paged path floors to the pool block
+        // boundary (#225), so it reports its own value.
+        let mut adopted_len = matched_len;
         let adopt_result = match detached {
             DetachedKvSet::Dense(mut dense) => {
                 // APC block-level partial adoption. When APC clamps
@@ -1279,20 +1283,49 @@ impl BatchScheduler {
                 self.cache_pool
                     .adopt(&self.model as &dyn LanguageModel, dense)
             }
-            DetachedKvSet::Paged(paged) => {
-                // APC block-hash partial adoption for paged entries is deferred
-                // (a later #121 sub-step): the paged store path matches the full
-                // stored prefix only. If a partial match somehow surfaces,
-                // decline rather than adopt an over-long prefix.
+            DetachedKvSet::Paged(mut paged) => {
+                // Paged partial prefix adoption (#225). An APC block-clamped
+                // lookup (or a request that diverges inside the stored entry)
+                // matches only `matched_len` of the set. Floor that to the
+                // POOL block boundary: no partially filled tail block survives
+                // the trim, so the suffix re-prefill starts on a fresh block
+                // and never needs copy-on-write against a shared tail. A
+                // whole-entry match skips the trim and stays bit-exact with
+                // the pre-#225 path.
                 let paged_seq_len = paged.seq_len();
-                if matched_len < paged_seq_len {
+                let block_size = paged.layout().block_size.max(1);
+                let adoptable = if matched_len < paged_seq_len {
+                    (matched_len / block_size) * block_size
+                } else {
+                    paged_seq_len
+                };
+                let min_prefix = store.min_prefix_tokens().max(1);
+                if adoptable < min_prefix {
                     tracing::debug!(
                         from = paged_seq_len,
-                        to = matched_len,
-                        "prompt-cache adopt: paged partial adoption not yet supported; releasing and falling back to cold prefill"
+                        to = adoptable,
+                        "prompt-cache adopt: block-floored paged match below the minimum prefix; releasing and falling back to cold prefill"
                     );
                     self.cache_pool.release_detached_paged(paged);
                     return None;
+                }
+                if adoptable < paged_seq_len {
+                    if let Err(err) = self
+                        .cache_pool
+                        .trim_detached_paged_to(&mut paged, adoptable)
+                    {
+                        tracing::warn!(
+                            "prompt-cache adopt: paged partial trim to {adoptable} failed ({err}); falling back to cold prefill"
+                        );
+                        self.cache_pool.release_detached_paged(paged);
+                        return None;
+                    }
+                    tracing::debug!(
+                        from = paged_seq_len,
+                        to = adoptable,
+                        "prompt-cache adopt: paged partial adoption trimmed detached set to the pool block boundary"
+                    );
+                    adopted_len = adoptable;
                 }
                 self.cache_pool
                     .adopt_paged(&self.model as &dyn LanguageModel, paged)
@@ -1303,21 +1336,21 @@ impl BatchScheduler {
             Ok(adopted_id) => {
                 tracing::debug!(
                     seq_id = %adopted_id,
-                    matched = matched_len,
+                    matched = adopted_len,
                     total = tokens.len(),
-                    "prompt-cache hit: adopted {matched_len}/{} tokens",
+                    "prompt-cache hit: adopted {adopted_len}/{} tokens",
                     tokens.len()
                 );
                 self.batch_observability
-                    .record_prompt_cache_hit(matched_len);
+                    .record_prompt_cache_hit(adopted_len);
                 // also increment BatchMetrics Prometheus counters.
-                self.batch_metrics.record_prompt_cache_hit(matched_len);
+                self.batch_metrics.record_prompt_cache_hit(adopted_len);
                 // Update byte/entry gauges so /metrics reflects current state.
                 if let Some(ref store) = self.prompt_cache {
                     self.batch_metrics
                         .update_prompt_cache_gauges(store.bytes(), store.len());
                 }
-                Some((adopted_id, matched_len))
+                Some((adopted_id, adopted_len))
             }
             Err(err) => {
                 // `adopt_paged` already releases paged pins on its error path;

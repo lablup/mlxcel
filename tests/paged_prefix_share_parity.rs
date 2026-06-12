@@ -321,3 +321,174 @@ fn paged_prefix_share_matches_cold_run_llama3() {
     };
     assert_prefix_share_parity(&model, LLAMA3_DIR, "llama3");
 }
+
+// ---------------------------------------------------------------------------
+// Partial prefix adoption (#225): APC-clamped match, floored to the pool block
+// boundary, trimmed, adopted, and decoded byte-identically to cold.
+// ---------------------------------------------------------------------------
+
+/// Tail stored after the shared prefix in A's entry (12 tokens). B shares the
+/// first 8 of them and then diverges, so the APC chain agrees through token 48
+/// (three 16-token APC blocks) and the scheduler floor lands at 32 (one pool
+/// block), exercising a real non-trivial floor (48 -> 32).
+const STORED_TAIL_TOKENS: &[i32] = &[14582, 25, 3555, 374, 220, 16, 488, 220, 18, 30, 6771, 594];
+
+/// B's continuation: same first 8 tail tokens, then divergent.
+const PARTIAL_SUFFIX_TOKENS: &[i32] = &[14582, 25, 3555, 374, 220, 16, 488, 220, 24, 11, 4226, 30];
+
+fn assert_partial_prefix_share_parity(
+    model: &mlxcel::LoadedModel,
+    label: &str,
+    cache_model_key: &str,
+) {
+    use mlxcel::server::prompt_cache::ApcConfig;
+
+    let num_layers = model.num_layers();
+
+    // Stored entry: prefix + tail = 52 tokens (2 pool blocks: 32 + 20).
+    let mut stored_tokens = PREFIX_TOKENS.to_vec();
+    stored_tokens.extend_from_slice(STORED_TAIL_TOKENS);
+    // B's request: shares the stored entry's first 48 tokens, then diverges.
+    let mut b_prompt = PREFIX_TOKENS.to_vec();
+    b_prompt.extend_from_slice(PARTIAL_SUFFIX_TOKENS);
+    assert_eq!(stored_tokens[..48], b_prompt[..48], "share 48 tokens");
+    assert_ne!(stored_tokens[48], b_prompt[48], "diverge at token 48");
+
+    eprintln!(
+        "\n=== paged PARTIAL prefix-share parity: {label} ({num_layers} layers, \
+         stored={}, request={}) ===",
+        stored_tokens.len(),
+        b_prompt.len()
+    );
+
+    // ---- COLD reference for B's full prompt. ----
+    let cold_tokens = {
+        let mut pool = CachePool::new(2);
+        let id = pool
+            .allocate_with_layout(model, Some(scheduler_paged_layout(num_layers)))
+            .expect("cold paged allocate");
+        let caches = pool.get_caches_mut(id).unwrap();
+        prefill_and_decode(model, caches, &b_prompt, 0)
+    };
+    eprintln!("cold    decoded: {cold_tokens:?}");
+
+    // ---- Store with APC enabled (16-token blocks, the server default). ----
+    // ApcConfig is #[non_exhaustive]; mutate a default instead of constructing.
+    let apc = {
+        let mut apc = ApcConfig::default();
+        apc.enabled = true;
+        apc
+    };
+    let store = PromptCacheStore::with_config(
+        PromptCacheConfig::new(true, 1 << 30, 64, Duration::from_secs(3600), 1).with_apc(apc),
+    );
+    let mut pool = CachePool::new(4);
+
+    // A prefills the full stored sequence and donates it.
+    let seq_a = pool
+        .allocate_with_layout(model, Some(scheduler_paged_layout(num_layers)))
+        .expect("A paged allocate");
+    {
+        let caches = pool.get_caches_mut(seq_a).unwrap();
+        let len = stored_tokens.len() as i32;
+        let prompt = mlxcel_core::from_slice_i32(&stored_tokens, &[1, len]);
+        let mask = mlxcel_core::utils::create_causal_mask(len, 0);
+        let logits = model.forward(&prompt, caches, Some(&mask));
+        mlxcel_core::eval(&logits);
+    }
+    let a_blocks = pool
+        .get_paged_state(seq_a)
+        .unwrap()
+        .layer(0)
+        .unwrap()
+        .block_ids
+        .clone();
+    assert_eq!(a_blocks.len(), 2, "52 tokens = 2 pool blocks");
+    let set_a = pool.detach_paged(seq_a).expect("A detach_paged");
+    let entry = CacheEntry::new(stored_tokens.clone(), DetachedKvSet::Paged(set_a));
+    let insert_key = PromptCacheKey::new_full(
+        cache_model_key,
+        None,
+        "tpl-v1",
+        Some("sess"),
+        MultimodalDigest::empty(),
+        &stored_tokens,
+    );
+    store.insert(&insert_key, entry).expect("store insert");
+
+    // ---- B looks up: APC clamps the match to 48 (three 16-token blocks). ----
+    let lookup_key = PromptCacheKey::new_full(
+        cache_model_key,
+        None,
+        "tpl-v1",
+        Some("sess"),
+        MultimodalDigest::empty(),
+        &b_prompt,
+    );
+    let (hit_entry, matched_len) = store
+        .lookup_longest_prefix(&lookup_key, &b_prompt)
+        .expect("B must hit A's entry via the APC partial path");
+    assert_eq!(matched_len, 48, "APC must clamp the match to token 48");
+
+    // ---- Mirror the scheduler's #225 paged arm: floor to the pool block
+    //      boundary, trim, adopt. ----
+    let mut set_b = match hit_entry.take_detached().expect("first take") {
+        DetachedKvSet::Paged(p) => p,
+        DetachedKvSet::Dense(_) => panic!("paged backend must store a paged set"),
+    };
+    let adoptable = (matched_len / BLOCK_SIZE) * BLOCK_SIZE;
+    assert_eq!(adoptable, 32, "48 floors to one 32-token pool block");
+    pool.trim_detached_paged_to(&mut set_b, adoptable)
+        .expect("partial trim");
+    assert_eq!(set_b.seq_len(), adoptable);
+    let seq_b = pool.adopt_paged(model, set_b).expect("B adopt_paged");
+
+    // B keeps A's FIRST block (shared physical prefix), dropped the second.
+    let b_blocks = pool
+        .get_paged_state(seq_b)
+        .unwrap()
+        .layer(0)
+        .unwrap()
+        .block_ids
+        .clone();
+    assert_eq!(b_blocks.len(), 1, "trimmed to one shared prefix block");
+    assert_eq!(b_blocks[0], a_blocks[0], "B must reuse A's first block");
+
+    // ---- B re-prefills everything past the adopted 32 tokens and decodes. ----
+    let cached_tokens = {
+        let caches = pool.get_caches_mut(seq_b).unwrap();
+        assert!(
+            caches.iter().all(|c| c.is_paged_backed()),
+            "adopted B must have pool-backed caches"
+        );
+        prefill_and_decode(model, caches, &b_prompt[adoptable..], adoptable as i32)
+    };
+    eprintln!("partial decoded: {cached_tokens:?}");
+
+    assert_eq!(
+        cached_tokens, cold_tokens,
+        "partial-prefix (trimmed + adopted) decode must equal the cold run\n\
+         cold:    {cold_tokens:?}\npartial: {cached_tokens:?}"
+    );
+    eprintln!("OK: B adopted a trimmed 32-token prefix and decoded identically to cold.");
+}
+
+#[test]
+#[ignore = "loads qwen3-0.6b-4bit and runs real GPU forwards; run with --ignored"]
+fn paged_partial_prefix_share_matches_cold_run_qwen3() {
+    let _runtime = initialize_runtime();
+    let Some(model) = load_or_skip(QWEN3_DIR, "mlx-community/Qwen3-0.6B-4bit") else {
+        return;
+    };
+    assert_partial_prefix_share_parity(&model, QWEN3_DIR, "qwen3");
+}
+
+#[test]
+#[ignore = "loads llama-3.2-1b-4bit and runs real GPU forwards; run with --ignored"]
+fn paged_partial_prefix_share_matches_cold_run_llama3() {
+    let _runtime = initialize_runtime();
+    let Some(model) = load_or_skip(LLAMA3_DIR, "mlx-community/Llama-3.2-1B-Instruct-4bit") else {
+        return;
+    };
+    assert_partial_prefix_share_parity(&model, LLAMA3_DIR, "llama3");
+}
