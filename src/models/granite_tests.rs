@@ -74,9 +74,12 @@ fn granite_quantization_is_read_from_config() {
 #[test]
 fn granite_unquantized_config_uses_defaults() {
     // Drop the quantization block (a bf16 checkpoint) and confirm the defaults.
-    let no_quant = GRANITE_33_2B_CONFIG
-        .replace(",\n    \"quantization\": { \"group_size\": 64, \"bits\": 4 }", "");
-    let args: ModelArgs = serde_json::from_str(&no_quant).expect("parse unquantized granite config");
+    let no_quant = GRANITE_33_2B_CONFIG.replace(
+        ",\n    \"quantization\": { \"group_size\": 64, \"bits\": 4 }",
+        "",
+    );
+    let args: ModelArgs =
+        serde_json::from_str(&no_quant).expect("parse unquantized granite config");
     assert!(args.quantization.is_none());
     assert_eq!(args.group_size(), 64);
     assert_eq!(args.bits(), 4);
