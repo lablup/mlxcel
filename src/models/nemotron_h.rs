@@ -639,13 +639,16 @@ impl NemotronHMamba2Mixer {
         let y_normed = self.norm.forward(&y, Some(&gate));
         let result = self.out_proj.forward(&y_normed);
 
-        // Force evaluation of the Mamba layer output.
-        // On M5 Max (Metal GPU Family 4), the lazy computation graph from
-        // the SSM step contains mixed float32×float16 intermediate nodes
-        // that produce NaN when fused with downstream layers in a single
-        // Metal command buffer.  Materializing here splits the graph at a
-        // clean dtype boundary.
-        mlxcel_core::eval(&result);
+        // Materialize at a clean dtype boundary ONLY on M5 Max (Metal GPU
+        // Family 4): there the lazy float32/float16 SSM graph can fuse into NaN
+        // within one Metal command buffer. On every other chip this per-mixer
+        // sync is pure decode-throughput loss (it blocks cross-layer
+        // pipelining), so skip it. Decode never reaches the prefill chunked-eval
+        // path (`needs_chunked_eval` is `seq_len > 1`), so this is the only
+        // per-token eval to gate. CLAUDE.md "Apple Silicon precision".
+        if mlxcel_core::hardware::is_m5_neural_accelerator() {
+            mlxcel_core::eval(&result);
+        }
 
         result
     }
