@@ -499,11 +499,39 @@ jobs:
 
       - name: Package binaries
         run: |
+          set -euo pipefail
           BIN_DIR="$CARGO_TARGET_DIR/release"
-          mkdir -p package
-          cp "$BIN_DIR/mlxcel" package/
-          cp "$BIN_DIR/mlxcel-server" package/
-          cd package && zip -r "../${{ matrix.asset_name }}.zip" . && cd ..
+          ASSET="${{ matrix.asset_name }}"
+
+          # Bundle the CCCL (libcu++) headers MLX's runtime NVRTC JIT needs. The
+          # compiled-in MLX_CCCL_DIR points at this build machine and is useless
+          # on the deployment host, so ship the headers in MLX's native layout:
+          # the JIT looks for <exe-dir>/../include/cccl, hence bin/ + include/cccl/.
+          # See the x86_64 job for the full rationale.
+          CCCL_INC=$(find "$BIN_DIR/build" -type d -path '*/_deps/cccl-src/include' 2>/dev/null | head -1)
+          if [ -z "$CCCL_INC" ] || [ ! -d "$CCCL_INC/cuda" ] || [ ! -d "$CCCL_INC/nv" ]; then
+            echo "::error::CCCL headers not found under the build tree (expected _deps/cccl-src/include/{cuda,nv})"
+            exit 1
+          fi
+          echo "Bundling CCCL headers from: $CCCL_INC"
+
+          PKG="package/${ASSET}"
+          mkdir -p "$PKG/bin" "$PKG/include/cccl"
+          cp "$BIN_DIR/mlxcel" "$PKG/bin/"
+          cp "$BIN_DIR/mlxcel-server" "$PKG/bin/"
+          cp -R "$CCCL_INC/cuda" "$PKG/include/cccl/"
+          cp -R "$CCCL_INC/nv" "$PKG/include/cccl/"
+
+          CCCL_FILES=$(find "$PKG/include/cccl" -type f | wc -l | tr -d ' ')
+          echo "Bundled CCCL header files: $CCCL_FILES"
+          if [ ! -f "$PKG/include/cccl/cuda/std/tuple" ] || [ "$CCCL_FILES" -lt 100 ]; then
+            echo "::error::CCCL bundle looks incomplete (missing cuda/std/tuple or too few files)"
+            exit 1
+          fi
+
+          ( cd package && zip -rq "../${ASSET}.zip" "${ASSET}" )
+          echo "=== zip top-level entries ==="
+          unzip -l "${ASSET}.zip" | awk 'NR<=3 || /\/(bin|include)\// {print}' | head -20
 
       - name: Generate checksum
         run: sha256sum "${{ matrix.asset_name }}.zip" > "${{ matrix.asset_name }}.zip.sha256"
@@ -641,11 +669,42 @@ jobs:
 
       - name: Package binaries
         run: |
+          set -euo pipefail
           BIN_DIR="$CARGO_TARGET_DIR/release"
-          mkdir -p package
-          cp "$BIN_DIR/mlxcel" package/
-          cp "$BIN_DIR/mlxcel-server" package/
-          cd package && zip -r "../${ASSET_NAME}.zip" . && cd ..
+
+          # MLX's CUDA backend NVRTC-JITs gather/indexing kernels at runtime;
+          # those include <cuda/std/tuple>, so the CCCL (libcu++) headers must be
+          # present on the deployment host. The compiled-in MLX_CCCL_DIR points at
+          # this build machine's path and is useless elsewhere, so bundle the
+          # headers in MLX's native runtime layout: the JIT looks for
+          # <exe-dir>/../include/cccl, hence bin/ + include/cccl/. Only cuda/ and
+          # nv/ are needed (MLX installs exactly those), ~8.8 MB. Host CUDA runtime
+          # headers (cuda_runtime.h etc.) still come from the node's CUDA_HOME.
+          CCCL_INC=$(find "$BIN_DIR/build" -type d -path '*/_deps/cccl-src/include' 2>/dev/null | head -1)
+          if [ -z "$CCCL_INC" ] || [ ! -d "$CCCL_INC/cuda" ] || [ ! -d "$CCCL_INC/nv" ]; then
+            echo "::error::CCCL headers not found under the build tree (expected _deps/cccl-src/include/{cuda,nv})"
+            exit 1
+          fi
+          echo "Bundling CCCL headers from: $CCCL_INC"
+
+          PKG="package/${ASSET_NAME}"
+          mkdir -p "$PKG/bin" "$PKG/include/cccl"
+          cp "$BIN_DIR/mlxcel" "$PKG/bin/"
+          cp "$BIN_DIR/mlxcel-server" "$PKG/bin/"
+          cp -R "$CCCL_INC/cuda" "$PKG/include/cccl/"
+          cp -R "$CCCL_INC/nv" "$PKG/include/cccl/"
+
+          # Sanity-check the bundle before zipping.
+          CCCL_FILES=$(find "$PKG/include/cccl" -type f | wc -l | tr -d ' ')
+          echo "Bundled CCCL header files: $CCCL_FILES"
+          if [ ! -f "$PKG/include/cccl/cuda/std/tuple" ] || [ "$CCCL_FILES" -lt 100 ]; then
+            echo "::error::CCCL bundle looks incomplete (missing cuda/std/tuple or too few files)"
+            exit 1
+          fi
+
+          ( cd package && zip -rq "../${ASSET_NAME}.zip" "${ASSET_NAME}" )
+          echo "=== zip top-level entries ==="
+          unzip -l "${ASSET_NAME}.zip" | awk 'NR<=3 || /\/(bin|include)\// {print}' | head -20
 
       - name: Generate checksum
         run: sha256sum "${ASSET_NAME}.zip" > "${ASSET_NAME}.zip.sha256"

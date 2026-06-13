@@ -116,6 +116,28 @@ x86_64 CUDA artifact that fattens Ampere through Blackwell into one binary
 (`80;86;89;90a;100;120`), all on self-hosted runners. Treat other GPU/OS
 combinations as source builds that need local validation.
 
+### Prebuilt CUDA artifact: runtime requirements
+
+MLX's CUDA backend compiles some kernels (gather and other indexing kernels)
+at runtime with NVRTC the first time they run, so a prebuilt binary needs CUDA
+headers available on the deployment host, not only the runtime libraries:
+
+- **CCCL (libcu++) headers** are bundled inside the prebuilt Linux CUDA
+  archives (both aarch64 and x86_64). Each unpacks to `bin/` + `include/cccl/`,
+  the layout MLX's JIT looks for relative to the executable
+  (`<exe-dir>/../include/cccl`). Keep `mlxcel`/`mlxcel-server` under `bin/` and
+  the `include/cccl/` directory beside it; do not flatten them.
+- **CUDA toolkit headers** (`cuda_runtime.h` and friends) come from the host.
+  Install the CUDA toolkit and set `CUDA_HOME` (or `CUDA_PATH`) if it is not at
+  `/usr/local/cuda`. Without them the first NVRTC compile fails with
+  `cannot open source file` errors.
+- An NVIDIA driver matching the CUDA toolkit must be present to run on the GPU.
+
+Compiled kernels are cached on disk (`MLX_PTX_CACHE_DIR`, default under the
+system temp dir), so only the first run of each kernel variant pays the NVRTC
+cost. Point `MLX_PTX_CACHE_DIR` at a persistent path to keep the cache across
+sessions.
+
 ## Runtime environment variables
 
 | Variable | Description | Default |
