@@ -156,12 +156,33 @@ impl SwitchLinear {
                 .get(&format!("{}.biases", prefix))
                 .map(|w| mlxcel_core::copy(w));
 
+            // Infer the actual bit width from the packed weight and scales shapes
+            // (group_size fixed): mixed-precision checkpoints such as dots.llm1
+            // quantize some expert projections at 6-bit while the model default is
+            // 4-bit, so the passed `bits` is only the default. The invariant is
+            // `packed_in * 32 == bits * num_groups * group_size`.
+            let w_shape = mlxcel_core::array_shape(&weight);
+            let s_shape = mlxcel_core::array_shape(&scales);
+            let packed_in = *w_shape.last().unwrap_or(&0);
+            let num_groups = *s_shape.last().unwrap_or(&0);
+            let denom = num_groups * group_size;
+            let effective_bits = if denom > 0 && (packed_in * 32) % denom == 0 {
+                let inferred = (packed_in * 32) / denom;
+                if (2..=8).contains(&inferred) {
+                    inferred
+                } else {
+                    bits
+                }
+            } else {
+                bits
+            };
+
             Ok(Self::Quantized {
                 weight,
                 scales,
                 biases,
                 group_size,
-                bits,
+                bits: effective_bits,
                 mode: mode.to_string(),
             })
         } else {
