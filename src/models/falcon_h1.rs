@@ -223,6 +223,10 @@ struct MambaRMSNormGated {
     weight: UniquePtr<MlxArray>,
     eps: f32,
     group_size: usize,
+    /// When false (the Falcon-H1 default), the SwiGLU gate is applied to the
+    /// input before the RMSNorm; when true, after the full norm (weight
+    /// included). Mirrors the reference `FalconH1RMSNormGated.norm_before_gate`.
+    norm_before_gate: bool,
 }
 
 impl MambaRMSNormGated {
@@ -231,7 +235,14 @@ impl MambaRMSNormGated {
 
         let x = mlxcel_core::astype(x, mlxcel_core::dtype::FLOAT32);
         let g_f32 = mlxcel_core::astype(gate, mlxcel_core::dtype::FLOAT32);
-        let x = mlxcel_core::multiply(&x, &silu(&g_f32));
+        let silu_gate = silu(&g_f32);
+
+        // norm_before_gate == false: gate the input before normalizing.
+        let x = if self.norm_before_gate {
+            x
+        } else {
+            mlxcel_core::multiply(&x, &silu_gate)
+        };
 
         let shape = mlxcel_core::array_shape(&x);
         let ndim = shape.len();
@@ -250,6 +261,13 @@ impl MambaRMSNormGated {
         let x_flat = mlxcel_core::reshape(&x_normed, &shape);
         let w_f32 = mlxcel_core::astype(&self.weight, mlxcel_core::dtype::FLOAT32);
         let result = mlxcel_core::multiply(&w_f32, &x_flat);
+
+        // norm_before_gate == true: gate after the full RMSNorm (weight included).
+        let result = if self.norm_before_gate {
+            mlxcel_core::multiply(&result, &silu_gate)
+        } else {
+            result
+        };
         mlxcel_core::astype(&result, orig_dtype)
     }
 }
@@ -272,7 +290,7 @@ struct FalconH1Mixer {
     dt_bias: UniquePtr<MlxArray>,
     a_log: UniquePtr<MlxArray>,
     d_param: UniquePtr<MlxArray>,
-    /// Gated RMSNorm — present only when `mamba_rms_norm == true`. The Falcon-H1
+    /// Gated RMSNorm, present only when `mamba_rms_norm == true`. The Falcon-H1
     /// default (`false`) gates with plain SwiGLU instead.
     norm: Option<MambaRMSNormGated>,
     out_proj: UnifiedLinear,
@@ -916,6 +934,7 @@ impl FalconH1Model {
                     weight: get_weight_copy(&weights, &format!("{mamba_prefix}.norm.weight"))?,
                     eps: args.rms_norm_eps,
                     group_size: mamba_group_size,
+                    norm_before_gate: args.mamba_norm_before_gate,
                 })
             } else {
                 None
