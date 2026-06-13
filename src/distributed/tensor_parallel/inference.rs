@@ -214,6 +214,7 @@ fn fallback_architecture(model_type: ModelType) -> &'static str {
         ModelType::Lfm2 => "lfm2",
         ModelType::Lfm2Moe => "lfm2_moe",
         ModelType::Plamo2 => "plamo2",
+        ModelType::GraniteMoeHybrid => "granitemoehybrid",
         ModelType::NemotronH => "nemotron_h",
         ModelType::NemotronHNanoOmniVLM => "nemotron_h_nano_omni",
         ModelType::NemotronNAS => "nemotron_nas",

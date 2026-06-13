@@ -79,6 +79,10 @@ pub(crate) fn try_load_nonstandard_model_from_dir(
             super::load_pair_from_dir(path_str, |path| models::Plamo2Model::load(&path))
                 .map(LoadedModel::Plamo2)?,
         ),
+        ModelType::GraniteMoeHybrid => Some(
+            super::load_pair_from_dir(path_str, |path| models::GraniteMoeHybridModel::load(&path))
+                .map(LoadedModel::GraniteMoeHybrid)?,
+        ),
         ModelType::NemotronH => Some(
             super::load_pair_from_dir(path_str, |path| models::NemotronHModel::load(&path))
                 .map(LoadedModel::NemotronH)?,

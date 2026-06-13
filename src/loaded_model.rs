@@ -143,6 +143,7 @@ pub enum LoadedModel {
     Lfm2(models::Lfm2Model),
     Lfm2Moe(models::Lfm2Model),
     Plamo2(models::Plamo2Model),
+    GraniteMoeHybrid(models::GraniteMoeHybridModel),
     NemotronH(models::NemotronHModel),
     /// Nemotron H Nano Omni — vision-capable variant (vision-only).
     NemotronHNanoOmniVLM(vision::NemotronHNanoOmniVlModel),
@@ -255,6 +256,7 @@ macro_rules! delegate_language_model {
             LoadedModel::Lfm2(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::Lfm2Moe(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::Plamo2(inner) => LanguageModel::$method(inner, $($arg),*),
+            LoadedModel::GraniteMoeHybrid(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::NemotronH(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::NemotronHNanoOmniVLM(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::NemotronNAS(inner) => LanguageModel::$method(inner, $($arg),*),

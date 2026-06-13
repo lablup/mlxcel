@@ -29,6 +29,7 @@ Implemented model families include:
 - ERNIE 4.5 and ERNIE 4.5 MoE
 - Hunyuan dense and MoE variants
 - IBM Granite dense (`granite`)
+- IBM Granite 4.x hybrid (`granitemoehybrid`: interleaves Mamba2 SSM and GQA attention layers by `layer_types`, applies the four Granite scalar multipliers (embedding, attention, residual, logits), and defaults to NoPE attention. The dense-MLP mode is validated against `mlx-community/granite-4.0-h-350m-4bit`; the MoE mode (`block_sparse_moe` + `shared_mlp`) is implemented but awaits a public MLX checkpoint to validate. The non-hybrid `granitemoe` variant is not yet ported.)
 - ExaOne / ExaOne 4 / ExaOne MoE / Solar Open
 - OLMo / OLMo2 / OLMo3 / OLMoE
 - StarCoder2, StableLM, SmolLM3, Baichuan, MiniCPM, MiniCPM3, MiniMax,

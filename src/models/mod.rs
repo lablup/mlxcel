@@ -55,6 +55,7 @@ pub mod glm4_moe_lite;
 pub mod glm_moe_dsa;
 pub mod gpt_oss;
 pub mod granite;
+pub mod granitemoehybrid;
 pub mod hunyuan_moe;
 pub mod hunyuan_v1_dense;
 pub mod internlm2;
@@ -136,6 +137,7 @@ pub use glm4_moe::Glm4MoeModel;
 pub use glm4_moe_lite::Glm4MoeLiteModel;
 pub use gpt_oss::{GptOssModel, GptOssWrapper};
 pub use granite::GraniteModel;
+pub use granitemoehybrid::GraniteMoeHybridModel;
 pub use hunyuan_moe::HunyuanMoeModel;
 pub use hunyuan_v1_dense::HunyuanV1DenseModel;
 pub use internlm2::InternLM2Model;
@@ -327,6 +329,9 @@ pub enum ModelType {
     // Preferred Networks PLaMo 2 (Mamba + attention interleaved hybrid)
     Plamo2,
 
+    // IBM Granite 4.x (Mamba2 + attention interleaved hybrid)
+    GraniteMoeHybrid,
+
     // Kimi models
     KimiLinear,
 
@@ -459,6 +464,8 @@ pub const ALL_MODEL_TYPES: &[ModelType] = &[
     ModelType::Lfm2Moe,
     // Preferred Networks PLaMo 2
     ModelType::Plamo2,
+    // IBM Granite 4.x hybrid
+    ModelType::GraniteMoeHybrid,
     // Kimi models
     ModelType::KimiLinear,
     // Longcat models
@@ -586,6 +593,7 @@ impl ModelType {
 
             // ----- IBM Granite -----
             ModelType::Granite => ("Granite (dense)", "Granite"),
+            ModelType::GraniteMoeHybrid => ("Granite 4 (Mamba2 + attention hybrid)", "Granite"),
 
             // ----- ExaOne -----
             ModelType::ExaOne => ("ExaOne 3", "ExaOne"),
@@ -798,3 +806,7 @@ mod falcon_h1_tests;
 #[cfg(test)]
 #[path = "plamo2_tests.rs"]
 mod plamo2_tests;
+
+#[cfg(test)]
+#[path = "granitemoehybrid_tests.rs"]
+mod granitemoehybrid_tests;
