@@ -1186,17 +1186,21 @@ pub fn load_text_weights<P: AsRef<std::path::Path>>(
     // exports such as `mlx-community/granite-*` work), whereas the bf16 scales
     // shipped by newer exports (Apertus-2509, Seed-OSS) dequantize to ~zero.
     if should_convert_bf16_to_f16() {
-        let had_bf16 = if !is_quantized {
-            if keep_gemma3n_mlp_bf16 {
+        if !is_quantized {
+            let had_bf16 = if keep_gemma3n_mlp_bf16 {
                 convert_bf16_weights_with_keep(&mut weights, gemma3n_language_mlp_bf16_key)
             } else {
                 convert_bf16_weights(&mut weights)
+            };
+            if had_bf16 {
+                warn_bf16_precision();
             }
         } else {
-            convert_quant_scales_bf16_to_f16(&mut weights)
-        };
-        if had_bf16 {
-            warn_bf16_precision();
+            // Promote bf16 quantization scales/biases to f16. This is a
+            // correctness normalization for the dequant kernels, not a
+            // precision-loss event, so it does not emit the bf16 warning (the
+            // model stays quantized).
+            convert_quant_scales_bf16_to_f16(&mut weights);
         }
     }
 
