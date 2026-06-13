@@ -413,10 +413,14 @@ impl FalconH1Mixer {
 
         let result = self.out_proj.forward(&y_gated);
 
-        // Materialize at a clean dtype boundary. The lazy SSM graph mixes
-        // float32/float16 nodes that can produce NaN when fused with downstream
-        // layers in one Metal command buffer on M5 Max (Metal GPU Family 4).
-        mlxcel_core::eval(&result);
+        // Materialize at a clean dtype boundary ONLY on M5 Max (Metal GPU
+        // Family 4): there the lazy float32/float16 SSM graph can fuse into NaN
+        // within one Metal command buffer. On every other chip this per-layer
+        // sync is pure decode-throughput loss (it blocks cross-layer
+        // pipelining), so skip it. CLAUDE.md "Apple Silicon precision".
+        if mlxcel_core::hardware::is_m5_neural_accelerator() {
+            mlxcel_core::eval(&result);
+        }
         result
     }
 
