@@ -725,6 +725,163 @@ fn gemma4_proportional_rope_freqs_match_python_semantics() {
 }
 
 // -----------------------------------------------------------------
+// Exact-prefix snapshot prompt-cache support for Gemma 4's model-owned
+// heterogeneous caches.
+mod snapshot_prompt_cache {
+    use crate::models::gemma4::Cache;
+    use mlxcel_core::cache::SequenceId;
+    use mlxcel_core::generate::{LanguageModel, ModelStateSnapshot};
+    use mlxcel_core::layers::{KVCache, RotatingKVCache};
+
+    fn token(value: f32) -> mlxcel_core::UniquePtr<mlxcel_core::MlxArray> {
+        mlxcel_core::from_slice_f32(&[value], &[1, 1, 1, 1])
+    }
+
+    fn to_vec_f32(arr: &mlxcel_core::MlxArray) -> Vec<f32> {
+        let arr_f32 = mlxcel_core::astype(arr, mlxcel_core::dtype::FLOAT32);
+        mlxcel_core::eval(&arr_f32);
+        mlxcel_core::array_to_raw_bytes(&arr_f32)
+            .chunks_exact(4)
+            .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+            .collect()
+    }
+
+    #[test]
+    #[ignore = "requires serial MLX execution"]
+    fn gemma4_snapshot_restores_standard_kv_cache() {
+        let mut source = Cache::Standard(KVCache::new());
+        if let Cache::Standard(cache) = &mut source {
+            let keys = mlxcel_core::from_slice_f32(&[1.0, 2.0, 3.0], &[1, 1, 3, 1]);
+            let values = mlxcel_core::from_slice_f32(&[10.0, 20.0, 30.0], &[1, 1, 3, 1]);
+            cache.update_and_fetch(keys, values);
+            assert_eq!(cache.seq_len(), 3);
+        }
+
+        let mut snapshot = ModelStateSnapshot::new("gemma4", 3);
+        source
+            .snapshot_into(&mut snapshot, "layer0")
+            .expect("standard cache snapshot must succeed");
+
+        let mut restored = Cache::Standard(KVCache::new());
+        restored
+            .restore_from(&snapshot, "layer0")
+            .expect("standard cache restore must succeed");
+
+        let Cache::Standard(restored_cache) = &restored else {
+            unreachable!()
+        };
+        assert_eq!(restored_cache.offset, 3);
+        assert_eq!(restored_cache.seq_len(), 3);
+        let keys = restored_cache.keys.as_ref().unwrap();
+        let values = restored_cache.values.as_ref().unwrap();
+        assert!(mlxcel_core::array_shape(keys)[2] >= 3);
+        assert!(mlxcel_core::array_shape(values)[2] >= 3);
+        let live_keys = mlxcel_core::slice(keys, &[0, 0, 0, 0], &[1, 1, 3, 1]);
+        let live_values = mlxcel_core::slice(values, &[0, 0, 0, 0], &[1, 1, 3, 1]);
+        assert_eq!(to_vec_f32(live_keys.as_ref().unwrap()), vec![1.0, 2.0, 3.0]);
+        assert_eq!(
+            to_vec_f32(live_values.as_ref().unwrap()),
+            vec![10.0, 20.0, 30.0]
+        );
+    }
+
+    #[test]
+    #[ignore = "requires serial MLX execution"]
+    fn gemma4_snapshot_restores_rotating_ring_metadata() {
+        let mut source = Cache::Rotating(RotatingKVCache::new(4));
+        if let Cache::Rotating(cache) = &mut source {
+            for i in 0..6 {
+                cache.update_and_fetch(token(i as f32), token((i * 10) as f32));
+            }
+            assert_eq!(cache.offset, 6);
+            assert_eq!(cache.visible_len(), 4);
+            assert_eq!(cache.logical_start(), 2);
+            assert_eq!(cache.buffer_write_idx(), 2);
+        }
+
+        let mut snapshot = ModelStateSnapshot::new("gemma4", 6);
+        source
+            .snapshot_into(&mut snapshot, "layer0")
+            .expect("rotating cache snapshot must succeed");
+
+        let mut restored = Cache::Rotating(RotatingKVCache::new(4));
+        restored
+            .restore_from(&snapshot, "layer0")
+            .expect("rotating cache restore must succeed");
+
+        let Cache::Rotating(restored_cache) = &restored else {
+            unreachable!()
+        };
+        assert_eq!(restored_cache.offset, 6);
+        assert_eq!(restored_cache.visible_len(), 4);
+        assert_eq!(restored_cache.logical_start(), 2);
+        assert_eq!(restored_cache.buffer_write_idx(), 2);
+
+        let (source_k, source_v) = match &mut source {
+            Cache::Rotating(cache) => cache.update_and_fetch(token(6.0), token(60.0)),
+            _ => unreachable!(),
+        };
+        let (restored_k, restored_v) = match &mut restored {
+            Cache::Rotating(cache) => cache.update_and_fetch(token(6.0), token(60.0)),
+            _ => unreachable!(),
+        };
+        assert_eq!(
+            mlxcel_core::array_shape(&source_k),
+            mlxcel_core::array_shape(&restored_k)
+        );
+        assert_eq!(
+            mlxcel_core::array_shape(&source_v),
+            mlxcel_core::array_shape(&restored_v)
+        );
+        assert_eq!(
+            to_vec_f32(source_k.as_ref().unwrap()),
+            to_vec_f32(restored_k.as_ref().unwrap())
+        );
+        assert_eq!(
+            to_vec_f32(source_v.as_ref().unwrap()),
+            to_vec_f32(restored_v.as_ref().unwrap())
+        );
+    }
+
+    #[test]
+    #[ignore = "requires serial MLX execution"]
+    fn gemma4_snapshot_reuse_restores_decode_logits() {
+        let source = super::build_synthetic_wrapper();
+        assert!(source.supports_snapshot_reuse());
+        let seq_a = SequenceId::from_raw(910);
+        source.prepare_sequence_state(seq_a);
+        let prompt = mlxcel_core::from_slice_i32(&[1, 2, 3], &[1, 3]);
+        let _ = source.forward_with_sequence_id(&prompt, Some(seq_a), &mut [], None);
+        let snapshot = source
+            .snapshot_sequence_state(seq_a, 3)
+            .expect("Gemma 4 wrapper must donate a non-empty snapshot");
+
+        let restored = super::build_synthetic_wrapper();
+        let seq_b = SequenceId::from_raw(911);
+        restored.prepare_sequence_state(seq_b);
+        restored
+            .restore_sequence_state(seq_b, &snapshot)
+            .expect("Gemma 4 wrapper must restore its own snapshot");
+
+        let decode = mlxcel_core::from_slice_i32(&[4], &[1, 1]);
+        let logits_source = source.forward_with_sequence_id(&decode, Some(seq_a), &mut [], None);
+        let logits_restored =
+            restored.forward_with_sequence_id(&decode, Some(seq_b), &mut [], None);
+        let source_vec = to_vec_f32(logits_source.as_ref().unwrap());
+        let restored_vec = to_vec_f32(logits_restored.as_ref().unwrap());
+        assert_eq!(source_vec.len(), restored_vec.len());
+        for (i, (&got, &want)) in restored_vec.iter().zip(source_vec.iter()).enumerate() {
+            let abs = (got - want).abs();
+            let rel = abs / want.abs().max(1.0);
+            assert!(
+                abs < 1e-3 || rel < 1e-3,
+                "logit[{i}] differs after Gemma 4 snapshot restore: restored={got}, source={want}, abs={abs}, rel={rel}"
+            );
+        }
+    }
+}
+
+// -----------------------------------------------------------------
 // Gemma 4 MTP target hooks — `rollback_speculative_cache`
 // + sink-aware forward.
 //

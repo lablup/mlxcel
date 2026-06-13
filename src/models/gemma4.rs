@@ -28,9 +28,12 @@ use crate::distributed::pipeline::LayerFilter;
 use crate::distributed::pipeline::StageExecutionOutput;
 use crate::distributed::pipeline::partial_loading::filter_weight_map;
 use crate::models::model_owned::ModelOwnedSequenceState;
+use crate::models::recurrent_snapshot::{push_i32, push_optional, restore_i32, restore_optional};
 use crate::models::switch_layers::{SwitchLinear, gather_sort};
-use mlxcel_core::cache::{SequenceId, SequenceStateLayout};
-use mlxcel_core::generate::LanguageModel;
+use mlxcel_core::cache::{
+    KVCacheMode, RotatingKVCacheSnapshotState, SequenceId, SequenceStateLayout,
+};
+use mlxcel_core::generate::{LanguageModel, ModelStateSnapshot};
 use mlxcel_core::layers::{
     FusedQKVLinear, KVCache, RMSNorm, RotatingKVCache, UnifiedEmbedding, UnifiedLinear,
     compiled_gelu_mlp_fp16,
@@ -736,6 +739,29 @@ impl CacheInterface for RotatingKVCache {
     }
 }
 
+fn kv_cache_mode_to_i32(mode: KVCacheMode) -> i32 {
+    match mode {
+        KVCacheMode::Fp16 => 0,
+        KVCacheMode::Int8 => 1,
+        KVCacheMode::Turbo4Asym => 2,
+        KVCacheMode::Turbo3Asym => 3,
+        KVCacheMode::Turbo4 => 4,
+        KVCacheMode::Turbo4Delegated => 5,
+    }
+}
+
+fn kv_cache_mode_from_i32(value: i32) -> Result<KVCacheMode, String> {
+    match value {
+        0 => Ok(KVCacheMode::Fp16),
+        1 => Ok(KVCacheMode::Int8),
+        2 => Ok(KVCacheMode::Turbo4Asym),
+        3 => Ok(KVCacheMode::Turbo3Asym),
+        4 => Ok(KVCacheMode::Turbo4),
+        5 => Ok(KVCacheMode::Turbo4Delegated),
+        other => Err(format!("unknown Gemma 4 cache snapshot mode tag {other}")),
+    }
+}
+
 pub enum Cache {
     Standard(KVCache),
     Rotating(RotatingKVCache),
@@ -754,6 +780,163 @@ impl Cache {
             Self::Standard(cache) => cache,
             Self::Rotating(cache) => cache,
         }
+    }
+
+    pub(crate) fn snapshot_into(
+        &self,
+        snapshot: &mut ModelStateSnapshot,
+        prefix: &str,
+    ) -> Result<(), String> {
+        match self {
+            Self::Standard(cache) => {
+                if cache.keys.is_none() && cache.values.is_none() {
+                    return Ok(());
+                }
+                if cache.keys.is_some() != cache.values.is_some() {
+                    return Err(format!(
+                        "Gemma 4 snapshot {prefix}: standard cache has only one of keys/values"
+                    ));
+                }
+                if cache.mode != KVCacheMode::Fp16 {
+                    return Err(format!(
+                        "Gemma 4 snapshot {prefix}: standard cache mode {:?} is not supported by model-state snapshots",
+                        cache.mode
+                    ));
+                }
+                push_optional(snapshot, format!("{prefix}.standard.keys"), &cache.keys);
+                push_optional(snapshot, format!("{prefix}.standard.values"), &cache.values);
+                push_i32(snapshot, format!("{prefix}.standard.offset"), cache.offset);
+                push_i32(
+                    snapshot,
+                    format!("{prefix}.standard.mode"),
+                    kv_cache_mode_to_i32(cache.mode),
+                );
+            }
+            Self::Rotating(cache) => {
+                if cache.keys.is_none() && cache.values.is_none() {
+                    return Ok(());
+                }
+                if cache.keys.is_some() != cache.values.is_some() {
+                    return Err(format!(
+                        "Gemma 4 snapshot {prefix}: rotating cache has only one of keys/values"
+                    ));
+                }
+                let state = cache.snapshot_state();
+                if state.mode != KVCacheMode::Fp16 {
+                    return Err(format!(
+                        "Gemma 4 snapshot {prefix}: rotating cache mode {:?} is not supported by model-state snapshots",
+                        state.mode
+                    ));
+                }
+                push_optional(snapshot, format!("{prefix}.rotating.keys"), &cache.keys);
+                push_optional(snapshot, format!("{prefix}.rotating.values"), &cache.values);
+                push_i32(
+                    snapshot,
+                    format!("{prefix}.rotating.max_size"),
+                    state.max_size,
+                );
+                push_i32(
+                    snapshot,
+                    format!("{prefix}.rotating.buffer_size"),
+                    state.buffer_size,
+                );
+                push_i32(snapshot, format!("{prefix}.rotating.offset"), state.offset);
+                push_i32(
+                    snapshot,
+                    format!("{prefix}.rotating.start_position"),
+                    state.start_position,
+                );
+                push_i32(snapshot, format!("{prefix}.rotating.idx"), state.idx);
+                push_i32(snapshot, format!("{prefix}.rotating.step"), state.step);
+                push_i32(
+                    snapshot,
+                    format!("{prefix}.rotating.mode"),
+                    kv_cache_mode_to_i32(state.mode),
+                );
+                push_i32(
+                    snapshot,
+                    format!("{prefix}.rotating.turbo_seed"),
+                    state.turbo_seed as i32,
+                );
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn restore_from(
+        &mut self,
+        snapshot: &ModelStateSnapshot,
+        prefix: &str,
+    ) -> Result<(), String> {
+        match self {
+            Self::Standard(cache) => {
+                let keys = restore_optional(snapshot, format!("{prefix}.standard.keys"));
+                let values = restore_optional(snapshot, format!("{prefix}.standard.values"));
+                if keys.is_none() && values.is_none() {
+                    return Ok(());
+                }
+                if keys.is_some() != values.is_some() {
+                    return Err(format!(
+                        "Gemma 4 restore {prefix}: standard snapshot has only one of keys/values"
+                    ));
+                }
+                let mode = restore_i32(snapshot, format!("{prefix}.standard.mode"))
+                    .map(kv_cache_mode_from_i32)
+                    .transpose()?
+                    .unwrap_or(KVCacheMode::Fp16);
+                if mode != KVCacheMode::Fp16 {
+                    return Err(format!(
+                        "Gemma 4 restore {prefix}: standard snapshot mode {:?} is not supported",
+                        mode
+                    ));
+                }
+                cache.keys = keys;
+                cache.values = values;
+                cache.offset = restore_i32(snapshot, format!("{prefix}.standard.offset"))
+                    .unwrap_or(snapshot.token_len() as i32);
+                cache.mode = KVCacheMode::Fp16;
+            }
+            Self::Rotating(cache) => {
+                let keys = restore_optional(snapshot, format!("{prefix}.rotating.keys"));
+                let values = restore_optional(snapshot, format!("{prefix}.rotating.values"));
+                if keys.is_none() && values.is_none() {
+                    return Ok(());
+                }
+                if keys.is_some() != values.is_some() {
+                    return Err(format!(
+                        "Gemma 4 restore {prefix}: rotating snapshot has only one of keys/values"
+                    ));
+                }
+                let current = cache.snapshot_state();
+                let mode = restore_i32(snapshot, format!("{prefix}.rotating.mode"))
+                    .map(kv_cache_mode_from_i32)
+                    .transpose()?
+                    .unwrap_or(KVCacheMode::Fp16);
+                let state = RotatingKVCacheSnapshotState {
+                    max_size: restore_i32(snapshot, format!("{prefix}.rotating.max_size"))
+                        .unwrap_or(current.max_size),
+                    buffer_size: restore_i32(snapshot, format!("{prefix}.rotating.buffer_size"))
+                        .unwrap_or(0),
+                    offset: restore_i32(snapshot, format!("{prefix}.rotating.offset"))
+                        .unwrap_or(snapshot.token_len() as i32),
+                    start_position: restore_i32(
+                        snapshot,
+                        format!("{prefix}.rotating.start_position"),
+                    )
+                    .unwrap_or(0),
+                    idx: restore_i32(snapshot, format!("{prefix}.rotating.idx"))
+                        .unwrap_or(snapshot.token_len() as i32),
+                    step: restore_i32(snapshot, format!("{prefix}.rotating.step"))
+                        .unwrap_or(current.step),
+                    mode,
+                    turbo_seed: restore_i32(snapshot, format!("{prefix}.rotating.turbo_seed"))
+                        .map(|seed| seed as u32)
+                        .unwrap_or(current.turbo_seed),
+                };
+                cache.restore_fp16_snapshot_state(state, keys, values)?;
+            }
+        }
+        Ok(())
     }
 
     /// Trim the last `n` entries from this cache, dispatching to the
@@ -4455,6 +4638,56 @@ impl LanguageModel for Gemma4Wrapper {
 
     fn release_sequence_state_by_id(&self, seq_id: SequenceId) {
         self.sequence_state.release_sequence_state(seq_id);
+    }
+
+    fn supports_snapshot_reuse(&self) -> bool {
+        true
+    }
+
+    fn snapshot_sequence_state(
+        &self,
+        seq_id: SequenceId,
+        token_len: usize,
+    ) -> Option<ModelStateSnapshot> {
+        self.sequence_state
+            .with_sequence_state_ref(seq_id, |state| {
+                let mut snapshot = ModelStateSnapshot::new("gemma4", token_len);
+                for (idx, cache) in state.iter().enumerate() {
+                    if let Err(error) = cache.snapshot_into(&mut snapshot, &format!("layer{idx}")) {
+                        tracing::warn!(
+                            error,
+                            layer_idx = idx,
+                            "Gemma4 snapshot prompt-cache donation skipped"
+                        );
+                        return None;
+                    }
+                }
+                if snapshot.is_empty() {
+                    None
+                } else {
+                    Some(snapshot)
+                }
+            })
+            .flatten()
+    }
+
+    fn restore_sequence_state(
+        &self,
+        seq_id: SequenceId,
+        snapshot: &ModelStateSnapshot,
+    ) -> Result<(), String> {
+        if snapshot.family() != "gemma4" {
+            return Err(format!(
+                "cannot restore {} snapshot into Gemma 4",
+                snapshot.family()
+            ));
+        }
+        let mut state = self.model.make_caches();
+        for (idx, cache) in state.iter_mut().enumerate() {
+            cache.restore_from(snapshot, &format!("layer{idx}"))?;
+        }
+        self.sequence_state.replace_sequence_state(seq_id, state);
+        Ok(())
     }
 
     fn num_layers(&self) -> usize {

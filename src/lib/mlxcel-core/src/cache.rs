@@ -3625,6 +3625,24 @@ pub struct RotatingKVCache {
     pub(crate) turbo_seed: u32,
 }
 
+/// Scalar state required to restore a [`RotatingKVCache`] snapshot.
+///
+/// The K/V tensors themselves travel separately through model-specific
+/// snapshot containers; this metadata preserves the rotating write position
+/// and buffered speculative-cache state so the next decode step writes to the
+/// same physical slot as the source cache.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RotatingKVCacheSnapshotState {
+    pub max_size: i32,
+    pub buffer_size: i32,
+    pub offset: i32,
+    pub start_position: i32,
+    pub idx: i32,
+    pub step: i32,
+    pub mode: KVCacheMode,
+    pub turbo_seed: u32,
+}
+
 impl RotatingKVCache {
     /// Create a new rotating KV cache with specified maximum size (FP16 mode).
     pub fn new(max_size: i32) -> Self {
@@ -4659,6 +4677,116 @@ impl RotatingKVCache {
     /// otherwise tracks the next physical write slot in the rotating buffer.
     pub fn buffer_write_idx(&self) -> i32 {
         self.idx
+    }
+
+    /// Return the scalar metadata needed to restore this rotating cache from
+    /// copied K/V tensors.
+    ///
+    /// Used by: Gemma 4 exact-prefix model-owned snapshot prompt-cache reuse.
+    pub fn snapshot_state(&self) -> RotatingKVCacheSnapshotState {
+        RotatingKVCacheSnapshotState {
+            max_size: self.max_size,
+            buffer_size: self.buffer_size,
+            offset: self.offset,
+            start_position: self.start_position,
+            idx: self.idx,
+            step: self.step,
+            mode: self.mode,
+            turbo_seed: self.turbo_seed,
+        }
+    }
+
+    /// Restore this cache from copied FP16 K/V tensors and scalar metadata.
+    ///
+    /// The current snapshot container captures only attention-ready FP16
+    /// tensors, so non-FP16 rotating-cache modes are rejected rather than
+    /// restoring an incomplete sidecar set.
+    ///
+    /// Used by: Gemma 4 exact-prefix model-owned snapshot prompt-cache reuse.
+    pub fn restore_fp16_snapshot_state(
+        &mut self,
+        state: RotatingKVCacheSnapshotState,
+        keys: Option<UniquePtr<MlxArray>>,
+        values: Option<UniquePtr<MlxArray>>,
+    ) -> Result<(), String> {
+        if state.mode != KVCacheMode::Fp16 {
+            return Err(format!(
+                "RotatingKVCache::restore_fp16_snapshot_state only supports FP16 snapshots; got {:?}",
+                state.mode
+            ));
+        }
+        if keys.is_some() != values.is_some() {
+            return Err(
+                "RotatingKVCache::restore_fp16_snapshot_state requires keys and values together"
+                    .into(),
+            );
+        }
+        if state.max_size <= 0 {
+            return Err(format!(
+                "RotatingKVCache::restore_fp16_snapshot_state requires positive max_size; got {}",
+                state.max_size
+            ));
+        }
+        if state.buffer_size < 0 {
+            return Err(format!(
+                "RotatingKVCache::restore_fp16_snapshot_state requires non-negative buffer_size; got {}",
+                state.buffer_size
+            ));
+        }
+        if state.offset < 0 || state.idx < 0 || state.start_position < 0 {
+            return Err(format!(
+                "RotatingKVCache::restore_fp16_snapshot_state requires non-negative offset/start/idx; got offset={}, start_position={}, idx={}",
+                state.offset, state.start_position, state.idx
+            ));
+        }
+        if state.step <= 0 {
+            return Err(format!(
+                "RotatingKVCache::restore_fp16_snapshot_state requires positive step; got {}",
+                state.step
+            ));
+        }
+
+        if let Some(keys_ref) = keys.as_ref().and_then(|a| a.as_ref()) {
+            let k_shape = ffi::array_shape(keys_ref);
+            if k_shape.len() < 3 {
+                return Err(format!(
+                    "RotatingKVCache::restore_fp16_snapshot_state expected rank-4 keys, got shape {:?}",
+                    k_shape
+                ));
+            }
+            let physical_len = k_shape[2];
+            if state.buffer_size > 0 {
+                if state.idx > physical_len {
+                    return Err(format!(
+                        "RotatingKVCache::restore_fp16_snapshot_state buffered idx {} exceeds physical length {}",
+                        state.idx, physical_len
+                    ));
+                }
+            } else if state.idx > state.max_size {
+                return Err(format!(
+                    "RotatingKVCache::restore_fp16_snapshot_state ring idx {} exceeds max_size {}",
+                    state.idx, state.max_size
+                ));
+            }
+        }
+
+        self.keys = keys;
+        self.values = values;
+        self.max_size = state.max_size;
+        self.buffer_size = state.buffer_size;
+        self.offset = state.offset;
+        self.start_position = state.start_position;
+        self.idx = state.idx;
+        self.step = state.step;
+        self.mode = KVCacheMode::Fp16;
+        self.key_scales = None;
+        self.val_scales = None;
+        self.v_packed = None;
+        self.v_norms = None;
+        self.v_rescale = None;
+        self.turbo_params = None;
+        self.turbo_seed = state.turbo_seed;
+        Ok(())
     }
 
     /// Trim the last `n` entries from the rotating cache by rewinding the

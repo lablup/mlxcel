@@ -21,6 +21,14 @@
 use mlxcel_core::generate::ModelStateSnapshot;
 use mlxcel_core::{MlxArray, UniquePtr};
 
+pub(crate) fn push_i32(snapshot: &mut ModelStateSnapshot, name: impl Into<String>, value: i32) {
+    let scalar = mlxcel_core::from_slice_i32(&[value], &[1]);
+    snapshot.push_tensor(
+        name,
+        scalar.as_ref().expect("from_slice_i32 returns an array"),
+    );
+}
+
 pub(crate) fn push_optional(
     snapshot: &mut ModelStateSnapshot,
     name: impl Into<String>,
@@ -36,4 +44,8 @@ pub(crate) fn restore_optional(
     name: impl AsRef<str>,
 ) -> Option<UniquePtr<MlxArray>> {
     snapshot.tensor(name.as_ref()).map(mlxcel_core::copy)
+}
+
+pub(crate) fn restore_i32(snapshot: &ModelStateSnapshot, name: impl AsRef<str>) -> Option<i32> {
+    snapshot.tensor(name.as_ref()).map(mlxcel_core::item_i32)
 }
