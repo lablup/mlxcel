@@ -56,7 +56,23 @@ Prerequisites vary by distribution and CUDA version. At minimum you need:
 - CUDA toolkit with `nvcc`.
 - NVIDIA driver compatible with the selected CUDA toolkit.
 - cuDNN and CUDA runtime libraries required by the pinned MLX build.
-- OpenBLAS and LAPACK development/runtime packages.
+- BLAS and LAPACK development packages, including the C headers. MLX's CMake
+  resolves `cblas.h` and `lapacke.h`, so the `lapacke` headers must be present,
+  not only the runtime libraries.
+
+On Debian/Ubuntu (x86_64 or aarch64) the build packages are:
+
+```bash
+sudo apt-get install -y \
+    build-essential cmake git \
+    libopenblas-dev liblapack-dev liblapacke-dev
+# CUDA toolkit (nvcc) and cuDNN come from NVIDIA's apt repository, e.g.
+#   cuda-toolkit-13-0  cudnn9-cuda-13
+```
+
+`liblapacke-dev` is the package that ships `lapacke.h`; `liblapack-dev` alone
+omits it and the MLX CMake configure step fails with `LAPACK_INCLUDE_DIRS` set
+to `NOTFOUND`.
 
 Example build shape:
 
@@ -94,8 +110,10 @@ MLX_CUDA_ARCHITECTURES=121 cargo build --release --features cuda
 MLX_CUDA_ARCHITECTURES="90a;121" cargo build --release --features cuda
 ```
 
-The repository release workflow currently builds Linux ARM64 CUDA artifacts for
-GB10 (`121`) and GH200 (`90a`) on a self-hosted runner. Treat other GPU/OS
+The repository release workflow builds Linux ARM64 CUDA artifacts for GB10
+(`121`) and GH200 (`90a`) as separate per-target binaries, plus a single Linux
+x86_64 CUDA artifact that fattens Ampere through Blackwell into one binary
+(`80;86;89;90a;100;120`), all on self-hosted runners. Treat other GPU/OS
 combinations as source builds that need local validation.
 
 ## Runtime environment variables
