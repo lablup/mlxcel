@@ -32,6 +32,11 @@ Use that report and its linked raw per-hardware tables for release notes,
 README updates, or capacity planning. This page should stay focused on
 methodology, required metadata, and caveats.
 
+Decode-gap investigations (root-cause analyses of where mlxcel trails the
+reference runtime) live alongside the snapshot:
+
+- [MoE decode gap investigation](benchmark_results/moe-decode-gap-investigation.md)
+
 ## Suggested benchmark commands
 
 The repository contains benchmark helper scripts under `scripts/`. The exact
