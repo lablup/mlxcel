@@ -90,6 +90,7 @@ pub mod phi3;
 pub mod phi3small;
 pub mod phi4mm;
 pub mod phimoe;
+pub mod plamo2;
 pub mod qwen2;
 pub mod qwen2_moe;
 pub mod qwen2_vl;
@@ -169,6 +170,7 @@ pub use phi3::Phi3Model;
 pub use phi3small::Phi3SmallModel;
 pub use phi4mm::Phi4MMModel;
 pub use phimoe::PhiMoeModel;
+pub use plamo2::Plamo2Model;
 pub use qwen2::Qwen2Model;
 pub use qwen2_moe::Qwen2MoeModel;
 pub use qwen2_vl::Qwen2VLModel;
@@ -322,6 +324,9 @@ pub enum ModelType {
     Lfm2,
     Lfm2Moe,
 
+    // Preferred Networks PLaMo 2 (Mamba + attention interleaved hybrid)
+    Plamo2,
+
     // Kimi models
     KimiLinear,
 
@@ -452,6 +457,8 @@ pub const ALL_MODEL_TYPES: &[ModelType] = &[
     // Liquid Foundation Models
     ModelType::Lfm2,
     ModelType::Lfm2Moe,
+    // Preferred Networks PLaMo 2
+    ModelType::Plamo2,
     // Kimi models
     ModelType::KimiLinear,
     // Longcat models
@@ -626,6 +633,9 @@ impl ModelType {
             ModelType::Lfm2 => ("LFM2 (short-conv + attention hybrid)", "LFM2"),
             ModelType::Lfm2Moe => ("LFM2-MoE (sigmoid-gated experts)", "LFM2"),
 
+            // ----- Preferred Networks -----
+            ModelType::Plamo2 => ("PLaMo 2 (Mamba + attention hybrid)", "PLaMo"),
+
             // ----- RWKV -----
             ModelType::Rwkv7 => ("RWKV v7", "RWKV"),
 
@@ -784,3 +794,7 @@ mod lfm2_tests;
 #[cfg(test)]
 #[path = "falcon_h1_tests.rs"]
 mod falcon_h1_tests;
+
+#[cfg(test)]
+#[path = "plamo2_tests.rs"]
+mod plamo2_tests;

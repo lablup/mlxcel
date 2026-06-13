@@ -1686,6 +1686,7 @@ const FAMILY_ORDER: &[&str] = &[
     "Hybrid",
     "Falcon",
     "LFM2",
+    "PLaMo",
     "RWKV",
     "Specialized",
     "Llama VLM",
