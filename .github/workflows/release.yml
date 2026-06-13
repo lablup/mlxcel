@@ -17,6 +17,7 @@ on:
           - all
           - macos
           - linux
+          - linux-aarch64
           - linux-x86_64
 
 # Default-deny top-level permissions; each job grants only what it needs.
@@ -388,7 +389,7 @@ jobs:
   # Linux ARM64 + CUDA builds (self-hosted GB10 runner)
   # ============================================================================
   build-linux-cuda:
-    name: Build Linux ARM64 CUDA (${{ matrix.variant }})
+    name: Build Linux aarch64 CUDA
     runs-on: GB10
     environment: packaging
     # See the macOS job for the rationale behind these two guards.
@@ -396,26 +397,24 @@ jobs:
       github.repository == 'lablup/mlxcel' && (
         github.event_name == 'release' ||
         github.event.inputs.targets == 'all' ||
-        github.event.inputs.targets == 'linux'
+        github.event.inputs.targets == 'linux' ||
+        github.event.inputs.targets == 'linux-aarch64'
       )
     permissions:
       contents: write
 
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          # NVIDIA DGX Spark / GB10 (Blackwell, SM 121)
-          - variant: gb10
-            cuda_arch: "121"
-            asset_name: mlxcel-linux-aarch64-cuda13-gb10
+    # One aarch64 fat binary covering both NVIDIA aarch64 targets in a single
+    # build: GH200 (Grace Hopper, sm_90a) and GB10 / DGX Spark (Blackwell,
+    # sm_121), cross-compiled on the GB10 runner. 90a is load-bearing for MLX's
+    # Hopper quantized kernel gate, and build.rs forwards the list verbatim. The
+    # CLI and server (~347 MB each) ship as separate archives, both with the
+    # CCCL headers.
+    env:
+      MLX_CUDA_ARCHITECTURES: "90a;121"
+      CLI_ASSET: mlxcel-linux-aarch64-cuda13
+      SERVER_ASSET: mlxcel-server-linux-aarch64-cuda13
 
-          # NVIDIA GH200 (Grace Hopper, SM 90a) — cross-compiled on GB10 runner
-          - variant: gh200
-            cuda_arch: "90a"
-            asset_name: mlxcel-linux-aarch64-cuda13-gh200
-
-    timeout-minutes: 120
+    timeout-minutes: 180
 
     steps:
       # Self-healing release: build the *source of the target tag* while
@@ -441,7 +440,7 @@ jobs:
         run: |
           # Set persistent cargo target directory to enable incremental builds
           # on self-hosted runner (avoids recompiling from scratch every run)
-          CARGO_TARGET="$HOME/.cargo-target/mlxcel-cuda-${{ matrix.variant }}"
+          CARGO_TARGET="$HOME/.cargo-target/mlxcel-cuda-aarch64"
           mkdir -p "$CARGO_TARGET"
           echo "CARGO_TARGET_DIR=$CARGO_TARGET" >> $GITHUB_ENV
 
@@ -494,14 +493,12 @@ jobs:
 
       - name: Build release binaries
         run: cargo build --release --features cuda --locked
-        env:
-          MLX_CUDA_ARCHITECTURES: ${{ matrix.cuda_arch }}
+        # MLX_CUDA_ARCHITECTURES is inherited from the job env above.
 
       - name: Package binaries
         run: |
           set -euo pipefail
           BIN_DIR="$CARGO_TARGET_DIR/release"
-          ASSET="${{ matrix.asset_name }}"
 
           # Bundle the CCCL (libcu++) headers MLX's runtime NVRTC JIT needs. The
           # compiled-in MLX_CCCL_DIR points at this build machine and is useless
@@ -515,29 +512,32 @@ jobs:
           fi
           echo "Bundling CCCL headers from: $CCCL_INC"
 
-          PKG="package/${ASSET}"
-          mkdir -p "$PKG/bin" "$PKG/include/cccl"
-          cp "$BIN_DIR/mlxcel" "$PKG/bin/"
-          cp "$BIN_DIR/mlxcel-server" "$PKG/bin/"
-          cp -R "$CCCL_INC/cuda" "$PKG/include/cccl/"
-          cp -R "$CCCL_INC/nv" "$PKG/include/cccl/"
+          package_one() {
+            bin="$1"; asset="$2"
+            pkg="package/${asset}"
+            rm -rf "$pkg"
+            mkdir -p "$pkg/bin" "$pkg/include/cccl"
+            cp "$BIN_DIR/${bin}" "$pkg/bin/"
+            cp -R "$CCCL_INC/cuda" "$pkg/include/cccl/"
+            cp -R "$CCCL_INC/nv" "$pkg/include/cccl/"
+            n=$(find "$pkg/include/cccl" -type f | wc -l | tr -d ' ')
+            if [ ! -f "$pkg/include/cccl/cuda/std/tuple" ] || [ "$n" -lt 100 ]; then
+              echo "::error::CCCL bundle for ${asset} looks incomplete (${n} files)"
+              exit 1
+            fi
+            ( cd package && zip -rq "../${asset}.zip" "${asset}" )
+            echo "Packaged ${asset}.zip ($(du -h "${asset}.zip" | cut -f1), CCCL headers: ${n})"
+          }
 
-          CCCL_FILES=$(find "$PKG/include/cccl" -type f | wc -l | tr -d ' ')
-          echo "Bundled CCCL header files: $CCCL_FILES"
-          if [ ! -f "$PKG/include/cccl/cuda/std/tuple" ] || [ "$CCCL_FILES" -lt 100 ]; then
-            echo "::error::CCCL bundle looks incomplete (missing cuda/std/tuple or too few files)"
-            exit 1
-          fi
+          package_one mlxcel "${CLI_ASSET}"
+          package_one mlxcel-server "${SERVER_ASSET}"
 
-          ( cd package && zip -rq "../${ASSET}.zip" "${ASSET}" )
-          # Show the top of the archive without piping to head: head closes the
-          # pipe early and SIGPIPEs unzip, which set -o pipefail would treat as a
-          # step failure. awk reads the whole stream and self-limits its output.
-          echo "=== zip top-level entries ==="
-          unzip -l "${ASSET}.zip" | awk 'NR<=3 {print} /\/(bin|include)\// && shown<17 {print; shown++}'
-
-      - name: Generate checksum
-        run: sha256sum "${{ matrix.asset_name }}.zip" > "${{ matrix.asset_name }}.zip.sha256"
+      - name: Generate checksums
+        run: |
+          set -euo pipefail
+          for asset in "${CLI_ASSET}" "${SERVER_ASSET}"; do
+            sha256sum "${asset}.zip" > "${asset}.zip.sha256"
+          done
 
       - name: Upload release artifacts
         if: github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && github.event.inputs.release_tag != '')
@@ -545,8 +545,10 @@ jobs:
         with:
           tag_name: ${{ github.event.release.tag_name || github.event.inputs.release_tag }}
           files: |
-            ${{ matrix.asset_name }}.zip
-            ${{ matrix.asset_name }}.zip.sha256
+            ${{ env.CLI_ASSET }}.zip
+            ${{ env.CLI_ASSET }}.zip.sha256
+            ${{ env.SERVER_ASSET }}.zip
+            ${{ env.SERVER_ASSET }}.zip.sha256
 
   # ============================================================================
   # Linux x86_64 + CUDA build (self-hosted RTX-class runner)
@@ -579,7 +581,10 @@ jobs:
     # is an RTX 5060 (sm_120), so the smoke test below runs on native SASS.
     env:
       MLX_CUDA_ARCHITECTURES: "80;86;89;90a;100;120"
-      ASSET_NAME: mlxcel-linux-x86_64-cuda13
+      # The CLI and server binaries are ~347 MB each, so ship them as separate
+      # archives; a consumer pulls only what it needs. Both carry the CCCL headers.
+      CLI_ASSET: mlxcel-linux-x86_64-cuda13
+      SERVER_ASSET: mlxcel-server-linux-x86_64-cuda13
 
     # A cold build compiles MLX for six CUDA architectures (CUTLASS-heavy
     # quantized kernels per arch); the persistent cargo cache makes later runs
@@ -690,30 +695,34 @@ jobs:
           fi
           echo "Bundling CCCL headers from: $CCCL_INC"
 
-          PKG="package/${ASSET_NAME}"
-          mkdir -p "$PKG/bin" "$PKG/include/cccl"
-          cp "$BIN_DIR/mlxcel" "$PKG/bin/"
-          cp "$BIN_DIR/mlxcel-server" "$PKG/bin/"
-          cp -R "$CCCL_INC/cuda" "$PKG/include/cccl/"
-          cp -R "$CCCL_INC/nv" "$PKG/include/cccl/"
+          # Package one binary as its own self-contained archive: bin/<binary>
+          # plus the CCCL headers in MLX's native include/cccl/ layout.
+          package_one() {
+            bin="$1"; asset="$2"
+            pkg="package/${asset}"
+            rm -rf "$pkg"
+            mkdir -p "$pkg/bin" "$pkg/include/cccl"
+            cp "$BIN_DIR/${bin}" "$pkg/bin/"
+            cp -R "$CCCL_INC/cuda" "$pkg/include/cccl/"
+            cp -R "$CCCL_INC/nv" "$pkg/include/cccl/"
+            n=$(find "$pkg/include/cccl" -type f | wc -l | tr -d ' ')
+            if [ ! -f "$pkg/include/cccl/cuda/std/tuple" ] || [ "$n" -lt 100 ]; then
+              echo "::error::CCCL bundle for ${asset} looks incomplete (${n} files)"
+              exit 1
+            fi
+            ( cd package && zip -rq "../${asset}.zip" "${asset}" )
+            echo "Packaged ${asset}.zip ($(du -h "${asset}.zip" | cut -f1), CCCL headers: ${n})"
+          }
 
-          # Sanity-check the bundle before zipping.
-          CCCL_FILES=$(find "$PKG/include/cccl" -type f | wc -l | tr -d ' ')
-          echo "Bundled CCCL header files: $CCCL_FILES"
-          if [ ! -f "$PKG/include/cccl/cuda/std/tuple" ] || [ "$CCCL_FILES" -lt 100 ]; then
-            echo "::error::CCCL bundle looks incomplete (missing cuda/std/tuple or too few files)"
-            exit 1
-          fi
+          package_one mlxcel "${CLI_ASSET}"
+          package_one mlxcel-server "${SERVER_ASSET}"
 
-          ( cd package && zip -rq "../${ASSET_NAME}.zip" "${ASSET_NAME}" )
-          # Show the top of the archive without piping to head: head closes the
-          # pipe early and SIGPIPEs unzip, which set -o pipefail would treat as a
-          # step failure. awk reads the whole stream and self-limits its output.
-          echo "=== zip top-level entries ==="
-          unzip -l "${ASSET_NAME}.zip" | awk 'NR<=3 {print} /\/(bin|include)\// && shown<17 {print; shown++}'
-
-      - name: Generate checksum
-        run: sha256sum "${ASSET_NAME}.zip" > "${ASSET_NAME}.zip.sha256"
+      - name: Generate checksums
+        run: |
+          set -euo pipefail
+          for asset in "${CLI_ASSET}" "${SERVER_ASSET}"; do
+            sha256sum "${asset}.zip" > "${asset}.zip.sha256"
+          done
 
       - name: Upload release artifacts
         if: github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && github.event.inputs.release_tag != '')
@@ -721,8 +730,10 @@ jobs:
         with:
           tag_name: ${{ github.event.release.tag_name || github.event.inputs.release_tag }}
           files: |
-            ${{ env.ASSET_NAME }}.zip
-            ${{ env.ASSET_NAME }}.zip.sha256
+            ${{ env.CLI_ASSET }}.zip
+            ${{ env.CLI_ASSET }}.zip.sha256
+            ${{ env.SERVER_ASSET }}.zip
+            ${{ env.SERVER_ASSET }}.zip.sha256
 
   # ============================================================================
   # Microsoft Teams release notification (Power Automate Workflows webhook)

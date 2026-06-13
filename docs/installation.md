@@ -110,11 +110,14 @@ MLX_CUDA_ARCHITECTURES=121 cargo build --release --features cuda
 MLX_CUDA_ARCHITECTURES="90a;121" cargo build --release --features cuda
 ```
 
-The repository release workflow builds Linux ARM64 CUDA artifacts for GB10
-(`121`) and GH200 (`90a`) as separate per-target binaries, plus a single Linux
-x86_64 CUDA artifact that fattens Ampere through Blackwell into one binary
-(`80;86;89;90a;100;120`), all on self-hosted runners. Treat other GPU/OS
-combinations as source builds that need local validation.
+The repository release workflow builds two Linux CUDA targets on self-hosted
+runners, each as one fat binary: aarch64 covering GH200 (`90a`) and GB10
+(`121`) in a single build (`90a;121`), and x86_64 covering Ampere through
+Blackwell (`80;86;89;90a;100;120`). For each target the `mlxcel` CLI and the
+`mlxcel-server` are published as separate archives (`mlxcel-...` and
+`mlxcel-server-...`, each roughly 347 MB) so a consumer downloads only the one
+it needs. Treat other GPU/OS combinations as source builds that need local
+validation.
 
 ### Prebuilt CUDA artifact: runtime requirements
 
