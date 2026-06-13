@@ -36,6 +36,7 @@ Decode-gap investigations (root-cause analyses of where mlxcel trails the
 reference runtime) live alongside the snapshot:
 
 - [MoE decode gap investigation](benchmark_results/moe-decode-gap-investigation.md)
+- [Fused decode-MoE kernel: design and roadmap](benchmark_results/fused-moe-decode-kernel-design.md)
 
 ## Suggested benchmark commands
 
