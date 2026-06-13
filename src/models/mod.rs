@@ -53,6 +53,7 @@ pub mod glm4_moe;
 pub mod glm4_moe_lite;
 pub mod glm_moe_dsa;
 pub mod gpt_oss;
+pub mod granite;
 pub mod hunyuan_moe;
 pub mod hunyuan_v1_dense;
 pub mod internlm2;
@@ -130,6 +131,7 @@ pub use glm4::Glm4Model;
 pub use glm4_moe::Glm4MoeModel;
 pub use glm4_moe_lite::Glm4MoeLiteModel;
 pub use gpt_oss::{GptOssModel, GptOssWrapper};
+pub use granite::GraniteModel;
 pub use hunyuan_moe::HunyuanMoeModel;
 pub use hunyuan_v1_dense::HunyuanV1DenseModel;
 pub use internlm2::InternLM2Model;
@@ -272,6 +274,9 @@ pub enum ModelType {
     HunyuanV1Dense,
     MiMo,
 
+    // IBM Granite
+    Granite,
+
     // Korean models
     ExaOne,
     ExaOne4,
@@ -402,6 +407,8 @@ pub const ALL_MODEL_TYPES: &[ModelType] = &[
     ModelType::HunyuanMoe,
     ModelType::HunyuanV1Dense,
     ModelType::MiMo,
+    // IBM Granite
+    ModelType::Granite,
     // Korean models
     ModelType::ExaOne,
     ModelType::ExaOne4,
@@ -553,6 +560,9 @@ impl ModelType {
             // ----- Hunyuan -----
             ModelType::HunyuanV1Dense => ("Hunyuan v1 Dense", "Hunyuan"),
             ModelType::HunyuanMoe => ("Hunyuan MoE", "Hunyuan"),
+
+            // ----- IBM Granite -----
+            ModelType::Granite => ("Granite (dense)", "Granite"),
 
             // ----- ExaOne -----
             ModelType::ExaOne => ("ExaOne 3", "ExaOne"),
@@ -739,3 +749,7 @@ mod qwen_vl_position_tests;
 #[cfg(test)]
 #[path = "qwen3_5_tests.rs"]
 mod qwen3_5_tests;
+
+#[cfg(test)]
+#[path = "granite_tests.rs"]
+mod granite_tests;

@@ -158,6 +158,7 @@ pub fn get_model_type(model_path: &Path) -> Result<ModelType> {
         "hunyuan_v1_dense" | "hunyuan_dense" => Ok(ModelType::HunyuanV1Dense),
         "hunyuan" => Ok(detect_hunyuan_model_type(&v)),
         "mimo" => Ok(ModelType::MiMo),
+        "granite" => Ok(ModelType::Granite),
         "exaone" => Ok(ModelType::ExaOne),
         "exaone4" => Ok(ModelType::ExaOne4),
         "exaone_moe" => Ok(ModelType::ExaOneMoe),

@@ -191,6 +191,7 @@ fn fallback_architecture(model_type: ModelType) -> &'static str {
         ModelType::HunyuanMoe => "hunyuan_moe",
         ModelType::HunyuanV1Dense => "hunyuan_v1_dense",
         ModelType::MiMo => "mimo",
+        ModelType::Granite => "granite",
         ModelType::ExaOne => "exaone",
         ModelType::ExaOne4 => "exaone4",
         ModelType::ExaOneMoe => "exaone_moe",

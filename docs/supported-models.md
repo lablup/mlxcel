@@ -28,6 +28,7 @@ Implemented model families include:
 - GLM 4, GLM MoE, GLM MoE DSA
 - ERNIE 4.5 and ERNIE 4.5 MoE
 - Hunyuan dense and MoE variants
+- IBM Granite dense (`granite`)
 - ExaOne / ExaOne 4 / ExaOne MoE / Solar Open
 - OLMo / OLMo2 / OLMo3 / OLMoE
 - StarCoder2, StableLM, SmolLM3, Baichuan, MiniCPM, MiniCPM3, MiniMax,
