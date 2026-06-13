@@ -530,8 +530,11 @@ jobs:
           fi
 
           ( cd package && zip -rq "../${ASSET}.zip" "${ASSET}" )
+          # Show the top of the archive without piping to head: head closes the
+          # pipe early and SIGPIPEs unzip, which set -o pipefail would treat as a
+          # step failure. awk reads the whole stream and self-limits its output.
           echo "=== zip top-level entries ==="
-          unzip -l "${ASSET}.zip" | awk 'NR<=3 || /\/(bin|include)\// {print}' | head -20
+          unzip -l "${ASSET}.zip" | awk 'NR<=3 {print} /\/(bin|include)\// && shown<17 {print; shown++}'
 
       - name: Generate checksum
         run: sha256sum "${{ matrix.asset_name }}.zip" > "${{ matrix.asset_name }}.zip.sha256"
@@ -703,8 +706,11 @@ jobs:
           fi
 
           ( cd package && zip -rq "../${ASSET_NAME}.zip" "${ASSET_NAME}" )
+          # Show the top of the archive without piping to head: head closes the
+          # pipe early and SIGPIPEs unzip, which set -o pipefail would treat as a
+          # step failure. awk reads the whole stream and self-limits its output.
           echo "=== zip top-level entries ==="
-          unzip -l "${ASSET_NAME}.zip" | awk 'NR<=3 || /\/(bin|include)\// {print}' | head -20
+          unzip -l "${ASSET_NAME}.zip" | awk 'NR<=3 {print} /\/(bin|include)\// && shown<17 {print; shown++}'
 
       - name: Generate checksum
         run: sha256sum "${ASSET_NAME}.zip" > "${ASSET_NAME}.zip.sha256"
