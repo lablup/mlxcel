@@ -60,6 +60,7 @@ pub mod internlm2;
 pub mod internlm3;
 pub mod jamba;
 pub mod kimi_linear;
+pub mod lfm2;
 pub mod llama3;
 pub mod llama4;
 pub mod longcat_flash_ngram;
@@ -138,6 +139,7 @@ pub use internlm2::InternLM2Model;
 pub use internlm3::InternLM3Model;
 pub use jamba::JambaModel;
 pub use kimi_linear::KimiLinearModel;
+pub use lfm2::Lfm2Model;
 pub use llama3::Llama3Model;
 pub use llama4::{Llama4CxxModel, Llama4Wrapper};
 pub use longcat_flash_ngram::LongcatFlashNgramModel;
@@ -311,6 +313,10 @@ pub enum ModelType {
     NemotronHNanoOmniVLM,
     NemotronNAS,
 
+    // Liquid Foundation Models (short-conv + attention hybrid)
+    Lfm2,
+    Lfm2Moe,
+
     // Kimi models
     KimiLinear,
 
@@ -436,6 +442,9 @@ pub const ALL_MODEL_TYPES: &[ModelType] = &[
     ModelType::NemotronH,
     ModelType::NemotronHNanoOmniVLM,
     ModelType::NemotronNAS,
+    // Liquid Foundation Models
+    ModelType::Lfm2,
+    ModelType::Lfm2Moe,
     // Kimi models
     ModelType::KimiLinear,
     // Longcat models
@@ -603,6 +612,10 @@ impl ModelType {
             // ----- Hybrid (Attention + SSM) -----
             ModelType::Jamba => ("Jamba (Mamba + Transformer + MoE)", "Hybrid"),
 
+            // ----- Liquid Foundation Models -----
+            ModelType::Lfm2 => ("LFM2 (short-conv + attention hybrid)", "LFM2"),
+            ModelType::Lfm2Moe => ("LFM2-MoE (sigmoid-gated experts)", "LFM2"),
+
             // ----- RWKV -----
             ModelType::Rwkv7 => ("RWKV v7", "RWKV"),
 
@@ -753,3 +766,7 @@ mod qwen3_5_tests;
 #[cfg(test)]
 #[path = "granite_tests.rs"]
 mod granite_tests;
+
+#[cfg(test)]
+#[path = "lfm2_tests.rs"]
+mod lfm2_tests;

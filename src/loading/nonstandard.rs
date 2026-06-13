@@ -63,6 +63,14 @@ pub(crate) fn try_load_nonstandard_model_from_dir(
             super::load_pair_from_dir(path_str, |path| models::JambaModel::load(&path))
                 .map(LoadedModel::Jamba)?,
         ),
+        ModelType::Lfm2 => Some(
+            super::load_pair_from_dir(path_str, |path| models::Lfm2Model::load(&path))
+                .map(LoadedModel::Lfm2)?,
+        ),
+        ModelType::Lfm2Moe => Some(
+            super::load_pair_from_dir(path_str, |path| models::Lfm2Model::load(&path))
+                .map(LoadedModel::Lfm2Moe)?,
+        ),
         ModelType::NemotronH => Some(
             super::load_pair_from_dir(path_str, |path| models::NemotronHModel::load(&path))
                 .map(LoadedModel::NemotronH)?,

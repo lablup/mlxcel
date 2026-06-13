@@ -139,6 +139,8 @@ pub enum LoadedModel {
     Mamba(models::MambaModel),
     Mamba2(models::Mamba2Model),
     Jamba(models::JambaModel),
+    Lfm2(models::Lfm2Model),
+    Lfm2Moe(models::Lfm2Model),
     NemotronH(models::NemotronHModel),
     /// Nemotron H Nano Omni — vision-capable variant (vision-only).
     NemotronHNanoOmniVLM(vision::NemotronHNanoOmniVlModel),
@@ -247,6 +249,8 @@ macro_rules! delegate_language_model {
             LoadedModel::Mamba(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::Mamba2(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::Jamba(inner) => LanguageModel::$method(inner, $($arg),*),
+            LoadedModel::Lfm2(inner) => LanguageModel::$method(inner, $($arg),*),
+            LoadedModel::Lfm2Moe(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::NemotronH(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::NemotronHNanoOmniVLM(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::NemotronNAS(inner) => LanguageModel::$method(inner, $($arg),*),

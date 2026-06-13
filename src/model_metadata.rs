@@ -182,6 +182,8 @@ macro_rules! for_each_model_registration {
             Mamba => { kind: Text, directory: Nonstandard, weight: Some(WeightLoadRoute::Special), adapter: None };
             Mamba2 => { kind: Text, directory: Nonstandard, weight: Some(WeightLoadRoute::Special), adapter: None };
             Jamba => { kind: Text, directory: Nonstandard, weight: Some(WeightLoadRoute::Special), adapter: None };
+            Lfm2 => { kind: Text, directory: Nonstandard, weight: Some(WeightLoadRoute::Special), adapter: None };
+            Lfm2Moe => { kind: Text, directory: Nonstandard, weight: Some(WeightLoadRoute::Special), adapter: None };
             NemotronH => { kind: Text, directory: Nonstandard, weight: Some(WeightLoadRoute::Special), adapter: None };
             NemotronHNanoOmniVLM => { kind: Vlm, directory: Vlm, weight: None, adapter: Some("Nemotron H Nano Omni VLM does not support adapter loading; use load_model() instead") };
             NemotronNAS => { kind: Text, directory: Nonstandard, weight: Some(WeightLoadRoute::Special), adapter: None };

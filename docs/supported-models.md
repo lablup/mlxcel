@@ -34,6 +34,7 @@ Implemented model families include:
 - StarCoder2, StableLM, SmolLM3, Baichuan, MiniCPM, MiniCPM3, MiniMax,
   Ministral3, Mistral4, Nemotron, Nemotron-NAS, Step 3.5, MiMo
 - Mamba, Mamba2, RWKV7, Recurrent Gemma, Jamba, Nemotron-H
+- LFM2 and LFM2-MoE (Liquid Foundation Models: short-convolution and attention hybrid; the MoE variant routes through sigmoid-gated experts)
 - Kimi Linear, LongCat Flash, LongCat Flash N-gram
 - GPT-OSS
 
