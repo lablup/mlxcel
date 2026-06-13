@@ -576,6 +576,144 @@ fn download_remote_tokenizer(repo_id: &str) -> Result<tokenizers::Tokenizer> {
     tokenizers::Tokenizer::from_file(tokenizer_path).map_err(|err| anyhow::anyhow!(err))
 }
 
+/// Build a JSON object for one of PLaMo's four special tokens, in the shape the
+/// `tokenizers` crate expects inside the top-level `added_tokens` array.
+fn plamo_added_token(id: u32, content: &str) -> serde_json::Value {
+    serde_json::json!({
+        "id": id,
+        "content": content,
+        "single_word": false,
+        "lstrip": false,
+        "rstrip": false,
+        "normalized": false,
+        "special": true,
+    })
+}
+
+/// Build a HuggingFace [`tokenizers::Tokenizer`] for PLaMo's custom
+/// `PlamoTokenizer` format.
+///
+/// PLaMo 2 checkpoints ship a `tokenizer.jsonl` Unigram vocabulary (one
+/// `[token, score, type]` array per line, where the line index is the token id)
+/// plus a `tokenization_plamo.py` reference, instead of a `tokenizer.json`,
+/// SentencePiece `tokenizer.model`, or tiktoken vocab. The reference tokenizer
+/// is a SentencePiece-style Unigram with byte fallback, run over the raw text
+/// (no normalizer, no pre-tokenizer) using Viterbi (maximum-score) decoding;
+/// 256 `<0xXX>` byte tokens cover any character the vocab does not.
+///
+/// We reconstruct that behavior with the `tokenizers` crate's Unigram model:
+/// the vocab and scores load verbatim in token-id order, `byte_fallback` routes
+/// uncovered characters through the `<0xXX>` tokens, and a `ByteFallback`
+/// decoder reassembles those bytes (UTF-8, lossy) exactly like
+/// `PlamoTokenizer.convert_tokens_to_string`. The four special tokens (unk=0,
+/// bos=1, eos=2, pad=3) are also registered as added/special tokens so
+/// `decode(skip_special_tokens=true)` can strip them and EOS detection matches.
+///
+/// Upstream reference:
+/// https://huggingface.co/pfnet/plamo-2-1b/blob/main/tokenization_plamo.py
+fn build_plamo_tokenizer(model_path: &Path) -> Result<tokenizers::Tokenizer> {
+    use std::io::BufRead;
+
+    let jsonl_path = model_path.join("tokenizer.jsonl");
+    let file = std::fs::File::open(&jsonl_path)
+        .map_err(|e| anyhow::anyhow!("Failed to open {:?}: {}", jsonl_path, e))?;
+    let reader = std::io::BufReader::new(file);
+
+    // The Unigram vocab in token-id order: vocab[i] = [token, score]. Each
+    // jsonl line is a `[token, score, type]` array; the line index is the id.
+    // Parse via serde_json so tokens containing quotes, backslashes, control
+    // characters, or non-BMP code points are handled as real JSON, never
+    // hand-formatted. The `type` field ("NORMAL" / "CONTROL" / "UNKNOWN" /
+    // "BYTE") is informational: byte tokens stay in the vocab with their scores
+    // so `byte_fallback` can resolve them, matching the Python tokenizer, which
+    // keeps every entry addressable by id.
+    let mut vocab: Vec<serde_json::Value> = Vec::new();
+    for (idx, line) in reader.lines().enumerate() {
+        let line = line
+            .map_err(|e| anyhow::anyhow!("Failed to read {:?} line {}: {}", jsonl_path, idx, e))?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        let row: serde_json::Value = serde_json::from_str(&line).map_err(|e| {
+            anyhow::anyhow!(
+                "Failed to parse {:?} line {} ({:?}): {}",
+                jsonl_path,
+                idx,
+                line,
+                e
+            )
+        })?;
+        let entry = row.as_array().ok_or_else(|| {
+            anyhow::anyhow!(
+                "{:?} line {} is not a JSON array: {:?}",
+                jsonl_path,
+                idx,
+                line
+            )
+        })?;
+        let token = entry.first().and_then(|v| v.as_str()).ok_or_else(|| {
+            anyhow::anyhow!(
+                "{:?} line {} has no string token: {:?}",
+                jsonl_path,
+                idx,
+                line
+            )
+        })?;
+        let score = entry.get(1).and_then(|v| v.as_f64()).ok_or_else(|| {
+            anyhow::anyhow!(
+                "{:?} line {} has no numeric score: {:?}",
+                jsonl_path,
+                idx,
+                line
+            )
+        })?;
+        vocab.push(serde_json::json!([token, score]));
+    }
+
+    if vocab.is_empty() {
+        return Err(anyhow::anyhow!(
+            "{:?} contained no vocab entries",
+            jsonl_path
+        ));
+    }
+
+    // Raw text in, raw text out: no normalizer and no pre-tokenizer (PLaMo
+    // tokens carry literal spaces, e.g. " of"/"  ", not SentencePiece `_`
+    // markers), and a ByteFallback decoder mirrors `convert_tokens_to_string`.
+    let tokenizer_json = serde_json::json!({
+        "version": "1.0",
+        "truncation": null,
+        "padding": null,
+        "added_tokens": [
+            plamo_added_token(0, "<|plamo:unk|>"),
+            plamo_added_token(1, "<|plamo:bos|>"),
+            plamo_added_token(2, "<|plamo:eos|>"),
+            plamo_added_token(3, "<|plamo:pad|>"),
+        ],
+        "normalizer": null,
+        "pre_tokenizer": null,
+        "post_processor": null,
+        "decoder": {"type": "ByteFallback"},
+        "model": {
+            "type": "Unigram",
+            "unk_id": 0,
+            "byte_fallback": true,
+            "vocab": vocab,
+        },
+    });
+
+    let json_bytes = serde_json::to_vec(&tokenizer_json)
+        .map_err(|e| anyhow::anyhow!("Failed to serialize PLaMo tokenizer.json: {}", e))?;
+
+    tokenizers::Tokenizer::from_bytes(json_bytes).map_err(|e| {
+        anyhow::anyhow!(
+            "Failed to build PLaMo tokenizer from {:?}: {}",
+            jsonl_path,
+            e
+        )
+    })
+}
+
 pub fn load_tokenizer(model_path: &Path) -> Result<MlxcelTokenizer> {
     // Try HuggingFace tokenizer.json first
     let tokenizer_json_path = model_path.join("tokenizer.json");
@@ -605,6 +743,14 @@ pub fn load_tokenizer(model_path: &Path) -> Result<MlxcelTokenizer> {
         return Ok(MlxcelTokenizer::Tiktoken(tokenizer));
     }
 
+    // Fall back to PLaMo's `tokenizer.jsonl` (a Unigram vocab shipped instead
+    // of tokenizer.json / tokenizer.model; see build_plamo_tokenizer).
+    if model_path.join("tokenizer.jsonl").exists() {
+        return Ok(MlxcelTokenizer::HuggingFace(build_plamo_tokenizer(
+            model_path,
+        )?));
+    }
+
     if let Some(repo_id) = remote_tokenizer_repo_for_model(model_path) {
         let tokenizer = download_remote_tokenizer(repo_id).map_err(|err| {
             anyhow::anyhow!(
@@ -618,7 +764,7 @@ pub fn load_tokenizer(model_path: &Path) -> Result<MlxcelTokenizer> {
     }
 
     Err(anyhow::anyhow!(
-        "No tokenizer found in {:?} (tried tokenizer.json, tokenizer.model, and *.tiktoken)",
+        "No tokenizer found in {:?} (tried tokenizer.json, tokenizer.model, *.tiktoken, and tokenizer.jsonl)",
         model_path
     ))
 }
@@ -945,5 +1091,71 @@ mod tests {
         // rfind variant returns the same index when there is exactly one
         // occurrence.
         assert_eq!(markers.rfind_think_end(&body, None, None), Some(close_idx));
+    }
+
+    // -- Real PLaMo tokenizer integration ---------------------------------
+    //
+    // PLaMo 2 ships a `tokenizer.jsonl` Unigram vocab and a custom
+    // `tokenization_plamo.py`, not a tokenizer.json. `build_plamo_tokenizer`
+    // reconstructs the SentencePiece-style Unigram + byte-fallback behavior on
+    // top of the `tokenizers` crate. These cases load the real vocab from
+    // `models/plamo-2-1b/` and assert exact parity against id sequences and
+    // decoded strings captured from PlamoTokenizer's own Aho-Corasick encode.
+    // The tokenizer is CPU-only (no MLX/Metal), so this runs in the normal lib
+    // test suite; it skips gracefully when the checkpoint is absent.
+
+    /// `(input text, expected token ids)` pairs captured from the reference
+    /// PlamoTokenizer's own Aho-Corasick encode.
+    const PLAMO_REFERENCE_CASES: &[(&str, &[u32])] = &[
+        (
+            "The capital of France is Paris.",
+            &[1097, 3849, 1079, 7148, 45119, 10188, 46],
+        ),
+        (
+            "def foo(x):\n    return x+1",
+            &[1276, 23154, 40, 120, 1189, 45059, 1094, 376, 43, 49],
+        ),
+        ("東京は日本の首都です。", &[47361, 64657, 58577, 47134]),
+        ("Hello world", &[6721, 1462]),
+        ("  spaces", &[288, 18541]),
+    ];
+
+    #[test]
+    fn plamo_tokenizer_matches_reference_encodings() {
+        let model_dir = std::path::Path::new("models/plamo-2-1b");
+        if !model_dir.exists() {
+            eprintln!(
+                "skipping plamo_tokenizer_matches_reference_encodings: models/plamo-2-1b is absent"
+            );
+            return;
+        }
+        let tok = super::load_tokenizer(model_dir).expect("load PLaMo tokenizer");
+
+        for (text, expected) in PLAMO_REFERENCE_CASES {
+            let ids = tok.encode(text, false).expect("encode");
+            assert_eq!(
+                &ids, expected,
+                "encode mismatch for {text:?}: got {ids:?}, want {expected:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn plamo_tokenizer_round_trips_decode() {
+        let model_dir = std::path::Path::new("models/plamo-2-1b");
+        if !model_dir.exists() {
+            eprintln!("skipping plamo_tokenizer_round_trips_decode: models/plamo-2-1b is absent");
+            return;
+        }
+        let tok = super::load_tokenizer(model_dir).expect("load PLaMo tokenizer");
+
+        for (text, _) in PLAMO_REFERENCE_CASES {
+            let ids = tok.encode(text, false).expect("encode");
+            let decoded = tok.decode(&ids, false).expect("decode");
+            assert_eq!(
+                &decoded, text,
+                "decode round-trip mismatch for {text:?}: got {decoded:?}"
+            );
+        }
     }
 }
