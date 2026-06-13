@@ -118,6 +118,7 @@ pub enum LoadedModel {
     HunyuanMoe(models::HunyuanMoeModel),
     HunyuanV1Dense(models::HunyuanV1DenseModel),
     MiMo(models::MiMoModel),
+    Apertus(models::ApertusModel),
     Granite(models::GraniteModel),
     ExaOne(models::ExaOneModel),
     // Sliding window model uses wrapper
@@ -233,6 +234,7 @@ macro_rules! delegate_language_model {
             LoadedModel::HunyuanMoe(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::HunyuanV1Dense(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::MiMo(inner) => LanguageModel::$method(inner, $($arg),*),
+            LoadedModel::Apertus(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::Granite(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::ExaOne(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::ExaOne4(inner) => LanguageModel::$method(inner, $($arg),*),

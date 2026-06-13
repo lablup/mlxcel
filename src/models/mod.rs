@@ -29,6 +29,7 @@ pub mod gated_delta;
 pub mod switch_layers;
 
 // Model implementations (mlxcel-core based)
+pub mod apertus;
 pub mod baichuan;
 pub mod cohere;
 pub mod cohere2;
@@ -111,6 +112,7 @@ pub mod step3p5;
 pub mod youtu_vl_lm;
 
 // Re-export model types
+pub use apertus::ApertusModel;
 pub use baichuan::BaichuanModel;
 pub use cohere::CohereModel;
 pub use cohere2::Cohere2Model;
@@ -282,6 +284,9 @@ pub enum ModelType {
     HunyuanV1Dense,
     MiMo,
 
+    // Apertus (Swiss AI)
+    Apertus,
+
     // IBM Granite
     Granite,
 
@@ -428,6 +433,8 @@ pub const ALL_MODEL_TYPES: &[ModelType] = &[
     ModelType::HunyuanMoe,
     ModelType::HunyuanV1Dense,
     ModelType::MiMo,
+    // Apertus (Swiss AI)
+    ModelType::Apertus,
     // IBM Granite
     ModelType::Granite,
     // Korean models
@@ -655,6 +662,7 @@ impl ModelType {
             ModelType::MiniCPM3 => ("MiniCPM 3", "Specialized"),
             ModelType::SmolLM3 => ("SmolLM 3", "Specialized"),
             ModelType::MiMo => ("MiMo (multi-token prediction)", "Specialized"),
+            ModelType::Apertus => ("Apertus (dense)", "Specialized"),
 
             // ----- Other VLM (cross-family vision-language stacks) -----
             ModelType::LlavaVLM => ("LLaVA (CLIP/SigLIP + Llama/Qwen2)", "Other VLM"),
@@ -790,6 +798,10 @@ mod qwen_vl_position_tests;
 #[cfg(test)]
 #[path = "qwen3_5_tests.rs"]
 mod qwen3_5_tests;
+
+#[cfg(test)]
+#[path = "apertus_tests.rs"]
+mod apertus_tests;
 
 #[cfg(test)]
 #[path = "granite_tests.rs"]
