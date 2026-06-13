@@ -129,12 +129,11 @@ headers available on the deployment host, not only the runtime libraries:
   archives (both aarch64 and x86_64). Each unpacks to `bin/` + `include/cccl/`,
   the layout MLX's JIT looks for relative to the executable
   (`<exe-dir>/../include/cccl`). Keep `mlxcel`/`mlxcel-server` under `bin/` and
-  the `include/cccl/` directory beside it; do not flatten them. Launch the
-  binary by its **absolute path** (`/path/to/bin/mlxcel`, as a service manager
-  or a parent process spawning a subprocess does). MLX resolves the bundled
-  header location from the executable's own path, and a relative launch
-  (`./mlxcel` from inside `bin/`) can defeat that resolution and fail the first
-  kernel JIT. A future `MLXCEL_CCCL_DIR` override will remove this constraint.
+  the `include/cccl/` directory beside it; do not flatten them. The runtime
+  resolves the bundled headers from the executable's canonical path
+  (`/proc/self/exe`), so any launch style works, including a relative
+  `./mlxcel`. Set `MLXCEL_CCCL_DIR` to point the JIT at the CCCL headers
+  explicitly, e.g. when embedding mlxcel and keeping a flat binary layout.
 - **CUDA toolkit headers** (`cuda_runtime.h` and friends) come from the host.
   Install the CUDA toolkit and set `CUDA_HOME` (or `CUDA_PATH`) if it is not at
   `/usr/local/cuda`. Without them the first NVRTC compile fails with
@@ -150,8 +149,10 @@ sessions.
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `CUDA_HOME` | CUDA toolkit root used by the build script | `/usr/local/cuda` when present |
+| `CUDA_HOME` | CUDA toolkit root, build-time and for runtime NVRTC headers | `/usr/local/cuda` when present |
 | `MLX_CUDA_ARCHITECTURES` | CUDA SM target list, build-time | auto-detect via `nvidia-smi`, then `90a` fallback |
+| `MLXCEL_CCCL_DIR` | Override for the bundled CCCL (libcu++) header dir used by the CUDA NVRTC JIT | bundled `<exe-dir>/../include/cccl`, then build-time fallback |
+| `MLX_PTX_CACHE_DIR` | On-disk cache for JIT-compiled CUDA kernels | system temp dir |
 | `MLXCEL_DEVICE` | Runtime device hint (`gpu` or `cpu`) | auto |
 | `MLXCEL_WIRED_LIMIT` | Apple Silicon wired-memory ceiling, e.g. `64GB`; `0`/`none` disables it | `max` |
 | `LLAMA_ARG_*` | Environment-backed server options accepted by clap | unset |
