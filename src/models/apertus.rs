@@ -513,8 +513,12 @@ fn get_weight_copy(weights: &WeightMap, name: &str) -> Result<UniquePtr<MlxArray
 fn read_scalar(weights: &WeightMap, name: &str) -> Option<f32> {
     weights.get(name).map(|w| {
         let squeezed = mlxcel_core::squeeze(w);
-        mlxcel_core::eval(&squeezed);
-        mlxcel_core::item_f32(&squeezed)
+        // The `act_fn` scalars ship as bf16; cast to f32 before the item read so
+        // the value (not the raw bytes) is recovered. Without this the xIELU
+        // coefficients collapse to ~zero and the MLP branch vanishes.
+        let as_f32 = mlxcel_core::astype(&squeezed, mlxcel_core::dtype::FLOAT32);
+        mlxcel_core::eval(&as_f32);
+        mlxcel_core::item_f32(&as_f32)
     })
 }
 

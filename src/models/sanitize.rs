@@ -1179,14 +1179,21 @@ pub fn load_text_weights<P: AsRef<std::path::Path>>(
     }
 
     // Convert bf16 → f16 on all Apple Silicon for performance.  No Apple GPU
-    // has native bf16 ALU, so f16 is strictly better.  Only for non-quantized
-    // models — quantized models use bf16 scales/biases in quantized_matmul
-    // which handles bf16 natively.
-    if !is_quantized && should_convert_bf16_to_f16() {
-        let had_bf16 = if keep_gemma3n_mlp_bf16 {
-            convert_bf16_weights_with_keep(&mut weights, gemma3n_language_mlp_bf16_key)
+    // has native bf16 ALU, so f16 is strictly better.  For non-quantized models
+    // every bf16 tensor is promoted.  For quantized models the packed weights
+    // stay as-is, but the bf16 quantization scales/biases must still be promoted
+    // to f16: mlxcel's quantized dequant path reads f16 scales (f16-scale
+    // exports such as `mlx-community/granite-*` work), whereas the bf16 scales
+    // shipped by newer exports (Apertus-2509, Seed-OSS) dequantize to ~zero.
+    if should_convert_bf16_to_f16() {
+        let had_bf16 = if !is_quantized {
+            if keep_gemma3n_mlp_bf16 {
+                convert_bf16_weights_with_keep(&mut weights, gemma3n_language_mlp_bf16_key)
+            } else {
+                convert_bf16_weights(&mut weights)
+            }
         } else {
-            convert_bf16_weights(&mut weights)
+            convert_quant_scales_bf16_to_f16(&mut weights)
         };
         if had_bf16 {
             warn_bf16_precision();
@@ -1194,6 +1201,32 @@ pub fn load_text_weights<P: AsRef<std::path::Path>>(
     }
 
     Ok(weights)
+}
+
+/// Promote bf16 quantization scales/biases to f16 in place, leaving the packed
+/// (uint32) weights and every other tensor untouched.  mlxcel's quantized
+/// dequant kernels require f16 scales/biases; checkpoints that ship them as
+/// bf16 otherwise dequantize to near-zero.  Returns true if any tensor changed.
+fn convert_quant_scales_bf16_to_f16(weights: &mut mlxcel_core::weights::WeightMap) -> bool {
+    let keys: Vec<String> = weights
+        .keys()
+        .filter(|k| k.ends_with(".scales") || k.ends_with(".biases"))
+        .cloned()
+        .collect();
+    let mut converted = false;
+    for k in keys {
+        let promoted = match weights.get(&k) {
+            Some(w) if mlxcel_core::array_dtype(w) == mlxcel_core::dtype::BFLOAT16 => {
+                Some(mlxcel_core::astype(w, mlxcel_core::dtype::FLOAT16))
+            }
+            _ => None,
+        };
+        if let Some(f16) = promoted {
+            weights.insert(k, f16);
+            converted = true;
+        }
+    }
+    converted
 }
 
 /// Returns true when bf16 tensors should be cast to f16 at load time.
