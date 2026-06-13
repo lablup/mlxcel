@@ -109,6 +109,25 @@ fn rejects_control_characters() {
     assert!(parse_allowed_origins(&origins(&["https://x.com\nevil"])).is_err());
 }
 
+#[test]
+fn rejects_origin_with_trailing_slash() {
+    // A trailing slash is a path; the browser `Origin` header carries none, so
+    // `https://app.example.com/` could only ever silently never match. Reject
+    // it at startup so the misconfiguration surfaces instead of failing closed
+    // but confusing. `http::Uri::path()` reports the empty path as `/`, so this
+    // must be caught on the raw string, not via the parsed path.
+    let err = parse_allowed_origins(&origins(&["https://app.example.com/"])).unwrap_err();
+    assert!(err.to_string().contains("app.example.com"));
+}
+
+#[test]
+fn rejects_origin_with_userinfo() {
+    // A browser `Origin` never includes `user[:pass]@`; an authority carrying
+    // userinfo can never match, so reject it rather than silently dropping it.
+    assert!(parse_allowed_origins(&origins(&["http://user@host"])).is_err());
+    assert!(parse_allowed_origins(&origins(&["https://user:pass@app.example.com"])).is_err());
+}
+
 fn test_router(origins: Option<&[HeaderValue]>) -> Router {
     Router::new()
         .route("/", get(|| async { "ok" }))

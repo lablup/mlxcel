@@ -35,10 +35,13 @@ use tower_http::cors::{AllowOrigin, Any, CorsLayer};
 /// are skipped, but a value that contains nothing but blank entries is a
 /// configuration error rather than a silent "no origins" result, because the
 /// operator clearly intended to set a policy. Every surviving entry must be a
-/// well-formed origin: a `scheme://host[:port]` with an `http`/`https` scheme,
-/// an authority, and no path (other than `/`), query, or control characters.
-/// Valid values are preserved verbatim (only trimmed) so they match the
-/// browser-sent `Origin` header exactly.
+/// bare origin: a `scheme://host[:port]` with an `http`/`https` scheme and an
+/// authority, and nothing else: no path (not even a bare trailing slash), no
+/// query, no fragment, no userinfo, and no control characters. A browser
+/// `Origin` header never carries any of those, so a value that included one
+/// could only ever silently never match; rejecting it at startup surfaces the
+/// misconfiguration instead. Valid values are preserved verbatim (only
+/// trimmed) so they match the browser-sent `Origin` header exactly.
 ///
 /// Returns an [`Err`] naming the offending value on the first invalid entry,
 /// so the failure is surfaced clearly at startup instead of being dropped.
@@ -52,8 +55,9 @@ pub(crate) fn parse_allowed_origins(raw: &[String]) -> anyhow::Result<Vec<Header
         validate_origin(trimmed)?;
         let value = HeaderValue::from_str(trimmed).map_err(|_| {
             anyhow::anyhow!(
-                "invalid --allowed-origins value '{trimmed}': origins must be a \
-                 scheme://host[:port] with no path, e.g. https://app.example.com"
+                "invalid --allowed-origins value '{trimmed}': origins must be a bare \
+                 scheme://host[:port] with no path, query, or userinfo, e.g. \
+                 https://app.example.com"
             )
         })?;
         origins.push(value);
@@ -72,27 +76,49 @@ pub(crate) fn parse_allowed_origins(raw: &[String]) -> anyhow::Result<Vec<Header
 
 /// Validate that `value` is a bare origin (`scheme://host[:port]`).
 ///
-/// An origin has a scheme, an authority, and nothing else: no path, query, or
-/// fragment. We parse with [`axum::http::Uri`] and enforce those invariants
-/// rather than hand-rolling a parser.
+/// An origin has a scheme, an authority, and nothing else: no path, query,
+/// fragment, or userinfo. `http::Uri` normalizes an empty path to `/`, so it
+/// cannot tell `https://host` apart from `https://host/`; we therefore inspect
+/// the raw authority substring directly to reject a trailing slash, path,
+/// query, fragment, or `user@` userinfo (none of which a browser `Origin` ever
+/// carries, so any of them could only ever silently never match), then parse
+/// with [`axum::http::Uri`] to confirm a known scheme, a well-formed authority,
+/// and the absence of control characters.
 fn validate_origin(value: &str) -> anyhow::Result<()> {
     let bad = || {
         anyhow::anyhow!(
-            "invalid --allowed-origins value '{value}': origins must be a \
-             scheme://host[:port] with no path, e.g. https://app.example.com"
+            "invalid --allowed-origins value '{value}': origins must be a bare \
+             scheme://host[:port] with no path, query, or userinfo, e.g. \
+             https://app.example.com"
         )
     };
 
+    // Structural check on the raw string. The authority is everything after the
+    // first `://`; a browser `Origin` is exactly `scheme://host[:port]`, so the
+    // authority must not contain a path separator (`/`, which also catches a
+    // bare trailing slash), a query (`?`), a fragment (`#`), or userinfo (`@`).
+    // This is done on the raw text because `http::Uri::path()` reports an empty
+    // path as `/`, hiding a configured trailing slash from a parsed-path check.
+    let authority_raw = value
+        .split_once("://")
+        .map(|(_, rest)| rest)
+        .ok_or_else(bad)?;
+    if authority_raw.is_empty()
+        || authority_raw.contains('/')
+        || authority_raw.contains('?')
+        || authority_raw.contains('#')
+        || authority_raw.contains('@')
+    {
+        return Err(bad());
+    }
+
+    // Structural parse: confirm an http/https scheme, a well-formed authority,
+    // and reject control characters or otherwise malformed authorities.
     let uri: axum::http::Uri = value.parse().map_err(|_| bad())?;
     let scheme_ok = matches!(uri.scheme_str(), Some("http") | Some("https"));
     let has_authority = uri.authority().is_some();
-    // An absolute origin carries no path; `http::Uri` reports the empty path as
-    // either "" or "/" depending on the input, so accept both and reject any
-    // real path segment.
-    let path_ok = uri.path().is_empty() || uri.path() == "/";
-    let has_query = uri.query().is_some();
 
-    if scheme_ok && has_authority && path_ok && !has_query {
+    if scheme_ok && has_authority {
         Ok(())
     } else {
         Err(bad())
