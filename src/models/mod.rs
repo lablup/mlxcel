@@ -104,6 +104,7 @@ pub mod qwen3_vl;
 pub mod qwen3_vl_moe;
 pub mod recurrent_gemma;
 pub mod rwkv7;
+pub mod seed_oss;
 pub mod smollm3;
 pub mod solar_open;
 pub mod stablelm;
@@ -196,6 +197,7 @@ pub use sanitize::{
     load_and_sanitize_weights, load_text_weights, sanitize_config_json, sanitize_tied_embeddings,
     warn_bf16_precision,
 };
+pub use seed_oss::SeedOssModel;
 pub use smollm3::SmolLM3Model;
 pub use solar_open::SolarOpenModel;
 pub use stablelm::StableLMModel;
@@ -286,6 +288,9 @@ pub enum ModelType {
 
     // Apertus (Swiss AI)
     Apertus,
+
+    // ByteDance Seed-OSS (dense)
+    SeedOss,
 
     // IBM Granite
     Granite,
@@ -435,6 +440,8 @@ pub const ALL_MODEL_TYPES: &[ModelType] = &[
     ModelType::MiMo,
     // Apertus (Swiss AI)
     ModelType::Apertus,
+    // ByteDance Seed-OSS
+    ModelType::SeedOss,
     // IBM Granite
     ModelType::Granite,
     // Korean models
@@ -663,6 +670,7 @@ impl ModelType {
             ModelType::SmolLM3 => ("SmolLM 3", "Specialized"),
             ModelType::MiMo => ("MiMo (multi-token prediction)", "Specialized"),
             ModelType::Apertus => ("Apertus (dense)", "Specialized"),
+            ModelType::SeedOss => ("Seed-OSS", "Specialized"),
 
             // ----- Other VLM (cross-family vision-language stacks) -----
             ModelType::LlavaVLM => ("LLaVA (CLIP/SigLIP + Llama/Qwen2)", "Other VLM"),
@@ -806,6 +814,10 @@ mod apertus_tests;
 #[cfg(test)]
 #[path = "granite_tests.rs"]
 mod granite_tests;
+
+#[cfg(test)]
+#[path = "seed_oss_tests.rs"]
+mod seed_oss_tests;
 
 #[cfg(test)]
 #[path = "lfm2_tests.rs"]

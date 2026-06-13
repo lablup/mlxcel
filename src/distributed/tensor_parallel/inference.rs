@@ -192,6 +192,7 @@ fn fallback_architecture(model_type: ModelType) -> &'static str {
         ModelType::HunyuanV1Dense => "hunyuan_v1_dense",
         ModelType::MiMo => "mimo",
         ModelType::Apertus => "apertus",
+        ModelType::SeedOss => "seed_oss",
         ModelType::Granite => "granite",
         ModelType::ExaOne => "exaone",
         ModelType::ExaOne4 => "exaone4",
