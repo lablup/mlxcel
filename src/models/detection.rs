@@ -181,6 +181,7 @@ pub fn get_model_type(model_path: &Path) -> Result<ModelType> {
         "mamba" | "falcon_mamba" => Ok(ModelType::Mamba),
         "mamba2" => Ok(ModelType::Mamba2),
         "jamba" => Ok(ModelType::Jamba),
+        "falcon_h1" => Ok(ModelType::FalconH1),
         "lfm2" => Ok(ModelType::Lfm2),
         "lfm2_moe" => Ok(ModelType::Lfm2Moe),
         "nemotron_h" => Ok(ModelType::NemotronH),

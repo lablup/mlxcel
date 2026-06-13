@@ -63,6 +63,10 @@ pub(crate) fn try_load_nonstandard_model_from_dir(
             super::load_pair_from_dir(path_str, |path| models::JambaModel::load(&path))
                 .map(LoadedModel::Jamba)?,
         ),
+        ModelType::FalconH1 => Some(
+            super::load_pair_from_dir(path_str, |path| models::FalconH1Model::load(&path))
+                .map(LoadedModel::FalconH1)?,
+        ),
         ModelType::Lfm2 => Some(
             super::load_pair_from_dir(path_str, |path| models::Lfm2Model::load(&path))
                 .map(LoadedModel::Lfm2)?,

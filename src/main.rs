@@ -1684,6 +1684,7 @@ const FAMILY_ORDER: &[&str] = &[
     "MoE (other)",
     "Mamba / SSM",
     "Hybrid",
+    "Falcon",
     "LFM2",
     "RWKV",
     "Specialized",

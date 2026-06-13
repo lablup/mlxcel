@@ -210,6 +210,7 @@ fn fallback_architecture(model_type: ModelType) -> &'static str {
         ModelType::Mamba => "mamba",
         ModelType::Mamba2 => "mamba2",
         ModelType::Jamba => "jamba",
+        ModelType::FalconH1 => "falcon_h1",
         ModelType::Lfm2 => "lfm2",
         ModelType::Lfm2Moe => "lfm2_moe",
         ModelType::NemotronH => "nemotron_h",

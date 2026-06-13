@@ -42,6 +42,7 @@ pub mod ernie4_5_moe;
 pub mod exaone;
 pub mod exaone4;
 pub mod exaone_moe;
+pub mod falcon_h1;
 pub mod gemma;
 pub mod gemma2;
 pub mod gemma3;
@@ -122,6 +123,7 @@ pub use ernie4_5_moe::Ernie45MoeModel;
 pub use exaone::ExaOneModel;
 pub use exaone_moe::ExaoneMoeModel;
 pub use exaone4::{ExaOne4Model, ExaOne4Wrapper};
+pub use falcon_h1::FalconH1Model;
 pub use gemma::GemmaModel;
 pub use gemma2::Gemma2Model;
 pub use gemma3::{Gemma3Model, Gemma3Wrapper};
@@ -313,6 +315,9 @@ pub enum ModelType {
     NemotronHNanoOmniVLM,
     NemotronNAS,
 
+    // TII Falcon (Mamba2 + Attention parallel hybrid)
+    FalconH1,
+
     // Liquid Foundation Models (short-conv + attention hybrid)
     Lfm2,
     Lfm2Moe,
@@ -442,6 +447,8 @@ pub const ALL_MODEL_TYPES: &[ModelType] = &[
     ModelType::NemotronH,
     ModelType::NemotronHNanoOmniVLM,
     ModelType::NemotronNAS,
+    // TII Falcon
+    ModelType::FalconH1,
     // Liquid Foundation Models
     ModelType::Lfm2,
     ModelType::Lfm2Moe,
@@ -612,6 +619,9 @@ impl ModelType {
             // ----- Hybrid (Attention + SSM) -----
             ModelType::Jamba => ("Jamba (Mamba + Transformer + MoE)", "Hybrid"),
 
+            // ----- Falcon -----
+            ModelType::FalconH1 => ("Falcon-H1 (Mamba2 + Attention parallel hybrid)", "Falcon"),
+
             // ----- Liquid Foundation Models -----
             ModelType::Lfm2 => ("LFM2 (short-conv + attention hybrid)", "LFM2"),
             ModelType::Lfm2Moe => ("LFM2-MoE (sigmoid-gated experts)", "LFM2"),
@@ -770,3 +780,7 @@ mod granite_tests;
 #[cfg(test)]
 #[path = "lfm2_tests.rs"]
 mod lfm2_tests;
+
+#[cfg(test)]
+#[path = "falcon_h1_tests.rs"]
+mod falcon_h1_tests;
