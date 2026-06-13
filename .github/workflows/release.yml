@@ -403,18 +403,20 @@ jobs:
     permissions:
       contents: write
 
-    # One aarch64 fat binary covering both NVIDIA aarch64 targets in a single
-    # build: GH200 (Grace Hopper, sm_90a) and GB10 / DGX Spark (Blackwell,
-    # sm_121), cross-compiled on the GB10 runner. 90a is load-bearing for MLX's
-    # Hopper quantized kernel gate, and build.rs forwards the list verbatim. The
-    # CLI and server (~347 MB each) ship as separate archives, both with the
-    # CCCL headers.
+    # One aarch64 fat binary covering the NVIDIA aarch64 targets in a single
+    # build: GH200 (Grace Hopper, sm_90a), GB200 (Grace Blackwell, sm_100), and
+    # GB10 / DGX Spark (Blackwell, sm_121), cross-compiled on the GB10 runner.
+    # 90a is load-bearing for MLX's Hopper quantized kernel gate, and build.rs
+    # forwards the list verbatim. The CLI and server (~347 MB each) ship as
+    # separate archives, both with the CCCL headers.
     env:
-      MLX_CUDA_ARCHITECTURES: "90a;121"
+      MLX_CUDA_ARCHITECTURES: "90a;100;121"
       CLI_ASSET: mlxcel-linux-aarch64-cuda13
       SERVER_ASSET: mlxcel-server-linux-aarch64-cuda13
 
-    timeout-minutes: 180
+    # Cold build compiles MLX for three CUDA architectures; generous ceiling so
+    # a from-scratch build is never killed (the cargo cache makes reruns cheap).
+    timeout-minutes: 360
 
     steps:
       # Self-healing release: build the *source of the target tag* while
@@ -588,8 +590,9 @@ jobs:
 
     # A cold build compiles MLX for six CUDA architectures (CUTLASS-heavy
     # quantized kernels per arch); the persistent cargo cache makes later runs
-    # far cheaper. Generous ceiling so a from-scratch build is not killed.
-    timeout-minutes: 300
+    # far cheaper. Generous ceiling so a from-scratch build is not killed (a
+    # cold 6-arch build was observed at ~3h).
+    timeout-minutes: 480
 
     steps:
       - name: Checkout code

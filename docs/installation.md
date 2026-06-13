@@ -111,9 +111,9 @@ MLX_CUDA_ARCHITECTURES="90a;121" cargo build --release --features cuda
 ```
 
 The repository release workflow builds two Linux CUDA targets on self-hosted
-runners, each as one fat binary: aarch64 covering GH200 (`90a`) and GB10
-(`121`) in a single build (`90a;121`), and x86_64 covering Ampere through
-Blackwell (`80;86;89;90a;100;120`). For each target the `mlxcel` CLI and the
+runners, each as one fat binary: aarch64 covering GH200 (`90a`), GB200 (`100`),
+and GB10 (`121`) in a single build (`90a;100;121`), and x86_64 covering Ampere
+through Blackwell (`80;86;89;90a;100;120`). For each target the `mlxcel` CLI and the
 `mlxcel-server` are published as separate archives (`mlxcel-...` and
 `mlxcel-server-...`, each roughly 347 MB) so a consumer downloads only the one
 it needs. Treat other GPU/OS combinations as source builds that need local
