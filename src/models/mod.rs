@@ -38,6 +38,7 @@ pub mod deepseek_v2;
 pub mod deepseek_v3;
 pub mod deepseek_v32;
 pub mod diffusion_gemma;
+pub mod dots1;
 pub mod ernie4_5;
 pub mod ernie4_5_moe;
 pub mod exaone;
@@ -123,6 +124,7 @@ pub use deepseek_v3::DeepSeekV3Model;
 pub use deepseek_v32::DeepSeekV32Model;
 pub use detection::get_model_type;
 pub use diffusion_gemma::DiffusionGemmaModel;
+pub use dots1::Dots1Model;
 pub use ernie4_5::Ernie45Model;
 pub use ernie4_5_moe::Ernie45MoeModel;
 pub use exaone::ExaOneModel;
@@ -267,6 +269,8 @@ pub enum ModelType {
     DeepSeekV2,
     DeepSeekV3,
     DeepSeekV32,
+    /// rednote dots.llm1 (DeepSeek-V3-style MoE without MLA).
+    Dots1,
 
     // Cohere family
     Cohere,
@@ -422,6 +426,7 @@ pub const ALL_MODEL_TYPES: &[ModelType] = &[
     ModelType::DeepSeekV2,
     ModelType::DeepSeekV3,
     ModelType::DeepSeekV32,
+    ModelType::Dots1,
     // Cohere family
     ModelType::Cohere,
     ModelType::Cohere2,
@@ -640,6 +645,7 @@ impl ModelType {
             ModelType::LongcatFlash => ("LongCat Flash (MLA + MoE, dual sublayer)", "MoE (other)"),
             ModelType::LongcatFlashNgram => ("LongCat Flash + N-gram embedding", "MoE (other)"),
             ModelType::Step3p5 => ("Step-3.5 (Sigmoid MoE gate + SwitchGLU)", "MoE (other)"),
+            ModelType::Dots1 => ("dots.llm1 (MoE)", "MoE (other)"),
 
             // ----- Mamba / SSM -----
             ModelType::Mamba => ("Mamba 1 / Falcon Mamba", "Mamba / SSM"),
@@ -818,6 +824,10 @@ mod granite_tests;
 #[cfg(test)]
 #[path = "seed_oss_tests.rs"]
 mod seed_oss_tests;
+
+#[cfg(test)]
+#[path = "dots1_tests.rs"]
+mod dots1_tests;
 
 #[cfg(test)]
 #[path = "lfm2_tests.rs"]

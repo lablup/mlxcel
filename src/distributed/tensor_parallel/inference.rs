@@ -177,6 +177,7 @@ fn fallback_architecture(model_type: ModelType) -> &'static str {
         ModelType::DeepSeekV2 => "deepseek_v2",
         ModelType::DeepSeekV3 => "deepseek_v3",
         ModelType::DeepSeekV32 => "deepseek_v32",
+        ModelType::Dots1 => "dots1",
         ModelType::Cohere => "cohere",
         ModelType::Cohere2 => "cohere2",
         ModelType::InternLM2 => "internlm2",

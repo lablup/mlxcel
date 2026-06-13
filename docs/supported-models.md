@@ -23,6 +23,7 @@ Implemented model families include:
 - Phi, Phi-3, Phi-3 Small, PhiMoE
 - Mixtral and other MoE families
 - DeepSeek v1 / v2 / v3 / v3.2
+- dots.llm1 (`dots1`, rednote: a DeepSeek-V3-style Mixture-of-Experts without MLA. Standard multi-head attention with per-head Q/K RMSNorm, a dense first layer (`first_k_dense_replace`), then sigmoid-routed experts that select on `gate.weight` logits plus an `e_score_correction_bias`, with a single always-on shared expert. Validated against `mlx-community/dots.llm1.inst-mixed-4-6bit`, a mixed 4/6-bit export whose `v_proj` and `down_proj` tensors are 6-bit while the rest are 4-bit; the unified loaders detect the per-tensor bit width from shape.)
 - Cohere / Cohere2
 - InternLM 2 / 3
 - GLM 4, GLM MoE, GLM MoE DSA
