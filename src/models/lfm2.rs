@@ -482,7 +482,7 @@ impl Lfm2MoeSparseMoeBlock {
             mlxcel_core::copy(x)
         };
 
-        // Sigmoid-gated routing (NOT softmax). See module note + mlx-lm #1354.
+        // Sigmoid-gated routing (NOT softmax). See module note + ml-explore/mlx-lm#1354.
         let routing_weights = mlxcel_core::sigmoid(&self.gate.forward(&x_flat));
 
         let k = self.top_k;
