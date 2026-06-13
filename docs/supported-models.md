@@ -36,7 +36,7 @@ Implemented model families include:
 - Mamba, Mamba2, RWKV7, Recurrent Gemma, Jamba, Nemotron-H
 - Falcon-H1 (TII: runs a Mamba2 SSM mixer and GQA attention in parallel within each block, summing both outputs; the MUP channel multipliers are pre-folded into the MLX weights)
 - LFM2 and LFM2-MoE (Liquid Foundation Models: short-convolution and attention hybrid; the MoE variant routes through sigmoid-gated experts)
-- PLaMo 2 (Preferred Networks: interleaves Mamba SSM and GQA attention layers by index; each block carries normformer-style pre/post offset RMSNorms, and the Mamba mixer derives B/C/dt from a post-conv projection)
+- PLaMo 2 (Preferred Networks: interleaves Mamba SSM and GQA attention layers by index; each block carries normformer-style pre/post offset RMSNorms, and the Mamba mixer derives B/C/dt from a post-conv projection). The architecture is validated against the mlx-lm reference at the token-id level (`tests/plamo2_parity.rs`). CLI text generation additionally needs support for PLaMo's custom `PlamoTokenizer` (the `tokenizer.jsonl` Unigram format), which the Rust tokenizer loader does not yet read.
 - Kimi Linear, LongCat Flash, LongCat Flash N-gram
 - GPT-OSS
 
