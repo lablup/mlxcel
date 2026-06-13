@@ -2315,6 +2315,35 @@ pub use lang_analyzer::{
 // tokenizer language-analysis disk cache already uses.
 pub use lang_analyzer::cache_root;
 
+/// Default the CUDA NVRTC PTX cache to a persistent, MLX-pin-scoped directory
+/// under the mlxcel cache root, unless `MLX_PTX_CACHE_DIR` is already set.
+///
+/// MLX's own default places the JIT cache in the system temp dir
+/// (`$TMPDIR/mlx/<version>/ptx`), which is cleared on reboot, so the first-run
+/// kernel compilation is paid again every boot. A persistent location pays it
+/// once per machine. The directory is scoped by the pinned MLX commit because
+/// the cache is keyed only by kernel name and is not validated against the
+/// kernel source, so entries must not survive an MLX upgrade. No-op on non-CUDA
+/// builds, when `MLX_PTX_CACHE_DIR` is already set, and when the cache root
+/// cannot be resolved. Call once at startup before the first inference.
+pub fn ensure_persistent_ptx_cache() {
+    if !cfg!(feature = "cuda") {
+        return;
+    }
+    if std::env::var_os("MLX_PTX_CACHE_DIR").is_some() {
+        return;
+    }
+    let Some(root) = cache_root() else {
+        return;
+    };
+    let commit = env!("MLXCEL_MLX_COMMIT");
+    let scope = &commit[..commit.len().min(12)];
+    let dir = root.join("cuda-ptx").join(scope);
+    if std::fs::create_dir_all(&dir).is_ok() {
+        std::env::set_var("MLX_PTX_CACHE_DIR", &dir);
+    }
+}
+
 fn use_single_query_maskless_path() -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ENABLED.get_or_init(|| {

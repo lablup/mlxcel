@@ -1080,6 +1080,10 @@ struct ServerArgs {
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
+    // Default the CUDA kernel JIT cache to a persistent, MLX-pin-scoped dir so
+    // the first-run kernel compilation is paid once per machine, not every boot.
+    mlxcel_core::ensure_persistent_ptx_cache();
+
     match cli.command {
         // Subcommand-driven dispatch. Currently only `download`
         // exists; future operational subcommands (e.g. cache inspection) can

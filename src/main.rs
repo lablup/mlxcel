@@ -1635,6 +1635,10 @@ impl Default for DiffusionServeOptions {
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
+    // Default the CUDA kernel JIT cache to a persistent, MLX-pin-scoped dir so
+    // the first-run kernel compilation is paid once per machine, not every boot.
+    mlxcel_core::ensure_persistent_ptx_cache();
+
     match cli.command {
         Commands::Run(args) => commands::run_run(args),
         Commands::Generate(args) => commands::run_generate(args),

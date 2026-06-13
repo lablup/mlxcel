@@ -21,6 +21,10 @@ use std::{env, path::PathBuf};
 fn main() {
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
 
+    // Expose the pinned MLX commit to the crate so the runtime can scope the
+    // persistent CUDA PTX cache directory by it (see ensure_persistent_ptx_cache).
+    println!("cargo:rustc-env=MLXCEL_MLX_COMMIT={MLX_EXPECTED_COMMIT}");
+
     // Build MLX using cmake
     let mlx_dst = build_mlx();
     mark_mlx_cache_valid(&out_dir);
