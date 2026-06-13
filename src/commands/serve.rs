@@ -330,6 +330,8 @@ fn build_startup_input(mut args: crate::ServeArgs) -> anyhow::Result<ServerStart
         kv_cache_budget: args.kv_cache_budget,
         // experimental VLM prompt-prefix cache toggle (#124 step c).
         enable_vlm_prefix_cache: args.enable_vlm_prefix_cache,
+        // CORS allow-list origins (#244); validated in into_startup_config.
+        allowed_origins: args.allowed_origins,
         // Responses API in-memory store limits. clap reads the
         // matching `LLAMA_ARG_*` env vars directly via the `env = ...`
         // attributes on the flags.

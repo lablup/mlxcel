@@ -370,6 +370,13 @@ pub struct ServerStartupInput {
     /// conversations; forwarded verbatim to the scheduler.
     pub enable_vlm_prefix_cache: bool,
 
+    /// `--allowed-origins` / `MLXCEL_ALLOWED_ORIGINS` (#244). Raw, comma-split
+    /// origin strings captured at the CLI edge. Empty == unset == permissive.
+    /// Validated into header values in [`Self::into_startup_config`], the
+    /// fallible startup boundary, so a malformed origin fails startup with a
+    /// clear message instead of being silently dropped.
+    pub allowed_origins: Vec<String>,
+
     /// `--responses-store-max-entries` value (`0` disables
     /// the OpenAI Responses API response store entirely).
     pub responses_store_max_entries: usize,
@@ -492,6 +499,19 @@ impl ServerStartupInput {
         let resolved_max_kv_size = resolve_max_kv_size(self.max_kv_size)
             .map_err(|e| anyhow::anyhow!("--max-kv-size: {e}"))?;
 
+        // (#244) Validate the CORS allow-list at the fallible startup boundary
+        // so a malformed origin fails fast with a clear message. An empty list
+        // (the flag/env unset) maps to `None`, preserving the permissive
+        // default; a non-empty validated list narrows the origin policy.
+        let cors_allowed_origins = {
+            let parsed = super::cors::parse_allowed_origins(&self.allowed_origins)?;
+            if parsed.is_empty() {
+                None
+            } else {
+                Some(parsed)
+            }
+        };
+
         Ok(ServerStartupConfig {
             model_path: self.model_path,
             adapter_path: self.adapter_path,
@@ -596,6 +616,8 @@ impl ServerStartupInput {
             kv_cache_budget: self.kv_cache_budget,
             // forward the experimental VLM prefix-cache toggle (#124 step c).
             enable_vlm_prefix_cache: self.enable_vlm_prefix_cache,
+            // forward the validated CORS allow-list (#244).
+            cors_allowed_origins,
             // forward the Responses-API store limits.
             responses_store_max_entries: self.responses_store_max_entries,
             responses_store_ttl_secs: self.responses_store_ttl_secs,

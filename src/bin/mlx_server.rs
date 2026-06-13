@@ -310,6 +310,21 @@ struct ServerArgs {
     )]
     enable_vlm_prefix_cache: bool,
 
+    /// Comma-separated list of allowed CORS origins (e.g.
+    /// `https://app.example.com,https://admin.example.com`). When set,
+    /// the server restricts cross-origin requests to exactly these origins
+    /// instead of the default permissive policy that reflects any origin.
+    /// Unset (default) keeps the permissive behavior. Only affects the
+    /// browser-reachable TCP HTTP listener. Also reads
+    /// `MLXCEL_ALLOWED_ORIGINS`.
+    #[arg(
+        long = "allowed-origins",
+        env = "MLXCEL_ALLOWED_ORIGINS",
+        value_delimiter = ',',
+        value_name = "ORIGINS"
+    )]
+    allowed_origins: Vec<String>,
+
     /// Maximum denoising steps per canvas block (diffusion models only;
     /// default: the checkpoint's generation_config, typically 48)
     #[arg(long = "max-denoising-steps", value_name = "N")]
@@ -1301,6 +1316,8 @@ fn build_startup_input(mut args: ServerArgs) -> anyhow::Result<ServerStartupInpu
         kv_cache_budget: args.kv_cache_budget,
         // experimental VLM prompt-prefix cache toggle (#124 step c).
         enable_vlm_prefix_cache: args.enable_vlm_prefix_cache,
+        // CORS allow-list origins (#244); validated in into_startup_config.
+        allowed_origins: args.allowed_origins,
         // Responses API in-memory store limits. clap reads the
         // matching `LLAMA_ARG_*` env vars directly via the `env = ...`
         // attributes on the flags.

@@ -146,6 +146,8 @@ fn sample_input() -> ServerStartupInput {
         kv_cache_budget: None,
         // experimental VLM prefix-cache toggle off in tests (#124 step c).
         enable_vlm_prefix_cache: false,
+        // CORS allow-list unset in tests (#244): permissive default.
+        allowed_origins: Vec::new(),
         // Responses API store defaults.
         responses_store_max_entries: 1024,
         responses_store_ttl_secs: 3600,

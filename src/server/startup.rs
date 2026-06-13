@@ -117,6 +117,12 @@ pub struct ServerStartupConfig {
     /// Enable experimental VLM prompt-prefix cache sharing (#124 step c,
     /// `--enable-vlm-prefix-cache`). Default off; forwarded to the scheduler.
     pub enable_vlm_prefix_cache: bool,
+    /// Validated CORS allow-list origins (#244). `None` keeps the permissive
+    /// default; `Some(non_empty)` restricts cross-origin requests to exactly
+    /// these origins. Built from `--allowed-origins` in
+    /// [`super::ServerStartupInput::into_startup_config`] and forwarded to
+    /// [`super::config::ServerConfig`].
+    pub cors_allowed_origins: Option<Vec<axum::http::HeaderValue>>,
     /// Preemption policy string from CLI (parsed into enum at build_server_config).
     pub preemption_policy: String,
     /// Force the legacy sequential worker, bypassing the batch scheduler.
@@ -393,6 +399,7 @@ impl Default for ServerStartupConfig {
             ubatch_size_provided: false,
             enable_preemption: false,
             enable_vlm_prefix_cache: false,
+            cors_allowed_origins: None,
             preemption_policy: "longest-first".to_string(),
             no_batch: false,
             max_batch_prefill: 1,
@@ -862,6 +869,8 @@ pub(super) fn build_server_config(
         kv_cache_budget: startup.kv_cache_budget,
         // forward the experimental VLM prefix-cache toggle (#124 step c).
         enable_vlm_prefix_cache: startup.enable_vlm_prefix_cache,
+        // forward the validated CORS allow-list (#244); `None` keeps permissive.
+        cors_allowed_origins: startup.cors_allowed_origins.clone(),
         // disaggregated serving role derived from `--node-role` (#126 B2).
         serving_mode,
         // disaggregated serving-role network addresses (#126 B3b2a): the

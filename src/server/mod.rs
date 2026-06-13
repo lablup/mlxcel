@@ -23,6 +23,7 @@ pub mod chat_template_kwargs;
 mod cli_input;
 mod config;
 pub mod conversation_store;
+mod cors;
 pub(crate) mod diffusion_worker;
 mod media;
 pub mod model_provider;

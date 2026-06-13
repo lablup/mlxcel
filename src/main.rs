@@ -863,6 +863,21 @@ pub(crate) struct ServeArgs {
     )]
     enable_vlm_prefix_cache: bool,
 
+    /// Comma-separated list of allowed CORS origins (e.g.
+    /// `https://app.example.com,https://admin.example.com`). When set,
+    /// the server restricts cross-origin requests to exactly these origins
+    /// instead of the default permissive policy that reflects any origin.
+    /// Unset (default) keeps the permissive behavior. Only affects the
+    /// browser-reachable TCP HTTP listener. Also reads
+    /// `MLXCEL_ALLOWED_ORIGINS`.
+    #[arg(
+        long = "allowed-origins",
+        env = "MLXCEL_ALLOWED_ORIGINS",
+        value_delimiter = ',',
+        value_name = "ORIGINS"
+    )]
+    allowed_origins: Vec<String>,
+
     /// Preemption policy: "longest-first" (default) or "lowest-priority"
     ///
     /// Controls which active sequence is evicted when preemption is

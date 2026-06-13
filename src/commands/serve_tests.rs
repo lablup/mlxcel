@@ -31,6 +31,7 @@ fn sample_args() -> crate::ServeArgs {
         max_kv_size: 0,
         kv_cache_budget: None,
         enable_vlm_prefix_cache: false,
+        allowed_origins: Vec::new(),
         n_predict: 128,
         draft_model: Some(PathBuf::from("models/draft")),
         draft_max: 4,

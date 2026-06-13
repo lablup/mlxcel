@@ -63,6 +63,9 @@ mlxcel generate -m Qwen3.5-0.8B-4bit -p "Hello, world!" -n 100
 # OpenAI-compatible server (mlxcel serve is the subcommand equivalent).
 mlxcel-server -m Qwen3.5-0.8B-4bit --port 8080
 
+# Restrict browser CORS to specific origins (default reflects any origin).
+mlxcel-server -m Qwen3.5-0.8B-4bit --port 8080 --allowed-origins https://app.example.com,https://admin.example.com
+
 # Read-only memory budget: weights + KV cache vs. available unified memory.
 mlxcel inspect -m Qwen3.5-0.8B-4bit --max-tokens 32768
 
