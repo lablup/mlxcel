@@ -1,9 +1,12 @@
 // Copyright © 2025 Apple Inc.
-// Modified by mlxcel: CCCL include resolution honors the MLXCEL_CCCL_DIR
-// override and resolves the executable directory from /proc/self/exe, so the
-// bundled headers are found regardless of how the process is launched (a
-// relative ./mlxcel from inside bin/ otherwise yields a relative dli_fname from
-// dladdr and the lookup misses).
+// Modified by mlxcel:
+// - CCCL include resolution honors the MLXCEL_CCCL_DIR override and resolves
+//   the executable directory from /proc/self/exe, so the bundled headers are
+//   found regardless of how the process is launched (a relative ./mlxcel from
+//   inside bin/ otherwise yields a relative dli_fname from dladdr and the
+//   lookup misses).
+// - A one-time notice when CUDA kernels are JIT-compiled on a cold cache, so
+//   the slower first response is not a mystery (suppress with MLXCEL_QUIET_JIT).
 
 #include "mlx/backend/cuda/jit_module.h"
 #include "mlx/backend/cuda/device.h"
@@ -11,6 +14,7 @@
 
 #include "cuda_jit_sources.h"
 
+#include <cstdio>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -422,6 +426,20 @@ JitModule::JitModule(
         ptx_kernels.emplace_back(name, name);
       }
     } else {
+      // The first NVRTC compile on a cold cache makes the first response
+      // noticeably slower (gather/indexing kernels are JIT-built here). Emit a
+      // one-time notice so the latency is not a mystery; a function-local static
+      // initializes exactly once and is thread-safe. Suppress with
+      // MLXCEL_QUIET_JIT.
+      [[maybe_unused]] static const bool mlxcel_jit_notice = []() {
+        if (std::getenv("MLXCEL_QUIET_JIT") == nullptr) {
+          std::fputs(
+              "Compiling CUDA kernels (first run on this host; cached for later runs)...\n",
+              stderr);
+          std::fflush(stderr);
+        }
+        return true;
+      }();
       compile(device, module_name, source_code, kernel_names, ptx, ptx_kernels);
     }
 
