@@ -428,6 +428,39 @@ impl LanguageModel for Qwen35VLModel {
         mlxcel_core::generate::LanguageModel::supports_paged_decode_backend(&self.text_model)
     }
 
+    fn supports_snapshot_reuse(&self) -> bool {
+        // The vision wrapper owns no recurrent/text state of its own; the
+        // Qwen3.5 text backbone carries the mixed attention / GatedDeltaNet
+        // caches. Delegate snapshot capability so VLM-wrapped checkpoints
+        // participate in the exact-prefix prompt cache just like the text
+        // model.
+        mlxcel_core::generate::LanguageModel::supports_snapshot_reuse(&self.text_model)
+    }
+
+    fn snapshot_sequence_state(
+        &self,
+        seq_id: SequenceId,
+        token_len: usize,
+    ) -> Option<mlxcel_core::generate::ModelStateSnapshot> {
+        mlxcel_core::generate::LanguageModel::snapshot_sequence_state(
+            &self.text_model,
+            seq_id,
+            token_len,
+        )
+    }
+
+    fn restore_sequence_state(
+        &self,
+        seq_id: SequenceId,
+        snapshot: &mlxcel_core::generate::ModelStateSnapshot,
+    ) -> Result<(), String> {
+        mlxcel_core::generate::LanguageModel::restore_sequence_state(
+            &self.text_model,
+            seq_id,
+            snapshot,
+        )
+    }
+
     fn embed_tokens(&self, input_ids: &MlxArray) -> Option<UniquePtr<MlxArray>> {
         Some(self.text_model.get_embed_tokens(input_ids))
     }
