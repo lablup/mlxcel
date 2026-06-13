@@ -129,7 +129,12 @@ headers available on the deployment host, not only the runtime libraries:
   archives (both aarch64 and x86_64). Each unpacks to `bin/` + `include/cccl/`,
   the layout MLX's JIT looks for relative to the executable
   (`<exe-dir>/../include/cccl`). Keep `mlxcel`/`mlxcel-server` under `bin/` and
-  the `include/cccl/` directory beside it; do not flatten them.
+  the `include/cccl/` directory beside it; do not flatten them. Launch the
+  binary by its **absolute path** (`/path/to/bin/mlxcel`, as a service manager
+  or a parent process spawning a subprocess does). MLX resolves the bundled
+  header location from the executable's own path, and a relative launch
+  (`./mlxcel` from inside `bin/`) can defeat that resolution and fail the first
+  kernel JIT. A future `MLXCEL_CCCL_DIR` override will remove this constraint.
 - **CUDA toolkit headers** (`cuda_runtime.h` and friends) come from the host.
   Install the CUDA toolkit and set `CUDA_HOME` (or `CUDA_PATH`) if it is not at
   `/usr/local/cuda`. Without them the first NVRTC compile fails with
