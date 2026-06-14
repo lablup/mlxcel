@@ -140,10 +140,10 @@ runs it efficiently.
    and reconstructs with the `quantized.h` `qdot` bit layout.
 4. **Done** (#279 = qwen3_next/qwen3.5/3.6, #280 = squared-ReLU kernel preserved
    for nemotron-class behind `MLXCEL_FUSED_MOE_RELU2`, #281 = GeGLU/gemma4).
-5. **Open** (see the M5 validation issue): validate the fused path on M5
-   (Neural Accelerator) and then decide on flipping `MLXCEL_FUSED_MOE` on by
-   default. `fused_moe_forward` has a documented M5-Max mixed-dtype NaN
-   workaround, and the new kernels have not run on M5 yet.
+5. **Open** (#282): validate the fused path on M5 (Neural Accelerator) and then
+   decide on flipping `MLXCEL_FUSED_MOE` on by default. `fused_moe_forward` has
+   a documented M5-Max mixed-dtype NaN workaround, and the new kernels have not
+   run on M5 yet.
 
 ## Usage and flags
 
