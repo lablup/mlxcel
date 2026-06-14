@@ -230,11 +230,13 @@ impl SwitchGLU {
     /// Computes `sum_k scores[k] * down_k(silu(gate_k(x)) * up_k(x))` for the K
     /// selected experts as two all-cores Metal dispatches (gate/up+swiglu, then
     /// down+score), beating gather_qmm by ~3.5% on qwen3-30b-a3b with
-    /// byte-identical greedy output. Returns `None` (caller falls back to
-    /// `forward` + `moe_weighted_sum`) for any unsupported config: non-affine or
-    /// non-power-of-2 bits (4/8 only; 6-bit falls back), mismatched
-    /// bits/group_size across gate/up/down, missing biases, or a non-single-token
-    /// `x`. Gated by the caller (`MLXCEL_FUSED_MOE`).
+    /// byte-identical greedy output. gate/up are 4/8-bit; down also handles
+    /// 6-bit, so mixed widths like dots.llm1 (gate/up 4-bit, down 6-bit) are
+    /// supported. Returns `None` (caller falls back to `forward` +
+    /// `moe_weighted_sum`) for any unsupported config: non-affine, gate/up not
+    /// 4/8-bit or down not 4/6/8-bit, gate/up bits mismatch, group_size mismatch
+    /// across gate/up/down, missing biases, or a non-single-token `x`. Gated by
+    /// the caller (`MLXCEL_FUSED_MOE`).
     pub fn forward_fused_kernel(
         &self,
         x: &MlxArray,
@@ -244,17 +246,22 @@ impl SwitchGLU {
         let gate = self.gate_proj.quantized_parts()?;
         let up = self.up_proj.quantized_parts()?;
         let down = self.down_proj.quantized_parts()?;
+        // Kernel A (gate/up) is power-of-2 only; kernel B (down) also handles
+        // 6-bit. gate/up must match each other; down may differ (dots.llm1:
+        // gate/up 4-bit, down 6-bit). group_size is shared across all three.
         if gate.bits != 4 && gate.bits != 8 {
             return None;
         }
+        if down.bits != 4 && down.bits != 8 && down.bits != 6 {
+            return None;
+        }
         if gate.bits != up.bits
-            || gate.bits != down.bits
             || gate.group_size != up.group_size
             || gate.group_size != down.group_size
         {
             return None;
         }
-        if gate.mode != "affine" {
+        if gate.mode != "affine" || up.mode != "affine" || down.mode != "affine" {
             return None;
         }
         let gw_shape = mlxcel_core::array_shape(gate.weight.as_ref().unwrap());
@@ -263,6 +270,11 @@ impl SwitchGLU {
         }
         let dff = gw_shape[1];
         let din = gw_shape[2] * (32 / gate.bits);
+        // 6-bit down packs 4 weights into 3 bytes; the kernel reads the row as
+        // bytes and needs Dff divisible by 16 (whole uint32 columns).
+        if down.bits == 6 && dff % 16 != 0 {
+            return None;
+        }
         let k = *mlxcel_core::array_shape(indices).last()?;
         let x_elems: i32 = mlxcel_core::array_shape(x).iter().product();
         if x_elems != din {
@@ -288,6 +300,7 @@ impl SwitchGLU {
             dff,
             k,
             gate.bits,
+            down.bits,
             gate.group_size,
         ))
     }

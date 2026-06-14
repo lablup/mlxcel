@@ -241,11 +241,11 @@ impl SwitchGLU {
         }
     }
 
-    /// Single-token decode via the fused MoE expert Metal kernel (#268 step 2b).
-    /// Returns None (caller falls back to `forward` + `moe_weighted_sum`) for
-    /// any unsupported config: non-power-of-2 bits (4/8 only), mismatched
-    /// bits/group_size across gate/up/down, the Regular variant, or a
-    /// non-single token `x`.
+    /// Single-token decode via the fused MoE expert Metal kernel (#268).
+    /// gate/up are 4/8-bit, down also handles 6-bit. Returns None (caller falls
+    /// back to `forward` + `moe_weighted_sum`) for any unsupported config:
+    /// gate/up not 4/8-bit or down not 4/6/8-bit, gate/up bits mismatch,
+    /// group_size mismatch, the Regular variant, or a non-single token `x`.
     pub fn forward_fused_kernel(
         &self,
         x: &MlxArray,
@@ -255,10 +255,14 @@ impl SwitchGLU {
         let (gw, gs, gb, ggs, gbits) = self.gate_proj.quantized_parts()?;
         let (uw, us, ub, ugs, ubits) = self.up_proj.quantized_parts()?;
         let (dw, ds, db, dgs, dbits) = self.down_proj.quantized_parts()?;
+        // gate/up power-of-2 (kernel A); down also handles 6-bit (kernel B).
         if gbits != 4 && gbits != 8 {
             return None;
         }
-        if gbits != ubits || gbits != dbits || ggs != ugs || ggs != dgs {
+        if dbits != 4 && dbits != 8 && dbits != 6 {
+            return None;
+        }
+        if gbits != ubits || ggs != ugs || ggs != dgs {
             return None;
         }
         let gw_shape = mlxcel_core::array_shape(gw);
@@ -267,6 +271,9 @@ impl SwitchGLU {
         }
         let dff = gw_shape[1];
         let din = gw_shape[2] * (32 / gbits);
+        if dbits == 6 && dff % 16 != 0 {
+            return None;
+        }
         let k = *mlxcel_core::array_shape(indices).last()?;
         let x_elems: i32 = mlxcel_core::array_shape(x).iter().product();
         if x_elems != din {
@@ -277,7 +284,7 @@ impl SwitchGLU {
         let sc_flat = mlxcel_core::reshape(scores, &[k]);
         Some(mlxcel_core::fused_moe_expert_kernel(
             &x_flat, &idx_flat, gw, gs, gb, uw, us, ub, dw, ds, db, &sc_flat, din, dff, k, gbits,
-            ggs,
+            dbits, ggs,
         ))
     }
 

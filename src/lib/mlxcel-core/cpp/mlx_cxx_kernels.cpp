@@ -842,24 +842,52 @@ namespace {
         if (h >= Din) return;                            // uniform across the simdgroup
         uint e = indices[eslot];
 
-        constexpr uint vpw   = 32u / bits;
-        constexpr uint wmask = (1u << bits) - 1u;
-        constexpr uint Dff_p = Dff / vpw;
-        constexpr uint Gd    = Dff / group_size;
-
+        constexpr uint Gd = Dff / group_size;
         uint row = e * Din + h;
-        const device uint*  dwr = down_w + row * Dff_p;
         const device T*     dsr = down_s + row * Gd;
         const device T*     dbr = down_b + row * Gd;
         const device float* a   = act_g  + eslot * Dff;
         float d = 0.0f;
-        for (uint p = lane; p < Dff_p; p += 32u) {
-            uint base = p * vpw;
-            uint grp  = base / group_size;
-            float ds = (float)dsr[grp], db = (float)dbr[grp];
-            uint dpk = dwr[p];
-            for (uint j = 0; j < vpw; ++j) {
-                d += a[base + j] * ((float)((dpk >> (j * bits)) & wmask) * ds + db);
+
+        if (bits == 6) {
+            // Non-power-of-2: MLX packs 4 weights into 3 bytes (pack_factor 4,
+            // bytes_per_pack 3). Read the row as bytes; each lane owns whole
+            // packs. The 6-bit value layout matches MLX quantized.h qdot:
+            //   v0=b0&0x3f, v1=(b0>>6)|((b1&0x0f)<<2),
+            //   v2=(b1>>4)|((b2&0x03)<<4), v3=b2>>2.
+            constexpr uint packs = Dff / 4u;          // 4 values per pack
+            constexpr uint row_u32 = Dff * 3u / 16u;  // 3 bytes/pack -> uint32 cols
+            const device uchar* wb = (const device uchar*)(down_w + row * row_u32);
+            for (uint p = lane; p < packs; p += 32u) {
+                uint base = p * 4u;
+                uint grp  = base / group_size;
+                float ds = (float)dsr[grp], db = (float)dbr[grp];
+                uint b0 = wb[p * 3u], b1 = wb[p * 3u + 1u], b2 = wb[p * 3u + 2u];
+                uint v0 = b0 & 0x3fu;
+                uint v1 = (b0 >> 6) | ((b1 & 0x0fu) << 2);
+                uint v2 = (b1 >> 4) | ((b2 & 0x03u) << 4);
+                uint v3 = (b2 >> 2);
+                d += a[base + 0u] * ((float)v0 * ds + db);
+                d += a[base + 1u] * ((float)v1 * ds + db);
+                d += a[base + 2u] * ((float)v2 * ds + db);
+                d += a[base + 3u] * ((float)v3 * ds + db);
+            }
+        } else {
+            // Power-of-2 bits (4/8): vpw weights per 32-bit pack, clean shift.
+            // (When bits==6 this branch is dead-eliminated; the constexprs stay
+            // valid, just unused.)
+            constexpr uint vpw   = 32u / bits;
+            constexpr uint wmask = (1u << bits) - 1u;
+            constexpr uint Dff_p = Dff / vpw;
+            const device uint* dwr = down_w + row * Dff_p;
+            for (uint p = lane; p < Dff_p; p += 32u) {
+                uint base = p * vpw;
+                uint grp  = base / group_size;
+                float ds = (float)dsr[grp], db = (float)dbr[grp];
+                uint dpk = dwr[p];
+                for (uint j = 0; j < vpw; ++j) {
+                    d += a[base + j] * ((float)((dpk >> (j * bits)) & wmask) * ds + db);
+                }
             }
         }
         d = simd_sum(d);
@@ -920,7 +948,7 @@ std::unique_ptr<MlxArray> fused_moe_expert_kernel(
     const MlxArray& down_w, const MlxArray& down_s, const MlxArray& down_b,
     const MlxArray& scores,
     int32_t din, int32_t dff, int32_t k,
-    int32_t bits, int32_t group_size
+    int32_t gu_bits, int32_t d_bits, int32_t group_size
 ) {
     using namespace mlx::core;
     auto T = x.inner.dtype();
@@ -934,9 +962,15 @@ std::unique_ptr<MlxArray> fused_moe_expert_kernel(
         if (v >= 1 && v <= 32) sgy = v;
     }
     auto round_up = [](int n, int m) { return ((n + m - 1) / m) * m; };
-    std::vector<std::pair<std::string, mlx::core::fast::TemplateArg>> ta = {
+    // gate/up and down can carry different bit widths (e.g. dots.llm1: gate/up
+    // 4-bit, down 6-bit), so each kernel gets its own `bits` template arg.
+    std::vector<std::pair<std::string, mlx::core::fast::TemplateArg>> taA = {
         {"T", T}, {"K", k}, {"Din", din}, {"Dff", dff},
-        {"bits", bits}, {"group_size", group_size},
+        {"bits", gu_bits}, {"group_size", group_size},
+    };
+    std::vector<std::pair<std::string, mlx::core::fast::TemplateArg>> taB = {
+        {"T", T}, {"K", k}, {"Din", din}, {"Dff", dff},
+        {"bits", d_bits}, {"group_size", group_size},
     };
 
     // A) gate/up + swiglu -> act_g[K, Dff] (f32 for the down GEMV).
@@ -950,7 +984,7 @@ std::unique_ptr<MlxArray> fused_moe_expert_kernel(
         inA, { Shape{k, dff} }, { float32 },
         std::make_tuple(32, round_up(dff, sgy), k),
         std::make_tuple(32, sgy, 1),
-        ta, std::nullopt, false, {}
+        taA, std::nullopt, false, {}
     );
 
     // B) down * score -> partial[K, Din]; summed over K into [Din].
@@ -964,7 +998,7 @@ std::unique_ptr<MlxArray> fused_moe_expert_kernel(
         inB, { Shape{k, din} }, { T },
         std::make_tuple(32, round_up(din, sgy), k),
         std::make_tuple(32, sgy, 1),
-        ta, std::nullopt, false, {}
+        taB, std::nullopt, false, {}
     );
     auto summed = sum(rB[0], /*axis=*/0, /*keepdims=*/false);
     return std::make_unique<MlxArray>(std::move(summed));

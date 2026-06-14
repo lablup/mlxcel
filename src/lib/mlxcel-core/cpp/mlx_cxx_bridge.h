@@ -1377,7 +1377,7 @@ std::unique_ptr<MlxArray> fused_moe_expert_kernel(
     const MlxArray& down_w, const MlxArray& down_s, const MlxArray& down_b,
     const MlxArray& scores,       // [K] combine weights
     int32_t din, int32_t dff, int32_t k,
-    int32_t bits, int32_t group_size
+    int32_t gu_bits, int32_t d_bits, int32_t group_size
 );
 
 // Fused MoE forward: gate + switch_mlp + score weighting + optional shared expert

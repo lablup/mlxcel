@@ -1406,7 +1406,9 @@ mod ffi {
             next_state: &mut UniquePtr<MlxArray>,
         );
 
-        /// Fused MoE expert kernel for single-token decode (power-of-2 bits).
+        /// Fused MoE expert kernel for single-token decode. gate/up use
+        /// `gu_bits` (power-of-2: 4/8), down uses `d_bits` (4/8/6); group_size
+        /// is shared. Mixed widths support e.g. dots.llm1 (gate/up 4, down 6).
         #[allow(clippy::too_many_arguments)]
         fn fused_moe_expert_kernel(
             x: &MlxArray,
@@ -1424,7 +1426,8 @@ mod ffi {
             din: i32,
             dff: i32,
             k: i32,
-            bits: i32,
+            gu_bits: i32,
+            d_bits: i32,
             group_size: i32,
         ) -> UniquePtr<MlxArray>;
 
