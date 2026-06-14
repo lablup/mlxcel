@@ -960,9 +960,7 @@ impl SwitchLinear {
     /// (weight, scales, biases, group_size, bits) for the affine-quantized
     /// variant; `None` for `Regular` (the fused MoE kernel needs quantized
     /// parts). The variant carries no `mode`: it is always affine here.
-    pub(crate) fn quantized_parts(
-        &self,
-    ) -> Option<(&MlxArray, &MlxArray, &MlxArray, i32, i32)> {
+    pub(crate) fn quantized_parts(&self) -> Option<(&MlxArray, &MlxArray, &MlxArray, i32, i32)> {
         match self {
             Self::Quantized {
                 weight,
