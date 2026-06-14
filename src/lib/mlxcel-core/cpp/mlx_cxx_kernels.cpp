@@ -606,6 +606,14 @@ void compiled_moe_gate(
 }
 
 // Fused MoE forward: combines gate + switch_mlp + score weighting + shared expert
+namespace {
+// Defined alongside the MoE kernel holders below; forward-declared so the
+// experimental squared-ReLU fast path in fused_moe_forward can reach them (the
+// holders are defined further down, after this function).
+mlx::core::fast::CustomKernelFunction& moe_fc1_relu2_kernel_fn();
+mlx::core::fast::CustomKernelFunction& moe_down_kernel_fn();
+}  // namespace
+
 std::unique_ptr<MlxArray> fused_moe_forward(
     const MlxArray& x,
     const MlxArray& gate_weight,
@@ -651,28 +659,84 @@ std::unique_ptr<MlxArray> fused_moe_forward(
         topk_scores = multiply(topk_scores, array(scaling_factor));
     }
 
-    // 2. SwitchMLP: expand + gather_qmm(fc1) + relu² + gather_qmm(fc2) + squeeze
+    // 2. SwitchMLP: expand + gather_qmm(fc1) + relu² + gather_qmm(fc2) + squeeze.
     auto x_shape = x.inner.shape();
-    auto x_exp = reshape(x.inner, {x_shape[0], 1, 1, x_shape[1]});
+    auto T = x.inner.dtype();
 
-    auto h = gather_qmm(
-        x_exp, fc1_weight.inner, fc1_scales.inner, fc1_biases.inner,
-        std::nullopt, topk_indices,
-        true, group_size, bits, "affine", false);
-    // relu² = relu(x)²
-    { MlxArray h_w{h}; h = compiled_relu_squared(h_w)->inner; }
-    h = gather_qmm(
-        h, fc2_weight.inner, fc2_scales.inner, fc2_biases.inner,
-        std::nullopt, topk_indices,
-        true, group_size, bits, "affine", false);
-    h = squeeze(h, -2);  // [tokens, top_k, hidden]
+    // Experimental fused squared-ReLU decode path (#268), behind its own flag
+    // MLXCEL_FUSED_MOE_RELU2 (NOT the default MLXCEL_FUSED_MOE): fc1 + relu² ->
+    // act_g[K, Dff], then reuse moe_down for fc2 * score. Correct and
+    // byte-identical, but measured performance-NEUTRAL on nemotron-h-30b (its
+    // decode is dominated by Mamba2 + attention, so the MoE expert GEMV is a
+    // small, already-efficient slice). Kept wired behind the dedicated flag so
+    // the kernel stays referenceable for a future squared-ReLU model whose
+    // decode is MoE-dominated; the default path below stays on gather_qmm.
+    bool fused_relu2 = x_shape[0] == 1 && (bits == 4 || bits == 8) &&
+        std::getenv("MLXCEL_FUSED_MOE_RELU2");
+    array result = x.inner;  // placeholder; overwritten in both branches
+    if (fused_relu2) {
+        int din = (int)x_shape[1];
+        int dff = (int)fc1_weight.inner.shape()[1];
+        int k = top_k;
+        int sgy = 8;
+        if (const char* s = std::getenv("MLXCEL_FUSED_MOE_SGY")) {
+            int v = std::atoi(s);
+            if (v >= 1 && v <= 32) sgy = v;
+        }
+        auto round_up = [](int n, int m) { return ((n + m - 1) / m) * m; };
+        std::vector<std::pair<std::string, mlx::core::fast::TemplateArg>> ta = {
+            {"T", T}, {"K", k}, {"Din", din}, {"Dff", dff},
+            {"bits", bits}, {"group_size", group_size},
+        };
+        auto idx_u32 = astype(reshape(topk_indices, {k}), uint32);
 
-    // 3. Score weighting: weighted sum over experts, cast back to input dtype
-    // Cast scores to h's dtype to avoid mixed float32×float16 multiply
-    // which produces NaN on M5 Max (Metal GPU Family 4) NAx broadcast kernel.
-    auto scores_exp = reshape(topk_scores, {topk_scores.shape()[0], top_k, 1});
-    auto scores_cast = astype(scores_exp, h.dtype());
-    auto result = astype(sum(multiply(h, scores_cast), -2, false), x.inner.dtype());
+        // A) fc1 + relu² -> act_g[K, Dff] (f32 for the fc2 GEMV).
+        auto& kA = moe_fc1_relu2_kernel_fn();
+        std::vector<array> inA = {
+            astype(reshape(x.inner, {din}), T), idx_u32,
+            fc1_weight.inner, astype(fc1_scales.inner, T), astype(fc1_biases.inner, T),
+        };
+        auto rA = kA(
+            inA, { Shape{k, dff} }, { float32 },
+            std::make_tuple(32, round_up(dff, sgy), k),
+            std::make_tuple(32, sgy, 1),
+            ta, std::nullopt, false, {});
+
+        // B) fc2 * score -> partial[K, Din]; summed over K into [1, Din].
+        auto& kB = moe_down_kernel_fn();
+        std::vector<array> inB = {
+            idx_u32,
+            fc2_weight.inner, astype(fc2_scales.inner, T), astype(fc2_biases.inner, T),
+            rA[0], astype(reshape(topk_scores, {k}), T),
+        };
+        auto rB = kB(
+            inB, { Shape{k, din} }, { T },
+            std::make_tuple(32, round_up(din, sgy), k),
+            std::make_tuple(32, sgy, 1),
+            ta, std::nullopt, false, {});
+        result = reshape(sum(rB[0], 0, false), {1, din});
+    } else {
+        auto x_exp = reshape(x.inner, {x_shape[0], 1, 1, x_shape[1]});
+
+        auto h = gather_qmm(
+            x_exp, fc1_weight.inner, fc1_scales.inner, fc1_biases.inner,
+            std::nullopt, topk_indices,
+            true, group_size, bits, "affine", false);
+        // relu² = relu(x)²
+        { MlxArray h_w{h}; h = compiled_relu_squared(h_w)->inner; }
+        h = gather_qmm(
+            h, fc2_weight.inner, fc2_scales.inner, fc2_biases.inner,
+            std::nullopt, topk_indices,
+            true, group_size, bits, "affine", false);
+        h = squeeze(h, -2);  // [tokens, top_k, hidden]
+
+        // 3. Score weighting: weighted sum over experts, cast back to input dtype
+        // Cast scores to h's dtype to avoid mixed float32×float16 multiply
+        // which produces NaN on M5 Max (Metal GPU Family 4) NAx broadcast kernel.
+        auto scores_exp = reshape(topk_scores, {topk_scores.shape()[0], top_k, 1});
+        auto scores_cast = astype(scores_exp, h.dtype());
+        result = astype(sum(multiply(h, scores_cast), -2, false), x.inner.dtype());
+    }
 
     // 4. Optional shared expert
     if (shared_up_weight && shared_down_weight) {
@@ -937,6 +1001,76 @@ namespace {
     static MoeDownKernelHolder& get_moe_down_kernel() {
         static MoeDownKernelHolder holder;
         return holder;
+    }
+
+    // fc1 + relu² -> act_g[K, Dff] for the squared-ReLU MoE (nemotron-h: the
+    // experts are fc1 -> relu² -> fc2, not SwiGLU). One simdgroup per output
+    // row, simd_sum over the contraction dim; relu² = square(max(x, 0)) to
+    // match compiled_relu_squared. The fc2 down-projection reuses
+    // moe_down_kernel unchanged. Power-of-2 bits only (4/8). Wired only behind
+    // MLXCEL_FUSED_MOE_RELU2 (see fused_moe_forward) — correct but measured
+    // performance-neutral on nemotron-h, kept for a future MoE-dominated
+    // squared-ReLU model.
+    static const char* MOE_FC1_RELU2_METAL_SOURCE = R"(
+        uint lane  = thread_position_in_threadgroup.x;   // 0..31 (one simdgroup)
+        uint f     = thread_position_in_grid.y;          // output row 0..Dff-1
+        uint eslot = thread_position_in_grid.z;          // 0..K-1
+        if (f >= Dff) return;                            // uniform across the simdgroup
+        uint e = indices[eslot];
+
+        constexpr uint vpw   = 32u / bits;
+        constexpr uint wmask = (1u << bits) - 1u;
+        constexpr uint Din_p = Din / vpw;
+        constexpr uint G     = Din / group_size;
+
+        uint row = e * Dff + f;
+        const device uint* wr = fc1_w + row * Din_p;
+        const device T*    sr = fc1_s + row * G;
+        const device T*    br = fc1_b + row * G;
+        float acc = 0.0f;
+        for (uint p = lane; p < Din_p; p += 32u) {
+            uint base = p * vpw;
+            uint grp  = base / group_size;
+            float s = (float)sr[grp], b = (float)br[grp];
+            uint pk = wr[p];
+            for (uint j = 0; j < vpw; ++j) {
+                acc += (float)x[base + j] * ((float)((pk >> (j * bits)) & wmask) * s + b);
+            }
+        }
+        acc = simd_sum(acc);
+        if (lane == 0u) {
+            float r = acc > 0.0f ? acc : 0.0f;   // relu
+            act_g[eslot * Dff + f] = r * r;       // ^2
+        }
+    )";
+
+    struct MoeFc1Relu2KernelHolder {
+        std::optional<mlx::core::fast::CustomKernelFunction> kernel;
+        bool initialized = false;
+        mlx::core::fast::CustomKernelFunction& get() {
+            if (!initialized) {
+                kernel = mlx::core::fast::metal_kernel(
+                    "moe_fc1_relu2_kernel",
+                    {"x", "indices", "fc1_w", "fc1_s", "fc1_b"},
+                    {"act_g"},
+                    MOE_FC1_RELU2_METAL_SOURCE
+                );
+                initialized = true;
+            }
+            return *kernel;
+        }
+    };
+    static MoeFc1Relu2KernelHolder& get_moe_fc1_relu2_kernel() {
+        static MoeFc1Relu2KernelHolder holder;
+        return holder;
+    }
+
+    // Definitions for the forward declarations above fused_moe_forward.
+    mlx::core::fast::CustomKernelFunction& moe_fc1_relu2_kernel_fn() {
+        return get_moe_fc1_relu2_kernel().get();
+    }
+    mlx::core::fast::CustomKernelFunction& moe_down_kernel_fn() {
+        return get_moe_down_kernel().get();
     }
 }
 
