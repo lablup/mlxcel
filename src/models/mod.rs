@@ -733,6 +733,156 @@ impl ModelType {
 mod metadata_tests {
     use super::{ALL_MODEL_TYPES, ModelType};
 
+    /// Compiler-enforced completeness: every `ModelType` variant must appear in
+    /// `ALL_MODEL_TYPES`, or it is silently absent from `mlxcel arch`.
+    ///
+    /// `all_variants!` lists each variant exactly once. A `match` guard inside
+    /// it makes the compiler reject the list when a variant is missing — so
+    /// adding a `ModelType` variant is a build error until it is listed here —
+    /// and the same list is iterated to assert membership in `ALL_MODEL_TYPES`.
+    /// A new model wired into the enum and `metadata()` but forgotten in
+    /// `ALL_MODEL_TYPES` therefore fails this test (the prior `count > 80` check
+    /// could not catch it).
+    #[test]
+    fn every_variant_is_registered_for_arch() {
+        macro_rules! all_variants {
+            ($($v:ident),+ $(,)?) => {{
+                // Exhaustiveness guard: a missing variant is a build error here.
+                fn _exhaustive(mt: ModelType) {
+                    match mt {
+                        $(ModelType::$v => {}),+
+                    }
+                }
+                [$(ModelType::$v),+]
+            }};
+        }
+        let variants = all_variants!(
+            Llama,
+            Llama4,
+            Llama4VLM,
+            Qwen2,
+            Qwen3,
+            Qwen3Moe,
+            Qwen3Next,
+            Qwen35,
+            Qwen35VLM,
+            Qwen35Moe,
+            Qwen35MoeVLM,
+            Gemma,
+            Gemma2,
+            Gemma3,
+            Gemma4,
+            DiffusionGemma,
+            Gemma3VLM,
+            Gemma4VLM,
+            Gemma4Unified,
+            LlavaVLM,
+            LlavaBunnyVLM,
+            AyaVisionVLM,
+            PaliGemmaVLM,
+            PixtralVLM,
+            Mistral3VLM,
+            Qwen2VL,
+            Qwen25VL,
+            Qwen3VL,
+            Qwen3VLMoe,
+            YoutuVLM,
+            InternVLChatVLM,
+            MiniCPMOVLM,
+            MiniCPMV46VLM,
+            Moondream3VLM,
+            Gemma3n,
+            Gemma3nVLM,
+            Phi,
+            Phi3,
+            Phi4MMVLM,
+            Phi4SigLipVLM,
+            Phi3VLM,
+            MolmoVLM,
+            Molmo2VLM,
+            MolmoPointVLM,
+            Phi3Small,
+            PhiMoe,
+            GptOss,
+            MiniMax,
+            Mixtral,
+            Qwen2Moe,
+            OLMoE,
+            DeepSeek,
+            DeepSeekV2,
+            DeepSeekV3,
+            DeepSeekV32,
+            Dots1,
+            Cohere,
+            Cohere2,
+            InternLM2,
+            InternLM3,
+            Baichuan,
+            Glm4,
+            Glm4Moe,
+            Glm4MoeLite,
+            GlmMoeDsa,
+            Ernie45,
+            Ernie45Moe,
+            HunyuanMoe,
+            HunyuanV1Dense,
+            MiMo,
+            Apertus,
+            SeedOss,
+            Granite,
+            BitNet,
+            ExaOne,
+            ExaOne4,
+            ExaOneMoe,
+            SolarOpen,
+            Olmo,
+            Olmo2,
+            Olmo3,
+            StarCoder2,
+            MiniCPM,
+            MiniCPM3,
+            StableLM,
+            SmolLM3,
+            Ministral3,
+            Mistral3,
+            Mistral4,
+            Nemotron,
+            Mamba,
+            Mamba2,
+            Jamba,
+            NemotronH,
+            NemotronHNanoOmniVLM,
+            NemotronNAS,
+            FalconH1,
+            Lfm2,
+            Lfm2Moe,
+            Plamo2,
+            GraniteMoeHybrid,
+            KimiLinear,
+            LongcatFlash,
+            LongcatFlashNgram,
+            Step3p5,
+            Rwkv7,
+            RecurrentGemma,
+        );
+        for mt in variants {
+            assert!(
+                ALL_MODEL_TYPES.contains(&mt),
+                "{mt:?} is a ModelType variant but is missing from ALL_MODEL_TYPES; \
+                 it will not appear in `mlxcel arch`. Add it to ALL_MODEL_TYPES."
+            );
+        }
+        // Every variant is registered and the slice has no duplicates
+        // (all_model_types_has_no_duplicates), so the lengths must match.
+        assert_eq!(
+            variants.len(),
+            ALL_MODEL_TYPES.len(),
+            "ALL_MODEL_TYPES has {} entries but there are {} ModelType variants",
+            ALL_MODEL_TYPES.len(),
+            variants.len(),
+        );
+    }
+
     /// `ALL_MODEL_TYPES` is the iteration source for `mlxcel arch`. The
     /// list must contain every `ModelType` variant or rendered output
     /// will silently miss models. We catch drift two ways:
