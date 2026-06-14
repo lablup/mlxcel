@@ -149,6 +149,7 @@ pub fn get_model_type(model_path: &Path) -> Result<ModelType> {
         "internlm2" => Ok(ModelType::InternLM2),
         "internlm3" => Ok(ModelType::InternLM3),
         "baichuan_m1" => Ok(ModelType::Baichuan),
+        "bitnet" => Ok(ModelType::BitNet),
         "glm4" => Ok(ModelType::Glm4),
         "glm4_moe" => Ok(ModelType::Glm4Moe),
         "solar_open" => Ok(ModelType::SolarOpen),

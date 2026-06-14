@@ -7,6 +7,108 @@
 
 namespace mlx_cxx {
 
+// ── BitLinear ternary matmul (BitNet b1.58) ────────────────────────────────
+// Port of mlx-lm bitlinear_layers.py make_bitlinear_kernel(): multiply directly
+// on 2-bit-packed ternary weights (4 output rows per uint8) without unpacking.
+// packed_weights is [out_features/4, in_features] uint8; each byte holds the
+// {-1,0,+1} weights (stored as {0,1,2}, value = bits - 1) for output rows
+// {row, row+out/4, row+2*out/4, row+3*out/4} at one input column. One simdgroup
+// (32 lanes) per (batch, row/4) reduces the in_features dim and writes 4 rows.
+namespace {
+    static const char* BITLINEAR_METAL_SOURCE = R"(
+        constexpr int M = 4;
+        uint tid       = thread_position_in_grid.y;   // batch * out/4
+        uint in_offset = thread_position_in_grid.x;   // lane 0..31
+
+        uint batch_idx = tid / (out_features / 4);
+        uint row_idx   = tid % (out_features / 4);
+
+        float sum[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+        for (uint i = in_offset * M; i < in_features; i += 32u * M) {
+            float v[M];
+            for (int j = 0; j < M; j++) {
+                v[j] = (float)x[batch_idx * in_features + i + j];
+            }
+            for (int j = 0; j < M; j++) {
+                uint w = packed_weights[row_idx * in_features + i + j];
+                sum[0] += v[j] * ((float)(w & 3u) - 1.0f);
+                sum[1] += v[j] * ((float)((w >> 2) & 3u) - 1.0f);
+                sum[2] += v[j] * ((float)((w >> 4) & 3u) - 1.0f);
+                sum[3] += v[j] * ((float)((w >> 6) & 3u) - 1.0f);
+            }
+        }
+        for (int j = 0; j < 4; j++) {
+            sum[j] = simd_sum(sum[j]);
+        }
+        if (in_offset == 0) {
+            float scale = invert_weight_scales ? 1.0f / (float)weight_scale[0]
+                                               : (float)weight_scale[0];
+            for (int i = 0; i < 4; i++) {
+                out[batch_idx * out_features + row_idx + i * (out_features / 4)] =
+                    (T)(sum[i] * scale);
+            }
+        }
+    )";
+
+    struct BitlinearKernelHolder {
+        std::optional<mlx::core::fast::CustomKernelFunction> kernel;
+        bool initialized = false;
+        mlx::core::fast::CustomKernelFunction& get() {
+            if (!initialized) {
+                kernel = mlx::core::fast::metal_kernel(
+                    "bitlinear_matmul",
+                    {"x", "packed_weights", "weight_scale"},
+                    {"out"},
+                    BITLINEAR_METAL_SOURCE);
+                initialized = true;
+            }
+            return *kernel;
+        }
+    };
+    static BitlinearKernelHolder& get_bitlinear_kernel() {
+        static BitlinearKernelHolder holder;
+        return holder;
+    }
+}
+
+std::unique_ptr<MlxArray> bitlinear_matmul(
+    const MlxArray& x,
+    const MlxArray& packed_weights,
+    const MlxArray& weight_scale,
+    int32_t in_features,
+    int32_t out_features,
+    bool invert_weight_scales
+) {
+    using namespace mlx::core;
+    auto T = x.inner.dtype();
+
+    // Flatten leading dims to [total_batch, in_features].
+    auto xs = x.inner.shape();
+    int total_batch = 1;
+    for (size_t i = 0; i + 1 < xs.size(); ++i) total_batch *= (int)xs[i];
+    auto x2d = reshape(astype(x.inner, T), {total_batch, in_features});
+
+    auto& kernel = get_bitlinear_kernel().get();
+    std::vector<std::pair<std::string, mlx::core::fast::TemplateArg>> ta = {
+        {"T", T},
+        {"in_features", in_features},
+        {"out_features", out_features},
+        {"invert_weight_scales", invert_weight_scales ? 1 : 0},
+    };
+    std::vector<array> inputs = {
+        x2d, packed_weights.inner, astype(weight_scale.inner, T),
+    };
+    auto results = kernel(
+        inputs, { Shape{total_batch, out_features} }, { T },
+        std::make_tuple(32, total_batch * (out_features / 4), 1),
+        std::make_tuple(32, 1, 1),
+        ta, std::nullopt, false, {});
+
+    Shape out_shape(xs.begin(), xs.end() - 1);
+    out_shape.push_back(out_features);
+    return std::make_unique<MlxArray>(reshape(results[0], out_shape));
+}
+
 // SSM (Mamba2) fused Metal kernel for single-token decode.
 // Port of Python mlx-lm ssm.py make_ssm_kernel() + ssm_update_kernel()
 namespace {

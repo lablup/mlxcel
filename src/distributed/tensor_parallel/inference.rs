@@ -195,6 +195,7 @@ fn fallback_architecture(model_type: ModelType) -> &'static str {
         ModelType::Apertus => "apertus",
         ModelType::SeedOss => "seed_oss",
         ModelType::Granite => "granite",
+        ModelType::BitNet => "bitnet",
         ModelType::ExaOne => "exaone",
         ModelType::ExaOne4 => "exaone4",
         ModelType::ExaOneMoe => "exaone_moe",

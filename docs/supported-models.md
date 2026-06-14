@@ -31,6 +31,7 @@ Implemented model families include:
 - Hunyuan dense and MoE variants
 - IBM Granite dense (`granite`)
 - IBM Granite 4.x hybrid (`granitemoehybrid`: interleaves Mamba2 SSM and GQA attention layers by `layer_types`, applies the four Granite scalar multipliers (embedding, attention, residual, logits), and defaults to NoPE attention. The dense-MLP mode is validated against `mlx-community/granite-4.0-h-350m-4bit`; the MoE mode (`block_sparse_moe` + `shared_mlp`) is implemented but awaits a public MLX checkpoint to validate. The non-hybrid `granitemoe` variant is not yet ported.)
+- BitNet b1.58 (`bitnet`, Microsoft: a Llama-style transformer whose every projection is a `BitLinear` with 1.58-bit ternary weights ({-1, 0, +1}) packed 4-per-uint8 and scaled by a single per-tensor `weight_scale`. A custom Metal kernel (`bitlinear_matmul`) multiplies directly on the packed bytes, so the unpacked weights never materialize. Two extra sub-norms (`attn_sub_norm` before `o_proj`, `ffn_sub_norm` inside the MLP) and a squared-ReLU MLP (`relu2(gate) * up`). Runs in native bf16 (its squared-ReLU overflows f16), bypassing the Apple-Silicon f16 conversion. Validated against `mlx-community/bitnet-b1.58-2B-4T`.)
 - ExaOne / ExaOne 4 / ExaOne MoE / Solar Open
 - OLMo / OLMo2 / OLMo3 / OLMoE
 - StarCoder2, StableLM, SmolLM3, Baichuan, MiniCPM, MiniCPM3, MiniMax,

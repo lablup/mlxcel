@@ -122,6 +122,7 @@ pub enum LoadedModel {
     Apertus(models::ApertusModel),
     SeedOss(models::SeedOssModel),
     Granite(models::GraniteModel),
+    BitNet(models::BitNetModel),
     ExaOne(models::ExaOneModel),
     // Sliding window model uses wrapper
     ExaOne4(models::ExaOne4Wrapper),
@@ -240,6 +241,7 @@ macro_rules! delegate_language_model {
             LoadedModel::Apertus(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::SeedOss(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::Granite(inner) => LanguageModel::$method(inner, $($arg),*),
+            LoadedModel::BitNet(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::ExaOne(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::ExaOne4(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::ExaOneMoe(inner) => LanguageModel::$method(inner, $($arg),*),

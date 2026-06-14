@@ -1455,6 +1455,19 @@ mod ffi {
             group_size: i32,
         ) -> UniquePtr<MlxArray>;
 
+        /// BitLinear ternary matmul (BitNet b1.58). `packed_weights` is
+        /// [out_features/4, in_features] uint8 (2-bit ternary, 4 rows/byte),
+        /// scaled by `weight_scale[0]` (inverted unless linear_class is
+        /// autobitlinear).
+        fn bitlinear_matmul(
+            x: &MlxArray,
+            packed_weights: &MlxArray,
+            weight_scale: &MlxArray,
+            in_features: i32,
+            out_features: i32,
+            invert_weight_scales: bool,
+        ) -> UniquePtr<MlxArray>;
+
         /// Fused gated-delta single-token decode step.
         /// Combines: decay → kv_mem → delta → state_update → output into one C++ call.
         /// Replaces ~26 FFI round-trips with 1.

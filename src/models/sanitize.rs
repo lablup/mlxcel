@@ -1107,6 +1107,12 @@ pub fn load_text_weights<P: AsRef<std::path::Path>>(
 
     let is_gemma4 = parsed_config.as_ref().is_some_and(is_gemma4_model_config);
     let keep_gemma3n_mlp_bf16 = parsed_config.as_ref().is_some_and(is_gemma3n_model_config);
+    // BitNet runs in its native bf16: its squared-ReLU activation overflows the
+    // f16 max (65504), so the usual bf16->f16 Apple-Silicon conversion produces
+    // NaNs. Keep the whole model bf16 to match the reference.
+    let is_bitnet = parsed_config
+        .as_ref()
+        .is_some_and(|c| c.get("model_type").and_then(|m| m.as_str()) == Some("bitnet"));
 
     let mut weights = if is_gemma4 {
         load_gemma4_text_weights(model_dir)?
@@ -1185,7 +1191,7 @@ pub fn load_text_weights<P: AsRef<std::path::Path>>(
     // to f16: mlxcel's quantized dequant path reads f16 scales (f16-scale
     // exports such as `mlx-community/granite-*` work), whereas the bf16 scales
     // shipped by newer exports (Apertus-2509, Seed-OSS) dequantize to ~zero.
-    if should_convert_bf16_to_f16() {
+    if should_convert_bf16_to_f16() && !is_bitnet {
         if !is_quantized {
             let had_bf16 = if keep_gemma3n_mlp_bf16 {
                 convert_bf16_weights_with_keep(&mut weights, gemma3n_language_mlp_bf16_key)

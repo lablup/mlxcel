@@ -31,6 +31,7 @@ pub mod switch_layers;
 // Model implementations (mlxcel-core based)
 pub mod apertus;
 pub mod baichuan;
+pub mod bitnet;
 pub mod cohere;
 pub mod cohere2;
 pub mod deepseek;
@@ -116,6 +117,7 @@ pub mod youtu_vl_lm;
 // Re-export model types
 pub use apertus::ApertusModel;
 pub use baichuan::BaichuanModel;
+pub use bitnet::BitNetModel;
 pub use cohere::CohereModel;
 pub use cohere2::Cohere2Model;
 pub use deepseek::DeepSeekModel;
@@ -299,6 +301,9 @@ pub enum ModelType {
     // IBM Granite
     Granite,
 
+    // BitNet (1.58-bit ternary)
+    BitNet,
+
     // Korean models
     ExaOne,
     ExaOne4,
@@ -449,6 +454,8 @@ pub const ALL_MODEL_TYPES: &[ModelType] = &[
     ModelType::SeedOss,
     // IBM Granite
     ModelType::Granite,
+    // BitNet (1.58-bit ternary)
+    ModelType::BitNet,
     // Korean models
     ModelType::ExaOne,
     ModelType::ExaOne4,
@@ -612,6 +619,7 @@ impl ModelType {
 
             // ----- IBM Granite -----
             ModelType::Granite => ("Granite (dense)", "Granite"),
+            ModelType::BitNet => ("BitNet b1.58 (ternary)", "BitNet"),
             ModelType::GraniteMoeHybrid => ("Granite 4 (Mamba2 + attention hybrid)", "Granite"),
 
             // ----- ExaOne -----

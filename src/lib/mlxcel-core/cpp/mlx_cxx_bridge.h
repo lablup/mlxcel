@@ -1393,6 +1393,17 @@ std::unique_ptr<MlxArray> fused_moe_geglu_kernel(
     int32_t gu_bits, int32_t d_bits, int32_t group_size
 );
 
+// BitLinear ternary matmul (BitNet b1.58): multiply on 2-bit-packed ternary
+// weights [out_features/4, in_features] uint8 scaled by weight_scale[0].
+std::unique_ptr<MlxArray> bitlinear_matmul(
+    const MlxArray& x,
+    const MlxArray& packed_weights,
+    const MlxArray& weight_scale,
+    int32_t in_features,
+    int32_t out_features,
+    bool invert_weight_scales
+);
+
 // Fused MoE forward: gate + switch_mlp + score weighting + optional shared expert
 // Combines ~25 FFI calls into a single C++ function
 // Used by: NemotronH, NemotronNAS
