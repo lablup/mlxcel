@@ -5462,92 +5462,145 @@ void ssm_update_kernel(
 }
 
 // ── Fused MoE expert kernel (single-token decode, power-of-2 bits) ──────────
-// One launch computes a decode token's routed-expert output:
+// Computes a decode token's routed-expert output:
 //   out[h] = sum_k scores[k] * down_k( silu(gate_k(x)) * up_k(x) )[h]
-// over the K selected experts (indices[k]), with affine-quantized gate/up/down.
-// Correctness-first: one threadgroup per token, in-kernel affine dequant for
-// power-of-2 bits (4/8). Multi-threadgroup tiling / SIMD reduction and wiring
-// into the live decode path are follow-ups (#268, step 2b); callers fall back
-// to SwitchGLU for 6-bit, non-affine, or oversized threadgroup memory.
+// over the K selected experts (indices[k]), with affine-quantized gate/up/down,
+// as two Metal dispatches that stream every active expert weight once.
+//
+// A single fused launch is bandwidth-bound the wrong way at batch=1: the
+// gate/up -> down dependency goes through the per-expert activation, so keeping
+// it in threadgroup memory confines each expert to one threadgroup and caps
+// occupancy at K cores (measured ~0.46x of gather_qmm on qwen3-30b-a3b).
+// Instead we break the barrier by staging the swiglu activation in global
+// memory between two dispatches, so every GEMV output row runs as an
+// independent simdgroup across all GPU cores:
+//   A) gate/up GEMV + swiglu  -> act_g[K, Dff] (f32)
+//   B) down GEMV * score       -> partial[K, Din]
+// partial is summed over K by the host wrapper. This is non-redundant (each
+// weight read once) and beats gather_qmm by ~3.5% on qwen3-30b-a3b, greedy
+// output byte-identical. Power-of-2 bits only (4/8); callers fall back to
+// SwitchGLU for 6-bit, non-affine, or oversized configs (#268 step 2b).
 namespace {
-    static const char* MOE_EXPERT_METAL_SOURCE = R"(
-        uint tid = thread_position_in_threadgroup.x;
-        uint nthreads = threads_per_threadgroup.x;
-        threadgroup float act[Dff];
-        threadgroup float acc[Din];
-        for (uint h = tid; h < Din; h += nthreads) { acc[h] = 0.0f; }
-        threadgroup_barrier(mem_flags::mem_threadgroup);
+    // SGY = simdgroups per threadgroup; each owns one output row (grid.y) and
+    // its 32 lanes stride the contraction dim, reduced with simd_sum (cf.
+    // ssm_update_kernel). A lane unpacks a whole 32-bit pack (vpw = 32/bits
+    // weights) at a time: group_size is a multiple of vpw for bits in {4, 8},
+    // so every weight in a pack shares one (scale, bias). The reduction order
+    // differs from gather_qmm, which is fine for the RMS<5e-3 / greedy-identical
+    // gate, not bitwise parity.
+    static const char* MOE_GATEUP_METAL_SOURCE = R"(
+        uint lane  = thread_position_in_threadgroup.x;   // 0..31 (one simdgroup)
+        uint f     = thread_position_in_grid.y;          // output row 0..Dff-1
+        uint eslot = thread_position_in_grid.z;          // 0..K-1
+        if (f >= Dff) return;                            // uniform across the simdgroup
+        uint e = indices[eslot];
 
-        constexpr uint vpw = 32u / bits;
+        constexpr uint vpw   = 32u / bits;
         constexpr uint wmask = (1u << bits) - 1u;
         constexpr uint Din_p = Din / vpw;
-        constexpr uint Dff_p = Dff / vpw;
-        constexpr uint G = Din / group_size;
-        constexpr uint Gd = Dff / group_size;
+        constexpr uint G     = Din / group_size;
 
-        for (uint k = 0; k < K; ++k) {
-            uint e = indices[k];
-            for (uint f = tid; f < Dff; f += nthreads) {
-                const device uint* gwr = gate_w + (uint)(e * Dff + f) * Din_p;
-                const device T* gsr = gate_s + (uint)(e * Dff + f) * G;
-                const device T* gbr = gate_b + (uint)(e * Dff + f) * G;
-                const device uint* uwr = up_w + (uint)(e * Dff + f) * Din_p;
-                const device T* usr = up_s + (uint)(e * Dff + f) * G;
-                const device T* ubr = up_b + (uint)(e * Dff + f) * G;
-                float g = 0.0f, u = 0.0f;
-                for (uint i = 0; i < Din; ++i) {
-                    uint grp = i / group_size;
-                    uint widx = i / vpw;
-                    uint sh = (i % vpw) * bits;
-                    float xv = (float)x[i];
-                    float gv = (float)((gwr[widx] >> sh) & wmask) * (float)gsr[grp] + (float)gbr[grp];
-                    float uv = (float)((uwr[widx] >> sh) & wmask) * (float)usr[grp] + (float)ubr[grp];
-                    g += xv * gv;
-                    u += xv * uv;
-                }
-                float sg = g / (1.0f + fast::exp(-g));
-                act[f] = sg * u;
+        uint row = e * Dff + f;
+        const device uint* gwr = gate_w + row * Din_p;
+        const device T*    gsr = gate_s + row * G;
+        const device T*    gbr = gate_b + row * G;
+        const device uint* uwr = up_w   + row * Din_p;
+        const device T*    usr = up_s   + row * G;
+        const device T*    ubr = up_b   + row * G;
+        float g = 0.0f, u = 0.0f;
+        for (uint p = lane; p < Din_p; p += 32u) {
+            uint base = p * vpw;
+            uint grp  = base / group_size;
+            float gs = (float)gsr[grp], gb = (float)gbr[grp];
+            float us = (float)usr[grp], ub = (float)ubr[grp];
+            uint gpk = gwr[p];
+            uint upk = uwr[p];
+            for (uint j = 0; j < vpw; ++j) {
+                float xv = (float)x[base + j];
+                g += xv * ((float)((gpk >> (j * bits)) & wmask) * gs + gb);
+                u += xv * ((float)((upk >> (j * bits)) & wmask) * us + ub);
             }
-            threadgroup_barrier(mem_flags::mem_threadgroup);
-            float sc = (float)scores[k];
-            for (uint h = tid; h < Din; h += nthreads) {
-                const device uint* dwr = down_w + (uint)(e * Din + h) * Dff_p;
-                const device T* dsr = down_s + (uint)(e * Din + h) * Gd;
-                const device T* dbr = down_b + (uint)(e * Din + h) * Gd;
-                float d = 0.0f;
-                for (uint i = 0; i < Dff; ++i) {
-                    uint grp = i / group_size;
-                    uint widx = i / vpw;
-                    uint sh = (i % vpw) * bits;
-                    float dv = (float)((dwr[widx] >> sh) & wmask) * (float)dsr[grp] + (float)dbr[grp];
-                    d += act[i] * dv;
-                }
-                acc[h] += sc * d;
-            }
-            threadgroup_barrier(mem_flags::mem_threadgroup);
         }
-        for (uint h = tid; h < Din; h += nthreads) { out[h] = (T)acc[h]; }
+        g = simd_sum(g);
+        u = simd_sum(u);
+        if (lane == 0u) {
+            act_g[eslot * Dff + f] = (g / (1.0f + fast::exp(-g))) * u;
+        }
     )";
 
-    struct MoeExpertKernelHolder {
+    static const char* MOE_DOWN_METAL_SOURCE = R"(
+        uint lane  = thread_position_in_threadgroup.x;   // 0..31 (one simdgroup)
+        uint h     = thread_position_in_grid.y;          // output row 0..Din-1
+        uint eslot = thread_position_in_grid.z;          // 0..K-1
+        if (h >= Din) return;                            // uniform across the simdgroup
+        uint e = indices[eslot];
+
+        constexpr uint vpw   = 32u / bits;
+        constexpr uint wmask = (1u << bits) - 1u;
+        constexpr uint Dff_p = Dff / vpw;
+        constexpr uint Gd    = Dff / group_size;
+
+        uint row = e * Din + h;
+        const device uint*  dwr = down_w + row * Dff_p;
+        const device T*     dsr = down_s + row * Gd;
+        const device T*     dbr = down_b + row * Gd;
+        const device float* a   = act_g  + eslot * Dff;
+        float d = 0.0f;
+        for (uint p = lane; p < Dff_p; p += 32u) {
+            uint base = p * vpw;
+            uint grp  = base / group_size;
+            float ds = (float)dsr[grp], db = (float)dbr[grp];
+            uint dpk = dwr[p];
+            for (uint j = 0; j < vpw; ++j) {
+                d += a[base + j] * ((float)((dpk >> (j * bits)) & wmask) * ds + db);
+            }
+        }
+        d = simd_sum(d);
+        if (lane == 0u) {
+            out[eslot * Din + h] = (T)((float)scores[eslot] * d);
+        }
+    )";
+
+    struct MoeGateUpKernelHolder {
         std::optional<mlx::core::fast::CustomKernelFunction> kernel;
         bool initialized = false;
         mlx::core::fast::CustomKernelFunction& get() {
             if (!initialized) {
                 kernel = mlx::core::fast::metal_kernel(
-                    "moe_expert_kernel",
+                    "moe_gateup_kernel",
                     {"x", "indices", "gate_w", "gate_s", "gate_b",
-                     "up_w", "up_s", "up_b", "down_w", "down_s", "down_b", "scores"},
-                    {"out"},
-                    MOE_EXPERT_METAL_SOURCE
+                     "up_w", "up_s", "up_b"},
+                    {"act_g"},
+                    MOE_GATEUP_METAL_SOURCE
                 );
                 initialized = true;
             }
             return *kernel;
         }
     };
-    static MoeExpertKernelHolder& get_moe_expert_kernel() {
-        static MoeExpertKernelHolder holder;
+    static MoeGateUpKernelHolder& get_moe_gateup_kernel() {
+        static MoeGateUpKernelHolder holder;
+        return holder;
+    }
+
+    struct MoeDownKernelHolder {
+        std::optional<mlx::core::fast::CustomKernelFunction> kernel;
+        bool initialized = false;
+        mlx::core::fast::CustomKernelFunction& get() {
+            if (!initialized) {
+                kernel = mlx::core::fast::metal_kernel(
+                    "moe_down_kernel",
+                    {"indices", "down_w", "down_s", "down_b", "act_g", "scores"},
+                    {"out"},
+                    MOE_DOWN_METAL_SOURCE
+                );
+                initialized = true;
+            }
+            return *kernel;
+        }
+    };
+    static MoeDownKernelHolder& get_moe_down_kernel() {
+        static MoeDownKernelHolder holder;
         return holder;
     }
 }
@@ -5564,30 +5617,50 @@ std::unique_ptr<MlxArray> fused_moe_expert_kernel(
 ) {
     using namespace mlx::core;
     auto T = x.inner.dtype();
-    auto& kernel = get_moe_expert_kernel().get();
-    std::vector<std::pair<std::string, mlx::core::fast::TemplateArg>> template_args = {
+
+    // SGY = simdgroups per threadgroup (one per output row). 8 is the measured
+    // sweet spot on qwen3-30b-a3b (M1 Ultra); env-overridable for other
+    // hardware. It feeds an MLX template arg, which JIT-specializes at runtime.
+    int sgy = 8;
+    if (const char* s = std::getenv("MLXCEL_FUSED_MOE_SGY")) {
+        int v = std::atoi(s);
+        if (v >= 1 && v <= 32) sgy = v;
+    }
+    auto round_up = [](int n, int m) { return ((n + m - 1) / m) * m; };
+    std::vector<std::pair<std::string, mlx::core::fast::TemplateArg>> ta = {
         {"T", T}, {"K", k}, {"Din", din}, {"Dff", dff},
         {"bits", bits}, {"group_size", group_size},
     };
-    std::vector<array> inputs = {
-        astype(x.inner, T),
-        astype(indices.inner, uint32),
+
+    // A) gate/up + swiglu -> act_g[K, Dff] (f32 for the down GEMV).
+    auto& kA = get_moe_gateup_kernel().get();
+    std::vector<array> inA = {
+        astype(x.inner, T), astype(indices.inner, uint32),
         gate_w.inner, astype(gate_s.inner, T), astype(gate_b.inner, T),
         up_w.inner,   astype(up_s.inner, T),   astype(up_b.inner, T),
-        down_w.inner, astype(down_s.inner, T), astype(down_b.inner, T),
-        astype(scores.inner, T),
     };
-    std::vector<Shape> output_shapes = { Shape{din} };
-    std::vector<Dtype> output_dtypes = { T };
-    int tg = std::min(din, 256);
-    auto results = kernel(
-        inputs, output_shapes, output_dtypes,
-        std::make_tuple(tg, 1, 1),
-        std::make_tuple(tg, 1, 1),
-        template_args,
-        std::nullopt, false, {}
+    auto rA = kA(
+        inA, { Shape{k, dff} }, { float32 },
+        std::make_tuple(32, round_up(dff, sgy), k),
+        std::make_tuple(32, sgy, 1),
+        ta, std::nullopt, false, {}
     );
-    return std::make_unique<MlxArray>(std::move(results[0]));
+
+    // B) down * score -> partial[K, Din]; summed over K into [Din].
+    auto& kB = get_moe_down_kernel().get();
+    std::vector<array> inB = {
+        astype(indices.inner, uint32),
+        down_w.inner, astype(down_s.inner, T), astype(down_b.inner, T),
+        rA[0], astype(scores.inner, T),
+    };
+    auto rB = kB(
+        inB, { Shape{k, din} }, { T },
+        std::make_tuple(32, round_up(din, sgy), k),
+        std::make_tuple(32, sgy, 1),
+        ta, std::nullopt, false, {}
+    );
+    auto summed = sum(rB[0], /*axis=*/0, /*keepdims=*/false);
+    return std::make_unique<MlxArray>(std::move(summed));
 }
 
 // Fused Mamba2 mixer forward for single-token decode.

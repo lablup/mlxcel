@@ -241,11 +241,11 @@ impl SwitchGLU {
         }
     }
 
-    /// Single-token decode via the fused MoE expert Metal kernel (#268 step 2a).
+    /// Single-token decode via the fused MoE expert Metal kernel (#268 step 2b).
     /// Returns None (caller falls back to `forward` + `moe_weighted_sum`) for
     /// any unsupported config: non-power-of-2 bits (4/8 only), mismatched
-    /// bits/group_size across gate/up/down, the Regular variant, a non-single
-    /// token `x`, or threadgroup memory over the 32 KiB Metal limit.
+    /// bits/group_size across gate/up/down, the Regular variant, or a
+    /// non-single token `x`.
     pub fn forward_fused_kernel(
         &self,
         x: &MlxArray,
@@ -270,9 +270,6 @@ impl SwitchGLU {
         let k = *mlxcel_core::array_shape(indices).last()?;
         let x_elems: i32 = mlxcel_core::array_shape(x).iter().product();
         if x_elems != din {
-            return None;
-        }
-        if (din + dff) * 4 >= 32768 {
             return None;
         }
         let x_flat = mlxcel_core::reshape(x, &[din]);

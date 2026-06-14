@@ -225,17 +225,16 @@ impl SwitchGLU {
         }
     }
 
-    /// Single-token decode via the fused MoE expert Metal kernel (#268, step 2a).
+    /// Single-token decode via the fused MoE expert Metal kernel (#268, step 2b).
     ///
     /// Computes `sum_k scores[k] * down_k(silu(gate_k(x)) * up_k(x))` for the K
-    /// selected experts in one launch. Returns `None` (caller falls back to
+    /// selected experts as two all-cores Metal dispatches (gate/up+swiglu, then
+    /// down+score), beating gather_qmm by ~3.5% on qwen3-30b-a3b with
+    /// byte-identical greedy output. Returns `None` (caller falls back to
     /// `forward` + `moe_weighted_sum`) for any unsupported config: non-affine or
     /// non-power-of-2 bits (4/8 only; 6-bit falls back), mismatched
-    /// bits/group_size across gate/up/down, missing biases, a non-single-token
-    /// `x`, or threadgroup memory over the 32 KiB Metal limit.
-    ///
-    /// Correctness-first (one threadgroup); not yet on the live decode path
-    /// (gated by the caller). Multi-threadgroup tiling is step 2b.
+    /// bits/group_size across gate/up/down, missing biases, or a non-single-token
+    /// `x`. Gated by the caller (`MLXCEL_FUSED_MOE`).
     pub fn forward_fused_kernel(
         &self,
         x: &MlxArray,
@@ -267,9 +266,6 @@ impl SwitchGLU {
         let k = *mlxcel_core::array_shape(indices).last()?;
         let x_elems: i32 = mlxcel_core::array_shape(x).iter().product();
         if x_elems != din {
-            return None;
-        }
-        if (din + dff) * 4 >= 32768 {
             return None;
         }
         let x_flat = mlxcel_core::reshape(x, &[din]);
