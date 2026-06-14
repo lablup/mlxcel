@@ -162,6 +162,28 @@ impl SwitchLinear {
             }
         }
     }
+
+    /// Borrowed quantized parts (weight, scales, biases, group_size, bits) for
+    /// the fused MoE kernel; None for the Regular (non-quantized) variant.
+    fn quantized_parts(&self) -> Option<(&MlxArray, &MlxArray, &MlxArray, i32, i32)> {
+        match self {
+            Self::Quantized {
+                weight,
+                scales,
+                biases,
+                group_size,
+                bits,
+                ..
+            } => Some((
+                weight.as_ref().unwrap(),
+                scales.as_ref().unwrap(),
+                biases.as_ref().unwrap(),
+                *group_size,
+                *bits,
+            )),
+            Self::Regular { .. } => None,
+        }
+    }
 }
 
 // SwitchGLU: SwiGLU with stacked expert weights.
@@ -217,6 +239,49 @@ impl SwitchGLU {
             // Squeeze: [n_tokens, top_k, 1, hidden] -> [n_tokens, top_k, hidden]
             mlxcel_core::squeeze_axis(&output, -2)
         }
+    }
+
+    /// Single-token decode via the fused MoE expert Metal kernel (#268 step 2a).
+    /// Returns None (caller falls back to `forward` + `moe_weighted_sum`) for
+    /// any unsupported config: non-power-of-2 bits (4/8 only), mismatched
+    /// bits/group_size across gate/up/down, the Regular variant, a non-single
+    /// token `x`, or threadgroup memory over the 32 KiB Metal limit.
+    pub fn forward_fused_kernel(
+        &self,
+        x: &MlxArray,
+        indices: &MlxArray,
+        scores: &MlxArray,
+    ) -> Option<UniquePtr<MlxArray>> {
+        let (gw, gs, gb, ggs, gbits) = self.gate_proj.quantized_parts()?;
+        let (uw, us, ub, ugs, ubits) = self.up_proj.quantized_parts()?;
+        let (dw, ds, db, dgs, dbits) = self.down_proj.quantized_parts()?;
+        if gbits != 4 && gbits != 8 {
+            return None;
+        }
+        if gbits != ubits || gbits != dbits || ggs != ugs || ggs != dgs {
+            return None;
+        }
+        let gw_shape = mlxcel_core::array_shape(gw);
+        if gw_shape.len() != 3 {
+            return None;
+        }
+        let dff = gw_shape[1];
+        let din = gw_shape[2] * (32 / gbits);
+        let k = *mlxcel_core::array_shape(indices).last()?;
+        let x_elems: i32 = mlxcel_core::array_shape(x).iter().product();
+        if x_elems != din {
+            return None;
+        }
+        if (din + dff) * 4 >= 32768 {
+            return None;
+        }
+        let x_flat = mlxcel_core::reshape(x, &[din]);
+        let idx_flat = mlxcel_core::reshape(indices, &[k]);
+        let sc_flat = mlxcel_core::reshape(scores, &[k]);
+        Some(mlxcel_core::fused_moe_expert_kernel(
+            &x_flat, &idx_flat, gw, gs, gb, uw, us, ub, dw, ds, db, &sc_flat, din, dff, k, gbits,
+            ggs,
+        ))
     }
 
     /// Sort tokens by expert index for better memory access
@@ -333,14 +398,32 @@ impl SparseMoeBlock {
             scores = mlxcel_core::divide(&scores, &sum);
         }
 
-        // Apply experts - returns [n_tokens, k, hidden]
-        let expert_out = self.experts.forward(&x_flat, &topk_indices);
-
-        let result = crate::models::switch_layers::moe_weighted_sum(
-            &expert_out,
-            &scores,
-            mlxcel_core::array_dtype(&x_flat),
-        );
+        // Apply experts and weighted-sum. Fused single-token decode kernel
+        // (#268 step 2a) when MLXCEL_FUSED_MOE is set; otherwise the proven
+        // SwitchGLU + moe_weighted_sum path (also the fallback when the kernel
+        // does not support the config).
+        let result = {
+            let fused = if mlxcel_core::array_shape(&x_flat)[0] == 1
+                && std::env::var("MLXCEL_FUSED_MOE").is_ok()
+            {
+                self.experts
+                    .forward_fused_kernel(&x_flat, &topk_indices, &scores)
+                    .map(|out| mlxcel_core::reshape(&out, &[1, hidden_dim]))
+            } else {
+                None
+            };
+            match fused {
+                Some(out) => out,
+                None => {
+                    let expert_out = self.experts.forward(&x_flat, &topk_indices);
+                    crate::models::switch_layers::moe_weighted_sum(
+                        &expert_out,
+                        &scores,
+                        mlxcel_core::array_dtype(&x_flat),
+                    )
+                }
+            }
+        };
 
         // Reshape back to original shape
         if orig_shape.len() > 2 {

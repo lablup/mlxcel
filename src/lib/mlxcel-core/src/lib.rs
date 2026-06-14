@@ -1406,6 +1406,28 @@ mod ffi {
             next_state: &mut UniquePtr<MlxArray>,
         );
 
+        /// Fused MoE expert kernel for single-token decode (power-of-2 bits).
+        #[allow(clippy::too_many_arguments)]
+        fn fused_moe_expert_kernel(
+            x: &MlxArray,
+            indices: &MlxArray,
+            gate_w: &MlxArray,
+            gate_s: &MlxArray,
+            gate_b: &MlxArray,
+            up_w: &MlxArray,
+            up_s: &MlxArray,
+            up_b: &MlxArray,
+            down_w: &MlxArray,
+            down_s: &MlxArray,
+            down_b: &MlxArray,
+            scores: &MlxArray,
+            din: i32,
+            dff: i32,
+            k: i32,
+            bits: i32,
+            group_size: i32,
+        ) -> UniquePtr<MlxArray>;
+
         /// Fused gated-delta single-token decode step.
         /// Combines: decay → kv_mem → delta → state_update → output into one C++ call.
         /// Replaces ~26 FFI round-trips with 1.

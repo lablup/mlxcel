@@ -1368,6 +1368,18 @@ void ssm_update_kernel(
     std::unique_ptr<MlxArray>& next_state
 );
 
+// Fused MoE expert kernel for single-token decode (power-of-2 bits, affine).
+std::unique_ptr<MlxArray> fused_moe_expert_kernel(
+    const MlxArray& x,            // [Din] activation
+    const MlxArray& indices,      // [K] selected expert ids
+    const MlxArray& gate_w, const MlxArray& gate_s, const MlxArray& gate_b,
+    const MlxArray& up_w,   const MlxArray& up_s,   const MlxArray& up_b,
+    const MlxArray& down_w, const MlxArray& down_s, const MlxArray& down_b,
+    const MlxArray& scores,       // [K] combine weights
+    int32_t din, int32_t dff, int32_t k,
+    int32_t bits, int32_t group_size
+);
+
 // Fused MoE forward: gate + switch_mlp + score weighting + optional shared expert
 // Combines ~25 FFI calls into a single C++ function
 // Used by: NemotronH, NemotronNAS

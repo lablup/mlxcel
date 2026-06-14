@@ -225,6 +225,77 @@ impl SwitchGLU {
         }
     }
 
+    /// Single-token decode via the fused MoE expert Metal kernel (#268, step 2a).
+    ///
+    /// Computes `sum_k scores[k] * down_k(silu(gate_k(x)) * up_k(x))` for the K
+    /// selected experts in one launch. Returns `None` (caller falls back to
+    /// `forward` + `moe_weighted_sum`) for any unsupported config: non-affine or
+    /// non-power-of-2 bits (4/8 only; 6-bit falls back), mismatched
+    /// bits/group_size across gate/up/down, missing biases, a non-single-token
+    /// `x`, or threadgroup memory over the 32 KiB Metal limit.
+    ///
+    /// Correctness-first (one threadgroup); not yet on the live decode path
+    /// (gated by the caller). Multi-threadgroup tiling is step 2b.
+    pub fn forward_fused_kernel(
+        &self,
+        x: &MlxArray,
+        indices: &MlxArray,
+        scores: &MlxArray,
+    ) -> Option<UniquePtr<MlxArray>> {
+        let gate = self.gate_proj.quantized_parts()?;
+        let up = self.up_proj.quantized_parts()?;
+        let down = self.down_proj.quantized_parts()?;
+        if gate.bits != 4 && gate.bits != 8 {
+            return None;
+        }
+        if gate.bits != up.bits
+            || gate.bits != down.bits
+            || gate.group_size != up.group_size
+            || gate.group_size != down.group_size
+        {
+            return None;
+        }
+        if gate.mode != "affine" {
+            return None;
+        }
+        let gw_shape = mlxcel_core::array_shape(gate.weight.as_ref().unwrap());
+        if gw_shape.len() != 3 {
+            return None;
+        }
+        let dff = gw_shape[1];
+        let din = gw_shape[2] * (32 / gate.bits);
+        let k = *mlxcel_core::array_shape(indices).last()?;
+        let x_elems: i32 = mlxcel_core::array_shape(x).iter().product();
+        if x_elems != din {
+            return None;
+        }
+        if (din + dff) * 4 >= 32768 {
+            return None;
+        }
+        let x_flat = mlxcel_core::reshape(x, &[din]);
+        let idx_flat = mlxcel_core::reshape(indices, &[k]);
+        let sc_flat = mlxcel_core::reshape(scores, &[k]);
+        Some(mlxcel_core::fused_moe_expert_kernel(
+            &x_flat,
+            &idx_flat,
+            gate.weight.as_ref().unwrap(),
+            gate.scales.as_ref().unwrap(),
+            gate.biases.as_ref().unwrap(),
+            up.weight.as_ref().unwrap(),
+            up.scales.as_ref().unwrap(),
+            up.biases.as_ref().unwrap(),
+            down.weight.as_ref().unwrap(),
+            down.scales.as_ref().unwrap(),
+            down.biases.as_ref().unwrap(),
+            &sc_flat,
+            din,
+            dff,
+            k,
+            gate.bits,
+            gate.group_size,
+        ))
+    }
+
     pub fn from_weights(
         weights: &WeightMap,
         prefix: &str,
