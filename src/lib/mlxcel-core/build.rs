@@ -35,6 +35,13 @@ fn main() {
     let mut bridge = cxx_build::bridge("src/lib.rs");
     bridge
         .file("cpp/mlx_cxx_bridge.cpp")
+        // Bridge implementation split out of mlx_cxx_bridge.cpp by domain
+        // (shared helpers in cpp/mlx_cxx_internal.h): fused decode Metal
+        // kernels, the NemotronH full-forward path, and safetensors loading +
+        // Metal 4 / turbo / paged attention launchers.
+        .file("cpp/mlx_cxx_kernels.cpp")
+        .file("cpp/mlx_cxx_nemotron.cpp")
+        .file("cpp/mlx_cxx_ext.cpp")
         // Fused Sparse-V SDPA kernel launcher. Lives under
         // `src/lib/mlx-cpp/turbo/` so the MLX-upstream-commit upgrade
         // checklist (CLAUDE.md) treats this directory as in-scope.
@@ -125,7 +132,11 @@ fn main() {
     // Rerun if bridge files change
     println!("cargo:rerun-if-changed=src/lib.rs");
     println!("cargo:rerun-if-changed=cpp/mlx_cxx_bridge.h");
+    println!("cargo:rerun-if-changed=cpp/mlx_cxx_internal.h");
     println!("cargo:rerun-if-changed=cpp/mlx_cxx_bridge.cpp");
+    println!("cargo:rerun-if-changed=cpp/mlx_cxx_kernels.cpp");
+    println!("cargo:rerun-if-changed=cpp/mlx_cxx_nemotron.cpp");
+    println!("cargo:rerun-if-changed=cpp/mlx_cxx_ext.cpp");
     println!("cargo:rerun-if-changed=metal/fused_attention_metal4.metal");
     println!("cargo:rerun-if-changed=../mlx-cpp/CMakeLists.txt");
     println!("cargo:rerun-if-changed=../mlx-cpp/patches");
