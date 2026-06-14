@@ -722,8 +722,9 @@ impl Experts {
         let x_flat = mlxcel_core::reshape(x, &[b * s, h]);
         let indices_flat = mlxcel_core::reshape(top_k_indices, &[b * s, k]);
 
-        // Fused single-token decode GeGLU kernel (#268) behind MLXCEL_FUSED_MOE;
-        // otherwise SwitchGeGLU + weighted combine (also the kernel's fallback).
+        // Fused single-token decode GeGLU kernel (#268) on by default
+        // (MLXCEL_FUSED_MOE=0 disables); otherwise SwitchGeGLU + weighted combine
+        // (also the kernel's automatic fallback).
         if b * s == 1
             && crate::models::switch_layers::fused_moe_enabled()
             && let Some(out) =

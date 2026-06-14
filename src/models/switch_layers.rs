@@ -37,8 +37,14 @@ use mlxcel_core::{MlxArray, UniquePtr, dtype};
 /// This only chooses whether to *attempt* the kernel. Callers still fall back to
 /// `gather_qmm` automatically for any config the kernel does not support
 /// (non-affine, unsupported bit widths, mismatched gate/up bits, prefill).
+///
+/// The variable is read once and cached for the process lifetime.
 pub fn fused_moe_enabled() -> bool {
-    fused_moe_enabled_from(std::env::var("MLXCEL_FUSED_MOE").ok().as_deref())
+    // Cache the launch-time flag, mirroring the `OnceLock` env-gate convention
+    // used by other hot-path flags (e.g. gemma4's `mtp_divergent_fix_disabled`).
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED
+        .get_or_init(|| fused_moe_enabled_from(std::env::var("MLXCEL_FUSED_MOE").ok().as_deref()))
 }
 
 /// Pure decision behind [`fused_moe_enabled`], split out so it can be unit-tested

@@ -399,9 +399,9 @@ impl Dots1MoE {
         let topk_scores = mlxcel_core::multiply(&topk_scores, &scale);
 
         // Routed experts: [n_tokens, top_k, hidden] -> weighted sum [n, hidden].
-        // Fused single-token decode kernel (#268) when MLXCEL_FUSED_MOE is set
-        // (dots.llm1 experts are gate/up 4-bit, down 6-bit); otherwise the
-        // SwitchGLU + moe_weighted_sum path, also the kernel's fallback.
+        // Fused single-token decode kernel (#268) on by default; MLXCEL_FUSED_MOE=0
+        // disables (dots.llm1 experts are gate/up 4-bit, down 6-bit); otherwise
+        // the SwitchGLU + moe_weighted_sum path, also the kernel's fallback.
         let mut result = {
             let fused = if mlxcel_core::array_shape(&x_flat)[0] == 1
                 && crate::models::switch_layers::fused_moe_enabled()

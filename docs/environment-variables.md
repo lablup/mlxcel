@@ -168,6 +168,9 @@ recommended as normal deployment settings.
 | `MLXCEL_DISABLE_SINGLE_QUERY_MASKLESS` | truthy disables | maskless path on | Disables the single-query maskless attention path. |
 | `MLXCEL_EXPERIMENTAL_BOOL_CAUSAL_MASK` | truthy enables | off | Enables an experimental boolean causal-mask path. |
 | `MLXCEL_PIPELINE_GRANULARITY` | `off`, `layer`, `block:N` | `off` | Inserts layer-boundary async-eval hints for pipeline experiments. |
+| `MLXCEL_FUSED_MOE` | `0`/`false`/`off`/`no` disable; any other value or unset enables | on | Fused single-token decode-MoE kernel (#268), on by default since #282 (validated on M1 Ultra and M5). Set to `0` to force the proven `gather_qmm`/`SwitchGLU` path. Active for qwen3_moe, qwen3_next, dots.llm1, and gemma4 decode. |
+| `MLXCEL_FUSED_MOE_SGY` | `1`-`32` | `8` | Simdgroups per threadgroup for the fused decode-MoE kernel; tune per hardware. |
+| `MLXCEL_FUSED_MOE_RELU2` | presence enables | off | Enables the squared-ReLU fused MoE path for nemotron-class experts; performance-neutral on nemotron-h, kept for a future MoE-dominated squared-ReLU model. |
 
 ## Block-diffusion diagnostic variables
 

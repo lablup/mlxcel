@@ -1184,9 +1184,9 @@ impl SparseMoeBlock {
             scores = mlxcel_core::divide(&scores, &sum);
         }
 
-        // Expert computation. Fused single-token decode kernel (#268) behind
-        // MLXCEL_FUSED_MOE; otherwise SwitchGLU + moe_weighted_sum (also the
-        // kernel's fallback for unsupported configs).
+        // Expert computation. Fused single-token decode kernel (#268) on by
+        // default (MLXCEL_FUSED_MOE=0 disables); otherwise SwitchGLU +
+        // moe_weighted_sum (also the kernel's fallback for unsupported configs).
         let y = {
             let fused = if mlxcel_core::array_shape(&x_flat)[0] == 1
                 && crate::models::switch_layers::fused_moe_enabled()
