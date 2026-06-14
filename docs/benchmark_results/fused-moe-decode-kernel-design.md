@@ -117,7 +117,7 @@ greedy output byte-identical throughout):
    score -> `partial[K, Din]`, summed over K). Every GEMV output row is now an
    independent simdgroup across all cores, each weight read exactly once:
    **49.0 vs 47.3 tok/s, +3.5%** over gather_qmm. This is the shipped kernel
-   (`MLXCEL_FUSED_MOE`, off by default), `MLXCEL_FUSED_MOE_SGY` tunes simdgroups
+   (`MLXCEL_FUSED_MOE`, on by default as of #282), `MLXCEL_FUSED_MOE_SGY` tunes simdgroups
    per threadgroup (default 8).
 
 The win is modest because the expert GEMV is already a small, equally-efficient
@@ -140,21 +140,24 @@ runs it efficiently.
    and reconstructs with the `quantized.h` `qdot` bit layout.
 4. **Done** (#279 = qwen3_next/qwen3.5/3.6, #280 = squared-ReLU kernel preserved
    for nemotron-class behind `MLXCEL_FUSED_MOE_RELU2`, #281 = GeGLU/gemma4).
-5. **Open** (#282): validate the fused path on M5 (Neural Accelerator) and then
-   decide on flipping `MLXCEL_FUSED_MOE` on by default. `fused_moe_forward` has
-   a documented M5-Max mixed-dtype NaN workaround, and the new kernels have not
-   run on M5 yet.
+5. **Done** (#282): validated the fused path on M5 (Neural Accelerator) and
+   flipped `MLXCEL_FUSED_MOE` on by default. The documented M5-Max mixed-dtype
+   NaN risk does not materialize in the new kernels: across the wired MoE set the
+   greedy decode output is byte-identical or within the f16 jitter class with no
+   NaN, and decode is parity-to-faster (no regression). Per-layer kernel
+   execution on M5 was confirmed with a dispatch trace. See the M5 results below.
 
 ## Usage and flags
 
-The fused decode-MoE path is **off by default** and applies only to
+The fused decode-MoE path is **on by default** as of #282 and applies only to
 single-token decode with affine 4/8-bit gate/up and 4/6/8-bit down. Anything
 else (prefill, non-affine, unsupported bit widths, mismatched gate/up bits)
-falls back to the proven `gather_qmm` / `SwitchGLU` path automatically.
+falls back to the proven `gather_qmm` / `SwitchGLU` path automatically. Set
+`MLXCEL_FUSED_MOE=0` to force that fallback everywhere.
 
 | Env var | Default | Effect |
 |---------|---------|--------|
-| `MLXCEL_FUSED_MOE` | unset (off) | Set to enable the fused SwiGLU/GeGLU decode-MoE kernel. |
+| `MLXCEL_FUSED_MOE` | unset (on) | On by default. Set to `0` (also `false`/`off`/`no`, case-insensitive) to force the proven `gather_qmm` / `SwitchGLU` path; any other value, or leaving it unset, keeps the kernel on. |
 | `MLXCEL_FUSED_MOE_SGY` | 8 | Simdgroups per threadgroup (one output row each). Tune per hardware. |
 | `MLXCEL_FUSED_MOE_RELU2` | unset (off) | Enable the squared-ReLU (fc1/relu²/fc2) fused path used by nemotron-class experts. Correct but measured performance-neutral on nemotron-h; kept for a future MoE-dominated squared-ReLU model. |
 
@@ -174,6 +177,26 @@ baseline was: gemma4 wins most (small experts, and its compiled-SwitchGeGLU
 baseline was three `gather_qmm`), while nemotron-h barely moves because its
 decode is dominated by Mamba2 + attention.
 
+### Measured decode gains (M5 Max, `MLXCEL_FUSED_MOE=1`, #282)
+
+Validated on M5 Max (Neural Accelerator, macOS 26.5) against the true `gather_qmm`
+baseline (env unset, since `MLXCEL_FUSED_MOE=0` only began disabling the kernel in
+#282). Greedy temp-0; best-of-3 decode tok/s, dots.llm1 single-pass.
+
+| Model | activation | bits | decode tok/s | gain | greedy parity |
+|-------|-----------|------|-------------:|-----:|---------------|
+| gemma-4-26b-a4b-it | GeGLU | 4 | 133.9 → 142.2 | +6.2% | within f16 jitter class |
+| qwen3.5-35b-a3b | SwiGLU | 4 | 153.6 → 161.3 | +5.1% | within f16 jitter class |
+| qwen3-30b-a3b | SwiGLU | 4 | 60.5 → 61.7 | +1.9% | byte-identical |
+| dots.llm1 | SwiGLU | 4 + 6 | 14.1 → 14.0 | ~par | byte-identical |
+
+The M5 gains are smaller than M1 Ultra's but positive with no regression, and no
+run produced NaN or garbage. The Neural Accelerator narrows the gap because it
+already accelerates the baseline expert matmul, leaving less inter-kernel idle for
+the fusion to recover. Per-layer kernel execution on M5 was confirmed with a
+dispatch trace (30 / 40 / 48 / 61 dispatches per decode token for gemma4 /
+qwen3.5 / qwen3-30b / dots.llm1).
+
 **Parity caveat.** The kernel accumulates the GEMV in f32 with a different
 reduction order than `gather_qmm`'s tiling, so it is within the f16 jitter
 class (RMS < 5e-3), not bit-exact, for every model. Many models happen to be
@@ -184,7 +207,13 @@ the expected numerical consequence of the fusion.
 
 ### Models covered
 
-qwen3_moe and everything reusing its `SparseMoeBlock` (qwen2_moe/qwen1.5-moe,
-mixtral, olmoe, minimax, phimoe, qwen3_vl_moe, lfm2), dots.llm1, qwen3_next
-(qwen3.5/3.6), and gemma4 (GeGLU). nemotron-h's MoE runs through the separate
-C++ `fused_moe_forward` and is wired behind `MLXCEL_FUSED_MOE_RELU2` only.
+The fused single-token decode dispatch is wired into four model paths: qwen3_moe
+(Qwen3 MoE), qwen3_next (qwen3.5/3.6), dots.llm1 (mixed 4/6-bit), and gemma4
+(GeGLU). Other MoE families reuse the shared `SwitchGLU` for the expert matmul but
+were not wired with the fused decode dispatch, so they stay on `gather_qmm`
+regardless of `MLXCEL_FUSED_MOE`: qwen2_moe (qwen1.5-moe), mixtral, olmoe,
+minimax, phimoe, lfm2, and qwen3_vl_moe (it imports `SwitchGLU` from qwen3_moe but
+keeps its own non-fused MoE forward). Wiring those is a separate follow-up; the
+qwen1.5-moe row in the M1 table above was therefore measured on the `gather_qmm`
+fallback, not the kernel. nemotron-h's MoE runs through the separate C++
+`fused_moe_forward` and is wired behind `MLXCEL_FUSED_MOE_RELU2` only.

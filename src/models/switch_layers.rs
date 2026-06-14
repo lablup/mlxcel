@@ -25,6 +25,36 @@ use mlxcel_core::utils::slice_axis;
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr, dtype};
 
+/// Whether the fused single-token decode-MoE kernel (#268) is enabled.
+///
+/// Default-on as of #282: across the validated MoE set the kernel is
+/// byte-identical or within the documented f16 jitter class, never regresses
+/// decode, and gives a measured speedup on both M1 Ultra and M5 (Neural
+/// Accelerator) hardware. Set `MLXCEL_FUSED_MOE=0` (also `false`/`off`/`no`,
+/// case-insensitive) to force the proven `gather_qmm` / `SwitchGLU` path; any
+/// other value, or leaving it unset, keeps the kernel on.
+///
+/// This only chooses whether to *attempt* the kernel. Callers still fall back to
+/// `gather_qmm` automatically for any config the kernel does not support
+/// (non-affine, unsupported bit widths, mismatched gate/up bits, prefill).
+pub fn fused_moe_enabled() -> bool {
+    fused_moe_enabled_from(std::env::var("MLXCEL_FUSED_MOE").ok().as_deref())
+}
+
+/// Pure decision behind [`fused_moe_enabled`], split out so it can be unit-tested
+/// without mutating process-global environment state. `None` (unset) is on; an
+/// explicit `0`/`false`/`off`/`no` (case-insensitive, trimmed) is off; any other
+/// value is on.
+fn fused_moe_enabled_from(value: Option<&str>) -> bool {
+    match value {
+        Some(v) => !matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "0" | "false" | "off" | "no"
+        ),
+        None => true,
+    }
+}
+
 /// Per-expert 3D linear layer (falls back to gather_mm for non-quantized models)
 /// Supports affine, mxfp4, nvfp4, and mxfp8 quantization modes.
 pub enum SwitchLinear {
@@ -473,5 +503,25 @@ mod tests {
 
         assert_eq!(mlxcel_core::array_shape(&out), vec![2, 4]);
         assert_eq!(mlxcel_core::array_dtype(&out), dtype::FLOAT16);
+    }
+
+    #[test]
+    fn fused_moe_enabled_defaults_on_and_respects_disable_values() {
+        // Unset -> on (default-on as of #282).
+        assert!(fused_moe_enabled_from(None));
+        // Explicit disable values (case-insensitive, trimmed) -> off.
+        for v in ["0", "false", "off", "no", "OFF", "False", " 0 ", "No"] {
+            assert!(
+                !fused_moe_enabled_from(Some(v)),
+                "{v:?} should disable the kernel"
+            );
+        }
+        // Any other value, including empty, -> on.
+        for v in ["1", "true", "on", "yes", "", "anything"] {
+            assert!(
+                fused_moe_enabled_from(Some(v)),
+                "{v:?} should keep the kernel on"
+            );
+        }
     }
 }

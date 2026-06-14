@@ -404,7 +404,7 @@ impl Dots1MoE {
         // SwitchGLU + moe_weighted_sum path, also the kernel's fallback.
         let mut result = {
             let fused = if mlxcel_core::array_shape(&x_flat)[0] == 1
-                && std::env::var("MLXCEL_FUSED_MOE").is_ok()
+                && crate::models::switch_layers::fused_moe_enabled()
             {
                 self.experts
                     .forward_fused_kernel(&x_flat, &topk_indices, &topk_scores)

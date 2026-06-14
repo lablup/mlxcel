@@ -725,7 +725,7 @@ impl Experts {
         // Fused single-token decode GeGLU kernel (#268) behind MLXCEL_FUSED_MOE;
         // otherwise SwitchGeGLU + weighted combine (also the kernel's fallback).
         if b * s == 1
-            && std::env::var("MLXCEL_FUSED_MOE").is_ok()
+            && crate::models::switch_layers::fused_moe_enabled()
             && let Some(out) =
                 self.switch_geglu
                     .forward_fused_kernel(&x_flat, &indices_flat, top_k_weights)
