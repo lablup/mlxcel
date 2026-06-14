@@ -131,11 +131,60 @@ runs it efficiently.
 ## Roadmap (one PR per step)
 
 1. **Done** (#274): design + trace harness (`capture_moe_decode_trace.sh`).
-2. **Done** (#275 = 2a, this PR = 2b): fused 4/8-bit expert kernel behind
+2. **Done** (#275 = 2a, #276 = 2b): fused 4/8-bit expert kernel behind
    `MLXCEL_FUSED_MOE`, wired into `SwitchGLU` decode; two-kernel split beats
    gather_qmm by ~3.5% on qwen3-30b-a3b, byte-identical.
-3. 6-bit / mixed-bit support; validate on dots.llm1 (its `down_proj` is 6-bit,
-   so it falls back today). MLX packs non-power-of-2 bits with
-   `get_bytes_per_pack` (3 bytes for 6-bit) rather than a clean shift-unpack.
-4. Broader-fleet validation (phi-3.5-moe, qwen3-vl, mixtral, deepseek-v3,
-   nemotron-h MoE) and a decision on flipping `MLXCEL_FUSED_MOE` on by default.
+3. **Done** (#278): 6-bit / mixed-bit support; dots.llm1 (4-bit gate/up, 6-bit
+   `down_proj`) wired. MLX packs non-power-of-2 bits with `get_bytes_per_pack`
+   (3 bytes / 4 weights for 6-bit), so the down kernel reads the row as bytes
+   and reconstructs with the `quantized.h` `qdot` bit layout.
+4. **Done** (#279 = qwen3_next/qwen3.5/3.6, #280 = squared-ReLU kernel preserved
+   for nemotron-class behind `MLXCEL_FUSED_MOE_RELU2`, #281 = GeGLU/gemma4).
+5. **Open** (see the M5 validation issue): validate the fused path on M5
+   (Neural Accelerator) and then decide on flipping `MLXCEL_FUSED_MOE` on by
+   default. `fused_moe_forward` has a documented M5-Max mixed-dtype NaN
+   workaround, and the new kernels have not run on M5 yet.
+
+## Usage and flags
+
+The fused decode-MoE path is **off by default** and applies only to
+single-token decode with affine 4/8-bit gate/up and 4/6/8-bit down. Anything
+else (prefill, non-affine, unsupported bit widths, mismatched gate/up bits)
+falls back to the proven `gather_qmm` / `SwitchGLU` path automatically.
+
+| Env var | Default | Effect |
+|---------|---------|--------|
+| `MLXCEL_FUSED_MOE` | unset (off) | Set to enable the fused SwiGLU/GeGLU decode-MoE kernel. |
+| `MLXCEL_FUSED_MOE_SGY` | 8 | Simdgroups per threadgroup (one output row each). Tune per hardware. |
+| `MLXCEL_FUSED_MOE_RELU2` | unset (off) | Enable the squared-ReLU (fc1/relu²/fc2) fused path used by nemotron-class experts. Correct but measured performance-neutral on nemotron-h; kept for a future MoE-dominated squared-ReLU model. |
+
+### Measured decode gains (M1 Ultra, `MLXCEL_FUSED_MOE=1`)
+
+| Model | activation | bits | decode tok/s | gain | greedy parity |
+|-------|-----------|------|-------------:|-----:|---------------|
+| gemma-4-26b-a4b-it | GeGLU | 4 | 73.8 → 83.2 | **+13%** | byte-identical (use the chat template) |
+| qwen3.5/3.6-35b-a3b | SwiGLU | 4 | 68.7 → 74.7 | +8.7% | within f16 jitter class |
+| dots.llm1 | SwiGLU | 4 + 6 | 13.1 → 13.7 | +4.7% | byte-identical |
+| qwen3-30b-a3b | SwiGLU | 4 | 47.3 → 49.0 | +3.5% | byte-identical |
+| qwen1.5-moe-a2.7b | SwiGLU | 4 | ~140 | ~par | byte-identical |
+| nemotron-h-30b | relu² | 4 | 54.9 → 54.7 | ~0% | byte-identical (off the default path) |
+
+The gain tracks how MoE-dominated the decode is and how inefficient the
+baseline was: gemma4 wins most (small experts, and its compiled-SwitchGeGLU
+baseline was three `gather_qmm`), while nemotron-h barely moves because its
+decode is dominated by Mamba2 + attention.
+
+**Parity caveat.** The kernel accumulates the GEMV in f32 with a different
+reduction order than `gather_qmm`'s tiling, so it is within the f16 jitter
+class (RMS < 5e-3), not bit-exact, for every model. Many models happen to be
+byte-identical for typical prompts; on a deep hybrid (qwen3.5/3.6) the ~1e-4
+per-block perturbation can flip a near-tie greedy token. This is the design
+harness's accepted "byte-identical or within f16 jitter class" outcome, and is
+the expected numerical consequence of the fusion.
+
+### Models covered
+
+qwen3_moe and everything reusing its `SparseMoeBlock` (qwen2_moe/qwen1.5-moe,
+mixtral, olmoe, minimax, phimoe, qwen3_vl_moe, lfm2), dots.llm1, qwen3_next
+(qwen3.5/3.6), and gemma4 (GeGLU). nemotron-h's MoE runs through the separate
+C++ `fused_moe_forward` and is wired behind `MLXCEL_FUSED_MOE_RELU2` only.
