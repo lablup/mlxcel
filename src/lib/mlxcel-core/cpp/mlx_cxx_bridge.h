@@ -1380,6 +1380,19 @@ std::unique_ptr<MlxArray> fused_moe_expert_kernel(
     int32_t gu_bits, int32_t d_bits, int32_t group_size
 );
 
+// Same as fused_moe_expert_kernel but with GeGLU (gelu tanh approx) instead of
+// SwiGLU for the gate/up activation (gemma4 experts).
+std::unique_ptr<MlxArray> fused_moe_geglu_kernel(
+    const MlxArray& x,
+    const MlxArray& indices,
+    const MlxArray& gate_w, const MlxArray& gate_s, const MlxArray& gate_b,
+    const MlxArray& up_w,   const MlxArray& up_s,   const MlxArray& up_b,
+    const MlxArray& down_w, const MlxArray& down_s, const MlxArray& down_b,
+    const MlxArray& scores,
+    int32_t din, int32_t dff, int32_t k,
+    int32_t gu_bits, int32_t d_bits, int32_t group_size
+);
+
 // Fused MoE forward: gate + switch_mlp + score weighting + optional shared expert
 // Combines ~25 FFI calls into a single C++ function
 // Used by: NemotronH, NemotronNAS

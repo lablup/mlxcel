@@ -895,7 +895,17 @@ namespace {
         g = simd_sum(g);
         u = simd_sum(u);
         if (lane == 0u) {
-            act_g[eslot * Dff + f] = (g / (1.0f + fast::exp(-g))) * u;
+            if (act == 1) {
+                // GeGLU (gelu tanh approx) * up — matches
+                // compiled_geglu_approx_activation (gemma4 experts).
+                float g3 = g * g * g;
+                float inner = 0.7978845608028654f * (g + 0.044715f * g3);
+                float gelu = 0.5f * g * (1.0f + precise::tanh(inner));
+                act_g[eslot * Dff + f] = gelu * u;
+            } else {
+                // SwiGLU (silu) * up.
+                act_g[eslot * Dff + f] = (g / (1.0f + fast::exp(-g))) * u;
+            }
         }
     )";
 
@@ -1074,15 +1084,18 @@ namespace {
     }
 }
 
-std::unique_ptr<MlxArray> fused_moe_expert_kernel(
-    const MlxArray& x,
-    const MlxArray& indices,
+namespace {
+// Shared body for the two fused decode-MoE FFIs. `act` selects the gate/up
+// activation: 0 = SwiGLU (silu), 1 = GeGLU (gelu tanh approx, gemma4). gate/up
+// use `gu_bits` (4/8), down uses `d_bits` (4/6/8); group_size shared.
+std::unique_ptr<MlxArray> run_fused_moe_two_kernel(
+    const MlxArray& x, const MlxArray& indices,
     const MlxArray& gate_w, const MlxArray& gate_s, const MlxArray& gate_b,
     const MlxArray& up_w,   const MlxArray& up_s,   const MlxArray& up_b,
     const MlxArray& down_w, const MlxArray& down_s, const MlxArray& down_b,
     const MlxArray& scores,
     int32_t din, int32_t dff, int32_t k,
-    int32_t gu_bits, int32_t d_bits, int32_t group_size
+    int32_t gu_bits, int32_t d_bits, int32_t group_size, int act
 ) {
     using namespace mlx::core;
     auto T = x.inner.dtype();
@@ -1100,14 +1113,14 @@ std::unique_ptr<MlxArray> fused_moe_expert_kernel(
     // 4-bit, down 6-bit), so each kernel gets its own `bits` template arg.
     std::vector<std::pair<std::string, mlx::core::fast::TemplateArg>> taA = {
         {"T", T}, {"K", k}, {"Din", din}, {"Dff", dff},
-        {"bits", gu_bits}, {"group_size", group_size},
+        {"bits", gu_bits}, {"group_size", group_size}, {"act", act},
     };
     std::vector<std::pair<std::string, mlx::core::fast::TemplateArg>> taB = {
         {"T", T}, {"K", k}, {"Din", din}, {"Dff", dff},
         {"bits", d_bits}, {"group_size", group_size},
     };
 
-    // A) gate/up + swiglu -> act_g[K, Dff] (f32 for the down GEMV).
+    // A) gate/up + activation -> act_g[K, Dff] (f32 for the down GEMV).
     auto& kA = get_moe_gateup_kernel().get();
     std::vector<array> inA = {
         astype(x.inner, T), astype(indices.inner, uint32),
@@ -1136,6 +1149,41 @@ std::unique_ptr<MlxArray> fused_moe_expert_kernel(
     );
     auto summed = sum(rB[0], /*axis=*/0, /*keepdims=*/false);
     return std::make_unique<MlxArray>(std::move(summed));
+}
+}  // namespace
+
+// SwiGLU experts (qwen3_moe, dots.llm1, qwen3_next, ...).
+std::unique_ptr<MlxArray> fused_moe_expert_kernel(
+    const MlxArray& x,
+    const MlxArray& indices,
+    const MlxArray& gate_w, const MlxArray& gate_s, const MlxArray& gate_b,
+    const MlxArray& up_w,   const MlxArray& up_s,   const MlxArray& up_b,
+    const MlxArray& down_w, const MlxArray& down_s, const MlxArray& down_b,
+    const MlxArray& scores,
+    int32_t din, int32_t dff, int32_t k,
+    int32_t gu_bits, int32_t d_bits, int32_t group_size
+) {
+    return run_fused_moe_two_kernel(
+        x, indices, gate_w, gate_s, gate_b, up_w, up_s, up_b,
+        down_w, down_s, down_b, scores, din, dff, k, gu_bits, d_bits,
+        group_size, /*act=*/0);
+}
+
+// GeGLU experts (gemma4): gelu-tanh-approx(gate) * up.
+std::unique_ptr<MlxArray> fused_moe_geglu_kernel(
+    const MlxArray& x,
+    const MlxArray& indices,
+    const MlxArray& gate_w, const MlxArray& gate_s, const MlxArray& gate_b,
+    const MlxArray& up_w,   const MlxArray& up_s,   const MlxArray& up_b,
+    const MlxArray& down_w, const MlxArray& down_s, const MlxArray& down_b,
+    const MlxArray& scores,
+    int32_t din, int32_t dff, int32_t k,
+    int32_t gu_bits, int32_t d_bits, int32_t group_size
+) {
+    return run_fused_moe_two_kernel(
+        x, indices, gate_w, gate_s, gate_b, up_w, up_s, up_b,
+        down_w, down_s, down_b, scores, din, dff, k, gu_bits, d_bits,
+        group_size, /*act=*/1);
 }
 
 // Fused Mamba2 mixer forward for single-token decode.

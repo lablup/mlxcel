@@ -462,6 +462,74 @@ impl SwitchGeGLU {
         }
     }
 
+    /// Single-token decode via the fused GeGLU MoE kernel (#268). Returns the
+    /// score-weighted expert sum `[hidden]`, or `None` (caller falls back to
+    /// `forward` + combine) for any unsupported config: non-affine, gate/up not
+    /// 4/8-bit or down not 4/6/8-bit, gate/up bits mismatch, group_size
+    /// mismatch, the Regular variant, or a non-single-token `x`.
+    fn forward_fused_kernel(
+        &self,
+        x: &MlxArray,
+        indices: &MlxArray,
+        scores: &MlxArray,
+    ) -> Option<UniquePtr<MlxArray>> {
+        let gate = self.gate_proj.quantized_parts()?;
+        let up = self.up_proj.quantized_parts()?;
+        let down = self.down_proj.quantized_parts()?;
+        if gate.bits != 4 && gate.bits != 8 {
+            return None;
+        }
+        if down.bits != 4 && down.bits != 8 && down.bits != 6 {
+            return None;
+        }
+        if gate.bits != up.bits
+            || gate.group_size != up.group_size
+            || gate.group_size != down.group_size
+        {
+            return None;
+        }
+        if gate.mode != "affine" || up.mode != "affine" || down.mode != "affine" {
+            return None;
+        }
+        let gw_shape = mlxcel_core::array_shape(gate.weight.as_ref().unwrap());
+        if gw_shape.len() != 3 {
+            return None;
+        }
+        let dff = gw_shape[1];
+        let din = gw_shape[2] * (32 / gate.bits);
+        if down.bits == 6 && dff % 16 != 0 {
+            return None;
+        }
+        let k = *mlxcel_core::array_shape(indices).last()?;
+        let x_elems: i32 = mlxcel_core::array_shape(x).iter().product();
+        if x_elems != din {
+            return None;
+        }
+        let x_flat = mlxcel_core::reshape(x, &[din]);
+        let idx_flat = mlxcel_core::reshape(indices, &[k]);
+        let sc_flat = mlxcel_core::reshape(scores, &[k]);
+        Some(mlxcel_core::fused_moe_geglu_kernel(
+            &x_flat,
+            &idx_flat,
+            gate.weight.as_ref().unwrap(),
+            gate.scales.as_ref().unwrap(),
+            gate.biases.as_ref().unwrap(),
+            up.weight.as_ref().unwrap(),
+            up.scales.as_ref().unwrap(),
+            up.biases.as_ref().unwrap(),
+            down.weight.as_ref().unwrap(),
+            down.scales.as_ref().unwrap(),
+            down.biases.as_ref().unwrap(),
+            &sc_flat,
+            din,
+            dff,
+            k,
+            gate.bits,
+            down.bits,
+            gate.group_size,
+        ))
+    }
+
     fn from_weights(
         weights: &WeightMap,
         prefix: &str,
@@ -653,8 +721,19 @@ impl Experts {
 
         let x_flat = mlxcel_core::reshape(x, &[b * s, h]);
         let indices_flat = mlxcel_core::reshape(top_k_indices, &[b * s, k]);
-        let expert_out = self.switch_geglu.forward(&x_flat, &indices_flat, h);
 
+        // Fused single-token decode GeGLU kernel (#268) behind MLXCEL_FUSED_MOE;
+        // otherwise SwitchGeGLU + weighted combine (also the kernel's fallback).
+        if b * s == 1
+            && std::env::var("MLXCEL_FUSED_MOE").is_ok()
+            && let Some(out) =
+                self.switch_geglu
+                    .forward_fused_kernel(&x_flat, &indices_flat, top_k_weights)
+        {
+            return mlxcel_core::reshape(&out, &[b, s, h]);
+        }
+
+        let expert_out = self.switch_geglu.forward(&x_flat, &indices_flat, h);
         let weights = mlxcel_core::reshape(top_k_weights, &[b * s, k, 1]);
         let weighted = mlxcel_core::multiply(&expert_out, &weights);
         let reduced = mlxcel_core::sum_axis(&weighted, -2, false);
