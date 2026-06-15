@@ -22,6 +22,19 @@
 #   prefill_ms, prefill_tok_s, decode_ms, decode_tok_s,
 #   date, hardware, mlx_version, build_type, max_tokens, prompt
 #
+# Result classifications (trailing CSV token):
+#   (none)               successful decode with profiling numbers
+#   SKIP:oom_estimate    model weight size exceeds the up-front memory budget;
+#                        skipped before launch (see model_fits_in_memory)
+#   SKIP:oom             process exited with an OOM signal/exception at load or
+#                        run time; a capacity exclusion, not a code failure
+#   FAIL:bench           benchmark process exited with a non-OOM failure
+#   FAIL:no_output       benchmark succeeded but produced no decode numbers
+#   SKIP:vlm_image_not_found  VLM run skipped because the test image is absent
+#
+# Both SKIP:oom_estimate and SKIP:oom share the SKIP: prefix, so downstream
+# consumers that filter on SKIP: treat them identically as capacity exclusions.
+#
 # Filename convention:
 #   {backend}_{hardware}_{YYYY-MM-DD}.csv                (text suite, 'all')
 #   {backend}_{hardware}_vlm_{YYYY-MM-DD}.csv            (VLM suite, 'all --vlm')
@@ -61,6 +74,12 @@ DATE=$(date '+%Y-%m-%d')
 MLX_VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
 [[ -n "$MLX_VERSION" ]] || MLX_VERSION="unknown"
 BUILD_TYPE="release"
+# Optional overhead multiplier applied to the weight-size estimate in
+# model_fits_in_memory(). Default 1.0 preserves the existing pass/skip
+# decisions exactly. Set to e.g. 1.2 to require weights to consume at most
+# 85%/1.2 ≈ 71% of system memory, giving headroom for activations and KV
+# cache on constrained hosts. Overridden via BENCH_MEM_OVERHEAD_FACTOR env.
+BENCH_MEM_OVERHEAD_FACTOR="${BENCH_MEM_OVERHEAD_FACTOR:-1.0}"
 
 # Thermal cooldown between models. Defaults to 0 to preserve existing
 # behaviour for CI and desktop hardware. Laptops (e.g. MacBook Pro M5 Max)
@@ -181,12 +200,52 @@ estimate_model_size() {
 }
 
 # Check if a model likely fits in memory.  Returns 0 (fits) or 1 (too large).
+# BENCH_MEM_OVERHEAD_FACTOR (default 1.0) scales the weight-byte estimate to
+# add headroom for activations, KV cache, and framework overhead. The default
+# leaves existing pass/skip decisions unchanged.
 model_fits_in_memory() {
   local model_path="$1"
   local model_bytes
   model_bytes=$(estimate_model_size "$model_path")
   [[ "$model_bytes" -eq 0 ]] && return 0  # can't determine size, try anyway
-  [[ "$model_bytes" -le "$MEMORY_LIMIT_BYTES" ]]
+  local effective_bytes
+  effective_bytes=$(awk "BEGIN{printf \"%.0f\", $model_bytes * $BENCH_MEM_OVERHEAD_FACTOR}")
+  [[ "$effective_bytes" -le "$MEMORY_LIMIT_BYTES" ]]
+}
+
+# Returns 0 (true) when a failed run looks like an out-of-memory condition.
+# Requires BOTH a matching exit code AND matching error output text so that
+# signal-killed processes (e.g. intentional SIGKILL from tests) are not
+# misclassified.
+#
+# OOM exit codes:
+#   137 = SIGKILL (OS OOM-killer terminated the process)
+#   134 = SIGABRT (C++ exception / bad_alloc caused abort)
+#   124 = timeout(1) expiry (explicitly NOT OOM)
+#
+# OOM error text patterns (case-insensitive):
+#   Generic:      out of memory, out-of-memory, insufficient memory,
+#                 failed to allocate, cannot allocate memory, unable to allocate,
+#                 bad_alloc, exceeds .*(memory|limit|budget)
+#   MLX Metal:    greater than the maximum (maxBufferLength exceeded),
+#                 metal::malloc (any Metal allocator error)
+#
+# Bare "oom" is intentionally excluded to avoid false positives (e.g. "zoom").
+is_oom_failure() {
+  local rc="$1"
+  local err_text="$2"
+
+  # timeout(1) expiry is never OOM
+  [[ "$rc" -eq 124 ]] && return 1
+
+  # Exit code must indicate a signal-triggered abort
+  local code_is_oom=0
+  [[ "$rc" -eq 137 || "$rc" -eq 134 ]] && code_is_oom=1
+  [[ "$code_is_oom" -eq 0 ]] && return 1
+
+  # Error output must also contain a recognisable OOM pattern
+  echo "$err_text" | grep -qiE \
+    'out of memory|out-of-memory|insufficient memory|failed to allocate|cannot allocate memory|unable to allocate|bad_alloc|greater than the maximum|metal::malloc|exceeds .*(memory|limit|budget)'
 }
 
 # ---------------------------------------------------------------------------
@@ -226,6 +285,23 @@ Options:
   --no-cooldown       Force --cooldown=0 and --big-cooldown=0, overriding
                       any earlier values on the same command line.
   --help              Show this help
+
+Environment variables:
+  BENCH_MEM_OVERHEAD_FACTOR  Multiply the safetensors weight-size estimate by
+                             this factor before comparing against the 85% memory
+                             budget. Default 1.0 (no change). Set to e.g. 1.2
+                             to add headroom for activations and KV cache on
+                             memory-constrained hosts; models that exceed the
+                             adjusted limit are classified SKIP:oom_estimate.
+
+Result classifications (trailing CSV token):
+  (none)               successful decode with profiling numbers
+  SKIP:oom_estimate    model weight bytes exceed the up-front memory budget
+  SKIP:oom             process OOM'd at load or run time (SIGKILL/SIGABRT +
+                       OOM error text); a capacity exclusion, not a code failure
+  FAIL:bench           non-OOM process failure
+  FAIL:no_output       process succeeded but produced no decode numbers
+  SKIP:vlm_image_not_found  VLM run skipped because the test image is absent
 
 Filename convention:
   {backend}_{hardware}_{YYYY-MM-DD}.csv                text suite ('all')
@@ -331,13 +407,22 @@ bench_one() {
   fi
 
   >&2 printf '>>> [bench]  %s (same-process warmup=%s) ...\n' "$model_name" "$WARMUP_TOKENS"
-  local raw
-  if ! raw=$(timeout "$run_timeout" "$MLXCEL_BENCH" \
+  local raw rc=0
+  # Capture combined stdout+stderr and exit code. The || suppresses set -e so
+  # a non-zero exit code is captured in rc rather than aborting the script.
+  raw=$(timeout "$run_timeout" "$MLXCEL_BENCH" \
       -m "$model_path" -p "$prompt" -n "$MAX_TOKENS" \
       --warmup-tokens "$WARMUP_TOKENS" \
-      ${extra_args[@]+"${extra_args[@]}"} 2>&1); then
-    >&2 echo "    benchmark failed"
-    echo "${model_name},${model_path},,,,,,,$DATE,$HARDWARE_FULL,$MLX_VERSION,$BUILD_TYPE,$MAX_TOKENS,\"$prompt\",FAIL:bench"
+      ${extra_args[@]+"${extra_args[@]}"} 2>&1) || rc=$?
+
+  if [[ "$rc" -ne 0 ]]; then
+    if is_oom_failure "$rc" "$raw"; then
+      >&2 printf '    OOM at load/run (exit %d) — SKIP:oom\n' "$rc"
+      echo "${model_name},${model_path},,,,,,,$DATE,$HARDWARE_FULL,$MLX_VERSION,$BUILD_TYPE,$MAX_TOKENS,\"$prompt\",SKIP:oom"
+    else
+      >&2 printf '    benchmark failed (exit %d)\n' "$rc"
+      echo "${model_name},${model_path},,,,,,,$DATE,$HARDWARE_FULL,$MLX_VERSION,$BUILD_TYPE,$MAX_TOKENS,\"$prompt\",FAIL:bench"
+    fi
     return
   fi
 
