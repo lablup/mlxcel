@@ -217,12 +217,29 @@ impl QuantizedEmbedding {
         // biases may not exist for mxfp4/nvfp4/mxfp8 modes
         let biases = weights.get(&biases_name).map(|w| ffi::copy(w));
 
+        // Reconcile caller-supplied bits with the actual tensor shapes, the same
+        // way UnifiedLinear does. Mixed-precision exports quantize the embedding
+        // at a different bit width than the model's top-level `config.quantization`
+        // (e.g. diffusiongemma / gemma4 store embed_tokens, attention, and MLP at
+        // 8-bit while the top-level default is 4-bit). Without this, the embedding
+        // lookup, the tied-embedding lm_head, and dequantized_weight() all
+        // dequantize with the wrong bits and abort. Uniform-quant checkpoints are
+        // unaffected (inference returns the caller bits unchanged).
+        let effective_bits = if mode == "affine" {
+            let w_shape = ffi::array_shape(&weight);
+            let s_shape = ffi::array_shape(&scales);
+            infer_quantization_bits(&w_shape, &s_shape, group_size, bits)
+                .map_err(|e| format!("{} (prefix: {})", e, prefix))?
+        } else {
+            bits
+        };
+
         Ok(Self {
             weight,
             scales,
             biases,
             group_size,
-            bits,
+            bits: effective_bits,
             mode: mode.to_string(),
         })
     }
@@ -3433,6 +3450,19 @@ mod tests {
             bits, 8,
             "shared_expert_gate is 8-bit under top-level 4-bit config"
         );
+    }
+
+    /// Mixed-precision exports (e.g. diffusiongemma / gemma4) store the
+    /// embedding at 8-bit while the top-level config default is 4-bit. The
+    /// quantized-embedding loader must detect the override from the shapes, or
+    /// the embedding lookup and tied lm_head dequantize at the wrong bits and
+    /// abort (issue #291). Shapes from real diffusiongemma-26B-A4B-it-4bit.
+    #[test]
+    fn infer_bits_detects_8bit_embedding_under_4bit_config() {
+        // embed_tokens: u32 weight (262144, 704), scales (262144, 44), gs=64
+        // 704 * 32 == 8 * 44 * 64  (22528 == 22528)
+        let bits = infer_quantization_bits(&[262144, 704], &[262144, 44], 64, 4).unwrap();
+        assert_eq!(bits, 8, "embedding is 8-bit under top-level 4-bit config");
     }
 
     /// 3D MoE expert weights (switch_mlp.*_proj) must use the last two axes.
