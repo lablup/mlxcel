@@ -226,12 +226,14 @@ model_fits_in_memory() {
 #   134 = SIGABRT          -> usually std::bad_alloc; classified by message below
 #   1   = cxx-propagated MLX/Metal exception -> classified by message below
 #
-# OOM error text patterns (case-insensitive):
+# OOM error text patterns (case-insensitive). Kept specific and grounded in
+# strings the runtime actually emits, so a non-OOM failure is never hidden as a
+# capacity skip (a too-broad pattern like a bare "exceeds .*limit" would match
+# unrelated errors such as the KV-cache "exceeds limit" frame checks):
 #   Generic:      out of memory, out-of-memory, insufficient memory,
 #                 failed to allocate, cannot allocate memory, unable to allocate,
-#                 bad_alloc, exceeds .*(memory|limit|budget)
-#   MLX Metal:    greater than the maximum (maxBufferLength exceeded),
-#                 metal::malloc (any Metal allocator error)
+#                 bad_alloc, "memory allocation of N bytes failed" (Rust abort)
+#   MLX Metal:    "greater than the maximum allowed buffer size", metal::malloc
 #
 # Bare "oom" is intentionally excluded to avoid false positives (e.g. "zoom").
 is_oom_failure() {
@@ -248,7 +250,7 @@ is_oom_failure() {
   # Otherwise (exit 1 cxx exception, 134 bad_alloc abort, ...) it is OOM only
   # if the captured output names an allocator failure.
   echo "$err_text" | grep -qiE \
-    'out of memory|out-of-memory|insufficient memory|failed to allocate|cannot allocate memory|unable to allocate|bad_alloc|greater than the maximum|metal::malloc|exceeds .*(memory|limit|budget)'
+    'out of memory|out-of-memory|insufficient memory|failed to allocate|cannot allocate memory|unable to allocate|bad_alloc|memory allocation of [0-9]|greater than the maximum allowed buffer size|metal::malloc'
 }
 
 # ---------------------------------------------------------------------------
@@ -378,9 +380,13 @@ bench_one() {
 
   # Skip models that won't fit in memory
   if ! model_fits_in_memory "$model_path"; then
-    local model_mb=$(( $(estimate_model_size "$model_path") / 1048576 ))
-    local limit_mb=$(( MEMORY_LIMIT_BYTES / 1048576 ))
-    >&2 printf '>>> [skip]   %s (%d MB > %d MB limit)\n' "$model_name" "$model_mb" "$limit_mb"
+    local est_bytes effective_mb limit_mb
+    est_bytes=$(estimate_model_size "$model_path")
+    # Report the effective (overhead-scaled) size actually used for the decision
+    # so the message stays consistent under a non-default BENCH_MEM_OVERHEAD_FACTOR.
+    effective_mb=$(awk "BEGIN{printf \"%.0f\", $est_bytes * $BENCH_MEM_OVERHEAD_FACTOR / 1048576}")
+    limit_mb=$(( MEMORY_LIMIT_BYTES / 1048576 ))
+    >&2 printf '>>> [skip]   %s (%d MB > %d MB limit)\n' "$model_name" "$effective_mb" "$limit_mb"
     echo "${model_name},${model_path},,,,,,,$DATE,$HARDWARE_FULL,$MLX_VERSION,$BUILD_TYPE,$MAX_TOKENS,\"$TEXT_PROMPT\",SKIP:oom_estimate"
     return
   fi
