@@ -1184,59 +1184,32 @@ pub fn load_text_weights<P: AsRef<std::path::Path>>(
         transform.apply(&mut weights, &cfg)?;
     }
 
-    // Convert bf16 → f16 on all Apple Silicon for performance.  No Apple GPU
-    // has native bf16 ALU, so f16 is strictly better.  For non-quantized models
-    // every bf16 tensor is promoted.  For quantized models the packed weights
-    // stay as-is, but the bf16 quantization scales/biases must still be promoted
-    // to f16: mlxcel's quantized dequant path reads f16 scales (f16-scale
-    // exports such as `mlx-community/granite-*` work), whereas the bf16 scales
-    // shipped by newer exports (Apertus-2509, Seed-OSS) dequantize to ~zero.
-    if should_convert_bf16_to_f16() && !is_bitnet {
-        if !is_quantized {
-            let had_bf16 = if keep_gemma3n_mlp_bf16 {
-                convert_bf16_weights_with_keep(&mut weights, gemma3n_language_mlp_bf16_key)
-            } else {
-                convert_bf16_weights(&mut weights)
-            };
-            if had_bf16 {
-                warn_bf16_precision();
-            }
+    // Convert bf16 → f16 on all Apple Silicon for performance. No Apple GPU has
+    // native bf16 ALU, so f16 is strictly better for non-quantized weights.
+    //
+    // Quantized models are intentionally left bf16. The quantized_matmul /
+    // gather_qmm kernels consume bf16 scales/biases natively and the activation
+    // path stays bf16, so the model is dtype-consistent. Promoting *only* the
+    // scales/biases to f16 (leaving activations bf16) created a dtype mismatch
+    // that regressed decode 33-41% on M1 Ultra for every bf16-scale checkpoint
+    // (qwen3, nemotron, gpt-oss, solar, ...; issue #289). Promoting *all*
+    // tensors to f16 instead corrupts models whose activations overflow f16
+    // (Apertus xIELU x^2, like BitNet's relu^2). The blank output once
+    // attributed to bf16 scales (Apertus-2509) was actually a separate xIELU
+    // read_scalar bf16 bug, fixed in the apertus loader; Apertus, Seed-OSS, and
+    // every other bf16-scale quant decode correctly with no scale promotion.
+    if should_convert_bf16_to_f16() && !is_bitnet && !is_quantized {
+        let had_bf16 = if keep_gemma3n_mlp_bf16 {
+            convert_bf16_weights_with_keep(&mut weights, gemma3n_language_mlp_bf16_key)
         } else {
-            // Promote bf16 quantization scales/biases to f16. This is a
-            // correctness normalization for the dequant kernels, not a
-            // precision-loss event, so it does not emit the bf16 warning (the
-            // model stays quantized).
-            convert_quant_scales_bf16_to_f16(&mut weights);
+            convert_bf16_weights(&mut weights)
+        };
+        if had_bf16 {
+            warn_bf16_precision();
         }
     }
 
     Ok(weights)
-}
-
-/// Promote bf16 quantization scales/biases to f16 in place, leaving the packed
-/// (uint32) weights and every other tensor untouched.  mlxcel's quantized
-/// dequant kernels require f16 scales/biases; checkpoints that ship them as
-/// bf16 otherwise dequantize to near-zero.  Returns true if any tensor changed.
-fn convert_quant_scales_bf16_to_f16(weights: &mut mlxcel_core::weights::WeightMap) -> bool {
-    let keys: Vec<String> = weights
-        .keys()
-        .filter(|k| k.ends_with(".scales") || k.ends_with(".biases"))
-        .cloned()
-        .collect();
-    let mut converted = false;
-    for k in keys {
-        let promoted = match weights.get(&k) {
-            Some(w) if mlxcel_core::array_dtype(w) == mlxcel_core::dtype::BFLOAT16 => {
-                Some(mlxcel_core::astype(w, mlxcel_core::dtype::FLOAT16))
-            }
-            _ => None,
-        };
-        if let Some(f16) = promoted {
-            weights.insert(k, f16);
-            converted = true;
-        }
-    }
-    converted
 }
 
 /// Returns true when bf16 tensors should be cast to f16 at load time.

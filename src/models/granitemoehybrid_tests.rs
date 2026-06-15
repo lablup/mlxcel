@@ -21,8 +21,8 @@
 //! `use_moe` follows `num_local_experts`, that the NoPE flag disables RoPE, that
 //! the Mamba2 inner dimensions and the `conv_dim` / `projection_size`
 //! derivations match the reference, and that the EOS default is the Granite
-//! `<|end_of_text|>` id (100257). The numeric correctness of the interleaved SSM
-//! + attention hybrid is validated end-to-end against the real
+//! `<|end_of_text|>` id (100257). The numeric correctness of the interleaved
+//! SSM + attention hybrid is validated end-to-end against the real
 //! `mlx-community/granite-4.0-h-350m-4bit` checkpoint and is not exercised here
 //! (no Metal device is assumed in unit tests).
 
