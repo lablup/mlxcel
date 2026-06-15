@@ -209,7 +209,10 @@ model_fits_in_memory() {
   model_bytes=$(estimate_model_size "$model_path")
   [[ "$model_bytes" -eq 0 ]] && return 0  # can't determine size, try anyway
   local effective_bytes
-  effective_bytes=$(awk "BEGIN{printf \"%.0f\", $model_bytes * $BENCH_MEM_OVERHEAD_FACTOR}")
+  # Pass values as awk data (-v), not interpolated program text, so a
+  # non-numeric BENCH_MEM_OVERHEAD_FACTOR degrades to 0 instead of an awk
+  # syntax error (which could abort the sweep under set -e).
+  effective_bytes=$(awk -v b="$model_bytes" -v f="$BENCH_MEM_OVERHEAD_FACTOR" 'BEGIN{printf "%.0f", b * f}')
   [[ "$effective_bytes" -le "$MEMORY_LIMIT_BYTES" ]]
 }
 
@@ -249,7 +252,7 @@ is_oom_failure() {
 
   # Otherwise (exit 1 cxx exception, 134 bad_alloc abort, ...) it is OOM only
   # if the captured output names an allocator failure.
-  echo "$err_text" | grep -qiE \
+  printf '%s\n' "$err_text" | grep -qiE \
     'out of memory|out-of-memory|insufficient memory|failed to allocate|cannot allocate memory|unable to allocate|bad_alloc|memory allocation of [0-9]|greater than the maximum allowed buffer size|metal::malloc'
 }
 
@@ -384,7 +387,7 @@ bench_one() {
     est_bytes=$(estimate_model_size "$model_path")
     # Report the effective (overhead-scaled) size actually used for the decision
     # so the message stays consistent under a non-default BENCH_MEM_OVERHEAD_FACTOR.
-    effective_mb=$(awk "BEGIN{printf \"%.0f\", $est_bytes * $BENCH_MEM_OVERHEAD_FACTOR / 1048576}")
+    effective_mb=$(awk -v b="$est_bytes" -v f="$BENCH_MEM_OVERHEAD_FACTOR" 'BEGIN{printf "%.0f", b * f / 1048576}')
     limit_mb=$(( MEMORY_LIMIT_BYTES / 1048576 ))
     >&2 printf '>>> [skip]   %s (%d MB > %d MB limit)\n' "$model_name" "$effective_mb" "$limit_mb"
     echo "${model_name},${model_path},,,,,,,$DATE,$HARDWARE_FULL,$MLX_VERSION,$BUILD_TYPE,$MAX_TOKENS,\"$TEXT_PROMPT\",SKIP:oom_estimate"
