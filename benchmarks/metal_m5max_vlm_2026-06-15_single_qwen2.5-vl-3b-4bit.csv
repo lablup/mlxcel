@@ -1,0 +1,2 @@
+model,model_path,prompt_tokens,generated_tokens,prefill_ms,prefill_tok_s,decode_ms,decode_tok_s,date,hardware,mlx_version,build_type,max_tokens,prompt
+qwen2.5-vl-3b-4bit,models/qwen2.5-vl-3b-4bit,91,22,52.84,1722.11,141.39,155.60,2026-06-15,Apple_M5_Max_128GB,0.2.1,release,100,"What is in this image?"

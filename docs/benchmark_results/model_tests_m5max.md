@@ -84,7 +84,7 @@ Compatibility and performance testing for mlxcel models on **MacBook Pro M5 Max 
 | qwen2.5 (0.5B bf16) | Qwen2.5-0.5B-Instruct (bf16) | ✅ | 5803.72 | 403.77 | - | 100 tokens |
 | qwen2.5 (7B) | Qwen2.5-7B-Instruct-4bit | ✅ | 918.42 | 126.26 | **1.15x** | 100 tokens |
 | qwen2.5 (7B 8bit) | Qwen2.5-7B-Instruct-8bit | ✅ | 844.60 | 68.66 | 1.00x | 100 tokens |
-| qwen2.5-vl (3B) | Qwen2.5-VL-3B-Instruct-4bit | ❌ | - | FAIL | - | FAIL:bench |
+| qwen2.5-vl (3B) | qwen2.5-vl-3b-4bit | ✅ | 1525.93 | 164.49 | - | 39 tokens; re-downloaded (prior FAIL was a corrupt checkpoint, not a code bug) |
 | qwen2-vl (2B) | Qwen2-VL-2B-Instruct-4bit | ✅ | 2622.97 | 274.88 | **1.83x** | 35 tokens |
 | qwen1.5-moe | Qwen1.5-MoE-A2.7B-Chat-4bit | ✅ | 921.53 | 239.47 | **1.65x** | 100 tokens |
 | qwen3 (0.6B) | Qwen3-0.6B-4bit | ✅ | 3694.61 | 565.88 | **1.92x** | 9 tokens |
@@ -179,8 +179,7 @@ Compatibility and performance testing for mlxcel models on **MacBook Pro M5 Max 
 | baichuan | Baichuan-M1-14B-Instruct-4bit | ✅ | 153.81 | 58.02 | **1.39x** | 7 tokens |
 | glm4_moe_lite | GLM-4.7-Flash-4bit | ✅ | 248.62 | 103.77 | **2.20x** | 18 tokens |
 | ernie4_5 | ERNIE-4.5-0.3B-Instruct-4bit | ✅ | 7747.91 | 1072.92 | **2.00x** | 100 tokens |
-| hunyuan_moe | Hunyuan-Large-Instruct-4bit | ✅ | 108.99 | 64.70 | **1.46x** | 36 tokens |
-| hunyuan_moe_13b | HunYuan-MoE-A13B-Instruct (bf16) | ❌ | - | FAIL | - | FAIL:bench |
+| hunyuan_moe | hunyuan-a13b-instruct-4bit | ✅ | 109.17 | 64.92 | - | 36 tokens; A13B MoE (4-bit), canonical after checkpoint dedup |
 | hunyuan_v1_dense | Hunyuan-1.8B-Instruct-4bit | ✅ | 1149.02 | 328.24 | **1.80x** | 42 tokens |
 
 ## Other Models
@@ -272,7 +271,7 @@ All entries use the VLM prompt 'What is in this image?' with
 | phi-3.5-vision | phi-3.5-vision-4bit | ✅ | 3576.85 | 167.62 | **1.79x** | 19 tokens |
 | pixtral (12B) | pixtral-12b-4bit | ✅ | 1474.59 | 68.94 | **1.18x** | 100 tokens |
 | qwen2-vl (2B) | qwen2-vl-2b-4bit | ✅ | 2470.49 | 244.65 | - | 12 tokens; EOS-terminate |
-| qwen2.5-vl (3B) | qwen2.5-vl-3b-4bit | ❌ | - | FAIL | - | FAIL:bench (regressed since 05-27) |
+| qwen2.5-vl (3B) | qwen2.5-vl-3b-4bit | ✅ | 1722.11 | 155.60 | - | 22 tokens; re-downloaded (prior FAIL was a corrupt checkpoint) |
 | qwen3-vl (2B) | qwen3-vl-2b-4bit | ✅ | 2263.07 | 273.37 | **1.65x** | 100 tokens |
 | qwen3-vl (4B) | qwen3-vl-4b-4bit | ✅ | 1181.38 | 135.24 | - | 58 tokens; NEW (6-13) |
 | qwen3-vl (8B) | qwen3-vl-8b-4bit | ✅ | 990.55 | 78.16 | - | 15 tokens; NEW (6-13) |
@@ -285,15 +284,15 @@ All entries use the VLM prompt 'What is in this image?' with
 
 ## Summary Statistics
 
-Counts reflect the 2026-06-15 `bench_decode.sh all` text sweep (151 checkpoints).
+Counts reflect the 2026-06-15 `bench_decode.sh all` text sweep with the two post-sweep corrections folded in (qwen2.5-vl-3b-4bit checkpoint re-download, oversized bf16 A13B dropped).
 
 | Status | Count |
 |--------|-------|
-| ✅ Pass (measured decode) | 130 |
+| ✅ Pass (measured decode) | 131 |
 | ⚠️ Partial (loads; early EOS or slow path) | 5 |
-| ❌ Fail / OOM-skip | 16 |
+| ❌ Fail / OOM-skip | 14 |
 
-135 of 151 text checkpoints produced decode numbers; 1 OOM-skip (`qwen3-next-480b-4bit`) and 15 `FAIL:bench`. The five ⚠️ partials are `phi-2-4bit`, `falcon-mamba-7b-4bit`, `gemma-4-31b-it-nvfp4`, `llama-3.1-8b-bf16`, and `granite-4.1-8b-4bit` (early EOS or no fast kernel). Two prior-passing models regressed to FAIL since the 2026-05-27 sweep: `hunyuan-moe-a13b-bf16` (bf16 MoE) and `qwen2.5-vl-3b-4bit` (fails in both text and VLM mode). The remaining FAILs are 5 newly-added non-autoregressive / MTP-drafter / block-diffusion checkpoints the decode harness cannot measure, 2 GLM-5 load failures, `deepseek-v3-4bit` (pre-existing), and experimental quant variants (see Recently Ported Families).
+135 of 151 text checkpoints produced decode numbers in the sweep; 1 OOM-skip (`qwen3-next-480b-4bit`) and 15 `FAIL:bench`. The five ⚠️ partials are `phi-2-4bit`, `falcon-mamba-7b-4bit`, `gemma-4-31b-it-nvfp4`, `llama-3.1-8b-bf16`, and `granite-4.1-8b-4bit` (early EOS or no fast kernel). Post-sweep re-test (2026-06-15) cleared the two models initially flagged as regressions; neither was a code bug: `qwen2.5-vl-3b-4bit` passes after a checkpoint re-download (the sweep hit a corrupt checkpoint) and is now ✅ at 164.49 (text) / 155.60 (VLM), and `hunyuan-moe-a13b-bf16` was dropped because the bf16 A13B exceeds the 128 GB budget (use the 4-bit `hunyuan-a13b-instruct-4bit` at 64.92). The remaining FAILs are 5 newly-added non-autoregressive / MTP-drafter / block-diffusion checkpoints the decode harness cannot measure, 2 GLM-5 load failures, `deepseek-v3-4bit` (pre-existing), and experimental quant variants (see Recently Ported Families).
 
 ## Performance vs mlx-lm / mlx-vlm baseline (2026-05-19 benchmark campaign)
 
@@ -596,9 +595,8 @@ increase and 96% of mlx-lm's 555.43 tok/s on the same prompt.
 
 | Model | Issue | Priority |
 |-------|-------|----------|
-| hunyuan-moe-a13b-bf16 | Regressed ✅→FAIL since 2026-05-27 (was 64.18 tok/s). bf16 MoE path only; the 4-bit Hunyuan MoE variants still pass at ~64 tok/s. Suspect bf16 × fused-MoE-default interaction | High |
-| qwen2.5-vl-3b-4bit | Regressed ✅→FAIL since 2026-05-27 (was 165.50 tok/s); fails in both text and VLM mode | High |
 | glm-5-4bit / glm-5.1-4bit | New GLM-5 family `FAIL:bench`; load-path investigation needed | Medium |
+| hunyuan-moe-a13b-bf16 (bf16 A13B) | Dropped: bf16 weights exceed the 128 GB budget; use `hunyuan-a13b-instruct-4bit` (4-bit, 64.92 tok/s). The size estimate passed it before it OOM'd at load, so the harness logged `FAIL:bench` instead of `SKIP:oom` | Low |
 | deepseek-v3-4bit | MoE + MLA; still fails warmup (pre-existing) | Medium |
 | qwen3-next-480b-4bit | OOM-skip on 128 GB; weights exceed 85% memory budget | Medium |
 | qwen3-0.6b-4bit | Full-budget raw prompt stays at ~93% of mlx-lm; sub-95% decode gap | Medium |
@@ -615,7 +613,7 @@ increase and 96% of mlx-lm's 555.43 tok/s on the same prompt.
 - vs M1 Ultra ratios carry over from the prior `benchmarks/metal_m1ultra_2026-05-28.csv` sweep (mlxcel 0.31.2). They are **not** refreshed for the 0.2.1 M5 numbers above and are pending an M1 Ultra re-sweep at the 0.2.1 pin; new-model rows show `-`.
 - Prefill and decode tok/s reported separately.
 - Current per-model values are the 2026-06-15 full sweep on mlxcel 0.2.1 (MLX pin `a6ec7123`): 151 text models (`bench_decode.sh all`) + 150 VLM-mode (`all --vlm`), bare run (pre-warm on, no cooldown). Source CSVs: `benchmarks/metal_m5max_2026-06-15.csv` and `benchmarks/metal_m5max_vlm_2026-06-15.csv`.
-- vs the 2026-05-27 sweep: 0 decode regressions among the 93 models measured in both; 11 improved >10% (MoE families from the fused-decode default plus broad MLX-bump gains, e.g. gemma2-2b +16.5%, gemma3-4b +12.5%, qwen3-30b-a3b +12.2%, qwen3-moe +12.1%). Two models regressed ✅→FAIL (see Known Issues).
+- vs the 2026-05-27 sweep: 0 decode regressions among the 93 models measured in both; 11 improved >10% (MoE families from the fused-decode default plus broad MLX-bump gains, e.g. gemma2-2b +16.5%, gemma3-4b +12.5%, qwen3-30b-a3b +12.2%, qwen3-moe +12.1%). The two sweep FAILs first read as regressions both turned out to be environmental, not code (corrupt qwen2.5-vl checkpoint re-downloaded; oversized bf16 hunyuan dropped for the 4-bit); see Summary Statistics.
 - Measurement noise on very fast small models remains high (qwen3.5-0.8b-4bit and
   similar can span ±15% across back-to-back runs because 100 tokens generate in
   under 300 ms).

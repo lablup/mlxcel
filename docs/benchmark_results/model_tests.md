@@ -80,10 +80,10 @@ For Qwen2.5-0.5B the 4-bit row is the directly comparable cross-hardware figure;
 |--------|-------|
 | Supported model architectures | 89+ ModelType variants |
 | Text models tested (M1 Ultra, 2026-06-15) | 136 pass, 2 partial, 4 fail, 9 skip/non-standalone (151 dirs; adds apertus, seed-oss, dots.llm1, granite family, lfm2, plamo-2, falcon-h1, BitNet; diffusiongemma loads via #291) |
-| Text models tested (M5 Max, 2026-06-15) | 130 pass, 5 partial, 16 fail/skip (151 total; 0.2.1 full sweep) |
+| Text models tested (M5 Max, 2026-06-15) | 131 pass, 5 partial, 14 fail/skip (0.2.1 full sweep; post-sweep: qwen2.5-vl-3b-4bit fixed by re-download, oversized bf16 hunyuan dropped; neither a code regression) |
 | Text models tested (GB10, 2026-05-28) | 101 pass, 8 fail/skip (109 total) |
 | VLM models tested (GB10, 2026-05-28) | 38 pass, 0 image-path fail (38 measured) |
-| VLM models tested (M5 Max, 2026-06-15) | 53 valid VLM rows (0.2.1 full VLM re-sweep; adds qwen3-vl-4b/8b, minicpm-v-4.6-bf16, nemotron-omni, youtu-vl) |
+| VLM models tested (M5 Max, 2026-06-15) | 54 valid VLM rows (0.2.1 full VLM re-sweep; adds qwen3-vl-4b/8b, minicpm-v-4.6-bf16, nemotron-omni, youtu-vl; qwen2.5-vl-3b-4bit restored after re-download) |
 | VLM models tested (M1 Ultra, 2026-06-15) | 55 measured VLM rows (53 pass + 2 partial) |
 | Beating mlx-lm on M1 Ultra (text, >=100%) | 24/74 (32%, 6-15 vs pinned 5-19 baseline) |
 | At 90%+ parity on M1 Ultra (text) | 59/74 (80%, 6-15 vs pinned 5-19 baseline) |
