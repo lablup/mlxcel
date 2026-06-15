@@ -214,14 +214,17 @@ model_fits_in_memory() {
 }
 
 # Returns 0 (true) when a failed run looks like an out-of-memory condition.
-# Requires BOTH a matching exit code AND matching error output text so that
-# signal-killed processes (e.g. intentional SIGKILL from tests) are not
-# misclassified.
+# OOM is matched by EITHER the exit signal OR a recognisable allocator message,
+# independently. Requiring both would miss the two real OOM paths: the OS
+# OOM-killer SIGKILLs the process before it can print anything (signal, no
+# message), while an MLX/Metal allocator exception propagated through cxx exits
+# with code 1 and carries the allocator text (message, non-signal exit code).
 #
-# OOM exit codes:
-#   137 = SIGKILL (OS OOM-killer terminated the process)
-#   134 = SIGABRT (C++ exception / bad_alloc caused abort)
-#   124 = timeout(1) expiry (explicitly NOT OOM)
+# Exit codes:
+#   137 = SIGKILL          -> OS OOM-killer; treated as OOM on its own
+#   124 = timeout(1) expiry -> explicitly NOT OOM (a slow model is not OOM)
+#   134 = SIGABRT          -> usually std::bad_alloc; classified by message below
+#   1   = cxx-propagated MLX/Metal exception -> classified by message below
 #
 # OOM error text patterns (case-insensitive):
 #   Generic:      out of memory, out-of-memory, insufficient memory,
@@ -235,15 +238,15 @@ is_oom_failure() {
   local rc="$1"
   local err_text="$2"
 
-  # timeout(1) expiry is never OOM
+  # timeout(1) expiry is never OOM (a slow model is not out of memory).
   [[ "$rc" -eq 124 ]] && return 1
 
-  # Exit code must indicate a signal-triggered abort
-  local code_is_oom=0
-  [[ "$rc" -eq 137 || "$rc" -eq 134 ]] && code_is_oom=1
-  [[ "$code_is_oom" -eq 0 ]] && return 1
+  # SIGKILL is the OS OOM-killer; the process is usually killed before it can
+  # print anything, so the exit code alone is sufficient.
+  [[ "$rc" -eq 137 ]] && return 0
 
-  # Error output must also contain a recognisable OOM pattern
+  # Otherwise (exit 1 cxx exception, 134 bad_alloc abort, ...) it is OOM only
+  # if the captured output names an allocator failure.
   echo "$err_text" | grep -qiE \
     'out of memory|out-of-memory|insufficient memory|failed to allocate|cannot allocate memory|unable to allocate|bad_alloc|greater than the maximum|metal::malloc|exceeds .*(memory|limit|budget)'
 }
