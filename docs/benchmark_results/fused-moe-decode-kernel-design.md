@@ -208,7 +208,7 @@ the expected numerical consequence of the fusion.
 
 ### Models covered
 
-The fused single-token decode dispatch is wired into eight model paths: qwen3_moe
+The fused single-token decode dispatch is wired into nine model paths: qwen3_moe
 (Qwen3 MoE), qwen3_next (qwen3.5/3.6), dots.llm1 (mixed 4/6-bit), gemma4 (GeGLU),
 qwen2_moe (qwen1.5-moe / Qwen2-MoE; migrated from its local `SwitchGLU` to the
 shared one, which gained a per-expert stacking loader for the `experts.{idx}`
@@ -218,10 +218,15 @@ overridable projection-leaf-name loader for the `w1`/`w2`/`w3` checkpoint
 convention, mapping gate=w1, up=w3, down=w2; Mixtral's expert intermediate is
 14336, above `MLXCEL_FUSED_MOE_MAX_DFF`, so the kernel declines and decode stays
 on `gather_qmm` (the migration removes duplication; the dispatch arms only if the
-bound is raised)), lfm2 (LFM2-MoE; sigmoid-routed,
-optional expert_bias and norm_topk_prob), and qwen3_vl_moe (Qwen3-VL MoE; imports
-`SwitchGLU` from qwen3_moe, SwiGLU activation, text-only decode path). Other MoE
-families reuse the shared `SwitchGLU` for the expert matmul but were not wired with
-the fused decode dispatch, so they stay on `gather_qmm` regardless of
-`MLXCEL_FUSED_MOE`: olmoe, minimax, and phimoe. nemotron-h's MoE runs through the
+bound is raised)), lfm2 (LFM2-MoE; sigmoid-routed, optional expert_bias and
+norm_topk_prob), qwen3_vl_moe (Qwen3-VL MoE; imports `SwitchGLU` from qwen3_moe,
+SwiGLU activation, text-only decode path), and phimoe (Phi-3.5-MoE; migrated from
+its local `SwitchGLU`/`SwitchLinear` to the shared ones; checkpoints pre-stacked
+under `block_sparse_moe.switch_mlp.{gate,up,down}_proj`; `sanitize_weights` still
+handles the unstacked `experts.{i}.w1/w2/w3` layout for community checkpoints; the
+expert intermediate is 6400, above `MLXCEL_FUSED_MOE_MAX_DFF`, so like mixtral the
+kernel declines and decode stays on `gather_qmm`). Other MoE families reuse the
+shared `SwitchGLU` for the expert matmul but were not wired with the fused decode
+dispatch, so they stay on `gather_qmm` regardless of `MLXCEL_FUSED_MOE`: olmoe and
+minimax. nemotron-h's MoE runs through the
 separate C++ `fused_moe_forward` and is wired behind `MLXCEL_FUSED_MOE_RELU2` only.

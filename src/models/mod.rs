@@ -992,6 +992,10 @@ mod dots1_tests;
 mod lfm2_tests;
 
 #[cfg(test)]
+#[path = "phimoe_tests.rs"]
+mod phimoe_tests;
+
+#[cfg(test)]
 #[path = "falcon_h1_tests.rs"]
 mod falcon_h1_tests;
 
