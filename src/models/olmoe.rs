@@ -384,14 +384,17 @@ impl Attention {
         let k = self.k_proj.forward(x);
         let v = self.v_proj.forward(x);
 
+        // Apply Q/K normalization on the full projection BEFORE the head reshape.
+        // OLMoE normalizes over the whole num_heads*head_dim projection (the norm
+        // weight is hidden-sized), matching the upstream order; normalizing after
+        // the reshape would size-mismatch the weight against head_dim.
+        let q = self.q_norm.forward(&q);
+        let k = self.k_norm.forward(&k);
+
         // Reshape to [batch, seq_len, n_heads, head_dim]
         let q = mlxcel_core::reshape(&q, &[b, l, self.num_heads, self.head_dim]);
         let k = mlxcel_core::reshape(&k, &[b, l, self.num_kv_heads, self.head_dim]);
         let v = mlxcel_core::reshape(&v, &[b, l, self.num_kv_heads, self.head_dim]);
-
-        // Apply Q/K normalization BEFORE transpose
-        let q = self.q_norm.forward(&q);
-        let k = self.k_norm.forward(&k);
 
         // Transpose to [batch, n_heads, seq_len, head_dim]
         let mut q = mlxcel_core::transpose_axes(&q, &[0, 2, 1, 3]);
