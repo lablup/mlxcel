@@ -267,7 +267,13 @@ impl SwitchLinear {
 /// quantized/regular split the stacked loader applies. Experts are gathered
 /// contiguously from index 0 until the first gap.
 ///
-/// Used by: Qwen2Moe (Qwen1.5-MoE / Qwen2-MoE individual-expert checkpoints)
+/// The expert leaf name comes from the `{proj}` segment of the prefix, so a
+/// caller that passes overridden leaf names (e.g. Mixtral's `w1`/`w2`/`w3` via
+/// `SwitchGLU::from_weights_with_proj_names`) loads from the matching expert
+/// keys without any name baked in here.
+///
+/// Used by: Qwen2Moe (Qwen1.5-MoE / Qwen2-MoE individual-expert checkpoints),
+///          Mixtral (`block_sparse_moe.experts.{idx}.{w1,w2,w3}` checkpoints)
 fn stack_individual_experts(
     weights: &WeightMap,
     prefix: &str,
@@ -427,22 +433,49 @@ impl SwitchGLU {
         group_size: i32,
         bits: i32,
     ) -> Result<Self, String> {
+        Self::from_weights_with_proj_names(
+            weights,
+            prefix,
+            group_size,
+            bits,
+            ["gate_proj", "up_proj", "down_proj"],
+        )
+    }
+
+    /// Like [`SwitchGLU::from_weights`], but with overridable projection leaf
+    /// names so checkpoints that do not use the `gate_proj`/`up_proj`/`down_proj`
+    /// convention can still load through the shared loader. `proj_names` is
+    /// `[gate, up, down]`, naming the per-projection leaf under `prefix`
+    /// (pre-stacked `{prefix}.{leaf}.weight`) or under the per-expert layout
+    /// `{root}.experts.{idx}.{leaf}` when `prefix` ends in `.switch_mlp`.
+    ///
+    /// Mixtral stores its experts under the `w1`/`w2`/`w3` convention, mapping
+    /// gate=`w1`, up=`w3`, down=`w2`; it passes those leaf names here so the
+    /// shared code stays generic (no checkpoint-specific names baked in).
+    pub fn from_weights_with_proj_names(
+        weights: &WeightMap,
+        prefix: &str,
+        group_size: i32,
+        bits: i32,
+        proj_names: [&str; 3],
+    ) -> Result<Self, String> {
+        let [gate_leaf, up_leaf, down_leaf] = proj_names;
         Ok(Self {
             gate_proj: SwitchLinear::from_weights(
                 weights,
-                &format!("{}.gate_proj", prefix),
+                &format!("{}.{}", prefix, gate_leaf),
                 group_size,
                 bits,
             )?,
             up_proj: SwitchLinear::from_weights(
                 weights,
-                &format!("{}.up_proj", prefix),
+                &format!("{}.{}", prefix, up_leaf),
                 group_size,
                 bits,
             )?,
             down_proj: SwitchLinear::from_weights(
                 weights,
-                &format!("{}.down_proj", prefix),
+                &format!("{}.{}", prefix, down_leaf),
                 group_size,
                 bits,
             )?,
@@ -664,6 +697,74 @@ mod tests {
         );
         assert_eq!(parts.group_size, group);
         assert_eq!(parts.mode, "affine");
+    }
+
+    #[test]
+    fn switch_glu_loads_overridden_proj_leaf_names() {
+        // Mixtral stores experts under the w1/w2/w3 convention at
+        // `{root}.experts.{idx}.{w1,w2,w3}.{weight,scales,biases}`, with
+        // gate=w1, up=w3, down=w2. The shared loader must find them when the
+        // leaf names are overridden (the `.switch_mlp` virtual prefix keys the
+        // per-expert stacker to the `{root}.experts.{idx}` layout, identical to
+        // the Qwen2-MoE path).
+        let out = 4i32;
+        let group = 64i32;
+        let in_dim = 64i32; // a single quantization group
+        let packed_in = in_dim / 8; // 4-bit packs 8 weights per uint32 column
+        let num_groups = in_dim / group;
+        let root = "model.layers.0.block_sparse_moe";
+
+        let mut weights = WeightMap::new();
+        for e in 0..3 {
+            for leaf in ["w1", "w2", "w3"] {
+                weights.insert(
+                    format!("{root}.experts.{e}.{leaf}.weight"),
+                    mlxcel_core::from_slice_f32(
+                        &vec![0.0; (out * packed_in) as usize],
+                        &[out, packed_in],
+                    ),
+                );
+                weights.insert(
+                    format!("{root}.experts.{e}.{leaf}.scales"),
+                    mlxcel_core::from_slice_f32(
+                        &vec![1.0; (out * num_groups) as usize],
+                        &[out, num_groups],
+                    ),
+                );
+                weights.insert(
+                    format!("{root}.experts.{e}.{leaf}.biases"),
+                    mlxcel_core::from_slice_f32(
+                        &vec![0.0; (out * num_groups) as usize],
+                        &[out, num_groups],
+                    ),
+                );
+            }
+        }
+
+        let glu = SwitchGLU::from_weights_with_proj_names(
+            &weights,
+            &format!("{root}.switch_mlp"),
+            group,
+            4,
+            ["w1", "w3", "w2"], // gate=w1, up=w3, down=w2
+        )
+        .expect("overridden leaf names should load the per-expert experts");
+
+        for proj in [&glu.gate_proj, &glu.up_proj, &glu.down_proj] {
+            let parts = proj
+                .quantized_parts()
+                .expect("stacked per-expert weights should yield a quantized SwitchLinear");
+            assert_eq!(
+                mlxcel_core::array_shape(parts.weight),
+                vec![3, out, packed_in]
+            );
+            assert_eq!(
+                parts.bits, 4,
+                "bits inferred from packed weight/scales shapes"
+            );
+            assert_eq!(parts.group_size, group);
+            assert_eq!(parts.mode, "affine");
+        }
     }
 
     #[test]
