@@ -516,8 +516,24 @@ impl Lfm2MoeSparseMoeBlock {
             scores = mlxcel_core::multiply_scalar(&scores, self.routed_scaling_factor);
         }
 
-        let expert_out = self.switch_mlp.forward(&x_flat, &topk_indices);
-        let result = moe_weighted_sum(&expert_out, &scores, mlxcel_core::array_dtype(&x_flat));
+        let result = {
+            let fused = if mlxcel_core::array_shape(&x_flat)[0] == 1
+                && crate::models::switch_layers::fused_moe_enabled()
+            {
+                self.switch_mlp
+                    .forward_fused_kernel(&x_flat, &topk_indices, &scores)
+                    .map(|out| mlxcel_core::reshape(&out, &[1, hidden_dim]))
+            } else {
+                None
+            };
+            match fused {
+                Some(out) => out,
+                None => {
+                    let expert_out = self.switch_mlp.forward(&x_flat, &topk_indices);
+                    moe_weighted_sum(&expert_out, &scores, mlxcel_core::array_dtype(&x_flat))
+                }
+            }
+        };
 
         if orig_shape.len() > 2 {
             mlxcel_core::reshape(&result, &orig_shape)
