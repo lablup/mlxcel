@@ -15,7 +15,7 @@
 //! Shared SwitchLinear / SwitchGLU for MoE models
 //!
 //! Used by: KimiLinear, LongcatFlashNgram, DeepSeekV3, DeepSeekV32, GLM4Moe,
-//!          GLM4MoeLite, ExaOneMoe, Mixtral, Qwen3Moe, PhiMoE, OLMoE, etc.
+//!          GLM4MoeLite, ExaOneMoe, Mixtral, Qwen2Moe, Qwen3Moe, PhiMoE, OLMoE, etc.
 //!
 //! SwitchLinear: per-expert 3D matmul (quantized via gather_qmm, regular via gather_mm)
 //! SwitchGLU: SwiGLU MLP routing through SwitchLinear
@@ -175,57 +175,137 @@ impl SwitchLinear {
         bits: i32,
         mode: &str,
     ) -> Result<Self, String> {
-        let weight = weights
-            .get(&format!("{}.weight", prefix))
-            .map(|w| mlxcel_core::copy(w))
-            .ok_or_else(|| format!("Missing weight: {}", prefix))?;
-
-        let scales_key = format!("{}.scales", prefix);
-        if weights.contains_key(&scales_key) {
-            // Quantized path
+        // Pre-stacked layout: `{prefix}.weight` (plus optional `.scales`/`.biases`)
+        // already holds every expert in one `[num_experts, ...]` tensor.
+        if let Some(weight) = weights.get(&format!("{}.weight", prefix)) {
+            let weight = mlxcel_core::copy(weight);
             let scales = weights
-                .get(&scales_key)
-                .map(|w| mlxcel_core::copy(w))
-                .unwrap();
+                .get(&format!("{}.scales", prefix))
+                .map(|w| mlxcel_core::copy(w));
             // biases may not exist for mxfp4/nvfp4/mxfp8 modes
             let biases = weights
                 .get(&format!("{}.biases", prefix))
                 .map(|w| mlxcel_core::copy(w));
+            return Ok(Self::from_stacked_parts(
+                weight, scales, biases, group_size, bits, mode,
+            ));
+        }
 
-            // Infer the actual bit width from the packed weight and scales shapes
-            // (group_size fixed): mixed-precision checkpoints such as dots.llm1
-            // quantize some expert projections at 6-bit while the model default is
-            // 4-bit, so the passed `bits` is only the default. The invariant is
-            // `packed_in * 32 == bits * num_groups * group_size`.
-            let w_shape = mlxcel_core::array_shape(&weight);
-            let s_shape = mlxcel_core::array_shape(&scales);
-            let packed_in = *w_shape.last().unwrap_or(&0);
-            let num_groups = *s_shape.last().unwrap_or(&0);
-            let denom = num_groups * group_size;
-            let effective_bits = if denom > 0 && (packed_in * 32) % denom == 0 {
-                let inferred = (packed_in * 32) / denom;
-                if (2..=8).contains(&inferred) {
-                    inferred
+        // Per-expert layout: `{root}.experts.{idx}.{proj}.{weight,scales,biases}`.
+        // Some mlx-lm checkpoints (e.g. Qwen2-MoE / Qwen1.5-MoE) ship the experts
+        // unstacked under `experts.{idx}` rather than as a single `switch_mlp`
+        // tensor. Stack them here so the gather paths see the same `[num_experts,
+        // ...]` layout as the pre-stacked checkpoints. This branch only runs when
+        // the pre-stacked tensor is absent, so it never changes behavior for an
+        // already-loadable checkpoint.
+        if let Some((weight, scales, biases)) = stack_individual_experts(weights, prefix) {
+            return Ok(Self::from_stacked_parts(
+                weight, scales, biases, group_size, bits, mode,
+            ));
+        }
+
+        Err(format!("Missing weight: {}", prefix))
+    }
+
+    /// Build a `SwitchLinear` from a stacked `[num_experts, ...]` weight (plus
+    /// optional scales/biases). Present scales select the quantized path and the
+    /// per-tensor bit width is inferred from the packed-weight and scales shapes;
+    /// absent scales select the non-quantized `Regular` path.
+    fn from_stacked_parts(
+        weight: UniquePtr<MlxArray>,
+        scales: Option<UniquePtr<MlxArray>>,
+        biases: Option<UniquePtr<MlxArray>>,
+        group_size: i32,
+        bits: i32,
+        mode: &str,
+    ) -> Self {
+        match scales {
+            Some(scales) => {
+                // Infer the actual bit width from the packed weight and scales
+                // shapes (group_size fixed): mixed-precision checkpoints such as
+                // dots.llm1 quantize some expert projections at 6-bit while the
+                // model default is 4-bit, so the passed `bits` is only the
+                // default. The invariant is `packed_in * 32 == bits * num_groups *
+                // group_size`.
+                let w_shape = mlxcel_core::array_shape(&weight);
+                let s_shape = mlxcel_core::array_shape(&scales);
+                let packed_in = *w_shape.last().unwrap_or(&0);
+                let num_groups = *s_shape.last().unwrap_or(&0);
+                let denom = num_groups * group_size;
+                let effective_bits = if denom > 0 && (packed_in * 32) % denom == 0 {
+                    let inferred = (packed_in * 32) / denom;
+                    if (2..=8).contains(&inferred) {
+                        inferred
+                    } else {
+                        bits
+                    }
                 } else {
                     bits
-                }
-            } else {
-                bits
-            };
+                };
 
-            Ok(Self::Quantized {
-                weight,
-                scales,
-                biases,
-                group_size,
-                bits: effective_bits,
-                mode: mode.to_string(),
-            })
-        } else {
-            // Non-quantized fallback
-            Ok(Self::Regular { weight })
+                Self::Quantized {
+                    weight,
+                    scales,
+                    biases,
+                    group_size,
+                    bits: effective_bits,
+                    mode: mode.to_string(),
+                }
+            }
+            None => Self::Regular { weight },
         }
     }
+}
+
+/// Stack per-expert projection tensors (`{root}.experts.{idx}.{proj}.{weight,
+/// scales,biases}`) into single `[num_experts, ...]` tensors, given a
+/// stacked-style `prefix` of the form `{root}.switch_mlp.{proj}`. Returns `None`
+/// when the prefix is not in that form or no `experts.0` weight exists, so the
+/// caller falls through to its own missing-weight error.
+///
+/// `scales`/`biases` are stacked only when expert 0 carries them, matching the
+/// quantized/regular split the stacked loader applies. Experts are gathered
+/// contiguously from index 0 until the first gap.
+///
+/// Used by: Qwen2Moe (Qwen1.5-MoE / Qwen2-MoE individual-expert checkpoints)
+fn stack_individual_experts(
+    weights: &WeightMap,
+    prefix: &str,
+) -> Option<(
+    UniquePtr<MlxArray>,
+    Option<UniquePtr<MlxArray>>,
+    Option<UniquePtr<MlxArray>>,
+)> {
+    // prefix: "{root}.switch_mlp.{proj}"  ->  experts at "{root}.experts.{idx}.{proj}"
+    let proj = prefix.rsplit('.').next()?;
+    let root = prefix.strip_suffix(&format!(".switch_mlp.{}", proj))?;
+    let expert_key = |idx: usize, leaf: &str| format!("{}.experts.{}.{}.{}", root, idx, proj, leaf);
+
+    if !weights.contains_key(&expert_key(0, "weight")) {
+        return None;
+    }
+    let has_scales = weights.contains_key(&expert_key(0, "scales"));
+    let has_biases = weights.contains_key(&expert_key(0, "biases"));
+
+    let mut stacked_weight = Vec::new();
+    let mut stacked_scales = Vec::new();
+    let mut stacked_biases = Vec::new();
+    let mut idx = 0;
+    while let Some(weight) = weights.get(&expert_key(idx, "weight")) {
+        stacked_weight.push(mlxcel_core::copy(weight));
+        if has_scales {
+            stacked_scales.push(mlxcel_core::copy(weights.get(&expert_key(idx, "scales"))?));
+        }
+        if has_biases {
+            stacked_biases.push(mlxcel_core::copy(weights.get(&expert_key(idx, "biases"))?));
+        }
+        idx += 1;
+    }
+
+    let weight = mlxcel_core::stack_owned(&stacked_weight, 0);
+    let scales = has_scales.then(|| mlxcel_core::stack_owned(&stacked_scales, 0));
+    let biases = has_biases.then(|| mlxcel_core::stack_owned(&stacked_biases, 0));
+    Some((weight, scales, biases))
 }
 
 pub struct SwitchGLU {
@@ -529,5 +609,78 @@ mod tests {
                 "{v:?} should keep the kernel on"
             );
         }
+    }
+
+    #[test]
+    fn switch_linear_stacks_individual_quantized_experts() {
+        // Per-expert affine 4-bit layout (Qwen1.5-MoE / Qwen2-MoE checkpoints):
+        // weight [out, in/8], scales/biases [out, in/group_size], stored under
+        // `experts.{idx}.gate_proj.*` instead of a stacked `switch_mlp` tensor.
+        let out = 4i32;
+        let group = 64i32;
+        let in_dim = 64i32; // a single quantization group
+        let packed_in = in_dim / 8; // 4-bit packs 8 weights per uint32 column
+        let num_groups = in_dim / group;
+        let root = "model.layers.0.mlp";
+
+        let mut weights = WeightMap::new();
+        for e in 0..3 {
+            weights.insert(
+                format!("{root}.experts.{e}.gate_proj.weight"),
+                mlxcel_core::from_slice_f32(
+                    &vec![0.0; (out * packed_in) as usize],
+                    &[out, packed_in],
+                ),
+            );
+            weights.insert(
+                format!("{root}.experts.{e}.gate_proj.scales"),
+                mlxcel_core::from_slice_f32(
+                    &vec![1.0; (out * num_groups) as usize],
+                    &[out, num_groups],
+                ),
+            );
+            weights.insert(
+                format!("{root}.experts.{e}.gate_proj.biases"),
+                mlxcel_core::from_slice_f32(
+                    &vec![0.0; (out * num_groups) as usize],
+                    &[out, num_groups],
+                ),
+            );
+        }
+
+        let sl =
+            SwitchLinear::from_weights(&weights, &format!("{root}.switch_mlp.gate_proj"), group, 4)
+                .expect("per-expert stacking should load through the shared loader");
+        let parts = sl
+            .quantized_parts()
+            .expect("stacked per-expert weights should yield a quantized SwitchLinear");
+        assert_eq!(
+            mlxcel_core::array_shape(parts.weight),
+            vec![3, out, packed_in]
+        );
+        assert_eq!(
+            parts.bits, 4,
+            "bits inferred from packed weight/scales shapes"
+        );
+        assert_eq!(parts.group_size, group);
+        assert_eq!(parts.mode, "affine");
+    }
+
+    #[test]
+    fn switch_linear_missing_weight_errors_without_stacked_or_individual() {
+        // Neither a stacked `switch_mlp` tensor nor `experts.{idx}` tensors exist.
+        // (`SwitchLinear` holds non-Debug MlxArray handles, so match on the Result
+        // rather than using `expect_err`.)
+        let weights = WeightMap::new();
+        let err = match SwitchLinear::from_weights(
+            &weights,
+            "model.layers.0.mlp.switch_mlp.gate_proj",
+            64,
+            4,
+        ) {
+            Ok(_) => panic!("absent experts must not load"),
+            Err(e) => e,
+        };
+        assert!(err.contains("Missing weight"), "unexpected error: {err}");
     }
 }

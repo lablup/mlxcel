@@ -207,13 +207,14 @@ the expected numerical consequence of the fusion.
 
 ### Models covered
 
-The fused single-token decode dispatch is wired into four model paths: qwen3_moe
-(Qwen3 MoE), qwen3_next (qwen3.5/3.6), dots.llm1 (mixed 4/6-bit), and gemma4
-(GeGLU). Other MoE families reuse the shared `SwitchGLU` for the expert matmul but
-were not wired with the fused decode dispatch, so they stay on `gather_qmm`
-regardless of `MLXCEL_FUSED_MOE`: qwen2_moe (qwen1.5-moe), mixtral, olmoe,
-minimax, phimoe, lfm2, and qwen3_vl_moe (it imports `SwitchGLU` from qwen3_moe but
-keeps its own non-fused MoE forward). Wiring those is a separate follow-up; the
-qwen1.5-moe row in the M1 table above was therefore measured on the `gather_qmm`
-fallback, not the kernel. nemotron-h's MoE runs through the separate C++
-`fused_moe_forward` and is wired behind `MLXCEL_FUSED_MOE_RELU2` only.
+The fused single-token decode dispatch is wired into five model paths: qwen3_moe
+(Qwen3 MoE), qwen3_next (qwen3.5/3.6), dots.llm1 (mixed 4/6-bit), gemma4 (GeGLU),
+and qwen2_moe (qwen1.5-moe / Qwen2-MoE; migrated from its local `SwitchGLU` to the
+shared one, which gained a per-expert stacking loader for the `experts.{idx}`
+checkpoint layout). Other MoE families reuse the shared `SwitchGLU` for the expert
+matmul but were not wired with the fused decode dispatch, so they stay on
+`gather_qmm` regardless of `MLXCEL_FUSED_MOE`: mixtral, olmoe, minimax, phimoe,
+lfm2, and qwen3_vl_moe (it imports `SwitchGLU` from qwen3_moe but keeps its own
+non-fused MoE forward). Wiring those is a separate follow-up. nemotron-h's MoE runs
+through the separate C++ `fused_moe_forward` and is wired behind
+`MLXCEL_FUSED_MOE_RELU2` only.

@@ -175,202 +175,6 @@ impl Attention {
     }
 }
 
-// SwitchLinear: Stacked expert weights for MoE.
-/// Stacked linear layers for MoE experts
-/// Weights shape: [num_experts, output_dim, input_dim_packed]
-/// Supports both quantized (gather_qmm) and non-quantized (gather_mm) forward paths.
-pub enum SwitchLinear {
-    Quantized {
-        weight: UniquePtr<MlxArray>,
-        scales: UniquePtr<MlxArray>,
-        biases: UniquePtr<MlxArray>,
-        group_size: i32,
-        bits: i32,
-        num_experts: usize,
-    },
-    Regular {
-        weight: UniquePtr<MlxArray>,
-        num_experts: usize,
-    },
-}
-
-impl SwitchLinear {
-    /// Return the number of experts this layer holds.
-    pub fn num_experts(&self) -> usize {
-        match self {
-            Self::Quantized { num_experts, .. } => *num_experts,
-            Self::Regular { num_experts, .. } => *num_experts,
-        }
-    }
-
-    /// Forward pass: gather_qmm for quantized weights, gather_mm for regular weights.
-    pub fn forward(
-        &self,
-        x: &MlxArray,
-        indices: &MlxArray,
-        sorted_indices: bool,
-    ) -> UniquePtr<MlxArray> {
-        match self {
-            Self::Quantized {
-                weight,
-                scales,
-                biases,
-                group_size,
-                bits,
-                ..
-            } => {
-                // SAFETY: weight/scales/biases are valid UniquePtr-owned MlxArray values.
-                unsafe {
-                    mlxcel_core::gather_qmm(
-                        x,
-                        weight,
-                        scales,
-                        biases.as_ref().unwrap() as *const _,
-                        std::ptr::null(), // lhs_indices
-                        indices as *const _,
-                        true, // transpose
-                        *group_size,
-                        *bits,
-                        sorted_indices,
-                        "affine",
-                    )
-                }
-            }
-            Self::Regular { weight, .. } => {
-                let wt = mlxcel_core::swap_axes(weight, -1, -2);
-                // SAFETY: wt and indices are valid MlxArray values in scope.
-                unsafe {
-                    mlxcel_core::gather_mm(
-                        x,
-                        &wt,
-                        std::ptr::null(),
-                        indices as *const _,
-                        sorted_indices,
-                    )
-                }
-            }
-        }
-    }
-}
-
-// SwitchGLU: SwiGLU with stacked expert weights.
-/// SwitchGLU: SwiGLU activation with stacked expert weights for MoE
-pub struct SwitchGLU {
-    pub gate_proj: SwitchLinear,
-    pub up_proj: SwitchLinear,
-    pub down_proj: SwitchLinear,
-}
-
-impl SwitchGLU {
-    /// Forward pass with kernel-fused SwiGLU activation
-    /// x: [n_tokens, hidden]
-    /// indices: [n_tokens, top_k]
-    /// Returns: [n_tokens, top_k, hidden]
-    pub fn forward(&self, x: &MlxArray, indices: &MlxArray) -> UniquePtr<MlxArray> {
-        let indices_shape = mlxcel_core::array_shape(indices);
-        let n_tokens = indices_shape[0];
-        let top_k = indices_shape[1];
-
-        // Check if we should use sorted_indices optimization (>= 64 tokens)
-        let total_elements = n_tokens * top_k;
-        let do_sort = total_elements >= 64;
-
-        // Expand x for broadcasting: [n_tokens, hidden] -> [n_tokens, 1, 1, hidden]
-        let x_expanded = mlxcel_core::expand_dims(x, -2);
-        let x_expanded = mlxcel_core::expand_dims(&x_expanded, -3);
-
-        if do_sort {
-            // Sort tokens by expert for better memory access
-            let (sorted_x, sorted_idx, inv_order) = self.gather_sort(&x_expanded, indices);
-
-            // Apply projections with sorted_indices=true
-            let x_gate = self.gate_proj.forward(&sorted_x, &sorted_idx, true);
-            let x_up = self.up_proj.forward(&sorted_x, &sorted_idx, true);
-
-            // Kernel-fused SwiGLU: silu(gate) * up
-            let activated = mlxcel_core::compiled_swiglu_activation(&x_gate, &x_up);
-
-            // Down projection
-            let output = self.down_proj.forward(&activated, &sorted_idx, true);
-
-            // Restore original order
-            self.scatter_unsort(&output, &inv_order, &indices_shape)
-        } else {
-            // Direct path without sorting
-            let x_gate = self.gate_proj.forward(&x_expanded, indices, false);
-            let x_up = self.up_proj.forward(&x_expanded, indices, false);
-
-            // Kernel-fused SwiGLU: silu(gate) * up
-            let activated = mlxcel_core::compiled_swiglu_activation(&x_gate, &x_up);
-
-            // Down projection
-            let output = self.down_proj.forward(&activated, indices, false);
-
-            // Squeeze: [n_tokens, top_k, 1, hidden] -> [n_tokens, top_k, hidden]
-            mlxcel_core::squeeze_axis(&output, -2)
-        }
-    }
-
-    /// Sort tokens by expert index for better memory access
-    fn gather_sort(
-        &self,
-        x: &MlxArray,
-        indices: &MlxArray,
-    ) -> (
-        UniquePtr<MlxArray>,
-        UniquePtr<MlxArray>,
-        UniquePtr<MlxArray>,
-    ) {
-        let indices_shape = mlxcel_core::array_shape(indices);
-        let top_k = indices_shape[indices_shape.len() - 1];
-
-        // Flatten indices: [n_tokens, top_k] -> [n_tokens * top_k]
-        let flat_indices = mlxcel_core::reshape(indices, &[-1]);
-
-        // Sort indices by expert
-        let order = mlxcel_core::argsort(&flat_indices, -1);
-        let inv_order = mlxcel_core::argsort(&order, -1);
-
-        // x is [n_tokens, 1, 1, hidden]
-        // Flatten: [n_tokens, 1, hidden]
-        let x_shape = mlxcel_core::array_shape(x);
-        let x_flat = mlxcel_core::reshape(x, &[x_shape[0], 1, x_shape[3]]);
-
-        // Divide order by top_k to get token indices
-        let top_k_arr = mlxcel_core::from_slice_i32(&[top_k], &[1]);
-        let token_indices = mlxcel_core::divide(&order, &top_k_arr);
-        let token_indices = mlxcel_core::astype(&token_indices, mlxcel_core::dtype::INT32);
-
-        // Take x rows in sorted order
-        let sorted_x = mlxcel_core::take(&x_flat, &token_indices, 0);
-
-        // Get sorted expert indices
-        let sorted_indices = mlxcel_core::take(&flat_indices, &order, 0);
-
-        (sorted_x, sorted_indices, inv_order)
-    }
-
-    /// Restore original order after sorted expert computation
-    fn scatter_unsort(
-        &self,
-        x: &MlxArray,
-        inv_order: &MlxArray,
-        orig_shape: &[i32],
-    ) -> UniquePtr<MlxArray> {
-        // x has shape [n_sorted, 1, hidden]
-        // Reorder by inv_order
-        let unsorted = mlxcel_core::take(x, inv_order, 0);
-
-        // Unflatten and squeeze
-        let x_shape = mlxcel_core::array_shape(&unsorted);
-        let n_tokens = orig_shape[0];
-        let top_k = orig_shape[1];
-
-        let reshaped = mlxcel_core::reshape(&unsorted, &[n_tokens, top_k, x_shape[1], x_shape[2]]);
-        mlxcel_core::squeeze_axis(&reshaped, 2)
-    }
-}
-
 // Shared Expert MLP.
 /// Standard MLP with SwiGLU activation for shared expert
 pub struct SharedExpertMLP {
@@ -395,7 +199,7 @@ impl SharedExpertMLP {
 /// Qwen2 MoE layer with sparse experts and shared expert
 pub struct SparseMoeBlock {
     pub router: UnifiedLinear,
-    pub experts: SwitchGLU,
+    pub experts: crate::models::switch_layers::SwitchGLU,
     pub shared_expert: SharedExpertMLP,
     pub shared_expert_gate: UnifiedLinear,
     pub num_experts: usize,
@@ -433,14 +237,32 @@ impl SparseMoeBlock {
         // Get corresponding scores
         let scores = mlxcel_core::take_along_axis(&gates, &topk_indices, -1);
 
-        // Apply experts
-        let expert_out = self.experts.forward(&x_flat, &topk_indices);
-
-        let expert_out_sum = crate::models::switch_layers::moe_weighted_sum(
-            &expert_out,
-            &scores,
-            mlxcel_core::array_dtype(&x_flat),
-        );
+        // Apply routed experts. Fused single-token decode kernel (#268) on by
+        // default; MLXCEL_FUSED_MOE=0 forces the proven SwitchGLU +
+        // moe_weighted_sum path (also the automatic fallback when the kernel does
+        // not support the config). The shared-expert path below is unchanged.
+        let expert_out_sum = {
+            let fused = if mlxcel_core::array_shape(&x_flat)[0] == 1
+                && crate::models::switch_layers::fused_moe_enabled()
+            {
+                self.experts
+                    .forward_fused_kernel(&x_flat, &topk_indices, &scores)
+                    .map(|out| mlxcel_core::reshape(&out, &[1, hidden_dim]))
+            } else {
+                None
+            };
+            match fused {
+                Some(out) => out,
+                None => {
+                    let expert_out = self.experts.forward(&x_flat, &topk_indices);
+                    crate::models::switch_layers::moe_weighted_sum(
+                        &expert_out,
+                        &scores,
+                        mlxcel_core::array_dtype(&x_flat),
+                    )
+                }
+            }
+        };
 
         // Compute shared expert output
         let shared_output = self.shared_expert.forward(&x_flat);
@@ -678,8 +500,12 @@ impl SparseMoeBlock {
         let moe_prefix = format!("{}.mlp", prefix);
 
         let router = load_quantized_linear(weights, &format!("{}.gate", moe_prefix), args)?;
-        let experts =
-            SwitchGLU::from_weights(weights, args, &format!("{}.switch_mlp", moe_prefix))?;
+        let experts = crate::models::switch_layers::SwitchGLU::from_weights(
+            weights,
+            &format!("{}.switch_mlp", moe_prefix),
+            args.group_size(),
+            args.bits(),
+        )?;
 
         // Load shared expert
         let shared_expert =
@@ -697,137 +523,6 @@ impl SparseMoeBlock {
             num_experts: args.num_experts,
             top_k: args.num_experts_per_tok,
         })
-    }
-}
-
-impl SwitchGLU {
-    /// Load SwitchGLU from weights
-    pub fn from_weights(
-        weights: &WeightMap,
-        args: &ModelArgs,
-        prefix: &str,
-    ) -> Result<Self, String> {
-        Ok(Self {
-            gate_proj: SwitchLinear::from_weights(weights, args, &format!("{}.gate_proj", prefix))?,
-            up_proj: SwitchLinear::from_weights(weights, args, &format!("{}.up_proj", prefix))?,
-            down_proj: SwitchLinear::from_weights(weights, args, &format!("{}.down_proj", prefix))?,
-        })
-    }
-}
-
-impl SwitchLinear {
-    /// Load SwitchLinear from weights, falling back to non-quantized when scales are absent.
-    ///
-    /// Supports both:
-    /// - Stacked format: `{prefix}.{weight,scales,biases}` with shape [num_experts, ...]
-    /// - Individual experts format: needs `experts_prefix` like `model.layers.{l}.mlp.experts`
-    pub fn from_weights(
-        weights: &WeightMap,
-        args: &ModelArgs,
-        prefix: &str,
-    ) -> Result<Self, String> {
-        // Try stacked format first (switch_mlp.gate_proj.weight, etc.)
-        let weight_name = format!("{}.weight", prefix);
-        if weights.contains_key(&weight_name) {
-            let weight = get_weight_copy(weights, &weight_name)?;
-            let scales_key = format!("{}.scales", prefix);
-            if weights.contains_key(&scales_key) {
-                let scales = mlxcel_core::copy(weights.get(&scales_key).unwrap());
-                let biases = get_weight_copy(weights, &format!("{}.biases", prefix))?;
-                let shape = mlxcel_core::array_shape(&weight);
-                let num_experts = shape[0] as usize;
-                return Ok(Self::Quantized {
-                    weight,
-                    scales,
-                    biases,
-                    group_size: args.group_size(),
-                    bits: args.bits(),
-                    num_experts,
-                });
-            } else {
-                let shape = mlxcel_core::array_shape(&weight);
-                let num_experts = shape[0] as usize;
-                return Ok(Self::Regular {
-                    weight,
-                    num_experts,
-                });
-            }
-        }
-
-        // Fall back to stacking individual experts
-        // prefix is like "model.layers.0.mlp.switch_mlp.gate_proj"
-        // Need to convert to "model.layers.0.mlp.experts.{idx}.gate_proj"
-        let proj_name = prefix
-            .rsplit('.')
-            .next()
-            .ok_or_else(|| format!("Invalid prefix: {}", prefix))?;
-        let base_prefix = prefix
-            .strip_suffix(&format!(".switch_mlp.{}", proj_name))
-            .ok_or_else(|| format!("Cannot parse prefix for experts format: {}", prefix))?;
-
-        let num_experts = args.num_experts;
-
-        // Check if individual experts are quantized by looking at the first one
-        let first_scales_key = format!("{}.experts.0.{}.scales", base_prefix, proj_name);
-        if weights.contains_key(&first_scales_key) {
-            // Stack weights from individual experts (quantized)
-            let expert_weights: Vec<_> = (0..num_experts)
-                .map(|e| {
-                    get_weight_copy(
-                        weights,
-                        &format!("{}.experts.{}.{}.weight", base_prefix, e, proj_name),
-                    )
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-
-            let expert_scales: Vec<_> = (0..num_experts)
-                .map(|e| {
-                    get_weight_copy(
-                        weights,
-                        &format!("{}.experts.{}.{}.scales", base_prefix, e, proj_name),
-                    )
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-
-            let expert_biases: Vec<_> = (0..num_experts)
-                .map(|e| {
-                    get_weight_copy(
-                        weights,
-                        &format!("{}.experts.{}.{}.biases", base_prefix, e, proj_name),
-                    )
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-
-            // Stack along axis 0
-            let weight = mlxcel_core::stack_owned(&expert_weights, 0);
-            let scales = mlxcel_core::stack_owned(&expert_scales, 0);
-            let biases = mlxcel_core::stack_owned(&expert_biases, 0);
-
-            Ok(Self::Quantized {
-                weight,
-                scales,
-                biases,
-                group_size: args.group_size(),
-                bits: args.bits(),
-                num_experts,
-            })
-        } else {
-            // Stack weights from individual experts (non-quantized)
-            let expert_weights: Vec<_> = (0..num_experts)
-                .map(|e| {
-                    get_weight_copy(
-                        weights,
-                        &format!("{}.experts.{}.{}.weight", base_prefix, e, proj_name),
-                    )
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-
-            let weight = mlxcel_core::stack_owned(&expert_weights, 0);
-            Ok(Self::Regular {
-                weight,
-                num_experts,
-            })
-        }
     }
 }
 
