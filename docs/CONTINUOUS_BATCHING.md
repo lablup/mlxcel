@@ -24,14 +24,34 @@ token, then streams the new tokens out. Relevant flags:
 
 ### Paged decode and the prompt-prefix cache
 
-With `--decode-storage-backend paged`, decode state and the cross-request
-prompt-prefix cache share one refcounted, copy-on-write block pool. Concurrent
-requests that share a prompt prefix store that prefix's KV once and skip
-re-prefilling it. The mechanism, the memory and prefill-token savings, the
-measured decode throughput, and `--kv-cache-budget` are documented in
+Decode state and the cross-request prompt-prefix cache share one refcounted,
+copy-on-write block pool (the default for batch-capable pool-backed families;
+`--decode-storage-backend dense` opts out). Concurrent requests that share a
+prompt prefix store that prefix's KV once and skip re-prefilling it: adoption
+is non-consuming (clone-and-pin), so one stored prefix serves any number of
+simultaneous borrowers, and Automatic Prefix Caching (on by default, disable
+with `--apc-enabled=false`) lets requests that diverge after a shared prefix
+reuse the common part. The mechanism, the measured memory and prefill-token
+savings, the decode throughput, and `--kv-cache-budget` are documented in
 [turbo-kv-cache.md](turbo-kv-cache.md#unified-paged-kv-cache). Paged decode is
 byte-identical to the dense backend; it is the storage backend the disaggregated
 roles below build on.
+
+Recurrent and hybrid SSM / linear-attention families cannot safely reuse
+arbitrary KV blocks, so they keep the hybrid-SSM/APC exclusion. Families that
+opt into `supports_snapshot_reuse()` instead use a separate exact-prefix
+snapshot bucket: on a healthy finish the scheduler copies the model-owned
+state, and on the next turn it restores that state only when the stored token
+vector is a whole prefix of the incoming request in the same session. The
+unmatched suffix is still prefilled normally, with no recurrent state
+truncation or cross-session sharing. The supported snapshot families are
+Mamba, Mamba2, Jamba, Nemotron-H, Qwen 3.5 / 3.6 text, MoE, and VLM wrappers,
+and Gemma 4 text, VLM, and Unified wrappers.
+
+For multimodal servers, `--enable-vlm-prefix-cache` opts image requests into
+prompt-prefix reuse across same-session follow-up turns with the same image.
+The default stays off for VLM requests, and text-only prompt-cache behavior is
+unchanged.
 
 ## Disaggregated serving
 
@@ -58,8 +78,8 @@ Networking flags:
 | Flag | Role | Purpose |
 |------|------|---------|
 | `--serving-bind <addr>` | prefill, decode, router | This node's own role-transport listener (`host:port`). |
-| `--decode-peers <addr,...>` | prefill | Decode node(s) a prefill node hands KV off to. |
-| `--prefill-peers <addr,...>` | router | Prefill node(s) the router routes requests to. |
+| `--decode-peers <addr,...>` | prefill, router | Decode node(s) a prefill node hands KV off to; routers also use these addresses for decode continuation routing. |
+| `--prefill-peers <addr,...>` | decode, router | Prefill node(s) accepted by a decode node and selected by a router. |
 
 The handoff transfers the paged block contents (not just metadata) over the
 transport, so the decode node reconstructs the exact KV the prefill node built;
@@ -100,8 +120,10 @@ curl http://127.0.0.1:8300/v1/chat/completions \
 ### Scope and limitations
 
 - Pool-backed Fp16 families only (the dense-natural backends such as qwen3 and
-  llama3). Model-owned-state families (gemma3, llama4, qwen3.5) and recurrent or
-  hybrid SSM models are excluded from the paged handoff.
+  llama3). Model-owned-state families and recurrent/hybrid SSM models are
+  excluded from the paged handoff; the exact-prefix snapshot cache described
+  above is a single-node prompt-cache optimization and is not serialized across
+  disaggregated prefill/decode roles.
 - Text-only. The router serves `/v1/chat/completions`; multimodal requests are
   rejected by the router.
 - The router does not yet apply the chat stream filter that the single-node chat

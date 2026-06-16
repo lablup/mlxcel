@@ -15,7 +15,7 @@
 //! SigLIP/CLIP Vision Encoder
 //!
 //! Unified vision encoder supporting both SigLIP and CLIP architectures.
-//! Port of references/mlx-vlm/mlx_vlm/models/llava/vision.py
+//! Port of https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/models/llava/vision.py
 //!
 //! Architecture: VisionEmbeddings → [pre_layrnorm] → Encoder (N × EncoderLayer) → post_layernorm
 //! - VisionEmbeddings: Conv2d patch embedding + learned position embedding [+ CLS token for CLIP]

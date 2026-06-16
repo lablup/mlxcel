@@ -20,7 +20,7 @@
 //! - Sparse MoE with grouped top-k routing (sigmoid/softmax)
 //! - Per-head MultiLinear projections for MLA
 //!
-//! Reference: mlx-lm/mlx_lm/models/kimi_linear.py
+//! Reference: https://github.com/ml-explore/mlx-lm/blob/main/mlx_lm/models/kimi_linear.py
 
 use crate::models::gated_delta::{gated_delta_update, scaled_fast_rms_norm_no_weight};
 use crate::models::switch_layers::SwitchGLU;

@@ -14,7 +14,7 @@
 
 //! Generic VLM video utilities (perf follow-up).
 //!
-//! Translates the upstream Python `mlx_vlm/video_generate.py` pipeline into
+//! Translates the upstream Python https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/video_generate.py pipeline into
 //! Rust so that any vision-language model can accept `--video` inputs through
 //! the same code path used by `--image`. The module is intentionally
 //! decoder-agnostic at the Rust level: frame extraction is delegated to the

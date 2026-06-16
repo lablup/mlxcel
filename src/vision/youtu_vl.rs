@@ -14,7 +14,7 @@
 
 //! Youtu-VL Vision-Language Model.
 //!
-//! Faithful port of `references/mlx-vlm/mlx_vlm/models/youtu_vl/youtu_vl.py`.
+//! Faithful port of https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/models/youtu_vl/youtu_vl.py.
 //!
 //! Composition:
 //! - `vision_tower` — `YoutuVLVisionEncoder` (SigLIP2-style with windowed

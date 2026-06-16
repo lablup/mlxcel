@@ -177,6 +177,7 @@ fn fallback_architecture(model_type: ModelType) -> &'static str {
         ModelType::DeepSeekV2 => "deepseek_v2",
         ModelType::DeepSeekV3 => "deepseek_v3",
         ModelType::DeepSeekV32 => "deepseek_v32",
+        ModelType::Dots1 => "dots1",
         ModelType::Cohere => "cohere",
         ModelType::Cohere2 => "cohere2",
         ModelType::InternLM2 => "internlm2",
@@ -191,6 +192,10 @@ fn fallback_architecture(model_type: ModelType) -> &'static str {
         ModelType::HunyuanMoe => "hunyuan_moe",
         ModelType::HunyuanV1Dense => "hunyuan_v1_dense",
         ModelType::MiMo => "mimo",
+        ModelType::Apertus => "apertus",
+        ModelType::SeedOss => "seed_oss",
+        ModelType::Granite => "granite",
+        ModelType::BitNet => "bitnet",
         ModelType::ExaOne => "exaone",
         ModelType::ExaOne4 => "exaone4",
         ModelType::ExaOneMoe => "exaone_moe",
@@ -209,6 +214,11 @@ fn fallback_architecture(model_type: ModelType) -> &'static str {
         ModelType::Mamba => "mamba",
         ModelType::Mamba2 => "mamba2",
         ModelType::Jamba => "jamba",
+        ModelType::FalconH1 => "falcon_h1",
+        ModelType::Lfm2 => "lfm2",
+        ModelType::Lfm2Moe => "lfm2_moe",
+        ModelType::Plamo2 => "plamo2",
+        ModelType::GraniteMoeHybrid => "granitemoehybrid",
         ModelType::NemotronH => "nemotron_h",
         ModelType::NemotronHNanoOmniVLM => "nemotron_h_nano_omni",
         ModelType::NemotronNAS => "nemotron_nas",
@@ -237,6 +247,10 @@ fn fallback_architecture(model_type: ModelType) -> &'static str {
         // MiniCPM-V 4.6 uses Qwen3.5 backbone; TP is not supported for VLM-kind
         // models and the loader refuses TP routing earlier. Return placeholder.
         ModelType::MiniCPMV46VLM => "minicpmv4_6",
+        // DiffusionGemma is not supported by tensor-parallel inference (the
+        // planner's supported-architecture validation rejects this string
+        // before any TP load is attempted).
+        ModelType::DiffusionGemma => "diffusion_gemma",
     }
 }
 

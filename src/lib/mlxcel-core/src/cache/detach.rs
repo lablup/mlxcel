@@ -132,6 +132,48 @@ impl DetachedKVCache {
         self.offset
     }
 
+    /// Metadata-only copy of this handle for a non-consuming paged prefix
+    /// clone (#227), re-anchored at `offset_override`.
+    ///
+    /// Only valid for a handle that carries no tensors (the pool-backed Fp16
+    /// shape `clone_handle` produces: the live K/V lives in the shared block
+    /// pool, the handle only carries offset bookkeeping). Returns `None` when
+    /// any tensor field is populated, so a dense-compat set cannot be
+    /// shallow-cloned into aliased buffers.
+    pub(super) fn pool_backed_handle_clone(&self, offset_override: i32) -> Option<DetachedKVCache> {
+        if self.keys.is_some()
+            || self.values.is_some()
+            || self.key_scales.is_some()
+            || self.val_scales.is_some()
+            || self.v_packed.is_some()
+            || self.v_norms.is_some()
+            || self.v_rescale.is_some()
+            || self.k_packed.is_some()
+            || self.k_norms.is_some()
+        {
+            return None;
+        }
+        Some(DetachedKVCache {
+            keys: None,
+            values: None,
+            offset: offset_override,
+            step: self.step,
+            mode: self.mode,
+            key_scales: None,
+            val_scales: None,
+            v_packed: None,
+            v_norms: None,
+            v_rescale: None,
+            k_packed: None,
+            k_norms: None,
+            turbo_seed: self.turbo_seed,
+            cold_offset: 0,
+            hot_threshold: self.hot_threshold,
+            delegated_fp16_fast_path: self.delegated_fp16_fast_path,
+            delegated_fp16_sidecar_policy: self.delegated_fp16_sidecar_policy,
+        })
+    }
+
     /// Quantization mode of the detached cache.
     pub fn mode(&self) -> KVCacheMode {
         self.mode

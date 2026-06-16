@@ -1,0 +1,2 @@
+model,model_path,prompt_tokens,generated_tokens,prefill_ms,prefill_tok_s,decode_ms,decode_tok_s,date,hardware,mlx_version,build_type,max_tokens,prompt
+gemma3n-e4b-4bit,models/gemma3n-e4b-4bit,16,74,91.82,174.26,1234.60,59.94,2026-06-12,Apple_M1_Ultra_128GB,0.1.4,release,100,"Hello, how are you today?"

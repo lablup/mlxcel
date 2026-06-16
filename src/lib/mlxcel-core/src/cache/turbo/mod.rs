@@ -11,6 +11,11 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+//
+// Portions of this file are derived from turboquant_plus
+// (https://github.com/TheTom/turboquant_plus), Copyright 2026 Tom Turney,
+// licensed under the Apache License, Version 2.0. See the top-level NOTICE
+// file for the attribution carried forward under Apache-2.0 Section 4(d).
 
 //! TurboQuant KV cache compression.
 //!
@@ -98,7 +103,7 @@ pub const DELEGATED_HOT_MAX: i32 = DELEGATED_HOT_THRESHOLD * 4;
 /// When enabled, the cache still builds packed cold V sidecars, but it keeps a
 /// unified FP16 V buffer and routes decode attention through native SDPA. This
 /// trades the compressed-only memory target for a speed reference path that
-/// mirrors `references/turboquant_plus`' delegated KVCache architecture.
+/// mirrors `turboquant_plus`' delegated KVCache architecture.
 pub const DELEGATED_FP16_FAST_PATH_ENV: &str = "MLXCEL_TURBO4_DELEGATED_FP16_FAST_PATH";
 
 static DELEGATED_FP16_FAST_PATH_ENABLED: OnceLock<bool> = OnceLock::new();

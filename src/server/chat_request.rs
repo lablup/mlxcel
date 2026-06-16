@@ -334,8 +334,10 @@ fn build_raw_json_messages_with_thinking(
                 msg["tool_call_id"] = serde_json::Value::String(tool_call_id.clone());
             }
             if let Some(ref tool_calls) = m.tool_calls {
-                msg["tool_calls"] =
+                let mut tc_value =
                     serde_json::to_value(tool_calls).unwrap_or(serde_json::Value::Null);
+                normalize_tool_call_arguments(&mut tc_value);
+                msg["tool_calls"] = tc_value;
             }
 
             msg
@@ -343,6 +345,40 @@ fn build_raw_json_messages_with_thinking(
         .collect();
 
     serde_json::Value::Array(messages)
+}
+
+/// Normalize each tool call's `function.arguments` from a JSON-encoded string
+/// into a parsed object so dict-iterating chat templates can consume it.
+///
+/// The OpenAI wire format carries `arguments` as a JSON *string* (e.g.
+/// `"{\"path\":\"/foo\"}"`), and that's what agentic clients echo back on
+/// later turns. But the Qwen3-Coder / Qwen3.5 / Qwen3.6 chat templates iterate
+/// it with `tool_call.arguments|items`, which requires a mapping. Passing the
+/// raw string makes minijinja's `|items` fail ("cannot convert value into
+/// pairs"), the whole render falls back to a default template, and the
+/// resulting prompt diverges from the prior turn from the first token,
+/// silently degrading the model's multi-turn context and destroying
+/// prompt-cache prefix reuse (every tool turn re-prefills cold).
+///
+/// We replace `arguments` only when the string parses to a JSON **object**;
+/// templates that serialize arguments via `tojson` then emit the original
+/// object shape, while malformed/scalar arguments stay strings for templates
+/// that treat them as text. Mirrors mlx-serve's `chat.zig` workaround.
+fn normalize_tool_call_arguments(tool_calls: &mut serde_json::Value) {
+    let serde_json::Value::Array(calls) = tool_calls else {
+        return;
+    };
+    for call in calls {
+        let Some(args) = call.pointer_mut("/function/arguments") else {
+            continue;
+        };
+        if let serde_json::Value::String(s) = args
+            && let Ok(parsed) = serde_json::from_str::<serde_json::Value>(s)
+            && parsed.is_object()
+        {
+            *args = parsed;
+        }
+    }
 }
 
 /// Flatten request messages into [`ChatMessage`], preserving all `<think>`

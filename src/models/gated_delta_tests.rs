@@ -16,7 +16,7 @@ use super::{
     GatedDeltaCache, RMSNormGated, compute_g, gated_delta_ops, gated_delta_step,
     precise_swiglu_gate, restore_dtype, supports_metal_gated_delta_kernel,
 };
-use mlxcel_core::dtype;
+use mlxcel_core::{dtype, generate::ModelStateSnapshot};
 
 fn assert_allclose(actual: &mlxcel_core::MlxArray, expected: &mlxcel_core::MlxArray) {
     let close = mlxcel_core::allclose(actual, expected, 1e-3, 1e-3);
@@ -324,4 +324,32 @@ fn gated_delta_cache_advance_increments_offset() {
     assert_eq!(cache.offset, 1);
     cache.advance(3);
     assert_eq!(cache.offset, 4);
+}
+
+#[test]
+fn gated_delta_cache_snapshot_restore_round_trips_state_shapes() {
+    let mut cache = GatedDeltaCache::new();
+    cache.conv_state = Some(mlxcel_core::zeros(&[1, 3, 8], dtype::FLOAT32));
+    cache.state_cache = Some(mlxcel_core::zeros(&[1, 2, 4, 8], dtype::FLOAT32));
+    cache.offset = 5;
+
+    let mut snapshot = ModelStateSnapshot::new("qwen3_5", 17);
+    cache.snapshot_into(&mut snapshot, "layer4.linear");
+
+    let mut restored = GatedDeltaCache::new();
+    restored.restore_from(&snapshot, "layer4.linear");
+
+    let conv = restored
+        .conv_state
+        .as_ref()
+        .and_then(|a| a.as_ref())
+        .expect("conv_state restored");
+    let state = restored
+        .state_cache
+        .as_ref()
+        .and_then(|a| a.as_ref())
+        .expect("state_cache restored");
+    assert_eq!(restored.offset, 17);
+    assert_eq!(mlxcel_core::array_shape(conv), vec![1, 3, 8]);
+    assert_eq!(mlxcel_core::array_shape(state), vec![1, 2, 4, 8]);
 }

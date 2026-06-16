@@ -56,7 +56,23 @@ Prerequisites vary by distribution and CUDA version. At minimum you need:
 - CUDA toolkit with `nvcc`.
 - NVIDIA driver compatible with the selected CUDA toolkit.
 - cuDNN and CUDA runtime libraries required by the pinned MLX build.
-- OpenBLAS and LAPACK development/runtime packages.
+- BLAS and LAPACK development packages, including the C headers. MLX's CMake
+  resolves `cblas.h` and `lapacke.h`, so the `lapacke` headers must be present,
+  not only the runtime libraries.
+
+On Debian/Ubuntu (x86_64 or aarch64) the build packages are:
+
+```bash
+sudo apt-get install -y \
+    build-essential cmake git \
+    libopenblas-dev liblapack-dev liblapacke-dev
+# CUDA toolkit (nvcc) and cuDNN come from NVIDIA's apt repository, e.g.
+#   cuda-toolkit-13-0  cudnn9-cuda-13
+```
+
+`liblapacke-dev` is the package that ships `lapacke.h`; `liblapack-dev` alone
+omits it and the MLX CMake configure step fails with `LAPACK_INCLUDE_DIRS` set
+to `NOTFOUND`.
 
 Example build shape:
 
@@ -94,15 +110,45 @@ MLX_CUDA_ARCHITECTURES=121 cargo build --release --features cuda
 MLX_CUDA_ARCHITECTURES="90a;121" cargo build --release --features cuda
 ```
 
-The repository release workflow currently builds Linux ARM64 CUDA artifacts for
-GB10 (`121`) and GH200 (`90a`) on a self-hosted runner, and Linux x86-64 CUDA
-artifacts for SM 80 / 90a / 120 on GitHub-hosted runners. Treat other GPU/OS
-combinations as source builds that need local validation.
+The repository release workflow builds two Linux CUDA targets on self-hosted
+runners, each as one fat binary: aarch64 covering GH200 (`90a`), GB200 (`100`),
+and GB10 (`121`) in a single build (`90a;100;121`), and x86_64 covering Ampere
+through Blackwell (`80;86;89;90a;100;120`). For each target the `mlxcel` CLI and the
+`mlxcel-server` are published as separate archives (`mlxcel-...` and
+`mlxcel-server-...`, each roughly 347 MB) so a consumer downloads only the one
+it needs. Treat other GPU/OS combinations as source builds that need local
+validation.
+
+### Prebuilt CUDA artifact: runtime requirements
+
+MLX's CUDA backend compiles some kernels (gather and other indexing kernels)
+at runtime with NVRTC the first time they run, so a prebuilt binary needs CUDA
+headers available on the deployment host, not only the runtime libraries:
+
+- **CCCL (libcu++) headers** are bundled inside the prebuilt Linux CUDA
+  archives (both aarch64 and x86_64). Each unpacks to `bin/` + `include/cccl/`,
+  the layout MLX's JIT looks for relative to the executable
+  (`<exe-dir>/../include/cccl`). Keep `mlxcel`/`mlxcel-server` under `bin/` and
+  the `include/cccl/` directory beside it; do not flatten them. The runtime
+  resolves the bundled headers from the executable's canonical path
+  (`/proc/self/exe`), so any launch style works, including a relative
+  `./mlxcel`. Set `MLXCEL_CCCL_DIR` to point the JIT at the CCCL headers
+  explicitly, e.g. when embedding mlxcel and keeping a flat binary layout.
+- **CUDA toolkit headers** (`cuda_runtime.h` and friends) come from the host.
+  Install the CUDA toolkit and set `CUDA_HOME` (or `CUDA_PATH`) if it is not at
+  `/usr/local/cuda`. Without them the first NVRTC compile fails with
+  `cannot open source file` errors.
+- An NVIDIA driver matching the CUDA toolkit must be present to run on the GPU.
+
+Compiled kernels are cached on disk (`MLX_PTX_CACHE_DIR`, default under the
+system temp dir), so only the first run of each kernel variant pays the NVRTC
+cost. Point `MLX_PTX_CACHE_DIR` at a persistent path to keep the cache across
+sessions.
 
 ### C++ ISA baseline (`MLXCEL_CXX_MARCH`)
 
 In release builds the C++ bridge defaults to `-march=native`, which tunes for
-— and only runs on — the build host's CPU. That is correct for builds that run
+(and only runs on) the build host's CPU. That is correct for builds that run
 where they are built (developer machines, the per-machine GB10/GH200 release
 assets). For a binary that must run on other machines, set `MLXCEL_CXX_MARCH`
 to a portable baseline; the release workflow's x86-64 assets use `x86-64-v3`
@@ -120,9 +166,12 @@ MLXCEL_CXX_MARCH=none cargo build --release --features cuda
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `CUDA_HOME` | CUDA toolkit root used by the build script | `/usr/local/cuda` when present |
+| `CUDA_HOME` | CUDA toolkit root, build-time and for runtime NVRTC headers | `/usr/local/cuda` when present |
 | `MLX_CUDA_ARCHITECTURES` | CUDA SM target list, build-time | auto-detect via `nvidia-smi`, then `90a` fallback |
 | `MLXCEL_CXX_MARCH` | C++ bridge `-march` value, build-time; `none` omits the flag | `native` |
+| `MLXCEL_CCCL_DIR` | Override for the bundled CCCL (libcu++) header dir used by the CUDA NVRTC JIT | bundled `<exe-dir>/../include/cccl`, then build-time fallback |
+| `MLX_PTX_CACHE_DIR` | On-disk cache for JIT-compiled CUDA kernels | system temp dir |
+| `MLXCEL_QUIET_JIT` | Suppress the one-time "compiling CUDA kernels" notice on a cold first run | unset (notice shown) |
 | `MLXCEL_DEVICE` | Runtime device hint (`gpu` or `cpu`) | auto |
 | `MLXCEL_WIRED_LIMIT` | Apple Silicon wired-memory ceiling, e.g. `64GB`; `0`/`none` disables it | `max` |
 | `LLAMA_ARG_*` | Environment-backed server options accepted by clap | unset |

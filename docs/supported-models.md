@@ -8,7 +8,7 @@ runtime source of truth is the code, not this prose page:
 - loading policy: `src/model_metadata.rs`
 - VLM loading routes: `src/loading/vlm*.rs`
 
-As of v0.0.27, `ModelType` contains 92 variants: 70 text/non-VLM variants
+As of v0.1.4, `ModelType` contains 93 variants: 71 text/non-VLM variants
 and 22 VLM variants. These are architecture/runtime variants, not a guarantee
 that every checkpoint under a marketing family name is supported.
 
@@ -23,22 +23,44 @@ Implemented model families include:
 - Phi, Phi-3, Phi-3 Small, PhiMoE
 - Mixtral and other MoE families
 - DeepSeek v1 / v2 / v3 / v3.2
+- dots.llm1 (`dots1`, rednote: a DeepSeek-V3-style Mixture-of-Experts without MLA. Standard multi-head attention with per-head Q/K RMSNorm, a dense first layer (`first_k_dense_replace`), then sigmoid-routed experts that select on `gate.weight` logits plus an `e_score_correction_bias`, with a single always-on shared expert. Validated against `mlx-community/dots.llm1.inst-mixed-4-6bit`, a mixed 4/6-bit export whose `v_proj` and `down_proj` tensors are 6-bit while the rest are 4-bit; the unified loaders detect the per-tensor bit width from shape.)
 - Cohere / Cohere2
 - InternLM 2 / 3
 - GLM 4, GLM MoE, GLM MoE DSA
 - ERNIE 4.5 and ERNIE 4.5 MoE
 - Hunyuan dense and MoE variants
+- IBM Granite dense (`granite`)
+- IBM Granite 4.x hybrid (`granitemoehybrid`: interleaves Mamba2 SSM and GQA attention layers by `layer_types`, applies the four Granite scalar multipliers (embedding, attention, residual, logits), and defaults to NoPE attention. The dense-MLP mode is validated against `mlx-community/granite-4.0-h-350m-4bit`; the MoE mode (`block_sparse_moe` + `shared_mlp`) is implemented but awaits a public MLX checkpoint to validate. The non-hybrid `granitemoe` variant is not yet ported.)
+- BitNet b1.58 (`bitnet`, Microsoft: a Llama-style transformer whose every projection is a `BitLinear` with 1.58-bit ternary weights ({-1, 0, +1}) packed 4-per-uint8 and scaled by a single per-tensor `weight_scale`. A custom Metal kernel (`bitlinear_matmul`) multiplies directly on the packed bytes, so the unpacked weights never materialize. Two extra sub-norms (`attn_sub_norm` before `o_proj`, `ffn_sub_norm` inside the MLP) and a squared-ReLU MLP (`relu2(gate) * up`). Runs in native bf16 (its squared-ReLU overflows f16), bypassing the Apple-Silicon f16 conversion. Validated against `mlx-community/bitnet-b1.58-2B-4T` and its `-4bit` variant, which additionally affine-quantizes the embedding/lm_head to 4-bit (the BitLinear weights stay ternary); keeping the whole model bf16 also keeps that 4-bit dequant dtype-consistent.)
 - ExaOne / ExaOne 4 / ExaOne MoE / Solar Open
 - OLMo / OLMo2 / OLMo3 / OLMoE
 - StarCoder2, StableLM, SmolLM3, Baichuan, MiniCPM, MiniCPM3, MiniMax,
   Ministral3, Mistral4, Nemotron, Nemotron-NAS, Step 3.5, MiMo
+- Apertus (`apertus`, Swiss AI: Llama-style dense transformer with an xIELU activation MLP (no gate), QK-norm, llama3 RoPE scaling, and untied embeddings)
+- Seed-OSS (`seed_oss`, ByteDance: plain Llama-style dense transformer with a standard SwiGLU MLP and standard residuals. The only deltas are a split attention bias (`attention_bias` on q/k/v, `attention_out_bias` on o_proj), an explicit `head_dim`, untied embeddings, and a `{"rope_type": "default"}` rope_scaling that applies no scaling. Validated against `mlx-community/Seed-OSS-36B-Instruct-4bit`.)
 - Mamba, Mamba2, RWKV7, Recurrent Gemma, Jamba, Nemotron-H
+- Falcon-H1 (TII: runs a Mamba2 SSM mixer and GQA attention in parallel within each block, summing both outputs; the MUP channel multipliers are pre-folded into the MLX weights)
+- LFM2 and LFM2-MoE (Liquid Foundation Models: short-convolution and attention hybrid; the MoE variant routes through sigmoid-gated experts)
+- PLaMo 2 (Preferred Networks: interleaves Mamba SSM and GQA attention layers by index; each block carries normformer-style pre/post offset RMSNorms, and the Mamba mixer derives B/C/dt from a post-conv projection). The architecture is validated against the mlx-lm reference at the token-id level (`tests/plamo2_parity.rs`). CLI text generation additionally needs support for PLaMo's custom `PlamoTokenizer` (the `tokenizer.jsonl` Unigram format), which the Rust tokenizer loader does not yet read.
 - Kimi Linear, LongCat Flash, LongCat Flash N-gram
 - GPT-OSS
 
 Many of these families have checkpoint-specific config or weight-layout
 requirements. If a checkpoint fails detection or loading, inspect its
 `config.json::model_type` first and compare it with `src/models/detection.rs`.
+
+## Block-diffusion text models
+
+| Family | `model_type` key | Notes |
+|--------|-----------------|-------|
+| DiffusionGemma | `diffusion_gemma` / `diffusion_gemma_text` | Block-diffusion on a Gemma 4 MoE backbone. Generates a canvas of tokens per block through iterative denoising rather than token-by-token left-to-right decoding. CLI (`mlxcel generate`) supports text and image input (`--image <path>`, repeatable). Served in `mlxcel-server` (serial, batch-1 by design) via `/v1/chat/completions` and `/v1/completions`; image input follows the standard `image_url` content part format. See [Block-diffusion generation](block-diffusion.md). |
+
+DiffusionGemma uses a two-phase forward pass: an encoder prefill that caches the
+prompt into dense FP16 KV caches, then a canvas loop that attends bidirectionally
+within each output block while attending causally to the cached prefix.
+Load detection accepts `model_type: "diffusion_gemma"` (outer config) and
+`model_type: "diffusion_gemma_text"` (inner `text_config`).
+The fused MoE `gate_up_proj` weights are split at load time. When a vision tower is present in the checkpoint, its weights are loaded and wired for image input; checkpoints without vision weights fall back to text-only mode without error.
 
 ## Vision-language and multimodal variants
 

@@ -193,7 +193,7 @@ pub(crate) fn compute_vlm_embeddings(
     tokenizer: &MlxcelTokenizer,
 ) -> Result<Option<InputEmbeddings>> {
     // Handle video-only or video + image mode for Gemma4.
-    // Video and audio cannot coexist in this CLI surface yet — surface a
+    // Video and audio cannot coexist in this CLI surface yet, surface a
     // clean error rather than silently accept one.
     if !video_paths.is_empty() {
         if audio_path.is_some() {
@@ -243,7 +243,7 @@ pub(crate) fn compute_vlm_embeddings(
         );
     }
 
-    // Nemotron H Nano Omni — audio-only or combined image + audio
+    // Nemotron H Nano Omni: audio-only or combined image + audio
     // Mirrors the Gemma 4 dispatch above; the helper
     // handles both branches so a single match arm covers both modes.
     if let Some(audio) = audio_path
@@ -259,7 +259,7 @@ pub(crate) fn compute_vlm_embeddings(
 
     // Reject `--audio` for any remaining VLM that does not have a
     // dedicated dispatch above. Without this guard, `--audio` would be
-    // silently dropped and the runtime would emit text-only output —
+    // silently dropped and the runtime would emit text-only output,
     // which is worse than a clear error since the user supplied data
     // they expect the model to consume.
     if audio_path.is_some() {
@@ -620,7 +620,7 @@ fn compute_gemma4_video_embeddings(
         .collect();
 
     // The CLI path does not insert a dedicated `<|video|>` marker into
-    // the prompt — the chat template handles `type == "image"` blocks
+    // the prompt, the chat template handles `type == "image"` blocks
     // and we splice video frames in after BOS using the existing image-
     // token expansion. `i32::MIN` is a sentinel that cannot appear in a
     // tokenised prompt, so the placeholder-replace branch of
@@ -718,9 +718,9 @@ fn expand_gemma4_audio_tokens(
 /// framing token is omitted (matches the model surface contract that
 /// `0` means "no framing token configured").
 ///
-/// If no placeholder is found in the prompt — common when the user
+/// If no placeholder is found in the prompt, common when the user
 /// runs `mlxcel generate --audio file.wav -p "..."` without manually
-/// inserting a sound token — the block is prepended before the first
+/// inserting a sound token, the block is prepended before the first
 /// non-special token, mirroring the Nemotron image-token-expansion
 /// path that does the equivalent prepend when the prompt has no
 /// `<image>` placeholder.
@@ -930,7 +930,7 @@ fn compute_nemotron_h_nano_omni_audio_embeddings(
         )
         .map_err(|e| anyhow::anyhow!("Audio feature extraction failed: {}", e))?;
 
-    // Compose final input embeddings — image placeholders get image
+    // Compose final input embeddings: image placeholders get image
     // features, audio placeholders get audio features, in upstream
     // order (images first, then audio).
     let input_ids_arr =
@@ -1036,7 +1036,7 @@ mod tests {
 
     #[test]
     fn audio_token_expansion_prepends_when_no_placeholder_present() {
-        // Prompt has no sound_ctx token — block prepended before the
+        // Prompt has no sound_ctx token, block prepended before the
         // existing tokens.
         let mut tokens = vec![1i32, 42, 2];
         let inserted = expand_nemotron_h_nano_omni_audio_tokens(&mut tokens, 99, 7, 8, 2);
@@ -1046,7 +1046,7 @@ mod tests {
 
     #[test]
     fn audio_token_expansion_replaces_only_first_occurrence() {
-        // Two sound_ctx tokens — only the first is expanded so a multi-
+        // Two sound_ctx tokens: only the first is expanded so a multi-
         // clip prompt would land each clip in its own marker (the
         // single-clip CLI surface uses N=1 here).
         let mut tokens = vec![99i32, 42, 99, 2];

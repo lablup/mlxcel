@@ -165,7 +165,7 @@ fn load_generation_model(
     // `memory_estimate::DEFAULT_HEADROOM_FACTOR`).
     //
     // On Linux/CPU MLX returns zero for most memory metrics, so we
-    // skip the delta when `snap.active_bytes == 0` — it would just
+    // skip the delta when `snap.active_bytes == 0`, it would just
     // print misleading "100% under-estimate" lines. The structural
     // wiring is verified by the call site and the unit tests; the
     // numerical delta is meaningful only on Apple Silicon (Metal) /
@@ -183,7 +183,7 @@ fn load_generation_model(
 /// per-process allocator counter on the no-gpu backend). When active
 /// bytes are nonzero, prints a `delta` line and emits a tracing
 /// event so an off-line collector can chart preflight accuracy
-/// across loads — feeding the manual recalibration recipe on
+/// across loads, feeding the manual recalibration recipe on
 /// `DEFAULT_HEADROOM_FACTOR`.
 fn log_estimate_vs_actual_delta(est: &MemoryEstimate, snap: &mlxcel_core::memory::MemorySnapshot) {
     if snap.active_bytes == 0 {
@@ -192,7 +192,7 @@ fn log_estimate_vs_actual_delta(est: &MemoryEstimate, snap: &mlxcel_core::memory
         // know the preflight estimate is structurally wired but
         // can't be validated numerically on this host.
         println!(
-            "Memory estimate vs actual: skipped (MLX active_memory() is 0 — \
+            "Memory estimate vs actual: skipped (MLX active_memory() is 0, \
              non-Metal/CUDA backend; estimate was {} and is structurally valid \
              but cannot be verified without a populated allocator counter)",
             format_bytes(est.total_bytes),
@@ -348,7 +348,7 @@ fn validate_pipeline_parallel_args(args: &GenerateArgs) -> Result<()> {
             tp_size
         );
     }
-    // LoRA adapter composition with PP is supported — adapters are loaded at
+    // LoRA adapter composition with PP is supported, adapters are loaded at
     // stage initialization via `load_in_process_stage_worker_with_adapter`.
     // Single-adapter only; multi-adapter stacking and runtime hot-swap
     // remain out of scope for v1.
@@ -632,7 +632,7 @@ fn tokenize_prompt(
 /// active.
 ///
 /// The empty-map path is the **baseline bit-exact** contract
-/// Axis B — no disk I/O, no vocab scan, no sampling-path changes.
+/// Axis B: no disk I/O, no vocab scan, no sampling-path changes.
 ///
 /// # Errors
 /// Returns an error when the tokenizer is not HuggingFace-compatible but the
@@ -646,7 +646,7 @@ fn resolve_cli_token_bias(
     let Some(cfg) = lang_bias_config else {
         return Ok(TokenBiasMap::default());
     };
-    // Empty bias set is also a no-op — `resolve_token_bias` short-circuits,
+    // Empty bias set is also a no-op: `resolve_token_bias` short-circuits,
     // but we short-circuit earlier here too to avoid any tokenizer I/O.
     if cfg.bias_set.ordered.is_empty() {
         return Ok(TokenBiasMap::default());
@@ -679,7 +679,7 @@ fn build_cli_sampling_config(args: &GenerateArgs, stop_token_ids: Vec<i32>) -> S
         top_k: args.sampling.top_k,
         top_p: args.sampling.top_p,
         min_p: args.sampling.min_p,
-        seed: None,
+        seed: args.sampling.seed,
         repetition_penalty: args.sampling.repetition_penalty,
         dry_multiplier: args.sampling.dry_multiplier,
         dry_base: args.sampling.dry_base,
@@ -692,7 +692,7 @@ fn build_cli_sampling_config(args: &GenerateArgs, stop_token_ids: Vec<i32>) -> S
     })
 }
 
-fn print_generation_preamble(user_prompt: &str) -> Result<()> {
+pub(super) fn print_generation_preamble(user_prompt: &str) -> Result<()> {
     println!("Generating...");
     print!("{}", user_prompt);
     io::stdout().flush()?;
@@ -941,7 +941,7 @@ fn run_generation_mode<M: LanguageModel>(
         let draft_num_layers = draft_model.num_layers();
         let main_num_layers = model.num_layers();
         // Axis B (B8): speculative decoding must apply the bias on the target
-        // (main) model only — see `SpeculativeGenerator::with_token_bias` and
+        // (main) model only: see `SpeculativeGenerator::with_token_bias` and
         // `draft_sampling` for the acceptance-rate rationale.
         let mut spec_generator = SpeculativeGenerator::new(main_num_layers, draft_num_layers)
             .with_token_bias(token_bias);
@@ -1037,7 +1037,7 @@ fn chat_options_from_args(args: &GenerateArgs) -> Result<crate::commands::ChatOp
         top_k: args.sampling.top_k,
         top_p: args.sampling.top_p,
         min_p: args.sampling.min_p,
-        seed: None,
+        seed: args.sampling.seed,
         repetition_penalty: args.sampling.repetition_penalty,
         dry_multiplier: args.sampling.dry_multiplier,
         dry_base: args.sampling.dry_base,
@@ -1076,7 +1076,7 @@ pub(crate) fn run_generate(args: GenerateArgs) -> Result<()> {
     run_generate_once(args)
 }
 
-/// One-shot (`-p`-supplied) text generation — the historical `generate` flow.
+/// One-shot (`-p`-supplied) text generation: the historical `generate` flow.
 fn run_generate_once(mut args: GenerateArgs) -> Result<()> {
     // Safe: the only caller (`run_generate`) guarantees `prompt` is `Some`.
     let user_prompt = args
@@ -1095,8 +1095,8 @@ fn run_generate_once(mut args: GenerateArgs) -> Result<()> {
     // or pipeline-parallel diagnostic. When `--surgery` is absent this
     // is a no-op and the load path remains bit-exact identical to the
     // earlier baseline. This reads only the `--surgery` YAML path, never
-    // the model directory, so it must stay ahead of the `-m` resolver below
-    // — a malformed surgery config never triggers an auto-download.
+    // the model directory, so it must stay ahead of the `-m` resolver below,
+    // a malformed surgery config never triggers an auto-download.
     #[cfg(feature = "surgery")]
     install_surgery_pipeline_from_cli(&args)?;
 
@@ -1107,7 +1107,7 @@ fn run_generate_once(mut args: GenerateArgs) -> Result<()> {
     // store, or auto-downloaded into the mlxcel store on a miss. Placed after
     // the (model-independent) surgery YAML validation but before the
     // tensor/pipeline-parallel validators and the quantization-advice,
-    // tokenizer, memory-preflight, and model-load steps — all of which read
+    // tokenizer, memory-preflight, and model-load steps, all of which read
     // the model directory and therefore need the resolved path.
     args.model.model =
         resolve_model_source_with_override(&args.model.model, args.model.models_dir.as_deref())?;
@@ -1172,7 +1172,7 @@ fn run_generate_once(mut args: GenerateArgs) -> Result<()> {
             token_bias.len(),
             if token_bias.len() == 1 { "y" } else { "ies" }
         );
-        // B9 — emit structured debug trace once per generator construction.
+        // B9: emit structured debug trace once per generator construction.
         let (languages_str, policy_str) = if let Some(cfg) = &lang_bias_config {
             let langs: Vec<&str> = cfg
                 .bias_set
@@ -1251,7 +1251,7 @@ fn run_generate_once(mut args: GenerateArgs) -> Result<()> {
         KVCacheMode::Turbo4 => {
             println!(
                 "KV cache mode: turbo4 (symmetric Turbo4-K + Turbo4-V, ~73% KV savings; \
-                 allowlisted families only — non-allowlisted models fall back to Turbo4Asym)"
+                 allowlisted families only; non-allowlisted models fall back to Turbo4Asym)"
             );
         }
         KVCacheMode::Turbo4Delegated => {
@@ -1290,6 +1290,18 @@ fn run_generate_once(mut args: GenerateArgs) -> Result<()> {
         )?
     } else {
         let (model, _loaded_tokenizer) = load_generation_model(&args, preflight_estimate.as_ref())?;
+        // Block-diffusion models generate by canvas denoising, not
+        // autoregressive decoding: route them to the diffusion engine BEFORE
+        // the standard CxxGenerator loop (issue #217, phase 1).
+        if let mlxcel::LoadedModel::DiffusionGemma(diffusion_model) = &model {
+            return super::generate_diffusion::run_diffusion_generation(
+                diffusion_model,
+                &args,
+                &tokenizer,
+                &prompt_tokens,
+                &user_prompt,
+            );
+        }
         let vlm_embeddings = generate_vlm::compute_vlm_embeddings(
             &model,
             &mut prompt_tokens,

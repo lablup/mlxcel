@@ -21,6 +21,7 @@ mod gemma3n_helpers;
 mod llama4_helpers;
 mod model_owned;
 pub(crate) mod qwen_mrope_state;
+mod recurrent_snapshot;
 mod sanitize;
 
 // Shared modules
@@ -28,18 +29,23 @@ pub mod gated_delta;
 pub mod switch_layers;
 
 // Model implementations (mlxcel-core based)
+pub mod apertus;
 pub mod baichuan;
+pub mod bitnet;
 pub mod cohere;
 pub mod cohere2;
 pub mod deepseek;
 pub mod deepseek_v2;
 pub mod deepseek_v3;
 pub mod deepseek_v32;
+pub mod diffusion_gemma;
+pub mod dots1;
 pub mod ernie4_5;
 pub mod ernie4_5_moe;
 pub mod exaone;
 pub mod exaone4;
 pub mod exaone_moe;
+pub mod falcon_h1;
 pub mod gemma;
 pub mod gemma2;
 pub mod gemma3;
@@ -51,12 +57,15 @@ pub mod glm4_moe;
 pub mod glm4_moe_lite;
 pub mod glm_moe_dsa;
 pub mod gpt_oss;
+pub mod granite;
+pub mod granitemoehybrid;
 pub mod hunyuan_moe;
 pub mod hunyuan_v1_dense;
 pub mod internlm2;
 pub mod internlm3;
 pub mod jamba;
 pub mod kimi_linear;
+pub mod lfm2;
 pub mod llama3;
 pub mod llama4;
 pub mod longcat_flash_ngram;
@@ -85,6 +94,7 @@ pub mod phi3;
 pub mod phi3small;
 pub mod phi4mm;
 pub mod phimoe;
+pub mod plamo2;
 pub mod qwen2;
 pub mod qwen2_moe;
 pub mod qwen2_vl;
@@ -96,6 +106,7 @@ pub mod qwen3_vl;
 pub mod qwen3_vl_moe;
 pub mod recurrent_gemma;
 pub mod rwkv7;
+pub mod seed_oss;
 pub mod smollm3;
 pub mod solar_open;
 pub mod stablelm;
@@ -104,7 +115,9 @@ pub mod step3p5;
 pub mod youtu_vl_lm;
 
 // Re-export model types
+pub use apertus::ApertusModel;
 pub use baichuan::BaichuanModel;
+pub use bitnet::BitNetModel;
 pub use cohere::CohereModel;
 pub use cohere2::Cohere2Model;
 pub use deepseek::DeepSeekModel;
@@ -112,11 +125,14 @@ pub use deepseek_v2::DeepSeekV2Model;
 pub use deepseek_v3::DeepSeekV3Model;
 pub use deepseek_v32::DeepSeekV32Model;
 pub use detection::get_model_type;
+pub use diffusion_gemma::DiffusionGemmaModel;
+pub use dots1::Dots1Model;
 pub use ernie4_5::Ernie45Model;
 pub use ernie4_5_moe::Ernie45MoeModel;
 pub use exaone::ExaOneModel;
 pub use exaone_moe::ExaoneMoeModel;
 pub use exaone4::{ExaOne4Model, ExaOne4Wrapper};
+pub use falcon_h1::FalconH1Model;
 pub use gemma::GemmaModel;
 pub use gemma2::Gemma2Model;
 pub use gemma3::{Gemma3Model, Gemma3Wrapper};
@@ -127,12 +143,15 @@ pub use glm4::Glm4Model;
 pub use glm4_moe::Glm4MoeModel;
 pub use glm4_moe_lite::Glm4MoeLiteModel;
 pub use gpt_oss::{GptOssModel, GptOssWrapper};
+pub use granite::GraniteModel;
+pub use granitemoehybrid::GraniteMoeHybridModel;
 pub use hunyuan_moe::HunyuanMoeModel;
 pub use hunyuan_v1_dense::HunyuanV1DenseModel;
 pub use internlm2::InternLM2Model;
 pub use internlm3::InternLM3Model;
 pub use jamba::JambaModel;
 pub use kimi_linear::KimiLinearModel;
+pub use lfm2::Lfm2Model;
 pub use llama3::Llama3Model;
 pub use llama4::{Llama4CxxModel, Llama4Wrapper};
 pub use longcat_flash_ngram::LongcatFlashNgramModel;
@@ -160,6 +179,7 @@ pub use phi3::Phi3Model;
 pub use phi3small::Phi3SmallModel;
 pub use phi4mm::Phi4MMModel;
 pub use phimoe::PhiMoeModel;
+pub use plamo2::Plamo2Model;
 pub use qwen2::Qwen2Model;
 pub use qwen2_moe::Qwen2MoeModel;
 pub use qwen2_vl::Qwen2VLModel;
@@ -181,6 +201,7 @@ pub use sanitize::{
     load_and_sanitize_weights, load_text_weights, sanitize_config_json, sanitize_tied_embeddings,
     warn_bf16_precision,
 };
+pub use seed_oss::SeedOssModel;
 pub use smollm3::SmolLM3Model;
 pub use solar_open::SolarOpenModel;
 pub use stablelm::StableLMModel;
@@ -206,6 +227,7 @@ pub enum ModelType {
     Gemma2,          // Gemma 2
     Gemma3,          // Gemma 3 (text-only)
     Gemma4,          // Gemma 4 text-only route
+    DiffusionGemma,  // DiffusionGemma (block-diffusion on the Gemma 4 MoE backbone)
     Gemma3VLM,       // Gemma 3 VLM (vision-language)
     Gemma4VLM,       // Gemma 4 VLM (vision-language)
     Gemma4Unified,   // Gemma 4 Unified (encoder-free text + vision + audio)
@@ -249,6 +271,8 @@ pub enum ModelType {
     DeepSeekV2,
     DeepSeekV3,
     DeepSeekV32,
+    /// rednote dots.llm1 (DeepSeek-V3-style MoE without MLA).
+    Dots1,
 
     // Cohere family
     Cohere,
@@ -267,6 +291,18 @@ pub enum ModelType {
     HunyuanMoe,
     HunyuanV1Dense,
     MiMo,
+
+    // Apertus (Swiss AI)
+    Apertus,
+
+    // ByteDance Seed-OSS (dense)
+    SeedOss,
+
+    // IBM Granite
+    Granite,
+
+    // BitNet (1.58-bit ternary)
+    BitNet,
 
     // Korean models
     ExaOne,
@@ -301,6 +337,19 @@ pub enum ModelType {
     /// Audio support is tracked separately as a follow-up.
     NemotronHNanoOmniVLM,
     NemotronNAS,
+
+    // TII Falcon (Mamba2 + Attention parallel hybrid)
+    FalconH1,
+
+    // Liquid Foundation Models (short-conv + attention hybrid)
+    Lfm2,
+    Lfm2Moe,
+
+    // Preferred Networks PLaMo 2 (Mamba + attention interleaved hybrid)
+    Plamo2,
+
+    // IBM Granite 4.x (Mamba2 + attention interleaved hybrid)
+    GraniteMoeHybrid,
 
     // Kimi models
     KimiLinear,
@@ -340,6 +389,7 @@ pub const ALL_MODEL_TYPES: &[ModelType] = &[
     ModelType::Gemma2,
     ModelType::Gemma3,
     ModelType::Gemma4,
+    ModelType::DiffusionGemma,
     ModelType::Gemma3VLM,
     ModelType::Gemma4VLM,
     ModelType::Gemma4Unified,
@@ -381,6 +431,7 @@ pub const ALL_MODEL_TYPES: &[ModelType] = &[
     ModelType::DeepSeekV2,
     ModelType::DeepSeekV3,
     ModelType::DeepSeekV32,
+    ModelType::Dots1,
     // Cohere family
     ModelType::Cohere,
     ModelType::Cohere2,
@@ -397,6 +448,14 @@ pub const ALL_MODEL_TYPES: &[ModelType] = &[
     ModelType::HunyuanMoe,
     ModelType::HunyuanV1Dense,
     ModelType::MiMo,
+    // Apertus (Swiss AI)
+    ModelType::Apertus,
+    // ByteDance Seed-OSS
+    ModelType::SeedOss,
+    // IBM Granite
+    ModelType::Granite,
+    // BitNet (1.58-bit ternary)
+    ModelType::BitNet,
     // Korean models
     ModelType::ExaOne,
     ModelType::ExaOne4,
@@ -424,6 +483,15 @@ pub const ALL_MODEL_TYPES: &[ModelType] = &[
     ModelType::NemotronH,
     ModelType::NemotronHNanoOmniVLM,
     ModelType::NemotronNAS,
+    // TII Falcon
+    ModelType::FalconH1,
+    // Liquid Foundation Models
+    ModelType::Lfm2,
+    ModelType::Lfm2Moe,
+    // Preferred Networks PLaMo 2
+    ModelType::Plamo2,
+    // IBM Granite 4.x hybrid
+    ModelType::GraniteMoeHybrid,
     // Kimi models
     ModelType::KimiLinear,
     // Longcat models
@@ -481,6 +549,10 @@ impl ModelType {
             ModelType::Gemma3 => ("Gemma 3", "Gemma"),
             ModelType::Gemma3n => ("Gemma 3n", "Gemma"),
             ModelType::Gemma4 => ("Gemma 4", "Gemma"),
+            ModelType::DiffusionGemma => (
+                "DiffusionGemma (block-diffusion, Gemma 4 MoE backbone)",
+                "Gemma",
+            ),
             ModelType::RecurrentGemma => ("RecurrentGemma (Griffin: RGLRU + attention)", "Gemma"),
 
             // ----- Gemma VLM -----
@@ -545,6 +617,11 @@ impl ModelType {
             ModelType::HunyuanV1Dense => ("Hunyuan v1 Dense", "Hunyuan"),
             ModelType::HunyuanMoe => ("Hunyuan MoE", "Hunyuan"),
 
+            // ----- IBM Granite -----
+            ModelType::Granite => ("Granite (dense)", "Granite"),
+            ModelType::BitNet => ("BitNet b1.58 (ternary)", "BitNet"),
+            ModelType::GraniteMoeHybrid => ("Granite 4 (Mamba2 + attention hybrid)", "Granite"),
+
             // ----- ExaOne -----
             ModelType::ExaOne => ("ExaOne 3", "ExaOne"),
             ModelType::ExaOne4 => ("ExaOne 4", "ExaOne"),
@@ -576,6 +653,7 @@ impl ModelType {
             ModelType::LongcatFlash => ("LongCat Flash (MLA + MoE, dual sublayer)", "MoE (other)"),
             ModelType::LongcatFlashNgram => ("LongCat Flash + N-gram embedding", "MoE (other)"),
             ModelType::Step3p5 => ("Step-3.5 (Sigmoid MoE gate + SwitchGLU)", "MoE (other)"),
+            ModelType::Dots1 => ("dots.llm1 (MoE)", "MoE (other)"),
 
             // ----- Mamba / SSM -----
             ModelType::Mamba => ("Mamba 1 / Falcon Mamba", "Mamba / SSM"),
@@ -583,6 +661,16 @@ impl ModelType {
 
             // ----- Hybrid (Attention + SSM) -----
             ModelType::Jamba => ("Jamba (Mamba + Transformer + MoE)", "Hybrid"),
+
+            // ----- Falcon -----
+            ModelType::FalconH1 => ("Falcon-H1 (Mamba2 + Attention parallel hybrid)", "Falcon"),
+
+            // ----- Liquid Foundation Models -----
+            ModelType::Lfm2 => ("LFM2 (short-conv + attention hybrid)", "LFM2"),
+            ModelType::Lfm2Moe => ("LFM2-MoE (sigmoid-gated experts)", "LFM2"),
+
+            // ----- Preferred Networks -----
+            ModelType::Plamo2 => ("PLaMo 2 (Mamba + attention hybrid)", "PLaMo"),
 
             // ----- RWKV -----
             ModelType::Rwkv7 => ("RWKV v7", "RWKV"),
@@ -595,6 +683,8 @@ impl ModelType {
             ModelType::MiniCPM3 => ("MiniCPM 3", "Specialized"),
             ModelType::SmolLM3 => ("SmolLM 3", "Specialized"),
             ModelType::MiMo => ("MiMo (multi-token prediction)", "Specialized"),
+            ModelType::Apertus => ("Apertus (dense)", "Specialized"),
+            ModelType::SeedOss => ("Seed-OSS", "Specialized"),
 
             // ----- Other VLM (cross-family vision-language stacks) -----
             ModelType::LlavaVLM => ("LLaVA (CLIP/SigLIP + Llama/Qwen2)", "Other VLM"),
@@ -642,6 +732,156 @@ impl ModelType {
 #[cfg(test)]
 mod metadata_tests {
     use super::{ALL_MODEL_TYPES, ModelType};
+
+    /// Compiler-enforced completeness: every `ModelType` variant must appear in
+    /// `ALL_MODEL_TYPES`, or it is silently absent from `mlxcel arch`.
+    ///
+    /// `all_variants!` lists each variant exactly once. A `match` guard inside
+    /// it makes the compiler reject the list when a variant is missing — so
+    /// adding a `ModelType` variant is a build error until it is listed here —
+    /// and the same list is iterated to assert membership in `ALL_MODEL_TYPES`.
+    /// A new model wired into the enum and `metadata()` but forgotten in
+    /// `ALL_MODEL_TYPES` therefore fails this test (the prior `count > 80` check
+    /// could not catch it).
+    #[test]
+    fn every_variant_is_registered_for_arch() {
+        macro_rules! all_variants {
+            ($($v:ident),+ $(,)?) => {{
+                // Exhaustiveness guard: a missing variant is a build error here.
+                fn _exhaustive(mt: ModelType) {
+                    match mt {
+                        $(ModelType::$v => {}),+
+                    }
+                }
+                [$(ModelType::$v),+]
+            }};
+        }
+        let variants = all_variants!(
+            Llama,
+            Llama4,
+            Llama4VLM,
+            Qwen2,
+            Qwen3,
+            Qwen3Moe,
+            Qwen3Next,
+            Qwen35,
+            Qwen35VLM,
+            Qwen35Moe,
+            Qwen35MoeVLM,
+            Gemma,
+            Gemma2,
+            Gemma3,
+            Gemma4,
+            DiffusionGemma,
+            Gemma3VLM,
+            Gemma4VLM,
+            Gemma4Unified,
+            LlavaVLM,
+            LlavaBunnyVLM,
+            AyaVisionVLM,
+            PaliGemmaVLM,
+            PixtralVLM,
+            Mistral3VLM,
+            Qwen2VL,
+            Qwen25VL,
+            Qwen3VL,
+            Qwen3VLMoe,
+            YoutuVLM,
+            InternVLChatVLM,
+            MiniCPMOVLM,
+            MiniCPMV46VLM,
+            Moondream3VLM,
+            Gemma3n,
+            Gemma3nVLM,
+            Phi,
+            Phi3,
+            Phi4MMVLM,
+            Phi4SigLipVLM,
+            Phi3VLM,
+            MolmoVLM,
+            Molmo2VLM,
+            MolmoPointVLM,
+            Phi3Small,
+            PhiMoe,
+            GptOss,
+            MiniMax,
+            Mixtral,
+            Qwen2Moe,
+            OLMoE,
+            DeepSeek,
+            DeepSeekV2,
+            DeepSeekV3,
+            DeepSeekV32,
+            Dots1,
+            Cohere,
+            Cohere2,
+            InternLM2,
+            InternLM3,
+            Baichuan,
+            Glm4,
+            Glm4Moe,
+            Glm4MoeLite,
+            GlmMoeDsa,
+            Ernie45,
+            Ernie45Moe,
+            HunyuanMoe,
+            HunyuanV1Dense,
+            MiMo,
+            Apertus,
+            SeedOss,
+            Granite,
+            BitNet,
+            ExaOne,
+            ExaOne4,
+            ExaOneMoe,
+            SolarOpen,
+            Olmo,
+            Olmo2,
+            Olmo3,
+            StarCoder2,
+            MiniCPM,
+            MiniCPM3,
+            StableLM,
+            SmolLM3,
+            Ministral3,
+            Mistral3,
+            Mistral4,
+            Nemotron,
+            Mamba,
+            Mamba2,
+            Jamba,
+            NemotronH,
+            NemotronHNanoOmniVLM,
+            NemotronNAS,
+            FalconH1,
+            Lfm2,
+            Lfm2Moe,
+            Plamo2,
+            GraniteMoeHybrid,
+            KimiLinear,
+            LongcatFlash,
+            LongcatFlashNgram,
+            Step3p5,
+            Rwkv7,
+            RecurrentGemma,
+        );
+        for mt in variants {
+            assert!(
+                ALL_MODEL_TYPES.contains(&mt),
+                "{mt:?} is a ModelType variant but is missing from ALL_MODEL_TYPES; \
+                 it will not appear in `mlxcel arch`. Add it to ALL_MODEL_TYPES."
+            );
+        }
+        // Every variant is registered and the slice has no duplicates
+        // (all_model_types_has_no_duplicates), so the lengths must match.
+        assert_eq!(
+            variants.len(),
+            ALL_MODEL_TYPES.len(),
+            "ALL_MODEL_TYPES has {} entries but there are {} ModelType variants",
+            ALL_MODEL_TYPES.len(),
+            variants.len(),
+        );
+    }
 
     /// `ALL_MODEL_TYPES` is the iteration source for `mlxcel arch`. The
     /// list must contain every `ModelType` variant or rendered output
@@ -730,3 +970,35 @@ mod qwen_vl_position_tests;
 #[cfg(test)]
 #[path = "qwen3_5_tests.rs"]
 mod qwen3_5_tests;
+
+#[cfg(test)]
+#[path = "apertus_tests.rs"]
+mod apertus_tests;
+
+#[cfg(test)]
+#[path = "granite_tests.rs"]
+mod granite_tests;
+
+#[cfg(test)]
+#[path = "seed_oss_tests.rs"]
+mod seed_oss_tests;
+
+#[cfg(test)]
+#[path = "dots1_tests.rs"]
+mod dots1_tests;
+
+#[cfg(test)]
+#[path = "lfm2_tests.rs"]
+mod lfm2_tests;
+
+#[cfg(test)]
+#[path = "falcon_h1_tests.rs"]
+mod falcon_h1_tests;
+
+#[cfg(test)]
+#[path = "plamo2_tests.rs"]
+mod plamo2_tests;
+
+#[cfg(test)]
+#[path = "granitemoehybrid_tests.rs"]
+mod granitemoehybrid_tests;

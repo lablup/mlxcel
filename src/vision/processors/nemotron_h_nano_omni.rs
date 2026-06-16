@@ -15,7 +15,7 @@
 //! Nemotron H Nano Omni image preprocessor.
 //!
 //! Faithful Rust port of
-//! `references/mlx-vlm/mlx_vlm/models/nemotron_h_nano_omni/image_processing_nemotron_h_nano_omni.py`.
+//! https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/models/nemotron_h_nano_omni/image_processing_nemotron_h_nano_omni.py.
 //! Produces channel-first `[1, 3, H, W]` float32 tensors normalized with the
 //! checkpoint-supplied mean/std, plus the pre-downsample patch grid that
 //! the multimodal projector uses to compute per-image token counts.

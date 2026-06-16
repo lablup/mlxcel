@@ -5,6 +5,8 @@ The implementation is experimental in the sense that quality and speed vary by
 model family, cache mode, hardware, and server path. Use the default FP16 cache
 unless you have measured the target model and workload.
 
+The TurboQuant algorithms (PolarQuant rotation, Lloyd-Max codebooks, layer-aware V protection, sparse-V dequant) are a Rust port of [turboquant_plus](https://github.com/TheTom/turboquant_plus), Copyright 2026 Tom Turney, licensed under the Apache License 2.0. See the top-level [NOTICE](../NOTICE) file for the attribution carried forward under Apache-2.0 Section 4(d).
+
 Implementation entry points:
 
 - CLI flags: `src/cli/turbo_args.rs`
@@ -125,16 +127,51 @@ paged layout when `--decode-storage-backend paged` is selected.
 
 ### Unified paged KV cache
 
-Under `--decode-storage-backend paged`, the continuous-batching server keeps
-both the cross-request prompt-prefix cache and per-sequence decode state in one
-refcounted, copy-on-write block pool (epic #116). Two requests that share a
-prompt prefix store that prefix's KV blocks once: the second request adopts the
-first request's blocks by reference rather than re-prefilling them, and a block
-forks (copy-on-write) only when one sequence's content diverges from a shared
-block. Paged adopt and donate are supported for the pool-backed Fp16 families
+The continuous-batching server keeps both the cross-request prompt-prefix cache
+and per-sequence decode state in one refcounted, copy-on-write block pool
+(epic #116). The paged backend is the default for batch-capable pool-backed
+families (`--decode-storage-backend auto` resolves to paged when batching);
+`dense` forces the legacy per-sequence caches.
+
+Two requests that share a prompt prefix store that prefix's KV blocks once.
+Adoption is non-consuming clone-and-pin: a borrower clones pinned references to
+the matched prefix blocks, so the stored entry survives for concurrent siblings
+and for deeper future matches, and any number of in-flight requests can share
+one stored prefix simultaneously. Partial matches adopt too: with Automatic
+Prefix Caching (APC, on by default) the match is verified per 16-token hash
+block, floored to the 32-token pool block boundary, and the borrower
+re-prefills only its divergent suffix on fresh blocks (full shared blocks are
+never mutated; a shared partial tail forks copy-on-write). Cache entries are
+accounted at their REAL pool bytes, so `--prompt-cache-capacity-bytes`
+(default 2 GiB) genuinely bounds retention and the LRU eviction actually
+triggers.
+
+Paged adopt and donate are supported for the pool-backed Fp16 families
 (the dense-natural backends such as qwen3 and llama3); model-owned-state families
-(gemma3, llama4, qwen3.5) and recurrent or hybrid SSM models keep dense or
-model-owned caches and stay out of the pool.
+and recurrent or hybrid SSM models keep dense or model-owned caches and stay out
+of the pool.
+
+### Exact-prefix snapshots for recurrent state
+
+Hybrid-SSM and linear-attention families remain excluded from block sharing:
+their recurrent hidden state cannot be reconstructed from a radix/APC token
+prefix, and it cannot be truncated to an arbitrary earlier token. For those
+families, `mlxcel-server` has an orthogonal exact-prefix snapshot bucket. Models
+that implement `supports_snapshot_reuse()` can copy their full model-owned
+state at turn end and restore it into a fresh sequence when the next request's
+tokens begin with that exact stored prefix under the same session key. As of
+v0.2.1, the supported snapshot families are Mamba, Mamba2, Jamba, Nemotron-H,
+Qwen 3.5 / 3.6 text, MoE, and VLM wrappers, and Gemma 4 text, VLM, and Unified
+wrappers.
+
+The snapshot bucket has its own byte cap, entry cap, TTL, LRU counters, and
+hit/miss metrics. `GET /v1/cache/stats` reports `snapshot_*` fields, while
+`/metrics` exposes `mlxcel_prompt_cache_snapshot_hits_total`,
+`mlxcel_prompt_cache_snapshot_misses_total`,
+`mlxcel_prompt_cache_snapshot_tokens_reused_total`, and labeled snapshot
+evictions. This path is deliberately whole-prefix only: it does not participate
+in APC block matching, does not share SSM state across sessions, and does not
+modify the block-sharing carve-out for hybrid SSM families.
 
 The block pool can be bounded with `--kv-cache-budget <bytes|auto>` (env
 `MLXCEL_KV_CACHE_BUDGET`); the default is unbounded. Under a budget the scheduler
@@ -159,6 +196,27 @@ prefix prefills it; the other `N - 1` adopt the cached blocks and skip
 confirms an adopting request decodes byte-identically to a cold run while
 skipping the shared prefill.
 
+**End-to-end server footprint.** Whole-process physical footprint
+(`/usr/bin/footprint`) of `mlxcel serve` under fixed HTTP workloads
+(`scripts/bench_memory_footprint.py`, `models/llama-3.2-1b-4bit`, M1 Ultra,
+defaults, peak during the scenario phase):
+
+| scenario | v0.1.4 | current default | shared tokens |
+|---|---|---|---|
+| idle (weights only) | 957 MiB | 983 MiB | - |
+| 8 concurrent requests, shared ~3.7k-token system prompt | 1653 MiB | 1627 MiB | 29184 (all 8 adopt) |
+| same prefix, 8 sequential requests | 1650 MiB | 1413 MiB | 25536 |
+| one conversation, 8 turns | 2104 MiB | 1301 MiB | 10976 |
+| 32 distinct prompts (churn) | 1558 MiB | 2276 MiB | 1984 |
+
+v0.1.4 never engaged the prompt cache from the HTTP path (zero reuse), so its
+footprint is the no-cache floor. The current default matches or beats it on
+every sharing scenario while also skipping the shared prefill work (the
+8-way burst completes its request phase 3.4x faster). The churn number is
+higher because donated entries are now retained for future reuse; that
+retention is real memory governed by `--prompt-cache-capacity-bytes` and is
+released by LRU eviction at the cap.
+
 **Decode throughput.** Paged decode is byte-identical to the dense backend
 (`tests/paged_scheduler_parity.rs`, RMS 0). The live batched path uses the native
 block-table decode kernel (`DecodeBatchContext::use_native_paged_kernel`, set by
@@ -168,8 +226,18 @@ for a 4096-token prompt, versus 146 and 7.7 tok/s for the gather reference (1.9x
 and 10.9x). The gather reference degrades sharply with context because it
 re-materializes the visible window every step, which is why the live path uses
 the native kernel. The separate fused split-K Metal kernel
-(`MLXCEL_PAGED_ATTENTION_NATIVE`) is opt-in and stays off by default; see
+(`MLXCEL_PAGED_ATTENTION_NATIVE`) is opt-in and stays off by default; with the
+chunked slab storage the pool is a list of fixed-size slab tensors, so the
+kernel also declines (falling back to gather) on any layer that has grown past
+one slab. See
 [ADR 0001](adr/0001-paged-attention-gather-vs-fused-kernel.md).
+
+Pool growth appends fixed-size slabs instead of reallocating one big tensor
+per layer, so extending the pool never copies existing KV and never strands a
+ladder of old buffer sizes in the allocator cache. Eight concurrent requests
+with distinct ~4k-token prompts (qwen3-0.6b, the nothing-shareable stress)
+peak at 3739 MiB versus 5013 MiB before the change, 1.13x of the dense
+backend on the same workload.
 
 ## Recommended starting points
 

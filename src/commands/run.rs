@@ -12,11 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! `mlxcel run` verb (epic #92, issue #95) — the ollama-/mlx-lm-style entry
+//! `mlxcel run` verb (epic #92, issue #95): the ollama-style entry
 //! point.
 //!
 //! `run` is the capstone of the unified download + run epic. It is a thin
-//! dispatcher that forks **no** model-loading or generation code — it builds a
+//! dispatcher that forks **no** model-loading or generation code, it builds a
 //! [`GenerateArgs`] from its own (deliberately small) flag surface and hands it
 //! straight to [`crate::commands::run_generate`], which already routes:
 //!
@@ -29,15 +29,14 @@
 //! Routing through `run_generate` (rather than re-implementing the
 //! prompt/no-prompt branch) is what guarantees `mlxcel run <repo-id> -p "..."`
 //! produces byte-identical output to the equivalent `mlxcel generate -m
-//! <repo-id> -p "..."` invocation — they execute the same code.
+//! <repo-id> -p "..."` invocation, they execute the same code.
 //!
 //! ## Default-model fallback
 //!
-//! When no model argument is supplied, `run` falls back to [`DEFAULT_MODEL`],
-//! mirroring `mlx_lm.generate` / `mlx_lm.chat` (both default to the same
-//! repo-id). The repo-id is auto-downloaded into the mlxcel global store on
-//! first use by the shared resolver, so `mlxcel run` with no arguments works
-//! from any directory.
+//! When no model argument is supplied, `run` falls back to [`DEFAULT_MODEL`].
+//! The repo-id is auto-downloaded into the mlxcel global store on first use by
+//! the shared resolver, so `mlxcel run` with no arguments works from any
+//! directory.
 
 use std::path::PathBuf;
 
@@ -48,16 +47,17 @@ use crate::{GenerateArgs, GenerationOptions, ModelOptions, SamplingOptions};
 
 /// Default model used when `mlxcel run` is invoked without a model argument.
 ///
-/// Matches the `DEFAULT_MODEL` constant `mlx_lm.generate` and `mlx_lm.chat`
-/// fall back to, so a user moving from mlx-lm gets the same out-of-the-box
-/// model. Documented in the `run` `--help` text and the project README.
-pub(crate) const DEFAULT_MODEL: &str = "mlx-community/Llama-3.2-3B-Instruct-4bit";
+/// `gemma-4-e2b-it-4bit` is a small, instruction-tuned checkpoint that
+/// downloads quickly and runs in a modest memory budget, so `mlxcel run` with
+/// no arguments gives a usable model out of the box. Documented in the `run`
+/// `--help` text and the project README.
+pub(crate) const DEFAULT_MODEL: &str = "mlx-community/gemma-4-e2b-it-4bit";
 
 /// Arguments for `mlxcel run`.
 ///
-/// `run` mirrors `ollama run`: pass a model (repo-id or local path) and either
-/// stream an interactive chat (no `-p`) or print a one-shot completion (`-p
-/// "..."`). The model argument is **optional** — omitting it loads
+/// `run` takes a model (repo-id or local path) and either streams an
+/// interactive chat (no `-p`) or prints a one-shot completion (`-p "..."`).
+/// The model argument is **optional**: omitting it loads
 /// [`DEFAULT_MODEL`]. Sampling and generation flags are the *same* clap groups
 /// [`GenerateArgs`] flattens ([`GenerationOptions`] / [`SamplingOptions`]), so
 /// `--help` and behavior stay in lock-step with `mlxcel generate` and no flag
@@ -68,10 +68,10 @@ pub(crate) struct RunArgs {
     /// Model to run: a local directory **or** a HuggingFace `owner/name`
     /// repo-id to auto-download (resolved exactly like `mlxcel generate -m`).
     ///
-    /// Optional — when omitted, `mlxcel run` falls back to the default model
-    /// `mlx-community/Llama-3.2-3B-Instruct-4bit` (mlx-lm parity) and
-    /// auto-downloads it into the mlxcel store on first use. Given as a
-    /// positional argument so `mlxcel run <repo-id>` reads like `ollama run`.
+    /// Optional: when omitted, `mlxcel run` falls back to the default model
+    /// `mlx-community/gemma-4-e2b-it-4bit` and auto-downloads it into the
+    /// mlxcel store on first use. Given as a positional argument so
+    /// `mlxcel run <repo-id>` reads like `ollama run`.
     /// A bare name without a slash (e.g. `Qwen3-4B-4bit`) is resolved as
     /// `mlx-community/<name>`; override the org with the `MLXCEL_DEFAULT_ORG`
     /// environment variable.
@@ -109,7 +109,7 @@ impl RunArgs {
     /// Lower the `run` flag surface onto a full [`GenerateArgs`], filling the
     /// model (default-model fallback) and leaving every advanced flag group
     /// (`tensor_parallel` / `pipeline_parallel` / `speculative` / `lang_bias`
-    /// / `surgery`) at its clap default — `run` intentionally does not expose
+    /// / `surgery`) at its clap default; `run` intentionally does not expose
     /// them, matching the minimal `ollama run` surface. The resulting
     /// `GenerateArgs` is then driven by the unchanged `run_generate` dispatch.
     fn into_generate_args(self) -> GenerateArgs {

@@ -15,7 +15,7 @@
 //! Parakeet-style log-mel feature extractor for Nemotron H Nano Omni.
 //!
 //! Faithful Rust port of upstream
-//! `references/mlx-vlm/mlx_vlm/models/nemotron_h_nano_omni/audio.py::SoundFeatureExtractor`
+//! https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/models/nemotron_h_nano_omni/audio.py (SoundFeatureExtractor)
 //! and the underlying `mlx_audio.dsp.stft / hanning / mel_filters` calls.
 //!
 //! Pipeline:

@@ -15,7 +15,7 @@
 //! RT-DETRv2 transformer: deformable-attention decoder, MLP heads, and the
 //! anchor priors used by encoder query selection.
 //!
-//! Port of `references/mlx-vlm/mlx_vlm/models/rt_detr_v2/transformer.py`.
+//! Port of https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/models/rt_detr_v2/transformer.py.
 //! Multi-scale deformable attention samples each feature level via the shared
 //! bilinear `grid_sample` (see [`super::layers::grid_sample`]) and weighted-sums
 //! across levels with the softmaxed attention weights.

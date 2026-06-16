@@ -64,6 +64,7 @@ use mlxcel::server::{
     about = "llama-server compatible HTTP server for MLX inference on Apple Silicon and CUDA GPUs",
     args_conflicts_with_subcommands = true,
     flatten_help = true,
+    verbatim_doc_comment,
     after_help = "\
 Tensor Parallel Runtime:
   Current multi-rank support: dense Llama, Qwen2/2.5, Qwen3, Qwen3.5 text, Gemma 3 text, Gemma 4 text, ERNIE 4.5, Hunyuan v1 Dense
@@ -127,6 +128,19 @@ struct Cli {
     /// `args_conflicts_with_subcommands = true` on the parent command).
     #[command(flatten)]
     server: ServerArgs,
+}
+
+/// Clap value parser: an f32 in the closed interval [0, 1].
+///
+/// Used by: `--diffusion-threshold` (fail fast at startup instead of
+/// surfacing a per-request engine error under the confidence sampler).
+fn parse_unit_interval(s: &str) -> Result<f32, String> {
+    let v: f32 = s.parse().map_err(|e| format!("not a number: {e}"))?;
+    if (0.0..=1.0).contains(&v) {
+        Ok(v)
+    } else {
+        Err(format!("must be between 0 and 1, got {v}"))
+    }
 }
 
 /// Subcommands supported by `mlxcel-server`.
@@ -297,6 +311,45 @@ struct ServerArgs {
     )]
     enable_vlm_prefix_cache: bool,
 
+    /// Comma-separated list of allowed CORS origins (e.g.
+    /// `https://app.example.com,https://admin.example.com`). When set,
+    /// the server restricts cross-origin requests to exactly these origins
+    /// instead of the default permissive policy that reflects any origin.
+    /// Unset (default) keeps the permissive behavior. Only affects the
+    /// browser-reachable TCP HTTP listener. Also reads
+    /// `MLXCEL_ALLOWED_ORIGINS`.
+    #[arg(
+        long = "allowed-origins",
+        env = "MLXCEL_ALLOWED_ORIGINS",
+        value_delimiter = ',',
+        value_name = "ORIGINS"
+    )]
+    allowed_origins: Vec<String>,
+
+    /// Maximum denoising steps per canvas block (diffusion models only;
+    /// default: the checkpoint's generation_config, typically 48)
+    #[arg(long = "max-denoising-steps", value_name = "N")]
+    max_denoising_steps: Option<usize>,
+
+    /// Per-step acceptance sampler for diffusion models (diffusion models only)
+    #[arg(
+        long = "diffusion-sampler",
+        value_name = "SAMPLER",
+        default_value = "entropy-bound",
+        value_parser = ["entropy-bound", "confidence-threshold"]
+    )]
+    diffusion_sampler: String,
+
+    /// Confidence threshold for `--diffusion-sampler confidence-threshold`
+    /// (diffusion models only)
+    #[arg(
+        long = "diffusion-threshold",
+        value_name = "FLOAT",
+        default_value_t = 0.9,
+        value_parser = parse_unit_interval
+    )]
+    diffusion_threshold: f32,
+
     /// Preemption policy: "longest-first" (default) or "lowest-priority"
     #[arg(long = "preemption-policy", default_value = "longest-first")]
     preemption_policy: String,
@@ -313,8 +366,7 @@ struct ServerArgs {
     ///
     /// When set to `N > 0`, the batch scheduler caps each per-sequence plain
     /// `KVCache` to `N` tokens by dropping the oldest entries once `offset`
-    /// exceeds the bound. Mirrors upstream mlx-lm's
-    /// `BatchGenerator(max_kv_size=N)` parameter.
+    /// exceeds the bound.
     ///
     /// Sliding-window models that already build their own `RotatingKVCache`
     /// (Gemma 3/4, Exaone 4, RecurrentGemma, Step 3.5, gpt-oss) are
@@ -333,7 +385,7 @@ struct ServerArgs {
     )]
     max_kv_size: usize,
 
-    /// Paged KV-cache pool block budget — `auto` or a byte count (default: unbounded).
+    /// Paged KV-cache pool block budget: `auto` or a byte count (default: unbounded).
     ///
     /// Bounds the unified paged KV cache (epic #116): `auto` derives the cap
     /// from the memory estimate, a raw byte count sets it explicitly. Only
@@ -511,20 +563,23 @@ struct ServerArgs {
     #[arg(long, value_delimiter = ',', value_name = "ADDR")]
     peers: Vec<std::net::SocketAddr>,
 
-    /// Comma-separated prefill-node addresses a decode node receives handoffs
-    /// from (disaggregated serving, #126). Consumed when `--node-role decode`.
+    /// Comma-separated prefill-node addresses. Decode nodes use this to identify
+    /// accepted handoff sources; routers use it to select a prefill target.
+    /// Consumed when `--node-role decode` or `--node-role router`.
     #[arg(long, value_delimiter = ',', value_name = "ADDR")]
     prefill_peers: Vec<std::net::SocketAddr>,
 
-    /// Comma-separated decode-node addresses a prefill node hands off to
-    /// (disaggregated serving, #126). Consumed when `--node-role prefill`.
+    /// Comma-separated decode-node addresses. Prefill nodes hand KV state to one
+    /// of these targets; routers use it to route decode continuations.
+    /// Consumed when `--node-role prefill` or `--node-role router`.
     #[arg(long, value_delimiter = ',', value_name = "ADDR")]
     decode_peers: Vec<std::net::SocketAddr>,
 
     /// This node's own bind address (host:port) for the disaggregated
-    /// serving-role transport (#126). Required for a `--node-role prefill` or
-    /// `--node-role decode` node: the prefill node listens here for request
-    /// frames and the decode node for KV handoffs.
+    /// serving-role transport (#126). Required for `--node-role prefill`,
+    /// `--node-role decode`, and `--node-role router`: prefill nodes receive
+    /// prompt frames, decode nodes receive KV handoffs, and routers receive
+    /// role-result frames.
     #[arg(long, value_name = "ADDR")]
     serving_bind: Option<std::net::SocketAddr>,
 
@@ -660,19 +715,19 @@ struct ServerArgs {
     decode_storage_backend: Option<mlxcel::server::DecodeStorageBackend>,
 
     // llama-server compatibility arguments (accepted but ignored).
-    /// Accepted for llama-server CLI compatibility (ignored — mlxcel has no web UI)
+    /// Accepted for llama-server CLI compatibility (ignored: mlxcel has no web UI)
     #[arg(long, hide = true)]
     _no_webui: bool,
 
-    /// Accepted for llama-server CLI compatibility (ignored — mlxcel always processes templates)
+    /// Accepted for llama-server CLI compatibility (ignored: mlxcel always processes templates)
     #[arg(long, hide = true)]
     _jinja: bool,
 
-    /// Accepted for llama-server CLI compatibility (ignored — mlxcel always uses Metal)
+    /// Accepted for llama-server CLI compatibility (ignored: mlxcel always uses Metal)
     #[arg(long = "n-gpu-layers", hide = true)]
     _n_gpu_layers: Option<i32>,
 
-    /// Accepted for llama-server CLI compatibility (ignored — vision projector loaded automatically)
+    /// Accepted for llama-server CLI compatibility (ignored: vision projector loaded automatically)
     #[arg(long, hide = true)]
     _mmproj: Option<String>,
 
@@ -680,15 +735,15 @@ struct ServerArgs {
     #[arg(long, hide = true)]
     _flash_attn: bool,
 
-    /// Accepted for llama-server CLI compatibility (ignored — not applicable to MLX)
+    /// Accepted for llama-server CLI compatibility (ignored: not applicable to MLX)
     #[arg(long, hide = true)]
     _mlock: bool,
 
-    /// Accepted for llama-server CLI compatibility (ignored — not applicable to MLX)
+    /// Accepted for llama-server CLI compatibility (ignored: not applicable to MLX)
     #[arg(long = "no-mmap", hide = true)]
     _no_mmap: bool,
 
-    /// Accepted for llama-server CLI compatibility (ignored — mlxcel handles batching internally)
+    /// Accepted for llama-server CLI compatibility (ignored: mlxcel handles batching internally)
     #[arg(long, hide = true)]
     _cont_batching: bool,
 
@@ -887,7 +942,11 @@ struct ServerArgs {
     /// Note: `preserve_thinking` quality benefits are validated on Qwen3.6;
     /// Qwen3 / Qwen3.5 accept the flag but were trained on the
     /// rolling-checkpoint convention.
-    #[arg(long = "chat-template-kwargs", value_name = "JSON")]
+    #[arg(
+        long = "chat-template-kwargs",
+        value_name = "JSON",
+        verbatim_doc_comment
+    )]
     chat_template_kwargs: Option<String>,
 
     // cross-request prompt-prefix KV cache knobs.
@@ -954,7 +1013,7 @@ struct ServerArgs {
 
     // Automatic Prefix Caching (APC) knobs.
     /// Enable Automatic Prefix Caching (APC) with block-granularity hash chains
-    /// (default: false).
+    /// (default: true). Disable with `--apc-enabled=false`.
     ///
     /// APC layers on top of the existing prompt-prefix cache to enable
     /// finer-grained KV reuse with chained `(parent_hash, tokens, extra_hash)`
@@ -963,10 +1022,10 @@ struct ServerArgs {
     /// automatically disabled at runtime since SSM state cannot be decomposed
     /// into hashable blocks.
     ///
-    /// Also reads `APC_ENABLED` (parity with upstream `mlx-vlm`).
+    /// Also reads `APC_ENABLED`.
     #[arg(
         long = "apc-enabled",
-        default_value_t = false,
+        default_value_t = true,
         value_name = "BOOL",
         num_args = 0..=1,
         require_equals = true,
@@ -1024,6 +1083,10 @@ struct ServerArgs {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
+
+    // Default the CUDA kernel JIT cache to a persistent, MLX-pin-scoped dir so
+    // the first-run kernel compilation is paid once per machine, not every boot.
+    mlxcel_core::ensure_persistent_ptx_cache();
 
     match cli.command {
         // Subcommand-driven dispatch. Currently only `download`
@@ -1090,7 +1153,7 @@ fn build_startup_input(mut args: ServerArgs) -> anyhow::Result<ServerStartupInpu
     // also reads them directly, so these helpers are only needed when the CLI
     // flag uses a different default convention (Option<String>). Since we use
     // `env = "..."` on the clap arg definition, these explicit fallback calls
-    // are not strictly necessary here — clap already reads the env vars.
+    // are not strictly necessary here, clap already reads the env vars.
     // We still call them for consistency with the pattern and to allow future
     // warn-on-conflict logic (e.g. if a separate MLXCEL_* alias is added).
     env_fallback_cache_type_k(&mut args.turbo.cache_type_k);
@@ -1222,7 +1285,7 @@ fn build_startup_input(mut args: ServerArgs) -> anyhow::Result<ServerStartupInpu
         // CLI-vs-env precedence, unparseable-env handling, and the collision
         // INFO log are handled consistently with `mlxcel serve` and with the
         // other LLAMA_ARG_* env fallbacks. (Do NOT put `env = "..."` on the
-        // clap arg — that bypasses our warn-and-ignore policy for unparseable
+        // clap arg, that bypasses our warn-and-ignore policy for unparseable
         // values and would emit a misleading collision warning.)
         reasoning_budget: {
             let mut v = args.reasoning_budget;
@@ -1261,6 +1324,8 @@ fn build_startup_input(mut args: ServerArgs) -> anyhow::Result<ServerStartupInpu
         kv_cache_budget: args.kv_cache_budget,
         // experimental VLM prompt-prefix cache toggle (#124 step c).
         enable_vlm_prefix_cache: args.enable_vlm_prefix_cache,
+        // CORS allow-list origins (#244); validated in into_startup_config.
+        allowed_origins: args.allowed_origins,
         // Responses API in-memory store limits. clap reads the
         // matching `LLAMA_ARG_*` env vars directly via the `env = ...`
         // attributes on the flags.
@@ -1273,6 +1338,11 @@ fn build_startup_input(mut args: ServerArgs) -> anyhow::Result<ServerStartupInpu
         // the flag, so no separate env-fallback helper is needed.
         #[cfg(feature = "surgery")]
         surgery_config_path: args.surgery,
+        // serve-level block-diffusion knobs (#217 phase 3); diffusion models
+        // only.
+        max_denoising_steps: args.max_denoising_steps,
+        diffusion_sampler: args.diffusion_sampler.clone(),
+        diffusion_threshold: args.diffusion_threshold,
     })
 }
 

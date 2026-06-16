@@ -23,6 +23,7 @@ use std::sync::Mutex;
 use std::time::Instant;
 
 use mlxcel_core::cache::{DetachedCacheSet, DetachedPagedCacheSet};
+use mlxcel_core::generate::ModelStateSnapshot;
 
 use super::block_hash::ApcBlockHash;
 
@@ -123,6 +124,10 @@ impl DetachedKvSetHolder {
     pub(crate) fn take(&mut self) -> Option<DetachedKvSet> {
         self.inner.take()
     }
+
+    pub(crate) fn peek(&self) -> Option<&DetachedKvSet> {
+        self.inner.as_ref()
+    }
 }
 
 // SAFETY: See the type-level doc-comment above. The detach/adopt API
@@ -135,6 +140,33 @@ impl DetachedKvSetHolder {
 // any given time.
 unsafe impl Send for DetachedKvSetHolder {}
 unsafe impl Sync for DetachedKvSetHolder {}
+
+/// Send/Sync holder for a model-owned recurrent-state snapshot.
+///
+/// The snapshot contains `UniquePtr<MlxArray>` values, which are not Send/Sync
+/// by type. The prompt-cache store keeps the snapshot behind a mutex and only
+/// exposes it through a closure; restore copies tensors out of it rather than
+/// mutating or moving them, so access is serialized exactly like
+/// [`DetachedKvSetHolder`].
+pub(crate) struct ModelSnapshotHolder {
+    inner: ModelStateSnapshot,
+}
+
+impl ModelSnapshotHolder {
+    pub(crate) fn new(snapshot: ModelStateSnapshot) -> Self {
+        Self { inner: snapshot }
+    }
+
+    pub(crate) fn get(&self) -> &ModelStateSnapshot {
+        &self.inner
+    }
+}
+
+// SAFETY: See the holder doc-comment. The mutex on `ModelSnapshotEntry`
+// serializes access, restore only copies from the parked tensors, and no
+// snapshot tensor is concurrently mutated while it is parked.
+unsafe impl Send for ModelSnapshotHolder {}
+unsafe impl Sync for ModelSnapshotHolder {}
 
 /// A prompt-prefix cache entry.
 ///
@@ -221,6 +253,21 @@ impl CacheEntry {
         }
     }
 
+    /// Run `f` against the parked set WITHOUT consuming it (#227).
+    ///
+    /// Returns `None` when the set was already taken (a drained shell).
+    /// Used by the non-consuming clone-and-pin adoption path: the closure
+    /// clones pinned block references out of a paged set while the entry
+    /// stays live in the store for concurrent siblings and deeper future
+    /// matches. The entry lock is held for the duration of `f`.
+    pub fn with_detached<R>(&self, f: impl FnOnce(&DetachedKvSet) -> R) -> Option<R> {
+        let guard = match self.detached.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        guard.peek().map(f)
+    }
+
     /// Update the `last_used` timestamp. Called on every successful lookup
     /// to keep the LRU ordering fresh. Poisoned lock paths fall back to
     /// overwriting the inner value so accounting keeps moving.
@@ -296,6 +343,58 @@ impl std::fmt::Debug for CacheEntry {
                 "apc_blocks",
                 &self.apc_block_hashes.as_ref().map(|h| h.len()),
             )
+            .finish()
+    }
+}
+
+/// A single exact-prefix recurrent/model-owned state snapshot.
+pub struct ModelSnapshotEntry {
+    pub tokens: Vec<i32>,
+    snapshot: Mutex<ModelSnapshotHolder>,
+    pub last_used: Mutex<Instant>,
+    pub size_bytes: usize,
+}
+
+impl ModelSnapshotEntry {
+    pub fn new(tokens: Vec<i32>, snapshot: ModelStateSnapshot) -> Self {
+        let size_bytes = snapshot.nbytes();
+        Self {
+            tokens,
+            snapshot: Mutex::new(ModelSnapshotHolder::new(snapshot)),
+            last_used: Mutex::new(Instant::now()),
+            size_bytes,
+        }
+    }
+
+    pub fn with_snapshot<R>(&self, f: impl FnOnce(&ModelStateSnapshot) -> R) -> R {
+        let guard = match self.snapshot.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        f(guard.get())
+    }
+
+    pub fn touch(&self) {
+        let mut guard = match self.last_used.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        *guard = Instant::now();
+    }
+
+    pub fn last_used(&self) -> Instant {
+        match self.last_used.lock() {
+            Ok(g) => *g,
+            Err(poisoned) => *poisoned.into_inner(),
+        }
+    }
+}
+
+impl std::fmt::Debug for ModelSnapshotEntry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ModelSnapshotEntry")
+            .field("tokens_len", &self.tokens.len())
+            .field("size_bytes", &self.size_bytes)
             .finish()
     }
 }

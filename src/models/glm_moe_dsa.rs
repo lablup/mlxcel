@@ -18,7 +18,7 @@
 //! The key difference is that GLM MoE DSA uses `rope_parameters` dict
 //! instead of separate `rope_scaling` and `rope_theta` fields.
 //!
-//! Reference: mlx-lm/mlx_lm/models/glm_moe_dsa.py
+//! Reference: https://github.com/ml-explore/mlx-lm/blob/main/mlx_lm/models/glm_moe_dsa.py
 
 use crate::models::deepseek_v32::{self, DeepSeekV32Model};
 use mlxcel_core::generate::LanguageModel;

@@ -23,7 +23,7 @@
 //!
 //! Reuses from qwen3_next: Qwen3NextAttention, MLP, SparseMoeBlock, SwitchGLU, SwitchLinear
 //!
-//! Reference: mlx-lm/mlx_lm/models/qwen3_5.py
+//! Reference: https://github.com/ml-explore/mlx-lm/blob/main/mlx_lm/models/qwen3_5.py
 
 use crate::distributed::pipeline::LayerFilter;
 use crate::distributed::pipeline::StageExecutionOutput;
@@ -461,7 +461,7 @@ impl Qwen35GatedDeltaNet {
     /// per-layer snapshot suitable for `rollback_speculative_cache`.
     ///
     /// Mirrors the `gdn_sink` parameter in upstream
-    /// `mlx-vlm/mlx_vlm/models/qwen3_5/language.py:Qwen3_5GatedDeltaNet`
+    /// https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/models/qwen3_5/language.py (Qwen3_5GatedDeltaNet)
     /// The snapshot is captured *before* `gated_delta_update`
     /// runs, holding the same per-step inputs and the pre-block recurrent
     /// state — exactly what is needed to replay the block over a truncated
@@ -1061,7 +1061,7 @@ pub struct GdnRollbackSnapshot {
 /// `5 * hidden_size`-wide projection input. The `gdn_states` vector is ordered
 /// by layer index over linear-attention layers only (skipping full-attention
 /// layers), matching the per-position correspondence used by upstream
-/// `rollback_speculative_cache` in `mlx-vlm/mlx_vlm/models/qwen3_5/language.py`.
+/// `rollback_speculative_cache` in https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/models/qwen3_5/language.py.
 ///
 /// Used by: DFlash round loop (sub-12), `Qwen35Model::rollback_speculative_cache`
 pub struct VerifyOutput {
@@ -1574,7 +1574,7 @@ impl Qwen35Model {
     ///
     /// This is the verify-pass hot path consumed by the DFlash drafter
     /// round loop (sub-12). It mirrors upstream
-    /// `mlx-vlm/mlx_vlm/models/qwen3_5/language.py::LanguageModel.__call__`
+    /// https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/models/qwen3_5/language.py (LanguageModel.__call__)
     /// when called with `capture_layer_ids` set, with two changes:
     ///   1. `return_hidden` is implied by `capture_layer_ids.is_some()` —
     ///      the upstream `return_hidden` flag is redundant on Qwen 3.5 since
@@ -1676,7 +1676,7 @@ impl Qwen35Model {
     /// position of the last accepted token after a DFlash verify-pass block.
     ///
     /// Mirrors upstream
-    /// `mlx-vlm/mlx_vlm/models/qwen3_5/language.py::LanguageModel.rollback_speculative_cache`
+    /// https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/models/qwen3_5/language.py (LanguageModel.rollback_speculative_cache)
     /// Returns `max(accepted)`.
     ///
     /// Arguments:
@@ -2594,6 +2594,10 @@ impl LanguageModel for Qwen35Model {
         true
     }
 
+    fn supports_snapshot_reuse(&self) -> bool {
+        true
+    }
+
     fn prepare_sequence_state(&self, seq_id: SequenceId) {
         self.sequence_state
             .prepare_sequence_state(seq_id, self.make_internal_caches());
@@ -2615,6 +2619,41 @@ impl LanguageModel for Qwen35Model {
         // drop the per-sequence MRoPE entry alongside the
         // cache state so the map cannot grow as sequences cycle through.
         self.release_mrope_sequence(seq_id);
+    }
+
+    fn snapshot_sequence_state(
+        &self,
+        seq_id: SequenceId,
+        token_len: usize,
+    ) -> Option<mlxcel_core::generate::ModelStateSnapshot> {
+        self.sequence_state
+            .with_sequence_state_ref(seq_id, |state| {
+                let mut snapshot =
+                    mlxcel_core::generate::ModelStateSnapshot::new("qwen3_5", token_len);
+                for (idx, cache) in state.iter().enumerate() {
+                    cache.snapshot_into(&mut snapshot, &format!("layer{idx}"));
+                }
+                snapshot
+            })
+    }
+
+    fn restore_sequence_state(
+        &self,
+        seq_id: SequenceId,
+        snapshot: &mlxcel_core::generate::ModelStateSnapshot,
+    ) -> Result<(), String> {
+        if snapshot.family() != "qwen3_5" {
+            return Err(format!(
+                "cannot restore {} snapshot into Qwen 3.5",
+                snapshot.family()
+            ));
+        }
+        let mut state = self.make_internal_caches();
+        for (idx, cache) in state.iter_mut().enumerate() {
+            cache.restore_from(snapshot, &format!("layer{idx}"));
+        }
+        self.sequence_state.replace_sequence_state(seq_id, state);
+        Ok(())
     }
 
     fn forward_with_sequence_id(

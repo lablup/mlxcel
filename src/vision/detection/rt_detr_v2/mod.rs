@@ -15,7 +15,7 @@
 //! RT-DETRv2 real-time object-detection model.
 //!
 //! A full Rust port of the upstream mlx-vlm RT-DETRv2 model (PR #1195,
-//! `references/mlx-vlm/mlx_vlm/models/rt_detr_v2/`). Architecture:
+//! https://github.com/Blaizzy/mlx-vlm/tree/main/mlx_vlm/models/rt_detr_v2). Architecture:
 //!
 //! ```text
 //! Image (NHWC) -> ResNet-50/101-vd backbone (strides 8/16/32)

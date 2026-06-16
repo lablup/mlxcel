@@ -48,10 +48,10 @@ use mlxcel_core::drafter::{DrafterKind, KNOWN_DRAFTER_KINDS};
 ///
 /// Values match upstream:
 ///
-/// - **MTP** → `4` — the Gemma 4 MTP "assistant" draft block length used
-///   by `references/mlx-vlm/mlx_vlm/speculative/drafters/gemma4_assistant/config.py`.
-/// - **DFlash** → `16` — the Qwen 3.5 DFlash drafter's `block_size`
-///   declared in `references/mlx-vlm/mlx_vlm/speculative/drafters/qwen3_dflash/config.py:31`.
+/// - **MTP** → `4`: the Gemma 4 MTP "assistant" draft block length used
+///   by https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/speculative/drafters/gemma4_assistant/config.py.
+/// - **DFlash** → `16`: the Qwen 3.5 DFlash drafter's `block_size`
+///   declared in https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/speculative/drafters/qwen3_dflash/config.py#L31.
 ///   Mirrors [`mlxcel_core::drafter::dflash::DEFAULT_BLOCK_SIZE`].
 pub const DEFAULT_MTP_BLOCK_SIZE: u32 = 4;
 pub const DEFAULT_DFLASH_BLOCK_SIZE: u32 = 16;
@@ -115,7 +115,7 @@ impl SpeculativeArgs {
     /// [`KNOWN_DRAFTER_KINDS`] when the value does not parse.
     ///
     /// Note that we intentionally **do not** accept the third
-    /// `internal-mtp` variant of [`DrafterKind`] on the CLI — that
+    /// `internal-mtp` variant of [`DrafterKind`] on the CLI. That
     /// variant is auto-detected from the target checkpoint
     /// and is not user-selectable today. The accepted set on the CLI is
     /// the upstream `KNOWN_DRAFTER_KINDS = {"dflash", "mtp"}` only;
@@ -177,7 +177,7 @@ pub fn default_block_size_for_kind(kind: DrafterKind) -> u32 {
 /// and the resolved drafter kind.
 ///
 /// When `override_value` is `Some(n)`, returns `n` (with no further
-/// validation here — concrete generators enforce their own minimums).
+/// validation here; concrete generators enforce their own minimums).
 /// When `override_value` is `None`, returns
 /// [`default_block_size_for_kind`] for `kind`.
 pub fn resolve_draft_block_size(override_value: Option<u32>, kind: DrafterKind) -> u32 {

@@ -11,6 +11,11 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+//
+// Portions of this file are derived from turboquant_plus
+// (https://github.com/TheTom/turboquant_plus), Copyright 2026 Tom Turney,
+// licensed under the Apache License, Version 2.0. See the top-level NOTICE
+// file for the attribution carried forward under Apache-2.0 Section 4(d).
 
 //! TurboQuant K/V-side PolarQuant pipeline (B2 + B4, and).
 //!
@@ -34,8 +39,9 @@
 //! ([`K_SEED_OFFSET`]). This decorrelates the K and V quantization noise so
 //! that the inner product `Q · Kᵀ` in attention does not see additive bias
 //! from a shared rotation. This is the exact pattern the TurboQuant+
-//! reference uses (`seed + 500` in `references/turboquant_plus/turboquant/
-//! kv_cache.py::KVCacheCompressor.__init__`).
+//! reference uses (`seed + 500` in
+//! https://github.com/TheTom/turboquant_plus/blob/main/turboquant/kv_cache.py
+//! (KVCacheCompressor.__init__)).
 //!
 //! # Storage layout
 //!
@@ -55,7 +61,7 @@
 //! no block-level shared state in the quantize/dequantize algorithm itself.
 //! This matches TurboQuant+'s "turbo4 already uses block_size=128" semantics
 //! for `head_dim=128` (one norm per rotation group = one norm per V vector).
-//! See `references/turboquant_plus/docs/papers/block-size-experiment.md`.
+//! See https://github.com/TheTom/turboquant_plus/blob/main/docs/papers/block-size-experiment.md.
 //!
 //! # Numerical notes
 //!
@@ -91,7 +97,7 @@ pub const K_BIT_WIDTH: u8 = 4;
 
 /// Seed offset added to the cache's `turbo_seed` before deriving the K-side
 /// sign vectors. Matches the TurboQuant+ reference pattern
-/// (`references/turboquant_plus/turboquant/kv_cache.py::KVCacheCompressor`,
+/// (https://github.com/TheTom/turboquant_plus/blob/main/turboquant/kv_cache.py (KVCacheCompressor),
 /// which uses `seed + 500`). The exact value matters less than the property
 /// that K and V sign vectors are *independent* — see the module docstring
 /// for why this matters for attention quality.
@@ -307,7 +313,7 @@ fn quantize_into_packed(
     // norm below 1.0 *up* to 1.0, destroying direction information for
     // small-magnitude vectors. Use a `where` op so non-zero norms pass
     // through unchanged. Mirrors the Python reference at
-    // `references/turboquant_plus/turboquant/polar_quant.py:60`:
+    // https://github.com/TheTom/turboquant_plus/blob/main/turboquant/polar_quant.py#L60:
     // `safe_norms = np.where(norms > 0, norms, 1.0)`.
     let zero = ffi::full_f32(&[1], 0.0, dtype::FLOAT32);
     let one = ffi::full_f32(&[1], 1.0, dtype::FLOAT32);
@@ -519,7 +525,7 @@ fn dequantize_from_packed(
 
     // 2. Norm correction: rescale y_hat to unit norm so the inverse rotation
     //    sees a unit vector. Mirrors the Python `if norm_correction` branch
-    //    in `references/turboquant_plus/turboquant/polar_quant.py`.
+    //    in https://github.com/TheTom/turboquant_plus/blob/main/turboquant/polar_quant.py.
     let y_hat_sq = ffi::multiply(&y_hat, &y_hat);
     let y_hat_sum_sq = ffi::sum_axis(&y_hat_sq, -1, true);
     let y_hat_norm = ffi::sqrt(&y_hat_sum_sq);

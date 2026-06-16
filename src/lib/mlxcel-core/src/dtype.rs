@@ -28,3 +28,14 @@ pub const FLOAT32: i32 = 10;
 pub const FLOAT64: i32 = 11;
 pub const BFLOAT16: i32 = 12;
 pub const COMPLEX64: i32 = 13;
+
+/// Bytes per element for an MLX dtype code, or `None` for unknown codes.
+pub fn size_bytes(dtype: i32) -> Option<usize> {
+    match dtype {
+        BOOL | UINT8 | INT8 => Some(1),
+        UINT16 | INT16 | FLOAT16 | BFLOAT16 => Some(2),
+        UINT32 | INT32 | FLOAT32 => Some(4),
+        UINT64 | INT64 | FLOAT64 | COMPLEX64 => Some(8),
+        _ => None,
+    }
+}

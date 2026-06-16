@@ -15,7 +15,7 @@
 //! Parakeet/Conformer encoder used by Nemotron H Nano Omni audio.
 //!
 //! Faithful Rust port of upstream
-//! `references/mlx-vlm/mlx_vlm/models/nemotron_h_nano_omni/audio.py`:
+//! https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/models/nemotron_h_nano_omni/audio.py:
 //! - `ParakeetEncoderSubsamplingConv2D` — depthwise/pointwise stack with
 //!   stride-2 reduction along the time axis.
 //! - `ParakeetEncoderRelPositionalEncoding` — Transformer-XL-style

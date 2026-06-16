@@ -306,9 +306,8 @@ impl PagedSequenceState {
 /// `refcount == 0` and is not eligible for recycling as long as `refcount > 0`.
 ///
 /// `in_use` is retained as a derived mirror of `refcount > 0` so the existing
-/// `stats_for_sequences` and internal debug assertions stay backwards
-/// compatible with call sites that inspected the flag directly before
-/// refcounts were introduced.
+/// `stats` and internal debug assertions stay backwards compatible with call
+/// sites that inspected the flag directly before refcounts were introduced.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct PagedBlockRecord {
     layer_idx: usize,
@@ -435,13 +434,18 @@ pub struct PagedBlockPool {
     /// `Fp16`/`Int8` cache modes; populated by Turbo4 sequences via
     /// [`PagedBlockPool::install_turbo_sidecar`].
     turbo_sidecars: PagedTurboPageSidecars,
-    /// Per-layer physical K pool tensor (layout A). `None` until the first
-    /// write to that layer lazily allocates it.
-    pool_k: Vec<Option<UniquePtr<MlxArray>>>,
-    /// Per-layer physical V pool tensor (layout A). `None` until first write.
-    pool_v: Vec<Option<UniquePtr<MlxArray>>>,
-    /// Per-layer inferred geometry/capacity of the pool tensors. `None` until
-    /// first write.
+    /// Per-layer physical K storage as a list of fixed-size slab tensors
+    /// (layout A; each slab is `[POOL_SLAB_BLOCKS, block_size, n_kv_heads,
+    /// head_dim]`). Empty until the first write to that layer lazily
+    /// allocates it. Growth APPENDS a slab; existing slabs are never
+    /// reallocated or copied (#235), so the allocator high-water tracks the
+    /// live capacity instead of accumulating a ladder of freed slabs.
+    pool_k: Vec<Vec<UniquePtr<MlxArray>>>,
+    /// Per-layer physical V slab list. Same shape discipline as `pool_k`.
+    pool_v: Vec<Vec<UniquePtr<MlxArray>>>,
+    /// Per-layer inferred geometry/capacity of the pool slabs. `None` until
+    /// first write. `capacity_blocks` is always `slab_count *
+    /// POOL_SLAB_BLOCKS`.
     pool_meta: Vec<Option<PagedPoolMeta>>,
     /// Per-layer `block_id -> physical row` map keeping the pool tensors
     /// compact. Global `PagedBlockId`s remain unique across layers; rows are
@@ -461,13 +465,19 @@ pub struct PagedBlockPool {
     /// evicts against; the scheduler sets it from the configured / estimated KV
     /// byte budget divided by the per-block byte size.
     block_budget: Option<usize>,
+    /// Number of growth episodes (an [`Self::ensure_layer_capacity`] call
+    /// that appended at least one slab) since construction. With chunked
+    /// slabs (#235) growth never copies; the counter remains so tests can pin
+    /// "presize allocates once, incremental growth appends once" and
+    /// observability can surface growth churn.
+    grow_events: u64,
 }
 
-/// Number of physical block rows the pool tensor grows by when a freshly
-/// assigned row exceeds the current capacity. Mirrors the chunked-growth
-/// discipline of the dense `KVCache` (which pre-allocates in steps) so an
-/// append is O(block) amortised rather than O(rows) on every write.
-const POOL_GROW_CHUNK_BLOCKS: usize = 32;
+/// Number of physical block rows per pool slab tensor. Growth appends whole
+/// slabs of this size (#235), so a freshly assigned row never triggers a
+/// reallocation or copy of existing storage; this also keeps the allocation
+/// granularity of the previous single-tensor chunked growth (32 blocks).
+const POOL_SLAB_BLOCKS: usize = 32;
 
 /// Gathered visible K and V tensors for one layer, each shaped
 /// `[1, n_kv_heads, visible_len, head_dim]` (SDPA-ready). Returned by
@@ -487,14 +497,36 @@ impl PagedBlockPool {
             next_block_id: 0,
             blocks: HashMap::new(),
             turbo_sidecars: PagedTurboPageSidecars::default(),
-            pool_k: (0..num_layers).map(|_| None).collect(),
-            pool_v: (0..num_layers).map(|_| None).collect(),
+            pool_k: (0..num_layers).map(|_| Vec::new()).collect(),
+            pool_v: (0..num_layers).map(|_| Vec::new()).collect(),
             pool_meta: vec![None; num_layers],
             block_rows: vec![HashMap::new(); num_layers],
             free_rows: vec![Vec::new(); num_layers],
             next_row: vec![0; num_layers],
             block_budget: None,
+            grow_events: 0,
         }
+    }
+
+    /// Number of pool growth episodes since construction (see
+    /// [`Self::ensure_layer_capacity`]). A long prefill should presize into
+    /// one episode instead of accumulating these.
+    pub fn pool_grow_events(&self) -> u64 {
+        self.grow_events
+    }
+
+    /// Map a physical row index to its slab and the row within that slab.
+    #[inline]
+    fn slab_coords(row: usize) -> (usize, i32) {
+        (row / POOL_SLAB_BLOCKS, (row % POOL_SLAB_BLOCKS) as i32)
+    }
+
+    /// Physical row currently assigned to `block_id` on `layer_idx`, if any.
+    /// Test support for pinning row-placement behavior (e.g. the #235
+    /// fragmented-gather case).
+    #[cfg(test)]
+    pub(crate) fn debug_row_of(&self, block_id: PagedBlockId, layer_idx: usize) -> Option<usize> {
+        self.block_rows[layer_idx].get(&block_id).copied()
     }
 
     pub fn layout(&self) -> &PagedKvLayout {
@@ -575,12 +607,19 @@ impl PagedBlockPool {
             return Ok(());
         }
 
-        let new_visible_len = layer.visible_len() + token_count;
-        let required_blocks = new_visible_len.div_ceil(self.layout.block_size);
+        // `block_ids` is indexed by ABSOLUTE position (`abs / block_size`),
+        // the convention `write_prefill` and `gather_visible` use, so the
+        // block count must cover the absolute length. With
+        // `logical_start == 0` this is identical to the old visible-length
+        // sizing; with `logical_start > 0` (a sliding-window owner,
+        // issue #196) visible-length sizing under-allocated and the next
+        // write indexed past the table.
+        let new_len = layer.len + token_count;
+        let required_blocks = new_len.div_ceil(self.layout.block_size);
         while layer.block_ids.len() < required_blocks {
             layer.block_ids.push(self.acquire_block(layer_idx)?);
         }
-        layer.len += token_count;
+        layer.len = new_len;
         Ok(())
     }
 
@@ -609,10 +648,22 @@ impl PagedBlockPool {
 
         layer.len -= trimmed;
         if layer.len == layer.logical_start {
+            // The back-trim consumed the whole visible window: the layer is
+            // logically empty, so reset to the origin and release everything
+            // (the old code only reset `logical_start`, which resurrected the
+            // slid-away prefix as visible, issue #196).
+            layer.len = 0;
             layer.logical_start = 0;
         }
 
-        let required_blocks = layer.visible_len().div_ceil(self.layout.block_size);
+        // `block_ids` is indexed by ABSOLUTE position; release only the tail
+        // blocks past the absolute length. Sizing by visible length here
+        // released tail blocks that still held visible tokens once
+        // `logical_start` crossed a block boundary (issue #196). Head blocks
+        // wholly before `logical_start` stay allocated; reclaiming them needs
+        // a block-base offset and is deferred until a sliding-window paged
+        // path exists.
+        let required_blocks = layer.len.div_ceil(self.layout.block_size);
         while layer.block_ids.len() > required_blocks {
             if let Some(block_id) = layer.block_ids.pop() {
                 self.release_block(block_id)?;
@@ -660,12 +711,14 @@ impl PagedBlockPool {
         }
 
         for (layer_idx, layer) in state.layers.iter().enumerate() {
-            let required_blocks = layer.visible_len().div_ceil(self.layout.block_size);
+            // Absolute-position indexing: the block table must cover the full
+            // absolute length, not just the visible window (issue #196).
+            let required_blocks = layer.len.div_ceil(self.layout.block_size);
             if layer.block_ids.len() < required_blocks {
                 return Err(format!(
-                    "PagedBlockPool: restored layer {layer_idx} has {} blocks for visible length {}, requires at least {}",
+                    "PagedBlockPool: restored layer {layer_idx} has {} blocks for length {}, requires at least {}",
                     layer.block_ids.len(),
-                    layer.visible_len(),
+                    layer.len,
                     required_blocks
                 ));
             }
@@ -677,10 +730,7 @@ impl PagedBlockPool {
         Ok(())
     }
 
-    pub fn stats_for_sequences<'a>(
-        &self,
-        sequences: impl IntoIterator<Item = &'a PagedSequenceState>,
-    ) -> PagedCacheStats {
+    pub fn stats(&self) -> PagedCacheStats {
         let allocated_blocks = self.blocks.len();
         let free_blocks = self
             .blocks
@@ -688,14 +738,26 @@ impl PagedBlockPool {
             .filter(|record| !record.is_in_use())
             .count();
         let live_blocks = allocated_blocks.saturating_sub(free_blocks);
-        let states: Vec<&PagedSequenceState> = sequences.into_iter().collect();
-        let bytes_reserved = states
-            .iter()
-            .map(|state| state.reserved_bytes(&self.layout))
-            .sum();
-        let bytes_in_use = states
-            .iter()
-            .map(|state| state.used_bytes(&self.layout))
+        // Real pool memory, not the layout's nominal scheduling placeholder
+        // (#226): reserved = every allocated slab byte (capacity, including
+        // grow slack); in use = bytes of the rows mapped to a live block,
+        // which covers ACTIVE sequences and PARKED prompt-cache pins alike
+        // (release_block unmaps a row at refcount 0). The per-sequence
+        // nominal sums these replaced systematically under-reported
+        // (32 B/block) and missed parked retention entirely.
+        let bytes_reserved = self.pool_tensor_bytes();
+        let bytes_in_use = (0..self.block_rows.len())
+            .map(|layer_idx| {
+                let per_block = self.real_block_bytes(layer_idx);
+                // A layer with mapped rows must have written geometry; an
+                // unknown dtype silently zeroing its bytes would be a future
+                // regression, so surface it in debug builds.
+                debug_assert!(
+                    per_block.is_some() || self.block_rows[layer_idx].is_empty(),
+                    "layer {layer_idx} has mapped rows but no real block size"
+                );
+                self.block_rows[layer_idx].len() * per_block.unwrap_or_default()
+            })
             .sum();
 
         PagedCacheStats {
@@ -705,6 +767,18 @@ impl PagedBlockPool {
             bytes_reserved,
             bytes_in_use,
         }
+    }
+
+    /// REAL bytes one physical block of `layer_idx` occupies in the pool's K
+    /// and V slabs combined: `block_size x n_kv_heads x head_dim x
+    /// element_size x 2`. `None` until the layer's first write captures its
+    /// geometry (or for an unknown dtype). This is the actual memory cost a
+    /// pinned block imposes, unlike the layout's nominal `bytes_per_block`
+    /// scheduling placeholder (#226).
+    pub fn real_block_bytes(&self, layer_idx: usize) -> Option<usize> {
+        let meta = self.pool_meta.get(layer_idx).copied().flatten()?;
+        let esize = crate::dtype::size_bytes(meta.dtype)?;
+        Some(self.layout.block_size * meta.n_kv_heads as usize * meta.head_dim as usize * esize * 2)
     }
 
     /// Current refcount of `block_id`, or `0` if the block is free or unknown.
@@ -1016,40 +1090,58 @@ impl PagedBlockPool {
                 }
             }
             None => {
-                let capacity = POOL_GROW_CHUNK_BLOCKS;
-                let shape = [capacity as i32, block_size, n_kv_heads, head_dim];
-                self.pool_k[layer_idx] = Some(ffi::zeros(&shape, k_dtype));
-                self.pool_v[layer_idx] = Some(ffi::zeros(&shape, k_dtype));
-                self.pool_meta[layer_idx] = Some(PagedPoolMeta {
-                    n_kv_heads,
-                    head_dim,
-                    dtype: k_dtype,
-                    capacity_blocks: capacity,
-                });
+                self.create_layer_pool(layer_idx, POOL_SLAB_BLOCKS, n_kv_heads, head_dim, k_dtype);
             }
         }
 
         // Resolve (and grow for) the physical row for this block.
         let row = self.assign_row(block_id, layer_idx)?;
+        let (slab_i, row_in_slab) = Self::slab_coords(row);
 
-        // Reassign the pool tensors with the slot update so MLX donates the
-        // buffer (in-place append, O(block)).
-        let starts = [row as i32, slot_start as i32, 0, 0];
+        // Reassign the row's slab with the slot update so MLX donates the
+        // buffer (in-place append, O(block)). The null placeholder makes the
+        // moved-out slab the buffer's sole owner for the donation; the slot
+        // is reassigned on the very next line, so the null never escapes a
+        // non-panicking path.
+        let starts = [row_in_slab, slot_start as i32, 0, 0];
         let stops = [
-            row as i32 + 1,
+            row_in_slab + 1,
             slot_start as i32 + n_slots,
             n_kv_heads,
             head_dim,
         ];
-        let old_k = self.pool_k[layer_idx]
-            .take()
-            .expect("pool_k allocated above");
-        self.pool_k[layer_idx] = Some(ffi::slice_update(&old_k, &k_slot, &starts, &stops));
-        let old_v = self.pool_v[layer_idx]
-            .take()
-            .expect("pool_v allocated above");
-        self.pool_v[layer_idx] = Some(ffi::slice_update(&old_v, &v_slot, &starts, &stops));
+        let old_k = std::mem::replace(&mut self.pool_k[layer_idx][slab_i], UniquePtr::null());
+        self.pool_k[layer_idx][slab_i] = ffi::slice_update(&old_k, &k_slot, &starts, &stops);
+        let old_v = std::mem::replace(&mut self.pool_v[layer_idx][slab_i], UniquePtr::null());
+        self.pool_v[layer_idx][slab_i] = ffi::slice_update(&old_v, &v_slot, &starts, &stops);
         Ok(())
+    }
+
+    /// Allocate the FIRST slabs for a layer, capturing its geometry. The
+    /// capacity is rounded up to whole [`POOL_SLAB_BLOCKS`] slabs. Creation is
+    /// not a growth episode (`grow_events` unchanged).
+    fn create_layer_pool(
+        &mut self,
+        layer_idx: usize,
+        min_capacity_blocks: usize,
+        n_kv_heads: i32,
+        head_dim: i32,
+        dtype: i32,
+    ) {
+        debug_assert!(self.pool_meta[layer_idx].is_none());
+        let slabs = min_capacity_blocks.div_ceil(POOL_SLAB_BLOCKS).max(1);
+        let block_size = self.layout.block_size as i32;
+        let shape = [POOL_SLAB_BLOCKS as i32, block_size, n_kv_heads, head_dim];
+        for _ in 0..slabs {
+            self.pool_k[layer_idx].push(ffi::zeros(&shape, dtype));
+            self.pool_v[layer_idx].push(ffi::zeros(&shape, dtype));
+        }
+        self.pool_meta[layer_idx] = Some(PagedPoolMeta {
+            n_kv_heads,
+            head_dim,
+            dtype,
+            capacity_blocks: slabs * POOL_SLAB_BLOCKS,
+        });
     }
 
     /// Write a whole prefill's worth of K/V for one layer into the pool.
@@ -1154,6 +1246,22 @@ impl PagedBlockPool {
         // Walk every block the new tokens span and write its slice.
         let first_block = (first_abs / block_size) as usize;
         let last_block = ((last_abs - 1) / block_size) as usize;
+
+        // Size the layer's pool once for the whole span before any block
+        // write. Without this, assign_row grows the slab in
+        // POOL_GROW_CHUNK_BLOCKS steps and every step reallocates and copies
+        // the entire layer tensor, transiently holding each step's old+new
+        // slab pair in one lazy graph on long prefills (#224).
+        self.presize_for_span(
+            state,
+            layer_idx,
+            first_block,
+            last_block,
+            n_kv_heads,
+            head_dim,
+            k_dtype,
+        )?;
+
         for block_index in first_block..=last_block {
             let block_start_abs = block_index as i32 * block_size;
             let slot_start = (first_abs.max(block_start_abs) - block_start_abs) as usize;
@@ -1189,6 +1297,47 @@ impl PagedBlockPool {
         Ok(())
     }
 
+    /// Ensure the layer's pool tensors can hold every span block in
+    /// `first_block..=last_block` of `state` without incremental growth.
+    ///
+    /// Counts the span blocks that still need a physical row, nets out the
+    /// reusable free rows, and either allocates the pool at the right size
+    /// (first write to the layer) or grows it once. [`Self::assign_row`]
+    /// keeps its grow fallback for rows minted outside the span (e.g. a
+    /// copy-on-write fork), so undershooting here stays correct.
+    #[allow(clippy::too_many_arguments)]
+    fn presize_for_span(
+        &mut self,
+        state: &PagedSequenceState,
+        layer_idx: usize,
+        first_block: usize,
+        last_block: usize,
+        n_kv_heads: i32,
+        head_dim: i32,
+        dtype: i32,
+    ) -> Result<(), String> {
+        let mut unassigned = 0usize;
+        for block_index in first_block..=last_block {
+            let block_id = state.layers[layer_idx].block_ids[block_index];
+            if !self.block_rows[layer_idx].contains_key(&block_id) {
+                unassigned += 1;
+            }
+        }
+        let minted = unassigned.saturating_sub(self.free_rows[layer_idx].len());
+        if minted == 0 {
+            return Ok(());
+        }
+        let target = self.next_row[layer_idx].saturating_add(minted);
+        match self.pool_meta[layer_idx] {
+            Some(meta) if target <= meta.capacity_blocks => Ok(()),
+            Some(_) => self.ensure_layer_capacity(layer_idx, target),
+            None => {
+                self.create_layer_pool(layer_idx, target, n_kv_heads, head_dim, dtype);
+                Ok(())
+            }
+        }
+    }
+
     /// Copy the current contents of `src_block_id` into a freshly acquired block
     /// on the same layer and return the new block id. Used by [`write_prefill`]
     /// to fork a shared partial tail block before mutating it (copy-on-write).
@@ -1215,7 +1364,8 @@ impl PagedBlockPool {
                 format!(
                     "PagedBlockPool::copy_on_write_block: shared block {src_block_id} on layer {layer_idx} has no pool row (was it written?)"
                 )
-            })? as i32;
+            })?;
+        let (slab_i, row_in_slab) = Self::slab_coords(src_row);
         let block_size = self.layout.block_size as i32;
 
         // Slice the source row's [block_size, H, D] slab out of K and V (the
@@ -1223,23 +1373,13 @@ impl PagedBlockPool {
         let slab = |pool: &MlxArray| -> UniquePtr<MlxArray> {
             let row = ffi::slice(
                 pool,
-                &[src_row, 0, 0, 0],
-                &[src_row + 1, block_size, meta.n_kv_heads, meta.head_dim],
+                &[row_in_slab, 0, 0, 0],
+                &[row_in_slab + 1, block_size, meta.n_kv_heads, meta.head_dim],
             );
             ffi::reshape(&row, &[block_size, meta.n_kv_heads, meta.head_dim])
         };
-        let k_slab = {
-            let pool_k = self.pool_k[layer_idx]
-                .as_ref()
-                .expect("pool_k present when pool_meta present");
-            slab(pool_k)
-        };
-        let v_slab = {
-            let pool_v = self.pool_v[layer_idx]
-                .as_ref()
-                .expect("pool_v present when pool_meta present");
-            slab(pool_v)
-        };
+        let k_slab = slab(&self.pool_k[layer_idx][slab_i]);
+        let v_slab = slab(&self.pool_v[layer_idx][slab_i]);
 
         let fresh = self.acquire_block(layer_idx)?;
         self.write_block(fresh, layer_idx, 0, &k_slab, &v_slab)?;
@@ -1274,7 +1414,8 @@ impl PagedBlockPool {
             format!(
                 "PagedBlockPool::read_block_contents: block {block_id} on layer {layer_idx} has no pool row (never written)"
             )
-        })? as i32;
+        })?;
+        let (slab_i, row_in_slab) = Self::slab_coords(src_row);
         let block_size = self.layout.block_size as i32;
 
         // Slice the source row's [block_size, H, D] slab out of K and V (the bare
@@ -1282,23 +1423,13 @@ impl PagedBlockPool {
         let slab = |pool: &MlxArray| -> UniquePtr<MlxArray> {
             let window = ffi::slice(
                 pool,
-                &[src_row, 0, 0, 0],
-                &[src_row + 1, block_size, meta.n_kv_heads, meta.head_dim],
+                &[row_in_slab, 0, 0, 0],
+                &[row_in_slab + 1, block_size, meta.n_kv_heads, meta.head_dim],
             );
             ffi::reshape(&window, &[block_size, meta.n_kv_heads, meta.head_dim])
         };
-        let k_slab = {
-            let pool_k = self.pool_k[layer_idx]
-                .as_ref()
-                .expect("pool_k present when pool_meta present");
-            slab(pool_k)
-        };
-        let v_slab = {
-            let pool_v = self.pool_v[layer_idx]
-                .as_ref()
-                .expect("pool_v present when pool_meta present");
-            slab(pool_v)
-        };
+        let k_slab = slab(&self.pool_k[layer_idx][slab_i]);
+        let v_slab = slab(&self.pool_v[layer_idx][slab_i]);
         Ok((k_slab, v_slab))
     }
 
@@ -1351,29 +1482,28 @@ impl PagedBlockPool {
             return Ok(None);
         }
 
-        let (pool_k, pool_v) = match (
-            self.pool_k.get(layer_idx).and_then(|p| p.as_ref()),
-            self.pool_v.get(layer_idx).and_then(|p| p.as_ref()),
-        ) {
-            (Some(k), Some(v)) => (k, v),
-            _ => return Ok(None),
-        };
-        let meta = self.pool_meta[layer_idx]
-            .expect("pool_meta present whenever pool tensors are allocated");
+        if self.pool_meta.get(layer_idx).copied().flatten().is_none()
+            || self.pool_k[layer_idx].is_empty()
+            || self.pool_v[layer_idx].is_empty()
+        {
+            return Ok(None);
+        }
+        let meta =
+            self.pool_meta[layer_idx].expect("pool_meta present whenever pool slabs are allocated");
 
         // Map each block id (in block-table order) to its physical row.
-        let mut rows_i32 = Vec::with_capacity(layer.block_ids.len());
+        let mut rows = Vec::with_capacity(layer.block_ids.len());
         for block_id in &layer.block_ids {
             let row = *self.block_rows[layer_idx].get(block_id).ok_or_else(|| {
                 format!(
                     "PagedBlockPool::gather_visible: block {block_id} on layer {layer_idx} has no pool row (was it written?)"
                 )
             })?;
-            rows_i32.push(row as i32);
+            rows.push(row);
         }
 
         let block_size = self.layout.block_size as i32;
-        let n_blocks = rows_i32.len() as i32;
+        let n_blocks = rows.len() as i32;
         let logical_start = layer.logical_start as i32;
         let len = layer.len as i32;
         if len > n_blocks * block_size {
@@ -1382,11 +1512,40 @@ impl PagedBlockPool {
             ));
         }
 
-        let idx = ffi::from_slice_i32(&rows_i32, &[n_blocks]);
+        // Gather the block rows in block-table order. With one slab this is a
+        // single `take`; across slabs (#235) the row list is split into
+        // maximal same-slab runs, each run gathered from its slab, and the
+        // per-run results concatenated in order. Rows are assigned mostly
+        // monotonically, so a sequence spans about one run per slab; the
+        // concat output copy is the same magnitude as the gather copy this
+        // path always materialized.
+        let gather_rows = |slabs: &[UniquePtr<MlxArray>]| -> UniquePtr<MlxArray> {
+            let mut parts: Vec<UniquePtr<MlxArray>> = Vec::new();
+            let mut i = 0usize;
+            while i < rows.len() {
+                let slab_i = rows[i] / POOL_SLAB_BLOCKS;
+                let mut local: Vec<i32> = Vec::new();
+                let mut j = i;
+                while j < rows.len() && rows[j] / POOL_SLAB_BLOCKS == slab_i {
+                    local.push((rows[j] % POOL_SLAB_BLOCKS) as i32);
+                    j += 1;
+                }
+                let idx = ffi::from_slice_i32(&local, &[local.len() as i32]);
+                parts.push(ffi::take(&slabs[slab_i], &idx, 0));
+                i = j;
+            }
+            if parts.len() == 1 {
+                parts.pop().expect("non-empty rows imply one part")
+            } else {
+                let ptrs: Vec<*const MlxArray> =
+                    parts.iter().map(|p| &**p as *const MlxArray).collect();
+                unsafe { ffi::concatenate(&ptrs, 0) }
+            }
+        };
 
-        let gather = |pool: &MlxArray| -> UniquePtr<MlxArray> {
+        let gather = |slabs: &[UniquePtr<MlxArray>]| -> UniquePtr<MlxArray> {
             // [n_blocks, block_size, H, D]
-            let gathered = ffi::take(pool, &idx, 0);
+            let gathered = gather_rows(slabs);
             // [n_blocks * block_size, H, D]
             let flat = ffi::reshape(
                 &gathered,
@@ -1407,7 +1566,10 @@ impl PagedBlockPool {
             ffi::transpose_axes(&batched, &[0, 2, 1, 3])
         };
 
-        Ok(Some((gather(pool_k), gather(pool_v))))
+        Ok(Some((
+            gather(&self.pool_k[layer_idx]),
+            gather(&self.pool_v[layer_idx]),
+        )))
     }
 
     /// Fused paged-attention decode over the pool via the native Metal kernel
@@ -1433,11 +1595,16 @@ impl PagedBlockPool {
         layer_idx: usize,
         scale: f32,
     ) -> Result<Option<UniquePtr<MlxArray>>, String> {
+        // The fused kernel reads one contiguous pool buffer per side. With
+        // chunked slabs (#235) a layer that has grown past one slab cannot be
+        // handed over as a single buffer, so decline and let the caller use
+        // the gather fallback. The kernel is gated off by default (#123) and
+        // single-slab layers (up to POOL_SLAB_BLOCKS rows) keep it available.
         let (pool_k, pool_v) = match (
-            self.pool_k.get(layer_idx).and_then(|p| p.as_ref()),
-            self.pool_v.get(layer_idx).and_then(|p| p.as_ref()),
+            self.pool_k.get(layer_idx).map(Vec::as_slice),
+            self.pool_v.get(layer_idx).map(Vec::as_slice),
         ) {
-            (Some(k), Some(v)) => (k, v),
+            (Some([k]), Some([v])) => (k, v),
             _ => return Ok(None),
         };
         let block_size = self.layout.block_size as i32;
@@ -1523,10 +1690,10 @@ impl PagedBlockPool {
     /// Used by: `CachePool::memory_usage_bytes` to reflect the true pool
     /// footprint once the live writer is wired (#120).
     pub fn pool_tensor_bytes(&self) -> usize {
-        let sum = |pools: &[Option<UniquePtr<MlxArray>>]| -> usize {
+        let sum = |pools: &[Vec<UniquePtr<MlxArray>>]| -> usize {
             pools
                 .iter()
-                .filter_map(|p| p.as_ref())
+                .flat_map(|slabs| slabs.iter())
                 .map(|a| ffi::array_nbytes(a))
                 .sum()
         };
@@ -1535,7 +1702,7 @@ impl PagedBlockPool {
 
     /// Resolve the physical pool row for `block_id` on `layer_idx`, assigning
     /// one lazily on first write (reusing a freed row when available) and
-    /// growing the pool tensors if the new row exceeds capacity.
+    /// appending pool slabs if the new row exceeds capacity.
     fn assign_row(&mut self, block_id: PagedBlockId, layer_idx: usize) -> Result<usize, String> {
         if let Some(&row) = self.block_rows[layer_idx].get(&block_id) {
             return Ok(row);
@@ -1553,60 +1720,47 @@ impl PagedBlockPool {
                 .map(|m| m.capacity_blocks)
                 .unwrap_or(0)
         {
-            self.grow_pool(layer_idx, row + 1)?;
+            self.ensure_layer_capacity(layer_idx, row + 1)?;
         }
         self.block_rows[layer_idx].insert(block_id, row);
         Ok(row)
     }
 
-    /// Grow the layer's K and V pool tensors so they hold at least
-    /// `min_capacity` rows, rounding up to the next [`POOL_GROW_CHUNK_BLOCKS`]
-    /// multiple. Existing rows are copied into the larger buffer via
-    /// `slice_update`.
-    fn grow_pool(&mut self, layer_idx: usize, min_capacity: usize) -> Result<(), String> {
+    /// Ensure the layer can hold at least `min_capacity` rows by APPENDING
+    /// fresh [`POOL_SLAB_BLOCKS`]-row slabs (#235).
+    ///
+    /// Existing slabs are never reallocated or copied, so growth costs only
+    /// the new slabs' allocation: no transient old+new pair (the #224
+    /// mitigation this replaces) and no ladder of orphaned buffer sizes in
+    /// the MLX cache. One call that appends counts as one growth episode.
+    fn ensure_layer_capacity(
+        &mut self,
+        layer_idx: usize,
+        min_capacity: usize,
+    ) -> Result<(), String> {
         let meta = self.pool_meta[layer_idx].ok_or_else(|| {
-            format!("PagedBlockPool::grow_pool: layer {layer_idx} has no pool tensors")
+            format!("PagedBlockPool::ensure_layer_capacity: layer {layer_idx} has no pool slabs")
         })?;
         if min_capacity <= meta.capacity_blocks {
             return Ok(());
         }
-        let new_capacity = min_capacity
-            .div_ceil(POOL_GROW_CHUNK_BLOCKS)
-            .saturating_mul(POOL_GROW_CHUNK_BLOCKS)
-            .max(POOL_GROW_CHUNK_BLOCKS);
+        let target_slabs = min_capacity.div_ceil(POOL_SLAB_BLOCKS);
         let block_size = self.layout.block_size as i32;
-        let new_shape = [
-            new_capacity as i32,
+        let shape = [
+            POOL_SLAB_BLOCKS as i32,
             block_size,
             meta.n_kv_heads,
             meta.head_dim,
         ];
-        let copy_stops = [
-            meta.capacity_blocks as i32,
-            block_size,
-            meta.n_kv_heads,
-            meta.head_dim,
-        ];
-        let starts = [0, 0, 0, 0];
-
-        let old_k = self.pool_k[layer_idx]
-            .take()
-            .expect("pool_k present when meta present");
-        let mut new_k = ffi::zeros(&new_shape, meta.dtype);
-        new_k = ffi::slice_update(&new_k, &old_k, &starts, &copy_stops);
-        self.pool_k[layer_idx] = Some(new_k);
-
-        let old_v = self.pool_v[layer_idx]
-            .take()
-            .expect("pool_v present when meta present");
-        let mut new_v = ffi::zeros(&new_shape, meta.dtype);
-        new_v = ffi::slice_update(&new_v, &old_v, &starts, &copy_stops);
-        self.pool_v[layer_idx] = Some(new_v);
-
+        while self.pool_k[layer_idx].len() < target_slabs {
+            self.pool_k[layer_idx].push(ffi::zeros(&shape, meta.dtype));
+            self.pool_v[layer_idx].push(ffi::zeros(&shape, meta.dtype));
+        }
         self.pool_meta[layer_idx] = Some(PagedPoolMeta {
-            capacity_blocks: new_capacity,
+            capacity_blocks: target_slabs * POOL_SLAB_BLOCKS,
             ..meta
         });
+        self.grow_events += 1;
         Ok(())
     }
 

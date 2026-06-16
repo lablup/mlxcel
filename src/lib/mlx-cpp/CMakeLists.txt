@@ -26,6 +26,9 @@ function(mlx_apply_source_overlays mlx_source_dir)
   # `#3422 Speed up NAX split-K`, `#3419 Segmented mm nax kernel`). Removing
   # the patches keeps our build binary-equivalent to the upstream Python
   # wheel and simplifies future upstream syncs.
+  # The steel/gemm/mma.h overlay (issue #217: upstream safe-load fix
+  # cherry-pick, PRs #3560/#3565) was retired when the pin moved to
+  # 2026-06-11 upstream main, which carries the fix natively (issue #222).
   set(_metal_patch_files
       "mlx/backend/metal/compiled.cpp"
       "mlx/backend/metal/kernels/utils.h")
@@ -89,7 +92,7 @@ else()
   FetchContent_Declare(
     mlx
     GIT_REPOSITORY "https://github.com/ml-explore/mlx.git"
-    GIT_TAG 84961223c02925bef6bef95d3a0a046779bde935)
+    GIT_TAG a6ec7123dac814417147e21d4aeed694924ddd4d)
 
   # Use FetchContent_Populate + add_subdirectory so we can apply source
   # overlays before the MLX build system processes the files.

@@ -33,6 +33,17 @@
 //! the prefill and decode nodes can return their [`ResultFrame`]s to it. A
 //! background demux task (`spawn_result_demux`) routes each incoming frame to
 //! the per-request channel keyed by `request_id`.
+//!
+//! # Output filtering (issue #198)
+//!
+//! Every decode text piece (and the prefill first token) passes through the
+//! same [`StreamFilter`] the single-node chat route uses, so model-specific
+//! structural markers (`<think>`, `<|channel>`, tool-call delimiters, stray
+//! turn tokens) never leak to the client and thinking content is routed to
+//! `delta.reasoning_content`. Tool-call parsing (accumulate-then-parse into
+//! `tool_calls`) is NOT yet supported on the router path: the router emits
+//! `content` and `reasoning_content` only, and the filter suppresses
+//! tool-call delimiter markers.
 
 use std::collections::HashMap;
 use std::convert::Infallible;
@@ -63,6 +74,7 @@ use crate::distributed::tcp_transport::TcpTransport;
 use crate::distributed::transport::{Transport, TransportBackend};
 use crate::server::ChatTemplateProcessor;
 use crate::server::config::ServerConfig;
+use crate::server::tool_calls::stream_filter::{FilterOutput, StreamFilter};
 use crate::server::types::request::ChatCompletionRequest;
 use crate::tokenizer::MlxcelTokenizer;
 
@@ -289,6 +301,17 @@ async fn route_chat(state: Arc<RouterState>, request: ChatCompletionRequest) -> 
 
     let prompt = prepared.prompt;
 
+    // Stream filter (issue #198): mirror the single-node chat route, including
+    // the primed-open-thinking start state when the rendered prompt ends
+    // inside an open thinking block (enable_thinking=true templates), so the
+    // model's first emitted tokens route to `reasoning_content`.
+    let primed_open_thinking = super::routes::chat::is_prompt_primed_open_thinking(&prompt);
+    let stream_filter = if primed_open_thinking {
+        StreamFilter::new_primed_open_thinking()
+    } else {
+        StreamFilter::new()
+    };
+
     // Tokenize the rendered prompt. Match the worker's behavior: skip the
     // BOS special token when the prompt already starts with one.
     let add_special = !prompt.starts_with("<bos>") && !prompt.starts_with("<s>");
@@ -342,19 +365,47 @@ async fn route_chat(state: Arc<RouterState>, request: ChatCompletionRequest) -> 
         let request_id_str2 = request_id_str.clone();
         let model = request.model.clone();
         let handoff_timeout = state.handoff_timeout;
+        let max_tokens = opts.max_tokens;
 
+        let mut filter = stream_filter;
         tokio::spawn(async move {
             let _ = chunk_tx.send(Ok(sse_event(&chat_chunk_initial(&request_id_str2, &model))));
 
-            let result =
-                drive_handoff_result(&mut { rx }, &request_id_str2, handoff_timeout, |text| {
+            let emit_filtered = |emit: FilterOutput| {
+                if let Some(reasoning) = emit.reasoning
+                    && !reasoning.is_empty()
+                {
+                    let _ = chunk_tx.send(Ok(sse_event(&chat_chunk_reasoning(
+                        &request_id_str2,
+                        &model,
+                        &reasoning,
+                    ))));
+                }
+                if let Some(content) = emit.content
+                    && !content.is_empty()
+                {
                     let _ = chunk_tx.send(Ok(sse_event(&chat_chunk_content(
                         &request_id_str2,
                         &model,
-                        text,
+                        &content,
                     ))));
-                })
-                .await;
+                }
+            };
+
+            let result = drive_handoff_result(
+                &mut { rx },
+                &request_id_str2,
+                handoff_timeout,
+                max_tokens,
+                |text| {
+                    emit_filtered(filter.feed(text));
+                },
+            )
+            .await;
+
+            // Flush any text still buffered inside the filter (e.g. an
+            // unterminated partial delimiter match at end of stream).
+            emit_filtered(filter.flush());
 
             if let Err(e) = result {
                 let _ = chunk_tx.send(Ok(sse_event(&chat_chunk_error(
@@ -373,19 +424,40 @@ async fn route_chat(state: Arc<RouterState>, request: ChatCompletionRequest) -> 
             .keep_alive(KeepAlive::default())
             .into_response())
     } else {
-        // Non-streaming: collect all tokens then return a single JSON object.
+        // Non-streaming: collect all tokens (filtered) then return a single
+        // JSON object with `content` and, when present, `reasoning_content`.
+        let mut filter = stream_filter;
         let mut content = String::new();
+        let mut reasoning = String::new();
         let mut rx = rx;
-        let r = drive_handoff_result(&mut rx, &request_id_str, state.handoff_timeout, |text| {
-            content.push_str(text);
-        })
-        .await;
-        state.pending.lock().unwrap().remove(&request_id);
-        r?;
+        {
+            let mut absorb = |emit: FilterOutput| {
+                if let Some(r) = emit.reasoning {
+                    reasoning.push_str(&r);
+                }
+                if let Some(c) = emit.content {
+                    content.push_str(&c);
+                }
+            };
+            let r = drive_handoff_result(
+                &mut rx,
+                &request_id_str,
+                state.handoff_timeout,
+                opts.max_tokens,
+                |text| {
+                    absorb(filter.feed(text));
+                },
+            )
+            .await;
+            absorb(filter.flush());
+            state.pending.lock().unwrap().remove(&request_id);
+            r?;
+        }
         Ok(Json(chat_completion_json(
             &request_id_str,
             &request.model,
             &content,
+            &reasoning,
         ))
         .into_response())
     }
@@ -403,6 +475,7 @@ async fn drive_handoff_result(
     rx: &mut UnboundedReceiver<ResultFrame>,
     request_id_str: &str,
     handoff_timeout: Duration,
+    max_tokens: usize,
     mut on_token: impl FnMut(&str),
 ) -> Result<()> {
     let bridge = StreamBridge::new(request_id_str.to_string(), handoff_timeout);
@@ -433,32 +506,64 @@ async fn drive_handoff_result(
         return Ok(());
     }
 
-    // Transition to the decode phase and wait for the continuation.
+    // Transition to the decode phase and consume the incrementally streamed
+    // continuation frames (issue #199) until the terminal `done` frame. The
+    // timeout applies per frame, so long generations keep streaming as long
+    // as the decode node makes progress.
     bridge
         .start_decode_stream()
         .map_err(|e| anyhow::anyhow!("stream bridge: {e}"))?;
 
-    let cont = tokio::time::timeout(handoff_timeout, rx.recv())
-        .await
-        .map_err(|_| anyhow::anyhow!("timed out waiting for the decode continuation"))?
-        .ok_or_else(|| anyhow::anyhow!("decode result channel closed before continuation"))?;
-
-    if let Some(e) = cont.error {
-        anyhow::bail!("decode node error: {e}");
-    }
     let mut seq: u64 = 1;
-    for text in &cont.tokens {
-        bridge
-            .submit_decode_token(&TokenEvent {
-                token_id: 0,
-                text: text.clone(),
-                sequence_number: seq,
-                source: TokenSource::Decode,
-                is_final: false,
-            })
-            .map_err(|e| anyhow::anyhow!("stream bridge: {e}"))?;
-        on_token(text);
-        seq += 1;
+    loop {
+        let cont = tokio::time::timeout(handoff_timeout, rx.recv())
+            .await
+            .map_err(|_| anyhow::anyhow!("timed out waiting for the decode continuation"))?
+            .ok_or_else(|| anyhow::anyhow!("decode result channel closed before continuation"))?;
+
+        if let Some(e) = cont.error {
+            anyhow::bail!("decode node error: {e}");
+        }
+        // The router set the request's token budget itself; do not trust the
+        // remote `done` flag to terminate the stream. A decode node that
+        // exceeds the budget (buggy or hostile) is cut off here, which also
+        // bounds the total frame count and, with the per-frame timeout, the
+        // total wall-clock time per request.
+        if seq as usize > max_tokens {
+            anyhow::bail!(
+                "decode node exceeded the request token budget ({max_tokens}) without \
+                 a terminal frame"
+            );
+        }
+        // Wire-level ordering check: a non-zero `start_sequence` must match
+        // the next expected position (frames could in principle reorder
+        // across pooled transport connections). This is a liveness and
+        // debugging aid against benign loss or reordering, NOT a tamper
+        // defense: the transport is unauthenticated and the disaggregated
+        // deployment model assumes a trusted network segment.
+        if cont.start_sequence != 0 && cont.start_sequence != seq {
+            anyhow::bail!(
+                "decode continuation frame out of order: expected sequence {seq}, \
+                 got {}",
+                cont.start_sequence
+            );
+        }
+        for text in &cont.tokens {
+            bridge
+                .submit_decode_token(&TokenEvent {
+                    token_id: 0,
+                    text: text.clone(),
+                    sequence_number: seq,
+                    source: TokenSource::Decode,
+                    is_final: false,
+                })
+                .map_err(|e| anyhow::anyhow!("stream bridge: {e}"))?;
+            on_token(text);
+            seq += 1;
+        }
+        if cont.done {
+            break;
+        }
     }
     bridge.finalize();
     Ok(())
@@ -499,6 +604,20 @@ fn chat_chunk_content(id: &str, model: &str, text: &str) -> serde_json::Value {
     })
 }
 
+/// Streaming chunk carrying a reasoning (thinking) token.
+fn chat_chunk_reasoning(id: &str, model: &str, text: &str) -> serde_json::Value {
+    serde_json::json!({
+        "id": id,
+        "object": "chat.completion.chunk",
+        "model": model,
+        "choices": [{
+            "index": 0,
+            "delta": {"reasoning_content": text},
+            "finish_reason": null
+        }]
+    })
+}
+
 /// Final streaming chunk with `finish_reason = "stop"`.
 fn chat_chunk_finish(id: &str, model: &str) -> serde_json::Value {
     serde_json::json!({
@@ -527,15 +646,25 @@ fn chat_chunk_error(id: &str, model: &str, msg: &str) -> serde_json::Value {
     })
 }
 
-/// Non-streaming response body.
-fn chat_completion_json(id: &str, model: &str, content: &str) -> serde_json::Value {
+/// Non-streaming response body. `reasoning_content` is included only when
+/// the filter routed any thinking text.
+fn chat_completion_json(
+    id: &str,
+    model: &str,
+    content: &str,
+    reasoning: &str,
+) -> serde_json::Value {
+    let mut message = serde_json::json!({"role": "assistant", "content": content});
+    if !reasoning.is_empty() {
+        message["reasoning_content"] = serde_json::Value::String(reasoning.to_string());
+    }
     serde_json::json!({
         "id": id,
         "object": "chat.completion",
         "model": model,
         "choices": [{
             "index": 0,
-            "message": {"role": "assistant", "content": content},
+            "message": message,
             "finish_reason": "stop"
         }]
     })

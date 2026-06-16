@@ -14,7 +14,7 @@
 
 //! Centroid-routed sparse softmax LM head used by Gemma 4 **E2B / E4B**
 //! assistant drafters. Port of upstream
-//! `references/mlx-vlm/mlx_vlm/speculative/drafters/gemma4_assistant/masked_embedder.py`.
+//! https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/speculative/drafters/gemma4_assistant/masked_embedder.py.
 //!
 //! ## What it does
 //!

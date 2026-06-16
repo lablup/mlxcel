@@ -13,7 +13,7 @@
 // limitations under the License.
 
 //! [`DFlashConfig`] — Rust port of upstream
-//! `references/mlx-vlm/mlx_vlm/speculative/drafters/qwen3_dflash/config.py`.
+//! https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/speculative/drafters/qwen3_dflash/config.py.
 //!
 //! Defaults mirror the published `z-lab/Qwen3.5-4B-DFlash` checkpoint:
 //!
@@ -41,7 +41,7 @@ use serde::{Deserialize, Serialize};
 /// Upstream DFlash default target-layer capture list.
 ///
 /// This is the default in
-/// `references/mlx-vlm/mlx_vlm/speculative/drafters/qwen3_dflash/config.py`
+/// https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/speculative/drafters/qwen3_dflash/config.py
 /// for the original `z-lab/Qwen3.5-4B-DFlash` drafter. Runtime code should
 /// prefer the loaded checkpoint's [`DFlashConfig::target_layer_ids`]; this
 /// constant exists only as the config default / backwards-compatible fallback.

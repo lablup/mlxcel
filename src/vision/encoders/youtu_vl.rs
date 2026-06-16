@@ -14,7 +14,7 @@
 
 //! Youtu-VL vision encoder.
 //!
-//! Faithful port of `references/mlx-vlm/mlx_vlm/models/youtu_vl/vision.py`.
+//! Faithful port of https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/models/youtu_vl/vision.py.
 //!
 //! Architecture:
 //! - `embeddings.patch_embedding`: Linear projection over flattened patches
@@ -61,7 +61,7 @@ use rope::VisionRoPE;
 
 /// Youtu-VL vision encoder configuration.
 ///
-/// Mirrors `references/mlx-vlm/mlx_vlm/models/youtu_vl/config.py::VisionConfig`.
+/// Mirrors https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/models/youtu_vl/config.py (VisionConfig).
 #[derive(Debug, Clone, Deserialize)]
 pub struct YoutuVisionConfig {
     #[serde(default = "default_model_type")]

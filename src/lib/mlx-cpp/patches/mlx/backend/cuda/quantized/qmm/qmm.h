@@ -1,5 +1,5 @@
 // Copyright © 2026 Apple Inc.
-// Patched by mlxcel: matches upstream 84961223. Declarations carry the
+// Patched by mlxcel: matches upstream a6ec712. Declarations carry the
 // optional<array> lhs_indices / rhs_indices parameters on qmm_sm80 and
 // qmm_naive; upstream #3443 (c9aa5605..84961223) split the kernel body
 // into qmm_naive.cuh / qmm_sm80.cuh while preserving the public ABI of

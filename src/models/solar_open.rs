@@ -22,7 +22,7 @@
 //! - 2 RMSNorm layers per block (input_layernorm, post_attention_layernorm)
 //! - Separate gate_proj/up_proj for experts (not fused gate_up_proj)
 //!
-//! Architecture reference: references/mlx-lm/mlx_lm/models/glm4_moe.py
+//! Architecture reference: https://github.com/ml-explore/mlx-lm/blob/main/mlx_lm/models/glm4_moe.py
 //! Weight format: supports both MLX native and GPTQ (auto_round) quantization
 
 use mlxcel_core::generate::LanguageModel;

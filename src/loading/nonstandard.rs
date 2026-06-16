@@ -47,6 +47,10 @@ pub(crate) fn try_load_nonstandard_model_from_dir(
         ModelType::Gemma3n => {
             Some(load_from_dir(path_str, models::Gemma3nModel::load).map(LoadedModel::Gemma3n)?)
         }
+        ModelType::DiffusionGemma => Some(
+            load_from_path(model_path, |path| models::DiffusionGemmaModel::load(path))
+                .map(LoadedModel::DiffusionGemma)?,
+        ),
         ModelType::Mamba => Some(
             super::load_pair_from_dir(path_str, |path| models::MambaModel::load(&path))
                 .map(LoadedModel::Mamba)?,
@@ -58,6 +62,26 @@ pub(crate) fn try_load_nonstandard_model_from_dir(
         ModelType::Jamba => Some(
             super::load_pair_from_dir(path_str, |path| models::JambaModel::load(&path))
                 .map(LoadedModel::Jamba)?,
+        ),
+        ModelType::FalconH1 => Some(
+            super::load_pair_from_dir(path_str, |path| models::FalconH1Model::load(&path))
+                .map(LoadedModel::FalconH1)?,
+        ),
+        ModelType::Lfm2 => Some(
+            super::load_pair_from_dir(path_str, |path| models::Lfm2Model::load(&path))
+                .map(LoadedModel::Lfm2)?,
+        ),
+        ModelType::Lfm2Moe => Some(
+            super::load_pair_from_dir(path_str, |path| models::Lfm2Model::load(&path))
+                .map(LoadedModel::Lfm2Moe)?,
+        ),
+        ModelType::Plamo2 => Some(
+            super::load_pair_from_dir(path_str, |path| models::Plamo2Model::load(&path))
+                .map(LoadedModel::Plamo2)?,
+        ),
+        ModelType::GraniteMoeHybrid => Some(
+            super::load_pair_from_dir(path_str, |path| models::GraniteMoeHybridModel::load(&path))
+                .map(LoadedModel::GraniteMoeHybrid)?,
         ),
         ModelType::NemotronH => Some(
             super::load_pair_from_dir(path_str, |path| models::NemotronHModel::load(&path))

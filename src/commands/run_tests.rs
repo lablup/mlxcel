@@ -17,8 +17,8 @@
 //! These cover the clap surface and the `RunArgs -> GenerateArgs` lowering
 //! only; they never load a model or run generation (the dispatch into
 //! `run_generate` is exercised end-to-end by the real-model integration
-//! suites). The point is to lock the three documented `run` behaviors —
-//! one-shot (`-p`), no-prompt REPL, and default-model fallback — at the
+//! suites). The point is to lock the three documented `run` behaviors:
+//! one-shot (`-p`), no-prompt REPL, and default-model fallback, at the
 //! arg-construction boundary.
 
 use std::path::PathBuf;
@@ -114,11 +114,11 @@ fn run_no_model_with_prompt_uses_default_model_one_shot() {
 }
 
 #[test]
-fn default_model_matches_mlx_lm() {
-    // Locks the documented default to the mlx-lm `DEFAULT_MODEL` value. If a
-    // future change picks a different default, this test forces the README /
-    // help text to be updated deliberately.
-    assert_eq!(DEFAULT_MODEL, "mlx-community/Llama-3.2-3B-Instruct-4bit");
+fn default_model_is_pinned() {
+    // Locks the documented default `DEFAULT_MODEL` value. If a future change
+    // picks a different default, this test forces the README / help text to be
+    // updated deliberately.
+    assert_eq!(DEFAULT_MODEL, "mlx-community/gemma-4-e2b-it-4bit");
 }
 
 #[test]

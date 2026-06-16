@@ -113,6 +113,11 @@ pub fn get_model_type(model_path: &Path) -> Result<ModelType> {
         } else {
             ModelType::Gemma4
         }),
+        // DiffusionGemma (block-diffusion on the Gemma 4 MoE backbone). The
+        // checkpoint always ships a vision tower, but phase 1 is text-only:
+        // the loader skips the vision weights, so detection is by model_type
+        // alone. `diffusion_gemma_text` is accepted for text-only exports.
+        "diffusion_gemma" | "diffusion_gemma_text" => Ok(ModelType::DiffusionGemma),
         // Gemma 4 Unified is always multimodal (text + vision [+ audio]); it
         // carries `vision_embedder.*` patch-projector weights rather than the
         // `vision_tower.*` ViT used by `gemma4`/Gemma4VLM, so it is detected by
@@ -138,11 +143,13 @@ pub fn get_model_type(model_path: &Path) -> Result<ModelType> {
         "deepseek_v2" => Ok(ModelType::DeepSeekV2),
         "deepseek_v3" => Ok(ModelType::DeepSeekV3),
         "deepseek_v32" | "deepseek_v3.2" => Ok(ModelType::DeepSeekV32),
+        "dots1" => Ok(ModelType::Dots1),
         "cohere" => Ok(ModelType::Cohere),
         "cohere2" => Ok(ModelType::Cohere2),
         "internlm2" => Ok(ModelType::InternLM2),
         "internlm3" => Ok(ModelType::InternLM3),
         "baichuan_m1" => Ok(ModelType::Baichuan),
+        "bitnet" => Ok(ModelType::BitNet),
         "glm4" => Ok(ModelType::Glm4),
         "glm4_moe" => Ok(ModelType::Glm4Moe),
         "solar_open" => Ok(ModelType::SolarOpen),
@@ -153,6 +160,9 @@ pub fn get_model_type(model_path: &Path) -> Result<ModelType> {
         "hunyuan_v1_dense" | "hunyuan_dense" => Ok(ModelType::HunyuanV1Dense),
         "hunyuan" => Ok(detect_hunyuan_model_type(&v)),
         "mimo" => Ok(ModelType::MiMo),
+        "apertus" => Ok(ModelType::Apertus),
+        "seed_oss" => Ok(ModelType::SeedOss),
+        "granite" => Ok(ModelType::Granite),
         "exaone" => Ok(ModelType::ExaOne),
         "exaone4" => Ok(ModelType::ExaOne4),
         "exaone_moe" => Ok(ModelType::ExaOneMoe),
@@ -175,6 +185,11 @@ pub fn get_model_type(model_path: &Path) -> Result<ModelType> {
         "mamba" | "falcon_mamba" => Ok(ModelType::Mamba),
         "mamba2" => Ok(ModelType::Mamba2),
         "jamba" => Ok(ModelType::Jamba),
+        "falcon_h1" => Ok(ModelType::FalconH1),
+        "lfm2" => Ok(ModelType::Lfm2),
+        "lfm2_moe" => Ok(ModelType::Lfm2Moe),
+        "plamo2" => Ok(ModelType::Plamo2),
+        "granitemoehybrid" => Ok(ModelType::GraniteMoeHybrid),
         "nemotron_h" => Ok(ModelType::NemotronH),
         "nemotron_h_nano_omni" | "nemotronh_nano_omni_reasoning_v3" => {
             Ok(ModelType::NemotronHNanoOmniVLM)

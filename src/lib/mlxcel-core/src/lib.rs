@@ -1406,6 +1406,68 @@ mod ffi {
             next_state: &mut UniquePtr<MlxArray>,
         );
 
+        /// Fused MoE expert kernel for single-token decode. gate/up use
+        /// `gu_bits` (power-of-2: 4/8), down uses `d_bits` (4/8/6); group_size
+        /// is shared. Mixed widths support e.g. dots.llm1 (gate/up 4, down 6).
+        #[allow(clippy::too_many_arguments)]
+        fn fused_moe_expert_kernel(
+            x: &MlxArray,
+            indices: &MlxArray,
+            gate_w: &MlxArray,
+            gate_s: &MlxArray,
+            gate_b: &MlxArray,
+            up_w: &MlxArray,
+            up_s: &MlxArray,
+            up_b: &MlxArray,
+            down_w: &MlxArray,
+            down_s: &MlxArray,
+            down_b: &MlxArray,
+            scores: &MlxArray,
+            din: i32,
+            dff: i32,
+            k: i32,
+            gu_bits: i32,
+            d_bits: i32,
+            group_size: i32,
+        ) -> UniquePtr<MlxArray>;
+
+        /// Like `fused_moe_expert_kernel` but GeGLU (gelu tanh approx) instead
+        /// of SwiGLU for the gate/up activation (gemma4 experts).
+        #[allow(clippy::too_many_arguments)]
+        fn fused_moe_geglu_kernel(
+            x: &MlxArray,
+            indices: &MlxArray,
+            gate_w: &MlxArray,
+            gate_s: &MlxArray,
+            gate_b: &MlxArray,
+            up_w: &MlxArray,
+            up_s: &MlxArray,
+            up_b: &MlxArray,
+            down_w: &MlxArray,
+            down_s: &MlxArray,
+            down_b: &MlxArray,
+            scores: &MlxArray,
+            din: i32,
+            dff: i32,
+            k: i32,
+            gu_bits: i32,
+            d_bits: i32,
+            group_size: i32,
+        ) -> UniquePtr<MlxArray>;
+
+        /// BitLinear ternary matmul (BitNet b1.58). `packed_weights` is
+        /// [out_features/4, in_features] uint8 (2-bit ternary, 4 rows/byte),
+        /// scaled by `weight_scale[0]` (inverted unless linear_class is
+        /// autobitlinear).
+        fn bitlinear_matmul(
+            x: &MlxArray,
+            packed_weights: &MlxArray,
+            weight_scale: &MlxArray,
+            in_features: i32,
+            out_features: i32,
+            invert_weight_scales: bool,
+        ) -> UniquePtr<MlxArray>;
+
         /// Fused gated-delta single-token decode step.
         /// Combines: decay → kv_mem → delta → state_update → output into one C++ call.
         /// Replaces ~26 FFI round-trips with 1.
@@ -2314,6 +2376,35 @@ pub use lang_analyzer::{
 // derive their on-disk locations from the exact same root and env-var semantics the
 // tokenizer language-analysis disk cache already uses.
 pub use lang_analyzer::cache_root;
+
+/// Default the CUDA NVRTC PTX cache to a persistent, MLX-pin-scoped directory
+/// under the mlxcel cache root, unless `MLX_PTX_CACHE_DIR` is already set.
+///
+/// MLX's own default places the JIT cache in the system temp dir
+/// (`$TMPDIR/mlx/<version>/ptx`), which is cleared on reboot, so the first-run
+/// kernel compilation is paid again every boot. A persistent location pays it
+/// once per machine. The directory is scoped by the pinned MLX commit because
+/// the cache is keyed only by kernel name and is not validated against the
+/// kernel source, so entries must not survive an MLX upgrade. No-op on non-CUDA
+/// builds, when `MLX_PTX_CACHE_DIR` is already set, and when the cache root
+/// cannot be resolved. Call once at startup before the first inference.
+pub fn ensure_persistent_ptx_cache() {
+    if !cfg!(feature = "cuda") {
+        return;
+    }
+    if std::env::var_os("MLX_PTX_CACHE_DIR").is_some() {
+        return;
+    }
+    let Some(root) = cache_root() else {
+        return;
+    };
+    let commit = env!("MLXCEL_MLX_COMMIT");
+    let scope = &commit[..commit.len().min(12)];
+    let dir = root.join("cuda-ptx").join(scope);
+    if std::fs::create_dir_all(&dir).is_ok() {
+        std::env::set_var("MLX_PTX_CACHE_DIR", &dir);
+    }
+}
 
 fn use_single_query_maskless_path() -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();

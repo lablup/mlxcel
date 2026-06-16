@@ -14,7 +14,7 @@
 
 //! Aya Vision Multi-Modal Projector (SwiGLU + PixelShuffle + LayerNorm)
 //!
-//! Port of references/mlx-vlm/mlx_vlm/models/aya_vision/aya_vision.py:AyaVisionMultiModalProjector
+//! Port of https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/models/aya_vision/aya_vision.py (AyaVisionMultiModalProjector)
 //!
 //! Architecture:
 //!   pixel_shuffle(x) → LayerNorm → Linear(in, mid) → split → SiLU(gate) * x → Linear(mid/2, out)

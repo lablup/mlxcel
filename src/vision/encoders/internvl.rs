@@ -15,7 +15,7 @@
 //! InternViT Vision Encoder (InternVL family).
 //!
 //! Faithful port of
-//! `references/mlx-vlm/mlx_vlm/models/internvl_chat/vision.py`.
+//! https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/models/internvl_chat/vision.py.
 //!
 //! Architecture (per `vision_model.*` in `internvl3-1b`):
 //! - `VisionEmbeddings`: Conv2d patch embedding (3 -> hidden, k=14, s=14) +

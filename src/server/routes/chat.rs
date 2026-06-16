@@ -86,7 +86,7 @@ pub(crate) fn structured_error_to_response(err: StructuredOutputError) -> ErrorR
 /// slices, which yields `MultimodalDigest::empty()` and a key byte-identical to
 /// the pre-#124 path. Callers must therefore build the context **after**
 /// preparing the request so the resolved bytes are available.
-fn build_prompt_cache_request_context(
+pub(crate) fn build_prompt_cache_request_context(
     state: &AppState,
     request: &ChatCompletionRequest,
     image_data: &[Vec<u8>],
@@ -929,7 +929,7 @@ const OPEN_THINKING_SUFFIXES: &[&str] = &["<|channel>thought\n", "<think>\n"];
 ///   emitted token from the start (otherwise the state would wait for an
 ///   opening token that never appears because the prompt already contains
 ///   it).
-fn is_prompt_primed_open_thinking(prompt: &str) -> bool {
+pub(crate) fn is_prompt_primed_open_thinking(prompt: &str) -> bool {
     OPEN_THINKING_SUFFIXES
         .iter()
         .any(|suffix| prompt.ends_with(suffix))

@@ -14,8 +14,9 @@
 
 //! Youtu-VL image processor.
 //!
-//! Mirrors the contract that upstream `references/mlx-vlm/mlx_vlm/models/
-//! youtu_vl/vision.py::VisionModel.__call__` expects:
+//! Mirrors the contract that upstream
+//! https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/models/youtu_vl/vision.py
+//! (VisionModel.__call__) expects:
 //! - `pixel_values`: `[total_patches, patch_size**2 * channels]` flattened
 //!   patches, normalized with SigLIP statistics.
 //! - `spatial_shapes`: `[N, 2]` of `(h_patches, w_patches)` per image (no

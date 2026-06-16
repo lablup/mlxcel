@@ -1107,3 +1107,315 @@ fn paged_block_byte_roundtrip_preserves_fp16() {
 fn paged_block_byte_roundtrip_preserves_bf16() {
     assert_byte_roundtrip_preserves_content(dtype::BFLOAT16);
 }
+
+// ---------------------------------------------------------------------------
+// Issue #196: absolute block indexing under logical_start > 0
+// ---------------------------------------------------------------------------
+
+/// `write_prefill` after a sliding-window advance (`logical_start > 0`) must
+/// land the suffix on the correct ABSOLUTE blocks and round-trip through
+/// `gather_visible`.
+#[test]
+fn write_prefill_round_trips_with_logical_start() {
+    let block_size = 4usize;
+    let mut pool = fp16_pool(block_size, 1);
+    let mut state = PagedSequenceState::new(pool.layout());
+
+    // Prefill 12 tokens cold (3 blocks), then slide the window forward by 5.
+    let k0 = make_block(100.0, 12);
+    let v0 = make_block(500.0, 12);
+    pool.write_prefill(&mut state, 0, &k0, &v0).unwrap();
+    state.layer_mut(0).unwrap().logical_start = 5;
+
+    // Write a 6-token suffix: absolute positions [12, 18) spanning blocks 3-4.
+    let k1 = make_block(112.0, 6);
+    let v1 = make_block(512.0, 6);
+    pool.write_prefill(&mut state, 0, &k1, &v1).unwrap();
+
+    let layer = state.layer(0).unwrap();
+    assert_eq!(layer.len, 18);
+    assert_eq!(layer.visible_len(), 13);
+    // Absolute sizing: ceil(18 / 4) = 5 blocks (visible-based sizing would
+    // have allocated only ceil(13 / 4) = 4 and written past the table).
+    assert_eq!(layer.block_ids.len(), 5);
+
+    let (gk, gv) = pool
+        .gather_visible(&state, 0)
+        .unwrap()
+        .expect("gather must return data");
+    assert_eq!(ffi::array_shape(&gk), vec![1, H, 13, D]);
+
+    // Dense reference: 18-token buffer (two writes), visible window [5, 18).
+    let dense_blocks = vec![(make_block(100.0, 12), 0), (make_block(112.0, 6), 12)];
+    let dense_k = dense_reference(&dense_blocks, 18, 5, 13);
+    let dense_blocks_v = vec![(make_block(500.0, 12), 0), (make_block(512.0, 6), 12)];
+    let dense_v = dense_reference(&dense_blocks_v, 18, 5, 13);
+    assert_eq!(flatten_fp32(&gk), flatten_fp32(&dense_k));
+    assert_eq!(flatten_fp32(&gv), flatten_fp32(&dense_v));
+}
+
+/// A back-trim with `logical_start` past a block boundary must NOT release
+/// tail blocks that still hold visible tokens (the old visible-length sizing
+/// released them, and `gather_visible` then failed).
+#[test]
+fn trim_preserves_visible_window_with_logical_start_past_block_boundary() {
+    let block_size = 4usize;
+    let mut pool = fp16_pool(block_size, 1);
+    let mut state = PagedSequenceState::new(pool.layout());
+
+    let k0 = make_block(100.0, 12);
+    let v0 = make_block(500.0, 12);
+    pool.write_prefill(&mut state, 0, &k0, &v0).unwrap();
+    // logical_start (5) is past the first block boundary (4).
+    state.layer_mut(0).unwrap().logical_start = 5;
+
+    // Back-trim 2 tokens: len 12 -> 10, visible window [5, 10).
+    let trimmed = pool.trim_tokens(&mut state, 0, 2).unwrap();
+    assert_eq!(trimmed, 2);
+    let layer = state.layer(0).unwrap();
+    assert_eq!(layer.len, 10);
+    assert_eq!(layer.visible_len(), 5);
+    // Absolute sizing keeps ceil(10 / 4) = 3 blocks (visible-based sizing
+    // would have popped block 2, which holds positions 8 and 9).
+    assert_eq!(layer.block_ids.len(), 3);
+
+    let (gk, _gv) = pool
+        .gather_visible(&state, 0)
+        .unwrap()
+        .expect("gather must return data");
+    assert_eq!(ffi::array_shape(&gk), vec![1, H, 5, D]);
+    let dense_k = dense_reference(&[(make_block(100.0, 12), 0)], 12, 5, 5);
+    assert_eq!(flatten_fp32(&gk), flatten_fp32(&dense_k));
+}
+
+/// A back-trim that consumes the whole visible window empties the layer:
+/// origin reset, all blocks released, nothing left to gather.
+#[test]
+fn trim_to_logical_start_empties_the_layer() {
+    let block_size = 4usize;
+    let mut pool = fp16_pool(block_size, 1);
+    let mut state = PagedSequenceState::new(pool.layout());
+
+    let k0 = make_block(100.0, 12);
+    let v0 = make_block(500.0, 12);
+    pool.write_prefill(&mut state, 0, &k0, &v0).unwrap();
+    state.layer_mut(0).unwrap().logical_start = 5;
+
+    // Trim the entire visible window (7 tokens).
+    let trimmed = pool.trim_tokens(&mut state, 0, 7).unwrap();
+    assert_eq!(trimmed, 7);
+    let layer = state.layer(0).unwrap();
+    assert_eq!(layer.len, 0);
+    assert_eq!(layer.logical_start, 0);
+    assert_eq!(layer.block_ids.len(), 0);
+    assert!(pool.gather_visible(&state, 0).unwrap().is_none());
+}
+
+// ---------------------------------------------------------------------------
+// 12. write_prefill presize (#224): one allocation for a multi-chunk span
+// ---------------------------------------------------------------------------
+
+#[test]
+fn write_prefill_presizes_pool_in_one_step_for_multi_chunk_span() {
+    // 100 blocks of 4 slots = 400 tokens, spanning four 32-row slabs.
+    // presize_for_span must create the layer pool in one step at
+    // ceil(100/32)*32 = 128 rows (four slabs) instead of growing through
+    // intermediate capacities.
+    let block_size = 4usize;
+    let total = 400i32;
+    let mut pool = fp16_pool(block_size, 1);
+    let mut state = PagedSequenceState::new(pool.layout());
+
+    let k_prefill = make_block(100.0, total);
+    let v_prefill = make_block(500.0, total);
+    pool.write_prefill(&mut state, 0, &k_prefill, &v_prefill)
+        .unwrap();
+
+    assert_eq!(state.layer(0).unwrap().block_ids.len(), 100);
+    assert_eq!(state.layer(0).unwrap().len, total as usize);
+
+    // Capacity must be the single presized target: 128 rows for K and V, in
+    // FP32 (make_block writes f32), 4 bytes per element.
+    let expected_capacity_rows = 128usize;
+    let expected_bytes = 2 * expected_capacity_rows * block_size * (H as usize) * (D as usize) * 4;
+    assert_eq!(pool.pool_tensor_bytes(), expected_bytes);
+
+    // The regression #224 fixed: presize allocates the pool at the final
+    // size directly, so NO growth episode happened. The old incremental path
+    // converged to the same 128 rows via three growth steps, so this
+    // assertion (not the final capacity above) is what pins presize.
+    assert_eq!(pool.pool_grow_events(), 0);
+
+    // Round-trip stays byte-identical to the dense reference.
+    let (gk, gv) = pool
+        .gather_visible(&state, 0)
+        .unwrap()
+        .expect("gather must return data");
+    let dense_k = dense_reference(&[(make_block(100.0, total), 0)], total, 0, total);
+    let dense_v = dense_reference(&[(make_block(500.0, total), 0)], total, 0, total);
+    assert_eq!(flatten_fp32(&gk), flatten_fp32(&dense_k));
+    assert_eq!(flatten_fp32(&gv), flatten_fp32(&dense_v));
+}
+
+#[test]
+fn write_prefill_after_presize_grows_incrementally_and_round_trips() {
+    // First prefill presizes to 32 rows (8 blocks used). A second prefill
+    // pushing past the presized capacity must take the growth path
+    // (ensure_layer_capacity appending a slab) and stay byte-identical.
+    let block_size = 4usize;
+    let first = 32i32; // 8 blocks
+    let second = 160i32; // 40 more blocks -> 48 total, beyond the 32-row chunk
+    let mut pool = fp16_pool(block_size, 1);
+    let mut state = PagedSequenceState::new(pool.layout());
+
+    let k1 = make_block(100.0, first);
+    let v1 = make_block(500.0, first);
+    pool.write_prefill(&mut state, 0, &k1, &v1).unwrap();
+    let bytes_after_first = pool.pool_tensor_bytes();
+
+    let k2 = make_block(200.0, second);
+    let v2 = make_block(600.0, second);
+    pool.write_prefill(&mut state, 0, &k2, &v2).unwrap();
+    assert!(pool.pool_tensor_bytes() > bytes_after_first);
+    assert_eq!(state.layer(0).unwrap().len, (first + second) as usize);
+
+    // The second span needed 40 more rows past the presized 32: exactly one
+    // growth episode (one ensure_layer_capacity call appending slabs).
+    assert_eq!(pool.pool_grow_events(), 1);
+
+    let total = first + second;
+    let (gk, gv) = pool
+        .gather_visible(&state, 0)
+        .unwrap()
+        .expect("gather must return data");
+    let dense_k = dense_reference(
+        &[
+            (make_block(100.0, first), 0),
+            (make_block(200.0, second), first as usize),
+        ],
+        total,
+        0,
+        total,
+    );
+    let dense_v = dense_reference(
+        &[
+            (make_block(500.0, first), 0),
+            (make_block(600.0, second), first as usize),
+        ],
+        total,
+        0,
+        total,
+    );
+    assert_eq!(flatten_fp32(&gk), flatten_fp32(&dense_k));
+    assert_eq!(flatten_fp32(&gv), flatten_fp32(&dense_v));
+}
+
+// ---------------------------------------------------------------------------
+// 13. Chunked slabs (#235): growth appends slabs without copying, and gather
+//     stays byte-identical when a block table crosses slabs non-monotonically.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn slab_growth_appends_without_copy_and_fragmented_gather_round_trips() {
+    let block_size = 4usize;
+    let mut pool = fp16_pool(block_size, 1);
+
+    // A: 40 blocks (160 tokens) -> rows 0..39, spanning two 32-row slabs.
+    let mut state_a = PagedSequenceState::new(pool.layout());
+    let a_tokens = 160i32;
+    pool.write_prefill(
+        &mut state_a,
+        0,
+        &make_block(100.0, a_tokens),
+        &make_block(500.0, a_tokens),
+    )
+    .unwrap();
+    let bytes_two_slabs = pool.pool_tensor_bytes();
+    assert_eq!(
+        pool.pool_grow_events(),
+        0,
+        "the presized first prefill creates slabs; creation is not growth"
+    );
+
+    // B: 26 more blocks push past the presized 64-row capacity (40 + 26 = 66)
+    // and need a third slab. Exactly one growth episode and exactly one
+    // slab's worth of new bytes per side (no copy, no ladder).
+    let mut state_b = PagedSequenceState::new(pool.layout());
+    let b_tokens = 104i32;
+    pool.write_prefill(
+        &mut state_b,
+        0,
+        &make_block(200.0, b_tokens),
+        &make_block(600.0, b_tokens),
+    )
+    .unwrap();
+    let slab_bytes_per_side = 32 * block_size * (H as usize) * (D as usize) * 4;
+    assert_eq!(pool.pool_grow_events(), 1);
+    assert_eq!(
+        pool.pool_tensor_bytes(),
+        bytes_two_slabs + 2 * slab_bytes_per_side,
+        "growth must append exactly one slab per side"
+    );
+
+    // D: 6 more blocks (rows 66..71) so two release batches can interleave.
+    let mut state_d = PagedSequenceState::new(pool.layout());
+    pool.write_prefill(
+        &mut state_d,
+        0,
+        &make_block(400.0, 24),
+        &make_block(800.0, 24),
+    )
+    .unwrap();
+
+    // Release A then D: the free list ends with D's rows, so C's LIFO reuse
+    // starts in the THIRD slab (rows 66..71) and then drops back to row 0,
+    // crossing slab boundaries non-monotonically. The gather must split the
+    // row list into per-slab runs and still round-trip byte-identically.
+    pool.release_sequence(&mut state_a).unwrap();
+    pool.release_sequence(&mut state_d).unwrap();
+    let mut state_c = PagedSequenceState::new(pool.layout());
+    let c_tokens = 184i32;
+    pool.write_prefill(
+        &mut state_c,
+        0,
+        &make_block(300.0, c_tokens),
+        &make_block(700.0, c_tokens),
+    )
+    .unwrap();
+    {
+        let layer = state_c.layer(0).unwrap();
+        let rows: Vec<usize> = layer
+            .block_ids
+            .iter()
+            .map(|id| pool.debug_row_of(*id, 0).unwrap())
+            .collect();
+        assert!(
+            rows.windows(2).any(|w| w[0] > w[1]),
+            "C must reuse freed rows non-monotonically to exercise run splitting (rows: {rows:?})"
+        );
+        let crosses = rows.windows(2).any(|w| w[0] / 32 != w[1] / 32);
+        assert!(
+            crosses,
+            "C's rows must cross a slab boundary (rows: {rows:?})"
+        );
+    }
+
+    let (gk, gv) = pool
+        .gather_visible(&state_c, 0)
+        .unwrap()
+        .expect("gather must return data");
+    let dense_k = dense_reference(&[(make_block(300.0, c_tokens), 0)], c_tokens, 0, c_tokens);
+    let dense_v = dense_reference(&[(make_block(700.0, c_tokens), 0)], c_tokens, 0, c_tokens);
+    assert_eq!(flatten_fp32(&gk), flatten_fp32(&dense_k));
+    assert_eq!(flatten_fp32(&gv), flatten_fp32(&dense_v));
+
+    // B (rows spanning the second and third slabs) still round-trips too.
+    let (gk_b, gv_b) = pool
+        .gather_visible(&state_b, 0)
+        .unwrap()
+        .expect("gather must return data");
+    let dense_kb = dense_reference(&[(make_block(200.0, b_tokens), 0)], b_tokens, 0, b_tokens);
+    let dense_vb = dense_reference(&[(make_block(600.0, b_tokens), 0)], b_tokens, 0, b_tokens);
+    assert_eq!(flatten_fp32(&gk_b), flatten_fp32(&dense_kb));
+    assert_eq!(flatten_fp32(&gv_b), flatten_fp32(&dense_vb));
+}

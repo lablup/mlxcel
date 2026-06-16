@@ -170,6 +170,14 @@ pub fn run_chat(opts: ChatOptions) -> Result<()> {
     println!("Loading model from {model_path:?}...");
     let load_start = Instant::now();
     let (model, _tok_from_load) = load_model(&model_path)?;
+    if matches!(model, mlxcel::LoadedModel::DiffusionGemma(_)) {
+        // The REPL drives the autoregressive CxxGenerator loop; the
+        // block-diffusion engine is one-shot only in phase 1 of issue #217.
+        return Err(anyhow!(
+            "DiffusionGemma interactive chat is not supported yet; use a one-shot prompt: \
+             mlxcel generate -m <model> -p \"...\""
+        ));
+    }
     let tokenizer = load_tokenizer(&model_path)?;
     println!(
         "Model loaded in {:.2}s.",

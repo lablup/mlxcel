@@ -21,7 +21,7 @@
 //! - DeepStack visual feature injection in decoder layers
 //!
 //! Used by: Qwen3-VL
-//! Reference: references/mlx-vlm/mlx_vlm/models/qwen3_vl/language.py
+//! Reference: https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/models/qwen3_vl/language.py
 
 use crate::models::qwen_mrope_state::MRopeState;
 use mlxcel_core::cache::SequenceId;

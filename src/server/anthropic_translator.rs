@@ -135,7 +135,16 @@ pub fn anthropic_request_to_chat(request: &AnthropicRequest) -> AnthropicTransla
         chat_template_kwargs: None,
         extra_body: None,
         prompt_cache_key: None,
-        user: None,
+        // Map the Anthropic `metadata.user_id` (stored untyped in `extra`) to
+        // the chat request's `user` so per-user prompt-cache isolation works on
+        // the Messages endpoint. Absent it, the session key falls back to the
+        // shared anonymous bucket, which still yields within-endpoint reuse.
+        user: request
+            .extra
+            .get("metadata")
+            .and_then(|m| m.get("user_id"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
         extra_body_fields: serde_json::Map::new(),
         response_format: None,
         params,
@@ -800,5 +809,23 @@ mod tests {
         assert!(!thinking_enabled(&req2));
         let req3 = parse_req(r#"{"model":"m","messages":[]}"#);
         assert!(!thinking_enabled(&req3));
+    }
+
+    #[test]
+    fn metadata_user_id_maps_to_chat_user() {
+        let req = parse_req(r#"{"model":"m","messages":[],"metadata":{"user_id":"u"}}"#);
+        let t = anthropic_request_to_chat(&req);
+        assert_eq!(t.chat_request.user.as_deref(), Some("u"));
+    }
+
+    #[test]
+    fn missing_metadata_user_id_leaves_chat_user_none() {
+        let req = parse_req(r#"{"model":"m","messages":[]}"#);
+        let t = anthropic_request_to_chat(&req);
+        assert_eq!(t.chat_request.user, None);
+        // metadata present but without user_id also yields None.
+        let req2 = parse_req(r#"{"model":"m","messages":[],"metadata":{"other":"x"}}"#);
+        let t2 = anthropic_request_to_chat(&req2);
+        assert_eq!(t2.chat_request.user, None);
     }
 }

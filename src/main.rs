@@ -39,12 +39,12 @@ use mlxcel::lang_bias::LangBiasCliArgs;
 Environment Variables:
   MLXCEL_DEVICE          Runtime device: \"gpu\" (default), \"cpu\"
   MLXCEL_WIRED_LIMIT     Apple Silicon wired memory limit
-                           unset/\"max\" — use MLX gpu_max_memory_size (default)
-                           \"0\"/\"none\" — disable the wired limit
-                           \"96GB\" — explicit limit (supports GB, MB, or bytes)
+                           unset/\"max\", use MLX gpu_max_memory_size (default)
+                           \"0\"/\"none\", disable the wired limit
+                           \"96GB\", explicit limit (supports GB, MB, or bytes)
   MLXCEL_MEMORY_LIMIT    Soft MLX allocator memory cap (fails fast on overflow)
-                           unset/\"0\"/\"none\" — let MLX use its backend default (default)
-                           \"32GB\" — explicit limit (supports GB, MB, or bytes)
+                           unset/\"0\"/\"none\", let MLX use its backend default (default)
+                           \"32GB\", explicit limit (supports GB, MB, or bytes)
 
 Tensor Parallel Runtime:
   Current multi-rank support: dense Llama, Qwen2/2.5, Qwen3, Qwen3.5 text, Gemma 3 text, Gemma 4 text, ERNIE 4.5, Hunyuan v1 Dense
@@ -63,9 +63,8 @@ struct Cli {
 enum Commands {
     /// Run a model: interactive chat, or one-shot generation with `-p`.
     ///
-    /// Mirrors `ollama run` / mlx-lm ergonomics. Pass a HuggingFace
-    /// `owner/name` repo-id or a local model directory (auto-downloaded and
-    /// resolved exactly like `mlxcel generate -m`):
+    /// Pass a HuggingFace `owner/name` repo-id or a local model directory
+    /// (auto-downloaded and resolved exactly like `mlxcel generate -m`):
     ///
     ///     mlxcel run mlx-community/Qwen3-4B-4bit            # interactive chat
     ///     mlxcel run mlx-community/Qwen3-4B-4bit -p "Hi"    # one-shot, then exit
@@ -76,10 +75,11 @@ enum Commands {
     /// `mlx-community/<name>`; override the org with `MLXCEL_DEFAULT_ORG`.
     ///
     /// With no `-p/--prompt`, `run` drops into the interactive multi-turn chat
-    /// REPL. With `-p`, it produces a single completion and exits — identical
+    /// REPL. With `-p`, it produces a single completion and exits, identical
     /// to the equivalent `mlxcel generate` invocation. With no model argument,
     /// it falls back to the default model
-    /// `mlx-community/Llama-3.2-3B-Instruct-4bit` (mlx-lm parity).
+    /// `mlx-community/gemma-4-e2b-it-4bit`.
+    #[command(verbatim_doc_comment)]
     Run(commands::RunArgs),
 
     /// Generate text from a prompt
@@ -109,6 +109,7 @@ enum Commands {
     ///     mlxcel inspect models/llama-3.2-1b-4bit
     ///     mlxcel inspect models/llama-3.2-1b-4bit --max-tokens 32768
     ///     mlxcel inspect models/llama-3.2-1b-4bit --cache-type-k int8 --cache-type-v int8
+    #[command(verbatim_doc_comment)]
     Inspect(InspectArgs),
 
     /// Download a HuggingFace model repository snapshot
@@ -125,6 +126,7 @@ enum Commands {
     ///
     ///     mlxcel detect -m models/docling-layout-heron-mlx-bf16 -i page.png
     ///     mlxcel detect -m models/rt-detr-v2 -i img.jpg --threshold 0.5 --format json
+    #[command(verbatim_doc_comment)]
     Detect(DetectArgs),
 
     /// Remove a downloaded model from the global store.
@@ -139,6 +141,7 @@ enum Commands {
     ///
     ///     mlxcel rm mlx-community/Qwen3-4B-4bit
     ///     mlxcel rm mlx-community/Qwen3-4B-4bit --yes
+    #[command(verbatim_doc_comment)]
     Rm(RmArgs),
 }
 
@@ -166,7 +169,7 @@ pub(crate) struct ListArgs {
     #[arg(long, conflicts_with_all = ["quiet", "verbose"])]
     pub(crate) json: bool,
 
-    /// Print only repo-ids, one per line — no header or columns — so the output
+    /// Print only repo-ids, one per line, no header or columns, so the output
     /// pipes cleanly (e.g. `mlxcel list -q | xargs -n1 mlxcel rm`).
     ///
     /// Mutually exclusive with `--json` and `--verbose`.
@@ -255,7 +258,7 @@ pub(crate) struct GenerateArgs {
     /// Path to a YAML configuration file describing structural
     /// fine-tuning operations (scale / add / prune / replace /
     /// interpolate). When omitted, model loading is bit-exact identical
-    /// to the pre-surgery baseline — no extra work, no observable
+    /// to the pre-surgery baseline, no extra work, no observable
     /// difference in generated tokens for any seed.
     ///
     /// Example:
@@ -315,8 +318,7 @@ pub(crate) struct GenerationOptions {
     ///
     /// When omitted, `mlxcel generate` drops into an interactive multi-turn
     /// chat REPL (streaming output, `/bye` / `/clear` / `/?` slash commands,
-    /// and `"""` multiline blocks) instead of running a single completion —
-    /// mirroring `mlx_lm.chat` / `ollama run`.
+    /// and `"""` multiline blocks) instead of running a single completion.
     #[arg(short, long, value_name = "TEXT")]
     pub(crate) prompt: Option<String>,
 
@@ -337,8 +339,7 @@ pub(crate) struct GenerationOptions {
 
     /// Target sampling FPS for `--video` decoding. Frames are
     /// uniformly resampled to this rate before being fed to the
-    /// vision tower. Defaults to 2.0 to match the upstream mlx-vlm
-    /// behaviour.
+    /// vision tower. Defaults to 2.0.
     #[arg(long, value_name = "FLOAT", default_value_t = 2.0)]
     pub(crate) fps: f64,
 
@@ -396,6 +397,12 @@ pub(crate) struct GenerationOptions {
     // mlxcel serve, mlxcel-server) expose identical help text and flags.
     #[command(flatten)]
     pub(crate) turbo: TurboKvCacheArgs,
+
+    // Block-diffusion flag group (--max-denoising-steps,
+    // --diffusion-sampler, ...). Only affects diffusion models such as
+    // DiffusionGemma; autoregressive models ignore it.
+    #[command(flatten)]
+    pub(crate) diffusion: DiffusionCliOptions,
 }
 
 /// Arguments for the `mlxcel inspect` subcommand.
@@ -443,13 +450,13 @@ pub(crate) struct InspectArgs {
     #[arg(long, default_value_t = 1, value_name = "N")]
     pub(crate) batch: u64,
 
-    /// Quantization mode label (does not affect the byte total — the
+    /// Quantization mode label (does not affect the byte total, the
     /// safetensors header is taken at face value because mlxcel
     /// quantizes lazily). One of: default, fp16, int8, int4.
     #[arg(long, default_value = "default", value_name = "MODE")]
     pub(crate) quant: String,
 
-    // Shared TurboQuant KV-cache flag group — gives `inspect` the same
+    // Shared TurboQuant KV-cache flag group, gives `inspect` the same
     // `--cache-type-k` / `--cache-type-v` surface as `generate` so the
     // estimate matches what the loaded model would actually allocate.
     #[command(flatten)]
@@ -515,6 +522,89 @@ pub(crate) struct SamplingOptions {
     /// DRY lookback window size (0 = use full history)
     #[arg(long, default_value_t = 0, value_name = "N")]
     pub(crate) dry_penalty_last_n: usize,
+
+    /// Random seed for MLX's global RNG. Makes sampled generation
+    /// reproducible, including the random canvas noise of diffusion models
+    /// (e.g. DiffusionGemma). Unset = nondeterministic.
+    #[arg(long, value_name = "N")]
+    pub(crate) seed: Option<u64>,
+}
+
+/// Clap value parser: an f32 in the closed interval [0, 1].
+///
+/// Used by: `--diffusion-threshold` (fail fast at startup instead of
+/// surfacing a per-request engine error under the confidence sampler).
+fn parse_unit_interval(s: &str) -> Result<f32, String> {
+    let v: f32 = s.parse().map_err(|e| format!("not a number: {e}"))?;
+    if (0.0..=1.0).contains(&v) {
+        Ok(v)
+    } else {
+        Err(format!("must be between 0 and 1, got {v}"))
+    }
+}
+
+/// Block-diffusion generation options.
+///
+/// These flags only affect diffusion models (e.g. DiffusionGemma); ordinary
+/// autoregressive models ignore them.
+#[derive(Args, Debug)]
+#[command(next_help_heading = "Diffusion Options")]
+pub(crate) struct DiffusionCliOptions {
+    /// Maximum denoising steps per canvas block (diffusion models only;
+    /// default: the checkpoint's generation_config, typically 48)
+    #[arg(long = "max-denoising-steps", value_name = "N")]
+    pub(crate) max_denoising_steps: Option<usize>,
+
+    /// Per-step acceptance sampler for diffusion models
+    #[arg(
+        long = "diffusion-sampler",
+        value_name = "SAMPLER",
+        default_value = "entropy-bound",
+        value_parser = ["entropy-bound", "confidence-threshold"]
+    )]
+    pub(crate) diffusion_sampler: String,
+
+    /// Confidence threshold for `--diffusion-sampler confidence-threshold`
+    #[arg(
+        long = "diffusion-threshold",
+        value_name = "FLOAT",
+        default_value_t = 0.9,
+        value_parser = parse_unit_interval
+    )]
+    pub(crate) diffusion_threshold: f32,
+
+    /// Smallest canvas allocated for the generation tail (diffusion only)
+    #[arg(
+        long = "diffusion-min-canvas-length",
+        value_name = "N",
+        default_value_t = 64
+    )]
+    pub(crate) diffusion_min_canvas_length: usize,
+
+    /// Cap on the per-block canvas length (diffusion only; default: the
+    /// model's canvas_length, typically 256)
+    #[arg(long = "diffusion-max-canvas-length", value_name = "N")]
+    pub(crate) diffusion_max_canvas_length: Option<usize>,
+
+    /// Always allocate the model's full canvas length per block (diffusion
+    /// only)
+    #[arg(long = "diffusion-full-canvas", default_value_t = false)]
+    pub(crate) diffusion_full_canvas: bool,
+}
+
+// Manual `Default` kept in lock-step with the `#[arg(default_value*)]`
+// attributes above, same contract as the parallelism option groups.
+impl Default for DiffusionCliOptions {
+    fn default() -> Self {
+        Self {
+            max_denoising_steps: None,
+            diffusion_sampler: "entropy-bound".to_string(),
+            diffusion_threshold: 0.9,
+            diffusion_min_canvas_length: 64,
+            diffusion_max_canvas_length: None,
+            diffusion_full_canvas: false,
+        }
+    }
 }
 
 /// Tensor-parallel options
@@ -580,7 +670,7 @@ pub(crate) struct PipelineParallelOptions {
 
 // `Default` impls for the parallelism option groups so the `mlxcel run`
 // dispatcher (`commands::run`) can build a `GenerateArgs` while leaving these
-// advanced groups at their inert single-device defaults — `run` deliberately
+// advanced groups at their inert single-device defaults, `run` deliberately
 // does not expose tensor/pipeline parallelism. These MUST stay in lock-step
 // with the `#[arg(default_value*)]` attributes above; the
 // `run_defaults_match_clap_defaults` test in `main_tests.rs` fails the build if
@@ -773,6 +863,21 @@ pub(crate) struct ServeArgs {
     )]
     enable_vlm_prefix_cache: bool,
 
+    /// Comma-separated list of allowed CORS origins (e.g.
+    /// `https://app.example.com,https://admin.example.com`). When set,
+    /// the server restricts cross-origin requests to exactly these origins
+    /// instead of the default permissive policy that reflects any origin.
+    /// Unset (default) keeps the permissive behavior. Only affects the
+    /// browser-reachable TCP HTTP listener. Also reads
+    /// `MLXCEL_ALLOWED_ORIGINS`.
+    #[arg(
+        long = "allowed-origins",
+        env = "MLXCEL_ALLOWED_ORIGINS",
+        value_delimiter = ',',
+        value_name = "ORIGINS"
+    )]
+    allowed_origins: Vec<String>,
+
     /// Preemption policy: "longest-first" (default) or "lowest-priority"
     ///
     /// Controls which active sequence is evicted when preemption is
@@ -795,10 +900,9 @@ pub(crate) struct ServeArgs {
     ///
     /// When set to `N > 0`, the batch scheduler caps each per-sequence plain
     /// `KVCache` to `N` tokens by dropping the oldest entries once `offset`
-    /// exceeds the bound. Mirrors upstream mlx-lm's
-    /// `BatchGenerator(max_kv_size=N)` parameter. Sliding-window
-    /// models (Gemma 3/4, Exaone 4, RecurrentGemma, Step 3.5, gpt-oss) keep
-    /// their model-specific window. Not supported with Turbo KV quantization.
+    /// exceeds the bound. Sliding-window models (Gemma 3/4, Exaone 4,
+    /// RecurrentGemma, Step 3.5, gpt-oss) keep their model-specific window.
+    /// Not supported with Turbo KV quantization.
     /// Also reads `LLAMA_ARG_MAX_KV_SIZE`.
     #[arg(
         long = "max-kv-size",
@@ -808,15 +912,15 @@ pub(crate) struct ServeArgs {
     )]
     max_kv_size: usize,
 
-    /// Paged KV-cache pool block budget — `auto` or a byte count (default: unbounded).
+    /// Paged KV-cache pool block budget: `auto` or a byte count (default: unbounded).
     ///
     /// Bounds the unified paged KV cache (epic #116) so the server evicts cold
     /// cross-request prompt prefixes (then preempts running sequences) instead
     /// of growing the pool without limit. `auto` derives the cap from the
-    /// memory estimate (`(available − weights − activation) / per-block bytes`);
+    /// memory estimate (`(available - weights - activation) / per-block bytes`);
     /// a raw byte count (e.g. `8589934592` for 8 GiB) sets an explicit cap.
-    /// Only affects pool-backed (Fp16, dense-natural-backend) models — model-
-    /// owned / quantized families keep dense caches and ignore it. Requires
+    /// Only affects pool-backed (Fp16, dense-natural-backend) models. Model-owned
+    /// and quantized families keep dense caches and ignore it. Requires
     /// `--decode-storage-backend paged` to have any effect.
     /// Also reads `MLXCEL_KV_CACHE_BUDGET`.
     #[arg(
@@ -841,7 +945,7 @@ pub(crate) struct ServeArgs {
     responses_store_max_entries: usize,
 
     /// TTL (seconds) for in-memory Responses-API response
-    /// entries. `0` disables TTL — entries are evicted only when the
+    /// entries. `0` disables TTL, entries are evicted only when the
     /// max-entries cap is hit.
     /// Also reads `LLAMA_ARG_RESPONSES_STORE_TTL_SECS`.
     #[arg(
@@ -1000,20 +1104,23 @@ pub(crate) struct ServeArgs {
     #[arg(long, value_delimiter = ',', value_name = "ADDR")]
     peers: Vec<std::net::SocketAddr>,
 
-    /// Comma-separated prefill-node addresses a decode node receives handoffs
-    /// from (disaggregated serving, #126). Consumed when `--node-role decode`.
+    /// Comma-separated prefill-node addresses. Decode nodes use this to identify
+    /// accepted handoff sources; routers use it to select a prefill target.
+    /// Consumed when `--node-role decode` or `--node-role router`.
     #[arg(long, value_delimiter = ',', value_name = "ADDR")]
     prefill_peers: Vec<std::net::SocketAddr>,
 
-    /// Comma-separated decode-node addresses a prefill node hands off to
-    /// (disaggregated serving, #126). Consumed when `--node-role prefill`.
+    /// Comma-separated decode-node addresses. Prefill nodes hand KV state to one
+    /// of these targets; routers use it to route decode continuations.
+    /// Consumed when `--node-role prefill` or `--node-role router`.
     #[arg(long, value_delimiter = ',', value_name = "ADDR")]
     decode_peers: Vec<std::net::SocketAddr>,
 
     /// This node's own bind address (host:port) for the disaggregated
-    /// serving-role transport (#126). Required for a `--node-role prefill` or
-    /// `--node-role decode` node: the prefill node listens here for request
-    /// frames and the decode node for KV handoffs.
+    /// serving-role transport (#126). Required for `--node-role prefill`,
+    /// `--node-role decode`, and `--node-role router`: prefill nodes receive
+    /// prompt frames, decode nodes receive KV handoffs, and routers receive
+    /// role-result frames.
     #[arg(long, value_name = "ADDR")]
     serving_bind: Option<std::net::SocketAddr>,
 
@@ -1114,19 +1221,19 @@ pub(crate) struct ServeArgs {
     tp_lm_head_mode: String,
 
     // llama-server compatibility arguments (accepted but ignored).
-    /// Accepted for llama-server CLI compatibility (ignored — mlxcel has no web UI)
+    /// Accepted for llama-server CLI compatibility (ignored, mlxcel has no web UI)
     #[arg(long, hide = true)]
     _no_webui: bool,
 
-    /// Accepted for llama-server CLI compatibility (ignored — mlxcel always processes templates)
+    /// Accepted for llama-server CLI compatibility (ignored, mlxcel always processes templates)
     #[arg(long, hide = true)]
     _jinja: bool,
 
-    /// Accepted for llama-server CLI compatibility (ignored — mlxcel always uses Metal)
+    /// Accepted for llama-server CLI compatibility (ignored, mlxcel always uses Metal)
     #[arg(long = "n-gpu-layers", hide = true)]
     _n_gpu_layers: Option<i32>,
 
-    /// Accepted for llama-server CLI compatibility (ignored — vision projector loaded automatically)
+    /// Accepted for llama-server CLI compatibility (ignored, vision projector loaded automatically)
     #[arg(long, hide = true)]
     _mmproj: Option<String>,
 
@@ -1134,15 +1241,15 @@ pub(crate) struct ServeArgs {
     #[arg(long, hide = true)]
     _flash_attn: bool,
 
-    /// Accepted for llama-server CLI compatibility (ignored — not applicable to MLX)
+    /// Accepted for llama-server CLI compatibility (ignored, not applicable to MLX)
     #[arg(long, hide = true)]
     _mlock: bool,
 
-    /// Accepted for llama-server CLI compatibility (ignored — not applicable to MLX)
+    /// Accepted for llama-server CLI compatibility (ignored, not applicable to MLX)
     #[arg(long = "no-mmap", hide = true)]
     _no_mmap: bool,
 
-    /// Accepted for llama-server CLI compatibility (ignored — mlxcel handles batching internally)
+    /// Accepted for llama-server CLI compatibility (ignored, mlxcel handles batching internally)
     #[arg(long, hide = true)]
     _cont_batching: bool,
 
@@ -1397,18 +1504,23 @@ pub(crate) struct ServeArgs {
 
     // Automatic Prefix Caching (APC) knobs.
     /// Enable Automatic Prefix Caching (APC) with block-granularity hash chains
-    /// (default: false).
+    /// (default: true). Disable with `--apc-enabled=false`.
     ///
     /// APC layers on top of the existing prompt-prefix cache to enable
-    /// finer-grained KV reuse. When enabled on a hybrid SSM/attention model
-    /// (jamba, mamba, mamba2, nemotron_h, gated_delta, kimi_linear,
-    /// qwen3_next), APC is automatically disabled at runtime since SSM
-    /// state cannot be decomposed into hashable blocks.
+    /// finer-grained KV reuse: without it, a stored prefix is reusable only
+    /// when it is fully contained in the new request, so requests that share
+    /// a long system prompt but diverge afterwards never reuse KV. With the
+    /// non-consuming paged adoption a partial match shares the prefix blocks
+    /// without copying or destroying the stored entry, so APC is on by
+    /// default. When enabled on a hybrid SSM/attention model (jamba, mamba,
+    /// mamba2, nemotron_h, gated_delta, kimi_linear, qwen3_next), APC is
+    /// automatically disabled at runtime since SSM state cannot be
+    /// decomposed into hashable blocks.
     ///
-    /// Also reads `APC_ENABLED` (parity with upstream `mlx-vlm`).
+    /// Also reads `APC_ENABLED`.
     #[arg(
         long = "apc-enabled",
-        default_value_t = false,
+        default_value_t = true,
         value_name = "BOOL",
         num_args = 0..=1,
         require_equals = true,
@@ -1449,7 +1561,7 @@ pub(crate) struct ServeArgs {
     /// Path to a YAML configuration file describing structural
     /// fine-tuning operations (scale / add / prune / replace /
     /// interpolate). When omitted, weight loading is bit-exact identical
-    /// to the pre-surgery baseline — every served request runs against
+    /// to the pre-surgery baseline, every served request runs against
     /// unmodified weights, so the server's response stream is unchanged.
     ///
     /// Also reads `MLXCEL_SURGERY`; CLI flag wins on conflict.
@@ -1462,10 +1574,69 @@ pub(crate) struct ServeArgs {
     #[cfg(feature = "surgery")]
     #[arg(long = "surgery", value_name = "FILE", env = "MLXCEL_SURGERY")]
     pub(crate) surgery: Option<PathBuf>,
+
+    // Block-diffusion serve-level flag group (--max-denoising-steps,
+    // --diffusion-sampler, --diffusion-threshold). Only affects diffusion
+    // models such as DiffusionGemma; autoregressive models ignore it. The flags
+    // set the per-request diffusion defaults for the single-stream worker loop.
+    #[command(flatten)]
+    pub(crate) diffusion: DiffusionServeOptions,
+}
+
+/// Serve-level block-diffusion options.
+///
+/// A focused subset of [`DiffusionCliOptions`] exposing only the knobs that
+/// the single-stream diffusion serving loop honors per request
+/// (`--diffusion-sampler`, `--diffusion-threshold`, `--max-denoising-steps`).
+/// They only affect diffusion models (e.g. DiffusionGemma); ordinary
+/// autoregressive models ignore them. Canvas-shaping flags from the generate
+/// CLI are intentionally not exposed in serve mode.
+#[derive(Args, Debug)]
+#[command(next_help_heading = "Diffusion Options")]
+pub(crate) struct DiffusionServeOptions {
+    /// Maximum denoising steps per canvas block (diffusion models only;
+    /// default: the checkpoint's generation_config, typically 48)
+    #[arg(long = "max-denoising-steps", value_name = "N")]
+    pub(crate) max_denoising_steps: Option<usize>,
+
+    /// Per-step acceptance sampler for diffusion models
+    #[arg(
+        long = "diffusion-sampler",
+        value_name = "SAMPLER",
+        default_value = "entropy-bound",
+        value_parser = ["entropy-bound", "confidence-threshold"]
+    )]
+    pub(crate) diffusion_sampler: String,
+
+    /// Confidence threshold for `--diffusion-sampler confidence-threshold`
+    /// (diffusion models only)
+    #[arg(
+        long = "diffusion-threshold",
+        value_name = "FLOAT",
+        default_value_t = 0.9,
+        value_parser = parse_unit_interval
+    )]
+    pub(crate) diffusion_threshold: f32,
+}
+
+// Manual `Default` kept in lock-step with the `#[arg(default_value*)]`
+// attributes above, same contract as the other serve option groups.
+impl Default for DiffusionServeOptions {
+    fn default() -> Self {
+        Self {
+            max_denoising_steps: None,
+            diffusion_sampler: "entropy-bound".to_string(),
+            diffusion_threshold: 0.9,
+        }
+    }
 }
 
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
+
+    // Default the CUDA kernel JIT cache to a persistent, MLX-pin-scoped dir so
+    // the first-run kernel compilation is paid once per machine, not every boot.
+    mlxcel_core::ensure_persistent_ptx_cache();
 
     match cli.command {
         Commands::Run(args) => commands::run_run(args),
@@ -1490,7 +1661,7 @@ fn main() -> anyhow::Result<()> {
 
 /// Preferred family ordering for the `mlxcel arch` output. Any family that
 /// appears in `ModelType::family()` but is missing from this slice is
-/// appended after these, sorted alphabetically — so the output remains
+/// appended after these, sorted alphabetically, so the output remains
 /// exhaustive even if a new family is introduced without updating this
 /// table. The same drift is also caught at test time by
 /// `family_order_is_exhaustive` in `main_tests.rs`, which makes the
@@ -1508,6 +1679,7 @@ const FAMILY_ORDER: &[&str] = &[
     "GLM",
     "ERNIE",
     "Hunyuan",
+    "Granite",
     "ExaOne",
     "Solar",
     "OLMo",
@@ -1515,6 +1687,9 @@ const FAMILY_ORDER: &[&str] = &[
     "MoE (other)",
     "Mamba / SSM",
     "Hybrid",
+    "Falcon",
+    "LFM2",
+    "PLaMo",
     "RWKV",
     "Specialized",
     "Llama VLM",
@@ -1529,8 +1704,8 @@ const FAMILY_ORDER: &[&str] = &[
 
 fn print_supported_models() {
     let mut out = String::new();
-    // Writing to a `String` cannot fail — `fmt::Write` for `String` is
-    // infallible — so `expect` is appropriate here.
+    // Writing to a `String` cannot fail, `fmt::Write` for `String` is
+    // infallible, so `expect` is appropriate here.
     write_supported_models(&mut out).expect("writing to a String cannot fail");
     print!("{out}");
 }

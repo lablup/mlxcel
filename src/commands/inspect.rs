@@ -59,7 +59,7 @@ pub(crate) fn run_inspect(mut args: InspectArgs) -> Result<()> {
     println!("{banner}");
 
     if !estimate.fits {
-        // Exit successfully — `inspect` is read-only and informational.
+        // Exit successfully: `inspect` is read-only and informational.
         // The caller can pipe this to a script that checks for the
         // "DOES NOT FIT" marker. Returning Err here would conflate
         // "inspect ran successfully and reported over-capacity" with

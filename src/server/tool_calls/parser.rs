@@ -147,11 +147,12 @@ pub fn parse_tool_calls(raw_output: &str, tools: Option<&[Tool]>) -> ToolCallPar
         formats::try_hermes,  // <tool_call> — Hermes/Qwen/DeepSeek
         formats::try_minimax_m2, // <invoke name=...><parameter name=...>...</parameter></invoke>
         formats::try_mistral_nemo, // [TOOL_CALLS]
-        formats::try_functionary_v31, // <function=name>
+        formats::try_functionary_v31, // <function=name>{json}
+        formats::try_qwen3_coder, // <function=name><parameter=key>val</parameter> (after v31, which declines non-JSON bodies)
         formats::try_functionary_v32, // >>>name\n
-        formats::try_llama3,  // {"name": ..., "parameters": ...}
+        formats::try_llama3,      // {"name": ..., "parameters": ...}
         formats::try_generic_json, // {"name": ..., "arguments": ...}
-        formats::try_command_r, // Action: / Action Input: — least specific
+        formats::try_command_r,   // Action: / Action Input: — least specific
     ];
 
     for parser in parsers {
@@ -577,5 +578,107 @@ mod tests {
         let raw2 = "all thinking<channel|>";
         let result2 = parse_tool_calls(raw2, None);
         assert_eq!(result2.content, "");
+    }
+
+    // ----------------------------------------------------------------
+    // Qwen3-Coder XML tool-call format (issue: agentic clients break
+    // because tool calls land in `content` instead of `tool_calls`)
+    // ----------------------------------------------------------------
+
+    fn arg_obj(call: &crate::server::tool_calls::ParsedToolCall) -> serde_json::Value {
+        serde_json::from_str(&call.arguments).expect("arguments must be valid JSON")
+    }
+
+    #[test]
+    fn qwen3_coder_single_call_single_param() {
+        let output = "<tool_call>\n<function=get_weather>\n<parameter=location>\nSan Francisco\n</parameter>\n</function>\n</tool_call>";
+        let tools = vec![make_tool("get_weather")];
+        let result = parse_tool_calls(output, Some(&tools));
+        assert!(result.has_tool_calls());
+        assert_eq!(result.tool_calls.len(), 1);
+        assert_eq!(result.tool_calls[0].name, "get_weather");
+        assert_eq!(arg_obj(&result.tool_calls[0])["location"], "San Francisco");
+        // Pure tool-call response: no leaked content.
+        assert_eq!(result.content, "");
+    }
+
+    #[test]
+    fn qwen3_coder_single_call_multiple_params_with_type_coercion() {
+        let output = "<tool_call><function=search><parameter=query>rust async</parameter><parameter=limit>5</parameter><parameter=fuzzy>true</parameter></function></tool_call>";
+        let tools = vec![make_tool("search")];
+        let result = parse_tool_calls(output, Some(&tools));
+        assert!(result.has_tool_calls());
+        let args = arg_obj(&result.tool_calls[0]);
+        assert_eq!(args["query"], "rust async");
+        assert_eq!(args["limit"], 5); // coerced to integer
+        assert_eq!(args["fuzzy"], true); // coerced to boolean
+    }
+
+    #[test]
+    fn qwen3_coder_multiple_calls_in_one_response() {
+        let output = "<tool_call><function=read_file><parameter=path>a.rs</parameter></function></tool_call><tool_call><function=read_file><parameter=path>b.rs</parameter></function></tool_call>";
+        let tools = vec![make_tool("read_file")];
+        let result = parse_tool_calls(output, Some(&tools));
+        assert_eq!(result.tool_calls.len(), 2);
+        assert_eq!(arg_obj(&result.tool_calls[0])["path"], "a.rs");
+        assert_eq!(arg_obj(&result.tool_calls[1])["path"], "b.rs");
+    }
+
+    #[test]
+    fn qwen3_coder_value_with_whitespace_newlines_and_quotes() {
+        // A code-snippet parameter: internal whitespace, newlines, and quotes
+        // must survive into a valid JSON string.
+        let output = "<tool_call><function=write_file><parameter=path>main.rs</parameter><parameter=content>\nfn main() {\n    println!(\"hi\");\n}\n</parameter></function></tool_call>";
+        let tools = vec![make_tool("write_file")];
+        let result = parse_tool_calls(output, Some(&tools));
+        assert!(result.has_tool_calls());
+        let args = arg_obj(&result.tool_calls[0]);
+        assert_eq!(args["path"], "main.rs");
+        assert_eq!(args["content"], "fn main() {\n    println!(\"hi\");\n}");
+    }
+
+    #[test]
+    fn qwen3_coder_empty_parameter_value() {
+        let output =
+            "<tool_call><function=set_note><parameter=text></parameter></function></tool_call>";
+        let tools = vec![make_tool("set_note")];
+        let result = parse_tool_calls(output, Some(&tools));
+        assert!(result.has_tool_calls());
+        assert_eq!(arg_obj(&result.tool_calls[0])["text"], "");
+    }
+
+    #[test]
+    fn qwen3_coder_malformed_missing_closing_tags_keeps_prior_calls() {
+        // First call is well-formed; the second opener is truncated mid-stream.
+        // The good call must still be returned (no panic, no total discard).
+        let output = "<tool_call><function=read_file><parameter=path>a.rs</parameter></function></tool_call><tool_call><function=read_file";
+        let tools = vec![make_tool("read_file")];
+        let result = parse_tool_calls(output, Some(&tools));
+        assert_eq!(result.tool_calls.len(), 1);
+        assert_eq!(arg_obj(&result.tool_calls[0])["path"], "a.rs");
+    }
+
+    #[test]
+    fn qwen3_coder_zero_parameter_call() {
+        // No `<parameter=` body at all: must still parse as a no-arg call,
+        // not fall through to raw content.
+        let output = "<tool_call><function=list_files></function></tool_call>";
+        let tools = vec![make_tool("list_files")];
+        let result = parse_tool_calls(output, Some(&tools));
+        assert!(result.has_tool_calls());
+        assert_eq!(result.tool_calls[0].name, "list_files");
+        assert_eq!(result.tool_calls[0].arguments, "{}");
+    }
+
+    #[test]
+    fn qwen3_coder_does_not_regress_functionary_v31_json_body() {
+        // Functionary v3.1 shares the `<function=` opener but has a JSON body.
+        // It must still be claimed by the functionary parser, not mis-parsed
+        // by the Qwen3-Coder parser into empty args.
+        let output = r#"<function=get_weather>{"location": "Berlin"}</function>"#;
+        let tools = vec![make_tool("get_weather")];
+        let result = parse_tool_calls(output, Some(&tools));
+        assert!(result.has_tool_calls());
+        assert_eq!(arg_obj(&result.tool_calls[0])["location"], "Berlin");
     }
 }

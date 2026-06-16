@@ -15,7 +15,7 @@
 //! DFlash speculative-decoding round-loop driver (B=1).
 //!
 //! Rust port of upstream
-//! `references/mlx-vlm/mlx_vlm/generate.py::_dflash_rounds`
+//! https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/speculative/dflash.py (_dflash_rounds)
 //! (`mlx-vlm` HEAD, lines 856–942). sub-12.
 //!
 //! ## What this module does
@@ -387,7 +387,7 @@ impl DFlashGenerator {
 /// Greedy speculative walk for a single batch.
 ///
 /// Rust port of upstream
-/// `references/mlx-vlm/mlx_vlm/generate.py::_speculative_walk`.
+/// https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/speculative/common.py (_speculative_walk).
 ///
 /// Given `draft_tokens` (the drafter's `K-1` proposals) and `target_tokens`
 /// (the target's per-position argmax across all `K` verify positions),

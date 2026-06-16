@@ -43,7 +43,7 @@
 //! ## Upstream reference
 //!
 //! This module ports the public surface of
-//! `references/mlx-vlm/mlx_vlm/speculative/drafters/__init__.py`:
+//! https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/speculative/drafters/__init__.py:
 //!
 //! ```python
 //! KNOWN_DRAFTER_KINDS = {"dflash", "mtp"}
@@ -773,7 +773,7 @@ pub trait Drafter {
     /// - **DFlash**: drop the target's `mtp.*` keys when reusing a
     ///   Qwen 3.5 / 3.6 checkpoint that carries an internal MTP head
     ///   the runtime path is not going to use. Matches
-    ///   `references/mlx-lm/mlx_lm/models/qwen3_5.py:308-313`
+    ///   https://github.com/ml-explore/mlx-lm/blob/main/mlx_lm/models/qwen3_5.py#L308-L313
     ///   (`weights.pop("lm_head.weight", None)` and friends).
     /// - **InternalMtp**: pass-through. The actual `mtp.*` extraction
     ///   happens sub-B *before* the drafter sees

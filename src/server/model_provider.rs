@@ -260,6 +260,10 @@ impl ModelProvider {
                 config.decode_peers.clone(),
                 config.serving_bind,
                 speculative_dispatch,
+                // serve-level diffusion knobs (#217 phase 3).
+                config.max_denoising_steps,
+                config.diffusion_sampler.clone(),
+                config.diffusion_threshold,
                 batch_metrics,
                 batch_observability,
             )?;
@@ -478,6 +482,11 @@ impl ModelProvider {
             decode_peers,
             serving_bind,
             crate::server::SpeculativeDispatch::Disabled,
+            // diffusion knobs default to the engine defaults in this
+            // speculative-dispatch-agnostic wrapper.
+            None,
+            "entropy-bound".to_string(),
+            0.9,
             batch_metrics,
             batch_observability,
         )
@@ -516,6 +525,9 @@ impl ModelProvider {
         decode_peers: Vec<std::net::SocketAddr>,
         serving_bind: Option<std::net::SocketAddr>,
         speculative_dispatch: crate::server::SpeculativeDispatch,
+        max_denoising_steps: Option<usize>,
+        diffusion_sampler: String,
+        diffusion_threshold: f32,
         batch_metrics: Arc<BatchMetrics>,
         batch_observability: Arc<BatchObservability>,
     ) -> Result<Self> {
@@ -567,6 +579,11 @@ impl ModelProvider {
             serving_bind,
             // forward the resolved speculative dispatch.
             speculative_dispatch,
+            // serve-level diffusion knobs (#217 phase 3); consumed only by the
+            // DiffusionGemma worker loop.
+            max_denoising_steps,
+            diffusion_sampler,
+            diffusion_threshold,
         };
 
         let worker_handle = model_worker::spawn_model_worker_with_batch_config(
@@ -648,6 +665,10 @@ impl ModelProvider {
             // defaults to `Disabled` which short-circuits the scheduler
             // hot path to the classic decode loop.
             speculative_dispatch: crate::server::SpeculativeDispatch::Disabled,
+            // minimal test path uses the engine diffusion defaults.
+            max_denoising_steps: None,
+            diffusion_sampler: "entropy-bound".to_string(),
+            diffusion_threshold: 0.9,
         };
 
         let worker_handle = model_worker::spawn_model_worker_with_batch_config(

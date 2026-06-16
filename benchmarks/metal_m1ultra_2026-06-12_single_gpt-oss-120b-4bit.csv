@@ -1,0 +1,2 @@
+model,model_path,prompt_tokens,generated_tokens,prefill_ms,prefill_tok_s,decode_ms,decode_tok_s,date,hardware,mlx_version,build_type,max_tokens,prompt
+gpt-oss-120b-4bit,models/gpt-oss-120b-4bit,73,82,448.77,162.67,1381.71,59.35,2026-06-12,Apple_M1_Ultra_128GB,0.1.4,release,100,"Hello, how are you today?"

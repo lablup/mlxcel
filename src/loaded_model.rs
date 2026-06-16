@@ -65,6 +65,10 @@ pub enum LoadedModel {
     // Sliding window models use wrappers that implement LanguageModel
     Gemma3(models::Gemma3Wrapper),
     Gemma4(models::Gemma4Wrapper),
+    /// DiffusionGemma block-diffusion text model (issue #217). The CLI
+    /// routes this family to the diffusion engine before the autoregressive
+    /// loop; the server rejects it (phase 3).
+    DiffusionGemma(models::DiffusionGemmaModel),
     // Vision-language models
     Gemma3VLM(vision::VisionLanguageModel),
     Gemma4VLM(vision::Gemma4VLModel),
@@ -100,6 +104,7 @@ pub enum LoadedModel {
     DeepSeekV2(models::DeepSeekV2Model),
     DeepSeekV3(models::DeepSeekV3Model),
     DeepSeekV32(models::DeepSeekV32Model),
+    Dots1(models::Dots1Model),
     Cohere(models::CohereModel),
     Cohere2(models::Cohere2Model),
     InternLM2(models::InternLM2Model),
@@ -114,6 +119,10 @@ pub enum LoadedModel {
     HunyuanMoe(models::HunyuanMoeModel),
     HunyuanV1Dense(models::HunyuanV1DenseModel),
     MiMo(models::MiMoModel),
+    Apertus(models::ApertusModel),
+    SeedOss(models::SeedOssModel),
+    Granite(models::GraniteModel),
+    BitNet(models::BitNetModel),
     ExaOne(models::ExaOneModel),
     // Sliding window model uses wrapper
     ExaOne4(models::ExaOne4Wrapper),
@@ -134,6 +143,11 @@ pub enum LoadedModel {
     Mamba(models::MambaModel),
     Mamba2(models::Mamba2Model),
     Jamba(models::JambaModel),
+    FalconH1(models::FalconH1Model),
+    Lfm2(models::Lfm2Model),
+    Lfm2Moe(models::Lfm2Model),
+    Plamo2(models::Plamo2Model),
+    GraniteMoeHybrid(models::GraniteMoeHybridModel),
     NemotronH(models::NemotronHModel),
     /// Nemotron H Nano Omni — vision-capable variant (vision-only).
     NemotronHNanoOmniVLM(vision::NemotronHNanoOmniVlModel),
@@ -174,6 +188,7 @@ macro_rules! delegate_language_model {
             LoadedModel::Gemma2(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::Gemma3(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::Gemma4(inner) => LanguageModel::$method(inner, $($arg),*),
+            LoadedModel::DiffusionGemma(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::Gemma3VLM(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::Gemma4VLM(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::Gemma4Unified(inner) => LanguageModel::$method(inner, $($arg),*),
@@ -208,6 +223,7 @@ macro_rules! delegate_language_model {
             LoadedModel::DeepSeekV2(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::DeepSeekV3(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::DeepSeekV32(inner) => LanguageModel::$method(inner, $($arg),*),
+            LoadedModel::Dots1(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::Cohere(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::Cohere2(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::InternLM2(inner) => LanguageModel::$method(inner, $($arg),*),
@@ -222,6 +238,10 @@ macro_rules! delegate_language_model {
             LoadedModel::HunyuanMoe(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::HunyuanV1Dense(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::MiMo(inner) => LanguageModel::$method(inner, $($arg),*),
+            LoadedModel::Apertus(inner) => LanguageModel::$method(inner, $($arg),*),
+            LoadedModel::SeedOss(inner) => LanguageModel::$method(inner, $($arg),*),
+            LoadedModel::Granite(inner) => LanguageModel::$method(inner, $($arg),*),
+            LoadedModel::BitNet(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::ExaOne(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::ExaOne4(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::ExaOneMoe(inner) => LanguageModel::$method(inner, $($arg),*),
@@ -240,6 +260,11 @@ macro_rules! delegate_language_model {
             LoadedModel::Mamba(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::Mamba2(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::Jamba(inner) => LanguageModel::$method(inner, $($arg),*),
+            LoadedModel::FalconH1(inner) => LanguageModel::$method(inner, $($arg),*),
+            LoadedModel::Lfm2(inner) => LanguageModel::$method(inner, $($arg),*),
+            LoadedModel::Lfm2Moe(inner) => LanguageModel::$method(inner, $($arg),*),
+            LoadedModel::Plamo2(inner) => LanguageModel::$method(inner, $($arg),*),
+            LoadedModel::GraniteMoeHybrid(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::NemotronH(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::NemotronHNanoOmniVLM(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::NemotronNAS(inner) => LanguageModel::$method(inner, $($arg),*),
@@ -322,6 +347,26 @@ impl LanguageModel for LoadedModel {
 
     fn release_sequence_state_by_id(&self, seq_id: mlxcel_core::cache::SequenceId) {
         delegate_language_model!(self, release_sequence_state_by_id(seq_id))
+    }
+
+    fn supports_snapshot_reuse(&self) -> bool {
+        delegate_language_model!(self, supports_snapshot_reuse())
+    }
+
+    fn snapshot_sequence_state(
+        &self,
+        seq_id: mlxcel_core::cache::SequenceId,
+        token_len: usize,
+    ) -> Option<mlxcel_core::generate::ModelStateSnapshot> {
+        delegate_language_model!(self, snapshot_sequence_state(seq_id, token_len))
+    }
+
+    fn restore_sequence_state(
+        &self,
+        seq_id: mlxcel_core::cache::SequenceId,
+        snapshot: &mlxcel_core::generate::ModelStateSnapshot,
+    ) -> Result<(), String> {
+        delegate_language_model!(self, restore_sequence_state(seq_id, snapshot))
     }
 
     fn sequence_state_layout(&self) -> mlxcel_core::cache::SequenceStateLayout {

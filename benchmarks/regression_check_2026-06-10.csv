@@ -1,0 +1,12 @@
+model,model_path,prompt_tokens,generated_tokens,prefill_ms,prefill_tok_s,decode_ms,decode_tok_s,date,hardware,mlx_version,build_type,max_tokens,prompt
+smollm-135m-4bit,models/smollm-135m-4bit,16,100,2.69,5954.51,116.57,857.86,2026-06-10,Apple_M5_Max_128GB,0.31.2,release,100,"Hello, how are you today?"
+llama-3.1-8b-4bit,models/llama-3.1-8b-4bit,98,100,46.26,2118.26,894.89,111.75,2026-06-10,Apple_M5_Max_128GB,0.31.2,release,100,"Hello, how are you today?"
+qwen2.5-7b-4bit,models/qwen2.5-7b-4bit,36,100,39.62,908.69,816.19,122.52,2026-06-10,Apple_M5_Max_128GB,0.31.2,release,100,"Hello, how are you today?"
+qwen3-4b-4bit,models/qwen3-4b-4bit,19,41,19.53,972.86,219.47,186.82,2026-06-10,Apple_M5_Max_128GB,0.31.2,release,100,"Hello, how are you today?"
+gemma3-4b-4bit,models/gemma3-4b-4bit,16,81,19.45,822.74,452.76,178.90,2026-06-10,Apple_M5_Max_128GB,0.31.2,release,100,"Hello, how are you today?"
+minicpm3-4b-4bit,models/minicpm3-4b-4bit,17,100,28.64,593.67,766.34,130.49,2026-06-10,Apple_M5_Max_128GB,0.31.2,release,100,"Hello, how are you today?"
+phi-3.5-moe-4bit,models/phi-3.5-moe-4bit,10,100,101.79,98.24,885.81,112.89,2026-06-10,Apple_M5_Max_128GB,0.31.2,release,100,"Hello, how are you today?"
+qwen3-30b-a3b-4bit,models/qwen3-30b-a3b-4bit,19,34,46.86,405.47,224.10,151.72,2026-06-10,Apple_M5_Max_128GB,0.31.2,release,100,"Hello, how are you today?"
+mixtral-8x7b-4bit,models/mixtral-8x7b-4bit,15,73,184.72,81.21,1194.11,61.13,2026-06-10,Apple_M5_Max_128GB,0.31.2,release,100,"Hello, how are you today?"
+nemotron-h-30b-4bit,models/nemotron-h-30b-4bit,23,46,66.28,347.01,271.69,169.31,2026-06-10,Apple_M5_Max_128GB,0.31.2,release,100,"Hello, how are you today?"
+jamba-v0.1-4bit,models/jamba-v0.1-4bit,44,100,41.51,1059.90,472.73,211.54,2026-06-10,Apple_M5_Max_128GB,0.31.2,release,100,"Hello, how are you today?"

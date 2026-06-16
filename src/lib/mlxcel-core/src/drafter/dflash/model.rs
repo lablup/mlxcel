@@ -71,7 +71,7 @@ pub struct DFlashDraftModel {
     /// checkpoint does NOT ship `embed_tokens.weight` — upstream Python
     /// sets `self.embed_tokens = None` at construction and binds it to
     /// the target's `embed_tokens` later via `bind()`
-    /// (`references/mlx-vlm/mlx_vlm/speculative/drafters/qwen3_dflash/dflash.py`,
+    /// (https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/speculative/drafters/qwen3_dflash/dflash.py,
     /// lines 88, 92-108). This field mirrors that shape:
     ///
     /// - `Some(_)` — a drafter checkpoint that *did* ship its own

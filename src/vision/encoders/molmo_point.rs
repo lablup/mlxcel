@@ -21,7 +21,7 @@
 //!   - MolmoPointPatchRope: 1D rotary for patch embeddings
 //!   - PadWithLearnedVector: "no more points" class embedding
 //!
-//! Reference: references/mlx-vlm/mlx_vlm/models/molmo_point/molmo_point.py
+//! Reference: https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/models/molmo_point/molmo_point.py
 
 use mlxcel_core::layers::Linear;
 use mlxcel_core::utils::slice_axis;

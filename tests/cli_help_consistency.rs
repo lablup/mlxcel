@@ -16,26 +16,26 @@
 //!
 //! Two flag groups are covered:
 //!
-//! 1. **TurboQuant KV-cache** (`KV Cache (TurboQuant) Options`) — every
+//! 1. **TurboQuant KV-cache** (`KV Cache (TurboQuant) Options`), every
 //!    binary flattens the same `TurboKvCacheArgs`, so the `--help` text
 //!    for `--cache-type-k`, `--cache-type-v`, `--kv-cache-mode`, and
 //!    `--turbo-boundary-v` MUST be identical across binaries.
-//! 2. **Speculative decoding** (`Speculative Decoding Options`) — every binary flattens the same `SpeculativeArgs`, so the
+//! 2. **Speculative decoding** (`Speculative Decoding Options`), every binary flattens the same `SpeculativeArgs`, so the
 //!    `--help` text for `--draft-kind` and `--draft-block-size` MUST be
 //!    identical across binaries.
 //!
-//! All three CLI surfaces — `mlxcel generate`, `mlxcel serve`, and
-//! `mlxcel-server` — flatten these groups via `#[command(flatten)]`. The
+//! All three CLI surfaces, `mlxcel generate`, `mlxcel serve`, and
+//! `mlxcel-server`, flatten these groups via `#[command(flatten)]`. The
 //! tests run each binary's `--help`, extract the relevant section block,
 //! and assert that every required flag, value-name, and accepted token
 //! appears in all three. Inside the same block they also forbid
 //! closed-repo issue/epic numbers from leaking back into operator-facing
 //! help text. The forbidden-substring check is intentionally scoped to
-//! each block — pre-existing references on unrelated flags elsewhere in
+//! each block, pre-existing references on unrelated flags elsewhere in
 //! the help output are out of scope for this invariant.
 //!
 //! When a future flag or mode is added to either shared group, all three
-//! binaries fail the test together — no drift is possible.
+//! binaries fail the test together, no drift is possible.
 
 use std::process::Command;
 
@@ -82,7 +82,7 @@ const FORBIDDEN_SUBSTRINGS: &[&str] = &["issue #", "epic #", "B-step #", "Issue 
 /// output and could in theory trip the forbidden-substring check).
 ///
 /// Only the env vars consumed by `TurboKvCacheArgs` itself need to be
-/// cleared — the broader llama-server compatibility env vars are scoped to
+/// cleared, the broader llama-server compatibility env vars are scoped to
 /// other flag groups whose help isn't asserted here.
 const ENV_TO_CLEAR_FOR_HELP: &[&str] = &["LLAMA_ARG_CACHE_TYPE_K", "LLAMA_ARG_CACHE_TYPE_V"];
 
@@ -116,7 +116,7 @@ fn help_output(bin_name: &str, args: &[&str]) -> String {
 /// by an indented list of flag entries. The next heading is the next
 /// non-indented line that ends with `:` (e.g. `Options:`, `Generation
 /// Options:`). For the invariant tests we only need to ensure the block
-/// contains the relevant flags, so an over-inclusive cut is fine — better
+/// contains the relevant flags, so an over-inclusive cut is fine, better
 /// to fail loud than to silently miss content.
 fn extract_kv_cache_block(help: &str) -> &str {
     let start = help
@@ -248,10 +248,10 @@ fn mlxcel_run_help_lists_shared_flags_and_default_model() {
         );
     }
 
-    // The documented default model (mlx-lm parity). If the default repo-id
-    // changes, this test forces the help text + README to be updated too.
+    // The documented default model. If the default repo-id changes, this test
+    // forces the help text + README to be updated too.
     assert!(
-        help.contains("mlx-community/Llama-3.2-3B-Instruct-4bit"),
+        help.contains("mlx-community/gemma-4-e2b-it-4bit"),
         "mlxcel run help must document the default model repo-id.\nHelp was:\n{help}"
     );
 }
@@ -309,7 +309,7 @@ const SPECULATIVE_EXPECTED_FLAGS: &[&str] = &["--draft-kind", "--draft-block-siz
 /// Drafter-kind tokens that MUST appear in the help block on every
 /// binary. Mirrors the user-selectable subset of
 /// `mlxcel_core::drafter::KNOWN_DRAFTER_KINDS` (the third
-/// `internal-mtp` variant is intentionally excluded from CLI parsing —
+/// `internal-mtp` variant is intentionally excluded from CLI parsing,
 /// see `SpeculativeArgs::parse_kind`).
 const SPECULATIVE_EXPECTED_KINDS: &[&str] = &["dflash", "mtp"];
 

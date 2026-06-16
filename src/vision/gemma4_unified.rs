@@ -561,6 +561,34 @@ impl LanguageModel for Gemma4UnifiedModel {
         self.text_model.release_sequence_state_by_id(seq_id);
     }
 
+    fn supports_snapshot_reuse(&self) -> bool {
+        mlxcel_core::generate::LanguageModel::supports_snapshot_reuse(&self.text_model)
+    }
+
+    fn snapshot_sequence_state(
+        &self,
+        seq_id: SequenceId,
+        token_len: usize,
+    ) -> Option<mlxcel_core::generate::ModelStateSnapshot> {
+        mlxcel_core::generate::LanguageModel::snapshot_sequence_state(
+            &self.text_model,
+            seq_id,
+            token_len,
+        )
+    }
+
+    fn restore_sequence_state(
+        &self,
+        seq_id: SequenceId,
+        snapshot: &mlxcel_core::generate::ModelStateSnapshot,
+    ) -> Result<(), String> {
+        mlxcel_core::generate::LanguageModel::restore_sequence_state(
+            &self.text_model,
+            seq_id,
+            snapshot,
+        )
+    }
+
     fn num_layers(&self) -> usize {
         self.text_model.num_layers_value()
     }

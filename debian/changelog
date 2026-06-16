@@ -1,3 +1,121 @@
+mlxcel (0.3.0-1~jammy1) jammy; urgency=medium
+
+  * Added: nine new model families: BitNet b1.58 (#252), IBM Granite dense
+    (#254) and GraniteMoeHybrid (#259), LFM2 and LFM2-MoE (#255), Falcon-H1
+    (#256), PLaMo 2 with PlamoTokenizer (#257, #264), Apertus (#260),
+    ByteDance Seed-OSS (#261), and dots.llm1 MoE (#263).
+  * Added: Linux x86_64 and aarch64 CUDA release builds with bundled CCCL
+    headers (#262).
+  * Added: configurable allowed-origins for server CORS (#253).
+  * Changed: fused decode-MoE Metal kernel is now on by default
+    (MLXCEL_FUSED_MOE), about 13% faster MoE decode on gemma4 (#285).
+  * Performance: two-kernel fused decode-MoE that beats gather_qmm, extended
+    to 6-bit and mixed-bit experts and wired to dots.llm1, qwen3-next, and
+    gemma4 (#274, #275, #276, #278, #279, #281).
+  * Performance: CCCL header resolution that handles relative invocations and
+    other nodes, plus a persistent PTX kernel cache for the CUDA backend (#270).
+  * Fixed: quantized models stay bf16, fixing a 33-41% M1 Ultra decode
+    regression on bf16-scale checkpoints (#290).
+  * Fixed: infer per-tensor quantization bits for embeddings so
+    mixed-precision exports such as diffusiongemma load (#292).
+
+ -- Jeongkyu Shin <inureyes@gmail.com>  Mon, 15 Jun 2026 12:00:00 +0900
+
+mlxcel (0.2.1-1~jammy1) jammy; urgency=medium
+
+  * Added: exact-prefix prompt-cache snapshots now cover model-owned
+    recurrent and mixed-cache families, including Mamba, Mamba2, Jamba,
+    Nemotron-H, and Qwen 3.5 / 3.6 text, MoE, and VLM wrappers (#241).
+  * Added: Gemma 4 text, VLM, and Unified wrappers now donate and restore
+    exact-prefix prompt-cache snapshots for model-owned standard and rotating
+    caches; gemma-4-26b-a4b-it-4bit inserted a 10,568,520-byte snapshot in
+    smoke validation with no oversized rejection (#243).
+  * Docs: align mlxcel serve and mlxcel-server option descriptions for
+    disaggregated peer roles, VLM prefix-cache env settings, paged KV budget
+    settings, and Gemma 4 snapshot-cache support.
+
+ -- Jeongkyu Shin <inureyes@gmail.com>  Sat, 13 Jun 2026 19:45:00 +0900
+
+mlxcel (0.2.0-1~jammy1) jammy; urgency=medium
+
+  * Added: unified paged KV cache is live in the batching server (epic
+    #116). Prefix reuse and paged block storage now run together: a shared
+    prefix is stored once with reference counting and copy-on-write, so a
+    second request adopts the existing blocks and re-prefills only its
+    divergent suffix. Pool-backed decode is byte-identical to the dense
+    path on qwen3 and llama3 (#152, #167, #168).
+  * Added: disaggregated serving. `mlxcel-server --node-role
+    {prefill,decode,router}` with --serving-bind, --prefill-peers, and
+    --decode-peers splits prefill, decode, and a model-free router across
+    processes over TCP; a 3-process run is byte-identical to a single
+    hybrid node. KV block contents serialize across the handoff
+    (#185, #187, #188, #189, #190, #191, #192, #193).
+  * Added: DiffusionGemma block-diffusion model: text generation, image
+    input, and mlxcel-server serving. Temperature-0 output is
+    byte-identical across the MLX bump (#217, #218, #219, #220).
+  * Added: Qwen3-Coder XML tool-call parsing, surfaced as OpenAI tool_calls
+    (#206).
+  * Added: --kv-cache-budget <BYTES|auto> (env MLXCEL_KV_CACHE_BUDGET) caps
+    the paged KV block pool with an admission gate and cold-prefix eviction;
+    opt-in, unbounded by default. Paged usage is exposed at
+    GET /v1/cache/stats and on /metrics (#174, #175, #176, #178).
+  * Added: architecture-aware KV-cache memory estimation for inspect and
+    the --estimate-memory preflight, plus an explicit activation term.
+    Sliding-window, MLA, hybrid, and pure-SSM models no longer use a flat
+    formula that was off by about 100x for Gemma, DeepSeek, and Mamba
+    (#172, #173).
+  * Added (opt-in): VLM prompt-prefix cache sharing for multi-turn
+    same-image conversations behind --enable-vlm-prefix-cache, verified
+    byte-identical to a cold prefill on qwen2-vl-2b (#182, #184).
+  * Added: fused paged-attention decode Metal kernel (split-K
+    flash-decoding), gated off because it does not beat MLX gather-then-SDPA
+    at long context on Apple Silicon. Enable with
+    MLXCEL_PAGED_ATTENTION_NATIVE (#181).
+  * Changed: Automatic Prefix Caching is now enabled by default; the output
+    is unchanged (#233).
+  * Changed: the prompt-prefix KV cache now serves the Anthropic
+    /v1/messages and OpenAI Responses /v1/responses endpoints (#240).
+  * Changed: the B=1 MTP speculative-burst default is chosen per hardware.
+    Batch-capable targets default on only on M5-class hardware with a neural
+    accelerator (M1 Ultra regressed); non-batchable targets stay always-on;
+    MLXCEL_ENABLE_MTP_B1 overrides either way (#216).
+  * Changed: partially matched paged prefixes are adopted instead of
+    declined, and paged adoption clones and pins shared blocks rather than
+    consuming them (#230, #232).
+  * Changed: vendored MLX bumped to upstream main (2026-06-11); the steel
+    GEMM overlay was retired (#223).
+  * Perf: chunked slab storage for the paged pool, presized per prefill
+    span with eager slab eval, plus per-frame decode token streaming from
+    the disaggregated decode role (#237, #229, #214).
+  * Fix: per-row position holes broke B>1 batched MTP greedy parity after
+    divergent accepts; the surviving K/V is now compacted to each row's
+    accepted end with per-row RoPE and a precise mask (#211).
+  * Fix: guard empty-batch paged-decode fallbacks and use absolute block
+    indexing so a logical_start > 0 write addresses the correct block
+    (#215).
+  * Fix: support chunked-prefill prompts in the disaggregated serving
+    handoff, with a 1M-token admission cap and pool release on extract
+    error (#213).
+  * Fix: apply the chat stream filter to disaggregated router output (#212);
+    finish a chunked prefill when the first chunk reaches the prompt end
+    (#179).
+  * Fix: release paged KV block pins on prompt-cache evict or decline,
+    closing a pre-existing leak of the origin allocation (#170); account
+    real paged pool bytes in the cache ledger and stats (#231).
+  * Fix: enforce the pack3 size contracts in release builds (#236).
+  * Fix: render assistant tool_calls.arguments as a JSON object on
+    multi-turn (#210); render the request's tools into the prompt (#207);
+    expand bare model names in the download subcommand (#177).
+  * Security: harden the paged KV handoff deserialization boundary (frame
+    cap, geometry anchor, per-layer consistency, empty-sequence rejection),
+    and release already-taken blocks on a partial restore failure (#186).
+  * Docs: new docs/CONTINUOUS_BATCHING.md and an expanded unified-cache
+    section in docs/turbo-kv-cache.md (#194).
+  * Chore: record upstream attribution for ported third-party code (#238);
+    bump the minor-and-patch dependency group with 3 updates (#180).
+
+ -- Jeongkyu Shin <inureyes@gmail.com>  Sat, 13 Jun 2026 18:00:00 +0900
+
 mlxcel (0.1.4-1~jammy1) jammy; urgency=medium
 
   * Added: Gemma 4 Unified (`gemma4_unified`) multimodal architecture

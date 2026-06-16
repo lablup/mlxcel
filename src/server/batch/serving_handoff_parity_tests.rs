@@ -111,6 +111,18 @@ fn build_paged_scheduler(
     tokenizer: MlxcelTokenizer,
     config_eos: Vec<i32>,
 ) -> BatchScheduler {
+    // 512-token chunk size > the test prompt, so handoff prefills run whole.
+    build_paged_scheduler_with_chunk_size(model, tokenizer, config_eos, 512)
+}
+
+/// [`build_paged_scheduler`] with an explicit `prefill_chunk_size`, for the
+/// chunked-prefill handoff case (issue #197).
+fn build_paged_scheduler_with_chunk_size(
+    model: crate::LoadedModel,
+    tokenizer: MlxcelTokenizer,
+    config_eos: Vec<i32>,
+    prefill_chunk_size: usize,
+) -> BatchScheduler {
     let (_req_tx, req_rx) = mpsc::channel();
     BatchScheduler::with_config(
         model,
@@ -121,7 +133,7 @@ fn build_paged_scheduler(
         64, // max_queue_depth
         Arc::new(BatchMetrics::new()),
         Arc::new(BatchObservability::new()),
-        512,   // prefill_chunk_size (> prompt len, so full prefill)
+        prefill_chunk_size,
         false, // enable_preemption
         PreemptionPolicy::default(),
         1, // max_batch_prefill
@@ -300,6 +312,76 @@ fn serving_handoff_parity_matches_single_node_qwen3() {
         "OK: prefill-role extracted, shipped over the coordinator transport, and the \
          decode-role reconstructed + decoded {DECODE_STEPS} tokens identically to the \
          single-node run."
+    );
+}
+
+/// Issue #197: a handoff prefill of a prompt LONGER than `--prefill-chunk-size`
+/// must drive the standard chunked-prefill machinery to completion before
+/// extracting, and the decode node must continue byte-identically to a
+/// single-node run. The reference leg runs an UNCHUNKED full prefill through
+/// the same scheduler, so this also re-proves chunked == full prefill across
+/// the handoff boundary.
+#[test]
+#[ignore = "loads qwen3-0.6b-4bit and runs real GPU forwards; run with --ignored"]
+fn serving_handoff_parity_chunked_prefill_matches_single_node_qwen3() {
+    let _runtime = crate::initialize_runtime();
+    let dir = repo_model_dir(QWEN3_DIR);
+    if !dir.exists() {
+        eprintln!("Skipping {QWEN3_DIR}: model directory not found");
+        return;
+    }
+    let (model, sched_tokenizer) =
+        crate::load_model(&dir).unwrap_or_else(|e| panic!("load {QWEN3_DIR}: {e:?}"));
+    let seq_tokenizer = crate::tokenizer::load_tokenizer(&dir).expect("load tokenizer");
+    let config_eos = crate::read_eos_token_ids(&dir);
+    // Chunk size 16 << the ~50-token prompt forces a 4-chunk handoff prefill.
+    let mut sched = build_paged_scheduler_with_chunk_size(model, sched_tokenizer, config_eos, 16);
+    assert!(
+        PROMPT_TOKENS.len() > 16,
+        "test prompt must exceed the chunk size for a chunked prefill"
+    );
+
+    // ---- REFERENCE: single-node UNCHUNKED prefill + decode. ----
+    let ref_id = sched
+        .allocate_sequence_state()
+        .expect("allocate reference sequence");
+    let (mut ref_seq, _ref_rx) = make_request(ref_id, &seq_tokenizer);
+    BatchScheduler::begin_prefill(&mut ref_seq).expect("begin reference prefill");
+    sched.execute_full_prefill(ref_seq);
+    let ref_tokens = drive_decode(&mut sched, ref_id);
+    assert_eq!(
+        ref_tokens.len(),
+        DECODE_STEPS,
+        "reference run should produce {DECODE_STEPS} tokens"
+    );
+    sched.active_batch.remove(ref_id);
+    sched.release_sequence_caches(ref_id);
+    eprintln!("reference decoded: {ref_tokens:?}");
+
+    // ---- HANDOFF: CHUNKED prefill -> extract -> wire -> ingest -> decode. ----
+    let prefill_id = sched
+        .allocate_sequence_state()
+        .expect("allocate handoff prefill sequence");
+    let (prefill_seq, _pfx_rx) = make_request(prefill_id, &seq_tokenizer);
+    let wire = sched
+        .prefill_request_for_handoff(prefill_seq)
+        .expect("chunked prefill-role extract")
+        .expect("chunked prefill produced a handoff frame (not an immediate EOS)");
+    let delivered = ship_over_coordinators(&wire);
+    let (resp_tx, _resp_rx) = mpsc::channel();
+    let decode_id = sched
+        .ingest_handoff_as_active(&delivered, MAX_TOKENS, SamplingConfig::greedy(), resp_tx)
+        .expect("decode-role ingest");
+    let handoff_tokens = drive_decode(&mut sched, decode_id);
+    eprintln!("chunked handoff decoded: {handoff_tokens:?}");
+
+    assert_eq!(
+        handoff_tokens, ref_tokens,
+        "chunked-prefill handoff decode must equal the single-node run"
+    );
+    eprintln!(
+        "OK: a 4-chunk handoff prefill extracted, shipped, and decoded {DECODE_STEPS} \
+         tokens identically to the unchunked single-node run."
     );
 }
 

@@ -14,7 +14,7 @@
 
 //! Regression tests for Mamba conv_state contiguous fix.
 
-use mlxcel_core::utils::slice_axis;
+use mlxcel_core::{dtype, generate::ModelStateSnapshot, utils::slice_axis};
 
 /// Simulate 50 decode steps of conv-state update and assert the stored shape
 /// stays at [B=1, k-1=3, channels=4] regardless of how many steps we run.
@@ -75,4 +75,30 @@ fn mamba_cache_default_has_no_state() {
     let cache = super::MambaCache::default();
     assert!(cache.conv_state.is_none());
     assert!(cache.ssm_state.is_none());
+}
+
+#[test]
+fn mamba_cache_snapshot_restore_round_trips_state_shapes() {
+    let mut cache = super::MambaCache::new();
+    cache.conv_state = Some(mlxcel_core::zeros(&[1, 3, 4], dtype::FLOAT32));
+    cache.ssm_state = Some(mlxcel_core::zeros(&[1, 2, 4, 8], dtype::FLOAT32));
+
+    let mut snapshot = ModelStateSnapshot::new("mamba", 7);
+    cache.snapshot_into(&mut snapshot, "layer0");
+
+    let mut restored = super::MambaCache::new();
+    restored.restore_from(&snapshot, "layer0");
+
+    let conv = restored
+        .conv_state
+        .as_ref()
+        .and_then(|a| a.as_ref())
+        .expect("conv_state restored");
+    let ssm = restored
+        .ssm_state
+        .as_ref()
+        .and_then(|a| a.as_ref())
+        .expect("ssm_state restored");
+    assert_eq!(mlxcel_core::array_shape(conv), vec![1, 3, 4]);
+    assert_eq!(mlxcel_core::array_shape(ssm), vec![1, 2, 4, 8]);
 }

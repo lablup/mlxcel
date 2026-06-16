@@ -71,7 +71,7 @@ use mlxcel::{LanguageModel, SamplingConfig, initialize_runtime, load_model};
 use mlxcel_core::generate::{CxxGenerator, GenerationStats};
 
 /// Default 17-token prompt that matches the upstream MTP perf-table conditions
-/// (`references/mlx-vlm/README.md`). Token count is approximate (depends on
+/// (https://github.com/Blaizzy/mlx-vlm/blob/main/README.md). Token count is approximate (depends on
 /// the tokenizer), but the prompt structure is the same: a short instruction
 /// + a moderately information-dense follow-on.
 const DEFAULT_PROMPT: &str =

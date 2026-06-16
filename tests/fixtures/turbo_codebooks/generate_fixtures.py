@@ -28,7 +28,7 @@ from scipy import stats
 
 
 # ---------------------------------------------------------------------------
-# Reference implementation (verbatim from references/turboquant_plus/turboquant/codebook.py)
+# Reference implementation (verbatim from https://github.com/TheTom/turboquant_plus/blob/main/turboquant/codebook.py)
 # ---------------------------------------------------------------------------
 
 def optimal_centroids(bit_width: int, d: int) -> np.ndarray:

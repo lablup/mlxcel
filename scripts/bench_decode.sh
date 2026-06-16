@@ -22,6 +22,19 @@
 #   prefill_ms, prefill_tok_s, decode_ms, decode_tok_s,
 #   date, hardware, mlx_version, build_type, max_tokens, prompt
 #
+# Result classifications (trailing CSV token):
+#   (none)               successful decode with profiling numbers
+#   SKIP:oom_estimate    model weight size exceeds the up-front memory budget;
+#                        skipped before launch (see model_fits_in_memory)
+#   SKIP:oom             process exited with an OOM signal/exception at load or
+#                        run time; a capacity exclusion, not a code failure
+#   FAIL:bench           benchmark process exited with a non-OOM failure
+#   FAIL:no_output       benchmark succeeded but produced no decode numbers
+#   SKIP:vlm_image_not_found  VLM run skipped because the test image is absent
+#
+# Both SKIP:oom_estimate and SKIP:oom share the SKIP: prefix, so downstream
+# consumers that filter on SKIP: treat them identically as capacity exclusions.
+#
 # Filename convention:
 #   {backend}_{hardware}_{YYYY-MM-DD}.csv                (text suite, 'all')
 #   {backend}_{hardware}_vlm_{YYYY-MM-DD}.csv            (VLM suite, 'all --vlm')
@@ -54,8 +67,19 @@ NO_CHAT_TEMPLATE=0
 OUTPUT=""
 SUFFIX=""
 DATE=$(date '+%Y-%m-%d')
-MLX_VERSION="0.31.2"
+# Version recorded in the CSV `mlx_version` column. This is the MLXCEL
+# version from Cargo.toml (the /update-benchmarks staleness check compares
+# this column against Cargo.toml); it was a stale hardcoded "0.31.2" until
+# 2026-06-12.
+MLX_VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
+[[ -n "$MLX_VERSION" ]] || MLX_VERSION="unknown"
 BUILD_TYPE="release"
+# Optional overhead multiplier applied to the weight-size estimate in
+# model_fits_in_memory(). Default 1.0 preserves the existing pass/skip
+# decisions exactly. Set to e.g. 1.2 to require weights to consume at most
+# 85%/1.2 ≈ 71% of system memory, giving headroom for activations and KV
+# cache on constrained hosts. Overridden via BENCH_MEM_OVERHEAD_FACTOR env.
+BENCH_MEM_OVERHEAD_FACTOR="${BENCH_MEM_OVERHEAD_FACTOR:-1.0}"
 
 # Thermal cooldown between models. Defaults to 0 to preserve existing
 # behaviour for CI and desktop hardware. Laptops (e.g. MacBook Pro M5 Max)
@@ -63,6 +87,14 @@ BUILD_TYPE="release"
 # during long all-model runs.
 COOLDOWN_SECS=0
 BIG_MODEL_COOLDOWN_SECS=0
+# Pre-warm before `all` sweeps (default ON). The first sweep right after a
+# fresh binary build measures early models up to 2x slow: GPU pipeline
+# caches are cold and the machine is still hot from compiling. The pre-warm
+# runs one small throwaway generation (compiles shared kernels) and then
+# settles for PRE_WARM_SETTLE_SECS so thermals recover before the first
+# measured model. Disable with --no-pre-warm for intentionally cold runs.
+PRE_WARM=1
+PRE_WARM_SETTLE_SECS=30
 # Models whose total weight bytes exceed this threshold get an additional
 # BIG_MODEL_COOLDOWN_SECS pause after running.
 BIG_MODEL_THRESHOLD_BYTES=$((10 * 1024 * 1024 * 1024))
@@ -168,12 +200,60 @@ estimate_model_size() {
 }
 
 # Check if a model likely fits in memory.  Returns 0 (fits) or 1 (too large).
+# BENCH_MEM_OVERHEAD_FACTOR (default 1.0) scales the weight-byte estimate to
+# add headroom for activations, KV cache, and framework overhead. The default
+# leaves existing pass/skip decisions unchanged.
 model_fits_in_memory() {
   local model_path="$1"
   local model_bytes
   model_bytes=$(estimate_model_size "$model_path")
   [[ "$model_bytes" -eq 0 ]] && return 0  # can't determine size, try anyway
-  [[ "$model_bytes" -le "$MEMORY_LIMIT_BYTES" ]]
+  local effective_bytes
+  # Pass values as awk data (-v), not interpolated program text, so a
+  # non-numeric BENCH_MEM_OVERHEAD_FACTOR degrades to 0 instead of an awk
+  # syntax error (which could abort the sweep under set -e).
+  effective_bytes=$(awk -v b="$model_bytes" -v f="$BENCH_MEM_OVERHEAD_FACTOR" 'BEGIN{printf "%.0f", b * f}')
+  [[ "$effective_bytes" -le "$MEMORY_LIMIT_BYTES" ]]
+}
+
+# Returns 0 (true) when a failed run looks like an out-of-memory condition.
+# OOM is matched by EITHER the exit signal OR a recognisable allocator message,
+# independently. Requiring both would miss the two real OOM paths: the OS
+# OOM-killer SIGKILLs the process before it can print anything (signal, no
+# message), while an MLX/Metal allocator exception propagated through cxx exits
+# with code 1 and carries the allocator text (message, non-signal exit code).
+#
+# Exit codes:
+#   137 = SIGKILL          -> OS OOM-killer; treated as OOM on its own
+#   124 = timeout(1) expiry -> explicitly NOT OOM (a slow model is not OOM)
+#   134 = SIGABRT          -> usually std::bad_alloc; classified by message below
+#   1   = cxx-propagated MLX/Metal exception -> classified by message below
+#
+# OOM error text patterns (case-insensitive). Kept specific and grounded in
+# strings the runtime actually emits, so a non-OOM failure is never hidden as a
+# capacity skip (a too-broad pattern like a bare "exceeds .*limit" would match
+# unrelated errors such as the KV-cache "exceeds limit" frame checks):
+#   Generic:      out of memory, out-of-memory, insufficient memory,
+#                 failed to allocate, cannot allocate memory, unable to allocate,
+#                 bad_alloc, "memory allocation of N bytes failed" (Rust abort)
+#   MLX Metal:    "greater than the maximum allowed buffer size", metal::malloc
+#
+# Bare "oom" is intentionally excluded to avoid false positives (e.g. "zoom").
+is_oom_failure() {
+  local rc="$1"
+  local err_text="$2"
+
+  # timeout(1) expiry is never OOM (a slow model is not out of memory).
+  [[ "$rc" -eq 124 ]] && return 1
+
+  # SIGKILL is the OS OOM-killer; the process is usually killed before it can
+  # print anything, so the exit code alone is sufficient.
+  [[ "$rc" -eq 137 ]] && return 0
+
+  # Otherwise (exit 1 cxx exception, 134 bad_alloc abort, ...) it is OOM only
+  # if the captured output names an allocator failure.
+  printf '%s\n' "$err_text" | grep -qiE \
+    'out of memory|out-of-memory|insufficient memory|failed to allocate|cannot allocate memory|unable to allocate|bad_alloc|memory allocation of [0-9]|greater than the maximum allowed buffer size|metal::malloc'
 }
 
 # ---------------------------------------------------------------------------
@@ -203,9 +283,33 @@ Options:
                       after a "big" model is COOLDOWN + BIG_COOLDOWN.
   --big-threshold-gb N  Size in GB that triggers --big-cooldown
                         (default: 10).
+  --no-pre-warm       Skip the pre-warm pass before an `all` sweep. The
+                      pre-warm runs one small throwaway generation and then
+                      settles for --pre-warm-settle seconds, so that cold GPU
+                      pipeline caches and post-build thermals do not depress
+                      the first measured models (observed up to 2x slow on
+                      the first sweep after a fresh build, 2026-06-12).
+  --pre-warm-settle N Settle sleep after the pre-warm pass (default: 30)
   --no-cooldown       Force --cooldown=0 and --big-cooldown=0, overriding
                       any earlier values on the same command line.
   --help              Show this help
+
+Environment variables:
+  BENCH_MEM_OVERHEAD_FACTOR  Multiply the safetensors weight-size estimate by
+                             this factor before comparing against the 85% memory
+                             budget. Default 1.0 (no change). Set to e.g. 1.2
+                             to add headroom for activations and KV cache on
+                             memory-constrained hosts; models that exceed the
+                             adjusted limit are classified SKIP:oom_estimate.
+
+Result classifications (trailing CSV token):
+  (none)               successful decode with profiling numbers
+  SKIP:oom_estimate    model weight bytes exceed the up-front memory budget
+  SKIP:oom             process OOM'd at load or run time (SIGKILL/SIGABRT +
+                       OOM error text); a capacity exclusion, not a code failure
+  FAIL:bench           non-OOM process failure
+  FAIL:no_output       process succeeded but produced no decode numbers
+  SKIP:vlm_image_not_found  VLM run skipped because the test image is absent
 
 Filename convention:
   {backend}_{hardware}_{YYYY-MM-DD}.csv                text suite ('all')
@@ -279,9 +383,13 @@ bench_one() {
 
   # Skip models that won't fit in memory
   if ! model_fits_in_memory "$model_path"; then
-    local model_mb=$(( $(estimate_model_size "$model_path") / 1048576 ))
-    local limit_mb=$(( MEMORY_LIMIT_BYTES / 1048576 ))
-    >&2 printf '>>> [skip]   %s (%d MB > %d MB limit)\n' "$model_name" "$model_mb" "$limit_mb"
+    local est_bytes effective_mb limit_mb
+    est_bytes=$(estimate_model_size "$model_path")
+    # Report the effective (overhead-scaled) size actually used for the decision
+    # so the message stays consistent under a non-default BENCH_MEM_OVERHEAD_FACTOR.
+    effective_mb=$(awk -v b="$est_bytes" -v f="$BENCH_MEM_OVERHEAD_FACTOR" 'BEGIN{printf "%.0f", b * f / 1048576}')
+    limit_mb=$(( MEMORY_LIMIT_BYTES / 1048576 ))
+    >&2 printf '>>> [skip]   %s (%d MB > %d MB limit)\n' "$model_name" "$effective_mb" "$limit_mb"
     echo "${model_name},${model_path},,,,,,,$DATE,$HARDWARE_FULL,$MLX_VERSION,$BUILD_TYPE,$MAX_TOKENS,\"$TEXT_PROMPT\",SKIP:oom_estimate"
     return
   fi
@@ -311,13 +419,22 @@ bench_one() {
   fi
 
   >&2 printf '>>> [bench]  %s (same-process warmup=%s) ...\n' "$model_name" "$WARMUP_TOKENS"
-  local raw
-  if ! raw=$(timeout "$run_timeout" "$MLXCEL_BENCH" \
+  local raw rc=0
+  # Capture combined stdout+stderr and exit code. The || suppresses set -e so
+  # a non-zero exit code is captured in rc rather than aborting the script.
+  raw=$(timeout "$run_timeout" "$MLXCEL_BENCH" \
       -m "$model_path" -p "$prompt" -n "$MAX_TOKENS" \
       --warmup-tokens "$WARMUP_TOKENS" \
-      ${extra_args[@]+"${extra_args[@]}"} 2>&1); then
-    >&2 echo "    benchmark failed"
-    echo "${model_name},${model_path},,,,,,,$DATE,$HARDWARE_FULL,$MLX_VERSION,$BUILD_TYPE,$MAX_TOKENS,\"$prompt\",FAIL:bench"
+      ${extra_args[@]+"${extra_args[@]}"} 2>&1) || rc=$?
+
+  if [[ "$rc" -ne 0 ]]; then
+    if is_oom_failure "$rc" "$raw"; then
+      >&2 printf '    OOM at load/run (exit %d) — SKIP:oom\n' "$rc"
+      echo "${model_name},${model_path},,,,,,,$DATE,$HARDWARE_FULL,$MLX_VERSION,$BUILD_TYPE,$MAX_TOKENS,\"$prompt\",SKIP:oom"
+    else
+      >&2 printf '    benchmark failed (exit %d)\n' "$rc"
+      echo "${model_name},${model_path},,,,,,,$DATE,$HARDWARE_FULL,$MLX_VERSION,$BUILD_TYPE,$MAX_TOKENS,\"$prompt\",FAIL:bench"
+    fi
     return
   fi
 
@@ -381,6 +498,8 @@ while [[ $# -gt 0 ]]; do
                       BIG_MODEL_THRESHOLD_BYTES=$(( $2 * 1024 * 1024 * 1024 ))
                       shift 2 ;;
     --no-cooldown)    COOLDOWN_SECS=0; BIG_MODEL_COOLDOWN_SECS=0; shift ;;
+    --no-pre-warm)    PRE_WARM=0; shift ;;
+    --pre-warm-settle) PRE_WARM_SETTLE_SECS="$2"; shift 2 ;;
     --help)           usage; exit 0 ;;
     -*)               echo "Unknown option: $1" >&2; usage >&2; exit 1 ;;
     *)                MODEL_ARG="$1"; shift ;;
@@ -451,11 +570,15 @@ is_gpu_crash_model() {
 # Run
 # ---------------------------------------------------------------------------
 # ---------------------------------------------------------------------------
-# CUDA JIT preheat: on first run after build, CUDA JIT-compiles many kernels
-# (binary ops, reduce, etc.) which can take 3-8 minutes per model. Run one
-# small model first so shared kernels are cached before the benchmark loop.
+# Pre-warm before `all` sweeps: on the first run after a build the shared
+# kernels are not cached yet (CUDA JIT-compiles for 3-8 minutes per model;
+# Metal compiles pipeline variants on first dispatch) and the machine is
+# still hot from compiling, which measured up to 2x slow on the first
+# models of a fresh sweep (2026-06-12 M1 Ultra refresh). Run one small
+# throwaway generation so shared kernels are cached, then settle so
+# thermals recover before the first measured model. --no-pre-warm skips.
 # ---------------------------------------------------------------------------
-if [[ "$BACKEND" == "cuda" && "$MODEL_ARG" == "all" ]]; then
+if [[ "$PRE_WARM" == "1" && "$MODEL_ARG" == "all" ]]; then
   # Find a small model to preheat with
   preheat_model=""
   for candidate in smollm-135m-4bit ernie-4.5-0.3b-4bit qwen2.5-0.5b-bf16; do
@@ -465,13 +588,21 @@ if [[ "$BACKEND" == "cuda" && "$MODEL_ARG" == "all" ]]; then
     fi
   done
   if [[ -n "$preheat_model" ]]; then
-    >&2 echo "=== CUDA JIT preheat: $(basename "$preheat_model") ==="
-    >&2 echo "    First run compiles CUDA JIT kernels (may take several minutes)..."
+    >&2 echo "=== Pre-warm: $(basename "$preheat_model") ==="
+    if [[ "$BACKEND" == "cuda" ]]; then
+      >&2 echo "    First run compiles CUDA JIT kernels (may take several minutes)..."
+    else
+      >&2 echo "    Warming shared GPU pipeline caches..."
+    fi
     if timeout "$JIT_PREHEAT_TIMEOUT" "$MLXCEL" generate \
         -m "$preheat_model" -p "Hello" -n 5 --profile >/dev/null 2>&1; then
-      >&2 echo "    JIT preheat complete."
+      >&2 echo "    Pre-warm complete."
     else
-      >&2 echo "    JIT preheat failed (non-fatal, continuing)."
+      >&2 echo "    Pre-warm failed (non-fatal, continuing)."
+    fi
+    if [[ "$PRE_WARM_SETTLE_SECS" -gt 0 ]]; then
+      >&2 echo "    Settling for ${PRE_WARM_SETTLE_SECS}s (thermal recovery)..."
+      sleep "$PRE_WARM_SETTLE_SECS"
     fi
     >&2 echo ""
   fi

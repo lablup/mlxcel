@@ -21,7 +21,7 @@
 //! - PatchMerger for spatial downsampling + projection to text hidden size
 //!
 //! Used by: Qwen2-VL
-//! Reference: references/mlx-vlm/mlx_vlm/models/qwen2_vl/vision.py
+//! Reference: https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/models/qwen2_vl/vision.py
 
 use super::VisionEncoderOutput;
 use mlxcel_core::layers::{LayerNorm, UnifiedLinear};

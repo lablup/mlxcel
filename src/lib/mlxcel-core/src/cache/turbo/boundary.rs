@@ -11,6 +11,11 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+//
+// Portions of this file are derived from turboquant_plus
+// (https://github.com/TheTom/turboquant_plus), Copyright 2026 Tom Turney,
+// licensed under the Apache License, Version 2.0. See the top-level NOTICE
+// file for the attribution carried forward under Apache-2.0 Section 4(d).
 
 //! Boundary-V layer protection (B6).
 //!
@@ -18,7 +23,7 @@
 //! V quantization error contributes disproportionately to perplexity
 //! regression: keeping these 4 layers at higher precision recovers
 //! 37–91% of the quality gap at zero speed cost. See
-//! `references/turboquant_plus/docs/papers/layer-aware-v-compression.md`
+//! https://github.com/TheTom/turboquant_plus/blob/main/docs/papers/layer-aware-v-compression.md
 //! for the original measurements (LA-V7 policy: q8_0 boundary V, turbo
 //! middle V, K unchanged).
 //!

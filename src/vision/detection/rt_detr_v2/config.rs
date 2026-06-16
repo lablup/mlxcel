@@ -17,7 +17,7 @@
 //! Mirrors the HuggingFace `RTDetrV2Config` schema
 //! (`transformers.models.rt_detr_v2.configuration_rt_detr_v2`) and the
 //! upstream mlx-vlm port in
-//! `references/mlx-vlm/mlx_vlm/models/rt_detr_v2/config.py`. The HF
+//! https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/models/rt_detr_v2/config.py. The HF
 //! `config.json` stores backbone / hybrid-encoder / decoder fields flat at
 //! the top level; this module parses them into one [`RtDetrV2Config`] and
 //! exposes typed sub-views (`backbone()`, `encoder()`, `transformer()`).

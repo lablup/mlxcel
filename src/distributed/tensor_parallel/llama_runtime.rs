@@ -1003,7 +1003,7 @@ impl TensorParallelGemma4Model {
                 }
                 let pre_offset = cache.offset();
                 let (attn_out, stored_kv) =
-                    full_attn.forward(&attn_norm, layer_mask, cache, shared_kv);
+                    full_attn.forward(&attn_norm, layer_mask, cache, shared_kv, None);
                 if let Some((keys, values)) = stored_kv {
                     shared_kv_store[0].insert(layer_idx, (keys, values, pre_offset));
                 }
@@ -1031,7 +1031,7 @@ impl TensorParallelGemma4Model {
                         let pre_offset = cache.offset();
                         let (attn_out, stored_kv) = rank.text_model.layers[layer_idx]
                             .self_attn
-                            .forward(&attn_norm, layer_mask, cache, shared_kv);
+                            .forward(&attn_norm, layer_mask, cache, shared_kv, None);
                         if let Some((keys, values)) = stored_kv {
                             shared_store.insert(layer_idx, (keys, values, pre_offset));
                         }

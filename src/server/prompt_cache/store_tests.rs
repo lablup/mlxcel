@@ -17,7 +17,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 use std::time::Duration;
 
-use super::super::entry::CacheEntry;
+use mlxcel_core::generate::ModelStateSnapshot;
+
+use super::super::entry::{CacheEntry, ModelSnapshotEntry};
 use super::super::key::{MultimodalDigest, PromptCacheKey};
 use super::super::metrics::AtomicPromptCacheMetrics;
 use super::super::policy::PromptCacheConfig;
@@ -41,12 +43,32 @@ fn key_for<'a>(model: &'a str, tokens: &'a [i32]) -> PromptCacheKey<'a> {
     PromptCacheKey::new_full(model, None, "tpl", None, MultimodalDigest::empty(), tokens)
 }
 
+fn key_for_session<'a>(
+    model: &'a str,
+    session_key: Option<&'a str>,
+    tokens: &'a [i32],
+) -> PromptCacheKey<'a> {
+    PromptCacheKey::new_full(
+        model,
+        None,
+        "tpl",
+        session_key,
+        MultimodalDigest::empty(),
+        tokens,
+    )
+}
+
 fn key_for_mm<'a>(
     model: &'a str,
     mm_digest: MultimodalDigest,
     tokens: &'a [i32],
 ) -> PromptCacheKey<'a> {
     PromptCacheKey::new_full(model, None, "tpl", None, mm_digest, tokens)
+}
+
+fn snapshot_entry_for_test(tokens: Vec<i32>, family: &str) -> ModelSnapshotEntry {
+    let snapshot = ModelStateSnapshot::new(family, tokens.len());
+    ModelSnapshotEntry::new(tokens, snapshot)
 }
 
 #[test]
@@ -455,6 +477,33 @@ fn metrics_hooks_fire_on_insert_and_lookup() {
 }
 
 #[test]
+fn snapshot_metrics_hooks_fire_on_insert_and_lookup() {
+    let metrics = AtomicPromptCacheMetrics::shared();
+    let store = PromptCacheStore::with_metrics(
+        cfg(1 << 20, 64, 4).with_snapshot_limits(1 << 20, 64, Duration::from_secs(3600)),
+        metrics.clone(),
+    );
+    let toks = tokens(0, 16);
+    store
+        .insert_snapshot(
+            &key_for("m", &toks),
+            snapshot_entry_for_test(toks.clone(), "mamba"),
+        )
+        .unwrap();
+    let _ = store.lookup_snapshot_prefix(&key_for("m", &toks), &toks);
+    let miss = tokens(999, 16);
+    let _ = store.lookup_snapshot_prefix(&key_for("m", &miss), &miss);
+
+    assert_eq!(metrics.snapshot_inserts.load(Ordering::Relaxed), 1);
+    assert_eq!(metrics.snapshot_lookups.load(Ordering::Relaxed), 2);
+    assert_eq!(metrics.snapshot_hits.load(Ordering::Relaxed), 1);
+    assert_eq!(
+        metrics.snapshot_hit_tokens_total.load(Ordering::Relaxed),
+        toks.len() as u64
+    );
+}
+
+#[test]
 fn evict_if_needed_returns_freed_bytes() {
     let cfg = PromptCacheConfig::new(true, 1 << 20, 64, Duration::from_millis(25), 4);
     let store = PromptCacheStore::with_config(cfg);
@@ -491,6 +540,125 @@ fn stats_reflect_mutations() {
     assert_eq!(stats.inserts, 1);
     assert_eq!(stats.lookups, 1);
     assert_eq!(stats.hits, 1);
+}
+
+#[test]
+fn snapshot_lookup_requires_whole_stored_prefix_and_same_session() {
+    let cfg = cfg(1 << 20, 64, 4).with_snapshot_limits(1 << 20, 64, Duration::from_secs(3600));
+    let store = PromptCacheStore::with_config(cfg);
+    let stored = tokens(0, 16);
+    store
+        .insert_snapshot(
+            &key_for_session("m", Some("chat-a"), &stored),
+            snapshot_entry_for_test(stored.clone(), "mamba"),
+        )
+        .unwrap();
+
+    let mut extension = stored.clone();
+    extension.extend([999, 1000]);
+    let (entry, matched) = store
+        .lookup_snapshot_prefix(
+            &key_for_session("m", Some("chat-a"), &extension),
+            &extension,
+        )
+        .expect("exact stored prefix should restore");
+    assert_eq!(matched, stored.len());
+    assert_eq!(entry.tokens, stored);
+    entry.with_snapshot(|snapshot| {
+        assert_eq!(snapshot.family(), "mamba");
+        assert_eq!(snapshot.token_len(), stored.len());
+    });
+
+    let mut diverging = tokens(0, 15);
+    diverging.push(42_424);
+    assert!(
+        store
+            .lookup_snapshot_prefix(
+                &key_for_session("m", Some("chat-a"), &diverging),
+                &diverging
+            )
+            .is_none(),
+        "snapshot lookup must not truncate to a partial recurrent state"
+    );
+    assert!(
+        store
+            .lookup_snapshot_prefix(
+                &key_for_session("m", Some("chat-b"), &extension),
+                &extension
+            )
+            .is_none(),
+        "snapshots are exact-session only"
+    );
+    assert!(
+        store
+            .lookup_snapshot_prefix(&key_for("m", &extension), &extension)
+            .is_none(),
+        "sessionless lookup must not adopt a session-bound snapshot"
+    );
+}
+
+#[test]
+fn snapshot_lru_cap_is_independent_from_kv_entries() {
+    let cfg = cfg(1 << 20, 64, 4).with_snapshot_limits(1 << 20, 2, Duration::from_secs(3600));
+    let store = PromptCacheStore::with_config(cfg);
+    let kv_tokens = tokens(10_000, 16);
+    store
+        .insert(
+            &key_for("m", &kv_tokens),
+            CacheEntry::new_for_test(kv_tokens.clone(), 1024),
+        )
+        .unwrap();
+
+    let a = tokens(0, 16);
+    let b = tokens(100, 16);
+    let c = tokens(200, 16);
+    store
+        .insert_snapshot(
+            &key_for("m", &a),
+            snapshot_entry_for_test(a.clone(), "mamba"),
+        )
+        .unwrap();
+    thread::sleep(Duration::from_millis(5));
+    store
+        .insert_snapshot(
+            &key_for("m", &b),
+            snapshot_entry_for_test(b.clone(), "mamba"),
+        )
+        .unwrap();
+    thread::sleep(Duration::from_millis(5));
+    store
+        .insert_snapshot(
+            &key_for("m", &c),
+            snapshot_entry_for_test(c.clone(), "mamba"),
+        )
+        .unwrap();
+
+    let stats = store.stats();
+    assert_eq!(stats.snapshot_entries, 2);
+    assert_eq!(stats.entries, 3, "KV entries and snapshots share reporting");
+    assert!(stats.snapshot_evictions_lru >= 1);
+    assert!(
+        store
+            .lookup_longest_prefix(&key_for("m", &kv_tokens), &kv_tokens)
+            .is_some(),
+        "snapshot cap must not evict detached KV entries"
+    );
+    assert!(
+        store
+            .lookup_snapshot_prefix(&key_for("m", &a), &a)
+            .is_none(),
+        "oldest snapshot should be evicted by the snapshot entry cap"
+    );
+    assert!(
+        store
+            .lookup_snapshot_prefix(&key_for("m", &b), &b)
+            .is_some()
+    );
+    assert!(
+        store
+            .lookup_snapshot_prefix(&key_for("m", &c), &c)
+            .is_some()
+    );
 }
 
 #[test]

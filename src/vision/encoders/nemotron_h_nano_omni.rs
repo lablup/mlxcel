@@ -15,7 +15,7 @@
 //! Nemotron H Nano Omni vision tower (RADIO v2.5-H).
 //!
 //! Faithful Rust port of
-//! `references/mlx-vlm/mlx_vlm/models/nemotron_h_nano_omni/vision.py`
+//! https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/models/nemotron_h_nano_omni/vision.py
 //! (vision-only scope). The encoder is a Vision Transformer
 //! with NVIDIA's RADIO patch generator: a learned `[CLS]` token (with
 //! optional teacher-tied registers), a 1D learned positional embedding,
@@ -492,7 +492,7 @@ impl ViTPatchGenerator {
     /// `[batch, patch_h * patch_w, embed_dim]`.
     ///
     /// Mirrors upstream `_get_pos_embeddings` from
-    /// `references/mlx-vlm/mlx_vlm/models/nemotron_h_nano_omni/vision.py`:
+    /// https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/models/nemotron_h_nano_omni/vision.py:
     /// 1. Fast path when runtime grid matches the stored table (no resize).
     /// 2. CPE mode: bilinear resize the (num_rows, num_cols) table to
     ///    (max_dim, max_dim) where `max_dim = max(patch_h, patch_w)`, then

@@ -57,7 +57,9 @@ use crate::server::types::anthropic_stream::{
     AnthropicStreamEvent,
 };
 
-use super::chat::{MAX_TOOLS, build_generate_options, parse_priority_header};
+use super::chat::{
+    MAX_TOOLS, build_generate_options, build_prompt_cache_request_context, parse_priority_header,
+};
 
 /// POST /v1/messages
 pub async fn anthropic_messages(
@@ -163,6 +165,17 @@ async fn non_stream_messages(
     let mut options = build_generate_options(&translated.chat_request.params, &state.config);
     options.priority = priority;
     options.reasoning_budget = budget_override;
+    // Wire the cross-request prompt-prefix KV cache (epic #116) into the
+    // Anthropic Messages path, mirroring the chat-completions handler. Built
+    // after `prepare_chat_request_with_cache` so the digest sees the resolved
+    // multimodal bytes; text-only requests yield an empty digest and a key
+    // byte-identical to the chat path.
+    options.prompt_cache_ctx = build_prompt_cache_request_context(
+        &state,
+        &translated.chat_request,
+        &prepared.image_data,
+        &prepared.audio_data,
+    );
 
     let result = match state.model_provider.generate_with_media_and_videos(
         prepared.prompt,
@@ -268,6 +281,14 @@ async fn stream_messages(
     let mut options = build_generate_options(&translated.chat_request.params, &state.config);
     options.priority = priority;
     options.reasoning_budget = budget_override;
+    // Wire the prompt-prefix KV cache (epic #116) into the streaming Anthropic
+    // path too, before `options`/`prepared` move into the spawned task.
+    options.prompt_cache_ctx = build_prompt_cache_request_context(
+        &state,
+        &translated.chat_request,
+        &prepared.image_data,
+        &prepared.audio_data,
+    );
 
     let (sender, stream, cancelled, keepalive) = anthropic_sse_channel(128);
 

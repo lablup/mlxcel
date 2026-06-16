@@ -15,7 +15,7 @@
 //! MTP batched round-loop driver (B > 1, continuous batching).
 //!
 //! Rust port of upstream
-//! `references/mlx-vlm/mlx_vlm/generate.py::_mtp_rounds_batch` (and the
+//! https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/speculative/mtp.py (_mtp_rounds_batch) (and the
 //! `_batch_cache_left_padding` helper). sub-7.
 //!
 //! ## Scope

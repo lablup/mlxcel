@@ -1,0 +1,61 @@
+mlxcel
+Copyright 2025-2026 Lablup Inc. and Jeongkyu Shin
+
+This product includes software developed at Lablup Inc.
+
+------------------------------------------------------------------------
+Third-party attributions
+------------------------------------------------------------------------
+
+turboquant_plus
+---------------
+
+Portions of the TurboQuant KV cache implementation, under
+src/lib/mlxcel-core/src/cache/turbo/, are derived from turboquant_plus
+(https://github.com/TheTom/turboquant_plus), Copyright 2026 Tom Turney,
+licensed under the Apache License, Version 2.0.
+
+The following notice is carried forward verbatim from the turboquant_plus
+NOTICE file, as required by Apache License 2.0 Section 4(d):
+
+    turboquant_plus
+    Copyright 2026 Tom Turney
+
+    This product includes software developed by Tom Turney
+    (https://github.com/TheTom/turboquant_plus).
+
+
+mlx-lm and mlx-vlm
+------------------
+
+Portions of mlxcel's model architectures, tokenizer handling, batch
+scheduler, and server API translators are ported from or mirror mlx-lm
+(https://github.com/ml-explore/mlx-lm), Copyright 2023 Apple Inc., and
+mlx-vlm (https://github.com/Blaizzy/mlx-vlm), Copyright 2025 Prince Canuma.
+Both are licensed under the MIT License. The MIT License requires that the
+copyright and permission notices be retained in substantial portions, so
+they are reproduced below:
+
+    MIT License
+
+    Copyright © 2023 Apple Inc. (mlx-lm)
+    Copyright © 2025 Prince Canuma (mlx-vlm)
+
+    Permission is hereby granted, free of charge, to any person obtaining a
+    copy of this software and associated documentation files (the
+    "Software"), to deal in the Software without restriction, including
+    without limitation the rights to use, copy, modify, merge, publish,
+    distribute, sublicense, and/or sell copies of the Software, and to
+    permit persons to whom the Software is furnished to do so, subject to
+    the following conditions:
+
+    The above copyright notice and this permission notice shall be included
+    in all copies or substantial portions of the Software.
+
+    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
+    OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+    MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+    IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+    CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
+    TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
+    SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.

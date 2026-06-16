@@ -894,6 +894,165 @@ fn coerce_minimax_param(value: &str) -> serde_json::Value {
     serde_json::Value::String(value.to_string())
 }
 
+// Defensive caps mirroring the MiniMax M2 parser: bound parallel-call and
+// per-call parameter memory under adversarial model output.
+const QWEN3_CODER_MAX_CALLS: usize = 1024;
+const QWEN3_CODER_MAX_PARAMS_PER_CALL: usize = 1024;
+
+/// Try parsing the Qwen3-Coder XML tool-call format:
+///
+/// ```text
+/// <tool_call>
+/// <function=NAME>
+/// <parameter=KEY>
+/// VALUE
+/// </parameter>
+/// </function>
+/// </tool_call>
+/// ```
+///
+/// This shares the `<function=...>` opener with Functionary v3.1 but differs in
+/// the body: Qwen3-Coder emits `<parameter=key>val</parameter>` XML rather than a
+/// JSON object. The dispatcher runs this parser *after* [`try_functionary_v31`],
+/// which declines Qwen input because its non-JSON body fails the JSON-validity
+/// check, so functionary calls are never stolen, and zero-parameter Qwen calls
+/// (an empty `<function=NAME></function>` body) are still handled here.
+///
+/// The surrounding `<tool_call>` wrapper is not required: scanning for
+/// `<function=` naturally skips it, matching Qwen3-Coder variants that omit it.
+pub fn try_qwen3_coder(text: &str) -> Option<ToolCallParseResult> {
+    let fn_open = "<function=";
+    let fn_close = "</function>";
+
+    let fn_pos = text.find(fn_open)?;
+
+    // Capture any prose before the first tool call. Prefer the `<tool_call>`
+    // wrapper boundary when it precedes `<function=` so the wrapper tag itself
+    // never leaks into the user-visible content.
+    let boundary = match text.find("<tool_call>") {
+        Some(tc) if tc < fn_pos => tc,
+        _ => fn_pos,
+    };
+    let content = text[..boundary].trim().to_string();
+
+    let mut calls = Vec::new();
+    let mut remaining = &text[fn_pos..];
+
+    while let Some(start) = remaining.find(fn_open) {
+        let name_start = start + fn_open.len();
+        // if-let rather than `?` so a single malformed `<function=` opener
+        // without a closing '>' does not discard already-parsed calls.
+        let Some(name_end) = remaining[name_start..].find('>') else {
+            break;
+        };
+        let function_name = extract_quoted_name(&remaining[name_start..name_start + name_end]);
+
+        let body_start = name_start + name_end + 1; // skip '>'
+        let body = match remaining[body_start..].find(fn_close) {
+            Some(end_offset) => {
+                let b = &remaining[body_start..body_start + end_offset];
+                remaining = &remaining[body_start + end_offset + fn_close.len()..];
+                b
+            }
+            None => {
+                // No closing </function>: take the rest as the body.
+                let b = &remaining[body_start..];
+                remaining = "";
+                b
+            }
+        };
+
+        if !function_name.is_empty() {
+            let arguments = extract_qwen_parameters(body);
+            calls.push(ParsedToolCall {
+                name: function_name,
+                arguments,
+            });
+        }
+
+        if calls.len() >= QWEN3_CODER_MAX_CALLS {
+            break;
+        }
+    }
+
+    if calls.is_empty() {
+        return None;
+    }
+
+    Some(ToolCallParseResult {
+        format: Some(ToolCallFormat::Qwen3Coder),
+        tool_calls: calls,
+        content,
+    })
+}
+
+/// Parse all `<parameter=key>value</parameter>` tags inside a Qwen3-Coder
+/// `<function>` body into a JSON object string.
+///
+/// Mirrors [`extract_minimax_parameters`] but keys on the bare `<parameter=`
+/// opener (Qwen3-Coder) rather than `<parameter name=` (MiniMax M2). Values are
+/// stripped of one surrounding newline (the model pretty-prints each parameter
+/// on its own line) then trimmed, and typed via [`coerce_minimax_param`].
+fn extract_qwen_parameters(body: &str) -> String {
+    let param_open = "<parameter=";
+    let param_close = "</parameter>";
+
+    let mut pairs: Vec<(String, serde_json::Value)> = Vec::new();
+    let mut remaining = body;
+
+    while let Some(start) = remaining.find(param_open) {
+        let after_tag = start + param_open.len();
+
+        // `break` (not `continue`) on a missing '>': a malformed `<parameter=`
+        // prefix with no '>' anywhere left would otherwise re-match and rescan
+        // forever: the same O(N^2) guard as `extract_minimax_parameters`.
+        let Some(gt_pos) = remaining[after_tag..].find('>') else {
+            break;
+        };
+
+        let param_name = extract_quoted_name(&remaining[after_tag..after_tag + gt_pos]);
+
+        let value_start = after_tag + gt_pos + 1; // skip '>'
+        let raw_value = match remaining[value_start..].find(param_close) {
+            Some(end_offset) => {
+                let v = &remaining[value_start..value_start + end_offset];
+                remaining = &remaining[value_start + end_offset + param_close.len()..];
+                v
+            }
+            None => {
+                let v = &remaining[value_start..];
+                remaining = "";
+                v
+            }
+        };
+
+        // Strip a single leading/trailing newline (the model emits the value on
+        // its own line), then trim surrounding spaces.
+        let mut raw_value = raw_value;
+        if let Some(stripped) = raw_value.strip_prefix('\n') {
+            raw_value = stripped;
+        }
+        if let Some(stripped) = raw_value.strip_suffix('\n') {
+            raw_value = stripped;
+        }
+        let raw_value = raw_value.trim();
+
+        if !param_name.is_empty() {
+            pairs.push((param_name, coerce_minimax_param(raw_value)));
+        }
+
+        if pairs.len() >= QWEN3_CODER_MAX_PARAMS_PER_CALL {
+            break;
+        }
+    }
+
+    let mut map = serde_json::Map::with_capacity(pairs.len());
+    for (k, v) in pairs {
+        map.insert(k, v);
+    }
+    serde_json::to_string(&serde_json::Value::Object(map)).unwrap_or_else(|_| "{}".to_string())
+}
+
 /// Try parsing generic JSON format:
 /// `{"name": "fn", "arguments": {...}}` or `{"name": "fn", "parameters": {...}}`
 ///

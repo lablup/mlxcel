@@ -17,9 +17,19 @@ on:
           - all
           - macos
           - linux
+          - linux-aarch64
+          - linux-x86_64
 
 # Default-deny top-level permissions; each job grants only what it needs.
 permissions: {}
+
+# Pinned MLX C++ commit, shared by both Linux CUDA jobs for build-cache
+# validation. Must match GIT_TAG in src/lib/mlx-cpp/CMakeLists.txt and
+# MLX_EXPECTED_COMMIT in src/lib/mlxcel-core/build.rs (the three-place pin
+# documented in CLAUDE.md). Hoisted to workflow scope so a future bump
+# touches one literal here instead of one per job.
+env:
+  MLX_EXPECTED_COMMIT: "a6ec7123dac814417147e21d4aeed694924ddd4d"
 
 jobs:
   # ============================================================================
@@ -350,7 +360,7 @@ jobs:
         run: shasum -a 256 mlxcel-macos-aarch64.zip > mlxcel-macos-aarch64.zip.sha256
 
       - name: Upload release artifacts
-        if: github.event_name == 'release' || github.event_name == 'workflow_dispatch'
+        if: github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && github.event.inputs.release_tag != '')
         uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ github.event.release.tag_name || github.event.inputs.release_tag }}
@@ -379,7 +389,7 @@ jobs:
   # Linux ARM64 + CUDA builds (self-hosted GB10 runner)
   # ============================================================================
   build-linux-cuda:
-    name: Build Linux ARM64 CUDA (${{ matrix.variant }})
+    name: Build Linux aarch64 CUDA
     runs-on: GB10
     environment: packaging
     # See the macOS job for the rationale behind these two guards.
@@ -387,26 +397,26 @@ jobs:
       github.repository == 'lablup/mlxcel' && (
         github.event_name == 'release' ||
         github.event.inputs.targets == 'all' ||
-        github.event.inputs.targets == 'linux'
+        github.event.inputs.targets == 'linux' ||
+        github.event.inputs.targets == 'linux-aarch64'
       )
     permissions:
       contents: write
 
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          # NVIDIA DGX Spark / GB10 (Blackwell, SM 121)
-          - variant: gb10
-            cuda_arch: "121"
-            asset_name: mlxcel-linux-aarch64-cuda13-gb10
+    # One aarch64 fat binary covering the NVIDIA aarch64 targets in a single
+    # build: GH200 (Grace Hopper, sm_90a), GB200 (Grace Blackwell, sm_100), and
+    # GB10 / DGX Spark (Blackwell, sm_121), cross-compiled on the GB10 runner.
+    # 90a is load-bearing for MLX's Hopper quantized kernel gate, and build.rs
+    # forwards the list verbatim. The CLI and server (~347 MB each) ship as
+    # separate archives, both with the CCCL headers.
+    env:
+      MLX_CUDA_ARCHITECTURES: "90a;100;121"
+      CLI_ASSET: mlxcel-linux-aarch64-cuda13
+      SERVER_ASSET: mlxcel-server-linux-aarch64-cuda13
 
-          # NVIDIA GH200 (Grace Hopper, SM 90a) — cross-compiled on GB10 runner
-          - variant: gh200
-            cuda_arch: "90a"
-            asset_name: mlxcel-linux-aarch64-cuda13-gh200
-
-    timeout-minutes: 120
+    # Cold build compiles MLX for three CUDA architectures; generous ceiling so
+    # a from-scratch build is never killed (the cargo cache makes reruns cheap).
+    timeout-minutes: 360
 
     steps:
       # Self-healing release: build the *source of the target tag* while
@@ -432,7 +442,7 @@ jobs:
         run: |
           # Set persistent cargo target directory to enable incremental builds
           # on self-hosted runner (avoids recompiling from scratch every run)
-          CARGO_TARGET="$HOME/.cargo-target/mlxcel-cuda-${{ matrix.variant }}"
+          CARGO_TARGET="$HOME/.cargo-target/mlxcel-cuda-aarch64"
           mkdir -p "$CARGO_TARGET"
           echo "CARGO_TARGET_DIR=$CARGO_TARGET" >> $GITHUB_ENV
 
@@ -455,11 +465,8 @@ jobs:
           fi
 
       - name: Validate MLX build cache
-        env:
-          # Must match GIT_TAG in src/lib/mlx-cpp/CMakeLists.txt and
-          # MLX_EXPECTED_COMMIT in src/lib/mlxcel-core/build.rs
-          MLX_EXPECTED_COMMIT: "84961223c02925bef6bef95d3a0a046779bde935"
         run: |
+          # MLX_EXPECTED_COMMIT is set at workflow scope (top of this file).
           # Check every _deps directory for a valid .mlx-build-commit marker.
           # If the marker is missing or doesn't match, purge that _deps/ entirely.
           # This ensures stale MLX source/objects never survive across MLX upgrades.
@@ -488,160 +495,263 @@ jobs:
 
       - name: Build release binaries
         run: cargo build --release --features cuda --locked
-        env:
-          MLX_CUDA_ARCHITECTURES: ${{ matrix.cuda_arch }}
+        # MLX_CUDA_ARCHITECTURES is inherited from the job env above.
 
       - name: Package binaries
         run: |
+          set -euo pipefail
           BIN_DIR="$CARGO_TARGET_DIR/release"
-          mkdir -p package
-          cp "$BIN_DIR/mlxcel" package/
-          cp "$BIN_DIR/mlxcel-server" package/
-          cd package && zip -r "../${{ matrix.asset_name }}.zip" . && cd ..
 
-      - name: Generate checksum
-        run: sha256sum "${{ matrix.asset_name }}.zip" > "${{ matrix.asset_name }}.zip.sha256"
+          # Bundle the CCCL (libcu++) headers MLX's runtime NVRTC JIT needs. The
+          # compiled-in MLX_CCCL_DIR points at this build machine and is useless
+          # on the deployment host, so ship the headers in MLX's native layout:
+          # the JIT looks for <exe-dir>/../include/cccl, hence bin/ + include/cccl/.
+          # See the x86_64 job for the full rationale.
+          CCCL_INC=$(find "$BIN_DIR/build" -type d -path '*/_deps/cccl-src/include' 2>/dev/null | head -1)
+          if [ -z "$CCCL_INC" ] || [ ! -d "$CCCL_INC/cuda" ] || [ ! -d "$CCCL_INC/nv" ]; then
+            echo "::error::CCCL headers not found under the build tree (expected _deps/cccl-src/include/{cuda,nv})"
+            exit 1
+          fi
+          echo "Bundling CCCL headers from: $CCCL_INC"
+
+          package_one() {
+            bin="$1"; asset="$2"
+            pkg="package/${asset}"
+            rm -rf "$pkg"
+            mkdir -p "$pkg/bin" "$pkg/include/cccl"
+            cp "$BIN_DIR/${bin}" "$pkg/bin/"
+            cp -R "$CCCL_INC/cuda" "$pkg/include/cccl/"
+            cp -R "$CCCL_INC/nv" "$pkg/include/cccl/"
+            n=$(find "$pkg/include/cccl" -type f | wc -l | tr -d ' ')
+            if [ ! -f "$pkg/include/cccl/cuda/std/tuple" ] || [ "$n" -lt 100 ]; then
+              echo "::error::CCCL bundle for ${asset} looks incomplete (${n} files)"
+              exit 1
+            fi
+            ( cd package && zip -rq "../${asset}.zip" "${asset}" )
+            echo "Packaged ${asset}.zip ($(du -h "${asset}.zip" | cut -f1), CCCL headers: ${n})"
+          }
+
+          package_one mlxcel "${CLI_ASSET}"
+          package_one mlxcel-server "${SERVER_ASSET}"
+
+      - name: Generate checksums
+        run: |
+          set -euo pipefail
+          for asset in "${CLI_ASSET}" "${SERVER_ASSET}"; do
+            sha256sum "${asset}.zip" > "${asset}.zip.sha256"
+          done
 
       - name: Upload release artifacts
-        if: github.event_name == 'release' || github.event_name == 'workflow_dispatch'
+        if: github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && github.event.inputs.release_tag != '')
         uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ github.event.release.tag_name || github.event.inputs.release_tag }}
           files: |
-            ${{ matrix.asset_name }}.zip
-            ${{ matrix.asset_name }}.zip.sha256
+            ${{ env.CLI_ASSET }}.zip
+            ${{ env.CLI_ASSET }}.zip.sha256
+            ${{ env.SERVER_ASSET }}.zip
+            ${{ env.SERVER_ASSET }}.zip.sha256
 
   # ============================================================================
-  # Linux x86-64 + CUDA builds (GitHub-hosted runner, build-only)
+  # Linux x86_64 + CUDA build (self-hosted RTX-class runner)
   # ============================================================================
-  # Unlike the self-hosted aarch64 jobs above, these run on standard
-  # GitHub-hosted runners with no GPU. Compiling CUDA only needs the toolkit
-  # (nvcc compiles without a device; MLX upstream CI builds its CUDA wheels
-  # the same way), and this workflow intentionally runs no tests, so a GPU
-  # runner would buy nothing here. Runtime verification happens out-of-band
-  # on real x86-64 + NVIDIA hosts.
-  build-linux-x86-cuda:
-    name: Build Linux x86-64 CUDA (${{ matrix.variant }})
-    runs-on: ubuntu-24.04
+  build-linux-x86_64-cuda:
+    name: Build Linux x86_64 CUDA
+    # Self-hosted x86_64 NVIDIA runner. A Linux x64 self-hosted runner is given
+    # the self-hosted/Linux/X64 default labels automatically; CUDA is the custom
+    # label that marks the NVIDIA-equipped host (lablup-x64-cuda-build1).
+    runs-on: [self-hosted, Linux, X64, CUDA]
     environment: packaging
-    timeout-minutes: 300
-    # Hosted runners carry no self-hosted-pool risk, but keep the same
-    # repository guard as the other jobs so forks don't burn actions minutes
-    # uploading assets nowhere.
+    # See the macOS job for the rationale behind these two guards. The dispatch
+    # filter: `linux` builds every Linux arch, `linux-x86_64` isolates this job
+    # for bring-up without churning the aarch64 artifacts.
     if: |
       github.repository == 'lablup/mlxcel' && (
         github.event_name == 'release' ||
         github.event.inputs.targets == 'all' ||
-        github.event.inputs.targets == 'linux'
+        github.event.inputs.targets == 'linux' ||
+        github.event.inputs.targets == 'linux-x86_64'
       )
     permissions:
       contents: write
 
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          # NVIDIA A100 (Ampere, SM 80)
-          - variant: sm80
-            cuda_arch: "80"
-            asset_name: mlxcel-linux-x86_64-cuda13-sm80
+    # One fat binary covering Ampere and later. 90a is load-bearing: MLX gates
+    # its Hopper quantized kernel on "90a" being in the list (MLX_CUDA_SM90A_ENABLED),
+    # and build.rs forwards MLX_CUDA_ARCHITECTURES verbatim (no auto-suffix). Blackwell
+    # (sm_100/sm_120) has no MLX gate, so plain numbers emit SASS+PTX. sm_87 (Jetson)
+    # and sm_121 (GB10) are aarch64-only and excluded here. The build runner's own GPU
+    # is an RTX 5060 (sm_120), so the smoke test below runs on native SASS.
+    env:
+      MLX_CUDA_ARCHITECTURES: "80;86;89;90a;100;120"
+      # The CLI and server binaries are ~347 MB each, so ship them as separate
+      # archives; a consumer pulls only what it needs. Both carry the CCCL headers.
+      CLI_ASSET: mlxcel-linux-x86_64-cuda13
+      SERVER_ASSET: mlxcel-server-linux-x86_64-cuda13
 
-          # NVIDIA H100 / H200 (Hopper, SM 90a — the `a` suffix gates MLX's
-          # dedicated qmm_sm90 quantized kernel, same as the gh200 asset)
-          - variant: sm90a
-            cuda_arch: "90a"
-            asset_name: mlxcel-linux-x86_64-cuda13-sm90a
-
-          # NVIDIA RTX 50-series / RTX PRO Blackwell (SM 120)
-          - variant: sm120
-            cuda_arch: "120"
-            asset_name: mlxcel-linux-x86_64-cuda13-sm120
+    # A cold build compiles MLX for six CUDA architectures (CUTLASS-heavy
+    # quantized kernels per arch); the persistent cargo cache makes later runs
+    # far cheaper. Generous ceiling so a from-scratch build is not killed (a
+    # cold 6-arch build was observed at ~3h).
+    timeout-minutes: 480
 
     steps:
-      # Self-healing release: see the macOS job for the rationale.
       - name: Checkout code
         uses: actions/checkout@v6
         with:
           persist-credentials: false
           ref: ${{ github.event.release.tag_name || github.event.inputs.release_tag || github.sha }}
 
-      # Hosted runners have ~14 GB free on the root volume; the CUDA toolkit
-      # (~6 GB) plus the MLX + cargo build tree does not fit without evicting
-      # the large preinstalled toolchains we never use.
-      - name: Free disk space
+      - name: Setup persistent cache paths (self-hosted)
         run: |
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
-            /opt/hostedtoolcache/CodeQL /usr/local/share/boost
-          df -h /
+          CARGO_TARGET="$HOME/.cargo-target/mlxcel-cuda-x86_64"
+          mkdir -p "$CARGO_TARGET"
+          echo "CARGO_TARGET_DIR=$CARGO_TARGET" >> $GITHUB_ENV
 
-      # CUDA 13 toolkit + cuDNN 9 from NVIDIA's network repo, plus the
-      # BLAS/LAPACK headers MLX's CPU fallback paths compile against
-      # (lapacke.h comes from liblapacke-dev, not liblapack-dev).
-      - name: Install CUDA toolkit and build dependencies
+          # Prune stale cargo target cache if older than 7 days.
+          MARKER="$CARGO_TARGET/.last-clean"
+          SHOULD_CLEAN=false
+          if [ ! -f "$MARKER" ]; then
+            SHOULD_CLEAN=true
+          elif [ "$(find "$MARKER" -mtime +7 2>/dev/null)" ]; then
+            SHOULD_CLEAN=true
+          fi
+          if [ "$SHOULD_CLEAN" = true ]; then
+            echo "Cargo target cache older than 7 days: cleaning"
+            rm -rf "$CARGO_TARGET"
+            mkdir -p "$CARGO_TARGET"
+            date -u +"%Y-%m-%dT%H:%M:%SZ" > "$MARKER"
+          else
+            AGE_DAYS=$(( ($(date +%s) - $(stat -c %Y "$MARKER")) / 86400 ))
+            echo "Cargo target cache age: ${AGE_DAYS}d (keeping)"
+          fi
+
+      - name: Validate MLX build cache
         run: |
-          wget -q https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb
-          sudo dpkg -i cuda-keyring_1.1-1_all.deb
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq \
-            cuda-toolkit-13-3 \
-            libcudnn9-dev-cuda-13 \
-            libopenblas-dev \
-            liblapacke-dev \
-            cmake
-          echo "CUDA_HOME=/usr/local/cuda-13.3" >> $GITHUB_ENV
-          echo "/usr/local/cuda-13.3/bin" >> $GITHUB_PATH
-          /usr/local/cuda-13.3/bin/nvcc --version
+          # MLX_EXPECTED_COMMIT is set at workflow scope (top of this file).
+          # Check every _deps directory for a valid .mlx-build-commit marker.
+          # If the marker is missing or doesn't match, purge that _deps/ entirely.
+          FOUND=0
+          PURGED=0
+          for deps_dir in $(find "$CARGO_TARGET_DIR" -path "*/_deps" -type d 2>/dev/null); do
+            FOUND=$((FOUND + 1))
+            MARKER="$deps_dir/.mlx-build-commit"
+            if [ -f "$MARKER" ] && [ "$(cat "$MARKER")" = "$MLX_EXPECTED_COMMIT" ]; then
+              echo "Valid cache: $deps_dir"
+            else
+              echo "Stale cache (marker=$(cat "$MARKER" 2>/dev/null || echo 'missing')): purging $deps_dir"
+              rm -rf "$deps_dir"
+              PURGED=$((PURGED + 1))
+            fi
+          done
+          for deps_dir in $(find target -path "*/_deps" -type d 2>/dev/null); do
+            rm -rf "$deps_dir"
+            PURGED=$((PURGED + 1))
+          done
+          echo "Checked $FOUND cache(s), purged $PURGED"
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      # No tests here either — see the macOS job comment. This job's purpose
-      # is producing (and continuously verifying) the x86-64 build itself.
-      #
-      # -j 3: cap build parallelism below the runner's 4 cores. Cargo forwards
-      # this as the CMake build parallelism for the MLX subbuild, where the
-      # CUTLASS-heavy quantized-matmul kernels (qmm_*.cu) peak at ~4-5 GB of
-      # cicc memory PER JOB — four concurrent jobs OOM the hosted runner's
-      # 16 GB (observed as gmake "Error 137" / SIGKILL).
       - name: Build release binaries
-        run: cargo build -j 3 --release --features cuda --locked
+        run: cargo build --release --features cuda --locked
+        # MLX_CUDA_ARCHITECTURES is inherited from the job env above.
         env:
-          MLX_CUDA_ARCHITECTURES: ${{ matrix.cuda_arch }}
           # Redistributable asset: pin the C++ bridge and Rust code to the
           # portable x86-64-v3 baseline (AVX2, ~2013+) instead of inheriting
-          # whatever ISA the hosted runner happens to expose (build.rs
-          # defaults to -march=native, which could bake in AVX-512 and
-          # SIGILL on older CPUs).
+          # this build host's native ISA. build.rs defaults the bridge to
+          # -march=native, which on a newer runner could bake in AVX-512 and
+          # SIGILL on older customer CPUs. Set MLXCEL_CXX_MARCH=none to omit.
           MLXCEL_CXX_MARCH: x86-64-v3
           RUSTFLAGS: "-C target-cpu=x86-64-v3"
 
+      - name: Smoke test (10-token generate on GPU)
+        run: |
+          set -euo pipefail
+          BIN_DIR="$CARGO_TARGET_DIR/release"
+          # Make the CUDA runtime/math libs we linked resolvable at run time.
+          export LD_LIBRARY_PATH="${CUDA_HOME:-/usr/local/cuda}/lib64:${LD_LIBRARY_PATH:-}"
+          # Keep the model cache inside the job temp dir so it does not accumulate
+          # on the persistent self-hosted runner.
+          export MLXCEL_CACHE_DIR="$RUNNER_TEMP/mlxcel-smoke"
+          MODEL_ID="mlx-community/Qwen3-0.6B-4bit"
+          MODEL_DIR="$MLXCEL_CACHE_DIR/models/mlx-community/Qwen3-0.6B-4bit"
+          echo "=== GPU ==="
+          nvidia-smi || true
+          echo "=== download $MODEL_ID ==="
+          "$BIN_DIR/mlxcel" download "$MODEL_ID"
+          echo "=== generate (10 tokens) ==="
+          "$BIN_DIR/mlxcel" generate -m "$MODEL_DIR" -p "Hello, world." -n 10
+
+      - name: Clean up smoke-test model cache
+        if: always()
+        run: rm -rf "$RUNNER_TEMP/mlxcel-smoke" 2>/dev/null || true
+
       - name: Package binaries
         run: |
-          mkdir -p package
-          cp target/release/mlxcel package/
-          cp target/release/mlxcel-server package/
-          cd package && zip -r "../${{ matrix.asset_name }}.zip" . && cd ..
+          set -euo pipefail
+          BIN_DIR="$CARGO_TARGET_DIR/release"
 
-      - name: Generate checksum
-        run: sha256sum "${{ matrix.asset_name }}.zip" > "${{ matrix.asset_name }}.zip.sha256"
+          # MLX's CUDA backend NVRTC-JITs gather/indexing kernels at runtime;
+          # those include <cuda/std/tuple>, so the CCCL (libcu++) headers must be
+          # present on the deployment host. The compiled-in MLX_CCCL_DIR points at
+          # this build machine's path and is useless elsewhere, so bundle the
+          # headers in MLX's native runtime layout: the JIT looks for
+          # <exe-dir>/../include/cccl, hence bin/ + include/cccl/. Only cuda/ and
+          # nv/ are needed (MLX installs exactly those), ~8.8 MB. Host CUDA runtime
+          # headers (cuda_runtime.h etc.) still come from the node's CUDA_HOME.
+          CCCL_INC=$(find "$BIN_DIR/build" -type d -path '*/_deps/cccl-src/include' 2>/dev/null | head -1)
+          if [ -z "$CCCL_INC" ] || [ ! -d "$CCCL_INC/cuda" ] || [ ! -d "$CCCL_INC/nv" ]; then
+            echo "::error::CCCL headers not found under the build tree (expected _deps/cccl-src/include/{cuda,nv})"
+            exit 1
+          fi
+          echo "Bundling CCCL headers from: $CCCL_INC"
 
-      # Skipped when release_tag is empty: a tag-less workflow_dispatch run is
-      # the documented build-only verification mode (see the input description).
+          # Package one binary as its own self-contained archive: bin/<binary>
+          # plus the CCCL headers in MLX's native include/cccl/ layout.
+          package_one() {
+            bin="$1"; asset="$2"
+            pkg="package/${asset}"
+            rm -rf "$pkg"
+            mkdir -p "$pkg/bin" "$pkg/include/cccl"
+            cp "$BIN_DIR/${bin}" "$pkg/bin/"
+            cp -R "$CCCL_INC/cuda" "$pkg/include/cccl/"
+            cp -R "$CCCL_INC/nv" "$pkg/include/cccl/"
+            n=$(find "$pkg/include/cccl" -type f | wc -l | tr -d ' ')
+            if [ ! -f "$pkg/include/cccl/cuda/std/tuple" ] || [ "$n" -lt 100 ]; then
+              echo "::error::CCCL bundle for ${asset} looks incomplete (${n} files)"
+              exit 1
+            fi
+            ( cd package && zip -rq "../${asset}.zip" "${asset}" )
+            echo "Packaged ${asset}.zip ($(du -h "${asset}.zip" | cut -f1), CCCL headers: ${n})"
+          }
+
+          package_one mlxcel "${CLI_ASSET}"
+          package_one mlxcel-server "${SERVER_ASSET}"
+
+      - name: Generate checksums
+        run: |
+          set -euo pipefail
+          for asset in "${CLI_ASSET}" "${SERVER_ASSET}"; do
+            sha256sum "${asset}.zip" > "${asset}.zip.sha256"
+          done
+
       - name: Upload release artifacts
-        if: github.event_name == 'release' || github.event.inputs.release_tag != ''
+        if: github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && github.event.inputs.release_tag != '')
         uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ github.event.release.tag_name || github.event.inputs.release_tag }}
           files: |
-            ${{ matrix.asset_name }}.zip
-            ${{ matrix.asset_name }}.zip.sha256
+            ${{ env.CLI_ASSET }}.zip
+            ${{ env.CLI_ASSET }}.zip.sha256
+            ${{ env.SERVER_ASSET }}.zip
+            ${{ env.SERVER_ASSET }}.zip.sha256
 
   # ============================================================================
   # Microsoft Teams release notification (Power Automate Workflows webhook)
   # ============================================================================
   notify-teams:
     name: Notify Teams on release
-    needs: [build-macos, build-linux-cuda, build-linux-x86-cuda]
+    needs: [build-macos, build-linux-cuda, build-linux-x86_64-cuda]
     if: github.repository == 'lablup/mlxcel' && github.event_name == 'release'
     runs-on: ubuntu-latest
     permissions: {}
@@ -695,8 +805,8 @@ jobs:
   # ============================================================================
   promote-release:
     name: Promote to full release
-    needs: [build-macos, build-linux-cuda, build-linux-x86-cuda]
-    if: always() && github.repository == 'lablup/mlxcel' && github.event_name == 'release' && github.event.release.prerelease && needs.build-macos.result == 'success' && needs.build-linux-cuda.result == 'success' && needs.build-linux-x86-cuda.result == 'success'
+    needs: [build-macos, build-linux-cuda, build-linux-x86_64-cuda]
+    if: always() && github.repository == 'lablup/mlxcel' && github.event_name == 'release' && github.event.release.prerelease && needs.build-macos.result == 'success' && needs.build-linux-cuda.result == 'success' && needs.build-linux-x86_64-cuda.result == 'success'
     runs-on: ubuntu-latest
     permissions:
       contents: write

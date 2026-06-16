@@ -16,7 +16,7 @@
 //! per-level decoder input projection -> encoder query selection -> deformable
 //! decoder.
 //!
-//! Port of `references/mlx-vlm/mlx_vlm/models/rt_detr_v2/rt_detr_v2.py`.
+//! Port of https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/models/rt_detr_v2/rt_detr_v2.py.
 
 use std::path::Path;
 

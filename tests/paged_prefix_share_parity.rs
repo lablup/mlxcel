@@ -321,3 +321,375 @@ fn paged_prefix_share_matches_cold_run_llama3() {
     };
     assert_prefix_share_parity(&model, LLAMA3_DIR, "llama3");
 }
+
+// ---------------------------------------------------------------------------
+// Partial prefix adoption (#225): APC-clamped match, floored to the pool block
+// boundary, trimmed, adopted, and decoded byte-identically to cold.
+// ---------------------------------------------------------------------------
+
+/// Tail stored after the shared prefix in A's entry (12 tokens). B shares the
+/// first 8 of them and then diverges, so the APC chain agrees through token 48
+/// (three 16-token APC blocks) and the scheduler floor lands at 32 (one pool
+/// block), exercising a real non-trivial floor (48 -> 32).
+const STORED_TAIL_TOKENS: &[i32] = &[14582, 25, 3555, 374, 220, 16, 488, 220, 18, 30, 6771, 594];
+
+/// B's continuation: same first 8 tail tokens, then divergent.
+const PARTIAL_SUFFIX_TOKENS: &[i32] = &[14582, 25, 3555, 374, 220, 16, 488, 220, 24, 11, 4226, 30];
+
+fn assert_partial_prefix_share_parity(
+    model: &mlxcel::LoadedModel,
+    label: &str,
+    cache_model_key: &str,
+) {
+    use mlxcel::server::prompt_cache::ApcConfig;
+
+    let num_layers = model.num_layers();
+
+    // Stored entry: prefix + tail = 52 tokens (2 pool blocks: 32 + 20).
+    let mut stored_tokens = PREFIX_TOKENS.to_vec();
+    stored_tokens.extend_from_slice(STORED_TAIL_TOKENS);
+    // B's request: shares the stored entry's first 48 tokens, then diverges.
+    let mut b_prompt = PREFIX_TOKENS.to_vec();
+    b_prompt.extend_from_slice(PARTIAL_SUFFIX_TOKENS);
+    assert_eq!(stored_tokens[..48], b_prompt[..48], "share 48 tokens");
+    assert_ne!(stored_tokens[48], b_prompt[48], "diverge at token 48");
+
+    eprintln!(
+        "\n=== paged PARTIAL prefix-share parity: {label} ({num_layers} layers, \
+         stored={}, request={}) ===",
+        stored_tokens.len(),
+        b_prompt.len()
+    );
+
+    // ---- COLD reference for B's full prompt. ----
+    let cold_tokens = {
+        let mut pool = CachePool::new(2);
+        let id = pool
+            .allocate_with_layout(model, Some(scheduler_paged_layout(num_layers)))
+            .expect("cold paged allocate");
+        let caches = pool.get_caches_mut(id).unwrap();
+        prefill_and_decode(model, caches, &b_prompt, 0)
+    };
+    eprintln!("cold    decoded: {cold_tokens:?}");
+
+    // ---- Store with APC enabled (16-token blocks, the server default). ----
+    // ApcConfig is #[non_exhaustive]; mutate a default instead of constructing.
+    let apc = {
+        let mut apc = ApcConfig::default();
+        apc.enabled = true;
+        apc
+    };
+    let store = PromptCacheStore::with_config(
+        PromptCacheConfig::new(true, 1 << 30, 64, Duration::from_secs(3600), 1).with_apc(apc),
+    );
+    let mut pool = CachePool::new(4);
+
+    // A prefills the full stored sequence and donates it.
+    let seq_a = pool
+        .allocate_with_layout(model, Some(scheduler_paged_layout(num_layers)))
+        .expect("A paged allocate");
+    {
+        let caches = pool.get_caches_mut(seq_a).unwrap();
+        let len = stored_tokens.len() as i32;
+        let prompt = mlxcel_core::from_slice_i32(&stored_tokens, &[1, len]);
+        let mask = mlxcel_core::utils::create_causal_mask(len, 0);
+        let logits = model.forward(&prompt, caches, Some(&mask));
+        mlxcel_core::eval(&logits);
+    }
+    let a_blocks = pool
+        .get_paged_state(seq_a)
+        .unwrap()
+        .layer(0)
+        .unwrap()
+        .block_ids
+        .clone();
+    assert_eq!(a_blocks.len(), 2, "52 tokens = 2 pool blocks");
+    let set_a = pool.detach_paged(seq_a).expect("A detach_paged");
+    let entry = CacheEntry::new(stored_tokens.clone(), DetachedKvSet::Paged(set_a));
+    let insert_key = PromptCacheKey::new_full(
+        cache_model_key,
+        None,
+        "tpl-v1",
+        Some("sess"),
+        MultimodalDigest::empty(),
+        &stored_tokens,
+    );
+    store.insert(&insert_key, entry).expect("store insert");
+
+    // ---- B looks up: APC clamps the match to 48 (three 16-token blocks). ----
+    let lookup_key = PromptCacheKey::new_full(
+        cache_model_key,
+        None,
+        "tpl-v1",
+        Some("sess"),
+        MultimodalDigest::empty(),
+        &b_prompt,
+    );
+    let (hit_entry, matched_len) = store
+        .lookup_longest_prefix(&lookup_key, &b_prompt)
+        .expect("B must hit A's entry via the APC partial path");
+    assert_eq!(matched_len, 48, "APC must clamp the match to token 48");
+
+    // ---- Mirror the scheduler's #225 paged arm: floor to the pool block
+    //      boundary, trim, adopt. ----
+    let mut set_b = match hit_entry.take_detached().expect("first take") {
+        DetachedKvSet::Paged(p) => p,
+        DetachedKvSet::Dense(_) => panic!("paged backend must store a paged set"),
+    };
+    let adoptable = (matched_len / BLOCK_SIZE) * BLOCK_SIZE;
+    assert_eq!(adoptable, 32, "48 floors to one 32-token pool block");
+    pool.trim_detached_paged_to(&mut set_b, adoptable)
+        .expect("partial trim");
+    assert_eq!(set_b.seq_len(), adoptable);
+    let seq_b = pool.adopt_paged(model, set_b).expect("B adopt_paged");
+
+    // B keeps A's FIRST block (shared physical prefix), dropped the second.
+    let b_blocks = pool
+        .get_paged_state(seq_b)
+        .unwrap()
+        .layer(0)
+        .unwrap()
+        .block_ids
+        .clone();
+    assert_eq!(b_blocks.len(), 1, "trimmed to one shared prefix block");
+    assert_eq!(b_blocks[0], a_blocks[0], "B must reuse A's first block");
+
+    // ---- B re-prefills everything past the adopted 32 tokens and decodes. ----
+    let cached_tokens = {
+        let caches = pool.get_caches_mut(seq_b).unwrap();
+        assert!(
+            caches.iter().all(|c| c.is_paged_backed()),
+            "adopted B must have pool-backed caches"
+        );
+        prefill_and_decode(model, caches, &b_prompt[adoptable..], adoptable as i32)
+    };
+    eprintln!("partial decoded: {cached_tokens:?}");
+
+    assert_eq!(
+        cached_tokens, cold_tokens,
+        "partial-prefix (trimmed + adopted) decode must equal the cold run\n\
+         cold:    {cold_tokens:?}\npartial: {cached_tokens:?}"
+    );
+    eprintln!("OK: B adopted a trimmed 32-token prefix and decoded identically to cold.");
+}
+
+#[test]
+#[ignore = "loads qwen3-0.6b-4bit and runs real GPU forwards; run with --ignored"]
+fn paged_partial_prefix_share_matches_cold_run_qwen3() {
+    let _runtime = initialize_runtime();
+    let Some(model) = load_or_skip(QWEN3_DIR, "mlx-community/Qwen3-0.6B-4bit") else {
+        return;
+    };
+    assert_partial_prefix_share_parity(&model, QWEN3_DIR, "qwen3");
+}
+
+#[test]
+#[ignore = "loads llama-3.2-1b-4bit and runs real GPU forwards; run with --ignored"]
+fn paged_partial_prefix_share_matches_cold_run_llama3() {
+    let _runtime = initialize_runtime();
+    let Some(model) = load_or_skip(LLAMA3_DIR, "mlx-community/Llama-3.2-1B-Instruct-4bit") else {
+        return;
+    };
+    assert_partial_prefix_share_parity(&model, LLAMA3_DIR, "llama3");
+}
+
+// ---------------------------------------------------------------------------
+// Non-consuming clone-and-pin adoption (#227): one stored entry serves
+// multiple borrowers and survives them all.
+// ---------------------------------------------------------------------------
+
+fn assert_clone_and_pin_share_parity(model: &mlxcel::LoadedModel, label: &str) {
+    let num_layers = model.num_layers();
+    let prefix_len = PREFIX_TOKENS.len() as i32;
+
+    // Two divergent continuations of the same shared prefix.
+    let mut prompt_b = PREFIX_TOKENS.to_vec();
+    prompt_b.extend_from_slice(SUFFIX_TOKENS);
+    let mut prompt_c = PREFIX_TOKENS.to_vec();
+    prompt_c.extend_from_slice(PARTIAL_SUFFIX_TOKENS);
+
+    eprintln!("\n=== paged clone-and-pin share parity: {label} ({num_layers} layers) ===");
+
+    // Cold references.
+    let cold = |prompt: &[i32]| {
+        let mut pool = CachePool::new(2);
+        let id = pool
+            .allocate_with_layout(model, Some(scheduler_paged_layout(num_layers)))
+            .expect("cold paged allocate");
+        let caches = pool.get_caches_mut(id).unwrap();
+        prefill_and_decode(model, caches, prompt, 0)
+    };
+    let cold_b = cold(&prompt_b);
+    let cold_c = cold(&prompt_c);
+
+    // A prefills the shared prefix and donates it.
+    let mut pool = CachePool::new(8);
+    let seq_a = pool
+        .allocate_with_layout(model, Some(scheduler_paged_layout(num_layers)))
+        .expect("A paged allocate");
+    {
+        let caches = pool.get_caches_mut(seq_a).unwrap();
+        let prompt = mlxcel_core::from_slice_i32(PREFIX_TOKENS, &[1, prefix_len]);
+        let mask = mlxcel_core::utils::create_causal_mask(prefix_len, 0);
+        let logits = model.forward(&prompt, caches, Some(&mask));
+        mlxcel_core::eval(&logits);
+    }
+    let a_blocks = pool
+        .get_paged_state(seq_a)
+        .unwrap()
+        .layer(0)
+        .unwrap()
+        .block_ids
+        .clone();
+    let set_a = pool.detach_paged(seq_a).expect("A detach_paged");
+    let entry = CacheEntry::new(PREFIX_TOKENS.to_vec(), DetachedKvSet::Paged(set_a));
+
+    // The scheduler's #227 path: clone the matched prefix (floored to the
+    // pool block boundary) WITHOUT consuming the entry, adopt the clone.
+    let adoptable = (PREFIX_TOKENS.len() / BLOCK_SIZE) * BLOCK_SIZE; // 40 -> 32
+    let mut borrow = |prompt: &[i32]| -> Vec<i32> {
+        let clone = entry
+            .with_detached(|set| match set {
+                DetachedKvSet::Paged(p) => pool.clone_detached_paged_prefix(p, adoptable),
+                DetachedKvSet::Dense(_) => panic!("expected a paged set"),
+            })
+            .expect("entry must not be drained")
+            .expect("clone must succeed");
+        let seq = pool.adopt_paged(model, clone).expect("adopt clone");
+        let caches = pool.get_caches_mut(seq).unwrap();
+        let decoded = prefill_and_decode(model, caches, &prompt[adoptable..], adoptable as i32);
+        pool.release(seq);
+        decoded
+    };
+
+    let got_b = borrow(&prompt_b);
+    assert_eq!(
+        got_b, cold_b,
+        "borrower B (clone-adopted) must equal its cold run"
+    );
+    let got_c = borrow(&prompt_c);
+    assert_eq!(
+        got_c, cold_c,
+        "borrower C (clone-adopted, after B) must equal its cold run"
+    );
+
+    // The entry SURVIVED both borrowers: its set is still present and still
+    // pins the original prefix blocks.
+    let still_there = entry
+        .with_detached(|set| match set {
+            DetachedKvSet::Paged(p) => p.seq_len(),
+            DetachedKvSet::Dense(_) => 0,
+        })
+        .expect("entry must still hold its set after clone-based borrows");
+    assert_eq!(still_there, PREFIX_TOKENS.len());
+    assert!(
+        pool.paged_pool_ref().unwrap().refcount(a_blocks[0]) >= 2,
+        "the stored entry must still pin the shared prefix blocks"
+    );
+
+    // Cleanup: take and release the source set; everything returns to zero.
+    if let Some(DetachedKvSet::Paged(p)) = entry.take_detached() {
+        pool.release_detached_paged(p);
+    }
+    assert_eq!(pool.paged_pool_ref().unwrap().refcount(a_blocks[0]), 0);
+    eprintln!("OK: one stored entry served two borrowers byte-identically and survived.");
+}
+
+#[test]
+#[ignore = "loads qwen3-0.6b-4bit and runs real GPU forwards; run with --ignored"]
+fn paged_clone_and_pin_share_matches_cold_runs_qwen3() {
+    let _runtime = initialize_runtime();
+    let Some(model) = load_or_skip(QWEN3_DIR, "mlx-community/Qwen3-0.6B-4bit") else {
+        return;
+    };
+    assert_clone_and_pin_share_parity(&model, QWEN3_DIR);
+}
+
+#[test]
+#[ignore = "loads llama-3.2-1b-4bit and runs real GPU forwards; run with --ignored"]
+fn paged_clone_and_pin_share_matches_cold_runs_llama3() {
+    let _runtime = initialize_runtime();
+    let Some(model) = load_or_skip(LLAMA3_DIR, "mlx-community/Llama-3.2-1B-Instruct-4bit") else {
+        return;
+    };
+    assert_clone_and_pin_share_parity(&model, LLAMA3_DIR);
+}
+
+/// Whole-entry match with an UNALIGNED stored length (the multi-turn
+/// continuation case: donated entries carry prompt + generated tokens, which
+/// is almost never a multiple of the pool block size). The scheduler floors
+/// the adoptable length to the block boundary even for whole-entry matches;
+/// the re-prefill covers the dropped partial tail plus the new turn.
+#[test]
+#[ignore = "loads llama-3.2-1b-4bit and runs real GPU forwards; run with --ignored"]
+fn paged_clone_whole_entry_unaligned_floors_and_matches_cold_llama3() {
+    let _runtime = initialize_runtime();
+    let Some(model) = load_or_skip(LLAMA3_DIR, "mlx-community/Llama-3.2-1B-Instruct-4bit") else {
+        return;
+    };
+    let num_layers = model.num_layers();
+
+    // Stored entry: 52 tokens (NOT a multiple of BLOCK_SIZE = 32).
+    let mut stored_tokens = PREFIX_TOKENS.to_vec();
+    stored_tokens.extend_from_slice(STORED_TAIL_TOKENS);
+    assert_ne!(stored_tokens.len() % BLOCK_SIZE, 0);
+    // Continuation request: the stored stream plus a new turn, so the match
+    // covers the WHOLE entry (matched_len == seq_len == 52, unaligned).
+    let mut request = stored_tokens.clone();
+    request.extend_from_slice(SUFFIX_TOKENS);
+
+    let cold = {
+        let mut pool = CachePool::new(2);
+        let id = pool
+            .allocate_with_layout(&model, Some(scheduler_paged_layout(num_layers)))
+            .expect("cold paged allocate");
+        let caches = pool.get_caches_mut(id).unwrap();
+        prefill_and_decode(&model, caches, &request, 0)
+    };
+
+    let mut pool = CachePool::new(4);
+    let seq_a = pool
+        .allocate_with_layout(&model, Some(scheduler_paged_layout(num_layers)))
+        .expect("A paged allocate");
+    {
+        let caches = pool.get_caches_mut(seq_a).unwrap();
+        let len = stored_tokens.len() as i32;
+        let prompt = mlxcel_core::from_slice_i32(&stored_tokens, &[1, len]);
+        let mask = mlxcel_core::utils::create_causal_mask(len, 0);
+        let logits = model.forward(&prompt, caches, Some(&mask));
+        mlxcel_core::eval(&logits);
+    }
+    let set_a = pool.detach_paged(seq_a).expect("A detach_paged");
+    let entry = CacheEntry::new(stored_tokens.clone(), DetachedKvSet::Paged(set_a));
+
+    // Scheduler mirror: matched_len == seq_len (whole entry), floored.
+    let matched_len = stored_tokens.len();
+    let adoptable = (matched_len.min(stored_tokens.len()) / BLOCK_SIZE) * BLOCK_SIZE;
+    assert_eq!(adoptable, 32, "52 floors to one 32-token pool block");
+    let clone = entry
+        .with_detached(|set| match set {
+            DetachedKvSet::Paged(p) => {
+                assert!(p.clone_eligible());
+                pool.clone_detached_paged_prefix(p, adoptable)
+            }
+            DetachedKvSet::Dense(_) => panic!("expected a paged set"),
+        })
+        .expect("entry live")
+        .expect("clone must succeed for the floored whole-entry match");
+    let seq_b = pool.adopt_paged(&model, clone).expect("adopt clone");
+    let got = {
+        let caches = pool.get_caches_mut(seq_b).unwrap();
+        prefill_and_decode(&model, caches, &request[adoptable..], adoptable as i32)
+    };
+    assert_eq!(
+        got, cold,
+        "unaligned whole-entry continuation must decode identically to cold"
+    );
+
+    // Entry survived the whole-entry borrow.
+    assert!(
+        entry
+            .with_detached(|set| matches!(set, DetachedKvSet::Paged(_)))
+            .unwrap_or(false)
+    );
+}

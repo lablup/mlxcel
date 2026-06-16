@@ -117,6 +117,12 @@ pub struct ServerStartupConfig {
     /// Enable experimental VLM prompt-prefix cache sharing (#124 step c,
     /// `--enable-vlm-prefix-cache`). Default off; forwarded to the scheduler.
     pub enable_vlm_prefix_cache: bool,
+    /// Validated CORS allow-list origins (#244). `None` keeps the permissive
+    /// default; `Some(non_empty)` restricts cross-origin requests to exactly
+    /// these origins. Built from `--allowed-origins` in
+    /// [`super::ServerStartupInput::into_startup_config`] and forwarded to
+    /// [`super::config::ServerConfig`].
+    pub cors_allowed_origins: Option<Vec<axum::http::HeaderValue>>,
     /// Preemption policy string from CLI (parsed into enum at build_server_config).
     pub preemption_policy: String,
     /// Force the legacy sequential worker, bypassing the batch scheduler.
@@ -353,6 +359,14 @@ pub struct ServerStartupConfig {
     /// trivial to construct.
     #[cfg(feature = "surgery")]
     pub surgery_config_path: Option<PathBuf>,
+
+    /// `--max-denoising-steps` (issue #217 phase 3). Serve-level diffusion
+    /// step-cap override; `None` keeps the checkpoint default.
+    pub max_denoising_steps: Option<usize>,
+    /// `--diffusion-sampler` (issue #217 phase 3).
+    pub diffusion_sampler: String,
+    /// `--diffusion-threshold` (issue #217 phase 3).
+    pub diffusion_threshold: f32,
 }
 
 impl Default for ServerStartupConfig {
@@ -385,6 +399,7 @@ impl Default for ServerStartupConfig {
             ubatch_size_provided: false,
             enable_preemption: false,
             enable_vlm_prefix_cache: false,
+            cors_allowed_origins: None,
             preemption_policy: "longest-first".to_string(),
             no_batch: false,
             max_batch_prefill: 1,
@@ -460,6 +475,9 @@ impl Default for ServerStartupConfig {
             conversation_store_ttl_secs: 3600,
             #[cfg(feature = "surgery")]
             surgery_config_path: None,
+            max_denoising_steps: None,
+            diffusion_sampler: "entropy-bound".to_string(),
+            diffusion_threshold: 0.9,
         }
     }
 }
@@ -851,6 +869,8 @@ pub(super) fn build_server_config(
         kv_cache_budget: startup.kv_cache_budget,
         // forward the experimental VLM prefix-cache toggle (#124 step c).
         enable_vlm_prefix_cache: startup.enable_vlm_prefix_cache,
+        // forward the validated CORS allow-list (#244); `None` keeps permissive.
+        cors_allowed_origins: startup.cors_allowed_origins.clone(),
         // disaggregated serving role derived from `--node-role` (#126 B2).
         serving_mode,
         // disaggregated serving-role network addresses (#126 B3b2a): the
@@ -859,6 +879,11 @@ pub(super) fn build_server_config(
         prefill_peers: startup.prefill_peers.clone(),
         decode_peers: startup.decode_peers.clone(),
         serving_bind: startup.serving_bind,
+        // serve-level diffusion knobs (#217 phase 3); consumed only by the
+        // DiffusionGemma worker loop.
+        max_denoising_steps: startup.max_denoising_steps,
+        diffusion_sampler: startup.diffusion_sampler.clone(),
+        diffusion_threshold: startup.diffusion_threshold,
     }
 }
 
@@ -1671,11 +1696,14 @@ pub async fn start_server(mut startup: ServerStartupConfig) -> Result<()> {
             capacity_bytes = config.prompt_cache.capacity_bytes,
             max_entries = config.prompt_cache.max_entries,
             ttl_seconds = config.prompt_cache.ttl.as_secs(),
+            snapshot_capacity_bytes = config.prompt_cache.snapshot_capacity_bytes,
+            snapshot_max_entries = config.prompt_cache.snapshot_max_entries,
+            snapshot_ttl_seconds = config.prompt_cache.snapshot_ttl.as_secs(),
             min_prefix_tokens = config.prompt_cache.min_prefix_tokens,
             apc_enabled = config.prompt_cache.apc.enabled,
             apc_block_size = config.prompt_cache.apc.block_size,
             apc_hash = %config.prompt_cache.apc.hash,
-            "Prompt-prefix KV cache store enabled (+ APC)"
+            "Prompt-prefix cache store enabled (+ APC, snapshots)"
         );
         Some(store)
     } else {

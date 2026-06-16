@@ -11,6 +11,11 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+//
+// Portions of this file are derived from turboquant_plus
+// (https://github.com/TheTom/turboquant_plus), Copyright 2026 Tom Turney,
+// licensed under the Apache License, Version 2.0. See the top-level NOTICE
+// file for the attribution carried forward under Apache-2.0 Section 4(d).
 
 //! Per-model allowlist for **symmetric** `KVCacheMode::Turbo4`
 //!

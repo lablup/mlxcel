@@ -15,7 +15,7 @@
 //! Nemotron H Nano Omni audio modality.
 //!
 //! Faithful Rust port of upstream
-//! `references/mlx-vlm/mlx_vlm/models/nemotron_h_nano_omni/audio.py`
+//! https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/models/nemotron_h_nano_omni/audio.py
 //! covering:
 //! - [`feature_extractor::NemotronOmniFeatureExtractor`] — log-mel
 //!   spectrogram preprocessing (pure DSP, no network weights). Mirrors

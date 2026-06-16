@@ -303,6 +303,7 @@ impl ServingCoordinator {
                 request_id: request.request_id,
                 phase: ResultPhase::FirstToken,
                 tokens,
+                start_sequence: 0,
                 done: done || frame.is_none(),
                 error,
             };
@@ -387,12 +388,48 @@ impl ServingCoordinator {
                     token_tx,
                 )
                 .context("decode role: ingest the handoff as an active sequence")?;
-            scheduler.decode_handoff_until_idle();
-            let (tokens, _done, error) = drain_generation_events(&token_rx);
 
+            // Stream the continuation incrementally (issue #199): after every
+            // decode tick, drain the tokens that tick produced and ship them
+            // as a non-terminal Continuation frame, so the client sees tokens
+            // during decode instead of after the whole generation finishes.
+            // The sends are awaited sequentially, so frames leave in order;
+            // `start_sequence` tags each frame's first token (1-based, the
+            // prefill first token is sequence 0) so the router can detect
+            // gaps or reordering on the wire.
+            let mut next_sequence: u64 = 1;
+            loop {
+                let active = scheduler.decode_handoff_step();
+                let (tokens, _done, error) = drain_generation_events(&token_rx);
+                if !tokens.is_empty() || error.is_some() {
+                    let frame_tokens = tokens.len() as u64;
+                    let result = ResultFrame {
+                        request_id: meta.request_id,
+                        phase: ResultPhase::Continuation,
+                        tokens,
+                        start_sequence: next_sequence,
+                        done: false,
+                        error,
+                    };
+                    self.transport
+                        .send(&meta.reply_to, result.encode()?)
+                        .await
+                        .context("decode role: stream a continuation frame to reply_to")?;
+                    next_sequence += frame_tokens;
+                }
+                if !active {
+                    break;
+                }
+            }
+
+            // Terminal frame. The per-tick drain above runs after each
+            // finalize_completed, so this drain is normally empty; it exists
+            // as a defensive catch-all so no event can be dropped.
+            let (tokens, _done, error) = drain_generation_events(&token_rx);
             let result = ResultFrame {
                 request_id: meta.request_id,
                 phase: ResultPhase::Continuation,
+                start_sequence: if tokens.is_empty() { 0 } else { next_sequence },
                 tokens,
                 done: true,
                 error,
@@ -400,7 +437,7 @@ impl ServingCoordinator {
             self.transport
                 .send(&meta.reply_to, result.encode()?)
                 .await
-                .context("decode role: return the continuation to reply_to")?;
+                .context("decode role: return the terminal continuation frame to reply_to")?;
         }
         Ok(())
     }

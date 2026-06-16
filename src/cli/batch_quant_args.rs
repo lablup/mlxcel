@@ -45,9 +45,8 @@ use clap::Args;
 pub struct BatchKvQuantArgs {
     /// KV cache quantization bit count for the continuous-batching path.
     ///
-    /// Mirrors the upstream `mlx-vlm` server `--kv-bits` flag. `0` (default)
-    /// disables KV cache quantization on the batched decode path. Valid
-    /// values:
+    /// `0` (default) disables KV cache quantization on the batched decode
+    /// path. Valid values:
     ///   `8` for `--kv-quant-scheme uniform`;
     ///   `4` only for `--kv-quant-scheme turboquant`.
     ///
@@ -83,8 +82,8 @@ pub struct BatchKvQuantArgs {
     /// KV cache quantization scheme for the continuous-batching path.
     ///
     /// Accepted values:
-    ///   `uniform`    — `mx.quantize`-style affine codec (default).
-    ///   `turboquant` — 4-bit V on FP16 K via TurboQuant.
+    ///   `uniform`    : `mx.quantize`-style affine codec (default).
+    ///   `turboquant` : 4-bit V on FP16 K via TurboQuant.
     ///
     /// Inert when `--kv-bits 0`.
     ///

@@ -15,7 +15,7 @@
 //! Single-batch exact-greedy speculative walk.
 //!
 //! Direct Rust port of `_speculative_walk` in
-//! `references/mlx-vlm/mlx_vlm/generate.py` lines 456-476:
+//! https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/speculative/mtp.py:
 //!
 //! ```python
 //! def _speculative_walk(draft_tokens, target_tokens, budget):
@@ -141,7 +141,7 @@ pub fn speculative_walk(draft_tokens: &[i32], target_tokens: &[i32], budget: usi
 /// Per-row exact-greedy speculative walk (B >= 1) for the batched MTP path.
 ///
 /// Mirrors upstream `_speculative_walk_batch` in
-/// `references/mlx-vlm/mlx_vlm/generate.py`. Given per-row drafter proposals
+/// https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/speculative/mtp.py. Given per-row drafter proposals
 /// (`draft_tokens[r]` is row `r`'s `K-1` proposals) and per-row target argmax
 /// (`target_tokens[r]` is row `r`'s `K` argmax tokens), plus per-row budgets,
 /// produces:

@@ -332,7 +332,7 @@ impl<'a> Gemma4MtpTargetAdapter<'a> {
     /// At temperature > 0 the caller is expected to override this with
     /// a real sampler; this helper handles only the greedy-parity path
     /// (`temperature == 0`). The MTP greedy-parity invariant
-    /// (referenced in `references/mlx-vlm`) requires the
+    /// (referenced in https://github.com/Blaizzy/mlx-vlm) requires the
     /// target tokens to match the target's own argmax extension, so for
     /// `temperature == 0` this is the load-bearing choice.
     ///
@@ -1128,6 +1128,99 @@ impl<'a> Gemma4MtpBatchedTargetAdapter<'a> {
         out
     }
 
+    /// Divergent-round analogue of [`Self::slice_shared_kv_batched`]
+    /// (issue #203): compact each captured shared K/V slab the same way
+    /// `rollback_speculative_cache_divergent` compacts the live caches, so
+    /// the slabs handed to the drafter keep every row's valid K/V as a
+    /// contiguous prefix (`normalize_batched_shared_kv_states` assumes the
+    /// row's real entries occupy `[left_padding[r], left_padding[r] +
+    /// kv_valid_len[r])`).
+    ///
+    /// Per row: move the accepted window entries from the shared physical
+    /// write base `[o_pre, o_pre + accepted[r] + 1)` down to the row's
+    /// logical valid end `ve_pre[r]`, zero the vacated region up to
+    /// `o_post`, then crop every slab to `o_post`.
+    fn compact_shared_kv_batched(
+        tensors: Vec<UniquePtr<MlxArray>>,
+        ve_pre: &[i32],
+        accepted: &[i32],
+        o_pre: i32,
+        o_post: i32,
+    ) -> Result<Vec<UniquePtr<MlxArray>>, DrafterError> {
+        tensors
+            .into_iter()
+            .map(|ptr| {
+                let array = ptr.as_ref().expect("shared K/V slab must be non-null");
+                let shape = mlxcel_core::array_shape(array);
+                if shape.len() != 4 || shape[0] != ve_pre.len() as i32 {
+                    return Err(DrafterError::DraftFailed {
+                        reason: format!(
+                            "Gemma4 batched MTP target: shared K/V slab must be \
+                             [B={}, H, kv, D], got shape {:?}",
+                            ve_pre.len(),
+                            shape
+                        ),
+                    });
+                }
+                // Validate every row against the slab axis BEFORE any
+                // slice_update (mirrors compact_partial_accept_rows).
+                let slab_len = shape[2];
+                for (r, (&ve, &a)) in ve_pre.iter().zip(accepted).enumerate() {
+                    if ve > o_pre || a < 0 || o_pre + a + 1 > slab_len || o_post > slab_len {
+                        return Err(DrafterError::DraftFailed {
+                            reason: format!(
+                                "Gemma4 batched MTP target: slab compaction row {r} out \
+                                 of bounds (ve_pre {ve}, accepted {a}, o_pre {o_pre}, \
+                                 o_post {o_post}, slab_len {slab_len})"
+                            ),
+                        });
+                    }
+                }
+                let dtype = mlxcel_core::array_dtype(array);
+                let mut out = mlxcel_core::copy(array);
+                for (r, (&ve, &a)) in ve_pre.iter().zip(accepted).enumerate() {
+                    let n = a + 1;
+                    let bi = r as i32;
+                    if ve < o_pre {
+                        // Materialize the source slice with an explicit copy
+                        // BEFORE the update: a bare slice is a lazy view of
+                        // the same buffer, and `slice_update` may donate that
+                        // buffer to its output, so an overlapping move
+                        // (`ve + n > o_pre`) would read already-overwritten
+                        // rows without the copy.
+                        let src = mlxcel_core::copy(&mlxcel_core::slice(
+                            &out,
+                            &[bi, 0, o_pre, 0],
+                            &[bi + 1, shape[1], o_pre + n, shape[3]],
+                        ));
+                        out = mlxcel_core::slice_update(
+                            &out,
+                            &src,
+                            &[bi, 0, ve, 0],
+                            &[bi + 1, shape[1], ve + n, shape[3]],
+                        );
+                    }
+                    let z_start = ve + n;
+                    if z_start < o_post {
+                        let span = o_post - z_start;
+                        let zero = mlxcel_core::zeros(&[1, shape[1], span, shape[3]], dtype);
+                        out = mlxcel_core::slice_update(
+                            &out,
+                            &zero,
+                            &[bi, 0, z_start, 0],
+                            &[bi + 1, shape[1], o_post, shape[3]],
+                        );
+                    }
+                }
+                Ok(mlxcel_core::slice(
+                    &out,
+                    &[0, 0, 0, 0],
+                    &[shape[0], shape[1], o_post, shape[3]],
+                ))
+            })
+            .collect()
+    }
+
     /// Slice the captured shared K/V slabs to the post-rollback length.
     ///
     /// Batched analogue of [`Gemma4MtpTargetAdapter::slice_shared_kv`]:
@@ -1733,27 +1826,78 @@ impl<'a> MtpTarget for Gemma4MtpBatchedTargetAdapter<'a> {
         let next_hidden = self
             .draft_hidden_at_positions_batched(hidden_full.as_ref().unwrap(), accepted_per_row)?;
 
-        // Per-row tail-zero rollback on the adapter's own [B, ...] cache.
+        // Per-row rollback on the adapter's own [B, ...] cache.
+        //
+        // Uniform rounds (every row's logical valid end still equals the
+        // shared physical write base, which is always true until the first divergent
+        // accept) keep the legacy contract:
         // `rollback_speculative_cache_explicit` trims by `block_size -
-        // max(accepted) - 1` and per-row zeros the tails for rows below
-        // max — the per-row early-EOS / partial-accept contract.
+        // max(accepted) - 1` and per-row zeros the tails for rows below max.
+        //
+        // Divergent rounds (issue #203) instead COMPACT: each row's accepted
+        // window K/V moves down to the row's logical valid end so physical
+        // slot == logical position is restored for every row, exactly like
+        // the row's standalone B = 1 run. The captured drafter slabs get the
+        // same per-row compaction so `normalize_batched_shared_kv_states`'s
+        // contiguous-prefix assumption holds.
         let accepted_i32: Vec<i32> = accepted_per_row.iter().map(|&a| a as i32).collect();
-        let post_rollback_kv_offset = {
-            let mut caches = self.caches.borrow_mut();
-            self.wrapper
-                .rollback_speculative_cache_explicit(&mut caches, &accepted_i32, block_size as i32)
-                .map_err(|e| DrafterError::DraftFailed {
-                    reason: format!("Gemma4 batched MTP rollback failed: {e}"),
-                })?;
-            first_cache_offset(caches.as_mut_slice(), "full_attention").max(0) as usize
+        let width = block_size as i32;
+        let ve_pre: Option<Vec<i32>> = {
+            let lp = self.left_padding.borrow();
+            let pos = self.positions.borrow();
+            if lp.len() == self.batch_size && pos.len() == self.batch_size {
+                Some(
+                    lp.iter()
+                        .zip(pos.iter())
+                        .map(|(&l, &p)| (l + p) as i32)
+                        .collect(),
+                )
+            } else {
+                None
+            }
         };
-
-        // Slice the captured shared K/V to the post-rollback length. The
-        // global trim amount is `block_size - max(accepted) - 1`; this
-        // matches the cache trim above.
-        let max_accepted = accepted_per_row.iter().copied().max().unwrap_or(0);
-        let rejected = block_size.saturating_sub(max_accepted).saturating_sub(1);
-        let next_shared_kv = Self::slice_shared_kv_batched(tensors, rejected);
+        let (post_rollback_kv_offset, next_shared_kv) = {
+            let mut caches = self.caches.borrow_mut();
+            let o_pre =
+                crate::models::gemma4::first_present_cache_offset(caches.as_slice()) - width;
+            let divergent = !crate::models::gemma4::mtp_divergent_fix_disabled()
+                && ve_pre
+                    .as_ref()
+                    .map(|ve| ve.iter().any(|&v| v != o_pre))
+                    .unwrap_or(false);
+            if divergent {
+                let ve_pre = ve_pre.as_ref().expect("divergent implies Some(ve_pre)");
+                tracing::debug!(
+                    o_pre,
+                    ?ve_pre,
+                    accepted = ?accepted_i32,
+                    "gemma4 batched MTP divergent finalize (compacting rollback)"
+                );
+                let o_post = self
+                    .wrapper
+                    .rollback_speculative_cache_divergent(&mut caches, ve_pre, &accepted_i32, width)
+                    .map_err(|e| DrafterError::DraftFailed {
+                        reason: format!("Gemma4 batched MTP divergent rollback failed: {e}"),
+                    })?;
+                let next_shared_kv =
+                    Self::compact_shared_kv_batched(tensors, ve_pre, &accepted_i32, o_pre, o_post)?;
+                (o_post.max(0) as usize, next_shared_kv)
+            } else {
+                self.wrapper
+                    .rollback_speculative_cache_explicit(&mut caches, &accepted_i32, width)
+                    .map_err(|e| DrafterError::DraftFailed {
+                        reason: format!("Gemma4 batched MTP rollback failed: {e}"),
+                    })?;
+                let offset =
+                    first_cache_offset(caches.as_mut_slice(), "full_attention").max(0) as usize;
+                // Slice the captured shared K/V to the post-rollback length.
+                // The global trim amount is `block_size - max(accepted) - 1`;
+                // this matches the cache trim above.
+                let max_accepted = accepted_per_row.iter().copied().max().unwrap_or(0);
+                let rejected = block_size.saturating_sub(max_accepted).saturating_sub(1);
+                (offset, Self::slice_shared_kv_batched(tensors, rejected))
+            }
+        };
 
         // Post-rollback per-row logical metadata. The physical cache offset
         // remains the global post-rollback max (used above for slicing the

@@ -37,6 +37,8 @@ and cached on first use. Set them before starting `mlxcel` or `mlxcel-server`.
 | `MLXCEL_MODELS_DIR` | directory path | unset (falls back to `${MLXCEL_CACHE_DIR:-$HOME/.cache/mlxcel}/models`) | Dedicated model-store root. Snapshots live directly at `$MLXCEL_MODELS_DIR/<owner>/<name>` with no `models/` subdir, so the whole store can sit on a separate volume without dragging the tokenizer-script cache along. Read by `mlxcel download`, the `-m/--model` resolver (`generate` / `serve` / `inspect` / `run`), the `mlxcel-server -m/--model` resolver, and `list` / `rm`. Resolution precedence for the models root: the `--models-dir <PATH>` CLI flag, then `MLXCEL_MODELS_DIR`, then `${MLXCEL_CACHE_DIR:-$HOME/.cache/mlxcel}/models`. (`download --local-dir <PATH>` is separate: it writes the snapshot verbatim at that exact path.) |
 | `MLXCEL_DEFAULT_ORG` | HuggingFace org/user name | `mlx-community` | Org prepended to a bare, prefix-less model name (no `/`) by the `-m/--model` resolver (`generate` / `serve` / `inspect` / `run`), the `mlxcel-server -m` resolver, and the `download` verb (`mlxcel download` / `mlx-server download`), so `mlxcel run Qwen3-4B-4bit` resolves to `mlx-community/Qwen3-4B-4bit` and `mlxcel download Qwen3-4B-4bit` downloads that same repo. An explicit `owner/name` repo-id and an existing local path are unaffected. An empty/whitespace value falls back to `mlx-community`. |
 | `MLXCEL_SERVER_DECODE_STORAGE` | `auto`, `dense`, `paged` | `auto` | Server continuous-batching decode storage. `--decode-storage-backend` takes precedence. Invalid values warn and fall back to `auto`. |
+| `MLXCEL_KV_CACHE_BUDGET` | `auto` or unsigned integer bytes | unset | Paged KV block-pool budget for continuous batching. `--kv-cache-budget` takes precedence. Applies when `--decode-storage-backend paged` uses pool-backed Fp16 caches. |
+| `MLXCEL_ALLOWED_ORIGINS` | comma-separated origin list (e.g. `https://app.example.com,https://admin.example.com`) | unset (permissive) | Restricts CORS to the listed origins. `--allowed-origins` takes precedence. Unset keeps the permissive default that reflects any origin. Each value must be a bare `scheme://host[:port]` origin (`http`/`https`, no path or query); a malformed value fails server startup with a clear message instead of being silently dropped. Only affects the browser-reachable TCP HTTP listener: the Unix-socket transport sends no `Origin` header and is unaffected. |
 | `MLXCEL_SURGERY` | YAML file path | unset | Feature-gated weight-load surgery configuration. `--surgery` takes precedence when the `surgery` feature is built. |
 
 ## Server context sizing
@@ -88,10 +90,23 @@ These variables are applied when the corresponding CLI flag is absent.
 | `MLXCEL_PROMPT_CACHE_MAX_ENTRIES` | unsigned integer | `1024` | `--prompt-cache-max-entries` |
 | `MLXCEL_PROMPT_CACHE_TTL` | unsigned integer seconds | `3600` | `--prompt-cache-ttl` |
 | `MLXCEL_PROMPT_CACHE_MIN_PREFIX` | unsigned integer tokens | `32` | `--prompt-cache-min-prefix` |
+| `MLXCEL_ENABLE_VLM_PREFIX_CACHE` | boolean | `false` | `--enable-vlm-prefix-cache` |
+| `APC_ENABLED` | boolean | `true` | `--apc-enabled` |
+| `APC_BLOCK_SIZE` | unsigned integer tokens | `16` | `--apc-block-size` |
+| `APC_NUM_BLOCKS` | unsigned integer | derived from max entries | `--apc-num-blocks` |
+| `APC_HASH` | `sha256` or `blake3` | `sha256` | `--apc-hash` |
 
 `MLXCEL_PROMPT_CACHE_ENABLED` has higher precedence than the llama.cpp
 compatibility alias `LLAMA_ARG_CACHE_REUSE` when both are set and no CLI flag is
 provided.
+
+Automatic Prefix Caching is on by default; pass `--apc-enabled=false` or set
+`APC_ENABLED=false` to fall back to whole-prefix matching only (a stored prefix
+is then reusable only when it is fully contained in the new request). The
+`APC_*` names mirror the upstream `mlx-vlm` env surface.
+
+`MLXCEL_ENABLE_VLM_PREFIX_CACHE` opts same-image multimodal follow-up turns into
+prompt-prefix sharing while leaving text-only prompt-cache behavior unchanged.
 
 ## Speculative-decoding variables
 
@@ -99,7 +114,7 @@ provided.
 |----------|--------|---------|-------|
 | `MLXCEL_DRAFT_KIND` | `dflash`, `mtp` | auto/none | Alias for `--draft-kind` when the CLI flag and `LLAMA_ARG_DRAFT_KIND` are absent. |
 | `MLXCEL_DRAFT_BLOCK_SIZE` | unsigned integer | per drafter (`4` for MTP, `16` for DFlash) | Alias for `--draft-block-size` when the CLI flag and `LLAMA_ARG_DRAFT_BLOCK_SIZE` are absent. |
-| `MLXCEL_ENABLE_MTP_B1` | `0`/`false`/`no`/`off` to disable | **on** | The singleton (B=1) MTP burst runs by default for all MTP targets (`gemma4_unified`, `gemma4`, `gemma4_vlm`). On Apple Silicon (M5 Max) it produces byte-identical output at temperature 0 with a measured ~1.87× speedup on the 12B Unified + 4-bit-assistant pair (≈39→74 tok/s) and ~1.2 to 1.4× on the 31B + bf16 assistant. Set to `0` to opt out, e.g. on lower-bandwidth Apple Silicon where the B=1 verify forward may not pay for itself. |
+| `MLXCEL_ENABLE_MTP_B1` | `0`/`false`/`no`/`off` to disable, any other value to force on | per hardware | The singleton (B=1) MTP burst default is per hardware (issue #165). Non-batchable targets (`gemma4_unified` 12B pairs, whose only decode path is B=1) default **on** everywhere: measured ~1.87× on M5 Max and ~1.1 to 1.4× on M1 Ultra. Batch-capable targets (the 31B + bf16 assistant) default **on only on M5+** (Neural Accelerator generation): M5 Max measured ~1.2 to 1.4×, while M1 Ultra measured a consistent ~0.75 to 0.96× regression, so pre-M5 chips fall back to classic decode by default. Setting the variable overrides the default in both directions. |
 | `MLXCEL_ENABLE_MTP_BATCH` | truthy value | off | **Advanced.** Forces the batched Gemma 4 MTP burst path for parity/debug testing. |
 | `MLXCEL_ENABLE_MTP_DEFERRED` | `1` | off | **Advanced.** Enables the deferred greedy verifier path for Gemma 4 MTP when sampling settings allow it. |
 
@@ -154,6 +169,15 @@ recommended as normal deployment settings.
 | `MLXCEL_DISABLE_SINGLE_QUERY_MASKLESS` | truthy disables | maskless path on | Disables the single-query maskless attention path. |
 | `MLXCEL_EXPERIMENTAL_BOOL_CAUSAL_MASK` | truthy enables | off | Enables an experimental boolean causal-mask path. |
 | `MLXCEL_PIPELINE_GRANULARITY` | `off`, `layer`, `block:N` | `off` | Inserts layer-boundary async-eval hints for pipeline experiments. |
+| `MLXCEL_FUSED_MOE` | `0`/`false`/`off`/`no` disable; any other value or unset enables | on | Fused single-token decode-MoE kernel (#268), on by default since #282 (validated on M1 Ultra and M5). Set to `0` to force the proven `gather_qmm`/`SwitchGLU` path. Active for qwen3_moe, qwen3_next, dots.llm1, and gemma4 decode. |
+| `MLXCEL_FUSED_MOE_SGY` | `1`-`32` | `8` | Simdgroups per threadgroup for the fused decode-MoE kernel; tune per hardware. |
+| `MLXCEL_FUSED_MOE_RELU2` | presence enables | off | Enables the squared-ReLU fused MoE path for nemotron-class experts; performance-neutral on nemotron-h, kept for a future MoE-dominated squared-ReLU model. |
+
+## Block-diffusion diagnostic variables
+
+| Variable | Values | Default | Purpose |
+|----------|--------|---------|---------|
+| `MLXCEL_DIFFUSION_DEBUG_CANVAS=1` | `1` enables | off | **Diagnostic.** Replaces all DiffusionGemma canvas random-noise initialization with a fixed deterministic pattern (`(i+1)*7919 + k*104729) % vocab_size`) and prints `DIFFUSION_COMMIT block=<n> ids=...` per committed block. Intended for cross-implementation parity testing against the mlx-vlm Python reference at temperature 0. Output is not suitable for normal generation. |
 
 ## Logging, profiling, and capture variables
 

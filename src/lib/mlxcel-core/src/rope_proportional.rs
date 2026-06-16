@@ -14,7 +14,7 @@
 
 //! Proportional RoPE helper for Gemma 4 full-attention layers.
 //!
-//! The Gemma 4 reference (`mlx_lm/models/rope_utils.py`) defines a
+//! The Gemma 4 reference (https://github.com/ml-explore/mlx-lm/blob/main/mlx_lm/models/rope_utils.py) defines a
 //! `ProportionalRoPE` variant whose frequency exponents are normalized by the
 //! FULL head dimension (`dims`) rather than the rotated-only slice
 //! (`rotated_dims = int(dims * partial_rotary_factor // 2) * 2`). Only the

@@ -9,9 +9,9 @@ behavior mlxcel ships today, and a local Apple Silicon measurement.
 
 | Target (mlxcel)                        | Drafter                          | M5 Max B=1 MTP        | mlxcel default        |
 | -------------------------------------- | -------------------------------- | --------------------- | --------------------- |
-| Gemma 4 Unified 12B (`gemma4_unified`) | `gemma-4-12B-it-assistant-4bit`  | ~1.87x (measured)       | **on** (B=1)  |
-| Gemma 4 31B (`gemma4`)                 | `gemma-4-31B-it-assistant-bf16`  | ~1.2 to 1.4x (measured) | **on** (B=1)  |
-| Gemma 4 26B-A4B MoE (`gemma4`)         | `gemma-4-26B-A4B-it-assistant`   | limited at B=1 (MoE)    | on (B=1)      |
+| Gemma 4 Unified 12B (`gemma4_unified`) | `gemma-4-12B-it-assistant-4bit`  | ~1.87x (measured)       | **on** (B=1, all hardware)  |
+| Gemma 4 31B (`gemma4`)                 | `gemma-4-31B-it-assistant-bf16`  | ~1.2 to 1.4x (measured) | **on** (B=1, M5+ only)  |
+| Gemma 4 26B-A4B MoE (`gemma4`)         | `gemma-4-26B-A4B-it-assistant`   | limited at B=1 (MoE)    | on (B=1, M5+ only)  |
 
 Both the 12B Unified and the 31B see a real B=1 MTP speedup on M5 Max (1.87x and
 ~1.3x), and mlxcel now runs B=1 (single-request) MTP by default for every MTP
@@ -78,6 +78,44 @@ because Apple Silicon decode is bandwidth-bound rather than compute-starved, but
 it is consistently above 1.0x, which is why B=1 MTP is now on by default for
 batch-capable targets too. Lower-bandwidth Apple Silicon, where the earlier
 "slower" calibration may still hold, can opt out with `MLXCEL_ENABLE_MTP_B1=0`.
+
+### Gemma 4 on M1 Ultra (measured, issue #165)
+
+Apple M1 Ultra (128 GB), same pairings, block size 4, `temperature 0`,
+160 decode tokens, decode tok/s = `(N - 1) / (T_N - T_1)` over streamed
+requests (a 1-token request absorbs the prefill cost identically in both
+modes; the burst path emits tokens in lumps, so inter-token client timing is
+not usable there).
+
+**31B + bf16 assistant: a consistent regression.** Four greedy prompts:
+
+| Prompt                          | classic tok/s | MTP B=1 tok/s | speedup |
+| ------------------------------- | ------------: | ------------: | ------: |
+| explain speculative decoding    |         18.2  |         15.6  |  0.86x  |
+| hash table                      |         18.2  |         17.4  |  0.96x  |
+| Romeo and Juliet summary        |         18.1  |         13.7  |  0.75x  |
+| TCP vs UDP                      |         18.0  |         16.3  |  0.91x  |
+
+**12B Unified + 4-bit assistant: still profitable** (~1.1 to 1.4x on prompts
+with stable prose; this checkpoint's degenerate-output prompts were excluded).
+
+Two consequences, shipped with issue #165:
+
+- The B=1 default is now **per hardware**: non-batchable targets (the 12B
+  Unified family) keep B=1 MTP on everywhere; batch-capable targets (the 31B)
+  default it on only on M5+ (Neural Accelerator generation) chips.
+  `MLXCEL_ENABLE_MTP_B1` overrides in both directions. The discriminator is
+  GPU compute generation rather than memory bandwidth: the M1 Ultra has
+  datacenter-class bandwidth (~800 GB/s) yet the drafter and K-wide verify
+  forwards do not pay for themselves on its older GPU cores.
+- Temperature-0 outputs on M1 Ultra are NOT always byte-identical between
+  classic and MTP: several prompts diverged at word-choice level
+  (e.g. "the violence escalates" vs "the fragile peace is shattered").
+  This is the evaluation-path fp jitter documented during issue #203: the
+  MTP verify computes logits through a `[1, K]` forward while classic uses
+  `[1, 1]` steps, and near-tie argmaxes flip more readily on this GPU class
+  (the same runs were byte-identical on M5 Max). Output quality is
+  unaffected; both streams are valid greedy chains under jitter.
 
 #### B>1 (batched) stays off by default
 

@@ -132,6 +132,17 @@ pub struct ResultFrame {
     pub phase: ResultPhase,
     /// Detokenized text pieces, in generation order.
     pub tokens: Vec<String>,
+    /// Stream sequence number of the FIRST token in this frame (issue #199).
+    ///
+    /// The decode role streams its continuation incrementally as multiple
+    /// frames; the router uses this tag to detect gaps or reordering across
+    /// the transport. Numbering starts at 1 for the first continuation token
+    /// (sequence 0 is the prefill first token). `0` on frames that carry no
+    /// continuation position (the first-token result, terminal/error frames
+    /// without tokens, and frames from older senders via `serde(default)`),
+    /// which the receiver treats as "unchecked".
+    #[serde(default)]
+    pub start_sequence: u64,
     /// `true` on the terminal frame of the request.
     pub done: bool,
     /// A generation error message, if the node hit one.

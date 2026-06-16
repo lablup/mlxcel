@@ -824,3 +824,392 @@ fn ragged_most_padded_row_verify_hidden_has_no_padding_contamination() {
         );
     }
 }
+
+// ===========================================================================
+// Issue #203: divergent-round compaction + exact per-row verify masks
+// ===========================================================================
+
+/// `Cache::compact_partial_accept_rows` must move each below-base row's
+/// accepted window K/V down to the row's logical valid end and zero the
+/// vacated region, for both cache kinds, leaving lockstep rows untouched.
+#[test]
+fn compact_partial_accept_rows_restores_contiguous_prefix() {
+    let _runtime = crate::initialize_runtime();
+    use crate::models::gemma4::Cache;
+    use mlxcel_core::cache::{KVCache, RotatingKVCache};
+
+    // [B=2, H=1, L, D=1] tensors with distinguishable values: row r slot s
+    // holds value 100*r + s.
+    let make_kv = |start: i32, len: i32| -> UniquePtr<MlxArray> {
+        let mut data = Vec::with_capacity(2 * len as usize);
+        for r in 0..2 {
+            for s in 0..len {
+                data.push((100 * r + start + s) as f32);
+            }
+        }
+        mlxcel_core::from_slice_f32(&data, &[2, 1, len, 1])
+    };
+
+    let caches: Vec<Cache> = vec![
+        Cache::Standard(KVCache::new()),
+        Cache::Rotating(RotatingKVCache::new(64)),
+    ];
+    for mut cache in caches {
+        {
+            let iface = cache.as_interface();
+            // Prefix: positions [0, 4). Window: positions [4, 7).
+            let _ = iface.update_and_fetch(make_kv(0, 4), make_kv(0, 4));
+            let _ = iface.update_and_fetch(make_kv(4, 3), make_kv(4, 3));
+        }
+        assert_eq!(cache.offset(), 7);
+
+        // Row 0 is lockstep (ve == o_pre == 4, accepted 2); row 1 carries a
+        // two-slot hole (ve = 2, accepted 0). o_post = max(4+3, 2+1) = 7.
+        cache
+            .compact_partial_accept_rows(&[4, 2], &[2, 0], 3)
+            .expect("compaction must succeed");
+
+        let keys = match &cache {
+            Cache::Standard(c) => c.keys.as_ref().unwrap(),
+            Cache::Rotating(c) => c.keys.as_ref().unwrap(),
+        };
+        let cell = |r: i32, s: i32| -> f32 {
+            mlxcel_core::item_f32(&mlxcel_core::slice(
+                keys,
+                &[r, 0, s, 0],
+                &[r + 1, 1, s + 1, 1],
+            ))
+        };
+        // Row 0 untouched: 0..7 contiguous.
+        for s in 0..7 {
+            assert_eq!(cell(0, s), s as f32, "row 0 slot {s} must be untouched");
+        }
+        // Row 1: prefix [0, 2) untouched, accepted window token moved from
+        // slot 4 (value 104) to slot 2, vacated [3, 7) zeroed.
+        assert_eq!(cell(1, 0), 100.0);
+        assert_eq!(cell(1, 1), 101.0);
+        assert_eq!(cell(1, 2), 104.0, "accepted window token must move to ve");
+        for s in 3..7 {
+            assert_eq!(cell(1, s), 0.0, "row 1 slot {s} must be zeroed");
+        }
+    }
+}
+
+/// The adapter-side slab compaction must mirror the cache compaction and
+/// crop the slab to `o_post` for the drafter's contiguous-prefix contract.
+#[test]
+fn compact_shared_kv_batched_compacts_and_crops() {
+    let _runtime = crate::initialize_runtime();
+
+    // [B=2, H=1, L=7, D=1]; row r slot s = 100*r + s. o_pre=4 (width 3).
+    let mut data = Vec::new();
+    for r in 0..2 {
+        for s in 0..7 {
+            data.push((100 * r + s) as f32);
+        }
+    }
+    let slab = mlxcel_core::from_slice_f32(&data, &[2, 1, 7, 1]);
+
+    // Row 0: ve=4 lockstep, accepted 1 (keeps slots 4..6). Row 1: ve=2,
+    // accepted 0 (moves slot 4 -> 2). o_post = max(4+2, 2+1) = 6.
+    let out = Gemma4MtpBatchedTargetAdapter::compact_shared_kv_batched(
+        vec![slab],
+        &[4, 2],
+        &[1, 0],
+        4,
+        6,
+    )
+    .expect("slab compaction must succeed");
+    assert_eq!(out.len(), 1);
+    let slab = &out[0];
+    assert_eq!(
+        mlxcel_core::array_shape(slab.as_ref().unwrap()),
+        vec![2, 1, 6, 1],
+        "slab must be cropped to o_post"
+    );
+    let cell = |r: i32, s: i32| -> f32 {
+        mlxcel_core::item_f32(&mlxcel_core::slice(
+            slab.as_ref().unwrap(),
+            &[r, 0, s, 0],
+            &[r + 1, 1, s + 1, 1],
+        ))
+    };
+    // Row 0: contiguous 0..6 (zeroing beyond ve+n=6 is outside the crop).
+    for s in 0..6 {
+        assert_eq!(cell(0, s), s as f32, "row 0 slot {s}");
+    }
+    // Row 1: [100, 101, 104(moved), 0, 0, 0].
+    let expected = [100.0, 101.0, 104.0, 0.0, 0.0, 0.0];
+    for (s, &want) in expected.iter().enumerate() {
+        assert_eq!(cell(1, s as i32), want, "row 1 slot {s}");
+    }
+}
+
+/// Overlapping compaction move (`ve + accepted + 1 > o_pre`): the source
+/// window range overlaps the destination, which corrupts the move if the
+/// source slice is not materialized before `slice_update` (buffer donation).
+/// Regression test for the first real-model #203 gate failure signature.
+#[test]
+fn compact_partial_accept_rows_handles_overlapping_move() {
+    let _runtime = crate::initialize_runtime();
+    use crate::models::gemma4::Cache;
+    use mlxcel_core::cache::{KVCache, RotatingKVCache};
+
+    let make_kv = |start: i32, len: i32| -> UniquePtr<MlxArray> {
+        let mut data = Vec::with_capacity(2 * len as usize);
+        for r in 0..2 {
+            for s in 0..len {
+                data.push((100 * r + start + s) as f32);
+            }
+        }
+        mlxcel_core::from_slice_f32(&data, &[2, 1, len, 1])
+    };
+
+    let caches: Vec<Cache> = vec![
+        Cache::Standard(KVCache::new()),
+        Cache::Rotating(RotatingKVCache::new(64)),
+    ];
+    for mut cache in caches {
+        {
+            let iface = cache.as_interface();
+            let _ = iface.update_and_fetch(make_kv(0, 4), make_kv(0, 4));
+            let _ = iface.update_and_fetch(make_kv(4, 3), make_kv(4, 3));
+        }
+        // Row 0 lockstep (ve=4, accepted 2); row 1 has a one-slot hole
+        // (ve=3) and accepts the full window head (accepted 2, n=3), so the
+        // move [4, 7) -> [3, 6) overlaps slots [4, 6).
+        cache
+            .compact_partial_accept_rows(&[4, 3], &[2, 2], 3)
+            .expect("overlapping compaction must succeed");
+
+        let keys = match &cache {
+            Cache::Standard(c) => c.keys.as_ref().unwrap(),
+            Cache::Rotating(c) => c.keys.as_ref().unwrap(),
+        };
+        let cell = |r: i32, s: i32| -> f32 {
+            mlxcel_core::item_f32(&mlxcel_core::slice(
+                keys,
+                &[r, 0, s, 0],
+                &[r + 1, 1, s + 1, 1],
+            ))
+        };
+        for s in 0..7 {
+            assert_eq!(cell(0, s), s as f32, "row 0 slot {s} must be untouched");
+        }
+        // Row 1: [100, 101, 102, 104, 105, 106, 0]; the overlapping move
+        // must read the pre-move values, not its own partial output.
+        let expected = [100.0, 101.0, 102.0, 104.0, 105.0, 106.0, 0.0];
+        for (s, &want) in expected.iter().enumerate() {
+            assert_eq!(
+                cell(1, s as i32),
+                want,
+                "row 1 slot {s}: overlapping move must be alias-safe"
+            );
+        }
+    }
+}
+
+/// DECISIVE divergent-geometry parity probe (issue #203): force a divergent
+/// accept round on a 2-row equal-length batch, then compare the HOLED row's
+/// next verify-round hidden state bitwise against a B = 1 replay of the same
+/// token history through the same batched adapter code (batch_size = 1, so
+/// kernels and code paths match and only the geometry differs).
+///
+/// The B = 1 replay's cache is the exact contiguous layout; the holed row
+/// carries a stale gap, per-row RoPE offsets, the divergent mask, and the
+/// finalize-side compaction. If the #203 machinery is exact, the hidden
+/// states (fp32 fixture) must agree to the last bit.
+#[test]
+fn divergent_round_hidden_matches_b1_replay() {
+    let _runtime = crate::initialize_runtime();
+    let sampler = SamplingConfig::greedy();
+
+    for layer_type in ["full_attention", "sliding_attention"] {
+        let build = || crate::models::gemma4_tests::build_synthetic_wrapper_with_layer(layer_type);
+        let prompt: Vec<i32> = vec![2, 3, 4];
+        let drafts = [5_i32, 6];
+
+        // ---- Batched B = 2 with a forced divergent round ----
+        let w_batch = build();
+        let adapter = Gemma4MtpBatchedTargetAdapter::new(&w_batch, 2);
+        let (bonuses, _seed) = adapter
+            .prefill_and_seed_batched(&[prompt.clone(), prompt.clone()], &sampler)
+            .expect("equal-length batched prefill");
+
+        // Round 1 (uniform): width-3 windows [bonus, d0, d1] per row.
+        let win1: Vec<Vec<i32>> = bonuses
+            .iter()
+            .map(|&b| vec![b, drafts[0], drafts[1]])
+            .collect();
+        let fwd1 = adapter
+            .verify_forward_batched(&win1, &sampler)
+            .expect("round-1 verify");
+        // Row 0's real next bonus (accept 0 -> target argmax at window pos 0);
+        // row 1 accepts both drafts (accept 2 -> bonus from window pos 2).
+        let t0 = fwd1.target_tokens_per_row[0][0];
+        let t1 = fwd1.target_tokens_per_row[1][2];
+        let _ = adapter
+            .verify_finalize_batched(&[0, 2], 3, fwd1.captured)
+            .expect("divergent finalize");
+
+        // Round 2 (divergent geometry: row 0 ve=4 vs o_pre=6).
+        let fwd2 = adapter
+            .verify_forward_batched(&[vec![t0], vec![t1]], &sampler)
+            .expect("round-2 verify");
+        let batched_hidden = &fwd2.captured.tensors[0];
+        let shape = mlxcel_core::array_shape(batched_hidden.as_ref().unwrap());
+        let hidden_dim = shape[2];
+        let batched_row0 = mlxcel_core::slice(
+            batched_hidden.as_ref().unwrap(),
+            &[0, 0, 0],
+            &[1, 1, hidden_dim],
+        );
+
+        // ---- B = 1 replay of row 0's exact history through the SAME
+        //      batched-adapter code (batch_size = 1: no holes ever) ----
+        let w_ref = build();
+        let ref_adapter = Gemma4MtpBatchedTargetAdapter::new(&w_ref, 1);
+        let (ref_bonuses, _seed) = ref_adapter
+            .prefill_and_seed_batched(std::slice::from_ref(&prompt), &sampler)
+            .expect("B=1 replay prefill");
+        assert_eq!(
+            ref_bonuses[0], bonuses[0],
+            "[{layer_type}] B=1 replay prefill bonus must match the batched row 0 bonus"
+        );
+        let ref_fwd1 = ref_adapter
+            .verify_forward_batched(&[vec![ref_bonuses[0], drafts[0], drafts[1]]], &sampler)
+            .expect("B=1 replay round-1 verify");
+        assert_eq!(
+            ref_fwd1.target_tokens_per_row[0][0], t0,
+            "[{layer_type}] B=1 replay round-1 argmax must match the batched row 0 argmax"
+        );
+        let _ = ref_adapter
+            .verify_finalize_batched(&[0], 3, ref_fwd1.captured)
+            .expect("B=1 replay finalize");
+        let ref_fwd2 = ref_adapter
+            .verify_forward_batched(&[vec![t0]], &sampler)
+            .expect("B=1 replay round-2 verify");
+        let ref_hidden = &ref_fwd2.captured.tensors[0];
+        let ref_row0 = mlxcel_core::slice(
+            ref_hidden.as_ref().unwrap(),
+            &[0, 0, 0],
+            &[1, 1, hidden_dim],
+        );
+
+        // ---- Bitwise comparison (fp32 fixture: exact equality expected) ----
+        let to_vec = |arr: &MlxArray| -> Vec<f32> {
+            let arr = mlxcel_core::astype(arr, mlxcel_core::dtype::FLOAT32);
+            mlxcel_core::eval(&arr);
+            mlxcel_core::array_to_raw_bytes(&arr)
+                .chunks_exact(4)
+                .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                .collect()
+        };
+        let got = to_vec(batched_row0.as_ref().unwrap());
+        let want = to_vec(ref_row0.as_ref().unwrap());
+        let n_diff = got
+            .iter()
+            .zip(&want)
+            .filter(|(g, w)| g.to_bits() != w.to_bits())
+            .count();
+        let max_abs = got
+            .iter()
+            .zip(&want)
+            .map(|(g, w)| (g - w).abs())
+            .fold(0.0f32, f32::max);
+        assert_eq!(
+            n_diff,
+            0,
+            "[{layer_type}] divergent-round hidden for the holed row deviates from \
+             the B=1 replay: {n_diff}/{} cells differ, max_abs={max_abs:e} \
+             (got[..4]={:?} want[..4]={:?})",
+            got.len(),
+            &got[..4.min(got.len())],
+            &want[..4.min(want.len())]
+        );
+        // Argmax must agree too (cheap end check).
+        assert_eq!(
+            fwd2.target_tokens_per_row[0][0], ref_fwd2.target_tokens_per_row[0][0],
+            "[{layer_type}] divergent-round argmax must match the B=1 replay"
+        );
+        eprintln!("[{layer_type}] divergent-round hidden bitwise-identical to B=1 replay");
+    }
+}
+
+/// `build_divergent_verify_mask` (full-attention family, `window == None`):
+/// per-row leading padding `[0, lp)`, history `[lp, ve)`, the stale gap
+/// `[ve, offset)`, and the causal window prefix must come out exactly.
+#[test]
+fn divergent_verify_mask_full_family_blocks_padding_gap_and_future() {
+    let _runtime = crate::initialize_runtime();
+    use crate::models::gemma4::build_divergent_verify_mask;
+
+    let mask = build_divergent_verify_mask(2, 6, &[6, 4], &[0, 1], None);
+    assert_eq!(mlxcel_core::array_shape(&mask), vec![2, 1, 2, 8]);
+    let cell = |b: i32, q: i32, k: i32| -> f32 {
+        mlxcel_core::item_f32(&mlxcel_core::slice(
+            &mask,
+            &[b, 0, q, k],
+            &[b + 1, 1, q + 1, k + 1],
+        ))
+    };
+    let visible = |b: i32, q: i32, k: i32| cell(b, q, k) == 0.0;
+    for q in 0..2 {
+        for k in 0..8 {
+            assert_eq!(
+                visible(0, q, k),
+                k <= 6 + q,
+                "row 0 q={q} k={k}: expected plain causal"
+            );
+        }
+    }
+    for q in 0..2 {
+        for k in 0..8 {
+            let expected = match k {
+                0 => false,
+                1..=3 => true,
+                4 | 5 => false,
+                _ => (k - 6) <= q,
+            };
+            assert_eq!(
+                visible(1, q, k),
+                expected,
+                "row 1 q={q} k={k}: divergent mask mismatch"
+            );
+        }
+    }
+}
+
+/// Sliding family (`window == Some`): the band must be evaluated at each
+/// row's LOGICAL positions, not the shared physical columns.
+#[test]
+fn divergent_verify_mask_sliding_band_uses_logical_positions() {
+    let _runtime = crate::initialize_runtime();
+    use crate::models::gemma4::build_divergent_verify_mask;
+
+    let mask = build_divergent_verify_mask(2, 6, &[6, 4], &[0, 0], Some(4));
+    let cell = |b: i32, q: i32, k: i32| -> f32 {
+        mlxcel_core::item_f32(&mlxcel_core::slice(
+            &mask,
+            &[b, 0, q, k],
+            &[b + 1, 1, q + 1, k + 1],
+        ))
+    };
+    let visible = |b: i32, q: i32, k: i32| cell(b, q, k) == 0.0;
+    let expected_row1_q1 = [false, false, true, true, false, false, true, true];
+    for (k, &expected) in expected_row1_q1.iter().enumerate() {
+        assert_eq!(
+            visible(1, 1, k as i32),
+            expected,
+            "row 1 q=1 k={k}: sliding band must use logical positions"
+        );
+    }
+    let expected_row0_q1 = [false, false, false, false, true, true, true, true];
+    for (k, &expected) in expected_row0_q1.iter().enumerate() {
+        assert_eq!(
+            visible(0, 1, k as i32),
+            expected,
+            "row 0 q=1 k={k}: lockstep row must keep the plain windowed mask"
+        );
+    }
+}

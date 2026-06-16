@@ -872,6 +872,69 @@ pub(crate) fn load_gemma4_unified_weights_with_backing<P: AsRef<Path>>(
     load_gemma4_family_weights_with_backing(model_dir, is_gemma4_unified_weight)
 }
 
+/// Trailing suffixes of the Gemma 4 vision clipped-linear calibration
+/// tensors. These exist only when `vision_config.use_clipped_linears` is
+/// true; otherwise they are dropped at load time (mirroring the mlx-vlm
+/// `DiffusionGemma` sanitize, which never materializes them for the
+/// unclipped tower the chat checkpoint ships).
+const VISION_CLIP_CALIBRATION_SUFFIXES: [&str; 4] =
+    [".input_max", ".input_min", ".output_max", ".output_min"];
+
+/// Whether a checkpoint key belongs to the DiffusionGemma text backbone
+/// (issue #217, phase 1): the decoder (`model.decoder.*`: embed, layers,
+/// norm, self_conditioning) and the encoder's per-layer scalars
+/// (`model.encoder.language_model.*`).
+fn is_diffusion_gemma_text_weight(name: &str) -> bool {
+    name.starts_with("model.decoder.") || name.starts_with("model.encoder.language_model.")
+}
+
+/// Whether a checkpoint key belongs to the DiffusionGemma vision front-end
+/// (issue #217, phase 2): the vision tower (`model.encoder.vision_tower.*`)
+/// and the multimodal embedder (`model.encoder.embed_vision.*`).
+fn is_diffusion_gemma_vision_weight(name: &str) -> bool {
+    name.starts_with("model.encoder.vision_tower.")
+        || name.starts_with("model.encoder.embed_vision.")
+}
+
+/// Weight filter for the full DiffusionGemma checkpoint.
+///
+/// Keeps the text backbone unconditionally and the vision front-end when
+/// present. When `use_clipped_linears` is false, the unused clipped-linear
+/// calibration tensors (`*.input_max` / `*.input_min` / `*.output_max` /
+/// `*.output_min`) are dropped from the vision tower, matching the upstream
+/// sanitize. Text-only checkpoints simply carry no vision keys, so vision
+/// loading is skipped downstream.
+pub(crate) fn keep_diffusion_gemma_weight(name: &str, use_clipped_linears: bool) -> bool {
+    if is_diffusion_gemma_text_weight(name) {
+        return true;
+    }
+    if is_diffusion_gemma_vision_weight(name) {
+        if !use_clipped_linears
+            && VISION_CLIP_CALIBRATION_SUFFIXES
+                .iter()
+                .any(|suffix| name.ends_with(suffix))
+        {
+            return false;
+        }
+        return true;
+    }
+    false
+}
+
+/// Load the DiffusionGemma weights (text backbone plus the vision front-end
+/// when present) with retained mmap backing.
+///
+/// `use_clipped_linears` mirrors `vision_config.use_clipped_linears`: when
+/// false the vision tower's clipped-linear calibration tensors are dropped.
+pub(crate) fn load_diffusion_gemma_weights_with_backing<P: AsRef<Path>>(
+    model_dir: P,
+    use_clipped_linears: bool,
+) -> Result<(mlxcel_core::weights::WeightMap, Gemma4WeightBacking), String> {
+    load_gemma4_family_weights_with_backing(model_dir, move |name| {
+        keep_diffusion_gemma_weight(name, use_clipped_linears)
+    })
+}
+
 /// Shared Gemma 4 family weight loader with a caller-supplied prefix filter.
 fn load_gemma4_family_weights_with_backing<P: AsRef<Path>, F>(
     model_dir: P,
@@ -1044,6 +1107,12 @@ pub fn load_text_weights<P: AsRef<std::path::Path>>(
 
     let is_gemma4 = parsed_config.as_ref().is_some_and(is_gemma4_model_config);
     let keep_gemma3n_mlp_bf16 = parsed_config.as_ref().is_some_and(is_gemma3n_model_config);
+    // BitNet runs in its native bf16: its squared-ReLU activation overflows the
+    // f16 max (65504), so the usual bf16->f16 Apple-Silicon conversion produces
+    // NaNs. Keep the whole model bf16 to match the reference.
+    let is_bitnet = parsed_config
+        .as_ref()
+        .is_some_and(|c| c.get("model_type").and_then(|m| m.as_str()) == Some("bitnet"));
 
     let mut weights = if is_gemma4 {
         load_gemma4_text_weights(model_dir)?
@@ -1115,11 +1184,21 @@ pub fn load_text_weights<P: AsRef<std::path::Path>>(
         transform.apply(&mut weights, &cfg)?;
     }
 
-    // Convert bf16 → f16 on all Apple Silicon for performance.  No Apple GPU
-    // has native bf16 ALU, so f16 is strictly better.  Only for non-quantized
-    // models — quantized models use bf16 scales/biases in quantized_matmul
-    // which handles bf16 natively.
-    if !is_quantized && should_convert_bf16_to_f16() {
+    // Convert bf16 → f16 on all Apple Silicon for performance. No Apple GPU has
+    // native bf16 ALU, so f16 is strictly better for non-quantized weights.
+    //
+    // Quantized models are intentionally left bf16. The quantized_matmul /
+    // gather_qmm kernels consume bf16 scales/biases natively and the activation
+    // path stays bf16, so the model is dtype-consistent. Promoting *only* the
+    // scales/biases to f16 (leaving activations bf16) created a dtype mismatch
+    // that regressed decode 33-41% on M1 Ultra for every bf16-scale checkpoint
+    // (qwen3, nemotron, gpt-oss, solar, ...; issue #289). Promoting *all*
+    // tensors to f16 instead corrupts models whose activations overflow f16
+    // (Apertus xIELU x^2, like BitNet's relu^2). The blank output once
+    // attributed to bf16 scales (Apertus-2509) was actually a separate xIELU
+    // read_scalar bf16 bug, fixed in the apertus loader; Apertus, Seed-OSS, and
+    // every other bf16-scale quant decode correctly with no scale promotion.
+    if should_convert_bf16_to_f16() && !is_bitnet && !is_quantized {
         let had_bf16 = if keep_gemma3n_mlp_bf16 {
             convert_bf16_weights_with_keep(&mut weights, gemma3n_language_mlp_bf16_key)
         } else {

@@ -330,6 +330,8 @@ fn build_startup_input(mut args: crate::ServeArgs) -> anyhow::Result<ServerStart
         kv_cache_budget: args.kv_cache_budget,
         // experimental VLM prompt-prefix cache toggle (#124 step c).
         enable_vlm_prefix_cache: args.enable_vlm_prefix_cache,
+        // CORS allow-list origins (#244); validated in into_startup_config.
+        allowed_origins: args.allowed_origins,
         // Responses API in-memory store limits. clap reads the
         // matching `LLAMA_ARG_*` env vars directly via the `env = ...`
         // attributes on the flags.
@@ -342,6 +344,11 @@ fn build_startup_input(mut args: crate::ServeArgs) -> anyhow::Result<ServerStart
         // the flag, so no separate env-fallback helper is needed.
         #[cfg(feature = "surgery")]
         surgery_config_path: args.surgery,
+        // serve-level block-diffusion knobs (#217 phase 3). Only diffusion
+        // models read them; autoregressive models ignore them.
+        max_denoising_steps: args.diffusion.max_denoising_steps,
+        diffusion_sampler: args.diffusion.diffusion_sampler,
+        diffusion_threshold: args.diffusion.diffusion_threshold,
     })
 }
 

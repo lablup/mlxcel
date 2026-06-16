@@ -428,6 +428,12 @@ pub struct ServerConfig {
     /// KV prefixes for multi-turn same-image conversations; text-only and
     /// non-VLM behavior is unchanged.
     pub enable_vlm_prefix_cache: bool,
+    /// Validated CORS allow-list origins (#244). `None` keeps the historical
+    /// permissive policy (reflects any `Origin`); `Some(non_empty)` restricts
+    /// cross-origin requests to exactly these origins. Built once at startup
+    /// from `--allowed-origins` / `MLXCEL_ALLOWED_ORIGINS` and consumed by
+    /// [`crate::server::create_app`].
+    pub cors_allowed_origins: Option<Vec<axum::http::HeaderValue>>,
     /// Serving role for disaggregated paged KV serving (#126 B2), derived from
     /// `--node-role`. [`ServingMode::Hybrid`] (the default) is the single-node
     /// path and is byte-identical to a server with no distributed flags.
@@ -447,6 +453,16 @@ pub struct ServerConfig {
     /// on a non-hybrid node enables the live prefill/decode role loop; `None`
     /// keeps the standard single-node scheduler loop.
     pub serving_bind: Option<std::net::SocketAddr>,
+    /// `--max-denoising-steps` (issue #217 phase 3). Serve-level override for
+    /// the DiffusionGemma per-block denoising step cap; `None` keeps the
+    /// checkpoint default. Only diffusion models read it.
+    pub max_denoising_steps: Option<usize>,
+    /// `--diffusion-sampler` (issue #217 phase 3). `"entropy-bound"` (default)
+    /// or `"confidence-threshold"`. Only diffusion models read it.
+    pub diffusion_sampler: String,
+    /// `--diffusion-threshold` (issue #217 phase 3). Confidence threshold for
+    /// the confidence-threshold sampler. Only diffusion models read it.
+    pub diffusion_threshold: f32,
 }
 
 impl Default for ServerConfig {
@@ -502,10 +518,14 @@ impl Default for ServerConfig {
             max_kv_size: None,
             kv_cache_budget: None,
             enable_vlm_prefix_cache: false,
+            cors_allowed_origins: None,
             serving_mode: crate::distributed::disaggregated::ServingMode::Hybrid,
             prefill_peers: Vec::new(),
             decode_peers: Vec::new(),
             serving_bind: None,
+            max_denoising_steps: None,
+            diffusion_sampler: "entropy-bound".to_string(),
+            diffusion_threshold: 0.9,
         }
     }
 }

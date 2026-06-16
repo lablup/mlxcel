@@ -23,9 +23,10 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{get, post},
 };
-use tower_http::{cors::CorsLayer, trace::TraceLayer};
+use tower_http::trace::TraceLayer;
 
 use super::AppState;
+use super::cors::build_cors_layer;
 use super::routes;
 use super::types::ErrorResponse;
 
@@ -90,6 +91,9 @@ pub fn create_app(state: AppState) -> Router {
     let enable_slots = state.config.enable_slots_endpoint;
     let enable_props = state.config.enable_props_endpoint;
     let enable_metrics = state.config.enable_metrics_endpoint;
+    // CORS policy (#244): restrict to the configured allow-list when set,
+    // otherwise keep the historical permissive default.
+    let cors = build_cors_layer(state.config.cors_allowed_origins.as_deref());
 
     let mut app = Router::new()
         // OpenAI API endpoints
@@ -155,7 +159,7 @@ pub fn create_app(state: AppState) -> Router {
         .route("/", get(routes::health_check))
         // Middleware
         .layer(middleware::from_fn_with_state(state.clone(), api_key_auth))
-        .layer(CorsLayer::permissive())
+        .layer(cors)
         .layer(TraceLayer::new_for_http())
         .with_state(state)
 }

@@ -19,7 +19,7 @@
 //!
 //! Used by: Qwen3Next, Qwen3.5, KimiLinear
 //!
-//! Reference: mlx-lm/mlx_lm/models/gated_delta.py
+//! Reference: https://github.com/ml-explore/mlx-lm/blob/main/mlx_lm/models/gated_delta.py
 
 use mlxcel_core::utils::{silu, softplus, stack_arrays};
 use mlxcel_core::{MlxArray, UniquePtr, dtype};
@@ -46,6 +46,35 @@ impl GatedDeltaCache {
 
     pub fn advance(&mut self, step: i32) {
         self.offset += step;
+    }
+
+    pub fn snapshot_into(
+        &self,
+        snapshot: &mut mlxcel_core::generate::ModelStateSnapshot,
+        prefix: &str,
+    ) {
+        super::recurrent_snapshot::push_optional(
+            snapshot,
+            format!("{prefix}.conv_state"),
+            &self.conv_state,
+        );
+        super::recurrent_snapshot::push_optional(
+            snapshot,
+            format!("{prefix}.state_cache"),
+            &self.state_cache,
+        );
+    }
+
+    pub fn restore_from(
+        &mut self,
+        snapshot: &mlxcel_core::generate::ModelStateSnapshot,
+        prefix: &str,
+    ) {
+        self.conv_state =
+            super::recurrent_snapshot::restore_optional(snapshot, format!("{prefix}.conv_state"));
+        self.state_cache =
+            super::recurrent_snapshot::restore_optional(snapshot, format!("{prefix}.state_cache"));
+        self.offset = snapshot.token_len() as i32;
     }
 }
 

@@ -16,7 +16,7 @@
 //! drafter.
 //!
 //! Mirrors
-//! `references/mlx-vlm/mlx_vlm/speculative/drafters/gemma4_assistant/gemma4_assistant.py`.
+//! https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/speculative/drafters/gemma4_assistant/gemma4_assistant.py.
 //!
 //! ## Lifecycle
 //!
@@ -542,7 +542,7 @@ impl Gemma4AssistantDraftModel {
     ///   only on E-series drafters with the centroid LM head).
     ///
     /// Mirrors upstream `Gemma4AssistantDraftModel.sanitize` in
-    /// `references/mlx-vlm/mlx_vlm/speculative/drafters/gemma4_assistant/gemma4_assistant.py`.
+    /// https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/speculative/drafters/gemma4_assistant/gemma4_assistant.py.
     pub fn sanitize_weights(weights: &mut WeightMap, config: &Gemma4AssistantConfig) {
         if config.tie_word_embeddings {
             weights.remove("lm_head.weight");

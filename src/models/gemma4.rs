@@ -28,9 +28,12 @@ use crate::distributed::pipeline::LayerFilter;
 use crate::distributed::pipeline::StageExecutionOutput;
 use crate::distributed::pipeline::partial_loading::filter_weight_map;
 use crate::models::model_owned::ModelOwnedSequenceState;
+use crate::models::recurrent_snapshot::{push_i32, push_optional, restore_i32, restore_optional};
 use crate::models::switch_layers::{SwitchLinear, gather_sort};
-use mlxcel_core::cache::{SequenceId, SequenceStateLayout};
-use mlxcel_core::generate::LanguageModel;
+use mlxcel_core::cache::{
+    KVCacheMode, RotatingKVCacheSnapshotState, SequenceId, SequenceStateLayout,
+};
+use mlxcel_core::generate::{LanguageModel, ModelStateSnapshot};
 use mlxcel_core::layers::{
     FusedQKVLinear, KVCache, RMSNorm, RotatingKVCache, UnifiedEmbedding, UnifiedLinear,
     compiled_gelu_mlp_fp16,
@@ -257,7 +260,7 @@ impl ModelArgs {
     }
 }
 
-fn parse_eos_ids(value: Option<&serde_json::Value>) -> Vec<i32> {
+pub(crate) fn parse_eos_ids(value: Option<&serde_json::Value>) -> Vec<i32> {
     match value {
         Some(serde_json::Value::Number(n)) => {
             n.as_i64().map(|v| vec![v as i32]).unwrap_or_default()
@@ -294,7 +297,13 @@ fn get_weight_copy(weights: &WeightMap, name: &str) -> Result<UniquePtr<MlxArray
 /// vision span is never split across a chunk (the loader sets
 /// `no_chunked_prefill`), so `offset == 0` and `block_ids` aligns with both the
 /// query and key axes.
-fn overlay_block_bidirectional(base: &MlxArray, block_ids: &MlxArray) -> UniquePtr<MlxArray> {
+///
+/// Used by: Gemma 4 Unified prefill masks, DiffusionGemma image prefill
+/// (`DiffusionGemmaModel::forward_encoder_embeds`, issue #217 phase 2).
+pub(crate) fn overlay_block_bidirectional(
+    base: &MlxArray,
+    block_ids: &MlxArray,
+) -> UniquePtr<MlxArray> {
     let base_shape = mlxcel_core::array_shape(base);
     debug_assert!(
         base_shape.len() >= 2,
@@ -451,6 +460,74 @@ impl SwitchGeGLU {
             inner_tick("squeeze", &squeezed, &mut last);
             squeezed
         }
+    }
+
+    /// Single-token decode via the fused GeGLU MoE kernel (#268). Returns the
+    /// score-weighted expert sum `[hidden]`, or `None` (caller falls back to
+    /// `forward` + combine) for any unsupported config: non-affine, gate/up not
+    /// 4/8-bit or down not 4/6/8-bit, gate/up bits mismatch, group_size
+    /// mismatch, the Regular variant, or a non-single-token `x`.
+    fn forward_fused_kernel(
+        &self,
+        x: &MlxArray,
+        indices: &MlxArray,
+        scores: &MlxArray,
+    ) -> Option<UniquePtr<MlxArray>> {
+        let gate = self.gate_proj.quantized_parts()?;
+        let up = self.up_proj.quantized_parts()?;
+        let down = self.down_proj.quantized_parts()?;
+        if gate.bits != 4 && gate.bits != 8 {
+            return None;
+        }
+        if down.bits != 4 && down.bits != 8 && down.bits != 6 {
+            return None;
+        }
+        if gate.bits != up.bits
+            || gate.group_size != up.group_size
+            || gate.group_size != down.group_size
+        {
+            return None;
+        }
+        if gate.mode != "affine" || up.mode != "affine" || down.mode != "affine" {
+            return None;
+        }
+        let gw_shape = mlxcel_core::array_shape(gate.weight.as_ref().unwrap());
+        if gw_shape.len() != 3 {
+            return None;
+        }
+        let dff = gw_shape[1];
+        let din = gw_shape[2] * (32 / gate.bits);
+        if down.bits == 6 && dff % 16 != 0 {
+            return None;
+        }
+        let k = *mlxcel_core::array_shape(indices).last()?;
+        let x_elems: i32 = mlxcel_core::array_shape(x).iter().product();
+        if x_elems != din {
+            return None;
+        }
+        let x_flat = mlxcel_core::reshape(x, &[din]);
+        let idx_flat = mlxcel_core::reshape(indices, &[k]);
+        let sc_flat = mlxcel_core::reshape(scores, &[k]);
+        Some(mlxcel_core::fused_moe_geglu_kernel(
+            &x_flat,
+            &idx_flat,
+            gate.weight.as_ref().unwrap(),
+            gate.scales.as_ref().unwrap(),
+            gate.biases.as_ref().unwrap(),
+            up.weight.as_ref().unwrap(),
+            up.scales.as_ref().unwrap(),
+            up.biases.as_ref().unwrap(),
+            down.weight.as_ref().unwrap(),
+            down.scales.as_ref().unwrap(),
+            down.biases.as_ref().unwrap(),
+            &sc_flat,
+            din,
+            dff,
+            k,
+            gate.bits,
+            down.bits,
+            gate.group_size,
+        ))
     }
 
     fn from_weights(
@@ -644,8 +721,20 @@ impl Experts {
 
         let x_flat = mlxcel_core::reshape(x, &[b * s, h]);
         let indices_flat = mlxcel_core::reshape(top_k_indices, &[b * s, k]);
-        let expert_out = self.switch_geglu.forward(&x_flat, &indices_flat, h);
 
+        // Fused single-token decode GeGLU kernel (#268) on by default
+        // (MLXCEL_FUSED_MOE=0 disables); otherwise SwitchGeGLU + weighted combine
+        // (also the kernel's automatic fallback).
+        if b * s == 1
+            && crate::models::switch_layers::fused_moe_enabled()
+            && let Some(out) =
+                self.switch_geglu
+                    .forward_fused_kernel(&x_flat, &indices_flat, top_k_weights)
+        {
+            return mlxcel_core::reshape(&out, &[b, s, h]);
+        }
+
+        let expert_out = self.switch_geglu.forward(&x_flat, &indices_flat, h);
         let weights = mlxcel_core::reshape(top_k_weights, &[b * s, k, 1]);
         let weighted = mlxcel_core::multiply(&expert_out, &weights);
         let reduced = mlxcel_core::sum_axis(&weighted, -2, false);
@@ -730,6 +819,29 @@ impl CacheInterface for RotatingKVCache {
     }
 }
 
+fn kv_cache_mode_to_i32(mode: KVCacheMode) -> i32 {
+    match mode {
+        KVCacheMode::Fp16 => 0,
+        KVCacheMode::Int8 => 1,
+        KVCacheMode::Turbo4Asym => 2,
+        KVCacheMode::Turbo3Asym => 3,
+        KVCacheMode::Turbo4 => 4,
+        KVCacheMode::Turbo4Delegated => 5,
+    }
+}
+
+fn kv_cache_mode_from_i32(value: i32) -> Result<KVCacheMode, String> {
+    match value {
+        0 => Ok(KVCacheMode::Fp16),
+        1 => Ok(KVCacheMode::Int8),
+        2 => Ok(KVCacheMode::Turbo4Asym),
+        3 => Ok(KVCacheMode::Turbo3Asym),
+        4 => Ok(KVCacheMode::Turbo4),
+        5 => Ok(KVCacheMode::Turbo4Delegated),
+        other => Err(format!("unknown Gemma 4 cache snapshot mode tag {other}")),
+    }
+}
+
 pub enum Cache {
     Standard(KVCache),
     Rotating(RotatingKVCache),
@@ -748,6 +860,163 @@ impl Cache {
             Self::Standard(cache) => cache,
             Self::Rotating(cache) => cache,
         }
+    }
+
+    pub(crate) fn snapshot_into(
+        &self,
+        snapshot: &mut ModelStateSnapshot,
+        prefix: &str,
+    ) -> Result<(), String> {
+        match self {
+            Self::Standard(cache) => {
+                if cache.keys.is_none() && cache.values.is_none() {
+                    return Ok(());
+                }
+                if cache.keys.is_some() != cache.values.is_some() {
+                    return Err(format!(
+                        "Gemma 4 snapshot {prefix}: standard cache has only one of keys/values"
+                    ));
+                }
+                if cache.mode != KVCacheMode::Fp16 {
+                    return Err(format!(
+                        "Gemma 4 snapshot {prefix}: standard cache mode {:?} is not supported by model-state snapshots",
+                        cache.mode
+                    ));
+                }
+                push_optional(snapshot, format!("{prefix}.standard.keys"), &cache.keys);
+                push_optional(snapshot, format!("{prefix}.standard.values"), &cache.values);
+                push_i32(snapshot, format!("{prefix}.standard.offset"), cache.offset);
+                push_i32(
+                    snapshot,
+                    format!("{prefix}.standard.mode"),
+                    kv_cache_mode_to_i32(cache.mode),
+                );
+            }
+            Self::Rotating(cache) => {
+                if cache.keys.is_none() && cache.values.is_none() {
+                    return Ok(());
+                }
+                if cache.keys.is_some() != cache.values.is_some() {
+                    return Err(format!(
+                        "Gemma 4 snapshot {prefix}: rotating cache has only one of keys/values"
+                    ));
+                }
+                let state = cache.snapshot_state();
+                if state.mode != KVCacheMode::Fp16 {
+                    return Err(format!(
+                        "Gemma 4 snapshot {prefix}: rotating cache mode {:?} is not supported by model-state snapshots",
+                        state.mode
+                    ));
+                }
+                push_optional(snapshot, format!("{prefix}.rotating.keys"), &cache.keys);
+                push_optional(snapshot, format!("{prefix}.rotating.values"), &cache.values);
+                push_i32(
+                    snapshot,
+                    format!("{prefix}.rotating.max_size"),
+                    state.max_size,
+                );
+                push_i32(
+                    snapshot,
+                    format!("{prefix}.rotating.buffer_size"),
+                    state.buffer_size,
+                );
+                push_i32(snapshot, format!("{prefix}.rotating.offset"), state.offset);
+                push_i32(
+                    snapshot,
+                    format!("{prefix}.rotating.start_position"),
+                    state.start_position,
+                );
+                push_i32(snapshot, format!("{prefix}.rotating.idx"), state.idx);
+                push_i32(snapshot, format!("{prefix}.rotating.step"), state.step);
+                push_i32(
+                    snapshot,
+                    format!("{prefix}.rotating.mode"),
+                    kv_cache_mode_to_i32(state.mode),
+                );
+                push_i32(
+                    snapshot,
+                    format!("{prefix}.rotating.turbo_seed"),
+                    state.turbo_seed as i32,
+                );
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn restore_from(
+        &mut self,
+        snapshot: &ModelStateSnapshot,
+        prefix: &str,
+    ) -> Result<(), String> {
+        match self {
+            Self::Standard(cache) => {
+                let keys = restore_optional(snapshot, format!("{prefix}.standard.keys"));
+                let values = restore_optional(snapshot, format!("{prefix}.standard.values"));
+                if keys.is_none() && values.is_none() {
+                    return Ok(());
+                }
+                if keys.is_some() != values.is_some() {
+                    return Err(format!(
+                        "Gemma 4 restore {prefix}: standard snapshot has only one of keys/values"
+                    ));
+                }
+                let mode = restore_i32(snapshot, format!("{prefix}.standard.mode"))
+                    .map(kv_cache_mode_from_i32)
+                    .transpose()?
+                    .unwrap_or(KVCacheMode::Fp16);
+                if mode != KVCacheMode::Fp16 {
+                    return Err(format!(
+                        "Gemma 4 restore {prefix}: standard snapshot mode {:?} is not supported",
+                        mode
+                    ));
+                }
+                cache.keys = keys;
+                cache.values = values;
+                cache.offset = restore_i32(snapshot, format!("{prefix}.standard.offset"))
+                    .unwrap_or(snapshot.token_len() as i32);
+                cache.mode = KVCacheMode::Fp16;
+            }
+            Self::Rotating(cache) => {
+                let keys = restore_optional(snapshot, format!("{prefix}.rotating.keys"));
+                let values = restore_optional(snapshot, format!("{prefix}.rotating.values"));
+                if keys.is_none() && values.is_none() {
+                    return Ok(());
+                }
+                if keys.is_some() != values.is_some() {
+                    return Err(format!(
+                        "Gemma 4 restore {prefix}: rotating snapshot has only one of keys/values"
+                    ));
+                }
+                let current = cache.snapshot_state();
+                let mode = restore_i32(snapshot, format!("{prefix}.rotating.mode"))
+                    .map(kv_cache_mode_from_i32)
+                    .transpose()?
+                    .unwrap_or(KVCacheMode::Fp16);
+                let state = RotatingKVCacheSnapshotState {
+                    max_size: restore_i32(snapshot, format!("{prefix}.rotating.max_size"))
+                        .unwrap_or(current.max_size),
+                    buffer_size: restore_i32(snapshot, format!("{prefix}.rotating.buffer_size"))
+                        .unwrap_or(0),
+                    offset: restore_i32(snapshot, format!("{prefix}.rotating.offset"))
+                        .unwrap_or(snapshot.token_len() as i32),
+                    start_position: restore_i32(
+                        snapshot,
+                        format!("{prefix}.rotating.start_position"),
+                    )
+                    .unwrap_or(0),
+                    idx: restore_i32(snapshot, format!("{prefix}.rotating.idx"))
+                        .unwrap_or(snapshot.token_len() as i32),
+                    step: restore_i32(snapshot, format!("{prefix}.rotating.step"))
+                        .unwrap_or(current.step),
+                    mode,
+                    turbo_seed: restore_i32(snapshot, format!("{prefix}.rotating.turbo_seed"))
+                        .map(|seed| seed as u32)
+                        .unwrap_or(current.turbo_seed),
+                };
+                cache.restore_fp16_snapshot_state(state, keys, values)?;
+            }
+        }
+        Ok(())
     }
 
     /// Trim the last `n` entries from this cache, dispatching to the
@@ -778,7 +1047,7 @@ impl Cache {
 
     /// Per-row tail-zero of the rotating cache for partial-accept rows in a
     /// batched verify pass. Mirrors the Python `hasattr(c, "_idx")` branch in
-    /// `rollback_speculative_cache` (references/mlx-vlm/mlx_vlm/models/gemma4
+    /// `rollback_speculative_cache` (https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/models/gemma4
     /// /language.py lines 637-645):
     ///
     /// ```text
@@ -880,6 +1149,178 @@ impl Cache {
         cache.values = Some(new_values);
         Ok(())
     }
+
+    /// Issue #203: close each row's post-rollback position hole by moving the
+    /// row's accepted verify-window K/V down to the row's logical valid end,
+    /// so every row's cache content stays a contiguous prefix (physical slot
+    /// == logical position), exactly like its standalone B = 1 run.
+    ///
+    /// Coordinates: `ve_pre[r]` is row `r`'s logical valid end BEFORE this
+    /// round's verify window (`left_padding[r] + kv_valid_len[r]`); the
+    /// window of `width` tokens was appended at the shared physical offset
+    /// `o_pre = self.offset() - width`. Row `r` accepted `accepted[r] + 1`
+    /// window tokens (bonus + accepted drafts); they move from
+    /// `[o_pre, o_pre + accepted[r] + 1)` to `[ve_pre[r], ...)` (a no-op for
+    /// rows already at the shared offset) and the vacated region up to
+    /// `o_post = max(ve_pre[r] + accepted[r] + 1)` is zeroed. The caller
+    /// trims the cache offset down to `o_post` afterwards.
+    ///
+    /// Both cache kinds are only ever Fp16 on this path
+    /// (`make_speculative_caches` constructs plain `KVCache::new` /
+    /// `RotatingKVCache::new`), so no quantization sidecars need moving.
+    /// Refuses front-compacted caches (buffer slot != logical position),
+    /// the eligible batched MTP regime never compacts.
+    pub(crate) fn compact_partial_accept_rows(
+        &mut self,
+        ve_pre: &[i32],
+        accepted: &[i32],
+        width: i32,
+    ) -> Result<(), String> {
+        if ve_pre.len() != accepted.len() {
+            return Err(format!(
+                "compact_partial_accept_rows: ve_pre rows ({}) != accepted rows ({})",
+                ve_pre.len(),
+                accepted.len()
+            ));
+        }
+        if ve_pre.is_empty() {
+            return Ok(());
+        }
+        let offset = self.offset();
+        let o_pre = offset - width;
+        if o_pre < 0 {
+            return Err(format!(
+                "compact_partial_accept_rows: width ({width}) exceeds cache offset ({offset})"
+            ));
+        }
+        // Validate every row BEFORE computing the global o_post or touching
+        // any buffer: a single malformed row must not let an earlier row's
+        // zeroing slice_update run against an inflated o_post.
+        for (r, (&ve, &a)) in ve_pre.iter().zip(accepted).enumerate() {
+            if ve > o_pre || a < 0 || a > width - 1 {
+                return Err(format!(
+                    "compact_partial_accept_rows: row {r} out of bounds \
+                     (ve_pre {ve}, accepted {a}, o_pre {o_pre}, width {width})"
+                ));
+            }
+        }
+        let o_post = ve_pre
+            .iter()
+            .zip(accepted)
+            .map(|(&v, &a)| v + a + 1)
+            .max()
+            .unwrap();
+        // Buffer slot of logical position p is `p - slot_base`; the batched
+        // MTP regime never front-compacts either cache kind, so require a
+        // zero base rather than silently corrupting slots.
+        let slot_base = match self {
+            Self::Standard(c) => c.offset - c.live_len(),
+            Self::Rotating(c) => c.offset - c.buffer_write_idx(),
+        };
+        if slot_base != 0 {
+            return Err(format!(
+                "compact_partial_accept_rows: cache buffer is front-compacted \
+                 (slot base {slot_base}); the divergent batched MTP path requires \
+                 the uncompacted regime"
+            ));
+        }
+        let (keys_slot, values_slot) = match self {
+            Self::Standard(c) => (&mut c.keys, &mut c.values),
+            Self::Rotating(c) => (&mut c.keys, &mut c.values),
+        };
+        let (Some(keys), Some(values)) = (keys_slot.as_ref(), values_slot.as_ref()) else {
+            return Ok(());
+        };
+        let k_shape = mlxcel_core::array_shape(keys);
+        let v_shape = mlxcel_core::array_shape(values);
+        let batch = k_shape[0];
+        if batch != ve_pre.len() as i32 {
+            return Err(format!(
+                "compact_partial_accept_rows: cache batch ({batch}) does not match \
+                 row count ({})",
+                ve_pre.len()
+            ));
+        }
+        let k_dtype = mlxcel_core::array_dtype(keys);
+        let v_dtype = mlxcel_core::array_dtype(values);
+
+        let mut new_keys = mlxcel_core::copy(keys);
+        let mut new_values = mlxcel_core::copy(values);
+        for (r, (&ve, &a)) in ve_pre.iter().zip(accepted).enumerate() {
+            let n = a + 1;
+            let bi = r as i32;
+            if ve < o_pre {
+                // Materialize the source slice with an explicit copy BEFORE
+                // the update: a bare slice is a lazy view of the same buffer,
+                // and `slice_update` may donate that buffer to its output, so
+                // an overlapping move (`ve + n > o_pre`) would read
+                // already-overwritten rows without the copy.
+                let src_k = mlxcel_core::copy(&mlxcel_core::slice(
+                    &new_keys,
+                    &[bi, 0, o_pre, 0],
+                    &[bi + 1, k_shape[1], o_pre + n, k_shape[3]],
+                ));
+                new_keys = mlxcel_core::slice_update(
+                    &new_keys,
+                    &src_k,
+                    &[bi, 0, ve, 0],
+                    &[bi + 1, k_shape[1], ve + n, k_shape[3]],
+                );
+                let src_v = mlxcel_core::copy(&mlxcel_core::slice(
+                    &new_values,
+                    &[bi, 0, o_pre, 0],
+                    &[bi + 1, v_shape[1], o_pre + n, v_shape[3]],
+                ));
+                new_values = mlxcel_core::slice_update(
+                    &new_values,
+                    &src_v,
+                    &[bi, 0, ve, 0],
+                    &[bi + 1, v_shape[1], ve + n, v_shape[3]],
+                );
+            }
+            // Zero the vacated region between the row's new valid end and the
+            // post-trim global end. Masked out next round anyway; zeroing
+            // keeps the buffers hygienic for any maskless fallback.
+            let z_start = ve + n;
+            if z_start < o_post {
+                let span = o_post - z_start;
+                let k_zero = mlxcel_core::zeros(&[1, k_shape[1], span, k_shape[3]], k_dtype);
+                let v_zero = mlxcel_core::zeros(&[1, v_shape[1], span, v_shape[3]], v_dtype);
+                new_keys = mlxcel_core::slice_update(
+                    &new_keys,
+                    &k_zero,
+                    &[bi, 0, z_start, 0],
+                    &[bi + 1, k_shape[1], o_post, k_shape[3]],
+                );
+                new_values = mlxcel_core::slice_update(
+                    &new_values,
+                    &v_zero,
+                    &[bi, 0, z_start, 0],
+                    &[bi + 1, v_shape[1], o_post, v_shape[3]],
+                );
+            }
+        }
+        *keys_slot = Some(new_keys);
+        *values_slot = Some(new_values);
+        Ok(())
+    }
+}
+
+/// Per-row context for a DIVERGENT batched MTP verify round (issue #203):
+/// some row's logical valid end lags the shared physical cache offset after
+/// mixed speculative accepts. Threaded from the model forward into every
+/// attention layer so queries and keys rotate at per-row logical positions
+/// (`ve[r]`), while the model-level [`build_divergent_verify_mask`] excludes
+/// each row's leading padding and stale gap and applies the window causality
+/// at the row's logical positions.
+pub(crate) struct DivergentVerifyRows<'a> {
+    /// Per-row logical valid end (`left_padding[r] + kv_valid_len[r]`): the
+    /// RoPE offset for the row's window tokens and the end of the row's
+    /// contiguous valid prefix in the shared cache.
+    pub(crate) ve: &'a [i32],
+    /// Per-row resident leading prompt padding (all zero for equal-length
+    /// bursts).
+    pub(crate) lp: Vec<i32>,
 }
 
 pub struct Attention {
@@ -942,12 +1383,92 @@ impl Attention {
         }
     }
 
+    /// Rotate a `[B, H, L, D]` tensor row-by-row, applying each batch row's
+    /// own RoPE offset.
+    ///
+    /// Used by the divergent batched MTP verify forward (issue #203): after
+    /// mixed speculative accepts each row's logical position lags the shared
+    /// physical cache offset, so the row's new window tokens must rotate at
+    /// the row's own logical positions to keep B = 1 relative RoPE distances.
+    /// B and L are tiny on that path (opt-in verify blocks), so the per-row
+    /// slice/rotate/concat loop is cheap relative to the layer matmuls.
+    fn apply_rope_per_row(&self, x: &MlxArray, offsets: &[i32]) -> UniquePtr<MlxArray> {
+        let shape = mlxcel_core::array_shape(x);
+        debug_assert_eq!(shape.len(), 4, "rope input must be [B, H, L, D]");
+        debug_assert_eq!(
+            shape[0] as usize,
+            offsets.len(),
+            "apply_rope_per_row needs exactly one offset per batch row"
+        );
+        let mut out: Option<UniquePtr<MlxArray>> = None;
+        for (r, &offset) in offsets.iter().enumerate() {
+            let r_i = r as i32;
+            let row =
+                mlxcel_core::slice(x, &[r_i, 0, 0, 0], &[r_i + 1, shape[1], shape[2], shape[3]]);
+            let rotated = self.apply_rope(&row, offset);
+            out = Some(match out {
+                None => rotated,
+                Some(acc) => {
+                    mlxcel_core::concatenate(acc.as_ref().unwrap(), rotated.as_ref().unwrap(), 0)
+                }
+            });
+        }
+        out.expect("apply_rope_per_row requires at least one batch row")
+    }
+
+    /// Per-row variant of the compiled proportional Q/K path: slice the
+    /// `[B, L, n_heads_or_kv * head_dim]` projection output row by row and
+    /// run each row through the SAME `compiled_q_path_proportional` fused
+    /// kernel the uniform path uses, with that row's own RoPE offset.
+    ///
+    /// Used by the divergent batched MTP verify forward (issue #203). The
+    /// offset flows into the compile window as a scalar array, so per-row
+    /// offsets reuse the cached graph (one extra compile per `[1, L, ...]`
+    /// shape, not per offset).
+    #[allow(clippy::too_many_arguments)]
+    fn compiled_q_path_proportional_per_row(
+        &self,
+        proj_out: &MlxArray,
+        norm_weight: &MlxArray,
+        norm_eps: f32,
+        freqs: &MlxArray,
+        n_heads: i32,
+        rotated_dims: i32,
+        l: i32,
+        offsets: &[i32],
+    ) -> UniquePtr<MlxArray> {
+        let width = n_heads * self.head_dim;
+        let mut out: Option<UniquePtr<MlxArray>> = None;
+        for (r, &offset) in offsets.iter().enumerate() {
+            let r_i = r as i32;
+            let row = mlxcel_core::slice(proj_out, &[r_i, 0, 0], &[r_i + 1, l, width]);
+            let rotated = mlxcel_core::compiled_q_path_proportional(
+                &row,
+                norm_weight,
+                freqs,
+                norm_eps,
+                n_heads,
+                self.head_dim,
+                rotated_dims,
+                offset,
+            );
+            out = Some(match out {
+                None => rotated,
+                Some(acc) => {
+                    mlxcel_core::concatenate(acc.as_ref().unwrap(), rotated.as_ref().unwrap(), 0)
+                }
+            });
+        }
+        out.expect("compiled_q_path_proportional_per_row requires at least one batch row")
+    }
+
     pub(crate) fn forward(
         &self,
         x: &MlxArray,
         mask: Option<&MlxArray>,
         cache: &mut dyn CacheInterface,
         shared_kv: Option<(&MlxArray, &MlxArray)>,
+        divergent_rows: Option<&DivergentVerifyRows<'_>>,
     ) -> (
         UniquePtr<MlxArray>,
         Option<(UniquePtr<MlxArray>, UniquePtr<MlxArray>)>,
@@ -956,6 +1477,7 @@ impl Attention {
         let b = shape[0];
         let l = shape[1];
         let offset = cache.offset();
+        let rope_offsets: Option<&[i32]> = divergent_rows.map(|ctx| ctx.ve);
 
         let q_proj_out = match &self.projection {
             AttentionProjection::Fused(proj) => {
@@ -970,7 +1492,39 @@ impl Attention {
         // `reshape -> q_norm -> transpose -> full-head ProportionalRoPE`
         // inside a single `mx::core::compile` window. Sliding layers and
         // layers with non-proportional RoPE stay on the op-at-a-time chain.
-        let queries = if let Some(ref freqs) = self.proportional_rope_freqs {
+        //
+        // Divergent batched MTP verify rounds (issue #203) instead rotate
+        // each row at its own logical position; `rope_offsets` is `Some` only
+        // on that path. Each row goes through the SAME kernels the uniform
+        // path uses (the compiled fused chain for proportional layers, the
+        // op-at-a-time chain otherwise), just sliced per row, so lockstep
+        // rows stay bitwise-identical to the uniform rounds and near-tie
+        // argmaxes cannot flip from a kernel-path change.
+        let queries = if let Some(offsets) = rope_offsets {
+            if let Some(ref freqs) = self.proportional_rope_freqs {
+                let rotated_dims = 2 * ((self.proportional_partial_rotary_factor as f64
+                    * self.head_dim as f64
+                    / 2.0)
+                    .floor() as i32)
+                    .max(0);
+                self.compiled_q_path_proportional_per_row(
+                    &q_proj_out,
+                    &self.q_norm.weight,
+                    self.q_norm.eps,
+                    freqs,
+                    self.n_heads,
+                    rotated_dims,
+                    l,
+                    offsets,
+                )
+            } else {
+                let queries =
+                    mlxcel_core::reshape(&q_proj_out, &[b, l, self.n_heads, self.head_dim]);
+                let queries = self.q_norm.forward(&queries);
+                let queries = mlxcel_core::transpose_axes(&queries, &[0, 2, 1, 3]);
+                self.apply_rope_per_row(&queries, offsets)
+            }
+        } else if let Some(ref freqs) = self.proportional_rope_freqs {
             let rotated_dims = 2
                 * ((self.proportional_partial_rotary_factor as f64 * self.head_dim as f64 / 2.0)
                     .floor() as i32)
@@ -999,7 +1553,7 @@ impl Attention {
             return (self.project_output(&attn_out, b, l), None);
         }
 
-        let (keys, values) = self.project_kv(x, b, l, offset, cache);
+        let (keys, values) = self.project_kv(x, b, l, offset, cache, rope_offsets);
         let attn_out = self.attend(&queries, &keys, &values, mask);
         let stored = if self.store_full_length_kv {
             Some((keys, values))
@@ -1063,6 +1617,7 @@ impl Attention {
         l: i32,
         offset: i32,
         cache: &mut dyn CacheInterface,
+        rope_offsets: Option<&[i32]>,
     ) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
         let (raw_keys, raw_values) = match &self.projection {
             AttentionProjection::Fused(proj) => {
@@ -1099,7 +1654,34 @@ impl Attention {
             .k_norm
             .as_ref()
             .expect("k_norm must be Some for non-KV-shared layers");
-        let keys = if let Some(ref freqs) = self.proportional_rope_freqs {
+        let keys = if let Some(offsets) = rope_offsets {
+            // Divergent batched MTP verify (issue #203): rotate each row's
+            // new keys at the row's own logical positions, mirroring the
+            // per-row query rotation in `forward`, through the same kernels
+            // the uniform path uses, sliced per row.
+            if let Some(ref freqs) = self.proportional_rope_freqs {
+                let rotated_dims = 2 * ((self.proportional_partial_rotary_factor as f64
+                    * self.head_dim as f64
+                    / 2.0)
+                    .floor() as i32)
+                    .max(0);
+                self.compiled_q_path_proportional_per_row(
+                    &raw_keys,
+                    &k_norm.weight,
+                    k_norm.eps,
+                    freqs,
+                    self.n_kv_heads,
+                    rotated_dims,
+                    l,
+                    offsets,
+                )
+            } else {
+                let keys = mlxcel_core::reshape(&raw_keys, &[b, l, self.n_kv_heads, self.head_dim]);
+                let keys = k_norm.forward(&keys);
+                let keys = mlxcel_core::transpose_axes(&keys, &[0, 2, 1, 3]);
+                self.apply_rope_per_row(&keys, offsets)
+            }
+        } else if let Some(ref freqs) = self.proportional_rope_freqs {
             let rotated_dims = 2
                 * ((self.proportional_partial_rotary_factor as f64 * self.head_dim as f64 / 2.0)
                     .floor() as i32)
@@ -1130,6 +1712,164 @@ impl Attention {
         let values = mlxcel_core::transpose_axes(&values, &[0, 2, 1, 3]);
 
         cache.update_and_fetch(keys, values)
+    }
+
+    /// DiffusionGemma canvas (decoder-mode) attention (issue #217, additive
+    /// seam). Mirrors `diffusion_gemma.language.Attention.__call__` with
+    /// `decoder=True`, line by line:
+    ///
+    /// * Q/K are projected, normed, and rotated at `offset` (the encoder
+    ///   length) through the SAME kernels the encoder path uses (the compiled
+    ///   proportional fused chain on full-attention layers, the op-at-a-time
+    ///   chain on sliding layers), so canvas numerics match the reference.
+    /// * `values_raw = v_proj(x)` when the layer has a v_proj (sliding
+    ///   layers), otherwise the raw K projection (`use_k_eq_v` full-attention
+    ///   layers); `values = v_norm(values_raw)`.
+    /// * The read-only `encoder_kv` prefix is concatenated in front of the
+    ///   canvas K/V. On sliding layers the prefix is first trimmed to the
+    ///   last `sliding_window - 1` positions (the upstream O(window) trim);
+    ///   with the trim applied, the no-padding decoder mask is `None`
+    ///   (canvas positions attend bidirectionally to everything that
+    ///   remains), so SDPA runs maskless with `self.scale` (1.0).
+    /// * The cache is NEVER updated; the canvas changes every denoising step.
+    pub(crate) fn forward_canvas(
+        &self,
+        x: &MlxArray,
+        encoder_kv: Option<(&MlxArray, &MlxArray)>,
+        offset: i32,
+    ) -> UniquePtr<MlxArray> {
+        let shape = mlxcel_core::array_shape(x);
+        let b = shape[0];
+        let l = shape[1];
+
+        let q_proj_out = match &self.projection {
+            AttentionProjection::Fused(proj) => {
+                let (q, _, _) = proj.forward(x);
+                q
+            }
+            AttentionProjection::Separate { q_proj, .. }
+            | AttentionProjection::KvShared { q_proj } => q_proj.forward(x),
+        };
+
+        let queries = if let Some(ref freqs) = self.proportional_rope_freqs {
+            let rotated_dims = 2
+                * ((self.proportional_partial_rotary_factor as f64 * self.head_dim as f64 / 2.0)
+                    .floor() as i32)
+                    .max(0);
+            mlxcel_core::compiled_q_path_proportional(
+                &q_proj_out,
+                &self.q_norm.weight,
+                freqs,
+                self.q_norm.eps,
+                self.n_heads,
+                self.head_dim,
+                rotated_dims,
+                offset,
+            )
+        } else {
+            let queries = mlxcel_core::reshape(&q_proj_out, &[b, l, self.n_heads, self.head_dim]);
+            let queries = self.q_norm.forward(&queries);
+            let queries = mlxcel_core::transpose_axes(&queries, &[0, 2, 1, 3]);
+            self.apply_rope(&queries, offset)
+        };
+
+        let (raw_keys, raw_values) = match &self.projection {
+            AttentionProjection::Fused(proj) => {
+                let (_, k, v) = proj.forward(x);
+                (k, Some(v))
+            }
+            AttentionProjection::Separate { k_proj, v_proj, .. } => {
+                let raw_keys = k_proj.forward(x);
+                let raw_values = if self.use_k_eq_v {
+                    None
+                } else {
+                    Some(
+                        v_proj
+                            .as_ref()
+                            .expect("Gemma4 attention expected v_proj for non-k_eq_v layer")
+                            .forward(x),
+                    )
+                };
+                (raw_keys, raw_values)
+            }
+            AttentionProjection::KvShared { .. } => {
+                unreachable!(
+                    "forward_canvas must not be called on a KV-shared layer; \
+                     DiffusionGemma forces num_kv_shared_layers == 0"
+                )
+            }
+        };
+
+        let k_norm = self
+            .k_norm
+            .as_ref()
+            .expect("k_norm must be Some for non-KV-shared layers");
+        let keys = if let Some(ref freqs) = self.proportional_rope_freqs {
+            let rotated_dims = 2
+                * ((self.proportional_partial_rotary_factor as f64 * self.head_dim as f64 / 2.0)
+                    .floor() as i32)
+                    .max(0);
+            mlxcel_core::compiled_q_path_proportional(
+                &raw_keys,
+                &k_norm.weight,
+                freqs,
+                k_norm.eps,
+                self.n_kv_heads,
+                self.head_dim,
+                rotated_dims,
+                offset,
+            )
+        } else {
+            let keys = mlxcel_core::reshape(&raw_keys, &[b, l, self.n_kv_heads, self.head_dim]);
+            let keys = k_norm.forward(&keys);
+            let keys = mlxcel_core::transpose_axes(&keys, &[0, 2, 1, 3]);
+            self.apply_rope(&keys, offset)
+        };
+
+        let raw_values_ref = raw_values
+            .as_ref()
+            .map(|values| values.as_ref().unwrap())
+            .unwrap_or_else(|| raw_keys.as_ref().unwrap());
+        let values = mlxcel_core::reshape(raw_values_ref, &[b, l, self.n_kv_heads, self.head_dim]);
+        let values = self.v_norm.forward(&values);
+        let values = mlxcel_core::transpose_axes(&values, &[0, 2, 1, 3]);
+
+        let (keys, values) = if let Some((encoder_keys, encoder_values)) = encoder_kv {
+            // Sliding layers: the canvas only sees the last
+            // `sliding_window - 1` encoder positions, so drop the
+            // out-of-window prefix before SDPA instead of scoring thousands
+            // of positions the (implicit) mask would zero anyway. Safe for
+            // the dense KVCache because offset == encoder_len always holds
+            // (no trailing-invalid slots).
+            let window_prefix = (self.window_size - 1).max(0);
+            let encoder_len = mlxcel_core::array_shape(encoder_keys)[2];
+            let (encoder_keys, encoder_values) =
+                if self.window_size > 0 && encoder_len > window_prefix && offset >= encoder_len {
+                    (
+                        slice_axis(encoder_keys, 2, encoder_len - window_prefix, encoder_len),
+                        slice_axis(encoder_values, 2, encoder_len - window_prefix, encoder_len),
+                    )
+                } else {
+                    (
+                        mlxcel_core::copy(encoder_keys),
+                        mlxcel_core::copy(encoder_values),
+                    )
+                };
+            (
+                mlxcel_core::concatenate(&encoder_keys, &keys, 2),
+                mlxcel_core::concatenate(&encoder_values, &values, 2),
+            )
+        } else {
+            (keys, values)
+        };
+
+        // Full bidirectional attention over [trimmed encoder prefix, canvas]:
+        // batch-1 with no padding means mask == None in the reference decoder
+        // mask builder. `window_size` 0 keeps the dispatch on the plain
+        // (non-windowed) SDPA path.
+        let attn_out =
+            mlxcel_core::layers::attention(&queries, &keys, &values, self.scale, None, 0.0, 0);
+        self.project_output(&attn_out, b, l)
     }
 
     pub fn from_weights(
@@ -1406,9 +2146,11 @@ impl DecoderLayer {
             shared_kv,
             usize::MAX,
             false,
+            None,
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn forward_with_profile(
         &self,
         x: &MlxArray,
@@ -1418,6 +2160,7 @@ impl DecoderLayer {
         shared_kv: Option<(&MlxArray, &MlxArray)>,
         layer_idx: usize,
         profile_subops: bool,
+        divergent_rows: Option<&DivergentVerifyRows<'_>>,
     ) -> (
         UniquePtr<MlxArray>,
         Option<(UniquePtr<MlxArray>, UniquePtr<MlxArray>)>,
@@ -1430,51 +2173,16 @@ impl DecoderLayer {
         // residual is only *read* by the final `add`.
         let h_attn = self.input_layernorm.forward(x);
         timer.tick("input_layernorm", &h_attn);
-        let (h_attn, stored_kv) = self.self_attn.forward(&h_attn, mask, cache, shared_kv);
+        let (h_attn, stored_kv) =
+            self.self_attn
+                .forward(&h_attn, mask, cache, shared_kv, divergent_rows);
         timer.tick("self_attn", &h_attn);
         let h_attn = self.post_attention_layernorm.forward(&h_attn);
         timer.tick("post_attention_layernorm", &h_attn);
         let after_attn = mlxcel_core::add(x, &h_attn);
         timer.tick("attn_residual_add", &after_attn);
 
-        let ffn_out = if let (Some(router), Some(experts)) = (&self.router, &self.experts) {
-            let h1 = self.pre_feedforward_layernorm.forward(&after_attn);
-            timer.tick("pre_ffn_ln_shared_mlp", &h1);
-            let h1 = self.mlp.forward(&h1);
-            timer.tick("shared_mlp", &h1);
-            let h1 = self
-                .post_feedforward_layernorm_1
-                .as_ref()
-                .expect("Missing Gemma4 MoE post_feedforward_layernorm_1")
-                .forward(&h1);
-            timer.tick("post_shared_mlp_ln", &h1);
-
-            let (top_k_indices, top_k_weights) = router.forward(&after_attn);
-            timer.tick("router", &top_k_indices);
-            let h2 = self
-                .pre_feedforward_layernorm_2
-                .as_ref()
-                .expect("Missing Gemma4 MoE pre_feedforward_layernorm_2")
-                .forward(&after_attn);
-            timer.tick("pre_moe_ln", &h2);
-            let h2 = experts.forward(&h2, &top_k_indices, &top_k_weights);
-            timer.tick("experts", &h2);
-            let h2 = self
-                .post_feedforward_layernorm_2
-                .as_ref()
-                .expect("Missing Gemma4 MoE post_feedforward_layernorm_2")
-                .forward(&h2);
-            timer.tick("post_moe_ln", &h2);
-            let combined = mlxcel_core::add(&h1, &h2);
-            timer.tick("moe_shared_add", &combined);
-            combined
-        } else {
-            let h_norm = self.pre_feedforward_layernorm.forward(&after_attn);
-            timer.tick("pre_ffn_ln", &h_norm);
-            let out = self.mlp.forward(&h_norm);
-            timer.tick("mlp", &out);
-            out
-        };
+        let ffn_out = self.ffn_branch(&after_attn, &mut timer);
 
         let ffn_out = self.post_feedforward_layernorm.forward(&ffn_out);
         timer.tick("post_ffn_ln", &ffn_out);
@@ -1529,6 +2237,109 @@ impl DecoderLayer {
         let h = mlxcel_core::multiply(&h, &self.layer_scalar);
         timer.tick("layer_scalar", &h);
         (h, stored_kv)
+    }
+
+    /// Shared feed-forward stage: dense MLP branch plus (when present) the
+    /// MoE branch, combined exactly like the upstream Gemma 4 layer. Extracted
+    /// from [`Self::forward_with_profile`] verbatim so the DiffusionGemma
+    /// encoder/canvas forwards (issue #217) reuse the identical op sequence;
+    /// the hot autoregressive path calls this with its own timer and is
+    /// byte-identical to the pre-extraction code.
+    fn ffn_branch(&self, after_attn: &MlxArray, timer: &mut SubopTimer) -> UniquePtr<MlxArray> {
+        if let (Some(router), Some(experts)) = (&self.router, &self.experts) {
+            let h1 = self.pre_feedforward_layernorm.forward(after_attn);
+            timer.tick("pre_ffn_ln_shared_mlp", &h1);
+            let h1 = self.mlp.forward(&h1);
+            timer.tick("shared_mlp", &h1);
+            let h1 = self
+                .post_feedforward_layernorm_1
+                .as_ref()
+                .expect("Missing Gemma4 MoE post_feedforward_layernorm_1")
+                .forward(&h1);
+            timer.tick("post_shared_mlp_ln", &h1);
+
+            let (top_k_indices, top_k_weights) = router.forward(after_attn);
+            timer.tick("router", &top_k_indices);
+            let h2 = self
+                .pre_feedforward_layernorm_2
+                .as_ref()
+                .expect("Missing Gemma4 MoE pre_feedforward_layernorm_2")
+                .forward(after_attn);
+            timer.tick("pre_moe_ln", &h2);
+            let h2 = experts.forward(&h2, &top_k_indices, &top_k_weights);
+            timer.tick("experts", &h2);
+            let h2 = self
+                .post_feedforward_layernorm_2
+                .as_ref()
+                .expect("Missing Gemma4 MoE post_feedforward_layernorm_2")
+                .forward(&h2);
+            timer.tick("post_moe_ln", &h2);
+            let combined = mlxcel_core::add(&h1, &h2);
+            timer.tick("moe_shared_add", &combined);
+            combined
+        } else {
+            let h_norm = self.pre_feedforward_layernorm.forward(after_attn);
+            timer.tick("pre_ffn_ln", &h_norm);
+            let out = self.mlp.forward(&h_norm);
+            timer.tick("mlp", &out);
+            out
+        }
+    }
+
+    /// DiffusionGemma encoder-mode layer forward (issue #217, additive seam).
+    ///
+    /// Identical to [`Self::forward`] for a layer without per-layer inputs or
+    /// KV sharing, except the final output scalar is the caller-provided
+    /// `layer_scalar` (the checkpoint's per-layer ENCODER scalar at
+    /// `model.encoder.language_model.layers.N.layer_scalar`) instead of the
+    /// layer's stored decoder `layer_scalar`. Mirrors the
+    /// `layer_scalar` override parameter on the upstream
+    /// `diffusion_gemma.language.DecoderLayer.__call__`.
+    pub(crate) fn forward_encoder_with_scalar(
+        &self,
+        x: &MlxArray,
+        mask: Option<&MlxArray>,
+        cache: &mut dyn CacheInterface,
+        layer_scalar: &MlxArray,
+    ) -> UniquePtr<MlxArray> {
+        let mut timer = SubopTimer::new(false, usize::MAX);
+        let h_attn = self.input_layernorm.forward(x);
+        let (h_attn, _stored_kv) = self.self_attn.forward(&h_attn, mask, cache, None, None);
+        let h_attn = self.post_attention_layernorm.forward(&h_attn);
+        let after_attn = mlxcel_core::add(x, &h_attn);
+
+        let ffn_out = self.ffn_branch(&after_attn, &mut timer);
+        let ffn_out = self.post_feedforward_layernorm.forward(&ffn_out);
+        let after_ffn = mlxcel_core::add(&after_attn, &ffn_out);
+
+        mlxcel_core::multiply(&after_ffn, layer_scalar)
+    }
+
+    /// DiffusionGemma canvas (decoder-mode) layer forward (issue #217,
+    /// additive seam).
+    ///
+    /// The canvas hidden states attend bidirectionally within themselves and
+    /// to the read-only `encoder_kv` prefix (the cache is never written);
+    /// everything after attention is the standard Gemma 4 layer with the
+    /// layer's stored DECODER `layer_scalar`. Mirrors the upstream
+    /// `decoder=True` path of `diffusion_gemma.language.DecoderLayer`.
+    pub(crate) fn forward_canvas(
+        &self,
+        x: &MlxArray,
+        encoder_kv: Option<(&MlxArray, &MlxArray)>,
+        offset: i32,
+    ) -> UniquePtr<MlxArray> {
+        let mut timer = SubopTimer::new(false, usize::MAX);
+        let h_attn = self.input_layernorm.forward(x);
+        let h_attn = self.self_attn.forward_canvas(&h_attn, encoder_kv, offset);
+        let h_attn = self.post_attention_layernorm.forward(&h_attn);
+        let after_attn = mlxcel_core::add(x, &h_attn);
+
+        let ffn_out = self.ffn_branch(&after_attn, &mut timer);
+        let ffn_out = self.post_feedforward_layernorm.forward(&ffn_out);
+        let after_ffn = mlxcel_core::add(&after_attn, &ffn_out);
+
+        mlxcel_core::multiply(&after_ffn, &self.layer_scalar)
     }
 
     pub fn from_weights(
@@ -1854,7 +2665,67 @@ impl Gemma4TextModel {
             .map(|lp| lp.iter().any(|&p| p > 0))
             .unwrap_or(false);
 
-        let (global_mask, sliding_mask) = if let Some(mask) = mask {
+        // Divergent batched MTP verify round (issue #203): some row's logical
+        // valid end lags the shared physical cache offset after mixed
+        // speculative accepts. The finalize-side compaction
+        // (`rollback_speculative_cache_divergent`) keeps each row's cache
+        // content a contiguous prefix `[0, ve[r])`, so the exact per-row mask
+        // is: padding `[0, lp[r])` and the stale gap `[ve[r], offset)` are
+        // blocked, history `[lp[r], ve[r])` and the causal window prefix are
+        // visible, with the sliding band evaluated at each row's LOGICAL
+        // positions. Queries/keys rotate at per-row logical positions via
+        // `rope_offsets` below. Uniform rounds (`ve[r] == offset` for every
+        // row, always true until the first divergent accept) skip this branch
+        // entirely and stay byte-identical to the pre-#203 path.
+        let global_offset_pre = first_present_cache_offset(caches);
+        let divergent_verify = mask.is_none()
+            && !mtp_divergent_fix_disabled()
+            && per_row_valid_end
+                .map(|ve| ve.iter().any(|&v| v != global_offset_pre))
+                .unwrap_or(false);
+        // Per-row context for the divergent verify path (issue #203): the
+        // attention layers rotate queries/keys at per-row logical positions
+        // and run attention per row over each row's exact contiguous K/V, so
+        // no batch-level masks are needed (and the SDPA reduction matches the
+        // row's standalone B = 1 run bitwise).
+        let divergent_rows: Option<DivergentVerifyRows<'_>> = if divergent_verify {
+            let ve = per_row_valid_end.expect("divergent_verify implies Some(per_row_valid_end)");
+            tracing::debug!(
+                l,
+                o_pre = global_offset_pre,
+                ?ve,
+                ?left_padding,
+                "gemma4 batched MTP divergent verify round"
+            );
+            let lp = match left_padding {
+                Some(lp) => lp.to_vec(),
+                None => vec![0; ve.len()],
+            };
+            Some(DivergentVerifyRows { ve, lp })
+        } else {
+            None
+        };
+
+        let (global_mask, sliding_mask) = if let Some(ctx) = divergent_rows.as_ref() {
+            let sliding_offset = first_cache_offset(caches, "sliding_attention");
+            let window = self.config.sliding_window as i32;
+            (
+                Some(build_divergent_verify_mask(
+                    l,
+                    global_offset_pre,
+                    ctx.ve,
+                    &ctx.lp,
+                    None,
+                )),
+                Some(build_divergent_verify_mask(
+                    l,
+                    sliding_offset,
+                    ctx.ve,
+                    &ctx.lp,
+                    Some(window),
+                )),
+            )
+        } else if let Some(mask) = mask {
             (Some(mlxcel_core::copy(mask)), Some(mlxcel_core::copy(mask)))
         } else if has_padding {
             // Resident prompt padding present (ragged burst). Build per-row
@@ -1927,7 +2798,11 @@ impl Gemma4TextModel {
         // the gap moves the batched logits onto the B = 1 semantics; it can only
         // improve parity. A uniform round (every `ve[r] == offset`, always true
         // for the first verify after prefill) is a byte-identical no-op.
-        let (global_mask, sliding_mask) = if let Some(ve) = per_row_valid_end {
+        // (Skipped when the divergent branch above already built exact
+        // per-row masks; the gap is part of those masks.)
+        let (global_mask, sliding_mask) = if let Some(ve) = per_row_valid_end
+            && !divergent_verify
+        {
             // Full-attention family: the unbounded `Cache::Standard` keeps each
             // row's rejected-draft K/V resident at `[ve[r], global_offset)`.
             let global_offset = first_cache_offset(caches, "full_attention");
@@ -2059,6 +2934,7 @@ impl Gemma4TextModel {
                 shared_kv,
                 i,
                 profile_subops,
+                divergent_rows.as_ref(),
             );
             h = next_h;
             if let Some(start) = layer_build_start {
@@ -2283,6 +3159,95 @@ impl Gemma4TextModel {
                 }
             })
             .collect()
+    }
+}
+
+/// Safety valve for the issue #203 divergent-round batched MTP machinery
+/// (per-row logical RoPE + exact per-row masks + compacting rollback).
+/// `MLXCEL_MTP_DISABLE_DIVERGENT_FIX=1` restores the pre-#203 behavior
+/// (shared-physical-offset rotation + #163 stale-gap masks + global-max
+/// trim). Used by the parity gates to validate that a structural positional
+/// defect fails the jitter-aware parity check, and as an operational escape
+/// hatch for the opt-in batched MTP paths.
+pub(crate) fn mtp_divergent_fix_disabled() -> bool {
+    static DISABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *DISABLED.get_or_init(|| {
+        std::env::var("MLXCEL_MTP_DISABLE_DIVERGENT_FIX")
+            .ok()
+            .as_deref()
+            == Some("1")
+    })
+}
+
+/// Build the exact per-row additive attention mask for a DIVERGENT batched
+/// MTP verify round (issue #203).
+///
+/// Layout model (maintained by `rollback_speculative_cache_divergent`): row
+/// `r`'s cache content is a contiguous valid prefix `[0, ve[r])` (physical
+/// slot == logical position, with `[0, lp[r])` being resident prompt
+/// padding), followed by a stale gap `[ve[r], offset)`, followed by the
+/// current verify window at physical `[offset, offset + l)` whose token `j`
+/// sits at the row's LOGICAL position `ve[r] + j`.
+///
+/// Query `j` of row `r` (logical position `q_pos = ve[r] + j`) may attend:
+/// - history keys `k in [lp[r], ve[r])` (logical position == `k`), subject to
+///   the sliding band `k > q_pos - window` when `window` is `Some`;
+/// - window keys `k in [offset, offset + j]` (logical position
+///   `ve[r] + (k - offset)`), always inside the band for `l <= window`.
+///
+/// Everything else (leading padding, the stale gap, future window keys) is
+/// `-inf`. Returns a `[B, 1, l, offset + l]` f32 additive mask.
+pub(crate) fn build_divergent_verify_mask(
+    l: i32,
+    offset: i32,
+    per_row_valid_end: &[i32],
+    left_padding: &[i32],
+    window: Option<i32>,
+) -> UniquePtr<MlxArray> {
+    assert_eq!(
+        per_row_valid_end.len(),
+        left_padding.len(),
+        "build_divergent_verify_mask: one left_padding entry per row"
+    );
+    let b = per_row_valid_end.len();
+    let k_len = offset + l;
+    let mut data = vec![f32::NEG_INFINITY; b * l as usize * k_len as usize];
+    for (r, (&ve, &lp)) in per_row_valid_end.iter().zip(left_padding).enumerate() {
+        for j in 0..l {
+            let q_pos = ve + j;
+            let row_base = (r * l as usize + j as usize) * k_len as usize;
+            for k in 0..k_len {
+                let visible = if k < lp {
+                    false
+                } else if k < ve {
+                    window.map(|w| k > q_pos - w).unwrap_or(true)
+                } else if k < offset {
+                    false
+                } else {
+                    let k_pos = ve + (k - offset);
+                    k_pos <= q_pos && window.map(|w| k_pos > q_pos - w).unwrap_or(true)
+                };
+                if visible {
+                    data[row_base + k as usize] = 0.0;
+                }
+            }
+        }
+    }
+    mlxcel_core::from_slice_f32(&data, &[b as i32, 1, l, k_len])
+}
+
+/// Offset of the first per-layer cache regardless of attention family.
+///
+/// The batched MTP regime keeps every family's offset in lockstep (one
+/// logical token count), but a model may lack one family entirely (a
+/// sliding-only synthetic fixture has no `full_attention` cache, for which
+/// [`first_cache_offset`] would return a spurious `0`). Layer 0 is never a
+/// KV-shared placeholder, so its cache carries the real offset.
+pub(crate) fn first_present_cache_offset(caches: &[Cache]) -> i32 {
+    match caches.first() {
+        Some(Cache::Standard(c)) => c.offset,
+        Some(Cache::Rotating(c)) => c.offset,
+        None => 0,
     }
 }
 
@@ -3427,7 +4392,7 @@ impl Gemma4Wrapper {
     /// Rewind the per-sequence target KV caches after a Gemma 4 MTP
     /// speculative-decoding round. Mirrors the upstream Python
     /// hook
-    /// (`references/mlx-vlm/mlx_vlm/models/gemma4/language.py` lines
+    /// (https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/models/gemma4/language.py lines
     /// 608-646) bit-for-bit:
     ///
     /// 1. `n = max(accepted) + 1`, `trim = block_size - n`.
@@ -3571,6 +4536,70 @@ impl Gemma4Wrapper {
         }
         Ok(())
     }
+
+    /// Issue #203: divergent-round batched MTP rollback. Replaces the
+    /// global-max trim + tail-zero contract of
+    /// [`Self::rollback_speculative_cache_explicit`] with per-row compaction:
+    /// each row's accepted verify-window K/V moves down to the row's logical
+    /// valid end (`ve_pre[r]`), restoring the contiguous-prefix layout
+    /// (physical slot == logical position) the per-row RoPE rotation and the
+    /// divergent verify mask assume. The cache offset is then trimmed to
+    /// `o_post = max(ve_pre[r] + accepted[r] + 1)`, which this returns.
+    ///
+    /// Called by the batched MTP adapter only when at least one row's
+    /// `ve_pre[r]` lags the shared physical write base (`o_pre`); uniform
+    /// rounds keep using `rollback_speculative_cache_explicit`, whose
+    /// behaviour this exactly reduces to when `ve_pre[r] == o_pre` for all
+    /// rows.
+    pub fn rollback_speculative_cache_divergent(
+        &self,
+        caches: &mut [Cache],
+        ve_pre: &[i32],
+        accepted: &[i32],
+        block_size: i32,
+    ) -> Result<i32, String> {
+        if accepted.is_empty() || ve_pre.len() != accepted.len() {
+            return Err(format!(
+                "rollback_speculative_cache_divergent: ve_pre rows ({}) and accepted rows \
+                 ({}) must match and be non-empty",
+                ve_pre.len(),
+                accepted.len()
+            ));
+        }
+        if block_size <= 0 {
+            return Err(format!(
+                "rollback_speculative_cache_divergent: block_size must be positive \
+                 (got {block_size})"
+            ));
+        }
+        let max_a = *accepted.iter().max().unwrap();
+        if accepted.iter().any(|&a| a < 0) {
+            return Err(
+                "rollback_speculative_cache_divergent: accepted values must be non-negative".into(),
+            );
+        }
+        if max_a > block_size - 1 {
+            return Err(format!(
+                "rollback_speculative_cache_divergent: max(accepted) ({max_a}) cannot \
+                 exceed block_size - 1 ({})",
+                block_size - 1
+            ));
+        }
+        let o_post = ve_pre
+            .iter()
+            .zip(accepted)
+            .map(|(&v, &a)| v + a + 1)
+            .max()
+            .unwrap();
+        for cache in caches.iter_mut() {
+            cache.compact_partial_accept_rows(ve_pre, accepted, block_size)?;
+            let n = cache.offset() - o_post;
+            if n > 0 {
+                cache.trim_speculative(n);
+            }
+        }
+        Ok(o_post)
+    }
 }
 
 impl LanguageModel for Gemma4Wrapper {
@@ -3689,6 +4718,56 @@ impl LanguageModel for Gemma4Wrapper {
 
     fn release_sequence_state_by_id(&self, seq_id: SequenceId) {
         self.sequence_state.release_sequence_state(seq_id);
+    }
+
+    fn supports_snapshot_reuse(&self) -> bool {
+        true
+    }
+
+    fn snapshot_sequence_state(
+        &self,
+        seq_id: SequenceId,
+        token_len: usize,
+    ) -> Option<ModelStateSnapshot> {
+        self.sequence_state
+            .with_sequence_state_ref(seq_id, |state| {
+                let mut snapshot = ModelStateSnapshot::new("gemma4", token_len);
+                for (idx, cache) in state.iter().enumerate() {
+                    if let Err(error) = cache.snapshot_into(&mut snapshot, &format!("layer{idx}")) {
+                        tracing::warn!(
+                            error,
+                            layer_idx = idx,
+                            "Gemma4 snapshot prompt-cache donation skipped"
+                        );
+                        return None;
+                    }
+                }
+                if snapshot.is_empty() {
+                    None
+                } else {
+                    Some(snapshot)
+                }
+            })
+            .flatten()
+    }
+
+    fn restore_sequence_state(
+        &self,
+        seq_id: SequenceId,
+        snapshot: &ModelStateSnapshot,
+    ) -> Result<(), String> {
+        if snapshot.family() != "gemma4" {
+            return Err(format!(
+                "cannot restore {} snapshot into Gemma 4",
+                snapshot.family()
+            ));
+        }
+        let mut state = self.model.make_caches();
+        for (idx, cache) in state.iter_mut().enumerate() {
+            cache.restore_from(snapshot, &format!("layer{idx}"))?;
+        }
+        self.sequence_state.replace_sequence_state(seq_id, state);
+        Ok(())
     }
 
     fn num_layers(&self) -> usize {

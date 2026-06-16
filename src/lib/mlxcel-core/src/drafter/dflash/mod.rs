@@ -17,7 +17,7 @@
 //! ## What this module ports
 //!
 //! Rust port of upstream
-//! `references/mlx-vlm/mlx_vlm/speculative/drafters/qwen3_dflash/`:
+//! https://github.com/Blaizzy/mlx-vlm/tree/main/mlx_vlm/speculative/drafters/qwen3_dflash:
 //!
 //! - [`config::DFlashConfig`] — the dataclass + JSON loader (config.py).
 //! - [`cache::DFlashKVCache`] — type alias for [`crate::layers::KVCache`]

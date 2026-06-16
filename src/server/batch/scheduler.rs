@@ -33,8 +33,8 @@ use std::sync::mpsc;
 use std::time::Instant;
 
 use mlxcel_core::cache::{
-    BatchKvQuantConfig, CachePool, KVCacheMode, PagedKvLayout, SequenceId, SequenceStateBackend,
-    SequenceStateLayout,
+    BatchKvQuantConfig, CachePool, DetachedPagedCacheSet, KVCacheMode, PagedKvLayout, SequenceId,
+    SequenceStateBackend, SequenceStateLayout,
 };
 use mlxcel_core::generate::{
     DecodeBatchContext, DecodeStorageBackend as CoreDecodeStorageBackend, LanguageModel,
@@ -62,7 +62,9 @@ use crate::server::model_provider::model_worker::{
 };
 use crate::server::model_provider::{GenerateEvent, ModelRequest};
 use crate::server::prompt_cache::key::PromptCacheKey;
-use crate::server::prompt_cache::{CacheEntry, DetachedKvSet, PromptCacheStore};
+use crate::server::prompt_cache::{
+    CacheEntry, DetachedKvSet, ModelSnapshotEntry, PromptCacheStore,
+};
 use crate::server::state::BatchMetrics;
 use crate::server::thinking_budget::{
     ThinkingBudget, ThinkingDecision, ThinkingState, ThinkingTokenIds,
@@ -457,13 +459,14 @@ impl BatchScheduler {
     /// and released it and there is nothing to hand off.
     ///
     /// This is the "reuse then extract" factoring (option C): it drives the
-    /// standard [`Self::execute_full_prefill`] path verbatim, so first-token
-    /// sampling, structured output, thinking budget, and logprobs are byte-for-byte
-    /// identical to a single-node prefill, then lifts the finished sequence back
-    /// out of the active batch before any local decode step runs. The hot
-    /// [`Self::run`] loop is never touched. Speculative burst is bypassed (it would
-    /// complete the request locally, defeating the handoff), and chunked prefill of
-    /// an over-long prompt is not yet supported on this path (deferred).
+    /// standard [`Self::execute_full_prefill`] path (or, for prompts longer than
+    /// `--prefill-chunk-size`, the standard chunked-prefill path driven to
+    /// completion, issue #197) verbatim, so first-token sampling, structured
+    /// output, thinking budget, and logprobs are byte-for-byte identical to a
+    /// single-node prefill, then lifts the finished sequence back out of the
+    /// active batch before any local decode step runs. The hot [`Self::run`] loop
+    /// is never touched. Speculative burst is bypassed (it would complete the
+    /// request locally, defeating the handoff).
     ///
     /// [`finish_prefill`]: Self::finish_prefill
     #[allow(dead_code)]
@@ -471,13 +474,10 @@ impl BatchScheduler {
         &mut self,
         mut seq: SequenceInfo,
     ) -> anyhow::Result<Option<Vec<u8>>> {
-        if self.prefill_chunk_size > 0 && seq.prompt_tokens.len() > self.prefill_chunk_size {
-            anyhow::bail!(
-                "prefill-role handoff does not yet support chunked prefill \
-                 (prompt {} tokens > chunk size {})",
-                seq.prompt_tokens.len(),
-                self.prefill_chunk_size
-            );
+        // The serving-role intake is strictly sequential, so a chunked prefill
+        // left in progress would be a wiring bug; refuse rather than clobber it.
+        if self.chunked_prefill_seq.is_some() {
+            anyhow::bail!("prefill-role handoff: another chunked prefill is already in progress");
         }
         let seq_id = seq.seq_id;
         // The decode node restores the prompt context from `token_history`; the
@@ -487,10 +487,22 @@ impl BatchScheduler {
             self.abort_sequence(seq, &err);
             anyhow::bail!("prefill-role handoff: begin_prefill failed: {err}");
         }
-        // Reuse the standard full prefill: it samples the first token and
+        // Reuse the standard prefill machinery: it samples the first token and
         // transitions the sequence into the active batch (no speculative burst on
-        // the handoff path).
-        self.execute_full_prefill(seq);
+        // the handoff path). Long prompts take the same chunked path the run()
+        // loop uses, driven to completion here so the full prompt's KV is in the
+        // pool before extraction (issue #197); the final chunk samples the first
+        // token via finish_prefill exactly like a single-node chunked prefill.
+        // The handoff path is text-only, so the VLM-embeddings full-prefill
+        // exemption in execute_prefill's dispatch cannot apply.
+        if self.prefill_chunk_size > 0 && prompt_tokens.len() > self.prefill_chunk_size {
+            self.start_chunked_prefill(seq);
+            while self.chunked_prefill_seq.is_some() {
+                self.continue_chunked_prefill();
+            }
+        } else {
+            self.execute_full_prefill(seq);
+        }
         // Lift the just-prefilled sequence back out before any local decode runs.
         // If it finished at prefill (immediate EOS) it is already finalized and
         // released, so there is nothing to hand off.
@@ -498,12 +510,15 @@ impl BatchScheduler {
             return Ok(None);
         };
         let generated_tokens = seq.generated_tokens.clone();
-        let bytes = self.extract_sequence_handoff(seq_id, prompt_tokens, generated_tokens)?;
-        // The KV now belongs to the decode node: release the local caches and any
-        // per-sequence tracking without donating back (the prefix left this node).
+        let bytes = self.extract_sequence_handoff(seq_id, prompt_tokens, generated_tokens);
+        // Release the local caches and per-sequence tracking on BOTH outcomes:
+        // on success the KV now belongs to the decode node (no donate-back, the
+        // prefix left this node); on an extract error the sequence was already
+        // lifted out of the active batch, so skipping the release would leak
+        // its pool slot.
         self.prompt_cache_seq_ctx.remove(&seq_id);
         self.release_sequence_caches(seq_id);
-        Ok(Some(bytes))
+        Ok(Some(bytes?))
     }
 
     /// Prefill role (#126 B3a): build a queued text sequence from the raw request
@@ -521,9 +536,10 @@ impl BatchScheduler {
     /// Returns `Ok(None)` when the request hit EOS at the first token, in which
     /// case there is nothing to hand off.
     ///
-    /// The empty-prompt and chunked-prefill guards run before a cache slot is
-    /// allocated, so a rejected request leaks no pool state. Chunked prefill of
-    /// an over-long prompt on the handoff path is not yet supported (deferred).
+    /// The empty-prompt guard runs before a cache slot is allocated, so a
+    /// rejected request leaks no pool state. Prompts longer than
+    /// `--prefill-chunk-size` are prefilled in chunks by
+    /// [`Self::prefill_request_for_handoff`] (issue #197).
     #[allow(dead_code)]
     pub(crate) fn prefill_text_request_for_handoff(
         &mut self,
@@ -536,12 +552,18 @@ impl BatchScheduler {
         if prompt_tokens.is_empty() {
             anyhow::bail!("prefill-role handoff: empty prompt has no tokens to prefill");
         }
-        if self.prefill_chunk_size > 0 && prompt_tokens.len() > self.prefill_chunk_size {
+        // Admission cap for the network-facing intake: with chunked prefill
+        // supported (issue #197) the old chunk-size bail no longer bounds the
+        // accepted prompt, so an oversized PrefillRequestFrame could drive a
+        // multi-minute synchronous chunk loop on the node's only prefill
+        // worker. 1M tokens matches the CacheIngestLimits philosophy (far
+        // above any realistic context; the pool budget is the real bound).
+        const MAX_HANDOFF_PROMPT_TOKENS: usize = 1 << 20;
+        if prompt_tokens.len() > MAX_HANDOFF_PROMPT_TOKENS {
             anyhow::bail!(
-                "prefill-role handoff does not yet support chunked prefill \
-                 (prompt {} tokens > chunk size {})",
-                prompt_tokens.len(),
-                self.prefill_chunk_size
+                "prefill-role handoff: prompt of {} tokens exceeds the admission cap \
+                 ({MAX_HANDOFF_PROMPT_TOKENS})",
+                prompt_tokens.len()
             );
         }
         // Merge the model's configured stop tokens into the request sampling
@@ -690,11 +712,27 @@ impl BatchScheduler {
     /// active batch has drained (each sequence reached its EOS or token budget).
     #[allow(dead_code)]
     pub(crate) fn decode_handoff_until_idle(&mut self) {
-        while !self.active_batch.is_empty() {
-            let ids = self.active_batch.sequence_ids();
-            self.execute_decode_step(&ids);
-            self.finalize_completed();
+        while self.decode_handoff_step() {}
+    }
+
+    /// One decode tick of the handoff drive loop (issue #199): run a single
+    /// `execute_decode_step` + `finalize_completed` over the active batch and
+    /// report whether any sequence remains. The networked decode role calls
+    /// this per tick so it can drain and ship newly produced tokens
+    /// incrementally instead of buffering the whole continuation.
+    ///
+    /// Returns `false` (without stepping) when the active batch is already
+    /// empty, so `while decode_handoff_step() {}` is exactly
+    /// [`Self::decode_handoff_until_idle`].
+    #[allow(dead_code)]
+    pub(crate) fn decode_handoff_step(&mut self) -> bool {
+        if self.active_batch.is_empty() {
+            return false;
         }
+        let ids = self.active_batch.sequence_ids();
+        self.execute_decode_step(&ids);
+        self.finalize_completed();
+        !self.active_batch.is_empty()
     }
 
     /// Create a new batch scheduler, taking ownership of the model and channel.
@@ -1081,10 +1119,12 @@ impl BatchScheduler {
     /// Attach the shared prompt-prefix KV cache store
     ///
     /// When `Some(..)`, the scheduler:
-    /// * Looks up a longest-prefix match on each new request and calls
-    ///   [`CachePool::adopt`] on hit to skip re-prefill of the shared prefix.
-    /// * Donates the sequence's full cache back to the store on a healthy
-    ///   finish (normal stop / length / cancelled without error).
+    /// * Looks up either a longest-prefix KV match or an exact-prefix
+    ///   recurrent-state snapshot on each new request, then adopts/restores on
+    ///   hit to skip re-prefill of the shared prefix.
+    /// * Donates the sequence's full KV cache or model-owned snapshot back to
+    ///   the store on a healthy finish (normal stop / length / cancelled
+    ///   without error).
     /// * Never donates back on OOM, transition errors, or
     ///   `Finished(FinishReason::Error(..))`.
     ///
@@ -1180,6 +1220,47 @@ impl BatchScheduler {
 
         let store = self.prompt_cache.as_ref()?.clone();
         let key = Self::compose_prompt_cache_key(ctx, tokens);
+        if self.model.supports_snapshot_reuse()
+            && let Some((snapshot_entry, matched_len)) = store.lookup_snapshot_prefix(&key, tokens)
+        {
+            let seq_id = match self.allocate_sequence_state() {
+                Ok(id) => id,
+                Err(err) => {
+                    tracing::warn!("Cache pool allocation failed during snapshot restore: {err}");
+                    return None;
+                }
+            };
+            let restore = snapshot_entry
+                .with_snapshot(|snapshot| self.model.restore_sequence_state(seq_id, snapshot));
+            match restore {
+                Ok(()) => {
+                    tracing::debug!(
+                        seq_id = %seq_id,
+                        matched = matched_len,
+                        total = tokens.len(),
+                        "prompt-cache snapshot hit: restored {matched_len}/{} tokens",
+                        tokens.len()
+                    );
+                    self.batch_observability
+                        .record_prompt_cache_hit(matched_len);
+                    self.batch_metrics
+                        .record_prompt_cache_snapshot_hit(matched_len);
+                    if let Some(ref store) = self.prompt_cache {
+                        self.batch_metrics
+                            .update_prompt_cache_gauges(store.bytes(), store.len());
+                    }
+                    return Some((seq_id, matched_len));
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        seq_id = %seq_id,
+                        "prompt-cache snapshot restore failed ({err}); falling back to cold prefill"
+                    );
+                    self.release_sequence_caches(seq_id);
+                    return None;
+                }
+            }
+        }
         let (entry, matched_len) = store.lookup_longest_prefix(&key, tokens)?;
         // #124 step c: multimodal sharing requires the matched prefix to cover
         // the ENTIRE stored entry. A partial (e.g. APC block-clamped) match
@@ -1190,9 +1271,82 @@ impl BatchScheduler {
         if require_whole_entry && matched_len < entry.tokens.len() {
             return None;
         }
-        // `take_detached` is one-shot: it returns `None` if a racing lookup
-        // already consumed this entry. The miss path is safe — the current
-        // sequence just does a fresh prefill.
+        // Length the adopted cache actually covers. The dense path truncates
+        // to exactly `matched_len`; the paged paths floor to the pool block
+        // boundary (#225), so they report their own value.
+        let mut adopted_len = matched_len;
+
+        // #227: pool-backed paged entries adopt by CLONE, leaving the stored
+        // entry intact for concurrent same-prefix siblings and deeper future
+        // matches. The one-shot take below destroyed the entry on first use;
+        // combined with the #225 trim, a short partial match (even the
+        // chat-template preamble) could gut a multi-thousand-token entry.
+        enum PagedCloneOutcome {
+            /// Adoptable clone built; the source entry stays in the store.
+            Cloned(Box<DetachedPagedCacheSet>, usize),
+            /// Cold prefill, entry untouched (below minimum, pin failure,
+            /// or cross-backend).
+            Decline(String),
+            /// Dense entry, or a clone-ineligible paged shape (dense-compat
+            /// handles, Turbo4, sliding-window): the consuming take path
+            /// below can still adopt those.
+            TakePath,
+        }
+        let backend_is_paged = matches!(self.decode_storage_backend, DecodeStorageBackend::Paged);
+        let min_prefix = store.min_prefix_tokens().max(1);
+        let cache_pool = &mut self.cache_pool;
+        // `with_detached` itself returns `None` for a drained shell; the take
+        // below then also yields `None` (cold prefill).
+        let clone_attempt: Option<PagedCloneOutcome> = entry.with_detached(|set| match set {
+            DetachedKvSet::Paged(paged) if backend_is_paged && paged.clone_eligible() => {
+                let block_size = paged.layout().block_size.max(1);
+                // Floor BOTH the partial and the whole-entry match to the
+                // pool block boundary: a donated entry's length
+                // (prompt + generated tokens) is almost never block-aligned,
+                // and the clone shares whole blocks only. The caller
+                // re-prefills everything past the adopted length, which
+                // re-covers the dropped partial tail.
+                let adoptable = (matched_len.min(paged.seq_len()) / block_size) * block_size;
+                if adoptable < min_prefix {
+                    return PagedCloneOutcome::Decline(format!(
+                        "block-floored match {adoptable} below the minimum prefix {min_prefix}"
+                    ));
+                }
+                match cache_pool.clone_detached_paged_prefix(paged, adoptable) {
+                    Ok(clone) => PagedCloneOutcome::Cloned(Box::new(clone), adoptable),
+                    Err(err) => PagedCloneOutcome::Decline(err),
+                }
+            }
+            // Paged entry under a dense decode backend: cross-backend
+            // adoption is invalid; decline without touching the entry
+            // (the old path took the set just to release it).
+            DetachedKvSet::Paged(_) if !backend_is_paged => {
+                PagedCloneOutcome::Decline("paged entry under a dense decode backend".into())
+            }
+            // Clone-ineligible paged shapes and dense entries.
+            DetachedKvSet::Paged(_) | DetachedKvSet::Dense(_) => PagedCloneOutcome::TakePath,
+        });
+        match clone_attempt {
+            Some(PagedCloneOutcome::Cloned(clone, adoptable)) => {
+                adopted_len = adoptable;
+                let adopt_result = self
+                    .cache_pool
+                    .adopt_paged(&self.model as &dyn LanguageModel, *clone);
+                return self.finish_prompt_cache_adopt(adopt_result, adopted_len, tokens.len());
+            }
+            Some(PagedCloneOutcome::Decline(reason)) => {
+                tracing::debug!(
+                    "prompt-cache adopt: paged clone declined ({reason}); falling back to cold prefill (entry preserved)"
+                );
+                return None;
+            }
+            Some(PagedCloneOutcome::TakePath) | None => {}
+        }
+
+        // Dense entries (and clone-ineligible paged shapes) keep the legacy
+        // one-shot consume: their adoption genuinely moves buffers.
+        // `take_detached` returns `None` if a racing lookup already consumed
+        // this entry; the miss path is safe (fresh prefill).
         let detached = entry.take_detached()?;
         if detached.is_empty() {
             // A paged set drained on this path would leak its block pins via
@@ -1243,45 +1397,84 @@ impl BatchScheduler {
                 self.cache_pool
                     .adopt(&self.model as &dyn LanguageModel, dense)
             }
-            DetachedKvSet::Paged(paged) => {
-                // APC block-hash partial adoption for paged entries is deferred
-                // (a later #121 sub-step): the paged store path matches the full
-                // stored prefix only. If a partial match somehow surfaces,
-                // decline rather than adopt an over-long prefix.
+            DetachedKvSet::Paged(mut paged) => {
+                // Paged partial prefix adoption (#225). An APC block-clamped
+                // lookup (or a request that diverges inside the stored entry)
+                // matches only `matched_len` of the set. Floor that to the
+                // POOL block boundary: no partially filled tail block survives
+                // the trim, so the suffix re-prefill starts on a fresh block
+                // and never needs copy-on-write against a shared tail. A
+                // whole-entry match skips the trim and stays bit-exact with
+                // the pre-#225 path.
                 let paged_seq_len = paged.seq_len();
-                if matched_len < paged_seq_len {
+                let block_size = paged.layout().block_size.max(1);
+                let adoptable = if matched_len < paged_seq_len {
+                    (matched_len / block_size) * block_size
+                } else {
+                    paged_seq_len
+                };
+                let min_prefix = store.min_prefix_tokens().max(1);
+                if adoptable < min_prefix {
                     tracing::debug!(
                         from = paged_seq_len,
-                        to = matched_len,
-                        "prompt-cache adopt: paged partial adoption not yet supported; releasing and falling back to cold prefill"
+                        to = adoptable,
+                        "prompt-cache adopt: block-floored paged match below the minimum prefix; releasing and falling back to cold prefill"
                     );
                     self.cache_pool.release_detached_paged(paged);
                     return None;
+                }
+                if adoptable < paged_seq_len {
+                    if let Err(err) = self
+                        .cache_pool
+                        .trim_detached_paged_to(&mut paged, adoptable)
+                    {
+                        tracing::warn!(
+                            "prompt-cache adopt: paged partial trim to {adoptable} failed ({err}); falling back to cold prefill"
+                        );
+                        self.cache_pool.release_detached_paged(paged);
+                        return None;
+                    }
+                    tracing::debug!(
+                        from = paged_seq_len,
+                        to = adoptable,
+                        "prompt-cache adopt: paged partial adoption trimmed detached set to the pool block boundary"
+                    );
+                    adopted_len = adoptable;
                 }
                 self.cache_pool
                     .adopt_paged(&self.model as &dyn LanguageModel, paged)
             }
         };
 
+        self.finish_prompt_cache_adopt(adopt_result, adopted_len, tokens.len())
+    }
+
+    /// Shared tail of [`Self::try_adopt_cached_prefix`]: record hit metrics
+    /// and gauges on success, log and fall back to a cold prefill on failure.
+    fn finish_prompt_cache_adopt(
+        &mut self,
+        adopt_result: Result<SequenceId, String>,
+        adopted_len: usize,
+        total_tokens: usize,
+    ) -> Option<(SequenceId, usize)> {
         match adopt_result {
             Ok(adopted_id) => {
                 tracing::debug!(
                     seq_id = %adopted_id,
-                    matched = matched_len,
-                    total = tokens.len(),
-                    "prompt-cache hit: adopted {matched_len}/{} tokens",
-                    tokens.len()
+                    matched = adopted_len,
+                    total = total_tokens,
+                    "prompt-cache hit: adopted {adopted_len}/{total_tokens} tokens"
                 );
                 self.batch_observability
-                    .record_prompt_cache_hit(matched_len);
+                    .record_prompt_cache_hit(adopted_len);
                 // also increment BatchMetrics Prometheus counters.
-                self.batch_metrics.record_prompt_cache_hit(matched_len);
+                self.batch_metrics.record_prompt_cache_hit(adopted_len);
                 // Update byte/entry gauges so /metrics reflects current state.
                 if let Some(ref store) = self.prompt_cache {
                     self.batch_metrics
                         .update_prompt_cache_gauges(store.bytes(), store.len());
                 }
-                Some((adopted_id, matched_len))
+                Some((adopted_id, adopted_len))
             }
             Err(err) => {
                 // `adopt_paged` already releases paged pins on its error path;
@@ -1340,8 +1533,9 @@ impl BatchScheduler {
     /// [`CachePool::detach`] (→ [`DetachedKvSet::Dense`]) and paged via
     /// [`CachePool::detach_paged`] (→ [`DetachedKvSet::Paged`], which pins the
     /// prefix's physical pool blocks so a later `adopt_paged` can share them).
-    /// `ModelOwned` sequences carry no detachable cross-request KV and are
-    /// skipped.
+    /// `ModelOwned` sequences carry no detachable cross-request KV; families
+    /// that opt into snapshot reuse donate a copied model-owned snapshot, while
+    /// the rest are skipped.
     fn donate_finished_sequence_cache(
         &mut self,
         seq_id: SequenceId,
@@ -1363,24 +1557,80 @@ impl BatchScheduler {
             None => return,
         };
 
+        // Tokens stored against both KV entries and recurrent snapshots are
+        // the full prompt + generated tail, so the next turn can restore the
+        // exact previous conversation prefix and prefill only the appended
+        // user turn.
+        let mut tokens = Vec::with_capacity(prompt_tokens.len() + generated_tokens.len());
+        tokens.extend_from_slice(prompt_tokens);
+        tokens.extend_from_slice(generated_tokens);
+
+        // Families with model-owned recurrent or linear-attention state opt
+        // into exact-prefix snapshots explicitly. Check this capability before
+        // consulting the allocated storage backend: under the paged decode
+        // override these families may still carry a shadow `PagedKvCache`
+        // placeholder even though the real state lives in
+        // `ModelOwnedSequenceState` and cannot be detached as KV blocks.
+        if self.model.supports_snapshot_reuse() {
+            let store = match self.prompt_cache.as_ref() {
+                Some(s) => s.clone(),
+                None => return,
+            };
+            if tokens.len() < store.min_prefix_tokens() {
+                return;
+            }
+            let snapshot = match self.model.snapshot_sequence_state(seq_id, tokens.len()) {
+                Some(s) if !s.is_empty() => s,
+                Some(_) => {
+                    tracing::debug!(
+                        seq_id = %seq_id,
+                        token_len = tokens.len(),
+                        "prompt-cache snapshot donate skipped: captured snapshot was empty"
+                    );
+                    return;
+                }
+                None => {
+                    tracing::debug!(
+                        seq_id = %seq_id,
+                        token_len = tokens.len(),
+                        "prompt-cache snapshot donate skipped: no model-owned state for sequence"
+                    );
+                    return;
+                }
+            };
+            let entry = ModelSnapshotEntry::new(tokens, snapshot);
+            let key_tokens = entry.tokens.clone();
+            let key = Self::compose_prompt_cache_key(&ctx, &key_tokens);
+            match store.insert_snapshot(&key, entry) {
+                Ok(()) => {
+                    tracing::debug!(
+                        seq_id = %seq_id,
+                        token_len = key_tokens.len(),
+                        bytes = store.stats().snapshot_bytes,
+                        "prompt-cache snapshot inserted"
+                    );
+                    self.batch_observability.record_prompt_cache_insert();
+                    self.batch_metrics
+                        .update_prompt_cache_gauges(store.bytes(), store.len());
+                }
+                Err(err) => {
+                    tracing::debug!("prompt-cache snapshot insert skipped: {err}");
+                    self.batch_observability.record_prompt_cache_insert_reject();
+                }
+            }
+            return;
+        }
+
         let backend = self
             .cache_pool
             .get_mut(seq_id)
             .map(|s| s.backend)
             .unwrap_or(SequenceStateBackend::ModelOwned);
-        // `ModelOwned` families (heterogeneous attention+recurrent caches, e.g.
-        // Qwen 3.5 / Gemma 4) carry no detachable cross-request KV. Skip before
-        // building the token vector so the burst donate stays a cheap no-op.
+
+        // Other `ModelOwned` families carry no detachable cross-request KV.
         if backend == SequenceStateBackend::ModelOwned {
             return;
         }
-
-        // Tokens stored against the entry are the full prompt + generated
-        // tail, so the next turn's `prompt + new user turn` can match at
-        // least up through the previous assistant reply.
-        let mut tokens = Vec::with_capacity(prompt_tokens.len() + generated_tokens.len());
-        tokens.extend_from_slice(prompt_tokens);
-        tokens.extend_from_slice(generated_tokens);
 
         let store = match self.prompt_cache.as_ref() {
             Some(s) => s.clone(),
@@ -2058,7 +2308,7 @@ impl BatchScheduler {
         let (seq_id, prefill_start_offset, already_cached_tokens) = match ctx_ref
             .and_then(|ctx| self.try_adopt_cached_prefix(ctx, &prompt_tokens, is_multimodal))
         {
-            Some((adopted_id, matched_len)) => (adopted_id, matched_len, matched_len),
+            Some((adopted_id, adopted_len)) => (adopted_id, adopted_len, adopted_len),
             None => {
                 // Miss or feature disabled → regular allocate.
                 // count misses only when the cache is actually
@@ -2602,18 +2852,18 @@ impl BatchScheduler {
                 self.speculative_dispatch,
                 crate::server::SpeculativeDispatch::Mtp { .. }
             )
-            && !super::speculative_burst::mtp_b1_burst_enabled()
+            && !super::speculative_burst::mtp_b1_burst_enabled(self.model.supports_batching())
         {
-            // B=1 (single-request) MTP runs by default for every MTP target
-            // (~1.87x on the 12B Unified pair, ~1.2 to 1.4x on the 31B, both
-            // byte-identical on M5 Max). This decline fires only when an operator
-            // opts out with `MLXCEL_ENABLE_MTP_B1=0`, e.g. on lower-bandwidth
-            // Apple Silicon where the B=1 verify forward may not pay for itself;
-            // the request then falls back to classic decode.
+            // Per-hardware B=1 MTP default (issue #165): non-batchable targets
+            // (12B Unified) keep B=1 MTP on everywhere; batch-capable targets
+            // (31B) default it on only on M5+ chips, because pre-M5 GPU cores
+            // measured a consistent regression (~0.87x avg on M1 Ultra).
+            // `MLXCEL_ENABLE_MTP_B1` overrides in both directions; on decline
+            // the request falls back to classic decode.
             let seq = window.into_iter().next().expect("singleton window");
             tracing::info!(
-                "MTP B=1 speculative burst disabled for seq {} via MLXCEL_ENABLE_MTP_B1=0; \
-                 falling back to classic decode",
+                "MTP B=1 speculative burst declined for seq {} (per-hardware default \
+                 or MLXCEL_ENABLE_MTP_B1=0); falling back to classic decode",
                 seq.seq_id,
             );
             return Some(seq);
@@ -2680,17 +2930,13 @@ impl BatchScheduler {
                     // `donate_finished_sequence_cache` per row BEFORE
                     // the `remove`/`release` — symmetric with the B=1
                     // arm and the classic `finalize_completed` path.
-                    // The donate helper is hard-gated on a dense
-                    // KV-cache backend; both batched-eligible model
-                    // families today — Gemma 4 (MTP) and Qwen 3.5
-                    // (DFlash) — are `SequenceStateBackend::ModelOwned`
-                    // with heterogeneous attention+recurrent caches, so
-                    // the donate is a guarded no-op for them, identical
-                    // to the B=1 arm's no-op for those same families.
-                    // Wiring it in removes the structural asymmetry
-                    // between the two burst arms and future-proofs the
-                    // batched path for any dense-KV-cache model that
-                    // later becomes batched-burst-eligible. Error /
+                    // The donate helper chooses the model's supported
+                    // cross-request reuse path: exact-prefix snapshots for
+                    // opt-in model-owned families, otherwise detached KV for
+                    // dense/paged families. Wiring it in removes the structural
+                    // asymmetry between the two burst arms and future-proofs
+                    // the batched path for any reusable family that later
+                    // becomes batched-burst-eligible. Error /
                     // transition-failure rows carry an empty/`false`
                     // payload so the donate is a guaranteed no-op on
                     // those tainted-cache rows.
@@ -2775,18 +3021,11 @@ impl BatchScheduler {
                     // needs the cache slot still attached. This mirrors
                     // the classic path's `finalize_completed`, keeping
                     // the burst and classic donate paths symmetric. The
-                    // donate helper detaches dense and paged backends but
-                    // skips `SequenceStateBackend::ModelOwned`; the two
-                    // burst-eligible model families today — Qwen 3.5
-                    // (DFlash) and Gemma 4 (MTP) — are both `ModelOwned`
-                    // with heterogeneous attention+recurrent caches that
-                    // the detach handoff cannot represent, so the donate is
-                    // a guarded no-op for them — identical to the classic
-                    // path's no-op for those same families. Wiring it in
-                    // removes the structural asymmetry between the two
-                    // paths and future-proofs the burst for any
-                    // dense/paged-KV model that later becomes
-                    // burst-eligible.
+                    // donate helper snapshots opt-in model-owned families and
+                    // detaches dense/paged KV for the regular backends. Wiring
+                    // it in removes the structural asymmetry between the two
+                    // paths and future-proofs the burst for any reusable model
+                    // family that later becomes burst-eligible.
                     self.donate_finished_sequence_cache(
                         seq_id,
                         &prompt_tokens,

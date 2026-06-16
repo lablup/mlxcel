@@ -638,14 +638,19 @@ fn park_paged_round_trip_accounts_bytes() {
     pool.append_paged_tokens(seq, 0, 8).unwrap();
     pool.append_paged_tokens(seq, 1, 4).unwrap();
     let detached = pool.detach_paged(seq).unwrap();
-    let expected_bytes = detached.nbytes();
-    assert!(expected_bytes > 0);
+    // The set's own ledger view (prompt-cache accounting) stays nonzero: with
+    // no real pool writes it falls back to the layout's nominal bytes.
+    assert!(detached.nbytes() > 0);
 
     let handle = pool.park_detached_paged(detached);
     assert_eq!(pool.parked_count(), 1);
-    assert_eq!(pool.parked_bytes(), expected_bytes);
+    // Pool-resident bytes are counted ONCE via `pool_tensor_bytes` inside
+    // `memory_usage_bytes` (#226); the parked walk no longer re-adds them.
+    // This sequence never wrote K/V, so the pool holds no slabs and the true
+    // physical footprint is zero.
+    assert_eq!(pool.parked_bytes(), 0);
     assert!(pool.peek_parked_paged(handle).is_some());
-    assert_eq!(pool.memory_usage_bytes(), expected_bytes);
+    assert_eq!(pool.memory_usage_bytes(), 0);
 
     // Dense peek must reject a paged handle.
     assert!(pool.peek_parked(handle).is_none());
@@ -1642,4 +1647,365 @@ fn trim_across_shared_blocks_releases_only_the_trimming_sequences_refs() {
 #[allow(dead_code)]
 fn _type_alive() -> Option<DetachedPagedCacheSet> {
     None
+}
+
+// ---------------------------------------------------------------------------
+// 12. Partial prefix adoption (#225): trim a detached set to a block boundary
+//     and adopt only the matched prefix.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn trim_detached_paged_to_enables_partial_prefix_adoption() {
+    let n_kv_heads = 2i32;
+    let head_dim = 3i32;
+    let block_size = 4usize;
+    let layout = PagedKvLayout::uniform(
+        1,
+        block_size,
+        block_size * n_kv_heads as usize * head_dim as usize * 2,
+    )
+    .unwrap();
+    let model = PagedStubModel::new(layout.clone());
+    let mut pool = CachePool::new(4);
+
+    // Seed: 12 tokens = 3 whole blocks, distinct per-token values.
+    let seed = pool.allocate(&model).unwrap();
+    let full_len = 12i32;
+    let full_k = prefill_block(1000.0, n_kv_heads, full_len, head_dim);
+    let full_v = prefill_block(5000.0, n_kv_heads, full_len, head_dim);
+    write_prefill_for(&mut pool, seed, 0, &full_k, &full_v).unwrap();
+
+    let mut set = pool.detach_paged(seed).unwrap();
+    assert_eq!(set.seq_len(), 12);
+    let live_before = pool.paged_stats().unwrap().live_blocks;
+    assert_eq!(live_before, 3);
+
+    // A request matched only 10 tokens; the scheduler floors to 8 (2 blocks).
+    pool.trim_detached_paged_to(&mut set, 8).unwrap();
+    assert_eq!(set.seq_len(), 8);
+    assert_eq!(
+        pool.paged_stats().unwrap().live_blocks,
+        2,
+        "the dropped tail block must fully release (both pins)"
+    );
+
+    // Adopt the trimmed set and append a divergent 6-token suffix at 8.
+    let consumer = pool.adopt_paged(&model, set).unwrap();
+    {
+        let state = pool.get_paged_state(consumer).unwrap();
+        let layer = state.layer(0).unwrap();
+        assert_eq!(layer.block_ids.len(), 2);
+        assert_eq!(layer.len, 8);
+    }
+    let suffix_len = 6i32;
+    let suffix_k = prefill_block(2000.0, n_kv_heads, suffix_len, head_dim);
+    let suffix_v = prefill_block(6000.0, n_kv_heads, suffix_len, head_dim);
+    write_prefill_for(&mut pool, consumer, 0, &suffix_k, &suffix_v).unwrap();
+
+    // Gather must return the kept 8-token prefix plus the fresh suffix,
+    // byte-identical to the dense reference.
+    let total = 8 + suffix_len;
+    let state = pool.get_paged_state(consumer).unwrap();
+    let (gk, gv) = pool
+        .paged_pool_ref()
+        .unwrap()
+        .gather_visible(&state, 0)
+        .unwrap()
+        .expect("gather must return data");
+    let prefix8_k = {
+        let full = prefill_block(1000.0, n_kv_heads, full_len, head_dim);
+        crate::ffi::slice(&full, &[0, 0, 0, 0], &[1, n_kv_heads, 8, head_dim])
+    };
+    let prefix8_v = {
+        let full = prefill_block(5000.0, n_kv_heads, full_len, head_dim);
+        crate::ffi::slice(&full, &[0, 0, 0, 0], &[1, n_kv_heads, 8, head_dim])
+    };
+    let dense_k = dense_reference(
+        &[
+            (prefix8_k, 0),
+            (
+                prefill_block(2000.0, n_kv_heads, suffix_len, head_dim),
+                8usize,
+            ),
+        ],
+        n_kv_heads,
+        total,
+        head_dim,
+    );
+    let dense_v = dense_reference(
+        &[
+            (prefix8_v, 0),
+            (
+                prefill_block(6000.0, n_kv_heads, suffix_len, head_dim),
+                8usize,
+            ),
+        ],
+        n_kv_heads,
+        total,
+        head_dim,
+    );
+    assert_eq!(flatten_fp32(&gk), flatten_fp32(&dense_k));
+    assert_eq!(flatten_fp32(&gv), flatten_fp32(&dense_v));
+}
+
+#[test]
+fn trim_detached_paged_to_rejects_bad_targets() {
+    let n_kv_heads = 2i32;
+    let head_dim = 3i32;
+    let block_size = 4usize;
+    let layout = PagedKvLayout::uniform(
+        1,
+        block_size,
+        block_size * n_kv_heads as usize * head_dim as usize * 2,
+    )
+    .unwrap();
+    let model = PagedStubModel::new(layout.clone());
+    let mut pool = CachePool::new(4);
+
+    let seed = pool.allocate(&model).unwrap();
+    let full_k = prefill_block(1.0, n_kv_heads, 12, head_dim);
+    let full_v = prefill_block(2.0, n_kv_heads, 12, head_dim);
+    write_prefill_for(&mut pool, seed, 0, &full_k, &full_v).unwrap();
+    let mut set = pool.detach_paged(seed).unwrap();
+
+    // Not block aligned.
+    assert!(pool.trim_detached_paged_to(&mut set, 6).is_err());
+    // Beyond the stored length.
+    assert!(pool.trim_detached_paged_to(&mut set, 16).is_err());
+    // No-op full-length trim succeeds and changes nothing.
+    pool.trim_detached_paged_to(&mut set, 12).unwrap();
+    assert_eq!(set.seq_len(), 12);
+    assert_eq!(pool.paged_stats().unwrap().live_blocks, 3);
+
+    // The set still adopts cleanly afterwards.
+    let consumer = pool.adopt_paged(&model, set).unwrap();
+    assert_eq!(
+        pool.get_paged_state(consumer)
+            .unwrap()
+            .layer(0)
+            .unwrap()
+            .len,
+        12
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 13. Real-bytes accounting (#226): detached sets and pool stats report the
+//     actual pool memory, not the layout's nominal placeholder.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn detached_paged_set_accounts_real_pool_bytes() {
+    let n_kv_heads = 2i32;
+    let head_dim = 3i32;
+    let block_size = 4usize;
+    let layout = PagedKvLayout::uniform(
+        1,
+        block_size,
+        block_size * n_kv_heads as usize * head_dim as usize * 2,
+    )
+    .unwrap();
+    let model = PagedStubModel::new(layout.clone());
+    let mut pool = CachePool::new(4);
+
+    // 12 tokens = 3 blocks, written in FP32 (tests write f32 blocks), so the
+    // REAL cost per block is block_size x H x D x 4 bytes x 2 (K+V) = 192.
+    let seq = pool.allocate(&model).unwrap();
+    let k = prefill_block(1.0, n_kv_heads, 12, head_dim);
+    let v = prefill_block(2.0, n_kv_heads, 12, head_dim);
+    write_prefill_for(&mut pool, seq, 0, &k, &v).unwrap();
+
+    let per_block_real = block_size * n_kv_heads as usize * head_dim as usize * 4 * 2;
+    assert_eq!(
+        pool.paged_pool_ref().unwrap().real_block_bytes(0),
+        Some(per_block_real)
+    );
+
+    // Pool stats are real: in_use covers the 3 mapped rows, reserved covers
+    // the full presized slab capacity.
+    let stats = pool.paged_stats().unwrap();
+    assert_eq!(stats.bytes_in_use, 3 * per_block_real);
+    assert_eq!(
+        stats.bytes_reserved,
+        pool.paged_pool_ref().unwrap().pool_tensor_bytes()
+    );
+    assert!(stats.bytes_reserved >= stats.bytes_in_use);
+
+    // The detached set's ledger bytes are the real pinned-pool bytes (the
+    // stub's dense handles are empty clone handles, so they contribute 0).
+    let mut set = pool.detach_paged(seq).unwrap();
+    assert_eq!(set.nbytes(), 3 * per_block_real);
+
+    // A partial trim (#225) shrinks the ledger by the dropped blocks.
+    pool.trim_detached_paged_to(&mut set, 8).unwrap();
+    assert_eq!(set.nbytes(), 2 * per_block_real);
+
+    pool.release_detached_paged(set);
+    // With every pin gone the rows unmap and in_use returns to zero;
+    // reserved keeps the allocated slabs (capacity is not shrunk).
+    let stats = pool.paged_stats().unwrap();
+    assert_eq!(stats.bytes_in_use, 0);
+    assert!(stats.bytes_reserved > 0);
+}
+
+#[test]
+fn detached_paged_set_without_pool_writes_falls_back_to_nominal_bytes() {
+    let layout = default_layout();
+    let model = PagedStubModel::new(layout.clone());
+    let mut pool = CachePool::new(4);
+
+    // Logical appends only: no pool tensor exists, so no real geometry was
+    // ever captured and the nominal layout accounting is the only signal.
+    let seq = pool.allocate(&model).unwrap();
+    pool.append_paged_tokens(seq, 0, 8).unwrap();
+    let set = pool.detach_paged(seq).unwrap();
+    let nominal = set.paged_state().reserved_bytes(set.layout());
+    assert!(nominal > 0);
+    assert_eq!(set.nbytes(), nominal);
+    pool.release_detached_paged(set);
+}
+
+// ---------------------------------------------------------------------------
+// 14. Non-consuming clone-and-pin adoption (#227): clones share the source's
+//     physical blocks and the source survives for further borrowers.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn clone_detached_paged_prefix_shares_blocks_and_preserves_source() {
+    let n_kv_heads = 2i32;
+    let head_dim = 3i32;
+    let block_size = 4usize;
+    let layout = PagedKvLayout::uniform(
+        1,
+        block_size,
+        block_size * n_kv_heads as usize * head_dim as usize * 2,
+    )
+    .unwrap();
+    let model = PagedStubModel::new(layout.clone());
+    let mut pool = CachePool::new(8);
+
+    // Source: 12 tokens = 3 blocks of distinct values.
+    let seed = pool.allocate(&model).unwrap();
+    let k = prefill_block(1000.0, n_kv_heads, 12, head_dim);
+    let v = prefill_block(5000.0, n_kv_heads, 12, head_dim);
+    write_prefill_for(&mut pool, seed, 0, &k, &v).unwrap();
+    let source = pool.detach_paged(seed).unwrap();
+    let source_blocks = source.paged_state().layer(0).unwrap().block_ids.clone();
+    // Detached source holds 2 references per block.
+    assert_eq!(pool.paged_pool_ref().unwrap().refcount(source_blocks[0]), 2);
+
+    // Borrower 1 clones the first 8 tokens (2 blocks).
+    let clone_a = pool.clone_detached_paged_prefix(&source, 8).unwrap();
+    assert_eq!(clone_a.seq_len(), 8);
+    assert_eq!(
+        clone_a.paged_state().layer(0).unwrap().block_ids,
+        source_blocks[..2].to_vec(),
+        "the clone must reference the SAME physical blocks"
+    );
+    // Source 2 refs + clone 2 refs.
+    assert_eq!(pool.paged_pool_ref().unwrap().refcount(source_blocks[0]), 4);
+    // Source untouched.
+    assert_eq!(source.seq_len(), 12);
+    assert_eq!(
+        source.paged_state().layer(0).unwrap().block_ids,
+        source_blocks
+    );
+
+    // Borrower 2 clones the whole entry concurrently.
+    let clone_b = pool.clone_detached_paged_prefix(&source, 12).unwrap();
+    assert_eq!(pool.paged_pool_ref().unwrap().refcount(source_blocks[0]), 6);
+
+    // Adopt clone A: its detach-style pin is released, the table ref stays.
+    let seq_a = pool.adopt_paged(&model, clone_a).unwrap();
+    assert_eq!(pool.paged_pool_ref().unwrap().refcount(source_blocks[0]), 5);
+
+    // The adopted borrower appends a divergent suffix on FRESH blocks and
+    // gathers prefix + suffix byte-identically to the dense reference.
+    let suffix = prefill_block(2000.0, n_kv_heads, 6, head_dim);
+    let suffix_v = prefill_block(6000.0, n_kv_heads, 6, head_dim);
+    write_prefill_for(&mut pool, seq_a, 0, &suffix, &suffix_v).unwrap();
+    {
+        let state = pool.get_paged_state(seq_a).unwrap();
+        let blocks = &state.layer(0).unwrap().block_ids;
+        assert_eq!(blocks.len(), 4, "2 shared prefix + 2 fresh suffix blocks");
+        assert_eq!(&blocks[..2], &source_blocks[..2]);
+        assert!(!source_blocks.contains(&blocks[2]));
+    }
+    let (gk, gv) = {
+        let state = pool.get_paged_state(seq_a).unwrap();
+        pool.paged_pool_ref()
+            .unwrap()
+            .gather_visible(&state, 0)
+            .unwrap()
+            .expect("gather must return data")
+    };
+    let prefix8 = |base: f32| {
+        let full = prefill_block(base, n_kv_heads, 12, head_dim);
+        crate::ffi::slice(&full, &[0, 0, 0, 0], &[1, n_kv_heads, 8, head_dim])
+    };
+    let dense_k = dense_reference(
+        &[
+            (prefix8(1000.0), 0),
+            (prefill_block(2000.0, n_kv_heads, 6, head_dim), 8usize),
+        ],
+        n_kv_heads,
+        14,
+        head_dim,
+    );
+    let dense_v = dense_reference(
+        &[
+            (prefix8(5000.0), 0),
+            (prefill_block(6000.0, n_kv_heads, 6, head_dim), 8usize),
+        ],
+        n_kv_heads,
+        14,
+        head_dim,
+    );
+    assert_eq!(flatten_fp32(&gk), flatten_fp32(&dense_k));
+    assert_eq!(flatten_fp32(&gv), flatten_fp32(&dense_v));
+
+    // The source's ledger view is unchanged; releasing everything drives the
+    // shared blocks back to zero with no leaks.
+    let per_block_real = block_size * n_kv_heads as usize * head_dim as usize * 4 * 2;
+    assert_eq!(source.nbytes(), 3 * per_block_real);
+    pool.release_detached_paged(clone_b);
+    assert_eq!(pool.paged_pool_ref().unwrap().refcount(source_blocks[0]), 3);
+    pool.release(seq_a);
+    assert_eq!(pool.paged_pool_ref().unwrap().refcount(source_blocks[0]), 2);
+    pool.release_detached_paged(source);
+    assert_eq!(pool.paged_pool_ref().unwrap().refcount(source_blocks[0]), 0);
+}
+
+#[test]
+fn clone_detached_paged_prefix_rejects_bad_targets() {
+    let n_kv_heads = 2i32;
+    let head_dim = 3i32;
+    let block_size = 4usize;
+    let layout = PagedKvLayout::uniform(
+        1,
+        block_size,
+        block_size * n_kv_heads as usize * head_dim as usize * 2,
+    )
+    .unwrap();
+    let model = PagedStubModel::new(layout.clone());
+    let mut pool = CachePool::new(4);
+
+    let seed = pool.allocate(&model).unwrap();
+    let k = prefill_block(1.0, n_kv_heads, 12, head_dim);
+    let v = prefill_block(2.0, n_kv_heads, 12, head_dim);
+    write_prefill_for(&mut pool, seed, 0, &k, &v).unwrap();
+    let source = pool.detach_paged(seed).unwrap();
+    let first_block = source.paged_state().layer(0).unwrap().block_ids[0];
+
+    // Misaligned, zero, and oversized targets are declined without pinning.
+    assert!(pool.clone_detached_paged_prefix(&source, 6).is_err());
+    assert!(pool.clone_detached_paged_prefix(&source, 0).is_err());
+    assert!(pool.clone_detached_paged_prefix(&source, 16).is_err());
+    assert_eq!(
+        pool.paged_pool_ref().unwrap().refcount(first_block),
+        2,
+        "declined clones must not leak pins"
+    );
+
+    pool.release_detached_paged(source);
 }

@@ -23,7 +23,7 @@
 //! - Gated output in attention blocks (sigmoid gating)
 //! - Q/K normalization
 //!
-//! Reference: mlx-lm/mlx_lm/models/qwen3_next.py
+//! Reference: https://github.com/ml-explore/mlx-lm/blob/main/mlx_lm/models/qwen3_next.py
 
 #[path = "qwen3_next_helpers.rs"]
 mod helpers;
@@ -162,6 +162,51 @@ impl Qwen3NextCache {
         match self {
             Qwen3NextCache::Attention(kv) => kv.offset,
             Qwen3NextCache::Linear(gd) => gd.offset,
+        }
+    }
+
+    pub fn snapshot_into(
+        &self,
+        snapshot: &mut mlxcel_core::generate::ModelStateSnapshot,
+        prefix: &str,
+    ) {
+        match self {
+            Qwen3NextCache::Attention(kv) => {
+                super::recurrent_snapshot::push_optional(
+                    snapshot,
+                    format!("{prefix}.attention.keys"),
+                    &kv.keys,
+                );
+                super::recurrent_snapshot::push_optional(
+                    snapshot,
+                    format!("{prefix}.attention.values"),
+                    &kv.values,
+                );
+            }
+            Qwen3NextCache::Linear(gd) => gd.snapshot_into(snapshot, &format!("{prefix}.linear")),
+        }
+    }
+
+    pub fn restore_from(
+        &mut self,
+        snapshot: &mlxcel_core::generate::ModelStateSnapshot,
+        prefix: &str,
+    ) {
+        match self {
+            Qwen3NextCache::Attention(kv) => {
+                kv.keys = super::recurrent_snapshot::restore_optional(
+                    snapshot,
+                    format!("{prefix}.attention.keys"),
+                );
+                kv.values = super::recurrent_snapshot::restore_optional(
+                    snapshot,
+                    format!("{prefix}.attention.values"),
+                );
+                kv.offset = snapshot.token_len() as i32;
+            }
+            Qwen3NextCache::Linear(gd) => {
+                gd.restore_from(snapshot, &format!("{prefix}.linear"));
+            }
         }
     }
 }
@@ -537,7 +582,7 @@ impl Qwen3NextAttention {
     /// scaled-dot-product attention through the per-query-position causal
     /// loop in [`Self::forward_hidden_with_position_ids_verify`], mirroring
     /// upstream `Qwen3_5Attention.__call__`'s `target_verify and L > 1`
-    /// branch (`mlx-vlm/mlx_vlm/models/qwen3_5/language.py`). This eliminates
+    /// branch (https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/models/qwen3_5/language.py). This eliminates
     /// the batched-SDPA-vs-decode logit drift that flips speculative
     /// accept/reject decisions away from the drafter-less greedy pass.
     ///
@@ -720,7 +765,7 @@ impl Qwen3NextAttention {
     /// axis into `[B, H, L_q, D]`.
     ///
     /// Faithful port of upstream
-    /// `mlx-vlm/mlx_vlm/models/qwen3_5/language.py::Qwen3_5Attention.__call__`
+    /// https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/models/qwen3_5/language.py (Qwen3_5Attention.__call__)
     /// (`target_verify and L > 1` branch). This is the load-bearing fix for
     /// Qwen 3.5 MTP verification drift / sampling parity.
     fn attend_per_position(
@@ -912,6 +957,22 @@ impl SwitchLinear {
         }
     }
 
+    /// (weight, scales, biases, group_size, bits) for the affine-quantized
+    /// variant; `None` for `Regular` (the fused MoE kernel needs quantized
+    /// parts). The variant carries no `mode`: it is always affine here.
+    pub(crate) fn quantized_parts(&self) -> Option<(&MlxArray, &MlxArray, &MlxArray, i32, i32)> {
+        match self {
+            Self::Quantized {
+                weight,
+                scales,
+                biases,
+                group_size,
+                bits,
+            } => Some((weight, scales, biases, *group_size, *bits)),
+            Self::Regular { .. } => None,
+        }
+    }
+
     pub(crate) fn from_weights(
         weights: &WeightMap,
         config: &Qwen3NextConfig,
@@ -975,6 +1036,52 @@ impl SwitchGLU {
             let output = self.down_proj.forward(&activated, indices, false);
             mlxcel_core::squeeze_axis(&output, -2)
         }
+    }
+
+    /// Single-token decode via the fused MoE expert Metal kernel (#268).
+    /// gate/up are 4/8-bit, down also handles 6-bit. Returns `None` (caller
+    /// falls back to `forward` + `moe_weighted_sum`) for any unsupported config:
+    /// gate/up not 4/8-bit or down not 4/6/8-bit, gate/up bits mismatch,
+    /// group_size mismatch, the Regular variant, or a non-single-token `x`.
+    pub(crate) fn forward_fused_kernel(
+        &self,
+        x: &MlxArray,
+        indices: &MlxArray,
+        scores: &MlxArray,
+    ) -> Option<UniquePtr<MlxArray>> {
+        let (gw, gs, gb, ggs, gbits) = self.gate_proj.quantized_parts()?;
+        let (uw, us, ub, ugs, ubits) = self.up_proj.quantized_parts()?;
+        let (dw, ds, db, dgs, dbits) = self.down_proj.quantized_parts()?;
+        if gbits != 4 && gbits != 8 {
+            return None;
+        }
+        if dbits != 4 && dbits != 8 && dbits != 6 {
+            return None;
+        }
+        if gbits != ubits || ggs != ugs || ggs != dgs {
+            return None;
+        }
+        let gw_shape = mlxcel_core::array_shape(gw);
+        if gw_shape.len() != 3 {
+            return None;
+        }
+        let dff = gw_shape[1];
+        let din = gw_shape[2] * (32 / gbits);
+        if dbits == 6 && dff % 16 != 0 {
+            return None;
+        }
+        let k = *mlxcel_core::array_shape(indices).last()?;
+        let x_elems: i32 = mlxcel_core::array_shape(x).iter().product();
+        if x_elems != din {
+            return None;
+        }
+        let x_flat = mlxcel_core::reshape(x, &[din]);
+        let idx_flat = mlxcel_core::reshape(indices, &[k]);
+        let sc_flat = mlxcel_core::reshape(scores, &[k]);
+        Some(mlxcel_core::fused_moe_expert_kernel(
+            &x_flat, &idx_flat, gw, gs, gb, uw, us, ub, dw, ds, db, &sc_flat, din, dff, k, gbits,
+            dbits, ggs,
+        ))
     }
 
     pub(crate) fn gather_sort(
@@ -1077,13 +1184,31 @@ impl SparseMoeBlock {
             scores = mlxcel_core::divide(&scores, &sum);
         }
 
-        // Expert computation
-        let expert_out = self.experts.forward(&x_flat, &topk_indices);
-        let y = crate::models::switch_layers::moe_weighted_sum(
-            &expert_out,
-            &scores,
-            mlxcel_core::array_dtype(&x_flat),
-        );
+        // Expert computation. Fused single-token decode kernel (#268) on by
+        // default (MLXCEL_FUSED_MOE=0 disables); otherwise SwitchGLU +
+        // moe_weighted_sum (also the kernel's fallback for unsupported configs).
+        let y = {
+            let fused = if mlxcel_core::array_shape(&x_flat)[0] == 1
+                && crate::models::switch_layers::fused_moe_enabled()
+            {
+                self.experts
+                    .forward_fused_kernel(&x_flat, &topk_indices, &scores)
+                    .map(|out| mlxcel_core::reshape(&out, &[1, hidden_dim]))
+            } else {
+                None
+            };
+            match fused {
+                Some(out) => out,
+                None => {
+                    let expert_out = self.experts.forward(&x_flat, &topk_indices);
+                    crate::models::switch_layers::moe_weighted_sum(
+                        &expert_out,
+                        &scores,
+                        mlxcel_core::array_dtype(&x_flat),
+                    )
+                }
+            }
+        };
 
         // Shared expert
         let shared_y = self.shared_expert.forward(&x_flat);
@@ -1473,5 +1598,79 @@ impl LanguageModel for Qwen3NextModel {
 
     fn eos_token_ids(&self) -> Vec<i32> {
         vec![151645] // Qwen3 EOS token
+    }
+}
+
+#[cfg(test)]
+mod cache_tests {
+    use super::Qwen3NextCache;
+    use crate::models::gated_delta::GatedDeltaCache;
+    use mlxcel_core::{dtype, generate::ModelStateSnapshot, layers::KVCache};
+
+    #[test]
+    fn qwen3_next_attention_cache_snapshot_restore_round_trips_kv_state() {
+        let mut kv = KVCache::new();
+        kv.keys = Some(mlxcel_core::zeros(&[1, 2, 23, 4], dtype::FLOAT32));
+        kv.values = Some(mlxcel_core::zeros(&[1, 2, 23, 4], dtype::FLOAT32));
+        kv.offset = 23;
+        let cache = Qwen3NextCache::Attention(kv);
+
+        let mut snapshot = ModelStateSnapshot::new("qwen3_5", 23);
+        cache.snapshot_into(&mut snapshot, "layer0");
+
+        let mut restored = Qwen3NextCache::Attention(KVCache::new());
+        restored.restore_from(&snapshot, "layer0");
+
+        match restored {
+            Qwen3NextCache::Attention(kv) => {
+                let keys = kv
+                    .keys
+                    .as_ref()
+                    .and_then(|a| a.as_ref())
+                    .expect("keys restored");
+                let values = kv
+                    .values
+                    .as_ref()
+                    .and_then(|a| a.as_ref())
+                    .expect("values restored");
+                assert_eq!(kv.offset, 23);
+                assert_eq!(mlxcel_core::array_shape(keys), vec![1, 2, 23, 4]);
+                assert_eq!(mlxcel_core::array_shape(values), vec![1, 2, 23, 4]);
+            }
+            Qwen3NextCache::Linear(_) => panic!("restored wrong cache variant"),
+        }
+    }
+
+    #[test]
+    fn qwen3_next_linear_cache_snapshot_restore_round_trips_state() {
+        let mut gd = GatedDeltaCache::new();
+        gd.conv_state = Some(mlxcel_core::zeros(&[1, 3, 8], dtype::FLOAT32));
+        gd.state_cache = Some(mlxcel_core::zeros(&[1, 2, 4, 8], dtype::FLOAT32));
+        let cache = Qwen3NextCache::Linear(gd);
+
+        let mut snapshot = ModelStateSnapshot::new("qwen3_5", 29);
+        cache.snapshot_into(&mut snapshot, "layer1");
+
+        let mut restored = Qwen3NextCache::Linear(GatedDeltaCache::new());
+        restored.restore_from(&snapshot, "layer1");
+
+        match restored {
+            Qwen3NextCache::Linear(gd) => {
+                let conv = gd
+                    .conv_state
+                    .as_ref()
+                    .and_then(|a| a.as_ref())
+                    .expect("conv_state restored");
+                let state = gd
+                    .state_cache
+                    .as_ref()
+                    .and_then(|a| a.as_ref())
+                    .expect("state_cache restored");
+                assert_eq!(gd.offset, 29);
+                assert_eq!(mlxcel_core::array_shape(conv), vec![1, 3, 8]);
+                assert_eq!(mlxcel_core::array_shape(state), vec![1, 2, 4, 8]);
+            }
+            Qwen3NextCache::Attention(_) => panic!("restored wrong cache variant"),
+        }
     }
 }

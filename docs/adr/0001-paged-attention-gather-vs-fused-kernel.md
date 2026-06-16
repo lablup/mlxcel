@@ -117,6 +117,10 @@ The fused kernel wins at 4096 tokens once decode is batched (batch >= 4), and it
 
 Phase 6 lands the kernel gated off. The native path is opt-in through the `MLXCEL_PAGED_ATTENTION_NATIVE` environment variable (or the `use_native_paged_kernel` argument on `paged_decode_attention_pooled`), and the default stays on the gather-then-SDPA path. The kernel keeps its value for the batched moderate-context regime where it wins, and as a starting point if a future device or a non-fused gather path shifts the trade-off. `examples/paged_attention_kernel_bench.rs` reproduces the table above.
 
+## Chunked slab storage interaction (#235)
+
+The pool later moved from one growable tensor per layer to a list of fixed-size slab tensors (32 blocks per slab), so growth appends a slab instead of reallocating and copying the whole layer. The fused kernel reads one contiguous pool buffer per side, so `paged_decode_fused` declines (returns `None`, the caller falls back to gather) on any layer that has grown past a single slab. Layers within their first slab keep the kernel available. Teaching the kernel per-slab base pointers is possible if the trade-off above ever flips; given the kernel is gated off by default and loses in the long-context regime, the decline is the accepted state. The gather path splits the block-row list into per-slab runs and concatenates the per-run `take` results, which keeps it byte-identical and within run noise of the single-tensor layout.
+
 ## References
 
 - Epic #116, unified KV cache.

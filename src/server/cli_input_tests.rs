@@ -125,7 +125,8 @@ fn sample_input() -> ServerStartupInput {
         prompt_cache_max_entries: None,
         prompt_cache_ttl_seconds: None,
         prompt_cache_min_prefix: None,
-        // APC knobs — disabled by default.
+        // APC knobs — the fixture keeps APC off so existing whole-prefix
+        // expectations stay exact (the serve binaries default it ON).
         apc_enabled: false,
         apc_block_size: None,
         apc_num_blocks: None,
@@ -145,6 +146,8 @@ fn sample_input() -> ServerStartupInput {
         kv_cache_budget: None,
         // experimental VLM prefix-cache toggle off in tests (#124 step c).
         enable_vlm_prefix_cache: false,
+        // CORS allow-list unset in tests (#244): permissive default.
+        allowed_origins: Vec::new(),
         // Responses API store defaults.
         responses_store_max_entries: 1024,
         responses_store_ttl_secs: 3600,
@@ -153,6 +156,10 @@ fn sample_input() -> ServerStartupInput {
         // (A4): default to None for baseline-path tests.
         #[cfg(feature = "surgery")]
         surgery_config_path: None,
+        // serve-level diffusion knobs (#217 phase 3): engine defaults in tests.
+        max_denoising_steps: None,
+        diffusion_sampler: "entropy-bound".to_string(),
+        diffusion_threshold: 0.9,
     }
 }
 

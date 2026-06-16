@@ -282,3 +282,226 @@ async fn disaggregated_router_streams_correct_output() {
     );
     eprintln!("OK: three-process disaggregated router reproduced the expected output via SSE.");
 }
+
+/// Parse an SSE body into concatenated `(content, reasoning_content)` deltas.
+fn parse_sse_deltas(body: &str) -> (String, String) {
+    let mut content = String::new();
+    let mut reasoning = String::new();
+    for line in body.lines() {
+        let line = line.trim();
+        if let Some(data) = line.strip_prefix("data: ") {
+            if data == "[DONE]" {
+                continue;
+            }
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(data) {
+                let delta = v
+                    .get("choices")
+                    .and_then(|c| c.get(0))
+                    .and_then(|c| c.get("delta"));
+                if let Some(text) = delta
+                    .and_then(|d| d.get("content"))
+                    .and_then(|t| t.as_str())
+                {
+                    content.push_str(text);
+                }
+                if let Some(text) = delta
+                    .and_then(|d| d.get("reasoning_content"))
+                    .and_then(|t| t.as_str())
+                {
+                    reasoning.push_str(text);
+                }
+            }
+        }
+    }
+    (content, reasoning)
+}
+
+/// Issue #198: a THINKING-ENABLED request through the disaggregated router
+/// must produce the same `content` / `reasoning_content` split as the
+/// single-node chat route, with no structural markers (`<think>`) leaking
+/// into either field.
+///
+/// Runs the single-node hybrid reference first (then kills it), so at most
+/// two model-loaded processes are resident at once alongside the router.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "spawns four real mlxcel-server processes loading qwen3-0.6b-4bit; run with --ignored"]
+async fn disaggregated_router_filters_thinking_output() {
+    let model_dir = repo_model_dir(QWEN3_DIR);
+    if !model_dir.exists() {
+        eprintln!("Skipping {QWEN3_DIR}: model directory not found");
+        return;
+    }
+    let binary = repo_binary_path("mlxcel-server");
+    if !binary.exists() {
+        eprintln!("Skipping: mlxcel-server binary not found");
+        return;
+    }
+    let model_arg = model_dir.to_string_lossy().to_string();
+    let request_body = serde_json::json!({
+        "model": "qwen3",
+        "messages": [{"role": "user", "content": "What is 2 + 2?"}],
+        "stream": true,
+        "temperature": 0.0,
+        "max_tokens": 32,
+        "chat_template_kwargs": {"enable_thinking": true}
+    });
+    let client = reqwest::Client::new();
+
+    // ---- Single-node hybrid reference ----
+    let (ref_content, ref_reasoning) = {
+        let ports = reserve_ports(1);
+        let hybrid_http = ports[0].to_string();
+        let _hybrid = spawn_role_server(&[
+            "-m",
+            &model_arg,
+            "--host",
+            "127.0.0.1",
+            "--port",
+            &hybrid_http,
+            "--no-warmup",
+        ]);
+        let deadline = Instant::now() + Duration::from_secs(240);
+        let health_url = format!("http://127.0.0.1:{hybrid_http}/health");
+        assert!(
+            wait_for_http_health(&health_url, deadline).await,
+            "hybrid reference server never became healthy at {health_url}"
+        );
+        let response = client
+            .post(format!(
+                "http://127.0.0.1:{hybrid_http}/v1/chat/completions"
+            ))
+            .json(&request_body)
+            .send()
+            .await
+            .expect("POST to hybrid reference");
+        assert!(response.status().is_success(), "hybrid returned an error");
+        let body = response.text().await.expect("read hybrid SSE body");
+        parse_sse_deltas(&body)
+        // _hybrid drops here, killing the reference server.
+    };
+    eprintln!(
+        "hybrid reference: content={ref_content:?} reasoning ({} chars)",
+        ref_reasoning.len()
+    );
+    assert!(
+        !ref_reasoning.is_empty(),
+        "thinking-enabled hybrid reference produced no reasoning_content; \
+         the parity comparison would be vacuous"
+    );
+
+    // ---- Three-process disaggregated router run ----
+    let ports = reserve_ports(6);
+    let prefill_http = ports[0].to_string();
+    let decode_http = ports[1].to_string();
+    let router_http = ports[2].to_string();
+    let prefill_serving_addr = format!("127.0.0.1:{}", ports[3]);
+    let decode_serving_addr = format!("127.0.0.1:{}", ports[4]);
+    let router_serving_addr = format!("127.0.0.1:{}", ports[5]);
+
+    let _decode = spawn_role_server(&[
+        "-m",
+        &model_arg,
+        "--host",
+        "127.0.0.1",
+        "--port",
+        &decode_http,
+        "--parallel",
+        "2",
+        "--max-batch-size",
+        "2",
+        "--decode-storage-backend",
+        "paged",
+        "--node-role",
+        "decode",
+        "--serving-bind",
+        &decode_serving_addr,
+        "--no-warmup",
+    ]);
+    let _prefill = spawn_role_server(&[
+        "-m",
+        &model_arg,
+        "--host",
+        "127.0.0.1",
+        "--port",
+        &prefill_http,
+        "--parallel",
+        "2",
+        "--max-batch-size",
+        "2",
+        "--decode-storage-backend",
+        "paged",
+        "--node-role",
+        "prefill",
+        "--serving-bind",
+        &prefill_serving_addr,
+        "--decode-peers",
+        &decode_serving_addr,
+        "--no-warmup",
+    ]);
+    let _router = spawn_role_server(&[
+        "-m",
+        &model_arg,
+        "--host",
+        "127.0.0.1",
+        "--port",
+        &router_http,
+        "--node-role",
+        "router",
+        "--serving-bind",
+        &router_serving_addr,
+        "--prefill-peers",
+        &prefill_serving_addr,
+        "--decode-peers",
+        &decode_serving_addr,
+        "--no-warmup",
+    ]);
+
+    let deadline = Instant::now() + Duration::from_secs(240);
+    assert!(
+        wait_for_tcp(&decode_serving_addr, deadline).await,
+        "decode node serving transport never came up"
+    );
+    assert!(
+        wait_for_tcp(&prefill_serving_addr, deadline).await,
+        "prefill node serving transport never came up"
+    );
+    let health_url = format!("http://127.0.0.1:{router_http}/health");
+    assert!(
+        wait_for_http_health(&health_url, deadline).await,
+        "router HTTP /health never returned 200"
+    );
+
+    let response = client
+        .post(format!(
+            "http://127.0.0.1:{router_http}/v1/chat/completions"
+        ))
+        .json(&request_body)
+        .send()
+        .await
+        .expect("POST to router");
+    assert!(response.status().is_success(), "router returned an error");
+    let body = response.text().await.expect("read router SSE body");
+    let (content, reasoning) = parse_sse_deltas(&body);
+    eprintln!(
+        "router: content={content:?} reasoning ({} chars)",
+        reasoning.len()
+    );
+
+    assert!(
+        !content.contains("<think>") && !content.contains("</think>"),
+        "thinking markers leaked into router content: {content:?}"
+    );
+    assert!(
+        !reasoning.contains("<think>") && !reasoning.contains("</think>"),
+        "thinking markers leaked into router reasoning_content"
+    );
+    assert_eq!(
+        reasoning, ref_reasoning,
+        "router reasoning_content does not match the single-node chat route"
+    );
+    assert_eq!(
+        content, ref_content,
+        "router content does not match the single-node chat route"
+    );
+    eprintln!("OK: router thinking-enabled output matches the single-node split.");
+}

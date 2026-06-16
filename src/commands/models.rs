@@ -18,10 +18,10 @@
 //! independent global store introduced by issue #93
 //! (`${MLXCEL_CACHE_DIR:-$HOME/.cache/mlxcel}/models/<owner>/<name>`):
 //!
-//! - **`mlxcel list`** — enumerates downloaded snapshots with repo-id,
+//! - **`mlxcel list`**: enumerates downloaded snapshots with repo-id,
 //!   on-disk size, and path (mirrors `ollama list` / `lms ls`). The supported
 //!   model-architecture catalog lives under the separate `mlxcel arch` verb.
-//! - **`mlxcel rm <repo-id>`** — removes a snapshot directory from the store
+//! - **`mlxcel rm <repo-id>`**: removes a snapshot directory from the store
 //!   (confirms unless `--yes`). It never touches the read-only HuggingFace
 //!   cache: a repo that exists only there is reported, not deleted.
 //!
@@ -213,7 +213,7 @@ fn should_color_stdout() -> bool {
 /// (`just now`, `5 min ago`, `2 days ago`, `3 weeks ago`, …).
 ///
 /// Pure (takes the already-computed elapsed duration, never reads the clock) so
-/// callers — and unit tests — control the reference instant. The caller passes
+/// callers (and unit tests) control the reference instant. The caller passes
 /// `now.duration_since(modified)`; a future `modified` (clock skew → `Err`)
 /// should be rendered by the caller as "just now" (see [`format_modified`]).
 ///
@@ -448,8 +448,8 @@ fn render_json<W: std::fmt::Write>(out: &mut W, models: &[StoredModel]) {
     let _ = writeln!(out, "{json}");
 }
 
-/// Render just the repo-ids, one per line (`-q/--quiet`) — no header, no
-/// columns, no ANSI — so `mlxcel list -q | xargs -n1 mlxcel rm` works. An empty
+/// Render just the repo-ids, one per line (`-q/--quiet`): no header, no
+/// columns, no ANSI, so `mlxcel list -q | xargs -n1 mlxcel rm` works. An empty
 /// store emits nothing.
 fn render_quiet<W: std::fmt::Write>(out: &mut W, models: &[StoredModel]) {
     for m in models {
@@ -462,7 +462,7 @@ fn render_quiet<W: std::fmt::Write>(out: &mut W, models: &[StoredModel]) {
 /// Confirms interactively unless `yes` is set. Refuses to delete anything in
 /// the read-only HuggingFace cache (reports it instead). When stdin is not a
 /// TTY and `--yes` was not passed, the command errors rather than silently
-/// deleting or silently skipping — the operator must opt in explicitly.
+/// deleting or silently skipping: the operator must opt in explicitly.
 pub(crate) fn run_remove(
     repo_id: &str,
     yes: bool,

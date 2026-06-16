@@ -89,7 +89,7 @@ fn filter_out_audio_weights(weights: WeightMap, drop_audio: bool) -> WeightMap {
 }
 
 /// Mirror upstream `sanitize_audio_weights` from
-/// `references/.../nemotron_h_nano_omni/audio.py`:
+/// https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/models/nemotron_h_nano_omni/audio.py:
 /// - drop `sound_encoder.encoder.feature_extractor.*` (training-only),
 /// - drop `*.num_batches_tracked` BatchNorm scratch state,
 /// - transpose Conv1d weights from PyTorch `[O, I, K]` to MLX

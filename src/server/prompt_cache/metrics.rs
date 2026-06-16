@@ -57,6 +57,22 @@ pub trait PromptCacheMetrics: Send + Sync {
     fn record_evict_ttl(&self, bytes: usize) {
         let _ = bytes;
     }
+    /// Called when an exact-prefix recurrent/model-owned snapshot is inserted.
+    fn record_snapshot_insert(&self, bytes: usize) {
+        let _ = bytes;
+    }
+    /// Called on every snapshot lookup.
+    fn record_snapshot_lookup(&self, hit: bool, matched_len: usize) {
+        let _ = (hit, matched_len);
+    }
+    /// Called when a snapshot is evicted under LRU pressure.
+    fn record_snapshot_evict_lru(&self, bytes: usize) {
+        let _ = bytes;
+    }
+    /// Called when a snapshot expires by TTL.
+    fn record_snapshot_evict_ttl(&self, bytes: usize) {
+        let _ = bytes;
+    }
 }
 
 /// No-op metrics implementation. The default for stores constructed without
@@ -80,6 +96,15 @@ pub struct AtomicPromptCacheMetrics {
     pub evict_lru_bytes: AtomicU64,
     pub evicts_ttl: AtomicU64,
     pub evict_ttl_bytes: AtomicU64,
+    pub snapshot_inserts: AtomicU64,
+    pub snapshot_insert_bytes: AtomicU64,
+    pub snapshot_lookups: AtomicU64,
+    pub snapshot_hits: AtomicU64,
+    pub snapshot_hit_tokens_total: AtomicU64,
+    pub snapshot_evicts_lru: AtomicU64,
+    pub snapshot_evict_lru_bytes: AtomicU64,
+    pub snapshot_evicts_ttl: AtomicU64,
+    pub snapshot_evict_ttl_bytes: AtomicU64,
 }
 
 impl AtomicPromptCacheMetrics {
@@ -118,6 +143,29 @@ impl PromptCacheMetrics for AtomicPromptCacheMetrics {
     fn record_evict_ttl(&self, bytes: usize) {
         self.evicts_ttl.fetch_add(1, Ordering::Relaxed);
         self.evict_ttl_bytes
+            .fetch_add(bytes as u64, Ordering::Relaxed);
+    }
+    fn record_snapshot_insert(&self, bytes: usize) {
+        self.snapshot_inserts.fetch_add(1, Ordering::Relaxed);
+        self.snapshot_insert_bytes
+            .fetch_add(bytes as u64, Ordering::Relaxed);
+    }
+    fn record_snapshot_lookup(&self, hit: bool, matched_len: usize) {
+        self.snapshot_lookups.fetch_add(1, Ordering::Relaxed);
+        if hit {
+            self.snapshot_hits.fetch_add(1, Ordering::Relaxed);
+            self.snapshot_hit_tokens_total
+                .fetch_add(matched_len as u64, Ordering::Relaxed);
+        }
+    }
+    fn record_snapshot_evict_lru(&self, bytes: usize) {
+        self.snapshot_evicts_lru.fetch_add(1, Ordering::Relaxed);
+        self.snapshot_evict_lru_bytes
+            .fetch_add(bytes as u64, Ordering::Relaxed);
+    }
+    fn record_snapshot_evict_ttl(&self, bytes: usize) {
+        self.snapshot_evicts_ttl.fetch_add(1, Ordering::Relaxed);
+        self.snapshot_evict_ttl_bytes
             .fetch_add(bytes as u64, Ordering::Relaxed);
     }
 }

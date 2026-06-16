@@ -13,7 +13,7 @@
 // limitations under the License.
 
 // Nemotron-H: NVIDIA's hybrid Mamba2+Transformer model for mlxcel-core
-// Reference: mlx-lm/mlx_lm/models/nemotron_h.py
+// Reference: https://github.com/ml-explore/mlx-lm/blob/main/mlx_lm/models/nemotron_h.py
 //
 // Key features:
 // - Hybrid architecture with configurable block types (M/*/−/E)
@@ -29,6 +29,9 @@ use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr, concatenate};
 use serde::Deserialize;
 use std::path::Path;
+
+use super::model_owned::ModelOwnedSequenceState;
+use super::recurrent_snapshot::{push_optional, restore_optional};
 
 // Configuration.
 // Custom deserializer for hybrid_override_pattern which can be either:
@@ -231,7 +234,7 @@ pub struct NemotronHConfig {
     pub quantization: Option<Quantization>,
 
     /// Softplus initialization bounds retained for config-schema parity with
-    /// upstream `mlx_lm/models/nemotron_h.py`. They do NOT participate in the
+    /// upstream https://github.com/ml-explore/mlx-lm/blob/main/mlx_lm/models/nemotron_h.py. They do NOT participate in the
     /// `time_step_limit` default (which is always `(0.0, +inf)` when absent;
     /// see upstream PR #1026 / commit `6ddfdda`).
     #[serde(default)]
@@ -364,6 +367,24 @@ impl NemotronMambaCache {
             ssm_state: None,
         }
     }
+
+    pub fn snapshot_into(
+        &self,
+        snapshot: &mut mlxcel_core::generate::ModelStateSnapshot,
+        prefix: &str,
+    ) {
+        push_optional(snapshot, format!("{prefix}.conv_state"), &self.conv_state);
+        push_optional(snapshot, format!("{prefix}.ssm_state"), &self.ssm_state);
+    }
+
+    pub fn restore_from(
+        &mut self,
+        snapshot: &mlxcel_core::generate::ModelStateSnapshot,
+        prefix: &str,
+    ) {
+        self.conv_state = restore_optional(snapshot, format!("{prefix}.conv_state"));
+        self.ssm_state = restore_optional(snapshot, format!("{prefix}.ssm_state"));
+    }
 }
 
 impl Default for NemotronMambaCache {
@@ -382,6 +403,39 @@ impl NemotronLayerCache {
         match self {
             NemotronLayerCache::Attention(kv) => kv.offset,
             NemotronLayerCache::Mamba(_) => 0,
+        }
+    }
+
+    pub fn snapshot_into(
+        &self,
+        snapshot: &mut mlxcel_core::generate::ModelStateSnapshot,
+        prefix: &str,
+    ) {
+        match self {
+            NemotronLayerCache::Attention(kv) => {
+                push_optional(snapshot, format!("{prefix}.attention.keys"), &kv.keys);
+                push_optional(snapshot, format!("{prefix}.attention.values"), &kv.values);
+            }
+            NemotronLayerCache::Mamba(cache) => {
+                cache.snapshot_into(snapshot, &format!("{prefix}.mamba"));
+            }
+        }
+    }
+
+    pub fn restore_from(
+        &mut self,
+        snapshot: &mlxcel_core::generate::ModelStateSnapshot,
+        prefix: &str,
+    ) {
+        match self {
+            NemotronLayerCache::Attention(kv) => {
+                kv.keys = restore_optional(snapshot, format!("{prefix}.attention.keys"));
+                kv.values = restore_optional(snapshot, format!("{prefix}.attention.values"));
+                kv.offset = snapshot.token_len() as i32;
+            }
+            NemotronLayerCache::Mamba(cache) => {
+                cache.restore_from(snapshot, &format!("{prefix}.mamba"));
+            }
         }
     }
 }
@@ -585,13 +639,16 @@ impl NemotronHMamba2Mixer {
         let y_normed = self.norm.forward(&y, Some(&gate));
         let result = self.out_proj.forward(&y_normed);
 
-        // Force evaluation of the Mamba layer output.
-        // On M5 Max (Metal GPU Family 4), the lazy computation graph from
-        // the SSM step contains mixed float32×float16 intermediate nodes
-        // that produce NaN when fused with downstream layers in a single
-        // Metal command buffer.  Materializing here splits the graph at a
-        // clean dtype boundary.
-        mlxcel_core::eval(&result);
+        // Materialize at a clean dtype boundary ONLY on M5 Max (Metal GPU
+        // Family 4): there the lazy float32/float16 SSM graph can fuse into NaN
+        // within one Metal command buffer. On every other chip this per-mixer
+        // sync is pure decode-throughput loss (it blocks cross-layer
+        // pipelining), so skip it. Decode never reaches the prefill chunked-eval
+        // path (`needs_chunked_eval` is `seq_len > 1`), so this is the only
+        // per-token eval to gate. CLAUDE.md "Apple Silicon precision".
+        if mlxcel_core::hardware::is_m5_neural_accelerator() {
+            mlxcel_core::eval(&result);
+        }
 
         result
     }
@@ -1430,8 +1487,6 @@ impl NemotronHBlock {
 }
 
 // Full Model.
-use std::cell::RefCell;
-
 pub struct NemotronHModel {
     config: NemotronHConfig,
     embeddings: UnifiedEmbedding,
@@ -1439,8 +1494,9 @@ pub struct NemotronHModel {
     norm_f: RMSNorm,
     lm_head: UnifiedLinear,
     block_types: Vec<BlockType>,
-    /// Internal caches for LanguageModel trait compatibility
-    internal_caches: RefCell<Vec<NemotronLayerCache>>,
+    /// Model-owned mixed caches keyed by scheduler sequence id, plus a
+    /// fallback slot for CLI / benchmark paths.
+    sequence_state: ModelOwnedSequenceState<NemotronLayerCache>,
     /// Opaque C++ handle for full-model decode (0 = not registered).
     /// When non-zero, `forward_with_caches` uses `nemotron_decode_step`
     /// for single-token decode instead of the Rust per-layer loop.
@@ -1897,8 +1953,9 @@ impl NemotronHModel {
     ///
     /// Used by: Nemotron H Nano Omni VLM
     pub fn forward_with_inputs_embeds(&self, inputs_embeds: &MlxArray) -> UniquePtr<MlxArray> {
-        let mut internal = self.internal_caches.borrow_mut();
-        self.forward_layer_stack(mlxcel_core::copy(inputs_embeds), &mut internal)
+        self.sequence_state.with_sequence_state(None, |internal| {
+            self.forward_layer_stack(mlxcel_core::copy(inputs_embeds), internal)
+        })
     }
 
     fn forward_layer_stack(
@@ -2423,7 +2480,7 @@ impl NemotronHModel {
             norm_f,
             lm_head,
             block_types,
-            internal_caches: RefCell::new(internal_caches),
+            sequence_state: ModelOwnedSequenceState::new(internal_caches),
             c_handle: 0,
         };
 
@@ -2711,24 +2768,14 @@ impl LanguageModel for NemotronHModel {
         _mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
         // NemotronH uses mixed cache types (KVCache + MambaCache)
-        // We use internal RefCell caches to maintain state through shared reference
-        let mut internal = self.internal_caches.borrow_mut();
-        self.forward_with_caches(input, &mut internal)
+        self.sequence_state
+            .with_sequence_state(None, |internal| self.forward_with_caches(input, internal))
     }
 
     fn make_caches(&self) -> Vec<KVCache> {
-        // Reset internal caches for new generation session
-        let new_internal_caches: Vec<NemotronLayerCache> = self
-            .block_types
-            .iter()
-            .filter(|bt| bt.needs_cache())
-            .map(|bt| match bt {
-                BlockType::Mamba => NemotronLayerCache::Mamba(NemotronMambaCache::new()),
-                BlockType::Attention => NemotronLayerCache::Attention(KVCache::new()),
-                _ => unreachable!(),
-            })
-            .collect();
-        *self.internal_caches.borrow_mut() = new_internal_caches;
+        // Reset fallback internal caches for new generation session
+        self.sequence_state
+            .replace_internal(NemotronHModel::make_caches(self));
 
         // Return empty KV caches for trait compatibility
         // Actual caching uses internal_caches
@@ -2749,25 +2796,88 @@ impl LanguageModel for NemotronHModel {
         false // NemotronH is a hybrid Mamba+Transformer, internal caches not compatible with per-sequence KV isolation
     }
 
+    fn prepare_sequence_state(&self, seq_id: mlxcel_core::cache::SequenceId) {
+        self.sequence_state
+            .prepare_sequence_state(seq_id, NemotronHModel::make_caches(self));
+    }
+
+    fn release_sequence_state_by_id(&self, seq_id: mlxcel_core::cache::SequenceId) {
+        self.sequence_state.release_sequence_state(seq_id);
+    }
+
+    fn forward_with_sequence_id(
+        &self,
+        input_ids: &MlxArray,
+        seq_id: Option<mlxcel_core::cache::SequenceId>,
+        _caches: &mut [KVCache],
+        _mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        self.sequence_state.with_or_create_sequence_state(
+            seq_id,
+            || NemotronHModel::make_caches(self),
+            |internal| self.forward_with_caches(input_ids, internal),
+        )
+    }
+
+    fn supports_snapshot_reuse(&self) -> bool {
+        true
+    }
+
+    fn snapshot_sequence_state(
+        &self,
+        seq_id: mlxcel_core::cache::SequenceId,
+        token_len: usize,
+    ) -> Option<mlxcel_core::generate::ModelStateSnapshot> {
+        self.sequence_state
+            .with_sequence_state_ref(seq_id, |state| {
+                let mut snapshot =
+                    mlxcel_core::generate::ModelStateSnapshot::new("nemotron_h", token_len);
+                for (idx, cache) in state.iter().enumerate() {
+                    cache.snapshot_into(&mut snapshot, &format!("layer{idx}"));
+                }
+                snapshot
+            })
+    }
+
+    fn restore_sequence_state(
+        &self,
+        seq_id: mlxcel_core::cache::SequenceId,
+        snapshot: &mlxcel_core::generate::ModelStateSnapshot,
+    ) -> Result<(), String> {
+        if snapshot.family() != "nemotron_h" {
+            return Err(format!(
+                "cannot restore {} snapshot into Nemotron-H",
+                snapshot.family()
+            ));
+        }
+        let mut state = NemotronHModel::make_caches(self);
+        for (idx, cache) in state.iter_mut().enumerate() {
+            cache.restore_from(snapshot, &format!("layer{idx}"));
+        }
+        self.sequence_state.replace_sequence_state(seq_id, state);
+        Ok(())
+    }
+
     fn trim_internal_caches(&self, excess: i32) {
         if excess <= 0 {
             return;
         }
-        let mut internal = self.internal_caches.borrow_mut();
-        for cache in internal.iter_mut() {
-            match cache {
-                NemotronLayerCache::Attention(kv) => {
-                    kv.trim(excess);
-                }
-                NemotronLayerCache::Mamba(mc) => {
-                    // Mamba caches are recurrent state, not positional.
-                    // Reset them since the SSM/conv state was computed using
-                    // padding tokens and would corrupt subsequent decode steps.
-                    mc.conv_state = None;
-                    mc.ssm_state = None;
+        self.sequence_state.with_sequence_state(None, |internal| {
+            for cache in internal.iter_mut() {
+                match cache {
+                    NemotronLayerCache::Attention(kv) => {
+                        kv.trim(excess);
+                    }
+                    NemotronLayerCache::Mamba(mc) => {
+                        // Mamba caches are recurrent state, not positional.
+                        // Reset them since the SSM/conv state was computed using
+                        // padding tokens and would corrupt subsequent decode steps.
+                        mc.conv_state = None;
+                        mc.ssm_state = None;
+                    }
                 }
             }
-        }
+        });
     }
 
     fn supports_padded_prefill(&self) -> bool {

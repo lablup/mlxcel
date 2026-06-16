@@ -65,7 +65,7 @@
 //! `slice(keys, 0, offset)` for K and `concat(dequant(v_packed), hot_V)` for
 //! V. The K side has no per-step concat — that was the dominant residual
 //! cost vs FP16 mode (~7 ms/step at 4 K context). See
-//! `references/turboquant_plus/README.md` §"MLX Framework Port" for the
+//! https://github.com/TheTom/turboquant_plus/blob/main/README.md §"MLX Framework Port" for the
 //! original architecture.
 //!
 //! Setting `MLXCEL_TURBO4_DELEGATED_FP16_FAST_PATH=1` switches this mode to a
@@ -131,7 +131,7 @@ fn direct_prefill_cache_store_enabled() -> bool {
 /// Check that all `KVCache` entries in `caches` support cache trimming.
 ///
 /// Mirrors the upstream mlx-lm `can_trim_prompt_cache` function
-/// (`mlx_lm/models/cache.py`). Speculative decoding requires a trimmable
+/// (https://github.com/ml-explore/mlx-lm/blob/main/mlx_lm/models/cache.py). Speculative decoding requires a trimmable
 /// cache so it can rewind cache entries after a draft-token rejection.
 ///
 /// All current `KVCache` mode variants (Fp16, Int8, Turbo4Asym, Turbo4,
@@ -594,7 +594,7 @@ impl KVCache {
     /// and the speed benchmarks. Production callers should leave the default
     /// [`turbo::DELEGATED_HOT_THRESHOLD`] in place; tuning this changes the
     /// fold cadence and therefore the speed/quality trade-off documented in
-    /// `references/turboquant_plus/README.md`. Setting `threshold <= 0` is
+    /// https://github.com/TheTom/turboquant_plus/blob/main/README.md. Setting `threshold <= 0` is
     /// rejected so the fold path stays well-defined.
     pub fn set_hot_threshold(&mut self, threshold: i32) {
         if threshold > 0 {
@@ -740,6 +740,39 @@ impl KVCache {
     #[inline]
     fn buffer_idx(&self) -> i32 {
         self.offset - self.live_start
+    }
+
+    /// Read-only view of the live K/V window without writing to the cache.
+    ///
+    /// Returns the `[B, n_kv_heads, live_len, head_dim]` slices of the dense
+    /// Fp16 buffers — exactly what [`Self::update_and_fetch`] would have
+    /// returned for a zero-token update, but as a `&self` accessor so callers
+    /// can concatenate the cached prefix with externally computed K/V
+    /// without mutating cache state.
+    ///
+    /// Returns `None` when the cache is empty, pool-backed (`new_paged`), or
+    /// not in plain `KVCacheMode::Fp16` — the only storage layout whose raw
+    /// buffers are directly attention-ready without dequantization.
+    ///
+    /// Used by: DiffusionGemma canvas (decoder-mode) attention (issue #217),
+    /// which reads the committed encoder prefix as a read-only context for
+    /// every denoising step.
+    pub fn visible_state(&self) -> Option<(UniquePtr<MlxArray>, UniquePtr<MlxArray>)> {
+        if self.mode != KVCacheMode::Fp16 || self.paged_backing.is_some() {
+            return None;
+        }
+        let keys = self.keys.as_ref()?;
+        let values = self.values.as_ref()?;
+        let live_len = self.buffer_idx();
+        if live_len <= 0 {
+            return None;
+        }
+        let ks = ffi::array_shape(keys);
+        let vs = ffi::array_shape(values);
+        Some((
+            ffi::slice(keys, &[0, 0, 0, 0], &[ks[0], ks[1], live_len, ks[3]]),
+            ffi::slice(values, &[0, 0, 0, 0], &[vs[0], vs[1], live_len, vs[3]]),
+        ))
     }
 
     /// Get the allocated buffer size (sequence dimension)
@@ -2349,7 +2382,7 @@ impl KVCache {
     /// 3. **Leaves `self.offset` unchanged** so RoPE for the next Q stays
     ///    rotated at the correct monotonic position.
     ///
-    /// Upstream `RotatingKVCache` (`mlx_lm/models/cache.py:410-510`) uses
+    /// Upstream `RotatingKVCache` (https://github.com/ml-explore/mlx-lm/blob/main/mlx_lm/models/cache.py#L410-L510) uses
     /// the same `offset` monotonic / `_idx` rotating split for the same
     /// reason; the names differ but the invariant is identical.
     ///
@@ -2861,7 +2894,7 @@ impl KVCache {
     /// tensors returned by the model's `forward` pass.
     ///
     /// Upstream mlx-lm evaluates `[c.state for c in cache]` after each
-    /// chunked-prefill step (see `mlx_lm/generate.py` ~line 583). This method
+    /// chunked-prefill step (see https://github.com/ml-explore/mlx-lm/blob/main/mlx_lm/generate.py ~line 583). This method
     /// mirrors that pattern: it calls `ffi::eval` on every non-`None` tensor
     /// field that contributes to the cache state (`keys`, `values`,
     /// `key_scales`, `val_scales`, `v_packed`, `v_norms`, `v_rescale`,
@@ -3590,6 +3623,24 @@ pub struct RotatingKVCache {
     /// Deterministic seed for the Turbo4 sign vectors. Set at construction
     /// time so detach/adopt round-trip without recomputing rotations.
     pub(crate) turbo_seed: u32,
+}
+
+/// Scalar state required to restore a [`RotatingKVCache`] snapshot.
+///
+/// The K/V tensors themselves travel separately through model-specific
+/// snapshot containers; this metadata preserves the rotating write position
+/// and buffered speculative-cache state so the next decode step writes to the
+/// same physical slot as the source cache.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RotatingKVCacheSnapshotState {
+    pub max_size: i32,
+    pub buffer_size: i32,
+    pub offset: i32,
+    pub start_position: i32,
+    pub idx: i32,
+    pub step: i32,
+    pub mode: KVCacheMode,
+    pub turbo_seed: u32,
 }
 
 impl RotatingKVCache {
@@ -4626,6 +4677,116 @@ impl RotatingKVCache {
     /// otherwise tracks the next physical write slot in the rotating buffer.
     pub fn buffer_write_idx(&self) -> i32 {
         self.idx
+    }
+
+    /// Return the scalar metadata needed to restore this rotating cache from
+    /// copied K/V tensors.
+    ///
+    /// Used by: Gemma 4 exact-prefix model-owned snapshot prompt-cache reuse.
+    pub fn snapshot_state(&self) -> RotatingKVCacheSnapshotState {
+        RotatingKVCacheSnapshotState {
+            max_size: self.max_size,
+            buffer_size: self.buffer_size,
+            offset: self.offset,
+            start_position: self.start_position,
+            idx: self.idx,
+            step: self.step,
+            mode: self.mode,
+            turbo_seed: self.turbo_seed,
+        }
+    }
+
+    /// Restore this cache from copied FP16 K/V tensors and scalar metadata.
+    ///
+    /// The current snapshot container captures only attention-ready FP16
+    /// tensors, so non-FP16 rotating-cache modes are rejected rather than
+    /// restoring an incomplete sidecar set.
+    ///
+    /// Used by: Gemma 4 exact-prefix model-owned snapshot prompt-cache reuse.
+    pub fn restore_fp16_snapshot_state(
+        &mut self,
+        state: RotatingKVCacheSnapshotState,
+        keys: Option<UniquePtr<MlxArray>>,
+        values: Option<UniquePtr<MlxArray>>,
+    ) -> Result<(), String> {
+        if state.mode != KVCacheMode::Fp16 {
+            return Err(format!(
+                "RotatingKVCache::restore_fp16_snapshot_state only supports FP16 snapshots; got {:?}",
+                state.mode
+            ));
+        }
+        if keys.is_some() != values.is_some() {
+            return Err(
+                "RotatingKVCache::restore_fp16_snapshot_state requires keys and values together"
+                    .into(),
+            );
+        }
+        if state.max_size <= 0 {
+            return Err(format!(
+                "RotatingKVCache::restore_fp16_snapshot_state requires positive max_size; got {}",
+                state.max_size
+            ));
+        }
+        if state.buffer_size < 0 {
+            return Err(format!(
+                "RotatingKVCache::restore_fp16_snapshot_state requires non-negative buffer_size; got {}",
+                state.buffer_size
+            ));
+        }
+        if state.offset < 0 || state.idx < 0 || state.start_position < 0 {
+            return Err(format!(
+                "RotatingKVCache::restore_fp16_snapshot_state requires non-negative offset/start/idx; got offset={}, start_position={}, idx={}",
+                state.offset, state.start_position, state.idx
+            ));
+        }
+        if state.step <= 0 {
+            return Err(format!(
+                "RotatingKVCache::restore_fp16_snapshot_state requires positive step; got {}",
+                state.step
+            ));
+        }
+
+        if let Some(keys_ref) = keys.as_ref().and_then(|a| a.as_ref()) {
+            let k_shape = ffi::array_shape(keys_ref);
+            if k_shape.len() < 3 {
+                return Err(format!(
+                    "RotatingKVCache::restore_fp16_snapshot_state expected rank-4 keys, got shape {:?}",
+                    k_shape
+                ));
+            }
+            let physical_len = k_shape[2];
+            if state.buffer_size > 0 {
+                if state.idx > physical_len {
+                    return Err(format!(
+                        "RotatingKVCache::restore_fp16_snapshot_state buffered idx {} exceeds physical length {}",
+                        state.idx, physical_len
+                    ));
+                }
+            } else if state.idx > state.max_size {
+                return Err(format!(
+                    "RotatingKVCache::restore_fp16_snapshot_state ring idx {} exceeds max_size {}",
+                    state.idx, state.max_size
+                ));
+            }
+        }
+
+        self.keys = keys;
+        self.values = values;
+        self.max_size = state.max_size;
+        self.buffer_size = state.buffer_size;
+        self.offset = state.offset;
+        self.start_position = state.start_position;
+        self.idx = state.idx;
+        self.step = state.step;
+        self.mode = KVCacheMode::Fp16;
+        self.key_scales = None;
+        self.val_scales = None;
+        self.v_packed = None;
+        self.v_norms = None;
+        self.v_rescale = None;
+        self.turbo_params = None;
+        self.turbo_seed = state.turbo_seed;
+        Ok(())
     }
 
     /// Trim the last `n` entries from the rotating cache by rewinding the
@@ -5801,19 +5962,10 @@ impl CachePool {
     }
 
     pub fn paged_stats(&self) -> Option<PagedCacheStats> {
-        let pool = self.paged_pool.as_ref()?;
-        // Collect the per-sequence borrows first, then hand `stats_for_sequences`
-        // plain references. The pool and each sequence state live in distinct
-        // `RefCell`s, so the pool borrow and these state borrows coexist.
-        let states: Vec<Ref<'_, PagedSequenceState>> = self
-            .active
-            .values()
-            .filter_map(|sequence| sequence.paged_state())
-            .collect();
-        Some(
-            pool.borrow()
-                .stats_for_sequences(states.iter().map(|state| &**state)),
-        )
+        // Pool-wide stats (#226): block counts and REAL slab bytes come from
+        // the pool itself, covering active sequences and parked prompt-cache
+        // pins alike, so no per-sequence borrows are needed anymore.
+        self.paged_pool.as_ref().map(|pool| pool.borrow().stats())
     }
 
     pub fn paged_block_size(&self) -> Option<usize> {
@@ -7302,8 +7454,8 @@ mod tests {
                 allocated_blocks: 3,
                 live_blocks: 3,
                 free_blocks: 0,
-                bytes_reserved: 384,
-                bytes_in_use: 288,
+                bytes_reserved: 0,
+                bytes_in_use: 0,
             })
         );
 
@@ -7314,8 +7466,8 @@ mod tests {
                 allocated_blocks: 4,
                 live_blocks: 4,
                 free_blocks: 0,
-                bytes_reserved: 512,
-                bytes_in_use: 352,
+                bytes_reserved: 0,
+                bytes_in_use: 0,
             })
         );
     }
@@ -7544,8 +7696,8 @@ mod tests {
                 allocated_blocks: 2,
                 live_blocks: 2,
                 free_blocks: 0,
-                bytes_reserved: 256,
-                bytes_in_use: 192,
+                bytes_reserved: 0,
+                bytes_in_use: 0,
             }
         );
         assert_eq!(pool.memory_usage_bytes(), 192);
@@ -7557,8 +7709,8 @@ mod tests {
                 allocated_blocks: 2,
                 live_blocks: 2,
                 free_blocks: 0,
-                bytes_reserved: 256,
-                bytes_in_use: 160,
+                bytes_reserved: 0,
+                bytes_in_use: 0,
             }
         );
 
@@ -7575,8 +7727,8 @@ mod tests {
                 allocated_blocks: 2,
                 live_blocks: 1,
                 free_blocks: 1,
-                bytes_reserved: 128,
-                bytes_in_use: 96,
+                bytes_reserved: 0,
+                bytes_in_use: 0,
             }
         );
 
@@ -7587,8 +7739,8 @@ mod tests {
                 allocated_blocks: 3,
                 live_blocks: 2,
                 free_blocks: 1,
-                bytes_reserved: 256,
-                bytes_in_use: 224,
+                bytes_reserved: 0,
+                bytes_in_use: 0,
             }
         );
 

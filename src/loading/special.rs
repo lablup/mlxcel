@@ -80,6 +80,11 @@ fn special_weight_loader_kind(model_type: ModelType) -> Option<SpecialWeightLoad
         ModelType::Mamba
         | ModelType::Mamba2
         | ModelType::Jamba
+        | ModelType::FalconH1
+        | ModelType::Lfm2
+        | ModelType::Lfm2Moe
+        | ModelType::Plamo2
+        | ModelType::GraniteMoeHybrid
         | ModelType::NemotronNAS
         | ModelType::RecurrentGemma => Some(SpecialWeightLoaderKind::OwnedConfig),
         ModelType::NemotronH => Some(SpecialWeightLoaderKind::NemotronH),
@@ -157,6 +162,41 @@ pub(crate) fn try_load_special_model_from_weights(
                 models::jamba::JambaConfig,
                 models::JambaModel::from_weights,
                 LoadedModel::Jamba
+            ),
+            ModelType::FalconH1 => load_owned_model_from_config!(
+                config_str,
+                weights,
+                models::falcon_h1::ModelArgs,
+                models::FalconH1Model::from_weights,
+                LoadedModel::FalconH1
+            ),
+            ModelType::Lfm2 => load_owned_model_from_config!(
+                config_str,
+                weights,
+                models::lfm2::ModelArgs,
+                models::Lfm2Model::from_weights,
+                LoadedModel::Lfm2
+            ),
+            ModelType::Lfm2Moe => load_owned_model_from_config!(
+                config_str,
+                weights,
+                models::lfm2::ModelArgs,
+                models::Lfm2Model::from_weights,
+                LoadedModel::Lfm2Moe
+            ),
+            ModelType::Plamo2 => load_owned_model_from_config!(
+                config_str,
+                weights,
+                models::plamo2::ModelArgs,
+                models::Plamo2Model::from_weights,
+                LoadedModel::Plamo2
+            ),
+            ModelType::GraniteMoeHybrid => load_owned_model_from_config!(
+                config_str,
+                weights,
+                models::granitemoehybrid::ModelArgs,
+                models::GraniteMoeHybridModel::from_weights,
+                LoadedModel::GraniteMoeHybrid
             ),
             ModelType::NemotronNAS => load_owned_model_from_config!(
                 config_str,

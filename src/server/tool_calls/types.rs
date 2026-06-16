@@ -49,6 +49,14 @@ pub enum ToolCallFormat {
     GenericJson,
     /// MiniMax M2: `<invoke name="fn_name"><parameter name="k">v</parameter></invoke>`
     MinimaxM2,
+    /// Qwen3-Coder: `<tool_call><function=name><parameter=key>val</parameter></function></tool_call>`
+    ///
+    /// Named for the family that introduced it (the format is spelled out in
+    /// the Qwen3-Coder chat template), and matches the parser name vLLM and
+    /// SGLang use (`--tool-call-parser qwen3_coder`). The parser keys on the
+    /// markup, not the model, so it also handles newer Qwen models that share
+    /// this template (Qwen3.5 / Qwen3.6).
+    Qwen3Coder,
 }
 
 /// Result of parsing model output for tool calls.

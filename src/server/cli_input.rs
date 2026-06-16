@@ -291,9 +291,10 @@ pub struct ServerStartupInput {
     // prompt-prefix cache so finer-grained reuse becomes possible. The
     // raw fields here are normalised into [`super::prompt_cache::ApcConfig`]
     // by [`build_prompt_cache_config`].
-    /// `--apc-enabled`: master switch for APC. Defaults to `false` so
-    /// behaviour matches the earlier server. Also accepts
-    /// `APC_ENABLED` (parity with upstream `mlx-vlm`).
+    /// `--apc-enabled`: master switch for APC. The serve binaries default
+    /// it to `true` (disable with `--apc-enabled=false`); this raw field just
+    /// carries whatever clap resolved. Also accepts `APC_ENABLED` (parity
+    /// with upstream `mlx-vlm`).
     pub apc_enabled: bool,
 
     /// `--apc-block-size`: tokens per APC block. `None` means "use the
@@ -369,6 +370,13 @@ pub struct ServerStartupInput {
     /// conversations; forwarded verbatim to the scheduler.
     pub enable_vlm_prefix_cache: bool,
 
+    /// `--allowed-origins` / `MLXCEL_ALLOWED_ORIGINS` (#244). Raw, comma-split
+    /// origin strings captured at the CLI edge. Empty == unset == permissive.
+    /// Validated into header values in [`Self::into_startup_config`], the
+    /// fallible startup boundary, so a malformed origin fails startup with a
+    /// clear message instead of being silently dropped.
+    pub allowed_origins: Vec<String>,
+
     /// `--responses-store-max-entries` value (`0` disables
     /// the OpenAI Responses API response store entirely).
     pub responses_store_max_entries: usize,
@@ -398,6 +406,13 @@ pub struct ServerStartupInput {
     /// error before any model load begins.
     #[cfg(feature = "surgery")]
     pub surgery_config_path: Option<PathBuf>,
+
+    /// `--max-denoising-steps` (issue #217 phase 3). Diffusion models only.
+    pub max_denoising_steps: Option<usize>,
+    /// `--diffusion-sampler` (issue #217 phase 3). Diffusion models only.
+    pub diffusion_sampler: String,
+    /// `--diffusion-threshold` (issue #217 phase 3). Diffusion models only.
+    pub diffusion_threshold: f32,
 }
 
 impl ServerStartupInput {
@@ -483,6 +498,19 @@ impl ServerStartupInput {
         // KV cache on every decode step.
         let resolved_max_kv_size = resolve_max_kv_size(self.max_kv_size)
             .map_err(|e| anyhow::anyhow!("--max-kv-size: {e}"))?;
+
+        // (#244) Validate the CORS allow-list at the fallible startup boundary
+        // so a malformed origin fails fast with a clear message. An empty list
+        // (the flag/env unset) maps to `None`, preserving the permissive
+        // default; a non-empty validated list narrows the origin policy.
+        let cors_allowed_origins = {
+            let parsed = super::cors::parse_allowed_origins(&self.allowed_origins)?;
+            if parsed.is_empty() {
+                None
+            } else {
+                Some(parsed)
+            }
+        };
 
         Ok(ServerStartupConfig {
             model_path: self.model_path,
@@ -588,6 +616,8 @@ impl ServerStartupInput {
             kv_cache_budget: self.kv_cache_budget,
             // forward the experimental VLM prefix-cache toggle (#124 step c).
             enable_vlm_prefix_cache: self.enable_vlm_prefix_cache,
+            // forward the validated CORS allow-list (#244).
+            cors_allowed_origins,
             // forward the Responses-API store limits.
             responses_store_max_entries: self.responses_store_max_entries,
             responses_store_ttl_secs: self.responses_store_ttl_secs,
@@ -598,6 +628,10 @@ impl ServerStartupInput {
             // exactly once before spawning the model worker.
             #[cfg(feature = "surgery")]
             surgery_config_path: self.surgery_config_path,
+            // serve-level diffusion knobs (#217 phase 3).
+            max_denoising_steps: self.max_denoising_steps,
+            diffusion_sampler: self.diffusion_sampler,
+            diffusion_threshold: self.diffusion_threshold,
         })
     }
 }
@@ -1181,9 +1215,10 @@ pub fn env_fallback_prompt_cache_min_prefix(value: &mut Option<usize>) {
 /// Apply `APC_ENABLED` env var fallback to the raw `--apc-enabled` value.
 ///
 /// `cli_was_set` must be `true` when clap explicitly received the flag (i.e.
-/// the operator typed `--apc-enabled=true|false`); a default `false` from
-/// clap should be reported as `cli_was_set = false` so a `true` env value
-/// can still take effect.
+/// the operator typed `--apc-enabled` or `--apc-enabled=...`); a value that
+/// merely came from the compiled-in default must be reported as
+/// `cli_was_set = false` so the env var can still override it in either
+/// direction (the detection scans argv, not the default).
 pub fn env_fallback_apc_enabled(enabled: &mut bool, cli_was_set: bool) {
     const KEY: &str = "APC_ENABLED";
     if cli_was_set {

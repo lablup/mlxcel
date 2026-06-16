@@ -110,6 +110,21 @@ pub fn get_hardware() -> &'static HardwareCapabilities {
     HARDWARE_CAPABILITIES.get_or_init(detect_hardware)
 }
 
+/// True only on M5-class Apple Silicon whose Neural Accelerator is driven by
+/// the running macOS (Metal GPU Family 4).
+///
+/// This is the gate for M5-Max-specific numerical workarounds. The M5 Max NAx
+/// GEMM kernels can fuse a lazy float32/float16 graph into NaN within a single
+/// Metal command buffer; code that builds such graphs (the Mamba2/SSM mixers)
+/// forces an intermediate `eval` boundary, but only when this returns true. On
+/// every other chip that eval boundary is pure throughput loss, so it is
+/// skipped. See CLAUDE.md "Apple Silicon precision".
+#[inline]
+pub fn is_m5_neural_accelerator() -> bool {
+    let hw = get_hardware();
+    hw.has_neural_accelerator && hw.macos_supports_na
+}
+
 // ── Detection ─────────────────────────────────────────────────────────────────
 
 /// Detect hardware capabilities by querying the OS at runtime.

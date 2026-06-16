@@ -16,7 +16,7 @@
 //! FPN, bottom-up PAN.
 //!
 //! Port of the hybrid-encoder half of
-//! `references/mlx-vlm/mlx_vlm/models/rt_detr_v2/vision.py`. All feature maps
+//! https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/models/rt_detr_v2/vision.py. All feature maps
 //! are NHWC. Output is `num_levels` feature maps at the original strides, all
 //! with `encoder_hidden_dim` channels.
 

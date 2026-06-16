@@ -1007,6 +1007,75 @@ mod tests {
     }
 
     #[test]
+    fn test_tojson_filter_serializes_tools_into_prompt() {
+        // Regression: Qwen3-Coder's official chat template serializes the tools
+        // array into the prompt with `{{ tools | tojson }}`. The `tojson` filter
+        // is gated behind minijinja's `json` feature; without it the template
+        // fails to render and the processor falls back to a default template
+        // that drops the tools section entirely, so the model never learns
+        // which tools exist and stops emitting tool calls.
+        let template = r#"{% if tools %}<tools>{{ tools | tojson }}</tools>{% endif %}
+{% for m in messages %}{{ m.content }}{% endfor %}"#;
+
+        let processor = ChatTemplateProcessor::with_template(template.to_string());
+        let messages = vec![ChatMessage {
+            role: "user".to_string(),
+            content: "hi".to_string(),
+        }];
+        let tools = vec![Tool {
+            tool_type: "function".to_string(),
+            function: crate::server::types::request::FunctionDefinition {
+                name: "get_weather".to_string(),
+                description: Some("Get weather".to_string()),
+                parameters: None,
+            },
+        }];
+
+        let result = processor.apply(&messages, Some(&tools)).unwrap();
+        // The custom `<tools>[...]` markup only survives if the real template
+        // rendered; a render-failure fallback would drop it. `[` confirms
+        // `tojson` emitted a JSON array rather than erroring on an unknown filter.
+        assert!(
+            result.contains("<tools>["),
+            "tojson must serialize the tools array into the prompt: {result}"
+        );
+        assert!(result.contains("get_weather"));
+    }
+
+    #[test]
+    fn test_tool_parameter_key_order_preserved_through_render() {
+        // Regression (Issue 7): serde_json's default `Map` is a `BTreeMap`,
+        // which alphabetizes object keys. Tool parameter schemas therefore
+        // rendered into the prompt in a DIFFERENT order than the client sent
+        // (e.g. grep's `pattern, include` became `include, pattern`), shifting
+        // Qwen3-Coder's tool-selection logits at temperature 0 and producing
+        // worse tool choices than mlx-serve (which preserves wire order). The
+        // `preserve_order` serde_json feature keeps insertion order.
+        //
+        // Deserialize from a wire JSON string with deliberately
+        // non-alphabetical keys so the test fails if BTreeMap sorting returns.
+        let tools: Vec<Tool> = serde_json::from_str(
+            r#"[{"type":"function","function":{"name":"grep","parameters":{"properties":{"pattern":{"type":"string"},"include":{"type":"string"}}}}}]"#,
+        )
+        .unwrap();
+
+        let template = r#"{{ tools | tojson }}"#;
+        let processor = ChatTemplateProcessor::with_template(template.to_string());
+        let messages = vec![ChatMessage {
+            role: "user".to_string(),
+            content: "x".to_string(),
+        }];
+
+        let result = processor.apply(&messages, Some(&tools)).unwrap();
+        let pattern_idx = result.find("pattern").expect("pattern key present");
+        let include_idx = result.find("include").expect("include key present");
+        assert!(
+            pattern_idx < include_idx,
+            "tool parameter keys must render in wire order (pattern before include), got: {result}"
+        );
+    }
+
+    #[test]
     fn test_supports_tools_detection() {
         // Template that uses tools — rendering differs with/without tools
         let with_tools =

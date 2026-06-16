@@ -45,23 +45,23 @@ pub struct TurboKvCacheArgs {
     /// K-side KV cache quantization type.
     ///
     /// Accepted values:
-    ///   fp16             — Standard half-precision storage (default, no overhead).
-    ///   int8             — Per-token INT8 absmax quantization. ~50% KV memory
+    ///   fp16               Standard half-precision storage (default, no overhead).
+    ///   int8               Per-token INT8 absmax quantization. ~50% KV memory
     ///                      savings with small per-token quantization error.
-    ///   fp16+turbo4      — Asymmetric Fp16-K + Turbo4-V (alias: turbo4-asym).
+    ///   fp16+turbo4        Asymmetric Fp16-K + Turbo4-V (alias: turbo4-asym).
     ///                      K side stays FP16; V side uses 4-bit PolarQuant
     ///                      with Walsh-Hadamard rotation. ~26% net KV savings
     ///                      at long context with negligible quality loss on
     ///                      Q4_K_M dense weights.
-    ///   fp16+turbo3      — Asymmetric Fp16-K + Turbo3-V (alias: turbo3-asym).
+    ///   fp16+turbo3        Asymmetric Fp16-K + Turbo3-V (alias: turbo3-asym).
     ///                      V side uses a 3-bit codebook for ~5.1x total KV
     ///                      savings at slightly higher V reconstruction error.
     ///                      Symmetric Turbo3 is not offered.
-    ///   turbo4           — Symmetric Turbo4-K + Turbo4-V (alias: turbo4-sym).
+    ///   turbo4             Symmetric Turbo4-K + Turbo4-V (alias: turbo4-sym).
     ///                      Allowlisted dense models only; non-allowlisted
     ///                      models fall back to turbo4-asym. ~73% net KV
     ///                      savings.
-    ///   turbo4-delegated — Hot/cold split on top of fp16+turbo4. FP16 hot
+    ///   turbo4-delegated   Hot/cold split on top of fp16+turbo4. FP16 hot
     ///                      tail + packed turbo cold body. Targets >= 97% of
     ///                      FP16 decode speed at 4K and >= 95% at 16K on
     ///                      M5 Max.
@@ -75,7 +75,8 @@ pub struct TurboKvCacheArgs {
     #[arg(
         long = "cache-type-k",
         env = "LLAMA_ARG_CACHE_TYPE_K",
-        value_name = "TYPE"
+        value_name = "TYPE",
+        verbatim_doc_comment
     )]
     pub cache_type_k: Option<String>,
 
@@ -148,7 +149,7 @@ impl TurboKvCacheArgs {
     /// be invoked while:
     ///
     /// 1. No `mlxcel-core` generator, server worker, or MLX background
-    ///    stream has been constructed yet — those read
+    ///    stream has been constructed yet   those read
     ///    `MLXCEL_KV_BOUNDARY_V_LAYERS` at first cache instantiation; AND
     /// 2. No other thread is concurrently reading the process environment.
     ///
@@ -160,7 +161,7 @@ impl TurboKvCacheArgs {
     /// that called `set_var`. Future refactors that spawn tasks before
     /// this call site, or that read env from spawned tasks during
     /// pre-startup, must keep the write upstream of the runtime
-    /// bring-up — or switch to a typed config rather than a process env
+    /// bring-up   or switch to a typed config rather than a process env
     /// var.
     pub fn apply_to_environment(&self) {
         if let Some(boundary) = self.turbo_boundary_v {
@@ -178,7 +179,7 @@ impl TurboKvCacheArgs {
     }
 }
 
-// ── (B11) — KV cache type split flags ─────────────────────────────
+// ── (B11)   KV cache type split flags ─────────────────────────────
 // (Comment kept in non-doc form for code-archeology only; the user-facing
 // help text intentionally omits closed-repo issue numbers.)
 

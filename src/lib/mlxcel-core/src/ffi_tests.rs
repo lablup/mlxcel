@@ -613,6 +613,8 @@ fn test_fused_paged_decode_matches_gather_over_200_steps() {
 
     let mut max_rms = 0.0f32;
     let mut prev_blocks = 0usize;
+    let mut fused_steps = 0usize;
+    let mut declined_steps = 0usize;
 
     for step in 0..STEPS {
         let t = step as i32;
@@ -669,10 +671,31 @@ fn test_fused_paged_decode_matches_gather_over_200_steps() {
         let q = from_slice_f32(&q_vals, &[1, n_kv_heads, 1, head_dim]);
 
         let states: [&PagedSequenceState; 1] = [&target];
-        let fused = crate::layers::paged_decode_attention_pooled(
-            &q, &pool, &states, layer_idx, scale, true,
-        )
-        .unwrap();
+        // With chunked slabs (#235) the fused kernel serves only layers that
+        // still fit one slab; past that it declines and the pooled wrapper
+        // silently falls back to gather, which would turn this parity loop
+        // into a gather-vs-gather tautology. Pin the availability contract
+        // explicitly and compare parity only while the kernel is live.
+        let total_rows = target.layer(layer_idx).unwrap().block_ids.len()
+            + spacer.layer(layer_idx).unwrap().block_ids.len();
+        let single_slab = total_rows <= 32; // POOL_SLAB_BLOCKS
+        let fused = pool
+            .paged_decode_fused(&q, &states, layer_idx, scale)
+            .unwrap();
+        match (&fused, single_slab) {
+            (Some(_), true) | (None, false) => {}
+            (Some(_), false) => panic!(
+                "step {step}: fused kernel must decline once the layer spans multiple slabs (rows {total_rows})"
+            ),
+            (None, true) => panic!(
+                "step {step}: fused kernel must serve a single-slab layer (rows {total_rows})"
+            ),
+        }
+        let Some(fused) = fused else {
+            declined_steps += 1;
+            continue;
+        };
+        fused_steps += 1;
         let gather = crate::layers::paged_decode_attention_pooled_fallback(
             &q, &pool, &states, layer_idx, scale,
         )
@@ -689,10 +712,18 @@ fn test_fused_paged_decode_matches_gather_over_200_steps() {
     }
 
     assert!(
-        max_rms < 5e-3,
-        "max RMS {max_rms} over 200 steps exceeded 5e-3"
+        fused_steps > 0 && declined_steps > 0,
+        "the loop must exercise both the live-kernel and the declined regime \
+         (fused {fused_steps}, declined {declined_steps})"
     );
-    println!("test_fused_paged_decode_matches_gather_over_200_steps: max RMS = {max_rms:e}");
+    assert!(
+        max_rms < 5e-3,
+        "max RMS {max_rms} over {fused_steps} fused steps exceeded 5e-3"
+    );
+    println!(
+        "test_fused_paged_decode_matches_gather_over_200_steps: max RMS = {max_rms:e} \
+         ({fused_steps} fused steps, {declined_steps} declined past one slab)"
+    );
 }
 
 /// #123 fused-kernel parity under grouped-query attention (Hq > Hkv) and
@@ -2509,5 +2540,82 @@ fn test_batch_quantized_kv_cache_make_mask_no_padding_multi_token() {
     assert_eq!(
         actual_shape, expected_shape,
         "no-padding multi-token mask shape must be {expected_shape:?}, got {actual_shape:?}"
+    );
+}
+
+/// Issue #195: the paged-decode attention fallbacks must reject an empty
+/// batch with a clean `Err` instead of panicking in `drain(..1)`.
+#[test]
+fn paged_decode_fallbacks_reject_an_empty_batch() {
+    use crate::cache::{
+        PagedBlockPool, PagedDecodeMetadata, PagedKvLayout, PagedSequenceState,
+        RotatingPagedDecodeMetadata,
+    };
+
+    // A valid 4-D decode query shape with batch == 0.
+    let q = zeros(&[0, 1, 1, 2], crate::dtype::FLOAT32);
+
+    let dense_meta = PagedDecodeMetadata::from_visible_lengths(&[], 2).unwrap();
+    let dense =
+        crate::layers::paged_decode_attention_dense_fallback(&q, &[], &[], &dense_meta, 1.0);
+    assert!(
+        dense.as_ref().is_err_and(|e| e.contains("empty batch")),
+        "dense fallback must reject batch == 0, got error {:?}",
+        dense.as_ref().err()
+    );
+
+    let rot_meta = RotatingPagedDecodeMetadata::from_parts(&[], &[], 2).unwrap();
+    let rotating =
+        crate::layers::paged_decode_attention_rotating_fallback(&q, &[], &[], &rot_meta, 1.0);
+    assert!(
+        rotating.as_ref().is_err_and(|e| e.contains("empty batch")),
+        "rotating fallback must reject batch == 0, got error {:?}",
+        rotating.as_ref().err()
+    );
+
+    let layout = PagedKvLayout::uniform(1, 2, 32).unwrap();
+    let pool = PagedBlockPool::new(layout);
+    let states: Vec<&PagedSequenceState> = Vec::new();
+    let pooled = crate::layers::paged_decode_attention_pooled_fallback(&q, &pool, &states, 0, 1.0);
+    assert!(
+        pooled.as_ref().is_err_and(|e| e.contains("empty batch")),
+        "pooled fallback must reject batch == 0, got error {:?}",
+        pooled.as_ref().err()
+    );
+}
+/// Regression test for the steel GEMM safe-load (edge-tile) fix
+/// (upstream MLX PRs #3560/#3565: `BaseMMAFrag<T, 8, 8>::load_safe` indexed
+/// columns with `off_x` instead of `off_y`). The fix was carried as a local
+/// `steel/gemm/mma.h` overlay under issue #217 and is now native upstream at
+/// the vendored MLX pin (overlay retired in issue #222); this test guards
+/// against a regression of that fix.
+///
+/// A non-tile-aligned fp32 GEMM (m=64, k=256, n=83) exercises edge-tile
+/// safe loads on the N axis; with the bug, the loader pulls the wrong rows
+/// and the result diverges wildly from a composite (multiply + sum)
+/// reference computed without steel GEMM. fp32 keeps the legitimate
+/// numerical gap tiny so the assertion threshold cleanly separates the two.
+#[test]
+fn steel_gemm_edge_tile_safe_load_matches_reference() {
+    crate::random_seed(31);
+    let a = unsafe { crate::random_normal(&[64, 256], crate::dtype::FLOAT32, std::ptr::null()) };
+    let b = unsafe { crate::random_normal(&[256, 83], crate::dtype::FLOAT32, std::ptr::null()) };
+    crate::eval(&a);
+    crate::eval(&b);
+
+    let gemm = crate::matmul(&a, &b);
+
+    // Composite reference: broadcast multiply + sum over K avoids the steel
+    // GEMM kernels entirely.
+    let a3 = crate::reshape(&a, &[64, 256, 1]);
+    let b3 = crate::reshape(&b, &[1, 256, 83]);
+    let reference = crate::sum_axis(&crate::multiply(&a3, &b3), 1, false);
+
+    let diff = crate::max_all(&crate::abs(&crate::subtract(&gemm, &reference)));
+    crate::eval(&diff);
+    let max_abs = crate::item_f32(&diff);
+    assert!(
+        max_abs < 1e-3,
+        "steel GEMM edge-tile result diverges from composite reference: max_abs = {max_abs}"
     );
 }

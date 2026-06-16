@@ -15,7 +15,7 @@
 //! ResNet-50-vd / ResNet-101-vd backbone for RT-DETRv2.
 //!
 //! Port of the backbone half of
-//! `references/mlx-vlm/mlx_vlm/models/rt_detr_v2/vision.py`. Returns features at
+//! https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/models/rt_detr_v2/vision.py. Returns features at
 //! the strides selected by `out_features` (default stages 2/3/4 -> strides
 //! 8/16/32). The `vd` variant uses a 3-conv stem + 3x3 stride-2 maxpool and
 //! AvgPool-based downsampling shortcuts.

@@ -16,7 +16,7 @@
 //!
 //! Used by: Gemma4 VLM
 //!
-//! The image side mirrors `references/mlx-vlm/mlx_vlm/models/gemma4/processing_gemma4.py
+//! The image side mirrors https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/models/gemma4/processing_gemma4.py
 //! :Gemma4ImageProcessor`. The video side ([`process_videos`] +
 //! [`Gemma4VideoFeatures`]) mirrors `Gemma4VideoProcessor` from the
 //! same file: per-frame uniform sampling, aspect-ratio-preserving resize

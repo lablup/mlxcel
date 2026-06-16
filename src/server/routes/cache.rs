@@ -108,6 +108,28 @@ pub struct CacheStatsResponse {
     /// Number of entries that carry a populated APC block-hash chain.
     /// Always `0` when APC is disabled.
     pub apc_active_entries: usize,
+    /// Live exact-prefix recurrent/model-owned snapshot entries.
+    pub snapshot_entries: usize,
+    /// Bytes consumed by live snapshot entries.
+    pub snapshot_bytes: usize,
+    /// Configured snapshot byte capacity.
+    pub snapshot_capacity_bytes: usize,
+    /// Configured maximum snapshot entries.
+    pub snapshot_max_entries: usize,
+    /// Lifetime snapshot hits.
+    pub snapshot_hits: u64,
+    /// Lifetime snapshot lookups.
+    pub snapshot_lookups: u64,
+    /// Snapshot hit rate as a fraction in `[0, 1]`.
+    pub snapshot_hit_rate: f64,
+    /// Lifetime successful snapshot inserts.
+    pub snapshot_inserts: u64,
+    /// Lifetime snapshot LRU evictions.
+    pub snapshot_evictions_lru: u64,
+    /// Lifetime snapshot TTL evictions.
+    pub snapshot_evictions_ttl: u64,
+    /// Lifetime snapshot insert rejections due to size.
+    pub snapshot_rejections_oversized: u64,
 
     // ── Paged KV block pool (epic #116 #122 c) ───────────────────────────────
     // Sourced from the batch observability gauges (not the prompt-cache store),
@@ -182,6 +204,11 @@ pub(crate) fn build_stats_response(
             } else {
                 0.0
             };
+            let snapshot_hit_rate = if stats.snapshot_lookups > 0 {
+                stats.snapshot_hits as f64 / stats.snapshot_lookups as f64
+            } else {
+                0.0
+            };
             CacheStatsResponse {
                 enabled: cfg.is_enabled(),
                 apc_enabled: cfg.apc_enabled(),
@@ -201,6 +228,17 @@ pub(crate) fn build_stats_response(
                 total_blocks_stored: apc_stats.total_blocks_stored,
                 unique_block_hashes: apc_stats.unique_block_hashes,
                 apc_active_entries: apc_stats.apc_active_entries,
+                snapshot_entries: stats.snapshot_entries,
+                snapshot_bytes: stats.snapshot_bytes,
+                snapshot_capacity_bytes: cfg.snapshot_capacity_bytes,
+                snapshot_max_entries: cfg.snapshot_max_entries,
+                snapshot_hits: stats.snapshot_hits,
+                snapshot_lookups: stats.snapshot_lookups,
+                snapshot_hit_rate,
+                snapshot_inserts: stats.snapshot_inserts,
+                snapshot_evictions_lru: stats.snapshot_evictions_lru,
+                snapshot_evictions_ttl: stats.snapshot_evictions_ttl,
+                snapshot_rejections_oversized: stats.snapshot_rejections_oversized,
                 // Paged block-pool gauges are store-independent.
                 paged_block_size: paged.block_size,
                 paged_blocks_allocated: paged.blocks_allocated,
@@ -230,6 +268,17 @@ pub(crate) fn build_stats_response(
             total_blocks_stored: 0,
             unique_block_hashes: 0,
             apc_active_entries: 0,
+            snapshot_entries: 0,
+            snapshot_bytes: 0,
+            snapshot_capacity_bytes: cfg.snapshot_capacity_bytes,
+            snapshot_max_entries: cfg.snapshot_max_entries,
+            snapshot_hits: 0,
+            snapshot_lookups: 0,
+            snapshot_hit_rate: 0.0,
+            snapshot_inserts: 0,
+            snapshot_evictions_lru: 0,
+            snapshot_evictions_ttl: 0,
+            snapshot_rejections_oversized: 0,
             // Paged decode can run with the prompt cache disabled, so these
             // still reflect the live pool even on the `None` branch.
             paged_block_size: paged.block_size,
