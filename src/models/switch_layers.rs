@@ -392,6 +392,21 @@ impl SwitchGLU {
         }
         let dff = gw_shape[1];
         let din = gw_shape[2] * (32 / gate.bits);
+        // Large experts: gather_qmm already saturates the GPU, so the two-kernel
+        // fused path's all-cores advantage disappears and its extra dispatch +
+        // global-memory activation staging becomes a net loss. Measured on M1
+        // Ultra: wins for small experts (Dff 704..2560: +3.5% to +15.4%), loses
+        // for large ones (phi-3.5-moe Dff 6400: -5.9%, mixtral Dff 14336: -21%).
+        // Decline above the break-even so the caller falls back to gather_qmm.
+        // The break-even is hardware-dependent, so the bound is env-tunable.
+        let max_dff = std::env::var("MLXCEL_FUSED_MOE_MAX_DFF")
+            .ok()
+            .and_then(|s| s.parse::<i32>().ok())
+            .filter(|v| *v > 0)
+            .unwrap_or(4096);
+        if dff > max_dff {
+            return None;
+        }
         // 6-bit down packs 4 weights into 3 bytes; the kernel reads the row as
         // bytes and needs Dff divisible by 16 (whole uint32 columns).
         if down.bits == 6 && dff % 16 != 0 {
