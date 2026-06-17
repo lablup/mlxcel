@@ -69,6 +69,71 @@ namespace {
         static BitlinearKernelHolder holder;
         return holder;
     }
+
+    // CUDA port of the BitLinear ternary matmul (the Metal source above is
+    // mx.fast.metal_kernel, which throws "[metal_kernel] No Metal back-end" on
+    // the CUDA backend). Same computation via mx.fast.cuda_kernel: one warp (32
+    // lanes, threadIdx.x) per (batch, out/4) row group, striding in_features in
+    // chunks of M=4 and reducing with __shfl_down_sync instead of simd_sum.
+    // Selected at runtime by metal::is_available() in bitlinear_matmul.
+    static const char* BITLINEAR_CUDA_SOURCE = R"(
+        constexpr int Mc = 4;
+        uint32_t tid       = blockIdx.y;     // batch * out/4
+        uint32_t in_offset = threadIdx.x;    // lane 0..31
+
+        uint32_t batch_idx = tid / (out_features / 4);
+        uint32_t row_idx   = tid % (out_features / 4);
+
+        float sum[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+        for (uint32_t i = in_offset * Mc; i < (uint32_t)in_features; i += 32u * Mc) {
+            float v[Mc];
+            for (int j = 0; j < Mc; j++) {
+                v[j] = (float)x[batch_idx * in_features + i + j];
+            }
+            for (int j = 0; j < Mc; j++) {
+                uint32_t w = packed_weights[row_idx * in_features + i + j];
+                sum[0] += v[j] * ((float)(w & 3u) - 1.0f);
+                sum[1] += v[j] * ((float)((w >> 2) & 3u) - 1.0f);
+                sum[2] += v[j] * ((float)((w >> 4) & 3u) - 1.0f);
+                sum[3] += v[j] * ((float)((w >> 6) & 3u) - 1.0f);
+            }
+        }
+        #pragma unroll
+        for (int o = 16; o > 0; o >>= 1) {
+            sum[0] += __shfl_down_sync(0xffffffffu, sum[0], o);
+            sum[1] += __shfl_down_sync(0xffffffffu, sum[1], o);
+            sum[2] += __shfl_down_sync(0xffffffffu, sum[2], o);
+            sum[3] += __shfl_down_sync(0xffffffffu, sum[3], o);
+        }
+        if (in_offset == 0u) {
+            float scale = invert_weight_scales ? 1.0f / (float)weight_scale[0]
+                                               : (float)weight_scale[0];
+            for (int i = 0; i < 4; i++) {
+                out[batch_idx * out_features + row_idx + i * (out_features / 4)] =
+                    (T)(sum[i] * scale);
+            }
+        }
+    )";
+
+    struct BitlinearKernelHolderCuda {
+        std::optional<mlx::core::fast::CustomKernelFunction> kernel;
+        bool initialized = false;
+        mlx::core::fast::CustomKernelFunction& get() {
+            if (!initialized) {
+                kernel = mlx::core::fast::cuda_kernel(
+                    "bitlinear_matmul_cu",
+                    {"x", "packed_weights", "weight_scale"},
+                    {"out"},
+                    BITLINEAR_CUDA_SOURCE);
+                initialized = true;
+            }
+            return *kernel;
+        }
+    };
+    static BitlinearKernelHolderCuda& get_bitlinear_kernel_cuda() {
+        static BitlinearKernelHolderCuda holder;
+        return holder;
+    }
 }
 
 std::unique_ptr<MlxArray> bitlinear_matmul(
@@ -88,7 +153,11 @@ std::unique_ptr<MlxArray> bitlinear_matmul(
     for (size_t i = 0; i + 1 < xs.size(); ++i) total_batch *= (int)xs[i];
     auto x2d = reshape(astype(x.inner, T), {total_batch, in_features});
 
-    auto& kernel = get_bitlinear_kernel().get();
+    // mx.fast.metal_kernel throws on CUDA, so dispatch the cuda_kernel port
+    // there. metal::is_available() is false on a CUDA-only build.
+    const bool use_cuda = !mlx::core::metal::is_available();
+    auto& kernel = use_cuda ? get_bitlinear_kernel_cuda().get()
+                            : get_bitlinear_kernel().get();
     std::vector<std::pair<std::string, mlx::core::fast::TemplateArg>> ta = {
         {"T", T},
         {"in_features", in_features},
