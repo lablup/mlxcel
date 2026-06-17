@@ -12,7 +12,7 @@ M5 Max, and mlx-lm / mlx-vlm baselines, see
 |----------|------|--------|-------------|
 | Mac Studio M1 Ultra 128GB | [model_tests_m1ultra.md](model_tests_m1ultra.md) | Active | 2026-06-15 |
 | MacBook Pro M5 Max 128GB | [model_tests_m5max.md](model_tests_m5max.md) | Active | 2026-06-15 |
-| NVIDIA GB10 (DGX Spark) | [model_tests_gb10.md](model_tests_gb10.md) | Active | 2026-05-28 |
+| NVIDIA GB10 (DGX Spark) | [model_tests_gb10.md](model_tests_gb10.md) | Active | 2026-06-17 |
 
 ## Benchmark CSVs
 
@@ -36,6 +36,8 @@ Current source-of-truth data lives in `benchmarks/`:
 | `metal_m1ultra_vlm_2026-05-19.csv` | M1 Ultra | 2026-05-19 (mlxcel 0.0.28, MLX commit 84961223; >65GB skipped) | VLM |
 | `pylm_m1ultra_2026-05-19.csv` | M1 Ultra | 2026-05-19 (mlx-lm 0.31.3 baseline, https://github.com/ml-explore/mlx-lm @ `df1d3f3`; >65GB skipped) | Text |
 | `pylm_m1ultra_vlm_2026-05-19.csv` | M1 Ultra | 2026-05-19 (mlx-vlm baseline, https://github.com/Blaizzy/mlx-vlm @ `d85ca4d`; >65GB skipped) | VLM |
+| `cuda_gb10_2026-06-17.csv` | GB10 | 2026-06-17 (mlxcel 0.3.1 [CSV relabeled; Cargo.toml 0.3.0 until release], MLX pin a6ec7123, CUDA 13.0 / SM 12.1, post-#319 CUDA fused decode-MoE; full text re-benchmark, 148 models, 133 pass / 14 fail / 1 OOM-skip) | Text |
+| `cuda_gb10_vlm_2026-06-17.csv` | GB10 | 2026-06-17 (mlxcel 0.3.1; full VLM re-benchmark, 53 measured image rows) | VLM |
 | `cuda_gb10_2026-05-28.csv` | GB10 | 2026-05-28 (full text re-benchmark, mlxcel 0.1.0, MLX commit 84961223, warm same-process harness `c9a77f2`, `--cooldown 0`; 109 models, 8 fail/skip) | Text |
 | `cuda_gb10_vlm_2026-05-28.csv` | GB10 | 2026-05-28 (full VLM re-benchmark, mlxcel 0.1.0; 38 measured VLM rows, 0 image-path failures) | VLM |
 | `cuda_gb10_2026-05-19.csv` | GB10 | 2026-05-19 (mlxcel 0.0.27, MLX 0.31.2) | Text |
@@ -49,40 +51,41 @@ The table below summarizes the current cross-hardware decode readings for select
 
 | Model | Params | M1 Ultra | M5 Max | GB10 |
 |-------|--------|----------|--------|------|
-| SmolLM-135M | 135M | 374.92 | 916.80 | 643.04 |
-| ERNIE-4.5-0.3B | 300M | 495.71 | 1072.92 | 682.24 |
-| Qwen2.5-0.5B (4bit) | 500M | 343.91 | 678.95 | 502.51 |
-| Llama-3.2-1B | 1B | 364.36 | 552.96 | 253.63 |
-| Qwen3-0.6B | 600M | 275.55 | 565.88 | 317.75* |
-| StableLM-1.6B | 1.6B | 270.88 | 424.38 | 197.05 |
-| Gemma-3-1B | 1B | 229.70 | 396.72 | 256.48 |
-| EXAONE-3.5-2.4B | 2.4B | 197.73 | 287.70 | 146.48 |
-| SmolLM3-3B | 3B | 126.29 | 232.99 | 100.66 |
-| Nemotron-H-30B | 30B | 91.54 | 176.10 | 32.92 |
-| Qwen3-MoE-30B | 30B | 83.75 | 175.63 | 57.49 |
-| Llama-3.1-8B | 8B | 107.89 | 116.61 | 49.15 |
-| Qwen2.5-7B | 7B | 111.50 | 126.26 | 53.73 |
-| Mixtral-8x7B | 47B | 54.25 | 65.37 | 28.00 |
-| GPT-OSS-120B | 120B (MoE) | 58.41 | 113.91 | 50.63 |
-| Solar-Open-100B | 100B (MoE) | 32.96 | 65.39 | 18.52 |
+| SmolLM-135M | 135M | 374.92 | 916.80 | 652.08 |
+| ERNIE-4.5-0.3B | 300M | 495.71 | 1072.92 | 654.97 |
+| Qwen2.5-0.5B (4bit) | 500M | 343.91 | 678.95 | 485.68 |
+| Llama-3.2-1B | 1B | 364.36 | 552.96 | 260.32 |
+| Qwen3-0.6B | 600M | 275.55 | 565.88 | 294.34* |
+| StableLM-1.6B | 1.6B | 270.88 | 424.38 | 198.28 |
+| Gemma-3-1B | 1B | 229.70 | 396.72 | 241.85 |
+| EXAONE-3.5-2.4B | 2.4B | 197.73 | 287.70 | 136.93 |
+| SmolLM3-3B | 3B | 126.29 | 232.99 | 104.11 |
+| Nemotron-H-30B | 30B | 91.54 | 176.10 | 40.32 |
+| Qwen3-MoE-30B | 30B | 83.75 | 175.63 | 89.84† |
+| Llama-3.1-8B | 8B | 107.89 | 116.61 | 49.10 |
+| Qwen2.5-7B | 7B | 111.50 | 126.26 | 53.16 |
+| Mixtral-8x7B | 47B | 54.25 | 65.37 | 27.92 |
+| GPT-OSS-120B | 120B (MoE) | 58.41 | 113.91 | 50.48 |
+| Solar-Open-100B | 100B (MoE) | 32.96 | 65.39 | 18.37 |
 
-*Qwen3-0.6B on GB10 produced only 9 tokens before EOS at 2026-05-28; the 317.75 tok/s decode rate is from that short window and is not directly comparable to full-length runs.
+*Qwen3-0.6B on GB10 again stopped at 9 tokens before EOS (2026-06-17); the 294.34 tok/s figure is from that short window and is not directly comparable to full-length runs.
+†Qwen3-MoE-30B (`qwen3-moe-4bit`) **failed** on GB10 at 0.3.0 (Metal-only fused-MoE kernel aborted on CUDA); the CUDA fused decode-MoE kernel (#319) restores it at 0.3.1, and at 89.84 tok/s it now edges past M1 Ultra (83.75).
 
 M1 Ultra column is from 2026-06-15 with mlxcel 0.2.1 / MLX pin commit `a6ec712` (0.32.0-dev) / no cooldown, using the `mlxcel-bench-decode` same-process harness (post #289 bf16-scale fix and #291 quantized-embedding fix).
 M5 Max column is from the 2026-06-15 full re-sweep with mlxcel 0.2.1 / MLX pin `a6ec7123` / same-process `mlxcel-bench-decode` harness (bare run).
-GB10 column is from 2026-05-28 with mlxcel 0.1.0 / MLX pin `84961223` / `--cooldown 0`, using the `mlxcel-bench-decode` same-process warm harness (PR `c9a77f2`).
-Both Apple Silicon columns now share mlxcel 0.2.1 and the same MLX pin `a6ec712`, so the gap reflects hardware delta. M5 Max stays roughly 1.76x faster than M1 Ultra on the selected 16 rows (avg ~1.76x, median ~1.88x). The largest MoE rows show the M5 Max advantage: qwen3-moe-30b runs at 175.63 vs 83.75 tok/s (2.10x), gpt-oss-120b at 113.91 vs 58.41 (1.95x), and solar-open-100b at 65.39 vs 32.96 (1.98x). The GB10 column still predates the MLX bump (0.1.0) and is pending a 0.2.1 refresh.
+GB10 column is from 2026-06-17 with mlxcel 0.3.1 / MLX pin `a6ec7123` / CUDA 13.0 (SM 12.1) / `--cooldown 0`, using the `mlxcel-bench-decode` same-process warm harness. 0.3.1 adds the CUDA fused decode-MoE kernel (#319): the Qwen MoE rows that aborted at 0.3.0 now run, and `qwen3-moe-30b` (89.84) edges past M1 Ultra (83.75). (CSV `mlx_version` relabeled to 0.3.1; the Cargo.toml bump lands at release.)
+Both Apple Silicon columns now share mlxcel 0.2.1 and the same MLX pin `a6ec712`, so the gap reflects hardware delta. M5 Max stays roughly 1.76x faster than M1 Ultra on the selected 16 rows (avg ~1.76x, median ~1.88x). The largest MoE rows show the M5 Max advantage: qwen3-moe-30b runs at 175.63 vs 83.75 tok/s (2.10x), gpt-oss-120b at 113.91 vs 58.41 (1.95x), and solar-open-100b at 65.39 vs 32.96 (1.98x). The GB10 column is now on mlxcel 0.3.1 with the CUDA fused decode-MoE kernel (#319); the Qwen MoE rows that failed at 0.3.0 run on CUDA at 0.3.1 and can exceed M1 Ultra (qwen3-moe-30b 89.84 vs 83.75).
 For Qwen2.5-0.5B the 4-bit row is the directly comparable cross-hardware figure; on M1 Ultra `qwen2.5-0.5b-bf16` now runs after the #289 fix (298.92 tok/s), and the bf16 variant runs on M5 Max at 404.68 tok/s.
 
-## Overall Status (mlxcel 0.2.1 on M1 Ultra and M5 Max, 0.1.0 on GB10)
+## Overall Status (mlxcel 0.2.1 on M1 Ultra and M5 Max, 0.3.1 on GB10)
 
 | Metric | Count |
 |--------|-------|
 | Supported model architectures | 89+ ModelType variants |
 | Text models tested (M1 Ultra, 2026-06-15) | 136 pass, 2 partial, 4 fail, 9 skip/non-standalone (151 dirs; adds apertus, seed-oss, dots.llm1, granite family, lfm2, plamo-2, falcon-h1, BitNet; diffusiongemma loads via #291) |
 | Text models tested (M5 Max, 2026-06-15) | 131 pass, 5 partial, 14 fail/skip (0.2.1 full sweep; post-sweep: qwen2.5-vl-3b-4bit fixed by re-download, oversized bf16 hunyuan dropped; neither a code regression) |
-| Text models tested (GB10, 2026-05-28) | 101 pass, 8 fail/skip (109 total) |
-| VLM models tested (GB10, 2026-05-28) | 38 pass, 0 image-path fail (38 measured) |
+| Text models tested (GB10, 2026-06-17) | 133 pass, 14 fail, 1 OOM-skip (148 total; 0.3.1 with the CUDA fused decode-MoE kernel #319 — 9 MoE models flipped FAIL→pass vs 0.3.0: 5 Qwen MoE + gemma-4-26b-a4b x2 + dots.llm1 + diffusiongemma) |
+| VLM models tested (GB10, 2026-06-17) | 53 measured image rows (0.3.1) |
 | VLM models tested (M5 Max, 2026-06-15) | 54 valid VLM rows (0.2.1 full VLM re-sweep; adds qwen3-vl-4b/8b, minicpm-v-4.6-bf16, nemotron-omni, youtu-vl; qwen2.5-vl-3b-4bit restored after re-download) |
 | VLM models tested (M1 Ultra, 2026-06-15) | 55 measured VLM rows (53 pass + 2 partial) |
 | Beating mlx-lm on M1 Ultra (text, >=100%) | 24/74 (32%, 6-15 vs pinned 5-19 baseline) |
