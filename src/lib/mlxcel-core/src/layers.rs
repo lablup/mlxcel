@@ -527,14 +527,21 @@ impl FusedQkNorm for GemmaRMSNorm {
 
 /// Whether the fused single-token decode QK-norm+RoPE kernel (#326) is enabled.
 ///
-/// Default-on: the kernel is correct (RMS < 5e-3 vs the graph path) and
-/// faster than the equivalent MLX graph sequence for quantized models.
-/// Set `MLXCEL_FUSED_QK_NORM=0` (also `false`/`off`/`no`, case-insensitive,
-/// trimmed) to force the graph fallback in Qwen3 and Qwen3-MoE decode.
+/// Default-OFF (opt-in). The kernel is numerically correct (decode output is
+/// byte-identical to the graph path on Qwen3 / Qwen3-MoE; the reduction is over
+/// the transpose-invariant head_dim axis), but it cuts Rust<->C++ FFI crossings
+/// rather than MLX op count, so on M1 Ultra (fast FFI) it measured ~1-3.4%
+/// SLOWER than the graph path (qwen3-0.6b 275 vs 284, qwen3-8b 82.3 vs 83.2
+/// tok/s). It ships as a reusable shared primitive for the deferred QK-norm
+/// families and is gated off by default pending a per-backend win (e.g. CUDA,
+/// where op-dispatch/FFI cost differs), mirroring the opt-in treatment of the
+/// neutral fused-relu2 MoE path (`MLXCEL_FUSED_MOE_RELU2`).
+///
+/// Set `MLXCEL_FUSED_QK_NORM=1` (also `true`/`on`/`yes`, case-insensitive,
+/// trimmed) to opt into the fused path in Qwen3 and Qwen3-MoE decode.
 ///
 /// The variable is read once at first call and cached for the process lifetime.
-/// Reading it per decode step would negate the performance gain this kernel
-/// provides.
+/// Reading it per decode step would add per-token overhead to the hot path.
 pub fn fused_qk_norm_enabled() -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ENABLED.get_or_init(|| {
@@ -543,15 +550,15 @@ pub fn fused_qk_norm_enabled() -> bool {
 }
 
 /// Pure decision behind [`fused_qk_norm_enabled`], split out for unit testing
-/// without touching process-global env state. `None` (unset) is on; an explicit
-/// `0`/`false`/`off`/`no` (case-insensitive, trimmed) is off; any other value is on.
+/// without touching process-global env state. `None` (unset) is off; an explicit
+/// `1`/`true`/`on`/`yes` (case-insensitive, trimmed) is on; any other value is off.
 fn fused_qk_norm_enabled_from(value: Option<&str>) -> bool {
     match value {
-        Some(v) => !matches!(
+        Some(v) => matches!(
             v.trim().to_ascii_lowercase().as_str(),
-            "0" | "false" | "off" | "no"
+            "1" | "true" | "on" | "yes"
         ),
-        None => true,
+        None => false,
     }
 }
 
@@ -3887,21 +3894,21 @@ mod tests {
     /// The `fused_qk_norm_enabled_from` helper must be default-on when the env
     /// var is absent and must respect the recognised disable strings.
     #[test]
-    fn fused_qk_norm_enabled_defaults_on_and_respects_disable_values() {
-        // Unset -> on (default-on).
-        assert!(fused_qk_norm_enabled_from(None));
-        // Recognised disable values (case-insensitive, trimmed) -> off.
-        for v in ["0", "false", "off", "no", "OFF", "False", " 0 ", "No"] {
-            assert!(
-                !fused_qk_norm_enabled_from(Some(v)),
-                "{v:?} should disable the fused QK-norm kernel"
-            );
-        }
-        // Any other value, including empty string -> on.
-        for v in ["1", "true", "on", "yes", "", "anything"] {
+    fn fused_qk_norm_enabled_defaults_off_and_respects_enable_values() {
+        // Unset -> off (default-off, opt-in).
+        assert!(!fused_qk_norm_enabled_from(None));
+        // Recognised enable values (case-insensitive, trimmed) -> on.
+        for v in ["1", "true", "on", "yes", "ON", "True", " 1 ", "Yes"] {
             assert!(
                 fused_qk_norm_enabled_from(Some(v)),
-                "{v:?} should keep the fused QK-norm kernel on"
+                "{v:?} should enable the fused QK-norm kernel"
+            );
+        }
+        // Any other value, including empty string -> off.
+        for v in ["0", "false", "off", "no", "", "anything"] {
+            assert!(
+                !fused_qk_norm_enabled_from(Some(v)),
+                "{v:?} should keep the fused QK-norm kernel off"
             );
         }
     }
