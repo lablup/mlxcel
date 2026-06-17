@@ -1166,8 +1166,7 @@ mod tests {
             top_k,
         };
         if target_dtype == dtype::FLOAT32 {
-            compute_logprobs(&f32_logits, selected_token, &config)
-                .expect("should return Some")
+            compute_logprobs(&f32_logits, selected_token, &config).expect("should return Some")
         } else {
             let logits = ffi::astype(&f32_logits, target_dtype);
             compute_logprobs(&logits, selected_token, &config).expect("should return Some")
@@ -1230,10 +1229,8 @@ mod tests {
         // logits drives the identical top-k path the server hits. The pre-fix
         // code panicked here ("range end index 12 out of range for slice of
         // length 10"); the fix must return correct f32 values instead.
-        let reference =
-            logprobs_for_dtype(&DTYPE_LOGITS, SELECTED_LOWEST, 5, dtype::FLOAT32);
-        let result =
-            logprobs_for_dtype(&DTYPE_LOGITS, SELECTED_LOWEST, 5, dtype::BFLOAT16);
+        let reference = logprobs_for_dtype(&DTYPE_LOGITS, SELECTED_LOWEST, 5, dtype::FLOAT32);
+        let result = logprobs_for_dtype(&DTYPE_LOGITS, SELECTED_LOWEST, 5, dtype::BFLOAT16);
         assert_eq!(result.top_alternatives.len(), 5);
         // bf16 has ~8 mantissa bits, so use a loose absolute tolerance.
         assert_top_k_matches_reference(&result, &reference, 0.1);
@@ -1243,10 +1240,8 @@ mod tests {
 
     #[test]
     fn compute_logprobs_top_k_f16_matches_f32() {
-        let reference =
-            logprobs_for_dtype(&DTYPE_LOGITS, SELECTED_LOWEST, 5, dtype::FLOAT32);
-        let result =
-            logprobs_for_dtype(&DTYPE_LOGITS, SELECTED_LOWEST, 5, dtype::FLOAT16);
+        let reference = logprobs_for_dtype(&DTYPE_LOGITS, SELECTED_LOWEST, 5, dtype::FLOAT32);
+        let result = logprobs_for_dtype(&DTYPE_LOGITS, SELECTED_LOWEST, 5, dtype::FLOAT16);
         assert_eq!(result.top_alternatives.len(), 5);
         // f16 has ~10 mantissa bits, so a tighter tolerance still holds.
         assert_top_k_matches_reference(&result, &reference, 0.03);
@@ -1258,8 +1253,7 @@ mod tests {
         // f32 reference path: the same top_k = 5 request must return exact
         // values (the dtype cast is a no-op here). Guards that the shared
         // helper and the f32 path agree before comparing dtype runs to it.
-        let reference =
-            logprobs_for_dtype(&DTYPE_LOGITS, SELECTED_LOWEST, 5, dtype::FLOAT32);
+        let reference = logprobs_for_dtype(&DTYPE_LOGITS, SELECTED_LOWEST, 5, dtype::FLOAT32);
         assert_eq!(reference.top_alternatives.len(), 5);
         assert_top_k_matches_reference(&reference, &reference, 1e-5);
         assert_eq!(reference.top_alternatives[0].0, 1);
@@ -1269,10 +1263,8 @@ mod tests {
     fn compute_logprobs_selected_token_bf16_matches_f32() {
         // Selected-token path (top_k = 0) must stay correct on bf16. This path
         // already uses `item_f32`; the test guards it against future refactors.
-        let reference =
-            logprobs_for_dtype(&DTYPE_LOGITS, SELECTED_LOWEST, 0, dtype::FLOAT32);
-        let result =
-            logprobs_for_dtype(&DTYPE_LOGITS, SELECTED_LOWEST, 0, dtype::BFLOAT16);
+        let reference = logprobs_for_dtype(&DTYPE_LOGITS, SELECTED_LOWEST, 0, dtype::FLOAT32);
+        let result = logprobs_for_dtype(&DTYPE_LOGITS, SELECTED_LOWEST, 0, dtype::BFLOAT16);
         assert!(result.top_alternatives.is_empty());
         assert_eq!(result.token_id, SELECTED_LOWEST);
         assert!(
@@ -1285,10 +1277,8 @@ mod tests {
 
     #[test]
     fn compute_logprobs_selected_token_f16_matches_f32() {
-        let reference =
-            logprobs_for_dtype(&DTYPE_LOGITS, SELECTED_LOWEST, 0, dtype::FLOAT32);
-        let result =
-            logprobs_for_dtype(&DTYPE_LOGITS, SELECTED_LOWEST, 0, dtype::FLOAT16);
+        let reference = logprobs_for_dtype(&DTYPE_LOGITS, SELECTED_LOWEST, 0, dtype::FLOAT32);
+        let result = logprobs_for_dtype(&DTYPE_LOGITS, SELECTED_LOWEST, 0, dtype::FLOAT16);
         assert!(result.top_alternatives.is_empty());
         assert_eq!(result.token_id, SELECTED_LOWEST);
         assert!(
