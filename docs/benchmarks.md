@@ -37,6 +37,7 @@ reference runtime) live alongside the snapshot:
 
 - [MoE decode gap investigation](benchmark_results/moe-decode-gap-investigation.md)
 - [Fused decode-MoE kernel: design and roadmap](benchmark_results/fused-moe-decode-kernel-design.md)
+- [Gemma3n decode profile: is a compiled fusion justified?](benchmark_results/gemma3n-decode-profile.md)
 
 ## Suggested benchmark commands
 
