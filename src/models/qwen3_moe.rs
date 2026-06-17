@@ -566,9 +566,10 @@ impl Attention {
         // On decode (l == 1) collapse the QKV projection, split, Q/K RMSNorm and
         // RoPE into one fused C++ kernel to cut per-token op count (#326). The
         // norm reduces over head_dim, which the head transpose leaves untouched,
-        // so the fused result matches the graph path below. Prefill (l > 1) and
-        // non-quantized weights (the kernel returns None) take the graph path.
-        let fused = if l == 1 {
+        // so the fused result matches the graph path below. Prefill (l > 1),
+        // non-quantized weights (the kernel returns None), and
+        // MLXCEL_FUSED_QK_NORM=0 all take the graph path.
+        let fused = if l == 1 && mlxcel_core::layers::fused_qk_norm_enabled() {
             self.qkv_proj.forward_split_norm_rope_quantized(
                 x,
                 &self.q_norm,

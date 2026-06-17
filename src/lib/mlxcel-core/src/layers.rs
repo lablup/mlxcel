@@ -525,6 +525,36 @@ impl FusedQkNorm for GemmaRMSNorm {
     }
 }
 
+/// Whether the fused single-token decode QK-norm+RoPE kernel (#326) is enabled.
+///
+/// Default-on: the kernel is correct (RMS < 5e-3 vs the graph path) and
+/// faster than the equivalent MLX graph sequence for quantized models.
+/// Set `MLXCEL_FUSED_QK_NORM=0` (also `false`/`off`/`no`, case-insensitive,
+/// trimmed) to force the graph fallback in Qwen3 and Qwen3-MoE decode.
+///
+/// The variable is read once at first call and cached for the process lifetime.
+/// Reading it per decode step would negate the performance gain this kernel
+/// provides.
+pub fn fused_qk_norm_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        fused_qk_norm_enabled_from(std::env::var("MLXCEL_FUSED_QK_NORM").ok().as_deref())
+    })
+}
+
+/// Pure decision behind [`fused_qk_norm_enabled`], split out for unit testing
+/// without touching process-global env state. `None` (unset) is on; an explicit
+/// `0`/`false`/`off`/`no` (case-insensitive, trimmed) is off; any other value is on.
+fn fused_qk_norm_enabled_from(value: Option<&str>) -> bool {
+    match value {
+        Some(v) => !matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "0" | "false" | "off" | "no"
+        ),
+        None => true,
+    }
+}
+
 /// Layer Normalization layer (standard LayerNorm with weight and optional bias)
 pub struct LayerNorm {
     pub weight: UniquePtr<MlxArray>,
@@ -1401,6 +1431,17 @@ impl FusedQKVLinear {
     )> {
         match &self.qkv_proj {
             UnifiedLinear::Quantized { weight, .. } => {
+                // At the C++ boundary the primitive passes a single eps value for
+                // both the Q and K RMS norm. Assert (debug builds only) that the
+                // caller supplies identical eps on both sides; a mismatch would
+                // silently apply the wrong eps to K.
+                debug_assert_eq!(
+                    q_norm.rms_eps(),
+                    k_norm.rms_eps(),
+                    "fused QK-norm primitive uses a single eps; q_norm eps {:.2e} != k_norm eps {:.2e}",
+                    q_norm.rms_eps(),
+                    k_norm.rms_eps(),
+                );
                 let mut q = cxx::UniquePtr::null();
                 let mut k = cxx::UniquePtr::null();
                 let mut v = cxx::UniquePtr::null();
@@ -3841,5 +3882,27 @@ mod tests {
         let (dq, dk) = (max_abs_diff(&sq, &gq), max_abs_diff(&sk, &gk));
         assert!(dq > 0.05, "standard vs Gemma Q must differ (max-abs {dq})");
         assert!(dk > 0.05, "standard vs Gemma K must differ (max-abs {dk})");
+    }
+
+    /// The `fused_qk_norm_enabled_from` helper must be default-on when the env
+    /// var is absent and must respect the recognised disable strings.
+    #[test]
+    fn fused_qk_norm_enabled_defaults_on_and_respects_disable_values() {
+        // Unset -> on (default-on).
+        assert!(fused_qk_norm_enabled_from(None));
+        // Recognised disable values (case-insensitive, trimmed) -> off.
+        for v in ["0", "false", "off", "no", "OFF", "False", " 0 ", "No"] {
+            assert!(
+                !fused_qk_norm_enabled_from(Some(v)),
+                "{v:?} should disable the fused QK-norm kernel"
+            );
+        }
+        // Any other value, including empty string -> on.
+        for v in ["1", "true", "on", "yes", "", "anything"] {
+            assert!(
+                fused_qk_norm_enabled_from(Some(v)),
+                "{v:?} should keep the fused QK-norm kernel on"
+            );
+        }
     }
 }
