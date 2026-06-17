@@ -22,6 +22,10 @@ use std::path::Path;
 
 use mlxcel_core::hardware::{HardwareCapabilities, QuantRecommendation, recommend_quantization};
 
+use crate::execution::kv_cache_advisor::{
+    KvCacheModeAdvice, advise_kv_cache_modes, print_kv_cache_advice,
+};
+
 // ── Model-size estimation ─────────────────────────────────────────────────────
 
 /// Try to estimate the approximate number of model parameters (in billions)
@@ -199,6 +203,12 @@ pub struct QuantAdvice {
     pub model_uses_bfloat16: bool,
     /// KV cache memory estimate in bytes (None if architecture info is unavailable).
     pub kv_cache_bytes: Option<u64>,
+    /// Advisory KV-cache-mode suggestions per context range (issue #327).
+    ///
+    /// Empty when `config.json` cannot be classified. These are opt-in
+    /// suggestions printed by [`print_quant_advice`]; they never change the
+    /// default inference path. See [`crate::execution::kv_cache_advisor`].
+    pub kv_cache_advice: Vec<KvCacheModeAdvice>,
 }
 
 /// Produce a complete quantization recommendation for a model directory.
@@ -280,12 +290,18 @@ pub fn advise_quantization(
 
     let uses_bf16 = model_uses_bfloat16(model_path);
 
+    // Advisory KV-cache-mode suggestions (issue #327). Reads only `config.json`
+    // and returns data; it does not touch the weight-loading path, so it cannot
+    // reintroduce the #289 bf16 to f16 quantized-weight promotion.
+    let kv_cache_advice = advise_kv_cache_modes(model_path);
+
     QuantAdvice {
         recommendation,
         estimated_params_billions: estimated_params,
         exact_weight_bytes,
         model_uses_bfloat16: uses_bf16,
         kv_cache_bytes: kv_bytes,
+        kv_cache_advice,
     }
 }
 
@@ -377,6 +393,10 @@ pub fn print_quant_advice(advice: &QuantAdvice, hw: &HardwareCapabilities) {
         println!("  The M5 Neural Accelerator does not support BFloat16 computation.");
         println!("  For best performance, use an INT8 or FP16 quantized variant of this model.");
     }
+
+    // Advisory KV-cache-mode suggestions (issue #327). Printed only; never
+    // applied. No-op when the architecture could not be classified.
+    print_kv_cache_advice(&advice.kv_cache_advice);
 
     println!();
 }

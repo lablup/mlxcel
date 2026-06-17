@@ -249,6 +249,50 @@ backend on the same workload.
 | Considering symmetric `turbo4` | Use only on an allowlisted/validated family. |
 | Long-context decode speed experiments | Benchmark `turbo4-delegated` against both `fp16` and `fp16+turbo4`. |
 
+## Advisor recommendations (`--recommend-quant`)
+
+`mlxcel generate --recommend-quant` prints an advisory KV-cache-mode section
+alongside the quantization advice. It suggests one of the five modes (`fp16`,
+`int8`, `fp16+turbo4`, `turbo4`, `fp16+turbo3`) per model family and context
+range, so you have a benchmark starting point instead of guessing.
+
+The suggestions are advisory and opt-in only. The default inference path is
+unchanged: with no flags the runtime still uses `fp16`. To use a suggested mode
+you must pass `--kv-cache-mode` (or `--cache-type-k` / `--cache-type-v`)
+yourself. The advisor reads only `config.json`; it never loads weights and
+never changes the quantized-weight dtype. KV-cache modes quantize only the K/V
+cache tensors and dequantize back to FP16 for attention, so a recommendation
+cannot reintroduce the bf16-to-f16 quantized-weight promotion that the project
+forbids (the `#289` regression).
+
+How it keys the suggestion:
+
+- **Model family** comes from the KV-architecture classifier
+  (`src/execution/kv_arch.rs`): standard attention, sliding-window, MLA
+  (DeepSeek), hybrid attention plus recurrent, and pure SSM. The raw
+  `model_type` is also checked against the symmetric-Turbo4 allowlist
+  (`src/lib/mlxcel-core/src/cache/turbo/allowlist.rs`).
+- **Context range** is bucketed as short (`<=4K` tokens, interactive /
+  single-request), medium (`4K-32K`), and long (`>32K`, long-context serving).
+  Long context and memory-constrained serving are prioritized over raw
+  short-decode tok/s, because that is where KV-cache pressure dominates.
+
+The conservative rules the advisor applies:
+
+| Family / context | Suggested | Also benchmark | Why |
+|------------------|-----------|----------------|-----|
+| Any family, short context | `fp16` | - | KV footprint is small; keep the baseline. |
+| Standard / sliding-window / hybrid, medium | `fp16+turbo4` | `int8` | K stays FP16 (softmax never sees a quantized K); safest Turbo start. |
+| Standard / sliding-window / hybrid, long, allowlisted | `turbo4` | `fp16+turbo4` | Family passed the PPL gate; largest KV savings with a lower-risk fallback. |
+| Standard / sliding-window / hybrid, long, not allowlisted | `fp16+turbo4` | `fp16+turbo3` | Symmetric `turbo4` withheld off the allowlist; `fp16+turbo3` if memory is tight. |
+| MLA (DeepSeek), medium or long | `int8` | - | The latent dimension is not a power of two, so the Turbo Walsh-Hadamard V path does not apply; per-token INT8 has no head-dim constraint. |
+| Pure SSM (Mamba/Mamba2) | `fp16` | - | No context-proportional KV cache, so Turbo modes save almost nothing. |
+
+Symmetric `turbo4` is only ever suggested for families on the allowlist; off
+the allowlist the advisor leads with `fp16+turbo4` exactly like the manual
+guidance above. Treat every suggestion as a hypothesis to validate per family
+with the checklist below before adopting it in production.
+
 ## Validation checklist
 
 Before recommending a TurboQuant mode for a model family:

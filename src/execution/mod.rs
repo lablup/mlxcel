@@ -19,6 +19,7 @@
 //! generation defaults in multiple places.
 
 pub mod kv_arch;
+pub mod kv_cache_advisor;
 pub mod memory_estimate;
 pub mod quant_advisor;
 pub mod runtime;
