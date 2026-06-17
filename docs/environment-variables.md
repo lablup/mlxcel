@@ -169,8 +169,9 @@ recommended as normal deployment settings.
 | `MLXCEL_DISABLE_SINGLE_QUERY_MASKLESS` | truthy disables | maskless path on | Disables the single-query maskless attention path. |
 | `MLXCEL_EXPERIMENTAL_BOOL_CAUSAL_MASK` | truthy enables | off | Enables an experimental boolean causal-mask path. |
 | `MLXCEL_PIPELINE_GRANULARITY` | `off`, `layer`, `block:N` | `off` | Inserts layer-boundary async-eval hints for pipeline experiments. |
-| `MLXCEL_FUSED_MOE` | `0`/`false`/`off`/`no` disable; any other value or unset enables | on | Fused single-token decode-MoE kernel (#268), on by default since #282 (validated on M1 Ultra and M5). Set to `0` to force the proven `gather_qmm`/`SwitchGLU` path. Active for qwen3_moe, qwen3_next, dots.llm1, and gemma4 decode. |
-| `MLXCEL_FUSED_MOE_SGY` | `1`-`32` | `8` | Simdgroups per threadgroup for the fused decode-MoE kernel; tune per hardware. |
+| `MLXCEL_FUSED_MOE` | `0`/`false`/`off`/`no` disable; any other value or unset enables | on | Fused single-token decode-MoE kernel (#268), on by default since #282 (Metal) and #319 (CUDA, via `mx.fast.cuda_kernel`); validated on M1 Ultra, M5, and GB10. Set to `0` to force the proven `gather_qmm`/`SwitchGLU` path. Active for qwen3_moe, qwen3_next, dots.llm1, gemma4, qwen2_moe, mixtral, phimoe, lfm2, qwen3_vl_moe, and olmoe decode. |
+| `MLXCEL_FUSED_MOE_SGY` | `1`-`32` | `8` | Simdgroups (Metal) / warps-per-block (CUDA) per threadgroup for the fused decode-MoE kernel; tune per hardware. |
+| `MLXCEL_FUSED_MOE_MAX_DFF` | positive int | `4096` | Expert-intermediate (Dff) upper bound for the fused path; above it the caller falls back to `gather_qmm`. The fused path wins only while `gather_qmm` underutilizes the GPU (small experts). The break-even is hardware-dependent: ~4096 on M1 Ultra, ~13-14k on GB10/CUDA. 4096 is the conservative shared default; raise it on CUDA for mid-size experts. |
 | `MLXCEL_FUSED_MOE_RELU2` | presence enables | off | Enables the squared-ReLU fused MoE path for nemotron-class experts; performance-neutral on nemotron-h, kept for a future MoE-dominated squared-ReLU model. |
 
 ## Block-diffusion diagnostic variables

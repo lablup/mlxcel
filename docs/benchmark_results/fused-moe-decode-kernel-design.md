@@ -146,11 +146,19 @@ runs it efficiently.
    greedy decode output is byte-identical or within the f16 jitter class with no
    NaN, and decode is parity-to-faster (no regression). Per-layer kernel
    execution on M5 was confirmed with a dispatch trace. See the M5 results below.
+6. **Done** (#319): ported the kernel to the CUDA backend via
+   `mx.fast.cuda_kernel` (the `simd_sum` reduction becomes `__shfl_down_sync`,
+   precise `expf` for greedy parity), runtime-selected by `metal::is_available()`.
+   Before this the kernel was Metal-only and aborted on CUDA (`[metal_kernel] No
+   Metal back-end`) for the small-expert MoE models the dispatch selected; they
+   now run on the fused path, byte-identical and faster (qwen3-30b-a3b +55% on
+   GB10). fused stays default-on for both backends. See the GB10 results below.
 
 ## Usage and flags
 
-The fused decode-MoE path is **on by default** as of #282 and applies only to
-single-token decode with affine 4/8-bit gate/up and 4/6/8-bit down. Anything
+The fused decode-MoE path is **on by default** as of #282 (Metal) and #319
+(CUDA, via `mx.fast.cuda_kernel`), and applies only to single-token decode with
+affine 4/8-bit gate/up and 4/6/8-bit down. Anything
 else (prefill, non-affine, unsupported bit widths, mismatched gate/up bits)
 falls back to the proven `gather_qmm` / `SwitchGLU` path automatically. Set
 `MLXCEL_FUSED_MOE=0` to force that fallback everywhere.
@@ -160,7 +168,7 @@ falls back to the proven `gather_qmm` / `SwitchGLU` path automatically. Set
 | `MLXCEL_FUSED_MOE` | unset (on) | On by default. Set to `0` (also `false`/`off`/`no`, case-insensitive) to force the proven `gather_qmm` / `SwitchGLU` path; any other value, or leaving it unset, keeps the kernel on. |
 | `MLXCEL_FUSED_MOE_SGY` | 8 | Simdgroups per threadgroup (one output row each). Tune per hardware. |
 | `MLXCEL_FUSED_MOE_RELU2` | unset (off) | Enable the squared-ReLU (fc1/relu²/fc2) fused path used by nemotron-class experts. Correct but measured performance-neutral on nemotron-h; kept for a future MoE-dominated squared-ReLU model. |
-| `MLXCEL_FUSED_MOE_MAX_DFF` | 4096 | Expert-intermediate (Dff) upper bound. Above it, `forward_fused_kernel` declines and the caller falls back to `gather_qmm`. The fused path wins only while `gather_qmm` underutilizes the GPU (small experts); for large experts `gather_qmm` already saturates and the extra dispatch plus global-memory activation staging is a net loss. M1 Ultra measurements: Dff 704..2560 gain +3.5% to +15.4%, Dff 6400 (phi-3.5-moe) loses 5.9%, Dff 14336 (mixtral) loses 21%. The break-even is hardware-dependent, so the bound is tunable. |
+| `MLXCEL_FUSED_MOE_MAX_DFF` | 4096 | Expert-intermediate (Dff) upper bound. Above it, `forward_fused_kernel` declines and the caller falls back to `gather_qmm`. The fused path wins only while `gather_qmm` underutilizes the GPU (small experts); for large experts `gather_qmm` already saturates and the extra dispatch plus global-memory activation staging is a net loss. M1 Ultra measurements: Dff 704..2560 gain +3.5% to +15.4%, Dff 6400 (phi-3.5-moe) loses 5.9%, Dff 14336 (mixtral) loses 21%. On CUDA (GB10) the crossover is much higher, ~13-14k (Dff 768 +60%, 1792 +13%, 6400 +2%, 14336 -2%), so 4096 is conservative there but kept as the shared default. The break-even is hardware-dependent, so the bound is tunable. |
 
 ### Measured decode gains (M1 Ultra, `MLXCEL_FUSED_MOE=1`)
 
@@ -197,6 +205,43 @@ already accelerates the baseline expert matmul, leaving less inter-kernel idle f
 the fusion to recover. Per-layer kernel execution on M5 was confirmed with a
 dispatch trace (30 / 40 / 48 / 61 dispatches per decode token for gemma4 /
 qwen3.5 / qwen3-30b / dots.llm1).
+
+### Measured decode gains (GB10 / CUDA, `MLXCEL_FUSED_MOE=1`, #319)
+
+The kernel was ported to the CUDA backend via `mx.fast.cuda_kernel` (#319), the
+CUDA analogue of `metal_kernel`: the same two dispatches, with the `simd_sum`
+warp reduction expressed as `__shfl_down_sync` and a precise `expf` in the
+SwiGLU. `run_fused_moe_two_kernel` picks the cuda_kernel port when
+`metal::is_available()` is false. Before #319 the kernel was Metal-only, so the
+selected small-expert MoE models aborted on CUDA with `[metal_kernel] No Metal
+back-end`; they now run on the fused path. Greedy output is byte-identical to
+`gather_qmm` on qwen3-30b-a3b. Measured on GB10 (DGX Spark, CUDA 13.0) against
+the `gather_qmm` baseline (`MLXCEL_FUSED_MOE=0`):
+
+| Model | activation | bits | decode tok/s | gain | greedy parity |
+|-------|-----------|------|-------------:|-----:|---------------|
+| qwen3-30b-a3b | SwiGLU | 4 | 58.2 → 90.3 | **+55%** | byte-identical |
+| qwen3.5-35b-a3b | SwiGLU | 4 | 45.8 → 64.7 | +41% | within f16 jitter class |
+| lfm2-8b-a1b | SwiGLU | 4 | 140.9 → 158.2 | +13% | byte-identical |
+| qwen1.5-moe-a2.7b | SwiGLU | 4 | 113.0 → 124.7 | +10% | byte-identical |
+
+The CUDA gains are larger than Apple Silicon's: at batch=1 `gather_qmm` leaves
+more of the GB10 GPU idle, so the all-warps fused path (one warp per output row)
+recovers more. The break-even with expert size is also far higher than Metal's.
+Forcing the fused path past the cap (`MLXCEL_FUSED_MOE_MAX_DFF=20000`):
+
+| Dff | model | fused vs gather_qmm |
+|----:|-------|--------------------:|
+| 768 | qwen3-30b-a3b | +60% |
+| 1792 | lfm2-8b-a1b | +13% |
+| 6400 | phi-3.5-moe | +2% |
+| 14336 | mixtral | −2% |
+
+The CUDA crossover is ~13–14k (vs Metal's ~4096, where phi-3.5-moe already loses
+5.9%). The 4096 cap is therefore conservative on CUDA but kept as the shared
+default: the meaningful wins are all below it, and the 4096–14k range gains at
+most ~2% (phi-3.5-moe) while mixtral (14336) slightly prefers `gather_qmm`. CUDA
+users with mid-size experts can raise `MLXCEL_FUSED_MOE_MAX_DFF`.
 
 **Parity caveat.** The kernel accumulates the GEMV in f32 with a different
 reduction order than `gather_qmm`'s tiling, so it is within the f16 jitter
