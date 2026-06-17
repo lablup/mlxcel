@@ -23,9 +23,13 @@ lever that does move decode is a scheduling knob, not a kernel:
    command-buffer dispatch gaps, not small-kernel compute. Raising
    `MLX_MAX_OPS_PER_BUFFER` recovers +11-13% with zero code and zero risk; a
    compiled fusion targets the wrong cost.
-3. The Gemma3n-specific fusions worth doing already shipped in #60 (fused MLP
-   bridge, compiled gelu_topk / GeGLU, stacked AltUp) and are already active on
-   M1 Ultra. The prior M5 investigation (the source of the
+3. The Gemma3n-specific fusions worth doing already shipped and run on M1 Ultra
+   off NA hardware: the stacked AltUp path (#60) and the compiled gelu_topk /
+   GeGLU activation kernels (landed before #60, reused by it). The #60 fused MLP
+   bridge is bf16-only, so the 4-bit MLP here runs gate/up/down as separate
+   `QuantizedMatmul` plus that compiled activation; extending the bridge to
+   quantized weights would only collapse the FFI crossings that point 1 shows
+   are hidden. The prior M5 investigation (the source of the
    `mlxcel-gpu-profiling` skill) found no remaining fusion lever above ~2.6%.
 
 On top of that, mlxcel is already ahead of the only Python runtime that loads
@@ -79,10 +83,13 @@ e4b-4bit is ~4209 nodes:
 | Matmul | 105 | Tanh | 71 | RoPE | 55 |
 | SliceUpdate | 40 | Concatenate | 36 | ScaledDotProductAttention | 35 |
 
-The long `Compiled*` nodes in the same graph are the #60 fusions already in
-place: `CompiledBroadcast...Tanh...` is gelu_topk / GeGLU, the
-`CompiledMaximum...Erf...` chain is the gelu_topk cutoff, and
-`CompiledBroadcastBroadcastSubtractSquare` is the magnitude reduction. Most of
+The long `Compiled*` nodes in the same graph are the compiled activation fusions
+already in place (gelu_topk / GeGLU, predating #60 and reused by it):
+`CompiledBroadcast...Tanh...` is gelu_topk / GeGLU, the `CompiledMaximum...Erf...`
+chain is the gelu_topk cutoff, and `CompiledBroadcastBroadcastSubtractSquare` is
+the magnitude reduction. The MLP gate/up/down are not bundled here because the
+#60 fused MLP bridge is bf16-only; on these 4-bit checkpoints they are the
+per-layer `QuantizedMatmul` nodes counted above. Most of
 the high-count ops are views (Transpose, Slice, Squeeze, Reshape, ExpandDims,
 Flatten) that carry no kernel, or cheap elementwise that MLX fuses at eval.
 
@@ -148,7 +155,8 @@ bottleneck.
 
 Close #329 with no compiled fusion. The decode profile shows no fusable
 small-kernel hotspot on M1 Ultra: decode is GPU-bound with FFI hidden, the
-worthwhile Gemma3n fusions already shipped in #60, mlxcel already leads mlx-vlm,
+worthwhile Gemma3n fusions already shipped (#60 and earlier), mlxcel already
+leads mlx-vlm,
 and the residual overhead is dispatch-gap idle that a scheduling knob recovers
 better than any kernel could.
 
