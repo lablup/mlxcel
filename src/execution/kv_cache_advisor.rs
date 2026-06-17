@@ -313,9 +313,16 @@ fn read_model_type(config: &serde_json::Value) -> String {
 /// Derive the attention head dimension from `config.json`.
 ///
 /// Checks `text_config` first, then top-level. Returns an explicit `head_dim`
-/// or `head_size` when present; otherwise divides `hidden_size` (or `d_model`)
-/// by `num_attention_heads` (or `num_heads`). Returns `None` when the required
-/// fields are absent or heads is zero.
+/// or `head_size` when present; otherwise divides the hidden size by the
+/// attention-head count. Returns `None` when the required fields are absent or
+/// heads is zero.
+///
+/// The hidden-size and head-count field-name lists mirror
+/// [`crate::execution::kv_arch`]'s `attn_dims` so the non-power-of-two guard
+/// derives the same head dim the classifier used. Without this, alternate
+/// config naming (OLMo / MPT-style `d_model` + `n_heads`) would make this
+/// return `None`, defaulting `turbo_ok` to `true` and slipping a
+/// non-power-of-two head dim past the guard.
 fn read_head_dim(config: &serde_json::Value) -> Option<u64> {
     let text = config.get("text_config").unwrap_or(config);
     if let Some(d) = text.get("head_dim").and_then(|v| v.as_u64()) {
@@ -327,10 +334,14 @@ fn read_head_dim(config: &serde_json::Value) -> Option<u64> {
     let hidden = text
         .get("hidden_size")
         .or_else(|| text.get("d_model"))
+        .or_else(|| text.get("dim"))
+        .or_else(|| text.get("model_dim"))
         .and_then(|v| v.as_u64())?;
     let heads = text
         .get("num_attention_heads")
         .or_else(|| text.get("num_heads"))
+        .or_else(|| text.get("n_heads"))
+        .or_else(|| text.get("n_head"))
         .and_then(|v| v.as_u64())?;
     if heads == 0 {
         return None;

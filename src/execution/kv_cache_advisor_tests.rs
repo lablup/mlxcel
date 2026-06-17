@@ -288,6 +288,59 @@ fn non_power_of_two_head_dim_withholds_turbo() {
     assert_eq!(advices[2].suggested, KVCacheMode::Int8);
 }
 
+/// Alternate config naming (OLMo / MPT-style `d_model` + `n_heads`) must not
+/// bypass the non-power-of-two guard. `read_head_dim` mirrors the classifier's
+/// field-name coverage, so a non-power-of-two head dim still withholds Turbo.
+#[test]
+fn alternate_naming_non_power_of_two_head_dim_withholds_turbo() {
+    // MPT-30B-style: d_model=7168, n_heads=64 -> head_dim=112 (not power of two).
+    let cfg = serde_json::json!({
+        "model_type": "mpt",
+        "n_layers": 48,
+        "n_heads": 64,
+        "d_model": 7168
+    });
+    // Without the field-name alignment this returned None, defaulting
+    // turbo_ok=true and slipping head_dim 112 past the guard.
+    assert_eq!(read_head_dim(&cfg), Some(112));
+    assert!(!112u64.is_power_of_two());
+
+    let advices = advise_kv_cache_modes_from_config(&cfg);
+    assert!(!advices.is_empty());
+    for advice in &advices {
+        assert!(
+            !is_walsh_hadamard_turbo(advice.suggested),
+            "alternate-naming non-pow2 head dim must withhold Turbo, got {:?}",
+            advice.suggested
+        );
+        if let Some(ac) = advice.also_consider {
+            assert!(
+                !is_walsh_hadamard_turbo(ac),
+                "alternate-naming non-pow2 head dim must withhold Turbo in also_consider, got {ac:?}"
+            );
+        }
+    }
+}
+
+/// Alternate naming with a power-of-two head dim (OLMo-1B: d_model=2048,
+/// n_heads=16 -> 128) still derives the head dim and keeps Turbo eligible.
+#[test]
+fn alternate_naming_power_of_two_head_dim_keeps_turbo() {
+    let cfg = serde_json::json!({
+        "model_type": "olmo",
+        "n_layers": 16,
+        "n_heads": 16,
+        "d_model": 2048
+    });
+    assert_eq!(read_head_dim(&cfg), Some(128));
+    assert!(128u64.is_power_of_two());
+
+    let advices = advise_kv_cache_modes_from_config(&cfg);
+    assert!(advices.len() >= 2);
+    // olmo is not on the symmetric allowlist; medium stays asymmetric Turbo4.
+    assert_eq!(advices[1].suggested, KVCacheMode::Turbo4Asym);
+}
+
 #[test]
 fn power_of_two_head_dim_keeps_turbo() {
     // Llama-style: hidden_size=4096, num_attention_heads=32 -> head_dim=128 (power of two).
