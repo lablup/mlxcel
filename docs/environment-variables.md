@@ -173,6 +173,7 @@ recommended as normal deployment settings.
 | `MLXCEL_FUSED_MOE_SGY` | `1`-`32` | `8` | Simdgroups (Metal) / warps-per-block (CUDA) per threadgroup for the fused decode-MoE kernel; tune per hardware. |
 | `MLXCEL_FUSED_MOE_MAX_DFF` | positive int | `4096` | Expert-intermediate (Dff) upper bound for the fused path; above it the caller falls back to `gather_qmm`. The fused path wins only while `gather_qmm` underutilizes the GPU (small experts). The break-even is hardware-dependent: ~4096 on M1 Ultra, ~13-14k on GB10/CUDA. 4096 is the conservative shared default; raise it on CUDA for mid-size experts. |
 | `MLXCEL_FUSED_MOE_RELU2` | presence enables | off | Enables the squared-ReLU fused MoE path for nemotron-class experts; performance-neutral on nemotron-h, kept for a future MoE-dominated squared-ReLU model. |
+| `MLXCEL_FUSED_QK_NORM` | `0`/`false`/`off`/`no` disable; any other value or unset enables | on | Fused single-token QKV projection + Q/K RMSNorm + RoPE kernel (#326) for Qwen3 and Qwen3-MoE decode. Default on; set to `0` to force the graph fallback path. The fused result is within RMS < 5e-3 of the graph path (jitter class, not bit-exact); the kill-switch is a safety valve for debugging output differences against the graph reference. Active only when `l == 1` (decode) and weights are quantized. |
 
 ## Block-diffusion diagnostic variables
 
