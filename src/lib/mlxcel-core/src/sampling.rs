@@ -713,7 +713,15 @@ pub fn compute_logprobs(
 
         // Use raw bytes to extract i32 token IDs from top_idx.
         let idx_bytes = ffi::array_to_raw_bytes(&top_idx);
-        let lp_bytes = ffi::array_to_raw_bytes(&top_lp);
+        // `top_lp` inherits the model logit dtype, which is f16/bf16 for
+        // quantized models (post-#289). `array_to_raw_bytes` dumps the buffer
+        // verbatim with no dtype conversion, so a hardcoded 4-byte stride
+        // overruns a 2-byte-per-element buffer and reinterprets the bytes as
+        // garbage. Cast to f32 first so the stride is valid and the values are
+        // correct, mirroring the dtype-aware selected-token path (`item_f32`).
+        let top_lp_f32 = ffi::astype(&top_lp, dtype::FLOAT32);
+        ffi::eval(&top_lp_f32);
+        let lp_bytes = ffi::array_to_raw_bytes(&top_lp_f32);
 
         // Build (token_id, logprob) pairs for only the top-k partition.
         let mut pairs: Vec<(i32, f32)> = (0..k_usize.min(idx_bytes.len() / 4))
@@ -1123,6 +1131,165 @@ mod tests {
         let result = compute_logprobs(&logits, 2, &config).expect("should return Some");
         // top_k is clamped to vocab size (3), so at most 3 alternatives
         assert_eq!(result.top_alternatives.len(), 3);
+    }
+
+    // -- f16 / bf16 logprobs regression coverage (issue #340) --
+    //
+    // Quantized models keep bf16 (and sometimes f16) logits post-#289, so the
+    // arrays reaching `compute_logprobs` are 2 bytes per element, not 4. These
+    // tests build the logit array at f16/bf16 from the SAME underlying f32
+    // values used for an f32 reference run, then assert the top-k and the
+    // selected-token logprobs come back as correct f32 values. The pre-fix code
+    // read the 2-byte top-k buffer with a hardcoded 4-byte stride, which either
+    // overran the slice (the reported server panic) or reinterpreted the bytes
+    // as garbage, so even a loose tolerance separates correct from broken.
+
+    // Build a `[1, vocab]` logit array at `target_dtype` from shared f32 values
+    // and run `compute_logprobs`. `target_dtype == dtype::FLOAT32` skips the
+    // cast so it doubles as the reference run.
+    fn logprobs_for_dtype(
+        values: &[f32],
+        selected_token: i32,
+        top_k: usize,
+        target_dtype: i32,
+    ) -> TokenLogprobData {
+        let f32_logits = ffi::from_slice_f32(values, &[1, values.len() as i32]);
+        let config = LogprobsConfig {
+            enabled: true,
+            top_k,
+        };
+        if target_dtype == dtype::FLOAT32 {
+            compute_logprobs(&f32_logits, selected_token, &config)
+                .expect("should return Some")
+        } else {
+            let logits = ffi::astype(&f32_logits, target_dtype);
+            compute_logprobs(&logits, selected_token, &config).expect("should return Some")
+        }
+    }
+
+    // Shared logit row for the dtype tests: 6 distinct logits. Descending
+    // logprob order by logit value is token 1 (3.0) > 3 (2.0) > 2 (1.0) >
+    // 0 (0.5) > 5 (0.0) > 4 (-1.0). Selecting token 4 (the lowest) lets the
+    // top-5 alternatives be the 5 highest, reproducing the `logprobs: 5`
+    // request that crashed the server.
+    const DTYPE_LOGITS: [f32; 6] = [0.5, 3.0, 1.0, 2.0, -1.0, 0.0];
+    const SELECTED_LOWEST: i32 = 4; // token with logit -1.0
+
+    // Assert a top-k run matches the f32 reference: same count, sorted
+    // descending, same top-token id, and per-value agreement within `tol`.
+    fn assert_top_k_matches_reference(
+        result: &TokenLogprobData,
+        reference: &TokenLogprobData,
+        tol: f32,
+    ) {
+        // (b) count matches the reference (and the requested k).
+        assert_eq!(
+            result.top_alternatives.len(),
+            reference.top_alternatives.len(),
+            "alternative count must match the f32 reference"
+        );
+        // (c) alternatives are sorted descending by logprob.
+        for w in result.top_alternatives.windows(2) {
+            assert!(
+                w[0].1 >= w[1].1,
+                "alternatives must be sorted descending: {:?}",
+                result.top_alternatives
+            );
+        }
+        // Identity of the top token matches the f32 reference.
+        assert_eq!(
+            result.top_alternatives[0].0, reference.top_alternatives[0].0,
+            "top alternative token id must match the f32 reference"
+        );
+        // (d) each logprob value matches the reference within tolerance. Match
+        // by token id rather than by position to stay robust to tie ordering.
+        for &(tok, lp) in &result.top_alternatives {
+            let ref_lp = reference
+                .top_alternatives
+                .iter()
+                .find(|&&(t, _)| t == tok)
+                .map(|&(_, lp)| lp)
+                .unwrap_or_else(|| panic!("token {tok} missing from f32 reference set"));
+            assert!(
+                (lp - ref_lp).abs() <= tol,
+                "logprob for token {tok} = {lp} differs from reference {ref_lp} by more than {tol}"
+            );
+        }
+    }
+
+    #[test]
+    fn compute_logprobs_top_k_bf16_no_panic_matches_f32() {
+        // Unit-level reproduction of the server crash: `top_k = 5` on bf16
+        // logits drives the identical top-k path the server hits. The pre-fix
+        // code panicked here ("range end index 12 out of range for slice of
+        // length 10"); the fix must return correct f32 values instead.
+        let reference =
+            logprobs_for_dtype(&DTYPE_LOGITS, SELECTED_LOWEST, 5, dtype::FLOAT32);
+        let result =
+            logprobs_for_dtype(&DTYPE_LOGITS, SELECTED_LOWEST, 5, dtype::BFLOAT16);
+        assert_eq!(result.top_alternatives.len(), 5);
+        // bf16 has ~8 mantissa bits, so use a loose absolute tolerance.
+        assert_top_k_matches_reference(&result, &reference, 0.1);
+        // Highest-logprob alternative is token 1 (logit 3.0).
+        assert_eq!(result.top_alternatives[0].0, 1);
+    }
+
+    #[test]
+    fn compute_logprobs_top_k_f16_matches_f32() {
+        let reference =
+            logprobs_for_dtype(&DTYPE_LOGITS, SELECTED_LOWEST, 5, dtype::FLOAT32);
+        let result =
+            logprobs_for_dtype(&DTYPE_LOGITS, SELECTED_LOWEST, 5, dtype::FLOAT16);
+        assert_eq!(result.top_alternatives.len(), 5);
+        // f16 has ~10 mantissa bits, so a tighter tolerance still holds.
+        assert_top_k_matches_reference(&result, &reference, 0.03);
+        assert_eq!(result.top_alternatives[0].0, 1);
+    }
+
+    #[test]
+    fn compute_logprobs_top_k_f32_values_correct() {
+        // f32 reference path: the same top_k = 5 request must return exact
+        // values (the dtype cast is a no-op here). Guards that the shared
+        // helper and the f32 path agree before comparing dtype runs to it.
+        let reference =
+            logprobs_for_dtype(&DTYPE_LOGITS, SELECTED_LOWEST, 5, dtype::FLOAT32);
+        assert_eq!(reference.top_alternatives.len(), 5);
+        assert_top_k_matches_reference(&reference, &reference, 1e-5);
+        assert_eq!(reference.top_alternatives[0].0, 1);
+    }
+
+    #[test]
+    fn compute_logprobs_selected_token_bf16_matches_f32() {
+        // Selected-token path (top_k = 0) must stay correct on bf16. This path
+        // already uses `item_f32`; the test guards it against future refactors.
+        let reference =
+            logprobs_for_dtype(&DTYPE_LOGITS, SELECTED_LOWEST, 0, dtype::FLOAT32);
+        let result =
+            logprobs_for_dtype(&DTYPE_LOGITS, SELECTED_LOWEST, 0, dtype::BFLOAT16);
+        assert!(result.top_alternatives.is_empty());
+        assert_eq!(result.token_id, SELECTED_LOWEST);
+        assert!(
+            (result.logprob - reference.logprob).abs() <= 0.1,
+            "bf16 selected-token logprob {} differs from f32 reference {} by more than 0.1",
+            result.logprob,
+            reference.logprob
+        );
+    }
+
+    #[test]
+    fn compute_logprobs_selected_token_f16_matches_f32() {
+        let reference =
+            logprobs_for_dtype(&DTYPE_LOGITS, SELECTED_LOWEST, 0, dtype::FLOAT32);
+        let result =
+            logprobs_for_dtype(&DTYPE_LOGITS, SELECTED_LOWEST, 0, dtype::FLOAT16);
+        assert!(result.top_alternatives.is_empty());
+        assert_eq!(result.token_id, SELECTED_LOWEST);
+        assert!(
+            (result.logprob - reference.logprob).abs() <= 0.03,
+            "f16 selected-token logprob {} differs from f32 reference {} by more than 0.03",
+            result.logprob,
+            reference.logprob
+        );
     }
 
     // -- TokenBiasMap and apply_token_bias --
