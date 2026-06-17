@@ -84,7 +84,7 @@ For Qwen2.5-0.5B the 4-bit row is the directly comparable cross-hardware figure;
 | Supported model architectures | 89+ ModelType variants |
 | Text models tested (M1 Ultra, 2026-06-15) | 136 pass, 2 partial, 4 fail, 9 skip/non-standalone (151 dirs; adds apertus, seed-oss, dots.llm1, granite family, lfm2, plamo-2, falcon-h1, BitNet; diffusiongemma loads via #291) |
 | Text models tested (M5 Max, 2026-06-15) | 131 pass, 5 partial, 14 fail/skip (0.2.1 full sweep; post-sweep: qwen2.5-vl-3b-4bit fixed by re-download, oversized bf16 hunyuan dropped; neither a code regression) |
-| Text models tested (GB10, 2026-06-17) | 133 pass, 14 fail, 1 OOM-skip (148 total; 0.3.1 with the CUDA fused decode-MoE kernel #319 — 9 MoE models flipped FAIL→pass vs 0.3.0: 5 Qwen MoE + gemma-4-26b-a4b x2 + dots.llm1 + diffusiongemma) |
+| Text models tested (GB10, 2026-06-17) | 133 pass, 12 fail, 2 not-tested (glm-5/glm-5.1 weights not downloaded), 1 OOM-skip (148 total; 0.3.1 with the CUDA fused decode-MoE kernel #319 — 9 MoE models flipped FAIL→pass vs 0.3.0: 5 Qwen MoE + gemma-4-26b-a4b x2 + dots.llm1 + diffusiongemma) |
 | VLM models tested (GB10, 2026-06-17) | 53 measured image rows (0.3.1) |
 | VLM models tested (M5 Max, 2026-06-15) | 54 valid VLM rows (0.2.1 full VLM re-sweep; adds qwen3-vl-4b/8b, minicpm-v-4.6-bf16, nemotron-omni, youtu-vl; qwen2.5-vl-3b-4bit restored after re-download) |
 | VLM models tested (M1 Ultra, 2026-06-15) | 55 measured VLM rows (53 pass + 2 partial) |

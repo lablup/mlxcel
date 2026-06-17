@@ -28,6 +28,7 @@ Compatibility and decode/prefill performance for mlxcel models on **NVIDIA GB10 
 
 - ✅ Pass: model loads and produces tokens within the configured budget
 - ❌ Fail: warmup/bench failure, OOM skip, or 0 tokens generated
+- ⚪ Not tested: model weights are not present in `models/` (not a code failure)
 
 Prefill/Decode are the measured-pass figures from `mlxcel-bench-decode`. Notes record an early-EOS token count (when a model stopped before 100) or the failure cause. Models are grouped by architecture family; VLM-capable models appear once under text (text-prompt pass) and again in the image-input table at the end.
 
@@ -185,8 +186,8 @@ Prefill/Decode are the measured-pass figures from `mlxcel-bench-decode`. Notes r
 | baichuan-m1-14b-4bit | ✅ | 74.32 | 22.36 | 7 tok |
 | ernie-4.5-0.3b-4bit | ✅ | 6384.30 | 654.97 |  |
 | glm4-flash-4bit | ✅ | 106.65 | 53.33 |  |
-| glm-5.1-4bit | ❌ | - | - | warmup failure |
-| glm-5-4bit | ❌ | - | - | warmup failure |
+| glm-5.1-4bit | ⚪ | - | - | not tested (weights not downloaded) |
+| glm-5-4bit | ⚪ | - | - | not tested (weights not downloaded) |
 | hunyuan-13b | ✅ | 18.78 | 14.80 |  |
 | hunyuan-1.8b-4bit | ✅ | 685.98 | 154.72 | 41 tok |
 | hunyuan-a13b-instruct-4bit | ✅ | 20.07 | 15.06 |  |
@@ -334,7 +335,8 @@ Models that accept image input and generated tokens under the `"What is in this 
 |--------|-------|
 | **Total text models attempted** | 148 |
 | **Pass (✅)** | 133 |
-| **Fail / 0-token (❌)** | 14 |
+| **Fail / 0-token (❌)** | 12 |
+| **Not tested (⚪, weights absent)** | 2 |
 | **OOM-skipped (capacity)** | 1 |
 | **VLM models measured (image input)** | 53 |
 
@@ -359,7 +361,8 @@ The 0.3.1 line ported the fused decode-MoE kernel to CUDA (#319). Nine MoE model
 ### Failing / skipped models (by cause)
 
 - **BitNet (ternary; fails CUDA warmup):** `bitnet-b1.58-2b-4t`, `bitnet-b1.58-2b-4t-4bit`
-- **Other model-specific failures:** `deepseek-v3-4bit`, `glm-5-4bit`, `glm-5.1-4bit`
+- **Other model-specific failures:** `deepseek-v3-4bit`
+- **Not tested (weights not downloaded, not a code failure):** `glm-5-4bit` (config only, no safetensors), `glm-5.1-4bit` (empty checkpoint dir)
 - **Not standalone text-gen models:** `docling-layout-heron-mlx-bf16` (document layout), `granite-speech-4.1-2b-nar-mlx` (speech)
 - **MTP/DFlash drafter checkpoints (need a target; not standalone):** `gemma-4-12b-it-assistant-4bit`, `gemma-4-31b-it-assistant-bf16`, `qwen3.5-27b-dflash`, `qwen3.5-4b-dflash`
 - **VLM warmup failure under image setup:** `qwen2.5-vl-3b` (bf16), `minicpm-v-4.6-mxfp4` (mxfp4; the bf16 variant passes)
