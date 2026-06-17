@@ -251,3 +251,59 @@ fn headline_includes_also_consider_when_present() {
     assert!(line.contains("also benchmark"));
     assert!(line.contains("int8"));
 }
+
+#[test]
+fn non_power_of_two_head_dim_withholds_turbo() {
+    // Phi-2-style: hidden_size=2560, num_attention_heads=32 -> head_dim=80 (not power of two).
+    let cfg = serde_json::json!({
+        "model_type": "phi",
+        "num_hidden_layers": 32,
+        "num_attention_heads": 32,
+        "hidden_size": 2560
+    });
+    // Verify head_dim derivation.
+    assert_eq!(read_head_dim(&cfg), Some(80));
+    assert!(!80u64.is_power_of_two());
+
+    let advices = advise_kv_cache_modes_from_config(&cfg);
+    assert_eq!(advices.len(), 3);
+
+    // None should suggest or offer a Walsh-Hadamard Turbo mode.
+    for advice in &advices {
+        assert!(
+            !is_walsh_hadamard_turbo(advice.suggested),
+            "Expected no Turbo suggestion for non-pow2 head dim, got {:?}",
+            advice.suggested
+        );
+        if let Some(ac) = advice.also_consider {
+            assert!(
+                !is_walsh_hadamard_turbo(ac),
+                "Expected no Turbo in also_consider for non-pow2 head dim, got {ac:?}"
+            );
+        }
+    }
+    // short -> fp16, medium -> int8, long -> int8.
+    assert_eq!(advices[0].suggested, KVCacheMode::Fp16);
+    assert_eq!(advices[1].suggested, KVCacheMode::Int8);
+    assert_eq!(advices[2].suggested, KVCacheMode::Int8);
+}
+
+#[test]
+fn power_of_two_head_dim_keeps_turbo() {
+    // Llama-style: hidden_size=4096, num_attention_heads=32 -> head_dim=128 (power of two).
+    let cfg = serde_json::json!({
+        "model_type": "llama",
+        "num_hidden_layers": 32,
+        "num_attention_heads": 32,
+        "num_key_value_heads": 8,
+        "hidden_size": 4096
+    });
+    assert_eq!(read_head_dim(&cfg), Some(128));
+    assert!(128u64.is_power_of_two());
+
+    let advices = advise_kv_cache_modes_from_config(&cfg);
+    assert!(advices.len() >= 2);
+    // medium and long should still suggest Turbo4Asym (llama is not on the symmetric allowlist).
+    assert_eq!(advices[1].suggested, KVCacheMode::Turbo4Asym);
+    assert_eq!(advices[2].suggested, KVCacheMode::Turbo4Asym);
+}

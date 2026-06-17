@@ -287,6 +287,9 @@ The conservative rules the advisor applies:
 | Standard / sliding-window / hybrid, long, not allowlisted | `fp16+turbo4` | `fp16+turbo3` | Symmetric `turbo4` withheld off the allowlist; `fp16+turbo3` if memory is tight. |
 | MLA (DeepSeek), medium or long | `int8` | - | The latent dimension is not a power of two, so the Turbo Walsh-Hadamard V path does not apply; per-token INT8 has no head-dim constraint. |
 | Pure SSM (Mamba/Mamba2) | `fp16` | - | No context-proportional KV cache, so Turbo modes save almost nothing. |
+| Non-power-of-two head dim (e.g. Phi-2 at head_dim 80) | `int8` (medium/long), `fp16` (short) | - | The Turbo Walsh-Hadamard transform requires a power-of-two head dimension; the advisor downgrades any Turbo suggestion to `int8` or `fp16` for these families, matching the MLA treatment. |
+
+The head-dimension check reads `head_dim` or `head_size` directly from `config.json` when present, or divides `hidden_size` by `num_attention_heads` to derive it. When the value is unavailable, the advisor conservatively assumes Turbo is applicable and leaves the suggestion unchanged.
 
 Symmetric `turbo4` is only ever suggested for families on the allowlist; off
 the allowlist the advisor leads with `fp16+turbo4` exactly like the manual

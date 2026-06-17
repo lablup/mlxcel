@@ -42,6 +42,11 @@
 //! - **Context range** is bucketed by [`KvContextRange`]: short single-request
 //!   decode versus long-context serving. Long context and memory-constrained
 //!   serving are prioritized over raw short-decode tok/s.
+//! - **Head-dimension guard**: Turbo (Walsh-Hadamard) modes require a
+//!   power-of-two attention head dimension. When the head dim is derivable from
+//!   `config.json` and is not a power of two (for example Phi-2 at 80),
+//!   Turbo suggestions are downgraded to `int8` or `fp16`, matching the
+//!   treatment of MLA families.
 //!
 //! Used by: `quant_advisor::advise_quantization` (populates
 //! `QuantAdvice::kv_cache_advice`) and `quant_advisor::print_quant_advice`
@@ -242,21 +247,48 @@ pub fn recommend_kv_cache_mode(
 /// Returns an empty vector when `config.json` cannot be read/parsed or when the
 /// architecture cannot be classified, so callers can treat "no advice" as a
 /// soft, non-fatal condition. Reads only `config.json`; never loads weights.
+///
+/// When the attention head dimension is derivable from the config and is not a
+/// power of two (for example Phi-2 at head_dim 80), any Turbo
+/// (Walsh-Hadamard) suggestion is downgraded to `int8` or `fp16`. The Turbo
+/// path panics on non-power-of-two head dims via
+/// `TurboQuantParams::new`; this guard prevents that panic from reaching a
+/// user-initiated benchmark run.
 #[must_use]
 pub fn advise_kv_cache_modes(model_path: &Path) -> Vec<KvCacheModeAdvice> {
-    let Some((arch_kind, model_type)) = arch_and_type_from_path(model_path) else {
-        return Vec::new();
+    let config_str = match std::fs::read_to_string(model_path.join("config.json")) {
+        Ok(s) => s,
+        Err(_) => return Vec::new(),
     };
-    KvContextRange::all()
-        .into_iter()
-        .map(|range| recommend_kv_cache_mode(arch_kind, &model_type, range))
-        .collect()
+    let config: serde_json::Value = match serde_json::from_str(&config_str) {
+        Ok(c) => c,
+        Err(_) => return Vec::new(),
+    };
+    advise_kv_cache_modes_from_config(&config)
 }
 
-fn arch_and_type_from_path(model_path: &Path) -> Option<(KvArchKind, String)> {
-    let config_str = std::fs::read_to_string(model_path.join("config.json")).ok()?;
-    let config: serde_json::Value = serde_json::from_str(&config_str).ok()?;
-    arch_and_type_from_config(&config)
+/// Pure-data core of [`advise_kv_cache_modes`], operating on an already-parsed
+/// config value. Separated so unit tests can drive it without touching the
+/// filesystem.
+fn advise_kv_cache_modes_from_config(config: &serde_json::Value) -> Vec<KvCacheModeAdvice> {
+    let Some((arch_kind, model_type)) = arch_and_type_from_config(config) else {
+        return Vec::new();
+    };
+    // Turbo modes require a power-of-two head dimension. When the config lets
+    // us derive the head dim and it is not a power of two, downgrade all Turbo
+    // suggestions to head-dim-agnostic alternatives.
+    let turbo_ok = read_head_dim(config).is_none_or(|d| d > 0 && d.is_power_of_two());
+    KvContextRange::all()
+        .into_iter()
+        .map(|range| {
+            let advice = recommend_kv_cache_mode(arch_kind, &model_type, range);
+            if turbo_ok {
+                advice
+            } else {
+                downgrade_for_non_power_of_two(advice)
+            }
+        })
+        .collect()
 }
 
 fn arch_and_type_from_config(config: &serde_json::Value) -> Option<(KvArchKind, String)> {
@@ -276,6 +308,72 @@ fn read_model_type(config: &serde_json::Value) -> String {
         .or_else(|| config.get("model_type").and_then(|v| v.as_str()))
         .unwrap_or("")
         .to_ascii_lowercase()
+}
+
+/// Derive the attention head dimension from `config.json`.
+///
+/// Checks `text_config` first, then top-level. Returns an explicit `head_dim`
+/// or `head_size` when present; otherwise divides `hidden_size` (or `d_model`)
+/// by `num_attention_heads` (or `num_heads`). Returns `None` when the required
+/// fields are absent or heads is zero.
+fn read_head_dim(config: &serde_json::Value) -> Option<u64> {
+    let text = config.get("text_config").unwrap_or(config);
+    if let Some(d) = text.get("head_dim").and_then(|v| v.as_u64()) {
+        return Some(d);
+    }
+    if let Some(d) = text.get("head_size").and_then(|v| v.as_u64()) {
+        return Some(d);
+    }
+    let hidden = text
+        .get("hidden_size")
+        .or_else(|| text.get("d_model"))
+        .and_then(|v| v.as_u64())?;
+    let heads = text
+        .get("num_attention_heads")
+        .or_else(|| text.get("num_heads"))
+        .and_then(|v| v.as_u64())?;
+    if heads == 0 {
+        return None;
+    }
+    Some(hidden / heads)
+}
+
+/// The rationale emitted when a Turbo suggestion is downgraded because the
+/// model's head dimension is not a power of two.
+const NON_POW2_RATIONALE: &str = "This family's attention head dimension is not \
+    a power of two, so the Turbo Walsh-Hadamard V path does not apply; \
+    per-token int8 is the head-dim-agnostic KV compression to benchmark here.";
+
+/// Returns `true` for the three modes that use the Walsh-Hadamard transform.
+fn is_walsh_hadamard_turbo(mode: KVCacheMode) -> bool {
+    matches!(
+        mode,
+        KVCacheMode::Turbo4Asym | KVCacheMode::Turbo4 | KVCacheMode::Turbo3Asym
+    )
+}
+
+/// Downgrade any Turbo (Walsh-Hadamard) suggestion to `int8` when the model's
+/// attention head dimension is not a power of two.
+///
+/// If `suggested` is a Turbo mode, it is replaced by `int8` and `also_consider`
+/// is cleared. If only `also_consider` is a Turbo mode, that field is cleared.
+/// Non-Turbo suggestions (fp16, int8) pass through unchanged.
+fn downgrade_for_non_power_of_two(advice: KvCacheModeAdvice) -> KvCacheModeAdvice {
+    if is_walsh_hadamard_turbo(advice.suggested) {
+        KvCacheModeAdvice {
+            suggested: KVCacheMode::Int8,
+            also_consider: None,
+            rationale: NON_POW2_RATIONALE,
+            ..advice
+        }
+    } else if advice.also_consider.is_some_and(is_walsh_hadamard_turbo) {
+        KvCacheModeAdvice {
+            also_consider: None,
+            ..advice
+        }
+    } else {
+        advice
+    }
 }
 
 // ── Rendering ──────────────────────────────────────────────────────────────────
