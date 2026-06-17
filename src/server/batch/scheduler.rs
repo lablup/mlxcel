@@ -43,7 +43,10 @@ use mlxcel_core::generation_policy::{
     initial_token_history, merged_eos_token_ids, seed_rng_if_needed,
 };
 use mlxcel_core::hardware;
-use mlxcel_core::sampling::{TokenBiasMap, compute_logprobs, sample_token_optimized};
+use mlxcel_core::sampling::{
+    FusedSampleParams, TokenBiasMap, batched_fused_sample, compute_logprobs,
+    row_supports_fused_batch, sample_token_optimized,
+};
 use mlxcel_core::streams::{
     install_thread_local_default_stream, new_thread_local_generation_stream,
 };
@@ -4210,6 +4213,20 @@ impl BatchScheduler {
             self.sync_sequence_storage(seq_id);
         }
 
+        // Fast path: when every active row shares a fused-compatible sampling
+        // config and none needs a structured-output mask, a thinking-budget
+        // override, or a per-token logprobs payload, sample all B rows in ONE
+        // fused `[B, vocab] -> [B]` dispatch + eval instead of B per-row
+        // slice/sample/eval/extract round trips. The per-row loop below stays
+        // the exact fallback for every other case (structured output,
+        // row-specific logprobs, token-bias observability, thinking budgets,
+        // mixed sampling configs).
+        if let Some(params) = self.batched_decode_fused_params(seq_ids) {
+            let tokens = batched_fused_sample(&logits, &params);
+            self.apply_fused_decode_tokens(seq_ids, &tokens);
+            return;
+        }
+
         for (i, &seq_id) in seq_ids.iter().enumerate() {
             let seq_logits =
                 mlxcel_core::slice(&logits, &[i as i32, 0, 0], &[i as i32 + 1, 1, i32::MAX]);
@@ -4339,6 +4356,111 @@ impl BatchScheduler {
             }
 
             // Periodic cache clearing (matches Python mlx-lm which clears every 256)
+            if seq.generated_tokens.len() % 256 == 0 {
+                mlxcel_core::clear_memory_cache();
+            }
+
+            if let Some(cache_set) = self.cache_pool.get_mut(seq_id) {
+                cache_set.current_offset += 1;
+            }
+        }
+    }
+
+    /// Decide whether the batched decode fast path applies to `seq_ids`.
+    ///
+    /// Returns `Some(params)` with the shared scalar sampling parameters when
+    /// EVERY active row can be sampled by a single `[B, vocab] -> [B]` fused
+    /// dispatch: all rows share the same scalar parameters, none needs a
+    /// history-based penalty or token bias, and none needs a structured-output
+    /// mask, a thinking-budget override, or a per-token logprobs payload. Any
+    /// row that needs per-row treatment returns `None`, which routes the caller
+    /// to the unchanged per-row fallback loop.
+    ///
+    /// The per-row obligations map onto the generic predicate
+    /// [`mlxcel_core::sampling::row_supports_fused_batch`] as: structured-output
+    /// mask -> `needs_logit_mask` (`seq.structured`); thinking-budget override
+    /// -> `needs_token_override` (`seq.thinking`); per-token logprobs ->
+    /// `needs_per_token_payload` (`seq.logprobs_config`).
+    fn batched_decode_fused_params(&self, seq_ids: &[SequenceId]) -> Option<FusedSampleParams> {
+        let mut shared: Option<FusedSampleParams> = None;
+        for &seq_id in seq_ids {
+            // A row that vanished from the batch forces the per-row fallback,
+            // which carries its own missing-sequence guards.
+            let seq = self.active_batch.get(seq_id)?;
+            if !row_supports_fused_batch(
+                &seq.sampling,
+                seq.structured.is_some(),
+                !seq.thinking.is_disabled(),
+                seq.logprobs_config.enabled,
+            ) {
+                return None;
+            }
+            let params = FusedSampleParams::from_config(&seq.sampling);
+            match shared {
+                None => shared = Some(params),
+                Some(first) if !first.matches(&params) => return None,
+                Some(_) => {}
+            }
+        }
+        shared
+    }
+
+    /// Bookkeeping for the batched fused fast path.
+    ///
+    /// Consumes the `[B]` token ids produced by
+    /// [`mlxcel_core::sampling::batched_fused_sample`] and drives each
+    /// sequence's EOS check, token history, streaming decode, length limit,
+    /// periodic cache clear, and cache-offset advance. This mirrors the tail of
+    /// the per-row loop in [`Self::execute_batched_decode`] minus the per-row
+    /// sampling, structured-output, thinking-budget, and logprobs work that
+    /// [`Self::batched_decode_fused_params`] already excluded. `tokens[i]` is
+    /// the id sampled for `seq_ids[i]`.
+    fn apply_fused_decode_tokens(&mut self, seq_ids: &[SequenceId], tokens: &[i32]) {
+        debug_assert_eq!(
+            seq_ids.len(),
+            tokens.len(),
+            "apply_fused_decode_tokens: token count must match seq_ids"
+        );
+        for (i, &seq_id) in seq_ids.iter().enumerate() {
+            let token_val = tokens[i];
+            let seq = match self.active_batch.get_mut(seq_id) {
+                Some(s) => s,
+                None => continue,
+            };
+
+            if seq.merged_eos.contains(&token_val) {
+                if let Err(err) = seq
+                    .state
+                    .transition_to(SequenceState::Finished(FinishReason::Stop))
+                {
+                    tracing::error!("State transition error: {err}");
+                }
+                continue;
+            }
+
+            seq.generated_tokens.push(token_val);
+
+            // The gate guarantees no penalty config reaches the fast path, so
+            // this is a no-op today; it is kept for exact parity with the
+            // per-row loop in case the gate ever admits history-tracking
+            // configs.
+            if seq.sampling.needs_token_history() {
+                seq.token_history.push(token_val);
+            }
+
+            if let Some(new_text) = seq.decode_state.on_token(token_val, &self.tokenizer) {
+                let _ = seq.response_tx.send(GenerateEvent::Token(new_text));
+            }
+
+            if seq.generated_tokens.len() >= seq.max_tokens
+                && let Err(err) = seq
+                    .state
+                    .transition_to(SequenceState::Finished(FinishReason::Length))
+            {
+                tracing::error!("State transition error: {err}");
+            }
+
+            // Periodic cache clearing (matches Python mlx-lm which clears every 256).
             if seq.generated_tokens.len() % 256 == 0 {
                 mlxcel_core::clear_memory_cache();
             }

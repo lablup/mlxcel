@@ -326,6 +326,143 @@ pub fn batched_sample(
     tokens
 }
 
+/// Scalar sampling parameters consumed by [`ffi::fused_sample`].
+///
+/// Once [`config_supports_fused_batch`] has ruled out per-row penalties and
+/// token bias, these four `Copy` fields are the entire sampler state the
+/// batched fast path needs. Carrying them on their own lets the batch
+/// scheduler gate compare rows and dispatch without cloning a full
+/// [`SamplingConfig`] (with its penalty `Vec`s and bias maps) on every fused
+/// decode step.
+///
+/// Used by: `BatchScheduler::execute_batched_decode` fast-path gate
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FusedSampleParams {
+    /// Sampling temperature (`0.0` selects the greedy argmax path).
+    pub temperature: f32,
+    /// Top-k cutoff (`0` disables; `1` selects the greedy argmax path).
+    pub top_k: i32,
+    /// Top-p (nucleus) cutoff (`1.0` disables).
+    pub top_p: f32,
+    /// Min-p cutoff (`0.0` disables).
+    pub min_p: f32,
+}
+
+impl FusedSampleParams {
+    /// Extract the fused scalar params from a full [`SamplingConfig`].
+    pub fn from_config(config: &SamplingConfig) -> Self {
+        Self {
+            temperature: config.temperature,
+            top_k: config.top_k,
+            top_p: config.top_p,
+            min_p: config.min_p,
+        }
+    }
+
+    /// Bitwise equality of the fused scalar params.
+    ///
+    /// Uses `f32::to_bits` so the comparison is exact (and clippy-clean): two
+    /// rows that derive their config from the same request are bit-identical,
+    /// and any difference forces the per-row fallback.
+    pub fn matches(&self, other: &Self) -> bool {
+        self.temperature.to_bits() == other.temperature.to_bits()
+            && self.top_k == other.top_k
+            && self.top_p.to_bits() == other.top_p.to_bits()
+            && self.min_p.to_bits() == other.min_p.to_bits()
+    }
+}
+
+/// Returns `true` when `config` can be sampled by the batched fused fast path.
+///
+/// The fast path applies one set of scalar parameters across the whole
+/// `[B, vocab]` batch in a single [`ffi::fused_sample`] call. It cannot
+/// represent per-row history-based penalties (repetition / DRY / frequency /
+/// presence) or a non-empty token bias, both of which require per-row logit
+/// edits before sampling. When this returns `false`, the caller must fall
+/// back to the per-row sampler.
+///
+/// Used by: `BatchScheduler::execute_batched_decode` fast-path gate
+pub fn config_supports_fused_batch(config: &SamplingConfig) -> bool {
+    !config.needs_token_history() && config.token_bias.is_empty()
+}
+
+/// Per-row eligibility for the batched fused fast path.
+///
+/// A row may join the single-dispatch `[B, vocab] -> [B]` fast path only when
+/// its sampling config is fused-compatible ([`config_supports_fused_batch`])
+/// and it imposes none of the per-row obligations that need the per-row
+/// sampler:
+///
+/// - `needs_logit_mask`: a per-row logit mask, e.g. a structured-output
+///   grammar mask.
+/// - `needs_token_override`: a post-sample token override, e.g. a
+///   thinking-budget forced `</think>`.
+/// - `needs_per_token_payload`: a per-token output payload, e.g. logprobs.
+///
+/// Any of those returns `false` and sends the row to the per-row fallback.
+///
+/// Used by: `BatchScheduler::execute_batched_decode` fast-path gate
+pub fn row_supports_fused_batch(
+    config: &SamplingConfig,
+    needs_logit_mask: bool,
+    needs_token_override: bool,
+    needs_per_token_payload: bool,
+) -> bool {
+    config_supports_fused_batch(config)
+        && !needs_logit_mask
+        && !needs_token_override
+        && !needs_per_token_payload
+}
+
+/// Batched fused sampler: sample `[B]` token ids from `[B, vocab]` (or
+/// `[B, 1, vocab]`) logits with a single eval/sync point.
+///
+/// All `B` rows are sampled with the same scalar parameters in ONE
+/// [`ffi::fused_sample`] dispatch, then the `[B]` token array is evaluated
+/// once and copied to host. This replaces the per-row slice + sample + eval +
+/// `item_i32` round trips that [`batched_sample`] performs (one eval/sync per
+/// row), collapsing `B` sync points into one.
+///
+/// Correctness: the caller must have confirmed every row is fused-eligible
+/// (see [`row_supports_fused_batch`]) and shares these `params`. Greedy
+/// (`temperature == 0` or `top_k == 1`) output is byte-identical to the
+/// per-row path because `argmax` over the last axis is independent per row.
+/// Stochastic sampling differs from the per-row path only in random-number
+/// sequencing (the documented batched-vs-B=1 jitter class), not in the
+/// sampled distribution.
+///
+/// Used by: `BatchScheduler::execute_batched_decode` fast-path dispatch
+pub fn batched_fused_sample(logits: &MlxArray, params: &FusedSampleParams) -> Vec<i32> {
+    // [B, 1, vocab] -> [B, vocab]; a 2-D input is returned unchanged.
+    let last_logits = ffi::slice_last_logits(logits);
+    let tokens = ffi::fused_sample(
+        &last_logits,
+        params.temperature,
+        params.top_k,
+        params.top_p,
+        params.min_p,
+    );
+    token_ids_to_host(&tokens)
+}
+
+/// Copy a 1-D `[B]` token-id array to host as `Vec<i32>` with a single
+/// evaluation.
+///
+/// [`ffi::fused_sample`] returns `uint32` token ids (from `argmax` or
+/// `categorical`); the raw bytes are reinterpreted as `i32`, which is exact
+/// for any token id in `0..vocab_size` (well under `i32::MAX`). This mirrors
+/// the raw-byte extraction already used by [`compute_logprobs`] for
+/// argpartition indices and avoids adding an `astype` node to the sampling
+/// graph. [`ffi::array_to_raw_bytes`] evaluates and makes the array
+/// contiguous internally, so it is the single sync point for the batch.
+fn token_ids_to_host(tokens: &MlxArray) -> Vec<i32> {
+    let bytes = ffi::array_to_raw_bytes(tokens);
+    bytes
+        .chunks_exact(4)
+        .map(|c| i32::from_ne_bytes([c[0], c[1], c[2], c[3]]))
+        .collect()
+}
+
 /// Apply repetition penalty to logits.
 ///
 /// For tokens in history:
@@ -778,6 +915,159 @@ mod tests {
         let tokens = batched_sample(&logits, &configs, &histories);
         assert_eq!(tokens.len(), 1);
         assert_eq!(tokens[0], 1); // argmax of [0.5, 1.5, 0.3] is index 1
+    }
+
+    // -- batched fused sampler ([B, vocab] -> [B]) --
+
+    #[test]
+    fn batched_fused_sample_greedy_matches_per_row() {
+        // Four rows with distinct argmax positions (no ties), shape [B, 1, V].
+        // Row 0: argmax 2, Row 1: argmax 0, Row 2: argmax 4, Row 3: argmax 1.
+        #[rustfmt::skip]
+        let flat = [
+            0.1f32, 0.9, 1.2, 0.3, 0.0,
+            2.0,    0.5, 0.1, 0.2, 0.3,
+            0.0,    0.1, 0.2, 0.3, 1.5,
+            0.4,    1.8, 0.2, 0.1, 0.0,
+        ];
+        let logits = ffi::from_slice_f32(&flat, &[4, 1, 5]);
+        let greedy = SamplingConfig::greedy();
+
+        // New fused path: one fused_sample dispatch + one host copy for all B.
+        let params = FusedSampleParams::from_config(&greedy);
+        let fused = batched_fused_sample(&logits, &params);
+
+        // Per-row reference path (one eval/sync per row).
+        let configs: Vec<&SamplingConfig> = vec![&greedy; 4];
+        let histories: Vec<&[i32]> = vec![&[]; 4];
+        let per_row = batched_sample(&logits, &configs, &histories);
+
+        // Greedy output must be byte-identical to the per-row path.
+        assert_eq!(fused, per_row);
+        assert_eq!(fused, vec![2, 0, 4, 1]);
+    }
+
+    #[test]
+    fn batched_fused_sample_single_row_no_regression() {
+        // B=1 must match the per-row path exactly (argmax of [0.5,1.5,0.3] = 1).
+        let logits = ffi::from_slice_f32(&[0.5, 1.5, 0.3], &[1, 1, 3]);
+        let greedy = SamplingConfig::greedy();
+        let params = FusedSampleParams::from_config(&greedy);
+        let fused = batched_fused_sample(&logits, &params);
+        assert_eq!(fused, vec![1]);
+    }
+
+    #[test]
+    fn batched_fused_sample_accepts_2d_logits() {
+        // A 2-D [B, V] input (already last-sliced) must work unchanged.
+        let logits = ffi::from_slice_f32(&[0.1, 0.2, 0.9, 1.0, 0.0, 0.0], &[2, 3]);
+        let greedy = SamplingConfig::greedy();
+        let params = FusedSampleParams::from_config(&greedy);
+        let fused = batched_fused_sample(&logits, &params);
+        assert_eq!(fused, vec![2, 0]);
+    }
+
+    #[test]
+    fn config_supports_fused_batch_true_for_plain_configs() {
+        assert!(config_supports_fused_batch(&SamplingConfig::greedy()));
+        assert!(config_supports_fused_batch(&SamplingConfig::default()));
+        assert!(config_supports_fused_batch(
+            &SamplingConfig::with_temperature(0.7)
+        ));
+    }
+
+    #[test]
+    fn config_supports_fused_batch_false_for_penalties() {
+        let rep = SamplingConfig {
+            repetition_penalty: 1.1,
+            ..Default::default()
+        };
+        assert!(!config_supports_fused_batch(&rep));
+
+        let freq = SamplingConfig {
+            frequency_penalty: 0.5,
+            ..Default::default()
+        };
+        assert!(!config_supports_fused_batch(&freq));
+
+        let pres = SamplingConfig {
+            presence_penalty: 0.5,
+            ..Default::default()
+        };
+        assert!(!config_supports_fused_batch(&pres));
+
+        let dry = SamplingConfig {
+            dry_multiplier: 0.8,
+            ..Default::default()
+        };
+        assert!(!config_supports_fused_batch(&dry));
+    }
+
+    #[test]
+    fn config_supports_fused_batch_false_for_token_bias() {
+        let mut bias = TokenBiasMap::new();
+        bias.insert(7, -1.0);
+        let cfg = SamplingConfig {
+            token_bias: bias,
+            ..Default::default()
+        };
+        assert!(!config_supports_fused_batch(&cfg));
+    }
+
+    #[test]
+    fn fused_sample_params_match_detects_each_difference() {
+        let base = FusedSampleParams::from_config(&SamplingConfig::with_temperature(0.7));
+        assert!(base.matches(&base));
+
+        let diff_temp = FusedSampleParams {
+            temperature: 0.8,
+            ..base
+        };
+        assert!(!base.matches(&diff_temp));
+
+        let diff_topk = FusedSampleParams { top_k: 40, ..base };
+        assert!(!base.matches(&diff_topk));
+
+        let diff_topp = FusedSampleParams { top_p: 0.9, ..base };
+        assert!(!base.matches(&diff_topp));
+
+        let diff_minp = FusedSampleParams {
+            min_p: 0.05,
+            ..base
+        };
+        assert!(!base.matches(&diff_minp));
+    }
+
+    #[test]
+    fn row_supports_fused_batch_gate_on_for_plain_row() {
+        // Plain greedy row with no per-row obligations joins the fast path.
+        assert!(row_supports_fused_batch(
+            &SamplingConfig::greedy(),
+            false, // no logit mask
+            false, // no token override
+            false, // no per-token payload
+        ));
+    }
+
+    #[test]
+    fn row_supports_fused_batch_gate_off_for_per_row_obligations() {
+        let greedy = SamplingConfig::greedy();
+        // Structured-output mask forces the per-row fallback.
+        assert!(!row_supports_fused_batch(&greedy, true, false, false));
+        // Thinking-budget override forces the per-row fallback.
+        assert!(!row_supports_fused_batch(&greedy, false, true, false));
+        // Per-token logprobs payload forces the per-row fallback.
+        assert!(!row_supports_fused_batch(&greedy, false, false, true));
+    }
+
+    #[test]
+    fn row_supports_fused_batch_gate_off_for_incompatible_config() {
+        // Even with no per-row obligations, a penalty config is not fusible.
+        let rep = SamplingConfig {
+            repetition_penalty: 1.2,
+            ..Default::default()
+        };
+        assert!(!row_supports_fused_batch(&rep, false, false, false));
     }
 
     #[test]

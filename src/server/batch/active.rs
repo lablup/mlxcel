@@ -72,6 +72,14 @@ impl ActiveBatch {
         self.sequences.get_mut(&id)
     }
 
+    /// Get a shared reference to a sequence by ID.
+    ///
+    /// Used by the batched-decode fast-path gate, which inspects each row's
+    /// sampling config and per-row obligations without mutating the batch.
+    pub fn get(&self, id: SequenceId) -> Option<&SequenceInfo> {
+        self.sequences.get(&id)
+    }
+
     /// Returns `true` when the batch has reached its capacity limit.
     pub fn is_full(&self) -> bool {
         self.sequences.len() >= self.max_size
