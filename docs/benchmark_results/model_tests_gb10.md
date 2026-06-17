@@ -133,7 +133,7 @@ Prefill/Decode are the measured-pass figures from `mlxcel-bench-decode`. Notes r
 | Model | Status | Prefill (tok/s) | Decode (tok/s) | Notes |
 |-------|--------|-----------------|----------------|-------|
 | deepseek-v2-lite-4bit | ✅ | 160.07 | 96.81 |  |
-| deepseek-v3-4bit | ❌ | - | - | warmup failure (also failed at 0.1.0) |
+| deepseek-v3-4bit | ❌ | - | - | too large for GB10 (671B @ 4bit ~350GB > 122GB); present checkpoint incomplete (layers 0-19 of 61) |
 | dots.llm1.inst-mixed-4-6bit | ✅ | 25.42 | 22.04 | 39 tok |
 | gpt-oss-120b-4bit | ✅ | 57.75 | 50.48 | 82 tok |
 | gpt-oss-20b-mxfp4 | ✅ | 126.16 | 77.25 |  |
@@ -208,8 +208,8 @@ Prefill/Decode are the measured-pass figures from `mlxcel-bench-decode`. Notes r
 
 | Model | Status | Prefill (tok/s) | Decode (tok/s) | Notes |
 |-------|--------|-----------------|----------------|-------|
-| bitnet-b1.58-2b-4t | ❌ | - | - | ternary BitNet; fails warmup on CUDA |
-| bitnet-b1.58-2b-4t-4bit | ❌ | - | - | ternary BitNet; fails warmup on CUDA |
+| bitnet-b1.58-2b-4t | ✅ | 517.84 | 130.24 | CUDA ternary kernel (#322) |
+| bitnet-b1.58-2b-4t-4bit | ✅ | 537.54 | 176.50 | CUDA ternary kernel (#322) |
 
 ## VLM-capable Models (text-only pass)
 
@@ -334,10 +334,10 @@ Models that accept image input and generated tokens under the `"What is in this 
 | Metric | Count |
 |--------|-------|
 | **Total text models attempted** | 148 |
-| **Pass (✅)** | 133 |
-| **Fail (❌)** | 11 |
+| **Pass (✅)** | 135 |
+| **Fail (❌)** | 8 |
 | **Not tested / N.A. (⚪)** | 3 |
-| **OOM-skipped (capacity)** | 1 |
+| **Too large for GB10 (capacity)** | 2 |
 | **VLM models measured (image input)** | 53 |
 
 ### CUDA fused decode-MoE kernel (#319)
@@ -360,12 +360,10 @@ The 0.3.1 line ported the fused decode-MoE kernel to CUDA (#319). Nine MoE model
 
 ### Failing / skipped models (by cause)
 
-- **BitNet (ternary; fails CUDA warmup):** `bitnet-b1.58-2b-4t`, `bitnet-b1.58-2b-4t-4bit`
-- **Other model-specific failures:** `deepseek-v3-4bit`
 - **Not tested / not applicable (not a code failure):** `glm-5-4bit`, `glm-5.1-4bit` (weights not downloaded); `paligemma2-3b-6bit` (image-only PaliGemma: 0 text-gen without an image, captions correctly in the VLM image table)
 - **Not standalone text-gen models:** `docling-layout-heron-mlx-bf16` (document layout), `granite-speech-4.1-2b-nar-mlx` (speech)
 - **MTP/DFlash drafter checkpoints (need a target; not standalone):** `gemma-4-12b-it-assistant-4bit`, `gemma-4-31b-it-assistant-bf16`, `qwen3.5-27b-dflash`, `qwen3.5-4b-dflash`
 - **VLM warmup failure under image setup:** `qwen2.5-vl-3b` (bf16), `minicpm-v-4.6-mxfp4` (mxfp4; the bf16 variant passes)
-- **OOM-skipped (capacity, weights exceed the memory budget):** `qwen3-next-480b-4bit`
+- **Too large for GB10 (capacity, weights exceed the 122 GB budget):** `qwen3-next-480b-4bit`; `deepseek-v3-4bit` (671B @ 4bit ~350GB; the present checkpoint is also an incomplete partial download, layers 0-19 of 61)
 
 These remaining failures are tracked in #315.
