@@ -191,7 +191,22 @@ impl QuantizedEmbedding {
         group_size: i32,
         bits: i32,
     ) -> Result<Self, String> {
-        Self::from_weights_with_mode(weights, prefix, group_size, bits, "affine")
+        // Auto-detect the quantization mode: affine stores zero-point biases,
+        // so their absence means a block-float scheme (mxfp4 / nvfp4 / mxfp8),
+        // distinguished by bits and group_size. This lets callers that do not
+        // thread an explicit mode (e.g. vision encoders, which always called
+        // this affine default) load non-affine weights correctly instead of
+        // aborting in quantized_matmul ("Biases must be provided for affine").
+        let mode = if weights.get(&format!("{}.biases", prefix)).is_some() {
+            "affine"
+        } else if bits == 8 {
+            "mxfp8"
+        } else if group_size == 16 {
+            "nvfp4"
+        } else {
+            "mxfp4"
+        };
+        Self::from_weights_with_mode(weights, prefix, group_size, bits, mode)
     }
 
     /// Load from weight map with explicit quantization mode
@@ -701,7 +716,22 @@ impl UnifiedLinear {
         group_size: i32,
         bits: i32,
     ) -> Result<Self, String> {
-        Self::from_weights_with_mode(weights, prefix, group_size, bits, "affine")
+        // Auto-detect the quantization mode: affine stores zero-point biases,
+        // so their absence means a block-float scheme (mxfp4 / nvfp4 / mxfp8),
+        // distinguished by bits and group_size. This lets callers that do not
+        // thread an explicit mode (e.g. vision encoders, which always called
+        // this affine default) load non-affine weights correctly instead of
+        // aborting in quantized_matmul ("Biases must be provided for affine").
+        let mode = if weights.get(&format!("{}.biases", prefix)).is_some() {
+            "affine"
+        } else if bits == 8 {
+            "mxfp8"
+        } else if group_size == 16 {
+            "nvfp4"
+        } else {
+            "mxfp4"
+        };
+        Self::from_weights_with_mode(weights, prefix, group_size, bits, mode)
     }
 
     /// Load from weight map with explicit quantization mode
@@ -734,23 +764,42 @@ impl UnifiedLinear {
             // biases may not exist for mxfp4/nvfp4/mxfp8 modes
             let biases = weights.get(&biases_name).map(|w| ffi::copy(w));
 
-            // Reconcile caller-supplied bits with actual tensor shapes. Models
-            // with per-layer quantization overrides (Qwen3.5/3.6 MoE gates)
-            // store gates at a different bit width from the rest of the model.
-            let effective_bits = if mode == "affine" {
+            // Reconcile caller-supplied quant params with the actual tensor
+            // shapes; mixed exports vary them per layer. For affine, bits are
+            // inferred with the trusted group_size (Qwen3.5/3.6 MoE gates). For
+            // the block-float modes bits are fixed by the mode, so reconcile
+            // group_size from the shapes instead: in_features = packed_in *
+            // (32/bits) = num_groups * group_size (e.g. minicpm-v-4.6 mxfp4
+            // stores some weights at group_size 32 while config says 64).
+            let (effective_bits, effective_group_size) = if mode == "affine" {
                 let w_shape = ffi::array_shape(&weight);
                 let s_shape = ffi::array_shape(&scales);
-                infer_quantization_bits(&w_shape, &s_shape, group_size, bits)
-                    .map_err(|e| format!("{} (prefix: {})", e, prefix))?
+                let eb = infer_quantization_bits(&w_shape, &s_shape, group_size, bits)
+                    .map_err(|e| format!("{} (prefix: {})", e, prefix))?;
+                (eb, group_size)
             } else {
-                bits
+                let w_shape = ffi::array_shape(&weight);
+                let s_shape = ffi::array_shape(&scales);
+                let egs = if w_shape.len() >= 2 && s_shape.len() >= 2 && bits > 0 {
+                    let packed_in = *w_shape.last().unwrap();
+                    let num_groups = *s_shape.last().unwrap();
+                    let in_features = packed_in * (32 / bits);
+                    if num_groups > 0 && in_features % num_groups == 0 {
+                        in_features / num_groups
+                    } else {
+                        group_size
+                    }
+                } else {
+                    group_size
+                };
+                (bits, egs)
             };
 
             let qweight = QuantizedWeight {
                 weight,
                 scales,
                 biases,
-                group_size,
+                group_size: effective_group_size,
                 bits: effective_bits,
                 mode: mode.to_string(),
             };
