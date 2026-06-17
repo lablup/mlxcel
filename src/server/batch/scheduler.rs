@@ -45,7 +45,7 @@ use mlxcel_core::generation_policy::{
 use mlxcel_core::hardware;
 use mlxcel_core::sampling::{
     FusedSampleParams, TokenBiasMap, batched_fused_sample, compute_logprobs,
-    row_supports_fused_batch, sample_token_optimized,
+    row_supports_fused_batch, sample_token_optimized, sample_token_optimized_with_state,
 };
 use mlxcel_core::streams::{
     install_thread_local_default_stream, new_thread_local_generation_stream,
@@ -601,6 +601,7 @@ impl BatchScheduler {
             prefill_start: None,
             first_token_time: None,
             token_history: Vec::new(),
+            sampler_state: None,
             merged_eos: Vec::new(),
             thinking: crate::server::thinking_budget::ThinkingState::disabled(),
             structured: None,
@@ -695,6 +696,7 @@ impl BatchScheduler {
             prefill_start: None,
             first_token_time: Some(Instant::now()),
             token_history,
+            sampler_state: None,
             merged_eos,
             thinking: crate::server::thinking_budget::ThinkingState::disabled(),
             structured: None,
@@ -2468,6 +2470,7 @@ impl BatchScheduler {
             prefill_start: None,
             first_token_time: None,
             token_history: Vec::new(),
+            sampler_state: None,
             merged_eos: Vec::new(),
             thinking,
             // forward the structured-output constraint built by
@@ -4273,8 +4276,19 @@ impl BatchScheduler {
                     Some(s) => s,
                     None => continue,
                 };
-                let (token_arr, adjusted_logits) =
-                    sample_token_optimized(&logits_for_sampling, &seq.sampling, &seq.token_history);
+                // Penalty rows use the incremental per-sequence sampler state
+                // (lazily created); the no-penalty rows that reach this per-row
+                // fallback take the original rebuild-free path unchanged.
+                let (token_arr, adjusted_logits) = if seq.sampling.needs_token_history() {
+                    sample_token_optimized_with_state(
+                        &logits_for_sampling,
+                        &seq.sampling,
+                        &seq.token_history,
+                        &mut seq.sampler_state,
+                    )
+                } else {
+                    sample_token_optimized(&logits_for_sampling, &seq.sampling, &seq.token_history)
+                };
                 mlxcel_core::eval(&token_arr);
                 let sampled = mlxcel_core::item_i32(&token_arr);
                 // apply the thinking-budget override first so that
@@ -4547,8 +4561,19 @@ impl BatchScheduler {
         // `</think>` would feed it a token outside its allowed set.
         let (sampled_token, token_val, token_lp) = {
             let seq = self.active_batch.get_mut(seq_id).unwrap();
-            let (token_arr, adjusted_logits) =
-                sample_token_optimized(&logits_for_sampling, &seq.sampling, &seq.token_history);
+            // Penalty sequences use the incremental per-sequence sampler state
+            // (lazily created); a no-penalty sequence takes the original
+            // rebuild-free path unchanged.
+            let (token_arr, adjusted_logits) = if seq.sampling.needs_token_history() {
+                sample_token_optimized_with_state(
+                    &logits_for_sampling,
+                    &seq.sampling,
+                    &seq.token_history,
+                    &mut seq.sampler_state,
+                )
+            } else {
+                sample_token_optimized(&logits_for_sampling, &seq.sampling, &seq.token_history)
+            };
             mlxcel_core::eval(&token_arr);
             let sampled = mlxcel_core::item_i32(&token_arr);
             // apply the thinking-budget override first so that

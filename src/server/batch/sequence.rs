@@ -43,7 +43,7 @@ use std::time::Instant;
 
 use mlxcel_core::cache::SequenceId;
 use mlxcel_core::generate::SamplingConfig;
-use mlxcel_core::sampling::LogprobsConfig;
+use mlxcel_core::sampling::{LogprobsConfig, SamplerState};
 
 use crate::server::model_provider::GenerateEvent;
 use crate::server::model_provider::model_worker::StreamingDecodeState;
@@ -232,6 +232,13 @@ pub struct SequenceInfo {
     /// step. Avoids O(prompt_len + generated_len) Vec reconstruction on every
     /// decode step. Empty when `sampling.needs_token_history()` is false.
     pub(crate) token_history: Vec<i32>,
+    /// Incremental per-sequence sampler state for history-based penalties
+    /// (repetition, frequency/presence). Created lazily on the first decode
+    /// step that applies one of those penalties and dropped with the sequence
+    /// (so the default no-penalty path never allocates it). DRY is not
+    /// state-backed and keeps reading `token_history` directly. Kept in sync
+    /// with `token_history` by `sample_token_optimized_with_state`.
+    pub(crate) sampler_state: Option<SamplerState>,
     /// Merged EOS token IDs (model + per-request stop tokens), computed once
     /// during prefill and reused for every decode step. Avoids redundant
     /// allocation on every step.

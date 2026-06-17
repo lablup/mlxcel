@@ -175,6 +175,7 @@ fn make_request(
         prefill_start: None,
         first_token_time: None,
         token_history: Vec::new(),
+        sampler_state: None,
         merged_eos: Vec::new(),
         thinking: crate::server::thinking_budget::ThinkingState::disabled(),
         structured: None,

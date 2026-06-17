@@ -225,6 +225,58 @@ pub fn sample_token_optimized(
     config: &SamplingConfig,
     token_history: &[i32],
 ) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
+    sample_token_optimized_core(logits, config, token_history, None)
+}
+
+/// Incremental-state variant of [`sample_token_optimized`].
+///
+/// Sampling behavior is identical, but the repetition and frequency/presence
+/// penalties read from a per-sequence [`SamplerState`] that is maintained
+/// incrementally instead of being rebuilt from `token_history` on every call.
+/// The state is created lazily the first time a repetition/frequency/presence
+/// penalty is active, so a config with none of those (the default no-penalty
+/// path, and DRY-only configs) never allocates it and `state` stays `None`.
+///
+/// `token_history` is still passed: the deferred DRY path consumes it directly,
+/// and the [`SamplerState`] synchronizes itself to it on entry (an append-only
+/// fast path absorbs only the newly appended tail; a shorter or diverged
+/// history triggers a rebuild, which keeps trim/restore correct without any
+/// explicit reset).
+///
+/// Produces byte-identical logits to [`sample_token_optimized`] for the same
+/// history, so penalty-adjusted greedy sampling selects identical token ids.
+///
+/// Used by: `BatchScheduler` decode steps, `CxxGenerator` decode loops
+pub fn sample_token_optimized_with_state(
+    logits: &MlxArray,
+    config: &SamplingConfig,
+    token_history: &[i32],
+    state: &mut Option<SamplerState>,
+) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
+    if state.is_none()
+        && (config.repetition_penalty != 1.0
+            || config.frequency_penalty != 0.0
+            || config.presence_penalty != 0.0)
+    {
+        *state = Some(SamplerState::for_config(config));
+    }
+    sample_token_optimized_core(logits, config, token_history, state.as_mut())
+}
+
+/// Shared implementation for [`sample_token_optimized`] (`state == None`) and
+/// [`sample_token_optimized_with_state`] (`state == Some`).
+///
+/// With `state == None` every penalty takes the rebuild-every-token path, so
+/// the output is bit-for-bit identical to the pre-incremental implementation.
+/// The no-penalty baseline path is unchanged regardless of `state`: an empty
+/// `token_history` skips every penalty block, and the only added work is one
+/// already-cheap `Option` check.
+fn sample_token_optimized_core(
+    logits: &MlxArray,
+    config: &SamplingConfig,
+    token_history: &[i32],
+    mut state: Option<&mut SamplerState>,
+) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
     // Use optimized slice_last_logits: [batch, seq, vocab] -> [batch, vocab].
     let last_logits = ffi::slice_last_logits(logits);
 
@@ -261,8 +313,19 @@ pub fn sample_token_optimized(
         last_logits
     };
 
+    // Synchronize the incremental state to the current history once, before any
+    // penalty reads it. No-op when `state` is `None`.
+    if let Some(s) = &mut state {
+        s.sync(token_history);
+    }
+
     let last_logits = if config.repetition_penalty != 1.0 && !token_history.is_empty() {
-        apply_repetition_penalty(&last_logits, token_history, config.repetition_penalty)
+        match &mut state {
+            Some(s) => s.apply_repetition(&last_logits, config.repetition_penalty),
+            None => {
+                apply_repetition_penalty(&last_logits, token_history, config.repetition_penalty)
+            }
+        }
     } else {
         last_logits
     };
@@ -276,12 +339,19 @@ pub fn sample_token_optimized(
     let last_logits = if (config.frequency_penalty != 0.0 || config.presence_penalty != 0.0)
         && !token_history.is_empty()
     {
-        apply_frequency_presence_penalty(
-            &last_logits,
-            token_history,
-            config.frequency_penalty,
-            config.presence_penalty,
-        )
+        match &mut state {
+            Some(s) => s.apply_frequency_presence(
+                &last_logits,
+                config.frequency_penalty,
+                config.presence_penalty,
+            ),
+            None => apply_frequency_presence_penalty(
+                &last_logits,
+                token_history,
+                config.frequency_penalty,
+                config.presence_penalty,
+            ),
+        }
     } else {
         last_logits
     };
@@ -478,12 +548,31 @@ pub(crate) fn apply_repetition_penalty(
     let mut seen: Vec<i32> = token_history.to_vec();
     seen.sort_unstable();
     seen.dedup();
+    apply_repetition_penalty_sorted(logits, &seen, penalty)
+}
 
-    if seen.is_empty() {
+/// Core repetition-penalty application over an already sorted-and-deduped set
+/// of seen token ids.
+///
+/// [`apply_repetition_penalty`] is the rebuild-every-token entry point: it
+/// sorts and deduplicates `token_history` and then calls this. [`SamplerState`]
+/// keeps its `seen_sorted` set incrementally maintained (sorted, deduped) and
+/// feeds it here directly. Both produce byte-identical logits for the same
+/// history because `take_along_axis`/`put_along_axis` over the same unique
+/// index set apply the identical per-element ops, and the set of unique ids is
+/// independent of how it was assembled.
+///
+/// Used by: apply_repetition_penalty (rebuild path), SamplerState::apply_repetition (incremental path)
+pub(crate) fn apply_repetition_penalty_sorted(
+    logits: &MlxArray,
+    seen_sorted: &[i32],
+    penalty: f32,
+) -> UniquePtr<MlxArray> {
+    if seen_sorted.is_empty() {
         return ffi::copy(logits);
     }
 
-    let indices = ffi::from_slice_i32(&seen, &[1, seen.len() as i32]);
+    let indices = ffi::from_slice_i32(seen_sorted, &[1, seen_sorted.len() as i32]);
     let selected = ffi::take_along_axis(logits, &indices, -1);
 
     let zero = ffi::full_f32(&[1], 0.0, dtype::FLOAT32);
@@ -635,6 +724,177 @@ pub(crate) fn apply_dry_penalty(
     ffi::add(logits, &penalty_arr)
 }
 
+/// Per-sequence incremental sampler state for history-based penalties.
+///
+/// Long generations re-derive the same penalty inputs on every decode step:
+/// the rebuild-every-token [`apply_repetition_penalty`] clones, sorts, and
+/// deduplicates the entire token history, and [`apply_frequency_presence_penalty`]
+/// rebuilds a token-count map and allocates a fresh full-vocabulary penalty
+/// vector. This state maintains those inputs incrementally per sequence so each
+/// decode step only absorbs the newly appended token(s):
+///
+/// - `seen_sorted`: the sorted, deduplicated set of seen token ids for the
+///   repetition penalty (binary-search insert per new token).
+/// - `counts`: per-token occurrence counts for the frequency/presence penalty.
+/// - `sparse_idx` / `sparse_val`: reusable scratch buffers that hold only the
+///   touched token ids and their penalty deltas, so the frequency/presence
+///   penalty never allocates a full-vocab vector.
+///
+/// The state is created lazily (only when a repetition/frequency/presence
+/// penalty is active) and lives on the owning sequence, so the default
+/// no-penalty path never allocates it. DRY is intentionally not state-backed
+/// (its sliding window would need fragile position rebasing); it keeps using
+/// `token_history` directly with unchanged behavior.
+///
+/// Results are byte-identical to the rebuild-every-token path (see the
+/// `sampler_state_*` parity tests), so the incremental state is purely an
+/// optimization and never changes which token is sampled.
+///
+/// Used by: [`sample_token_optimized_with_state`]
+#[derive(Debug, Clone, Default)]
+pub struct SamplerState {
+    /// Maintain `seen_sorted` (repetition penalty is active).
+    track_seen: bool,
+    /// Maintain `counts` (frequency or presence penalty is active).
+    track_counts: bool,
+    /// Sorted, deduplicated seen token ids (repetition penalty input).
+    seen_sorted: Vec<i32>,
+    /// Per-token occurrence counts (frequency/presence penalty input).
+    counts: HashMap<i32, usize>,
+    /// Reusable scratch buffer: touched token ids for the sparse penalty.
+    sparse_idx: Vec<i32>,
+    /// Reusable scratch buffer: per-id penalty deltas aligned with `sparse_idx`.
+    sparse_val: Vec<f32>,
+    /// Number of leading `token_history` entries already absorbed.
+    absorbed_len: usize,
+    /// Last absorbed token id, used for the O(1) append/divergence check.
+    tip_token: i32,
+}
+
+impl SamplerState {
+    /// Create state sized to the penalties `config` actually enables. Only the
+    /// structures a penalty needs are maintained, so a repetition-only config
+    /// never touches the count map and a frequency-only config never touches
+    /// the sorted set.
+    pub fn for_config(config: &SamplingConfig) -> Self {
+        Self {
+            track_seen: config.repetition_penalty != 1.0,
+            track_counts: config.frequency_penalty != 0.0 || config.presence_penalty != 0.0,
+            ..Self::default()
+        }
+    }
+
+    /// Absorb a single newly appended token into the tracked structures.
+    fn absorb_one(&mut self, token: i32) {
+        if self.track_seen {
+            if let Err(pos) = self.seen_sorted.binary_search(&token) {
+                self.seen_sorted.insert(pos, token);
+            }
+        }
+        if self.track_counts {
+            *self.counts.entry(token).or_insert(0) += 1;
+        }
+    }
+
+    /// Discard the incremental state and re-absorb `history` from scratch. Used
+    /// when the history shrank or diverged (the append-only invariant no longer
+    /// holds), which is always correct.
+    fn rebuild(&mut self, history: &[i32]) {
+        self.seen_sorted.clear();
+        self.counts.clear();
+        for &t in history {
+            self.absorb_one(t);
+        }
+        self.absorbed_len = history.len();
+        self.tip_token = history.last().copied().unwrap_or(0);
+    }
+
+    /// Synchronize the incremental state to `history`.
+    ///
+    /// Append-only growth (the decode common case) absorbs just the new tail in
+    /// O(new tokens). A shorter or diverged history (speculative rollback, KV
+    /// cache trim/restore) falls back to a full [`Self::rebuild`]. The O(1) tip
+    /// check detects divergence without an O(n) prefix comparison; the decode
+    /// model only ever appends or truncates a suffix, so a matching length and
+    /// tip imply an unchanged prefix.
+    fn sync(&mut self, history: &[i32]) {
+        let n = history.len();
+        let tip_matches = self.absorbed_len == 0
+            || (self.absorbed_len <= n && history[self.absorbed_len - 1] == self.tip_token);
+        if n < self.absorbed_len || !tip_matches {
+            self.rebuild(history);
+            return;
+        }
+        for &t in &history[self.absorbed_len..] {
+            self.absorb_one(t);
+        }
+        self.absorbed_len = n;
+        if n > 0 {
+            self.tip_token = history[n - 1];
+        }
+    }
+
+    /// Repetition penalty over the incrementally maintained `seen_sorted` set.
+    /// Byte-identical to [`apply_repetition_penalty`] for the same history.
+    fn apply_repetition(&self, logits: &MlxArray, penalty: f32) -> UniquePtr<MlxArray> {
+        apply_repetition_penalty_sorted(logits, &self.seen_sorted, penalty)
+    }
+
+    /// Frequency/presence penalty using the reusable sparse scratch buffers
+    /// (touched tokens only); never allocates a full-vocabulary vector.
+    ///
+    /// Byte-identical to [`apply_frequency_presence_penalty`]: the rebuild path
+    /// computes `subtract(logits, penalty_f32)`, which promotes the whole array
+    /// to f32 (f16/bf16 -> f32 is lossless). This path promotes first, then
+    /// applies `logits[id] - penalty[id]` to exactly the touched ids via
+    /// take/put. Untouched ids keep their promoted value, which equals the
+    /// rebuild path's `logits[id] - 0.0` for every finite logit.
+    fn apply_frequency_presence(
+        &mut self,
+        logits: &MlxArray,
+        frequency_penalty: f32,
+        presence_penalty: f32,
+    ) -> UniquePtr<MlxArray> {
+        if self.counts.is_empty() {
+            return ffi::copy(logits);
+        }
+
+        let shape = ffi::array_shape(logits);
+        let vocab_size = *shape.last().unwrap() as usize;
+
+        // Move the scratch buffers out so the loop can read `self.counts` and
+        // fill them without a borrow conflict; put them back before returning
+        // so their capacity is reused next step.
+        let mut idx = std::mem::take(&mut self.sparse_idx);
+        let mut val = std::mem::take(&mut self.sparse_val);
+        idx.clear();
+        val.clear();
+        for (&token_id, &count) in &self.counts {
+            if token_id >= 0 && (token_id as usize) < vocab_size {
+                idx.push(token_id);
+                val.push(frequency_penalty * count as f32 + presence_penalty);
+            }
+        }
+
+        let result = if idx.is_empty() {
+            // No in-range tokens: matches the rebuild path's empty early return.
+            ffi::copy(logits)
+        } else {
+            let promoted = ffi::astype(logits, dtype::FLOAT32);
+            let k = idx.len() as i32;
+            let indices = ffi::from_slice_i32(&idx, &[1, k]);
+            let selected = ffi::take_along_axis(&promoted, &indices, -1);
+            let values = ffi::from_slice_f32(&val, &[1, k]);
+            let penalized = ffi::subtract(&selected, &values);
+            ffi::put_along_axis(&promoted, &indices, &penalized, -1)
+        };
+
+        self.sparse_idx = idx;
+        self.sparse_val = val;
+        result
+    }
+}
+
 /// Configuration for log probability computation during generation.
 ///
 /// When `enabled` is false, no logprobs are computed and zero overhead is incurred.
@@ -671,6 +931,33 @@ pub fn compute_logprobs(
 ) -> Option<TokenLogprobData> {
     if !config.enabled {
         return None;
+    }
+
+    // Selected-token-only fast path (`top_k == 0`). Avoid materializing the
+    // full-vocabulary log-softmax array: `log_softmax(x)[s] == x[s] -
+    // logsumexp(x)`, where `logsumexp` is a reduction (no full-vocab output)
+    // and the selected logit is a single gather. The dtype regime matches the
+    // full path (compute in the logit dtype, read out as f32), and the only
+    // numerical difference is the order of the final subtraction (<= 1 ULP),
+    // which is OpenAI-compatible. Token selection already happened upstream, so
+    // this never changes which token is emitted. Every logprob caller (classic
+    // decode plus the dflash / MTP `per_position_logprobs` helpers) funnels
+    // through here, so all paths stay mutually consistent.
+    //
+    // The `top_k > 0` path below is unchanged and keeps its own (issue #340)
+    // dtype-aware top-k extraction.
+    if config.top_k == 0 {
+        let idx = ffi::from_slice_i32(&[selected_token], &[1, 1]);
+        let selected_logit = ffi::take_along_axis(adjusted_logits, &idx, -1);
+        let lse = ffi::logsumexp_axis(adjusted_logits, -1, true);
+        let selected_lp = ffi::subtract(&selected_logit, &lse);
+        let selected_lp_f32 = ffi::astype(&selected_lp, dtype::FLOAT32);
+        ffi::eval(&selected_lp_f32);
+        return Some(TokenLogprobData {
+            token_id: selected_token,
+            logprob: ffi::item_f32(&selected_lp_f32),
+            top_alternatives: Vec::new(),
+        });
     }
 
     // Apply log-softmax to get per-token log probabilities.
@@ -1514,5 +1801,282 @@ mod tests {
                 );
             }
         }
+    }
+
+    // -- incremental SamplerState parity (issue #328) --
+
+    // Astype to f32 and pull the values to host, so f16/bf16 penalty outputs can
+    // be compared regardless of their native dtype.
+    fn logits_to_f32_vec(a: &MlxArray) -> Vec<f32> {
+        let f = ffi::astype(a, dtype::FLOAT32);
+        to_vec_f32(&f)
+    }
+
+    // Bit-for-bit equality of two logit arrays (compared as f32). The
+    // incremental path must reproduce the rebuild path exactly so penalty-
+    // adjusted greedy sampling picks identical tokens.
+    fn assert_logits_bit_identical(a: &MlxArray, b: &MlxArray, ctx: &str) {
+        let va = logits_to_f32_vec(a);
+        let vb = logits_to_f32_vec(b);
+        assert_eq!(va.len(), vb.len(), "{ctx}: length mismatch");
+        for (i, (x, y)) in va.iter().zip(vb.iter()).enumerate() {
+            assert_eq!(
+                x.to_bits(),
+                y.to_bits(),
+                "{ctx}: element {i} differs: {x} vs {y}"
+            );
+        }
+    }
+
+    // Distinct, mostly-nonzero logits used by the parity sweeps.
+    const PARITY_LOGITS: [f32; 10] = [0.5, 1.0, -1.0, 2.0, 0.0, 1.5, -0.5, 0.25, 1.1, 0.9];
+
+    // A history with repeats so both repetition (unique set) and
+    // frequency/presence (counts) inputs are exercised.
+    const PARITY_HISTORY: [i32; 12] = [3, 1, 4, 1, 5, 9, 2, 6, 5, 3, 5, 1];
+
+    #[test]
+    fn sampler_state_repetition_matches_rebuild_over_sequence() {
+        let penalty = 1.3_f32;
+        let cfg = SamplingConfig {
+            repetition_penalty: penalty,
+            ..Default::default()
+        };
+        let mut state = SamplerState::for_config(&cfg);
+        for len in 1..=PARITY_HISTORY.len() {
+            let h = &PARITY_HISTORY[..len];
+            let rebuilt = apply_repetition_penalty(
+                &ffi::from_slice_f32(&PARITY_LOGITS, &[1, 10]),
+                h,
+                penalty,
+            );
+            state.sync(h);
+            let incremental =
+                state.apply_repetition(&ffi::from_slice_f32(&PARITY_LOGITS, &[1, 10]), penalty);
+            assert_logits_bit_identical(&rebuilt, &incremental, &format!("repetition len {len}"));
+        }
+    }
+
+    #[test]
+    fn sampler_state_repetition_matches_rebuild_f16() {
+        // f16 logits exercise the same `put_along_axis` dtype path through both
+        // routes; the shared core keeps them bit-identical.
+        let penalty = 1.4_f32;
+        let cfg = SamplingConfig {
+            repetition_penalty: penalty,
+            ..Default::default()
+        };
+        let mut state = SamplerState::for_config(&cfg);
+        let h = &PARITY_HISTORY[..];
+        state.sync(h);
+        let f16 = ffi::astype(
+            &ffi::from_slice_f32(&PARITY_LOGITS, &[1, 10]),
+            dtype::FLOAT16,
+        );
+        let rebuilt = apply_repetition_penalty(&f16, h, penalty);
+        let incremental = state.apply_repetition(&f16, penalty);
+        assert_logits_bit_identical(&rebuilt, &incremental, "repetition f16");
+    }
+
+    #[test]
+    fn sampler_state_frequency_presence_matches_rebuild_over_sequence() {
+        let (freq, pres) = (0.7_f32, 0.3_f32);
+        let cfg = SamplingConfig {
+            frequency_penalty: freq,
+            presence_penalty: pres,
+            ..Default::default()
+        };
+        let mut state = SamplerState::for_config(&cfg);
+        for len in 1..=PARITY_HISTORY.len() {
+            let h = &PARITY_HISTORY[..len];
+            let rebuilt = apply_frequency_presence_penalty(
+                &ffi::from_slice_f32(&PARITY_LOGITS, &[1, 10]),
+                h,
+                freq,
+                pres,
+            );
+            state.sync(h);
+            let incremental = state.apply_frequency_presence(
+                &ffi::from_slice_f32(&PARITY_LOGITS, &[1, 10]),
+                freq,
+                pres,
+            );
+            assert_logits_bit_identical(
+                &rebuilt,
+                &incremental,
+                &format!("frequency/presence len {len}"),
+            );
+        }
+    }
+
+    #[test]
+    fn sampler_state_frequency_presence_matches_rebuild_f16() {
+        // The rebuild path's broadcast subtract promotes f16 logits to f32. The
+        // sparse path must promote first to stay bit-identical.
+        let (freq, pres) = (0.6_f32, 0.25_f32);
+        let cfg = SamplingConfig {
+            frequency_penalty: freq,
+            presence_penalty: pres,
+            ..Default::default()
+        };
+        let mut state = SamplerState::for_config(&cfg);
+        let h = &PARITY_HISTORY[..];
+        state.sync(h);
+        let f16 = ffi::astype(
+            &ffi::from_slice_f32(&PARITY_LOGITS, &[1, 10]),
+            dtype::FLOAT16,
+        );
+        let rebuilt = apply_frequency_presence_penalty(&f16, h, freq, pres);
+        let incremental = state.apply_frequency_presence(&f16, freq, pres);
+        assert_logits_bit_identical(&rebuilt, &incremental, "frequency/presence f16");
+    }
+
+    #[test]
+    fn sampler_state_sync_handles_append_shrink_and_divergence() {
+        let cfg = SamplingConfig {
+            repetition_penalty: 1.2,
+            frequency_penalty: 0.5,
+            ..Default::default()
+        };
+        let mut s = SamplerState::for_config(&cfg);
+
+        // Append-only growth.
+        s.sync(&[1, 2, 2, 3]);
+        assert_eq!(s.absorbed_len, 4);
+        assert_eq!(s.seen_sorted, vec![1, 2, 3]);
+        assert_eq!(s.counts.get(&2), Some(&2));
+
+        // Further append reuses the state (tip matches).
+        s.sync(&[1, 2, 2, 3, 3, 1]);
+        assert_eq!(s.absorbed_len, 6);
+        assert_eq!(s.seen_sorted, vec![1, 2, 3]);
+        assert_eq!(s.counts.get(&1), Some(&2));
+        assert_eq!(s.counts.get(&3), Some(&2));
+
+        // Shrink (cache trim / rollback) rebuilds to the shorter history.
+        s.sync(&[1, 2]);
+        assert_eq!(s.absorbed_len, 2);
+        assert_eq!(s.seen_sorted, vec![1, 2]);
+        assert_eq!(s.counts.get(&2), Some(&1));
+        assert_eq!(s.counts.get(&3), None);
+
+        // Same length but a diverged tip also rebuilds.
+        s.sync(&[7, 8]);
+        assert_eq!(s.seen_sorted, vec![7, 8]);
+        assert_eq!(s.counts.get(&1), None);
+        assert_eq!(s.counts.get(&7), Some(&1));
+    }
+
+    #[test]
+    fn sample_token_optimized_with_state_greedy_parity_over_sequence() {
+        // Greedy sampling with every history-based penalty active (repetition +
+        // DRY + frequency + presence). The state-backed path must select the
+        // same token id as the rebuild path at every step.
+        let cfg = SamplingConfig {
+            repetition_penalty: 1.5,
+            dry_multiplier: 0.8,
+            dry_base: 1.75,
+            dry_allowed_length: 2,
+            frequency_penalty: 0.8,
+            presence_penalty: 0.5,
+            ..SamplingConfig::greedy()
+        };
+        let vocab = 12usize;
+        let mut history: Vec<i32> = vec![2, 5, 2, 7, 5];
+        let mut state: Option<SamplerState> = None;
+
+        for step in 0..40i32 {
+            let vals: Vec<f32> = (0..vocab as i32)
+                .map(|i| ((step * 31 + i * 17) % 23) as f32 * 0.3 - 3.0)
+                .collect();
+            let logits_a = ffi::from_slice_f32(&vals, &[1, 1, vocab as i32]);
+            let logits_b = ffi::from_slice_f32(&vals, &[1, 1, vocab as i32]);
+
+            let (tok_a, _) = sample_token_optimized(&logits_a, &cfg, &history);
+            let (tok_b, _) =
+                sample_token_optimized_with_state(&logits_b, &cfg, &history, &mut state);
+            ffi::eval(&tok_a);
+            ffi::eval(&tok_b);
+            let a = ffi::item_i32(&tok_a);
+            let b = ffi::item_i32(&tok_b);
+            assert_eq!(a, b, "token mismatch at step {step}");
+            history.push(a);
+        }
+        // State was created because penalties are active.
+        assert!(state.is_some());
+    }
+
+    #[test]
+    fn sample_token_optimized_with_state_no_penalty_allocates_no_state() {
+        // The default no-penalty path must take the original fast path and never
+        // allocate per-sequence state.
+        let logits = ffi::from_slice_f32(&[0.1, 0.9, 1.2], &[1, 1, 3]);
+        let cfg = SamplingConfig::greedy();
+        let mut state: Option<SamplerState> = None;
+        let (token, _) = sample_token_optimized_with_state(&logits, &cfg, &[], &mut state);
+        ffi::eval(&token);
+        assert_eq!(ffi::item_i32(&token), 2);
+        assert!(
+            state.is_none(),
+            "no-penalty path must not allocate sampler state"
+        );
+
+        // And it agrees with the plain entry point.
+        let logits2 = ffi::from_slice_f32(&[0.1, 0.9, 1.2], &[1, 1, 3]);
+        let (token2, _) = sample_token_optimized(&logits2, &cfg, &[]);
+        ffi::eval(&token2);
+        assert_eq!(ffi::item_i32(&token2), 2);
+    }
+
+    #[test]
+    fn sample_token_optimized_with_state_dry_only_allocates_no_state() {
+        // DRY is intentionally not state-backed, so a DRY-only config must not
+        // allocate state, and its output must match the rebuild path exactly.
+        let cfg = SamplingConfig {
+            dry_multiplier: 1.0,
+            dry_base: 2.0,
+            dry_allowed_length: 1,
+            ..SamplingConfig::greedy()
+        };
+        let history = [0, 1, 2, 0, 1];
+        let logits_a = ffi::from_slice_f32(&[1.0, 1.0, 1.0], &[1, 1, 3]);
+        let logits_b = ffi::from_slice_f32(&[1.0, 1.0, 1.0], &[1, 1, 3]);
+        let mut state: Option<SamplerState> = None;
+        let (tok_a, _) = sample_token_optimized(&logits_a, &cfg, &history);
+        let (tok_b, _) = sample_token_optimized_with_state(&logits_b, &cfg, &history, &mut state);
+        ffi::eval(&tok_a);
+        ffi::eval(&tok_b);
+        assert_eq!(ffi::item_i32(&tok_a), ffi::item_i32(&tok_b));
+        assert!(
+            state.is_none(),
+            "DRY-only path is not state-backed and must not allocate state"
+        );
+    }
+
+    #[test]
+    fn compute_logprobs_top_k_zero_fast_path_matches_full_softmax() {
+        // The `top_k == 0` fast path (logit - logsumexp) must match the full
+        // log-softmax gather within tight floating-point tolerance.
+        let logits = ffi::from_slice_f32(&DTYPE_LOGITS, &[1, DTYPE_LOGITS.len() as i32]);
+        let cfg = LogprobsConfig {
+            enabled: true,
+            top_k: 0,
+        };
+        let fast = compute_logprobs(&logits, SELECTED_LOWEST, &cfg).expect("should return Some");
+        assert!(fast.top_alternatives.is_empty());
+
+        // Reference: full log-softmax then gather the selected token.
+        let log_probs = ffi::log_softmax(&logits, -1);
+        let idx = ffi::from_slice_i32(&[SELECTED_LOWEST], &[1, 1]);
+        let sel = ffi::take_along_axis(&log_probs, &idx, -1);
+        ffi::eval(&sel);
+        let full = ffi::item_f32(&sel);
+
+        assert!(
+            (fast.logprob - full).abs() < 1e-5,
+            "fast-path logprob {} differs from full log-softmax {}",
+            fast.logprob,
+            full
+        );
     }
 }

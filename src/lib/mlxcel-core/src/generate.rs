@@ -34,7 +34,9 @@ use crate::generation_policy::{
 };
 use crate::hardware;
 use crate::layers::KVCache;
-use crate::sampling::{sample_token_optimized, TokenBiasMap};
+use crate::sampling::{
+    sample_token_optimized, sample_token_optimized_with_state, SamplerState, TokenBiasMap,
+};
 use crate::streams::{install_thread_local_default_stream, new_thread_local_generation_stream};
 use crate::utils::{align_to_na_tile, create_padded_prefill_mask};
 use cxx::UniquePtr;
@@ -1081,9 +1083,18 @@ impl CxxGenerator {
         // Build token history from prompt for penalty-based sampling
         let needs_history = sampling.needs_token_history();
         let mut token_history = initial_token_history(prompt_tokens, needs_history);
+        // Per-sequence incremental penalty state, created lazily only when a
+        // repetition/frequency/presence penalty is active (see
+        // `sample_token_optimized_with_state`). Stays `None` on the no-penalty
+        // path, so that path keeps calling the original sampler unchanged.
+        let mut sampler_state: Option<SamplerState> = None;
 
         // Sample first token (logits already sliced to last real position when padded)
-        let (mut y, mut _logprobs) = sample_token_optimized(&logits, sampling, &token_history);
+        let (mut y, mut _logprobs) = if needs_history {
+            sample_token_optimized_with_state(&logits, sampling, &token_history, &mut sampler_state)
+        } else {
+            sample_token_optimized(&logits, sampling, &token_history)
+        };
         ffi::async_eval(&y);
         self.prepare_turbo4_delegated_before_decode(max_tokens);
 
@@ -1138,8 +1149,16 @@ impl CxxGenerator {
                 } else {
                     None
                 };
-                let (next_tok, next_log) =
-                    sample_token_optimized(&next_logits, sampling, &token_history);
+                let (next_tok, next_log) = if needs_history {
+                    sample_token_optimized_with_state(
+                        &next_logits,
+                        sampling,
+                        &token_history,
+                        &mut sampler_state,
+                    )
+                } else {
+                    sample_token_optimized(&next_logits, sampling, &token_history)
+                };
                 if let Some(start) = detail_start {
                     sample_ns_total += start.elapsed().as_nanos();
                 }
@@ -1359,8 +1378,17 @@ impl CxxGenerator {
 
         let needs_history = sampling.needs_token_history();
         let mut token_history = initial_token_history(prompt_tokens, needs_history);
+        // Per-sequence incremental penalty state, created lazily only when a
+        // repetition/frequency/presence penalty is active (see
+        // `sample_token_optimized_with_state`). Stays `None` on the no-penalty
+        // path, so that path keeps calling the original sampler unchanged.
+        let mut sampler_state: Option<SamplerState> = None;
 
-        let (mut y, mut _logprobs) = sample_token_optimized(&logits, sampling, &token_history);
+        let (mut y, mut _logprobs) = if needs_history {
+            sample_token_optimized_with_state(&logits, sampling, &token_history, &mut sampler_state)
+        } else {
+            sample_token_optimized(&logits, sampling, &token_history)
+        };
         ffi::async_eval(&y);
         self.prepare_turbo4_delegated_before_decode(max_tokens);
 
@@ -1370,8 +1398,16 @@ impl CxxGenerator {
             let (next_y, next_logprobs) = if n + 1 < max_tokens {
                 let next_input = ffi::reshape_token_for_forward(&y);
                 let next_logits = model.forward(&next_input, &mut self.caches, None);
-                let (next_tok, next_log) =
-                    sample_token_optimized(&next_logits, sampling, &token_history);
+                let (next_tok, next_log) = if needs_history {
+                    sample_token_optimized_with_state(
+                        &next_logits,
+                        sampling,
+                        &token_history,
+                        &mut sampler_state,
+                    )
+                } else {
+                    sample_token_optimized(&next_logits, sampling, &token_history)
+                };
                 ffi::async_eval_pair(&next_tok, &next_log);
                 (Some(next_tok), Some(next_log))
             } else {
@@ -1451,6 +1487,11 @@ impl CxxGenerator {
         let eos_tokens = merged_eos_token_ids(model.eos_token_ids(), &sampling.stop_token_ids);
         let needs_history = sampling.needs_token_history();
         let mut token_history = initial_token_history(prompt_tokens, needs_history);
+        // Per-sequence incremental penalty state, created lazily only when a
+        // repetition/frequency/presence penalty is active (see
+        // `sample_token_optimized_with_state`). Stays `None` on the no-penalty
+        // path, so that path keeps calling the original sampler unchanged.
+        let mut sampler_state: Option<SamplerState> = None;
 
         // Prefill with embeddings.
         // On M5+ hardware pad to a 32-token tile boundary (same logic as
@@ -1491,7 +1532,11 @@ impl CxxGenerator {
             model.forward_with_embeddings(&input, input_embeddings, &mut self.caches, mask)
         };
         model.after_prefill();
-        let (mut y, mut _logprobs) = sample_token_optimized(&logits, sampling, &token_history);
+        let (mut y, mut _logprobs) = if needs_history {
+            sample_token_optimized_with_state(&logits, sampling, &token_history, &mut sampler_state)
+        } else {
+            sample_token_optimized(&logits, sampling, &token_history)
+        };
         ffi::eval(&y);
         self.prepare_turbo4_delegated_before_decode(max_tokens);
         let prefill_time = prefill_start.elapsed();
@@ -1504,8 +1549,16 @@ impl CxxGenerator {
             let next_y = if n + 1 < max_tokens {
                 let next_input = ffi::reshape_token_for_forward(&y);
                 let next_logits = model.forward(&next_input, &mut self.caches, None);
-                let (next_tok, _next_log) =
-                    sample_token_optimized(&next_logits, sampling, &token_history);
+                let (next_tok, _next_log) = if needs_history {
+                    sample_token_optimized_with_state(
+                        &next_logits,
+                        sampling,
+                        &token_history,
+                        &mut sampler_state,
+                    )
+                } else {
+                    sample_token_optimized(&next_logits, sampling, &token_history)
+                };
                 ffi::async_eval(&next_tok);
                 Some(next_tok)
             } else {
@@ -1609,6 +1662,11 @@ impl CxxGenerator {
         // Build token history from prompt for penalty-based sampling
         let needs_history = sampling.needs_token_history();
         let mut token_history = initial_token_history(prompt_tokens, needs_history);
+        // Per-sequence incremental penalty state, created lazily only when a
+        // repetition/frequency/presence penalty is active (see
+        // `sample_token_optimized_with_state`). Stays `None` on the no-penalty
+        // path, so that path keeps calling the original sampler unchanged.
+        let mut sampler_state: Option<SamplerState> = None;
 
         // PREFILL PHASE.
         // On M5+ hardware pad the sequence to a 32-token tile boundary for
@@ -1641,7 +1699,11 @@ impl CxxGenerator {
         };
 
         // Sample first token and force sync to measure prefill accurately
-        let (mut y, mut _logprobs) = sample_token_optimized(&logits, sampling, &token_history);
+        let (mut y, mut _logprobs) = if needs_history {
+            sample_token_optimized_with_state(&logits, sampling, &token_history, &mut sampler_state)
+        } else {
+            sample_token_optimized(&logits, sampling, &token_history)
+        };
         ffi::eval(&y);
         self.prepare_turbo4_delegated_before_decode(max_tokens);
         let prefill_time = prefill_start.elapsed();
@@ -1658,8 +1720,16 @@ impl CxxGenerator {
             let next_y = if n + 1 < max_tokens {
                 let next_input = ffi::reshape_token_for_forward(&y);
                 let next_logits = model.forward(&next_input, &mut self.caches, None);
-                let (next_tok, _next_log) =
-                    sample_token_optimized(&next_logits, sampling, &token_history);
+                let (next_tok, _next_log) = if needs_history {
+                    sample_token_optimized_with_state(
+                        &next_logits,
+                        sampling,
+                        &token_history,
+                        &mut sampler_state,
+                    )
+                } else {
+                    sample_token_optimized(&next_logits, sampling, &token_history)
+                };
                 ffi::async_eval(&next_tok);
                 Some(next_tok)
             } else {
