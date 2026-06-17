@@ -2079,4 +2079,37 @@ mod tests {
             full
         );
     }
+
+    #[test]
+    fn compute_logprobs_top_k_zero_fast_path_f16_matches_full_softmax() {
+        // Same parity check as above but with f16 logits. Quantized models
+        // produce f16 logits post-#289, so this guards the fast path (gather +
+        // logsumexp) against the full log-softmax on the same f16 input. Both
+        // operate in f16 arithmetic; the result is cast to f32 only at the read
+        // boundary, so the two paths must agree within f16 precision (~0.01).
+        let f32_logits = ffi::from_slice_f32(&DTYPE_LOGITS, &[1, DTYPE_LOGITS.len() as i32]);
+        let f16_logits = ffi::astype(&f32_logits, dtype::FLOAT16);
+        let cfg = LogprobsConfig {
+            enabled: true,
+            top_k: 0,
+        };
+        let fast =
+            compute_logprobs(&f16_logits, SELECTED_LOWEST, &cfg).expect("should return Some");
+        assert!(fast.top_alternatives.is_empty());
+
+        // Reference: full log-softmax on the same f16 logits, then cast to f32 for reading.
+        let log_probs = ffi::log_softmax(&f16_logits, -1);
+        let idx = ffi::from_slice_i32(&[SELECTED_LOWEST], &[1, 1]);
+        let sel = ffi::take_along_axis(&log_probs, &idx, -1);
+        let sel_f32 = ffi::astype(&sel, dtype::FLOAT32);
+        ffi::eval(&sel_f32);
+        let full = ffi::item_f32(&sel_f32);
+
+        assert!(
+            (fast.logprob - full).abs() < 0.01,
+            "f16 fast-path logprob {} differs from full log-softmax {} by more than 0.01",
+            fast.logprob,
+            full
+        );
+    }
 }
