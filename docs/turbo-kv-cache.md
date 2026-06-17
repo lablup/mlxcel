@@ -289,7 +289,7 @@ The conservative rules the advisor applies:
 | Pure SSM (Mamba/Mamba2) | `fp16` | - | No context-proportional KV cache, so Turbo modes save almost nothing. |
 | Non-power-of-two head dim (e.g. Phi-2 at head_dim 80) | `int8` (medium/long), `fp16` (short) | - | The Turbo Walsh-Hadamard transform requires a power-of-two head dimension; the advisor downgrades any Turbo suggestion to `int8` or `fp16` for these families, matching the MLA treatment. |
 
-The head-dimension check reads `head_dim` or `head_size` directly from `config.json` when present, or divides `hidden_size` by `num_attention_heads` to derive it. When the value is unavailable, the advisor conservatively assumes Turbo is applicable and leaves the suggestion unchanged.
+The head-dimension check reads `head_dim` or `head_size` directly from `config.json` when present. When neither explicit field exists, it divides the hidden size by the attention head count, checking the alternate field names used by each naming convention: `hidden_size` / `d_model` / `dim` / `model_dim` for hidden size, and `num_attention_heads` / `num_heads` / `n_heads` / `n_head` for head count. This mirrors the field-name coverage in the KV-architecture classifier so the two paths agree on the derived head dimension. When none of the required fields are present, the advisor conservatively assumes Turbo is applicable and leaves the suggestion unchanged.
 
 Symmetric `turbo4` is only ever suggested for families on the allowlist; off
 the allowlist the advisor leads with `fp16+turbo4` exactly like the manual
