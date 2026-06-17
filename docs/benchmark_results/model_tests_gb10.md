@@ -28,7 +28,7 @@ Compatibility and decode/prefill performance for mlxcel models on **NVIDIA GB10 
 
 - ✅ Pass: model loads and produces tokens within the configured budget
 - ❌ Fail: warmup/bench failure, OOM skip, or 0 tokens generated
-- ⚪ Not tested: model weights are not present in `models/` (not a code failure)
+- ⚪ Not tested / not applicable: weights not present, or the model only generates given inputs the text suite does not provide (e.g. image-only PaliGemma); not a code failure
 
 Prefill/Decode are the measured-pass figures from `mlxcel-bench-decode`. Notes record an early-EOS token count (when a model stopped before 100) or the failure cause. Models are grouped by architecture family; VLM-capable models appear once under text (text-prompt pass) and again in the image-input table at the end.
 
@@ -226,7 +226,7 @@ Prefill/Decode are the measured-pass figures from `mlxcel-bench-decode`. Notes r
 | minicpm-v-4.6-mxfp4 | ❌ | - | - | mxfp4 warmup failure (bf16 variant works) |
 | molmo2-4b | ✅ | 197.01 | 26.56 | 33 tok |
 | molmo-7b | ✅ | 203.66 | 33.64 | 24 tok |
-| paligemma2-3b-6bit | ❌ | 160.60 | 0.00 | 0 tokens generated |
+| paligemma2-3b-6bit | ⚪ | 160.60 | 0.00 | image-only (PaliGemma): no text-gen without an image; works in the VLM table |
 | phi-3.5-vision-4bit | ✅ | 435.53 | 91.05 | 43 tok |
 | qwen2.5-vl-3b | ❌ | - | - | warmup failure (also failed at 0.1.0) |
 | qwen2.5-vl-3b-4bit | ✅ | 371.22 | 59.93 | 39 tok |
@@ -335,8 +335,8 @@ Models that accept image input and generated tokens under the `"What is in this 
 |--------|-------|
 | **Total text models attempted** | 148 |
 | **Pass (✅)** | 133 |
-| **Fail / 0-token (❌)** | 12 |
-| **Not tested (⚪, weights absent)** | 2 |
+| **Fail (❌)** | 11 |
+| **Not tested / N.A. (⚪)** | 3 |
 | **OOM-skipped (capacity)** | 1 |
 | **VLM models measured (image input)** | 53 |
 
@@ -362,11 +362,10 @@ The 0.3.1 line ported the fused decode-MoE kernel to CUDA (#319). Nine MoE model
 
 - **BitNet (ternary; fails CUDA warmup):** `bitnet-b1.58-2b-4t`, `bitnet-b1.58-2b-4t-4bit`
 - **Other model-specific failures:** `deepseek-v3-4bit`
-- **Not tested (weights not downloaded, not a code failure):** `glm-5-4bit` (config only, no safetensors), `glm-5.1-4bit` (empty checkpoint dir)
+- **Not tested / not applicable (not a code failure):** `glm-5-4bit`, `glm-5.1-4bit` (weights not downloaded); `paligemma2-3b-6bit` (image-only PaliGemma: 0 text-gen without an image, captions correctly in the VLM image table)
 - **Not standalone text-gen models:** `docling-layout-heron-mlx-bf16` (document layout), `granite-speech-4.1-2b-nar-mlx` (speech)
 - **MTP/DFlash drafter checkpoints (need a target; not standalone):** `gemma-4-12b-it-assistant-4bit`, `gemma-4-31b-it-assistant-bf16`, `qwen3.5-27b-dflash`, `qwen3.5-4b-dflash`
 - **VLM warmup failure under image setup:** `qwen2.5-vl-3b` (bf16), `minicpm-v-4.6-mxfp4` (mxfp4; the bf16 variant passes)
-- **Zero tokens generated:** `paligemma2-3b-6bit`
 - **OOM-skipped (capacity, weights exceed the memory budget):** `qwen3-next-480b-4bit`
 
 These remaining failures are tracked in #315.
