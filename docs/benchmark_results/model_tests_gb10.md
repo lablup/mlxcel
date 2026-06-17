@@ -27,8 +27,8 @@ Compatibility and decode/prefill performance for mlxcel models on **NVIDIA GB10 
 ## Legend
 
 - ✅ Pass: model loads and produces tokens within the configured budget
-- ❌ Fail: warmup/bench failure, OOM skip, or 0 tokens generated
-- ⚪ Not tested / not applicable: weights not present, or the model only generates given inputs the text suite does not provide (e.g. image-only PaliGemma); not a code failure
+- ❌ Fail: warmup/bench failure or 0 tokens generated. Capacity OOM (weights exceed the 122 GB budget) also shows ❌ but is tallied separately as "Too large" in the summary.
+- ⚪ Not tested / not applicable: weights not present, or the checkpoint is not a standalone text generator (an image-only model such as PaliGemma, a speech or document-layout model, or an MTP/DFlash drafter that needs a target); not a code failure
 
 Prefill/Decode are the measured-pass figures from `mlxcel-bench-decode`. Notes record an early-EOS token count (when a model stopped before 100) or the failure cause. Models are grouped by architecture family; VLM-capable models appear once under text (text-prompt pass) and again in the image-input table at the end.
 
@@ -88,12 +88,12 @@ Prefill/Decode are the measured-pass figures from `mlxcel-bench-decode`. Notes r
 |-------|--------|-----------------|----------------|-------|
 | diffusiongemma-26b-a4b-it-4bit | ✅ | 117.60 | 37.68 | 27 tok |
 | gemma-4-12b-it-4bit | ✅ | 202.66 | 14.70 |  |
-| gemma-4-12b-it-assistant-4bit | ❌ | - | - | MTP/DFlash drafter (needs a target; not standalone) |
+| gemma-4-12b-it-assistant-4bit | ⚪ | - | - | MTP/DFlash drafter (needs a target; not standalone) |
 | gemma-4-26b-a4b-it-4bit | ✅ | 130.81 | 58.59 | 26 tok |
 | gemma-4-26b-a4b-it-qat-4bit | ✅ | 136.06 | 50.33 | 26 tok |
 | gemma-4-31b-4bit | ✅ | 30.58 | 8.93 |  |
 | gemma-4-31b-it-4bit | ✅ | 70.25 | 8.53 | 26 tok |
-| gemma-4-31b-it-assistant-bf16 | ❌ | - | - | MTP/DFlash drafter (needs a target; not standalone) |
+| gemma-4-31b-it-assistant-bf16 | ⚪ | - | - | MTP/DFlash drafter (needs a target; not standalone) |
 | gemma-4-31b-it-nvfp4 | ✅ | 16.26 | 0.89 | 26 tok |
 | gemma-4-31b-it-qat-4bit | ✅ | 80.51 | 5.59 | 26 tok |
 | gemma-4-e2b-it-4bit | ✅ | 761.69 | 104.25 |  |
@@ -126,7 +126,7 @@ Prefill/Decode are the measured-pass figures from `mlxcel-bench-decode`. Notes r
 | granite-4.0-h-tiny-4bit | ✅ | 256.82 | 33.84 | 53 tok |
 | granite-4.1-3b-4bit | ✅ | 328.96 | 73.74 | 7 tok |
 | granite-4.1-8b-4bit | ✅ | 166.20 | 18.45 | 1 tok |
-| granite-speech-4.1-2b-nar-mlx | ❌ | - | - | not a standalone text-gen model |
+| granite-speech-4.1-2b-nar-mlx | ⚪ | - | - | not a standalone text-gen model |
 
 ## MoE (Mixture of Experts)
 
@@ -217,18 +217,17 @@ Prefill/Decode are the measured-pass figures from `mlxcel-bench-decode`. Notes r
 |-------|--------|-----------------|----------------|-------|
 | aya-vision-8b | ✅ | 124.91 | 46.67 | 87 tok |
 | bunny-llama3-8b-4bit | ✅ | 433.97 | 48.81 | 40 tok |
-| docling-layout-heron-mlx-bf16 | ❌ | - | - | not a standalone text-gen model |
+| docling-layout-heron-mlx-bf16 | ⚪ | - | - | not a standalone text-gen model |
 | internvl3-1b | ✅ | 4559.06 | 473.46 | 37 tok |
 | llava-1.5-7b-4bit | ✅ | 205.07 | 55.06 |  |
 | llava-interleave-qwen-0.5b-bf16 | ✅ | 2531.16 | 206.58 | 49 tok |
 | llava-next-mistral-7b-4bit | ✅ | 374.38 | 51.61 |  |
 | minicpm-v-4.6-bf16 | ✅ | 317.54 | 110.35 |  |
-| minicpm-v-4.6-mxfp4 | ❌ | - | - | mxfp4 warmup failure (bf16 variant works) |
+| minicpm-v-4.6-mxfp4 | ✅ | 347.59 | 142.14 |  |
 | molmo2-4b | ✅ | 197.01 | 26.56 | 33 tok |
 | molmo-7b | ✅ | 203.66 | 33.64 | 24 tok |
 | paligemma2-3b-6bit | ⚪ | 160.60 | 0.00 | image-only (PaliGemma): no text-gen without an image; works in the VLM table |
 | phi-3.5-vision-4bit | ✅ | 435.53 | 91.05 | 43 tok |
-| qwen2.5-vl-3b | ❌ | - | - | warmup failure (also failed at 0.1.0) |
 | qwen2.5-vl-3b-4bit | ✅ | 371.22 | 59.93 | 39 tok |
 | qwen2-vl-2b | ✅ | 583.13 | 101.35 | 35 tok |
 | qwen2-vl-2b-4bit | ✅ | 607.09 | 100.84 | 35 tok |
@@ -249,11 +248,11 @@ Prefill/Decode are the measured-pass figures from `mlxcel-bench-decode`. Notes r
 | qwen3.5-0.8b-4bit | ✅ | 640.75 | 174.95 | 18 tok |
 | qwen3.5-0.8b-optiq-4bit | ✅ | 644.30 | 156.91 | 19 tok |
 | qwen3.5-27b-4bit | ✅ | 59.38 | 12.21 | 30 tok |
-| qwen3.5-27b-dflash | ❌ | - | - | MTP/DFlash drafter (needs a target; not standalone) |
+| qwen3.5-27b-dflash | ⚪ | - | - | MTP/DFlash drafter (needs a target; not standalone) |
 | qwen3.5-2b-4bit | ✅ | 514.72 | 124.55 | 32 tok |
 | qwen3.5-35b-a3b-4bit | ✅ | 144.28 | 64.26 | 31 tok |
 | qwen3.5-4b-4bit | ✅ | 247.95 | 62.05 | 31 tok |
-| qwen3.5-4b-dflash | ❌ | - | - | MTP/DFlash drafter (needs a target; not standalone) |
+| qwen3.5-4b-dflash | ⚪ | - | - | MTP/DFlash drafter (needs a target; not standalone) |
 | qwen3.5-9b-4bit | ✅ | 172.83 | 38.92 | 31 tok |
 | qwen3.5-9b-bf16 | ✅ | 169.27 | 13.11 | 31 tok |
 | qwen3.6-35b-a3b-4bit | ✅ | 148.18 | 62.99 | 28 tok |
@@ -295,6 +294,7 @@ Models that accept image input and generated tokens under the `"What is in this 
 | llava-interleave-qwen-0.5b-bf16 | ✅ | 32 | 20633.47 | 188.13 |
 | llava-next-mistral-7b-4bit | ✅ | 100 | 2159.71 | 51.07 |
 | minicpm-v-4.6-bf16 | ✅ | 23 | 583.76 | 103.61 |
+| minicpm-v-4.6-mxfp4 | ✅ | 48 | 625.47 | 138.70 |
 | ministral-3b-4bit | ✅ | 100 | 2524.57 | 89.35 |
 | mistral-small-3.1-24b-4bit | ✅ | 100 | 504.81 | 15.33 |
 | molmo2-4b | ✅ | 46 | 773.43 | 26.21 |
@@ -333,12 +333,12 @@ Models that accept image input and generated tokens under the `"What is in this 
 
 | Metric | Count |
 |--------|-------|
-| **Total text models attempted** | 148 |
-| **Pass (✅)** | 135 |
-| **Fail (❌)** | 8 |
-| **Not tested / N.A. (⚪)** | 3 |
-| **Too large for GB10 (capacity)** | 2 |
-| **VLM models measured (image input)** | 53 |
+| **Total text models attempted** | 147 |
+| **Pass (✅)** | 136 |
+| **Fail (❌, code failure)** | 0 |
+| **Not tested / N.A. (⚪)** | 9 |
+| **Too large for GB10 (capacity, OOM ❌)** | 2 |
+| **VLM models measured (image input)** | 54 |
 
 ### CUDA fused decode-MoE kernel (#319)
 
@@ -358,12 +358,13 @@ The 0.3.1 line ported the fused decode-MoE kernel to CUDA (#319). Nine MoE model
 
 `lfm2-8b-a1b-4bit` (141.8 → 157.7) and `qwen3-vl-30b-a3b-4bit` (57.1 → 83.3) were already passing on the legacy path and got faster on the fused path. Greedy output is byte-identical to `gather_qmm`. The CUDA fused crossover is much higher than Metal's (~13-14k vs ~4096), but the cap stays 4096 (see `fused-moe-decode-kernel-design.md`).
 
-### Failing / skipped models (by cause)
+### Not-applicable / skipped models (by cause)
 
-- **Not tested / not applicable (not a code failure):** `glm-5-4bit`, `glm-5.1-4bit` (weights not downloaded); `paligemma2-3b-6bit` (image-only PaliGemma: 0 text-gen without an image, captions correctly in the VLM image table)
-- **Not standalone text-gen models:** `docling-layout-heron-mlx-bf16` (document layout), `granite-speech-4.1-2b-nar-mlx` (speech)
-- **MTP/DFlash drafter checkpoints (need a target; not standalone):** `gemma-4-12b-it-assistant-4bit`, `gemma-4-31b-it-assistant-bf16`, `qwen3.5-27b-dflash`, `qwen3.5-4b-dflash`
-- **VLM warmup failure under image setup:** `qwen2.5-vl-3b` (bf16), `minicpm-v-4.6-mxfp4` (mxfp4; the bf16 variant passes)
-- **Too large for GB10 (capacity, weights exceed the 122 GB budget):** `qwen3-next-480b-4bit`; `deepseek-v3-4bit` (671B @ 4bit ~350GB; the present checkpoint is also an incomplete partial download, layers 0-19 of 61)
+Every model that does not pass falls into one of these buckets; there are no outstanding code-level failures on the 0.3.1 line.
 
-These remaining failures are tracked in #315.
+- **Weights not downloaded (⚪):** `glm-5-4bit`, `glm-5.1-4bit`
+- **Image-only / not a standalone text generator (⚪):** `paligemma2-3b-6bit` (image-only PaliGemma: 0 text-gen without an image, captions correctly in the VLM image table); `docling-layout-heron-mlx-bf16` (document layout); `granite-speech-4.1-2b-nar-mlx` (speech)
+- **MTP/DFlash drafter checkpoints (need a target; not standalone) (⚪):** `gemma-4-12b-it-assistant-4bit`, `gemma-4-31b-it-assistant-bf16`, `qwen3.5-27b-dflash`, `qwen3.5-4b-dflash`
+- **Too large for GB10 (capacity, weights exceed the 122 GB budget; shown ❌):** `qwen3-next-480b-4bit`; `deepseek-v3-4bit` (671B @ 4bit ~350GB; the present checkpoint is also an incomplete partial download, layers 0-19 of 61)
+
+`minicpm-v-4.6-mxfp4` previously failed here (mxfp4 warmup) and now passes after the quant-mode/group_size loader fix (#334): 142.14 tok/s text decode and 138.70 tok/s on image input. `qwen2.5-vl-3b` was a broken duplicate of `qwen2.5-vl-3b-4bit` and has been removed. The remaining capacity item (`deepseek-v3-4bit`) is tracked in #315.

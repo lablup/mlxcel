@@ -36,8 +36,8 @@ Current source-of-truth data lives in `benchmarks/`:
 | `metal_m1ultra_vlm_2026-05-19.csv` | M1 Ultra | 2026-05-19 (mlxcel 0.0.28, MLX commit 84961223; >65GB skipped) | VLM |
 | `pylm_m1ultra_2026-05-19.csv` | M1 Ultra | 2026-05-19 (mlx-lm 0.31.3 baseline, https://github.com/ml-explore/mlx-lm @ `df1d3f3`; >65GB skipped) | Text |
 | `pylm_m1ultra_vlm_2026-05-19.csv` | M1 Ultra | 2026-05-19 (mlx-vlm baseline, https://github.com/Blaizzy/mlx-vlm @ `d85ca4d`; >65GB skipped) | VLM |
-| `cuda_gb10_2026-06-17.csv` | GB10 | 2026-06-17 (mlxcel 0.3.1 [CSV relabeled; Cargo.toml 0.3.0 until release], MLX pin a6ec7123, CUDA 13.0 / SM 12.1, post-#319 CUDA fused decode-MoE; full text re-benchmark, 148 models, 133 pass / 14 fail / 1 OOM-skip) | Text |
-| `cuda_gb10_vlm_2026-06-17.csv` | GB10 | 2026-06-17 (mlxcel 0.3.1; full VLM re-benchmark, 53 measured image rows) | VLM |
+| `cuda_gb10_2026-06-17.csv` | GB10 | 2026-06-17 (mlxcel 0.3.1 [CSV relabeled; Cargo.toml 0.3.0 until release], MLX pin a6ec7123, CUDA 13.0 / SM 12.1, post-#319 CUDA fused decode-MoE; full text re-benchmark, 147 models, 136 pass / 0 fail / 9 not-tested-N.A. / 2 too-large) | Text |
+| `cuda_gb10_vlm_2026-06-17.csv` | GB10 | 2026-06-17 (mlxcel 0.3.1; full VLM re-benchmark, 54 measured image rows) | VLM |
 | `cuda_gb10_2026-05-28.csv` | GB10 | 2026-05-28 (full text re-benchmark, mlxcel 0.1.0, MLX commit 84961223, warm same-process harness `c9a77f2`, `--cooldown 0`; 109 models, 8 fail/skip) | Text |
 | `cuda_gb10_vlm_2026-05-28.csv` | GB10 | 2026-05-28 (full VLM re-benchmark, mlxcel 0.1.0; 38 measured VLM rows, 0 image-path failures) | VLM |
 | `cuda_gb10_2026-05-19.csv` | GB10 | 2026-05-19 (mlxcel 0.0.27, MLX 0.31.2) | Text |
@@ -84,8 +84,8 @@ For Qwen2.5-0.5B the 4-bit row is the directly comparable cross-hardware figure;
 | Supported model architectures | 89+ ModelType variants |
 | Text models tested (M1 Ultra, 2026-06-15) | 136 pass, 2 partial, 4 fail, 9 skip/non-standalone (151 dirs; adds apertus, seed-oss, dots.llm1, granite family, lfm2, plamo-2, falcon-h1, BitNet; diffusiongemma loads via #291) |
 | Text models tested (M5 Max, 2026-06-15) | 131 pass, 5 partial, 14 fail/skip (0.2.1 full sweep; post-sweep: qwen2.5-vl-3b-4bit fixed by re-download, oversized bf16 hunyuan dropped; neither a code regression) |
-| Text models tested (GB10, 2026-06-17) | 135 pass, 8 fail, 3 not-tested/N.A. (glm-5/glm-5.1 weights not downloaded; paligemma2 image-only), 2 too-large/capacity (qwen3-next-480b, deepseek-v3) (148 total; 0.3.1 with the CUDA fused decode-MoE kernel #319 + bitnet CUDA kernel #322) |
-| VLM models tested (GB10, 2026-06-17) | 53 measured image rows (0.3.1) |
+| Text models tested (GB10, 2026-06-17) | 136 pass, 0 fail, 9 not-tested/N.A. (glm-5/glm-5.1 weights not downloaded; paligemma2 image-only; docling/granite-speech non-text-gen; 4 MTP/DFlash drafters), 2 too-large/capacity (qwen3-next-480b, deepseek-v3) (147 total; 0.3.1 with the CUDA fused decode-MoE kernel #319, bitnet CUDA kernel #322, and the VLM mxfp4 loader fix #334) |
+| VLM models tested (GB10, 2026-06-17) | 54 measured image rows (0.3.1) |
 | VLM models tested (M5 Max, 2026-06-15) | 54 valid VLM rows (0.2.1 full VLM re-sweep; adds qwen3-vl-4b/8b, minicpm-v-4.6-bf16, nemotron-omni, youtu-vl; qwen2.5-vl-3b-4bit restored after re-download) |
 | VLM models tested (M1 Ultra, 2026-06-15) | 55 measured VLM rows (53 pass + 2 partial) |
 | Beating mlx-lm on M1 Ultra (text, >=100%) | 24/74 (32%, 6-15 vs pinned 5-19 baseline) |
