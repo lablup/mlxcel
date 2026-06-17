@@ -483,6 +483,48 @@ impl GemmaRMSNorm {
     }
 }
 
+/// Per-element RMS scale + epsilon that the fused QKV kernel feeds straight to
+/// `mlx::core::fast::rms_norm`, which computes `x * weight * rsqrt(mean(x^2) + eps)`.
+///
+/// The kernel only ever applies that plain formula. The `(1 + weight)` offset
+/// that distinguishes Gemma from a standard RMSNorm lives in the weight each
+/// impl hands back, never in the kernel:
+///
+/// - [`RMSNorm`] returns its raw `weight`, realizing `x * weight * rsqrt(...)`.
+/// - [`GemmaRMSNorm`] returns its pre-computed `(1 + weight)`, realizing
+///   `x * (1 + weight) * rsqrt(...)`.
+///
+/// This lets one fused primitive serve both norm variants while keeping the
+/// `(1 + weight)` semantics selected by type, not by a branch inside the kernel.
+///
+/// Used by: FusedQKVLinear::forward_split_norm_rope_quantized
+/// (Gemma3, Qwen3, Qwen3-MoE).
+pub trait FusedQkNorm {
+    /// Effective per-element scale fed to `fast_rms_norm`: the raw weight for a
+    /// standard RMSNorm, `(1 + weight)` for Gemma.
+    fn fused_norm_weight(&self) -> &MlxArray;
+    /// RMS normalization epsilon.
+    fn rms_eps(&self) -> f32;
+}
+
+impl FusedQkNorm for RMSNorm {
+    fn fused_norm_weight(&self) -> &MlxArray {
+        &self.weight
+    }
+    fn rms_eps(&self) -> f32 {
+        self.eps
+    }
+}
+
+impl FusedQkNorm for GemmaRMSNorm {
+    fn fused_norm_weight(&self) -> &MlxArray {
+        self.adjusted_weight()
+    }
+    fn rms_eps(&self) -> f32 {
+        self.eps
+    }
+}
+
 /// Layer Normalization layer (standard LayerNorm with weight and optional bias)
 pub struct LayerNorm {
     pub weight: UniquePtr<MlxArray>,
@@ -1322,17 +1364,33 @@ impl FusedQKVLinear {
     }
 
     /// Fused concatenated QKV projection + split + reshape + transpose +
-    /// GemmaRMSNorm(Q/K) + RoPE.
+    /// RMSNorm(Q/K) + RoPE.
     ///
     /// Returns Q/K/V already shaped `[B, H, T, D]`. Q/K are normalized and
-    /// have RoPE applied. Only available for quantized fused-QKV weights.
+    /// have RoPE applied. Only available for quantized fused-QKV weights;
+    /// returns `None` for regular (non-quantized) weights so the caller can
+    /// fall back to the graph path.
     ///
-    /// Used by: Gemma3 dense attention path.
-    pub fn forward_split_norm_rope_quantized(
+    /// The Q/K norm variant is selected through the [`FusedQkNorm`] trait: a
+    /// standard [`RMSNorm`] feeds its raw weight, [`GemmaRMSNorm`] feeds its
+    /// pre-computed `(1 + weight)`. The underlying kernel always applies the
+    /// plain `x * weight * rsqrt(mean(x^2) + eps)` formula, so the
+    /// Gemma-vs-standard distinction stays in the weight, not in a kernel
+    /// branch. Q/K must use the same norm type (`N`); their eps is taken from
+    /// `q_norm`.
+    ///
+    /// Norm is applied here after the head transpose, whereas the Qwen3 graph
+    /// fallback norms before the transpose. RMSNorm reduces over the last axis
+    /// (head_dim), which the `[B, T, H, D]` -> `[B, H, T, D]` permutation leaves
+    /// untouched, so both orders are numerically equivalent per element.
+    ///
+    /// Used by: Gemma3 dense attention path, Qwen3 / Qwen3-MoE decode attention
+    /// path.
+    pub fn forward_split_norm_rope_quantized<N: FusedQkNorm>(
         &self,
         x: &MlxArray,
-        q_norm: &GemmaRMSNorm,
-        k_norm: &GemmaRMSNorm,
+        q_norm: &N,
+        k_norm: &N,
         rope_dims: i32,
         rope_base: f32,
         cache_offset: i32,
@@ -1352,14 +1410,14 @@ impl FusedQKVLinear {
                         &weight.weight,
                         &weight.scales,
                         weight.biases_ptr(),
-                        q_norm.adjusted_weight(),
-                        k_norm.adjusted_weight(),
+                        q_norm.fused_norm_weight(),
+                        k_norm.fused_norm_weight(),
                         self.n_heads,
                         self.n_kv_heads,
                         self.head_dim,
                         rope_dims,
                         rope_base,
-                        q_norm.eps,
+                        q_norm.rms_eps(),
                         cache_offset,
                         weight.group_size,
                         weight.bits,
@@ -3545,5 +3603,243 @@ mod tests {
     fn infer_bits_pass_through_on_empty() {
         assert_eq!(infer_quantization_bits(&[], &[], 64, 4).unwrap(), 4);
         assert_eq!(infer_quantization_bits(&[0, 0], &[0, 0], 64, 4).unwrap(), 4);
+    }
+
+    // ---- #326: generic fused QKV + RMSNorm + RoPE ----
+
+    /// f16 array from f32 values (the activation/scale dtype the fused kernel
+    /// runs in).
+    fn f16_from(values: &[f32], shape: &[i32]) -> UniquePtr<MlxArray> {
+        use crate::dtype;
+        ffi::astype(&ffi::from_slice_f32(values, shape), dtype::FLOAT16)
+    }
+
+    /// Quantized fused QKV built by quantizing a non-trivial float weight with
+    /// MLX's own `quantize`, so the projection is a valid, non-zero matmul that
+    /// varies per output channel. A meaningful projection is what lets the Q/K
+    /// RMSNorm comparison exercise the `(1 + weight)` vs `weight` choice (a zero
+    /// projection would normalize to zero regardless). The 4-bit quantization
+    /// error cancels in the fused-vs-graph comparison because both paths share
+    /// this exact dequantized weight.
+    fn synthetic_quantized_fused_qkv(
+        n_heads: i32,
+        n_kv_heads: i32,
+        head_dim: i32,
+    ) -> FusedQKVLinear {
+        let in_dim = 64;
+        let group_size = in_dim; // single group
+        let bits = 4;
+        let out_dim = (n_heads + 2 * n_kv_heads) * head_dim;
+
+        // Vary per (out, in) so the projection (and each per-head head_dim slice)
+        // is non-degenerate.
+        let mut w_vals = Vec::with_capacity((out_dim * in_dim) as usize);
+        for o in 0..out_dim {
+            for i in 0..in_dim {
+                w_vals.push(0.01 * (((o * 13 + i * 7) % 23) as f32 - 11.0));
+            }
+        }
+        let w = f16_from(&w_vals, &[out_dim, in_dim]);
+        let weight = ffi::quantize_weights_w(&w, group_size, bits);
+        let scales = ffi::quantize_weights_scales(&w, group_size, bits);
+        let biases = ffi::quantize_weights_biases(&w, group_size, bits);
+        let qweight = QuantizedWeight::new(weight, scales, biases, group_size, bits);
+        FusedQKVLinear {
+            qkv_proj: UnifiedLinear::new(qweight, None),
+            n_heads,
+            n_kv_heads,
+            head_dim,
+        }
+    }
+
+    /// Max absolute element, used as a non-degeneracy guard so a comparison
+    /// test cannot pass by silently normalizing an all-zero projection.
+    fn max_abs(a: &MlxArray) -> f32 {
+        scalar_f32(&ffi::max_all(&ffi::abs(a)))
+    }
+
+    /// Read a scalar array as f32. The decode arrays are f16, and
+    /// `item_f32` (MLX `item<float>()`) reinterprets the buffer rather than
+    /// casting, so the scalar must be cast to f32 first.
+    fn scalar_f32(a: &MlxArray) -> f32 {
+        use crate::dtype;
+        let f = ffi::astype(a, dtype::FLOAT32);
+        ffi::eval(&f);
+        ffi::item_f32(&f)
+    }
+
+    fn rms_diff(a: &MlxArray, b: &MlxArray) -> f32 {
+        scalar_f32(&ffi::sqrt(&ffi::mean_all(&ffi::square(&ffi::subtract(
+            a, b,
+        )))))
+    }
+
+    fn max_abs_diff(a: &MlxArray, b: &MlxArray) -> f32 {
+        scalar_f32(&ffi::max_all(&ffi::abs(&ffi::subtract(a, b))))
+    }
+
+    /// Projection + reshape to `[b, l, heads, head_dim]`, mirroring the model
+    /// graph fallback before the head transpose.
+    fn project_reshape_heads(
+        qkv: &FusedQKVLinear,
+        x: &MlxArray,
+    ) -> (
+        UniquePtr<MlxArray>,
+        UniquePtr<MlxArray>,
+        UniquePtr<MlxArray>,
+    ) {
+        let shape = ffi::array_shape(x);
+        let (b, l) = (shape[0], shape[1]);
+        let (q, k, v) = qkv.forward(x);
+        let q = ffi::reshape(&q, &[b, l, qkv.n_heads, qkv.head_dim]);
+        let k = ffi::reshape(&k, &[b, l, qkv.n_kv_heads, qkv.head_dim]);
+        let v = ffi::reshape(&v, &[b, l, qkv.n_kv_heads, qkv.head_dim]);
+        (q, k, v)
+    }
+
+    fn transpose_then_rope(
+        arr: &MlxArray,
+        rope_dims: i32,
+        rope_base: f32,
+        offset: i32,
+    ) -> UniquePtr<MlxArray> {
+        let t = ffi::transpose_axes(arr, &[0, 2, 1, 3]);
+        ffi::fast_rope(&t, rope_dims, false, rope_base, 1.0, offset)
+    }
+
+    /// The generalized fused primitive with a standard `RMSNorm` Q/K norm must
+    /// match the explicit graph sequence (projection -> split -> q/k RMSNorm ->
+    /// transpose -> RoPE) within RMS < 5e-3. This is the Qwen3 / Qwen3-MoE
+    /// decode path (#326). RoPE runs at a non-zero offset so the rotation is
+    /// actually exercised.
+    #[test]
+    fn fused_qkv_split_norm_rope_standard_rmsnorm_matches_graph() {
+        let (n_heads, n_kv_heads, head_dim) = (2, 1, 8);
+        let (rope_dims, rope_base, offset, eps) = (head_dim, 10000.0_f32, 7, 1e-6_f32);
+
+        let qkv = synthetic_quantized_fused_qkv(n_heads, n_kv_heads, head_dim);
+        let q_norm_w: Vec<f32> = (0..head_dim).map(|i| 0.5 + 0.1 * i as f32).collect();
+        let k_norm_w: Vec<f32> = (0..head_dim).map(|i| 0.7 + 0.05 * i as f32).collect();
+        let q_norm = RMSNorm::new(f16_from(&q_norm_w, &[head_dim]), eps);
+        let k_norm = RMSNorm::new(f16_from(&k_norm_w, &[head_dim]), eps);
+
+        let x_vals: Vec<f32> = (0..64).map(|c| 0.2 + 0.01 * c as f32).collect();
+        let x = f16_from(&x_vals, &[1, 1, 64]);
+
+        // Graph reference: norm via the real RMSNorm::forward (raw weight),
+        // BEFORE the head transpose, exactly like the model fallback.
+        let (rq, rk, rv) = project_reshape_heads(&qkv, &x);
+        let rq = q_norm.forward(&rq);
+        let rk = k_norm.forward(&rk);
+        let ref_q = transpose_then_rope(&rq, rope_dims, rope_base, offset);
+        let ref_k = transpose_then_rope(&rk, rope_dims, rope_base, offset);
+        let ref_v = ffi::transpose_axes(&rv, &[0, 2, 1, 3]);
+
+        // Guard: a trivially-zero projection would make the RMS comparison vacuous.
+        assert!(
+            max_abs(&ref_q) > 0.1,
+            "reference Q must be non-degenerate (max-abs {})",
+            max_abs(&ref_q)
+        );
+
+        let (fq, fk, fv) = qkv
+            .forward_split_norm_rope_quantized(&x, &q_norm, &k_norm, rope_dims, rope_base, offset)
+            .expect("quantized fused QKV must take the fused path");
+
+        let (dq, dk, dv) = (
+            rms_diff(&fq, &ref_q),
+            rms_diff(&fk, &ref_k),
+            rms_diff(&fv, &ref_v),
+        );
+        assert!(dq < 5e-3, "fused Q vs graph Q RMS too large: {dq}");
+        assert!(dk < 5e-3, "fused K vs graph K RMS too large: {dk}");
+        assert!(dv < 5e-3, "fused V vs graph V RMS too large: {dv}");
+    }
+
+    /// The existing `GemmaRMSNorm` path must still match its graph reference
+    /// after the primitive was generalized: no Gemma regression (#326). The
+    /// graph reference uses `GemmaRMSNorm::forward`, which applies `(1 + weight)`.
+    #[test]
+    fn fused_qkv_split_norm_rope_gemma_unchanged() {
+        let (n_heads, n_kv_heads, head_dim) = (2, 1, 8);
+        let (rope_dims, rope_base, offset, eps) = (head_dim, 10000.0_f32, 7, 1e-6_f32);
+
+        let qkv = synthetic_quantized_fused_qkv(n_heads, n_kv_heads, head_dim);
+        let q_norm_w: Vec<f32> = (0..head_dim).map(|i| -0.4 + 0.1 * i as f32).collect();
+        let k_norm_w: Vec<f32> = (0..head_dim).map(|i| -0.3 + 0.08 * i as f32).collect();
+        let q_norm = GemmaRMSNorm::new(f16_from(&q_norm_w, &[head_dim]), eps);
+        let k_norm = GemmaRMSNorm::new(f16_from(&k_norm_w, &[head_dim]), eps);
+
+        let x_vals: Vec<f32> = (0..64).map(|c| 0.2 + 0.01 * c as f32).collect();
+        let x = f16_from(&x_vals, &[1, 1, 64]);
+
+        let (rq, rk, rv) = project_reshape_heads(&qkv, &x);
+        let rq = q_norm.forward(&rq);
+        let rk = k_norm.forward(&rk);
+        let ref_q = transpose_then_rope(&rq, rope_dims, rope_base, offset);
+        let ref_k = transpose_then_rope(&rk, rope_dims, rope_base, offset);
+        let ref_v = ffi::transpose_axes(&rv, &[0, 2, 1, 3]);
+
+        assert!(
+            max_abs(&ref_q) > 0.1,
+            "reference Q must be non-degenerate (max-abs {})",
+            max_abs(&ref_q)
+        );
+
+        let (fq, fk, fv) = qkv
+            .forward_split_norm_rope_quantized(&x, &q_norm, &k_norm, rope_dims, rope_base, offset)
+            .expect("quantized fused QKV must take the fused path");
+
+        let (dq, dk, dv) = (
+            rms_diff(&fq, &ref_q),
+            rms_diff(&fk, &ref_k),
+            rms_diff(&fv, &ref_v),
+        );
+        assert!(dq < 5e-3, "Gemma fused Q vs graph Q RMS too large: {dq}");
+        assert!(dk < 5e-3, "Gemma fused K vs graph K RMS too large: {dk}");
+        assert!(dv < 5e-3, "Gemma fused V vs graph V RMS too large: {dv}");
+    }
+
+    /// The `(1 + weight)` Gemma offset must actually change the fused output:
+    /// feeding the SAME raw weights as a standard `RMSNorm` vs a `GemmaRMSNorm`
+    /// produces materially different Q/K. Guards against the primitive silently
+    /// hardcoding or dropping the Gemma offset, the core correctness risk in
+    /// #326.
+    #[test]
+    fn fused_qkv_norm_variant_selects_one_plus_weight() {
+        let (n_heads, n_kv_heads, head_dim) = (2, 1, 8);
+        let (rope_dims, rope_base, offset, eps) = (head_dim, 10000.0_f32, 7, 1e-6_f32);
+
+        let qkv = synthetic_quantized_fused_qkv(n_heads, n_kv_heads, head_dim);
+        let norm_w: Vec<f32> = (0..head_dim).map(|i| 0.5 + 0.1 * i as f32).collect();
+        let std_q = RMSNorm::new(f16_from(&norm_w, &[head_dim]), eps);
+        let std_k = RMSNorm::new(f16_from(&norm_w, &[head_dim]), eps);
+        let gemma_q = GemmaRMSNorm::new(f16_from(&norm_w, &[head_dim]), eps);
+        let gemma_k = GemmaRMSNorm::new(f16_from(&norm_w, &[head_dim]), eps);
+
+        let x_vals: Vec<f32> = (0..64).map(|c| 0.2 + 0.01 * c as f32).collect();
+        let x = f16_from(&x_vals, &[1, 1, 64]);
+
+        let (sq, sk, _sv) = qkv
+            .forward_split_norm_rope_quantized(&x, &std_q, &std_k, rope_dims, rope_base, offset)
+            .expect("standard fused path");
+        let (gq, gk, _gv) = qkv
+            .forward_split_norm_rope_quantized(&x, &gemma_q, &gemma_k, rope_dims, rope_base, offset)
+            .expect("gemma fused path");
+
+        // Guard: both outputs must be non-degenerate, else the difference below
+        // would be a meaningless 0 vs 0.
+        assert!(
+            max_abs(&sq) > 0.1,
+            "standard fused Q must be non-degenerate (max-abs {})",
+            max_abs(&sq)
+        );
+
+        // Same projection, same raw norm weights: the only difference is the
+        // `(1 + weight)` Gemma offset, which must move the output well beyond
+        // f16 noise.
+        let (dq, dk) = (max_abs_diff(&sq, &gq), max_abs_diff(&sk, &gk));
+        assert!(dq > 0.05, "standard vs Gemma Q must differ (max-abs {dq})");
+        assert!(dk > 0.05, "standard vs Gemma K must differ (max-abs {dk})");
     }
 }

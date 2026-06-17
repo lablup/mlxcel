@@ -1256,8 +1256,10 @@ mod ffi {
         );
 
         /// Fused concatenated QKV projection + split + reshape + transpose +
-        /// GemmaRMSNorm(Q/K) + RoPE.
-        /// Used by: Gemma3 dense attention preparation path.
+        /// RMSNorm(Q/K) + RoPE. Applies the plain
+        /// `x * weight * rsqrt(mean(x^2) + eps)` form; the caller passes the raw
+        /// weight for a standard RMSNorm or `(1 + weight)` for Gemma.
+        /// Used by: Gemma3, Qwen3, Qwen3-MoE attention preparation paths.
         unsafe fn fused_qkv_project_split_norm_rope(
             x: &MlxArray,
             weight: &MlxArray,

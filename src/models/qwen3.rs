@@ -111,29 +111,51 @@ impl Attention {
         let shape = mlxcel_core::array_shape(x);
         let b = shape[0];
         let l = shape[1];
-
-        // Fused QKV projection: single matmul → split into Q, K, V
-        let (q, k, v) = self.qkv_proj.forward(x);
-
-        // Reshape to [batch, seq_len, n_heads, head_dim]
-        let q = mlxcel_core::reshape(&q, &[b, l, self.num_heads, self.head_dim]);
-        let k = mlxcel_core::reshape(&k, &[b, l, self.num_kv_heads, self.head_dim]);
-        let v = mlxcel_core::reshape(&v, &[b, l, self.num_kv_heads, self.head_dim]);
-
-        // Apply Q/K normalization BEFORE transpose
-        let q = self.q_norm.forward(&q);
-        let k = self.k_norm.forward(&k);
-
-        // Transpose to [batch, n_heads, seq_len, head_dim]
-        let mut q = mlxcel_core::transpose_axes(&q, &[0, 2, 1, 3]);
-        let mut k = mlxcel_core::transpose_axes(&k, &[0, 2, 1, 3]);
-        let v = mlxcel_core::transpose_axes(&v, &[0, 2, 1, 3]);
-
         let offset = cache.offset;
 
-        // Apply RoPE AFTER normalization
-        q = mlxcel_core::fast_rope(&q, self.rope_dims, false, self.rope_base, 1.0, offset);
-        k = mlxcel_core::fast_rope(&k, self.rope_dims, false, self.rope_base, 1.0, offset);
+        // On decode (l == 1) collapse the QKV projection, split, Q/K RMSNorm and
+        // RoPE into one fused C++ kernel to cut per-token op count (#326). The
+        // norm reduces over head_dim, which the head transpose leaves untouched,
+        // so the fused result matches the graph path below. Prefill (l > 1) and
+        // non-quantized weights (the kernel returns None) take the graph path.
+        let fused = if l == 1 {
+            self.qkv_proj.forward_split_norm_rope_quantized(
+                x,
+                &self.q_norm,
+                &self.k_norm,
+                self.rope_dims,
+                self.rope_base,
+                offset,
+            )
+        } else {
+            None
+        };
+
+        let (q, k, v) = if let Some((q, k, v)) = fused {
+            (q, k, v)
+        } else {
+            // Fused QKV projection: single matmul → split into Q, K, V
+            let (q, k, v) = self.qkv_proj.forward(x);
+
+            // Reshape to [batch, seq_len, n_heads, head_dim]
+            let q = mlxcel_core::reshape(&q, &[b, l, self.num_heads, self.head_dim]);
+            let k = mlxcel_core::reshape(&k, &[b, l, self.num_kv_heads, self.head_dim]);
+            let v = mlxcel_core::reshape(&v, &[b, l, self.num_kv_heads, self.head_dim]);
+
+            // Apply Q/K normalization BEFORE transpose
+            let q = self.q_norm.forward(&q);
+            let k = self.k_norm.forward(&k);
+
+            // Transpose to [batch, n_heads, seq_len, head_dim]
+            let q = mlxcel_core::transpose_axes(&q, &[0, 2, 1, 3]);
+            let k = mlxcel_core::transpose_axes(&k, &[0, 2, 1, 3]);
+            let v = mlxcel_core::transpose_axes(&v, &[0, 2, 1, 3]);
+
+            // Apply RoPE AFTER normalization
+            let q = mlxcel_core::fast_rope(&q, self.rope_dims, false, self.rope_base, 1.0, offset);
+            let k = mlxcel_core::fast_rope(&k, self.rope_dims, false, self.rope_base, 1.0, offset);
+            (q, k, v)
+        };
 
         // Try the fused sparse-V SDPA path for the decode case
         // (l == 1) when the cache is in Turbo4Asym mode
