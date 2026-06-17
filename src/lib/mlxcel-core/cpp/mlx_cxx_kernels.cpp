@@ -1115,6 +1115,171 @@ namespace {
         return holder;
     }
 
+    // ---- CUDA ports of the two fused decode-MoE kernels (#268 step 2b). ----
+    // The Metal sources above are mx.fast.metal_kernel, which throws on the CUDA
+    // backend ("[metal_kernel] No Metal back-end"). These are the same
+    // computation in CUDA C++ for mx.fast.cuda_kernel: one warp (32 lanes,
+    // threadIdx.x) owns each output row (grid.y), striding the contraction dim
+    // and reduced with __shfl_down_sync instead of simd_sum. grid.z selects the
+    // expert slot. MLX injects the template args (T, K, Din, Dff, bits,
+    // group_size, act) as constexpr/using, and wraps these bodies as a
+    // __global__ with the named buffers as parameters, mirroring the Metal path.
+    // Selected at runtime by metal::is_available() in run_fused_moe_two_kernel.
+    static const char* MOE_GATEUP_CUDA_SOURCE = R"(
+        uint32_t lane  = threadIdx.x;                          // 0..31 (one warp)
+        uint32_t f     = blockIdx.y * blockDim.y + threadIdx.y; // output row 0..Dff-1
+        uint32_t eslot = blockIdx.z;                           // 0..K-1
+        if (f >= (uint32_t)Dff) return;                        // warp-uniform
+        uint32_t e = indices[eslot];
+
+        constexpr uint32_t vpw   = 32u / bits;
+        constexpr uint32_t wmask = (1u << bits) - 1u;
+        constexpr uint32_t Din_p = Din / vpw;
+        constexpr uint32_t G     = Din / group_size;
+
+        uint32_t row = e * Dff + f;
+        const uint32_t* gwr = gate_w + row * Din_p;
+        const T*        gsr = gate_s + row * G;
+        const T*        gbr = gate_b + row * G;
+        const uint32_t* uwr = up_w   + row * Din_p;
+        const T*        usr = up_s   + row * G;
+        const T*        ubr = up_b   + row * G;
+        float g = 0.0f, u = 0.0f;
+        for (uint32_t p = lane; p < Din_p; p += 32u) {
+            uint32_t base = p * vpw;
+            uint32_t grp  = base / group_size;
+            float gs = (float)gsr[grp], gb = (float)gbr[grp];
+            float us = (float)usr[grp], ub = (float)ubr[grp];
+            uint32_t gpk = gwr[p];
+            uint32_t upk = uwr[p];
+            for (uint32_t j = 0; j < vpw; ++j) {
+                float xv = (float)x[base + j];
+                g += xv * ((float)((gpk >> (j * bits)) & wmask) * gs + gb);
+                u += xv * ((float)((upk >> (j * bits)) & wmask) * us + ub);
+            }
+        }
+        #pragma unroll
+        for (int o = 16; o > 0; o >>= 1) {
+            g += __shfl_down_sync(0xffffffffu, g, o);
+            u += __shfl_down_sync(0xffffffffu, u, o);
+        }
+        if (lane == 0u) {
+            if (act == 1) {
+                // GeGLU (gelu tanh approx) * up (gemma4 experts).
+                float g3 = g * g * g;
+                float inner = 0.7978845608028654f * (g + 0.044715f * g3);
+                float gelu = 0.5f * g * (1.0f + tanhf(inner));
+                act_g[eslot * Dff + f] = gelu * u;
+            } else {
+                // SwiGLU (silu) * up. Precise expf (not __expf) to match the
+                // gather_qmm silu and hold greedy parity; it runs once per row
+                // on lane 0, so the cost is negligible against the GEMV.
+                act_g[eslot * Dff + f] = (g / (1.0f + expf(-g))) * u;
+            }
+        }
+    )";
+
+    static const char* MOE_DOWN_CUDA_SOURCE = R"(
+        uint32_t lane  = threadIdx.x;                          // 0..31 (one warp)
+        uint32_t h     = blockIdx.y * blockDim.y + threadIdx.y; // output row 0..Din-1
+        uint32_t eslot = blockIdx.z;                           // 0..K-1
+        if (h >= (uint32_t)Din) return;                        // warp-uniform
+        uint32_t e = indices[eslot];
+
+        constexpr uint32_t Gd = Dff / group_size;
+        uint32_t row = e * Din + h;
+        const T*     dsr = down_s + row * Gd;
+        const T*     dbr = down_b + row * Gd;
+        const float* a   = act_g  + eslot * Dff;
+        float d = 0.0f;
+
+        if (bits == 6) {
+            // 6-bit: MLX packs 4 weights into 3 bytes; read the row as bytes.
+            // Layout matches quantized.h qdot: v0=b0&0x3f,
+            // v1=(b0>>6)|((b1&0x0f)<<2), v2=(b1>>4)|((b2&0x03)<<4), v3=b2>>2.
+            constexpr uint32_t packs   = Dff / 4u;
+            constexpr uint32_t row_u32 = Dff * 3u / 16u;
+            const uint8_t* wb = reinterpret_cast<const uint8_t*>(down_w + row * row_u32);
+            for (uint32_t p = lane; p < packs; p += 32u) {
+                uint32_t base = p * 4u;
+                uint32_t grp  = base / group_size;
+                float ds = (float)dsr[grp], db = (float)dbr[grp];
+                uint32_t b0 = wb[p * 3u], b1 = wb[p * 3u + 1u], b2 = wb[p * 3u + 2u];
+                uint32_t v0 = b0 & 0x3fu;
+                uint32_t v1 = (b0 >> 6) | ((b1 & 0x0fu) << 2);
+                uint32_t v2 = (b1 >> 4) | ((b2 & 0x03u) << 4);
+                uint32_t v3 = (b2 >> 2);
+                d += a[base + 0u] * ((float)v0 * ds + db);
+                d += a[base + 1u] * ((float)v1 * ds + db);
+                d += a[base + 2u] * ((float)v2 * ds + db);
+                d += a[base + 3u] * ((float)v3 * ds + db);
+            }
+        } else {
+            // Power-of-2 bits (4/8): vpw weights per 32-bit pack.
+            constexpr uint32_t vpw   = 32u / bits;
+            constexpr uint32_t wmask = (1u << bits) - 1u;
+            constexpr uint32_t Dff_p = Dff / vpw;
+            const uint32_t* dwr = down_w + row * Dff_p;
+            for (uint32_t p = lane; p < Dff_p; p += 32u) {
+                uint32_t base = p * vpw;
+                uint32_t grp  = base / group_size;
+                float ds = (float)dsr[grp], db = (float)dbr[grp];
+                uint32_t dpk = dwr[p];
+                for (uint32_t j = 0; j < vpw; ++j) {
+                    d += a[base + j] * ((float)((dpk >> (j * bits)) & wmask) * ds + db);
+                }
+            }
+        }
+        #pragma unroll
+        for (int o = 16; o > 0; o >>= 1) d += __shfl_down_sync(0xffffffffu, d, o);
+        if (lane == 0u) {
+            out[eslot * Din + h] = (T)((float)scores[eslot] * d);
+        }
+    )";
+
+    struct MoeGateUpKernelHolderCuda {
+        std::optional<mlx::core::fast::CustomKernelFunction> kernel;
+        bool initialized = false;
+        mlx::core::fast::CustomKernelFunction& get() {
+            if (!initialized) {
+                kernel = mlx::core::fast::cuda_kernel(
+                    "moe_gateup_kernel_cu",
+                    {"x", "indices", "gate_w", "gate_s", "gate_b",
+                     "up_w", "up_s", "up_b"},
+                    {"act_g"},
+                    MOE_GATEUP_CUDA_SOURCE
+                );
+                initialized = true;
+            }
+            return *kernel;
+        }
+    };
+    static MoeGateUpKernelHolderCuda& get_moe_gateup_kernel_cuda() {
+        static MoeGateUpKernelHolderCuda holder;
+        return holder;
+    }
+
+    struct MoeDownKernelHolderCuda {
+        std::optional<mlx::core::fast::CustomKernelFunction> kernel;
+        bool initialized = false;
+        mlx::core::fast::CustomKernelFunction& get() {
+            if (!initialized) {
+                kernel = mlx::core::fast::cuda_kernel(
+                    "moe_down_kernel_cu",
+                    {"indices", "down_w", "down_s", "down_b", "act_g", "scores"},
+                    {"out"},
+                    MOE_DOWN_CUDA_SOURCE
+                );
+                initialized = true;
+            }
+            return *kernel;
+        }
+    };
+    static MoeDownKernelHolderCuda& get_moe_down_kernel_cuda() {
+        static MoeDownKernelHolderCuda holder;
+        return holder;
+    }
+
     // fc1 + relu² -> act_g[K, Dff] for the squared-ReLU MoE (nemotron-h: the
     // experts are fc1 -> relu² -> fc2, not SwiGLU). One simdgroup per output
     // row, simd_sum over the contraction dim; relu² = square(max(x, 0)) to
@@ -1222,8 +1387,13 @@ std::unique_ptr<MlxArray> run_fused_moe_two_kernel(
         {"bits", d_bits}, {"group_size", group_size},
     };
 
+    // mx.fast.metal_kernel throws on CUDA ("No Metal back-end"), so dispatch the
+    // cuda_kernel port there. metal::is_available() is false on a CUDA-only build.
+    const bool use_cuda = !mlx::core::metal::is_available();
+
     // A) gate/up + activation -> act_g[K, Dff] (f32 for the down GEMV).
-    auto& kA = get_moe_gateup_kernel().get();
+    auto& kA = use_cuda ? get_moe_gateup_kernel_cuda().get()
+                        : get_moe_gateup_kernel().get();
     std::vector<array> inA = {
         astype(x.inner, T), astype(indices.inner, uint32),
         gate_w.inner, astype(gate_s.inner, T), astype(gate_b.inner, T),
@@ -1237,7 +1407,8 @@ std::unique_ptr<MlxArray> run_fused_moe_two_kernel(
     );
 
     // B) down * score -> partial[K, Din]; summed over K into [Din].
-    auto& kB = get_moe_down_kernel().get();
+    auto& kB = use_cuda ? get_moe_down_kernel_cuda().get()
+                        : get_moe_down_kernel().get();
     std::vector<array> inB = {
         astype(indices.inner, uint32),
         down_w.inner, astype(down_s.inner, T), astype(down_b.inner, T),
