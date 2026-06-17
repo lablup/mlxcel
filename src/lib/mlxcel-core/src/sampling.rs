@@ -677,11 +677,18 @@ pub fn compute_logprobs(
     let log_probs = ffi::log_softmax(adjusted_logits, -1);
     ffi::eval(&log_probs);
 
-    // Extract the log probability of the selected token.
+    // Extract the log probability of the selected token. `selected_lp_arr`
+    // inherits the model logit dtype (f16/bf16 for quantized models post-#289),
+    // and `item_f32` reads the element's raw bytes via MLX `item<float>()`
+    // without dtype conversion, so a 2-byte f16/bf16 element would be
+    // reinterpreted as garbage. Cast the single value to f32 first. Casting
+    // only this 1-element array (not the full-vocab `log_probs`) keeps the
+    // decode hot path cheap, matching the top-k boundary below.
     let idx = ffi::from_slice_i32(&[selected_token], &[1, 1]);
     let selected_lp_arr = ffi::take_along_axis(&log_probs, &idx, -1);
-    ffi::eval(&selected_lp_arr);
-    let selected_logprob = ffi::item_f32(&selected_lp_arr);
+    let selected_lp_f32 = ffi::astype(&selected_lp_arr, dtype::FLOAT32);
+    ffi::eval(&selected_lp_f32);
+    let selected_logprob = ffi::item_f32(&selected_lp_f32);
 
     // Compute top-k alternatives if requested.
     let top_alternatives = if config.top_k > 0 {
