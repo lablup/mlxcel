@@ -2,6 +2,8 @@
 
 Compatibility and performance testing for mlxcel models on **Mac Studio M1 Ultra 128GB**, with comparison against Python mlx-lm / mlx-vlm.
 
+> **2026-06-17 fused decode-MoE update.** After this 0.2.1 sweep, the fused decode-MoE kernel was wired into more MoE families (epic #307: qwen2_moe, lfm2, qwen3_vl_moe, mixtral, phi-3.5-moe, olmoe). On M1 Ultra the small-expert families gain on decode (qwen3-vl-30b-a3b text path 69 to 82 tok/s, +18.8%; lfm2-8b-a1b +3.4%; qwen1.5-moe +2.2%), while large-expert mixtral and phi-3.5-moe stay on gather_qmm via the `MLXCEL_FUSED_MOE_MAX_DFF` guard (decode unchanged) and olmoe is perf-neutral. The MoE rows in this dated sweep predate the wiring; the post-wiring decode numbers are in `benchmarks/metal_m1ultra_2026-06-17_fused_moe.csv` and [Fused decode-MoE kernel](fused-moe-decode-kernel-design.md).
+
 ## Test Environment
 
 | Item | Value |

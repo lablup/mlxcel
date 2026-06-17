@@ -9,7 +9,7 @@ High-performance LLM/VLM inference runtime and server for Apple Silicon. The CLI
 ## New in v0.3.0
 
 - **Nine new model families.** BitNet b1.58 (1.58-bit ternary), IBM Granite dense and GraniteMoeHybrid, LFM2 / LFM2-MoE, Falcon-H1, PLaMo 2, Apertus, ByteDance Seed-OSS, and dots.llm1 MoE, on top of the existing Llama, Qwen, Gemma, and DeepSeek coverage.
-- **Faster MoE decode, on by default.** The fused decode-MoE Metal kernel beats the previous gather path on single-token decode (about 13% on gemma4) and is now enabled by default. Set `MLXCEL_FUSED_MOE=0` to disable.
+- **Faster MoE decode, on by default.** The fused decode-MoE Metal kernel beats the previous gather path on single-token decode (up to about 19% on Qwen3-VL 30B-A3B and 13% on Gemma 4, M1 Ultra) and is enabled by default across ten MoE families. It self-gates by expert size (`MLXCEL_FUSED_MOE_MAX_DFF`, default 4096): large-expert models such as Mixtral 8x7B and Phi-3.5-MoE keep the proven gather path with no regression. Set `MLXCEL_FUSED_MOE=0` to disable.
 - **Loads newer mixed-precision checkpoints.** mlxcel now reads per-layer mixed bit widths and bf16 quantization scales, so recent mlx-community exports (for example 8-bit embeddings under a 4-bit default) load correctly. A bf16-scale decode regression on M1 Ultra is also fixed.
 - **Linux CUDA release builds.** Prebuilt x86_64 and aarch64 CUDA artifacts ship with bundled CCCL headers and reuse JIT-compiled kernels across runs through a persistent PTX cache.
 
@@ -172,8 +172,14 @@ to a quantized-decode regression on bf16-scale checkpoints that mostly affected
 M1 Ultra). The M5 Max `mlx-lm` / `mlx-vlm` reference columns are retained from
 the earlier same-host campaign, so each ratio is mlxcel (2026-06-15) over that
 retained reference; a fresh same-host mlx-lm / mlx-vlm run validated that the
-reference is stable. M1 Ultra values are mlxcel-only capacity references.
-Absolute results depend on model family, quantization, prompt shape, decode
+reference is stable. M1 Ultra values are mlxcel-only capacity references. After
+that sweep the fused decode-MoE kernel was wired into more MoE families
+(qwen2_moe, lfm2, qwen3_vl_moe), so the Qwen3-VL 30B-A3B text-path M1 Ultra figure
+here is the refreshed post-wiring number (69 to 82 tok/s, +19%, `--profile`
+decode, median of 3); the M5 Max columns predate that wiring and are conservative
+for that row. Mixtral 8x7B stays on the gather path via the expert-size guard, so
+its figures are unchanged. Absolute results depend on model family, quantization,
+prompt shape, decode
 length, and hardware. See
 [Benchmark results](docs/benchmark_results/benchmark-report.md) and
 [Benchmarks](docs/benchmarks.md) for methodology and caveats.
@@ -195,7 +201,7 @@ length, and hardware. See
 | Mixtral 8x7B 4bit | 54 tok/s | 65 tok/s | 66 tok/s | 98% |
 | StarCoder2 3B 4bit | 166 tok/s | 216 tok/s | 215 tok/s | 100% |
 | Qwen3.5 0.8B 4bit | 230 tok/s | 504 tok/s | 545 tok/s | 92% |
-| Qwen3-VL 30B-A3B 4bit, text path | 69 tok/s | 151 tok/s | 147 tok/s | 103% |
+| Qwen3-VL 30B-A3B 4bit, text path | 82 tok/s | 151 tok/s | 147 tok/s | 103% |
 | Qwen3-VL 32B 4bit, text path | 21 tok/s | 27 tok/s | 29 tok/s | 93% |
 | GPT-OSS 120B 4bit | 58 tok/s | 114 tok/s | 110 tok/s | 104% |
 | Solar Open 100B 4bit | 33 tok/s | 65 tok/s | 66 tok/s | 98% |

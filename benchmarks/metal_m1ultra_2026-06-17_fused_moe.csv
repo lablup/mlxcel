@@ -1,0 +1,7 @@
+model,model_path,prompt_tokens,generated_tokens,prefill_ms,prefill_tok_s,decode_ms,decode_tok_s,date,hardware,mlx_version,build_type,max_tokens,prompt
+qwen1.5-moe-a2.7b-4bit,models/qwen1.5-moe-a2.7b-4bit/,25,43,,,298.30,144.15,2026-06-17,Apple_M1_Ultra_128GB,0.3.0+d9f88e07b,release,100,"Hello, how are you today?"
+lfm2-8b-a1b-4bit,models/lfm2-8b-a1b-4bit/,17,37,,,217.11,170.42,2026-06-17,Apple_M1_Ultra_128GB,0.3.0+d9f88e07b,release,100,"Hello, how are you today?"
+qwen3-vl-30b-a3b-4bit,models/qwen3-vl-30b-a3b-4bit/,15,35,,,437.60,79.98,2026-06-17,Apple_M1_Ultra_128GB,0.3.0+d9f88e07b,release,100,"Hello, how are you today?"
+mixtral-8x7b-4bit,models/mixtral-8x7b-4bit/,15,76,,,1426.77,53.27,2026-06-17,Apple_M1_Ultra_128GB,0.3.0+d9f88e07b,release,100,"Hello, how are you today?"
+phi-3.5-moe-4bit,models/phi-3.5-moe-4bit/,10,100,,,1318.50,75.84,2026-06-17,Apple_M1_Ultra_128GB,0.3.0+d9f88e07b,release,100,"Hello, how are you today?"
+olmoe-1b-7b-0125-instruct-4bit,/Users/inureyes/.cache/mlxcel/models/mlx-community/OLMoE-1B-7B-0125-Instruct-4bit/,20,100,,,364.31,274.49,2026-06-17,Apple_M1_Ultra_128GB,0.3.0+d9f88e07b,release,100,"Hello, how are you today?"

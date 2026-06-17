@@ -164,19 +164,32 @@ falls back to the proven `gather_qmm` / `SwitchGLU` path automatically. Set
 
 ### Measured decode gains (M1 Ultra, `MLXCEL_FUSED_MOE=1`)
 
+decode tok/s pairs are `MLXCEL_FUSED_MOE=0` (gather_qmm baseline) followed by the
+default fused path. The first four rows and nemotron-h are from the kernel
+development passes; qwen3-vl-30b-a3b, lfm2-8b-a1b, and qwen1.5-moe are from the
+`--profile` decode benchmark (prompt "Hello, how are you today?", 100 tokens,
+median of 3) added when those families were wired (epic #307).
+
 | Model | activation | bits | decode tok/s | gain | greedy parity |
 |-------|-----------|------|-------------:|-----:|---------------|
-| gemma-4-26b-a4b-it | GeGLU | 4 | 73.8 → 83.2 | **+13%** | byte-identical (use the chat template) |
+| qwen3-vl-30b-a3b (text path) | SwiGLU | 4 | 69.3 → 82.3 | **+18.8%** | within f16 jitter class |
+| gemma-4-26b-a4b-it | GeGLU | 4 | 73.8 → 83.2 | +13% | byte-identical (use the chat template) |
 | qwen3.5/3.6-35b-a3b | SwiGLU | 4 | 68.7 → 74.7 | +8.7% | within f16 jitter class |
 | dots.llm1 | SwiGLU | 4 + 6 | 13.1 → 13.7 | +4.7% | byte-identical |
 | qwen3-30b-a3b | SwiGLU | 4 | 47.3 → 49.0 | +3.5% | byte-identical |
-| qwen1.5-moe-a2.7b | SwiGLU | 4 | ~140 | ~par | byte-identical |
+| lfm2-8b-a1b (LFM2-MoE) | SwiGLU | 4 | 168.9 → 174.7 | +3.4% | byte-identical |
+| qwen1.5-moe-a2.7b | SwiGLU | 4 | 143.0 → 146.1 | +2.2% | within f16 jitter class |
 | nemotron-h-30b | relu² | 4 | 54.9 → 54.7 | ~0% | byte-identical (off the default path) |
 
-The gain tracks how MoE-dominated the decode is and how inefficient the
-baseline was: gemma4 wins most (small experts, and its compiled-SwitchGeGLU
-baseline was three `gather_qmm`), while nemotron-h barely moves because its
-decode is dominated by Mamba2 + attention.
+The gain tracks how MoE-dominated the decode is and how inefficient the baseline
+was: qwen3-vl-30b-a3b and gemma4 win most (small experts, MoE-dominated decode;
+gemma4's compiled-SwitchGeGLU baseline was three `gather_qmm`), while nemotron-h
+barely moves because its decode is dominated by Mamba2 + attention. Three wired
+families do not gain and stay on `gather_qmm`: mixtral (Dff 14336) and phi-3.5-moe
+(Dff 6400) sit above `MLXCEL_FUSED_MOE_MAX_DFF`, so the kernel declines and decode
+is unchanged (mixtral ~53 tok/s, phi-3.5-moe ~75 tok/s); olmoe (Dff 1024, top_k=8)
+dispatches but is perf-neutral (~272 tok/s on and off). All three remain within
+the f16 jitter class of their baselines, with no regression.
 
 ### Measured decode gains (M5 Max, `MLXCEL_FUSED_MOE=1`, #282)
 
