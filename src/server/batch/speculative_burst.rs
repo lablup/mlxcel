@@ -150,8 +150,9 @@ use mlxcel_core::drafter::{Drafter, DrafterKind, load_drafter};
 use mlxcel_core::generate::{LanguageModel, SamplingConfig};
 use mlxcel_core::generation_policy::{initial_token_history, merged_eos_token_ids};
 use mlxcel_core::sampling::TokenLogprobData;
-use mlxcel_core::speculative::mtp::{MtpBatchedGenerator, MtpGenerator};
+use mlxcel_core::speculative::mtp::{MtpAcceptanceSummary, MtpBatchedGenerator, MtpGenerator};
 
+use super::mtp_policy::MtpBurstProfile;
 use crate::LoadedModel;
 use crate::models::gemma4_mtp_target::{
     Gemma4MtpBatchedTargetAdapter, Gemma4MtpTargetAdapter, Gemma4UnifiedMtpBatchedTargetAdapter,
@@ -582,6 +583,12 @@ pub(crate) struct BurstFinalized {
     /// — only healthy finishes donate their cache back. `false` on the
     /// error / transition-failure paths.
     pub healthy_finish: bool,
+    /// Coarse MTP profile for the adaptive policy (issue #333). `Some` only
+    /// for a successful MTP B=1 burst that ran at least one speculative round;
+    /// `None` for DFlash, for zero-round MTP runs, and on the error /
+    /// transition-failure paths. The scheduler feeds it to
+    /// [`super::mtp_policy::MtpPolicy::record_b1_sample`].
+    pub mtp_profile: Option<MtpBurstProfile>,
 }
 
 /// Run a speculative burst for `seq`, producing every token the request
@@ -654,6 +661,7 @@ pub(crate) fn try_run_burst_b1(
             logprobs,
             prefill_time_ms,
             decode_time_ms,
+            profile,
         }) => {
             // Transition Queued → Prefilling now that we know the
             // burst owned the request lifecycle.
@@ -668,6 +676,8 @@ pub(crate) fn try_run_burst_b1(
                     prompt_tokens: Vec::new(),
                     generated_tokens: Vec::new(),
                     healthy_finish: false,
+                    // No usable profile: the burst never streamed tokens.
+                    mtp_profile: None,
                 });
             }
             let seq_id = seq.seq_id;
@@ -685,6 +695,9 @@ pub(crate) fn try_run_burst_b1(
                 prompt_tokens: finalized.prompt_tokens,
                 generated_tokens: finalized.generated_tokens,
                 healthy_finish: finalized.healthy_finish,
+                // Surface the MTP profile so the scheduler can feed the
+                // adaptive policy. `None` for DFlash / zero-round runs.
+                mtp_profile: profile,
             })
         }
         Err(BurstOutcome::DeclineToClassic) => {
@@ -716,6 +729,8 @@ pub(crate) fn try_run_burst_b1(
                 prompt_tokens: Vec::new(),
                 generated_tokens: Vec::new(),
                 healthy_finish: false,
+                // Errored burst: no profile to record.
+                mtp_profile: None,
             })
         }
     }
@@ -734,6 +749,11 @@ struct BurstSuccess {
     logprobs: Vec<Option<TokenLogprobData>>,
     prefill_time_ms: f64,
     decode_time_ms: f64,
+    /// Coarse per-pairing MTP profile (issue #333), `Some` only for the MTP
+    /// B=1 burst when a speculative round ran. `None` for DFlash and for MTP
+    /// runs that produced no round. The scheduler feeds it to the adaptive
+    /// policy after the burst finalizes.
+    profile: Option<MtpBurstProfile>,
 }
 
 /// Outcome of [`finalize_burst_success`].
@@ -1002,6 +1022,16 @@ fn run_mtp_burst(
         }
     };
 
+    // Build the adaptive-policy profile from the captured acceptance summary
+    // (issue #333). Only runs that executed at least one speculative round
+    // carry a timing signal; zero-round runs (immediate EOS / max_tokens=1)
+    // are dropped so they never skew the per-pairing profile. batch_size=1
+    // for the singleton burst path.
+    let profile = output
+        .acceptance
+        .filter(|summary| summary.rounds > 0)
+        .map(|summary| MtpBurstProfile::from_summary(summary, 1, prompt.len()));
+
     // Hand the recovered drafter back to the slot for the next
     // request. The slot's `return_drafter` calls `reset` against the
     // target LM so the drafter starts clean.
@@ -1013,6 +1043,7 @@ fn run_mtp_burst(
         logprobs: output.logprobs,
         prefill_time_ms: stats.prefill_time_ms,
         decode_time_ms: stats.decode_time_ms,
+        profile,
     })
 }
 
@@ -1033,6 +1064,10 @@ struct DriveMtpOutput {
     /// disabled.
     logprobs: Vec<Option<TokenLogprobData>>,
     recovered_drafter: Box<dyn Drafter>,
+    /// Coarse acceptance + latency summary of the run, captured from the
+    /// generator before it is consumed. `None` when no speculative round ran.
+    /// Feeds the adaptive MTP policy's per-pairing profile (issue #333).
+    acceptance: Option<MtpAcceptanceSummary>,
 }
 
 /// Generator-shape-agnostic helper that drives an [`MtpGenerator`]
@@ -1084,6 +1119,9 @@ where
         cancel,
         logprobs_config,
     );
+    // Capture the coarse acceptance + latency summary BEFORE `into_drafter`
+    // consumes the generator. Feeds the adaptive MTP policy (issue #333).
+    let acceptance = generator.last_acceptance();
     // `MtpGenerator` owns the drafter by value; recover it via
     // `into_drafter` for slot-restoration.
     let recovered_drafter = generator.into_drafter();
@@ -1092,6 +1130,7 @@ where
             emitted,
             logprobs,
             recovered_drafter,
+            acceptance,
         },
         stats,
     )
@@ -1233,6 +1272,9 @@ fn run_dflash_burst(
         logprobs,
         prefill_time_ms,
         decode_time_ms,
+        // The adaptive MTP policy (issue #333) governs the MTP path only;
+        // DFlash carries no profile.
+        profile: None,
     })
 }
 

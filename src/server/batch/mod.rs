@@ -27,6 +27,11 @@
 //! - [`BatchScheduler`] -- core iteration-level scheduler.
 
 mod active;
+/// Adaptive MTP enable/decline policy (issue #333): profiles the first few
+/// B=1 MTP burst requests of a (target, drafter, hardware) pairing and settles
+/// to a data-driven verdict, overriding the static per-hardware gate while
+/// keeping `MLXCEL_ENABLE_MTP_B1` as a manual force.
+pub(crate) mod mtp_policy;
 pub mod observability;
 mod prefill_cohort;
 mod queue;

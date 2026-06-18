@@ -360,6 +360,18 @@ pub struct BatchScheduler {
     /// entered.
     speculative_drafter_slot: super::speculative_burst::WorkerDrafterSlot,
 
+    /// Adaptive MTP enable/decline policy (issue #333). `Some` only when the
+    /// dispatch is [`crate::server::SpeculativeDispatch::Mtp`] and the adaptive
+    /// path is enabled (`MLXCEL_MTP_ADAPTIVE` not set to an off value); built
+    /// by [`Self::with_mtp_policy`]. When `None` the B=1 MTP gate falls back to
+    /// the static per-hardware default
+    /// ([`super::speculative_burst::mtp_b1_burst_enabled`]). The policy profiles
+    /// the first few B=1 bursts of the (target, drafter, hardware) pairing and
+    /// settles to a data-driven verdict; consulted via
+    /// [`super::mtp_policy::MtpPolicy::should_attempt_b1`] and fed via
+    /// [`super::mtp_policy::MtpPolicy::record_b1_sample`].
+    mtp_policy: Option<super::mtp_policy::MtpPolicy>,
+
     // -- Disaggregated serving-role handoff --
     /// Cached decode-model paged block geometry for cross-node KV handoff
     /// ([`crate::distributed::disaggregated::handoff_impl`]).
@@ -857,6 +869,9 @@ impl BatchScheduler {
             speculative_drafter_slot: super::speculative_burst::WorkerDrafterSlot::from_dispatch(
                 &crate::server::SpeculativeDispatch::Disabled,
             ),
+            // No adaptive MTP policy until `with_mtp_policy` builds one for an
+            // MTP dispatch. The non-speculative hot path never touches it.
+            mtp_policy: None,
             paged_handoff_geometry: None,
         }
     }
@@ -1032,6 +1047,39 @@ impl BatchScheduler {
         self.speculative_drafter_slot =
             super::speculative_burst::WorkerDrafterSlot::from_dispatch(&dispatch);
         self.speculative_dispatch = dispatch;
+        self
+    }
+
+    /// Attach the adaptive MTP enable/decline policy (issue #333).
+    ///
+    /// Must be chained **after** [`Self::with_speculative_dispatch`] so the
+    /// resolved dispatch (and the drafter checkpoint identity) are in place.
+    /// The policy is built only for [`crate::server::SpeculativeDispatch::Mtp`]
+    /// and only when the adaptive path is enabled; for any other dispatch, or
+    /// when `MLXCEL_MTP_ADAPTIVE` is set to an off value, the field stays
+    /// `None` and the B=1 gate keeps the pre-#333 static per-hardware default.
+    ///
+    /// `target_model_id` is the coarse, non-request-identifying target
+    /// identity (the model directory basename) used as one third of the
+    /// persisted-hint key; the worker passes the served model's basename.
+    /// Building the policy reads the persisted hint from disk once here, at
+    /// worker startup, so the per-request gate performs no IO.
+    pub fn with_mtp_policy(mut self, target_model_id: Option<String>) -> Self {
+        if let crate::server::SpeculativeDispatch::Mtp {
+            draft_model_path, ..
+        } = &self.speculative_dispatch
+        {
+            let drafter_id = draft_model_path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "unknown-drafter".to_string());
+            let target_id = target_model_id.unwrap_or_else(|| "unknown-target".to_string());
+            self.mtp_policy = super::mtp_policy::MtpPolicy::initialize(
+                target_id,
+                drafter_id,
+                self.model.supports_batching(),
+            );
+        }
         self
     }
 
@@ -2791,6 +2839,21 @@ impl BatchScheduler {
     /// so requests that need payloads unsupported by the batched round
     /// loops (currently logprobs) stay on the B = 1 burst path. A window
     /// that collapses to size 1 falls back to the B=1 burst.
+    /// Whether to run the B=1 MTP burst for the next singleton request.
+    ///
+    /// Routes through the adaptive policy (issue #333) when one is attached: it
+    /// forces MTP on while profiling, then returns its settled verdict. Without
+    /// a policy (adaptive disabled) this is the pre-#333 static per-hardware
+    /// gate ([`super::speculative_burst::mtp_b1_burst_enabled`]), which reads
+    /// `MLXCEL_ENABLE_MTP_B1` and the hardware default. A pure read with no
+    /// per-token cost.
+    fn mtp_b1_should_run(&self) -> bool {
+        match &self.mtp_policy {
+            Some(policy) => policy.should_attempt_b1(),
+            None => super::speculative_burst::mtp_b1_burst_enabled(self.model.supports_batching()),
+        }
+    }
+
     fn try_speculative_burst(&mut self, seq: SequenceInfo) -> Option<SequenceInfo> {
         // Fast path: speculative dispatch off, or the head fails the
         // per-sequence gate (multimodal payload / VLM embeddings /
@@ -2859,18 +2922,24 @@ impl BatchScheduler {
                 self.speculative_dispatch,
                 crate::server::SpeculativeDispatch::Mtp { .. }
             )
-            && !super::speculative_burst::mtp_b1_burst_enabled(self.model.supports_batching())
+            && !self.mtp_b1_should_run()
         {
-            // Per-hardware B=1 MTP default (issue #165): non-batchable targets
-            // (12B Unified) keep B=1 MTP on everywhere; batch-capable targets
-            // (31B) default it on only on M5+ chips, because pre-M5 GPU cores
-            // measured a consistent regression (~0.87x avg on M1 Ultra).
-            // `MLXCEL_ENABLE_MTP_B1` overrides in both directions; on decline
-            // the request falls back to classic decode.
+            // B=1 MTP decision (issue #333, adaptive): when an adaptive policy
+            // is attached it profiles the first few B=1 bursts of this
+            // (target, drafter, hardware) pairing and settles to a data-driven
+            // verdict, overriding the static per-hardware gate where the
+            // measured profile is clearly favorable or unfavorable. Without a
+            // policy (MLXCEL_MTP_ADAPTIVE off) this falls back to the static
+            // per-hardware default (issue #165): non-batchable 12B targets keep
+            // B=1 MTP on everywhere; batch-capable 31B targets default it on
+            // only on M5+, since pre-M5 GPU cores measured a consistent
+            // regression. `MLXCEL_ENABLE_MTP_B1` overrides in both directions;
+            // on decline the request falls back to classic decode.
             let seq = window.into_iter().next().expect("singleton window");
             tracing::info!(
-                "MTP B=1 speculative burst declined for seq {} (per-hardware default \
-                 or MLXCEL_ENABLE_MTP_B1=0); falling back to classic decode",
+                "MTP B=1 speculative burst declined for seq {} (adaptive policy \
+                 verdict, per-hardware default, or MLXCEL_ENABLE_MTP_B1=0); \
+                 falling back to classic decode",
                 seq.seq_id,
             );
             return Some(seq);
@@ -3018,6 +3087,7 @@ impl BatchScheduler {
                     prompt_tokens,
                     generated_tokens,
                     healthy_finish,
+                    mtp_profile,
                 }) => {
                     // Burst handled the full request lifecycle inline.
                     //
@@ -3051,6 +3121,13 @@ impl BatchScheduler {
                     self.batch_metrics
                         .record_sequence_completed(tokens_generated);
                     self.batch_observability.record_sequence_completed();
+                    // Feed the adaptive MTP policy (issue #333) the coarse
+                    // profile of this B=1 burst. Only present for MTP runs that
+                    // executed a speculative round; a no-op once the policy has
+                    // settled, so there is no steady-state per-request cost.
+                    if let (Some(policy), Some(profile)) = (self.mtp_policy.as_mut(), mtp_profile) {
+                        policy.record_b1_sample(profile);
+                    }
                     self.publish_metrics();
                     None
                 }

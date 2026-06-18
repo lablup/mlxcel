@@ -55,7 +55,7 @@ pub mod walk;
 #[cfg(test)]
 mod tests;
 
-pub use generator::MtpGenerator;
+pub use generator::{MtpAcceptanceSummary, MtpGenerator};
 pub use round_loop_batched::{MtpBatchedGenerator, MtpBatchedRunOutput};
 pub use target::{
     MtpBatchedVerifyForwardOutput, MtpBatchedVerifyOutput, MtpTarget, MtpVerifyOutput,

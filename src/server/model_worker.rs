@@ -472,7 +472,16 @@ pub(crate) fn spawn_model_worker_with_batch_config(
         // attach the resolved speculative dispatch so the
         // scheduler can branch per-request once the round-loop dispatch
         // hook is wired in `decode_single_step`.
-        .with_speculative_dispatch(sched_config.speculative_dispatch);
+        .with_speculative_dispatch(sched_config.speculative_dispatch)
+        // attach the adaptive MTP policy (issue #333). Keyed on the served
+        // model's directory basename (the coarse, non-request-identifying
+        // target identity) plus the drafter basename and hardware class. A
+        // no-op for non-MTP dispatch or when MLXCEL_MTP_ADAPTIVE is off.
+        .with_mtp_policy(
+            model_path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned()),
+        );
 
         // #126 B3b2a: a non-hybrid `--node-role` runs the live disaggregated
         // serving role rather than the standard single-node loop. The role loop

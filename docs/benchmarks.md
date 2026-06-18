@@ -107,6 +107,24 @@ offset the extra drafter forward per token. This pairing is wired into
 `gemma-4-31b-it-4bit` and `gemma-4-31B-it-assistant-bf16` checkpoints are present
 in the model store.
 
+### Adaptive B=1 MTP policy
+
+Since issue #333 the server no longer decides the B=1 MTP path from the static
+per-hardware gate alone. It profiles the first few B=1 bursts of each (target,
+drafter, hardware) pairing (acceptance length, verify latency, drafter latency,
+batch size, prompt shape) and settles to a data-driven verdict: a clearly
+favorable profile enables MTP even where the static gate would decline, a
+clearly unfavorable one declines it, and an ambiguous profile keeps the static
+per-hardware default above. The settled verdict (enable/decline plus the coarse
+acceptance rate, never prompt data) is cached under
+`${MLXCEL_CACHE_DIR:-$HOME/.cache/mlxcel}/mtp-policy/`, so profiling is a
+one-time cost per pairing and survives restarts. MTP stays mathematically
+exact: the policy only chooses when to run it, so temperature-0 output is still
+byte-identical to classic decode. `MLXCEL_ENABLE_MTP_B1` pins the decision in
+either direction (and suppresses profiling); `MLXCEL_MTP_ADAPTIVE=0` restores
+the pre-#333 static gates. When recording benchmark numbers, discard the
+profiling window and report the settled-verdict steady state.
+
 ## Recommended output layout
 
 Add benchmark artifacts under a dedicated directory before publishing a release,

@@ -1368,6 +1368,7 @@ fn burst_finalized_carries_prompt_cache_donate_fields() {
         prompt_tokens: vec![1, 2, 3, 4],
         generated_tokens: vec![10, 11, 12],
         healthy_finish: true,
+        mtp_profile: None,
     };
 
     assert_eq!(finalized.seq_id, SequenceId::from_raw(7));
@@ -1400,6 +1401,7 @@ fn burst_finalized_error_outcome_has_empty_donate_payload() {
         prompt_tokens: Vec::new(),
         generated_tokens: Vec::new(),
         healthy_finish: false,
+        mtp_profile: None,
     };
 
     assert!(!errored.healthy_finish, "error outcome must not be healthy");

@@ -103,6 +103,20 @@ impl MtpRoundDiagnostics {
         }
     }
 
+    /// Project the internal per-round diagnostics into the public
+    /// [`MtpAcceptanceSummary`] the server-side adaptive MTP policy consumes.
+    /// Carries aggregate round counts and the draft/verify wall-clock split
+    /// only; no prompt data and nothing request-identifying.
+    fn summary(&self) -> MtpAcceptanceSummary {
+        MtpAcceptanceSummary {
+            rounds: self.rounds,
+            proposed_tokens: self.proposed_tokens,
+            accepted_draft_tokens: self.accepted_draft_tokens,
+            draft_ms: self.draft_ms,
+            verify_forward_ms: self.verify_forward_ms,
+        }
+    }
+
     fn log(
         &self,
         block_size: usize,
@@ -137,6 +151,49 @@ impl MtpRoundDiagnostics {
 
 fn duration_ms(duration: Duration) -> f64 {
     duration.as_secs_f64() * 1000.0
+}
+
+/// Coarse per-run acceptance + latency summary surfaced from a single
+/// [`MtpGenerator::generate`] call.
+///
+/// This is the public projection of the generator's internal
+/// `MtpRoundDiagnostics`: only the fields the server-side adaptive MTP policy
+/// (`crate::server::batch::mtp_policy`) needs to decide whether the
+/// speculative path pays for itself on a given (target, drafter, hardware)
+/// pairing. It carries no prompt data and nothing request-identifying, just
+/// aggregate round counts and the draft/verify wall-clock split.
+///
+/// The time fields are cumulative milliseconds across the run's rounds; a
+/// consumer divides by [`Self::rounds`] for a per-round mean.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct MtpAcceptanceSummary {
+    /// Speculative rounds executed (one drafter forward + one verify forward
+    /// each). Zero when the request hit EOS on the seed bonus or
+    /// `max_tokens == 1`, in which case the speculative path produced no
+    /// timing signal.
+    pub rounds: usize,
+    /// Total draft tokens proposed across all rounds.
+    pub proposed_tokens: usize,
+    /// Total draft tokens accepted by the target's argmax walk across all
+    /// rounds. The realized acceptance length per round is
+    /// `accepted_draft_tokens / rounds`.
+    pub accepted_draft_tokens: usize,
+    /// Cumulative drafter `draft_block` wall-clock time (ms) across all rounds.
+    pub draft_ms: f64,
+    /// Cumulative target verify-forward wall-clock time (ms) across all rounds.
+    pub verify_forward_ms: f64,
+}
+
+impl MtpAcceptanceSummary {
+    /// Fraction of proposed draft tokens the target accepted, in `[0, 1]`.
+    /// Returns `0.0` when no tokens were proposed.
+    pub fn acceptance_rate(&self) -> f64 {
+        if self.proposed_tokens == 0 {
+            0.0
+        } else {
+            self.accepted_draft_tokens as f64 / self.proposed_tokens as f64
+        }
+    }
 }
 
 /// Round-loop driver for Gemma 4 MTP speculative decoding (B=1).
@@ -180,6 +237,11 @@ pub struct MtpGenerator<T: MtpTarget> {
     /// above this start here and expand adaptively after high acceptance.
     configured_block_size: usize,
     prefer_requested_block_size: bool,
+    /// Coarse acceptance + latency summary of the most recent `generate`
+    /// call, surfaced via [`Self::last_acceptance`] for the server's adaptive
+    /// MTP policy. `None` until the first run, and reset at the start of every
+    /// `generate`. Holds no prompt data.
+    last_acceptance: Option<MtpAcceptanceSummary>,
 }
 
 impl<T: MtpTarget> MtpGenerator<T> {
@@ -202,12 +264,26 @@ impl<T: MtpTarget> MtpGenerator<T> {
             block_size,
             configured_block_size,
             prefer_requested_block_size,
+            last_acceptance: None,
         }
     }
 
     /// Block size (K). Test/diagnostic accessor.
     pub fn block_size(&self) -> usize {
         self.block_size
+    }
+
+    /// Coarse acceptance + latency summary of the most recent [`Self::generate`]
+    /// call, or `None` if no speculative round ran (the request hit EOS on the
+    /// seed bonus or `max_tokens == 1`).
+    ///
+    /// Surfaced for the server's adaptive MTP policy, which profiles the first
+    /// few requests of a (target, drafter, hardware) pairing to decide whether
+    /// the speculative path is worth running. Cleared at the start of every
+    /// `generate`, so it always reflects the latest run, and carries no prompt
+    /// data.
+    pub fn last_acceptance(&self) -> Option<MtpAcceptanceSummary> {
+        self.last_acceptance
     }
 
     /// Target accessor. Test/diagnostic.
@@ -288,6 +364,12 @@ impl<T: MtpTarget> MtpGenerator<T> {
             "MtpGenerator: prompt_tokens must be non-empty",
         );
 
+        // Reset the per-run acceptance summary so `last_acceptance` always
+        // reflects this call. The `max_tokens == 0` early return below leaves
+        // it `None` (no decode ran); every later exit stamps the round
+        // diagnostics' summary.
+        self.last_acceptance = None;
+
         let prompt_len = prompt_tokens.len();
         let eos_tokens =
             merged_eos_token_ids(self.target.eos_token_ids(), &sampling.stop_token_ids);
@@ -332,6 +414,7 @@ impl<T: MtpTarget> MtpGenerator<T> {
         if eos_tokens.contains(&first_bonus) || max_tokens == 1 {
             let gen_count = emitted.len();
             diagnostics.log(self.block_size, prompt_len, gen_count, Duration::ZERO);
+            self.last_acceptance = Some(diagnostics.summary());
             return (
                 emitted,
                 logprobs,
@@ -470,6 +553,7 @@ impl<T: MtpTarget> MtpGenerator<T> {
                     let decode_time = decode_start.elapsed();
                     let gen_count = emitted.len();
                     diagnostics.log(self.block_size, prompt_len, gen_count, decode_time);
+                    self.last_acceptance = Some(diagnostics.summary());
                     return (
                         emitted,
                         logprobs,
@@ -480,6 +564,7 @@ impl<T: MtpTarget> MtpGenerator<T> {
                     let decode_time = decode_start.elapsed();
                     let gen_count = emitted.len();
                     diagnostics.log(self.block_size, prompt_len, gen_count, decode_time);
+                    self.last_acceptance = Some(diagnostics.summary());
                     return (
                         emitted,
                         logprobs,
@@ -506,6 +591,7 @@ impl<T: MtpTarget> MtpGenerator<T> {
         let decode_time = decode_start.elapsed();
         let gen_count = emitted.len();
         diagnostics.log(self.block_size, prompt_len, gen_count, decode_time);
+        self.last_acceptance = Some(diagnostics.summary());
         (
             emitted,
             logprobs,
