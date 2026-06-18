@@ -1066,7 +1066,9 @@ impl BatchScheduler {
     /// worker startup, so the per-request gate performs no IO.
     pub fn with_mtp_policy(mut self, target_model_id: Option<String>) -> Self {
         if let crate::server::SpeculativeDispatch::Mtp {
-            draft_model_path, ..
+            draft_model_path,
+            block_size,
+            ..
         } = &self.speculative_dispatch
         {
             let drafter_id = draft_model_path
@@ -1077,6 +1079,7 @@ impl BatchScheduler {
             self.mtp_policy = super::mtp_policy::MtpPolicy::initialize(
                 target_id,
                 drafter_id,
+                *block_size,
                 self.model.supports_batching(),
             );
         }

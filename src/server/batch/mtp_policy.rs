@@ -89,7 +89,10 @@ pub(crate) const DECLINE_SPEEDUP_CEIL: f64 = 1.0;
 
 /// On-disk hint format version. Bump when the schema changes; older/newer
 /// versions are ignored on load so a stale file just triggers a re-profile.
-const HINT_VERSION: u32 = 1;
+/// v2: added `block_size` to `PolicyKey` and `PolicyHint` (K affects acceptance
+/// length and verify latency, so a verdict profiled at one K must not be reused
+/// if K changes).
+const HINT_VERSION: u32 = 2;
 
 /// Subdirectory under the mlxcel cache root that holds per-pairing hints.
 const HINT_SUBDIR: &str = "mtp-policy";
@@ -325,30 +328,40 @@ impl ProfileAccumulator {
 
 // ── Pairing key + hardware label ──────────────────────────────────────────────
 
-/// Identity of a (target, drafter, hardware) pairing. The persisted hint is
-/// keyed on this; the file name is a hash so model basenames never have to be
-/// filesystem-safe, and the readable fields are stored inside the file.
+/// Identity of a (target, drafter, hardware, block_size) pairing. The persisted
+/// hint is keyed on this; the file name is a hash so model basenames never have
+/// to be filesystem-safe, and the readable fields are stored inside the file.
+///
+/// `block_size` (K) is included because acceptance length and verify latency
+/// both depend on K: a verdict profiled at K=8 must not be reused at K=4 (or
+/// vice versa). Changing `--num-draft-tokens` / `MLXCEL_DRAFT_BLOCK_SIZE` therefore
+/// produces a different key and triggers a fresh profiling window.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PolicyKey {
     target: String,
     drafter: String,
     hardware: String,
+    block_size: u32,
 }
 
 impl PolicyKey {
-    pub(crate) fn new(target: String, drafter: String, hardware: String) -> Self {
+    pub(crate) fn new(target: String, drafter: String, hardware: String, block_size: u32) -> Self {
         Self {
             target,
             drafter,
             hardware,
+            block_size,
         }
     }
 
-    /// Human-readable key (`target|drafter|hardware`) for logs and the stored
-    /// hint body.
+    /// Human-readable key (`target|drafter|hardware|K{block_size}`) for logs
+    /// and the stored hint body.
     #[must_use]
     pub(crate) fn display(&self) -> String {
-        format!("{}|{}|{}", self.target, self.drafter, self.hardware)
+        format!(
+            "{}|{}|{}|K{}",
+            self.target, self.drafter, self.hardware, self.block_size
+        )
     }
 
     /// Stable short hash used as the hint file stem.
@@ -408,6 +421,9 @@ pub(crate) struct PolicyHint {
     pub target: String,
     pub drafter: String,
     pub hardware: String,
+    /// Draft block size (K) profiled under. A hint is only loaded when the
+    /// current K matches; changing block size re-profiles.
+    pub block_size: u32,
     pub verdict: Verdict,
     /// Coarse measured acceptance rate, rounded to two decimals.
     pub acceptance_rate: f64,
@@ -422,6 +438,7 @@ impl PolicyHint {
             target: key.target.clone(),
             drafter: key.drafter.clone(),
             hardware: key.hardware.clone(),
+            block_size: key.block_size,
             verdict,
             // Round to two decimals so the persisted value stays coarse.
             acceptance_rate: (acceptance_rate * 100.0).round() / 100.0,
@@ -464,8 +481,9 @@ impl PolicyStore {
     }
 
     /// Load a stored hint for `key`, or `None` when there is no usable hint
-    /// (missing file, unreadable, unparseable, wrong version, or a key
-    /// mismatch from a hash collision).
+    /// (missing file, unreadable, unparseable, wrong version, key mismatch from
+    /// a hash collision, or a block_size mismatch meaning the hint was profiled
+    /// under a different K and must not be reused).
     #[must_use]
     pub(crate) fn load(&self, key: &PolicyKey) -> Option<PolicyHint> {
         let path = self.hint_file(key)?;
@@ -475,6 +493,7 @@ impl PolicyStore {
             || hint.target != key.target
             || hint.drafter != key.drafter
             || hint.hardware != key.hardware
+            || hint.block_size != key.block_size
         {
             return None;
         }
@@ -485,7 +504,8 @@ impl PolicyStore {
     /// temporary file, and renames it into place (atomic on the same volume).
     /// One file per pairing, so concurrent writers for different pairings
     /// never contend. Returns the IO error for the caller to log; never
-    /// panics.
+    /// panics. On rename failure the temporary file is cleaned up so no
+    /// orphaned `.tmp.<pid>` files accumulate.
     pub(crate) fn save(&self, hint: &PolicyHint) -> std::io::Result<()> {
         let Some(dir) = self.dir.clone() else {
             return Ok(());
@@ -494,6 +514,7 @@ impl PolicyStore {
             hint.target.clone(),
             hint.drafter.clone(),
             hint.hardware.clone(),
+            hint.block_size,
         );
         let Some(path) = self.hint_file(&key) else {
             return Ok(());
@@ -503,7 +524,10 @@ impl PolicyStore {
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
         let tmp = dir.join(format!("{}.json.tmp.{}", key.hash(), std::process::id()));
         std::fs::write(&tmp, body.as_bytes())?;
-        std::fs::rename(&tmp, &path)?;
+        if let Err(e) = std::fs::rename(&tmp, &path) {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(e);
+        }
         Ok(())
     }
 }
@@ -564,16 +588,21 @@ impl MtpPolicy {
     /// gate. Reads `MLXCEL_ENABLE_MTP_B1` and `MLXCEL_MTP_ADAPTIVE` exactly
     /// once here, mirroring the env-caching pattern, so the per-request gate
     /// touches no environment.
+    ///
+    /// `block_size` is the resolved draft block size (K) for this pairing. It
+    /// is part of the key so a verdict profiled at one K is never reused when K
+    /// changes (acceptance length and verify latency both depend on K).
     #[must_use]
     pub(crate) fn initialize(
         target_id: String,
         drafter_id: String,
+        block_size: u32,
         target_supports_batching: bool,
     ) -> Option<Self> {
         if !adaptive_enabled(std::env::var("MLXCEL_MTP_ADAPTIVE").ok().as_deref()) {
             return None;
         }
-        let key = PolicyKey::new(target_id, drafter_id, hardware_label());
+        let key = PolicyKey::new(target_id, drafter_id, hardware_label(), block_size);
         let has_neural_accelerator = mlxcel_core::hardware::get_hardware().has_neural_accelerator;
         let force = parse_force_override(std::env::var("MLXCEL_ENABLE_MTP_B1").ok().as_deref());
         let store = PolicyStore::from_cache_root();
