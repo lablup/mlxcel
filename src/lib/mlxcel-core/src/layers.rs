@@ -527,15 +527,23 @@ impl FusedQkNorm for GemmaRMSNorm {
 
 /// Whether the fused single-token decode QK-norm+RoPE kernel (#326) is enabled.
 ///
-/// Default-OFF (opt-in). The kernel is numerically correct (decode output is
-/// byte-identical to the graph path on Qwen3 / Qwen3-MoE; the reduction is over
-/// the transpose-invariant head_dim axis), but it cuts Rust<->C++ FFI crossings
-/// rather than MLX op count, so on M1 Ultra (fast FFI) it measured ~1-3.4%
+/// Default-OFF (opt-in). The primitive matches the graph path within RMS < 5e-3
+/// (the reduction is over the transpose-invariant head_dim axis), but it cuts
+/// Rust<->C++ FFI crossings rather than MLX op count, so it does not speed up the
+/// GPU/bandwidth-bound decode loop. On M1 Ultra (fast FFI) it measured ~1-3.4%
 /// SLOWER than the graph path (qwen3-0.6b 275 vs 284, qwen3-8b 82.3 vs 83.2
-/// tok/s). It ships as a reusable shared primitive for the deferred QK-norm
-/// families and is gated off by default pending a per-backend win (e.g. CUDA,
-/// where op-dispatch/FFI cost differs), mirroring the opt-in treatment of the
-/// neutral fused-relu2 MoE path (`MLXCEL_FUSED_MOE_RELU2`).
+/// tok/s). CUDA was the open per-backend question; on GB10 (SM 12.1) it is also
+/// slower (qwen3-0.6b 0.96x, qwen3-8b ~1.0x, qwen3-30b-a3b 0.92x fused/graph;
+/// see docs/benchmark_results/fused-qk-norm-decode-gb10.md). It ships as a
+/// reusable shared primitive for the deferred QK-norm families and stays gated
+/// off, mirroring the opt-in treatment of the neutral fused-relu2 MoE path
+/// (`MLXCEL_FUSED_MOE_RELU2`).
+///
+/// Greedy temp-0 is not byte-identical to the graph path over long generation:
+/// the two numerical paths can diverge at a near-tie argmax. This is not a
+/// regression. On CUDA the graph path is itself non-deterministic run-to-run
+/// (GPU FP-reduction order), while the fused path is deterministic, so its
+/// output stays inside the graph baseline's own run-to-run envelope.
 ///
 /// Set `MLXCEL_FUSED_QK_NORM=1` (also `true`/`on`/`yes`, case-insensitive,
 /// trimmed) to opt into the fused path in Qwen3 and Qwen3-MoE decode.
