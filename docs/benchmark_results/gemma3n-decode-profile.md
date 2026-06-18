@@ -172,6 +172,31 @@ on M5-class hardware (larger buffers were slower there); blindly raising it
 would regress M5. That needs a cross-hardware re-bench before it lands, so it
 belongs in its own issue.
 
+### Hardware-gated default (landed in #353)
+
+`apply_metal_ops_per_buffer_default` (`src/lib/mlxcel-core/src/hardware.rs`) now sets `MLX_MAX_OPS_PER_BUFFER=1000` at process start on pre-M5 Apple Silicon (`AppleSiliconGen` M1 through M4, Metal GPU family 3) when the variable is unset. M5+ (Neural Accelerator) and non-Apple (CUDA) are left on MLX's default, and an operator-set `MLX_MAX_OPS_PER_BUFFER` always wins. The CLI, server, and `mlxcel-bench-decode` binaries apply it before any MLX op.
+
+Cross-hardware basis for the gate:
+
+| Class | MLX_MAX_OPS_PER_BUFFER default | Source |
+|-------|--------------------------------|--------|
+| M1-M4 (no Neural Accelerator) | 1000 (auto) | M1 Ultra sweep in section 4 + re-bench below |
+| M5+ (Neural Accelerator) | MLX default (untouched) | gemma3n-decode-profile-m5max.md (#358): the sweep is flat on M5 Max, and the earlier M5 study recorded larger buffers as slower |
+| Non-Apple (CUDA, e.g. GB10) | MLX default (untouched) | Metal command-buffer knob, irrelevant off Apple GPUs |
+
+M1 Ultra re-bench with the gate active (2026-06-19, best-of-3, raw prompt, 80 tokens after a 20-token warmup, `caffeinate -i`):
+
+| Checkpoint | gated default (1000) | recorded section-4 default | gain |
+|------------|---------------------:|---------------------------:|-----:|
+| gemma3n-e2b-4bit | 92.5 | 82.7 | +11.9% |
+| gemma3n-e4b-4bit | 68.4 | 63.0 | +8.6% |
+
+The gate fires on this M1 Ultra (detected as `M1`) and reproduces the 1000-row throughput from section 4. An explicit low override is respected and collapses throughput to 67.7 (e2b) and 51.8 (e4b) at `MLX_MAX_OPS_PER_BUFFER=10`, confirming the lever direction and that operator settings win.
+
+Generalization: the gain concentrates in Gemma3n's high-op-density stack, but the cap is not Gemma3n-only. Dense qwen3-8b-4bit (86.1) and MoE qwen3-30b-a3b-4bit (89.0) also run faster at 1000 than at a starved cap (75.9 and 79.3 at ops=10), so the generation-wide pre-M5 gate does not regress them. The MoE decode-gap sweep (#268) was flat, consistent with the dispatch-gap binding being strongest where per-layer op density is highest. Section 4's sweep is monotonic up to the plateau near 1000 and regresses slightly at 2000, so 1000 sits at the knee.
+
+Not yet benched: GB10 (no access in the landing environment), recorded here as a follow-up. The gate leaves GB10 on MLX's default (it is non-Apple, CUDA), so it is unaffected until measured.
+
 ### Reproduce
 
 ```bash

@@ -125,6 +125,63 @@ pub fn is_m5_neural_accelerator() -> bool {
     hw.has_neural_accelerator && hw.macos_supports_na
 }
 
+/// The `MLX_MAX_OPS_PER_BUFFER` default to apply for an Apple Silicon class, or
+/// `None` to leave MLX's built-in default in place.
+///
+/// `MLX_MAX_OPS_PER_BUFFER` caps how many ops MLX batches into one Metal command
+/// buffer before committing it. On pre-M5 Apple Silicon (Metal GPU family 3) the
+/// default cap is small enough that high-op-density decode (Gemma3n: AltUp
+/// 4-plane, LAUREL, per-layer input gating, dual norms) stalls the GPU at
+/// command-buffer boundaries; raising the cap to 1000 closes that dispatch-gap
+/// idle and recovers +11 to 13% decode throughput on M1 Ultra (see
+/// docs/benchmark_results/gemma3n-decode-profile.md, #329/#345).
+///
+/// The lever is hardware-specific, so it is gated:
+/// - M1 through M4 (no Neural Accelerator, Metal family 3): apply 1000.
+/// - M5+ (has Neural Accelerator): leave MLX's default. The same sweep is flat
+///   on M5 Max (within run-to-run noise, no plateau) and an earlier M5 study
+///   recorded larger buffers as slower, so raising it offers no gain and risks a
+///   regression (docs/benchmark_results/gemma3n-decode-profile-m5max.md, #358).
+/// - Unknown (non-Apple, e.g. CUDA): leave untouched; this is a Metal command
+///   buffer scheduling knob, irrelevant off Apple GPUs.
+///
+/// The gain is most pronounced on Gemma3n's dense high-op-density stack; the MoE
+/// decode sweep was flat (#268), so other families are expected neutral, not
+/// regressed. This is a default only: an explicit `MLX_MAX_OPS_PER_BUFFER` in the
+/// environment always wins (see [`apply_metal_ops_per_buffer_default`]).
+#[must_use]
+pub fn metal_ops_per_buffer_default(
+    gen: AppleSiliconGen,
+    has_neural_accelerator: bool,
+) -> Option<u32> {
+    if gen != AppleSiliconGen::Unknown && !has_neural_accelerator {
+        Some(1000)
+    } else {
+        None
+    }
+}
+
+/// Apply the hardware-gated [`metal_ops_per_buffer_default`] to the process
+/// environment, unless `MLX_MAX_OPS_PER_BUFFER` is already set.
+///
+/// Call this once, early in `main()`, before any MLX op runs and before spawning
+/// threads: MLX reads `MLX_MAX_OPS_PER_BUFFER` when it commits command buffers,
+/// and setting an environment variable is only sound while the process is
+/// effectively single-threaded. An operator-set `MLX_MAX_OPS_PER_BUFFER` (any
+/// value) is always respected.
+pub fn apply_metal_ops_per_buffer_default() {
+    if std::env::var_os("MLX_MAX_OPS_PER_BUFFER").is_some() {
+        return;
+    }
+    let hw = get_hardware();
+    if let Some(value) = metal_ops_per_buffer_default(hw.silicon_gen, hw.has_neural_accelerator) {
+        // Safe: mlxcel-core is edition 2021 (set_var is not `unsafe` here), and
+        // the documented contract requires callers to invoke this early in
+        // `main()`, before other threads or MLX touch the environment.
+        std::env::set_var("MLX_MAX_OPS_PER_BUFFER", value.to_string());
+    }
+}
+
 // ── Detection ─────────────────────────────────────────────────────────────────
 
 /// Detect hardware capabilities by querying the OS at runtime.
@@ -665,6 +722,38 @@ mod tests {
         assert!(!AppleSiliconGen::M4.has_neural_accelerator());
         assert!(AppleSiliconGen::M5.has_neural_accelerator());
         assert!(!AppleSiliconGen::Unknown.has_neural_accelerator());
+    }
+
+    #[test]
+    fn ops_per_buffer_default_gates_on_hardware_class() {
+        // Pre-M5 Apple Silicon (Metal family 3) raises the command-buffer op cap
+        // to close dispatch-gap idle (#329/#345). M5+ is flat (#358) and an
+        // earlier study saw it slower, so it stays on MLX's default; non-Apple
+        // (Unknown) is untouched.
+        assert_eq!(
+            metal_ops_per_buffer_default(AppleSiliconGen::M1, false),
+            Some(1000)
+        );
+        assert_eq!(
+            metal_ops_per_buffer_default(AppleSiliconGen::M2, false),
+            Some(1000)
+        );
+        assert_eq!(
+            metal_ops_per_buffer_default(AppleSiliconGen::M3, false),
+            Some(1000)
+        );
+        assert_eq!(
+            metal_ops_per_buffer_default(AppleSiliconGen::M4, false),
+            Some(1000)
+        );
+        assert_eq!(
+            metal_ops_per_buffer_default(AppleSiliconGen::M5, true),
+            None
+        );
+        assert_eq!(
+            metal_ops_per_buffer_default(AppleSiliconGen::Unknown, false),
+            None
+        );
     }
 
     #[test]

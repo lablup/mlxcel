@@ -273,6 +273,13 @@ fn measured(
 
 fn main() -> Result<()> {
     let args = Args::parse();
+
+    // Match the production binaries: apply the hardware-gated
+    // MLX_MAX_OPS_PER_BUFFER default (#353) before any model/generator
+    // construction so decode benchmarks reflect the shipped default. A
+    // pre-set MLX_MAX_OPS_PER_BUFFER (manual sweep override) always wins.
+    mlxcel_core::hardware::apply_metal_ops_per_buffer_default();
+
     let kv_cache_mode = resolve_kv_cache_mode(
         args.turbo.cache_type_k.as_deref(),
         args.turbo.cache_type_v.as_deref(),

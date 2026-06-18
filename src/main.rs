@@ -45,6 +45,10 @@ Environment Variables:
   MLXCEL_MEMORY_LIMIT    Soft MLX allocator memory cap (fails fast on overflow)
                            unset/\"0\"/\"none\", let MLX use its backend default (default)
                            \"32GB\", explicit limit (supports GB, MB, or bytes)
+  MLX_MAX_OPS_PER_BUFFER MLX command-buffer op cap (decode dispatch-gap lever)
+                           unset, auto-defaults to 1000 on pre-M5 Apple Silicon (M1-M4),
+                             MLX default on M5+ and non-Apple (hardware-gated, #353)
+                           explicit value always wins (manual override / sweeps)
 
 Tensor Parallel Runtime:
   Current multi-rank support: dense Llama, Qwen2/2.5, Qwen3, Qwen3.5 text, Gemma 3 text, Gemma 4 text, ERNIE 4.5, Hunyuan v1 Dense
@@ -1637,6 +1641,11 @@ fn main() -> anyhow::Result<()> {
     // Default the CUDA kernel JIT cache to a persistent, MLX-pin-scoped dir so
     // the first-run kernel compilation is paid once per machine, not every boot.
     mlxcel_core::ensure_persistent_ptx_cache();
+
+    // Raise MLX_MAX_OPS_PER_BUFFER on pre-M5 Apple Silicon to close decode
+    // command-buffer dispatch-gap idle (#353). Hardware-gated, a no-op when the
+    // variable is already set, and must run before any MLX op.
+    mlxcel_core::hardware::apply_metal_ops_per_buffer_default();
 
     match cli.command {
         Commands::Run(args) => commands::run_run(args),

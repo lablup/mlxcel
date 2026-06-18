@@ -1088,6 +1088,11 @@ async fn main() -> anyhow::Result<()> {
     // the first-run kernel compilation is paid once per machine, not every boot.
     mlxcel_core::ensure_persistent_ptx_cache();
 
+    // Raise MLX_MAX_OPS_PER_BUFFER on pre-M5 Apple Silicon to close decode
+    // command-buffer dispatch-gap idle (#353). Hardware-gated, a no-op when the
+    // variable is already set, and must run before any MLX op.
+    mlxcel_core::hardware::apply_metal_ops_per_buffer_default();
+
     match cli.command {
         // Subcommand-driven dispatch. Currently only `download`
         // exists; future operational subcommands (e.g. cache inspection) can
