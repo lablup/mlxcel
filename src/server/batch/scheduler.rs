@@ -3114,6 +3114,18 @@ impl BatchScheduler {
         let mut slots: Vec<Option<SequenceInfo>> = seqs.into_iter().map(Some).collect();
         for cohort in plan {
             match cohort.kind {
+                // Behavior note (#332): a cold row that previously fell back to
+                // *sequential* prefill (because the collected window held an
+                // incompatible sibling) now runs batched here. A padded batched
+                // forward (B > 1) is not bitwise-identical to single-sequence
+                // prefill on Metal, so such a row's greedy decode can differ
+                // from its old sequential output by an early near-tie token flip
+                // (the documented #203 / #325 / #326 jitter class). That is the
+                // intended effect of cohort splitting, not a correctness
+                // regression: the guarantee is that a cohort-split cold row
+                // decodes identically to the same row in an all-cold batched
+                // window of the same composition (pinned by
+                // scheduler_cohort_parity_tests).
                 PrefillCohortKind::BatchedCold => {
                     let group: Vec<SequenceInfo> = cohort
                         .members

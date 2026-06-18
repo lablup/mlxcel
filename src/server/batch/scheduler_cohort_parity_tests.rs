@@ -12,19 +12,40 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Real-model parity tests for #332 batched-prefill cohort splitting.
+//! Real-model parity test for #332 batched-prefill cohort splitting.
 //!
 //! When a collected prefill window mixes cold text rows with an incompatible
 //! request (adopted prompt-cache prefix, VLM embeddings), the scheduler now
 //! splits the window into cohorts and runs the cold rows batched instead of
-//! falling the whole window back to sequential prefill. These tests confirm
-//! that the split does not change any request's decoded output versus the
-//! pre-cohort all-or-nothing sequential path: a cold row prefilled inside a
-//! batched cohort (alongside an incompatible sibling) must decode identically
-//! to the same row prefilled alone on the single-sequence path.
+//! falling the whole window back to sequential prefill. This test pins the
+//! actual correctness property of that split: removing the incompatible row
+//! from the window must not perturb the cold rows' batched prefill. Concretely,
+//! a cold row prefilled inside a cohort-split window (`[cold A, cold B, adopted
+//! C]`, which the planner splits into a batched `{A, B}` cohort plus a
+//! sequential `{C}` cohort) must decode byte-for-byte identically to the same
+//! row in an all-cold batched window of the same composition (`[cold A,
+//! cold B]`, where no split happens). The split only lifts C onto the
+//! offset-aware single-sequence path; it leaves `{A, B}`'s padded batched
+//! forward untouched, so the two must agree exactly.
 //!
-//! The tests load a real qwen3 checkpoint and run GPU forwards, so they are
-//! `#[ignore]` and soft-skip when the model directory is absent.
+//! It deliberately does NOT compare a batched (B > 1) row against a
+//! single-prefill (B = 1) reference. Padded batched prefill is not
+//! bitwise-identical to single-sequence prefill on Metal: the batched pass pads
+//! short rows up to the cohort's longest prompt and runs a wider matmul, so f16
+//! rounding differs and an early near-tie greedy token can flip and cascade.
+//! That is the documented #203 / #325 / #326 jitter class, not a correctness
+//! bug, so asserting byte-identity of a batched row against a single-prefill
+//! row would be the wrong invariant. The single-prefill values are still
+//! computed and printed as a diagnostic (so the jitter is visible under
+//! `--nocapture`), but they are never asserted.
+//!
+//! Behavior note: a cold row that previously fell back to *sequential* prefill
+//! (because its window held an incompatible sibling) now runs batched. Its
+//! greedy decode can therefore differ from the old sequential output by the
+//! same jitter class. That is the intended effect of #332, not a regression.
+//!
+//! The test loads a real qwen3 checkpoint and runs GPU forwards, so it is
+//! `#[ignore]` and soft-skips when the model directory is absent.
 //!
 //! Run with:
 //! ```text
@@ -214,9 +235,54 @@ fn reference_text(
     text
 }
 
+/// Enqueue a window of `(prompt, prefill_start_offset)` rows, run a single
+/// [`BatchScheduler::execute_batched_prefill`] (which classifies the rows,
+/// plans cohorts, and dispatches them), then decode each row in window order
+/// and return the per-row decoded text.
+///
+/// Each row is decoded on its own with `execute_decode_step(&[id])`, so the
+/// only batched stage is the prefill. That isolates cohort-split prefill
+/// behavior as the single variable under test: a row's decode trajectory is
+/// driven purely by its own post-prefill KV cache, never by a sibling. All
+/// sequences are released afterward so the pool is clean for the next window.
+fn run_window(
+    sched: &mut BatchScheduler,
+    tokenizer: &MlxcelTokenizer,
+    window: &[(&[i32], usize)],
+) -> Vec<String> {
+    let mut ids = Vec::with_capacity(window.len());
+    let mut rxs = Vec::with_capacity(window.len());
+    for &(prompt, offset) in window {
+        let id = sched
+            .allocate_sequence_state()
+            .expect("allocate window sequence");
+        let (seq, rx) = make_seq(id, tokenizer, prompt.to_vec(), offset);
+        sched
+            .prefill_queue
+            .enqueue(seq)
+            .expect("enqueue window sequence");
+        ids.push(id);
+        rxs.push(rx);
+    }
+    // One call drains the whole window, splitting it into cohorts.
+    sched.execute_batched_prefill();
+    assert!(
+        sched.prefill_queue.is_empty(),
+        "the whole window must be drained by the cohort dispatch"
+    );
+    let mut outputs = Vec::with_capacity(window.len());
+    for (idx, &id) in ids.iter().enumerate() {
+        outputs.push(run_and_collect(sched, id, &rxs[idx]));
+    }
+    for &id in &ids {
+        cleanup(sched, id);
+    }
+    outputs
+}
+
 #[test]
 #[ignore = "loads qwen3-0.6b-4bit and runs real GPU forwards; run with --ignored"]
-fn mixed_window_cold_cohort_matches_single_prefill_qwen3() {
+fn mixed_window_cold_cohort_matches_all_cold_batched_qwen3() {
     let _runtime = crate::initialize_runtime();
     let dir = repo_model_dir(QWEN3_DIR);
     if !dir.exists() {
@@ -233,60 +299,77 @@ fn mixed_window_cold_cohort_matches_single_prefill_qwen3() {
     let config_eos = crate::read_eos_token_ids(&dir);
     let mut sched = build_cohort_scheduler(model, sched_tokenizer, config_eos);
 
-    // ---- REFERENCES: each cold prompt prefilled alone (single-sequence). ----
+    // ---- DIAGNOSTIC reference: each cold prompt prefilled alone (B = 1). ----
+    // NOT a load-bearing comparison. Padded batched prefill (B > 1) is not
+    // bitwise-identical to single-sequence prefill (B = 1) on Metal, so a
+    // batched row's greedy decode can flip an early near-tie token versus the
+    // single-prefill output (the #203 / #325 / #326 jitter class). These values
+    // are printed only so the jitter is visible under --nocapture.
     let ref_a = reference_text(&mut sched, &seq_tokenizer, PROMPT_A);
     let ref_b = reference_text(&mut sched, &seq_tokenizer, PROMPT_B);
     assert!(!ref_a.is_empty(), "reference A produced no output");
     assert!(!ref_b.is_empty(), "reference B produced no output");
 
-    // ---- MIXED WINDOW: [cold A, cold B, adopted C]. ----
-    // The planner forms a batched cohort {A, B} (two cold rows of different
-    // lengths) and a sequential cohort {C}. C carries a non-zero
-    // prefill_start_offset, so it is incompatible with the padded batched path
-    // and is routed to the offset-aware single-sequence path in both the new
-    // (cohort) and old (all-sequential) behavior. Its presence is what forces a
-    // genuine cohort split rather than an all-cold batch.
-    let id_a = sched.allocate_sequence_state().expect("alloc A");
-    let id_b = sched.allocate_sequence_state().expect("alloc B");
-    let id_c = sched.allocate_sequence_state().expect("alloc C");
-    let (seq_a, rx_a) = make_seq(id_a, &seq_tokenizer, PROMPT_A.to_vec(), 0);
-    let (seq_b, rx_b) = make_seq(id_b, &seq_tokenizer, PROMPT_B.to_vec(), 0);
-    let (seq_c, rx_c) = make_seq(id_c, &seq_tokenizer, PROMPT_C.to_vec(), 1);
-
-    sched.prefill_queue.enqueue(seq_a).expect("enqueue A");
-    sched.prefill_queue.enqueue(seq_b).expect("enqueue B");
-    sched.prefill_queue.enqueue(seq_c).expect("enqueue C");
-    assert_eq!(
-        sched.prefill_queue.len(),
-        3,
-        "window should hold three rows"
-    );
-
-    // One call splits the window: {A, B} batched, {C} sequential.
-    sched.execute_batched_prefill();
+    // ---- CONTROL: all-cold [A, B] batched window (no incompatible row). ----
+    // Both rows are cold, so the planner forms a single BatchedCold {A, B}
+    // cohort and performs NO split. This is the correct reference for the
+    // cohort path: it pins what {A, B}'s padded batched prefill produces when
+    // there is no C in the window to split off.
+    let all_cold = run_window(&mut sched, &seq_tokenizer, &[(PROMPT_A, 0), (PROMPT_B, 0)]);
+    let allcold_a = &all_cold[0];
+    let allcold_b = &all_cold[1];
     assert!(
-        sched.prefill_queue.is_empty(),
-        "the whole window must be drained by the cohort dispatch"
+        !allcold_b.is_empty(),
+        "all-cold batched B produced no output"
     );
 
-    let got_a = run_and_collect(&mut sched, id_a, &rx_a);
-    let got_b = run_and_collect(&mut sched, id_b, &rx_b);
-    let got_c = run_and_collect(&mut sched, id_c, &rx_c);
+    // ---- SUBJECT: mixed [cold A, cold B, adopted C] window (the #332 split). ----
+    // C carries a non-zero prefill_start_offset (an adopted prompt-cache
+    // prefix), so it is incompatible with the padded batched path. The planner
+    // forms BatchedCold {A, B} + Sequential {C}: the split lifts C onto the
+    // offset-aware single-sequence path but must NOT change {A, B}'s batched
+    // forward at all (C is prefilled in a separate cohort after {A, B} and
+    // never shares their forward pass or caches).
+    let mixed = run_window(
+        &mut sched,
+        &seq_tokenizer,
+        &[(PROMPT_A, 0), (PROMPT_B, 0), (PROMPT_C, 1)],
+    );
+    let mixed_a = &mixed[0];
+    let mixed_b = &mixed[1];
+    let mixed_c = &mixed[2];
 
+    eprintln!("--- #332 cohort parity (qwen3-0.6b-4bit) ---");
+    eprintln!("single  B (B=1, diagnostic):  {ref_b:?}");
+    eprintln!("allcold B (B=2 batched):      {allcold_b:?}");
+    eprintln!("mixed   B (B=2 cohort split): {mixed_b:?}");
+    eprintln!("single  A (B=1, diagnostic):  {ref_a:?}");
+    eprintln!("allcold A (B=2 batched):      {allcold_a:?}");
+    eprintln!("mixed   A (B=2 cohort split): {mixed_a:?}");
+    if mixed_b != &ref_b {
+        eprintln!(
+            "note: batched B (B=2) differs from single B (B=1) -> #203 jitter class \
+             (expected; the cohort property is batched-vs-batched, asserted below)."
+        );
+    }
+
+    // ---- LOAD-BEARING #332 invariant: cohort split == all-cold batched. ----
+    // Removing the incompatible row C from the window must not perturb the cold
+    // rows' batched prefill, so a cohort-split cold row must decode byte-for-
+    // byte identically to the same row in an all-cold batched window of the
+    // same composition. This is the real correctness property of the split, and
+    // unlike a batched-vs-single comparison it is not subject to the #203
+    // jitter class (both sides run the identical B = 2 padded forward).
     assert_eq!(
-        got_a, ref_a,
-        "cold row A batched in a mixed window must decode identically to the single-prefill reference"
+        mixed_a, allcold_a,
+        "cold row A in a cohort-split window must decode identically to the all-cold batched window"
     );
     assert_eq!(
-        got_b, ref_b,
-        "cold row B batched in a mixed window must decode identically to the single-prefill reference"
+        mixed_b, allcold_b,
+        "cold row B in a cohort-split window must decode identically to the all-cold batched window"
     );
     assert!(
-        !got_c.is_empty(),
+        !mixed_c.is_empty(),
         "the adopted-prefix cohort row must still be prefilled and decode output (split handled every cohort)"
     );
-
-    cleanup(&mut sched, id_a);
-    cleanup(&mut sched, id_b);
-    cleanup(&mut sched, id_c);
 }
