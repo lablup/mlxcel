@@ -736,9 +736,12 @@ impl MlpInputProjection {
 /// #60 introduced a fused Gemma3n decode path (stacked AltUp predict/
 /// correct plus the `gemma3n_mlp_forward` bridge call) that cuts Rust↔C++
 /// graph-construction overhead. It improves decode on Apple Silicon without a
-/// Neural Accelerator (M1 Ultra: +3.6%) but regresses M5-class hardware
-/// (about -6.3% on M5 Max `gemma3n-e4b-bf16`). Use the fused path only off NA
-/// hardware; M5-class GPUs fall back to the per-op split path.
+/// Neural Accelerator (M1 Ultra: +3.6%). On M5-class (NA) hardware it is
+/// neutral (re-measured ~0% on 2026-06-18 with MLX 0.31.2; it previously
+/// regressed M5 by ~-6.3%, since closed by MLX/code evolution), so the gate
+/// stays off NA hardware: no upside there, and the per-op split path is the
+/// validated default. Full numbers:
+/// docs/benchmark_results/gemma3n-decode-profile-m5max.md.
 #[inline]
 fn use_fused_decode_path() -> bool {
     let hw = mlxcel_core::hardware::get_hardware();
@@ -760,9 +763,9 @@ impl MLP {
 
     pub fn forward(&self, x: &MlxArray) -> UniquePtr<MlxArray> {
         // The fused MLP bridge call (`gemma3n_mlp_forward`, added in #60) cuts
-        // decode graph overhead on non-NA Apple Silicon but regresses M5-class
-        // hardware. Gate it off NA hardware so M5 uses the per-op bf16 path
-        // below.
+        // decode graph overhead on non-NA Apple Silicon. On M5-class (NA)
+        // hardware it is neutral (see use_fused_decode_path), so it is gated off
+        // and M5 uses the per-op bf16 path below.
         if use_fused_decode_path()
             && let (Some(gate), Some(up), Some(down)) = (
                 self.gate_proj.regular_weight(),
