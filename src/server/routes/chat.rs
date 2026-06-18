@@ -440,6 +440,15 @@ async fn non_stream_chat_completion(
 
     let cached_tokens = result.cached_tokens;
 
+    // Surface the thinking scratchpad as `reasoning_content`. This is additive:
+    // the `content` computation below (strip_unclosed_primed_thinking /
+    // clean_structural_tokens / tool-call parsing) is unchanged. Reusing the
+    // streaming `StreamFilter` here means streaming and non-streaming responses
+    // split reasoning from content identically. `None` for non-thinking models
+    // leaves the field absent, closing the dropped-reasoning gap for every
+    // thinking family at once (Qwen `<think>`, Gemma 4 `<|channel>`).
+    let reasoning = extract_reasoning_content(&result.text, primed_open_thinking);
+
     // Try to parse tool calls from the output
     if tool_calls::should_parse_tool_calls(&request) {
         let tools = request.tools.as_deref();
@@ -463,7 +472,8 @@ async fn non_stream_chat_completion(
                         result.completion_tokens,
                         logprobs,
                     )
-                    .with_cached_tokens(cached_tokens, prompt_cache_enabled),
+                    .with_cached_tokens(cached_tokens, prompt_cache_enabled)
+                    .with_reasoning_content(reasoning.clone()),
                 ));
             }
         }
@@ -483,7 +493,8 @@ async fn non_stream_chat_completion(
                 Some(result.finish_reason),
                 logprobs,
             )
-            .with_cached_tokens(cached_tokens, prompt_cache_enabled),
+            .with_cached_tokens(cached_tokens, prompt_cache_enabled)
+            .with_reasoning_content(reasoning.clone()),
         ));
     }
 
@@ -506,7 +517,8 @@ async fn non_stream_chat_completion(
             Some(result.finish_reason),
             logprobs,
         )
-        .with_cached_tokens(cached_tokens, prompt_cache_enabled),
+        .with_cached_tokens(cached_tokens, prompt_cache_enabled)
+        .with_reasoning_content(reasoning),
     ))
 }
 
@@ -962,6 +974,48 @@ fn strip_unclosed_primed_thinking(content: String, raw_output: &str, primed: boo
     String::new()
 }
 
+/// Extract the reasoning / thinking scratchpad from a completed generation by
+/// replaying the raw text through the same [`StreamFilter`] the streaming path
+/// uses (`stream_chat_completion` builds the identical filter at the SSE
+/// construction site). Reusing the filter is what guarantees streaming and
+/// non-streaming surface the same `reasoning_content`: the filter's state
+/// machine is deterministic over the concatenated input, so feeding the whole
+/// string in one `feed()` accumulates the same reasoning/content split as
+/// feeding it token-by-token (the parity is locked by a unit test).
+///
+/// `primed_open_thinking` selects the filter's start state. A prompt that
+/// primed an open thinking block (`<think>\n` for Qwen-style, or
+/// `<|channel>thought\n` for Gemma 4 `enable_thinking=true`) starts the filter
+/// inside `Thinking` so the leading generated tokens route to reasoning even
+/// though the opening marker lives in the prompt, not the output. This mirrors
+/// the non-streaming content path in [`strip_unclosed_primed_thinking`]: when
+/// the whole window is unclosed thinking, all of it becomes `reasoning` and the
+/// user-facing `content` is empty.
+///
+/// Returns `Some(reasoning)` when any reasoning text was captured, `None`
+/// otherwise (so the response omits `reasoning_content` for non-thinking
+/// models). Tool-call blocks are suppressed by the filter and never leak into
+/// reasoning; they are materialized by the parser path instead.
+fn extract_reasoning_content(raw_text: &str, primed_open_thinking: bool) -> Option<String> {
+    let mut filter = if primed_open_thinking {
+        StreamFilter::new_primed_open_thinking()
+    } else {
+        StreamFilter::new()
+    };
+    let mut reasoning = String::new();
+    if let Some(r) = filter.feed(raw_text).reasoning {
+        reasoning.push_str(&r);
+    }
+    if let Some(r) = filter.flush().reasoning {
+        reasoning.push_str(&r);
+    }
+    if reasoning.is_empty() {
+        None
+    } else {
+        Some(reasoning)
+    }
+}
+
 /// Build ServerGenerateOptions using request params with server config as defaults
 pub(crate) fn build_generate_options(
     params: &SamplingParams,
@@ -1105,6 +1159,134 @@ mod tests {
             strip_unclosed_primed_thinking(content.clone(), raw, false),
             content
         );
+    }
+
+    // -- extract_reasoning_content (non-streaming reasoning surface) --
+
+    #[test]
+    fn extract_reasoning_qwen_think_block() {
+        // Qwen-style: a closed <think>…</think> block before the answer. The
+        // reasoning is captured; the answer stays out of reasoning.
+        let raw = "<think>reasoning</think>the answer";
+        assert_eq!(
+            extract_reasoning_content(raw, false),
+            Some("reasoning".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_reasoning_qwen_primed_open() {
+        // enable_thinking=true primes `<think>\n` in the prompt, so the raw
+        // output starts mid-think with no opening marker. The filter must
+        // start in Thinking and route the leading tokens to reasoning until
+        // the close marker.
+        let raw = "reasoning</think>the answer";
+        assert_eq!(
+            extract_reasoning_content(raw, true),
+            Some("reasoning".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_reasoning_gemma4_channel_block() {
+        // Gemma 4: a full <|channel>…<channel|> block before the answer.
+        let raw = "<|channel>thought\ndeliberating<channel|>the answer";
+        assert_eq!(
+            extract_reasoning_content(raw, false),
+            Some("thought\ndeliberating".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_reasoning_gemma4_primed_all_thinking() {
+        // Gemma 4 enable_thinking=true primes `<|channel>thought\n`; if the
+        // model fills the whole window without ever emitting `<channel|>`, the
+        // entire generation is reasoning and the user-facing content is empty.
+        // Mirrors the content side (strip_unclosed_primed_thinking ->
+        // String::new()) and the parser's all-thinking branch.
+        let raw = "still deliberating about hash tables with no close marker";
+        assert_eq!(
+            extract_reasoning_content(raw, true),
+            Some("still deliberating about hash tables with no close marker".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_reasoning_none_for_plain_content() {
+        // A non-thinking model (no markers, not primed) yields no reasoning,
+        // so the response omits `reasoning_content`.
+        assert_eq!(
+            extract_reasoning_content("just a normal answer", false),
+            None
+        );
+    }
+
+    // -- streaming / non-streaming parity ---------------------------
+    //
+    // The non-streaming extractor feeds the whole generated string through the
+    // same StreamFilter the streaming path feeds token-by-token. This locks
+    // the equivalence: the accumulated (content, reasoning) split must be
+    // identical regardless of how the input is fragmented.
+
+    fn absorb(
+        out: crate::server::tool_calls::stream_filter::FilterOutput,
+        content: &mut String,
+        reasoning: &mut String,
+    ) {
+        if let Some(c) = out.content {
+            content.push_str(&c);
+        }
+        if let Some(r) = out.reasoning {
+            reasoning.push_str(&r);
+        }
+    }
+
+    fn split_whole(text: &str, primed: bool) -> (String, String) {
+        let mut f = if primed {
+            StreamFilter::new_primed_open_thinking()
+        } else {
+            StreamFilter::new()
+        };
+        let (mut content, mut reasoning) = (String::new(), String::new());
+        absorb(f.feed(text), &mut content, &mut reasoning);
+        absorb(f.flush(), &mut content, &mut reasoning);
+        (content, reasoning)
+    }
+
+    fn split_chunked(text: &str, primed: bool) -> (String, String) {
+        let mut f = if primed {
+            StreamFilter::new_primed_open_thinking()
+        } else {
+            StreamFilter::new()
+        };
+        let (mut content, mut reasoning) = (String::new(), String::new());
+        let mut buf = [0u8; 4];
+        for ch in text.chars() {
+            absorb(
+                f.feed(ch.encode_utf8(&mut buf)),
+                &mut content,
+                &mut reasoning,
+            );
+        }
+        absorb(f.flush(), &mut content, &mut reasoning);
+        (content, reasoning)
+    }
+
+    #[test]
+    fn reasoning_split_identical_whole_vs_chunked() {
+        let samples = [
+            ("<think>reasoning here</think>the answer", false),
+            ("<|channel>thought\ndeliberate<channel|>final answer", false),
+            ("still reasoning</think>then content", true),
+            ("unclosed thinking forever", true),
+        ];
+        for (text, primed) in samples {
+            assert_eq!(
+                split_whole(text, primed),
+                split_chunked(text, primed),
+                "whole-vs-chunked split must match for {text:?} (primed={primed})"
+            );
+        }
     }
 
     // -- video_url block detection ---------------------------

@@ -113,6 +113,14 @@ pub struct ChatChoice {
 pub struct ChatMessage {
     pub role: String,
     pub content: Option<String>,
+    /// Reasoning / thinking scratchpad surfaced for thinking models (Qwen-style
+    /// `<think>…</think>`, Gemma 4 `<|channel>thought…<channel|>`). Present only
+    /// when the model produced reasoning; omitted otherwise so non-thinking
+    /// responses keep the existing wire shape. Mirrors the OpenAI / vLLM
+    /// `reasoning_content` convention and matches the streaming path's
+    /// `delta.reasoning_content`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_content: Option<String>,
     /// Tool calls made by the assistant (present when finish_reason is "tool_calls")
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<ToolCallResponse>>,
@@ -191,6 +199,7 @@ impl ChatCompletionResponse {
                 message: ChatMessage {
                     role: "assistant".to_string(),
                     content: Some(content),
+                    reasoning_content: None,
                     tool_calls: None,
                 },
                 finish_reason,
@@ -237,6 +246,7 @@ impl ChatCompletionResponse {
                 message: ChatMessage {
                     role: "assistant".to_string(),
                     content: message_content,
+                    reasoning_content: None,
                     tool_calls: Some(tool_calls),
                 },
                 finish_reason: Some("tool_calls".to_string()),
@@ -265,6 +275,23 @@ impl ChatCompletionResponse {
             self.usage.prompt_tokens_details = Some(PromptTokensDetails {
                 cached_tokens: cached_tokens as u64,
             });
+        }
+        self
+    }
+
+    /// Attach reasoning / thinking scratchpad text to the first choice's
+    /// message as `reasoning_content`. `None` leaves the field absent (it is
+    /// `#[serde(skip_serializing_if = "Option::is_none")]`), so non-thinking
+    /// responses keep the existing wire shape. This is the non-streaming
+    /// counterpart to the streaming `delta.reasoning_content` chunks; both are
+    /// derived from the same `StreamFilter` so the two endpoints surface
+    /// identical reasoning. Chaining mirrors `with_cached_tokens`.
+    ///
+    /// Used by: chat.rs (non-streaming path)
+    #[must_use]
+    pub fn with_reasoning_content(mut self, reasoning: Option<String>) -> Self {
+        if let Some(choice) = self.choices.first_mut() {
+            choice.message.reasoning_content = reasoning;
         }
         self
     }
@@ -611,6 +638,57 @@ mod tests {
 
         let json = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["usage"]["prompt_tokens_details"]["cached_tokens"], 0);
+    }
+
+    // -- reasoning_content (thinking-scratchpad surface) --------
+
+    /// A plain response (no reasoning) must omit `reasoning_content` so the
+    /// wire shape is unchanged for non-thinking models.
+    #[test]
+    fn reasoning_content_absent_when_none() {
+        let resp = ChatCompletionResponse::new(
+            "id".to_string(),
+            "model".to_string(),
+            "the answer".to_string(),
+            10,
+            5,
+            Some("stop".to_string()),
+        )
+        .with_reasoning_content(None);
+
+        let json = serde_json::to_value(&resp).unwrap();
+        let message = &json["choices"][0]["message"];
+        assert!(
+            !message
+                .as_object()
+                .unwrap()
+                .contains_key("reasoning_content"),
+            "reasoning_content must be absent when None, got: {message}"
+        );
+        assert_eq!(message["content"], "the answer");
+    }
+
+    /// When reasoning is present, `with_reasoning_content` must surface it on
+    /// the first choice's message as `reasoning_content`.
+    #[test]
+    fn reasoning_content_present_when_some() {
+        let resp = ChatCompletionResponse::new(
+            "id".to_string(),
+            "model".to_string(),
+            "the answer".to_string(),
+            10,
+            5,
+            Some("stop".to_string()),
+        )
+        .with_reasoning_content(Some("let me think about hash tables".to_string()));
+
+        let json = serde_json::to_value(&resp).unwrap();
+        let message = &json["choices"][0]["message"];
+        assert_eq!(
+            message["reasoning_content"],
+            "let me think about hash tables"
+        );
+        assert_eq!(message["content"], "the answer");
     }
 
     #[test]

@@ -85,6 +85,28 @@ Audio/video capability is model-specific. The server request types include
 must advertise support for the corresponding modality. Video frame extraction
 uses the system `ffmpeg`/`ffprobe` binaries at runtime.
 
+### Thinking default for `gemma4_unified`
+
+Gemma 4 Unified (`gemma4_unified`) ships `<|channel>` / `<channel|>` thinking
+markers in its tokenizer, so the server defaults `enable_thinking=true` for this
+family on startup, mirroring [ml-explore/mlx-lm#1114](https://github.com/ml-explore/mlx-lm).
+With thinking on, the model writes an internal scratchpad before the visible
+reply, so simple prompts spend more of the budget on reasoning than on the
+answer. A one-sentence answer can take roughly 275 completion tokens, and a
+default `max_tokens` of 64 to 80 may return an empty `content` with
+`finish_reason` of `length` because the whole budget went to thinking. Set
+`max_tokens` to at least 512 for this family, and higher for multi-sentence
+answers.
+
+The scratchpad is no longer dropped: it is surfaced as `reasoning_content` on
+both streaming responses (`delta.reasoning_content`) and non-streaming responses
+(a `reasoning_content` field on the assistant message, present only when the
+model produced reasoning). This applies to every thinking family, including
+Qwen-style `<think>` models. To turn thinking off, pass
+`chat_template_kwargs={"enable_thinking": false}` per request, or set the server
+default via `--chat-template-kwargs` or `LLAMA_ARG_CHAT_TEMPLATE_KWARGS`. A
+per-request value always wins over the server default.
+
 ## Quantization formats
 
 | Format | Status | Notes |
