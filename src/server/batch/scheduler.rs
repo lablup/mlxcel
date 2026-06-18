@@ -77,6 +77,7 @@ use crate::vision::feature_cache::ModelVisionCaches;
 use crate::vlm_runtime::prepared_embedding_refs;
 
 use super::active::ActiveBatch;
+use super::prefill_cohort::{PrefillCohortKind, PrefillRow, plan_prefill_cohorts};
 use super::queue::PrefillQueue;
 use super::sequence::{
     BatchSchedulerAction, FinishReason, RequestPriority, SequenceInfo, SequenceState,
@@ -3059,18 +3060,24 @@ impl BatchScheduler {
     }
 
     /// Batched prefill: drain up to `max_batch_prefill` requests from the
-    /// prefill queue and process them in a single forward pass.
+    /// prefill queue and process eligible cold text rows in a single forward
+    /// pass.
     ///
-    /// Sequences are padded to the longest prompt in the batch (aligned to a
-    /// 32-token tile on M5+). Each sequence gets a per-sequence causal +
-    /// padding attention mask so padding tokens are excluded from attention.
-    ///
-    /// On any error the method falls back to sequential single-request prefill
-    /// for the remaining requests so no requests are lost.
+    /// The drained window can mix requests the padded batched path supports
+    /// (cold text: zero KV-history offset, no custom embeddings) with requests
+    /// it does not (adopted prompt-cache prefixes, VLM / custom embeddings).
+    /// #332: instead of falling the whole window back to sequential prefill
+    /// when it contains one incompatible request, the window is split into
+    /// cohorts ([`plan_prefill_cohorts`]). Cold cohorts run batched; everything
+    /// else takes the offset-aware single-sequence path. Cohorts are dispatched
+    /// in window order, and the queue dequeues in priority order, so request
+    /// priority / FIFO fairness is preserved across cohort boundaries.
     fn execute_batched_prefill(&mut self) {
         let batch_size = self.max_batch_prefill.min(self.prefill_queue.len());
 
-        // Collect up to `batch_size` requests from the queue.
+        // Collect up to `batch_size` requests from the queue. The queue
+        // dequeues in priority order (high lane, then normal, then low; FIFO
+        // within a lane), so `seqs` is already in priority order.
         let mut seqs: Vec<SequenceInfo> = Vec::with_capacity(batch_size);
         for _ in 0..batch_size {
             match self.prefill_queue.dequeue() {
@@ -3083,76 +3090,97 @@ impl BatchScheduler {
             return;
         }
 
-        // Single-request fast path: fall through to the regular prefill so
-        // there is no overhead for constructing a padded batch.
+        // Classify each row, then plan cohorts. A row is "cold" only when it
+        // has no VLM / custom embeddings AND no adopted prompt-cache prefix.
+        // That is exactly the precondition the padded batched path assumes (a
+        // zero cache offset for every row), so the planner's guarantee that a
+        // BatchedCold cohort holds only cold rows is what keeps cache offsets
+        // correct: an adopted prefix can never be folded into a batch and have
+        // its KV resumed at the wrong position.
+        let can_batch = self.model.supports_batched_prefill();
+        let can_pad = self.model.supports_padded_prefill();
+        let rows: Vec<PrefillRow> = seqs
+            .iter()
+            .map(|s| PrefillRow {
+                is_cold: s.vlm_embeddings.is_none() && s.prefill_start_offset == 0,
+                prompt_len: s.prompt_tokens.len(),
+            })
+            .collect();
+        let plan = plan_prefill_cohorts(&rows, can_batch, can_pad);
+
+        // Move sequences into index-addressable slots so each cohort can take
+        // ownership of exactly its members. Dispatching cohorts in plan order
+        // reproduces window (priority) order across the cohort boundaries.
+        let mut slots: Vec<Option<SequenceInfo>> = seqs.into_iter().map(Some).collect();
+        for cohort in plan {
+            match cohort.kind {
+                PrefillCohortKind::BatchedCold => {
+                    let group: Vec<SequenceInfo> = cohort
+                        .members
+                        .iter()
+                        .filter_map(|&i| slots[i].take())
+                        .collect();
+                    self.run_padded_batched_prefill(group);
+                }
+                PrefillCohortKind::Sequential => {
+                    for &i in &cohort.members {
+                        let Some(mut seq) = slots[i].take() else {
+                            continue;
+                        };
+                        if let Err(err) = Self::begin_prefill(&mut seq) {
+                            tracing::error!("Batched prefill state transition error: {err}");
+                            self.abort_sequence(seq, &err);
+                            continue;
+                        }
+                        self.execute_full_prefill(seq);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Run a single padded batched prefill over a cohort of cold text rows.
+    ///
+    /// Every sequence in `seqs` must be cold (zero KV-history offset, no custom
+    /// embeddings); [`plan_prefill_cohorts`] guarantees this, so the pipeline
+    /// below can assume a zero cache offset for every row. Sequences are padded
+    /// to the longest prompt in the cohort (aligned to a 32-token tile on M5+),
+    /// each with a per-sequence causal + padding mask, and run in one forward
+    /// pass. On any error the affected sequences fall back to the
+    /// single-sequence prefill path so no request is lost.
+    fn run_padded_batched_prefill(&mut self, mut seqs: Vec<SequenceInfo>) {
+        // Defensive: the planner only emits BatchedCold cohorts of >= 2 rows,
+        // but keep the empty / single cases correct if called directly.
+        if seqs.is_empty() {
+            return;
+        }
         if seqs.len() == 1 {
-            let seq = seqs.remove(0);
+            let mut seq = seqs.remove(0);
+            if let Err(err) = Self::begin_prefill(&mut seq) {
+                tracing::error!("Batched prefill state transition error: {err}");
+                self.abort_sequence(seq, &err);
+                return;
+            }
             self.execute_full_prefill(seq);
             return;
         }
 
-        // Most models only implement batched decode (`[B, 1]`) and do not
-        // support full-sequence prompt prefill via `forward_batched()`.
-        // Keep those on the single-sequence prefill path so correctness and
-        // the standard NAX-friendly prefill route are preserved.
-        if !self.model.supports_batched_prefill() {
-            tracing::debug!(
-                "batched prefill: falling back to sequential (model lacks full batched prefill)"
-            );
-            for mut seq in seqs {
-                if let Err(err) = Self::begin_prefill(&mut seq) {
-                    tracing::error!("Batched prefill state transition error: {err}");
-                    self.abort_sequence(seq, &err);
-                    continue;
-                }
-                self.execute_full_prefill(seq);
+        // Transition all sequences to Prefilling up front so every fallback
+        // below routes through `execute_full_prefill` from the correct state.
+        for seq in &mut seqs {
+            if let Err(err) = Self::begin_prefill(seq) {
+                tracing::error!("Batched prefill state transition error: {err}");
             }
-            return;
-        }
-
-        // Any VLM request cannot currently be batched (embeddings are
-        // per-sequence and would need separate handling). Fall back for the
-        // whole batch when any request carries VLM embeddings.
-        if seqs.iter().any(|s| s.vlm_embeddings.is_some()) {
-            tracing::debug!("batched prefill: falling back to sequential (VLM request in batch)");
-            for mut seq in seqs {
-                if let Err(err) = Self::begin_prefill(&mut seq) {
-                    tracing::error!("Batched prefill state transition error: {err}");
-                    self.abort_sequence(seq, &err);
-                    continue;
-                }
-                self.execute_full_prefill(seq);
-            }
-            return;
-        }
-
-        // any sequence that adopted a cached prefix
-        // cannot participate in the padded batched prefill path because the
-        // KV-history offsets differ across sequences. Take the single-
-        // sequence path for those so their `prefill_start_offset` is
-        // honored correctly; batched-prefill continues for the rest of
-        // this batch in the normal padded pipeline below.
-        if seqs.iter().any(|s| s.prefill_start_offset > 0) {
-            tracing::debug!(
-                "batched prefill: falling back to sequential (adopted prompt-cache prefix in batch)"
-            );
-            for mut seq in seqs {
-                if let Err(err) = Self::begin_prefill(&mut seq) {
-                    tracing::error!("Batched prefill state transition error: {err}");
-                    self.abort_sequence(seq, &err);
-                    continue;
-                }
-                self.execute_full_prefill(seq);
-            }
-            return;
         }
 
         let b = seqs.len();
         let max_len = seqs.iter().map(|s| s.prompt_tokens.len()).max().unwrap();
         let can_pad_prefill = self.model.supports_padded_prefill();
         if !can_pad_prefill && seqs.iter().any(|s| s.prompt_tokens.len() != max_len) {
+            // Should not happen for a planner-approved cohort (it only batches
+            // equal-length rows on equal-length-only models), but stay safe.
             tracing::debug!(
-                "batched prefill: falling back to sequential (model requires equal prompt lengths)"
+                "batched prefill: cohort fell back to sequential (model requires equal prompt lengths)"
             );
             for seq in seqs {
                 self.execute_full_prefill(seq);
@@ -3167,13 +3195,6 @@ impl BatchScheduler {
         };
 
         tracing::debug!("batched prefill: {} requests, padded to {}", b, padded_len);
-
-        // Transition all sequences to Prefilling.
-        for seq in &mut seqs {
-            if let Err(err) = Self::begin_prefill(seq) {
-                tracing::error!("Batched prefill state transition error: {err}");
-            }
-        }
 
         // Build padded input: [B, padded_len]
         let mut flat_tokens: Vec<i32> = Vec::with_capacity(b * padded_len);
@@ -4817,3 +4838,7 @@ mod tests;
 #[cfg(test)]
 #[path = "serving_handoff_parity_tests.rs"]
 mod serving_handoff_parity_tests;
+
+#[cfg(test)]
+#[path = "scheduler_cohort_parity_tests.rs"]
+mod scheduler_cohort_parity_tests;

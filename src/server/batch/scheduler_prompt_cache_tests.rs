@@ -325,16 +325,18 @@ fn sequence_info_fields_transport_cache_hit_metadata() {
 }
 
 // ---------------------------------------------------------------------------
-// Batched prefill falls back to sequential when any adopted prefix is present
+// Batched prefill routes adopted-prefix rows to the sequential cohort
 // ---------------------------------------------------------------------------
 
 #[test]
 fn batched_prefill_path_detects_adopted_sequences() {
-    // The scheduler's `execute_batched_prefill` short-circuits to
-    // sequential prefill when *any* sequence in the batch has
-    // `prefill_start_offset > 0`. We assert the detection predicate here
-    // so any future refactor of the batched path can't regress the
-    // behavior silently.
+    // The scheduler's `execute_batched_prefill` classifies a row with
+    // `prefill_start_offset > 0` as not-cold, so #332 cohort splitting routes
+    // it to the offset-aware sequential path (instead of the padded batched
+    // path) while cold siblings still batch. We assert the detection predicate
+    // that drives that classification here so a future refactor of the batched
+    // path can't regress it silently. The full cohort plan (including order and
+    // offset isolation) is covered in `prefill_cohort::tests`.
     let mut offsets = [0_usize; 3];
     assert!(
         !offsets.iter().any(|&o| o > 0),

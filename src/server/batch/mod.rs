@@ -28,6 +28,7 @@
 
 mod active;
 pub mod observability;
+mod prefill_cohort;
 mod queue;
 pub(crate) mod scheduler;
 #[cfg(test)]
