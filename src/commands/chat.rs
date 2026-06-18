@@ -63,6 +63,7 @@ use mlxcel::server::model_provider::model_worker::StreamingDecodeState;
 use mlxcel::tokenizer::{MlxcelTokenizer, load_tokenizer};
 use mlxcel::{CxxGenerator, LanguageModel, SamplingConfig, initialize_runtime, load_model};
 use mlxcel_core::cache::KVCacheMode;
+use mlxcel_core::sampling::TokenBiasMap;
 
 /// Triple-quote fence that opens / closes an ollama-style multiline input
 /// block.
@@ -228,10 +229,22 @@ pub fn run_chat(opts: ChatOptions) -> Result<()> {
     }
     let sampling_config = build_sampling_config(sampling);
 
+    // issue #350: suppress this model's reserved multimodal placeholder ids
+    // (audio / image / video span markers) in the interactive chat generator,
+    // mirroring `run_generation_mode` for the one-shot path. `CxxGenerator`'s
+    // `compose_sampling` injects this cached bias whenever the per-call sampling
+    // config carries no token bias of its own (the chat config's stays empty),
+    // so a placeholder id can never leak into a chat reply. Zero-cost for
+    // non-multimodal models: the suppressed set is empty, the bias map stays
+    // empty, and `apply_token_bias` short-circuits.
+    let mut output_suppression = TokenBiasMap::new();
+    output_suppression.suppress_tokens(&model.output_suppressed_token_ids());
+
     // One generator for the whole session. `generate_streaming` resets its KV
     // cache per call, so re-rendering the full transcript each turn preserves
     // context without forking the generation loop.
-    let mut generator = CxxGenerator::new_with_kv_mode(model.num_layers(), opts.kv_cache_mode);
+    let mut generator = CxxGenerator::new_with_kv_mode(model.num_layers(), opts.kv_cache_mode)
+        .with_token_bias(output_suppression);
 
     let mut editor = DefaultEditor::new()
         .map_err(|e| anyhow!("failed to initialize the interactive line editor: {e}"))?;

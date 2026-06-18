@@ -114,6 +114,60 @@ fn argmax_per_position_returns_one_id_per_position() {
     assert_eq!(argmax, vec![2, 0, 3]);
 }
 
+#[test]
+fn verify_bias_suppresses_argmax_at_leaking_position_b1() {
+    // issue #350: the B = 1 verify step applies `sampler.token_bias` to the
+    // logits before `argmax_per_position`. Model the leak with a `[1, 3, 4]`
+    // verify block where the placeholder id 2 wins position 0 by raw argmax,
+    // then confirm the suppression bias re-routes ONLY that position to the
+    // next-best non-suppressed id while the legitimate positions are unchanged.
+    let _runtime = crate::initialize_runtime();
+
+    let data: Vec<f32> = vec![
+        // pos 0: raw argmax 2 (placeholder), next-best 3
+        0.1, 0.2, 0.9, 0.7, // pos 1: legitimate argmax 0
+        0.9, 0.1, 0.2, 0.3, // pos 2: legitimate argmax 3
+        0.1, 0.2, 0.3, 0.9,
+    ];
+    let logits = mlxcel_core::from_slice_f32(&data, &[1, 3, 4]);
+
+    // Raw argmax leaks the placeholder id 2 at position 0.
+    let raw = Gemma4MtpTargetAdapter::argmax_per_position(logits.as_ref().unwrap());
+    assert_eq!(raw, vec![2, 0, 3]);
+
+    // Suppress id 2; the biased argmax must pick the next-best id 3 at
+    // position 0 while positions 1 and 2 stay put.
+    let mut bias = mlxcel_core::sampling::TokenBiasMap::new();
+    bias.suppress_tokens(&[2]);
+    let biased_logits = mlxcel_core::sampling::apply_token_bias(logits.as_ref().unwrap(), &bias);
+    let biased = Gemma4MtpTargetAdapter::argmax_per_position(biased_logits.as_ref().unwrap());
+    assert_eq!(
+        biased,
+        vec![3, 0, 3],
+        "suppressing the placeholder id must re-route only the leaking position"
+    );
+}
+
+#[test]
+fn verify_empty_bias_is_identity_b1() {
+    // An empty `TokenBiasMap` (every non-multimodal model) must leave the
+    // per-position argmax bit-identical to the raw path.
+    let _runtime = crate::initialize_runtime();
+
+    let data: Vec<f32> = vec![
+        0.1, 0.2, 0.9, 0.3, // pos 0 -> 2
+        0.9, 0.1, 0.2, 0.3, // pos 1 -> 0
+        0.1, 0.2, 0.3, 0.9, // pos 2 -> 3
+    ];
+    let logits = mlxcel_core::from_slice_f32(&data, &[1, 3, 4]);
+
+    let raw = Gemma4MtpTargetAdapter::argmax_per_position(logits.as_ref().unwrap());
+    let empty = mlxcel_core::sampling::TokenBiasMap::new();
+    let passthrough = mlxcel_core::sampling::apply_token_bias(logits.as_ref().unwrap(), &empty);
+    let biased = Gemma4MtpTargetAdapter::argmax_per_position(passthrough.as_ref().unwrap());
+    assert_eq!(raw, biased, "empty bias must be a no-op over the verify argmax");
+}
+
 // ===========================================================================
 // Batched MTP target adapter helper tests
 //
@@ -190,6 +244,43 @@ fn batched_argmax_per_row_returns_b_by_width_ids() {
     let logits = mlxcel_core::from_slice_f32(&data, &[2, 3, 4]);
     let argmax = Gemma4MtpBatchedTargetAdapter::argmax_per_row(logits.as_ref().unwrap(), 2, 3);
     assert_eq!(argmax, vec![vec![2, 0, 3], vec![1, 3, 0]]);
+}
+
+#[test]
+fn batched_verify_bias_suppresses_argmax_per_row() {
+    // issue #350: the batched verify step applies `sampler.token_bias` to the
+    // [B, width, vocab] logits before `argmax_per_row`. Confirm a [1, vocab]
+    // suppression mask broadcasts across the [B, width] grid and re-routes only
+    // the positions where the suppressed id would otherwise win, in any row.
+    let _runtime = crate::initialize_runtime();
+
+    // `[2, 3, 4]`. The placeholder id 2 is the raw winner at row 0 pos 0 and
+    // row 1 pos 2; every other position wins on a legitimate id.
+    let data: Vec<f32> = vec![
+        // row 0
+        0.1, 0.2, 0.9, 0.7, // pos 0 -> raw 2, next-best 3
+        0.9, 0.1, 0.2, 0.3, // pos 1 -> 0
+        0.1, 0.2, 0.3, 0.9, // pos 2 -> 3
+        // row 1
+        0.1, 0.9, 0.2, 0.3, // pos 0 -> 1
+        0.1, 0.2, 0.3, 0.9, // pos 1 -> 3
+        0.6, 0.1, 0.9, 0.3, // pos 2 -> raw 2, next-best 0
+    ];
+    let logits = mlxcel_core::from_slice_f32(&data, &[2, 3, 4]);
+
+    let raw = Gemma4MtpBatchedTargetAdapter::argmax_per_row(logits.as_ref().unwrap(), 2, 3);
+    assert_eq!(raw, vec![vec![2, 0, 3], vec![1, 3, 2]]);
+
+    let mut bias = mlxcel_core::sampling::TokenBiasMap::new();
+    bias.suppress_tokens(&[2]);
+    let biased_logits = mlxcel_core::sampling::apply_token_bias(logits.as_ref().unwrap(), &bias);
+    let biased =
+        Gemma4MtpBatchedTargetAdapter::argmax_per_row(biased_logits.as_ref().unwrap(), 2, 3);
+    assert_eq!(
+        biased,
+        vec![vec![3, 0, 3], vec![1, 3, 0]],
+        "suppressing id 2 must re-route both rows' leaking positions and leave the rest"
+    );
 }
 
 #[test]

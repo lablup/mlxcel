@@ -209,8 +209,9 @@ impl TokenBiasMap {
 /// Invalid token ids (negative, or `>= vocab_size`) are silently ignored —
 /// no panic, no error.
 ///
-/// Used by: standard generation, speculative decoding, batch scheduler
-pub(crate) fn apply_token_bias(logits: &MlxArray, bias: &TokenBiasMap) -> UniquePtr<MlxArray> {
+/// Used by: standard generation, speculative decoding, batch scheduler, MTP
+/// verify (Gemma4 target adapter)
+pub fn apply_token_bias(logits: &MlxArray, bias: &TokenBiasMap) -> UniquePtr<MlxArray> {
     if bias.is_empty() {
         return ffi::copy(logits);
     }

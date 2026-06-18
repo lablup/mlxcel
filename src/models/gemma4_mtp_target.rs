@@ -264,12 +264,28 @@ impl<'a> Gemma4MtpTargetAdapter<'a> {
     /// early-stop on the first mismatch: for the small Gemma 4 MTP block sizes
     /// we use today, avoiding `K` separate cxx/MLX calls is more important
     /// than skipping the tail projection on low-accept rounds.
-    fn argmax_from_hidden_positions(&self, hidden_full: &MlxArray) -> Vec<i32> {
+    ///
+    /// `token_bias` is the model's output-suppression set (issue #350). When it
+    /// is non-empty the projected logits are biased before the argmax so a
+    /// suppressed placeholder id can never win a deferred-greedy verify
+    /// position. An empty map (every non-multimodal model) takes the raw argmax,
+    /// preserving the bit-exact baseline.
+    fn argmax_from_hidden_positions(
+        &self,
+        hidden_full: &MlxArray,
+        token_bias: &mlxcel_core::sampling::TokenBiasMap,
+    ) -> Vec<i32> {
         let shape = mlxcel_core::array_shape(hidden_full);
         debug_assert_eq!(shape.len(), 3, "hidden must be 3-D [B, T, H]");
         let expected_len = shape[1].max(0) as usize;
         let logits = self.wrapper.speculative_logits_from_hidden(hidden_full);
-        let argmax = mlxcel_core::argmax_last_axis(logits.as_ref().unwrap());
+        let argmax = if token_bias.is_empty() {
+            mlxcel_core::argmax_last_axis(logits.as_ref().unwrap())
+        } else {
+            let biased =
+                mlxcel_core::sampling::apply_token_bias(logits.as_ref().unwrap(), token_bias);
+            mlxcel_core::argmax_last_axis(&biased)
+        };
         mlxcel_core::eval(&argmax);
         materialize_argmax_i32_vec(&argmax, expected_len)
     }
@@ -560,7 +576,7 @@ impl<'a> MtpTarget for Gemma4MtpTargetAdapter<'a> {
             );
             None
         } else {
-            Some(self.wrapper.forward_with_speculative_sinks(
+            let raw_logits = self.wrapper.forward_with_speculative_sinks(
                 &verify_arr,
                 None,
                 None,
@@ -569,7 +585,23 @@ impl<'a> MtpTarget for Gemma4MtpTargetAdapter<'a> {
                 None,
                 Some(&mut sinks),
                 None,
-            ))
+            );
+            // issue #350: mask the model's output-illegal placeholder ids on the
+            // verify logits BEFORE the per-position argmax AND the logprob
+            // extraction, so a suppressed id can never win a near-tie verify
+            // position (the leak) and the emitted token plus its logprob stay
+            // consistent. The bias is the model's suppressed-id set, forwarded
+            // from the server `enqueue_request` through `MtpGenerator` into
+            // `sampler`. An empty map (every non-multimodal model) short-circuits
+            // here to the raw logits, so the baseline stays bit-exact.
+            if sampler.token_bias.is_empty() {
+                Some(raw_logits)
+            } else {
+                Some(mlxcel_core::sampling::apply_token_bias(
+                    &raw_logits,
+                    &sampler.token_bias,
+                ))
+            }
         };
 
         // Greedy-parity gate: pull the per-position argmax tokens from
@@ -605,7 +637,7 @@ impl<'a> MtpTarget for Gemma4MtpTargetAdapter<'a> {
             .next_back()
             .expect("hidden sink must carry at least one entry");
         let target_tokens = if target_tokens.is_empty() && use_deferred_greedy {
-            self.argmax_from_hidden_positions(hidden_full.as_ref().unwrap())
+            self.argmax_from_hidden_positions(hidden_full.as_ref().unwrap(), &sampler.token_bias)
         } else {
             target_tokens
         };
@@ -1733,7 +1765,7 @@ impl<'a> MtpTarget for Gemma4MtpBatchedTargetAdapter<'a> {
     fn verify_forward_batched(
         &self,
         verify_input_per_row: &[Vec<i32>],
-        _sampler: &SamplingConfig,
+        sampler: &SamplingConfig,
     ) -> Result<MtpBatchedVerifyForwardOutput, DrafterError> {
         // Build the rectangular [B, block_size] verify batch.
         let (verify_arr, width) = Self::rectangular_input(verify_input_per_row, self.batch_size)?;
@@ -1771,6 +1803,20 @@ impl<'a> MtpTarget for Gemma4MtpBatchedTargetAdapter<'a> {
         // entries per row; `verify_finalize_batched` trims it back.
         let (logits, hidden_full, shared_kv) =
             self.batched_sink_forward_with_mask(&verify_arr, None, lp_ref, Some(&valid_ends));
+
+        // issue #350: mask the model's output-illegal placeholder ids on the
+        // [B, width, vocab] verify logits BEFORE the per-row argmax, so a
+        // suppressed id can never win a near-tie verify position (the leak).
+        // `apply_token_bias` broadcasts the [1, vocab] mask across the
+        // [B, width] grid; the bias is forwarded from the server `enqueue_request`
+        // (the batched burst shares one sampler across rows). An empty map (every
+        // non-multimodal model) short-circuits to the raw logits, so the baseline
+        // stays bit-exact.
+        let logits = if sampler.token_bias.is_empty() {
+            logits
+        } else {
+            mlxcel_core::sampling::apply_token_bias(&logits, &sampler.token_bias)
+        };
 
         // Greedy-parity: per-row argmax over the [B, width, vocab]
         // logits. At temperature 0 this matches the drafter-less
