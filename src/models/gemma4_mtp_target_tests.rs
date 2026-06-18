@@ -165,7 +165,10 @@ fn verify_empty_bias_is_identity_b1() {
     let empty = mlxcel_core::sampling::TokenBiasMap::new();
     let passthrough = mlxcel_core::sampling::apply_token_bias(logits.as_ref().unwrap(), &empty);
     let biased = Gemma4MtpTargetAdapter::argmax_per_position(passthrough.as_ref().unwrap());
-    assert_eq!(raw, biased, "empty bias must be a no-op over the verify argmax");
+    assert_eq!(
+        raw, biased,
+        "empty bias must be a no-op over the verify argmax"
+    );
 }
 
 // ===========================================================================

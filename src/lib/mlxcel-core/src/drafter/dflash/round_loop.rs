@@ -910,6 +910,16 @@ impl DFlashGenerator {
 /// Equivalent to upstream `sampler(verify_out.logits)` with the greedy
 /// `sampler = argmax(axis=-1)`. Stochastic samplers are out of scope
 /// for this sub-issue (sub-9 covers stochastic DFlash parity).
+///
+/// LATENT GAP (issue #350): this argmax is raw — it applies no token bias.
+/// Today that is safe because only `gemma4_unified` carries a non-empty
+/// `output_suppressed_token_ids` set, and gemma4_unified uses the MTP verify
+/// path (not DFlash). If a model with a non-empty suppressed-id set ever
+/// adopts the DFlash verify path, this call must be preceded by
+/// `mlxcel_core::sampling::apply_token_bias(logits, token_bias)` — exactly as
+/// `Gemma4MtpTargetAdapter::argmax_from_hidden_positions` does — so that
+/// suppressed placeholder token ids cannot win a verify position and
+/// reintroduce the #350 leak.
 fn argmax_logits_to_array(logits: &MlxArray, seq_len: i32) -> UniquePtr<MlxArray> {
     let shape = ffi::array_shape(logits);
     debug_assert!(shape.len() == 3, "expected [1, seq_len, vocab] logits");
