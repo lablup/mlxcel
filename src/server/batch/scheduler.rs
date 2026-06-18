@@ -3907,6 +3907,21 @@ impl BatchScheduler {
         } else {
             mlxcel_core::copy(&logits)
         };
+        // #347: reseed the global MLX RNG to THIS row's own seed at the exact
+        // point it samples its first token. `begin_prefill` already seeded once,
+        // but a batched cohort runs every row's `begin_prefill` up front before
+        // any row reaches `finish_prefill`, so by the time row 0 samples here the
+        // global RNG holds the LAST cohort row's seed ("last-seed-wins"). The
+        // fused sampler draws from that process-global RNG with no per-call key
+        // (`fused_sample` takes only the scalar params), so without this reseed a
+        // seeded row's first token would depend on its siblings' seeds. Reseeding
+        // here, rather than only in `begin_prefill`, guarantees the seed is live
+        // at the exact sample point and makes each row's first token depend only
+        // on its own seed. Greedy / `temperature == 0` / `top_k == 1` rows take
+        // the argmax path and consume no RNG, so this is a no-op for them. The
+        // batched fused DECODE path shares one global-RNG draw across the whole
+        // `[B, vocab]` batch and is out of scope here (see issue #347).
+        seed_rng_if_needed(&seq.sampling);
         let (first_token_arr, adjusted_logits) =
             sample_token_optimized(&logits_for_sampling, &seq.sampling, &token_history);
         mlxcel_core::eval(&first_token_arr);
@@ -4963,3 +4978,7 @@ mod serving_handoff_parity_tests;
 #[cfg(test)]
 #[path = "scheduler_cohort_parity_tests.rs"]
 mod scheduler_cohort_parity_tests;
+
+#[cfg(test)]
+#[path = "scheduler_seed_determinism_tests.rs"]
+mod scheduler_seed_determinism_tests;
