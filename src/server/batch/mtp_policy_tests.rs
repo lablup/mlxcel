@@ -33,6 +33,7 @@ fn key() -> PolicyKey {
         "target-model".to_string(),
         "drafter-model".to_string(),
         "M5-16c".to_string(),
+        4,
     )
 }
 
@@ -87,7 +88,11 @@ fn unique_temp_dir(tag: &str) -> std::path::PathBuf {
     use std::sync::atomic::{AtomicU64, Ordering};
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-    std::env::temp_dir().join(format!("mlxcel-mtp-policy-test-{}-{}-{n}", std::process::id(), tag))
+    std::env::temp_dir().join(format!(
+        "mlxcel-mtp-policy-test-{}-{}-{n}",
+        std::process::id(),
+        tag
+    ))
 }
 
 // ── pure decision core ────────────────────────────────────────────────────────
@@ -269,12 +274,20 @@ fn unfavorable_profile_declines_overriding_static_enable() {
 #[test]
 fn ambiguous_profile_follows_static_default() {
     // Same ambiguous profile settles to whatever the static default says.
-    let enabled = drive(adaptive_policy(false, false), ambiguous_sample(), PROFILE_SAMPLE_TARGET);
+    let enabled = drive(
+        adaptive_policy(false, false),
+        ambiguous_sample(),
+        PROFILE_SAMPLE_TARGET,
+    );
     assert!(
         enabled.should_attempt_b1(),
         "ambiguous + static enable → enable"
     );
-    let declined = drive(adaptive_policy(true, false), ambiguous_sample(), PROFILE_SAMPLE_TARGET);
+    let declined = drive(
+        adaptive_policy(true, false),
+        ambiguous_sample(),
+        PROFILE_SAMPLE_TARGET,
+    );
     assert!(
         !declined.should_attempt_b1(),
         "ambiguous + static decline → decline"
@@ -402,6 +415,7 @@ fn persisted_hint_holds_only_coarse_fields() {
         keys,
         [
             "acceptance_rate",
+            "block_size",
             "drafter",
             "hardware",
             "samples",
@@ -454,7 +468,7 @@ fn loaded_hint_is_rejected_on_key_mismatch() {
     // Guards against a hash collision handing back another pairing's verdict.
     let dir = unique_temp_dir("mismatch");
     let store = PolicyStore::with_dir(Some(dir.clone()));
-    let other = PolicyKey::new("a".into(), "b".into(), "c".into());
+    let other = PolicyKey::new("a".into(), "b".into(), "c".into(), 4);
     store
         .save(&PolicyHint::new(&other, Verdict::Enable, 0.5, 4))
         .expect("save");
@@ -466,13 +480,108 @@ fn loaded_hint_is_rejected_on_key_mismatch() {
 
 #[test]
 fn policy_key_hash_is_stable_and_distinct() {
-    let a = PolicyKey::new("t".into(), "d".into(), "hw".into());
-    let b = PolicyKey::new("t".into(), "d".into(), "hw".into());
-    let c = PolicyKey::new("t".into(), "d".into(), "other-hw".into());
+    let a = PolicyKey::new("t".into(), "d".into(), "hw".into(), 4);
+    let b = PolicyKey::new("t".into(), "d".into(), "hw".into(), 4);
+    let c = PolicyKey::new("t".into(), "d".into(), "other-hw".into(), 4);
     assert_eq!(a.hash(), b.hash(), "same key → same hash");
     assert_ne!(a.hash(), c.hash(), "different hardware → different hash");
-    assert_eq!(a.display(), "t|d|hw");
+    assert_eq!(a.display(), "t|d|hw|K4");
     assert_eq!(a.hash().len(), 16, "16 hex chars");
+}
+
+// ── block_size key separation ─────────────────────────────────────────────────
+
+/// A verdict profiled at block_size=K must not be reused when K changes.
+/// Different block sizes produce different hashes (and therefore different hint
+/// files), so a change in `--num-draft-tokens` / `MLXCEL_DRAFT_BLOCK_SIZE`
+/// triggers a fresh profiling window rather than inheriting the old verdict.
+#[test]
+fn block_size_change_produces_different_key_and_re_profiles() {
+    let k4 = PolicyKey::new("t".into(), "d".into(), "hw".into(), 4);
+    let k8 = PolicyKey::new("t".into(), "d".into(), "hw".into(), 8);
+    assert_ne!(
+        k4.hash(),
+        k8.hash(),
+        "keys differing only in block_size must hash differently"
+    );
+    assert_ne!(k4.display(), k8.display());
+
+    // A hint saved at K=4 must not load for K=8 (different file, different
+    // key check), and vice versa.
+    let dir = unique_temp_dir("block-size-sep");
+    let store = PolicyStore::with_dir(Some(dir.clone()));
+
+    let hint4 = PolicyHint::new(&k4, Verdict::Enable, 0.75, 4);
+    store.save(&hint4).expect("save K=4 hint");
+
+    // Loading with the same key (K=4) succeeds.
+    assert!(
+        store.load(&k4).is_some(),
+        "same block_size must load the hint"
+    );
+    // Loading with a different block_size (K=8) returns None; re-profile.
+    assert!(
+        store.load(&k8).is_none(),
+        "different block_size must not load the hint (triggers re-profile)"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ── load degradation (LOW-3) ──────────────────────────────────────────────────
+
+/// `PolicyStore::load` must return `None` (degrade to re-profile, no panic) on
+/// truncated or garbage JSON. The `.ok()?` on `serde_json::from_str` covers
+/// this; the test pins the contract so a future refactor cannot break it.
+#[test]
+fn load_returns_none_on_garbage_json() {
+    let dir = unique_temp_dir("garbage-json");
+    std::fs::create_dir_all(&dir).expect("create dir");
+    let store = PolicyStore::with_dir(Some(dir.clone()));
+    // Write garbage directly to the path where load would look.
+    let k = key();
+    let path = dir.join(format!("{}.json", k.hash()));
+    std::fs::write(&path, b"this is not json {{{{").expect("write garbage");
+    assert!(
+        store.load(&k).is_none(),
+        "garbage JSON must degrade to None, not panic"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `PolicyStore::load` must return `None` on a hint whose version field does
+/// not match `HINT_VERSION`. The version check covers schema changes (e.g.
+/// the v1 -> v2 addition of `block_size`); old hints are silently discarded
+/// and the pairing re-profiles rather than crashing or handing back a stale
+/// verdict.
+#[test]
+fn load_returns_none_on_version_mismatch() {
+    let dir = unique_temp_dir("version-mismatch");
+    std::fs::create_dir_all(&dir).expect("create dir");
+    let store = PolicyStore::with_dir(Some(dir.clone()));
+    let k = key();
+
+    // Write a hint with a deliberately wrong version (0 instead of HINT_VERSION).
+    let stale_json = serde_json::json!({
+        "version": 0u32,
+        "target": "target-model",
+        "drafter": "drafter-model",
+        "hardware": "M5-16c",
+        "block_size": 4u32,
+        "verdict": "enable",
+        "acceptance_rate": 0.75,
+        "samples": 4,
+    });
+    let path = dir.join(format!("{}.json", k.hash()));
+    std::fs::write(
+        &path,
+        serde_json::to_string(&stale_json).unwrap().as_bytes(),
+    )
+    .expect("write stale hint");
+    assert!(
+        store.load(&k).is_none(),
+        "version mismatch must degrade to None and trigger re-profile"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 // ── exactness contract ────────────────────────────────────────────────────────
