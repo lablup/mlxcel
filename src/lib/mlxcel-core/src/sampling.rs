@@ -134,6 +134,28 @@ impl TokenBiasMap {
         self.byte_fragment_ids.insert(token_id);
     }
 
+    /// Permanently suppress every token id in `ids` by forcing its bias to
+    /// `f32::NEG_INFINITY` (sampled probability becomes 0).
+    ///
+    /// Suppression always wins: an existing finite bias for the same id is
+    /// overwritten. This is the mechanism the generation paths use to mask a
+    /// model's reserved output-illegal tokens (multimodal placeholder ids,
+    /// issue #350) so they can never become the argmax at a near-tie decode
+    /// step. Negative or out-of-range ids are stored but ignored when the
+    /// bias is applied (see [`apply_token_bias`]).
+    ///
+    /// An empty slice is a no-op, so a non-multimodal model (whose
+    /// suppressed set is empty) keeps the bit-exact zero-overhead baseline:
+    /// the map stays empty and `apply_token_bias` short-circuits.
+    ///
+    /// Used by: CLI `generate` (`run_generation_mode`) and the server batch
+    /// scheduler (`enqueue_request`).
+    pub fn suppress_tokens(&mut self, ids: &[i32]) {
+        for &id in ids {
+            self.entries.insert(id, f32::NEG_INFINITY);
+        }
+    }
+
     /// Returns `true` when no bias entries are stored.
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
@@ -1632,6 +1654,49 @@ mod tests {
             prob_at_3, 0.0,
             "probability at suppressed token must be 0.0"
         );
+    }
+
+    #[test]
+    fn suppress_tokens_forces_neg_inf_and_drives_probability_to_zero() {
+        // issue #350: suppress_tokens masks each id to -inf so it can never be
+        // sampled, while leaving other tokens (e.g. real EOS) untouched.
+        let mut bias = TokenBiasMap::new();
+        // Simulate a model's reserved multimodal placeholder ids alongside an
+        // existing finite bias that suppression must override.
+        bias.insert(2, 5.0);
+        bias.suppress_tokens(&[1, 2, 4]);
+
+        for id in [1, 2, 4] {
+            let b = *bias.get(&id).expect("suppressed id present");
+            assert!(
+                b.is_infinite() && b.is_sign_negative(),
+                "token {id} must be -inf, got {b}"
+            );
+        }
+        // An id that was never suppressed stays absent (not silenced).
+        assert!(bias.get(&3).is_none(), "untouched token must stay absent");
+
+        // After softmax the suppressed indices carry zero probability.
+        let logits = ffi::from_slice_f32(&[1.0, 1.0, 1.0, 1.0, 1.0], &[1, 5]);
+        let biased = apply_token_bias(&logits, &bias);
+        let probs = ffi::softmax(&biased, -1);
+        ffi::eval(&probs);
+        for id in [1, 2, 4] {
+            assert_eq!(
+                logit_at(&probs, id),
+                0.0,
+                "probability at suppressed token {id} must be 0.0"
+            );
+        }
+        // The non-suppressed token 3 keeps positive probability.
+        assert!(logit_at(&probs, 3) > 0.0, "token 3 must remain reachable");
+    }
+
+    #[test]
+    fn suppress_tokens_empty_slice_is_noop() {
+        let mut bias = TokenBiasMap::new();
+        bias.suppress_tokens(&[]);
+        assert!(bias.is_empty(), "empty suppression keeps the baseline path");
     }
 
     #[test]

@@ -25,6 +25,8 @@
 use serde::Deserialize;
 use serde_json::Value;
 
+use crate::models::multimodal_placeholders::MultimodalPlaceholderTokens;
+
 fn default_rms_norm_eps() -> f32 {
     1e-6
 }
@@ -170,6 +172,28 @@ impl Gemma4UnifiedConfig {
         self.eoa_token_id
             .or(self.eoa_token_index)
             .unwrap_or_else(default_eoa_token_index)
+    }
+
+    /// The reserved multimodal placeholder token ids (audio / image / video
+    /// span markers) that must never appear in generated text output
+    /// (issue #350).
+    ///
+    /// These are input-alignment placeholders; the runtime scatters encoded
+    /// features into them during prefill, but they are illegal as generation
+    /// output. The returned [`MultimodalPlaceholderTokens`] is fed through
+    /// [`MultimodalPlaceholderTokens::suppressed_ids`] and masked to `-inf` at
+    /// every decode step. Real EOS ids (`eos_token_id`) are intentionally
+    /// excluded so end-of-sequence detection is unaffected.
+    pub fn placeholder_tokens(&self) -> MultimodalPlaceholderTokens {
+        MultimodalPlaceholderTokens {
+            audio_token_id: Some(self.audio_token_id),
+            image_token_id: Some(self.image_token_id),
+            video_token_id: Some(self.video_token_id),
+            boa_token_id: Some(self.boa_token_id),
+            boi_token_id: Some(self.boi_token_id),
+            eoa_token_id: Some(self.resolve_eoa_token_id()),
+            eoi_token_id: Some(self.eoi_token_id),
+        }
     }
 }
 

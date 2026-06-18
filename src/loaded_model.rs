@@ -287,6 +287,10 @@ impl LanguageModel for LoadedModel {
         delegate_language_model!(self, eos_token_ids())
     }
 
+    fn output_suppressed_token_ids(&self) -> Vec<i32> {
+        delegate_language_model!(self, output_suppressed_token_ids())
+    }
+
     fn make_caches(&self) -> Vec<mlxcel_core::layers::KVCache> {
         // Use fully qualified syntax to ensure we call the trait method, not inherent methods
         delegate_language_model!(self, make_caches())

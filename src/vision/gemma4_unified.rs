@@ -597,6 +597,25 @@ impl LanguageModel for Gemma4UnifiedModel {
         self.text_model.eos_token_ids_value()
     }
 
+    /// Suppress the reserved audio / image / video span markers in the output
+    /// logits (issue #350). These ids are parsed from the checkpoint config
+    /// (`audio_token_id`, `image_token_id`, ...) and stored on the model; they
+    /// are input-alignment placeholders that must never be sampled as text.
+    /// The real EOS ids are not included here, so end-of-sequence detection is
+    /// unaffected.
+    fn output_suppressed_token_ids(&self) -> Vec<i32> {
+        crate::models::MultimodalPlaceholderTokens {
+            audio_token_id: Some(self.audio_token_id),
+            image_token_id: Some(self.image_token_id),
+            video_token_id: Some(self.video_token_id),
+            boa_token_id: Some(self.boa_token_id),
+            boi_token_id: Some(self.boi_token_id),
+            eoa_token_id: Some(self.eoa_token_id),
+            eoi_token_id: Some(self.eoi_token_id),
+        }
+        .suppressed_ids()
+    }
+
     fn supports_padded_prefill(&self) -> bool {
         false
     }

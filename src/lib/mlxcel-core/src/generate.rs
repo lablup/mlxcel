@@ -265,6 +265,30 @@ pub trait LanguageModel {
     /// Get the EOS token IDs for this model
     fn eos_token_ids(&self) -> Vec<i32>;
 
+    /// Token ids this model must never emit as generated text output.
+    ///
+    /// Multimodal models reserve placeholder ids (audio / image / video span
+    /// markers, e.g. Gemma 4 Unified's `audio_token_id`, `image_token_id`,
+    /// `boi_token_id`, ...) purely for INPUT alignment. If one becomes the
+    /// argmax at a near-tie decode step it corrupts the text stream
+    /// (issue #350). Generation paths mask these to `f32::NEG_INFINITY` in
+    /// the per-step [`crate::sampling::TokenBiasMap`] so they can never be
+    /// sampled.
+    ///
+    /// The default is empty: non-multimodal models have nothing to suppress
+    /// and pay zero cost (the bias map stays empty and `apply_token_bias`
+    /// short-circuits). Only families with reserved output-illegal ids
+    /// override this, and they must return ONLY those placeholder ids, never
+    /// real EOS or normal text ids.
+    ///
+    /// Used by: CLI `generate` (`run_generation_mode`) and the server batch
+    /// scheduler, which merge the returned ids into the effective
+    /// `TokenBiasMap` (via [`crate::sampling::TokenBiasMap::suppress_tokens`])
+    /// at generator / scheduler construction.
+    fn output_suppressed_token_ids(&self) -> Vec<i32> {
+        Vec::new()
+    }
+
     /// Forward with pre-computed embeddings (for VLM prefill)
     /// Used by: VisionLanguageModel (Gemma3 VLM)
     fn forward_with_embeddings(

@@ -174,6 +174,56 @@ fn audio_config_optional() {
 }
 
 #[test]
+fn placeholder_tokens_cover_all_seven_markers() {
+    // issue #350: the config's placeholder ids feed the output-suppression set.
+    let cfg: Gemma4UnifiedConfig = serde_json::from_value(reference_config()).unwrap();
+    let suppressed = cfg.placeholder_tokens().suppressed_ids();
+    // audio 258881, image 258880, video 258884, boa 256000, boi 255999,
+    // eoa 258883 (via eoa_token_index fallback), eoi 258882, returned sorted.
+    assert_eq!(
+        suppressed,
+        vec![
+            255_999, 256_000, 258_880, 258_881, 258_882, 258_883, 258_884
+        ]
+    );
+}
+
+#[test]
+fn output_suppression_masks_placeholders_but_not_eos() {
+    // The end-to-end shape used at generation time: derive the suppressed set
+    // from the gemma4_unified config and force it into a TokenBiasMap. Every
+    // placeholder id must become -inf; the real EOS ids ([1, 106, 50] in the
+    // gemma-4-12b checkpoint) must stay untouched so end-of-sequence detection
+    // and normal text generation are unaffected (issue #350 acceptance).
+    let mut value = reference_config();
+    value["eos_token_id"] = serde_json::json!([1, 106, 50]);
+    let cfg: Gemma4UnifiedConfig = serde_json::from_value(value).unwrap();
+
+    let mut bias = mlxcel_core::TokenBiasMap::default();
+    assert!(bias.is_empty(), "baseline starts empty (zero-cost path)");
+    bias.suppress_tokens(&cfg.placeholder_tokens().suppressed_ids());
+
+    for placeholder in [
+        255_999, 256_000, 258_880, 258_881, 258_882, 258_883, 258_884,
+    ] {
+        let b = bias
+            .get(&placeholder)
+            .copied()
+            .unwrap_or_else(|| panic!("placeholder {placeholder} must be in the bias map"));
+        assert!(
+            b.is_infinite() && b.is_sign_negative(),
+            "placeholder {placeholder} must be masked to -inf, got {b}"
+        );
+    }
+    for eos in [1, 106, 50] {
+        assert!(
+            bias.get(&eos).is_none(),
+            "real EOS id {eos} must never be suppressed"
+        );
+    }
+}
+
+#[test]
 fn vision_config_defaults_apply() {
     // Minimal vision_config falls back to documented defaults.
     let value = serde_json::json!({

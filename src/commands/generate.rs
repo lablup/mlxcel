@@ -846,8 +846,16 @@ fn run_generation_mode<M: LanguageModel>(
     sampling_config: &SamplingConfig,
     vlm_embeddings: Option<&InputEmbeddings>,
     kv_cache_mode: KVCacheMode,
-    token_bias: TokenBiasMap,
+    mut token_bias: TokenBiasMap,
 ) -> Result<(Vec<i32>, GenerationStats)> {
+    // issue #350: mask this model's reserved multimodal placeholder tokens
+    // (audio / image / video span markers) to -inf in the output logits so
+    // they can never leak into generated text. Merged into the token-bias map
+    // here, before any generator is built, so it reaches every sub-path below
+    // (speculative, VLM-embedding, and standard). No-op for non-multimodal
+    // models whose suppressed set is empty.
+    token_bias.suppress_tokens(&model.output_suppressed_token_ids());
+
     let output = if let Some(ref draft_model_path) = args.model.draft_model {
         // resolve the effective DrafterKind from
         // (a) the explicit `--draft-kind` CLI flag, OR

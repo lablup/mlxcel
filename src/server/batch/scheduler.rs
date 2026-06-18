@@ -301,6 +301,17 @@ pub struct BatchScheduler {
     /// Empty map = bit-exact baseline path (no sampling change, no alloc).
     token_bias: TokenBiasMap,
 
+    /// Reserved output-illegal token ids for the loaded model (issue #350).
+    ///
+    /// Multimodal models (e.g. `gemma4_unified`) carry audio / image / video
+    /// span placeholder ids that must never be emitted as text. Resolved once
+    /// at construction from [`LanguageModel::output_suppressed_token_ids`] and
+    /// force-masked to `-inf` on every sequence's sampling config at
+    /// [`Self::enqueue_request`] time, unconditionally (suppression always
+    /// wins over any per-request bias). Empty for non-multimodal models, which
+    /// keeps the enqueue path zero-cost.
+    model_output_suppressed: Vec<i32>,
+
     // -- — thinking-token budget --
     /// Server-wide default thinking-token budget. `None` means unrestricted.
     /// Per-request `thinking_budget_tokens` overrides this at enqueue time.
@@ -825,6 +836,10 @@ impl BatchScheduler {
         // batch and the prefill queue so requests can be queued while another
         // sequence is generating.
         let pool_capacity = max_batch_size + max_queue_depth;
+        // issue #350: resolve the model's reserved output-illegal placeholder
+        // ids once, before `model` is moved into the scheduler. Empty for
+        // non-multimodal models (zero cost on the enqueue path).
+        let model_output_suppressed = model.output_suppressed_token_ids();
         Self {
             cache_pool: CachePool::new(pool_capacity),
             prefill_queue: PrefillQueue::with_capacity(max_queue_depth),
@@ -847,6 +862,7 @@ impl BatchScheduler {
                 crate::vision::feature_cache::DEFAULT_VISION_CACHE_SIZE,
             )),
             token_bias: TokenBiasMap::default(),
+            model_output_suppressed,
             reasoning_budget: None,
             thinking_token_ids: None,
             prompt_cache: None,
@@ -2297,6 +2313,19 @@ impl BatchScheduler {
         // via `/v1/chat/completions` request body are deferred to B12.
         if !self.token_bias.is_empty() && sampling.token_bias.is_empty() {
             sampling.token_bias = self.token_bias.clone();
+        }
+
+        // issue #350: force-suppress the model's reserved multimodal
+        // placeholder tokens (audio / image / video span markers) on every
+        // sequence's output logits. Applied after the lang-bias merge and
+        // unconditionally, so suppression always wins over any per-request
+        // bias and a placeholder id can never become the sampled argmax. A
+        // no-op (and zero alloc) for non-multimodal models whose suppressed
+        // set is empty.
+        if !self.model_output_suppressed.is_empty() {
+            sampling
+                .token_bias
+                .suppress_tokens(&self.model_output_suppressed);
         }
 
         let is_multimodal = !images.is_empty() || !audio.is_empty() || !videos.is_empty();
