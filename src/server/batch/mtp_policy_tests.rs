@@ -493,7 +493,7 @@ fn profile_sample_carries_no_token_level_data() {
         verify_forward_ms: 32.0,
     };
     let profile = MtpBurstProfile::from_summary(summary, 1, 256);
-    // Only aggregate counts, latencies, batch size, and prompt length — the
+    // Only aggregate counts, latencies, batch size, and prompt length: the
     // exact fields the issue lists. No token ids, no prompt bytes.
     assert_eq!(profile.batch_size, 1);
     assert_eq!(profile.prompt_len, 256);
