@@ -39,27 +39,27 @@ use crate::server::types::request::Tool;
 ///
 /// Used by: tool_calls::parser
 fn strip_thinking(text: &str) -> String {
-    // Prompt-primed Gemma 4: strip everything up to (and including) the first
-    // `<channel|>` when no opening `<|channel>` precedes it. Runs before the
-    // balanced-pair pass so subsequent `<|channel>...<channel|>` blocks (if
-    // any) still get handled uniformly.
-    let mut result = {
-        const CLOSE: &str = "<channel|>";
-        const OPEN: &str = "<|channel>";
-        match text.find(CLOSE) {
-            Some(close_pos) => {
-                let before_close = &text[..close_pos];
-                if before_close.contains(OPEN) {
-                    text.to_string()
-                } else {
-                    text[close_pos + CLOSE.len()..].to_string()
-                }
-            }
-            None => text.to_string(),
-        }
-    };
-
+    // (open, close) marker pairs by family: Qwen-style `<think>...</think>`
+    // and Gemma 4 `<|channel>...<channel|>`.
     let pairs: &[(&str, &str)] = &[("<think>", "</think>"), ("<|channel>", "<channel|>")];
+
+    // Prompt-primed pass: when a close marker appears with no opening marker
+    // before it, the generation prompt primed the open (Gemma 4
+    // `<|channel>thought\n` or a Qwen-style `<think>\n`), so the model output
+    // starts inside the block and carries only the close. Strip everything up
+    // to and including that first bare close, for both families. Runs before
+    // the balanced-pair pass so any later `open...close` blocks still get
+    // handled uniformly, and so a primed `</think>` close is stripped on the
+    // non-streaming path the same way `/v1/responses`, `/v1/anthropic`, and the
+    // streaming filter already handle it.
+    let mut result = text.to_string();
+    for &(open, close) in pairs {
+        if let Some(close_pos) = result.find(close)
+            && !result[..close_pos].contains(open)
+        {
+            result = result[close_pos + close.len()..].to_string();
+        }
+    }
     for &(open, close) in pairs {
         let mut new_result = String::with_capacity(result.len());
         let mut remaining = result.as_str();
@@ -402,6 +402,25 @@ mod tests {
         let input = "<think>think block</think><|channel>thought\nchannel block<channel|>final";
         let result = strip_thinking(input);
         assert_eq!(result, "final");
+    }
+
+    #[test]
+    fn strip_thinking_primed_qwen_close_only() {
+        // Prompt-primed `<think>\n`: the model output carries only the closing
+        // `</think>` (no opening `<think>`), so the close-only block must be
+        // stripped the same way the primed Gemma 4 `<channel|>` case is. This
+        // matches the responses/anthropic split and chat's streaming filter.
+        let input = "reasoning text</think>\n\nHello!";
+        let result = strip_thinking(input);
+        assert_eq!(result, "\n\nHello!");
+    }
+
+    #[test]
+    fn clean_structural_tokens_primed_qwen_close_only() {
+        // The full non-streaming content path: a primed `<think>` close-only
+        // output yields the clean answer, not the leaked reasoning + marker.
+        let cleaned = clean_structural_tokens("reasoning text</think>\n\nHello!");
+        assert_eq!(cleaned, "Hello!");
     }
 
     // -- Gemma 4 full-path parse tests --
