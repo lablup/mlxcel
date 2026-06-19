@@ -1167,6 +1167,114 @@ fn turbo4_dequant_sdpa_matches_full_dequant_attention() {
 }
 
 // ===========================================================================
+// Asymmetric Turbo4Asym dequant-first SDPA (#367)
+// ===========================================================================
+
+/// The new default `Turbo4Asym` decode route (dequant-first native SDPA) must
+/// match the exact full-dequant + native SDPA reference within FP16 round-off.
+///
+/// The reference is the same `update_and_fetch` (which dequantizes the packed
+/// 4-bit V to FP16) followed by native `attention` pair that `int8` decode and
+/// the fallback `else` branch use — i.e. the *exact* attention. This is NOT a
+/// parity check against the old sparse-V path: sparse-V is a lossy
+/// approximation (it skips low-attention V positions), so the new path is
+/// expected to differ from, and be more accurate than, sparse-V. We assert the
+/// new path equals the exact reference.
+///
+/// The grouped-query shape (4 query heads over 2 KV heads, `n_rep = 2`)
+/// exercises the GQA head broadcast inside native SDPA.
+#[test]
+fn turbo4_asym_dequant_sdpa_matches_full_dequant_attention() {
+    let head_dim = 64;
+    let n_kv_heads = 2; // GQA: 2 KV heads broadcast to 4 query heads (n_rep = 2).
+    let n_q_heads = 4;
+    let prefill_len = 8;
+    let total_steps = 16;
+    let scale = 1.0 / (head_dim as f32).sqrt();
+
+    // cache_new drives the new dequant-first SDPA route; cache_ref builds the
+    // exact reference via update_and_fetch + attention; cache_sparse drives the
+    // legacy sparse-V route purely to confirm the cache state (offset / packing)
+    // is unchanged by the attention-compute choice.
+    let mut cache_new = KVCache::new_with_mode(KVCacheMode::Turbo4Asym);
+    let mut cache_ref = KVCache::new_with_mode(KVCacheMode::Turbo4Asym);
+    let mut cache_sparse = KVCache::new_with_mode(KVCacheMode::Turbo4Asym);
+
+    // Identical prefill into all three caches.
+    let k_pre = synth_kv_tensor(1, n_kv_heads, prefill_len, head_dim, 41);
+    let v_pre = synth_kv_tensor(1, n_kv_heads, prefill_len, head_dim, 42);
+    let k_pre_r = ffi::copy(&k_pre);
+    let v_pre_r = ffi::copy(&v_pre);
+    let k_pre_s = ffi::copy(&k_pre);
+    let v_pre_s = ffi::copy(&v_pre);
+    let _ = cache_new.update_and_fetch(k_pre, v_pre);
+    let _ = cache_ref.update_and_fetch(k_pre_r, v_pre_r);
+    let _ = cache_sparse.update_and_fetch(k_pre_s, v_pre_s);
+
+    let mut max_rms = 0.0_f32;
+    for step in 0..total_steps {
+        let k_a = synth_kv_tensor(1, n_kv_heads, 1, head_dim, 30_000 + step as u32);
+        let v_a = synth_kv_tensor(1, n_kv_heads, 1, head_dim, 31_000 + step as u32);
+        let k_r = ffi::copy(&k_a);
+        let v_r = ffi::copy(&v_a);
+        let k_s = ffi::copy(&k_a);
+        let v_s = ffi::copy(&v_a);
+        let q = synth_kv_tensor(1, n_q_heads, 1, head_dim, 32_000 + step as u32);
+
+        // New default path: dequantize V to FP16, native SDPA with FP16 K.
+        let out_new =
+            cache_new.update_and_turbo4_asym_dequant_sdpa_attention(&q, k_a, v_a, scale, None);
+        // Exact reference: update_and_fetch dequantizes V; native SDPA.
+        let out_ref = turbo4_reference_attention(&mut cache_ref, &q, k_r, v_r, scale);
+        // Legacy sparse-V path: output discarded; only its state is compared.
+        let _ = cache_sparse
+            .update_and_sparse_v_attention(&q, k_s, v_s, scale, None)
+            .expect("sparse-V should be available for Turbo4Asym");
+
+        // Cache state is unchanged across all three routes: each advances the
+        // offset solely through the shared `KVCache::update`, so the packed V
+        // buffers and visible length are written identically; only the attention
+        // computation differs.
+        assert_eq!(
+            cache_new.seq_len(),
+            cache_ref.seq_len(),
+            "step {step}: offset diverged between dequant-SDPA and exact reference"
+        );
+        assert_eq!(
+            cache_new.seq_len(),
+            cache_sparse.seq_len(),
+            "step {step}: offset diverged between dequant-SDPA and sparse-V"
+        );
+
+        let flat_new = flatten_fp32(&out_new);
+        let flat_ref = flatten_fp32(&out_ref);
+        assert_eq!(
+            flat_new.len(),
+            flat_ref.len(),
+            "step {step}: shape mismatch"
+        );
+        let mut sum_sq = 0.0_f64;
+        for (x, y) in flat_new.iter().zip(flat_ref.iter()) {
+            let d = (x - y) as f64;
+            sum_sq += d * d;
+        }
+        let rms = (sum_sq / flat_new.len() as f64).sqrt() as f32;
+        if rms > max_rms {
+            max_rms = rms;
+        }
+        assert!(
+            rms < 5e-3,
+            "step {step}: Turbo4Asym dequant-SDPA vs full-dequant RMS {rms:.4e} exceeds 5e-3"
+        );
+    }
+
+    eprintln!(
+        "turbo4_asym_dequant_sdpa_matches_full_dequant_attention: max RMS over {total_steps} \
+         steps = {max_rms:.4e}"
+    );
+}
+
+// ===========================================================================
 // Turbo3Asym — 3-bit V-side PolarQuant
 // ===========================================================================
 

@@ -3156,6 +3156,96 @@ impl KVCache {
         ))
     }
 
+    /// Returns `true` iff this cache can route `Turbo4Asym` decode through the
+    /// dequant-first native SDPA path.
+    ///
+    /// `Turbo4Asym` keeps K in FP16 and packs V into 4-bit PolarQuant indices.
+    /// Unlike the sparse-V weighted-sum path
+    /// ([`Self::update_and_sparse_v_attention`]), this route dequantizes the
+    /// full visible V to FP16 and runs native MLX SDPA with the FP16 K — exact
+    /// (no per-token attention-weight skipping) and far faster, mirroring how
+    /// `int8` and symmetric `Turbo4` decode.
+    ///
+    /// Used by: per-model attention call sites (Llama 3 / Qwen 2 / Qwen 3
+    /// family) when `mode == KVCacheMode::Turbo4Asym` and
+    /// [`turbo::sparse_v::turbo4_asym_dequant_sdpa_enabled`] is true.
+    pub fn turbo4_asym_dequant_sdpa_available(&self) -> bool {
+        self.mode == KVCacheMode::Turbo4Asym
+    }
+
+    /// Combined update + `Turbo4Asym` dequant-first native SDPA dispatch.
+    ///
+    /// This is the asymmetric analogue of
+    /// [`Self::update_and_turbo4_dequant_sdpa_attention`]: only the V side is
+    /// packed, so K is sliced from the FP16 `keys` buffer as-is and only V is
+    /// transiently dequantized (via the same
+    /// [`turbo::quant::dequantize_v_turbo4`] the `update_and_fetch` fetch path
+    /// uses). The persistent cache state stays packed; the FP16 V is a transient
+    /// SDPA workspace.
+    ///
+    /// The cache-state mutation is identical to the sparse-V path — both call
+    /// [`Self::update`] and nothing else writes state — so swapping between the
+    /// two routes is purely an attention-compute choice and leaves the packed V
+    /// buffers and `offset` unchanged. The output differs from sparse-V because
+    /// sparse-V is a lossy approximation (it skips low-attention V positions)
+    /// whereas this path is the exact full-dequant attention.
+    ///
+    /// Native MLX SDPA handles the grouped-query (GQA) head broadcast and the
+    /// optional additive mask internally, so the FP16 K/V are passed with their
+    /// stored `n_kv_heads` and the standard causal/window mask the caller
+    /// supplies.
+    ///
+    /// Used by: model attention call sites when `mode == KVCacheMode::Turbo4Asym`
+    /// and [`turbo::sparse_v::turbo4_asym_dequant_sdpa_enabled`] is true.
+    pub fn update_and_turbo4_asym_dequant_sdpa_attention(
+        &mut self,
+        q: &MlxArray,
+        new_keys: UniquePtr<MlxArray>,
+        new_values: UniquePtr<MlxArray>,
+        scale: f32,
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        assert!(
+            self.turbo4_asym_dequant_sdpa_available(),
+            "update_and_turbo4_asym_dequant_sdpa_attention called on a cache that is not in \
+             Turbo4Asym mode (mode={:?})",
+            self.mode
+        );
+        // Fill the packed buffers; this also advances `self.offset`. Identical
+        // to the sparse-V path's state mutation.
+        self.update(new_keys, new_values);
+
+        // K stays FP16 in `self.keys` and the visible token range is contiguous
+        // (`0..self.offset`); slice it directly. V is reconstructed from the
+        // packed 4-bit indices + per-token norms via the exact dequant the
+        // `update_and_fetch` Turbo4Asym arm uses.
+        let k = self.keys.as_ref().expect("keys must exist for Turbo4Asym");
+        let vp = self
+            .v_packed
+            .as_ref()
+            .expect("v_packed must exist for Turbo4Asym");
+        let vn = self
+            .v_norms
+            .as_ref()
+            .expect("v_norms must exist for Turbo4Asym");
+        let params = self
+            .turbo_params
+            .as_ref()
+            .expect("turbo_params must be initialised after first update_turbo4_asym");
+
+        let ks = ffi::array_shape(k);
+        let vps = ffi::array_shape(vp);
+        let vns = ffi::array_shape(vn);
+
+        let k_slice = ffi::slice(k, &[0, 0, 0, 0], &[ks[0], ks[1], self.offset, ks[3]]);
+        let vp_slice = ffi::slice(vp, &[0, 0, 0, 0], &[vps[0], vps[1], self.offset, vps[3]]);
+        let vn_slice = ffi::slice(vn, &[0, 0, 0, 0], &[vns[0], vns[1], self.offset, 1]);
+
+        let v_dequantized = turbo::quant::dequantize_v_turbo4(&vp_slice, &vn_slice, params);
+
+        crate::layers::attention(q, &k_slice, &v_dequantized, scale, mask, 0.0, 0)
+    }
+
     /// Returns `true` iff this cache can route symmetric `Turbo4` through the
     /// Swift-LM-style dequant-first SDPA path.
     pub fn turbo4_dequant_sdpa_available(&self) -> bool {

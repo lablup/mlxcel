@@ -201,6 +201,21 @@ pub const TURBO4_DEQUANT_SDPA_ENV_VAR: &str = "MLXCEL_TURBO4_DEQUANT_SDPA";
 
 static TURBO4_DEQUANT_SDPA_ENABLED: OnceLock<bool> = OnceLock::new();
 
+/// Environment variable controlling the dequant-first native SDPA strategy for
+/// asymmetric `KVCacheMode::Turbo4Asym` (FP16 K + 4-bit packed V).
+///
+/// Default: **on**. The V side is transiently dequantized to FP16 and fed,
+/// together with the already-FP16 K side, to native MLX SDPA — the same tensor
+/// shape the `int8`, symmetric `Turbo4`, and `Turbo4Delegated` decode routes
+/// use. This is both exact (no per-token attention-weight skipping) and several
+/// times faster than the sparse-V weighted-sum path. Set this to `0`, `false`,
+/// `off`, or `no` to fall back to the lossy sparse-V approximation
+/// (`KVCache::update_and_sparse_v_attention`) for A/B comparison or as a
+/// fallback.
+pub const TURBO4_ASYM_DEQUANT_SDPA_ENV_VAR: &str = "MLXCEL_TURBO4_ASYM_DEQUANT_SDPA";
+
+static TURBO4_ASYM_DEQUANT_SDPA_ENABLED: OnceLock<bool> = OnceLock::new();
+
 fn parse_env_default_on(var_name: &str) -> bool {
     match std::env::var(var_name) {
         Ok(s) => !matches!(
@@ -256,6 +271,19 @@ pub fn turbo4_delegated_dequant_sdpa_enabled() -> bool {
 /// V basis.
 pub fn turbo4_dequant_sdpa_enabled() -> bool {
     *TURBO4_DEQUANT_SDPA_ENABLED.get_or_init(|| parse_env_default_on(TURBO4_DEQUANT_SDPA_ENV_VAR))
+}
+
+/// Returns `true` iff asymmetric `Turbo4Asym` decode should use dequant-first
+/// native SDPA instead of the lossy sparse-V weighted-sum path.
+///
+/// `Turbo4Asym` keeps K in FP16 and packs V into 4-bit PolarQuant indices. This
+/// path transiently dequantizes V to FP16 and runs native SDPA with the FP16 K,
+/// matching how `int8` and symmetric `Turbo4` decode. It is default-on; set
+/// [`TURBO4_ASYM_DEQUANT_SDPA_ENV_VAR`] to a falsy value to fall back to the
+/// sparse-V approximation for A/B comparison.
+pub fn turbo4_asym_dequant_sdpa_enabled() -> bool {
+    *TURBO4_ASYM_DEQUANT_SDPA_ENABLED
+        .get_or_init(|| parse_env_default_on(TURBO4_ASYM_DEQUANT_SDPA_ENV_VAR))
 }
 
 /// Returns `true` iff model attention call sites should route

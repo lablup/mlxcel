@@ -69,6 +69,7 @@ Environment variables:
 | `MLXCEL_KV_BOUNDARY_V_LAYERS` | Boundary-V layer count when the CLI flag is not set. |
 | `MLXCEL_SPARSE_V_THRESHOLD` | Sparse-V threshold; `0` disables sparse-V behavior. |
 | `MLXCEL_SPARSE_V_KERNEL` | Set to a falsy value to disable custom sparse/dequant Metal kernels where they are used. |
+| `MLXCEL_TURBO4_ASYM_DEQUANT_SDPA` | Falsy value disables the default dequant-first SDPA path for `Turbo4Asym`, falling back to the sparse-V approximation. |
 | `MLXCEL_TURBO4_DELEGATED_DEQUANT_SDPA` | Falsy value disables the default dequant-first SDPA path for delegated mode. |
 | `MLXCEL_TURBO4_DELEGATED_FUSED` | Truthy value opts into an older fused delegated-kernel route for comparison. |
 | `MLXCEL_TURBO4_DELEGATED_FP16_FAST_PATH` | Truthy value keeps an FP16 V working set for delegated-mode speed experiments. |

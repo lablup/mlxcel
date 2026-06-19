@@ -134,6 +134,7 @@ variables below are useful for service-level defaults and A/B experiments. See
 | `MLXCEL_SPARSE_V_THRESHOLD` | non-negative float | `1e-6` | Sparse-V alive threshold. `0` disables sparse-V; invalid values warn and use the default. |
 | `MLXCEL_SPARSE_V_KERNEL` | falsy disables | enabled on macOS | Allows the fused Sparse-V/dequant Metal kernels. Set `0`, `false`, `off`, or `no` to force graph fallback. |
 | `MLXCEL_TURBO4_DEQUANT_SDPA` | falsy disables | on | Controls the dequant-first SDPA path for symmetric `Turbo4`. |
+| `MLXCEL_TURBO4_ASYM_DEQUANT_SDPA` | falsy disables | on | Controls the dequant-first SDPA path for asymmetric `Turbo4Asym` (FP16 K + 4-bit V). Falsy values fall back to the lossy sparse-V approximation. |
 | `MLXCEL_TURBO4_DELEGATED_DEQUANT_SDPA` | falsy disables | on | Controls the default dequant-first SDPA path for `Turbo4Delegated`. |
 | `MLXCEL_TURBO4_DELEGATED_FUSED` | truthy enables | off | **Advanced.** Enables the older custom fused delegated-kernel route, mainly for comparison when dequant-first SDPA is disabled. |
 | `MLXCEL_TURBO4_DELEGATED_FP16_FAST_PATH` | truthy enables | off | **Advanced.** Keeps a unified FP16 V working set in delegated mode for speed experiments while maintaining packed sidecars. |

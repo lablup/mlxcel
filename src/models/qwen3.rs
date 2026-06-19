@@ -158,26 +158,35 @@ impl Attention {
             (q, k, v)
         };
 
-        // Try the fused sparse-V SDPA path for the decode case
-        // (l == 1) when the cache is in Turbo4Asym mode
-        // and `MLXCEL_SPARSE_V_THRESHOLD > 0`. Skipped on prefill (l > 1)
-        // because the per-token skip only wins at long context — and
-        // prefill builds the cache from scratch, so there's nothing to
-        // skip yet.
-        // Turbo4 compressed attention mirrors mlx-swift-lm's current decode
-        // policy: prefer dequant-first native SDPA by default. Delegated mode
-        // keeps the custom packed-V Metal kernels available as a forced
-        // fallback.
-        // The gate is parsed once and cached in a `OnceLock<bool>` — see
-        // `mlxcel_core::cache::turbo::sparse_v::turbo4_delegated_compressed_attention_enabled`.
+        // Decode-case (l == 1) attention dispatch for the Turbo quantized cache
+        // modes. Prefill (l > 1) builds the cache from scratch and falls through
+        // to the standard masked/causal paths below.
+        //
+        // Turbo4Asym (FP16 K + 4-bit V) decodes via dequant-first native SDPA by
+        // default: V is dequantized to FP16 transiently and fed with the FP16 K
+        // to native SDPA. This is exact and ~3-6x faster than the lossy sparse-V
+        // weighted-sum path, which stays reachable behind
+        // `MLXCEL_TURBO4_ASYM_DEQUANT_SDPA=0` for A/B and fallback. Symmetric
+        // Turbo4 and Turbo4Delegated mirror mlx-swift-lm's dequant-first policy.
+        // Each gate is parsed once and cached in a `OnceLock<bool>`.
+        let use_turbo4_asym_dequant_sdpa =
+            mlxcel_core::cache::turbo::sparse_v::turbo4_asym_dequant_sdpa_enabled();
         let use_delegated_compressed =
             mlxcel_core::cache::turbo::sparse_v::turbo4_delegated_compressed_attention_enabled();
         let use_turbo4_dequant_sdpa =
             mlxcel_core::cache::turbo::sparse_v::turbo4_dequant_sdpa_enabled();
-        let attn_out = if l == 1 && cache.sparse_v_available() {
-            // The helper consumes k/v, fills the packed cache, and runs
-            // the fused kernel (or graph fallback). When `sparse_v_available`
-            // is true the helper always returns Some.
+        let attn_out = if l == 1
+            && use_turbo4_asym_dequant_sdpa
+            && cache.turbo4_asym_dequant_sdpa_available()
+        {
+            // Default Turbo4Asym decode: dequantize the 4-bit V to FP16 and run
+            // native SDPA with the FP16 K. Exact full-dequant attention.
+            cache.update_and_turbo4_asym_dequant_sdpa_attention(&q, k, v, self.scale, mask)
+        } else if l == 1 && cache.sparse_v_available() {
+            // Sparse-V fallback: only taken when the dequant-SDPA gate above is
+            // disabled (`MLXCEL_TURBO4_ASYM_DEQUANT_SDPA=0`). The helper consumes
+            // k/v, fills the packed cache, and runs the fused kernel (or graph
+            // fallback). When `sparse_v_available` is true it always returns Some.
             cache
                 .update_and_sparse_v_attention(&q, k, v, self.scale, mask)
                 .expect("update_and_sparse_v_attention returned None despite sparse_v_available")
