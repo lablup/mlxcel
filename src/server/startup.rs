@@ -1805,10 +1805,13 @@ pub async fn start_server(mut startup: ServerStartupConfig) -> Result<()> {
 
     // Speech-to-text wiring: when the loaded checkpoint is a Whisper-style ASR
     // model, populate the audio slot so `/v1/audio/transcriptions` and
-    // `/v1/audio/translations` are served. The chat ModelProvider load above is
-    // a no-op for this checkpoint (the worker logs and returns), matching the
-    // single-model "speech-to-text only" deployment; serving chat and STT
-    // simultaneously is out of scope.
+    // `/v1/audio/translations` are served. `WhisperSttProvider::load` hands the
+    // checkpoint path to its own dedicated worker thread, which loads the
+    // weights and evaluates every transcription on that one stream-initialized
+    // thread (MLX work is thread-affine); the load happens off this startup
+    // thread. The chat ModelProvider load above is a no-op for this checkpoint
+    // (the worker logs and returns), matching the single-model "speech-to-text
+    // only" deployment; serving chat and STT simultaneously is out of scope.
     let audio_model: Option<Arc<dyn crate::server::audio_model::AudioModelProvider>> =
         match crate::models::get_model_type(&startup.model_path) {
             Ok(crate::models::ModelType::Whisper) => {

@@ -18,42 +18,45 @@
 //! encoder-decoder model and exposes the result through the transport-agnostic
 //! audio-model seam consumed by `POST /v1/audio/transcriptions` and
 //! `POST /v1/audio/translations`.
+//!
+//! The Whisper model is loaded and every transcription is evaluated on one
+//! dedicated thread owned by an [`AudioWorker`]. MLX work is thread-affine, so
+//! loading the weights and evaluating the graph must happen on the same
+//! stream-initialized thread (see [`crate::server::audio_worker`]). This
+//! provider therefore holds no MLX handles itself; it only forwards requests
+//! over the worker's channel, which makes it trivially `Send + Sync`.
 
 use std::path::Path;
-use std::sync::Mutex;
 
 use crate::audio::load_wav_from_bytes;
 use crate::audio::whisper_mel;
 use crate::models::WhisperModel;
 use crate::server::audio_model::{
-    AudioModelError, AudioModelKind, AudioModelProvider, AudioTranscribeInput,
-    AudioTranscribeOutput,
+    AudioModelError, AudioModelKind, AudioModelProvider, AudioSynthesizeInput,
+    AudioSynthesizeOutput, AudioTranscribeInput, AudioTranscribeOutput,
 };
+use crate::server::audio_worker::{AudioEngine, AudioWorker};
 
-/// Speech-to-text provider holding a loaded Whisper model.
-///
-/// Each request is serialized through the `Mutex`, so the underlying MLX arrays
-/// are only ever touched by one thread at a time even though the route layer
-/// dispatches transcription on a blocking thread pool.
+/// Speech-to-text provider backed by a Whisper model on a dedicated worker
+/// thread.
 pub struct WhisperSttProvider {
-    model: Mutex<WhisperModel>,
+    worker: AudioWorker,
 }
 
-// SAFETY: `WhisperModel` owns MLX array handles (cxx `UniquePtr<MlxArray>`),
-// which are not automatically `Send`/`Sync`. Every access goes through the
-// `Mutex` above, so a handle is never dereferenced from more than one thread
-// concurrently. This mirrors the established holder pattern used by
-// `crate::server::prompt_cache::entry::ModelSnapshotHolder`.
-unsafe impl Send for WhisperSttProvider {}
-unsafe impl Sync for WhisperSttProvider {}
-
 impl WhisperSttProvider {
-    /// Load a Whisper checkpoint directory and build the provider.
+    /// Spawn the Whisper worker thread and load the checkpoint on it.
+    ///
+    /// The thread loads `config.json`, the safetensors weights, and the
+    /// tokenizer, then stays alive to serve transcription requests. Returns
+    /// `Err` if the worker thread cannot start or the checkpoint fails to load,
+    /// letting the server boot with the audio slot empty instead of aborting.
     pub fn load(model_path: &Path) -> anyhow::Result<Self> {
-        let model = WhisperModel::load(model_path)?;
-        Ok(Self {
-            model: Mutex::new(model),
-        })
+        let model_path = model_path.to_path_buf();
+        let worker = AudioWorker::spawn("whisper-stt", move || {
+            let model = WhisperModel::load(&model_path)?;
+            Ok(WhisperEngine { model })
+        })?;
+        Ok(Self { worker })
     }
 }
 
@@ -66,6 +69,35 @@ impl AudioModelProvider for WhisperSttProvider {
         &self,
         input: AudioTranscribeInput,
     ) -> Result<AudioTranscribeOutput, AudioModelError> {
+        self.worker.transcribe(input)
+    }
+
+    /// Whisper does not synthesize speech. The call still routes through the
+    /// worker so both audio directions share the one MLX-owning thread, and the
+    /// engine reports the unsupported direction. Routes gate on
+    /// [`supports`](Self::supports) first, so this is not reached in practice.
+    fn synthesize(
+        &self,
+        input: AudioSynthesizeInput,
+    ) -> Result<AudioSynthesizeOutput, AudioModelError> {
+        self.worker.synthesize(input)
+    }
+}
+
+/// Whisper [`AudioEngine`] confined to the worker thread that loaded it.
+///
+/// Holds the `WhisperModel` (and its MLX array handles) directly: it is only
+/// ever constructed and called on the single worker thread, so no `Mutex` or
+/// `unsafe impl Send` is needed.
+struct WhisperEngine {
+    model: WhisperModel,
+}
+
+impl AudioEngine for WhisperEngine {
+    fn transcribe(
+        &mut self,
+        input: AudioTranscribeInput,
+    ) -> Result<AudioTranscribeOutput, AudioModelError> {
         let (samples, sample_rate) = load_wav_from_bytes(&input.audio)
             .map_err(|e| AudioModelError::Inference(format!("WAV decode failed: {e}")))?;
         let audio_16k = whisper_mel::resample_to_16k(&samples, sample_rate);
@@ -75,11 +107,8 @@ impl AudioModelProvider for WhisperSttProvider {
         // matches the lowercase Whisper language tags.
         let hint = input.language.as_deref().map(str::to_ascii_lowercase);
 
-        let model = self
+        let (text, used_language) = self
             .model
-            .lock()
-            .map_err(|_| AudioModelError::Inference("speech-to-text model lock poisoned".into()))?;
-        let (text, used_language) = model
             .transcribe(&audio_16k, hint.as_deref(), input.translate)
             .map_err(|e| AudioModelError::Inference(format!("transcription failed: {e}")))?;
 

@@ -39,8 +39,6 @@
 //! deployments where construction and execution can happen on
 //! different threads.
 
-use std::cell::RefCell;
-
 use crate::ffi;
 use crate::ffi::{MlxStream, MlxThreadLocalStream};
 use crate::UniquePtr;
@@ -56,7 +54,7 @@ use crate::UniquePtr;
 /// to bind its dedicated per-thread stream as the default for
 /// subsequent MLX dispatches on that thread.
 ///
-/// Used by: CxxGenerator, SpeculativeGenerator, BatchScheduler
+/// Used by: CxxGenerator, SpeculativeGenerator, BatchScheduler, AudioWorker
 pub fn new_thread_local_generation_stream() -> Option<UniquePtr<MlxThreadLocalStream>> {
     if ffi::is_gpu_available() {
         Some(ffi::new_thread_local_stream_gpu())
@@ -78,7 +76,7 @@ pub fn new_thread_local_generation_stream() -> Option<UniquePtr<MlxThreadLocalSt
 ///
 /// `None` is a safe no-op for CPU-only builds.
 ///
-/// Used by: CxxGenerator, SpeculativeGenerator, BatchScheduler
+/// Used by: CxxGenerator, SpeculativeGenerator, BatchScheduler, AudioWorker
 pub fn install_thread_local_default_stream(tls: Option<&UniquePtr<MlxThreadLocalStream>>) {
     if let Some(tls) = tls {
         let stream = ffi::stream_from_thread_local_stream(tls);
@@ -98,69 +96,14 @@ pub fn install_thread_local_default_stream(tls: Option<&UniquePtr<MlxThreadLocal
 /// `None` is a safe no-op (matches the CPU-only build path of
 /// [`new_thread_local_generation_stream`]).
 ///
-/// Used by: tests; runtime callers currently rely on the default
-/// stream being installed by [`install_thread_local_default_stream`]
-/// and on per-op `eval` calls for synchronization.
+/// Used by: AudioWorker (after each request); tests. Generation-loop callers
+/// rely on the default stream installed by
+/// [`install_thread_local_default_stream`] and on per-op `eval` for
+/// synchronization.
 pub fn synchronize_thread_local_stream(tls: Option<&UniquePtr<MlxThreadLocalStream>>) {
     if let Some(tls) = tls {
         ffi::synchronize_thread_local_stream(tls);
     }
-}
-
-thread_local! {
-    /// Lazily-created MLX default stream for threads that run MLX work outside
-    /// the dedicated generation worker loop.
-    ///
-    /// Created on first use per thread and reused on every later call, so a
-    /// reused thread that services many requests allocates exactly one MLX
-    /// stream rather than one per call. `None` on CPU-only builds.
-    static OFF_WORKER_DEFAULT_STREAM: RefCell<Option<UniquePtr<MlxThreadLocalStream>>> =
-        const { RefCell::new(None) };
-}
-
-/// Run `f` with the calling thread's MLX default stream installed, then
-/// synchronize that stream before returning `f`'s result.
-///
-/// MLX work is thread-affine: a thread must have a default stream installed
-/// before it constructs or evaluates any array, or MLX throws
-/// `There is no Stream(...)`, which, uncaught across the cxx FFI boundary,
-/// aborts the process. The dedicated generation worker threads install their
-/// stream once at the top of their loop via
-/// [`install_thread_local_default_stream`]. Work dispatched onto an arbitrary,
-/// reused thread (for example a `tokio::task::spawn_blocking` pool thread) has
-/// no such stream and must install one itself before touching MLX.
-///
-/// This helper makes that correct on a reused pool thread:
-///
-/// * the per-thread stream is created once and cached in a thread-local, so no
-///   stream is leaked per call;
-/// * it is re-installed as the default on every call, so an unrelated task that
-///   changed the thread's default stream in between cannot leave a stale
-///   binding; and
-/// * the stream is synchronized before the result is returned, so every
-///   dispatch issued inside `f` has completed and dispatch and synchronization
-///   stay paired on the same per-thread stream.
-///
-/// On CPU-only builds the cached handle is `None` and the call is a transparent
-/// pass-through (matching the no-op behavior of the helpers above).
-///
-/// Used by: server audio routes (speech-to-text / text-to-speech dispatch).
-pub fn with_thread_local_default_stream<T>(f: impl FnOnce() -> T) -> T {
-    OFF_WORKER_DEFAULT_STREAM.with(|cell| {
-        {
-            let mut slot = cell.borrow_mut();
-            if slot.is_none() {
-                *slot = new_thread_local_generation_stream();
-            }
-            install_thread_local_default_stream(slot.as_ref());
-        }
-        let result = f();
-        {
-            let slot = cell.borrow();
-            synchronize_thread_local_stream(slot.as_ref());
-        }
-        result
-    })
 }
 
 /// RAII guard that restores the calling thread's MLX default stream on drop.
@@ -328,26 +271,5 @@ mod tests {
         // Sanity: MLX is still usable.
         let arr = ffi::zeros(&[1, 1], crate::dtype::FLOAT32);
         ffi::eval(&arr);
-    }
-
-    /// `with_thread_local_default_stream` installs a default stream, runs the
-    /// closure (which dispatches and evaluates a real op), and synchronizes,
-    /// without panicking. A second call on the same thread must reuse the
-    /// cached per-thread handle and still succeed, proving the helper is
-    /// re-entrant across calls (the `spawn_blocking` reuse pattern).
-    ///
-    /// A [`DefaultStreamGuard`] restores the thread's previous default stream so
-    /// the mutation does not leak into other tests on this thread.
-    #[test]
-    fn with_thread_local_default_stream_runs_and_reuses() {
-        let _guard = DefaultStreamGuard::capture();
-        for _ in 0..2 {
-            let value = with_thread_local_default_stream(|| {
-                let arr = ffi::zeros(&[1, 1], crate::dtype::FLOAT32);
-                ffi::eval(&arr);
-                ffi::item_f32(&arr)
-            });
-            assert_eq!(value, 0.0);
-        }
     }
 }

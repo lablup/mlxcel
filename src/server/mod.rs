@@ -17,6 +17,7 @@
 pub mod anthropic_translator;
 pub mod app;
 pub mod audio_model;
+pub(crate) mod audio_worker;
 pub mod batch;
 mod chat_request;
 pub mod chat_template;
