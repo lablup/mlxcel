@@ -71,6 +71,13 @@ pub fn get_model_type(model_path: &Path) -> Result<ModelType> {
     let config_str = sanitize_config_json(&config_str);
     let v: serde_json::Value = serde_json::from_str(&config_str)?;
 
+    // Kokoro TTS checkpoints carry no top-level `model_type`, so detect them by
+    // architecture signal (the `istftnet` config block or the canonical weight
+    // filename) before the `model_type`-based dispatch below would error.
+    if super::kokoro::is_kokoro_checkpoint(model_path, &v) {
+        return Ok(ModelType::Kokoro);
+    }
+
     let model_type_raw = v["model_type"]
         .as_str()
         .ok_or_else(|| anyhow::anyhow!("model_type not found"))?;

@@ -8,10 +8,10 @@ runtime source of truth is the code, not this prose page:
 - loading policy: `src/model_metadata.rs`
 - VLM loading routes: `src/loading/vlm*.rs`
 
-As of v0.1.4, `ModelType` contains 94 variants: 71 text/non-VLM variants,
-22 VLM variants, and a speech-to-text encoder-decoder (Whisper). These are
-architecture/runtime variants, not a guarantee that every checkpoint under a
-marketing family name is supported.
+`ModelType` spans text and non-VLM language models, VLM variants, a
+speech-to-text encoder-decoder (Whisper), and a text-to-speech model (Kokoro).
+These are architecture/runtime variants, not a guarantee that every checkpoint
+under a marketing family name is supported.
 
 ## Text and hybrid model families
 
@@ -115,6 +115,14 @@ mlxcel loads Whisper-style encoder-decoder ASR checkpoints (`model_type: "whispe
 When the server's loaded checkpoint is detected as Whisper, the speech-to-text slot is populated and `POST /v1/audio/transcriptions` (transcribe in place) and `POST /v1/audio/translations` (translate to English) return the recognized text. Uploaded audio is decoded with the shared WAV reader, resampled to 16 kHz, and processed in consecutive 30-second windows. An explicit `language` hint is honored; otherwise the language is detected from the first decoder step. Token suppression follows the Whisper rules: `suppress_blank`, the non-speech symbol set, and `<|notimestamps|>`.
 
 This first port targets non-quantized (fp16/f32) checkpoints with greedy decoding, and the loader accepts both the native MLX and HuggingFace key layouts. Loading a Whisper checkpoint serves speech-to-text only; chat generation is not available in the same process. Beam search, word-level and segment timestamps, quantized checkpoints, and streaming transcription are follow-ups.
+
+## Text-to-speech (TTS)
+
+mlxcel loads the Kokoro-82M model (a StyleTTS2 phoneme-to-mel acoustic model with a built-in iSTFTNet vocoder) and serves it through `POST /v1/audio/speech`. The path is: text to phonemes (grapheme-to-phoneme front-end) to a PLBert text encoder, a duration predictor that expands per-token features to per-frame, F0 (pitch) and energy prosody, and an iSTFTNet decoder that produces a 24 kHz mono waveform directly via an inverse STFT (no separate neural codec).
+
+Detection works without a top-level `model_type`: the loader recognizes a Kokoro checkpoint by the `istftnet` config block or the `kokoro-v1_0.safetensors` weight filename, so `-m <kokoro-dir>` resolves to the TTS provider. The `voice` request field selects a pack from `voices/<name>.safetensors` (54 voices; default `af_heart`), validated against the available packs with a safe fallback. `speed` scales the predicted durations (larger is faster and shorter). `response_format` accepts `wav` today (returned via the shared WAV writer); other containers are a follow-up.
+
+The grapheme-to-phoneme front-end is a self-contained American-English phonemizer: text is normalized (lower-cased, integers spoken, common punctuation kept), each word is looked up in a bundled lexicon, and out-of-vocabulary words fall back to deterministic letter-to-sound rules. It emits the IPA symbols in Kokoro's vocab and needs no external binary or download. Non-English voices in the checkpoint still load and synthesize, but their phonemes come from the English front-end, so pronunciation quality is limited; per-language g2p (the analogue of upstream Kokoro's `misaki[xx]` packages) is future work. Like Whisper, the model loads and runs every synthesis on one dedicated MLX worker thread, so loading a Kokoro checkpoint serves text-to-speech only.
 
 ## Quantization formats
 

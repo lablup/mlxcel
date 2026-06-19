@@ -1827,6 +1827,19 @@ pub async fn start_server(mut startup: ServerStartupConfig) -> Result<()> {
                     }
                 }
             }
+            Ok(crate::models::ModelType::Kokoro) => {
+                tracing::info!(
+                    "Detected Kokoro text-to-speech checkpoint; loading audio model for \
+                     /v1/audio/speech"
+                );
+                match crate::server::kokoro_tts::KokoroTtsProvider::load(&startup.model_path) {
+                    Ok(provider) => Some(Arc::new(provider)),
+                    Err(err) => {
+                        tracing::error!("Failed to load Kokoro text-to-speech model: {err}");
+                        None
+                    }
+                }
+            }
             _ => None,
         };
 

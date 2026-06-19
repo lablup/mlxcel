@@ -27,6 +27,7 @@ mod config;
 pub mod conversation_store;
 mod cors;
 pub(crate) mod diffusion_worker;
+pub mod kokoro_tts;
 mod media;
 pub mod model_provider;
 pub mod prompt_cache;
