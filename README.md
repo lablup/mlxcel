@@ -142,7 +142,7 @@ cd mlxcel
 cargo build --release --features metal,accelerate
 ```
 
-Linux/CUDA builds use the `cuda` feature and require the CUDA toolkit plus the system libraries used by MLX. See [Installation](docs/installation.md) for the detailed prerequisite matrix.
+Linux/CUDA builds use the `cuda` feature and require the CUDA toolkit plus the system libraries used by MLX. A plain `cargo build --release` on Linux omits the `cuda` feature and produces a CPU-only binary that still runs but silently executes MLX on the CPU at a fraction of GPU throughput, so always pass `--features cuda` on an NVIDIA host. See [Installation](docs/installation.md) for the detailed prerequisite matrix.
 
 ## Performance
 

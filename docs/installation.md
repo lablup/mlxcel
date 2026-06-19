@@ -82,6 +82,12 @@ cd mlxcel
 cargo build --release --features cuda
 ```
 
+> **CPU-only build footgun.** A plain `cargo build --release` on Linux uses the
+> default features (no `cuda`) and produces a CPU-only binary. It still loads and
+> generates, but silently runs MLX on the host CPU at a fraction of GPU
+> throughput (single-digit tok/s on GB10 instead of hundreds), so the mistake is
+> easy to miss. Always pass `--features cuda` on an NVIDIA host.
+
 If CUDA is not installed under `/usr/local/cuda`, set `CUDA_HOME`:
 
 ```bash
