@@ -245,6 +245,19 @@ pub fn load_model(model_path: &Path) -> Result<(LoadedModel, MlxcelTokenizer)> {
     let model_path = resolve_model_dir(model_path);
     let model_path = model_path.as_path();
     let model_type = get_model_type(model_path)?;
+
+    // Whisper is an encoder-decoder ASR model, not a text generator. It is
+    // wired into the speech-to-text audio endpoints at server startup rather
+    // than the LanguageModel path, so fail clearly here instead of attempting
+    // a text-model load.
+    if model_type == ModelType::Whisper {
+        anyhow::bail!(
+            "Whisper is a speech-to-text model served through the /v1/audio/* \
+             endpoints, not a text-generation model. The mlxcel-server populates \
+             its speech-to-text slot from this checkpoint automatically."
+        );
+    }
+
     let path_str = model_path_str(model_path)?;
 
     let policy = if model_type == ModelType::Mistral3 {

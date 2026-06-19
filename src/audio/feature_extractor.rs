@@ -302,7 +302,10 @@ impl AudioFeatureExtractor {
 
 /// Compute magnitude of real-valued FFT using simple DFT.
 /// Returns `[num_freq_bins]` magnitudes.
-fn real_fft_magnitude(input: &[f64], num_bins: usize) -> Vec<f64> {
+///
+/// Shared with the Whisper log-mel front-end in [`super::whisper_mel`], which
+/// squares the result to obtain the power spectrum.
+pub(crate) fn real_fft_magnitude(input: &[f64], num_bins: usize) -> Vec<f64> {
     let n = input.len();
     let mut magnitudes = Vec::with_capacity(num_bins);
     for k in 0..num_bins {

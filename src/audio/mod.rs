@@ -32,6 +32,7 @@ pub mod encoder;
 pub mod feature_extractor;
 pub mod nemotron_h_nano_omni;
 pub mod wav_writer;
+pub mod whisper_mel;
 
 pub use config::AudioConfig;
 pub use encoder::AudioEncoder;

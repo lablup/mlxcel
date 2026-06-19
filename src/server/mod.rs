@@ -44,6 +44,7 @@ pub mod structured;
 pub mod thinking_budget;
 pub mod tool_calls;
 pub mod types;
+pub mod whisper_stt;
 
 pub use app::create_app;
 pub use audio_model::{

@@ -218,6 +218,8 @@ pub fn get_model_type(model_path: &Path) -> Result<ModelType> {
         "molmo" => Ok(ModelType::MolmoVLM),
         "molmo2" => Ok(ModelType::Molmo2VLM),
         "molmo_point" => Ok(ModelType::MolmoPointVLM),
+        // Speech-to-text (encoder-decoder ASR).
+        "whisper" => Ok(ModelType::Whisper),
         _ => Err(anyhow::anyhow!(
             "Unsupported model type: {}",
             model_type_raw

@@ -63,6 +63,31 @@ fn temp_path(name: &str) -> PathBuf {
 }
 
 #[test]
+fn whisper_model_type_is_detected() {
+    let model_dir = temp_path("whisper_asr");
+    fs::create_dir_all(&model_dir).unwrap();
+    fs::write(
+        model_dir.join("config.json"),
+        r#"{
+            "model_type": "whisper",
+            "num_mel_bins": 80,
+            "d_model": 384,
+            "encoder_attention_heads": 6,
+            "encoder_layers": 4,
+            "decoder_attention_heads": 6,
+            "decoder_layers": 4,
+            "vocab_size": 51865
+        }"#,
+    )
+    .unwrap();
+
+    let detected = super::detection::get_model_type(&model_dir).unwrap();
+    assert_eq!(detected, ModelType::Whisper);
+
+    fs::remove_dir_all(model_dir).unwrap();
+}
+
+#[test]
 fn gemma4_detection_stays_on_text_route_without_vision_weights() {
     let model_dir = temp_path("gemma4_text_route");
     fs::create_dir_all(&model_dir).unwrap();

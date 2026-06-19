@@ -113,6 +113,7 @@ pub mod solar_open;
 pub mod stablelm;
 pub mod starcoder2;
 pub mod step3p5;
+pub mod whisper;
 pub mod youtu_vl_lm;
 
 // Re-export model types
@@ -209,6 +210,7 @@ pub use solar_open::SolarOpenModel;
 pub use stablelm::StableLMModel;
 pub use starcoder2::StarCoder2Model;
 pub use step3p5::Step3p5Model;
+pub use whisper::WhisperModel;
 
 /// Supported model types
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -366,6 +368,9 @@ pub enum ModelType {
     // RNN models
     Rwkv7,
     RecurrentGemma,
+
+    // Speech-to-text (encoder-decoder ASR)
+    Whisper,
 }
 
 /// All `ModelType` variants, in declaration order. Used as the iteration
@@ -504,6 +509,8 @@ pub const ALL_MODEL_TYPES: &[ModelType] = &[
     // RNN models
     ModelType::Rwkv7,
     ModelType::RecurrentGemma,
+    // Speech-to-text
+    ModelType::Whisper,
 ];
 
 impl ModelType {
@@ -676,6 +683,9 @@ impl ModelType {
 
             // ----- RWKV -----
             ModelType::Rwkv7 => ("RWKV v7", "RWKV"),
+
+            // ----- Speech-to-text (ASR) -----
+            ModelType::Whisper => ("Whisper (encoder-decoder ASR)", "Speech-to-text"),
 
             // ----- Specialized / other small/text -----
             ModelType::StarCoder2 => ("StarCoder 2", "Specialized"),
@@ -866,6 +876,7 @@ mod metadata_tests {
             Step3p5,
             Rwkv7,
             RecurrentGemma,
+            Whisper,
         );
         for mt in variants {
             assert!(

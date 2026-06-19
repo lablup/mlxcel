@@ -8,9 +8,10 @@ runtime source of truth is the code, not this prose page:
 - loading policy: `src/model_metadata.rs`
 - VLM loading routes: `src/loading/vlm*.rs`
 
-As of v0.1.4, `ModelType` contains 93 variants: 71 text/non-VLM variants
-and 22 VLM variants. These are architecture/runtime variants, not a guarantee
-that every checkpoint under a marketing family name is supported.
+As of v0.1.4, `ModelType` contains 94 variants: 71 text/non-VLM variants,
+22 VLM variants, and a speech-to-text encoder-decoder (Whisper). These are
+architecture/runtime variants, not a guarantee that every checkpoint under a
+marketing family name is supported.
 
 ## Text and hybrid model families
 
@@ -106,6 +107,14 @@ Qwen-style `<think>` models. To turn thinking off, pass
 `chat_template_kwargs={"enable_thinking": false}` per request, or set the server
 default via `--chat-template-kwargs` or `LLAMA_ARG_CHAT_TEMPLATE_KWARGS`. A
 per-request value always wins over the server default.
+
+## Speech-to-text (ASR)
+
+mlxcel loads Whisper-style encoder-decoder ASR checkpoints (`model_type: "whisper"`) and serves them through the OpenAI audio endpoints. A convolutional audio encoder builds features from a 30-second log-mel window, and an autoregressive text decoder cross-attends to those features as it emits tokens, steered by the multilingual transcribe/translate task tokens.
+
+When the server's loaded checkpoint is detected as Whisper, the speech-to-text slot is populated and `POST /v1/audio/transcriptions` (transcribe in place) and `POST /v1/audio/translations` (translate to English) return the recognized text. Uploaded audio is decoded with the shared WAV reader, resampled to 16 kHz, and processed in consecutive 30-second windows. An explicit `language` hint is honored; otherwise the language is detected from the first decoder step. Token suppression follows the Whisper rules: `suppress_blank`, the non-speech symbol set, and `<|notimestamps|>`.
+
+This first port targets non-quantized (fp16/f32) checkpoints with greedy decoding, and the loader accepts both the native MLX and HuggingFace key layouts. Loading a Whisper checkpoint serves speech-to-text only; chat generation is not available in the same process. Beam search, word-level and segment timestamps, quantized checkpoints, and streaming transcription are follow-ups.
 
 ## Quantization formats
 

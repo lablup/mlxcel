@@ -251,6 +251,10 @@ fn fallback_architecture(model_type: ModelType) -> &'static str {
         // planner's supported-architecture validation rejects this string
         // before any TP load is attempted).
         ModelType::DiffusionGemma => "diffusion_gemma",
+        // Whisper is an ASR model served through the audio endpoints, never
+        // routed to tensor-parallel text inference; the loader rejects it
+        // earlier. Return a placeholder so the dispatch table stays total.
+        ModelType::Whisper => "whisper",
     }
 }
 
