@@ -27,6 +27,9 @@ const BYTES_PER_SAMPLE: u32 = 2;
 const BITS_PER_SAMPLE: u16 = 16;
 /// WAV `audio_format` tag for integer PCM.
 const WAV_FORMAT_PCM: u16 = 1;
+/// Largest PCM payload a 32-bit RIFF `data` length can describe. The 44-byte
+/// header is reserved so the total `RIFF` chunk size also fits in `u32`.
+const MAX_DATA_BYTES: u32 = u32::MAX - 44;
 
 /// Encode interleaved `f32` PCM samples as a canonical 16-bit little-endian
 /// RIFF WAV byte stream.
@@ -41,7 +44,14 @@ const WAV_FORMAT_PCM: u16 = 1;
 /// Used by: server/routes/audio.rs (text-to-speech binary response)
 #[must_use]
 pub fn encode_wav_pcm16(samples: &[f32], sample_rate: u32, channels: u16) -> Vec<u8> {
-    let data_len = (samples.len() as u32).saturating_mul(BYTES_PER_SAMPLE);
+    // A 32-bit RIFF `data` length caps a single WAV at roughly 4 GiB of PCM.
+    // Clamp the sample count to what that field can represent so the advertised
+    // length always matches the bytes actually written, even for pathological
+    // inputs. A larger payload cannot be expressed in a standard RIFF WAV, so
+    // truncating here keeps the output well-formed rather than corrupt.
+    let max_samples = (MAX_DATA_BYTES / BYTES_PER_SAMPLE) as usize;
+    let encoded = &samples[..samples.len().min(max_samples)];
+    let data_len = (encoded.len() as u32).saturating_mul(BYTES_PER_SAMPLE);
     let byte_rate = sample_rate
         .saturating_mul(channels as u32)
         .saturating_mul(BYTES_PER_SAMPLE);
@@ -67,10 +77,11 @@ pub fn encode_wav_pcm16(samples: &[f32], sample_rate: u32, channels: u16) -> Vec
     // data sub-chunk.
     out.extend_from_slice(b"data");
     out.extend_from_slice(&data_len.to_le_bytes());
-    for &sample in samples {
+    for &sample in encoded {
         // Mirror the reader's `i16 / 32768.0` decode: scale by 32768, then
         // clamp into the i16 range so a full-scale 1.0 saturates rather than
-        // wrapping to a negative value.
+        // wrapping to a negative value. NaN maps to 0 and infinities saturate
+        // because Rust's `f32 as i16` cast is saturating.
         let scaled = (sample * 32768.0).round();
         let clamped = scaled.clamp(i16::MIN as f32, i16::MAX as f32) as i16;
         out.extend_from_slice(&clamped.to_le_bytes());
@@ -141,6 +152,53 @@ mod tests {
             (decoded[1] + 1.0).abs() < 1.0e-4,
             "negative full scale diverged: {}",
             decoded[1]
+        );
+    }
+
+    #[test]
+    fn header_data_length_matches_payload() {
+        let bytes = encode_wav_pcm16(&[0.1_f32; 100], 16_000, 1);
+        let data_len = u32::from_le_bytes([bytes[40], bytes[41], bytes[42], bytes[43]]) as usize;
+        assert_eq!(data_len, 200, "data chunk advertises the PCM byte count");
+        assert_eq!(
+            bytes.len(),
+            44 + data_len,
+            "payload length matches the header"
+        );
+        let riff_len = u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]) as usize;
+        assert_eq!(riff_len, 36 + data_len, "RIFF size covers the body");
+    }
+
+    #[test]
+    fn pathological_floats_saturate_without_panicking() {
+        let bytes = encode_wav_pcm16(
+            &[f32::NAN, f32::INFINITY, f32::NEG_INFINITY, 5.0, -5.0],
+            8_000,
+            1,
+        );
+        let (decoded, _) = load_wav_from_bytes(&bytes).expect("pathological WAV must read back");
+        assert!(
+            decoded[0].abs() < 1.0e-4,
+            "NaN should encode to silence, got {}",
+            decoded[0]
+        );
+        assert!(
+            decoded[1] > 0.99,
+            "positive infinity should saturate high, got {}",
+            decoded[1]
+        );
+        assert!(
+            decoded[2] < -0.99,
+            "negative infinity should saturate low, got {}",
+            decoded[2]
+        );
+        assert!(
+            decoded[3] > 0.99,
+            "out-of-range positive should saturate high"
+        );
+        assert!(
+            decoded[4] < -0.99,
+            "out-of-range negative should saturate low"
         );
     }
 
