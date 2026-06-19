@@ -327,6 +327,24 @@ mod tests {
         assert!(!is_kokoro_checkpoint(Path::new("/nonexistent"), &cfg_no));
     }
 
+    #[test]
+    fn detection_falls_back_to_weight_filename() {
+        // No `istftnet` block, but the canonical weight file exists in a tmpdir.
+        let dir = std::env::temp_dir().join("kokoro_detection_test");
+        let _ = std::fs::create_dir_all(&dir);
+        let weight_path = dir.join(KOKORO_WEIGHT_FILE);
+        std::fs::write(&weight_path, b"fake").expect("create fake weight file");
+
+        let cfg_no_istftnet: Value = serde_json::json!({ "some_other_key": 1 });
+        assert!(
+            is_kokoro_checkpoint(&dir, &cfg_no_istftnet),
+            "weight file presence triggers detection even without istftnet block"
+        );
+
+        // Clean up (best-effort).
+        let _ = std::fs::remove_file(&weight_path);
+    }
+
     /// Resolve the local Kokoro checkpoint used for development, if present.
     /// Returns `None` (skipping the test) when the asset is unavailable, so the
     /// suite stays green on machines without the weights.

@@ -146,4 +146,21 @@ mod tests {
         // "three" -> θɹi must appear
         assert!(ps.contains("θɹi"), "number expanded in {ps}");
     }
+
+    #[test]
+    fn possessive_clitic_strips_and_retries_lexicon() {
+        // "cat's" should produce the phonemes for "cat" plus a trailing /z/ for
+        // the 's clitic, rather than treating "cat's" as an OOV word. The
+        // lexicon entry for "cat" is `kæt` (no stress mark); the clitic appends z.
+        let ps = text_to_phonemes("cat's");
+        assert!(ps.contains("kæt"), "base form phonemized in {ps}");
+        assert!(ps.ends_with('z'), "possessive /z/ appended in {ps}");
+    }
+
+    #[test]
+    fn whitespace_only_input_is_empty() {
+        // Tabs and newlines are not special-cased separately; they should all
+        // produce an empty output the same way spaces do.
+        assert_eq!(text_to_phonemes("\t\n "), "");
+    }
 }

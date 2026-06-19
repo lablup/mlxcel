@@ -2,7 +2,7 @@
 
 `mlxcel serve` and `mlxcel-server` expose the three OpenAI-compatible audio endpoints: text-to-speech (`/v1/audio/speech`), transcription (`/v1/audio/transcriptions`), and translation (`/v1/audio/translations`).
 
-**Current status.** The HTTP plumbing (request parsing, multipart handling, binary response framing) is complete and all three routes are mounted. Speech-to-text (`/v1/audio/transcriptions` and `/v1/audio/translations`) is functional: load a Whisper checkpoint with the `-m` flag and the STT slot is populated automatically. Text-to-speech (`/v1/audio/speech`) has no model implementation yet and always returns a structured `501 Not Implemented`. Any route whose model kind is not loaded returns 501 after the request is fully parsed.
+**Current status.** All three routes are mounted and functional. Speech-to-text (`/v1/audio/transcriptions` and `/v1/audio/translations`) is served by the Whisper provider: pass a Whisper checkpoint with `-m` and the STT slot is populated automatically. Text-to-speech (`/v1/audio/speech`) is served by the Kokoro-82M provider: pass a Kokoro checkpoint with `-m` and the TTS slot is populated automatically. Any route whose model kind is not loaded returns 501 after the request is fully parsed.
 
 ## Implemented endpoints
 
@@ -21,6 +21,7 @@ Alias paths without the `/v1` prefix are also mounted: `/audio/speech`, `/audio/
 | `src/server/audio_model.rs` | `AudioModelProvider` trait, input/output types, `AudioModelKind`, `AudioModelError`. |
 | `src/server/audio_worker.rs` | `AudioWorker` and `AudioEngine`: dedicated MLX-owning thread that loads and runs the audio model. |
 | `src/server/whisper_stt.rs` | `WhisperSttProvider`: wires the WAV reader and Whisper front-end to the `AudioModelProvider` seam. |
+| `src/server/kokoro_tts.rs` | `KokoroTtsProvider`: wires the g2p front-end and Kokoro acoustic model to the `AudioModelProvider` seam. |
 | `src/server/routes/audio.rs` | HTTP handlers, multipart parser, format resolution, binary/JSON response builders. |
 | `src/server/types/request.rs` | `AudioSpeechRequest`, `AudioTranscriptionRequest` (schema reference). |
 | `src/server/types/response.rs` | `AudioTranscriptionResponse`, `ErrorResponse` (including `not_implemented`). |
@@ -46,17 +47,37 @@ Loading a Whisper checkpoint occupies the audio slot only; the server does not s
 
 **Current limitations.** Non-quantized (fp16/f32) checkpoints only; quantized Whisper weights are not yet supported. Greedy decoding only; beam search is a follow-up.
 
+## Kokoro TTS setup
+
+Pass a Kokoro-82M checkpoint directory to `-m`. The server detects the checkpoint by the `istftnet` config block in `config.json` or by the presence of `kokoro-v1_0.safetensors`, and populates the TTS slot via `KokoroTtsProvider`, which owns a dedicated worker thread for all MLX graph evaluation.
+
+```sh
+mlxcel-server -m models/kokoro-82m
+```
+
+The checkpoint directory must contain `config.json` (with `vocab` and architecture blocks), `kokoro-v1_0.safetensors`, and a `voices/` subdirectory of per-voice safetensors packs. The Kokoro checkpoint from Hugging Face (`hexgrad/Kokoro-82M`) ships 54 voice packs.
+
+Loading a Kokoro checkpoint occupies the audio slot only; the server does not serve `/v1/chat/completions` or generation requests from that process. TTS and text generation are separate server instances.
+
+**Voices.** The `voice` field in the request selects a pack from `voices/<name>.safetensors`. Available voice names are the file stems (e.g. `af_heart`, `bm_lewis`). The default is `af_heart`. A requested voice that does not exist or contains unsafe characters (anything outside `[A-Za-z0-9_-]`) falls back silently to `af_heart`.
+
+**Language scope.** The built-in g2p front-end is American English only. Non-English voices in the checkpoint load and synthesize, but phonemes still come from the English front-end, so pronunciation quality for non-English text is limited.
+
+**Input length.** Input text is capped at 4096 characters before g2p runs; longer inputs are truncated (not rejected), so well-formed long-ish requests still synthesize. The acoustic model processes at most 510 phoneme tokens; phonemes beyond that are dropped.
+
+**Current limitations.** `response_format` is `wav` only; other containers are a follow-up. The g2p front-end covers American English; per-language phonemizers are future work. Quantized Kokoro checkpoints are not yet tested.
+
 ## POST /v1/audio/speech
 
 **Request body (JSON):**
 
 | Field | Type | Required | Notes |
 |-------|------|----------|-------|
-| `model` | string | yes | Identifier of the TTS model. Ignored until a model is loaded; any string is accepted. |
-| `input` | string | yes | Text to synthesize. |
-| `voice` | string | no | Named voice. Model-specific; forwarded as-is to the provider. |
-| `response_format` | string | no | Output container. Only `wav` is supported today; omitting the field defaults to `wav`. |
-| `speed` | float | no | Playback-speed multiplier. Forwarded to the provider; no range is enforced by the route layer. |
+| `model` | string | yes | Identifier of the TTS model. Ignored at the route layer; any string is accepted. |
+| `input` | string | yes | Text to synthesize. Capped at 4096 characters; longer inputs are truncated before g2p. |
+| `voice` | string | no | Kokoro voice name (e.g. `af_heart`, `bm_lewis`). Defaults to `af_heart`; unknown names fall back to the default. |
+| `response_format` | string | no | Output container. Only `wav` is supported; omitting the field defaults to `wav`. Any other value returns 400. |
+| `speed` | float | no | Duration scale factor. Values larger than 1.0 produce shorter (faster) audio; values smaller than 1.0 produce longer (slower) audio. Non-positive or non-finite values default to 1.0. |
 
 **Success response (200):**
 

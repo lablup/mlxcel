@@ -126,4 +126,45 @@ mod tests {
         assert!(!is_safe_name(""));
         assert!(!is_safe_name("a.b"));
     }
+
+    #[test]
+    fn resolve_voice_falls_back_to_default_when_no_voices() {
+        // With no voices directory the list is empty; any request falls back.
+        let dir = std::env::temp_dir().join("kokoro_test_empty");
+        let _ = std::fs::create_dir_all(&dir);
+        assert_eq!(
+            resolve_voice(&dir, Some("af_heart")),
+            DEFAULT_VOICE,
+            "falls back when voices/ dir is absent or empty"
+        );
+        assert_eq!(
+            resolve_voice(&dir, None),
+            DEFAULT_VOICE,
+            "falls back when voice is None"
+        );
+        assert_eq!(
+            resolve_voice(&dir, Some("../escape")),
+            DEFAULT_VOICE,
+            "unsafe name falls back"
+        );
+    }
+
+    #[test]
+    fn resolve_voice_picks_known_voice_from_tmpdir() {
+        // Create a minimal voices/ directory with a fake safetensors file.
+        let root = std::env::temp_dir().join("kokoro_test_voices");
+        let voices = root.join("voices");
+        let _ = std::fs::create_dir_all(&voices);
+        std::fs::write(voices.join("bf_emma.safetensors"), b"fake")
+            .expect("create test voice file");
+
+        // bf_emma should resolve to itself; unknown names fall back.
+        assert_eq!(resolve_voice(&root, Some("bf_emma")), "bf_emma");
+        assert_eq!(resolve_voice(&root, Some("unknown")), DEFAULT_VOICE);
+        assert_eq!(resolve_voice(&root, Some("")), DEFAULT_VOICE);
+        assert_eq!(resolve_voice(&root, Some("   ")), DEFAULT_VOICE);
+
+        // Clean up (best-effort).
+        let _ = std::fs::remove_file(voices.join("bf_emma.safetensors"));
+    }
 }

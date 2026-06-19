@@ -256,13 +256,13 @@ fn worker_loop<E, L>(
     while let Ok(command) = commands.recv() {
         match command {
             AudioCommand::Transcribe { input, respond } => {
-                let result =
-                    run_guarded("transcription", stream.as_ref(), || engine.transcribe(input));
+                let result = run_guarded("transcription", stream.as_ref(), || {
+                    engine.transcribe(input)
+                });
                 let _ = respond.send(result);
             }
             AudioCommand::Synthesize { input, respond } => {
-                let result =
-                    run_guarded("synthesis", stream.as_ref(), || engine.synthesize(input));
+                let result = run_guarded("synthesis", stream.as_ref(), || engine.synthesize(input));
                 let _ = respond.send(result);
             }
             AudioCommand::Shutdown => break,
