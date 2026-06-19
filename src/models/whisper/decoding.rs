@@ -19,6 +19,8 @@
 //! Beam search, word-level timestamps, and temperature fallback are out of
 //! scope for this first port.
 
+use anyhow::{Result, anyhow};
+
 use mlxcel_core::{MlxArray, UniquePtr};
 
 use super::decoder::TextDecoder;
@@ -80,13 +82,18 @@ fn mask_array(data: &[f32], n_vocab: i32) -> UniquePtr<MlxArray> {
 
 /// Take the last-position logits, apply additive masks, and return the argmax
 /// token id.
+///
+/// This is the single point in the decode loop where the lazily-built MLX graph
+/// (encoder, decoder, masks, argmax) is forced. The evaluation is routed through
+/// the fallible [`mlxcel_core::try_eval`] wrapper so an MLX failure surfaces as
+/// an `Err` rather than an uncaught C++ exception that would abort the process.
 fn argmax_with_masks(
     logits: &MlxArray,
     pos: i32,
     n_vocab: i32,
     always_mask: &MlxArray,
     first_mask: Option<&MlxArray>,
-) -> i32 {
+) -> Result<i32> {
     let sliced = mlxcel_core::slice(logits, &[0, pos, 0], &[1, pos + 1, n_vocab]);
     let sliced = mlxcel_core::reshape(&sliced, &[1, n_vocab]);
     let mut l = mlxcel_core::astype(&sliced, mlxcel_core::dtype::FLOAT32);
@@ -95,7 +102,8 @@ fn argmax_with_masks(
         l = mlxcel_core::add(&l, first);
     }
     let idx = mlxcel_core::argmax(&l, -1, false);
-    mlxcel_core::item_i32(&idx)
+    mlxcel_core::try_eval(&idx).map_err(|e| anyhow!("Whisper logits evaluation failed: {e}"))?;
+    Ok(mlxcel_core::item_i32(&idx))
 }
 
 /// Detect the spoken language from a single `<|startoftranscript|>` decode step.
@@ -105,9 +113,9 @@ pub(crate) fn detect_language<'a>(
     audio_features: &MlxArray,
     tokenizer: &'a WhisperTokenizer,
     n_vocab: i32,
-) -> Option<&'a str> {
+) -> Result<Option<&'a str>> {
     if !tokenizer.multilingual {
-        return None;
+        return Ok(None);
     }
     let mut self_caches = empty_caches(decoder.num_layers());
     let mut cross_caches = empty_caches(decoder.num_layers());
@@ -115,12 +123,12 @@ pub(crate) fn detect_language<'a>(
     let logits = decoder.forward(&sot, audio_features, 0, &mut self_caches, &mut cross_caches);
 
     let lang_mask = mask_array(&build_language_mask(tokenizer, n_vocab), n_vocab);
-    let picked = argmax_with_masks(&logits, 0, n_vocab, &lang_mask, None);
-    tokenizer
+    let picked = argmax_with_masks(&logits, 0, n_vocab, &lang_mask, None)?;
+    Ok(tokenizer
         .language_ids
         .iter()
         .find(|(_, id)| *id == picked)
-        .map(|(code, _)| *code)
+        .map(|(code, _)| *code))
 }
 
 /// Greedily decode one 30 s segment of `audio_features` into token ids and the
@@ -133,11 +141,11 @@ pub(crate) fn transcribe_segment(
     n_text_ctx: i32,
     language: Option<&str>,
     translate: bool,
-) -> (Vec<i32>, Option<String>) {
+) -> Result<(Vec<i32>, Option<String>)> {
     // Resolve the language once (hint takes priority over detection).
     let resolved: Option<String> = match language {
         Some(code) => Some(code.to_string()),
-        None => detect_language(decoder, audio_features, tokenizer, n_vocab).map(str::to_string),
+        None => detect_language(decoder, audio_features, tokenizer, n_vocab)?.map(str::to_string),
     };
 
     let initial = tokenizer.initial_tokens(resolved.as_deref(), translate);
@@ -164,7 +172,7 @@ pub(crate) fn transcribe_segment(
         n_vocab,
         &always,
         Some(&first),
-    );
+    )?;
     let mut offset = initial.len() as i32;
 
     // `sample_len` mirrors the reference cap of n_text_ctx / 2.
@@ -182,10 +190,10 @@ pub(crate) fn transcribe_segment(
         );
         offset += 1;
         step += 1;
-        next = argmax_with_masks(&logits, 0, n_vocab, &always, None);
+        next = argmax_with_masks(&logits, 0, n_vocab, &always, None)?;
     }
 
-    (generated, resolved)
+    Ok((generated, resolved))
 }
 
 #[cfg(test)]

@@ -144,16 +144,21 @@ impl WhisperModel {
     ///
     /// Returns the concatenated text and the language code that was used. Audio
     /// longer than 30 s is processed in consecutive 30 s windows.
+    ///
+    /// Errors if MLX graph evaluation fails. The graph is evaluated through the
+    /// fallible [`mlxcel_core::try_eval`] boundary, so an MLX failure (for
+    /// example a shape or allocation error) is returned as `Err` instead of
+    /// aborting the process with an uncaught C++ exception.
     pub fn transcribe(
         &self,
         audio_16k: &[f32],
         language: Option<&str>,
         translate: bool,
-    ) -> (String, Option<String>) {
+    ) -> Result<(String, Option<String>)> {
         let n_mels = self.dims.n_mels as usize;
         let (mel, frames) = whisper_mel::log_mel_spectrogram(audio_16k, n_mels);
         if frames == 0 {
-            return (String::new(), language.map(String::from));
+            return Ok((String::new(), language.map(String::from)));
         }
 
         let mut text = String::new();
@@ -176,7 +181,7 @@ impl WhisperModel {
                 self.dims.n_text_ctx,
                 used_language.as_deref(),
                 translate,
-            );
+            )?;
             if used_language.is_none() {
                 used_language = detected;
             }
@@ -184,7 +189,7 @@ impl WhisperModel {
             seek += whisper_mel::WHISPER_N_FRAMES;
         }
 
-        (text, used_language)
+        Ok((text, used_language))
     }
 }
 

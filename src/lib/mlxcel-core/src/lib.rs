@@ -154,6 +154,16 @@ mod ffi {
         /// Evaluate an array
         fn eval(arr: &MlxArray);
 
+        /// Evaluate an array, returning an error instead of throwing.
+        ///
+        /// Same effect as [`eval`], but any MLX C++ exception (missing stream,
+        /// shape mismatch, allocation failure) is caught at the FFI boundary and
+        /// surfaced as a Rust `Err` rather than an uncaught exception that
+        /// aborts the process. Off-worker callers that evaluate a graph on a
+        /// pool thread (the audio providers) use this so a failure becomes a
+        /// structured error.
+        fn try_eval(arr: &MlxArray) -> Result<()>;
+
         /// Evaluate multiple arrays at once
         unsafe fn eval_all(arrays: &[*const MlxArray]);
 

@@ -79,7 +79,9 @@ impl AudioModelProvider for WhisperSttProvider {
             .model
             .lock()
             .map_err(|_| AudioModelError::Inference("speech-to-text model lock poisoned".into()))?;
-        let (text, used_language) = model.transcribe(&audio_16k, hint.as_deref(), input.translate);
+        let (text, used_language) = model
+            .transcribe(&audio_16k, hint.as_deref(), input.translate)
+            .map_err(|e| AudioModelError::Inference(format!("transcription failed: {e}")))?;
 
         Ok(AudioTranscribeOutput {
             text: text.trim().to_string(),

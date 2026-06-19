@@ -81,7 +81,16 @@ pub async fn audio_speech(
     };
 
     let started = std::time::Instant::now();
-    let synth = tokio::task::spawn_blocking(move || provider.synthesize(input)).await;
+    // The provider evaluates an MLX graph, which is thread-affine: the blocking
+    // pool thread must have an MLX default stream installed before the first
+    // array op or MLX aborts the process. `with_thread_local_default_stream`
+    // installs (and synchronizes) a per-thread stream around the call. Applying
+    // it at this shared dispatch seam means the speech-to-text path and any
+    // future text-to-speech provider inherit the same protection.
+    let synth = tokio::task::spawn_blocking(move || {
+        mlxcel_core::streams::with_thread_local_default_stream(move || provider.synthesize(input))
+    })
+    .await;
     let output = match synth {
         Ok(Ok(output)) => output,
         Ok(Err(err)) => return audio_model_error_response(err).into_response(),
@@ -153,7 +162,15 @@ async fn transcribe(state: AppState, multipart: Multipart, translate: bool) -> R
     };
 
     let started = std::time::Instant::now();
-    let result = tokio::task::spawn_blocking(move || provider.transcribe(input)).await;
+    // Install (and synchronize) a per-thread MLX default stream around the
+    // provider call: the Whisper graph is evaluated on this blocking-pool
+    // thread and MLX requires a default stream to be installed first. See the
+    // matching comment in `audio_speech` for why this lives at the dispatch
+    // seam shared by both audio directions.
+    let result = tokio::task::spawn_blocking(move || {
+        mlxcel_core::streams::with_thread_local_default_stream(move || provider.transcribe(input))
+    })
+    .await;
     let output = match result {
         Ok(Ok(output)) => output,
         Ok(Err(err)) => return audio_model_error_response(err).into_response(),

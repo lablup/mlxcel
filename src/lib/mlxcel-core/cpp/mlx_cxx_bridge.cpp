@@ -319,6 +319,14 @@ void eval(const MlxArray& arr) {
     const_cast<array&>(arr.inner).eval();
 }
 
+// Same as `eval`, but declared `-> Result<()>` on the Rust side so cxx wraps
+// the call in a try/catch and converts any thrown MLX exception into a Rust
+// `Err` instead of letting it cross the FFI boundary uncaught (which aborts the
+// process). The body is otherwise identical to `eval`.
+void try_eval(const MlxArray& arr) {
+    const_cast<array&>(arr.inner).eval();
+}
+
 void eval_all(rust::Slice<const MlxArray* const> arrays) {
     std::vector<array> arrs;
     arrs.reserve(arrays.size());

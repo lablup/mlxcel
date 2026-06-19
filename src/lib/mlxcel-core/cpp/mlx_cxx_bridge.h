@@ -128,6 +128,9 @@ rust::Vec<uint8_t> array_to_raw_bytes(const MlxArray& arr);
 
 // Evaluation.
 void eval(const MlxArray& arr);
+// Fallible counterpart of `eval`; declared `-> Result<()>` in the bridge so cxx
+// catches any thrown MLX exception at the FFI boundary instead of aborting.
+void try_eval(const MlxArray& arr);
 void eval_all(rust::Slice<const MlxArray* const> arrays);
 
 // Element-wise binary operations.
