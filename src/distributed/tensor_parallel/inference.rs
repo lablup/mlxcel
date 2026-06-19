@@ -255,6 +255,9 @@ fn fallback_architecture(model_type: ModelType) -> &'static str {
         // routed to tensor-parallel text inference; the loader rejects it
         // earlier. Return a placeholder so the dispatch table stays total.
         ModelType::Whisper => "whisper",
+        // Kokoro is a TTS model served through /v1/audio/speech, never routed
+        // to tensor-parallel text inference; placeholder keeps the table total.
+        ModelType::Kokoro => "kokoro",
     }
 }
 

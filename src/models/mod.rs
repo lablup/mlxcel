@@ -116,6 +116,10 @@ pub mod step3p5;
 pub mod whisper;
 pub mod youtu_vl_lm;
 
+// Text-to-speech (StyleTTS2 + iSTFTNet) and its grapheme-to-phoneme front-end.
+pub mod g2p;
+pub mod kokoro;
+
 // Re-export model types
 pub use apertus::ApertusModel;
 pub use baichuan::BaichuanModel;
@@ -211,6 +215,8 @@ pub use stablelm::StableLMModel;
 pub use starcoder2::StarCoder2Model;
 pub use step3p5::Step3p5Model;
 pub use whisper::WhisperModel;
+
+pub use kokoro::KokoroModel;
 
 /// Supported model types
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -371,6 +377,9 @@ pub enum ModelType {
 
     // Speech-to-text (encoder-decoder ASR)
     Whisper,
+
+    // Text-to-speech (StyleTTS2 acoustic model + built-in iSTFTNet vocoder)
+    Kokoro,
 }
 
 /// All `ModelType` variants, in declaration order. Used as the iteration
@@ -511,6 +520,8 @@ pub const ALL_MODEL_TYPES: &[ModelType] = &[
     ModelType::RecurrentGemma,
     // Speech-to-text
     ModelType::Whisper,
+    // Text-to-speech
+    ModelType::Kokoro,
 ];
 
 impl ModelType {
@@ -686,6 +697,9 @@ impl ModelType {
 
             // ----- Speech-to-text (ASR) -----
             ModelType::Whisper => ("Whisper (encoder-decoder ASR)", "Speech-to-text"),
+
+            // ----- Text-to-speech (TTS) -----
+            ModelType::Kokoro => ("Kokoro (StyleTTS2 + iSTFTNet)", "Text-to-speech"),
 
             // ----- Specialized / other small/text -----
             ModelType::StarCoder2 => ("StarCoder 2", "Specialized"),
@@ -877,6 +891,7 @@ mod metadata_tests {
             Rwkv7,
             RecurrentGemma,
             Whisper,
+            Kokoro,
         );
         for mt in variants {
             assert!(

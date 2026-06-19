@@ -311,11 +311,7 @@ impl ProfileAccumulator {
     /// Mean prompt length across profiling samples (0 with no samples).
     #[must_use]
     pub(crate) fn mean_prompt_len(&self) -> usize {
-        if self.samples == 0 {
-            0
-        } else {
-            self.total_prompt_len / self.samples
-        }
+        self.total_prompt_len.checked_div(self.samples).unwrap_or(0)
     }
 
     /// Optimistic speedup estimate from the aggregate, or `None` when there is
