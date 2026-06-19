@@ -22,7 +22,7 @@ Current GitHub-facing docs:
 7. `turbo-kv-cache.md` — TurboQuant modes, the unified paged KV cache, quality/performance trade-offs, and flags.
 8. `CONTINUOUS_BATCHING.md` — continuous-batching scheduler, paged decode, and disaggregated prefill/decode/router serving.
 9. `responses-api.md` — implemented `/v1/responses` subset and gaps.
-10. `audio-api.md` — implemented `/v1/audio` endpoints, Phase 1 501 behavior, and WAV encoding details.
+10. `audio-api.md` — implemented `/v1/audio` endpoints: Whisper STT setup, request/response reference, WAV encoding details, and request validation order.
 11. `adding-models.md` — contribution guide for new model architectures.
 12. `block-diffusion.md` — DiffusionGemma block-diffusion generation: canvas denoising vs autoregressive, CLI flags, throughput, and phase 1 limitations.
 

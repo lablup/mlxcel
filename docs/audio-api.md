@@ -2,7 +2,7 @@
 
 `mlxcel serve` and `mlxcel-server` expose the three OpenAI-compatible audio endpoints: text-to-speech (`/v1/audio/speech`), transcription (`/v1/audio/transcriptions`), and translation (`/v1/audio/translations`).
 
-**Phase 1 status.** The HTTP plumbing (request parsing, multipart handling, binary response framing) is complete and all three routes are mounted. Until an audio model is registered via `AppState::with_audio_model`, every request returns a structured `501 Not Implemented` with error type `not_implemented`. This is by design: Phase 1 establishes the transport boundary; Phase 2 wires in a speech model.
+**Current status.** The HTTP plumbing (request parsing, multipart handling, binary response framing) is complete and all three routes are mounted. Speech-to-text (`/v1/audio/transcriptions` and `/v1/audio/translations`) is functional: load a Whisper checkpoint with the `-m` flag and the STT slot is populated automatically. Text-to-speech (`/v1/audio/speech`) has no model implementation yet and always returns a structured `501 Not Implemented`. Any route whose model kind is not loaded returns 501 after the request is fully parsed.
 
 ## Implemented endpoints
 
@@ -19,11 +19,32 @@ Alias paths without the `/v1` prefix are also mounted: `/audio/speech`, `/audio/
 | Module | Responsibility |
 |--------|----------------|
 | `src/server/audio_model.rs` | `AudioModelProvider` trait, input/output types, `AudioModelKind`, `AudioModelError`. |
+| `src/server/audio_worker.rs` | `AudioWorker` and `AudioEngine`: dedicated MLX-owning thread that loads and runs the audio model. |
+| `src/server/whisper_stt.rs` | `WhisperSttProvider`: wires the WAV reader and Whisper front-end to the `AudioModelProvider` seam. |
 | `src/server/routes/audio.rs` | HTTP handlers, multipart parser, format resolution, binary/JSON response builders. |
 | `src/server/types/request.rs` | `AudioSpeechRequest`, `AudioTranscriptionRequest` (schema reference). |
 | `src/server/types/response.rs` | `AudioTranscriptionResponse`, `ErrorResponse` (including `not_implemented`). |
 | `src/audio/wav_writer.rs` | `encode_wav_pcm16`: `f32` PCM samples to RIFF WAV bytes. |
+| `src/audio/whisper_mel.rs` | Log-mel front-end: STFT, Slaney mel filterbank, normalization, and 16 kHz resampler. |
 | `src/server/app.rs` | Route registration and `AUDIO_MAX_UPLOAD_BYTES` (25 MiB) body-limit layer. |
+
+## Whisper STT setup
+
+Pass a Whisper checkpoint directory to `-m`. The server detects `model_type: "whisper"` in `config.json` and populates the STT slot via `WhisperSttProvider`, which owns a dedicated worker thread for all MLX graph evaluation.
+
+```sh
+mlxcel-server -m models/whisper-base
+```
+
+Both the native MLX key layout and the HuggingFace `WhisperForConditionalGeneration` layout load without conversion. The checkpoint directory must contain `config.json`, one or more SafeTensors weight files, and `tokenizer.json`.
+
+Loading a Whisper checkpoint occupies the audio slot only; the server does not serve `/v1/chat/completions` or generation requests from that process. Chat and STT are separate server instances.
+
+**Supported audio input.** The `file` part must be a WAV file. Audio is decoded with the shared WAV reader, converted to mono, and resampled to 16 kHz before the log-mel front-end. Other container formats (MP3, FLAC, etc.) are not yet supported; the WAV reader returns an error for non-WAV input and the route returns 400.
+
+**Long audio.** Audio longer than 30 seconds is split into consecutive 30-second windows, each transcribed independently. The results are concatenated in order. Word-level timestamps, segment-level timestamps, and VAD-gated chunking are follow-ups.
+
+**Current limitations.** Non-quantized (fp16/f32) checkpoints only; quantized Whisper weights are not yet supported. Greedy decoding only; beam search is a follow-up.
 
 ## POST /v1/audio/speech
 
@@ -64,7 +85,7 @@ curl -s -X POST http://localhost:8080/v1/audio/speech \
 
 | Field | Type | Required | Notes |
 |-------|------|----------|-------|
-| `file` | file part | yes | Raw audio bytes. Any container the loaded provider can decode. |
+| `file` | file part | yes | Raw WAV audio bytes. The current Whisper provider decodes WAV only; other container formats return 400. |
 | `model` | text | no | STT model identifier. Forwarded to the provider. |
 | `language` | text | no | ISO-639-1 source-language hint (`en`, `ko`, etc.). |
 | `response_format` | text | no | `json` (default), `text`, or `verbose_json`. Any other non-empty value returns 400. |
@@ -101,7 +122,7 @@ curl -s -X POST http://localhost:8080/v1/audio/transcriptions \
 
 Same multipart shape and field semantics as `/v1/audio/transcriptions`. The difference is that the loaded model is asked to output text in English regardless of the source language. The `501` message names `stt` (the same underlying capability direction).
 
-## Phase 1 boundaries
+## Request validation order
 
 The 501 response is returned **after** the request is fully parsed. This means:
 
