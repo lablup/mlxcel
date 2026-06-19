@@ -339,8 +339,11 @@ impl Decoder {
             }
         }
 
-        // F0 curve for the NSF source is the predictor F0 at the decoder rate.
-        let f0_curve = ops::to_vec_f32(&f0_a)?;
+        // NSF harmonic source uses the RAW predictor F0 at full (2T) resolution,
+        // matching the upstream reference (the generator upsamples it by 300).
+        // `f0_a` above is the conv-downsampled curve used only for the
+        // encode/decode feature concat, not the harmonic source.
+        let f0_curve = ops::to_vec_f32(f0_pred)?;
         let _ = STYLE_DIM;
         self.generator.forward(&x, style, &f0_curve)
     }
