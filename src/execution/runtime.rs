@@ -216,10 +216,7 @@ fn should_warn_cpu_only_on_nvidia_host(
     cuda_build: bool,
     nvidia_host: bool,
 ) -> bool {
-    requested == RuntimeDevice::Gpu
-        && resolved == RuntimeDevice::Cpu
-        && !cuda_build
-        && nvidia_host
+    requested == RuntimeDevice::Gpu && resolved == RuntimeDevice::Cpu && !cuda_build && nvidia_host
 }
 
 /// Loud one-time startup warning for the CPU-only-build-on-NVIDIA-host footgun.
