@@ -84,6 +84,19 @@ pub fn initialize_runtime() -> RuntimeSetup {
         RuntimeDevice::Cpu
     };
 
+    // Footgun guard: a default `cargo build --release` on Linux omits the `cuda`
+    // feature and silently runs MLX on the CPU. If the user wanted the GPU but
+    // this CPU-only binary fell back to CPU on a host that has an NVIDIA GPU,
+    // say so loudly instead of crawling at a fraction of GPU speed.
+    if should_warn_cpu_only_on_nvidia_host(
+        requested_device,
+        device,
+        cfg!(feature = "cuda"),
+        nvidia_host_present(),
+    ) {
+        warn_cpu_only_on_nvidia_host();
+    }
+
     let wired_limit_bytes = if device.uses_gpu() {
         resolve_wired_limit()
     } else {
@@ -181,6 +194,45 @@ fn parse_runtime_device(value: &str) -> Option<RuntimeDevice> {
         "gpu" | "metal" => Some(RuntimeDevice::Gpu),
         _ => None,
     }
+}
+
+/// Detect an NVIDIA GPU without linking CUDA. The kernel driver exposes these
+/// paths whether or not this binary was built with the `cuda` feature, so a
+/// CPU-only build can still tell it is sitting on an NVIDIA host.
+fn nvidia_host_present() -> bool {
+    std::path::Path::new("/dev/nvidiactl").exists()
+        || std::path::Path::new("/proc/driver/nvidia/version").exists()
+}
+
+/// Whether to warn that a CPU-only build is wasting an NVIDIA GPU. True only
+/// when the GPU was wanted, the runtime fell back to CPU, this binary lacks the
+/// `cuda` feature (so it can never use the GPU), and an NVIDIA host is present.
+/// An explicit `MLXCEL_DEVICE=cpu` (`requested == Cpu`) suppresses the warning,
+/// and a `cuda`-capable build that fell back to CPU is a genuine no-GPU host,
+/// not the footgun.
+fn should_warn_cpu_only_on_nvidia_host(
+    requested: RuntimeDevice,
+    resolved: RuntimeDevice,
+    cuda_build: bool,
+    nvidia_host: bool,
+) -> bool {
+    requested == RuntimeDevice::Gpu
+        && resolved == RuntimeDevice::Cpu
+        && !cuda_build
+        && nvidia_host
+}
+
+/// Loud one-time startup warning for the CPU-only-build-on-NVIDIA-host footgun.
+fn warn_cpu_only_on_nvidia_host() {
+    eprintln!(
+        "warning: an NVIDIA GPU is present but this mlxcel binary was built \
+         without CUDA support, so it is running on the CPU (orders of magnitude \
+         slower).\n         \
+         Rebuild with the `cuda` feature: \
+         `MLX_CUDA_ARCHITECTURES=<arch> cargo build --release --features cuda` \
+         (or `cargo cuda`).\n         \
+         See docs/installation.md (Linux with CUDA)."
+    );
 }
 
 #[cfg(test)]

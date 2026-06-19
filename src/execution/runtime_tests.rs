@@ -12,7 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use super::{RuntimeDevice, parse_memory_size, parse_runtime_device, resolve_runtime_device};
+use super::{
+    RuntimeDevice, parse_memory_size, parse_runtime_device, resolve_runtime_device,
+    should_warn_cpu_only_on_nvidia_host,
+};
 
 #[test]
 fn parse_runtime_device_accepts_cpu() {
@@ -71,4 +74,19 @@ fn parse_memory_size_fractional_gb() {
 #[test]
 fn parse_memory_size_invalid() {
     assert_eq!(parse_memory_size("abc"), None);
+}
+
+#[test]
+fn warns_only_for_cpu_fallback_on_nvidia_host_without_cuda() {
+    use RuntimeDevice::{Cpu, Gpu};
+    // Footgun: wanted GPU, fell back to CPU, no cuda feature, NVIDIA host present.
+    assert!(should_warn_cpu_only_on_nvidia_host(Gpu, Cpu, false, true));
+    // cuda-capable build that fell back to CPU is a genuine no-GPU host, not the footgun.
+    assert!(!should_warn_cpu_only_on_nvidia_host(Gpu, Cpu, true, true));
+    // Genuine CPU-only Linux box (no NVIDIA device node): no nag.
+    assert!(!should_warn_cpu_only_on_nvidia_host(Gpu, Cpu, false, false));
+    // Explicit MLXCEL_DEVICE=cpu (requested == Cpu): respect the override.
+    assert!(!should_warn_cpu_only_on_nvidia_host(Cpu, Cpu, false, true));
+    // Already running on the GPU: nothing to warn about.
+    assert!(!should_warn_cpu_only_on_nvidia_host(Gpu, Gpu, false, true));
 }

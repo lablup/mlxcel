@@ -1,0 +1,9 @@
+# Convenience aliases.
+#
+# `cargo cuda` builds the CUDA backend with the `cuda` feature, so a plain
+# `cargo build` does not silently produce a CPU-only binary on an NVIDIA host
+# (the runtime warns when that happens; see docs/installation.md). The CUDA
+# architecture is auto-detected from `nvidia-smi`; override it with
+# `MLX_CUDA_ARCHITECTURES` (for example `MLX_CUDA_ARCHITECTURES=121` for GB10).
+[alias]
+cuda = "build --release --features cuda"
