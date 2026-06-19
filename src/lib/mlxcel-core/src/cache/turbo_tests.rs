@@ -1175,7 +1175,7 @@ fn turbo4_dequant_sdpa_matches_full_dequant_attention() {
 ///
 /// The reference is the same `update_and_fetch` (which dequantizes the packed
 /// 4-bit V to FP16) followed by native `attention` pair that `int8` decode and
-/// the fallback `else` branch use — i.e. the *exact* attention. This is NOT a
+/// the fallback `else` branch use, i.e. the *exact* attention. This is NOT a
 /// parity check against the old sparse-V path: sparse-V is a lossy
 /// approximation (it skips low-attention V positions), so the new path is
 /// expected to differ from, and be more accurate than, sparse-V. We assert the

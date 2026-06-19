@@ -205,7 +205,7 @@ static TURBO4_DEQUANT_SDPA_ENABLED: OnceLock<bool> = OnceLock::new();
 /// asymmetric `KVCacheMode::Turbo4Asym` (FP16 K + 4-bit packed V).
 ///
 /// Default: **on**. The V side is transiently dequantized to FP16 and fed,
-/// together with the already-FP16 K side, to native MLX SDPA — the same tensor
+/// together with the already-FP16 K side, to native MLX SDPA, the same tensor
 /// shape the `int8`, symmetric `Turbo4`, and `Turbo4Delegated` decode routes
 /// use. This is both exact (no per-token attention-weight skipping) and several
 /// times faster than the sparse-V weighted-sum path. Set this to `0`, `false`,

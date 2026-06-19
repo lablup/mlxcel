@@ -3184,8 +3184,8 @@ impl KVCache {
     /// per-token inverse WHT a full dequant pays. The persistent cache state
     /// stays packed; the rotated FP16 V is a transient SDPA workspace.
     ///
-    /// The cache-state mutation is identical to the sparse-V path — both call
-    /// [`Self::update`] and nothing else writes state — so swapping between the
+    /// The cache-state mutation is identical to the sparse-V path (both call
+    /// [`Self::update`] and nothing else writes state), so swapping between the
     /// two routes is purely an attention-compute choice and leaves the packed V
     /// buffers and `offset` unchanged. The output differs from sparse-V because
     /// sparse-V is a lossy approximation (it skips low-attention V positions)
