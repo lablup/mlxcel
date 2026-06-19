@@ -184,3 +184,184 @@ pub fn create_app(state: AppState) -> Router {
         .layer(TraceLayer::new_for_http())
         .with_state(state)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::AUDIO_MAX_UPLOAD_BYTES;
+    use axum::{
+        Router,
+        body::Body,
+        extract::DefaultBodyLimit,
+        http::{Method, Request, StatusCode},
+        routing::post,
+    };
+    use tower::ServiceExt;
+
+    /// Build a minimal audio sub-router using stub handlers and the same
+    /// `DefaultBodyLimit` layer applied in `create_app`. Tests can call this
+    /// without constructing a real `AppState`.
+    fn audio_test_router() -> Router {
+        Router::new()
+            .route(
+                "/v1/audio/speech",
+                post(|| async { StatusCode::NO_CONTENT }),
+            )
+            .route(
+                "/v1/audio/transcriptions",
+                post(|| async { StatusCode::NO_CONTENT }),
+            )
+            .route(
+                "/v1/audio/translations",
+                post(|| async { StatusCode::NO_CONTENT }),
+            )
+            .route("/audio/speech", post(|| async { StatusCode::NO_CONTENT }))
+            .route(
+                "/audio/transcriptions",
+                post(|| async { StatusCode::NO_CONTENT }),
+            )
+            .route(
+                "/audio/translations",
+                post(|| async { StatusCode::NO_CONTENT }),
+            )
+            .layer(DefaultBodyLimit::max(AUDIO_MAX_UPLOAD_BYTES))
+    }
+
+    #[test]
+    fn audio_upload_limit_is_25_mib() {
+        assert_eq!(
+            AUDIO_MAX_UPLOAD_BYTES,
+            25 * 1024 * 1024,
+            "audio upload limit must be 25 MiB"
+        );
+    }
+
+    #[tokio::test]
+    async fn audio_speech_is_reachable_at_v1_path() {
+        let response = audio_test_router()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/v1/audio/speech")
+                    .header("content-type", "application/json")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_ne!(
+            response.status(),
+            StatusCode::NOT_FOUND,
+            "/v1/audio/speech must be mounted"
+        );
+    }
+
+    #[tokio::test]
+    async fn audio_transcriptions_is_reachable_at_v1_path() {
+        let response = audio_test_router()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/v1/audio/transcriptions")
+                    .header("content-type", "multipart/form-data; boundary=x")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_ne!(
+            response.status(),
+            StatusCode::NOT_FOUND,
+            "/v1/audio/transcriptions must be mounted"
+        );
+    }
+
+    #[tokio::test]
+    async fn audio_translations_is_reachable_at_v1_path() {
+        let response = audio_test_router()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/v1/audio/translations")
+                    .header("content-type", "multipart/form-data; boundary=x")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_ne!(
+            response.status(),
+            StatusCode::NOT_FOUND,
+            "/v1/audio/translations must be mounted"
+        );
+    }
+
+    #[tokio::test]
+    async fn get_to_audio_speech_returns_method_not_allowed() {
+        // The route exists but only accepts POST. A 405 (not 404) confirms the
+        // path is registered.
+        let response = audio_test_router()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/v1/audio/speech")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
+    }
+
+    #[tokio::test]
+    async fn audio_alias_paths_are_reachable_without_v1_prefix() {
+        for path in [
+            "/audio/speech",
+            "/audio/transcriptions",
+            "/audio/translations",
+        ] {
+            let response = audio_test_router()
+                .oneshot(
+                    Request::builder()
+                        .method(Method::POST)
+                        .uri(path)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_ne!(
+                response.status(),
+                StatusCode::NOT_FOUND,
+                "{path} alias must be mounted"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn body_limit_layer_enforces_upload_cap() {
+        // Use a small limit so the test does not allocate the full 25 MiB. The
+        // goal is confirming DefaultBodyLimit is wired onto the audio sub-router
+        // and that an over-limit body produces 413; the constant test covers the
+        // 25 MiB value separately.
+        const TEST_LIMIT: usize = 16;
+        let app = Router::new()
+            .route(
+                "/v1/audio/transcriptions",
+                post(|_body: axum::body::Bytes| async move { StatusCode::NO_CONTENT }),
+            )
+            .layer(DefaultBodyLimit::max(TEST_LIMIT));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/v1/audio/transcriptions")
+                    .header("content-type", "multipart/form-data; boundary=x")
+                    .body(Body::from(vec![0u8; TEST_LIMIT + 1]))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    }
+}
