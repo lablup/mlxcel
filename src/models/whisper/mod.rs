@@ -156,7 +156,11 @@ impl WhisperModel {
         translate: bool,
     ) -> Result<(String, Option<String>)> {
         let n_mels = self.dims.n_mels as usize;
-        let (mel, frames) = whisper_mel::log_mel_spectrogram(audio_16k, n_mels);
+        // Pad the waveform to a whole number of 30 s windows before the log-mel
+        // transform so the silent tail is normalized like trained silence rather
+        // than left at a raw 0.0 (see `pad_audio_to_window_multiple`).
+        let audio_padded = pad_audio_to_window_multiple(audio_16k);
+        let (mel, frames) = whisper_mel::log_mel_spectrogram(&audio_padded, n_mels);
         if frames == 0 {
             return Ok((String::new(), language.map(String::from)));
         }
@@ -193,8 +197,34 @@ impl WhisperModel {
     }
 }
 
-/// Copy one 30 s window of mel frames starting at `seek`, zero-padding the tail
-/// when the utterance ends mid-window. Output is row-major `[N_FRAMES][n_mels]`.
+/// Pad the waveform with trailing silence (zeros) up to a whole number of 30 s
+/// windows.
+///
+/// The padding is applied to the waveform, before the log-mel transform, so the
+/// silent tail flows through `log10` and the global-max clamp and lands at the
+/// same normalized log floor as trained silence. Zero-filling the mel frames
+/// directly (after normalization) would instead leave the tail at a raw `0.0`, a
+/// low-mid value the encoder reads as spurious broadband energy, which can
+/// degrade or hallucinate transcriptions of clips shorter than one window (under
+/// 30 s) where the padding dominates. An empty input stays empty; the caller
+/// short-circuits on zero frames.
+fn pad_audio_to_window_multiple(audio: &[f32]) -> Vec<f32> {
+    if audio.is_empty() {
+        return Vec::new();
+    }
+    let windows = audio.len().div_ceil(whisper_mel::WHISPER_N_SAMPLES);
+    let target = windows * whisper_mel::WHISPER_N_SAMPLES;
+    let mut padded = Vec::with_capacity(target);
+    padded.extend_from_slice(audio);
+    padded.resize(target, 0.0);
+    padded
+}
+
+/// Copy one 30 s window of mel frames starting at `seek`. The waveform is padded
+/// to a whole number of windows before the log-mel transform (see
+/// `pad_audio_to_window_multiple`), so in practice every window is full; the
+/// trailing zero-fill here is a safety net for any final-frame remainder. Output
+/// is row-major `[N_FRAMES][n_mels]`.
 fn padded_window(mel: &[f32], frames: usize, n_mels: usize, seek: usize) -> Vec<f32> {
     let mut out = vec![0.0f32; whisper_mel::WHISPER_N_FRAMES * n_mels];
     let avail = (frames - seek).min(whisper_mel::WHISPER_N_FRAMES);
@@ -327,5 +357,47 @@ mod tests {
         assert_eq!(&window[0..6], &[1.0, 1.0, 2.0, 2.0, 3.0, 3.0]);
         // Everything past the 3 available frames is zero-padded.
         assert!(window[6..].iter().all(|&v| v == 0.0));
+    }
+
+    #[test]
+    fn pad_audio_rounds_up_to_window_multiple() {
+        assert!(pad_audio_to_window_multiple(&[]).is_empty());
+
+        let one = pad_audio_to_window_multiple(&vec![0.5f32; 100]);
+        assert_eq!(one.len(), whisper_mel::WHISPER_N_SAMPLES);
+        assert_eq!(one[0], 0.5);
+        assert_eq!(one[100], 0.0);
+
+        let two = pad_audio_to_window_multiple(&vec![0.1f32; whisper_mel::WHISPER_N_SAMPLES + 5]);
+        assert_eq!(two.len(), 2 * whisper_mel::WHISPER_N_SAMPLES);
+    }
+
+    #[test]
+    fn padded_audio_tail_sits_at_log_floor_not_zero() {
+        // A short tone padded to a full window must land its silent tail at the
+        // normalized log floor (the per-utterance minimum), not 0.0. Feeding 0.0
+        // would read as spurious broadband energy to the encoder.
+        let mut tone = vec![0.0f32; 8000]; // 0.5 s at 16 kHz
+        for (i, s) in tone.iter_mut().enumerate() {
+            *s = (2.0 * std::f32::consts::PI * 440.0 * i as f32 / 16_000.0).sin();
+        }
+        let padded = pad_audio_to_window_multiple(&tone);
+        assert_eq!(padded.len(), whisper_mel::WHISPER_N_SAMPLES);
+
+        let (mel, frames) = whisper_mel::log_mel_spectrogram(&padded, 80);
+        assert_eq!(frames, whisper_mel::WHISPER_N_FRAMES);
+
+        let global_min = mel.iter().copied().fold(f32::INFINITY, f32::min);
+        let last = &mel[(frames - 1) * 80..frames * 80];
+        for &v in last {
+            assert!(
+                (v - global_min).abs() < 1e-3,
+                "silent tail frame should sit at the log floor, got {v} vs floor {global_min}"
+            );
+        }
+        assert!(
+            global_min < -1e-2,
+            "log floor must differ from the 0.0 the buggy mel padding produced, got {global_min}"
+        );
     }
 }
