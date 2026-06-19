@@ -3161,8 +3161,8 @@ impl KVCache {
     ///
     /// `Turbo4Asym` keeps K in FP16 and packs V into 4-bit PolarQuant indices.
     /// Unlike the sparse-V weighted-sum path
-    /// ([`Self::update_and_sparse_v_attention`]), this route dequantizes the
-    /// full visible V to FP16 and runs native MLX SDPA with the FP16 K — exact
+    /// ([`Self::update_and_sparse_v_attention`]), this route dequantizes V into
+    /// its rotated codec basis and runs native MLX SDPA against the FP16 K, exact
     /// (no per-token attention-weight skipping) and far faster, mirroring how
     /// `int8` and symmetric `Turbo4` decode.
     ///
@@ -3178,10 +3178,11 @@ impl KVCache {
     /// This is the asymmetric analogue of
     /// [`Self::update_and_turbo4_dequant_sdpa_attention`]: only the V side is
     /// packed, so K is sliced from the FP16 `keys` buffer as-is and only V is
-    /// transiently dequantized (via the same
-    /// [`turbo::quant::dequantize_v_turbo4`] the `update_and_fetch` fetch path
-    /// uses). The persistent cache state stays packed; the FP16 V is a transient
-    /// SDPA workspace.
+    /// transiently dequantized into its rotated codec basis. Native SDPA runs
+    /// against the FP16 K and the small output is inverse-rotated through the V
+    /// basis (`rotate(SDPA(q,k,v)) == SDPA(q,k,rotate(v))`), skipping the
+    /// per-token inverse WHT a full dequant pays. The persistent cache state
+    /// stays packed; the rotated FP16 V is a transient SDPA workspace.
     ///
     /// The cache-state mutation is identical to the sparse-V path — both call
     /// [`Self::update`] and nothing else writes state — so swapping between the
@@ -3224,10 +3225,10 @@ impl KVCache {
             .v_packed
             .as_ref()
             .expect("v_packed must exist for Turbo4Asym");
-        let vn = self
-            .v_norms
+        let vr = self
+            .v_rescale
             .as_ref()
-            .expect("v_norms must exist for Turbo4Asym");
+            .expect("v_rescale must exist for Turbo4Asym");
         let params = self
             .turbo_params
             .as_ref()
@@ -3235,15 +3236,19 @@ impl KVCache {
 
         let ks = ffi::array_shape(k);
         let vps = ffi::array_shape(vp);
-        let vns = ffi::array_shape(vn);
+        let vrs = ffi::array_shape(vr);
 
         let k_slice = ffi::slice(k, &[0, 0, 0, 0], &[ks[0], ks[1], self.offset, ks[3]]);
         let vp_slice = ffi::slice(vp, &[0, 0, 0, 0], &[vps[0], vps[1], self.offset, vps[3]]);
-        let vn_slice = ffi::slice(vn, &[0, 0, 0, 0], &[vns[0], vns[1], self.offset, 1]);
+        let vr_slice = ffi::slice(vr, &[0, 0, 0, 0], &[vrs[0], vrs[1], self.offset, 1]);
 
-        let v_dequantized = turbo::quant::dequantize_v_turbo4(&vp_slice, &vn_slice, params);
-
-        crate::layers::attention(q, &k_slice, &v_dequantized, scale, mask, 0.0, 0)
+        // Rotated-codec-basis SDPA: dequantize V into its WHT-rotated basis (no
+        // per-token inverse WHT), run native SDPA against the FP16 K, and
+        // inverse-rotate only the small output. Exact (`rotate(SDPA(q,k,v)) ==
+        // SDPA(q,k,rotate(v))`) and far faster than a full V dequant.
+        turbo::sparse_v::attention_turbo4_asym_dequant_sdpa(
+            q, &k_slice, &vp_slice, &vr_slice, params, scale, mask,
+        )
     }
 
     /// Returns `true` iff this cache can route symmetric `Turbo4` through the

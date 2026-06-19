@@ -924,6 +924,33 @@ pub fn attention_turbo4_dequant_sdpa(
     super::quant::turbo4_v_inverse_rotate(&rot_out, params)
 }
 
+/// Dequant-first SDPA path for `KVCacheMode::Turbo4Asym` (FP16-K + packed-V).
+///
+/// The asymmetric analogue of [`attention_turbo4_dequant_sdpa`]: the K side is
+/// already FP16, so there is no Q rotation and no K dequant. Only V is
+/// transiently dequantized into its rotated codec basis, native SDPA runs
+/// against the FP16 K, and the small `[B, Hq, Tq, D]` output is inverse-rotated
+/// through the V basis. This uses the same identity the delegated path documents
+/// (`SDPA(q, k, rotate(v)) = rotate(SDPA(q, k, v))`, since attention scores
+/// depend only on Q/K) to skip the per-token inverse WHT that the full
+/// [`super::quant::dequantize_v_turbo4`] dequant pays, so the result is exact
+/// (bit-for-bit equivalent to dequant-then-SDPA, up to FP rounding) but far
+/// faster. The persistent cache state stays packed.
+#[allow(clippy::too_many_arguments)]
+pub fn attention_turbo4_asym_dequant_sdpa(
+    q: &MlxArray,
+    k: &MlxArray,
+    v_packed: &MlxArray,
+    v_rescale: &MlxArray,
+    params: &TurboQuantParams,
+    scale: f32,
+    mask: Option<&MlxArray>,
+) -> UniquePtr<MlxArray> {
+    let v_rot = dequantize_v_turbo4_rotated_for_sdpa(v_packed, v_rescale, params);
+    let rot_out = crate::layers::attention(q, k, &v_rot, scale, mask, 0.0, 0);
+    super::quant::turbo4_v_inverse_rotate(&rot_out, params)
+}
+
 /// Dequant-first SDPA path for `KVCacheMode::Turbo4Delegated`.
 ///
 /// This mirrors the default single-token decode strategy in
