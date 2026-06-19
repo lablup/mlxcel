@@ -236,20 +236,85 @@ fn worker_loop<E, L>(
 
     // (c) Serve one command at a time. After each, synchronize so dispatch and
     // synchronization stay paired on this thread's stream.
+    //
+    // Each engine call runs under `catch_unwind` so one panicking request cannot
+    // tear down the worker thread. Without this boundary a panic on the
+    // attacker-reachable forward path (the synthesis helpers carry many
+    // `expect`/`unwrap` calls) would unwind out of the loop, close the channel,
+    // and make every later audio request fail with `WORKER_GONE` for the rest of
+    // the process: a permanent denial of service from a single bad request.
+    // Recovering here turns that into a clean per-request `Inference` error while
+    // the thread keeps serving.
+    //
+    // `&mut engine` is not `UnwindSafe`, so we assert it at this supervised
+    // boundary. That is sound: the engine is owned and used single-threadedly on
+    // this thread and is the only state the closure touches, the MLX graph
+    // builders hold no cross-call invariants, so a recovered panic cannot leave
+    // shared state observably torn for the next command. We always synchronize
+    // the stream afterwards (panic or not) because a partially built or evaluated
+    // graph may have left work queued, then send the reply: run -> sync -> send.
     while let Ok(command) = commands.recv() {
         match command {
             AudioCommand::Transcribe { input, respond } => {
-                let result = engine.transcribe(input);
-                synchronize_thread_local_stream(stream.as_ref());
+                let result =
+                    run_guarded("transcription", stream.as_ref(), || engine.transcribe(input));
                 let _ = respond.send(result);
             }
             AudioCommand::Synthesize { input, respond } => {
-                let result = engine.synthesize(input);
-                synchronize_thread_local_stream(stream.as_ref());
+                let result =
+                    run_guarded("synthesis", stream.as_ref(), || engine.synthesize(input));
                 let _ = respond.send(result);
             }
             AudioCommand::Shutdown => break,
         }
+    }
+}
+
+/// Run one engine call under a panic boundary, then synchronize this thread's
+/// MLX stream, returning the call's `Result` or a recovered-panic error.
+///
+/// `label` names the direction ("transcription"/"synthesis") for the log and
+/// fallback message; it never carries request input. The happy path forwards
+/// the engine's `Ok`/`Err` unchanged, so non-panicking behavior is identical to
+/// calling the engine directly. On a caught panic the payload string (if any) is
+/// surfaced as [`AudioModelError::Inference`].
+fn run_guarded<T, F>(
+    label: &str,
+    stream: Option<&mlxcel_core::UniquePtr<mlxcel_core::MlxThreadLocalStream>>,
+    call: F,
+) -> Result<T, AudioModelError>
+where
+    F: FnOnce() -> Result<T, AudioModelError>,
+{
+    // `AssertUnwindSafe`: see the supervised-boundary reasoning at the call site.
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(call));
+    // Synchronize whether or not the call panicked: a partially built/evaluated
+    // graph may have queued work on this stream that must drain before the next
+    // command reuses it.
+    synchronize_thread_local_stream(stream);
+    match outcome {
+        Ok(result) => result,
+        Err(payload) => {
+            let detail = panic_message(payload.as_ref(), label);
+            // A recovered panic is a real fault worth surfacing; log it without
+            // any request input content.
+            tracing::error!(target: "mlxcel::audio", "audio worker recovered from panic during {label}: {detail}");
+            Err(AudioModelError::Inference(format!(
+                "audio worker recovered from panic: {detail}"
+            )))
+        }
+    }
+}
+
+/// Extract a human-readable message from a caught panic payload, falling back to
+/// a generic per-direction message when the payload is not a string.
+fn panic_message(payload: &(dyn std::any::Any + Send), label: &str) -> String {
+    if let Some(s) = payload.downcast_ref::<&str>() {
+        (*s).to_string()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        format!("{label} panicked")
     }
 }
 
@@ -339,5 +404,66 @@ mod tests {
             err,
             AudioModelError::KindNotLoaded(AudioModelKind::Tts)
         ));
+    }
+
+    /// Engine that panics on a sentinel input and succeeds otherwise. Used to
+    /// prove the worker thread survives a panicking request instead of dying and
+    /// failing every later request with `WORKER_GONE`.
+    struct PanicEngine;
+
+    impl AudioEngine for PanicEngine {
+        fn transcribe(
+            &mut self,
+            input: AudioTranscribeInput,
+        ) -> Result<AudioTranscribeOutput, AudioModelError> {
+            if input.language.as_deref() == Some("panic") {
+                panic!("synthetic transcribe panic");
+            }
+            // Touch MLX on the worker thread like `TrivialEngine`, so the success
+            // path exercises the same stream the panic path left to synchronize.
+            let arr = mlxcel_core::from_slice_f32(&[1.0_f32, 2.0, 3.0], &[3]);
+            mlxcel_core::try_eval(&arr)
+                .map_err(|e| AudioModelError::Inference(format!("eval failed: {e}")))?;
+            Ok(AudioTranscribeOutput {
+                text: format!("ok:{}", input.audio.len()),
+                language: input.language,
+                duration_seconds: None,
+            })
+        }
+    }
+
+    #[test]
+    fn worker_survives_engine_panic_and_keeps_serving() {
+        let worker = AudioWorker::spawn("audio-test-panic", || Ok(PanicEngine))
+            .expect("worker spawns and engine loads");
+
+        // First request hits the panic path. The worker must recover and reply
+        // with an `Inference` error, NOT die and surface `WORKER_GONE`. (The
+        // default panic hook prints the panic to stderr during this call; that
+        // is expected and does not fail the test.)
+        let err = worker
+            .transcribe(transcribe_input(7, Some("panic")))
+            .expect_err("panicking request returns an error");
+        match err {
+            AudioModelError::Inference(message) => {
+                assert_ne!(
+                    message, WORKER_GONE,
+                    "a recovered panic must not be reported as a dead worker"
+                );
+                assert!(
+                    message.contains("panic"),
+                    "recovered-panic error should mention the panic, got: {message}"
+                );
+            }
+            other => panic!("expected an Inference error, got: {other:?}"),
+        }
+
+        // The key assertion: a normal request on the SAME worker still succeeds,
+        // proving the thread survived the earlier panic.
+        let out = worker
+            .transcribe(transcribe_input(4, Some("en")))
+            .expect("worker still serves after recovering from a panic");
+        assert_eq!(out.text, "ok:4");
+        assert_eq!(out.language.as_deref(), Some("en"));
     }
 }

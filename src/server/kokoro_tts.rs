@@ -25,6 +25,7 @@
 //! provider therefore holds no MLX handles itself; it only forwards requests
 //! over the worker's channel, which makes it trivially `Send + Sync`.
 
+use std::borrow::Cow;
 use std::path::Path;
 
 use crate::models::KokoroModel;
@@ -34,6 +35,30 @@ use crate::server::audio_model::{
     AudioSynthesizeOutput, AudioTranscribeInput, AudioTranscribeOutput,
 };
 use crate::server::audio_worker::{AudioEngine, AudioWorker};
+
+/// Hard cap on the number of input characters fed to the g2p front-end.
+///
+/// The acoustic model consumes at most `MAX_TOKENS` (510) phoneme tokens, so
+/// text far beyond that is wasted work. Synthesis runs on the single audio
+/// worker thread, so an unbounded `input` would let one request monopolize it
+/// (the request body limit is sized for STT audio uploads, not this text
+/// field). Cap the text before any g2p work to keep per-request cost bounded.
+const MAX_INPUT_CHARS: usize = 4096;
+
+/// Bound `text` to at most [`MAX_INPUT_CHARS`] characters before g2p runs.
+///
+/// Truncation happens on a character boundary (never mid-codepoint), so the
+/// result is always valid UTF-8. Inputs at or below the cap are returned
+/// borrowed; longer inputs are truncated into an owned `String`. Long inputs are
+/// truncated rather than rejected so well-behaved long-ish requests still
+/// succeed, matching OpenAI-compatible client expectations.
+fn cap_input(text: &str) -> Cow<'_, str> {
+    if text.chars().count() > MAX_INPUT_CHARS {
+        Cow::Owned(text.chars().take(MAX_INPUT_CHARS).collect::<String>())
+    } else {
+        Cow::Borrowed(text)
+    }
+}
 
 /// Text-to-speech provider backed by a Kokoro model on a dedicated worker
 /// thread.
@@ -104,8 +129,22 @@ impl AudioEngine for KokoroEngine {
             ));
         }
 
+        // Cap the input before any g2p work so one oversized request cannot
+        // monopolize the shared audio worker thread. Truncate (never reject) so
+        // long-ish well-behaved inputs still synthesize. Log the fact only (not
+        // the text) at debug level to avoid surfacing attacker-controlled input.
+        let original_chars = text.chars().count();
+        let text = cap_input(text);
+        if original_chars > MAX_INPUT_CHARS {
+            tracing::debug!(
+                original_chars,
+                max_input_chars = MAX_INPUT_CHARS,
+                "synthesis input truncated to character cap before g2p"
+            );
+        }
+
         // g2p front-end: English text -> Kokoro IPA phonemes.
-        let phonemes = g2p::text_to_phonemes(text);
+        let phonemes = g2p::text_to_phonemes(&text);
         if phonemes.trim().is_empty() {
             return Err(AudioModelError::Inference(
                 "g2p produced no phonemes for the input text".to_string(),
@@ -123,5 +162,49 @@ impl AudioEngine for KokoroEngine {
             sample_rate,
             channels: 1,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{MAX_INPUT_CHARS, cap_input};
+
+    #[test]
+    fn cap_input_passes_short_text_unchanged() {
+        let text = "hello world";
+        let capped = cap_input(text);
+        assert_eq!(capped, text);
+    }
+
+    #[test]
+    fn cap_input_passes_text_at_cap_unchanged() {
+        let text = "a".repeat(MAX_INPUT_CHARS);
+        let capped = cap_input(&text);
+        assert_eq!(capped.chars().count(), MAX_INPUT_CHARS);
+        assert_eq!(capped, text);
+    }
+
+    #[test]
+    fn cap_input_truncates_overlong_text_to_cap() {
+        let text = "a".repeat(MAX_INPUT_CHARS + 100);
+        let capped = cap_input(&text);
+        assert_eq!(capped.chars().count(), MAX_INPUT_CHARS);
+    }
+
+    #[test]
+    fn cap_input_truncates_multibyte_on_char_boundary() {
+        // Each "é" is two UTF-8 bytes; byte slicing at MAX_INPUT_CHARS would
+        // split a codepoint. Character truncation must keep valid UTF-8.
+        let text = "é".repeat(MAX_INPUT_CHARS + 100);
+        let capped = cap_input(&text);
+        assert_eq!(capped.chars().count(), MAX_INPUT_CHARS);
+        // `String`/`&str` are UTF-8 by construction; round-trip to prove it.
+        assert!(std::str::from_utf8(capped.as_bytes()).is_ok());
+
+        // Also exercise a 3-byte codepoint.
+        let cjk = "あ".repeat(MAX_INPUT_CHARS + 1);
+        let capped_cjk = cap_input(&cjk);
+        assert_eq!(capped_cjk.chars().count(), MAX_INPUT_CHARS);
+        assert!(std::str::from_utf8(capped_cjk.as_bytes()).is_ok());
     }
 }
