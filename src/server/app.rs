@@ -118,6 +118,17 @@ pub fn create_app(state: AppState) -> Router {
         // off so monitoring clients can poll without conditional logic).
         .route("/v1/cache/stats", get(routes::cache_stats))
         .route("/v1/cache/reset", post(routes::cache_reset))
+        // OpenAI audio API surface (speech synthesis + transcription/translation).
+        // Both the `/v1`-prefixed and unversioned forms are mounted.
+        .route("/v1/audio/speech", post(routes::audio_speech))
+        .route(
+            "/v1/audio/transcriptions",
+            post(routes::audio_transcriptions),
+        )
+        .route("/v1/audio/translations", post(routes::audio_translations))
+        .route("/audio/speech", post(routes::audio_speech))
+        .route("/audio/transcriptions", post(routes::audio_transcriptions))
+        .route("/audio/translations", post(routes::audio_translations))
         // Aliases (some clients use these)
         .route("/chat/completions", post(routes::chat_completions))
         .route("/completions", post(routes::completions))

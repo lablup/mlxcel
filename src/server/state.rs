@@ -25,6 +25,7 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use crate::distributed::pipeline::{PipelineObservability, PpTracer};
 use crate::tokenizer::MlxcelTokenizer;
 
+use super::audio_model::AudioModelProvider;
 use super::batch::BatchObservability;
 use super::conversation_store::ConversationStore;
 use super::prompt_cache::{PromptCacheStore, metrics::PromptCacheMetrics};
@@ -371,6 +372,10 @@ pub struct AppState {
     /// `conversation` field in Responses-API requests. `None` when the
     /// store is disabled.
     pub conversation_store: Option<Arc<ConversationStore>>,
+    /// Audio-model provider serving the `/audio/*` endpoints. `None` until a
+    /// speech-to-text or text-to-speech model is wired in; while it is `None`
+    /// the audio routes return a structured `501 Not Implemented`.
+    pub audio_model: Option<Arc<dyn AudioModelProvider>>,
 }
 
 impl AppState {
@@ -398,6 +403,7 @@ impl AppState {
             prompt_cache: None,
             responses_store: None,
             conversation_store: None,
+            audio_model: None,
         }
     }
 
@@ -429,6 +435,7 @@ impl AppState {
             prompt_cache: None,
             responses_store: None,
             conversation_store: None,
+            audio_model: None,
         }
     }
 
@@ -481,6 +488,14 @@ impl AppState {
     #[must_use]
     pub fn with_pp_tracer(mut self, tracer: Option<Arc<PpTracer>>) -> Self {
         self.pp_tracer = tracer;
+        self
+    }
+
+    /// Attach an audio-model provider serving the `/audio/*` endpoints. Pass
+    /// `None` to leave the routes returning a structured `501 Not Implemented`.
+    #[must_use]
+    pub fn with_audio_model(mut self, provider: Option<Arc<dyn AudioModelProvider>>) -> Self {
+        self.audio_model = provider;
         self
     }
 

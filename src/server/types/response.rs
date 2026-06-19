@@ -466,6 +466,20 @@ impl ErrorResponse {
             status: axum::http::StatusCode::SERVICE_UNAVAILABLE,
         }
     }
+
+    /// Build a `501 Not Implemented` error. Used by the audio endpoints to
+    /// report that no model is loaded for the requested audio direction while
+    /// the request itself parsed successfully.
+    pub fn not_implemented(message: impl Into<String>) -> Self {
+        Self {
+            error: ErrorDetail {
+                message: message.into(),
+                error_type: "not_implemented".into(),
+                code: None,
+            },
+            status: axum::http::StatusCode::NOT_IMPLEMENTED,
+        }
+    }
 }
 
 impl axum::response::IntoResponse for ErrorResponse {
@@ -509,6 +523,24 @@ pub struct TokenizeResponse {
 #[derive(Debug, Clone, Serialize)]
 pub struct DetokenizeResponse {
     pub content: String,
+}
+
+/// Transcription/translation response (POST /v1/audio/transcriptions and
+/// /v1/audio/translations).
+///
+/// The default `json` response format serializes to `{ "text": ... }`; the
+/// optional fields are populated only for `verbose_json` and are omitted
+/// otherwise.
+#[derive(Debug, Clone, Serialize)]
+pub struct AudioTranscriptionResponse {
+    /// Recognized text.
+    pub text: String,
+    /// Detected or supplied source language (verbose responses only).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub language: Option<String>,
+    /// Source audio duration in seconds (verbose responses only).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duration: Option<f32>,
 }
 
 /// Server properties response (GET /props)

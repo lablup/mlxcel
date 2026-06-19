@@ -16,6 +16,7 @@
 
 pub mod anthropic_translator;
 pub mod app;
+pub mod audio_model;
 pub mod batch;
 mod chat_request;
 pub mod chat_template;
@@ -45,6 +46,10 @@ pub mod tool_calls;
 pub mod types;
 
 pub use app::create_app;
+pub use audio_model::{
+    AudioModelError, AudioModelKind, AudioModelProvider, AudioSynthesizeInput,
+    AudioSynthesizeOutput, AudioTranscribeInput, AudioTranscribeOutput,
+};
 pub use chat_template::ChatTemplateProcessor;
 pub use chat_template_kwargs::{
     ChatTemplateKwargs, ChatTemplateKwargsError, LLAMA_ARG_CHAT_TEMPLATE_KWARGS,

@@ -19,6 +19,7 @@
 //! `server/media.rs`, `server/streaming.rs`, and `server/model_worker.rs`.
 
 pub mod anthropic;
+pub mod audio;
 pub mod cache;
 pub mod chat;
 pub mod completions;
@@ -33,6 +34,7 @@ pub mod slots;
 pub mod tokenize;
 
 pub use anthropic::{anthropic_count_tokens, anthropic_messages};
+pub use audio::{audio_speech, audio_transcriptions, audio_translations};
 pub use cache::{cache_reset, cache_stats};
 pub use chat::chat_completions;
 pub use completions::completions;

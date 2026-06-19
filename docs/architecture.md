@@ -87,7 +87,12 @@ Important control surfaces:
 2. `src/server/startup.rs` resolves startup configuration, loads the model, and
    builds the Axum application.
 3. `src/server/app.rs` mounts routes such as `/v1/chat/completions`,
-   `/v1/completions`, `/v1/responses`, `/health`, and `/v1/models`.
+   `/v1/completions`, `/v1/responses`, `/health`, and `/v1/models`. The OpenAI
+   audio surface is also mounted (both `/v1`-prefixed and unversioned):
+   `/v1/audio/speech` (text-to-speech), `/v1/audio/transcriptions`, and
+   `/v1/audio/translations` (speech-to-text). These return a structured
+   `501 Not Implemented` until a speech model is wired into the audio-model
+   slot on `AppState`.
 4. Route handlers translate requests into internal generation work.
 5. `src/server/batch/` schedules batched decode when enabled.
 6. Streaming responses are emitted as SSE frames.

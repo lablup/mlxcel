@@ -31,6 +31,7 @@ pub mod config;
 pub mod encoder;
 pub mod feature_extractor;
 pub mod nemotron_h_nano_omni;
+pub mod wav_writer;
 
 pub use config::AudioConfig;
 pub use encoder::AudioEncoder;
@@ -38,3 +39,4 @@ pub use feature_extractor::{
     AudioFeatureExtractor, AudioFeatureExtractorConfig, compute_audio_num_tokens, load_wav_file,
     load_wav_from_bytes,
 };
+pub use wav_writer::encode_wav_pcm16;

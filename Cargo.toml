@@ -148,7 +148,7 @@ toktrie_hf_tokenizers = "1.7"
 
 # HTTP Server
 tokio = { version = "1.52", features = ["full"] }
-axum = { version = "0.7", features = ["json", "macros"] }
+axum = { version = "0.7", features = ["json", "macros", "multipart"] }
 tokio-stream = "0.1"
 tokio-util = "0.7"
 futures = "0.3"
