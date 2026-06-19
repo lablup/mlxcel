@@ -142,16 +142,43 @@ fn reflect_pad(audio: &[f32], pad: usize) -> Vec<f32> {
     out
 }
 
+/// Upper bound on the sample count a single resample may emit: one hour of
+/// 16 kHz audio.
+///
+/// Linear resampling expands the buffer by `16000 / src_rate`. The WAV reader
+/// accepts any non-zero declared sample rate, so a crafted-but-well-formed
+/// header claiming a tiny rate (e.g. 1 Hz) would otherwise size the output at
+/// `len * 16000`, turning a few hundred thousand input samples into hundreds of
+/// billions; the resulting `Vec` allocation aborts the process. Clamping the
+/// output keeps the allocation bounded. The HTTP upload is already capped at a
+/// few tens of MiB upstream, so a legitimate clip (sampled at >= 8 kHz) never
+/// approaches this ceiling.
+const MAX_RESAMPLED_SAMPLES: usize = WHISPER_SAMPLE_RATE as usize * 3600;
+
+/// Output sample count for a resample to 16 kHz, clamped to
+/// [`MAX_RESAMPLED_SAMPLES`]. Split out so the bound is unit-testable without
+/// allocating the (potentially large) output buffer.
+fn resampled_len(input_len: usize, src_rate: u32) -> usize {
+    if src_rate == WHISPER_SAMPLE_RATE {
+        return input_len;
+    }
+    let ratio = WHISPER_SAMPLE_RATE as f64 / src_rate as f64;
+    let projected = ((input_len as f64) * ratio).round() as usize;
+    projected.min(MAX_RESAMPLED_SAMPLES)
+}
+
 /// Linear-interpolation resampler from `src_rate` to 16 kHz mono.
 ///
 /// Linear interpolation is adequate for the recognizer's robustness; a
-/// polyphase/sinc resampler is a documented follow-up.
+/// polyphase/sinc resampler is a documented follow-up. The output length is
+/// bounded by [`MAX_RESAMPLED_SAMPLES`] so a tiny declared `src_rate` cannot
+/// trigger an unbounded allocation.
 pub fn resample_to_16k(samples: &[f32], src_rate: u32) -> Vec<f32> {
     if src_rate == WHISPER_SAMPLE_RATE || samples.is_empty() {
         return samples.to_vec();
     }
     let ratio = WHISPER_SAMPLE_RATE as f64 / src_rate as f64;
-    let out_len = ((samples.len() as f64) * ratio).round() as usize;
+    let out_len = resampled_len(samples.len(), src_rate);
     let mut out = Vec::with_capacity(out_len);
     for i in 0..out_len {
         let src_pos = i as f64 / ratio;
@@ -318,5 +345,15 @@ mod tests {
         let out = resample_to_16k(&audio, 32_000);
         // 32 kHz -> 16 kHz halves the sample count (within rounding).
         assert!((out.len() as i64 - (audio.len() as i64 / 2)).abs() <= 1);
+    }
+
+    #[test]
+    fn resampled_len_clamps_pathological_low_rate() {
+        // A near-zero declared rate would expand the buffer by ~16000x; the cap
+        // keeps the allocation bounded so a crafted WAV cannot abort the worker.
+        assert_eq!(resampled_len(10_000_000, 1), MAX_RESAMPLED_SAMPLES);
+        // Legitimate rates pass through unclamped.
+        assert_eq!(resampled_len(1_000, WHISPER_SAMPLE_RATE), 1_000); // identity
+        assert_eq!(resampled_len(1_000, 8_000), 2_000); // 8 kHz -> 16 kHz doubles
     }
 }
