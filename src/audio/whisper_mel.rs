@@ -348,6 +348,40 @@ mod tests {
     }
 
     #[test]
+    fn reflect_pad_empty_returns_zeros() {
+        // An empty waveform must not panic; the output is all zeros of length
+        // 2 * pad, satisfying the downstream `padded.len() >= WHISPER_N_FFT`
+        // check without reading out of bounds.
+        let pad = WHISPER_N_FFT / 2;
+        let out = reflect_pad(&[], pad);
+        assert_eq!(out.len(), 2 * pad);
+        assert!(out.iter().all(|&v| v == 0.0));
+    }
+
+    #[test]
+    fn reflect_pad_shorter_than_pad_does_not_panic() {
+        // When the input is shorter than the pad width the clamped-index path
+        // is taken for both prefix and suffix. This is the edge case the HIGH
+        // security fix targets: a crafted very-short clip must not cause an
+        // index out of bounds.
+        let short = [0.5f32, -0.5];
+        let pad = WHISPER_N_FFT / 2; // 200
+        let out = reflect_pad(&short, pad);
+        assert_eq!(out.len(), short.len() + 2 * pad);
+        // All values must be in the valid sample range (no garbage).
+        assert!(out.iter().all(|&v| v.is_finite()));
+    }
+
+    #[test]
+    fn very_short_audio_returns_empty_spectrogram() {
+        // A clip too short to yield any frames after the trailing-frame drop
+        // must return (empty, 0) rather than panicking or producing garbage.
+        let (features, frames) = log_mel_spectrogram(&[0.0f32; 1], 80);
+        assert_eq!(frames, 0);
+        assert!(features.is_empty());
+    }
+
+    #[test]
     fn resampled_len_clamps_pathological_low_rate() {
         // A near-zero declared rate would expand the buffer by ~16000x; the cap
         // keeps the allocation bounded so a crafted WAV cannot abort the worker.
