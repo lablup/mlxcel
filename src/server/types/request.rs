@@ -765,14 +765,15 @@ pub struct AudioSpeechRequest {
     pub speed: Option<f32>,
 }
 
-/// Speech-to-text request fields (POST /v1/audio/transcriptions and
+/// Speech-to-text request schema (POST /v1/audio/transcriptions and
 /// /v1/audio/translations).
 ///
-/// These arrive as `multipart/form-data`: the audio file is a separate part
-/// (parsed directly from the multipart stream, not this struct) while the
-/// remaining form fields populate this struct. Deriving `Deserialize` keeps
-/// the field naming aligned with the OpenAI JSON schema for documentation and
-/// future reuse.
+/// This struct mirrors the OpenAI transcription field schema for reference and
+/// future reuse. The live multipart handler parses the fields directly from the
+/// `multipart/form-data` stream and does not deserialize into this struct.
+/// `Deserialize` is derived to keep field naming aligned with the OpenAI JSON
+/// schema and to support JSON-based deserialization in tests or future contexts
+/// that do not use multipart upload.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct AudioTranscriptionRequest {
     /// Identifier of the speech model to use.
@@ -845,6 +846,33 @@ mod tests {
         assert_eq!(
             msg.content.image_urls(),
             vec!["data:image/png;base64,AAAA".to_string()]
+        );
+    }
+
+    #[test]
+    fn audio_transcription_request_deserializes_and_defaults() {
+        // All fields present: verify each is captured.
+        let full: AudioTranscriptionRequest = serde_json::from_str(
+            r#"{"model":"test-model","language":"en","response_format":"json","temperature":0.0}"#,
+        )
+        .expect("full form deserializes");
+        assert_eq!(full.model, "test-model");
+        assert_eq!(full.language.as_deref(), Some("en"));
+        assert_eq!(full.response_format.as_deref(), Some("json"));
+        assert_eq!(full.temperature, Some(0.0_f32));
+
+        // Omitted optional fields must default to None.
+        let minimal: AudioTranscriptionRequest =
+            serde_json::from_str(r#"{"model":"m"}"#).expect("minimal form deserializes");
+        assert_eq!(minimal.model, "m");
+        assert!(minimal.language.is_none(), "language defaults to None");
+        assert!(
+            minimal.response_format.is_none(),
+            "response_format defaults to None"
+        );
+        assert!(
+            minimal.temperature.is_none(),
+            "temperature defaults to None"
         );
     }
 }

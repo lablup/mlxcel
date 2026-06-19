@@ -172,7 +172,7 @@ async fn transcribe(state: AppState, multipart: Multipart, translate: bool) -> R
 
 /// Fields extracted from a transcription/translation multipart form. The audio
 /// file is carried separately from the JSON-shaped scalar fields.
-#[derive(Default)]
+#[derive(Debug, Default)]
 struct ParsedTranscriptionForm {
     /// `(bytes, original filename)` of the uploaded audio.
     file: Option<(Vec<u8>, Option<String>)>,
@@ -285,6 +285,12 @@ fn build_audio_response(format: &AudioFormat, body: Vec<u8>) -> Response {
 }
 
 /// Render a transcription result in the requested response format.
+///
+/// Supported formats: `json` (the default, also matches `None` and empty
+/// string), `text`, and `verbose_json`. Any other non-empty value returns 400
+/// so callers catch typos rather than silently receiving a JSON body. This
+/// validation stays in this function rather than at the parse stage so that
+/// the 501 response from the no-model path dominates during Phase 1.
 fn build_transcription_response(
     output: AudioTranscribeOutput,
     response_format: Option<&str>,
@@ -293,6 +299,13 @@ fn build_transcription_response(
         .map(|value| value.trim().to_ascii_lowercase())
         .as_deref()
     {
+        // `json` and the absent/empty-string default both return the compact form.
+        None | Some("") | Some("json") => Json(AudioTranscriptionResponse {
+            text: output.text,
+            language: None,
+            duration: None,
+        })
+        .into_response(),
         Some("text") => (StatusCode::OK, output.text).into_response(),
         Some("verbose_json") => Json(AudioTranscriptionResponse {
             text: output.text,
@@ -300,12 +313,13 @@ fn build_transcription_response(
             duration: output.duration_seconds,
         })
         .into_response(),
-        // `json` (the default) and any other value collapse to `{ "text": ... }`.
-        _ => Json(AudioTranscriptionResponse {
-            text: output.text,
-            language: None,
-            duration: None,
-        })
+        Some(other) => ErrorResponse::new(
+            format!(
+                "response_format '{other}' is not supported; \
+                 supported formats are: json, text, verbose_json"
+            ),
+            "invalid_request_error",
+        )
         .into_response(),
     }
 }
@@ -330,6 +344,8 @@ fn audio_model_error_response(err: AudioModelError) -> ErrorResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::extract::FromRequest;
+    use axum::http::Request;
 
     #[test]
     fn resolve_format_defaults_to_wav() {
@@ -420,6 +436,65 @@ mod tests {
     }
 
     #[test]
+    fn transcription_unsupported_format_returns_bad_request() {
+        let make = || AudioTranscribeOutput {
+            text: "hello".to_string(),
+            language: Some("en".to_string()),
+            duration_seconds: Some(1.5),
+        };
+        for format in ["srt", "vtt"] {
+            let response = build_transcription_response(make(), Some(format));
+            assert_eq!(
+                response.status(),
+                StatusCode::BAD_REQUEST,
+                "format '{format}' should return 400"
+            );
+        }
+    }
+
+    #[test]
+    fn transcription_json_explicit_matches_none_default() {
+        let make = || AudioTranscribeOutput {
+            text: "hello".to_string(),
+            language: Some("en".to_string()),
+            duration_seconds: Some(1.5),
+        };
+        for fmt in [None, Some("json")] {
+            let response = build_transcription_response(make(), fmt);
+            assert_eq!(response.status(), StatusCode::OK);
+            let ct = response
+                .headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or_default();
+            assert!(
+                ct.contains("application/json"),
+                "format {fmt:?} should yield JSON content type, got {ct}"
+            );
+        }
+    }
+
+    #[test]
+    fn transcription_verbose_json_returns_json_content_type() {
+        let output = AudioTranscribeOutput {
+            text: "bonjour".to_string(),
+            language: Some("fr".to_string()),
+            duration_seconds: Some(2.0),
+        };
+        let response = build_transcription_response(output, Some("verbose_json"));
+        assert_eq!(response.status(), StatusCode::OK);
+        let ct = response
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default();
+        assert!(
+            ct.contains("application/json"),
+            "verbose_json should yield JSON content type, got {ct}"
+        );
+    }
+
+    #[test]
     fn minimal_transcription_serializes_to_text_only() {
         let body = AudioTranscriptionResponse {
             text: "hi".to_string(),
@@ -439,5 +514,148 @@ mod tests {
         assert!(req.voice.is_none());
         assert!(req.response_format.is_none());
         assert!(req.speed.is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // Multipart parser unit tests
+    // -----------------------------------------------------------------------
+
+    const BOUNDARY: &str = "testboundary1234";
+
+    /// Build a single text part (no filename, no Content-Type header).
+    fn text_part(name: &str, value: &[u8]) -> Vec<u8> {
+        let mut part = Vec::new();
+        part.extend_from_slice(format!("--{BOUNDARY}\r\n").as_bytes());
+        part.extend_from_slice(
+            format!("Content-Disposition: form-data; name=\"{name}\"\r\n").as_bytes(),
+        );
+        part.extend_from_slice(b"\r\n");
+        part.extend_from_slice(value);
+        part.extend_from_slice(b"\r\n");
+        part
+    }
+
+    /// Build a binary file part with Content-Disposition filename and Content-Type.
+    fn file_part(name: &str, filename: &str, content_type: &str, data: &[u8]) -> Vec<u8> {
+        let mut part = Vec::new();
+        part.extend_from_slice(format!("--{BOUNDARY}\r\n").as_bytes());
+        part.extend_from_slice(
+            format!("Content-Disposition: form-data; name=\"{name}\"; filename=\"{filename}\"\r\n")
+                .as_bytes(),
+        );
+        part.extend_from_slice(format!("Content-Type: {content_type}\r\n").as_bytes());
+        part.extend_from_slice(b"\r\n");
+        part.extend_from_slice(data);
+        part.extend_from_slice(b"\r\n");
+        part
+    }
+
+    /// The closing delimiter that terminates a multipart body.
+    fn end_boundary() -> Vec<u8> {
+        format!("--{BOUNDARY}--\r\n").into_bytes()
+    }
+
+    /// Wrap raw bytes in a POST request and extract a `Multipart` from it.
+    async fn make_multipart(body_bytes: Vec<u8>) -> Multipart {
+        let request = Request::builder()
+            .method("POST")
+            .uri("/v1/audio/transcriptions")
+            .header(
+                header::CONTENT_TYPE,
+                format!("multipart/form-data; boundary={BOUNDARY}"),
+            )
+            .body(Body::from(body_bytes))
+            .unwrap();
+        Multipart::from_request(request, &()).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn multipart_parses_well_formed_form() {
+        let file_bytes = encode_wav_pcm16(&[0.0_f32, 0.1, -0.1], 16_000, 1);
+        let mut body = Vec::new();
+        body.extend(file_part("file", "clip.wav", "audio/wav", &file_bytes));
+        body.extend(text_part("model", b"test-stt-model"));
+        body.extend(text_part("language", b"en"));
+        body.extend(text_part("response_format", b"json"));
+        body.extend(text_part("temperature", b"0.5"));
+        body.extend(end_boundary());
+
+        let form = parse_transcription_multipart(make_multipart(body).await)
+            .await
+            .expect("well-formed form parses");
+        let (bytes, filename) = form.file.expect("file bytes captured");
+        assert_eq!(bytes, file_bytes, "file bytes round-trip");
+        assert_eq!(filename.as_deref(), Some("clip.wav"), "filename captured");
+        assert_eq!(form.model.as_deref(), Some("test-stt-model"));
+        assert_eq!(form.language.as_deref(), Some("en"));
+        assert_eq!(form.response_format.as_deref(), Some("json"));
+        let temp = form.temperature.expect("temperature captured");
+        assert!((temp - 0.5_f32).abs() < 1e-5, "expected 0.5, got {temp}");
+    }
+
+    #[tokio::test]
+    async fn multipart_empty_temperature_yields_none() {
+        let mut body = Vec::new();
+        body.extend(text_part("model", b"m"));
+        body.extend(text_part("temperature", b"  "));
+        body.extend(end_boundary());
+
+        let form = parse_transcription_multipart(make_multipart(body).await)
+            .await
+            .expect("empty temperature field parses without error");
+        assert!(
+            form.temperature.is_none(),
+            "whitespace-only temperature should be treated as not supplied"
+        );
+    }
+
+    #[tokio::test]
+    async fn multipart_invalid_temperature_returns_bad_request() {
+        let mut body = Vec::new();
+        body.extend(text_part("model", b"m"));
+        body.extend(text_part("temperature", b"not_a_number"));
+        body.extend(end_boundary());
+
+        let err = parse_transcription_multipart(make_multipart(body).await)
+            .await
+            .expect_err("non-numeric temperature should fail");
+        assert_eq!(err.status, StatusCode::BAD_REQUEST);
+        assert!(
+            err.error.message.contains("not_a_number"),
+            "error message should echo the bad value"
+        );
+    }
+
+    #[tokio::test]
+    async fn multipart_unknown_part_is_drained_and_ignored() {
+        let mut body = Vec::new();
+        body.extend(text_part("prompt", b"some caller-supplied hint"));
+        body.extend(text_part("model", b"my-model"));
+        body.extend(end_boundary());
+
+        let form = parse_transcription_multipart(make_multipart(body).await)
+            .await
+            .expect("unknown part should be drained without error");
+        assert_eq!(
+            form.model.as_deref(),
+            Some("my-model"),
+            "known parts after unknown part are still captured"
+        );
+    }
+
+    #[tokio::test]
+    async fn multipart_missing_file_part_yields_none() {
+        let mut body = Vec::new();
+        body.extend(text_part("model", b"m"));
+        body.extend(text_part("language", b"fr"));
+        body.extend(end_boundary());
+
+        let form = parse_transcription_multipart(make_multipart(body).await)
+            .await
+            .expect("form without file part still parses");
+        assert!(
+            form.file.is_none(),
+            "file field is None when the part is absent (caller enforces the 400)"
+        );
     }
 }
