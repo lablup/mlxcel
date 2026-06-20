@@ -16,14 +16,15 @@
 
 use super::*;
 
-/// The five KV-cache modes the issue scopes the advisor to. `Turbo4Delegated`
-/// is intentionally excluded.
+/// The KV-cache modes the advisor may emit. `Turbo3Asym` is intentionally
+/// excluded: its measured decode throughput (about 0.01-0.07x of fp16) makes it
+/// a documented memory-extremis last resort, never an advisory pick.
 const ALLOWED_MODES: [KVCacheMode; 5] = [
     KVCacheMode::Fp16,
     KVCacheMode::Int8,
+    KVCacheMode::Turbo4Delegated,
     KVCacheMode::Turbo4Asym,
     KVCacheMode::Turbo4,
-    KVCacheMode::Turbo3Asym,
 ];
 
 const ALL_ARCH_KINDS: [KvArchKind; 6] = [
@@ -60,19 +61,19 @@ fn short_context_is_always_fp16() {
 }
 
 #[test]
-fn standard_medium_suggests_turbo4_asym() {
+fn standard_medium_suggests_int8_then_delegated() {
     let advice = recommend_kv_cache_mode(KvArchKind::Standard, "llama", KvContextRange::Medium);
-    assert_eq!(advice.suggested, KVCacheMode::Turbo4Asym);
-    assert_eq!(advice.also_consider, Some(KVCacheMode::Int8));
+    assert_eq!(advice.suggested, KVCacheMode::Int8);
+    assert_eq!(advice.also_consider, Some(KVCacheMode::Turbo4Delegated));
 }
 
 #[test]
 fn standard_long_non_allowlisted_never_symmetric_turbo4() {
     // Llama is a dense Q4_K_M-style family and is NOT on the allowlist.
     let advice = recommend_kv_cache_mode(KvArchKind::Standard, "llama", KvContextRange::Long);
-    assert_eq!(advice.suggested, KVCacheMode::Turbo4Asym);
+    assert_eq!(advice.suggested, KVCacheMode::Turbo4Delegated);
     assert_ne!(advice.suggested, KVCacheMode::Turbo4);
-    assert_eq!(advice.also_consider, Some(KVCacheMode::Turbo3Asym));
+    assert_eq!(advice.also_consider, Some(KVCacheMode::Turbo4Asym));
 }
 
 #[test]
@@ -84,7 +85,7 @@ fn allowlisted_family_long_suggests_symmetric_turbo4() {
             KVCacheMode::Turbo4,
             "allowlisted family {mt} at long context should suggest turbo4"
         );
-        assert_eq!(advice.also_consider, Some(KVCacheMode::Turbo4Asym));
+        assert_eq!(advice.also_consider, Some(KVCacheMode::Turbo4Delegated));
     }
 }
 
@@ -145,10 +146,11 @@ fn mla_uses_int8_never_turbo() {
     }
 }
 
-/// Every recommendation is one of the five KV-cache modes named in the
-/// issue, and never `Turbo4Delegated`. Because the output is always a
-/// `KVCacheMode` (a KV-cache-only storage setting), it cannot imply a
-/// bf16 to f16 promotion of quantized model weights (the #289 landmine).
+/// Every recommendation is one of the allowed KV-cache modes, and never
+/// `Turbo3Asym` (a documented memory-extremis last resort, not an advisory
+/// pick). Because the output is always a `KVCacheMode` (a KV-cache-only storage
+/// setting), it cannot imply a bf16 to f16 promotion of quantized model weights
+/// (the #289 landmine).
 #[test]
 fn recommendation_is_always_an_allowed_kv_cache_mode() {
     let model_types = ["llama", "qwen3_5", "deepseek_v3", "mamba", "gemma3", ""];
@@ -161,13 +163,13 @@ fn recommendation_is_always_an_allowed_kv_cache_mode() {
                     "{kind:?}/{mt}/{range:?} suggested an out-of-scope mode: {:?}",
                     advice.suggested
                 );
-                assert_ne!(advice.suggested, KVCacheMode::Turbo4Delegated);
+                assert_ne!(advice.suggested, KVCacheMode::Turbo3Asym);
                 if let Some(also) = advice.also_consider {
                     assert!(
                         ALLOWED_MODES.contains(&also),
                         "{kind:?}/{mt}/{range:?} also_consider out-of-scope: {also:?}"
                     );
-                    assert_ne!(also, KVCacheMode::Turbo4Delegated);
+                    assert_ne!(also, KVCacheMode::Turbo3Asym);
                 }
             }
         }
@@ -200,8 +202,8 @@ fn advise_classifies_standard_config_for_all_ranges() {
     assert_eq!(advices.len(), 3);
     assert_eq!(advices[0].context_range, KvContextRange::Short);
     assert_eq!(advices[0].suggested, KVCacheMode::Fp16);
-    assert_eq!(advices[1].suggested, KVCacheMode::Turbo4Asym);
-    assert_eq!(advices[2].suggested, KVCacheMode::Turbo4Asym);
+    assert_eq!(advices[1].suggested, KVCacheMode::Int8);
+    assert_eq!(advices[2].suggested, KVCacheMode::Turbo4Delegated);
 }
 
 /// Computing advice must not change the runtime default. With no opt-in
@@ -247,9 +249,9 @@ fn render_block_empty_for_no_advice() {
 fn headline_includes_also_consider_when_present() {
     let advice = recommend_kv_cache_mode(KvArchKind::Standard, "llama", KvContextRange::Medium);
     let line = advice.headline();
-    assert!(line.contains("fp16+turbo4"));
-    assert!(line.contains("also benchmark"));
     assert!(line.contains("int8"));
+    assert!(line.contains("also benchmark"));
+    assert!(line.contains("turbo4-delegated"));
 }
 
 #[test]
@@ -336,9 +338,10 @@ fn alternate_naming_power_of_two_head_dim_keeps_turbo() {
     assert!(128u64.is_power_of_two());
 
     let advices = advise_kv_cache_modes_from_config(&cfg);
-    assert!(advices.len() >= 2);
-    // olmo is not on the symmetric allowlist; medium stays asymmetric Turbo4.
-    assert_eq!(advices[1].suggested, KVCacheMode::Turbo4Asym);
+    assert_eq!(advices.len(), 3);
+    // olmo is not on the symmetric allowlist; pow2 head dim keeps the
+    // Walsh-Hadamard turbo4-delegated at long context.
+    assert_eq!(advices[2].suggested, KVCacheMode::Turbo4Delegated);
 }
 
 #[test]
@@ -356,7 +359,8 @@ fn power_of_two_head_dim_keeps_turbo() {
 
     let advices = advise_kv_cache_modes_from_config(&cfg);
     assert!(advices.len() >= 2);
-    // medium and long should still suggest Turbo4Asym (llama is not on the symmetric allowlist).
-    assert_eq!(advices[1].suggested, KVCacheMode::Turbo4Asym);
-    assert_eq!(advices[2].suggested, KVCacheMode::Turbo4Asym);
+    // Pow2 head dim keeps Turbo eligible: long (non-allowlisted) leads with the
+    // Walsh-Hadamard turbo4-delegated rather than being downgraded to int8.
+    assert_eq!(advices[2].suggested, KVCacheMode::Turbo4Delegated);
+    assert_eq!(advices[2].also_consider, Some(KVCacheMode::Turbo4Asym));
 }

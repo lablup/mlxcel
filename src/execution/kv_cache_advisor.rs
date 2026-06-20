@@ -154,15 +154,27 @@ impl KvCacheModeAdvice {
 /// Recommend a KV-cache mode for a model family and context range.
 ///
 /// Pure function: identical inputs always produce identical output and no I/O
-/// is performed. The result is one of the five issue-#327 modes: `fp16`,
-/// `int8`, `fp16+turbo4` (asymmetric), `turbo4` (symmetric), or `fp16+turbo3`.
+/// is performed. The result is one of six KV-cache modes: `fp16`, `int8`,
+/// `turbo4-delegated`, `fp16+turbo4` (asymmetric), `turbo4` (symmetric), or
+/// `fp16+turbo3`.
+///
+/// The advice keys on the measured Apple-Silicon decode/prefill sweep
+/// (`benchmarks/turbo_kv/`, M1 Ultra, post-#369): every quantized KV mode
+/// decodes slower than fp16, so the suggestions trade KV footprint for memory,
+/// not throughput. The fast quantized picks are `int8` (about 2x compression,
+/// robust on both dense and MoE) and `turbo4-delegated` (about 4x V, the
+/// fastest of the Turbo codecs); `fp16+turbo4` keeps K exact at a higher decode
+/// cost; symmetric `turbo4` maximizes compression but is the slowest and
+/// quality-sensitive.
 ///
 /// Safety invariants enforced here and covered by tests:
 /// - Symmetric [`KVCacheMode::Turbo4`] is suggested **only** for families on
 ///   the PPL allowlist ([`is_symmetric_turbo_allowed`]). Dense Q4_K_M models
 ///   off the allowlist can degrade to PPL 200+ under symmetric Turbo4.
-/// - [`KVCacheMode::Turbo4Delegated`] is never suggested; it is a decode-speed
-///   experiment, not one of the five advisory modes.
+/// - [`KVCacheMode::Turbo3Asym`] is never the suggested or also-benchmark mode.
+///   Its measured decode throughput (about 0.01-0.07x of fp16) makes it a
+///   memory-extremis last resort documented in `docs/turbo-kv-cache.md`, not an
+///   advisory pick.
 /// - MLA and pure-SSM families never receive a Turbo (Walsh-Hadamard) mode,
 ///   because their cache dimension is not a power of two (MLA) or absent
 ///   (SSM).
@@ -172,7 +184,7 @@ pub fn recommend_kv_cache_mode(
     model_type: &str,
     range: KvContextRange,
 ) -> KvCacheModeAdvice {
-    use KVCacheMode::{Fp16, Int8, Turbo3Asym, Turbo4, Turbo4Asym};
+    use KVCacheMode::{Fp16, Int8, Turbo4, Turbo4Asym, Turbo4Delegated};
     use KvArchKind::{Hybrid, MlaCompressed, MlaDecompressed, PureSsm, SlidingWindow, Standard};
     use KvContextRange::{Long, Medium, Short};
 
@@ -208,22 +220,22 @@ pub fn recommend_kv_cache_mode(
                     "Short context keeps the KV cache small, so fp16 preserves baseline quality and decode speed.",
                 ),
                 Medium => (
-                    Turbo4Asym,
-                    Some(Int8),
-                    "fp16+turbo4 keeps K in fp16 (softmax never sees a quantized K) and compresses V, the safest Turbo starting point; int8 is a simpler ~50% alternative. Benchmark both against fp16.",
+                    Int8,
+                    Some(Turbo4Delegated),
+                    "int8 is the fastest quantized KV mode here (about 2x compression, robust on dense and MoE). turbo4-delegated reaches about 4x V compression at similar dense decode speed; fp16+turbo4 keeps K exact for the same V savings at a higher decode cost. Every quantized mode decodes slower than fp16, so adopt only when KV memory matters and benchmark first.",
                 ),
                 Long => {
                     if is_symmetric_turbo_allowed(model_type) {
                         (
                             Turbo4,
-                            Some(Turbo4Asym),
-                            "This family is on the symmetric-Turbo4 PPL allowlist, so turbo4 (4-bit K and V) offers the largest KV savings; fp16+turbo4 is the lower-risk fallback. Benchmark both for quality and throughput.",
+                            Some(Turbo4Delegated),
+                            "This family is on the symmetric-Turbo4 PPL allowlist, so turbo4 (4-bit K and V) gives the largest KV footprint savings for long-context serving; turbo4-delegated is the faster fallback (4-bit cold V, exact recent V, fp16 K). Both decode slower than fp16, so adopt only when KV memory is the binding constraint.",
                         )
                     } else {
                         (
-                            Turbo4Asym,
-                            Some(Turbo3Asym),
-                            "fp16+turbo4 (K stays fp16) is the safest large KV saver. Symmetric turbo4 is withheld because this family is not on the PPL allowlist (dense Q4_K_M can reach PPL 200+); fp16+turbo3 trades more V error for further savings when memory is tight.",
+                            Turbo4Delegated,
+                            Some(Turbo4Asym),
+                            "turbo4-delegated gives about 4x V compression at the fastest quantized decode speed (4-bit cold V, exact recent V, fp16 K); fp16+turbo4 is the exact-K alternative at a higher decode cost. Symmetric turbo4 is withheld off the PPL allowlist (dense Q4_K_M can reach PPL 200+). All quantized KV modes trade memory for footprint, not decode speed.",
                         )
                     }
                 }
@@ -355,11 +367,16 @@ const NON_POW2_RATIONALE: &str = "This family's attention head dimension is not 
     a power of two, so the Turbo Walsh-Hadamard V path does not apply; \
     per-token int8 is the head-dim-agnostic KV compression to benchmark here.";
 
-/// Returns `true` for the three modes that use the Walsh-Hadamard transform.
+/// Returns `true` for the modes that use the Walsh-Hadamard transform and so
+/// require a power-of-two head dimension. `Turbo4Delegated` is included because
+/// it is a hot/cold split built on the same `Turbo4Asym` codec.
 fn is_walsh_hadamard_turbo(mode: KVCacheMode) -> bool {
     matches!(
         mode,
-        KVCacheMode::Turbo4Asym | KVCacheMode::Turbo4 | KVCacheMode::Turbo3Asym
+        KVCacheMode::Turbo4Asym
+            | KVCacheMode::Turbo4
+            | KVCacheMode::Turbo3Asym
+            | KVCacheMode::Turbo4Delegated
     )
 }
 

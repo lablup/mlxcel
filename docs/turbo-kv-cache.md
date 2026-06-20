@@ -28,6 +28,55 @@ Implementation entry points:
 
 Symmetric Turbo3 is not exposed.
 
+## Measured speed and the memory trade-off
+
+Quantized KV cache is a memory-footprint optimization, not a decode-speed one.
+On the post-#369 M1 Ultra sweep (`benchmarks/turbo_kv/`, 2026-06-19) every
+quantized mode decodes slower than fp16. The dequant work (Walsh-Hadamard
+inverse rotation plus a codebook lookup for the Turbo modes, a scale-and-add for
+int8) runs per token and, at the context lengths tested, costs more than the
+memory bandwidth it saves. On dense models the gap is wider because FFN
+dominates decode and the V read that compression shrinks is a small fraction of
+the work.
+
+Decode is reported as a fraction of the same model's fp16 throughput at that
+context; prefill at 8K. Two representative checkpoints below; the full
+four-model sweep (adding qwen2.5-7b and the 142B dots.llm1 MoE) is in
+`benchmarks/turbo_kv/`.
+
+| Mode | dense decode 4K / 16K | dense prefill 8K | MoE decode 4K / 16K | MoE prefill 8K | KV compression |
+|------|-----------------------|------------------|---------------------|----------------|----------------|
+| `fp16` | 1.00 / 1.00 | 1.00 | 1.00 / 1.00 | 1.00 | 1x (baseline) |
+| `int8` | 0.61 / 0.41 | 1.29 | 0.48 / 0.50 | 1.14 | ~2x |
+| `turbo4-delegated` | 0.63 / 0.45 | 1.27 | 0.43 / 0.34 | 1.13 | ~4x V |
+| `turbo4-asym` | 0.38 / 0.37 | 0.92 | 0.24 / 0.26 | 0.80 | ~3.8x V |
+| `turbo4` (sym) | 0.22 / 0.20 | 0.73 | 0.17 / 0.17 | 0.62 | ~4x K+V |
+| `turbo3-asym` | 0.04 / 0.02 | 0.91 | 0.05 / 0.03 | 0.77 | ~5x V |
+
+Dense = `qwen3-8b-4bit`, MoE = `qwen3-30b-a3b-4bit`, M1 Ultra.
+
+What the numbers say:
+
+- **`int8` and `turbo4-delegated` are the fast picks.** int8 (2x) is robust on
+  both dense and MoE; turbo4-delegated reaches ~4x V compression at a similar
+  decode speed by keeping recent V in fp16 and only the cold tail in 4-bit. Both
+  also speed up prefill (less KV written), 1.1-1.3x.
+- **`turbo4-asym` is the memory-and-exactness pick, not a speed pick.** K stays
+  fp16 and the #369 dequant-SDPA path is parity-exact with the fp16 reference,
+  but decode is ~0.2-0.4x. Reach for it when you need ~4x V compression with an
+  untouched K and accept the decode cost. The fused kernel that would close the
+  gap is tracked in #370.
+- **Symmetric `turbo4` maximizes compression and is the slowest;** use only on
+  an allowlisted family (see below).
+- **`turbo3-asym` is near-unusable** (0.02-0.07x, about 0.4 tok/s at 32K). It
+  exists for memory-extremis only and is not a recommended mode.
+
+The slowdown is consistent with the upstream TurboQuant+ analysis: its headline
+`+22.8%` decode-at-32K figure is measured against turbo3's own full-dequant
+path, not against fp16, and even with that win turbo3 stays at 0.93x of int8.
+The compression is a 4.6x memory trade; the decode cost is inherent to
+dequantizing a rotated, codebook-quantized cache every step.
+
 ## CLI and server flags
 
 The same TurboQuant flag group is flattened into `mlxcel generate`,
@@ -244,18 +293,22 @@ backend on the same workload.
 
 | Workload | Recommendation |
 |----------|----------------|
-| General serving | Start with `fp16`. |
-| Need lower KV memory with low risk | Test `fp16+turbo4` with boundary-V enabled. |
-| Need more aggressive V compression | Test `fp16+turbo3`; compare quality against FP16. |
-| Considering symmetric `turbo4` | Use only on an allowlisted/validated family. |
-| Long-context decode speed experiments | Benchmark `turbo4-delegated` against both `fp16` and `fp16+turbo4`. |
+| General serving | Start with `fp16`. Quantized KV is for memory pressure, not speed. |
+| Lower KV memory, fastest quantized option | Use `int8` (~2x) or `turbo4-delegated` (~4x V); both also speed up prefill. |
+| Maximum V compression with exact K | `fp16+turbo4` (turbo4-asym), accepting ~0.2-0.4x decode; enable boundary-V for quality. |
+| Considering symmetric `turbo4` | Use only on an allowlisted/validated family; it is the slowest mode. |
+| Memory-extremis only | `fp16+turbo3` decodes near-unusably; confirm the footprint is worth the speed cost. |
 
 ## Advisor recommendations (`--recommend-quant`)
 
 `mlxcel generate --recommend-quant` prints an advisory KV-cache-mode section
-alongside the quantization advice. It suggests one of the five modes (`fp16`,
-`int8`, `fp16+turbo4`, `turbo4`, `fp16+turbo3`) per model family and context
-range, so you have a benchmark starting point instead of guessing.
+alongside the quantization advice. It suggests one of `fp16`, `int8`,
+`turbo4-delegated`, `fp16+turbo4`, or `turbo4` per model family and context
+range (it withholds `fp16+turbo3`, whose decode is near-unusable), so you have a
+benchmark starting point instead of guessing. The suggestions follow the
+measured trade-off above: int8 and turbo4-delegated as the fast picks,
+fp16+turbo4 as the exact-K memory pick, symmetric turbo4 for allowlisted
+families only.
 
 The suggestions are advisory and opt-in only. The default inference path is
 unchanged: with no flags the runtime still uses `fp16`. To use a suggested mode
@@ -283,9 +336,9 @@ The conservative rules the advisor applies:
 | Family / context | Suggested | Also benchmark | Why |
 |------------------|-----------|----------------|-----|
 | Any family, short context | `fp16` | - | KV footprint is small; keep the baseline. |
-| Standard / sliding-window / hybrid, medium | `fp16+turbo4` | `int8` | K stays FP16 (softmax never sees a quantized K); safest Turbo start. |
-| Standard / sliding-window / hybrid, long, allowlisted | `turbo4` | `fp16+turbo4` | Family passed the PPL gate; largest KV savings with a lower-risk fallback. |
-| Standard / sliding-window / hybrid, long, not allowlisted | `fp16+turbo4` | `fp16+turbo3` | Symmetric `turbo4` withheld off the allowlist; `fp16+turbo3` if memory is tight. |
+| Standard / sliding-window / hybrid, medium | `int8` | `turbo4-delegated` | int8 is the fastest quantized mode (~2x); turbo4-delegated for ~4x V at a similar speed. |
+| Standard / sliding-window / hybrid, long, allowlisted | `turbo4` | `turbo4-delegated` | Family passed the PPL gate; turbo4 is max compression, delegated is the faster fallback. |
+| Standard / sliding-window / hybrid, long, not allowlisted | `turbo4-delegated` | `fp16+turbo4` | Fastest ~4x V compression; fp16+turbo4 is the exact-K alternative. Symmetric `turbo4` withheld off the allowlist. |
 | MLA (DeepSeek), medium or long | `int8` | - | The latent dimension is not a power of two, so the Turbo Walsh-Hadamard V path does not apply; per-token INT8 has no head-dim constraint. |
 | Pure SSM (Mamba/Mamba2) | `fp16` | - | No context-proportional KV cache, so Turbo modes save almost nothing. |
 | Non-power-of-two head dim (e.g. Phi-2 at head_dim 80) | `int8` (medium/long), `fp16` (short) | - | The Turbo Walsh-Hadamard transform requires a power-of-two head dimension; the advisor downgrades any Turbo suggestion to `int8` or `fp16` for these families, matching the MLA treatment. |
@@ -293,9 +346,10 @@ The conservative rules the advisor applies:
 The head-dimension check reads `head_dim` or `head_size` directly from `config.json` when present. When neither explicit field exists, it divides the hidden size by the attention head count, checking the alternate field names used by each naming convention: `hidden_size` / `d_model` / `dim` / `model_dim` for hidden size, and `num_attention_heads` / `num_heads` / `n_heads` / `n_head` for head count. This mirrors the field-name coverage in the KV-architecture classifier so the two paths agree on the derived head dimension. When none of the required fields are present, the advisor conservatively assumes Turbo is applicable and leaves the suggestion unchanged.
 
 Symmetric `turbo4` is only ever suggested for families on the allowlist; off
-the allowlist the advisor leads with `fp16+turbo4` exactly like the manual
-guidance above. Treat every suggestion as a hypothesis to validate per family
-with the checklist below before adopting it in production.
+the allowlist the advisor leads with `turbo4-delegated` at long context and
+`int8` at medium, matching the measured trade-off above. `fp16+turbo3` is never
+suggested. Treat every suggestion as a hypothesis to validate per family with
+the checklist below before adopting it in production.
 
 ## Validation checklist
 
