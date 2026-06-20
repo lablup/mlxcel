@@ -75,7 +75,12 @@ The slowdown is consistent with the upstream TurboQuant+ analysis: its headline
 `+22.8%` decode-at-32K figure is measured against turbo3's own full-dequant
 path, not against fp16, and even with that win turbo3 stays at 0.93x of int8.
 The compression is a 4.6x memory trade; the decode cost is inherent to
-dequantizing a rotated, codebook-quantized cache every step.
+dequantizing a rotated, codebook-quantized cache every step. The upstream
+sparse-V skip that produces the +22.8% does not carry over to mlxcel, because
+mlxcel's Turbo decode is a split dequant plus native SDPA rather than a fused
+flash-attention; [ADR 0002](adr/0002-turbo-kv-split-dequant-vs-fused.md) records
+the measured A/B and names fused V dequant (#370) as the one lever that can beat
+the current decode ceiling.
 
 ## CLI and server flags
 
