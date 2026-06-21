@@ -136,6 +136,16 @@ request. `GET /router/stats` reports the per-node load spread and node health.
 See [continuous batching and disaggregated serving](CONTINUOUS_BATCHING.md#multi-node-routing-load-balancing-and-failover)
 for the flags and behavior.
 
+### Security and trust model
+
+The disaggregated role-transport connections (router to prefill, prefill to decode) carry no authentication or TLS, the same assumption the pipeline-parallelism transport already makes. The entire cluster, including the router's client-facing HTTP port and all internal role-transport ports, should run inside a trusted network segment or behind a network isolation boundary (VPC security group, firewall rule, or Kubernetes NetworkPolicy) that prevents untrusted callers from reaching the internal ports.
+
+Two specific operational notes for the multi-node routing surface:
+
+- `GET /router/stats` is mounted on the router's client-facing HTTP port and returns each registered peer's host:port address, current health status, and per-node request counts. This discloses internal cluster topology to any caller that can reach the router. Restrict the router's client port to the same trusted segment as the internal ports, or front the router with a reverse proxy that blocks `/router/stats` from external callers. The same trusted-segment assumption that already applies to the disaggregated transport covers this endpoint; no additional configuration is needed for a correctly segmented deployment.
+
+- A prefill node connects to the address in the `decode_target` field of the incoming request frame to deliver the KV cache handoff. Under the trusted-segment assumption this is safe: the router populates that field only from its own configured node registry, so the addresses are operator-controlled. A defense-in-depth allowlist (prefill nodes reject `decode_target` values outside their own `--decode-peers` set) is tracked as a follow-up.
+
 ## Common limitations
 
 - Distributed support is not uniform across model families.
