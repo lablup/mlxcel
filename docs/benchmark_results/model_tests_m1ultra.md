@@ -120,7 +120,7 @@ Compatibility and performance testing for mlxcel models on **Mac Studio M1 Ultra
 | phimoe | Phi-3.5-MoE-instruct-4bit | ✅ | 114.02 | 76.55 | **110%** | mlx-lm: 69.28 |
 | solar_open | Solar-Open-100B-4bit | ✅ | 70.96 | 32.96 | 92% | mlx-lm: 35.69; 128 experts, top-8; layer-eval skip; 54GB |
 | solar_open (int4) | Solar-Open-100B-int4 | ✅ | - | 11.55 | - | mlx-lm: fails to load; 128 experts, top-8; int4 quantization; 54GB; not in the 06-12 sweep |
-| olmoe | - | ⏳ | - | - | - | |
+| olmoe | OLMoE-1B-7B-0125-Instruct-4bit | ⏳ | - | - | - | router scoring fix (#318): full softmax over all experts then gather, not top-k-only softmax; greedy temp-0 output now coherent; perf sweep pending |
 | gpt_oss (20B) | gpt-oss-20b-MXFP4-Q4 | ✅ | 282.44 | 89.72 | **100%** | mlx-lm: 89.51; MXFP4 quantization; 32 experts; bf16 decode fix |
 | gpt_oss (120B) | gpt-oss-120b-4bit | ✅ | 162.21 | 58.41 | **101%** | mlx-lm: 57.58; 128 experts, top-4; 61GB model; bf16 decode fix |
 
