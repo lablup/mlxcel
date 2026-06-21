@@ -128,18 +128,27 @@ pub struct AnthropicSystemBlock {
 /// A single conversation turn.
 #[derive(Debug, Clone, Deserialize)]
 pub struct AnthropicMessage {
-    /// `user` or `assistant`.
+    /// `user`, `assistant`, or `system`.
     pub role: AnthropicRole,
     /// Content: a bare string or an array of typed content blocks.
     pub content: AnthropicMessageContent,
 }
 
 /// Message role.
+///
+/// The Anthropic spec only allows `user`/`assistant` inside `messages` (system
+/// text belongs in the top-level `system` field), but Claude Code >= 2.1.156
+/// interleaves `{"role":"system", ...}` turns inside the array for
+/// mid-conversation system reminders. Modeling `System` here lets those
+/// requests deserialize instead of failing the `Json` extractor with HTTP 422;
+/// the translator then folds the text into an adjacent user turn (see
+/// [`crate::server::anthropic_translator`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum AnthropicRole {
     User,
     Assistant,
+    System,
 }
 
 impl AnthropicRole {
@@ -147,6 +156,7 @@ impl AnthropicRole {
         match self {
             AnthropicRole::User => "user",
             AnthropicRole::Assistant => "assistant",
+            AnthropicRole::System => "system",
         }
     }
 }
@@ -439,5 +449,23 @@ mod tests {
         let req: AnthropicRequest = serde_json::from_str(body).unwrap();
         assert!(req.extra.contains_key("metadata"));
         assert!(req.extra.contains_key("container"));
+    }
+
+    #[test]
+    fn system_role_turn_inside_messages_deserializes() {
+        // Regression for #349: Claude Code >= 2.1.156 sends `role:"system"`
+        // turns inside `messages`. Without the `System` variant this fails the
+        // `Json` extractor with HTTP 422 before any generation.
+        let body = r#"{"model":"m","max_tokens":32,"messages":[
+            {"role":"user","content":"hi"},
+            {"role":"system","content":"be terse"},
+            {"role":"user","content":"greet me"}
+        ]}"#;
+        let req: AnthropicRequest = serde_json::from_str(body).unwrap();
+        assert_eq!(req.messages.len(), 3);
+        assert_eq!(req.messages[0].role, AnthropicRole::User);
+        assert_eq!(req.messages[1].role, AnthropicRole::System);
+        assert_eq!(req.messages[2].role, AnthropicRole::User);
+        assert_eq!(AnthropicRole::System.as_str(), "system");
     }
 }

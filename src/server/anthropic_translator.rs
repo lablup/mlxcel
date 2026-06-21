@@ -94,6 +94,10 @@ pub fn anthropic_request_to_chat(request: &AnthropicRequest) -> AnthropicTransla
         append_message(&mut messages, message);
     }
 
+    // 2b. Relocate any `system`-role turn that landed mid-conversation so its
+    // text actually reaches the model regardless of the chat template.
+    fold_system_messages(&mut messages);
+
     // 3. Tools / tool_choice.
     let tools = convert_tools(request);
     let tool_choice = convert_tool_choice(request.tool_choice.as_ref());
@@ -159,6 +163,10 @@ fn append_message(out: &mut Vec<Message>, message: &AnthropicMessage) {
     let role = match message.role {
         AnthropicRole::User => Role::User,
         AnthropicRole::Assistant => Role::Assistant,
+        // Claude Code >= 2.1.156 interleaves `system` turns inside `messages`.
+        // Map them to the internal `System` role here; `fold_system_messages`
+        // then relocates any that are not at the head of the conversation.
+        AnthropicRole::System => Role::System,
     };
 
     match &message.content {
@@ -264,6 +272,149 @@ fn append_message(out: &mut Vec<Message>, message: &AnthropicMessage) {
             out.extend(tool_results);
         }
     }
+}
+
+/// Relocate `system`-role turns that landed mid-conversation so their text is
+/// guaranteed to reach the model.
+///
+/// WHY this exists (issue #349): Claude Code >= 2.1.156 interleaves
+/// `{"role":"system", ...}` reminders inside the `messages` array (the pattern
+/// is `[user, system, user, ...]`). Mapping the role is enough to stop the 422,
+/// but it does NOT guarantee the text renders: many production chat templates
+/// (Qwen-family, Llama 3, ...) special-case `messages[0]` for the system block
+/// and their `{% for message in messages %}` loop only handles `user` /
+/// `assistant` / `tool`. A `system` turn at `messages[1]` is then SILENTLY
+/// DROPPED, so the reminder never influences generation.
+///
+/// Strategy, chosen to render correctly under any template:
+///   * Leading `system` turns (before the first user/assistant/tool turn) are
+///     merged into the single head system block — together with the top-level
+///     `system` field when present, so neither is dropped.
+///   * A mid-conversation `system` turn is folded (prepended) into the FOLLOWING
+///     user turn. Claude Code emits the reminder right before a user turn, so
+///     this keeps its positional/contextual meaning, and folding into an
+///     existing turn (rather than emitting a fresh `system` message) means we
+///     never rely on a template rendering a non-head `system` role. No new
+///     `user` turn is created, so user/assistant alternation is unchanged.
+///   * A trailing `system` turn with no following user turn is appended to the
+///     preceding user turn, or merged into the head block as a last resort.
+///
+/// The pass is a no-op (early return) for the common case of a single head
+/// system block produced by the top-level `system` field.
+fn fold_system_messages(messages: &mut Vec<Message>) {
+    // Action is needed only when a `system` message exists somewhere other than
+    // the head (index 0). A lone head system block is left exactly as-is.
+    let needs_fold = messages
+        .iter()
+        .enumerate()
+        .any(|(i, m)| i != 0 && m.role == Role::System);
+    if !needs_fold {
+        return;
+    }
+
+    let original = std::mem::take(messages);
+    let mut head_system: Option<String> = None;
+    let mut body: Vec<Message> = Vec::with_capacity(original.len());
+    let mut pending_system: Vec<String> = Vec::new();
+    let mut seen_non_system = false;
+
+    for message in original {
+        match message.role {
+            Role::System if !seen_non_system => {
+                // Head block: top-level system and/or leading system turns.
+                merge_head_system(&mut head_system, message.content.text());
+            }
+            Role::System => {
+                // Mid-conversation reminder: buffer for the next user turn.
+                let text = message.content.text();
+                if !text.trim().is_empty() {
+                    pending_system.push(text);
+                }
+            }
+            Role::User => {
+                seen_non_system = true;
+                let mut message = message;
+                if !pending_system.is_empty() {
+                    combine_user_text(&mut message, &pending_system.join("\n\n"), true);
+                    pending_system.clear();
+                }
+                body.push(message);
+            }
+            _ => {
+                seen_non_system = true;
+                body.push(message);
+            }
+        }
+    }
+
+    // Trailing reminders with no following user turn: append to the preceding
+    // user turn when possible, otherwise fall back to the head block.
+    if !pending_system.is_empty() {
+        let preamble = pending_system.join("\n\n");
+        match body.last_mut() {
+            Some(last) if last.role == Role::User => combine_user_text(last, &preamble, false),
+            _ => merge_head_system(&mut head_system, preamble),
+        }
+    }
+
+    if let Some(text) = head_system {
+        messages.push(Message {
+            role: Role::System,
+            content: MessageContent::Text(text),
+            name: None,
+            tool_call_id: None,
+            tool_calls: None,
+        });
+    }
+    messages.extend(body);
+}
+
+/// Merge `text` into the accumulating head system block, joining with a blank
+/// line. Empty/whitespace-only text is ignored.
+fn merge_head_system(head: &mut Option<String>, text: String) {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return;
+    }
+    match head {
+        Some(existing) => {
+            existing.push_str("\n\n");
+            existing.push_str(trimmed);
+        }
+        None => *head = Some(trimmed.to_string()),
+    }
+}
+
+/// Fold `addition` into a user message's text, keeping any image/other parts.
+/// When `prepend` is true the addition leads (a reminder that precedes the
+/// user's words); otherwise it trails.
+fn combine_user_text(message: &mut Message, addition: &str, prepend: bool) {
+    if addition.is_empty() {
+        return;
+    }
+    let content = std::mem::take(&mut message.content);
+    message.content = match content {
+        MessageContent::Text(existing) => {
+            if existing.trim().is_empty() {
+                MessageContent::Text(addition.to_string())
+            } else if prepend {
+                MessageContent::Text(format!("{addition}\n\n{existing}"))
+            } else {
+                MessageContent::Text(format!("{existing}\n\n{addition}"))
+            }
+        }
+        MessageContent::Parts(mut parts) => {
+            let part = ContentPart::Text {
+                text: addition.to_string(),
+            };
+            if prepend {
+                parts.insert(0, part);
+            } else {
+                parts.push(part);
+            }
+            MessageContent::Parts(parts)
+        }
+    };
 }
 
 /// Convert an Anthropic `tool_use` block into an internal assistant
@@ -827,5 +978,186 @@ mod tests {
         let req2 = parse_req(r#"{"model":"m","messages":[],"metadata":{"other":"x"}}"#);
         let t2 = anthropic_request_to_chat(&req2);
         assert_eq!(t2.chat_request.user, None);
+    }
+
+    /// Render internal messages through a Qwen-style head-only template: the
+    /// system block is only emitted for `messages[0]`, and the per-turn loop
+    /// handles user/assistant exclusively. Any `system` turn left mid-array is
+    /// SILENTLY DROPPED by this template, so a substring assertion on its output
+    /// proves the reminder was actually folded into a rendered turn (issue #349).
+    fn render_head_only(messages: &[Message]) -> String {
+        use crate::server::chat_template::{ChatMessage, ChatTemplateProcessor};
+        let template = r#"{%- if messages[0].role == 'system' -%}
+SYS:{{ messages[0].content }}
+{% endif -%}
+{%- for m in messages -%}
+{%- if m.role == 'user' -%}
+U:{{ m.content }}
+{% elif m.role == 'assistant' -%}
+A:{{ m.content }}
+{% endif -%}
+{%- endfor -%}"#;
+        let processor = ChatTemplateProcessor::with_template(template.to_string());
+        let chat: Vec<ChatMessage> = messages
+            .iter()
+            .map(|m| ChatMessage {
+                role: m.role.as_str().to_string(),
+                content: m.content.text(),
+            })
+            .collect();
+        processor
+            .apply(&chat, None)
+            .expect("head-only template must render")
+    }
+
+    #[test]
+    fn system_role_turn_in_messages_deserializes_no_422() {
+        // The Claude Code >= 2.1.156 shape parses instead of 422-ing.
+        let req = parse_req(
+            r#"{"model":"m","max_tokens":8,"messages":[
+                {"role":"user","content":"hi"},
+                {"role":"system","content":"be terse"},
+                {"role":"user","content":"greet me"}
+            ]}"#,
+        );
+        assert_eq!(req.messages.len(), 3);
+    }
+
+    #[test]
+    fn mid_conversation_system_turn_folds_into_following_user() {
+        let req = parse_req(
+            r#"{"model":"m","max_tokens":8,"messages":[
+                {"role":"user","content":"hi"},
+                {"role":"system","content":"be terse"},
+                {"role":"user","content":"greet me"}
+            ]}"#,
+        );
+        let t = anthropic_request_to_chat(&req);
+        let msgs = &t.chat_request.messages;
+        // No orphan mid-array system turn survives (a head-only template would
+        // drop it); the reminder rode into the following user turn.
+        assert!(msgs.iter().all(|m| m.role != Role::System));
+        assert_eq!(msgs.len(), 2);
+        assert!(matches!(msgs[0].role, Role::User));
+        assert_eq!(msgs[0].content.text(), "hi");
+        assert!(matches!(msgs[1].role, Role::User));
+        assert_eq!(msgs[1].content.text(), "be terse\n\ngreet me");
+        // Empirical proof: the system text survives a head-only Qwen-style
+        // template render.
+        let rendered = render_head_only(msgs);
+        assert!(
+            rendered.contains("be terse"),
+            "system reminder must reach the prompt: {rendered}"
+        );
+    }
+
+    #[test]
+    fn top_level_system_and_mid_array_system_both_survive() {
+        let req = parse_req(
+            r#"{"model":"m","max_tokens":8,"system":"global rule","messages":[
+                {"role":"user","content":"hi"},
+                {"role":"system","content":"mid reminder"},
+                {"role":"user","content":"go"}
+            ]}"#,
+        );
+        let t = anthropic_request_to_chat(&req);
+        let msgs = &t.chat_request.messages;
+        // Exactly one system block, at the head, carrying the top-level system.
+        assert!(matches!(msgs[0].role, Role::System));
+        assert_eq!(msgs[0].content.text(), "global rule");
+        assert_eq!(
+            msgs.iter().filter(|m| m.role == Role::System).count(),
+            1,
+            "no second head system block (some templates only read messages[0])"
+        );
+        // The mid-array reminder folded into the trailing user turn.
+        let user_text: String = msgs
+            .iter()
+            .filter(|m| m.role == Role::User)
+            .map(|m| m.content.text())
+            .collect::<Vec<_>>()
+            .join("|");
+        assert!(user_text.contains("mid reminder"));
+        // Both reach the prompt under a head-only template.
+        let rendered = render_head_only(msgs);
+        assert!(rendered.contains("global rule"), "{rendered}");
+        assert!(rendered.contains("mid reminder"), "{rendered}");
+    }
+
+    #[test]
+    fn leading_array_system_merges_with_top_level_system() {
+        // A `system` turn at messages[0] alongside a top-level `system` must
+        // merge into one head block, dropping neither.
+        let req = parse_req(
+            r#"{"model":"m","max_tokens":8,"system":"top","messages":[
+                {"role":"system","content":"lead"},
+                {"role":"user","content":"hi"}
+            ]}"#,
+        );
+        let t = anthropic_request_to_chat(&req);
+        let msgs = &t.chat_request.messages;
+        assert_eq!(msgs.iter().filter(|m| m.role == Role::System).count(), 1);
+        assert!(matches!(msgs[0].role, Role::System));
+        let head = msgs[0].content.text();
+        assert!(head.contains("top"), "{head}");
+        assert!(head.contains("lead"), "{head}");
+        assert!(matches!(msgs[1].role, Role::User));
+        assert_eq!(msgs[1].content.text(), "hi");
+    }
+
+    #[test]
+    fn trailing_system_turn_with_no_following_user_is_preserved() {
+        let req = parse_req(
+            r#"{"model":"m","max_tokens":8,"messages":[
+                {"role":"user","content":"hi"},
+                {"role":"system","content":"bye reminder"}
+            ]}"#,
+        );
+        let t = anthropic_request_to_chat(&req);
+        let msgs = &t.chat_request.messages;
+        assert!(msgs.iter().all(|m| m.role != Role::System));
+        assert_eq!(msgs.len(), 1);
+        assert!(matches!(msgs[0].role, Role::User));
+        assert_eq!(msgs[0].content.text(), "hi\n\nbye reminder");
+        assert!(render_head_only(msgs).contains("bye reminder"));
+    }
+
+    #[test]
+    fn mid_array_system_folds_into_multimodal_user_turn() {
+        // The following user turn carries an image; the reminder must not clobber
+        // the image part and must still surface as text.
+        let req = parse_req(
+            r#"{"model":"m","max_tokens":8,"messages":[
+                {"role":"user","content":"first"},
+                {"role":"system","content":"watch out"},
+                {"role":"user","content":[
+                    {"type":"text","text":"see this"},
+                    {"type":"image","source":{"type":"base64","media_type":"image/png","data":"QUJD"}}
+                ]}
+            ]}"#,
+        );
+        let t = anthropic_request_to_chat(&req);
+        let msgs = &t.chat_request.messages;
+        assert!(msgs.iter().all(|m| m.role != Role::System));
+        // Image preserved through the fold.
+        assert_eq!(t.chat_request.image_urls().len(), 1);
+        let folded = msgs.last().unwrap();
+        assert!(folded.content.text().contains("watch out"));
+        assert!(folded.content.text().contains("see this"));
+    }
+
+    #[test]
+    fn system_string_only_path_unchanged_by_fold() {
+        // Regression guard: the plain top-level-system case is a no-op for the
+        // fold pass and keeps its exact prior shape.
+        let req = parse_req(
+            r#"{"model":"m","max_tokens":8,"system":"be terse","messages":[{"role":"user","content":"hi"}]}"#,
+        );
+        let t = anthropic_request_to_chat(&req);
+        assert_eq!(t.chat_request.messages.len(), 2);
+        assert!(matches!(t.chat_request.messages[0].role, Role::System));
+        assert_eq!(t.chat_request.messages[0].content.text(), "be terse");
+        assert!(matches!(t.chat_request.messages[1].role, Role::User));
+        assert_eq!(t.chat_request.messages[1].content.text(), "hi");
     }
 }
