@@ -1166,7 +1166,7 @@ fn resolve_completion_tokens(
     outcome
         .generated_tokens
         .map(|n| (n as usize).min(max_tokens))
-        .unwrap_or(frame_counted)
+        .unwrap_or(frame_counted.min(max_tokens))
 }
 
 /// Consume the two-part disaggregated result (prefill first token + decode
@@ -1193,7 +1193,7 @@ async fn drive_handoff_result(
     let mut generated_tokens: Option<u64> = None;
     let mut add_count = |frame_count: Option<u64>| {
         if let Some(n) = frame_count {
-            generated_tokens = Some(generated_tokens.unwrap_or(0) + n);
+            generated_tokens = Some(generated_tokens.unwrap_or(0).saturating_add(n));
         }
     };
 

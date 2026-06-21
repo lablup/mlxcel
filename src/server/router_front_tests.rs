@@ -46,6 +46,18 @@ fn falls_back_to_frame_count_when_no_authoritative_count() {
     assert_eq!(resolve_completion_tokens(&outcome, 7, 16), 7);
 }
 
+/// When no authoritative count is available and the emitted-piece count exceeds
+/// `max_tokens` (which can happen for a hostile or buggy node in a mixed-version
+/// cluster), the fallback is clamped to `max_tokens` for uniform defensiveness.
+#[test]
+fn fallback_frame_count_clamped_to_max_tokens() {
+    let outcome = HandoffOutcome {
+        generated_tokens: None,
+    };
+    // Frame count exceeds the budget; the fallback must not report more than allowed.
+    assert_eq!(resolve_completion_tokens(&outcome, 9999, 16), 16);
+}
+
 /// The authoritative count is clamped to `max_tokens`: the router bounds
 /// generation to its own budget, so a larger reported count (a buggy or hostile
 /// node) must not inflate the usage figure.
