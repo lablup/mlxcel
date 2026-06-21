@@ -1,6 +1,6 @@
 # ADR 0002: Turbo KV decode is split dequant plus native SDPA, and the upstream sparse-V speedup does not carry over
 
-**Status:** Accepted (2026-06-20). Follows #369 (Turbo4Asym routed through dequant-SDPA), motivates #370 (fuse V dequant into the attention kernel). Backed by the 2026-06-19 sweep under `benchmarks/turbo_kv/` and the A/B measurements below.
+**Status:** Accepted (2026-06-20); amended 2026-06-21 with the #370 result. Follows #369 (Turbo4Asym routed through dequant-SDPA), motivated #370 (fuse V dequant into the attention kernel). Backed by the 2026-06-19 sweep under `benchmarks/turbo_kv/` and the A/B measurements below. The 2026-06-21 addendum records that the #370 fused-kernel lever did not pan out and why; the decision stands and is now measured on both ends.
 
 ## Context
 
@@ -45,7 +45,34 @@ On the four standard-attention sweep models every quantized KV mode decodes slow
 
 Keep dequant-SDPA (#369) as the `Turbo4Asym` decode default. Do not revive sparse-V as a speed path: it is exact and worth keeping as a runtime option and correctness reference, but its skip buys nothing in mlxcel's split design. Treat quantized KV as a memory-footprint trade, not a decode-speed feature; PR #376 aligns the `--recommend-quant` advisor, the `bench_kv_cache.sh` gates, and `docs/turbo-kv-cache.md` to that.
 
-The one lever that can beat the current 0.24x to 0.40x decode ceiling is **#370**: fuse the V dequant into the native SDPA kernel so V is never materialized and the dequant rides inside the fused scores plus softmax plus accumulate. That single change captures all three things the split design cannot: the long-context cache-bandwidth win, a sparse-V skip that actually removes hot-path work, and no materialize round-trip.
+The one lever that could in principle beat the current 0.24x to 0.40x decode ceiling is **#370**: fuse the V dequant into the attention kernel so V is never materialized and the dequant rides inside the scores plus softmax plus accumulate. That would capture all three things the split design cannot: the long-context cache-bandwidth win, a sparse-V skip that actually removes hot-path work, and no materialize round-trip. The 2026-06-21 addendum below records that mlxcel's only available fused kernel does not actually win, so this prediction did not hold.
+
+## Addendum (2026-06-21): the fused-kernel lever does not pan out (#370)
+
+#370 took the first route the issue proposed: route `Turbo4Asym` decode through the existing delegated steel-envelope kernel (`attention_turbo4_delegated_steel`). `Turbo4Asym` is structurally the all-cold case of `Turbo4Delegated` (FP16 K, every visible V token 4-bit packed, no hot FP16 tail), so the kernel serves it directly with `cold_offset = offset, hot_offset = 0`. The kernel fuses the cold-V dequant into the attention accumulate, never materializing the full V. Parity held: a 16-step `Turbo4Asym` decode through the steel kernel matched the dequant-SDPA reference at RMS < 5e-3 (threshold 0, no skip).
+
+The speed did not. M1 Ultra, `qwen2.5-7b-4bit`, decode tok/s (`benchmarks/turbo_kv/2026-06-21_Apple_M1_Ultra_qwen2.5-7b-4bit_370_asym_fused_attempt.csv`):
+
+| mode | 4K | 16K | 32K |
+|---|---|---|---|
+| fp16 | 94.83 (1.00x) | 68.95 (1.00x) | 50.62 (1.00x) |
+| turbo4-asym, dequant-SDPA (#369) | 28.61 (0.30x) | 22.76 (0.33x) | 14.55 (0.29x) |
+| turbo4-asym, steel fused (#370 attempt) | 10.68 (0.11x) | 4.41 (0.06x) | 2.15 (0.04x) |
+| turbo4-delegated | 63.50 (0.67x) | 48.38 (0.70x) | 34.64 (0.68x) |
+
+The fused kernel **regresses** asym decode 3x at 4K and 7x at 32K, the opposite of the goal. Two facts explain it:
+
+1. **The custom fused kernel is slower than native SDPA over a materialized V.** The steel envelope computes scores in graph, then does a two-pass online softmax and a per-token nibble-unpack plus codebook-lookup plus accumulate sweep over every cold token in one Metal dispatch. At 32K that hand-written sweep loses badly to MLX's optimized flash-attention GEMM running on a transiently materialized FP16 V. Materializing the rotated V and calling native SDPA, which is exactly what the dequant-SDPA path does, is the faster arrangement on this hardware.
+
+2. **`Turbo4Delegated`'s 0.66-0.80x does not come from the steel kernel.** The delegated decode path defaults to dequant-SDPA (`turbo4_delegated_dequant_sdpa_enabled()` is on by default; `update_and_turbo4_delegated_attention` returns from the dequant-SDPA branch before it ever reaches the steel try). The steel envelope is delegated's *slow fallback*, used only when dequant-SDPA is disabled. So the premise that motivated #370, that delegated is fast because it fuses V dequant into the kernel, was wrong: delegated is fast because it dequantizes only the cold body, keeps a hot FP16 ring, and hands the result to native SDPA.
+
+There is no fuse-into-native-SDPA option, because MLX's SDPA kernel consumes a dense V; feeding it packed V would mean modifying the upstream kernel. The mlxcel-side fused kernel is the only fusion available, and it is slower.
+
+### Decision (amended)
+
+Do not route `Turbo4Asym` through the fused kernel. `Turbo4Asym` stays on the exact dequant-SDPA path (#369), the simple full-precision-K option that quantizes every V token with no hot ring, at roughly 0.3-0.5x decode. For the fp16-K + 4-bit-V use case that wants speed, the recommended mode is **`Turbo4Delegated`**: about 4x V compression at 0.66-0.80x fp16 decode, via cold-only dequant-SDPA plus a hot FP16 ring. The `--recommend-quant` advisor already promotes `Turbo4Delegated` here (post-#376); no advisor change is needed.
+
+The remaining asym-versus-delegated decode gap (about 0.4x versus 0.7x) is the hot/cold split, not V-dequant fusion. Closing it would mean giving `Turbo4Asym` a hot ring, which is exactly what makes a cache `Turbo4Delegated`. Keeping the two modes distinct (delegated = fast with a hot ring, asym = simple and fully quantized) is the intended design, so the gap is left as is.
 
 ## Reproduce
 
@@ -69,7 +96,7 @@ Models: `qwen3-30b-a3b-4bit` (standard attention, cache-bound) and `qwen3.5-35b-
 
 - **Advisor and docs.** PR #376 frames Turbo KV as a memory trade and promotes `int8` and `turbo4-delegated` as the fast quantized picks. This ADR is the measured why.
 - **sparse-V kernel.** Kept as a runtime option (`MLXCEL_TURBO4_ASYM_DEQUANT_SDPA=0`) and the correctness reference for any future fused kernel, not recommended for speed.
-- **#370 carries the speed work.** When it lands, re-run the A/B above. The prediction is that a fused dequant-in-SDPA kernel is the first mlxcel path where the sparse-V skip and the long-context bandwidth win both show up, because it is the first path where V dequant stops being a negligible, separable slice.
+- **#370 closed without a fused asym path.** The fused-kernel attempt regressed asym decode 3-7x (see the 2026-06-21 addendum); the mlxcel-side fused kernel is slower than native SDPA over a materialized V, and delegated's speed comes from dequant-SDPA, not the steel envelope. The decision is to keep `Turbo4Asym` on dequant-SDPA and steer the fp16-K + 4-bit-V speed use case to `Turbo4Delegated`.
 
 ## References
 

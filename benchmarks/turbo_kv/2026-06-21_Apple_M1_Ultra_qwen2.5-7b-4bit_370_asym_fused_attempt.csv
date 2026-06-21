@@ -1,0 +1,17 @@
+model,model_path,kv_cache_mode,context_target,stage,run_index,prompt_tokens,generated_tokens,prefill_ms,prefill_tok_s,decode_ms,decode_tok_s,thermal_start,thermal_end,hardware,date
+qwen2.5-7b-4bit,models/qwen2.5-7b-4bit,fp16,4096,decode,1,4212,100,5640.63,746.73,1054.57,94.83,none|none,none|none,Apple_M1_Ultra,2026-06-21
+qwen2.5-7b-4bit,models/qwen2.5-7b-4bit,fp16,16384,decode,2,16758,100,26118.50,641.61,1450.25,68.95,none|none,none|none,Apple_M1_Ultra,2026-06-21
+qwen2.5-7b-4bit,models/qwen2.5-7b-4bit,fp16,32768,decode,3,33486,100,63177.48,530.03,1975.69,50.62,none|none,none|none,Apple_M1_Ultra,2026-06-21
+qwen2.5-7b-4bit,models/qwen2.5-7b-4bit,fp16,8192,prefill,4,8394,1,11951.53,702.34,0.00,800000.00,none|none,none|none,Apple_M1_Ultra,2026-06-21
+qwen2.5-7b-4bit,models/qwen2.5-7b-4bit,turbo4-asym-steel,4096,decode,5,4212,100,6933.43,607.49,9360.65,10.68,none|none,none|none,Apple_M1_Ultra,2026-06-21
+qwen2.5-7b-4bit,models/qwen2.5-7b-4bit,turbo4-asym-steel,16384,decode,6,16758,100,31469.02,532.52,22675.38,4.41,none|none,none|none,Apple_M1_Ultra,2026-06-21
+qwen2.5-7b-4bit,models/qwen2.5-7b-4bit,turbo4-asym-steel,32768,decode,7,33486,100,74319.59,450.57,46565.93,2.15,none|none,none|none,Apple_M1_Ultra,2026-06-21
+qwen2.5-7b-4bit,models/qwen2.5-7b-4bit,turbo4-asym-steel,8192,prefill,8,8394,1,14070.90,596.55,0.00,615384.62,none|none,none|none,Apple_M1_Ultra,2026-06-21
+qwen2.5-7b-4bit,models/qwen2.5-7b-4bit,turbo4-delegated,4096,decode,9,4212,100,6977.28,603.67,1574.81,63.50,none|none,none|none,Apple_M1_Ultra,2026-06-21
+qwen2.5-7b-4bit,models/qwen2.5-7b-4bit,turbo4-delegated,16384,decode,10,16758,100,31002.33,540.54,2067.12,48.38,none|none,none|none,Apple_M1_Ultra,2026-06-21
+qwen2.5-7b-4bit,models/qwen2.5-7b-4bit,turbo4-delegated,32768,decode,11,33486,100,72613.25,461.16,2886.82,34.64,none|none,none|none,Apple_M1_Ultra,2026-06-21
+qwen2.5-7b-4bit,models/qwen2.5-7b-4bit,turbo4-delegated,8192,prefill,12,8394,1,11626.70,721.96,0.00,631711.94,none|none,none|none,Apple_M1_Ultra,2026-06-21
+qwen2.5-7b-4bit,models/qwen2.5-7b-4bit,turbo4-asym-dequant-sdpa,4096,decode,1,4212,100,6746.35,624.34,3495.24,28.61,none|none,none|none,Apple_M1_Ultra,2026-06-21
+qwen2.5-7b-4bit,models/qwen2.5-7b-4bit,turbo4-asym-dequant-sdpa,16384,decode,2,16758,100,30899.14,542.35,4394.14,22.76,none|none,none|none,Apple_M1_Ultra,2026-06-21
+qwen2.5-7b-4bit,models/qwen2.5-7b-4bit,turbo4-asym-dequant-sdpa,32768,decode,3,33486,100,72644.16,460.96,6872.78,14.55,none|none,none|none,Apple_M1_Ultra,2026-06-21
+qwen2.5-7b-4bit,models/qwen2.5-7b-4bit,turbo4-asym-dequant-sdpa,8192,prefill,4,8394,1,14005.08,599.35,0.00,558035.71,none|none,none|none,Apple_M1_Ultra,2026-06-21

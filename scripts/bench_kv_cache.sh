@@ -22,7 +22,10 @@
 #   turbo4-asym:     decode 0.18-0.44x; prefill 0.61-0.92x. K stays fp16
 #                    (exact). The #369 dequant-SDPA path is for memory +
 #                    exactness, not speed, and MUST stay parity-exact vs the
-#                    graph SDPA reference (RMS ~0). Fused kernel tracked in #370.
+#                    graph SDPA reference (RMS ~0). #370 tried fusing the V
+#                    dequant into the steel kernel and measured a 3-7x decode
+#                    regression (ADR 0002 addendum), so asym stays on
+#                    dequant-SDPA; use turbo4-delegated for fp16-K speed.
 #   turbo4 (sym):    decode 0.10-0.27x; prefill 0.40-0.73x. Max compression,
 #                    quality-sensitive; allowlist families only.
 #   turbo3-asym:     decode 0.02-0.07x (near-unusable, 32K ~0.4 tok/s).

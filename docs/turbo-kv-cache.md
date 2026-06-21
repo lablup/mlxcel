@@ -64,8 +64,10 @@ What the numbers say:
 - **`turbo4-asym` is the memory-and-exactness pick, not a speed pick.** K stays
   fp16 and the #369 dequant-SDPA path is parity-exact with the fp16 reference,
   but decode is ~0.2-0.4x. Reach for it when you need ~4x V compression with an
-  untouched K and accept the decode cost. The fused kernel that would close the
-  gap is tracked in #370.
+  untouched K and accept the decode cost. If you want speed at the same fp16-K +
+  4-bit-V trade, use `turbo4-delegated` (~0.7x) instead. #370 tried fusing the V
+  dequant into the attention kernel to close the gap and measured it a 3-7x
+  regression, not a win; see the 2026-06-21 addendum in ADR 0002.
 - **Symmetric `turbo4` maximizes compression and is the slowest;** use only on
   an allowlisted family (see below).
 - **`turbo3-asym` is near-unusable** (0.02-0.07x, about 0.4 tok/s at 32K). It
@@ -79,8 +81,10 @@ dequantizing a rotated, codebook-quantized cache every step. The upstream
 sparse-V skip that produces the +22.8% does not carry over to mlxcel, because
 mlxcel's Turbo decode is a split dequant plus native SDPA rather than a fused
 flash-attention; [ADR 0002](adr/0002-turbo-kv-split-dequant-vs-fused.md) records
-the measured A/B and names fused V dequant (#370) as the one lever that can beat
-the current decode ceiling.
+the measured A/B. Its 2026-06-21 addendum closes #370: routing asym through
+mlxcel's fused kernel regressed decode 3-7x, because the hand-written fused
+kernel is slower than native SDPA over a materialized V, so the split dequant
+plus native SDPA stays the fast arrangement.
 
 ## CLI and server flags
 
