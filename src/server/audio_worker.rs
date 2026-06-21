@@ -150,6 +150,15 @@ impl AudioWorker {
         // not the admission semantics we want, so clamp to at least one queued
         // command. A `0` from config therefore falls back to a usable bound.
         let capacity = queue_depth.max(1);
+        // A `Duration::ZERO` timeout would make `recv_timeout` return `Err(Timeout)`
+        // before the worker thread can ever reply, rejecting every request. Fall back
+        // to the documented default (120 s), mirroring the `queue_depth.max(1)` clamp
+        // above so the worker is correct regardless of what the caller passes.
+        let request_timeout = if request_timeout == Duration::ZERO {
+            Duration::from_secs(crate::server::config::DEFAULT_AUDIO_REQUEST_TIMEOUT_SECS)
+        } else {
+            request_timeout
+        };
         let (command_tx, command_rx) = mpsc::sync_channel::<AudioCommand>(capacity);
         let (ready_tx, ready_rx) = mpsc::channel::<Result<(), String>>();
 
@@ -647,5 +656,24 @@ mod tests {
             matches!(err, AudioModelError::Timeout),
             "expected Timeout, got: {err:?}"
         );
+    }
+
+    /// `Duration::ZERO` passed to `spawn` must not make every request time out
+    /// immediately. The guard inside `spawn` clamps it to the documented default
+    /// so a fast request still completes.
+    #[test]
+    fn zero_request_timeout_falls_back_to_default() {
+        let worker = AudioWorker::spawn("audio-test-zero-timeout", 8, Duration::ZERO, || {
+            Ok(TrivialEngine)
+        })
+        .expect("worker spawns with a zero timeout arg");
+
+        // If Duration::ZERO were used as-is, recv_timeout(ZERO) would return
+        // Err(Timeout) before the worker thread could reply. The guard inside
+        // spawn clamps it, so a fast request completes normally.
+        let out = worker
+            .transcribe(transcribe_input(4, None))
+            .expect("zero timeout falls back to default; fast request completes");
+        assert_eq!(out.text, "ok:4");
     }
 }
