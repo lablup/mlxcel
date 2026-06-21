@@ -404,13 +404,35 @@ fn combine_user_text(message: &mut Message, addition: &str, prepend: bool) {
             }
         }
         MessageContent::Parts(mut parts) => {
-            let part = ContentPart::Text {
-                text: addition.to_string(),
-            };
-            if prepend {
-                parts.insert(0, part);
-            } else {
-                parts.push(part);
+            // Merge into the existing text part so the reminder is separated
+            // from the user's words with a blank line, matching the Text branch
+            // (a bare extra text part would be concatenated with no separator,
+            // since `MessageContent::text()` joins parts with an empty string).
+            // Fall back to a fresh text part only when the turn is image-only.
+            match parts
+                .iter_mut()
+                .find(|p| matches!(p, ContentPart::Text { .. }))
+            {
+                Some(ContentPart::Text { text }) => {
+                    let existing = std::mem::take(text);
+                    *text = if existing.trim().is_empty() {
+                        addition.to_string()
+                    } else if prepend {
+                        format!("{addition}\n\n{existing}")
+                    } else {
+                        format!("{existing}\n\n{addition}")
+                    };
+                }
+                _ => {
+                    let part = ContentPart::Text {
+                        text: addition.to_string(),
+                    };
+                    if prepend {
+                        parts.insert(0, part);
+                    } else {
+                        parts.push(part);
+                    }
+                }
             }
             MessageContent::Parts(parts)
         }
@@ -1142,8 +1164,37 @@ A:{{ m.content }}
         // Image preserved through the fold.
         assert_eq!(t.chat_request.image_urls().len(), 1);
         let folded = msgs.last().unwrap();
-        assert!(folded.content.text().contains("watch out"));
-        assert!(folded.content.text().contains("see this"));
+        // Reminder leads the user's words, separated by a blank line (not
+        // concatenated): `text()` joins parts with an empty string, so a bare
+        // extra text part would render "watch outsee this".
+        assert_eq!(folded.content.text(), "watch out\n\nsee this");
+        // Folded turn keeps exactly one text part plus the image part.
+        match &folded.content {
+            MessageContent::Parts(parts) => assert_eq!(parts.len(), 2),
+            other => panic!("expected multimodal parts, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn consecutive_mid_array_system_turns_all_fold() {
+        // Multiple back-to-back system reminders between user turns must all
+        // survive, joined together, folded into the following user turn.
+        let req = parse_req(
+            r#"{"model":"m","max_tokens":8,"messages":[
+                {"role":"user","content":"hi"},
+                {"role":"system","content":"rule one"},
+                {"role":"system","content":"rule two"},
+                {"role":"user","content":"go"}
+            ]}"#,
+        );
+        let t = anthropic_request_to_chat(&req);
+        let msgs = &t.chat_request.messages;
+        assert!(msgs.iter().all(|m| m.role != Role::System));
+        assert_eq!(msgs.len(), 2);
+        assert_eq!(msgs[1].content.text(), "rule one\n\nrule two\n\ngo");
+        let rendered = render_head_only(msgs);
+        assert!(rendered.contains("rule one"), "{rendered}");
+        assert!(rendered.contains("rule two"), "{rendered}");
     }
 
     #[test]
