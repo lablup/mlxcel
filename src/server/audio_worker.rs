@@ -38,6 +38,7 @@
 use std::sync::Mutex;
 use std::sync::mpsc;
 use std::thread::{self, JoinHandle};
+use std::time::Duration;
 
 use mlxcel_core::streams::{
     install_thread_local_default_stream, new_thread_local_generation_stream,
@@ -101,10 +102,24 @@ enum AudioCommand {
 /// reply values (all `Send`) cross the channel.
 #[derive(Debug)]
 pub(crate) struct AudioWorker {
-    /// Command channel to the worker thread. Wrapped in a `Mutex` so the
-    /// `AudioWorker` is `Sync` (an `mpsc::Sender` is `Send` but not `Sync`); the
-    /// lock is held only for the brief enqueue, not across inference.
-    sender: Mutex<mpsc::Sender<AudioCommand>>,
+    /// Bounded command channel to the worker thread. Wrapped in a `Mutex` so the
+    /// `AudioWorker` is `Sync` (an `mpsc::SyncSender` is `Send` but not `Sync`);
+    /// the lock is held only for the brief enqueue, not across inference. The
+    /// channel is bounded (admission control): `dispatch` uses `try_send`, so a
+    /// full queue is rejected with [`AudioModelError::QueueFull`] rather than
+    /// growing memory without bound (each queued command holds the full audio
+    /// payload).
+    sender: Mutex<mpsc::SyncSender<AudioCommand>>,
+    /// Per-request reply timeout. `transcribe`/`synthesize` block on the reply
+    /// channel for at most this long, then return [`AudioModelError::Timeout`].
+    ///
+    /// The timeout frees the caller's blocking `spawn_blocking` thread and
+    /// returns a structured error; it does NOT cancel the in-flight MLX work on
+    /// the worker (a single worker can only safely process one request at a
+    /// time). When the worker eventually finishes, its reply send fails silently
+    /// because the reply receiver was already dropped. This is intentional and
+    /// matches the issue: a stuck request frees its thread instead of hanging.
+    request_timeout: Duration,
     /// Join handle, taken in `Drop` after the loop is asked to stop.
     handle: Option<JoinHandle<()>>,
 }
@@ -116,12 +131,26 @@ impl AudioWorker {
     /// that thread's MLX context. Returns `Err` if the thread cannot be spawned
     /// or the engine fails to load, so the caller can leave the audio slot empty
     /// and keep serving rather than aborting startup.
-    pub(crate) fn spawn<E, L>(thread_name: &str, loader: L) -> anyhow::Result<Self>
+    ///
+    /// `queue_depth` bounds the command channel: at most `queue_depth` requests
+    /// can wait behind the one in flight before admission is rejected with
+    /// [`AudioModelError::QueueFull`]. `request_timeout` bounds how long a caller
+    /// blocks for a reply before giving up with [`AudioModelError::Timeout`].
+    pub(crate) fn spawn<E, L>(
+        thread_name: &str,
+        queue_depth: usize,
+        request_timeout: Duration,
+        loader: L,
+    ) -> anyhow::Result<Self>
     where
         E: AudioEngine,
         L: FnOnce() -> anyhow::Result<E> + Send + 'static,
     {
-        let (command_tx, command_rx) = mpsc::channel::<AudioCommand>();
+        // A zero-capacity `sync_channel` is a rendezvous (no buffering), which is
+        // not the admission semantics we want, so clamp to at least one queued
+        // command. A `0` from config therefore falls back to a usable bound.
+        let capacity = queue_depth.max(1);
+        let (command_tx, command_rx) = mpsc::sync_channel::<AudioCommand>(capacity);
         let (ready_tx, ready_rx) = mpsc::channel::<Result<(), String>>();
 
         let handle = thread::Builder::new()
@@ -132,6 +161,7 @@ impl AudioWorker {
         match ready_rx.recv() {
             Ok(Ok(())) => Ok(Self {
                 sender: Mutex::new(command_tx),
+                request_timeout,
                 handle: Some(handle),
             }),
             Ok(Err(message)) => {
@@ -149,43 +179,60 @@ impl AudioWorker {
         }
     }
 
-    /// Send a transcription request to the worker and block for its reply.
+    /// Send a transcription request to the worker and block for its reply, up to
+    /// the per-request timeout.
     pub(crate) fn transcribe(
         &self,
         input: AudioTranscribeInput,
     ) -> Result<AudioTranscribeOutput, AudioModelError> {
         let (respond, reply) = mpsc::channel();
         self.dispatch(AudioCommand::Transcribe { input, respond })?;
-        match reply.recv() {
+        match reply.recv_timeout(self.request_timeout) {
             Ok(result) => result,
-            Err(_) => Err(AudioModelError::Inference(WORKER_GONE.to_string())),
+            Err(mpsc::RecvTimeoutError::Timeout) => Err(AudioModelError::Timeout),
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                Err(AudioModelError::Inference(WORKER_GONE.to_string()))
+            }
         }
     }
 
-    /// Send a synthesis request to the worker and block for its reply.
+    /// Send a synthesis request to the worker and block for its reply, up to the
+    /// per-request timeout.
     pub(crate) fn synthesize(
         &self,
         input: AudioSynthesizeInput,
     ) -> Result<AudioSynthesizeOutput, AudioModelError> {
         let (respond, reply) = mpsc::channel();
         self.dispatch(AudioCommand::Synthesize { input, respond })?;
-        match reply.recv() {
+        match reply.recv_timeout(self.request_timeout) {
             Ok(result) => result,
-            Err(_) => Err(AudioModelError::Inference(WORKER_GONE.to_string())),
+            Err(mpsc::RecvTimeoutError::Timeout) => Err(AudioModelError::Timeout),
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                Err(AudioModelError::Inference(WORKER_GONE.to_string()))
+            }
         }
     }
 
-    /// Enqueue a command, releasing the sender lock before the caller blocks on
-    /// its reply channel so concurrent requests queue in the channel rather than
-    /// serialize on the lock.
+    /// Enqueue a command without blocking, releasing the sender lock before the
+    /// caller blocks on its reply channel so concurrent requests queue in the
+    /// channel rather than serialize on the lock.
+    ///
+    /// `try_send` is the admission gate: a full bounded queue is rejected with
+    /// [`AudioModelError::QueueFull`] (load shedding) instead of blocking the
+    /// caller or letting queued payloads grow without bound. A disconnected
+    /// channel means the worker thread has gone, reported as before.
     fn dispatch(&self, command: AudioCommand) -> Result<(), AudioModelError> {
         let sender = self
             .sender
             .lock()
             .map_err(|_| AudioModelError::Inference("audio worker channel poisoned".to_string()))?;
-        sender
-            .send(command)
-            .map_err(|_| AudioModelError::Inference(WORKER_GONE.to_string()))
+        match sender.try_send(command) {
+            Ok(()) => Ok(()),
+            Err(mpsc::TrySendError::Full(_)) => Err(AudioModelError::QueueFull),
+            Err(mpsc::TrySendError::Disconnected(_)) => {
+                Err(AudioModelError::Inference(WORKER_GONE.to_string()))
+            }
+        }
     }
 }
 
@@ -195,6 +242,11 @@ impl Drop for AudioWorker {
         // handles are dropped on the thread that created them. Both steps are
         // best-effort: if the worker already exited, the send fails and the join
         // observes the prior exit, neither of which should escape a destructor.
+        //
+        // This is a blocking `SyncSender::send` (not `try_send`): on a full
+        // bounded queue it waits for capacity, which is correct here because the
+        // worker keeps draining commands, so a slot frees and the shutdown is
+        // delivered after the queued work.
         if let Ok(sender) = self.sender.lock() {
             let _ = sender.send(AudioCommand::Shutdown);
         }
@@ -357,8 +409,10 @@ mod tests {
 
     #[test]
     fn worker_round_trip_runs_mlx_op_and_replies() {
-        let worker = AudioWorker::spawn("audio-test-roundtrip", || Ok(TrivialEngine))
-            .expect("worker spawns and engine loads");
+        let worker = AudioWorker::spawn("audio-test-roundtrip", 8, Duration::from_secs(30), || {
+            Ok(TrivialEngine)
+        })
+        .expect("worker spawns and engine loads");
 
         let out = worker
             .transcribe(transcribe_input(5, Some("en")))
@@ -376,9 +430,12 @@ mod tests {
 
     #[test]
     fn worker_surfaces_loader_failure() {
-        let result = AudioWorker::spawn::<TrivialEngine, _>("audio-test-loadfail", || {
-            Err(anyhow::anyhow!("synthetic load failure"))
-        });
+        let result = AudioWorker::spawn::<TrivialEngine, _>(
+            "audio-test-loadfail",
+            8,
+            Duration::from_secs(30),
+            || Err(anyhow::anyhow!("synthetic load failure")),
+        );
         let err = result.expect_err("loader failure propagates from spawn");
         assert!(
             err.to_string().contains("synthetic load failure"),
@@ -391,8 +448,10 @@ mod tests {
         struct NoneEngine;
         impl AudioEngine for NoneEngine {}
 
-        let worker = AudioWorker::spawn("audio-test-default", || Ok(NoneEngine))
-            .expect("worker spawns with a do-nothing engine");
+        let worker = AudioWorker::spawn("audio-test-default", 8, Duration::from_secs(30), || {
+            Ok(NoneEngine)
+        })
+        .expect("worker spawns with a do-nothing engine");
         let err = worker
             .synthesize(AudioSynthesizeInput {
                 input: "hi".to_string(),
@@ -434,8 +493,10 @@ mod tests {
 
     #[test]
     fn worker_survives_engine_panic_and_keeps_serving() {
-        let worker = AudioWorker::spawn("audio-test-panic", || Ok(PanicEngine))
-            .expect("worker spawns and engine loads");
+        let worker = AudioWorker::spawn("audio-test-panic", 8, Duration::from_secs(30), || {
+            Ok(PanicEngine)
+        })
+        .expect("worker spawns and engine loads");
 
         // First request hits the panic path. The worker must recover and reply
         // with an `Inference` error, NOT die and surface `WORKER_GONE`. (The
@@ -465,5 +526,126 @@ mod tests {
             .expect("worker still serves after recovering from a panic");
         assert_eq!(out.text, "ok:4");
         assert_eq!(out.language.as_deref(), Some("en"));
+    }
+
+    /// A bounded command queue rejects admission once it is full. The single
+    /// worker is held busy on an in-flight request so the buffer never drains;
+    /// each buffered direct call returns via the per-request timeout and its
+    /// command stays buffered, so after `queue_depth` slots fill the next
+    /// admission is rejected with `QueueFull`.
+    #[test]
+    fn queue_full_returns_queuefull_error() {
+        // Engine that blocks the worker thread on the first request until the
+        // test opens the gate. Only the first pulled command reaches the gate;
+        // buffered commands are never pulled while the worker is blocked here.
+        struct BlockingEngine {
+            gate: Option<mpsc::Receiver<()>>,
+            started: mpsc::Sender<()>,
+        }
+        impl AudioEngine for BlockingEngine {
+            fn transcribe(
+                &mut self,
+                input: AudioTranscribeInput,
+            ) -> Result<AudioTranscribeOutput, AudioModelError> {
+                if let Some(gate) = self.gate.take() {
+                    let _ = self.started.send(());
+                    let _ = gate.recv();
+                }
+                Ok(AudioTranscribeOutput {
+                    text: format!("ok:{}", input.audio.len()),
+                    language: input.language,
+                    duration_seconds: None,
+                })
+            }
+        }
+
+        let (gate_tx, gate_rx) = mpsc::channel::<()>();
+        let (started_tx, started_rx) = mpsc::channel::<()>();
+
+        let queue_depth = 2;
+        let worker = AudioWorker::spawn(
+            "audio-test-queuefull",
+            queue_depth,
+            Duration::from_millis(150),
+            move || {
+                Ok(BlockingEngine {
+                    gate: Some(gate_rx),
+                    started: started_tx,
+                })
+            },
+        )
+        .expect("worker spawns and engine loads");
+
+        std::thread::scope(|scope| {
+            // Occupy the single worker with one in-flight request. This call
+            // gives up after the per-request timeout, but the worker stays busy
+            // inside the engine until the gate opens, so the buffer never drains.
+            scope.spawn(|| {
+                let _ = worker.transcribe(transcribe_input(1, None));
+            });
+
+            // Wait until the worker has pulled the in-flight request and is
+            // blocked in the engine: now the buffer is empty and the worker busy.
+            started_rx
+                .recv()
+                .expect("engine signals it began the in-flight request");
+
+            // Fill the bounded buffer, then prove the next admission is rejected.
+            let mut saw_queue_full = false;
+            for _ in 0..(queue_depth + 1) {
+                match worker.transcribe(transcribe_input(1, None)) {
+                    Err(AudioModelError::QueueFull) => {
+                        saw_queue_full = true;
+                        break;
+                    }
+                    // The slot filled; the command stays buffered. Keep going.
+                    Err(AudioModelError::Timeout) => continue,
+                    other => panic!("unexpected result while filling the queue: {other:?}"),
+                }
+            }
+            assert!(
+                saw_queue_full,
+                "a full bounded queue must reject admission with QueueFull"
+            );
+
+            // Open the gate so the worker drains and the scope thread can finish.
+            drop(gate_tx);
+        });
+    }
+
+    /// A request the worker cannot finish within the per-request timeout returns
+    /// `Timeout` (freeing the caller's blocking thread), not `WORKER_GONE`.
+    #[test]
+    fn request_timeout_returns_timeout_error() {
+        struct SlowEngine;
+        impl AudioEngine for SlowEngine {
+            fn transcribe(
+                &mut self,
+                input: AudioTranscribeInput,
+            ) -> Result<AudioTranscribeOutput, AudioModelError> {
+                // Sleep well past the worker's per-request timeout. This runs on
+                // the worker thread (a plain std thread, not async), so a
+                // blocking sleep is the right tool to model a slow request.
+                std::thread::sleep(Duration::from_millis(500));
+                Ok(AudioTranscribeOutput {
+                    text: format!("ok:{}", input.audio.len()),
+                    language: input.language,
+                    duration_seconds: None,
+                })
+            }
+        }
+
+        let worker = AudioWorker::spawn("audio-test-timeout", 8, Duration::from_millis(50), || {
+            Ok(SlowEngine)
+        })
+        .expect("worker spawns and engine loads");
+
+        let err = worker
+            .transcribe(transcribe_input(3, None))
+            .expect_err("a request slower than the timeout must error");
+        assert!(
+            matches!(err, AudioModelError::Timeout),
+            "expected Timeout, got: {err:?}"
+        );
     }
 }

@@ -225,6 +225,18 @@ pub struct RemotePipelineStageConfig {
     pub transport_backend: TransportBackend,
 }
 
+/// Default bound for the audio worker command queue (admission control).
+///
+/// Each queued speech-to-text command can hold up to the 25 MiB per-request
+/// payload, so a depth of `8` caps queued payload at roughly 200 MiB plus the
+/// one request in flight, while still absorbing short bursts.
+pub const DEFAULT_AUDIO_QUEUE_DEPTH: usize = 8;
+
+/// Default per-request reply timeout (seconds) for the audio worker. Generous
+/// upper bound for a single bounded clip; a stuck request frees its blocking
+/// thread after this instead of hanging.
+pub const DEFAULT_AUDIO_REQUEST_TIMEOUT_SECS: u64 = 120;
+
 /// Server configuration derived from CLI-compatible startup arguments.
 ///
 /// Default values intentionally track `llama-server` behavior where practical
@@ -283,6 +295,16 @@ pub struct ServerConfig {
     pub max_batch_size: usize,
     /// Maximum number of requests waiting in the prefill queue.
     pub max_queue_depth: usize,
+    /// Bound on the audio worker command queue (admission control). When the
+    /// queue is full, new audio requests get a structured `503` instead of
+    /// growing memory without bound. A `0` clamps to at least one queued
+    /// command at the channel boundary. See [`DEFAULT_AUDIO_QUEUE_DEPTH`].
+    pub audio_queue_depth: usize,
+    /// Per-request reply timeout for the audio worker, in seconds. A stuck or
+    /// pathologically slow audio request frees its blocking thread and returns
+    /// a structured `504` after this. A `0` falls back to the default rather
+    /// than timing out instantly. See [`DEFAULT_AUDIO_REQUEST_TIMEOUT_SECS`].
+    pub audio_request_timeout_secs: u64,
     /// Number of tokens per prefill chunk. When 0, chunking is disabled and
     /// the full prompt is prefilled in a single pass.
     pub prefill_chunk_size: usize,
@@ -499,6 +521,8 @@ impl Default for ServerConfig {
             draft_block_size: None,
             max_batch_size: 1,
             max_queue_depth: 1024,
+            audio_queue_depth: DEFAULT_AUDIO_QUEUE_DEPTH,
+            audio_request_timeout_secs: DEFAULT_AUDIO_REQUEST_TIMEOUT_SECS,
             prefill_chunk_size: 512,
             enable_preemption: false,
             preemption_policy: PreemptionPolicy::default(),

@@ -279,6 +279,30 @@ struct ServerArgs {
     #[arg(long = "max-queue-depth", default_value_t = 32)]
     max_queue_depth: usize,
 
+    /// Bound on the audio worker command queue; a full queue returns 503 (default: 8)
+    ///
+    /// Caps how many audio (speech-to-text / text-to-speech) requests may wait
+    /// behind the one in flight before admission is shed, so a burst cannot grow
+    /// memory without bound (each queued command holds the full audio payload).
+    /// A `0` clamps to at least one queued command.
+    #[arg(
+        long = "audio-queue-depth",
+        env = "MLXCEL_AUDIO_QUEUE_DEPTH",
+        default_value_t = 8
+    )]
+    audio_queue_depth: usize,
+
+    /// Per-request audio reply timeout in seconds; 0 falls back to the default (default: 120)
+    ///
+    /// A stuck or pathologically slow audio request frees its blocking thread
+    /// and returns a structured 504 after this, instead of hanging the worker.
+    #[arg(
+        long = "audio-request-timeout-secs",
+        env = "MLXCEL_AUDIO_REQUEST_TIMEOUT_SECS",
+        default_value_t = 120
+    )]
+    audio_request_timeout_secs: u64,
+
     /// Prefill chunk size in tokens (0 = disabled, default: 512)
     #[arg(long = "prefill-chunk-size", default_value_t = 512)]
     prefill_chunk_size: usize,
@@ -1219,6 +1243,8 @@ fn build_startup_input(mut args: ServerArgs) -> anyhow::Result<ServerStartupInpu
         max_batch_size: args.max_batch_size,
         no_batch: args.no_batch,
         max_queue_depth: args.max_queue_depth,
+        audio_queue_depth: args.audio_queue_depth,
+        audio_request_timeout_secs: args.audio_request_timeout_secs,
         prefill_chunk_size: args.prefill_chunk_size,
         batch_size: args.batch_size,
         ubatch_size: args.ubatch_size,

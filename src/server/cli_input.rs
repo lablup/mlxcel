@@ -64,6 +64,12 @@ pub struct ServerStartupInput {
     pub draft_block_size: Option<u32>,
     pub max_batch_size: Option<usize>,
     pub max_queue_depth: usize,
+    /// Bound on the audio worker command queue (admission control), forwarded to
+    /// the audio providers via [`super::config::ServerConfig`].
+    pub audio_queue_depth: usize,
+    /// Per-request reply timeout (seconds) for the audio worker, forwarded to the
+    /// audio providers via [`super::config::ServerConfig`].
+    pub audio_request_timeout_secs: u64,
     pub prefill_chunk_size: usize,
     /// llama-server alias for `--prefill-chunk-size` (`--batch-size` / `-b`).
     ///
@@ -536,6 +542,8 @@ impl ServerStartupInput {
             draft_block_size: self.draft_block_size,
             max_batch_size: self.max_batch_size,
             max_queue_depth: self.max_queue_depth,
+            audio_queue_depth: self.audio_queue_depth,
+            audio_request_timeout_secs: self.audio_request_timeout_secs,
             prefill_chunk_size: resolution.prefill_chunk_size,
             batch_size_conflict: resolution.batch_size_conflict,
             ubatch_size_provided: resolution.ubatch_size_provided,

@@ -467,6 +467,21 @@ impl ErrorResponse {
         }
     }
 
+    /// Build a `504 Gateway Timeout` error. Used by the audio endpoints when the
+    /// dedicated worker thread does not reply within the configured per-request
+    /// timeout, so a stuck or pathologically slow request frees its blocking
+    /// thread and returns a structured error instead of hanging.
+    pub fn gateway_timeout(message: impl Into<String>) -> Self {
+        Self {
+            error: ErrorDetail {
+                message: message.into(),
+                error_type: "server_timeout".into(),
+                code: None,
+            },
+            status: axum::http::StatusCode::GATEWAY_TIMEOUT,
+        }
+    }
+
     /// Build a `501 Not Implemented` error. Used by the audio endpoints to
     /// report that no model is loaded for the requested audio direction while
     /// the request itself parsed successfully.

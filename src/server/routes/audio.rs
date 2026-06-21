@@ -348,6 +348,16 @@ fn audio_model_error_response(err: AudioModelError) -> ErrorResponse {
             format!("audio model inference failed: {message}"),
             "server_error",
         ),
+        // A full bounded queue reuses the shared 503 admission envelope so the
+        // audio path sheds load the same way the generation path does.
+        AudioModelError::QueueFull => {
+            ErrorResponse::service_unavailable("All slots are busy. Please try again later.")
+        }
+        // The worker did not reply in time; 504 names the upstream worker as the
+        // party that did not respond, distinct from a 503 admission rejection.
+        AudioModelError::Timeout => {
+            ErrorResponse::gateway_timeout("Audio request timed out. Please try again later.")
+        }
     }
 }
 
@@ -393,6 +403,16 @@ mod tests {
         let not_loaded =
             audio_model_error_response(AudioModelError::KindNotLoaded(AudioModelKind::Tts));
         assert_eq!(not_loaded.status, StatusCode::NOT_IMPLEMENTED);
+
+        // A full bounded queue maps to the shared 503 "server_busy" envelope.
+        let queue_full = audio_model_error_response(AudioModelError::QueueFull);
+        assert_eq!(queue_full.status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(queue_full.error.error_type, "server_busy");
+
+        // A per-request timeout maps to a structured 504 "server_timeout".
+        let timeout = audio_model_error_response(AudioModelError::Timeout);
+        assert_eq!(timeout.status, StatusCode::GATEWAY_TIMEOUT);
+        assert_eq!(timeout.error.error_type, "server_timeout");
     }
 
     #[test]

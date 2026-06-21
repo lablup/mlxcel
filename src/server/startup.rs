@@ -106,6 +106,12 @@ pub struct ServerStartupConfig {
     // Batch scheduling
     pub max_batch_size: Option<usize>,
     pub max_queue_depth: usize,
+    /// Bound on the audio worker command queue (admission control). Forwarded to
+    /// [`super::config::ServerConfig::audio_queue_depth`].
+    pub audio_queue_depth: usize,
+    /// Per-request reply timeout for the audio worker, in seconds. Forwarded to
+    /// [`super::config::ServerConfig::audio_request_timeout_secs`].
+    pub audio_request_timeout_secs: u64,
     /// Prefill chunk size in tokens (0 = disabled).
     pub prefill_chunk_size: usize,
     /// Set when `--batch-size` and `--prefill-chunk-size` conflict; triggers a startup warning.
@@ -394,6 +400,8 @@ impl Default for ServerStartupConfig {
             draft_block_size: None,
             max_batch_size: None,
             max_queue_depth: 32,
+            audio_queue_depth: crate::server::config::DEFAULT_AUDIO_QUEUE_DEPTH,
+            audio_request_timeout_secs: crate::server::config::DEFAULT_AUDIO_REQUEST_TIMEOUT_SECS,
             prefill_chunk_size: 512,
             batch_size_conflict: false,
             ubatch_size_provided: false,
@@ -829,6 +837,8 @@ pub(super) fn build_server_config(
         draft_block_size: startup.draft_block_size,
         max_batch_size,
         max_queue_depth: startup.max_queue_depth,
+        audio_queue_depth: startup.audio_queue_depth,
+        audio_request_timeout_secs: startup.audio_request_timeout_secs,
         prefill_chunk_size: startup.prefill_chunk_size,
         enable_preemption: startup.enable_preemption,
         preemption_policy: parse_preemption_policy(&startup.preemption_policy),
@@ -1812,6 +1822,18 @@ pub async fn start_server(mut startup: ServerStartupConfig) -> Result<()> {
     // thread. The chat ModelProvider load above is a no-op for this checkpoint
     // (the worker logs and returns), matching the single-model "speech-to-text
     // only" deployment; serving chat and STT simultaneously is out of scope.
+    // Audio admission bounds (#373). Read from the in-scope `config` before it is
+    // moved into `AppState`: a bounded command queue (queue depth) plus a
+    // per-request reply timeout, shared by the STT and TTS workers. A `0` timeout
+    // falls back to the default rather than timing out instantly; a `0` queue
+    // depth is clamped at the channel boundary inside `AudioWorker::spawn`.
+    let audio_queue_depth = config.audio_queue_depth;
+    let audio_request_timeout =
+        std::time::Duration::from_secs(if config.audio_request_timeout_secs == 0 {
+            crate::server::config::DEFAULT_AUDIO_REQUEST_TIMEOUT_SECS
+        } else {
+            config.audio_request_timeout_secs
+        });
     let audio_model: Option<Arc<dyn crate::server::audio_model::AudioModelProvider>> =
         match crate::models::get_model_type(&startup.model_path) {
             Ok(crate::models::ModelType::Whisper) => {
@@ -1819,7 +1841,11 @@ pub async fn start_server(mut startup: ServerStartupConfig) -> Result<()> {
                     "Detected Whisper speech-to-text checkpoint; loading audio model for \
                      /v1/audio/transcriptions and /v1/audio/translations"
                 );
-                match crate::server::whisper_stt::WhisperSttProvider::load(&startup.model_path) {
+                match crate::server::whisper_stt::WhisperSttProvider::load(
+                    &startup.model_path,
+                    audio_queue_depth,
+                    audio_request_timeout,
+                ) {
                     Ok(provider) => Some(Arc::new(provider)),
                     Err(err) => {
                         tracing::error!("Failed to load Whisper speech-to-text model: {err}");
@@ -1832,7 +1858,11 @@ pub async fn start_server(mut startup: ServerStartupConfig) -> Result<()> {
                     "Detected Kokoro text-to-speech checkpoint; loading audio model for \
                      /v1/audio/speech"
                 );
-                match crate::server::kokoro_tts::KokoroTtsProvider::load(&startup.model_path) {
+                match crate::server::kokoro_tts::KokoroTtsProvider::load(
+                    &startup.model_path,
+                    audio_queue_depth,
+                    audio_request_timeout,
+                ) {
                     Ok(provider) => Some(Arc::new(provider)),
                     Err(err) => {
                         tracing::error!("Failed to load Kokoro text-to-speech model: {err}");

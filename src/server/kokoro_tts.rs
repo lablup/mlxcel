@@ -27,6 +27,7 @@
 
 use std::borrow::Cow;
 use std::path::Path;
+use std::time::Duration;
 
 use crate::models::KokoroModel;
 use crate::models::g2p;
@@ -74,9 +75,16 @@ impl KokoroTtsProvider {
     /// Returns `Err` if the worker thread cannot start or the checkpoint fails
     /// to load, letting the server boot with the audio slot empty instead of
     /// aborting.
-    pub fn load(model_path: &Path) -> anyhow::Result<Self> {
+    ///
+    /// `queue_depth` and `request_timeout` bound the shared worker's command
+    /// queue and per-request reply wait (admission control + timeout).
+    pub fn load(
+        model_path: &Path,
+        queue_depth: usize,
+        request_timeout: Duration,
+    ) -> anyhow::Result<Self> {
         let model_path = model_path.to_path_buf();
-        let worker = AudioWorker::spawn("kokoro-tts", move || {
+        let worker = AudioWorker::spawn("kokoro-tts", queue_depth, request_timeout, move || {
             let model = KokoroModel::load(&model_path)?;
             Ok(KokoroEngine { model })
         })?;

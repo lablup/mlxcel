@@ -27,6 +27,7 @@
 //! over the worker's channel, which makes it trivially `Send + Sync`.
 
 use std::path::Path;
+use std::time::Duration;
 
 use crate::audio::load_wav_from_bytes;
 use crate::audio::whisper_mel;
@@ -50,9 +51,16 @@ impl WhisperSttProvider {
     /// tokenizer, then stays alive to serve transcription requests. Returns
     /// `Err` if the worker thread cannot start or the checkpoint fails to load,
     /// letting the server boot with the audio slot empty instead of aborting.
-    pub fn load(model_path: &Path) -> anyhow::Result<Self> {
+    ///
+    /// `queue_depth` and `request_timeout` bound the shared worker's command
+    /// queue and per-request reply wait (admission control + timeout).
+    pub fn load(
+        model_path: &Path,
+        queue_depth: usize,
+        request_timeout: Duration,
+    ) -> anyhow::Result<Self> {
         let model_path = model_path.to_path_buf();
-        let worker = AudioWorker::spawn("whisper-stt", move || {
+        let worker = AudioWorker::spawn("whisper-stt", queue_depth, request_timeout, move || {
             let model = WhisperModel::load(&model_path)?;
             Ok(WhisperEngine { model })
         })?;

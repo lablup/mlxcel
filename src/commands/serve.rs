@@ -229,6 +229,8 @@ fn build_startup_input(mut args: crate::ServeArgs) -> anyhow::Result<ServerStart
         max_batch_size: args.max_batch_size,
         no_batch: args.no_batch,
         max_queue_depth: args.max_queue_depth,
+        audio_queue_depth: args.audio_queue_depth,
+        audio_request_timeout_secs: args.audio_request_timeout_secs,
         prefill_chunk_size: args.prefill_chunk_size,
         batch_size: args.batch_size,
         ubatch_size: args.ubatch_size,

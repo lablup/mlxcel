@@ -38,6 +38,8 @@ fn sample_args() -> crate::ServeArgs {
         max_batch_size: Some(4),
         no_batch: false,
         max_queue_depth: 32,
+        audio_queue_depth: 8,
+        audio_request_timeout_secs: 120,
         prefill_chunk_size: 512,
         batch_size: None,
         ubatch_size: None,

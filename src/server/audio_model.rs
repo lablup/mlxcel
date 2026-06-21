@@ -123,6 +123,17 @@ pub enum AudioModelError {
     /// The loaded model failed while processing the request.
     #[error("audio model inference failed: {0}")]
     Inference(String),
+    /// The bounded audio worker queue was full at admission time. Routes map
+    /// this to the shared `503` "all slots are busy" envelope so a burst sheds
+    /// load instead of growing memory without bound.
+    #[error("audio worker queue is full")]
+    QueueFull,
+    /// The worker did not reply within the per-request timeout. Routes map this
+    /// to a `504 Gateway Timeout`: the upstream worker did not answer in time.
+    /// The in-flight MLX work is not cancelled; only the caller's blocking
+    /// thread is freed.
+    #[error("audio request timed out")]
+    Timeout,
 }
 
 /// Provider-facing interface implemented by the speech models.

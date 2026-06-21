@@ -89,7 +89,8 @@ Content-Type: `audio/wav`. Content-Disposition: `attachment; filename=speech.wav
 |--------|-----------|
 | 400 | Unsupported `response_format` (any value other than `wav` or absent). |
 | 501 | No TTS model is registered. Body: `{"error":{"type":"not_implemented","message":"audio model kind not loaded: tts"}}` |
-| 503 | All inference slots are busy. |
+| 503 | All slots are busy: either the generation batch queue or the bounded audio worker queue (`--audio-queue-depth`) is full. |
+| 504 | The audio worker did not reply within the per-request timeout (`--audio-request-timeout-secs`). |
 
 **Example (curl):**
 
@@ -127,7 +128,8 @@ Unknown multipart parts are drained and ignored. The upload body limit is 25 MiB
 | 400 | Malformed multipart, non-numeric `temperature`, or unsupported `response_format`. |
 | 413 | Upload body exceeds 25 MiB. |
 | 501 | No STT model is registered. Body: `{"error":{"type":"not_implemented","message":"audio model kind not loaded: stt"}}` |
-| 503 | All inference slots are busy. |
+| 503 | All slots are busy: either the generation batch queue or the bounded audio worker queue (`--audio-queue-depth`) is full. |
+| 504 | The audio worker did not reply within the per-request timeout (`--audio-request-timeout-secs`). |
 
 **Example (curl):**
 
@@ -152,6 +154,16 @@ The 501 response is returned **after** the request is fully parsed. This means:
 - The `file` field is required for transcriptions/translations; its absence returns 400 regardless of model state.
 
 This ordering lets callers distinguish broken requests from absent models without needing a loaded model.
+
+## Queue bound and per-request timeout
+
+All audio requests serialize through one dedicated MLX-owning worker thread (the model weights are thread-affine, so the thread that loads them must also run them). Two server knobs bound that path so a burst or a stuck request cannot degrade availability:
+
+- **Queue bound** (`--audio-queue-depth`, env `MLXCEL_AUDIO_QUEUE_DEPTH`, default `8`). The worker's command channel is bounded. At most this many requests may wait behind the one in flight; the next request is rejected with a structured `503` ("All slots are busy") rather than queueing without bound. This caps queued memory: each queued speech-to-text command holds up to the 25 MiB per-request payload, so the default of `8` caps queued payload at roughly 200 MiB plus the one in flight. A `0` is clamped to at least one queued command (a zero-capacity rendezvous channel is not the admission behavior we want).
+
+- **Per-request timeout** (`--audio-request-timeout-secs`, env `MLXCEL_AUDIO_REQUEST_TIMEOUT_SECS`, default `120`). A caller blocks on the worker reply for at most this long, then returns a structured `504`. The timeout frees the caller's blocking thread; it does not cancel the in-flight model work on the worker (a single worker can only safely process one request at a time). When the worker eventually finishes, its reply is dropped silently. A `0` falls back to the default rather than timing out instantly.
+
+Both knobs apply to the shared worker, so they cover the STT (Whisper) and TTS (Kokoro) paths together.
 
 ## Adding an audio model provider
 

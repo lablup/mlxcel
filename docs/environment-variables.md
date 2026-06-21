@@ -108,6 +108,15 @@ is then reusable only when it is fully contained in the new request). The
 `MLXCEL_ENABLE_VLM_PREFIX_CACHE` opts same-image multimodal follow-up turns into
 prompt-prefix sharing while leaving text-only prompt-cache behavior unchanged.
 
+## Server audio admission variables
+
+The OpenAI audio endpoints (`/v1/audio/speech`, `/v1/audio/transcriptions`, `/v1/audio/translations`) dispatch work to a single dedicated worker thread over a bounded command queue. These knobs bound that queue and the per-request reply wait, so a burst of requests cannot grow memory without bound (each queued speech-to-text command holds up to the 25 MiB per-request payload) and a stuck request does not block its caller forever.
+
+| Variable | Values | Default | CLI flag | Notes |
+|----------|--------|---------|----------|-------|
+| `MLXCEL_AUDIO_QUEUE_DEPTH` | unsigned integer | `8` | `--audio-queue-depth` | Bound on the audio worker command queue. When the queue is full, new audio requests get a structured `503` ("All slots are busy") instead of queueing without bound. A depth of `8` caps queued payload at roughly 200 MiB plus the one request in flight. A `0` is clamped to at least one queued command. |
+| `MLXCEL_AUDIO_REQUEST_TIMEOUT_SECS` | unsigned integer seconds | `120` | `--audio-request-timeout-secs` | Per-request reply timeout. A stuck or pathologically slow audio request frees its blocking thread and returns a structured `504` after this, instead of hanging. The timeout does not cancel the in-flight model work on the worker; it only frees the caller. A `0` falls back to the default rather than timing out instantly. |
+
 ## Speculative-decoding variables
 
 | Variable | Values | Default | Notes |
