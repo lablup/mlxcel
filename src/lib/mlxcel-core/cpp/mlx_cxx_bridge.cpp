@@ -314,6 +314,28 @@ rust::Vec<uint8_t> array_to_raw_bytes(const MlxArray& arr) {
     return result;
 }
 
+// Same body as `array_to_raw_bytes`, but declared `-> Result<Vec<u8>>` on the
+// Rust side so cxx wraps the call in a try/catch and converts any thrown MLX
+// exception (an allocation failure making the contiguous copy, or any deferred
+// error forced by the eval) into a Rust `Err` instead of letting it cross the
+// FFI boundary uncaught (which aborts the process). The audio synthesis readback
+// uses this so the whole contiguous + eval + copy-out step is recoverable at one
+// fallible boundary.
+rust::Vec<uint8_t> try_array_to_raw_bytes(const MlxArray& arr) {
+    auto a = mlx::core::contiguous(arr.inner);
+    mlx::core::eval(a);
+
+    size_t nbytes = a.nbytes();
+    const auto* data = reinterpret_cast<const uint8_t*>(a.data<void>());
+
+    rust::Vec<uint8_t> result;
+    result.reserve(nbytes);
+    for (size_t i = 0; i < nbytes; ++i) {
+        result.push_back(data[i]);
+    }
+    return result;
+}
+
 // Evaluation.
 void eval(const MlxArray& arr) {
     const_cast<array&>(arr.inner).eval();
@@ -612,6 +634,15 @@ std::unique_ptr<MlxArray> any_all(const MlxArray& a) {
 
 // Matrix operations.
 std::unique_ptr<MlxArray> matmul(const MlxArray& a, const MlxArray& b) {
+    return std::make_unique<MlxArray>(mlx::core::matmul(a.inner, b.inner));
+}
+
+// Same body as `matmul`, but declared `-> Result` on the Rust side so cxx wraps
+// the call in a try/catch and converts MLX's eager shape-mismatch exception (and
+// any other throw) into a Rust `Err` instead of letting it abort the process.
+// MLX validates matmul shapes at graph-build time, so this catches the throw at
+// op construction, not only at eval.
+std::unique_ptr<MlxArray> try_matmul(const MlxArray& a, const MlxArray& b) {
     return std::make_unique<MlxArray>(mlx::core::matmul(a.inner, b.inner));
 }
 

@@ -125,6 +125,10 @@ bool item_bool(const MlxArray& arr);
 // Copy evaluated array data to a byte buffer.
 // Used by: KV cache serialization for disaggregated inference
 rust::Vec<uint8_t> array_to_raw_bytes(const MlxArray& arr);
+// Fallible counterpart of `array_to_raw_bytes`; declared `-> Result` in the
+// bridge so cxx catches a throw from the contiguous copy or eval and surfaces it
+// as a Rust `Err` instead of aborting.
+rust::Vec<uint8_t> try_array_to_raw_bytes(const MlxArray& arr);
 
 // Evaluation.
 void eval(const MlxArray& arr);
@@ -220,6 +224,10 @@ std::unique_ptr<MlxArray> any_all(const MlxArray& a);
 
 // Matrix operations.
 std::unique_ptr<MlxArray> matmul(const MlxArray& a, const MlxArray& b);
+// Fallible counterpart of `matmul`; declared `-> Result` in the bridge so cxx
+// catches MLX's eager shape-mismatch exception (and any other throw) and
+// surfaces it as a Rust `Err` instead of aborting.
+std::unique_ptr<MlxArray> try_matmul(const MlxArray& a, const MlxArray& b);
 std::unique_ptr<MlxArray> transpose(const MlxArray& a);
 std::unique_ptr<MlxArray> transpose_axes(const MlxArray& a, rust::Slice<const int32_t> axes);
 std::unique_ptr<MlxArray> reshape(const MlxArray& a, rust::Slice<const int32_t> shape);

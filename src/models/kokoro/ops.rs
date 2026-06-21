@@ -93,6 +93,23 @@ pub(crate) fn matmul(a: &UniquePtr<MlxArray>, b: &UniquePtr<MlxArray>) -> Unique
     mlxcel_core::matmul(r(a), r(b))
 }
 
+/// Fallible matrix product `a @ b`.
+///
+/// Like [`matmul`], but returns `Err` instead of aborting the process when MLX
+/// rejects the operation. MLX validates matmul shapes eagerly at graph-build
+/// time, so a malformed graph throws at construction; this variant catches that
+/// throw at the FFI boundary (see [`mlxcel_core::try_matmul`]). Used for the
+/// audio synthesis alignment-expansion matmuls, whose inner dimension is derived
+/// from the runtime duration prediction, so a fault surfaces as a structured
+/// per-request error rather than a `std::terminate`.
+#[inline]
+pub(crate) fn try_matmul(
+    a: &UniquePtr<MlxArray>,
+    b: &UniquePtr<MlxArray>,
+) -> Result<UniquePtr<MlxArray>, String> {
+    mlxcel_core::try_matmul(r(a), r(b)).map_err(|e| format!("kokoro matmul failed: {e}"))
+}
+
 /// `exp(a)`.
 #[inline]
 pub(crate) fn exp(a: &UniquePtr<MlxArray>) -> UniquePtr<MlxArray> {
@@ -389,13 +406,22 @@ pub(crate) fn lstm_dir(
     outputs
 }
 
-/// Read an MLX array back to a host `Vec<f32>`. Casts to `f32`, makes the
-/// buffer contiguous, evaluates, then parses 4-byte little-endian chunks.
+/// Read an MLX array back to a host `Vec<f32>`. Casts to `f32`, then materializes
+/// the buffer (contiguous + eval + copy-out) through the fallible FFI readback
+/// and parses 4-byte little-endian chunks.
+///
+/// This is the single point where the lazily-built Kokoro graph is forced, so it
+/// is also where an MLX C++ exception (an allocation failure on a large
+/// data-dependent tensor, or any deferred op error) is most likely. The
+/// materialize step runs through [`mlxcel_core::try_array_to_raw_bytes`], which
+/// performs the contiguous copy and the eval inside one cxx try/catch boundary,
+/// so a fault returns `Err` instead of aborting the process via an uncaught C++
+/// exception. The `astype` to `f32` is a no-op on already-`f32` arrays and never
+/// throws, so it is left on the non-fallible path.
 pub(crate) fn to_vec_f32(a: &UniquePtr<MlxArray>) -> Result<Vec<f32>, String> {
     let f = mlxcel_core::astype(r(a), FLOAT32);
-    let c = mlxcel_core::contiguous(r(&f), false);
-    mlxcel_core::try_eval(r(&c)).map_err(|e| format!("kokoro eval failed: {e}"))?;
-    let bytes = mlxcel_core::array_to_raw_bytes(r(&c));
+    let bytes = mlxcel_core::try_array_to_raw_bytes(r(&f))
+        .map_err(|e| format!("kokoro eval failed: {e}"))?;
     Ok(bytes
         .chunks_exact(4)
         .map(|ch| f32::from_le_bytes([ch[0], ch[1], ch[2], ch[3]]))

@@ -150,6 +150,17 @@ mod ffi {
         /// Used by: KV cache serialization for disaggregated inference
         fn array_to_raw_bytes(arr: &MlxArray) -> Vec<u8>;
 
+        /// Fallible counterpart of [`array_to_raw_bytes`].
+        ///
+        /// Makes the array contiguous, evaluates it, and copies the bytes out,
+        /// all inside the cxx try/catch boundary (declared `-> Result`), so an
+        /// MLX C++ exception during the contiguous copy or the eval (for example
+        /// an allocation failure on a large data-dependent tensor) surfaces as a
+        /// Rust `Err` instead of an uncaught exception that aborts the process.
+        /// Used by the audio synthesis readback so a fault on a pool/worker
+        /// thread becomes a structured per-request error.
+        fn try_array_to_raw_bytes(arr: &MlxArray) -> Result<Vec<u8>>;
+
         // Evaluation.
         /// Evaluate an array
         fn eval(arr: &MlxArray);
@@ -371,6 +382,18 @@ mod ffi {
         // Matrix operations.
         /// Matrix multiplication
         fn matmul(a: &MlxArray, b: &MlxArray) -> UniquePtr<MlxArray>;
+
+        /// Fallible matrix multiplication.
+        ///
+        /// Same effect as [`matmul`], but declared `-> Result` so cxx catches
+        /// any MLX C++ exception at the FFI boundary and returns it as a Rust
+        /// `Err` instead of letting it cross uncaught and abort the process.
+        /// MLX validates matmul shapes eagerly at graph-build time, so a shape
+        /// mismatch throws at construction (not only at eval); this variant
+        /// catches that. Used on the audio synthesis forward path for the
+        /// data-dependent alignment-expansion matmuls, whose inner dimension is
+        /// derived from the runtime duration prediction.
+        fn try_matmul(a: &MlxArray, b: &MlxArray) -> Result<UniquePtr<MlxArray>>;
 
         /// Transpose (swap last two dimensions)
         fn transpose(a: &MlxArray) -> UniquePtr<MlxArray>;

@@ -2619,3 +2619,56 @@ fn steel_gemm_edge_tile_safe_load_matches_reference() {
         "steel GEMM edge-tile result diverges from composite reference: max_abs = {max_abs}"
     );
 }
+
+// --- Fallible audio-path FFI ops (issue #382) -------------------------------
+//
+// The audio synthesis/transcription forward paths build MLX graphs through ops
+// declared in the cxx bridge. A non-`Result` cxx op that throws a C++ exception
+// aborts the process via `std::terminate`, which the `catch_unwind` backstop in
+// the audio worker cannot intercept. The fallible variants below are declared
+// `-> Result` so cxx converts a thrown MLX exception into a recoverable `Err`.
+// These tests assert the recovery behavior (no abort) at the FFI boundary.
+
+#[test]
+fn try_matmul_returns_err_on_shape_mismatch() {
+    // MLX validates matmul shapes eagerly at graph-build time: the inner
+    // dimensions (3 and 4) do not match, so `mlx::core::matmul` throws at op
+    // construction. The fallible variant must catch that throw and return `Err`
+    // rather than letting it cross the FFI boundary uncaught (which would abort
+    // the whole process). No eval is needed; the throw happens at construction.
+    let a = ones(&[2, 3], dtype::FLOAT32);
+    let b = ones(&[4, 5], dtype::FLOAT32);
+    let result = try_matmul(&a, &b);
+    assert!(
+        result.is_err(),
+        "a matmul shape mismatch must return Err, not abort the process"
+    );
+}
+
+#[test]
+fn try_matmul_ok_matches_matmul() {
+    // The happy path is identical to `matmul`: a valid (2,3) x (3,4) product
+    // returns the (2,4) result and evaluates to the same value.
+    let a = ones(&[2, 3], dtype::FLOAT32);
+    let b = ones(&[3, 4], dtype::FLOAT32);
+    let c = try_matmul(&a, &b).expect("valid matmul returns Ok");
+    assert_eq!(array_shape(&c), vec![2, 4]);
+    eval(&c);
+    let total = sum_all(&c);
+    eval(&total);
+    assert_eq!(item_f32(&total), 24.0);
+}
+
+#[test]
+fn try_array_to_raw_bytes_round_trips_f32() {
+    // The fallible readback materializes (contiguous + eval + copy-out) inside a
+    // single cxx try/catch boundary. On a well-formed array it round-trips the
+    // bytes exactly, matching the non-fallible `array_to_raw_bytes`.
+    let a = from_slice_f32(&[1.0_f32, 2.0, 3.0], &[3]);
+    let bytes = try_array_to_raw_bytes(&a).expect("readback of a valid array returns Ok");
+    let values: Vec<f32> = bytes
+        .chunks_exact(4)
+        .map(|ch| f32::from_le_bytes([ch[0], ch[1], ch[2], ch[3]]))
+        .collect();
+    assert_eq!(values, vec![1.0, 2.0, 3.0]);
+}

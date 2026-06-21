@@ -219,12 +219,19 @@ impl KokoroModel {
         }
         let aln = alignment_matrix(&durations, l, total_frames);
 
+        // These two matmuls expand per-token features to per-frame against the
+        // alignment matrix, whose `T` (frame) dimension is derived from the
+        // runtime duration prediction. They are the data-dependent construction
+        // ops on the synthesis path, so route them through the fallible variant:
+        // a malformed graph returns Err here instead of aborting the process via
+        // an uncaught MLX C++ exception (MLX validates matmul shapes eagerly at
+        // graph-build time).
         let d_t = ops::swap_axes(&d, 0, 1); // (640, L)
-        let en = ops::matmul(&d_t, &aln); // (640, T)
+        let en = ops::try_matmul(&d_t, &aln).map_err(|e| anyhow!(e))?; // (640, T)
         let (f0_pred, n_pred) = self.predictor.f0n(&en, &s_pred, total_frames);
 
         let t_en = self.text_encoder.forward(&padded); // (512, L)
-        let asr = ops::matmul(&t_en, &aln); // (512, T)
+        let asr = ops::try_matmul(&t_en, &aln).map_err(|e| anyhow!(e))?; // (512, T)
 
         let samples = self
             .decoder
