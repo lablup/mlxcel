@@ -16,7 +16,7 @@ use super::{
     apply_user_chat_template, cli_pipeline_requested, estimate_delta_label_and_bytes,
     generated_suffix, generation_stats_from_duration, memory_preflight_ctx_len,
     resolve_cli_pipeline_assignments, resolve_cli_prompt, should_route_offline_mtp,
-    validate_pipeline_parallel_args, validate_tensor_parallel_args,
+    strip_trailing_eos, validate_pipeline_parallel_args, validate_tensor_parallel_args,
 };
 use mlxcel::server::chat_template::ChatTemplateProcessor;
 use mlxcel_core::drafter::DrafterKind;
@@ -46,6 +46,38 @@ fn should_route_offline_mtp_rejects_other_explicit_kinds() {
     assert!(!should_route_offline_mtp(true, DrafterKind::Dflash));
     assert!(!should_route_offline_mtp(true, DrafterKind::InternalMtp));
     assert!(!should_route_offline_mtp(false, DrafterKind::Dflash));
+}
+
+// issue #166: the offline MTP loop must exclude the terminal EOS / stop token so
+// its output is byte-identical to the non-speculative `mlxcel generate` path,
+// which breaks on EOS BEFORE pushing. `strip_trailing_eos` enforces that without
+// loading a model.
+#[test]
+fn strip_trailing_eos_drops_terminal_stop_token() {
+    // Common temp-0 case: the generator leaked the terminal EOS at the end.
+    let tokens = vec![10, 20, 30, 2];
+    assert_eq!(strip_trailing_eos(tokens, &[2]), vec![10, 20, 30]);
+}
+
+#[test]
+fn strip_trailing_eos_leaves_output_without_eos_unchanged() {
+    // max_tokens stop (no EOS emitted): nothing to strip.
+    let tokens = vec![10, 20, 30];
+    assert_eq!(strip_trailing_eos(tokens, &[2]), vec![10, 20, 30]);
+}
+
+#[test]
+fn strip_trailing_eos_first_token_eos_yields_empty() {
+    // EOS as the only / first token truncates to an empty output, mirroring the
+    // server breaking at the first EOS occurrence.
+    assert_eq!(strip_trailing_eos(vec![2], &[2]), Vec::<i32>::new());
+    assert_eq!(strip_trailing_eos(vec![2, 10, 20], &[2]), Vec::<i32>::new());
+}
+
+#[test]
+fn strip_trailing_eos_empty_eos_set_is_noop() {
+    let tokens = vec![10, 20, 2, 30];
+    assert_eq!(strip_trailing_eos(tokens, &[]), vec![10, 20, 2, 30]);
 }
 
 #[test]

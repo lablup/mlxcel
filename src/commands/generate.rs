@@ -1171,7 +1171,7 @@ fn run_offline_mtp(
     // Select the per-target adapter exactly as the server does, then drive the
     // round loop. `seq_id = None` selects the wrapper's internal single-sequence
     // fallback slot, the documented offline / single-row CLI usage.
-    let (tokens, stats) = match model {
+    let (mut tokens, mut stats) = match model {
         LoadedModel::Gemma4(wrapper) => drive_offline_mtp(
             Gemma4MtpTargetAdapter::new_with_block_size(wrapper, None, block_size),
             drafter,
@@ -1204,7 +1204,43 @@ fn run_offline_mtp(
         _ => unreachable!("non-MTP-capable target rejected by the variant gate above"),
     };
 
+    // issue #166: strip the terminal EOS / stop token so the offline MTP output
+    // is byte-identical to the non-speculative `mlxcel generate` path. The
+    // `MtpGenerator` pushes a token onto its `emitted` vec and THEN checks EOS,
+    // so its returned vector includes the terminal stop token. Both reference
+    // paths exclude it: `CxxGenerator::generate` breaks on EOS BEFORE pushing,
+    // and the server burst `finalize_burst_success` does the same. Without this,
+    // `decode_generated_text` (which decodes with skip_special_tokens = false)
+    // would render the leaked stop token (e.g. `<end_of_turn>`) and inflate the
+    // printed generated-token count by one. Use the SAME merged EOS set the
+    // generator used: the target's eos ids plus the sampling `stop_token_ids`.
+    let eos_tokens = merged_eos_token_ids(target_lm.eos_token_ids(), &sampling.stop_token_ids);
+    tokens = strip_trailing_eos(tokens, &eos_tokens);
+
+    // Realign the stats with the stripped output so the printed
+    // "[Generated N tokens ...]" line and tok/s match the non-speculative path,
+    // which counts EOS-excluded tokens.
+    stats.generated_tokens = tokens.len();
+    stats.decode_tok_per_sec = if stats.decode_time_ms > 0.0 {
+        tokens.len() as f64 / (stats.decode_time_ms / 1000.0)
+    } else {
+        0.0
+    };
+
     Ok((tokens, stats))
+}
+
+/// Truncate `tokens` at the first EOS / stop token so the returned vector
+/// excludes the terminal stop token, matching `CxxGenerator::generate` and the
+/// server burst `finalize_burst_success` (issue #166). The `MtpGenerator` never
+/// emits tokens after an EOS, so truncating at the first occurrence is
+/// equivalent to (and more robust than) dropping only a trailing one. An empty
+/// `eos_tokens` set is a no-op.
+fn strip_trailing_eos(mut tokens: Vec<i32>, eos_tokens: &[i32]) -> Vec<i32> {
+    if let Some(pos) = tokens.iter().position(|t| eos_tokens.contains(t)) {
+        tokens.truncate(pos);
+    }
+    tokens
 }
 
 /// Parse the `--surgery <FILE>` YAML configuration when supplied and
