@@ -414,3 +414,16 @@ fn run_core_thread_or_abort_runs_body_to_completion() {
         "side effects of the body must be observable after the wrapper returns"
     );
 }
+
+/// A body that returns a recoverable `Err` must not abort: the value is
+/// forwarded unchanged to the caller. Only a panic triggers the abort; a
+/// normal return, including `Err`, is not a panic.
+#[test]
+fn run_core_thread_or_abort_forwards_err_without_aborting() {
+    let result: Result<(), &str> = run_core_thread_or_abort("test-err-fwd", || Err("recoverable"));
+    assert_eq!(
+        result,
+        Err("recoverable"),
+        "a recoverable Err return must be forwarded, not treated as a panic"
+    );
+}
