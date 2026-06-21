@@ -3242,6 +3242,23 @@ impl KVCache {
         let vp_slice = ffi::slice(vp, &[0, 0, 0, 0], &[vps[0], vps[1], self.offset, vps[3]]);
         let vr_slice = ffi::slice(vr, &[0, 0, 0, 0], &[vrs[0], vrs[1], self.offset, 1]);
 
+        // #377 sparse-V skip-rate measurement: when MLXCEL_SPARSE_V_COUNT names
+        // an output file, tally the post-softmax skip rate for this decode step
+        // (single-token only). Off by default; a pure side computation that does
+        // not affect the returned attention output.
+        if turbo::sparse_v::sparse_v_count_enabled() {
+            let q_shape = ffi::array_shape(q);
+            if q_shape.len() == 4 && q_shape[2] == 1 {
+                turbo::sparse_v::record_skip_rate(
+                    q,
+                    &k_slice,
+                    scale,
+                    mask,
+                    turbo::sparse_v::threshold(),
+                );
+            }
+        }
+
         // Rotated-codec-basis SDPA: dequantize V into its WHT-rotated basis (no
         // per-token inverse WHT), run native SDPA against the FP16 K, and
         // inverse-rotate only the small output. Exact (`rotate(SDPA(q,k,v)) ==

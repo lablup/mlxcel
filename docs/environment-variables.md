@@ -133,6 +133,7 @@ variables below are useful for service-level defaults and A/B experiments. See
 | `MLXCEL_KV_SKIP_LAST_LAYER` | boolean | `true` | Fallback for `--kv-skip-last-layer` in continuous-batching KV quantization. |
 | `MLXCEL_SPARSE_V_THRESHOLD` | non-negative float | `1e-6` | Sparse-V alive threshold. `0` disables sparse-V; invalid values warn and use the default. |
 | `MLXCEL_SPARSE_V_KERNEL` | falsy disables | enabled on macOS | Allows the fused Sparse-V/dequant Metal kernels. Set `0`, `false`, `off`, or `no` to force graph fallback. |
+| `MLXCEL_SPARSE_V_COUNT` | output file path | unset (off) | **Diagnostic.** When set to a non-empty path, every single-token `Turbo4Asym` decode appends `call_idx,kv_tokens,skipped,total` to that CSV, counting post-softmax attention weights below `MLXCEL_SPARSE_V_THRESHOLD` across all heads. Aggregate per layer offline by grouping on `kv_tokens` (constant within a decode step) and using each call's position within the step as the layer index. A graph-only side computation; zero cost when unset. See `scripts/measure_sparse_v_skip_rate.sh`. |
 | `MLXCEL_TURBO4_DEQUANT_SDPA` | falsy disables | on | Controls the dequant-first SDPA path for symmetric `Turbo4`. |
 | `MLXCEL_TURBO4_ASYM_DEQUANT_SDPA` | falsy disables | on | Controls the dequant-first SDPA path for asymmetric `Turbo4Asym` (FP16 K + 4-bit V). Falsy values fall back to the lossy sparse-V approximation. |
 | `MLXCEL_TURBO4_DELEGATED_DEQUANT_SDPA` | falsy disables | on | Controls the default dequant-first SDPA path for `Turbo4Delegated`. |

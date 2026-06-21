@@ -65,7 +65,9 @@
 //! visible token range across cold-packed V and hot-FP16 V; wiring sparse-V
 //! through that split requires a hot+cold composition pass and is deferred.
 
-use std::sync::OnceLock;
+use std::io::Write as _;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, OnceLock};
 
 use cxx::UniquePtr;
 
@@ -284,6 +286,146 @@ pub fn turbo4_dequant_sdpa_enabled() -> bool {
 pub fn turbo4_asym_dequant_sdpa_enabled() -> bool {
     *TURBO4_ASYM_DEQUANT_SDPA_ENABLED
         .get_or_init(|| parse_env_default_on(TURBO4_ASYM_DEQUANT_SDPA_ENV_VAR))
+}
+
+// ── #377: sparse-V skip-rate measurement (diagnostic, off by default) ───────
+
+/// Environment variable that enables the sparse-V skip-rate counter and names
+/// its output CSV.
+///
+/// When set to a non-empty path, every single-token `Turbo4Asym` decode call
+/// appends one row `call_idx,kv_tokens,skipped,total` to that file, where
+/// `skipped` counts post-softmax attention weights strictly below the sparse-V
+/// threshold ([`threshold`], default `1e-6`) across all query heads and key
+/// positions, and `total = B * Hq * Tk`. Aggregate per layer offline with
+/// `layer = call_idx % num_hidden_layers`, since decode walks the layers in a
+/// fixed round-robin and prefill (`Tq > 1`) is not recorded.
+///
+/// This directly measures the post-softmax sparsity the upstream TurboQuant+
+/// sparse-V paper reports (#377). It is a graph-only side computation (one extra
+/// `Q·K^T` plus softmax per recorded decode step) and does not change the
+/// attention output. Unset by default, with zero cost when unset.
+pub const SPARSE_V_COUNT_ENV_VAR: &str = "MLXCEL_SPARSE_V_COUNT";
+
+/// Monotonic per-process counter tagging each recorded decode call so the
+/// offline aggregator can recover the layer as `call_idx % num_hidden_layers`.
+static SPARSE_V_COUNT_CALL_IDX: AtomicU64 = AtomicU64::new(0);
+
+/// Resolved output path for [`SPARSE_V_COUNT_ENV_VAR`] (cached on first read).
+/// `None` means the counter is disabled.
+pub fn sparse_v_count_path() -> Option<&'static str> {
+    static PATH: OnceLock<Option<String>> = OnceLock::new();
+    PATH.get_or_init(|| {
+        std::env::var(SPARSE_V_COUNT_ENV_VAR)
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+    })
+    .as_deref()
+}
+
+/// Returns `true` iff the sparse-V skip-rate counter is enabled.
+pub fn sparse_v_count_enabled() -> bool {
+    sparse_v_count_path().is_some()
+}
+
+/// Lazily-opened CSV sink for the skip-rate counter. Truncates the file and
+/// writes the header on first use; a failed open warns once and disables the
+/// counter (returns `None`).
+fn sparse_v_count_file() -> Option<&'static Mutex<std::fs::File>> {
+    static FILE: OnceLock<Option<Mutex<std::fs::File>>> = OnceLock::new();
+    FILE.get_or_init(|| {
+        let path = sparse_v_count_path()?;
+        match std::fs::File::create(path) {
+            Ok(mut f) => {
+                let _ = writeln!(f, "call_idx,kv_tokens,skipped,total");
+                Some(Mutex::new(f))
+            }
+            Err(e) => {
+                eprintln!("[mlxcel] WARN: {SPARSE_V_COUNT_ENV_VAR}: cannot open {path:?}: {e}");
+                None
+            }
+        }
+    })
+    .as_ref()
+}
+
+/// Record the post-softmax sparse-V skip rate for one single-token decode step.
+///
+/// Computes `softmax(Q·K^T·scale + mask)` over the key axis and counts the
+/// weights strictly below `threshold_value` across all query heads and key
+/// positions, appending `call_idx,kv_tokens,skipped,total` to the counter CSV.
+/// This is a pure side computation: the result is written out and discarded,
+/// and the caller's normal path still produces the attention output. Gated by
+/// [`sparse_v_count_enabled`]; the caller must also restrict it to decode steps
+/// (`Tq == 1`), which is what the paper's skip-rate methodology measures.
+pub fn record_skip_rate(
+    q: &MlxArray,
+    k: &MlxArray,
+    scale: f32,
+    mask: Option<&MlxArray>,
+    threshold_value: f32,
+) {
+    let Some(file) = sparse_v_count_file() else {
+        return;
+    };
+    let q_shape = ffi::array_shape(q);
+    let k_shape = ffi::array_shape(k);
+    if q_shape.len() != 4 || k_shape.len() != 4 {
+        return;
+    }
+    let b = q_shape[0];
+    let hq = q_shape[1];
+    let kv_heads = k_shape[1];
+    let tk = k_shape[2];
+    if kv_heads <= 0 || hq % kv_heads != 0 {
+        return;
+    }
+    let n_rep = hq / kv_heads;
+
+    // Broadcast KV heads to Q heads, then scores = Q·K^T·scale (+ mask). Same
+    // construction as `attention_sparse_v_turbo4`, in FP32 for a stable softmax.
+    let k_for_q = if n_rep == 1 {
+        ffi::contiguous(k, false)
+    } else {
+        let kt = k_shape[2];
+        let kd = k_shape[3];
+        let k_exp = ffi::expand_dims(k, 2);
+        let k_tiled = ffi::broadcast_to(&k_exp, &[b, kv_heads, n_rep, kt, kd]);
+        ffi::reshape(&k_tiled, &[b, hq, kt, kd])
+    };
+    let k_for_q_t = ffi::transpose_axes(&k_for_q, &[0, 1, 3, 2]);
+    let q_f32 = ffi::astype(q, dtype::FLOAT32);
+    let k_t_f32 = ffi::astype(&k_for_q_t, dtype::FLOAT32);
+    let qk = ffi::matmul(&q_f32, &k_t_f32);
+    let scale_arr = ffi::full_f32(&[1], scale, dtype::FLOAT32);
+    let mut scores = ffi::multiply(&qk, &scale_arr);
+    if let Some(m) = mask {
+        let m_f32 = ffi::astype(m, dtype::FLOAT32);
+        scores = ffi::add(&scores, &m_f32);
+    }
+    let weights = ffi::softmax_precise(&scores, -1); // [B, Hq, Tq, Tk] f32
+
+    let (skipped, total) = count_weights_below_threshold(&weights, threshold_value);
+    let idx = SPARSE_V_COUNT_CALL_IDX.fetch_add(1, Ordering::Relaxed);
+    if let Ok(mut f) = file.lock() {
+        let _ = writeln!(f, "{idx},{tk},{skipped},{total}");
+    }
+}
+
+/// Count post-softmax attention weights strictly below `threshold` and the
+/// total element count, matching the kernel's `attn < threshold` skip and the
+/// paper's "below tau". Returns `(skipped, total)`.
+pub fn count_weights_below_threshold(weights: &MlxArray, threshold: f32) -> (u64, u64) {
+    let shape = ffi::array_shape(weights);
+    let total: i64 = shape.iter().map(|&d| i64::from(d)).product();
+    let thr_arr = ffi::full_f32(&[1], threshold, dtype::FLOAT32);
+    let below = ffi::less(weights, &thr_arr);
+    let below_f32 = ffi::astype(&below, dtype::FLOAT32);
+    let skipped_arr = ffi::sum_all(&below_f32);
+    ffi::eval(&skipped_arr);
+    let skipped = ffi::item_f32(&skipped_arr).round() as u64;
+    (skipped, total.max(0) as u64)
 }
 
 /// Returns `true` iff model attention call sites should route

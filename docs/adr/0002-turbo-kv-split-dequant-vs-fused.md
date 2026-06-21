@@ -1,6 +1,6 @@
 # ADR 0002: Turbo KV decode is split dequant plus native SDPA, and the upstream sparse-V speedup does not carry over
 
-**Status:** Accepted (2026-06-20); amended 2026-06-21 with the #370 result. Follows #369 (Turbo4Asym routed through dequant-SDPA), motivated #370 (fuse V dequant into the attention kernel). Backed by the 2026-06-19 sweep under `benchmarks/turbo_kv/` and the A/B measurements below. The 2026-06-21 addendum records that the #370 fused-kernel lever did not pan out and why; the decision stands and is now measured on both ends.
+**Status:** Accepted (2026-06-20); amended 2026-06-21 with the #370 and #377 results. Follows #369 (Turbo4Asym routed through dequant-SDPA), motivated #370 (fuse V dequant into the attention kernel) and #377 (measure the skip rate directly). Backed by the 2026-06-19 sweep under `benchmarks/turbo_kv/` and the A/B measurements below. The 2026-06-21 addenda record that the #370 fused-kernel lever did not pan out, and that the sparse-V skip rate is genuinely high (#377) yet still buys no decode speed; the decision stands and is now measured on both ends.
 
 ## Context
 
@@ -73,6 +73,24 @@ There is no fuse-into-native-SDPA option, because MLX's SDPA kernel consumes a d
 Do not route `Turbo4Asym` through the fused kernel. `Turbo4Asym` stays on the exact dequant-SDPA path (#369), the simple full-precision-K option that quantizes every V token with no hot ring, at roughly 0.3-0.5x decode. For the fp16-K + 4-bit-V use case that wants speed, the recommended mode is **`Turbo4Delegated`**: about 4x V compression at 0.66-0.80x fp16 decode, via cold-only dequant-SDPA plus a hot FP16 ring. The `--recommend-quant` advisor already promotes `Turbo4Delegated` here (post-#376); no advisor change is needed.
 
 The remaining asym-versus-delegated decode gap (about 0.4x versus 0.7x) is the hot/cold split, not V-dequant fusion. Closing it would mean giving `Turbo4Asym` a hot ring, which is exactly what makes a cache `Turbo4Delegated`. Keeping the two modes distinct (delegated = fast with a hot ring, asym = simple and fully quantized) is the intended design, so the gap is left as is.
+
+## Addendum (2026-06-21): measured sparse-V skip rate (#377)
+
+The original finding above (the sparse-V skip buys no decode speed) was reached from speed A/B, not from a direct count of how many attention weights fall below `tau=1e-6`. #377 closes that loop by measuring the skip rate directly, through an env-gated counter (`MLXCEL_SPARSE_V_COUNT`) that tallies post-softmax weights below the threshold across all query heads per decode step.
+
+The asym decode hook that the counter rides lives in the dense Qwen3 and Llama3 attention paths (the MoE paths funnel through generic `update_and_fetch`), so the measurement uses dense `qwen3-4b-4bit`. The skip rate is a property of the attention distribution rather than MoE routing, and the upstream paper itself inspected attention on a dense Qwen3-1.7B, so a dense model is a faithful probe. M1 Ultra, prompt seeded to each context with a repeated paragraph, 32 of 36 layers participate (4 boundary-V layers stay fp16). Evidence under `benchmarks/sparse_v_skip/`:
+
+| context | overall skip | per-layer min / median / max |
+|---|---|---|
+| ~8.4K | 66.8% | 33.9% / 65.4% / 90.0% |
+| ~16.7K | 75.6% | 44.6% / 76.2% / 93.0% |
+| ~33.5K | 81.8% | 62.2% / 82.0% / 95.6% |
+
+Paper (Qwen3.5-35B-A3B, wikitext): 28% / 51% / 90% at 8K / 16K / 32K.
+
+**The high-sparsity regime reproduces.** Skip rate grows monotonically with context, and the most concentrated layers reach the paper's ~90% band (90.0% peak at 8K rising to 95.6% at 32K). The overall numbers run higher than the paper's 28% and 51% at 8K and 16K, for two reasons worth stating plainly: the model differs (dense `qwen3-4b` versus the paper's MoE), and the repeated-paragraph prompt concentrates attention more than natural wikitext, so the absolute values read as an upper-ish bound, not a precise replication. The trend and the ~90%+ peak-layer regime at long context are the robust findings.
+
+This is the confirmation the split-architecture conclusion needed. The sparsity is real and high, yet ADR's A/B showed the skip removes no measurable decode time even on the paper's exact model at 32K. High sparsity plus zero speed gain means the V weighted-sum is simply too small a fraction of a split decode step for any skip rate to matter; the skip would only pay inside a fused flash-attention, and #370 showed mlxcel's available fused kernel loses to native SDPA. Sparsity was never the missing piece.
 
 ## Reproduce
 

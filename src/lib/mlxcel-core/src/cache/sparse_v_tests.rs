@@ -717,3 +717,19 @@ fn turbo4_delegated_dequant_sdpa_enabled_default_on() {
         }
     }
 }
+
+/// #377: the skip-rate counter's core counts post-softmax weights strictly
+/// below the threshold and reports the total element count.
+#[test]
+fn count_weights_below_threshold_counts_strictly_below() {
+    // 6 weights; strictly below 1e-6: 1e-7, 0.0, 1e-8 -> 3. The boundary value
+    // 1e-6 itself is not below (strict comparison), so it stays counted alive.
+    let weights = ffi::from_slice_f32(&[0.001, 0.5, 1e-7, 0.0, 1e-8, 1e-6], &[1, 1, 1, 6]);
+    let (skipped, total) = sparse_v::count_weights_below_threshold(&weights, 1e-6);
+    assert_eq!(total, 6, "total must be the element count");
+    assert_eq!(skipped, 3, "three weights are strictly below 1e-6");
+
+    // threshold 0 skips nothing: no weight is strictly below 0.
+    let (skipped_zero, _) = sparse_v::count_weights_below_threshold(&weights, 0.0);
+    assert_eq!(skipped_zero, 0, "threshold 0 skips nothing");
+}
