@@ -44,6 +44,20 @@ use common::{repo_binary_path, repo_model_dir};
 /// qwen3 checkpoint directory name (pool-backed Fp16, the handoff scope).
 const QWEN3_DIR: &str = "qwen3-0.6b-4bit";
 
+/// Gemma checkpoint directory name (issue #387). Gemma's SentencePiece
+/// tokenizer has `byte_fallback = true`, so a multi-byte character (e.g. the
+/// `é` in "café") is emitted as a `<0xXX>` byte sequence: several model tokens
+/// surfacing as one detokenized text piece. Counting emitted pieces would
+/// under-count those tokens, which is exactly what the authoritative wire count
+/// fixes. Fetch with:
+/// `./target/release/mlxcel download mlx-community/gemma-3-1b-it-4bit`.
+const GEMMA_DIR: &str = "gemma-3-1b-it-4bit";
+
+/// Model alias for the Gemma byte-fallback parity test (single-node baseline
+/// started with `--alias <this>` so its `display_model_id()` matches the router-
+/// echoed `model`).
+const GEMMA_MODEL_ALIAS: &str = "gemma-completions";
+
 /// Expected concatenated SSE content from the router for the test prompt.
 ///
 /// This is the single-node greedy reference: a hybrid `mlxcel-server` answers
@@ -786,6 +800,274 @@ async fn disaggregated_router_completions_match_single_node() {
         "router stream /v1/completions chunks are not byte-identical to single-node"
     );
     eprintln!("OK: router /v1/completions matches single-node (non-stream + stream).");
+}
+
+/// Issue #387: `POST /v1/completions` through the disaggregated router must
+/// report `usage.completion_tokens` and `finish_reason` identical to single-node
+/// for a BYTE-FALLBACK tokenizer (Gemma), not just byte-level-BPE (Qwen).
+///
+/// Gemma's SentencePiece tokenizer emits multi-byte characters as `<0xXX>` byte
+/// sequences: several model tokens that surface as a single detokenized text
+/// piece. The previous router counted emitted pieces, which under-counted those
+/// tokens and could flip `finish_reason` between "length" and "stop". With the
+/// worker's authoritative token count carried over the wire
+/// (`ResultFrame.generated_tokens`), the router reports the exact count.
+///
+/// The prompt forces the multi-byte `é` in "café" into the output so the byte-
+/// fallback path is actually exercised; the full body is compared byte-for-byte
+/// (normalizing only the volatile `id` / `created`), and `usage.completion_tokens`
+/// plus `finish_reason` are asserted explicitly for a clear failure message.
+///
+/// Gated like the other real-model tests: `#[ignore]` plus a checkpoint-presence
+/// guard that skips cleanly when the Gemma checkpoint is absent. Requires a
+/// byte-fallback checkpoint that also supports the pool-backed paged handoff.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "spawns four real mlxcel-server processes loading gemma-3-1b-it-4bit; run with --ignored"]
+async fn disaggregated_router_completions_match_single_node_byte_fallback() {
+    let model_dir = repo_model_dir(GEMMA_DIR);
+    if !model_dir.exists() {
+        eprintln!(
+            "Skipping {GEMMA_DIR}: model directory not found at {}.\n\
+             Fetch with: ./target/release/mlxcel download mlx-community/gemma-3-1b-it-4bit",
+            model_dir.display()
+        );
+        return;
+    }
+    let binary = repo_binary_path("mlxcel-server");
+    if !binary.exists() {
+        eprintln!("Skipping: mlxcel-server binary not found");
+        return;
+    }
+    let model_arg = model_dir.to_string_lossy().to_string();
+    // A prompt that forces the multi-byte `é` (a byte-fallback `<0xXX>`
+    // sequence) into the greedy continuation so the count fix is exercised.
+    let prompt = "Spell the French word for coffee. It is café. Repeat it:";
+    let nonstream_body = serde_json::json!({
+        "model": GEMMA_MODEL_ALIAS,
+        "prompt": prompt,
+        "max_tokens": 16,
+        "temperature": 0.0
+    });
+    let stream_body = serde_json::json!({
+        "model": GEMMA_MODEL_ALIAS,
+        "prompt": prompt,
+        "max_tokens": 16,
+        "temperature": 0.0,
+        "stream": true,
+        "stream_options": {"include_usage": true}
+    });
+    let client = reqwest::Client::new();
+
+    // ---- Single-node reference (started with --alias for model parity) ----
+    let (ref_nonstream, ref_stream_chunks) = {
+        let ports = reserve_ports(1);
+        let http = ports[0].to_string();
+        let _single = spawn_role_server(&[
+            "-m",
+            &model_arg,
+            "--host",
+            "127.0.0.1",
+            "--port",
+            &http,
+            "--alias",
+            GEMMA_MODEL_ALIAS,
+            "--no-warmup",
+        ]);
+        let deadline = Instant::now() + Duration::from_secs(240);
+        let health_url = format!("http://127.0.0.1:{http}/health");
+        assert!(
+            wait_for_http_health(&health_url, deadline).await,
+            "single-node Gemma reference never became healthy at {health_url}"
+        );
+        let completions_url = format!("http://127.0.0.1:{http}/v1/completions");
+
+        let ns_resp = client
+            .post(&completions_url)
+            .json(&nonstream_body)
+            .send()
+            .await
+            .expect("POST single-node /v1/completions (non-stream)");
+        assert!(
+            ns_resp.status().is_success(),
+            "single-node non-stream completion returned HTTP {}",
+            ns_resp.status()
+        );
+        let ns_json = ns_resp
+            .json::<serde_json::Value>()
+            .await
+            .expect("parse single-node non-stream completion JSON");
+
+        let st_resp = client
+            .post(&completions_url)
+            .json(&stream_body)
+            .send()
+            .await
+            .expect("POST single-node /v1/completions (stream)");
+        assert!(
+            st_resp.status().is_success(),
+            "single-node stream completion returned HTTP {}",
+            st_resp.status()
+        );
+        let st_body = st_resp.text().await.expect("read single-node SSE body");
+
+        (
+            normalize_completion(ns_json),
+            parse_completion_chunks(&st_body),
+        )
+        // _single drops here, killing the reference server.
+    };
+    eprintln!("single-node Gemma non-stream reference: {ref_nonstream}");
+    let ref_text = ref_nonstream["choices"][0]["text"].as_str().unwrap_or("");
+    assert!(
+        !ref_text.is_empty(),
+        "single-node Gemma reference produced empty completion text; parity check would be vacuous"
+    );
+    // Guard the test's premise: the byte-fallback path is only exercised if the
+    // greedy output actually contains a multi-byte character.
+    assert!(
+        !ref_text.is_ascii(),
+        "single-node Gemma output {ref_text:?} is pure ASCII; the byte-fallback \
+         count path is not exercised. Adjust the prompt so the output contains a \
+         multi-byte character."
+    );
+
+    // ---- Three-process disaggregated router run ----
+    let ports = reserve_ports(6);
+    let prefill_http = ports[0].to_string();
+    let decode_http = ports[1].to_string();
+    let router_http = ports[2].to_string();
+    let prefill_serving_addr = format!("127.0.0.1:{}", ports[3]);
+    let decode_serving_addr = format!("127.0.0.1:{}", ports[4]);
+    let router_serving_addr = format!("127.0.0.1:{}", ports[5]);
+
+    let _decode = spawn_role_server(&[
+        "-m",
+        &model_arg,
+        "--host",
+        "127.0.0.1",
+        "--port",
+        &decode_http,
+        "--parallel",
+        "2",
+        "--max-batch-size",
+        "2",
+        "--decode-storage-backend",
+        "paged",
+        "--node-role",
+        "decode",
+        "--serving-bind",
+        &decode_serving_addr,
+        "--no-warmup",
+    ]);
+    let _prefill = spawn_role_server(&[
+        "-m",
+        &model_arg,
+        "--host",
+        "127.0.0.1",
+        "--port",
+        &prefill_http,
+        "--parallel",
+        "2",
+        "--max-batch-size",
+        "2",
+        "--decode-storage-backend",
+        "paged",
+        "--node-role",
+        "prefill",
+        "--serving-bind",
+        &prefill_serving_addr,
+        "--decode-peers",
+        &decode_serving_addr,
+        "--no-warmup",
+    ]);
+    let _router = spawn_role_server(&[
+        "-m",
+        &model_arg,
+        "--host",
+        "127.0.0.1",
+        "--port",
+        &router_http,
+        "--node-role",
+        "router",
+        "--serving-bind",
+        &router_serving_addr,
+        "--prefill-peers",
+        &prefill_serving_addr,
+        "--decode-peers",
+        &decode_serving_addr,
+        "--no-warmup",
+    ]);
+
+    let deadline = Instant::now() + Duration::from_secs(240);
+    assert!(
+        wait_for_tcp(&decode_serving_addr, deadline).await,
+        "decode node serving transport never came up"
+    );
+    assert!(
+        wait_for_tcp(&prefill_serving_addr, deadline).await,
+        "prefill node serving transport never came up"
+    );
+    let health_url = format!("http://127.0.0.1:{router_http}/health");
+    assert!(
+        wait_for_http_health(&health_url, deadline).await,
+        "router HTTP /health never returned 200"
+    );
+    let router_completions_url = format!("http://127.0.0.1:{router_http}/v1/completions");
+
+    // Non-streaming parity: usage.completion_tokens + finish_reason must match.
+    let router_ns_resp = client
+        .post(&router_completions_url)
+        .json(&nonstream_body)
+        .send()
+        .await
+        .expect("POST router /v1/completions (non-stream)");
+    assert!(
+        router_ns_resp.status().is_success(),
+        "router non-stream completion returned HTTP {}",
+        router_ns_resp.status()
+    );
+    let router_ns = normalize_completion(
+        router_ns_resp
+            .json::<serde_json::Value>()
+            .await
+            .expect("parse router non-stream completion JSON"),
+    );
+    eprintln!("router Gemma non-stream: {router_ns}");
+    assert_eq!(
+        router_ns["usage"]["completion_tokens"], ref_nonstream["usage"]["completion_tokens"],
+        "router usage.completion_tokens diverges from single-node for a byte-fallback tokenizer"
+    );
+    assert_eq!(
+        router_ns["choices"][0]["finish_reason"], ref_nonstream["choices"][0]["finish_reason"],
+        "router finish_reason diverges from single-node for a byte-fallback tokenizer"
+    );
+    assert_eq!(
+        router_ns, ref_nonstream,
+        "router non-stream /v1/completions body is not byte-identical to single-node (Gemma)"
+    );
+
+    // Streaming parity: the usage chunk and finish chunk must match too.
+    let router_st_resp = client
+        .post(&router_completions_url)
+        .json(&stream_body)
+        .send()
+        .await
+        .expect("POST router /v1/completions (stream)");
+    assert!(
+        router_st_resp.status().is_success(),
+        "router stream completion returned HTTP {}",
+        router_st_resp.status()
+    );
+    let router_st_body = router_st_resp.text().await.expect("read router SSE body");
+    let router_st_chunks = parse_completion_chunks(&router_st_body);
+    assert_eq!(
+        router_st_chunks, ref_stream_chunks,
+        "router stream /v1/completions chunks are not byte-identical to single-node (Gemma)"
+    );
+    eprintln!(
+        "OK: router /v1/completions matches single-node for a byte-fallback tokenizer \
+         (usage + finish_reason)."
+    );
 }
 
 // ── Multi-node routing, balancing, and failover (issue #201) ─────────────

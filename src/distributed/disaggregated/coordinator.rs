@@ -294,7 +294,17 @@ impl ServingCoordinator {
                 token_tx,
                 Arc::new(AtomicBool::new(false)),
             )?;
-            let (tokens, done, error) = drain_generation_events(&token_rx);
+            let drained = drain_generation_events(&token_rx);
+
+            // The prefill node's authoritative count of model tokens it
+            // generated for this request (issue #387). When it finished here
+            // (immediate EOS or a single-token budget) the terminal `Done`
+            // reports the exact count (0 or 1); when it produced a handoff and
+            // continues on the decode node, it sampled exactly one first token
+            // and emitted no `Done`, so the count is 1. Carrying this lets the
+            // router count a byte-fallback first token (which surfaces as no
+            // text piece) correctly instead of under-counting it.
+            let prefill_generated = drained.completion_tokens.unwrap_or(1);
 
             // Return the prefill node's first token to the client. When prefill
             // produced no handoff frame (immediate EOS), this first-token result
@@ -304,10 +314,11 @@ impl ServingCoordinator {
             let first_result = ResultFrame {
                 request_id: request.request_id,
                 phase: ResultPhase::FirstToken,
-                tokens,
+                tokens: drained.tokens,
                 start_sequence: 0,
-                done: done || frame.is_none(),
-                error,
+                done: drained.done || frame.is_none(),
+                error: drained.error,
+                generated_tokens: Some(prefill_generated),
             };
             if let Err(e) = self
                 .transport
@@ -358,6 +369,7 @@ impl ServingCoordinator {
                         start_sequence: 0,
                         done: true,
                         error: Some(format!("decode handoff to {decode_peer} failed: {e}")),
+                        generated_tokens: None,
                     };
                     let _ = self
                         .transport
@@ -454,18 +466,31 @@ impl ServingCoordinator {
             // prefill first token is sequence 0) so the router can detect
             // gaps or reordering on the wire.
             let mut next_sequence: u64 = 1;
+            // The decode node's authoritative count of model tokens it generated
+            // after the handoff (issue #387), accumulated from whichever tick's
+            // terminal `Done` event carries it. The decode `decode_state` is
+            // seeded with the prompt and the prefill node's first token, so this
+            // count covers only the decode continuation; the router adds the
+            // prefill node's first-token count for the request total.
+            let mut decode_generated: Option<u64> = None;
             loop {
                 let active = scheduler.decode_handoff_step();
-                let (tokens, _done, error) = drain_generation_events(&token_rx);
-                if !tokens.is_empty() || error.is_some() {
-                    let frame_tokens = tokens.len() as u64;
+                let drained = drain_generation_events(&token_rx);
+                if let Some(count) = drained.completion_tokens {
+                    decode_generated = Some(count);
+                }
+                if !drained.tokens.is_empty() || drained.error.is_some() {
+                    let frame_tokens = drained.tokens.len() as u64;
                     let result = ResultFrame {
                         request_id: meta.request_id,
                         phase: ResultPhase::Continuation,
-                        tokens,
+                        tokens: drained.tokens,
                         start_sequence: next_sequence,
                         done: false,
-                        error,
+                        error: drained.error,
+                        // Only the terminal frame carries the count; intermediate
+                        // continuation frames leave it None.
+                        generated_tokens: None,
                     };
                     self.transport
                         .send(&meta.reply_to, result.encode()?)
@@ -480,15 +505,25 @@ impl ServingCoordinator {
 
             // Terminal frame. The per-tick drain above runs after each
             // finalize_completed, so this drain is normally empty; it exists
-            // as a defensive catch-all so no event can be dropped.
-            let (tokens, _done, error) = drain_generation_events(&token_rx);
+            // as a defensive catch-all so no event can be dropped. The
+            // authoritative decode count rides this terminal frame even when the
+            // count's `Done` event arrived on an earlier tick.
+            let drained = drain_generation_events(&token_rx);
+            if let Some(count) = drained.completion_tokens {
+                decode_generated = Some(count);
+            }
             let result = ResultFrame {
                 request_id: meta.request_id,
                 phase: ResultPhase::Continuation,
-                start_sequence: if tokens.is_empty() { 0 } else { next_sequence },
-                tokens,
+                start_sequence: if drained.tokens.is_empty() {
+                    0
+                } else {
+                    next_sequence
+                },
+                tokens: drained.tokens,
                 done: true,
-                error,
+                error: drained.error,
+                generated_tokens: decode_generated,
             };
             self.transport
                 .send(&meta.reply_to, result.encode()?)
@@ -499,29 +534,58 @@ impl ServingCoordinator {
     }
 }
 
-/// Drain a finished generation channel into its text pieces, terminal flag, and
-/// any error.
+/// The result of draining a finished generation channel: the text pieces, the
+/// terminal flag, any error, and the worker's authoritative generated-token
+/// count when a terminal [`GenerateEvent::Done`] was emitted (issue #387).
+struct DrainedGeneration {
+    /// Detokenized text pieces, in generation order.
+    tokens: Vec<String>,
+    /// `true` when a terminal [`GenerateEvent::Done`] was seen.
+    done: bool,
+    /// A generation error message, if one was emitted.
+    error: Option<String>,
+    /// The worker's authoritative count of model tokens generated for this half
+    /// of the stream, taken from the terminal [`GenerateEvent::Done`]'s
+    /// [`GenerationResult::completion_tokens`]. `None` when this half ended
+    /// without a `Done` event (a prefill node that handed off mid-stream returns
+    /// its single first token without a `Done`).
+    ///
+    /// [`GenerationResult::completion_tokens`]: crate::server::model_provider::GenerationResult::completion_tokens
+    completion_tokens: Option<u64>,
+}
+
+/// Drain a finished generation channel into its text pieces, terminal flag, any
+/// error, and the authoritative generated-token count.
 ///
 /// The serving-role scheduler entries
 /// ([`BatchScheduler::prefill_text_request_for_handoff`] /
 /// [`BatchScheduler::decode_handoff_until_idle`]) run synchronously to
 /// completion and emit their [`GenerateEvent`]s on a local channel before
 /// returning, so a non-blocking drain after the call collects the whole half of
-/// the stream.
-fn drain_generation_events(
-    rx: &mpsc::Receiver<GenerateEvent>,
-) -> (Vec<String>, bool, Option<String>) {
+/// the stream. The terminal `Done` event carries the worker's true model-token
+/// count, which the caller forwards on the wire so the router can report exact
+/// usage even for byte-fallback tokenizers (issue #387).
+fn drain_generation_events(rx: &mpsc::Receiver<GenerateEvent>) -> DrainedGeneration {
     let mut tokens = Vec::new();
     let mut done = false;
     let mut error = None;
+    let mut completion_tokens = None;
     while let Ok(event) = rx.try_recv() {
         match event {
             GenerateEvent::Token(t) | GenerateEvent::TokenWithLogprobs(t, _) => tokens.push(t),
-            GenerateEvent::Done(_) => done = true,
+            GenerateEvent::Done(result) => {
+                done = true;
+                completion_tokens = Some(result.completion_tokens as u64);
+            }
             GenerateEvent::Error(e) => error = Some(e),
         }
     }
-    (tokens, done, error)
+    DrainedGeneration {
+        tokens,
+        done,
+        error,
+        completion_tokens,
+    }
 }
 
 /// A prefill-role work item the serving-role prefill loop turns into a handoff.

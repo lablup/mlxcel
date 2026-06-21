@@ -621,12 +621,18 @@ async fn route_chat(state: Arc<RouterState>, request: ChatCompletionRequest) -> 
                 }
             };
 
+            // `frame_counted` is the emitted-piece fallback count; the resolved
+            // count below prefers the worker's authoritative model-token count
+            // (issue #387) so the finish_reason matches single-node even for
+            // byte-fallback tokenizers.
+            let mut frame_counted = 0usize;
             let result = drive_handoff_result(
                 &mut { rx },
                 &request_id_str2,
                 handoff_timeout,
                 max_tokens,
                 |text| {
+                    frame_counted += 1;
                     emit_filtered(filter.feed(text));
                 },
             )
@@ -637,6 +643,19 @@ async fn route_chat(state: Arc<RouterState>, request: ChatCompletionRequest) -> 
             emit_filtered(filter.flush());
 
             let completed = result.is_ok();
+            // Mirror single-node chat: "length" when the whole token budget was
+            // generated, else "stop". On a handoff failure finish as "stop"
+            // alongside the visible error delta emitted just above.
+            let finish_reason = match &result {
+                Ok(outcome) => {
+                    if resolve_completion_tokens(outcome, frame_counted, max_tokens) >= max_tokens {
+                        "length"
+                    } else {
+                        "stop"
+                    }
+                }
+                Err(_) => "stop",
+            };
             if let Err(e) = result {
                 let _ = chunk_tx.send(Ok(sse_event(&chat_chunk_error(
                     &request_id_str2,
@@ -644,7 +663,11 @@ async fn route_chat(state: Arc<RouterState>, request: ChatCompletionRequest) -> 
                     &e.to_string(),
                 ))));
             }
-            let _ = chunk_tx.send(Ok(sse_event(&chat_chunk_finish(&request_id_str2, &model))));
+            let _ = chunk_tx.send(Ok(sse_event(&chat_chunk_finish(
+                &request_id_str2,
+                &model,
+                finish_reason,
+            ))));
             let _ = chunk_tx.send(Ok(Event::default().data("[DONE]")));
 
             state2.pending.lock().unwrap().remove(&request_id);
@@ -661,7 +684,9 @@ async fn route_chat(state: Arc<RouterState>, request: ChatCompletionRequest) -> 
         let mut content = String::new();
         let mut reasoning = String::new();
         let mut rx = rx;
+        let finish_reason;
         {
+            let mut frame_counted = 0usize;
             let mut absorb = |emit: FilterOutput| {
                 if let Some(r) = emit.reasoning {
                     reasoning.push_str(&r);
@@ -676,6 +701,7 @@ async fn route_chat(state: Arc<RouterState>, request: ChatCompletionRequest) -> 
                 state.handoff_timeout,
                 opts.max_tokens,
                 |text| {
+                    frame_counted += 1;
                     absorb(filter.feed(text));
                 },
             )
@@ -683,13 +709,24 @@ async fn route_chat(state: Arc<RouterState>, request: ChatCompletionRequest) -> 
             absorb(filter.flush());
             state.pending.lock().unwrap().remove(&request_id);
             state.finalize_request(&request_id_str, r.is_ok());
-            r?;
+            let outcome = r?;
+            // Mirror single-node chat finish_reason: "length" when the whole
+            // token budget was generated, else "stop", using the worker's
+            // authoritative count when present (issue #387).
+            finish_reason = if resolve_completion_tokens(&outcome, frame_counted, opts.max_tokens)
+                >= opts.max_tokens
+            {
+                "length"
+            } else {
+                "stop"
+            };
         }
         Ok(Json(chat_completion_json(
             &request_id_str,
             &request.model,
             &content,
             &reasoning,
+            finish_reason,
         ))
         .into_response())
     }
@@ -729,12 +766,14 @@ async fn router_completions(
 ///   structured-output constraint, reasoning-budget enforcement) cannot be
 ///   reproduced on the router path. Rejecting keeps the router consistent with
 ///   single-node rather than returning 200 with silently divergent output.
-/// - `completion_tokens` is derived from emitted detokenized text pieces, which
-///   equals the worker's generated-token count for byte-level-BPE tokenizers
-///   (e.g. Qwen) but may under-count for byte-fallback tokenizers (e.g. Gemma
-///   `<0xXX>` byte sequences), and can consequently flip `finish_reason`
-///   between "length" and "stop". A precise fix requires the disaggregated wire
-///   protocol to carry the worker's token count and is deferred to a follow-up.
+/// - `completion_tokens` uses the worker's authoritative generated-token count
+///   carried over the wire ([`ResultFrame::generated_tokens`], issue #387),
+///   which is exact even for byte-fallback tokenizers (e.g. Gemma `<0xXX>` byte
+///   sequences) where counting emitted detokenized text pieces under-counts.
+///   `finish_reason` is derived from that authoritative count with the same
+///   `count >= max_tokens` formula the worker uses, so it matches single-node.
+///   Against a mixed-version cluster where a node predates the wire field, the
+///   router falls back to counting emitted text pieces (the prior behavior).
 async fn route_completion(state: Arc<RouterState>, request: CompletionRequest) -> Result<Response> {
     // Admission control first: reject with 503 when the cluster cannot take the
     // request (issue #201), before any per-request work.
@@ -817,7 +856,12 @@ async fn route_completion(state: Arc<RouterState>, request: CompletionRequest) -
         let max_tokens = opts.max_tokens;
 
         tokio::spawn(async move {
-            let mut completion_tokens = 0usize;
+            // `frame_counted` is the number of emitted detokenized text pieces
+            // (one `on_token` call per `ResultFrame` text entry). It is the
+            // fallback usage count when the wire carries no authoritative count
+            // (an older worker); the resolved `completion_tokens` below prefers
+            // the worker's true model-token count (issue #387).
+            let mut frame_counted = 0usize;
             let mut rx = rx;
             let result = drive_handoff_result(
                 &mut rx,
@@ -825,15 +869,7 @@ async fn route_completion(state: Arc<RouterState>, request: CompletionRequest) -
                 handoff_timeout,
                 max_tokens,
                 |text| {
-                    // `completion_tokens` counts emitted detokenized text pieces
-                    // (one `on_token` call per `ResultFrame` text entry). This
-                    // equals the worker's generated-token count for byte-level-
-                    // BPE tokenizers (e.g. Qwen) but may under-count for byte-
-                    // fallback tokenizers (e.g. Gemma `<0xXX>` byte sequences),
-                    // which can flip the finish_reason below between "length" and
-                    // "stop". A precise fix requires the disaggregated wire
-                    // protocol to carry the worker's token count (follow-up).
-                    completion_tokens += 1;
+                    frame_counted += 1;
                     let chunk = CompletionChunk::content(
                         response_id2.clone(),
                         model.clone(),
@@ -844,12 +880,22 @@ async fn route_completion(state: Arc<RouterState>, request: CompletionRequest) -
             )
             .await;
 
+            // Resolve the request's completion token count: prefer the worker's
+            // authoritative count carried over the wire (issue #387), which is
+            // exact even for byte-fallback tokenizers (e.g. Gemma `<0xXX>` byte
+            // sequences) where counting emitted text pieces under-counts; fall
+            // back to the emitted-piece count for an older worker.
+            let completion_tokens = match &result {
+                Ok(outcome) => resolve_completion_tokens(outcome, frame_counted, max_tokens),
+                Err(_) => frame_counted,
+            };
+
             // Mirror the single-node finish_reason exactly: the worker reports
             // "length" when it generated the whole token budget, else "stop"
-            // (model_worker.rs). The disaggregated frames do not carry a
-            // finish_reason, but the router knows both counts, so it reproduces
-            // the same value. On a handoff failure it reports "error" (matching
-            // single-node's streaming error finish_reason).
+            // (model_worker.rs). The router applies the same formula to the
+            // authoritative count, so it reproduces the single-node value. On a
+            // handoff failure it reports "error" (matching single-node's
+            // streaming error finish_reason).
             let finish_reason = if result.is_err() {
                 "error"
             } else if completion_tokens >= max_tokens {
@@ -890,7 +936,7 @@ async fn route_completion(state: Arc<RouterState>, request: CompletionRequest) -
         // Non-streaming: collect all tokens, then return a single
         // `CompletionResponse` JSON object identical in shape to single-node.
         let mut text = String::new();
-        let mut completion_tokens = 0usize;
+        let mut frame_counted = 0usize;
         let mut rx = rx;
         let r = drive_handoff_result(
             &mut rx,
@@ -899,14 +945,19 @@ async fn route_completion(state: Arc<RouterState>, request: CompletionRequest) -
             opts.max_tokens,
             |piece| {
                 text.push_str(piece);
-                completion_tokens += 1;
+                frame_counted += 1;
             },
         )
         .await;
         state.pending.lock().unwrap().remove(&request_id);
         state.finalize_request(&response_id, r.is_ok());
-        r?;
+        let outcome = r?;
 
+        // Prefer the worker's authoritative token count carried over the wire
+        // (issue #387), which is exact even for byte-fallback tokenizers where
+        // counting emitted text pieces under-counts; fall back to the emitted-
+        // piece count for an older worker.
+        let completion_tokens = resolve_completion_tokens(&outcome, frame_counted, opts.max_tokens);
         // Mirror the single-node finish_reason exactly (model_worker.rs):
         // "length" when the whole token budget was generated, else "stop".
         // logprobs are rejected up front, so always `None` here.
@@ -1085,20 +1136,66 @@ async fn start_handoff(
 
 // ── Handoff result driver ────────────────────────────────────────────────
 
+/// The authoritative generation outcome the router extracts from the result
+/// frames (issue #387), used to report `usage.completion_tokens` and to derive
+/// `finish_reason` without under-counting byte-fallback tokenizers.
+struct HandoffOutcome {
+    /// Sum of the per-node authoritative model-token counts the workers reported
+    /// (the prefill node's first token plus the decode node's continuation).
+    /// `None` when no frame carried a count, which happens only against a
+    /// mixed-version cluster running an older prefill or decode node that
+    /// predates the wire field; the caller then falls back to counting emitted
+    /// text pieces.
+    generated_tokens: Option<u64>,
+}
+
+/// Resolve a request's `completion_tokens` from the disaggregated result.
+///
+/// Prefers the worker's authoritative generated-token count carried over the
+/// wire (issue #387), which is exact even for byte-fallback tokenizers, and
+/// falls back to `frame_counted` (the number of emitted detokenized text pieces)
+/// when no node reported a count. The authoritative count is clamped to
+/// `max_tokens`: the router bounds generation to its own budget regardless of
+/// the remote `done` flag, so a larger reported count can only come from a buggy
+/// or hostile node and must not inflate the usage figure.
+fn resolve_completion_tokens(
+    outcome: &HandoffOutcome,
+    frame_counted: usize,
+    max_tokens: usize,
+) -> usize {
+    outcome
+        .generated_tokens
+        .map(|n| (n as usize).min(max_tokens))
+        .unwrap_or(frame_counted)
+}
+
 /// Consume the two-part disaggregated result (prefill first token + decode
-/// continuation), call `on_token` for every text piece in order, and return
-/// once the stream is finalized or an error occurs.
+/// continuation), call `on_token` for every text piece in order, and return the
+/// authoritative generation outcome once the stream is finalized (or an error
+/// occurs).
 ///
 /// Uses [`StreamBridge`] to enforce the prefill-decode phase ordering and
-/// detect sequence gaps.
+/// detect sequence gaps. The returned [`HandoffOutcome`] sums the worker-
+/// reported model-token counts so the caller reports exact usage (issue #387).
 async fn drive_handoff_result(
     rx: &mut UnboundedReceiver<ResultFrame>,
     request_id_str: &str,
     handoff_timeout: Duration,
     max_tokens: usize,
     mut on_token: impl FnMut(&str),
-) -> Result<()> {
+) -> Result<HandoffOutcome> {
     let bridge = StreamBridge::new(request_id_str.to_string(), handoff_timeout);
+
+    // Accumulate the per-node authoritative model-token counts (issue #387): the
+    // prefill first-token frame carries its count, the decode terminal frame
+    // carries the continuation count. Summing any frame that carries one is
+    // robust to which node ends the stream.
+    let mut generated_tokens: Option<u64> = None;
+    let mut add_count = |frame_count: Option<u64>| {
+        if let Some(n) = frame_count {
+            generated_tokens = Some(generated_tokens.unwrap_or(0) + n);
+        }
+    };
 
     // Wait for the prefill node's first-token result.
     let first = tokio::time::timeout(handoff_timeout, rx.recv())
@@ -1109,6 +1206,7 @@ async fn drive_handoff_result(
     if let Some(e) = first.error {
         anyhow::bail!("prefill node error: {e}");
     }
+    add_count(first.generated_tokens);
     if let Some(text) = first.tokens.first() {
         bridge
             .submit_first_token(&TokenEvent {
@@ -1123,7 +1221,7 @@ async fn drive_handoff_result(
     }
     if first.done {
         bridge.finalize();
-        return Ok(());
+        return Ok(HandoffOutcome { generated_tokens });
     }
 
     // Transition to the decode phase and consume the incrementally streamed
@@ -1144,6 +1242,7 @@ async fn drive_handoff_result(
         if let Some(e) = cont.error {
             anyhow::bail!("decode node error: {e}");
         }
+        add_count(cont.generated_tokens);
         // The router set the request's token budget itself; do not trust the
         // remote `done` flag to terminate the stream. A decode node that
         // exceeds the budget (buggy or hostile) is cut off here, which also
@@ -1186,7 +1285,7 @@ async fn drive_handoff_result(
         }
     }
     bridge.finalize();
-    Ok(())
+    Ok(HandoffOutcome { generated_tokens })
 }
 
 // ── Small JSON helpers ───────────────────────────────────────────────────
@@ -1245,8 +1344,10 @@ fn chat_chunk_reasoning(id: &str, model: &str, text: &str) -> serde_json::Value 
     })
 }
 
-/// Final streaming chunk with `finish_reason = "stop"`.
-fn chat_chunk_finish(id: &str, model: &str) -> serde_json::Value {
+/// Final streaming chunk carrying the request's `finish_reason` ("stop" or
+/// "length"); the router derives it from the worker's authoritative token count
+/// (issue #387) so it matches the single-node chat route.
+fn chat_chunk_finish(id: &str, model: &str, finish_reason: &str) -> serde_json::Value {
     serde_json::json!({
         "id": id,
         "object": "chat.completion.chunk",
@@ -1254,7 +1355,7 @@ fn chat_chunk_finish(id: &str, model: &str) -> serde_json::Value {
         "choices": [{
             "index": 0,
             "delta": {},
-            "finish_reason": "stop"
+            "finish_reason": finish_reason
         }]
     })
 }
@@ -1274,12 +1375,15 @@ fn chat_chunk_error(id: &str, model: &str, msg: &str) -> serde_json::Value {
 }
 
 /// Non-streaming response body. `reasoning_content` is included only when
-/// the filter routed any thinking text.
+/// the filter routed any thinking text. `finish_reason` ("stop" or "length")
+/// is derived from the worker's authoritative token count (issue #387) so it
+/// matches the single-node chat route.
 fn chat_completion_json(
     id: &str,
     model: &str,
     content: &str,
     reasoning: &str,
+    finish_reason: &str,
 ) -> serde_json::Value {
     let mut message = serde_json::json!({"role": "assistant", "content": content});
     if !reasoning.is_empty() {
@@ -1292,7 +1396,7 @@ fn chat_completion_json(
         "choices": [{
             "index": 0,
             "message": message,
-            "finish_reason": "stop"
+            "finish_reason": finish_reason
         }]
     })
 }
@@ -1315,3 +1419,7 @@ pub fn create_router_app(state: Arc<RouterState>) -> Router {
         .route("/v1/completions", post(router_completions))
         .with_state(state)
 }
+
+#[cfg(test)]
+#[path = "router_front_tests.rs"]
+mod tests;

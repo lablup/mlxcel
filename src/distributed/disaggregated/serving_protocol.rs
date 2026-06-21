@@ -136,7 +136,9 @@ pub enum ResultPhase {
 ///
 /// `tokens` are the detokenized text pieces in order; `done` marks the terminal
 /// frame of the request (the decode node sets it on the continuation); `error`
-/// carries a generation error message instead of tokens when one occurred.
+/// carries a generation error message instead of tokens when one occurred;
+/// `generated_tokens` carries the worker's authoritative model-token count for
+/// usage accounting (issue #387).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResultFrame {
     /// Correlates with the originating [`PrefillRequestFrame::request_id`].
@@ -160,6 +162,27 @@ pub struct ResultFrame {
     pub done: bool,
     /// A generation error message, if the node hit one.
     pub error: Option<String>,
+    /// The worker's authoritative count of model tokens this node generated for
+    /// the request (issue #387).
+    ///
+    /// The prefill node sets it on its [`ResultPhase::FirstToken`] frame (the
+    /// number of tokens it sampled: normally 1, or 0 on an immediate EOS at
+    /// prefill); the decode node sets it on its terminal
+    /// [`ResultPhase::Continuation`] frame (the number of tokens it generated
+    /// after the handoff). The router sums the per-node counts to report
+    /// `usage.completion_tokens`, which is exact even for byte-fallback
+    /// tokenizers (e.g. Gemma `<0xXX>` byte sequences) where counting emitted
+    /// detokenized text pieces under-counts: a single character can take several
+    /// model tokens yet surface as one text piece, and a byte-fallback first
+    /// token can surface as none.
+    ///
+    /// `None` on intermediate continuation frames (only the terminal frame
+    /// carries the decode total) and on frames from a sender predating this
+    /// field (decoded via `serde(default)`). When no frame in the stream carries
+    /// a count, the router falls back to counting emitted text pieces, so a
+    /// mixed-version cluster (an older prefill or decode node) keeps working.
+    #[serde(default)]
+    pub generated_tokens: Option<u64>,
 }
 
 macro_rules! json_control_frame {

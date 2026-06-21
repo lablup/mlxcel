@@ -111,6 +111,7 @@ fn result_frame_round_trips_both_phases() {
         start_sequence: 0,
         done: false,
         error: None,
+        generated_tokens: Some(1),
     };
     let cont = ResultFrame {
         request_id: 3,
@@ -119,6 +120,7 @@ fn result_frame_round_trips_both_phases() {
         start_sequence: 1,
         done: true,
         error: None,
+        generated_tokens: Some(2),
     };
     for frame in [first, cont] {
         let message = frame.encode().expect("encode result");
@@ -130,7 +132,47 @@ fn result_frame_round_trips_both_phases() {
         assert_eq!(decoded.tokens, frame.tokens);
         assert_eq!(decoded.start_sequence, frame.start_sequence);
         assert_eq!(decoded.done, frame.done);
+        assert_eq!(decoded.generated_tokens, frame.generated_tokens);
     }
+}
+
+/// Issue #387: the worker's authoritative generated-token count round-trips
+/// through the result frame so the router can report exact usage for byte-
+/// fallback tokenizers instead of counting emitted text pieces.
+#[test]
+fn result_frame_carries_authoritative_generated_token_count() {
+    let frame = ResultFrame {
+        request_id: 21,
+        phase: ResultPhase::Continuation,
+        tokens: Vec::new(),
+        start_sequence: 0,
+        done: true,
+        error: None,
+        generated_tokens: Some(15),
+    };
+    let message = frame.encode().expect("encode result");
+    let (_op, payload) = control_parts(message).expect("control parts");
+    let decoded = ResultFrame::decode(&payload).expect("decode result");
+    assert_eq!(decoded.generated_tokens, Some(15));
+}
+
+/// Issue #387: `generated_tokens` is `serde(default)` so a frame from a sender
+/// predating the field (no `generated_tokens` key) decodes to `None`, which
+/// makes the router fall back to counting emitted text pieces in a mixed-version
+/// cluster.
+#[test]
+fn result_frame_generated_tokens_defaults_to_none() {
+    let payload = serde_json::json!({
+        "request_id": 8,
+        "phase": "continuation",
+        "tokens": ["x"],
+        "start_sequence": 1,
+        "done": true,
+        "error": null
+    });
+    let decoded: ResultFrame =
+        serde_json::from_slice(&serde_json::to_vec(&payload).unwrap()).expect("decode");
+    assert_eq!(decoded.generated_tokens, None);
 }
 
 /// `start_sequence` is `serde(default)` so frames from senders predating
