@@ -279,14 +279,34 @@ impl SparseMoeBlock {
         let norm_scores = mlxcel_core::divide(&topk_scores, &score_sum);
         let norm_scores = mlxcel_core::astype(&norm_scores, mlxcel_core::array_dtype(&x_flat));
 
-        // Apply experts - returns [n_tokens, k, hidden]
-        let expert_out = self.experts.forward(&x_flat, &topk_indices);
-
-        let result = crate::models::switch_layers::moe_weighted_sum(
-            &expert_out,
-            &norm_scores,
-            mlxcel_core::array_dtype(&x_flat),
-        );
+        // Apply routed experts. Fused single-token decode kernel (#268) on by
+        // default; MLXCEL_FUSED_MOE=0 forces the proven SwitchGLU +
+        // moe_weighted_sum path (also the automatic fallback when the kernel does
+        // not support the config, e.g. non-affine or unsupported bit widths).
+        // minimax experts are SwiGLU (SiLU), so the kernel runs with the default
+        // swiglu activation (act=0); no GeGLU/relu2 template is needed.
+        let result = {
+            let fused = if mlxcel_core::array_shape(&x_flat)[0] == 1
+                && crate::models::switch_layers::fused_moe_enabled()
+            {
+                self.experts
+                    .forward_fused_kernel(&x_flat, &topk_indices, &norm_scores)
+                    .map(|out| mlxcel_core::reshape(&out, &[1, hidden_dim]))
+            } else {
+                None
+            };
+            match fused {
+                Some(out) => out,
+                None => {
+                    let expert_out = self.experts.forward(&x_flat, &topk_indices);
+                    crate::models::switch_layers::moe_weighted_sum(
+                        &expert_out,
+                        &norm_scores,
+                        mlxcel_core::array_dtype(&x_flat),
+                    )
+                }
+            }
+        };
 
         // Reshape back to original shape
         if orig_shape.len() > 2 {

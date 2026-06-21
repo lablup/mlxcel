@@ -266,7 +266,7 @@ the expected numerical consequence of the fusion.
 
 ### Models covered
 
-The fused single-token decode dispatch is wired into ten model paths: qwen3_moe
+The fused single-token decode dispatch is wired into eleven model paths: qwen3_moe
 (Qwen3 MoE), qwen3_next (qwen3.5/3.6), dots.llm1 (mixed 4/6-bit), gemma4 (GeGLU),
 qwen2_moe (qwen1.5-moe / Qwen2-MoE; migrated from its local `SwitchGLU` to the
 shared one, which gained a per-expert stacking loader for the `experts.{idx}`
@@ -283,13 +283,16 @@ its local `SwitchGLU`/`SwitchLinear` to the shared ones; checkpoints pre-stacked
 under `block_sparse_moe.switch_mlp.{gate,up,down}_proj`; `sanitize_weights` still
 handles the unstacked `experts.{i}.w1/w2/w3` layout for community checkpoints; the
 expert intermediate is 6400, above `MLXCEL_FUSED_MOE_MAX_DFF`, so like mixtral the
-kernel declines and decode stays on `gather_qmm`), and olmoe (OLMoE; migrated from
+kernel declines and decode stays on `gather_qmm`), olmoe (OLMoE; migrated from
 its local `SwitchGLU`/`SwitchLinear` to the shared ones; SwiGLU, softmax-routed
 with optional `norm_topk_prob`, weights stacked under `switch_mlp.{gate,up,down}_proj`
 or joined from the per-expert `experts.{i}` layout by `sanitize_weights`; expert
 intermediate is 1024, below `MLXCEL_FUSED_MOE_MAX_DFF`, so the kernel dispatches at
-decode and delivers a real throughput gain). One MoE family reuses the shared
-`SwitchGLU` for the expert matmul but is not yet wired with the fused decode
-dispatch, so it stays on `gather_qmm` regardless of `MLXCEL_FUSED_MOE`: minimax.
-nemotron-h's MoE runs through the separate C++ `fused_moe_forward` and is wired
+decode and delivers a real throughput gain), and minimax (MiniMax-M2; sigmoid-routed
+with e_score_correction_bias, unbiased scores selected, SwiGLU/SiLU activation,
+no shared expert; the dispatch uses the default swiglu act=0 template; wired in
+#304; runtime validation is hardware-blocked because MiniMax-Text-01 at ~456B does
+not fit 128 GB unified memory, so greedy temp-0 throughput and output-parity
+measurements are deferred until a smaller variant or larger-memory machine is
+available). nemotron-h's MoE runs through the separate C++ `fused_moe_forward` and is wired
 behind `MLXCEL_FUSED_MOE_RELU2` only.

@@ -51,7 +51,7 @@ pub fn fused_moe_enabled() -> bool {
 /// without mutating process-global environment state. `None` (unset) is on; an
 /// explicit `0`/`false`/`off`/`no` (case-insensitive, trimmed) is off; any other
 /// value is on.
-fn fused_moe_enabled_from(value: Option<&str>) -> bool {
+pub(crate) fn fused_moe_enabled_from(value: Option<&str>) -> bool {
     match value {
         Some(v) => !matches!(
             v.trim().to_ascii_lowercase().as_str(),

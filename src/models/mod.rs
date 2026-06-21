@@ -1034,3 +1034,7 @@ mod plamo2_tests;
 #[cfg(test)]
 #[path = "granitemoehybrid_tests.rs"]
 mod granitemoehybrid_tests;
+
+#[cfg(test)]
+#[path = "minimax_tests.rs"]
+mod minimax_tests;
