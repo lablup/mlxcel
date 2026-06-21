@@ -462,6 +462,22 @@ async fn router_completions(
 /// [`CompletionChunk`] types the single-node route uses, so the wire shape is
 /// byte-identical (modulo the volatile `id` / `created` fields) for the same
 /// prompt and sampling.
+///
+/// # Parity notes
+///
+/// - `logprobs`, `response_format` (structured output), and explicit
+///   reasoning/thinking budgets are rejected with a 400. The
+///   [`PrefillRequestFrame`] carries only sampling and max_tokens, so the
+///   worker-side behavior these options trigger (per-token logprob data, a
+///   structured-output constraint, reasoning-budget enforcement) cannot be
+///   reproduced on the router path. Rejecting keeps the router consistent with
+///   single-node rather than returning 200 with silently divergent output.
+/// - `completion_tokens` is derived from emitted detokenized text pieces, which
+///   equals the worker's generated-token count for byte-level-BPE tokenizers
+///   (e.g. Qwen) but may under-count for byte-fallback tokenizers (e.g. Gemma
+///   `<0xXX>` byte sequences), and can consequently flip `finish_reason`
+///   between "length" and "stop". A precise fix requires the disaggregated wire
+///   protocol to carry the worker's token count and is deferred to a follow-up.
 async fn route_completion(state: Arc<RouterState>, request: CompletionRequest) -> Result<Response> {
     // The disaggregated result frames carry detokenized text only, with no
     // per-token logprob data, so the router cannot reproduce the single-node
@@ -470,6 +486,38 @@ async fn route_completion(state: Arc<RouterState>, request: CompletionRequest) -
     if request.logprobs.is_some() {
         return Ok(ErrorResponse::new(
             "the disaggregated router does not support logprobs on /v1/completions",
+            "invalid_request_error",
+        )
+        .into_response());
+    }
+
+    // The PrefillRequestFrame carries only sampling and max_tokens, so the
+    // worker's structured-output constraint cannot be reproduced on the router
+    // path. Reject rather than emit unconstrained output that silently diverges
+    // from single-node (the same reject-what-the-frame-cannot-reproduce
+    // principle as the logprobs guard above).
+    if request.response_format.is_some() {
+        return Ok(ErrorResponse::new(
+            "the disaggregated router does not support response_format (structured output) on /v1/completions",
+            "invalid_request_error",
+        )
+        .into_response());
+    }
+
+    // Reasoning/thinking-budget enforcement is worker-side and is not carried by
+    // the PrefillRequestFrame, so it cannot be reproduced on the router path.
+    // Reject an explicit budget rather than emit un-budgeted output that
+    // diverges from single-node. A request with no budget alias set still works
+    // (the default unbounded path needs no frame support).
+    if crate::server::thinking_budget::pick_budget_alias(
+        request.params.thinking_budget_tokens,
+        request.params.thinking_token_budget,
+        request.params.thinking_budget,
+    )
+    .is_some()
+    {
+        return Ok(ErrorResponse::new(
+            "the disaggregated router does not support reasoning/thinking budgets on /v1/completions",
             "invalid_request_error",
         )
         .into_response());
@@ -514,6 +562,14 @@ async fn route_completion(state: Arc<RouterState>, request: CompletionRequest) -
                 handoff_timeout,
                 max_tokens,
                 |text| {
+                    // `completion_tokens` counts emitted detokenized text pieces
+                    // (one `on_token` call per `ResultFrame` text entry). This
+                    // equals the worker's generated-token count for byte-level-
+                    // BPE tokenizers (e.g. Qwen) but may under-count for byte-
+                    // fallback tokenizers (e.g. Gemma `<0xXX>` byte sequences),
+                    // which can flip the finish_reason below between "length" and
+                    // "stop". A precise fix requires the disaggregated wire
+                    // protocol to carry the worker's token count (follow-up).
                     completion_tokens += 1;
                     let chunk = CompletionChunk::content(
                         response_id2.clone(),
@@ -545,7 +601,11 @@ async fn route_completion(state: Arc<RouterState>, request: CompletionRequest) -
             );
             let _ = chunk_tx.send(Ok(sse_serialize(&finish)));
 
-            if include_usage {
+            // Emit the usage chunk only on success, matching single-node
+            // `stream_completion` which guards `if include_usage && let Ok(ref r)
+            // = result`. On a handoff failure (finish_reason "error") no usage
+            // chunk is sent.
+            if include_usage && result.is_ok() {
                 let usage = CompletionChunk::usage(
                     response_id2.clone(),
                     model.clone(),
