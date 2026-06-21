@@ -94,6 +94,17 @@ hands the KV cache to the router-balanced decode node rather than to its own
 (an older router) leaves the prefill node on its config fallback, and an older
 prefill node ignores it and uses config, so mixed-version pools keep working.
 
+As opt-in defense-in-depth (issue #389), a prefill node can validate the
+router-chosen `decode_target` against an allowlist before connecting. The
+allowlist source is the dedicated `MLXCEL_DECODE_ALLOWLIST` environment variable,
+a comma-separated `host:port` list set to the full pool of router-selectable
+decode nodes (the shared cluster config). It is independent of `--decode-peers`,
+which stays the static handoff fallback only, so enabling the allowlist does not
+constrain router balancing. When `MLXCEL_DECODE_ALLOWLIST` is unset the prefill
+stays permissive and logs a warning rather than rejecting, so balancing is never
+silently broken; see [`docs/distributed.md`](distributed.md) for the security
+rationale.
+
 The router tracks node health and fails over without wedging:
 
 - A transport error when sending a request to a prefill node marks that node

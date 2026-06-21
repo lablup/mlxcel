@@ -84,11 +84,14 @@ use crate::server::model_provider::GenerateEvent;
 /// CRITICAL design constraint: the set must cover EVERY decode node the router
 /// may select, not just this prefill's static handoff peer. Validating against a
 /// single node would silently reject router-balanced targets and break the
-/// multi-node decode balancing issue #201 added. It is built from the prefill
-/// node's full `--decode-peers` list, which operators configure with the same
-/// decode pool the router routes over (the shared cluster config). When no
-/// allowlist source is configured (an empty set), the prefill node stays
-/// permissive-with-warning so balancing is never silently disabled.
+/// multi-node decode balancing issue #201 added. The allowlist is therefore
+/// decoupled from `--decode-peers` (whose first entry is only the static handoff
+/// fallback) and comes from the dedicated `MLXCEL_DECODE_ALLOWLIST` env input: a
+/// comma-separated `host:port` list an operator sets to the full pool of
+/// router-selectable decode nodes (the shared cluster config). See
+/// [`decode_allowlist_from_env`]. When that source is unset (an empty set), the
+/// prefill node stays permissive-with-warning so router-driven balancing is never
+/// silently disabled.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct DecodeAllowlist {
     peers: HashSet<SocketAddr>,
@@ -134,6 +137,41 @@ impl DecodeAllowlist {
     }
 }
 
+/// Build the decode-target allowlist from the dedicated `MLXCEL_DECODE_ALLOWLIST`
+/// env input (issue #389).
+///
+/// `raw` is the comma-separated `host:port` list an operator sets to the FULL set
+/// of router-selectable decode nodes (the shared cluster config). It is
+/// independent of this node's `--decode-peers`, which stays the static handoff
+/// fallback only. Each entry is trimmed; empty entries are skipped; an entry that
+/// does not parse to a [`SocketAddr`] is skipped with a one-line warning rather
+/// than failing startup. An empty or `None` input yields an empty allowlist,
+/// which is the permissive-with-warning ([`DecodeTargetDecision::AllowUnchecked`])
+/// path, so router-driven decode balancing is never silently broken when the
+/// allowlist is left unconfigured.
+pub(crate) fn decode_allowlist_from_env(raw: Option<&str>) -> DecodeAllowlist {
+    let Some(raw) = raw else {
+        return DecodeAllowlist::default();
+    };
+    let mut peers = Vec::new();
+    for entry in raw.split(',') {
+        let entry = entry.trim();
+        if entry.is_empty() {
+            continue;
+        }
+        match entry.parse::<SocketAddr>() {
+            Ok(addr) => peers.push(addr),
+            Err(e) => {
+                tracing::warn!(
+                    "MLXCEL_DECODE_ALLOWLIST entry {entry:?} is not a valid host:port \
+                     address ({e}); skipping it"
+                );
+            }
+        }
+    }
+    DecodeAllowlist::from_peers(&peers)
+}
+
 /// Binds a serving role to a transport and its handoff peer.
 ///
 /// Constructed by the startup serving-role branch (for a `PrefillOnly` or
@@ -166,9 +204,10 @@ pub struct ServingCoordinator {
 
     /// Allowlist of decode addresses this prefill node will hand a KV cache off
     /// to (issue #389). Empty for the decode role, the legacy in-process role
-    /// loops, and the unit-test coordinators; populated for the live prefill
-    /// role from the node's full `--decode-peers` set so a router-chosen
-    /// `decode_target` is validated before the prefill connects to it.
+    /// loops, and the unit-test coordinators; populated for the live prefill role
+    /// from the dedicated `MLXCEL_DECODE_ALLOWLIST` full-pool env input so a
+    /// router-chosen `decode_target` is validated before the prefill connects to
+    /// it. Empty (env unset) means permissive-with-warning, never a hard reject.
     decode_allowlist: DecodeAllowlist,
 }
 
@@ -840,13 +879,15 @@ pub(crate) fn serve_decode_role_blocking(
 /// in-process request channel, prefill requests arrive as
 /// [`PrefillRequestFrame`] control frames over the bound transport and results
 /// are returned over the network, so a model worker can run this directly. `bind`
-/// is the node's own role-transport listener, `decode_peers` the node's full
-/// configured decode pool. Its first entry is the static handoff fallback used
-/// when the router does not pick a decode node (an older router), and the full
-/// set is the allowlist a router-chosen `decode_target` is validated against
-/// before this node connects to it (issue #389). When `ready` is set the bound
-/// local address is reported once the listener is up (tests learn an ephemeral
-/// port this way; the worker passes `None`).
+/// is the node's own role-transport listener, `decode_peers` the node's
+/// configured decode peers, whose first entry is the static handoff fallback used
+/// when the router does not pick a decode node (an older router). The allowlist a
+/// router-chosen `decode_target` is validated against before this node connects to
+/// it (issue #389) is read separately from the dedicated `MLXCEL_DECODE_ALLOWLIST`
+/// env input (the full pool of router-selectable decode nodes); when that is unset
+/// the prefill stays permissive-with-warning so balancing is never broken. When
+/// `ready` is set the bound local address is reported once the listener is up
+/// (tests learn an ephemeral port this way; the worker passes `None`).
 ///
 /// [`PrefillRequestFrame`]: super::serving_protocol::PrefillRequestFrame
 pub(crate) fn serve_prefill_role_networked_blocking(
@@ -866,14 +907,18 @@ pub(crate) fn serve_prefill_role_networked_blocking(
         if let Some(ready) = ready {
             let _ = ready.send(transport.local_addr()?);
         }
-        // The first configured decode peer is the static handoff fallback (used
-        // when the router does not pick a decode node); the full set is the
-        // allowlist for router-chosen targets (issue #389).
+        // The first configured decode peer is the static handoff fallback, used
+        // when the router does not pick a decode node (issue #389).
         let static_peer = decode_peers
             .first()
             .map(|addr| addr.to_string())
             .unwrap_or_default();
-        let allowlist = DecodeAllowlist::from_peers(&decode_peers);
+        // The allowlist for router-chosen targets comes from the dedicated
+        // MLXCEL_DECODE_ALLOWLIST full-pool env input, not from --decode-peers, so
+        // it never rejects router-balanced targets. Unset stays permissive (issue
+        // #389).
+        let allowlist =
+            decode_allowlist_from_env(std::env::var("MLXCEL_DECODE_ALLOWLIST").ok().as_deref());
         let coordinator =
             ServingCoordinator::new(ServingMode::PrefillOnly, Box::new(transport), static_peer)
                 .with_decode_allowlist(allowlist);
