@@ -15,10 +15,16 @@
 //! Model-free HTTP router front-end for disaggregated serving (#126 B3b2b).
 //!
 //! The router loads a tokenizer and chat template but never loads model
-//! weights. Incoming `/v1/chat/completions` requests are tokenized, forwarded
-//! to a prefill node via [`PrefillRequestFrame`], and the two-part result
-//! (prefill first token + decode continuation) is merged and returned to the
-//! client as a streaming SSE response or a single JSON object.
+//! weights. Incoming `/v1/chat/completions` and `/v1/completions` requests are
+//! tokenized, forwarded to a prefill node via [`PrefillRequestFrame`], and the
+//! two-part result (prefill first token + decode continuation) is merged and
+//! returned to the client as a streaming SSE response or a single JSON object.
+//! Both endpoints share the [`start_handoff`] dispatch body (issue #200); they
+//! differ only in request parsing (chat template vs raw `prompt`) and the
+//! response chunk shape (chat-completion chunk vs text-completion chunk). The
+//! text-completion path reuses the single-node [`CompletionResponse`] /
+//! [`CompletionChunk`] serializers so its output is byte-identical to
+//! single-node `/v1/completions` for the same prompt and sampling.
 //!
 //! # Architecture
 //!
@@ -73,9 +79,10 @@ use crate::distributed::request_tracker::RequestId;
 use crate::distributed::tcp_transport::TcpTransport;
 use crate::distributed::transport::{Transport, TransportBackend};
 use crate::server::ChatTemplateProcessor;
-use crate::server::config::ServerConfig;
+use crate::server::config::{ServerConfig, ServerGenerateOptions};
 use crate::server::tool_calls::stream_filter::{FilterOutput, StreamFilter};
 use crate::server::types::request::ChatCompletionRequest;
+use crate::server::types::{CompletionChunk, CompletionRequest, CompletionResponse, ErrorResponse};
 use crate::tokenizer::MlxcelTokenizer;
 
 /// Timeout for waiting for the prefill first-token result and the decode
@@ -312,49 +319,17 @@ async fn route_chat(state: Arc<RouterState>, request: ChatCompletionRequest) -> 
         StreamFilter::new()
     };
 
-    // Tokenize the rendered prompt. Match the worker's behavior: skip the
-    // BOS special token when the prompt already starts with one.
-    let add_special = !prompt.starts_with("<bos>") && !prompt.starts_with("<s>");
-    let token_ids: Vec<i32> = state
-        .tokenizer
-        .encode(&prompt, add_special)
-        .map_err(|e| anyhow::anyhow!("tokenize: {e}"))?
-        .into_iter()
-        .map(|t| t as i32)
-        .collect();
-
     // Resolve sampling and token budget using the same defaults as the
     // model worker.
     let opts = super::routes::chat::build_generate_options(&request.params, &state.config);
 
-    // Assign a request id and register a result channel.
+    // Assign a request id and dispatch the prefill request through the shared
+    // tokenize -> select_prefill -> send body (issue #200). The chat id scheme
+    // (`chatcmpl-<n>`) is preserved exactly.
     let request_id = state.next_id.fetch_add(1, Ordering::Relaxed);
     let request_id_str = format!("chatcmpl-{request_id}");
-    let prefill_addr = state.select_prefill(&request_id_str, token_ids.len())?;
-
-    let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<ResultFrame>();
-    state.pending.lock().unwrap().insert(request_id, tx);
-
-    // Send the prefill request frame to the chosen prefill node.
-    let frame = PrefillRequestFrame {
-        request_id,
-        prompt_tokens: token_ids,
-        sampling: sampling_to_serializable(&opts.sampling),
-        max_tokens: opts.max_tokens as u64,
-        reply_to: state.reply_to.clone(),
-    };
-    if let Err(e) = state
-        .transport
-        .send(
-            &prefill_addr,
-            frame.encode().map_err(|e| anyhow::anyhow!("{e}"))?,
-        )
-        .await
-    {
-        state.pending.lock().unwrap().remove(&request_id);
-        return Err(anyhow::anyhow!("send prefill request: {e}"));
-    }
-    tracing::debug!(request_id, %prefill_addr, "router: sent prefill request frame");
+    let (_prompt_tokens, rx) =
+        start_handoff(&state, &prompt, request_id, &request_id_str, &opts).await?;
 
     if request.stream {
         // Streaming: spawn a task that drives the handoff and feeds SSE events
@@ -461,6 +436,236 @@ async fn route_chat(state: Arc<RouterState>, request: ChatCompletionRequest) -> 
         ))
         .into_response())
     }
+}
+
+/// POST /v1/completions
+async fn router_completions(
+    State(state): State<Arc<RouterState>>,
+    Json(request): Json<CompletionRequest>,
+) -> Response {
+    match route_completion(state, request).await {
+        Ok(resp) => resp,
+        Err(e) => (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": {"message": e.to_string()}})),
+        )
+            .into_response(),
+    }
+}
+
+/// Core text-completion routing logic (issue #200).
+///
+/// Mirrors the single-node `/v1/completions` semantics: the raw `prompt` is
+/// tokenized with the same `add_special` rule the worker uses (handled inside
+/// [`start_handoff`]), generation is dispatched through the shared handoff body,
+/// and the output is serialized with the SAME [`CompletionResponse`] /
+/// [`CompletionChunk`] types the single-node route uses, so the wire shape is
+/// byte-identical (modulo the volatile `id` / `created` fields) for the same
+/// prompt and sampling.
+async fn route_completion(state: Arc<RouterState>, request: CompletionRequest) -> Result<Response> {
+    // The disaggregated result frames carry detokenized text only, with no
+    // per-token logprob data, so the router cannot reproduce the single-node
+    // `logprobs` object. Reject rather than emit a divergent null-logprobs
+    // body (the chat path rejects multimodal requests on the same principle).
+    if request.logprobs.is_some() {
+        return Ok(ErrorResponse::new(
+            "the disaggregated router does not support logprobs on /v1/completions",
+            "invalid_request_error",
+        )
+        .into_response());
+    }
+
+    let prompt = request.prompt.clone();
+    // Same default/override resolution as the single-node completion route.
+    let opts = super::routes::chat::build_generate_options(&request.params, &state.config);
+
+    // Assign a request id and dispatch the prefill request through the shared
+    // tokenize -> select_prefill -> send body. The completion id format
+    // (`cmpl-<uuid>`) matches the single-node route's `format!("cmpl-{uuid}")`.
+    let request_id = state.next_id.fetch_add(1, Ordering::Relaxed);
+    let response_id = format!("cmpl-{}", uuid::Uuid::new_v4());
+    let (prompt_tokens, rx) =
+        start_handoff(&state, &prompt, request_id, &response_id, &opts).await?;
+
+    if request.stream {
+        // Streaming: spawn a task that drives the handoff and feeds text
+        // completion chunks into an SSE channel; return the SSE response
+        // immediately. The chunk shape, finish chunk, optional usage chunk, and
+        // `[DONE]` sentinel match the single-node `stream_completion` path.
+        let include_usage = request
+            .stream_options
+            .as_ref()
+            .map(|o| o.include_usage)
+            .unwrap_or(false);
+        let (chunk_tx, chunk_rx) =
+            tokio::sync::mpsc::unbounded_channel::<Result<Event, Infallible>>();
+        let state2 = state.clone();
+        let model = request.model.clone();
+        let response_id2 = response_id.clone();
+        let handoff_timeout = state.handoff_timeout;
+        let max_tokens = opts.max_tokens;
+
+        tokio::spawn(async move {
+            let mut completion_tokens = 0usize;
+            let mut rx = rx;
+            let result = drive_handoff_result(
+                &mut rx,
+                &response_id2,
+                handoff_timeout,
+                max_tokens,
+                |text| {
+                    completion_tokens += 1;
+                    let chunk = CompletionChunk::content(
+                        response_id2.clone(),
+                        model.clone(),
+                        text.to_string(),
+                    );
+                    let _ = chunk_tx.send(Ok(sse_serialize(&chunk)));
+                },
+            )
+            .await;
+
+            // Mirror the single-node finish_reason exactly: the worker reports
+            // "length" when it generated the whole token budget, else "stop"
+            // (model_worker.rs). The disaggregated frames do not carry a
+            // finish_reason, but the router knows both counts, so it reproduces
+            // the same value. On a handoff failure it reports "error" (matching
+            // single-node's streaming error finish_reason).
+            let finish_reason = if result.is_err() {
+                "error"
+            } else if completion_tokens >= max_tokens {
+                "length"
+            } else {
+                "stop"
+            };
+            let finish = CompletionChunk::finish(
+                response_id2.clone(),
+                model.clone(),
+                finish_reason.to_string(),
+            );
+            let _ = chunk_tx.send(Ok(sse_serialize(&finish)));
+
+            if include_usage {
+                let usage = CompletionChunk::usage(
+                    response_id2.clone(),
+                    model.clone(),
+                    prompt_tokens,
+                    completion_tokens,
+                );
+                let _ = chunk_tx.send(Ok(sse_serialize(&usage)));
+            }
+            let _ = chunk_tx.send(Ok(Event::default().data("[DONE]")));
+
+            state2.pending.lock().unwrap().remove(&request_id);
+        });
+
+        Ok(Sse::new(UnboundedReceiverStream::new(chunk_rx))
+            .keep_alive(KeepAlive::default())
+            .into_response())
+    } else {
+        // Non-streaming: collect all tokens, then return a single
+        // `CompletionResponse` JSON object identical in shape to single-node.
+        let mut text = String::new();
+        let mut completion_tokens = 0usize;
+        let mut rx = rx;
+        let r = drive_handoff_result(
+            &mut rx,
+            &response_id,
+            state.handoff_timeout,
+            opts.max_tokens,
+            |piece| {
+                text.push_str(piece);
+                completion_tokens += 1;
+            },
+        )
+        .await;
+        state.pending.lock().unwrap().remove(&request_id);
+        r?;
+
+        // Mirror the single-node finish_reason exactly (model_worker.rs):
+        // "length" when the whole token budget was generated, else "stop".
+        // logprobs are rejected up front, so always `None` here.
+        let finish_reason = if completion_tokens >= opts.max_tokens {
+            "length"
+        } else {
+            "stop"
+        };
+        let response = CompletionResponse::new_with_logprobs(
+            response_id,
+            request.model.clone(),
+            text,
+            prompt_tokens,
+            completion_tokens,
+            Some(finish_reason.to_string()),
+            None,
+        );
+        Ok(Json(response).into_response())
+    }
+}
+
+// ── Shared handoff dispatch ──────────────────────────────────────────────
+
+/// Shared dispatch body for the router's chat and text-completion handlers
+/// (issue #200).
+///
+/// Tokenizes the rendered `prompt` with the worker's `add_special` rule
+/// (`!prompt.starts_with("<bos>") && !prompt.starts_with("<s>")`), routes it to
+/// a prefill node, registers a per-request result channel keyed by the numeric
+/// `request_id`, and sends the [`PrefillRequestFrame`]. The caller then drives
+/// the returned receiver with [`drive_handoff_result`] and shapes the
+/// per-endpoint response (chat-completion chunks vs text-completion chunks).
+///
+/// `response_id` is the request's display id (`chatcmpl-<n>` for chat,
+/// `cmpl-<uuid>` for completions); it seeds the routing hash and the
+/// [`StreamBridge`] id. Returns the prompt token count (for the completion
+/// `usage` block) and the per-request receiver. On any failure before the frame
+/// is sent the registered channel is removed so a failed request never leaks an
+/// entry in `state.pending`.
+async fn start_handoff(
+    state: &Arc<RouterState>,
+    prompt: &str,
+    request_id: u64,
+    response_id: &str,
+    opts: &ServerGenerateOptions,
+) -> Result<(usize, UnboundedReceiver<ResultFrame>)> {
+    // Tokenize the rendered prompt. Match the worker's behavior: skip the
+    // BOS special token when the prompt already starts with one.
+    let add_special = !prompt.starts_with("<bos>") && !prompt.starts_with("<s>");
+    let token_ids: Vec<i32> = state
+        .tokenizer
+        .encode(prompt, add_special)
+        .map_err(|e| anyhow::anyhow!("tokenize: {e}"))?
+        .into_iter()
+        .map(|t| t as i32)
+        .collect();
+    let prompt_tokens = token_ids.len();
+
+    let prefill_addr = state.select_prefill(response_id, prompt_tokens)?;
+
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<ResultFrame>();
+    state.pending.lock().unwrap().insert(request_id, tx);
+
+    // Build and send the prefill request frame to the chosen prefill node.
+    let frame = PrefillRequestFrame {
+        request_id,
+        prompt_tokens: token_ids,
+        sampling: sampling_to_serializable(&opts.sampling),
+        max_tokens: opts.max_tokens as u64,
+        reply_to: state.reply_to.clone(),
+    };
+    let encoded = match frame.encode() {
+        Ok(encoded) => encoded,
+        Err(e) => {
+            state.pending.lock().unwrap().remove(&request_id);
+            return Err(anyhow::anyhow!("{e}"));
+        }
+    };
+    if let Err(e) = state.transport.send(&prefill_addr, encoded).await {
+        state.pending.lock().unwrap().remove(&request_id);
+        return Err(anyhow::anyhow!("send prefill request: {e}"));
+    }
+    tracing::debug!(request_id, %prefill_addr, "router: sent prefill request frame");
+    Ok((prompt_tokens, rx))
 }
 
 // ── Handoff result driver ────────────────────────────────────────────────
@@ -576,6 +781,13 @@ fn sse_event(value: &serde_json::Value) -> Event {
     Event::default().data(serde_json::to_string(value).unwrap_or_default())
 }
 
+/// Build an SSE event from any serializable value (e.g. a typed
+/// [`CompletionChunk`]). The serialized `data:` line matches the single-node
+/// streaming path's `Event::default().data(serde_json::to_string(..))` framing.
+fn sse_serialize<T: serde::Serialize>(value: &T) -> Event {
+    Event::default().data(serde_json::to_string(value).unwrap_or_default())
+}
+
 /// Initial streaming chunk: sets `delta.role = "assistant"`.
 fn chat_chunk_initial(id: &str, model: &str) -> serde_json::Value {
     serde_json::json!({
@@ -677,9 +889,11 @@ fn chat_completion_json(
 /// Exposes:
 /// - `GET /health` - liveness probe
 /// - `POST /v1/chat/completions` - chat completions (streaming and non-streaming)
+/// - `POST /v1/completions` - text completions (streaming and non-streaming)
 pub fn create_router_app(state: Arc<RouterState>) -> Router {
     Router::new()
         .route("/health", get(router_health))
         .route("/v1/chat/completions", post(router_chat_completions))
+        .route("/v1/completions", post(router_completions))
         .with_state(state)
 }

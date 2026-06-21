@@ -505,3 +505,285 @@ async fn disaggregated_router_filters_thinking_output() {
     );
     eprintln!("OK: router thinking-enabled output matches the single-node split.");
 }
+
+// ── /v1/completions parity (issue #200) ──────────────────────────────────
+
+/// Model alias used for the completion-parity test. The single-node baseline
+/// is started with `--alias <this>`, so its `display_model_id()` equals the
+/// `model` string the router echoes back from the request body. With the model
+/// field aligned, the only inherently volatile fields left are `id` and
+/// `created`, which the comparison normalizes.
+const COMPLETION_MODEL_ALIAS: &str = "qwen3-completions";
+
+/// Normalize the volatile `id` and `created` fields of a completion body (or
+/// chunk) so two independent runs can be compared for byte-identical structure.
+fn normalize_completion(mut v: serde_json::Value) -> serde_json::Value {
+    if let Some(obj) = v.as_object_mut() {
+        if obj.contains_key("id") {
+            obj.insert("id".to_string(), serde_json::json!("<id>"));
+        }
+        if obj.contains_key("created") {
+            obj.insert("created".to_string(), serde_json::json!(0));
+        }
+    }
+    v
+}
+
+/// Parse an SSE completion stream into the ordered list of normalized chunk
+/// objects. The `[DONE]` sentinel is dropped; keepalive comment lines (which do
+/// not start with `data: `) are ignored.
+fn parse_completion_chunks(body: &str) -> Vec<serde_json::Value> {
+    let mut chunks = Vec::new();
+    for line in body.lines() {
+        let line = line.trim();
+        if let Some(data) = line.strip_prefix("data: ") {
+            if data == "[DONE]" {
+                continue;
+            }
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(data) {
+                chunks.push(normalize_completion(v));
+            }
+        }
+    }
+    chunks
+}
+
+/// Issue #200: `POST /v1/completions` through the disaggregated router must
+/// return output byte-identical to single-node `/v1/completions` for the same
+/// prompt and sampling, in both the non-streaming (single JSON) and streaming
+/// (SSE) shapes.
+///
+/// The single-node baseline runs first (started with `--alias` so its model id
+/// matches the router's echoed `model`), is captured, then killed before the
+/// three-process router stack starts, so at most three model-loaded processes
+/// are resident at once. The comparison normalizes only the inherently volatile
+/// `id` / `created` fields; everything else (object, model, system_fingerprint,
+/// choices[index, text, finish_reason, logprobs], usage[...], the per-chunk
+/// stream shapes, and the `[DONE]` sentinel) must match exactly.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "spawns four real mlxcel-server processes loading qwen3-0.6b-4bit; run with --ignored"]
+async fn disaggregated_router_completions_match_single_node() {
+    let model_dir = repo_model_dir(QWEN3_DIR);
+    if !model_dir.exists() {
+        eprintln!("Skipping {QWEN3_DIR}: model directory not found");
+        return;
+    }
+    let binary = repo_binary_path("mlxcel-server");
+    if !binary.exists() {
+        eprintln!("Skipping: mlxcel-server binary not found");
+        return;
+    }
+    let model_arg = model_dir.to_string_lossy().to_string();
+    let prompt = "The capital of France is";
+    let nonstream_body = serde_json::json!({
+        "model": COMPLETION_MODEL_ALIAS,
+        "prompt": prompt,
+        "max_tokens": 16,
+        "temperature": 0.0
+    });
+    let stream_body = serde_json::json!({
+        "model": COMPLETION_MODEL_ALIAS,
+        "prompt": prompt,
+        "max_tokens": 16,
+        "temperature": 0.0,
+        "stream": true
+    });
+    let client = reqwest::Client::new();
+
+    // ---- Single-node reference (started with --alias for model parity) ----
+    let (ref_nonstream, ref_stream_chunks) = {
+        let ports = reserve_ports(1);
+        let http = ports[0].to_string();
+        let _single = spawn_role_server(&[
+            "-m",
+            &model_arg,
+            "--host",
+            "127.0.0.1",
+            "--port",
+            &http,
+            "--alias",
+            COMPLETION_MODEL_ALIAS,
+            "--no-warmup",
+        ]);
+        let deadline = Instant::now() + Duration::from_secs(240);
+        let health_url = format!("http://127.0.0.1:{http}/health");
+        assert!(
+            wait_for_http_health(&health_url, deadline).await,
+            "single-node reference never became healthy at {health_url}"
+        );
+        let completions_url = format!("http://127.0.0.1:{http}/v1/completions");
+
+        let ns_resp = client
+            .post(&completions_url)
+            .json(&nonstream_body)
+            .send()
+            .await
+            .expect("POST single-node /v1/completions (non-stream)");
+        assert!(
+            ns_resp.status().is_success(),
+            "single-node non-stream completion returned HTTP {}",
+            ns_resp.status()
+        );
+        let ns_json = ns_resp
+            .json::<serde_json::Value>()
+            .await
+            .expect("parse single-node non-stream completion JSON");
+
+        let st_resp = client
+            .post(&completions_url)
+            .json(&stream_body)
+            .send()
+            .await
+            .expect("POST single-node /v1/completions (stream)");
+        assert!(
+            st_resp.status().is_success(),
+            "single-node stream completion returned HTTP {}",
+            st_resp.status()
+        );
+        let st_body = st_resp.text().await.expect("read single-node SSE body");
+
+        (
+            normalize_completion(ns_json),
+            parse_completion_chunks(&st_body),
+        )
+        // _single drops here, killing the reference server.
+    };
+    eprintln!("single-node non-stream reference: {ref_nonstream}");
+    assert!(
+        ref_nonstream["choices"][0]["text"]
+            .as_str()
+            .is_some_and(|t| !t.is_empty()),
+        "single-node reference produced empty completion text; parity check would be vacuous"
+    );
+    assert!(
+        !ref_stream_chunks.is_empty(),
+        "single-node reference produced no SSE chunks; parity check would be vacuous"
+    );
+
+    // ---- Three-process disaggregated router run ----
+    let ports = reserve_ports(6);
+    let prefill_http = ports[0].to_string();
+    let decode_http = ports[1].to_string();
+    let router_http = ports[2].to_string();
+    let prefill_serving_addr = format!("127.0.0.1:{}", ports[3]);
+    let decode_serving_addr = format!("127.0.0.1:{}", ports[4]);
+    let router_serving_addr = format!("127.0.0.1:{}", ports[5]);
+
+    let _decode = spawn_role_server(&[
+        "-m",
+        &model_arg,
+        "--host",
+        "127.0.0.1",
+        "--port",
+        &decode_http,
+        "--parallel",
+        "2",
+        "--max-batch-size",
+        "2",
+        "--decode-storage-backend",
+        "paged",
+        "--node-role",
+        "decode",
+        "--serving-bind",
+        &decode_serving_addr,
+        "--no-warmup",
+    ]);
+    let _prefill = spawn_role_server(&[
+        "-m",
+        &model_arg,
+        "--host",
+        "127.0.0.1",
+        "--port",
+        &prefill_http,
+        "--parallel",
+        "2",
+        "--max-batch-size",
+        "2",
+        "--decode-storage-backend",
+        "paged",
+        "--node-role",
+        "prefill",
+        "--serving-bind",
+        &prefill_serving_addr,
+        "--decode-peers",
+        &decode_serving_addr,
+        "--no-warmup",
+    ]);
+    let _router = spawn_role_server(&[
+        "-m",
+        &model_arg,
+        "--host",
+        "127.0.0.1",
+        "--port",
+        &router_http,
+        "--node-role",
+        "router",
+        "--serving-bind",
+        &router_serving_addr,
+        "--prefill-peers",
+        &prefill_serving_addr,
+        "--decode-peers",
+        &decode_serving_addr,
+        "--no-warmup",
+    ]);
+
+    let deadline = Instant::now() + Duration::from_secs(240);
+    assert!(
+        wait_for_tcp(&decode_serving_addr, deadline).await,
+        "decode node serving transport never came up"
+    );
+    assert!(
+        wait_for_tcp(&prefill_serving_addr, deadline).await,
+        "prefill node serving transport never came up"
+    );
+    let health_url = format!("http://127.0.0.1:{router_http}/health");
+    assert!(
+        wait_for_http_health(&health_url, deadline).await,
+        "router HTTP /health never returned 200"
+    );
+    let router_completions_url = format!("http://127.0.0.1:{router_http}/v1/completions");
+
+    // Non-streaming parity.
+    let router_ns_resp = client
+        .post(&router_completions_url)
+        .json(&nonstream_body)
+        .send()
+        .await
+        .expect("POST router /v1/completions (non-stream)");
+    assert!(
+        router_ns_resp.status().is_success(),
+        "router non-stream completion returned HTTP {}",
+        router_ns_resp.status()
+    );
+    let router_ns = normalize_completion(
+        router_ns_resp
+            .json::<serde_json::Value>()
+            .await
+            .expect("parse router non-stream completion JSON"),
+    );
+    eprintln!("router non-stream: {router_ns}");
+    assert_eq!(
+        router_ns, ref_nonstream,
+        "router non-stream /v1/completions body is not byte-identical to single-node"
+    );
+
+    // Streaming parity.
+    let router_st_resp = client
+        .post(&router_completions_url)
+        .json(&stream_body)
+        .send()
+        .await
+        .expect("POST router /v1/completions (stream)");
+    assert!(
+        router_st_resp.status().is_success(),
+        "router stream completion returned HTTP {}",
+        router_st_resp.status()
+    );
+    let router_st_body = router_st_resp.text().await.expect("read router SSE body");
+    let router_st_chunks = parse_completion_chunks(&router_st_body);
+    assert_eq!(
+        router_st_chunks, ref_stream_chunks,
+        "router stream /v1/completions chunks are not byte-identical to single-node"
+    );
+    eprintln!("OK: router /v1/completions matches single-node (non-stream + stream).");
+}
