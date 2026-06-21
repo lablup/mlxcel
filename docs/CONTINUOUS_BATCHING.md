@@ -124,12 +124,11 @@ curl http://127.0.0.1:8300/v1/chat/completions \
   excluded from the paged handoff; the exact-prefix snapshot cache described
   above is a single-node prompt-cache optimization and is not serialized across
   disaggregated prefill/decode roles.
-- Text-only. The router serves `/v1/chat/completions`; multimodal requests are
-  rejected by the router.
-- The router does not yet apply the chat stream filter that the single-node chat
-  route uses, so reasoning/tool-call markers pass through verbatim. Use a
-  non-reasoning prompt or `chat_template_kwargs.enable_thinking=false` for clean
-  content.
+- Text-only. The router serves `POST /v1/chat/completions` and `POST /v1/completions`; multimodal requests are rejected.
+- On `/v1/completions`, three option groups are rejected with HTTP 400 because the disaggregated wire protocol does not carry the data they require: `logprobs`, `response_format` (structured output), and explicit reasoning/thinking budgets. Requests without those fields work normally.
+- `stop` sequences are not forwarded to the worker nodes by the router. This is a pre-existing limitation shared with the chat path.
+- `completion_tokens` in the usage block is counted from emitted detokenized text pieces. For byte-level BPE tokenizers (Qwen, Llama) this equals the worker's token count exactly. For byte-fallback tokenizers (Gemma `<0xXX>` byte sequences) it can under-count, which may flip `finish_reason` between `"length"` and `"stop"`. A precise fix requires the disaggregated wire protocol to carry the worker's token count; a follow-up issue tracks the protocol extension.
+- The router stream filter suppresses model-specific structural markers (`<think>`, tool-call delimiters) and routes thinking content to `reasoning_content`. Tool-call parsing is not yet supported on the router path: only `content` and `reasoning_content` are emitted.
 - Co-locating the roles on one machine adds transport hops without the scaling
   benefit of separate prefill and decode hardware, so a single-machine setup is
   for validation. The throughput case for disaggregation is separate prefill and
