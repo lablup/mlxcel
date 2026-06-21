@@ -17,8 +17,8 @@
 //! Key features:
 //! - Q/K normalization (RMSNorm after projection, before RoPE)
 //! - Sparse MoE with SwitchGLU and top-k routing
-//! - Softmax routing for expert selection
-//! - Optional norm_topk_prob to normalize top-k probabilities
+//! - Full softmax over all experts, then gather the probabilities at the top-k
+//! - Optional norm_topk_prob renormalization of the gathered top-k scores
 //! - Standard RoPE positional embeddings
 
 use mlxcel_core::generate::LanguageModel;
@@ -108,6 +108,54 @@ pub struct SparseMoeBlock {
     pub norm_topk_prob: bool,
 }
 
+/// Compute the top-k expert indices and their router scores from raw router
+/// logits, matching ml-explore/mlx-lm OlmoeSparseMoeBlock
+/// (https://github.com/ml-explore/mlx-lm/blob/main/mlx_lm/models/olmoe.py).
+///
+/// Order matters. mlx-lm softmaxes over ALL experts FIRST (precise f32
+/// accumulation), then gathers those full-softmax probabilities at the top-k
+/// experts, then renormalizes only when `norm_topk_prob` is set. Softmaxing
+/// over only the top-k logits instead always sums to 1, i.e. it silently
+/// behaves as if `norm_topk_prob` were always true. OLMoE-1B-7B-0125 ships
+/// `norm_topk_prob = false`, so its top-k probabilities must sum to < 1 and stay
+/// un-normalized; the top-k-only softmax over-weights every MoE block and the
+/// error compounds with depth and generation length (issue #318).
+///
+/// Expert selection is by argpartition on the raw logits. softmax is monotonic,
+/// so this yields the same expert set as mlx-lm's
+/// `argpartition(-routing_weights)[..., :k]`; the indices are unchanged from the
+/// previous implementation and only the scores differ. Returns
+/// `(topk_indices, scores)`, both shaped `[n_tokens, k]` and aligned so that
+/// `scores[t, j]` is the weight for expert `topk_indices[t, j]`.
+fn router_topk_scores(
+    logits: &MlxArray,
+    k: i32,
+    norm_topk_prob: bool,
+) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
+    let n_experts = mlxcel_core::array_shape(logits)[1];
+    let kth = n_experts - k;
+
+    // Top-k selection: indices[..., kth:] after argpartition on the logits.
+    let indices = mlxcel_core::argpartition(logits, kth, -1);
+    let indices_shape = mlxcel_core::array_shape(&indices);
+    let topk_indices =
+        mlxcel_core::slice(&indices, &[0, kth], &[indices_shape[0], indices_shape[1]]);
+
+    // Full softmax over ALL experts first (precise/f32 accumulation), then gather
+    // the probabilities at the selected experts. This is NOT a fresh softmax over
+    // only the top-k logits.
+    let routing_weights = mlxcel_core::softmax_precise(logits, -1);
+    let mut scores = mlxcel_core::take_along_axis(&routing_weights, &topk_indices, -1);
+
+    // Only renormalize when the config requests it (false for OLMoE-1B-7B-0125).
+    if norm_topk_prob {
+        let sum = mlxcel_core::sum_axis(&scores, -1, true);
+        scores = mlxcel_core::divide(&scores, &sum);
+    }
+
+    (topk_indices, scores)
+}
+
 impl SparseMoeBlock {
     pub fn forward(&self, x: &MlxArray) -> UniquePtr<MlxArray> {
         let orig_shape = mlxcel_core::array_shape(x);
@@ -121,30 +169,16 @@ impl SparseMoeBlock {
             mlxcel_core::copy(x)
         };
 
-        // Get router logits
+        // Router logits and top-k expert routing scores. The scoring matches
+        // ml-explore/mlx-lm OlmoeSparseMoeBlock exactly: softmax over all experts
+        // first, then gather the full-softmax probabilities at the top-k, then
+        // renormalize only when norm_topk_prob is set. See router_topk_scores for
+        // why this differs from a top-k-only softmax when norm_topk_prob is false
+        // (issue #318). Both the fused-kernel path and the SwitchGLU +
+        // moe_weighted_sum fallback below consume the same indices and scores.
         let logits = self.router.forward(&x_flat);
-
-        // Top-k selection using argpartition
         let k = self.num_experts_per_tok as i32;
-        let n_experts = mlxcel_core::array_shape(&logits)[1];
-        let kth = n_experts - k;
-
-        let indices = mlxcel_core::argpartition(&logits, kth, -1);
-
-        // Slice to get top-k: indices[..., kth:]
-        let indices_shape = mlxcel_core::array_shape(&indices);
-        let topk_indices =
-            mlxcel_core::slice(&indices, &[0, kth], &[indices_shape[0], indices_shape[1]]);
-
-        // Get scores for top-k experts and apply softmax (OLMoE uses softmax)
-        let topk_logits = mlxcel_core::take_along_axis(&logits, &topk_indices, -1);
-        let mut scores = mlxcel_core::softmax(&topk_logits, -1);
-
-        // Optionally normalize top-k probabilities
-        if self.norm_topk_prob {
-            let sum = mlxcel_core::sum_axis(&scores, -1, true);
-            scores = mlxcel_core::divide(&scores, &sum);
-        }
+        let (topk_indices, scores) = router_topk_scores(&logits, k, self.norm_topk_prob);
 
         // Apply experts and weighted-sum. Fused single-token decode kernel
         // on by default; MLXCEL_FUSED_MOE=0 forces the proven SwitchGLU +
@@ -581,12 +615,5 @@ impl LanguageModel for OlmoeModel {
 }
 
 #[cfg(test)]
-mod tests {
-    #[test]
-    fn fused_dispatch_gate_is_callable() {
-        // Confirm that the fused_moe_enabled gate used in SparseMoeBlock::forward
-        // compiles and returns a bool. The actual dispatch is exercised at runtime
-        // with real model weights.
-        let _enabled: bool = crate::models::switch_layers::fused_moe_enabled();
-    }
-}
+#[path = "olmoe_tests.rs"]
+mod tests;
