@@ -97,8 +97,7 @@ prefill node ignores it and uses config, so mixed-version pools keep working.
 As opt-in defense-in-depth (issue #389), a prefill node can validate the
 router-chosen `decode_target` against an allowlist before connecting. The
 allowlist source is the dedicated `MLXCEL_DECODE_ALLOWLIST` environment variable,
-a comma-separated `host:port` list set to the full pool of router-selectable
-decode nodes (the shared cluster config). It is independent of `--decode-peers`,
+a comma-separated list of numeric `IP:port` values (parsed as `SocketAddr`) set to the full pool of router-selectable decode nodes (the shared cluster config); hostname:port entries are not resolved and are skipped with a warning. It is independent of `--decode-peers`,
 which stays the static handoff fallback only, so enabling the allowlist does not
 constrain router balancing. When `MLXCEL_DECODE_ALLOWLIST` is unset the prefill
 stays permissive and logs a warning rather than rejecting, so balancing is never

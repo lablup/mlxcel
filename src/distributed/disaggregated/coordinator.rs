@@ -53,7 +53,7 @@
 use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 
 use anyhow::{Context, Result};
@@ -69,6 +69,10 @@ use crate::distributed::tcp_transport::{TcpTransport, TcpTransportConfig};
 use crate::distributed::transport::Transport;
 use crate::server::batch::BatchScheduler;
 use crate::server::model_provider::GenerateEvent;
+
+/// Set to `true` the first time the no-allowlist warning is emitted so
+/// subsequent requests in the same process do not flood the log.
+static ALLOWLIST_UNCONFIGURED_WARNED: AtomicBool = AtomicBool::new(false);
 
 /// Allowlist of decode node addresses a prefill node will ship a KV cache
 /// handoff to (issue #389, defense-in-depth on top of issue #201).
@@ -481,12 +485,23 @@ impl ServingCoordinator {
                     Some(target) => match self.decode_allowlist.decide(target) {
                         DecodeTargetDecision::Allow => target.to_string(),
                         DecodeTargetDecision::AllowUnchecked => {
-                            tracing::warn!(
-                                request_id = request.request_id,
-                                decode_target = %target,
-                                "prefill role: no decode allowlist configured; forwarding the \
-                                 KV handoff to the router-chosen target unchecked"
-                            );
+                            // Warn at most once per process: in the default multi-node
+                            // config (MLXCEL_DECODE_ALLOWLIST unset, router sends
+                            // decode_target) every request would otherwise emit a WARN
+                            // and bury real warnings. The security posture is unchanged
+                            // (still permissive; still forwards). Set
+                            // MLXCEL_DECODE_ALLOWLIST to enforce.
+                            if !ALLOWLIST_UNCONFIGURED_WARNED.swap(true, Ordering::Relaxed) {
+                                tracing::warn!(
+                                    "prefill role: MLXCEL_DECODE_ALLOWLIST is not configured; \
+                                     decode_target validation is permissive and this node will \
+                                     forward KV handoffs to any router-chosen address unchecked. \
+                                     Set MLXCEL_DECODE_ALLOWLIST to the full pool of \
+                                     router-selectable decode nodes (numeric IP:port, \
+                                     comma-separated) to enforce the allowlist. This warning \
+                                     appears once per process."
+                                );
+                            }
                             target.to_string()
                         }
                         DecodeTargetDecision::Reject => {
