@@ -19,7 +19,7 @@ use image::{DynamicImage, ImageBuffer, ImageFormat, Rgb};
 use super::{
     StreamingDecodeState, build_generation_result, decode_request_images,
     decode_request_images_with_limits, merge_config_stop_tokens, parse_byte_fallback_token,
-    safe_emit_boundary,
+    run_core_thread_or_abort, safe_emit_boundary,
 };
 use crate::SamplingConfig;
 use crate::server::media::ImageInputLimits;
@@ -383,4 +383,33 @@ fn token_piece_identifies_byte_fallback_tokens() {
 
     // Out-of-vocabulary ID returns None.
     assert_eq!(tokenizer.token_piece(9999), None);
+}
+
+/// `run_core_thread_or_abort` runs a non-panicking body to completion and lets
+/// it observe its side effects, behaving as a transparent wrapper on the happy
+/// path (issue #375).
+///
+/// The abort path (a panicking body calls `std::process::abort()`) cannot be
+/// exercised in-process: `abort` terminates the whole test runner, so a panic
+/// test here would kill every other test. It is verified manually instead, by
+/// forcing a panic on a core worker thread in a release build and observing the
+/// process exit with the "aborting to preserve fail-fast" log line rather than
+/// a hung server. A subprocess re-exec harness could assert the abort, but the
+/// added flakiness is not worth it for a one-line `process::abort`.
+#[test]
+fn run_core_thread_or_abort_runs_body_to_completion() {
+    use std::cell::Cell;
+
+    let ran = Cell::new(false);
+    let mut returned = 0u32;
+    run_core_thread_or_abort("test-core-thread", || {
+        ran.set(true);
+        returned = 7;
+    });
+
+    assert!(ran.get(), "the non-panicking body must run to completion");
+    assert_eq!(
+        returned, 7,
+        "side effects of the body must be observable after the wrapper returns"
+    );
 }

@@ -177,7 +177,15 @@ strip = true              # Strip all symbols for smaller binary
 lto = true                # Full (fat) LTO for best size and performance
 codegen-units = 1         # Single codegen unit for maximum optimization
 opt-level = 3             # Maximum speed optimization (inference is compute-bound)
-panic = "abort"           # Remove panic unwinding code
+# Unwind (not abort) so the deliberate `catch_unwind` request/stage-isolation
+# backstops work in release as they do in debug: the audio worker `run_guarded`
+# (src/server/audio_worker.rs) turns a synthesis panic into a per-request error
+# instead of aborting the server, and the pipeline stage boundaries stay
+# contained. Core generation worker threads re-impose fail-fast explicitly with
+# a targeted `catch_unwind` + `process::abort()` (see `run_core_thread_or_abort`
+# in src/server/model_worker.rs and ADR 0003), so a broken core invariant still
+# crashes cleanly for a supervised restart rather than silently unwinding.
+panic = "unwind"
 
 [lints.clippy]
 upper_case_acronyms = "allow"

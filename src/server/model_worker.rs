@@ -175,6 +175,35 @@ pub(crate) struct WorkerSchedulerConfig {
     pub diffusion_threshold: f32,
 }
 
+/// Run a core inference worker thread body, converting an uncaught panic into a
+/// clean process abort.
+///
+/// The release profile uses `panic = "unwind"` (issue #375) so the deliberate
+/// `catch_unwind` request/stage-isolation backstops work in production: a
+/// synthesis panic on the audio worker becomes a per-request error, not a
+/// process abort. That same unwind policy would let a panic on a core
+/// generation thread unwind out of the worker loop and silently kill the
+/// thread, leaving the server process alive but unable to generate. A panic in
+/// a core worker means an invariant is broken, so we re-impose fail-fast here:
+/// log without request content, then `abort` so a supervisor restarts into
+/// fresh state.
+///
+/// This is intentionally narrow. Request and stage boundaries that deliberately
+/// CONTAIN panics (the audio worker `run_guarded`, the pipeline stage isolation)
+/// keep their own `catch_unwind` and are NOT wrapped, and there is deliberately
+/// no global abort panic hook, which would run before unwinding and defeat
+/// those backstops. `AssertUnwindSafe` is correct precisely because we abort
+/// (never continue) on a caught panic, so no torn state is ever observed.
+fn run_core_thread_or_abort<F: FnOnce()>(label: &str, body: F) {
+    if std::panic::catch_unwind(std::panic::AssertUnwindSafe(body)).is_err() {
+        tracing::error!(
+            target: "mlxcel::worker",
+            "core worker thread '{label}' panicked; aborting to preserve fail-fast"
+        );
+        std::process::abort();
+    }
+}
+
 pub(crate) fn spawn_model_worker_with_batch_config(
     model_path: PathBuf,
     adapter_path: Option<PathBuf>,
@@ -186,11 +215,19 @@ pub(crate) fn spawn_model_worker_with_batch_config(
     batch_observability: Arc<BatchObservability>,
 ) -> thread::JoinHandle<()> {
     thread::spawn(move || {
-        tracing::info!("Model worker thread starting, loading model...");
+        // Re-impose fail-fast on this core generation thread under release
+        // `panic = "unwind"` (issue #375): an uncaught panic in the load,
+        // scheduler, diffusion, or disaggregated-role path aborts the process
+        // for a supervised restart instead of silently unwinding and leaving
+        // the server unable to generate. The audio worker and pipeline stage
+        // boundaries keep their own `catch_unwind` and are not wrapped.
+        run_core_thread_or_abort("model-worker", move || {
+            tracing::info!("Model worker thread starting, loading model...");
 
-        let load_start = Instant::now();
-        let result = if let Some(ref pipeline_runtime) = sched_config.pipeline_parallel_runtime {
-            match pipeline_runtime {
+            let load_start = Instant::now();
+            let result = if let Some(ref pipeline_runtime) = sched_config.pipeline_parallel_runtime
+            {
+                match pipeline_runtime {
                 crate::server::PipelineParallelRuntimeConfig::InProcess {
                     layers,
                     micro_batch_size,
@@ -213,197 +250,199 @@ pub(crate) fn spawn_model_worker_with_batch_config(
                 let tokenizer = crate::tokenizer::load_tokenizer(&model_path)?;
                 Ok((crate::LoadedModel::PipelineLlama(model), tokenizer))
             })
-        } else if sched_config.tensor_parallel.tp_size > 1 {
-            crate::load_model_with_tensor_parallel(
-                &model_path,
-                adapter_path.as_deref(),
-                &sched_config.tensor_parallel,
-            )
-        } else if let Some(adapter) = adapter_path {
-            tracing::info!("Loading LoRA adapter from {:?}", adapter);
-            crate::load_model_with_adapter(&model_path, &adapter)
-        } else {
-            crate::load_model(&model_path)
-        };
-
-        let (model, tokenizer) = match result {
-            Ok((model, tokenizer)) => {
-                let load_elapsed = load_start.elapsed();
-                // Issue #55: log MLX-allocator resident memory after a
-                // successful weight load so operators see the actual
-                // working set the model occupies (not just the tensor
-                // sum). Useful for capacity planning and for the future
-                // preflight (#56) which will compare this against
-                // `MLXCEL_MEMORY_LIMIT` to fail fast.
-                let snap = mlxcel_core::memory::snapshot();
-                tracing::info!(
-                    worker_model_id = %worker_model_id,
-                    load_seconds = load_elapsed.as_secs_f64(),
-                    active_bytes = snap.active_bytes,
-                    peak_bytes = snap.peak_bytes,
-                    cache_bytes = snap.cache_bytes,
-                    limit_bytes = snap.limit_bytes,
-                    "Model {worker_model_id} loaded in {:.3}s (resident after load: {:.2} GB)",
-                    load_elapsed.as_secs_f64(),
-                    snap.active_bytes as f64 / (1024.0 * 1024.0 * 1024.0),
-                );
-                loaded.store(true, Ordering::Release);
-                (model, tokenizer)
-            }
-            Err(err) => {
-                tracing::error!("Failed to load model: {err}");
-                return;
-            }
-        };
-
-        let config_eos = crate::read_eos_token_ids(&model_path);
-        if !config_eos.is_empty() {
-            tracing::info!("EOS tokens from config: {:?}", config_eos);
-        }
-
-        // DiffusionGemma (issue #217 phase 3): block-diffusion models are
-        // model-owned single-stream generators (`supports_batching() == false`)
-        // and cannot join the BatchScheduler. Serve them on a dedicated
-        // batch-1 loop off the same request channel and return; all the
-        // scheduler-specific setup below is skipped.
-        let model = match model {
-            LoadedModel::DiffusionGemma(diffusion) => {
-                let sampler = crate::server::diffusion_worker::parse_diffusion_sampler(
-                    &sched_config.diffusion_sampler,
-                )
-                .unwrap_or_else(|err| {
-                    tracing::warn!("{err}; defaulting to entropy-bound");
-                    crate::models::diffusion_gemma::DiffusionSamplerKind::EntropyBound
-                });
-                let defaults = crate::server::diffusion_worker::DiffusionServeDefaults {
-                    sampler,
-                    confidence_threshold: sched_config.diffusion_threshold,
-                    max_denoising_steps: sched_config.max_denoising_steps,
-                };
-                crate::server::diffusion_worker::run_diffusion_worker_loop(
-                    &diffusion,
-                    &tokenizer,
+            } else if sched_config.tensor_parallel.tp_size > 1 {
+                crate::load_model_with_tensor_parallel(
                     &model_path,
-                    request_rx,
-                    defaults,
-                    &config_eos,
-                );
-                return;
-            }
-            other => other,
-        };
-
-        // Axis B (B8): resolve the server-wide LangBiasConfig once,
-        // after the tokenizer is available. Empty bias set or an HF-less
-        // tokenizer yields an empty map — bit-exact baseline preserved.
-        let token_bias = resolve_worker_token_bias(
-            sched_config.lang_bias_config.as_ref(),
-            &tokenizer,
-            &model_path,
-        );
-
-        // B9 — emit structured debug trace once at generator construction time
-        // (after resolve, before the scheduler is started).
-        if let (true, Some(cfg)) = (
-            !token_bias.is_empty(),
-            sched_config.lang_bias_config.as_ref(),
-        ) {
-            let langs: Vec<&str> = cfg
-                .bias_set
-                .ordered
-                .iter()
-                .map(|(code, _)| code.as_str())
-                .collect();
-            let languages_str = langs.join(",");
-            let policy_str = if cfg.policy == mlxcel_core::InclusionPolicy::Strict {
-                "strict"
+                    adapter_path.as_deref(),
+                    &sched_config.tensor_parallel,
+                )
+            } else if let Some(adapter) = adapter_path {
+                tracing::info!("Loading LoRA adapter from {:?}", adapter);
+                crate::load_model_with_adapter(&model_path, &adapter)
             } else {
-                "conservative"
+                crate::load_model(&model_path)
             };
-            // emit byte_fragment_entries only when non-zero so
-            // the existing B9 field shape is preserved for Phase 1 configs.
-            let byte_fragment_entries = token_bias.byte_fragment_len();
-            if byte_fragment_entries > 0 {
-                tracing::debug!(
-                    entries = token_bias.len(),
-                    byte_fragment_entries,
-                    languages = %languages_str,
-                    policy = %policy_str,
-                    "lang_bias resolved"
-                );
-            } else {
-                tracing::debug!(
-                    entries = token_bias.len(),
-                    languages = %languages_str,
-                    policy = %policy_str,
-                    "lang_bias resolved"
-                );
+
+            let (model, tokenizer) = match result {
+                Ok((model, tokenizer)) => {
+                    let load_elapsed = load_start.elapsed();
+                    // Issue #55: log MLX-allocator resident memory after a
+                    // successful weight load so operators see the actual
+                    // working set the model occupies (not just the tensor
+                    // sum). Useful for capacity planning and for the future
+                    // preflight (#56) which will compare this against
+                    // `MLXCEL_MEMORY_LIMIT` to fail fast.
+                    let snap = mlxcel_core::memory::snapshot();
+                    tracing::info!(
+                        worker_model_id = %worker_model_id,
+                        load_seconds = load_elapsed.as_secs_f64(),
+                        active_bytes = snap.active_bytes,
+                        peak_bytes = snap.peak_bytes,
+                        cache_bytes = snap.cache_bytes,
+                        limit_bytes = snap.limit_bytes,
+                        "Model {worker_model_id} loaded in {:.3}s (resident after load: {:.2} GB)",
+                        load_elapsed.as_secs_f64(),
+                        snap.active_bytes as f64 / (1024.0 * 1024.0 * 1024.0),
+                    );
+                    loaded.store(true, Ordering::Release);
+                    (model, tokenizer)
+                }
+                Err(err) => {
+                    tracing::error!("Failed to load model: {err}");
+                    return;
+                }
+            };
+
+            let config_eos = crate::read_eos_token_ids(&model_path);
+            if !config_eos.is_empty() {
+                tracing::info!("EOS tokens from config: {:?}", config_eos);
             }
-        }
 
-        let chunk_info = if sched_config.prefill_chunk_size > 0 {
-            format!(", prefill_chunk_size={}", sched_config.prefill_chunk_size)
-        } else {
-            String::new()
-        };
-        let batch_prefill_info = if sched_config.max_batch_prefill > 1 {
-            format!(", max_batch_prefill={}", sched_config.max_batch_prefill)
-        } else {
-            String::new()
-        };
-        let decode_storage_info = match sched_config.decode_storage_backend {
-            crate::server::DecodeStorageBackend::Auto => ", decode_storage=auto".to_string(),
-            crate::server::DecodeStorageBackend::Dense => String::new(),
-            crate::server::DecodeStorageBackend::Paged => ", decode_storage=paged".to_string(),
-        };
-        let lang_bias_info = if !token_bias.is_empty() {
-            format!(", lang_bias_tokens={}", token_bias.len())
-        } else {
-            String::new()
-        };
-        // log the resolved speculative dispatch once at
-        // startup. This makes the operator-visible "which path is
-        // active" explicit in the worker log without forcing the
-        // scheduler to log per request.
-        let spec_info = if !matches!(
-            sched_config.speculative_dispatch,
-            crate::server::SpeculativeDispatch::Disabled
-        ) {
-            format!(", {}", sched_config.speculative_dispatch.summary())
-        } else {
-            String::new()
-        };
-        tracing::info!(
-            "Starting BatchScheduler (max_batch_size={}, \
-             max_queue_depth={}{chunk_info}{batch_prefill_info}{decode_storage_info}{lang_bias_info}{spec_info})",
-            sched_config.max_batch_size,
-            sched_config.max_queue_depth,
-        );
+            // DiffusionGemma (issue #217 phase 3): block-diffusion models are
+            // model-owned single-stream generators (`supports_batching() == false`)
+            // and cannot join the BatchScheduler. Serve them on a dedicated
+            // batch-1 loop off the same request channel and return; all the
+            // scheduler-specific setup below is skipped.
+            let model = match model {
+                LoadedModel::DiffusionGemma(diffusion) => {
+                    let sampler = crate::server::diffusion_worker::parse_diffusion_sampler(
+                        &sched_config.diffusion_sampler,
+                    )
+                    .unwrap_or_else(|err| {
+                        tracing::warn!("{err}; defaulting to entropy-bound");
+                        crate::models::diffusion_gemma::DiffusionSamplerKind::EntropyBound
+                    });
+                    let defaults = crate::server::diffusion_worker::DiffusionServeDefaults {
+                        sampler,
+                        confidence_threshold: sched_config.diffusion_threshold,
+                        max_denoising_steps: sched_config.max_denoising_steps,
+                    };
+                    crate::server::diffusion_worker::run_diffusion_worker_loop(
+                        &diffusion,
+                        &tokenizer,
+                        &model_path,
+                        request_rx,
+                        defaults,
+                        &config_eos,
+                    );
+                    return;
+                }
+                other => other,
+            };
 
-        // speculative dispatch is wired end-to-end via
-        // the burst path in `BatchScheduler::execute_prefill`. With
-        // `max_batch_size > 1` the scheduler assembles an
-        // equal-prompt-length window of concurrently-queued speculative
-        // requests and drives them through the batched round-loop driver
-        // (`MtpBatchedGenerator` / `DFlashBatchedGenerator`) in one tick
-        // — true B>1 batched speculative decoding. A
-        // speculative request whose prompt length, `max_tokens`, or
-        // sampling config does not match the current window head, or
-        // that arrives alone, still runs as a B=1 burst; in that case
-        // the burst occupies the worker thread for its full duration and
-        // concurrent classic-decode rows head-of-line-block behind it
-        // until it completes. The previous earlier wording described the
-        // B=1-only behaviour; this reflects the batched path.
-        //
-        // Variable-length-prompt MTP bursts (different prompt lengths in one
-        // B>1 window) are implemented behind the `MLXCEL_ENABLE_MTP_BATCH_RAGGED`
-        // opt-in (subordinate to `MLXCEL_ENABLE_MTP_BATCH`): when enabled the
-        // MTP adapter left-pads the window to `max_prompt_len` (eligible while
-        // `max_prompt_len <= sliding_window`), preserving greedy parity via the
-        // left-padding uniform per-row position shift.
-        if sched_config.speculative_dispatch.is_kind_specific() && sched_config.max_batch_size > 1 {
+            // Axis B (B8): resolve the server-wide LangBiasConfig once,
+            // after the tokenizer is available. Empty bias set or an HF-less
+            // tokenizer yields an empty map — bit-exact baseline preserved.
+            let token_bias = resolve_worker_token_bias(
+                sched_config.lang_bias_config.as_ref(),
+                &tokenizer,
+                &model_path,
+            );
+
+            // B9 — emit structured debug trace once at generator construction time
+            // (after resolve, before the scheduler is started).
+            if let (true, Some(cfg)) = (
+                !token_bias.is_empty(),
+                sched_config.lang_bias_config.as_ref(),
+            ) {
+                let langs: Vec<&str> = cfg
+                    .bias_set
+                    .ordered
+                    .iter()
+                    .map(|(code, _)| code.as_str())
+                    .collect();
+                let languages_str = langs.join(",");
+                let policy_str = if cfg.policy == mlxcel_core::InclusionPolicy::Strict {
+                    "strict"
+                } else {
+                    "conservative"
+                };
+                // emit byte_fragment_entries only when non-zero so
+                // the existing B9 field shape is preserved for Phase 1 configs.
+                let byte_fragment_entries = token_bias.byte_fragment_len();
+                if byte_fragment_entries > 0 {
+                    tracing::debug!(
+                        entries = token_bias.len(),
+                        byte_fragment_entries,
+                        languages = %languages_str,
+                        policy = %policy_str,
+                        "lang_bias resolved"
+                    );
+                } else {
+                    tracing::debug!(
+                        entries = token_bias.len(),
+                        languages = %languages_str,
+                        policy = %policy_str,
+                        "lang_bias resolved"
+                    );
+                }
+            }
+
+            let chunk_info = if sched_config.prefill_chunk_size > 0 {
+                format!(", prefill_chunk_size={}", sched_config.prefill_chunk_size)
+            } else {
+                String::new()
+            };
+            let batch_prefill_info = if sched_config.max_batch_prefill > 1 {
+                format!(", max_batch_prefill={}", sched_config.max_batch_prefill)
+            } else {
+                String::new()
+            };
+            let decode_storage_info = match sched_config.decode_storage_backend {
+                crate::server::DecodeStorageBackend::Auto => ", decode_storage=auto".to_string(),
+                crate::server::DecodeStorageBackend::Dense => String::new(),
+                crate::server::DecodeStorageBackend::Paged => ", decode_storage=paged".to_string(),
+            };
+            let lang_bias_info = if !token_bias.is_empty() {
+                format!(", lang_bias_tokens={}", token_bias.len())
+            } else {
+                String::new()
+            };
+            // log the resolved speculative dispatch once at
+            // startup. This makes the operator-visible "which path is
+            // active" explicit in the worker log without forcing the
+            // scheduler to log per request.
+            let spec_info = if !matches!(
+                sched_config.speculative_dispatch,
+                crate::server::SpeculativeDispatch::Disabled
+            ) {
+                format!(", {}", sched_config.speculative_dispatch.summary())
+            } else {
+                String::new()
+            };
             tracing::info!(
-                "Speculative decoding active ({}) with max_batch_size={}: \
+                "Starting BatchScheduler (max_batch_size={}, \
+             max_queue_depth={}{chunk_info}{batch_prefill_info}{decode_storage_info}{lang_bias_info}{spec_info})",
+                sched_config.max_batch_size,
+                sched_config.max_queue_depth,
+            );
+
+            // speculative dispatch is wired end-to-end via
+            // the burst path in `BatchScheduler::execute_prefill`. With
+            // `max_batch_size > 1` the scheduler assembles an
+            // equal-prompt-length window of concurrently-queued speculative
+            // requests and drives them through the batched round-loop driver
+            // (`MtpBatchedGenerator` / `DFlashBatchedGenerator`) in one tick
+            // — true B>1 batched speculative decoding. A
+            // speculative request whose prompt length, `max_tokens`, or
+            // sampling config does not match the current window head, or
+            // that arrives alone, still runs as a B=1 burst; in that case
+            // the burst occupies the worker thread for its full duration and
+            // concurrent classic-decode rows head-of-line-block behind it
+            // until it completes. The previous earlier wording described the
+            // B=1-only behaviour; this reflects the batched path.
+            //
+            // Variable-length-prompt MTP bursts (different prompt lengths in one
+            // B>1 window) are implemented behind the `MLXCEL_ENABLE_MTP_BATCH_RAGGED`
+            // opt-in (subordinate to `MLXCEL_ENABLE_MTP_BATCH`): when enabled the
+            // MTP adapter left-pads the window to `max_prompt_len` (eligible while
+            // `max_prompt_len <= sliding_window`), preserving greedy parity via the
+            // left-padding uniform per-row position shift.
+            if sched_config.speculative_dispatch.is_kind_specific()
+                && sched_config.max_batch_size > 1
+            {
+                tracing::info!(
+                    "Speculative decoding active ({}) with max_batch_size={}: \
                  concurrently-queued speculative requests that share a \
                  prompt length, max_tokens, and sampling config are driven \
                  as a single B>1 batched burst. A speculative \
@@ -413,99 +452,101 @@ pub(crate) fn spawn_model_worker_with_batch_config(
                  duration. Variable-length-prompt MTP batched bursts are \
                  available behind MLXCEL_ENABLE_MTP_BATCH_RAGGED=1 (with \
                  MLXCEL_ENABLE_MTP_BATCH=1).",
-                sched_config.speculative_dispatch.summary(),
-                sched_config.max_batch_size,
-            );
-        }
+                    sched_config.speculative_dispatch.summary(),
+                    sched_config.max_batch_size,
+                );
+            }
 
-        // resolve the thinking-token id pair once, after the
-        // tokenizer is loaded. For models without `<think>`/`</think>` tokens
-        // (non-thinking models) this returns `None` and the scheduler silently
-        // ignores any budget parameter (logging once per model load).
-        let thinking_ids = crate::server::thinking_budget::resolve_thinking_token_ids(&tokenizer);
-        if sched_config.reasoning_budget.is_some() && thinking_ids.is_none() {
-            tracing::warn!(
-                "--reasoning-budget / thinking_budget_tokens requested but this model's \
+            // resolve the thinking-token id pair once, after the
+            // tokenizer is loaded. For models without `<think>`/`</think>` tokens
+            // (non-thinking models) this returns `None` and the scheduler silently
+            // ignores any budget parameter (logging once per model load).
+            let thinking_ids =
+                crate::server::thinking_budget::resolve_thinking_token_ids(&tokenizer);
+            if sched_config.reasoning_budget.is_some() && thinking_ids.is_none() {
+                tracing::warn!(
+                    "--reasoning-budget / thinking_budget_tokens requested but this model's \
                  tokenizer has no <think> / </think> tokens; thinking-budget enforcement \
                  is disabled for this session"
-            );
-        }
-
-        // #122 b3: resolve the `--kv-cache-budget` directive into a paged
-        // block count now (the model's geometry is known) and install it on
-        // the scheduler's pool below. A no-op (unbounded) when the flag is
-        // unset. Computed before `model` is moved into `with_config`.
-        let paged_block_budget = resolve_worker_paged_block_budget(
-            &model_path,
-            &model,
-            sched_config.max_batch_size,
-            sched_config.kv_cache_budget,
-        );
-
-        let mut scheduler = super::super::batch::BatchScheduler::with_config(
-            model,
-            tokenizer,
-            config_eos,
-            request_rx,
-            sched_config.max_batch_size,
-            sched_config.max_queue_depth,
-            batch_metrics,
-            batch_observability,
-            sched_config.prefill_chunk_size,
-            sched_config.enable_preemption,
-            sched_config.preemption_policy,
-            sched_config.max_batch_prefill,
-            sched_config.decode_storage_backend,
-        )
-        .with_vision_cache_size(sched_config.vision_cache_size)
-        .with_token_bias(token_bias)
-        .with_reasoning_budget(sched_config.reasoning_budget, thinking_ids)
-        .with_prompt_cache(sched_config.prompt_cache)
-        .with_kv_cache_mode(sched_config.kv_cache_mode)
-        .with_batch_kv_quant(sched_config.batch_kv_quant)
-        // cap plain KVCache growth to --max-kv-size when set.
-        .with_max_kv_size(sched_config.max_kv_size)
-        // install the resolved paged KV block budget (epic #116 #122 b3).
-        .with_paged_block_budget(paged_block_budget)
-        // experimental VLM prompt-prefix cache sharing (#124 step c).
-        .with_vlm_prefix_cache(sched_config.enable_vlm_prefix_cache)
-        // attach the resolved speculative dispatch so the
-        // scheduler can branch per-request once the round-loop dispatch
-        // hook is wired in `decode_single_step`.
-        .with_speculative_dispatch(sched_config.speculative_dispatch)
-        // attach the adaptive MTP policy (issue #333). Keyed on the served
-        // model's directory basename (the coarse, non-request-identifying
-        // target identity) plus the drafter basename and hardware class. A
-        // no-op for non-MTP dispatch or when MLXCEL_MTP_ADAPTIVE is off.
-        .with_mtp_policy(
-            model_path
-                .file_name()
-                .map(|name| name.to_string_lossy().into_owned()),
-        );
-
-        // #126 B3b2a: a non-hybrid `--node-role` runs the live disaggregated
-        // serving role rather than the standard single-node loop. The role loop
-        // binds this node's `--serving-bind` transport and drives prefill (or
-        // decode) over the B1 handoff hooks, returning only when the transport
-        // closes. A misconfigured role (no `--serving-bind`, or a prefill node
-        // without `--decode-peers`) logs an error and falls back to serving
-        // locally rather than hanging a half-configured node. `Hybrid` (the
-        // default) and `Router` run the standard loop, byte-identical to before
-        // (the dedicated router front lands in a later step).
-        use crate::distributed::disaggregated::ServingMode;
-        match sched_config.serving_mode {
-            ServingMode::PrefillOnly | ServingMode::DecodeOnly => {
-                if !run_disaggregated_serving_role(
-                    &mut scheduler,
-                    sched_config.serving_mode,
-                    sched_config.serving_bind,
-                    &sched_config.decode_peers,
-                ) {
-                    scheduler.run();
-                }
+                );
             }
-            ServingMode::Hybrid | ServingMode::Router => scheduler.run(),
-        }
+
+            // #122 b3: resolve the `--kv-cache-budget` directive into a paged
+            // block count now (the model's geometry is known) and install it on
+            // the scheduler's pool below. A no-op (unbounded) when the flag is
+            // unset. Computed before `model` is moved into `with_config`.
+            let paged_block_budget = resolve_worker_paged_block_budget(
+                &model_path,
+                &model,
+                sched_config.max_batch_size,
+                sched_config.kv_cache_budget,
+            );
+
+            let mut scheduler = super::super::batch::BatchScheduler::with_config(
+                model,
+                tokenizer,
+                config_eos,
+                request_rx,
+                sched_config.max_batch_size,
+                sched_config.max_queue_depth,
+                batch_metrics,
+                batch_observability,
+                sched_config.prefill_chunk_size,
+                sched_config.enable_preemption,
+                sched_config.preemption_policy,
+                sched_config.max_batch_prefill,
+                sched_config.decode_storage_backend,
+            )
+            .with_vision_cache_size(sched_config.vision_cache_size)
+            .with_token_bias(token_bias)
+            .with_reasoning_budget(sched_config.reasoning_budget, thinking_ids)
+            .with_prompt_cache(sched_config.prompt_cache)
+            .with_kv_cache_mode(sched_config.kv_cache_mode)
+            .with_batch_kv_quant(sched_config.batch_kv_quant)
+            // cap plain KVCache growth to --max-kv-size when set.
+            .with_max_kv_size(sched_config.max_kv_size)
+            // install the resolved paged KV block budget (epic #116 #122 b3).
+            .with_paged_block_budget(paged_block_budget)
+            // experimental VLM prompt-prefix cache sharing (#124 step c).
+            .with_vlm_prefix_cache(sched_config.enable_vlm_prefix_cache)
+            // attach the resolved speculative dispatch so the
+            // scheduler can branch per-request once the round-loop dispatch
+            // hook is wired in `decode_single_step`.
+            .with_speculative_dispatch(sched_config.speculative_dispatch)
+            // attach the adaptive MTP policy (issue #333). Keyed on the served
+            // model's directory basename (the coarse, non-request-identifying
+            // target identity) plus the drafter basename and hardware class. A
+            // no-op for non-MTP dispatch or when MLXCEL_MTP_ADAPTIVE is off.
+            .with_mtp_policy(
+                model_path
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned()),
+            );
+
+            // #126 B3b2a: a non-hybrid `--node-role` runs the live disaggregated
+            // serving role rather than the standard single-node loop. The role loop
+            // binds this node's `--serving-bind` transport and drives prefill (or
+            // decode) over the B1 handoff hooks, returning only when the transport
+            // closes. A misconfigured role (no `--serving-bind`, or a prefill node
+            // without `--decode-peers`) logs an error and falls back to serving
+            // locally rather than hanging a half-configured node. `Hybrid` (the
+            // default) and `Router` run the standard loop, byte-identical to before
+            // (the dedicated router front lands in a later step).
+            use crate::distributed::disaggregated::ServingMode;
+            match sched_config.serving_mode {
+                ServingMode::PrefillOnly | ServingMode::DecodeOnly => {
+                    if !run_disaggregated_serving_role(
+                        &mut scheduler,
+                        sched_config.serving_mode,
+                        sched_config.serving_bind,
+                        &sched_config.decode_peers,
+                    ) {
+                        scheduler.run();
+                    }
+                }
+                ServingMode::Hybrid | ServingMode::Router => scheduler.run(),
+            }
+        })
     })
 }
 
@@ -712,124 +753,130 @@ pub(crate) fn spawn_legacy_model_worker(
     batch_observability: Arc<BatchObservability>,
 ) -> thread::JoinHandle<()> {
     thread::spawn(move || {
-        tracing::info!(
-            "Model worker thread starting (legacy sequential mode, --no-batch), loading model..."
-        );
+        // Same fail-fast posture as the batched worker above (issue #375): the
+        // legacy sequential generation thread aborts the process on an uncaught
+        // panic under release `panic = "unwind"` rather than unwinding away.
+        run_core_thread_or_abort("model-worker-legacy", move || {
+            tracing::info!(
+                "Model worker thread starting (legacy sequential mode, --no-batch), loading model..."
+            );
 
-        let load_start = Instant::now();
-        let result = if tensor_parallel.tp_size > 1 {
-            crate::load_model_with_tensor_parallel(
-                &model_path,
-                adapter_path.as_deref(),
-                &tensor_parallel,
-            )
-        } else if let Some(adapter) = adapter_path {
-            tracing::info!("Loading LoRA adapter from {:?}", adapter);
-            crate::load_model_with_adapter(&model_path, &adapter)
-        } else {
-            crate::load_model(&model_path)
-        };
-
-        let (model, tokenizer) = match result {
-            Ok((model, tokenizer)) => {
-                let load_elapsed = load_start.elapsed();
-                // Issue #55: log MLX-allocator resident memory after a
-                // successful weight load so operators see the actual
-                // working set the model occupies (not just the tensor
-                // sum). Useful for capacity planning and for the future
-                // preflight (#56) which will compare this against
-                // `MLXCEL_MEMORY_LIMIT` to fail fast.
-                let snap = mlxcel_core::memory::snapshot();
-                tracing::info!(
-                    worker_model_id = %worker_model_id,
-                    load_seconds = load_elapsed.as_secs_f64(),
-                    active_bytes = snap.active_bytes,
-                    peak_bytes = snap.peak_bytes,
-                    cache_bytes = snap.cache_bytes,
-                    limit_bytes = snap.limit_bytes,
-                    "Model {worker_model_id} loaded in {:.3}s (resident after load: {:.2} GB)",
-                    load_elapsed.as_secs_f64(),
-                    snap.active_bytes as f64 / (1024.0 * 1024.0 * 1024.0),
-                );
-                loaded.store(true, Ordering::Release);
-                (model, tokenizer)
-            }
-            Err(err) => {
-                tracing::error!("Failed to load model: {err}");
-                return;
-            }
-        };
-
-        let config_eos = crate::read_eos_token_ids(&model_path);
-        if !config_eos.is_empty() {
-            tracing::info!("EOS tokens from config: {:?}", config_eos);
-        }
-
-        // DiffusionGemma (issue #217 phase 3): serve the block-diffusion model
-        // on its dedicated batch-1 loop. The legacy worker has no serve-level
-        // diffusion flags wired in (like `--vision-cache-size`), so it uses the
-        // engine defaults; operators who need to tune the diffusion knobs use
-        // the default batched worker.
-        let model = match model {
-            LoadedModel::DiffusionGemma(diffusion) => {
-                crate::server::diffusion_worker::run_diffusion_worker_loop(
-                    &diffusion,
-                    &tokenizer,
+            let load_start = Instant::now();
+            let result = if tensor_parallel.tp_size > 1 {
+                crate::load_model_with_tensor_parallel(
                     &model_path,
-                    request_rx,
-                    crate::server::diffusion_worker::DiffusionServeDefaults::default(),
-                    &config_eos,
-                );
-                return;
+                    adapter_path.as_deref(),
+                    &tensor_parallel,
+                )
+            } else if let Some(adapter) = adapter_path {
+                tracing::info!("Loading LoRA adapter from {:?}", adapter);
+                crate::load_model_with_adapter(&model_path, &adapter)
+            } else {
+                crate::load_model(&model_path)
+            };
+
+            let (model, tokenizer) = match result {
+                Ok((model, tokenizer)) => {
+                    let load_elapsed = load_start.elapsed();
+                    // Issue #55: log MLX-allocator resident memory after a
+                    // successful weight load so operators see the actual
+                    // working set the model occupies (not just the tensor
+                    // sum). Useful for capacity planning and for the future
+                    // preflight (#56) which will compare this against
+                    // `MLXCEL_MEMORY_LIMIT` to fail fast.
+                    let snap = mlxcel_core::memory::snapshot();
+                    tracing::info!(
+                        worker_model_id = %worker_model_id,
+                        load_seconds = load_elapsed.as_secs_f64(),
+                        active_bytes = snap.active_bytes,
+                        peak_bytes = snap.peak_bytes,
+                        cache_bytes = snap.cache_bytes,
+                        limit_bytes = snap.limit_bytes,
+                        "Model {worker_model_id} loaded in {:.3}s (resident after load: {:.2} GB)",
+                        load_elapsed.as_secs_f64(),
+                        snap.active_bytes as f64 / (1024.0 * 1024.0 * 1024.0),
+                    );
+                    loaded.store(true, Ordering::Release);
+                    (model, tokenizer)
+                }
+                Err(err) => {
+                    tracing::error!("Failed to load model: {err}");
+                    return;
+                }
+            };
+
+            let config_eos = crate::read_eos_token_ids(&model_path);
+            if !config_eos.is_empty() {
+                tracing::info!("EOS tokens from config: {:?}", config_eos);
             }
-            other => other,
-        };
 
-        tracing::info!(
-            "Starting legacy sequential worker \
+            // DiffusionGemma (issue #217 phase 3): serve the block-diffusion model
+            // on its dedicated batch-1 loop. The legacy worker has no serve-level
+            // diffusion flags wired in (like `--vision-cache-size`), so it uses the
+            // engine defaults; operators who need to tune the diffusion knobs use
+            // the default batched worker.
+            let model = match model {
+                LoadedModel::DiffusionGemma(diffusion) => {
+                    crate::server::diffusion_worker::run_diffusion_worker_loop(
+                        &diffusion,
+                        &tokenizer,
+                        &model_path,
+                        request_rx,
+                        crate::server::diffusion_worker::DiffusionServeDefaults::default(),
+                        &config_eos,
+                    );
+                    return;
+                }
+                other => other,
+            };
+
+            tracing::info!(
+                "Starting legacy sequential worker \
              (max_batch_size=1, prefill_chunk_size=disabled)"
-        );
+            );
 
-        // resolve the thinking-token id pair once, after the
-        // tokenizer is loaded. Mirrors the batched-worker path in
-        // `spawn_model_worker_with_batch_config`. For models without
-        // `<think>`/`</think>` tokens the helper returns `None` and the
-        // scheduler silently ignores any budget parameter (after the
-        // warn-once log below).
-        let thinking_ids = crate::server::thinking_budget::resolve_thinking_token_ids(&tokenizer);
-        if reasoning_budget.is_some() && thinking_ids.is_none() {
-            tracing::warn!(
-                "--reasoning-budget / thinking_budget_tokens requested but this model's \
+            // resolve the thinking-token id pair once, after the
+            // tokenizer is loaded. Mirrors the batched-worker path in
+            // `spawn_model_worker_with_batch_config`. For models without
+            // `<think>`/`</think>` tokens the helper returns `None` and the
+            // scheduler silently ignores any budget parameter (after the
+            // warn-once log below).
+            let thinking_ids =
+                crate::server::thinking_budget::resolve_thinking_token_ids(&tokenizer);
+            if reasoning_budget.is_some() && thinking_ids.is_none() {
+                tracing::warn!(
+                    "--reasoning-budget / thinking_budget_tokens requested but this model's \
                  tokenizer has no <think> / </think> tokens; thinking-budget enforcement \
                  is disabled for this session"
-            );
-        }
+                );
+            }
 
-        // Reuse BatchScheduler with max_batch_size=1 and chunking disabled.
-        // Per the scheduler docs, size-1 behavior is identical to the old
-        // sequential recv() loop, with no extra overhead.
-        //
-        // The legacy worker uses the default vision cache size because it
-        // currently does not receive the normalized server config; users who
-        // need to tune `--vision-cache-size` should use the default batched
-        // worker which wires the flag through `WorkerSchedulerConfig`.
-        let mut scheduler = super::super::batch::BatchScheduler::with_config(
-            model,
-            tokenizer,
-            config_eos,
-            request_rx,
-            1,          // max_batch_size = 1 → sequential, no interleaving
-            usize::MAX, // max_queue_depth: unbounded (one at a time anyway)
-            batch_metrics,
-            batch_observability,
-            0,     // prefill_chunk_size = 0 → chunking disabled
-            false, // enable_preemption = false
-            crate::server::config::PreemptionPolicy::default(),
-            1, // max_batch_prefill = 1 → sequential prefill
-            crate::server::DecodeStorageBackend::Dense,
-        )
-        .with_reasoning_budget(reasoning_budget, thinking_ids);
-        scheduler.run();
+            // Reuse BatchScheduler with max_batch_size=1 and chunking disabled.
+            // Per the scheduler docs, size-1 behavior is identical to the old
+            // sequential recv() loop, with no extra overhead.
+            //
+            // The legacy worker uses the default vision cache size because it
+            // currently does not receive the normalized server config; users who
+            // need to tune `--vision-cache-size` should use the default batched
+            // worker which wires the flag through `WorkerSchedulerConfig`.
+            let mut scheduler = super::super::batch::BatchScheduler::with_config(
+                model,
+                tokenizer,
+                config_eos,
+                request_rx,
+                1,          // max_batch_size = 1 → sequential, no interleaving
+                usize::MAX, // max_queue_depth: unbounded (one at a time anyway)
+                batch_metrics,
+                batch_observability,
+                0,     // prefill_chunk_size = 0 → chunking disabled
+                false, // enable_preemption = false
+                crate::server::config::PreemptionPolicy::default(),
+                1, // max_batch_prefill = 1 → sequential prefill
+                crate::server::DecodeStorageBackend::Dense,
+            )
+            .with_reasoning_budget(reasoning_budget, thinking_ids);
+            scheduler.run();
+        })
     })
 }
 

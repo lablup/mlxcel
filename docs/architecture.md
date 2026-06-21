@@ -97,6 +97,10 @@ Important control surfaces:
 5. `src/server/batch/` schedules batched decode when enabled.
 6. Streaming responses are emitted as SSE frames.
 
+#### Panic and threading posture
+
+Release builds use `panic = "unwind"` (issue #375), so the deliberate `catch_unwind` isolation boundaries work in production: a synthesis or transcription panic on the audio worker (`src/server/audio_worker.rs`) is contained as a per-request error, and the pipeline stage boundaries (`src/distributed/pipeline/`) stay contained. The core generation worker threads take the opposite posture on purpose: `run_core_thread_or_abort` in `src/server/model_worker.rs` wraps them so a panic, which signals a broken invariant, logs and aborts the process for a supervised restart rather than silently unwinding and leaving the server unable to generate. There is no global abort panic hook, which would run before unwinding and defeat the contained boundaries. An MLX C++ FFI exception still becomes `std::terminate` rather than a Rust panic and terminates the process (tracked as issue #382). See [ADR 0003](adr/0003-release-panic-unwind-with-core-thread-abort.md).
+
 ## Platform-specific behavior
 
 - macOS/Metal and Linux/CUDA behavior is primarily determined by the pinned MLX

@@ -165,6 +165,12 @@ All audio requests serialize through one dedicated MLX-owning worker thread (the
 
 Both knobs apply to the shared worker, so they cover the STT (Whisper) and TTS (Kokoro) paths together.
 
+## Fault isolation
+
+Each engine call on the audio worker runs under a `catch_unwind` boundary (`run_guarded` in `src/server/audio_worker.rs`), so a synthesis or transcription panic becomes a per-request `Inference` error and the worker thread keeps serving rather than taking down the server. Since issue #375 this holds in release builds too: the release profile uses `panic = "unwind"` (it formerly used `panic = "abort"`, which silently defeated the boundary in production). The core text-generation worker threads take the opposite, deliberate posture: an uncaught panic there means a broken invariant, so they log and `abort` the process for a supervised restart instead of unwinding (see ADR 0003).
+
+One residual case is not contained: an MLX C++ FFI exception thrown through a non-`Result` op becomes `std::terminate`, not a Rust panic, so it still terminates the process. That path is tracked separately as issue #382.
+
 ## Adding an audio model provider
 
 Implement `crate::server::AudioModelProvider` and register it at startup:

@@ -500,6 +500,13 @@ mod tests {
         }
     }
 
+    // Since issue #375 this test also represents release-build behavior. The
+    // test harness always builds with `panic = "unwind"` regardless of the
+    // profile, so `catch_unwind` in `run_guarded` has always worked here; the
+    // release profile now also uses `panic = "unwind"`, so the release binary
+    // contains the worker survives, server keeps serving behavior this asserts
+    // (rather than aborting the process as it did under the former
+    // `panic = "abort"`).
     #[test]
     fn worker_survives_engine_panic_and_keeps_serving() {
         let worker = AudioWorker::spawn("audio-test-panic", 8, Duration::from_secs(30), || {
