@@ -125,6 +125,17 @@ The code shares the same cluster config, registry, transport, and metrics
 infrastructure as PP. Treat it as a topology-specific feature: run a live test
 with your traffic shape before publishing performance claims.
 
+A `--node-role router` front balances independent prefill and decode pools. It
+picks both the prefill node and the decode node per request (round-robin over
+the nodes the registry marks online), ships the chosen decode node to the
+prefill node in the request frame so the prefill hands off to the
+router-balanced decode node, marks unreachable peers down (via send-error
+detection and a background liveness probe) and fails over to healthy nodes, and
+applies admission control that returns HTTP 503 when no node can take the
+request. `GET /router/stats` reports the per-node load spread and node health.
+See [continuous batching and disaggregated serving](CONTINUOUS_BATCHING.md#multi-node-routing-load-balancing-and-failover)
+for the flags and behavior.
+
 ## Common limitations
 
 - Distributed support is not uniform across model families.

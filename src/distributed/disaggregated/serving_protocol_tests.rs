@@ -34,6 +34,7 @@ fn prefill_request_frame_round_trips_through_a_control_message() {
         sampling: sample_sampling(),
         max_tokens: 64,
         reply_to: "127.0.0.1:5555".to_string(),
+        decode_target: None,
     };
     let message = frame.encode().expect("encode prefill request");
     let (op, payload) = control_parts(message).expect("control parts");
@@ -45,6 +46,42 @@ fn prefill_request_frame_round_trips_through_a_control_message() {
     assert_eq!(decoded.prompt_tokens, vec![1, 2, 3, 42]);
     assert_eq!(decoded.max_tokens, 64);
     assert_eq!(decoded.reply_to, "127.0.0.1:5555");
+    assert_eq!(decoded.decode_target, None);
+}
+
+/// Issue #201: a router-chosen decode target round-trips through the frame so
+/// the prefill node forwards the KV handoff to the router-balanced decode node.
+#[test]
+fn prefill_request_frame_carries_router_chosen_decode_target() {
+    let frame = PrefillRequestFrame {
+        request_id: 9,
+        prompt_tokens: vec![5, 6],
+        sampling: sample_sampling(),
+        max_tokens: 16,
+        reply_to: "127.0.0.1:5555".to_string(),
+        decode_target: Some("127.0.0.1:7001".to_string()),
+    };
+    let message = frame.encode().expect("encode prefill request");
+    let (_op, payload) = control_parts(message).expect("control parts");
+    let decoded = PrefillRequestFrame::decode(&payload).expect("decode prefill request");
+    assert_eq!(decoded.decode_target.as_deref(), Some("127.0.0.1:7001"));
+}
+
+/// Issue #201: `decode_target` is `serde(default)` so a frame from a router
+/// predating the field (no `decode_target` key) decodes to `None`, and the
+/// prefill node falls back to its configured `--decode-peers` target.
+#[test]
+fn prefill_request_frame_decode_target_defaults_to_none() {
+    let payload = serde_json::json!({
+        "request_id": 4,
+        "prompt_tokens": [1, 2],
+        "sampling": sample_sampling(),
+        "max_tokens": 8,
+        "reply_to": "127.0.0.1:5555"
+    });
+    let decoded: PrefillRequestFrame =
+        serde_json::from_slice(&serde_json::to_vec(&payload).unwrap()).expect("decode");
+    assert_eq!(decoded.decode_target, None);
 }
 
 #[test]

@@ -50,6 +50,27 @@
 //! `tool_calls`) is NOT yet supported on the router path: the router emits
 //! `content` and `reasoning_content` only, and the filter suppresses
 //! tool-call delimiter markers.
+//!
+//! # Multi-node routing, health, and backpressure (issue #201)
+//!
+//! The router balances BOTH pools. It selects the prefill node with
+//! `route_to_prefill` and the decode node with `route_to_decode`, then ships the
+//! chosen decode node in [`PrefillRequestFrame`]'s `decode_target` so the prefill
+//! node hands the KV cache to the router-balanced decode node rather than its own
+//! static `--decode-peers` config (a frame without the field, from an older
+//! router, leaves the prefill node on its config fallback). Both pools use a
+//! round-robin strategy because the router has no live per-node load telemetry.
+//!
+//! Health and failover: a transport error when sending a prefill frame marks the
+//! node unreachable, re-routes its in-flight requests via `handle_node_failure`,
+//! and retries the request on a healthy node. A background [`spawn_health_monitor`]
+//! task probes every peer's liveness (TCP connect) so a dead decode node (which
+//! the router never sends to directly) is detected and skipped, and a recovered
+//! node is restored to online.
+//!
+//! Backpressure: every request first passes `apply_backpressure` admission
+//! control; when the prefill queue is full or no prefill node is available, the
+//! router returns HTTP 503 instead of dispatching.
 
 use std::collections::HashMap;
 use std::convert::Infallible;
@@ -70,8 +91,8 @@ use tokio_stream::wrappers::UnboundedReceiverStream;
 use crate::distributed::backpressure::{BackpressureConfig, BackpressureMonitor};
 use crate::distributed::config::{ClusterConfig, ClusterMeta, NodeConfig, NodeResources, NodeRole};
 use crate::distributed::disaggregated::{
-    PrefillRequestFrame, RequestRouter, ResultFrame, RouterConfig, StreamBridge, TokenEvent,
-    TokenSource, control_parts, sampling_to_serializable,
+    BackpressureAction, DisaggRoutingStrategy, PrefillRequestFrame, RequestRouter, ResultFrame,
+    RouterConfig, StreamBridge, TokenEvent, TokenSource, control_parts, sampling_to_serializable,
 };
 use crate::distributed::metrics::ClusterMetrics;
 use crate::distributed::registry::{NodeRegistry, NodeStatus};
@@ -88,6 +109,14 @@ use crate::tokenizer::MlxcelTokenizer;
 /// Timeout for waiting for the prefill first-token result and the decode
 /// continuation from the serving nodes.
 const HANDOFF_TIMEOUT_SECS: u64 = 120;
+
+/// How often the background health monitor probes each registered serving peer
+/// for liveness (issue #201).
+const HEALTH_PROBE_INTERVAL: Duration = Duration::from_secs(3);
+
+/// Per-probe TCP connect timeout for the health monitor. A peer that does not
+/// accept a connection within this window is treated as unreachable.
+const HEALTH_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 
 // ── Router state ─────────────────────────────────────────────────────────
 
@@ -119,6 +148,15 @@ pub struct RouterState {
     /// Prefill node addresses used as a fallback when the router returns an
     /// error (e.g. because all nodes appear loaded).
     pub prefill_fallback: Vec<SocketAddr>,
+
+    /// Per-node count of dispatched requests, keyed by prefill node id
+    /// (`prefill-<i>`). Exposed via `GET /router/stats` so an operator (and the
+    /// multi-node E2E) can see the load spread across the prefill pool.
+    pub prefill_hits: Mutex<HashMap<String, u64>>,
+
+    /// Per-node count of dispatched requests, keyed by decode node id
+    /// (`decode-<i>`). Exposed via `GET /router/stats`.
+    pub decode_hits: Mutex<HashMap<String, u64>>,
 
     /// Chat template processor for rendering the prompt.
     pub chat_template: Arc<ChatTemplateProcessor>,
@@ -190,8 +228,20 @@ impl RouterState {
             registry.set_node_status(&node.id, NodeStatus::Online);
         }
 
+        // The router has no live per-node load or memory telemetry from the
+        // worker pools, so the load-aware strategies (least-loaded /
+        // memory-aware) would all collapse to "pick the first node" and never
+        // balance. Round-robin is the strategy that actually spreads requests
+        // across both pools with only the registry's online/offline view, which
+        // is exactly what the router has. It picks both the prefill node and the
+        // router-chosen decode node (issue #201).
+        let router_config = RouterConfig {
+            prefill_strategy: DisaggRoutingStrategy::RoundRobin,
+            decode_strategy: DisaggRoutingStrategy::RoundRobin,
+            ..RouterConfig::default()
+        };
         let request_router = RequestRouter::new(
-            RouterConfig::default(),
+            router_config,
             registry.clone(),
             ClusterMetrics::new(),
             BackpressureMonitor::new(BackpressureConfig::default()),
@@ -207,6 +257,8 @@ impl RouterState {
             router: request_router,
             registry,
             prefill_fallback,
+            prefill_hits: Mutex::new(HashMap::new()),
+            decode_hits: Mutex::new(HashMap::new()),
             chat_template,
             tokenizer,
             config,
@@ -214,25 +266,92 @@ impl RouterState {
         })
     }
 
-    /// Resolve the prefill node address for a new request.
+    /// Select a prefill node for a request, returning both its registry id (when
+    /// the router picked one) and the address to send the frame to.
     ///
-    /// Tries the [`RequestRouter`] first; falls back to the first entry in
-    /// `prefill_fallback` on routing errors.
-    fn select_prefill(&self, request_id_str: &str, prompt_len: usize) -> Result<String> {
-        let rid = RequestId::from_string(request_id_str.to_string()).unwrap_or_default();
-        match self.router.route_to_prefill(rid, prompt_len) {
+    /// Tracks the request in the [`RequestRouter`] (so decode routing and
+    /// failover can find it) and applies the configured load-balancing strategy.
+    /// `allow_fallback` controls the degenerate path: on the first attempt it is
+    /// `true`, so a router with no usable registry entry still dispatches to the
+    /// first configured `--prefill-peers` address (`node_id` is then `None`,
+    /// since no registry node backs it). On a failover retry it is `false`: the
+    /// caller wants a real, routed, healthy node and treats "no node" as a clean
+    /// failure rather than re-sending to a possibly-dead static address.
+    fn select_prefill(
+        &self,
+        rid: &RequestId,
+        prompt_len: usize,
+        allow_fallback: bool,
+    ) -> Result<PrefillTarget> {
+        match self.router.route_to_prefill(rid.clone(), prompt_len) {
             Ok(node_id) => self
                 .registry
                 .get_node(&node_id)
-                .map(|n| n.config.address.to_string())
+                .map(|n| PrefillTarget {
+                    node_id: Some(node_id.clone()),
+                    addr: n.config.address.to_string(),
+                })
                 .ok_or_else(|| anyhow::anyhow!("routed prefill node {node_id} not in registry")),
-            Err(_) => self
+            Err(_) if allow_fallback => self
                 .prefill_fallback
                 .first()
-                .map(|a| a.to_string())
+                .map(|a| PrefillTarget {
+                    node_id: None,
+                    addr: a.to_string(),
+                })
                 .ok_or_else(|| anyhow::anyhow!("no prefill node available")),
+            Err(e) => Err(anyhow::anyhow!("no healthy prefill node: {e}")),
         }
     }
+
+    /// Select a decode node for an already-tracked request (router-driven decode
+    /// selection, issue #201). Returns the decode node's registry id and
+    /// address, or `None` when no decode node could be routed (no decode peers
+    /// registered, all unreachable, or the request is not tracked because the
+    /// prefill selection took the static fallback). A `None` here makes the
+    /// router omit `decode_target` so the prefill node falls back to its own
+    /// `--decode-peers` config.
+    fn select_decode(&self, rid: &RequestId) -> Option<DecodeTarget> {
+        match self.router.route_to_decode(rid) {
+            Ok(node_id) => self.registry.get_node(&node_id).map(|n| DecodeTarget {
+                node_id,
+                addr: n.config.address.to_string(),
+            }),
+            Err(_) => None,
+        }
+    }
+
+    /// Move a tracked request to a terminal phase so the router does not leak it.
+    ///
+    /// Derives the router's string request id from the response id (the same
+    /// derivation [`start_handoff`] uses) and marks the request completed or
+    /// failed. Terminal entries are purged by [`spawn_health_monitor`]; without
+    /// this the `Prefilling` / `Decoding` entry would live forever. A no-op when
+    /// the id cannot be reconstructed or the request was never tracked.
+    fn finalize_request(&self, response_id: &str, completed: bool) {
+        let Some(rid) = RequestId::from_string(response_id.to_string()) else {
+            return;
+        };
+        if completed {
+            let _ = self.router.mark_completed(&rid);
+        } else {
+            let _ = self.router.mark_failed(&rid, "router request failed");
+        }
+    }
+}
+
+/// A selected prefill node: its registry id (`None` when the static fallback
+/// address was used) and the address to send the [`PrefillRequestFrame`] to.
+struct PrefillTarget {
+    node_id: Option<String>,
+    addr: String,
+}
+
+/// A selected decode node: its registry id and the address the router puts in
+/// [`PrefillRequestFrame::decode_target`] for the prefill node to hand off to.
+struct DecodeTarget {
+    node_id: String,
+    addr: String,
 }
 
 // ── Background demux task ────────────────────────────────────────────────
@@ -264,11 +383,109 @@ pub fn spawn_result_demux(state: Arc<RouterState>) {
     });
 }
 
+// ── Background health monitor ────────────────────────────────────────────
+
+/// Spawn a background task that probes every registered serving peer for
+/// liveness and keeps the [`NodeRegistry`] status in sync (issue #201).
+///
+/// Each cycle TCP-connects to each node's serving address (the same address the
+/// router routes to). A node that does not accept a connection within
+/// [`HEALTH_PROBE_TIMEOUT`] is marked [`NodeStatus::Unreachable`], so
+/// `route_to_prefill` / `route_to_decode` skip it, and its in-flight requests
+/// are re-routed via [`RequestRouter::handle_node_failure`]. A previously
+/// unreachable node that starts accepting again is restored to
+/// [`NodeStatus::Online`]. This catches the cases the per-send transport-error
+/// path cannot: a decode node (which the router never sends to directly) dying,
+/// and a node recovering. The task also purges terminal tracked requests so the
+/// router's request map stays bounded.
+///
+/// Locking: `all_nodes()` returns a snapshot and releases the registry lock; no
+/// registry or request-map lock is held across the connect `await`.
+pub fn spawn_health_monitor(state: Arc<RouterState>) {
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(HEALTH_PROBE_INTERVAL).await;
+            for node in state.registry.all_nodes() {
+                let addr = node.config.address.to_string();
+                let alive = matches!(
+                    tokio::time::timeout(
+                        HEALTH_PROBE_TIMEOUT,
+                        tokio::net::TcpStream::connect(&addr),
+                    )
+                    .await,
+                    Ok(Ok(_))
+                );
+                match (alive, node.status) {
+                    (false, NodeStatus::Online) => {
+                        state
+                            .registry
+                            .set_node_status(&node.config.id, NodeStatus::Unreachable);
+                        let (rerouted, failed) = state.router.handle_node_failure(&node.config.id);
+                        tracing::warn!(
+                            node = %node.config.id, %addr, rerouted, failed,
+                            "router health: peer unreachable; marked it down"
+                        );
+                    }
+                    (true, NodeStatus::Unreachable) => {
+                        state
+                            .registry
+                            .set_node_status(&node.config.id, NodeStatus::Online);
+                        tracing::info!(
+                            node = %node.config.id, %addr,
+                            "router health: peer recovered; marked it online"
+                        );
+                    }
+                    _ => {}
+                }
+            }
+            // Bound the tracked-request map: drop terminal entries older than the
+            // router config's auto-purge age.
+            let purged = state
+                .router
+                .purge_terminal(state.router.config().auto_purge_age);
+            if purged > 0 {
+                tracing::debug!(purged, "router health: purged terminal tracked requests");
+            }
+        }
+    });
+}
+
 // ── HTTP handlers ─────────────────────────────────────────────────────────
 
 /// GET /health
 async fn router_health() -> &'static str {
     "ok"
+}
+
+/// GET /router/stats
+///
+/// Report the router's load distribution and routing metrics (issue #201): the
+/// per-node dispatch counts for the prefill and decode pools, the registered
+/// nodes with their current health status, and the [`RouterMetrics`] snapshot.
+/// An operator (and the multi-node E2E) uses this to confirm requests spread
+/// across the pools and that a failed node is marked unreachable.
+async fn router_stats(State(state): State<Arc<RouterState>>) -> Json<serde_json::Value> {
+    let prefill_hits = state.prefill_hits.lock().unwrap().clone();
+    let decode_hits = state.decode_hits.lock().unwrap().clone();
+    let nodes: Vec<serde_json::Value> = state
+        .registry
+        .all_nodes()
+        .into_iter()
+        .map(|n| {
+            serde_json::json!({
+                "id": n.config.id,
+                "role": n.config.role.to_string(),
+                "address": n.config.address.to_string(),
+                "status": n.status.to_string(),
+            })
+        })
+        .collect();
+    Json(serde_json::json!({
+        "metrics": state.router.metrics(),
+        "prefill_hits": prefill_hits,
+        "decode_hits": decode_hits,
+        "nodes": nodes,
+    }))
 }
 
 /// POST /v1/chat/completions
@@ -286,8 +503,45 @@ async fn router_chat_completions(
     }
 }
 
+/// Apply router-level admission control before dispatching (issue #201).
+///
+/// Consults [`RequestRouter::apply_backpressure`]. When the prefill queue is at
+/// capacity (`Reject`) or no prefill node is currently available (`Queue`, e.g.
+/// every prefill node is marked unreachable), the router has nowhere to send the
+/// request and no async queue to park it in, so it returns HTTP 503 instead of
+/// attempting a doomed dispatch. `Accept` returns `None` and the caller proceeds
+/// exactly as before, so the healthy path is unchanged.
+fn admission_reject(state: &RouterState) -> Option<Response> {
+    match state.router.apply_backpressure() {
+        BackpressureAction::Accept => None,
+        BackpressureAction::Queue => Some(service_unavailable(
+            "all serving nodes are at capacity or unreachable; retry shortly",
+        )),
+        BackpressureAction::Reject(reason) => Some(service_unavailable(&format!(
+            "router rejected request: {reason}"
+        ))),
+    }
+}
+
+/// Build an HTTP 503 JSON error response for a backpressure rejection.
+fn service_unavailable(message: &str) -> Response {
+    (
+        axum::http::StatusCode::SERVICE_UNAVAILABLE,
+        Json(serde_json::json!({
+            "error": {"message": message, "type": "service_unavailable"}
+        })),
+    )
+        .into_response()
+}
+
 /// Core chat routing logic: tokenizes, sends to prefill, merges result.
 async fn route_chat(state: Arc<RouterState>, request: ChatCompletionRequest) -> Result<Response> {
+    // Admission control first: reject with 503 when the cluster cannot take the
+    // request (issue #201), before spending work on template rendering.
+    if let Some(resp) = admission_reject(&state) {
+        return Ok(resp);
+    }
+
     // Render the chat template and reject multimodal requests (the
     // disaggregated path is text-only for pool-backed Fp16 families).
     let prepared = super::chat_request::prepare_chat_request_with_cache(
@@ -382,6 +636,7 @@ async fn route_chat(state: Arc<RouterState>, request: ChatCompletionRequest) -> 
             // unterminated partial delimiter match at end of stream).
             emit_filtered(filter.flush());
 
+            let completed = result.is_ok();
             if let Err(e) = result {
                 let _ = chunk_tx.send(Ok(sse_event(&chat_chunk_error(
                     &request_id_str2,
@@ -393,6 +648,7 @@ async fn route_chat(state: Arc<RouterState>, request: ChatCompletionRequest) -> 
             let _ = chunk_tx.send(Ok(Event::default().data("[DONE]")));
 
             state2.pending.lock().unwrap().remove(&request_id);
+            state2.finalize_request(&request_id_str2, completed);
         });
 
         Ok(Sse::new(UnboundedReceiverStream::new(chunk_rx))
@@ -426,6 +682,7 @@ async fn route_chat(state: Arc<RouterState>, request: ChatCompletionRequest) -> 
             .await;
             absorb(filter.flush());
             state.pending.lock().unwrap().remove(&request_id);
+            state.finalize_request(&request_id_str, r.is_ok());
             r?;
         }
         Ok(Json(chat_completion_json(
@@ -479,6 +736,12 @@ async fn router_completions(
 ///   between "length" and "stop". A precise fix requires the disaggregated wire
 ///   protocol to carry the worker's token count and is deferred to a follow-up.
 async fn route_completion(state: Arc<RouterState>, request: CompletionRequest) -> Result<Response> {
+    // Admission control first: reject with 503 when the cluster cannot take the
+    // request (issue #201), before any per-request work.
+    if let Some(resp) = admission_reject(&state) {
+        return Ok(resp);
+    }
+
     // The disaggregated result frames carry detokenized text only, with no
     // per-token logprob data, so the router cannot reproduce the single-node
     // `logprobs` object. Reject rather than emit a divergent null-logprobs
@@ -617,6 +880,7 @@ async fn route_completion(state: Arc<RouterState>, request: CompletionRequest) -
             let _ = chunk_tx.send(Ok(Event::default().data("[DONE]")));
 
             state2.pending.lock().unwrap().remove(&request_id);
+            state2.finalize_request(&response_id2, result.is_ok());
         });
 
         Ok(Sse::new(UnboundedReceiverStream::new(chunk_rx))
@@ -640,6 +904,7 @@ async fn route_completion(state: Arc<RouterState>, request: CompletionRequest) -
         )
         .await;
         state.pending.lock().unwrap().remove(&request_id);
+        state.finalize_request(&response_id, r.is_ok());
         r?;
 
         // Mirror the single-node finish_reason exactly (model_worker.rs):
@@ -700,31 +965,121 @@ async fn start_handoff(
         .collect();
     let prompt_tokens = token_ids.len();
 
-    let prefill_addr = state.select_prefill(response_id, prompt_tokens)?;
+    // The router tracks the request under the string id derived from
+    // `response_id`, so `route_to_prefill` here and `route_to_decode` below
+    // operate on the same tracked entry.
+    let rid = RequestId::from_string(response_id.to_string()).unwrap_or_default();
+
+    // Pick the prefill node (tracks the request) and, when possible, the decode
+    // node too (issue #201). The router-chosen decode target rides the frame so
+    // the prefill node hands the KV cache to the router-balanced decode node
+    // instead of its own static `--decode-peers` config. A `None` decode target
+    // (no decode peer routable) leaves the prefill node on its config fallback.
+    let mut prefill = state.select_prefill(&rid, prompt_tokens, true)?;
+    let decode = state.select_decode(&rid);
 
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<ResultFrame>();
     state.pending.lock().unwrap().insert(request_id, tx);
 
-    // Build and send the prefill request frame to the chosen prefill node.
+    // Build the prefill request frame once; re-encode per send attempt so a
+    // failover retry can reuse it without requiring the transport message to be
+    // cloneable.
     let frame = PrefillRequestFrame {
         request_id,
         prompt_tokens: token_ids,
         sampling: sampling_to_serializable(&opts.sampling),
         max_tokens: opts.max_tokens as u64,
         reply_to: state.reply_to.clone(),
+        decode_target: decode.as_ref().map(|d| d.addr.clone()),
     };
-    let encoded = match frame.encode() {
-        Ok(encoded) => encoded,
-        Err(e) => {
-            state.pending.lock().unwrap().remove(&request_id);
-            return Err(anyhow::anyhow!("{e}"));
+
+    // Send to the prefill node, failing over to other healthy prefill nodes on a
+    // transport error. A send error means the node is unreachable, so mark it
+    // down in the registry (which makes `route_to_prefill` skip it), re-route any
+    // other in-flight requests it held via `handle_node_failure`, and re-select a
+    // healthy node for this request. Bounded by the prefill-node count so a fully
+    // dead pool fails the request cleanly instead of spinning. No registry / map
+    // lock is held across the `await`, mirroring the existing discipline.
+    let max_attempts = state
+        .registry
+        .nodes_with_role(NodeRole::Prefill)
+        .len()
+        .max(1);
+    let mut attempt = 0usize;
+    loop {
+        let encoded = match frame.encode() {
+            Ok(encoded) => encoded,
+            Err(e) => {
+                state.pending.lock().unwrap().remove(&request_id);
+                state.finalize_request(response_id, false);
+                return Err(anyhow::anyhow!("{e}"));
+            }
+        };
+        match state.transport.send(&prefill.addr, encoded).await {
+            Ok(()) => break,
+            Err(e) => {
+                attempt += 1;
+                if let Some(failed_id) = prefill.node_id.clone() {
+                    state
+                        .registry
+                        .set_node_status(&failed_id, NodeStatus::Unreachable);
+                    let (rerouted, failed) = state.router.handle_node_failure(&failed_id);
+                    tracing::warn!(
+                        node = %failed_id, addr = %prefill.addr, rerouted, failed,
+                        "router: prefill node send failed; marked unreachable: {e}"
+                    );
+                }
+                if attempt >= max_attempts {
+                    state.pending.lock().unwrap().remove(&request_id);
+                    state.finalize_request(response_id, false);
+                    return Err(anyhow::anyhow!(
+                        "send prefill request: no healthy prefill node after {attempt} attempt(s): {e}"
+                    ));
+                }
+                // Re-select a healthy prefill node (the failed one is now
+                // Unreachable, so the router skips it). No static fallback on
+                // retry: a doomed re-send to a dead config address is not a fix.
+                match state.select_prefill(&rid, prompt_tokens, false) {
+                    Ok(next) => prefill = next,
+                    Err(re) => {
+                        state.pending.lock().unwrap().remove(&request_id);
+                        state.finalize_request(response_id, false);
+                        return Err(anyhow::anyhow!(
+                            "send prefill request: {e}; no healthy prefill node to retry: {re}"
+                        ));
+                    }
+                }
+            }
         }
-    };
-    if let Err(e) = state.transport.send(&prefill_addr, encoded).await {
-        state.pending.lock().unwrap().remove(&request_id);
-        return Err(anyhow::anyhow!("send prefill request: {e}"));
     }
-    tracing::debug!(request_id, %prefill_addr, "router: sent prefill request frame");
+
+    // Count the dispatched request against the nodes actually used, for the
+    // `GET /router/stats` distribution view. Each lock is taken and released
+    // without crossing an await.
+    if let Some(id) = &prefill.node_id {
+        *state
+            .prefill_hits
+            .lock()
+            .unwrap()
+            .entry(id.clone())
+            .or_insert(0) += 1;
+    }
+    if let Some(d) = &decode {
+        *state
+            .decode_hits
+            .lock()
+            .unwrap()
+            .entry(d.node_id.clone())
+            .or_insert(0) += 1;
+        // Reflect the in-flight decode phase for the metrics snapshot.
+        let _ = state.router.mark_decoding(&rid, &d.node_id);
+    }
+    tracing::debug!(
+        request_id,
+        prefill = %prefill.addr,
+        decode = decode.as_ref().map(|d| d.addr.as_str()).unwrap_or("<config-fallback>"),
+        "router: sent prefill request frame"
+    );
     Ok((prompt_tokens, rx))
 }
 
@@ -948,11 +1303,14 @@ fn chat_completion_json(
 ///
 /// Exposes:
 /// - `GET /health` - liveness probe
+/// - `GET /router/stats` - per-node dispatch distribution, node health, and
+///   routing metrics (issue #201)
 /// - `POST /v1/chat/completions` - chat completions (streaming and non-streaming)
 /// - `POST /v1/completions` - text completions (streaming and non-streaming)
 pub fn create_router_app(state: Arc<RouterState>) -> Router {
     Router::new()
         .route("/health", get(router_health))
+        .route("/router/stats", get(router_stats))
         .route("/v1/chat/completions", post(router_chat_completions))
         .route("/v1/completions", post(router_completions))
         .with_state(state)

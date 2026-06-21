@@ -78,8 +78,39 @@ Networking flags:
 | Flag | Role | Purpose |
 |------|------|---------|
 | `--serving-bind <addr>` | prefill, decode, router | This node's own role-transport listener (`host:port`). |
-| `--decode-peers <addr,...>` | prefill, router | Decode node(s) a prefill node hands KV off to; routers also use these addresses for decode continuation routing. |
-| `--prefill-peers <addr,...>` | decode, router | Prefill node(s) accepted by a decode node and selected by a router. |
+| `--decode-peers <addr,...>` | prefill, router | On a router, the decode pool it balances; on a prefill node, the static fallback used only when the router does not pick a decode target for a request. |
+| `--prefill-peers <addr,...>` | decode, router | On a router, the prefill pool it balances; on a decode node, the prefill node(s) it accepts handoffs from. |
+
+### Multi-node routing, load balancing, and failover
+
+With more than one prefill or decode node, the router balances both pools
+(issue #201). For each request it picks a prefill node and, independently, a
+decode node, both round-robin across the nodes the registry currently considers
+online (the router has no live per-node load telemetry, so round-robin is the
+strategy that actually spreads load). The chosen decode node travels to the
+prefill node in the request frame's `decode_target` field, so the prefill node
+hands the KV cache to the router-balanced decode node rather than to its own
+`--decode-peers` config. The field is optional on the wire: a frame without it
+(an older router) leaves the prefill node on its config fallback, and an older
+prefill node ignores it and uses config, so mixed-version pools keep working.
+
+The router tracks node health and fails over without wedging:
+
+- A transport error when sending a request to a prefill node marks that node
+  unreachable, re-routes its in-flight requests, and retries the request on a
+  healthy node. When no prefill node is left, the request fails cleanly with an
+  error rather than hanging.
+- A background health monitor TCP-probes every peer's serving address on an
+  interval. A node that stops accepting connections is marked unreachable (so
+  routing skips it, including a dead decode node the router never sends to
+  directly), and a node that starts accepting again is restored to online.
+- Admission control runs before every dispatch: when the prefill queue is full
+  or no prefill node is available, the router returns HTTP 503 instead of
+  attempting a dispatch that cannot succeed.
+
+`GET /router/stats` reports the per-node dispatch counts for both pools, the
+registered nodes with their current health status, and the routing-metrics
+snapshot, so an operator can confirm the spread and see which nodes are down.
 
 The handoff transfers the paged block contents (not just metadata) over the
 transport, so the decode node reconstructs the exact KV the prefill node built;

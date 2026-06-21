@@ -230,6 +230,9 @@ async fn disaggregated_two_process_handoff_matches_single_node() {
         sampling: sampling_to_serializable(&SamplingConfig::greedy()),
         max_tokens: MAX_TOKENS,
         reply_to: reply_to.clone(),
+        // Single configured decode peer: let the prefill node use its
+        // `--decode-peers` fallback rather than a router-chosen target.
+        decode_target: None,
     };
     client
         .send(

@@ -787,3 +787,224 @@ async fn disaggregated_router_completions_match_single_node() {
     );
     eprintln!("OK: router /v1/completions matches single-node (non-stream + stream).");
 }
+
+// ── Multi-node routing, balancing, and failover (issue #201) ─────────────
+
+/// Spawn a `--node-role decode` server wired to its own serving address.
+fn spawn_decode(model_arg: &str, http: &str, serving_addr: &str) -> ChildGuard {
+    spawn_role_server(&[
+        "-m",
+        model_arg,
+        "--host",
+        "127.0.0.1",
+        "--port",
+        http,
+        "--parallel",
+        "2",
+        "--max-batch-size",
+        "2",
+        "--decode-storage-backend",
+        "paged",
+        "--node-role",
+        "decode",
+        "--serving-bind",
+        serving_addr,
+        "--no-warmup",
+    ])
+}
+
+/// Spawn a `--node-role prefill` server wired to its serving address and a
+/// single configured decode peer (the router overrides the decode target per
+/// request via `decode_target`; the config peer is only the fallback).
+fn spawn_prefill(model_arg: &str, http: &str, serving_addr: &str, decode_peer: &str) -> ChildGuard {
+    spawn_role_server(&[
+        "-m",
+        model_arg,
+        "--host",
+        "127.0.0.1",
+        "--port",
+        http,
+        "--parallel",
+        "2",
+        "--max-batch-size",
+        "2",
+        "--decode-storage-backend",
+        "paged",
+        "--node-role",
+        "prefill",
+        "--serving-bind",
+        serving_addr,
+        "--decode-peers",
+        decode_peer,
+        "--no-warmup",
+    ])
+}
+
+/// POST a non-streaming completion to the router and return `(status, text)`.
+async fn post_completion(
+    client: &reqwest::Client,
+    url: &str,
+    model: &str,
+    prompt: &str,
+) -> (reqwest::StatusCode, String) {
+    let resp = client
+        .post(url)
+        .json(&serde_json::json!({
+            "model": model, "prompt": prompt, "max_tokens": 8, "temperature": 0.0
+        }))
+        .send()
+        .await
+        .expect("POST /v1/completions");
+    let status = resp.status();
+    let text = if status.is_success() {
+        resp.json::<serde_json::Value>()
+            .await
+            .ok()
+            .and_then(|v| v["choices"][0]["text"].as_str().map(str::to_string))
+            .unwrap_or_default()
+    } else {
+        String::new()
+    };
+    (status, text)
+}
+
+/// Issue #201, AC1 + AC2: with two prefill AND two decode nodes the router
+/// spreads requests across both pools (asserted via `GET /router/stats`
+/// per-node hit counters), and killing one prefill node does not wedge the
+/// router: subsequent requests still succeed by routing to the survivor.
+///
+/// Five processes: 2 decode + 2 prefill + 1 router. qwen3-0.6b-4bit is tiny, but
+/// this still loads four model copies, so it is `#[ignore]` and run explicitly
+/// by the gate, not in the default unit run.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "spawns five real mlxcel-server processes (2 prefill + 2 decode + router); run with --ignored"]
+async fn disaggregated_router_balances_and_survives_node_failure() {
+    let model_dir = repo_model_dir(QWEN3_DIR);
+    if !model_dir.exists() {
+        eprintln!("Skipping {QWEN3_DIR}: model directory not found");
+        return;
+    }
+    let binary = repo_binary_path("mlxcel-server");
+    if !binary.exists() {
+        eprintln!("Skipping: mlxcel-server binary not found");
+        return;
+    }
+    let model_arg = model_dir.to_string_lossy().to_string();
+
+    // Ports: [prefill0_http, prefill1_http, decode0_http, decode1_http,
+    //         router_http, prefill0_srv, prefill1_srv, decode0_srv,
+    //         decode1_srv, router_srv].
+    let ports = reserve_ports(10);
+    let prefill0_http = ports[0].to_string();
+    let prefill1_http = ports[1].to_string();
+    let decode0_http = ports[2].to_string();
+    let decode1_http = ports[3].to_string();
+    let router_http = ports[4].to_string();
+    let prefill0_srv = format!("127.0.0.1:{}", ports[5]);
+    let prefill1_srv = format!("127.0.0.1:{}", ports[6]);
+    let decode0_srv = format!("127.0.0.1:{}", ports[7]);
+    let decode1_srv = format!("127.0.0.1:{}", ports[8]);
+    let router_srv = format!("127.0.0.1:{}", ports[9]);
+
+    // Decode nodes first so they are ready before prefill hands off.
+    let _decode0 = spawn_decode(&model_arg, &decode0_http, &decode0_srv);
+    let _decode1 = spawn_decode(&model_arg, &decode1_http, &decode1_srv);
+    // Each prefill node configures decode0 as its static fallback; the router
+    // overrides the decode target per request, balancing both decode nodes.
+    let mut prefill0 = Some(spawn_prefill(
+        &model_arg,
+        &prefill0_http,
+        &prefill0_srv,
+        &decode0_srv,
+    ));
+    let _prefill1 = spawn_prefill(&model_arg, &prefill1_http, &prefill1_srv, &decode0_srv);
+    let _router = spawn_role_server(&[
+        "-m",
+        &model_arg,
+        "--host",
+        "127.0.0.1",
+        "--port",
+        &router_http,
+        "--node-role",
+        "router",
+        "--serving-bind",
+        &router_srv,
+        "--prefill-peers",
+        &format!("{prefill0_srv},{prefill1_srv}"),
+        "--decode-peers",
+        &format!("{decode0_srv},{decode1_srv}"),
+        "--no-warmup",
+    ]);
+
+    let deadline = Instant::now() + Duration::from_secs(240);
+    for addr in [&decode0_srv, &decode1_srv, &prefill0_srv, &prefill1_srv] {
+        assert!(
+            wait_for_tcp(addr, deadline).await,
+            "serving transport never came up at {addr}"
+        );
+    }
+    let health_url = format!("http://127.0.0.1:{router_http}/health");
+    assert!(
+        wait_for_http_health(&health_url, deadline).await,
+        "router HTTP /health never returned 200"
+    );
+
+    let client = reqwest::Client::new();
+    let completions_url = format!("http://127.0.0.1:{router_http}/v1/completions");
+    let stats_url = format!("http://127.0.0.1:{router_http}/router/stats");
+    let prompt = "The capital of France is";
+
+    // ---- AC1: distribution across both pools ----
+    for _ in 0..8 {
+        let (status, text) = post_completion(&client, &completions_url, "qwen3", prompt).await;
+        assert!(
+            status.is_success(),
+            "pre-failure request failed: HTTP {status}"
+        );
+        assert!(!text.is_empty(), "pre-failure request returned empty text");
+    }
+    let stats: serde_json::Value = client
+        .get(&stats_url)
+        .send()
+        .await
+        .expect("GET /router/stats")
+        .json()
+        .await
+        .expect("parse /router/stats");
+    eprintln!("router stats before failure: {stats}");
+    let prefill_hits = stats["prefill_hits"]
+        .as_object()
+        .expect("prefill_hits object");
+    let decode_hits = stats["decode_hits"]
+        .as_object()
+        .expect("decode_hits object");
+    let nonzero = |m: &serde_json::Map<String, serde_json::Value>| {
+        m.values().filter(|v| v.as_u64().unwrap_or(0) > 0).count()
+    };
+    assert_eq!(
+        nonzero(prefill_hits),
+        2,
+        "expected both prefill nodes to receive requests, got {prefill_hits:?}"
+    );
+    assert_eq!(
+        nonzero(decode_hits),
+        2,
+        "expected both decode nodes to receive requests, got {decode_hits:?}"
+    );
+
+    // ---- AC2: kill one prefill node; subsequent requests still succeed ----
+    drop(prefill0.take()); // ChildGuard::drop kills the process.
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    for i in 0..6 {
+        let (status, text) = post_completion(&client, &completions_url, "qwen3", prompt).await;
+        assert!(
+            status.is_success(),
+            "post-failure request {i} failed: HTTP {status} (router wedged after node death)"
+        );
+        assert!(
+            !text.is_empty(),
+            "post-failure request {i} returned empty text"
+        );
+    }
+    eprintln!("OK: router balanced both pools and survived a prefill-node failure.");
+}

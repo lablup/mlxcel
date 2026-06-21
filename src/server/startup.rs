@@ -1658,6 +1658,7 @@ pub async fn start_server(mut startup: ServerStartupConfig) -> Result<()> {
             tokenizer_arc,
         )?);
         crate::server::router_front::spawn_result_demux(state.clone());
+        crate::server::router_front::spawn_health_monitor(state.clone());
         let app = crate::server::router_front::create_router_app(state);
         tracing::info!(
             host = %startup.host,

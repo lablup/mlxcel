@@ -298,7 +298,9 @@ impl ServingCoordinator {
 
             // Return the prefill node's first token to the client. When prefill
             // produced no handoff frame (immediate EOS), this first-token result
-            // is the entire stream, so mark it done.
+            // is the entire stream, so mark it done. A send failure here means
+            // the router/client went away; log and move to the next request
+            // rather than tearing down the worker loop that serves everyone.
             let first_result = ResultFrame {
                 request_id: request.request_id,
                 phase: ResultPhase::FirstToken,
@@ -307,29 +309,83 @@ impl ServingCoordinator {
                 done: done || frame.is_none(),
                 error,
             };
-            self.transport
+            if let Err(e) = self
+                .transport
                 .send(&request.reply_to, first_result.encode()?)
                 .await
-                .context("prefill role: return the first token to reply_to")?;
+            {
+                tracing::warn!(
+                    request_id = request.request_id,
+                    reply_to = %request.reply_to,
+                    "prefill role: failed to return the first token: {e}; dropping request"
+                );
+                continue;
+            }
 
-            // Forward the handoff to the decode peer: the coordination metadata
-            // first, then the KV frame (the decode loop reads them in that order).
+            // Forward the handoff to the decode node: the coordination metadata
+            // first, then the KV frame (the decode loop reads them in that
+            // order). The router picks the decode node and ships it in
+            // `decode_target` (issue #201); a frame without it (an older router)
+            // falls back to this node's statically configured `--decode-peers`
+            // peer. A handoff failure (e.g. a dead decode node) fails only this
+            // one request: the prefill loop logs it, tells the client so it does
+            // not wait for a continuation that never comes, and keeps serving the
+            // rest. The router's health monitor then marks the dead decode node
+            // down so later requests route elsewhere.
             if let Some(bytes) = frame {
+                let decode_peer = request
+                    .decode_target
+                    .as_deref()
+                    .filter(|addr| !addr.is_empty())
+                    .unwrap_or_else(|| self.peer())
+                    .to_string();
                 let meta = DecodeMetaFrame {
                     request_id: request.request_id,
                     max_tokens: request.max_tokens,
                     sampling: request.sampling,
-                    reply_to: request.reply_to,
+                    reply_to: request.reply_to.clone(),
                 };
-                self.transport
-                    .send(self.peer(), meta.encode()?)
-                    .await
-                    .context("prefill role: forward decode metadata to the decode peer")?;
-                self.send_handoff(&bytes)
-                    .await
-                    .context("prefill role: ship the KV handoff to the decode peer")?;
+                if let Err(e) = self.forward_handoff_to(&decode_peer, &meta, &bytes).await {
+                    tracing::warn!(
+                        request_id = request.request_id,
+                        decode_peer = %decode_peer,
+                        "prefill role: decode handoff failed: {e:#}; failing the request"
+                    );
+                    let err_result = ResultFrame {
+                        request_id: request.request_id,
+                        phase: ResultPhase::Continuation,
+                        tokens: Vec::new(),
+                        start_sequence: 0,
+                        done: true,
+                        error: Some(format!("decode handoff to {decode_peer} failed: {e}")),
+                    };
+                    let _ = self
+                        .transport
+                        .send(&request.reply_to, err_result.encode()?)
+                        .await;
+                }
             }
         }
+        Ok(())
+    }
+
+    /// Forward a request's decode handoff to a specific decode node: the
+    /// [`DecodeMetaFrame`] first, then the KV frame (the decode loop reads them
+    /// in that order). `decode_peer` is the router-chosen target (issue #201) or
+    /// this node's configured peer when the router did not specify one.
+    async fn forward_handoff_to(
+        &self,
+        decode_peer: &str,
+        meta: &DecodeMetaFrame,
+        bytes: &[u8],
+    ) -> Result<()> {
+        self.transport
+            .send(decode_peer, meta.encode()?)
+            .await
+            .context("prefill role: forward decode metadata to the decode node")?;
+        send_handoff_payload(&*self.transport, decode_peer, bytes)
+            .await
+            .context("prefill role: ship the KV handoff to the decode node")?;
         Ok(())
     }
 

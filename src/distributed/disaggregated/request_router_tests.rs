@@ -688,6 +688,142 @@ fn handle_node_failure_distributes_rerouted_requests() {
     );
 }
 
+// ── Router-driven decode selection (issue #201) ─────────────────────
+
+/// With round-robin decode routing (the strategy the router front uses), the
+/// router spreads decode selections across the decode pool instead of always
+/// picking the first node, so a router-chosen `decode_target` balances the
+/// decode pool just like the prefill pool.
+#[test]
+fn route_to_decode_round_robin_distributes_across_decode_nodes() {
+    let (registry, metrics, bp) = test_cluster();
+    let config = RouterConfig {
+        prefill_strategy: DisaggRoutingStrategy::RoundRobin,
+        decode_strategy: DisaggRoutingStrategy::RoundRobin,
+        ..Default::default()
+    };
+    let router = RequestRouter::new(config, registry, metrics, bp);
+
+    let mut counts: HashMap<String, usize> = HashMap::new();
+    for _ in 0..6 {
+        let req_id = RequestId::new();
+        router.route_to_prefill(req_id.clone(), 100).unwrap();
+        let decode = router.route_to_decode(&req_id).unwrap();
+        *counts.entry(decode).or_insert(0) += 1;
+    }
+
+    assert_eq!(
+        counts.len(),
+        2,
+        "expected both decode nodes used, got {counts:?}"
+    );
+    assert_eq!(counts.get("decode-0"), Some(&3));
+    assert_eq!(counts.get("decode-1"), Some(&3));
+}
+
+/// A prefill node marked `Unreachable` in the registry is skipped by
+/// `route_to_prefill`: all requests go to the surviving node. This is the
+/// registry-status mechanism the router front's transport-error path and health
+/// monitor drive.
+#[test]
+fn unreachable_prefill_node_is_skipped() {
+    let (registry, metrics, bp) = test_cluster();
+    registry.set_node_status("prefill-0", NodeStatus::Unreachable);
+    let config = RouterConfig {
+        prefill_strategy: DisaggRoutingStrategy::RoundRobin,
+        ..Default::default()
+    };
+    let router = RequestRouter::new(config, registry, metrics, bp);
+
+    for _ in 0..4 {
+        let req_id = RequestId::new();
+        let node = router.route_to_prefill(req_id, 100).unwrap();
+        assert_eq!(node, "prefill-1", "must skip the unreachable prefill node");
+    }
+}
+
+/// A decode node marked `Unreachable` is skipped by `route_to_decode`.
+#[test]
+fn unreachable_decode_node_is_skipped() {
+    let (registry, metrics, bp) = test_cluster();
+    registry.set_node_status("decode-0", NodeStatus::Unreachable);
+    let config = RouterConfig {
+        decode_strategy: DisaggRoutingStrategy::RoundRobin,
+        ..Default::default()
+    };
+    let router = RequestRouter::new(config, registry, metrics, bp);
+
+    for _ in 0..4 {
+        let req_id = RequestId::new();
+        router.route_to_prefill(req_id.clone(), 100).unwrap();
+        let decode = router.route_to_decode(&req_id).unwrap();
+        assert_eq!(decode, "decode-1", "must skip the unreachable decode node");
+    }
+}
+
+/// Admission control returns `Queue` when every prefill node is unreachable, so
+/// the router front rejects with HTTP 503 instead of attempting a doomed
+/// dispatch (issue #201). With at least one node available it returns `Accept`.
+#[test]
+fn apply_backpressure_queues_when_all_prefill_unreachable() {
+    let (registry, metrics, bp) = test_cluster();
+    let router = RequestRouter::new(RouterConfig::default(), registry.clone(), metrics, bp);
+
+    assert_eq!(router.apply_backpressure(), BackpressureAction::Accept);
+
+    registry.set_node_status("prefill-0", NodeStatus::Unreachable);
+    registry.set_node_status("prefill-1", NodeStatus::Unreachable);
+    assert_eq!(
+        router.apply_backpressure(),
+        BackpressureAction::Queue,
+        "all prefill nodes down must not be Accept"
+    );
+}
+
+/// The router-front failover sequence: send to a prefill node fails, so the
+/// node is marked unreachable and `handle_node_failure` re-routes its in-flight
+/// requests; a subsequent `route_to_prefill` then lands on the survivor. This
+/// is the unit-level mirror of `start_handoff`'s retry loop.
+#[test]
+fn failover_reroutes_to_survivor_after_marking_unreachable() {
+    let (registry, metrics, bp) = test_cluster();
+    let config = RouterConfig {
+        prefill_strategy: DisaggRoutingStrategy::RoundRobin,
+        ..Default::default()
+    };
+    let router = RequestRouter::new(config, registry.clone(), metrics, bp);
+
+    // First request lands on one of the two nodes (registry iteration order is
+    // not deterministic, so capture whichever it was rather than assuming).
+    let first = RequestId::new();
+    let failed_node = router.route_to_prefill(first.clone(), 100).unwrap();
+    let survivor = if failed_node == "prefill-0" {
+        "prefill-1"
+    } else {
+        "prefill-0"
+    };
+
+    // Simulate the send to the chosen node failing: mark it down and re-route.
+    registry.set_node_status(&failed_node, NodeStatus::Unreachable);
+    let (rerouted, failed) = router.handle_node_failure(&failed_node);
+    assert_eq!(
+        failed, 0,
+        "a healthy alternative exists, nothing should fail"
+    );
+    assert!(rerouted >= 1, "the in-flight request should be re-routed");
+
+    // The in-flight request must no longer point at the dead node.
+    let tracked = router.get_tracked_request(&first).unwrap();
+    assert_ne!(tracked.prefill_node.as_deref(), Some(failed_node.as_str()));
+
+    // Every fresh request now routes only to the survivor.
+    for _ in 0..3 {
+        let next = RequestId::new();
+        let node = router.route_to_prefill(next, 100).unwrap();
+        assert_eq!(node, survivor, "must route to the surviving node");
+    }
+}
+
 // ── Auto-purge on capacity ──────────────────────────────────────────
 
 #[test]

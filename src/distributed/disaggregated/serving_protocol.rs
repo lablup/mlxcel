@@ -80,6 +80,19 @@ pub struct PrefillRequestFrame {
     pub max_tokens: u64,
     /// Listener address (`host:port`) the nodes return [`ResultFrame`]s to.
     pub reply_to: String,
+    /// Router-chosen decode node (`host:port`) this prefill should hand the KV
+    /// cache off to (issue #201).
+    ///
+    /// When `Some`, the prefill node forwards the [`DecodeMetaFrame`] and KV
+    /// handoff to this address so the router balances the decode pool too.
+    /// When `None` (a frame from a router predating this field, decoded via
+    /// `serde(default)`), the prefill node falls back to its own statically
+    /// configured `--decode-peers` target. The optional encoding keeps an older
+    /// peer working: an old router omits the field and a new prefill falls back
+    /// to config; a new router populates it and an old prefill ignores the
+    /// unknown field and uses config.
+    #[serde(default)]
+    pub decode_target: Option<String>,
 }
 
 /// The per-request coordination metadata a prefill node forwards to a decode
