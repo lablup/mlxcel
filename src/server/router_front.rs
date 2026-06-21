@@ -457,6 +457,86 @@ async fn router_health() -> &'static str {
     "ok"
 }
 
+/// Environment variable that opts the client-facing `GET /router/stats` into the
+/// verbose (unredacted) view, including each node's raw `host:port` address
+/// (issue #389).
+const ROUTER_STATS_VERBOSE_ENV: &str = "MLXCEL_ROUTER_STATS_VERBOSE";
+
+/// A registered node's identity for the `/router/stats` response. Carries the
+/// stable router-assigned id and the raw address separately so the response
+/// builder can redact the address on the public surface (issue #389).
+struct StatsNode {
+    id: String,
+    role: String,
+    status: String,
+    address: String,
+}
+
+/// Whether the verbose (unredacted) `/router/stats` view is enabled, parsed from
+/// the [`ROUTER_STATS_VERBOSE_ENV`] value (pure, for unit testing).
+///
+/// Truthy values are `1`, `true`, `yes`, `on` (case-insensitive, trimmed); any
+/// other value, an empty string, or an unset variable keeps the redacted
+/// default.
+fn router_stats_verbose_from(raw: Option<&str>) -> bool {
+    match raw {
+        Some(v) => {
+            let v = v.trim();
+            v.eq_ignore_ascii_case("1")
+                || v.eq_ignore_ascii_case("true")
+                || v.eq_ignore_ascii_case("yes")
+                || v.eq_ignore_ascii_case("on")
+        }
+        None => false,
+    }
+}
+
+/// Read [`ROUTER_STATS_VERBOSE_ENV`] from the process environment.
+fn router_stats_verbose() -> bool {
+    router_stats_verbose_from(std::env::var(ROUTER_STATS_VERBOSE_ENV).ok().as_deref())
+}
+
+/// Build the `/router/stats` JSON body, redacting raw node addresses unless
+/// `verbose` is set (issue #389).
+///
+/// The redacted default reports each node's stable router-assigned id, role, and
+/// health, plus the per-node dispatch counts and the [`RouterMetrics`] snapshot,
+/// but never the raw `host:port`. That is enough for an operator (and the
+/// multi-node E2E) to confirm the load spread and that a failed node is marked
+/// unreachable, without disclosing the internal cluster topology to any client
+/// that can reach the inference port. The `verbose` view (opt-in via
+/// [`ROUTER_STATS_VERBOSE_ENV`]) adds the raw address back for trusted-segment
+/// debugging. `addresses_redacted` tells the caller which view it received.
+fn router_stats_body(
+    nodes: &[StatsNode],
+    prefill_hits: &HashMap<String, u64>,
+    decode_hits: &HashMap<String, u64>,
+    metrics: &crate::distributed::disaggregated::RouterMetrics,
+    verbose: bool,
+) -> serde_json::Value {
+    let nodes_json: Vec<serde_json::Value> = nodes
+        .iter()
+        .map(|n| {
+            let mut obj = serde_json::json!({
+                "id": n.id,
+                "role": n.role,
+                "status": n.status,
+            });
+            if verbose {
+                obj["address"] = serde_json::Value::String(n.address.clone());
+            }
+            obj
+        })
+        .collect();
+    serde_json::json!({
+        "metrics": metrics,
+        "prefill_hits": prefill_hits,
+        "decode_hits": decode_hits,
+        "nodes": nodes_json,
+        "addresses_redacted": !verbose,
+    })
+}
+
 /// GET /router/stats
 ///
 /// Report the router's load distribution and routing metrics (issue #201): the
@@ -464,28 +544,36 @@ async fn router_health() -> &'static str {
 /// nodes with their current health status, and the [`RouterMetrics`] snapshot.
 /// An operator (and the multi-node E2E) uses this to confirm requests spread
 /// across the pools and that a failed node is marked unreachable.
+///
+/// This endpoint is mounted on the same client-facing axum app as
+/// `/v1/chat/completions`, so by default it redacts each node's raw `host:port`
+/// to avoid disclosing the internal cluster topology to an unauthenticated
+/// client that can reach the inference port (issue #389). The node ids
+/// (`prefill-<i>` / `decode-<i>`) and the dispatch counts are stable opaque
+/// labels, not addresses, so they stay. Set [`ROUTER_STATS_VERBOSE_ENV`] to opt
+/// a trusted-segment deployment back into the full address view.
 async fn router_stats(State(state): State<Arc<RouterState>>) -> Json<serde_json::Value> {
     let prefill_hits = state.prefill_hits.lock().unwrap().clone();
     let decode_hits = state.decode_hits.lock().unwrap().clone();
-    let nodes: Vec<serde_json::Value> = state
+    let nodes: Vec<StatsNode> = state
         .registry
         .all_nodes()
         .into_iter()
-        .map(|n| {
-            serde_json::json!({
-                "id": n.config.id,
-                "role": n.config.role.to_string(),
-                "address": n.config.address.to_string(),
-                "status": n.status.to_string(),
-            })
+        .map(|n| StatsNode {
+            id: n.config.id,
+            role: n.config.role.to_string(),
+            status: n.status.to_string(),
+            address: n.config.address.to_string(),
         })
         .collect();
-    Json(serde_json::json!({
-        "metrics": state.router.metrics(),
-        "prefill_hits": prefill_hits,
-        "decode_hits": decode_hits,
-        "nodes": nodes,
-    }))
+    let verbose = router_stats_verbose();
+    Json(router_stats_body(
+        &nodes,
+        &prefill_hits,
+        &decode_hits,
+        &state.router.metrics(),
+        verbose,
+    ))
 }
 
 /// POST /v1/chat/completions
@@ -1408,7 +1496,9 @@ fn chat_completion_json(
 /// Exposes:
 /// - `GET /health` - liveness probe
 /// - `GET /router/stats` - per-node dispatch distribution, node health, and
-///   routing metrics (issue #201)
+///   routing metrics (issue #201); raw node addresses are redacted on this
+///   client-facing surface unless `MLXCEL_ROUTER_STATS_VERBOSE` is set
+///   (issue #389)
 /// - `POST /v1/chat/completions` - chat completions (streaming and non-streaming)
 /// - `POST /v1/completions` - text completions (streaming and non-streaming)
 pub fn create_router_app(state: Arc<RouterState>) -> Router {

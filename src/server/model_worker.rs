@@ -572,9 +572,13 @@ fn run_disaggregated_serving_role(
             };
             tracing::info!(
                 bind = %bind_addr, decode_peer = %decode_peer,
+                decode_allowlist = decode_peers.len(),
                 "Starting the disaggregated prefill serving role"
             );
-            serve_prefill_role_networked_blocking(bind, decode_peer.to_string(), scheduler, None)
+            // Pass the full configured decode pool: the first entry is the
+            // static handoff fallback, the whole set is the allowlist a
+            // router-chosen `decode_target` is validated against (issue #389).
+            serve_prefill_role_networked_blocking(bind, decode_peers.to_vec(), scheduler, None)
         }
         ServingMode::DecodeOnly => {
             tracing::info!(bind = %bind_addr, "Starting the disaggregated decode serving role");

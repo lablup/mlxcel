@@ -108,3 +108,98 @@ fn authoritative_count_fixes_finish_reason_flip() {
         "frame-count fallback would have reported stop"
     );
 }
+
+// ── /router/stats topology-disclosure redaction (issue #389) ────────────────
+
+/// Build a small `StatsNode` fixture for the redaction tests.
+fn stats_node(id: &str, role: &str, status: &str, address: &str) -> StatsNode {
+    StatsNode {
+        id: id.to_string(),
+        role: role.to_string(),
+        status: status.to_string(),
+        address: address.to_string(),
+    }
+}
+
+/// The default (redacted) `/router/stats` body omits every node's raw address
+/// but keeps the stable id, role, health, and dispatch counts, so an operator
+/// can still read the load spread without learning the internal topology.
+#[test]
+fn router_stats_redacts_addresses_by_default() {
+    let nodes = vec![
+        stats_node("prefill-0", "prefill", "online", "10.0.0.1:9001"),
+        stats_node("decode-0", "decode", "online", "10.0.0.2:9002"),
+    ];
+    let mut prefill_hits = HashMap::new();
+    prefill_hits.insert("prefill-0".to_string(), 3u64);
+    let decode_hits = HashMap::new();
+    let metrics = crate::distributed::disaggregated::RouterMetrics::default();
+
+    let body = router_stats_body(&nodes, &prefill_hits, &decode_hits, &metrics, false);
+
+    assert_eq!(body["addresses_redacted"], serde_json::json!(true));
+    let nodes_json = body["nodes"].as_array().expect("nodes array");
+    assert_eq!(nodes_json.len(), 2);
+    for node in nodes_json {
+        assert!(
+            node.get("address").is_none(),
+            "redacted view must not carry a raw address: {node}"
+        );
+        assert!(node.get("id").is_some(), "id is retained");
+        assert!(node.get("status").is_some(), "health is retained");
+    }
+    // The serialized body must contain neither raw address anywhere.
+    let serialized = serde_json::to_string(&body).expect("serialize");
+    assert!(
+        !serialized.contains("10.0.0.1") && !serialized.contains("10.0.0.2"),
+        "no raw address may leak into the redacted body: {serialized}"
+    );
+    // Dispatch counts (keyed by stable node id) are still reported.
+    assert_eq!(body["prefill_hits"]["prefill-0"], serde_json::json!(3));
+}
+
+/// The opt-in verbose view (env-gated) restores each node's raw address for
+/// trusted-segment debugging.
+#[test]
+fn router_stats_verbose_includes_addresses() {
+    let nodes = vec![stats_node(
+        "decode-1",
+        "decode",
+        "unreachable",
+        "10.0.0.3:9003",
+    )];
+    let metrics = crate::distributed::disaggregated::RouterMetrics::default();
+
+    let body = router_stats_body(&nodes, &HashMap::new(), &HashMap::new(), &metrics, true);
+
+    assert_eq!(body["addresses_redacted"], serde_json::json!(false));
+    assert_eq!(
+        body["nodes"][0]["address"],
+        serde_json::json!("10.0.0.3:9003")
+    );
+}
+
+/// Only the documented truthy spellings enable the verbose view; anything else
+/// (including unset and empty) keeps the redacted default.
+#[test]
+fn router_stats_verbose_env_parsing() {
+    for truthy in ["1", "true", "TRUE", "Yes", "on", " on "] {
+        assert!(
+            router_stats_verbose_from(Some(truthy)),
+            "{truthy:?} should enable verbose"
+        );
+    }
+    for falsy in [
+        None,
+        Some(""),
+        Some("0"),
+        Some("false"),
+        Some("off"),
+        Some("nope"),
+    ] {
+        assert!(
+            !router_stats_verbose_from(falsy),
+            "{falsy:?} should keep redaction"
+        );
+    }
+}
