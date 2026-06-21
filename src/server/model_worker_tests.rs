@@ -19,11 +19,12 @@ use image::{DynamicImage, ImageBuffer, ImageFormat, Rgb};
 use super::{
     StreamingDecodeState, build_generation_result, decode_request_images,
     decode_request_images_with_limits, merge_config_stop_tokens, parse_byte_fallback_token,
-    run_core_thread_or_abort, safe_emit_boundary,
+    safe_emit_boundary,
 };
 use crate::SamplingConfig;
 use crate::server::media::ImageInputLimits;
 use crate::tokenizer::MlxcelTokenizer;
+use crate::worker_failfast::run_core_thread_or_abort;
 
 fn encode_png_bytes() -> Vec<u8> {
     let image = DynamicImage::ImageRgb8(ImageBuffer::from_pixel(1, 1, Rgb([0, 0, 0])));

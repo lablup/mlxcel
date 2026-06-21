@@ -32,6 +32,7 @@ use crate::distributed::pipeline::activation_transfer::{
 use crate::distributed::request_tracker::RequestId;
 use crate::distributed::transport_factory::bind_transport;
 use crate::distributed::{Transport, TransportBackend, TransportMessage};
+use crate::worker_failfast::run_core_thread_or_abort;
 
 use super::stage_executor::{LoadedStageExecutor, StageExecutionInput, StageExecutionOutput};
 use super::wire_tensor::{deserialize_wire_tensor, sequence_length, serialize_mlx_array};
@@ -595,19 +596,30 @@ impl RemoteStageServiceHandle {
         let (startup_tx, startup_rx) = std::sync::mpsc::channel::<Result<String>>();
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         let join_handle = std::thread::spawn(move || -> Result<()> {
-            let runtime = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .context("failed to build remote stage runtime")?;
-            runtime.block_on(async move {
-                let transport =
-                    bind_transport(config.transport_backend, &config.bind_address).await?;
-                let local_addr = transport.local_addr()?;
-                startup_tx
-                    .send(Ok(local_addr))
-                    .map_err(|_| anyhow!("failed to publish remote stage local address"))?;
-                let service = RemoteStageService::load(config, transport).await?;
-                service.run(shutdown_rx).await
+            // Re-impose fail-fast on this core inference thread under release
+            // `panic = "unwind"` (issue #375): `RemoteStageService::run` executes
+            // core model forward passes for this pipeline stage, so an uncaught
+            // panic must abort the stage process for a supervised restart. Without
+            // this, a panic would unwind out of the thread and leave
+            // `serve_remote_pipeline_stage` (src/server/startup.rs) parked on
+            // `ctrl_c` with a zombie stage that a supervisor will not restart. A
+            // normal `Err` return is the contained path: the wrapper forwards it
+            // to the join side unchanged, so only a panic aborts.
+            run_core_thread_or_abort("remote-pipeline-stage", move || -> Result<()> {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .context("failed to build remote stage runtime")?;
+                runtime.block_on(async move {
+                    let transport =
+                        bind_transport(config.transport_backend, &config.bind_address).await?;
+                    let local_addr = transport.local_addr()?;
+                    startup_tx
+                        .send(Ok(local_addr))
+                        .map_err(|_| anyhow!("failed to publish remote stage local address"))?;
+                    let service = RemoteStageService::load(config, transport).await?;
+                    service.run(shutdown_rx).await
+                })
             })
         });
         let local_addr = startup_rx

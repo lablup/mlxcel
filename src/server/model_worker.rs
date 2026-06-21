@@ -39,6 +39,7 @@ use crate::vision::merge::InputEmbeddings;
 use crate::vlm_runtime::{
     prepare_and_compute_vlm_embeddings, prepare_and_compute_vlm_embeddings_with_cache,
 };
+use crate::worker_failfast::run_core_thread_or_abort;
 
 use super::{GenerationResult, ModelRequest};
 
@@ -173,35 +174,6 @@ pub(crate) struct WorkerSchedulerConfig {
     /// serve-level `--diffusion-threshold` for the confidence-threshold
     /// sampler (diffusion models only). Ignored by non-diffusion models.
     pub diffusion_threshold: f32,
-}
-
-/// Run a core inference worker thread body, converting an uncaught panic into a
-/// clean process abort.
-///
-/// The release profile uses `panic = "unwind"` (issue #375) so the deliberate
-/// `catch_unwind` request/stage-isolation backstops work in production: a
-/// synthesis panic on the audio worker becomes a per-request error, not a
-/// process abort. That same unwind policy would let a panic on a core
-/// generation thread unwind out of the worker loop and silently kill the
-/// thread, leaving the server process alive but unable to generate. A panic in
-/// a core worker means an invariant is broken, so we re-impose fail-fast here:
-/// log without request content, then `abort` so a supervisor restarts into
-/// fresh state.
-///
-/// This is intentionally narrow. Request and stage boundaries that deliberately
-/// CONTAIN panics (the audio worker `run_guarded`, the pipeline stage isolation)
-/// keep their own `catch_unwind` and are NOT wrapped, and there is deliberately
-/// no global abort panic hook, which would run before unwinding and defeat
-/// those backstops. `AssertUnwindSafe` is correct precisely because we abort
-/// (never continue) on a caught panic, so no torn state is ever observed.
-fn run_core_thread_or_abort<F: FnOnce()>(label: &str, body: F) {
-    if std::panic::catch_unwind(std::panic::AssertUnwindSafe(body)).is_err() {
-        tracing::error!(
-            target: "mlxcel::worker",
-            "core worker thread '{label}' panicked; aborting to preserve fail-fast"
-        );
-        std::process::abort();
-    }
 }
 
 pub(crate) fn spawn_model_worker_with_batch_config(

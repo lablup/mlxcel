@@ -37,6 +37,11 @@ mod loaded_model_capabilities;
 mod loading;
 mod model_metadata;
 
+// Fail-fast wrapper shared by every core inference worker thread (issue #375).
+// `pub(crate)` so both `server::model_provider::model_worker` and
+// `distributed::pipeline::remote_service` can name it.
+pub(crate) mod worker_failfast;
+
 // Crate-wide helpers for `#[cfg(test)]` paths. Provides the single shared
 // `ENV_LOCK` that every env-mutating test in this crate must acquire; see `test_support::env_lock` for the rationale. `pub(crate)` so
 // that test modules at any depth (e.g. `crate::server::cli_input::tests`)
