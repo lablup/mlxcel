@@ -294,5 +294,10 @@ no shared expert; the dispatch uses the default swiglu act=0 template; wired in
 #304; runtime validation is hardware-blocked because MiniMax-Text-01 at ~456B does
 not fit 128 GB unified memory, so greedy temp-0 throughput and output-parity
 measurements are deferred until a smaller variant or larger-memory machine is
-available). nemotron-h's MoE runs through the separate C++ `fused_moe_forward` and is wired
+available; a runtime smoke on minimax-m2-3bit (M1 Ultra, 16 tokens at 17.6 tok/s)
+confirmed the dispatch wiring is non-breaking: 3-bit quant is not a supported
+fused-kernel input, so `forward_fused_kernel` returned `None` and decode fell back
+to `gather_qmm`, generating coherent output with no crash or OOM; fused-path
+throughput and output-parity validation remain blocked on a fitting 4-bit or 8-bit
+minimax checkpoint). nemotron-h's MoE runs through the separate C++ `fused_moe_forward` and is wired
 behind `MLXCEL_FUSED_MOE_RELU2` only.
