@@ -86,6 +86,14 @@ pub struct SpeculativeArgs {
     /// classic non-MTP / non-DFlash `SpeculativeGenerator` path when a
     /// drafter is supplied without an explicit kind.
     ///
+    /// Parity note (offline `mlxcel generate` with `--draft-kind mtp`):
+    /// at temperature 0 with no sampling penalties the output matches the
+    /// non-speculative path (within the f16 / #203 jitter class). When any
+    /// repetition, frequency, presence, or DRY penalty is active, only the
+    /// first bonus token is penalized; subsequent tokens in each verify
+    /// window are greedy, so penalized requests are not byte-identical to
+    /// the non-speculative path.
+    ///
     /// Also read from `LLAMA_ARG_DRAFT_KIND` (and the mlxcel-native
     /// alias `MLXCEL_DRAFT_KIND`).
     #[arg(long = "draft-kind", env = "LLAMA_ARG_DRAFT_KIND", value_name = "KIND")]

@@ -1154,7 +1154,7 @@ fn run_offline_mtp(
         .map_err(|e| anyhow!("MTP drafter bind failed: {e}"))?;
     println!("MTP drafter loaded and bound (block_size = {block_size}).");
 
-    // Inject the resolved token bias (CLI `--logit-bias` plus the model's
+    // Inject the resolved token bias (CLI `--lang-bias` plus the model's
     // reserved multimodal placeholder suppression from issue #350) into the
     // sampling config so the adapter applies the SAME bias the non-speculative
     // `CxxGenerator` path applies via `with_token_bias`. This is what keeps the

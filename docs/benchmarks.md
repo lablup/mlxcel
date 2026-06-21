@@ -81,6 +81,10 @@ Measure with the `speculative_bench` harness or the server:
 mlxcel serve -m <target> --draft-model <drafter> --draft-kind mtp
 ```
 
+The offline `mlxcel generate` command also supports the MTP round-loop path (issue #166) for Gemma 4 text, VLM, and Unified targets. Pass `--draft-model <drafter> --draft-kind mtp` explicitly; without `--draft-kind mtp` the command keeps the classic speculative path for backward compatibility even when the drafter auto-detects as MTP.
+
+Parity: at `temperature 0` with no repetition, frequency, presence, or DRY penalties, the offline MTP output matches the non-speculative path within the documented f16 / #203 batched-kernel jitter class (on some hardware, notably M1 Ultra, near-tie token choices can differ). When any sampling penalty is active, only the first bonus token samples from the penalized distribution; subsequent tokens in each verify window are accepted or rejected greedily, so non-greedy or penalized requests are not byte-identical to the non-speculative path. This matches the known limitation of the server burst path.
+
 ### Gemma 4 Unified (12B) + 4-bit assistant
 
 Measured on Apple M5 Max (128 GB) with `mlx-community/gemma-4-12b-it-4bit` as the
