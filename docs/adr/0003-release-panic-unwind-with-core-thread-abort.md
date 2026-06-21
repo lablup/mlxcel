@@ -47,11 +47,11 @@ There is deliberately no `std::panic::set_hook` that aborts. The panic hook runs
 - A synthesis-path panic in a release build now becomes a per-request error and the server keeps serving, matching the `worker_survives_engine_panic_and_keeps_serving` test. That test now represents release behavior, not just the always-unwind test profile.
 - A panic on a core generation thread aborts the process cleanly (logged via `tracing` at `target: "mlxcel::worker"`, without request content) for a supervisor to restart, preserving the fail-fast posture `panic = "abort"` used to provide for those threads.
 - The abort path of `run_core_thread_or_abort` cannot be unit-tested in-process (it terminates the test runner). It is covered by a happy-path unit test and verified manually in a release build; a cfg-gated subprocess re-exec test is possible but not worth the flakiness for a one-line abort.
-- **Residual abort vector (#382).** An MLX C++ FFI exception thrown through a non-`Result` `cxx` op becomes `std::terminate`, not a Rust panic, so neither the `catch_unwind` backstops nor the unwind policy intercept it: it still terminates the process. This change does nothing for that path; it is tracked separately as issue #382.
+- **Residual abort vector (#382) — resolved in PR #384.** An MLX C++ FFI exception thrown through a non-`Result` `cxx` op becomes `std::terminate`, not a Rust panic, so neither the `catch_unwind` backstops nor the unwind policy intercept it. PR #384 adds `try_matmul` and `try_array_to_raw_bytes` as `-> Result<..>` variants in the cxx bridge and routes the Kokoro alignment-expansion matmuls and the final PCM readback through them, so those throws become recoverable per-request `Err`s instead of `std::terminate`. Whisper relies on fixed-shape invariants so no fallible variants are needed there. `cxx` ops that throw a non-`std::exception` type still terminate (the cxx bridge only catches `std::exception`); no such throws exist on the current audio path.
 
 ## References
 
-- Issue #375 (this decision), PR #374 (the Kokoro provider and the `run_guarded` backstop), issue #382 (the residual MLX FFI `std::terminate` vector).
+- Issue #375 (this decision), PR #374 (the Kokoro provider and the `run_guarded` backstop), issue #382 (the residual MLX FFI `std::terminate` vector, resolved by PR #384), PR #384 (`try_matmul` / `try_array_to_raw_bytes` fallible cxx variants, Kokoro path wiring).
 - `Cargo.toml` `[profile.release]` `panic = "unwind"`.
 - `src/worker_failfast.rs` (`run_core_thread_or_abort`, shared by the server and the distributed pipeline).
 - `src/server/model_worker.rs` (the two wrapped core generation `thread::spawn` sites).

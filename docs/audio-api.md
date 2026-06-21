@@ -169,7 +169,7 @@ Both knobs apply to the shared worker, so they cover the STT (Whisper) and TTS (
 
 Each engine call on the audio worker runs under a `catch_unwind` boundary (`run_guarded` in `src/server/audio_worker.rs`), so a synthesis or transcription panic becomes a per-request `Inference` error and the worker thread keeps serving rather than taking down the server. Since issue #375 this holds in release builds too: the release profile uses `panic = "unwind"` (it formerly used `panic = "abort"`, which silently defeated the boundary in production). The core text-generation worker threads take the opposite, deliberate posture: an uncaught panic there means a broken invariant, so they log and `abort` the process for a supervised restart instead of unwinding (see ADR 0003).
 
-One residual case is not contained: an MLX C++ FFI exception thrown through a non-`Result` op becomes `std::terminate`, not a Rust panic, so it still terminates the process. That path is tracked separately as issue #382.
+The MLX C++ FFI exception path (issue #382) is contained on the Kokoro synthesis route as of PR #384: the alignment-expansion matmuls and the final PCM readback go through `try_matmul` and `try_array_to_raw_bytes`, which are declared `-> Result<..>` in the cxx bridge so an MLX throw becomes a per-request `Err` rather than `std::terminate`. Whisper is unaffected because its tensor shapes are fixed and checked before the MLX call. Any `cxx` op that throws a non-`std::exception` type still terminates the process; no such throw exists on the current audio path.
 
 ## Adding an audio model provider
 
