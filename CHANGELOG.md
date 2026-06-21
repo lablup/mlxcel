@@ -4,6 +4,11 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Fixed
+- **HTTP 422 from `/v1/messages` for Claude Code >= 2.1.156** (#380). Claude Code interleaves `{"role":"system", ...}` turns inside the `messages` array as mid-conversation reminders. The missing `System` variant in `AnthropicRole` caused `serde_json` to reject those requests before any generation. A new `fold_system_messages` translator pass now relocates mid-conversation system turns into the adjacent user turn (or the head system block) so the text reaches the model under any chat template, including head-only templates (Qwen, Llama 3) that silently drop non-head system messages.
+
 ## [v0.3.2] - 2026-06-20
 
 ### Added
