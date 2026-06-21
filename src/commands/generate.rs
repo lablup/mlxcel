@@ -53,7 +53,7 @@ use mlxcel_core::sampling::{TokenBiasMap, sample_token_optimized};
 
 use mlxcel::cli::speculative_args::resolve_draft_block_size;
 use mlxcel::cli::turbo_args::resolve_kv_cache_mode;
-use mlxcel_core::drafter::{DrafterKind, resolve_drafter_kind};
+use mlxcel_core::drafter::{DrafterKind, load_drafter, resolve_drafter_kind};
 
 use super::generate_vlm;
 use crate::GenerateArgs;
@@ -839,8 +839,15 @@ fn generate_with_embeddings<M: LanguageModel>(
     ))
 }
 
-fn run_generation_mode<M: LanguageModel>(
-    model: &M,
+// Takes a concrete `&LoadedModel` (rather than a generic `M: LanguageModel`)
+// so the `--draft-kind mtp` branch can match the target's family and select the
+// matching per-target `MtpTarget` adapter (issue #166). Every inner call
+// (`generate_standard`, `generate_with_embeddings`, `SpeculativeGenerator::generate`)
+// stays generic over `LanguageModel`; `LoadedModel` implements that trait, so
+// the monomorphized code for the non-MTP paths is identical to the prior generic
+// form. The sole caller already passes `&LoadedModel`.
+fn run_generation_mode(
+    model: &mlxcel::LoadedModel,
     args: &GenerateArgs,
     prompt_tokens: &[i32],
     sampling_config: &SamplingConfig,
@@ -877,6 +884,34 @@ fn run_generation_mode<M: LanguageModel>(
         let block_size = resolve_draft_block_size(args.speculative.draft_block_size, resolved_kind);
         let user_requested_explicit_kind = explicit_kind.is_some();
 
+        // issue #166: when the operator explicitly passes `--draft-kind mtp`,
+        // drive the kind-specific `MtpGenerator` round loop here, reusing the
+        // SAME per-target `MtpTarget` adapters the server burst path uses
+        // (`src/models/gemma4_mtp_target.rs`). This runs BEFORE
+        // `load_model(draft_model_path)` because an MTP assistant is loaded as a
+        // `Drafter` (via `load_drafter`), not as a full `LoadedModel`. DFlash /
+        // InternalMtp explicit kinds and the auto-detect classic path are
+        // untouched and fall through below.
+        if should_route_offline_mtp(user_requested_explicit_kind, resolved_kind) {
+            if vlm_embeddings.is_some() {
+                return Err(anyhow!(
+                    "--draft-kind mtp does not support multimodal (image / audio / \
+                     video) input in the offline `mlxcel generate` path; rerun with \
+                     a text-only prompt, or omit --draft-model for multimodal \
+                     generation"
+                ));
+            }
+            return run_offline_mtp(
+                model,
+                draft_model_path,
+                prompt_tokens,
+                args.generation.max_tokens,
+                sampling_config,
+                block_size as usize,
+                token_bias,
+            );
+        }
+
         println!("Loading draft model from {:?}...", draft_model_path);
         let (draft_model, _draft_tokenizer) = load_model(draft_model_path)?;
         println!("Draft model loaded.");
@@ -890,20 +925,15 @@ fn run_generation_mode<M: LanguageModel>(
             },
         );
 
-        // when the operator explicitly opted into MTP /
-        // DFlash via `--draft-kind`, we MUST dispatch to the kind-specific
-        // generator. The concrete `MtpGenerator<T>` / `DFlashGenerator`
-        // round loops are wired in sub-6 and sub-12,
-        // respectively, but those round loops require model-specific
-        // `MtpTarget` / `SpeculativeTarget` impls that this offline CLI
-        // path does not yet provide. Surface a clear, actionable error
-        // that names the responsible sub-issue so an operator who passed
-        // `--draft-kind mtp` doesn't silently fall back to the classic
-        // path and miss the perf they were trying to validate. When
-        // `--draft-kind` was unset (auto-detect resolved to a kind),
-        // we instead log an info line and keep the classic path so the
-        // default `--draft-model some/dflash-drafter` workflow remains
-        // backward-compatible.
+        // MTP is handled above (issue #166). The remaining explicit kinds
+        // (DFlash, InternalMtp) still need their kind-specific round loops and
+        // per-target `SpeculativeTarget` impls wired into this offline path, so
+        // surface a clear, actionable error that names the responsible follow-up
+        // rather than silently falling back to the classic path (which would
+        // miss the perf the operator asked for). When `--draft-kind` was unset
+        // (auto-detect resolved to a kind), we instead log an info line and keep
+        // the classic path so the default `--draft-model some/dflash-drafter`
+        // workflow remains backward-compatible.
         if user_requested_explicit_kind {
             return Err(anyhow!(
                 "--draft-kind {kind} is plumbed end-to-end but \
@@ -986,6 +1016,195 @@ fn run_generation_mode<M: LanguageModel>(
     };
 
     Ok(output)
+}
+
+/// Routing gate for the offline MTP speculative path (issue #166).
+///
+/// Returns `true` only when the operator explicitly passed `--draft-kind mtp`
+/// (an auto-detected MTP shape with no explicit flag keeps the classic
+/// `SpeculativeGenerator` path for backward compatibility, matching the prior
+/// behavior). DFlash / InternalMtp explicit kinds return `false` and fall
+/// through to the deferred-error branch. Extracted as a pure function so the
+/// loop-construction decision is unit-testable without loading a model.
+fn should_route_offline_mtp(
+    user_requested_explicit_kind: bool,
+    resolved_kind: DrafterKind,
+) -> bool {
+    user_requested_explicit_kind && resolved_kind == DrafterKind::Mtp
+}
+
+/// Drive a constructed [`mlxcel_core::speculative::mtp::target::MtpTarget`]
+/// adapter through the [`mlxcel_core::speculative::mtp::MtpGenerator`] round
+/// loop and return the emitted tokens plus timing stats.
+///
+/// Mirrors the server burst driver
+/// (`src/server/batch/speculative_burst.rs::drive_mtp_generator`) minus the
+/// drafter-recovery / adaptive-policy bookkeeping the offline single-shot path
+/// does not need. The cooperative-cancel flag is always clear offline (there is
+/// no client to disconnect mid-generation) and logprob capture is disabled (the
+/// CLI prints decoded text, not per-token logprobs).
+fn drive_offline_mtp<T>(
+    adapter: T,
+    drafter: Box<dyn mlxcel_core::drafter::Drafter>,
+    prompt_tokens: &[i32],
+    max_tokens: usize,
+    sampling: &SamplingConfig,
+    token_history: &[i32],
+    block_size: usize,
+) -> (Vec<i32>, GenerationStats)
+where
+    T: mlxcel_core::speculative::mtp::target::MtpTarget,
+{
+    use std::sync::atomic::AtomicBool;
+
+    use mlxcel_core::sampling::LogprobsConfig;
+    use mlxcel_core::speculative::mtp::MtpGenerator;
+
+    let logprobs = LogprobsConfig::default();
+    let cancel = AtomicBool::new(false);
+    let mut generator = MtpGenerator::new(adapter, drafter, block_size);
+    let (tokens, _logprobs, stats) = generator.generate(
+        prompt_tokens,
+        max_tokens,
+        sampling,
+        token_history,
+        &cancel,
+        &logprobs,
+    );
+    (tokens, stats)
+}
+
+/// Construct and drive the MTP speculative round loop for the offline
+/// `mlxcel generate` path (issue #166).
+///
+/// Reuses the exact per-target adapters the server burst path selects
+/// (`src/models/gemma4_mtp_target.rs`) and the same `MtpGenerator` round-loop
+/// driver, so the offline path is byte-identical to the server's speculative
+/// output at temperature 0 and identical to the non-speculative offline path
+/// for the same target / prompt / `-n` (the MTP greedy-parity invariant: the
+/// loop accepts exactly the tokens the target would have produced greedily).
+///
+/// The drafter is loaded through [`load_drafter`] (an MTP assistant is a
+/// `Drafter`, not a full `LoadedModel`), compatibility-checked, then bound to
+/// the SAME concrete target the adapter wraps BEFORE the generator runs.
+/// [`MtpGenerator::generate`] does not bind internally, so the bind here is
+/// load-bearing: without it the first `draft_block` returns
+/// `DrafterError::BindNotCalled` and the loop emits only the seed bonus.
+///
+/// A target that is not MTP-capable returns a clear error instead of silently
+/// falling back, matching the issue's contract.
+fn run_offline_mtp(
+    model: &mlxcel::LoadedModel,
+    draft_model_path: &Path,
+    prompt_tokens: &[i32],
+    max_tokens: usize,
+    sampling_config: &SamplingConfig,
+    block_size: usize,
+    token_bias: TokenBiasMap,
+) -> Result<(Vec<i32>, GenerationStats)> {
+    use mlxcel::LoadedModel;
+    use mlxcel::models::gemma4_mtp_target::{
+        Gemma4MtpTargetAdapter, Gemma4UnifiedMtpTargetAdapter, Gemma4VLMtpTargetAdapter,
+    };
+
+    if block_size < 2 {
+        return Err(anyhow!(
+            "--draft-kind mtp with block_size={block_size} produces no draft \
+             proposals (need >= 2); pass --draft-block-size with a value >= 2"
+        ));
+    }
+
+    // Resolve the concrete target reference the drafter binds to, and reject any
+    // non-MTP-capable target. Mirrors the server burst dispatch
+    // (`run_mtp_burst`): bind to the same concrete Gemma 4 model the adapter
+    // wraps below. VLM / Unified wrappers expose their text backbone through the
+    // `LanguageModel` impl, so the compat check / bind see the text hidden size
+    // and vocab the assistant was trained against.
+    let target_lm: &dyn LanguageModel = match model {
+        LoadedModel::Gemma4(wrapper) => wrapper as &dyn LanguageModel,
+        LoadedModel::Gemma4VLM(vlm) => vlm as &dyn LanguageModel,
+        LoadedModel::Gemma4Unified(unified) => unified as &dyn LanguageModel,
+        _ => {
+            return Err(anyhow!(
+                "--draft-kind mtp is only supported for Gemma 4 (text, VLM, or \
+                 Unified) targets; the loaded target is not MTP-capable. Omit \
+                 --draft-kind to use the classic SpeculativeGenerator with your \
+                 --draft-model drafter."
+            ));
+        }
+    };
+
+    println!("Loading MTP drafter from {:?}...", draft_model_path);
+    let (mut drafter, kind) = load_drafter(draft_model_path, Some(DrafterKind::Mtp))
+        .map_err(|e| anyhow!("MTP drafter load failed: {e}"))?;
+    if kind != DrafterKind::Mtp {
+        return Err(anyhow!(
+            "drafter at {draft_model_path:?} did not resolve to an MTP drafter \
+             (got {kind})"
+        ));
+    }
+
+    // Compatibility gate BEFORE binding (rejects a mismatched
+    // backbone-hidden-size / vocab pairing), then bind.
+    drafter
+        .validate_target_compat(target_lm)
+        .map_err(|e| anyhow!("MTP drafter incompatible with target: {e}"))?;
+    drafter
+        .bind(target_lm)
+        .map_err(|e| anyhow!("MTP drafter bind failed: {e}"))?;
+    println!("MTP drafter loaded and bound (block_size = {block_size}).");
+
+    // Inject the resolved token bias (CLI `--logit-bias` plus the model's
+    // reserved multimodal placeholder suppression from issue #350) into the
+    // sampling config so the adapter applies the SAME bias the non-speculative
+    // `CxxGenerator` path applies via `with_token_bias`. This is what keeps the
+    // temp-0 output byte-identical to the non-speculative path: the adapter's
+    // `prefill_and_seed` / `verify_forward` read `sampler.token_bias`.
+    let mut sampling = sampling_config.clone();
+    sampling.token_bias = token_bias;
+
+    // History-dependent-penalty context for the first-bonus sample (mirrors the
+    // server burst path and the classic decode path's first-token seed). Empty
+    // when no repetition / frequency / presence / DRY penalty is configured.
+    let token_history = initial_token_history(prompt_tokens, sampling.needs_token_history());
+
+    // Select the per-target adapter exactly as the server does, then drive the
+    // round loop. `seq_id = None` selects the wrapper's internal single-sequence
+    // fallback slot, the documented offline / single-row CLI usage.
+    let (tokens, stats) = match model {
+        LoadedModel::Gemma4(wrapper) => drive_offline_mtp(
+            Gemma4MtpTargetAdapter::new_with_block_size(wrapper, None, block_size),
+            drafter,
+            prompt_tokens,
+            max_tokens,
+            &sampling,
+            &token_history,
+            block_size,
+        ),
+        LoadedModel::Gemma4VLM(vlm) => drive_offline_mtp(
+            Gemma4VLMtpTargetAdapter::new_with_block_size(vlm, None, block_size),
+            drafter,
+            prompt_tokens,
+            max_tokens,
+            &sampling,
+            &token_history,
+            block_size,
+        ),
+        LoadedModel::Gemma4Unified(unified) => drive_offline_mtp(
+            Gemma4UnifiedMtpTargetAdapter::new_with_block_size(unified, None, block_size),
+            drafter,
+            prompt_tokens,
+            max_tokens,
+            &sampling,
+            &token_history,
+            block_size,
+        ),
+        // Unreachable: the variant gate above already returned an error for any
+        // non-MTP-capable target. Kept for match exhaustiveness.
+        _ => unreachable!("non-MTP-capable target rejected by the variant gate above"),
+    };
+
+    Ok((tokens, stats))
 }
 
 /// Parse the `--surgery <FILE>` YAML configuration when supplied and

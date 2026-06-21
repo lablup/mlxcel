@@ -15,13 +15,38 @@
 use super::{
     apply_user_chat_template, cli_pipeline_requested, estimate_delta_label_and_bytes,
     generated_suffix, generation_stats_from_duration, memory_preflight_ctx_len,
-    resolve_cli_pipeline_assignments, resolve_cli_prompt, validate_pipeline_parallel_args,
-    validate_tensor_parallel_args,
+    resolve_cli_pipeline_assignments, resolve_cli_prompt, should_route_offline_mtp,
+    validate_pipeline_parallel_args, validate_tensor_parallel_args,
 };
 use mlxcel::server::chat_template::ChatTemplateProcessor;
+use mlxcel_core::drafter::DrafterKind;
 use std::fs;
 use std::path::PathBuf;
 use std::time::Duration;
+
+// issue #166: the offline MTP loop is constructed only when the operator
+// explicitly passes `--draft-kind mtp`. An auto-detected MTP shape (no explicit
+// flag) keeps the classic SpeculativeGenerator path, and DFlash / InternalMtp
+// explicit kinds fall through to the deferred-error branch. These pins guard the
+// routing decision without loading a model.
+#[test]
+fn should_route_offline_mtp_only_for_explicit_mtp() {
+    assert!(should_route_offline_mtp(true, DrafterKind::Mtp));
+}
+
+#[test]
+fn should_route_offline_mtp_rejects_auto_detected_mtp() {
+    // Auto-detect resolved to MTP but no explicit `--draft-kind`: stay on the
+    // classic path for backward compatibility.
+    assert!(!should_route_offline_mtp(false, DrafterKind::Mtp));
+}
+
+#[test]
+fn should_route_offline_mtp_rejects_other_explicit_kinds() {
+    assert!(!should_route_offline_mtp(true, DrafterKind::Dflash));
+    assert!(!should_route_offline_mtp(true, DrafterKind::InternalMtp));
+    assert!(!should_route_offline_mtp(false, DrafterKind::Dflash));
+}
 
 #[test]
 fn generation_stats_from_duration_uses_elapsed_time_for_decode_rate() {
