@@ -373,6 +373,15 @@ fn input_items_to_messages(items: &[ResponseInputItem]) -> Vec<Message> {
                     reasoning: None,
                     tool_calls: None,
                 });
+                // A tool-output turn is not an assistant turn, so any buffered
+                // reasoning that was not consumed by the flush above (e.g.
+                // malformed input: Reasoning immediately followed by
+                // FunctionCallOutput with no preceding FunctionCall) must be
+                // cleared here. Without this, the buffered reasoning leaks onto
+                // the next assistant turn, violating the invariant that a
+                // reasoning item not followed by an assistant turn before the
+                // next turn boundary is dropped.
+                pending_reasoning = None;
             }
             ResponseInputItem::Reasoning { content } => {
                 // Buffer the reasoning text and attach it to the following
@@ -810,6 +819,112 @@ mod tests {
         assert_eq!(
             user.reasoning, None,
             "reasoning must not leak onto user turn"
+        );
+    }
+
+    #[test]
+    fn reasoning_does_not_leak_when_function_call_output_has_no_preceding_function_call() {
+        // Regression for the MEDIUM bug: a Reasoning item immediately followed
+        // by a FunctionCallOutput with no preceding FunctionCall (malformed
+        // input) must not attach the buffered reasoning to the next assistant
+        // turn. The FunctionCallOutput arm must clear pending_reasoning even
+        // when the tool-call flush is skipped.
+        use crate::server::types::responses_request::{
+            ReasoningContentPart, ResponseInputContent, ResponseInputItem, ResponseInputRole,
+        };
+        let items = vec![
+            ResponseInputItem::Reasoning {
+                content: vec![ReasoningContentPart {
+                    part_type: "reasoning_text".to_string(),
+                    text: "orphaned reasoning".to_string(),
+                }],
+            },
+            // No FunctionCall precedes this output, so pending_tool_calls is
+            // empty and the flush block that would consume pending_reasoning is
+            // skipped. The arm must still clear pending_reasoning.
+            ResponseInputItem::FunctionCallOutput {
+                call_id: "call_orphan".to_string(),
+                output: "result".to_string(),
+            },
+            ResponseInputItem::Message {
+                role: ResponseInputRole::Assistant,
+                content: ResponseInputContent::Text("answer".to_string()),
+                name: None,
+            },
+        ];
+        let req = make_request(ResponseInput::Items(items));
+        let translated = responses_request_to_chat(&req, None, None).unwrap();
+        let assistant = translated
+            .chat_request
+            .messages
+            .iter()
+            .find(|m| matches!(m.role, Role::Assistant))
+            .expect("assistant turn present");
+        assert_eq!(
+            assistant.reasoning, None,
+            "reasoning must not leak onto the assistant turn after a bare FunctionCallOutput"
+        );
+    }
+
+    #[test]
+    fn reasoning_attaches_to_function_call_turn_in_normal_tool_flow() {
+        // Confirms the normal Reasoning -> FunctionCall -> FunctionCallOutput
+        // flow is unaffected by the pending_reasoning = None fix: reasoning
+        // still attaches to the function-call assistant turn, not the tool
+        // turn, and the following message sees no reasoning.
+        use crate::server::types::responses_request::{
+            ReasoningContentPart, ResponseInputContent, ResponseInputItem, ResponseInputRole,
+        };
+        let items = vec![
+            ResponseInputItem::Message {
+                role: ResponseInputRole::User,
+                content: ResponseInputContent::Text("call a tool".to_string()),
+                name: None,
+            },
+            ResponseInputItem::Reasoning {
+                content: vec![ReasoningContentPart {
+                    part_type: "reasoning_text".to_string(),
+                    text: "I should call do_thing".to_string(),
+                }],
+            },
+            ResponseInputItem::FunctionCall {
+                call_id: "call_1".to_string(),
+                name: "do_thing".to_string(),
+                arguments: "{}".to_string(),
+            },
+            ResponseInputItem::FunctionCallOutput {
+                call_id: "call_1".to_string(),
+                output: "done".to_string(),
+            },
+            ResponseInputItem::Message {
+                role: ResponseInputRole::Assistant,
+                content: ResponseInputContent::Text("all done".to_string()),
+                name: None,
+            },
+        ];
+        let req = make_request(ResponseInput::Items(items));
+        let translated = responses_request_to_chat(&req, None, None).unwrap();
+        let msgs = &translated.chat_request.messages;
+
+        // The function-call flush produces an assistant turn that carries the
+        // reasoning; the later text assistant turn must not carry it.
+        let function_call_turn = msgs
+            .iter()
+            .find(|m| matches!(m.role, Role::Assistant) && m.tool_calls.is_some())
+            .expect("function-call assistant turn present");
+        assert_eq!(
+            function_call_turn.reasoning.as_deref(),
+            Some("I should call do_thing"),
+            "reasoning must attach to the function-call assistant turn"
+        );
+
+        let text_assistant_turn = msgs
+            .iter()
+            .find(|m| matches!(m.role, Role::Assistant) && m.tool_calls.is_none())
+            .expect("text assistant turn present");
+        assert_eq!(
+            text_assistant_turn.reasoning, None,
+            "reasoning must not leak onto the later text assistant turn"
         );
     }
 

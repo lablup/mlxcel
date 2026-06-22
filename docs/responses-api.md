@@ -101,8 +101,7 @@ Phase 1 supports these typed items:
 ]
 ```
 
-`developer` role is treated like `system`. Reasoning input items are accepted
-but are not fed back into the next prompt.
+`developer` role is treated like `system`. Reasoning input items are accepted and forwarded: the text content is buffered and attached to the parallel `reasoning` field of the following assistant turn. Chat templates that render `message.get('reasoning')` (such as Gemma 4) receive it there. The `preserve_thinking` kwarg controls whether the field survives the rolling-checkpoint strip: `false` (the default, unless the prompt cache is on) drops prior-turn reasoning along with any inline `<think>` blocks; `true` retains it.
 
 Message content parts reuse mlxcel's chat-completions content part types. This
 means `text`, `image_url`, `video_url`, and `input_audio` can deserialize, but
