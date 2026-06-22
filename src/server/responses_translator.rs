@@ -188,6 +188,7 @@ pub fn responses_request_to_chat(
             content: MessageContent::Text(instr.clone()),
             name: None,
             tool_call_id: None,
+            reasoning: None,
             tool_calls: None,
         });
     }
@@ -292,11 +293,15 @@ fn function_tools(tools: Option<&[ResponseTool]>) -> Option<Vec<Tool>> {
 ///
 /// `function_call` items become assistant messages with `tool_calls`;
 /// `function_call_output` items become tool messages with the matching
-/// `tool_call_id`. Reasoning items are dropped during conversion because
-/// downstream chat-template renderers don't expect them as turns.
+/// `tool_call_id`. A `reasoning` item is not emitted as its own turn; instead
+/// its text is buffered and attached to the parallel `reasoning` field of the
+/// following assistant turn (issue #362) so templates that read
+/// `message.get('reasoning')` see prior thinking. A reasoning item that is not
+/// followed by an assistant turn before the next turn boundary is dropped.
 fn input_items_to_messages(items: &[ResponseInputItem]) -> Vec<Message> {
     let mut out: Vec<Message> = Vec::new();
     let mut pending_tool_calls: Vec<ToolCallInMessage> = Vec::new();
+    let mut pending_reasoning: Option<String> = None;
 
     for item in items {
         match item {
@@ -305,6 +310,7 @@ fn input_items_to_messages(items: &[ResponseInputItem]) -> Vec<Message> {
                 content,
                 name,
             } => {
+                let converted_role = convert_role(*role);
                 // Flush any pending tool calls as an assistant turn
                 // before emitting the next role message.
                 if !pending_tool_calls.is_empty() {
@@ -313,16 +319,26 @@ fn input_items_to_messages(items: &[ResponseInputItem]) -> Vec<Message> {
                         content: MessageContent::Text(String::new()),
                         name: None,
                         tool_call_id: None,
+                        reasoning: pending_reasoning.take(),
                         tool_calls: Some(std::mem::take(&mut pending_tool_calls)),
                     });
                 }
+                let reasoning = if converted_role == Role::Assistant {
+                    pending_reasoning.take()
+                } else {
+                    None
+                };
                 out.push(Message {
-                    role: convert_role(*role),
+                    role: converted_role,
                     content: convert_content(content),
                     name: name.clone(),
                     tool_call_id: None,
+                    reasoning,
                     tool_calls: None,
                 });
+                // A turn boundary consumes any leftover reasoning so it cannot
+                // leak onto a later, unrelated assistant turn.
+                pending_reasoning = None;
             }
             ResponseInputItem::FunctionCall {
                 call_id,
@@ -345,6 +361,7 @@ fn input_items_to_messages(items: &[ResponseInputItem]) -> Vec<Message> {
                         content: MessageContent::Text(String::new()),
                         name: None,
                         tool_call_id: None,
+                        reasoning: pending_reasoning.take(),
                         tool_calls: Some(std::mem::take(&mut pending_tool_calls)),
                     });
                 }
@@ -353,13 +370,23 @@ fn input_items_to_messages(items: &[ResponseInputItem]) -> Vec<Message> {
                     content: MessageContent::Text(output.clone()),
                     name: None,
                     tool_call_id: Some(call_id.clone()),
+                    reasoning: None,
                     tool_calls: None,
                 });
             }
-            ResponseInputItem::Reasoning { .. } => {
-                // Phase 1: drop. Reasoning text from a prior turn does
-                // not feed back into the next prompt — the chat
-                // template handles thinking state automatically.
+            ResponseInputItem::Reasoning { content } => {
+                // Buffer the reasoning text and attach it to the following
+                // assistant turn (issue #362) so templates that render
+                // `message.get('reasoning')` see the model's prior thinking.
+                let text = content
+                    .iter()
+                    .map(|p| p.text.as_str())
+                    .filter(|t| !t.is_empty())
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                if !text.is_empty() {
+                    pending_reasoning = Some(text);
+                }
             }
         }
     }
@@ -370,6 +397,7 @@ fn input_items_to_messages(items: &[ResponseInputItem]) -> Vec<Message> {
             content: MessageContent::Text(String::new()),
             name: None,
             tool_call_id: None,
+            reasoning: pending_reasoning.take(),
             tool_calls: Some(pending_tool_calls),
         });
     }
@@ -738,6 +766,51 @@ mod tests {
             Role::User
         ));
         assert_eq!(translated.chat_request.messages[0].content.text(), "hello");
+    }
+
+    #[test]
+    fn reasoning_item_attaches_to_following_assistant_message() {
+        // Issue #362: a Responses `reasoning` item is not its own turn; its
+        // text rides on the parallel `reasoning` field of the next assistant
+        // message so reasoning-aware chat templates can render it.
+        use crate::server::types::responses_request::{
+            ReasoningContentPart, ResponseInputContent, ResponseInputItem, ResponseInputRole,
+        };
+        let items = vec![
+            ResponseInputItem::Message {
+                role: ResponseInputRole::User,
+                content: ResponseInputContent::Text("what is 2+2?".to_string()),
+                name: None,
+            },
+            ResponseInputItem::Reasoning {
+                content: vec![ReasoningContentPart {
+                    part_type: "reasoning_text".to_string(),
+                    text: "add 2 and 2".to_string(),
+                }],
+            },
+            ResponseInputItem::Message {
+                role: ResponseInputRole::Assistant,
+                content: ResponseInputContent::Text("4".to_string()),
+                name: None,
+            },
+        ];
+        let req = make_request(ResponseInput::Items(items));
+        let translated = responses_request_to_chat(&req, None, None).unwrap();
+        let msgs = &translated.chat_request.messages;
+        let assistant = msgs
+            .iter()
+            .find(|m| matches!(m.role, Role::Assistant))
+            .expect("assistant turn present");
+        assert_eq!(assistant.reasoning.as_deref(), Some("add 2 and 2"));
+        assert_eq!(assistant.content.text(), "4");
+        let user = msgs
+            .iter()
+            .find(|m| matches!(m.role, Role::User))
+            .expect("user turn present");
+        assert_eq!(
+            user.reasoning, None,
+            "reasoning must not leak onto user turn"
+        );
     }
 
     #[test]

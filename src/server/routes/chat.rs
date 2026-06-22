@@ -1302,6 +1302,7 @@ mod tests {
                 content: MessageContent::Parts(parts),
                 name: None,
                 tool_call_id: None,
+                reasoning: None,
                 tool_calls: None,
             }],
             stream: false,

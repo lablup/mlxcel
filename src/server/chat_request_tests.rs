@@ -62,6 +62,7 @@ fn build_chat_messages_flattens_text_parts() {
         ]),
         name: None,
         tool_call_id: None,
+        reasoning: None,
         tool_calls: None,
     }]);
 
@@ -87,6 +88,7 @@ async fn prepare_chat_request_uses_template_output_and_extracts_images() {
         ]),
         name: None,
         tool_call_id: None,
+        reasoning: None,
         tool_calls: None,
     }]);
     let processor =
@@ -106,6 +108,7 @@ async fn prepare_chat_request_falls_back_to_simple_prompt_on_template_error() {
         content: MessageContent::Text("Hello".to_string()),
         name: None,
         tool_call_id: None,
+        reasoning: None,
         tool_calls: None,
     }]);
     let processor = ChatTemplateProcessor::with_template("{% if %}".to_string());
@@ -316,6 +319,7 @@ fn build_raw_json_messages_includes_tool_fields() {
                 content: MessageContent::Text(String::new()),
                 name: None,
                 tool_call_id: None,
+                reasoning: None,
                 tool_calls: Some(vec![ToolCallInMessage {
                     id: "call_123".to_string(),
                     call_type: "function".to_string(),
@@ -330,6 +334,7 @@ fn build_raw_json_messages_includes_tool_fields() {
                 content: MessageContent::Text("Sunny".to_string()),
                 name: None,
                 tool_call_id: Some("call_123".to_string()),
+                reasoning: None,
                 tool_calls: None,
             },
         ],
@@ -373,6 +378,7 @@ fn req_with_tool_call_arguments(arguments: &str) -> ChatCompletionRequest {
             content: MessageContent::Text(String::new()),
             name: None,
             tool_call_id: None,
+            reasoning: None,
             tool_calls: Some(vec![ToolCallInMessage {
                 id: "call_1".to_string(),
                 call_type: "function".to_string(),
@@ -463,6 +469,7 @@ async fn prepare_chat_request_renders_tool_call_arguments_as_mapping() {
             content: MessageContent::Text("Read a file".to_string()),
             name: None,
             tool_call_id: None,
+            reasoning: None,
             tool_calls: None,
         },
         Message {
@@ -470,6 +477,7 @@ async fn prepare_chat_request_renders_tool_call_arguments_as_mapping() {
             content: MessageContent::Text(String::new()),
             name: None,
             tool_call_id: None,
+            reasoning: None,
             tool_calls: Some(vec![ToolCallInMessage {
                 id: "call_1".to_string(),
                 call_type: "function".to_string(),
@@ -484,6 +492,7 @@ async fn prepare_chat_request_renders_tool_call_arguments_as_mapping() {
             content: MessageContent::Text("ok".to_string()),
             name: None,
             tool_call_id: Some("call_1".to_string()),
+            reasoning: None,
             tool_calls: None,
         },
         Message {
@@ -491,6 +500,7 @@ async fn prepare_chat_request_renders_tool_call_arguments_as_mapping() {
             content: MessageContent::Text("Continue".to_string()),
             name: None,
             tool_call_id: None,
+            reasoning: None,
             tool_calls: None,
         },
     ]);
@@ -621,6 +631,7 @@ fn three_turn_request_with_think_blocks() -> ChatCompletionRequest {
             content: MessageContent::Text("What is 2+2?".to_string()),
             name: None,
             tool_call_id: None,
+            reasoning: None,
             tool_calls: None,
         },
         Message {
@@ -630,6 +641,7 @@ fn three_turn_request_with_think_blocks() -> ChatCompletionRequest {
             ),
             name: None,
             tool_call_id: None,
+            reasoning: None,
             tool_calls: None,
         },
         Message {
@@ -637,6 +649,7 @@ fn three_turn_request_with_think_blocks() -> ChatCompletionRequest {
             content: MessageContent::Text("And 3+3?".to_string()),
             name: None,
             tool_call_id: None,
+            reasoning: None,
             tool_calls: None,
         },
         Message {
@@ -644,6 +657,7 @@ fn three_turn_request_with_think_blocks() -> ChatCompletionRequest {
             content: MessageContent::Text("<think>\ncalc 3+3\n</think>\n\nSix.".to_string()),
             name: None,
             tool_call_id: None,
+            reasoning: None,
             tool_calls: None,
         },
         Message {
@@ -651,6 +665,7 @@ fn three_turn_request_with_think_blocks() -> ChatCompletionRequest {
             content: MessageContent::Text("And 4+4?".to_string()),
             name: None,
             tool_call_id: None,
+            reasoning: None,
             tool_calls: None,
         },
     ])
@@ -806,6 +821,7 @@ async fn prefix_stability_across_turns_when_preserve_thinking_true() {
             content: MessageContent::Text("q1".to_string()),
             name: None,
             tool_call_id: None,
+            reasoning: None,
             tool_calls: None,
         },
         Message {
@@ -813,6 +829,7 @@ async fn prefix_stability_across_turns_when_preserve_thinking_true() {
             content: MessageContent::Text("<think>think1</think>a1".to_string()),
             name: None,
             tool_call_id: None,
+            reasoning: None,
             tool_calls: None,
         },
         Message {
@@ -820,6 +837,7 @@ async fn prefix_stability_across_turns_when_preserve_thinking_true() {
             content: MessageContent::Text("q2".to_string()),
             name: None,
             tool_call_id: None,
+            reasoning: None,
             tool_calls: None,
         },
     ];
@@ -831,6 +849,7 @@ async fn prefix_stability_across_turns_when_preserve_thinking_true() {
         content: MessageContent::Text("<think>think2</think>a2".to_string()),
         name: None,
         tool_call_id: None,
+        reasoning: None,
         tool_calls: None,
     });
     messages_t3.push(Message {
@@ -838,6 +857,7 @@ async fn prefix_stability_across_turns_when_preserve_thinking_true() {
         content: MessageContent::Text("q3".to_string()),
         name: None,
         tool_call_id: None,
+        reasoning: None,
         tool_calls: None,
     });
 
@@ -996,6 +1016,7 @@ async fn rolling_checkpoint_tolerates_tool_turn_in_middle() {
             content: MessageContent::Text("q1".to_string()),
             name: None,
             tool_call_id: None,
+            reasoning: None,
             tool_calls: None,
         },
         Message {
@@ -1003,6 +1024,7 @@ async fn rolling_checkpoint_tolerates_tool_turn_in_middle() {
             content: MessageContent::Text("<think>plan</think>call tool".to_string()),
             name: None,
             tool_call_id: None,
+            reasoning: None,
             tool_calls: None,
         },
         Message {
@@ -1010,6 +1032,7 @@ async fn rolling_checkpoint_tolerates_tool_turn_in_middle() {
             content: MessageContent::Text("q2".to_string()),
             name: None,
             tool_call_id: None,
+            reasoning: None,
             tool_calls: None,
         },
         Message {
@@ -1017,6 +1040,7 @@ async fn rolling_checkpoint_tolerates_tool_turn_in_middle() {
             content: MessageContent::Text("tool-result".to_string()),
             name: None,
             tool_call_id: None,
+            reasoning: None,
             tool_calls: None,
         },
     ];
@@ -1063,6 +1087,7 @@ async fn rolling_checkpoint_ignores_pseudo_user_tool_response_anchor() {
             content: MessageContent::Text("q1".to_string()),
             name: None,
             tool_call_id: None,
+            reasoning: None,
             tool_calls: None,
         },
         Message {
@@ -1070,6 +1095,7 @@ async fn rolling_checkpoint_ignores_pseudo_user_tool_response_anchor() {
             content: MessageContent::Text("<think>plan 1</think>a1".to_string()),
             name: None,
             tool_call_id: None,
+            reasoning: None,
             tool_calls: None,
         },
         Message {
@@ -1077,6 +1103,7 @@ async fn rolling_checkpoint_ignores_pseudo_user_tool_response_anchor() {
             content: MessageContent::Text("q2".to_string()),
             name: None,
             tool_call_id: None,
+            reasoning: None,
             tool_calls: None,
         },
         Message {
@@ -1084,6 +1111,7 @@ async fn rolling_checkpoint_ignores_pseudo_user_tool_response_anchor() {
             content: MessageContent::Text("<think>plan 2</think>a2".to_string()),
             name: None,
             tool_call_id: None,
+            reasoning: None,
             tool_calls: None,
         },
         Message {
@@ -1093,6 +1121,7 @@ async fn rolling_checkpoint_ignores_pseudo_user_tool_response_anchor() {
             ),
             name: None,
             tool_call_id: None,
+            reasoning: None,
             tool_calls: None,
         },
     ];
@@ -1539,6 +1568,7 @@ async fn chat_request_drops_temp_files_on_completion() {
             }]),
             name: None,
             tool_call_id: None,
+            reasoning: None,
             tool_calls: None,
         }],
         stream: false,
@@ -1586,5 +1616,176 @@ async fn chat_request_drops_temp_files_on_completion() {
     assert!(
         !temp_path.exists(),
         "temp file must be removed once PreparedChatRequest drops; remained at {temp_path:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Issue #362: assistant `reasoning` field preserved across turns
+// ---------------------------------------------------------------------------
+
+/// Gemma-4-style template: renders `message.get('reasoning')` as a thought
+/// channel before each turn's content, so we can assert exactly when a prior
+/// reasoning trace reaches the prompt.
+fn reasoning_dump_template() -> String {
+    "{% for m in messages %}\
+{% set r = m.get('reasoning') %}\
+{% if r %}[REASON:{{ r }}]{% endif %}\
+[{{ m.role }}:{{ m.content }}]\
+{% endfor %}"
+        .to_string()
+}
+
+/// 2-turn conversation whose assistant reply carries reasoning in the parallel
+/// `reasoning` field (no inline `<think>` in its content), followed by a new
+/// user turn. Per the rolling checkpoint, the assistant turn is strictly
+/// before the latest user turn, so it is a "prior" turn for stripping.
+fn request_with_prior_assistant_reasoning() -> ChatCompletionRequest {
+    request_with_messages(vec![
+        Message {
+            role: Role::User,
+            content: MessageContent::Text("What is 2+2?".to_string()),
+            name: None,
+            tool_call_id: None,
+            reasoning: None,
+            tool_calls: None,
+        },
+        Message {
+            role: Role::Assistant,
+            content: MessageContent::Text("The answer is 4.".to_string()),
+            name: None,
+            tool_call_id: None,
+            reasoning: Some("compute 2+2=4".to_string()),
+            tool_calls: None,
+        },
+        Message {
+            role: Role::User,
+            content: MessageContent::Text("And 3+3?".to_string()),
+            name: None,
+            tool_call_id: None,
+            reasoning: None,
+            tool_calls: None,
+        },
+    ])
+}
+
+#[tokio::test]
+async fn assistant_reasoning_reaches_prompt_when_preserve_thinking_true() {
+    // preserve_thinking=true must forward the parallel reasoning field through
+    // the real raw-JSON render path into the rendered prompt (issue #362).
+    let mut request = request_with_prior_assistant_reasoning();
+    let mut map = serde_json::Map::new();
+    map.insert(
+        "preserve_thinking".to_string(),
+        serde_json::Value::Bool(true),
+    );
+    request.chat_template_kwargs = Some(map);
+
+    let processor = ChatTemplateProcessor::with_template(reasoning_dump_template());
+    let prepared = prepare_chat_request(&processor, &request, None)
+        .await
+        .unwrap();
+
+    assert!(
+        prepared.prompt.contains("[REASON:compute 2+2=4]"),
+        "assistant reasoning must reach the prompt when preserve_thinking=true; got: {:?}",
+        prepared.prompt
+    );
+    assert!(prepared.prompt.contains("The answer is 4."));
+}
+
+#[tokio::test]
+async fn assistant_reasoning_stripped_when_preserve_thinking_false_default() {
+    // Default (preserve_thinking=false): a prior assistant turn's reasoning is
+    // stripped consistently with its inline <think> block, so it must not leak
+    // into the next prompt (issue #362).
+    let request = request_with_prior_assistant_reasoning();
+    let processor = ChatTemplateProcessor::with_template(reasoning_dump_template());
+    let prepared = prepare_chat_request(&processor, &request, None)
+        .await
+        .unwrap();
+
+    assert!(
+        !prepared.prompt.contains("compute 2+2=4"),
+        "prior reasoning must be stripped by default; got: {:?}",
+        prepared.prompt
+    );
+    assert!(
+        !prepared.prompt.contains("[REASON:"),
+        "no reasoning channel should render by default; got: {:?}",
+        prepared.prompt
+    );
+    // The visible answer is untouched by reasoning stripping.
+    assert!(prepared.prompt.contains("The answer is 4."));
+}
+
+#[tokio::test]
+async fn reasoning_not_double_injected_when_content_has_inline_think() {
+    // When the retained turn's content already carries an inline <think> block,
+    // the parallel reasoning field must not also be forwarded, or templates
+    // that render both channels would inject the same reasoning twice.
+    let request = request_with_messages(vec![
+        Message {
+            role: Role::User,
+            content: MessageContent::Text("What is 2+2?".to_string()),
+            name: None,
+            tool_call_id: None,
+            reasoning: None,
+            tool_calls: None,
+        },
+        Message {
+            role: Role::Assistant,
+            content: MessageContent::Text(
+                "<think>\ninline reasoning\n</think>\n\nThe answer is 4.".to_string(),
+            ),
+            name: None,
+            tool_call_id: None,
+            reasoning: Some("DUPLICATE_TRACE".to_string()),
+            tool_calls: None,
+        },
+    ]);
+    // preserve_thinking=true so the trailing assistant turn is retained.
+    let mut request = request;
+    let mut map = serde_json::Map::new();
+    map.insert(
+        "preserve_thinking".to_string(),
+        serde_json::Value::Bool(true),
+    );
+    request.chat_template_kwargs = Some(map);
+
+    let processor = ChatTemplateProcessor::with_template(reasoning_dump_template());
+    let prepared = prepare_chat_request(&processor, &request, None)
+        .await
+        .unwrap();
+
+    // Inline block survives via content; the parallel reasoning channel is
+    // suppressed to avoid the duplicate.
+    assert!(
+        prepared.prompt.contains("inline reasoning"),
+        "inline <think> content must remain; got: {:?}",
+        prepared.prompt
+    );
+    assert!(
+        !prepared.prompt.contains("DUPLICATE_TRACE"),
+        "parallel reasoning must not be double-injected over inline <think>; got: {:?}",
+        prepared.prompt
+    );
+}
+
+#[test]
+fn reasoning_field_routes_request_through_raw_json_path() {
+    // A reasoning-bearing request (no tool fields) must still take the raw-JSON
+    // path so the reasoning reaches templates that read message.get('reasoning').
+    let request = request_with_prior_assistant_reasoning();
+    // preserve_thinking=true so the field is forwarded for the retained turns.
+    let raw = build_raw_json_messages(&request);
+    let arr = raw.as_array().expect("raw messages must be an array");
+    let assistant = arr
+        .iter()
+        .find(|m| m.get("role").and_then(|r| r.as_str()) == Some("assistant"))
+        .expect("assistant message present");
+    assert_eq!(
+        assistant.get("reasoning").and_then(|r| r.as_str()),
+        Some("compute 2+2=4"),
+        "raw JSON assistant message must carry the reasoning field"
     );
 }

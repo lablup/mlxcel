@@ -175,9 +175,12 @@ pub(crate) async fn prepare_chat_request_with_cache(
 
     let preserve_thinking = merged_kwargs.preserve_thinking();
 
-    let prompt = if has_tool_fields(request) {
-        // When messages contain tool_calls or tool_call_id, use raw JSON
-        // rendering so the Jinja2 template can access all fields.
+    let prompt = if has_tool_fields(request) || has_reasoning_fields(request) {
+        // When messages contain tool_calls / tool_call_id, or a parallel
+        // `reasoning` field (issue #362), use raw JSON rendering so the Jinja2
+        // template can access all fields. The typed `ChatMessage` path only
+        // carries role + content, so reasoning would otherwise be dropped
+        // before reaching templates that render `message.get('reasoning')`.
         let raw_messages = build_raw_json_messages_with_thinking(request, preserve_thinking);
         // Build the stripped ChatMessages in parallel so the fallback path can
         // use them without re-running strip_rolling_checkpoint.
@@ -267,6 +270,18 @@ fn has_tool_fields(request: &ChatCompletionRequest) -> bool {
         .any(|m| m.tool_call_id.is_some() || m.tool_calls.is_some())
 }
 
+/// Check if any message carries a non-empty `reasoning` field (issue #362).
+///
+/// Such requests must take the raw-JSON render path so the parallel reasoning
+/// reaches templates that read `message.get('reasoning')`; the typed
+/// [`ChatMessage`] path drops everything except role and content.
+fn has_reasoning_fields(request: &ChatCompletionRequest) -> bool {
+    request
+        .messages
+        .iter()
+        .any(|m| m.reasoning.as_ref().is_some_and(|r| !r.is_empty()))
+}
+
 /// Build raw JSON messages for template rendering, preserving all fields
 /// (including tool_calls, tool_call_id) so Jinja2 templates can iterate over
 /// multi-turn tool-use conversations.
@@ -315,8 +330,9 @@ fn build_raw_json_messages_with_thinking(
         .enumerate()
         .map(|(idx, m)| {
             // Strip think blocks from assistant messages before the checkpoint.
+            let stripped = strip_indices.contains(&idx);
             let raw_content = m.content.text();
-            let content = if strip_indices.contains(&idx) {
+            let content = if stripped {
                 strip_think_block(&raw_content).into_owned()
             } else {
                 raw_content
@@ -338,6 +354,28 @@ fn build_raw_json_messages_with_thinking(
                     serde_json::to_value(tool_calls).unwrap_or(serde_json::Value::Null);
                 normalize_tool_call_arguments(&mut tc_value);
                 msg["tool_calls"] = tc_value;
+            }
+
+            // Forward the parallel `reasoning` field (issue #362) so templates
+            // that render `message.get('reasoning')` (e.g. Gemma 4) see prior
+            // assistant thinking across turns. The decision mirrors the inline
+            // `<think>` handling exactly so the two channels stay consistent:
+            //
+            // - When this message is being stripped (preserve_thinking=false and
+            //   it sits before the rolling checkpoint), drop the reasoning field
+            //   too. Stripping the inline block while leaking the parallel field
+            //   would still feed prior thinking back into the prompt.
+            // - When preserve_thinking=true (or this is the retained latest
+            //   reply), forward the reasoning field, unless the content already
+            //   carries an inline `<think>` block. Forwarding it on top of an
+            //   inline block would double-inject the same reasoning into
+            //   templates that render both channels.
+            if !stripped
+                && let Some(reasoning) = m.reasoning.as_ref()
+                && !reasoning.is_empty()
+                && !content.contains("<think>")
+            {
+                msg["reasoning"] = serde_json::Value::String(reasoning.clone());
             }
 
             msg

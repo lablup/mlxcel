@@ -316,6 +316,19 @@ pub struct Message {
     /// Tool calls made by the assistant (multi-turn history)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<ToolCallInMessage>>,
+    /// Prior-turn assistant reasoning ("interleaved reasoning"), forwarded to
+    /// chat templates that render `message.get('reasoning')` (e.g. Gemma 4) so
+    /// the model can see its own thinking across turns (issue #362).
+    ///
+    /// Accepts both `reasoning` and the OpenAI-compatible `reasoning_content`
+    /// spelling via serde alias. The field is dropped from serialized output
+    /// when absent, keeping existing wire shapes unchanged.
+    #[serde(
+        default,
+        alias = "reasoning_content",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub reasoning: Option<String>,
 }
 
 /// Sampling parameters shared across endpoints
@@ -832,6 +845,47 @@ mod tests {
         let msg: Message = serde_json::from_str(json).unwrap();
         assert_eq!(msg.content.text(), "hello");
         assert!(matches!(msg.content, MessageContent::Text(_)));
+    }
+
+    #[test]
+    fn message_reasoning_field_and_alias_round_trip() {
+        // Issue #362: assistant `reasoning` is accepted under both the
+        // `reasoning` and OpenAI-compatible `reasoning_content` spellings, and
+        // its presence does not disturb the other fields.
+        let from_reasoning: Message = serde_json::from_str(
+            r#"{"role":"assistant","content":"hi","reasoning":"because 2+2=4"}"#,
+        )
+        .expect("`reasoning` must deserialize");
+        assert_eq!(from_reasoning.reasoning.as_deref(), Some("because 2+2=4"));
+        assert_eq!(from_reasoning.content.text(), "hi");
+
+        let from_alias: Message = serde_json::from_str(
+            r#"{"role":"assistant","content":"hi","reasoning_content":"alias text"}"#,
+        )
+        .expect("`reasoning_content` alias must deserialize");
+        assert_eq!(from_alias.reasoning.as_deref(), Some("alias text"));
+
+        // Absent reasoning leaves the field None while other fields still load.
+        let absent: Message =
+            serde_json::from_str(r#"{"role":"user","content":"q","name":"alice"}"#)
+                .expect("missing reasoning must deserialize");
+        assert_eq!(absent.reasoning, None);
+        assert_eq!(absent.name.as_deref(), Some("alice"));
+
+        // Serialize uses the canonical `reasoning` key and omits it when None.
+        let serialized = serde_json::to_string(&from_reasoning).unwrap();
+        assert!(
+            serialized.contains(r#""reasoning":"because 2+2=4""#),
+            "serialized form must carry reasoning: {serialized}"
+        );
+        let absent_serialized = serde_json::to_string(&absent).unwrap();
+        assert!(
+            !absent_serialized.contains("reasoning"),
+            "absent reasoning must be omitted from output: {absent_serialized}"
+        );
+        // Full round-trip preserves the value.
+        let round_trip: Message = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(round_trip.reasoning.as_deref(), Some("because 2+2=4"));
     }
 
     #[test]

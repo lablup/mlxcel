@@ -85,6 +85,7 @@ pub fn anthropic_request_to_chat(request: &AnthropicRequest) -> AnthropicTransla
             content: MessageContent::Text(text),
             name: None,
             tool_call_id: None,
+            reasoning: None,
             tool_calls: None,
         });
     }
@@ -176,6 +177,7 @@ fn append_message(out: &mut Vec<Message>, message: &AnthropicMessage) {
                 content: MessageContent::Text(text.clone()),
                 name: None,
                 tool_call_id: None,
+                reasoning: None,
                 tool_calls: None,
             });
         }
@@ -184,6 +186,7 @@ fn append_message(out: &mut Vec<Message>, message: &AnthropicMessage) {
             let mut image_parts: Vec<ContentPart> = Vec::new();
             let mut tool_calls: Vec<ToolCallInMessage> = Vec::new();
             let mut tool_results: Vec<Message> = Vec::new();
+            let mut reasoning_parts: Vec<String> = Vec::new();
 
             for block in blocks {
                 match block {
@@ -228,9 +231,22 @@ fn append_message(out: &mut Vec<Message>, message: &AnthropicMessage) {
                             ));
                         }
                     }
-                    AnthropicContentBlock::Thinking { .. } | AnthropicContentBlock::Unknown => {
-                        // Dropped: thinking traces and unknown blocks do not
-                        // feed back into the next prompt.
+                    AnthropicContentBlock::Thinking { thinking } => {
+                        // Forward extended-thinking traces from assistant turns
+                        // into the parallel `reasoning` field (issue #362) so
+                        // templates that render `message.get('reasoning')` see
+                        // prior thinking across turns. Thinking on non-assistant
+                        // turns is meaningless and ignored.
+                        if message.role == AnthropicRole::Assistant
+                            && let Some(text) = thinking.as_ref()
+                            && !text.is_empty()
+                        {
+                            reasoning_parts.push(text.clone());
+                        }
+                    }
+                    AnthropicContentBlock::Unknown => {
+                        // Dropped: unknown blocks do not feed back into the
+                        // next prompt.
                     }
                 }
             }
@@ -256,11 +272,17 @@ fn append_message(out: &mut Vec<Message>, message: &AnthropicMessage) {
                 } else {
                     MessageContent::Text(joined_text)
                 };
+                let reasoning = if reasoning_parts.is_empty() {
+                    None
+                } else {
+                    Some(reasoning_parts.join("\n"))
+                };
                 out.push(Message {
                     role,
                     content,
                     name: None,
                     tool_call_id: None,
+                    reasoning,
                     tool_calls: if tool_calls.is_empty() {
                         None
                     } else {
@@ -363,6 +385,7 @@ fn fold_system_messages(messages: &mut Vec<Message>) {
             content: MessageContent::Text(text),
             name: None,
             tool_call_id: None,
+            reasoning: None,
             tool_calls: None,
         });
     }
@@ -494,6 +517,7 @@ fn tool_result_message(
         content: message_content,
         name: None,
         tool_call_id: tool_use_id.map(|s| s.to_string()),
+        reasoning: None,
         tool_calls: None,
     }
 }
@@ -768,6 +792,24 @@ mod tests {
         assert_eq!(calls[0].id, "toolu_1");
         assert_eq!(calls[0].function.name, "get_weather");
         assert_eq!(calls[0].function.arguments, r#"{"city":"SF"}"#);
+    }
+
+    #[test]
+    fn assistant_thinking_block_becomes_reasoning_field() {
+        // Issue #362: an Anthropic assistant `thinking` block is forwarded onto
+        // the internal message's parallel `reasoning` field for cross-API
+        // consistency, instead of being dropped.
+        let req = parse_req(
+            r#"{"model":"m","messages":[{"role":"assistant","content":[
+                {"type":"thinking","thinking":"step by step"},
+                {"type":"text","text":"the answer"}
+            ]}]}"#,
+        );
+        let t = anthropic_request_to_chat(&req);
+        let msg = &t.chat_request.messages[0];
+        assert!(matches!(msg.role, Role::Assistant));
+        assert_eq!(msg.content.text(), "the answer");
+        assert_eq!(msg.reasoning.as_deref(), Some("step by step"));
     }
 
     #[test]

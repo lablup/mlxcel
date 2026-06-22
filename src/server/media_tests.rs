@@ -35,6 +35,7 @@ fn build_chat_request(parts: Vec<ContentPart>) -> ChatCompletionRequest {
             content: MessageContent::Parts(parts),
             name: None,
             tool_call_id: None,
+            reasoning: None,
             tool_calls: None,
         }],
         stream: false,
@@ -187,6 +188,7 @@ async fn extract_chat_image_data_collects_images_across_messages() {
                 content: MessageContent::Text("ignore".to_string()),
                 name: None,
                 tool_call_id: None,
+                reasoning: None,
                 tool_calls: None,
             },
             Message {
@@ -208,6 +210,7 @@ async fn extract_chat_image_data_collects_images_across_messages() {
                 ]),
                 name: None,
                 tool_call_id: None,
+                reasoning: None,
                 tool_calls: None,
             },
         ],
