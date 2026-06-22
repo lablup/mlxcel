@@ -75,7 +75,7 @@ jobs:
       #   - workflow_dispatch  -> the release_tag input, when provided
       #   - otherwise          -> the exact commit that triggered the run
       - name: Checkout code
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           # Don't leave GITHUB_TOKEN in .git/config; release jobs only fetch.
           persist-credentials: false
@@ -431,7 +431,7 @@ jobs:
       #   - workflow_dispatch  -> the release_tag input, when provided
       #   - otherwise          -> the exact commit that triggered the run
       - name: Checkout code
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           # Don't leave GITHUB_TOKEN in .git/config; release jobs only fetch.
           persist-credentials: false
@@ -596,7 +596,7 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           persist-credentials: false
           ref: ${{ github.event.release.tag_name || github.event.inputs.release_tag || github.sha }}

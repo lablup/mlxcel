@@ -96,7 +96,7 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           # Don't leave GITHUB_TOKEN in .git/config; CI jobs only fetch.
           persist-credentials: false
@@ -227,7 +227,7 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           # Don't leave GITHUB_TOKEN in .git/config; CI jobs only fetch.
           persist-credentials: false
