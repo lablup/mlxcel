@@ -204,3 +204,42 @@ fn xielu_formula_matches_hand_values() {
         "x=0 should be near zero: got {at_zero}"
     );
 }
+
+/// The MLX `apertus_xielu` path factors the shared `beta * x` term out of both
+/// branches and adds it once after the per-element select:
+///   `result = where(x > 0, alpha_p*x^2, (expm1(min(x,eps))-x)*alpha_n) + beta*x`
+/// rather than adding `beta * x` inside each branch. This mirrors that factored
+/// structure on scalars and asserts it equals the branch-local reference
+/// (`xielu_scalar`) bit-for-bit in f32, which is the algebraic guarantee behind
+/// "greedy temp-0 output unchanged": the select only chooses which value
+/// `beta * x` is added to, so factoring the add out cannot change any result.
+fn xielu_scalar_factored(x: f32, alpha_p_raw: f32, alpha_n_raw: f32, beta: f32, eps: f32) -> f32 {
+    let alpha_p = softplus(alpha_p_raw);
+    let alpha_n = beta + softplus(alpha_n_raw);
+    let core = if x > 0.0 {
+        alpha_p * x * x
+    } else {
+        let clamped = x.min(eps);
+        ((clamped.exp() - 1.0) - x) * alpha_n
+    };
+    core + beta * x
+}
+
+#[test]
+fn xielu_factored_beta_x_matches_branch_local() {
+    let beta = 0.5f32;
+    let eps = -1e-6f32;
+    let raw = (0.8f32.exp() - 1.0).ln();
+
+    // Across positive, negative, and zero inputs the factored form (beta * x
+    // added once after the select) must equal the branch-local form bit-for-bit.
+    for &x in &[-4.0f32, -1.0, -0.25, 0.0, 0.25, 1.0, 4.0, 12.5] {
+        let branch_local = xielu_scalar(x, raw, raw, beta, eps);
+        let factored = xielu_scalar_factored(x, raw, raw, beta, eps);
+        assert_eq!(
+            branch_local.to_bits(),
+            factored.to_bits(),
+            "factored xIELU diverged at x={x}: branch_local={branch_local}, factored={factored}"
+        );
+    }
+}

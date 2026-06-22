@@ -41,6 +41,8 @@ use mlxcel_core::{MlxArray, UniquePtr};
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::OnceLock;
+use std::time::Instant;
 
 // Configuration.
 #[derive(Debug, Clone, Deserialize)]
@@ -140,23 +142,70 @@ fn apertus_xielu(
 ) -> UniquePtr<MlxArray> {
     let dtype = mlxcel_core::array_dtype(x);
 
-    // beta * x is shared by both branches.
-    let beta_x = mlxcel_core::multiply_scalar(x, beta);
-
-    // Positive branch: alpha_p * x^2 + beta * x.
+    // Positive-branch core: alpha_p * x^2.
     let x_sq = mlxcel_core::square(x);
-    let pos = mlxcel_core::add(&mlxcel_core::multiply_scalar(&x_sq, alpha_p), &beta_x);
+    let pos_core = mlxcel_core::multiply_scalar(&x_sq, alpha_p);
 
-    // Negative branch: (expm1(min(x, eps)) - x) * alpha_n + beta * x.
+    // Negative-branch core: (expm1(min(x, eps)) - x) * alpha_n.
     let eps_arr = mlxcel_core::full_f32(&[1], eps, dtype);
     let clamped = mlxcel_core::minimum(x, &eps_arr);
     let neg_core = mlxcel_core::subtract(&mlxcel_core::expm1(&clamped), x);
-    let neg = mlxcel_core::add(&mlxcel_core::multiply_scalar(&neg_core, alpha_n), &beta_x);
+    let neg_core = mlxcel_core::multiply_scalar(&neg_core, alpha_n);
 
-    // Select per element on x > 0.
+    // Select the per-element branch on x > 0, then add the shared `beta * x`
+    // once, outside the select. Both branches end in `+ beta * x`, so factoring
+    // that term out drops one elementwise add (and its kernel launch) per layer
+    // per token. The arithmetic is unchanged: the select only chooses which
+    // value `beta * x` is added to, so greedy temp-0 decode stays bit-identical.
     let zero_arr = mlxcel_core::full_f32(&[1], 0.0, dtype);
     let cond = mlxcel_core::greater(x, &zero_arr);
-    mlxcel_core::where_cond(&cond, &pos, &neg)
+    let selected = mlxcel_core::where_cond(&cond, &pos_core, &neg_core);
+    mlxcel_core::add(&selected, &mlxcel_core::multiply_scalar(x, beta))
+}
+
+// Decode profiling (env-gated, default-off).
+//
+// Mirrors the lightweight hooks in `src/models/nemotron_h.rs` and
+// `src/models/qwen3_moe.rs` for the dense apertus path. Both flags are read
+// once from the environment and cached, so the steady-state decode path pays
+// only an atomic load per token when profiling is disabled (the default).
+//
+// - `MLXCEL_PROFILE_BLOCKS`: attribute single-token decode wall-clock between
+//   the attention and MLP (xIELU) sub-blocks. Active profiling `eval()`s the
+//   sub-block outputs, which serializes the lazy graph; use only for analysis.
+// - `MLXCEL_PROFILE_FORWARD`: split single-token decode into graph-build versus
+//   GPU-eval time for the whole forward.
+
+fn profile_blocks_enabled() -> bool {
+    static FLAG: OnceLock<bool> = OnceLock::new();
+    *FLAG.get_or_init(|| std::env::var_os("MLXCEL_PROFILE_BLOCKS").is_some())
+}
+
+fn profile_forward_enabled() -> bool {
+    static FLAG: OnceLock<bool> = OnceLock::new();
+    *FLAG.get_or_init(|| std::env::var_os("MLXCEL_PROFILE_FORWARD").is_some())
+}
+
+/// Per-block decode timing accumulator. Constructed only when
+/// `MLXCEL_PROFILE_BLOCKS` is set for a single-token decode step.
+#[derive(Default)]
+struct BlockTiming {
+    attn_ns: u128,
+    mlp_ns: u128,
+}
+
+impl BlockTiming {
+    fn report(&self) {
+        let total = (self.attn_ns + self.mlp_ns).max(1);
+        eprintln!(
+            "[BLOCKS] attn:{:.3}ms({:.0}%) mlp:{:.3}ms({:.0}%) total:{:.3}ms",
+            self.attn_ns as f64 / 1e6,
+            self.attn_ns as f64 * 100.0 / total as f64,
+            self.mlp_ns as f64 / 1e6,
+            self.mlp_ns as f64 * 100.0 / total as f64,
+            total as f64 / 1e6,
+        );
+    }
 }
 
 // MLP (xIELU, no gate).
@@ -370,15 +419,40 @@ impl TransformerBlock {
         cache: &mut KVCache,
         mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
+        self.forward_timed(x, cache, mask, None)
+    }
+
+    /// Block forward with optional per-sub-block timing. The production path
+    /// passes `None`, which keeps the body identical to a plain forward (no
+    /// extra `eval()` or `Instant`). When `timing` is `Some`, the attention and
+    /// MLP outputs are `eval()`d to attribute wall-clock time to each.
+    fn forward_timed(
+        &self,
+        x: &MlxArray,
+        cache: &mut KVCache,
+        mask: Option<&MlxArray>,
+        mut timing: Option<&mut BlockTiming>,
+    ) -> UniquePtr<MlxArray> {
         // h = x + self_attn(attention_layernorm(x))
+        let attn_start = timing.as_ref().map(|_| Instant::now());
         let normed = self.attention_layernorm.forward(x);
         let attn_out = self.self_attn.forward(&normed, cache, mask);
         let h = mlxcel_core::add(x, &attn_out);
+        if let Some(t) = timing.as_mut() {
+            mlxcel_core::eval(&h);
+            t.attn_ns += attn_start.unwrap().elapsed().as_nanos();
+        }
 
         // out = h + mlp(feedforward_layernorm(h))
+        let mlp_start = timing.as_ref().map(|_| Instant::now());
         let normed = self.feedforward_layernorm.forward(&h);
         let ff_out = self.mlp.forward(&normed);
-        mlxcel_core::add(&h, &ff_out)
+        let out = mlxcel_core::add(&h, &ff_out);
+        if let Some(t) = timing.as_mut() {
+            mlxcel_core::eval(&out);
+            t.mlp_ns += mlp_start.unwrap().elapsed().as_nanos();
+        }
+        out
     }
 
     pub fn from_weights(
@@ -424,22 +498,50 @@ impl ApertusModel {
         caches: &mut [KVCache],
         mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
+        // Decode profiling is off by default: the cached flags resolve to two
+        // atomic loads and `array_shape` is only queried when a flag is set, so
+        // the steady-state decode path is unchanged.
+        let profiling = profile_blocks_enabled() || profile_forward_enabled();
+        let is_decode = profiling && mlxcel_core::array_shape(input_ids)[1] == 1;
+        let profile_blocks = is_decode && profile_blocks_enabled();
+        let profile_forward = is_decode && !profile_blocks;
+        let build_start = profile_forward.then(Instant::now);
+
         let mut h = self.embed_tokens.forward(input_ids);
+        let mut timing = profile_blocks.then(BlockTiming::default);
 
         let n = self.layers.len();
         for (i, layer) in self.layers.iter().enumerate() {
-            h = layer.forward(&h, &mut caches[i], mask);
+            h = layer.forward_timed(&h, &mut caches[i], mask, timing.as_mut());
             pipeline_hint(&h, i, n);
         }
 
         let h = self.norm.forward(&h);
 
         // No logit multiplier for Apertus.
-        if let Some(ref lm_head) = self.lm_head {
+        let logits = if let Some(ref lm_head) = self.lm_head {
             lm_head.forward(&h)
         } else {
             self.embed_tokens.as_linear(&h)
+        };
+
+        if let Some(t) = timing {
+            t.report();
         }
+        if let Some(start) = build_start {
+            let build_ms = start.elapsed().as_nanos() as f64 / 1e6;
+            let eval_start = Instant::now();
+            mlxcel_core::eval(&logits);
+            let eval_ms = eval_start.elapsed().as_nanos() as f64 / 1e6;
+            eprintln!(
+                "[FORWARD] build:{:.3}ms eval:{:.3}ms total:{:.3}ms",
+                build_ms,
+                eval_ms,
+                build_ms + eval_ms,
+            );
+        }
+
+        logits
     }
 
     pub fn make_caches(&self) -> Vec<KVCache> {
