@@ -118,7 +118,7 @@ impl Gemma4UnifiedModel {
         input_ids: &MlxArray,
         images: &[Gemma4UnifiedImageInput],
     ) -> merge::InputEmbeddings {
-        self.get_input_embeddings_with_audio(input_ids, images, None, None)
+        self.merge_multimodal(input_ids, images, &[], None, None)
     }
 
     /// Compute merged input embeddings, optionally scattering audio frames.
@@ -126,6 +126,87 @@ impl Gemma4UnifiedModel {
         &self,
         input_ids: &MlxArray,
         images: &[Gemma4UnifiedImageInput],
+        audio_features: Option<&MlxArray>,
+        audio_mask: Option<&MlxArray>,
+    ) -> merge::InputEmbeddings {
+        self.merge_multimodal(input_ids, images, &[], audio_features, audio_mask)
+    }
+
+    /// Compute merged input embeddings, scattering per-frame video soft tokens
+    /// into `video_token_id` placeholders (optionally alongside companion
+    /// images). `video_frames` is the concatenation of every clip's frames in
+    /// prompt order; each frame is one [`Gemma4UnifiedImageInput`] capped at
+    /// the processor's `video_soft_tokens_per_frame` budget.
+    pub fn get_input_embeddings_with_video(
+        &self,
+        input_ids: &MlxArray,
+        images: &[Gemma4UnifiedImageInput],
+        video_frames: &[Gemma4UnifiedImageInput],
+    ) -> merge::InputEmbeddings {
+        self.merge_multimodal(input_ids, images, video_frames, None, None)
+    }
+
+    /// Project per-frame video patches into language-model hidden features.
+    ///
+    /// Encoder-free: each frame's patches run through the same patch projector
+    /// (`vision_embedder` + `embed_vision`) as images. Returns the per-frame
+    /// features concatenated along the token axis as `[1, total_soft_tokens,
+    /// hidden]`, trimmed to each frame's real (non-padding) soft-token count,
+    /// or `None` when `video_frames` is empty. The result is scattered into
+    /// `video_token_id` placeholders by [`Self::merge_multimodal`].
+    pub fn get_video_features(
+        &self,
+        video_frames: &[Gemma4UnifiedImageInput],
+    ) -> Option<UniquePtr<MlxArray>> {
+        self.project_vision_features(video_frames)
+    }
+
+    /// Project a set of patch inputs (images or video frames) into the LM
+    /// hidden space and concatenate them along the token axis.
+    ///
+    /// Returns `[1, total_soft_tokens, hidden]` in the projector's native
+    /// dtype (the caller casts to the text dtype before scattering), or `None`
+    /// when `inputs` is empty. Shared by the image and video scatter paths so
+    /// the per-input projection + trim loop lives in one place.
+    fn project_vision_features(
+        &self,
+        inputs: &[Gemma4UnifiedImageInput],
+    ) -> Option<UniquePtr<MlxArray>> {
+        if inputs.is_empty() {
+            return None;
+        }
+        let mut features = Vec::with_capacity(inputs.len());
+        for input in inputs {
+            let patch_feat = self
+                .vision_embedder
+                .forward(&input.patches, &input.positions);
+            let projected = self.embed_vision.forward(&patch_feat);
+            // Keep only the real (non-padding) patch rows so the count aligns
+            // exactly with the placeholder tokens the processor emitted
+            // (`input.num_soft_tokens`). The padded rows sit at the tail
+            // (indices >= num_soft_tokens) and are dropped.
+            let shape = mlxcel_core::array_shape(&projected);
+            let real = (input.num_soft_tokens as i32).min(shape[0]);
+            let trimmed = mlxcel_core::slice(&projected, &[0, 0], &[real, shape[1]]);
+            // [real, hidden] -> [1, real, hidden].
+            features.push(mlxcel_core::reshape(&trimmed, &[1, real, shape[1]]));
+        }
+        if features.len() == 1 {
+            features.pop()
+        } else {
+            Some(crate::vision::encoders::qwen2_vl::concat_many(&features, 1))
+        }
+    }
+
+    /// Compute merged input embeddings for a text + image + video + audio
+    /// prompt. Image and video soft tokens scatter into their respective
+    /// placeholder ids; audio frames scatter last. Text/image/audio-only calls
+    /// pass empty slices / `None` so their behavior is unchanged.
+    fn merge_multimodal(
+        &self,
+        input_ids: &MlxArray,
+        images: &[Gemma4UnifiedImageInput],
+        video_frames: &[Gemma4UnifiedImageInput],
         audio_features: Option<&MlxArray>,
         audio_mask: Option<&MlxArray>,
     ) -> merge::InputEmbeddings {
@@ -143,39 +224,25 @@ impl Gemma4UnifiedModel {
         let per_layer_inputs = self.build_per_layer_inputs(input_ids, &inputs_embeds);
 
         // Encoder-free vision: project each image's patches, concat along the
-        // token axis, and scatter into image_token_id placeholders.
-        let mut result_embeds = if images.is_empty() {
-            merge::InputEmbeddings {
-                inputs_embeds: mlxcel_core::copy(&inputs_embeds),
-                attention_mask_4d: None,
-            }
-        } else {
-            let mut features = Vec::with_capacity(images.len());
-            for image in images {
-                let patch_feat = self
-                    .vision_embedder
-                    .forward(&image.patches, &image.positions);
-                let projected = self.embed_vision.forward(&patch_feat);
-                // Keep only the real (non-padding) patch rows so the count
-                // aligns exactly with the image placeholder tokens the
-                // processor emitted (`image.num_soft_tokens`). The padded rows
-                // sit at the tail (indices >= num_soft_tokens) and are dropped.
-                let shape = mlxcel_core::array_shape(&projected);
-                let real = (image.num_soft_tokens as i32).min(shape[0]);
-                let trimmed = mlxcel_core::slice(&projected, &[0, 0], &[real, shape[1]]);
-                // [real, hidden] -> [1, real, hidden].
-                features.push(mlxcel_core::reshape(&trimmed, &[1, real, shape[1]]));
-            }
-            let merged = if features.len() == 1 {
-                mlxcel_core::astype(
-                    features[0].as_ref().unwrap(),
-                    mlxcel_core::array_dtype(&inputs_embeds),
-                )
-            } else {
-                let cat = crate::vision::encoders::qwen2_vl::concat_many(&features, 1);
-                mlxcel_core::astype(&cat, mlxcel_core::array_dtype(&inputs_embeds))
-            };
-            merge::merge_llava(self.image_token_id, &merged, &inputs_embeds, input_ids)
+        // token axis, and scatter into image_token_id placeholders. Video
+        // frames follow the identical projection and scatter into
+        // video_token_id placeholders (issue #164). Each scatter runs on the
+        // running embeddings so image and video features coexist.
+        let dtype = mlxcel_core::array_dtype(&inputs_embeds);
+        let mut current = mlxcel_core::copy(&inputs_embeds);
+        if let Some(image_feats) = self.project_vision_features(images) {
+            let merged = mlxcel_core::astype(&image_feats, dtype);
+            current =
+                merge::merge_llava(self.image_token_id, &merged, &current, input_ids).inputs_embeds;
+        }
+        if let Some(video_feats) = self.project_vision_features(video_frames) {
+            let merged = mlxcel_core::astype(&video_feats, dtype);
+            current =
+                merge::merge_llava(self.video_token_id, &merged, &current, input_ids).inputs_embeds;
+        }
+        let mut result_embeds = merge::InputEmbeddings {
+            inputs_embeds: current,
+            attention_mask_4d: None,
         };
 
         // Audio: chunk-projected frames scattered into audio_token_id slots.

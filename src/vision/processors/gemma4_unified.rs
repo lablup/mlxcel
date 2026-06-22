@@ -25,6 +25,13 @@ use image::DynamicImage;
 use image::imageops::FilterType;
 use mlxcel_core::{MlxArray, UniquePtr};
 
+/// Default soft-token budget per video frame. Mirrors upstream
+/// `Gemma4UnifiedConfig.vision_soft_tokens_per_video_frame` default of 70
+/// (https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/models/gemma4_unified/config.py#L101).
+/// Video frames carry a much smaller per-frame budget than still images
+/// (`num_soft_tokens`, 280) because a clip supplies many frames.
+pub const DEFAULT_VIDEO_SOFT_TOKENS_PER_FRAME: usize = 70;
+
 /// One preprocessed image for the Gemma 4 Unified vision embedder.
 pub struct Gemma4UnifiedImageInput {
     /// Flat patch matrix: `[num_soft_tokens, model_patch_size² · 3]` float32.
@@ -53,6 +60,11 @@ pub struct Gemma4UnifiedProcessor {
     pub model_patch_size: usize,
     /// Maximum soft tokens (patches) per image.
     pub num_soft_tokens: usize,
+    /// Maximum soft tokens (patches) per video frame. Smaller than
+    /// `num_soft_tokens` because a clip supplies many frames. Defaults to
+    /// [`DEFAULT_VIDEO_SOFT_TOKENS_PER_FRAME`]; the loader overrides it from
+    /// `vision_soft_tokens_per_video_frame` in the checkpoint config.
+    pub video_soft_tokens_per_frame: usize,
     /// Raw samples per audio frame/token.
     pub audio_samples_per_token: usize,
     /// Pixel rescale factor (1/255).
@@ -68,9 +80,16 @@ impl Gemma4UnifiedProcessor {
         Self {
             model_patch_size: model_patch_size.max(1),
             num_soft_tokens: num_soft_tokens.max(1),
+            video_soft_tokens_per_frame: DEFAULT_VIDEO_SOFT_TOKENS_PER_FRAME,
             audio_samples_per_token: audio_samples_per_token.max(1),
             rescale_factor: 1.0 / 255.0,
         }
+    }
+
+    /// Override the per-video-frame soft-token budget (config-driven). Clamped
+    /// to at least 1 so the patch loop always emits a row.
+    pub fn set_video_soft_tokens_per_frame(&mut self, value: usize) {
+        self.video_soft_tokens_per_frame = value.max(1);
     }
 
     /// Flat patch dimension (`model_patch_size² · 3`).
@@ -87,9 +106,37 @@ impl Gemma4UnifiedProcessor {
             .collect()
     }
 
+    /// Preprocess decoded video frames into per-frame patch inputs.
+    ///
+    /// Video is "images per frame": each decoded frame runs through the same
+    /// encoder-free patchify as a still image, but the per-frame soft-token
+    /// budget is capped at [`Self::video_soft_tokens_per_frame`] (70 by
+    /// default, from `vision_soft_tokens_per_video_frame`) rather than the
+    /// larger image budget [`Self::num_soft_tokens`]. Each returned
+    /// [`Gemma4UnifiedImageInput`] therefore has its `patches`/`positions`
+    /// padded to `video_soft_tokens_per_frame` rows with `num_soft_tokens`
+    /// equal to the real patch count for that frame.
+    pub fn preprocess_video_frames(&self, frames: &[DynamicImage]) -> Vec<Gemma4UnifiedImageInput> {
+        frames
+            .iter()
+            .map(|frame| self.patchify(frame, self.video_soft_tokens_per_frame))
+            .collect()
+    }
+
     fn preprocess_single(&self, image: &DynamicImage) -> Gemma4UnifiedImageInput {
+        self.patchify(image, self.num_soft_tokens)
+    }
+
+    /// Patchify one image (or video frame) into flat patch vectors plus grid
+    /// positions, capped and padded to `soft_token_cap` rows. Shared by the
+    /// image ([`Self::preprocess_single`]) and video
+    /// ([`Self::preprocess_video_frames`]) paths so the patch loop lives in one
+    /// place; only the soft-token budget differs.
+    fn patchify(&self, image: &DynamicImage, soft_token_cap: usize) -> Gemma4UnifiedImageInput {
+        let soft_token_cap = soft_token_cap.max(1);
         let rgb = image.to_rgb8();
-        let (target_h, target_w) = self.resize_dims(rgb.height() as usize, rgb.width() as usize);
+        let (target_h, target_w) =
+            self.resize_dims(rgb.height() as usize, rgb.width() as usize, soft_token_cap);
 
         let resized = if rgb.height() as usize == target_h && rgb.width() as usize == target_w {
             rgb
@@ -102,18 +149,18 @@ impl Gemma4UnifiedProcessor {
         let ps = self.model_patch_size;
         let grid_h = target_h / ps;
         let grid_w = target_w / ps;
-        let real_patches = (grid_h * grid_w).min(self.num_soft_tokens);
+        let real_patches = (grid_h * grid_w).min(soft_token_cap);
         let patch_dim = self.patch_dim();
 
-        // Pad row count up to num_soft_tokens; pad rows stay zero and get
+        // Pad row count up to soft_token_cap; pad rows stay zero and get
         // position -1 so the embedder contributes zero for them.
-        let mut patch_data = vec![0.0f32; self.num_soft_tokens * patch_dim];
-        let mut positions = vec![-1i32; self.num_soft_tokens * 2];
+        let mut patch_data = vec![0.0f32; soft_token_cap * patch_dim];
+        let mut positions = vec![-1i32; soft_token_cap * 2];
 
         let mut patch_idx = 0usize;
         'outer: for py in 0..grid_h {
             for px in 0..grid_w {
-                if patch_idx >= self.num_soft_tokens {
+                if patch_idx >= soft_token_cap {
                     break 'outer;
                 }
                 // Fill this patch's flat vector in (y, x, c) row-major order:
@@ -139,19 +186,23 @@ impl Gemma4UnifiedProcessor {
         Gemma4UnifiedImageInput {
             patches: mlxcel_core::from_slice_f32(
                 &patch_data,
-                &[self.num_soft_tokens as i32, patch_dim as i32],
+                &[soft_token_cap as i32, patch_dim as i32],
             ),
-            positions: mlxcel_core::from_slice_i32(&positions, &[self.num_soft_tokens as i32, 2]),
+            positions: mlxcel_core::from_slice_i32(&positions, &[soft_token_cap as i32, 2]),
             num_soft_tokens: real_patches,
         }
     }
 
     /// Aspect-ratio-preserving resize so the number of `model_patch_size`
-    /// patches stays at or below `num_soft_tokens` and each side is a multiple
+    /// patches stays at or below `max_patches` and each side is a multiple
     /// of `model_patch_size`.
-    fn resize_dims(&self, image_height: usize, image_width: usize) -> (usize, usize) {
+    fn resize_dims(
+        &self,
+        image_height: usize,
+        image_width: usize,
+        max_patches: usize,
+    ) -> (usize, usize) {
         let ps = self.model_patch_size;
-        let max_patches = self.num_soft_tokens;
         let target_px = max_patches as f64 * (ps * ps) as f64;
         let factor = (target_px / ((image_height * image_width).max(1) as f64)).sqrt();
 

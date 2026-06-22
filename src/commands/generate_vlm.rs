@@ -210,6 +210,15 @@ pub(crate) fn compute_vlm_embeddings(
                 target_fps,
             );
         }
+        if let LoadedModel::Gemma4Unified(unified) = model {
+            return compute_gemma4_unified_video_embeddings(
+                unified,
+                prompt_tokens,
+                image_paths,
+                video_paths,
+                target_fps,
+            );
+        }
         return Err(anyhow::anyhow!(
             "--video input is currently only supported by Gemma4 VLMs"
         ));
@@ -671,6 +680,99 @@ fn compute_gemma4_video_embeddings(
 
     print_preparation_summary(VlmPreparationSummary::Gemma4Video {
         video_count: processed_videos.len(),
+        frame_slots: total_frames,
+        total_tokens: prompt_tokens.len(),
+    });
+
+    Ok(Some(embeddings))
+}
+
+/// Compute video embeddings (and optional preceding image embeddings)
+/// for the Gemma 4 Unified (encoder-free) model.
+///
+/// Decodes each video via `mlxcel::video::load_videos` (subprocess `ffmpeg`,
+/// default 2.0 fps), patchifies each frame through the encoder-free vision
+/// embedder with the per-frame `vision_soft_tokens_per_video_frame` budget,
+/// expands the prompt into per-frame `<boi> video_token*N <eoi>` runs, and
+/// scatters the per-frame soft tokens into `video_token_id` placeholders.
+/// Mirrors [`compute_gemma4_video_embeddings`] but routes through the unified
+/// model's `video_token_id` scatter instead of the ViT image path.
+fn compute_gemma4_unified_video_embeddings(
+    unified: &mlxcel::vision::Gemma4UnifiedModel,
+    prompt_tokens: &mut Vec<i32>,
+    image_paths: &[PathBuf],
+    video_paths: &[PathBuf],
+    target_fps: f64,
+) -> Result<Option<InputEmbeddings>> {
+    if !video::ffmpeg_available() {
+        return Err(anyhow::anyhow!(
+            "Video input requires `ffmpeg` on PATH. Install ffmpeg (e.g. `brew install ffmpeg` \
+             on macOS or `apt install ffmpeg` on Linux) and retry."
+        ));
+    }
+
+    // Decode the videos. `target_fps == 0` is rejected by `smart_nframes`,
+    // so guard here with a clean error.
+    let videos = video::load_videos(video_paths, Some(target_fps), None)
+        .map_err(|err| anyhow::anyhow!("Failed to load video(s): {}", err))?;
+    println!(
+        "Loaded {} video(s) ({} total frames after sampling).",
+        videos.len(),
+        videos.iter().map(Vec::len).sum::<usize>()
+    );
+
+    // Optional companion images (e.g. user passes both --image and --video).
+    let processed_images = if image_paths.is_empty() {
+        Vec::new()
+    } else {
+        let images: Vec<image::DynamicImage> = image_paths
+            .iter()
+            .map(|path| {
+                image::open(path)
+                    .map_err(|e| anyhow::anyhow!("Failed to load image {:?}: {}", path, e))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        println!("Loaded {} image(s).", images.len());
+        let processed = unified.processor.preprocess(&images);
+        let num_soft_tokens: Vec<usize> = processed.iter().map(|i| i.num_soft_tokens).collect();
+        mlxcel::vlm_runtime::expand_gemma4_image_tokens_pub(
+            prompt_tokens,
+            unified.image_token_id,
+            unified.boi_token_id,
+            unified.eoi_token_id,
+            &num_soft_tokens,
+        )?;
+        processed
+    };
+
+    // Patchify every frame of every video through the encoder-free embedder.
+    // Frames are kept flat (in video, then frame order) so the scatter sees
+    // them in the same order as the expanded video_token_id placeholders.
+    let mut video_frames: Vec<mlxcel::vision::processors::gemma4_unified::Gemma4UnifiedImageInput> =
+        Vec::new();
+    let mut video_frame_tokens: Vec<Vec<usize>> = Vec::with_capacity(videos.len());
+    for frames in &videos {
+        let processed = unified.processor.preprocess_video_frames(frames);
+        video_frame_tokens.push(processed.iter().map(|f| f.num_soft_tokens).collect());
+        video_frames.extend(processed);
+    }
+
+    mlxcel::vlm_runtime::expand_gemma4_unified_video_tokens(
+        prompt_tokens,
+        unified.video_token_id,
+        unified.boi_token_id,
+        unified.eoi_token_id,
+        &video_frame_tokens,
+    )?;
+
+    let total_frames: usize = video_frame_tokens.iter().map(Vec::len).sum();
+    let input_ids_arr =
+        mlxcel_core::from_slice_i32(prompt_tokens, &[1, prompt_tokens.len() as i32]);
+    let embeddings =
+        unified.get_input_embeddings_with_video(&input_ids_arr, &processed_images, &video_frames);
+
+    print_preparation_summary(VlmPreparationSummary::Gemma4Video {
+        video_count: videos.len(),
         frame_slots: total_frames,
         total_tokens: prompt_tokens.len(),
     });

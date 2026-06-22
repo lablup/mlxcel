@@ -60,6 +60,20 @@ fn block_ids_video_counts_as_vision() {
 }
 
 #[test]
+fn block_ids_video_frames_separated_by_eoi_boi_are_distinct() {
+    // Two video frames, each framed as BOI video* EOI (the unified video
+    // expansion). The EOI/BOI between frames break the vision run, so each
+    // frame's video span is its own bidirectional block. Mirrors the per-frame
+    // boi/eoi framing produced by `expand_gemma4_unified_video_tokens`.
+    // BOI vid vid EOI BOI vid vid EOI
+    let input = vec![
+        255_999, 258_884, 258_884, 258_882, 255_999, 258_884, 258_884, 258_882,
+    ];
+    let block = compute_vision_block_ids(&input, IDS, true).expect("video present, no audio");
+    assert_eq!(block, vec![-1, 0, 0, -1, -1, 1, 1, -1]);
+}
+
+#[test]
 fn block_ids_disabled_when_audio_present() {
     // image + audio → fully causal (overlay disabled per issue §6).
     let input = vec![1, 258_880, 258_880, 258_881, 9];

@@ -13,8 +13,9 @@
 // limitations under the License.
 
 use super::{
-    VlmPreparationSummary, expand_gemma4_video_tokens, format_molmo_v1_prompt_for_processor,
-    prepared_embedding_refs, shift_molmo_v1_image_input_idx_for_bos, should_prepare_vlm_embeddings,
+    VlmPreparationSummary, expand_gemma4_unified_video_tokens, expand_gemma4_video_tokens,
+    format_molmo_v1_prompt_for_processor, prepared_embedding_refs,
+    shift_molmo_v1_image_input_idx_for_bos, should_prepare_vlm_embeddings,
 };
 use crate::vision::merge::InputEmbeddings;
 use crate::vlm_prompt::{ImageTokenBlockAction, ImageTokenBlockStats};
@@ -169,5 +170,54 @@ fn expand_gemma4_video_tokens_no_op_when_videos_empty() {
     let mut prompt = vec![1, 7, 8];
     let original = prompt.clone();
     expand_gemma4_video_tokens(&mut prompt, 100, 200, 201, 202, &[]).unwrap();
+    assert_eq!(prompt, original);
+}
+
+// ── Gemma 4 Unified video token expansion (issue #164) ────────────────────────
+// Per-frame soft tokens are the VIDEO token id (not the image token id), framed
+// BOI video* EOI per frame. video_token_id = 100, boi = 201, eoi = 202.
+
+#[test]
+fn expand_gemma4_unified_video_tokens_splices_after_bos_when_no_placeholder() {
+    // CLI path: no <|video|> placeholder in the prompt, two frames of 2 soft
+    // tokens each spliced after BOS.
+    let mut prompt = vec![1, 7, 8];
+    let frames = vec![vec![2, 2]]; // one video, two frames
+    expand_gemma4_unified_video_tokens(&mut prompt, 100, 201, 202, &frames).unwrap();
+    assert_eq!(
+        prompt,
+        vec![
+            1, // BOS
+            201, 100, 100, 202, // frame 1: BOI video video EOI
+            201, 100, 100, 202, // frame 2: BOI video video EOI
+            7, 8,
+        ]
+    );
+}
+
+#[test]
+fn expand_gemma4_unified_video_tokens_replaces_placeholder() {
+    // Server/chat-template path: a single <|video|> (video_token_id=100)
+    // placeholder is replaced by its video's per-frame runs. The replacement
+    // scan does not re-expand the video tokens it just inserted.
+    let mut prompt = vec![1, 100, 7];
+    let frames = vec![vec![3]]; // one video, one frame of 3 soft tokens
+    expand_gemma4_unified_video_tokens(&mut prompt, 100, 201, 202, &frames).unwrap();
+    assert_eq!(prompt, vec![1, 201, 100, 100, 100, 202, 7]);
+}
+
+#[test]
+fn expand_gemma4_unified_video_tokens_errors_on_count_mismatch() {
+    let mut prompt = vec![1, 100, 100, 7]; // two placeholders
+    let frames = vec![vec![2]]; // only one video
+    let err = expand_gemma4_unified_video_tokens(&mut prompt, 100, 201, 202, &frames).unwrap_err();
+    assert!(err.to_string().contains("video placeholder"));
+}
+
+#[test]
+fn expand_gemma4_unified_video_tokens_no_op_when_videos_empty() {
+    let mut prompt = vec![1, 7, 8];
+    let original = prompt.clone();
+    expand_gemma4_unified_video_tokens(&mut prompt, 100, 201, 202, &[]).unwrap();
     assert_eq!(prompt, original);
 }

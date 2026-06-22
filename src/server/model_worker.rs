@@ -1244,14 +1244,15 @@ fn prepare_request_video_embeddings(
 ) -> Result<Option<InputEmbeddings>> {
     use crate::multimodal::video;
 
+    // Encoder-free Gemma 4 Unified routes to its own video path (issue #164):
+    // per-frame patches scatter into video_token_id placeholders rather than
+    // through the ViT image tower.
+    if let LoadedModel::Gemma4Unified(unified) = model {
+        return prepare_gemma4_unified_video_embeddings(unified, prompt_tokens, images, videos);
+    }
+
     let gemma4_vl = match model {
         LoadedModel::Gemma4VLM(model) => model,
-        LoadedModel::Gemma4Unified(_) => {
-            return Err(anyhow!(
-                "video input is not yet supported for gemma4_unified models; \
-                 text and image (and image+audio) inputs are supported"
-            ));
-        }
         _ => {
             return Err(anyhow!(
                 "video inputs are only supported by Gemma 4 VLM models in this build"
@@ -1365,6 +1366,102 @@ fn prepare_request_video_embeddings(
         &processed_images,
         &processed_videos,
     );
+
+    Ok(Some(embeddings))
+}
+
+/// Resolve `videos` into Gemma 4 Unified (encoder-free) video embeddings.
+///
+/// Mirrors [`prepare_request_video_embeddings`]'s decode/ffmpeg handling and
+/// the CLI's `compute_gemma4_unified_video_embeddings`, but routes through the
+/// unified model's `video_token_id` scatter: each decoded frame is patchified
+/// at the per-frame `vision_soft_tokens_per_video_frame` budget, the prompt is
+/// expanded into per-frame `<boi> video_token*N <eoi>` runs, and the per-frame
+/// soft tokens scatter into `video_token_id` placeholders (issue #164).
+///
+/// `videos` carry [`crate::multimodal::video::VideoSource`] handles that are
+/// fd-backed on Unix, so `load_video_source` reads from the open file
+/// description the resolver already validated (no canonicalize → ffmpeg-open
+/// TOCTOU window).
+fn prepare_gemma4_unified_video_embeddings(
+    unified: &crate::vision::Gemma4UnifiedModel,
+    prompt_tokens: &mut Vec<i32>,
+    images: &[Vec<u8>],
+    videos: &[crate::server::media::ResolvedVideo],
+) -> Result<Option<InputEmbeddings>> {
+    use crate::multimodal::video;
+
+    if !video::ffmpeg_available() {
+        return Err(anyhow!(
+            "Video input requires `ffmpeg` on PATH. Install ffmpeg (e.g. `brew install ffmpeg` \
+             on macOS or `apt install ffmpeg` on Linux) and retry."
+        ));
+    }
+
+    // Decode each video honoring the per-video FPS override when supplied;
+    // otherwise fall back to `multimodal::video::DEFAULT_FPS` (2.0 fps).
+    let mut decoded_videos: Vec<Vec<image::DynamicImage>> = Vec::with_capacity(videos.len());
+    for resolved in videos.iter() {
+        let fps = resolved.fps.unwrap_or(video::DEFAULT_FPS);
+        let frames =
+            video::load_video_source(&resolved.source, Some(fps), None).map_err(|err| {
+                anyhow!(
+                    "Failed to load video {:?}: {}",
+                    resolved.source.canonical_path(),
+                    err
+                )
+            })?;
+        decoded_videos.push(frames);
+    }
+
+    let total_decoded_frames: usize = decoded_videos.iter().map(Vec::len).sum();
+    tracing::info!(
+        "Gemma4 Unified video request: decoded {} video(s) ({} total frames after sampling)",
+        decoded_videos.len(),
+        total_decoded_frames
+    );
+
+    // Optional companion images (e.g. user passes both image_url and video_url).
+    let processed_images = if images.is_empty() {
+        Vec::new()
+    } else {
+        let decoded_images = decode_request_images(images)?;
+        let processed = unified.processor.preprocess(&decoded_images);
+        let num_soft_tokens: Vec<usize> = processed.iter().map(|img| img.num_soft_tokens).collect();
+        crate::vlm_runtime::expand_gemma4_image_tokens_pub(
+            prompt_tokens,
+            unified.image_token_id,
+            unified.boi_token_id,
+            unified.eoi_token_id,
+            &num_soft_tokens,
+        )?;
+        processed
+    };
+
+    // Patchify every frame of every video. Frames stay flat in (video, frame)
+    // order so the scatter sees them in the same order as the expanded
+    // video_token_id placeholders.
+    let mut video_frames: Vec<crate::vision::processors::gemma4_unified::Gemma4UnifiedImageInput> =
+        Vec::with_capacity(total_decoded_frames);
+    let mut video_frame_tokens: Vec<Vec<usize>> = Vec::with_capacity(decoded_videos.len());
+    for frames in &decoded_videos {
+        let processed = unified.processor.preprocess_video_frames(frames);
+        video_frame_tokens.push(processed.iter().map(|f| f.num_soft_tokens).collect());
+        video_frames.extend(processed);
+    }
+
+    crate::vlm_runtime::expand_gemma4_unified_video_tokens(
+        prompt_tokens,
+        unified.video_token_id,
+        unified.boi_token_id,
+        unified.eoi_token_id,
+        &video_frame_tokens,
+    )?;
+
+    let input_ids_arr =
+        mlxcel_core::from_slice_i32(prompt_tokens, &[1, prompt_tokens.len() as i32]);
+    let embeddings =
+        unified.get_input_embeddings_with_video(&input_ids_arr, &processed_images, &video_frames);
 
     Ok(Some(embeddings))
 }

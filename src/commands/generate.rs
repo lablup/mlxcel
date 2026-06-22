@@ -531,18 +531,22 @@ fn apply_user_chat_template(processor: &ChatTemplateProcessor, user_prompt: &str
         .unwrap_or_else(|_| user_prompt.to_string())
 }
 
-/// Apply chat template with image placeholders for VLM models.
+/// Apply chat template with image / video placeholders for VLM models.
 ///
 /// Creates multimodal content entries that Gemma3-style templates can
-/// render into `<start_of_image>` tokens (which are later expanded into
-/// full image-token blocks by `apply_image_token_blocks`).
+/// render into `<start_of_image>` / `<|video|>` markers (which are later
+/// expanded into full soft-token blocks by the per-family expansion
+/// helpers).
 ///
 /// Only used when the template explicitly handles `type == 'image'`
-/// content items. Templates without image support fall back to text-only.
+/// content items. Video content parts are only emitted when the template
+/// also handles `type == 'video'`. Templates without image support fall
+/// back to text-only.
 fn apply_vlm_chat_template(
     processor: &ChatTemplateProcessor,
     user_prompt: &str,
     num_images: usize,
+    num_videos: usize,
 ) -> String {
     // Only attempt multimodal rendering when the template handles image
     // content items.  Templates that don't (e.g. Vicuna, ChatML) would
@@ -551,10 +555,21 @@ fn apply_vlm_chat_template(
         return apply_user_chat_template(processor, user_prompt);
     }
 
-    // Build a multimodal content list: [{type: image}, ..., {type: text, text: prompt}]
+    // Build a multimodal content list:
+    // [{type: image}, ..., {type: video}, ..., {type: text, text: prompt}].
+    // Video items are only included when the template renders them (so the
+    // marker lands inside the user turn, alongside the question, instead of
+    // before it). Placing the video marker in the user turn matters: a video
+    // spliced before the user turn yields no grounded answer (issue #164).
+    let emit_video = num_videos > 0 && processor.supports_video_content();
     let mut content_parts: Vec<serde_json::Value> = Vec::new();
     for _ in 0..num_images {
         content_parts.push(serde_json::json!({"type": "image"}));
+    }
+    if emit_video {
+        for _ in 0..num_videos {
+            content_parts.push(serde_json::json!({"type": "video"}));
+        }
     }
     content_parts.push(serde_json::json!({"type": "text", "text": user_prompt}));
 
@@ -574,6 +589,7 @@ fn resolve_cli_prompt(
     no_chat_template: bool,
     processor: Option<&ChatTemplateProcessor>,
     num_images: usize,
+    num_videos: usize,
 ) -> String {
     if no_chat_template {
         return user_prompt.to_string();
@@ -582,8 +598,8 @@ fn resolve_cli_prompt(
     processor.map_or_else(
         || user_prompt.to_string(),
         |processor| {
-            if num_images > 0 {
-                apply_vlm_chat_template(processor, user_prompt, num_images)
+            if num_images > 0 || num_videos > 0 {
+                apply_vlm_chat_template(processor, user_prompt, num_images, num_videos)
             } else {
                 apply_user_chat_template(processor, user_prompt)
             }
@@ -596,6 +612,7 @@ fn load_cli_prompt(
     user_prompt: &str,
     no_chat_template: bool,
     num_images: usize,
+    num_videos: usize,
 ) -> String {
     let processor = if no_chat_template {
         None
@@ -610,7 +627,25 @@ fn load_cli_prompt(
         no_chat_template,
         processor.as_ref(),
         num_images,
+        num_videos,
     )
+}
+
+/// Number of `<|video|>` content parts to render into the CLI chat prompt.
+///
+/// Only the encoder-free `gemma4_unified` model expands a real `video_token_id`
+/// placeholder inside the user turn (issue #164); every other family (including
+/// the ViT-backed `gemma4` VLM, which splices video frames after BOS via a
+/// sentinel) keeps `0` so its prompt rendering is byte-for-byte unchanged. On
+/// any detection failure we conservatively return `0`.
+fn cli_video_content_part_count(model_path: &Path, num_videos: usize) -> usize {
+    if num_videos == 0 {
+        return 0;
+    }
+    match mlxcel::models::get_model_type(model_path) {
+        Ok(mlxcel::models::ModelType::Gemma4Unified) => num_videos,
+        _ => 0,
+    }
 }
 
 fn tokenize_prompt(
@@ -1413,6 +1448,7 @@ fn run_generate_once(mut args: GenerateArgs) -> Result<()> {
         &user_prompt,
         args.generation.no_chat_template,
         args.generation.image.len(),
+        cli_video_content_part_count(&args.model.model, args.generation.video.len()),
     );
     let mut prompt_tokens = tokenize_prompt(&tokenizer, &prompt)?;
 

@@ -309,6 +309,16 @@ impl ChatTemplateProcessor {
         self.template.contains("'image'") || self.template.contains("\"image\"")
     }
 
+    /// Check if the template handles multimodal content with video items.
+    ///
+    /// Returns true when the Jinja2 template iterates over content items and
+    /// checks for `type == 'video'`, as the Gemma 4 templates do (they emit a
+    /// `<|video|>` marker per video item). Templates without this pattern
+    /// expect `content` to be a plain string.
+    pub fn supports_video_content(&self) -> bool {
+        self.template.contains("'video'") || self.template.contains("\"video\"")
+    }
+
     /// Apply the chat template with raw JSON messages (for multimodal content).
     ///
     /// This allows passing messages with list-type content entries (e.g.,

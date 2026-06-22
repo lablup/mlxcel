@@ -141,6 +141,19 @@ fn eoa_token_index_fallback() {
 }
 
 #[test]
+fn vision_soft_tokens_per_video_frame_defaults_to_70() {
+    // The reference checkpoint omits the field; it must default to 70
+    // (issue #164). An explicit value overrides the default.
+    let cfg: Gemma4UnifiedConfig = serde_json::from_value(reference_config()).unwrap();
+    assert_eq!(cfg.vision_soft_tokens_per_video_frame, 70);
+
+    let mut value = reference_config();
+    value["vision_soft_tokens_per_video_frame"] = serde_json::json!(140);
+    let cfg2: Gemma4UnifiedConfig = serde_json::from_value(value).unwrap();
+    assert_eq!(cfg2.vision_soft_tokens_per_video_frame, 140);
+}
+
+#[test]
 fn token_ids_match_reference() {
     let cfg: Gemma4UnifiedConfig = serde_json::from_value(reference_config()).unwrap();
     assert_eq!(cfg.image_token_id, 258880);

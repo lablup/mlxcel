@@ -706,6 +706,52 @@ fn overlay_makes_image_block_bidirectional_keeps_text_causal() {
     );
 }
 
+#[test]
+fn overlay_aligns_block_ids_to_windowed_key_axis() {
+    // issue #164: when seq_len > sliding_window the sliding base mask caps its
+    // key axis to the window (k < seq_len). The overlay must align the
+    // block ids to the trailing `k` keys (the rotating window) instead of
+    // reshaping the full-length id vector into the shorter key axis (which
+    // panicked with "Cannot reshape array of size N into shape (1, window)").
+    //
+    // Build an 8-query / 4-key base (window 4 over an 8-token sequence). Block
+    // ids cover the full 8 positions; one vision span sits at positions 5,6
+    // which are inside the windowed tail (logical keys [4, 8)).
+    let block_ids = [-1i32, -1, 0, 0, -1, 1, 1, -1];
+    let seq = block_ids.len() as i32; // 8
+    let window = 4i32;
+
+    // Capped sliding base: rows = seq (8), cols = window (4). Column k_c maps to
+    // logical key position (seq - window) + k_c = 4 + k_c.
+    let base = mlxcel_core::utils::create_causal_mask_with_window(seq, 0, Some(window));
+    assert_eq!(mlxcel_core::array_shape(&base), vec![seq, window]);
+
+    let ids = mlxcel_core::from_slice_i32(&block_ids, &[seq]);
+    let overlaid = crate::models::gemma4::overlay_block_bidirectional(&base, &ids);
+    mlxcel_core::eval(&overlaid);
+    // Shape preserved: the reshape no longer panics.
+    assert_eq!(mlxcel_core::array_shape(&overlaid), vec![seq, window]);
+
+    let at = |q: i32, k: i32| -> f32 {
+        let scalar = mlxcel_core::slice(&overlaid, &[q, k], &[q + 1, k + 1]);
+        mlxcel_core::item_f32(&scalar)
+    };
+    let blocked = |v: f32| v.is_infinite() && v < 0.0;
+
+    // The block at logical positions 5,6 maps to key columns 1,2 (5-4, 6-4).
+    // Query 5 attends FORWARD to logical key 6 (column 2): bidirectional.
+    assert_eq!(at(5, 2), 0.0, "vision query 5 attends forward to key 6");
+    // Query 6 attends back to logical key 5 (column 1): causal, already 0.
+    assert_eq!(at(6, 1), 0.0, "vision query 6 attends back to key 5");
+    // A text query (7) still cannot see a future key beyond its causal band;
+    // logical key 7 is column 3, query 7 row: causal allows it (7>=7), but a
+    // text query 5 to future text key 7 (column 3) stays blocked.
+    assert!(
+        blocked(at(5, 3)),
+        "vision query 5 cannot see future text key 7"
+    );
+}
+
 // -------------------------------------------------------------------------
 // Sanitize keep/skip rules (phase 2 vision weights)
 // -------------------------------------------------------------------------

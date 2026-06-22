@@ -69,7 +69,7 @@ The fused MoE `gate_up_proj` weights are split at load time. When a vision tower
 Implemented VLM variants include:
 
 - Gemma 3 VL, Gemma 3n VL, Gemma 4 VL
-- Gemma 4 Unified (`gemma4_unified`): encoder-free text + image + audio. Patch-projection vision embedder and waveform-chunk audio path feed the shared Gemma 4 backbone, with blockwise bidirectional attention over image/video token spans during prefill. Video input is not yet supported.
+- Gemma 4 Unified (`gemma4_unified`): encoder-free text + image + audio + video. Patch-projection vision embedder and waveform-chunk audio path feed the shared Gemma 4 backbone, with blockwise bidirectional attention over image/video token spans during prefill. Video is handled as images-per-frame: frames are extracted with `ffmpeg` (uniform sampling, default 2.0 fps), patchified through the same vision embedder with a per-frame `vision_soft_tokens_per_video_frame` budget (70), and scattered into `video_token_id` placeholder spans. Available on both the CLI (`--video`) and the server (`video_url` content blocks). The prompt grows by ~70 soft tokens per sampled frame, so long clips at the default fps can exceed the model's 1024-token sliding window during single-pass prefill; lower `--fps` (or fewer frames) keeps a clip within the window.
 - Llama 4 VLM
 - LLaVA and LLaVA-Bunny
 - Aya Vision and PaliGemma

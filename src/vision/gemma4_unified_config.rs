@@ -119,6 +119,12 @@ pub struct Gemma4UnifiedConfig {
     #[serde(default)]
     pub audio_config: Option<Gemma4UnifiedAudioConfig>,
 
+    /// Soft tokens (patches) emitted per video frame. Smaller than the
+    /// per-image budget (`vision_config.num_soft_tokens`, 280) because a clip
+    /// supplies many frames. Default 70.
+    #[serde(default = "default_vision_soft_tokens_per_video_frame")]
+    pub vision_soft_tokens_per_video_frame: usize,
+
     #[serde(default = "default_image_token_id")]
     pub image_token_id: i32,
     #[serde(default = "default_audio_token_id")]
@@ -143,6 +149,9 @@ pub struct Gemma4UnifiedConfig {
     pub tie_word_embeddings: Option<bool>,
 }
 
+fn default_vision_soft_tokens_per_video_frame() -> usize {
+    70
+}
 fn default_image_token_id() -> i32 {
     258_880
 }

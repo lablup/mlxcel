@@ -281,7 +281,7 @@ pub(crate) fn load_gemma4_unified(model_path: &Path) -> Result<LoadedModel> {
     )
     .map_err(|e| anyhow::anyhow!("Failed to load Gemma4 Unified vision projector: {}", e))?;
 
-    let processor = Gemma4UnifiedProcessor::new(
+    let mut processor = Gemma4UnifiedProcessor::new(
         vision_config.model_patch_size,
         vision_config.num_soft_tokens,
         unified_config
@@ -290,6 +290,7 @@ pub(crate) fn load_gemma4_unified(model_path: &Path) -> Result<LoadedModel> {
             .map(|a| a.audio_samples_per_token)
             .unwrap_or(640),
     );
+    processor.set_video_soft_tokens_per_frame(unified_config.vision_soft_tokens_per_video_frame);
 
     let mut model = Gemma4UnifiedModel::new(
         models::Gemma4Wrapper::new(text_model),

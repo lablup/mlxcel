@@ -13,10 +13,11 @@
 // limitations under the License.
 
 use super::{
-    apply_user_chat_template, cli_pipeline_requested, estimate_delta_label_and_bytes,
-    generated_suffix, generation_stats_from_duration, memory_preflight_ctx_len,
-    resolve_cli_pipeline_assignments, resolve_cli_prompt, should_route_offline_mtp,
-    strip_trailing_eos, validate_pipeline_parallel_args, validate_tensor_parallel_args,
+    apply_user_chat_template, apply_vlm_chat_template, cli_pipeline_requested,
+    estimate_delta_label_and_bytes, generated_suffix, generation_stats_from_duration,
+    memory_preflight_ctx_len, resolve_cli_pipeline_assignments, resolve_cli_prompt,
+    should_route_offline_mtp, strip_trailing_eos, validate_pipeline_parallel_args,
+    validate_tensor_parallel_args,
 };
 use mlxcel::server::chat_template::ChatTemplateProcessor;
 use mlxcel_core::drafter::DrafterKind;
@@ -131,7 +132,7 @@ fn apply_user_chat_template_wraps_prompt_as_user_message() {
 fn resolve_cli_prompt_skips_template_when_disabled() {
     let processor = ChatTemplateProcessor::with_template("wrapped".to_string());
 
-    let prompt = resolve_cli_prompt("Hello", true, Some(&processor), 0);
+    let prompt = resolve_cli_prompt("Hello", true, Some(&processor), 0, 0);
 
     assert_eq!(prompt, "Hello");
 }
@@ -140,9 +141,50 @@ fn resolve_cli_prompt_skips_template_when_disabled() {
 fn resolve_cli_prompt_falls_back_on_template_errors() {
     let processor = ChatTemplateProcessor::with_template("{% if %}".to_string());
 
-    let prompt = resolve_cli_prompt("Hello", false, Some(&processor), 0);
+    let prompt = resolve_cli_prompt("Hello", false, Some(&processor), 0, 0);
 
     assert_eq!(prompt, "Hello");
+}
+
+#[test]
+fn vlm_chat_template_renders_video_content_part_in_user_turn() {
+    // A template that handles both image and video content items. The video
+    // marker must land alongside the text (inside the user turn), not before
+    // it — that placement is what lets the Gemma 4 Unified video path produce a
+    // grounded answer (issue #164).
+    let template = "user: {% for item in messages[0]['content'] %}\
+        {% if item['type'] == 'image' %}<IMG>\
+        {% elif item['type'] == 'video' %}<VID>\
+        {% elif item['type'] == 'text' %}{{ item['text'] }}\
+        {% endif %}{% endfor %}"
+        .to_string();
+    let processor = ChatTemplateProcessor::with_template(template);
+
+    // One video + the question: marker precedes the text within the turn.
+    let prompt = apply_vlm_chat_template(&processor, "Describe this video.", 0, 1);
+    assert_eq!(prompt, "user: <VID>Describe this video.");
+
+    // Image + video together render in image-then-video order.
+    let mixed = apply_vlm_chat_template(&processor, "Q", 1, 1);
+    assert_eq!(mixed, "user: <IMG><VID>Q");
+}
+
+#[test]
+fn vlm_chat_template_omits_video_when_template_lacks_video_support() {
+    // A template that handles images but NOT video must not emit a video
+    // content part (it would render the raw item as text). The ViT-backed
+    // gemma4 VLM path relies on this: it keeps its splice-after-BOS behavior.
+    let template = "user: {% for item in messages[0]['content'] %}\
+        {% if item['type'] == 'image' %}<IMG>\
+        {% elif item['type'] == 'text' %}{{ item['text'] }}\
+        {% endif %}{% endfor %}"
+        .to_string();
+    let processor = ChatTemplateProcessor::with_template(template);
+    assert!(!processor.supports_video_content());
+
+    // num_videos > 0 but the template has no video branch: no marker emitted.
+    let prompt = apply_vlm_chat_template(&processor, "Q", 0, 1);
+    assert_eq!(prompt, "user: Q");
 }
 
 #[test]

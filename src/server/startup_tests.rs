@@ -1075,6 +1075,28 @@ fn detect_model_media_support_recognises_gemma4_vlm() {
 }
 
 #[test]
+fn detect_model_media_support_recognises_gemma4_unified() {
+    // The encoder-free Gemma 4 Unified model consumes `video_url` content
+    // blocks (issue #164). `model_type=gemma4_unified` is detected by
+    // model_type alone (no vision-tower weight probe needed), so a minimal
+    // config is enough to assert the route guard will admit video requests.
+    let dir = temp_path("media-gemma4-unified");
+    let config = serde_json::json!({
+        "model_type": "gemma4_unified",
+        "text_config": { "model_type": "gemma4_unified_text" },
+        "vision_config": { "model_type": "gemma4_unified_vision" }
+    });
+    std::fs::write(dir.join("config.json"), config.to_string()).unwrap();
+
+    let support = detect_model_media_support(&dir);
+    assert!(
+        support.video,
+        "gemma4_unified must enable video_url content blocks, got {support:?}"
+    );
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
 fn detect_model_media_support_falls_back_for_missing_config() {
     let dir = temp_path("media-missing-config");
     // No config.json → get_model_type fails → fallback yields "no video".

@@ -108,6 +108,74 @@ fn resize_respects_soft_token_budget() {
 }
 
 #[test]
+fn video_frames_use_per_frame_soft_token_budget() {
+    // Default video budget is DEFAULT_VIDEO_SOFT_TOKENS_PER_FRAME (70), smaller
+    // than the image budget (280). A large frame must not exceed it.
+    let proc = Gemma4UnifiedProcessor::new(48, 280, 640);
+    assert_eq!(
+        proc.video_soft_tokens_per_frame,
+        DEFAULT_VIDEO_SOFT_TOKENS_PER_FRAME
+    );
+    let big = solid_image(4096, 4096, [128, 128, 128]);
+    let frames = proc.preprocess_video_frames(std::slice::from_ref(&big));
+    assert_eq!(frames.len(), 1);
+    // Padded to the per-frame budget (70), not the image budget (280).
+    assert_eq!(
+        mlxcel_core::array_shape(&frames[0].patches),
+        vec![DEFAULT_VIDEO_SOFT_TOKENS_PER_FRAME as i32, 48 * 48 * 3]
+    );
+    assert_eq!(
+        mlxcel_core::array_shape(&frames[0].positions),
+        vec![DEFAULT_VIDEO_SOFT_TOKENS_PER_FRAME as i32, 2]
+    );
+    assert!(frames[0].num_soft_tokens <= DEFAULT_VIDEO_SOFT_TOKENS_PER_FRAME);
+    assert!(frames[0].num_soft_tokens > 0);
+}
+
+#[test]
+fn video_frames_patchify_each_frame_independently() {
+    // A small explicit budget makes the patch count deterministic: a 96x96
+    // frame on a 2x2 grid yields 4 real patches, padded to the budget (6).
+    let mut proc = Gemma4UnifiedProcessor::new(48, 280, 640);
+    proc.set_video_soft_tokens_per_frame(6);
+    assert_eq!(proc.video_soft_tokens_per_frame, 6);
+
+    let frame_a = solid_image(96, 96, [255, 0, 0]);
+    let frame_b = solid_image(96, 96, [0, 255, 0]);
+    let frames = proc.preprocess_video_frames(&[frame_a, frame_b]);
+    assert_eq!(frames.len(), 2);
+    for frame in &frames {
+        assert_eq!(frame.num_soft_tokens, 4);
+        assert_eq!(
+            mlxcel_core::array_shape(&frame.patches),
+            vec![6, 48 * 48 * 3]
+        );
+        assert_eq!(mlxcel_core::array_shape(&frame.positions), vec![6, 2]);
+        // Padding row (index 4, beyond the 4 real patches) carries position -1.
+        assert_eq!(read_i32_at(&frame.positions, &[4, 0]), -1);
+        assert_eq!(read_i32_at(&frame.positions, &[4, 1]), -1);
+    }
+    // First channel of frame A's first patch is 255/255 = 1.0 (red).
+    assert!((read_f32_at(&frames[0].patches, &[0, 0]) - 1.0).abs() < 1e-6);
+}
+
+#[test]
+fn image_path_unchanged_by_video_budget() {
+    // Setting the video budget must not affect the still-image path: a 96x96
+    // image on budget 6 still yields 4 real patches padded to 6 (regression
+    // guard for the shared patchify refactor).
+    let mut proc = Gemma4UnifiedProcessor::new(48, 6, 640);
+    proc.set_video_soft_tokens_per_frame(70);
+    let img = solid_image(96, 96, [255, 0, 0]);
+    let out = proc.preprocess(std::slice::from_ref(&img));
+    assert_eq!(out[0].num_soft_tokens, 4);
+    assert_eq!(
+        mlxcel_core::array_shape(&out[0].patches),
+        vec![6, 48 * 48 * 3]
+    );
+}
+
+#[test]
 fn audio_chunks_into_frames_with_mask() {
     let proc = Gemma4UnifiedProcessor::new(48, 280, 640);
     // 1.5 frames worth of samples → 2 frames; the second is zero-padded.

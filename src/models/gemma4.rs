@@ -313,10 +313,20 @@ pub(crate) fn overlay_block_bidirectional(
     let k = base_shape[base_shape.len() - 1];
 
     // Align the per-position block ids to the query (rows) and key (cols)
-    // axes. For single-chunk prefill q == k == seq_len; when the cache holds a
-    // prefix (offset > 0) the key axis is longer than the block-id vector, so
-    // the leading `k - q` key columns (the already-cached prefix) get id -1 and
-    // never participate in a same-block match.
+    // axes. For single-chunk prefill q == k == seq_len; two key-axis mismatches
+    // are handled:
+    // * `k > id_len` (cached prefix, offset > 0): the leading `k - id_len` key
+    //   columns are the already-cached prefix and get id -1 (left pad) so they
+    //   never participate in a same-block match.
+    // * `k < id_len` (sliding-window cap): when `seq_len > sliding_window`,
+    //   `create_causal_mask_with_window` caps the key axis to the last `k`
+    //   logical positions (the rotating window holds only the most recent `k`
+    //   keys). Column `k_c` then maps to logical key position
+    //   `(id_len - k) + k_c`, so align the key-side ids to the trailing `k`
+    //   block ids. Every vision span is at most one frame/image (≤ a few dozen
+    //   soft tokens) and so always fits inside the window; aligning to the tail
+    //   keeps each span's same-block match intact without leaking attention
+    //   outside the windowed key axis (issue #164).
     let ids_shape = mlxcel_core::array_shape(block_ids);
     let id_len = if ids_shape.is_empty() {
         1
@@ -326,9 +336,15 @@ pub(crate) fn overlay_block_bidirectional(
     let q_ids = mlxcel_core::reshape(block_ids, &[q, 1]);
     let k_ids = if k == id_len {
         mlxcel_core::reshape(block_ids, &[1, k])
+    } else if k < id_len {
+        // Sliding-window cap: take the trailing `k` block ids (the keys the
+        // rotating window retains).
+        let tail = mlxcel_core::slice(block_ids, &[id_len - k], &[id_len]);
+        mlxcel_core::reshape(&tail, &[1, k])
     } else {
-        // Pad the key-side ids on the left with -1 so cached-prefix columns
-        // are non-matching. pad_width is [(before, after)] per axis.
+        // Cached prefix (offset > 0): pad the key-side ids on the left with -1
+        // so cached-prefix columns are non-matching. pad_width is
+        // [(before, after)] per axis.
         let pad_before = (k - id_len).max(0);
         let padded = mlxcel_core::pad(block_ids, &[pad_before, 0], -1.0);
         mlxcel_core::reshape(&padded, &[1, k])
