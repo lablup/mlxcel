@@ -432,9 +432,11 @@ impl SparseMoeBlock {
             mlxcel_core::copy(x)
         };
 
-        // Router logits -> softmax routing probabilities.
+        // Router logits -> softmax routing probabilities. Use the precise
+        // (f32-accumulation) softmax to match upstream mellum.py, which routes
+        // with `mx.softmax(..., precise=True)` for router stability (same as olmoe).
         let logits = self.gate.forward(&x_flat);
-        let gates = mlxcel_core::softmax(&logits, -1);
+        let gates = mlxcel_core::softmax_precise(&logits, -1);
 
         // Top-k selection via argpartition (top-k of logits == top-k of softmax).
         let k = self.num_experts_per_tok as i32;
