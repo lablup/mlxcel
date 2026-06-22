@@ -88,6 +88,32 @@ fn whisper_model_type_is_detected() {
 }
 
 #[test]
+fn mellum_model_type_is_detected() {
+    let model_dir = temp_path("mellum_code");
+    fs::create_dir_all(&model_dir).unwrap();
+    fs::write(
+        model_dir.join("config.json"),
+        r#"{
+            "model_type": "mellum",
+            "architectures": ["MellumForCausalLM"],
+            "hidden_size": 2304,
+            "head_dim": 128,
+            "num_hidden_layers": 28,
+            "num_attention_heads": 32,
+            "num_key_value_heads": 4,
+            "num_experts": 64,
+            "vocab_size": 98304
+        }"#,
+    )
+    .unwrap();
+
+    let detected = super::detection::get_model_type(&model_dir).unwrap();
+    assert_eq!(detected, ModelType::Mellum);
+
+    fs::remove_dir_all(model_dir).unwrap();
+}
+
+#[test]
 fn gemma4_detection_stays_on_text_route_without_vision_weights() {
     let model_dir = temp_path("gemma4_text_route");
     fs::create_dir_all(&model_dir).unwrap();

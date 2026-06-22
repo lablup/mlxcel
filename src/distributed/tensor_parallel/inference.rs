@@ -204,6 +204,7 @@ fn fallback_architecture(model_type: ModelType) -> &'static str {
         ModelType::Olmo2 => "olmo2",
         ModelType::Olmo3 => "olmo3",
         ModelType::StarCoder2 => "starcoder2",
+        ModelType::Mellum => "mellum",
         ModelType::MiniCPM | ModelType::MiniCPMOVLM => "minicpm",
         ModelType::MiniCPM3 => "minicpm3",
         ModelType::StableLM => "stablelm",

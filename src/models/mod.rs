@@ -72,6 +72,7 @@ pub mod llama4;
 pub mod longcat_flash_ngram;
 pub mod mamba;
 pub mod mamba2;
+pub mod mellum;
 pub mod mimo;
 pub mod minicpm;
 pub mod minicpm3;
@@ -163,6 +164,7 @@ pub use llama4::{Llama4CxxModel, Llama4Wrapper};
 pub use longcat_flash_ngram::LongcatFlashNgramModel;
 pub use mamba::MambaModel;
 pub use mamba2::Mamba2Model;
+pub use mellum::{MellumModel, MellumWrapper};
 pub use mimo::MiMoModel;
 pub use minicpm::MiniCPMModel;
 pub use minicpm3::MiniCPM3Model;
@@ -327,6 +329,7 @@ pub enum ModelType {
 
     // Code models
     StarCoder2,
+    Mellum, // Mellum 2 (JetBrains hybrid-attention MoE code model)
 
     // Other Transformer models
     MiniCPM,
@@ -483,6 +486,7 @@ pub const ALL_MODEL_TYPES: &[ModelType] = &[
     ModelType::Olmo3,
     // Code models
     ModelType::StarCoder2,
+    ModelType::Mellum,
     // Other Transformer models
     ModelType::MiniCPM,
     ModelType::MiniCPM3,
@@ -703,6 +707,7 @@ impl ModelType {
 
             // ----- Specialized / other small/text -----
             ModelType::StarCoder2 => ("StarCoder 2", "Specialized"),
+            ModelType::Mellum => ("Mellum 2 (JetBrains code)", "Specialized"),
             ModelType::StableLM => ("StableLM", "Specialized"),
             ModelType::Baichuan => ("Baichuan", "Specialized"),
             ModelType::MiniCPM => ("MiniCPM 1", "Specialized"),
@@ -865,6 +870,7 @@ mod metadata_tests {
             Olmo2,
             Olmo3,
             StarCoder2,
+            Mellum,
             MiniCPM,
             MiniCPM3,
             StableLM,
@@ -1030,6 +1036,10 @@ mod falcon_h1_tests;
 #[cfg(test)]
 #[path = "plamo2_tests.rs"]
 mod plamo2_tests;
+
+#[cfg(test)]
+#[path = "mellum_tests.rs"]
+mod mellum_tests;
 
 #[cfg(test)]
 #[path = "granitemoehybrid_tests.rs"]
