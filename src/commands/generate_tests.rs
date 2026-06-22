@@ -150,7 +150,7 @@ fn resolve_cli_prompt_falls_back_on_template_errors() {
 fn vlm_chat_template_renders_video_content_part_in_user_turn() {
     // A template that handles both image and video content items. The video
     // marker must land alongside the text (inside the user turn), not before
-    // it — that placement is what lets the Gemma 4 Unified video path produce a
+    // it. That placement is what lets the Gemma 4 Unified video path produce a
     // grounded answer (issue #164).
     let template = "user: {% for item in messages[0]['content'] %}\
         {% if item['type'] == 'image' %}<IMG>\

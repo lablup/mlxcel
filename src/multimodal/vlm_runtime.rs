@@ -1075,7 +1075,7 @@ pub fn expand_gemma4_unified_video_tokens(
         return Ok(());
     }
 
-    // No placeholder in prompt — splice all video runs in after BOS.
+    // No placeholder in prompt: splice all video runs in after BOS.
     let bos = prompt_tokens[0];
     let rest: Vec<i32> = prompt_tokens[1..].to_vec();
     let mut expanded = vec![bos];
