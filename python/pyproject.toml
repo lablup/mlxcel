@@ -1,0 +1,86 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "mlxcel"
+version = "0.1.0"
+description = "Python client for the mlxcel OpenAI-compatible inference server"
+readme = "README.md"
+requires-python = ">=3.9"
+license = "Apache-2.0"
+authors = [
+    { name = "Lablup Inc." },
+    { name = "Jeongkyu Shin" },
+]
+keywords = ["mlx", "llm", "inference", "openai", "apple-silicon"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Typing :: Typed",
+]
+dependencies = [
+    "openai>=1.40",
+    "httpx>=0.27",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.6",
+    "mypy>=1.11",
+]
+
+[project.urls]
+Homepage = "https://github.com/lablup/mlxcel"
+Repository = "https://github.com/lablup/mlxcel"
+Issues = "https://github.com/lablup/mlxcel/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/mlxcel"]
+
+[tool.pytest.ini_options]
+markers = [
+    "e2e: end-to-end tests requiring a real mlxcel binary (set MLXCEL_BIN); skipped by default",
+]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py39"
+src = ["src", "tests", "examples"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "W"]
+ignore = [
+    "UP006",  # keep typing.List etc. usable on 3.9 where needed
+    "UP007",  # keep Optional[...] / Union[...] for 3.9 runtime compatibility
+    "UP035",  # allow typing imports under requires-python 3.9
+    "UP037",  # keep quoted self-referential annotations
+    "UP045",  # keep Optional[...] over X | None for 3.9 clarity
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/fake_server.py" = ["B008"]
+
+[tool.mypy]
+python_version = "3.9"
+strict = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+namespace_packages = true
+explicit_package_bases = true
+mypy_path = "src"
+
+[[tool.mypy.overrides]]
+module = ["tests.*", "examples.*"]
+disallow_untyped_defs = false
+ignore_missing_imports = true

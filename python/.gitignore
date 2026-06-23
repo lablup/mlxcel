@@ -1,0 +1,10 @@
+# Python build / cache artifacts for the mlxcel client package.
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+dist/
+build/

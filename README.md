@@ -265,6 +265,21 @@ mlxcel arch
 
 for the CLI summary, and see [Supported models](docs/supported-models.md) for the maintained architecture table, known limitations, and VLM coverage notes.
 
+## Python
+
+`mlxcel` ships a pure-Python client that drives the OpenAI-compatible server from Python. It spawns and manages a local `mlxcel serve` process (managed mode) or connects to a running one (connect mode), auto-discovers the served model id, and exposes the raw `openai` client for the full API surface.
+
+```python
+import mlxcel
+
+with mlxcel.LLM("mlx-community/Qwen3-4B-4bit") as llm:
+    print(llm.generate("def fib(n):", max_tokens=128))
+    for delta in llm.stream("Write a haiku about autumn"):
+        print(delta, end="", flush=True)
+```
+
+Install with `pip install ./python`. See [Python client](docs/python-client.md) for managed and connect modes, streaming, structured output, async usage, and troubleshooting. The client lives in [`python/`](python) and builds entirely on the existing server (no native extension).
+
 ## Optional GUI
 
 `mlxcel-server` can be used directly through HTTP clients. For a local graphical front-end, [Backend.AI Go](https://go.backend.ai) can be used as a companion UI for chat, model management, and multi-model routing.
@@ -279,6 +294,7 @@ for the CLI summary, and see [Supported models](docs/supported-models.md) for th
 - [Tensor and pipeline parallelism](docs/distributed.md)
 - [TurboQuant KV cache](docs/turbo-kv-cache.md)
 - [OpenAI Responses API](docs/responses-api.md)
+- [Python client](docs/python-client.md)
 - [Adding a new model](docs/adding-models.md)
 
 ## Contributing

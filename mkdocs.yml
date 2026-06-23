@@ -143,6 +143,7 @@ nav:
       - user-guide/index.md
       - CLI Commands: user-guide/cli.md
       - Server Mode: user-guide/server.md
+      - Python Client: user-guide/python-client.md
       - Vision-Language Models: user-guide/vision-language-models.md
       - LoRA Adapters: user-guide/lora.md
       - Speculative Decoding: user-guide/speculative-decoding.md

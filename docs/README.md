@@ -25,6 +25,7 @@ Current GitHub-facing docs:
 10. `audio-api.md` — implemented `/v1/audio` endpoints: Whisper STT setup, request/response reference, WAV encoding details, and request validation order.
 11. `adding-models.md` — contribution guide for new model architectures.
 12. `block-diffusion.md` — DiffusionGemma block-diffusion generation: canvas denoising vs autoregressive, CLI flags, throughput, and phase 1 limitations.
+13. `python-client.md`: the `mlxcel` Python client over the OpenAI-compatible server, covering managed and connect modes, streaming, chat, structured output, the `openai_client` escape hatch, async usage, and troubleshooting.
 
 ## Architecture Decision Records
 
