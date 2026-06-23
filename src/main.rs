@@ -1716,6 +1716,7 @@ const FAMILY_ORDER: &[&str] = &[
     "LFM2",
     "PLaMo",
     "RWKV",
+    "BitNet",
     "Speech-to-text",
     "Text-to-speech",
     "Specialized",
