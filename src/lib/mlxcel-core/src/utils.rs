@@ -590,7 +590,7 @@ pub fn create_causal_mask_with_window(
 /// step), so the cache returns all `size` keys. With the capped `[size, window]`
 /// mask the attention layer slices K/V down to the trailing `window` keys, which
 /// strands the earliest query rows (logical position `< size - window`) with no
-/// visible key — an all-masked row that softmaxes to NaN and degenerates the
+/// visible key, producing an all-masked row that softmaxes to NaN and degenerates the
 /// output. Mirroring mlx-lm's `RotatingKVCache`, the correctness of the window
 /// comes from the *mask*, not from physically dropping keys, so prefill must use
 /// this full-width mask. Consumers backed by a rotating cache pair this with a

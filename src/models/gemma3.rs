@@ -67,8 +67,8 @@ use std::path::Path;
 /// values stay correct since `sliding_offset` cancels in the relative query/key
 /// relation.
 ///
-/// For `seq_len <= window` this also keeps the clamped path (byte-identical
-/// greedy output), so only over-window fresh prefills use the full mask.
+/// The full mask is only taken when `seq_len > window && sliding_offset == 0`;
+/// all other cases use the clamped path.
 fn sliding_prefill_mask(seq_len: i32, sliding_offset: i32, window: i32) -> UniquePtr<MlxArray> {
     if seq_len > window && sliding_offset == 0 {
         create_causal_mask_with_window_full(seq_len, sliding_offset, Some(window))
@@ -1355,9 +1355,14 @@ impl mlxcel_core::generate::LanguageModel for Gemma3Wrapper {
 mod gemma3_mask_tests {
     use super::*;
 
+    fn mask_at(mask: &MlxArray, q: i32, k: i32) -> f32 {
+        let scalar = mlxcel_core::slice(mask, &[q, k], &[q + 1, k + 1]);
+        mlxcel_core::item_f32(&scalar)
+    }
+
     /// Issue #401: a fresh single-pass prefill (`sliding_offset == 0`) longer
     /// than the sliding window keeps every prefill key, so the mask must span
-    /// the full `[seq_len, seq_len]` key axis.
+    /// the full `[seq_len, seq_len]` key axis and have no fully-masked row.
     #[test]
     fn sliding_prefill_mask_fresh_over_window_spans_full_key_axis() {
         let mask = sliding_prefill_mask(4, 0, 2);
@@ -1367,6 +1372,11 @@ mod gemma3_mask_tests {
             vec![4, 4],
             "fresh over-window prefill mask must span the full key axis"
         );
+        // Every query row must attend to at least itself (diagonal == 0.0),
+        // proving no all-masked row that would softmax to NaN.
+        for q in 0..4 {
+            assert_eq!(mask_at(&mask, q, q), 0.0, "row {q} must attend to itself");
+        }
     }
 
     /// Issue #401 / PR #405 follow-up: a non-fresh multi-token append

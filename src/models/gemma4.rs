@@ -2071,7 +2071,7 @@ impl Attention {
 /// decode step), so the windowed mask must span the full key axis. A capped
 /// `[l, window]` mask makes `Attention::attend` discard the (undersized) mask
 /// and fall back to `causal_attention`, which slices K/V to the trailing
-/// `window` keys — stranding the earliest query rows (logical position
+/// `window` keys, stranding the earliest query rows (logical position
 /// `< l - window`) with no visible key, producing an all-masked row that
 /// softmaxes to NaN and degenerates the output to `<pad>` (issue #401). The
 /// full `[l, l + offset]` windowed mask keeps every query row attending to its
