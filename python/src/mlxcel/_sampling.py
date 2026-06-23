@@ -12,7 +12,8 @@ from __future__ import annotations
 
 from typing import Any, Dict, Tuple
 
-# Sampling kwargs that map directly onto native OpenAI request fields.
+# Sampling kwargs accepted as top-level fields by BOTH the completions and the
+# chat-completions endpoints.
 _OPENAI_FIELDS: Tuple[str, ...] = (
     "max_tokens",
     "temperature",
@@ -25,8 +26,13 @@ _OPENAI_FIELDS: Tuple[str, ...] = (
     "n",
     "logprobs",
     "top_logprobs",
-    "response_format",
 )
+
+# Fields the OpenAI SDK accepts only on ``chat.completions.create``. For the
+# plain ``completions.create`` endpoint the SDK raises ``TypeError`` on these,
+# so they are routed through ``extra_body`` instead (the mlxcel/llguidance
+# server reads constrained-decoding settings from the raw request body).
+_CHAT_ONLY_FIELDS: Tuple[str, ...] = ("response_format",)
 
 # Server-specific sampling knobs forwarded via ``extra_body``. These are not in
 # the OpenAI schema; the server reads them from the raw request body.
@@ -42,7 +48,7 @@ _EXTRA_BODY_FIELDS: Tuple[str, ...] = (
 )
 
 
-def build_params(kwargs: Dict[str, Any]) -> Dict[str, Any]:
+def build_params(kwargs: Dict[str, Any], *, chat: bool = True) -> Dict[str, Any]:
     """Split caller kwargs into OpenAI request fields plus an ``extra_body`` payload.
 
     Known OpenAI fields are passed through as top-level request parameters.
@@ -52,8 +58,16 @@ def build_params(kwargs: Dict[str, Any]) -> Dict[str, Any]:
     remaining unknown kwargs are also routed into ``extra_body`` rather than
     silently dropped, since the OpenAI SDK rejects unexpected top-level keys.
 
+    Chat-only fields (see :data:`_CHAT_ONLY_FIELDS`, e.g. ``response_format``)
+    are valid top-level parameters for ``chat.completions.create`` but not for
+    ``completions.create``. When ``chat`` is False they are routed through
+    ``extra_body`` so the server still receives them while the SDK does not
+    raise ``TypeError`` on an unexpected keyword.
+
     Args:
         kwargs: Raw keyword arguments from a generate/chat call.
+        chat: True when building params for ``chat.completions.create``; False
+            when building for the plain ``completions.create`` endpoint.
 
     Returns:
         A new dict suitable for splatting into the OpenAI ``create`` call.
@@ -69,6 +83,13 @@ def build_params(kwargs: Dict[str, Any]) -> Dict[str, Any]:
             continue
         if key in _OPENAI_FIELDS:
             params[key] = value
+        elif key in _CHAT_ONLY_FIELDS:
+            # Top-level for chat; the completions endpoint only accepts it in
+            # the raw body, so route it through extra_body there.
+            if chat:
+                params[key] = value
+            else:
+                extra_body[key] = value
         else:
             # Recognized server knob or an unknown key: send it in the body so
             # the server can interpret it instead of the SDK rejecting it.

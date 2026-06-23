@@ -171,6 +171,13 @@ class ManagedServer:
         return f"http://{self.host}:{self.port}/health"
 
     def _build_command(self) -> List[str]:
+        """Build the ``mlxcel serve`` argv.
+
+        The API key is intentionally NOT placed on the command line: argv is
+        world-readable via ``ps`` / ``/proc/<pid>/cmdline`` on multi-user hosts.
+        It is passed to the child through the ``LLAMA_API_KEY`` environment
+        variable in :meth:`start` instead.
+        """
         binary = _find_binary(self._binary_arg)
         cmd: List[str] = [binary, "serve", "-m", self.model]
 
@@ -181,8 +188,6 @@ class ManagedServer:
             assert self.host is not None and self.port is not None
             cmd += ["--host", self.host, "--port", str(self.port)]
 
-        if self.api_key:
-            cmd += ["--api-key", self.api_key]
         if self._ctx_size is not None:
             cmd += ["--ctx-size", str(self._ctx_size)]
         if self._n_predict is not None:
@@ -209,7 +214,14 @@ class ManagedServer:
             raise MlxcelServerError("Server already started.")
 
         cmd = self._build_command()
+        # Safe to log: the API key is passed via the environment, not argv.
         logger.debug("Launching mlxcel server: %s", " ".join(cmd))
+
+        # Pass the API key through the environment so it never appears in argv
+        # (visible via ps / /proc/<pid>/cmdline) or in the launch log above.
+        env = os.environ.copy()
+        if self.api_key:
+            env["LLAMA_API_KEY"] = self.api_key
 
         # Remove a stale socket file so bind does not fail on EADDRINUSE.
         if self.uds_path is not None and os.path.exists(self.uds_path):
@@ -225,6 +237,7 @@ class ManagedServer:
                 stderr=subprocess.PIPE,
                 text=True,
                 bufsize=1,
+                env=env,
             )
         except OSError as exc:
             raise MlxcelServerError(f"Failed to launch mlxcel server: {exc}") from exc

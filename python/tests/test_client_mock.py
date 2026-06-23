@@ -16,6 +16,9 @@ MODEL_ID = "mock-model"
 # Captured request bodies, keyed by path, so tests can assert sampling mapping.
 _LAST_BODY: Dict[str, Dict[str, Any]] = {}
 
+# Captured request headers, keyed by path, so tests can assert auth behavior.
+_LAST_HEADERS: Dict[str, Dict[str, str]] = {}
+
 
 def _models_response() -> httpx.Response:
     return httpx.Response(
@@ -75,6 +78,7 @@ def _handler(request: httpx.Request) -> httpx.Response:
         except json.JSONDecodeError:
             body = {}
     _LAST_BODY[path] = body
+    _LAST_HEADERS[path] = dict(request.headers)
     stream = bool(body.get("stream"))
 
     if path == "/v1/models":
@@ -120,6 +124,7 @@ def _error_handler(request: httpx.Request) -> httpx.Response:
 @pytest.fixture()
 def llm() -> Any:
     _LAST_BODY.clear()
+    _LAST_HEADERS.clear()
     transport = httpx.MockTransport(_handler)
     client = mlxcel.LLM(transport=transport)
     yield client
@@ -185,6 +190,42 @@ def test_response_format_passthrough(llm: Any) -> None:
     assert body["response_format"] == schema
 
 
+def test_response_format_on_generate_uses_extra_body(llm: Any) -> None:
+    # response_format is chat-only for the OpenAI SDK; on the completions
+    # endpoint it must be routed through extra_body (no TypeError) and still
+    # reach the server inside the request body.
+    schema = {"type": "json_object"}
+    assert llm.generate("hi", response_format=schema) == "generated text"
+    body = _LAST_BODY["/v1/completions"]
+    assert body["response_format"] == schema
+
+
+# -- native-route authorization (regression: missing Bearer on /tokenize) ----
+
+
+def test_native_routes_carry_bearer_when_api_key_set() -> None:
+    _LAST_BODY.clear()
+    _LAST_HEADERS.clear()
+    transport = httpx.MockTransport(_handler)
+    client = mlxcel.LLM(transport=transport, api_key="secret")
+    try:
+        client.tokenize("hi")
+        client.detokenize([1, 2, 3])
+    finally:
+        client.close()
+    assert _LAST_HEADERS["/tokenize"].get("authorization") == "Bearer secret"
+    assert _LAST_HEADERS["/detokenize"].get("authorization") == "Bearer secret"
+
+
+def test_native_routes_omit_auth_without_api_key(llm: Any) -> None:
+    # The default fixture client has no api_key; the no-auth path must stay
+    # intact so servers started without --api-key keep working.
+    llm.tokenize("hi")
+    llm.detokenize([1, 2, 3])
+    assert "authorization" not in _LAST_HEADERS["/tokenize"]
+    assert "authorization" not in _LAST_HEADERS["/detokenize"]
+
+
 def test_openai_client_escape_hatch(llm: Any) -> None:
     from openai import OpenAI
 
@@ -244,6 +285,18 @@ def test_build_params_drops_none() -> None:
     assert params["temperature"] == 0.0
 
 
+def test_build_params_response_format_routing() -> None:
+    schema = {"type": "json_object"}
+    # Chat: top-level field.
+    chat_params = build_params({"response_format": schema}, chat=True)
+    assert chat_params["response_format"] == schema
+    assert "extra_body" not in chat_params
+    # Completions: routed through extra_body so completions.create won't raise.
+    cmpl_params = build_params({"response_format": schema}, chat=False)
+    assert "response_format" not in cmpl_params
+    assert cmpl_params["extra_body"]["response_format"] == schema
+
+
 # -- async ------------------------------------------------------------------
 
 
@@ -291,3 +344,39 @@ def test_async_stream_and_tokenize() -> None:
     assert streamed == "gen text"
     assert tokens == [1, 2, 3]
     assert decoded == "decoded"
+
+
+def test_async_native_routes_carry_bearer_when_api_key_set() -> None:
+    _LAST_BODY.clear()
+    _LAST_HEADERS.clear()
+    transport = httpx.MockTransport(_handler)
+
+    async def go() -> None:
+        client = mlxcel.AsyncLLM(transport=transport, api_key="secret")
+        try:
+            await client.tokenize("hi")
+            await client.detokenize([1, 2, 3])
+        finally:
+            await client.close()
+
+    _run(go())
+    assert _LAST_HEADERS["/tokenize"].get("authorization") == "Bearer secret"
+    assert _LAST_HEADERS["/detokenize"].get("authorization") == "Bearer secret"
+
+
+def test_async_native_routes_omit_auth_without_api_key() -> None:
+    _LAST_BODY.clear()
+    _LAST_HEADERS.clear()
+    transport = httpx.MockTransport(_handler)
+
+    async def go() -> None:
+        client = mlxcel.AsyncLLM(transport=transport)
+        try:
+            await client.tokenize("hi")
+            await client.detokenize([1, 2, 3])
+        finally:
+            await client.close()
+
+    _run(go())
+    assert "authorization" not in _LAST_HEADERS["/tokenize"]
+    assert "authorization" not in _LAST_HEADERS["/detokenize"]

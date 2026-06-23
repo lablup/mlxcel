@@ -175,6 +175,50 @@ def test_connect_mode_to_running_uds_server(fake_binary: str, tmp_path: Path) ->
         server.close()
 
 
+def test_api_key_not_in_argv(fake_binary: str) -> None:
+    # Regression: the API key must never appear on the command line (visible via
+    # ps / /proc/<pid>/cmdline). It is passed through LLAMA_API_KEY instead.
+    server = ManagedServer("fake/model", binary=fake_binary, host="127.0.0.1", api_key="secret")
+    cmd = server._build_command()
+    assert "--api-key" not in cmd
+    assert "secret" not in " ".join(cmd)
+
+
+def test_api_key_passed_via_env(
+    fake_binary: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The key reaches the child through LLAMA_API_KEY, not argv. Capture what
+    # Popen receives without launching a real process.
+    captured_env = {}
+    captured_cmd = []
+
+    class _StubPopen:
+        def __init__(self, cmd, *args, **kwargs):
+            captured_env.update(kwargs.get("env") or {})
+            captured_cmd.extend(cmd)
+            # Empty stderr stream so log forwarding starts and finishes cleanly.
+            self.stderr = iter(())
+
+        def poll(self):
+            # Report an immediate non-None exit so _wait_until_ready raises a
+            # clean MlxcelServerError instead of polling /health forever.
+            return 1
+
+    monkeypatch.setattr("mlxcel._server.subprocess.Popen", _StubPopen)
+
+    sock = _short_socket(tmp_path)
+    server = ManagedServer("fake/model", binary=fake_binary, socket_path=sock, api_key="secret")
+    # start() raises because the stubbed process "exits" immediately; we only
+    # care that Popen was handed the key via env and not via argv.
+    with pytest.raises(MlxcelServerError):
+        server.start()
+
+    assert captured_env.get("LLAMA_API_KEY") == "secret"
+    joined = " ".join(captured_cmd)
+    assert "secret" not in joined
+    assert "--api-key" not in joined
+
+
 def test_ensure_alive_after_crash(fake_binary: str, tmp_path: Path) -> None:
     server = ManagedServer(
         "fake/model",

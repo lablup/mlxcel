@@ -61,6 +61,10 @@ class AsyncLLM:
         self._http_client: Optional[httpx.AsyncClient] = None
         self._model: Optional[str] = None
         self._closed = False
+        # Resolved API key, used to authorize native (/tokenize, /detokenize)
+        # routes that bypass the OpenAI SDK's own Authorization injection. The
+        # empty-or-None case stays unauthenticated to preserve the no-auth path.
+        self._api_key = api_key
         timeout = timeout or DEFAULT_TIMEOUT
 
         model_override = server_kwargs.pop("model", None)
@@ -181,7 +185,7 @@ class AsyncLLM:
         """Generate a completion for ``prompt`` and return the text."""
         self._ensure_alive()
         model = await self._resolve_model()
-        params = build_params(sampling)
+        params = build_params(sampling, chat=False)
         resp = await self._client.completions.create(model=model, prompt=prompt, **params)
         return resp.choices[0].text or ""
 
@@ -189,7 +193,7 @@ class AsyncLLM:
         """Stream completion text deltas for ``prompt``."""
         self._ensure_alive()
         model = await self._resolve_model()
-        params = build_params(sampling)
+        params = build_params(sampling, chat=False)
         stream = cast(
             "AsyncStream[Completion]",
             await self._client.completions.create(
@@ -204,7 +208,7 @@ class AsyncLLM:
         """Run a chat completion and return the assistant message content."""
         self._ensure_alive()
         model = await self._resolve_model()
-        params = build_params(sampling)
+        params = build_params(sampling, chat=True)
         resp = await self._client.chat.completions.create(
             model=model, messages=as_messages(messages), **params
         )
@@ -214,7 +218,7 @@ class AsyncLLM:
         """Stream chat completion content deltas."""
         self._ensure_alive()
         model = await self._resolve_model()
-        params = build_params(sampling)
+        params = build_params(sampling, chat=True)
         stream = cast(
             "AsyncStream[ChatCompletionChunk]",
             await self._client.chat.completions.create(
@@ -248,7 +252,12 @@ class AsyncLLM:
     async def _raw_post(self, path: str, json: Dict[str, Any]) -> Dict[str, Any]:
         assert self._http_client is not None
         url = native_base_url(self._base_url) + path
-        response = await self._http_client.post(url, json=json)
+        # The OpenAI SDK injects Authorization on /v1/* routes, but these native
+        # routes go through the bare httpx client, so add the bearer token here
+        # when a key was supplied. With no key, omit the header to keep the
+        # no-auth path working against servers started without --api-key.
+        headers = {"Authorization": f"Bearer {self._api_key}"} if self._api_key else None
+        response = await self._http_client.post(url, json=json, headers=headers)
         response.raise_for_status()
         result: Dict[str, Any] = response.json()
         return result
