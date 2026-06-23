@@ -81,21 +81,33 @@ class LLM:
 
         model_override = server_kwargs.pop("model", None)
 
-        if not managed:
-            resolved_base = self._connect(base_url, socket, transport, timeout)
-        else:
-            assert model is not None
-            resolved_base = self._spawn(
-                model, binary, host, port, socket, api_key, startup_timeout, timeout, server_kwargs
-            )
+        try:
+            if not managed:
+                resolved_base = self._connect(base_url, socket, transport, timeout)
+            else:
+                assert model is not None
+                resolved_base = self._spawn(
+                    model,
+                    binary,
+                    host,
+                    port,
+                    socket,
+                    api_key,
+                    startup_timeout,
+                    timeout,
+                    server_kwargs,
+                )
 
-        self._client = OpenAI(
-            base_url=resolved_base,
-            api_key=api_key or "-",
-            http_client=self._http_client,
-        )
-        self._base_url = resolved_base
-        self._model = model_override or self._discover_model()
+            self._client = OpenAI(
+                base_url=resolved_base,
+                api_key=api_key or "-",
+                http_client=self._http_client,
+            )
+            self._base_url = resolved_base
+            self._model = model_override or self._discover_model()
+        except BaseException:
+            self.close()
+            raise
 
     # -- setup -------------------------------------------------------------
 

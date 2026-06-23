@@ -69,21 +69,42 @@ class AsyncLLM:
 
         model_override = server_kwargs.pop("model", None)
 
-        if not managed:
-            resolved_base = self._connect(base_url, socket, transport, timeout)
-        else:
-            assert model is not None
-            resolved_base = self._spawn(
-                model, binary, host, port, socket, api_key, startup_timeout, timeout, server_kwargs
-            )
+        try:
+            if not managed:
+                resolved_base = self._connect(base_url, socket, transport, timeout)
+            else:
+                assert model is not None
+                resolved_base = self._spawn(
+                    model,
+                    binary,
+                    host,
+                    port,
+                    socket,
+                    api_key,
+                    startup_timeout,
+                    timeout,
+                    server_kwargs,
+                )
 
-        self._client = AsyncOpenAI(
-            base_url=resolved_base,
-            api_key=api_key or "-",
-            http_client=self._http_client,
-        )
-        self._base_url = resolved_base
-        self._model_override = model_override
+            self._client = AsyncOpenAI(
+                base_url=resolved_base,
+                api_key=api_key or "-",
+                http_client=self._http_client,
+            )
+            self._base_url = resolved_base
+            self._model_override = model_override
+        except BaseException:
+            # close() is a coroutine and cannot be awaited from __init__, so
+            # perform synchronous cleanup directly. The managed subprocess is
+            # the critical resource; stopping it here ensures deterministic
+            # reaping even when the caller never awaits close().
+            if self._server is not None:
+                self._server.close()
+            # Drop the async http client reference. It has never been used so
+            # no active connections exist; the pool will be released when the
+            # object is collected.
+            self._http_client = None
+            raise
 
     # -- setup -------------------------------------------------------------
 
@@ -283,6 +304,22 @@ class AsyncLLM:
 
     async def __aexit__(self, *exc: object) -> None:
         await self.close()
+
+    def __del__(self) -> None:
+        # Best-effort synchronous cleanup at GC time. The async connection pool
+        # is released by dropping the reference; the managed subprocess is reaped
+        # via ManagedServer.close() which is synchronous. Do NOT attempt to run
+        # the event loop or await close() here: the loop may already be gone at
+        # interpreter shutdown. The correct API remains `await close()` or
+        # `async with`.
+        if self._closed:
+            return
+        try:
+            if self._server is not None:
+                self._server.close()
+            self._http_client = None
+        except Exception:
+            pass
 
 
 __all__ = ["AsyncLLM"]
