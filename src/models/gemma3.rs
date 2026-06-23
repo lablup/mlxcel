@@ -35,11 +35,38 @@ use mlxcel_core::generate::DecodeBatchContext;
 use mlxcel_core::layers::{
     FusedQKVLinear, GemmaRMSNorm, KVCache, RotatingKVCache, UnifiedEmbedding, UnifiedLinear,
 };
-use mlxcel_core::utils::{create_causal_mask, create_causal_mask_with_window, pipeline_hint};
+use mlxcel_core::utils::{
+    create_causal_mask, create_causal_mask_with_window, create_causal_mask_with_window_full,
+    pipeline_hint,
+};
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
 use serde::Deserialize;
 use std::path::Path;
+
+/// Build the sliding-window prefill mask for a multi-token (`seq_len > 1`) pass.
+///
+/// For a single-pass prefill longer than the sliding window the rotating cache
+/// returns ALL `seq_len` prefill keys (it only trims to `window` on the
+/// subsequent decode step). A capped `[seq_len, window]` mask therefore both
+/// fails to broadcast against the full key axis and, where the attention layer
+/// slices K/V to the trailing `window` keys, strands the earliest query rows
+/// (logical position `< seq_len - window`) with no visible key — an all-masked
+/// row that softmaxes to NaN and degenerates the output (issue #401). The full
+/// `[seq_len, seq_len + offset]` windowed mask keeps every query row attending
+/// to its own window. Mirrors mlx-lm's `RotatingKVCache` prefill, where the
+/// window's correctness comes from the mask, not from dropping keys.
+///
+/// For `seq_len <= window` this keeps the existing clamped path (byte-identical
+/// greedy output), so only over-window prefills change.
+fn sliding_prefill_mask(seq_len: i32, sliding_offset: i32, window: i32) -> UniquePtr<MlxArray> {
+    if seq_len > window {
+        create_causal_mask_with_window_full(seq_len, sliding_offset, Some(window))
+    } else {
+        let effective_offset = sliding_offset.min((window - seq_len).max(0));
+        create_causal_mask_with_window(seq_len, effective_offset, Some(window))
+    }
+}
 
 // Configuration.
 #[derive(Debug, Clone, Deserialize)]
@@ -768,15 +795,10 @@ impl Gemma3Model {
 
             let sliding_mask = if self.sliding_window_pattern > 1 {
                 let sliding_offset = caches[0].as_interface().offset();
-                // Clamp offset so mask shape matches RotatingKVCache output.
-                // The cache returns at most max_size tokens, so the mask's
-                // total_len (= seq_len + offset) must not exceed max_size.
-                let max_cache = self.sliding_window as i32;
-                let effective_offset = sliding_offset.min((max_cache - seq_len).max(0));
-                Some(create_causal_mask_with_window(
+                Some(sliding_prefill_mask(
                     seq_len,
-                    effective_offset,
-                    Some(max_cache),
+                    sliding_offset,
+                    self.sliding_window as i32,
                 ))
             } else {
                 None
@@ -1055,12 +1077,10 @@ impl Gemma3StageModel {
 
             let sliding_mask = if self.first_sliding_cache_index().is_some() {
                 let sliding_offset = caches[self.first_sliding_cache_index().unwrap()].offset();
-                let max_cache = self.sliding_window as i32;
-                let effective_offset = sliding_offset.min((max_cache - seq_len).max(0));
-                Some(create_causal_mask_with_window(
+                Some(sliding_prefill_mask(
                     seq_len,
-                    effective_offset,
-                    Some(max_cache),
+                    sliding_offset,
+                    self.sliding_window as i32,
                 ))
             } else {
                 None

@@ -564,6 +564,68 @@ pub fn create_causal_mask_with_window(
     ffi::where_cond(&bool_mask, &zeros, &neg_inf)
 }
 
+/// Create a sliding-window causal mask sized to the *full* key axis, without
+/// the `min(size + offset, window)` cap applied by [`create_causal_mask_with_window`].
+/// Used by: Gemma 3, Gemma 4 single-pass prefill longer than the sliding window
+///
+/// # Arguments
+/// * `size` - Size of the query sequence
+/// * `offset` - Tokens already resident in the KV cache before this call
+/// * `window` - Sliding window size (`None` for full attention)
+///
+/// # Returns
+/// An additive `[size, size + offset]` mask (`0.0` = attend, `-inf` = block)
+/// where query row `q` (logical position `q + offset`) attends to key column
+/// `k` iff `k <= q + offset` (causal) and `k >= q + offset - window + 1`
+/// (sliding-window lower bound).
+///
+/// ## Why an uncapped variant is needed
+///
+/// [`create_causal_mask_with_window`] caps the key axis to `window` when
+/// `size + offset > window`, on the assumption that a [`RotatingKVCache`] with
+/// `max_size = window` only ever returns the most recent `window` keys. That
+/// assumption holds for decode and for cache rollover, but **not** for a
+/// single-pass prefill whose length exceeds the window: the rotating cache
+/// keeps every prefill key (it only trims to `window` on the subsequent decode
+/// step), so the cache returns all `size` keys. With the capped `[size, window]`
+/// mask the attention layer slices K/V down to the trailing `window` keys, which
+/// strands the earliest query rows (logical position `< size - window`) with no
+/// visible key — an all-masked row that softmaxes to NaN and degenerates the
+/// output. Mirroring mlx-lm's `RotatingKVCache`, the correctness of the window
+/// comes from the *mask*, not from physically dropping keys, so prefill must use
+/// this full-width mask. Consumers backed by a rotating cache pair this with a
+/// `trim_mask_to_keys` step so that any later capped fetch still aligns. See
+/// issue #401.
+///
+/// [`RotatingKVCache`]: crate::cache::RotatingKVCache
+pub fn create_causal_mask_with_window_full(
+    size: i32,
+    offset: i32,
+    window: Option<i32>,
+) -> UniquePtr<MlxArray> {
+    let total_len = size + offset;
+
+    // Causal lower-triangular core: query row q attends to key columns
+    // `k <= q + offset`.
+    let ones = ffi::ones(&[size, total_len], dtype::FLOAT32);
+    let mut mask = ffi::tril(&ones, offset);
+
+    // Sliding-window lower bound: forbid keys older than `window` positions,
+    // i.e. require `k >= q + offset - window + 1`.
+    if let Some(w) = window {
+        let upper_mask = ffi::triu(&ones, offset - w + 1);
+        mask = ffi::multiply(&mask, &upper_mask);
+    }
+
+    // Convert to additive form (0 = attend, -inf = block) via where_cond to
+    // avoid NaN from `0 * -inf`. Intentional FP32 sentinel mask.
+    let zeros = ffi::zeros(&[size, total_len], dtype::FLOAT32);
+    let neg_inf = ffi::full_f32(&[size, total_len], f32::NEG_INFINITY, dtype::FLOAT32);
+    let bool_mask = ffi::greater(&mask, &zeros);
+
+    ffi::where_cond(&bool_mask, &zeros, &neg_inf)
+}
+
 /// Create a boolean causal attention mask with optional sliding window.
 /// Used by: same as `create_causal_mask_with_window` (experimental path)
 ///
@@ -1140,6 +1202,74 @@ mod tests {
         // q=3 attends to both cache keys
         assert_eq!(row3_col0, 0.0, "row3_col0 should be 0.0 (attend)");
         assert_eq!(row3_col1, 0.0, "row3_col1 should be 0.0 (attend)");
+    }
+
+    // --- Uncapped windowed mask (single-pass prefill > window, issue #401) --
+
+    /// The uncapped windowed mask keeps the full `[size, size + offset]` key
+    /// axis, so a single-pass prefill longer than the window leaves NO query
+    /// row fully masked. Contrast `test_sliding_window_mask_values_when_capped`,
+    /// where the capped `[4, 2]` mask strands rows 0 and 1 (all -inf) because it
+    /// drops the keys those early rows still need.
+    #[test]
+    fn full_windowed_mask_over_window_has_no_all_masked_row() {
+        // size=4 > window=2, offset=0. Capped variant would be [4, 2] with rows
+        // 0 and 1 entirely -inf; the full variant is [4, 4] with every row valid.
+        let mask = create_causal_mask_with_window_full(4, 0, Some(2));
+        let shape = ffi::array_shape(&mask);
+        assert_eq!(
+            shape,
+            vec![4, 4],
+            "full windowed mask must NOT cap the key axis"
+        );
+
+        let at = |q: i32, k: i32| ffi::item_f32(&ffi::slice(&mask, &[q, k], &[q + 1, k + 1]));
+        let blocked = |v: f32| v.is_infinite() && v < 0.0;
+
+        // Diagonal always open: no query row is fully masked.
+        for q in 0..4 {
+            assert_eq!(at(q, q), 0.0, "row {q} must attend to itself");
+        }
+        // Window band (window = 2): query q attends to keys {q-1, q}.
+        assert_eq!(at(1, 0), 0.0, "row1 attends to in-window key0");
+        assert_eq!(at(2, 1), 0.0, "row2 attends to in-window key1");
+        // Older-than-window keys are blocked.
+        assert!(blocked(at(2, 0)), "key0 is older than row2's window");
+        assert!(blocked(at(3, 1)), "key1 is older than row3's window");
+        // Future keys stay causally blocked.
+        assert!(blocked(at(0, 1)), "row0 future key blocked (causal)");
+        assert!(blocked(at(1, 2)), "row1 future key blocked (causal)");
+    }
+
+    /// Within the window (`size + offset <= window`) the full and capped
+    /// builders agree cell-for-cell, so the `<= window` prefill path is
+    /// unchanged.
+    #[test]
+    fn full_windowed_mask_within_window_matches_capped() {
+        // size=3, offset=2, window=8: total=5 <= 8 → capped builder does not cap.
+        let full = create_causal_mask_with_window_full(3, 2, Some(8));
+        let capped = create_causal_mask_with_window(3, 2, Some(8));
+        assert_eq!(
+            ffi::array_shape(&full),
+            ffi::array_shape(&capped),
+            "within-window shapes must match"
+        );
+        let at =
+            |m: &MlxArray, q: i32, k: i32| ffi::item_f32(&ffi::slice(m, &[q, k], &[q + 1, k + 1]));
+        for q in 0..3 {
+            for k in 0..5 {
+                let a = at(&full, q, k);
+                let b = at(&capped, q, k);
+                assert_eq!(
+                    a.is_finite(),
+                    b.is_finite(),
+                    "cell ({q},{k}) finiteness must match: full={a}, capped={b}"
+                );
+                if a.is_finite() {
+                    assert_eq!(a, b, "cell ({q},{k}) value mismatch: full={a}, capped={b}");
+                }
+            }
+        }
     }
 
     // --- Windowed left-padding mask (ragged batched MTP prefill) ----------
