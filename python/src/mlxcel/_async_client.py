@@ -55,18 +55,19 @@ class AsyncLLM:
         transport: Optional[httpx.AsyncBaseTransport] = None,
         **server_kwargs: Any,
     ) -> None:
-        managed = is_managed(model, base_url, socket, transport)
-
+        # Set _closed before any call that can raise so __del__ never sees a
+        # missing attribute even when __init__ fails early (e.g. bad arg combo).
+        self._closed = False
         self._server: Optional[ManagedServer] = None
         self._http_client: Optional[httpx.AsyncClient] = None
         self._model: Optional[str] = None
-        self._closed = False
         # Resolved API key, used to authorize native (/tokenize, /detokenize)
         # routes that bypass the OpenAI SDK's own Authorization injection. The
         # empty-or-None case stays unauthenticated to preserve the no-auth path.
         self._api_key = api_key
         timeout = timeout or DEFAULT_TIMEOUT
 
+        managed = is_managed(model, base_url, socket, transport)
         model_override = server_kwargs.pop("model", None)
 
         try:

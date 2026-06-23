@@ -380,3 +380,76 @@ def test_async_native_routes_omit_auth_without_api_key() -> None:
     _run(go())
     assert "authorization" not in _LAST_HEADERS["/tokenize"]
     assert "authorization" not in _LAST_HEADERS["/detokenize"]
+
+
+def test_async_chat_stream() -> None:
+    transport = httpx.MockTransport(_handler)
+
+    async def go() -> str:
+        client = mlxcel.AsyncLLM(transport=transport)
+        try:
+            chunks = [d async for d in client.chat_stream([{"role": "user", "content": "hi"}])]
+            return "".join(chunks)
+        finally:
+            await client.close()
+
+    assert _run(go()) == "chat reply"
+
+
+def test_async_models() -> None:
+    transport = httpx.MockTransport(_handler)
+
+    async def go() -> list[str]:
+        client = mlxcel.AsyncLLM(transport=transport)
+        try:
+            return await client.models()
+        finally:
+            await client.close()
+
+    assert _run(go()) == [MODEL_ID]
+
+
+def test_async_openai_client_escape_hatch() -> None:
+    from openai import AsyncOpenAI
+
+    transport = httpx.MockTransport(_handler)
+
+    async def go() -> bool:
+        client = mlxcel.AsyncLLM(transport=transport)
+        try:
+            return isinstance(client.openai_client, AsyncOpenAI)
+        finally:
+            await client.close()
+
+    assert _run(go())
+
+
+def test_async_model_property_raises_before_resolution() -> None:
+    transport = httpx.MockTransport(_handler)
+
+    async def go() -> None:
+        client = mlxcel.AsyncLLM(transport=transport)
+        try:
+            # model property raises before any request has resolved the id
+            with pytest.raises(mlxcel.MlxcelError):
+                _ = client.model
+        finally:
+            await client.close()
+
+    _run(go())
+
+
+def test_async_ambiguous_args_is_error() -> None:
+    async def go() -> None:
+        with pytest.raises(mlxcel.MlxcelError):
+            mlxcel.AsyncLLM("some-model", base_url="http://localhost:8080/v1")
+
+    _run(go())
+
+
+def test_async_no_args_is_error() -> None:
+    async def go() -> None:
+        with pytest.raises(mlxcel.MlxcelError):
+            mlxcel.AsyncLLM()
+
+    _run(go())

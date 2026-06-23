@@ -146,6 +146,7 @@ nav:
       - user-guide/index.md
       - CLI 명령어: user-guide/cli.md
       - 서버 모드: user-guide/server.md
+      - Python 클라이언트: user-guide/python-client.md
       - 비전-언어 모델: user-guide/vision-language-models.md
       - LoRA 어댑터: user-guide/lora.md
       - 추측적 디코딩: user-guide/speculative-decoding.md

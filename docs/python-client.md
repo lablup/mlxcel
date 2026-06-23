@@ -64,6 +64,24 @@ mlxcel serve -m mlx-community/Qwen3-4B-4bit --host /tmp/mlxcel.sock --port 0
 
 Passing both a model and a connect target raises `MlxcelError`, because the mode would be ambiguous.
 
+## Security: multi-user hosts
+
+On a shared machine, the default socket path under `/tmp` is world-readable: any local user can connect to the server you spawned and send requests. If that matters for your deployment, pass an explicit `socket=` path under a directory only you can read, for example one under `$XDG_RUNTIME_DIR` (mode `0700`, owned by your uid):
+
+```python
+import os, pathlib, mlxcel
+
+runtime_dir = pathlib.Path(os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}"))
+runtime_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+
+with mlxcel.LLM("mlx-community/Qwen3-4B-4bit", socket=str(runtime_dir / "mlxcel.sock")) as llm:
+    print(llm.generate("hello"))
+```
+
+The CLI equivalent is `mlxcel serve --host "$XDG_RUNTIME_DIR/mlxcel.sock" --port 0`.
+
+On macOS, `$TMPDIR` already expands to a per-user path under `/var/folders`, so the default socket is private there. On Linux without an active login session, `$XDG_RUNTIME_DIR` may be absent; fall back to a `0700` subdirectory under your home directory if needed.
+
 ## Streaming
 
 `stream` and `chat_stream` yield text deltas as they arrive.
