@@ -24,7 +24,7 @@
 
 use mlxcel_core::generate::LanguageModel;
 use mlxcel_core::layers::{KVCache, RMSNorm, UnifiedEmbedding, UnifiedLinear};
-use mlxcel_core::utils::{create_causal_mask, create_causal_mask_with_window};
+use mlxcel_core::utils::{create_causal_mask, create_sliding_window_prefill_mask};
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
 use serde::Deserialize;
@@ -205,15 +205,21 @@ impl OLMo3Attention {
 
         // Scaled dot-product attention
         let attn_out = if l > 1 && mask.is_some() {
-            // Prefill with mask. If this is a sliding layer the windowed
-            // mask is capped to `(l, window_size)` post-earlier. Plain
-            // `KVCache` returns full-length K/V, so slice K/V to the last
-            // `window_size` slots to match the mask.
+            // Prefill: use mask. A sliding-window layer's mask is either the
+            // clamped `(l, window_size)` mask or the full `(l, k_len)` mask for
+            // a fresh single-pass prefill that exceeds the window (issue #408).
+            // Plain `KVCache` returns full-length K/V, so slice K/V to the
+            // mask's key axis (not blindly to `window_size`): a full mask keeps
+            // every key, a clamped mask drops the oldest. Mirrors
+            // `causal_attention`'s internal handling.
             let k_shape = mlxcel_core::array_shape(&cache_k);
             let k_len = k_shape[2];
-            let (k_used, v_used) = if self.window_size > 0 && k_len > self.window_size {
+            let mask_klen = mask
+                .map(|m| *mlxcel_core::array_shape(m).last().unwrap_or(&k_len))
+                .unwrap_or(k_len);
+            let (k_used, v_used) = if self.window_size > 0 && k_len > mask_klen {
                 let v_shape = mlxcel_core::array_shape(&cache_v);
-                let start = k_len - self.window_size;
+                let start = k_len - mask_klen;
                 (
                     Some(mlxcel_core::slice(
                         &cache_k,
@@ -458,10 +464,14 @@ impl OLMo3Model {
             let swa_offset = caches[self.swa_idx].offset;
 
             let full = Some(create_causal_mask(l as i32, ga_offset));
-            let sliding = Some(create_causal_mask_with_window(
+            // Full-width windowed mask for a fresh single-pass prefill that
+            // exceeds the window; clamped mask otherwise. The attention layer
+            // slices K/V to the mask's key axis, so a full mask keeps every
+            // (dense `KVCache`) key. See issue #408.
+            let sliding = Some(create_sliding_window_prefill_mask(
                 l as i32,
                 swa_offset,
-                Some(self.config.sliding_window as i32),
+                self.config.sliding_window as i32,
             ));
             (full, sliding)
         } else {

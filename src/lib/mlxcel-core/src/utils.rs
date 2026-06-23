@@ -649,7 +649,7 @@ pub fn create_causal_mask_with_window_full(
 /// to `window`) so they keep the full key set when this returns the full mask.
 ///
 /// Used by: GptOss, Mellum, Exaone4, ExaoneMoE, Ministral3, Step3P5, Cohere2,
-/// Gemma3n, Baichuan sliding-window prefill mask construction.
+/// Gemma3n, Olmo3 sliding-window prefill mask construction.
 ///
 /// [`RotatingKVCache`]: crate::cache::RotatingKVCache
 pub fn create_sliding_window_prefill_mask(
