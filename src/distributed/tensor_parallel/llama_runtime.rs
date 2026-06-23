@@ -2757,11 +2757,17 @@ fn gemma3_masks(
     let sliding_mask = if rank0.sliding_window_pattern > 1 {
         let sliding_offset = gemma3_cache_offset(&mut rank0_caches[0]);
         let max_cache = rank0.sliding_window as i32;
-        let effective_offset = sliding_offset.min((max_cache - seq_len).max(0));
-        Some(mlxcel_core::utils::create_causal_mask_with_window(
+        // Mirror the single-process gemma3 `sliding_prefill_mask` (issue #401/#408):
+        // a fresh single-pass prefill longer than the window keeps every key (the
+        // RotatingKVCache returns all of them) and needs the full-width windowed
+        // mask, otherwise the clamped `(seq_len, window)` mask strands the earliest
+        // query rows with an all-(-inf) row and the broadcast crashes against the
+        // full key axis. The helper's else-branch is byte-identical to the prior
+        // `sliding_offset.min((max_cache - seq_len).max(0))` clamped construction.
+        Some(mlxcel_core::utils::create_sliding_window_prefill_mask(
             seq_len,
-            effective_offset,
-            Some(max_cache),
+            sliding_offset,
+            max_cache,
         ))
     } else {
         None
