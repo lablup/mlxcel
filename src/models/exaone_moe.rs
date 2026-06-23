@@ -684,13 +684,12 @@ impl ExaoneMoeModel {
                 .find(|c| matches!(c, AnyKVCache::Rotating(_)))
                 .map(|c| c.offset())
                 .unwrap_or(0);
-            // Clamp offset so mask shape matches RotatingKVCache output
+            // Full-width windowed mask for a fresh single-pass prefill that
+            // exceeds the window (RotatingKVCache keeps all prefill keys),
+            // clamped mask otherwise. See issue #408.
             let max_cache = self.window_size as i32;
-            let effective_swa_offset = swa_offset.min((max_cache - seq_len).max(0));
-            let swa_mask = Some(utils::create_causal_mask_with_window(
-                seq_len,
-                effective_swa_offset,
-                Some(max_cache),
+            let swa_mask = Some(utils::create_sliding_window_prefill_mask(
+                seq_len, swa_offset, max_cache,
             ));
 
             (global_mask, swa_mask)

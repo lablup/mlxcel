@@ -3461,7 +3461,14 @@ mod tests {
     }
 
     #[test]
-    fn causal_attention_window_bool_mask_matches_float_reference() {
+    fn causal_attention_multi_token_over_window_uses_full_windowed_mask() {
+        // Multi-token prefill (`q_len = 3`) whose key length (`k_len = 5`)
+        // exceeds the window. Before issue #408 `causal_attention` sliced K/V
+        // to the trailing `window_size` keys and used the clamped
+        // `(q_len, window_size)` mask, which strands the earliest query rows.
+        // The corrected behavior keeps all keys and builds the full
+        // `(q_len, k_len)` windowed-causal mask, so the reference must use the
+        // full K/V and `create_causal_mask_with_window_full`.
         let q = crate::from_slice_f32(
             &[
                 0.1, -0.2, 0.3, 0.4, 0.2, 0.0, -0.1, 0.5, -0.3, 0.1, 0.2, -0.4,
@@ -3483,26 +3490,22 @@ mod tests {
             &[1, 1, 5, 4],
         );
         let scale = 0.5_f32;
-        // Use window_size=3 (not 2) so the post-earlier cap path produces a
-        // non-degenerate mask: with q_len=3, window=3, tril_offset = w - size
-        // = 0, so q=0 attends to k=0. With window=2 the row-0 mask is fully
-        // masked, which produces NaN under the now-correct semantics (a
-        // query whose logical position predates every cache key).
-        let window_size = 3_i32;
+        // window_size=2 is the previously-degenerate case: under the old
+        // clamp+slice path query row 0 (logical position 0) had an all-`-inf`
+        // mask row and softmaxed to NaN. The full mask gives it its own
+        // window, so no row is fully masked.
+        let window_size = 2_i32;
 
         let out = crate::causal_attention(&q, &k, &v, scale, 0.0, window_size);
-        // See note in `causal_attention_single_query_window_respects_mask_when_needed`:
-        // the explicit-mask reference must slice K/V to the last `window_size`
-        // slots to line up with the post-cap mask shape `(q_len, window_size)`.
-        let mask_f = crate::utils::create_causal_mask_with_window(3, 2, Some(window_size));
-        let k_sliced = crate::slice(&k, &[0, 0, 5 - window_size, 0], &[1, 1, 5, 4]);
-        let v_sliced = crate::slice(&v, &[0, 0, 5 - window_size, 0], &[1, 1, 5, 4]);
+        // Reference: full key set + uncapped windowed mask over offset =
+        // k_len - q_len = 2.
+        let mask_full = crate::utils::create_causal_mask_with_window_full(3, 2, Some(window_size));
         let out_ref = attention(
             &q,
-            &k_sliced,
-            &v_sliced,
+            &k,
+            &v,
             scale,
-            Some(mask_f.as_ref().unwrap()),
+            Some(mask_full.as_ref().unwrap()),
             0.0,
             window_size,
         );
@@ -3511,9 +3514,21 @@ mod tests {
         let diff_abs = crate::abs(&diff);
         let diff_sum = crate::sum_all(&diff_abs);
         crate::eval(&diff_sum);
+        let total = crate::item_f32(&diff_sum);
         assert!(
-            crate::item_f32(&diff_sum) < 1e-5,
-            "bool-mask causal window path should match float-mask reference"
+            total.is_finite() && total < 1e-5,
+            "multi-token over-window causal attention should match the full \
+             windowed-mask reference (no NaN, no stranded rows); diff_sum = {total}"
+        );
+
+        // The output itself must be finite (the pre-#408 path produced NaN for
+        // the earliest query row under window_size=2).
+        let out_abs = crate::abs(out.as_ref().unwrap());
+        let out_sum = crate::sum_all(&out_abs);
+        crate::eval(&out_sum);
+        assert!(
+            crate::item_f32(&out_sum).is_finite(),
+            "multi-token over-window causal attention output must be finite"
         );
     }
 

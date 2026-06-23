@@ -25,7 +25,7 @@
 
 use mlxcel_core::generate::LanguageModel;
 use mlxcel_core::layers::{KVCache, RMSNorm, RotatingKVCache, UnifiedEmbedding, UnifiedLinear};
-use mlxcel_core::utils::{create_causal_mask, create_causal_mask_with_window};
+use mlxcel_core::utils::{create_causal_mask, create_sliding_window_prefill_mask};
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
 use serde::Deserialize;
@@ -964,8 +964,11 @@ impl Step3p5Model {
 
         let swa_mask = if seq_len > 1 {
             self.swa_idx.map(|idx| {
+                // Full-width windowed mask for a fresh single-pass prefill that
+                // exceeds the window (RotatingKVCache keeps all prefill keys),
+                // clamped mask otherwise. See issue #408.
                 let offset = caches[idx].as_interface().offset();
-                create_causal_mask_with_window(seq_len, offset, Some(self.config.sliding_window))
+                create_sliding_window_prefill_mask(seq_len, offset, self.config.sliding_window)
             })
         } else {
             None

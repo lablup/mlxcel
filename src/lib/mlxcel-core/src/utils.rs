@@ -626,6 +626,45 @@ pub fn create_causal_mask_with_window_full(
     ffi::where_cond(&bool_mask, &zeros, &neg_inf)
 }
 
+/// Build the sliding-window attention mask for a multi-token prefill
+/// (`size > 1`), sized to the keys the cache actually returns.
+///
+/// A fresh single-pass prefill that exceeds the window is the degenerate case
+/// behind issue #401/#408: both [`RotatingKVCache`] (on its first prefill
+/// append) and a dense `KVCache` keep *every* prefill key, so the window must
+/// be enforced by the mask over the full key axis, not by capping the mask and
+/// dropping keys. For that case (`size > window && sliding_offset == 0`) this
+/// returns the uncapped [`create_causal_mask_with_window_full`] `[size, size]`
+/// mask. In every other case (within-window prefill, or a rolled-over rotating
+/// cache that already returns at most `window` keys) it returns the clamped
+/// [`create_causal_mask_with_window`] mask with the same
+/// `sliding_offset.min((window - size).max(0))` adjustment the per-model mask
+/// builders used before, so greedy output stays byte-identical there.
+///
+/// The `sliding_offset == 0` gate mirrors the gemma3 prior art: only a fresh
+/// prefill is guaranteed to hold all `size` keys; once a rotating cache has
+/// rolled over (`sliding_offset > 0`) it returns at most `window` keys and the
+/// clamped mask is the matching shape. Models whose attention layer slices K/V
+/// to the trailing window must slice to the mask's key dimension (not blindly
+/// to `window`) so they keep the full key set when this returns the full mask.
+///
+/// Used by: GptOss, Mellum, Exaone4, ExaoneMoE, Ministral3, Step3P5, Cohere2,
+/// Gemma3n, Baichuan sliding-window prefill mask construction.
+///
+/// [`RotatingKVCache`]: crate::cache::RotatingKVCache
+pub fn create_sliding_window_prefill_mask(
+    size: i32,
+    sliding_offset: i32,
+    window: i32,
+) -> UniquePtr<MlxArray> {
+    if size > window && sliding_offset == 0 {
+        create_causal_mask_with_window_full(size, 0, Some(window))
+    } else {
+        let effective_offset = sliding_offset.min((window - size).max(0));
+        create_causal_mask_with_window(size, effective_offset, Some(window))
+    }
+}
+
 /// Create a boolean causal attention mask with optional sliding window.
 /// Used by: same as `create_causal_mask_with_window` (experimental path)
 ///
@@ -1267,6 +1306,88 @@ mod tests {
                 );
                 if a.is_finite() {
                     assert_eq!(a, b, "cell ({q},{k}) value mismatch: full={a}, capped={b}");
+                }
+            }
+        }
+    }
+
+    // --- Sliding-window prefill mask selector (issue #408) ----------------
+
+    /// A fresh single-pass prefill (`sliding_offset == 0`) longer than the
+    /// window must select the uncapped full `[size, size]` mask, so no early
+    /// query row is stranded with an all-`-inf` row.
+    #[test]
+    fn sliding_window_prefill_mask_selects_full_when_fresh_over_window() {
+        let prefill = create_sliding_window_prefill_mask(4, 0, 2);
+        assert_eq!(
+            ffi::array_shape(&prefill),
+            vec![4, 4],
+            "fresh over-window prefill must use the full [size, size] mask"
+        );
+        let full = create_causal_mask_with_window_full(4, 0, Some(2));
+        let at =
+            |m: &MlxArray, q: i32, k: i32| ffi::item_f32(&ffi::slice(m, &[q, k], &[q + 1, k + 1]));
+        for q in 0..4 {
+            for k in 0..4 {
+                let a = at(&prefill, q, k);
+                let b = at(&full, q, k);
+                assert_eq!(a.is_finite(), b.is_finite(), "cell ({q},{k}) finiteness");
+                if a.is_finite() {
+                    assert_eq!(a, b, "cell ({q},{k}) value");
+                }
+            }
+            // No row is fully masked: each attends to at least its own key.
+            assert_eq!(at(&prefill, q, q), 0.0, "row {q} must attend to itself");
+        }
+    }
+
+    /// A rolled-over cache (`sliding_offset > 0`) keeps the clamped path,
+    /// byte-identical to the per-model `create_causal_mask_with_window`
+    /// construction it replaced (same `min((window - size).max(0))` clamp).
+    #[test]
+    fn sliding_window_prefill_mask_clamps_when_rolled_over() {
+        let window = 4;
+        let size = 2;
+        let sliding_offset = 9; // well past the window → clamped path
+        let prefill = create_sliding_window_prefill_mask(size, sliding_offset, window);
+        let effective_offset = sliding_offset.min((window - size).max(0));
+        let clamped = create_causal_mask_with_window(size, effective_offset, Some(window));
+        assert_eq!(
+            ffi::array_shape(&prefill),
+            ffi::array_shape(&clamped),
+            "rolled-over prefill must match the clamped mask shape"
+        );
+        let cols = ffi::array_shape(&prefill)[1];
+        let at =
+            |m: &MlxArray, q: i32, k: i32| ffi::item_f32(&ffi::slice(m, &[q, k], &[q + 1, k + 1]));
+        for q in 0..size {
+            for k in 0..cols {
+                let a = at(&prefill, q, k);
+                let b = at(&clamped, q, k);
+                assert_eq!(a.is_finite(), b.is_finite(), "cell ({q},{k}) finiteness");
+                if a.is_finite() {
+                    assert_eq!(a, b, "cell ({q},{k}) value");
+                }
+            }
+        }
+    }
+
+    /// A within-window fresh prefill (`size <= window`) selects the clamped
+    /// (here non-capped) mask, identical to `create_causal_mask_with_window`.
+    #[test]
+    fn sliding_window_prefill_mask_within_window_matches_capped_builder() {
+        let prefill = create_sliding_window_prefill_mask(3, 0, 8);
+        let capped = create_causal_mask_with_window(3, 0, Some(8));
+        assert_eq!(ffi::array_shape(&prefill), ffi::array_shape(&capped));
+        let at =
+            |m: &MlxArray, q: i32, k: i32| ffi::item_f32(&ffi::slice(m, &[q, k], &[q + 1, k + 1]));
+        for q in 0..3 {
+            for k in 0..3 {
+                let a = at(&prefill, q, k);
+                let b = at(&capped, q, k);
+                assert_eq!(a.is_finite(), b.is_finite(), "cell ({q},{k}) finiteness");
+                if a.is_finite() {
+                    assert_eq!(a, b, "cell ({q},{k}) value");
                 }
             }
         }

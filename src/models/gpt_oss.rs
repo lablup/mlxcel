@@ -26,7 +26,7 @@
 //! Reference: mlx-lm gpt_oss.py
 
 use mlxcel_core::layers::{KVCache, RMSNorm, RotatingKVCache, UnifiedEmbedding, UnifiedLinear};
-use mlxcel_core::utils::{create_causal_mask, create_causal_mask_with_window};
+use mlxcel_core::utils::{create_causal_mask, create_sliding_window_prefill_mask};
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
 use serde::Deserialize;
@@ -908,9 +908,11 @@ impl GptOssModel {
 
             let sliding_offset = caches[swa_idx].as_interface().offset();
             let max_cache = self.sliding_window as i32;
-            let effective_offset = sliding_offset.min((max_cache - seq_len).max(0));
+            // Full-width windowed mask for a fresh single-pass prefill that
+            // exceeds the window (RotatingKVCache keeps all prefill keys),
+            // clamped mask otherwise. See issue #408.
             let sliding_mask =
-                create_causal_mask_with_window(seq_len, effective_offset, Some(max_cache));
+                create_sliding_window_prefill_mask(seq_len, sliding_offset, max_cache);
 
             for (i, layer) in self.layers.iter().enumerate() {
                 let mask = if self.layer_types[i] == "full_attention" {
@@ -1240,9 +1242,10 @@ impl GptOssStageModel {
         let sliding_mask = if seq_len > 1 {
             self.first_layer_offset(caches, "sliding_attention")
                 .map(|offset| {
+                    // See issue #408: full-width windowed mask for a fresh
+                    // >window prefill, clamped otherwise.
                     let max_cache = self.sliding_window as i32;
-                    let effective_offset = offset.min((max_cache - seq_len).max(0));
-                    create_causal_mask_with_window(seq_len, effective_offset, Some(max_cache))
+                    create_sliding_window_prefill_mask(seq_len, offset, max_cache)
                 })
         } else {
             None

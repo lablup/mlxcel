@@ -30,7 +30,7 @@ use crate::models::gemma3n_helpers::{
 };
 use mlxcel_core::generate::LanguageModel;
 use mlxcel_core::layers::{KVCache, Linear, RMSNorm, UnifiedEmbedding, UnifiedLinear};
-use mlxcel_core::utils::{create_causal_mask, create_causal_mask_with_window};
+use mlxcel_core::utils::{create_causal_mask, create_sliding_window_prefill_mask};
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
 use serde::Deserialize;
@@ -514,16 +514,21 @@ impl Gemma3nAttention {
                 self.window_size,
             )
         } else {
-            // Single token or explicit mask path. If the caller supplied a
-            // windowed mask and this layer is a sliding-window layer, the
-            // mask is shaped `(q_len, window_size)` post-earlier cap. Plain
-            // `KVCache` returns full-length K/V, so we must slice K/V to
-            // match the capped mask, mirroring `causal_attention` internals.
+            // Single token or explicit mask path. A sliding-window layer's
+            // mask is either the clamped `(q_len, window_size)` mask or the
+            // full `(q_len, k_len)` mask for a fresh single-pass prefill that
+            // exceeds the window (issue #408). Plain `KVCache` returns
+            // full-length K/V, so slice K/V to the mask's key axis (not blindly
+            // to `window_size`): a full mask keeps every key, a clamped mask
+            // drops the oldest. Mirrors `causal_attention`'s internal handling.
             let k_shape = mlxcel_core::array_shape(&keys);
             let k_len = k_shape[2];
-            let (k_used, v_used) = if self.window_size > 0 && k_len > self.window_size {
+            let mask_klen = mask
+                .map(|m| *mlxcel_core::array_shape(m).last().unwrap_or(&k_len))
+                .unwrap_or(k_len);
+            let (k_used, v_used) = if self.window_size > 0 && k_len > mask_klen {
                 let v_shape = mlxcel_core::array_shape(&values);
-                let start = k_len - self.window_size;
+                let start = k_len - mask_klen;
                 (
                     Some(mlxcel_core::slice(
                         &keys,
@@ -1200,10 +1205,14 @@ impl Gemma3nLanguageModel {
             None
         };
         let sliding_mask = if l > 1 {
-            Some(create_causal_mask_with_window(
+            // Full-width windowed mask for a fresh single-pass prefill that
+            // exceeds the window; clamped mask otherwise. The attention layer
+            // slices K/V to the mask's key axis, so a full mask keeps every
+            // (dense `KVCache`) key. See issue #408.
+            Some(create_sliding_window_prefill_mask(
                 l,
                 sliding_offset,
-                Some(self.config.sliding_window as i32),
+                self.config.sliding_window as i32,
             ))
         } else {
             None
@@ -1373,10 +1382,14 @@ impl Gemma3nLanguageModel {
             None
         };
         let sliding_mask = if l > 1 {
-            Some(create_causal_mask_with_window(
+            // Full-width windowed mask for a fresh single-pass prefill that
+            // exceeds the window; clamped mask otherwise. The attention layer
+            // slices K/V to the mask's key axis, so a full mask keeps every
+            // (dense `KVCache`) key. See issue #408.
+            Some(create_sliding_window_prefill_mask(
                 l,
                 sliding_offset,
-                Some(self.config.sliding_window as i32),
+                self.config.sliding_window as i32,
             ))
         } else {
             None

@@ -2570,6 +2570,14 @@ pub fn fast_rope_batched(
 /// explicit mask array. Other hardware keeps using MLX's native causal SDPA
 /// entry point.
 ///
+/// Sliding-window handling splits by query length: a single-query decode
+/// (`q_len == 1`) slices K/V to the trailing `window_size` keys and uses the
+/// clamped `(1, window_size)` mask, while a multi-token prefill that exceeds
+/// the window (`q_len > 1 && k_len > window_size`) keeps all keys and builds a
+/// full-width windowed-causal mask over them. Slicing K/V for a multi-token
+/// prefill would strand the earliest query rows with an all-`-inf` row -> NaN
+/// (issue #401/#408); the windowed correctness instead comes from the mask.
+///
 /// Used by: Llama, Qwen, Mixtral, Gemma, Cohere, Phi, OLMo, Exaone, GLM4,
 /// MiniCPM, DeepSeek, Hunyuan, StarCoder2 and other causal prefill call sites
 pub fn causal_attention(
@@ -2593,13 +2601,25 @@ pub fn causal_attention(
     }
 
     if softcap > 0.0 || window_size > 0 {
-        // When the window is exceeded, slice K/V to the last `window_size`
-        // slots so they line up with the (q_len, window_size)-shaped mask
-        // produced by `create_causal_mask_with_window`. Production callers
-        // backed by `RotatingKVCache` already deliver K/V truncated to
-        // `max_size = window_size`; this branch keeps the wrapper
-        // self-consistent for any other caller (and for our own unit tests).
-        let (k_used, v_used, effective_k_len) = if needs_window_mask {
+        // A multi-token prefill that exceeds the window must NOT slice K/V to
+        // the trailing `window_size` keys: a fresh `RotatingKVCache` (and a
+        // dense `KVCache`) keep every prefill key, and a trailing slice strands
+        // the earliest query rows (logical position `< k_len - window_size`)
+        // with no visible key, producing an all-`-inf` softmax row -> NaN /
+        // `<pad>` (issue #401/#408). For that case build a full-width
+        // windowed-causal mask over ALL keys instead; windowed correctness
+        // comes from the mask, mirroring mlx-lm's `RotatingKVCache`. The
+        // single-query decode path (`q_len == 1`) keeps the trailing-window K/V
+        // slice fast path, byte-for-byte unchanged.
+        let over_window_prefill = needs_window_mask && q_len > 1;
+
+        let (k_used, v_used, effective_k_len) = if needs_window_mask && !over_window_prefill {
+            // Decode (`q_len == 1`) beyond the window: slice K/V to the last
+            // `window_size` keys so they line up with the (1, window_size) mask
+            // produced by `create_causal_mask_with_window`. Production callers
+            // backed by `RotatingKVCache` already deliver K/V truncated to
+            // `max_size = window_size`; this keeps the wrapper self-consistent
+            // for any other single-query caller.
             let k_shape = ffi::array_shape(k);
             let v_shape = ffi::array_shape(v);
             let start = k_len - window_size;
@@ -2621,7 +2641,15 @@ pub fn causal_attention(
         let v_ref: &MlxArray = v_used.as_deref().unwrap_or(v);
 
         let offset = (effective_k_len - q_len).max(0);
-        let mask = if softcap == 0.0 && use_bool_causal_mask_path() {
+        let mask = if over_window_prefill {
+            // Full-width windowed-causal mask over all `k_len` keys (same
+            // builder as the gemma3/gemma4 `sliding_prefill_mask`, issue #401).
+            // Only reached for the previously-degenerate `q_len > 1`,
+            // `k_len > window` case, so there is no decode bit-exactness
+            // constraint here; the experimental bool-mask path is intentionally
+            // bypassed (this case has no all-`-inf` rows left to reproduce).
+            utils::create_causal_mask_with_window_full(q_len, offset, Some(window_size))
+        } else if softcap == 0.0 && use_bool_causal_mask_path() {
             if window_size > 0 {
                 utils::create_causal_bool_mask_with_window(q_len, offset, Some(window_size))
             } else {

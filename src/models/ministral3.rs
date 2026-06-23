@@ -20,7 +20,7 @@
 //! - RotatingKVCache for sliding_attention layers
 
 use mlxcel_core::layers::{KVCache, RMSNorm, RotatingKVCache, UnifiedEmbedding, UnifiedLinear};
-use mlxcel_core::utils::{create_causal_mask, create_causal_mask_with_window};
+use mlxcel_core::utils::{create_causal_mask, create_sliding_window_prefill_mask};
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
 use serde::Deserialize;
@@ -462,10 +462,11 @@ impl Ministral3Model {
         // Create masks
         let fa_mask = Some(create_causal_mask(seq_len, fa_offset));
         let swa_mask = swa_idx.map(|_| {
-            // Clamp offset so mask shape matches RotatingKVCache output
+            // Full-width windowed mask for a fresh single-pass prefill that
+            // exceeds the window (RotatingKVCache keeps all prefill keys),
+            // clamped mask otherwise. See issue #408.
             let max_cache = self.sliding_window.map(|w| w as i32).unwrap_or(i32::MAX);
-            let effective_offset = swa_offset.min((max_cache - seq_len).max(0));
-            create_causal_mask_with_window(seq_len, effective_offset, Some(max_cache))
+            create_sliding_window_prefill_mask(seq_len, swa_offset, max_cache)
         });
 
         // Compute Llama 4 attention scale using h.shape[1] (after embedding)

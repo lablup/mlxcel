@@ -22,7 +22,7 @@
 //! - Output-norm architecture: h = x + norm(attn_out), out = h + norm(mlp_out)
 
 use mlxcel_core::layers::{KVCache, RMSNorm, RotatingKVCache, UnifiedEmbedding, UnifiedLinear};
-use mlxcel_core::utils::{create_causal_mask, create_causal_mask_with_window};
+use mlxcel_core::utils::{create_causal_mask, create_sliding_window_prefill_mask};
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
 use serde::Deserialize;
@@ -655,8 +655,10 @@ impl ExaOne4Model {
         // Create masks (cast to bfloat16 to match model weights dtype for SDPA)
         let mask_local = if self.sliding_window.is_some() {
             let max_cache = self.sliding_window.map(|w| w as i32).unwrap_or(i32::MAX);
-            let effective_offset = local_offset.min((max_cache - seq_len).max(0));
-            let mask = create_causal_mask_with_window(seq_len, effective_offset, Some(max_cache));
+            // Full-width windowed mask for a fresh single-pass prefill that
+            // exceeds the window (RotatingKVCache keeps all prefill keys),
+            // clamped mask otherwise. See issue #408.
+            let mask = create_sliding_window_prefill_mask(seq_len, local_offset, max_cache);
             Some(mlxcel_core::astype(&mask, mlxcel_core::dtype::BFLOAT16))
         } else {
             None
