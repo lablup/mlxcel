@@ -19,7 +19,7 @@
 //! control plane so every entry point applies the same defaults.
 
 use crate::SamplingConfig;
-use mlxcel_core::TokenBiasMap;
+use mlxcel_core::{LoopDetectionConfig, TokenBiasMap};
 
 #[derive(Debug, Clone, PartialEq)]
 /// Fully resolved sampling knobs before conversion into `SamplingConfig`.
@@ -76,6 +76,11 @@ pub fn build_sampling_config(params: ResolvedSamplingParams) -> SamplingConfig {
             presence_penalty: params.presence_penalty,
             stop_token_ids: params.stop_token_ids,
             token_bias: TokenBiasMap::default(),
+            // Loop detection defaults to disabled here. The server control
+            // plane sets `sampling.loop_detection` after this helper returns,
+            // where the model family and the request's tools / response_format
+            // are visible (see `request_options::build_server_generate_options`).
+            loop_detection: LoopDetectionConfig::default(),
         }
     }
 }

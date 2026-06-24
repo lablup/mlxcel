@@ -1017,6 +1017,13 @@ fn extract_reasoning_content(raw_text: &str, primed_open_thinking: bool) -> Opti
 }
 
 /// Build ServerGenerateOptions using request params with server config as defaults
+///
+/// The explicit per-request loop-detection override is read from `params` (the
+/// vLLM `max_pattern_size` / `min_pattern_size` / `min_count` fields, issue
+/// #432). The Gemma 4 family default-on is applied engine-side from the loaded
+/// model type in
+/// [`crate::server::request_options::build_server_generate_options`], so callers
+/// pass no amplifier signal.
 pub(crate) fn build_generate_options(
     params: &SamplingParams,
     config: &ServerConfig,
@@ -1051,6 +1058,11 @@ pub(crate) fn build_generate_options(
             // scheduler matches the actual prompt tail (Qwen `<think>\n`,
             // Gemma 4 `<|channel>thought\n`, or neither).
             thinking_enter_block_on_start: false,
+            loop_detection_request: crate::server::request_options::loop_detection_from_request(
+                params.max_pattern_size,
+                params.min_pattern_size,
+                params.min_count,
+            ),
         },
     )
 }

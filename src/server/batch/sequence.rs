@@ -126,6 +126,12 @@ pub enum FinishReason {
     Stop,
     /// `max_tokens` was reached.
     Length,
+    /// The N-gram loop detector tripped: the raw generated stream collapsed
+    /// into a short repeated pattern, so generation was ended early. Mapped to
+    /// the OpenAI `finish_reason` string `"stop"` (an early, non-error stop,
+    /// matching vLLM's behavior) by the completion result builder, which keys
+    /// the wire string off `completion_tokens < max_tokens`.
+    RepetitionLoop,
     /// The client disconnected or cancelled the request.
     Cancelled,
     /// An internal error occurred during generation.
@@ -141,7 +147,7 @@ impl SequenceState {
     /// Valid transitions:
     /// - `Queued -> Prefilling` (scheduler begins prefill)
     /// - `Prefilling -> Decoding` (prefill complete, enter decode loop)
-    /// - `Prefilling -> Finished(Stop | Length)` (completed on first token)
+    /// - `Prefilling -> Finished(Stop | Length | RepetitionLoop)` (completed on first token)
     /// - `Decoding -> Finished(*)` (normal completion)
     /// - `Decoding -> Queued` (preemptive eviction for re-prefill)
     /// - Any non-terminal state -> `Finished(Cancelled | Error)` (early abort)
@@ -152,6 +158,9 @@ impl SequenceState {
             (SequenceState::Prefilling, SequenceState::Decoding) => true,
             (SequenceState::Prefilling, SequenceState::Finished(FinishReason::Stop)) => true,
             (SequenceState::Prefilling, SequenceState::Finished(FinishReason::Length)) => true,
+            (SequenceState::Prefilling, SequenceState::Finished(FinishReason::RepetitionLoop)) => {
+                true
+            }
             (SequenceState::Decoding, SequenceState::Finished(_)) => true,
             // Preemptive eviction: a decoding sequence can be evicted and
             // re-queued for re-prefill.
@@ -400,6 +409,96 @@ mod tests {
                 .transition_to(SequenceState::Finished(FinishReason::Length))
                 .is_ok()
         );
+        assert!(matches!(
+            state,
+            SequenceState::Finished(FinishReason::Length)
+        ));
+    }
+
+    #[test]
+    fn valid_transition_decoding_to_finished_repetition_loop() {
+        let mut state = SequenceState::Decoding;
+        assert!(
+            state
+                .transition_to(SequenceState::Finished(FinishReason::RepetitionLoop))
+                .is_ok()
+        );
+        assert!(matches!(
+            state,
+            SequenceState::Finished(FinishReason::RepetitionLoop)
+        ));
+    }
+
+    #[test]
+    fn valid_transition_prefilling_to_finished_repetition_loop() {
+        let mut state = SequenceState::Prefilling;
+        assert!(
+            state
+                .transition_to(SequenceState::Finished(FinishReason::RepetitionLoop))
+                .is_ok()
+        );
+        assert!(matches!(
+            state,
+            SequenceState::Finished(FinishReason::RepetitionLoop)
+        ));
+    }
+
+    // -- decode-site loop-detection wiring --
+    //
+    // These replicate the exact guard the scheduler decode sites apply after
+    // pushing each token, driving the real `SequenceState` machine so the
+    // wiring (detector + transition), not just the pure helper, is exercised.
+
+    fn apply_loop_guard(
+        state: &mut SequenceState,
+        generated: &[i32],
+        cfg: &mlxcel_core::LoopDetectionConfig,
+    ) {
+        if !state.is_finished()
+            && mlxcel_core::detect_repetition_loop(generated, cfg)
+            && let Err(err) =
+                state.transition_to(SequenceState::Finished(FinishReason::RepetitionLoop))
+        {
+            panic!("unexpected transition error: {err}");
+        }
+    }
+
+    #[test]
+    fn degenerate_stream_finishes_with_repetition_loop() {
+        let cfg = mlxcel_core::LoopDetectionConfig::new(1, 20, 4);
+        let mut state = SequenceState::Decoding;
+        // Single-token collapse: token 5 repeated four times at the tail.
+        apply_loop_guard(&mut state, &[1, 2, 5, 5, 5, 5], &cfg);
+        assert!(matches!(
+            state,
+            SequenceState::Finished(FinishReason::RepetitionLoop)
+        ));
+    }
+
+    #[test]
+    fn below_threshold_stream_keeps_decoding() {
+        let cfg = mlxcel_core::LoopDetectionConfig::new(1, 20, 4);
+        let mut state = SequenceState::Decoding;
+        // Only three repeats: below min_count, sequence keeps decoding.
+        apply_loop_guard(&mut state, &[1, 2, 5, 5, 5], &cfg);
+        assert!(matches!(state, SequenceState::Decoding));
+    }
+
+    #[test]
+    fn disabled_loop_detection_keeps_decoding_on_obvious_loop() {
+        let cfg = mlxcel_core::LoopDetectionConfig::disabled();
+        let mut state = SequenceState::Decoding;
+        apply_loop_guard(&mut state, &[5, 5, 5, 5, 5, 5, 5, 5], &cfg);
+        assert!(matches!(state, SequenceState::Decoding));
+    }
+
+    #[test]
+    fn loop_guard_does_not_override_already_finished_length() {
+        let cfg = mlxcel_core::LoopDetectionConfig::new(1, 20, 4);
+        // Length limit fired first; the loop guard must not re-transition a
+        // finished sequence (the `is_finished()` precheck protects it).
+        let mut state = SequenceState::Finished(FinishReason::Length);
+        apply_loop_guard(&mut state, &[5, 5, 5, 5], &cfg);
         assert!(matches!(
             state,
             SequenceState::Finished(FinishReason::Length)

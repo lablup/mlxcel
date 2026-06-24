@@ -485,6 +485,21 @@ pub struct ServerConfig {
     /// `--diffusion-threshold` (issue #217 phase 3). Confidence threshold for
     /// the confidence-threshold sampler. Only diffusion models read it.
     pub diffusion_threshold: f32,
+
+    /// Global N-gram loop-detection override (issue #432), resolved from the
+    /// `MLXCEL_LOOP_DETECTION` env var at startup. `None` means "operator did
+    /// not set a global override" so the per-family auto-enable policy applies;
+    /// `Some(cfg)` forces that configuration for every request (including an
+    /// explicitly disabled one), still overridable per-request. Precedence:
+    /// explicit request > this global override > family auto-enable > disabled.
+    pub loop_detection: Option<mlxcel_core::LoopDetectionConfig>,
+
+    /// Whether the loaded model is in the Gemma 4 family (`Gemma4`,
+    /// `Gemma4VLM`, or `Gemma4Unified`), resolved once at startup. Gates the
+    /// loop-detection auto-enable for requests that carry the documented
+    /// amplifiers (tools or a `json_schema` response_format). Defaults to
+    /// `false` so non-Gemma-4 models keep the bit-exact baseline.
+    pub model_is_gemma4_family: bool,
 }
 
 impl Default for ServerConfig {
@@ -550,6 +565,8 @@ impl Default for ServerConfig {
             max_denoising_steps: None,
             diffusion_sampler: "entropy-bound".to_string(),
             diffusion_threshold: 0.9,
+            loop_detection: None,
+            model_is_gemma4_family: false,
         }
     }
 }

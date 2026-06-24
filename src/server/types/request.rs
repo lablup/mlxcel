@@ -384,6 +384,18 @@ pub struct SamplingParams {
     /// Presence penalty (0.0 = disabled) - penalizes based on presence
     pub presence_penalty: Option<f32>,
 
+    // vLLM-compatible N-gram repetition / loop detection. When any of the three
+    // is present the request is authoritative and overrides server defaults and
+    // family auto-enable (see `request_options::resolve_loop_detection`). Field
+    // names match vLLM's `SamplingParams` for client compatibility.
+    /// Largest N-gram pattern size to scan (`0` disables detection).
+    pub max_pattern_size: Option<usize>,
+    /// Smallest N-gram pattern size to scan (`0` is treated as `1`).
+    pub min_pattern_size: Option<usize>,
+    /// Minimum consecutive repeats of a pattern that ends generation early
+    /// (must be `>= 2`).
+    pub min_count: Option<usize>,
+
     // thinking-token budget (Qwen3-family reasoning cap).
     //
     // Three aliases accepted, first non-None wins (see

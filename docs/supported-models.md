@@ -110,6 +110,12 @@ Qwen-style `<think>` models. To turn thinking off, pass
 default via `--chat-template-kwargs` or `LLAMA_ARG_CHAT_TEMPLATE_KWARGS`. A
 per-request value always wins over the server default.
 
+### Loop-detection default-on for the Gemma 4 family
+
+Gemma 4 (31B Dense and 26B-A4B MoE, including the QAT 4-bit checkpoints) has an upstream, weights-level token-repetition collapse documented in [google-deepmind/gemma#622](https://github.com/google-deepmind/gemma/issues/622) and reproduced across other engines, including [vllm-project/vllm#40080](https://github.com/vllm-project/vllm/issues/40080). Generation can degenerate into a single repeated token (or short fragment) that fills the token budget, most often inside the thought channel. Tool declarations and `json_schema` structured-output requests amplify it, but it is not limited to those cases. Sampling penalties do not reliably recover it, because once the logits collapse the top-k candidates are themselves garbage.
+
+mlxcel applies vLLM-style N-gram loop detection to break this, default-on for the Gemma 4 family with no configuration required. For any model in the family (`Gemma4`, `Gemma4VLM`, `Gemma4Unified`), the engine applies the conservative threshold `min_pattern_size=1, max_pattern_size=20, min_count=4` by default; a degenerate run then ends early with `finish_reason` of `stop`. The default-on applies to plain Gemma 4 chat too, so a downstream serving app and its users need no setup and see no toggle. Detection only ends generation when a real repetition loop is present, so this conservative default is low risk. Every non-Gemma-4 model defaults to disabled (bit-exact baseline preserved). The behavior is still tunable on top of the default: a per-request override (the vLLM `max_pattern_size` / `min_pattern_size` / `min_count` fields, including `max_pattern_size=0` to opt out) wins, and a global operator override (`MLXCEL_LOOP_DETECTION`) can tune, force-enable for any model, or force-disable. See [Generation loop detection](environment-variables.md#generation-loop-detection-issue-432) for the field semantics and the full precedence order.
+
 ## Speech-to-text (ASR)
 
 mlxcel loads Whisper-style encoder-decoder ASR checkpoints (`model_type: "whisper"`) and serves them through the OpenAI audio endpoints. A convolutional audio encoder builds features from a 30-second log-mel window, and an autoregressive text decoder cross-attends to those features as it emits tokens, steered by the multilingual transcribe/translate task tokens.

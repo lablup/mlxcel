@@ -268,6 +268,11 @@ fn build_native_generate_options(
             // responsible for priming `<think>` in the prompt if they want
             // in-block counting to start at the first decoded token.
             thinking_enter_block_on_start: false,
+            // The native `/completion` endpoint has no per-request
+            // loop-detection field. The Gemma 4 family default-on and the
+            // global `MLXCEL_LOOP_DETECTION` override still apply engine-side
+            // via `resolve_loop_detection`.
+            loop_detection_request: None,
         },
     )
 }

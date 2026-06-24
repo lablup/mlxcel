@@ -2406,6 +2406,9 @@ pub use ops::{concatenate, divide_scalar, multiply_scalar, stack, stack_owned, w
 
 // Re-export sampling primitives needed by generation-loop wiring (B8) and server layers.
 pub use sampling::TokenBiasMap;
+// Re-export N-gram loop-detection so the server control plane and CLI decode
+// loops can configure and run early-stop on degenerate token-repetition.
+pub use loop_detection::{detect_repetition_loop, LoopDetectionConfig};
 // Re-export B9 observability counter accessors so the server `/metrics` handler
 // can read process-wide lang-bias counters without a struct dependency.
 // Includes the byte-fragment suppression counter added.
@@ -2727,6 +2730,11 @@ pub mod generate;
 // Decode-loop setup helpers shared by standard and speculative generation.
 // Public so that the server batch scheduler can reuse seed/EOS/history helpers.
 pub mod generation_policy;
+
+// N-gram repetition / loop detection over the raw generated token stream.
+// Public so the server batch scheduler and CLI decode loops can end a
+// degenerate generation early (e.g. Gemma 4 token-repetition collapse).
+pub mod loop_detection;
 
 // Shared sampling and token-penalty policy helpers.
 // Public so that the server batch scheduler can perform step-level sampling.

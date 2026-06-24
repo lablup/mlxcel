@@ -128,6 +128,31 @@ The OpenAI audio endpoints (`/v1/audio/speech`, `/v1/audio/transcriptions`, `/v1
 | `MLXCEL_ENABLE_MTP_BATCH` | truthy value | off | **Advanced.** Forces the batched Gemma 4 MTP burst path for parity/debug testing. Not governed by the adaptive policy (issue #333), which scopes to the validated, byte-identical B=1 path. |
 | `MLXCEL_ENABLE_MTP_DEFERRED` | `1` | off | **Advanced.** Enables the deferred greedy verifier path for Gemma 4 MTP when sampling settings allow it. |
 
+## Generation loop detection (issue #432)
+
+N-gram tail repetition detection ends a generation early when the raw generated token stream collapses into a short repeated pattern (a single token such as `様様様様`, or a short block such as `abcdabcd...`). It runs on the raw stream, so it also catches loops inside the reasoning/thought channel and tool-call JSON, not just the final answer. The wire `finish_reason` is `stop`, the same as vLLM. Sampling penalties (`repeat_penalty`, DRY) cannot recover once the logits collapse, which is why this is a stop condition rather than a logit reshaper.
+
+The detector mirrors vLLM's `SamplingParams` fields, with the same JSON names on the OpenAI chat surface:
+
+| Field | Meaning |
+|-------|---------|
+| `max_pattern_size` | Largest N-gram pattern size to scan. `0` (default) disables detection. |
+| `min_pattern_size` | Smallest N-gram pattern size to scan. `0` (default) is treated as `1`; clamped to `<= max_pattern_size`. |
+| `min_count` | Minimum consecutive repeats of a pattern that ends generation. Must be `>= 2`; any smaller value disables detection. |
+
+The preferred activation surface is engine-level: detection is **default-on for the Gemma 4 family with no configuration required**, so a downstream serving app needs no setup and end users see no toggle. The per-request fields and the global env var below are additional tuning surfaces, not the only way to turn it on.
+
+| Variable | Values | Default | Notes |
+|----------|--------|---------|-------|
+| `MLXCEL_LOOP_DETECTION` | `off`/`0`/`none`/`false`/`disabled`, `on`/`default`/`true`/`enabled`, or `MIN,MAX,COUNT` (also `MIN:MAX:COUNT`) | unset | Global operator override for any model. Unset lets the Gemma 4 family default-on apply (non-Gemma models stay disabled). `off` force-disables for every request, including the Gemma 4 family; `on` forces the recommended threshold `1,20,4` for every model; an explicit triple (e.g. `1,20,4`) sets exact values. A malformed value warns and is ignored. |
+
+Resolution precedence, highest first:
+
+1. **Explicit per-request fields.** If a chat request sets any of `max_pattern_size` / `min_pattern_size` / `min_count`, those values are used verbatim, including an explicit disable (`max_pattern_size=0`). A client never has to send anything; the fields are only for tuning or opting out.
+2. **Global override.** `MLXCEL_LOOP_DETECTION`, which an operator can use to force-enable, tune, or force-disable for any model.
+3. **Gemma 4 family default-on.** When the loaded model is in the Gemma 4 family (`Gemma4`, `Gemma4VLM`, `Gemma4Unified`), the conservative threshold `min_pattern_size=1, max_pattern_size=20, min_count=4` is applied unconditionally. This does not require tools or a structured-output request, so plain Gemma 4 chat is covered too. Detection only ends generation when a real repetition loop is present, so a conservative default-on for this family is low risk.
+4. **Disabled.** The default for every non-Gemma-4 model, preserving the exact baseline output.
+
 ## KV cache and TurboQuant variables
 
 Use CLI flags such as `--cache-type-k`, `--cache-type-v`, `--kv-cache-mode`,

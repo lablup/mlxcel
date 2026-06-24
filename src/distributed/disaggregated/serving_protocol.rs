@@ -270,6 +270,10 @@ pub fn sampling_from_serializable(state: &SerializableSamplingState) -> Sampling
         presence_penalty: state.presence_penalty,
         stop_token_ids: state.stop_token_ids.clone(),
         token_bias: Default::default(),
+        // Loop detection is not yet serialized across the disaggregated
+        // prefill/decode handoff; the decode node keeps the disabled baseline.
+        // Wiring it into `SerializableSamplingState` is a follow-up.
+        loop_detection: Default::default(),
     }
 }
 

@@ -4526,6 +4526,28 @@ impl BatchScheduler {
                 tracing::error!("State transition error: {err}");
             }
 
+            // Loop / repetition guard (issue #432): end early when the raw
+            // generated stream collapses into a short repeated pattern. Skip if
+            // the length limit already finished this sequence; the detector is
+            // a zero-overhead no-op when loop detection is disabled (default).
+            if !seq.state.is_finished()
+                && mlxcel_core::detect_repetition_loop(
+                    &seq.generated_tokens,
+                    &seq.sampling.loop_detection,
+                )
+            {
+                match seq
+                    .state
+                    .transition_to(SequenceState::Finished(FinishReason::RepetitionLoop))
+                {
+                    Ok(()) => tracing::info!(
+                        generated = seq.generated_tokens.len(),
+                        "loop detection: ending generation early (repetition loop)"
+                    ),
+                    Err(err) => tracing::error!("State transition error: {err}"),
+                }
+            }
+
             // Periodic cache clearing (matches Python mlx-lm which clears every 256)
             if seq.generated_tokens.len() % 256 == 0 {
                 mlxcel_core::clear_memory_cache();
@@ -4629,6 +4651,28 @@ impl BatchScheduler {
                     .transition_to(SequenceState::Finished(FinishReason::Length))
             {
                 tracing::error!("State transition error: {err}");
+            }
+
+            // Loop / repetition guard (issue #432): end early when the raw
+            // generated stream collapses into a short repeated pattern. Skip if
+            // the length limit already finished this sequence; the detector is
+            // a zero-overhead no-op when loop detection is disabled (default).
+            if !seq.state.is_finished()
+                && mlxcel_core::detect_repetition_loop(
+                    &seq.generated_tokens,
+                    &seq.sampling.loop_detection,
+                )
+            {
+                match seq
+                    .state
+                    .transition_to(SequenceState::Finished(FinishReason::RepetitionLoop))
+                {
+                    Ok(()) => tracing::info!(
+                        generated = seq.generated_tokens.len(),
+                        "loop detection: ending generation early (repetition loop)"
+                    ),
+                    Err(err) => tracing::error!("State transition error: {err}"),
+                }
             }
 
             // Periodic cache clearing (matches Python mlx-lm which clears every 256).
@@ -4799,6 +4843,28 @@ impl BatchScheduler {
             tracing::error!("State transition error: {err}");
         }
 
+        // Loop / repetition guard (issue #432): end early when the raw
+        // generated stream collapses into a short repeated pattern. Skip if the
+        // length limit already finished this sequence; the detector is a
+        // zero-overhead no-op when loop detection is disabled (default).
+        if !seq.state.is_finished()
+            && mlxcel_core::detect_repetition_loop(
+                &seq.generated_tokens,
+                &seq.sampling.loop_detection,
+            )
+        {
+            match seq
+                .state
+                .transition_to(SequenceState::Finished(FinishReason::RepetitionLoop))
+            {
+                Ok(()) => tracing::info!(
+                    generated = seq.generated_tokens.len(),
+                    "loop detection: ending generation early (repetition loop)"
+                ),
+                Err(err) => tracing::error!("State transition error: {err}"),
+            }
+        }
+
         // Periodic cache clearing (matches Python mlx-lm which clears every 256)
         if seq.generated_tokens.len() % 256 == 0 {
             mlxcel_core::clear_memory_cache();
@@ -4903,7 +4969,10 @@ impl BatchScheduler {
                 let healthy = matches!(
                     seq.state,
                     SequenceState::Finished(
-                        FinishReason::Stop | FinishReason::Length | FinishReason::Cancelled,
+                        FinishReason::Stop
+                            | FinishReason::Length
+                            | FinishReason::RepetitionLoop
+                            | FinishReason::Cancelled,
                     )
                 );
                 self.donate_finished_sequence_cache(

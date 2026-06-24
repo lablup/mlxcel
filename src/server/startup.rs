@@ -895,7 +895,68 @@ pub(super) fn build_server_config(
         max_denoising_steps: startup.max_denoising_steps,
         diffusion_sampler: startup.diffusion_sampler.clone(),
         diffusion_threshold: startup.diffusion_threshold,
+        // Global loop-detection override (issue #432) from `MLXCEL_LOOP_DETECTION`.
+        // `None` means the per-family auto-enable policy applies.
+        loop_detection: resolve_loop_detection_env(),
+        // Whether the loaded model is in the Gemma 4 family, used to gate the
+        // loop-detection auto-enable on the documented amplifiers.
+        model_is_gemma4_family: detect_gemma4_family(&startup.model_path),
     }
+}
+
+/// Whether `model_path` loads a Gemma 4 family model (`Gemma4`, `Gemma4VLM`, or
+/// `Gemma4Unified`). Used to gate the issue #432 loop-detection auto-enable. A
+/// detection error (unreadable config) returns `false`, preserving the baseline.
+fn detect_gemma4_family(model_path: &Path) -> bool {
+    use crate::models::ModelType;
+    matches!(
+        crate::models::get_model_type(model_path),
+        Ok(ModelType::Gemma4 | ModelType::Gemma4VLM | ModelType::Gemma4Unified)
+    )
+}
+
+/// Parse the `MLXCEL_LOOP_DETECTION` global override (issue #432).
+///
+/// Accepted values (case-insensitive):
+/// - unset / empty: `None` (the per-family auto-enable policy applies).
+/// - `off` / `0` / `none` / `false` / `disabled`: force-disable for every
+///   request (`Some(disabled)`), still overridable per request.
+/// - `on` / `default` / `true` / `enabled`: force the recommended threshold
+///   (`min=1, max=20, count=4`).
+/// - `MIN,MAX,COUNT` or `MIN:MAX:COUNT`: an explicit triple, e.g. `1,20,4`.
+///
+/// A malformed value warns and returns `None` so a typo does not silently
+/// change generation behavior.
+fn resolve_loop_detection_env() -> Option<mlxcel_core::LoopDetectionConfig> {
+    let raw = std::env::var("MLXCEL_LOOP_DETECTION").ok()?;
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    match trimmed.to_ascii_lowercase().as_str() {
+        "off" | "0" | "none" | "false" | "disabled" => {
+            return Some(mlxcel_core::LoopDetectionConfig::disabled());
+        }
+        "on" | "default" | "true" | "enabled" => {
+            return Some(crate::server::request_options::LOOP_DETECTION_RECOMMENDED);
+        }
+        _ => {}
+    }
+    let parts: Vec<&str> = trimmed.split([',', ':']).map(str::trim).collect();
+    if parts.len() == 3
+        && let (Ok(min), Ok(max), Ok(count)) = (
+            parts[0].parse::<usize>(),
+            parts[1].parse::<usize>(),
+            parts[2].parse::<usize>(),
+        )
+    {
+        return Some(mlxcel_core::LoopDetectionConfig::new(min, max, count));
+    }
+    tracing::warn!(
+        "MLXCEL_LOOP_DETECTION=\"{raw}\" is not valid; expected off/on or MIN,MAX,COUNT \
+         (e.g. 1,20,4). Ignoring."
+    );
+    None
 }
 
 fn initialize_server_logging(startup: &ServerStartupConfig) -> Result<()> {

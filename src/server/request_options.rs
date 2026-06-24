@@ -22,7 +22,16 @@ use super::{ServerConfig, ServerGenerateOptions};
 use crate::sampling::{ResolvedSamplingParams, build_sampling_config};
 use crate::server::batch::RequestPriority;
 use crate::server::config::ReasoningBudgetOverride;
+use mlxcel_core::LoopDetectionConfig;
 use mlxcel_core::sampling::LogprobsConfig;
+
+/// Conservative built-in loop-detection threshold (issue #432): scan
+/// single-token through 20-token tail patterns and end generation once any
+/// repeats four times. This is the engine-level default applied to the Gemma 4
+/// family (with no per-user configuration), and also the "force-enable"
+/// configuration for the `MLXCEL_LOOP_DETECTION` global override.
+pub(crate) const LOOP_DETECTION_RECOMMENDED: LoopDetectionConfig =
+    LoopDetectionConfig::new(1, 20, 4);
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub(crate) struct RequestOptionOverrides {
@@ -48,13 +57,69 @@ pub(crate) struct RequestOptionOverrides {
     /// chat endpoints) vs. takes a free-form prompt (false for raw text
     /// completion endpoints).
     pub thinking_enter_block_on_start: bool,
+    /// Explicit per-request loop-detection override (issue #432). `Some` when
+    /// the request set any of the vLLM `max_pattern_size` / `min_pattern_size`
+    /// / `min_count` fields; it then wins over the global override and the
+    /// family default-on. `None` lets the global override / family policy
+    /// decide.
+    pub loop_detection_request: Option<LoopDetectionConfig>,
+}
+
+/// Build a [`LoopDetectionConfig`] from the raw vLLM-style request fields.
+///
+/// Returns `None` when the request set none of the three fields (so the global
+/// override / family policy decides). Returns `Some` when any field is present,
+/// treating the request as authoritative, including an explicit disable
+/// (`max_pattern_size = 0`). Unset companions fall back to vLLM defaults (`0`),
+/// which the detector normalizes (`min_pattern_size 0 -> 1`, disabled when
+/// `max_pattern_size == 0` or `min_count < 2`).
+pub(crate) fn loop_detection_from_request(
+    max_pattern_size: Option<usize>,
+    min_pattern_size: Option<usize>,
+    min_count: Option<usize>,
+) -> Option<LoopDetectionConfig> {
+    if max_pattern_size.is_none() && min_pattern_size.is_none() && min_count.is_none() {
+        return None;
+    }
+    Some(LoopDetectionConfig::new(
+        min_pattern_size.unwrap_or(0),
+        max_pattern_size.unwrap_or(0),
+        min_count.unwrap_or(0),
+    ))
+}
+
+/// Resolve the effective loop-detection config for one request.
+///
+/// Precedence (highest first): explicit per-request override, global operator
+/// override (`MLXCEL_LOOP_DETECTION`, which may force-disable), the Gemma 4
+/// family engine-level default-on, otherwise disabled. The family default-on is
+/// unconditional (it does not require tools or a structured-output request);
+/// the issue selects this as the "Best" activation surface so a downstream
+/// serving app needs no configuration and end users see no toggle. Detection
+/// only ends generation when a real repetition loop is present, so a
+/// conservative default-on for this family is low risk.
+pub(crate) fn resolve_loop_detection(
+    request_override: Option<LoopDetectionConfig>,
+    global_override: Option<LoopDetectionConfig>,
+    family_default_on: bool,
+) -> LoopDetectionConfig {
+    if let Some(req) = request_override {
+        return req;
+    }
+    if let Some(global) = global_override {
+        return global;
+    }
+    if family_default_on {
+        return LOOP_DETECTION_RECOMMENDED;
+    }
+    LoopDetectionConfig::disabled()
 }
 
 pub(crate) fn build_server_generate_options(
     config: &ServerConfig,
     overrides: RequestOptionOverrides,
 ) -> ServerGenerateOptions {
-    let sampling = build_sampling_config(ResolvedSamplingParams {
+    let mut sampling = build_sampling_config(ResolvedSamplingParams {
         temperature: overrides.temperature.unwrap_or(config.default_temperature),
         top_k: overrides.top_k.unwrap_or(config.default_top_k),
         top_p: overrides.top_p.unwrap_or(config.default_top_p),
@@ -82,6 +147,17 @@ pub(crate) fn build_server_generate_options(
             .unwrap_or(config.default_presence_penalty),
         stop_token_ids: Vec::new(),
     });
+
+    // Loop-detection policy (issue #432) is resolved here, in the server
+    // control plane, where the loaded model family is visible. The Gemma 4
+    // family is default-on (engine-level, no per-user configuration); the
+    // shared `build_sampling_config` leaves the field disabled for everything
+    // else, preserving the bit-exact baseline.
+    sampling.loop_detection = resolve_loop_detection(
+        overrides.loop_detection_request,
+        config.loop_detection,
+        config.model_is_gemma4_family,
+    );
 
     ServerGenerateOptions {
         max_tokens: overrides.max_tokens.unwrap_or(config.default_max_tokens),

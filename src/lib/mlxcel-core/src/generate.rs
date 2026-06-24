@@ -34,6 +34,7 @@ use crate::generation_policy::{
 };
 use crate::hardware;
 use crate::layers::KVCache;
+use crate::loop_detection::{detect_repetition_loop, LoopDetectionConfig};
 use crate::sampling::{
     sample_token_optimized, sample_token_optimized_with_state, SamplerState, TokenBiasMap,
 };
@@ -684,6 +685,12 @@ pub struct SamplingConfig {
     /// Per-token additive logit bias applied before all history-based penalties.
     /// Empty (default) is a zero-overhead no-op that preserves bit-exact baseline.
     pub token_bias: TokenBiasMap,
+    /// N-gram tail repetition / loop detection. Disabled by default (all zero),
+    /// a zero-overhead no-op that preserves the bit-exact baseline for every
+    /// model that does not opt in (mirrors `token_bias` / `stop_token_ids`).
+    /// When enabled, the decode loops end generation early once the raw
+    /// generated stream collapses into a short repeated pattern.
+    pub loop_detection: LoopDetectionConfig,
 }
 
 impl Default for SamplingConfig {
@@ -704,6 +711,7 @@ impl Default for SamplingConfig {
             presence_penalty: 0.0,
             stop_token_ids: Vec::new(),
             token_bias: TokenBiasMap::default(),
+            loop_detection: LoopDetectionConfig::default(),
         }
     }
 }
@@ -727,6 +735,7 @@ impl SamplingConfig {
             presence_penalty: 0.0,
             stop_token_ids: Vec::new(),
             token_bias: TokenBiasMap::default(),
+            loop_detection: LoopDetectionConfig::default(),
         }
     }
 
@@ -1264,6 +1273,14 @@ impl CxxGenerator {
                 token_history.push(token_val);
             }
 
+            // Loop / repetition guard: end generation early when the raw
+            // generated stream collapses into a short repeated pattern (e.g.
+            // Gemma 4 token-repetition collapse). A disabled config (the
+            // default) short-circuits with zero overhead.
+            if detect_repetition_loop(&self.generated_tokens, &sampling.loop_detection) {
+                break;
+            }
+
             // Invoke callback; abort if it returns false
             if !on_token(token_val) {
                 break;
@@ -1458,6 +1475,14 @@ impl CxxGenerator {
                 token_history.push(token_val);
             }
 
+            // Loop / repetition guard: end generation early when the raw
+            // generated stream collapses into a short repeated pattern (e.g.
+            // Gemma 4 token-repetition collapse). A disabled config (the
+            // default) short-circuits with zero overhead.
+            if detect_repetition_loop(&self.generated_tokens, &sampling.loop_detection) {
+                break;
+            }
+
             if !on_token(token_val) {
                 break;
             }
@@ -1603,6 +1628,14 @@ impl CxxGenerator {
             self.generated_tokens.push(token_val);
             if needs_history {
                 token_history.push(token_val);
+            }
+
+            // Loop / repetition guard: end generation early when the raw
+            // generated stream collapses into a short repeated pattern (e.g.
+            // Gemma 4 token-repetition collapse). A disabled config (the
+            // default) short-circuits with zero overhead.
+            if detect_repetition_loop(&self.generated_tokens, &sampling.loop_detection) {
+                break;
             }
             // Periodic cache clearing (matches Python mlx-lm which clears every 256)
             if n % 256 == 0 && n > 0 {
@@ -1781,6 +1814,14 @@ impl CxxGenerator {
             self.generated_tokens.push(token_val);
             if needs_history {
                 token_history.push(token_val);
+            }
+
+            // Loop / repetition guard: end generation early when the raw
+            // generated stream collapses into a short repeated pattern (e.g.
+            // Gemma 4 token-repetition collapse). A disabled config (the
+            // default) short-circuits with zero overhead.
+            if detect_repetition_loop(&self.generated_tokens, &sampling.loop_detection) {
+                break;
             }
 
             // Periodic cache clearing (matches Python mlx-lm which clears every 256)
