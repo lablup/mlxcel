@@ -186,6 +186,18 @@ fn profile_forward_enabled() -> bool {
     *FLAG.get_or_init(|| std::env::var_os("MLXCEL_PROFILE_FORWARD").is_some())
 }
 
+/// Route the MLP activation through the fused single-launch Metal xIELU kernel
+/// (`mlxcel_core::fused_xielu`) instead of the ~11-op elementwise `apertus_xielu`
+/// graph. Read once from `MLXCEL_FUSED_XIELU` and cached; default-off. The fused
+/// kernel keeps every intermediate in the input dtype (bf16 for native Apertus),
+/// so greedy temp-0 decode stays byte-identical to the elementwise path on Apple
+/// Silicon (see #409). On non-Metal back-ends the FFI falls back to an equivalent
+/// elementwise graph, so enabling the flag is safe everywhere.
+fn fused_xielu_enabled() -> bool {
+    static FLAG: OnceLock<bool> = OnceLock::new();
+    *FLAG.get_or_init(|| std::env::var_os("MLXCEL_FUSED_XIELU").is_some())
+}
+
 /// Per-block decode timing accumulator. Constructed only when
 /// `MLXCEL_PROFILE_BLOCKS` is set for a single-token decode step.
 #[derive(Default)]
@@ -223,7 +235,11 @@ pub struct MLP {
 impl MLP {
     pub fn forward(&self, x: &MlxArray) -> UniquePtr<MlxArray> {
         let up = self.up_proj.forward(x);
-        let activated = apertus_xielu(&up, self.alpha_p, self.alpha_n, self.beta, self.eps);
+        let activated = if fused_xielu_enabled() {
+            mlxcel_core::fused_xielu(&up, self.alpha_p, self.alpha_n, self.beta, self.eps)
+        } else {
+            apertus_xielu(&up, self.alpha_p, self.alpha_n, self.beta, self.eps)
+        };
         self.down_proj.forward(&activated)
     }
 
@@ -712,5 +728,65 @@ impl LanguageModel for ApertusModel {
         // Apertus-8B-Instruct generation_config: </s>, <|assistant_end|>,
         // <|tools_suffix|>.
         vec![2, 68, 72]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // bf16 dtype id for `astype` (see mlx_cxx_internal.h to_dtype()).
+    const BF16: i32 = 12;
+
+    /// The fused xIELU Metal kernel must be bit-for-bit identical to the
+    /// elementwise `apertus_xielu` reference on the native bf16 path, so the
+    /// `MLXCEL_FUSED_XIELU` flag never perturbs greedy temp-0 decode. The kernel
+    /// keeps every intermediate in bf16 and reproduces MLX's expm1f, so each
+    /// sub-expression rounds exactly where the reference rounds. The test spans
+    /// the full activation domain: large/small positive, the `x > 0` boundary,
+    /// near-zero negatives that straddle `eps`, and large negatives that
+    /// saturate `expm1`. On a non-Metal back-end `fused_xielu` runs the
+    /// equivalent elementwise fallback, which is identical by construction.
+    #[test]
+    fn fused_xielu_matches_elementwise_bit_for_bit() {
+        // Per-layer scalars in the range the Apertus-8B checkpoint produces:
+        // alpha_p/alpha_n are post-softplus (positive), beta/eps are the fixed
+        // reference defaults.
+        let alpha_p = 0.8731f32;
+        let alpha_n = 0.6042f32;
+        let beta = 0.5f32;
+        let eps = -1e-6f32;
+
+        let mut vals: Vec<f32> = vec![
+            0.0, -0.0, 1e-7, -1e-7, 5e-7, -5e-7, 1e-6, -1e-6, 2e-6, -2e-6, 1e-4, -1e-4, 0.001,
+            -0.001, 0.5, -0.5, 1.0, -1.0, 2.5, -2.5, 8.0, -8.0, 42.0, -42.0, 90.0, -90.0,
+        ];
+        // A deterministic spread so the test exercises a dense range, not just
+        // the hand-picked edge cases above.
+        for k in 0..2048i32 {
+            vals.push((k as f32 - 1024.0) * 0.05);
+        }
+        let n = vals.len() as i32;
+
+        let x_f32 = mlxcel_core::from_slice_f32(&vals, &[1, 1, n]);
+        let x = mlxcel_core::astype(&x_f32, BF16);
+
+        let reference = apertus_xielu(&x, alpha_p, alpha_n, beta, eps);
+        let fused = mlxcel_core::fused_xielu(&x, alpha_p, alpha_n, beta, eps);
+
+        let equal = mlxcel_core::array_equal(&reference, &fused, true);
+        mlxcel_core::eval(&equal);
+        let all_equal = mlxcel_core::item_f32(&equal) != 0.0;
+
+        if !all_equal {
+            // Report the worst element-wise gap to make a regression debuggable.
+            let diff = mlxcel_core::abs(&mlxcel_core::subtract(&reference, &fused));
+            let max_diff = mlxcel_core::max_all(&diff);
+            mlxcel_core::eval(&max_diff);
+            panic!(
+                "fused xIELU diverged from the elementwise reference (max abs diff {})",
+                mlxcel_core::item_f32(&max_diff)
+            );
+        }
     }
 }

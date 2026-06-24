@@ -1490,6 +1490,20 @@ mod ffi {
             group_size: i32,
         ) -> UniquePtr<MlxArray>;
 
+        /// Fused xIELU activation (Apertus): one Metal launch covering the
+        /// `apertus_xielu` elementwise graph (square/min/expm1/where/...). The
+        /// per-layer scalars `alpha_p` / `alpha_n` (post-softplus) and `beta` /
+        /// `eps` are passed by value. Greedy temp-0 byte-identical to the
+        /// elementwise path on Apple Silicon; falls back to an equivalent
+        /// elementwise graph on non-Metal back-ends. Gated by `MLXCEL_FUSED_XIELU`.
+        fn fused_xielu(
+            x: &MlxArray,
+            alpha_p: f32,
+            alpha_n: f32,
+            beta: f32,
+            eps: f32,
+        ) -> UniquePtr<MlxArray>;
+
         /// BitLinear ternary matmul (BitNet b1.58). `packed_weights` is
         /// [out_features/4, in_features] uint8 (2-bit ternary, 4 rows/byte),
         /// scaled by `weight_scale[0]` (inverted unless linear_class is

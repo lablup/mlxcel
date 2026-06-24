@@ -178,6 +178,188 @@ std::unique_ptr<MlxArray> bitlinear_matmul(
     return std::make_unique<MlxArray>(reshape(results[0], out_shape));
 }
 
+// ── xIELU activation (Apertus) fused elementwise Metal kernel ───────────────
+// Collapses the ~11 elementwise MLX ops in src/models/apertus.rs::apertus_xielu
+// (square, multiply_scalar, full, minimum, expm1, subtract, multiply_scalar,
+// greater, where, multiply_scalar, add) into a single launch over the MLP
+// intermediate buffer. The element-wise formula, mirroring mlx-lm's XieLU
+// (https://github.com/ml-explore/mlx-lm/blob/main/mlx_lm/models/activations.py):
+//   x  > 0:  alpha_p * x^2 + beta * x
+//   x <= 0:  (expm1(min(x, eps)) - x) * alpha_n + beta * x
+//
+// Every intermediate is held in T (the input dtype, bfloat16 for the native
+// Apertus path), so each sub-expression rounds exactly where the elementwise
+// reference rounds: bfloat arithmetic on Metal promotes to float, computes, and
+// rounds back to bfloat per operation, matching MLX's per-op bf16 store. The
+// scalars are cast f32->T once in-kernel, matching the reference's
+// multiply_scalar/full helpers which materialize the scalar in the array dtype.
+// expm1f((float)x) mirrors MLX's Expm1 unary op. The result is greedy-temp-0
+// byte-identical to apertus_xielu on Apple Silicon (verified in #409).
+namespace {
+    // Device-side expm1f for the negative branch. The JIT metal_kernel preamble
+    // (utils.h) does NOT pull in MLX's expm1f.h, and Metal's <metal_math> has no
+    // expm1, so `mx.fast.metal_kernel` cannot see the same expm1f that the AOT
+    // unary kernels use. To stay greedy-temp-0 byte-identical to the elementwise
+    // path (whose expm1 routes through mlx::core::expm1 -> the AOT expm1f), this
+    // header reproduces MLX's expm1f verbatim (renamed to avoid any clash). It
+    // is itself Norbert Juffa's BSD-2-Clause routine carried in MLX; see the
+    // top-level NOTICE.
+    //
+    // Derived from mlx/backend/metal/kernels/expm1f.h in ml-explore/mlx
+    // (https://github.com/ml-explore/mlx/blob/main/mlx/backend/metal/kernels/expm1f.h),
+    // Copyright (c) Apple Inc. (MIT) and Copyright (c) 2015-2023 Norbert Juffa
+    // (BSD-2-Clause). See the top-level NOTICE file.
+    static const char* XIELU_METAL_HEADER = R"(
+        inline float xielu_expm1f_scaled_unchecked(float a, float b) {
+            float f, j, r, s, t, u, v, x, y;
+            int i;
+            j = metal::fma(1.442695f, a, 12582912.f);
+            j = j - 12582912.0f;
+            i = (int)j;
+            f = metal::fma(j, -6.93145752e-1f, a);
+            s = f * f;
+            if (a == 0.0f) s = a;
+            r = 1.97350979e-4f;
+            r = metal::fma(r, f, 1.39309070e-3f);
+            r = metal::fma(r, f, 8.33343994e-3f);
+            r = metal::fma(r, f, 4.16668020e-2f);
+            r = metal::fma(r, f, 1.66666716e-1f);
+            r = metal::fma(r, f, 4.99999970e-1f);
+            u = (j == 1) ? (f + 0.5f) : f;
+            v = metal::fma(r, s, u);
+            s = 0.5f * b;
+            t = metal::ldexp(s, i);
+            y = t - s;
+            x = (t - y) - s;
+            r = metal::fma(v, t, x) + y;
+            r = r + r;
+            if (j == 0) r = v;
+            if (j == 1) r = v + v;
+            return r;
+        }
+        inline float xielu_expm1f(float a) {
+            float r = xielu_expm1f_scaled_unchecked(a, 1.0f);
+            if (metal::fabs(a - 1.0f) > 88.0f) {
+                r = metal::pow(2.0f, a);
+                r = metal::fma(r, r, -1.0f);
+            }
+            return r;
+        }
+    )";
+
+    static const char* XIELU_METAL_SOURCE = R"(
+        uint i = thread_position_in_grid.x;
+        if (i >= (uint)n) { return; }
+        T xx = x[i];
+        T ap = (T)alpha_p[0];
+        T an = (T)alpha_n[0];
+        T bb = (T)beta[0];
+        T ee = (T)eps[0];
+        // Each named T (bfloat for the native Apertus path) intermediate forces
+        // a round-to-bf16 at exactly the points the elementwise reference rounds
+        // (one MLX op == one round). Keeping every sub-expression to a single
+        // arithmetic op prevents the Metal compiler from contracting a multiply
+        // and add into one FMA (which would round once instead of twice) and
+        // makes the fused result greedy-temp-0 byte-identical to apertus_xielu.
+        T pos_x_sq = xx * xx;        // square(x)
+        T pos_core = ap * pos_x_sq;  // alpha_p * x^2
+        T clamped = min(xx, ee);     // minimum(x, eps)
+        T em = (T)xielu_expm1f((float)clamped);  // expm1(clamped)
+        T neg_sub = em - xx;         // expm1(clamped) - x
+        T neg_core = neg_sub * an;   // (expm1(clamped) - x) * alpha_n
+        T selected = (xx > (T)0) ? pos_core : neg_core;  // where(x > 0, ...)
+        T bx = xx * bb;              // beta * x (added once, outside the select)
+        out[i] = selected + bx;      // selected + beta * x
+    )";
+
+    struct XieluKernelHolder {
+        std::optional<mlx::core::fast::CustomKernelFunction> kernel;
+        bool initialized = false;
+        mlx::core::fast::CustomKernelFunction& get() {
+            if (!initialized) {
+                kernel = mlx::core::fast::metal_kernel(
+                    "xielu_fused",
+                    {"x", "alpha_p", "alpha_n", "beta", "eps"},
+                    {"out"},
+                    XIELU_METAL_SOURCE,
+                    XIELU_METAL_HEADER);
+                initialized = true;
+            }
+            return *kernel;
+        }
+    };
+    static XieluKernelHolder& get_xielu_kernel() {
+        static XieluKernelHolder holder;
+        return holder;
+    }
+
+    // Elementwise fallback mirroring src/models/apertus.rs::apertus_xielu. Used
+    // when the Metal back-end is unavailable (e.g. a CUDA-only build, where
+    // mx.fast.metal_kernel throws "[metal_kernel] No Metal back-end"). Keeps the
+    // FFI entry total so the MLXCEL_FUSED_XIELU flag never crashes a non-Metal
+    // build; the per-op result is identical to the Rust reference.
+    static mlx::core::array xielu_elementwise(
+        const mlx::core::array& x, float alpha_p, float alpha_n,
+        float beta, float eps) {
+        using namespace mlx::core;
+        auto dt = x.dtype();
+        auto ap = array(alpha_p, dt);
+        auto an = array(alpha_n, dt);
+        auto bb = array(beta, dt);
+        auto ee = array(eps, dt);
+        auto pos_core = multiply(ap, square(x));
+        auto neg_core = multiply(an, subtract(expm1(minimum(x, ee)), x));
+        auto cond = greater(x, array(0.0f, dt));
+        auto selected = where(cond, pos_core, neg_core);
+        return add(selected, multiply(x, bb));
+    }
+}
+
+std::unique_ptr<MlxArray> fused_xielu(
+    const MlxArray& x,
+    float alpha_p,
+    float alpha_n,
+    float beta,
+    float eps
+) {
+    using namespace mlx::core;
+    auto T = x.inner.dtype();
+    auto xs = x.inner.shape();
+
+    // Non-Metal back-ends: mx.fast.metal_kernel throws, so use the elementwise
+    // fallback (correct, just not fused). Apertus is a macOS/Metal target.
+    if (!mlx::core::metal::is_available()) {
+        return std::make_unique<MlxArray>(
+            xielu_elementwise(x.inner, alpha_p, alpha_n, beta, eps));
+    }
+
+    int64_t n = 1;
+    for (auto d : xs) n *= d;
+    auto xflat = reshape(x.inner, {(int)n});
+
+    // Per-layer scalars as 1-element f32 inputs; cast f32->T once in-kernel.
+    auto ap = full({1}, alpha_p, float32);
+    auto an = full({1}, alpha_n, float32);
+    auto bb = full({1}, beta, float32);
+    auto ee = full({1}, eps, float32);
+
+    auto& kernel = get_xielu_kernel().get();
+    std::vector<std::pair<std::string, mlx::core::fast::TemplateArg>> ta = {
+        {"T", T},
+        {"n", (int)n},
+    };
+    std::vector<array> inputs = {xflat, ap, an, bb, ee};
+    const int tg = 256;
+    const int grid = (int)(((n + tg - 1) / tg) * tg);
+    auto results = kernel(
+        inputs, {Shape{(int)n}}, {T},
+        std::make_tuple(grid, 1, 1),
+        std::make_tuple(tg, 1, 1),
+        ta, std::nullopt, false, {});
+
+    return std::make_unique<MlxArray>(reshape(results[0], xs));
+}
+
 // SSM (Mamba2) fused Metal kernel for single-token decode.
 // Port of Python mlx-lm ssm.py make_ssm_kernel() + ssm_update_kernel()
 namespace {

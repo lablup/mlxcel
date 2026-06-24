@@ -1404,6 +1404,17 @@ std::unique_ptr<MlxArray> fused_moe_geglu_kernel(
     int32_t gu_bits, int32_t d_bits, int32_t group_size
 );
 
+// Fused xIELU activation (Apertus). Collapses the ~11 elementwise ops in
+// apertus_xielu into one launch over the MLP intermediate buffer. Falls back to
+// an equivalent elementwise graph on non-Metal back-ends.
+std::unique_ptr<MlxArray> fused_xielu(
+    const MlxArray& x,
+    float alpha_p,
+    float alpha_n,
+    float beta,
+    float eps
+);
+
 // BitLinear ternary matmul (BitNet b1.58): multiply on 2-bit-packed ternary
 // weights [out_features/4, in_features] uint8 scaled by weight_scale[0].
 std::unique_ptr<MlxArray> bitlinear_matmul(
