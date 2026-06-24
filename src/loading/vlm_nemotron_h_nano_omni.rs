@@ -88,15 +88,48 @@ fn filter_out_audio_weights(weights: WeightMap, drop_audio: bool) -> WeightMap {
         .collect()
 }
 
+/// Decide whether the `sound_encoder` conv weights are in PyTorch `[O, I, K]`
+/// layout (need transposing to MLX channel-last) or are already channel-last
+/// (must be left untouched).
+///
+/// The Parakeet conv module mixes depthwise and pointwise Conv1d whose
+/// channel-last vs PyTorch shape signatures are mirror images (depthwise
+/// channel-last `[O, kW>1, 1]` vs pointwise channel-last `[O, 1, in>1]`), so no
+/// single per-weight shape test can classify both: the earlier per-weight guard
+/// left pointwise on an unconditional transpose, which corrupted a channel-last
+/// checkpoint's pointwise weights and crashed the audio conv (#428). Decide the
+/// whole tower's layout ONCE from an unambiguous depthwise weight: PyTorch
+/// depthwise is `[O, 1, kW]` (axis 1 == 1) while channel-last depthwise is
+/// `[O, kW, 1]` (axis 2 == 1). mlx-community checkpoints (e.g.
+/// Nemotron-3-Nano-Omni) ship the encoder already channel-last, so this returns
+/// false and every `sound_encoder` conv transpose is skipped.
+fn nemotron_audio_needs_conv_transpose(weights: &WeightMap) -> bool {
+    for (key, value) in weights.iter() {
+        if key.starts_with("sound_encoder.encoder.")
+            && key.contains("depthwise")
+            && key.ends_with(".weight")
+        {
+            let shape = mlxcel_core::array_shape(value);
+            if shape.len() == 3 {
+                return shape[1] == 1;
+            }
+        }
+    }
+    // No depthwise weight found: preserve the historical unconditional transpose.
+    true
+}
+
 /// Mirror upstream `sanitize_audio_weights` from
 /// https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/models/nemotron_h_nano_omni/audio.py:
 /// - drop `sound_encoder.encoder.feature_extractor.*` (training-only),
 /// - drop `*.num_batches_tracked` BatchNorm scratch state,
-/// - transpose Conv1d weights from PyTorch `[O, I, K]` to MLX
-///   channel-last `[O, K, I]`,
-/// - transpose Conv2d weights from PyTorch `[O, I, kh, kw]` to MLX
-///   channel-last `[O, kh, kw, I]`.
+/// - transpose Conv1d `[O, I, K]` -> MLX `[O, K, I]` and Conv2d
+///   `[O, I, kH, kW]` -> MLX `[O, kH, kW, I]`, but ONLY when the checkpoint is
+///   in PyTorch layout. A checkpoint already stored channel-last (detected once
+///   via [`nemotron_audio_needs_conv_transpose`]) is left untouched so the
+///   pointwise conv1d weights are not corrupted by a double transpose (#428).
 fn sanitize_audio_weights(weights: WeightMap) -> WeightMap {
+    let needs_transpose = nemotron_audio_needs_conv_transpose(&weights);
     let mut out = WeightMap::new();
     for (key, value) in weights {
         if key.starts_with("sound_encoder.encoder.feature_extractor.") {
@@ -105,37 +138,16 @@ fn sanitize_audio_weights(weights: WeightMap) -> WeightMap {
         if key.ends_with(".num_batches_tracked") {
             continue;
         }
-        if key.starts_with("sound_encoder.encoder.") && key.ends_with(".weight") {
+        if needs_transpose && key.starts_with("sound_encoder.encoder.") && key.ends_with(".weight")
+        {
             let shape = mlxcel_core::array_shape(&value);
             match shape.len() {
                 3 => {
-                    // PyTorch Conv1d [O, I, K] -> MLX channel-last [O, K, I].
-                    // The Parakeet convolution module mixes depthwise (I == 1)
-                    // and pointwise (K == 1) conv1d, whose channel-last and
-                    // PyTorch shape signatures collide, so only the depthwise
-                    // weight can be layout-detected from shape alone (issue
-                    // #428). Guard the depthwise key; leave the pointwise and
-                    // any other 3D weights on the unconditional transpose, which
-                    // matches the upstream mlx-vlm sanitizer.
-                    if key.contains("depthwise")
-                        && crate::loading::conv1d_weight_is_channel_last(&shape)
-                    {
-                        out.insert(key, value);
-                    } else {
-                        let transposed = mlxcel_core::transpose_axes(&value, &[0, 2, 1]);
-                        out.insert(key, transposed);
-                    }
+                    out.insert(key, mlxcel_core::transpose_axes(&value, &[0, 2, 1]));
                     continue;
                 }
                 4 => {
-                    // PyTorch Conv2d [O, I, kH, kW] -> MLX [O, kH, kW, I]; skip
-                    // when the checkpoint is already channel-last (issue #428).
-                    if crate::loading::conv2d_weight_is_channel_last(&shape) {
-                        out.insert(key, value);
-                    } else {
-                        let transposed = mlxcel_core::transpose_axes(&value, &[0, 2, 3, 1]);
-                        out.insert(key, transposed);
-                    }
+                    out.insert(key, mlxcel_core::transpose_axes(&value, &[0, 2, 3, 1]));
                     continue;
                 }
                 _ => {}
@@ -573,10 +585,10 @@ mod tests {
     #[test]
     fn sanitize_audio_weights_transposes_conv_weights() {
         let mut weights = WeightMap::new();
-        // Conv1d weight in PyTorch layout: [out=4, in=8, kernel=3].
+        // Conv1d depthwise in PyTorch layout: [out=4, in=1, kernel=3].
         weights.insert(
             "sound_encoder.encoder.layers.0.conv.depthwise_conv.weight".into(),
-            ones(&[4, 8, 3]),
+            ones(&[4, 1, 3]),
         );
         // Conv2d weight in PyTorch layout: [out=4, in=1, kh=3, kw=3].
         weights.insert(
@@ -590,8 +602,8 @@ mod tests {
                 .get("sound_encoder.encoder.layers.0.conv.depthwise_conv.weight")
                 .unwrap(),
         );
-        // After transpose(0,2,1): [4, 3, 8].
-        assert_eq!(conv1d_shape, vec![4, 3, 8]);
+        // After transpose(0,2,1): [4, 3, 1].
+        assert_eq!(conv1d_shape, vec![4, 3, 1]);
 
         let conv2d_shape = mlxcel_core::array_shape(
             sanitized
@@ -647,11 +659,25 @@ mod tests {
     }
 
     #[test]
-    fn sanitize_audio_weights_pointwise_conv1d_always_transposes() {
-        // Pointwise conv1d (kernel == 1) has an ambiguous shape signature, so
-        // the guard does not apply to it: it keeps the unconditional transpose
-        // matching the upstream sanitizer. PyTorch [out, in, 1] -> [out, 1, in].
+    fn sanitize_audio_weights_channel_last_pointwise_left_untouched() {
+        // Regression (#428): in a channel-last checkpoint (depthwise [O, kW, 1])
+        // the pointwise conv1d [O, 1, in] must NOT be transposed. The earlier
+        // per-weight guard transposed the pointwise and crashed the audio conv.
+        // The depthwise anchors the checkpoint-level layout detection.
         let mut weights = WeightMap::new();
+        weights.insert(DEPTHWISE.into(), ones(&[1024, 9, 1]));
+        weights.insert(POINTWISE.into(), ones(&[2048, 1, 1024]));
+        let sanitized = sanitize_audio_weights(weights);
+        assert_eq!(audio_shape(&sanitized, DEPTHWISE), vec![1024, 9, 1]);
+        assert_eq!(audio_shape(&sanitized, POINTWISE), vec![2048, 1, 1024]);
+    }
+
+    #[test]
+    fn sanitize_audio_weights_transposes_pytorch_pointwise_conv1d() {
+        // PyTorch checkpoint (depthwise [O, 1, kW]): pointwise [O, in, 1] is
+        // transposed to channel-last [O, 1, in].
+        let mut weights = WeightMap::new();
+        weights.insert(DEPTHWISE.into(), ones(&[1024, 1, 9]));
         weights.insert(POINTWISE.into(), ones(&[2048, 1024, 1]));
         let sanitized = sanitize_audio_weights(weights);
         assert_eq!(audio_shape(&sanitized, POINTWISE), vec![2048, 1, 1024]);
@@ -659,8 +685,10 @@ mod tests {
 
     #[test]
     fn sanitize_audio_weights_skips_channel_last_conv2d() {
-        // Conv2d already channel-last [out, kH, kW, in] must be left untouched.
+        // Conv2d already channel-last [out, kH, kW, in] must be left untouched;
+        // a channel-last depthwise anchors the checkpoint-level layout detection.
         let mut weights = WeightMap::new();
+        weights.insert(DEPTHWISE.into(), ones(&[1024, 3, 1]));
         weights.insert(SUBSAMPLE_CONV2D.into(), ones(&[32, 3, 3, 1]));
         let sanitized = sanitize_audio_weights(weights);
         assert_eq!(audio_shape(&sanitized, SUBSAMPLE_CONV2D), vec![32, 3, 3, 1]);
@@ -668,11 +696,15 @@ mod tests {
 
     #[test]
     fn sanitize_audio_weights_conv2d_is_idempotent() {
+        // A PyTorch depthwise anchors detection; after the first pass it is
+        // channel-last, so the second pass skips and the result is stable.
         let mut once = WeightMap::new();
+        once.insert(DEPTHWISE.into(), ones(&[1024, 1, 3]));
         once.insert(SUBSAMPLE_CONV2D.into(), ones(&[4, 1, 3, 3]));
         let once = sanitize_audio_weights(once);
 
         let mut twice = WeightMap::new();
+        twice.insert(DEPTHWISE.into(), ones(&[1024, 1, 3]));
         twice.insert(SUBSAMPLE_CONV2D.into(), ones(&[4, 1, 3, 3]));
         let twice = sanitize_audio_weights(sanitize_audio_weights(twice));
 
