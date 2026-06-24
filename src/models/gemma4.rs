@@ -2790,15 +2790,15 @@ impl Gemma4TextModel {
             let global_offset = first_cache_offset(caches, "full_attention");
             let sliding_offset = first_cache_offset(caches, "sliding_attention");
             let window = self.config.sliding_window as i32;
-            // Shared `create_sliding_window_prefill_mask` (hoisted in #410) gates
-            // the full mask on `l > window && sliding_offset == 0`. Gemma 4 used a
-            // local copy gated on `l > window` alone, but the difference is
-            // unreachable here: Gemma 4 sets `no_chunked_prefill`, so prefill is
-            // single-pass (`sliding_offset == 0`) and the only multi-token reuse
-            // is MTP verify with `l` << `window`, never `l > window`. The
-            // `l > window && sliding_offset > 0` case the gates differ on cannot
-            // occur, and `trim_mask_to_keys` re-crops any over-length mask anyway,
-            // so this is behaviour-preserving for every reachable input.
+            // Shared helper (hoisted in #410) gates the full mask on
+            // `l > window && sliding_offset == 0`; the old local copy gated on
+            // `l > window` alone. The gates differ only when
+            // `l > window && sliding_offset > 0`. In that case RotatingKVCache
+            // trims to exactly `window` keys, and `trim_mask_to_keys` crops the
+            // full `[l, l+offset]` mask to its trailing `window` columns -- the
+            // same band as the new clamped output (`q-l+1 <= k <= q-l+window`,
+            // independent of offset). Old-trimmed equals new for every input,
+            // so the migration is behaviour-preserving.
             (
                 Some(create_causal_mask(l, global_offset)),
                 Some(create_sliding_window_prefill_mask(

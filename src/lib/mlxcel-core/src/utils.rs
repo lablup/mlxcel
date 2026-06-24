@@ -653,10 +653,13 @@ pub fn create_causal_mask_with_window_full(
 ///
 /// Gemma3 carries the documented `sliding_offset == 0` invariant (no trim step,
 /// so it can legitimately see `sliding_offset > 0` with `size > window` under
-/// chunked prefill or multi-turn reuse and needs the clamped path). Gemma4 sets
-/// `no_chunked_prefill` and routes through `trim_mask_to_keys`, so the
-/// `size > window && sliding_offset > 0` case never arises for it and the guard
-/// is a harmless no-op (#410).
+/// chunked prefill or multi-turn reuse and needs the clamped path). Gemma4
+/// routes through `trim_mask_to_keys`: when `size > window && sliding_offset > 0`,
+/// RotatingKVCache trims to exactly `window` keys and `trim_mask_to_keys` crops
+/// the full `[size, size+offset]` mask to its trailing `window` columns, which
+/// is the same band as the clamped output of this helper (`q-size+1 <= k <=
+/// q-size+window`, independent of offset). Old-trimmed equals new for every
+/// input, so the migration is behaviour-preserving (#410).
 ///
 /// [`RotatingKVCache`]: crate::cache::RotatingKVCache
 pub fn create_sliding_window_prefill_mask(
