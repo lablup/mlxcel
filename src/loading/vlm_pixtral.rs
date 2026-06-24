@@ -32,6 +32,7 @@ use crate::vision;
 
 use super::llava::infer_llama_config_from_weights;
 use super::{load_vlm_weights_common, read_sanitized_vlm_config, strip_language_model_prefix};
+use crate::model_metadata::is_mistral4_config;
 
 struct PixtralFamilyContext {
     full_config: Value,
@@ -101,12 +102,49 @@ fn build_pixtral_family_context(model_path: &Path) -> Result<PixtralFamilyContex
     vision::encoders::pixtral::sanitize_pixtral_weights(&mut weights);
     models::sanitize_tied_embeddings(&mut weights, &full_config);
 
+    // `text_config_value` is the Llama-shaped view of the backbone config. It
+    // is only used below for scalar context fields (hidden_size, rms_norm_eps);
+    // those keys come straight from text_config and survive the Llama massaging
+    // (infer_llama_config_from_weights only fills missing fields and never
+    // touches rms_norm_eps; apply_mistral_attention_head_override is a no-op
+    // when q_proj weights are absent), so it stays correct on both branches.
     let text_config_value = build_mistral_text_config(&full_config, &weights)?;
-    let text_args: models::llama3::ModelArgs = serde_json::from_value(text_config_value.clone())
-        .map_err(|e| anyhow::anyhow!("Failed to parse text_config as Mistral: {}", e))?;
-    let text_model = models::Llama3Model::from_weights(&weights, &text_args)
-        .map(LoadedModel::Llama)
-        .map_err(|e| anyhow::anyhow!("Failed to load text model: {}", e))?;
+
+    // The Mistral3 VLM container wraps either a standard Llama/Mistral text
+    // backbone (q_proj) or a `mistral4` MLA + MoE backbone (q_a_proj /
+    // kv_a_proj_with_mqa / kv_b_proj, no q_proj). Route the MLA case to the
+    // Mistral4 loader, mirroring the text-only `load_llama_family_from_weights`
+    // path in `src/loading/mod.rs`; the Llama loader cannot find `q_proj` for an
+    // MLA backbone and fails with a weight-not-found error. The
+    // `language_model.` prefix is already stripped above, so the weights sit at
+    // the bare `model.layers...` namespace both loaders expect. See
+    // lablup/mlxcel#423.
+    let text_model = if is_mistral4_config(&full_config) {
+        // Build the Mistral4 args from the RAW text_config, not the
+        // Llama-massaged `text_config_value`: infer_llama_config_from_weights and
+        // apply_mistral_attention_head_override key off `q_proj` and can corrupt
+        // the MLA head layout. Inherit the top-level quantization block when
+        // text_config omits it so group_size/bits are present.
+        let mut mistral4_text_config = full_config
+            .get("text_config")
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("Missing text_config for Mistral4 VLM backbone"))?;
+        inherit_quantization_if_missing(&mut mistral4_text_config, &full_config)?;
+        let text_args: models::mistral4::Mistral4Config =
+            serde_json::from_value(mistral4_text_config)
+                .map_err(|e| anyhow::anyhow!("Failed to parse text_config as Mistral4: {}", e))?;
+        models::mistral4::sanitize_weights(&mut weights, &text_args, "");
+        models::Mistral4Model::from_weights(&weights, &text_args)
+            .map(LoadedModel::Mistral4)
+            .map_err(|e| anyhow::anyhow!("Failed to load Mistral4 text model: {}", e))?
+    } else {
+        let text_args: models::llama3::ModelArgs =
+            serde_json::from_value(text_config_value.clone())
+                .map_err(|e| anyhow::anyhow!("Failed to parse text_config as Mistral: {}", e))?;
+        models::Llama3Model::from_weights(&weights, &text_args)
+            .map(LoadedModel::Llama)
+            .map_err(|e| anyhow::anyhow!("Failed to load text model: {}", e))?
+    };
 
     let vision_config_value = full_config
         .get("vision_config")
