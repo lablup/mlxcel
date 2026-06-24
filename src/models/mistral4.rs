@@ -908,6 +908,18 @@ impl LanguageModel for Mistral4Model {
         vec![2] // Mistral EOS token
     }
 
+    // VLM image path: VisionModule::get_input_embeddings calls this to obtain
+    // text-space token embeddings before splicing in projected image features
+    // (see src/vision/mod.rs). Mirror the no-`input_embeddings` branch of
+    // `forward_with_embeddings` below so the merge path and the plain forward
+    // path share the same embedding table. Without this override the trait
+    // default returns None and a Mistral4-backed Mistral3 VLM image request
+    // fails with "Text model must support embed_tokens for VLM". See
+    // lablup/mlxcel#423.
+    fn embed_tokens(&self, input_ids: &MlxArray) -> Option<UniquePtr<MlxArray>> {
+        Some(self.embed_tokens.forward(input_ids))
+    }
+
     fn forward_with_embeddings(
         &self,
         input_ids: &MlxArray,
