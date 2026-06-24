@@ -627,6 +627,22 @@ pub enum AnyKVCache {
     Rotating(RotatingKVCache),
 }
 
+impl AnyKVCache {
+    /// Number of live keys the cache will actually return on the next
+    /// `update_and_fetch`. For a `Standard` (`KVCache`) this is
+    /// `offset - live_start` (`live_len()`), which shrinks below the
+    /// monotonic `offset` after a `--max-kv-size` `trim_front`; for a
+    /// `Rotating` cache `seq_len()` already reports the live window. Prefill
+    /// masks size from this so the mask key axis matches the returned K/V,
+    /// while `offset()` stays for RoPE. See issue #430.
+    fn live_len(&self) -> i32 {
+        match self {
+            Self::Standard(c) => c.live_len(),
+            Self::Rotating(c) => c.seq_len(),
+        }
+    }
+}
+
 impl KVCacheTrait for AnyKVCache {
     fn update_and_fetch(
         &mut self,
@@ -668,28 +684,42 @@ impl ExaoneMoeModel {
 
         let seq_len = mlxcel_core::array_shape(&h)[1];
 
-        // Create masks if needed
+        // Create masks if needed.
+        //
+        // Size both prefill masks from the cache's live window
+        // (`live_len()`), not the monotonic `offset`. Under `--max-kv-size`,
+        // the scheduler trims the global (full-attention) `KVCache` via
+        // `trim_front`, which advances `live_start` while `offset` keeps
+        // growing to preserve the RoPE relative positions, so
+        // `update_and_fetch` returns only `live_len = offset - live_start`
+        // keys. A mask sized from `offset` would be wider than the returned
+        // K/V and trip `broadcast_shapes`. With no trim (`live_start == 0`),
+        // `live_len == offset`, so this is byte-identical to the untrimmed
+        // path; RoPE keeps reading the monotonic `offset` inside the
+        // attention layer. See issue #430 (mirrors #419/#420, #421/#422).
         let (global_mask, swa_mask) = if seq_len > 1 && mask.is_none() {
             // Create global causal mask
-            let ga_offset = caches
+            let ga_live_len = caches
                 .iter()
                 .find(|c| matches!(c, AnyKVCache::Standard(_)))
-                .map(|c| c.offset())
+                .map(|c| c.live_len())
                 .unwrap_or(0);
-            let global_mask = Some(utils::create_causal_mask(seq_len, ga_offset));
+            let global_mask = Some(utils::create_causal_mask(seq_len, ga_live_len));
 
             // Create sliding window mask if applicable
-            let swa_offset = caches
+            let swa_live_len = caches
                 .iter()
                 .find(|c| matches!(c, AnyKVCache::Rotating(_)))
-                .map(|c| c.offset())
+                .map(|c| c.live_len())
                 .unwrap_or(0);
             // Full-width windowed mask for a fresh single-pass prefill that
             // exceeds the window (RotatingKVCache keeps all prefill keys),
             // clamped mask otherwise. See issue #408.
             let max_cache = self.window_size as i32;
             let swa_mask = Some(utils::create_sliding_window_prefill_mask(
-                seq_len, swa_offset, max_cache,
+                seq_len,
+                swa_live_len,
+                max_cache,
             ));
 
             (global_mask, swa_mask)
@@ -1055,5 +1085,89 @@ impl LanguageModel for ExaoneMoeModel {
     fn eos_token_ids(&self) -> Vec<i32> {
         // ExaOne MoE EOS token
         vec![2] // </s>
+    }
+}
+
+#[cfg(test)]
+mod exaone_moe_mask_tests {
+    // `KVCacheTrait` (defined in this module) brings `update_and_fetch` /
+    // `offset` into scope for `AnyKVCache`; `live_len` is an inherent method.
+    use super::*;
+
+    // [1, H, n, D] K/V tensor; only the key axis (n) matters for the shape
+    // invariant exercised here.
+    fn make_kv(h: i32, n: i32, d: i32, base: f32) -> UniquePtr<MlxArray> {
+        let count = (h * n * d) as usize;
+        let data: Vec<f32> = (0..count).map(|i| base + i as f32).collect();
+        mlxcel_core::from_slice_f32(&data, &[1, h, n, d])
+    }
+
+    /// Regression for #430: the global prefill mask must size from
+    /// `AnyKVCache::live_len()` (the `Standard`/`KVCache` live window), not the
+    /// monotonic `offset()`. After a `--max-kv-size` `trim_front`
+    /// (`live_start > 0`), `live_len < offset`; a continuation chunk's
+    /// `update_and_fetch` returns only `live_len + m` keys, so a `live_len`-
+    /// sized causal mask matches the returned K/V while an `offset`-sized mask
+    /// is strictly wider (the crash this fix prevents).
+    #[test]
+    fn global_mask_sizes_from_live_len_not_offset_after_trim() {
+        const H: i32 = 2;
+        const D: i32 = 4;
+        let (n1, trimmed, m) = (8, 3, 4);
+
+        let mut cache = AnyKVCache::Standard(KVCache::new());
+        let _ = cache.update_and_fetch(make_kv(H, n1, D, 0.0), make_kv(H, n1, D, 100.0));
+        let AnyKVCache::Standard(ref mut std_cache) = cache else {
+            unreachable!("constructed as Standard")
+        };
+        assert_eq!(std_cache.trim_front(trimmed), trimmed);
+
+        let offset = cache.offset();
+        let live_len = cache.live_len();
+        assert_eq!(offset, n1, "offset stays monotonic after trim");
+        assert_eq!(live_len, n1 - trimmed, "live_len == offset - live_start");
+        assert!(live_len < offset, "trim must make live_len < offset");
+
+        let (cont_k, _) = cache.update_and_fetch(make_kv(H, m, D, 200.0), make_kv(H, m, D, 300.0));
+        let returned_klen = mlxcel_core::array_shape(&cont_k)[2];
+        assert_eq!(
+            returned_klen,
+            live_len + m,
+            "cache returns live_len + m keys"
+        );
+
+        let live_mask = utils::create_causal_mask(m, live_len);
+        mlxcel_core::eval(&live_mask);
+        assert_eq!(
+            *mlxcel_core::array_shape(&live_mask).last().unwrap(),
+            returned_klen,
+            "live_len-sized mask key axis must match the returned K/V"
+        );
+        let offset_mask = utils::create_causal_mask(m, offset);
+        mlxcel_core::eval(&offset_mask);
+        assert!(
+            *mlxcel_core::array_shape(&offset_mask).last().unwrap() > returned_klen,
+            "offset-sized mask must be wider than the returned K/V (the bug)"
+        );
+    }
+
+    /// The sliding lookup uses `RotatingKVCache::seq_len()` via
+    /// `AnyKVCache::live_len()`, which equals the keys `update_and_fetch`
+    /// returns.
+    #[test]
+    fn sliding_cache_live_len_matches_returned_keys() {
+        const H: i32 = 2;
+        const D: i32 = 4;
+        let window = 6;
+        let m = 4;
+
+        let mut cache = AnyKVCache::Rotating(RotatingKVCache::new(window));
+        let (k, _) = cache.update_and_fetch(make_kv(H, m, D, 0.0), make_kv(H, m, D, 100.0));
+        let returned_klen = mlxcel_core::array_shape(&k)[2];
+        assert_eq!(
+            cache.live_len(),
+            returned_klen,
+            "AnyKVCache::live_len() for Rotating (== seq_len) must equal the returned key axis"
+        );
     }
 }

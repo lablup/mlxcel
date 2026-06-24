@@ -2747,6 +2747,15 @@ impl Gemma4TextModel {
         } else if has_padding {
             // Resident prompt padding present (ragged burst). Build per-row
             // left-padding-aware masks for ANY query width, including `l == 1`.
+            //
+            // These offsets stay monotonic (NOT `live_len`): this is the
+            // batched-MTP regime, which never front-compacts either cache kind
+            // (`slot_base == 0`, so `live_len == offset` here), and the same
+            // offset value is the column-coordinate base that the
+            // `per_row_valid_end` stale-gap masking below compares against
+            // (`mask_stale_key_gap`). The `--max-kv-size` trim cannot reach
+            // these model-owned caches, so there is no live/monotonic split to
+            // reconcile on this path. See issue #430.
             let global_offset = first_cache_offset(caches, "full_attention");
             let sliding_offset = first_cache_offset(caches, "sliding_attention");
             let window = self.config.sliding_window as i32;
@@ -2786,9 +2795,16 @@ impl Gemma4TextModel {
             (Some(global_mask), Some(sliding_mask))
         } else if l > 1 {
             // Non-ragged prefill / multi-token verify: derive both masks from
-            // the cache offsets (byte-identical to the pre-ragged behaviour).
-            let global_offset = first_cache_offset(caches, "full_attention");
-            let sliding_offset = first_cache_offset(caches, "sliding_attention");
+            // the cache's live window (`live_len`), not the monotonic
+            // `offset`. Under `--max-kv-size`, `trim_front` advances the
+            // full-attention `KVCache`'s `live_start` while `offset` keeps
+            // growing for RoPE, so `update_and_fetch` returns only `live_len`
+            // keys; an `offset`-sized mask would be wider than the returned
+            // K/V and trip `broadcast_shapes`. With no trim, `live_len ==
+            // offset`, so this stays byte-identical to the pre-ragged
+            // behaviour. See issue #430 (mirrors #419/#420, #421/#422).
+            let global_live_len = first_cache_live_len(caches, "full_attention");
+            let sliding_live_len = first_cache_live_len(caches, "sliding_attention");
             let window = self.config.sliding_window as i32;
             // Shared helper (hoisted in #410) gates the full mask on
             // `l > window && sliding_offset == 0`; the old local copy gated on
@@ -2800,10 +2816,10 @@ impl Gemma4TextModel {
             // independent of offset). Old-trimmed equals new for every input,
             // so the migration is behaviour-preserving.
             (
-                Some(create_causal_mask(l, global_offset)),
+                Some(create_causal_mask(l, global_live_len)),
                 Some(create_sliding_window_prefill_mask(
                     l,
-                    sliding_offset,
+                    sliding_live_len,
                     window,
                 )),
             )
@@ -3281,6 +3297,31 @@ pub(crate) fn first_cache_offset(caches: &mut [Cache], layer_type: &str) -> i32 
         match (layer_type, cache) {
             ("full_attention", Cache::Standard(c)) => return c.offset,
             ("sliding_attention", Cache::Rotating(c)) => return c.offset,
+            _ => {}
+        }
+    }
+    0
+}
+
+/// Live-window length of the first cache of `layer_type`, the count of keys
+/// `update_and_fetch` will actually return.
+///
+/// This is the mask-sizing companion to [`first_cache_offset`]: prefill masks
+/// must be sized from the live window, not the monotonic `offset`. Under
+/// `--max-kv-size`, `trim_front` advances a full-attention `KVCache`'s
+/// `live_start` while `offset` keeps growing for RoPE, so the cache returns
+/// only `live_len = offset - live_start` keys; a mask sized from `offset`
+/// would be wider than the returned K/V and trip `broadcast_shapes`. For a
+/// `Rotating` (sliding) cache `seq_len()` already reports the live window.
+/// With no trim (`live_start == 0`), this equals [`first_cache_offset`], so
+/// the prefill path stays byte-identical. RoPE/position bookkeeping and the
+/// batched-MTP `per_row_valid_end` coordinate math keep using
+/// [`first_cache_offset`] (the monotonic value). See issue #430.
+pub(crate) fn first_cache_live_len(caches: &mut [Cache], layer_type: &str) -> i32 {
+    for cache in caches.iter_mut() {
+        match (layer_type, cache) {
+            ("full_attention", Cache::Standard(c)) => return c.live_len(),
+            ("sliding_attention", Cache::Rotating(c)) => return c.seq_len(),
             _ => {}
         }
     }
@@ -3783,15 +3824,21 @@ impl Gemma4StageModel {
         let seq_len = shape[1];
 
         let (global_mask, sliding_mask) = if seq_len > 1 {
-            let global_offset = self.first_cache_offset(caches, "full_attention");
-            let sliding_offset = self.first_cache_offset(caches, "sliding_attention");
+            // Size the prefill masks from the cache's live window
+            // (`live_len`), not the monotonic `offset`, so the mask key axis
+            // matches the K/V `update_and_fetch` returns after a
+            // `--max-kv-size` trim (`live_start` advances while `offset` keeps
+            // growing for RoPE). Byte-identical when untrimmed (`live_len ==
+            // offset`). See issue #430 (mirrors #419/#420, #421/#422).
+            let global_live_len = self.first_cache_live_len(caches, "full_attention");
+            let sliding_live_len = self.first_cache_live_len(caches, "sliding_attention");
             (
-                Some(create_causal_mask(seq_len, global_offset)),
+                Some(create_causal_mask(seq_len, global_live_len)),
                 // Shared helper hoisted in #410; behaviour-preserving for Gemma 4
                 // (see the gate-divergence note in `forward_with_speculative_sinks`).
                 Some(create_sliding_window_prefill_mask(
                     seq_len,
-                    sliding_offset,
+                    sliding_live_len,
                     self.config.sliding_window as i32,
                 )),
             )
@@ -4014,11 +4061,17 @@ impl Gemma4StageModel {
         )
     }
 
-    fn first_cache_offset(&self, caches: &[Cache], layer_type: &str) -> i32 {
+    /// Live-window length of the first cache of `layer_type` (mask-sizing
+    /// companion to the free-function [`first_cache_offset`]). See
+    /// [`first_cache_live_len`] for the full rationale; prefill masks size
+    /// from this so the mask key axis matches the K/V `update_and_fetch`
+    /// returns after a `--max-kv-size` trim, while RoPE keeps the monotonic
+    /// offset. See issue #430.
+    fn first_cache_live_len(&self, caches: &[Cache], layer_type: &str) -> i32 {
         for cache in caches {
             match (layer_type, cache) {
-                ("full_attention", Cache::Standard(cache)) => return cache.offset,
-                ("sliding_attention", Cache::Rotating(cache)) => return cache.offset,
+                ("full_attention", Cache::Standard(cache)) => return cache.live_len(),
+                ("sliding_attention", Cache::Rotating(cache)) => return cache.seq_len(),
                 _ => {}
             }
         }
@@ -4891,6 +4944,95 @@ mod gemma4_unified_mask_tests {
         );
         // Backward (3 -> 1) is allowed only by causality, not by same-block.
         assert_eq!(mask_at(&out, 3, 1), 0.0);
+    }
+
+    // [1, H, n, D] K/V tensor; only the key axis (n) matters here.
+    fn make_kv(h: i32, n: i32, d: i32, base: f32) -> UniquePtr<MlxArray> {
+        let count = (h * n * d) as usize;
+        let data: Vec<f32> = (0..count).map(|i| base + i as f32).collect();
+        mlxcel_core::from_slice_f32(&data, &[1, h, n, d])
+    }
+
+    /// Regression for #430: `first_cache_live_len` must return the
+    /// full-attention `Cache::Standard` LIVE window (`live_len`), not the
+    /// monotonic `offset`, so the prefill mask matches the K/V a continuation
+    /// chunk's `update_and_fetch` returns after a `--max-kv-size` trim.
+    #[test]
+    fn first_cache_live_len_sizes_global_mask_from_live_window_after_trim() {
+        const H: i32 = 2;
+        const D: i32 = 4;
+        let (n1, trimmed, m) = (8, 3, 4);
+        let window = 6;
+
+        // Layer 0 sliding (Rotating), layer 1 global (Standard): matches the
+        // `first_cache_live_len` family lookups.
+        let mut caches = vec![
+            Cache::Rotating(RotatingKVCache::new(window)),
+            Cache::Standard(KVCache::new()),
+        ];
+        if let Cache::Standard(ref mut c) = caches[1] {
+            let _ = c.update_and_fetch(make_kv(H, n1, D, 0.0), make_kv(H, n1, D, 100.0));
+            assert_eq!(c.trim_front(trimmed), trimmed);
+        }
+
+        let global_offset = first_cache_offset(&mut caches, "full_attention");
+        let global_live_len = first_cache_live_len(&mut caches, "full_attention");
+        assert_eq!(global_offset, n1, "first_cache_offset stays monotonic");
+        assert_eq!(
+            global_live_len,
+            n1 - trimmed,
+            "first_cache_live_len reports the trimmed live window"
+        );
+        assert!(global_live_len < global_offset);
+
+        let (cont_k, _) = if let Cache::Standard(ref mut c) = caches[1] {
+            c.update_and_fetch(make_kv(H, m, D, 200.0), make_kv(H, m, D, 300.0))
+        } else {
+            unreachable!()
+        };
+        let returned_klen = mlxcel_core::array_shape(&cont_k)[2];
+        assert_eq!(returned_klen, global_live_len + m);
+
+        let live_mask = create_causal_mask(m, global_live_len);
+        mlxcel_core::eval(&live_mask);
+        assert_eq!(
+            *mlxcel_core::array_shape(&live_mask).last().unwrap(),
+            returned_klen,
+            "live_len-sized global mask must match the returned K/V"
+        );
+        let offset_mask = create_causal_mask(m, global_offset);
+        mlxcel_core::eval(&offset_mask);
+        assert!(
+            *mlxcel_core::array_shape(&offset_mask).last().unwrap() > returned_klen,
+            "offset-sized global mask must be wider than the returned K/V (the bug)"
+        );
+    }
+
+    /// The sliding lookup of `first_cache_live_len` returns the
+    /// `RotatingKVCache` live window (`seq_len`), which equals the keys it
+    /// returns from `update_and_fetch`.
+    #[test]
+    fn first_cache_live_len_sliding_matches_returned_keys() {
+        const H: i32 = 2;
+        const D: i32 = 4;
+        let window = 6;
+        let m = 4;
+
+        let mut caches = vec![
+            Cache::Rotating(RotatingKVCache::new(window)),
+            Cache::Standard(KVCache::new()),
+        ];
+        let (k, _) = if let Cache::Rotating(ref mut c) = caches[0] {
+            c.update_and_fetch(make_kv(H, m, D, 0.0), make_kv(H, m, D, 100.0))
+        } else {
+            unreachable!()
+        };
+        let returned_klen = mlxcel_core::array_shape(&k)[2];
+        assert_eq!(
+            first_cache_live_len(&mut caches, "sliding_attention"),
+            returned_klen,
+            "sliding first_cache_live_len (== seq_len) must equal the returned key axis"
+        );
     }
 
     // The Gemma 4 over-window (`sliding_prefill_mask_over_window_*`) and
