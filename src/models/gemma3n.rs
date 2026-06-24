@@ -1195,23 +1195,34 @@ impl Gemma3nLanguageModel {
         let per_layer_inputs = self.get_per_layer_inputs(inputs);
         let per_layer_inputs = self.project_per_layer_inputs(&h, &per_layer_inputs);
 
-        // Create masks
-        let global_offset = caches[self.first_full_idx].offset;
-        let sliding_offset = caches[self.first_sliding_idx].offset;
+        // Create masks. Size them from the cache's live window
+        // (`live_len() = offset - live_start`), not the monotonic `offset`.
+        // Under `--max-kv-size`, `trim_front` slices the buffer to the live
+        // window and advances `live_start` while `offset` keeps growing to
+        // preserve the RoPE relative positions, so `update_and_fetch` returns
+        // only `live_len` keys. A mask sized from `offset` would be wider than
+        // the returned K/V and break the attention broadcast. The KV-shared
+        // attention layer already slices its K/V to `cache.live_len()` (see
+        // `Gemma3nAttention::forward`), so the model-level mask must use the
+        // same bound. With no trim (`live_start == 0`), `live_len == offset`,
+        // so this is byte-identical to the untrimmed path. See issue #419.
+        let global_live_len = caches[self.first_full_idx].live_len();
+        let sliding_live_len = caches[self.first_sliding_idx].live_len();
 
         let global_mask = if l > 1 {
-            Some(create_causal_mask(l, global_offset))
+            Some(create_causal_mask(l, global_live_len))
         } else {
             None
         };
         let sliding_mask = if l > 1 {
-            // Dense `KVCache` keeps every key, so the prefill mask is always
-            // the full windowed-causal mask over all retained keys; the
-            // attention layer slices K/V to the mask's key axis. The window is
-            // enforced by the mask, not by dropping keys. See issues #408, #413.
+            // Dense `KVCache` keeps every key in the live window, so the
+            // prefill mask is the full windowed-causal mask over the retained
+            // (live) keys; the attention layer slices K/V to the mask's key
+            // axis. The window is enforced by the mask, not by dropping keys.
+            // See issues #408, #413, #419.
             Some(create_sliding_window_prefill_mask_dense(
                 l,
-                sliding_offset,
+                sliding_live_len,
                 self.config.sliding_window as i32,
             ))
         } else {
@@ -1372,23 +1383,34 @@ impl Gemma3nLanguageModel {
         let _b = shape[0];
         let l = shape[1];
 
-        // Create masks
-        let global_offset = caches[self.first_full_idx].offset;
-        let sliding_offset = caches[self.first_sliding_idx].offset;
+        // Create masks. Size them from the cache's live window
+        // (`live_len() = offset - live_start`), not the monotonic `offset`.
+        // Under `--max-kv-size`, `trim_front` slices the buffer to the live
+        // window and advances `live_start` while `offset` keeps growing to
+        // preserve the RoPE relative positions, so `update_and_fetch` returns
+        // only `live_len` keys. A mask sized from `offset` would be wider than
+        // the returned K/V and break the attention broadcast. The KV-shared
+        // attention layer already slices its K/V to `cache.live_len()` (see
+        // `Gemma3nAttention::forward`), so the model-level mask must use the
+        // same bound. With no trim (`live_start == 0`), `live_len == offset`,
+        // so this is byte-identical to the untrimmed path. See issue #419.
+        let global_live_len = caches[self.first_full_idx].live_len();
+        let sliding_live_len = caches[self.first_sliding_idx].live_len();
 
         let global_mask = if l > 1 {
-            Some(create_causal_mask(l, global_offset))
+            Some(create_causal_mask(l, global_live_len))
         } else {
             None
         };
         let sliding_mask = if l > 1 {
-            // Dense `KVCache` keeps every key, so the prefill mask is always
-            // the full windowed-causal mask over all retained keys; the
-            // attention layer slices K/V to the mask's key axis. The window is
-            // enforced by the mask, not by dropping keys. See issues #408, #413.
+            // Dense `KVCache` keeps every key in the live window, so the
+            // prefill mask is the full windowed-causal mask over the retained
+            // (live) keys; the attention layer slices K/V to the mask's key
+            // axis. The window is enforced by the mask, not by dropping keys.
+            // See issues #408, #413, #419.
             Some(create_sliding_window_prefill_mask_dense(
                 l,
-                sliding_offset,
+                sliding_live_len,
                 self.config.sliding_window as i32,
             ))
         } else {

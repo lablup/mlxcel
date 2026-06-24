@@ -8144,6 +8144,97 @@ mod tests {
         metadata.assert_consistent().unwrap();
     }
 
+    /// Regression for #419: a dense `KVCache` multi-token continuation chunk
+    /// after a `--max-kv-size` `trim_front` must size its prefill mask from
+    /// `live_len()` (the key count the cache actually returns), not the
+    /// monotonic `offset`. The dense sliding-window models (cohere2, gemma3n,
+    /// olmo3) build their model-level prefill masks from the cache before the
+    /// chunk's `update_and_fetch`; under a trim (`live_start > 0`) a mask
+    /// sized from `offset` is wider than the returned K/V, so the attention
+    /// broadcast throws and the server aborts. This pins the cache invariant
+    /// the fix relies on so a regression back to `offset` is caught.
+    #[test]
+    fn kv_cache_continuation_mask_sizes_from_live_len_not_offset_after_trim() {
+        const H: i32 = 2;
+        const D: i32 = 4;
+
+        // Build a `[1, H, n, D]` Fp16-cache K/V tensor with arbitrary values;
+        // only the key axis (n) matters for this shape invariant.
+        let make_kv = |n: i32, base: f32| {
+            let count = (H * n * D) as usize;
+            let data: Vec<f32> = (0..count).map(|i| base + i as f32).collect();
+            ffi::from_slice_f32(&data, &[1, H, n, D])
+        };
+
+        let mut cache = KVCache::new();
+
+        // Prefill `n1` tokens, then trim the oldest `trimmed` (the
+        // `--max-kv-size` cap path) so the live window starts at
+        // `live_start > 0`.
+        let n1 = 8;
+        let trimmed = 3;
+        let _ = cache.update_and_fetch(make_kv(n1, 0.0), make_kv(n1, 100.0));
+        assert_eq!(cache.offset, n1);
+        assert_eq!(cache.live_start, 0);
+
+        assert_eq!(cache.trim_front(trimmed), trimmed);
+
+        // RoPE invariant: `offset` stays monotonic and `live_start` advances,
+        // so the visible window is `live_len = offset - live_start`, NOT
+        // `offset`.
+        assert_eq!(
+            cache.offset, n1,
+            "offset must stay monotonic after trim_front"
+        );
+        assert_eq!(cache.live_start, trimmed);
+        assert_eq!(cache.live_len(), n1 - trimmed);
+
+        // Snapshot what the model-level mask builder reads just before the
+        // continuation chunk's `update_and_fetch`.
+        let live_len_before = cache.live_len(); // correct mask width source
+        let offset_before = cache.offset; // buggy mask width source
+
+        // Continuation chunk of `m` tokens (the `l > 1` prefill path).
+        let m = 4;
+        let (cont_k, _cont_v) = cache.update_and_fetch(make_kv(m, 200.0), make_kv(m, 300.0));
+
+        // The cache returns only the live window plus the new tokens.
+        let returned_key_axis = ffi::array_shape(&cont_k)[2];
+        assert_eq!(
+            returned_key_axis,
+            live_len_before + m,
+            "Fp16 update_and_fetch must return live_len + new tokens"
+        );
+        assert_eq!(
+            returned_key_axis,
+            cache.live_len(),
+            "returned key axis must equal the post-update live window"
+        );
+        assert_ne!(
+            returned_key_axis,
+            offset_before + m,
+            "returned key axis must NOT equal offset + new tokens (the buggy assumption)"
+        );
+
+        // The correct (live_len-sized) prefill mask key axis matches the
+        // returned K/V key axis.
+        let correct_mask = crate::utils::create_causal_mask(m, live_len_before);
+        let correct_klen = *ffi::array_shape(&correct_mask).last().unwrap();
+        assert_eq!(
+            correct_klen, returned_key_axis,
+            "create_causal_mask(m, live_len) key axis must match the returned K/V"
+        );
+
+        // The buggy (offset-sized) mask is strictly wider than the returned
+        // K/V; that mismatch is what crashes the attention broadcast.
+        let buggy_mask = crate::utils::create_causal_mask(m, offset_before);
+        let buggy_klen = *ffi::array_shape(&buggy_mask).last().unwrap();
+        assert!(
+            buggy_klen > returned_key_axis,
+            "offset-sized mask ({buggy_klen}) must be wider than the returned K/V ({returned_key_axis})"
+        );
+    }
+
     /// End-to-end batch grow + shrink sequence: start with one sequence,
     /// admit a second mid-decode (extend), then evict the first
     /// (filter_in_place). Per-row offsets must remain coherent throughout.

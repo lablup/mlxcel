@@ -460,17 +460,28 @@ impl OLMo3Model {
 
         // Create masks for full and sliding attention
         let (full_mask, sliding_mask) = if l > 1 {
-            let ga_offset = caches[self.ga_idx].offset;
-            let swa_offset = caches[self.swa_idx].offset;
+            // Size the prefill masks from the cache's live window
+            // (`live_len() = offset - live_start`), not the monotonic
+            // `offset`. Under `--max-kv-size`, `trim_front` slices the buffer
+            // to the live window and advances `live_start` while `offset`
+            // keeps growing to preserve the RoPE relative positions, so
+            // `update_and_fetch` returns only `live_len` keys. A mask sized
+            // from `offset` would be wider than the returned K/V and break the
+            // attention broadcast. With no trim (`live_start == 0`),
+            // `live_len == offset`, so this is byte-identical to the untrimmed
+            // path. See issue #419.
+            let ga_live_len = caches[self.ga_idx].live_len();
+            let swa_live_len = caches[self.swa_idx].live_len();
 
-            let full = Some(create_causal_mask(l as i32, ga_offset));
-            // Dense `KVCache` keeps every key, so the prefill mask is always
-            // the full windowed-causal mask over all retained keys; the
-            // attention layer slices K/V to the mask's key axis. The window is
-            // enforced by the mask, not by dropping keys. See issues #408, #413.
+            let full = Some(create_causal_mask(l as i32, ga_live_len));
+            // Dense `KVCache` keeps every key in the live window, so the
+            // prefill mask is the full windowed-causal mask over the retained
+            // (live) keys; the attention layer slices K/V to the mask's key
+            // axis. The window is enforced by the mask, not by dropping keys.
+            // See issues #408, #413, #419.
             let sliding = Some(create_sliding_window_prefill_mask_dense(
                 l as i32,
-                swa_offset,
+                swa_live_len,
                 self.config.sliding_window as i32,
             ));
             (full, sliding)
