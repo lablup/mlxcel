@@ -188,14 +188,37 @@ fn profile_forward_enabled() -> bool {
 
 /// Route the MLP activation through the fused single-launch Metal xIELU kernel
 /// (`mlxcel_core::fused_xielu`) instead of the ~11-op elementwise `apertus_xielu`
-/// graph. Read once from `MLXCEL_FUSED_XIELU` and cached; default-off. The fused
-/// kernel keeps every intermediate in the input dtype (bf16 for native Apertus),
-/// so greedy temp-0 decode stays byte-identical to the elementwise path on Apple
-/// Silicon (see #409). On non-Metal back-ends the FFI falls back to an equivalent
-/// elementwise graph, so enabling the flag is safe everywhere.
+/// graph. Read once from `MLXCEL_FUSED_XIELU` and cached.
+///
+/// Default-on as of the M5 Max validation: the fused kernel keeps every
+/// intermediate in the input dtype (bf16 for native Apertus) and reproduces
+/// MLX's `expm1f`, so greedy temp-0 decode is byte-identical to the elementwise
+/// path on Apple Silicon (see #409), and it measured a decode speedup on both
+/// M1 Ultra (+2.7%) and M5 Max (+1.9%) with no regression. Set
+/// `MLXCEL_FUSED_XIELU=0` (also `false`/`off`/`no`, case-insensitive) to force
+/// the elementwise path; any other value, or leaving it unset, keeps the kernel
+/// on. On non-Metal back-ends the FFI falls back to an equivalent elementwise
+/// graph, so the kernel is safe everywhere. Mirrors the `MLXCEL_FUSED_MOE`
+/// default-on opt-out convention.
 fn fused_xielu_enabled() -> bool {
     static FLAG: OnceLock<bool> = OnceLock::new();
-    *FLAG.get_or_init(|| std::env::var_os("MLXCEL_FUSED_XIELU").is_some())
+    *FLAG.get_or_init(|| {
+        fused_xielu_enabled_from(std::env::var("MLXCEL_FUSED_XIELU").ok().as_deref())
+    })
+}
+
+/// Pure decision behind [`fused_xielu_enabled`], split out so it can be
+/// unit-tested without mutating process-global environment state. `None` (unset)
+/// is on; an explicit `0`/`false`/`off`/`no` (case-insensitive, trimmed) is off;
+/// any other value is on.
+fn fused_xielu_enabled_from(value: Option<&str>) -> bool {
+    match value {
+        Some(v) => !matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "0" | "false" | "off" | "no"
+        ),
+        None => true,
+    }
 }
 
 /// Per-block decode timing accumulator. Constructed only when
@@ -788,5 +811,27 @@ mod tests {
                 mlxcel_core::item_f32(&max_diff)
             );
         }
+    }
+
+    /// The `MLXCEL_FUSED_XIELU` gate is default-on with an opt-out, mirroring
+    /// `MLXCEL_FUSED_MOE` (#282). Unset, or any unrecognized value, keeps the
+    /// fused kernel on; an explicit `0`/`false`/`off`/`no` (case-insensitive,
+    /// trimmed) forces the elementwise reference path. Greedy temp-0 decode is
+    /// byte-identical either way (see `fused_xielu_matches_elementwise_bit_for_bit`),
+    /// so flipping the default is a pure throughput change.
+    #[test]
+    fn fused_xielu_gate_defaults_on_with_opt_out() {
+        // Default-on: unset and unrecognized values enable the kernel.
+        assert!(fused_xielu_enabled_from(None));
+        assert!(fused_xielu_enabled_from(Some("1")));
+        assert!(fused_xielu_enabled_from(Some("on")));
+        assert!(fused_xielu_enabled_from(Some("anything")));
+        // Opt-out: explicit falsy values force the elementwise path.
+        assert!(!fused_xielu_enabled_from(Some("0")));
+        assert!(!fused_xielu_enabled_from(Some("false")));
+        assert!(!fused_xielu_enabled_from(Some("off")));
+        assert!(!fused_xielu_enabled_from(Some("no")));
+        // Trimmed and case-insensitive.
+        assert!(!fused_xielu_enabled_from(Some("  OFF  ")));
     }
 }
