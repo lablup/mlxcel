@@ -183,12 +183,16 @@ pub fn sanitize(weights: WeightMap) -> WeightMap {
 
 /// PyTorch conv weights are `(out, in, kH, kW)`; MLX wants NHWC
 /// `(out, kH, kW, in)`. Transpose any 4D `*.conv.weight`.
+///
+/// This runs only inside [`sanitize`], which the caller invokes only when
+/// [`needs_sanitize`] has already determined the checkpoint is raw
+/// HuggingFace (PyTorch) layout, so an unconditional transpose is correct and
+/// a layout guard here would wrongly skip stem convs whose shape is ambiguous
+/// (e.g. a `[out, 3, 3, 3]` RGB 3x3 stem conv).
 fn maybe_transpose_conv(key: &str, value: UniquePtr<MlxArray>) -> UniquePtr<MlxArray> {
     if key.ends_with(".conv.weight") {
         let shape = mlxcel_core::array_shape(&value);
-        // Transpose only genuine PyTorch-layout weights; a checkpoint already in
-        // MLX channel-last layout must be left untouched (issue #428).
-        if shape.len() == 4 && !crate::loading::conv2d_weight_is_channel_last(&shape) {
+        if shape.len() == 4 {
             return mlxcel_core::transpose_axes(&value, &[0, 2, 3, 1]);
         }
     }
@@ -332,32 +336,13 @@ mod tests {
     }
 
     #[test]
-    fn maybe_transpose_conv_skips_channel_last_layout() {
-        // MLX channel-last conv2d [out=8, kH=3, kW=3, in=16] must be left as-is
-        // so a pre-converted checkpoint is not double-transposed (issue #428).
-        let value = mlxcel_core::ones(&[8, 3, 3, 16], mlxcel_core::dtype::FLOAT32);
+    fn maybe_transpose_conv_transposes_ambiguous_rgb_stem() {
+        // The ResNet-vd stem first conv is a 3x3 over 3-channel RGB input, so
+        // its PyTorch shape [out, in=3, kH=3, kW=3] has in == kH == kW. This
+        // runs only after needs_sanitize confirmed raw-HF layout, so it must
+        // still be transposed [0,2,3,1] even though the shape looks square.
+        let value = mlxcel_core::ones(&[32, 3, 3, 3], mlxcel_core::dtype::FLOAT32);
         let out = maybe_transpose_conv("vision.backbone.embedder.0.conv.weight", value);
-        assert_eq!(mlxcel_core::array_shape(&out), vec![8, 3, 3, 16]);
-    }
-
-    #[test]
-    fn maybe_transpose_conv_is_idempotent() {
-        // First pass converts PyTorch -> channel-last; second pass must detect
-        // the channel-last layout and leave the shape unchanged.
-        let key = "vision.backbone.embedder.0.conv.weight";
-        let once = maybe_transpose_conv(
-            key,
-            mlxcel_core::ones(&[8, 16, 3, 3], mlxcel_core::dtype::FLOAT32),
-        );
-        let twice = maybe_transpose_conv(
-            key,
-            mlxcel_core::ones(&[8, 16, 3, 3], mlxcel_core::dtype::FLOAT32),
-        );
-        let twice = maybe_transpose_conv(key, twice);
-        assert_eq!(
-            mlxcel_core::array_shape(&once),
-            mlxcel_core::array_shape(&twice)
-        );
-        assert_eq!(mlxcel_core::array_shape(&twice), vec![8, 3, 3, 16]);
+        assert_eq!(mlxcel_core::array_shape(&out), vec![32, 3, 3, 3]);
     }
 }
