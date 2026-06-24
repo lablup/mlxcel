@@ -73,7 +73,7 @@ Implemented VLM variants include:
 - Llama 4 VLM
 - LLaVA and LLaVA-Bunny
 - Aya Vision and PaliGemma
-- Pixtral and Mistral 3 VLM wrappers
+- Pixtral and Mistral 3 VLM wrappers (Mistral 3 VLM supports both the standard Llama/Mistral text backbone and the Mistral4 MLA+MoE backbone; text generation is validated on both, image+text for the Mistral4 backbone is tracked in #425)
 - Qwen2-VL, Qwen2.5-VL, Qwen3-VL, Qwen3.5-VL, and Qwen3-VL MoE
 - Youtu-VL
 - MiniCPM-O
