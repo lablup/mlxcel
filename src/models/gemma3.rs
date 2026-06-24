@@ -35,48 +35,11 @@ use mlxcel_core::generate::DecodeBatchContext;
 use mlxcel_core::layers::{
     FusedQKVLinear, GemmaRMSNorm, KVCache, RotatingKVCache, UnifiedEmbedding, UnifiedLinear,
 };
-use mlxcel_core::utils::{
-    create_causal_mask, create_causal_mask_with_window, create_causal_mask_with_window_full,
-    pipeline_hint,
-};
+use mlxcel_core::utils::{create_causal_mask, create_sliding_window_prefill_mask, pipeline_hint};
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
 use serde::Deserialize;
 use std::path::Path;
-
-/// Build the sliding-window prefill mask for a multi-token (`seq_len > 1`) pass.
-///
-/// The full mask is only used for a fresh single-pass prefill
-/// (`sliding_offset == 0`). For a fresh prefill longer than the sliding window
-/// the rotating cache returns ALL `seq_len` prefill keys (it only trims to
-/// `window` on a later append), so a capped `[seq_len, window]` mask would both
-/// fail to broadcast against the full key axis and, where the attention layer
-/// slices K/V to the trailing `window` keys, strand the earliest query rows
-/// (logical position `< seq_len - window`) with no visible key: an all-masked
-/// row that softmaxes to NaN and degenerates the output (issue #401). The full
-/// `[seq_len, seq_len + offset]` windowed mask keeps every query row attending
-/// to its own window. Mirrors mlx-lm's `RotatingKVCache` prefill, where the
-/// window's correctness comes from the mask, not from dropping keys.
-///
-/// For a non-fresh multi-token append (`sliding_offset > 0`) the rotating cache
-/// trims to `window` keys, and Gemma 3 passes the mask directly to attention
-/// with no `trim_mask_to_keys` step (unlike Gemma 4). The clamped
-/// `[seq_len, window]` path is used so the mask stays aligned with the trimmed
-/// key axis: the else branch collapses `effective_offset` to `0` (because
-/// `(window - seq_len).max(0) == 0` when `seq_len > window`) and the windowed
-/// values stay correct since `sliding_offset` cancels in the relative query/key
-/// relation.
-///
-/// The full mask is only taken when `seq_len > window && sliding_offset == 0`;
-/// all other cases use the clamped path.
-fn sliding_prefill_mask(seq_len: i32, sliding_offset: i32, window: i32) -> UniquePtr<MlxArray> {
-    if seq_len > window && sliding_offset == 0 {
-        create_causal_mask_with_window_full(seq_len, sliding_offset, Some(window))
-    } else {
-        let effective_offset = sliding_offset.min((window - seq_len).max(0));
-        create_causal_mask_with_window(seq_len, effective_offset, Some(window))
-    }
-}
 
 // Configuration.
 #[derive(Debug, Clone, Deserialize)]
@@ -805,7 +768,7 @@ impl Gemma3Model {
 
             let sliding_mask = if self.sliding_window_pattern > 1 {
                 let sliding_offset = caches[0].as_interface().offset();
-                Some(sliding_prefill_mask(
+                Some(create_sliding_window_prefill_mask(
                     seq_len,
                     sliding_offset,
                     self.sliding_window as i32,
@@ -1087,7 +1050,7 @@ impl Gemma3StageModel {
 
             let sliding_mask = if self.first_sliding_cache_index().is_some() {
                 let sliding_offset = caches[self.first_sliding_cache_index().unwrap()].offset();
-                Some(sliding_prefill_mask(
+                Some(create_sliding_window_prefill_mask(
                     seq_len,
                     sliding_offset,
                     self.sliding_window as i32,
@@ -1353,6 +1316,11 @@ impl mlxcel_core::generate::LanguageModel for Gemma3Wrapper {
 
 #[cfg(test)]
 mod gemma3_mask_tests {
+    // These tests pin the shared `mlxcel_core::utils::create_sliding_window_prefill_mask`
+    // helper (hoisted in #410) from the Gemma 3 caller's perspective: Gemma 3
+    // forwards the mask straight to attention with no `trim_mask_to_keys` step,
+    // so it relies on both the full over-window mask (fresh prefill) and the
+    // window-clamped shape (rolled-over cache) the helper produces.
     use super::*;
 
     fn mask_at(mask: &MlxArray, q: i32, k: i32) -> f32 {
@@ -1365,7 +1333,7 @@ mod gemma3_mask_tests {
     /// the full `[seq_len, seq_len]` key axis and have no fully-masked row.
     #[test]
     fn sliding_prefill_mask_fresh_over_window_spans_full_key_axis() {
-        let mask = sliding_prefill_mask(4, 0, 2);
+        let mask = create_sliding_window_prefill_mask(4, 0, 2);
         mlxcel_core::eval(&mask);
         assert_eq!(
             mlxcel_core::array_shape(&mask),
@@ -1388,7 +1356,7 @@ mod gemma3_mask_tests {
     /// `[4, 7]`), which fails to broadcast and crashes.
     #[test]
     fn sliding_prefill_mask_nonfresh_over_window_matches_trimmed_cache() {
-        let mask = sliding_prefill_mask(4, 3, 2);
+        let mask = create_sliding_window_prefill_mask(4, 3, 2);
         mlxcel_core::eval(&mask);
         assert_eq!(
             mlxcel_core::array_shape(&mask),

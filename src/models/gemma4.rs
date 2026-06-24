@@ -40,7 +40,7 @@ use mlxcel_core::layers::{
 };
 use mlxcel_core::utils::{
     create_causal_mask, create_causal_mask_with_left_padding, create_causal_mask_with_window,
-    create_causal_mask_with_window_and_left_padding, create_causal_mask_with_window_full,
+    create_causal_mask_with_window_and_left_padding, create_sliding_window_prefill_mask,
     mask_stale_key_gap, pipeline_hint, slice_axis,
 };
 use mlxcel_core::weights::WeightMap;
@@ -2064,36 +2064,6 @@ impl Attention {
     }
 }
 
-/// Build the sliding-window prefill mask for a multi-token (`l > 1`) pass.
-///
-/// For a single-pass prefill longer than the sliding window the rotating cache
-/// returns ALL `l` prefill keys (it only trims to `window` on the subsequent
-/// decode step), so the windowed mask must span the full key axis. A capped
-/// `[l, window]` mask makes `Attention::attend` discard the (undersized) mask
-/// and fall back to `causal_attention`, which slices K/V to the trailing
-/// `window` keys, stranding the earliest query rows (logical position
-/// `< l - window`) with no visible key, producing an all-masked row that
-/// softmaxes to NaN and degenerates the output to `<pad>` (issue #401). The
-/// full `[l, l + offset]` windowed mask keeps every query row attending to its
-/// own window; `attend`'s `trim_mask_to_keys` later crops it to the actual key
-/// count when the cache caps. Mirrors mlx-lm's `RotatingKVCache` prefill, where
-/// windowed correctness comes from the mask, not from dropping keys.
-///
-/// For `l <= window` the capped and full masks are identical after the
-/// `attend` trim, so this keeps the existing clamped path (byte-identical
-/// greedy output, including the batched MTP verify rounds) untouched.
-///
-/// Used by: Gemma 4 `forward_with_speculative_sinks`, Gemma 4 pipeline-stage
-/// `execute_hidden`.
-fn sliding_prefill_mask(l: i32, sliding_offset: i32, window: i32) -> UniquePtr<MlxArray> {
-    if l > window {
-        create_causal_mask_with_window_full(l, sliding_offset, Some(window))
-    } else {
-        let sliding_effective_offset = sliding_offset.min((window - l).max(0));
-        create_causal_mask_with_window(l, sliding_effective_offset, Some(window))
-    }
-}
-
 fn trim_mask_to_keys(mask: Option<&MlxArray>, keys: &MlxArray) -> Option<UniquePtr<MlxArray>> {
     let mask = mask?;
     let mask_shape = mlxcel_core::array_shape(mask);
@@ -2820,9 +2790,22 @@ impl Gemma4TextModel {
             let global_offset = first_cache_offset(caches, "full_attention");
             let sliding_offset = first_cache_offset(caches, "sliding_attention");
             let window = self.config.sliding_window as i32;
+            // Shared `create_sliding_window_prefill_mask` (hoisted in #410) gates
+            // the full mask on `l > window && sliding_offset == 0`. Gemma 4 used a
+            // local copy gated on `l > window` alone, but the difference is
+            // unreachable here: Gemma 4 sets `no_chunked_prefill`, so prefill is
+            // single-pass (`sliding_offset == 0`) and the only multi-token reuse
+            // is MTP verify with `l` << `window`, never `l > window`. The
+            // `l > window && sliding_offset > 0` case the gates differ on cannot
+            // occur, and `trim_mask_to_keys` re-crops any over-length mask anyway,
+            // so this is behaviour-preserving for every reachable input.
             (
                 Some(create_causal_mask(l, global_offset)),
-                Some(sliding_prefill_mask(l, sliding_offset, window)),
+                Some(create_sliding_window_prefill_mask(
+                    l,
+                    sliding_offset,
+                    window,
+                )),
             )
         } else {
             // Ordinary single-token decode with no resident padding: the
@@ -3804,7 +3787,9 @@ impl Gemma4StageModel {
             let sliding_offset = self.first_cache_offset(caches, "sliding_attention");
             (
                 Some(create_causal_mask(seq_len, global_offset)),
-                Some(sliding_prefill_mask(
+                // Shared helper hoisted in #410; behaviour-preserving for Gemma 4
+                // (see the gate-divergence note in `forward_with_speculative_sinks`).
+                Some(create_sliding_window_prefill_mask(
                     seq_len,
                     sliding_offset,
                     self.config.sliding_window as i32,
@@ -4908,58 +4893,13 @@ mod gemma4_unified_mask_tests {
         assert_eq!(mask_at(&out, 3, 1), 0.0);
     }
 
-    /// Issue #401: a single-pass prefill longer than the sliding window must
-    /// produce a full `[l, l]` windowed mask in which every query row can still
-    /// attend to at least its own position. The old capped `[l, window]` mask
-    /// (and the K/V slice it triggered in `causal_attention`) stranded the
-    /// earliest rows with an all-masked row -> NaN -> `<pad>`.
-    #[test]
-    fn sliding_prefill_mask_over_window_has_no_fully_masked_row() {
-        // l = 4 > window = 2, fresh prefill (offset 0). Must be [4, 4], not the
-        // capped [4, 2] that strands rows 0 and 1.
-        let mask = sliding_prefill_mask(4, 0, 2);
-        mlxcel_core::eval(&mask);
-        assert_eq!(
-            mlxcel_core::array_shape(&mask),
-            vec![4, 4],
-            "over-window prefill mask must span the full key axis"
-        );
-
-        let blocked = |v: f32| v.is_infinite() && v < 0.0;
-        // No query row is fully masked.
-        for q in 0..4 {
-            assert_eq!(mask_at(&mask, q, q), 0.0, "row {q} must attend to itself");
-        }
-        // Window band (window = 2): row q attends to keys {q-1, q}.
-        assert_eq!(mask_at(&mask, 1, 0), 0.0, "row1 attends in-window key0");
-        assert!(blocked(mask_at(&mask, 2, 0)), "key0 older than row2 window");
-        assert!(blocked(mask_at(&mask, 3, 1)), "key1 older than row3 window");
-        // Future keys stay causally blocked.
-        assert!(blocked(mask_at(&mask, 0, 1)), "row0 future key blocked");
-    }
-
-    /// At or below the window the prefill mask is the existing clamped windowed
-    /// mask (no behaviour change for `l <= window`).
-    #[test]
-    fn sliding_prefill_mask_within_window_matches_clamped() {
-        // l = 3 <= window = 8: falls through to the clamped capped builder.
-        let prefill = sliding_prefill_mask(3, 0, 8);
-        let clamped = create_causal_mask_with_window(3, 0, Some(8));
-        mlxcel_core::eval(&prefill);
-        assert_eq!(
-            mlxcel_core::array_shape(&prefill),
-            mlxcel_core::array_shape(&clamped),
-            "within-window prefill mask shape must match the clamped builder"
-        );
-        for q in 0..3 {
-            for k in 0..3 {
-                let a = mask_at(&prefill, q, k);
-                let b = mask_at(&clamped, q, k);
-                assert_eq!(a.is_finite(), b.is_finite(), "cell ({q},{k}) finiteness");
-                if a.is_finite() {
-                    assert_eq!(a, b, "cell ({q},{k}) value");
-                }
-            }
-        }
-    }
+    // The Gemma 4 over-window (`sliding_prefill_mask_over_window_*`) and
+    // within-window prefill-mask tests were hoisted to the shared
+    // `mlxcel_core::utils::create_sliding_window_prefill_mask` tests in #410
+    // (`sliding_window_prefill_mask_selects_full_when_fresh_over_window`,
+    // `sliding_window_prefill_mask_within_window_matches_capped_builder`,
+    // `full_windowed_mask_over_window_has_no_all_masked_row`). The Gemma 3
+    // caller's no-trim invariant is additionally pinned in
+    // `gemma3::gemma3_mask_tests`. Gemma 4's real-model over-window behaviour is
+    // covered by the byte-identical regression on `gemma-4-12b-it-4bit`.
 }
