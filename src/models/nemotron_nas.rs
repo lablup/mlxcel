@@ -642,13 +642,20 @@ impl LanguageModel for NemotronNASModel {
     ) -> UniquePtr<MlxArray> {
         let mut h = self.embeddings.forward(input_ids);
 
-        // Create causal mask if not provided
+        // Create causal mask if not provided. Size it from the cache's live
+        // window (`live_len() = offset - live_start`), not the monotonic
+        // `offset`. Under `--max-kv-size`, `trim_front` advances `live_start`
+        // while `offset` keeps growing for RoPE; `update_and_fetch` then
+        // returns only `live_len` keys, so an `offset`-sized mask would be
+        // wider than the live K/V and trip `broadcast_shapes`. With no trim
+        // (`live_start == 0`), `live_len == offset`, so this is byte-identical
+        // to the untrimmed path. See issue #421 (mirrors #419/#420).
         let computed_mask = if mask.is_none() {
             let shape = array_shape(&h);
             let seq_len = shape[1];
-            let offset = caches.first().map(|c| c.offset).unwrap_or(0);
+            let live_len = caches.first().map(|c| c.live_len()).unwrap_or(0);
             if seq_len > 1 {
-                Some(create_causal_mask(seq_len, offset))
+                Some(create_causal_mask(seq_len, live_len))
             } else {
                 None
             }

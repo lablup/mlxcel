@@ -685,12 +685,21 @@ impl Qwen2VLModel {
             }
         });
 
-        // Create causal mask if needed
+        // Create causal mask if needed. Size it from the cache's live window
+        // (`live_len() = offset - live_start`), not the monotonic
+        // `cache_offset`. Under `--max-kv-size`, `trim_front` advances
+        // `live_start` while `offset` keeps growing; `update_and_fetch` then
+        // returns only `live_len` keys, so an `offset`-sized mask would be
+        // wider than the live K/V and trip `broadcast_shapes`. With no trim
+        // (`live_start == 0`), `live_len == cache_offset`, so this is
+        // byte-identical to the untrimmed path. `cache_offset` stays monotonic
+        // above because position_ids/RoPE need absolute positions. See issue
+        // #421 (mirrors #419/#420).
         let auto_mask;
         let mask = if mask.is_some() {
             mask
         } else {
-            auto_mask = mlxcel_core::utils::create_causal_mask(seq_len, cache_offset);
+            auto_mask = mlxcel_core::utils::create_causal_mask(seq_len, caches[0].live_len());
             Some(auto_mask.as_ref().unwrap() as &MlxArray)
         };
 

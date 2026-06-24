@@ -634,10 +634,18 @@ impl Mistral4Model {
         let shape = mlxcel_core::array_shape(&h);
         let l = shape[1];
 
-        // Create causal mask for prefill
+        // Create causal mask for prefill. Size it from the cache's live
+        // window (`live_len() = offset - live_start`), not the monotonic
+        // `offset`. Under `--max-kv-size`, `trim_front` advances `live_start`
+        // while `offset` keeps growing for RoPE; `update_and_fetch` then
+        // returns only `live_len` keys, so an `offset`-sized mask would be
+        // wider than the live K/V and trip `broadcast_shapes`. With no trim
+        // (`live_start == 0`), `live_len == offset`, so this is byte-identical
+        // to the untrimmed path. The Llama-4 attention scale below keeps the
+        // monotonic `offset`. See issue #421 (mirrors #419/#420).
         let mask = if l > 1 {
-            let offset = caches[0].offset;
-            Some(create_causal_mask(l, offset))
+            let live_len = caches[0].live_len();
+            Some(create_causal_mask(l, live_len))
         } else {
             None
         };
