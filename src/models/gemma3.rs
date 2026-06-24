@@ -1071,17 +1071,26 @@ impl Gemma3StageModel {
 
         let seq_len = mlxcel_core::array_shape(hidden.as_ref().unwrap())[1];
         if seq_len > 1 {
-            let global_offset = self
+            // Size both prefill masks from the cache's live window
+            // (`live_len()`), not the monotonic `offset`, so the mask key axis
+            // matches the K/V `update_and_fetch` returns after a
+            // `--max-kv-size` trim advances `live_start` while `offset` keeps
+            // growing for RoPE. Byte-identical when untrimmed (`live_len ==
+            // offset`); mirrors `Gemma3Model::forward_with_caches` and
+            // `Gemma4StageModel::execute_hidden`. See issue #430.
+            let global_live_len = self
                 .first_global_cache_index()
-                .map(|idx| caches[idx].offset())
+                .map(|idx| caches[idx].as_interface().live_len())
                 .unwrap_or(0);
-            let global_mask = create_causal_mask(seq_len, global_offset);
+            let global_mask = create_causal_mask(seq_len, global_live_len);
 
             let sliding_mask = if self.first_sliding_cache_index().is_some() {
-                let sliding_offset = caches[self.first_sliding_cache_index().unwrap()].offset();
+                let sliding_live_len = caches[self.first_sliding_cache_index().unwrap()]
+                    .as_interface()
+                    .live_len();
                 Some(create_sliding_window_prefill_mask(
                     seq_len,
-                    sliding_offset,
+                    sliding_live_len,
                     self.sliding_window as i32,
                 ))
             } else {
