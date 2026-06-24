@@ -4,6 +4,11 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Fixed
+- **Double-transpose crash on mlx-community conv checkpoints (Gemma 4 audio, phi4mm patch-embed, nemotron audio, RT-DETRv2).** Several weight-sanitizer functions transposed conv weights from PyTorch `[out, in, kH, kW]` to MLX channel-last `[out, kH, kW, in]` unconditionally. Pre-converted mlx-community checkpoints already store these weights in channel-last order, so the unconditional transpose double-converted them and produced a corrupted shape. The confirmed crash: loading `mlx-community/gemma-4-e4b-it-qat-4bit` turned the audio subsample conv weight `[128, 3, 3, 1]` into `[128, 3, 1, 3]`, which MLX conv2d rejected because the input C_in=1 did not match the weight C_in=3. All four affected sanitizers now check the tensor shape before transposing: `conv2d_weight_is_channel_last` (already-MLX `[out, kH, kW, in]` skips; PyTorch `[out, in, kH, kW]` transposes) and `conv1d_weight_is_channel_last` (depthwise-only; MLX `[out, kW, 1]` skips; PyTorch `[out, 1, kW]` transposes). Both predicates are idempotent. Resolves #428.
+
 ## [v0.3.3] - 2026-06-23
 
 ### Added
