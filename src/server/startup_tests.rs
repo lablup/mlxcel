@@ -18,9 +18,10 @@ use super::{
     MIN_PARALLEL_CONTEXT_SIZE, ServerStartupConfig, build_server_config,
     detect_model_media_support, effective_parallel_context_slots, resolve_api_key,
     resolve_chat_template, resolve_decode_storage_backend, resolve_default_max_tokens,
-    resolve_dry_penalty_last_n, resolve_parallel_context_size, resolve_remote_pipeline_topology,
-    resolve_tensor_parallel_runtime_support, validate_parallel_context_startup,
-    validate_pipeline_parallel_startup, validate_tensor_parallel_startup,
+    resolve_dry_penalty_last_n, resolve_loop_detection_env, resolve_parallel_context_size,
+    resolve_remote_pipeline_topology, resolve_tensor_parallel_runtime_support,
+    validate_parallel_context_startup, validate_pipeline_parallel_startup,
+    validate_tensor_parallel_startup,
 };
 use crate::distributed::{ClusterConfig, TransportBackend};
 use crate::server::chat_template::ChatMessage;
@@ -1167,4 +1168,92 @@ fn startup_passes_strict_allowlist_dir() {
 
     std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
     std::fs::remove_dir_all(dir).unwrap();
+}
+
+// -- MLXCEL_LOOP_DETECTION env parser (issue #432) --
+
+/// Run `resolve_loop_detection_env` with `MLXCEL_LOOP_DETECTION` temporarily
+/// set to `value` (or unset when `None`), then restore the original.
+fn with_loop_detection_env<F, R>(value: Option<&str>, f: F) -> R
+where
+    F: FnOnce() -> R,
+{
+    let _guard = env_lock();
+    let key = "MLXCEL_LOOP_DETECTION";
+    let prev = std::env::var_os(key);
+    // SAFETY: serialized via the crate-wide ENV_LOCK acquired above.
+    match value {
+        Some(v) => unsafe { std::env::set_var(key, v) },
+        None => unsafe { std::env::remove_var(key) },
+    }
+    let result = f();
+    // SAFETY: serialized via the crate-wide ENV_LOCK acquired above.
+    match prev {
+        Some(v) => unsafe { std::env::set_var(key, v) },
+        None => unsafe { std::env::remove_var(key) },
+    }
+    result
+}
+
+#[test]
+fn loop_detection_env_unset_returns_none() {
+    let result = with_loop_detection_env(None, resolve_loop_detection_env);
+    assert!(result.is_none());
+}
+
+#[test]
+fn loop_detection_env_off_keywords_force_disable() {
+    use mlxcel_core::LoopDetectionConfig;
+    for kw in &["off", "OFF", "0", "none", "false", "disabled"] {
+        let result = with_loop_detection_env(Some(kw), resolve_loop_detection_env);
+        assert!(
+            result.is_some(),
+            "expected Some(disabled) for keyword {kw:?}"
+        );
+        assert_eq!(
+            result.unwrap(),
+            LoopDetectionConfig::disabled(),
+            "expected disabled config for keyword {kw:?}"
+        );
+    }
+}
+
+#[test]
+fn loop_detection_env_on_keywords_force_recommended() {
+    use crate::server::request_options::LOOP_DETECTION_RECOMMENDED;
+    for kw in &["on", "ON", "default", "true", "enabled"] {
+        let result = with_loop_detection_env(Some(kw), resolve_loop_detection_env);
+        assert_eq!(
+            result,
+            Some(LOOP_DETECTION_RECOMMENDED),
+            "expected recommended config for keyword {kw:?}"
+        );
+    }
+}
+
+#[test]
+fn loop_detection_env_comma_triple_parsed() {
+    use mlxcel_core::LoopDetectionConfig;
+    let result = with_loop_detection_env(Some("2,30,5"), resolve_loop_detection_env);
+    assert_eq!(result, Some(LoopDetectionConfig::new(2, 30, 5)));
+}
+
+#[test]
+fn loop_detection_env_colon_triple_parsed() {
+    use mlxcel_core::LoopDetectionConfig;
+    let result = with_loop_detection_env(Some("1:20:4"), resolve_loop_detection_env);
+    assert_eq!(result, Some(LoopDetectionConfig::new(1, 20, 4)));
+}
+
+#[test]
+fn loop_detection_env_malformed_returns_none() {
+    let result = with_loop_detection_env(Some("not_a_valid_value"), resolve_loop_detection_env);
+    assert!(result.is_none());
+}
+
+#[test]
+fn loop_detection_env_wrong_field_count_returns_none() {
+    // Four fields is not a valid triple.
+    let result = with_loop_detection_env(Some("1,20,4,extra"), resolve_loop_detection_env);
+    assert!(result.is_none());
 }

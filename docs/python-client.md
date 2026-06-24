@@ -109,7 +109,7 @@ print(llm.chat(messages, max_tokens=128, temperature=0.3))
 
 ## Sampling parameters
 
-Generation methods accept OpenAI sampling fields directly: `max_tokens`, `temperature`, `top_p`, `stop`, `seed`, `presence_penalty`, `frequency_penalty`, `logit_bias`, and `response_format`. Server-specific knobs that are not part of the OpenAI schema (`top_k`, `min_p`, `repetition_penalty`, and DRY settings) are forwarded in the request body. You can also pass an explicit `extra_body={...}` for arbitrary server fields; values you set there win on conflict.
+Generation methods accept OpenAI sampling fields directly: `max_tokens`, `temperature`, `top_p`, `stop`, `seed`, `presence_penalty`, `frequency_penalty`, `logit_bias`, and `response_format`. Server-specific knobs that are not part of the OpenAI schema (`top_k`, `min_p`, `repetition_penalty`, DRY settings, and the vLLM-compatible loop-detection fields `max_pattern_size` / `min_pattern_size` / `min_count`) are forwarded in the request body. You can also pass an explicit `extra_body={...}` for arbitrary server fields; values you set there win on conflict.
 
 ```python
 llm.generate("Once upon a time", max_tokens=200, top_p=0.9, top_k=40, min_p=0.05)
