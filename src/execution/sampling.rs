@@ -78,8 +78,8 @@ pub fn build_sampling_config(params: ResolvedSamplingParams) -> SamplingConfig {
             token_bias: TokenBiasMap::default(),
             // Loop detection defaults to disabled here. The server control
             // plane sets `sampling.loop_detection` after this helper returns,
-            // where the model family and the request's tools / response_format
-            // are visible (see `request_options::build_server_generate_options`).
+            // where the loaded model family is visible (see
+            // `request_options::build_server_generate_options`).
             loop_detection: LoopDetectionConfig::default(),
         }
     }

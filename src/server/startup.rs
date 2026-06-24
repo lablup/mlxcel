@@ -898,8 +898,9 @@ pub(super) fn build_server_config(
         // Global loop-detection override (issue #432) from `MLXCEL_LOOP_DETECTION`.
         // `None` means the per-family auto-enable policy applies.
         loop_detection: resolve_loop_detection_env(),
-        // Whether the loaded model is in the Gemma 4 family, used to gate the
-        // loop-detection auto-enable on the documented amplifiers.
+        // Whether the loaded model is in the Gemma 4 family, used to turn on
+        // the loop-detection default-on for the family unconditionally (not
+        // gated on tools or a `json_schema` response_format).
         model_is_gemma4_family: detect_gemma4_family(&startup.model_path),
     }
 }

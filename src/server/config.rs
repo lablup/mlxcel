@@ -495,10 +495,11 @@ pub struct ServerConfig {
     pub loop_detection: Option<mlxcel_core::LoopDetectionConfig>,
 
     /// Whether the loaded model is in the Gemma 4 family (`Gemma4`,
-    /// `Gemma4VLM`, or `Gemma4Unified`), resolved once at startup. Gates the
-    /// loop-detection auto-enable for requests that carry the documented
-    /// amplifiers (tools or a `json_schema` response_format). Defaults to
-    /// `false` so non-Gemma-4 models keep the bit-exact baseline.
+    /// `Gemma4VLM`, or `Gemma4Unified`), resolved once at startup. Enables the
+    /// engine-level loop-detection default-on for the family, unconditionally:
+    /// it does not require tools or a `json_schema` response_format, so plain
+    /// Gemma 4 chat is covered too. Defaults to `false` so non-Gemma-4 models
+    /// keep the bit-exact baseline.
     pub model_is_gemma4_family: bool,
 }
 
