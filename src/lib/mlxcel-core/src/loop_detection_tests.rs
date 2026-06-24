@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use super::{detect_repetition_loop, LoopDetectionConfig};
+use super::{detect_repetition_loop, LoopDetectionConfig, MAX_EFFECTIVE_PATTERN_SIZE};
 
 /// The conservative starting threshold the server applies for the Gemma 4
 /// amplifier case (`min_pattern_size=1, max_pattern_size=20, min_count=4`).
@@ -167,4 +167,64 @@ fn observed_cjk_collapse_shape_fires() {
     let mut stream: Vec<i32> = (100..160).collect();
     stream.extend(std::iter::repeat_n(255, 30));
     assert!(detect_repetition_loop(&stream, &recommended()));
+}
+
+// -- effective max_pattern_size cap (CPU-DoS guard) --
+//
+// `LoopDetectionConfig::new(1, <huge>, 2)` is exactly what BOTH untrusted
+// override surfaces produce: the per-request path (`loop_detection_from_request`,
+// from the OpenAI `max_pattern_size` chat field) and the global-env triple
+// (`MLXCEL_LOOP_DETECTION`). Neither clamps the value; the detector caps the
+// effective scan at `MAX_EFFECTIVE_PATTERN_SIZE`. These detector-level tests
+// therefore cover both override paths at once.
+
+#[test]
+fn huge_max_pattern_size_still_fires_and_terminates() {
+    // A per-request / global-env override with an unbounded max_pattern_size.
+    let cfg = LoopDetectionConfig::new(1, usize::MAX, 2);
+
+    // Still fires on a real short loop: a single token repeated many times.
+    let loop_stream = vec![9; 256];
+    assert!(detect_repetition_loop(&loop_stream, &cfg));
+
+    // Does NOT fire on a long strictly-increasing, non-repeating stream, and the
+    // scan terminates promptly (the cap bounds the work despite usize::MAX).
+    let non_repeating: Vec<i32> = (0..400).collect();
+    assert!(!detect_repetition_loop(&non_repeating, &cfg));
+}
+
+#[test]
+fn cap_bounds_detected_pattern_length() {
+    // Same huge max as the untrusted overrides; min set to the cap so only the
+    // capped pattern length is in range.
+    let cfg = LoopDetectionConfig::new(MAX_EFFECTIVE_PATTERN_SIZE, usize::MAX, 2);
+
+    // A pattern of length exactly MAX_EFFECTIVE_PATTERN_SIZE repeated min_count
+    // (2) times: this length is scanned, so it fires.
+    let block_at_cap: Vec<i32> = (0..MAX_EFFECTIVE_PATTERN_SIZE as i32).collect();
+    let mut at_cap = block_at_cap.clone();
+    at_cap.extend_from_slice(&block_at_cap);
+    assert!(detect_repetition_loop(&at_cap, &cfg));
+
+    // A pattern of length MAX_EFFECTIVE_PATTERN_SIZE + 1 repeated min_count (2)
+    // times: this length is beyond the cap and never scanned, so it does NOT
+    // fire even though the stream is a genuine two-times repeat.
+    let block_above_cap: Vec<i32> = (0..(MAX_EFFECTIVE_PATTERN_SIZE as i32 + 1)).collect();
+    let mut above_cap = block_above_cap.clone();
+    above_cap.extend_from_slice(&block_above_cap);
+    assert!(!detect_repetition_loop(&above_cap, &cfg));
+}
+
+#[test]
+fn min_pattern_size_above_cap_does_not_panic() {
+    // min_pattern_size well above the cap with a huge max_pattern_size: the min
+    // clamps down to the capped max, so the only scanned pattern size is the cap
+    // itself (p == MAX_EFFECTIVE_PATTERN_SIZE) and the range stays well-formed.
+    // A single-token loop shorter than that pattern's window
+    // (MAX_EFFECTIVE_PATTERN_SIZE * min_count) is below the scan window, so the
+    // detector breaks out without matching: it must return false without
+    // panicking (the guarantee here is no panic / well-formed range).
+    let cfg = LoopDetectionConfig::new(MAX_EFFECTIVE_PATTERN_SIZE + 100, usize::MAX, 2);
+    let single_token_loop = vec![3; MAX_EFFECTIVE_PATTERN_SIZE];
+    assert!(!detect_repetition_loop(&single_token_loop, &cfg));
 }

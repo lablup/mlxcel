@@ -29,6 +29,21 @@
 //! zero-overhead no-op that preserves the bit-exact baseline for every model
 //! that does not opt in.
 
+/// Hard upper bound on the effective `max_pattern_size` actually scanned by
+/// [`detect_repetition_loop`], regardless of the configured value.
+///
+/// The per-decode-step scan cost grows with the largest pattern size it sweeps:
+/// for each `p` up to the maximum it checks the last `p * min_count` tokens, so
+/// an unbounded maximum makes the per-step work grow with the generated length
+/// (and the whole-generation cost grow super-linearly), letting an untrusted
+/// per-request `max_pattern_size` or the global-env override pin the worker
+/// thread. Both override surfaces are untrusted, so the value is capped here
+/// rather than at each entry point. The cap still covers every loop length that
+/// occurs in practice: real Gemma 4 collapses are 1-20 tokens, and vLLM-style
+/// detection targets short patterns, so 64 leaves a wide margin while keeping
+/// per-step work bounded.
+pub const MAX_EFFECTIVE_PATTERN_SIZE: usize = 64;
+
 /// Configuration for tail N-gram repetition detection.
 ///
 /// Field names and semantics mirror vLLM's `SamplingParams` so the same JSON
@@ -86,8 +101,11 @@ impl LoopDetectionConfig {
     }
 
     /// Smallest pattern size actually scanned: `0` becomes `1`, then clamped to
-    /// `1..=max_pattern_size`. Only meaningful when [`is_enabled`] is true, so
-    /// `max_pattern_size >= 1` holds and the clamp range is well-formed.
+    /// `1..=effective_max_pattern_size()`. The ceiling is the capped maximum (not
+    /// the raw `max_pattern_size`) so a huge configured maximum paired with a min
+    /// above the cap still yields a well-formed scan range. Only meaningful when
+    /// [`is_enabled`] is true, so `max_pattern_size >= 1` holds and the clamp
+    /// range is non-empty.
     ///
     /// [`is_enabled`]: Self::is_enabled
     fn effective_min_pattern_size(&self) -> usize {
@@ -96,7 +114,14 @@ impl LoopDetectionConfig {
         } else {
             self.min_pattern_size
         };
-        requested.clamp(1, self.max_pattern_size)
+        requested.clamp(1, self.effective_max_pattern_size())
+    }
+
+    /// Largest pattern size actually scanned: `max_pattern_size` capped at
+    /// [`MAX_EFFECTIVE_PATTERN_SIZE`]. This bounds the per-decode-step cost no
+    /// matter what a per-request or global override supplies.
+    fn effective_max_pattern_size(&self) -> usize {
+        self.max_pattern_size.min(MAX_EFFECTIVE_PATTERN_SIZE)
     }
 }
 
@@ -125,7 +150,7 @@ pub fn detect_repetition_loop(generated: &[i32], cfg: &LoopDetectionConfig) -> b
     let len = generated.len();
     let count = cfg.min_count;
     let min_p = cfg.effective_min_pattern_size();
-    let max_p = cfg.max_pattern_size;
+    let max_p = cfg.effective_max_pattern_size();
 
     for p in min_p..=max_p {
         // `window` grows monotonically with `p`, so once it exceeds the stream
