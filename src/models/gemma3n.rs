@@ -1205,10 +1205,10 @@ impl Gemma3nLanguageModel {
             None
         };
         let sliding_mask = if l > 1 {
-            // Full-width windowed mask for any over-window prefill (at any
-            // offset, not just a fresh one); clamped mask otherwise. The
-            // attention layer slices K/V to the mask's key axis, so a full mask
-            // keeps every (dense `KVCache`) key. See issues #408, #413.
+            // Dense `KVCache` keeps every key, so the prefill mask is always
+            // the full windowed-causal mask over all retained keys; the
+            // attention layer slices K/V to the mask's key axis. The window is
+            // enforced by the mask, not by dropping keys. See issues #408, #413.
             Some(create_sliding_window_prefill_mask_dense(
                 l,
                 sliding_offset,
@@ -1382,10 +1382,10 @@ impl Gemma3nLanguageModel {
             None
         };
         let sliding_mask = if l > 1 {
-            // Full-width windowed mask for any over-window prefill (at any
-            // offset, not just a fresh one); clamped mask otherwise. The
-            // attention layer slices K/V to the mask's key axis, so a full mask
-            // keeps every (dense `KVCache`) key. See issues #408, #413.
+            // Dense `KVCache` keeps every key, so the prefill mask is always
+            // the full windowed-causal mask over all retained keys; the
+            // attention layer slices K/V to the mask's key axis. The window is
+            // enforced by the mask, not by dropping keys. See issues #408, #413.
             Some(create_sliding_window_prefill_mask_dense(
                 l,
                 sliding_offset,

@@ -427,10 +427,10 @@ impl Cohere2Model {
             let swa_offset = caches[self.swa_idx].offset;
 
             let full = Some(create_causal_mask(l as i32, ga_offset));
-            // Full-width windowed mask for any over-window prefill (at any
-            // offset, not just a fresh one); clamped mask otherwise. The
-            // attention layer slices K/V to the mask's key axis, so a full mask
-            // keeps all (dense `KVCache`) keys. See issues #408, #413.
+            // Dense `KVCache` keeps every key, so the prefill mask is always
+            // the full windowed-causal mask over all retained keys; the
+            // attention layer slices K/V to the mask's key axis. The window is
+            // enforced by the mask, not by dropping keys. See issues #408, #413.
             let sliding = Some(create_sliding_window_prefill_mask_dense(
                 l as i32,
                 swa_offset,
@@ -489,10 +489,10 @@ impl Cohere2Model {
             let swa_offset = caches[self.swa_idx].offset;
 
             let full = Some(create_causal_mask(l as i32, ga_offset));
-            // Full-width windowed mask for any over-window prefill (at any
-            // offset, not just a fresh one); clamped mask otherwise. The
-            // attention layer slices K/V to the mask's key axis, so a full mask
-            // keeps all (dense `KVCache`) keys. See issues #408, #413.
+            // Dense `KVCache` keeps every key, so the prefill mask is always
+            // the full windowed-causal mask over all retained keys; the
+            // attention layer slices K/V to the mask's key axis. The window is
+            // enforced by the mask, not by dropping keys. See issues #408, #413.
             let sliding = Some(create_sliding_window_prefill_mask_dense(
                 l as i32,
                 swa_offset,
