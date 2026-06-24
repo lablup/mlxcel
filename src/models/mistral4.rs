@@ -447,8 +447,34 @@ pub struct Mistral4MoE {
 
 impl Mistral4MoE {
     pub fn forward(&self, x: &MlxArray) -> UniquePtr<MlxArray> {
-        // Route tokens to experts
-        let gates = self.gate.forward(x);
+        // SwitchGLU::forward expects 2D inputs: `[n_tokens, hidden]` for `x` and
+        // `[n_tokens, top_k]` for the routing indices. It reads `indices_shape[0]`
+        // as `n_tokens` and `indices_shape[1]` as `top_k` to decide the sort path
+        // (`do_sort = n_tokens * top_k >= 64`). Passing a 3D `[batch, seq, hidden]`
+        // tensor (and 3D `[batch, seq, top_k]` indices) misreads `n_tokens=batch`
+        // and `top_k=seq`; for `seq >= 64` it entered gather_sort with the wrong
+        // dims and aborted with `[reshape] Cannot reshape array of size seq*hidden
+        // into (1,1,1)`, breaking every real mistral4 prompt, a >= 512-token
+        // prefill chunk, and any image-bearing prefill (#425). Flatten to
+        // `[n_tokens, hidden]` before routing and reshape the result back,
+        // mirroring qwen3_moe's proven pattern. This also corrects the decode path,
+        // which the old 3D shape was misrouting.
+        let orig_shape = mlxcel_core::array_shape(x);
+        let hidden_dim = orig_shape[orig_shape.len() - 1];
+
+        // Flatten leading dims: prefill `[1, l, hidden]` -> `[l, hidden]`,
+        // decode `[1, 1, hidden]` -> `[1, hidden]`.
+        let x_flat = if orig_shape.len() > 2 {
+            let n: i32 = orig_shape[..orig_shape.len() - 1].iter().product();
+            mlxcel_core::reshape(x, &[n, hidden_dim])
+        } else {
+            mlxcel_core::copy(x)
+        };
+
+        // Route tokens to experts on the flat tensor (indices/scores come out 2D
+        // `[n_tokens, top_k]`). Ops and eps are unchanged from the prior path, so
+        // routing is numerically identical per token, just correctly shaped.
+        let gates = self.gate.forward(&x_flat);
         let gates = mlxcel_core::softmax(&gates, -1);
 
         // Top-k expert selection via argpartition
@@ -475,22 +501,27 @@ impl Mistral4MoE {
         );
         let scores = mlxcel_core::multiply(&scores, &scale_val);
 
-        // Dispatch to selected experts
-        let y = self.switch_mlp.forward(x, &inds);
+        // Dispatch to selected experts on the flat tensor
+        let y = self.switch_mlp.forward(&x_flat, &inds);
 
         let mut result = crate::models::switch_layers::moe_weighted_sum(
             &y,
             &scores,
-            mlxcel_core::array_dtype(x),
+            mlxcel_core::array_dtype(&x_flat),
         );
 
-        // Add shared expert output
+        // Add shared expert output (on the flat tensor)
         if let Some(ref shared) = self.shared_experts {
-            let shared_out = shared.forward(x);
+            let shared_out = shared.forward(&x_flat);
             result = mlxcel_core::add(&result, &shared_out);
         }
 
-        result
+        // Reshape back to the original rank.
+        if orig_shape.len() > 2 {
+            mlxcel_core::reshape(&result, &orig_shape)
+        } else {
+            result
+        }
     }
 
     pub fn from_weights(
