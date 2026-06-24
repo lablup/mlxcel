@@ -25,6 +25,7 @@ Implemented model families include:
 - Mixtral and other MoE families
 - DeepSeek v1 / v2 / v3 / v3.2
 - dots.llm1 (`dots1`, rednote: a DeepSeek-V3-style Mixture-of-Experts without MLA. Standard multi-head attention with per-head Q/K RMSNorm, a dense first layer (`first_k_dense_replace`), then sigmoid-routed experts that select on `gate.weight` logits plus an `e_score_correction_bias`, with a single always-on shared expert. Validated against `mlx-community/dots.llm1.inst-mixed-4-6bit`, a mixed 4/6-bit export whose `v_proj` and `down_proj` tensors are 6-bit while the rest are 4-bit; the unified loaders detect the per-tensor bit width from shape.)
+- Mistral 4 (`mistral4`, Mistral Small 4: a DeepSeek-V3-style Multi-Latent Attention decoder with compressed query and KV LoRA projections (`q_lora_rank` 1024, `kv_lora_rank` 256), split rope/nope query-key head dims, and a separate value head dim, paired with a softmax-routed Mixture-of-Experts (128 routed experts plus one always-on shared expert, 4 active per token, `norm_topk_prob`) and Llama-4 position-dependent attention scaling. The only public checkpoint is the Mistral Small 4 119B vision model, whose `text_config.model_type` is `mistral4`; mlxcel detects it as a Mistral 3 VLM (Pixtral vision tower) on the Mistral4 text backbone. Validated against `mlx-community/Mistral-Small-4-119B-2603-4bit` for both text and image-plus-text.)
 - Cohere / Cohere2
 - InternLM 2 / 3
 - GLM 4, GLM MoE, GLM MoE DSA
@@ -36,7 +37,7 @@ Implemented model families include:
 - ExaOne / ExaOne 4 / ExaOne MoE / Solar Open
 - OLMo / OLMo2 / OLMo3 / OLMoE
 - StarCoder2, StableLM, SmolLM3, Baichuan, MiniCPM, MiniCPM3, MiniMax,
-  Ministral3, Mistral4, Nemotron, Nemotron-NAS, Step 3.5, MiMo
+  Ministral3, Nemotron, Nemotron-NAS, Step 3.5, MiMo
 - Mellum / Mellum 2 (`mellum`, JetBrains code model: sliding/full hybrid attention driven by `layer_types`, with QK-RMSNorm and a sparse softmax-routed MoE (`norm_topk_prob`) in every layer. Full-attention layers use YaRN-scaled RoPE plus a standard `KVCache`; sliding-attention layers use default RoPE plus a `RotatingKVCache` windowed to `sliding_window`. Supports tied and untied LM heads. Validated against `JetBrains/Mellum2-12B-A2.5B-Base`.)
 - Apertus (`apertus`, Swiss AI: Llama-style dense transformer with an xIELU activation MLP (no gate), QK-norm, llama3 RoPE scaling, and untied embeddings)
 - Seed-OSS (`seed_oss`, ByteDance: plain Llama-style dense transformer with a standard SwiGLU MLP and standard residuals. The only deltas are a split attention bias (`attention_bias` on q/k/v, `attention_out_bias` on o_proj), an explicit `head_dim`, untied embeddings, and a `{"rope_type": "default"}` rope_scaling that applies no scaling. Validated against `mlx-community/Seed-OSS-36B-Instruct-4bit`.)
@@ -73,7 +74,7 @@ Implemented VLM variants include:
 - Llama 4 VLM
 - LLaVA and LLaVA-Bunny
 - Aya Vision and PaliGemma
-- Pixtral and Mistral 3 VLM wrappers (Mistral 3 VLM supports both the standard Llama/Mistral text backbone and the Mistral4 MLA+MoE backbone; text generation is validated on both, image+text for the Mistral4 backbone is tracked in #425)
+- Pixtral and Mistral 3 VLM wrappers (Mistral 3 VLM supports both the standard Llama/Mistral text backbone and the Mistral4 MLA+MoE backbone; text and image-plus-text are validated on both, including the Mistral Small 4 119B checkpoint)
 - Qwen2-VL, Qwen2.5-VL, Qwen3-VL, Qwen3.5-VL, and Qwen3-VL MoE
 - Youtu-VL
 - MiniCPM-O
