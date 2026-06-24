@@ -30,7 +30,7 @@ use crate::models::gemma3n_helpers::{
 };
 use mlxcel_core::generate::LanguageModel;
 use mlxcel_core::layers::{KVCache, Linear, RMSNorm, UnifiedEmbedding, UnifiedLinear};
-use mlxcel_core::utils::{create_causal_mask, create_sliding_window_prefill_mask};
+use mlxcel_core::utils::{create_causal_mask, create_sliding_window_prefill_mask_dense};
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
 use serde::Deserialize;
@@ -1205,11 +1205,11 @@ impl Gemma3nLanguageModel {
             None
         };
         let sliding_mask = if l > 1 {
-            // Full-width windowed mask for a fresh single-pass prefill that
-            // exceeds the window; clamped mask otherwise. The attention layer
-            // slices K/V to the mask's key axis, so a full mask keeps every
-            // (dense `KVCache`) key. See issue #408.
-            Some(create_sliding_window_prefill_mask(
+            // Full-width windowed mask for any over-window prefill (at any
+            // offset, not just a fresh one); clamped mask otherwise. The
+            // attention layer slices K/V to the mask's key axis, so a full mask
+            // keeps every (dense `KVCache`) key. See issues #408, #413.
+            Some(create_sliding_window_prefill_mask_dense(
                 l,
                 sliding_offset,
                 self.config.sliding_window as i32,
@@ -1382,11 +1382,11 @@ impl Gemma3nLanguageModel {
             None
         };
         let sliding_mask = if l > 1 {
-            // Full-width windowed mask for a fresh single-pass prefill that
-            // exceeds the window; clamped mask otherwise. The attention layer
-            // slices K/V to the mask's key axis, so a full mask keeps every
-            // (dense `KVCache`) key. See issue #408.
-            Some(create_sliding_window_prefill_mask(
+            // Full-width windowed mask for any over-window prefill (at any
+            // offset, not just a fresh one); clamped mask otherwise. The
+            // attention layer slices K/V to the mask's key axis, so a full mask
+            // keeps every (dense `KVCache`) key. See issues #408, #413.
+            Some(create_sliding_window_prefill_mask_dense(
                 l,
                 sliding_offset,
                 self.config.sliding_window as i32,

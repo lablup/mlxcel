@@ -23,7 +23,7 @@
 
 use mlxcel_core::generate::LanguageModel;
 use mlxcel_core::layers::{FusedQKVLinear, KVCache, LayerNorm, UnifiedEmbedding, UnifiedLinear};
-use mlxcel_core::utils::{create_causal_mask, create_sliding_window_prefill_mask};
+use mlxcel_core::utils::{create_causal_mask, create_sliding_window_prefill_mask_dense};
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
 use serde::Deserialize;
@@ -427,11 +427,11 @@ impl Cohere2Model {
             let swa_offset = caches[self.swa_idx].offset;
 
             let full = Some(create_causal_mask(l as i32, ga_offset));
-            // Full-width windowed mask for a fresh single-pass prefill that
-            // exceeds the window; clamped mask otherwise. The attention layer
-            // slices K/V to the mask's key axis, so a full mask keeps all
-            // (dense `KVCache`) keys. See issue #408.
-            let sliding = Some(create_sliding_window_prefill_mask(
+            // Full-width windowed mask for any over-window prefill (at any
+            // offset, not just a fresh one); clamped mask otherwise. The
+            // attention layer slices K/V to the mask's key axis, so a full mask
+            // keeps all (dense `KVCache`) keys. See issues #408, #413.
+            let sliding = Some(create_sliding_window_prefill_mask_dense(
                 l as i32,
                 swa_offset,
                 self.config.sliding_window as i32,
@@ -489,11 +489,11 @@ impl Cohere2Model {
             let swa_offset = caches[self.swa_idx].offset;
 
             let full = Some(create_causal_mask(l as i32, ga_offset));
-            // Full-width windowed mask for a fresh single-pass prefill that
-            // exceeds the window; clamped mask otherwise. The attention layer
-            // slices K/V to the mask's key axis, so a full mask keeps all
-            // (dense `KVCache`) keys. See issue #408.
-            let sliding = Some(create_sliding_window_prefill_mask(
+            // Full-width windowed mask for any over-window prefill (at any
+            // offset, not just a fresh one); clamped mask otherwise. The
+            // attention layer slices K/V to the mask's key axis, so a full mask
+            // keeps all (dense `KVCache`) keys. See issues #408, #413.
+            let sliding = Some(create_sliding_window_prefill_mask_dense(
                 l as i32,
                 swa_offset,
                 self.config.sliding_window as i32,
