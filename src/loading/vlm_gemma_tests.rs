@@ -14,7 +14,7 @@
 
 use super::{
     gemma3n_language_model_prefix, gemma3n_metadata, gemma3n_needs_conv_transpose,
-    sanitize_gemma3n_weights,
+    sanitize_gemma3n_weights, sanitize_gemma4_audio_weights,
 };
 use mlxcel_core::dtype;
 use mlxcel_core::weights::WeightMap;
@@ -108,4 +108,102 @@ fn sanitize_gemma3n_weights_strips_model_prefix_and_transposes_conv_weights() {
         ),
         vec![8, 3, 3, 16]
     );
+}
+
+fn audio_conv_shape(weights: &WeightMap, key: &str) -> Vec<i32> {
+    mlxcel_core::array_shape(weights.get(key).unwrap())
+}
+
+const LAYER0_CONV: &str = "audio_tower.subsample_conv_projection.layer0.conv.weight";
+const LAYER1_CONV: &str = "audio_tower.subsample_conv_projection.layer1.conv.weight";
+const LCONV1D: &str = "audio_tower.layers.0.lconv1d.depthwise_conv1d.weight";
+
+#[test]
+fn sanitize_gemma4_audio_weights_preserves_channel_last_checkpoint() {
+    // The mlx-community/gemma-4-e4b-it-qat-4bit checkpoint stores these conv
+    // weights already in MLX channel-last layout. The sanitizer must leave them
+    // untouched so the audio subsample conv receives a C_in=1 weight matching
+    // the C_in=1 input (regression for issue #428).
+    let mut weights = WeightMap::new();
+    weights.insert(
+        LAYER0_CONV.to_string(),
+        mlxcel_core::ones(&[128, 3, 3, 1], dtype::FLOAT32),
+    );
+    weights.insert(
+        LAYER1_CONV.to_string(),
+        mlxcel_core::ones(&[32, 3, 3, 128], dtype::FLOAT32),
+    );
+    weights.insert(
+        LCONV1D.to_string(),
+        mlxcel_core::ones(&[1024, 5, 1], dtype::FLOAT32),
+    );
+
+    sanitize_gemma4_audio_weights(&mut weights);
+
+    assert_eq!(audio_conv_shape(&weights, LAYER0_CONV), vec![128, 3, 3, 1]);
+    assert_eq!(audio_conv_shape(&weights, LAYER1_CONV), vec![32, 3, 3, 128]);
+    assert_eq!(audio_conv_shape(&weights, LCONV1D), vec![1024, 5, 1]);
+}
+
+#[test]
+fn sanitize_gemma4_audio_weights_transposes_pytorch_layout() {
+    // Synthetic PyTorch-layout weights: conv2d [out, in, kH, kW] and depthwise
+    // conv1d [out, in=1, kW]. Both must be transposed to channel-last.
+    let mut weights = WeightMap::new();
+    weights.insert(
+        LAYER0_CONV.to_string(),
+        mlxcel_core::ones(&[128, 1, 3, 3], dtype::FLOAT32),
+    );
+    weights.insert(
+        LCONV1D.to_string(),
+        mlxcel_core::ones(&[1024, 1, 5], dtype::FLOAT32),
+    );
+
+    sanitize_gemma4_audio_weights(&mut weights);
+
+    // conv2d [128, 1, 3, 3] --transpose[0,2,3,1]--> [128, 3, 3, 1].
+    assert_eq!(audio_conv_shape(&weights, LAYER0_CONV), vec![128, 3, 3, 1]);
+    // depthwise conv1d [1024, 1, 5] --transpose[0,2,1]--> [1024, 5, 1].
+    assert_eq!(audio_conv_shape(&weights, LCONV1D), vec![1024, 5, 1]);
+}
+
+#[test]
+fn sanitize_gemma4_audio_weights_is_idempotent() {
+    // Running the sanitizer twice must equal running it once: the first pass
+    // converts the PyTorch-layout weights to channel-last, and the second pass
+    // must detect that layout and leave them unchanged.
+    let mut once = WeightMap::new();
+    once.insert(
+        LAYER0_CONV.to_string(),
+        mlxcel_core::ones(&[128, 1, 3, 3], dtype::FLOAT32),
+    );
+    once.insert(
+        LCONV1D.to_string(),
+        mlxcel_core::ones(&[1024, 1, 5], dtype::FLOAT32),
+    );
+    sanitize_gemma4_audio_weights(&mut once);
+
+    let mut twice = WeightMap::new();
+    twice.insert(
+        LAYER0_CONV.to_string(),
+        mlxcel_core::ones(&[128, 1, 3, 3], dtype::FLOAT32),
+    );
+    twice.insert(
+        LCONV1D.to_string(),
+        mlxcel_core::ones(&[1024, 1, 5], dtype::FLOAT32),
+    );
+    sanitize_gemma4_audio_weights(&mut twice);
+    sanitize_gemma4_audio_weights(&mut twice);
+
+    assert_eq!(
+        audio_conv_shape(&once, LAYER0_CONV),
+        audio_conv_shape(&twice, LAYER0_CONV)
+    );
+    assert_eq!(
+        audio_conv_shape(&once, LCONV1D),
+        audio_conv_shape(&twice, LCONV1D)
+    );
+    // And the idempotent result is the channel-last layout.
+    assert_eq!(audio_conv_shape(&twice, LAYER0_CONV), vec![128, 3, 3, 1]);
+    assert_eq!(audio_conv_shape(&twice, LCONV1D), vec![1024, 5, 1]);
 }

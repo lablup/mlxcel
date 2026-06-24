@@ -13,14 +13,15 @@
 // limitations under the License.
 
 use super::{
-    cap_molmo2_vit_num_layers, dequantize_moondream3_weight, inherit_quantization_if_missing,
-    llama4_mm_tokens_per_image, llama4_quantization_params, llama4_token_ids, llama4_vision_prefix,
-    minicpmv4_6_text_weights, molmo2_max_crops, moondream3_text_config_value,
-    moondream3_vision_config_value, parse_molmo2_vit_layers, phi3_num_crops,
-    phi4_siglip_text_config_value, phi4mm_text_config_value, phi4mm_vision_config_value,
-    remap_minicpmo_text_weights, remap_minicpmv4_6_weights, rewrite_molmo2_weight_key,
-    rewrite_moondream3_weight_key, rewrite_phi3_weight_key, rewrite_phi4_siglip_weight_key,
-    rewrite_phi4mm_vision_key, should_transpose_phi3_patch_embedding,
+    cap_molmo2_vit_num_layers, dequantize_moondream3_weight, flatten_phi4mm_patch_embedding,
+    inherit_quantization_if_missing, llama4_mm_tokens_per_image, llama4_quantization_params,
+    llama4_token_ids, llama4_vision_prefix, minicpmv4_6_text_weights, molmo2_max_crops,
+    moondream3_text_config_value, moondream3_vision_config_value, parse_molmo2_vit_layers,
+    phi3_num_crops, phi4_siglip_text_config_value, phi4mm_text_config_value,
+    phi4mm_vision_config_value, remap_minicpmo_text_weights, remap_minicpmv4_6_weights,
+    rewrite_molmo2_weight_key, rewrite_moondream3_weight_key, rewrite_phi3_weight_key,
+    rewrite_phi4_siglip_weight_key, rewrite_phi4mm_vision_key,
+    should_transpose_phi3_patch_embedding,
 };
 use mlxcel_core::dtype;
 use mlxcel_core::weights::WeightMap;
@@ -202,6 +203,25 @@ fn phi3_patch_embedding_transpose_detection_matches_layout_expectations() {
     assert!(!should_transpose_phi3_patch_embedding(&[1024, 14, 14, 3]));
     assert!(should_transpose_phi3_patch_embedding(&[14, 14, 3, 1024]));
     assert!(!should_transpose_phi3_patch_embedding(&[1024, 196]));
+}
+
+#[test]
+fn flatten_phi4mm_patch_embedding_flattens_both_layouts_to_same_shape() {
+    // PyTorch layout [out, in, kH, kW]: transpose to channel-last, then flatten.
+    let pytorch = mlxcel_core::ones(&[1024, 3, 14, 14], dtype::FLOAT32);
+    let flat = flatten_phi4mm_patch_embedding(&pytorch);
+    assert_eq!(mlxcel_core::array_shape(&flat), vec![1024, 3 * 14 * 14]);
+
+    // Already channel-last [out, kH, kW, in]: skip the transpose (issue #428),
+    // flatten to the same [out, in*kH*kW] shape without double-converting.
+    let channel_last = mlxcel_core::ones(&[1024, 14, 14, 3], dtype::FLOAT32);
+    let flat = flatten_phi4mm_patch_embedding(&channel_last);
+    assert_eq!(mlxcel_core::array_shape(&flat), vec![1024, 14 * 14 * 3]);
+
+    // Non-4D weights are copied through unchanged.
+    let already_flat = mlxcel_core::ones(&[1024, 196], dtype::FLOAT32);
+    let out = flatten_phi4mm_patch_embedding(&already_flat);
+    assert_eq!(mlxcel_core::array_shape(&out), vec![1024, 196]);
 }
 
 #[test]

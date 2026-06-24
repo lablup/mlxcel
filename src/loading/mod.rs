@@ -88,6 +88,53 @@ pub(super) fn parse_model_config<T: DeserializeOwned>(config_str: &str) -> Resul
     serde_json::from_str(config_str).map_err(|e| anyhow::anyhow!("Failed to parse config: {}", e))
 }
 
+/// Layout-detection guard for conv weights loaded from a checkpoint.
+///
+/// Several loaders transpose conv weights from PyTorch to MLX channel-last
+/// layout while sanitizing a checkpoint. Pre-converted `mlx-community`
+/// checkpoints already store these weights channel-last, so an unconditional
+/// transpose double-converts and corrupts the shape (see issue #428). These
+/// helpers detect the layout from the shape so the transpose fires only for
+/// genuine PyTorch-layout weights, which is safe in both directions: a true
+/// PyTorch weight is still transposed and an already-MLX weight is left as-is.
+///
+/// Returns `true` when a 4D conv2d weight is already in MLX channel-last
+/// `[out, kH, kW, in]` layout (skip the transpose). PyTorch layout is
+/// `[out, in, kH, kW]`.
+///
+/// Heuristic: in channel-last layout the output-channel count is the leading
+/// dim and dominates both spatial dims, and the two kernel dims are equal
+/// (square kernels are the norm for these patch/subsample/backbone convs).
+/// PyTorch layout puts `in` in dim 1, which generally breaks `dim1 == dim2`
+/// (e.g. `[128, 1, 3, 3]` has `dim1=1 != dim2=3`) or `out >= dim1` once the
+/// in-channel count exceeds the output count. This mirrors the validated
+/// `should_transpose_phi3_patch_embedding` predicate.
+#[must_use]
+pub(crate) fn conv2d_weight_is_channel_last(shape: &[i32]) -> bool {
+    shape.len() == 4 && shape[0] >= shape[1] && shape[0] >= shape[2] && shape[1] == shape[2]
+}
+
+/// Returns `true` when a 3D depthwise conv1d weight is already in MLX
+/// channel-last `[out, kW, in]` layout (skip the transpose). PyTorch layout is
+/// `[out, in, kW]`.
+///
+/// This predicate is valid only for depthwise kernels, where the in-channel
+/// count per group is `1`. In that case channel-last `[out, kW, 1]` carries the
+/// `1` in the trailing dim, while PyTorch `[out, 1, kW]` carries it in the
+/// middle dim. Detecting `shape[2] == 1 && shape[1] > 1` therefore distinguishes
+/// the two depthwise layouts unambiguously: the confirmed Gemma 4 audio kernel
+/// `[1024, 5, 1]` is recognized as already-MLX (skip), and its PyTorch form
+/// `[1024, 1, 5]` as needing the transpose.
+///
+/// It does NOT generalize to pointwise conv1d (`kernel == 1`): PyTorch pointwise
+/// `[out, in, 1]` and MLX depthwise `[out, kW, 1]` share the same shape
+/// signature and cannot be told apart from shape alone. Callers that may receive
+/// pointwise weights must scope this guard to depthwise keys.
+#[must_use]
+pub(crate) fn conv1d_weight_is_channel_last(shape: &[i32]) -> bool {
+    shape.len() == 3 && shape[2] == 1 && shape[1] > 1
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Qwen35VlmKind {
     Dense,

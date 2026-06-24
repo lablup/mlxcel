@@ -280,17 +280,25 @@ fn sanitize_gemma4_audio_weights(weights: &mut mlxcel_core::weights::WeightMap) 
             mlxcel_core::array_shape(w)
         };
 
-        // Conv2d: PyTorch [out, in, kH, kW] -> MLX [out, kH, kW, in]
+        // Conv2d: PyTorch [out, in, kH, kW] -> MLX [out, kH, kW, in].
+        // Skip already-channel-last checkpoints to avoid double-converting the
+        // shape (issue #428): the mlx-community gemma4 weights ship channel-last.
         if key.contains("subsample_conv_projection")
             && key.contains("conv.weight")
             && shape.len() == 4
+            && !crate::loading::conv2d_weight_is_channel_last(&shape)
         {
             let w = weights.remove(&key).unwrap();
             let transposed = mlxcel_core::transpose_axes(&w, &[0, 2, 3, 1]);
             weights.insert(key, transposed);
         }
-        // Conv1d depthwise: PyTorch [out, in, kW] -> MLX [out, kW, in]
-        else if key.contains("depthwise_conv1d.weight") && shape.len() == 3 {
+        // Conv1d depthwise: PyTorch [out, in, kW] -> MLX [out, kW, in].
+        // The Conformer lconv1d is depthwise (in == 1), so the channel-last
+        // form is [out, kW, 1]; skip it when already converted (issue #428).
+        else if key.contains("depthwise_conv1d.weight")
+            && shape.len() == 3
+            && !crate::loading::conv1d_weight_is_channel_last(&shape)
+        {
             let w = weights.remove(&key).unwrap();
             let transposed = mlxcel_core::transpose_axes(&w, &[0, 2, 1]);
             weights.insert(key, transposed);

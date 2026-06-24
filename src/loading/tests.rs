@@ -13,8 +13,9 @@
 // limitations under the License.
 
 use super::{
-    Qwen35VlmKind, model_path_str, parse_eos_token_ids, qwen35_vlm_kind, read_eos_token_ids,
-    require_qwen35_vlm_kind, resolve_model_dir,
+    Qwen35VlmKind, conv1d_weight_is_channel_last, conv2d_weight_is_channel_last, model_path_str,
+    parse_eos_token_ids, qwen35_vlm_kind, read_eos_token_ids, require_qwen35_vlm_kind,
+    resolve_model_dir,
 };
 use crate::model_metadata::{
     DirectoryLoadRoute, ModelCapabilities, ModelKind, ModelLoadPolicy, WeightLoadRoute,
@@ -346,4 +347,30 @@ fn model_load_policy_handles_mistral3_mistral4_wrapper_config() {
         DirectoryLoadRoute::Mistral3Mistral4Wrapper
     );
     assert_eq!(policy.weight_route, Some(WeightLoadRoute::LlamaFamily));
+}
+
+#[test]
+fn conv2d_weight_is_channel_last_detects_mlx_layout() {
+    // MLX channel-last [out, kH, kW, in]: out dominates and kernels are square.
+    assert!(conv2d_weight_is_channel_last(&[128, 3, 3, 1]));
+    assert!(conv2d_weight_is_channel_last(&[32, 3, 3, 128]));
+    // PyTorch [out, in, kH, kW]: in breaks dim1 == dim2 (or out >= dim1).
+    assert!(!conv2d_weight_is_channel_last(&[128, 1, 3, 3]));
+    assert!(!conv2d_weight_is_channel_last(&[32, 128, 3, 3]));
+    // Non-4D shapes are never treated as conv2d channel-last.
+    assert!(!conv2d_weight_is_channel_last(&[128, 3, 3]));
+    assert!(!conv2d_weight_is_channel_last(&[4, 4]));
+}
+
+#[test]
+fn conv1d_weight_is_channel_last_detects_depthwise_mlx_layout() {
+    // MLX depthwise [out, kW, in=1]: trailing in dim is 1.
+    assert!(conv1d_weight_is_channel_last(&[1024, 5, 1]));
+    // PyTorch depthwise [out, in=1, kW]: middle in dim is 1, kW > 1.
+    assert!(!conv1d_weight_is_channel_last(&[1024, 1, 5]));
+    // A regular conv1d [out, in, kW] with in, kW > 1 is treated as PyTorch.
+    assert!(!conv1d_weight_is_channel_last(&[4, 8, 3]));
+    // Non-3D shapes are never treated as depthwise conv1d channel-last.
+    assert!(!conv1d_weight_is_channel_last(&[1024, 5, 1, 1]));
+    assert!(!conv1d_weight_is_channel_last(&[4, 4]));
 }

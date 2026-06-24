@@ -733,7 +733,14 @@ fn flatten_phi4mm_patch_embedding(
         return mlxcel_core::copy(weight);
     }
 
-    let transposed = mlxcel_core::transpose_axes(weight, &[0, 2, 3, 1]);
+    // Transpose only genuine PyTorch-layout weights; channel-last checkpoints
+    // are already `[out, kH, kW, in]` and must skip it (issue #428). The
+    // reshape/flatten below runs unconditionally either way.
+    let transposed = if crate::loading::conv2d_weight_is_channel_last(&shape) {
+        mlxcel_core::copy(weight)
+    } else {
+        mlxcel_core::transpose_axes(weight, &[0, 2, 3, 1])
+    };
     mlxcel_core::reshape(&transposed, &[shape[0], shape[1] * shape[2] * shape[3]])
 }
 
@@ -1177,13 +1184,11 @@ pub(super) fn rewrite_phi3_weight_key(key: &str) -> Option<String> {
 }
 
 pub(super) fn should_transpose_phi3_patch_embedding(shape: &[i32]) -> bool {
-    if shape.len() != 4 {
-        return false;
-    }
-    let out_ch = shape[0];
-    let dim1 = shape[1];
-    let dim2 = shape[2];
-    !(out_ch >= dim1 && out_ch >= dim2 && dim1 == dim2)
+    // A 4D weight that is not already MLX channel-last is PyTorch layout and
+    // must be transposed. Delegates to the shared layout guard (issue #428);
+    // for a non-4D shape `conv2d_weight_is_channel_last` is `false`, so this
+    // returns `false` (no transpose), preserving the original behavior.
+    shape.len() == 4 && !crate::loading::conv2d_weight_is_channel_last(shape)
 }
 
 fn remap_phi3_weights(raw_weights: WeightMap) -> WeightMap {
