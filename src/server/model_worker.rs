@@ -1071,18 +1071,30 @@ pub(crate) fn prepare_request_vlm_embeddings(
 /// tokenizer (non-Gemma tokenizers), in which case the caller keeps the legacy
 /// "before the final token" insertion.
 fn resolve_end_of_turn_token_id(tokenizer: &MlxcelTokenizer) -> Option<i32> {
-    if let Some(hf) = tokenizer.hf_tokenizer()
-        && let Some(id) = hf.token_to_id("<end_of_turn>")
-    {
-        return Some(id as i32);
+    // The end-of-turn marker differs across Gemma generations: Gemma 2/3 use
+    // "<end_of_turn>", while Gemma 4 renamed it to "<turn|>" (id 106, and
+    // "<|turn>" for start-of-turn). Try both so the audio block lands inside
+    // the last user turn on every Gemma checkpoint; "<end_of_turn>" is tried
+    // first because that is the value carried by the non-Gemma-4 templates.
+    const EOT_CANDIDATES: &[&str] = &["<end_of_turn>", "<turn|>"];
+    if let Some(hf) = tokenizer.hf_tokenizer() {
+        for candidate in EOT_CANDIDATES {
+            if let Some(id) = hf.token_to_id(candidate) {
+                return Some(id as i32);
+            }
+        }
     }
     // SentencePiece / Tiktoken fallback: accept only when the literal marker
     // encodes to exactly one token, so a tokenizer that splits it into pieces
     // does not yield a bogus mid-vocabulary id.
-    match tokenizer.encode("<end_of_turn>", false) {
-        Ok(ids) if ids.len() == 1 => Some(ids[0] as i32),
-        _ => None,
+    for candidate in EOT_CANDIDATES {
+        if let Ok(ids) = tokenizer.encode(candidate, false)
+            && ids.len() == 1
+        {
+            return Some(ids[0] as i32);
+        }
     }
+    None
 }
 
 /// Process audio (and optionally images) for Gemma4 VLM models.
