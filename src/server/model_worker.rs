@@ -957,12 +957,28 @@ pub(crate) fn prepare_request_vlm_embeddings(
 
     // Audio-only or audio+images for Gemma4 / Gemma4 Unified
     if !audio.is_empty() {
-        if let Some(embeddings) =
-            prepare_gemma4_unified_audio_embeddings(model, prompt_tokens, images, audio)?
-        {
+        // The server renders chat messages text-only, so the prompt carries no
+        // `<|audio|>` marker (issue #437). Resolve the Gemma `<end_of_turn>`
+        // id so the per-family audio expansion can place the audio block inside
+        // the last user turn instead of the model turn (which forces an
+        // immediate EOS / 0-token output).
+        let end_of_turn_token_id = resolve_end_of_turn_token_id(tokenizer);
+        if let Some(embeddings) = prepare_gemma4_unified_audio_embeddings(
+            model,
+            prompt_tokens,
+            images,
+            audio,
+            end_of_turn_token_id,
+        )? {
             return Ok(Some(embeddings));
         }
-        match prepare_gemma4_audio_embeddings(model, prompt_tokens, images, audio)? {
+        match prepare_gemma4_audio_embeddings(
+            model,
+            prompt_tokens,
+            images,
+            audio,
+            end_of_turn_token_id,
+        )? {
             Some(embeddings) => return Ok(Some(embeddings)),
             None => {
                 // Model does not support audio (not Gemma4 or no audio tower).
@@ -1045,6 +1061,30 @@ pub(crate) fn prepare_request_vlm_embeddings(
     Ok(None)
 }
 
+/// Resolve the Gemma `<end_of_turn>` token id from the tokenizer.
+///
+/// The server flattens chat messages to text-only, so an `input_audio` request
+/// produces a prompt with no `<|audio|>` marker. Knowing the `<end_of_turn>`
+/// id lets [`crate::vlm_runtime::expand_gemma4_audio_tokens_for_server`] place
+/// the audio block inside the last user turn instead of the model turn (issue
+/// #437). Returns `None` when the marker is not a single token in this
+/// tokenizer (non-Gemma tokenizers), in which case the caller keeps the legacy
+/// "before the final token" insertion.
+fn resolve_end_of_turn_token_id(tokenizer: &MlxcelTokenizer) -> Option<i32> {
+    if let Some(hf) = tokenizer.hf_tokenizer()
+        && let Some(id) = hf.token_to_id("<end_of_turn>")
+    {
+        return Some(id as i32);
+    }
+    // SentencePiece / Tiktoken fallback: accept only when the literal marker
+    // encodes to exactly one token, so a tokenizer that splits it into pieces
+    // does not yield a bogus mid-vocabulary id.
+    match tokenizer.encode("<end_of_turn>", false) {
+        Ok(ids) if ids.len() == 1 => Some(ids[0] as i32),
+        _ => None,
+    }
+}
+
 /// Process audio (and optionally images) for Gemma4 VLM models.
 ///
 /// Returns `Ok(None)` if the model is not a Gemma4 VLM with audio support.
@@ -1053,6 +1093,7 @@ fn prepare_gemma4_audio_embeddings(
     prompt_tokens: &mut Vec<i32>,
     images: &[Vec<u8>],
     audio_data: &[Vec<u8>],
+    end_of_turn_token_id: Option<i32>,
 ) -> Result<Option<InputEmbeddings>> {
     use crate::audio;
 
@@ -1087,13 +1128,15 @@ fn prepare_gemma4_audio_embeddings(
 
     let num_audio_tokens = audio::compute_audio_num_tokens(samples.len(), sample_rate, 40, 750);
 
-    // Expand audio tokens: BOA + AUDIO*N + EOA
+    // Expand audio tokens: BOA + AUDIO*N + EOA, placed inside the last user
+    // turn (issue #437).
     crate::vlm_runtime::expand_gemma4_audio_tokens_for_server(
         prompt_tokens,
         gemma4_vl.audio_token_id,
         gemma4_vl.boa_token_id,
         gemma4_vl.eoa_token_id,
         num_audio_tokens,
+        end_of_turn_token_id,
     );
 
     // `AudioFeatureExtractor::extract` assumes a 16 kHz waveform (160-sample
@@ -1163,6 +1206,7 @@ fn prepare_gemma4_unified_audio_embeddings(
     prompt_tokens: &mut Vec<i32>,
     images: &[Vec<u8>],
     audio_data: &[Vec<u8>],
+    end_of_turn_token_id: Option<i32>,
 ) -> Result<Option<InputEmbeddings>> {
     use crate::audio;
 
@@ -1201,6 +1245,7 @@ fn prepare_gemma4_unified_audio_embeddings(
         unified.boa_token_id,
         unified.eoa_token_id,
         num_audio_tokens,
+        end_of_turn_token_id,
     );
 
     // Process images alongside audio (encoder-free patch projector).

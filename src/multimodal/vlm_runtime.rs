@@ -1089,40 +1089,77 @@ pub fn expand_gemma4_unified_video_tokens(
     Ok(())
 }
 
-/// Expand audio token placeholder in prompt tokens for server requests.
+/// Expand the Gemma 4 audio placeholder in server prompt tokens into a full
+/// `boa + audio_token*N + eoa` block.
 ///
-/// Replaces the first `audio_token_id` with `boa + audio_token*N + eoa`.
-/// If no audio placeholder is found, inserts before the last token.
+/// Placement order, most specific first:
+///
+/// 1. **In place.** If a rendered `<|audio|>` (`audio_token_id`) placeholder is
+///    already present (e.g. a future template path emits one into the user
+///    turn), wrap the first occurrence as `boa + audio_token*N + eoa`. This is
+///    the same in-place expansion the CLI relies on after its chat template
+///    renders the marker.
+/// 2. **End of the last user turn.** The server renders chat messages
+///    text-only (`MessageContent::text()` drops `input_audio` content parts),
+///    so no `<|audio|>` marker reaches the prompt. When `end_of_turn_token_id`
+///    is supplied, insert the audio block immediately before the *last*
+///    `<end_of_turn>` token. In a Gemma generation prompt
+///    (`<start_of_turn>user\n…<end_of_turn>\n<start_of_turn>model\n`) the final
+///    `<end_of_turn>` closes the latest user turn (the pending model turn has
+///    no closing marker yet), so the block lands inside the user turn. This is
+///    the fix for issue #437: the previous "before the last token" fallback put
+///    the audio inside the model turn, which forced an immediate EOS (0-token
+///    output).
+/// 3. **Before the final token.** Last-resort fallback for prompts with no
+///    `<end_of_turn>` marker (e.g. `--no-chat-template`). Preserves the
+///    historical behavior so a non-Gemma-shaped prompt still gets an audio
+///    block rather than none.
 pub fn expand_gemma4_audio_tokens_for_server(
     prompt_tokens: &mut Vec<i32>,
     audio_token_id: i32,
     boa_token_id: i32,
     eoa_token_id: i32,
     num_audio_tokens: usize,
+    end_of_turn_token_id: Option<i32>,
 ) {
-    let mut expanded = Vec::with_capacity(prompt_tokens.len() + num_audio_tokens + 2);
-    let mut found = false;
-    for &token in prompt_tokens.iter() {
-        if token == audio_token_id && !found {
-            found = true;
-            expanded.push(boa_token_id);
-            expanded.extend(std::iter::repeat_n(audio_token_id, num_audio_tokens));
-            expanded.push(eoa_token_id);
-        } else {
-            expanded.push(token);
+    let build_block = || {
+        let mut block = Vec::with_capacity(num_audio_tokens + 2);
+        block.push(boa_token_id);
+        block.extend(std::iter::repeat_n(audio_token_id, num_audio_tokens));
+        block.push(eoa_token_id);
+        block
+    };
+
+    // 1. Wrap a rendered `<|audio|>` placeholder in place.
+    if prompt_tokens.contains(&audio_token_id) {
+        let mut expanded = Vec::with_capacity(prompt_tokens.len() + num_audio_tokens + 2);
+        let mut found = false;
+        for &token in prompt_tokens.iter() {
+            if token == audio_token_id && !found {
+                found = true;
+                expanded.extend(build_block());
+            } else {
+                expanded.push(token);
+            }
         }
+        *prompt_tokens = expanded;
+        return;
     }
-    // If no placeholder found, insert before last token
-    if !found {
-        let last = expanded.pop();
-        expanded.push(boa_token_id);
-        expanded.extend(std::iter::repeat_n(audio_token_id, num_audio_tokens));
-        expanded.push(eoa_token_id);
-        if let Some(tok) = last {
-            expanded.push(tok);
-        }
+
+    // 2. Insert inside the last user turn (before its closing `<end_of_turn>`).
+    if let Some(eot) = end_of_turn_token_id
+        && let Some(pos) = prompt_tokens.iter().rposition(|&token| token == eot)
+    {
+        prompt_tokens.splice(pos..pos, build_block());
+        return;
     }
-    *prompt_tokens = expanded;
+
+    // 3. Last resort: insert before the final token.
+    let last = prompt_tokens.pop();
+    prompt_tokens.extend(build_block());
+    if let Some(tok) = last {
+        prompt_tokens.push(tok);
+    }
 }
 
 #[cfg(test)]

@@ -13,7 +13,8 @@
 // limitations under the License.
 
 use super::{
-    VlmPreparationSummary, expand_gemma4_unified_video_tokens, expand_gemma4_video_tokens,
+    VlmPreparationSummary, expand_gemma4_audio_tokens_for_server,
+    expand_gemma4_unified_video_tokens, expand_gemma4_video_tokens,
     format_molmo_v1_prompt_for_processor, prepared_embedding_refs,
     shift_molmo_v1_image_input_idx_for_bos, should_prepare_vlm_embeddings,
 };
@@ -220,4 +221,84 @@ fn expand_gemma4_unified_video_tokens_no_op_when_videos_empty() {
     let original = prompt.clone();
     expand_gemma4_unified_video_tokens(&mut prompt, 100, 201, 202, &[]).unwrap();
     assert_eq!(prompt, original);
+}
+
+// Audio token ids used across the audio-placement tests below.
+const AUDIO: i32 = 50; // audio_token_id
+const BOA: i32 = 51; // boa_token_id
+const EOA: i32 = 52; // eoa_token_id
+const EOT: i32 = 106; // <end_of_turn>
+const SOT: i32 = 105; // <start_of_turn>
+
+#[test]
+fn server_audio_wraps_rendered_placeholder_in_place() {
+    // A rendered `<|audio|>` (AUDIO) already sits in the user turn: wrap the
+    // first occurrence as BOA + AUDIO*N + EOA in place, leaving the turn
+    // structure intact.
+    // [BOS, <sot>, user_text, AUDIO, <eot>, <sot>, model]
+    let mut prompt = vec![2, SOT, 7, AUDIO, EOT, SOT, 8];
+    expand_gemma4_audio_tokens_for_server(&mut prompt, AUDIO, BOA, EOA, 3, Some(EOT));
+    assert_eq!(
+        prompt,
+        vec![2, SOT, 7, BOA, AUDIO, AUDIO, AUDIO, EOA, EOT, SOT, 8]
+    );
+}
+
+#[test]
+fn server_audio_inserts_inside_last_user_turn() {
+    // Text-only server render: no AUDIO placeholder. The block must land
+    // before the user turn's closing `<end_of_turn>` so it stays in the user
+    // turn, not the model turn (issue #437).
+    // [BOS, <sot>, user, text, <eot>, <sot>, model]
+    let mut prompt = vec![2, SOT, 11, 7, EOT, SOT, 8];
+    expand_gemma4_audio_tokens_for_server(&mut prompt, AUDIO, BOA, EOA, 3, Some(EOT));
+    // Block spliced before the EOT at index 4, i.e. after the user text.
+    assert_eq!(
+        prompt,
+        vec![2, SOT, 11, 7, BOA, AUDIO, AUDIO, AUDIO, EOA, EOT, SOT, 8]
+    );
+    // The audio block precedes the (only) `<end_of_turn>`, never the trailing
+    // `<start_of_turn>model` generation prompt.
+    let eot_pos = prompt.iter().position(|&t| t == EOT).unwrap();
+    let eoa_pos = prompt.iter().position(|&t| t == EOA).unwrap();
+    assert!(eoa_pos < eot_pos);
+}
+
+#[test]
+fn server_audio_targets_the_last_user_turn_in_multi_turn() {
+    // Multi-turn prompt: user / model / user, then the generation prompt. The
+    // block must go before the LAST `<end_of_turn>` (closing the latest user
+    // turn), not an earlier one.
+    // idx: 0   1    2   3    4    5   6    7    8   9    10   11
+    //     [BOS,<sot>,u1, EOT,<sot>,m1, EOT,<sot>,u2, EOT,<sot>,model]
+    let mut prompt = vec![2, SOT, 21, EOT, SOT, 31, EOT, SOT, 22, EOT, SOT, 8];
+    expand_gemma4_audio_tokens_for_server(&mut prompt, AUDIO, BOA, EOA, 2, Some(EOT));
+    assert_eq!(
+        prompt,
+        vec![
+            2, SOT, 21, EOT, SOT, 31, EOT, SOT, 22, BOA, AUDIO, AUDIO, EOA, EOT, SOT, 8
+        ]
+    );
+    // The first two `<end_of_turn>` markers stay adjacent to their turn text;
+    // only the final user turn gains the audio block.
+    assert_eq!(prompt[3], EOT);
+    assert_eq!(prompt[6], EOT);
+}
+
+#[test]
+fn server_audio_falls_back_before_last_token_without_end_of_turn() {
+    // No placeholder and no `<end_of_turn>` id (e.g. --no-chat-template): keep
+    // the historical "before the final token" insertion as a last resort.
+    let mut prompt = vec![2, 11, 8];
+    expand_gemma4_audio_tokens_for_server(&mut prompt, AUDIO, BOA, EOA, 2, None);
+    assert_eq!(prompt, vec![2, 11, BOA, AUDIO, AUDIO, EOA, 8]);
+}
+
+#[test]
+fn server_audio_falls_back_when_end_of_turn_absent_from_prompt() {
+    // `<end_of_turn>` id is known but the prompt does not contain it: the
+    // last-resort fallback still fires rather than dropping the audio block.
+    let mut prompt = vec![2, 11, 8];
+    expand_gemma4_audio_tokens_for_server(&mut prompt, AUDIO, BOA, EOA, 2, Some(EOT));
+    assert_eq!(prompt, vec![2, 11, BOA, AUDIO, AUDIO, EOA, 8]);
 }
