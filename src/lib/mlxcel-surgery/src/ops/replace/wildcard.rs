@@ -203,9 +203,10 @@ mod tests {
             Some(vec![])
         );
         assert!(p.match_with_captures("model.embed_tokens.bias").is_none());
-        assert!(p
-            .match_with_captures("xxmodel.embed_tokens.weight")
-            .is_none());
+        assert!(
+            p.match_with_captures("xxmodel.embed_tokens.weight")
+                .is_none()
+        );
         assert_eq!(p.original(), "model.embed_tokens.weight");
     }
 

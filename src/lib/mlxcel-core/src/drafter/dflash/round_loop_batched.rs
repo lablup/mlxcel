@@ -979,13 +979,13 @@ mod tests {
 
         let drafter = SyntheticBatchedDrafter::new(propose_fn);
         let lm = EmbedOnlyLm;
-        let mut gen =
+        let mut r#gen =
             DFlashBatchedGenerator::with_drafter(Box::new(drafter), SamplingConfig::greedy());
-        gen.block_size = block_size;
+        r#gen.block_size = block_size;
 
         let first_hidden = ffi::zeros(&[batch_size as i32, 1, 5 * 8], crate::dtype::FLOAT32);
 
-        let out = gen
+        let out = r#gen
             .run_batched(
                 &target,
                 &lm,

@@ -63,7 +63,7 @@ mod tests {
     };
     use crate::generate::{LanguageModel, SamplingConfig};
     use crate::layers::KVCache;
-    use crate::{dtype, ones, MlxArray, UniquePtr};
+    use crate::{MlxArray, UniquePtr, dtype, ones};
 
     struct DummyModel {
         layers: usize,

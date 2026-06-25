@@ -46,7 +46,7 @@ use crate::generate::{GenerationStats, LanguageModel, SamplingConfig};
 use crate::generation_policy::{initial_token_history, merged_eos_token_ids};
 use crate::hardware;
 use crate::layers::KVCache;
-use crate::sampling::{sample_token_optimized, TokenBiasMap};
+use crate::sampling::{TokenBiasMap, sample_token_optimized};
 use crate::streams::{install_thread_local_default_stream, new_thread_local_generation_stream};
 use crate::utils::{align_to_na_tile, create_padded_prefill_mask};
 use cxx::UniquePtr;

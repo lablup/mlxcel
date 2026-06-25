@@ -39,9 +39,9 @@
 //! deployments where construction and execution can happen on
 //! different threads.
 
+use crate::UniquePtr;
 use crate::ffi;
 use crate::ffi::{MlxStream, MlxThreadLocalStream};
-use crate::UniquePtr;
 
 /// Create a thread-local generation stream bound to the GPU device.
 ///

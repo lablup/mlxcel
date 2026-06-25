@@ -38,7 +38,7 @@
 use crate::drafter::gemma4_assistant::config::{DrafterTextConfig, Gemma4AssistantConfig};
 use crate::drafter::gemma4_assistant::layer::{DraftDecoderLayer, RopeOffset};
 use crate::drafter::masked_embedder::MaskedEmbedder;
-use crate::drafter::masks::{make_drafter_masks_with_valid_len, BatchScalar, LayerType};
+use crate::drafter::masks::{BatchScalar, LayerType, make_drafter_masks_with_valid_len};
 use crate::drafter::{Drafter, DrafterError, DrafterKind, SharedKv};
 use crate::ffi::{self, MlxArray};
 use crate::generate::{LanguageModel, SamplingConfig};

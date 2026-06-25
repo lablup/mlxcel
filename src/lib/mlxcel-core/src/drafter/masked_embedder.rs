@@ -376,11 +376,11 @@ impl MaskedEmbedder {
 /// lives — `"masked_embedding"` for the Gemma 4 assistant drafter.
 pub fn sanitize_token_ordering(weights: &mut WeightMap, prefix: &str) {
     let key = format!("{prefix}.token_ordering");
-    if let Some(arr) = weights.get(&key) {
-        if ffi::array_dtype(arr) != crate::dtype::INT32 {
-            let cast = ffi::astype(arr, crate::dtype::INT32);
-            weights.insert(key, cast);
-        }
+    if let Some(arr) = weights.get(&key)
+        && ffi::array_dtype(arr) != crate::dtype::INT32
+    {
+        let cast = ffi::astype(arr, crate::dtype::INT32);
+        weights.insert(key, cast);
     }
 }
 

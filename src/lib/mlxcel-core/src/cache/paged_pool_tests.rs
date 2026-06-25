@@ -34,8 +34,8 @@
 //! - `write_prefill` copy-on-write forks a shared partial tail block so two
 //!   sequences' suffixes never corrupt each other or the shared prefix.
 
-use super::paged::{PagedBlockId, PagedBlockPool, PagedKvLayout, PagedSequenceState};
 use super::KVCacheMode;
+use super::paged::{PagedBlockId, PagedBlockPool, PagedKvLayout, PagedSequenceState};
 
 use crate::dtype;
 use crate::ffi;

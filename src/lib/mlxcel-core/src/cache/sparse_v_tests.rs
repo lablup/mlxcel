@@ -21,7 +21,7 @@
 
 use cxx::UniquePtr;
 
-use super::turbo::{self, sparse_v, TurboQuantParams};
+use super::turbo::{self, TurboQuantParams, sparse_v};
 use crate::dtype;
 use crate::ffi;
 use crate::ffi::MlxArray;

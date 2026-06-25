@@ -626,28 +626,28 @@ impl BatchQuantizedKVCache {
         // here (see `BatchQuantizedKVCache.filter`, commit 2a55b80). We must
         // mirror that so `make_mask` continues to compute the correct
         // `total_len = n + idx` after a trim.
-        if let Some(&min_lp) = self.left_padding.iter().min() {
-            if min_lp > 0 {
-                for lp in &mut self.left_padding {
-                    *lp -= min_lp;
-                }
-                // Precondition: callers invoke `update_after_decode` (which
-                // advances `idx`) before `filter` whenever `left_padding` is
-                // nonzero, so `idx >= min_lp` holds here and `idx` stays
-                // non-negative. Mirrors upstream `self._idx -= min_lp`; a
-                // negative `idx` would make `make_mask` build a degenerate
-                // `total_len = n + idx`. The scheduler upholds this once these
-                // caches move onto the live decode path.
-                self.idx -= min_lp;
-                // The actual K/V tensor trim (slicing leading
-                // `min_lp` tokens out of each layer cache) is the
-                // scheduler's responsibility because it requires
-                // `cxx::UniquePtr<MlxArray>` operations on the live
-                // device-resident tensors. The metadata side is
-                // sufficient for the unit-test scenario, where we
-                // verify that the wrapper's bookkeeping matches the
-                // upstream Python invariant.
+        if let Some(&min_lp) = self.left_padding.iter().min()
+            && min_lp > 0
+        {
+            for lp in &mut self.left_padding {
+                *lp -= min_lp;
             }
+            // Precondition: callers invoke `update_after_decode` (which
+            // advances `idx`) before `filter` whenever `left_padding` is
+            // nonzero, so `idx >= min_lp` holds here and `idx` stays
+            // non-negative. Mirrors upstream `self._idx -= min_lp`; a
+            // negative `idx` would make `make_mask` build a degenerate
+            // `total_len = n + idx`. The scheduler upholds this once these
+            // caches move onto the live decode path.
+            self.idx -= min_lp;
+            // The actual K/V tensor trim (slicing leading
+            // `min_lp` tokens out of each layer cache) is the
+            // scheduler's responsibility because it requires
+            // `cxx::UniquePtr<MlxArray>` operations on the live
+            // device-resident tensors. The metadata side is
+            // sufficient for the unit-test scenario, where we
+            // verify that the wrapper's bookkeeping matches the
+            // upstream Python invariant.
         }
         Ok(())
     }
@@ -877,20 +877,20 @@ impl BatchTurboQuantKVCache {
         // Mirrors upstream Python `BatchQuantizedKVCache.filter`: also
         // decrement `_idx` by `min_lp` when padding is trimmed, so that
         // `make_mask` keeps computing the correct `total_len = n + idx`.
-        if let Some(&min_lp) = self.left_padding.iter().min() {
-            if min_lp > 0 {
-                for lp in &mut self.left_padding {
-                    *lp -= min_lp;
-                }
-                // Precondition: callers invoke `update_after_decode` (which
-                // advances `idx`) before `filter` whenever `left_padding` is
-                // nonzero, so `idx >= min_lp` holds here and `idx` stays
-                // non-negative. Mirrors upstream `self._idx -= min_lp`; a
-                // negative `idx` would make `make_mask` build a degenerate
-                // `total_len = n + idx`. The scheduler upholds this once these
-                // caches move onto the live decode path.
-                self.idx -= min_lp;
+        if let Some(&min_lp) = self.left_padding.iter().min()
+            && min_lp > 0
+        {
+            for lp in &mut self.left_padding {
+                *lp -= min_lp;
             }
+            // Precondition: callers invoke `update_after_decode` (which
+            // advances `idx`) before `filter` whenever `left_padding` is
+            // nonzero, so `idx >= min_lp` holds here and `idx` stays
+            // non-negative. Mirrors upstream `self._idx -= min_lp`; a
+            // negative `idx` would make `make_mask` build a degenerate
+            // `total_len = n + idx`. The scheduler upholds this once these
+            // caches move onto the live decode path.
+            self.idx -= min_lp;
         }
         Ok(())
     }

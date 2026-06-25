@@ -853,8 +853,8 @@ fn rotating_turbo4_clone_handle_clears_turbo_params_on_source() {
 mod boundary_v {
     use super::*;
     use crate::cache::turbo::boundary::{
-        is_boundary_layer, resolve_boundary_count, resolve_layer_mode, resolve_layer_modes,
-        DEFAULT_BOUNDARY_V_LAYERS,
+        DEFAULT_BOUNDARY_V_LAYERS, is_boundary_layer, resolve_boundary_count, resolve_layer_mode,
+        resolve_layer_modes,
     };
 
     /// The default count must be the LA-V7 boundary width (2) per the

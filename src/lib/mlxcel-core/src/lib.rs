@@ -2236,11 +2236,11 @@ mod ffi {
 
         /// Quantize weights — scales
         fn quantize_weights_scales(w: &MlxArray, group_size: i32, bits: i32)
-            -> UniquePtr<MlxArray>;
+        -> UniquePtr<MlxArray>;
 
         /// Quantize weights — biases
         fn quantize_weights_biases(w: &MlxArray, group_size: i32, bits: i32)
-            -> UniquePtr<MlxArray>;
+        -> UniquePtr<MlxArray>;
 
         // -------------------------------------------------------------------
         // Fused Sparse-V SDPA Metal kernel.
@@ -2413,7 +2413,7 @@ mod ffi {
         /// outputs struct. After this call the struct's `out_cold_pre` slot
         /// is empty; calling again returns a null UniquePtr.
         fn steel_outputs_take_cold(o: Pin<&mut Turbo4DelegatedSteelOutputs>)
-            -> UniquePtr<MlxArray>;
+        -> UniquePtr<MlxArray>;
 
         /// Take (move out) the hot weighted sum from a steel SDPA outputs
         /// struct. After this call the struct's `out_hot` slot is empty.
@@ -2449,7 +2449,7 @@ pub use ops::{concatenate, divide_scalar, multiply_scalar, stack, stack_owned, w
 pub use sampling::TokenBiasMap;
 // Re-export N-gram loop-detection so the server control plane and CLI decode
 // loops can configure and run early-stop on degenerate token-repetition.
-pub use loop_detection::{detect_repetition_loop, LoopDetectionConfig};
+pub use loop_detection::{LoopDetectionConfig, detect_repetition_loop};
 // Re-export B9 observability counter accessors so the server `/metrics` handler
 // can read process-wide lang-bias counters without a struct dependency.
 // Includes the byte-fragment suppression counter added.
@@ -2495,7 +2495,13 @@ pub fn ensure_persistent_ptx_cache() {
     let scope = &commit[..commit.len().min(12)];
     let dir = root.join("cuda-ptx").join(scope);
     if std::fs::create_dir_all(&dir).is_ok() {
-        std::env::set_var("MLX_PTX_CACHE_DIR", &dir);
+        // SAFETY: set_var mutates the process-global environment and is unsound
+        // only under a concurrent getenv/setenv on another thread. Per this
+        // function's documented contract, all in-tree callers invoke it once at
+        // startup right after CLI parsing (src/main.rs, src/bin/mlx_server.rs),
+        // before the first CUDA NVRTC JIT compile, any model load, or any worker
+        // thread touches the environment, so no other thread is accessing it here.
+        unsafe { std::env::set_var("MLX_PTX_CACHE_DIR", &dir) };
     }
 }
 

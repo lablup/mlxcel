@@ -151,10 +151,10 @@ pub fn is_m5_neural_accelerator() -> bool {
 /// environment always wins (see [`apply_metal_ops_per_buffer_default`]).
 #[must_use]
 pub fn metal_ops_per_buffer_default(
-    gen: AppleSiliconGen,
+    r#gen: AppleSiliconGen,
     has_neural_accelerator: bool,
 ) -> Option<u32> {
-    if gen != AppleSiliconGen::Unknown && !has_neural_accelerator {
+    if r#gen != AppleSiliconGen::Unknown && !has_neural_accelerator {
         Some(1000)
     } else {
         None
@@ -175,10 +175,14 @@ pub fn apply_metal_ops_per_buffer_default() {
     }
     let hw = get_hardware();
     if let Some(value) = metal_ops_per_buffer_default(hw.silicon_gen, hw.has_neural_accelerator) {
-        // Safe: mlxcel-core is edition 2021 (set_var is not `unsafe` here), and
-        // the documented contract requires callers to invoke this early in
-        // `main()`, before other threads or MLX touch the environment.
-        std::env::set_var("MLX_MAX_OPS_PER_BUFFER", value.to_string());
+        // SAFETY: set_var mutates the process-global environment and is unsound
+        // only if another thread reads or writes the environment concurrently.
+        // Per this function's documented contract, all in-tree callers invoke it
+        // once at the top of `main` right after CLI parsing (src/main.rs,
+        // src/bin/mlx_server.rs, src/bin/bench_decode.rs), before any model load,
+        // MLX op, or worker thread touches the environment, so no other thread is
+        // accessing it here.
+        unsafe { std::env::set_var("MLX_MAX_OPS_PER_BUFFER", value.to_string()) };
     }
 }
 
@@ -206,7 +210,7 @@ mod platform {
     use std::os::raw::{c_char, c_int, c_void};
 
     // sysctlbyname(3) is in <sys/sysctl.h> — link against libSystem automatically.
-    extern "C" {
+    unsafe extern "C" {
         fn sysctlbyname(
             name: *const c_char,
             oldp: *mut c_void,
@@ -396,8 +400,8 @@ fn parse_macos_version(version: &str) -> (u32, u32) {
 /// memory configuration.  Values are midpoints from Apple's published specs
 /// for the base chip variant at the given memory size.
 #[cfg(target_os = "macos")]
-fn estimate_bandwidth(gen: AppleSiliconGen, memory_gb: u32) -> f64 {
-    match gen {
+fn estimate_bandwidth(r#gen: AppleSiliconGen, memory_gb: u32) -> f64 {
+    match r#gen {
         AppleSiliconGen::M1 => {
             if memory_gb > 16 {
                 400.0 // M1 Max / Ultra
@@ -434,11 +438,7 @@ fn estimate_bandwidth(gen: AppleSiliconGen, memory_gb: u32) -> f64 {
         }
         AppleSiliconGen::M5 => {
             // Estimated; update once Apple publishes official specs.
-            if memory_gb > 64 {
-                1000.0
-            } else {
-                150.0
-            }
+            if memory_gb > 64 { 1000.0 } else { 150.0 }
         }
         AppleSiliconGen::Unknown => 0.0,
     }

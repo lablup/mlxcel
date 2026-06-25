@@ -809,10 +809,10 @@ impl SamplerState {
 
     /// Absorb a single newly appended token into the tracked structures.
     fn absorb_one(&mut self, token: i32) {
-        if self.track_seen {
-            if let Err(pos) = self.seen_sorted.binary_search(&token) {
-                self.seen_sorted.insert(pos, token);
-            }
+        if self.track_seen
+            && let Err(pos) = self.seen_sorted.binary_search(&token)
+        {
+            self.seen_sorted.insert(pos, token);
         }
         if self.track_counts {
             *self.counts.entry(token).or_insert(0) += 1;

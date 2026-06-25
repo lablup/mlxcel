@@ -78,7 +78,7 @@ pub use layer::DFlashDecoderLayer;
 pub use mlp::DFlashMlp;
 pub use model::DFlashDraftModel;
 pub use round_loop::{
-    DFlashGenerator, DFlashRunOutput, SpeculativeTarget, DEFAULT_BLOCK_SIZE, DEFAULT_MASK_TOKEN_ID,
+    DEFAULT_BLOCK_SIZE, DEFAULT_MASK_TOKEN_ID, DFlashGenerator, DFlashRunOutput, SpeculativeTarget,
 };
 pub use round_loop_batched::{DFlashBatchedGenerator, DFlashBatchedRunOutput};
 

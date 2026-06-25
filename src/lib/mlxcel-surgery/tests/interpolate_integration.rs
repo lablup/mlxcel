@@ -30,8 +30,8 @@ use std::io::Write;
 use std::path::Path;
 
 use mlxcel_surgery::{
-    parse_config_file, InterpolateMethod, InterpolateOp, SurgeryError, SurgeryPipeline, WeightMap,
-    WeightTransform,
+    InterpolateMethod, InterpolateOp, SurgeryError, SurgeryPipeline, WeightMap, WeightTransform,
+    parse_config_file,
 };
 
 /// Minimal safetensors writer producing a single-file checkpoint

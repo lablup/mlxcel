@@ -29,8 +29,8 @@
 //! Used by: Gemma4
 
 use crate::{
-    array_shape, compiled_proportional_rope, concatenate, copy, fast_rope_with_freqs,
-    from_slice_f32, slice, MlxArray, UniquePtr,
+    MlxArray, UniquePtr, array_shape, compiled_proportional_rope, concatenate, copy,
+    fast_rope_with_freqs, from_slice_f32, slice,
 };
 
 /// Compute the frequency table for proportional RoPE.

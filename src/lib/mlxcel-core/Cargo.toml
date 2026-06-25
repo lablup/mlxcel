@@ -1,7 +1,7 @@
 [package]
 name = "mlxcel-core"
-version = "0.2.0"
-edition = "2021"
+version = "0.3.3"
+edition = "2024"
 description = "Low-level MLX building blocks for mlxcel"
 license = "Apache-2.0"
 

@@ -94,8 +94,8 @@ pub mod turbo;
 mod turbo_tests;
 
 pub use batch_quant::{
-    BatchKvQuantConfig, BatchQuantizedKVCache, BatchTurboQuantKVCache, KvQuantScheme,
-    DEFAULT_KV_GROUP_SIZE,
+    BatchKvQuantConfig, BatchQuantizedKVCache, BatchTurboQuantKVCache, DEFAULT_KV_GROUP_SIZE,
+    KvQuantScheme,
 };
 pub use detach::{DetachedCacheSet, DetachedHandle, DetachedKVCache, DetachedRotatingKVCache};
 pub use paged::{
@@ -784,11 +784,7 @@ impl KVCache {
         match buf {
             Some(k) => {
                 let shape = ffi::array_shape(k);
-                if shape.len() >= 3 {
-                    shape[2]
-                } else {
-                    0
-                }
+                if shape.len() >= 3 { shape[2] } else { 0 }
             }
             None => 0,
         }
@@ -1652,11 +1648,7 @@ impl KVCache {
         match self.keys.as_ref() {
             Some(k) => {
                 let s = ffi::array_shape(k);
-                if s.len() >= 3 {
-                    s[2]
-                } else {
-                    0
-                }
+                if s.len() >= 3 { s[2] } else { 0 }
             }
             None => 0,
         }
@@ -1668,11 +1660,7 @@ impl KVCache {
         match self.values.as_ref() {
             Some(v) => {
                 let s = ffi::array_shape(v);
-                if s.len() >= 3 {
-                    s[2]
-                } else {
-                    0
-                }
+                if s.len() >= 3 { s[2] } else { 0 }
             }
             None => 0,
         }
@@ -2006,11 +1994,7 @@ impl KVCache {
         let cold_cap = match &self.v_packed {
             Some(vp) => {
                 let s = ffi::array_shape(vp);
-                if s.len() >= 3 {
-                    s[2]
-                } else {
-                    0
-                }
+                if s.len() >= 3 { s[2] } else { 0 }
             }
             None => 0,
         };
@@ -3524,8 +3508,8 @@ impl KVCache {
         // WHT over every cold token on each graph fallback. It is the default
         // compressed path; set `MLXCEL_TURBO4_DELEGATED_DEQUANT_SDPA=0` to
         // compare against the custom steel/cold-only order below.
-        if turbo::sparse_v::turbo4_delegated_dequant_sdpa_enabled() {
-            if let Some(out) = turbo::sparse_v::attention_turbo4_delegated_dequant_sdpa(
+        if turbo::sparse_v::turbo4_delegated_dequant_sdpa_enabled()
+            && let Some(out) = turbo::sparse_v::attention_turbo4_delegated_dequant_sdpa(
                 q,
                 &k_slice,
                 v_packed_ref,
@@ -3536,9 +3520,9 @@ impl KVCache {
                 hot_offset,
                 scale,
                 mask,
-            ) {
-                return out;
-            }
+            )
+        {
+            return out;
         }
 
         // Prefer the steel-attention-envelope kernel when
@@ -3824,11 +3808,7 @@ impl RotatingKVCache {
         }
         if let Some(ref keys) = self.keys {
             let shape = ffi::array_shape(keys);
-            if shape.len() >= 3 {
-                shape[2]
-            } else {
-                0
-            }
+            if shape.len() >= 3 { shape[2] } else { 0 }
         } else {
             0
         }
@@ -4070,10 +4050,10 @@ impl RotatingKVCache {
         needed: i32,
         incoming: i32,
     ) {
-        if let Some(keys) = self.keys.as_ref() {
-            if needed <= ffi::array_shape(keys)[2] {
-                return;
-            }
+        if let Some(keys) = self.keys.as_ref()
+            && needed <= ffi::array_shape(keys)[2]
+        {
+            return;
         }
 
         let new_k_shape = ffi::array_shape(new_keys);

@@ -127,10 +127,10 @@ fn extract_shards_and_total_size(json: &str) -> Result<(Vec<String>, Option<u64>
     let mut seen = std::collections::HashSet::new();
     let mut shards = Vec::new();
     for value in weight_map.values() {
-        if let Some(s) = value.as_str() {
-            if seen.insert(s.to_string()) {
-                shards.push(s.to_string());
-            }
+        if let Some(s) = value.as_str()
+            && seen.insert(s.to_string())
+        {
+            shards.push(s.to_string());
         }
     }
 
@@ -246,14 +246,14 @@ pub fn weight_footprint_bytes<P: AsRef<Path>>(model_dir: P) -> Option<u64> {
     // 1. Try sharded index first, but only trust it if the loader would use the
     // same shard list. Repackaged mlx-community quants can ship stale upstream
     // indexes; using their metadata.total_size would over-reject preflight.
-    if let Ok(Some((shards, total_size))) = parse_shard_index_with_total_size(dir) {
-        if let Ok(paths) = validate_index_shards(dir, &shards) {
-            if let Some(total_size) = total_size {
-                return Some(total_size);
-            }
-            if let Some(total) = sum_safetensors_header_bytes(&paths) {
-                return Some(total);
-            }
+    if let Ok(Some((shards, total_size))) = parse_shard_index_with_total_size(dir)
+        && let Ok(paths) = validate_index_shards(dir, &shards)
+    {
+        if let Some(total_size) = total_size {
+            return Some(total_size);
+        }
+        if let Some(total) = sum_safetensors_header_bytes(&paths) {
+            return Some(total);
         }
     }
 
@@ -768,12 +768,16 @@ mod tests {
 
         let paths = collect_shard_paths(dir.path()).expect("should succeed");
         assert_eq!(paths.len(), 2);
-        assert!(paths
-            .iter()
-            .any(|p| p.file_name().unwrap() == "model-00001-of-00002.safetensors"));
-        assert!(paths
-            .iter()
-            .any(|p| p.file_name().unwrap() == "model-00002-of-00002.safetensors"));
+        assert!(
+            paths
+                .iter()
+                .any(|p| p.file_name().unwrap() == "model-00001-of-00002.safetensors")
+        );
+        assert!(
+            paths
+                .iter()
+                .any(|p| p.file_name().unwrap() == "model-00002-of-00002.safetensors")
+        );
     }
 
     #[test]

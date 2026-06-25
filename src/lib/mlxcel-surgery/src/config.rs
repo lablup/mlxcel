@@ -69,9 +69,9 @@ use std::sync::Arc;
 use globset::{Glob, GlobMatcher};
 use serde::Deserialize;
 
-use crate::ops::{InterpolateOp, ScaleOp};
 #[cfg(test)]
 use crate::WeightMap;
+use crate::ops::{InterpolateOp, ScaleOp};
 use crate::{SharedSurgeryOp, SurgeryError, SurgeryPipeline};
 
 /// The only schema version this parser understands. Bump when the

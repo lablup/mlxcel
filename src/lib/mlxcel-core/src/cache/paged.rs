@@ -1791,13 +1791,13 @@ impl PagedBlockPool {
 
         // No freed block to reuse — minting a new one grows the pool, so it is
         // subject to the global block budget (opt-in; `None` = unbounded).
-        if let Some(max) = self.block_budget {
-            if self.blocks.len() >= max {
-                return Err(format!(
-                    "PagedBlockPool: block budget exhausted ({} of {max} blocks allocated)",
-                    self.blocks.len()
-                ));
-            }
+        if let Some(max) = self.block_budget
+            && self.blocks.len() >= max
+        {
+            return Err(format!(
+                "PagedBlockPool: block budget exhausted ({} of {max} blocks allocated)",
+                self.blocks.len()
+            ));
         }
 
         let block_id = PagedBlockId(self.next_block_id);

@@ -25,9 +25,9 @@
 use std::path::Path;
 
 use mlxcel_core::dtype as mlx_dtype;
-use mlxcel_core::{array_to_raw_bytes, eval, from_bytes, MlxArray, UniquePtr};
-use safetensors::tensor::Dtype as SafeTensorDtype;
+use mlxcel_core::{MlxArray, UniquePtr, array_to_raw_bytes, eval, from_bytes};
 use safetensors::View;
+use safetensors::tensor::Dtype as SafeTensorDtype;
 
 /// A `safetensors::View` impl over owned bytes — copied from the
 /// pattern used in `src/distributed/pipeline/partial_loading_adapter_tests.rs`.

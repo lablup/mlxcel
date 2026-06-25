@@ -28,7 +28,7 @@ use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{array_dtype, astype};
 
 use super::add::AddOp;
-use super::add_test_helpers::{extract_f32, f32_tensor, mlx_f32, write_single_donor, OwnedTensor};
+use super::add_test_helpers::{OwnedTensor, extract_f32, f32_tensor, mlx_f32, write_single_donor};
 use crate::SurgeryOp;
 
 #[test]

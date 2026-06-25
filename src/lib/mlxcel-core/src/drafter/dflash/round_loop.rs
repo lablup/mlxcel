@@ -1460,9 +1460,9 @@ mod tests {
 
         let drafter = SyntheticDrafter::new(propose_fn);
         let lm = EmbedOnlyLm;
-        let mut gen = DFlashGenerator::with_drafter(Box::new(drafter), SamplingConfig::greedy());
+        let mut r#gen = DFlashGenerator::with_drafter(Box::new(drafter), SamplingConfig::greedy());
         // Round loop pulls block_size from the generator.
-        gen.block_size = block_size;
+        r#gen.block_size = block_size;
 
         // Build the initial hidden as a `[1, 1, concat_hidden_dim]` tensor.
         // The synthetic target's concat_hidden_for_drafter slices the
@@ -1471,7 +1471,7 @@ mod tests {
         // in the real pipeline).
         let first_hidden = ffi::zeros(&[1, 1, 5 * 8], crate::dtype::FLOAT32);
 
-        let out = gen
+        let out = r#gen
             .run(
                 &target,
                 &lm,
@@ -1510,7 +1510,7 @@ mod tests {
             SyntheticDrafter::new(|bonus, bs| (1..bs as i32).map(|s| bonus + s).collect())
                 .with_target_layer_ids(drafter_ids.clone());
         let lm = EmbedOnlyLm;
-        let mut gen = DFlashGenerator::new(
+        let mut r#gen = DFlashGenerator::new(
             Box::new(drafter),
             SamplingConfig::greedy(),
             4,
@@ -1518,7 +1518,7 @@ mod tests {
         );
         let first_hidden = ffi::zeros(&[1, 1, 5 * 8], crate::dtype::FLOAT32);
 
-        let _ = gen
+        let _ = r#gen
             .run(
                 &target,
                 &lm,
@@ -1752,7 +1752,7 @@ mod tests {
 
         let first_bonus = 100i32;
         let max_tokens = 33; // 1 first_bonus + 32 round-loop emissions
-                             // Build the reference greedy sequence.
+        // Build the reference greedy sequence.
         let mut reference: Vec<i32> = Vec::with_capacity(max_tokens);
         reference.push(first_bonus);
         for _ in 1..max_tokens {
@@ -1851,10 +1851,10 @@ mod tests {
         let mut caches: Vec<SyntheticCache> = (0..3).map(|_| SyntheticCache::default()).collect();
         let drafter = SyntheticDrafter::new(propose_fn);
         let lm = EmbedOnlyLm;
-        let mut gen = DFlashGenerator::with_drafter(Box::new(drafter), SamplingConfig::greedy());
-        gen.block_size = 8;
+        let mut r#gen = DFlashGenerator::with_drafter(Box::new(drafter), SamplingConfig::greedy());
+        r#gen.block_size = 8;
         let first_hidden = ffi::zeros(&[1, 1, 5 * 8], crate::dtype::FLOAT32);
-        let out = gen
+        let out = r#gen
             .run(
                 &target,
                 &lm,

@@ -397,22 +397,20 @@ impl TokenLanguageIndex {
             // which would cause the exception-config filter to reject the
             // fragment even with `include_byte_fragments = true`.
             let mut is_byte_fragment = false;
-            if !is_special && scripts.is_empty() {
-                if let Some(reverse) = &byte_reverse {
-                    if token_str.is_empty() || token_str.chars().any(|c| c == '\u{FFFD}') {
-                        if let Some(raw_byte) = reverse_byte_for_token(tokenizer, id, reverse) {
-                            if let Some(script) = classify_byte_start(raw_byte) {
-                                scripts.push(script);
-                                is_byte_fragment = true;
-                                // U+FFFD-driven punctuation/numeric flags are
-                                // an artifact of the decode path, not the
-                                // token's real nature.
-                                is_num = false;
-                                is_punct = false;
-                            }
-                        }
-                    }
-                }
+            if !is_special
+                && scripts.is_empty()
+                && let Some(reverse) = &byte_reverse
+                && (token_str.is_empty() || token_str.chars().any(|c| c == '\u{FFFD}'))
+                && let Some(raw_byte) = reverse_byte_for_token(tokenizer, id, reverse)
+                && let Some(script) = classify_byte_start(raw_byte)
+            {
+                scripts.push(script);
+                is_byte_fragment = true;
+                // U+FFFD-driven punctuation/numeric flags are
+                // an artifact of the decode path, not the
+                // token's real nature.
+                is_num = false;
+                is_punct = false;
             }
 
             // Populate the inverted index. Exception flags do NOT exclude from
@@ -1437,7 +1435,7 @@ mod tests {
             InclusionPolicy::Conservative,
             &ExceptionConfig::default(),
         );
-        let bias = map.iter().find(|(&id, _)| id == 10).map(|(_, &b)| b);
+        let bias = map.iter().find(|&(&id, _)| id == 10).map(|(_, &b)| b);
         assert_eq!(
             bias,
             Some(3.0_f32),
@@ -1469,28 +1467,28 @@ mod tests {
             &ExceptionConfig::default(),
         );
         // Hangul token (id=20) present with +5.0
-        let ko_bias = map.iter().find(|(&id, _)| id == 20).map(|(_, &b)| b);
+        let ko_bias = map.iter().find(|&(&id, _)| id == 20).map(|(_, &b)| b);
         assert_eq!(
             ko_bias,
             Some(5.0_f32),
             "Hangul token bias mismatch: {ko_bias:?}"
         );
         // Han token (id=21) also claimed by ko (Conservative includes Han) with +5.0
-        let han_bias = map.iter().find(|(&id, _)| id == 21).map(|(_, &b)| b);
+        let han_bias = map.iter().find(|&(&id, _)| id == 21).map(|(_, &b)| b);
         assert_eq!(
             han_bias,
             Some(5.0_f32),
             "Han token (ko Conservative) bias mismatch: {han_bias:?}"
         );
         // Latin token (id=22) claimed by en with -3.5
-        let en_bias = map.iter().find(|(&id, _)| id == 22).map(|(_, &b)| b);
+        let en_bias = map.iter().find(|&(&id, _)| id == 22).map(|(_, &b)| b);
         assert_eq!(
             en_bias,
             Some(-3.5_f32),
             "Latin token bias mismatch: {en_bias:?}"
         );
         // Greek token (id=23) not in ko or en — absent
-        let el_bias = map.iter().find(|(&id, _)| id == 23).map(|(_, &b)| b);
+        let el_bias = map.iter().find(|&(&id, _)| id == 23).map(|(_, &b)| b);
         assert!(
             el_bias.is_none(),
             "Greek token should not appear for ko+en: {el_bias:?}"
@@ -1509,7 +1507,7 @@ mod tests {
             InclusionPolicy::Conservative,
             &ExceptionConfig::default(),
         );
-        let bias = map.iter().find(|(&id, _)| id == 30).map(|(_, &b)| b);
+        let bias = map.iter().find(|&(&id, _)| id == 30).map(|(_, &b)| b);
         assert_eq!(
             bias,
             Some(f32::NEG_INFINITY),
@@ -1586,9 +1584,9 @@ mod tests {
         );
 
         // Bias values are correct.
-        let bias_1: Vec<_> = map.iter().filter(|(&id, _)| id == 1).collect();
+        let bias_1: Vec<_> = map.iter().filter(|&(&id, _)| id == 1).collect();
         assert_eq!(bias_1[0].1, &-100.0_f32);
-        let bias_2: Vec<_> = map.iter().filter(|(&id, _)| id == 2).collect();
+        let bias_2: Vec<_> = map.iter().filter(|&(&id, _)| id == 2).collect();
         assert_eq!(bias_2[0].1, &2.0_f32);
 
         // The map is non-empty and has exactly 3 entries (ids 1, 2, 3).
@@ -1654,7 +1652,8 @@ mod tests {
         );
 
         let _guard = env_lock();
-        std::env::set_var("MLXCEL_CACHE_DIR", tmp.path());
+        // SAFETY: test-only; env mutation is serialized by the env_lock() guard held above.
+        unsafe { std::env::set_var("MLXCEL_CACHE_DIR", tmp.path()) };
 
         // Call the resolver; it must NOT touch the cache for an empty bias set.
         let map = config
@@ -1668,7 +1667,8 @@ mod tests {
             .map(|rd| rd.count())
             .unwrap_or(0);
 
-        std::env::remove_var("MLXCEL_CACHE_DIR");
+        // SAFETY: test-only; env mutation is serialized by the env_lock() guard held above.
+        unsafe { std::env::remove_var("MLXCEL_CACHE_DIR") };
         drop(_guard);
 
         assert!(
@@ -1706,6 +1706,7 @@ mod tests {
         };
 
         let _guard = env_lock();
+        // SAFETY: test-only; env mutation is serialized by the env_lock() guard held above.
         unsafe {
             std::env::set_var("MLXCEL_CACHE_DIR", tmp.path());
         }
@@ -1731,7 +1732,8 @@ mod tests {
             .ok()
             .and_then(|m| m.modified().ok());
 
-        std::env::remove_var("MLXCEL_CACHE_DIR");
+        // SAFETY: test-only; env mutation is serialized by the env_lock() guard held above.
+        unsafe { std::env::remove_var("MLXCEL_CACHE_DIR") };
         drop(_guard);
 
         assert!(
@@ -2090,9 +2092,9 @@ mod tests {
         // as a codepoint, which is 'å' (U+00E5).
         let char_e5 = '\u{00E5}'; // byte 0xE5 → 'å' in the GPT-2 alphabet
         let char_b4 = '\u{0174}'; // byte 0xB4 is NOT in the printable set,
-                                  // so it maps to the first free slot above 0x100.
-                                  // We don't need to compute the exact char here — we discover it at
-                                  // runtime from the reverse map so this test stays robust.
+        // so it maps to the first free slot above 0x100.
+        // We don't need to compute the exact char here — we discover it at
+        // runtime from the reverse map so this test stays robust.
 
         let reverse = build_byte_level_reverse_map();
         // Sanity: 0xE5 really is 'å' in the forward map.
@@ -2100,7 +2102,7 @@ mod tests {
         // Find whatever char maps to byte 0xB4 (continuation byte).
         let char_b4_actual = reverse
             .iter()
-            .find(|(_, &b)| b == 0xB4)
+            .find(|&(_, &b)| b == 0xB4)
             .map(|(&c, _)| c)
             .expect("byte 0xB4 must have a forward-map char");
         let _ = char_b4;

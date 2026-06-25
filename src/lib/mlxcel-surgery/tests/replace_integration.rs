@@ -28,7 +28,7 @@
 //! `SurgeryPipeline` builder, `ReplaceOp` produces a `WeightMap`
 //! with the targeted tensor replaced by the donor's tensor.
 
-use mlxcel_surgery::{parse_config_file, WeightMap, WeightTransform};
+use mlxcel_surgery::{WeightMap, WeightTransform, parse_config_file};
 use std::collections::HashMap;
 use std::path::Path;
 

@@ -584,16 +584,16 @@ impl KVCache {
         // shape. Inverse of `head_dim * 3 / 8`: head_dim = packed_dim * 8 / 3.
         // Mirrors the Turbo4 prebuild above so dequantize-only consumers see
         // a ready-to-go cache after install.
-        if self.mode == KVCacheMode::Turbo3Asym {
-            if let Some(p) = self.v_packed.as_ref() {
-                let shape = ffi::array_shape(p);
-                if shape.len() == 4 && shape[3] > 0 {
-                    let head_dim = (shape[3] as u32) * 8 / 3;
-                    self.turbo3_params = Some(super::turbo::quant3::TurboQuantParams3::new(
-                        head_dim,
-                        self.turbo_seed,
-                    ));
-                }
+        if self.mode == KVCacheMode::Turbo3Asym
+            && let Some(p) = self.v_packed.as_ref()
+        {
+            let shape = ffi::array_shape(p);
+            if shape.len() == 4 && shape[3] > 0 {
+                let head_dim = (shape[3] as u32) * 8 / 3;
+                self.turbo3_params = Some(super::turbo::quant3::TurboQuantParams3::new(
+                    head_dim,
+                    self.turbo_seed,
+                ));
             }
         }
         Ok(())
@@ -752,16 +752,16 @@ impl RotatingKVCache {
         // Pre-build turbo_params from v_packed shape if available so the
         // first dequantize-only consumer doesn't need to wait for an update
         // call (mirrors `KVCache::install_detached`).
-        if self.mode == KVCacheMode::Turbo4Asym {
-            if let Some(ref vp) = self.v_packed {
-                let shape = ffi::array_shape(vp);
-                if shape.len() == 4 && shape[3] > 0 {
-                    let head_dim = (shape[3] as u32) * 2;
-                    self.turbo_params = Some(super::turbo::TurboQuantParams::new(
-                        head_dim,
-                        self.turbo_seed,
-                    ));
-                }
+        if self.mode == KVCacheMode::Turbo4Asym
+            && let Some(ref vp) = self.v_packed
+        {
+            let shape = ffi::array_shape(vp);
+            if shape.len() == 4 && shape[3] > 0 {
+                let head_dim = (shape[3] as u32) * 2;
+                self.turbo_params = Some(super::turbo::TurboQuantParams::new(
+                    head_dim,
+                    self.turbo_seed,
+                ));
             }
         }
         Ok(())

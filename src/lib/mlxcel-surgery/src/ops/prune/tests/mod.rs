@@ -71,8 +71,8 @@ pub(super) fn read_f32_2d(weights: &WeightMap, key: &str) -> (Vec<i32>, Vec<f32>
 // ============================================================
 
 use super::granularity::{
-    classify_attention_key, classify_mlp_key, extract_layer_index, key_has_dotted_segment,
-    AttentionRole, MlpRole,
+    AttentionRole, MlpRole, classify_attention_key, classify_mlp_key, extract_layer_index,
+    key_has_dotted_segment,
 };
 
 #[test]

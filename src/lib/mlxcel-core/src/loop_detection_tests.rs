@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use super::{detect_repetition_loop, LoopDetectionConfig, MAX_EFFECTIVE_PATTERN_SIZE};
+use super::{LoopDetectionConfig, MAX_EFFECTIVE_PATTERN_SIZE, detect_repetition_loop};
 
 /// The conservative starting threshold the server applies for the Gemma 4
 /// amplifier case (`min_pattern_size=1, max_pattern_size=20, min_count=4`).

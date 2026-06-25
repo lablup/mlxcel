@@ -32,10 +32,10 @@ use std::path::Path;
 
 use mlxcel_core::dtype as mlx_dtype;
 use mlxcel_core::weights::{WeightMap, WeightTransform};
-use mlxcel_core::{array_to_raw_bytes, eval, from_bytes, MlxArray, UniquePtr};
-use mlxcel_surgery::{parse_config_file, SurgeryPipeline};
-use safetensors::tensor::Dtype as SafeTensorDtype;
+use mlxcel_core::{MlxArray, UniquePtr, array_to_raw_bytes, eval, from_bytes};
+use mlxcel_surgery::{SurgeryPipeline, parse_config_file};
 use safetensors::View;
+use safetensors::tensor::Dtype as SafeTensorDtype;
 
 /// `safetensors::View` over owned bytes — same shape as the helper
 /// in `src/lib/mlxcel-surgery/src/ops/add.rs`. Duplicated here

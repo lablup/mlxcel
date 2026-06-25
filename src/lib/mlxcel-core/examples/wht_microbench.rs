@@ -37,7 +37,7 @@
 //! K-cache snapshot is found at `models/wht-bench-kv.safetensors`. Skipped
 //! silently if not present so this binary is hermetic.
 
-use mlxcel_core::{self, dtype, MlxArray, UniquePtr};
+use mlxcel_core::{self, MlxArray, UniquePtr, dtype};
 use std::time::Instant;
 
 const WARMUP_ITERS: usize = 8;

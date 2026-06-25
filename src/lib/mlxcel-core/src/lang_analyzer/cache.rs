@@ -30,7 +30,7 @@ use std::path::PathBuf;
 
 use tokenizers::Tokenizer;
 
-use super::{LangAnalyzerError, TokenLanguageIndex, CURRENT_VERSION};
+use super::{CURRENT_VERSION, LangAnalyzerError, TokenLanguageIndex};
 
 /// Sub-directory under the mlxcel cache root that holds tokenizer index files.
 pub const CACHE_SUBDIR: &str = "tokenizer-scripts";
@@ -170,10 +170,8 @@ pub fn load_or_build(
 ) -> Result<TokenLanguageIndex, LangAnalyzerError> {
     let hash = TokenLanguageIndex::compute_vocab_hash(tokenizer_json_bytes);
 
-    if !rebuild {
-        if let Some(idx) = try_load(&hash) {
-            return Ok(idx);
-        }
+    if !rebuild && let Some(idx) = try_load(&hash) {
+        return Ok(idx);
     }
 
     let idx = TokenLanguageIndex::build(tokenizer, tokenizer_json_bytes)?;
@@ -252,9 +250,11 @@ mod tests {
         let override_dir = tmp.path().to_path_buf();
 
         let _guard = env_lock();
-        std::env::set_var("MLXCEL_CACHE_DIR", &override_dir);
+        // SAFETY: test-only; env mutation is serialized by the env_lock() guard held above.
+        unsafe { std::env::set_var("MLXCEL_CACHE_DIR", &override_dir) };
         let path = cache_path("deadbeef12345678");
-        std::env::remove_var("MLXCEL_CACHE_DIR");
+        // SAFETY: test-only; env mutation is serialized by the env_lock() guard held above.
+        unsafe { std::env::remove_var("MLXCEL_CACHE_DIR") };
         drop(_guard);
 
         assert!(
@@ -283,10 +283,12 @@ mod tests {
         let idx = build_test_index(&json);
 
         let _guard = env_lock();
-        std::env::set_var("MLXCEL_CACHE_DIR", tmp.path());
+        // SAFETY: test-only; env mutation is serialized by the env_lock() guard held above.
+        unsafe { std::env::set_var("MLXCEL_CACHE_DIR", tmp.path()) };
         save(&idx).expect("save should succeed");
         let loaded = try_load(&idx.vocab_hash);
-        std::env::remove_var("MLXCEL_CACHE_DIR");
+        // SAFETY: test-only; env mutation is serialized by the env_lock() guard held above.
+        unsafe { std::env::remove_var("MLXCEL_CACHE_DIR") };
         drop(_guard);
 
         let loaded = loaded.expect("try_load should return Some after save");
@@ -311,10 +313,12 @@ mod tests {
         idx.version = CURRENT_VERSION + 99; // future version — cache is stale
 
         let _guard = env_lock();
-        std::env::set_var("MLXCEL_CACHE_DIR", tmp.path());
+        // SAFETY: test-only; env mutation is serialized by the env_lock() guard held above.
+        unsafe { std::env::set_var("MLXCEL_CACHE_DIR", tmp.path()) };
         save(&idx).expect("save should succeed");
         let result = try_load(&idx.vocab_hash);
-        std::env::remove_var("MLXCEL_CACHE_DIR");
+        // SAFETY: test-only; env mutation is serialized by the env_lock() guard held above.
+        unsafe { std::env::remove_var("MLXCEL_CACHE_DIR") };
         drop(_guard);
 
         assert!(
@@ -342,7 +346,8 @@ mod tests {
         idx_v2.version = 2;
 
         let _guard = env_lock();
-        std::env::set_var("MLXCEL_CACHE_DIR", tmp.path());
+        // SAFETY: test-only; env mutation is serialized by the env_lock() guard held above.
+        unsafe { std::env::set_var("MLXCEL_CACHE_DIR", tmp.path()) };
         save(&idx_v2).expect("save v2 cache");
 
         // `try_load` must refuse the v2 cache.
@@ -355,7 +360,8 @@ mod tests {
         // `load_or_build` must rebuild to the current version.
         let rebuilt =
             load_or_build(&tok, &json_bytes, false).expect("load_or_build should rebuild v2→v3");
-        std::env::remove_var("MLXCEL_CACHE_DIR");
+        // SAFETY: test-only; env mutation is serialized by the env_lock() guard held above.
+        unsafe { std::env::remove_var("MLXCEL_CACHE_DIR") };
         drop(_guard);
 
         assert_eq!(
@@ -380,14 +386,16 @@ mod tests {
         let hash = "aabbccddeeff0011";
 
         let _guard = env_lock();
-        std::env::set_var("MLXCEL_CACHE_DIR", tmp.path());
+        // SAFETY: test-only; env mutation is serialized by the env_lock() guard held above.
+        unsafe { std::env::set_var("MLXCEL_CACHE_DIR", tmp.path()) };
         let path = cache_path(hash);
         std::fs::create_dir_all(path.parent().unwrap()).expect("create dirs");
         std::fs::write(&path, b"not valid postcard data!!!").expect("write garbage");
         let result = try_load(hash);
         let path_still_exists = path.exists();
         let cache_dir = path.parent().unwrap().to_path_buf();
-        std::env::remove_var("MLXCEL_CACHE_DIR");
+        // SAFETY: test-only; env mutation is serialized by the env_lock() guard held above.
+        unsafe { std::env::remove_var("MLXCEL_CACHE_DIR") };
         drop(_guard);
 
         assert!(
@@ -429,7 +437,8 @@ mod tests {
         let tok = make_tokenizer(&json);
 
         let _guard = env_lock();
-        std::env::set_var("MLXCEL_CACHE_DIR", tmp.path());
+        // SAFETY: test-only; env mutation is serialized by the env_lock() guard held above.
+        unsafe { std::env::set_var("MLXCEL_CACHE_DIR", tmp.path()) };
 
         // First call — must build and save.
         let idx1 =
@@ -448,7 +457,8 @@ mod tests {
             .modified()
             .expect("mtime");
 
-        std::env::remove_var("MLXCEL_CACHE_DIR");
+        // SAFETY: test-only; env mutation is serialized by the env_lock() guard held above.
+        unsafe { std::env::remove_var("MLXCEL_CACHE_DIR") };
         drop(_guard);
 
         assert_eq!(
@@ -475,7 +485,8 @@ mod tests {
         let tok = make_tokenizer(&json);
 
         let _guard = env_lock();
-        std::env::set_var("MLXCEL_CACHE_DIR", tmp.path());
+        // SAFETY: test-only; env mutation is serialized by the env_lock() guard held above.
+        unsafe { std::env::set_var("MLXCEL_CACHE_DIR", tmp.path()) };
 
         // First call — build and save.
         let idx1 = load_or_build(&tok, &json_bytes, false).expect("first load_or_build");
@@ -496,7 +507,8 @@ mod tests {
             .modified()
             .expect("mtime");
 
-        std::env::remove_var("MLXCEL_CACHE_DIR");
+        // SAFETY: test-only; env mutation is serialized by the env_lock() guard held above.
+        unsafe { std::env::remove_var("MLXCEL_CACHE_DIR") };
         drop(_guard);
 
         assert_eq!(
@@ -539,7 +551,8 @@ mod tests {
         let tok = Tokenizer::from_bytes(&json_bytes).expect("parse tokenizer");
 
         let _guard = env_lock();
-        std::env::set_var("MLXCEL_CACHE_DIR", tmp.path());
+        // SAFETY: test-only; env mutation is serialized by the env_lock() guard held above.
+        unsafe { std::env::set_var("MLXCEL_CACHE_DIR", tmp.path()) };
 
         // First call — build and persist.
         let idx1 =
@@ -559,7 +572,8 @@ mod tests {
             .expect("second load_or_build on real tokenizer");
         let mtime2 = std::fs::metadata(&path).unwrap().modified().unwrap();
 
-        std::env::remove_var("MLXCEL_CACHE_DIR");
+        // SAFETY: test-only; env mutation is serialized by the env_lock() guard held above.
+        unsafe { std::env::remove_var("MLXCEL_CACHE_DIR") };
         drop(_guard);
 
         assert_eq!(idx1.vocab_hash, idx2.vocab_hash);

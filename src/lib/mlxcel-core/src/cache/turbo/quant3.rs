@@ -61,7 +61,7 @@ use std::sync::Arc;
 
 use cxx::UniquePtr;
 
-use super::codebook::{nearest_centroid_indices_with_boundaries, optimal_codebook, Codebook};
+use super::codebook::{Codebook, nearest_centroid_indices_with_boundaries, optimal_codebook};
 use super::pack3::{pack_3bit_per_token, packed_bytes_per_token_3bit, unpack_3bit_per_token};
 use super::quant::generate_signs;
 use crate::dtype;

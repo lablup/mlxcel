@@ -53,8 +53,8 @@ pub mod ops;
 mod pipeline;
 
 pub use config::{
-    parse_config_file, parse_config_str, InterpolateMethod, OpSpec, PruneGranularity,
-    SurgeryConfig, SUPPORTED_SCHEMA_VERSION,
+    InterpolateMethod, OpSpec, PruneGranularity, SUPPORTED_SCHEMA_VERSION, SurgeryConfig,
+    parse_config_file, parse_config_str,
 };
 pub use error::SurgeryError;
 pub use ops::{AddOp, InterpolateOp, PruneOp, PruneSelector, ReplaceOp, ScaleOp};
@@ -103,8 +103,8 @@ mod tests {
     //! pipeline is invoked through A1's `WeightTransform` hook with
     //! no-op semantics yielding bit-exactness vs the `None` path.
 
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::*;
 

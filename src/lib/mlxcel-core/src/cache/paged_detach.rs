@@ -276,15 +276,15 @@ impl Drop for DetachedPagedCacheSet {
         // own pins at drop time the caller forgot to return us to the pool;
         // warn so the leak is visible rather than silently burning block
         // budget forever.
-        if let Some(blocks) = self.retained_blocks.take() {
-            if !blocks.is_empty() {
-                eprintln!(
-                    "[mlxcel::cache::paged_detach] DetachedPagedCacheSet dropped with {} retained blocks (origin seq {}); \
+        if let Some(blocks) = self.retained_blocks.take()
+            && !blocks.is_empty()
+        {
+            eprintln!(
+                "[mlxcel::cache::paged_detach] DetachedPagedCacheSet dropped with {} retained blocks (origin seq {}); \
                      use CachePool::release_detached_paged or adopt_paged to release pins",
-                    blocks.len(),
-                    self.origin_seq_id
-                );
-            }
+                blocks.len(),
+                self.origin_seq_id
+            );
         }
     }
 }
@@ -441,29 +441,29 @@ impl CachePool {
         let mut k_packed_pages: HashMap<PagedBlockId, UniquePtr<MlxArray>> = HashMap::new();
         let mut k_norms_pages: HashMap<PagedBlockId, UniquePtr<MlxArray>> = HashMap::new();
         let mut cold_keys_pages: HashMap<PagedBlockId, UniquePtr<MlxArray>> = HashMap::new();
-        if paged_layout.is_turbo_mode() {
-            if let Some(pool) = self.paged_pool.as_ref() {
-                let mut pool = pool.borrow_mut();
-                for &block_id in &retained {
-                    if let Some(t) = pool.take_v_packed(block_id) {
-                        v_packed_pages.insert(block_id, t);
+        if paged_layout.is_turbo_mode()
+            && let Some(pool) = self.paged_pool.as_ref()
+        {
+            let mut pool = pool.borrow_mut();
+            for &block_id in &retained {
+                if let Some(t) = pool.take_v_packed(block_id) {
+                    v_packed_pages.insert(block_id, t);
+                }
+                if let Some(t) = pool.take_v_norms(block_id) {
+                    v_norms_pages.insert(block_id, t);
+                }
+                if paged_layout.cache_mode == KVCacheMode::Turbo4 {
+                    if let Some(t) = pool.take_k_packed(block_id) {
+                        k_packed_pages.insert(block_id, t);
                     }
-                    if let Some(t) = pool.take_v_norms(block_id) {
-                        v_norms_pages.insert(block_id, t);
+                    if let Some(t) = pool.take_k_norms(block_id) {
+                        k_norms_pages.insert(block_id, t);
                     }
-                    if paged_layout.cache_mode == KVCacheMode::Turbo4 {
-                        if let Some(t) = pool.take_k_packed(block_id) {
-                            k_packed_pages.insert(block_id, t);
-                        }
-                        if let Some(t) = pool.take_k_norms(block_id) {
-                            k_norms_pages.insert(block_id, t);
-                        }
-                    }
-                    if paged_layout.cache_mode == KVCacheMode::Turbo4Delegated {
-                        if let Some(t) = pool.take_cold_keys(block_id) {
-                            cold_keys_pages.insert(block_id, t);
-                        }
-                    }
+                }
+                if paged_layout.cache_mode == KVCacheMode::Turbo4Delegated
+                    && let Some(t) = pool.take_cold_keys(block_id)
+                {
+                    cold_keys_pages.insert(block_id, t);
                 }
             }
         }
@@ -696,43 +696,43 @@ impl CachePool {
         // constructed sequence. The detach-side `take_*` calls already
         // consumed the originals, so a failure here would otherwise drop
         // them silently.
-        if paged_layout.is_turbo_mode() {
-            if let Some(pool) = self.paged_pool.as_ref() {
-                let mut pool = pool.borrow_mut();
-                for (block_id, t) in v_packed_pages {
-                    if let Err(err) = pool.install_v_packed(block_id, t) {
-                        eprintln!(
-                            "[mlxcel::cache::paged_detach] adopt_paged: failed to reinstall v_packed for {block_id}: {err}"
-                        );
-                    }
+        if paged_layout.is_turbo_mode()
+            && let Some(pool) = self.paged_pool.as_ref()
+        {
+            let mut pool = pool.borrow_mut();
+            for (block_id, t) in v_packed_pages {
+                if let Err(err) = pool.install_v_packed(block_id, t) {
+                    eprintln!(
+                        "[mlxcel::cache::paged_detach] adopt_paged: failed to reinstall v_packed for {block_id}: {err}"
+                    );
                 }
-                for (block_id, t) in v_norms_pages {
-                    if let Err(err) = pool.install_v_norms(block_id, t) {
-                        eprintln!(
-                            "[mlxcel::cache::paged_detach] adopt_paged: failed to reinstall v_norms for {block_id}: {err}"
-                        );
-                    }
+            }
+            for (block_id, t) in v_norms_pages {
+                if let Err(err) = pool.install_v_norms(block_id, t) {
+                    eprintln!(
+                        "[mlxcel::cache::paged_detach] adopt_paged: failed to reinstall v_norms for {block_id}: {err}"
+                    );
                 }
-                for (block_id, t) in k_packed_pages {
-                    if let Err(err) = pool.install_k_packed(block_id, t) {
-                        eprintln!(
-                            "[mlxcel::cache::paged_detach] adopt_paged: failed to reinstall k_packed for {block_id}: {err}"
-                        );
-                    }
+            }
+            for (block_id, t) in k_packed_pages {
+                if let Err(err) = pool.install_k_packed(block_id, t) {
+                    eprintln!(
+                        "[mlxcel::cache::paged_detach] adopt_paged: failed to reinstall k_packed for {block_id}: {err}"
+                    );
                 }
-                for (block_id, t) in k_norms_pages {
-                    if let Err(err) = pool.install_k_norms(block_id, t) {
-                        eprintln!(
-                            "[mlxcel::cache::paged_detach] adopt_paged: failed to reinstall k_norms for {block_id}: {err}"
-                        );
-                    }
+            }
+            for (block_id, t) in k_norms_pages {
+                if let Err(err) = pool.install_k_norms(block_id, t) {
+                    eprintln!(
+                        "[mlxcel::cache::paged_detach] adopt_paged: failed to reinstall k_norms for {block_id}: {err}"
+                    );
                 }
-                for (block_id, t) in cold_keys_pages {
-                    if let Err(err) = pool.install_cold_keys(block_id, t) {
-                        eprintln!(
-                            "[mlxcel::cache::paged_detach] adopt_paged: failed to reinstall cold_keys for {block_id}: {err}"
-                        );
-                    }
+            }
+            for (block_id, t) in cold_keys_pages {
+                if let Err(err) = pool.install_cold_keys(block_id, t) {
+                    eprintln!(
+                        "[mlxcel::cache::paged_detach] adopt_paged: failed to reinstall cold_keys for {block_id}: {err}"
+                    );
                 }
             }
         }
@@ -743,19 +743,19 @@ impl CachePool {
         // now holds the original pin. Releasing the detach-side bump restores
         // the invariant "refcount == number of active block_ids entries
         // owning the block".
-        if let Some(blocks) = retained_blocks {
-            if let Some(pool) = self.paged_pool.as_ref() {
-                let mut pool = pool.borrow_mut();
-                for block_id in blocks {
-                    if let Err(err) = pool.release_block(block_id) {
-                        // Fatal: the pool now disagrees with the sequence
-                        // state. Surface loudly but do not unwind — unwinding
-                        // here would leave the new sequence in an even worse
-                        // state.
-                        eprintln!(
-                            "[mlxcel::cache::paged_detach] CachePool::adopt_paged: failed to drop detach pin on block {block_id}: {err}"
-                        );
-                    }
+        if let Some(blocks) = retained_blocks
+            && let Some(pool) = self.paged_pool.as_ref()
+        {
+            let mut pool = pool.borrow_mut();
+            for block_id in blocks {
+                if let Err(err) = pool.release_block(block_id) {
+                    // Fatal: the pool now disagrees with the sequence
+                    // state. Surface loudly but do not unwind — unwinding
+                    // here would leave the new sequence in an even worse
+                    // state.
+                    eprintln!(
+                        "[mlxcel::cache::paged_detach] CachePool::adopt_paged: failed to drop detach pin on block {block_id}: {err}"
+                    );
                 }
             }
         }
@@ -1098,25 +1098,25 @@ impl CachePool {
     /// blocks) — the `retained_blocks.take()` guard makes the whole body a
     /// no-op so neither reference is released twice.
     pub fn release_detached_paged(&mut self, mut detached: DetachedPagedCacheSet) {
-        if let Some(blocks) = detached.retained_blocks.take() {
-            if let Some(pool) = self.paged_pool.as_ref() {
-                let mut pool = pool.borrow_mut();
-                // Release the detach pins.
-                for block_id in &blocks {
-                    if let Err(err) = pool.release_block(*block_id) {
-                        eprintln!(
-                            "[mlxcel::cache::paged_detach] CachePool::release_detached_paged: failed to release pin for block {block_id}: {err}"
-                        );
-                    }
+        if let Some(blocks) = detached.retained_blocks.take()
+            && let Some(pool) = self.paged_pool.as_ref()
+        {
+            let mut pool = pool.borrow_mut();
+            // Release the detach pins.
+            for block_id in &blocks {
+                if let Err(err) = pool.release_block(*block_id) {
+                    eprintln!(
+                        "[mlxcel::cache::paged_detach] CachePool::release_detached_paged: failed to release pin for block {block_id}: {err}"
+                    );
                 }
-                // Release the origin allocation the block table still carries.
-                for layer in &detached.paged_state.layers {
-                    for &block_id in &layer.block_ids {
-                        if let Err(err) = pool.release_block(block_id) {
-                            eprintln!(
-                                "[mlxcel::cache::paged_detach] CachePool::release_detached_paged: failed to release allocation for block {block_id}: {err}"
-                            );
-                        }
+            }
+            // Release the origin allocation the block table still carries.
+            for layer in &detached.paged_state.layers {
+                for &block_id in &layer.block_ids {
+                    if let Err(err) = pool.release_block(block_id) {
+                        eprintln!(
+                            "[mlxcel::cache::paged_detach] CachePool::release_detached_paged: failed to release allocation for block {block_id}: {err}"
+                        );
                     }
                 }
             }

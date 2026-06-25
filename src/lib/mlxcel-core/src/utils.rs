@@ -545,12 +545,12 @@ pub fn create_causal_mask_with_window(
     // Apply sliding window upper-bound only when the mask is NOT capped.
     // In the capped path the column range is already the window; the upper
     // bound (q <= k + window - 1) is trivially satisfied.
-    if let Some(w) = window {
-        if uncapped_len <= w {
-            // Non-capped path: enforce window upper bound.
-            let upper_mask = ffi::triu(&ones, offset - w + 1);
-            mask = ffi::multiply(&mask, &upper_mask);
-        }
+    if let Some(w) = window
+        && uncapped_len <= w
+    {
+        // Non-capped path: enforce window upper bound.
+        let upper_mask = ffi::triu(&ones, offset - w + 1);
+        mask = ffi::multiply(&mask, &upper_mask);
     }
 
     // Convert to attention mask format: where mask=1 -> 0, where mask=0 -> -inf
@@ -743,11 +743,11 @@ pub fn create_causal_bool_mask_with_window(
     let ones = ffi::ones(&[size, total_len], dtype::FLOAT32);
     let mut mask = ffi::tril(&ones, tril_offset);
 
-    if let Some(w) = window {
-        if uncapped_len <= w {
-            let upper_mask = ffi::triu(&ones, offset - w + 1);
-            mask = ffi::multiply(&mask, &upper_mask);
-        }
+    if let Some(w) = window
+        && uncapped_len <= w
+    {
+        let upper_mask = ffi::triu(&ones, offset - w + 1);
+        mask = ffi::multiply(&mask, &upper_mask);
     }
 
     let zeros = ffi::zeros(&[size, total_len], dtype::FLOAT32);

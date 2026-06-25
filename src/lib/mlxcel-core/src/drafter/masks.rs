@@ -321,10 +321,11 @@ pub fn bidirectional_swa_mask_with_key_offset(
     let kv_valid_is_scalar = kv_valid_len.map(BatchScalar::is_scalar).unwrap_or(true);
     if let (BatchScalar::Scalar(qo), true, BatchScalar::Scalar(ko)) =
         (query_offset, kv_valid_is_scalar, key_offset)
+        && kv_len <= window
+        && *qo - *ko < window
+        && *ko + kv_len - (*qo + query_len) < window
     {
-        if kv_len <= window && *qo - *ko < window && *ko + kv_len - (*qo + query_len) < window {
-            return None;
-        }
+        return None;
     }
 
     // ----- materialisation -------------------------------------------------
@@ -373,8 +374,8 @@ pub fn bidirectional_swa_mask_with_key_offset(
             let q_range_1d = ffi::arange_i32(0, query_len, 1); // [query_len]
             let q_range = ffi::reshape(&q_range_1d, &[1, query_len]); // [1, query_len]
             let q_idx_2d = ffi::add(&qo_col, &q_range); // [B, query_len]
-                                                        // Reshape for the [B, query_len, kv_len] computation:
-                                                        //   q_idx -> [B, query_len, 1], k_idx -> [1, 1, kv_len].
+            // Reshape for the [B, query_len, kv_len] computation:
+            //   q_idx -> [B, query_len, 1], k_idx -> [1, 1, kv_len].
             let q_idx = ffi::reshape(&q_idx_2d, &[batch, query_len, 1]);
 
             let k_idx = match key_offset {
@@ -395,7 +396,7 @@ pub fn bidirectional_swa_mask_with_key_offset(
             // Per-row kv_valid_len tail-mask.
             let inside = apply_kv_valid_tail_batched(inside, &k_idx, kv_valid_len, batch);
             let bias_3d = build_bias_from_bool(&inside, dtype); // [B, query_len, kv_len]
-                                                                // Reshape to [B, 1, query_len, kv_len].
+            // Reshape to [B, 1, query_len, kv_len].
             Some(ffi::reshape(&bias_3d, &[batch, 1, query_len, kv_len]))
         }
     }

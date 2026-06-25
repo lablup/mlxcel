@@ -300,9 +300,7 @@ pub enum DrafterError {
     /// Drafter encountered a layer with a `layer_type` string that does not
     /// map to any shared-K/V bucket the round-loop set up. The two known
     /// buckets are `"full_attention"` and `"sliding_attention"`.
-    #[error(
-        "drafter saw unknown layer_type {got:?}; expected full_attention or sliding_attention"
-    )]
+    #[error("drafter saw unknown layer_type {got:?}; expected full_attention or sliding_attention")]
     UnknownLayerType { got: String },
 
     /// Drafter has a layer of the named layer-type but the round-loop did

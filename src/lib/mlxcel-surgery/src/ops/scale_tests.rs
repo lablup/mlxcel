@@ -24,9 +24,9 @@
 //!   packed payload.
 
 use super::*;
-use mlxcel_core::dtype;
 use mlxcel_core::MlxArray;
 use mlxcel_core::UniquePtr;
+use mlxcel_core::dtype;
 use std::sync::Arc;
 
 /// Construct a tiny f32 tensor from a literal slice. The shape is

@@ -34,9 +34,9 @@ use crate::generation_policy::{
 };
 use crate::hardware;
 use crate::layers::KVCache;
-use crate::loop_detection::{detect_repetition_loop, LoopDetectionConfig};
+use crate::loop_detection::{LoopDetectionConfig, detect_repetition_loop};
 use crate::sampling::{
-    sample_token_optimized, sample_token_optimized_with_state, SamplerState, TokenBiasMap,
+    SamplerState, TokenBiasMap, sample_token_optimized, sample_token_optimized_with_state,
 };
 use crate::streams::{install_thread_local_default_stream, new_thread_local_generation_stream};
 use crate::utils::{align_to_na_tile, create_padded_prefill_mask};
@@ -1200,10 +1200,10 @@ impl CxxGenerator {
                 } else {
                     None
                 };
-                if n == 0 {
-                    if let Ok(path) = std::env::var("MLXCEL_EXPORT_DECODE_DOT") {
-                        ffi::export_to_dot_pair(&path, &next_tok, &next_log);
-                    }
+                if n == 0
+                    && let Ok(path) = std::env::var("MLXCEL_EXPORT_DECODE_DOT")
+                {
+                    ffi::export_to_dot_pair(&path, &next_tok, &next_log);
                 }
                 // Optional Metal GPU capture of one warm decode token for
                 // per-kernel profiling vs mlx-lm. Fires at n==2 so
@@ -1211,18 +1211,18 @@ impl CxxGenerator {
                 // launched with `MTL_CAPTURE_ENABLED=1`; writes a `.gputrace`
                 // bundle to the given path, comparable with mlx-lm's
                 // `mx.metal.start_capture`.
-                if n == 2 {
-                    if let Ok(path) = std::env::var("MLXCEL_CAPTURE_DECODE") {
-                        ffi::metal_start_capture(&path);
-                        ffi::eval(&next_tok);
-                        ffi::metal_stop_capture();
-                        // Exit immediately so the GPU trace document finalizes
-                        // with exactly one captured decode token and no further
-                        // GPU work polluting it (mirrors mlx-lm's capture-script
-                        // lifecycle). Capture mode is a profiling-only path.
-                        eprintln!("[capture] wrote one decode token to {path}");
-                        std::process::exit(0);
-                    }
+                if n == 2
+                    && let Ok(path) = std::env::var("MLXCEL_CAPTURE_DECODE")
+                {
+                    ffi::metal_start_capture(&path);
+                    ffi::eval(&next_tok);
+                    ffi::metal_stop_capture();
+                    // Exit immediately so the GPU trace document finalizes
+                    // with exactly one captured decode token and no further
+                    // GPU work polluting it (mirrors mlx-lm's capture-script
+                    // lifecycle). Capture mode is a profiling-only path.
+                    eprintln!("[capture] wrote one decode token to {path}");
+                    std::process::exit(0);
                 }
                 if force_sync {
                     ffi::eval(&next_tok);
@@ -1292,11 +1292,14 @@ impl CxxGenerator {
             }
 
             // Move to next
-            if let (Some(ny), Some(nl)) = (next_y, next_logprobs) {
-                y = ny;
-                _logprobs = nl;
-            } else {
-                break;
+            match (next_y, next_logprobs) {
+                (Some(ny), Some(nl)) => {
+                    y = ny;
+                    _logprobs = nl;
+                }
+                _ => {
+                    break;
+                }
             }
 
             n += 1;
@@ -1492,11 +1495,14 @@ impl CxxGenerator {
                 ffi::clear_memory_cache();
             }
 
-            if let (Some(ny), Some(nl)) = (next_y, next_logprobs) {
-                y = ny;
-                _logprobs = nl;
-            } else {
-                break;
+            match (next_y, next_logprobs) {
+                (Some(ny), Some(nl)) => {
+                    y = ny;
+                    _logprobs = nl;
+                }
+                _ => {
+                    break;
+                }
             }
 
             n += 1;

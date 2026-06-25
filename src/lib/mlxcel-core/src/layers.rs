@@ -24,8 +24,8 @@
 use crate::ffi;
 use crate::ffi::MlxArray;
 use cxx::UniquePtr;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 pub use crate::cache::{ChunkedKVCache, KVCache, KVCacheMode, RotatingKVCache};
 
@@ -671,14 +671,14 @@ impl Linear {
         let mut result = ffi::matmul(x, &wt);
 
         // Apply runtime LoRA: result += (x @ A.T) @ B.T * scale
-        if let Some(ref lora) = self.lora {
-            if lora.active.get() {
-                let at = ffi::transpose(&lora.a);
-                let bt = ffi::transpose(&lora.b);
-                let lora_out = ffi::matmul(&ffi::matmul(x, &at), &bt);
-                let scaled = crate::multiply_scalar(&lora_out, lora.scale);
-                result = ffi::add(&result, &scaled);
-            }
+        if let Some(ref lora) = self.lora
+            && lora.active.get()
+        {
+            let at = ffi::transpose(&lora.a);
+            let bt = ffi::transpose(&lora.b);
+            let lora_out = ffi::matmul(&ffi::matmul(x, &at), &bt);
+            let scaled = crate::multiply_scalar(&lora_out, lora.scale);
+            result = ffi::add(&result, &scaled);
         }
 
         match &self.bias {
@@ -2719,10 +2719,10 @@ pub fn paged_decode_attention_pooled(
     scale: f32,
     use_native_paged_kernel: bool,
 ) -> Result<UniquePtr<MlxArray>, String> {
-    if use_native_paged_kernel || native_paged_kernel_env() {
-        if let Some(out) = pool.paged_decode_fused(q, states, layer_idx, scale)? {
-            return Ok(out);
-        }
+    if (use_native_paged_kernel || native_paged_kernel_env())
+        && let Some(out) = pool.paged_decode_fused(q, states, layer_idx, scale)?
+    {
+        return Ok(out);
     }
     paged_decode_attention_pooled_fallback(q, pool, states, layer_idx, scale)
 }

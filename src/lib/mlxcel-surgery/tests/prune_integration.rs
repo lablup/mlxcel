@@ -26,7 +26,7 @@ use std::io::Write;
 use mlxcel_core::dtype;
 use mlxcel_core::weights::{WeightMap, WeightTransform};
 use mlxcel_surgery::{
-    parse_config_file, parse_config_str, PruneOp, PruneSelector, SurgeryPipeline,
+    PruneOp, PruneSelector, SurgeryPipeline, parse_config_file, parse_config_str,
 };
 
 /// Build a Llama-style synthetic weight map for one layer with the

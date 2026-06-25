@@ -53,23 +53,23 @@ pub mod quant3;
 pub mod sparse_v;
 
 pub use allowlist::{
-    is_symmetric_turbo_allowed, symmetric_turbo_warning_message, ALLOWED_SYMMETRIC_TURBO_FAMILIES,
+    ALLOWED_SYMMETRIC_TURBO_FAMILIES, is_symmetric_turbo_allowed, symmetric_turbo_warning_message,
 };
 pub use boundary::{
-    boundary_mode_for, boundary_v_layers_from_env, is_boundary_layer, parse_boundary_v_str,
-    resolve_boundary_count, resolve_layer_mode, resolve_layer_modes, BOUNDARY_V_ENV,
-    BOUNDARY_V_ENV_ALT, DEFAULT_BOUNDARY_V_LAYERS,
+    BOUNDARY_V_ENV, BOUNDARY_V_ENV_ALT, DEFAULT_BOUNDARY_V_LAYERS, boundary_mode_for,
+    boundary_v_layers_from_env, is_boundary_layer, parse_boundary_v_str, resolve_boundary_count,
+    resolve_layer_mode, resolve_layer_modes,
 };
 
 // Re-export the most commonly used entry points for convenience
 pub use codebook::{
-    compute_centroids, nearest_centroid_indices, nearest_centroid_indices_with_boundaries,
-    optimal_centroids, optimal_codebook, Codebook,
+    Codebook, compute_centroids, nearest_centroid_indices,
+    nearest_centroid_indices_with_boundaries, optimal_centroids, optimal_codebook,
 };
 pub use quant::{
-    dequantize_k_turbo4, dequantize_k_turbo4_rotated, dequantize_v_turbo4, generate_signs,
-    quantize_k_turbo4, quantize_v_turbo4, turbo4_k_rotate, turbo4_v_rotate, TurboQuantParams,
-    BLOCK_SIZE, K_BIT_WIDTH, K_SEED_OFFSET, V_BIT_WIDTH,
+    BLOCK_SIZE, K_BIT_WIDTH, K_SEED_OFFSET, TurboQuantParams, V_BIT_WIDTH, dequantize_k_turbo4,
+    dequantize_k_turbo4_rotated, dequantize_v_turbo4, generate_signs, quantize_k_turbo4,
+    quantize_v_turbo4, turbo4_k_rotate, turbo4_v_rotate,
 };
 
 /// Default hot-tail threshold for `KVCacheMode::Turbo4Delegated`.

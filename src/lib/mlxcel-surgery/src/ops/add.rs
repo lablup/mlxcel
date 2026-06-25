@@ -68,10 +68,10 @@ use std::path::{Path, PathBuf};
 
 use globset::{Glob, GlobMatcher};
 use mlxcel_core::dtype as mlx_dtype;
-use mlxcel_core::weights::{load_safetensors, WeightMap};
+use mlxcel_core::weights::{WeightMap, load_safetensors};
 use mlxcel_core::{
-    add as mlx_add, array_dtype, array_shape, astype, copy as mlx_copy, multiply_scalar, MlxArray,
-    UniquePtr,
+    MlxArray, UniquePtr, add as mlx_add, array_dtype, array_shape, astype, copy as mlx_copy,
+    multiply_scalar,
 };
 
 use crate::{SurgeryError, SurgeryOp};

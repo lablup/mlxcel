@@ -79,7 +79,7 @@ use std::sync::Arc;
 
 use cxx::UniquePtr;
 
-use super::codebook::{nearest_centroid_indices_with_boundaries, optimal_codebook, Codebook};
+use super::codebook::{Codebook, nearest_centroid_indices_with_boundaries, optimal_codebook};
 use crate::dtype;
 use crate::ffi;
 use crate::ffi::MlxArray;

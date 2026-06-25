@@ -78,7 +78,7 @@
 use std::path::{Path, PathBuf};
 
 use globset::{Glob, GlobMatcher};
-use mlxcel_core::weights::{load_safetensors, WeightMap};
+use mlxcel_core::weights::{WeightMap, load_safetensors};
 use mlxcel_core::{MlxArray, UniquePtr};
 
 use crate::config::InterpolateMethod;

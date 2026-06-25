@@ -29,7 +29,7 @@
 
 use mlxcel_core::weights::{WeightMap, WeightTransform};
 use mlxcel_core::{MlxArray, UniquePtr};
-use mlxcel_surgery::{parse_config_str, SurgeryPipeline};
+use mlxcel_surgery::{SurgeryPipeline, parse_config_str};
 
 /// Build a tiny synthetic 1-D f32 tensor from a literal slice.
 fn f32_tensor(values: &[f32]) -> UniquePtr<MlxArray> {
