@@ -193,8 +193,13 @@ struct SubsamplingConv2DLayer {
 }
 
 impl SubsamplingConv2DLayer {
-    fn forward(&self, x: &MlxArray) -> UniquePtr<MlxArray> {
-        mlxcel_core::conv2d(
+    // Fallible: the conv input shape derives from the runtime audio length, so
+    // a crafted clip can mismatch the conv weights. MLX validates conv shapes
+    // eagerly at graph-build time and throws; routing through `try_conv2d` lets
+    // cxx catch that throw and surface it as a per-request `Err` instead of an
+    // uncaught C++ exception that aborts the whole server (see issue #435).
+    fn forward(&self, x: &MlxArray) -> Result<UniquePtr<MlxArray>, String> {
+        mlxcel_core::try_conv2d(
             x,
             &self.weight,
             self.stride,
@@ -205,6 +210,7 @@ impl SubsamplingConv2DLayer {
             1,
             self.groups,
         )
+        .map_err(|e| format!("nemotron subsampling conv2d failed: {e}"))
     }
 }
 
@@ -327,7 +333,7 @@ impl ParakeetSubsamplingConv2D {
         &self,
         input_features: &MlxArray,
         attention_mask: Option<&MlxArray>,
-    ) -> UniquePtr<MlxArray> {
+    ) -> Result<UniquePtr<MlxArray>, String> {
         // input_features: [B, T, num_mel_bins]
         // Add channel dim: [B, T, F, 1]
         let mut x = mlxcel_core::expand_dims(input_features, -1);
@@ -341,7 +347,7 @@ impl ParakeetSubsamplingConv2D {
         });
 
         for (idx, layer) in self.layers.iter().enumerate() {
-            x = layer.forward(&x);
+            x = layer.forward(&x)?;
             // Mask after each conv layer (matches upstream ordering).
             if let Some(lengths) = current_lengths.as_mut() {
                 let stride = self.layer_strides[idx];
@@ -379,7 +385,7 @@ impl ParakeetSubsamplingConv2D {
         let transposed = mlxcel_core::transpose_axes(&x, &[0, 1, 3, 2]);
         let flattened = mlxcel_core::reshape(&transposed, &[batch, t, -1]);
 
-        self.linear.forward(&flattened)
+        Ok(self.linear.forward(&flattened))
     }
 }
 
@@ -544,9 +550,17 @@ impl ParakeetConvModule {
     /// `x: [B, T, C]`, `validity_mask: [B, T]` (true = valid frame, the
     /// caller-supplied mask is `output_mask` from the encoder so we
     /// match the upstream "all_masked_rows" guard).
-    fn forward(&self, x: &MlxArray, all_masked_rows: Option<&MlxArray>) -> UniquePtr<MlxArray> {
-        // Pointwise conv 1: out = 2 * channels (for GLU split).
-        let h = mlxcel_core::conv1d(x, &self.pointwise1, 1, 0, 1, 1);
+    fn forward(
+        &self,
+        x: &MlxArray,
+        all_masked_rows: Option<&MlxArray>,
+    ) -> Result<UniquePtr<MlxArray>, String> {
+        // Pointwise conv 1: out = 2 * channels (for GLU split). Fallible: the
+        // conv input shapes derive from the runtime audio length, so a crafted
+        // clip can mismatch the conv weights; `try_conv1d` turns MLX's eager
+        // shape throw into a per-request `Err` instead of a process abort.
+        let h = mlxcel_core::try_conv1d(x, &self.pointwise1, 1, 0, 1, 1)
+            .map_err(|e| format!("nemotron pointwise1 conv1d failed: {e}"))?;
         let h = if let Some(bias) = &self.pointwise1_bias {
             mlxcel_core::add(&h, bias)
         } else {
@@ -567,7 +581,8 @@ impl ParakeetConvModule {
 
         // Depthwise Conv1d, padding = (kernel-1)/2, groups = channels.
         let pad = ((self.kernel - 1) / 2) as i32;
-        let h = mlxcel_core::conv1d(&h, &self.depthwise, 1, pad, 1, self.channels);
+        let h = mlxcel_core::try_conv1d(&h, &self.depthwise, 1, pad, 1, self.channels)
+            .map_err(|e| format!("nemotron depthwise conv1d failed: {e}"))?;
         let h = if let Some(bias) = &self.depthwise_bias {
             mlxcel_core::add(&h, bias)
         } else {
@@ -580,12 +595,13 @@ impl ParakeetConvModule {
         let h = mlxcel_core::silu(&h);
 
         // Pointwise conv 2: channels -> channels.
-        let h = mlxcel_core::conv1d(&h, &self.pointwise2, 1, 0, 1, 1);
-        if let Some(bias) = &self.pointwise2_bias {
+        let h = mlxcel_core::try_conv1d(&h, &self.pointwise2, 1, 0, 1, 1)
+            .map_err(|e| format!("nemotron pointwise2 conv1d failed: {e}"))?;
+        Ok(if let Some(bias) = &self.pointwise2_bias {
             mlxcel_core::add(&h, bias)
         } else {
             h
-        }
+        })
     }
 }
 
@@ -861,7 +877,7 @@ impl ParakeetEncoderBlock {
         attention_mask: Option<&MlxArray>,
         valid_queries_f: Option<&MlxArray>,
         all_masked_rows: Option<&MlxArray>,
-    ) -> UniquePtr<MlxArray> {
+    ) -> Result<UniquePtr<MlxArray>, String> {
         // Half-FFN.
         let residual = mlxcel_core::copy(x);
         let n = self.norm_feed_forward1.forward(x);
@@ -881,7 +897,7 @@ impl ParakeetEncoderBlock {
 
         // Conv module.
         let normed = self.norm_conv.forward(&h);
-        let conv_out = self.conv.forward(&normed, all_masked_rows);
+        let conv_out = self.conv.forward(&normed, all_masked_rows)?;
         let h = mlxcel_core::add(&h, &conv_out);
 
         // Half-FFN.
@@ -891,7 +907,7 @@ impl ParakeetEncoderBlock {
         let h = mlxcel_core::add(&h, &half);
 
         // Out norm.
-        self.norm_out.forward(&h)
+        Ok(self.norm_out.forward(&h))
     }
 }
 
@@ -954,8 +970,8 @@ impl NemotronOmniSoundEncoder {
         &self,
         input_features: &MlxArray,
         attention_mask: Option<&MlxArray>,
-    ) -> UniquePtr<MlxArray> {
-        let mut hidden = self.subsampling.forward(input_features, attention_mask);
+    ) -> Result<UniquePtr<MlxArray>, String> {
+        let mut hidden = self.subsampling.forward(input_features, attention_mask)?;
         if self.input_scale != 1.0 {
             hidden = mlxcel_core::multiply_scalar(&hidden, self.input_scale);
         }
@@ -1017,9 +1033,42 @@ impl NemotronOmniSoundEncoder {
                 full_mask.as_deref(),
                 valid_queries_f.as_deref(),
                 all_masked_rows.as_deref(),
-            );
+            )?;
         }
 
-        hidden
+        Ok(hidden)
+    }
+}
+
+#[cfg(test)]
+mod abort_safety_tests {
+    //! Defense-in-depth coverage for issue #435: a conv shape fault on the
+    //! Nemotron H Nano Omni audio path must return a per-request `Err`, not
+    //! abort the process. The `try_conv2d`/`try_conv1d` FFI wrappers
+    //! themselves are covered by the channel-mismatch Err tests in
+    //! `src/lib/mlxcel-core/src/ffi_tests.rs` (added with the wrappers in
+    //! PR #434); these tests confirm the encoder structs route through the
+    //! fallible variants and surface the `Err` instead of aborting.
+    use super::*;
+
+    #[test]
+    fn subsampling_conv2d_layer_returns_err_on_channel_mismatch() {
+        // Channel-last conv2d weight layout is `[out, kh, kw, in/groups]`.
+        // The weight here expects C_in = 3, but the input carries C_in = 1, so
+        // MLX throws at conv graph-build. The fallible `try_conv2d` path must
+        // catch that throw and return `Err` rather than aborting.
+        let weight = mlxcel_core::from_slice_f32(&vec![0.0f32; 8 * 3 * 3 * 3], &[8, 3, 3, 3]);
+        let layer = SubsamplingConv2DLayer {
+            weight,
+            stride: 2,
+            padding: 1,
+            groups: 1,
+        };
+        let input = mlxcel_core::from_slice_f32(&vec![0.0f32; 8 * 8], &[1, 8, 8, 1]);
+        let result = layer.forward(&input);
+        assert!(
+            result.is_err(),
+            "a subsampling conv2d channel mismatch must return Err, not abort the process"
+        );
     }
 }

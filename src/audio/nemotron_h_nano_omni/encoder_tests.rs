@@ -247,7 +247,9 @@ fn encoder_loads_and_produces_expected_shape() {
     let data: Vec<f32> = (0..total).map(|i| (i as f32) * 1e-3).collect();
     let input = mlxcel_core::from_slice_f32(&data, &[1, frames, config.num_mel_bins as i32]);
 
-    let output = encoder.forward(input.as_ref().unwrap(), None);
+    let output = encoder
+        .forward(input.as_ref().unwrap(), None)
+        .expect("encoder forward on valid input");
     let shape = mlxcel_core::array_shape(&output);
     let expected_t = config.subsampling_output_length(frames as usize) as i32;
     assert_eq!(shape, vec![1, expected_t, config.hidden_size as i32]);
@@ -273,7 +275,9 @@ fn encoder_with_attention_mask_zeros_padded_frames() {
     mask_data.extend(vec![0i32; 16]);
     let mask = mlxcel_core::from_slice_i32(&mask_data, &[1, frames]);
 
-    let output = encoder.forward(input.as_ref().unwrap(), Some(mask.as_ref().unwrap()));
+    let output = encoder
+        .forward(input.as_ref().unwrap(), Some(mask.as_ref().unwrap()))
+        .expect("encoder forward on valid masked input");
     let shape = mlxcel_core::array_shape(&output);
     let expected_t = config.subsampling_output_length(frames as usize) as i32;
     assert_eq!(shape, vec![1, expected_t, config.hidden_size as i32]);
@@ -458,7 +462,9 @@ fn synthetic_audio_pipeline_produces_consistent_token_count() {
     let mask =
         mlxcel_core::from_slice_i32(&extracted.attention_mask, &[batch as i32, frames as i32]);
 
-    let encoded = encoder.forward(features.as_ref().unwrap(), Some(mask.as_ref().unwrap()));
+    let encoded = encoder
+        .forward(features.as_ref().unwrap(), Some(mask.as_ref().unwrap()))
+        .expect("encoder forward on valid CLI features");
     let encoded_shape = mlxcel_core::array_shape(&encoded);
 
     // Token count = post-subsampling length predicted by the formula.

@@ -333,7 +333,7 @@ impl NemotronHNanoOmniVlModel {
         let embed_dtype = bundle.projection.compute_dtype();
         let input_features = mlxcel_core::astype(input_features, embed_dtype);
 
-        let encoded = bundle.encoder.forward(&input_features, attention_mask);
+        let encoded = bundle.encoder.forward(&input_features, attention_mask)?;
         let projected = bundle.projection.forward(&encoded);
 
         // Trim to post-subsampling valid lengths and concatenate across
