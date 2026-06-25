@@ -9,6 +9,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Docs
 - Finalize the per-backend `MLXCEL_FUSED_QK_NORM` default decision: CUDA (GB10) was measured and is also slower than the graph path, so the fused QK-norm decode path stays opt-in (default off) on every backend; `docs/environment-variables.md` updated to drop the CUDA-pending rationale and record the determinism nuance (#355).
 
+### Chore
+- Bump the `mlxcel-core` and `mlxcel-surgery` member crates to Rust edition 2024 and align their versions to the root crate at 0.3.3, per the release-versioning rule (#272).
+
 ## [v0.3.3] - 2026-06-25
 
 ### Added
