@@ -2686,7 +2686,8 @@ fn try_conv2d_ok_matches_conv2d() {
     let input = ones(&[1, 5, 5, 2], dtype::FLOAT32);
     let weight = ones(&[3, 2, 2, 2], dtype::FLOAT32);
     let reference = conv2d(&input, &weight, 1, 1, 0, 0, 1, 1, 1);
-    let fallible = try_conv2d(&input, &weight, 1, 1, 0, 0, 1, 1, 1).expect("valid conv2d returns Ok");
+    let fallible =
+        try_conv2d(&input, &weight, 1, 1, 0, 0, 1, 1, 1).expect("valid conv2d returns Ok");
     assert_eq!(array_shape(&fallible), vec![1, 4, 4, 3]);
     assert_eq!(array_shape(&fallible), array_shape(&reference));
     eval(&fallible);
@@ -2714,6 +2715,28 @@ fn try_conv1d_returns_err_on_channel_mismatch() {
         result.is_err(),
         "a conv1d channel mismatch must return Err, not abort the process"
     );
+}
+
+#[test]
+fn try_conv1d_ok_matches_conv1d() {
+    // The happy path is identical to `conv1d`: a valid NLC input (1,10,2)
+    // convolved with an OKC weight (4,3,2) at stride 1 / no padding yields
+    // (1,8,4) and evaluates to the same values as the non-fallible op.
+    // Each output element sums K*C_in = 3*2 = 6 ones; 1*8*4 = 32 outputs.
+    let input = ones(&[1, 10, 2], dtype::FLOAT32);
+    let weight = ones(&[4, 3, 2], dtype::FLOAT32);
+    let reference = conv1d(&input, &weight, 1, 0, 1, 1);
+    let fallible = try_conv1d(&input, &weight, 1, 0, 1, 1).expect("valid conv1d returns Ok");
+    assert_eq!(array_shape(&fallible), vec![1, 8, 4]);
+    assert_eq!(array_shape(&fallible), array_shape(&reference));
+    eval(&fallible);
+    eval(&reference);
+    let fallible_sum = sum_all(&fallible);
+    let reference_sum = sum_all(&reference);
+    eval(&fallible_sum);
+    eval(&reference_sum);
+    assert_eq!(item_f32(&fallible_sum), item_f32(&reference_sum));
+    assert_eq!(item_f32(&fallible_sum), 192.0);
 }
 
 #[test]
