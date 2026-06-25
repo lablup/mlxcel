@@ -27,6 +27,15 @@
 //! the engine is not implemented yet rather than pretending to load a model.
 //! When a real engine arrives it will likely live in its own feature-gated
 //! crate and be constructed here.
+//!
+//! Note for the next implementer: [`ComputeBackend`] currently returns the
+//! concrete [`LoadedModel`], which is the MLX executor type. A genuinely
+//! non-MLX engine cannot construct a `LoadedModel`, so wiring one in will
+//! require either giving `LoadedModel` a non-MLX variant or evolving the trait
+//! to return an engine-neutral `Box<dyn LanguageModel>`. The concrete return
+//! type is deliberate for this seam-only step: the control plane pattern-matches
+//! concrete `LoadedModel` variants for multimodal dispatch, so an engine-neutral
+//! return would force a broad rework the issue scoped out.
 
 use std::path::Path;
 

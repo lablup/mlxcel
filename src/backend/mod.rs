@@ -46,8 +46,8 @@
 //!
 //! [`Backend`] is an enum that has a *single* variant ([`Backend::Mlx`]) under
 //! default features. [`MlxBackend`] is a zero-sized type, so the single-variant
-//! enum is itself zero-sized with no discriminant. [`select_backend`] is a
-//! `const`-evaluable constructor that always returns that one variant with no
+//! enum is itself zero-sized with no discriminant. [`select_backend`] is an
+//! `#[inline]` constructor that always returns that one variant with no
 //! environment read and no branch, and every [`Backend`] method is a
 //! single-arm `match` marked `#[inline]`. After inlining the dispatch folds
 //! away entirely: `select_backend().load_model(p)` lowers to a direct call to

@@ -14,6 +14,7 @@ src/
 ├── commands/                    # CLI subcommand handlers
 ├── execution/                   # runtime/device and sampling helpers
 ├── model_metadata.rs            # model-kind and loading-policy descriptors
+├── backend/                     # ComputeBackend seam: which engine executes forward()
 ├── loading/                     # model loading routers and family registries
 ├── loaded_model.rs              # LoadedModel enum and LanguageModel dispatch
 ├── loaded_model_capabilities.rs # multimodal capability routing
@@ -70,6 +71,12 @@ Important control surfaces:
   implementation.
 - `src/loaded_model.rs` and `src/loaded_model_capabilities.rs` keep downstream
   CLI/server code from matching on every concrete model type.
+- `src/backend/` is the compute-backend seam. CLI and server load sites call
+  `select_backend().load_model(...)` rather than `loading::load_model` directly,
+  so the engine that runs `LanguageModel::forward` is chosen at the load
+  boundary. Under default features the seam folds to the MLX backend at compile
+  time and adds no runtime dispatch; the optional `experimental-backend` feature
+  reserves a slot for a future non-MLX engine (issue #338).
 
 ## Request paths
 
