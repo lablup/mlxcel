@@ -547,3 +547,79 @@ fn resolve_end_of_turn_id_returns_none_when_no_marker_present() {
         "a tokenizer without <end_of_turn> or <turn|> must return None"
     );
 }
+
+/// Nemotron-H Nano Omni uses a ChatML template that closes every turn with
+/// `"<|im_end|>"` (id 151 in the released 30B checkpoint).  A tokenizer that
+/// registers only `"<|im_end|>"` and no Gemma marker must resolve to that id,
+/// because `"<|im_end|>"` is the last candidate in `EOT_CANDIDATES` and is
+/// reached after both Gemma entries return `None`.
+#[test]
+fn resolve_end_of_turn_id_handles_chatml_im_end_marker() {
+    // Nemotron tokenizer stub: "<|im_end|>" = id 151, no Gemma markers.
+    let tokenizer = stub_eot_tokenizer("<|im_end|>", 151);
+    assert_eq!(
+        resolve_end_of_turn_token_id(&tokenizer),
+        Some(151),
+        "Nemotron tokenizer must resolve <|im_end|> (id 151) as the end-of-turn id"
+    );
+}
+
+/// Build a minimal HuggingFace tokenizer stub with exactly two added special
+/// tokens.  Used to verify candidate ordering in
+/// `resolve_end_of_turn_token_id`: when the vocabulary contains both a Gemma
+/// marker and `"<|im_end|>"`, the function must return the first match in
+/// `EOT_CANDIDATES`, which is the Gemma one.
+fn stub_two_eot_tokenizer(
+    first_content: &str,
+    first_id: u32,
+    second_content: &str,
+    second_id: u32,
+) -> MlxcelTokenizer {
+    let json = format!(
+        r#"{{
+            "version": "1.0",
+            "truncation": null,
+            "padding": null,
+            "added_tokens": [
+                {{"id": {first_id}, "content": "{first_content}", "single_word": false,
+                  "lstrip": false, "rstrip": false, "normalized": false, "special": true}},
+                {{"id": {second_id}, "content": "{second_content}", "single_word": false,
+                  "lstrip": false, "rstrip": false, "normalized": false, "special": true}}
+            ],
+            "normalizer": null,
+            "pre_tokenizer": null,
+            "post_processor": null,
+            "decoder": null,
+            "model": {{
+                "type": "BPE",
+                "dropout": null,
+                "unk_token": null,
+                "continuing_subword_prefix": null,
+                "end_of_word_suffix": null,
+                "fuse_unk": false,
+                "byte_fallback": false,
+                "vocab": {{"a": 0, "b": 1, "{first_content}": {first_id}, "{second_content}": {second_id}}},
+                "merges": []
+            }}
+        }}"#
+    );
+    let tokenizer = tokenizers::Tokenizer::from_bytes(json.as_bytes())
+        .expect("failed to build stub two-token EOT tokenizer");
+    MlxcelTokenizer::HuggingFace(tokenizer)
+}
+
+/// When a tokenizer contains both `"<end_of_turn>"` (Gemma) and `"<|im_end|>"`
+/// (ChatML), `resolve_end_of_turn_token_id` must return the Gemma marker
+/// because it appears first in `EOT_CANDIDATES`.  This guards against a future
+/// ordering change that would regress the Gemma audio path on any tokenizer
+/// that also happens to define `"<|im_end|>"`.
+#[test]
+fn resolve_end_of_turn_id_prefers_gemma_over_chatml() {
+    // Tokenizer with both markers: Gemma "<end_of_turn>" = id 107, ChatML "<|im_end|>" = id 151.
+    let tokenizer = stub_two_eot_tokenizer("<end_of_turn>", 107, "<|im_end|>", 151);
+    assert_eq!(
+        resolve_end_of_turn_token_id(&tokenizer),
+        Some(107),
+        "<end_of_turn> must win over <|im_end|> when both are present (candidate order)"
+    );
+}

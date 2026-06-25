@@ -82,7 +82,7 @@ Implemented VLM variants include:
 - Moondream 3
 - Phi-3 Vision, Phi4MM, Phi4 SigLIP VLM
 - Molmo2 and Molmo-Point
-- Nemotron-H Nano Omni
+- Nemotron-H Nano Omni: ships a Conformer/Parakeet audio encoder and accepts spoken audio from the CLI with `--audio <path>`. Input audio is resampled to 16 kHz before the encoder. Server-side `input_audio` in `POST /v1/chat/completions` is also supported: the audio block is spliced inside the last user turn, before the `<|im_end|>` end-of-turn marker that the ChatML template uses (id 151 in the released checkpoint).
 
 Audio/video capability is model-specific. The server request types include
 `image_url`, `video_url`, and `input_audio` content blocks, but a loaded model
