@@ -197,6 +197,11 @@ pub(crate) fn spawn_model_worker_with_batch_config(
             tracing::info!("Model worker thread starting, loading model...");
 
             let load_start = Instant::now();
+            // Route model loading through the compute-backend seam (issue
+            // #338). Under default features this folds to the MLX backend with
+            // no runtime dispatch. The pipeline-parallel branch below is its
+            // own distributed loader and does not go through the seam.
+            let backend = crate::backend::select_backend();
             let result = if let Some(ref pipeline_runtime) = sched_config.pipeline_parallel_runtime
             {
                 match pipeline_runtime {
@@ -223,16 +228,16 @@ pub(crate) fn spawn_model_worker_with_batch_config(
                 Ok((crate::LoadedModel::PipelineLlama(model), tokenizer))
             })
             } else if sched_config.tensor_parallel.tp_size > 1 {
-                crate::load_model_with_tensor_parallel(
+                backend.load_model_with_tensor_parallel(
                     &model_path,
                     adapter_path.as_deref(),
                     &sched_config.tensor_parallel,
                 )
             } else if let Some(adapter) = adapter_path {
                 tracing::info!("Loading LoRA adapter from {:?}", adapter);
-                crate::load_model_with_adapter(&model_path, &adapter)
+                backend.load_model_with_adapter(&model_path, &adapter)
             } else {
-                crate::load_model(&model_path)
+                backend.load_model(&model_path)
             };
 
             let (model, tokenizer) = match result {
@@ -738,17 +743,20 @@ pub(crate) fn spawn_legacy_model_worker(
             );
 
             let load_start = Instant::now();
+            // Route model loading through the compute-backend seam (issue #338);
+            // folds to the MLX backend under default features.
+            let backend = crate::backend::select_backend();
             let result = if tensor_parallel.tp_size > 1 {
-                crate::load_model_with_tensor_parallel(
+                backend.load_model_with_tensor_parallel(
                     &model_path,
                     adapter_path.as_deref(),
                     &tensor_parallel,
                 )
             } else if let Some(adapter) = adapter_path {
                 tracing::info!("Loading LoRA adapter from {:?}", adapter);
-                crate::load_model_with_adapter(&model_path, &adapter)
+                backend.load_model_with_adapter(&model_path, &adapter)
             } else {
-                crate::load_model(&model_path)
+                backend.load_model(&model_path)
             };
 
             let (model, tokenizer) = match result {

@@ -44,6 +44,18 @@ metal = ["mlxcel-core/metal"]
 accelerate = ["mlxcel-core/accelerate"]
 cuda = ["mlxcel-core/cuda"]
 test-utils = []
+# Seam scaffold for an optional non-MLX forward-execution backend (issue #338).
+#
+# Default OFF. Shipping binaries (Apple Silicon, CUDA) compile no backend code
+# beyond the MLX path: the `crate::backend::experimental` module and the
+# `Backend::Experimental` enum variant are `cfg`-gated behind this feature, and
+# `select_backend()` folds to the single `Backend::Mlx` variant (a zero-sized
+# enum) with no runtime dispatch on the load or forward path. Enabling this
+# feature compiles the scaffold plug-in point where a future non-MLX engine
+# (the motivating target is FuriosaAI TCP / RNGD, which cannot route through
+# MLX) implements `ComputeBackend`. No kernels ship with this feature today; it
+# only lands the boundary.
+experimental-backend = []
 # Axis A "weight-load surgery" framework.
 #
 # On by default so production `mlxcel` and `mlxcel-server` binaries expose

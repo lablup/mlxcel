@@ -18,6 +18,7 @@
 //! direct MLX C++ bindings via mlxcel-core.
 
 pub mod audio;
+pub mod backend;
 pub mod cli;
 pub mod distributed;
 pub mod downloader;
@@ -77,6 +78,13 @@ pub use multimodal::{
     internvl_prompt, minicpmo_prompt, moondream3_prompt, phi3v_prompt, phi4_siglip_prompt,
     phi4mm_prompt, qwen_vl, video, vlm_prompt, vlm_runtime, youtu_vl_prompt,
 };
+
+// Re-export the compute-backend seam (issue #338). Control-plane callers in
+// both the library and the `mlxcel` / `mlxcel-server` binaries reach model
+// loading through `select_backend()` so the forward-execution engine is
+// chosen at one boundary. Under default features this folds to the single
+// MLX variant with no runtime dispatch.
+pub use backend::{Backend, ComputeBackend, MlxBackend, select_backend};
 
 // Re-export split modules
 pub use loaded_model::LoadedModel;

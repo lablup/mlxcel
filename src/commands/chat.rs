@@ -61,7 +61,7 @@ use mlxcel::sampling::{ResolvedSamplingParams, build_sampling_config};
 use mlxcel::server::chat_template::{ChatMessage, ChatTemplateProcessor};
 use mlxcel::server::model_provider::model_worker::StreamingDecodeState;
 use mlxcel::tokenizer::{MlxcelTokenizer, load_tokenizer};
-use mlxcel::{CxxGenerator, LanguageModel, SamplingConfig, initialize_runtime, load_model};
+use mlxcel::{CxxGenerator, LanguageModel, SamplingConfig, initialize_runtime, select_backend};
 use mlxcel_core::cache::KVCacheMode;
 use mlxcel_core::sampling::TokenBiasMap;
 
@@ -170,7 +170,7 @@ pub fn run_chat(opts: ChatOptions) -> Result<()> {
 
     println!("Loading model from {model_path:?}...");
     let load_start = Instant::now();
-    let (model, _tok_from_load) = load_model(&model_path)?;
+    let (model, _tok_from_load) = select_backend().load_model(&model_path)?;
     if matches!(model, mlxcel::LoadedModel::DiffusionGemma(_)) {
         // The REPL drives the autoregressive CxxGenerator loop; the
         // block-diffusion engine is one-shot only in phase 1 of issue #217.

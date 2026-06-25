@@ -33,12 +33,13 @@ use mlxcel::{
         resolve_model_shard_plan, shard_config_from_cli, validate_supported_runtime,
     },
     downloader::resolve_model_source_with_override,
-    initialize_runtime, load_model, load_model_with_adapter, load_model_with_tensor_parallel,
+    initialize_runtime,
     memory_estimate::{
         MemoryEstimate, QuantHint, estimate_total_memory, format_bytes, format_estimate,
     },
     quant_advisor::{advise_quantization, print_quant_advice},
     sampling::{ResolvedSamplingParams, build_sampling_config},
+    select_backend,
     server::chat_template::{ChatMessage, ChatTemplateProcessor},
     tokenizer::load_tokenizer,
     vision::merge::InputEmbeddings,
@@ -122,17 +123,21 @@ fn load_generation_model(
         &args.tensor_parallel.tp_embedding_mode,
         &args.tensor_parallel.tp_lm_head_mode,
     )?;
+    // Route model loading through the compute-backend seam (issue #338). Under
+    // default features `select_backend()` folds to the MLX backend with no
+    // runtime dispatch.
+    let backend = select_backend();
     let result = if shard_config.tp_size > 1 {
-        load_model_with_tensor_parallel(
+        backend.load_model_with_tensor_parallel(
             &args.model.model,
             args.model.adapter.as_deref(),
             &shard_config,
         )
     } else if let Some(ref adapter_path) = args.model.adapter {
         println!("Loading LoRA adapter from {:?}...", adapter_path);
-        load_model_with_adapter(&args.model.model, adapter_path)
+        backend.load_model_with_adapter(&args.model.model, adapter_path)
     } else {
-        load_model(&args.model.model)
+        backend.load_model(&args.model.model)
     }?;
     let load_elapsed = load_start.elapsed();
     // Issue #55: surface "resident after load" so operators (and the
@@ -972,7 +977,7 @@ fn run_generation_mode(
         }
 
         println!("Loading draft model from {:?}...", draft_model_path);
-        let (draft_model, _draft_tokenizer) = load_model(draft_model_path)?;
+        let (draft_model, _draft_tokenizer) = select_backend().load_model(draft_model_path)?;
         println!("Draft model loaded.");
         println!(
             "Resolved drafter kind: {} (block_size = {block_size}{})",
