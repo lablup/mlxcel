@@ -622,10 +622,8 @@ fn resolve_cli_pipeline_assignments_auto_splits_layers_across_stages() {
     assert_eq!(assignments.len(), 3);
     assert_eq!(assignments[0].layer_range.start, 0);
     assert_eq!(assignments[2].layer_range.end, 9);
-    assert!(
-        assignments
-            .iter()
-            .all(|stage| !stage.layer_range.is_empty())
-    );
+    assert!(assignments
+        .iter()
+        .all(|stage| !stage.layer_range.is_empty()));
     fs::remove_dir_all(args.model.model).unwrap();
 }
