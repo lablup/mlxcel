@@ -1071,4 +1071,46 @@ mod abort_safety_tests {
             "a subsampling conv2d channel mismatch must return Err, not abort the process"
         );
     }
+
+    #[test]
+    fn conv_module_pointwise1_returns_err_on_channel_mismatch() {
+        // Exercises the conv1d path. `pointwise1` expects 4 input channels
+        // (weight shape [8, 1, 4]); the input carries 2. MLX throws at
+        // conv graph-build; `try_conv1d` must catch that throw and return
+        // `Err` rather than aborting. The residual weights (depthwise,
+        // norm, pointwise2) are valid but are never reached.
+        let channels = 4i32;
+        let norm = ParakeetBatchNorm {
+            weight: mlxcel_core::ones(&[channels], mlxcel_core::dtype::FLOAT32),
+            bias: mlxcel_core::zeros(&[channels], mlxcel_core::dtype::FLOAT32),
+            running_mean: mlxcel_core::zeros(&[channels], mlxcel_core::dtype::FLOAT32),
+            running_var: mlxcel_core::ones(&[channels], mlxcel_core::dtype::FLOAT32),
+            eps: 1e-5,
+        };
+        let module = ParakeetConvModule {
+            // pointwise1 expands to 2*channels for GLU; expects in=4.
+            pointwise1: mlxcel_core::from_slice_f32(
+                &vec![0.0f32; 8 * 1 * 4],
+                &[2 * channels, 1, channels],
+            ),
+            depthwise: mlxcel_core::from_slice_f32(&vec![0.0f32; 4 * 3 * 1], &[channels, 3, 1]),
+            norm,
+            pointwise2: mlxcel_core::from_slice_f32(
+                &vec![0.0f32; 4 * 1 * 4],
+                &[channels, 1, channels],
+            ),
+            pointwise1_bias: None,
+            depthwise_bias: None,
+            pointwise2_bias: None,
+            kernel: 3,
+            channels,
+        };
+        // x: [B=1, T=8, C=2] — 2 channels, but pointwise1 expects 4.
+        let input = mlxcel_core::from_slice_f32(&vec![0.0f32; 1 * 8 * 2], &[1, 8, 2]);
+        let result = module.forward(&input, None);
+        assert!(
+            result.is_err(),
+            "a conv module pointwise1 channel mismatch must return Err, not abort the process"
+        );
+    }
 }
