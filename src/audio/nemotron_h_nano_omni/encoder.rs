@@ -1089,16 +1089,10 @@ mod abort_safety_tests {
         };
         let module = ParakeetConvModule {
             // pointwise1 expands to 2*channels for GLU; expects in=4.
-            pointwise1: mlxcel_core::from_slice_f32(
-                &vec![0.0f32; 8 * 1 * 4],
-                &[2 * channels, 1, channels],
-            ),
-            depthwise: mlxcel_core::from_slice_f32(&vec![0.0f32; 4 * 3 * 1], &[channels, 3, 1]),
+            pointwise1: mlxcel_core::from_slice_f32(&[0.0f32; 8 * 4], &[2 * channels, 1, channels]),
+            depthwise: mlxcel_core::from_slice_f32(&[0.0f32; 4 * 3], &[channels, 3, 1]),
             norm,
-            pointwise2: mlxcel_core::from_slice_f32(
-                &vec![0.0f32; 4 * 1 * 4],
-                &[channels, 1, channels],
-            ),
+            pointwise2: mlxcel_core::from_slice_f32(&[0.0f32; 4 * 4], &[channels, 1, channels]),
             pointwise1_bias: None,
             depthwise_bias: None,
             pointwise2_bias: None,
@@ -1106,7 +1100,7 @@ mod abort_safety_tests {
             channels,
         };
         // x: [B=1, T=8, C=2] — 2 channels, but pointwise1 expects 4.
-        let input = mlxcel_core::from_slice_f32(&vec![0.0f32; 1 * 8 * 2], &[1, 8, 2]);
+        let input = mlxcel_core::from_slice_f32(&[0.0f32; 8 * 2], &[1, 8, 2]);
         let result = module.forward(&input, None);
         assert!(
             result.is_err(),
