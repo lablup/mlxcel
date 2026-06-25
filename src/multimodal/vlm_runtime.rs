@@ -1174,8 +1174,8 @@ pub fn expand_gemma4_audio_tokens_for_server(
 ///    place as `sound_start? + sound_context * N + sound_end?`.
 /// 2. Otherwise splice the block before the last end-of-turn token (the
 ///    Nemotron ChatML template closes every turn with `<|im_end|>`), so it
-///    lands inside the last user turn rather than the open assistant turn —
-///    placing it in the assistant turn forces an immediate EOS at prefill
+///    lands inside the last user turn rather than the open assistant turn.
+///    Placing it in the assistant turn forces an immediate EOS at prefill
 ///    (issue #437 class).
 /// 3. Failing that (no end-of-turn id, or none in the prompt), fall back to
 ///    inserting before the final token.
