@@ -972,7 +972,16 @@ pub(crate) fn prepare_request_vlm_embeddings(
         )? {
             return Ok(Some(embeddings));
         }
-        match prepare_gemma4_audio_embeddings(
+        if let Some(embeddings) = prepare_gemma4_audio_embeddings(
+            model,
+            prompt_tokens,
+            images,
+            audio,
+            end_of_turn_token_id,
+        )? {
+            return Ok(Some(embeddings));
+        }
+        match prepare_nemotron_h_nano_omni_audio_embeddings(
             model,
             prompt_tokens,
             images,
@@ -981,8 +990,9 @@ pub(crate) fn prepare_request_vlm_embeddings(
         )? {
             Some(embeddings) => return Ok(Some(embeddings)),
             None => {
-                // Model does not support audio (not Gemma4 or no audio tower).
-                // Log a warning and fall through to image-only or text-only paths.
+                // Model does not support audio (not Gemma4 / Nemotron H Nano
+                // Omni, or no audio tower). Log a warning and fall through to
+                // image-only or text-only paths.
                 tracing::warn!("Audio input provided but model does not support audio; ignoring");
             }
         }
@@ -1061,22 +1071,26 @@ pub(crate) fn prepare_request_vlm_embeddings(
     Ok(None)
 }
 
-/// Resolve the Gemma `<end_of_turn>` token id from the tokenizer.
+/// Resolve the per-family end-of-turn token id from the tokenizer.
 ///
 /// The server flattens chat messages to text-only, so an `input_audio` request
-/// produces a prompt with no `<|audio|>` marker. Knowing the `<end_of_turn>`
-/// id lets [`crate::vlm_runtime::expand_gemma4_audio_tokens_for_server`] place
-/// the audio block inside the last user turn instead of the model turn (issue
-/// #437). Returns `None` when the marker is not a single token in this
-/// tokenizer (non-Gemma tokenizers), in which case the caller keeps the legacy
-/// "before the final token" insertion.
+/// produces a prompt with no audio placeholder marker. Knowing the end-of-turn
+/// id lets the per-family server audio expanders
+/// ([`crate::vlm_runtime::expand_gemma4_audio_tokens_for_server`] and
+/// [`crate::vlm_runtime::expand_nemotron_h_nano_omni_audio_tokens_for_server`])
+/// place the audio block inside the last user turn instead of the assistant
+/// turn (issue #437). Returns `None` when no known marker is a single token in
+/// this tokenizer, in which case the caller keeps the legacy "before the final
+/// token" insertion.
 fn resolve_end_of_turn_token_id(tokenizer: &MlxcelTokenizer) -> Option<i32> {
-    // The end-of-turn marker differs across Gemma generations: Gemma 2/3 use
-    // "<end_of_turn>", while Gemma 4 renamed it to "<turn|>" (id 106, and
-    // "<|turn>" for start-of-turn). Try both so the audio block lands inside
-    // the last user turn on every Gemma checkpoint; "<end_of_turn>" is tried
-    // first because that is the value carried by the non-Gemma-4 templates.
-    const EOT_CANDIDATES: &[&str] = &["<end_of_turn>", "<turn|>"];
+    // The end-of-turn marker differs across families: Gemma 2/3 use
+    // "<end_of_turn>", Gemma 4 renamed it to "<turn|>" (id 106, with "<|turn>"
+    // for start-of-turn), and the Nemotron H Nano Omni ChatML template closes
+    // every turn with "<|im_end|>". Try them in order so the audio block lands
+    // inside the last user turn on every supported checkpoint; the Gemma
+    // markers are tried first so the Gemma audio path keeps resolving to its
+    // own marker even on a tokenizer that also defines "<|im_end|>".
+    const EOT_CANDIDATES: &[&str] = &["<end_of_turn>", "<turn|>", "<|im_end|>"];
     if let Some(hf) = tokenizer.hf_tokenizer() {
         for candidate in EOT_CANDIDATES {
             if let Some(id) = hf.token_to_id(candidate) {
@@ -1284,6 +1298,179 @@ fn prepare_gemma4_unified_audio_embeddings(
         &processed_images,
         Some(&audio_input.features),
         Some(&audio_input.mask),
+    );
+
+    Ok(Some(embeddings))
+}
+
+/// Process audio (and optionally images) for the Nemotron H Nano Omni VLM.
+///
+/// Mirrors the CLI builder `compute_nemotron_h_nano_omni_audio_embeddings` in
+/// `src/commands/generate_vlm.rs`: it runs the Parakeet feature extractor,
+/// derives the post-subsampling audio token count, places the sound-context
+/// block inside the last user turn, runs the encoder + projector via
+/// `extract_audio_features`, and scatters the audio rows through
+/// `get_input_embeddings_full`. The encoder forward is the model method, not a
+/// duplicate.
+///
+/// Returns `Ok(None)` when the model is not a Nemotron H Nano Omni VLM, or it
+/// was loaded without an audio bundle or `sound_context_token_id`, so the
+/// dispatch in [`prepare_request_vlm_embeddings`] falls through to the next
+/// audio handler / the "model does not support audio" warning.
+fn prepare_nemotron_h_nano_omni_audio_embeddings(
+    model: &LoadedModel,
+    prompt_tokens: &mut Vec<i32>,
+    images: &[Vec<u8>],
+    audio_data: &[Vec<u8>],
+    end_of_turn_token_id: Option<i32>,
+) -> Result<Option<InputEmbeddings>> {
+    use crate::audio;
+    use crate::audio::nemotron_h_nano_omni::NemotronOmniFeatureExtractor;
+
+    let nemotron_vl = match model {
+        LoadedModel::NemotronHNanoOmniVLM(vl) => vl,
+        _ => return Ok(None),
+    };
+
+    let bundle = match nemotron_vl.audio() {
+        Some(bundle) => bundle,
+        None => {
+            tracing::warn!(
+                "Nemotron H Nano Omni model was loaded without audio support; ignoring audio input"
+            );
+            return Ok(None);
+        }
+    };
+
+    let sound_context_token_id = match nemotron_vl.config.sound_context_token_id {
+        Some(id) => id,
+        None => {
+            tracing::warn!(
+                "Nemotron H Nano Omni model has no sound_context_token_id; ignoring audio input"
+            );
+            return Ok(None);
+        }
+    };
+
+    if audio_data.len() > 1 {
+        tracing::warn!(
+            "Multiple audio inputs provided ({}); only the first will be processed",
+            audio_data.len()
+        );
+    }
+
+    // Server passes inline payload bytes; decode the first clip.
+    let (samples, sample_rate) = audio::load_wav_from_bytes(&audio_data[0])
+        .map_err(|e| anyhow!("Failed to decode audio: {}", e))?;
+    tracing::info!(
+        "Audio input: {} samples at {} Hz ({:.1}s)",
+        samples.len(),
+        sample_rate,
+        samples.len() as f64 / sample_rate.max(1) as f64
+    );
+
+    // The Parakeet feature extractor is tied to the configured sampling rate
+    // (16 kHz for the released checkpoint). The CLI path hard-errors on a rate
+    // mismatch; `load_wav_from_bytes` returns native-rate samples, so resample
+    // to the expected rate before mel extraction so the encoder frame count
+    // matches the duration-derived placeholder count. The only resampler in
+    // core targets 16 kHz, so a checkpoint expecting a different rate is
+    // rejected with a clear error (preserving the CLI's hard-error contract).
+    let expected_rate = bundle.config.sampling_rate;
+    let samples = if sample_rate != expected_rate {
+        if expected_rate == 16_000 {
+            audio::whisper_mel::resample_to_16k(&samples, sample_rate)
+        } else {
+            return Err(anyhow!(
+                "Audio sample rate {} Hz does not match the model's expected {} Hz; \
+                 resample the audio before sending it.",
+                sample_rate,
+                expected_rate
+            ));
+        }
+    } else {
+        samples
+    };
+
+    // Run the feature extractor and derive the post-subsampling token count,
+    // mirroring the CLI builder. Single server clip, so `feature_lengths` has
+    // length 1.
+    let extractor = NemotronOmniFeatureExtractor::new(&bundle.config);
+    let extracted = extractor.extract_batch(&[&samples[..]]);
+    let num_frames = extracted.features_shape[1] as usize;
+    let total_frames = extracted
+        .feature_lengths
+        .first()
+        .copied()
+        .unwrap_or(num_frames as i32) as usize;
+    let num_audio_tokens = bundle.config.subsampling_output_length(total_frames).max(1);
+
+    // Place the sound-context block inside the last user turn (issue #437): the
+    // server prompt is text-only with no `<so_embedding>` marker, so the block
+    // is spliced before the user turn's closing `<|im_end|>`.
+    crate::vlm_runtime::expand_nemotron_h_nano_omni_audio_tokens_for_server(
+        prompt_tokens,
+        sound_context_token_id,
+        nemotron_vl.config.sound_start_token_id,
+        nemotron_vl.config.sound_end_token_id,
+        num_audio_tokens,
+        end_of_turn_token_id,
+    );
+
+    // Optional image branch (combined image + audio): preprocess and expand
+    // image tokens the same way the image-only runtime path does, so the merged
+    // stream matches an image-only request.
+    let processed_images = if !images.is_empty() {
+        let decoded_images = decode_request_images(images)?;
+        let processed = nemotron_vl.processor.preprocess_batch(&decoded_images);
+        crate::vlm_runtime::expand_nemotron_h_nano_omni_image_tokens_for_server(
+            prompt_tokens,
+            nemotron_vl.config.img_context_token_id,
+            nemotron_vl.config.image_start_token_id,
+            nemotron_vl.config.image_end_token_id,
+            &processed,
+        );
+        processed
+    } else {
+        Vec::new()
+    };
+
+    // Build encoder inputs: row-major f32 features, int32 attention mask and
+    // per-clip lengths (the encoder broadcasts the mask via `less`).
+    let audio_features_in = mlxcel_core::from_slice_f32(
+        &extracted.features,
+        &[
+            extracted.features_shape[0],
+            extracted.features_shape[1],
+            extracted.features_shape[2],
+        ],
+    );
+    let audio_attention_mask = mlxcel_core::from_slice_i32(
+        &extracted.attention_mask,
+        &[
+            extracted.attention_mask_shape[0],
+            extracted.attention_mask_shape[1],
+        ],
+    );
+    let feature_lengths = mlxcel_core::from_slice_i32(
+        &extracted.feature_lengths,
+        &[extracted.feature_lengths.len() as i32],
+    );
+
+    let audio_features = nemotron_vl
+        .extract_audio_features(
+            &audio_features_in,
+            Some(&audio_attention_mask),
+            Some(&feature_lengths),
+        )
+        .map_err(|e| anyhow!("Audio feature extraction failed: {}", e))?;
+
+    let input_ids_arr =
+        mlxcel_core::from_slice_i32(prompt_tokens, &[1, prompt_tokens.len() as i32]);
+    let embeddings = nemotron_vl.get_input_embeddings_full(
+        &input_ids_arr,
+        &processed_images,
+        Some(&audio_features),
     );
 
     Ok(Some(embeddings))

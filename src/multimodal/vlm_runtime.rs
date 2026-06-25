@@ -1162,6 +1162,140 @@ pub fn expand_gemma4_audio_tokens_for_server(
     }
 }
 
+/// Place the Nemotron H Nano Omni sound-context block in the server prompt.
+///
+/// The server renders chat messages text-only (see
+/// `chat_request::build_chat_messages_with_thinking`, which keeps only
+/// `content.text()`), so an `input_audio` request produces a prompt with no
+/// `<so_embedding>` (`sound_context_token_id`) marker. This is the audio
+/// analogue of [`expand_gemma4_audio_tokens_for_server`]:
+///
+/// 1. If the rendered placeholder is present, wrap its first occurrence in
+///    place as `sound_start? + sound_context * N + sound_end?`.
+/// 2. Otherwise splice the block before the last end-of-turn token (the
+///    Nemotron ChatML template closes every turn with `<|im_end|>`), so it
+///    lands inside the last user turn rather than the open assistant turn —
+///    placing it in the assistant turn forces an immediate EOS at prefill
+///    (issue #437 class).
+/// 3. Failing that (no end-of-turn id, or none in the prompt), fall back to
+///    inserting before the final token.
+///
+/// Unlike the Gemma helper, the start/end framing tokens are emitted only when
+/// non-zero, matching the CLI expander `expand_nemotron_h_nano_omni_audio_tokens`
+/// (the released checkpoint surfaces no sound framing tokens, so both default to
+/// `0`, which means "no framing token in the stream").
+pub fn expand_nemotron_h_nano_omni_audio_tokens_for_server(
+    prompt_tokens: &mut Vec<i32>,
+    sound_context_token_id: i32,
+    sound_start_token_id: i32,
+    sound_end_token_id: i32,
+    num_audio_tokens: usize,
+    end_of_turn_token_id: Option<i32>,
+) {
+    let build_block = || {
+        let mut block = Vec::with_capacity(num_audio_tokens + 2);
+        if sound_start_token_id != 0 {
+            block.push(sound_start_token_id);
+        }
+        block.extend(std::iter::repeat_n(
+            sound_context_token_id,
+            num_audio_tokens,
+        ));
+        if sound_end_token_id != 0 {
+            block.push(sound_end_token_id);
+        }
+        block
+    };
+
+    // 1. Wrap a rendered `<so_embedding>` placeholder in place.
+    if prompt_tokens.contains(&sound_context_token_id) {
+        let mut expanded = Vec::with_capacity(prompt_tokens.len() + num_audio_tokens + 2);
+        let mut found = false;
+        for &token in prompt_tokens.iter() {
+            if token == sound_context_token_id && !found {
+                found = true;
+                expanded.extend(build_block());
+            } else {
+                expanded.push(token);
+            }
+        }
+        *prompt_tokens = expanded;
+        return;
+    }
+
+    // 2. Insert inside the last user turn (before its closing `<|im_end|>`).
+    if let Some(eot) = end_of_turn_token_id
+        && let Some(pos) = prompt_tokens.iter().rposition(|&token| token == eot)
+    {
+        prompt_tokens.splice(pos..pos, build_block());
+        return;
+    }
+
+    // 3. Last resort: insert before the final token.
+    let last = prompt_tokens.pop();
+    prompt_tokens.extend(build_block());
+    if let Some(tok) = last {
+        prompt_tokens.push(tok);
+    }
+}
+
+/// Expand Nemotron H Nano Omni image placeholders for the server path.
+///
+/// Mirrors the image-only runtime expansion in
+/// [`prepare_and_compute_vlm_embeddings`] (the `VlmRuntimeRef::NemotronHNanoOmni`
+/// arm) so a combined image + audio chat request produces the same image-token
+/// stream as an image-only request. When the text-only server prompt carries no
+/// `img_context_token_id` marker, one block per image is prepended; otherwise
+/// each placeholder is expanded in order. Framing tokens are emitted only when
+/// non-zero.
+pub fn expand_nemotron_h_nano_omni_image_tokens_for_server(
+    prompt_tokens: &mut Vec<i32>,
+    img_context_token_id: i32,
+    image_start_token_id: i32,
+    image_end_token_id: i32,
+    images: &[crate::vision::processors::nemotron_h_nano_omni::NemotronHNanoOmniImageInput],
+) {
+    let mut expanded = Vec::with_capacity(
+        prompt_tokens.len() + images.iter().map(|img| img.num_tokens + 2).sum::<usize>(),
+    );
+    let has_placeholder = prompt_tokens.contains(&img_context_token_id);
+
+    if !has_placeholder {
+        for image in images.iter() {
+            if image_start_token_id != 0 {
+                expanded.push(image_start_token_id);
+            }
+            for _ in 0..image.num_tokens {
+                expanded.push(img_context_token_id);
+            }
+            if image_end_token_id != 0 {
+                expanded.push(image_end_token_id);
+            }
+        }
+        expanded.extend_from_slice(prompt_tokens);
+    } else {
+        let mut image_idx = 0usize;
+        for &token in prompt_tokens.iter() {
+            if token == img_context_token_id && image_idx < images.len() {
+                let image = &images[image_idx];
+                if image_start_token_id != 0 {
+                    expanded.push(image_start_token_id);
+                }
+                for _ in 0..image.num_tokens {
+                    expanded.push(img_context_token_id);
+                }
+                if image_end_token_id != 0 {
+                    expanded.push(image_end_token_id);
+                }
+                image_idx += 1;
+            } else {
+                expanded.push(token);
+            }
+        }
+    }
+    *prompt_tokens = expanded;
+}
+
 #[cfg(test)]
 #[path = "vlm_runtime_tests.rs"]
 mod tests;

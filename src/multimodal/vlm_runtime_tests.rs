@@ -15,8 +15,8 @@
 use super::{
     VlmPreparationSummary, expand_gemma4_audio_tokens_for_server,
     expand_gemma4_unified_video_tokens, expand_gemma4_video_tokens,
-    format_molmo_v1_prompt_for_processor, prepared_embedding_refs,
-    shift_molmo_v1_image_input_idx_for_bos, should_prepare_vlm_embeddings,
+    expand_nemotron_h_nano_omni_audio_tokens_for_server, format_molmo_v1_prompt_for_processor,
+    prepared_embedding_refs, shift_molmo_v1_image_input_idx_for_bos, should_prepare_vlm_embeddings,
 };
 use crate::vision::merge::InputEmbeddings;
 use crate::vlm_prompt::{ImageTokenBlockAction, ImageTokenBlockStats};
@@ -301,4 +301,104 @@ fn server_audio_falls_back_when_end_of_turn_absent_from_prompt() {
     let mut prompt = vec![2, 11, 8];
     expand_gemma4_audio_tokens_for_server(&mut prompt, AUDIO, BOA, EOA, 2, Some(EOT));
     assert_eq!(prompt, vec![2, 11, BOA, AUDIO, AUDIO, EOA, 8]);
+}
+
+// -- Nemotron H Nano Omni server audio token placement -----------------------
+//
+// Token ids mirror the released `nemotron-3-nano-omni-30b-a3b-reasoning-4bit`
+// checkpoint: `<so_embedding>` (sound_context) = 27, `<|im_start|>` = 10,
+// `<|im_end|>` = 11. The released checkpoint surfaces no sound framing tokens,
+// so sound_start / sound_end default to 0 (no framing token in the stream).
+const SO_CTX: i32 = 27; // sound_context_token_id (<so_embedding>)
+const IM_START: i32 = 10; // <|im_start|>
+const IM_END: i32 = 11; // <|im_end|> (Nemotron ChatML end-of-turn)
+
+#[test]
+fn nemotron_server_audio_inserts_inside_last_user_turn() {
+    // ChatML prompt with no rendered `<so_embedding>` (server flattens chat to
+    // text-only). The block must land before the user turn's closing
+    // `<|im_end|>`, not after the open assistant generation prompt, or the
+    // model EOSes at prefill (issue #437 class).
+    // [<|im_start|>, "user", text, <|im_end|>, <|im_start|>, "assistant", <think>]
+    let mut prompt = vec![IM_START, 100, 7, IM_END, IM_START, 101, 102];
+    expand_nemotron_h_nano_omni_audio_tokens_for_server(&mut prompt, SO_CTX, 0, 0, 3, Some(IM_END));
+    // No framing tokens (start/end == 0); three sound-context placeholders are
+    // spliced before the user-closing `<|im_end|>` at index 3.
+    assert_eq!(
+        prompt,
+        vec![
+            IM_START, 100, 7, SO_CTX, SO_CTX, SO_CTX, IM_END, IM_START, 101, 102
+        ]
+    );
+    // The block sits inside the user turn: every placeholder precedes the only
+    // `<|im_end|>`, and the assistant generation prefix is untouched at the end.
+    let im_end_pos = prompt.iter().position(|&t| t == IM_END).unwrap();
+    let last_ctx_pos = prompt.iter().rposition(|&t| t == SO_CTX).unwrap();
+    assert!(last_ctx_pos < im_end_pos);
+    assert_eq!(&prompt[prompt.len() - 3..], &[IM_START, 101, 102]);
+}
+
+#[test]
+fn nemotron_server_audio_targets_the_last_user_turn_in_multi_turn() {
+    // system / user1 / assistant1 / user2, then the assistant generation
+    // prompt. The block must go before the LAST `<|im_end|>` (closing user2).
+    // idx: 0       1   2     3       4   5     6       7   8     9       10  11   12
+    //     [im_st, sys, im_e, im_st, u1, im_e, im_st, a1, im_e, im_st, u2, im_e, im_st(gen)]
+    let mut prompt = vec![
+        IM_START, 200, IM_END, IM_START, 201, IM_END, IM_START, 202, IM_END, IM_START, 203, IM_END,
+        IM_START,
+    ];
+    expand_nemotron_h_nano_omni_audio_tokens_for_server(&mut prompt, SO_CTX, 0, 0, 2, Some(IM_END));
+    // The block is spliced before the last `<|im_end|>` (index 11), i.e. after
+    // user2's text (203), leaving every earlier turn boundary intact.
+    assert_eq!(
+        prompt,
+        vec![
+            IM_START, 200, IM_END, IM_START, 201, IM_END, IM_START, 202, IM_END, IM_START, 203,
+            SO_CTX, SO_CTX, IM_END, IM_START
+        ]
+    );
+}
+
+#[test]
+fn nemotron_server_audio_wraps_rendered_placeholder_in_place() {
+    // If a `<so_embedding>` marker is already rendered into the prompt (a chat
+    // template that preserved the audio part), the first occurrence is expanded
+    // in place into N placeholders, leaving the turn structure intact.
+    let mut prompt = vec![IM_START, 100, SO_CTX, IM_END, IM_START, 101];
+    expand_nemotron_h_nano_omni_audio_tokens_for_server(&mut prompt, SO_CTX, 0, 0, 3, Some(IM_END));
+    assert_eq!(
+        prompt,
+        vec![IM_START, 100, SO_CTX, SO_CTX, SO_CTX, IM_END, IM_START, 101]
+    );
+}
+
+#[test]
+fn nemotron_server_audio_emits_framing_tokens_when_nonzero() {
+    // A hypothetical checkpoint that surfaces sound_start / sound_end framing
+    // tokens wraps the placeholder run, matching the CLI expander's optional
+    // framing behaviour.
+    let mut prompt = vec![IM_START, 100, IM_END, IM_START, 101];
+    expand_nemotron_h_nano_omni_audio_tokens_for_server(
+        &mut prompt,
+        SO_CTX,
+        90,
+        91,
+        2,
+        Some(IM_END),
+    );
+    assert_eq!(
+        prompt,
+        vec![IM_START, 100, 90, SO_CTX, SO_CTX, 91, IM_END, IM_START, 101]
+    );
+}
+
+#[test]
+fn nemotron_server_audio_falls_back_before_last_token_without_end_of_turn() {
+    // No placeholder and no end-of-turn id resolved (non-ChatML tokenizer):
+    // keep the historical "before the final token" insertion as a last resort
+    // rather than dropping the audio block.
+    let mut prompt = vec![2, 100, 8];
+    expand_nemotron_h_nano_omni_audio_tokens_for_server(&mut prompt, SO_CTX, 0, 0, 2, None);
+    assert_eq!(prompt, vec![2, 100, SO_CTX, SO_CTX, 8]);
 }
