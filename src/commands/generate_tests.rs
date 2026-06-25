@@ -132,7 +132,7 @@ fn apply_user_chat_template_wraps_prompt_as_user_message() {
 fn resolve_cli_prompt_skips_template_when_disabled() {
     let processor = ChatTemplateProcessor::with_template("wrapped".to_string());
 
-    let prompt = resolve_cli_prompt("Hello", true, Some(&processor), 0, 0);
+    let prompt = resolve_cli_prompt("Hello", true, Some(&processor), 0, 0, 0);
 
     assert_eq!(prompt, "Hello");
 }
@@ -141,7 +141,7 @@ fn resolve_cli_prompt_skips_template_when_disabled() {
 fn resolve_cli_prompt_falls_back_on_template_errors() {
     let processor = ChatTemplateProcessor::with_template("{% if %}".to_string());
 
-    let prompt = resolve_cli_prompt("Hello", false, Some(&processor), 0, 0);
+    let prompt = resolve_cli_prompt("Hello", false, Some(&processor), 0, 0, 0);
 
     assert_eq!(prompt, "Hello");
 }
@@ -161,11 +161,11 @@ fn vlm_chat_template_renders_video_content_part_in_user_turn() {
     let processor = ChatTemplateProcessor::with_template(template);
 
     // One video + the question: marker precedes the text within the turn.
-    let prompt = apply_vlm_chat_template(&processor, "Describe this video.", 0, 1);
+    let prompt = apply_vlm_chat_template(&processor, "Describe this video.", 0, 1, 0);
     assert_eq!(prompt, "user: <VID>Describe this video.");
 
     // Image + video together render in image-then-video order.
-    let mixed = apply_vlm_chat_template(&processor, "Q", 1, 1);
+    let mixed = apply_vlm_chat_template(&processor, "Q", 1, 1, 0);
     assert_eq!(mixed, "user: <IMG><VID>Q");
 }
 
@@ -183,8 +183,82 @@ fn vlm_chat_template_omits_video_when_template_lacks_video_support() {
     assert!(!processor.supports_video_content());
 
     // num_videos > 0 but the template has no video branch: no marker emitted.
-    let prompt = apply_vlm_chat_template(&processor, "Q", 0, 1);
+    let prompt = apply_vlm_chat_template(&processor, "Q", 0, 1, 0);
     assert_eq!(prompt, "user: Q");
+}
+
+#[test]
+fn vlm_chat_template_renders_audio_content_part_in_user_turn() {
+    // A Gemma-4-style template that handles image and audio content items. The
+    // `<|audio|>` marker must land alongside the text (inside the user turn),
+    // not before it: an audio block in the model turn forces an immediate EOS
+    // (issue #436).
+    let template = "user: {% for item in messages[0]['content'] %}\
+        {% if item['type'] == 'image' %}<IMG>\
+        {% elif item['type'] == 'audio' %}<|audio|>\
+        {% elif item['type'] == 'text' %}{{ item['text'] }}\
+        {% endif %}{% endfor %}"
+        .to_string();
+    let processor = ChatTemplateProcessor::with_template(template);
+    assert!(processor.supports_audio_content());
+
+    // One audio clip + the question: the audio marker precedes the text within
+    // the user turn, so `expand_gemma4_audio_tokens` finds it in place.
+    let prompt = apply_vlm_chat_template(&processor, "Transcribe this audio.", 0, 0, 1);
+    assert_eq!(prompt, "user: <|audio|>Transcribe this audio.");
+}
+
+#[test]
+fn vlm_chat_template_omits_audio_when_template_lacks_audio_support() {
+    // A template that handles images but NOT audio must not emit an audio
+    // content part (it would render the raw item as text and break the prompt).
+    let template = "user: {% for item in messages[0]['content'] %}\
+        {% if item['type'] == 'image' %}<IMG>\
+        {% elif item['type'] == 'text' %}{{ item['text'] }}\
+        {% endif %}{% endfor %}"
+        .to_string();
+    let processor = ChatTemplateProcessor::with_template(template);
+    assert!(!processor.supports_audio_content());
+
+    // num_audios > 0 but the template has no audio branch: no marker emitted.
+    let prompt = apply_vlm_chat_template(&processor, "Q", 0, 0, 1);
+    assert_eq!(prompt, "user: Q");
+}
+
+#[test]
+fn resolve_cli_prompt_routes_audio_through_vlm_template() {
+    // Audio-bearing request on a Gemma-4-style template (image + audio content
+    // support) renders the `<|audio|>` marker in the user turn (the VLM path),
+    // even with no images or videos. `apply_vlm_chat_template` takes the
+    // multimodal (content-list) path because the template handles image
+    // content, as the real Gemma 4 template does.
+    let template = "user: {% for item in messages[0]['content'] %}\
+        {% if item['type'] == 'image' %}<IMG>\
+        {% elif item['type'] == 'audio' %}<|audio|>\
+        {% elif item['type'] == 'text' %}{{ item['text'] }}\
+        {% endif %}{% endfor %}"
+        .to_string();
+    let processor = ChatTemplateProcessor::with_template(template);
+
+    let prompt = resolve_cli_prompt("Transcribe.", false, Some(&processor), 0, 0, 1);
+    assert_eq!(prompt, "user: <|audio|>Transcribe.");
+}
+
+#[test]
+fn resolve_cli_prompt_keeps_text_path_for_audio_on_plain_template() {
+    // A plain (string-content) template that does NOT handle audio content must
+    // keep the byte-identical text-only path even when an audio clip is present
+    // (no regression for non-audio models). The per-family token expansion then
+    // places the audio block instead.
+    let processor = ChatTemplateProcessor::with_template(
+        "{{ messages[0].role }}: {{ messages[0].content }}".to_string(),
+    );
+    assert!(!processor.supports_audio_content());
+
+    let with_audio = resolve_cli_prompt("Hello", false, Some(&processor), 0, 0, 1);
+    let without_audio = resolve_cli_prompt("Hello", false, Some(&processor), 0, 0, 0);
+    assert_eq!(with_audio, without_audio);
+    assert_eq!(with_audio, "user: Hello");
 }
 
 #[test]

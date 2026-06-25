@@ -1096,6 +1096,18 @@ fn prepare_gemma4_audio_embeddings(
         num_audio_tokens,
     );
 
+    // `AudioFeatureExtractor::extract` assumes a 16 kHz waveform (160-sample
+    // hop = 10 ms). `load_wav_from_bytes` returns native-rate samples, so
+    // without resampling the Conformer encoder emits the wrong frame count and
+    // desyncs from the duration-based placeholder count above, garbling the
+    // audio embeddings (issue #436). Resample to 16 kHz before mel extraction;
+    // duration (and thus `num_audio_tokens`) is rate-invariant.
+    let samples = if sample_rate != 16_000 {
+        audio::whisper_mel::resample_to_16k(&samples, sample_rate)
+    } else {
+        samples
+    };
+
     // Extract mel spectrogram features
     let extractor =
         audio::AudioFeatureExtractor::new(audio::AudioFeatureExtractorConfig::default());

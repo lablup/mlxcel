@@ -319,6 +319,18 @@ impl ChatTemplateProcessor {
         self.template.contains("'video'") || self.template.contains("\"video\"")
     }
 
+    /// Check if the template handles multimodal content with audio items.
+    ///
+    /// Returns true when the Jinja2 template iterates over content items and
+    /// checks for `type == 'audio'`, as the Gemma 4 audio templates do (they
+    /// emit an `<|audio|>` marker per audio item). Templates without this
+    /// pattern expect `content` to be a plain string, so the CLI keeps the
+    /// audio block out of the rendered prompt and lets the per-family token
+    /// expansion place it instead.
+    pub fn supports_audio_content(&self) -> bool {
+        self.template.contains("'audio'") || self.template.contains("\"audio\"")
+    }
+
     /// Apply the chat template with raw JSON messages (for multimodal content).
     ///
     /// This allows passing messages with list-type content entries (e.g.,
@@ -948,6 +960,23 @@ impl std::fmt::Debug for ChatTemplateProcessor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn supports_audio_content_detects_audio_branch() {
+        // A Gemma-4-style template that handles `type == 'audio'` is detected,
+        // so the CLI renders the `<|audio|>` marker into the user turn instead
+        // of relying on the per-family expansion fallback (issue #436).
+        let with_audio = ChatTemplateProcessor::with_template(
+            "{% if item['type'] == 'audio' %}<|audio|>{% endif %}".to_string(),
+        );
+        assert!(with_audio.supports_audio_content());
+
+        // A plain string-content template is not flagged as audio-capable.
+        let without_audio = ChatTemplateProcessor::with_template(
+            "{{ messages[0].role }}: {{ messages[0].content }}".to_string(),
+        );
+        assert!(!without_audio.supports_audio_content());
+    }
 
     #[test]
     fn test_default_template() {

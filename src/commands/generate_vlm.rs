@@ -373,6 +373,20 @@ fn compute_gemma4_audio_embeddings(
         num_audio_tokens,
     );
 
+    // `AudioFeatureExtractor::extract` assumes a 16 kHz waveform (160-sample
+    // hop = 10 ms). `load_wav_file` returns native-rate samples (the reference
+    // clips are 24 kHz), so without resampling the Conformer encoder emits
+    // ~1.5x too many frames and desyncs from the duration-based placeholder
+    // count above, garbling the audio embeddings and forcing an immediate EOS
+    // (issue #436). Resample to 16 kHz before mel extraction; duration (and
+    // thus `num_audio_tokens`) is rate-invariant, so the placeholder count
+    // stays correct and now matches the encoder output length.
+    let samples = if sample_rate != 16_000 {
+        audio::whisper_mel::resample_to_16k(&samples, sample_rate)
+    } else {
+        samples
+    };
+
     // Extract mel spectrogram
     let extractor =
         audio::AudioFeatureExtractor::new(audio::AudioFeatureExtractorConfig::default());
@@ -463,6 +477,15 @@ fn compute_gemma4_multimodal_embeddings(
         gemma4_vl.eoa_token_id,
         num_audio_tokens,
     );
+
+    // Resample to 16 kHz before mel extraction (the extractor assumes 16 kHz;
+    // see `compute_gemma4_audio_embeddings` and issue #436). Duration, and thus
+    // the placeholder count computed above, is rate-invariant.
+    let samples = if sample_rate != 16_000 {
+        audio::whisper_mel::resample_to_16k(&samples, sample_rate)
+    } else {
+        samples
+    };
 
     // Extract mel spectrogram
     let extractor =
@@ -1119,7 +1142,29 @@ fn expand_nemotron_h_nano_omni_image_tokens(
 
 #[cfg(test)]
 mod tests {
-    use super::expand_nemotron_h_nano_omni_audio_tokens;
+    use super::{expand_gemma4_audio_tokens, expand_nemotron_h_nano_omni_audio_tokens};
+
+    #[test]
+    fn gemma4_audio_expands_placeholder_in_place() {
+        // Prompt with the `<|audio|>` marker (id 9) already rendered into the
+        // user turn (Fix A): expand it in place into BOA + AUDIO*N + EOA so the
+        // audio block stays inside the user turn (issue #436).
+        // [BOS, <sot>, audio_token, EOS]
+        let mut tokens = vec![1i32, 5, 9, 2];
+        expand_gemma4_audio_tokens(&mut tokens, 9, 7, 8, 3);
+        // [BOS, <sot>, BOA, AUDIO, AUDIO, AUDIO, EOA, EOS]
+        assert_eq!(tokens, vec![1i32, 5, 7, 9, 9, 9, 8, 2]);
+    }
+
+    #[test]
+    fn gemma4_audio_fallback_inserts_before_last_token() {
+        // No `<|audio|>` placeholder present: the last-resort fallback inserts
+        // the audio block before the final token. (Fix A renders the marker so
+        // this path is not taken for Gemma 4, but it must stay correct.)
+        let mut tokens = vec![1i32, 42, 2];
+        expand_gemma4_audio_tokens(&mut tokens, 9, 7, 8, 2);
+        assert_eq!(tokens, vec![1i32, 42, 7, 9, 9, 8, 2]);
+    }
 
     #[test]
     fn audio_token_expansion_replaces_first_placeholder() {

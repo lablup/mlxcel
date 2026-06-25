@@ -531,22 +531,24 @@ fn apply_user_chat_template(processor: &ChatTemplateProcessor, user_prompt: &str
         .unwrap_or_else(|_| user_prompt.to_string())
 }
 
-/// Apply chat template with image / video placeholders for VLM models.
+/// Apply chat template with image / video / audio placeholders for VLM models.
 ///
 /// Creates multimodal content entries that Gemma3-style templates can
-/// render into `<start_of_image>` / `<|video|>` markers (which are later
-/// expanded into full soft-token blocks by the per-family expansion
+/// render into `<start_of_image>` / `<|video|>` / `<|audio|>` markers (which
+/// are later expanded into full soft-token blocks by the per-family expansion
 /// helpers).
 ///
 /// Only used when the template explicitly handles `type == 'image'`
 /// content items. Video content parts are only emitted when the template
-/// also handles `type == 'video'`. Templates without image support fall
-/// back to text-only.
+/// also handles `type == 'video'`, and audio content parts only when it
+/// handles `type == 'audio'`. Templates without image support fall back to
+/// text-only.
 fn apply_vlm_chat_template(
     processor: &ChatTemplateProcessor,
     user_prompt: &str,
     num_images: usize,
     num_videos: usize,
+    num_audios: usize,
 ) -> String {
     // Only attempt multimodal rendering when the template handles image
     // content items.  Templates that don't (e.g. Vicuna, ChatML) would
@@ -556,12 +558,18 @@ fn apply_vlm_chat_template(
     }
 
     // Build a multimodal content list:
-    // [{type: image}, ..., {type: video}, ..., {type: text, text: prompt}].
-    // Video items are only included when the template renders them (so the
-    // marker lands inside the user turn, alongside the question, instead of
-    // before it). Placing the video marker in the user turn matters: a video
-    // spliced before the user turn yields no grounded answer (issue #164).
+    // [{type: image}, ..., {type: video}, ..., {type: audio}, ...,
+    //  {type: text, text: prompt}].
+    // Video and audio items are only included when the template renders them
+    // (so the marker lands inside the user turn, alongside the question,
+    // instead of before it). Placing the marker in the user turn matters: a
+    // video spliced before the user turn yields no grounded answer (issue
+    // #164), and an audio block placed in the model turn forces an immediate
+    // EOS (issue #436). Mirrors the upstream mlx-vlm Gemma 4 processor, which
+    // adds the audio item to the user content list:
+    // https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/models/gemma4/processing_gemma4.py
     let emit_video = num_videos > 0 && processor.supports_video_content();
+    let emit_audio = num_audios > 0 && processor.supports_audio_content();
     let mut content_parts: Vec<serde_json::Value> = Vec::new();
     for _ in 0..num_images {
         content_parts.push(serde_json::json!({"type": "image"}));
@@ -569,6 +577,11 @@ fn apply_vlm_chat_template(
     if emit_video {
         for _ in 0..num_videos {
             content_parts.push(serde_json::json!({"type": "video"}));
+        }
+    }
+    if emit_audio {
+        for _ in 0..num_audios {
+            content_parts.push(serde_json::json!({"type": "audio"}));
         }
     }
     content_parts.push(serde_json::json!({"type": "text", "text": user_prompt}));
@@ -590,6 +603,7 @@ fn resolve_cli_prompt(
     processor: Option<&ChatTemplateProcessor>,
     num_images: usize,
     num_videos: usize,
+    num_audios: usize,
 ) -> String {
     if no_chat_template {
         return user_prompt.to_string();
@@ -598,8 +612,16 @@ fn resolve_cli_prompt(
     processor.map_or_else(
         || user_prompt.to_string(),
         |processor| {
-            if num_images > 0 || num_videos > 0 {
-                apply_vlm_chat_template(processor, user_prompt, num_images, num_videos)
+            // Route an audio-bearing request through the VLM template only when
+            // the template actually renders audio content items. This keeps the
+            // prompt byte-identical to the text-only path for every model whose
+            // template does not handle `type == 'audio'` (no regression), while
+            // letting Gemma 4 emit a `<|audio|>` marker in the user turn so the
+            // per-family token expansion finds and expands it in place
+            // (issue #436).
+            let emit_audio = num_audios > 0 && processor.supports_audio_content();
+            if num_images > 0 || num_videos > 0 || emit_audio {
+                apply_vlm_chat_template(processor, user_prompt, num_images, num_videos, num_audios)
             } else {
                 apply_user_chat_template(processor, user_prompt)
             }
@@ -613,6 +635,7 @@ fn load_cli_prompt(
     no_chat_template: bool,
     num_images: usize,
     num_videos: usize,
+    num_audios: usize,
 ) -> String {
     let processor = if no_chat_template {
         None
@@ -628,6 +651,7 @@ fn load_cli_prompt(
         processor.as_ref(),
         num_images,
         num_videos,
+        num_audios,
     )
 }
 
@@ -1449,6 +1473,7 @@ fn run_generate_once(mut args: GenerateArgs) -> Result<()> {
         args.generation.no_chat_template,
         args.generation.image.len(),
         cli_video_content_part_count(&args.model.model, args.generation.video.len()),
+        usize::from(args.generation.audio.is_some()),
     );
     let mut prompt_tokens = tokenize_prompt(&tokenizer, &prompt)?;
 

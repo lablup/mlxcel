@@ -348,6 +348,19 @@ mod tests {
     }
 
     #[test]
+    fn resample_scales_length_from_24k() {
+        // The Gemma 4 reference clips are 24 kHz. Resampling to 16 kHz scales the
+        // sample count by 2/3, which is what realigns the Conformer encoder frame
+        // count with the duration-based audio-token placeholder count (issue
+        // #436). Duration is preserved: a 1.0 s 24 kHz clip (24000 samples)
+        // becomes 16000 samples at 16 kHz.
+        let audio = tone(440.0, 1.0, 24_000);
+        assert_eq!(audio.len(), 24_000);
+        let out = resample_to_16k(&audio, 24_000);
+        assert_eq!(out.len(), 16_000);
+    }
+
+    #[test]
     fn reflect_pad_empty_returns_zeros() {
         // An empty waveform must not panic; the output is all zeros of length
         // 2 * pad, satisfying the downstream `padded.len() >= WHISPER_N_FFT`
