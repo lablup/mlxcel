@@ -2389,6 +2389,28 @@ std::unique_ptr<MlxArray> conv2d(
     ));
 }
 
+// Same body as `conv2d`, but declared `-> Result` on the Rust side so cxx wraps
+// the call in a try/catch and converts MLX's eager shape-mismatch exception (and
+// any other throw) into a Rust `Err` instead of letting it abort the process.
+// MLX validates conv shapes at graph-build time, so this catches the throw at op
+// construction, not only at eval.
+std::unique_ptr<MlxArray> try_conv2d(
+    const MlxArray& input,
+    const MlxArray& weight,
+    int32_t stride_h, int32_t stride_w,
+    int32_t padding_h, int32_t padding_w,
+    int32_t dilation_h, int32_t dilation_w,
+    int32_t groups
+) {
+    return std::make_unique<MlxArray>(mlx::core::conv2d(
+        input.inner, weight.inner,
+        {stride_h, stride_w},
+        {padding_h, padding_w},
+        {dilation_h, dilation_w},
+        groups
+    ));
+}
+
 std::unique_ptr<MlxArray> avg_pool2d(
     const MlxArray& input,
     int32_t kernel_h, int32_t kernel_w,
@@ -4150,6 +4172,24 @@ void fused_gated_delta_decode_step(
 
 // 1D convolution with groups support (for depthwise conv when groups=channels)
 std::unique_ptr<MlxArray> conv1d(
+    const MlxArray& input,
+    const MlxArray& weight,
+    int32_t stride,
+    int32_t padding,
+    int32_t dilation,
+    int32_t groups
+) {
+    return std::make_unique<MlxArray>(mlx::core::conv1d(
+        input.inner, weight.inner, stride, padding, dilation, groups
+    ));
+}
+
+// Same body as `conv1d`, but declared `-> Result` on the Rust side so cxx wraps
+// the call in a try/catch and converts MLX's eager shape-mismatch exception (and
+// any other throw) into a Rust `Err` instead of letting it abort the process.
+// MLX validates conv shapes at graph-build time, so this catches the throw at op
+// construction, not only at eval.
+std::unique_ptr<MlxArray> try_conv1d(
     const MlxArray& input,
     const MlxArray& weight,
     int32_t stride,

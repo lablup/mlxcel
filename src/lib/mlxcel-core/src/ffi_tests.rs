@@ -2660,6 +2660,63 @@ fn try_matmul_ok_matches_matmul() {
 }
 
 #[test]
+fn try_conv2d_returns_err_on_channel_mismatch() {
+    // MLX validates conv shapes eagerly at graph-build time. With the
+    // channel-last layout, the input's last dim is C_in and the weight's last
+    // dim is C_in/groups; here input C_in = 1 but the weight expects 3 (the
+    // exact mismatch from the real Gemma 4 audio crash: input (1,12,130,1) vs
+    // weight (128,3,1,3)). `mlx::core::conv2d` therefore throws at op
+    // construction. The fallible variant must catch that throw and return `Err`
+    // rather than letting it cross the FFI boundary uncaught (which would abort
+    // the whole process). No eval is needed; the throw happens at construction.
+    let input = ones(&[1, 12, 130, 1], dtype::FLOAT32);
+    let weight = ones(&[128, 3, 1, 3], dtype::FLOAT32);
+    let result = try_conv2d(&input, &weight, 1, 1, 0, 0, 1, 1, 1);
+    assert!(
+        result.is_err(),
+        "a conv2d channel mismatch must return Err, not abort the process"
+    );
+}
+
+#[test]
+fn try_conv2d_ok_matches_conv2d() {
+    // The happy path is identical to `conv2d`: a valid NHWC input (1,5,5,2)
+    // convolved with an OHWI weight (3,2,2,2) at stride 1 / no padding yields
+    // (1,4,4,3) and evaluates to the same values as the non-fallible op.
+    let input = ones(&[1, 5, 5, 2], dtype::FLOAT32);
+    let weight = ones(&[3, 2, 2, 2], dtype::FLOAT32);
+    let reference = conv2d(&input, &weight, 1, 1, 0, 0, 1, 1, 1);
+    let fallible = try_conv2d(&input, &weight, 1, 1, 0, 0, 1, 1, 1).expect("valid conv2d returns Ok");
+    assert_eq!(array_shape(&fallible), vec![1, 4, 4, 3]);
+    assert_eq!(array_shape(&fallible), array_shape(&reference));
+    eval(&fallible);
+    eval(&reference);
+    let fallible_sum = sum_all(&fallible);
+    let reference_sum = sum_all(&reference);
+    eval(&fallible_sum);
+    eval(&reference_sum);
+    // Each output element sums kH*kW*C_in = 2*2*2 = 8 ones; 1*4*4*3 = 48 outputs.
+    assert_eq!(item_f32(&fallible_sum), item_f32(&reference_sum));
+    assert_eq!(item_f32(&fallible_sum), 384.0);
+}
+
+#[test]
+fn try_conv1d_returns_err_on_channel_mismatch() {
+    // Same eager-validation behavior for conv1d: with the channel-last layout
+    // the input's last dim is C_in and the weight's last dim is C_in/groups.
+    // Here input C_in = 4 but the weight expects 2, so `mlx::core::conv1d`
+    // throws at op construction. The fallible variant must catch that throw and
+    // return `Err` rather than aborting the process. No eval is needed.
+    let input = ones(&[1, 10, 4], dtype::FLOAT32);
+    let weight = ones(&[8, 3, 2], dtype::FLOAT32);
+    let result = try_conv1d(&input, &weight, 1, 0, 1, 1);
+    assert!(
+        result.is_err(),
+        "a conv1d channel mismatch must return Err, not abort the process"
+    );
+}
+
+#[test]
 fn try_array_to_raw_bytes_round_trips_f32() {
     // The fallible readback materializes (contiguous + eval + copy-out) inside a
     // single cxx try/catch boundary. On a well-formed array it round-trips the

@@ -415,14 +415,16 @@ where
             };
 
             let input_ids_arr = prompt_ids_array(prompt_tokens);
-            let embeddings = gemma4_vl.get_input_embeddings_with_audio_and_cache(
-                &input_ids_arr,
-                &processed_images,
-                None,
-                None,
-                gemma4_keys.as_deref(),
-                active_caches.map(|c| &c.single),
-            );
+            let embeddings = gemma4_vl
+                .get_input_embeddings_with_audio_and_cache(
+                    &input_ids_arr,
+                    &processed_images,
+                    None,
+                    None,
+                    gemma4_keys.as_deref(),
+                    active_caches.map(|c| &c.single),
+                )
+                .map_err(|e| anyhow::anyhow!(e))?;
 
             Ok(Some(PreparedVlmEmbeddings {
                 embeddings,

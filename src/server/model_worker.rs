@@ -1129,12 +1129,14 @@ fn prepare_gemma4_audio_embeddings(
 
     let input_ids_arr =
         mlxcel_core::from_slice_i32(prompt_tokens, &[1, prompt_tokens.len() as i32]);
-    let embeddings = gemma4_vl.get_input_embeddings_with_audio(
-        &input_ids_arr,
-        &processed_images,
-        Some(&audio_features),
-        Some(&audio_mask),
-    );
+    let embeddings = gemma4_vl
+        .get_input_embeddings_with_audio(
+            &input_ids_arr,
+            &processed_images,
+            Some(&audio_features),
+            Some(&audio_mask),
+        )
+        .map_err(|e| anyhow::anyhow!(e))?;
 
     Ok(Some(embeddings))
 }

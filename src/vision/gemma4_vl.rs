@@ -103,7 +103,11 @@ impl Gemma4VLModel {
         input_ids: &MlxArray,
         images: &[processors::gemma4::Gemma4ImageInput],
     ) -> merge::InputEmbeddings {
+        // Vision-only path: no audio features, so the fallible audio-encoder
+        // branch in `..._and_cache` is never reached and the result is always
+        // `Ok` (vision patch-embed conv shapes are config-fixed, not in scope).
         self.get_input_embeddings_with_audio_and_cache(input_ids, images, None, None, None, None)
+            .expect("Gemma4 vision-only embeddings are infallible (no audio path)")
     }
 
     /// Compute input embeddings from video features.
@@ -128,9 +132,13 @@ impl Gemma4VLModel {
         videos: &[processors::gemma4::Gemma4VideoFeatures],
     ) -> merge::InputEmbeddings {
         if videos.is_empty() {
-            return self.get_input_embeddings_with_audio_and_cache(
-                input_ids, images, None, None, None, None,
-            );
+            // No audio features here, so the fallible audio-encoder branch is
+            // never reached and the result is always `Ok`.
+            return self
+                .get_input_embeddings_with_audio_and_cache(
+                    input_ids, images, None, None, None, None,
+                )
+                .expect("Gemma4 video/vision embeddings are infallible (no audio path)");
         }
 
         // Lower videos to per-frame Gemma4ImageInput entries so the
@@ -157,17 +165,24 @@ impl Gemma4VLModel {
                 });
             }
         }
+        // No audio features here, so the fallible audio-encoder branch is never
+        // reached and the result is always `Ok`.
         self.get_input_embeddings_with_audio_and_cache(input_ids, &combined, None, None, None, None)
+            .expect("Gemma4 video/vision embeddings are infallible (no audio path)")
     }
 
     /// Compute input embeddings with both vision and audio features.
+    ///
+    /// Returns `Err` when the Conformer audio encoder hits a data-dependent
+    /// conv shape fault, so the caller can fail the one request instead of
+    /// aborting the process.
     pub fn get_input_embeddings_with_audio(
         &self,
         input_ids: &MlxArray,
         images: &[processors::gemma4::Gemma4ImageInput],
         audio_features: Option<&MlxArray>,
         audio_mask: Option<&MlxArray>,
-    ) -> merge::InputEmbeddings {
+    ) -> Result<merge::InputEmbeddings, String> {
         self.get_input_embeddings_with_audio_and_cache(
             input_ids,
             images,
@@ -199,7 +214,7 @@ impl Gemma4VLModel {
         audio_mask: Option<&MlxArray>,
         image_keys: Option<&[Option<CacheKey>]>,
         vision_cache: Option<&std::sync::Mutex<VisionFeatureCache<SingleArrayFeatures>>>,
-    ) -> merge::InputEmbeddings {
+    ) -> Result<merge::InputEmbeddings, String> {
         // Apply the `sqrt(hidden_size)` embed scale to the text embeddings
         // once, up front. Vision features (produced by `self.embed_vision`)
         // and audio features (produced by `self.embed_audio`) are already in
@@ -314,7 +329,11 @@ impl Gemma4VLModel {
                 mlxcel_core::copy,
             );
 
-            let (audio_encodings, _) = audio_tower.forward(audio_feat, &audio_mel_mask);
+            // The Conformer audio encoder runs data-dependent conv ops whose
+            // shapes derive from the runtime audio length. A conv shape fault
+            // there surfaces as a recoverable `Err` (rather than a process
+            // abort) and is propagated to the caller as a per-request error.
+            let (audio_encodings, _) = audio_tower.forward(audio_feat, &audio_mel_mask)?;
             let audio_encodings = embed_audio.forward(&audio_encodings);
 
             let current_embeds = &result_embeds.inputs_embeds;
@@ -340,7 +359,7 @@ impl Gemma4VLModel {
         // returns; legacy CLI/single-row callers consume it via
         // `take_fallback` on the next prefill.
         self.per_layer_inputs_state.set_fallback(per_layer_inputs);
-        result_embeds
+        Ok(result_embeds)
     }
 
     // -- Per-sequence per_layer_inputs --------------------

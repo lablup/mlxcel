@@ -104,7 +104,11 @@ impl SSCPConvBlock {
         })
     }
 
-    fn forward(&self, x: &MlxArray, mask: &MlxArray) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
+    fn forward(
+        &self,
+        x: &MlxArray,
+        mask: &MlxArray,
+    ) -> Result<(UniquePtr<MlxArray>, UniquePtr<MlxArray>), String> {
         // x: [B, T, F, C] (MLX channel-last)
         // mask: [B, T] (True = invalid/padding)
 
@@ -121,8 +125,12 @@ impl SSCPConvBlock {
         // pad_width is flat: [B_before, B_after, T_before, T_after, F_before, F_after, C_before, C_after]
         let x = mlxcel_core::pad(&x, &[0, 0, 1, 1, 1, 1, 0, 0], 0.0);
 
-        // Conv2d with stride=2, padding=0
-        let x = mlxcel_core::conv2d(&x, &self.conv_weight, 2, 2, 0, 0, 1, 1, 1);
+        // Conv2d with stride=2, padding=0. Routed through the fallible FFI
+        // variant: the input shape is data-dependent (derived from the runtime
+        // audio length), so a conv shape fault must degrade to a recoverable
+        // per-request error rather than abort the process via std::terminate.
+        let x = mlxcel_core::try_conv2d(&x, &self.conv_weight, 2, 2, 0, 0, 1, 1, 1)
+            .map_err(|e| format!("audio SSCP conv2d failed: {e}"))?;
         let out_shape = mlxcel_core::array_shape(&x);
         let t_out = out_shape[1];
 
@@ -144,7 +152,7 @@ impl SSCPConvBlock {
         // ReLU
         let x = mlxcel_core::relu(&x);
 
-        (x, mask_sliced)
+        Ok((x, mask_sliced))
     }
 }
 
@@ -202,13 +210,13 @@ impl SubSampleConvProjection {
         &self,
         audio_mel: &MlxArray,
         mask: &MlxArray,
-    ) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
+    ) -> Result<(UniquePtr<MlxArray>, UniquePtr<MlxArray>), String> {
         // audio_mel: [B, T, F_in=128]
         // Add channel dim: [B, T, F, 1]
         let x = mlxcel_core::expand_dims(audio_mel, -1);
 
-        let (x, mask) = self.layer0.forward(&x, mask);
-        let (x, mask) = self.layer1.forward(&x, &mask);
+        let (x, mask) = self.layer0.forward(&x, mask)?;
+        let (x, mask) = self.layer1.forward(&x, &mask)?;
 
         // Flatten F*C -> [B, T, F*C]
         let shape = mlxcel_core::array_shape(&x);
@@ -219,7 +227,7 @@ impl SubSampleConvProjection {
 
         // Project to hidden_size
         let x = self.input_proj_linear.forward(&x);
-        (x, mask)
+        Ok((x, mask))
     }
 }
 
@@ -351,7 +359,7 @@ impl ConformerLightConv1d {
         })
     }
 
-    fn forward(&self, x: &MlxArray) -> UniquePtr<MlxArray> {
+    fn forward(&self, x: &MlxArray) -> Result<UniquePtr<MlxArray>, String> {
         let residual = mlxcel_core::copy(x);
 
         let x = self.pre_layer_norm.forward(x);
@@ -369,16 +377,21 @@ impl ConformerLightConv1d {
         // Causal padding for Conv1d: pad T dimension
         let x = mlxcel_core::pad(&x, &[0, 0, self.causal_padding as i32, 0, 0, 0], 0.0);
 
-        // Depthwise conv1d: groups = hidden_size (each channel independently)
+        // Depthwise conv1d: groups = hidden_size (each channel independently).
+        // Routed through the fallible FFI variant: the input shape is
+        // data-dependent (derived from the runtime audio length), so a conv
+        // shape fault must degrade to a recoverable per-request error rather
+        // than abort the process via std::terminate.
         let channels = mlxcel_core::array_shape(&x)[2];
-        let x = mlxcel_core::conv1d(&x, &self.depthwise_conv1d_weight, 1, 0, 1, channels);
+        let x = mlxcel_core::try_conv1d(&x, &self.depthwise_conv1d_weight, 1, 0, 1, channels)
+            .map_err(|e| format!("audio depthwise conv1d failed: {e}"))?;
 
         let x = clip_gradient(&x, self.gradient_clipping);
         let x = self.conv_norm.forward(&x);
         let x = mlxcel_core::silu(&x);
         let x = self.linear_end.forward(&x);
 
-        mlxcel_core::add(&x, &residual)
+        Ok(mlxcel_core::add(&x, &residual))
     }
 }
 
@@ -468,7 +481,7 @@ impl ConformerBlock {
         x: &MlxArray,
         mask: &MlxArray,
         causal_valid_mask: &MlxArray,
-    ) -> UniquePtr<MlxArray> {
+    ) -> Result<UniquePtr<MlxArray>, String> {
         let x = self.feed_forward1.forward(x);
 
         // Attention with pre/post norm and residual
@@ -487,10 +500,10 @@ impl ConformerBlock {
         let validity_f = mlxcel_core::astype(&validity_expanded, mlxcel_core::array_dtype(&x));
         let x = mlxcel_core::multiply(&x, &validity_f);
 
-        let x = self.lconv1d.forward(&x);
+        let x = self.lconv1d.forward(&x)?;
         let x = self.feed_forward2.forward(&x);
         let x = clip_gradient(&x, self.gradient_clipping);
-        self.norm_out.forward(&x)
+        Ok(self.norm_out.forward(&x))
     }
 }
 
@@ -577,15 +590,15 @@ impl AudioEncoder {
         &self,
         audio_mel: &MlxArray,
         audio_mel_mask: &MlxArray,
-    ) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
+    ) -> Result<(UniquePtr<MlxArray>, UniquePtr<MlxArray>), String> {
         let (mut encodings, mut current_mask) = self
             .subsample_conv_projection
-            .forward(audio_mel, audio_mel_mask);
+            .forward(audio_mel, audio_mel_mask)?;
 
         let causal_valid_mask = self.build_causal_valid_mask();
 
         for block in &self.layers {
-            encodings = block.forward(&encodings, &current_mask, &causal_valid_mask);
+            encodings = block.forward(&encodings, &current_mask, &causal_valid_mask)?;
         }
 
         // Output projection (with bias)
@@ -609,6 +622,6 @@ impl AudioEncoder {
         let zeros = mlxcel_core::zeros_like(&encodings);
         encodings = mlxcel_core::where_cond(&mask_expanded, &zeros, &encodings);
 
-        (encodings, current_mask)
+        Ok((encodings, current_mask))
     }
 }

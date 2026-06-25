@@ -392,12 +392,14 @@ fn compute_gemma4_audio_embeddings(
     // Compute embeddings
     let input_ids_arr =
         mlxcel_core::from_slice_i32(prompt_tokens, &[1, prompt_tokens.len() as i32]);
-    let embeddings = gemma4_vl.get_input_embeddings_with_audio(
-        &input_ids_arr,
-        &[], // no images
-        Some(&audio_features),
-        Some(&audio_mask),
-    );
+    let embeddings = gemma4_vl
+        .get_input_embeddings_with_audio(
+            &input_ids_arr,
+            &[], // no images
+            Some(&audio_features),
+            Some(&audio_mask),
+        )
+        .map_err(|e| anyhow::anyhow!(e))?;
 
     print_preparation_summary(VlmPreparationSummary::Gemma4Audio {
         audio_tokens: num_audio_tokens,
@@ -478,12 +480,14 @@ fn compute_gemma4_multimodal_embeddings(
     // Compute embeddings with both images and audio
     let input_ids_arr =
         mlxcel_core::from_slice_i32(prompt_tokens, &[1, prompt_tokens.len() as i32]);
-    let embeddings = gemma4_vl.get_input_embeddings_with_audio(
-        &input_ids_arr,
-        &processed_images,
-        Some(&audio_features),
-        Some(&audio_mask),
-    );
+    let embeddings = gemma4_vl
+        .get_input_embeddings_with_audio(
+            &input_ids_arr,
+            &processed_images,
+            Some(&audio_features),
+            Some(&audio_mask),
+        )
+        .map_err(|e| anyhow::anyhow!(e))?;
 
     Ok(Some(embeddings))
 }

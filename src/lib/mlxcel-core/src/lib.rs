@@ -962,6 +962,28 @@ mod ffi {
             groups: i32,
         ) -> UniquePtr<MlxArray>;
 
+        /// Fallible 2D convolution.
+        ///
+        /// Same effect as [`conv2d`], but declared `-> Result` so cxx catches
+        /// any MLX C++ exception at the FFI boundary and returns it as a Rust
+        /// `Err` instead of letting it cross uncaught and abort the process.
+        /// MLX validates conv shapes eagerly at graph-build time, so a shape
+        /// mismatch (e.g. input/weight channel mismatch) throws at op
+        /// construction (not only at eval); this variant catches that. Used on
+        /// the audio-encoder conv path whose input shapes derive from the
+        /// runtime audio length.
+        fn try_conv2d(
+            input: &MlxArray,
+            weight: &MlxArray,
+            stride_h: i32,
+            stride_w: i32,
+            padding_h: i32,
+            padding_w: i32,
+            dilation_h: i32,
+            dilation_w: i32,
+            groups: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
+
         /// 2D average pooling
         /// Used by: VisionModule (Gemma3 AvgPool projector)
         fn avg_pool2d(
@@ -1796,6 +1818,25 @@ mod ffi {
             dilation: i32,
             groups: i32,
         ) -> UniquePtr<MlxArray>;
+
+        /// Fallible 1D convolution.
+        ///
+        /// Same effect as [`conv1d`], but declared `-> Result` so cxx catches
+        /// any MLX C++ exception at the FFI boundary and returns it as a Rust
+        /// `Err` instead of letting it cross uncaught and abort the process.
+        /// MLX validates conv shapes eagerly at graph-build time, so a shape
+        /// mismatch (e.g. input/weight channel mismatch) throws at op
+        /// construction (not only at eval); this variant catches that. Used on
+        /// the audio-encoder depthwise-conv path whose input shapes derive from
+        /// the runtime audio length.
+        fn try_conv1d(
+            input: &MlxArray,
+            weight: &MlxArray,
+            stride: i32,
+            padding: i32,
+            dilation: i32,
+            groups: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
 
         /// Swap axes (convenient for SSM attention)
         fn swap_axes(a: &MlxArray, axis1: i32, axis2: i32) -> UniquePtr<MlxArray>;

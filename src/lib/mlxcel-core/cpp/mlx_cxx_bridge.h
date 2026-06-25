@@ -704,6 +704,17 @@ std::unique_ptr<MlxArray> conv2d(
     int32_t dilation_h, int32_t dilation_w,
     int32_t groups
 );
+// Fallible counterpart of `conv2d`; declared `-> Result` in the bridge so cxx
+// catches MLX's eager shape-mismatch exception (and any other throw) and
+// surfaces it as a Rust `Err` instead of aborting.
+std::unique_ptr<MlxArray> try_conv2d(
+    const MlxArray& input,
+    const MlxArray& weight,
+    int32_t stride_h, int32_t stride_w,
+    int32_t padding_h, int32_t padding_w,
+    int32_t dilation_h, int32_t dilation_w,
+    int32_t groups
+);
 
 // 2D average pooling
 // Used by: VisionModule (Gemma3 AvgPool projector)
@@ -1177,6 +1188,17 @@ std::unique_ptr<MlxArray> softplus(const MlxArray& a);
 
 // 1D convolution with groups support (for depthwise conv when groups=channels)
 std::unique_ptr<MlxArray> conv1d(
+    const MlxArray& input,
+    const MlxArray& weight,
+    int32_t stride,
+    int32_t padding,
+    int32_t dilation,
+    int32_t groups
+);
+// Fallible counterpart of `conv1d`; declared `-> Result` in the bridge so cxx
+// catches MLX's eager shape-mismatch exception (and any other throw) and
+// surfaces it as a Rust `Err` instead of aborting.
+std::unique_ptr<MlxArray> try_conv1d(
     const MlxArray& input,
     const MlxArray& weight,
     int32_t stride,
