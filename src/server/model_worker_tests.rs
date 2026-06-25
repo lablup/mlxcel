@@ -19,7 +19,7 @@ use image::{DynamicImage, ImageBuffer, ImageFormat, Rgb};
 use super::{
     StreamingDecodeState, build_generation_result, decode_request_images,
     decode_request_images_with_limits, merge_config_stop_tokens, parse_byte_fallback_token,
-    safe_emit_boundary,
+    resolve_end_of_turn_token_id, safe_emit_boundary,
 };
 use crate::SamplingConfig;
 use crate::server::media::ImageInputLimits;
@@ -425,5 +425,125 @@ fn run_core_thread_or_abort_forwards_err_without_aborting() {
         result,
         Err("recoverable"),
         "a recoverable Err return must be forwarded, not treated as a panic"
+    );
+}
+
+// ── resolve_end_of_turn_token_id tests ───────────────────────────────────────
+
+/// Build a minimal HuggingFace tokenizer stub that has exactly one added
+/// special token acting as the end-of-turn marker.  The model vocabulary
+/// intentionally contains only ASCII letter tokens so that encoding either
+/// Gemma EOT candidate through the BPE path always produces multiple (or
+/// zero) pieces, preventing a false-positive from the SentencePiece/Tiktoken
+/// fallback branch.
+fn stub_eot_tokenizer(eot_content: &str, eot_id: u32) -> MlxcelTokenizer {
+    let json = format!(
+        r#"{{
+            "version": "1.0",
+            "truncation": null,
+            "padding": null,
+            "added_tokens": [
+                {{"id": {eot_id}, "content": "{eot_content}", "single_word": false,
+                  "lstrip": false, "rstrip": false, "normalized": false, "special": true}}
+            ],
+            "normalizer": null,
+            "pre_tokenizer": null,
+            "post_processor": null,
+            "decoder": null,
+            "model": {{
+                "type": "BPE",
+                "dropout": null,
+                "unk_token": null,
+                "continuing_subword_prefix": null,
+                "end_of_word_suffix": null,
+                "fuse_unk": false,
+                "byte_fallback": false,
+                "vocab": {{"a": 0, "b": 1, "{eot_content}": {eot_id}}},
+                "merges": []
+            }}
+        }}"#
+    );
+    let tokenizer = tokenizers::Tokenizer::from_bytes(json.as_bytes())
+        .expect("failed to build stub EOT tokenizer");
+    MlxcelTokenizer::HuggingFace(tokenizer)
+}
+
+/// Build a minimal HuggingFace tokenizer stub with no EOT-style added tokens
+/// and a small ASCII vocabulary.  Used to exercise the `None` path in
+/// `resolve_end_of_turn_token_id` for models whose tokenizer carries neither
+/// `<end_of_turn>` nor `<turn|>`.
+fn stub_tokenizer_no_eot() -> MlxcelTokenizer {
+    let json = r#"{
+        "version": "1.0",
+        "truncation": null,
+        "padding": null,
+        "added_tokens": [],
+        "normalizer": null,
+        "pre_tokenizer": null,
+        "post_processor": null,
+        "decoder": null,
+        "model": {
+            "type": "BPE",
+            "dropout": null,
+            "unk_token": null,
+            "continuing_subword_prefix": null,
+            "end_of_word_suffix": null,
+            "fuse_unk": false,
+            "byte_fallback": false,
+            "vocab": {"a": 0, "b": 1},
+            "merges": []
+        }
+    }"#;
+    let tokenizer = tokenizers::Tokenizer::from_bytes(json.as_bytes())
+        .expect("failed to build stub no-EOT tokenizer");
+    MlxcelTokenizer::HuggingFace(tokenizer)
+}
+
+/// Gemma 4 uses `"<turn|>"` (id 106) as its end-of-turn marker instead of
+/// `"<end_of_turn>"`.  Before PR #440 `resolve_end_of_turn_token_id` only
+/// looked up `"<end_of_turn>"` and returned `None` for Gemma 4 tokenizers,
+/// causing the audio block to fall back to a model-turn insertion and
+/// producing 0 output tokens.  This test guards that regression: a tokenizer
+/// that has `"<turn|>"` but not `"<end_of_turn>"` must return `Some(106)`.
+#[test]
+fn resolve_end_of_turn_id_handles_gemma4_turn_marker() {
+    // Gemma 4 tokenizer: "<turn|>" = id 106, no "<end_of_turn>" anywhere.
+    let tokenizer = stub_eot_tokenizer("<turn|>", 106);
+    assert_eq!(
+        resolve_end_of_turn_token_id(&tokenizer),
+        Some(106),
+        "Gemma 4 tokenizer must resolve <turn|> (id 106) as the end-of-turn id"
+    );
+}
+
+/// Gemma 2 and Gemma 3 tokenizers carry `"<end_of_turn>"` as the EOT marker.
+/// `resolve_end_of_turn_token_id` must find it via `token_to_id` before even
+/// reaching the `"<turn|>"` candidate, so the returned id matches the token's
+/// entry in the added-tokens table.
+#[test]
+fn resolve_end_of_turn_id_handles_gemma23_end_of_turn_marker() {
+    // Gemma 2/3 tokenizer: "<end_of_turn>" = id 107.
+    let tokenizer = stub_eot_tokenizer("<end_of_turn>", 107);
+    assert_eq!(
+        resolve_end_of_turn_token_id(&tokenizer),
+        Some(107),
+        "Gemma 2/3 tokenizer must resolve <end_of_turn> (id 107) as the end-of-turn id"
+    );
+}
+
+/// For models whose tokenizer contains neither `"<end_of_turn>"` nor
+/// `"<turn|>"` as a registered token, `resolve_end_of_turn_token_id` must
+/// return `None`.  The caller keeps its own fallback (insert before the last
+/// token) in that case.
+#[test]
+fn resolve_end_of_turn_id_returns_none_when_no_marker_present() {
+    // Minimal tokenizer with no EOT-style tokens: neither candidate is in the
+    // vocabulary or added-tokens table, and encoding either marker through the
+    // BPE path produces zero or multiple pieces, so the fallback also yields None.
+    let tokenizer = stub_tokenizer_no_eot();
+    assert_eq!(
+        resolve_end_of_turn_token_id(&tokenizer),
+        None,
+        "a tokenizer without <end_of_turn> or <turn|> must return None"
     );
 }
