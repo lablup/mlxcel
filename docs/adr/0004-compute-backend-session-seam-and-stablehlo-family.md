@@ -50,7 +50,7 @@ Adopt Option C.
 The maintainer locked the following to start work. They refine the open problems below.
 
 - **Two parallel tracks to start.** Track A is the session-contract redesign with the MLX path moved behind it (byte-identical), validatable on the backend we already have. Track B is an OpenXLA reference backend. They run in parallel; the contract from Track A stays provisional until Track B validates it, so some rework of the contract is accepted.
-- **Compiler-family model definition: export-first, spike-validated.** The intended path is to import an exported graph (HF transformers via torch-export / torch-mlir, or a JAX reference, lowered to StableHLO) and let mlxcel supply weight mapping, tokenizer, KV orchestration, sampling, and serving, so per-model work shrinks to glue. This is validated by a spike inside the Track B milestone before it is committed. In-tree hand-written StableHLO emission is the fallback if the export route does not hold for our model set.
+- **Compiler-family model definition: export-first, spike-validated.** The intended path is to import an exported graph (HF transformers via torch-export / torch-mlir, or a JAX reference, lowered to StableHLO) and let mlxcel supply weight mapping, tokenizer, KV orchestration, sampling, and serving, so per-model work shrinks to glue. This is validated by a spike inside the Track B milestone before it is committed. In-tree hand-written StableHLO emission is the fallback if the export route does not hold for our model set. (Update 2026-06-27: export-first is validated for the fp16 path, see the Phase 1 outcome below. The remaining open sub-question is the authoring FRONTEND, JAX-reference versus a Rust-native StableHLO emitter, tracked by #451 and evaluated in parallel; the choice is swappable behind the StableHLO artifact boundary.)
 - **First-milestone success bar includes quantized decode.** The milestone is not done at fp16 coherent output; it runs through 4-bit quantized decode on the compiler family (the issue's stated real success bar). fp16 single-sequence coherent output is the intermediate checkpoint. The spike must therefore also characterize how 4-bit lowers on XLA (dequant-in-graph versus a custom op or target kernel).
 - **KV / paged / scheduler abstraction is a later phase.** The compiler family starts single-sequence; batching and paged KV stay MLX-session features until a later abstraction phase.
 - **The StableHLO/MLIR backend lives in its own default-off crate.** XLA / PJRT dependencies must not touch the default Apple-Silicon or CUDA builds.
@@ -58,13 +58,26 @@ The maintainer locked the following to start work. They refine the open problems
 
 ### Open problems this ADR names but does not yet resolve
 
-- **Model definition for the compiler family.** Decided above (export-first, spike-validated, hand-write fallback). The spike's findings (whether prefill and a bucketed decode-step export with a working KV loop, and how 4-bit lowers) resolve whether the export route is committed.
+- **Model definition for the compiler family.** Export-first is now validated for the fp16 path (Phase 1 outcome below); the live sub-question is the authoring frontend (JAX-reference, proven; a Rust-native StableHLO emitter, under parallel evaluation in #451; torch.export, unexercised). How 4-bit lowers (dequant-in-graph fusion versus a custom op) is the Phase 2a question, in progress on the JAX harness and frontend-independent.
 - **KV cache, paged KV, and scheduler coupling.** The batch scheduler, paged KV block table and pool, and speculative decode are built on the MLX `KVCache` type today. They remain MLX-session features initially; abstracting the block-table and pool concepts over a backend-owned KV representation is a separate, later phase, not a prerequisite for the first non-MLX session.
 - **Furiosa graph ingestion.** Whether the Furiosa toolchain ingests StableHLO, or needs a bespoke Option B engine, is a feasibility-gate unknown, consistent with the hardware go/no-go gate issue #338 already deferred kernel work behind.
 
 ### Validation plan
 
 Prove the session contract with OpenXLA as the second reference backend before the contract is locked and this ADR is marked Accepted. A second real implementation is what forces the abstraction to be genuine rather than an MLX-shaped trait. Per the 2026-06-26 decisions the two tracks run in parallel: Track A (session contract plus MLX behind it, byte-identical) proceeds on the MLX backend, while Track B (the OpenXLA reference backend) spikes the export route on one small model, reaches fp16 single-sequence coherent output, then carries through 4-bit quantized decode as the success bar. Track B's findings resolve the model-definition strategy and feed back into Track A's contract.
+
+### Phase 1 outcome (2026-06-27)
+
+Track B Phase 0/1 (issue #449, branch `spike/openxla-export-449`) validated the export-first route for the fp16 path. A Llama-3.2-1B model written once as a JAX reference exports to StableHLO via `jax.export` and greedy-decodes token-exact (48 of 48) against an HF transformers temp-0 reference; the same serialized StableHLO runs unmodified on both PJRT and IREE with matching argmax and no `custom_call`, and isolated logits agree with HF to fp32 reduction noise (about 1e-5). This is the result the validation plan required before committing export-first.
+
+Consequences and refinements:
+
+- **Export-first committed for the fp16 path.** Models are authored once per architecture as a graph with weights as inputs; within an architecture family per-checkpoint work is weight-mapping glue, across transformer variants it is scaffold plus per-arch deltas, and new families (MoE, SSM-hybrid, VLM) need new forward authoring. So "per-model shrinks to glue" holds within a family, not across families.
+- **Session contract shape confirmed.** The exported `prefill` / `decode_step` graphs with session-owned fixed-capacity KV and on-device argmax match the `InferenceSession` contract landed for #448 (PR #450). Phase 3 integration binds to it.
+- **Authoring frontend still open, evaluated in parallel.** Phase 1 proved the JAX-reference route. A Rust-native StableHLO emitter is under parallel evaluation (#451) as the production authoring path that keeps compiler-family model definitions in-tree in Rust with no Python in the authoring path; the StableHLO artifact is the swappable boundary, so this does not affect the runtime or the #448 integration. torch.export-from-HF remains unexercised.
+- **GPU deferred; Phase 2 split.** The Phase 1 host (GB10, aarch64 plus Blackwell) has no CUDA jaxlib wheel on PyPI, so Phase 1 ran on CPU (sufficient for the coherence bar). Phase 2 is split: 2a (int4 dequant-in-graph lowering structure, fusion behavior, and correctness) proceeds now on CPU and is frontend-independent; 2b (real GPU perf and memory) is deferred until a GPU host is chosen (an NGC JAX-Toolbox container on the GB10 box, or an x86 CUDA host).
+
+This ADR stays Proposed; it moves to Accepted once the OpenXLA backend integrates behind the #448 session contract (Phase 3) and validates the full contract.
 
 ## Consequences
 
