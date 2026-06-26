@@ -179,6 +179,22 @@ impl Builder {
         Val { name: r, ty }
     }
 
+    /// Permute axes. `perm[k]` is the input axis that becomes output axis k.
+    pub fn transpose(&mut self, x: &Val, perm: &[usize]) -> Val {
+        let shape: Vec<usize> = perm.iter().map(|&p| x.ty.shape[p]).collect();
+        let ty = Ty::new(shape, x.ty.elt);
+        let r = self.fresh();
+        self.line(format!(
+            "{} = stablehlo.transpose {}, dims = {} : ({}) -> {}",
+            r,
+            x.name,
+            dims_list(perm),
+            x.ty.render(),
+            ty.render()
+        ));
+        Val { name: r, ty }
+    }
+
     /// Unused by decode today; kept for the int4 dequant path (int -> f32).
     #[allow(dead_code)]
     pub fn convert(&mut self, x: &Val, elt: &'static str) -> Val {
@@ -262,6 +278,28 @@ impl Builder {
             operand.ty.render(),
             update.ty.render(),
             idx_tys.join(", "),
+            ty.render()
+        ));
+        Val { name: r, ty }
+    }
+
+    /// Row gather: `operand[N, M]` indexed by `indices[Lp, 1]` (i32) -> `[Lp, M]`.
+    /// This is the multi-token embedding lookup `embed[tokens]`; the
+    /// dimension_numbers and slice_sizes mirror the JAX-emitted `prefill`
+    /// `stablehlo.gather` in spike/openxla/artifacts/prefill.stablehlo.mlir.
+    pub fn gather(&mut self, operand: &Val, indices: &Val) -> Val {
+        let lp = indices.ty.shape[0];
+        let m = operand.ty.shape[1];
+        let ty = Ty::new(vec![lp, m], operand.ty.elt);
+        let r = self.fresh();
+        self.line(format!(
+            "{} = \"stablehlo.gather\"({}, {}) <{{dimension_numbers = #stablehlo.gather<offset_dims = [1], collapsed_slice_dims = [0], start_index_map = [0], index_vector_dim = 1>, slice_sizes = array<i64: 1, {}>}}> : ({}, {}) -> {}",
+            r,
+            operand.name,
+            indices.name,
+            m,
+            operand.ty.render(),
+            indices.ty.render(),
             ty.render()
         ));
         Val { name: r, ty }
@@ -417,5 +455,14 @@ impl Builder {
     pub fn linear(&mut self, x: &Val, w: &Val) -> Val {
         let n = w.ty.shape[0];
         self.dot_general(x, w, &[], &[], &[0], &[1], vec![n])
+    }
+
+    /// Sequence-batched linear: y[L,N] = x[L,K] @ W^T for W:[N,K] (stored
+    /// [out,in]). Contracts the feature dim (x dim 1, W dim 1), keeps the [L]
+    /// row axis. The prefill analog of `linear` for `[Lp, ...]` activations.
+    pub fn linear_seq(&mut self, x: &Val, w: &Val) -> Val {
+        let l = x.ty.shape[0];
+        let n = w.ty.shape[0];
+        self.dot_general(x, w, &[], &[], &[1], &[1], vec![l, n])
     }
 }

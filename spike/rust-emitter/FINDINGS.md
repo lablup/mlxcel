@@ -85,10 +85,21 @@ in Rust f64 then cast f32 (matching the JAX `np.cos(emb).astype(f32)`), baked as
 hex `dense` constants, and `dynamic_slice`d at `pos`; keeping the trig out of the
 graph removes any dependence on the runtime's transcendental precision.
 
-`prefill` (bucketed) was not separately emitted. Streaming the prompt through
-decode validates the same math; a standalone prefill graph is straightforward in
-the same builder and needs one new op (`stablehlo.gather` for the multi-token
-embedding lookup). It was out of scope once decode landed token-exact.
+### Bucketed prefill (follow-up to #451)
+
+`src/model.rs` `emit_prefill` now also emits the standalone bucketed `prefill`
+graph, matching the JAX `prefill` signature (`tokens[Lp]`, `positions[Lp]`,
+`real_len`; no input caches, zero-initialized internally; bucket `Lp = 64`). It
+reuses the same builder over an `[Lp]` sequence axis: a `[Lp,Lp]` causal mask
+(`j <= i`), the `[Lp]` KV block written with one `dynamic_update_slice` per
+layer, and the last logit sliced at `real_len-1`. Running the Rust-emitted
+`prefill` (first token) then `decode_step` (continuation) is **token-exact
+(48/48)** against the same HF reference. The one new op the prefill needs is
+`stablehlo.gather` (the multi-token embedding lookup `embed[tokens]`, plus the
+per-position cos/sin lookup), whose `dimension_numbers` and `slice_sizes` mirror
+the JAX-emitted `prefill.stablehlo.mlir`. The added builder ops are `gather`,
+`transpose` (one per layer, for the GQA context output), and `linear_seq` (the
+`[Lp, K]` activation matmul); decode stays token-exact 48/48 unchanged.
 
 ### Emitted graph vs the JAX graph
 
@@ -210,8 +221,8 @@ oracle workflow is what keeps that price from becoming a correctness risk.
 
 ### Open items (not in this spike)
 
-- **prefill graph** in the emitter (needs `stablehlo.gather`); validated here by
-  streaming the prompt through decode.
+- **prefill graph** in the emitter: done as a #451 follow-up (`emit_prefill`,
+  `stablehlo.gather`), token-exact 48/48 via Rust-emitted prefill + decode.
 - **int4 path:** author dequant-in-graph and a `custom_call` variant from
   `Builder::linear`, then measure fusion on a GPU-capable host (this box is CPU).
 - **GPU backend:** same `iree-compile` route with a CUDA target; not exercised

@@ -1,9 +1,10 @@
 //! Rust-native StableHLO text emitter for Llama-3.2-1B (spike #451).
 //!
 //! Usage:
-//!   emit p0     [out.mlir]   single dot_general, toolchain round-trip gate (P0)
-//!   emit probe  [out.mlir]   syntax probe for the riskiest op forms
-//!   emit decode [out.mlir]   full Llama-3.2-1B decode_step (P1)
+//!   emit p0      [out.mlir]   single dot_general, toolchain round-trip gate (P0)
+//!   emit probe   [out.mlir]   syntax probe for the riskiest op forms
+//!   emit decode  [out.mlir]   full Llama-3.2-1B decode_step (P1)
+//!   emit prefill [out.mlir]   full Llama-3.2-1B bucketed prefill
 
 mod builder;
 mod config;
@@ -33,8 +34,9 @@ fn main() {
         "p0" => p0_matmul(),
         "probe" => probe(),
         "decode" => model::emit_decode(&config::Config::llama_3_2_1b()),
+        "prefill" => model::emit_prefill(&config::Config::llama_3_2_1b()),
         other => {
-            eprintln!("unknown kind: {other} (use p0 | probe | decode)");
+            eprintln!("unknown kind: {other} (use p0 | probe | decode | prefill)");
             std::process::exit(2);
         }
     };

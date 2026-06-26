@@ -13,6 +13,10 @@ use crate::rope;
 
 const MAX_SEQ: usize = 256;
 
+/// Bucketed padded prompt length for prefill. Fits the 46-token spike prompt
+/// (matches `bucket` in spike/openxla/artifacts/results.json).
+const PREFILL_LP: usize = 64;
+
 /// Per-layer weight handles (JAX alphabetical order: down, gate, in_ln,
 /// post_ln, up, wk, wo, wq, wv).
 struct LayerW {
@@ -313,6 +317,246 @@ pub fn emit_decode(c: &Config) -> String {
     let logits_ty = Ty::f32(vec![c.vocab]).render();
     format!(
         "module @decode_step {{\n  func.func public @main({sig}) -> ({logits_ty}, {cache_ty}, {cache_ty}) {{\n{body}    return {l}, {kc}, {vc} : {logits_ty}, {cache_ty}, {cache_ty}\n  }}\n}}\n",
+        sig = sig,
+        logits_ty = logits_ty,
+        cache_ty = cache_ty,
+        body = b.body(),
+        l = logits.name,
+        kc = kcache.name,
+        vc = vcache.name,
+    )
+}
+
+// ===========================================================================
+// prefill: bucketed multi-token prompt processing
+// ===========================================================================
+//
+// Signature mirrors spike/openxla/model_jax.py `prefill`:
+//   main(params..., tokens[Lp], positions[Lp], real_len)
+//       -> (last_logits[V], kcache, vcache)
+// Unlike decode, prefill takes NO input caches: it zero-initializes them and
+// returns the prompt's K/V written into the [0:Lp] block. The whole prompt is
+// processed at once over an [Lp] sequence axis with an [Lp,Lp] causal mask, and
+// the returned logit is the row at real_len-1 (the last real prompt token).
+
+/// Prefill arg handles. Weights are identical to decode (same order/locs); the
+/// trailing inputs are tokens/positions/real_len with no caches.
+struct PrefillArgs {
+    embed: Val,
+    final_norm: Val,
+    layers: Vec<LayerW>,
+    tokens: Val,
+    positions: Val,
+    real_len: Val,
+}
+
+fn build_prefill_arg_schema(c: &Config, lp: usize) -> (Vec<ArgDecl>, PrefillArgs) {
+    let h = c.hidden;
+    let inter = c.inter;
+    let kv = c.n_kv * c.head_dim; // 512
+    let qd = c.n_q * c.head_dim; // 2048
+    let v = c.vocab;
+
+    let mut decls: Vec<ArgDecl> = Vec::new();
+    let mut idx = 0usize;
+    let mut take = |decls: &mut Vec<ArgDecl>, ty: Ty, loc: String| -> Val {
+        let val = Builder::arg(idx, ty.clone());
+        decls.push(ArgDecl { ty, loc });
+        idx += 1;
+        val
+    };
+
+    let embed = take(&mut decls, Ty::f32(vec![v, h]), "params['embed']".into());
+    let final_norm = take(&mut decls, Ty::f32(vec![h]), "params['final_norm']".into());
+
+    let mut layers = Vec::with_capacity(c.n_layers);
+    for li in 0..c.n_layers {
+        let p = |k: &str| format!("params['layers'][{}]['{}']", li, k);
+        let down = take(&mut decls, Ty::f32(vec![h, inter]), p("down"));
+        let gate = take(&mut decls, Ty::f32(vec![inter, h]), p("gate"));
+        let in_ln = take(&mut decls, Ty::f32(vec![h]), p("in_ln"));
+        let post_ln = take(&mut decls, Ty::f32(vec![h]), p("post_ln"));
+        let up = take(&mut decls, Ty::f32(vec![inter, h]), p("up"));
+        let wk = take(&mut decls, Ty::f32(vec![kv, h]), p("wk"));
+        let wo = take(&mut decls, Ty::f32(vec![qd, h]), p("wo"));
+        let wq = take(&mut decls, Ty::f32(vec![qd, h]), p("wq"));
+        let wv = take(&mut decls, Ty::f32(vec![kv, h]), p("wv"));
+        layers.push(LayerW {
+            down,
+            gate,
+            in_ln,
+            post_ln,
+            up,
+            wk,
+            wo,
+            wq,
+            wv,
+        });
+    }
+
+    let tokens = take(&mut decls, Ty::new(vec![lp], "i32"), "tokens".into());
+    let positions = take(&mut decls, Ty::new(vec![lp], "i32"), "positions".into());
+    let real_len = take(&mut decls, Ty::scalar("i32"), "real_len".into());
+
+    (
+        decls,
+        PrefillArgs {
+            embed,
+            final_norm,
+            layers,
+            tokens,
+            positions,
+            real_len,
+        },
+    )
+}
+
+/// RMSNorm over a sequence: x:[Lp, H] -> per-row x * rsqrt(mean(x*x)+eps) * w.
+fn rms_norm_seq(b: &mut Builder, x: &Val, w: &Val, k: &Consts, lp: usize, hidden: usize) -> Val {
+    let sq = b.multiply(x, x);
+    let ssum = b.reduce_add(&sq, 1, &k.zero); // [Lp]
+    let hb = b.broadcast(&k.hidden_f, &[], vec![lp]);
+    let mean = b.divide(&ssum, &hb); // [Lp]
+    let epsb = b.broadcast(&k.eps, &[], vec![lp]);
+    let meps = b.add(&mean, &epsb);
+    let r = b.rsqrt(&meps); // [Lp]
+    let rb = b.broadcast(&r, &[0], vec![lp, hidden]); // [Lp, H]
+    let xr = b.multiply(x, &rb);
+    let wb = b.broadcast(w, &[1], vec![lp, hidden]); // [H] -> [Lp, H]
+    b.multiply(&xr, &wb)
+}
+
+/// HF half-split RoPE on x:[Lp, heads, d]; cos/sin are [Lp, d] (per position).
+fn apply_rope_seq(
+    b: &mut Builder,
+    x: &Val,
+    cos: &Val,
+    sin: &Val,
+    lp: usize,
+    heads: usize,
+    d: usize,
+) -> Val {
+    let half = d / 2;
+    let cos_b = b.broadcast(cos, &[0, 2], vec![lp, heads, d]); // [Lp,d] -> [Lp,heads,d]
+    let sin_b = b.broadcast(sin, &[0, 2], vec![lp, heads, d]);
+    let xc = b.multiply(x, &cos_b);
+    let x1 = b.slice(x, &[(0, lp), (0, heads), (0, half)]);
+    let x2 = b.slice(x, &[(0, lp), (0, heads), (half, d)]);
+    let nx2 = b.negate(&x2);
+    let rh = b.concatenate(&nx2, &x1, 2);
+    let rs = b.multiply(&rh, &sin_b);
+    b.add(&xc, &rs)
+}
+
+/// Emit the complete prefill module text.
+pub fn emit_prefill(c: &Config) -> String {
+    let lp = PREFILL_LP;
+    let (decls, a) = build_prefill_arg_schema(c, lp);
+    let mut b = Builder::new();
+    let k = emit_consts(&mut b, c);
+
+    let h = c.hidden;
+    let d = c.head_dim;
+    let nq = c.n_q;
+    let nkv = c.n_kv;
+    let g = c.group();
+
+    // --- head: embed gather, per-position rope vectors, [Lp,Lp] causal mask ---
+    let tok_idx = b.reshape(&a.tokens, vec![lp, 1]);
+    let mut x = b.gather(&a.embed, &tok_idx); // [Lp, H]
+
+    let pos_idx = b.reshape(&a.positions, vec![lp, 1]);
+    let cos = b.gather(&k.cos_table, &pos_idx); // [Lp, d]
+    let sin = b.gather(&k.sin_table, &pos_idx); // [Lp, d]
+
+    // causal mask [Lp, Lp]: query i attends key j iff j <= i -> additive 0/-1e30
+    let irow = b.iota(lp);
+    let row = b.broadcast(&irow, &[0], vec![lp, lp]); // entry[i,j] = i
+    let jcol = b.iota(lp);
+    let col = b.broadcast(&jcol, &[1], vec![lp, lp]); // entry[i,j] = j
+    let le = b.compare("LE", &col, &row, "SIGNED"); // j <= i
+    let zeros = b.broadcast(&k.zero, &[], vec![lp, lp]);
+    let negs = b.broadcast(&k.neg_big, &[], vec![lp, lp]);
+    let cmask = b.select(&le, &zeros, &negs); // [Lp, Lp]
+
+    // caches start as zeros; prefill writes the [0:Lp] block and returns them
+    let mut kcache = b.broadcast(&k.zero, &[], vec![c.n_layers, MAX_SEQ, nkv, d]);
+    let mut vcache = b.broadcast(&k.zero, &[], vec![c.n_layers, MAX_SEQ, nkv, d]);
+
+    for li in 0..c.n_layers {
+        let lw = &a.layers[li];
+
+        // attention block
+        let hn = rms_norm_seq(&mut b, &x, &lw.in_ln, &k, lp, h); // [Lp, H]
+        let q = b.linear_seq(&hn, &lw.wq); // [Lp, qd]
+        let q = b.reshape(&q, vec![lp, nq, d]);
+        let kk = b.linear_seq(&hn, &lw.wk); // [Lp, kv]
+        let kk = b.reshape(&kk, vec![lp, nkv, d]);
+        let vv = b.linear_seq(&hn, &lw.wv); // [Lp, kv]
+        let vv = b.reshape(&vv, vec![lp, nkv, d]);
+
+        let q = apply_rope_seq(&mut b, &q, &cos, &sin, lp, nq, d);
+        let kk = apply_rope_seq(&mut b, &kk, &cos, &sin, lp, nkv, d);
+
+        // write the whole [Lp] K/V block at [li, 0:Lp]
+        let k_upd = b.reshape(&kk, vec![1, lp, nkv, d]);
+        kcache = b.dynamic_update_slice(&kcache, &k_upd, &[&k.layer_idx[li], &k.c0, &k.c0, &k.c0]);
+        let v_upd = b.reshape(&vv, vec![1, lp, nkv, d]);
+        vcache = b.dynamic_update_slice(&vcache, &v_upd, &[&k.layer_idx[li], &k.c0, &k.c0, &k.c0]);
+
+        // GQA scores: q head (kv*g+grp) attends kv head kv. Layout [nkv,Lp_i,g,Lp_j]
+        // so it reshapes to [nq, Lp_i, Lp_j] without a transpose (head = kv*g+grp).
+        let q4 = b.reshape(&q, vec![lp, nkv, g, d]);
+        let scores = b.dot_general(&q4, &kk, &[1], &[1], &[3], &[2], vec![nkv, lp, g, lp]);
+        let scale_b = b.broadcast(&k.scale, &[], vec![nkv, lp, g, lp]);
+        let scores = b.multiply(&scores, &scale_b);
+        let cmask_b = b.broadcast(&cmask, &[1, 3], vec![nkv, lp, g, lp]);
+        let scores = b.add(&scores, &cmask_b);
+
+        // softmax over the key axis (Lp_j, dim 3)
+        let m = b.reduce_max(&scores, 3, &k.neg_inf); // [nkv, Lp, g]
+        let m_b = b.broadcast(&m, &[0, 1, 2], vec![nkv, lp, g, lp]);
+        let sh = b.subtract(&scores, &m_b);
+        let e = b.exponential(&sh);
+        let s = b.reduce_add(&e, 3, &k.zero); // [nkv, Lp, g]
+        let s_b = b.broadcast(&s, &[0, 1, 2], vec![nkv, lp, g, lp]);
+        let attn = b.divide(&e, &s_b); // [nkv, Lp, g, Lp]
+
+        // context: o[kv,i,grp,d] = sum_j attn[kv,i,grp,j] * vv[j,kv,d]
+        let o = b.dot_general(&attn, &vv, &[0], &[1], &[3], &[0], vec![nkv, lp, g, d]);
+        let o = b.transpose(&o, &[1, 0, 2, 3]); // [Lp, nkv, g, d]
+        let o = b.reshape(&o, vec![lp, nq * d]); // [Lp, nq*d], head-major
+        let attn_out = b.linear_seq(&o, &lw.wo); // [Lp, H]
+        x = b.add(&x, &attn_out);
+
+        // MLP: down( silu(x@gate^T) * (x@up^T) )
+        let hn2 = rms_norm_seq(&mut b, &x, &lw.post_ln, &k, lp, h);
+        let gate = b.linear_seq(&hn2, &lw.gate); // [Lp, inter]
+        let up = b.linear_seq(&hn2, &lw.up); // [Lp, inter]
+        let neg = b.negate(&gate);
+        let ex = b.exponential(&neg);
+        let one_b = b.broadcast(&k.one, &[], vec![lp, c.inter]);
+        let denom = b.add(&one_b, &ex);
+        let sig = b.divide(&one_b, &denom);
+        let silu = b.multiply(&gate, &sig);
+        let act = b.multiply(&silu, &up);
+        let down = b.linear_seq(&act, &lw.down); // [Lp, H]
+        x = b.add(&x, &down);
+    }
+
+    // --- tail: final norm, take the row at real_len-1, tied LM head ---
+    let xf = rms_norm_seq(&mut b, &x, &a.final_norm, &k, lp, h); // [Lp, H]
+    let one_i = b.const_i32(1);
+    let last_idx = b.subtract(&a.real_len, &one_i); // real_len - 1
+    let last_row = b.dynamic_slice(&xf, &[&last_idx, &k.c0], vec![1, h]); // [1, H]
+    let last = b.reshape(&last_row, vec![h]); // [H]
+    let logits = b.linear(&last, &a.embed); // [V]
+
+    let sig = render_signature(&decls);
+    let cache_ty = Ty::f32(vec![c.n_layers, MAX_SEQ, c.n_kv, c.head_dim]).render();
+    let logits_ty = Ty::f32(vec![c.vocab]).render();
+    format!(
+        "module @prefill {{\n  func.func public @main({sig}) -> ({logits_ty}, {cache_ty}, {cache_ty}) {{\n{body}    return {l}, {kc}, {vc} : {logits_ty}, {cache_ty}, {cache_ty}\n  }}\n}}\n",
         sig = sig,
         logits_ty = logits_ty,
         cache_ty = cache_ty,

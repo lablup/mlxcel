@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # End-to-end driver for the Rust StableHLO emitter spike (#451).
 #
-#   ./validate.sh            # P0 round-trip + full decode_step token check
+#   ./validate.sh            # P0 round-trip + decode + prefill token checks
 #   ./validate.sh p0         # P0 toolchain round-trip only
 #   ./validate.sh decode     # emit + compile + token-exact decode only
+#   ./validate.sh prefill    # emit + compile + token-exact prefill->decode
 #
 # Reuses the existing spike/openxla venv (iree-compile + iree runtime + torch +
 # transformers + safetensors). Nothing here builds or touches the mlxcel crates.
@@ -49,9 +50,23 @@ decode() {
   "$PY" "$HERE/python/run_decode.py" --mlir "$OUT/decode.mlir" --vmfb "$OUT/decode.vmfb"
 }
 
+prefill() {
+  echo "== P1: full prefill -> decode =="
+  "$EMIT" prefill "$OUT/prefill.mlir"
+  "$EMIT" decode "$OUT/decode.mlir"
+  "$IREE_COMPILE" --iree-input-type=stablehlo --iree-hal-target-backends=llvm-cpu \
+    "$OUT/prefill.mlir" -o "$OUT/prefill.vmfb"
+  "$IREE_COMPILE" --iree-input-type=stablehlo --iree-hal-target-backends=llvm-cpu \
+    "$OUT/decode.mlir" -o "$OUT/decode.vmfb"
+  "$PY" "$HERE/python/run_prefill.py" \
+    --prefill "$OUT/prefill.mlir" --prefill-vmfb "$OUT/prefill.vmfb" \
+    --decode "$OUT/decode.mlir" --decode-vmfb "$OUT/decode.vmfb"
+}
+
 case "$mode" in
   p0) p0 ;;
   decode) decode ;;
-  all) p0; decode ;;
-  *) echo "usage: validate.sh [p0|decode|all]"; exit 2 ;;
+  prefill) prefill ;;
+  all) p0; decode; prefill ;;
+  *) echo "usage: validate.sh [p0|decode|prefill|all]"; exit 2 ;;
 esac
