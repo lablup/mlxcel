@@ -45,15 +45,26 @@ Adopt Option C.
 - Non-MLX targets are served by a single StableHLO/MLIR compiler-family backend that emits a portable graph, rather than by per-vendor hand-written engines. Per-vendor bespoke backends (Option B) are the fallback only for a target whose toolchain cannot ingest the shared IR.
 - The `select_backend` selection skeleton and the default-off `experimental-backend` feature gate from PR #446 are kept. The `ComputeBackend` trait contract from #446 (load boundary, concrete `LoadedModel`) is provisional and is replaced by the session contract above before any non-MLX engine is wired in.
 
+### Implementation decisions (2026-06-26)
+
+The maintainer locked the following to start work. They refine the open problems below.
+
+- **Two parallel tracks to start.** Track A is the session-contract redesign with the MLX path moved behind it (byte-identical), validatable on the backend we already have. Track B is an OpenXLA reference backend. They run in parallel; the contract from Track A stays provisional until Track B validates it, so some rework of the contract is accepted.
+- **Compiler-family model definition: export-first, spike-validated.** The intended path is to import an exported graph (HF transformers via torch-export / torch-mlir, or a JAX reference, lowered to StableHLO) and let mlxcel supply weight mapping, tokenizer, KV orchestration, sampling, and serving, so per-model work shrinks to glue. This is validated by a spike inside the Track B milestone before it is committed. In-tree hand-written StableHLO emission is the fallback if the export route does not hold for our model set.
+- **First-milestone success bar includes quantized decode.** The milestone is not done at fp16 coherent output; it runs through 4-bit quantized decode on the compiler family (the issue's stated real success bar). fp16 single-sequence coherent output is the intermediate checkpoint. The spike must therefore also characterize how 4-bit lowers on XLA (dequant-in-graph versus a custom op or target kernel).
+- **KV / paged / scheduler abstraction is a later phase.** The compiler family starts single-sequence; batching and paged KV stay MLX-session features until a later abstraction phase.
+- **The StableHLO/MLIR backend lives in its own default-off crate.** XLA / PJRT dependencies must not touch the default Apple-Silicon or CUDA builds.
+- **Reference model is a small one** (Llama-3.2-1B class), 4-bit for the success bar with an fp16 variant as the intermediate checkpoint.
+
 ### Open problems this ADR names but does not yet resolve
 
-- **Model definition for the compiler family.** How models emit StableHLO/MLIR (a shared graph-builder, reusing config and weight loading) is the central follow-up design and the main cost driver. The first cut may hand-write graph emission for a small hot set (Llama, Qwen, Gemma) rather than all families.
+- **Model definition for the compiler family.** Decided above (export-first, spike-validated, hand-write fallback). The spike's findings (whether prefill and a bucketed decode-step export with a working KV loop, and how 4-bit lowers) resolve whether the export route is committed.
 - **KV cache, paged KV, and scheduler coupling.** The batch scheduler, paged KV block table and pool, and speculative decode are built on the MLX `KVCache` type today. They remain MLX-session features initially; abstracting the block-table and pool concepts over a backend-owned KV representation is a separate, later phase, not a prerequisite for the first non-MLX session.
 - **Furiosa graph ingestion.** Whether the Furiosa toolchain ingests StableHLO, or needs a bespoke Option B engine, is a feasibility-gate unknown, consistent with the hardware go/no-go gate issue #338 already deferred kernel work behind.
 
 ### Validation plan
 
-Prove the session contract with OpenXLA as the second reference backend on one or two hot models before the contract is locked and this ADR is marked Accepted. A second real implementation is what forces the abstraction to be genuine rather than an MLX-shaped trait.
+Prove the session contract with OpenXLA as the second reference backend before the contract is locked and this ADR is marked Accepted. A second real implementation is what forces the abstraction to be genuine rather than an MLX-shaped trait. Per the 2026-06-26 decisions the two tracks run in parallel: Track A (session contract plus MLX behind it, byte-identical) proceeds on the MLX backend, while Track B (the OpenXLA reference backend) spikes the export route on one small model, reaches fp16 single-sequence coherent output, then carries through 4-bit quantized decode as the success bar. Track B's findings resolve the model-definition strategy and feed back into Track A's contract.
 
 ## Consequences
 
