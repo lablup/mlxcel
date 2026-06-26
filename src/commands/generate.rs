@@ -23,8 +23,7 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use mlxcel::{
-    CxxGenerator, GenerationStats, LanguageModel, RuntimeSetup, SamplingConfig,
-    SpeculativeGenerator,
+    GenerationStats, LanguageModel, RuntimeSetup, SamplingConfig, SpeculativeGenerator,
     distributed::{
         PipelineWorkerInput, RequestId,
         pipeline::{
@@ -821,18 +820,22 @@ fn generate_standard<M: LanguageModel>(
     profile: bool,
     kv_cache_mode: KVCacheMode,
     token_bias: TokenBiasMap,
-) -> (Vec<i32>, GenerationStats) {
-    // Axis B (B8): thread the resolved token-bias into the CxxGenerator. Empty
-    // map preserves bit-exact baseline via `CxxGenerator::compose_sampling`.
-    let mut generator = CxxGenerator::new_with_kv_mode(model.num_layers(), kv_cache_mode)
-        .with_token_bias(token_bias);
+) -> Result<(Vec<i32>, GenerationStats)> {
+    // Route generation through the inference-session seam (issue #448, ADR 0004).
+    // Under default features `select_backend()` folds to MLX and the session
+    // wraps the same `CxxGenerator`, so the delegated generation methods run the
+    // identical decode loop and CLI output is byte-identical. Axis B (B8): the
+    // resolved token-bias is threaded into the session; an empty map preserves
+    // bit-exact baseline via the generator's `compose_sampling`.
+    let mut session =
+        select_backend().create_session(model.num_layers(), kv_cache_mode, token_bias)?;
 
     if profile {
-        return generator.generate_with_stats(model, prompt_tokens, max_tokens, sampling_config);
+        return Ok(session.generate_with_stats(model, prompt_tokens, max_tokens, sampling_config));
     }
 
-    let _ = generator.generate(model, prompt_tokens, 1, sampling_config);
-    generator.reset_with_model(model);
+    let _ = session.generate(model, prompt_tokens, 1, sampling_config);
+    session.reset_with_model(model);
 
     let capture_path = std::env::var("MLXCEL_METAL_CAPTURE_PATH").ok();
     if let Some(ref path) = capture_path {
@@ -844,7 +847,7 @@ fn generate_standard<M: LanguageModel>(
     }
 
     let start_time = Instant::now();
-    let tokens = generator.generate(model, prompt_tokens, max_tokens, sampling_config);
+    let tokens = session.generate(model, prompt_tokens, max_tokens, sampling_config);
     let total_time = start_time.elapsed();
     let generated_len = tokens.len();
 
@@ -852,10 +855,10 @@ fn generate_standard<M: LanguageModel>(
         mlxcel_core::metal_stop_capture();
     }
 
-    (
+    Ok((
         tokens,
         generation_stats_from_duration(prompt_tokens.len(), generated_len, total_time),
-    )
+    ))
 }
 
 fn generate_with_embeddings<M: LanguageModel>(
@@ -868,13 +871,13 @@ fn generate_with_embeddings<M: LanguageModel>(
     kv_cache_mode: KVCacheMode,
     token_bias: TokenBiasMap,
 ) -> Result<(Vec<i32>, GenerationStats)> {
-    // Axis B (B8): same wiring as the text-only CxxGenerator path above.
-    let mut generator = CxxGenerator::new_with_kv_mode(model.num_layers(), kv_cache_mode)
-        .with_token_bias(token_bias);
+    // Axis B (B8): same session wiring as the text-only path above (issue #448).
+    let mut session =
+        select_backend().create_session(model.num_layers(), kv_cache_mode, token_bias)?;
     let (input_embeds, mask_ref) = prepared_embedding_refs(embeddings)?;
 
     if profile {
-        return Ok(generator.generate_with_stats_and_embeddings(
+        return Ok(session.generate_with_stats_and_embeddings(
             model,
             prompt_tokens,
             Some(input_embeds),
@@ -885,7 +888,7 @@ fn generate_with_embeddings<M: LanguageModel>(
     }
 
     let start_time = Instant::now();
-    let tokens = generator.generate_streaming_with_embeddings(
+    let tokens = session.generate_streaming_with_embeddings(
         model,
         prompt_tokens,
         Some(input_embeds),
@@ -1076,7 +1079,7 @@ fn run_generation_mode(
             args.generation.profile,
             kv_cache_mode,
             token_bias,
-        )
+        )?
     };
 
     Ok(output)

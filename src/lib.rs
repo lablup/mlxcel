@@ -79,12 +79,15 @@ pub use multimodal::{
     phi4mm_prompt, qwen_vl, video, vlm_prompt, vlm_runtime, youtu_vl_prompt,
 };
 
-// Re-export the compute-backend seam (issue #338). Control-plane callers in
-// both the library and the `mlxcel` / `mlxcel-server` binaries reach model
-// loading through `select_backend()` so the forward-execution engine is
-// chosen at one boundary. Under default features this folds to the single
-// MLX variant with no runtime dispatch.
-pub use backend::{Backend, ComputeBackend, MlxBackend, select_backend};
+// Re-export the compute-backend seam (issue #338, reframed to a session engine
+// in issue #448 / ADR 0004). Control-plane callers in both the library and the
+// `mlxcel` / `mlxcel-server` binaries reach model loading through
+// `select_backend()` so the forward-execution engine is chosen at one boundary.
+// The CLI generation path obtains a single-sequence `Session` from the backend;
+// the server batched path keeps using `load_model`. Under default features both
+// fold to the single MLX variant with no runtime dispatch.
+pub use backend::{Backend, ComputeBackend, MlxBackend, Session, select_backend};
+pub use mlxcel_core::session::{InferenceSession, MlxInferenceSession, SessionCapabilities};
 
 // Re-export split modules
 pub use loaded_model::LoadedModel;

@@ -24,8 +24,11 @@
 use std::path::Path;
 
 use anyhow::Result;
+use mlxcel_core::TokenBiasMap;
+use mlxcel_core::cache::KVCacheMode;
+use mlxcel_core::session::MlxInferenceSession;
 
-use super::ComputeBackend;
+use super::{ComputeBackend, Session};
 use crate::LoadedModel;
 use crate::distributed::ShardConfig;
 use crate::loading;
@@ -76,5 +79,29 @@ impl ComputeBackend for MlxBackend {
         shard_config: &ShardConfig,
     ) -> Result<(LoadedModel, MlxcelTokenizer)> {
         loading::load_model_with_tensor_parallel(model_path, adapter_path, shard_config)
+    }
+
+    #[inline]
+    fn create_session(
+        &self,
+        num_layers: usize,
+        kv_cache_mode: KVCacheMode,
+        token_bias: TokenBiasMap,
+    ) -> Result<Session> {
+        // Wrap the existing `CxxGenerator` (inside `MlxInferenceSession`) with
+        // the same KV mode and token bias the CLI used before the seam, so the
+        // generation methods delegate verbatim and CLI output is byte-identical.
+        Ok(Session::mlx(
+            MlxInferenceSession::new_with_kv_mode(num_layers, kv_cache_mode)
+                .with_token_bias(token_bias),
+        ))
+    }
+
+    #[inline]
+    fn supports_batched_serving(&self) -> bool {
+        // MLX serves batched requests through the server `BatchScheduler` and
+        // the retained `load_model` path; that capability is unchanged by the
+        // single-sequence session.
+        true
     }
 }

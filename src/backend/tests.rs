@@ -19,6 +19,8 @@
 //! the real MLX loader.
 
 use super::*;
+use mlxcel_core::TokenBiasMap;
+use mlxcel_core::cache::KVCacheMode;
 
 /// Compile-time proof that the executor the seam yields implements the forward
 /// contract. Whatever the backend loads is a working forward executor.
@@ -69,4 +71,56 @@ fn seam_delegates_to_real_mlx_loader_on_missing_dir() {
             let _ = err.to_string();
         }
     }
+}
+
+#[test]
+fn mlx_backend_creates_a_session_and_advertises_batched_serving() {
+    // The session is constructed without loading a checkpoint (the wrapped
+    // `CxxGenerator` only allocates KV caches), so this stays fast and bridge
+    // light, like the existing `CxxGenerator::new` unit tests.
+    let backend = select_backend();
+    assert!(
+        backend.supports_batched_serving(),
+        "MLX serves batched requests via the retained load_model / scheduler path"
+    );
+    let session = backend
+        .create_session(4, KVCacheMode::Fp16, TokenBiasMap::new())
+        .expect("MLX backend must produce a single-sequence session");
+    // The single-sequence session does not batch, page, or speculate, but it
+    // accepts multimodal embedding prefill.
+    let caps = session.capabilities();
+    assert!(!caps.batched_serving);
+    assert!(!caps.paged_kv);
+    assert!(!caps.speculative_decode);
+    assert!(caps.multimodal);
+}
+
+#[test]
+fn mlx_session_threads_the_token_bias_through() {
+    let mut bias = TokenBiasMap::new();
+    bias.insert(5, -2.0);
+    let session = select_backend()
+        .create_session(2, KVCacheMode::Fp16, bias)
+        .expect("session creation must succeed");
+    match session {
+        Session::Mlx(s) => {
+            assert_eq!(s.token_bias().len(), 1);
+            assert!(s.token_bias().contains(5));
+        }
+    }
+}
+
+/// The experimental scaffold has no engine wired in, so it cannot produce a
+/// session. Compiled only under the optional feature; default builds carry none
+/// of it.
+#[cfg(feature = "experimental-backend")]
+#[test]
+fn experimental_backend_session_creation_errors() {
+    let backend = experimental::ExperimentalBackend::new();
+    assert!(!backend.supports_batched_serving());
+    let result = backend.create_session(4, KVCacheMode::Fp16, TokenBiasMap::new());
+    assert!(
+        result.is_err(),
+        "the experimental scaffold must report it has no session engine"
+    );
 }

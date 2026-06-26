@@ -28,20 +28,25 @@
 //! When a real engine arrives it will likely live in its own feature-gated
 //! crate and be constructed here.
 //!
-//! Note for the next implementer: [`ComputeBackend`] currently returns the
-//! concrete [`LoadedModel`], which is the MLX executor type. A genuinely
-//! non-MLX engine cannot construct a `LoadedModel`, so wiring one in will
-//! require either giving `LoadedModel` a non-MLX variant or evolving the trait
-//! to return an engine-neutral `Box<dyn LanguageModel>`. The concrete return
-//! type is deliberate for this seam-only step: the control plane pattern-matches
-//! concrete `LoadedModel` variants for multimodal dispatch, so an engine-neutral
-//! return would force a broad rework the issue scoped out.
+//! Note for the next implementer (issue #449): the CLI generation path now goes
+//! through [`ComputeBackend::create_session`], which returns a [`Session`]
+//! wrapping the engine-neutral
+//! [`InferenceSession`](mlxcel_core::session::InferenceSession) contract. A
+//! genuinely non-MLX engine implements that contract's token-level `prefill` /
+//! `decode_step` primitives in its own default-off crate and plugs in here.
+//! [`ComputeBackend::load_model`] still returns the concrete [`LoadedModel`] for
+//! the server batched path, because the batch scheduler pattern-matches its
+//! variants for multimodal dispatch; abstracting that path over a backend-owned
+//! KV representation is a later phase (ADR 0004), not part of the first non-MLX
+//! session.
 
 use std::path::Path;
 
 use anyhow::Result;
+use mlxcel_core::TokenBiasMap;
+use mlxcel_core::cache::KVCacheMode;
 
-use super::ComputeBackend;
+use super::{ComputeBackend, Session};
 use crate::LoadedModel;
 use crate::distributed::ShardConfig;
 use crate::tokenizer::MlxcelTokenizer;
@@ -91,5 +96,21 @@ impl ComputeBackend for ExperimentalBackend {
         _shard_config: &ShardConfig,
     ) -> Result<(LoadedModel, MlxcelTokenizer)> {
         not_implemented()
+    }
+
+    fn create_session(
+        &self,
+        _num_layers: usize,
+        _kv_cache_mode: KVCacheMode,
+        _token_bias: TokenBiasMap,
+    ) -> Result<Session> {
+        // No engine is wired in, so the scaffold cannot produce a session. The
+        // error mirrors the load-boundary stub: a session is the new contract a
+        // real non-MLX engine (issue #449) will satisfy here.
+        not_implemented()
+    }
+
+    fn supports_batched_serving(&self) -> bool {
+        false
     }
 }

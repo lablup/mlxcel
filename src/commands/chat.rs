@@ -27,8 +27,8 @@
 //!   `generate` applies),
 //! * sampling → [`build_sampling_config`] over [`ResolvedSamplingParams`] (the
 //!   same `SamplingConfig` assembly `generate` uses),
-//! * token generation → [`CxxGenerator::generate_streaming`] (the same
-//!   streaming decode loop the offline `generate` path drives),
+//! * token generation → [`Session::generate_streaming`] (which delegates to the
+//!   same `CxxGenerator` streaming decode loop the offline `generate` path drives),
 //! * incremental detokenization → [`StreamingDecodeState`] (the server's own
 //!   byte-fallback-safe streaming detokenizer, now shared).
 //!
@@ -61,7 +61,7 @@ use mlxcel::sampling::{ResolvedSamplingParams, build_sampling_config};
 use mlxcel::server::chat_template::{ChatMessage, ChatTemplateProcessor};
 use mlxcel::server::model_provider::model_worker::StreamingDecodeState;
 use mlxcel::tokenizer::{MlxcelTokenizer, load_tokenizer};
-use mlxcel::{CxxGenerator, LanguageModel, SamplingConfig, initialize_runtime, select_backend};
+use mlxcel::{LanguageModel, SamplingConfig, Session, initialize_runtime, select_backend};
 use mlxcel_core::cache::KVCacheMode;
 use mlxcel_core::sampling::TokenBiasMap;
 
@@ -149,7 +149,7 @@ enum SlashOutcome {
 /// `mlxcel run` verb (issue #95). Loads the model once, then loops: read a
 /// line (or a `"""` multiline block), interpret slash commands, render the
 /// accumulated conversation through the chat template, and stream the
-/// assistant reply token-by-token via the shared [`CxxGenerator`].
+/// assistant reply token-by-token via the shared inference [`Session`].
 ///
 /// # Errors
 ///
@@ -240,11 +240,16 @@ pub fn run_chat(opts: ChatOptions) -> Result<()> {
     let mut output_suppression = TokenBiasMap::new();
     output_suppression.suppress_tokens(&model.output_suppressed_token_ids());
 
-    // One generator for the whole session. `generate_streaming` resets its KV
-    // cache per call, so re-rendering the full transcript each turn preserves
-    // context without forking the generation loop.
-    let mut generator = CxxGenerator::new_with_kv_mode(model.num_layers(), opts.kv_cache_mode)
-        .with_token_bias(output_suppression);
+    // One inference session for the whole chat (issue #448, ADR 0004). Under
+    // default features `select_backend()` folds to MLX and the session wraps the
+    // same `CxxGenerator`, so `generate_streaming` runs the identical loop and
+    // resets its KV cache per call; re-rendering the full transcript each turn
+    // preserves context without forking the generation loop.
+    let mut session = select_backend().create_session(
+        model.num_layers(),
+        opts.kv_cache_mode,
+        output_suppression,
+    )?;
 
     let mut editor = DefaultEditor::new()
         .map_err(|e| anyhow!("failed to initialize the interactive line editor: {e}"))?;
@@ -270,8 +275,8 @@ pub fn run_chat(opts: ChatOptions) -> Result<()> {
                     }
                     SlashOutcome::Cleared => {
                         // `/clear` already reset the transcript; also drop any
-                        // generator-side state for a clean next prefill.
-                        generator.reset_with_model(&model);
+                        // session-side state for a clean next prefill.
+                        session.reset_with_model(&model);
                         continue;
                     }
                     SlashOutcome::Handled => continue,
@@ -286,7 +291,7 @@ pub fn run_chat(opts: ChatOptions) -> Result<()> {
                 let prompt =
                     render_prompt(processor.as_ref(), &conversation, opts.no_chat_template);
                 let reply = stream_turn(
-                    &mut generator,
+                    &mut session,
                     &model,
                     &tokenizer,
                     &prompt,
@@ -531,10 +536,11 @@ fn concat_userassistant_fallback(conversation: &[ChatMessage]) -> String {
 ///
 /// Tokenization matches `generate::tokenize_prompt` (skip the extra BOS when
 /// the rendered prompt already embeds one). Generation goes through
-/// [`CxxGenerator::generate_streaming`] — the same loop the offline path uses —
-/// with a per-token callback that streams text via [`StreamingDecodeState`].
+/// [`Session::generate_streaming`] — which delegates to the same
+/// `CxxGenerator::generate_streaming` loop the offline path uses — with a
+/// per-token callback that streams text via [`StreamingDecodeState`].
 fn stream_turn<M: LanguageModel>(
-    generator: &mut CxxGenerator,
+    session: &mut Session,
     model: &M,
     tokenizer: &MlxcelTokenizer,
     prompt: &str,
@@ -558,7 +564,7 @@ fn stream_turn<M: LanguageModel>(
     let mut streamed = String::new();
     let mut stdout = io::stdout();
 
-    generator.generate_streaming(
+    session.generate_streaming(
         model,
         &prompt_tokens,
         max_tokens,

@@ -24,23 +24,32 @@
 //! target is FuriosaAI's TCP / RNGD, whose `furiosa-opt` toolchain compiles to
 //! a virtual ISA and cannot route through MLX).
 //!
-//! This module introduces the seam and nothing else. A [`ComputeBackend`]
-//! abstracts the forward-execution engine at the model-load boundary: it
-//! produces the loaded forward executor ([`LoadedModel`], which is an
-//! `impl LanguageModel`) for a given model spec. It abstracts the *engine*,
-//! not individual ops.
+//! A [`ComputeBackend`] abstracts the forward-execution engine. It has two
+//! layers, drawn at the altitudes ADR 0004 settled on (issue #448):
 //!
-//! # Why the seam sits at model load, not at `forward()`
+//! - **Session layer (core, single sequence).** A backend produces an
+//!   inference [`Session`] that owns its own KV state and runs generation
+//!   token-in / token-out with on-device sampling. This is the contract the CLI
+//!   `generate` / `chat` paths consume and the one a future non-MLX backend
+//!   (issue #449, a separate default-off crate) implements. The MLX session
+//!   wraps the existing `CxxGenerator`, so the same decode loop and sampling
+//!   run and CLI output stays byte-identical.
+//! - **Extended layer (MLX-only, load boundary).** The server batch scheduler
+//!   does cross-sequence batched forward and owns [`LoadedModel`] directly, so
+//!   the load-boundary entry ([`ComputeBackend::load_model`], returning
+//!   `(LoadedModel, MlxcelTokenizer)`) is retained unchanged for
+//!   `src/server/model_worker.rs` and the scheduler. Batched serving is treated
+//!   as an MLX capability the single-sequence session does not cover yet (the
+//!   KV / batching abstraction ADR 0004 defers).
 //!
-//! The forward entry boundary (`LanguageModel::forward`, once per token in
-//! decode and once per chunk in prefill) is already the right contract: a
-//! non-MLX backend implements the *same* `LanguageModel` contract with a
-//! different engine behind it. The seam therefore lives one level up, at the
-//! point that decides which engine constructs the executor. It does NOT wrap
-//! `forward()` itself and is NOT an op-level abstraction. An op-level seam
-//! would lose MLX graph fusion and `mx.compile` and add real overhead in the
-//! inner loop. The MLX path keeps its concrete hot types (KV cache tensors,
-//! paged-KV blocks, prompt-cache detach / adopt) exposed and untouched.
+//! # Why the seam abstracts the *engine*, not individual ops
+//!
+//! An op-level seam (parametrizing every model over a tensor type) would lose
+//! MLX graph fusion and `mx.compile` and add real overhead in the inner loop,
+//! and it does not fit a graph-compiler backend's whole-graph model. So the
+//! session method runs the per-token forward internally and the MLX path keeps
+//! its concrete hot types (KV cache tensors, paged-KV blocks, prompt-cache
+//! detach / adopt) exposed and untouched.
 //!
 //! # Codegen equivalence when the optional backend is off (the default)
 //!
@@ -51,13 +60,19 @@
 //! environment read and no branch, and every [`Backend`] method is a
 //! single-arm `match` marked `#[inline]`. After inlining the dispatch folds
 //! away entirely: `select_backend().load_model(p)` lowers to a direct call to
-//! the existing MLX loader, identical to the pre-seam build. Shipping binaries
-//! (Apple Silicon, CUDA) compile no extra backend code because the optional
-//! `experimental-backend` module and enum variant are `cfg`-gated off.
+//! the existing MLX loader, and `backend.create_session(...).generate(...)`
+//! lowers to a direct call into the wrapped `CxxGenerator`, identical to the
+//! pre-seam build. The returned [`Session`] is itself a single-variant enum
+//! whose per-method `match` collapses the same way, so no runtime indirection
+//! is added on the generation hot path. Shipping binaries (Apple Silicon, CUDA)
+//! compile no extra backend code because the optional `experimental-backend`
+//! module and enum variant are `cfg`-gated off.
 
 use std::path::Path;
 
 use anyhow::Result;
+use mlxcel_core::TokenBiasMap;
+use mlxcel_core::cache::KVCacheMode;
 
 use crate::LoadedModel;
 use crate::distributed::ShardConfig;
@@ -66,20 +81,27 @@ use crate::tokenizer::MlxcelTokenizer;
 pub mod mlx;
 pub use mlx::MlxBackend;
 
+pub mod session;
+pub use session::Session;
+
 #[cfg(feature = "experimental-backend")]
 pub mod experimental;
 
 /// The forward-execution engine seam.
 ///
-/// A `ComputeBackend` produces the loaded forward executor for a model spec.
-/// The executor is a [`LoadedModel`], which implements the
-/// [`LanguageModel`](mlxcel_core::generate::LanguageModel) forward contract, so
-/// the backend abstracts *which engine* runs `forward()`, not individual ops.
+/// A `ComputeBackend` produces two things: a single-sequence inference
+/// [`Session`] for the CLI generation path ([`create_session`](Self::create_session)),
+/// and, for the server batched path, the loaded forward executor at the load
+/// boundary ([`load_model`](Self::load_model), returning [`LoadedModel`], which
+/// implements the [`LanguageModel`](mlxcel_core::generate::LanguageModel)
+/// forward contract). The backend abstracts *which engine* runs generation, not
+/// individual ops.
 ///
-/// The trait is drawn narrowly on purpose: it covers only the load boundary so
-/// that the MLX path's specialized hot paths (paged KV, prompt-cache detach /
-/// adopt, concrete cache tensors) are never forced through a generic
-/// interface. Those stay on the concrete MLX path behind [`MlxBackend`].
+/// The session method runs the per-token forward internally, and the load
+/// boundary keeps returning the concrete `LoadedModel`, so the MLX path's
+/// specialized hot paths (paged KV, prompt-cache detach / adopt, concrete cache
+/// tensors) are never forced through a generic op interface. Those stay on the
+/// concrete MLX path behind [`MlxBackend`].
 pub trait ComputeBackend {
     /// Stable identifier for diagnostics and logging (e.g. `"mlx"`).
     fn name(&self) -> &'static str;
@@ -102,6 +124,32 @@ pub trait ComputeBackend {
         adapter_path: Option<&Path>,
         shard_config: &ShardConfig,
     ) -> Result<(LoadedModel, MlxcelTokenizer)>;
+
+    /// Produce a single-sequence inference [`Session`] for an already-loaded
+    /// model (issue #448, ADR 0004).
+    ///
+    /// The session owns its own KV state and runs generation token-in /
+    /// token-out. `num_layers` and `kv_cache_mode` come from the loaded model;
+    /// `token_bias` is the pre-resolved language / suppression bias the CLI
+    /// threads in (empty is a zero-overhead no-op). A backend with no engine
+    /// wired in (the experimental scaffold) returns an error here.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the backend cannot construct a session.
+    fn create_session(
+        &self,
+        num_layers: usize,
+        kv_cache_mode: KVCacheMode,
+        token_bias: TokenBiasMap,
+    ) -> Result<Session>;
+
+    /// Whether this backend supports cross-sequence batched serving (the server
+    /// `BatchScheduler` path). The single-sequence [`Session`] never batches;
+    /// this advertises the backend-level capability the extended load-boundary
+    /// path provides. MLX returns `true`; a backend with no batched engine
+    /// returns `false`.
+    fn supports_batched_serving(&self) -> bool;
 }
 
 /// The compute backend selected for this process.
@@ -174,6 +222,34 @@ impl Backend {
             Backend::Experimental(b) => {
                 b.load_model_with_tensor_parallel(model_path, adapter_path, shard_config)
             }
+        }
+    }
+
+    /// Produce a single-sequence inference [`Session`] through the active
+    /// backend. Under default features the dispatch folds to a direct
+    /// [`MlxBackend::create_session`].
+    #[inline]
+    pub fn create_session(
+        &self,
+        num_layers: usize,
+        kv_cache_mode: KVCacheMode,
+        token_bias: TokenBiasMap,
+    ) -> Result<Session> {
+        match self {
+            Backend::Mlx(b) => b.create_session(num_layers, kv_cache_mode, token_bias),
+            #[cfg(feature = "experimental-backend")]
+            Backend::Experimental(b) => b.create_session(num_layers, kv_cache_mode, token_bias),
+        }
+    }
+
+    /// Whether the active backend supports cross-sequence batched serving.
+    #[inline]
+    #[must_use]
+    pub fn supports_batched_serving(&self) -> bool {
+        match self {
+            Backend::Mlx(b) => b.supports_batched_serving(),
+            #[cfg(feature = "experimental-backend")]
+            Backend::Experimental(b) => b.supports_batched_serving(),
         }
     }
 }

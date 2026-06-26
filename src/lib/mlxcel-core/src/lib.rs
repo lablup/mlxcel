@@ -2447,6 +2447,9 @@ pub use ops::{concatenate, divide_scalar, multiply_scalar, stack, stack_owned, w
 
 // Re-export sampling primitives needed by generation-loop wiring (B8) and server layers.
 pub use sampling::TokenBiasMap;
+// Re-export the inference-session contract (issue #448, ADR 0004) so the root
+// crate's compute-backend seam can construct and dispatch MLX sessions.
+pub use session::{InferenceSession, MlxInferenceSession, SessionCapabilities};
 // Re-export N-gram loop-detection so the server control plane and CLI decode
 // loops can configure and run early-stop on degenerate token-repetition.
 pub use loop_detection::{LoopDetectionConfig, detect_repetition_loop};
@@ -2773,6 +2776,11 @@ pub mod weights;
 
 // Token generation
 pub mod generate;
+
+// Inference-session contract (issue #448, ADR 0004). The engine-neutral
+// `InferenceSession` trait plus the MLX `MlxInferenceSession` that wraps
+// `CxxGenerator`. The CLI single-sequence paths drive generation through this.
+pub mod session;
 
 // Decode-loop setup helpers shared by standard and speculative generation.
 // Public so that the server batch scheduler can reuse seed/EOS/history helpers.
