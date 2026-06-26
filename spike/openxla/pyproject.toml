@@ -1,0 +1,26 @@
+# Standalone Phase 0/1 spike for issue #449 (OpenXLA reference backend).
+# Not part of the mlxcel Cargo workspace; touches no Rust crate or build graph.
+# Exact resolved versions are pinned in requirements.lock (the reproducible spec).
+[project]
+name = "mlxcel-openxla-spike"
+version = "0.0.1"
+description = "Llama-3.2-1B prefill + decode-step StableHLO export, run on PJRT/IREE"
+requires-python = ">=3.12"
+dependencies = [
+    "jax",            # native StableHLO export; CPU jaxlib on aarch64
+    "numpy",
+    "safetensors",
+    "huggingface-hub",
+    "flatbuffers",    # required by jax.export serialization
+    "torch",          # CPU build, for the HF reference only
+    "transformers",   # reference Llama implementation + tokenizer
+    "iree-base-compiler",  # bonus: compile/run the same StableHLO on IREE
+    "iree-base-runtime",
+]
+
+# torch is installed from the CPU index so it does not pull a CUDA build:
+#   uv venv --python 3.12 .venv
+#   uv pip install --python .venv torch --index-url https://download.pytorch.org/whl/cpu
+#   uv pip install --python .venv jax numpy safetensors huggingface-hub flatbuffers \
+#       transformers iree-base-compiler iree-base-runtime
+# Then freeze: uv pip freeze --python .venv > requirements.lock

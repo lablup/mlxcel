@@ -1,0 +1,6 @@
+# Standalone spike: keep source + lock, ignore env, weights, build artifacts
+.venv/
+models/
+artifacts/
+__pycache__/
+*.pyc
