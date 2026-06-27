@@ -87,13 +87,20 @@ pub fn initialize_runtime() -> RuntimeSetup {
     // Footgun guard: a default `cargo build --release` on Linux omits the `cuda`
     // feature and silently runs MLX on the CPU. If the user wanted the GPU but
     // this CPU-only binary fell back to CPU on a host that has an NVIDIA GPU,
-    // say so loudly instead of crawling at a fraction of GPU speed.
-    if should_warn_cpu_only_on_nvidia_host(
-        requested_device,
-        device,
-        cfg!(feature = "cuda"),
-        nvidia_host_present(),
-    ) {
+    // say so loudly instead of crawling at a fraction of GPU speed. The OpenXLA
+    // backend (issue #449) is the exception: it drives inference through IREE,
+    // not MLX, and can run on the GPU via its own device (MLXCEL_XLA_DEVICE),
+    // so the MLX-CPU-fallback message would be misleading there.
+    let xla_backend_selected =
+        cfg!(feature = "xla-backend") && std::env::var("MLXCEL_BACKEND").as_deref() == Ok("xla");
+    if !xla_backend_selected
+        && should_warn_cpu_only_on_nvidia_host(
+            requested_device,
+            device,
+            cfg!(feature = "cuda"),
+            nvidia_host_present(),
+        )
+    {
         warn_cpu_only_on_nvidia_host();
     }
 

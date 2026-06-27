@@ -162,6 +162,9 @@ fn verify_config(model_dir: &Path) -> Result<(), String> {
 
 /// Locate the IREE distribution: a runtime `IREE_DIST` override first, else the
 /// path baked at build time (the dist whose runtime is linked into this binary).
+/// Only the dist (CPU/vulkan) build uses this; the cuda build links a source-built
+/// runtime and takes its iree-compile from `MLXCEL_XLA_IREE_COMPILE` instead.
+#[cfg(not(xla_iree_cuda))]
 fn iree_dist() -> Result<PathBuf, String> {
     if let Ok(d) = std::env::var("IREE_DIST") {
         return Ok(PathBuf::from(d));
@@ -172,20 +175,54 @@ fn iree_dist() -> Result<PathBuf, String> {
     }
 }
 
-/// iree-compile target flags for a HAL device. M2 ships the CPU path; the
-/// prebuilt aarch64 dist registers only local (CPU) and vulkan drivers, not
-/// CUDA, so a GPU device needs a CUDA/Vulkan-enabled runtime (a follow-up).
+/// The `iree-compile` binary used to lower the bundled graphs to vmfbs. In the
+/// cuda build the source-built runtime ships no compiler, so a cuda-capable
+/// iree-compile (version-matched to that runtime) is required via
+/// `MLXCEL_XLA_IREE_COMPILE` (runtime env, else baked at build); in the dist
+/// build it is the dist's own `bin/iree-compile`.
+fn iree_compile_bin() -> Result<PathBuf, String> {
+    if let Ok(ic) = std::env::var("MLXCEL_XLA_IREE_COMPILE") {
+        return Ok(PathBuf::from(ic));
+    }
+    if let Some(ic) = option_env!("MLXCEL_XLA_IREE_COMPILE") {
+        return Ok(PathBuf::from(ic));
+    }
+    #[cfg(xla_iree_cuda)]
+    {
+        Err("the cuda build needs a cuda-capable iree-compile: set \
+             MLXCEL_XLA_IREE_COMPILE to one matching the source runtime version \
+             (e.g. the pip iree-compile)"
+            .to_string())
+    }
+    #[cfg(not(xla_iree_cuda))]
+    {
+        let ic = iree_dist()?.join("bin/iree-compile");
+        if !ic.exists() {
+            return Err(format!(
+                "iree-compile not found at {} (set IREE_DIST to a valid dist)",
+                ic.display()
+            ));
+        }
+        Ok(ic)
+    }
+}
+
+/// iree-compile target flags for a HAL device. `local-task`/`local-sync` -> the
+/// CPU (llvm-cpu) target; `cuda` -> the CUDA target (only usable in a cuda
+/// build, whose runtime registers the cuda driver and whose iree-compile has
+/// cuda codegen).
 fn target_flags(device: &str) -> Result<&'static [&'static str], String> {
-    if device.starts_with("local") {
+    if device == "cuda" {
+        Ok(&["--iree-hal-target-device=cuda"])
+    } else if device.starts_with("local") {
         Ok(&[
             "--iree-hal-target-device=local",
             "--iree-hal-local-target-device-backends=llvm-cpu",
         ])
     } else {
         Err(format!(
-            "the OpenXLA backend M2 path runs on CPU (device \"local-task\"); device \
-             {device:?} needs a CUDA/Vulkan-enabled IREE runtime, which the prebuilt \
-             dist does not register"
+            "unsupported OpenXLA device {device:?}; use \"local-task\" (CPU) or, in a \
+             cuda build, \"cuda\""
         ))
     }
 }
@@ -204,6 +241,9 @@ fn compile_one(
     for f in flags {
         f.hash(&mut h);
     }
+    // Include the compiler path so a cuda vmfb is never reused for a cpu build
+    // (or across iree-compile versions) just because the graph text matches.
+    iree_compile.to_string_lossy().hash(&mut h);
     let key = h.finish();
     let mlir_path = cache.join(format!("{tag}-{key:016x}.mlir"));
     let vmfb_path = cache.join(format!("{tag}-{key:016x}.vmfb"));
@@ -230,11 +270,10 @@ fn compile_one(
 
 /// Compile the bundled prefill + decode graphs for `device`.
 fn compile_vmfbs(device: &str) -> Result<(PathBuf, PathBuf), String> {
-    let dist = iree_dist()?;
-    let iree_compile = dist.join("bin/iree-compile");
+    let iree_compile = iree_compile_bin()?;
     if !iree_compile.exists() {
         return Err(format!(
-            "iree-compile not found at {} (set IREE_DIST to a valid dist)",
+            "iree-compile not found at {}",
             iree_compile.display()
         ));
     }

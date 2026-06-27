@@ -31,6 +31,13 @@
 #include <iree/runtime/api.h>
 #include <iree/hal/buffer_view_util.h>
 #include <iree/hal/buffer_transfer.h>
+#ifdef XLA_GATE_CUDA
+// CUDA mode (GB10): built against a source-built cuda-enabled IREE runtime
+// (build.rs cuda mode defines XLA_GATE_CUDA). The unified runtime bundles the
+// cuda driver impl + local-task, but the registration wrapper is separate, so
+// the driver is registered explicitly below.
+#include <iree/hal/drivers/cuda/registration/driver_module.h>
+#endif
 
 // libc-backed implementation of the system allocator control function.
 iree_status_t iree_xla_libc_ctl(void* self, iree_allocator_command_t command,
@@ -150,6 +157,15 @@ static iree_status_t xla_llama_create_impl(
     const char* decode_vmfb, int32_t n_weights, const float* const* weight_data,
     const int32_t* weight_ranks, const int64_t* weight_dims) {
   c->n_weights = n_weights;
+
+#ifdef XLA_GATE_CUDA
+  // Register the CUDA driver so use_all_available_drivers exposes it for a
+  // device_uri of "cuda" (GB10). Non-fatal; CUDA is initialized only when a
+  // cuda device is actually created.
+  iree_status_t cu_reg =
+      iree_hal_cuda_driver_module_register(iree_hal_driver_registry_default());
+  if (!iree_status_is_ok(cu_reg)) iree_status_ignore(cu_reg);
+#endif
 
   iree_runtime_instance_options_t inst_opts;
   iree_runtime_instance_options_initialize(&inst_opts);

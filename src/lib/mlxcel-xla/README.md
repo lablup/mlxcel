@@ -36,18 +36,51 @@ MLXCEL_BACKEND=xla ./target/release/mlxcel generate \
   -m <Llama-3.2-1B-Instruct dir> -p "..." -n 48
 ```
 
-CPU (`local-task`) is the proven M2 path, token-exact (48/48) vs the HF temp-0
+CPU (`local-task`) is the proven path, token-exact (48/48) vs the HF temp-0
 reference. `MLXCEL_XLA_DEVICE` selects the HAL device (default `local-task`).
 
-### Scope / limits (M2)
+### CUDA (GPU) build
+
+The prebuilt dist is CPU/Vulkan only (no CUDA driver, and its `iree-compile` has
+no CUDA codegen). The CUDA path therefore uses a **source-built cuda-enabled IREE
+runtime** plus a **cuda-capable `iree-compile`**, version-matched to each other.
+It is a separate, mutually-exclusive build mode (set `IREE_CUDA_HOME` instead of
+`IREE_DIST`).
+
+```bash
+# 1. Build the IREE *runtime* from source at the version your iree-compile uses
+#    (runtime only -> no LLVM; skip the third_party/llvm-project submodule):
+git clone --depth 1 --branch <iree-tag> https://github.com/iree-org/iree.git src
+git -C src -c submodule."third_party/llvm-project".update=none \
+    submodule update --init --recursive --depth 1
+cmake -S src -B build -G "Unix Makefiles" -DCMAKE_BUILD_TYPE=Release \
+  -DIREE_BUILD_COMPILER=OFF -DIREE_HAL_DRIVER_DEFAULTS=OFF \
+  -DIREE_HAL_DRIVER_LOCAL_TASK=ON -DIREE_HAL_DRIVER_LOCAL_SYNC=ON \
+  -DIREE_HAL_DRIVER_CUDA=ON -DCUDAToolkit_ROOT=/usr/local/cuda
+make -C build -j"$(nproc)" iree_runtime_unified
+
+# 2. Point the build at it; provide a cuda-capable iree-compile (matching version).
+export IREE_CUDA_HOME=/abs/path/to/that/iree   # the dir holding src/ and build/
+export IREE_CUDA_COMPILE=/abs/path/to/iree-compile   # cuda codegen, version-matched
+cargo build --release --features xla-iree
+
+# 3. Run on the GPU.
+MLXCEL_BACKEND=xla MLXCEL_XLA_DEVICE=cuda ./target/release/mlxcel generate \
+  -m <Llama-3.2-1B-Instruct dir> -p "..." -n 48
+```
+
+Validated on a GB10 (Grace-Blackwell, sm_121): token-exact 48/48, ~5 tok/s
+(~2.6x the CPU path). Vulkan via the prebuilt dist does **not** work on the GB10
+(IREE's Vulkan allocator vs NVIDIA's unified memory), so CUDA is the GPU path.
+
+### Scope / limits
 
 - The bundled graphs are authored for **Llama-3.2-1B-Instruct** specifically;
   `load` verifies `config.json` matches and errors otherwise.
 - Prompt length is capped at the prefill bucket (`MAX_SEQ = 256` tokens).
 - Greedy sampling only; text-only (no VLM / draft).
-- **GPU:** the prebuilt aarch64 dist registers `local-sync` / `local-task` /
-  `vulkan` drivers but **no CUDA**, so a GPU device needs a CUDA/Vulkan-enabled
-  runtime; M2 runs on CPU.
+- Single-sequence (batch-1). Throughput needs batched graphs + a multi-sequence
+  session, a separate milestone.
 
 ## File map
 

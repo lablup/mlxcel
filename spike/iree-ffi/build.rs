@@ -5,13 +5,61 @@ use std::env;
 use std::path::PathBuf;
 
 fn main() {
+    println!("cargo:rerun-if-changed=iree_gate.c");
+    println!("cargo:rerun-if-env-changed=IREE_DIST");
+    println!("cargo:rerun-if-env-changed=IREE_CUDA_HOME");
+
+    // CUDA experiment (GB10): build against a source-built cuda-enabled IREE
+    // runtime instead of the CPU/vulkan prebuilt dist. Set IREE_CUDA_HOME to the
+    // iree-cuda dir (it has src/ and build/). Headers are split across the source
+    // (src/runtime/src) and the build (build/runtime/src, generated flatcc/config),
+    // and the cuda driver is separate libs registered explicitly in the shim.
+    if let Ok(home) = env::var("IREE_CUDA_HOME") {
+        let home = PathBuf::from(home);
+        let src_inc = home.join("src/runtime/src");
+        let bld_inc = home.join("build/runtime/src");
+        cc::Build::new()
+            .file("iree_gate.c")
+            .include(&src_inc)
+            .include(&bld_inc)
+            .define("XLA_GATE_CUDA", None)
+            .compile("iree_gate");
+
+        let b = home.join("build");
+        for d in [
+            "runtime/src/iree/runtime",
+            "runtime/src/iree/hal/drivers/cuda/registration",
+            "build_tools/third_party/flatcc",
+            "build_tools/third_party/printf",
+        ] {
+            println!("cargo:rustc-link-search=native={}", b.join(d).display());
+        }
+        // The unified archive already bundles the cuda driver impl + local-task,
+        // so whole-archive only it (re-linking the cuda impl libs would multiply-
+        // define their objects). The cuda registration wrapper (just
+        // driver_module.c.o, pulled by the explicit register call), IREE's
+        // vendored printf (vsnprintf_/vfctprintf the unified printf.c.o needs),
+        // and flatcc go in a group. The cuda driver dlopens libcuda at runtime,
+        // so no link-time -lcuda.
+        println!("cargo:rustc-link-arg=-Wl,--whole-archive");
+        println!("cargo:rustc-link-arg=-l:libiree_runtime_unified.a");
+        println!("cargo:rustc-link-arg=-Wl,--no-whole-archive");
+        println!("cargo:rustc-link-arg=-Wl,--start-group");
+        println!("cargo:rustc-link-arg=-l:libiree_hal_drivers_cuda_registration_registration.a");
+        println!("cargo:rustc-link-arg=-l:libprintf_printf.a");
+        println!("cargo:rustc-link-arg=-l:libflatcc_parsing.a");
+        println!("cargo:rustc-link-arg=-lgcc");
+        println!("cargo:rustc-link-arg=-lm");
+        println!("cargo:rustc-link-arg=-lpthread");
+        println!("cargo:rustc-link-arg=-ldl");
+        println!("cargo:rustc-link-arg=-Wl,--end-group");
+        return;
+    }
+
     let dist = env::var("IREE_DIST").expect("set IREE_DIST to the extracted iree-dist tree");
     let dist = PathBuf::from(dist);
     let include = dist.join("include");
     let lib = dist.join("lib");
-
-    println!("cargo:rerun-if-changed=iree_gate.c");
-    println!("cargo:rerun-if-env-changed=IREE_DIST");
 
     cc::Build::new()
         .file("iree_gate.c")

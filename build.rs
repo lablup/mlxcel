@@ -17,10 +17,54 @@ use std::path::PathBuf;
 
 fn main() {
     println!("cargo:rerun-if-env-changed=IREE_DIST");
+    println!("cargo:rerun-if-env-changed=IREE_CUDA_HOME");
 
     // The feature env is set for this crate's own enabled features; `xla-iree`
     // becomes `CARGO_FEATURE_XLA_IREE`.
     if env::var_os("CARGO_FEATURE_XLA_IREE").is_none() {
+        return;
+    }
+
+    // CUDA mode (GB10): link the source-built cuda-enabled IREE runtime instead
+    // of the prebuilt dist (mutually exclusive; IREE_CUDA_HOME wins). The
+    // source-built `libiree_runtime_unified.a` already bundles the cuda driver
+    // impl + local-task, so whole-archive only it (re-linking the separate cuda
+    // impl libs would multiply-define their objects); the cuda registration
+    // wrapper (driver_module.c.o, pulled by the shim's explicit register call),
+    // IREE's vendored printf (the unified printf.c.o needs vsnprintf_), and flatcc
+    // go in a group. The cuda driver dlopens libcuda at runtime (no -lcuda).
+    if let Ok(home) = env::var("IREE_CUDA_HOME") {
+        let b = PathBuf::from(home).join("build");
+        let unified = b.join("runtime/src/iree/runtime/libiree_runtime_unified.a");
+        assert!(
+            unified.exists(),
+            "IREE_CUDA_HOME build is missing {} (run the runtime build first)",
+            unified.display()
+        );
+        for d in [
+            "runtime/src/iree/runtime",
+            "runtime/src/iree/hal/drivers/cuda/registration",
+            "build_tools/third_party/flatcc",
+            "build_tools/third_party/printf",
+        ] {
+            println!("cargo:rustc-link-search=native={}", b.join(d).display());
+        }
+        for arg in [
+            "-Wl,--whole-archive",
+            "-l:libiree_runtime_unified.a",
+            "-Wl,--no-whole-archive",
+            "-Wl,--start-group",
+            "-l:libiree_hal_drivers_cuda_registration_registration.a",
+            "-l:libprintf_printf.a",
+            "-l:libflatcc_parsing.a",
+            "-lgcc",
+            "-lm",
+            "-lpthread",
+            "-ldl",
+            "-Wl,--end-group",
+        ] {
+            println!("cargo:rustc-link-arg={arg}");
+        }
         return;
     }
 
