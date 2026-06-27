@@ -84,10 +84,13 @@ impl ComputeBackend for MlxBackend {
     #[inline]
     fn create_session(
         &self,
+        _model_path: &Path,
         num_layers: usize,
         kv_cache_mode: KVCacheMode,
         token_bias: TokenBiasMap,
     ) -> Result<Session> {
+        // The MLX engine already loaded the model at `load_model`, so it does not
+        // need the model directory here.
         // Wrap the existing `CxxGenerator` (inside `MlxInferenceSession`) with
         // the same KV mode and token bias the CLI used before the seam, so the
         // generation methods delegate verbatim and CLI output is byte-identical.

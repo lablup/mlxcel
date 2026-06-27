@@ -1,10 +1,12 @@
 //! Rust-native StableHLO text emitter for Llama-3.2-1B (spike #451).
 //!
 //! Usage:
-//!   emit p0      [out.mlir]   single dot_general, toolchain round-trip gate (P0)
-//!   emit probe   [out.mlir]   syntax probe for the riskiest op forms
-//!   emit decode  [out.mlir]   full Llama-3.2-1B decode_step (P1)
-//!   emit prefill [out.mlir]   full Llama-3.2-1B bucketed prefill
+//!   emit p0              [out.mlir]   single dot_general, toolchain round-trip (P0)
+//!   emit probe           [out.mlir]   syntax probe for the riskiest op forms
+//!   emit decode          [out.mlir]   full Llama-3.2-1B decode_step (logits out)
+//!   emit prefill         [out.mlir]   full Llama-3.2-1B bucketed prefill (logits)
+//!   emit decode-argmax   [out.mlir]   decode_step ending in on-device argmax
+//!   emit prefill-argmax  [out.mlir]   prefill ending in on-device argmax
 
 mod builder;
 mod config;
@@ -30,13 +32,19 @@ fn main() {
     let kind = args.get(1).map(|s| s.as_str()).unwrap_or("decode");
     let out = args.get(2);
 
+    let cfg = config::Config::llama_3_2_1b();
     let text = match kind {
         "p0" => p0_matmul(),
         "probe" => probe(),
-        "decode" => model::emit_decode(&config::Config::llama_3_2_1b()),
-        "prefill" => model::emit_prefill(&config::Config::llama_3_2_1b()),
+        "decode" => model::emit_decode(&cfg, false),
+        "prefill" => model::emit_prefill(&cfg, false),
+        "decode-argmax" => model::emit_decode(&cfg, true),
+        "prefill-argmax" => model::emit_prefill(&cfg, true),
         other => {
-            eprintln!("unknown kind: {other} (use p0 | probe | decode | prefill)");
+            eprintln!(
+                "unknown kind: {other} (use p0 | probe | decode | prefill | \
+                 decode-argmax | prefill-argmax)"
+            );
             std::process::exit(2);
         }
     };

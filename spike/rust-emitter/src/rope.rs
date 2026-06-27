@@ -28,8 +28,8 @@ pub fn llama3_inv_freq(c: &Config) -> Vec<f64> {
             base
         };
         // smoothed = (1 - smooth) * inv/factor + smooth * inv
-        let smooth =
-            (c.orig_ctx as f64 / wavelen - c.low_freq_factor) / (c.high_freq_factor - c.low_freq_factor);
+        let smooth = (c.orig_ctx as f64 / wavelen - c.low_freq_factor)
+            / (c.high_freq_factor - c.low_freq_factor);
         let smoothed = (1.0 - smooth) * v / c.factor + smooth * v;
         // is_medium = !(wavelen < high_wl) && !(wavelen > low_wl)
         let is_medium = !(wavelen < high_wl) && !(wavelen > low_wl);

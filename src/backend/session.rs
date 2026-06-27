@@ -118,9 +118,14 @@ impl Session {
             // empty result until the engine is wired in; the control plane uses
             // the object-safe contract directly for error-visible paths.
             #[cfg(feature = "xla-backend")]
-            Session::Xla(s) => s
-                .generate_greedy(prompt_tokens, max_tokens, &[])
-                .unwrap_or_default(),
+            Session::Xla(s) => {
+                let eos = s.eos_token_ids().to_vec();
+                s.generate_greedy(prompt_tokens, max_tokens, &eos)
+                    .unwrap_or_else(|e| {
+                        eprintln!("OpenXLA generation failed: {e}");
+                        Vec::new()
+                    })
+            }
         }
     }
 
@@ -140,9 +145,14 @@ impl Session {
                 s.generate_streaming(model, prompt_tokens, max_tokens, sampling, on_token)
             }
             #[cfg(feature = "xla-backend")]
-            Session::Xla(s) => s
-                .generate_streaming_greedy(prompt_tokens, max_tokens, &[], on_token)
-                .unwrap_or_default(),
+            Session::Xla(s) => {
+                let eos = s.eos_token_ids().to_vec();
+                s.generate_streaming_greedy(prompt_tokens, max_tokens, &eos, on_token)
+                    .unwrap_or_else(|e| {
+                        eprintln!("OpenXLA generation failed: {e}");
+                        Vec::new()
+                    })
+            }
         }
     }
 
@@ -174,9 +184,14 @@ impl Session {
             // capability, so it ignores the input embeddings and drives the token
             // stream from the prompt ids.
             #[cfg(feature = "xla-backend")]
-            Session::Xla(s) => s
-                .generate_streaming_greedy(prompt_tokens, max_tokens, &[], on_token)
-                .unwrap_or_default(),
+            Session::Xla(s) => {
+                let eos = s.eos_token_ids().to_vec();
+                s.generate_streaming_greedy(prompt_tokens, max_tokens, &eos, on_token)
+                    .unwrap_or_else(|e| {
+                        eprintln!("OpenXLA generation failed: {e}");
+                        Vec::new()
+                    })
+            }
         }
     }
 
@@ -192,11 +207,16 @@ impl Session {
         match self {
             Session::Mlx(s) => s.generate_with_stats(model, prompt_tokens, max_tokens, sampling),
             #[cfg(feature = "xla-backend")]
-            Session::Xla(s) => (
-                s.generate_greedy(prompt_tokens, max_tokens, &[])
-                    .unwrap_or_default(),
-                GenerationStats::default(),
-            ),
+            Session::Xla(s) => {
+                let eos = s.eos_token_ids().to_vec();
+                let toks = s
+                    .generate_greedy(prompt_tokens, max_tokens, &eos)
+                    .unwrap_or_else(|e| {
+                        eprintln!("OpenXLA generation failed: {e}");
+                        Vec::new()
+                    });
+                (toks, GenerationStats::default())
+            }
         }
     }
 
@@ -221,11 +241,16 @@ impl Session {
                 sampling,
             ),
             #[cfg(feature = "xla-backend")]
-            Session::Xla(s) => (
-                s.generate_greedy(prompt_tokens, max_tokens, &[])
-                    .unwrap_or_default(),
-                GenerationStats::default(),
-            ),
+            Session::Xla(s) => {
+                let eos = s.eos_token_ids().to_vec();
+                let toks = s
+                    .generate_greedy(prompt_tokens, max_tokens, &eos)
+                    .unwrap_or_else(|e| {
+                        eprintln!("OpenXLA generation failed: {e}");
+                        Vec::new()
+                    });
+                (toks, GenerationStats::default())
+            }
         }
     }
 

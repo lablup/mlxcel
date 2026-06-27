@@ -4,10 +4,14 @@
 # it. This crate is the home of the engine that fills in the engine-neutral
 # `InferenceSession` contract from mlxcel-core.
 #
-# M1 (this commit) is the crate + seam scaffold: the session implements the
-# contract and the self-contained greedy drive loop, but the actual graph
-# execution (the IREE runtime C API via FFI) is the next milestone, so
-# prefill / decode_step return a clear not-wired error.
+# Two gates:
+#   * `xla-backend` (root) compiles the crate + seam. Without the `iree` feature
+#     the crate is pure Rust and needs no native toolchain, so CI builds it with
+#     no IREE distribution; prefill / decode_step return a clear not-built error.
+#   * `iree` (this crate) turns on real execution: build.rs compiles the C shim
+#     against the prebuilt IREE runtime (needs IREE_DIST) and the session drives
+#     the #451-emitted prefill / decode_step vmfbs with resident weights and
+#     on-device argmax. The root `xla-iree` feature enables it.
 [package]
 name = "mlxcel-xla"
 version = "0.3.3"
@@ -15,6 +19,13 @@ edition = "2024"
 description = "OpenXLA / StableHLO compiler-family inference backend for mlxcel (default-off)"
 repository = "https://github.com/lablup/mlxcel"
 license = "Apache-2.0"
+build = "build.rs"
+
+[features]
+# Real IREE execution. Off by default so `--features xla-backend` stays buildable
+# in CI (no IREE dist). When on, build.rs compiles csrc/xla_iree.c and links the
+# prebuilt IREE runtime (IREE_DIST must point at the extracted dist).
+iree = ["dep:safetensors", "dep:memmap2", "dep:serde_json"]
 
 [dependencies]
 # The engine-neutral inference-session contract lives in mlxcel-core. This
@@ -22,3 +33,13 @@ license = "Apache-2.0"
 # contract to a leaf crate so the non-MLX backend does not compile MLX. The
 # default build is unaffected either way (this crate is off unless `xla-backend`).
 mlxcel-core = { path = "../mlxcel-core" }
+
+# Weight loading (bf16 safetensors -> f32). Only pulled in under the `iree`
+# feature, where the session uploads the real weights to the device.
+safetensors = { version = "0.4", optional = true }
+memmap2 = { version = "0.9", optional = true }
+# config.json shape check (the bundled graphs are authored for one architecture).
+serde_json = { version = "1", optional = true }
+
+[build-dependencies]
+cc = "1"

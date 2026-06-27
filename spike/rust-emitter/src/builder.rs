@@ -337,7 +337,13 @@ impl Builder {
     fn unary(&mut self, op: &str, a: &Val) -> Val {
         let ty = a.ty.clone();
         let r = self.fresh();
-        self.line(format!("{} = stablehlo.{} {} : {}", r, op, a.name, ty.render()));
+        self.line(format!(
+            "{} = stablehlo.{} {} : {}",
+            r,
+            op,
+            a.name,
+            ty.render()
+        ));
         Val { name: r, ty }
     }
 
@@ -387,14 +393,13 @@ impl Builder {
     // --- reductions --------------------------------------------------------
 
     fn reduce(&mut self, applies: &str, x: &Val, dim: usize, init: &Val) -> Val {
-        let shape: Vec<usize> = x
-            .ty
-            .shape
-            .iter()
-            .enumerate()
-            .filter(|(i, _)| *i != dim)
-            .map(|(_, d)| *d)
-            .collect();
+        let shape: Vec<usize> =
+            x.ty.shape
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| *i != dim)
+                .map(|(_, d)| *d)
+                .collect();
         let ty = Ty::new(shape, x.ty.elt);
         let r = self.fresh();
         self.line(format!(
@@ -409,6 +414,80 @@ impl Builder {
     }
     pub fn reduce_max(&mut self, x: &Val, dim: usize, init: &Val) -> Val {
         self.reduce("maximum", x, dim, init)
+    }
+
+    /// On-device argmax over a `[V]` vector -> scalar `i32` index (the first
+    /// index of the max, numpy/jax semantics). Mirrors the JAX/IREE-emitted
+    /// argmax reducer in `spike/openxla/artifacts/fp32_decode_argmax.stablehlo.mlir`:
+    /// a two-operand `stablehlo.reduce` over (values, iota indices) whose body
+    /// keeps the larger value (or NaN), tie-breaking to the lower index. This is
+    /// the Phase 2b on-device sampling: the graph returns a token id, so a decode
+    /// step ships 4 bytes back instead of a `[V]` logits copy. The reducer block
+    /// args are named (not `%argN` / `%N`) so they never collide with the
+    /// function args or the builder's SSA counter.
+    pub fn argmax(&mut self, logits: &Val) -> Val {
+        let v = logits.ty.shape[0];
+        let vf = Ty::f32(vec![v]).render();
+        let vi = Ty::new(vec![v], "i32").render();
+        let c0 = self.fresh();
+        self.line(format!("{c0} = stablehlo.constant dense<0> : tensor<i32>"));
+        let ninf = self.fresh();
+        self.line(format!(
+            "{ninf} = stablehlo.constant dense<0xFF800000> : tensor<f32>"
+        ));
+        let iota = self.fresh();
+        self.line(format!("{iota} = stablehlo.iota dim = 0 : {vi}"));
+        let res = self.fresh();
+        self.line(format!(
+            "{res}:2 = stablehlo.reduce({l} init: {ninf}), ({iota} init: {c0}) across dimensions = [0] : ({vf}, {vi}, tensor<f32>, tensor<i32>) -> (tensor<f32>, tensor<i32>)",
+            l = logits.name
+        ));
+        self.line(
+            "reducer(%amv_l: tensor<f32>, %amv_r: tensor<f32>) (%ami_l: tensor<i32>, %ami_r: tensor<i32>) {"
+                .to_string(),
+        );
+        let gt = self.fresh();
+        self.line(format!(
+            "  {gt} = stablehlo.compare GT, %amv_l, %amv_r, FLOAT : (tensor<f32>, tensor<f32>) -> tensor<i1>"
+        ));
+        let nan = self.fresh();
+        self.line(format!(
+            "  {nan} = stablehlo.compare NE, %amv_l, %amv_l, FLOAT : (tensor<f32>, tensor<f32>) -> tensor<i1>"
+        ));
+        let gt_nan = self.fresh();
+        self.line(format!(
+            "  {gt_nan} = stablehlo.or {gt}, {nan} : tensor<i1>"
+        ));
+        let eq = self.fresh();
+        self.line(format!(
+            "  {eq} = stablehlo.compare EQ, %amv_l, %amv_r, FLOAT : (tensor<f32>, tensor<f32>) -> tensor<i1>"
+        ));
+        let lt = self.fresh();
+        self.line(format!(
+            "  {lt} = stablehlo.compare LT, %ami_l, %ami_r, SIGNED : (tensor<i32>, tensor<i32>) -> tensor<i1>"
+        ));
+        let eq_lt = self.fresh();
+        self.line(format!("  {eq_lt} = stablehlo.and {eq}, {lt} : tensor<i1>"));
+        let idx_pred = self.fresh();
+        self.line(format!(
+            "  {idx_pred} = stablehlo.or {gt_nan}, {eq_lt} : tensor<i1>"
+        ));
+        let mv = self.fresh();
+        self.line(format!(
+            "  {mv} = stablehlo.select {gt_nan}, %amv_l, %amv_r : tensor<i1>, tensor<f32>"
+        ));
+        let mi = self.fresh();
+        self.line(format!(
+            "  {mi} = stablehlo.select {idx_pred}, %ami_l, %ami_r : tensor<i1>, tensor<i32>"
+        ));
+        self.line(format!(
+            "  stablehlo.return {mv}, {mi} : tensor<f32>, tensor<i32>"
+        ));
+        self.line("}".to_string());
+        Val {
+            name: format!("{res}#1"),
+            ty: Ty::scalar("i32"),
+        }
     }
 
     // --- dot_general -------------------------------------------------------

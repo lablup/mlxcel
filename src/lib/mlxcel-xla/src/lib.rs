@@ -28,54 +28,120 @@
 //!
 //! # Milestone state
 //!
-//! This is the crate + seam scaffold (Phase 3 M1). It wires the session into the
-//! `ComputeBackend` seam and implements the self-contained greedy drive loop
+//! Phase 3 M2 wires real execution behind the `iree` feature: [`prefill`] seeds
+//! the KV cache through the bucketed prefill graph and [`decode_step`] advances
+//! one token through the decode graph, both driven by the IREE runtime C API via
+//! the [`iree`] module's FFI shim, with the model weights resident on the device
+//! and the next-token argmax computed on-device. The drive loop
 //! ([`XlaInferenceSession::generate_greedy`] /
-//! [`XlaInferenceSession::generate_streaming_greedy`]) over the object-safe
-//! [`InferenceSession::prefill`] / [`InferenceSession::decode_step`] primitives.
-//! The actual graph execution (the IREE runtime C API via FFI, loading the vmfb
-//! and uploading weights) is the next milestone, so [`InferenceSession::prefill`]
-//! and [`InferenceSession::decode_step`] return [`NOT_WIRED`] for now. Nothing in
-//! the default build depends on this crate.
+//! [`generate_streaming_greedy`](XlaInferenceSession::generate_streaming_greedy))
+//! sits on top of those object-safe primitives.
+//!
+//! Without the `iree` feature the crate is pure Rust (no native toolchain, no
+//! IREE distribution needed, so CI builds `--features xla-backend` unchanged) and
+//! `prefill` / `decode_step` return [`NOT_WIRED`]. Nothing in the default build
+//! depends on this crate.
+//!
+//! [`prefill`]: InferenceSession::prefill
+//! [`decode_step`]: InferenceSession::decode_step
 
 use std::path::{Path, PathBuf};
 
 use mlxcel_core::session::{InferenceSession, SessionCapabilities};
 
-/// Error returned by the scaffold's token-level primitives until the IREE
-/// execution path is wired in (Phase 3, the milestone after this one).
-pub const NOT_WIRED: &str = "the OpenXLA inference session is a crate and seam scaffold (issue #449 \
-     Phase 3 M1); graph execution through the IREE runtime C API is the next \
-     milestone, so prefill / decode_step are not bound to an engine yet";
+#[cfg(feature = "iree")]
+mod iree;
+
+/// Error returned by the token-level primitives when the crate is built without
+/// the `iree` feature (no IREE execution path compiled in).
+pub const NOT_WIRED: &str = "the OpenXLA inference session was built without the `iree` feature; rebuild \
+     mlxcel-xla with `--features iree` (and IREE_DIST pointing at an extracted iree \
+     dist) to enable StableHLO / IREE execution of prefill / decode_step";
+
+/// Read the model's EOS token ids from `generation_config.json` (a single int or
+/// a list). Only parsed under `iree`, where `serde_json` is available and the
+/// decode loop actually runs; otherwise empty (execution errors out anyway).
+#[cfg(feature = "iree")]
+fn read_eos(model_path: &Path) -> Vec<i32> {
+    let p = model_path.join("generation_config.json");
+    let Ok(s) = std::fs::read_to_string(p) else {
+        return Vec::new();
+    };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(&s) else {
+        return Vec::new();
+    };
+    match v.get("eos_token_id") {
+        Some(serde_json::Value::Number(n)) => {
+            n.as_i64().map(|x| vec![x as i32]).unwrap_or_default()
+        }
+        Some(serde_json::Value::Array(a)) => a
+            .iter()
+            .filter_map(serde_json::Value::as_i64)
+            .map(|x| x as i32)
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+#[cfg(not(feature = "iree"))]
+fn read_eos(_model_path: &Path) -> Vec<i32> {
+    Vec::new()
+}
 
 /// The single-sequence OpenXLA inference session.
 ///
 /// Owns its per-sequence KV state and runs generation token-in / token-out with
 /// on-device sampling, the shape ADR 0004 reserves for a compiler-family backend.
-/// In this milestone it holds the load inputs and the drive loop; the compiled
-/// graphs, resident weights, device handles, and live KV land with the execution
-/// milestone.
+/// Under the `iree` feature it holds the live IREE engine ([`iree::IreeLlama`])
+/// and the running cache length; without it, it holds only the load inputs and
+/// the token primitives report [`NOT_WIRED`].
 pub struct XlaInferenceSession {
     model_path: PathBuf,
     num_layers: usize,
+    eos_token_ids: Vec<i32>,
+    #[cfg(feature = "iree")]
+    engine: iree::IreeLlama,
+    #[cfg(feature = "iree")]
+    cache_len: i32,
 }
 
 impl XlaInferenceSession {
     /// Prepare a session for a model directory.
     ///
-    /// In a later milestone this compiles or loads the exported `prefill` and
-    /// `decode_step` vmfbs and uploads the (optionally int4) weights to the
-    /// device. For now it records the inputs so the seam wiring is exercisable.
+    /// Under the `iree` feature this verifies the model architecture, compiles
+    /// the bundled `prefill` / `decode_step` graphs, and uploads the weights as
+    /// resident device buffers (on `MLXCEL_XLA_DEVICE`, default `"local-task"`).
+    /// Without the feature it only records the inputs so the seam wiring stays
+    /// exercisable.
     ///
     /// # Errors
     ///
-    /// Returns an error if the session cannot be prepared (none in this
-    /// milestone).
+    /// Returns an error if the session cannot be prepared: under `iree`, an
+    /// unsupported model architecture, a missing IREE distribution, an
+    /// `iree-compile` failure, or a weight-loading failure.
     pub fn load(model_path: &Path, num_layers: usize) -> Result<Self, String> {
-        Ok(Self {
-            model_path: model_path.to_path_buf(),
-            num_layers,
-        })
+        let eos_token_ids = read_eos(model_path);
+        #[cfg(feature = "iree")]
+        {
+            let device =
+                std::env::var("MLXCEL_XLA_DEVICE").unwrap_or_else(|_| "local-task".to_string());
+            let engine = iree::IreeLlama::load(model_path, &device)?;
+            Ok(Self {
+                model_path: model_path.to_path_buf(),
+                num_layers,
+                eos_token_ids,
+                engine,
+                cache_len: 0,
+            })
+        }
+        #[cfg(not(feature = "iree"))]
+        {
+            Ok(Self {
+                model_path: model_path.to_path_buf(),
+                num_layers,
+                eos_token_ids,
+            })
+        }
     }
 
     /// Layer count the session was loaded with.
@@ -90,6 +156,13 @@ impl XlaInferenceSession {
         &self.model_path
     }
 
+    /// The model's EOS token ids (from `generation_config.json`), so the drive
+    /// loop and the seam can stop on them.
+    #[must_use]
+    pub fn eos_token_ids(&self) -> &[i32] {
+        &self.eos_token_ids
+    }
+
     /// Self-contained greedy generation over the object-safe contract.
     ///
     /// Seeds KV with the prompt prefix, then advances one token per step until an
@@ -99,8 +172,8 @@ impl XlaInferenceSession {
     ///
     /// # Errors
     ///
-    /// Propagates the `prefill` / `decode_step` error (currently [`NOT_WIRED`]),
-    /// or errors on an empty prompt.
+    /// Propagates the `prefill` / `decode_step` error, or errors on an empty
+    /// prompt.
     pub fn generate_greedy(
         &mut self,
         prompt_tokens: &[i32],
@@ -117,8 +190,8 @@ impl XlaInferenceSession {
     ///
     /// # Errors
     ///
-    /// Propagates the `prefill` / `decode_step` error (currently [`NOT_WIRED`]),
-    /// or errors on an empty prompt.
+    /// Propagates the `prefill` / `decode_step` error, or errors on an empty
+    /// prompt.
     pub fn generate_streaming_greedy<F: FnMut(i32) -> bool>(
         &mut self,
         prompt_tokens: &[i32],
@@ -155,16 +228,36 @@ impl InferenceSession for XlaInferenceSession {
         SessionCapabilities::single_sequence()
     }
 
+    #[cfg(feature = "iree")]
+    fn prefill(&mut self, token_ids: &[i32]) -> Result<(), String> {
+        self.engine.prefill_seed(token_ids)?;
+        self.cache_len = token_ids.len() as i32;
+        Ok(())
+    }
+
+    #[cfg(not(feature = "iree"))]
     fn prefill(&mut self, _token_ids: &[i32]) -> Result<(), String> {
         Err(NOT_WIRED.to_string())
     }
 
+    #[cfg(feature = "iree")]
+    fn decode_step(&mut self, token: i32) -> Result<i32, String> {
+        let next = self.engine.decode(token, self.cache_len)?;
+        self.cache_len += 1;
+        Ok(next)
+    }
+
+    #[cfg(not(feature = "iree"))]
     fn decode_step(&mut self, _token: i32) -> Result<i32, String> {
         Err(NOT_WIRED.to_string())
     }
 }
 
-#[cfg(test)]
+// These scaffold tests cover the without-`iree` behavior (load records inputs;
+// the token primitives report NOT_WIRED). Under `--features iree`, `load`
+// constructs a real engine from a real model directory, so the fake-path fixture
+// does not apply; that path is validated by the end-to-end CLI run on GB10.
+#[cfg(all(test, not(feature = "iree")))]
 mod tests {
     use super::*;
 

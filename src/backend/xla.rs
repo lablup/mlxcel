@@ -95,17 +95,20 @@ impl ComputeBackend for XlaBackend {
 
     fn create_session(
         &self,
+        model_path: &Path,
         num_layers: usize,
         _kv_cache_mode: KVCacheMode,
         _token_bias: TokenBiasMap,
     ) -> Result<Session> {
-        // M1 scaffold: produce the session so the seam is exercisable. The model
-        // directory is not threaded through `create_session` yet (the MLX seam
-        // loads it via `load_model` first); wiring the model path and config into
-        // session creation lands with the IREE execution / CLI milestone, at
-        // which point `prefill` / `decode_step` bind to the compiled graphs.
-        let session = XlaInferenceSession::load(Path::new("."), num_layers)
-            .map_err(|e| anyhow::anyhow!(e))?;
+        // The OpenXLA engine drives generation from the session, so it loads its
+        // own weights and config from the model directory here (rather than the
+        // MLX `load_model` boundary). Under the `iree` feature this compiles the
+        // bundled prefill / decode_step graphs and uploads the weights resident;
+        // without it, the session loads but `prefill` / `decode_step` report that
+        // the `iree` feature is off. KV mode and token bias do not apply: the
+        // session owns its own KV and samples greedily on-device.
+        let session =
+            XlaInferenceSession::load(model_path, num_layers).map_err(|e| anyhow::anyhow!(e))?;
         Ok(Session::xla(session))
     }
 

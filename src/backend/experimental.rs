@@ -100,6 +100,7 @@ impl ComputeBackend for ExperimentalBackend {
 
     fn create_session(
         &self,
+        _model_path: &Path,
         _num_layers: usize,
         _kv_cache_mode: KVCacheMode,
         _token_bias: TokenBiasMap,

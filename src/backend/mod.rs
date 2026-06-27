@@ -134,16 +134,21 @@ pub trait ComputeBackend {
     /// model (issue #448, ADR 0004).
     ///
     /// The session owns its own KV state and runs generation token-in /
-    /// token-out. `num_layers` and `kv_cache_mode` come from the loaded model;
-    /// `token_bias` is the pre-resolved language / suppression bias the CLI
-    /// threads in (empty is a zero-overhead no-op). A backend with no engine
-    /// wired in (the experimental scaffold) returns an error here.
+    /// token-out. `model_path` is the resolved model directory, threaded so a
+    /// backend that drives generation from the session (rather than the MLX
+    /// `load_model` boundary) can load its own weights and config; the MLX
+    /// backend, which already loaded the model at `load_model`, ignores it.
+    /// `num_layers` and `kv_cache_mode` come from the loaded model; `token_bias`
+    /// is the pre-resolved language / suppression bias the CLI threads in (empty
+    /// is a zero-overhead no-op). A backend with no engine wired in (the
+    /// experimental scaffold) returns an error here.
     ///
     /// # Errors
     ///
     /// Returns an error if the backend cannot construct a session.
     fn create_session(
         &self,
+        model_path: &Path,
         num_layers: usize,
         kv_cache_mode: KVCacheMode,
         token_bias: TokenBiasMap,
@@ -250,16 +255,19 @@ impl Backend {
     #[inline]
     pub fn create_session(
         &self,
+        model_path: &Path,
         num_layers: usize,
         kv_cache_mode: KVCacheMode,
         token_bias: TokenBiasMap,
     ) -> Result<Session> {
         match self {
-            Backend::Mlx(b) => b.create_session(num_layers, kv_cache_mode, token_bias),
+            Backend::Mlx(b) => b.create_session(model_path, num_layers, kv_cache_mode, token_bias),
             #[cfg(feature = "experimental-backend")]
-            Backend::Experimental(b) => b.create_session(num_layers, kv_cache_mode, token_bias),
+            Backend::Experimental(b) => {
+                b.create_session(model_path, num_layers, kv_cache_mode, token_bias)
+            }
             #[cfg(feature = "xla-backend")]
-            Backend::Xla(b) => b.create_session(num_layers, kv_cache_mode, token_bias),
+            Backend::Xla(b) => b.create_session(model_path, num_layers, kv_cache_mode, token_bias),
         }
     }
 

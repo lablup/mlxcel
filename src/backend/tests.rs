@@ -84,7 +84,12 @@ fn mlx_backend_creates_a_session_and_advertises_batched_serving() {
         "MLX serves batched requests via the retained load_model / scheduler path"
     );
     let session = backend
-        .create_session(4, KVCacheMode::Fp16, TokenBiasMap::new())
+        .create_session(
+            std::path::Path::new("/tmp/model"),
+            4,
+            KVCacheMode::Fp16,
+            TokenBiasMap::new(),
+        )
         .expect("MLX backend must produce a single-sequence session");
     // The single-sequence session does not batch, page, or speculate, but it
     // accepts multimodal embedding prefill.
@@ -100,7 +105,12 @@ fn mlx_session_threads_the_token_bias_through() {
     let mut bias = TokenBiasMap::new();
     bias.insert(5, -2.0);
     let session = select_backend()
-        .create_session(2, KVCacheMode::Fp16, bias)
+        .create_session(
+            std::path::Path::new("/tmp/model"),
+            2,
+            KVCacheMode::Fp16,
+            bias,
+        )
         .expect("session creation must succeed");
     match session {
         Session::Mlx(s) => {
@@ -122,7 +132,12 @@ fn mlx_session_threads_the_token_bias_through() {
 fn experimental_backend_session_creation_errors() {
     let backend = experimental::ExperimentalBackend::new();
     assert!(!backend.supports_batched_serving());
-    let result = backend.create_session(4, KVCacheMode::Fp16, TokenBiasMap::new());
+    let result = backend.create_session(
+        std::path::Path::new("/tmp/model"),
+        4,
+        KVCacheMode::Fp16,
+        TokenBiasMap::new(),
+    );
     assert!(
         result.is_err(),
         "the experimental scaffold must report it has no session engine"
@@ -130,11 +145,12 @@ fn experimental_backend_session_creation_errors() {
 }
 
 /// The OpenXLA backend produces a single-sequence session whose token-level
-/// primitives report they are not wired to an engine yet (the Phase 3 M1
-/// scaffold). `load_model` is the MLX batched path and errors here. Compiled
-/// only under the optional `xla-backend` feature; default builds carry none of
-/// it.
-#[cfg(feature = "xla-backend")]
+/// primitives report the `iree` feature is off (the without-execution build).
+/// `load_model` is the MLX batched path and errors here. Compiled under
+/// `xla-backend` but NOT when real execution is on (`xla-iree`), where
+/// `create_session` loads a real model and the fake-path fixture does not apply
+/// (that path is validated by the end-to-end CLI run).
+#[cfg(all(feature = "xla-backend", not(feature = "xla-iree")))]
 #[test]
 fn xla_backend_creates_a_single_sequence_session_scaffold() {
     let backend = XlaBackend::new();
@@ -146,7 +162,12 @@ fn xla_backend_creates_a_single_sequence_session_scaffold() {
     );
 
     let session = backend
-        .create_session(16, KVCacheMode::Fp16, TokenBiasMap::new())
+        .create_session(
+            std::path::Path::new("/tmp/model"),
+            16,
+            KVCacheMode::Fp16,
+            TokenBiasMap::new(),
+        )
         .expect("xla session creation must succeed");
     let caps = session.capabilities();
     assert!(

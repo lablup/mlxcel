@@ -814,6 +814,7 @@ fn print_generation_result(
 
 fn generate_standard<M: LanguageModel>(
     model: &M,
+    model_path: &Path,
     prompt_tokens: &[i32],
     max_tokens: usize,
     sampling_config: &SamplingConfig,
@@ -826,9 +827,15 @@ fn generate_standard<M: LanguageModel>(
     // wraps the same `CxxGenerator`, so the delegated generation methods run the
     // identical decode loop and CLI output is byte-identical. Axis B (B8): the
     // resolved token-bias is threaded into the session; an empty map preserves
-    // bit-exact baseline via the generator's `compose_sampling`.
-    let mut session =
-        select_backend().create_session(model.num_layers(), kv_cache_mode, token_bias)?;
+    // bit-exact baseline via the generator's `compose_sampling`. `model_path` is
+    // threaded for a session-driven backend (issue #449 OpenXLA) that loads its
+    // own weights/config; MLX ignores it.
+    let mut session = select_backend().create_session(
+        model_path,
+        model.num_layers(),
+        kv_cache_mode,
+        token_bias,
+    )?;
 
     if profile {
         return Ok(session.generate_with_stats(model, prompt_tokens, max_tokens, sampling_config));
@@ -863,6 +870,7 @@ fn generate_standard<M: LanguageModel>(
 
 fn generate_with_embeddings<M: LanguageModel>(
     model: &M,
+    model_path: &Path,
     prompt_tokens: &[i32],
     embeddings: &InputEmbeddings,
     max_tokens: usize,
@@ -872,8 +880,13 @@ fn generate_with_embeddings<M: LanguageModel>(
     token_bias: TokenBiasMap,
 ) -> Result<(Vec<i32>, GenerationStats)> {
     // Axis B (B8): same session wiring as the text-only path above (issue #448).
-    let mut session =
-        select_backend().create_session(model.num_layers(), kv_cache_mode, token_bias)?;
+    // `model_path` is threaded for the session-driven OpenXLA backend (#449).
+    let mut session = select_backend().create_session(
+        model_path,
+        model.num_layers(),
+        kv_cache_mode,
+        token_bias,
+    )?;
     let (input_embeds, mask_ref) = prepared_embedding_refs(embeddings)?;
 
     if profile {
@@ -900,6 +913,59 @@ fn generate_with_embeddings<M: LanguageModel>(
     let total_time = start_time.elapsed();
     let generated_len = tokens.len();
 
+    Ok((
+        tokens,
+        generation_stats_from_duration(prompt_tokens.len(), generated_len, total_time),
+    ))
+}
+
+/// Read `num_hidden_layers` from a model directory's `config.json` (0 if absent
+/// or unparsable). The OpenXLA session stores it as metadata; the bundled graph
+/// fixes the architecture, so a best-effort value is sufficient.
+#[cfg(feature = "xla-backend")]
+fn xla_num_layers(model_dir: &Path) -> usize {
+    std::fs::read_to_string(model_dir.join("config.json"))
+        .ok()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+        .and_then(|v| {
+            v.get("num_hidden_layers")
+                .and_then(serde_json::Value::as_u64)
+        })
+        .map_or(0, |n| n as usize)
+}
+
+/// Self-contained text generation for the OpenXLA backend (issue #449 Phase 3).
+///
+/// The OpenXLA engine drives generation from its own session and has no MLX
+/// `LoadedModel`, so this path skips `load_model` (which the XLA backend rejects)
+/// and the generic model-threaded loop: it creates the session straight from the
+/// model directory and runs the session's own greedy loop, which seeds KV and
+/// samples on-device. Text-only and greedy by design (no VLM / draft / sampling
+/// knobs), so the caller routes here only when `MLXCEL_BACKEND=xla` is selected.
+#[cfg(feature = "xla-backend")]
+fn generate_xla_text(
+    model_path: &Path,
+    num_layers: usize,
+    prompt_tokens: &[i32],
+    max_tokens: usize,
+    kv_cache_mode: KVCacheMode,
+    token_bias: TokenBiasMap,
+) -> Result<(Vec<i32>, GenerationStats)> {
+    let mut session =
+        select_backend().create_session(model_path, num_layers, kv_cache_mode, token_bias)?;
+    let start_time = Instant::now();
+    let tokens = match &mut session {
+        mlxcel::Session::Xla(s) => {
+            let eos = s.eos_token_ids().to_vec();
+            s.generate_greedy(prompt_tokens, max_tokens, &eos)
+                .map_err(|e| anyhow!("OpenXLA generation failed: {e}"))?
+        }
+        // `select_backend()` returned the XLA backend, so its `create_session`
+        // yields an XLA session; any other variant would be a wiring bug.
+        _ => anyhow::bail!("the OpenXLA backend did not produce an XLA session"),
+    };
+    let total_time = start_time.elapsed();
+    let generated_len = tokens.len();
     Ok((
         tokens,
         generation_stats_from_duration(prompt_tokens.len(), generated_len, total_time),
@@ -1062,6 +1128,7 @@ fn run_generation_mode(
     } else if let Some(embeddings) = vlm_embeddings {
         generate_with_embeddings(
             model,
+            &args.model.model,
             prompt_tokens,
             embeddings,
             args.generation.max_tokens,
@@ -1073,6 +1140,7 @@ fn run_generation_mode(
     } else {
         generate_standard(
             model,
+            &args.model.model,
             prompt_tokens,
             args.generation.max_tokens,
             sampling_config,
@@ -1599,6 +1667,31 @@ fn run_generate_once(mut args: GenerateArgs) -> Result<()> {
             );
         }
         KVCacheMode::Fp16 => {}
+    }
+
+    // OpenXLA backend (issue #449): the engine drives generation from its own
+    // session and has no MLX `LoadedModel`, so route around `load_model` (which
+    // the XLA backend rejects) and the model-threaded loop entirely, then fall
+    // back into the shared decode / print path. Compiled only under
+    // `xla-backend`; taken at runtime only when `MLXCEL_BACKEND=xla` is selected,
+    // so the default flow below is unchanged. (The conditional move of
+    // `token_bias` is sound because this branch diverges with `return`.)
+    #[cfg(feature = "xla-backend")]
+    if select_backend().name() == "xla" {
+        let num_layers = xla_num_layers(&args.model.model);
+        print_generation_preamble(&user_prompt)?;
+        let (generated_tokens, stats) = generate_xla_text(
+            &args.model.model,
+            num_layers,
+            &prompt_tokens,
+            args.generation.max_tokens,
+            kv_cache_mode,
+            token_bias,
+        )?;
+        let generated_text = decode_generated_text(&tokenizer, &prompt_tokens, &generated_tokens);
+        print_generation_result(&generated_text, &stats, args.generation.profile)?;
+        mlxcel_core::clear_memory_cache();
+        return Ok(());
     }
 
     let (generated_tokens, stats) = if pipeline_requested {

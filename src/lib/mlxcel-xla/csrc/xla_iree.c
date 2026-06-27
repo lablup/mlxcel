@@ -1,8 +1,24 @@
-// Minimal C shim over the IREE runtime C API: load a vmfb and invoke
-// module.main with two [n]f32 inputs, returning the [n]f32 output. This is the
-// FFI-gate proof (issue #449 Phase 3 M2) and the shape the mlxcel-xla backend
-// will use: a thin C shim over the prebuilt IREE runtime, with Rust calling a
-// flat C ABI rather than binding the runtime structs directly.
+// Copyright 2025-2026 Lablup Inc. and Jeongkyu Shin
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+// Thin C shim over the prebuilt IREE runtime C API for the OpenXLA backend
+// (issue #449 Phase 3). It loads the #451-emitted `prefill` and `decode_step`
+// vmfbs into one IREE session, keeps the model weights resident as device
+// buffers (uploaded once), threads the KV cache across decode steps, and returns
+// a token id per step. The grown shape of the FFI gate (spike/iree-ffi), proven
+// token-exact from Rust before being vendored here. Rust calls the flat C ABI
+// (`xla_llama_*`) and never binds the IREE runtime structs directly.
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -10,15 +26,15 @@
 // The iree-dist build leaves the system allocator to the application (its
 // iree_allocator_system() is gated on IREE_ALLOCATOR_SYSTEM_CTL). Point it at a
 // libc malloc/free control function, defined below, before the IREE headers.
-#define IREE_ALLOCATOR_SYSTEM_CTL iree_gate_libc_ctl
+#define IREE_ALLOCATOR_SYSTEM_CTL iree_xla_libc_ctl
 
 #include <iree/runtime/api.h>
 #include <iree/hal/buffer_view_util.h>
 #include <iree/hal/buffer_transfer.h>
 
 // libc-backed implementation of the system allocator control function.
-iree_status_t iree_gate_libc_ctl(void* self, iree_allocator_command_t command,
-                                 const void* params, void** inout_ptr) {
+iree_status_t iree_xla_libc_ctl(void* self, iree_allocator_command_t command,
+                                const void* params, void** inout_ptr) {
   (void)self;
   switch (command) {
     case IREE_ALLOCATOR_COMMAND_MALLOC:
@@ -47,95 +63,16 @@ iree_status_t iree_gate_libc_ctl(void* self, iree_allocator_command_t command,
   }
 }
 
-#define GATE_CHECK(expr)                                                 \
+#define XLA_CHECK(expr)                                                  \
   do {                                                                   \
     iree_status_t _s = (expr);                                          \
     if (!iree_status_is_ok(_s)) {                                       \
       int _c = (int)iree_status_code(_s);                               \
-      fprintf(stderr, "iree_gate: %s failed (status %d)\n", #expr, _c); \
+      fprintf(stderr, "xla_iree: %s failed (status %d)\n", #expr, _c);  \
       iree_status_ignore(_s);                                           \
       return _c ? _c : 1;                                               \
     }                                                                    \
   } while (0)
-
-// Returns 0 on success; a,b and out are host arrays of n f32.
-int iree_gate_run_add(const char* vmfb_path, const float* a, const float* b,
-                      int32_t n, float* out) {
-  iree_runtime_instance_options_t inst_opts;
-  iree_runtime_instance_options_initialize(&inst_opts);
-  iree_runtime_instance_options_use_all_available_drivers(&inst_opts);
-  iree_runtime_instance_t* instance = NULL;
-  GATE_CHECK(iree_runtime_instance_create(&inst_opts, iree_allocator_system(),
-                                          &instance));
-
-  iree_hal_device_t* device = NULL;
-  GATE_CHECK(iree_runtime_instance_try_create_default_device(
-      instance, iree_make_cstring_view("local-task"), &device));
-
-  iree_runtime_session_options_t sess_opts;
-  iree_runtime_session_options_initialize(&sess_opts);
-  iree_runtime_session_t* session = NULL;
-  GATE_CHECK(iree_runtime_session_create_with_device(
-      instance, &sess_opts, device,
-      iree_runtime_instance_host_allocator(instance), &session));
-
-  GATE_CHECK(
-      iree_runtime_session_append_bytecode_module_from_file(session, vmfb_path));
-
-  iree_runtime_call_t call;
-  GATE_CHECK(iree_runtime_call_initialize_by_name(
-      session, iree_make_cstring_view("module.main"), &call));
-
-  iree_hal_allocator_t* allocator =
-      iree_runtime_session_device_allocator(session);
-  iree_hal_buffer_params_t params = {
-      .type = IREE_HAL_MEMORY_TYPE_DEVICE_LOCAL,
-      .access = IREE_HAL_MEMORY_ACCESS_ALL,
-      .usage = IREE_HAL_BUFFER_USAGE_DEFAULT,
-  };
-  iree_hal_dim_t shape[1] = {(iree_hal_dim_t)n};
-  iree_host_size_t bytes = (iree_host_size_t)n * sizeof(float);
-
-  iree_hal_buffer_view_t* arg0 = NULL;
-  GATE_CHECK(iree_hal_buffer_view_allocate_buffer_copy(
-      device, allocator, 1, shape, IREE_HAL_ELEMENT_TYPE_FLOAT_32,
-      IREE_HAL_ENCODING_TYPE_DENSE_ROW_MAJOR, params,
-      iree_make_const_byte_span(a, bytes), &arg0));
-  iree_hal_buffer_view_t* arg1 = NULL;
-  GATE_CHECK(iree_hal_buffer_view_allocate_buffer_copy(
-      device, allocator, 1, shape, IREE_HAL_ELEMENT_TYPE_FLOAT_32,
-      IREE_HAL_ENCODING_TYPE_DENSE_ROW_MAJOR, params,
-      iree_make_const_byte_span(b, bytes), &arg1));
-
-  GATE_CHECK(iree_runtime_call_inputs_push_back_buffer_view(&call, arg0));
-  GATE_CHECK(iree_runtime_call_inputs_push_back_buffer_view(&call, arg1));
-
-  GATE_CHECK(iree_runtime_call_invoke(&call, 0));
-
-  iree_hal_buffer_view_t* ret = NULL;
-  GATE_CHECK(iree_runtime_call_outputs_pop_front_buffer_view(&call, &ret));
-  GATE_CHECK(iree_hal_device_transfer_d2h(
-      device, iree_hal_buffer_view_buffer(ret), 0, out, bytes,
-      IREE_HAL_TRANSFER_BUFFER_FLAG_DEFAULT, iree_infinite_timeout()));
-
-  iree_hal_buffer_view_release(arg0);
-  iree_hal_buffer_view_release(arg1);
-  iree_hal_buffer_view_release(ret);
-  iree_runtime_call_deinitialize(&call);
-  iree_runtime_session_release(session);
-  iree_hal_device_release(device);
-  iree_runtime_instance_release(instance);
-  return 0;
-}
-
-// ===========================================================================
-// Llama-3.2-1B execution: load the #451-emitted prefill + decode vmfbs into one
-// session, keep the 146 weights resident as device buffers, thread the KV cache
-// across steps, and return a token id per step (issue #449 Phase 3 M2). This is
-// the shape mlxcel-xla's prefill / decode_step will take. Argmax is on the host
-// here (read [V] logits back, pick the max); the Phase 2b on-device argmax
-// variant returns a scalar token id and is wired once the emitter emits it.
-// ===========================================================================
 
 typedef struct xla_ctx {
   iree_runtime_instance_t* instance;
@@ -146,8 +83,10 @@ typedef struct xla_ctx {
   iree_hal_buffer_view_t** weights;  // resident weights, uploaded once
   iree_hal_buffer_view_t* kcache;    // threaded KV (set by prefill, advanced by decode)
   iree_hal_buffer_view_t* vcache;
-  int32_t vocab;
 } xla_ctx;
+
+// Forward declaration: xla_llama_create's error path frees a partial context.
+void xla_llama_free(xla_ctx* c);
 
 static const iree_hal_buffer_params_t kDeviceLocalParams = {
     .type = IREE_HAL_MEMORY_TYPE_DEVICE_LOCAL,
@@ -209,8 +148,7 @@ static iree_status_t xla_alloc_bv(xla_ctx* c, iree_host_size_t rank,
 static iree_status_t xla_llama_create_impl(
     xla_ctx* c, const char* device_uri, const char* prefill_vmfb,
     const char* decode_vmfb, int32_t n_weights, const float* const* weight_data,
-    const int32_t* weight_ranks, const int64_t* weight_dims, int32_t vocab) {
-  c->vocab = vocab;
+    const int32_t* weight_ranks, const int64_t* weight_dims) {
   c->n_weights = n_weights;
 
   iree_runtime_instance_options_t inst_opts;
@@ -237,8 +175,8 @@ static iree_status_t xla_llama_create_impl(
 
   c->allocator = iree_runtime_session_device_allocator(c->session);
 
-  c->weights = (iree_hal_buffer_view_t**)calloc((size_t)n_weights,
-                                                sizeof(iree_hal_buffer_view_t*));
+  c->weights = (iree_hal_buffer_view_t**)calloc(
+      (size_t)n_weights, sizeof(iree_hal_buffer_view_t*));
   if (!c->weights) return iree_make_status(IREE_STATUS_RESOURCE_EXHAUSTED);
   for (int32_t i = 0; i < n_weights; i++) {
     int32_t rank = weight_ranks[i];
@@ -257,17 +195,21 @@ static iree_status_t xla_llama_create_impl(
   return iree_ok_status();
 }
 
-// Create the execution context. Returns NULL on failure (after printing).
+// Create the execution context. `device_uri` is "local-task" (CPU) or another
+// registered HAL driver. `weight_data[i]` points at `prod(weight_dims[i*4..])`
+// f32 values laid out row-major; the shim copies them into resident device
+// buffers, so the caller may free them after this returns. Returns NULL on
+// failure (after printing a diagnostic).
 xla_ctx* xla_llama_create(const char* device_uri, const char* prefill_vmfb,
                           const char* decode_vmfb, int32_t n_weights,
                           const float* const* weight_data,
                           const int32_t* weight_ranks,
-                          const int64_t* weight_dims, int32_t vocab) {
+                          const int64_t* weight_dims) {
   xla_ctx* c = (xla_ctx*)calloc(1, sizeof(xla_ctx));
   if (!c) return NULL;
   iree_status_t s =
       xla_llama_create_impl(c, device_uri, prefill_vmfb, decode_vmfb, n_weights,
-                            weight_data, weight_ranks, weight_dims, vocab);
+                            weight_data, weight_ranks, weight_dims);
   if (!iree_status_is_ok(s)) {
     char buf[512];
     iree_host_size_t got = 0;
@@ -287,43 +229,43 @@ int xla_llama_prefill(xla_ctx* c, const int32_t* tokens, int32_t lp,
                       const int32_t* positions, int32_t real_len,
                       int32_t* out_token) {
   iree_runtime_call_t call;
-  GATE_CHECK(iree_runtime_call_initialize_by_name(
+  XLA_CHECK(iree_runtime_call_initialize_by_name(
       c->session, iree_make_cstring_view("prefill.main"), &call));
   for (int32_t i = 0; i < c->n_weights; i++) {
-    GATE_CHECK(iree_runtime_call_inputs_push_back_buffer_view(&call,
-                                                              c->weights[i]));
+    XLA_CHECK(
+        iree_runtime_call_inputs_push_back_buffer_view(&call, c->weights[i]));
   }
   iree_hal_dim_t seq_shape[1] = {(iree_hal_dim_t)lp};
   iree_host_size_t seq_bytes = (iree_host_size_t)lp * sizeof(int32_t);
   iree_hal_buffer_view_t* tok_bv = NULL;
   iree_hal_buffer_view_t* pos_bv = NULL;
   iree_hal_buffer_view_t* len_bv = NULL;
-  GATE_CHECK(xla_alloc_bv(c, 1, seq_shape, IREE_HAL_ELEMENT_TYPE_INT_32, tokens,
-                          seq_bytes, &tok_bv));
-  GATE_CHECK(xla_alloc_bv(c, 1, seq_shape, IREE_HAL_ELEMENT_TYPE_INT_32,
-                          positions, seq_bytes, &pos_bv));
-  GATE_CHECK(xla_alloc_bv(c, 0, NULL, IREE_HAL_ELEMENT_TYPE_INT_32, &real_len,
-                          sizeof(int32_t), &len_bv));
-  GATE_CHECK(iree_runtime_call_inputs_push_back_buffer_view(&call, tok_bv));
-  GATE_CHECK(iree_runtime_call_inputs_push_back_buffer_view(&call, pos_bv));
-  GATE_CHECK(iree_runtime_call_inputs_push_back_buffer_view(&call, len_bv));
+  XLA_CHECK(xla_alloc_bv(c, 1, seq_shape, IREE_HAL_ELEMENT_TYPE_INT_32, tokens,
+                         seq_bytes, &tok_bv));
+  XLA_CHECK(xla_alloc_bv(c, 1, seq_shape, IREE_HAL_ELEMENT_TYPE_INT_32,
+                         positions, seq_bytes, &pos_bv));
+  XLA_CHECK(xla_alloc_bv(c, 0, NULL, IREE_HAL_ELEMENT_TYPE_INT_32, &real_len,
+                         sizeof(int32_t), &len_bv));
+  XLA_CHECK(iree_runtime_call_inputs_push_back_buffer_view(&call, tok_bv));
+  XLA_CHECK(iree_runtime_call_inputs_push_back_buffer_view(&call, pos_bv));
+  XLA_CHECK(iree_runtime_call_inputs_push_back_buffer_view(&call, len_bv));
 
-  GATE_CHECK(iree_runtime_call_invoke(&call, 0));
+  XLA_CHECK(iree_runtime_call_invoke(&call, 0));
 
-  iree_hal_buffer_view_t* logits = NULL;
+  iree_hal_buffer_view_t* token_out = NULL;
   iree_hal_buffer_view_t* kc = NULL;
   iree_hal_buffer_view_t* vc = NULL;
-  GATE_CHECK(iree_runtime_call_outputs_pop_front_buffer_view(&call, &logits));
-  GATE_CHECK(iree_runtime_call_outputs_pop_front_buffer_view(&call, &kc));
-  GATE_CHECK(iree_runtime_call_outputs_pop_front_buffer_view(&call, &vc));
+  XLA_CHECK(iree_runtime_call_outputs_pop_front_buffer_view(&call, &token_out));
+  XLA_CHECK(iree_runtime_call_outputs_pop_front_buffer_view(&call, &kc));
+  XLA_CHECK(iree_runtime_call_outputs_pop_front_buffer_view(&call, &vc));
   if (c->kcache) iree_hal_buffer_view_release(c->kcache);
   if (c->vcache) iree_hal_buffer_view_release(c->vcache);
   c->kcache = kc;
   c->vcache = vc;
 
-  GATE_CHECK(xla_read_token(c, logits, out_token));
+  XLA_CHECK(xla_read_token(c, token_out, out_token));
 
-  iree_hal_buffer_view_release(logits);
+  iree_hal_buffer_view_release(token_out);
   iree_hal_buffer_view_release(tok_bv);
   iree_hal_buffer_view_release(pos_bv);
   iree_hal_buffer_view_release(len_bv);
@@ -336,43 +278,43 @@ int xla_llama_prefill(xla_ctx* c, const int32_t* tokens, int32_t lp,
 int xla_llama_decode(xla_ctx* c, int32_t token, int32_t pos, int32_t cache_len,
                      int32_t* out_token) {
   iree_runtime_call_t call;
-  GATE_CHECK(iree_runtime_call_initialize_by_name(
+  XLA_CHECK(iree_runtime_call_initialize_by_name(
       c->session, iree_make_cstring_view("decode_step.main"), &call));
   for (int32_t i = 0; i < c->n_weights; i++) {
-    GATE_CHECK(iree_runtime_call_inputs_push_back_buffer_view(&call,
-                                                              c->weights[i]));
+    XLA_CHECK(
+        iree_runtime_call_inputs_push_back_buffer_view(&call, c->weights[i]));
   }
   iree_hal_buffer_view_t* tok_bv = NULL;
   iree_hal_buffer_view_t* pos_bv = NULL;
   iree_hal_buffer_view_t* len_bv = NULL;
-  GATE_CHECK(xla_alloc_bv(c, 0, NULL, IREE_HAL_ELEMENT_TYPE_INT_32, &token,
-                          sizeof(int32_t), &tok_bv));
-  GATE_CHECK(xla_alloc_bv(c, 0, NULL, IREE_HAL_ELEMENT_TYPE_INT_32, &pos,
-                          sizeof(int32_t), &pos_bv));
-  GATE_CHECK(xla_alloc_bv(c, 0, NULL, IREE_HAL_ELEMENT_TYPE_INT_32, &cache_len,
-                          sizeof(int32_t), &len_bv));
-  GATE_CHECK(iree_runtime_call_inputs_push_back_buffer_view(&call, tok_bv));
-  GATE_CHECK(iree_runtime_call_inputs_push_back_buffer_view(&call, pos_bv));
-  GATE_CHECK(iree_runtime_call_inputs_push_back_buffer_view(&call, len_bv));
-  GATE_CHECK(iree_runtime_call_inputs_push_back_buffer_view(&call, c->kcache));
-  GATE_CHECK(iree_runtime_call_inputs_push_back_buffer_view(&call, c->vcache));
+  XLA_CHECK(xla_alloc_bv(c, 0, NULL, IREE_HAL_ELEMENT_TYPE_INT_32, &token,
+                         sizeof(int32_t), &tok_bv));
+  XLA_CHECK(xla_alloc_bv(c, 0, NULL, IREE_HAL_ELEMENT_TYPE_INT_32, &pos,
+                         sizeof(int32_t), &pos_bv));
+  XLA_CHECK(xla_alloc_bv(c, 0, NULL, IREE_HAL_ELEMENT_TYPE_INT_32, &cache_len,
+                         sizeof(int32_t), &len_bv));
+  XLA_CHECK(iree_runtime_call_inputs_push_back_buffer_view(&call, tok_bv));
+  XLA_CHECK(iree_runtime_call_inputs_push_back_buffer_view(&call, pos_bv));
+  XLA_CHECK(iree_runtime_call_inputs_push_back_buffer_view(&call, len_bv));
+  XLA_CHECK(iree_runtime_call_inputs_push_back_buffer_view(&call, c->kcache));
+  XLA_CHECK(iree_runtime_call_inputs_push_back_buffer_view(&call, c->vcache));
 
-  GATE_CHECK(iree_runtime_call_invoke(&call, 0));
+  XLA_CHECK(iree_runtime_call_invoke(&call, 0));
 
-  iree_hal_buffer_view_t* logits = NULL;
+  iree_hal_buffer_view_t* token_out = NULL;
   iree_hal_buffer_view_t* kc = NULL;
   iree_hal_buffer_view_t* vc = NULL;
-  GATE_CHECK(iree_runtime_call_outputs_pop_front_buffer_view(&call, &logits));
-  GATE_CHECK(iree_runtime_call_outputs_pop_front_buffer_view(&call, &kc));
-  GATE_CHECK(iree_runtime_call_outputs_pop_front_buffer_view(&call, &vc));
+  XLA_CHECK(iree_runtime_call_outputs_pop_front_buffer_view(&call, &token_out));
+  XLA_CHECK(iree_runtime_call_outputs_pop_front_buffer_view(&call, &kc));
+  XLA_CHECK(iree_runtime_call_outputs_pop_front_buffer_view(&call, &vc));
   iree_hal_buffer_view_t* old_k = c->kcache;
   iree_hal_buffer_view_t* old_v = c->vcache;
   c->kcache = kc;
   c->vcache = vc;
 
-  GATE_CHECK(xla_read_token(c, logits, out_token));
+  XLA_CHECK(xla_read_token(c, token_out, out_token));
 
-  iree_hal_buffer_view_release(logits);
+  iree_hal_buffer_view_release(token_out);
   iree_hal_buffer_view_release(tok_bv);
   iree_hal_buffer_view_release(pos_bv);
   iree_hal_buffer_view_release(len_bv);

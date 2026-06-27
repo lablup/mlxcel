@@ -13,9 +13,12 @@ use crate::rope;
 
 const MAX_SEQ: usize = 256;
 
-/// Bucketed padded prompt length for prefill. Fits the 46-token spike prompt
-/// (matches `bucket` in spike/openxla/artifacts/results.json).
-const PREFILL_LP: usize = 64;
+/// Bucketed padded prompt length for prefill. Set to MAX_SEQ so the one bucket
+/// covers any prompt the cache holds (e.g. the ~103-token Llama-3.2 chat-template
+/// prompt), not just the 46-token spike prompt. KV for real positions is
+/// identical to a smaller bucket (padding positions are causally masked), so the
+/// generated tokens are unchanged.
+const PREFILL_LP: usize = MAX_SEQ;
 
 /// Per-layer weight handles (JAX alphabetical order: down, gate, in_ln,
 /// post_ln, up, wk, wo, wq, wv).
@@ -199,8 +202,10 @@ fn apply_rope(b: &mut Builder, x: &Val, cos: &Val, sin: &Val, heads: usize, d: u
     b.add(&xc, &rs)
 }
 
-/// Emit the complete decode_step module text.
-pub fn emit_decode(c: &Config) -> String {
+/// Emit the complete decode_step module text. With `sample`, the graph ends in
+/// an on-device argmax and returns the next token id (`tensor<i32>`, the Phase
+/// 2b pattern); otherwise it returns the raw `[V]` logits.
+pub fn emit_decode(c: &Config, sample: bool) -> String {
     let (decls, a) = build_arg_schema(c);
     let mut b = Builder::new();
     let k = emit_consts(&mut b, c);
@@ -308,20 +313,25 @@ pub fn emit_decode(c: &Config) -> String {
         x = b.add(&x, &down);
     }
 
-    // --- tail: final norm + tied LM head ---
+    // --- tail: final norm + tied LM head, then optional on-device argmax ---
     let xf = rms_norm(&mut b, &x, &a.final_norm, &k, h);
     let logits = b.linear(&xf, &a.embed); // [V]
+    let (out_val, out_ty) = if sample {
+        let tok = b.argmax(&logits);
+        (tok.name, Ty::scalar("i32").render())
+    } else {
+        (logits.name, Ty::f32(vec![c.vocab]).render())
+    };
 
     let sig = render_signature(&decls);
     let cache_ty = Ty::f32(vec![c.n_layers, MAX_SEQ, c.n_kv, c.head_dim]).render();
-    let logits_ty = Ty::f32(vec![c.vocab]).render();
     format!(
-        "module @decode_step {{\n  func.func public @main({sig}) -> ({logits_ty}, {cache_ty}, {cache_ty}) {{\n{body}    return {l}, {kc}, {vc} : {logits_ty}, {cache_ty}, {cache_ty}\n  }}\n}}\n",
+        "module @decode_step {{\n  func.func public @main({sig}) -> ({out_ty}, {cache_ty}, {cache_ty}) {{\n{body}    return {l}, {kc}, {vc} : {out_ty}, {cache_ty}, {cache_ty}\n  }}\n}}\n",
         sig = sig,
-        logits_ty = logits_ty,
+        out_ty = out_ty,
         cache_ty = cache_ty,
         body = b.body(),
-        l = logits.name,
+        l = out_val,
         kc = kcache.name,
         vc = vcache.name,
     )
@@ -448,8 +458,10 @@ fn apply_rope_seq(
     b.add(&xc, &rs)
 }
 
-/// Emit the complete prefill module text.
-pub fn emit_prefill(c: &Config) -> String {
+/// Emit the complete prefill module text. With `sample`, the graph ends in an
+/// on-device argmax and returns the first token id (`tensor<i32>`); otherwise it
+/// returns the raw `[V]` logits at `real_len-1`.
+pub fn emit_prefill(c: &Config, sample: bool) -> String {
     let lp = PREFILL_LP;
     let (decls, a) = build_prefill_arg_schema(c, lp);
     let mut b = Builder::new();
@@ -551,17 +563,22 @@ pub fn emit_prefill(c: &Config) -> String {
     let last_row = b.dynamic_slice(&xf, &[&last_idx, &k.c0], vec![1, h]); // [1, H]
     let last = b.reshape(&last_row, vec![h]); // [H]
     let logits = b.linear(&last, &a.embed); // [V]
+    let (out_val, out_ty) = if sample {
+        let tok = b.argmax(&logits);
+        (tok.name, Ty::scalar("i32").render())
+    } else {
+        (logits.name, Ty::f32(vec![c.vocab]).render())
+    };
 
     let sig = render_signature(&decls);
     let cache_ty = Ty::f32(vec![c.n_layers, MAX_SEQ, c.n_kv, c.head_dim]).render();
-    let logits_ty = Ty::f32(vec![c.vocab]).render();
     format!(
-        "module @prefill {{\n  func.func public @main({sig}) -> ({logits_ty}, {cache_ty}, {cache_ty}) {{\n{body}    return {l}, {kc}, {vc} : {logits_ty}, {cache_ty}, {cache_ty}\n  }}\n}}\n",
+        "module @prefill {{\n  func.func public @main({sig}) -> ({out_ty}, {cache_ty}, {cache_ty}) {{\n{body}    return {l}, {kc}, {vc} : {out_ty}, {cache_ty}, {cache_ty}\n  }}\n}}\n",
         sig = sig,
-        logits_ty = logits_ty,
+        out_ty = out_ty,
         cache_ty = cache_ty,
         body = b.body(),
-        l = logits.name,
+        l = out_val,
         kc = kcache.name,
         vc = vcache.name,
     )

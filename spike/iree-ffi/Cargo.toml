@@ -8,5 +8,13 @@ edition = "2024"
 
 [workspace]
 
+# The `llama` bin (src/bin/llama.rs) grows the gate into a real token loop:
+# read the bf16 Llama weights, drive prefill/decode through the shim, check
+# token-exact. The original gate bin (src/main.rs) stays as the smoke test.
+[dependencies]
+safetensors = "0.4"
+memmap2 = "0.9"
+serde_json = "1"
+
 [build-dependencies]
 cc = "1"

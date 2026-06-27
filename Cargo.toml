@@ -11,6 +11,9 @@ repository = "https://github.com/lablup/mlxcel"
 license = "Apache-2.0"
 keywords = ["mlx", "llm", "vlm", "inference"]
 categories = ["science", "command-line-utilities"]
+# No-op unless the `xla-iree` feature is on, where it emits the IREE runtime link
+# recipe for the binary (a dependency's link-args do not propagate). See build.rs.
+build = "build.rs"
 
 [[bin]]
 name = "mlxcel"
@@ -63,6 +66,11 @@ experimental-backend = []
 # `MLXCEL_BACKEND=xla` selection arm. Apple-Silicon and CUDA shipping builds do
 # not enable it, so they compile none of it and the seam folds to MLX as before.
 xla-backend = ["dep:mlxcel-xla"]
+# Real OpenXLA execution: `xla-backend` plus the `mlxcel-xla/iree` feature, which
+# compiles the C shim against the prebuilt IREE runtime and drives the bundled
+# StableHLO prefill / decode_step graphs. Needs IREE_DIST at build time (the
+# extracted iree dist), so it is a local / opt-in build, not a CI default.
+xla-iree = ["xla-backend", "mlxcel-xla/iree"]
 # Axis A "weight-load surgery" framework.
 #
 # On by default so production `mlxcel` and `mlxcel-server` binaries expose

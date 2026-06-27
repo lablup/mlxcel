@@ -246,6 +246,7 @@ pub fn run_chat(opts: ChatOptions) -> Result<()> {
     // resets its KV cache per call; re-rendering the full transcript each turn
     // preserves context without forking the generation loop.
     let mut session = select_backend().create_session(
+        &model_path,
         model.num_layers(),
         opts.kv_cache_mode,
         output_suppression,
