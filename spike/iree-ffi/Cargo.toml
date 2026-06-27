@@ -1,0 +1,12 @@
+# FFI-gate spike (issue #449 Phase 3 M2): prove Rust can drive IREE execution on
+# this aarch64 box via the prebuilt iree-dist runtime, with no IREE source build.
+# Standalone: own [workspace] so it never joins the mlxcel build graph.
+[package]
+name = "iree-ffi-gate"
+version = "0.0.1"
+edition = "2024"
+
+[workspace]
+
+[build-dependencies]
+cc = "1"
