@@ -38,7 +38,11 @@
 
 use mlxcel_core::MlxArray;
 use mlxcel_core::generate::{GenerationStats, LanguageModel, SamplingConfig};
+#[cfg(feature = "xla-backend")]
+use mlxcel_core::session::InferenceSession;
 use mlxcel_core::session::{MlxInferenceSession, SessionCapabilities};
+#[cfg(feature = "xla-backend")]
+use mlxcel_xla::XlaInferenceSession;
 
 /// The inference session selected for a load.
 ///
@@ -50,6 +54,12 @@ use mlxcel_core::session::{MlxInferenceSession, SessionCapabilities};
 pub enum Session {
     /// The MLX single-sequence session, wrapping `CxxGenerator`.
     Mlx(MlxInferenceSession),
+    /// The OpenXLA / StableHLO compiler-family session (issue #449), compiled
+    /// only under the `xla-backend` feature. It owns its KV and samples
+    /// on-device, so it self-drives the engine-neutral prefill / decode_step
+    /// contract and ignores the threaded MLX model and sampling config (greedy).
+    #[cfg(feature = "xla-backend")]
+    Xla(XlaInferenceSession),
 }
 
 impl Session {
@@ -60,12 +70,22 @@ impl Session {
         Session::Mlx(session)
     }
 
+    /// Wrap an [`XlaInferenceSession`] as the active session.
+    #[cfg(feature = "xla-backend")]
+    #[inline]
+    #[must_use]
+    pub fn xla(session: XlaInferenceSession) -> Self {
+        Session::Xla(session)
+    }
+
     /// What this session can do, so the control plane can gate features.
     #[inline]
     #[must_use]
     pub fn capabilities(&self) -> SessionCapabilities {
         match self {
             Session::Mlx(s) => s.capabilities(),
+            #[cfg(feature = "xla-backend")]
+            Session::Xla(s) => s.capabilities(),
         }
     }
 
@@ -74,6 +94,11 @@ impl Session {
     pub fn reset_with_model<M: LanguageModel + ?Sized>(&mut self, model: &M) {
         match self {
             Session::Mlx(s) => s.reset_with_model(model),
+            #[cfg(feature = "xla-backend")]
+            Session::Xla(_s) => {
+                // The XLA session resets its own KV on the next prefill; the MLX
+                // model is not used by this engine.
+            }
         }
     }
 
@@ -88,6 +113,14 @@ impl Session {
     ) -> Vec<i32> {
         match self {
             Session::Mlx(s) => s.generate(model, prompt_tokens, max_tokens, sampling),
+            // The XLA session self-drives via prefill / decode_step and ignores
+            // the MLX model and the sampling config (greedy). It surfaces an
+            // empty result until the engine is wired in; the control plane uses
+            // the object-safe contract directly for error-visible paths.
+            #[cfg(feature = "xla-backend")]
+            Session::Xla(s) => s
+                .generate_greedy(prompt_tokens, max_tokens, &[])
+                .unwrap_or_default(),
         }
     }
 
@@ -106,6 +139,10 @@ impl Session {
             Session::Mlx(s) => {
                 s.generate_streaming(model, prompt_tokens, max_tokens, sampling, on_token)
             }
+            #[cfg(feature = "xla-backend")]
+            Session::Xla(s) => s
+                .generate_streaming_greedy(prompt_tokens, max_tokens, &[], on_token)
+                .unwrap_or_default(),
         }
     }
 
@@ -133,6 +170,13 @@ impl Session {
                 sampling,
                 on_token,
             ),
+            // The XLA session is single-sequence text; it has no multimodal
+            // capability, so it ignores the input embeddings and drives the token
+            // stream from the prompt ids.
+            #[cfg(feature = "xla-backend")]
+            Session::Xla(s) => s
+                .generate_streaming_greedy(prompt_tokens, max_tokens, &[], on_token)
+                .unwrap_or_default(),
         }
     }
 
@@ -147,6 +191,12 @@ impl Session {
     ) -> (Vec<i32>, GenerationStats) {
         match self {
             Session::Mlx(s) => s.generate_with_stats(model, prompt_tokens, max_tokens, sampling),
+            #[cfg(feature = "xla-backend")]
+            Session::Xla(s) => (
+                s.generate_greedy(prompt_tokens, max_tokens, &[])
+                    .unwrap_or_default(),
+                GenerationStats::default(),
+            ),
         }
     }
 
@@ -170,6 +220,12 @@ impl Session {
                 max_tokens,
                 sampling,
             ),
+            #[cfg(feature = "xla-backend")]
+            Session::Xla(s) => (
+                s.generate_greedy(prompt_tokens, max_tokens, &[])
+                    .unwrap_or_default(),
+                GenerationStats::default(),
+            ),
         }
     }
 
@@ -182,6 +238,10 @@ impl Session {
     ) -> Vec<f32> {
         match self {
             Session::Mlx(s) => s.evaluate_loglikelihoods(model, prompt_tokens),
+            // Perplexity evaluation is not part of the single-sequence XLA
+            // session; it returns no per-token scores.
+            #[cfg(feature = "xla-backend")]
+            Session::Xla(_s) => Vec::new(),
         }
     }
 }

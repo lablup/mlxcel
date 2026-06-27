@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "src/lib/mlxcel-core", "src/lib/mlxcel-surgery"]
+members = [".", "src/lib/mlxcel-core", "src/lib/mlxcel-surgery", "src/lib/mlxcel-xla"]
 resolver = "2"
 
 [package]
@@ -56,6 +56,13 @@ test-utils = []
 # MLX) implements `ComputeBackend`. No kernels ship with this feature today; it
 # only lands the boundary.
 experimental-backend = []
+# OpenXLA / StableHLO compiler-family backend (issue #449, ADR 0004 Track B).
+#
+# Default OFF. Pulls in the `mlxcel-xla` crate and compiles the `crate::backend::xla`
+# module, the `Backend::Xla` / `Session::Xla` enum variants, and the
+# `MLXCEL_BACKEND=xla` selection arm. Apple-Silicon and CUDA shipping builds do
+# not enable it, so they compile none of it and the seam folds to MLX as before.
+xla-backend = ["dep:mlxcel-xla"]
 # Axis A "weight-load surgery" framework.
 #
 # On by default so production `mlxcel` and `mlxcel-server` binaries expose
@@ -77,6 +84,10 @@ mlxcel-core = { path = "src/lib/mlxcel-core", default-features = false }
 
 # Axis A weight-load surgery — opt-in via the `surgery` feature above.
 mlxcel-surgery = { path = "src/lib/mlxcel-surgery", optional = true }
+
+# OpenXLA / StableHLO compiler-family backend — opt-in via the `xla-backend`
+# feature below. Default OFF; never enters Apple-Silicon or CUDA shipping builds.
+mlxcel-xla = { path = "src/lib/mlxcel-xla", optional = true }
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }

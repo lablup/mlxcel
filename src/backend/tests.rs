@@ -107,6 +107,10 @@ fn mlx_session_threads_the_token_bias_through() {
             assert_eq!(s.token_bias().len(), 1);
             assert!(s.token_bias().contains(5));
         }
+        #[cfg(feature = "xla-backend")]
+        Session::Xla(_) => {
+            unreachable!("select_backend defaults to MLX without MLXCEL_BACKEND=xla")
+        }
     }
 }
 
@@ -123,4 +127,39 @@ fn experimental_backend_session_creation_errors() {
         result.is_err(),
         "the experimental scaffold must report it has no session engine"
     );
+}
+
+/// The OpenXLA backend produces a single-sequence session whose token-level
+/// primitives report they are not wired to an engine yet (the Phase 3 M1
+/// scaffold). `load_model` is the MLX batched path and errors here. Compiled
+/// only under the optional `xla-backend` feature; default builds carry none of
+/// it.
+#[cfg(feature = "xla-backend")]
+#[test]
+fn xla_backend_creates_a_single_sequence_session_scaffold() {
+    let backend = XlaBackend::new();
+    assert_eq!(backend.name(), "xla");
+    assert!(!backend.supports_batched_serving());
+    assert!(
+        backend.load_model(std::path::Path::new("/tmp/x")).is_err(),
+        "the XLA backend drives generation through the session, not load_model"
+    );
+
+    let session = backend
+        .create_session(16, KVCacheMode::Fp16, TokenBiasMap::new())
+        .expect("xla session creation must succeed");
+    let caps = session.capabilities();
+    assert!(
+        !caps.batched_serving && !caps.paged_kv && !caps.speculative_decode && !caps.multimodal,
+        "the XLA session advertises the single-sequence floor"
+    );
+
+    match session {
+        Session::Xla(mut s) => {
+            // The self-contained drive loop surfaces the not-wired stub instead
+            // of panicking; real execution lands with the IREE FFI milestone.
+            assert!(s.generate_greedy(&[1, 2, 3], 4, &[]).is_err());
+        }
+        Session::Mlx(_) => unreachable!("XlaBackend::create_session yields an XLA session"),
+    }
 }

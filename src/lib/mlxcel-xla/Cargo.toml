@@ -1,0 +1,24 @@
+# OpenXLA / StableHLO compiler-family inference backend for mlxcel (issue #449,
+# ADR 0004 Track B). Default-off: the root crate pulls this in only under the
+# `xla-backend` feature, so Apple-Silicon and CUDA shipping builds never compile
+# it. This crate is the home of the engine that fills in the engine-neutral
+# `InferenceSession` contract from mlxcel-core.
+#
+# M1 (this commit) is the crate + seam scaffold: the session implements the
+# contract and the self-contained greedy drive loop, but the actual graph
+# execution (the IREE runtime C API via FFI) is the next milestone, so
+# prefill / decode_step return a clear not-wired error.
+[package]
+name = "mlxcel-xla"
+version = "0.3.3"
+edition = "2024"
+description = "OpenXLA / StableHLO compiler-family inference backend for mlxcel (default-off)"
+repository = "https://github.com/lablup/mlxcel"
+license = "Apache-2.0"
+
+[dependencies]
+# The engine-neutral inference-session contract lives in mlxcel-core. This
+# depends on mlxcel-core only for that trait; a later refactor could extract the
+# contract to a leaf crate so the non-MLX backend does not compile MLX. The
+# default build is unaffected either way (this crate is off unless `xla-backend`).
+mlxcel-core = { path = "../mlxcel-core" }

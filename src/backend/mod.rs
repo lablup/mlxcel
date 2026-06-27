@@ -87,6 +87,11 @@ pub use session::Session;
 #[cfg(feature = "experimental-backend")]
 pub mod experimental;
 
+#[cfg(feature = "xla-backend")]
+pub mod xla;
+#[cfg(feature = "xla-backend")]
+pub use xla::XlaBackend;
+
 /// The forward-execution engine seam.
 ///
 /// A `ComputeBackend` produces two things: a single-sequence inference
@@ -167,6 +172,10 @@ pub enum Backend {
     /// only; no kernels are wired in here).
     #[cfg(feature = "experimental-backend")]
     Experimental(experimental::ExperimentalBackend),
+    /// The OpenXLA / StableHLO compiler-family engine (issue #449), compiled
+    /// only under the `xla-backend` feature.
+    #[cfg(feature = "xla-backend")]
+    Xla(xla::XlaBackend),
 }
 
 impl Backend {
@@ -178,6 +187,8 @@ impl Backend {
             Backend::Mlx(b) => b.name(),
             #[cfg(feature = "experimental-backend")]
             Backend::Experimental(b) => b.name(),
+            #[cfg(feature = "xla-backend")]
+            Backend::Xla(b) => b.name(),
         }
     }
 
@@ -188,6 +199,8 @@ impl Backend {
             Backend::Mlx(b) => b.load_model(model_path),
             #[cfg(feature = "experimental-backend")]
             Backend::Experimental(b) => b.load_model(model_path),
+            #[cfg(feature = "xla-backend")]
+            Backend::Xla(b) => b.load_model(model_path),
         }
     }
 
@@ -202,6 +215,8 @@ impl Backend {
             Backend::Mlx(b) => b.load_model_with_adapter(model_path, adapter_path),
             #[cfg(feature = "experimental-backend")]
             Backend::Experimental(b) => b.load_model_with_adapter(model_path, adapter_path),
+            #[cfg(feature = "xla-backend")]
+            Backend::Xla(b) => b.load_model_with_adapter(model_path, adapter_path),
         }
     }
 
@@ -222,6 +237,10 @@ impl Backend {
             Backend::Experimental(b) => {
                 b.load_model_with_tensor_parallel(model_path, adapter_path, shard_config)
             }
+            #[cfg(feature = "xla-backend")]
+            Backend::Xla(b) => {
+                b.load_model_with_tensor_parallel(model_path, adapter_path, shard_config)
+            }
         }
     }
 
@@ -239,6 +258,8 @@ impl Backend {
             Backend::Mlx(b) => b.create_session(num_layers, kv_cache_mode, token_bias),
             #[cfg(feature = "experimental-backend")]
             Backend::Experimental(b) => b.create_session(num_layers, kv_cache_mode, token_bias),
+            #[cfg(feature = "xla-backend")]
+            Backend::Xla(b) => b.create_session(num_layers, kv_cache_mode, token_bias),
         }
     }
 
@@ -250,6 +271,8 @@ impl Backend {
             Backend::Mlx(b) => b.supports_batched_serving(),
             #[cfg(feature = "experimental-backend")]
             Backend::Experimental(b) => b.supports_batched_serving(),
+            #[cfg(feature = "xla-backend")]
+            Backend::Xla(b) => b.supports_batched_serving(),
         }
     }
 }
@@ -261,7 +284,7 @@ impl Backend {
 /// so the call inlines to a direct [`MlxBackend`] construction and the seam
 /// adds no runtime dispatch on the load path or, transitively, the hot
 /// `forward()` path.
-#[cfg(not(feature = "experimental-backend"))]
+#[cfg(not(any(feature = "experimental-backend", feature = "xla-backend")))]
 #[inline]
 #[must_use]
 pub fn select_backend() -> Backend {
@@ -275,14 +298,18 @@ pub fn select_backend() -> Backend {
 /// logic is compiled only under the feature, so default builds carry none of
 /// it. The seam currently has no non-MLX engine wired in, so any non-MLX
 /// selection still resolves to a scaffold that reports it is not implemented.
-#[cfg(feature = "experimental-backend")]
+#[cfg(any(feature = "experimental-backend", feature = "xla-backend"))]
 #[must_use]
 pub fn select_backend() -> Backend {
-    // The plug-in point for a future non-MLX backend. Until an engine is wired
-    // in (a separate hardware-feasibility gate must precede any kernel work),
-    // every selection but the explicit experimental opt-in falls back to MLX.
+    // The plug-in point for the optional non-MLX backends. Each opt-in arm is
+    // compiled only under its own feature; with neither feature this function is
+    // the const MLX form above. Any selection but an explicit opt-in falls back
+    // to MLX.
     match std::env::var("MLXCEL_BACKEND").ok().as_deref() {
+        #[cfg(feature = "experimental-backend")]
         Some("experimental") => Backend::Experimental(experimental::ExperimentalBackend::new()),
+        #[cfg(feature = "xla-backend")]
+        Some("xla") => Backend::Xla(xla::XlaBackend::new()),
         _ => Backend::Mlx(MlxBackend::new()),
     }
 }

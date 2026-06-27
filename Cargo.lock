@@ -1918,6 +1918,7 @@ dependencies = [
  "minijinja",
  "mlxcel-core",
  "mlxcel-surgery",
+ "mlxcel-xla",
  "path-clean",
  "percent-encoding",
  "reqwest",
@@ -1978,6 +1979,13 @@ dependencies = [
  "serde_yaml",
  "tempfile",
  "thiserror",
+]
+
+[[package]]
+name = "mlxcel-xla"
+version = "0.3.3"
+dependencies = [
+ "mlxcel-core",
 ]
 
 [[package]]
