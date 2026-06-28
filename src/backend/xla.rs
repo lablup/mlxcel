@@ -113,6 +113,9 @@ impl ComputeBackend for XlaBackend {
     }
 
     fn supports_batched_serving(&self) -> bool {
-        false
+        // The OpenXLA backend serves through the continuous-batching engine
+        // (issue #449 M3 Stage 2c) once real IREE execution is compiled in. Without
+        // `xla-iree` there is no engine to batch with, so it reports false.
+        cfg!(feature = "xla-iree")
     }
 }

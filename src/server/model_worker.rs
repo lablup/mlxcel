@@ -30,6 +30,9 @@ use mlxcel_core::generate::LanguageModel;
 
 use crate::LoadedModel;
 use crate::SamplingConfig;
+// The backend-neutral serve contract (#449 M3 Stage 2c). The MLX scheduler and the
+// OpenXLA worker are both driven through `BatchEngine::serve`.
+use crate::server::batch::BatchEngine;
 use crate::server::batch::BatchObservability;
 use crate::server::media::{ImageInputLimits, current_image_input_limits};
 use crate::server::state::BatchMetrics;
@@ -518,10 +521,10 @@ pub(crate) fn spawn_model_worker_with_batch_config(
                         sched_config.serving_bind,
                         &sched_config.decode_peers,
                     ) {
-                        scheduler.run();
+                        scheduler.serve();
                     }
                 }
-                ServingMode::Hybrid | ServingMode::Router => scheduler.run(),
+                ServingMode::Hybrid | ServingMode::Router => scheduler.serve(),
             }
         })
     })
@@ -859,7 +862,67 @@ pub(crate) fn spawn_legacy_model_worker(
                 crate::server::DecodeStorageBackend::Dense,
             )
             .with_reasoning_budget(reasoning_budget, thinking_ids);
-            scheduler.run();
+            scheduler.serve();
+        })
+    })
+}
+
+/// Spawn the OpenXLA / IREE serve worker (issue #449 M3 Stage 2c).
+///
+/// Parallel to [`spawn_legacy_model_worker`], but for the OpenXLA backend: it
+/// builds the `mlxcel-xla` continuous-batching engine and a standalone tokenizer
+/// inside the worker thread (so loading does not block the server start, same as
+/// the MLX path), marks the model loaded, then drives the
+/// [`XlaServeWorker`](crate::server::batch::XlaServeWorker) through the
+/// [`BatchEngine`](crate::server::batch::BatchEngine) contract. `b_max` is one of
+/// the engine's bundled slot counts; the HAL device is read from
+/// `MLXCEL_XLA_DEVICE` (default `local-task`), matching the single-sequence path.
+#[cfg(feature = "xla-iree")]
+pub(crate) fn spawn_xla_model_worker(
+    model_path: PathBuf,
+    b_max: usize,
+    request_rx: mpsc::Receiver<ModelRequest>,
+    loaded: Arc<AtomicBool>,
+    worker_model_id: String,
+) -> thread::JoinHandle<()> {
+    thread::spawn(move || {
+        // Same fail-fast posture as the MLX workers (issue #375): abort the
+        // process on an uncaught panic rather than unwinding away a serve thread.
+        run_core_thread_or_abort("model-worker-xla", move || {
+            let device =
+                std::env::var("MLXCEL_XLA_DEVICE").unwrap_or_else(|_| "local-task".to_string());
+            tracing::info!(
+                "Model worker thread starting (OpenXLA continuous batching, B_max={b_max}, \
+                 device={device}), loading model..."
+            );
+
+            let load_start = Instant::now();
+            let tokenizer = match crate::tokenizer::load_tokenizer(&model_path) {
+                Ok(t) => t,
+                Err(err) => {
+                    tracing::error!("Failed to load tokenizer for the OpenXLA backend: {err}");
+                    return;
+                }
+            };
+            let engine = match mlxcel_xla::XlaBatchEngine::load(&model_path, b_max, &device) {
+                Ok(engine) => engine,
+                Err(err) => {
+                    tracing::error!("Failed to load the OpenXLA engine: {err}");
+                    return;
+                }
+            };
+            let load_elapsed = load_start.elapsed();
+            tracing::info!(
+                worker_model_id = %worker_model_id,
+                load_seconds = load_elapsed.as_secs_f64(),
+                "OpenXLA model {worker_model_id} loaded in {:.3}s (B_max={b_max}, device={device})",
+                load_elapsed.as_secs_f64(),
+            );
+            loaded.store(true, Ordering::Release);
+
+            let mut worker =
+                crate::server::batch::XlaServeWorker::new(engine, tokenizer, request_rx);
+            worker.serve();
         })
     })
 }

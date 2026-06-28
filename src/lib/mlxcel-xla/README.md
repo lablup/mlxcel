@@ -95,12 +95,31 @@ contiguous per-slot KV.
 
 The engine is backend-neutral at the request level (`submit` a prompt + budget,
 `pump` a step, read per-request `EngineEvent`s, `cancel`); it holds no server
-types, so the Stage 2c `BatchEngine` trait + server adapter wrap it unchanged.
-`XlaBackend::supports_batched_serving()` stays `false` until 2c wires it into the
-server.
+types, so the server adapter wraps it unchanged.
 
-Prove it without the server with the reference-equivalence + throughput example
-(every request's batched stream must equal its independent single-seq reference):
+### Serving (Stage 2c)
+
+On an `xla-iree` build, `mlxcel-server` serves through this engine when
+`MLXCEL_BACKEND=xla` is selected: a server-side `XlaServeWorker` adapts the engine
+to the server's backend-neutral `BatchEngine` contract (the MLX scheduler
+implements the same contract), so the HTTP path is unchanged.
+
+```bash
+MLXCEL_BACKEND=xla MLXCEL_XLA_DEVICE=cuda ./target/release/mlxcel-server \
+  -m <Llama-3.2-1B-Instruct dir> --port 8080
+# then POST /v1/completions as usual.
+```
+
+The serve path is greedy and text-only (the engine's nature): it honors
+`max_tokens` and the model's EOS ids, but serves greedily regardless of sampling
+parameters (logged once). Requests it cannot serve faithfully are rejected with a
+clear error rather than served wrong: logprobs, structured / JSON-schema output,
+and multimodal inputs. Stop strings are not enforced yet. `--max-batch-size` maps
+to the engine's bundled `B_max` (`>= 8` -> 8, else 4).
+
+Prove the engine without the server with the reference-equivalence + throughput
+example (every request's batched stream must equal its independent single-seq
+reference):
 
 ```bash
 # CPU (prebuilt dist):

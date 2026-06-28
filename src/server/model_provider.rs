@@ -197,6 +197,29 @@ impl ModelProvider {
         let speculative_dispatch = crate::server::SpeculativeDispatch::resolve(config)
             .map_err(|e| anyhow::anyhow!("Speculative decoding dispatch resolution failed: {e}"))?;
 
+        // OpenXLA backend (issue #449 M3 Stage 2c): when `MLXCEL_BACKEND=xla` is
+        // selected on an `xla-iree` build, serve through the continuous-batching
+        // XLA engine instead of the MLX scheduler. The MLX path below is the
+        // default and is unaffected. The XLA engine is greedy and owns its own
+        // KV/scheduling, so most scheduler config (`no_batch`, preemption,
+        // speculative dispatch, prompt cache) does not apply; `max_batch_size`
+        // maps to the engine's bundled slot count.
+        #[cfg(feature = "xla-iree")]
+        if std::env::var("MLXCEL_BACKEND").ok().as_deref() == Some("xla") {
+            if config.no_batch {
+                tracing::warn!(
+                    "--no-batch is ignored by the OpenXLA backend; it serves through the \
+                     continuous-batching engine"
+                );
+            }
+            let b_max = xla_serve_b_max(config.max_batch_size);
+            let mut provider =
+                Self::new_with_xla_worker(model_path, b_max, batch_metrics, batch_observability)?;
+            provider.prompt_cache = prompt_cache_store;
+            provider.decode_hang_timeout = decode_hang_timeout;
+            return Ok(provider);
+        }
+
         if config.no_batch {
             let mut provider = Self::new_with_legacy_worker(
                 model_path,
@@ -308,6 +331,51 @@ impl ModelProvider {
             worker_model_id,
             metrics_clone,
             obs_clone,
+        );
+
+        Ok(Self {
+            request_tx,
+            model_id,
+            created_at,
+            loaded,
+            batch_metrics,
+            batch_observability,
+            prompt_cache: None,
+            decode_hang_timeout: DECODE_HANG_TIMEOUT,
+            _worker_handle: worker_handle,
+        })
+    }
+
+    /// Create and start a model provider backed by the OpenXLA / IREE
+    /// continuous-batching engine (issue #449 M3 Stage 2c).
+    ///
+    /// Spawns [`spawn_xla_model_worker`](model_worker::spawn_xla_model_worker),
+    /// which builds the engine + tokenizer on the worker thread and serves through
+    /// the [`BatchEngine`](crate::server::batch::BatchEngine) contract. The batch
+    /// metrics/observability handles are held for the provider API surface but the
+    /// XLA worker does not populate the MLX scheduler metrics.
+    #[cfg(feature = "xla-iree")]
+    pub(crate) fn new_with_xla_worker(
+        model_path: PathBuf,
+        b_max: usize,
+        batch_metrics: Arc<BatchMetrics>,
+        batch_observability: Arc<BatchObservability>,
+    ) -> Result<Self> {
+        let model_id = model_path
+            .file_name()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_else(|| "unknown".to_string());
+
+        let created_at = chrono::Utc::now().timestamp();
+        let (request_tx, request_rx) = mpsc::channel::<ModelRequest>();
+        let loaded = Arc::new(AtomicBool::new(false));
+
+        let worker_handle = model_worker::spawn_xla_model_worker(
+            model_path,
+            b_max,
+            request_rx,
+            loaded.clone(),
+            model_id.clone(),
         );
 
         Ok(Self {
@@ -1013,6 +1081,16 @@ pub(crate) fn validated_decode_hang_timeout(timeout_seconds: u64) -> Duration {
         return DECODE_HANG_TIMEOUT;
     }
     Duration::from_secs(timeout_seconds)
+}
+
+/// Map the server's `--max-batch-size` to one of the OpenXLA engine's bundled
+/// slot counts (issue #449 M3 Stage 2c): the largest bundled `B_max` that does
+/// not exceed the request, defaulting to the smallest. The engine compiles one
+/// ragged graph per slot count, so the server picks from the bundled set rather
+/// than any value.
+#[cfg(feature = "xla-iree")]
+fn xla_serve_b_max(max_batch_size: usize) -> usize {
+    if max_batch_size >= 8 { 8 } else { 4 }
 }
 
 /// Drain `response_rx`, forwarding decoded tokens to `on_token` and applying

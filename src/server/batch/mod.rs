@@ -46,6 +46,11 @@ mod sequence;
 pub(crate) mod speculative_burst;
 #[cfg(test)]
 mod speculative_burst_tests;
+/// OpenXLA / IREE serve worker (issue #449 M3 Stage 2c): adapts the
+/// `mlxcel-xla` continuous-batching engine to the [`BatchEngine`] contract.
+/// Behind `xla-iree` (real IREE execution); the MLX serving path is unaffected.
+#[cfg(feature = "xla-iree")]
+pub(crate) mod xla_worker;
 
 pub use active::ActiveBatch;
 pub use observability::{BatchObservability, ObservabilitySnapshot};
@@ -54,3 +59,37 @@ pub use scheduler::BatchScheduler;
 pub use sequence::{
     BatchSchedulerAction, FinishReason, RequestPriority, SequenceInfo, SequenceState,
 };
+#[cfg(feature = "xla-iree")]
+pub(crate) use xla_worker::XlaServeWorker;
+
+/// Backend-neutral batching contract for a model worker (issue #449 M3 Stage 2c,
+/// the cross-backend batching seam ADR 0004 deferred).
+///
+/// A worker owns its model plus KV/scheduling, consumes [`ModelRequest`]s off the
+/// `request_rx` it was constructed with, and streams [`GenerateEvent`]s per request
+/// until it receives [`ModelRequest::Shutdown`]. The MLX [`BatchScheduler`] and the
+/// OpenXLA [`XlaServeWorker`] both satisfy it, so `ModelProvider` drives either
+/// backend through one contract.
+///
+/// Each worker is constructed and run entirely on its own thread (the worker
+/// functions in `model_worker.rs` build it inside `thread::spawn`), so it is never
+/// moved across threads and needs no `Send` bound. That matters for the OpenXLA
+/// worker, whose IREE context is thread-affine (`!Send`) by design.
+///
+/// [`ModelRequest`]: crate::server::model_provider::ModelRequest
+/// [`ModelRequest::Shutdown`]: crate::server::model_provider::ModelRequest::Shutdown
+/// [`GenerateEvent`]: crate::server::model_provider::GenerateEvent
+pub(crate) trait BatchEngine {
+    /// Run the worker's serve loop to completion (until shutdown). Called once,
+    /// on the worker thread.
+    fn serve(&mut self);
+}
+
+impl BatchEngine for BatchScheduler {
+    fn serve(&mut self) {
+        // Forward to the scheduler's existing inherent run loop. Method-call
+        // syntax resolves to the inherent `BatchScheduler::run` (inherent methods
+        // shadow trait methods), so the MLX serving behavior is unchanged.
+        self.run();
+    }
+}
