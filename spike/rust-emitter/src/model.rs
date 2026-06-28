@@ -617,6 +617,290 @@ pub fn emit_decode_batched(c: &Config, bsz: usize, sample: bool) -> String {
 }
 
 // ===========================================================================
+// ragged decode: continuous-batching decode_step (#449 M3 Stage 2a)
+// ===========================================================================
+//
+// Like the uniform-B graph, but each row carries its OWN position and length, so
+// sequences of different lengths can share the batch (the continuous-batching
+// requirement). Versus uniform-B: `pos` and `cache_len` are `[B]` (per row);
+// RoPE cos/sin are a per-row gather `[B, d]` from the table by `pos[B]`; the key
+// mask is per-row `[B, S]` (valid iff `s <= cache_len[b]`); and the KV write is
+// unrolled per row, each row writing its new K/V at its own `pos[b]` (the shared-
+// offset `dynamic_update_slice` no longer applies). The attention contractions
+// and the LM head are identical to uniform-B; the per-row mask carries the
+// raggedness.
+
+struct RaggedArgs {
+    embed: Val,
+    final_norm: Val,
+    layers: Vec<LayerW>,
+    token: Val,     // [B] i32
+    pos: Val,       // [B] i32 (per row)
+    cache_len: Val, // [B] i32 (per row)
+    kcache: Val,    // [B, L, MAX_SEQ, nkv, d]
+    vcache: Val,
+}
+
+fn build_ragged_arg_schema(c: &Config, bsz: usize) -> (Vec<ArgDecl>, RaggedArgs) {
+    let h = c.hidden;
+    let inter = c.inter;
+    let kv = c.n_kv * c.head_dim; // 512
+    let qd = c.n_q * c.head_dim; // 2048
+    let v = c.vocab;
+
+    let mut decls: Vec<ArgDecl> = Vec::new();
+    let mut idx = 0usize;
+    let mut take = |decls: &mut Vec<ArgDecl>, ty: Ty, loc: String| -> Val {
+        let val = Builder::arg(idx, ty.clone());
+        decls.push(ArgDecl { ty, loc });
+        idx += 1;
+        val
+    };
+
+    let embed = take(&mut decls, Ty::f32(vec![v, h]), "params['embed']".into());
+    let final_norm = take(&mut decls, Ty::f32(vec![h]), "params['final_norm']".into());
+
+    let mut layers = Vec::with_capacity(c.n_layers);
+    for li in 0..c.n_layers {
+        let p = |k: &str| format!("params['layers'][{}]['{}']", li, k);
+        let down = take(&mut decls, Ty::f32(vec![h, inter]), p("down"));
+        let gate = take(&mut decls, Ty::f32(vec![inter, h]), p("gate"));
+        let in_ln = take(&mut decls, Ty::f32(vec![h]), p("in_ln"));
+        let post_ln = take(&mut decls, Ty::f32(vec![h]), p("post_ln"));
+        let up = take(&mut decls, Ty::f32(vec![inter, h]), p("up"));
+        let wk = take(&mut decls, Ty::f32(vec![kv, h]), p("wk"));
+        let wo = take(&mut decls, Ty::f32(vec![qd, h]), p("wo"));
+        let wq = take(&mut decls, Ty::f32(vec![qd, h]), p("wq"));
+        let wv = take(&mut decls, Ty::f32(vec![kv, h]), p("wv"));
+        layers.push(LayerW {
+            down,
+            gate,
+            in_ln,
+            post_ln,
+            up,
+            wk,
+            wo,
+            wq,
+            wv,
+        });
+    }
+
+    let token = take(&mut decls, Ty::new(vec![bsz], "i32"), "token".into());
+    let pos = take(&mut decls, Ty::new(vec![bsz], "i32"), "pos".into());
+    let cache_len = take(&mut decls, Ty::new(vec![bsz], "i32"), "cache_len".into());
+    let kcache = take(
+        &mut decls,
+        Ty::f32(vec![bsz, c.n_layers, MAX_SEQ, c.n_kv, c.head_dim]),
+        "kcache".into(),
+    );
+    let vcache = take(
+        &mut decls,
+        Ty::f32(vec![bsz, c.n_layers, MAX_SEQ, c.n_kv, c.head_dim]),
+        "vcache".into(),
+    );
+
+    (
+        decls,
+        RaggedArgs {
+            embed,
+            final_norm,
+            layers,
+            token,
+            pos,
+            cache_len,
+            kcache,
+            vcache,
+        },
+    )
+}
+
+/// HF half-split RoPE on x:[B, heads, d]; cos/sin are per-row `[B, d]` (each
+/// row's own position), broadcast over the head axis.
+fn apply_rope_ragged(
+    b: &mut Builder,
+    x: &Val,
+    cos: &Val,
+    sin: &Val,
+    bsz: usize,
+    heads: usize,
+    d: usize,
+) -> Val {
+    let half = d / 2;
+    let cos_b = b.broadcast(cos, &[0, 2], vec![bsz, heads, d]); // [B,d] -> [B,heads,d]
+    let sin_b = b.broadcast(sin, &[0, 2], vec![bsz, heads, d]);
+    let xc = b.multiply(x, &cos_b);
+    let x1 = b.slice(x, &[(0, bsz), (0, heads), (0, half)]);
+    let x2 = b.slice(x, &[(0, bsz), (0, heads), (half, d)]);
+    let nx2 = b.negate(&x2);
+    let rh = b.concatenate(&nx2, &x1, 2);
+    let rs = b.multiply(&rh, &sin_b);
+    b.add(&xc, &rs)
+}
+
+/// Emit the ragged (continuous-batching) `decode_step` module for a static batch
+/// size `bsz`. With `sample`, ends in a per-row on-device argmax returning `[B]`
+/// token ids; otherwise returns `[B, V]` logits.
+pub fn emit_decode_ragged(c: &Config, bsz: usize, sample: bool) -> String {
+    let (decls, a) = build_ragged_arg_schema(c, bsz);
+    let mut b = Builder::new();
+    let k = emit_consts(&mut b, c);
+    // Constant row indices 0..bsz for the per-row KV-write dim-0 offsets.
+    let row_idx: Vec<Val> = (0..bsz).map(|i| b.const_i32(i as i32)).collect();
+
+    let h = c.hidden;
+    let d = c.head_dim;
+    let nq = c.n_q;
+    let nkv = c.n_kv;
+    let g = c.group();
+
+    // --- head: per-row embed gather, per-row rope gather, per-row key mask ---
+    let tok_idx = b.reshape(&a.token, vec![bsz, 1]);
+    let mut x = b.gather(&a.embed, &tok_idx); // [B, H]
+
+    // each row's rope vectors come from its own position: gather [B,d] by pos[B]
+    let pos_idx = b.reshape(&a.pos, vec![bsz, 1]);
+    let cos = b.gather(&k.cos_table, &pos_idx); // [B, d]
+    let sin = b.gather(&k.sin_table, &pos_idx); // [B, d]
+
+    // per-row key mask [B,S]: key s valid for row b iff s <= cache_len[b]
+    let ii = b.iota(MAX_SEQ); // [S]
+    let ii_b = b.broadcast(&ii, &[1], vec![bsz, MAX_SEQ]); // entry[b,s] = s
+    let clen_b = b.broadcast(&a.cache_len, &[0], vec![bsz, MAX_SEQ]); // entry[b,s] = cache_len[b]
+    let valid = b.compare("LE", &ii_b, &clen_b, "SIGNED");
+    let zeros = b.broadcast(&k.zero, &[], vec![bsz, MAX_SEQ]);
+    let negs = b.broadcast(&k.neg_big, &[], vec![bsz, MAX_SEQ]);
+    let kmask = b.select(&valid, &zeros, &negs); // [B, S]
+
+    let mut kcache = a.kcache.clone();
+    let mut vcache = a.vcache.clone();
+
+    for li in 0..c.n_layers {
+        let lw = &a.layers[li];
+
+        let hn = rms_norm_seq(&mut b, &x, &lw.in_ln, &k, bsz, h); // [B, H]
+        let q = b.linear_seq(&hn, &lw.wq);
+        let q = b.reshape(&q, vec![bsz, nq, d]);
+        let kk = b.linear_seq(&hn, &lw.wk);
+        let kk = b.reshape(&kk, vec![bsz, nkv, d]);
+        let vv = b.linear_seq(&hn, &lw.wv);
+        let vv = b.reshape(&vv, vec![bsz, nkv, d]);
+
+        let q = apply_rope_ragged(&mut b, &q, &cos, &sin, bsz, nq, d);
+        let kk = apply_rope_ragged(&mut b, &kk, &cos, &sin, bsz, nkv, d);
+
+        // per-row KV write: row r writes its [1,1,1,nkv,d] K/V at [r, li, pos[r]].
+        // `r` indexes the row consts AND the slice ranges (r, r+1), so a plain
+        // iterator does not fit; keep the range loop.
+        #[allow(clippy::needless_range_loop)]
+        for r in 0..bsz {
+            let pos_r = b.slice(&a.pos, &[(r, r + 1)]); // [1]
+            let pos_r = b.reshape(&pos_r, vec![]); // scalar i32 offset
+            let kk_r = b.slice(&kk, &[(r, r + 1), (0, nkv), (0, d)]);
+            let kk_upd = b.reshape(&kk_r, vec![1, 1, 1, nkv, d]);
+            kcache = b.dynamic_update_slice(
+                &kcache,
+                &kk_upd,
+                &[&row_idx[r], &k.layer_idx[li], &pos_r, &k.c0, &k.c0],
+            );
+            let vv_r = b.slice(&vv, &[(r, r + 1), (0, nkv), (0, d)]);
+            let vv_upd = b.reshape(&vv_r, vec![1, 1, 1, nkv, d]);
+            vcache = b.dynamic_update_slice(
+                &vcache,
+                &vv_upd,
+                &[&row_idx[r], &k.layer_idx[li], &pos_r, &k.c0, &k.c0],
+            );
+        }
+
+        // read this layer's cache slabs [B, S, nkv, d]
+        let kl = b.slice(
+            &kcache,
+            &[(0, bsz), (li, li + 1), (0, MAX_SEQ), (0, nkv), (0, d)],
+        );
+        let kl = b.reshape(&kl, vec![bsz, MAX_SEQ, nkv, d]);
+        let vl = b.slice(
+            &vcache,
+            &[(0, bsz), (li, li + 1), (0, MAX_SEQ), (0, nkv), (0, d)],
+        );
+        let vl = b.reshape(&vl, vec![bsz, MAX_SEQ, nkv, d]);
+
+        // GQA scores (identical to uniform-B); only the mask below is per-row.
+        let q_r = b.reshape(&q, vec![bsz, nkv, g, d]);
+        let scores = b.dot_general(
+            &q_r,
+            &kl,
+            &[0, 1],
+            &[0, 2],
+            &[3],
+            &[3],
+            vec![bsz, nkv, g, MAX_SEQ],
+        );
+        let scores = b.reshape(&scores, vec![bsz, nq, MAX_SEQ]);
+        let scale_b = b.broadcast(&k.scale, &[], vec![bsz, nq, MAX_SEQ]);
+        let scores = b.multiply(&scores, &scale_b);
+        let kmask_b = b.broadcast(&kmask, &[0, 2], vec![bsz, nq, MAX_SEQ]); // [B,S] -> [B,nq,S]
+        let scores = b.add(&scores, &kmask_b);
+
+        let m = b.reduce_max(&scores, 2, &k.neg_inf);
+        let m_b = b.broadcast(&m, &[0, 1], vec![bsz, nq, MAX_SEQ]);
+        let sh = b.subtract(&scores, &m_b);
+        let e = b.exponential(&sh);
+        let s = b.reduce_add(&e, 2, &k.zero);
+        let s_b = b.broadcast(&s, &[0, 1], vec![bsz, nq, MAX_SEQ]);
+        let attn = b.divide(&e, &s_b);
+
+        let attn_r = b.reshape(&attn, vec![bsz, nkv, g, MAX_SEQ]);
+        let o = b.dot_general(
+            &attn_r,
+            &vl,
+            &[0, 1],
+            &[0, 2],
+            &[3],
+            &[1],
+            vec![bsz, nkv, g, d],
+        );
+        let o = b.reshape(&o, vec![bsz, nq, d]);
+        let o = b.reshape(&o, vec![bsz, nq * d]);
+        let attn_out = b.linear_seq(&o, &lw.wo);
+        x = b.add(&x, &attn_out);
+
+        let hn2 = rms_norm_seq(&mut b, &x, &lw.post_ln, &k, bsz, h);
+        let gate = b.linear_seq(&hn2, &lw.gate);
+        let up = b.linear_seq(&hn2, &lw.up);
+        let neg = b.negate(&gate);
+        let ex = b.exponential(&neg);
+        let one_b = b.broadcast(&k.one, &[], vec![bsz, c.inter]);
+        let denom = b.add(&one_b, &ex);
+        let sig = b.divide(&one_b, &denom);
+        let silu = b.multiply(&gate, &sig);
+        let act = b.multiply(&silu, &up);
+        let down = b.linear_seq(&act, &lw.down);
+        x = b.add(&x, &down);
+    }
+
+    let xf = rms_norm_seq(&mut b, &x, &a.final_norm, &k, bsz, h);
+    let logits = b.linear_seq(&xf, &a.embed); // [B, V]
+    let (out_val, out_ty) = if sample {
+        let tok = b.argmax_batched(&logits);
+        (tok.name, Ty::new(vec![bsz], "i32").render())
+    } else {
+        (logits.name, Ty::f32(vec![bsz, c.vocab]).render())
+    };
+
+    let sig = render_signature(&decls);
+    let cache_ty = Ty::f32(vec![bsz, c.n_layers, MAX_SEQ, c.n_kv, c.head_dim]).render();
+    format!(
+        "module @decode_step {{\n  func.func public @main({sig}) -> ({out_ty}, {cache_ty}, {cache_ty}) {{\n{body}    return {l}, {kc}, {vc} : {out_ty}, {cache_ty}, {cache_ty}\n  }}\n}}\n",
+        sig = sig,
+        out_ty = out_ty,
+        cache_ty = cache_ty,
+        body = b.body(),
+        l = out_val,
+        kc = kcache.name,
+        vc = vcache.name,
+    )
+}
+
+// ===========================================================================
 // prefill: bucketed multi-token prompt processing
 // ===========================================================================
 //

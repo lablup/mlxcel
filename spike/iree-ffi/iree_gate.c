@@ -154,8 +154,16 @@ typedef struct xla_ctx {
   iree_hal_buffer_view_t** weights;  // resident weights, uploaded once
   iree_hal_buffer_view_t* kcache;    // threaded KV (set by prefill, advanced by decode)
   iree_hal_buffer_view_t* vcache;
-  iree_hal_buffer_view_t* kcache_b;  // rank-5 batched KV [B,L,S,nkv,d] (uniform-B decode)
+  iree_hal_buffer_view_t* kcache_b;  // rank-5 batched KV [B,L,S,nkv,d] (uniform-B/ragged decode)
   iree_hal_buffer_view_t* vcache_b;
+  // Ragged (continuous-batching) host KV mirror: per-slot single-seq prefills are
+  // assembled here, then committed (h2d) into kcache_b/vcache_b. rg_dims is the
+  // rank-4 single-seq KV shape [L,S,nkv,d]; rg_per = its element count.
+  int32_t rg_bsz;
+  float* rg_mk;
+  float* rg_mv;
+  iree_host_size_t rg_per;
+  iree_hal_dim_t rg_dims[4];
   int32_t vocab;
 } xla_ctx;
 
@@ -571,8 +579,153 @@ int xla_llama_decode_batch(xla_ctx* c, int32_t bsz, const int32_t* tokens,
   return 0;
 }
 
+// ===========================================================================
+// Ragged continuous-batching decode (#449 M3 Stage 2a). Each slot carries its
+// OWN position/length, so sequences of different lengths share the batch. The
+// per-slot prompt KV is built by running the single-seq prefill into a host
+// mirror (one slot at a time), then committed (h2d) into the resident rank-5 KV
+// the ragged decode threads. decode_ragged takes token/pos/cache_len as [B]
+// arrays (per row) instead of the uniform-B scalars.
+// ===========================================================================
+
+// Reset the ragged state for a batch of `bsz` slots (drops any mirror + KV).
+int xla_llama_ragged_reset(xla_ctx* c, int32_t bsz) {
+  c->rg_bsz = bsz;
+  free(c->rg_mk);
+  c->rg_mk = NULL;
+  free(c->rg_mv);
+  c->rg_mv = NULL;
+  c->rg_per = 0;
+  if (c->kcache_b) {
+    iree_hal_buffer_view_release(c->kcache_b);
+    c->kcache_b = NULL;
+  }
+  if (c->vcache_b) {
+    iree_hal_buffer_view_release(c->vcache_b);
+    c->vcache_b = NULL;
+  }
+  return 0;
+}
+
+// Prefill one prompt into mirror slot `slot` and report its first token. Runs the
+// single-seq prefill (reusing the scalar prefill vmfb) and copies its rank-4 KV
+// into the host mirror; call xla_llama_commit once all slots are filled.
+int xla_llama_prefill_slot(xla_ctx* c, int32_t slot, const int32_t* tokens,
+                           int32_t lp, const int32_t* positions, int32_t real_len,
+                           int32_t* out_first) {
+  int rc = xla_llama_prefill(c, tokens, lp, positions, real_len, out_first);
+  if (rc != 0) return rc;
+  if (iree_hal_buffer_view_shape_rank(c->kcache) != 4) {
+    fprintf(stderr, "xla_llama_prefill_slot: expected rank-4 single-seq KV\n");
+    return 1;
+  }
+  iree_host_size_t per = iree_hal_buffer_view_element_count(c->kcache);
+  if (!c->rg_mk) {
+    c->rg_per = per;
+    for (int32_t i = 0; i < 4; i++) {
+      c->rg_dims[i] = iree_hal_buffer_view_shape_dim(c->kcache, i);
+    }
+    c->rg_mk = (float*)calloc((size_t)c->rg_bsz * per, sizeof(float));
+    c->rg_mv = (float*)calloc((size_t)c->rg_bsz * per, sizeof(float));
+    if (!c->rg_mk || !c->rg_mv) return 1;
+  }
+  GATE_CHECK(iree_hal_device_transfer_d2h(
+      c->device, iree_hal_buffer_view_buffer(c->kcache), 0,
+      c->rg_mk + (size_t)slot * per, per * sizeof(float),
+      IREE_HAL_TRANSFER_BUFFER_FLAG_DEFAULT, iree_infinite_timeout()));
+  GATE_CHECK(iree_hal_device_transfer_d2h(
+      c->device, iree_hal_buffer_view_buffer(c->vcache), 0,
+      c->rg_mv + (size_t)slot * per, per * sizeof(float),
+      IREE_HAL_TRANSFER_BUFFER_FLAG_DEFAULT, iree_infinite_timeout()));
+  iree_hal_buffer_view_release(c->kcache);
+  c->kcache = NULL;
+  iree_hal_buffer_view_release(c->vcache);
+  c->vcache = NULL;
+  return 0;
+}
+
+// Upload the host mirror into the resident rank-5 KV the ragged decode threads.
+int xla_llama_commit(xla_ctx* c) {
+  if (!c->rg_mk) {
+    fprintf(stderr, "xla_llama_commit: no slots prefilled\n");
+    return 1;
+  }
+  iree_hal_dim_t shape5[5] = {(iree_hal_dim_t)c->rg_bsz, c->rg_dims[0],
+                              c->rg_dims[1], c->rg_dims[2], c->rg_dims[3]};
+  if (c->kcache_b) {
+    iree_hal_buffer_view_release(c->kcache_b);
+    c->kcache_b = NULL;
+  }
+  if (c->vcache_b) {
+    iree_hal_buffer_view_release(c->vcache_b);
+    c->vcache_b = NULL;
+  }
+  iree_host_size_t bytes = (iree_host_size_t)c->rg_bsz * c->rg_per * sizeof(float);
+  GATE_CHECK(xla_alloc_bv(c, 5, shape5, IREE_HAL_ELEMENT_TYPE_FLOAT_32, c->rg_mk,
+                          bytes, &c->kcache_b));
+  GATE_CHECK(xla_alloc_bv(c, 5, shape5, IREE_HAL_ELEMENT_TYPE_FLOAT_32, c->rg_mv,
+                          bytes, &c->vcache_b));
+  return 0;
+}
+
+// Ragged decode_step: token[B], pos[B], cache_len[B] (per row), rank-5 KV ->
+// token[B]; advances the resident rank-5 KV in place.
+int xla_llama_decode_ragged(xla_ctx* c, int32_t bsz, const int32_t* tokens,
+                            const int32_t* pos, const int32_t* cache_len,
+                            int32_t* out_tokens) {
+  iree_runtime_call_t call;
+  GATE_CHECK(iree_runtime_call_initialize_by_name(
+      c->session, iree_make_cstring_view("decode_step.main"), &call));
+  for (int32_t i = 0; i < c->n_weights; i++) {
+    GATE_CHECK(iree_runtime_call_inputs_push_back_buffer_view(&call,
+                                                              c->weights[i]));
+  }
+  iree_hal_dim_t vshape[1] = {(iree_hal_dim_t)bsz};
+  iree_host_size_t vbytes = (iree_host_size_t)bsz * sizeof(int32_t);
+  iree_hal_buffer_view_t* tok_bv = NULL;
+  iree_hal_buffer_view_t* pos_bv = NULL;
+  iree_hal_buffer_view_t* len_bv = NULL;
+  GATE_CHECK(xla_alloc_bv(c, 1, vshape, IREE_HAL_ELEMENT_TYPE_INT_32, tokens,
+                          vbytes, &tok_bv));
+  GATE_CHECK(xla_alloc_bv(c, 1, vshape, IREE_HAL_ELEMENT_TYPE_INT_32, pos, vbytes,
+                          &pos_bv));
+  GATE_CHECK(xla_alloc_bv(c, 1, vshape, IREE_HAL_ELEMENT_TYPE_INT_32, cache_len,
+                          vbytes, &len_bv));
+  GATE_CHECK(iree_runtime_call_inputs_push_back_buffer_view(&call, tok_bv));
+  GATE_CHECK(iree_runtime_call_inputs_push_back_buffer_view(&call, pos_bv));
+  GATE_CHECK(iree_runtime_call_inputs_push_back_buffer_view(&call, len_bv));
+  GATE_CHECK(iree_runtime_call_inputs_push_back_buffer_view(&call, c->kcache_b));
+  GATE_CHECK(iree_runtime_call_inputs_push_back_buffer_view(&call, c->vcache_b));
+
+  GATE_CHECK(iree_runtime_call_invoke(&call, 0));
+
+  iree_hal_buffer_view_t* logits = NULL;
+  iree_hal_buffer_view_t* kc = NULL;
+  iree_hal_buffer_view_t* vc = NULL;
+  GATE_CHECK(iree_runtime_call_outputs_pop_front_buffer_view(&call, &logits));
+  GATE_CHECK(iree_runtime_call_outputs_pop_front_buffer_view(&call, &kc));
+  GATE_CHECK(iree_runtime_call_outputs_pop_front_buffer_view(&call, &vc));
+  iree_hal_buffer_view_t* old_k = c->kcache_b;
+  iree_hal_buffer_view_t* old_v = c->vcache_b;
+  c->kcache_b = kc;
+  c->vcache_b = vc;
+
+  GATE_CHECK(xla_read_tokens_batch(c, bsz, logits, out_tokens));
+
+  iree_hal_buffer_view_release(logits);
+  iree_hal_buffer_view_release(tok_bv);
+  iree_hal_buffer_view_release(pos_bv);
+  iree_hal_buffer_view_release(len_bv);
+  iree_runtime_call_deinitialize(&call);
+  iree_hal_buffer_view_release(old_k);
+  iree_hal_buffer_view_release(old_v);
+  return 0;
+}
+
 void xla_llama_free(xla_ctx* c) {
   if (!c) return;
+  free(c->rg_mk);
+  free(c->rg_mv);
   if (c->weights) {
     for (int32_t i = 0; i < c->n_weights; i++) {
       if (c->weights[i]) iree_hal_buffer_view_release(c->weights[i]);

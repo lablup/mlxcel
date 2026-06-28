@@ -9,6 +9,8 @@
 //!   emit prefill-argmax  [out.mlir]   prefill ending in on-device argmax
 //!   emit decode-batch        <B> [out]   uniform-B batched decode (logits)
 //!   emit decode-batch-argmax <B> [out]   uniform-B batched decode, on-device argmax
+//!   emit decode-ragged        <B> [out]  continuous-batching decode (logits)
+//!   emit decode-ragged-argmax <B> [out]  continuous-batching decode, on-device argmax
 
 mod builder;
 mod config;
@@ -35,7 +37,7 @@ fn main() {
 
     // Batched kinds take the batch size in args[2]; the output path then shifts
     // to args[3]. All other kinds keep the output path at args[2].
-    let is_batch = kind.starts_with("decode-batch");
+    let is_batch = kind.starts_with("decode-batch") || kind.starts_with("decode-ragged");
     let bsz = if is_batch {
         match args.get(2).and_then(|s| s.parse::<usize>().ok()) {
             Some(b) if b >= 1 => b,
@@ -59,10 +61,13 @@ fn main() {
         "prefill-argmax" => model::emit_prefill(&cfg, true),
         "decode-batch" => model::emit_decode_batched(&cfg, bsz, false),
         "decode-batch-argmax" => model::emit_decode_batched(&cfg, bsz, true),
+        "decode-ragged" => model::emit_decode_ragged(&cfg, bsz, false),
+        "decode-ragged-argmax" => model::emit_decode_ragged(&cfg, bsz, true),
         other => {
             eprintln!(
                 "unknown kind: {other} (use p0 | probe | decode | prefill | \
-                 decode-argmax | prefill-argmax | decode-batch | decode-batch-argmax)"
+                 decode-argmax | prefill-argmax | decode-batch | decode-batch-argmax | \
+                 decode-ragged | decode-ragged-argmax)"
             );
             std::process::exit(2);
         }
