@@ -668,6 +668,25 @@ int xla_llama_commit(xla_ctx* c) {
   return 0;
 }
 
+// Pull the live rank-5 KV back into the host mirror (d2h). Used before a
+// mid-stream admit: refresh captures the advanced state of all active slots, then
+// prefill_slot overwrites just the freed slot and commit re-uploads, so admitting
+// one sequence does not disturb the others.
+int xla_llama_refresh_mirror(xla_ctx* c) {
+  if (!c->rg_mk || !c->kcache_b) {
+    fprintf(stderr, "xla_llama_refresh_mirror: no mirror or no committed KV\n");
+    return 1;
+  }
+  iree_host_size_t bytes = (iree_host_size_t)c->rg_bsz * c->rg_per * sizeof(float);
+  GATE_CHECK(iree_hal_device_transfer_d2h(
+      c->device, iree_hal_buffer_view_buffer(c->kcache_b), 0, c->rg_mk, bytes,
+      IREE_HAL_TRANSFER_BUFFER_FLAG_DEFAULT, iree_infinite_timeout()));
+  GATE_CHECK(iree_hal_device_transfer_d2h(
+      c->device, iree_hal_buffer_view_buffer(c->vcache_b), 0, c->rg_mv, bytes,
+      IREE_HAL_TRANSFER_BUFFER_FLAG_DEFAULT, iree_infinite_timeout()));
+  return 0;
+}
+
 // Ragged decode_step: token[B], pos[B], cache_len[B] (per row), rank-5 KV ->
 // token[B]; advances the resident rank-5 KV in place.
 int xla_llama_decode_ragged(xla_ctx* c, int32_t bsz, const int32_t* tokens,
