@@ -93,11 +93,19 @@ ragged decode graph advances every active slot one token per step, each at its
 own position. Greedy, fixed `B_max ∈ {4, 8}` (the bundled ragged graphs),
 contiguous per-slot KV.
 
-The engine is backend-neutral at the request level (`submit` a prompt + budget,
-`pump` a step, read per-request `EngineEvent`s, `cancel`); it holds no server
-types, so the server adapter wraps it unchanged.
+The engine is backend-neutral at the request level (`submit` a prompt + budget +
+[`SampleParams`](src/sampler.rs), `pump` a step, read per-request `EngineEvent`s,
+`cancel`); it holds no server types, so the server adapter wraps it unchanged.
 
-### Serving (Stage 2c)
+### Sampling (Stage 2d)
+
+The engine reads the per-row logits back to the host (the logits graph variant)
+and samples there, so it honors **temperature, top-k, top-p, min-p, and a seed**.
+Greedy (`temperature 0`) is host argmax of the logits, token-exact with the
+single-sequence argmax path. Reading the full `[B, vocab]` logits per step is a
+small fraction of the decode matmuls; on-device sampling is a later optimization.
+
+### Serving (Stage 2c/2d)
 
 On an `xla-iree` build, `mlxcel-server` serves through this engine when
 `MLXCEL_BACKEND=xla` is selected: a server-side `XlaServeWorker` adapts the engine
@@ -107,15 +115,16 @@ implements the same contract), so the HTTP path is unchanged.
 ```bash
 MLXCEL_BACKEND=xla MLXCEL_XLA_DEVICE=cuda ./target/release/mlxcel-server \
   -m <Llama-3.2-1B-Instruct dir> --port 8080
-# then POST /v1/completions as usual.
+# then POST /v1/completions (temperature / top_p / top_k / seed are honored).
 ```
 
-The serve path is greedy and text-only (the engine's nature): it honors
-`max_tokens` and the model's EOS ids, but serves greedily regardless of sampling
-parameters (logged once). Requests it cannot serve faithfully are rejected with a
-clear error rather than served wrong: logprobs, structured / JSON-schema output,
-and multimodal inputs. Stop strings are not enforced yet. `--max-batch-size` maps
-to the engine's bundled `B_max` (`>= 8` -> 8, else 4).
+The serve path is text-only: it honors `max_tokens`, the model's EOS ids, and
+sampling (temperature / top-k / top-p / min-p / seed). The history-based penalties
+(repetition / frequency / presence / DRY) are not applied (logged once). Requests
+it cannot serve faithfully are rejected with a clear error rather than served
+wrong: logprobs, structured / JSON-schema output, and multimodal inputs. Stop
+strings are not enforced yet. `--max-batch-size` maps to the engine's bundled
+`B_max` (`>= 8` -> 8, else 4).
 
 Prove the engine without the server with the reference-equivalence + throughput
 example (every request's batched stream must equal its independent single-seq

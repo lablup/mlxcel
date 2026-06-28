@@ -42,6 +42,9 @@ use std::path::Path;
 
 #[cfg(feature = "iree")]
 use crate::iree::{IreeLlama, IreeRaggedLlama, PREFILL_LP};
+use crate::sampler::SampleParams;
+#[cfg(feature = "iree")]
+use crate::sampler::sample;
 
 /// Why a request stopped generating. Cancellation is silent (the caller that
 /// called [`XlaBatchEngine::cancel`] already knows), so it is not a finish reason.
@@ -74,6 +77,10 @@ struct Slot {
     produced: usize,
     /// Token budget (`max_new_tokens`).
     cap: usize,
+    /// Sampling parameters for this request (#449 M3 Stage 2d).
+    params: SampleParams,
+    /// PRNG state, advanced by each sample; seeded at admit for reproducibility.
+    rng: u64,
 }
 
 /// A queued, not-yet-admitted request.
@@ -81,7 +88,14 @@ struct Pending {
     req_id: u64,
     prompt: Vec<i32>,
     cap: usize,
+    params: SampleParams,
     cancelled: bool,
+}
+
+/// Resolve a request's PRNG seed: the explicit seed if given, else a deterministic
+/// per-request seed so a no-seed request is still reproducible.
+fn resolve_seed(params: &SampleParams, req_id: u64) -> u64 {
+    params.seed.unwrap_or(0x9E37_79B9_7F4A_7C15 ^ req_id)
 }
 
 /// Greedy stop test after a slot emits `last`: EOS wins over Length when the
@@ -122,13 +136,14 @@ impl Scheduler {
     }
 
     /// Queue a request and return its id (monotonically increasing).
-    fn submit(&mut self, prompt: Vec<i32>, cap: usize) -> u64 {
+    fn submit(&mut self, prompt: Vec<i32>, cap: usize, params: SampleParams) -> u64 {
         let req_id = self.next_id;
         self.next_id += 1;
         self.queue.push_back(Pending {
             req_id,
             prompt,
             cap,
+            params,
             cancelled: false,
         });
         req_id
@@ -240,15 +255,21 @@ impl XlaBatchEngine {
         self.sched.slots.iter().filter(|s| s.is_some()).count()
     }
 
-    /// Queue a request: generate up to `max_new_tokens` greedy tokens for
-    /// `prompt`, stopping early on EOS. Returns the request id used in the
-    /// [`EngineEvent`]s [`pump`](Self::pump) yields.
+    /// Queue a request: generate up to `max_new_tokens` tokens for `prompt`,
+    /// sampling per `params` (greedy when `params.is_greedy()`), stopping early on
+    /// EOS. Returns the request id used in the [`EngineEvent`]s [`pump`](Self::pump)
+    /// yields.
     ///
     /// # Errors
     ///
     /// Errors on an empty prompt, a prompt longer than the prefill bucket, or a
     /// zero token budget.
-    pub fn submit(&mut self, prompt: &[i32], max_new_tokens: usize) -> Result<u64, String> {
+    pub fn submit(
+        &mut self,
+        prompt: &[i32],
+        max_new_tokens: usize,
+        params: SampleParams,
+    ) -> Result<u64, String> {
         if prompt.is_empty() {
             return Err("XLA batched submit requires a non-empty prompt".to_string());
         }
@@ -261,7 +282,7 @@ impl XlaBatchEngine {
         if max_new_tokens == 0 {
             return Err("max_new_tokens must be >= 1".to_string());
         }
-        Ok(self.sched.submit(prompt.to_vec(), max_new_tokens))
+        Ok(self.sched.submit(prompt.to_vec(), max_new_tokens, params))
     }
 
     /// Cancel a request by id (frees its slot or drops it from the queue).
@@ -289,12 +310,15 @@ impl XlaBatchEngine {
         let mut events = Vec::new();
 
         // ADMIT: fill free slots from the queue. The device-side prefill writes
-        // only the admitted slot's KV region, so live slots are not disturbed.
+        // only the admitted slot's KV region, so live slots are not disturbed; its
+        // first-token logits are sampled here per the request's params.
         for s in self.sched.free_slots() {
             let Some(p) = self.sched.pop_next_pending() else {
                 break;
             };
-            let first = self.engine.prefill_slot(s, &p.prompt)?;
+            let logits = self.engine.prefill_slot_logits(s, &p.prompt)?;
+            let mut rng = resolve_seed(&p.params, p.req_id);
+            let first = sample(&logits, &p.params, &mut rng);
             events.push(EngineEvent::Token {
                 req_id: p.req_id,
                 token: first,
@@ -305,6 +329,8 @@ impl XlaBatchEngine {
                 cache_len: p.prompt.len() as i32,
                 produced: 1,
                 cap: p.cap,
+                params: p.params,
+                rng,
             };
             if let Some(reason) = finish_reason(slot.produced, slot.cap, first, &eos) {
                 // Finished at its first token: leave the slot free for the next admit.
@@ -322,7 +348,7 @@ impl XlaBatchEngine {
         }
 
         // DECODE: advance all B slots in one ragged step. Inactive rows carry
-        // zeros (masked no-ops) and their outputs are discarded.
+        // zeros (masked no-ops) and their logits are discarded.
         let b = self.sched.b_max;
         let mut tok = vec![0i32; b];
         let mut pos = vec![0i32; b];
@@ -334,11 +360,14 @@ impl XlaBatchEngine {
                 clen[s] = st.cache_len;
             }
         }
-        let out = self.engine.decode_ragged(&tok, &pos, &clen)?;
+        let logits = self.engine.decode_ragged_logits(&tok, &pos, &clen)?;
+        let vocab = self.engine.vocab();
 
-        // ADVANCE + EVICT.
-        for (slot_opt, &nt) in self.sched.slots.iter_mut().zip(&out) {
+        // ADVANCE + EVICT: sample each active row from its `[vocab]` logit slice.
+        for (s, slot_opt) in self.sched.slots.iter_mut().enumerate() {
             if let Some(slot) = slot_opt.as_mut() {
+                let row = &logits[s * vocab..(s + 1) * vocab];
+                let nt = sample(row, &slot.params, &mut slot.rng);
                 slot.cur = nt;
                 slot.cache_len += 1;
                 slot.produced += 1;
@@ -427,11 +456,15 @@ mod tests {
         assert_eq!(finish_reason(1, 1, 7, &EOS), Some(FinishReason::Length));
     }
 
+    fn g() -> SampleParams {
+        SampleParams::greedy()
+    }
+
     #[test]
     fn submit_assigns_increasing_ids_and_queues() {
         let mut s = Scheduler::new(2, EOS.to_vec());
-        assert_eq!(s.submit(vec![1, 2], 8), 0);
-        assert_eq!(s.submit(vec![3], 8), 1);
+        assert_eq!(s.submit(vec![1, 2], 8, g()), 0);
+        assert_eq!(s.submit(vec![3], 8, g()), 1);
         assert_eq!(s.free_slots(), vec![0, 1]);
         assert!(!s.is_idle());
         assert!(!s.any_active());
@@ -440,8 +473,8 @@ mod tests {
     #[test]
     fn pop_next_pending_skips_cancelled() {
         let mut s = Scheduler::new(2, EOS.to_vec());
-        let a = s.submit(vec![1], 8);
-        let b = s.submit(vec![2], 8);
+        let a = s.submit(vec![1], 8, g());
+        let b = s.submit(vec![2], 8, g());
         assert!(s.cancel(a)); // cancel the head while queued
         let got = s.pop_next_pending().expect("a live request remains");
         assert_eq!(got.req_id, b);
@@ -451,7 +484,7 @@ mod tests {
     #[test]
     fn cancel_active_slot_frees_it() {
         let mut s = Scheduler::new(2, EOS.to_vec());
-        let id = s.submit(vec![1], 8);
+        let id = s.submit(vec![1], 8, g());
         // simulate an admit into slot 0
         let p = s.pop_next_pending().unwrap();
         s.slots[0] = Some(Slot {
@@ -460,6 +493,8 @@ mod tests {
             cache_len: 1,
             produced: 1,
             cap: p.cap,
+            params: p.params,
+            rng: 0,
         });
         assert!(s.any_active());
         assert!(s.cancel(id));
@@ -472,7 +507,7 @@ mod tests {
     fn idle_only_when_drained() {
         let mut s = Scheduler::new(1, EOS.to_vec());
         assert!(s.is_idle());
-        let id = s.submit(vec![1], 8);
+        let id = s.submit(vec![1], 8, g());
         assert!(!s.is_idle()); // queued
         assert!(s.cancel(id));
         assert!(s.is_idle()); // cancelled-while-queued counts as drained

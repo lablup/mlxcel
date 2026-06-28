@@ -39,7 +39,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use mlxcel_xla::{EngineEvent, FinishReason, XlaBatchEngine, XlaReferenceEngine};
+use mlxcel_xla::{EngineEvent, FinishReason, SampleParams, XlaBatchEngine, XlaReferenceEngine};
 
 fn arg(flag: &str, default: &str) -> String {
     let args: Vec<String> = std::env::args().collect();
@@ -175,8 +175,10 @@ fn main() {
     let mut streams: Vec<Vec<i32>> = vec![Vec::new(); nreq];
     let mut finished: Vec<Option<FinishReason>> = vec![None; nreq];
     for &(len, cap) in &specs {
+        // Greedy keeps the reference-equivalence gate exact: host argmax of the
+        // logits graph == the single-seq argmax reference, token for token.
         engine
-            .submit(&prompt_ids[..len], cap)
+            .submit(&prompt_ids[..len], cap, SampleParams::greedy())
             .expect("submit request");
     }
 

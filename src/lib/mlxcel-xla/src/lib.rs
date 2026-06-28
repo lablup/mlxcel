@@ -60,8 +60,16 @@ mod iree;
 #[cfg_attr(not(feature = "iree"), allow(dead_code))]
 mod batch;
 
+// Host-side token sampler (#449 M3 Stage 2d). Pure Rust; present under `iree` (the
+// engine samples with it) and under `test` (unit-tested without the IREE runtime).
+#[cfg(any(feature = "iree", test))]
+#[cfg_attr(not(feature = "iree"), allow(dead_code))]
+mod sampler;
+
 #[cfg(feature = "iree")]
 pub use batch::{EngineEvent, FinishReason, XlaBatchEngine, XlaReferenceEngine};
+#[cfg(feature = "iree")]
+pub use sampler::SampleParams;
 
 /// Error returned by the token-level primitives when the crate is built without
 /// the `iree` feature (no IREE execution path compiled in).

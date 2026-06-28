@@ -23,13 +23,14 @@
 //! [`EngineEvent`] back to a [`GenerateEvent`] on that request's channel, reusing
 //! the server's [`StreamingDecodeState`] for byte-fallback-safe detokenization.
 //!
-//! Scope: the OpenXLA engine is greedy (argmax) and text-only, so this path
-//! honors `max_tokens` and the model's EOS ids but serves greedily regardless of
-//! the request's sampling parameters (logged once). Requests that need features
-//! the engine cannot provide are rejected with a clear error rather than served
-//! wrong: logprobs (no logit readback), structured / JSON-schema output (no
-//! constraint masking), and multimodal inputs (text-only). Stop strings are not
-//! enforced yet (EOS + `max_tokens` terminate); that is a follow-up.
+//! Scope: text-only. This path honors `max_tokens`, the model's EOS ids, and
+//! sampling (temperature / top-k / top-p / min-p / seed, #449 M3 Stage 2d); the
+//! history-based penalties (repetition / frequency / presence / DRY) are not
+//! applied (logged once). Requests that need features the engine cannot provide
+//! are rejected with a clear error rather than served wrong: logprobs (no logit
+//! readback), structured / JSON-schema output (no constraint masking), and
+//! multimodal inputs (text-only). Stop strings are not enforced yet (EOS +
+//! `max_tokens` terminate); that is a follow-up.
 //!
 //! Compiled only under `xla-iree` (real IREE execution). The MLX serving path is
 //! untouched.
@@ -40,7 +41,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::time::Instant;
 
-use mlxcel_xla::{EngineEvent, FinishReason as XlaFinishReason, XlaBatchEngine};
+use mlxcel_xla::{EngineEvent, FinishReason as XlaFinishReason, SampleParams, XlaBatchEngine};
 
 use super::BatchEngine;
 use crate::server::ServerGenerateOptions;
@@ -68,7 +69,7 @@ pub(crate) struct XlaServeWorker {
     /// Active requests, keyed by the engine req id `submit` returned.
     states: HashMap<u64, ServeState>,
     shutdown: bool,
-    warned_sampling: bool,
+    warned_penalties: bool,
     warned_stop: bool,
 }
 
@@ -84,7 +85,7 @@ impl XlaServeWorker {
             request_rx,
             states: HashMap::new(),
             shutdown: false,
-            warned_sampling: false,
+            warned_penalties: false,
             warned_stop: false,
         }
     }
@@ -122,14 +123,27 @@ impl XlaServeWorker {
             return;
         }
 
-        // Greedy regardless of sampling params, and stop strings are not enforced
-        // yet; warn once each so operators are not surprised, then serve.
-        if !self.warned_sampling {
+        // Sampling: temperature / top-k / top-p / min-p / seed are honored; the
+        // history-based penalties (repetition / frequency / presence / DRY) and stop
+        // strings are not, so warn once each when a request asks for them.
+        let sampling = &options.sampling;
+        let params = SampleParams {
+            temperature: sampling.temperature,
+            top_k: sampling.top_k.max(0) as usize,
+            top_p: sampling.top_p,
+            min_p: sampling.min_p,
+            seed: sampling.seed,
+        };
+        let uses_penalties = sampling.repetition_penalty != 1.0
+            || sampling.frequency_penalty != 0.0
+            || sampling.presence_penalty != 0.0
+            || sampling.dry_multiplier != 0.0;
+        if uses_penalties && !self.warned_penalties {
             tracing::warn!(
-                "the OpenXLA backend serves greedily (argmax); request sampling parameters \
-                 (temperature/top_p/top_k/penalties) are ignored on this backend"
+                "the OpenXLA backend applies temperature / top-k / top-p / min-p only; \
+                 repetition / frequency / presence penalties and DRY are ignored"
             );
-            self.warned_sampling = true;
+            self.warned_penalties = true;
         }
         if !self.warned_stop
             && options
@@ -165,7 +179,10 @@ impl XlaServeWorker {
         }
 
         let detok = StreamingDecodeState::new(&self.tokenizer, &prompt_tokens);
-        match self.engine.submit(&prompt_tokens, options.max_tokens) {
+        match self
+            .engine
+            .submit(&prompt_tokens, options.max_tokens, params)
+        {
             Ok(req_id) => {
                 self.states.insert(
                     req_id,
@@ -302,7 +319,7 @@ impl XlaServeWorker {
 impl BatchEngine for XlaServeWorker {
     fn serve(&mut self) {
         tracing::info!(
-            "OpenXLA serve worker starting (continuous batching, B_max={}, greedy)",
+            "OpenXLA serve worker starting (continuous batching, B_max={}, sampling)",
             self.engine.b_max()
         );
         loop {

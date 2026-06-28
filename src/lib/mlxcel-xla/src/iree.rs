@@ -42,6 +42,10 @@ use safetensors::{Dtype, SafeTensors};
 
 /// Llama-3.2-1B-Instruct shape the bundled graphs are authored for.
 const N_LAYERS: usize = 16;
+/// Vocabulary size the bundled graphs emit logits over (#449 M3 Stage 2d): the
+/// logits prefill returns `[VOCAB]` and the ragged decode `[B, VOCAB]`. Matches
+/// the `vocab_size` `verify_config` checks.
+const VOCAB: usize = 128256;
 /// Prefill bucket baked into the bundled `prefill` graph (`tensor<256xi32>`,
 /// == MAX_SEQ, so it covers any prompt the 256-slot KV cache holds).
 pub const PREFILL_LP: usize = 256;
@@ -77,42 +81,54 @@ unsafe extern "C" {
         cache_len: c_int,
         out_token: *mut c_int,
     ) -> c_int;
-    // Ragged continuous-batching (#449 M3 Stage 2b). `ragged_reset` sizes the
-    // batch; `prefill_slot` seeds one slot (device-side KV write); `decode_ragged`
-    // advances all B slots, each at its own per-row pos/cache_len.
+    // Ragged continuous-batching (#449 M3 Stage 2b/2d). `ragged_reset` sizes the
+    // batch; the `_logits` calls run one slot's prefill / all B slots' decode and
+    // copy the per-row `[vocab]` logits to host so the engine samples there (Stage
+    // 2d). `prefill_slot_logits` also does the device-side KV slot write.
     fn xla_llama_ragged_reset(c: *mut XlaCtx, bsz: c_int) -> c_int;
-    fn xla_llama_prefill_slot(
+    fn xla_llama_prefill_slot_logits(
         c: *mut XlaCtx,
         slot: c_int,
         tokens: *const c_int,
         lp: c_int,
         positions: *const c_int,
         real_len: c_int,
-        out_first: *mut c_int,
+        vocab: c_int,
+        out_logits: *mut f32,
     ) -> c_int;
-    fn xla_llama_decode_ragged(
+    fn xla_llama_decode_ragged_logits(
         c: *mut XlaCtx,
         bsz: c_int,
         tokens: *const c_int,
         pos: *const c_int,
         cache_len: *const c_int,
-        out_tokens: *mut c_int,
+        vocab: c_int,
+        out_logits: *mut f32,
     ) -> c_int;
     fn xla_llama_free(c: *mut XlaCtx);
 }
 
-/// The #451-emitted graphs (on-device argmax variant), bundled as crate assets.
-/// `iree-compile` turns these into vmfbs that match the linked runtime.
+/// The single-sequence graphs (on-device argmax variant), bundled as crate assets.
+/// Used by [`IreeLlama`]; `iree-compile` turns these into vmfbs that match the
+/// linked runtime.
 const PREFILL_MLIR: &str = include_str!("../assets/llama-3.2-1b/prefill.mlir");
 const DECODE_MLIR: &str = include_str!("../assets/llama-3.2-1b/decode.mlir");
 
+/// The LOGITS prefill graph (#449 M3 Stage 2d): same as `prefill` but returns the
+/// `[vocab]` logit distribution instead of the argmax token, so the batched engine
+/// can sample the first token on the host. Used by [`IreeRaggedLlama`].
+const PREFILL_LOGITS_MLIR: &str = include_str!("../assets/llama-3.2-1b/prefill_logits.mlir");
+
 /// Ragged (continuous-batching) decode graphs, one bundled per supported slot
-/// count (#449 M3 Stage 2b). Each is a fixed-`B_max` `@decode_step` taking per-row
-/// `token[B]`/`pos[B]`/`cache_len[B]` and the rank-5 KV. The batched engine picks
-/// one by `b_max`; adding a slot count means regenerating the asset (see the
+/// count (#449 M3 Stage 2b/2d). Each is a fixed-`B_max` `@decode_step` taking
+/// per-row `token[B]`/`pos[B]`/`cache_len[B]` and the rank-5 KV, returning the
+/// `[B, vocab]` LOGITS (the engine samples per row on the host). The batched engine
+/// picks one by `b_max`; adding a slot count means regenerating the asset (see the
 /// assets README) and extending this table.
-const DECODE_RAGGED_B4_MLIR: &str = include_str!("../assets/llama-3.2-1b/decode_ragged_b4.mlir");
-const DECODE_RAGGED_B8_MLIR: &str = include_str!("../assets/llama-3.2-1b/decode_ragged_b8.mlir");
+const DECODE_RAGGED_LOGITS_B4_MLIR: &str =
+    include_str!("../assets/llama-3.2-1b/decode_ragged_logits_b4.mlir");
+const DECODE_RAGGED_LOGITS_B8_MLIR: &str =
+    include_str!("../assets/llama-3.2-1b/decode_ragged_logits_b8.mlir");
 
 /// The slot counts (`B_max`) the bundled ragged graphs cover.
 pub(crate) const RAGGED_B_VALUES: &[usize] = &[4, 8];
@@ -120,8 +136,8 @@ pub(crate) const RAGGED_B_VALUES: &[usize] = &[4, 8];
 /// The bundled ragged decode graph for `b_max`, or `None` if unsupported.
 fn ragged_decode_mlir(b_max: usize) -> Option<&'static str> {
     match b_max {
-        4 => Some(DECODE_RAGGED_B4_MLIR),
-        8 => Some(DECODE_RAGGED_B8_MLIR),
+        4 => Some(DECODE_RAGGED_LOGITS_B4_MLIR),
+        8 => Some(DECODE_RAGGED_LOGITS_B8_MLIR),
         _ => None,
     }
 }
@@ -309,11 +325,12 @@ fn compile_one(
     Ok(vmfb_path)
 }
 
-/// Compile the bundled prefill graph plus a chosen decode graph for `device`.
-/// The prefill vmfb is shared (same text + flags hash) across the single-seq and
-/// ragged engines; only the decode graph differs.
-fn compile_prefill_and(
+/// Compile a (prefill, decode) graph pair for `device`. The single-sequence engine
+/// uses the argmax pair; the ragged engine uses the logits pair (Stage 2d).
+fn compile_pair(
     device: &str,
+    prefill_mlir: &str,
+    prefill_tag: &str,
     decode_mlir: &str,
     decode_tag: &str,
 ) -> Result<(PathBuf, PathBuf), String> {
@@ -327,14 +344,14 @@ fn compile_prefill_and(
     let flags = target_flags(device)?;
     let cache = std::env::temp_dir().join("mlxcel-xla-vmfb");
     std::fs::create_dir_all(&cache).map_err(|e| format!("mkdir {}: {e}", cache.display()))?;
-    let pre = compile_one(&iree_compile, PREFILL_MLIR, flags, &cache, "prefill")?;
+    let pre = compile_one(&iree_compile, prefill_mlir, flags, &cache, prefill_tag)?;
     let dec = compile_one(&iree_compile, decode_mlir, flags, &cache, decode_tag)?;
     Ok((pre, dec))
 }
 
-/// Compile the bundled prefill + single-token decode graphs for `device`.
+/// Compile the bundled argmax prefill + single-token decode graphs for `device`.
 fn compile_vmfbs(device: &str) -> Result<(PathBuf, PathBuf), String> {
-    compile_prefill_and(device, DECODE_MLIR, "decode")
+    compile_pair(device, PREFILL_MLIR, "prefill", DECODE_MLIR, "decode")
 }
 
 /// Load the 146 weights bf16 -> f32 in the emitter's arg order, returning the
@@ -514,15 +531,16 @@ impl Drop for IreeLlama {
     }
 }
 
-/// Owns a ragged (continuous-batching) IREE context (#449 M3 Stage 2b): the
-/// prefill module plus a fixed-`B_max` ragged decode module, the resident weights,
-/// and the rank-5 per-slot KV. Slots are seeded with [`prefill_slot`] (a device-side
-/// KV write) and advanced together by [`decode_ragged`], each row at its own
-/// position. Not `Send`/`Sync` (the raw context is single-threaded); the engine
-/// that wraps it owns it on one thread.
+/// Owns a ragged (continuous-batching) IREE context (#449 M3 Stage 2b/2d): the
+/// logits prefill module plus a fixed-`B_max` ragged decode module, the resident
+/// weights, and the rank-5 per-slot KV. Slots are seeded with [`prefill_slot_logits`]
+/// (a device-side KV write) and advanced together by [`decode_ragged_logits`], each
+/// row at its own position; both return logits so the wrapping engine samples on the
+/// host. Not `Send`/`Sync` (the raw context is single-threaded); the engine that
+/// wraps it owns it on one thread.
 ///
-/// [`prefill_slot`]: Self::prefill_slot
-/// [`decode_ragged`]: Self::decode_ragged
+/// [`prefill_slot_logits`]: Self::prefill_slot_logits
+/// [`decode_ragged_logits`]: Self::decode_ragged_logits
 pub struct IreeRaggedLlama {
     ctx: *mut XlaCtx,
     b_max: usize,
@@ -543,8 +561,13 @@ impl IreeRaggedLlama {
                  asset to add it; see the assets README)"
             )
         })?;
-        let (prefill_vmfb, decode_vmfb) =
-            compile_prefill_and(device, decode_mlir, &format!("decode_ragged_b{b_max}"))?;
+        let (prefill_vmfb, decode_vmfb) = compile_pair(
+            device,
+            PREFILL_LOGITS_MLIR,
+            "prefill_logits",
+            decode_mlir,
+            &format!("decode_ragged_logits_b{b_max}"),
+        )?;
         let ctx = create_ctx(model_dir, device, &prefill_vmfb, &decode_vmfb)?;
         // Safety: ctx is a fresh valid context from create_ctx; free it on error.
         let rc = unsafe { xla_llama_ragged_reset(ctx, b_max as c_int) };
@@ -561,16 +584,24 @@ impl IreeRaggedLlama {
         self.b_max
     }
 
+    /// The vocabulary size (logits per row). The engine slices the ragged decode's
+    /// flat `[b_max * vocab]` logits by this.
+    #[must_use]
+    pub fn vocab(&self) -> usize {
+        VOCAB
+    }
+
     /// Seed slot `slot` with `prompt` (1..=[`PREFILL_LP`] tokens) and return its
-    /// first token (the prefill argmax). The prompt's KV is written device-side
-    /// into the slot's region of the rank-5 cache; the other slots are untouched,
-    /// so a mid-stream admit does not disturb live sequences.
-    pub fn prefill_slot(&mut self, slot: usize, prompt: &[i32]) -> Result<i32, String> {
+    /// first-token `[vocab]` LOGITS (#449 M3 Stage 2d). The prompt's KV is written
+    /// device-side into the slot's region of the rank-5 cache; the other slots are
+    /// untouched, so a mid-stream admit does not disturb live sequences. The caller
+    /// samples the first token from the returned logits.
+    pub fn prefill_slot_logits(&mut self, slot: usize, prompt: &[i32]) -> Result<Vec<f32>, String> {
         if slot >= self.b_max {
             return Err(format!("slot {slot} out of range [0,{})", self.b_max));
         }
         if prompt.is_empty() {
-            return Err("prefill_slot requires a non-empty prompt".to_string());
+            return Err("prefill_slot_logits requires a non-empty prompt".to_string());
         }
         if prompt.len() > PREFILL_LP {
             return Err(format!(
@@ -581,57 +612,65 @@ impl IreeRaggedLlama {
         let mut tokens = vec![0i32; PREFILL_LP];
         tokens[..prompt.len()].copy_from_slice(prompt);
         let positions: Vec<c_int> = (0..PREFILL_LP as c_int).collect();
-        let mut out = 0i32;
-        // Safety: buffers outlive the call; the shim writes the slot's KV device-side.
+        let mut logits = vec![0f32; VOCAB];
+        // Safety: input buffers outlive the call; `logits` has VOCAB elements, which
+        // the shim fills; the shim also writes the slot's KV device-side.
         let rc = unsafe {
-            xla_llama_prefill_slot(
+            xla_llama_prefill_slot_logits(
                 self.ctx,
                 slot as c_int,
                 tokens.as_ptr(),
                 PREFILL_LP as c_int,
                 positions.as_ptr(),
                 prompt.len() as c_int,
-                &mut out,
+                VOCAB as c_int,
+                logits.as_mut_ptr(),
             )
         };
         if rc != 0 {
-            return Err(format!("xla_llama_prefill_slot failed (status {rc})"));
+            return Err(format!(
+                "xla_llama_prefill_slot_logits failed (status {rc})"
+            ));
         }
-        Ok(out)
+        Ok(logits)
     }
 
-    /// Advance all `b_max` slots one token. `tokens` / `pos` / `cache_len` are
-    /// per-row (length `b_max`); an inactive slot carries zeros (a masked no-op
-    /// whose output the caller discards). Returns the per-row next tokens.
-    pub fn decode_ragged(
+    /// Advance all `b_max` slots one token, returning the flat `[b_max * vocab]`
+    /// LOGITS (#449 M3 Stage 2d). `tokens` / `pos` / `cache_len` are per-row (length
+    /// `b_max`); an inactive slot carries zeros (a masked no-op whose logits the
+    /// caller discards). The caller samples a token per row from `logits[s*vocab..]`.
+    pub fn decode_ragged_logits(
         &mut self,
         tokens: &[i32],
         pos: &[i32],
         cache_len: &[i32],
-    ) -> Result<Vec<i32>, String> {
+    ) -> Result<Vec<f32>, String> {
         if tokens.len() != self.b_max || pos.len() != self.b_max || cache_len.len() != self.b_max {
             return Err(format!(
-                "decode_ragged expects per-row arrays of length b_max = {}",
+                "decode_ragged_logits expects per-row arrays of length b_max = {}",
                 self.b_max
             ));
         }
-        let mut out = vec![0i32; self.b_max];
-        // Safety: the three input slices and the output buffer are all length
-        // b_max == bsz; the shim threads its own resident rank-5 KV.
+        let mut logits = vec![0f32; self.b_max * VOCAB];
+        // Safety: the three input slices are length b_max == bsz; `logits` has
+        // b_max*VOCAB elements, which the shim fills; the shim threads its rank-5 KV.
         let rc = unsafe {
-            xla_llama_decode_ragged(
+            xla_llama_decode_ragged_logits(
                 self.ctx,
                 self.b_max as c_int,
                 tokens.as_ptr(),
                 pos.as_ptr(),
                 cache_len.as_ptr(),
-                out.as_mut_ptr(),
+                VOCAB as c_int,
+                logits.as_mut_ptr(),
             )
         };
         if rc != 0 {
-            return Err(format!("xla_llama_decode_ragged failed (status {rc})"));
+            return Err(format!(
+                "xla_llama_decode_ragged_logits failed (status {rc})"
+            ));
         }
-        Ok(out)
+        Ok(logits)
     }
 }
 
