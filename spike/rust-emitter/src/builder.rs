@@ -442,6 +442,52 @@ impl Builder {
             "{res}:2 = stablehlo.reduce({l} init: {ninf}), ({iota} init: {c0}) across dimensions = [0] : ({vf}, {vi}, tensor<f32>, tensor<i32>) -> (tensor<f32>, tensor<i32>)",
             l = logits.name
         ));
+        self.argmax_reducer_block();
+        Val {
+            name: format!("{res}#1"),
+            ty: Ty::scalar("i32"),
+        }
+    }
+
+    /// Batched on-device argmax over `[B, V]` -> `[B] i32`: the per-row argmax
+    /// index (first-max, numpy/jax tie-break). Same reducer as `argmax`, here
+    /// reducing the last axis of a 2-D logits tensor; the index iota is `[B, V]`
+    /// with each row `0..V-1` (`iota dim = 1`). Returns the index result (`#1`)
+    /// as a `[B] i32`. This is the batched-decode sampling tail: each step ships
+    /// `B` token ids (`4*B` bytes) back instead of a `[B, V]` logits copy.
+    pub fn argmax_batched(&mut self, logits: &Val) -> Val {
+        let bsz = logits.ty.shape[0];
+        let v = logits.ty.shape[1];
+        let bvf = Ty::f32(vec![bsz, v]).render();
+        let bvi = Ty::new(vec![bsz, v], "i32").render();
+        let bf = Ty::f32(vec![bsz]).render();
+        let bi = Ty::new(vec![bsz], "i32").render();
+        let c0 = self.fresh();
+        self.line(format!("{c0} = stablehlo.constant dense<0> : tensor<i32>"));
+        let ninf = self.fresh();
+        self.line(format!(
+            "{ninf} = stablehlo.constant dense<0xFF800000> : tensor<f32>"
+        ));
+        let iota = self.fresh();
+        self.line(format!("{iota} = stablehlo.iota dim = 1 : {bvi}"));
+        let res = self.fresh();
+        self.line(format!(
+            "{res}:2 = stablehlo.reduce({l} init: {ninf}), ({iota} init: {c0}) across dimensions = [1] : ({bvf}, {bvi}, tensor<f32>, tensor<i32>) -> ({bf}, {bi})",
+            l = logits.name
+        ));
+        self.argmax_reducer_block();
+        Val {
+            name: format!("{res}#1"),
+            ty: Ty::new(vec![bsz], "i32"),
+        }
+    }
+
+    /// The shared `stablehlo.reduce` reducer region for argmax (scalar or
+    /// batched): keep the larger value (NaN-propagating), tie-break to the lower
+    /// index. The block operates on scalars regardless of the reduced rank, so
+    /// the same body serves both. Block args are named (not `%argN`/`%N`) so they
+    /// never collide with the function args or the builder's SSA counter.
+    fn argmax_reducer_block(&mut self) {
         self.line(
             "reducer(%amv_l: tensor<f32>, %amv_r: tensor<f32>) (%ami_l: tensor<i32>, %ami_r: tensor<i32>) {"
                 .to_string(),
@@ -484,10 +530,6 @@ impl Builder {
             "  stablehlo.return {mv}, {mi} : tensor<f32>, tensor<i32>"
         ));
         self.line("}".to_string());
-        Val {
-            name: format!("{res}#1"),
-            ty: Ty::scalar("i32"),
-        }
     }
 
     // --- dot_general -------------------------------------------------------

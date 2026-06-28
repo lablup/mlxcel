@@ -7,6 +7,8 @@
 //!   emit prefill         [out.mlir]   full Llama-3.2-1B bucketed prefill (logits)
 //!   emit decode-argmax   [out.mlir]   decode_step ending in on-device argmax
 //!   emit prefill-argmax  [out.mlir]   prefill ending in on-device argmax
+//!   emit decode-batch        <B> [out]   uniform-B batched decode (logits)
+//!   emit decode-batch-argmax <B> [out]   uniform-B batched decode, on-device argmax
 
 mod builder;
 mod config;
@@ -30,7 +32,22 @@ fn probe() -> String {
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let kind = args.get(1).map(|s| s.as_str()).unwrap_or("decode");
-    let out = args.get(2);
+
+    // Batched kinds take the batch size in args[2]; the output path then shifts
+    // to args[3]. All other kinds keep the output path at args[2].
+    let is_batch = kind.starts_with("decode-batch");
+    let bsz = if is_batch {
+        match args.get(2).and_then(|s| s.parse::<usize>().ok()) {
+            Some(b) if b >= 1 => b,
+            _ => {
+                eprintln!("{kind} needs a batch size >= 1: emit {kind} <B> [out.mlir]");
+                std::process::exit(2);
+            }
+        }
+    } else {
+        1
+    };
+    let out = args.get(if is_batch { 3 } else { 2 });
 
     let cfg = config::Config::llama_3_2_1b();
     let text = match kind {
@@ -40,10 +57,12 @@ fn main() {
         "prefill" => model::emit_prefill(&cfg, false),
         "decode-argmax" => model::emit_decode(&cfg, true),
         "prefill-argmax" => model::emit_prefill(&cfg, true),
+        "decode-batch" => model::emit_decode_batched(&cfg, bsz, false),
+        "decode-batch-argmax" => model::emit_decode_batched(&cfg, bsz, true),
         other => {
             eprintln!(
                 "unknown kind: {other} (use p0 | probe | decode | prefill | \
-                 decode-argmax | prefill-argmax)"
+                 decode-argmax | prefill-argmax | decode-batch | decode-batch-argmax)"
             );
             std::process::exit(2);
         }

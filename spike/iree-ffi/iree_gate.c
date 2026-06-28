@@ -6,6 +6,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 // The iree-dist build leaves the system allocator to the application (its
 // iree_allocator_system() is gated on IREE_ALLOCATOR_SYSTEM_CTL). Point it at a
@@ -153,6 +154,8 @@ typedef struct xla_ctx {
   iree_hal_buffer_view_t** weights;  // resident weights, uploaded once
   iree_hal_buffer_view_t* kcache;    // threaded KV (set by prefill, advanced by decode)
   iree_hal_buffer_view_t* vcache;
+  iree_hal_buffer_view_t* kcache_b;  // rank-5 batched KV [B,L,S,nkv,d] (uniform-B decode)
+  iree_hal_buffer_view_t* vcache_b;
   int32_t vocab;
 } xla_ctx;
 
@@ -197,6 +200,35 @@ static iree_status_t xla_read_token(xla_ctx* c, iree_hal_buffer_view_t* out,
       c->device, iree_hal_buffer_view_buffer(out), 0, host, n * sizeof(float),
       IREE_HAL_TRANSFER_BUFFER_FLAG_DEFAULT, iree_infinite_timeout());
   if (iree_status_is_ok(s)) *out_token = xla_argmax_f32(host, (int32_t)n);
+  free(host);
+  return s;
+}
+
+// Batched output readback (uniform-B decode): a [B] i32 buffer is an on-device
+// per-row argmax (4*B-byte readback); a [B, V] f32 buffer is raw logits, argmaxed
+// per row on the host. Fills out_tokens[0..bsz].
+static iree_status_t xla_read_tokens_batch(xla_ctx* c, int32_t bsz,
+                                           iree_hal_buffer_view_t* out,
+                                           int32_t* out_tokens) {
+  iree_host_size_t n = iree_hal_buffer_view_element_count(out);
+  iree_hal_element_type_t et = iree_hal_buffer_view_element_type(out);
+  if (et == IREE_HAL_ELEMENT_TYPE_INT_32 && n == (iree_host_size_t)bsz) {
+    return iree_hal_device_transfer_d2h(
+        c->device, iree_hal_buffer_view_buffer(out), 0, out_tokens,
+        (iree_host_size_t)bsz * sizeof(int32_t),
+        IREE_HAL_TRANSFER_BUFFER_FLAG_DEFAULT, iree_infinite_timeout());
+  }
+  iree_host_size_t v = n / (iree_host_size_t)bsz;
+  float* host = (float*)malloc(n * sizeof(float));
+  if (!host) return iree_make_status(IREE_STATUS_RESOURCE_EXHAUSTED);
+  iree_status_t s = iree_hal_device_transfer_d2h(
+      c->device, iree_hal_buffer_view_buffer(out), 0, host, n * sizeof(float),
+      IREE_HAL_TRANSFER_BUFFER_FLAG_DEFAULT, iree_infinite_timeout());
+  if (iree_status_is_ok(s)) {
+    for (int32_t r = 0; r < bsz; r++) {
+      out_tokens[r] = xla_argmax_f32(host + (iree_host_size_t)r * v, (int32_t)v);
+    }
+  }
   free(host);
   return s;
 }
@@ -400,6 +432,145 @@ int xla_llama_decode(xla_ctx* c, int32_t token, int32_t pos, int32_t cache_len,
   return 0;
 }
 
+// ===========================================================================
+// Uniform-B batched decode (#449 M3 Stage 1). All B sequences advance in
+// lockstep (shared pos/cache_len), so the single-seq prefill runs once and its
+// rank-4 KV is tiled across B rows into the rank-5 cache the batched decode
+// threads. The batched decode vmfb (emitter `decode-batch-argmax <B>`) takes
+// token[B] + the rank-5 KV and returns token[B], reusing each weight across the
+// batch (GEMV -> GEMM). prefill_vmfb is the same single-seq graph as the scalar
+// path; only the decode module is the batched one.
+// ===========================================================================
+
+// Tile a rank-4 KV buffer [d0,d1,d2,d3] B times into a resident rank-5 buffer
+// [B,d0,d1,d2,d3] (every row a copy). One-time prefill cost.
+static iree_status_t xla_tile_one(xla_ctx* c, int32_t bsz,
+                                  iree_hal_buffer_view_t* src,
+                                  iree_hal_buffer_view_t** dst) {
+  if (iree_hal_buffer_view_shape_rank(src) != 4) {
+    return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
+                            "expected rank-4 KV to tile");
+  }
+  iree_hal_dim_t d0 = iree_hal_buffer_view_shape_dim(src, 0);
+  iree_hal_dim_t d1 = iree_hal_buffer_view_shape_dim(src, 1);
+  iree_hal_dim_t d2 = iree_hal_buffer_view_shape_dim(src, 2);
+  iree_hal_dim_t d3 = iree_hal_buffer_view_shape_dim(src, 3);
+  iree_host_size_t per =
+      (iree_host_size_t)d0 * (iree_host_size_t)d1 * (iree_host_size_t)d2 *
+      (iree_host_size_t)d3;
+  iree_host_size_t pbytes = per * sizeof(float);
+
+  float* host = (float*)malloc(pbytes);
+  if (!host) return iree_make_status(IREE_STATUS_RESOURCE_EXHAUSTED);
+  iree_status_t s = iree_hal_device_transfer_d2h(
+      c->device, iree_hal_buffer_view_buffer(src), 0, host, pbytes,
+      IREE_HAL_TRANSFER_BUFFER_FLAG_DEFAULT, iree_infinite_timeout());
+  if (!iree_status_is_ok(s)) {
+    free(host);
+    return s;
+  }
+  float* hostb = (float*)malloc((iree_host_size_t)bsz * pbytes);
+  if (!hostb) {
+    free(host);
+    return iree_make_status(IREE_STATUS_RESOURCE_EXHAUSTED);
+  }
+  for (int32_t r = 0; r < bsz; r++) {
+    memcpy(hostb + (iree_host_size_t)r * per, host, pbytes);
+  }
+  free(host);
+  iree_hal_dim_t shape5[5] = {(iree_hal_dim_t)bsz, d0, d1, d2, d3};
+  s = xla_alloc_bv(c, 5, shape5, IREE_HAL_ELEMENT_TYPE_FLOAT_32, hostb,
+                   (iree_host_size_t)bsz * pbytes, dst);
+  free(hostb);
+  return s;
+}
+
+// Tile the single-seq KV (c->kcache/vcache, set by prefill) into the rank-5
+// batched cache and drop the single-seq buffers.
+static iree_status_t xla_tile_kv_to_batch(xla_ctx* c, int32_t bsz) {
+  if (c->kcache_b) {
+    iree_hal_buffer_view_release(c->kcache_b);
+    c->kcache_b = NULL;
+  }
+  if (c->vcache_b) {
+    iree_hal_buffer_view_release(c->vcache_b);
+    c->vcache_b = NULL;
+  }
+  IREE_RETURN_IF_ERROR(xla_tile_one(c, bsz, c->kcache, &c->kcache_b));
+  IREE_RETURN_IF_ERROR(xla_tile_one(c, bsz, c->vcache, &c->vcache_b));
+  iree_hal_buffer_view_release(c->kcache);
+  c->kcache = NULL;
+  iree_hal_buffer_view_release(c->vcache);
+  c->vcache = NULL;
+  return iree_ok_status();
+}
+
+// Batched prefill: run the single-seq prefill once for the prompt, tile its KV
+// across B rows, and report the first token (identical for every row). The
+// batched decode then advances each row independently.
+int xla_llama_prefill_batch(xla_ctx* c, int32_t bsz, const int32_t* tokens,
+                            int32_t lp, const int32_t* positions,
+                            int32_t real_len, int32_t* out_tokens) {
+  int32_t first = 0;
+  int rc = xla_llama_prefill(c, tokens, lp, positions, real_len, &first);
+  if (rc != 0) return rc;
+  GATE_CHECK(xla_tile_kv_to_batch(c, bsz));
+  for (int32_t r = 0; r < bsz; r++) out_tokens[r] = first;
+  return 0;
+}
+
+// Batched decode_step: token[B], shared pos + cache_len, rank-5 KV -> token[B];
+// advances the resident rank-5 KV in place.
+int xla_llama_decode_batch(xla_ctx* c, int32_t bsz, const int32_t* tokens,
+                           int32_t pos, int32_t cache_len, int32_t* out_tokens) {
+  iree_runtime_call_t call;
+  GATE_CHECK(iree_runtime_call_initialize_by_name(
+      c->session, iree_make_cstring_view("decode_step.main"), &call));
+  for (int32_t i = 0; i < c->n_weights; i++) {
+    GATE_CHECK(iree_runtime_call_inputs_push_back_buffer_view(&call,
+                                                              c->weights[i]));
+  }
+  iree_hal_dim_t tok_shape[1] = {(iree_hal_dim_t)bsz};
+  iree_hal_buffer_view_t* tok_bv = NULL;
+  iree_hal_buffer_view_t* pos_bv = NULL;
+  iree_hal_buffer_view_t* len_bv = NULL;
+  GATE_CHECK(xla_alloc_bv(c, 1, tok_shape, IREE_HAL_ELEMENT_TYPE_INT_32, tokens,
+                          (iree_host_size_t)bsz * sizeof(int32_t), &tok_bv));
+  GATE_CHECK(xla_alloc_bv(c, 0, NULL, IREE_HAL_ELEMENT_TYPE_INT_32, &pos,
+                          sizeof(int32_t), &pos_bv));
+  GATE_CHECK(xla_alloc_bv(c, 0, NULL, IREE_HAL_ELEMENT_TYPE_INT_32, &cache_len,
+                          sizeof(int32_t), &len_bv));
+  GATE_CHECK(iree_runtime_call_inputs_push_back_buffer_view(&call, tok_bv));
+  GATE_CHECK(iree_runtime_call_inputs_push_back_buffer_view(&call, pos_bv));
+  GATE_CHECK(iree_runtime_call_inputs_push_back_buffer_view(&call, len_bv));
+  GATE_CHECK(iree_runtime_call_inputs_push_back_buffer_view(&call, c->kcache_b));
+  GATE_CHECK(iree_runtime_call_inputs_push_back_buffer_view(&call, c->vcache_b));
+
+  GATE_CHECK(iree_runtime_call_invoke(&call, 0));
+
+  iree_hal_buffer_view_t* logits = NULL;
+  iree_hal_buffer_view_t* kc = NULL;
+  iree_hal_buffer_view_t* vc = NULL;
+  GATE_CHECK(iree_runtime_call_outputs_pop_front_buffer_view(&call, &logits));
+  GATE_CHECK(iree_runtime_call_outputs_pop_front_buffer_view(&call, &kc));
+  GATE_CHECK(iree_runtime_call_outputs_pop_front_buffer_view(&call, &vc));
+  iree_hal_buffer_view_t* old_k = c->kcache_b;
+  iree_hal_buffer_view_t* old_v = c->vcache_b;
+  c->kcache_b = kc;
+  c->vcache_b = vc;
+
+  GATE_CHECK(xla_read_tokens_batch(c, bsz, logits, out_tokens));
+
+  iree_hal_buffer_view_release(logits);
+  iree_hal_buffer_view_release(tok_bv);
+  iree_hal_buffer_view_release(pos_bv);
+  iree_hal_buffer_view_release(len_bv);
+  iree_runtime_call_deinitialize(&call);
+  iree_hal_buffer_view_release(old_k);
+  iree_hal_buffer_view_release(old_v);
+  return 0;
+}
+
 void xla_llama_free(xla_ctx* c) {
   if (!c) return;
   if (c->weights) {
@@ -410,6 +581,8 @@ void xla_llama_free(xla_ctx* c) {
   }
   if (c->kcache) iree_hal_buffer_view_release(c->kcache);
   if (c->vcache) iree_hal_buffer_view_release(c->vcache);
+  if (c->kcache_b) iree_hal_buffer_view_release(c->kcache_b);
+  if (c->vcache_b) iree_hal_buffer_view_release(c->vcache_b);
   if (c->session) iree_runtime_session_release(c->session);
   if (c->device) iree_hal_device_release(c->device);
   if (c->instance) iree_runtime_instance_release(c->instance);
