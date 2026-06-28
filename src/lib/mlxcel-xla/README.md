@@ -79,15 +79,45 @@ Validated on a GB10 (Grace-Blackwell, sm_121): token-exact 48/48, ~5 tok/s
   `load` verifies `config.json` matches and errors otherwise.
 - Prompt length is capped at the prefill bucket (`MAX_SEQ = 256` tokens).
 - Greedy sampling only; text-only (no VLM / draft).
-- Single-sequence (batch-1). Throughput needs batched graphs + a multi-sequence
-  session, a separate milestone.
+- `XlaInferenceSession` is single-sequence; `XlaBatchEngine` (below) adds
+  multi-sequence throughput.
+
+## Batched continuous batching (Stage 2b)
+
+`XlaBatchEngine` runs many sequences at once: `B_max` slots share one rank-5 KV
+cache and serve a request stream, so the device stays full. Requests of different
+lengths join and leave the batch at different times; a freed slot is recycled by
+a new request whose prompt KV is written **device-side** into just that slot
+(no host round-trip), so admitting one sequence does not disturb the others. The
+ragged decode graph advances every active slot one token per step, each at its
+own position. Greedy, fixed `B_max ∈ {4, 8}` (the bundled ragged graphs),
+contiguous per-slot KV.
+
+The engine is backend-neutral at the request level (`submit` a prompt + budget,
+`pump` a step, read per-request `EngineEvent`s, `cancel`); it holds no server
+types, so the Stage 2c `BatchEngine` trait + server adapter wrap it unchanged.
+`XlaBackend::supports_batched_serving()` stays `false` until 2c wires it into the
+server.
+
+Prove it without the server with the reference-equivalence + throughput example
+(every request's batched stream must equal its independent single-seq reference):
+
+```bash
+# CPU (prebuilt dist):
+IREE_DIST=/path/to/iree-dist cargo run --release --features xla-iree \
+  --example xla_batch_bench -- --batch 4 --requests 8 --maxcap 24
+# CUDA (GB10): source-built runtime + cuda iree-compile (as above), then:
+MLXCEL_XLA_DEVICE=cuda cargo run --release --features xla-iree \
+  --example xla_batch_bench -- --device cuda --batch 8 --requests 16 --maxcap 48
+```
 
 ## File map
 
 | Path | Purpose |
 |------|---------|
-| `src/lib.rs` | `XlaInferenceSession`: the `InferenceSession` impl + greedy drive loop. |
-| `src/iree.rs` | (feature `iree`) FFI to the shim; `IreeLlama` loads weights, compiles + runs the graphs. |
-| `csrc/xla_iree.c` | C shim over the IREE runtime C API (one session, two modules, resident weights, threaded KV). |
+| `src/lib.rs` | `XlaInferenceSession`: the single-sequence `InferenceSession` impl + greedy drive loop. |
+| `src/iree.rs` | (feature `iree`) FFI to the shim; `IreeLlama` (single-seq) and `IreeRaggedLlama` (batched) load weights, compile + run the graphs. |
+| `src/batch.rs` | (feature `iree`) `XlaBatchEngine`: the continuous-batching engine (slots + queue + admit/decode/evict) and `XlaReferenceEngine` (single-seq reference for validation). The backend-neutral `Scheduler` bookkeeping is unit-tested without IREE. |
+| `csrc/xla_iree.c` | C shim over the IREE runtime C API (one session, resident weights, threaded KV; single-seq `prefill`/`decode` plus the ragged `prefill_slot`/`decode_ragged` with a device-side per-slot KV write). |
 | `build.rs` | (feature `iree`) compiles the shim against `IREE_DIST` headers. The runtime link recipe lives in the **root** `mlxcel/build.rs` (a dependency's link-args do not propagate to the binary). |
-| `assets/llama-3.2-1b/` | The #451-emitted `prefill` / `decode_step` StableHLO graphs (on-device-argmax variant), compiled to vmfbs at session load. |
+| `assets/llama-3.2-1b/` | The #451-emitted `prefill` / `decode_step` StableHLO graphs (on-device-argmax variant) plus the ragged `decode_ragged_b{4,8}` graphs, compiled to vmfbs at load. |

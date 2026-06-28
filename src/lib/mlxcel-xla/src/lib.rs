@@ -52,6 +52,17 @@ use mlxcel_core::session::{InferenceSession, SessionCapabilities};
 #[cfg(feature = "iree")]
 mod iree;
 
+// The continuous-batching engine (#449 M3 Stage 2b). Present under `iree` (real
+// execution) and under `test` (so its backend-neutral Scheduler bookkeeping is
+// unit-tested without the IREE runtime, which the crate's own tests cannot link).
+// Absent from a plain `--features xla-backend` build, so CI is unaffected.
+#[cfg(any(feature = "iree", test))]
+#[cfg_attr(not(feature = "iree"), allow(dead_code))]
+mod batch;
+
+#[cfg(feature = "iree")]
+pub use batch::{EngineEvent, FinishReason, XlaBatchEngine, XlaReferenceEngine};
+
 /// Error returned by the token-level primitives when the crate is built without
 /// the `iree` feature (no IREE execution path compiled in).
 pub const NOT_WIRED: &str = "the OpenXLA inference session was built without the `iree` feature; rebuild \
@@ -62,7 +73,7 @@ pub const NOT_WIRED: &str = "the OpenXLA inference session was built without the
 /// a list). Only parsed under `iree`, where `serde_json` is available and the
 /// decode loop actually runs; otherwise empty (execution errors out anyway).
 #[cfg(feature = "iree")]
-fn read_eos(model_path: &Path) -> Vec<i32> {
+pub(crate) fn read_eos(model_path: &Path) -> Vec<i32> {
     let p = model_path.join("generation_config.json");
     let Ok(s) = std::fs::read_to_string(p) else {
         return Vec::new();

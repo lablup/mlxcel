@@ -77,6 +77,27 @@ unsafe extern "C" {
         cache_len: c_int,
         out_token: *mut c_int,
     ) -> c_int;
+    // Ragged continuous-batching (#449 M3 Stage 2b). `ragged_reset` sizes the
+    // batch; `prefill_slot` seeds one slot (device-side KV write); `decode_ragged`
+    // advances all B slots, each at its own per-row pos/cache_len.
+    fn xla_llama_ragged_reset(c: *mut XlaCtx, bsz: c_int) -> c_int;
+    fn xla_llama_prefill_slot(
+        c: *mut XlaCtx,
+        slot: c_int,
+        tokens: *const c_int,
+        lp: c_int,
+        positions: *const c_int,
+        real_len: c_int,
+        out_first: *mut c_int,
+    ) -> c_int;
+    fn xla_llama_decode_ragged(
+        c: *mut XlaCtx,
+        bsz: c_int,
+        tokens: *const c_int,
+        pos: *const c_int,
+        cache_len: *const c_int,
+        out_tokens: *mut c_int,
+    ) -> c_int;
     fn xla_llama_free(c: *mut XlaCtx);
 }
 
@@ -84,6 +105,26 @@ unsafe extern "C" {
 /// `iree-compile` turns these into vmfbs that match the linked runtime.
 const PREFILL_MLIR: &str = include_str!("../assets/llama-3.2-1b/prefill.mlir");
 const DECODE_MLIR: &str = include_str!("../assets/llama-3.2-1b/decode.mlir");
+
+/// Ragged (continuous-batching) decode graphs, one bundled per supported slot
+/// count (#449 M3 Stage 2b). Each is a fixed-`B_max` `@decode_step` taking per-row
+/// `token[B]`/`pos[B]`/`cache_len[B]` and the rank-5 KV. The batched engine picks
+/// one by `b_max`; adding a slot count means regenerating the asset (see the
+/// assets README) and extending this table.
+const DECODE_RAGGED_B4_MLIR: &str = include_str!("../assets/llama-3.2-1b/decode_ragged_b4.mlir");
+const DECODE_RAGGED_B8_MLIR: &str = include_str!("../assets/llama-3.2-1b/decode_ragged_b8.mlir");
+
+/// The slot counts (`B_max`) the bundled ragged graphs cover.
+pub(crate) const RAGGED_B_VALUES: &[usize] = &[4, 8];
+
+/// The bundled ragged decode graph for `b_max`, or `None` if unsupported.
+fn ragged_decode_mlir(b_max: usize) -> Option<&'static str> {
+    match b_max {
+        4 => Some(DECODE_RAGGED_B4_MLIR),
+        8 => Some(DECODE_RAGGED_B8_MLIR),
+        _ => None,
+    }
+}
 
 /// The 146 weight names in the emitter's exact arg order: embed, final_norm,
 /// then per layer down, gate, in_ln, post_ln, up, wk, wo, wq, wv.
@@ -268,8 +309,14 @@ fn compile_one(
     Ok(vmfb_path)
 }
 
-/// Compile the bundled prefill + decode graphs for `device`.
-fn compile_vmfbs(device: &str) -> Result<(PathBuf, PathBuf), String> {
+/// Compile the bundled prefill graph plus a chosen decode graph for `device`.
+/// The prefill vmfb is shared (same text + flags hash) across the single-seq and
+/// ragged engines; only the decode graph differs.
+fn compile_prefill_and(
+    device: &str,
+    decode_mlir: &str,
+    decode_tag: &str,
+) -> Result<(PathBuf, PathBuf), String> {
     let iree_compile = iree_compile_bin()?;
     if !iree_compile.exists() {
         return Err(format!(
@@ -281,8 +328,13 @@ fn compile_vmfbs(device: &str) -> Result<(PathBuf, PathBuf), String> {
     let cache = std::env::temp_dir().join("mlxcel-xla-vmfb");
     std::fs::create_dir_all(&cache).map_err(|e| format!("mkdir {}: {e}", cache.display()))?;
     let pre = compile_one(&iree_compile, PREFILL_MLIR, flags, &cache, "prefill")?;
-    let dec = compile_one(&iree_compile, DECODE_MLIR, flags, &cache, "decode")?;
+    let dec = compile_one(&iree_compile, decode_mlir, flags, &cache, decode_tag)?;
     Ok((pre, dec))
+}
+
+/// Compile the bundled prefill + single-token decode graphs for `device`.
+fn compile_vmfbs(device: &str) -> Result<(PathBuf, PathBuf), String> {
+    compile_prefill_and(device, DECODE_MLIR, "decode")
 }
 
 /// Load the 146 weights bf16 -> f32 in the emitter's arg order, returning the
@@ -329,6 +381,44 @@ fn path_cstring(p: &Path) -> Result<CString, String> {
         .map_err(|_| format!("path has an interior nul byte: {}", p.display()))
 }
 
+/// Load the weights and create the C execution context for a (prefill, decode)
+/// vmfb pair on `device`. Shared by the single-sequence ([`IreeLlama`]) and ragged
+/// ([`IreeRaggedLlama`]) engines, which differ only in which decode vmfb they pass.
+fn create_ctx(
+    model_dir: &Path,
+    device: &str,
+    prefill_vmfb: &Path,
+    decode_vmfb: &Path,
+) -> Result<*mut XlaCtx, String> {
+    let (bufs, ranks, dims) = load_weights(model_dir)?;
+    let ptrs: Vec<*const f32> = bufs.iter().map(|b| b.as_ptr()).collect();
+    let c_dev = CString::new(device).map_err(|_| "device has interior nul".to_string())?;
+    let c_pre = path_cstring(prefill_vmfb)?;
+    let c_dec = path_cstring(decode_vmfb)?;
+    // Safety: pointers are valid for the duration of the call; the shim copies
+    // the weight data into device buffers before returning.
+    let ctx = unsafe {
+        xla_llama_create(
+            c_dev.as_ptr(),
+            c_pre.as_ptr(),
+            c_dec.as_ptr(),
+            bufs.len() as c_int,
+            ptrs.as_ptr(),
+            ranks.as_ptr(),
+            dims.as_ptr(),
+        )
+    };
+    // Weights are resident on the device now; free the host copy.
+    drop(ptrs);
+    drop(bufs);
+    if ctx.is_null() {
+        return Err(
+            "xla_llama_create failed (IREE runtime; see stderr for the status)".to_string(),
+        );
+    }
+    Ok(ctx)
+}
+
 /// Owns the IREE execution context: one session with the prefill + decode
 /// modules, the resident weights, and the threaded KV cache. Not `Send`/`Sync`
 /// (the raw context is single-threaded), matching the single-sequence session.
@@ -343,33 +433,7 @@ impl IreeLlama {
     pub fn load(model_dir: &Path, device: &str) -> Result<Self, String> {
         verify_config(model_dir)?;
         let (prefill_vmfb, decode_vmfb) = compile_vmfbs(device)?;
-        let (bufs, ranks, dims) = load_weights(model_dir)?;
-        let ptrs: Vec<*const f32> = bufs.iter().map(|b| b.as_ptr()).collect();
-
-        let c_dev = CString::new(device).map_err(|_| "device has interior nul".to_string())?;
-        let c_pre = path_cstring(&prefill_vmfb)?;
-        let c_dec = path_cstring(&decode_vmfb)?;
-        // Safety: pointers are valid for the duration of the call; the shim
-        // copies the weight data into device buffers before returning.
-        let ctx = unsafe {
-            xla_llama_create(
-                c_dev.as_ptr(),
-                c_pre.as_ptr(),
-                c_dec.as_ptr(),
-                bufs.len() as c_int,
-                ptrs.as_ptr(),
-                ranks.as_ptr(),
-                dims.as_ptr(),
-            )
-        };
-        // Weights are resident on the device now; free the host copy.
-        drop(ptrs);
-        drop(bufs);
-        if ctx.is_null() {
-            return Err(
-                "xla_llama_create failed (IREE runtime; see stderr for the status)".to_string(),
-            );
-        }
+        let ctx = create_ctx(model_dir, device, &prefill_vmfb, &decode_vmfb)?;
         Ok(Self { ctx })
     }
 
@@ -377,15 +441,37 @@ impl IreeLlama {
     /// bucketed prefill graph. The returned token (the graph's argmax at
     /// `real_len-1`) is unused by the seed-then-decode drive loop.
     pub fn prefill_seed(&mut self, token_ids: &[i32]) -> Result<(), String> {
-        if token_ids.len() > PREFILL_LP {
+        self.prefill_padded(token_ids).map(|_| ())
+    }
+
+    /// Run the bucketed prefill over the FULL prompt and return its first token
+    /// (the argmax at `prompt.len() - 1`). Unlike [`prefill_seed`], which seeds
+    /// the KV and discards the token for the seed-then-decode loop, this returns
+    /// the token, matching the batched engine's slot-seed convention
+    /// ([`IreeRaggedLlama::prefill_slot`]); so a single-seq stream captured with
+    /// `prefill_first` + [`decode`](Self::decode) is the right reference for it.
+    ///
+    /// [`prefill_seed`]: Self::prefill_seed
+    pub fn prefill_first(&mut self, prompt: &[i32]) -> Result<i32, String> {
+        if prompt.is_empty() {
+            return Err("prefill_first requires a non-empty prompt".to_string());
+        }
+        self.prefill_padded(prompt)
+    }
+
+    /// Pad `prompt` into the [`PREFILL_LP`] bucket, run the prefill, and return its
+    /// first token. Accepts an empty prompt (the seed-then-decode loop prefills a
+    /// zero-length prefix when the prompt is a single token).
+    fn prefill_padded(&mut self, prompt: &[i32]) -> Result<i32, String> {
+        if prompt.len() > PREFILL_LP {
             return Err(format!(
                 "the OpenXLA M2 prefill graph is bucketed at {PREFILL_LP} tokens; prompt \
                  prefix of {} exceeds it (a larger-bucket graph is a follow-up)",
-                token_ids.len()
+                prompt.len()
             ));
         }
         let mut tokens = vec![0i32; PREFILL_LP];
-        tokens[..token_ids.len()].copy_from_slice(token_ids);
+        tokens[..prompt.len()].copy_from_slice(prompt);
         let positions: Vec<c_int> = (0..PREFILL_LP as c_int).collect();
         let mut out = 0i32;
         // Safety: buffers outlive the call; the shim stores the returned KV.
@@ -395,14 +481,14 @@ impl IreeLlama {
                 tokens.as_ptr(),
                 PREFILL_LP as c_int,
                 positions.as_ptr(),
-                token_ids.len() as c_int,
+                prompt.len() as c_int,
                 &mut out,
             )
         };
         if rc != 0 {
             return Err(format!("xla_llama_prefill failed (status {rc})"));
         }
-        Ok(())
+        Ok(out)
     }
 
     /// Advance one token at `cache_len` (== position), returning the next token
@@ -422,6 +508,137 @@ impl Drop for IreeLlama {
     fn drop(&mut self) {
         if !self.ctx.is_null() {
             // Safety: ctx was produced by xla_llama_create and not freed yet.
+            unsafe { xla_llama_free(self.ctx) };
+            self.ctx = std::ptr::null_mut();
+        }
+    }
+}
+
+/// Owns a ragged (continuous-batching) IREE context (#449 M3 Stage 2b): the
+/// prefill module plus a fixed-`B_max` ragged decode module, the resident weights,
+/// and the rank-5 per-slot KV. Slots are seeded with [`prefill_slot`] (a device-side
+/// KV write) and advanced together by [`decode_ragged`], each row at its own
+/// position. Not `Send`/`Sync` (the raw context is single-threaded); the engine
+/// that wraps it owns it on one thread.
+///
+/// [`prefill_slot`]: Self::prefill_slot
+/// [`decode_ragged`]: Self::decode_ragged
+pub struct IreeRaggedLlama {
+    ctx: *mut XlaCtx,
+    b_max: usize,
+}
+
+impl IreeRaggedLlama {
+    /// Prepare a ragged engine for `model_dir` on `device` with `b_max` slots.
+    ///
+    /// Verifies the architecture, compiles the bundled prefill + the ragged decode
+    /// graph for `b_max`, uploads the weights resident, and sizes the batch.
+    /// `b_max` must be one of the bundled graphs ([`RAGGED_B_VALUES`]).
+    pub fn load(model_dir: &Path, device: &str, b_max: usize) -> Result<Self, String> {
+        verify_config(model_dir)?;
+        let decode_mlir = ragged_decode_mlir(b_max).ok_or_else(|| {
+            format!(
+                "the OpenXLA batched engine has bundled ragged decode graphs for \
+                 B_max {RAGGED_B_VALUES:?}; {b_max} is not one of them (regenerate an \
+                 asset to add it; see the assets README)"
+            )
+        })?;
+        let (prefill_vmfb, decode_vmfb) =
+            compile_prefill_and(device, decode_mlir, &format!("decode_ragged_b{b_max}"))?;
+        let ctx = create_ctx(model_dir, device, &prefill_vmfb, &decode_vmfb)?;
+        // Safety: ctx is a fresh valid context from create_ctx; free it on error.
+        let rc = unsafe { xla_llama_ragged_reset(ctx, b_max as c_int) };
+        if rc != 0 {
+            unsafe { xla_llama_free(ctx) };
+            return Err(format!("xla_llama_ragged_reset failed (status {rc})"));
+        }
+        Ok(Self { ctx, b_max })
+    }
+
+    /// The fixed slot count this engine was compiled for.
+    #[must_use]
+    pub fn b_max(&self) -> usize {
+        self.b_max
+    }
+
+    /// Seed slot `slot` with `prompt` (1..=[`PREFILL_LP`] tokens) and return its
+    /// first token (the prefill argmax). The prompt's KV is written device-side
+    /// into the slot's region of the rank-5 cache; the other slots are untouched,
+    /// so a mid-stream admit does not disturb live sequences.
+    pub fn prefill_slot(&mut self, slot: usize, prompt: &[i32]) -> Result<i32, String> {
+        if slot >= self.b_max {
+            return Err(format!("slot {slot} out of range [0,{})", self.b_max));
+        }
+        if prompt.is_empty() {
+            return Err("prefill_slot requires a non-empty prompt".to_string());
+        }
+        if prompt.len() > PREFILL_LP {
+            return Err(format!(
+                "prompt of {} exceeds the {PREFILL_LP}-token prefill bucket",
+                prompt.len()
+            ));
+        }
+        let mut tokens = vec![0i32; PREFILL_LP];
+        tokens[..prompt.len()].copy_from_slice(prompt);
+        let positions: Vec<c_int> = (0..PREFILL_LP as c_int).collect();
+        let mut out = 0i32;
+        // Safety: buffers outlive the call; the shim writes the slot's KV device-side.
+        let rc = unsafe {
+            xla_llama_prefill_slot(
+                self.ctx,
+                slot as c_int,
+                tokens.as_ptr(),
+                PREFILL_LP as c_int,
+                positions.as_ptr(),
+                prompt.len() as c_int,
+                &mut out,
+            )
+        };
+        if rc != 0 {
+            return Err(format!("xla_llama_prefill_slot failed (status {rc})"));
+        }
+        Ok(out)
+    }
+
+    /// Advance all `b_max` slots one token. `tokens` / `pos` / `cache_len` are
+    /// per-row (length `b_max`); an inactive slot carries zeros (a masked no-op
+    /// whose output the caller discards). Returns the per-row next tokens.
+    pub fn decode_ragged(
+        &mut self,
+        tokens: &[i32],
+        pos: &[i32],
+        cache_len: &[i32],
+    ) -> Result<Vec<i32>, String> {
+        if tokens.len() != self.b_max || pos.len() != self.b_max || cache_len.len() != self.b_max {
+            return Err(format!(
+                "decode_ragged expects per-row arrays of length b_max = {}",
+                self.b_max
+            ));
+        }
+        let mut out = vec![0i32; self.b_max];
+        // Safety: the three input slices and the output buffer are all length
+        // b_max == bsz; the shim threads its own resident rank-5 KV.
+        let rc = unsafe {
+            xla_llama_decode_ragged(
+                self.ctx,
+                self.b_max as c_int,
+                tokens.as_ptr(),
+                pos.as_ptr(),
+                cache_len.as_ptr(),
+                out.as_mut_ptr(),
+            )
+        };
+        if rc != 0 {
+            return Err(format!("xla_llama_decode_ragged failed (status {rc})"));
+        }
+        Ok(out)
+    }
+}
+
+impl Drop for IreeRaggedLlama {
+    fn drop(&mut self) {
+        if !self.ctx.is_null() {
+            // Safety: ctx was produced by create_ctx and not freed yet.
             unsafe { xla_llama_free(self.ctx) };
             self.ctx = std::ptr::null_mut();
         }

@@ -241,3 +241,11 @@ required-features = ["test-utils"]
 [[test]]
 name = "paged_handoff_parity"
 required-features = ["test-utils"]
+
+# Reference-equivalence + throughput harness for the OpenXLA/IREE continuous
+# batching engine (#449 M3 Stage 2b). Needs real IREE execution, so it builds
+# only under `xla-iree` (which carries the runtime link recipe); default/CI
+# builds skip it.
+[[example]]
+name = "xla_batch_bench"
+required-features = ["xla-iree"]
