@@ -16,14 +16,15 @@
 //! feature.
 //!
 //! [`IreeLlama`] is the safe Rust owner of the C shim (`csrc/xla_iree.c`). On
-//! [`IreeLlama::load`] it (1) checks the model's `config.json` matches the
-//! architecture the bundled StableHLO graphs were authored for, (2) compiles the
-//! bundled `prefill` / `decode_step` graphs (which end in an on-device argmax,
-//! the #451 emitter output) to vmfbs with the dist's `iree-compile`, cached by
-//! content hash, (3) loads the bf16 weights as f32 in the emitter's arg order,
-//! and (4) hands all of it to the shim, which keeps the weights resident on the
-//! device and threads the KV cache across steps. Then [`IreeLlama::prefill`] /
-//! [`IreeLlama::decode`] are token-in / token-out.
+//! [`IreeLlama::load`] it (1) reads the model's `config.json` into an emitter
+//! [`Config`], (2) emits the `prefill` / `decode_step` StableHLO graphs from that
+//! config (the #451 emitter, ending in an on-device argmax) and compiles them to
+//! vmfbs with the dist's `iree-compile`, cached by content hash, (3) loads the
+//! bf16 weights as f32 in the emitter's arg order, and (4) hands all of it to the
+//! shim, which keeps the weights resident on the device and threads the KV cache
+//! across steps. Then [`IreeLlama::prefill`] / [`IreeLlama::decode`] are token-in
+//! / token-out. Emitting from config (issue #449 M3 Stage 2d) replaced the bundled
+//! Llama-3.2-1B `.mlir` assets, so any Llama-architecture checkpoint loads.
 //!
 //! Proven token-exact against the HF temp-0 reference in
 //! `spike/openxla/artifacts/results.json` before being vendored from the
@@ -40,13 +41,9 @@ use std::process::Command;
 use memmap2::Mmap;
 use safetensors::{Dtype, SafeTensors};
 
-/// Llama-3.2-1B-Instruct shape the bundled graphs are authored for.
-const N_LAYERS: usize = 16;
-/// Vocabulary size the bundled graphs emit logits over (#449 M3 Stage 2d): the
-/// logits prefill returns `[VOCAB]` and the ragged decode `[B, VOCAB]`. Matches
-/// the `vocab_size` `verify_config` checks.
-const VOCAB: usize = 128256;
-/// Prefill bucket baked into the bundled `prefill` graph (`tensor<256xi32>`,
+use crate::emitter::{Config, emit_decode, emit_decode_ragged, emit_prefill};
+
+/// Prefill bucket baked into the emitted `prefill` graph (`tensor<256xi32>`,
 /// == MAX_SEQ, so it covers any prompt the 256-slot KV cache holds).
 pub const PREFILL_LP: usize = 256;
 
@@ -108,48 +105,20 @@ unsafe extern "C" {
     fn xla_llama_free(c: *mut XlaCtx);
 }
 
-/// The single-sequence graphs (on-device argmax variant), bundled as crate assets.
-/// Used by [`IreeLlama`]; `iree-compile` turns these into vmfbs that match the
-/// linked runtime.
-const PREFILL_MLIR: &str = include_str!("../assets/llama-3.2-1b/prefill.mlir");
-const DECODE_MLIR: &str = include_str!("../assets/llama-3.2-1b/decode.mlir");
-
-/// The LOGITS prefill graph (#449 M3 Stage 2d): same as `prefill` but returns the
-/// `[vocab]` logit distribution instead of the argmax token, so the batched engine
-/// can sample the first token on the host. Used by [`IreeRaggedLlama`].
-const PREFILL_LOGITS_MLIR: &str = include_str!("../assets/llama-3.2-1b/prefill_logits.mlir");
-
-/// Ragged (continuous-batching) decode graphs, one bundled per supported slot
-/// count (#449 M3 Stage 2b/2d). Each is a fixed-`B_max` `@decode_step` taking
-/// per-row `token[B]`/`pos[B]`/`cache_len[B]` and the rank-5 KV, returning the
-/// `[B, vocab]` LOGITS (the engine samples per row on the host). The batched engine
-/// picks one by `b_max`; adding a slot count means regenerating the asset (see the
-/// assets README) and extending this table.
-const DECODE_RAGGED_LOGITS_B4_MLIR: &str =
-    include_str!("../assets/llama-3.2-1b/decode_ragged_logits_b4.mlir");
-const DECODE_RAGGED_LOGITS_B8_MLIR: &str =
-    include_str!("../assets/llama-3.2-1b/decode_ragged_logits_b8.mlir");
-
-/// The slot counts (`B_max`) the bundled ragged graphs cover.
+/// The slot counts (`B_max`) the serve worker maps a request's batch size to. The
+/// ragged decode graph for the chosen `b_max` is emitted from the model config at
+/// load (any `b_max` is emittable; the worker selects from this set).
 pub(crate) const RAGGED_B_VALUES: &[usize] = &[4, 8];
 
-/// The bundled ragged decode graph for `b_max`, or `None` if unsupported.
-fn ragged_decode_mlir(b_max: usize) -> Option<&'static str> {
-    match b_max {
-        4 => Some(DECODE_RAGGED_LOGITS_B4_MLIR),
-        8 => Some(DECODE_RAGGED_LOGITS_B8_MLIR),
-        _ => None,
-    }
-}
-
-/// The 146 weight names in the emitter's exact arg order: embed, final_norm,
-/// then per layer down, gate, in_ln, post_ln, up, wk, wo, wq, wv.
-fn weight_names() -> Vec<String> {
+/// The weight names in the emitter's exact arg order: embed, final_norm, then per
+/// layer down, gate, in_ln, post_ln, up, wk, wo, wq, wv. The layer count comes
+/// from the model config so the order matches the emitted graph's args.
+fn weight_names(cfg: &Config) -> Vec<String> {
     let mut names = vec![
         "model.embed_tokens.weight".to_string(),
         "model.norm.weight".to_string(),
     ];
-    for i in 0..N_LAYERS {
+    for i in 0..cfg.n_layers {
         let p = format!("model.layers.{i}.");
         for suf in [
             "mlp.down_proj.weight",
@@ -174,47 +143,6 @@ fn bf16_to_f32(bytes: &[u8]) -> Vec<f32> {
         .chunks_exact(2)
         .map(|c| f32::from_bits((u16::from_le_bytes([c[0], c[1]]) as u32) << 16))
         .collect()
-}
-
-/// Verify `config.json` matches the architecture the bundled graphs encode. The
-/// graphs hard-code Llama-3.2-1B-Instruct dimensions; a different model would
-/// silently produce wrong shapes, so this fails loudly instead.
-fn verify_config(model_dir: &Path) -> Result<(), String> {
-    let p = model_dir.join("config.json");
-    let s = std::fs::read_to_string(&p).map_err(|e| format!("read {}: {e}", p.display()))?;
-    let v: serde_json::Value =
-        serde_json::from_str(&s).map_err(|e| format!("parse {}: {e}", p.display()))?;
-    let want = [
-        ("num_hidden_layers", 16u64),
-        ("hidden_size", 2048),
-        ("intermediate_size", 8192),
-        ("num_attention_heads", 32),
-        ("num_key_value_heads", 8),
-        ("head_dim", 64),
-        ("vocab_size", 128256),
-    ];
-    for (k, w) in want {
-        let got = v.get(k).and_then(serde_json::Value::as_u64);
-        if got != Some(w) {
-            return Err(format!(
-                "the OpenXLA backend's bundled graphs are authored for \
-                 Llama-3.2-1B-Instruct (issue #449 M2): config.json `{k}` = {got:?}, \
-                 expected {w} ({})",
-                p.display()
-            ));
-        }
-    }
-    if v.get("tie_word_embeddings")
-        .and_then(serde_json::Value::as_bool)
-        != Some(true)
-    {
-        return Err(format!(
-            "the OpenXLA backend's bundled Llama-3.2-1B graph assumes tied word \
-             embeddings (config.json `tie_word_embeddings` != true, {})",
-            p.display()
-        ));
-    }
-    Ok(())
 }
 
 /// Locate the IREE distribution: a runtime `IREE_DIST` override first, else the
@@ -349,16 +277,24 @@ fn compile_pair(
     Ok((pre, dec))
 }
 
-/// Compile the bundled argmax prefill + single-token decode graphs for `device`.
-fn compile_vmfbs(device: &str) -> Result<(PathBuf, PathBuf), String> {
-    compile_pair(device, PREFILL_MLIR, "prefill", DECODE_MLIR, "decode")
+/// Emit and compile the argmax prefill + single-token decode graphs for `cfg` on
+/// `device` (the single-sequence engine's on-device-argmax pair). The graph text
+/// is emitted from the model config, so `compile_one`'s text-hash cache keys a
+/// distinct vmfb per architecture.
+fn compile_vmfbs(device: &str, cfg: &Config) -> Result<(PathBuf, PathBuf), String> {
+    let prefill = emit_prefill(cfg, true);
+    let decode = emit_decode(cfg, true);
+    compile_pair(device, &prefill, "prefill", &decode, "decode")
 }
 
-/// Load the 146 weights bf16 -> f32 in the emitter's arg order, returning the
-/// owned f32 buffers (kept alive until the shim copies them) plus the flat
-/// (ptr, rank, dims) arrays the C ABI takes.
+/// Load the weights bf16 -> f32 in the emitter's arg order, returning the owned
+/// f32 buffers (kept alive until the shim copies them) plus the flat (ptr, rank,
+/// dims) arrays the C ABI takes. `cfg` fixes the layer count and weight order.
 #[allow(clippy::type_complexity)]
-fn load_weights(model_dir: &Path) -> Result<(Vec<Vec<f32>>, Vec<c_int>, Vec<i64>), String> {
+fn load_weights(
+    model_dir: &Path,
+    cfg: &Config,
+) -> Result<(Vec<Vec<f32>>, Vec<c_int>, Vec<i64>), String> {
     let st_path = model_dir.join("model.safetensors");
     let file = File::open(&st_path).map_err(|e| format!("open {}: {e}", st_path.display()))?;
     // Safety: the file is read-only for the lifetime of the mmap below.
@@ -366,7 +302,7 @@ fn load_weights(model_dir: &Path) -> Result<(Vec<Vec<f32>>, Vec<c_int>, Vec<i64>
         unsafe { Mmap::map(&file) }.map_err(|e| format!("mmap {}: {e}", st_path.display()))?;
     let st = SafeTensors::deserialize(&mmap).map_err(|e| format!("parse safetensors: {e}"))?;
 
-    let names = weight_names();
+    let names = weight_names(cfg);
     let mut bufs: Vec<Vec<f32>> = Vec::with_capacity(names.len());
     let mut ranks: Vec<c_int> = Vec::with_capacity(names.len());
     let mut dims: Vec<i64> = Vec::with_capacity(names.len() * 4);
@@ -403,11 +339,12 @@ fn path_cstring(p: &Path) -> Result<CString, String> {
 /// ([`IreeRaggedLlama`]) engines, which differ only in which decode vmfb they pass.
 fn create_ctx(
     model_dir: &Path,
+    cfg: &Config,
     device: &str,
     prefill_vmfb: &Path,
     decode_vmfb: &Path,
 ) -> Result<*mut XlaCtx, String> {
-    let (bufs, ranks, dims) = load_weights(model_dir)?;
+    let (bufs, ranks, dims) = load_weights(model_dir, cfg)?;
     let ptrs: Vec<*const f32> = bufs.iter().map(|b| b.as_ptr()).collect();
     let c_dev = CString::new(device).map_err(|_| "device has interior nul".to_string())?;
     let c_pre = path_cstring(prefill_vmfb)?;
@@ -448,9 +385,9 @@ impl IreeLlama {
     /// (`"local-task"` for CPU). Compiles the bundled graphs, uploads the
     /// weights resident, and readies the prefill / decode calls.
     pub fn load(model_dir: &Path, device: &str) -> Result<Self, String> {
-        verify_config(model_dir)?;
-        let (prefill_vmfb, decode_vmfb) = compile_vmfbs(device)?;
-        let ctx = create_ctx(model_dir, device, &prefill_vmfb, &decode_vmfb)?;
+        let cfg = Config::from_json(model_dir)?;
+        let (prefill_vmfb, decode_vmfb) = compile_vmfbs(device, &cfg)?;
+        let ctx = create_ctx(model_dir, &cfg, device, &prefill_vmfb, &decode_vmfb)?;
         Ok(Self { ctx })
     }
 
@@ -544,6 +481,9 @@ impl Drop for IreeLlama {
 pub struct IreeRaggedLlama {
     ctx: *mut XlaCtx,
     b_max: usize,
+    /// Vocabulary size (logits per row), from the model config; the readback
+    /// buffers and the per-row logits slice are sized by it.
+    vocab: usize,
 }
 
 impl IreeRaggedLlama {
@@ -553,29 +493,35 @@ impl IreeRaggedLlama {
     /// graph for `b_max`, uploads the weights resident, and sizes the batch.
     /// `b_max` must be one of the bundled graphs ([`RAGGED_B_VALUES`]).
     pub fn load(model_dir: &Path, device: &str, b_max: usize) -> Result<Self, String> {
-        verify_config(model_dir)?;
-        let decode_mlir = ragged_decode_mlir(b_max).ok_or_else(|| {
-            format!(
-                "the OpenXLA batched engine has bundled ragged decode graphs for \
-                 B_max {RAGGED_B_VALUES:?}; {b_max} is not one of them (regenerate an \
-                 asset to add it; see the assets README)"
-            )
-        })?;
+        let cfg = Config::from_json(model_dir)?;
+        if !RAGGED_B_VALUES.contains(&b_max) {
+            return Err(format!(
+                "the OpenXLA serve worker selects B_max from {RAGGED_B_VALUES:?}; \
+                 {b_max} is not one of them"
+            ));
+        }
+        // Emit the logits prefill + the ragged decode graph for this model + b_max.
+        let prefill_mlir = emit_prefill(&cfg, false);
+        let decode_mlir = emit_decode_ragged(&cfg, b_max, false);
         let (prefill_vmfb, decode_vmfb) = compile_pair(
             device,
-            PREFILL_LOGITS_MLIR,
+            &prefill_mlir,
             "prefill_logits",
-            decode_mlir,
+            &decode_mlir,
             &format!("decode_ragged_logits_b{b_max}"),
         )?;
-        let ctx = create_ctx(model_dir, device, &prefill_vmfb, &decode_vmfb)?;
+        let ctx = create_ctx(model_dir, &cfg, device, &prefill_vmfb, &decode_vmfb)?;
         // Safety: ctx is a fresh valid context from create_ctx; free it on error.
         let rc = unsafe { xla_llama_ragged_reset(ctx, b_max as c_int) };
         if rc != 0 {
             unsafe { xla_llama_free(ctx) };
             return Err(format!("xla_llama_ragged_reset failed (status {rc})"));
         }
-        Ok(Self { ctx, b_max })
+        Ok(Self {
+            ctx,
+            b_max,
+            vocab: cfg.vocab,
+        })
     }
 
     /// The fixed slot count this engine was compiled for.
@@ -588,7 +534,7 @@ impl IreeRaggedLlama {
     /// flat `[b_max * vocab]` logits by this.
     #[must_use]
     pub fn vocab(&self) -> usize {
-        VOCAB
+        self.vocab
     }
 
     /// Seed slot `slot` with `prompt` (1..=[`PREFILL_LP`] tokens) and return its
@@ -612,9 +558,9 @@ impl IreeRaggedLlama {
         let mut tokens = vec![0i32; PREFILL_LP];
         tokens[..prompt.len()].copy_from_slice(prompt);
         let positions: Vec<c_int> = (0..PREFILL_LP as c_int).collect();
-        let mut logits = vec![0f32; VOCAB];
-        // Safety: input buffers outlive the call; `logits` has VOCAB elements, which
-        // the shim fills; the shim also writes the slot's KV device-side.
+        let mut logits = vec![0f32; self.vocab];
+        // Safety: input buffers outlive the call; `logits` has self.vocab elements,
+        // which the shim fills; the shim also writes the slot's KV device-side.
         let rc = unsafe {
             xla_llama_prefill_slot_logits(
                 self.ctx,
@@ -623,7 +569,7 @@ impl IreeRaggedLlama {
                 PREFILL_LP as c_int,
                 positions.as_ptr(),
                 prompt.len() as c_int,
-                VOCAB as c_int,
+                self.vocab as c_int,
                 logits.as_mut_ptr(),
             )
         };
@@ -651,9 +597,9 @@ impl IreeRaggedLlama {
                 self.b_max
             ));
         }
-        let mut logits = vec![0f32; self.b_max * VOCAB];
+        let mut logits = vec![0f32; self.b_max * self.vocab];
         // Safety: the three input slices are length b_max == bsz; `logits` has
-        // b_max*VOCAB elements, which the shim fills; the shim threads its rank-5 KV.
+        // b_max*self.vocab elements, which the shim fills; it threads its rank-5 KV.
         let rc = unsafe {
             xla_llama_decode_ragged_logits(
                 self.ctx,
@@ -661,7 +607,7 @@ impl IreeRaggedLlama {
                 tokens.as_ptr(),
                 pos.as_ptr(),
                 cache_len.as_ptr(),
-                VOCAB as c_int,
+                self.vocab as c_int,
                 logits.as_mut_ptr(),
             )
         };

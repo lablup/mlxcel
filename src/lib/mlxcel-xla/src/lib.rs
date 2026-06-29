@@ -66,6 +66,16 @@ mod batch;
 #[cfg_attr(not(feature = "iree"), allow(dead_code))]
 mod sampler;
 
+// Rust-native StableHLO emitter (#449 M3 Stage 2d, ported from the #451 spike).
+// Pure Rust; present under `iree` (the engine emits its graphs from config.json at
+// load) and under `test` (the byte-exact regression runs without the IREE
+// runtime). A faithful port keeps some entry points the production path does not
+// call (uniform-B batched emit, the hard-coded reference config), so dead_code is
+// allowed module-wide.
+#[cfg(any(feature = "iree", test))]
+#[allow(dead_code)]
+mod emitter;
+
 #[cfg(feature = "iree")]
 pub use batch::{EngineEvent, FinishReason, XlaBatchEngine, XlaReferenceEngine};
 #[cfg(feature = "iree")]
