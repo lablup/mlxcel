@@ -287,6 +287,51 @@ pub fn read_eos_token_ids(model_dir: &Path) -> Vec<i32> {
     parse_eos_token_ids(&config)
 }
 
+/// Read the model's context window from `config.json`.
+///
+/// Mirrors llama.cpp's `n_ctx_train`: the value generation treats as the upper
+/// bound when no explicit token budget is given (`-n -1` / `--n-predict -1`).
+/// Vision-language checkpoints nest the language-model config under
+/// `text_config`, so that object is consulted first, then the top level.
+///
+/// Returns `None` when `config.json` is missing/unreadable or exposes no
+/// context length; callers fall back to
+/// [`crate::cli::max_tokens::DEFAULT_CONTEXT_WINDOW_FALLBACK`].
+pub fn read_model_context_window(model_dir: &Path) -> Option<usize> {
+    let config_path = resolve_model_dir(model_dir).join("config.json");
+    let content = std::fs::read_to_string(&config_path).ok()?;
+    let config: serde_json::Value = parse_model_config(&content).ok()?;
+    context_window_from_config(&config)
+}
+
+/// Pure extraction of the context window from a parsed `config.json` value.
+///
+/// Split out from [`read_model_context_window`] so the key precedence (and the
+/// VLM `text_config` nesting) can be unit-tested without touching the
+/// filesystem.
+pub fn context_window_from_config(config: &serde_json::Value) -> Option<usize> {
+    const KEYS: [&str; 3] = [
+        "max_position_embeddings",
+        "n_positions",
+        "max_sequence_length",
+    ];
+    let mut candidates: Vec<&serde_json::Value> = Vec::with_capacity(2);
+    if let Some(text) = config.get("text_config") {
+        candidates.push(text);
+    }
+    candidates.push(config);
+    for obj in candidates {
+        for key in KEYS {
+            if let Some(value) = obj.get(key).and_then(serde_json::Value::as_u64)
+                && value > 0
+            {
+                return usize::try_from(value).ok();
+            }
+        }
+    }
+    None
+}
+
 /// Load a model from a directory (or file — parent directory will be used)
 pub fn load_model(model_path: &Path) -> Result<(LoadedModel, MlxcelTokenizer)> {
     let model_path = resolve_model_dir(model_path);

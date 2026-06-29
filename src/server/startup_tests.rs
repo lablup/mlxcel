@@ -40,8 +40,14 @@ fn temp_path(name: &str) -> PathBuf {
 
 #[test]
 fn resolve_default_max_tokens_matches_server_policy() {
-    assert_eq!(resolve_default_max_tokens(-1), 4096);
-    assert_eq!(resolve_default_max_tokens(128), 128);
+    let missing = std::path::Path::new("/nonexistent/mlxcel/model/dir");
+    // Explicit budget passes through unchanged regardless of context window.
+    assert_eq!(resolve_default_max_tokens(128, 0, missing), 128);
+    assert_eq!(resolve_default_max_tokens(128, 8192, missing), 128);
+    // Unlimited (-1) with an explicit per-slot context size uses that window.
+    assert_eq!(resolve_default_max_tokens(-1, 8192, missing), 8192);
+    // Unlimited with no context size and an unreadable config falls back to 4096.
+    assert_eq!(resolve_default_max_tokens(-1, 0, missing), 4096);
 }
 
 #[test]
@@ -141,7 +147,10 @@ fn build_server_config_applies_normalized_startup_values() {
     assert_eq!(config.default_min_p, 0.05);
     assert_eq!(config.default_repetition_penalty, 1.2);
     assert_eq!(config.default_repetition_context_size, 96);
-    assert_eq!(config.default_max_tokens, 4096);
+    // n_predict = -1 (unlimited) resolves to the per-slot context window:
+    // ctx_size 2048 / 3 slots = 682 (issue #476). The startup model_path here is
+    // empty so no config.json is read; the explicit --ctx-size drives the value.
+    assert_eq!(config.default_max_tokens, 682);
     assert_eq!(config.default_seed, Some(7));
     assert_eq!(config.default_presence_penalty, 0.4);
     assert_eq!(config.default_frequency_penalty, 0.3);

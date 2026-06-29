@@ -585,12 +585,29 @@ pub(super) fn resolve_elastic_pp_config(startup: &ServerStartupConfig) -> Option
     Some(cfg)
 }
 
-pub(super) fn resolve_default_max_tokens(n_predict: i32) -> usize {
-    if n_predict < 0 {
-        4096
-    } else {
-        n_predict as usize
+/// Resolve the per-request default token budget applied when a request omits
+/// `max_tokens` / `n_predict`.
+///
+/// llama-server parity (issue #476): a negative `--n-predict` (`-1`, the
+/// default) means "generate until the context window is full". It resolves to
+/// the effective per-slot context window — an explicit `--ctx-size` (already
+/// divided across slots into `per_slot_context_size`) when set, otherwise the
+/// model's `max_position_embeddings` read from `config.json`, with the
+/// historical 4096 used only when neither is available. A non-negative
+/// `--n-predict N` is taken verbatim.
+pub(super) fn resolve_default_max_tokens(
+    n_predict: i32,
+    per_slot_context_size: usize,
+    model_path: &Path,
+) -> usize {
+    if n_predict >= 0 {
+        return n_predict as usize;
     }
+    if per_slot_context_size > 0 {
+        return per_slot_context_size;
+    }
+    crate::read_model_context_window(model_path)
+        .unwrap_or(crate::cli::max_tokens::DEFAULT_CONTEXT_WINDOW_FALLBACK)
 }
 
 pub(super) fn resolve_dry_penalty_last_n(value: i32) -> usize {
@@ -818,7 +835,11 @@ pub(super) fn build_server_config(
         default_min_p: startup.min_p,
         default_repetition_penalty: startup.repeat_penalty,
         default_repetition_context_size: startup.repeat_last_n,
-        default_max_tokens: resolve_default_max_tokens(startup.n_predict),
+        default_max_tokens: resolve_default_max_tokens(
+            startup.n_predict,
+            context_size,
+            &startup.model_path,
+        ),
         default_seed: startup.seed,
         default_frequency_penalty: startup.frequency_penalty,
         default_presence_penalty: startup.presence_penalty,

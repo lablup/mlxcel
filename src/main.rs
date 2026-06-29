@@ -347,8 +347,20 @@ pub(crate) struct GenerationOptions {
     #[arg(long, value_name = "FLOAT", default_value_t = 2.0)]
     pub(crate) fps: f64,
 
-    /// Maximum number of tokens to generate
-    #[arg(short = 'n', long, default_value_t = 100, value_name = "N")]
+    /// Maximum number of tokens to generate.
+    ///
+    /// Defaults to `-1` (unlimited), matching llama.cpp: generation runs until
+    /// the model emits an end-of-sequence token or fills its context window.
+    /// Pass an explicit `-n N` to cap output at exactly `N` tokens. Internally
+    /// `-1` is stored as a sentinel and resolved to `context_window - prompt`
+    /// once the model is loaded.
+    #[arg(
+        short = 'n',
+        long,
+        default_value = "-1",
+        value_parser = mlxcel::cli::max_tokens::parse_max_tokens,
+        value_name = "N"
+    )]
     pub(crate) max_tokens: usize,
 
     /// Enable profiling mode with detailed timing breakdown

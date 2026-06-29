@@ -13,9 +13,9 @@
 // limitations under the License.
 
 use super::{
-    Qwen35VlmKind, conv1d_weight_is_channel_last, conv2d_weight_is_channel_last, model_path_str,
-    parse_eos_token_ids, qwen35_vlm_kind, read_eos_token_ids, require_qwen35_vlm_kind,
-    resolve_model_dir,
+    Qwen35VlmKind, context_window_from_config, conv1d_weight_is_channel_last,
+    conv2d_weight_is_channel_last, model_path_str, parse_eos_token_ids, qwen35_vlm_kind,
+    read_eos_token_ids, read_model_context_window, require_qwen35_vlm_kind, resolve_model_dir,
 };
 use crate::model_metadata::{
     DirectoryLoadRoute, ModelCapabilities, ModelKind, ModelLoadPolicy, WeightLoadRoute,
@@ -56,6 +56,76 @@ fn parse_eos_token_ids_supports_number_arrays() {
 fn parse_eos_token_ids_ignores_invalid_entries() {
     let config = json!({ "eos_token_id": [7, "bad", null, 9] });
     assert_eq!(parse_eos_token_ids(&config), vec![7, 9]);
+}
+
+#[test]
+fn context_window_reads_top_level_max_position_embeddings() {
+    let config = json!({ "max_position_embeddings": 32768 });
+    assert_eq!(context_window_from_config(&config), Some(32768));
+}
+
+#[test]
+fn context_window_prefers_nested_text_config_for_vlm() {
+    // VLM layout: the language-model context length lives under `text_config`.
+    let config = json!({
+        "text_config": { "max_position_embeddings": 131072 },
+        "max_position_embeddings": 4096
+    });
+    assert_eq!(context_window_from_config(&config), Some(131072));
+}
+
+#[test]
+fn context_window_falls_back_to_top_level_when_text_config_lacks_key() {
+    let config = json!({
+        "text_config": { "hidden_size": 2048 },
+        "max_position_embeddings": 8192
+    });
+    assert_eq!(context_window_from_config(&config), Some(8192));
+}
+
+#[test]
+fn context_window_supports_alternate_keys() {
+    assert_eq!(
+        context_window_from_config(&json!({ "n_positions": 2048 })),
+        Some(2048)
+    );
+    assert_eq!(
+        context_window_from_config(&json!({ "max_sequence_length": 16384 })),
+        Some(16384)
+    );
+}
+
+#[test]
+fn context_window_is_none_when_absent_or_zero() {
+    assert_eq!(
+        context_window_from_config(&json!({ "hidden_size": 4096 })),
+        None
+    );
+    assert_eq!(
+        context_window_from_config(&json!({ "max_position_embeddings": 0 })),
+        None
+    );
+}
+
+#[test]
+fn read_model_context_window_returns_none_for_missing_file() {
+    let missing_dir = temp_path("missing_config_json");
+    assert_eq!(read_model_context_window(&missing_dir), None);
+}
+
+#[test]
+fn read_model_context_window_reads_config_json() {
+    let model_dir = temp_path("context_window_config");
+    fs::create_dir_all(&model_dir).unwrap();
+    fs::write(
+        model_dir.join("config.json"),
+        r#"{ "max_position_embeddings": 40960 }"#,
+    )
+    .unwrap();
+
+    assert_eq!(read_model_context_window(&model_dir), Some(40960));
+
+    fs::remove_dir_all(model_dir).unwrap();
 }
 
 #[test]

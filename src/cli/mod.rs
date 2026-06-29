@@ -22,5 +22,6 @@
 //! one place.
 
 pub mod batch_quant_args;
+pub mod max_tokens;
 pub mod speculative_args;
 pub mod turbo_args;

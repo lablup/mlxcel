@@ -57,6 +57,9 @@ use anyhow::{Result, anyhow};
 use rustyline::DefaultEditor;
 use rustyline::error::ReadlineError;
 
+use mlxcel::cli::max_tokens::{
+    DEFAULT_CONTEXT_WINDOW_FALLBACK, UNLIMITED_MAX_TOKENS, resolve_unlimited_max_tokens,
+};
 use mlxcel::sampling::{ResolvedSamplingParams, build_sampling_config};
 use mlxcel::server::chat_template::{ChatMessage, ChatTemplateProcessor};
 use mlxcel::server::model_provider::model_worker::StreamingDecodeState;
@@ -185,6 +188,21 @@ pub fn run_chat(opts: ChatOptions) -> Result<()> {
         load_start.elapsed().as_secs_f64()
     );
 
+    // llama.cpp parity (issue #476): the default unlimited `-n -1` caps each
+    // reply at the model context window instead of a fixed number, so chat turns
+    // run until EOS or the window fills. Read the window once; `stream_turn`
+    // computes the per-turn budget (window - rendered prompt) so a growing
+    // transcript never overruns the context. An explicit `-n N` is honored
+    // verbatim every turn.
+    let context_window =
+        mlxcel::read_model_context_window(&model_path).unwrap_or(DEFAULT_CONTEXT_WINDOW_FALLBACK);
+    if opts.max_tokens == UNLIMITED_MAX_TOKENS {
+        println!(
+            "Per-turn output: unlimited (-1) -> until EOS or the model context window \
+             ({context_window} tokens)."
+        );
+    }
+
     // Same chat-template discovery as `generate`'s `load_cli_prompt`. `None`
     // (no template, or `--no-chat-template`) falls back to raw-text turns.
     let processor = if opts.no_chat_template {
@@ -297,6 +315,7 @@ pub fn run_chat(opts: ChatOptions) -> Result<()> {
                     &tokenizer,
                     &prompt,
                     opts.max_tokens,
+                    context_window,
                     &sampling_config,
                 )?;
 
@@ -546,6 +565,7 @@ fn stream_turn<M: LanguageModel>(
     tokenizer: &MlxcelTokenizer,
     prompt: &str,
     max_tokens: usize,
+    context_window: usize,
     sampling_config: &SamplingConfig,
 ) -> Result<String> {
     let add_special = !prompt.starts_with("<bos>") && !prompt.starts_with("<s>");
@@ -555,6 +575,12 @@ fn stream_turn<M: LanguageModel>(
         .iter()
         .map(|&x| x as i32)
         .collect();
+
+    // llama.cpp parity (issue #476): an unlimited `-n -1` becomes the remaining
+    // context (window minus this turn's rendered prompt) so the reply runs until
+    // EOS or the window fills; an explicit `-n N` is used verbatim. Resolved
+    // before the allocation below so the sentinel never reaches `with_capacity`.
+    let max_tokens = resolve_unlimited_max_tokens(max_tokens, context_window, prompt_tokens.len());
 
     // Stream display through the shared incremental detokenizer (byte-fallback
     // safe), accumulating exactly what was printed. The raw generated ids are

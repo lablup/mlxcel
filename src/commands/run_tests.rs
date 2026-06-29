@@ -148,6 +148,29 @@ fn run_shares_generate_sampling_and_generation_flags() {
 }
 
 #[test]
+fn run_default_max_tokens_is_unlimited_sentinel() {
+    // llama.cpp parity (issue #476): omitting `-n` defaults to `-1` (unlimited),
+    // which clap folds into the sentinel; the generation paths later resolve it
+    // to the model context window. An explicit `-n N` stays verbatim.
+    let args = parse_run(&["mlxcel", "run", "mlx-community/Qwen3-4B-4bit", "-p", "x"]);
+    assert_eq!(
+        args.into_generate_args().generation.max_tokens,
+        mlxcel::cli::max_tokens::UNLIMITED_MAX_TOKENS
+    );
+
+    let explicit = parse_run(&[
+        "mlxcel",
+        "run",
+        "mlx-community/Qwen3-4B-4bit",
+        "-p",
+        "x",
+        "-n",
+        "256",
+    ]);
+    assert_eq!(explicit.into_generate_args().generation.max_tokens, 256);
+}
+
+#[test]
 fn run_accepts_adapter_flag() {
     let args = parse_run(&[
         "mlxcel",

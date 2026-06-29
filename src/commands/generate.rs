@@ -253,6 +253,30 @@ fn memory_preflight_ctx_len(prompt_tokens: usize, max_tokens: usize) -> u64 {
     u64::try_from(total).unwrap_or(u64::MAX)
 }
 
+/// Resolve a possibly-unlimited `-n/--max-tokens` value against the model's
+/// context window (issue #476, llama.cpp parity).
+///
+/// The unlimited sentinel (`-n -1`) becomes `context_window - prompt_len` (read
+/// from the checkpoint `config.json`, falling back to the shared default when
+/// the model exposes no context length). An explicit `-n N` is returned
+/// unchanged. A one-line note is printed when the unlimited default resolves so
+/// the effective cap stays visible to the operator.
+fn resolve_cli_max_tokens(requested: usize, model_dir: &Path, prompt_len: usize) -> usize {
+    use mlxcel::cli::max_tokens::{
+        DEFAULT_CONTEXT_WINDOW_FALLBACK, UNLIMITED_MAX_TOKENS, resolve_unlimited_max_tokens,
+    };
+    if requested != UNLIMITED_MAX_TOKENS {
+        return requested;
+    }
+    let window =
+        mlxcel::read_model_context_window(model_dir).unwrap_or(DEFAULT_CONTEXT_WINDOW_FALLBACK);
+    let resolved = resolve_unlimited_max_tokens(requested, window, prompt_len);
+    println!(
+        "Max tokens: unlimited (-1) -> {resolved} (model context window {window}, prompt {prompt_len})"
+    );
+    resolved
+}
+
 /// Run the `--estimate-memory` preflight for `mlxcel generate`.
 ///
 /// Returns `Some(estimate)` when the user passed `--estimate-memory`
@@ -1552,6 +1576,17 @@ fn run_generate_once(mut args: GenerateArgs) -> Result<()> {
         usize::from(args.generation.audio.is_some()),
     );
     let mut prompt_tokens = tokenize_prompt(&tokenizer, &prompt)?;
+
+    // llama.cpp parity (issue #476): resolve an unlimited `-n -1` into a
+    // concrete budget (model context window minus the rendered prompt) now, so
+    // every downstream consumer (the memory preflight below, plus the standard /
+    // VLM / speculative / XLA / pipeline generators) reads a plain usize. An
+    // explicit `-n N` passes through unchanged.
+    args.generation.max_tokens = resolve_cli_max_tokens(
+        args.generation.max_tokens,
+        &args.model.model,
+        prompt_tokens.len(),
+    );
 
     // Memory preflight (issue #56). Runs after prompt rendering/tokenization so
     // long prompts are included in the KV-cache budget, but still before the

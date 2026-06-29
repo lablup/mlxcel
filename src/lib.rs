@@ -93,5 +93,6 @@ pub use mlxcel_core::session::{InferenceSession, MlxInferenceSession, SessionCap
 pub use loaded_model::LoadedModel;
 pub use loaded_model_capabilities::VlmRuntimeRef;
 pub use loading::{
-    load_model, load_model_with_adapter, load_model_with_tensor_parallel, read_eos_token_ids,
+    context_window_from_config, load_model, load_model_with_adapter,
+    load_model_with_tensor_parallel, read_eos_token_ids, read_model_context_window,
 };
