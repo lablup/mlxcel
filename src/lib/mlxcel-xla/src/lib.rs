@@ -66,6 +66,13 @@ mod batch;
 #[cfg_attr(not(feature = "iree"), allow(dead_code))]
 mod sampler;
 
+// Safetensors weight-dtype widening (#449 M3 Stage 2d). Pure Rust bf16/f16 -> f32
+// converters; present under `iree` (the loader widens weights with them) and under
+// `test` (the f16 conversion is unit-tested without the IREE runtime).
+#[cfg(any(feature = "iree", test))]
+#[cfg_attr(not(feature = "iree"), allow(dead_code))]
+mod weights;
+
 // Rust-native StableHLO emitter (#449 M3 Stage 2d, ported from the #451 spike).
 // Pure Rust; present under `iree` (the engine emits its graphs from config.json at
 // load) and under `test` (the byte-exact regression runs without the IREE

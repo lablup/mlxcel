@@ -20,7 +20,10 @@
 //! [`Config`], (2) emits the `prefill` / `decode_step` StableHLO graphs from that
 //! config (the #451 emitter, ending in an on-device argmax) and compiles them to
 //! vmfbs with the dist's `iree-compile`, cached by content hash, (3) loads the
-//! bf16 weights as f32 in the emitter's arg order, and (4) hands all of it to the
+//! weights as f32 (widening bf16 / f16, or copying f32) in the emitter's arg
+//! order, from either a single-file `model.safetensors` or a sharded checkpoint
+//! (via its `model.safetensors.index.json`, which is how the big untied models
+//! ship), and (4) hands all of it to the
 //! shim, which keeps the weights resident on the device and threads the KV cache
 //! across steps. Then [`IreeLlama::prefill`] / [`IreeLlama::decode`] are token-in
 //! / token-out. Emitting from config (issue #449 M3 Stage 2d) replaced the bundled
@@ -47,6 +50,7 @@ use memmap2::Mmap;
 use safetensors::{Dtype, SafeTensors};
 
 use crate::emitter::{Config, emit_decode, emit_decode_ragged, emit_prefill};
+use crate::weights::{bf16_to_f32, f16_to_f32, f32_le_to_f32};
 
 /// Prefill bucket baked into the emitted `prefill` graph (`tensor<256xi32>`,
 /// == MAX_SEQ, so it covers any prompt the 256-slot KV cache holds).
@@ -160,14 +164,6 @@ fn weight_names(cfg: &Config) -> Vec<String> {
         }
     }
     names
-}
-
-/// bf16 little-endian bytes -> f32 (bf16 is the high 16 bits of f32).
-fn bf16_to_f32(bytes: &[u8]) -> Vec<f32> {
-    bytes
-        .chunks_exact(2)
-        .map(|c| f32::from_bits((u16::from_le_bytes([c[0], c[1]]) as u32) << 16))
-        .collect()
 }
 
 /// Locate the IREE distribution: a runtime `IREE_DIST` override first, else the
@@ -312,44 +308,107 @@ fn compile_vmfbs(device: &str, cfg: &Config) -> Result<(PathBuf, PathBuf), Strin
     compile_pair(device, &prefill, "prefill", &decode, "decode")
 }
 
+/// Map each needed weight name to the safetensors file that holds it, in the same
+/// order as `names`. A single-file checkpoint (`model.safetensors` present) maps
+/// every name to that one file; a sharded checkpoint (no `model.safetensors`, only
+/// `model-0000k-of-...safetensors` shards) reads `model.safetensors.index.json`'s
+/// `weight_map`. The big untied models (e.g. Llama-3.1-8B) ship sharded, so this
+/// is what lets them load. A model dir that has BOTH a `model.safetensors` and an
+/// index uses the single file (the index then just points back at it).
+fn resolve_weight_shards(model_dir: &Path, names: &[String]) -> Result<Vec<PathBuf>, String> {
+    let single = model_dir.join("model.safetensors");
+    if single.exists() {
+        return Ok(vec![single; names.len()]);
+    }
+    let index = model_dir.join("model.safetensors.index.json");
+    let text = std::fs::read_to_string(&index).map_err(|e| {
+        format!(
+            "no model.safetensors and no readable model.safetensors.index.json in {}: {e}",
+            model_dir.display()
+        )
+    })?;
+    let v: serde_json::Value =
+        serde_json::from_str(&text).map_err(|e| format!("parse {}: {e}", index.display()))?;
+    let map = v
+        .get("weight_map")
+        .and_then(serde_json::Value::as_object)
+        .ok_or_else(|| format!("{}: missing object `weight_map`", index.display()))?;
+    names
+        .iter()
+        .map(|name| {
+            map.get(name)
+                .and_then(serde_json::Value::as_str)
+                .map(|f| model_dir.join(f))
+                .ok_or_else(|| format!("{}: weight_map has no entry for `{name}`", index.display()))
+        })
+        .collect()
+}
+
 /// Load the weights bf16 -> f32 in the emitter's arg order, returning the owned
 /// f32 buffers (kept alive until the shim copies them) plus the flat (ptr, rank,
 /// dims) arrays the C ABI takes. `cfg` fixes the layer count and weight order.
+///
+/// Single-file and sharded checkpoints both load: [`resolve_weight_shards`] maps
+/// each weight to its file, and the weights are read shard by shard (each shard
+/// mmap'd exactly once, its tensors copied out as owned f32) and placed back into
+/// the emitter's arg order by index, so the buffers line up with the graph args
+/// regardless of how the checkpoint was split.
 #[allow(clippy::type_complexity)]
 fn load_weights(
     model_dir: &Path,
     cfg: &Config,
 ) -> Result<(Vec<Vec<f32>>, Vec<c_int>, Vec<i64>), String> {
-    let st_path = model_dir.join("model.safetensors");
-    let file = File::open(&st_path).map_err(|e| format!("open {}: {e}", st_path.display()))?;
-    // Safety: the file is read-only for the lifetime of the mmap below.
-    let mmap =
-        unsafe { Mmap::map(&file) }.map_err(|e| format!("mmap {}: {e}", st_path.display()))?;
-    let st = SafeTensors::deserialize(&mmap).map_err(|e| format!("parse safetensors: {e}"))?;
-
     let names = weight_names(cfg);
-    let mut bufs: Vec<Vec<f32>> = Vec::with_capacity(names.len());
-    let mut ranks: Vec<c_int> = Vec::with_capacity(names.len());
-    let mut dims: Vec<i64> = Vec::with_capacity(names.len() * 4);
-    for name in &names {
-        let t = st.tensor(name).map_err(|e| format!("weight {name}: {e}"))?;
-        if t.dtype() != Dtype::BF16 {
-            return Err(format!(
-                "weight {name} dtype {:?}, expected BF16",
-                t.dtype()
-            ));
+    let shard_paths = resolve_weight_shards(model_dir, &names)?;
+
+    // Group weight indices by shard so each shard file is opened/mmap'd once; the
+    // results are placed by index, preserving the emitter's arg order.
+    let mut by_shard: std::collections::BTreeMap<&Path, Vec<usize>> =
+        std::collections::BTreeMap::new();
+    for (i, p) in shard_paths.iter().enumerate() {
+        by_shard.entry(p.as_path()).or_default().push(i);
+    }
+
+    let n = names.len();
+    let mut bufs: Vec<Vec<f32>> = vec![Vec::new(); n];
+    let mut ranks: Vec<c_int> = vec![0; n];
+    let mut dims: Vec<i64> = vec![0; n * 4];
+    for (shard, idxs) in by_shard {
+        let file = File::open(shard).map_err(|e| format!("open {}: {e}", shard.display()))?;
+        // Safety: the file is read-only for the lifetime of the mmap below.
+        let mmap =
+            unsafe { Mmap::map(&file) }.map_err(|e| format!("mmap {}: {e}", shard.display()))?;
+        let st = SafeTensors::deserialize(&mmap)
+            .map_err(|e| format!("parse {}: {e}", shard.display()))?;
+        for &i in &idxs {
+            let name = &names[i];
+            let t = st
+                .tensor(name)
+                .map_err(|e| format!("weight {name} in {}: {e}", shard.display()))?;
+            // Widen to f32 (the graph's weight dtype). bf16 and f16 are the common
+            // checkpoint dtypes; f32 is a passthrough. The widening is exact for
+            // all three, so it matches HF's f32 reference.
+            let data = match t.dtype() {
+                Dtype::BF16 => bf16_to_f32(t.data()),
+                Dtype::F16 => f16_to_f32(t.data()),
+                Dtype::F32 => f32_le_to_f32(t.data()),
+                other => {
+                    return Err(format!(
+                        "weight {name} dtype {other:?}, expected BF16/F16/F32 \
+                         (a quantized checkpoint must be dequantized first)"
+                    ));
+                }
+            };
+            let shape = t.shape();
+            if shape.len() > 4 {
+                return Err(format!("weight {name} rank {} > 4", shape.len()));
+            }
+            ranks[i] = shape.len() as c_int;
+            for (k, &s) in shape.iter().enumerate() {
+                dims[i * 4 + k] = s as i64;
+            }
+            bufs[i] = data;
         }
-        let shape = t.shape();
-        if shape.len() > 4 {
-            return Err(format!("weight {name} rank {} > 4", shape.len()));
-        }
-        ranks.push(shape.len() as c_int);
-        let mut d4 = [0i64; 4];
-        for (k, &s) in shape.iter().enumerate() {
-            d4[k] = s as i64;
-        }
-        dims.extend_from_slice(&d4);
-        bufs.push(bf16_to_f32(t.data()));
     }
     Ok((bufs, ranks, dims))
 }
