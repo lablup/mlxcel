@@ -249,3 +249,12 @@ required-features = ["test-utils"]
 [[example]]
 name = "xla_batch_bench"
 required-features = ["xla-iree"]
+
+# Token-exactness gate vs an external greedy oracle (#449 M3 Stage 2d, Stage B).
+# Drives the single-sequence OpenXLA engine over a prompt and asserts its greedy
+# token stream equals a reference captured from HF transformers, proving the
+# emitted graph computes the architecture correctly (the Qwen2 QKV-bias + plain
+# RoPE gate). Needs real IREE execution, so it builds only under `xla-iree`.
+[[example]]
+name = "xla_oracle_check"
+required-features = ["xla-iree"]

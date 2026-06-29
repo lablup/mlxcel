@@ -24,7 +24,9 @@
 //! shim, which keeps the weights resident on the device and threads the KV cache
 //! across steps. Then [`IreeLlama::prefill`] / [`IreeLlama::decode`] are token-in
 //! / token-out. Emitting from config (issue #449 M3 Stage 2d) replaced the bundled
-//! Llama-3.2-1B `.mlir` assets, so any Llama-architecture checkpoint loads.
+//! Llama-3.2-1B `.mlir` assets, so any checkpoint of a supported architecture
+//! loads: Llama (any size) and Qwen2 (plain RoPE + q/k/v bias; Stage B), the
+//! latter adding its bias tensors to `weight_names` to match the emitted graph.
 //!
 //! Proven token-exact against the HF temp-0 reference in
 //! `spike/openxla/artifacts/results.json` before being vendored from the
@@ -111,8 +113,10 @@ unsafe extern "C" {
 pub(crate) const RAGGED_B_VALUES: &[usize] = &[4, 8];
 
 /// The weight names in the emitter's exact arg order: embed, final_norm, then per
-/// layer down, gate, in_ln, post_ln, up, wk, wo, wq, wv. The layer count comes
-/// from the model config so the order matches the emitted graph's args.
+/// layer down, gate, in_ln, post_ln, up, wk, wo, wq, wv, and — for a `qkv_bias`
+/// architecture (Qwen2) — the k/q/v projection biases. The layer count and the
+/// presence of biases come from the model config so the order matches the emitted
+/// graph's args (`take_layer_weights` in `emitter/model.rs`).
 fn weight_names(cfg: &Config) -> Vec<String> {
     let mut names = vec![
         "model.embed_tokens.weight".to_string(),
@@ -132,6 +136,17 @@ fn weight_names(cfg: &Config) -> Vec<String> {
             "self_attn.v_proj.weight",
         ] {
             names.push(format!("{p}{suf}"));
+        }
+        // Qwen2 q/k/v projection biases, appended per layer in the same k/q/v
+        // order `take_layer_weights` adds them to the emitted graph args.
+        if cfg.qkv_bias {
+            for suf in [
+                "self_attn.k_proj.bias",
+                "self_attn.q_proj.bias",
+                "self_attn.v_proj.bias",
+            ] {
+                names.push(format!("{p}{suf}"));
+            }
         }
     }
     names

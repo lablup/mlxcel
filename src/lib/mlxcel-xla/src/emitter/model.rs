@@ -1,11 +1,14 @@
-//! Emits the Llama-3.2-1B `decode_step` StableHLO module from Rust.
+//! Emits the `decode_step` / `prefill` StableHLO modules for the supported
+//! Llama-family architectures (Llama, Qwen2) from Rust.
 //!
 //! Signature mirrors spike/openxla/model_jax.py `decode_step`:
 //!   main(params..., token, pos, cache_len, kcache, vcache)
 //!       -> (logits[V], kcache, vcache)
 //! Weights are individual tensor inputs in the same order JAX emitted
 //! (alphabetical within each layer), each carrying its pytree-path loc so the
-//! arg-to-weight mapping is self-documenting and reuses the JAX weight glue.
+//! arg-to-weight mapping is self-documenting and reuses the JAX weight glue. For
+//! a `qkv_bias` architecture (Qwen2) the per-layer q/k/v projection biases follow
+//! the layer's weights (see [`take_layer_weights`]).
 
 use super::builder::{Builder, Ty, Val};
 use super::config::Config;
@@ -21,7 +24,9 @@ const MAX_SEQ: usize = 256;
 const PREFILL_LP: usize = MAX_SEQ;
 
 /// Per-layer weight handles (JAX alphabetical order: down, gate, in_ln,
-/// post_ln, up, wk, wo, wq, wv).
+/// post_ln, up, wk, wo, wq, wv). `bk`/`bq`/`bv` are the q/k/v projection biases,
+/// present only for an architecture with `qkv_bias` (Qwen2); `None` for Llama,
+/// where the bias add emits no op so the graph is byte-identical to before.
 struct LayerW {
     down: Val,
     gate: Val,
@@ -32,6 +37,9 @@ struct LayerW {
     wo: Val,
     wq: Val,
     wv: Val,
+    bk: Option<Val>,
+    bq: Option<Val>,
+    bv: Option<Val>,
 }
 
 struct Args {
@@ -51,60 +59,121 @@ struct ArgDecl {
     loc: String,
 }
 
-fn build_arg_schema(c: &Config) -> (Vec<ArgDecl>, Args) {
+/// Append one (type, pytree-path loc) arg, returning a handle to it. `idx` is the
+/// running arg counter; sharing it across every graph kind keeps arg numbering
+/// identical to the hand-written builders this replaced.
+fn take_arg(decls: &mut Vec<ArgDecl>, idx: &mut usize, ty: Ty, loc: String) -> Val {
+    let val = Builder::arg(*idx, ty.clone());
+    decls.push(ArgDecl { ty, loc });
+    *idx += 1;
+    val
+}
+
+/// Append layer `li`'s weights (and, for `qkv_bias`, its q/k/v biases) in the one
+/// canonical order every graph kind shares, so the emitted arg order matches
+/// `weight_names` in `iree.rs` exactly. JAX-alphabetical weights (down, gate,
+/// in_ln, post_ln, up, wk, wo, wq, wv), then — when `c.qkv_bias` — the k/q/v
+/// projection biases (alphabetical, matching the wk<wq<wv weight order). The
+/// biases are rank-1: `bk`/`bv` are `[n_kv*head_dim]`, `bq` is `[n_q*head_dim]`.
+fn take_layer_weights(decls: &mut Vec<ArgDecl>, idx: &mut usize, c: &Config, li: usize) -> LayerW {
     let h = c.hidden;
     let inter = c.inter;
-    let kv = c.n_kv * c.head_dim; // 512
-    let qd = c.n_q * c.head_dim; // 2048
+    let kv = c.n_kv * c.head_dim;
+    let qd = c.n_q * c.head_dim;
+    let p = |k: &str| format!("params['layers'][{}]['{}']", li, k);
+    let down = take_arg(decls, idx, Ty::f32(vec![h, inter]), p("down"));
+    let gate = take_arg(decls, idx, Ty::f32(vec![inter, h]), p("gate"));
+    let in_ln = take_arg(decls, idx, Ty::f32(vec![h]), p("in_ln"));
+    let post_ln = take_arg(decls, idx, Ty::f32(vec![h]), p("post_ln"));
+    let up = take_arg(decls, idx, Ty::f32(vec![inter, h]), p("up"));
+    let wk = take_arg(decls, idx, Ty::f32(vec![kv, h]), p("wk"));
+    let wo = take_arg(decls, idx, Ty::f32(vec![qd, h]), p("wo"));
+    let wq = take_arg(decls, idx, Ty::f32(vec![qd, h]), p("wq"));
+    let wv = take_arg(decls, idx, Ty::f32(vec![kv, h]), p("wv"));
+    let (bk, bq, bv) = if c.qkv_bias {
+        let bk = take_arg(decls, idx, Ty::f32(vec![kv]), p("bk"));
+        let bq = take_arg(decls, idx, Ty::f32(vec![qd]), p("bq"));
+        let bv = take_arg(decls, idx, Ty::f32(vec![kv]), p("bv"));
+        (Some(bk), Some(bq), Some(bv))
+    } else {
+        (None, None, None)
+    };
+    LayerW {
+        down,
+        gate,
+        in_ln,
+        post_ln,
+        up,
+        wk,
+        wo,
+        wq,
+        wv,
+        bk,
+        bq,
+        bv,
+    }
+}
+
+/// Add an optional q/k/v projection bias to a single-token `[K]` projection (the
+/// single-sequence decode path). When the bias is absent (Llama) this emits no op
+/// and returns the projection unchanged.
+fn add_proj_bias(b: &mut Builder, x: Val, bias: &Option<Val>) -> Val {
+    match bias {
+        Some(bias) => b.add(&x, bias),
+        None => x,
+    }
+}
+
+/// Add an optional q/k/v projection bias to `[N, K]` projections (the prefill /
+/// batched / ragged paths): the `[K]` bias broadcasts over the leading row axis.
+/// No-op (and no emitted op) when the bias is absent.
+fn add_proj_bias_seq(b: &mut Builder, x: Val, bias: &Option<Val>, n: usize, k: usize) -> Val {
+    match bias {
+        Some(bias) => {
+            let bb = b.broadcast(bias, &[1], vec![n, k]);
+            b.add(&x, &bb)
+        }
+        None => x,
+    }
+}
+
+fn build_arg_schema(c: &Config) -> (Vec<ArgDecl>, Args) {
+    let h = c.hidden;
     let v = c.vocab;
 
     let mut decls: Vec<ArgDecl> = Vec::new();
     let mut idx = 0usize;
-    let mut take = |decls: &mut Vec<ArgDecl>, ty: Ty, loc: String| -> Val {
-        let val = Builder::arg(idx, ty.clone());
-        decls.push(ArgDecl { ty, loc });
-        idx += 1;
-        val
-    };
 
-    let embed = take(&mut decls, Ty::f32(vec![v, h]), "params['embed']".into());
-    let final_norm = take(&mut decls, Ty::f32(vec![h]), "params['final_norm']".into());
+    let embed = take_arg(
+        &mut decls,
+        &mut idx,
+        Ty::f32(vec![v, h]),
+        "params['embed']".into(),
+    );
+    let final_norm = take_arg(
+        &mut decls,
+        &mut idx,
+        Ty::f32(vec![h]),
+        "params['final_norm']".into(),
+    );
 
     let mut layers = Vec::with_capacity(c.n_layers);
     for li in 0..c.n_layers {
-        let p = |k: &str| format!("params['layers'][{}]['{}']", li, k);
-        let down = take(&mut decls, Ty::f32(vec![h, inter]), p("down"));
-        let gate = take(&mut decls, Ty::f32(vec![inter, h]), p("gate"));
-        let in_ln = take(&mut decls, Ty::f32(vec![h]), p("in_ln"));
-        let post_ln = take(&mut decls, Ty::f32(vec![h]), p("post_ln"));
-        let up = take(&mut decls, Ty::f32(vec![inter, h]), p("up"));
-        let wk = take(&mut decls, Ty::f32(vec![kv, h]), p("wk"));
-        let wo = take(&mut decls, Ty::f32(vec![qd, h]), p("wo"));
-        let wq = take(&mut decls, Ty::f32(vec![qd, h]), p("wq"));
-        let wv = take(&mut decls, Ty::f32(vec![kv, h]), p("wv"));
-        layers.push(LayerW {
-            down,
-            gate,
-            in_ln,
-            post_ln,
-            up,
-            wk,
-            wo,
-            wq,
-            wv,
-        });
+        layers.push(take_layer_weights(&mut decls, &mut idx, c, li));
     }
 
-    let token = take(&mut decls, Ty::scalar("i32"), "token".into());
-    let pos = take(&mut decls, Ty::scalar("i32"), "pos".into());
-    let cache_len = take(&mut decls, Ty::scalar("i32"), "cache_len".into());
-    let kcache = take(
+    let token = take_arg(&mut decls, &mut idx, Ty::scalar("i32"), "token".into());
+    let pos = take_arg(&mut decls, &mut idx, Ty::scalar("i32"), "pos".into());
+    let cache_len = take_arg(&mut decls, &mut idx, Ty::scalar("i32"), "cache_len".into());
+    let kcache = take_arg(
         &mut decls,
+        &mut idx,
         Ty::f32(vec![c.n_layers, MAX_SEQ, c.n_kv, c.head_dim]),
         "kcache".into(),
     );
-    let vcache = take(
+    let vcache = take_arg(
         &mut decls,
+        &mut idx,
         Ty::f32(vec![c.n_layers, MAX_SEQ, c.n_kv, c.head_dim]),
         "vcache".into(),
     );
@@ -242,10 +311,13 @@ pub fn emit_decode(c: &Config, sample: bool) -> String {
         // attention block
         let hn = rms_norm(&mut b, &x, &lw.in_ln, &k, h);
         let q = b.linear(&hn, &lw.wq);
+        let q = add_proj_bias(&mut b, q, &lw.bq);
         let q = b.reshape(&q, vec![nq, d]);
         let kk = b.linear(&hn, &lw.wk);
+        let kk = add_proj_bias(&mut b, kk, &lw.bk);
         let kk = b.reshape(&kk, vec![nkv, d]);
         let vv = b.linear(&hn, &lw.wv);
+        let vv = add_proj_bias(&mut b, vv, &lw.bv);
         let vv = b.reshape(&vv, vec![nkv, d]);
 
         let q = apply_rope(&mut b, &q, &cos_vec, &sin_vec, nq, d);
@@ -364,58 +436,46 @@ struct BatchedArgs {
 
 fn build_batched_arg_schema(c: &Config, bsz: usize) -> (Vec<ArgDecl>, BatchedArgs) {
     let h = c.hidden;
-    let inter = c.inter;
-    let kv = c.n_kv * c.head_dim; // 512
-    let qd = c.n_q * c.head_dim; // 2048
     let v = c.vocab;
 
     let mut decls: Vec<ArgDecl> = Vec::new();
     let mut idx = 0usize;
-    let mut take = |decls: &mut Vec<ArgDecl>, ty: Ty, loc: String| -> Val {
-        let val = Builder::arg(idx, ty.clone());
-        decls.push(ArgDecl { ty, loc });
-        idx += 1;
-        val
-    };
 
-    let embed = take(&mut decls, Ty::f32(vec![v, h]), "params['embed']".into());
-    let final_norm = take(&mut decls, Ty::f32(vec![h]), "params['final_norm']".into());
+    let embed = take_arg(
+        &mut decls,
+        &mut idx,
+        Ty::f32(vec![v, h]),
+        "params['embed']".into(),
+    );
+    let final_norm = take_arg(
+        &mut decls,
+        &mut idx,
+        Ty::f32(vec![h]),
+        "params['final_norm']".into(),
+    );
 
     let mut layers = Vec::with_capacity(c.n_layers);
     for li in 0..c.n_layers {
-        let p = |k: &str| format!("params['layers'][{}]['{}']", li, k);
-        let down = take(&mut decls, Ty::f32(vec![h, inter]), p("down"));
-        let gate = take(&mut decls, Ty::f32(vec![inter, h]), p("gate"));
-        let in_ln = take(&mut decls, Ty::f32(vec![h]), p("in_ln"));
-        let post_ln = take(&mut decls, Ty::f32(vec![h]), p("post_ln"));
-        let up = take(&mut decls, Ty::f32(vec![inter, h]), p("up"));
-        let wk = take(&mut decls, Ty::f32(vec![kv, h]), p("wk"));
-        let wo = take(&mut decls, Ty::f32(vec![qd, h]), p("wo"));
-        let wq = take(&mut decls, Ty::f32(vec![qd, h]), p("wq"));
-        let wv = take(&mut decls, Ty::f32(vec![kv, h]), p("wv"));
-        layers.push(LayerW {
-            down,
-            gate,
-            in_ln,
-            post_ln,
-            up,
-            wk,
-            wo,
-            wq,
-            wv,
-        });
+        layers.push(take_layer_weights(&mut decls, &mut idx, c, li));
     }
 
-    let token = take(&mut decls, Ty::new(vec![bsz], "i32"), "token".into());
-    let pos = take(&mut decls, Ty::scalar("i32"), "pos".into());
-    let cache_len = take(&mut decls, Ty::scalar("i32"), "cache_len".into());
-    let kcache = take(
+    let token = take_arg(
         &mut decls,
+        &mut idx,
+        Ty::new(vec![bsz], "i32"),
+        "token".into(),
+    );
+    let pos = take_arg(&mut decls, &mut idx, Ty::scalar("i32"), "pos".into());
+    let cache_len = take_arg(&mut decls, &mut idx, Ty::scalar("i32"), "cache_len".into());
+    let kcache = take_arg(
+        &mut decls,
+        &mut idx,
         Ty::f32(vec![bsz, c.n_layers, MAX_SEQ, c.n_kv, c.head_dim]),
         "kcache".into(),
     );
-    let vcache = take(
+    let vcache = take_arg(
         &mut decls,
+        &mut idx,
         Ty::f32(vec![bsz, c.n_layers, MAX_SEQ, c.n_kv, c.head_dim]),
         "vcache".into(),
     );
@@ -499,10 +559,13 @@ pub fn emit_decode_batched(c: &Config, bsz: usize, sample: bool) -> String {
         // attention block (RMSNorm over H reuses the [N,H] seq variant, N=B)
         let hn = rms_norm_seq(&mut b, &x, &lw.in_ln, &k, bsz, h); // [B, H]
         let q = b.linear_seq(&hn, &lw.wq); // [B, qd]
+        let q = add_proj_bias_seq(&mut b, q, &lw.bq, bsz, nq * d);
         let q = b.reshape(&q, vec![bsz, nq, d]);
         let kk = b.linear_seq(&hn, &lw.wk); // [B, kv]
+        let kk = add_proj_bias_seq(&mut b, kk, &lw.bk, bsz, nkv * d);
         let kk = b.reshape(&kk, vec![bsz, nkv, d]);
         let vv = b.linear_seq(&hn, &lw.wv); // [B, kv]
+        let vv = add_proj_bias_seq(&mut b, vv, &lw.bv, bsz, nkv * d);
         let vv = b.reshape(&vv, vec![bsz, nkv, d]);
 
         let q = apply_rope_batched(&mut b, &q, &cos_vec, &sin_vec, bsz, nq, d);
@@ -643,58 +706,56 @@ struct RaggedArgs {
 
 fn build_ragged_arg_schema(c: &Config, bsz: usize) -> (Vec<ArgDecl>, RaggedArgs) {
     let h = c.hidden;
-    let inter = c.inter;
-    let kv = c.n_kv * c.head_dim; // 512
-    let qd = c.n_q * c.head_dim; // 2048
     let v = c.vocab;
 
     let mut decls: Vec<ArgDecl> = Vec::new();
     let mut idx = 0usize;
-    let mut take = |decls: &mut Vec<ArgDecl>, ty: Ty, loc: String| -> Val {
-        let val = Builder::arg(idx, ty.clone());
-        decls.push(ArgDecl { ty, loc });
-        idx += 1;
-        val
-    };
 
-    let embed = take(&mut decls, Ty::f32(vec![v, h]), "params['embed']".into());
-    let final_norm = take(&mut decls, Ty::f32(vec![h]), "params['final_norm']".into());
+    let embed = take_arg(
+        &mut decls,
+        &mut idx,
+        Ty::f32(vec![v, h]),
+        "params['embed']".into(),
+    );
+    let final_norm = take_arg(
+        &mut decls,
+        &mut idx,
+        Ty::f32(vec![h]),
+        "params['final_norm']".into(),
+    );
 
     let mut layers = Vec::with_capacity(c.n_layers);
     for li in 0..c.n_layers {
-        let p = |k: &str| format!("params['layers'][{}]['{}']", li, k);
-        let down = take(&mut decls, Ty::f32(vec![h, inter]), p("down"));
-        let gate = take(&mut decls, Ty::f32(vec![inter, h]), p("gate"));
-        let in_ln = take(&mut decls, Ty::f32(vec![h]), p("in_ln"));
-        let post_ln = take(&mut decls, Ty::f32(vec![h]), p("post_ln"));
-        let up = take(&mut decls, Ty::f32(vec![inter, h]), p("up"));
-        let wk = take(&mut decls, Ty::f32(vec![kv, h]), p("wk"));
-        let wo = take(&mut decls, Ty::f32(vec![qd, h]), p("wo"));
-        let wq = take(&mut decls, Ty::f32(vec![qd, h]), p("wq"));
-        let wv = take(&mut decls, Ty::f32(vec![kv, h]), p("wv"));
-        layers.push(LayerW {
-            down,
-            gate,
-            in_ln,
-            post_ln,
-            up,
-            wk,
-            wo,
-            wq,
-            wv,
-        });
+        layers.push(take_layer_weights(&mut decls, &mut idx, c, li));
     }
 
-    let token = take(&mut decls, Ty::new(vec![bsz], "i32"), "token".into());
-    let pos = take(&mut decls, Ty::new(vec![bsz], "i32"), "pos".into());
-    let cache_len = take(&mut decls, Ty::new(vec![bsz], "i32"), "cache_len".into());
-    let kcache = take(
+    let token = take_arg(
         &mut decls,
+        &mut idx,
+        Ty::new(vec![bsz], "i32"),
+        "token".into(),
+    );
+    let pos = take_arg(
+        &mut decls,
+        &mut idx,
+        Ty::new(vec![bsz], "i32"),
+        "pos".into(),
+    );
+    let cache_len = take_arg(
+        &mut decls,
+        &mut idx,
+        Ty::new(vec![bsz], "i32"),
+        "cache_len".into(),
+    );
+    let kcache = take_arg(
+        &mut decls,
+        &mut idx,
         Ty::f32(vec![bsz, c.n_layers, MAX_SEQ, c.n_kv, c.head_dim]),
         "kcache".into(),
     );
-    let vcache = take(
+    let vcache = take_arg(
         &mut decls,
+        &mut idx,
         Ty::f32(vec![bsz, c.n_layers, MAX_SEQ, c.n_kv, c.head_dim]),
         "vcache".into(),
     );
@@ -779,10 +840,13 @@ pub fn emit_decode_ragged(c: &Config, bsz: usize, sample: bool) -> String {
 
         let hn = rms_norm_seq(&mut b, &x, &lw.in_ln, &k, bsz, h); // [B, H]
         let q = b.linear_seq(&hn, &lw.wq);
+        let q = add_proj_bias_seq(&mut b, q, &lw.bq, bsz, nq * d);
         let q = b.reshape(&q, vec![bsz, nq, d]);
         let kk = b.linear_seq(&hn, &lw.wk);
+        let kk = add_proj_bias_seq(&mut b, kk, &lw.bk, bsz, nkv * d);
         let kk = b.reshape(&kk, vec![bsz, nkv, d]);
         let vv = b.linear_seq(&hn, &lw.wv);
+        let vv = add_proj_bias_seq(&mut b, vv, &lw.bv, bsz, nkv * d);
         let vv = b.reshape(&vv, vec![bsz, nkv, d]);
 
         let q = apply_rope_ragged(&mut b, &q, &cos, &sin, bsz, nq, d);
@@ -925,51 +989,42 @@ struct PrefillArgs {
 
 fn build_prefill_arg_schema(c: &Config, lp: usize) -> (Vec<ArgDecl>, PrefillArgs) {
     let h = c.hidden;
-    let inter = c.inter;
-    let kv = c.n_kv * c.head_dim; // 512
-    let qd = c.n_q * c.head_dim; // 2048
     let v = c.vocab;
 
     let mut decls: Vec<ArgDecl> = Vec::new();
     let mut idx = 0usize;
-    let mut take = |decls: &mut Vec<ArgDecl>, ty: Ty, loc: String| -> Val {
-        let val = Builder::arg(idx, ty.clone());
-        decls.push(ArgDecl { ty, loc });
-        idx += 1;
-        val
-    };
 
-    let embed = take(&mut decls, Ty::f32(vec![v, h]), "params['embed']".into());
-    let final_norm = take(&mut decls, Ty::f32(vec![h]), "params['final_norm']".into());
+    let embed = take_arg(
+        &mut decls,
+        &mut idx,
+        Ty::f32(vec![v, h]),
+        "params['embed']".into(),
+    );
+    let final_norm = take_arg(
+        &mut decls,
+        &mut idx,
+        Ty::f32(vec![h]),
+        "params['final_norm']".into(),
+    );
 
     let mut layers = Vec::with_capacity(c.n_layers);
     for li in 0..c.n_layers {
-        let p = |k: &str| format!("params['layers'][{}]['{}']", li, k);
-        let down = take(&mut decls, Ty::f32(vec![h, inter]), p("down"));
-        let gate = take(&mut decls, Ty::f32(vec![inter, h]), p("gate"));
-        let in_ln = take(&mut decls, Ty::f32(vec![h]), p("in_ln"));
-        let post_ln = take(&mut decls, Ty::f32(vec![h]), p("post_ln"));
-        let up = take(&mut decls, Ty::f32(vec![inter, h]), p("up"));
-        let wk = take(&mut decls, Ty::f32(vec![kv, h]), p("wk"));
-        let wo = take(&mut decls, Ty::f32(vec![qd, h]), p("wo"));
-        let wq = take(&mut decls, Ty::f32(vec![qd, h]), p("wq"));
-        let wv = take(&mut decls, Ty::f32(vec![kv, h]), p("wv"));
-        layers.push(LayerW {
-            down,
-            gate,
-            in_ln,
-            post_ln,
-            up,
-            wk,
-            wo,
-            wq,
-            wv,
-        });
+        layers.push(take_layer_weights(&mut decls, &mut idx, c, li));
     }
 
-    let tokens = take(&mut decls, Ty::new(vec![lp], "i32"), "tokens".into());
-    let positions = take(&mut decls, Ty::new(vec![lp], "i32"), "positions".into());
-    let real_len = take(&mut decls, Ty::scalar("i32"), "real_len".into());
+    let tokens = take_arg(
+        &mut decls,
+        &mut idx,
+        Ty::new(vec![lp], "i32"),
+        "tokens".into(),
+    );
+    let positions = take_arg(
+        &mut decls,
+        &mut idx,
+        Ty::new(vec![lp], "i32"),
+        "positions".into(),
+    );
+    let real_len = take_arg(&mut decls, &mut idx, Ty::scalar("i32"), "real_len".into());
 
     (
         decls,
@@ -1064,10 +1119,13 @@ pub fn emit_prefill(c: &Config, sample: bool) -> String {
         // attention block
         let hn = rms_norm_seq(&mut b, &x, &lw.in_ln, &k, lp, h); // [Lp, H]
         let q = b.linear_seq(&hn, &lw.wq); // [Lp, qd]
+        let q = add_proj_bias_seq(&mut b, q, &lw.bq, lp, nq * d);
         let q = b.reshape(&q, vec![lp, nq, d]);
         let kk = b.linear_seq(&hn, &lw.wk); // [Lp, kv]
+        let kk = add_proj_bias_seq(&mut b, kk, &lw.bk, lp, nkv * d);
         let kk = b.reshape(&kk, vec![lp, nkv, d]);
         let vv = b.linear_seq(&hn, &lw.wv); // [Lp, kv]
+        let vv = add_proj_bias_seq(&mut b, vv, &lw.bv, lp, nkv * d);
         let vv = b.reshape(&vv, vec![lp, nkv, d]);
 
         let q = apply_rope_seq(&mut b, &q, &cos, &sin, lp, nq, d);
