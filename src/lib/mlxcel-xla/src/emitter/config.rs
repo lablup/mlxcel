@@ -3,8 +3,10 @@
 //! [`Config::from_json`] reads the same shape from a checkpoint's `config.json`
 //! (issue #449 M3 Stage 2d). Stage A covered the Llama architecture (llama3 RoPE,
 //! no attention bias); Stage B adds Qwen2 (plain RoPE + QKV bias), so the config
-//! carries the two architecture switches the emitter branches on: the RoPE kind
-//! and whether q/k/v projections have a bias.
+//! carries the architecture switches the emitter branches on: the RoPE kind,
+//! whether q/k/v projections have a bias, and whether the LM head is tied to the
+//! token embedding (tied) or a separate `lm_head.weight` (untied, e.g.
+//! Llama-3.1-8B and the larger Qwen2.5 checkpoints).
 
 /// How the RoPE inverse-frequency table is computed. Both kinds share the
 /// `outer(pos, inv_freq)` table build (see [`rope`](super::rope)); they differ
@@ -39,6 +41,11 @@ pub struct Config {
     /// q/k/v projections carry a bias (Qwen2). `o_proj` never does, and the MLP
     /// projections never do, so this single switch covers the architecture delta.
     pub qkv_bias: bool,
+    /// The LM head shares the token-embedding matrix (HF `tie_word_embeddings`).
+    /// `true` (Llama-3.2-1B, Qwen2.5-0.5B) reuses `params['embed']` for the final
+    /// projection; `false` adds a separate `params['lm_head']` weight the tail
+    /// projects through instead (Llama-3.1-8B, larger Qwen2.5 sizes).
+    pub tie_word_embeddings: bool,
 }
 
 impl Config {
@@ -61,16 +68,18 @@ impl Config {
                 orig_ctx: 8192,
             },
             qkv_bias: false,
+            tie_word_embeddings: true,
         }
     }
 
     /// Build a [`Config`] from a model's `config.json` text.
     ///
-    /// Scope: the Llama and Qwen2 architectures (RMSNorm, SwiGLU MLP, GQA, tied
-    /// embeddings). Llama uses llama3 RoPE scaling and no attention bias; Qwen2
-    /// uses plain RoPE and a q/k/v projection bias. Configs the emitter cannot yet
-    /// reproduce are rejected with a clear error rather than silently mis-emitted:
-    /// an unsupported `model_type`, untied embeddings, a `llama` checkpoint with
+    /// Scope: the Llama and Qwen2 architectures (RMSNorm, SwiGLU MLP, GQA, tied or
+    /// untied embeddings). Llama uses llama3 RoPE scaling and no attention bias;
+    /// Qwen2 uses plain RoPE and a q/k/v projection bias; either may tie its LM
+    /// head to the token embedding or carry a separate `lm_head.weight`. Configs
+    /// the emitter cannot yet reproduce are rejected with a clear error rather than
+    /// silently mis-emitted: an unsupported `model_type`, a `llama` checkpoint with
     /// `attention_bias`, or a `rope_scaling` whose `rope_type` is not `llama3`.
     pub fn from_json_str(s: &str) -> Result<Self, String> {
         let v: serde_json::Value =
@@ -103,14 +112,13 @@ impl Config {
             }
         };
 
-        if v.get("tie_word_embeddings")
+        // Tied (share `embed` for the head) vs untied (separate `lm_head.weight`).
+        // HF `PretrainedConfig` defaults this to `true`, so an absent field means
+        // tied; the emitter and the weight loader branch on it.
+        let tie_word_embeddings = v
+            .get("tie_word_embeddings")
             .and_then(serde_json::Value::as_bool)
-            != Some(true)
-        {
-            return Err("the OpenXLA emitter assumes tied word embeddings; \
-                 config.json tie_word_embeddings != true (untied LM head is a follow-up)"
-                .to_string());
-        }
+            .unwrap_or(true);
 
         let u = |k: &str| -> Result<usize, String> {
             v.get(k)
@@ -184,6 +192,7 @@ impl Config {
             vocab: u("vocab_size")?,
             rope,
             qkv_bias,
+            tie_word_embeddings,
         })
     }
 

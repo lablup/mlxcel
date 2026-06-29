@@ -8,7 +8,11 @@
 //! (alphabetical within each layer), each carrying its pytree-path loc so the
 //! arg-to-weight mapping is self-documenting and reuses the JAX weight glue. For
 //! a `qkv_bias` architecture (Qwen2) the per-layer q/k/v projection biases follow
-//! the layer's weights (see [`take_layer_weights`]).
+//! the layer's weights (see [`take_layer_weights`]). For an untied checkpoint
+//! (`tie_word_embeddings = false`) a separate `params['lm_head']` weight follows
+//! `final_norm` and feeds the final logits projection in place of the shared
+//! `embed` matrix (see [`take_lm_head`]); a tied checkpoint emits no such arg and
+//! is byte-identical to before.
 
 use super::builder::{Builder, Ty, Val};
 use super::config::Config;
@@ -45,6 +49,8 @@ struct LayerW {
 struct Args {
     embed: Val,
     final_norm: Val,
+    /// Untied LM head (`None` when tied; the tail then reuses `embed`).
+    lm_head: Option<Val>,
     layers: Vec<LayerW>,
     token: Val,
     pos: Val,
@@ -67,6 +73,33 @@ fn take_arg(decls: &mut Vec<ArgDecl>, idx: &mut usize, ty: Ty, loc: String) -> V
     decls.push(ArgDecl { ty, loc });
     *idx += 1;
     val
+}
+
+/// Take the untied LM head weight `params['lm_head']` (`[V, H]`), or `None` for a
+/// tied checkpoint (which reuses `embed` for the final projection). Called right
+/// after `final_norm` and before the layers, so the weight arg order is embed,
+/// final_norm, [lm_head when untied], layers..., matching `weight_names` in
+/// `iree.rs`. For a tied model nothing is emitted, so the graph stays byte-
+/// identical (the guard that keeps every tied checkpoint unchanged).
+fn take_lm_head(decls: &mut Vec<ArgDecl>, idx: &mut usize, c: &Config) -> Option<Val> {
+    if c.tie_word_embeddings {
+        None
+    } else {
+        Some(take_arg(
+            decls,
+            idx,
+            Ty::f32(vec![c.vocab, c.hidden]),
+            "params['lm_head']".into(),
+        ))
+    }
+}
+
+/// The weight the final logits projection multiplies by: the dedicated `lm_head`
+/// for an untied checkpoint, else the tied token-embedding matrix. Both are
+/// `[V, H]` (`linear` computes `x @ W^T`), so the tail is identical apart from
+/// which buffer it reads.
+fn head_weight<'a>(embed: &'a Val, lm_head: &'a Option<Val>) -> &'a Val {
+    lm_head.as_ref().unwrap_or(embed)
 }
 
 /// Append layer `li`'s weights (and, for `qkv_bias`, its q/k/v biases) in the one
@@ -156,6 +189,7 @@ fn build_arg_schema(c: &Config) -> (Vec<ArgDecl>, Args) {
         Ty::f32(vec![h]),
         "params['final_norm']".into(),
     );
+    let lm_head = take_lm_head(&mut decls, &mut idx, c);
 
     let mut layers = Vec::with_capacity(c.n_layers);
     for li in 0..c.n_layers {
@@ -183,6 +217,7 @@ fn build_arg_schema(c: &Config) -> (Vec<ArgDecl>, Args) {
         Args {
             embed,
             final_norm,
+            lm_head,
             layers,
             token,
             pos,
@@ -385,9 +420,10 @@ pub fn emit_decode(c: &Config, sample: bool) -> String {
         x = b.add(&x, &down);
     }
 
-    // --- tail: final norm + tied LM head, then optional on-device argmax ---
+    // --- tail: final norm + LM head (tied embed or untied lm_head), then
+    // optional on-device argmax ---
     let xf = rms_norm(&mut b, &x, &a.final_norm, &k, h);
-    let logits = b.linear(&xf, &a.embed); // [V]
+    let logits = b.linear(&xf, head_weight(&a.embed, &a.lm_head)); // [V]
     let (out_val, out_ty) = if sample {
         let tok = b.argmax(&logits);
         (tok.name, Ty::scalar("i32").render())
@@ -426,6 +462,7 @@ pub fn emit_decode(c: &Config, sample: bool) -> String {
 struct BatchedArgs {
     embed: Val,
     final_norm: Val,
+    lm_head: Option<Val>,
     layers: Vec<LayerW>,
     token: Val,     // [B] i32
     pos: Val,       // scalar i32 (shared across the batch)
@@ -453,6 +490,7 @@ fn build_batched_arg_schema(c: &Config, bsz: usize) -> (Vec<ArgDecl>, BatchedArg
         Ty::f32(vec![h]),
         "params['final_norm']".into(),
     );
+    let lm_head = take_lm_head(&mut decls, &mut idx, c);
 
     let mut layers = Vec::with_capacity(c.n_layers);
     for li in 0..c.n_layers {
@@ -485,6 +523,7 @@ fn build_batched_arg_schema(c: &Config, bsz: usize) -> (Vec<ArgDecl>, BatchedArg
         BatchedArgs {
             embed,
             final_norm,
+            lm_head,
             layers,
             token,
             pos,
@@ -655,9 +694,10 @@ pub fn emit_decode_batched(c: &Config, bsz: usize, sample: bool) -> String {
         x = b.add(&x, &down);
     }
 
-    // --- tail: final norm + tied LM head -> [B, V], optional per-row argmax ---
+    // --- tail: final norm + LM head (tied embed or untied lm_head) -> [B, V],
+    // optional per-row argmax ---
     let xf = rms_norm_seq(&mut b, &x, &a.final_norm, &k, bsz, h); // [B, H]
-    let logits = b.linear_seq(&xf, &a.embed); // [B, V]
+    let logits = b.linear_seq(&xf, head_weight(&a.embed, &a.lm_head)); // [B, V]
     let (out_val, out_ty) = if sample {
         let tok = b.argmax_batched(&logits);
         (tok.name, Ty::new(vec![bsz], "i32").render())
@@ -696,6 +736,7 @@ pub fn emit_decode_batched(c: &Config, bsz: usize, sample: bool) -> String {
 struct RaggedArgs {
     embed: Val,
     final_norm: Val,
+    lm_head: Option<Val>,
     layers: Vec<LayerW>,
     token: Val,     // [B] i32
     pos: Val,       // [B] i32 (per row)
@@ -723,6 +764,7 @@ fn build_ragged_arg_schema(c: &Config, bsz: usize) -> (Vec<ArgDecl>, RaggedArgs)
         Ty::f32(vec![h]),
         "params['final_norm']".into(),
     );
+    let lm_head = take_lm_head(&mut decls, &mut idx, c);
 
     let mut layers = Vec::with_capacity(c.n_layers);
     for li in 0..c.n_layers {
@@ -765,6 +807,7 @@ fn build_ragged_arg_schema(c: &Config, bsz: usize) -> (Vec<ArgDecl>, RaggedArgs)
         RaggedArgs {
             embed,
             final_norm,
+            lm_head,
             layers,
             token,
             pos,
@@ -942,7 +985,7 @@ pub fn emit_decode_ragged(c: &Config, bsz: usize, sample: bool) -> String {
     }
 
     let xf = rms_norm_seq(&mut b, &x, &a.final_norm, &k, bsz, h);
-    let logits = b.linear_seq(&xf, &a.embed); // [B, V]
+    let logits = b.linear_seq(&xf, head_weight(&a.embed, &a.lm_head)); // [B, V]
     let (out_val, out_ty) = if sample {
         let tok = b.argmax_batched(&logits);
         (tok.name, Ty::new(vec![bsz], "i32").render())
@@ -981,6 +1024,7 @@ pub fn emit_decode_ragged(c: &Config, bsz: usize, sample: bool) -> String {
 struct PrefillArgs {
     embed: Val,
     final_norm: Val,
+    lm_head: Option<Val>,
     layers: Vec<LayerW>,
     tokens: Val,
     positions: Val,
@@ -1006,6 +1050,7 @@ fn build_prefill_arg_schema(c: &Config, lp: usize) -> (Vec<ArgDecl>, PrefillArgs
         Ty::f32(vec![h]),
         "params['final_norm']".into(),
     );
+    let lm_head = take_lm_head(&mut decls, &mut idx, c);
 
     let mut layers = Vec::with_capacity(c.n_layers);
     for li in 0..c.n_layers {
@@ -1031,6 +1076,7 @@ fn build_prefill_arg_schema(c: &Config, lp: usize) -> (Vec<ArgDecl>, PrefillArgs
         PrefillArgs {
             embed,
             final_norm,
+            lm_head,
             layers,
             tokens,
             positions,
@@ -1177,13 +1223,14 @@ pub fn emit_prefill(c: &Config, sample: bool) -> String {
         x = b.add(&x, &down);
     }
 
-    // --- tail: final norm, take the row at real_len-1, tied LM head ---
+    // --- tail: final norm, take the row at real_len-1, LM head (tied embed or
+    // untied lm_head) ---
     let xf = rms_norm_seq(&mut b, &x, &a.final_norm, &k, lp, h); // [Lp, H]
     let one_i = b.const_i32(1);
     let last_idx = b.subtract(&a.real_len, &one_i); // real_len - 1
     let last_row = b.dynamic_slice(&xf, &[&last_idx, &k.c0], vec![1, h]); // [1, H]
     let last = b.reshape(&last_row, vec![h]); // [H]
-    let logits = b.linear(&last, &a.embed); // [V]
+    let logits = b.linear(&last, head_weight(&a.embed, &a.lm_head)); // [V]
     let (out_val, out_ty) = if sample {
         let tok = b.argmax(&logits);
         (tok.name, Ty::scalar("i32").render())

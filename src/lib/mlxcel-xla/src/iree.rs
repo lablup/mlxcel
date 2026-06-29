@@ -27,6 +27,9 @@
 //! Llama-3.2-1B `.mlir` assets, so any checkpoint of a supported architecture
 //! loads: Llama (any size) and Qwen2 (plain RoPE + q/k/v bias; Stage B), the
 //! latter adding its bias tensors to `weight_names` to match the emitted graph.
+//! An untied checkpoint (`tie_word_embeddings = false`, e.g. Llama-3.1-8B and the
+//! larger Qwen2.5 sizes) adds its `lm_head.weight` to `weight_names`, matching the
+//! separate `params['lm_head']` arg the emitter takes for the final projection.
 //!
 //! Proven token-exact against the HF temp-0 reference in
 //! `spike/openxla/artifacts/results.json` before being vendored from the
@@ -112,16 +115,23 @@ unsafe extern "C" {
 /// load (any `b_max` is emittable; the worker selects from this set).
 pub(crate) const RAGGED_B_VALUES: &[usize] = &[4, 8];
 
-/// The weight names in the emitter's exact arg order: embed, final_norm, then per
-/// layer down, gate, in_ln, post_ln, up, wk, wo, wq, wv, and — for a `qkv_bias`
-/// architecture (Qwen2) — the k/q/v projection biases. The layer count and the
-/// presence of biases come from the model config so the order matches the emitted
-/// graph's args (`take_layer_weights` in `emitter/model.rs`).
+/// The weight names in the emitter's exact arg order: embed, final_norm, then —
+/// for an untied checkpoint (`tie_word_embeddings = false`) — `lm_head.weight`,
+/// then per layer down, gate, in_ln, post_ln, up, wk, wo, wq, wv, and — for a
+/// `qkv_bias` architecture (Qwen2) — the k/q/v projection biases. The layer count,
+/// the untied head, and the presence of biases come from the model config so the
+/// order matches the emitted graph's args (`take_lm_head` / `take_layer_weights`
+/// in `emitter/model.rs`).
 fn weight_names(cfg: &Config) -> Vec<String> {
     let mut names = vec![
         "model.embed_tokens.weight".to_string(),
         "model.norm.weight".to_string(),
     ];
+    // Untied LM head: a separate `lm_head.weight` follows `final_norm`, matching
+    // the `params['lm_head']` arg the emitter takes in the same position.
+    if !cfg.tie_word_embeddings {
+        names.push("lm_head.weight".to_string());
+    }
     for i in 0..cfg.n_layers {
         let p = format!("model.layers.{i}.");
         for suf in [
