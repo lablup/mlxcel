@@ -351,9 +351,11 @@ impl ModelProvider {
     ///
     /// Spawns [`spawn_xla_model_worker`](model_worker::spawn_xla_model_worker),
     /// which builds the engine + tokenizer on the worker thread and serves through
-    /// the [`BatchEngine`](crate::server::batch::BatchEngine) contract. The batch
-    /// metrics/observability handles are held for the provider API surface but the
-    /// XLA worker does not populate the MLX scheduler metrics.
+    /// the [`BatchEngine`](crate::server::batch::BatchEngine) contract. The shared
+    /// `batch_metrics` handle is passed to the worker, which populates the active
+    /// count, queue depth, and per-sequence completion the `/metrics` endpoint
+    /// reports (the `batch_observability` handle is held for the provider API
+    /// surface; the XLA path has no prompt cache or preemption to report there).
     #[cfg(feature = "xla-iree")]
     pub(crate) fn new_with_xla_worker(
         model_path: PathBuf,
@@ -376,6 +378,8 @@ impl ModelProvider {
             request_rx,
             loaded.clone(),
             model_id.clone(),
+            batch_metrics.clone(),
+            batch_observability.clone(),
         );
 
         Ok(Self {

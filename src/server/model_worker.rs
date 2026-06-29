@@ -884,6 +884,8 @@ pub(crate) fn spawn_xla_model_worker(
     request_rx: mpsc::Receiver<ModelRequest>,
     loaded: Arc<AtomicBool>,
     worker_model_id: String,
+    batch_metrics: Arc<BatchMetrics>,
+    batch_observability: Arc<BatchObservability>,
 ) -> thread::JoinHandle<()> {
     thread::spawn(move || {
         // Same fail-fast posture as the MLX workers (issue #375): abort the
@@ -920,8 +922,13 @@ pub(crate) fn spawn_xla_model_worker(
             );
             loaded.store(true, Ordering::Release);
 
-            let mut worker =
-                crate::server::batch::XlaServeWorker::new(engine, tokenizer, request_rx);
+            let mut worker = crate::server::batch::XlaServeWorker::new(
+                engine,
+                tokenizer,
+                request_rx,
+                batch_metrics,
+                batch_observability,
+            );
             worker.serve();
         })
     })

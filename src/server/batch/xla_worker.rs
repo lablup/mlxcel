@@ -49,10 +49,12 @@ use std::time::Instant;
 use mlxcel_xla::{EngineEvent, FinishReason as XlaFinishReason, SampleParams, XlaBatchEngine};
 
 use super::BatchEngine;
+use super::observability::BatchObservability;
 use super::stop_matcher::StopMatcher;
 use crate::server::ServerGenerateOptions;
 use crate::server::model_provider::model_worker::StreamingDecodeState;
 use crate::server::model_provider::{GenerateEvent, ModelRequest};
+use crate::server::state::BatchMetrics;
 use crate::tokenizer::MlxcelTokenizer;
 
 /// Per-active-request state, keyed by the engine's request id.
@@ -66,6 +68,10 @@ struct ServeState {
     start: Instant,
     prompt_token_count: usize,
     max_tokens: usize,
+    /// Tokens the engine has generated for this request (one per `Token` event,
+    /// counted even when detok withholds the piece), reported to `BatchMetrics`
+    /// when the sequence completes.
+    generated_tokens: usize,
 }
 
 /// Server-side worker that serves requests through the OpenXLA continuous-batching
@@ -77,6 +83,14 @@ pub(crate) struct XlaServeWorker {
     request_rx: mpsc::Receiver<ModelRequest>,
     /// Active requests, keyed by the engine req id `submit` returned.
     states: HashMap<u64, ServeState>,
+    /// Batch metrics surfaced by the `/metrics` endpoint, populated the same way
+    /// the MLX `BatchScheduler` populates them (active count + queue depth gauges,
+    /// per-sequence completion), so the OpenXLA serve path is observable too.
+    batch_metrics: Arc<BatchMetrics>,
+    /// Cumulative serve counters (`/metrics`): sequences started/completed and
+    /// prefill/decode token throughput. The cache-pool / paged gauges are
+    /// MLX-specific and stay zero for this path (it has neither).
+    batch_observability: Arc<BatchObservability>,
     shutdown: bool,
 }
 
@@ -85,14 +99,28 @@ impl XlaServeWorker {
         engine: XlaBatchEngine,
         tokenizer: MlxcelTokenizer,
         request_rx: mpsc::Receiver<ModelRequest>,
+        batch_metrics: Arc<BatchMetrics>,
+        batch_observability: Arc<BatchObservability>,
     ) -> Self {
         Self {
             engine,
             tokenizer,
             request_rx,
             states: HashMap::new(),
+            batch_metrics,
+            batch_observability,
             shutdown: false,
         }
+    }
+
+    /// Refresh the active-count and queue-depth gauges from the engine. Cheap
+    /// (two atomic stores), called each serve iteration so `/metrics` tracks the
+    /// live batch.
+    fn update_gauges(&self) {
+        self.batch_metrics
+            .set_active_count(self.engine.active_len());
+        self.batch_metrics
+            .set_queue_depth(self.engine.pending_len());
     }
 
     /// Validate, tokenize, and submit one `Generate` request, or send a terminal
@@ -176,6 +204,9 @@ impl XlaServeWorker {
             .submit(&prompt_tokens, options.max_tokens, params)
         {
             Ok(req_id) => {
+                // The sequence has entered the batch; count it and its prompt.
+                self.batch_observability
+                    .record_prefill_start(prompt_tokens.len());
                 self.states.insert(
                     req_id,
                     ServeState {
@@ -186,6 +217,7 @@ impl XlaServeWorker {
                         start: Instant::now(),
                         prompt_token_count: prompt_tokens.len(),
                         max_tokens: options.max_tokens,
+                        generated_tokens: 0,
                     },
                 );
             }
@@ -274,6 +306,10 @@ impl XlaServeWorker {
                         let Some(state) = self.states.get_mut(&req_id) else {
                             continue;
                         };
+                        // Count the generated token even if detok withholds the
+                        // piece (a mid-multibyte token), so the completion metric
+                        // reflects what the engine produced.
+                        state.generated_tokens += 1;
                         let Some(piece) = state.detok.on_token(token, &self.tokenizer) else {
                             continue;
                         };
@@ -301,8 +337,12 @@ impl XlaServeWorker {
                             start,
                             prompt_token_count,
                             max_tokens,
+                            generated_tokens,
                             ..
                         } = state;
+                        self.batch_metrics
+                            .record_sequence_completed(generated_tokens);
+                        self.batch_observability.record_sequence_completed();
                         // Release any tail held back as a potential stop-string
                         // prefix; ending on EOS/length means it never completed
                         // one, so it is real output and must be streamed first.
@@ -340,8 +380,12 @@ impl XlaServeWorker {
                 start,
                 prompt_token_count,
                 max_tokens,
+                generated_tokens,
                 ..
             } = state;
+            self.batch_metrics
+                .record_sequence_completed(generated_tokens);
+            self.batch_observability.record_sequence_completed();
             let mut result =
                 detok.finish_truncated(keep_bytes, start, prompt_token_count, max_tokens);
             result.finish_reason = "stop".to_string();
@@ -374,6 +418,8 @@ impl BatchEngine for XlaServeWorker {
             let block = self.engine.is_idle() && !self.shutdown;
             self.drain_incoming(block);
             self.evict_cancelled();
+            // Reflect admits/cancels (and a drained-to-idle batch) in the gauges.
+            self.update_gauges();
 
             if self.engine.is_idle() {
                 if self.shutdown {
@@ -385,7 +431,20 @@ impl BatchEngine for XlaServeWorker {
             }
 
             match self.engine.pump() {
-                Ok(events) => self.dispatch(events),
+                Ok(events) => {
+                    // Each `Token` event is one token produced this step across the
+                    // active batch, so the count is the step's decode width.
+                    let decoded = events
+                        .iter()
+                        .filter(|e| matches!(e, EngineEvent::Token { .. }))
+                        .count();
+                    if decoded > 0 {
+                        self.batch_observability.record_decode_step(decoded);
+                    }
+                    self.dispatch(events);
+                    // Reflect any sequences that completed this step.
+                    self.update_gauges();
+                }
                 Err(err) => {
                     tracing::error!("OpenXLA engine step failed: {err}");
                     self.fail_all(&format!("OpenXLA engine step failed: {err}"));
