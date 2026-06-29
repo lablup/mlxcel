@@ -24,18 +24,18 @@
 //! the server's [`StreamingDecodeState`] for byte-fallback-safe detokenization.
 //!
 //! Scope: text-only. This path honors `max_tokens`, the model's EOS ids,
-//! sampling (temperature / top-k / top-p / min-p / seed, #449 M3 Stage 2d), and
-//! stop strings (#449 M3 Stage 2d): a [`StopMatcher`] withholds any decoded tail
-//! that could begin a stop string and ends the request at the earliest full
-//! match, excluding the stop string and everything after it from the output
-//! (the same rule as
+//! sampling (temperature / top-k / top-p / min-p / seed, #449 M3 Stage 2d), the
+//! history-based penalties (repetition / frequency / presence / DRY, #449 M3
+//! Stage 2d, applied host-side in the engine's sampler with the same math and
+//! order as the MLX path), and stop strings (#449 M3 Stage 2d): a
+//! [`StopMatcher`] withholds any decoded tail that could begin a stop string and
+//! ends the request at the earliest full match, excluding the stop string and
+//! everything after it from the output (the same rule as
 //! [`apply_stop_sequences`](crate::server::anthropic_translator::apply_stop_sequences),
-//! applied incrementally so it is safe across token boundaries). The
-//! history-based penalties (repetition / frequency / presence / DRY) are not
-//! applied (logged once). Requests that need features the engine cannot provide
-//! are rejected with a clear error rather than served wrong: logprobs (no logit
-//! readback), structured / JSON-schema output (no constraint masking), and
-//! multimodal inputs (text-only).
+//! applied incrementally so it is safe across token boundaries). Requests that
+//! need features the engine cannot provide are rejected with a clear error rather
+//! than served wrong: logprobs (no logit readback), structured / JSON-schema
+//! output (no constraint masking), and multimodal inputs (text-only).
 //!
 //! Compiled only under `xla-iree` (real IREE execution). The MLX serving path is
 //! untouched.
@@ -78,7 +78,6 @@ pub(crate) struct XlaServeWorker {
     /// Active requests, keyed by the engine req id `submit` returned.
     states: HashMap<u64, ServeState>,
     shutdown: bool,
-    warned_penalties: bool,
 }
 
 impl XlaServeWorker {
@@ -93,7 +92,6 @@ impl XlaServeWorker {
             request_rx,
             states: HashMap::new(),
             shutdown: false,
-            warned_penalties: false,
         }
     }
 
@@ -130,10 +128,11 @@ impl XlaServeWorker {
             return;
         }
 
-        // Sampling: temperature / top-k / top-p / min-p / seed are honored; stop
-        // strings are enforced below by a per-request `StopMatcher`. The
+        // Sampling: temperature / top-k / top-p / min-p / seed and the
         // history-based penalties (repetition / frequency / presence / DRY) are
-        // not applied, so warn once when a request asks for them.
+        // honored; stop strings are enforced below by a per-request `StopMatcher`.
+        // The penalty math runs host-side in the engine's sampler and mirrors the
+        // MLX path, so the two backends penalize identically for the same history.
         let sampling = &options.sampling;
         let params = SampleParams {
             temperature: sampling.temperature,
@@ -141,18 +140,15 @@ impl XlaServeWorker {
             top_p: sampling.top_p,
             min_p: sampling.min_p,
             seed: sampling.seed,
+            repetition_penalty: sampling.repetition_penalty,
+            frequency_penalty: sampling.frequency_penalty,
+            presence_penalty: sampling.presence_penalty,
+            dry_multiplier: sampling.dry_multiplier,
+            dry_base: sampling.dry_base,
+            dry_allowed_length: sampling.dry_allowed_length,
+            dry_penalty_last_n: sampling.dry_penalty_last_n,
+            dry_sequence_breakers: sampling.dry_sequence_breakers.clone(),
         };
-        let uses_penalties = sampling.repetition_penalty != 1.0
-            || sampling.frequency_penalty != 0.0
-            || sampling.presence_penalty != 0.0
-            || sampling.dry_multiplier != 0.0;
-        if uses_penalties && !self.warned_penalties {
-            tracing::warn!(
-                "the OpenXLA backend applies temperature / top-k / top-p / min-p only; \
-                 repetition / frequency / presence penalties and DRY are ignored"
-            );
-            self.warned_penalties = true;
-        }
 
         let add_special = !prompt.starts_with("<bos>") && !prompt.starts_with("<s>");
         let token_ids = match self.tokenizer.encode(&prompt, add_special) {

@@ -81,6 +81,11 @@ struct Slot {
     params: SampleParams,
     /// PRNG state, advanced by each sample; seeded at admit for reproducibility.
     rng: u64,
+    /// Token history for history-based penalties: the prompt followed by every
+    /// generated token (matching mlxcel-core's `initial_token_history` window).
+    /// Empty when the request enables no penalty, so greedy requests carry no
+    /// per-slot history cost.
+    history: Vec<i32>,
 }
 
 /// A queued, not-yet-admitted request.
@@ -318,7 +323,19 @@ impl XlaBatchEngine {
             };
             let logits = self.engine.prefill_slot_logits(s, &p.prompt)?;
             let mut rng = resolve_seed(&p.params, p.req_id);
-            let first = sample(&logits, &p.params, &mut rng);
+            // History-based penalties see the prompt plus generated tokens (the
+            // same window mlxcel-core seeds via `initial_token_history`). Build it
+            // only when a penalty is active; greedy requests keep it empty.
+            let needs_history = p.params.needs_penalties();
+            let mut history = if needs_history {
+                p.prompt.clone()
+            } else {
+                Vec::new()
+            };
+            let first = sample(&logits, &p.params, &history, &mut rng);
+            if needs_history {
+                history.push(first);
+            }
             events.push(EngineEvent::Token {
                 req_id: p.req_id,
                 token: first,
@@ -331,6 +348,7 @@ impl XlaBatchEngine {
                 cap: p.cap,
                 params: p.params,
                 rng,
+                history,
             };
             if let Some(reason) = finish_reason(slot.produced, slot.cap, first, &eos) {
                 // Finished at its first token: leave the slot free for the next admit.
@@ -367,7 +385,10 @@ impl XlaBatchEngine {
         for (s, slot_opt) in self.sched.slots.iter_mut().enumerate() {
             if let Some(slot) = slot_opt.as_mut() {
                 let row = &logits[s * vocab..(s + 1) * vocab];
-                let nt = sample(row, &slot.params, &mut slot.rng);
+                let nt = sample(row, &slot.params, &slot.history, &mut slot.rng);
+                if slot.params.needs_penalties() {
+                    slot.history.push(nt);
+                }
                 slot.cur = nt;
                 slot.cache_len += 1;
                 slot.produced += 1;
@@ -495,6 +516,7 @@ mod tests {
             cap: p.cap,
             params: p.params,
             rng: 0,
+            history: Vec::new(),
         });
         assert!(s.any_active());
         assert!(s.cancel(id));
