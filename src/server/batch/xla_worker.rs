@@ -23,14 +23,19 @@
 //! [`EngineEvent`] back to a [`GenerateEvent`] on that request's channel, reusing
 //! the server's [`StreamingDecodeState`] for byte-fallback-safe detokenization.
 //!
-//! Scope: text-only. This path honors `max_tokens`, the model's EOS ids, and
-//! sampling (temperature / top-k / top-p / min-p / seed, #449 M3 Stage 2d); the
+//! Scope: text-only. This path honors `max_tokens`, the model's EOS ids,
+//! sampling (temperature / top-k / top-p / min-p / seed, #449 M3 Stage 2d), and
+//! stop strings (#449 M3 Stage 2d): a [`StopMatcher`] withholds any decoded tail
+//! that could begin a stop string and ends the request at the earliest full
+//! match, excluding the stop string and everything after it from the output
+//! (the same rule as
+//! [`apply_stop_sequences`](crate::server::anthropic_translator::apply_stop_sequences),
+//! applied incrementally so it is safe across token boundaries). The
 //! history-based penalties (repetition / frequency / presence / DRY) are not
 //! applied (logged once). Requests that need features the engine cannot provide
 //! are rejected with a clear error rather than served wrong: logprobs (no logit
 //! readback), structured / JSON-schema output (no constraint masking), and
-//! multimodal inputs (text-only). Stop strings are not enforced yet (EOS +
-//! `max_tokens` terminate); that is a follow-up.
+//! multimodal inputs (text-only).
 //!
 //! Compiled only under `xla-iree` (real IREE execution). The MLX serving path is
 //! untouched.
@@ -44,6 +49,7 @@ use std::time::Instant;
 use mlxcel_xla::{EngineEvent, FinishReason as XlaFinishReason, SampleParams, XlaBatchEngine};
 
 use super::BatchEngine;
+use super::stop_matcher::StopMatcher;
 use crate::server::ServerGenerateOptions;
 use crate::server::model_provider::model_worker::StreamingDecodeState;
 use crate::server::model_provider::{GenerateEvent, ModelRequest};
@@ -54,6 +60,9 @@ struct ServeState {
     response_tx: mpsc::Sender<GenerateEvent>,
     cancelled: Arc<AtomicBool>,
     detok: StreamingDecodeState,
+    /// Streaming-safe stop-string matcher. Inactive (a pass-through) when the
+    /// request set no stop strings, so those requests stream exactly as before.
+    stop: StopMatcher,
     start: Instant,
     prompt_token_count: usize,
     max_tokens: usize,
@@ -70,7 +79,6 @@ pub(crate) struct XlaServeWorker {
     states: HashMap<u64, ServeState>,
     shutdown: bool,
     warned_penalties: bool,
-    warned_stop: bool,
 }
 
 impl XlaServeWorker {
@@ -86,7 +94,6 @@ impl XlaServeWorker {
             states: HashMap::new(),
             shutdown: false,
             warned_penalties: false,
-            warned_stop: false,
         }
     }
 
@@ -123,9 +130,10 @@ impl XlaServeWorker {
             return;
         }
 
-        // Sampling: temperature / top-k / top-p / min-p / seed are honored; the
-        // history-based penalties (repetition / frequency / presence / DRY) and stop
-        // strings are not, so warn once each when a request asks for them.
+        // Sampling: temperature / top-k / top-p / min-p / seed are honored; stop
+        // strings are enforced below by a per-request `StopMatcher`. The
+        // history-based penalties (repetition / frequency / presence / DRY) are
+        // not applied, so warn once when a request asks for them.
         let sampling = &options.sampling;
         let params = SampleParams {
             temperature: sampling.temperature,
@@ -144,18 +152,6 @@ impl XlaServeWorker {
                  repetition / frequency / presence penalties and DRY are ignored"
             );
             self.warned_penalties = true;
-        }
-        if !self.warned_stop
-            && options
-                .stop_sequences
-                .as_ref()
-                .is_some_and(|s| !s.is_empty())
-        {
-            tracing::warn!(
-                "the OpenXLA backend does not enforce stop strings yet; generation stops on EOS \
-                 or max_tokens only"
-            );
-            self.warned_stop = true;
         }
 
         let add_special = !prompt.starts_with("<bos>") && !prompt.starts_with("<s>");
@@ -190,6 +186,7 @@ impl XlaServeWorker {
                         response_tx,
                         cancelled,
                         detok,
+                        stop: StopMatcher::new(options.stop_sequences.unwrap_or_default()),
                         start: Instant::now(),
                         prompt_token_count: prompt_tokens.len(),
                         max_tokens: options.max_tokens,
@@ -273,10 +270,30 @@ impl XlaServeWorker {
         for ev in events {
             match ev {
                 EngineEvent::Token { req_id, token } => {
-                    if let Some(state) = self.states.get_mut(&req_id)
-                        && let Some(piece) = state.detok.on_token(token, &self.tokenizer)
-                    {
-                        let _ = state.response_tx.send(GenerateEvent::Token(piece));
+                    // Decode the token, run it through the request's stop matcher,
+                    // and emit only what is safe to stream. `Some(keep)` means a
+                    // stop string matched: finalize the request keeping `keep`
+                    // bytes (everything already streamed, before the stop string).
+                    let stop_keep = {
+                        let Some(state) = self.states.get_mut(&req_id) else {
+                            continue;
+                        };
+                        let Some(piece) = state.detok.on_token(token, &self.tokenizer) else {
+                            continue;
+                        };
+                        if state.stop.is_active() {
+                            let chunk = state.stop.push(&piece);
+                            if !chunk.emit.is_empty() {
+                                let _ = state.response_tx.send(GenerateEvent::Token(chunk.emit));
+                            }
+                            chunk.stopped.then(|| state.stop.emitted_len())
+                        } else {
+                            let _ = state.response_tx.send(GenerateEvent::Token(piece));
+                            None
+                        }
+                    };
+                    if let Some(keep) = stop_keep {
+                        self.finalize_stop(req_id, keep);
                     }
                 }
                 EngineEvent::Finished { req_id, reason } => {
@@ -284,11 +301,19 @@ impl XlaServeWorker {
                         let ServeState {
                             response_tx,
                             mut detok,
+                            mut stop,
                             start,
                             prompt_token_count,
                             max_tokens,
                             ..
                         } = state;
+                        // Release any tail held back as a potential stop-string
+                        // prefix; ending on EOS/length means it never completed
+                        // one, so it is real output and must be streamed first.
+                        let tail = stop.flush();
+                        if !tail.is_empty() {
+                            let _ = response_tx.send(GenerateEvent::Token(tail));
+                        }
                         detok.flush(&self.tokenizer);
                         let mut result = detok.finish(start, prompt_token_count, max_tokens);
                         // The engine knows the authoritative reason; prefer it over
@@ -302,6 +327,29 @@ impl XlaServeWorker {
                     }
                 }
             }
+        }
+    }
+
+    /// Finalize a request that matched a stop string: free its engine slot and
+    /// send a terminal `Done` whose text is truncated to `keep_bytes` (the bytes
+    /// already streamed, i.e. everything before the stop string). The matcher
+    /// withheld the stop string and everything after it, so the non-streaming
+    /// result matches what was streamed; the finish reason is `stop`.
+    fn finalize_stop(&mut self, req_id: u64, keep_bytes: usize) {
+        self.engine.cancel(req_id);
+        if let Some(state) = self.states.remove(&req_id) {
+            let ServeState {
+                response_tx,
+                detok,
+                start,
+                prompt_token_count,
+                max_tokens,
+                ..
+            } = state;
+            let mut result =
+                detok.finish_truncated(keep_bytes, start, prompt_token_count, max_tokens);
+            result.finish_reason = "stop".to_string();
+            let _ = response_tx.send(GenerateEvent::Done(result));
         }
     }
 
@@ -319,7 +367,7 @@ impl XlaServeWorker {
 impl BatchEngine for XlaServeWorker {
     fn serve(&mut self) {
         tracing::info!(
-            "OpenXLA serve worker starting (continuous batching, B_max={}, sampling)",
+            "OpenXLA serve worker starting (continuous batching, B_max={}, sampling, stop strings)",
             self.engine.b_max()
         );
         loop {

@@ -2085,6 +2085,33 @@ impl StreamingDecodeState {
             cached_tokens,
         )
     }
+
+    /// Like [`finish`](Self::finish) but truncates the accumulated text to
+    /// `keep_bytes` first.
+    ///
+    /// The OpenXLA serve worker (issue #449 M3 Stage 2d) uses this when a stop
+    /// string matches: streaming already stopped at `keep_bytes` (the stop
+    /// string and everything after it were withheld), so truncating here keeps
+    /// the non-streaming `result.text` consistent with what was streamed.
+    /// `keep_bytes` counts whole emitted pieces and so lands on a char boundary;
+    /// it is floored to the nearest boundary defensively rather than panicking.
+    #[cfg(feature = "xla-iree")]
+    pub(crate) fn finish_truncated(
+        mut self,
+        keep_bytes: usize,
+        start: Instant,
+        prompt_token_count: usize,
+        max_tokens: usize,
+    ) -> GenerationResult {
+        if keep_bytes < self.generated_text.len() {
+            let mut cut = keep_bytes;
+            while cut > 0 && !self.generated_text.is_char_boundary(cut) {
+                cut -= 1;
+            }
+            self.generated_text.truncate(cut);
+        }
+        self.finish_with_cache(start, prompt_token_count, max_tokens, 0)
+    }
 }
 
 /// Find the byte position after the last non-U+FFFD character.
