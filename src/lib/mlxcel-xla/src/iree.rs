@@ -227,10 +227,14 @@ fn iree_compile_bin() -> Result<PathBuf, String> {
 /// iree-compile target flags for a HAL device. `local-task`/`local-sync` -> the
 /// CPU (llvm-cpu) target; `cuda` -> the CUDA target (only usable in a cuda
 /// build, whose runtime registers the cuda driver and whose iree-compile has
-/// cuda codegen).
+/// cuda codegen); `metal` -> the Metal target (metal-spirv codegen; the Apple
+/// Silicon dev path, where the macOS runtime registers the metal driver and the
+/// pinned macOS universal2 iree-compile has metal-spirv codegen).
 fn target_flags(device: &str) -> Result<&'static [&'static str], String> {
     if device == "cuda" {
         Ok(&["--iree-hal-target-device=cuda"])
+    } else if device == "metal" {
+        Ok(&["--iree-hal-target-device=metal"])
     } else if device.starts_with("local") {
         Ok(&[
             "--iree-hal-target-device=local",
@@ -238,8 +242,8 @@ fn target_flags(device: &str) -> Result<&'static [&'static str], String> {
         ])
     } else {
         Err(format!(
-            "unsupported OpenXLA device {device:?}; use \"local-task\" (CPU) or, in a \
-             cuda build, \"cuda\""
+            "unsupported OpenXLA device {device:?}; use \"local-task\" (CPU), \
+             \"metal\" (Apple Silicon GPU, macOS build), or \"cuda\" (cuda build)"
         ))
     }
 }

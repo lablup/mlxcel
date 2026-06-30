@@ -73,6 +73,40 @@ Validated on a GB10 (Grace-Blackwell, sm_121): token-exact 48/48, ~5 tok/s
 (~2.6x the CPU path). Vulkan via the prebuilt dist does **not** work on the GB10
 (IREE's Vulkan allocator vs NVIDIA's unified memory), so CUDA is the GPU path.
 
+### macOS (Apple Silicon, Metal) build
+
+On Apple Silicon, **MLX is the default and primary backend**; this OpenXLA path
+is a development / parity path, opt-in exactly like CUDA. IREE publishes no macOS
+`iree-dist` (only linux dists + python wheels), so the runtime is **source-built**
+like the CUDA path. `scripts/iree/setup-macos.sh` automates it: it installs the
+pinned macOS `iree-compile` (metal-spirv codegen) from the universal2 wheel into a
+private venv, source-builds the IREE runtime (`local-task`/`local-sync`/`metal`
+drivers), and prints the env.
+
+```bash
+# 1. One-time setup (clones + builds the IREE runtime; idempotent).
+eval "$(scripts/iree/setup-macos.sh)"        # sets IREE_MACOS_HOME, MLXCEL_XLA_IREE_COMPILE
+# (later shells: eval "$(scripts/iree/setup-macos.sh --env)")
+
+# 2. Build with real execution on (alongside the usual MLX features).
+cargo build --release --features metal,accelerate,xla-iree
+
+# 3. Opt into XLA at runtime; MLX stays default when these are unset.
+#    CPU (local-task), token-exact vs the HF temp-0 reference:
+MLXCEL_BACKEND=xla MLXCEL_XLA_DEVICE=local-task ./target/release/mlxcel generate \
+  -m <Llama-3.2-1B-Instruct dir> -p "The capital of France is" -n 48
+#    Apple GPU (Metal):
+MLXCEL_BACKEND=xla MLXCEL_XLA_DEVICE=metal ./target/release/mlxcel generate \
+  -m <Llama-3.2-1B-Instruct dir> -p "The capital of France is" -n 48
+```
+
+Validated on an M1 Ultra: `metal` is token-exact with the `local-task` path
+(which is itself token-exact vs the HF temp-0 reference) and ~1.9x its tok/s. The
+root `build.rs` macOS arm uses Apple `ld` (`-force_load`, no `--whole-archive` /
+`--start-group` / `-lgcc`) and links the Metal/Foundation/QuartzCore frameworks;
+the C shim is unchanged (the `metal` driver registers via
+`use_all_available_drivers`).
+
 ### Scope / limits
 
 - The bundled graphs are authored for **Llama-3.2-1B-Instruct** specifically;

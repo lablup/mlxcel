@@ -24,6 +24,8 @@ fn main() {
     println!("cargo:rerun-if-env-changed=IREE_DIST");
     println!("cargo:rerun-if-env-changed=IREE_CUDA_HOME");
     println!("cargo:rerun-if-env-changed=IREE_CUDA_COMPILE");
+    println!("cargo:rerun-if-env-changed=IREE_MACOS_HOME");
+    println!("cargo:rerun-if-env-changed=IREE_MACOS_COMPILE");
     // cfg used by src/iree.rs to select the cuda iree-compile / device behavior.
     println!("cargo:rustc-check-cfg=cfg(xla_iree_cuda)");
 
@@ -58,6 +60,37 @@ fn main() {
             .compile("xla_iree");
         println!("cargo:rustc-cfg=xla_iree_cuda");
         if let Ok(ic) = env::var("IREE_CUDA_COMPILE") {
+            println!("cargo:rustc-env=MLXCEL_XLA_IREE_COMPILE={ic}");
+        }
+        return;
+    }
+
+    // macOS (Apple Silicon dev path). IREE publishes no macOS iree-dist (only
+    // linux dists + python wheels), so the runtime is source-built like the CUDA
+    // path and IREE_MACOS_HOME points at that iree source+build tree (src/ and
+    // build/). The shim compiles against the in-tree runtime headers. The vmfbs
+    // are lowered by the pinned macOS universal2 iree-compile (it has metal-spirv
+    // codegen), set via IREE_MACOS_COMPILE (baked here) or MLXCEL_XLA_IREE_COMPILE
+    // at runtime. The runtime link recipe (Apple ld -force_load + Metal
+    // frameworks) lives in the root build.rs. scripts/iree/setup-macos.sh
+    // produces this tree and prints the matching env.
+    #[cfg(target_os = "macos")]
+    if let Ok(home) = env::var("IREE_MACOS_HOME") {
+        let home = PathBuf::from(home);
+        let src_inc = home.join("src/runtime/src");
+        let bld_inc = home.join("build/runtime/src");
+        assert!(
+            src_inc.join("iree/runtime/api.h").exists(),
+            "IREE_MACOS_HOME={} is not an iree source+build tree (missing \
+             src/runtime/src/iree/runtime/api.h); run scripts/iree/setup-macos.sh",
+            home.display()
+        );
+        cc::Build::new()
+            .file("csrc/xla_iree.c")
+            .include(&src_inc)
+            .include(&bld_inc)
+            .compile("xla_iree");
+        if let Ok(ic) = env::var("IREE_MACOS_COMPILE") {
             println!("cargo:rustc-env=MLXCEL_XLA_IREE_COMPILE={ic}");
         }
         return;
