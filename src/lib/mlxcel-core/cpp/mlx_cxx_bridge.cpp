@@ -46,6 +46,37 @@ void synchronize_thread_local_stream(const MlxThreadLocalStream& tls) {
     mlx::core::synchronize(tls.inner);
 }
 
+// --- Multi-GPU device-index surface (epic #486, sub-issue #487) ---
+//
+// Portable across backends via MLX's `device_count` and the
+// `Device(DeviceType, index)` constructor; no CUDA headers required. See
+// the header comment for cross-backend semantics.
+int32_t gpu_device_count() {
+    int count = mlx::core::device_count(mlx::core::Device::gpu);
+    // Clamp to >= 1: a CPU-only build reports 0 GPUs but `Device::gpu`
+    // still resolves to the single default compute device, and callers
+    // (and the acceptance criteria) expect at least one.
+    return count >= 1 ? static_cast<int32_t>(count) : 1;
+}
+
+std::unique_ptr<MlxStream> new_stream_on_gpu_index(int32_t index) {
+    return std::make_unique<MlxStream>(
+        mlx::core::new_stream(Device(Device::gpu, index)));
+}
+
+void set_default_device_index(int32_t index) {
+    mlx::core::set_default_device(Device(Device::gpu, index));
+}
+
+std::unique_ptr<MlxThreadLocalStream> new_thread_local_stream_gpu_index(int32_t index) {
+    return std::make_unique<MlxThreadLocalStream>(
+        mlx::core::new_thread_local_stream(Device(Device::gpu, index)));
+}
+
+std::unique_ptr<MlxArray> copy_array_to_stream(const MlxArray& a, const MlxStream& stream) {
+    return std::make_unique<MlxArray>(mlx::core::copy(a.inner, stream.inner));
+}
+
 // Array factory functions.
 std::unique_ptr<MlxArray> zeros(rust::Slice<const int32_t> shape, int32_t dtype) {
     return std::make_unique<MlxArray>(mlx::core::zeros(to_shape(shape), to_dtype(dtype)));

@@ -1103,6 +1103,10 @@ fn validate_pipeline_parallel_startup(startup: &ServerStartupConfig) -> Result<(
 
 fn log_endpoints(startup: &ServerStartupConfig, addr: &str) {
     tracing::info!("Starting mlxcel server on {}", addr);
+    // Surface the backend's GPU count at startup (epic #486, sub-issue #487).
+    // On Metal this is always 1; on a CUDA multi-GPU host it reports the real
+    // adapter count that `--tp-size` can target.
+    tracing::info!("Detected {} GPU(s)", mlxcel_core::gpu_device_count());
     tracing::info!("Endpoints:");
     tracing::info!("  POST /v1/chat/completions  - OpenAI chat completions");
     tracing::info!("  POST /v1/completions       - OpenAI text completions");

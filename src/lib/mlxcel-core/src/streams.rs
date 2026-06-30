@@ -183,9 +183,219 @@ pub fn install_default_stream(stream: Option<&UniquePtr<MlxStream>>) {
     }
 }
 
+// --- Index-aware multi-GPU device/stream helpers (epic #486, sub-issue #487) ---
+//
+// The boolean device API targets GPU index 0 only. The helpers below let a
+// caller place a stream or the default device on a specific GPU, validating
+// the index against the backend's reported device count. They are the
+// foundation for per-rank device placement in single-node tensor
+// parallelism; the consuming TP runtime lands in sub-issue #488.
+
+/// Error returned by the index-aware GPU helpers when the requested GPU
+/// index is outside `0..gpu_device_count()`.
+///
+/// On a single-GPU backend (Metal/Apple, CPU-only) only index 0 is valid, so
+/// any `index > 0` produces this error. On a multi-GPU CUDA host the valid
+/// range widens to the real adapter count.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InvalidGpuIndex {
+    /// The out-of-range index that was requested.
+    pub requested: i32,
+    /// The number of usable GPUs reported by the active backend.
+    pub device_count: i32,
+}
+
+impl std::fmt::Display for InvalidGpuIndex {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "GPU index {} is out of range: {} GPU(s) available (valid indices 0..{})",
+            self.requested, self.device_count, self.device_count
+        )
+    }
+}
+
+impl std::error::Error for InvalidGpuIndex {}
+
+/// Number of usable GPUs reported by the active MLX backend.
+///
+/// Portable across backends via MLX's `device_count(DeviceType::gpu)`: Metal
+/// reports 1 (single unified-memory GPU), a CUDA build reports the real
+/// adapter count, and a CPU-only build clamps to 1. Always `>= 1`.
+pub fn gpu_device_count() -> i32 {
+    ffi::gpu_device_count()
+}
+
+/// Validate that `index` names a usable GPU for the active backend.
+///
+/// Returns [`InvalidGpuIndex`] for a negative index or one at/above
+/// [`gpu_device_count`].
+fn check_gpu_index(index: i32) -> Result<(), InvalidGpuIndex> {
+    let device_count = ffi::gpu_device_count();
+    if index < 0 || index >= device_count {
+        return Err(InvalidGpuIndex {
+            requested: index,
+            device_count,
+        });
+    }
+    Ok(())
+}
+
+/// Create a new MLX stream pinned to GPU `index` (0-based).
+///
+/// Index-aware sibling of the boolean `new_stream_on_device`. On a
+/// single-GPU backend only index 0 is valid; `index > 0` returns
+/// [`InvalidGpuIndex`]. On a multi-GPU CUDA host any index in
+/// `0..gpu_device_count()` is valid. This is the foundation for placing each
+/// tensor-parallel rank's compute on its own GPU (epic #486).
+pub fn new_stream_on_gpu(index: i32) -> Result<UniquePtr<MlxStream>, InvalidGpuIndex> {
+    check_gpu_index(index)?;
+    Ok(ffi::new_stream_on_gpu_index(index))
+}
+
+/// Make GPU `index` the default device for subsequent MLX ops.
+///
+/// Validates `index` against [`gpu_device_count`]; index 0 is always valid.
+/// Mirrors the boolean `set_default_device` but targets a specific GPU.
+pub fn set_default_gpu_device(index: i32) -> Result<(), InvalidGpuIndex> {
+    check_gpu_index(index)?;
+    ffi::set_default_device_index(index);
+    Ok(())
+}
+
+/// Create a thread-local MLX stream pinned to GPU `index`.
+///
+/// Index-aware sibling of [`new_thread_local_generation_stream`]; validates
+/// `index` against [`gpu_device_count`]. Intended for the multi-GPU TP
+/// runtime (sub-issue #488) so each rank's worker thread dispatches on its
+/// own GPU.
+pub fn new_thread_local_stream_on_gpu(
+    index: i32,
+) -> Result<UniquePtr<MlxThreadLocalStream>, InvalidGpuIndex> {
+    check_gpu_index(index)?;
+    Ok(ffi::new_thread_local_stream_gpu_index(index))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // --- Index-aware multi-GPU helpers (epic #486, sub-issue #487) ---
+
+    /// The portable device count is always at least one, on every backend.
+    #[test]
+    fn gpu_device_count_is_at_least_one() {
+        assert!(
+            gpu_device_count() >= 1,
+            "gpu_device_count must report at least one usable GPU"
+        );
+    }
+
+    /// A stream can be created on every valid GPU index `0..count`. On Metal
+    /// this exercises only index 0; on a multi-GPU CUDA host it covers all.
+    #[test]
+    fn new_stream_on_gpu_accepts_every_valid_index() {
+        let count = gpu_device_count();
+        for index in 0..count {
+            let stream = new_stream_on_gpu(index)
+                .unwrap_or_else(|e| panic!("index {index} should be valid: {e}"));
+            assert!(
+                !stream.is_null(),
+                "stream for index {index} must be non-null"
+            );
+        }
+    }
+
+    /// Out-of-range indices (at/above the count, and negative) return the
+    /// typed error carrying the offending index and the device count.
+    #[test]
+    fn new_stream_on_gpu_rejects_out_of_range() {
+        let count = gpu_device_count();
+        match new_stream_on_gpu(count) {
+            Ok(_) => panic!("index == count ({count}) must be rejected"),
+            Err(e) => {
+                assert_eq!(e.requested, count);
+                assert_eq!(e.device_count, count);
+            }
+        }
+        match new_stream_on_gpu(-1) {
+            Ok(_) => panic!("negative index must be rejected"),
+            Err(e) => {
+                assert_eq!(e.requested, -1);
+                assert_eq!(e.device_count, count);
+            }
+        }
+    }
+
+    /// `set_default_gpu_device` validates the index: index 0 always succeeds,
+    /// an at-count index errors. The boolean GPU default is restored so the
+    /// process-global default device is not left mutated for sibling tests.
+    #[test]
+    fn set_default_gpu_device_validates_index() {
+        let count = gpu_device_count();
+        assert!(
+            set_default_gpu_device(count).is_err(),
+            "index == count ({count}) must be rejected"
+        );
+        // Index 0 is the GPU that is already the default on a single-GPU
+        // backend, so installing then restoring leaves the process as-is.
+        set_default_gpu_device(0).expect("index 0 is always valid");
+        ffi::set_default_device(true);
+    }
+
+    /// The thread-local stream factory validates indices the same way.
+    #[test]
+    fn new_thread_local_stream_on_gpu_validates_index() {
+        let count = gpu_device_count();
+        let tls = new_thread_local_stream_on_gpu(0).expect("index 0 is always valid");
+        assert!(!tls.is_null(), "TLS handle for index 0 must be non-null");
+        assert!(
+            new_thread_local_stream_on_gpu(count).is_err(),
+            "index == count ({count}) must be rejected"
+        );
+    }
+
+    /// The typed error renders a human-readable, actionable message naming
+    /// both the bad index and the available device count.
+    #[test]
+    fn invalid_gpu_index_display_is_actionable() {
+        let err = InvalidGpuIndex {
+            requested: 3,
+            device_count: 1,
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains('3'),
+            "message should name the bad index: {msg}"
+        );
+        assert!(
+            msg.contains('1'),
+            "message should name the device count: {msg}"
+        );
+    }
+
+    /// CUDA-gated: a trivial op runs on a non-default GPU index and produces
+    /// the correct result. Compiled only under the `cuda` feature (no Metal
+    /// build risk) and skipped on a single-GPU CUDA host. Authored for a
+    /// multi-GPU CUDA box; not exercised on this Apple/Metal machine.
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn trivial_op_runs_on_non_default_gpu_index() {
+        let count = gpu_device_count();
+        if count < 2 {
+            // Single-GPU CUDA host: no second device to target.
+            return;
+        }
+        // Pin the default device to GPU 1, compute 1 + 1 there, then restore.
+        set_default_gpu_device(1).expect("index 1 valid on a multi-GPU host");
+        let a = ffi::ones(&[1], crate::dtype::FLOAT32);
+        let b = ffi::ones(&[1], crate::dtype::FLOAT32);
+        let c = ffi::add(&a, &b);
+        ffi::eval(&c);
+        let value = ffi::item_f32(&c);
+        set_default_gpu_device(0).expect("index 0 is always valid");
+        assert_eq!(value, 2.0, "1 + 1 on GPU 1 should equal 2");
+    }
 
     /// Smoke test: the TLS handle factory either succeeds (GPU build)
     /// or returns `None` cleanly (CPU-only build).

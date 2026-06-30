@@ -59,6 +59,29 @@ mod ffi {
         /// Synchronize the calling thread's stream for this TLS handle.
         fn synchronize_thread_local_stream(tls: &MlxThreadLocalStream);
 
+        // Multi-GPU device-index surface (epic #486, sub-issue #487).
+        //
+        // Index-aware counterparts of the boolean device API. Raw,
+        // unvalidated entry points: prefer the safe wrappers in
+        // [`crate::streams`] (`new_stream_on_gpu`, `set_default_gpu_device`,
+        // `new_thread_local_stream_on_gpu`), which validate the index
+        // against `gpu_device_count`.
+
+        /// Number of usable GPUs for the active backend (always >= 1).
+        fn gpu_device_count() -> i32;
+
+        /// Create a new stream pinned to GPU `index` (0-based, unvalidated).
+        fn new_stream_on_gpu_index(index: i32) -> UniquePtr<MlxStream>;
+
+        /// Make GPU `index` the default device for subsequent ops (unvalidated).
+        fn set_default_device_index(index: i32);
+
+        /// Create a thread-local stream pinned to GPU `index` (unvalidated).
+        fn new_thread_local_stream_gpu_index(index: i32) -> UniquePtr<MlxThreadLocalStream>;
+
+        /// Materialize `a` on the device backing `stream` (cross-device copy).
+        fn copy_array_to_stream(a: &MlxArray, stream: &MlxStream) -> UniquePtr<MlxArray>;
+
         // Array factory functions.
         /// Create array filled with zeros
         fn zeros(shape: &[i32], dtype: i32) -> UniquePtr<MlxArray>;

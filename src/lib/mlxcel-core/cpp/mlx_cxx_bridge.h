@@ -72,6 +72,43 @@ std::unique_ptr<MlxStream> stream_from_thread_local_stream(const MlxThreadLocalS
 // dispatched the work.
 void synchronize_thread_local_stream(const MlxThreadLocalStream& tls);
 
+// --- Multi-GPU device-index surface (epic #486, sub-issue #487) ---
+//
+// The boolean device API (`new_stream_on_device(bool)`,
+// `set_default_device(bool)`) can only target GPU index 0. These
+// index-aware entry points are the foundation for single-node tensor
+// parallelism, where each rank's weights and compute live on their own
+// physical GPU. They use MLX's portable device API
+// (`mlx::core::device_count`, the `Device(DeviceType, index)`
+// constructor) so the same code compiles on Metal (one GPU), a CUDA
+// multi-GPU host, and a CPU-only build; no CUDA headers are required.
+
+// Number of usable GPUs for the active backend, via
+// `mlx::core::device_count(Device::gpu)`. Metal reports 1 (single
+// unified-memory GPU), a CUDA build reports the real adapter count, and a
+// CPU-only build clamps to 1. Always returns >= 1.
+int32_t gpu_device_count();
+
+// New stream pinned to GPU `index` (0-based). `index` must be in
+// `[0, gpu_device_count())`; the Rust wrapper validates this before
+// calling, so an out-of-range index here is undefined per MLX.
+std::unique_ptr<MlxStream> new_stream_on_gpu_index(int32_t index);
+
+// Make GPU `index` the default device for subsequent ops. Mirrors
+// `set_default_device(bool)` but targets a specific GPU.
+void set_default_device_index(int32_t index);
+
+// Thread-local stream pinned to GPU `index`. Index-aware sibling of
+// `new_thread_local_stream_gpu`; each calling thread resolves its own
+// per-thread stream on that GPU.
+std::unique_ptr<MlxThreadLocalStream> new_thread_local_stream_gpu_index(int32_t index);
+
+// Materialize `a` on the device backing `stream` via `mlx::core::copy`.
+// On a multi-GPU CUDA host this is a genuine cross-device copy (used by
+// sub-issue 2 to move shards between GPUs); on a single-GPU backend it is
+// a same-device copy.
+std::unique_ptr<MlxArray> copy_array_to_stream(const MlxArray& a, const MlxStream& stream);
+
 // Array factory functions.
 // Create array filled with zeros
 std::unique_ptr<MlxArray> zeros(rust::Slice<const int32_t> shape, int32_t dtype);

@@ -115,6 +115,10 @@ fn load_generation_model(
     preflight: Option<&MemoryEstimate>,
 ) -> Result<(mlxcel::LoadedModel, mlxcel::tokenizer::MlxcelTokenizer)> {
     println!("Loading model from {:?}...", args.model.model);
+    // Surface the backend's GPU count (epic #486, sub-issue #487). Always 1 on
+    // Metal; reports the real adapter count on a CUDA multi-GPU host, which is
+    // what `--tp-size` shards across.
+    println!("Detected {} GPU(s).", mlxcel_core::gpu_device_count());
     let load_start = Instant::now();
     let shard_config = shard_config_from_cli(
         args.tensor_parallel.tp_size,
