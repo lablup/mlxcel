@@ -62,6 +62,74 @@ pub(crate) fn f32_le_to_f32(bytes: &[u8]) -> Vec<f32> {
         .collect()
 }
 
+/// Dequantize one MLX affine-quantized weight to row-major `[out, in]` f32.
+///
+/// `packed` is the row-major `[out, in_packed]` u32 weight (little-endian bytes,
+/// `in_packed = in * bits / 32`); `scales` / `biases` are the row-major
+/// `[out, in/group_size]` f16 buffers. Each weight is recovered as
+/// `w[o,i] = q[o,i] * scale[o, i/group_size] + bias[o, i/group_size]`, where `q`
+/// is the `bits`-wide value unpacked low-order-first from `packed[o, i/(32/bits)]`
+/// (the MLX affine layout). The graph runs in f32, so the packed weights are
+/// widened here once at load.
+pub(crate) fn dequantize_affine(
+    packed: &[u8],
+    scales: &[u8],
+    biases: &[u8],
+    out: usize,
+    in_packed: usize,
+    bits: usize,
+    group_size: usize,
+) -> Result<Vec<f32>, String> {
+    if !(bits == 4 || bits == 8) {
+        return Err(format!(
+            "unsupported quantization bits {bits} (expected 4 or 8)"
+        ));
+    }
+    let per_u32 = 32 / bits; // values packed per u32
+    let in_ = in_packed * per_u32;
+    if group_size == 0 || !in_.is_multiple_of(group_size) {
+        return Err(format!(
+            "quantization group_size {group_size} does not divide in dimension {in_}"
+        ));
+    }
+    let n_groups = in_ / group_size;
+    if packed.len() != out * in_packed * 4 {
+        return Err(format!(
+            "packed weight is {} bytes, expected {} ([{out}, {in_packed}] u32)",
+            packed.len(),
+            out * in_packed * 4
+        ));
+    }
+    let scales = f16_to_f32(scales);
+    let biases = f16_to_f32(biases);
+    if scales.len() != out * n_groups || biases.len() != out * n_groups {
+        return Err(format!(
+            "scales/biases have {}/{} elements, expected {} ([{out}, {n_groups}])",
+            scales.len(),
+            biases.len(),
+            out * n_groups
+        ));
+    }
+    let mask: u32 = (1u32 << bits) - 1;
+    let mut w = vec![0f32; out * in_];
+    for o in 0..out {
+        let row = &packed[o * in_packed * 4..(o + 1) * in_packed * 4];
+        let grow = o * n_groups;
+        let wrow = o * in_;
+        for p in 0..in_packed {
+            let u =
+                u32::from_le_bytes([row[p * 4], row[p * 4 + 1], row[p * 4 + 2], row[p * 4 + 3]]);
+            for j in 0..per_u32 {
+                let i = p * per_u32 + j;
+                let q = ((u >> (bits * j)) & mask) as f32;
+                let g = i / group_size;
+                w[wrow + i] = q * scales[grow + g] + biases[grow + g];
+            }
+        }
+    }
+    Ok(w)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -114,5 +182,39 @@ mod tests {
     fn f32_passthrough_reinterprets() {
         let bytes = 1.5f32.to_le_bytes();
         assert_eq!(f32_le_to_f32(&bytes), vec![1.5]);
+    }
+
+    /// 4-bit affine dequant on a hand-built row: one u32 packs eight nibbles
+    /// 1..=8 (low-order first), two groups of 4 with scale/bias (2.0, +10) and
+    /// (0.5, -1), so `q*scale + bias` is exact.
+    #[test]
+    fn dequantize_affine_recovers_hand_example() {
+        // u32 = 0x8765_4321 -> nibbles [1,2,3,4,5,6,7,8] low-order first.
+        let packed = [0x21u8, 0x43, 0x65, 0x87];
+        let scales = [0x00u8, 0x40, 0x00, 0x38]; // f16 [2.0, 0.5]
+        let biases = [0x00u8, 0x49, 0x00, 0xBC]; // f16 [10.0, -1.0]
+        let w = dequantize_affine(&packed, &scales, &biases, 1, 1, 4, 4).unwrap();
+        assert_eq!(w, vec![12.0, 14.0, 16.0, 18.0, 1.5, 2.0, 2.5, 3.0]);
+    }
+
+    /// 8-bit affine dequant: one u32 packs four bytes 10/20/30/40 (low-order
+    /// first), two groups of 2 with scale/bias (2.0, +10) and (0.5, -1), so
+    /// `q*scale + bias` is exact. Exercises the `bits = 8` (`per_u32 = 4`) path.
+    #[test]
+    fn dequantize_affine_8bit_recovers_hand_example() {
+        // u32 = 0x281E_140A -> bytes [10, 20, 30, 40] low-order first.
+        let packed = [0x0Au8, 0x14, 0x1E, 0x28];
+        let scales = [0x00u8, 0x40, 0x00, 0x38]; // f16 [2.0, 0.5]
+        let biases = [0x00u8, 0x49, 0x00, 0xBC]; // f16 [10.0, -1.0]
+        let w = dequantize_affine(&packed, &scales, &biases, 1, 1, 8, 2).unwrap();
+        assert_eq!(w, vec![30.0, 50.0, 14.0, 19.0]);
+    }
+
+    /// A packed buffer whose size disagrees with `[out, in_packed]` is rejected.
+    #[test]
+    fn dequantize_affine_rejects_size_mismatch() {
+        let packed = [0u8; 4];
+        let sb = [0u8; 4];
+        assert!(dequantize_affine(&packed, &sb, &sb, 2, 1, 4, 4).is_err());
     }
 }
