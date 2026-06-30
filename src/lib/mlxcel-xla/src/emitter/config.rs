@@ -60,6 +60,21 @@ pub struct Config {
     /// an unquantized bf16/f16/f32 checkpoint). The graph itself is unchanged (it
     /// runs in f32); the loader dequantizes the packed weights at load.
     pub quantization: Option<QuantConfig>,
+    /// Gemma2 architecture switch. When true the emitter scales the input
+    /// embeddings by `sqrt(hidden)`, uses `(1 + weight)` RMSNorm, a GeGLU
+    /// (`gelu_tanh`) MLP, a post-norm on each sublayer (four norms per layer), and
+    /// attention / final logit soft-capping; `o_proj` is non-square
+    /// (`n_q*head_dim != hidden`). Llama / Qwen2 keep their existing path.
+    pub gemma2: bool,
+    /// Gemma2 query pre-attention scale base: the attention score scale is
+    /// `query_pre_attn_scalar^-0.5` (Gemma2; can differ from `head_dim`). `None`
+    /// uses `head_dim^-0.5` (Llama / Qwen2).
+    pub query_pre_attn_scalar: Option<f64>,
+    /// Gemma2 attention logit soft-cap: `softcap * tanh(scores / softcap)` on the
+    /// pre-mask scores. `None` for Llama / Qwen2.
+    pub attn_logit_softcap: Option<f32>,
+    /// Gemma2 final logit soft-cap on the LM-head logits. `None` for Llama / Qwen2.
+    pub final_logit_softcap: Option<f32>,
 }
 
 impl Config {
@@ -84,6 +99,10 @@ impl Config {
             qkv_bias: false,
             tie_word_embeddings: true,
             quantization: None,
+            gemma2: false,
+            query_pre_attn_scalar: None,
+            attn_logit_softcap: None,
+            final_logit_softcap: None,
         }
     }
 
@@ -101,6 +120,7 @@ impl Config {
             serde_json::from_str(s).map_err(|e| format!("parse config.json: {e}"))?;
 
         let model_type = v.get("model_type").and_then(serde_json::Value::as_str);
+        let gemma2 = model_type == Some("gemma2");
         // Qwen2 always has a q/k/v projection bias (the HF `Qwen2Attention` hard-
         // codes `bias=True`), and it is not a `config.json` field, so it is keyed
         // off the architecture rather than read.
@@ -119,10 +139,11 @@ impl Config {
                 false
             }
             Some("qwen2") => true,
+            Some("gemma2") => false,
             other => {
                 return Err(format!(
-                    "the OpenXLA emitter supports the Llama and Qwen2 architectures; \
-                     config.json model_type = {other:?} (Gemma / others are a follow-up)"
+                    "the OpenXLA emitter supports the Llama, Qwen2, and Gemma2 architectures; \
+                     config.json model_type = {other:?} (other Gemma variants are a follow-up)"
                 ));
             }
         };
@@ -213,6 +234,26 @@ impl Config {
             }
         };
 
+        // Gemma2 logit soft-caps and the query pre-attention scale base (read only
+        // for a gemma2 checkpoint; the scale defaults to `head_dim` if absent).
+        let (query_pre_attn_scalar, attn_logit_softcap, final_logit_softcap) = if gemma2 {
+            (
+                Some(
+                    v.get("query_pre_attn_scalar")
+                        .and_then(serde_json::Value::as_f64)
+                        .unwrap_or(head_dim as f64),
+                ),
+                v.get("attn_logit_softcapping")
+                    .and_then(serde_json::Value::as_f64)
+                    .map(|x| x as f32),
+                v.get("final_logit_softcapping")
+                    .and_then(serde_json::Value::as_f64)
+                    .map(|x| x as f32),
+            )
+        } else {
+            (None, None, None)
+        };
+
         Ok(Config {
             hidden,
             inter: u("intermediate_size")?,
@@ -227,6 +268,10 @@ impl Config {
             qkv_bias,
             tie_word_embeddings,
             quantization,
+            gemma2,
+            query_pre_attn_scalar,
+            attn_logit_softcap,
+            final_logit_softcap,
         })
     }
 
@@ -241,8 +286,19 @@ impl Config {
         self.n_q / self.n_kv
     }
 
-    /// Attention scale head_dim^-0.5.
+    /// Attention score scale. Llama / Qwen2 use `head_dim^-0.5`; Gemma2 uses
+    /// `query_pre_attn_scalar^-0.5` (computed in f64 to match HF, since it can
+    /// differ from `head_dim`). The Llama / Qwen2 branch is unchanged.
     pub fn scale(&self) -> f32 {
-        (self.head_dim as f32).powf(-0.5)
+        match self.query_pre_attn_scalar {
+            Some(q) => q.powf(-0.5) as f32,
+            None => (self.head_dim as f32).powf(-0.5),
+        }
+    }
+
+    /// Gemma2 input-embedding normalizer `sqrt(hidden)` (computed in f64 then
+    /// narrowed, matching HF's `hidden_size**0.5` cast to the activation dtype).
+    pub fn embed_normalizer(&self) -> f32 {
+        (self.hidden as f64).sqrt() as f32
     }
 }

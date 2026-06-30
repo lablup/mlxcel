@@ -19,14 +19,15 @@
 //! `config.json` at load, instead of being pinned to the bundled Llama-3.2-1B
 //! `.mlir` assets.
 //!
-//! Scope: the Llama and Qwen2 architectures (RMSNorm, SwiGLU MLP, GQA, tied or
-//! untied embeddings). The `Config` is parameterized by dimensions, so any
-//! checkpoint of a supported architecture (any size) emits correctly. The
-//! architecture switches the emitter branches on are the RoPE kind (llama3 scaling
-//! for Llama, plain for Qwen2), whether the q/k/v projections carry a bias (Qwen2,
-//! Stage B), and whether the LM head is tied to the token embedding or a separate
-//! `lm_head.weight` (untied, e.g. Llama-3.1-8B); other architectures (e.g. Gemma
-//! GeGLU / softcap) are a follow-up that extends the emitter and `from_json`.
+//! Scope: the Llama, Qwen2, and Gemma2 architectures. The `Config` is
+//! parameterized by dimensions, so any checkpoint of a supported architecture (any
+//! size) emits correctly. The architecture switches the emitter branches on are
+//! the RoPE kind (llama3 scaling for Llama, plain for Qwen2 / Gemma2), whether the
+//! q/k/v projections carry a bias (Qwen2), whether the LM head is tied or a
+//! separate `lm_head.weight` (untied, e.g. Llama-3.1-8B), and the `gemma2` switch
+//! (embedding scale, `(1+w)` RMSNorm, GeGLU, a four-norm layer, attention / final
+//! logit soft-cap, non-square `o_proj`). Gemma2 is single-sequence only so far;
+//! the batched / ragged serve graphs are a follow-up.
 //!
 //! Pure Rust (no IREE), so it compiles and is unit-tested without the `iree`
 //! feature; only the IREE engine consumes it. The bundled `.mlir` assets remain
@@ -84,6 +85,10 @@ mod tests {
             qkv_bias,
             tie_word_embeddings: true,
             quantization: None,
+            gemma2: false,
+            query_pre_attn_scalar: None,
+            attn_logit_softcap: None,
+            final_logit_softcap: None,
         }
     }
 
@@ -142,16 +147,17 @@ mod tests {
         assert_eq!(c.eps, 1e-6);
     }
 
-    /// A non-Llama/Qwen2 architecture and an unsupported `rope_scaling` are each
-    /// rejected with a clear message rather than mis-emitted. (Untied embeddings
-    /// are no longer rejected; see `from_json_accepts_untied_embeddings`.)
+    /// A non-Llama/Qwen2/Gemma2 architecture and an unsupported `rope_scaling` are
+    /// each rejected with a clear message rather than mis-emitted. (Untied
+    /// embeddings and Gemma2 are no longer rejected; see
+    /// `from_json_accepts_untied_embeddings` / `from_json_parses_gemma2`.)
     #[test]
     fn from_json_rejects_unsupported_configs() {
-        let gemma = r#"{"model_type":"gemma2","tie_word_embeddings":true,"hidden_size":8,
+        let gemma3 = r#"{"model_type":"gemma3","tie_word_embeddings":true,"hidden_size":8,
             "num_attention_heads":2,"intermediate_size":16,"num_hidden_layers":2,
             "num_key_value_heads":1,"rms_norm_eps":1e-6,"rope_theta":1e4,"vocab_size":10}"#;
         assert!(
-            Config::from_json_str(gemma)
+            Config::from_json_str(gemma3)
                 .unwrap_err()
                 .contains("model_type")
         );
@@ -165,6 +171,30 @@ mod tests {
                 .unwrap_err()
                 .contains("rope_type")
         );
+    }
+
+    /// Gemma2 parses to its architecture switches: the soft-caps, the query
+    /// pre-attention scale, plain RoPE, and the `gemma2` structural flag. Uses the
+    /// Gemma2-9B values, where `query_pre_attn_scalar` (224) differs from `head_dim`
+    /// (256), so the scale must come from the former, not the latter.
+    #[test]
+    fn from_json_parses_gemma2() {
+        let g = r#"{"model_type":"gemma2","hidden_size":3584,"num_attention_heads":16,
+            "num_key_value_heads":8,"head_dim":256,"intermediate_size":14336,
+            "num_hidden_layers":42,"rms_norm_eps":1e-6,"rope_theta":1e4,"vocab_size":256000,
+            "query_pre_attn_scalar":224,"attn_logit_softcapping":50.0,
+            "final_logit_softcapping":30.0,"hidden_activation":"gelu_pytorch_tanh"}"#;
+        let c = Config::from_json_str(g).expect("gemma2 parses");
+        assert!(c.gemma2);
+        assert_eq!(c.rope, RopeScaling::Plain);
+        assert_eq!(c.query_pre_attn_scalar, Some(224.0));
+        assert_eq!(c.attn_logit_softcap, Some(50.0));
+        assert_eq!(c.final_logit_softcap, Some(30.0));
+        assert_eq!(c.head_dim, 256, "explicit head_dim (!= hidden/n_q)");
+        assert!(c.tie_word_embeddings, "Gemma2 ties embeddings by default");
+        // The scale is query_pre_attn_scalar^-0.5 (224), NOT head_dim^-0.5 (256).
+        assert_eq!(c.scale(), (224.0f64.powf(-0.5)) as f32);
+        assert_ne!(c.scale(), (256.0f32).powf(-0.5), "must not use head_dim");
     }
 
     /// Untied embeddings are supported (issue #449 M3 Stage 2d): `from_json` reads

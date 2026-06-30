@@ -44,6 +44,11 @@ struct LayerW {
     bk: Option<Val>,
     bq: Option<Val>,
     bv: Option<Val>,
+    /// Gemma2 pre/post feed-forward norms (`None` for Llama / Qwen2). Gemma2 wraps
+    /// each sublayer in a pre- and a post-norm: `post_ln` becomes the POST-attn
+    /// norm, `pre_ff_ln` the pre-MLP norm, `post_ff_ln` the post-MLP norm.
+    pre_ff_ln: Option<Val>,
+    post_ff_ln: Option<Val>,
 }
 
 struct Args {
@@ -120,7 +125,10 @@ fn take_layer_weights(decls: &mut Vec<ArgDecl>, idx: &mut usize, c: &Config, li:
     let post_ln = take_arg(decls, idx, Ty::f32(vec![h]), p("post_ln"));
     let up = take_arg(decls, idx, Ty::f32(vec![inter, h]), p("up"));
     let wk = take_arg(decls, idx, Ty::f32(vec![kv, h]), p("wk"));
-    let wo = take_arg(decls, idx, Ty::f32(vec![qd, h]), p("wo"));
+    // o_proj maps `[n_q*head_dim]` -> `[hidden]`, so its weight is `[h, qd]` (HF's
+    // `[out, in]`). For Llama / Qwen2 `qd == h`, so this renders the same square
+    // type as before (byte-identical); Gemma2 is genuinely non-square.
+    let wo = take_arg(decls, idx, Ty::f32(vec![h, qd]), p("wo"));
     let wq = take_arg(decls, idx, Ty::f32(vec![qd, h]), p("wq"));
     let wv = take_arg(decls, idx, Ty::f32(vec![kv, h]), p("wv"));
     let (bk, bq, bv) = if c.qkv_bias {
@@ -130,6 +138,15 @@ fn take_layer_weights(decls: &mut Vec<ArgDecl>, idx: &mut usize, c: &Config, li:
         (Some(bk), Some(bq), Some(bv))
     } else {
         (None, None, None)
+    };
+    // Gemma2's two extra per-layer norms, appended after the q/k/v biases slot in
+    // the same order `weight_names` lists them (pre then post feed-forward).
+    let (pre_ff_ln, post_ff_ln) = if c.gemma2 {
+        let pre = take_arg(decls, idx, Ty::f32(vec![h]), p("pre_ff_ln"));
+        let post = take_arg(decls, idx, Ty::f32(vec![h]), p("post_ff_ln"));
+        (Some(pre), Some(post))
+    } else {
+        (None, None)
     };
     LayerW {
         down,
@@ -144,6 +161,8 @@ fn take_layer_weights(decls: &mut Vec<ArgDecl>, idx: &mut usize, c: &Config, li:
         bk,
         bq,
         bv,
+        pre_ff_ln,
+        post_ff_ln,
     }
 }
 
@@ -292,6 +311,58 @@ fn rms_norm(b: &mut Builder, x: &Val, w: &Val, k: &Consts, hidden: usize) -> Val
     b.multiply(&xr, w)
 }
 
+/// Gemma2 `(1 + weight)` norm scale (`weight + 1` over the `[hidden]` feature
+/// axis). Gemma stores the RMSNorm weight offset by one, so the gemma2 paths pass
+/// `gemma_norm_w(...)` where Llama / Qwen2 pass the raw weight.
+fn gemma_norm_w(b: &mut Builder, w: &Val, k: &Consts, hidden: usize) -> Val {
+    let one = b.broadcast(&k.one, &[], vec![hidden]);
+    b.add(w, &one)
+}
+
+/// The RMSNorm weight to feed `rms_norm`: `1 + w` for Gemma2, the raw `w`
+/// otherwise. A `Val` clone is just a handle copy (no emitted op), so the
+/// Llama / Qwen2 graphs are unchanged.
+fn norm_w(b: &mut Builder, w: &Val, c: &Config, k: &Consts, hidden: usize) -> Val {
+    if c.gemma2 {
+        gemma_norm_w(b, w, k, hidden)
+    } else {
+        w.clone()
+    }
+}
+
+/// Gemma2 `gelu_pytorch_tanh` activation, elementwise over `x` (any shape):
+/// `0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))`.
+fn gelu_tanh(b: &mut Builder, x: &Val) -> Val {
+    let shape = x.ty.shape.clone();
+    let bc = |b: &mut Builder, v: f32, shape: &[usize]| {
+        let c = b.const_f32(v);
+        b.broadcast(&c, &[], shape.to_vec())
+    };
+    let c0 = bc(b, (2.0f64 / std::f64::consts::PI).sqrt() as f32, &shape);
+    let c1 = bc(b, 0.044715, &shape);
+    let half = bc(b, 0.5, &shape);
+    let one = bc(b, 1.0, &shape);
+    let x2 = b.multiply(x, x);
+    let x3 = b.multiply(&x2, x);
+    let c1x3 = b.multiply(&c1, &x3);
+    let inner1 = b.add(x, &c1x3);
+    let inner = b.multiply(&c0, &inner1);
+    let t = b.tanh(&inner);
+    let onept = b.add(&one, &t);
+    let hx = b.multiply(&half, x);
+    b.multiply(&hx, &onept)
+}
+
+/// Gemma2 logit soft-cap, elementwise over `x`: `cap * tanh(x / cap)`.
+fn softcap(b: &mut Builder, x: &Val, cap: f32) -> Val {
+    let shape = x.ty.shape.clone();
+    let capc = b.const_f32(cap);
+    let capb = b.broadcast(&capc, &[], shape);
+    let xd = b.divide(x, &capb);
+    let t = b.tanh(&xd);
+    b.multiply(&t, &capb)
+}
+
 /// HF half-split RoPE on x:[heads, d]; cos/sin are [d] for the position.
 fn apply_rope(b: &mut Builder, x: &Val, cos: &Val, sin: &Val, heads: usize, d: usize) -> Val {
     let half = d / 2;
@@ -323,6 +394,12 @@ pub fn emit_decode(c: &Config, sample: bool) -> String {
     // --- head: embed gather, rope vectors, decode key mask ---
     let emb_row = b.dynamic_slice(&a.embed, &[&a.token, &k.c0], vec![1, h]);
     let mut x = b.reshape(&emb_row, vec![h]);
+    // Gemma2 scales the input embeddings by sqrt(hidden).
+    if c.gemma2 {
+        let norm = b.const_f32(c.embed_normalizer());
+        let nb = b.broadcast(&norm, &[], vec![h]);
+        x = b.multiply(&x, &nb);
+    }
 
     let cos_row = b.dynamic_slice(&k.cos_table, &[&a.pos, &k.c0], vec![1, d]);
     let cos_vec = b.reshape(&cos_row, vec![d]);
@@ -344,7 +421,8 @@ pub fn emit_decode(c: &Config, sample: bool) -> String {
         let lw = &a.layers[li];
 
         // attention block
-        let hn = rms_norm(&mut b, &x, &lw.in_ln, &k, h);
+        let in_ln_w = norm_w(&mut b, &lw.in_ln, c, &k, h);
+        let hn = rms_norm(&mut b, &x, &in_ln_w, &k, h);
         let q = b.linear(&hn, &lw.wq);
         let q = add_proj_bias(&mut b, q, &lw.bq);
         let q = b.reshape(&q, vec![nq, d]);
@@ -384,6 +462,11 @@ pub fn emit_decode(c: &Config, sample: bool) -> String {
         let scores = b.reshape(&scores, vec![nq, MAX_SEQ]);
         let scale_b = b.broadcast(&k.scale, &[], vec![nq, MAX_SEQ]);
         let scores = b.multiply(&scores, &scale_b);
+        // Gemma2 attention logit soft-cap, applied to the scaled scores before the mask.
+        let scores = match c.attn_logit_softcap {
+            Some(cap) => softcap(&mut b, &scores, cap),
+            None => scores,
+        };
         let kmask_b = b.broadcast(&kmask, &[1], vec![nq, MAX_SEQ]);
         let scores = b.add(&scores, &kmask_b);
 
@@ -402,28 +485,65 @@ pub fn emit_decode(c: &Config, sample: bool) -> String {
         let o = b.reshape(&o, vec![nq, d]);
         let o = b.reshape(&o, vec![nq * d]);
         let attn_out = b.linear(&o, &lw.wo);
+        // Gemma2: post-attention norm on the sublayer output before the residual.
+        let attn_out = if c.gemma2 {
+            let w = norm_w(&mut b, &lw.post_ln, c, &k, h);
+            rms_norm(&mut b, &attn_out, &w, &k, h)
+        } else {
+            attn_out
+        };
         x = b.add(&x, &attn_out);
 
-        // MLP: down( silu(x@gate^T) * (x@up^T) )
-        let hn2 = rms_norm(&mut b, &x, &lw.post_ln, &k, h);
+        // MLP. Pre-MLP norm: Llama / Qwen2 use post_attention_layernorm; Gemma2
+        // uses pre_feedforward_layernorm (post_attention_layernorm became the
+        // post-attn norm above). Activation: SwiGLU (silu) vs Gemma2 GeGLU (gelu).
+        let pre_mlp = if c.gemma2 {
+            lw.pre_ff_ln.as_ref().expect("gemma2 pre_ff_ln")
+        } else {
+            &lw.post_ln
+        };
+        let pre_mlp_w = norm_w(&mut b, pre_mlp, c, &k, h);
+        let hn2 = rms_norm(&mut b, &x, &pre_mlp_w, &k, h);
         let gate = b.linear(&hn2, &lw.gate);
         let up = b.linear(&hn2, &lw.up);
-        // silu(gate) = gate * sigmoid(gate), sigmoid(z) = 1/(1+exp(-z))
-        let neg = b.negate(&gate);
-        let ex = b.exponential(&neg);
-        let one_b = b.broadcast(&k.one, &[], vec![c.inter]);
-        let denom = b.add(&one_b, &ex);
-        let sig = b.divide(&one_b, &denom);
-        let silu = b.multiply(&gate, &sig);
-        let act = b.multiply(&silu, &up);
+        let act = if c.gemma2 {
+            gelu_tanh(&mut b, &gate)
+        } else {
+            // silu(gate) = gate * sigmoid(gate), sigmoid(z) = 1/(1+exp(-z))
+            let neg = b.negate(&gate);
+            let ex = b.exponential(&neg);
+            let one_b = b.broadcast(&k.one, &[], vec![c.inter]);
+            let denom = b.add(&one_b, &ex);
+            let sig = b.divide(&one_b, &denom);
+            b.multiply(&gate, &sig)
+        };
+        let act = b.multiply(&act, &up);
         let down = b.linear(&act, &lw.down);
+        // Gemma2: post-MLP norm before the residual.
+        let down = if c.gemma2 {
+            let w = norm_w(
+                &mut b,
+                lw.post_ff_ln.as_ref().expect("gemma2 post_ff_ln"),
+                c,
+                &k,
+                h,
+            );
+            rms_norm(&mut b, &down, &w, &k, h)
+        } else {
+            down
+        };
         x = b.add(&x, &down);
     }
 
-    // --- tail: final norm + LM head (tied embed or untied lm_head), then
-    // optional on-device argmax ---
-    let xf = rms_norm(&mut b, &x, &a.final_norm, &k, h);
+    // --- tail: final norm + LM head (tied embed or untied lm_head), Gemma2 final
+    // logit soft-cap, then optional on-device argmax ---
+    let final_w = norm_w(&mut b, &a.final_norm, c, &k, h);
+    let xf = rms_norm(&mut b, &x, &final_w, &k, h);
     let logits = b.linear(&xf, head_weight(&a.embed, &a.lm_head)); // [V]
+    let logits = match c.final_logit_softcap {
+        Some(cap) => softcap(&mut b, &logits, cap),
+        None => logits,
+    };
     let (out_val, out_ty) = if sample {
         let tok = b.argmax(&logits);
         (tok.name, Ty::scalar("i32").render())
@@ -1140,6 +1260,12 @@ pub fn emit_prefill(c: &Config, sample: bool) -> String {
     // --- head: embed gather, per-position rope vectors, [Lp,Lp] causal mask ---
     let tok_idx = b.reshape(&a.tokens, vec![lp, 1]);
     let mut x = b.gather(&a.embed, &tok_idx); // [Lp, H]
+    // Gemma2 scales the input embeddings by sqrt(hidden).
+    if c.gemma2 {
+        let norm = b.const_f32(c.embed_normalizer());
+        let nb = b.broadcast(&norm, &[], vec![lp, h]);
+        x = b.multiply(&x, &nb);
+    }
 
     let pos_idx = b.reshape(&a.positions, vec![lp, 1]);
     let cos = b.gather(&k.cos_table, &pos_idx); // [Lp, d]
@@ -1163,7 +1289,8 @@ pub fn emit_prefill(c: &Config, sample: bool) -> String {
         let lw = &a.layers[li];
 
         // attention block
-        let hn = rms_norm_seq(&mut b, &x, &lw.in_ln, &k, lp, h); // [Lp, H]
+        let in_ln_w = norm_w(&mut b, &lw.in_ln, c, &k, h);
+        let hn = rms_norm_seq(&mut b, &x, &in_ln_w, &k, lp, h); // [Lp, H]
         let q = b.linear_seq(&hn, &lw.wq); // [Lp, qd]
         let q = add_proj_bias_seq(&mut b, q, &lw.bq, lp, nq * d);
         let q = b.reshape(&q, vec![lp, nq, d]);
@@ -1189,6 +1316,11 @@ pub fn emit_prefill(c: &Config, sample: bool) -> String {
         let scores = b.dot_general(&q4, &kk, &[1], &[1], &[3], &[2], vec![nkv, lp, g, lp]);
         let scale_b = b.broadcast(&k.scale, &[], vec![nkv, lp, g, lp]);
         let scores = b.multiply(&scores, &scale_b);
+        // Gemma2 attention logit soft-cap on the scaled scores before the mask.
+        let scores = match c.attn_logit_softcap {
+            Some(cap) => softcap(&mut b, &scores, cap),
+            None => scores,
+        };
         let cmask_b = b.broadcast(&cmask, &[1, 3], vec![nkv, lp, g, lp]);
         let scores = b.add(&scores, &cmask_b);
 
@@ -1206,31 +1338,67 @@ pub fn emit_prefill(c: &Config, sample: bool) -> String {
         let o = b.transpose(&o, &[1, 0, 2, 3]); // [Lp, nkv, g, d]
         let o = b.reshape(&o, vec![lp, nq * d]); // [Lp, nq*d], head-major
         let attn_out = b.linear_seq(&o, &lw.wo); // [Lp, H]
+        // Gemma2: post-attention norm before the residual.
+        let attn_out = if c.gemma2 {
+            let w = norm_w(&mut b, &lw.post_ln, c, &k, h);
+            rms_norm_seq(&mut b, &attn_out, &w, &k, lp, h)
+        } else {
+            attn_out
+        };
         x = b.add(&x, &attn_out);
 
-        // MLP: down( silu(x@gate^T) * (x@up^T) )
-        let hn2 = rms_norm_seq(&mut b, &x, &lw.post_ln, &k, lp, h);
+        // MLP. Pre-MLP norm: Llama / Qwen2 use post_attention_layernorm; Gemma2
+        // uses pre_feedforward_layernorm. Activation: SwiGLU (silu) vs GeGLU (gelu).
+        let pre_mlp = if c.gemma2 {
+            lw.pre_ff_ln.as_ref().expect("gemma2 pre_ff_ln")
+        } else {
+            &lw.post_ln
+        };
+        let pre_mlp_w = norm_w(&mut b, pre_mlp, c, &k, h);
+        let hn2 = rms_norm_seq(&mut b, &x, &pre_mlp_w, &k, lp, h);
         let gate = b.linear_seq(&hn2, &lw.gate); // [Lp, inter]
         let up = b.linear_seq(&hn2, &lw.up); // [Lp, inter]
-        let neg = b.negate(&gate);
-        let ex = b.exponential(&neg);
-        let one_b = b.broadcast(&k.one, &[], vec![lp, c.inter]);
-        let denom = b.add(&one_b, &ex);
-        let sig = b.divide(&one_b, &denom);
-        let silu = b.multiply(&gate, &sig);
-        let act = b.multiply(&silu, &up);
+        let act = if c.gemma2 {
+            gelu_tanh(&mut b, &gate)
+        } else {
+            let neg = b.negate(&gate);
+            let ex = b.exponential(&neg);
+            let one_b = b.broadcast(&k.one, &[], vec![lp, c.inter]);
+            let denom = b.add(&one_b, &ex);
+            let sig = b.divide(&one_b, &denom);
+            b.multiply(&gate, &sig)
+        };
+        let act = b.multiply(&act, &up);
         let down = b.linear_seq(&act, &lw.down); // [Lp, H]
+        // Gemma2: post-MLP norm before the residual.
+        let down = if c.gemma2 {
+            let w = norm_w(
+                &mut b,
+                lw.post_ff_ln.as_ref().expect("gemma2 post_ff_ln"),
+                c,
+                &k,
+                h,
+            );
+            rms_norm_seq(&mut b, &down, &w, &k, lp, h)
+        } else {
+            down
+        };
         x = b.add(&x, &down);
     }
 
     // --- tail: final norm, take the row at real_len-1, LM head (tied embed or
-    // untied lm_head) ---
-    let xf = rms_norm_seq(&mut b, &x, &a.final_norm, &k, lp, h); // [Lp, H]
+    // untied lm_head), Gemma2 final logit soft-cap ---
+    let final_w = norm_w(&mut b, &a.final_norm, c, &k, h);
+    let xf = rms_norm_seq(&mut b, &x, &final_w, &k, lp, h); // [Lp, H]
     let one_i = b.const_i32(1);
     let last_idx = b.subtract(&a.real_len, &one_i); // real_len - 1
     let last_row = b.dynamic_slice(&xf, &[&last_idx, &k.c0], vec![1, h]); // [1, H]
     let last = b.reshape(&last_row, vec![h]); // [H]
     let logits = b.linear(&last, head_weight(&a.embed, &a.lm_head)); // [V]
+    let logits = match c.final_logit_softcap {
+        Some(cap) => softcap(&mut b, &logits, cap),
+        None => logits,
+    };
     let (out_val, out_ty) = if sample {
         let tok = b.argmax(&logits);
         (tok.name, Ty::scalar("i32").render())

@@ -163,6 +163,16 @@ fn weight_names(cfg: &Config) -> Vec<String> {
                 names.push(format!("{p}{suf}"));
             }
         }
+        // Gemma2 has two extra per-layer norms (pre/post feed-forward), appended
+        // in the same order `take_layer_weights` takes their graph args.
+        if cfg.gemma2 {
+            for suf in [
+                "pre_feedforward_layernorm.weight",
+                "post_feedforward_layernorm.weight",
+            ] {
+                names.push(format!("{p}{suf}"));
+            }
+        }
     }
     names
 }
@@ -630,6 +640,14 @@ impl IreeRaggedLlama {
     /// `b_max` must be one of the bundled graphs ([`RAGGED_B_VALUES`]).
     pub fn load(model_dir: &Path, device: &str, b_max: usize) -> Result<Self, String> {
         let cfg = Config::from_json(model_dir)?;
+        // The ragged (batched serve) emitter does not yet implement the Gemma2
+        // forward (soft-caps, the four-norm structure, GeGLU); only the single-
+        // sequence path does. Reject Gemma2 here rather than serve a wrong graph.
+        if cfg.gemma2 {
+            return Err("the OpenXLA serve path does not yet support Gemma2 \
+                 (use the single-sequence CLI; batched Gemma2 is a follow-up)"
+                .to_string());
+        }
         if !RAGGED_B_VALUES.contains(&b_max) {
             return Err(format!(
                 "the OpenXLA serve worker selects B_max from {RAGGED_B_VALUES:?}; \

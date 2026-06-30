@@ -356,6 +356,9 @@ impl Builder {
     pub fn rsqrt(&mut self, a: &Val) -> Val {
         self.unary("rsqrt", a)
     }
+    pub fn tanh(&mut self, a: &Val) -> Val {
+        self.unary("tanh", a)
+    }
 
     /// `compare DIR, a, b, SIGNED|FLOAT` -> i1 tensor of the same shape.
     pub fn compare(&mut self, dir: &str, a: &Val, b: &Val, kind: &str) -> Val {
