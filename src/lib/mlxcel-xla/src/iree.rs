@@ -20,10 +20,11 @@
 //! [`Config`], (2) emits the `prefill` / `decode_step` StableHLO graphs from that
 //! config (the #451 emitter, ending in an on-device argmax) and compiles them to
 //! vmfbs with the dist's `iree-compile`, cached by content hash, (3) loads the
-//! weights as f32 (widening bf16 / f16, or copying f32) in the emitter's arg
-//! order, from either a single-file `model.safetensors` or a sharded checkpoint
-//! (via its `model.safetensors.index.json`, which is how the big untied models
-//! ship), and (4) hands all of it to the
+//! weights as f32 (widening bf16 / f16, copying f32, or dequantizing MLX 4 / 8-bit
+//! affine weights) in the emitter's arg order, from either a single-file
+//! `model.safetensors` or a sharded checkpoint (via its
+//! `model.safetensors.index.json`, which is how the big untied models ship), and
+//! (4) hands all of it to the
 //! shim, which keeps the weights resident on the device and threads the KV cache
 //! across steps. Then [`IreeLlama::prefill`] / [`IreeLlama::decode`] are token-in
 //! / token-out. Emitting from config (issue #449 M3 Stage 2d) replaced the bundled
@@ -50,7 +51,7 @@ use memmap2::Mmap;
 use safetensors::{Dtype, SafeTensors};
 
 use crate::emitter::{Config, emit_decode, emit_decode_ragged, emit_prefill};
-use crate::weights::{bf16_to_f32, f16_to_f32, f32_le_to_f32};
+use crate::weights::{bf16_to_f32, dequantize_affine, f16_to_f32, f32_le_to_f32};
 
 /// Prefill bucket baked into the emitted `prefill` graph (`tensor<256xi32>`,
 /// == MAX_SEQ, so it covers any prompt the 256-slot KV cache holds).
@@ -385,6 +386,57 @@ fn load_weights(
             let t = st
                 .tensor(name)
                 .map_err(|e| format!("weight {name} in {}: {e}", shard.display()))?;
+
+            // MLX affine-quantized weight: a `U32`-packed `[out, in_packed]` weight
+            // with same-shard `*.scales` / `*.biases`. Dequantize to `[out, in]` f32
+            // (the graph's dtype); the layernorms and q/k/v biases are not quantized
+            // and fall through to the widen path below.
+            if t.dtype() == Dtype::U32 {
+                let qc = cfg.quantization.ok_or_else(|| {
+                    format!(
+                        "weight {name} is U32 (quantized) but config.json has no `quantization`"
+                    )
+                })?;
+                let prefix = name
+                    .strip_suffix(".weight")
+                    .ok_or_else(|| format!("quantized weight {name} does not end in `.weight`"))?;
+                let scales_name = format!("{prefix}.scales");
+                let biases_name = format!("{prefix}.biases");
+                let scales = st.tensor(&scales_name).map_err(|e| {
+                    format!("{scales_name} (for {name}) in {}: {e}", shard.display())
+                })?;
+                let biases = st.tensor(&biases_name).map_err(|e| {
+                    format!("{biases_name} (for {name}) in {}: {e}", shard.display())
+                })?;
+                if scales.dtype() != Dtype::F16 || biases.dtype() != Dtype::F16 {
+                    return Err(format!(
+                        "{prefix} scales/biases dtype {:?}/{:?}, expected F16",
+                        scales.dtype(),
+                        biases.dtype()
+                    ));
+                }
+                let shape = t.shape();
+                if shape.len() != 2 {
+                    return Err(format!("quantized weight {name} rank {} != 2", shape.len()));
+                }
+                let (out, in_packed) = (shape[0], shape[1]);
+                let in_ = in_packed * (32 / qc.bits);
+                bufs[i] = dequantize_affine(
+                    t.data(),
+                    scales.data(),
+                    biases.data(),
+                    out,
+                    in_packed,
+                    qc.bits,
+                    qc.group_size,
+                )
+                .map_err(|e| format!("dequantize {name}: {e}"))?;
+                ranks[i] = 2;
+                dims[i * 4] = out as i64;
+                dims[i * 4 + 1] = in_ as i64;
+                continue;
+            }
+
             // Widen to f32 (the graph's weight dtype). bf16 and f16 are the common
             // checkpoint dtypes; f32 is a passthrough. The widening is exact for
             // all three, so it matches HF's f32 reference.
@@ -394,8 +446,8 @@ fn load_weights(
                 Dtype::F32 => f32_le_to_f32(t.data()),
                 other => {
                     return Err(format!(
-                        "weight {name} dtype {other:?}, expected BF16/F16/F32 \
-                         (a quantized checkpoint must be dequantized first)"
+                        "weight {name} dtype {other:?}, expected BF16/F16/F32 or \
+                         MLX-quantized U32"
                     ));
                 }
             };

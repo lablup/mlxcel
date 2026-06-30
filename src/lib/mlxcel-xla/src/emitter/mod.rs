@@ -83,6 +83,7 @@ mod tests {
             rope: RopeScaling::Plain,
             qkv_bias,
             tie_word_embeddings: true,
+            quantization: None,
         }
     }
 

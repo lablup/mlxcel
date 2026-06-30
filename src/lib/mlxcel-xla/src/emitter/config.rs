@@ -25,6 +25,16 @@ pub enum RopeScaling {
     },
 }
 
+/// MLX affine weight quantization (`config.json` `quantization`). The linear /
+/// embedding `*.weight` tensors are stored packed as `U32` with companion
+/// `*.scales` / `*.biases`; the loader dequantizes them to f32 as
+/// `q * scale + bias` per group of `group_size` input columns.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct QuantConfig {
+    pub bits: usize,
+    pub group_size: usize,
+}
+
 #[derive(Clone, Debug)]
 pub struct Config {
     pub hidden: usize,
@@ -46,6 +56,10 @@ pub struct Config {
     /// projection; `false` adds a separate `params['lm_head']` weight the tail
     /// projects through instead (Llama-3.1-8B, larger Qwen2.5 sizes).
     pub tie_word_embeddings: bool,
+    /// MLX affine weight quantization, if the checkpoint is quantized (`None` for
+    /// an unquantized bf16/f16/f32 checkpoint). The graph itself is unchanged (it
+    /// runs in f32); the loader dequantizes the packed weights at load.
+    pub quantization: Option<QuantConfig>,
 }
 
 impl Config {
@@ -69,6 +83,7 @@ impl Config {
             },
             qkv_bias: false,
             tie_word_embeddings: true,
+            quantization: None,
         }
     }
 
@@ -119,6 +134,24 @@ impl Config {
             .get("tie_word_embeddings")
             .and_then(serde_json::Value::as_bool)
             .unwrap_or(true);
+
+        // MLX affine quantization: an optional `{bits, group_size}` block. The
+        // loader dequantizes the packed weights; the emitted graph is unchanged.
+        let quantization = match v.get("quantization") {
+            None | Some(serde_json::Value::Null) => None,
+            Some(q) => {
+                let qu = |k: &str| -> Result<usize, String> {
+                    q.get(k)
+                        .and_then(serde_json::Value::as_u64)
+                        .map(|x| x as usize)
+                        .ok_or_else(|| format!("config.json quantization missing integer `{k}`"))
+                };
+                Some(QuantConfig {
+                    bits: qu("bits")?,
+                    group_size: qu("group_size")?,
+                })
+            }
+        };
 
         let u = |k: &str| -> Result<usize, String> {
             v.get(k)
@@ -193,6 +226,7 @@ impl Config {
             rope,
             qkv_bias,
             tie_word_embeddings,
+            quantization,
         })
     }
 
