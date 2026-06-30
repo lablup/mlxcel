@@ -876,7 +876,8 @@ pub(crate) fn spawn_legacy_model_worker(
 /// [`XlaServeWorker`](crate::server::batch::XlaServeWorker) through the
 /// [`BatchEngine`](crate::server::batch::BatchEngine) contract. `b_max` is one of
 /// the engine's bundled slot counts; the HAL device is read from
-/// `MLXCEL_XLA_DEVICE` (default `local-task`), matching the single-sequence path.
+/// `MLXCEL_XLA_DEVICE` (default [`mlxcel_xla::default_device`]: `metal` on Apple
+/// Silicon, `local-task` elsewhere), matching the single-sequence path.
 #[cfg(feature = "xla-iree")]
 pub(crate) fn spawn_xla_model_worker(
     model_path: PathBuf,
@@ -891,8 +892,8 @@ pub(crate) fn spawn_xla_model_worker(
         // Same fail-fast posture as the MLX workers (issue #375): abort the
         // process on an uncaught panic rather than unwinding away a serve thread.
         run_core_thread_or_abort("model-worker-xla", move || {
-            let device =
-                std::env::var("MLXCEL_XLA_DEVICE").unwrap_or_else(|_| "local-task".to_string());
+            let device = std::env::var("MLXCEL_XLA_DEVICE")
+                .unwrap_or_else(|_| mlxcel_xla::default_device().to_string());
             tracing::info!(
                 "Model worker thread starting (OpenXLA continuous batching, B_max={b_max}, \
                  device={device}), loading model..."

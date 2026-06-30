@@ -91,21 +91,32 @@ eval "$(scripts/iree/setup-macos.sh)"        # sets IREE_MACOS_HOME, MLXCEL_XLA_
 # 2. Build with real execution on (alongside the usual MLX features).
 cargo build --release --features metal,accelerate,xla-iree
 
-# 3. Opt into XLA at runtime; MLX stays default when these are unset.
-#    CPU (local-task), token-exact vs the HF temp-0 reference:
-MLXCEL_BACKEND=xla MLXCEL_XLA_DEVICE=local-task ./target/release/mlxcel generate \
+# 3. Opt into XLA at runtime; MLX stays default when MLXCEL_BACKEND is unset.
+#    On Apple Silicon the XLA device defaults to `metal`, so just:
+MLXCEL_BACKEND=xla ./target/release/mlxcel generate \
   -m <Llama-3.2-1B-Instruct dir> -p "The capital of France is" -n 48
-#    Apple GPU (Metal):
-MLXCEL_BACKEND=xla MLXCEL_XLA_DEVICE=metal ./target/release/mlxcel generate \
+#    Force the CPU path (token-exact vs the HF temp-0 reference) if you need it:
+MLXCEL_BACKEND=xla MLXCEL_XLA_DEVICE=local-task ./target/release/mlxcel generate \
   -m <Llama-3.2-1B-Instruct dir> -p "The capital of France is" -n 48
 ```
 
-Validated on an M1 Ultra: `metal` is token-exact with the `local-task` path
-(which is itself token-exact vs the HF temp-0 reference) and ~1.9x its tok/s. The
-root `build.rs` macOS arm uses Apple `ld` (`-force_load`, no `--whole-archive` /
-`--start-group` / `-lgcc`) and links the Metal/Foundation/QuartzCore frameworks;
-the C shim is unchanged (the `metal` driver registers via
-`use_all_available_drivers`).
+On Apple Silicon `MLXCEL_XLA_DEVICE` defaults to `metal` (the GPU); set it to
+`local-task` to force the CPU path. Validated on an M1 Ultra: `metal` is
+token-exact with the `local-task` path (which is itself token-exact vs the HF
+temp-0 reference) and ~1.9x its tok/s.
+
+This is a correctness / parity path, **not** a performance path: on the same
+M1 Ultra and model (Llama-3.2-1B-Instruct, greedy, 64 tokens), MLX runs at
+~186 tok/s versus ~1.6 tok/s for XLA-on-Metal (~117x), because the bundled XLA
+graphs are f32 and use generic metal-spirv codegen with a per-step host logits
+readback, while MLX uses bf16 hand-tuned Metal kernels. MLX remains the
+production Apple-Silicon backend; XLA-on-Metal exists to run the same StableHLO
+graphs that target CUDA/Linux on a Mac for development and parity.
+
+The root `build.rs` macOS arm uses Apple `ld` (`-force_load`, no
+`--whole-archive` / `--start-group` / `-lgcc`) and links the
+Metal/Foundation/QuartzCore frameworks; the C shim is unchanged (the `metal`
+driver registers via `use_all_available_drivers`).
 
 ### Scope / limits
 

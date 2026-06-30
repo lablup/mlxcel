@@ -141,12 +141,33 @@ pub struct XlaInferenceSession {
     cache_len: i32,
 }
 
+/// The default HAL device when `MLXCEL_XLA_DEVICE` is unset.
+///
+/// On Apple Silicon (macOS) the `xla-iree` runtime is built with the Metal
+/// driver and Metal is the GPU, so default to `"metal"` (the dev/parity path,
+/// faster than the CPU fallback). Elsewhere default to the portable multithreaded
+/// CPU (`"local-task"`). CUDA is never auto-selected: it needs a cuda build and
+/// device, so set `MLXCEL_XLA_DEVICE=cuda` explicitly. Override the default on any
+/// platform with `MLXCEL_XLA_DEVICE`.
+#[must_use]
+pub fn default_device() -> &'static str {
+    #[cfg(target_os = "macos")]
+    {
+        "metal"
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        "local-task"
+    }
+}
+
 impl XlaInferenceSession {
     /// Prepare a session for a model directory.
     ///
     /// Under the `iree` feature this verifies the model architecture, compiles
     /// the bundled `prefill` / `decode_step` graphs, and uploads the weights as
-    /// resident device buffers (on `MLXCEL_XLA_DEVICE`, default `"local-task"`).
+    /// resident device buffers (on `MLXCEL_XLA_DEVICE`, default
+    /// [`default_device`]: `"metal"` on Apple Silicon, `"local-task"` elsewhere).
     /// Without the feature it only records the inputs so the seam wiring stays
     /// exercisable.
     ///
@@ -160,7 +181,7 @@ impl XlaInferenceSession {
         #[cfg(feature = "iree")]
         {
             let device =
-                std::env::var("MLXCEL_XLA_DEVICE").unwrap_or_else(|_| "local-task".to_string());
+                std::env::var("MLXCEL_XLA_DEVICE").unwrap_or_else(|_| default_device().to_string());
             let engine = iree::IreeLlama::load(model_path, &device)?;
             Ok(Self {
                 model_path: model_path.to_path_buf(),
@@ -337,5 +358,14 @@ mod tests {
     fn empty_prompt_is_rejected() {
         let mut s = session();
         assert!(s.generate_greedy(&[], 8, &[2]).is_err());
+    }
+
+    #[test]
+    fn default_device_is_metal_on_apple_silicon_else_cpu() {
+        let d = default_device();
+        #[cfg(target_os = "macos")]
+        assert_eq!(d, "metal");
+        #[cfg(not(target_os = "macos"))]
+        assert_eq!(d, "local-task");
     }
 }
