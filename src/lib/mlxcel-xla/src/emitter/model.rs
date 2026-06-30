@@ -363,6 +363,52 @@ fn softcap(b: &mut Builder, x: &Val, cap: f32) -> Val {
     b.multiply(&t, &capb)
 }
 
+/// The seq-shaped (`[n, H]`) per-layer MLP plus its surrounding norms, shared by
+/// every multi-row graph (prefill, ragged decode). Llama / Qwen2: a pre-MLP
+/// `post_attention_layernorm` then SwiGLU. Gemma2: a pre-MLP
+/// `pre_feedforward_layernorm`, GeGLU, and a post-MLP `post_feedforward_layernorm`.
+/// Returns the residual already added (`x + down`). For a non-Gemma2 config it
+/// emits exactly the op sequence the graphs carried inline, so their text is
+/// byte-identical. Writing it once is the lever that makes a new architecture's
+/// MLP delta (here, GeGLU + the two FF norms) reach every serve graph at once.
+fn seq_mlp(b: &mut Builder, c: &Config, lw: &LayerW, k: &Consts, x: &Val, n: usize) -> Val {
+    let h = c.hidden;
+    let pre_mlp = if c.gemma2 {
+        lw.pre_ff_ln.as_ref().expect("gemma2 pre_ff_ln")
+    } else {
+        &lw.post_ln
+    };
+    let pre_mlp_w = norm_w(b, pre_mlp, c, k, h);
+    let hn2 = rms_norm_seq(b, x, &pre_mlp_w, k, n, h);
+    let gate = b.linear_seq(&hn2, &lw.gate);
+    let up = b.linear_seq(&hn2, &lw.up);
+    let act = if c.gemma2 {
+        gelu_tanh(b, &gate)
+    } else {
+        let neg = b.negate(&gate);
+        let ex = b.exponential(&neg);
+        let one_b = b.broadcast(&k.one, &[], vec![n, c.inter]);
+        let denom = b.add(&one_b, &ex);
+        let sig = b.divide(&one_b, &denom);
+        b.multiply(&gate, &sig)
+    };
+    let act = b.multiply(&act, &up);
+    let down = b.linear_seq(&act, &lw.down);
+    let down = if c.gemma2 {
+        let w = norm_w(
+            b,
+            lw.post_ff_ln.as_ref().expect("gemma2 post_ff_ln"),
+            c,
+            k,
+            h,
+        );
+        rms_norm_seq(b, &down, &w, k, n, h)
+    } else {
+        down
+    };
+    b.add(x, &down)
+}
+
 /// HF half-split RoPE on x:[heads, d]; cos/sin are [d] for the position.
 fn apply_rope(b: &mut Builder, x: &Val, cos: &Val, sin: &Val, heads: usize, d: usize) -> Val {
     let half = d / 2;
@@ -980,6 +1026,12 @@ pub fn emit_decode_ragged(c: &Config, bsz: usize, sample: bool) -> String {
     // --- head: per-row embed gather, per-row rope gather, per-row key mask ---
     let tok_idx = b.reshape(&a.token, vec![bsz, 1]);
     let mut x = b.gather(&a.embed, &tok_idx); // [B, H]
+    // Gemma2 scales the input embeddings by sqrt(hidden).
+    if c.gemma2 {
+        let norm = b.const_f32(c.embed_normalizer());
+        let nb = b.broadcast(&norm, &[], vec![bsz, h]);
+        x = b.multiply(&x, &nb);
+    }
 
     // each row's rope vectors come from its own position: gather [B,d] by pos[B]
     let pos_idx = b.reshape(&a.pos, vec![bsz, 1]);
@@ -1001,7 +1053,8 @@ pub fn emit_decode_ragged(c: &Config, bsz: usize, sample: bool) -> String {
     for li in 0..c.n_layers {
         let lw = &a.layers[li];
 
-        let hn = rms_norm_seq(&mut b, &x, &lw.in_ln, &k, bsz, h); // [B, H]
+        let in_ln_w = norm_w(&mut b, &lw.in_ln, c, &k, h);
+        let hn = rms_norm_seq(&mut b, &x, &in_ln_w, &k, bsz, h); // [B, H]
         let q = b.linear_seq(&hn, &lw.wq);
         let q = add_proj_bias_seq(&mut b, q, &lw.bq, bsz, nq * d);
         let q = b.reshape(&q, vec![bsz, nq, d]);
@@ -1064,6 +1117,11 @@ pub fn emit_decode_ragged(c: &Config, bsz: usize, sample: bool) -> String {
         let scores = b.reshape(&scores, vec![bsz, nq, MAX_SEQ]);
         let scale_b = b.broadcast(&k.scale, &[], vec![bsz, nq, MAX_SEQ]);
         let scores = b.multiply(&scores, &scale_b);
+        // Gemma2 attention logit soft-cap on the scaled scores before the mask.
+        let scores = match c.attn_logit_softcap {
+            Some(cap) => softcap(&mut b, &scores, cap),
+            None => scores,
+        };
         let kmask_b = b.broadcast(&kmask, &[0, 2], vec![bsz, nq, MAX_SEQ]); // [B,S] -> [B,nq,S]
         let scores = b.add(&scores, &kmask_b);
 
@@ -1088,24 +1146,28 @@ pub fn emit_decode_ragged(c: &Config, bsz: usize, sample: bool) -> String {
         let o = b.reshape(&o, vec![bsz, nq, d]);
         let o = b.reshape(&o, vec![bsz, nq * d]);
         let attn_out = b.linear_seq(&o, &lw.wo);
+        // Gemma2: post-attention norm before the residual.
+        let attn_out = if c.gemma2 {
+            let w = norm_w(&mut b, &lw.post_ln, c, &k, h);
+            rms_norm_seq(&mut b, &attn_out, &w, &k, bsz, h)
+        } else {
+            attn_out
+        };
         x = b.add(&x, &attn_out);
 
-        let hn2 = rms_norm_seq(&mut b, &x, &lw.post_ln, &k, bsz, h);
-        let gate = b.linear_seq(&hn2, &lw.gate);
-        let up = b.linear_seq(&hn2, &lw.up);
-        let neg = b.negate(&gate);
-        let ex = b.exponential(&neg);
-        let one_b = b.broadcast(&k.one, &[], vec![bsz, c.inter]);
-        let denom = b.add(&one_b, &ex);
-        let sig = b.divide(&one_b, &denom);
-        let silu = b.multiply(&gate, &sig);
-        let act = b.multiply(&silu, &up);
-        let down = b.linear_seq(&act, &lw.down);
-        x = b.add(&x, &down);
+        // MLP + its norms (SwiGLU, or Gemma2 GeGLU with pre/post FF norms),
+        // shared with the prefill graph.
+        x = seq_mlp(&mut b, c, lw, &k, &x, bsz);
     }
 
-    let xf = rms_norm_seq(&mut b, &x, &a.final_norm, &k, bsz, h);
+    let final_w = norm_w(&mut b, &a.final_norm, c, &k, h);
+    let xf = rms_norm_seq(&mut b, &x, &final_w, &k, bsz, h);
     let logits = b.linear_seq(&xf, head_weight(&a.embed, &a.lm_head)); // [B, V]
+    // Gemma2 final logit soft-cap (per row; argmax-invariant but kept for exactness).
+    let logits = match c.final_logit_softcap {
+        Some(cap) => softcap(&mut b, &logits, cap),
+        None => logits,
+    };
     let (out_val, out_ty) = if sample {
         let tok = b.argmax_batched(&logits);
         (tok.name, Ty::new(vec![bsz], "i32").render())
@@ -1347,43 +1409,9 @@ pub fn emit_prefill(c: &Config, sample: bool) -> String {
         };
         x = b.add(&x, &attn_out);
 
-        // MLP. Pre-MLP norm: Llama / Qwen2 use post_attention_layernorm; Gemma2
-        // uses pre_feedforward_layernorm. Activation: SwiGLU (silu) vs GeGLU (gelu).
-        let pre_mlp = if c.gemma2 {
-            lw.pre_ff_ln.as_ref().expect("gemma2 pre_ff_ln")
-        } else {
-            &lw.post_ln
-        };
-        let pre_mlp_w = norm_w(&mut b, pre_mlp, c, &k, h);
-        let hn2 = rms_norm_seq(&mut b, &x, &pre_mlp_w, &k, lp, h);
-        let gate = b.linear_seq(&hn2, &lw.gate); // [Lp, inter]
-        let up = b.linear_seq(&hn2, &lw.up); // [Lp, inter]
-        let act = if c.gemma2 {
-            gelu_tanh(&mut b, &gate)
-        } else {
-            let neg = b.negate(&gate);
-            let ex = b.exponential(&neg);
-            let one_b = b.broadcast(&k.one, &[], vec![lp, c.inter]);
-            let denom = b.add(&one_b, &ex);
-            let sig = b.divide(&one_b, &denom);
-            b.multiply(&gate, &sig)
-        };
-        let act = b.multiply(&act, &up);
-        let down = b.linear_seq(&act, &lw.down); // [Lp, H]
-        // Gemma2: post-MLP norm before the residual.
-        let down = if c.gemma2 {
-            let w = norm_w(
-                &mut b,
-                lw.post_ff_ln.as_ref().expect("gemma2 post_ff_ln"),
-                c,
-                &k,
-                h,
-            );
-            rms_norm_seq(&mut b, &down, &w, &k, lp, h)
-        } else {
-            down
-        };
-        x = b.add(&x, &down);
+        // MLP + its norms (SwiGLU, or Gemma2 GeGLU with pre/post FF norms),
+        // shared with the ragged-decode graph.
+        x = seq_mlp(&mut b, c, lw, &k, &x, lp);
     }
 
     // --- tail: final norm, take the row at real_len-1, LM head (tied embed or
