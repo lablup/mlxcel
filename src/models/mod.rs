@@ -56,6 +56,8 @@ pub mod gemma4_mtp_target;
 pub mod glm4;
 pub mod glm4_moe;
 pub mod glm4_moe_lite;
+pub mod glm4v;
+pub mod glm4v_moe;
 pub mod glm_moe_dsa;
 pub mod gpt_oss;
 pub mod granite;
@@ -80,9 +82,11 @@ pub mod minimax;
 pub mod ministral3;
 pub mod mistral4;
 pub mod mixtral;
+pub mod mllama;
 pub mod molmo;
 pub mod molmo2;
 pub mod molmo_point;
+pub mod moondream2;
 pub mod moondream3;
 pub mod nemotron;
 pub mod nemotron_h;
@@ -91,6 +95,7 @@ pub mod olmo;
 pub mod olmo2;
 pub mod olmo3;
 pub mod olmoe;
+pub mod paddleocr_vl;
 pub mod phi;
 pub mod phi3;
 pub mod phi3small;
@@ -149,6 +154,8 @@ pub use glm_moe_dsa::GlmMoeDsaModel;
 pub use glm4::Glm4Model;
 pub use glm4_moe::Glm4MoeModel;
 pub use glm4_moe_lite::Glm4MoeLiteModel;
+pub use glm4v::Glm4vTextModel;
+pub use glm4v_moe::Glm4vMoeTextModel;
 pub use gpt_oss::{GptOssModel, GptOssWrapper};
 pub use granite::GraniteModel;
 pub use granitemoehybrid::GraniteMoeHybridModel;
@@ -174,6 +181,7 @@ pub use mistral4::Mistral4Model;
 pub use mixtral::MixtralModel;
 pub use molmo::MolmoModel;
 pub use molmo2::Molmo2Model;
+pub use moondream2::Moondream2Model;
 pub use moondream3::Moondream3Model;
 pub use multimodal_placeholders::MultimodalPlaceholderTokens;
 pub use nemotron::NemotronModel;
@@ -183,6 +191,7 @@ pub use olmo::OlmoModel;
 pub use olmo2::OLMo2Model;
 pub use olmo3::OLMo3Model;
 pub use olmoe::OlmoeModel;
+pub use paddleocr_vl::{PaddleOcrTextConfig, PaddleOcrTextModel};
 pub use phi::PhiModel;
 pub use phi3::Phi3Model;
 pub use phi3small::Phi3SmallModel;
@@ -227,6 +236,7 @@ pub enum ModelType {
     Llama,           // Llama 1/2/3, Mistral
     Llama4,          // Llama 4 (MoE)
     Llama4VLM,       // Llama 4 VLM (vision-language)
+    MllamaVLM,       // Llama 3.2 Vision (mllama): tiled ViT + gated cross-attention
     Qwen2,           // Qwen 2/2.5
     Qwen3,           // Qwen 3
     Qwen3Moe,        // Qwen 3 MoE
@@ -253,11 +263,16 @@ pub enum ModelType {
     Qwen25VL,        // Qwen2.5-VL (windowed ViT + Qwen2 w/ MRoPE)
     Qwen3VL,         // Qwen3-VL (ViT + interleaved MRoPE + DeepStack)
     Qwen3VLMoe,      // Qwen3-VL-MoE (Qwen3-VL + MoE text backbone)
+    PaddleOcrVL,     // PaddleOCR-VL (NaViT vision + ERNIE-4.5 w/ MRoPE)
+    Glm4v,           // GLM-4V (GLM-4V ViT + GLM-4 text w/ sectioned MRoPE)
+    Glm4vMoe,        // GLM-4V MoE (GLM-4V ViT + GLM-4 MoE text w/ MRoPE)
     YoutuVLM,        // Youtu-VL (SigLIP2 windowed-attn + DeepSeek-V3-style MLA)
     InternVLChatVLM, // InternVL (internvl_chat): InternViT + pixel-shuffle mlp1 + Qwen2 text
+    SmolVLM,         // SmolVLM/SmolVLM2 (smolvlm): SigLIP + pixel-shuffle connector + SmolLM2 text
     MiniCPMOVLM,     // MiniCPM-o (dynamic SigLIP + resampler + Qwen3-VL text)
     MiniCPMV46VLM,   // MiniCPM-V 4.6 (SigLIP + VitMerger + Merger + Qwen3.5 text)
     Moondream3VLM,   // Moondream3 (custom ViT + custom text decoder, query/caption image path)
+    Moondream2VLM,   // Moondream2 (SigLIP-style ViT + Phi text decoder + crop tiling)
     Gemma3n,         // Gemma 3n (text-only)
     Gemma3nVLM,      // Gemma 3n VLM (MobileNetV5 + Gemma3n)
     Phi,             // Phi 1/2
@@ -398,6 +413,7 @@ pub const ALL_MODEL_TYPES: &[ModelType] = &[
     ModelType::Llama,
     ModelType::Llama4,
     ModelType::Llama4VLM,
+    ModelType::MllamaVLM,
     ModelType::Qwen2,
     ModelType::Qwen3,
     ModelType::Qwen3Moe,
@@ -424,11 +440,16 @@ pub const ALL_MODEL_TYPES: &[ModelType] = &[
     ModelType::Qwen25VL,
     ModelType::Qwen3VL,
     ModelType::Qwen3VLMoe,
+    ModelType::PaddleOcrVL,
+    ModelType::Glm4v,
+    ModelType::Glm4vMoe,
     ModelType::YoutuVLM,
     ModelType::InternVLChatVLM,
+    ModelType::SmolVLM,
     ModelType::MiniCPMOVLM,
     ModelType::MiniCPMV46VLM,
     ModelType::Moondream3VLM,
+    ModelType::Moondream2VLM,
     ModelType::Gemma3n,
     ModelType::Gemma3nVLM,
     ModelType::Phi,
@@ -553,6 +574,10 @@ impl ModelType {
             ModelType::Llama => ("Llama 1/2/3", "Llama"),
             ModelType::Llama4 => ("Llama 4 (MoE)", "Llama"),
             ModelType::Llama4VLM => ("Llama 4 VLM", "Llama VLM"),
+            ModelType::MllamaVLM => (
+                "Llama 3.2 Vision (tiled ViT + gated cross-attention)",
+                "Llama VLM",
+            ),
 
             // ----- Qwen (text/hybrid/MoE) -----
             ModelType::Qwen2 => ("Qwen 2 / 2.5", "Qwen"),
@@ -568,6 +593,9 @@ impl ModelType {
             ModelType::Qwen25VL => ("Qwen2.5-VL", "Qwen VLM"),
             ModelType::Qwen3VL => ("Qwen3-VL", "Qwen VLM"),
             ModelType::Qwen3VLMoe => ("Qwen3-VL MoE", "Qwen VLM"),
+            ModelType::PaddleOcrVL => ("PaddleOCR-VL", "PaddleOCR VLM"),
+            ModelType::Glm4v => ("GLM-4V", "GLM VLM"),
+            ModelType::Glm4vMoe => ("GLM-4V MoE", "GLM VLM"),
             ModelType::Qwen35VLM => ("Qwen 3.5 VLM", "Qwen VLM"),
             ModelType::Qwen35MoeVLM => ("Qwen 3.5 MoE VLM", "Qwen VLM"),
 
@@ -729,12 +757,14 @@ impl ModelType {
             ModelType::InternVLChatVLM => {
                 ("InternVL (InternViT + pixel-shuffle + Qwen2)", "Other VLM")
             }
+            ModelType::SmolVLM => ("SmolVLM (SigLIP + pixel-shuffle + SmolLM2)", "Other VLM"),
             ModelType::MolmoVLM => ("Molmo (CLIP ViT + OLMo-style text)", "Other VLM"),
             ModelType::Molmo2VLM => ("Molmo 2 (custom ViT + Molmo2 text)", "Other VLM"),
             ModelType::MolmoPointVLM => {
                 ("Molmo-Point (point prediction + Molmo2 text)", "Other VLM")
             }
             ModelType::Moondream3VLM => ("Moondream 3 (custom ViT + custom decoder)", "Other VLM"),
+            ModelType::Moondream2VLM => ("Moondream 2 (SigLIP-style ViT + Phi text)", "Other VLM"),
             ModelType::MiniCPMOVLM => (
                 "MiniCPM-o (dynamic SigLIP + resampler + Qwen3-VL text)",
                 "Other VLM",
@@ -797,6 +827,7 @@ mod metadata_tests {
             Llama,
             Llama4,
             Llama4VLM,
+            MllamaVLM,
             Qwen2,
             Qwen3,
             Qwen3Moe,
@@ -823,11 +854,16 @@ mod metadata_tests {
             Qwen25VL,
             Qwen3VL,
             Qwen3VLMoe,
+            PaddleOcrVL,
+            Glm4v,
+            Glm4vMoe,
             YoutuVLM,
             InternVLChatVLM,
+            SmolVLM,
             MiniCPMOVLM,
             MiniCPMV46VLM,
             Moondream3VLM,
+            Moondream2VLM,
             Gemma3n,
             Gemma3nVLM,
             Phi,

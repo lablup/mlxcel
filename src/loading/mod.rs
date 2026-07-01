@@ -164,6 +164,7 @@ fn try_load_vlm_model_from_dir(
 ) -> Result<Option<LoadedModel>> {
     Ok(match model_type {
         ModelType::Llama4VLM => Some(load_llama4_vlm(model_path)?),
+        ModelType::MllamaVLM => Some(load_mllama_vlm(model_path)?),
         ModelType::Qwen35VLM | ModelType::Qwen35MoeVLM => {
             Some(match require_qwen35_vlm_kind(model_type)? {
                 Qwen35VlmKind::Dense => load_qwen3_5_vlm(model_path)?,
@@ -183,9 +184,13 @@ fn try_load_vlm_model_from_dir(
         ModelType::Qwen25VL => Some(load_qwen2_5_vl(model_path)?),
         ModelType::Qwen3VL => Some(load_qwen3_vl(model_path)?),
         ModelType::Qwen3VLMoe => Some(load_qwen3_vl_moe(model_path)?),
+        ModelType::PaddleOcrVL => Some(load_paddleocr_vl(model_path)?),
+        ModelType::Glm4v => Some(load_glm4v(model_path)?),
+        ModelType::Glm4vMoe => Some(load_glm4v_moe(model_path)?),
         ModelType::MiniCPMOVLM => Some(load_minicpmo_vlm(model_path)?),
         ModelType::MiniCPMV46VLM => Some(load_minicpmv4_6_vlm(model_path)?),
         ModelType::Moondream3VLM => Some(load_moondream3_vlm(model_path)?),
+        ModelType::Moondream2VLM => Some(load_moondream2_vlm(model_path)?),
         ModelType::Gemma3nVLM => Some(load_gemma3n_vlm(model_path)?),
         ModelType::Phi4MMVLM => Some(load_phi4mm_vlm(model_path)?),
         ModelType::Phi4SigLipVLM => Some(load_phi4_siglip_vlm(model_path)?),
@@ -197,6 +202,7 @@ fn try_load_vlm_model_from_dir(
         ModelType::YoutuVLM => Some(load_youtu_vl_vlm(model_path)?),
         ModelType::InternVLChatVLM => Some(load_internvl_vlm(model_path)?),
         ModelType::KimiVL | ModelType::KimiK25 => Some(load_kimi_vl_vlm(model_path)?),
+        ModelType::SmolVLM => Some(load_smolvlm_vlm(model_path)?),
         _ => None,
     })
 }

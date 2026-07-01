@@ -32,6 +32,7 @@ pub enum VlmRuntimeRef<'a> {
     MiniCPMO(&'a vision::MiniCPMOVLModel),
     MiniCPMV46(&'a vision::MiniCPMV46VLModel),
     Moondream3(&'a vision::Moondream3VLModel),
+    Moondream2(&'a vision::Moondream2VLModel),
     Gemma3n(&'a vision::Gemma3nVLModel),
     Gemma4(&'a vision::Gemma4VLModel),
     Gemma4Unified(&'a vision::Gemma4UnifiedModel),
@@ -43,12 +44,18 @@ pub enum VlmRuntimeRef<'a> {
     MolmoPoint(&'a vision::MolmoPointVLModel),
     /// Nemotron H Nano Omni vision runtime (vision-only scope).
     NemotronHNanoOmni(&'a vision::NemotronHNanoOmniVlModel),
+    /// PaddleOCR-VL runtime (NaViT vision + ERNIE-4.5 MRoPE text).
+    PaddleOcr(&'a vision::PaddleOcrVlModel),
     /// Youtu-VL runtime.
     YoutuVL(&'a vision::YoutuVLModel),
     /// InternVL (internvl_chat) runtime.
     InternVL(&'a vision::InternVLChatVLM),
     /// Kimi-VL / Kimi-VL 2.5 (MoonViT) runtime.
     KimiVL(&'a vision::KimiVLModel),
+    /// Llama 3.2 Vision (mllama) cross-attention runtime.
+    Mllama(&'a vision::MllamaVLModel),
+    /// SmolVLM / SmolVLM2 (smolvlm) runtime.
+    SmolVLM(&'a vision::SmolVLMModel),
     Standard(&'a vision::VisionModule),
 }
 
@@ -133,10 +140,14 @@ impl LoadedModel {
             Self::Qwen25VL(model) => Some(VlmRuntimeRef::Qwen(model)),
             Self::Qwen3VL(model) => Some(VlmRuntimeRef::Qwen(model)),
             Self::Qwen3VLMoe(model) => Some(VlmRuntimeRef::Qwen(model)),
+            Self::Glm4v(model) => Some(VlmRuntimeRef::Qwen(model)),
+            Self::Glm4vMoe(model) => Some(VlmRuntimeRef::Qwen(model)),
             Self::Qwen35VLM(model) | Self::Qwen35MoeVLM(model) => Some(VlmRuntimeRef::Qwen(model)),
+            Self::PaddleOcrVL(model) => Some(VlmRuntimeRef::PaddleOcr(model)),
             Self::MiniCPMOVLM(model) => Some(VlmRuntimeRef::MiniCPMO(model)),
             Self::MiniCPMV46VLM(model) => Some(VlmRuntimeRef::MiniCPMV46(model)),
             Self::Moondream3VLM(model) => Some(VlmRuntimeRef::Moondream3(model)),
+            Self::Moondream2VLM(model) => Some(VlmRuntimeRef::Moondream2(model)),
             Self::Gemma3nVLM(model) => Some(VlmRuntimeRef::Gemma3n(model)),
             Self::Gemma4VLM(model) => Some(VlmRuntimeRef::Gemma4(model)),
             Self::Gemma4Unified(model) => Some(VlmRuntimeRef::Gemma4Unified(model)),
@@ -150,6 +161,8 @@ impl LoadedModel {
             Self::YoutuVL(model) => Some(VlmRuntimeRef::YoutuVL(model)),
             Self::InternVLChatVLM(model) => Some(VlmRuntimeRef::InternVL(model)),
             Self::KimiVL(model) => Some(VlmRuntimeRef::KimiVL(model)),
+            Self::MllamaVLM(model) => Some(VlmRuntimeRef::Mllama(model)),
+            Self::SmolVLM(model) => Some(VlmRuntimeRef::SmolVLM(model)),
             Self::Gemma3VLM(vlm) => Some(VlmRuntimeRef::Standard(&vlm.vision)),
             Self::Llama4VLM(vlm) => Some(VlmRuntimeRef::Standard(&vlm.vision)),
             Self::LlavaVLM(vlm) => Some(VlmRuntimeRef::Standard(&vlm.vision)),

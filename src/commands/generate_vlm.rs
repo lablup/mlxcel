@@ -53,6 +53,16 @@ fn print_preparation_summary(summary: VlmPreparationSummary) {
                 mode, total_tokens, prefix_tokens
             );
         }
+        VlmPreparationSummary::Moondream2 {
+            mode,
+            total_tokens,
+            prefix_tokens,
+        } => {
+            println!(
+                "Moondream2: prepared {:?} prompt ({} text tokens, {} image-prefix tokens)",
+                mode, total_tokens, prefix_tokens
+            );
+        }
         VlmPreparationSummary::Gemma4 {
             image_slots,
             total_tokens,
@@ -160,6 +170,15 @@ fn print_preparation_summary(summary: VlmPreparationSummary) {
         } => {
             println!(
                 "InternVL: inserted {} image block(s) ({} total image tokens)",
+                image_blocks, total_image_tokens
+            );
+        }
+        VlmPreparationSummary::SmolVLM {
+            image_blocks,
+            total_image_tokens,
+        } => {
+            println!(
+                "SmolVLM: inserted {} image block(s) ({} total image tokens)",
                 image_blocks, total_image_tokens
             );
         }
@@ -291,6 +310,22 @@ pub(crate) fn compute_vlm_embeddings(
         // Moondream3 needs special prompt formatting even for text-only
         if matches!(model, LoadedModel::Moondream3VLM(_)) {
             let prepared = mlxcel::moondream3_prompt::prepare_moondream3_prompt_tokens(
+                prompt,
+                0,
+                |text, add_special| {
+                    tokenizer
+                        .encode(text, add_special)
+                        .unwrap_or_default()
+                        .iter()
+                        .map(|&t| t as i32)
+                        .collect()
+                },
+            )
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+            *prompt_tokens = prepared.tokens;
+        } else if matches!(model, LoadedModel::Moondream2VLM(_)) {
+            // Moondream2 also needs its own text-only framing.
+            let prepared = mlxcel::moondream2_prompt::prepare_moondream2_prompt_tokens(
                 prompt,
                 0,
                 |text, add_special| {

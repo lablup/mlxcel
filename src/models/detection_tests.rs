@@ -88,6 +88,42 @@ fn whisper_model_type_is_detected() {
 }
 
 #[test]
+fn mllama_model_type_is_detected() {
+    // Llama 3.2 Vision: a `mllama` checkpoint must resolve to the VLM route
+    // instead of erroring with "Unsupported model type".
+    let model_dir = temp_path("llama_3_2_vision");
+    fs::create_dir_all(&model_dir).unwrap();
+    fs::write(
+        model_dir.join("config.json"),
+        r#"{
+            "model_type": "mllama",
+            "image_token_index": 128256,
+            "text_config": {
+                "model_type": "mllama",
+                "hidden_size": 4096,
+                "num_hidden_layers": 40,
+                "num_attention_heads": 32,
+                "num_key_value_heads": 8,
+                "cross_attention_layers": [3, 8, 13, 18, 23, 28, 33, 38]
+            },
+            "vision_config": {
+                "image_size": 560,
+                "patch_size": 14,
+                "hidden_size": 1280,
+                "num_hidden_layers": 32,
+                "num_global_layers": 8
+            }
+        }"#,
+    )
+    .unwrap();
+
+    let detected = super::detection::get_model_type(&model_dir).unwrap();
+    assert_eq!(detected, ModelType::MllamaVLM);
+
+    fs::remove_dir_all(model_dir).unwrap();
+}
+
+#[test]
 fn mellum_model_type_is_detected() {
     let model_dir = temp_path("mellum_code");
     fs::create_dir_all(&model_dir).unwrap();

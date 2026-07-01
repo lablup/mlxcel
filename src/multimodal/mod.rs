@@ -26,6 +26,7 @@
 //! - `phi4mm_prompt`: Phi4MM `<|image_N|>` normalization and audio guard
 //! - `phi4_siglip_prompt`: Phi4-SigLIP `<image>` placeholder handling
 //! - `minicpmo_prompt`: MiniCPM-o image placeholder expansion and bounds
+//! - `moondream2_prompt`: Moondream2 query/caption template shaping
 //! - `moondream3_prompt`: Moondream3 query/caption template shaping
 //! - `qwen_vl`: Qwen-VL token insertion rules
 //! - `phi3v_prompt`: Phi3V image-tag normalization
@@ -38,11 +39,13 @@ pub mod gemma4_vl;
 pub mod internvl_prompt;
 pub mod kimi_vl_prompt;
 pub mod minicpmo_prompt;
+pub mod moondream2_prompt;
 pub mod moondream3_prompt;
 pub mod phi3v_prompt;
 pub mod phi4_siglip_prompt;
 pub mod phi4mm_prompt;
 pub mod qwen_vl;
+pub mod smolvlm_prompt;
 pub mod video;
 pub mod vlm_prompt;
 pub mod vlm_runtime;

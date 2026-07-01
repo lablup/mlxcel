@@ -44,15 +44,20 @@ pub mod gemma4_unified;
 pub mod gemma4_unified_config;
 pub mod gemma4_unified_mask;
 pub mod gemma4_vl;
+pub mod glm4v;
+pub mod glm4v_moe;
 pub mod internvl;
 pub mod kimi_vl;
 pub mod minicpmo_vl;
 pub mod minicpmv4_6_vl;
+pub mod mllama_vl;
 pub mod molmo2_vl;
 pub mod molmo_point_vl;
 pub mod molmo_vl;
+pub mod moondream2_vl;
 pub mod moondream3_vl;
 pub mod nemotron_h_nano_omni_vl;
+pub mod paddleocr_vl;
 pub mod phi3_vl;
 pub mod phi4_siglip_vl;
 pub mod phi4mm_vl;
@@ -61,21 +66,27 @@ pub mod qwen2_vl;
 pub mod qwen3_5_vl;
 pub mod qwen3_vl;
 pub mod qwen3_vl_moe;
+pub mod smolvlm;
 pub mod youtu_vl;
 
 // Re-export VLM model types
 pub use gemma3n_vl::Gemma3nVLModel;
 pub use gemma4_unified::Gemma4UnifiedModel;
 pub use gemma4_vl::Gemma4VLModel;
+pub use glm4v::Glm4vModel;
+pub use glm4v_moe::Glm4vMoeModel;
 pub use internvl::InternVLChatVLM;
 pub use kimi_vl::{KimiVLModel, KimiVLMultiModalProjector};
 pub use minicpmo_vl::MiniCPMOVLModel;
 pub use minicpmv4_6_vl::MiniCPMV46VLModel;
+pub use mllama_vl::MllamaVLModel;
 pub use molmo_point_vl::MolmoPointVLModel;
 pub use molmo_vl::MolmoVLModel;
 pub use molmo2_vl::Molmo2VLModel;
+pub use moondream2_vl::Moondream2VLModel;
 pub use moondream3_vl::Moondream3VLModel;
 pub use nemotron_h_nano_omni_vl::NemotronHNanoOmniVlModel;
+pub use paddleocr_vl::PaddleOcrVlModel;
 pub use phi3_vl::Phi3VLModel;
 pub use phi4_siglip_vl::Phi4SigLipVLModel;
 pub use phi4mm_vl::Phi4MMVLModel;
@@ -84,6 +95,7 @@ pub use qwen2_vl::Qwen2VLModel;
 pub use qwen3_5_vl::Qwen35VLModel;
 pub use qwen3_vl::Qwen3VLModel;
 pub use qwen3_vl_moe::Qwen3VLMoeModel;
+pub use smolvlm::SmolVLMModel;
 pub use youtu_vl::YoutuVLModel;
 
 use crate::LanguageModel;
@@ -402,3 +414,7 @@ mod tests;
 #[cfg(test)]
 #[path = "moondream3_vl_tests.rs"]
 mod moondream3_vl_tests;
+
+#[cfg(test)]
+#[path = "moondream2_vl_tests.rs"]
+mod moondream2_vl_tests;
