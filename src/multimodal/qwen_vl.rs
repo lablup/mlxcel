@@ -176,6 +176,8 @@ macro_rules! impl_qwen_vl_runtime_loop_dispatch {
 // trait method which just routes through `input_embeddings`.
 impl_qwen_vl_runtime_loop_dispatch!(vision::Qwen2VLModel);
 impl_qwen_vl_runtime_loop_dispatch!(vision::Qwen3VLMoeModel);
+impl_qwen_vl_runtime_loop_dispatch!(vision::Glm4vModel);
+impl_qwen_vl_runtime_loop_dispatch!(vision::Glm4vMoeModel);
 
 // Qwen2.5-VL: single-array cache path.
 impl QwenVlRuntime for vision::Qwen25VLModel {
