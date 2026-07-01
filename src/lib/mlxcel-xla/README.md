@@ -124,12 +124,12 @@ The contraction (matmul) input precision is authored in the emitted StableHLO
 graph, so it applies on every IREE target (CPU, CUDA, Metal, and future NPUs),
 not just one backend:
 
-- `f16` / `bf16` — demote the f32 inputs of every `dot_general` to the narrow
+- `f16` / `bf16`: demote the f32 inputs of every `dot_general` to the narrow
   type while keeping the f32 accumulate and output, so only the matmuls change
   and the sensitive elementwise ops (norm, softmax, RoPE) stay f32. A blanket
   program-wide f32 to f16 is deliberately not done (it regressed accuracy and was
   slower).
-- `f32` — no demotion.
+- `f32`: no demotion.
 
 **Default is per device:** `f16` on the GPU devices (`metal`, `cuda`), `f32` on
 the CPU (`local-task` / `local-sync`). `MLXCEL_XLA_PRECISION` (`f16` | `bf16` |
@@ -271,6 +271,58 @@ single-seq reference). It exits non-zero if any run gate fails.
 Not every family bundles goldens: Qwen2.5 (`assets/qwen2.5-0.5b/`) is emitted at
 load and covered by the emitter's structural tests plus the execution tier, with
 no committed `.mlir`. The harness still drives its emit through `emit_graphs`.
+
+## Performance and the low-precision decision
+
+This backend is a portability / parity path, not a performance path. On Apple
+Silicon, MLX is and remains the production backend; XLA runs the same StableHLO
+graphs that target CUDA/Linux on a Mac, for development and cross-checking.
+
+### Measured (M1 Ultra, Llama-3.2-1B-Instruct, greedy)
+
+| | Metal | CPU (`local-task`) |
+|---|---|---|
+| one decode step, f32 | ~600 ms | ~233 ms |
+| one decode step, f16 | ~291 ms (~2.1x) | ~187 ms (~1.25x) |
+| end-to-end, f32 | ~1.5 tok/s | ~0.75 tok/s |
+| end-to-end, f16 | ~3.0 tok/s | - |
+| MLX (reference) | ~186 tok/s | - |
+
+The decode-step figures are `iree-benchmark-module` (pure runtime, no host glue).
+
+### Where the time goes
+
+The Metal decode step is ~600 ms with the GPU busy the whole time (its host-side
+`process_time` is ~50 ms), so the time is in the GPU kernels, not invoke overhead
+or host round-trips. On the **same** StableHLO graph a 13-thread CPU (~233 ms)
+beats the Metal GPU (~600 ms), which is the tell: the bottleneck is IREE's
+`metal-spirv` kernel codegen (generic, unfused MSL via SPIRV-Cross), not
+bandwidth. ~600 ms is ~110x the ~5 ms/token bandwidth floor MLX runs at.
+
+### What is and is not worth optimizing
+
+- **Graph-level (precision, quantization, op selection): in scope, transferable.**
+  Authored once in the portable graph, it helps every IREE target (CPU, CUDA,
+  Metal, future NPUs). f16 (landed) is ~1.9x and token-exact, and speeds up the
+  CPU path too. For NPUs, low precision / quantization is not a 2x optimization
+  but the entry ticket (they are int8 / fp16 native). This is where investment
+  pays off.
+- **Per-backend kernel codegen (the remaining ~50x to MLX): out of scope.** That
+  is upstream IREE's job, is Metal-specific (does not transfer to non-SPIR-V
+  NPUs), and MLX already owns Apple-Silicon performance.
+
+So Metal's absolute tok/s is a *pessimistic* proxy for an NPU, which brings its
+own optimized kernels; what transfers is the graph, not the Metal tuning.
+
+### Decision (2026-07)
+
+- **In scope:** graph-level low precision. f16 / bf16 is landed. int8 / int4
+  weight quantization is the NPU lever, but its payoff is memory bandwidth, which
+  a compute-bound Metal decode cannot demonstrate and which needs an actual NPU to
+  measure; it is **deferred to a hardware-gated follow-up** (on Metal only its
+  token-exactness would be verifiable, not the speedup).
+- **Out of scope:** hand-writing Metal kernels or tuning IREE's `metal-spirv`
+  codegen to chase MLX.
 
 ## File map
 

@@ -17,6 +17,259 @@
 //! common checkpoint dtypes; f32 is a passthrough. Every conversion is exact
 //! (f32 represents every bf16/f16 value), so the widened weights match HF's own
 //! f32 cast, which the token-exact oracle gate depends on.
+//!
+//! This module also owns [`weight_specs`], the per-architecture checkpoint-weight
+//! order the IREE loader (`iree.rs`) reads (issue #498), kept here (not in the
+//! feature-gated `iree.rs`) so it is unit-tested without the IREE runtime and stays
+//! in lock-step with the emitter's arg order (`emitter::model::take_layer_weights`).
+
+use crate::emitter::Config;
+
+/// One checkpoint weight the loader reads, in the emitter's arg order. Most are a
+/// whole safetensors tensor; a Phi3 checkpoint fuses q/k/v into one `qkv_proj` and
+/// gate/up into one `gate_up_proj`, so the loader takes a row-slice of the fused
+/// tensor for each of the emitter's separate `wq`/`wk`/`wv`/`gate`/`up` args.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum WeightSpec {
+    /// Load the whole checkpoint tensor `name`.
+    Whole(String),
+    /// Load rows `[start, end)` of the checkpoint tensor `name` (a fused Phi3
+    /// projection, split into an emitter arg). Row-major `[out, in]`, so this is
+    /// the `[start, end)` slice of the `out` axis.
+    Rows {
+        name: String,
+        start: usize,
+        end: usize,
+    },
+}
+
+impl WeightSpec {
+    /// The checkpoint tensor this spec reads from (whole or sliced).
+    pub(crate) fn tensor_name(&self) -> &str {
+        match self {
+            WeightSpec::Whole(n) => n,
+            WeightSpec::Rows { name, .. } => name,
+        }
+    }
+}
+
+/// The checkpoint weights the loader reads, in the emitter's exact arg order
+/// (`take_lm_head` / `take_final_norm_bias` / `take_layer_weights` in
+/// `emitter/model.rs`): `embed`, `norm` (+ `norm.bias` for a LayerNorm arch), then
+/// — for an untied checkpoint — the LM head, then per layer `down`, `gate` (gated
+/// only), `in_ln` (unless the OLMo reordered post-norm drops it), `post_ln`
+/// (sequential only), `up`, `wk`, `wo`, `wq`, `wv`, then the q/k/v biases, the q/k
+/// norms (Qwen3 / Gemma3 / OLMo2/3), the Gemma2/3 and OLMo2/3 feed-forward norms,
+/// and finally the #498 LayerNorm biases, the `o_proj` bias, and the MLP biases.
+///
+/// The base tensor names come from [`weight_names::scheme_names`](crate::weight_names)
+/// (issue #499): the standard HF Llama layout, or ExaOne 3.x's GPT-2-style names.
+/// A dense (StarCoder2) MLP uses `c_fc`/`c_proj` and has no gate; a fused (Phi3)
+/// checkpoint row-slices `qkv_proj` / `gate_up_proj` (both dense/fused deltas are
+/// Llama-scheme). Byte-identical order to the pre-dense-pack loader for the Llama
+/// family, and it mirrors `take_layer_weights` so the loaded buffers line up with
+/// the emitted graph's args exactly.
+pub(crate) fn weight_specs(cfg: &Config) -> Vec<WeightSpec> {
+    let s = crate::weight_names::scheme_names(cfg.weight_scheme);
+    let hd = cfg.head_dim;
+    let nq = cfg.n_q * hd;
+    let nkv = cfg.n_kv * hd;
+    let inter = cfg.inter;
+    let gated = !cfg.dense_mlp;
+    let has_post = !cfg.parallel_block;
+
+    let mut out: Vec<WeightSpec> = Vec::new();
+    out.push(WeightSpec::Whole(s.embed.to_string()));
+    out.push(WeightSpec::Whole(s.final_norm.to_string()));
+    // #498 final-norm affine bias (LayerNorm archs only; Llama scheme).
+    if cfg.norm_bias {
+        out.push(WeightSpec::Whole("model.norm.bias".to_string()));
+    }
+    if !cfg.tie_word_embeddings {
+        out.push(WeightSpec::Whole(s.lm_head.to_string()));
+    }
+    for i in 0..cfg.n_layers {
+        let p = format!("{}{i}.", s.layer_stem);
+        // A MoE layer (issue #500) takes no dense MLP weights (down/gate/up); its
+        // expert bank is appended after the attention weights / norms instead.
+        let moe_layer = cfg.is_moe_layer(i);
+        // down (dense StarCoder2 uses c_proj; else the scheme's down projection).
+        if !moe_layer {
+            out.push(WeightSpec::Whole(if cfg.dense_mlp {
+                format!("{p}mlp.c_proj.weight")
+            } else {
+                format!("{p}{}", s.down)
+            }));
+        }
+        // gate (gated MLP only; the first half of gate_up_proj for a fused Phi3).
+        if gated && !moe_layer {
+            if cfg.fused_gate_up {
+                out.push(WeightSpec::Rows {
+                    name: format!("{p}mlp.gate_up_proj.weight"),
+                    start: 0,
+                    end: inter,
+                });
+            } else {
+                out.push(WeightSpec::Whole(format!("{p}{}", s.gate)));
+            }
+        }
+        // input_layernorm: present unless the OLMo reordered post-norm drops it.
+        if cfg.has_input_norm() {
+            out.push(WeightSpec::Whole(format!("{p}{}", s.input_layernorm)));
+        }
+        // post_attention_layernorm: dropped for a parallel-block arch (Cohere).
+        if has_post {
+            out.push(WeightSpec::Whole(format!(
+                "{p}{}",
+                s.post_attention_layernorm
+            )));
+        }
+        // up (c_fc for dense; the second half of gate_up_proj for a fused Phi3).
+        // Skipped on a MoE layer (issue #500), which has no dense up projection.
+        if !moe_layer {
+            if cfg.fused_gate_up {
+                out.push(WeightSpec::Rows {
+                    name: format!("{p}mlp.gate_up_proj.weight"),
+                    start: inter,
+                    end: 2 * inter,
+                });
+            } else if cfg.dense_mlp {
+                out.push(WeightSpec::Whole(format!("{p}mlp.c_fc.weight")));
+            } else {
+                out.push(WeightSpec::Whole(format!("{p}{}", s.up)));
+            }
+        }
+        // wk, wo, wq, wv (JAX-alphabetical; a fused Phi3 qkv_proj is [Q|K|V] rows).
+        if cfg.fused_qkv {
+            let qkv = format!("{p}self_attn.qkv_proj.weight");
+            out.push(WeightSpec::Rows {
+                name: qkv.clone(),
+                start: nq,
+                end: nq + nkv,
+            }); // wk
+            out.push(WeightSpec::Whole(format!("{p}{}", s.o_proj))); // wo
+            out.push(WeightSpec::Rows {
+                name: qkv.clone(),
+                start: 0,
+                end: nq,
+            }); // wq
+            out.push(WeightSpec::Rows {
+                name: qkv,
+                start: nq + nkv,
+                end: nq + 2 * nkv,
+            }); // wv
+        } else {
+            out.push(WeightSpec::Whole(format!("{p}{}", s.k_proj)));
+            out.push(WeightSpec::Whole(format!("{p}{}", s.o_proj)));
+            out.push(WeightSpec::Whole(format!("{p}{}", s.q_proj)));
+            out.push(WeightSpec::Whole(format!("{p}{}", s.v_proj)));
+        }
+        // q/k/v projection biases (k, q, v order).
+        if cfg.qkv_bias {
+            out.push(WeightSpec::Whole(format!("{p}{}", s.k_bias)));
+            out.push(WeightSpec::Whole(format!("{p}{}", s.q_bias)));
+            out.push(WeightSpec::Whole(format!("{p}{}", s.v_bias)));
+        }
+        // q/k norms (Qwen3 / Gemma3 per-head, OLMo2/3 flat), q then k.
+        if cfg.qk_norm.is_some() {
+            out.push(WeightSpec::Whole(format!("{p}{}", s.q_norm)));
+            out.push(WeightSpec::Whole(format!("{p}{}", s.k_norm)));
+        }
+        // Feed-forward norms: Gemma2/3 add pre AND post; OLMo2/3 add post only.
+        if cfg.has_pre_ff_norm() {
+            out.push(WeightSpec::Whole(format!("{p}{}", s.pre_ff_norm)));
+        }
+        if cfg.has_post_ff_norm() {
+            out.push(WeightSpec::Whole(format!("{p}{}", s.post_ff_norm)));
+        }
+        // #498 LayerNorm biases, the o_proj bias, and the MLP biases (Llama scheme).
+        if cfg.norm_bias {
+            out.push(WeightSpec::Whole(format!("{p}input_layernorm.bias")));
+            if has_post {
+                out.push(WeightSpec::Whole(format!(
+                    "{p}post_attention_layernorm.bias"
+                )));
+            }
+        }
+        if cfg.attn_o_bias {
+            out.push(WeightSpec::Whole(format!("{p}self_attn.o_proj.bias")));
+        }
+        if cfg.mlp_bias {
+            out.push(WeightSpec::Whole(if cfg.dense_mlp {
+                format!("{p}mlp.c_proj.bias")
+            } else {
+                format!("{p}mlp.down_proj.bias")
+            }));
+            if gated {
+                out.push(WeightSpec::Whole(format!("{p}mlp.gate_proj.bias")));
+            }
+            out.push(WeightSpec::Whole(if cfg.dense_mlp {
+                format!("{p}mlp.c_fc.bias")
+            } else {
+                format!("{p}mlp.up_proj.bias")
+            }));
+        }
+        // MoE expert bank (issue #500), last in the layer: the router, the stacked
+        // mlx-lm `switch_mlp` gate/up/down, then the optional shared expert (and its
+        // sigmoid gate). `weight_prefix` is `mlp` (Qwen2-MoE) or `block_sparse_moe`
+        // (Mixtral); the order mirrors `take_moe_weights` in `emitter/model.rs` and
+        // the emitted args, so the loaded buffers line up with the graph.
+        if moe_layer {
+            let m = cfg.moe.as_ref().expect("a MoE layer has a MoeConfig");
+            let mp = m.weight_prefix;
+            out.push(WeightSpec::Whole(format!("{p}{mp}.gate.weight")));
+            out.push(WeightSpec::Whole(format!(
+                "{p}{mp}.switch_mlp.gate_proj.weight"
+            )));
+            out.push(WeightSpec::Whole(format!(
+                "{p}{mp}.switch_mlp.up_proj.weight"
+            )));
+            out.push(WeightSpec::Whole(format!(
+                "{p}{mp}.switch_mlp.down_proj.weight"
+            )));
+            if let Some(sh) = m.shared {
+                out.push(WeightSpec::Whole(format!(
+                    "{p}{mp}.shared_expert.gate_proj.weight"
+                )));
+                out.push(WeightSpec::Whole(format!(
+                    "{p}{mp}.shared_expert.up_proj.weight"
+                )));
+                out.push(WeightSpec::Whole(format!(
+                    "{p}{mp}.shared_expert.down_proj.weight"
+                )));
+                if sh.gated {
+                    out.push(WeightSpec::Whole(format!(
+                        "{p}{mp}.shared_expert_gate.weight"
+                    )));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Slice rows `[start, end)` of a row-major `[out, in]` f32 buffer into a
+/// `[end - start, in]` buffer (the Phi3 fused-projection split at load).
+pub(crate) fn slice_rows(
+    buf: &[f32],
+    out: usize,
+    start: usize,
+    end: usize,
+) -> Result<Vec<f32>, String> {
+    if out == 0 || !buf.len().is_multiple_of(out) {
+        return Err(format!(
+            "cannot row-slice a {} element buffer as [{out}, in]",
+            buf.len()
+        ));
+    }
+    let in_ = buf.len() / out;
+    if start > end || end > out {
+        return Err(format!(
+            "row slice [{start}, {end}) out of range for {out} rows"
+        ));
+    }
+    Ok(buf[start * in_..end * in_].to_vec())
+}
 
 /// bf16 little-endian bytes -> f32 (bf16 is the high 16 bits of f32).
 pub(crate) fn bf16_to_f32(bytes: &[u8]) -> Vec<f32> {
@@ -197,6 +450,132 @@ pub(crate) fn dequantize_affine_stacked(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The Llama family weight order is the legacy all-`Whole` sequence (embed,
+    /// norm, then 9 per layer), so the #498 spec loader is byte-identical for it.
+    #[test]
+    fn weight_specs_llama_is_the_legacy_whole_order() {
+        let c = Config::llama_3_2_1b();
+        let specs = weight_specs(&c);
+        assert!(specs.iter().all(|s| matches!(s, WeightSpec::Whole(_))));
+        assert_eq!(specs.len(), 2 + 9 * c.n_layers);
+        let names: Vec<&str> = specs.iter().map(WeightSpec::tensor_name).collect();
+        assert_eq!(names[0], "model.embed_tokens.weight");
+        assert_eq!(names[1], "model.norm.weight");
+        assert_eq!(
+            &names[2..11],
+            &[
+                "model.layers.0.mlp.down_proj.weight",
+                "model.layers.0.mlp.gate_proj.weight",
+                "model.layers.0.input_layernorm.weight",
+                "model.layers.0.post_attention_layernorm.weight",
+                "model.layers.0.mlp.up_proj.weight",
+                "model.layers.0.self_attn.k_proj.weight",
+                "model.layers.0.self_attn.o_proj.weight",
+                "model.layers.0.self_attn.q_proj.weight",
+                "model.layers.0.self_attn.v_proj.weight",
+            ]
+        );
+    }
+
+    /// Phi3 row-slices the fused `qkv_proj` ([Q|K|V]) and `gate_up_proj` (gate then
+    /// up) into the emitter's separate args, and is untied (`lm_head` after norm).
+    #[test]
+    fn weight_specs_phi3_row_slices_the_fused_projections() {
+        let json = r#"{"model_type":"phi3","hidden_size":32,"num_attention_heads":4,
+            "num_key_value_heads":2,"intermediate_size":64,"num_hidden_layers":1,
+            "rms_norm_eps":1e-5,"rope_theta":1e4,"vocab_size":48,"tie_word_embeddings":false}"#;
+        let c = Config::from_json_str(json).expect("phi3 parses");
+        let specs = weight_specs(&c);
+        assert_eq!(specs[2], WeightSpec::Whole("lm_head.weight".to_string()));
+        let gu = "model.layers.0.mlp.gate_up_proj.weight".to_string();
+        assert!(specs.contains(&WeightSpec::Rows {
+            name: gu.clone(),
+            start: 0,
+            end: 64
+        }));
+        assert!(specs.contains(&WeightSpec::Rows {
+            name: gu,
+            start: 64,
+            end: 128
+        }));
+        // qkv: q rows [0,32), k [32,48), v [48,64) (nq=4*8, nkv=2*8).
+        let qkv = "model.layers.0.self_attn.qkv_proj.weight".to_string();
+        assert!(specs.contains(&WeightSpec::Rows {
+            name: qkv.clone(),
+            start: 0,
+            end: 32
+        }));
+        assert!(specs.contains(&WeightSpec::Rows {
+            name: qkv.clone(),
+            start: 32,
+            end: 48
+        }));
+        assert!(specs.contains(&WeightSpec::Rows {
+            name: qkv,
+            start: 48,
+            end: 64
+        }));
+        assert!(!specs.iter().any(|s| s.tensor_name().contains("q_proj")));
+    }
+
+    /// StarCoder2 uses the dense `c_fc`/`c_proj` MLP (no gate) and carries biases on
+    /// the norms and every projection.
+    #[test]
+    fn weight_specs_starcoder2_dense_mlp_and_biases() {
+        let json = r#"{"model_type":"starcoder2","hidden_size":32,"num_attention_heads":4,
+            "num_key_value_heads":2,"intermediate_size":64,"num_hidden_layers":1,
+            "norm_epsilon":1e-5,"rope_theta":1e4,"vocab_size":48,"use_bias":true}"#;
+        let c = Config::from_json_str(json).expect("starcoder2 parses");
+        let names: Vec<String> = weight_specs(&c)
+            .iter()
+            .map(|s| s.tensor_name().to_string())
+            .collect();
+        assert!(names.iter().any(|n| n.ends_with("mlp.c_fc.weight")));
+        assert!(names.iter().any(|n| n.ends_with("mlp.c_proj.weight")));
+        assert!(!names.iter().any(|n| n.ends_with("mlp.gate_proj.weight")));
+        assert!(names.iter().any(|n| n == "model.norm.bias"));
+        assert!(names.iter().any(|n| n.ends_with("input_layernorm.bias")));
+        assert!(names.iter().any(|n| n.ends_with("self_attn.o_proj.bias")));
+        assert!(names.iter().any(|n| n.ends_with("mlp.c_fc.bias")));
+        assert!(names.iter().any(|n| n.ends_with("mlp.c_proj.bias")));
+    }
+
+    /// Cohere is tied, LayerNorm (no norm bias), parallel (no post-attn norm).
+    #[test]
+    fn weight_specs_cohere_is_tied_parallel_no_post_norm() {
+        let json = r#"{"model_type":"cohere","hidden_size":32,"num_attention_heads":4,
+            "num_key_value_heads":2,"intermediate_size":64,"num_hidden_layers":1,
+            "layer_norm_eps":1e-5,"rope_theta":1e4,"vocab_size":48,"logit_scale":0.25}"#;
+        let c = Config::from_json_str(json).expect("cohere parses");
+        let names: Vec<String> = weight_specs(&c)
+            .iter()
+            .map(|s| s.tensor_name().to_string())
+            .collect();
+        assert!(!names.iter().any(|n| n == "lm_head.weight"), "tied");
+        assert!(
+            !names.iter().any(|n| n.contains("post_attention_layernorm")),
+            "parallel"
+        );
+        assert!(
+            !names.iter().any(|n| n == "model.norm.bias"),
+            "no norm bias"
+        );
+        assert!(
+            names.iter().any(|n| n.ends_with("mlp.gate_proj.weight")),
+            "gated"
+        );
+    }
+
+    /// `slice_rows` extracts a row band of a row-major `[out, in]` buffer and
+    /// rejects an out-of-range band or a non-divisible length.
+    #[test]
+    fn slice_rows_extracts_the_row_band() {
+        let buf: Vec<f32> = (0..8).map(|x| x as f32).collect(); // 4 rows x 2 cols
+        assert_eq!(slice_rows(&buf, 4, 1, 3).unwrap(), vec![2.0, 3.0, 4.0, 5.0]);
+        assert!(slice_rows(&buf, 4, 2, 5).is_err());
+        assert!(slice_rows(&buf, 3, 0, 1).is_err());
+    }
 
     /// f16 widening is exact against `f32 as` for representative values: zero, one,
     /// a fraction, a negative, the max normal, and a subnormal.

@@ -29,12 +29,16 @@
 //! across steps. Then [`IreeLlama::prefill`] / [`IreeLlama::decode`] are token-in
 //! / token-out. Emitting from config (issue #449 M3 Stage 2d) replaced the bundled
 //! Llama-3.2-1B `.mlir` assets, so any checkpoint of a supported dense family loads:
-//! Llama, Qwen2, Qwen3, Gemma1/2/3, SmolLM3, and OLMo2/3 (issue #497). Each family's
-//! per-layer weight order in `weight_names` mirrors the emitter's arg schedule: the
-//! Qwen2 q/k/v biases, the Qwen3 / Gemma3 / OLMo2/3 q/k norms, the Gemma2/3 feed-
-//! forward norms, and (for OLMo2/3's reordered post-norm) the absence of an
-//! `input_layernorm`. An untied checkpoint (`tie_word_embeddings = false`, e.g.
-//! Llama-3.1-8B, larger Qwen2.5, OLMo2/3) adds its `lm_head.weight`, matching the
+//! Llama, Qwen2, Qwen3, Gemma1/2/3, SmolLM3, OLMo2/3, Seed-OSS, MiMo, InternLM3,
+//! ExaOne (issues #497 / #499), and the parallel-block / norm-variant pack Cohere,
+//! Cohere2, Phi3, StableLM, StarCoder2, Granite, MiniCPM (issue #498). Each family's
+//! per-layer weight order in `weight_specs` (`weights.rs`) mirrors the emitter's arg
+//! schedule: the q/k/v biases, the Qwen3 / Gemma3 / OLMo2/3 q/k norms, the Gemma2/3
+//! feed-forward norms, the OLMo2/3 absence of an `input_layernorm`, the #498
+//! LayerNorm / o_proj / MLP biases and dense StarCoder2 MLP, and the fused Phi3
+//! `qkv_proj` / `gate_up_proj` (read once and row-sliced into the separate args). An
+//! untied checkpoint (`tie_word_embeddings = false`, e.g. Llama-3.1-8B, larger
+//! Qwen2.5, OLMo2/3, Phi3, StableLM, MiniCPM) adds its `lm_head.weight`, matching the
 //! separate `params['lm_head']` arg the emitter takes for the final projection.
 //!
 //! Proven token-exact against the HF temp-0 reference in
@@ -55,8 +59,15 @@ use safetensors::{Dtype, SafeTensors};
 use crate::emitter::{
     Config, emit_decode_ragged_with, emit_decode_with, emit_prefill_with, resolve_precision,
 };
+// The loader reads the per-architecture checkpoint-weight order from
+// `weights::weight_specs`, which sources its names from `weight_names::scheme_names`
+// (issue #499 naming schemes) and covers the #498 dense pack (LayerNorm / o_proj /
+// MLP biases, the dense StarCoder2 MLP, and the row-sliced fused Phi3 projections)
+// and the #500 MoE expert bank (the stacked `switch_mlp` weights, dequantized with
+// `dequantize_affine_stacked`). Both are pure-Rust and unit-tested without `iree`.
 use crate::weights::{
-    bf16_to_f32, dequantize_affine, dequantize_affine_stacked, f16_to_f32, f32_le_to_f32,
+    WeightSpec, bf16_to_f32, dequantize_affine, dequantize_affine_stacked, f16_to_f32,
+    f32_le_to_f32, slice_rows, weight_specs,
 };
 
 /// Prefill bucket baked into the emitted `prefill` graph (`tensor<256xi32>`,
@@ -126,104 +137,14 @@ unsafe extern "C" {
 /// load (any `b_max` is emittable; the worker selects from this set).
 pub(crate) const RAGGED_B_VALUES: &[usize] = &[4, 8];
 
-/// The weight names in the emitter's exact arg order: embed, final_norm, then —
-/// for an untied checkpoint (`tie_word_embeddings = false`) — `lm_head.weight`,
-/// then per layer the base weights and the arch-conditional extras. The base order
-/// is down, gate, input_layernorm, post_attention_layernorm, up, wk, wo, wq, wv;
-/// then, matching `take_layer_weights` in `emitter/model.rs` exactly, the k/q/v
-/// biases (`qkv_bias`, Qwen2), the q/k norms (`qk_norm`, Qwen3 / Gemma3 / OLMo2/3),
-/// and the feed-forward norms. `input_layernorm` is skipped for the OLMo reordered
-/// post-norm (which has none).
-///
-/// A MoE layer (issue #500) takes no dense `mlp.{gate,up,down}_proj`; instead, after
-/// the attention weights / biases / FF norms, come the router (`{prefix}.gate.weight`),
-/// the stacked mlx-lm `switch_mlp` expert projections, and, when the family has a
-/// shared expert (Qwen2-MoE), the shared SwiGLU plus its sigmoid gate. Every knob
-/// comes from the model config so the buffer order lines up with the emitted args.
-fn weight_names(cfg: &Config) -> Vec<String> {
-    let mut names = vec![
-        "model.embed_tokens.weight".to_string(),
-        "model.norm.weight".to_string(),
-    ];
-    // Untied LM head: a separate `lm_head.weight` follows `final_norm`, matching
-    // the `params['lm_head']` arg the emitter takes in the same position.
-    if !cfg.tie_word_embeddings {
-        names.push("lm_head.weight".to_string());
-    }
-    for i in 0..cfg.n_layers {
-        let p = format!("model.layers.{i}.");
-        let moe_layer = cfg.is_moe_layer(i);
-        // Dense MLP weights (down, gate) only for a dense layer; a MoE layer takes
-        // its expert bank after the attention weights / norms instead.
-        if !moe_layer {
-            names.push(format!("{p}mlp.down_proj.weight"));
-            names.push(format!("{p}mlp.gate_proj.weight"));
-        }
-        // input_layernorm: present unless the reordered (OLMo) post-norm drops it.
-        if cfg.has_input_norm() {
-            names.push(format!("{p}input_layernorm.weight"));
-        }
-        names.push(format!("{p}post_attention_layernorm.weight"));
-        // up_proj only for a dense layer.
-        if !moe_layer {
-            names.push(format!("{p}mlp.up_proj.weight"));
-        }
-        for suf in [
-            "self_attn.k_proj.weight",
-            "self_attn.o_proj.weight",
-            "self_attn.q_proj.weight",
-            "self_attn.v_proj.weight",
-        ] {
-            names.push(format!("{p}{suf}"));
-        }
-        // Qwen2 q/k/v projection biases, in the same k/q/v order the emitter adds.
-        if cfg.qkv_bias {
-            for suf in [
-                "self_attn.k_proj.bias",
-                "self_attn.q_proj.bias",
-                "self_attn.v_proj.bias",
-            ] {
-                names.push(format!("{p}{suf}"));
-            }
-        }
-        // q/k norms (Qwen3 / Gemma3 per-head, OLMo2/3 flat), q then k.
-        if cfg.qk_norm.is_some() {
-            names.push(format!("{p}self_attn.q_norm.weight"));
-            names.push(format!("{p}self_attn.k_norm.weight"));
-        }
-        // Feed-forward norms: Gemma2/3 add pre AND post; OLMo2/3 add post only.
-        if cfg.has_pre_ff_norm() {
-            names.push(format!("{p}pre_feedforward_layernorm.weight"));
-        }
-        if cfg.has_post_ff_norm() {
-            names.push(format!("{p}post_feedforward_layernorm.weight"));
-        }
-        // MoE expert bank (issue #500), after the FF norms: router, then the stacked
-        // mlx-lm `switch_mlp` gate/up/down, then the optional shared expert.
-        // `weight_prefix` is `mlp` (Qwen2-MoE) or `block_sparse_moe` (Mixtral).
-        if moe_layer {
-            let m = cfg.moe.as_ref().expect("a MoE layer has a MoeConfig");
-            let mp = m.weight_prefix;
-            names.push(format!("{p}{mp}.gate.weight"));
-            names.push(format!("{p}{mp}.switch_mlp.gate_proj.weight"));
-            names.push(format!("{p}{mp}.switch_mlp.up_proj.weight"));
-            names.push(format!("{p}{mp}.switch_mlp.down_proj.weight"));
-            if let Some(sh) = m.shared {
-                for suf in [
-                    "shared_expert.gate_proj.weight",
-                    "shared_expert.up_proj.weight",
-                    "shared_expert.down_proj.weight",
-                ] {
-                    names.push(format!("{p}{mp}.{suf}"));
-                }
-                if sh.gated {
-                    names.push(format!("{p}{mp}.shared_expert_gate.weight"));
-                }
-            }
-        }
-    }
-    names
-}
+// The per-architecture checkpoint-weight order the loader reads lives in
+// `weights::weight_specs` (pure logic, unit-tested without the IREE runtime, and
+// kept in lock-step with the emitter's arg order). It covers the dense arch pack
+// (issue #498): LayerNorm biases, the o_proj / MLP biases, the dense StarCoder2
+// MLP, and the Phi3 fused `qkv_proj` / `gate_up_proj` (loaded once and row-sliced
+// into the emitter's separate args); and the MoE expert bank (issue #500): the
+// router and the stacked `switch_mlp` gate/up/down (plus the optional shared
+// expert), appended after each MoE layer's attention weights / norms.
 
 /// Locate the IREE distribution: a runtime `IREE_DIST` override first, else the
 /// path baked at build time (the dist whose runtime is linked into this binary).
@@ -422,18 +343,21 @@ fn load_weights(
     model_dir: &Path,
     cfg: &Config,
 ) -> Result<(Vec<Vec<f32>>, Vec<c_int>, Vec<i64>), String> {
-    let names = weight_names(cfg);
+    let specs = weight_specs(cfg);
+    let names: Vec<String> = specs.iter().map(|s| s.tensor_name().to_string()).collect();
     let shard_paths = resolve_weight_shards(model_dir, &names)?;
 
     // Group weight indices by shard so each shard file is opened/mmap'd once; the
-    // results are placed by index, preserving the emitter's arg order.
+    // results are placed by index, preserving the emitter's arg order. A Phi3
+    // fused checkpoint references one tensor (`qkv_proj` / `gate_up_proj`) from
+    // several specs; each reads and row-slices the (memmapped) shard.
     let mut by_shard: std::collections::BTreeMap<&Path, Vec<usize>> =
         std::collections::BTreeMap::new();
     for (i, p) in shard_paths.iter().enumerate() {
         by_shard.entry(p.as_path()).or_default().push(i);
     }
 
-    let n = names.len();
+    let n = specs.len();
     let mut bufs: Vec<Vec<f32>> = vec![Vec::new(); n];
     let mut ranks: Vec<c_int> = vec![0; n];
     let mut dims: Vec<i64> = vec![0; n * 4];
@@ -450,11 +374,10 @@ fn load_weights(
                 .tensor(name)
                 .map_err(|e| format!("weight {name} in {}: {e}", shard.display()))?;
 
-            // MLX affine-quantized weight: a `U32`-packed `[out, in_packed]` weight
-            // with same-shard `*.scales` / `*.biases`. Dequantize to `[out, in]` f32
-            // (the graph's dtype); the layernorms and q/k/v biases are not quantized
-            // and fall through to the widen path below.
-            if t.dtype() == Dtype::U32 {
+            // Widen the whole tensor to row-major `[out, in]` (or `[out]`) f32 (the
+            // graph's dtype): an MLX affine `U32`-packed weight is dequantized (the
+            // layernorms / biases are not quantized and take the widen path).
+            let (data, shape): (Vec<f32>, Vec<usize>) = if t.dtype() == Dtype::U32 {
                 let qc = cfg.quantization.ok_or_else(|| {
                     format!(
                         "weight {name} is U32 (quantized) but config.json has no `quantization`"
@@ -485,7 +408,7 @@ fn load_weights(
                     2 => {
                         let (out, in_packed) = (shape[0], shape[1]);
                         let in_ = in_packed * (32 / qc.bits);
-                        bufs[i] = dequantize_affine(
+                        let d = dequantize_affine(
                             t.data(),
                             scales.data(),
                             biases.data(),
@@ -495,9 +418,7 @@ fn load_weights(
                             qc.group_size,
                         )
                         .map_err(|e| format!("dequantize {name}: {e}"))?;
-                        ranks[i] = 2;
-                        dims[i * 4] = out as i64;
-                        dims[i * 4 + 1] = in_ as i64;
+                        (d, vec![out, in_])
                     }
                     // Stacked `[experts, out, in_packed]` MoE `switch_mlp` weight
                     // (issue #500); dequantize each expert slab and keep the leading
@@ -505,7 +426,7 @@ fn load_weights(
                     3 => {
                         let (experts, out, in_packed) = (shape[0], shape[1], shape[2]);
                         let in_ = in_packed * (32 / qc.bits);
-                        bufs[i] = dequantize_affine_stacked(
+                        let d = dequantize_affine_stacked(
                             t.data(),
                             scales.data(),
                             biases.data(),
@@ -516,41 +437,57 @@ fn load_weights(
                             qc.group_size,
                         )
                         .map_err(|e| format!("dequantize stacked {name}: {e}"))?;
-                        ranks[i] = 3;
-                        dims[i * 4] = experts as i64;
-                        dims[i * 4 + 1] = out as i64;
-                        dims[i * 4 + 2] = in_ as i64;
+                        (d, vec![experts, out, in_])
                     }
                     r => {
                         return Err(format!("quantized weight {name} rank {r} not in {{2, 3}}"));
                     }
                 }
-                continue;
-            }
-
-            // Widen to f32 (the graph's weight dtype). bf16 and f16 are the common
-            // checkpoint dtypes; f32 is a passthrough. The widening is exact for
-            // all three, so it matches HF's f32 reference.
-            let data = match t.dtype() {
-                Dtype::BF16 => bf16_to_f32(t.data()),
-                Dtype::F16 => f16_to_f32(t.data()),
-                Dtype::F32 => f32_le_to_f32(t.data()),
-                other => {
-                    return Err(format!(
-                        "weight {name} dtype {other:?}, expected BF16/F16/F32 or \
-                         MLX-quantized U32"
-                    ));
+            } else {
+                // bf16 and f16 are the common checkpoint dtypes; f32 is a
+                // passthrough. The widening is exact for all three, matching HF's
+                // f32 reference.
+                let d = match t.dtype() {
+                    Dtype::BF16 => bf16_to_f32(t.data()),
+                    Dtype::F16 => f16_to_f32(t.data()),
+                    Dtype::F32 => f32_le_to_f32(t.data()),
+                    other => {
+                        return Err(format!(
+                            "weight {name} dtype {other:?}, expected BF16/F16/F32 or \
+                             MLX-quantized U32"
+                        ));
+                    }
+                };
+                let shape = t.shape();
+                if shape.len() > 4 {
+                    return Err(format!("weight {name} rank {} > 4", shape.len()));
                 }
+                (d, shape.to_vec())
             };
-            let shape = t.shape();
-            if shape.len() > 4 {
-                return Err(format!("weight {name} rank {} > 4", shape.len()));
+
+            // Place the whole tensor, or (Phi3 fused) a row-slice, into arg slot i.
+            match &specs[i] {
+                WeightSpec::Whole(_) => {
+                    ranks[i] = shape.len() as c_int;
+                    for (k, &s) in shape.iter().enumerate() {
+                        dims[i * 4 + k] = s as i64;
+                    }
+                    bufs[i] = data;
+                }
+                WeightSpec::Rows { start, end, .. } => {
+                    if shape.len() != 2 {
+                        return Err(format!(
+                            "row-slice weight {name} is rank {} (expected 2)",
+                            shape.len()
+                        ));
+                    }
+                    bufs[i] = slice_rows(&data, shape[0], *start, *end)
+                        .map_err(|e| format!("row-slice {name}: {e}"))?;
+                    ranks[i] = 2;
+                    dims[i * 4] = (*end - *start) as i64;
+                    dims[i * 4 + 1] = shape[1] as i64;
+                }
             }
-            ranks[i] = shape.len() as c_int;
-            for (k, &s) in shape.iter().enumerate() {
-                dims[i * 4 + k] = s as i64;
-            }
-            bufs[i] = data;
         }
     }
     Ok((bufs, ranks, dims))

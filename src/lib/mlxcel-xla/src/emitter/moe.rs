@@ -15,13 +15,14 @@
 //! Shared Mixture-of-Experts FFN graph primitive (issue #500).
 //!
 //! A MoE layer replaces the dense SwiGLU MLP with a router that selects the top-k
-//! of N experts. [`moe_ffn_seq`] emits the whole block for `[N, H]` activations
-//! (used by prefill, ragged / batched decode, and — via [`moe_ffn_single`], which
-//! reshapes `[H]` to `[1, H]` — single-token decode), so every graph kind routes
-//! from one authoring site, exactly as the shared attention core (issue #494) does
-//! for attention. The primitive is parameterized by [`MoeConfig`] so #501 can add
-//! MoE families (Mixtral, Qwen2-MoE, and, once their attention lands, Qwen3-MoE /
-//! DeepSeek) by setting the routing knobs and wiring `weight_names`, without
+//! of N experts. [`moe_block`] emits the whole block over the already-normed `[N, H]`
+//! hidden (no pre-norm, no residual: the transformer layer owns those), and
+//! `emitter/model.rs` calls it from one FFN dispatch site (`emit_ffn_body`) that
+//! reaches prefill, ragged / batched decode, and single-token decode (which reshapes
+//! `[H]` to `[1, H]`), exactly as the shared attention core (issue #494) does for
+//! attention. The primitive is parameterized by [`MoeConfig`] so #501 can add MoE
+//! families (Mixtral, Qwen2-MoE, and, once their attention lands, Qwen3-MoE /
+//! DeepSeek) by setting the routing knobs and wiring `weight_specs`, without
 //! touching the routing math here.
 //!
 //! # Routing math (softmax-before-top-k)
@@ -50,7 +51,7 @@
 
 use super::builder::{Builder, Val};
 use super::config::{Config, MoeConfig};
-use super::model::{Consts, attn_softmax, rms_norm_seq};
+use super::model::{Consts, attn_softmax};
 
 /// One MoE layer's shared-expert weight handles (Qwen2-MoE / DeepSeek), taken in
 /// `emitter/model.rs` (which owns the arg schema) and consumed here.
@@ -247,43 +248,4 @@ pub(crate) fn moe_block(
         }
         None => routed,
     }
-}
-
-/// Emit one MoE FFN layer over `[N, H]` activations, returning the residual stream
-/// after the FFN residual add (`x + moe_out`), mirroring `seq_mlp`. `pre_norm_w`
-/// is the pre-FFN norm weight (`post_attention_layernorm`); the router AND the
-/// experts both consume the normed hidden, matching HF's decoder layer.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn moe_ffn_seq(
-    b: &mut Builder,
-    c: &Config,
-    moe: &MoeConfig,
-    mw: &MoeLayerW,
-    pre_norm_w: &Val,
-    k: &Consts,
-    x: &Val,
-    n: usize,
-) -> Val {
-    let h = c.hidden;
-    let hn = rms_norm_seq(b, x, pre_norm_w, k, n, h); // [N, H]
-    let moe_out = moe_block(b, c, moe, mw, k, &hn, n);
-    b.add(x, &moe_out)
-}
-
-/// Emit one MoE FFN layer over a single-token `[H]` activation, returning the
-/// residual stream `[H]`. Reshapes to `[1, H]` and delegates to [`moe_ffn_seq`], so
-/// the single-token decode path shares the exact routing math of the seq graphs.
-pub(crate) fn moe_ffn_single(
-    b: &mut Builder,
-    c: &Config,
-    moe: &MoeConfig,
-    mw: &MoeLayerW,
-    pre_norm_w: &Val,
-    k: &Consts,
-    x: &Val,
-) -> Val {
-    let h = c.hidden;
-    let x1 = b.reshape(x, vec![1, h]);
-    let y1 = moe_ffn_seq(b, c, moe, mw, pre_norm_w, k, &x1, 1);
-    b.reshape(&y1, vec![h])
 }

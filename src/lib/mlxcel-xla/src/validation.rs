@@ -396,9 +396,80 @@ pub(crate) static QWEN2_MOE_TINY: ArchFixture = ArchFixture {
     ],
 };
 
+/// A dense-pack fixture: a small synthetic `config.json` and the frozen decode +
+/// prefill goldens for a family. `$sample` selects the graph tail the goldens were
+/// frozen with: `true` returns the on-device argmax token (the issue #499 pack:
+/// Seed-OSS / MiMo / InternLM3 / ExaOne, each reusing an already-proven Llama /
+/// Qwen2 forward up to a config / naming delta), `false` returns the raw logits
+/// (the issue #498 pack: Cohere / Cohere2 / Phi3 / StableLM / StarCoder2 / Granite /
+/// MiniCPM, each proven token-exact against an HF fp32 oracle on the synthetic model
+/// via `spike/openxla/dense_arch_check.py`). Both are trusted goldens the byte-exact
+/// gate then guards against drift; the graph order in the array does not matter (each
+/// fixture is compared to its own golden).
+macro_rules! dense_fixture {
+    ($ident:ident, $arch:literal, $sample:expr) => {
+        pub(crate) static $ident: ArchFixture = ArchFixture {
+            arch: $arch,
+            config_json: include_str!(concat!("../assets/", $arch, "/config.json")),
+            graphs: &[
+                GraphFixture {
+                    kind: GraphKind::Decode { sample: $sample },
+                    golden_name: "decode.mlir",
+                    golden: include_str!(concat!("../assets/", $arch, "/decode.mlir")),
+                },
+                GraphFixture {
+                    kind: GraphKind::Prefill { sample: $sample },
+                    golden_name: "prefill.mlir",
+                    golden: include_str!(concat!("../assets/", $arch, "/prefill.mlir")),
+                },
+            ],
+        };
+    };
+}
+
+// issue #498 dense pack (raw-logits goldens, sample = false): the parallel-block
+// and norm-variant families, each proven token-exact on a synthetic model before
+// freezing (`spike/openxla/dense_arch_check.py`).
+dense_fixture!(COHERE, "cohere", false);
+dense_fixture!(COHERE2, "cohere2", false);
+dense_fixture!(PHI3, "phi3", false);
+dense_fixture!(STABLELM, "stablelm", false);
+dense_fixture!(STARCODER2, "starcoder2", false);
+dense_fixture!(GRANITE, "granite", false);
+dense_fixture!(MINICPM, "minicpm", false);
+
+// issue #499 dense pack (argmax-token goldens, sample = true): each reuses an
+// already-proven Llama / Qwen2 forward up to a config / naming delta.
+// Seed-OSS: q/k/v projection bias (from `attention_bias`), untied, `default` rope
+// type served as plain — the proven Qwen2 bias forward with standard names.
+dense_fixture!(SEED_OSS, "seed_oss", true);
+// MiMo: q/k/v projection bias, untied, plain RoPE; its config `sliding_window` is
+// served globally (as for Qwen2), so it parses to `sliding_window = None`.
+dense_fixture!(MIMO, "mimo", true);
+// InternLM3: standard names, untied, `dynamic` rope served as plain (in-context).
+dense_fixture!(INTERNLM3, "internlm3", true);
+// ExaOne 3.x: llama3 RoPE, tied, GPT-2-style names (the `Exaone` weight scheme)
+// and the `num_layers` / `layer_norm_epsilon` alternate config fields.
+dense_fixture!(EXAONE, "exaone", true);
+
 /// Every registered structural fixture. Append a family here to add it to the
-/// byte-exact gate; see the module docs for the freeze workflow.
-pub(crate) static REGISTERED: &[&ArchFixture] = &[&LLAMA_3_2_1B, &QWEN2_MOE_TINY];
+/// byte-exact gate; see the module docs for the freeze workflow. The MoE fixture
+/// (issue #500) rides the same byte-exact gate as the dense families.
+pub(crate) static REGISTERED: &[&ArchFixture] = &[
+    &LLAMA_3_2_1B,
+    &COHERE,
+    &COHERE2,
+    &PHI3,
+    &STABLELM,
+    &STARCODER2,
+    &GRANITE,
+    &MINICPM,
+    &SEED_OSS,
+    &MIMO,
+    &INTERNLM3,
+    &EXAONE,
+    &QWEN2_MOE_TINY,
+];
 
 /// A golden-less structural fixture (issue #497): a small synthetic `config.json`
 /// for a dense family plus the signature every emitted shared-core graph must
@@ -516,6 +587,83 @@ mod tests {
         for fx in REGISTERED {
             let report = check_arch(fx).unwrap_or_else(|e| panic!("{}: {e}", fx.arch));
             assert!(report.passed(), "{report}");
+        }
+    }
+
+    /// The dense pack (issue #499) reuses the proven forward: each family's config
+    /// emits StableHLO byte-for-byte identical to a proven `llama` / `qwen2`
+    /// reference carrying the SAME switches and dimensions, across the single,
+    /// prefill, and ragged graph kinds. This is the correctness anchor for the
+    /// families without a real-checkpoint execution run in-agent: their emit is
+    /// literally the Llama / Qwen2 emit the backend already runs token-exact, so
+    /// the delta is confined to config parsing (asserted in `config::tests`) and
+    /// tensor naming (asserted in `weight_names::tests`). The references match each
+    /// fixture's small synthetic dims / eps / theta exactly (rope tables and the
+    /// eps constant must line up for a byte match).
+    #[test]
+    fn dense_pack_families_reuse_proven_graphs() {
+        // (fixture, an equivalent config expressed via a proven model_type).
+        let cases: &[(&ArchFixture, &str)] = &[
+            // Seed-OSS == untied Qwen2 (q/k/v bias, plain RoPE).
+            (
+                &SEED_OSS,
+                r#"{"model_type":"qwen2","hidden_size":8,"num_attention_heads":2,
+                "num_key_value_heads":1,"head_dim":4,"intermediate_size":16,
+                "num_hidden_layers":2,"rms_norm_eps":1e-6,"rope_theta":10000000.0,
+                "vocab_size":10,"tie_word_embeddings":false}"#,
+            ),
+            // MiMo == untied Qwen2 (q/k/v bias, plain RoPE), sliding_window ignored.
+            (
+                &MIMO,
+                r#"{"model_type":"qwen2","hidden_size":8,"num_attention_heads":2,
+                "num_key_value_heads":1,"head_dim":4,"intermediate_size":16,
+                "num_hidden_layers":2,"rms_norm_eps":1e-5,"rope_theta":640000.0,
+                "vocab_size":10,"tie_word_embeddings":false}"#,
+            ),
+            // InternLM3 == untied plain-RoPE Llama (dynamic served as plain).
+            (
+                &INTERNLM3,
+                r#"{"model_type":"llama","hidden_size":8,"num_attention_heads":2,
+                "num_key_value_heads":1,"head_dim":4,"intermediate_size":16,
+                "num_hidden_layers":2,"rms_norm_eps":1e-5,"rope_theta":50000000.0,
+                "vocab_size":10,"tie_word_embeddings":false}"#,
+            ),
+            // ExaOne 3.x == tied llama3-RoPE Llama (the weight scheme is loader-only).
+            (
+                &EXAONE,
+                r#"{"model_type":"llama","hidden_size":8,"num_attention_heads":2,
+                "num_key_value_heads":1,"head_dim":4,"intermediate_size":16,
+                "num_hidden_layers":2,"rms_norm_eps":1e-5,"rope_theta":1000000.0,
+                "vocab_size":10,"tie_word_embeddings":true,"rope_scaling":{"rope_type":"llama3",
+                "factor":8.0,"low_freq_factor":1.0,"high_freq_factor":4.0,
+                "original_max_position_embeddings":8192}}"#,
+            ),
+        ];
+        for (fx, ref_json) in cases {
+            let fam = Config::from_json_str(fx.config_json)
+                .unwrap_or_else(|e| panic!("{}: {e}", fx.arch));
+            let refc = Config::from_json_str(ref_json)
+                .unwrap_or_else(|e| panic!("{} reference: {e}", fx.arch));
+            let pairs = [
+                ("decode", emit_decode(&fam, true), emit_decode(&refc, true)),
+                (
+                    "prefill",
+                    emit_prefill(&fam, false),
+                    emit_prefill(&refc, false),
+                ),
+                (
+                    "ragged",
+                    emit_decode_ragged(&fam, 4, false),
+                    emit_decode_ragged(&refc, 4, false),
+                ),
+            ];
+            for (name, got, want) in pairs {
+                assert_eq!(
+                    got, want,
+                    "{}: emitted {name} is not byte-identical to its proven equivalent",
+                    fx.arch
+                );
+            }
         }
     }
 

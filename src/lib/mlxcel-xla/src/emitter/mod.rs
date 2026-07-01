@@ -19,19 +19,26 @@
 //! `config.json` at load, instead of being pinned to the bundled Llama-3.2-1B
 //! `.mlir` assets.
 //!
-//! Scope: the dense families Llama, Qwen2, Qwen3, Gemma1, Gemma2, Gemma3, SmolLM3,
-//! and OLMo2/3. The `Config` is parameterized by dimensions AND by orthogonal
-//! architecture flags, so any checkpoint of a supported family (any size) emits
-//! correctly and a new family is a flag combination rather than a new code path.
-//! The switches the emitter branches on are the RoPE kind (llama3 vs plain, plus an
-//! optional per-layer local base for Gemma3), the q/k/v bias (Qwen2), the LM-head
-//! tie, MLX quantization, the Gemma embedding scale / `(1+w)` RMSNorm / GeGLU MLP,
-//! the per-layer norm placement ([`NormStyle`](config::NormStyle): pre-norm,
-//! Gemma four-norm, or OLMo reordered post-norm), an optional q/k normalization
+//! Scope: the dense families Llama, Qwen2, Qwen3, Gemma1/2/3, SmolLM3, OLMo2/3,
+//! Seed-OSS, MiMo, InternLM3, ExaOne (issues #497 / #499), and the parallel-block
+//! and norm-variant pack Cohere/Cohere2, Phi3, StableLM, StarCoder2, Granite,
+//! MiniCPM (issue #498). The `Config` is parameterized by dimensions AND by
+//! orthogonal architecture flags, so any checkpoint of a supported family (any
+//! size) emits correctly and a new family is a flag combination rather than a new
+//! code path. The switches the emitter branches on are the RoPE kind (llama3 vs
+//! plain, an optional per-layer local base for Gemma3, and an interleaved / partial
+//! variant for Cohere / StableLM), the q/k/v / o_proj / MLP biases, the LM-head tie,
+//! MLX quantization, the Gemma embedding scale / `(1+w)` RMSNorm / GeGLU MLP, the
+//! per-layer norm placement ([`NormStyle`](config::NormStyle): pre-norm, Gemma
+//! four-norm, or OLMo reordered post-norm) plus the mean-subtract LayerNorm (with an
+//! optional bias) for Cohere / StableLM / StarCoder2, an optional q/k normalization
 //! ([`QkNorm`](config::QkNorm): per-head for Qwen3 / Gemma3, flat for OLMo2/3), the
-//! sliding-window schedule, Gemma2/3 soft-caps, and a per-layer NoPE mask
-//! (SmolLM3). The single-sequence, ragged-decode, and prefill graphs share one
-//! per-layer attention core (issue #494), so every delta reaches all three.
+//! sliding-window schedule, Gemma2/3 soft-caps, a per-layer NoPE mask (SmolLM3), the
+//! block structure (sequential or Cohere's parallel attention+MLP), the dense
+//! (StarCoder2) MLP, and the Granite / MiniCPM / Cohere scalar multipliers. The
+//! single-token decode, ragged (continuous-batching) decode, and prefill graphs
+//! share one per-layer core (issues #494 / #498), so a family is authored once and
+//! reaches all three. MiniCPM3 (MLA attention) is rejected pending a follow-up.
 //!
 //! Pure Rust (no IREE), so it compiles and is unit-tested without the `iree`
 //! feature; only the IREE engine consumes it. The bundled `.mlir` assets remain
@@ -44,7 +51,7 @@ mod model;
 mod moe;
 mod rope;
 
-pub(crate) use config::Config;
+pub(crate) use config::{Config, NormStyle, QkNorm, WeightScheme};
 // MoE FFN config types (issue #500), read by the weight loader (`iree.rs`) and the
 // validation harness. `SharedExpertConfig` is only named in some build cfgs.
 #[allow(unused_imports)]
@@ -69,6 +76,14 @@ mod tests {
 
     const CONFIG_JSON: &str = include_str!("../../assets/llama-3.2-1b/config.json");
     const QWEN_CONFIG_JSON: &str = include_str!("../../assets/qwen2.5-0.5b/config.json");
+    // Dense arch pack (#498) synthetic fixtures.
+    const COHERE_CFG: &str = include_str!("../../assets/cohere/config.json");
+    const COHERE2_CFG: &str = include_str!("../../assets/cohere2/config.json");
+    const PHI3_CFG: &str = include_str!("../../assets/phi3/config.json");
+    const STABLELM_CFG: &str = include_str!("../../assets/stablelm/config.json");
+    const STARCODER2_CFG: &str = include_str!("../../assets/starcoder2/config.json");
+    const GRANITE_CFG: &str = include_str!("../../assets/granite/config.json");
+    const MINICPM_CFG: &str = include_str!("../../assets/minicpm/config.json");
 
     fn occurs(haystack: &str, needle: &str) -> usize {
         haystack.matches(needle).count()
@@ -110,9 +125,10 @@ mod tests {
             attn_logit_softcap: None,
             final_logit_softcap: None,
             sliding_window: None,
-            sliding_pattern: 2,
-            use_rope_layers: None,
-            moe: None,
+            // The #497 and #498 switches all default off for a Qwen-shaped config;
+            // pull them (sliding_pattern, use_rope_layers, weight_scheme, and the
+            // dense-arch-pack flags) from the reference Llama config.
+            ..Config::llama_3_2_1b()
         }
     }
 
@@ -149,9 +165,9 @@ mod tests {
             attn_logit_softcap: Some(50.0),
             final_logit_softcap: Some(30.0),
             sliding_window,
-            sliding_pattern: 2,
-            use_rope_layers: None,
-            moe: None,
+            // sliding_pattern (2), use_rope_layers, weight_scheme, and the #498 flags
+            // take their Llama defaults.
+            ..Config::llama_3_2_1b()
         }
     }
 
@@ -174,19 +190,7 @@ mod tests {
             rope: RopeScaling::Plain,
             qkv_bias: true,
             tie_word_embeddings: false,
-            quantization: None,
-            embed_scale: false,
-            norm_one_plus: false,
-            mlp_geglu: false,
             norm_style: NormStyle::Plain,
-            qk_norm: None,
-            rope_local_base: None,
-            query_pre_attn_scalar: None,
-            attn_logit_softcap: None,
-            final_logit_softcap: None,
-            sliding_window: None,
-            sliding_pattern: 2,
-            use_rope_layers: None,
             moe: Some(MoeConfig {
                 n_experts: 4,
                 top_k: 2,
@@ -204,6 +208,9 @@ mod tests {
                 first_k_dense: 0,
                 weight_prefix: "mlp",
             }),
+            // sliding_pattern (2), use_rope_layers, weight_scheme, and the #498
+            // dense-arch-pack flags take their Llama defaults.
+            ..Config::llama_3_2_1b()
         }
     }
 
@@ -401,7 +408,7 @@ mod tests {
     }
 
     /// The q/k/v bias args are appended after `wv` in k/q/v order for every layer,
-    /// matching `weight_names` in `iree.rs` so the loaded weight buffers line up
+    /// matching `weight_specs` (`weights.rs`) so the loaded weight buffers line up
     /// with the emitted graph args.
     #[test]
     fn qkv_bias_args_follow_wv_in_k_q_v_order() {
@@ -464,7 +471,7 @@ mod tests {
     /// consumes it. A `tie_word_embeddings = true` config emits no such arg, so the
     /// arg counts differ by exactly one and a tied graph never names `lm_head` (the
     /// guard that keeps every shipped tied checkpoint byte-identical). Mirrors
-    /// `weight_names` in `iree.rs`, which adds `lm_head.weight` in the same slot.
+    /// `weight_specs` (`weights.rs`), which adds `lm_head.weight` in the same slot.
     #[test]
     fn untied_adds_one_lm_head_arg_after_final_norm() {
         let tied = qwen_like(true);
@@ -681,24 +688,47 @@ mod tests {
         );
     }
 
-    /// Opt-in graph dump for the out-of-crate execution check (issue #495). Ignored
-    /// by default; when run with `--ignored` and `MLXCEL_DUMP_CONFIG` /
-    /// `MLXCEL_DUMP_OUT` set, it parses that Gemma2 `config.json` and writes the
-    /// prefill (logits) StableHLO to `MLXCEL_DUMP_OUT`, so the `spike/openxla`
-    /// harness (`gemma2_sliding_window_check.py`) can compile it with IREE and
-    /// compare last-token logits to an HF fp32 Gemma2 oracle at several window
-    /// sizes. Kept as a plain, scoped, pure-Rust entry point so the execution
-    /// check never needs the heavyweight `iree` cargo feature.
+    /// Opt-in graph dump for the out-of-crate execution check (issues #495 / #498).
+    /// Ignored by default; when run with `--ignored` and `MLXCEL_DUMP_CONFIG` /
+    /// `MLXCEL_DUMP_OUT` set, it parses that `config.json` and writes the prefill
+    /// (logits) StableHLO to `MLXCEL_DUMP_OUT`, so a `spike/openxla` harness
+    /// (`gemma2_sliding_window_check.py`, `dense_arch_check.py`) can compile it with
+    /// IREE and compare last-token logits to an HF fp32 oracle for that
+    /// architecture. Arch-generic (any config `from_json_str` accepts), and a plain,
+    /// scoped, pure-Rust entry point so the execution check never needs the
+    /// heavyweight `iree` cargo feature.
     #[test]
     #[ignore = "opt-in: writes a graph to disk for the spike/openxla execution check"]
     fn dump_prefill_graph_for_execution_check() {
         let cfg_path = std::env::var("MLXCEL_DUMP_CONFIG")
-            .expect("set MLXCEL_DUMP_CONFIG to a Gemma2 config.json path");
+            .expect("set MLXCEL_DUMP_CONFIG to a config.json path");
         let out_path =
             std::env::var("MLXCEL_DUMP_OUT").expect("set MLXCEL_DUMP_OUT to the target .mlir path");
         let text = std::fs::read_to_string(&cfg_path).expect("read MLXCEL_DUMP_CONFIG");
-        let cfg = Config::from_json_str(&text).expect("parse Gemma2 config.json");
+        let cfg = Config::from_json_str(&text).expect("parse config.json");
         std::fs::write(&out_path, emit_prefill(&cfg, false)).expect("write MLXCEL_DUMP_OUT");
+    }
+
+    /// Opt-in graph dump for the issue #499 dense-pack execution check. Ignored by
+    /// default; with `MLXCEL_DUMP_CONFIG` (a checkpoint `config.json`) and
+    /// `MLXCEL_DUMP_DIR` set, it writes the host-sampled prefill + decode logits
+    /// graphs (`prefill_logits.mlir` / `decode_logits.mlir`) from the REAL config,
+    /// so `spike/openxla/arch_execution_check.py` can compile them with IREE and
+    /// drive a token-exact continuation against an HF fp32 oracle. Pure Rust /
+    /// scoped, so the check never needs the `iree` cargo feature.
+    #[test]
+    #[ignore = "opt-in: writes prefill/decode graphs to disk for the spike/openxla execution check"]
+    fn dump_dense_pack_graphs_for_execution_check() {
+        let cfg_path =
+            std::env::var("MLXCEL_DUMP_CONFIG").expect("set MLXCEL_DUMP_CONFIG to a config.json");
+        let dir = std::env::var("MLXCEL_DUMP_DIR").expect("set MLXCEL_DUMP_DIR to an output dir");
+        let text = std::fs::read_to_string(&cfg_path).expect("read MLXCEL_DUMP_CONFIG");
+        let cfg = Config::from_json_str(&text).expect("parse config.json");
+        let dir = std::path::Path::new(&dir);
+        std::fs::write(dir.join("prefill_logits.mlir"), emit_prefill(&cfg, false))
+            .expect("write prefill_logits.mlir");
+        std::fs::write(dir.join("decode_logits.mlir"), emit_decode(&cfg, false))
+            .expect("write decode_logits.mlir");
     }
 
     /// Plain RoPE base frequencies are the textbook `1 / theta^(2i/head_dim)`
@@ -748,6 +778,203 @@ mod tests {
         assert!(!emit_decode_with(&c, true, Precision::F32).contains("f16"));
     }
 
+    // ======================================================================
+    // dense arch pack (issue #498)
+    // ======================================================================
+
+    /// Each dense-pack family parses to its architecture switches. Cohere/Cohere2
+    /// are LayerNorm + parallel-block + interleaved-RoPE with a logit multiply
+    /// (Cohere2 adds sliding layers + NoPE on the full ones); Phi3 fuses q/k/v and
+    /// gate/up; StableLM is LayerNorm-with-bias + partial RoPE + q/k/v bias;
+    /// StarCoder2 is LayerNorm-with-bias + all biases + a dense GELU MLP; Granite is
+    /// RMSNorm + four scalar multipliers.
+    #[test]
+    fn from_json_parses_dense_arch_pack() {
+        let co = Config::from_json_str(COHERE_CFG).expect("cohere");
+        assert!(co.layernorm && !co.norm_bias && co.parallel_block && co.rope_interleaved);
+        assert_eq!(co.logit_mul, Some(0.25));
+        assert!(co.tie_word_embeddings);
+
+        let c2 = Config::from_json_str(COHERE2_CFG).expect("cohere2");
+        assert!(c2.parallel_block && c2.rope_interleaved && c2.rope_on_sliding_only);
+        assert_eq!(c2.sliding_pattern, 2);
+        assert!(c2.sliding_window.is_some());
+
+        let p3 = Config::from_json_str(PHI3_CFG).expect("phi3");
+        assert!(p3.fused_qkv && p3.fused_gate_up && !p3.tie_word_embeddings);
+        assert!(!p3.layernorm && p3.rotary_dim.is_none()); // RMSNorm, full RoPE
+
+        let sl = Config::from_json_str(STABLELM_CFG).expect("stablelm");
+        assert!(sl.layernorm && sl.norm_bias && sl.qkv_bias && !sl.tie_word_embeddings);
+        assert_eq!(sl.rotary_dim, Some(2)); // head_dim 8 * 0.25
+
+        let sc = Config::from_json_str(STARCODER2_CFG).expect("starcoder2");
+        assert!(sc.layernorm && sc.norm_bias && sc.dense_mlp);
+        assert!(sc.qkv_bias && sc.attn_o_bias && sc.mlp_bias && sc.tie_word_embeddings);
+
+        let gr = Config::from_json_str(GRANITE_CFG).expect("granite");
+        assert_eq!(gr.embedding_multiplier, Some(12.0));
+        assert_eq!(gr.residual_multiplier, Some(0.22));
+        assert_eq!(gr.attention_multiplier, Some(0.125));
+        assert_eq!(gr.logit_div, Some(8.0));
+        assert_eq!(
+            gr.scale(),
+            0.125,
+            "granite uses attention_multiplier as the scale"
+        );
+    }
+
+    /// A MiniCPM checkpoint ships as `model_type = "llama"` but keeps `scale_emb` /
+    /// `scale_depth` / `dim_model_base`; detection keys on those fields (a plain
+    /// Llama has none, so it is unaffected). The residual multiplier is
+    /// `scale_depth / sqrt(num_layers)` and the logit divide is
+    /// `hidden / dim_model_base`.
+    #[test]
+    fn minicpm_llama_config_detects_scalars() {
+        let m = Config::from_json_str(MINICPM_CFG).expect("minicpm");
+        assert_eq!(m.embedding_multiplier, Some(12.0)); // scale_emb
+        // scale_depth 1.4 / sqrt(2 layers).
+        let want = (1.4f64 / (m.n_layers as f64).sqrt()) as f32;
+        assert_eq!(m.residual_multiplier, Some(want));
+        assert_eq!(m.logit_div, Some(4.0)); // hidden 32 / dim_model_base 8
+        assert!(!m.tie_word_embeddings);
+        // A plain Llama (no scale_emb) gets none of these.
+        let llama = Config::llama_3_2_1b();
+        assert!(llama.embedding_multiplier.is_none() && llama.residual_multiplier.is_none());
+        assert!(llama.logit_div.is_none());
+    }
+
+    /// MiniCPM3 (MLA) is rejected with a clear follow-up message rather than
+    /// mis-emitted through the standard-attention core.
+    #[test]
+    fn from_json_rejects_minicpm3_mla() {
+        let j = r#"{"model_type":"minicpm3","hidden_size":32,"num_attention_heads":4,
+            "num_key_value_heads":4,"intermediate_size":64,"num_hidden_layers":2,
+            "rms_norm_eps":1e-5,"rope_theta":1e4,"vocab_size":32}"#;
+        let e = Config::from_json_str(j).unwrap_err();
+        assert!(e.contains("MiniCPM3") && e.contains("MLA"), "got: {e}");
+    }
+
+    /// The parallel-block archs (Cohere/Cohere2) carry a single `input_layernorm`
+    /// per layer and NO `post_attention_layernorm`; the sequential archs carry both.
+    /// Holds across every shared-core graph kind.
+    #[test]
+    fn parallel_block_omits_post_attention_layernorm() {
+        let co = Config::from_json_str(COHERE_CFG).expect("cohere");
+        let ll = Config::llama_3_2_1b();
+        for kind in ["decode", "prefill", "ragged"] {
+            let g_co = match kind {
+                "decode" => emit_decode(&co, false),
+                "prefill" => emit_prefill(&co, false),
+                _ => emit_decode_ragged(&co, 4, false),
+            };
+            assert!(
+                g_co.contains("['in_ln']"),
+                "{kind}: cohere has input_layernorm"
+            );
+            assert!(
+                !g_co.contains("['post_ln']"),
+                "{kind}: cohere has no post-attn norm"
+            );
+        }
+        assert!(
+            emit_decode(&ll, false).contains("['post_ln']"),
+            "llama is sequential"
+        );
+    }
+
+    /// The dense (StarCoder2) MLP has no gate projection and uses a `gelu_tanh`
+    /// activation (`stablehlo.tanh`), unlike the gated SwiGLU of the Llama family.
+    #[test]
+    fn dense_mlp_has_no_gate_and_uses_gelu_tanh() {
+        let sc = Config::from_json_str(STARCODER2_CFG).expect("starcoder2");
+        for kind in ["decode", "prefill", "ragged"] {
+            let g = match kind {
+                "decode" => emit_decode(&sc, false),
+                "prefill" => emit_prefill(&sc, false),
+                _ => emit_decode_ragged(&sc, 4, false),
+            };
+            assert!(!g.contains("['gate']"), "{kind}: dense MLP has no gate");
+            assert!(
+                g.contains("stablehlo.tanh"),
+                "{kind}: dense MLP is gelu_tanh"
+            );
+        }
+        // A Llama SwiGLU MLP has a gate and no tanh.
+        assert!(emit_decode(&Config::llama_3_2_1b(), false).contains("['gate']"));
+    }
+
+    /// Partial RoPE (StableLM) rotates only `rotary_dim` of each head: the baked
+    /// cos/sin table is `[256, rotary_dim]`, narrower than the `head_dim`-wide
+    /// Llama table, and a full-rope arch's is `[256, head_dim]`.
+    #[test]
+    fn partial_rope_shrinks_the_rope_table() {
+        let sl = Config::from_json_str(STABLELM_CFG).expect("stablelm");
+        assert_eq!(sl.rotary_width(), 2);
+        let g = emit_decode(&sl, false);
+        assert!(
+            g.contains("tensor<256x2xf32>"),
+            "partial rope table is [256, 2]"
+        );
+        assert!(
+            !g.contains("tensor<256x8xf32>"),
+            "not the full head_dim (8) table"
+        );
+    }
+
+    /// Cohere2 applies RoPE only on the sliding (local) layers and leaves the
+    /// full-attention layers position-free (NoPE): with `sliding_window_pattern = 2`
+    /// the odd layers are full, so they skip the rotation.
+    #[test]
+    fn cohere2_ropes_only_sliding_layers() {
+        let c2 = Config::from_json_str(COHERE2_CFG).expect("cohere2");
+        // pattern 2: layer 0 sliding (RoPE), layer 1 full (NoPE). The merged RoPE
+        // gate `layer_uses_rope` folds Cohere2's rope-on-sliding-only into the
+        // SmolLM3 NoPE mask, so it captures the same per-layer decision.
+        assert!(c2.is_sliding_layer(0) && c2.layer_uses_rope(0));
+        assert!(!c2.is_sliding_layer(1) && !c2.layer_uses_rope(1));
+        // Cohere v1 has no such gate: every layer is RoPE'd.
+        let co = Config::from_json_str(COHERE_CFG).expect("cohere");
+        assert!(co.layer_uses_rope(0) && co.layer_uses_rope(1));
+    }
+
+    /// Granite / MiniCPM scalars reach the graph: the embedding multiplier and the
+    /// per-residual multiplier are baked constants, and the final logits are divided
+    /// (Granite `logits_scaling`) rather than left unscaled (Llama).
+    #[test]
+    fn granite_scalars_are_emitted() {
+        let gr = Config::from_json_str(GRANITE_CFG).expect("granite");
+        let g = emit_decode(&gr, false);
+        // The same dims with the scalars off isolates exactly the scalar surface.
+        let mut plain = gr.clone();
+        plain.embedding_multiplier = None;
+        plain.residual_multiplier = None;
+        plain.logit_div = None;
+        plain.attention_multiplier = None;
+        let base = emit_decode(&plain, false);
+        // logits_scaling adds exactly one logit divide; the embed / residual
+        // multipliers add multiplies (embed once, residual twice per layer).
+        assert_eq!(
+            g.matches("stablehlo.divide").count(),
+            base.matches("stablehlo.divide").count() + 1,
+            "granite divides the logits once (logits_scaling)"
+        );
+        assert_eq!(
+            g.matches("stablehlo.multiply").count() - base.matches("stablehlo.multiply").count(),
+            1 + 2 * gr.n_layers,
+            "embed multiplier once + residual multiplier on each sublayer"
+        );
+        // The scalar constants are baked into the graph.
+        assert!(
+            g.contains(&super::builder::f32_hex(12.0)),
+            "embedding multiplier 12.0"
+        );
+        assert!(
+            g.contains(&super::builder::f32_hex(8.0)),
+            "logits_scaling 8.0"
+        );
+    }
+
     // ===================================================================
     // issue #497: dense arch pack (Qwen3, Gemma1/3, SmolLM3, OLMo2/3)
     // ===================================================================
@@ -782,9 +1009,9 @@ mod tests {
             attn_logit_softcap: None,
             final_logit_softcap: None,
             sliding_window: None,
-            sliding_pattern: 2,
-            use_rope_layers: None,
-            moe: None,
+            // sliding_pattern (2), use_rope_layers, weight_scheme, and the #498
+            // dense-arch-pack flags all take their Llama defaults.
+            ..Config::llama_3_2_1b()
         }
     }
 
