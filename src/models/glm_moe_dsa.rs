@@ -95,13 +95,19 @@ pub struct ModelArgs {
     #[serde(default = "default_rope_theta")]
     pub rope_theta: f32,
 
-    // GLM-specific fields (unused by DSV32 but present in config)
+    // DSA lightning indexer config. GLM MoE DSA parses these directly; they
+    // are threaded into the DeepSeek V3.2 attention via `to_dsv32_args`.
     #[serde(default)]
     pub index_head_dim: Option<usize>,
     #[serde(default)]
     pub index_n_heads: Option<usize>,
     #[serde(default)]
     pub index_topk: Option<usize>,
+
+    /// Indexer RoPE `traditional` flag. Defaults to `true` (interleaved) for
+    /// glm_moe_dsa, unlike deepseek_v32 which defaults to `false`.
+    #[serde(default = "default_indexer_rope_interleave")]
+    pub indexer_rope_interleave: bool,
 }
 
 fn default_routed_scaling_factor() -> f32 {
@@ -152,6 +158,9 @@ fn default_rms_norm_eps() -> f32 {
 fn default_rope_theta() -> f32 {
     10000.0
 }
+fn default_indexer_rope_interleave() -> bool {
+    true
+}
 
 impl ModelArgs {
     /// Convert GLM MoE DSA config to DeepSeek V3.2 config.
@@ -201,6 +210,16 @@ impl ModelArgs {
             qk_rope_head_dim: self.qk_rope_head_dim,
             v_head_dim: self.v_head_dim,
             qk_nope_head_dim: self.qk_nope_head_dim,
+            index_topk: self
+                .index_topk
+                .unwrap_or_else(deepseek_v32::default_index_topk),
+            index_n_heads: self
+                .index_n_heads
+                .unwrap_or_else(deepseek_v32::default_index_n_heads),
+            index_head_dim: self
+                .index_head_dim
+                .unwrap_or_else(deepseek_v32::default_index_head_dim),
+            indexer_rope_interleave: self.indexer_rope_interleave,
             topk_method: self.topk_method.clone(),
             scoring_func: self.scoring_func.clone(),
             norm_topk_prob: self.norm_topk_prob,
@@ -314,6 +333,7 @@ mod tests {
             index_head_dim: None,
             index_n_heads: None,
             index_topk: None,
+            indexer_rope_interleave: default_indexer_rope_interleave(),
         }
     }
 
@@ -359,5 +379,45 @@ mod tests {
         assert_eq!(rope_scaling.scaling_type.as_deref(), Some("linear"));
         assert_eq!(rope_scaling.factor, Some(8.0));
         assert_eq!(rope_scaling.mscale_all_dim, None);
+    }
+
+    #[test]
+    fn glm_moe_dsa_indexer_rope_is_interleaved_by_default() {
+        // glm_moe_dsa must default the indexer RoPE to interleaved
+        // (traditional = true), the opposite of deepseek_v32's false. This is
+        // load-bearing: the wrong value silently corrupts key selection.
+        let args = sample_args();
+        assert!(
+            args.indexer_rope_interleave,
+            "glm_moe_dsa default indexer_rope_interleave must be true"
+        );
+        assert!(
+            args.to_dsv32_args().indexer_rope_interleave,
+            "interleave flag must be threaded into the DeepSeek V3.2 args"
+        );
+    }
+
+    #[test]
+    fn glm_moe_dsa_indexer_config_defaults_thread_through() {
+        // Absent explicit index_* fields, the DeepSeek V3.2 indexer defaults
+        // (topk 2048, 64 heads, head_dim 128) must be supplied.
+        let mapped = sample_args().to_dsv32_args();
+        assert_eq!(mapped.index_topk, 2048);
+        assert_eq!(mapped.index_n_heads, 64);
+        assert_eq!(mapped.index_head_dim, 128);
+    }
+
+    #[test]
+    fn glm_moe_dsa_indexer_config_overrides_are_respected() {
+        let mut args = sample_args();
+        args.index_topk = Some(4096);
+        args.index_n_heads = Some(32);
+        args.index_head_dim = Some(96);
+        args.indexer_rope_interleave = false;
+        let mapped = args.to_dsv32_args();
+        assert_eq!(mapped.index_topk, 4096);
+        assert_eq!(mapped.index_n_heads, 32);
+        assert_eq!(mapped.index_head_dim, 96);
+        assert!(!mapped.indexer_rope_interleave);
     }
 }
