@@ -53,7 +53,9 @@ use safetensors::{Dtype, SafeTensors};
 use crate::emitter::{
     Config, emit_decode_ragged_with, emit_decode_with, emit_prefill_with, resolve_precision,
 };
-use crate::weights::{bf16_to_f32, dequantize_affine, f16_to_f32, f32_le_to_f32};
+use crate::weights::{
+    bf16_to_f32, dequantize_affine, dequantize_affine_stacked, f16_to_f32, f32_le_to_f32,
+};
 
 /// Prefill bucket baked into the emitted `prefill` graph (`tensor<256xi32>`,
 /// == MAX_SEQ, so it covers any prompt the 256-slot KV cache holds).
@@ -129,6 +131,13 @@ pub(crate) const RAGGED_B_VALUES: &[usize] = &[4, 8];
 /// the untied head, and the presence of biases come from the model config so the
 /// order matches the emitted graph's args (`take_lm_head` / `take_layer_weights`
 /// in `emitter/model.rs`).
+///
+/// A MoE layer (issue #500) takes no dense `mlp.{gate,up,down}_proj`; instead, after
+/// its attention weights / biases, come the router (`{prefix}.gate.weight`), the
+/// stacked mlx-lm `switch_mlp` expert projections, and — when the family has a
+/// shared expert (Qwen2-MoE) — the shared SwiGLU plus its sigmoid gate. The order
+/// mirrors `take_moe_weights` in `emitter/model.rs` so the loaded buffers line up
+/// with the emitted expert args.
 fn weight_names(cfg: &Config) -> Vec<String> {
     let mut names = vec![
         "model.embed_tokens.weight".to_string(),
@@ -141,38 +150,82 @@ fn weight_names(cfg: &Config) -> Vec<String> {
     }
     for i in 0..cfg.n_layers {
         let p = format!("model.layers.{i}.");
-        for suf in [
-            "mlp.down_proj.weight",
-            "mlp.gate_proj.weight",
-            "input_layernorm.weight",
-            "post_attention_layernorm.weight",
-            "mlp.up_proj.weight",
-            "self_attn.k_proj.weight",
-            "self_attn.o_proj.weight",
-            "self_attn.q_proj.weight",
-            "self_attn.v_proj.weight",
-        ] {
-            names.push(format!("{p}{suf}"));
-        }
-        // Qwen2 q/k/v projection biases, appended per layer in the same k/q/v
-        // order `take_layer_weights` adds them to the emitted graph args.
-        if cfg.qkv_bias {
+        if cfg.is_moe_layer(i) {
+            let m = cfg.moe.as_ref().expect("a MoE layer has a MoeConfig");
+            // Attention weights + norms (no dense MLP weights on a MoE layer).
             for suf in [
-                "self_attn.k_proj.bias",
-                "self_attn.q_proj.bias",
-                "self_attn.v_proj.bias",
+                "input_layernorm.weight",
+                "post_attention_layernorm.weight",
+                "self_attn.k_proj.weight",
+                "self_attn.o_proj.weight",
+                "self_attn.q_proj.weight",
+                "self_attn.v_proj.weight",
             ] {
                 names.push(format!("{p}{suf}"));
             }
-        }
-        // Gemma2 has two extra per-layer norms (pre/post feed-forward), appended
-        // in the same order `take_layer_weights` takes their graph args.
-        if cfg.gemma2 {
+            if cfg.qkv_bias {
+                for suf in [
+                    "self_attn.k_proj.bias",
+                    "self_attn.q_proj.bias",
+                    "self_attn.v_proj.bias",
+                ] {
+                    names.push(format!("{p}{suf}"));
+                }
+            }
+            // MoE expert bank: router, then the stacked `switch_mlp` gate/up/down,
+            // then the optional shared expert. `weight_prefix` is `mlp` (Qwen2-MoE)
+            // or `block_sparse_moe` (Mixtral).
+            let mp = m.weight_prefix;
+            names.push(format!("{p}{mp}.gate.weight"));
+            names.push(format!("{p}{mp}.switch_mlp.gate_proj.weight"));
+            names.push(format!("{p}{mp}.switch_mlp.up_proj.weight"));
+            names.push(format!("{p}{mp}.switch_mlp.down_proj.weight"));
+            if let Some(sh) = m.shared {
+                for suf in [
+                    "shared_expert.gate_proj.weight",
+                    "shared_expert.up_proj.weight",
+                    "shared_expert.down_proj.weight",
+                ] {
+                    names.push(format!("{p}{mp}.{suf}"));
+                }
+                if sh.gated {
+                    names.push(format!("{p}{mp}.shared_expert_gate.weight"));
+                }
+            }
+        } else {
             for suf in [
-                "pre_feedforward_layernorm.weight",
-                "post_feedforward_layernorm.weight",
+                "mlp.down_proj.weight",
+                "mlp.gate_proj.weight",
+                "input_layernorm.weight",
+                "post_attention_layernorm.weight",
+                "mlp.up_proj.weight",
+                "self_attn.k_proj.weight",
+                "self_attn.o_proj.weight",
+                "self_attn.q_proj.weight",
+                "self_attn.v_proj.weight",
             ] {
                 names.push(format!("{p}{suf}"));
+            }
+            // Qwen2 q/k/v projection biases, appended per layer in the same k/q/v
+            // order `take_layer_weights` adds them to the emitted graph args.
+            if cfg.qkv_bias {
+                for suf in [
+                    "self_attn.k_proj.bias",
+                    "self_attn.q_proj.bias",
+                    "self_attn.v_proj.bias",
+                ] {
+                    names.push(format!("{p}{suf}"));
+                }
+            }
+            // Gemma2 has two extra per-layer norms (pre/post feed-forward), appended
+            // in the same order `take_layer_weights` takes their graph args.
+            if cfg.gemma2 {
+                for suf in [
+                    "pre_feedforward_layernorm.weight",
+                    "post_feedforward_layernorm.weight",
+                ] {
+                    names.push(format!("{p}{suf}"));
+                }
             }
         }
     }
@@ -433,24 +486,52 @@ fn load_weights(
                     ));
                 }
                 let shape = t.shape();
-                if shape.len() != 2 {
-                    return Err(format!("quantized weight {name} rank {} != 2", shape.len()));
+                match shape.len() {
+                    // Ordinary `[out, in_packed]` weight (attention, dense MLP,
+                    // shared expert, router when quantized).
+                    2 => {
+                        let (out, in_packed) = (shape[0], shape[1]);
+                        let in_ = in_packed * (32 / qc.bits);
+                        bufs[i] = dequantize_affine(
+                            t.data(),
+                            scales.data(),
+                            biases.data(),
+                            out,
+                            in_packed,
+                            qc.bits,
+                            qc.group_size,
+                        )
+                        .map_err(|e| format!("dequantize {name}: {e}"))?;
+                        ranks[i] = 2;
+                        dims[i * 4] = out as i64;
+                        dims[i * 4 + 1] = in_ as i64;
+                    }
+                    // Stacked `[experts, out, in_packed]` MoE `switch_mlp` weight
+                    // (issue #500); dequantize each expert slab and keep the leading
+                    // expert axis so it feeds the emitter's `[E, out, in]` arg.
+                    3 => {
+                        let (experts, out, in_packed) = (shape[0], shape[1], shape[2]);
+                        let in_ = in_packed * (32 / qc.bits);
+                        bufs[i] = dequantize_affine_stacked(
+                            t.data(),
+                            scales.data(),
+                            biases.data(),
+                            experts,
+                            out,
+                            in_packed,
+                            qc.bits,
+                            qc.group_size,
+                        )
+                        .map_err(|e| format!("dequantize stacked {name}: {e}"))?;
+                        ranks[i] = 3;
+                        dims[i * 4] = experts as i64;
+                        dims[i * 4 + 1] = out as i64;
+                        dims[i * 4 + 2] = in_ as i64;
+                    }
+                    r => {
+                        return Err(format!("quantized weight {name} rank {r} not in {{2, 3}}"));
+                    }
                 }
-                let (out, in_packed) = (shape[0], shape[1]);
-                let in_ = in_packed * (32 / qc.bits);
-                bufs[i] = dequantize_affine(
-                    t.data(),
-                    scales.data(),
-                    biases.data(),
-                    out,
-                    in_packed,
-                    qc.bits,
-                    qc.group_size,
-                )
-                .map_err(|e| format!("dequantize {name}: {e}"))?;
-                ranks[i] = 2;
-                dims[i * 4] = out as i64;
-                dims[i * 4 + 1] = in_ as i64;
                 continue;
             }
 

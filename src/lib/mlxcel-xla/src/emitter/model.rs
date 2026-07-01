@@ -16,6 +16,7 @@
 
 use super::builder::{Builder, Precision, Ty, Val, precision_from_env};
 use super::config::Config;
+use super::moe::{self, MoeLayerW, MoeSharedW};
 use super::rope;
 
 const MAX_SEQ: usize = 256;
@@ -32,11 +33,15 @@ const PREFILL_LP: usize = MAX_SEQ;
 /// present only for an architecture with `qkv_bias` (Qwen2); `None` for Llama,
 /// where the bias add emits no op so the graph is byte-identical to before.
 struct LayerW {
-    down: Val,
-    gate: Val,
+    /// Dense SwiGLU MLP weights. `None` on a MoE layer (issue #500), whose FFN
+    /// uses `moe` instead; `Some` for every dense layer (all non-MoE models, and
+    /// the leading dense layers of a MoE model), so the emitted dense-MLP op
+    /// sequence is byte-for-byte unchanged.
+    down: Option<Val>,
+    gate: Option<Val>,
+    up: Option<Val>,
     in_ln: Val,
     post_ln: Val,
-    up: Val,
     wk: Val,
     wo: Val,
     wq: Val,
@@ -49,6 +54,19 @@ struct LayerW {
     /// norm, `pre_ff_ln` the pre-MLP norm, `post_ff_ln` the post-MLP norm.
     pre_ff_ln: Option<Val>,
     post_ff_ln: Option<Val>,
+    /// MoE FFN weight handles (issue #500), `Some` on a MoE layer (router, stacked
+    /// experts, optional shared expert); `None` on a dense layer.
+    moe: Option<MoeLayerW>,
+}
+
+impl LayerW {
+    /// The dense MLP weight `w`, present on every dense layer. Panics only if a MoE
+    /// layer reaches a dense-MLP emit path, which the `is_moe_layer` branch guards
+    /// against — the dense paths are never taken for a MoE layer.
+    fn dense(w: &Option<Val>) -> &Val {
+        w.as_ref()
+            .expect("dense MLP weight taken on a dense layer (MoE layers use `moe`)")
+    }
 }
 
 struct Args {
@@ -119,11 +137,25 @@ fn take_layer_weights(decls: &mut Vec<ArgDecl>, idx: &mut usize, c: &Config, li:
     let kv = c.n_kv * c.head_dim;
     let qd = c.n_q * c.head_dim;
     let p = |k: &str| format!("params['layers'][{}]['{}']", li, k);
-    let down = take_arg(decls, idx, Ty::f32(vec![h, inter]), p("down"));
-    let gate = take_arg(decls, idx, Ty::f32(vec![inter, h]), p("gate"));
+    // A MoE layer (issue #500) takes no dense MLP weights here; its expert bank is
+    // taken after the attention weights. A dense layer keeps the original
+    // JAX-alphabetical order (down, gate, in_ln, post_ln, up, ...) byte-identical.
+    let moe_layer = c.is_moe_layer(li);
+    let (down, gate) = if moe_layer {
+        (None, None)
+    } else {
+        (
+            Some(take_arg(decls, idx, Ty::f32(vec![h, inter]), p("down"))),
+            Some(take_arg(decls, idx, Ty::f32(vec![inter, h]), p("gate"))),
+        )
+    };
     let in_ln = take_arg(decls, idx, Ty::f32(vec![h]), p("in_ln"));
     let post_ln = take_arg(decls, idx, Ty::f32(vec![h]), p("post_ln"));
-    let up = take_arg(decls, idx, Ty::f32(vec![inter, h]), p("up"));
+    let up = if moe_layer {
+        None
+    } else {
+        Some(take_arg(decls, idx, Ty::f32(vec![inter, h]), p("up")))
+    };
     let wk = take_arg(decls, idx, Ty::f32(vec![kv, h]), p("wk"));
     // o_proj maps `[n_q*head_dim]` -> `[hidden]`, so its weight is `[h, qd]` (HF's
     // `[out, in]`). For Llama / Qwen2 `qd == h`, so this renders the same square
@@ -148,12 +180,20 @@ fn take_layer_weights(decls: &mut Vec<ArgDecl>, idx: &mut usize, c: &Config, li:
     } else {
         (None, None)
     };
+    // MoE expert bank (issue #500): router, stacked experts, optional shared
+    // expert, appended after the attention weights / biases in a MoE layer, in the
+    // same order `weight_names` (`iree.rs`) lists them.
+    let moe = if moe_layer {
+        Some(take_moe_weights(decls, idx, c, li))
+    } else {
+        None
+    };
     LayerW {
         down,
         gate,
+        up,
         in_ln,
         post_ln,
-        up,
         wk,
         wo,
         wq,
@@ -163,6 +203,55 @@ fn take_layer_weights(decls: &mut Vec<ArgDecl>, idx: &mut usize, c: &Config, li:
         bv,
         pre_ff_ln,
         post_ff_ln,
+        moe,
+    }
+}
+
+/// Append a MoE layer's expert-bank args (issue #500): the router `[E, H]`, the
+/// three stacked expert projections `[E, I, H]` / `[E, I, H]` / `[E, H, I]`, and —
+/// when the family has a shared expert — its `[Is, H]` / `[Is, H]` / `[H, Is]`
+/// SwiGLU plus, for a gated shared expert (Qwen2-MoE), its `[1, H]` gate. The order
+/// mirrors `weight_names` in `iree.rs` so the loaded buffers line up with the args.
+fn take_moe_weights(decls: &mut Vec<ArgDecl>, idx: &mut usize, c: &Config, li: usize) -> MoeLayerW {
+    let m = c.moe.as_ref().expect("a MoE layer has a MoeConfig");
+    let h = c.hidden;
+    let e = m.n_experts;
+    let i = m.intermediate;
+    let p = |k: &str| format!("params['layers'][{}]['{}']", li, k);
+    let router = take_arg(decls, idx, Ty::f32(vec![e, h]), p("moe_router"));
+    let w_gate = take_arg(decls, idx, Ty::f32(vec![e, i, h]), p("moe_gate"));
+    let w_up = take_arg(decls, idx, Ty::f32(vec![e, i, h]), p("moe_up"));
+    let w_down = take_arg(decls, idx, Ty::f32(vec![e, h, i]), p("moe_down"));
+    let shared = if let Some(sh) = m.shared {
+        let is = sh.intermediate;
+        let gate = take_arg(decls, idx, Ty::f32(vec![is, h]), p("moe_shared_gate"));
+        let up = take_arg(decls, idx, Ty::f32(vec![is, h]), p("moe_shared_up"));
+        let down = take_arg(decls, idx, Ty::f32(vec![h, is]), p("moe_shared_down"));
+        let expert_gate = if sh.gated {
+            Some(take_arg(
+                decls,
+                idx,
+                Ty::f32(vec![1, h]),
+                p("moe_shared_expert_gate"),
+            ))
+        } else {
+            None
+        };
+        Some(MoeSharedW {
+            gate,
+            up,
+            down,
+            expert_gate,
+        })
+    } else {
+        None
+    };
+    MoeLayerW {
+        router,
+        w_gate,
+        w_up,
+        w_down,
+        shared,
     }
 }
 
@@ -256,13 +345,15 @@ fn render_signature(decls: &[ArgDecl]) -> String {
     parts.join(", ")
 }
 
-/// Shared scalar/table constants, emitted once at the top of the body.
-struct Consts {
+/// Shared scalar/table constants, emitted once at the top of the body. Crate-
+/// visible so the sibling `moe` module (issue #500) reads the shared scalars
+/// (`one`, `zero`, `neg_inf`) it needs for the router softmax / top-k masking.
+pub(crate) struct Consts {
     cos_table: Val,
     sin_table: Val,
-    zero: Val,
-    one: Val,
-    neg_inf: Val,
+    pub(crate) zero: Val,
+    pub(crate) one: Val,
+    pub(crate) neg_inf: Val,
     neg_big: Val,
     eps: Val,
     hidden_f: Val,
@@ -380,8 +471,8 @@ fn seq_mlp(b: &mut Builder, c: &Config, lw: &LayerW, k: &Consts, x: &Val, n: usi
     };
     let pre_mlp_w = norm_w(b, pre_mlp, c, k, h);
     let hn2 = rms_norm_seq(b, x, &pre_mlp_w, k, n, h);
-    let gate = b.linear_seq(&hn2, &lw.gate);
-    let up = b.linear_seq(&hn2, &lw.up);
+    let gate = b.linear_seq(&hn2, LayerW::dense(&lw.gate));
+    let up = b.linear_seq(&hn2, LayerW::dense(&lw.up));
     let act = if c.gemma2 {
         gelu_tanh(b, &gate)
     } else {
@@ -393,7 +484,7 @@ fn seq_mlp(b: &mut Builder, c: &Config, lw: &LayerW, k: &Consts, x: &Val, n: usi
         b.multiply(&gate, &sig)
     };
     let act = b.multiply(&act, &up);
-    let down = b.linear_seq(&act, &lw.down);
+    let down = b.linear_seq(&act, LayerW::dense(&lw.down));
     let down = if c.gemma2 {
         let w = norm_w(
             b,
@@ -407,6 +498,28 @@ fn seq_mlp(b: &mut Builder, c: &Config, lw: &LayerW, k: &Consts, x: &Val, n: usi
         down
     };
     b.add(x, &down)
+}
+
+/// The per-layer FFN over `[N, H]` activations: the MoE FFN (issue #500) on a MoE
+/// layer, else the dense SwiGLU MLP ([`seq_mlp`]). Shared by the prefill and ragged
+/// graphs so a family's FFN choice reaches them from one site; on a dense layer it
+/// forwards straight to `seq_mlp`, so those graphs stay byte-for-byte identical.
+fn ffn_seq(
+    b: &mut Builder,
+    c: &Config,
+    lw: &LayerW,
+    k: &Consts,
+    x: &Val,
+    n: usize,
+    li: usize,
+) -> Val {
+    if c.is_moe_layer(li) {
+        let m = c.moe.as_ref().expect("a MoE layer has a MoeConfig");
+        let mw = lw.moe.as_ref().expect("a MoE layer has expert weights");
+        moe::moe_ffn_seq(b, c, m, mw, &lw.post_ln, k, x, n)
+    } else {
+        seq_mlp(b, c, lw, k, x, n)
+    }
 }
 
 /// HF half-split RoPE on x:[heads, d]; cos/sin are [d] for the position.
@@ -794,8 +907,9 @@ fn layer_mask<'a>(mask: &'a Val, mask_local: &'a Option<Val>, c: &Config, li: us
 /// Numerically-stable softmax over `axis` of `scores` (max-subtract, exp,
 /// sum-divide). The keep-dims for the max/sum broadcasts are every axis but
 /// `axis`, so one helper serves the single (`axis 1`), ragged (`axis 2`), and
-/// prefill (`axis 3`) score ranks identically.
-fn attn_softmax(b: &mut Builder, k: &Consts, scores: &Val, axis: usize) -> Val {
+/// prefill (`axis 3`) score ranks identically. Crate-visible: the `moe` module
+/// (issue #500) reuses it for the router softmax over the expert axis.
+pub(crate) fn attn_softmax(b: &mut Builder, k: &Consts, scores: &Val, axis: usize) -> Val {
     let shape = scores.ty.shape.clone();
     let keep: Vec<usize> = (0..shape.len()).filter(|&i| i != axis).collect();
     let m = b.reduce_max(scores, axis, &k.neg_inf);
@@ -959,45 +1073,54 @@ pub fn emit_decode_with(c: &Config, sample: bool, precision: Precision) -> Strin
         // attention block (shared per-layer core, issue #494)
         x = emit_attention(&mut b, c, &k, lw, li, &x, &layout, &mut kcache, &mut vcache);
 
-        // MLP. Pre-MLP norm: Llama / Qwen2 use post_attention_layernorm; Gemma2
-        // uses pre_feedforward_layernorm (post_attention_layernorm became the
-        // post-attn norm above). Activation: SwiGLU (silu) vs Gemma2 GeGLU (gelu).
-        let pre_mlp = if c.gemma2 {
-            lw.pre_ff_ln.as_ref().expect("gemma2 pre_ff_ln")
+        // FFN. A MoE layer (issue #500) routes the top-k of N experts (the seq MoE
+        // block reshaped to a single [1, H] row); a dense layer runs the SwiGLU /
+        // Gemma2 GeGLU MLP inline (byte-for-byte unchanged).
+        if c.is_moe_layer(li) {
+            let m = c.moe.as_ref().expect("a MoE layer has a MoeConfig");
+            let mw = lw.moe.as_ref().expect("a MoE layer has expert weights");
+            x = moe::moe_ffn_single(&mut b, c, m, mw, &lw.post_ln, &k, &x);
         } else {
-            &lw.post_ln
-        };
-        let pre_mlp_w = norm_w(&mut b, pre_mlp, c, &k, h);
-        let hn2 = rms_norm(&mut b, &x, &pre_mlp_w, &k, h);
-        let gate = b.linear(&hn2, &lw.gate);
-        let up = b.linear(&hn2, &lw.up);
-        let act = if c.gemma2 {
-            gelu_tanh(&mut b, &gate)
-        } else {
-            // silu(gate) = gate * sigmoid(gate), sigmoid(z) = 1/(1+exp(-z))
-            let neg = b.negate(&gate);
-            let ex = b.exponential(&neg);
-            let one_b = b.broadcast(&k.one, &[], vec![c.inter]);
-            let denom = b.add(&one_b, &ex);
-            let sig = b.divide(&one_b, &denom);
-            b.multiply(&gate, &sig)
-        };
-        let act = b.multiply(&act, &up);
-        let down = b.linear(&act, &lw.down);
-        // Gemma2: post-MLP norm before the residual.
-        let down = if c.gemma2 {
-            let w = norm_w(
-                &mut b,
-                lw.post_ff_ln.as_ref().expect("gemma2 post_ff_ln"),
-                c,
-                &k,
-                h,
-            );
-            rms_norm(&mut b, &down, &w, &k, h)
-        } else {
-            down
-        };
-        x = b.add(&x, &down);
+            // Pre-MLP norm: Llama / Qwen2 use post_attention_layernorm; Gemma2 uses
+            // pre_feedforward_layernorm (post_attention_layernorm became the post-attn
+            // norm above). Activation: SwiGLU (silu) vs Gemma2 GeGLU (gelu).
+            let pre_mlp = if c.gemma2 {
+                lw.pre_ff_ln.as_ref().expect("gemma2 pre_ff_ln")
+            } else {
+                &lw.post_ln
+            };
+            let pre_mlp_w = norm_w(&mut b, pre_mlp, c, &k, h);
+            let hn2 = rms_norm(&mut b, &x, &pre_mlp_w, &k, h);
+            let gate = b.linear(&hn2, LayerW::dense(&lw.gate));
+            let up = b.linear(&hn2, LayerW::dense(&lw.up));
+            let act = if c.gemma2 {
+                gelu_tanh(&mut b, &gate)
+            } else {
+                // silu(gate) = gate * sigmoid(gate), sigmoid(z) = 1/(1+exp(-z))
+                let neg = b.negate(&gate);
+                let ex = b.exponential(&neg);
+                let one_b = b.broadcast(&k.one, &[], vec![c.inter]);
+                let denom = b.add(&one_b, &ex);
+                let sig = b.divide(&one_b, &denom);
+                b.multiply(&gate, &sig)
+            };
+            let act = b.multiply(&act, &up);
+            let down = b.linear(&act, LayerW::dense(&lw.down));
+            // Gemma2: post-MLP norm before the residual.
+            let down = if c.gemma2 {
+                let w = norm_w(
+                    &mut b,
+                    lw.post_ff_ln.as_ref().expect("gemma2 post_ff_ln"),
+                    c,
+                    &k,
+                    h,
+                );
+                rms_norm(&mut b, &down, &w, &k, h)
+            } else {
+                down
+            };
+            x = b.add(&x, &down);
+        }
     }
 
     // --- tail: final norm + LM head (tied embed or untied lm_head), Gemma2 final
@@ -1273,19 +1396,26 @@ pub fn emit_decode_batched_with(
         let attn_out = b.linear_seq(&o, &lw.wo); // [B, H]
         x = b.add(&x, &attn_out);
 
-        // MLP: down( silu(x@gate^T) * (x@up^T) )
-        let hn2 = rms_norm_seq(&mut b, &x, &lw.post_ln, &k, bsz, h);
-        let gate = b.linear_seq(&hn2, &lw.gate); // [B, inter]
-        let up = b.linear_seq(&hn2, &lw.up); // [B, inter]
-        let neg = b.negate(&gate);
-        let ex = b.exponential(&neg);
-        let one_b = b.broadcast(&k.one, &[], vec![bsz, c.inter]);
-        let denom = b.add(&one_b, &ex);
-        let sig = b.divide(&one_b, &denom);
-        let silu = b.multiply(&gate, &sig);
-        let act = b.multiply(&silu, &up);
-        let down = b.linear_seq(&act, &lw.down); // [B, H]
-        x = b.add(&x, &down);
+        // FFN: MoE (issue #500) on a MoE layer, else the dense SwiGLU MLP
+        // `down( silu(x@gate^T) * (x@up^T) )` (byte-for-byte unchanged).
+        if c.is_moe_layer(li) {
+            let m = c.moe.as_ref().expect("a MoE layer has a MoeConfig");
+            let mw = lw.moe.as_ref().expect("a MoE layer has expert weights");
+            x = moe::moe_ffn_seq(&mut b, c, m, mw, &lw.post_ln, &k, &x, bsz);
+        } else {
+            let hn2 = rms_norm_seq(&mut b, &x, &lw.post_ln, &k, bsz, h);
+            let gate = b.linear_seq(&hn2, LayerW::dense(&lw.gate)); // [B, inter]
+            let up = b.linear_seq(&hn2, LayerW::dense(&lw.up)); // [B, inter]
+            let neg = b.negate(&gate);
+            let ex = b.exponential(&neg);
+            let one_b = b.broadcast(&k.one, &[], vec![bsz, c.inter]);
+            let denom = b.add(&one_b, &ex);
+            let sig = b.divide(&one_b, &denom);
+            let silu = b.multiply(&gate, &sig);
+            let act = b.multiply(&silu, &up);
+            let down = b.linear_seq(&act, LayerW::dense(&lw.down)); // [B, H]
+            x = b.add(&x, &down);
+        }
     }
 
     // --- tail: final norm + LM head (tied embed or untied lm_head) -> [B, V],
@@ -1510,9 +1640,9 @@ pub fn emit_decode_ragged_with(
         // attention block (shared per-layer core, issue #494)
         x = emit_attention(&mut b, c, &k, lw, li, &x, &layout, &mut kcache, &mut vcache);
 
-        // MLP + its norms (SwiGLU, or Gemma2 GeGLU with pre/post FF norms),
-        // shared with the prefill graph.
-        x = seq_mlp(&mut b, c, lw, &k, &x, bsz);
+        // FFN: MoE (issue #500) on a MoE layer, else the dense SwiGLU / Gemma2
+        // GeGLU MLP, shared with the prefill graph.
+        x = ffn_seq(&mut b, c, lw, &k, &x, bsz, li);
     }
 
     let final_w = norm_w(&mut b, &a.final_norm, c, &k, h);
@@ -1623,7 +1753,15 @@ fn build_prefill_arg_schema(c: &Config, lp: usize) -> (Vec<ArgDecl>, PrefillArgs
 }
 
 /// RMSNorm over a sequence: x:[Lp, H] -> per-row x * rsqrt(mean(x*x)+eps) * w.
-fn rms_norm_seq(b: &mut Builder, x: &Val, w: &Val, k: &Consts, lp: usize, hidden: usize) -> Val {
+/// Crate-visible: the `moe` module (issue #500) reuses it for the pre-MoE norm.
+pub(crate) fn rms_norm_seq(
+    b: &mut Builder,
+    x: &Val,
+    w: &Val,
+    k: &Consts,
+    lp: usize,
+    hidden: usize,
+) -> Val {
     let sq = b.multiply(x, x);
     let ssum = b.reduce_add(&sq, 1, &k.zero); // [Lp]
     let hb = b.broadcast(&k.hidden_f, &[], vec![lp]);
@@ -1731,9 +1869,9 @@ pub fn emit_prefill_with(c: &Config, sample: bool, precision: Precision) -> Stri
         // attention block (shared per-layer core, issue #494)
         x = emit_attention(&mut b, c, &k, lw, li, &x, &layout, &mut kcache, &mut vcache);
 
-        // MLP + its norms (SwiGLU, or Gemma2 GeGLU with pre/post FF norms),
-        // shared with the ragged-decode graph.
-        x = seq_mlp(&mut b, c, lw, &k, &x, lp);
+        // FFN: MoE (issue #500) on a MoE layer, else the dense SwiGLU / Gemma2
+        // GeGLU MLP, shared with the ragged-decode graph.
+        x = ffn_seq(&mut b, c, lw, &k, &x, lp, li);
     }
 
     // --- tail: final norm, take the row at real_len-1, LM head (tied embed or
@@ -1767,5 +1905,53 @@ pub fn emit_prefill_with(c: &Config, sample: bool, precision: Precision) -> Stri
         l = out_val,
         kc = kcache.name,
         vc = vcache.name,
+    )
+}
+
+// ===========================================================================
+// MoE FFN block probe (issue #500): a standalone module for the execution check
+// ===========================================================================
+//
+// `main(moe weights..., hn[N, H]) -> out[N, H]` runs ONLY the MoE FFN block
+// ([`moe::moe_block`]) on an already-normed hidden `hn`, with no attention, no
+// pre-norm, and no residual, so an out-of-crate check (spike/openxla/moe_oracle.py)
+// can compile it with IREE and compare it directly to an HF MoE block's fp32
+// forward. Isolating the block makes the routing / dispatch math the only variable,
+// so the execution check proves it without needing a full model or a real
+// (unsupported-attention) MoE checkpoint. The arg order is the per-layer MoE order
+// `take_moe_weights` / `weight_names` share, so the probe doubles as a check that
+// the emitted expert-arg schema is what the loader feeds.
+
+/// Emit the MoE FFN block probe for `c` over `n` input rows (default precision).
+pub(crate) fn emit_moe_probe(c: &Config, n: usize) -> String {
+    emit_moe_probe_with(c, n, precision_from_env())
+}
+
+/// Emit the MoE FFN block probe at an explicit contraction precision.
+pub(crate) fn emit_moe_probe_with(c: &Config, n: usize, precision: Precision) -> String {
+    let m = c
+        .moe
+        .as_ref()
+        .expect("emit_moe_probe requires a MoE config");
+    let h = c.hidden;
+
+    let mut decls: Vec<ArgDecl> = Vec::new();
+    let mut idx = 0usize;
+    // The expert bank in the canonical per-layer MoE arg order, then the input.
+    let mw = take_moe_weights(&mut decls, &mut idx, c, 0);
+    let hn = take_arg(&mut decls, &mut idx, Ty::f32(vec![n, h]), "hn".into());
+
+    let mut b = Builder::new().with_precision(precision);
+    let k = emit_consts(&mut b, c);
+    let out = moe::moe_block(&mut b, c, m, &mw, &k, &hn, n);
+
+    let sig = render_signature(&decls);
+    let out_ty = Ty::f32(vec![n, h]).render();
+    format!(
+        "module @moe_probe {{\n  func.func public @main({sig}) -> {out_ty} {{\n{body}    return {o} : {out_ty}\n  }}\n}}\n",
+        sig = sig,
+        out_ty = out_ty,
+        body = b.body(),
+        o = out.name,
     )
 }

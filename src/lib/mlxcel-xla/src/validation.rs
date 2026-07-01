@@ -357,9 +357,48 @@ pub(crate) static LLAMA_3_2_1B: ArchFixture = ArchFixture {
     ],
 };
 
+/// Qwen2-MoE (synthetic tiny): the structural fixture for the MoE FFN primitive
+/// (issue #500). A small MoE config (4 experts, top-2, `norm_topk_prob`, a gated
+/// shared expert, q/k/v bias, untied head) exercising the whole routing / dispatch
+/// surface in a graph small enough to commit. The goldens are the frozen StableHLO
+/// the emitter produces for `assets/qwen2-moe-tiny/config.json`: on-device-argmax
+/// `prefill` / `decode`, plus the host-sampled `prefill_logits` and ragged `decode`
+/// serve graphs (B_max 4). The routing math itself is proven token-exact against an
+/// HF MoE block by the out-of-crate execution check (`spike/openxla/moe_oracle.py`);
+/// this fixture then guards the emit byte-for-byte forever.
+pub(crate) static QWEN2_MOE_TINY: ArchFixture = ArchFixture {
+    arch: "qwen2-moe-tiny",
+    config_json: include_str!("../assets/qwen2-moe-tiny/config.json"),
+    graphs: &[
+        GraphFixture {
+            kind: GraphKind::Prefill { sample: true },
+            golden_name: "prefill.mlir",
+            golden: include_str!("../assets/qwen2-moe-tiny/prefill.mlir"),
+        },
+        GraphFixture {
+            kind: GraphKind::Decode { sample: true },
+            golden_name: "decode.mlir",
+            golden: include_str!("../assets/qwen2-moe-tiny/decode.mlir"),
+        },
+        GraphFixture {
+            kind: GraphKind::Prefill { sample: false },
+            golden_name: "prefill_logits.mlir",
+            golden: include_str!("../assets/qwen2-moe-tiny/prefill_logits.mlir"),
+        },
+        GraphFixture {
+            kind: GraphKind::DecodeRagged {
+                b_max: 4,
+                sample: false,
+            },
+            golden_name: "decode_ragged_logits_b4.mlir",
+            golden: include_str!("../assets/qwen2-moe-tiny/decode_ragged_logits_b4.mlir"),
+        },
+    ],
+};
+
 /// Every registered structural fixture. Append a family here to add it to the
 /// byte-exact gate; see the module docs for the freeze workflow.
-pub(crate) static REGISTERED: &[&ArchFixture] = &[&LLAMA_3_2_1B];
+pub(crate) static REGISTERED: &[&ArchFixture] = &[&LLAMA_3_2_1B, &QWEN2_MOE_TINY];
 
 #[cfg(test)]
 mod tests {
@@ -457,6 +496,40 @@ mod tests {
                 assert_eq!(*name, gf.golden_name);
                 assert_eq!(mlir, gf.golden, "{}/{name} re-emits its golden", fx.arch);
             }
+        }
+    }
+
+    /// Freeze the MoE structural goldens (issue #500) for the synthetic tiny
+    /// qwen2_moe fixture. A no-op unless `MLXCEL_FREEZE_MOE=1`; when set it emits
+    /// each graph from `assets/qwen2-moe-tiny/config.json` and writes the `.mlir`
+    /// goldens via the bootstrap [`emit_graphs`] path (no committed golden needed),
+    /// so a brand-new family authors its goldens before its [`ArchFixture`] exists.
+    /// Run once to author them; the byte-exact gate then guards them forever.
+    #[test]
+    fn freeze_moe_goldens() {
+        if std::env::var("MLXCEL_FREEZE_MOE").as_deref() != Ok("1") {
+            return;
+        }
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/qwen2-moe-tiny");
+        let cfg_json = std::fs::read_to_string(root.join("config.json")).expect("read config.json");
+        let targets: [(GraphKind, &str); 4] = [
+            (GraphKind::Decode { sample: true }, "decode.mlir"),
+            (GraphKind::Prefill { sample: true }, "prefill.mlir"),
+            (GraphKind::Prefill { sample: false }, "prefill_logits.mlir"),
+            (
+                GraphKind::DecodeRagged {
+                    b_max: 4,
+                    sample: false,
+                },
+                "decode_ragged_logits_b4.mlir",
+            ),
+        ];
+        for (kind, name) in targets {
+            let graphs = emit_graphs(&cfg_json, &[kind]).expect("qwen2-moe-tiny config parses");
+            let (_, mlir) = &graphs[0];
+            let p = root.join(name);
+            std::fs::write(&p, mlir).unwrap_or_else(|e| panic!("write {}: {e}", p.display()));
+            eprintln!("froze {}", p.display());
         }
     }
 

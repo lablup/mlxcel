@@ -37,9 +37,14 @@
 mod builder;
 mod config;
 mod model;
+mod moe;
 mod rope;
 
 pub(crate) use config::Config;
+// MoE FFN config types (issue #500), read by the weight loader (`iree.rs`) and the
+// validation harness. `SharedExpertConfig` is only named in some build cfgs.
+#[allow(unused_imports)]
+pub(crate) use config::{MoeConfig, SharedExpertConfig};
 // `resolve_precision` and the precision-taking `*_with` emit variants are consumed
 // by the IREE execution path; the f32-default `emit_*` wrappers by the byte-exact
 // regression tests. Which set is live depends on the build cfg (`iree` vs `test`),
@@ -50,7 +55,7 @@ pub(crate) use builder::resolve_precision;
 #[allow(unused_imports)]
 pub(crate) use model::{
     emit_decode, emit_decode_batched, emit_decode_ragged, emit_decode_ragged_with,
-    emit_decode_with, emit_prefill, emit_prefill_with,
+    emit_decode_with, emit_moe_probe, emit_moe_probe_with, emit_prefill, emit_prefill_with,
 };
 
 #[cfg(test)]
@@ -96,6 +101,7 @@ mod tests {
             attn_logit_softcap: None,
             final_logit_softcap: None,
             sliding_window: None,
+            moe: None,
         }
     }
 
@@ -127,6 +133,52 @@ mod tests {
             attn_logit_softcap: Some(50.0),
             final_logit_softcap: Some(30.0),
             sliding_window,
+            moe: None,
+        }
+    }
+
+    /// A tiny MoE config (issue #500): Qwen2-MoE-shaped attention (plain RoPE +
+    /// q/k/v bias, untied head) with a 4-expert, top-2 MoE FFN. `shared` toggles the
+    /// gated shared-expert branch (present for Qwen2-MoE, absent for Mixtral), the
+    /// one knob the shared-expert tests vary. Small dims keep the emitted text tiny
+    /// while exercising the router, the stacked experts, and the shared expert.
+    fn moe_like(shared: bool) -> Config {
+        Config {
+            hidden: 8,
+            inter: 16,
+            n_layers: 2,
+            n_q: 2,
+            n_kv: 1,
+            head_dim: 4,
+            eps: 1e-6,
+            rope_theta: 1_000_000.0,
+            vocab: 10,
+            rope: RopeScaling::Plain,
+            qkv_bias: true,
+            tie_word_embeddings: false,
+            quantization: None,
+            gemma2: false,
+            query_pre_attn_scalar: None,
+            attn_logit_softcap: None,
+            final_logit_softcap: None,
+            sliding_window: None,
+            moe: Some(MoeConfig {
+                n_experts: 4,
+                top_k: 2,
+                intermediate: 12,
+                norm_topk_prob: true,
+                routed_scaling_factor: 1.0,
+                shared: if shared {
+                    Some(SharedExpertConfig {
+                        intermediate: 10,
+                        gated: true,
+                    })
+                } else {
+                    None
+                },
+                first_k_dense: 0,
+                weight_prefix: "mlp",
+            }),
         }
     }
 
@@ -665,5 +717,227 @@ mod tests {
 
         // The f32 default carries no f16 at all (byte-exact path preserved).
         assert!(!emit_decode_with(&c, true, Precision::F32).contains("f16"));
+    }
+
+    // ---- MoE FFN primitive (issue #500) -----------------------------------
+
+    /// A MoE config replaces the dense MLP with the routed experts + shared expert
+    /// in EVERY graph kind (single decode, prefill, ragged, batched), so the FFN
+    /// choice reaches them all from one authoring site: the router / stacked expert
+    /// / shared-expert args appear, and no dense `mlp.{gate,up,down}` arg does.
+    #[test]
+    fn moe_replaces_dense_mlp_across_every_graph_kind() {
+        let c = moe_like(true);
+        let graphs = [
+            ("decode", emit_decode(&c, false)),
+            ("prefill", emit_prefill(&c, false)),
+            ("ragged", emit_decode_ragged(&c, 4, false)),
+            ("batched", super::model::emit_decode_batched(&c, 4, false)),
+        ];
+        for (name, g) in graphs {
+            assert!(g.contains("['moe_router']"), "{name}: router arg");
+            assert!(
+                g.contains("['moe_gate']")
+                    && g.contains("['moe_up']")
+                    && g.contains("['moe_down']"),
+                "{name}: stacked expert args"
+            );
+            assert!(
+                g.contains("['moe_shared_gate']") && g.contains("['moe_shared_expert_gate']"),
+                "{name}: shared-expert args"
+            );
+            // A MoE layer takes no dense MLP weights.
+            assert!(
+                !g.contains("['down']") && !g.contains("['gate']") && !g.contains("['up']"),
+                "{name}: no dense MLP args on a MoE layer"
+            );
+        }
+    }
+
+    /// A dense (non-MoE) config emits NO MoE op or arg, in any graph kind — the
+    /// guard that keeps every shipped dense checkpoint byte-for-byte unchanged.
+    #[test]
+    fn dense_config_emits_no_moe_ops() {
+        for g in [
+            emit_decode(&Config::llama_3_2_1b(), true),
+            emit_prefill(&qwen_like(true), false),
+            emit_decode_ragged(&qwen_like(true), 4, false),
+        ] {
+            assert!(!g.contains("moe_"), "a dense config must emit no MoE arg");
+        }
+    }
+
+    /// `num_experts_per_tok` drives the number of top-k picks: each MoE layer emits
+    /// one iterative-argmax `reducer` block per selected expert, so raising `top_k`
+    /// by one adds exactly `n_layers` reducer blocks (and nothing else routing-wise
+    /// shifts). Uses the logits graph (sample = false) so no final-token argmax is
+    /// counted.
+    #[test]
+    fn top_k_drives_the_number_of_argmax_reducers() {
+        let mut k2 = moe_like(false);
+        let mut k3 = moe_like(false);
+        k2.moe.as_mut().unwrap().top_k = 2;
+        k3.moe.as_mut().unwrap().top_k = 3;
+        let count = |g: &str| occurs(g, "reducer(");
+        let (g2, g3) = (emit_decode(&k2, false), emit_decode(&k3, false));
+        assert_eq!(
+            count(&g3) - count(&g2),
+            k2.n_layers,
+            "one extra top-k argmax per MoE layer per added expert"
+        );
+    }
+
+    /// The shared-expert args (and gate) appear only when the family has a shared
+    /// expert; a Mixtral-shaped MoE (no shared expert) emits the routed experts but
+    /// no `moe_shared*` arg.
+    #[test]
+    fn shared_expert_args_only_when_configured() {
+        let with = emit_decode(&moe_like(true), false);
+        let without = emit_decode(&moe_like(false), false);
+        assert!(with.contains("moe_shared_gate") && with.contains("moe_shared_expert_gate"));
+        assert!(
+            !without.contains("moe_shared"),
+            "no shared-expert arg without a shared expert"
+        );
+        assert!(
+            with.contains("moe_router") && without.contains("moe_router"),
+            "both route experts"
+        );
+    }
+
+    /// The MoE expert bank follows the attention weights / biases in the canonical
+    /// per-layer order the emitter and `weight_names` (`iree.rs`) share, so the
+    /// loaded buffers line up with the emitted args: wv < bv < router < gate < up <
+    /// down < shared_gate < shared_up < shared_down < shared_expert_gate.
+    #[test]
+    fn moe_expert_args_follow_attention_in_canonical_order() {
+        let c = moe_like(true);
+        let mlir = emit_decode(&c, false);
+        let order = [
+            "wv",
+            "bv",
+            "moe_router",
+            "moe_gate",
+            "moe_up",
+            "moe_down",
+            "moe_shared_gate",
+            "moe_shared_up",
+            "moe_shared_down",
+            "moe_shared_expert_gate",
+        ];
+        for li in 0..c.n_layers {
+            let at = |k: &str| {
+                mlir.find(&format!("params['layers'][{li}]['{k}']"))
+                    .unwrap_or_else(|| panic!("layer {li} missing {k}"))
+            };
+            let positions: Vec<usize> = order.iter().map(|k| at(k)).collect();
+            for w in positions.windows(2) {
+                assert!(
+                    w[0] < w[1],
+                    "layer {li}: expected the canonical MoE arg order"
+                );
+            }
+        }
+    }
+
+    /// `from_json` parses the supported MoE architectures to their routing knobs:
+    /// Qwen2-MoE (softmax-before-top-k, norm_topk_prob, a gated shared expert, q/k/v
+    /// bias) and Mixtral (8 experts top-2, always-renormalized, no shared expert, no
+    /// attention bias, `block_sparse_moe` weight prefix).
+    #[test]
+    fn from_json_parses_moe_architectures() {
+        let c = Config::from_json_str(include_str!("../../assets/qwen2-moe-tiny/config.json"))
+            .expect("qwen2-moe-tiny parses");
+        let m = c.moe.as_ref().expect("qwen2_moe -> MoeConfig");
+        assert_eq!(m.n_experts, 4);
+        assert_eq!(m.top_k, 2);
+        assert!(m.norm_topk_prob);
+        assert_eq!(m.intermediate, 12);
+        assert_eq!(m.weight_prefix, "mlp");
+        let sh = m.shared.expect("qwen2_moe has a shared expert");
+        assert_eq!(sh.intermediate, 10);
+        assert!(sh.gated, "Qwen2-MoE gates the shared expert");
+        assert!(c.qkv_bias, "Qwen2-MoE carries a q/k/v bias");
+        assert!(!c.tie_word_embeddings);
+
+        let mix = r#"{"model_type":"mixtral","hidden_size":8,"num_attention_heads":2,
+            "num_key_value_heads":1,"intermediate_size":16,"num_hidden_layers":2,
+            "num_local_experts":8,"num_experts_per_tok":2,"rms_norm_eps":1e-6,
+            "rope_theta":1e6,"vocab_size":10}"#;
+        let cm = Config::from_json_str(mix).expect("mixtral parses");
+        let mm = cm.moe.as_ref().expect("mixtral -> MoeConfig");
+        assert_eq!(mm.n_experts, 8);
+        assert_eq!(mm.top_k, 2);
+        assert_eq!(mm.intermediate, 16);
+        assert!(
+            mm.norm_topk_prob,
+            "Mixtral always renormalizes the top-k weights"
+        );
+        assert!(mm.shared.is_none(), "Mixtral has no shared expert");
+        assert_eq!(mm.weight_prefix, "block_sparse_moe");
+        assert!(!cm.qkv_bias, "Mixtral has no attention bias");
+    }
+
+    /// MoE families whose attention is not yet reproduced are deferred with a clear
+    /// message (rather than mis-emitted): Qwen3-MoE (per-head q/k norm) and
+    /// DeepSeek-V2 (multi-head latent attention). The MoE FFN primitive unblocks
+    /// adding them in #501.
+    #[test]
+    fn from_json_defers_unsupported_moe_attention() {
+        let qwen3 = r#"{"model_type":"qwen3_moe","hidden_size":8,"num_attention_heads":2,
+            "num_key_value_heads":1,"intermediate_size":16,"moe_intermediate_size":12,
+            "num_hidden_layers":2,"num_experts":8,"num_experts_per_tok":2,"rms_norm_eps":1e-6,
+            "rope_theta":1e6,"vocab_size":10}"#;
+        assert!(
+            Config::from_json_str(qwen3).unwrap_err().contains("Qwen3"),
+            "qwen3_moe is deferred with a Qwen3 pointer"
+        );
+        let ds = r#"{"model_type":"deepseek_v2","hidden_size":8,"num_attention_heads":2,
+            "num_key_value_heads":1,"intermediate_size":16,"num_hidden_layers":2,
+            "rms_norm_eps":1e-6,"rope_theta":1e6,"vocab_size":10}"#;
+        assert!(
+            Config::from_json_str(ds).unwrap_err().contains("DeepSeek"),
+            "deepseek_v2 is deferred with a DeepSeek pointer"
+        );
+    }
+
+    /// The `norm_topk_prob` flag emits the top-k renormalization (a divide of each
+    /// selected weight by their sum). With it off there is no such divide added by
+    /// the router, so a with/without diff over an otherwise-identical config isolates
+    /// exactly the renormalization.
+    #[test]
+    fn norm_topk_prob_toggles_the_renormalization_divide() {
+        let mut on = moe_like(false);
+        let mut off = moe_like(false);
+        on.moe.as_mut().unwrap().norm_topk_prob = true;
+        off.moe.as_mut().unwrap().norm_topk_prob = false;
+        let (g_on, g_off) = (emit_decode(&on, false), emit_decode(&off, false));
+        assert!(
+            occurs(&g_on, "stablehlo.divide ") > occurs(&g_off, "stablehlo.divide "),
+            "norm_topk_prob adds the renormalization divide"
+        );
+    }
+
+    /// Opt-in graph dump for the out-of-crate MoE execution check (issue #500).
+    /// Ignored by default; when run with `--ignored` and `MLXCEL_DUMP_CONFIG` /
+    /// `MLXCEL_DUMP_OUT` set, it parses that MoE `config.json` and writes the
+    /// standalone MoE-block probe (`emit_moe_probe`) to `MLXCEL_DUMP_OUT`, so the
+    /// `spike/openxla` harness (`moe_oracle.py`) can compile it with IREE and compare
+    /// the block output to an HF MoE block's fp32 forward. Pure, scoped, no `iree`
+    /// cargo feature. `MLXCEL_MOE_N` sets the row count (default 4).
+    #[test]
+    #[ignore = "opt-in: writes the MoE probe graph to disk for the spike/openxla execution check"]
+    fn dump_moe_probe_for_execution_check() {
+        let cfg_path = std::env::var("MLXCEL_DUMP_CONFIG")
+            .expect("set MLXCEL_DUMP_CONFIG to a MoE config.json path");
+        let out_path =
+            std::env::var("MLXCEL_DUMP_OUT").expect("set MLXCEL_DUMP_OUT to the target .mlir path");
+        let n: usize = std::env::var("MLXCEL_MOE_N")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(4);
+        let text = std::fs::read_to_string(&cfg_path).expect("read MLXCEL_DUMP_CONFIG");
+        let cfg = Config::from_json_str(&text).expect("parse MoE config.json");
+        std::fs::write(&out_path, emit_moe_probe(&cfg, n)).expect("write MLXCEL_DUMP_OUT");
     }
 }
