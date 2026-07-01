@@ -2943,9 +2943,17 @@ mod sanitize_tests {
 
         let result = sanitize_weights(weights, &config);
 
-        for (dst, suffix) in [("w1", "weight"), ("w1", "scales"), ("w1", "biases"),
-                               ("w2", "weight"), ("w2", "scales"), ("w2", "biases"),
-                               ("w3", "weight"), ("w3", "scales"), ("w3", "biases")] {
+        for (dst, suffix) in [
+            ("w1", "weight"),
+            ("w1", "scales"),
+            ("w1", "biases"),
+            ("w2", "weight"),
+            ("w2", "scales"),
+            ("w2", "biases"),
+            ("w3", "weight"),
+            ("w3", "scales"),
+            ("w3", "biases"),
+        ] {
             let key = format!("model.layers.0.mlp.switch_mlp.{}.{}", dst, suffix);
             assert!(
                 result.contains_key(key.as_str()),
