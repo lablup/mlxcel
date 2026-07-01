@@ -20,6 +20,7 @@ pub mod gemma3n;
 pub mod gemma4;
 pub mod gemma4_unified;
 pub mod internvl;
+pub mod kimi_vl;
 pub mod llama4;
 pub mod minicpmo;
 pub mod minicpmv4_6;

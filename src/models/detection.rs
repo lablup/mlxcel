@@ -205,6 +205,8 @@ pub fn get_model_type(model_path: &Path) -> Result<ModelType> {
         "nemotron-nas" => Ok(ModelType::NemotronNAS),
         "rwkv7" => Ok(ModelType::Rwkv7),
         "kimi_linear" => Ok(ModelType::KimiLinear),
+        "kimi_vl" => Ok(ModelType::KimiVL),
+        "kimi_k25" => Ok(ModelType::KimiK25),
         "longcat_flash" => Ok(ModelType::LongcatFlash),
         "longcat_flash_ngram" => Ok(ModelType::LongcatFlashNgram),
         "step3p5" => Ok(ModelType::Step3p5),

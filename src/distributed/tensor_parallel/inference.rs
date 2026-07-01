@@ -225,6 +225,8 @@ fn fallback_architecture(model_type: ModelType) -> &'static str {
         ModelType::NemotronNAS => "nemotron_nas",
         ModelType::Rwkv7 => "rwkv7",
         ModelType::KimiLinear => "kimi_linear",
+        // Kimi-VL / Kimi-VL 2.5 use a DeepSeek-V3-style MoE text backbone.
+        ModelType::KimiVL | ModelType::KimiK25 => "deepseek_v3",
         ModelType::LongcatFlash | ModelType::LongcatFlashNgram => "longcat_flash",
         ModelType::Step3p5 => "step3p5",
         ModelType::RecurrentGemma => "recurrent_gemma",

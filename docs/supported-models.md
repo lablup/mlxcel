@@ -78,6 +78,7 @@ Implemented VLM variants include:
 - Pixtral and Mistral 3 VLM wrappers (Mistral 3 VLM supports both the standard Llama/Mistral text backbone and the Mistral4 MLA+MoE backbone; text and image-plus-text are validated on both, including the Mistral Small 4 119B checkpoint)
 - Qwen2-VL, Qwen2.5-VL, Qwen3-VL, Qwen3.5-VL, and Qwen3-VL MoE
 - Youtu-VL
+- Kimi-VL and Kimi-VL 2.5 (`kimi_vl` / `kimi_k25`): MoonViT native-resolution vision encoder (Conv2d patch embedding, learned plus bicubically-interpolated 2D position embedding, a shared 2D rotary embedding, block-diagonal cross-image attention, and `spatial_merge_size` patch merging) feeding a `LayerNorm -> Linear -> GELU -> Linear` connector into a DeepSeek-V3-style MoE text backbone. Image path only; the Kimi-VL 2.5 3D MoonViT video (image plus video patch embedding) path is tracked as a separate follow-up. Model-type detection, the MoonViT encoder, the connector, and the VLM composition are in place; the safetensors directory loader and image-runtime wiring land in a follow-up.
 - MiniCPM-O
 - Moondream 3
 - Phi-3 Vision, Phi4MM, Phi4 SigLIP VLM

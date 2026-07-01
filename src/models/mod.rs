@@ -366,6 +366,8 @@ pub enum ModelType {
 
     // Kimi models
     KimiLinear,
+    KimiVL,  // Kimi-VL (MoonViT vision encoder + DeepSeek-V3-style MoE text)
+    KimiK25, // Kimi-VL 2.5 (MoonViT + DeepSeek-V3-style MoE, image path)
 
     // Longcat models
     LongcatFlash,
@@ -514,6 +516,8 @@ pub const ALL_MODEL_TYPES: &[ModelType] = &[
     ModelType::GraniteMoeHybrid,
     // Kimi models
     ModelType::KimiLinear,
+    ModelType::KimiVL,
+    ModelType::KimiK25,
     // Longcat models
     ModelType::LongcatFlash,
     ModelType::LongcatFlashNgram,
@@ -674,6 +678,8 @@ impl ModelType {
             ModelType::MiniMax => ("MiniMax-M2 (MoE, 256 experts)", "MoE (other)"),
             ModelType::Mixtral => ("Mixtral (MoE)", "MoE (other)"),
             ModelType::KimiLinear => ("Kimi Linear (MLA + GatedDeltaNet hybrid)", "MoE (other)"),
+            ModelType::KimiVL => ("Kimi-VL (MoonViT + DeepSeek-V3 MoE)", "Kimi VLM"),
+            ModelType::KimiK25 => ("Kimi-VL 2.5 (MoonViT + DeepSeek-V3 MoE)", "Kimi VLM"),
             ModelType::LongcatFlash => ("LongCat Flash (MLA + MoE, dual sublayer)", "MoE (other)"),
             ModelType::LongcatFlashNgram => ("LongCat Flash + N-gram embedding", "MoE (other)"),
             ModelType::Step3p5 => ("Step-3.5 (Sigmoid MoE gate + SwitchGLU)", "MoE (other)"),
@@ -891,6 +897,8 @@ mod metadata_tests {
             Plamo2,
             GraniteMoeHybrid,
             KimiLinear,
+            KimiVL,
+            KimiK25,
             LongcatFlash,
             LongcatFlashNgram,
             Step3p5,

@@ -840,6 +840,40 @@ impl DeepSeekV3Model {
         self.lm_head.forward(&h)
     }
 
+    /// Text-embedding lookup, exposed so a VLM wrapper can build merged
+    /// text/vision embeddings before calling [`Self::forward_impl_with_embeddings`].
+    ///
+    /// Used by: `vision::kimi_vl::KimiVLModel`.
+    pub fn get_embed_tokens(&self, input_ids: &MlxArray) -> UniquePtr<MlxArray> {
+        self.embed_tokens.forward(input_ids)
+    }
+
+    /// Forward pass that optionally consumes precomputed input embeddings
+    /// (the VLM image path) instead of embedding `input_ids`. When
+    /// `input_embeddings` is `None` this is identical to [`Self::forward_impl`].
+    ///
+    /// Used by: `vision::kimi_vl::KimiVLModel`.
+    pub fn forward_impl_with_embeddings(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        let mut h = match input_embeddings {
+            Some(embeds) => mlxcel_core::copy(embeds),
+            None => self.embed_tokens.forward(input_ids),
+        };
+
+        let mask = mask.map(mlxcel_core::copy);
+        for (i, layer) in self.layers.iter().enumerate() {
+            h = layer.forward(&h, &mut caches[i], mask.as_deref());
+        }
+
+        let h = self.norm.forward(&h);
+        self.lm_head.forward(&h)
+    }
+
     pub fn make_caches_impl(&self) -> Vec<KVCache> {
         (0..self.layers.len()).map(|_| KVCache::new()).collect()
     }
