@@ -459,6 +459,21 @@ pub fn emit_decode(c: &Config, sample: bool) -> String {
     let zeros_s = b.broadcast(&k.zero, &[], vec![MAX_SEQ]);
     let negs_s = b.broadcast(&k.neg_big, &[], vec![MAX_SEQ]);
     let kmask = b.select(&valid, &zeros_s, &negs_s);
+    // Gemma2 local (sliding-window) mask (issue #495): a local layer additionally
+    // drops keys older than the window, keeping key s iff `cache_len - s < W`. The
+    // global `kmask` already encodes causality, so anding the window in is one more
+    // `select`: within-window -> keep `kmask`, else force -1e30. Built once and
+    // reused by every local layer; emitted only for a config with a window
+    // (Gemma2), so Llama / Qwen2 stay byte-identical. When `W >= MAX_SEQ` the
+    // predicate is always true (`cache_len - s <= MAX_SEQ-1 < W`), so it is a value
+    // no-op, which is why short-context Gemma2 output is unchanged.
+    let kmask_local = c.sliding_window.map(|w| {
+        let wc = b.const_i32(w as i32);
+        let wb = b.broadcast(&wc, &[], vec![MAX_SEQ]);
+        let age = b.subtract(&clen_b, &ii); // cache_len - s
+        let within = b.compare("LT", &age, &wb, "SIGNED");
+        b.select(&within, &kmask, &negs_s)
+    });
 
     let mut kcache = a.kcache.clone();
     let mut vcache = a.vcache.clone();
@@ -513,7 +528,14 @@ pub fn emit_decode(c: &Config, sample: bool) -> String {
             Some(cap) => softcap(&mut b, &scores, cap),
             None => scores,
         };
-        let kmask_b = b.broadcast(&kmask, &[1], vec![nq, MAX_SEQ]);
+        // Local (even) layers use the sliding-window mask; global (odd) layers and
+        // every non-Gemma2 layer use the plain causal `kmask` (same handle, so the
+        // emitted op is unchanged for them).
+        let mask = kmask_local
+            .as_ref()
+            .filter(|_| c.is_sliding_layer(li))
+            .unwrap_or(&kmask);
+        let kmask_b = b.broadcast(mask, &[1], vec![nq, MAX_SEQ]);
         let scores = b.add(&scores, &kmask_b);
 
         // softmax over the key axis
@@ -1046,6 +1068,17 @@ pub fn emit_decode_ragged(c: &Config, bsz: usize, sample: bool) -> String {
     let zeros = b.broadcast(&k.zero, &[], vec![bsz, MAX_SEQ]);
     let negs = b.broadcast(&k.neg_big, &[], vec![bsz, MAX_SEQ]);
     let kmask = b.select(&valid, &zeros, &negs); // [B, S]
+    // Gemma2 local (sliding-window) mask (issue #495), per row: keep key s for row
+    // b iff `cache_len[b] - s < W`. And it into the causal `kmask` with one more
+    // `select`. Emitted only for a windowed config (Gemma2); reused by every local
+    // layer. No-op on the value when `W >= MAX_SEQ` (short-context parity).
+    let kmask_local = c.sliding_window.map(|w| {
+        let wc = b.const_i32(w as i32);
+        let wb = b.broadcast(&wc, &[], vec![bsz, MAX_SEQ]);
+        let age = b.subtract(&clen_b, &ii_b); // cache_len[b] - s
+        let within = b.compare("LT", &age, &wb, "SIGNED");
+        b.select(&within, &kmask, &negs)
+    });
 
     let mut kcache = a.kcache.clone();
     let mut vcache = a.vcache.clone();
@@ -1122,7 +1155,13 @@ pub fn emit_decode_ragged(c: &Config, bsz: usize, sample: bool) -> String {
             Some(cap) => softcap(&mut b, &scores, cap),
             None => scores,
         };
-        let kmask_b = b.broadcast(&kmask, &[0, 2], vec![bsz, nq, MAX_SEQ]); // [B,S] -> [B,nq,S]
+        // Local (even) layers use the per-row sliding-window mask; global (odd) and
+        // non-Gemma2 layers use the plain causal `kmask` (unchanged handle).
+        let mask = kmask_local
+            .as_ref()
+            .filter(|_| c.is_sliding_layer(li))
+            .unwrap_or(&kmask);
+        let kmask_b = b.broadcast(mask, &[0, 2], vec![bsz, nq, MAX_SEQ]); // [B,S] -> [B,nq,S]
         let scores = b.add(&scores, &kmask_b);
 
         let m = b.reduce_max(&scores, 2, &k.neg_inf);
@@ -1342,6 +1381,19 @@ pub fn emit_prefill(c: &Config, sample: bool) -> String {
     let zeros = b.broadcast(&k.zero, &[], vec![lp, lp]);
     let negs = b.broadcast(&k.neg_big, &[], vec![lp, lp]);
     let cmask = b.select(&le, &zeros, &negs); // [Lp, Lp]
+    // Gemma2 local (sliding-window) mask (issue #495): a local layer keeps key j
+    // for query i iff `i - j < W` (prefill positions are 0..Lp, so the buffer
+    // index equals the position). And it into the causal `cmask` with one more
+    // `select`. Emitted only for a windowed config (Gemma2); reused by every local
+    // layer. No-op on the value when `W >= Lp` (`i - j <= Lp-1 < W`), so a
+    // short-prompt Gemma2 prefill is unchanged.
+    let cmask_local = c.sliding_window.map(|w| {
+        let wc = b.const_i32(w as i32);
+        let wb = b.broadcast(&wc, &[], vec![lp, lp]);
+        let age = b.subtract(&row, &col); // i - j
+        let within = b.compare("LT", &age, &wb, "SIGNED");
+        b.select(&within, &cmask, &negs)
+    });
 
     // caches start as zeros; prefill writes the [0:Lp] block and returns them
     let mut kcache = b.broadcast(&k.zero, &[], vec![c.n_layers, MAX_SEQ, nkv, d]);
@@ -1383,7 +1435,13 @@ pub fn emit_prefill(c: &Config, sample: bool) -> String {
             Some(cap) => softcap(&mut b, &scores, cap),
             None => scores,
         };
-        let cmask_b = b.broadcast(&cmask, &[1, 3], vec![nkv, lp, g, lp]);
+        // Local (even) layers use the sliding-window causal mask; global (odd) and
+        // non-Gemma2 layers use the full causal `cmask` (unchanged handle).
+        let mask = cmask_local
+            .as_ref()
+            .filter(|_| c.is_sliding_layer(li))
+            .unwrap_or(&cmask);
+        let cmask_b = b.broadcast(mask, &[1, 3], vec![nkv, lp, g, lp]);
         let scores = b.add(&scores, &cmask_b);
 
         // softmax over the key axis (Lp_j, dim 3)

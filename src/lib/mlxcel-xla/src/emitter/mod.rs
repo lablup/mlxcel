@@ -89,6 +89,35 @@ mod tests {
             query_pre_attn_scalar: None,
             attn_logit_softcap: None,
             final_logit_softcap: None,
+            sliding_window: None,
+        }
+    }
+
+    /// A tiny Gemma2-shaped config for the sliding-window structural tests
+    /// (issue #495). `n_layers = 4` gives two local (even) and two global (odd)
+    /// layers so the alternation is observable; `sliding_window` is the only knob
+    /// under test. The soft-caps / four-norm structure are set so the graph is a
+    /// faithful (small) Gemma2, but the window mask is independent of them.
+    fn gemma2_like(sliding_window: Option<usize>) -> Config {
+        Config {
+            hidden: 8,
+            inter: 16,
+            n_layers: 4,
+            n_q: 2,
+            n_kv: 1,
+            head_dim: 4,
+            eps: 1e-6,
+            rope_theta: 10_000.0,
+            vocab: 10,
+            rope: RopeScaling::Plain,
+            qkv_bias: false,
+            tie_word_embeddings: true,
+            quantization: None,
+            gemma2: true,
+            query_pre_attn_scalar: Some(4.0),
+            attn_logit_softcap: Some(50.0),
+            final_logit_softcap: Some(30.0),
+            sliding_window,
         }
     }
 
@@ -192,6 +221,11 @@ mod tests {
         assert_eq!(c.final_logit_softcap, Some(30.0));
         assert_eq!(c.head_dim, 256, "explicit head_dim (!= hidden/n_q)");
         assert!(c.tie_word_embeddings, "Gemma2 ties embeddings by default");
+        assert_eq!(
+            c.sliding_window,
+            Some(4096),
+            "absent sliding_window defaults to the HF Gemma2 4096"
+        );
         // The scale is query_pre_attn_scalar^-0.5 (224), NOT head_dim^-0.5 (256).
         assert_eq!(c.scale(), (224.0f64.powf(-0.5)) as f32);
         assert_ne!(c.scale(), (256.0f32).powf(-0.5), "must not use head_dim");
@@ -380,6 +414,187 @@ mod tests {
                 "{name}: expected final_norm < lm_head < layer0 arg order"
             );
         }
+    }
+
+    /// Issue #495: Gemma2 parses its sliding-window size, defaulting to the HF
+    /// Gemma2 default (4096) when the field is absent; a non-Gemma2 architecture
+    /// gets `None` even when its own config carries a `sliding_window` (Qwen2.5
+    /// ships `sliding_window = 32768` but the emitter serves it globally).
+    #[test]
+    fn from_json_parses_sliding_window() {
+        // Explicit window on a gemma2 checkpoint (gemma2-2b ships 4096).
+        let explicit = r#"{"model_type":"gemma2","hidden_size":8,"num_attention_heads":2,
+            "num_key_value_heads":1,"intermediate_size":16,"num_hidden_layers":4,
+            "rms_norm_eps":1e-6,"rope_theta":1e4,"vocab_size":10,"sliding_window":4096}"#;
+        assert_eq!(
+            Config::from_json_str(explicit)
+                .expect("gemma2 parses")
+                .sliding_window,
+            Some(4096)
+        );
+
+        // Absent field -> HF Gemma2 default of 4096.
+        let absent = r#"{"model_type":"gemma2","hidden_size":8,"num_attention_heads":2,
+            "num_key_value_heads":1,"intermediate_size":16,"num_hidden_layers":4,
+            "rms_norm_eps":1e-6,"rope_theta":1e4,"vocab_size":10}"#;
+        assert_eq!(
+            Config::from_json_str(absent)
+                .expect("gemma2 parses")
+                .sliding_window,
+            Some(4096),
+            "absent sliding_window defaults to 4096"
+        );
+
+        // Qwen2.5 ships a sliding_window (32768) but the emitter serves it with
+        // global attention, so it must parse to None (not the config value).
+        let qwen = Config::from_json_str(QWEN_CONFIG_JSON).expect("qwen parses");
+        assert_eq!(qwen.sliding_window, None, "Qwen2 sliding_window is ignored");
+
+        // Llama has no window.
+        assert_eq!(Config::llama_3_2_1b().sliding_window, None);
+    }
+
+    /// The local/global schedule (issue #495): Gemma2 alternates starting local,
+    /// so even layers are local (sliding) and odd layers global; a config with no
+    /// window (Llama / Qwen2, or a Gemma2 control with the window off) has no local
+    /// layer, so its graphs are unchanged.
+    #[test]
+    fn is_sliding_layer_alternates_even_local() {
+        let g = gemma2_like(Some(4096));
+        assert!(g.is_sliding_layer(0), "layer 0 local");
+        assert!(!g.is_sliding_layer(1), "layer 1 global");
+        assert!(g.is_sliding_layer(2), "layer 2 local");
+        assert!(!g.is_sliding_layer(3), "layer 3 global");
+
+        let none = gemma2_like(None);
+        for li in 0..none.n_layers {
+            assert!(!none.is_sliding_layer(li), "no window -> no local layer");
+        }
+        for li in 0..4 {
+            assert!(!qwen_like(true).is_sliding_layer(li), "Qwen2 is global");
+            assert!(
+                !Config::llama_3_2_1b().is_sliding_layer(li),
+                "Llama is global"
+            );
+        }
+    }
+
+    /// The sliding-window mask is built once per graph and only when a window is
+    /// configured: turning the window on adds exactly one `subtract`, one
+    /// `compare`, and one `select` (the one-time local-mask block) to each graph
+    /// kind, and nothing when the window is `None`. A with/without diff over an
+    /// otherwise-identical Gemma2 config isolates exactly the window surface, so
+    /// the reused-across-local-layers design is confirmed and no stray op shifted.
+    #[test]
+    fn sliding_window_adds_one_local_mask_block_per_graph() {
+        let with = gemma2_like(Some(4096));
+        let without = gemma2_like(None);
+        let graphs = [
+            (
+                emit_decode(&with, false),
+                emit_decode(&without, false),
+                "decode",
+            ),
+            (
+                emit_prefill(&with, false),
+                emit_prefill(&without, false),
+                "prefill",
+            ),
+            (
+                emit_decode_ragged(&with, 4, false),
+                emit_decode_ragged(&without, 4, false),
+                "ragged",
+            ),
+        ];
+        for (g_with, g_without, name) in graphs {
+            assert_eq!(
+                occurs(&g_with, "stablehlo.subtract ") - occurs(&g_without, "stablehlo.subtract "),
+                1,
+                "{name}: one window age subtract"
+            );
+            assert_eq!(
+                occurs(&g_with, "stablehlo.compare ") - occurs(&g_without, "stablehlo.compare "),
+                1,
+                "{name}: one window compare"
+            );
+            assert_eq!(
+                occurs(&g_with, "stablehlo.select ") - occurs(&g_without, "stablehlo.select "),
+                1,
+                "{name}: one window select"
+            );
+        }
+    }
+
+    /// The configured window size is emitted into the graph (as the `i32` constant
+    /// the key age is compared against), so a different window yields a different
+    /// graph. Uses windows that do not collide with the layer-index constants.
+    #[test]
+    fn sliding_window_size_is_emitted_into_the_graph() {
+        let g7 = emit_decode(&gemma2_like(Some(7)), false);
+        let g9 = emit_decode(&gemma2_like(Some(9)), false);
+        assert!(
+            g7.contains("dense<7> : tensor<i32>"),
+            "window 7 constant present"
+        );
+        assert!(!g7.contains("dense<9> : tensor<i32>"));
+        assert!(
+            g9.contains("dense<9> : tensor<i32>"),
+            "window 9 constant present"
+        );
+        assert!(!g9.contains("dense<7> : tensor<i32>"));
+    }
+
+    /// The heart of #495: within one graph the even layers consume the LOCAL
+    /// (sliding-window) mask and the odd layers the GLOBAL (causal) mask, proving
+    /// the per-layer alternation is actually wired, not merely that a local mask
+    /// exists. The score-mask broadcast is `[S] -> [nq, S]` (`dims = [1]`, here
+    /// `tensor<256xf32> -> tensor<2x256xf32>` for the 2-query-head config), and it
+    /// is the only broadcast with that signature; collecting its operand per layer
+    /// in order shows even layers share one mask value, odd layers another, and the
+    /// two differ.
+    #[test]
+    fn local_and_global_layers_use_distinct_masks_alternating() {
+        let g = emit_decode(&gemma2_like(Some(4096)), false);
+        let needle = ", dims = [1] : (tensor<256xf32>) -> tensor<2x256xf32>";
+        let operands: Vec<&str> = g
+            .lines()
+            .filter(|l| l.contains("stablehlo.broadcast_in_dim") && l.contains(needle))
+            .map(|l| {
+                // "  %N = stablehlo.broadcast_in_dim %OP, dims = ..."
+                let after = l
+                    .split("stablehlo.broadcast_in_dim ")
+                    .nth(1)
+                    .expect("broadcast operand");
+                after.split(',').next().expect("operand token").trim()
+            })
+            .collect();
+        assert_eq!(operands.len(), 4, "one mask broadcast per layer");
+        assert_eq!(operands[0], operands[2], "even layers share the local mask");
+        assert_eq!(operands[1], operands[3], "odd layers share the global mask");
+        assert_ne!(
+            operands[0], operands[1],
+            "local (even) and global (odd) masks are distinct values"
+        );
+    }
+
+    /// Opt-in graph dump for the out-of-crate execution check (issue #495). Ignored
+    /// by default; when run with `--ignored` and `MLXCEL_DUMP_CONFIG` /
+    /// `MLXCEL_DUMP_OUT` set, it parses that Gemma2 `config.json` and writes the
+    /// prefill (logits) StableHLO to `MLXCEL_DUMP_OUT`, so the `spike/openxla`
+    /// harness (`gemma2_sliding_window_check.py`) can compile it with IREE and
+    /// compare last-token logits to an HF fp32 Gemma2 oracle at several window
+    /// sizes. Kept as a plain, scoped, pure-Rust entry point so the execution
+    /// check never needs the heavyweight `iree` cargo feature.
+    #[test]
+    #[ignore = "opt-in: writes a graph to disk for the spike/openxla execution check"]
+    fn dump_prefill_graph_for_execution_check() {
+        let cfg_path = std::env::var("MLXCEL_DUMP_CONFIG")
+            .expect("set MLXCEL_DUMP_CONFIG to a Gemma2 config.json path");
+        let out_path =
+            std::env::var("MLXCEL_DUMP_OUT").expect("set MLXCEL_DUMP_OUT to the target .mlir path");
+        let text = std::fs::read_to_string(&cfg_path).expect("read MLXCEL_DUMP_CONFIG");
+        let cfg = Config::from_json_str(&text).expect("parse Gemma2 config.json");
+        std::fs::write(&out_path, emit_prefill(&cfg, false)).expect("write MLXCEL_DUMP_OUT");
     }
 
     /// Plain RoPE base frequencies are the textbook `1 / theta^(2i/head_dim)`
