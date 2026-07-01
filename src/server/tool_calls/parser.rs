@@ -175,13 +175,39 @@ pub fn parse_tool_calls(raw_output: &str, tools: Option<&[Tool]>) -> ToolCallPar
 
 /// Filter parsed tool calls to only include functions that exist in the
 /// provided tool definitions.
+///
+/// Names are normalized before matching: if a call name contains a leading
+/// namespace segment (e.g. `functions.get_weather`), the segment up to and
+/// including the first `.` is stripped and the bare name is matched against
+/// the registered tools. The call is emitted with the stripped name when the
+/// match succeeds. The original spelling is kept when neither the full name
+/// nor the stripped name matches any registered tool (in which case the call
+/// is dropped).
 fn filter_by_tools(calls: Vec<ParsedToolCall>, tools: &[Tool]) -> Vec<ParsedToolCall> {
     let tool_names: std::collections::HashSet<&str> =
         tools.iter().map(|t| t.function.name.as_str()).collect();
 
     calls
         .into_iter()
-        .filter(|c| tool_names.contains(c.name.as_str()))
+        .filter_map(|mut c| {
+            if tool_names.contains(c.name.as_str()) {
+                // Bare name matches directly.
+                Some(c)
+            } else if let Some(dot_pos) = c.name.find('.') {
+                // Strip the leading namespace segment (e.g. `functions.`) and
+                // retry. Only normalise when the result actually matches a
+                // registered tool; otherwise drop the call as before.
+                let stripped = c.name[dot_pos + 1..].to_string();
+                if tool_names.contains(stripped.as_str()) {
+                    c.name = stripped;
+                    Some(c)
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        })
         .collect()
 }
 
@@ -699,5 +725,49 @@ mod tests {
         let result = parse_tool_calls(output, Some(&tools));
         assert!(result.has_tool_calls());
         assert_eq!(arg_obj(&result.tool_calls[0])["location"], "Berlin");
+    }
+
+    // -- namespace normalization tests -----------------------------------------
+
+    #[test]
+    fn filter_by_tools_strips_leading_namespace() {
+        // Gemma 4 can emit `functions.get_weather` when the registered tool is
+        // `get_weather`. The filter must strip the `functions.` prefix and
+        // emit the call with the bare name so downstream serialisation produces
+        // the correct function name.
+        let output =
+            "<|tool_call>call:functions.get_weather{location:<|\"|>Paris<|\"|>}<tool_call|>";
+        let tools = vec![make_tool("get_weather")];
+        let result = parse_tool_calls(output, Some(&tools));
+        assert!(result.has_tool_calls(), "namespaced call should pass the filter");
+        assert_eq!(result.tool_calls.len(), 1);
+        assert_eq!(
+            result.tool_calls[0].name, "get_weather",
+            "name must be normalised to the bare form"
+        );
+        let args: serde_json::Value =
+            serde_json::from_str(&result.tool_calls[0].arguments).unwrap();
+        assert_eq!(args["location"], "Paris");
+    }
+
+    #[test]
+    fn filter_by_tools_bare_name_unchanged() {
+        // Bare names (no dot) must continue to work as before.
+        let output = "<|tool_call>call:get_weather{location:<|\"|>Tokyo<|\"|>}<tool_call|>";
+        let tools = vec![make_tool("get_weather")];
+        let result = parse_tool_calls(output, Some(&tools));
+        assert!(result.has_tool_calls());
+        assert_eq!(result.tool_calls[0].name, "get_weather");
+    }
+
+    #[test]
+    fn filter_by_tools_unknown_namespaced_name_dropped() {
+        // `functions.unknown_fn` is not in the registered tool set even after
+        // stripping, so it must be dropped.
+        let output =
+            "<|tool_call>call:functions.unknown_fn{key:<|\"|>val<|\"|>}<tool_call|>";
+        let tools = vec![make_tool("get_weather")];
+        let result = parse_tool_calls(output, Some(&tools));
+        assert!(!result.has_tool_calls(), "unknown namespaced call must be dropped");
     }
 }
