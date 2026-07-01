@@ -176,6 +176,17 @@ pub struct Gemma4MtpTargetAdapter<'a> {
     seq_id: Option<SequenceId>,
     /// Buffered rotating-cache slack for MTP verify append + rollback.
     rotating_buffer_size: i32,
+    /// Adopted prompt-cache prefix length (issue #518). When `> 0`,
+    /// `prefill_and_seed` forwards only `prompt_tokens[prefill_start_offset..]`
+    /// and reuses the KV already resident in the per-sequence cache slot for
+    /// `[..prefill_start_offset]`. The slot is populated by the scheduler's APC
+    /// snapshot restore (`restore_sequence_state`) BEFORE the burst runs, and
+    /// the same `ModelOwnedSequenceState[seq_id]` slot is what
+    /// `forward_with_speculative_sinks` resolves — so no double-prefill of the
+    /// cached tokens occurs and RoPE positions continue from the cache's
+    /// restored `offset`. `0` (the default) preserves the cold full-prompt
+    /// prefill byte-for-byte.
+    prefill_start_offset: usize,
 }
 
 impl<'a> Gemma4MtpTargetAdapter<'a> {
@@ -201,7 +212,23 @@ impl<'a> Gemma4MtpTargetAdapter<'a> {
             wrapper,
             seq_id,
             rotating_buffer_size: mtp_rotating_buffer_size(block_size),
+            prefill_start_offset: 0,
         }
+    }
+
+    /// Set the adopted prompt-cache prefix length (issue #518).
+    ///
+    /// When `prefill_start_offset > 0`, the next `prefill_and_seed` forwards
+    /// only the suffix `prompt_tokens[prefill_start_offset..]` and reuses the
+    /// cached KV for `[..prefill_start_offset]` already resident in the
+    /// per-sequence cache slot (restored by the scheduler's APC snapshot
+    /// adoption before the burst runs). The default of `0` keeps the cold
+    /// full-prompt prefill unchanged, so non-adopting callers (CLI, benches,
+    /// existing tests) never need to call this.
+    #[must_use]
+    pub fn with_prefill_start_offset(mut self, prefill_start_offset: usize) -> Self {
+        self.prefill_start_offset = prefill_start_offset;
+        self
     }
 
     /// Slice a `[B, T, H]` hidden tensor down to one position,
@@ -436,8 +463,22 @@ impl<'a> MtpTarget for Gemma4MtpTargetAdapter<'a> {
         MtpVerifyOutput,
         Option<mlxcel_core::sampling::TokenLogprobData>,
     ) {
+        // Suffix-only prefill for an adopted prompt-cache prefix (issue #518).
+        // When `prefill_start_offset > 0` the per-sequence cache slot already
+        // holds the KV for `prompt_tokens[..offset]` (the scheduler's APC
+        // snapshot restore populated the same `ModelOwnedSequenceState[seq_id]`
+        // slot this forward resolves into), so forwarding the whole prompt
+        // would double-prefill and corrupt the cache. We forward only the
+        // suffix; the cache's restored `offset` drives RoPE so the suffix
+        // tokens rotate at their true absolute positions. `offset == 0` (cold)
+        // takes the whole prompt, byte-identical to the pre-#518 path. A
+        // degenerate `offset >= prompt_len` is guarded upstream in
+        // `run_mtp_burst` (declined to classic), so `saturating` here is purely
+        // defensive and never trims the last prompt position in practice.
+        let offset = self.prefill_start_offset.min(prompt_tokens.len());
+        let forward_tokens = &prompt_tokens[offset..];
         let prompt_arr =
-            mlxcel_core::from_slice_i32(prompt_tokens, &[1, prompt_tokens.len() as i32]);
+            mlxcel_core::from_slice_i32(forward_tokens, &[1, forward_tokens.len() as i32]);
 
         // Capture last-layer hidden + last full/SWA shared K/V slabs.
         // Gemma 4 owns its own caches via `ModelOwnedSequenceState`;
@@ -764,6 +805,15 @@ impl<'a> Gemma4VLMtpTargetAdapter<'a> {
             inner: Gemma4MtpTargetAdapter::new_with_block_size(&vlm.text_model, seq_id, block_size),
         }
     }
+
+    /// Set the adopted prompt-cache prefix length (issue #518), delegating to
+    /// the inner text-model adapter. See
+    /// [`Gemma4MtpTargetAdapter::with_prefill_start_offset`].
+    #[must_use]
+    pub fn with_prefill_start_offset(mut self, prefill_start_offset: usize) -> Self {
+        self.inner = self.inner.with_prefill_start_offset(prefill_start_offset);
+        self
+    }
 }
 
 impl<'a> MtpTarget for Gemma4VLMtpTargetAdapter<'a> {
@@ -848,6 +898,15 @@ impl<'a> Gemma4UnifiedMtpTargetAdapter<'a> {
                 block_size,
             ),
         }
+    }
+
+    /// Set the adopted prompt-cache prefix length (issue #518), delegating to
+    /// the inner text-model adapter. See
+    /// [`Gemma4MtpTargetAdapter::with_prefill_start_offset`].
+    #[must_use]
+    pub fn with_prefill_start_offset(mut self, prefill_start_offset: usize) -> Self {
+        self.inner = self.inner.with_prefill_start_offset(prefill_start_offset);
+        self
     }
 }
 

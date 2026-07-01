@@ -245,14 +245,56 @@ fn dflash_burst_declined_for_audio_payload_without_embeddings() {
 }
 
 #[test]
-fn burst_declined_for_adopted_prompt_cache_prefix() {
+fn burst_allowed_for_adopted_prompt_cache_prefix() {
+    // Issue #518: an adopted prompt-cache prefix is no longer a blanket gate.
+    // `should_burst_for_sequence` now admits `prefill_start_offset > 0`; the
+    // per-kind driver decides (MTP reuses the suffix, DFlash falls back).
     let dispatch = make_mtp_dispatch();
     let (mut seq, _rx) = make_test_sequence();
     seq.prefill_start_offset = 5;
     assert!(
-        !should_burst_for_sequence(&dispatch, &seq),
-        "requests with an adopted cache prefix must fall back to classic decode"
+        should_burst_for_sequence(&dispatch, &seq),
+        "an adopted cache prefix must reach the B=1 driver, not be gated out at the scheduler"
     );
+}
+
+#[test]
+fn batched_window_declines_adopted_prompt_cache_prefix() {
+    // Issue #518: adopted-prefix requests are handled only on the B=1 arm
+    // today. `can_join_batched_burst_window` keeps them out of B>1 windows so
+    // they route to the single-request burst (MTP suffix-reuse / DFlash
+    // fallback) rather than the batched round loops, which assume a zero KV
+    // offset per row.
+    let (mut seq, _rx) = make_test_sequence();
+    seq.prefill_start_offset = 5;
+    assert!(
+        !can_join_batched_burst_window(&seq),
+        "an adopted cache prefix must be excluded from B>1 windows and land on the B=1 arm"
+    );
+
+    // A cold request (no adopted prefix) still joins a batched window.
+    let (cold_seq, _rx2) = make_test_sequence();
+    assert_eq!(cold_seq.prefill_start_offset, 0);
+    assert!(
+        can_join_batched_burst_window(&cold_seq),
+        "a cold request must remain eligible for a B>1 window"
+    );
+}
+
+#[test]
+fn mtp_prefill_suffix_start_resolves_cold_reuse_and_degenerate_offsets() {
+    use super::speculative_burst::mtp_prefill_suffix_start;
+    // Cold: offset 0 forwards the whole prompt.
+    assert_eq!(mtp_prefill_suffix_start(0, 10), Some(0));
+    // Reuse: a proper prefix forwards only the suffix `[offset..]`.
+    assert_eq!(mtp_prefill_suffix_start(5, 10), Some(5));
+    // Reuse boundary: a single suffix token still has a position to sample the
+    // first bonus from.
+    assert_eq!(mtp_prefill_suffix_start(9, 10), Some(9));
+    // Degenerate: the whole prompt is cached — no suffix position remains, so
+    // the driver must decline to classic.
+    assert_eq!(mtp_prefill_suffix_start(10, 10), None);
+    assert_eq!(mtp_prefill_suffix_start(11, 10), None);
 }
 
 // History-dependent sampling penalties are NO LONGER a decline-to-classic

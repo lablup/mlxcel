@@ -100,9 +100,24 @@
 //!   eligible.
 //! - The request carries a structured-output constraint: the speculative
 //!   round loops do not yet plumb `llguidance` per-step.
-//! - The request adopted a prompt-cache prefix (`prefill_start_offset > 0`):
-//!   a burst owns the cache for its full lifetime; mixing an adopted prefix
-//!   would double-prefill the leading tokens.
+//!
+//! An adopted prompt-cache prefix (`prefill_start_offset > 0`) is **no longer**
+//! a `should_burst_for_sequence` gate (issue #518). The decision moved into the
+//! per-kind drivers so a cache hit keeps the speculative speedup where it is
+//! safe:
+//!
+//! - **MTP / Gemma 4** ([`run_mtp_burst`]) reuses the adopted KV: it forwards
+//!   only the suffix `prompt_tokens[offset..]` through the same
+//!   `ModelOwnedSequenceState[seq_id]` slot the scheduler's APC snapshot restore
+//!   populated with `[..offset]`, so there is no double-prefill and RoPE
+//!   positions continue from the cache's restored offset. A degenerate offset
+//!   that covers the whole prompt (no suffix to sample the first bonus from)
+//!   still declines to classic.
+//! - **DFlash / Qwen 3.5** ([`run_dflash_burst`]) keeps the safe fallback: it
+//!   builds its own fresh caches that do not hold the adopted KV, so an adopted
+//!   prefix declines to classic (a B = 1 DFlash reuse follow-up).
+//! - **B > 1 batched** declines an adopted prefix via
+//!   [`can_join_batched_burst_window`], routing it to the B = 1 arm.
 //!
 //! History-dependent sampling penalties (repetition / frequency /
 //! presence / DRY) are **not** a gate: the burst threads
@@ -312,10 +327,14 @@ impl WorkerDrafterSlot {
 ///    speculative round loops do not yet plumb the `llguidance` matcher
 ///    through per-step; falling back to classic decode preserves the
 ///    grammar invariants.
-/// 4. `seq` has no prefill-cache adoption (`prefill_start_offset == 0`).
-///    A speculative burst owns the cache for its full lifetime; mixing
-///    an adopted prefix with the burst's own prefill would double-prefill
-///    the leading tokens.
+///
+/// An adopted prompt-cache prefix (`prefill_start_offset > 0`) is **no longer**
+/// a gate here (issue #518). The per-kind driver decides: [`run_mtp_burst`]
+/// reuses the adopted KV by prefilling only the suffix, while
+/// [`run_dflash_burst`] falls back to classic (its fresh caches do not hold the
+/// adopted KV). B > 1 windows exclude adopted prefixes via
+/// [`can_join_batched_burst_window`], so an offset request always lands on the
+/// B = 1 arm.
 ///
 /// History-dependent sampling penalties (repetition / frequency /
 /// presence / DRY) are **no longer** a gate: the burst
@@ -367,14 +386,17 @@ pub(crate) fn should_burst_for_sequence(
         );
         return false;
     }
-    if seq.prefill_start_offset > 0 {
-        tracing::debug!(
-            "speculative burst declined for seq {}: prefill_start_offset={} (adopted cache prefix)",
-            seq.seq_id,
-            seq.prefill_start_offset,
-        );
-        return false;
-    }
+    // An adopted prompt-cache prefix (`prefill_start_offset > 0`) is NO LONGER a
+    // blanket decline-to-classic gate (issue #518). The B = 1 MTP burst reuses
+    // the adopted KV by prefilling only the suffix `[offset..]` (the same
+    // `ModelOwnedSequenceState[seq_id]` slot the snapshot restore populated is
+    // what the speculative forward resolves, so there is no double-prefill). The
+    // per-driver decision lives in `run_mtp_burst` (honors the offset) and
+    // `run_dflash_burst` (declines to classic — its fresh independent caches do
+    // not hold the adopted KV yet; a B = 1 DFlash follow-up). The B > 1 batched
+    // burst still declines an adopted prefix via `can_join_batched_burst_window`
+    // below, so an offset request always lands on the B = 1 arm.
+    //
     // History-dependent sampling penalties (repetition / frequency /
     // presence / DRY) are NO LONGER a decline-to-classic gate. The burst now threads `initial_token_history(&prompt, ..)`
     // into the first-bonus sample via `MtpTarget::prefill_and_seed` /
@@ -411,7 +433,48 @@ pub(crate) fn can_join_batched_burst_window(seq: &SequenceInfo) -> bool {
         );
         return false;
     }
+    // Adopted prompt-cache prefixes (issue #518) are handled only on the B = 1
+    // arm today: the suffix-reuse prefill is wired for the single-request MTP
+    // burst, while the batched round loops assume every row starts from a zero
+    // KV offset. Keeping `prefill_start_offset > 0` requests out of B > 1
+    // windows routes them to the B = 1 burst (where MTP reuses the adopted KV
+    // and DFlash falls back to classic). B > 1 adopted-prefix reuse is a
+    // separate follow-up.
+    if seq.prefill_start_offset > 0 {
+        tracing::debug!(
+            "speculative batched burst declined for seq {}: prefill_start_offset={} \
+             (adopted cache prefix handled on the B=1 arm)",
+            seq.seq_id,
+            seq.prefill_start_offset,
+        );
+        return false;
+    }
     true
+}
+
+/// Resolve the forward-start index for a B = 1 MTP burst that may reuse an
+/// adopted prompt-cache prefix (issue #518).
+///
+/// Given the adopted prefix length `prefill_start_offset` and the full prompt
+/// length `prompt_len`, returns:
+///
+/// - `Some(offset)` — forward only `prompt_tokens[offset..]`, reusing the
+///   already-resident cached KV for `[..offset]`. `offset == 0` is the cold
+///   path (forward the whole prompt, byte-identical to the pre-#518 burst);
+///   any `0 < offset < prompt_len` reuses the adopted prefix.
+/// - `None` — the offset is degenerate (`>= prompt_len`: the whole prompt is
+///   already cached, so there is no suffix position left to forward the
+///   first-bonus logits from). The caller declines to classic decode, which
+///   owns the all-cached edge and keeps the adopted cache untouched.
+pub(crate) fn mtp_prefill_suffix_start(
+    prefill_start_offset: usize,
+    prompt_len: usize,
+) -> Option<usize> {
+    if prefill_start_offset >= prompt_len {
+        None
+    } else {
+        Some(prefill_start_offset)
+    }
 }
 
 /// Whether the Gemma 4 MTP B=1 (single-request) burst path runs for a target
@@ -881,6 +944,30 @@ fn run_mtp_burst(
         }
     };
 
+    // Adopted prompt-cache prefix (issue #518): resolve where the suffix
+    // prefill starts. `None` means the whole prompt is already cached
+    // (`prefill_start_offset >= prompt_len`) with no suffix position to sample
+    // the first bonus from — decline to classic, which owns that all-cached
+    // edge. We check this BEFORE taking the drafter so the decline leaves the
+    // slot and the adopted cache untouched. `Some(0)` (cold) and any
+    // `Some(0 < offset < prompt_len)` (reuse) both proceed.
+    let prefill_start_offset = match mtp_prefill_suffix_start(
+        seq.prefill_start_offset,
+        seq.prompt_tokens.len(),
+    ) {
+        Some(offset) => offset,
+        None => {
+            tracing::debug!(
+                "MTP speculative burst declined for seq {}: prefill_start_offset={} \
+                 covers the whole prompt (len={}); falling back to classic decode",
+                seq.seq_id,
+                seq.prefill_start_offset,
+                seq.prompt_tokens.len(),
+            );
+            return Err(BurstOutcome::DeclineToClassic);
+        }
+    };
+
     // The MTP generator owns the drafter by value; take it from the
     // slot for the burst's lifetime. On success we return it via
     // `return_drafter`; on error we drop it so the next request
@@ -957,7 +1044,8 @@ fn run_mtp_burst(
     let (output, stats) = match ctx.model {
         LoadedModel::Gemma4(wrapper) => {
             let adapter =
-                Gemma4MtpTargetAdapter::new_with_block_size(wrapper, Some(seq.seq_id), block_size);
+                Gemma4MtpTargetAdapter::new_with_block_size(wrapper, Some(seq.seq_id), block_size)
+                    .with_prefill_start_offset(prefill_start_offset);
             drive_mtp_generator(
                 adapter,
                 owned_drafter,
@@ -976,7 +1064,8 @@ fn run_mtp_burst(
                     vlm,
                     Some(seq.seq_id),
                     block_size,
-                );
+                )
+                .with_prefill_start_offset(prefill_start_offset);
             drive_mtp_generator(
                 adapter,
                 owned_drafter,
@@ -995,7 +1084,8 @@ fn run_mtp_burst(
                     unified,
                     Some(seq.seq_id),
                     block_size,
-                );
+                )
+                .with_prefill_start_offset(prefill_start_offset);
             drive_mtp_generator(
                 adapter,
                 owned_drafter,
@@ -1168,6 +1258,29 @@ fn run_dflash_burst(
         return Err(BurstOutcome::DeclineToClassic);
     }
 
+    // Safe fallback for an adopted prompt-cache prefix (issue #518): the DFlash
+    // burst builds its OWN fresh per-layer caches (`make_dflash_caches()`),
+    // independent of the `ModelOwnedSequenceState[seq_id]` slot the scheduler's
+    // APC snapshot restore populates. Those fresh caches do NOT hold the
+    // adopted `[..offset]` KV, so forwarding only the suffix would rotate the
+    // suffix at the wrong positions and attend a missing prefix. Until the B = 1
+    // DFlash path can seed its caches from the adopted prefix (a follow-up),
+    // decline to classic decode — which owns the adopted cache and prefills the
+    // suffix correctly. The check is placed before any drafter load / cache
+    // build so the decline leaves the adopted cache and drafter slot untouched.
+    // (The MTP burst, by contrast, reuses the adopted KV because its target
+    // forward resolves the SAME model-owned slot the snapshot restored into.)
+    if seq.prefill_start_offset > 0 {
+        tracing::debug!(
+            "DFlash speculative burst declined for seq {}: prefill_start_offset={} \
+             (adopted cache prefix not yet reusable by the DFlash burst's \
+             independent caches); falling back to classic decode",
+            seq.seq_id,
+            seq.prefill_start_offset,
+        );
+        return Err(BurstOutcome::DeclineToClassic);
+    }
+
     // HOIST: validate the model variant BEFORE loading the drafter.
     // See the function-level docstring above.
     match ctx.model {
@@ -1319,8 +1432,10 @@ where
     // Build a fresh per-layer cache vector for this request. We do NOT
     // touch the scheduler-owned `sequence_state` map — the speculative
     // burst's caches are independent of the prompt-cache adoption
-    // pipeline (`should_burst_for_sequence` enforces
-    // `prefill_start_offset == 0`).
+    // pipeline. Because these caches start empty, an adopted prefix
+    // cannot be reused here, which is exactly why `run_dflash_burst`
+    // declines `prefill_start_offset > 0` to classic decode (issue #518);
+    // by the time control reaches this helper the offset is guaranteed 0.
     //
     // The target-specific cache factory returns the heterogeneous
     // attention+linear cache vec the round loop needs, while the

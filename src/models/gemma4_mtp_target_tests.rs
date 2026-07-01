@@ -114,6 +114,72 @@ fn argmax_per_position_returns_one_id_per_position() {
     assert_eq!(argmax, vec![2, 0, 3]);
 }
 
+/// Issue #518: `prefill_and_seed` with an adopted prompt-cache offset forwards
+/// ONLY the suffix and reuses the cached KV for the prefix, producing the
+/// SAME first bonus and `kv_offset` as a cold full-prompt prefill.
+///
+/// This runs on the tiny synthetic Gemma 4 wrapper (1 layer, hidden=4,
+/// vocab=8), not a real checkpoint, so it stays a narrow CPU unit test. It is
+/// the prefix-caching invariant made concrete for the burst path: the
+/// last-position attention reads the same per-position K/V whether the cache
+/// was filled by one full forward `[0..len]` or by a prefix forward `[0..off]`
+/// followed by the adapter's suffix forward `[off..len]`, so the greedy bonus
+/// is bit-identical (no near-tie flakiness — same reduction over the same K/V).
+/// The full on-hardware greedy-parity check against a real Gemma 4 checkpoint
+/// is the orchestrator's deferred `tests/speculative_parity.rs` lane.
+#[test]
+fn prefill_and_seed_with_offset_reuses_prefix_and_matches_cold_full_prompt() {
+    use mlxcel_core::cache::SequenceId;
+    use mlxcel_core::generate::LanguageModel;
+
+    let _runtime = crate::initialize_runtime();
+    let sampler = SamplingConfig::greedy();
+    let logprobs = mlxcel_core::sampling::LogprobsConfig::default();
+
+    // Full-attention layer so the suffix reuse exercises the unbounded KVCache
+    // path (the sliding fixture is equivalent here because the prompt is
+    // shorter than the sliding window, but full-attention is unambiguous).
+    let wrapper = crate::models::gemma4_tests::build_synthetic_wrapper_with_layer("full_attention");
+
+    // Vocab is 8, so keep every id in `[0, 8)`.
+    let prompt: Vec<i32> = vec![2, 5, 1, 7, 3, 6];
+    let offset = 4usize;
+
+    // --- Cold: a fresh slot prefills the whole prompt (offset defaults to 0). ---
+    let seq_cold = SequenceId::from_raw(51_810);
+    let cold_adapter = Gemma4MtpTargetAdapter::new_with_block_size(&wrapper, Some(seq_cold), 4);
+    let (bonus_cold, seed_cold, _) = cold_adapter.prefill_and_seed(&prompt, &sampler, &[], &logprobs);
+
+    // --- Adopted: seed `[..offset]` into a fresh slot (mirrors the scheduler's
+    // APC snapshot restore), then the offset adapter forwards only the suffix. ---
+    let seq_adopt = SequenceId::from_raw(51_811);
+    let prefix_arr = mlxcel_core::from_slice_i32(&prompt[..offset], &[1, offset as i32]);
+    // `forward_with_sequence_id` resolves the same per-sequence slot the adapter
+    // later reads, and appends the prefix KV at absolute positions `[0..offset)`.
+    let _ = wrapper.forward_with_sequence_id(&prefix_arr, Some(seq_adopt), &mut [], None);
+    let adopt_adapter = Gemma4MtpTargetAdapter::new_with_block_size(&wrapper, Some(seq_adopt), 4)
+        .with_prefill_start_offset(offset);
+    let (bonus_adopt, seed_adopt, _) =
+        adopt_adapter.prefill_and_seed(&prompt, &sampler, &[], &logprobs);
+
+    // The reused-prefix run and the cold run must agree on the first bonus...
+    assert_eq!(
+        bonus_cold, bonus_adopt,
+        "suffix-reuse first bonus must equal the cold full-prompt bonus"
+    );
+    // ...and both must report `kv_offset == full prompt length` (the cache holds
+    // `offset` reused + `len - offset` forwarded == `len` tokens after prefill).
+    assert_eq!(
+        seed_cold.kv_offset, seed_adopt.kv_offset,
+        "kv_offset must match between cold and suffix-reuse prefill"
+    );
+    assert_eq!(
+        seed_adopt.kv_offset,
+        prompt.len(),
+        "kv_offset must equal the full prompt length even though only the suffix was forwarded"
+    );
+}
+
 #[test]
 fn verify_bias_suppresses_argmax_at_leaking_position_b1() {
     // issue #350: the B = 1 verify step applies `sampler.token_bias` to the
