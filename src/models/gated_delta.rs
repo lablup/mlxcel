@@ -24,6 +24,14 @@
 use mlxcel_core::utils::{silu, softplus, stack_arrays};
 use mlxcel_core::{MlxArray, UniquePtr, dtype};
 
+/// Chunk length for the chunked parallel prefill scan (`gated_delta_chunked`).
+///
+/// The scan trades the per-token loop's `O(T)` sequential dependency for an
+/// `O(T/C + C)` one: `C`-length intra-chunk work done in parallel across all
+/// chunks plus a `T/C`-step inter-chunk state scan. `64` follows the standard
+/// delta-rule chunk size and keeps the intra-chunk `C x C` matrices small.
+const GATED_DELTA_CHUNK_SIZE: usize = 64;
+
 // Cache.
 /// Cache for GatedDeltaNet (linear attention) layers.
 /// Stores conv1d state and recurrent SSM state.
@@ -314,7 +322,28 @@ pub fn gated_delta_ops(
         return (y, new_state);
     }
 
-    // Multi-token path (prefill): process each timestep sequentially
+    // Multi-token path (prefill). On the non-Metal fallback, scalar gating with
+    // no mask routes through the chunked parallel scan below; vectorized gating
+    // ([B, T, Hv, Dk]) or an explicit batch-recovery mask falls through to the
+    // sequential reference loop that follows.
+    if mask.is_none() && mlxcel_core::array_ndim(g) == 3 {
+        return gated_delta_chunked(
+            q_ref,
+            k_ref,
+            v,
+            g,
+            beta,
+            &current_state,
+            GATED_DELTA_CHUNK_SIZE,
+            b,
+            t,
+            hv,
+            dk,
+            dv,
+        );
+    }
+
+    // Sequential fallback (vectorized gating or mask): one step per timestep.
     let mut ys = Vec::with_capacity(t);
     for t_idx in 0..t {
         let q_t = mlxcel_core::squeeze_axis(
@@ -389,6 +418,218 @@ pub fn gated_delta_ops(
     let y = stack_arrays(&ys, 1);
 
     (y, current_state)
+}
+
+/// Chunked parallel prefill scan for the gated delta rule (scalar gating).
+///
+/// Computes the exact same recurrence as the sequential per-token loop, but
+/// with `O(T/C + C)` sequential depth instead of `O(T)`. Used for prefill on
+/// backends without the fused Metal kernel (CUDA/CPU). `q_ref`/`k_ref` are
+/// already GQA-repeated to `Hv` heads; `g` is scalar gating `[B, T, Hv]`.
+///
+/// Standard delta-rule chunking with gating. Split the sequence into chunks of
+/// length `C`. Within a chunk (local positions `r`, incoming state `S`), the
+/// reference recurrence is `S_r = g_r S_{r-1} + w_r k_r^T` with
+/// `w_r = beta_r (v_r - g_r S_{r-1} k_r)` and output `y_r = S_r q_r`. Writing
+/// the cumulative gate `gamma_r = prod_{i<=r} g_i` and the pseudo-values
+/// `W = (I + T)^{-1} RHS`, where `T[r,j] = beta_r (gamma_r/gamma_j)(k_r . k_j)`
+/// is strictly lower triangular, the chunk becomes:
+///   - `Wv = Ainv (beta ⊙ V)`, `R = Ainv (beta·gamma ⊙ K)` (state-independent),
+///   - state scan `S_out = gamma_last ⊙ S - S (R^T Kd) + (Wv^T Kd)`,
+///   - output `y = (Pmat Wv) + Qeff S^T` with `Pmat[r,j]=(gamma_r/gamma_j)(k_j.q_r)`
+///     lower-triangular and `Qeff = gamma ⊙ Q - Pmat R`.
+///
+/// `Ainv = (I + T)^{-1}` is formed by the finite Neumann series (T is nilpotent).
+/// All decay ratios are kept in the log domain and clamped so no entry overflows.
+///
+/// Used by: Qwen3Next, Qwen3.5, KimiLinear
+#[allow(clippy::too_many_arguments)]
+fn gated_delta_chunked(
+    q_ref: &MlxArray,
+    k_ref: &MlxArray,
+    v: &MlxArray,
+    g: &MlxArray,
+    beta: &MlxArray,
+    initial_state: &MlxArray,
+    chunk: usize,
+    b: i32,
+    t: usize,
+    hv: i32,
+    dk: i32,
+    dv: i32,
+) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
+    let q_dtype = mlxcel_core::array_dtype(q_ref);
+
+    let cc = chunk as i32;
+    let nn = t.div_ceil(chunk) as i32; // number of chunks
+    let t_pad = nn * cc;
+    let pad_after = t_pad - t as i32;
+
+    // Scan math runs in float32 (the sequential reference accumulates state in
+    // float32); cast the possibly-bf16 inputs up front.
+    let qf = mlxcel_core::astype(q_ref, dtype::FLOAT32);
+    let kf = mlxcel_core::astype(k_ref, dtype::FLOAT32);
+    let vf = mlxcel_core::astype(v, dtype::FLOAT32);
+    let betaf = mlxcel_core::astype(beta, dtype::FLOAT32);
+    let gf = mlxcel_core::astype(g, dtype::FLOAT32);
+
+    // Pad the time axis to a whole number of chunks. Query/key/value/beta pad
+    // with zero (inert tokens); the gate pads with one so padded positions
+    // apply no decay. With beta = 0 the padded tokens never update the state,
+    // so the post-chunk state equals the state after the last real token and
+    // the discarded padded outputs cannot corrupt earlier (causal) positions.
+    let (qf, kf, vf, betaf, gf) = if pad_after > 0 {
+        let pad4 = [0, 0, 0, pad_after, 0, 0, 0, 0];
+        let pad3 = [0, 0, 0, pad_after, 0, 0];
+        (
+            mlxcel_core::pad(&qf, &pad4, 0.0),
+            mlxcel_core::pad(&kf, &pad4, 0.0),
+            mlxcel_core::pad(&vf, &pad4, 0.0),
+            mlxcel_core::pad(&betaf, &pad3, 0.0),
+            mlxcel_core::pad(&gf, &pad3, 1.0),
+        )
+    } else {
+        (qf, kf, vf, betaf, gf)
+    };
+
+    // Reshape [B, T_pad, Hv, D] -> [B, Hv, N, C, D] (and [B, T_pad, Hv] gate/beta
+    // -> [B, Hv, N, C]) so intra-chunk matmuls batch over (B, Hv, N) and
+    // contract the last two axes.
+    let to_chunks_4d = |x: &MlxArray| -> UniquePtr<MlxArray> {
+        let u = mlxcel_core::unflatten(x, 1, &[nn, cc]); // [B, N, C, Hv, D]
+        mlxcel_core::transpose_axes(&u, &[0, 3, 1, 2, 4]) // [B, Hv, N, C, D]
+    };
+    let to_chunks_3d = |x: &MlxArray| -> UniquePtr<MlxArray> {
+        let u = mlxcel_core::unflatten(x, 1, &[nn, cc]); // [B, N, C, Hv]
+        mlxcel_core::transpose_axes(&u, &[0, 3, 1, 2]) // [B, Hv, N, C]
+    };
+    let qc = to_chunks_4d(&qf);
+    let kc = to_chunks_4d(&kf);
+    let vc = to_chunks_4d(&vf);
+    let betac = to_chunks_3d(&betaf);
+    let gc = to_chunks_3d(&gf);
+
+    // Log-domain cumulative gate: L[.., r] = sum_{i<=r} log g_i = log gamma_r.
+    // Floor the log so an underflowed gate cannot inject -inf.
+    let neg_cap = mlxcel_core::multiply_scalar(&mlxcel_core::ones_like(&gc), -60.0);
+    let lg = mlxcel_core::maximum(&mlxcel_core::log(&gc), &neg_cap);
+    let l = mlxcel_core::cumsum(&lg, -1, false, true); // inclusive cumsum over C
+    let gamma = mlxcel_core::exp(&l); // [B, Hv, N, C]
+
+    // Decay-ratio matrix ratio[r, j] = gamma_r/gamma_j = exp(L_r - L_j). Clamp
+    // the exponent to <= 0 so no entry overflows; the upper triangle is masked
+    // out where used.
+    let li = mlxcel_core::expand_dims(&l, -1); // [.., C, 1]
+    let lj = mlxcel_core::expand_dims(&l, -2); // [.., 1, C]
+    let diff = mlxcel_core::subtract(&li, &lj);
+    let diff = mlxcel_core::minimum(&diff, &mlxcel_core::zeros_like(&diff));
+    let ratio = mlxcel_core::exp(&diff); // [.., C, C]
+
+    // Triangular masks / identity acting on the last two axes.
+    let ones_cc = mlxcel_core::ones(&[cc, cc], dtype::FLOAT32);
+    let mask_strict = mlxcel_core::tril(&ones_cc, -1); // r > j
+    let mask_incl = mlxcel_core::tril(&ones_cc, 0); // r >= j
+    let eye_cc = mlxcel_core::identity(cc, dtype::FLOAT32);
+
+    // kk[r, j] = k_r . k_j ; qk[r, j] = q_r . k_j
+    let kt = mlxcel_core::swap_axes(&kc, -1, -2); // [.., Dk, C]
+    let kk = mlxcel_core::matmul(&kc, &kt);
+    let qk = mlxcel_core::matmul(&qc, &kt);
+
+    let beta_e = mlxcel_core::expand_dims(&betac, -1); // [.., C, 1]
+    let gamma_e = mlxcel_core::expand_dims(&gamma, -1); // [.., C, 1]
+
+    // Strictly-lower intra-chunk matrix T[r, j] = beta_r (gamma_r/gamma_j)(k_r . k_j).
+    let t_mat = mlxcel_core::multiply(
+        &mlxcel_core::multiply(&mlxcel_core::multiply(&beta_e, &ratio), &kk),
+        &mask_strict,
+    );
+
+    // Ainv = (I + T)^{-1} via the finite Neumann series (T strictly lower, so
+    // T^C = 0): sum_{p=0}^{C-1} (-T)^p, computed with C-1 Horner steps.
+    let t_shape = mlxcel_core::array_shape(&t_mat);
+    let mut ainv = mlxcel_core::broadcast_to(&eye_cc, &t_shape); // [.., C, C]
+    for _ in 1..chunk {
+        ainv = mlxcel_core::subtract(&eye_cc, &mlxcel_core::matmul(&t_mat, &ainv));
+    }
+
+    // Wv = Ainv (beta ⊙ V) ; R = Ainv (beta·gamma ⊙ K).
+    let bg_e = mlxcel_core::expand_dims(&mlxcel_core::multiply(&betac, &gamma), -1); // [.., C, 1]
+    let wv = mlxcel_core::matmul(&ainv, &mlxcel_core::multiply(&beta_e, &vc)); // [.., C, Dv]
+    let r_mat = mlxcel_core::matmul(&ainv, &mlxcel_core::multiply(&bg_e, &kc)); // [.., C, Dk]
+
+    // d_j = gamma_last/gamma_j (<= 1) ; Kd = d ⊙ K.
+    let l_last = mlxcel_core::slice(&l, &[0, 0, 0, cc - 1], &[b, hv, nn, cc]); // [.., 1]
+    let d_e = mlxcel_core::expand_dims(&mlxcel_core::exp(&mlxcel_core::subtract(&l_last, &l)), -1);
+    let kd = mlxcel_core::multiply(&d_e, &kc); // [.., C, Dk]
+
+    // State-scan operators (independent of the incoming state).
+    let bmat = mlxcel_core::matmul(&mlxcel_core::swap_axes(&r_mat, -1, -2), &kd); // [.., Dk, Dk]
+    let cmat = mlxcel_core::matmul(&mlxcel_core::swap_axes(&wv, -1, -2), &kd); // [.., Dv, Dk]
+    let gamma_last = mlxcel_core::exp(&l_last); // [B, Hv, N, 1]
+
+    // Output operators: Pmat[r, j] = (gamma_r/gamma_j)(k_j . q_r) for j <= r.
+    let pmat = mlxcel_core::multiply(&mlxcel_core::multiply(&ratio, &qk), &mask_incl);
+    let pmat_wv = mlxcel_core::matmul(&pmat, &wv); // [.., C, Dv]
+    let qeff = mlxcel_core::subtract(
+        &mlxcel_core::multiply(&gamma_e, &qc),
+        &mlxcel_core::matmul(&pmat, &r_mat),
+    ); // [.., C, Dk]
+
+    // Sequential inter-chunk state scan (N steps). S: [B, Hv, Dv, Dk].
+    let mut state = mlxcel_core::astype(initial_state, dtype::FLOAT32);
+    let mut ys: Vec<UniquePtr<MlxArray>> = Vec::with_capacity(nn as usize);
+    for n in 0..nn {
+        let qeff_n = mlxcel_core::squeeze_axis(
+            &mlxcel_core::slice(&qeff, &[0, 0, n, 0, 0], &[b, hv, n + 1, cc, dk]),
+            2,
+        ); // [B, Hv, C, Dk]
+        let pmwv_n = mlxcel_core::squeeze_axis(
+            &mlxcel_core::slice(&pmat_wv, &[0, 0, n, 0, 0], &[b, hv, n + 1, cc, dv]),
+            2,
+        ); // [B, Hv, C, Dv]
+        let bmat_n = mlxcel_core::squeeze_axis(
+            &mlxcel_core::slice(&bmat, &[0, 0, n, 0, 0], &[b, hv, n + 1, dk, dk]),
+            2,
+        ); // [B, Hv, Dk, Dk]
+        let cmat_n = mlxcel_core::squeeze_axis(
+            &mlxcel_core::slice(&cmat, &[0, 0, n, 0, 0], &[b, hv, n + 1, dv, dk]),
+            2,
+        ); // [B, Hv, Dv, Dk]
+        let gl_n = mlxcel_core::expand_dims(
+            &mlxcel_core::squeeze_axis(
+                &mlxcel_core::slice(&gamma_last, &[0, 0, n, 0], &[b, hv, n + 1, 1]),
+                2,
+            ),
+            -1,
+        ); // [B, Hv, 1, 1]
+
+        // y_n = Pmat Wv + Qeff S^T
+        let y_inter = mlxcel_core::matmul(&qeff_n, &mlxcel_core::swap_axes(&state, -1, -2));
+        ys.push(mlxcel_core::add(&pmwv_n, &y_inter));
+
+        // S_out = gamma_last ⊙ S - S B + Cst
+        let decayed = mlxcel_core::multiply(&gl_n, &state);
+        let corrected = mlxcel_core::matmul(&state, &bmat_n);
+        state = mlxcel_core::add(&mlxcel_core::subtract(&decayed, &corrected), &cmat_n);
+    }
+
+    // Reassemble outputs [B, Hv, N, C, Dv] -> [B, T, Hv, Dv], dropping padding.
+    let y = stack_arrays(&ys, 2); // [B, Hv, N, C, Dv]
+    let y = mlxcel_core::reshape(&y, &[b, hv, t_pad, dv]); // [B, Hv, T_pad, Dv]
+    let y = mlxcel_core::transpose_axes(&y, &[0, 2, 1, 3]); // [B, T_pad, Hv, Dv]
+    let y = if pad_after > 0 {
+        mlxcel_core::slice(&y, &[0, 0, 0, 0], &[b, t as i32, hv, dv])
+    } else {
+        y
+    };
+    let y = if mlxcel_core::array_dtype(&y) != q_dtype {
+        mlxcel_core::astype(&y, q_dtype)
+    } else {
+        y
+    };
+
+    (y, state)
 }
 
 /// Return whether the custom Metal gated-delta kernel supports this shape.

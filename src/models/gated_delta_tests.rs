@@ -13,8 +13,8 @@
 // limitations under the License.
 
 use super::{
-    GatedDeltaCache, RMSNormGated, compute_g, gated_delta_ops, gated_delta_step,
-    precise_swiglu_gate, restore_dtype, supports_metal_gated_delta_kernel,
+    GatedDeltaCache, RMSNormGated, compute_g, gated_delta_chunked, gated_delta_ops,
+    gated_delta_step, precise_swiglu_gate, restore_dtype, supports_metal_gated_delta_kernel,
 };
 use mlxcel_core::{dtype, generate::ModelStateSnapshot};
 
@@ -352,4 +352,131 @@ fn gated_delta_cache_snapshot_restore_round_trips_state_shapes() {
     assert_eq!(restored.offset, 17);
     assert_eq!(mlxcel_core::array_shape(conv), vec![1, 3, 8]);
     assert_eq!(mlxcel_core::array_shape(state), vec![1, 2, 4, 8]);
+}
+
+// Parity test for the chunked parallel prefill scan (gated_delta_chunked).
+
+/// Deterministic synthetic tensor with values in [-scale, scale].
+fn synth(shape: &[i32], scale: f32, phase: f32) -> mlxcel_core::UniquePtr<mlxcel_core::MlxArray> {
+    let n: i32 = shape.iter().product();
+    let data: Vec<f32> = (0..n)
+        .map(|i| scale * (0.1 * i as f32 + phase).sin())
+        .collect();
+    mlxcel_core::from_slice_f32(&data, shape)
+}
+
+/// Relative RMS error between two arrays: rms(a - b) / rms(b).
+fn rms_rel(a: &mlxcel_core::MlxArray, b: &mlxcel_core::MlxArray) -> f32 {
+    let diff = mlxcel_core::subtract(a, b);
+    let num = mlxcel_core::item_f32(&mlxcel_core::mean_all(&mlxcel_core::square(&diff))).sqrt();
+    let den = mlxcel_core::item_f32(&mlxcel_core::mean_all(&mlxcel_core::square(b))).sqrt();
+    num / (den + 1e-8)
+}
+
+/// Exact sequential reference: the same recurrence as `gated_delta_step`'s
+/// ops path, run one timestep at a time in float32 (no mask, no fused kernel).
+#[allow(clippy::too_many_arguments)]
+fn sequential_reference(
+    q: &mlxcel_core::MlxArray,
+    k: &mlxcel_core::MlxArray,
+    v: &mlxcel_core::MlxArray,
+    g: &mlxcel_core::MlxArray,
+    beta: &mlxcel_core::MlxArray,
+    state0: &mlxcel_core::MlxArray,
+    b: i32,
+    t: usize,
+    h: i32,
+    dk: i32,
+    dv: i32,
+) -> (
+    mlxcel_core::UniquePtr<mlxcel_core::MlxArray>,
+    mlxcel_core::UniquePtr<mlxcel_core::MlxArray>,
+) {
+    let mut s = mlxcel_core::copy(state0);
+    let mut ys = Vec::with_capacity(t);
+    for ti in 0..t {
+        let ti = ti as i32;
+        let qt =
+            mlxcel_core::squeeze_axis(&mlxcel_core::slice(q, &[0, ti, 0, 0], &[b, ti + 1, h, dk]), 1);
+        let kt =
+            mlxcel_core::squeeze_axis(&mlxcel_core::slice(k, &[0, ti, 0, 0], &[b, ti + 1, h, dk]), 1);
+        let vt =
+            mlxcel_core::squeeze_axis(&mlxcel_core::slice(v, &[0, ti, 0, 0], &[b, ti + 1, h, dv]), 1);
+        let gt = mlxcel_core::squeeze_axis(&mlxcel_core::slice(g, &[0, ti, 0], &[b, ti + 1, h]), 1);
+        let betat =
+            mlxcel_core::squeeze_axis(&mlxcel_core::slice(beta, &[0, ti, 0], &[b, ti + 1, h]), 1);
+
+        // S' = g * S
+        let decay = mlxcel_core::expand_dims(&mlxcel_core::expand_dims(&gt, -1), -1);
+        let sp = mlxcel_core::multiply(&s, &decay);
+        // u = S' k
+        let k_exp = mlxcel_core::expand_dims(&kt, -2);
+        let u = mlxcel_core::sum_axis(&mlxcel_core::multiply(&sp, &k_exp), -1, false);
+        // w = beta (v - u)
+        let beta_exp = mlxcel_core::expand_dims(&betat, -1);
+        let w = mlxcel_core::multiply(&mlxcel_core::subtract(&vt, &u), &beta_exp);
+        // S = S' + w k^T
+        let w_exp = mlxcel_core::expand_dims(&w, -1);
+        s = mlxcel_core::add(&sp, &mlxcel_core::multiply(&k_exp, &w_exp));
+        // y = S q
+        let q_exp = mlxcel_core::expand_dims(&qt, -2);
+        let yt = mlxcel_core::sum_axis(&mlxcel_core::multiply(&s, &q_exp), -1, false);
+        ys.push(yt);
+    }
+    let y = mlxcel_core::utils::stack_arrays(&ys, 1);
+    (y, s)
+}
+
+#[test]
+#[ignore = "requires serial MLX execution"]
+fn chunked_prefill_matches_sequential_reference() {
+    // B=2, T=10, H=3, Dk=16, Dv=8, chunk C=4 -> N=3 chunks with 2 padded
+    // positions in the last chunk (exercises multi-chunk + ragged padding +
+    // a non-zero incoming state).
+    let b = 2i32;
+    let t = 10usize;
+    let h = 3i32;
+    let dk = 16i32;
+    let dv = 8i32;
+    let chunk = 4usize;
+    let ti = t as i32;
+
+    let q = synth(&[b, ti, h, dk], 0.3, 0.0);
+    let k = synth(&[b, ti, h, dk], 0.25, 1.3);
+    let v = synth(&[b, ti, h, dv], 0.5, 2.1);
+    // Gate in [0.82, 0.98] (strictly in (0, 1)); beta in [0.2, 0.8].
+    let g = {
+        let n = b * ti * h;
+        let data: Vec<f32> = (0..n).map(|i| 0.9 + 0.08 * (0.3 * i as f32).sin()).collect();
+        mlxcel_core::from_slice_f32(&data, &[b, ti, h])
+    };
+    let beta = {
+        let n = b * ti * h;
+        let data: Vec<f32> = (0..n)
+            .map(|i| 0.5 + 0.3 * (0.2 * i as f32 + 0.5).sin())
+            .collect();
+        mlxcel_core::from_slice_f32(&data, &[b, ti, h])
+    };
+    let state0 = synth(&[b, h, dv, dk], 0.2, 0.7);
+
+    let (y_ref, s_ref) = sequential_reference(&q, &k, &v, &g, &beta, &state0, b, t, h, dk, dv);
+    let (y_chunk, s_chunk) =
+        gated_delta_chunked(&q, &k, &v, &g, &beta, &state0, chunk, b, t, h, dk, dv);
+
+    // Shape parity.
+    assert_eq!(mlxcel_core::array_shape(&y_chunk), vec![b, ti, h, dv]);
+    assert_eq!(mlxcel_core::array_shape(&s_chunk), vec![b, h, dv, dk]);
+
+    // Numerical parity (RMS-equivalent) for both the output and the carried
+    // recurrent state that seeds subsequent decode steps.
+    let y_err = rms_rel(&y_chunk, &y_ref);
+    let s_err = rms_rel(&s_chunk, &s_ref);
+    assert!(
+        y_err < 1e-3,
+        "chunked output diverged from sequential reference: rms_rel={y_err}"
+    );
+    assert!(
+        s_err < 1e-3,
+        "chunked state diverged from sequential reference: rms_rel={s_err}"
+    );
 }
