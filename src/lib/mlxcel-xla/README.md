@@ -45,23 +45,18 @@ The prebuilt dist is CPU/Vulkan only (no CUDA driver, and its `iree-compile` has
 no CUDA codegen). The CUDA path therefore uses a **source-built cuda-enabled IREE
 runtime** plus a **cuda-capable `iree-compile`**, version-matched to each other.
 It is a separate, mutually-exclusive build mode (set `IREE_CUDA_HOME` instead of
-`IREE_DIST`).
+`IREE_DIST`). `make iree-cuda` (wrapping `scripts/iree/setup-cuda.sh`) automates
+it: it installs the pinned cuda `iree-compile` into a private venv and
+source-builds the version-matched runtime (`local-task`/`local-sync`/`cuda`
+drivers), then prints the env. Idempotent: re-running reuses the clone/build/venv.
 
 ```bash
-# 1. Build the IREE *runtime* from source at the version your iree-compile uses
-#    (runtime only -> no LLVM; skip the third_party/llvm-project submodule):
-git clone --depth 1 --branch <iree-tag> https://github.com/iree-org/iree.git src
-git -C src -c submodule."third_party/llvm-project".update=none \
-    submodule update --init --recursive --depth 1
-cmake -S src -B build -G "Unix Makefiles" -DCMAKE_BUILD_TYPE=Release \
-  -DIREE_BUILD_COMPILER=OFF -DIREE_HAL_DRIVER_DEFAULTS=OFF \
-  -DIREE_HAL_DRIVER_LOCAL_TASK=ON -DIREE_HAL_DRIVER_LOCAL_SYNC=ON \
-  -DIREE_HAL_DRIVER_CUDA=ON -DCUDAToolkit_ROOT=/usr/local/cuda
-make -C build -j"$(nproc)" iree_runtime_unified
+# 1. Source-build the cuda IREE runtime + pinned iree-compile (idempotent).
+make iree-cuda                                 # or `make iree` (auto-detects the host)
+eval "$(scripts/iree/setup-cuda.sh --env)"     # export IREE_CUDA_HOME / _COMPILE / MLXCEL_XLA_IREE_COMPILE
+# (inspect the resolved paths + pinned version any time: `make iree-env`)
 
-# 2. Point the build at it; provide a cuda-capable iree-compile (matching version).
-export IREE_CUDA_HOME=/abs/path/to/that/iree   # the dir holding src/ and build/
-export IREE_CUDA_COMPILE=/abs/path/to/iree-compile   # cuda codegen, version-matched
+# 2. Build with real execution on.
 cargo build --release --features xla-iree
 
 # 3. Run on the GPU.
@@ -78,15 +73,17 @@ Validated on a GB10 (Grace-Blackwell, sm_121): token-exact 48/48, ~5 tok/s
 On Apple Silicon, **MLX is the default and primary backend**; this OpenXLA path
 is a development / parity path, opt-in exactly like CUDA. IREE publishes no macOS
 `iree-dist` (only linux dists + python wheels), so the runtime is **source-built**
-like the CUDA path. `scripts/iree/setup-macos.sh` automates it: it installs the
-pinned macOS `iree-compile` (metal-spirv codegen) from the universal2 wheel into a
+like the CUDA path. `make iree-metal` (wrapping `scripts/iree/setup-macos.sh`)
+automates it: it installs the pinned macOS `iree-compile` (metal-spirv codegen)
+from the universal2 wheel into a
 private venv, source-builds the IREE runtime (`local-task`/`local-sync`/`metal`
 drivers), and prints the env.
 
 ```bash
-# 1. One-time setup (clones + builds the IREE runtime; idempotent).
-eval "$(scripts/iree/setup-macos.sh)"        # sets IREE_MACOS_HOME, MLXCEL_XLA_IREE_COMPILE
-# (later shells: eval "$(scripts/iree/setup-macos.sh --env)")
+# 1. One-time setup: source-build the IREE runtime (idempotent).
+make iree-metal                              # or `make iree` (auto-detects the host)
+eval "$(scripts/iree/setup-macos.sh --env)"  # export IREE_MACOS_HOME, MLXCEL_XLA_IREE_COMPILE
+# (inspect the resolved paths + pinned version: `make iree-env`)
 
 # 2. Build with real execution on (alongside the usual MLX features).
 cargo build --release --features metal,accelerate,xla-iree

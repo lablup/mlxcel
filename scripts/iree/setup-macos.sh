@@ -43,9 +43,26 @@ emit_env() {
   echo "export MLXCEL_XLA_IREE_COMPILE=$IREE_COMPILE"
 }
 
+# `--info`: human-readable resolved paths + pinned version + HAL drivers, for
+# `make iree-env`. Not eval-safe -- use `--env` to export into a shell.
+emit_info() {
+  echo "IREE backend:  metal (HAL drivers: local-task, local-sync, metal)"
+  echo "IREE home:     $IREE_DIR"
+  echo "iree-compile:  $IREE_COMPILE"
+  echo "Pinned:        $IREE_TAG  (wheel $WHEEL)"
+  echo
+  echo "# export the build env with: eval \"\$(scripts/iree/setup-macos.sh --env)\""
+  emit_env
+}
+
 # `--env`: assume already built; just print the exports.
 if [ "${1:-}" = "--env" ]; then
   emit_env
+  exit 0
+fi
+# `--info`: print resolved paths + pinned version (human-readable).
+if [ "${1:-}" = "--info" ]; then
+  emit_info
   exit 0
 fi
 
@@ -82,11 +99,19 @@ if [ ! -d "$SRC/.git" ]; then
   log "cloning IREE runtime source @ $IREE_TAG (shallow, no LLVM)"
   git clone --depth 1 --branch "$IREE_TAG" https://github.com/iree-org/iree.git "$SRC"
 fi
-# The runtime build needs only flatcc (vmfb parsing); skip the compiler-only
-# submodules (llvm-project, stablehlo, torch-mlir, ...) entirely.
-if [ ! -e "$SRC/third_party/flatcc/.git" ]; then
-  log "initializing flatcc submodule only"
-  git -C "$SRC" submodule update --init --depth 1 -- third_party/flatcc
+# The runtime build needs the non-compiler submodules: flatcc (vmfb parsing),
+# plus google benchmark and printf, which the top-level CMake pulls in through the
+# threading / runtime gates (IREE_ENABLE_THREADING etc.), not IREE_BUILD_*.
+# Initialize everything EXCEPT the heavy compiler-only submodules (llvm-project,
+# stablehlo, torch-mlir), which a runtime-only build (IREE_BUILD_COMPILER=OFF)
+# never configures. The benchmark sentinel also self-heals an older flatcc-only clone.
+if [ ! -e "$SRC/third_party/benchmark/.git" ]; then
+  log "initializing runtime submodules (all except llvm-project/stablehlo/torch-mlir)"
+  git -C "$SRC" \
+    -c submodule."third_party/llvm-project".update=none \
+    -c submodule."third_party/stablehlo".update=none \
+    -c submodule."third_party/torch-mlir".update=none \
+    submodule update --init --depth 1
 fi
 
 UNIFIED="$BUILD/runtime/src/iree/runtime/libiree_runtime_unified.a"

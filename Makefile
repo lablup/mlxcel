@@ -62,6 +62,9 @@ help: ## Show this help message
 	@echo "$(BOLD)Build Targets:$(RESET)"
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | grep -E '(build|release|debug)' | awk 'BEGIN {FS = ":.*?## "}; {printf "  $(CYAN)%-20s$(RESET) %s\n", $$1, $$2}'
 	@echo ""
+	@echo "$(BOLD)IREE Backend Targets:$(RESET)"
+	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | grep -E '(iree)' | awk 'BEGIN {FS = ":.*?## "}; {printf "  $(CYAN)%-20s$(RESET) %s\n", $$1, $$2}'
+	@echo ""
 	@echo "$(BOLD)Test Targets:$(RESET)"
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | grep -E '(test|check|lint|clippy)' | awk 'BEGIN {FS = ":.*?## "}; {printf "  $(CYAN)%-20s$(RESET) %s\n", $$1, $$2}'
 	@echo ""
@@ -147,6 +150,44 @@ release-cuda: ## Build in release mode with CUDA (Linux/NVIDIA)
 
 .PHONY: debug
 debug: build ## Alias for build (debug mode)
+
+# ============================================================================
+# IREE Toolchain (OpenXLA `xla-iree` backend runtime)
+# ============================================================================
+#
+# Source-build the version-matched IREE runtime + pinned `iree-compile` that the
+# `xla-iree` feature links against, wrapping scripts/iree/setup-{cuda,macos}.sh so
+# the measurement environment is reproducible from a fresh checkout. The scripts
+# are idempotent (they reuse an existing clone / build / venv), so re-running does
+# not rebuild when the pinned artifact is already present. `make iree` auto-detects
+# the host: CUDA on Linux, Metal on macOS.
+
+IREE_CUDA_SCRIPT := scripts/iree/setup-cuda.sh
+IREE_MACOS_SCRIPT := scripts/iree/setup-macos.sh
+
+.PHONY: iree
+iree: ## Set up the IREE backend toolchain for this host (CUDA/Linux, Metal/macOS)
+ifeq ($(UNAME_S),Darwin)
+	@$(MAKE) --no-print-directory iree-metal
+else
+	@$(MAKE) --no-print-directory iree-cuda
+endif
+
+.PHONY: iree-cuda
+iree-cuda: ## Set up the IREE CUDA toolchain (Linux/NVIDIA)
+	@$(IREE_CUDA_SCRIPT)
+
+.PHONY: iree-metal
+iree-metal: ## Set up the IREE Metal toolchain (macOS/Apple Silicon)
+	@$(IREE_MACOS_SCRIPT)
+
+.PHONY: iree-env
+iree-env: ## Print the resolved IREE toolchain paths + pinned version
+ifeq ($(UNAME_S),Darwin)
+	@$(IREE_MACOS_SCRIPT) --info
+else
+	@$(IREE_CUDA_SCRIPT) --info
+endif
 
 # ============================================================================
 # Test Targets
