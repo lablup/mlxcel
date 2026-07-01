@@ -93,11 +93,14 @@ mod tests {
         }
     }
 
-    /// A tiny Gemma2-shaped config for the sliding-window structural tests
-    /// (issue #495). `n_layers = 4` gives two local (even) and two global (odd)
-    /// layers so the alternation is observable; `sliding_window` is the only knob
-    /// under test. The soft-caps / four-norm structure are set so the graph is a
-    /// faithful (small) Gemma2, but the window mask is independent of them.
+    /// A tiny Gemma2-shaped config with every Gemma2 switch on: `(1 + w)` norm,
+    /// four per-layer norms, GeGLU, embedding scale, attention / final logit
+    /// soft-cap, and a non-square `o_proj` (`n_q*head_dim = 12 != hidden = 8`, as
+    /// in real Gemma2) for the shared-attention-core coverage test (issue #494).
+    /// `n_layers = 4` gives two local (even) and two global (odd) layers so the
+    /// sliding-window alternation (issue #495) is observable; `sliding_window` is
+    /// the only knob the window tests vary (the coverage test passes `None`). Small
+    /// dims keep the emitted text tiny while exercising every Gemma2 path.
     fn gemma2_like(sliding_window: Option<usize>) -> Config {
         Config {
             hidden: 8,
@@ -105,16 +108,16 @@ mod tests {
             n_layers: 4,
             n_q: 2,
             n_kv: 1,
-            head_dim: 4,
+            head_dim: 6,
             eps: 1e-6,
-            rope_theta: 10_000.0,
+            rope_theta: 1e4,
             vocab: 10,
             rope: RopeScaling::Plain,
             qkv_bias: false,
             tie_word_embeddings: true,
             quantization: None,
             gemma2: true,
-            query_pre_attn_scalar: Some(4.0),
+            query_pre_attn_scalar: Some(6.0),
             attn_logit_softcap: Some(50.0),
             final_logit_softcap: Some(30.0),
             sliding_window,
@@ -352,6 +355,34 @@ mod tests {
         assert!(!mlir.contains("['bq']"));
         assert!(!mlir.contains("['bk']"));
         assert!(!mlir.contains("['bv']"));
+    }
+
+    /// The shared attention core (issue #494) keeps a family's attention / MLP
+    /// deltas reaching every graph kind from one authoring site. Gemma2's GeGLU
+    /// and its attention / final soft-caps are the only source of `stablehlo.tanh`
+    /// in these graphs, so a Gemma2 config emits `tanh` in single decode, ragged
+    /// decode, and prefill alike, while a Llama config (SwiGLU + no soft-cap)
+    /// emits none in any of them. This locks the "authored once, reaches all three
+    /// paths" guarantee for the one in-scope architecture with no committed byte
+    /// asset.
+    #[test]
+    fn gemma2_deltas_reach_every_shared_core_kind() {
+        let gemma = gemma2_like(None);
+        let llama = Config::llama_3_2_1b();
+        for (c, want_tanh) in [(&gemma, true), (&llama, false)] {
+            let kinds = [
+                ("decode", emit_decode(c, false)),
+                ("ragged", emit_decode_ragged(c, 4, false)),
+                ("prefill", emit_prefill(c, false)),
+            ];
+            for (name, g) in kinds {
+                assert_eq!(
+                    g.contains("stablehlo.tanh"),
+                    want_tanh,
+                    "{name}: gemma2={want_tanh} tanh presence"
+                );
+            }
+        }
     }
 
     /// Untied embeddings add exactly one weight arg — the `[V, H]`
