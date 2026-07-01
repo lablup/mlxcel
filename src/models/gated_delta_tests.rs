@@ -396,12 +396,18 @@ fn sequential_reference(
     let mut ys = Vec::with_capacity(t);
     for ti in 0..t {
         let ti = ti as i32;
-        let qt =
-            mlxcel_core::squeeze_axis(&mlxcel_core::slice(q, &[0, ti, 0, 0], &[b, ti + 1, h, dk]), 1);
-        let kt =
-            mlxcel_core::squeeze_axis(&mlxcel_core::slice(k, &[0, ti, 0, 0], &[b, ti + 1, h, dk]), 1);
-        let vt =
-            mlxcel_core::squeeze_axis(&mlxcel_core::slice(v, &[0, ti, 0, 0], &[b, ti + 1, h, dv]), 1);
+        let qt = mlxcel_core::squeeze_axis(
+            &mlxcel_core::slice(q, &[0, ti, 0, 0], &[b, ti + 1, h, dk]),
+            1,
+        );
+        let kt = mlxcel_core::squeeze_axis(
+            &mlxcel_core::slice(k, &[0, ti, 0, 0], &[b, ti + 1, h, dk]),
+            1,
+        );
+        let vt = mlxcel_core::squeeze_axis(
+            &mlxcel_core::slice(v, &[0, ti, 0, 0], &[b, ti + 1, h, dv]),
+            1,
+        );
         let gt = mlxcel_core::squeeze_axis(&mlxcel_core::slice(g, &[0, ti, 0], &[b, ti + 1, h]), 1);
         let betat =
             mlxcel_core::squeeze_axis(&mlxcel_core::slice(beta, &[0, ti, 0], &[b, ti + 1, h]), 1);
@@ -447,7 +453,9 @@ fn chunked_prefill_matches_sequential_reference() {
     // Gate in [0.82, 0.98] (strictly in (0, 1)); beta in [0.2, 0.8].
     let g = {
         let n = b * ti * h;
-        let data: Vec<f32> = (0..n).map(|i| 0.9 + 0.08 * (0.3 * i as f32).sin()).collect();
+        let data: Vec<f32> = (0..n)
+            .map(|i| 0.9 + 0.08 * (0.3 * i as f32).sin())
+            .collect();
         mlxcel_core::from_slice_f32(&data, &[b, ti, h])
     };
     let beta = {
