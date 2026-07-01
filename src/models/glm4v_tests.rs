@@ -14,7 +14,7 @@
 
 //! Unit tests for the GLM-4V text backbone config + MRoPE bookkeeping.
 
-use super::{Glm4vMRoPE, Glm4vTextConfig};
+use super::{Glm4vMRoPE, Glm4vRopePairing, Glm4vTextConfig};
 
 fn sample_text_config_json() -> &'static str {
     r#"{
@@ -71,7 +71,7 @@ fn text_config_missing_rope_scaling_falls_back_to_default_section() {
 fn mrope_axis_selector_is_chunked_by_section() {
     // head_dim 128, rope_dims 64 -> 32 rotary pairs; section [8, 12, 12] must
     // assign pair->axis as [T x8, H x12, W x12].
-    let mrope = Glm4vMRoPE::new(128, 10000.0, 64, &[8, 12, 12]);
+    let mrope = Glm4vMRoPE::new(10000.0, 64, &[8, 12, 12], Glm4vRopePairing::EvenOdd);
     let mut expected: Vec<i32> = Vec::new();
     expected.extend(std::iter::repeat_n(0, 8));
     expected.extend(std::iter::repeat_n(1, 12));
@@ -83,4 +83,18 @@ fn mrope_axis_selector_is_chunked_by_section() {
     for w in mrope.inv_freq.windows(2) {
         assert!(w[1] < w[0]);
     }
+}
+
+#[test]
+fn mrope_half_split_selector_matches_moe_section() {
+    // GLM-4V MoE (sectioned_half_split): section [64, 32, 32] over rope_dims
+    // 256 -> 128 rotary pairs; the chunked selector partitions T/H/W the same
+    // way regardless of pairing.
+    let mrope = Glm4vMRoPE::new(10000.0, 256, &[64, 32, 32], Glm4vRopePairing::HalfSplit);
+    let mut expected: Vec<i32> = Vec::new();
+    expected.extend(std::iter::repeat_n(0, 64));
+    expected.extend(std::iter::repeat_n(1, 32));
+    expected.extend(std::iter::repeat_n(2, 32));
+    assert_eq!(mrope.axis_selector, expected);
+    assert_eq!(mrope.inv_freq.len(), 128);
 }

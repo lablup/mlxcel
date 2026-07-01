@@ -127,29 +127,47 @@ impl Glm4vTextConfig {
     }
 }
 
-/// Sectioned even/odd MRoPE.
+/// Rotary pairing used when applying sectioned MRoPE.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Glm4vRopePairing {
+    /// GPT-J style: rotary pair `(2j, 2j+1)`, `cos`/`sin` interleave-repeated.
+    /// Used by GLM-4V (`sectioned_even_odd`).
+    EvenOdd,
+    /// GPT-NeoX style: rotary pair `(d, d + half)`, `cos`/`sin` tiled. Used by
+    /// GLM-4V MoE (`sectioned_half_split`).
+    HalfSplit,
+}
+
+/// Sectioned MRoPE (`sectioned_even_odd` / `sectioned_half_split`).
 ///
 /// Precomputes the inverse-frequency table and the per-pair position-axis
 /// selector so `cos`/`sin` can be built directly from 3D position IDs. The
-/// resulting rotation is applied to the first `rope_dims` head dimensions with
-/// GPT-J style even/odd interleaving; the remaining dimensions pass through.
-struct Glm4vMRoPE {
+/// rotation is applied to the first `rope_dims` head dimensions; the remaining
+/// dimensions pass through. The `pairing` selects even/odd vs half-split layout.
+pub(crate) struct Glm4vMRoPE {
     /// `rope_dims / 2` inverse frequencies.
     inv_freq: Vec<f32>,
     /// Position axis (0=T, 1=H, 2=W) selected for each rotary pair.
     axis_selector: Vec<i32>,
     rope_dims: i32,
+    pairing: Glm4vRopePairing,
 }
 
 impl Glm4vMRoPE {
-    fn new(head_dim: usize, base: f32, rope_dims: usize, mrope_section: &[i32]) -> Self {
+    pub(crate) fn new(
+        base: f32,
+        rope_dims: usize,
+        mrope_section: &[i32],
+        pairing: Glm4vRopePairing,
+    ) -> Self {
         let half = rope_dims / 2;
         let mut inv_freq = Vec::with_capacity(half);
         for i in 0..half {
             inv_freq.push(1.0 / base.powf((2 * i) as f32 / rope_dims as f32));
         }
         // Chunked position selection: the j-th pair takes the position axis
-        // whose cumulative `mrope_section` window contains j.
+        // whose cumulative `mrope_section` window contains j (matching the
+        // reference `_chunked_position_selector`, clamped to `half`).
         let mut axis_selector = vec![0i32; half];
         let mut offset = 0usize;
         for (axis, &length) in mrope_section.iter().enumerate() {
@@ -159,17 +177,20 @@ impl Glm4vMRoPE {
             }
             offset = end;
         }
-        let _ = head_dim;
         Self {
             inv_freq,
             axis_selector,
             rope_dims: rope_dims as i32,
+            pairing,
         }
     }
 
     /// Build `cos`/`sin` of shape `[batch, 1, seq, rope_dims]` from
     /// `position_ids` `[3, batch, seq]` (or `[batch, seq]` for text-only).
-    fn cos_sin(&self, position_ids: &MlxArray) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
+    pub(crate) fn cos_sin(
+        &self,
+        position_ids: &MlxArray,
+    ) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
         let pos_shape = mlxcel_core::array_shape(position_ids);
         // Normalize to [3, batch, seq].
         let pos3 = if pos_shape.len() == 2 {
@@ -212,17 +233,31 @@ impl Glm4vMRoPE {
 
         let cos_h = mlxcel_core::cos(&angles);
         let sin_h = mlxcel_core::sin(&angles);
-        // Interleave-repeat so each rotary pair shares one frequency.
-        let cos_f = mlxcel_core::repeat(&cos_h, 2, 2);
-        let sin_f = mlxcel_core::repeat(&sin_h, 2, 2);
+        // Expand `[batch, seq, half]` to `[batch, seq, rope_dims]`: even/odd
+        // interleave-repeats each frequency; half-split tiles the block.
+        let (cos_f, sin_f) = match self.pairing {
+            Glm4vRopePairing::EvenOdd => (
+                mlxcel_core::repeat(&cos_h, 2, 2),
+                mlxcel_core::repeat(&sin_h, 2, 2),
+            ),
+            Glm4vRopePairing::HalfSplit => (
+                mlxcel_core::concatenate(&cos_h, &cos_h, 2),
+                mlxcel_core::concatenate(&sin_h, &sin_h, 2),
+            ),
+        };
         // Add a broadcast head axis: [batch, 1, seq, rope_dims].
         let cos_f = mlxcel_core::expand_dims(&cos_f, 1);
         let sin_f = mlxcel_core::expand_dims(&sin_f, 1);
         (cos_f, sin_f)
     }
 
-    /// Apply the even/odd rotation to `x` `[batch, heads, seq, head_dim]`.
-    fn apply(&self, x: &MlxArray, cos_f: &MlxArray, sin_f: &MlxArray) -> UniquePtr<MlxArray> {
+    /// Apply the sectioned rotation to `x` `[batch, heads, seq, head_dim]`.
+    pub(crate) fn apply(
+        &self,
+        x: &MlxArray,
+        cos_f: &MlxArray,
+        sin_f: &MlxArray,
+    ) -> UniquePtr<MlxArray> {
         let shape = mlxcel_core::array_shape(x);
         let b = shape[0];
         let h = shape[1];
@@ -233,15 +268,26 @@ impl Glm4vMRoPE {
 
         let x_rot = mlxcel_core::slice(x, &[0, 0, 0, 0], &[b, h, l, rope_dims]);
 
-        // rotate_half_even_odd: (a, b) pairs -> (-b, a).
-        let x5 = mlxcel_core::reshape(&x_rot, &[b, h, l, half, 2]);
-        let even = mlxcel_core::slice(&x5, &[0, 0, 0, 0, 0], &[b, h, l, half, 1]);
-        let even = mlxcel_core::squeeze_axis(&even, 4);
-        let odd = mlxcel_core::slice(&x5, &[0, 0, 0, 0, 1], &[b, h, l, half, 2]);
-        let odd = mlxcel_core::squeeze_axis(&odd, 4);
-        let neg_odd = mlxcel_core::negative(&odd);
-        let rot5 = mlxcel_core::stack_owned(&[neg_odd, even], -1);
-        let rotated = mlxcel_core::reshape(&rot5, &[b, h, l, rope_dims]);
+        let rotated = match self.pairing {
+            Glm4vRopePairing::EvenOdd => {
+                // rotate_half_even_odd: (a, b) pairs -> (-b, a).
+                let x5 = mlxcel_core::reshape(&x_rot, &[b, h, l, half, 2]);
+                let even = mlxcel_core::slice(&x5, &[0, 0, 0, 0, 0], &[b, h, l, half, 1]);
+                let even = mlxcel_core::squeeze_axis(&even, 4);
+                let odd = mlxcel_core::slice(&x5, &[0, 0, 0, 0, 1], &[b, h, l, half, 2]);
+                let odd = mlxcel_core::squeeze_axis(&odd, 4);
+                let neg_odd = mlxcel_core::negative(&odd);
+                let rot5 = mlxcel_core::stack_owned(&[neg_odd, even], -1);
+                mlxcel_core::reshape(&rot5, &[b, h, l, rope_dims])
+            }
+            Glm4vRopePairing::HalfSplit => {
+                // rotate_half: [-x2, x1] with x1 = first half, x2 = second half.
+                let x1 = mlxcel_core::slice(&x_rot, &[0, 0, 0, 0], &[b, h, l, half]);
+                let x2 = mlxcel_core::slice(&x_rot, &[0, 0, 0, half], &[b, h, l, rope_dims]);
+                let neg_x2 = mlxcel_core::negative(&x2);
+                mlxcel_core::concatenate(&neg_x2, &x1, 3)
+            }
+        };
 
         let term1 = mlxcel_core::multiply(&x_rot, cos_f);
         let term2 = mlxcel_core::multiply(&rotated, sin_f);
@@ -304,10 +350,10 @@ impl Attention {
 
         let head_dim = config.head_dim();
         let mrope = Glm4vMRoPE::new(
-            head_dim,
             config.rope_theta,
             config.rope_dims(),
             &config.mrope_section(),
+            Glm4vRopePairing::EvenOdd,
         );
 
         Ok(Self {
@@ -544,10 +590,10 @@ impl Glm4vTextModel {
         };
 
         let mrope = Glm4vMRoPE::new(
-            config.head_dim(),
             config.rope_theta,
             config.rope_dims(),
             &config.mrope_section(),
+            Glm4vRopePairing::EvenOdd,
         );
 
         let eos_token_ids = config

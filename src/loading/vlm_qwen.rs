@@ -413,3 +413,120 @@ pub(crate) fn load_glm4v(model_path: &Path) -> Result<LoadedModel> {
 
     Ok(LoadedModel::Glm4v(vlm))
 }
+
+/// Extract the `mrope_section` from a GLM-4V MoE text config, checking both
+/// `rope_scaling` and `rope_parameters`; defaults to `[64, 32, 32]`.
+fn extract_glm4v_mrope_section(text_config: &serde_json::Value) -> Vec<i32> {
+    for key in ["rope_scaling", "rope_parameters"] {
+        if let Some(section) = text_config
+            .get(key)
+            .and_then(|rs| rs.get("mrope_section"))
+            .and_then(|v| v.as_array())
+        {
+            let vals: Vec<i32> = section
+                .iter()
+                .filter_map(|v| v.as_i64().map(|i| i as i32))
+                .collect();
+            if !vals.is_empty() {
+                return vals;
+            }
+        }
+    }
+    vec![64, 32, 32]
+}
+
+/// Extract EOS token ids from the top-level or text config; defaults to the
+/// GLM-4V MoE end tokens.
+fn extract_glm4v_eos_token_ids(
+    full_config: &serde_json::Value,
+    text_config: &serde_json::Value,
+) -> Vec<i32> {
+    for cfg in [full_config, text_config] {
+        if let Some(eos) = cfg.get("eos_token_id") {
+            if let Some(arr) = eos.as_array() {
+                let vals: Vec<i32> = arr
+                    .iter()
+                    .filter_map(|v| v.as_i64().map(|i| i as i32))
+                    .collect();
+                if !vals.is_empty() {
+                    return vals;
+                }
+            } else if let Some(single) = eos.as_i64() {
+                return vec![single as i32];
+            }
+        }
+    }
+    vec![151329, 151336, 151338]
+}
+
+/// Load a GLM-4V MoE model (GLM-4V ViT + GLM-4 MoE text backbone with MRoPE).
+pub(crate) fn load_glm4v_moe(model_path: &Path) -> Result<LoadedModel> {
+    use vision::encoders::glm4v::{Glm4vVisionConfig, Glm4vVisionEncoder};
+
+    let (_config_str, full_config) = read_sanitized_vlm_config(model_path)?;
+
+    // Text config: normalize `rope_theta` (it may live under `rope_parameters`)
+    // and inherit top-level quantization, then reuse the shared GLM-4 MoE args.
+    let mut text_config_val = full_config
+        .get("text_config")
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("Missing text_config in config.json"))?;
+    {
+        let obj = super::require_object_mut(&mut text_config_val, "GLM-4V MoE text_config")?;
+        if obj.get("rope_theta").and_then(|v| v.as_f64()).is_none() {
+            let theta = obj
+                .get("rope_parameters")
+                .and_then(|rp| rp.get("rope_theta"))
+                .and_then(|v| v.as_f64())
+                .unwrap_or(10000.0);
+            obj.insert("rope_theta".to_string(), serde_json::json!(theta));
+        }
+        if obj.get("quantization_config").is_none()
+            && obj.get("group_size").is_none()
+            && let Some(q) = full_config.get("quantization")
+        {
+            obj.insert("quantization_config".to_string(), q.clone());
+        }
+    }
+
+    let args: models::glm4_moe::ModelArgs = serde_json::from_value(text_config_val.clone())
+        .map_err(|e| anyhow::anyhow!("Failed to parse GLM-4V MoE text config: {}", e))?;
+    let mrope_section = extract_glm4v_mrope_section(&text_config_val);
+    let eos_token_ids = extract_glm4v_eos_token_ids(&full_config, &text_config_val);
+
+    let mut vision_config: Glm4vVisionConfig =
+        parse_required_vlm_subconfig(&full_config, "vision_config", "GLM-4V MoE vision config")?;
+    inherit_qwen_vision_quantization(&mut vision_config, &full_config);
+
+    let mut weights = remap_glm4v_weights(load_vlm_weights_common(model_path, None)?);
+    models::sanitize_tied_embeddings(&mut weights, &full_config);
+
+    let text_model =
+        models::Glm4vMoeTextModel::from_weights(&weights, &args, &mrope_section, eos_token_ids)
+            .map_err(|e| anyhow::anyhow!("Failed to load GLM-4V MoE text model: {}", e))?;
+
+    let vision_encoder = Glm4vVisionEncoder::from_weights(&weights, &vision_config, "vision_tower")
+        .map_err(|e| anyhow::anyhow!("Failed to load GLM-4V MoE vision encoder: {}", e))?;
+
+    let processor = qwen_vl_processor(&vision_config);
+    let token_ids = qwen_vl_token_ids(
+        &full_config,
+        QwenVisionTokenIds {
+            image_token_id: 151363,
+            video_token_id: 151364,
+            vision_start_token_id: 151339,
+        },
+    );
+
+    let vlm = vision::Glm4vMoeModel {
+        text_model,
+        vision_encoder,
+        processor,
+        image_token_id: token_ids.image_token_id,
+        video_token_id: token_ids.video_token_id,
+        vision_start_token_id: token_ids.vision_start_token_id,
+        spatial_merge_size: vision_config.spatial_merge_size,
+    };
+
+    Ok(LoadedModel::Glm4vMoe(vlm))
+}
