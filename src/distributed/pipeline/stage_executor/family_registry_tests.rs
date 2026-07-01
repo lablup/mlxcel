@@ -65,6 +65,19 @@ fn new_issue_345_families_are_registered() {
 }
 
 #[test]
+fn qwen3_next_family_is_registered() {
+    // Floor test for the Qwen3-Next pipeline-parallel stage family. Removing
+    // it (or its stable name) without bumping the pipeline capability protocol
+    // version would break running multi-host qwen3-next deployments.
+    let families: HashSet<StageFamily> = supported_families().iter().copied().collect();
+    assert!(
+        families.contains(&StageFamily::Qwen3Next),
+        "StageFamily::Qwen3Next must appear in supported_families()",
+    );
+    assert_eq!(StageFamily::Qwen3Next.name(), "qwen3_next");
+}
+
+#[test]
 fn all_stage_family_variants_have_stable_names() {
     // If a new variant is added, this match must be updated to give it a
     // stable on-the-wire name. The `#[non_exhaustive]` attribute would

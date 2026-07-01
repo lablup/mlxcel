@@ -41,6 +41,7 @@ mod mixtral;
 mod nemotron_h;
 mod qwen3;
 mod qwen35;
+mod qwen3_next;
 
 #[cfg(test)]
 #[path = "family_registry_tests.rs"]
@@ -69,6 +70,7 @@ use mistral::MistralStageExecutor;
 use mixtral::MixtralStageExecutor;
 use nemotron_h::NemotronHStageExecutor;
 use qwen3::Qwen3StageExecutor;
+use qwen3_next::Qwen3NextStageExecutor;
 use qwen35::Qwen35StageExecutor;
 
 /// Input payload for a single stage-local forward.
@@ -238,6 +240,7 @@ pub enum StageFamily {
     Glm4MoeLite,
     GlmMoeDsa,
     Qwen3,
+    Qwen3Next,
     Qwen35,
     Qwen35Vlm,
     Qwen35Moe,
@@ -267,6 +270,7 @@ impl StageFamily {
             Self::Glm4MoeLite => "glm4_moe_lite",
             Self::GlmMoeDsa => "glm_moe_dsa",
             Self::Qwen3 => "qwen3",
+            Self::Qwen3Next => "qwen3_next",
             Self::Qwen35 => "qwen3_5",
             Self::Qwen35Vlm => "qwen3_5_vlm",
             Self::Qwen35Moe => "qwen3_5_moe",
@@ -318,6 +322,7 @@ pub fn supported_families() -> &'static [StageFamily] {
         StageFamily::Qwen35Moe,
         StageFamily::Qwen35MoeVlm,
         StageFamily::Qwen35Vlm,
+        StageFamily::Qwen3Next,
     ];
     FAMILIES
 }
@@ -348,6 +353,7 @@ fn resolve_stage_family(model_dir: &Path) -> Result<StageFamily> {
         ModelType::Glm4MoeLite => StageFamily::Glm4MoeLite,
         ModelType::GlmMoeDsa => StageFamily::GlmMoeDsa,
         ModelType::Qwen3 => StageFamily::Qwen3,
+        ModelType::Qwen3Next => StageFamily::Qwen3Next,
         ModelType::Qwen35 => StageFamily::Qwen35,
         ModelType::Qwen35VLM => StageFamily::Qwen35Vlm,
         ModelType::Qwen35Moe => StageFamily::Qwen35Moe,
@@ -478,6 +484,14 @@ fn load_family_backend(
         StageFamily::Qwen3 => {
             ensure_no_adapter(adapter_path, family)?;
             Ok(Box::new(Qwen3StageExecutor::load(
+                model_dir,
+                filter,
+                stage_index,
+            )?))
+        }
+        StageFamily::Qwen3Next => {
+            ensure_no_adapter(adapter_path, family)?;
+            Ok(Box::new(Qwen3NextStageExecutor::load(
                 model_dir,
                 filter,
                 stage_index,

@@ -32,6 +32,9 @@ mod helpers;
 #[path = "qwen3_next_helpers_tests.rs"]
 mod helper_tests;
 
+use crate::distributed::pipeline::LayerFilter;
+use crate::distributed::pipeline::StageExecutionOutput;
+use crate::distributed::pipeline::partial_loading::filter_weight_map;
 use crate::models::gated_delta::{
     GatedDeltaCache, RMSNormGated, gated_delta_update, scaled_fast_rms_norm_no_weight,
 };
@@ -1598,6 +1601,313 @@ impl LanguageModel for Qwen3NextModel {
 
     fn eos_token_ids(&self) -> Vec<i32> {
         vec![151645] // Qwen3 EOS token
+    }
+}
+
+// Pipeline-parallel stage model.
+//
+// Stage-local counterpart of [`Qwen3NextModel`], modeled on the Qwen 3.5
+// `Qwen35StageModel`. It loads only the layers in `filter.layer_range`,
+// accepts token IDs on the entry stage (the stage that hosts the embedding
+// table) and hidden states on intermediate / final stages, and emits hidden
+// states on non-final stages or final logits on the last stage.
+//
+// The load-bearing detail is the hybrid cache. qwen3-next interleaves linear
+// (GatedDeltaNet, `GatedDeltaCache`) and full-attention (`KVCache`) layers.
+// Each stage builds and advances the cache variant that matches its LOCAL
+// layer, derived from the GLOBAL layer index via `config.is_linear_layer`
+// (carried on `DecoderLayer::is_linear`), so a stage that starts partway
+// through the network still assigns the correct cache type per layer. The
+// causal attention mask is derived from the first full-attention layer that
+// is actually present in the stage, and linear layers receive no mask (an
+// all-valid SSM step), exactly as the single-process `Qwen35Model`
+// `forward_internal` path does.
+pub(crate) struct Qwen3NextStageModel {
+    filter: LayerFilter,
+    embed_tokens: Option<UnifiedEmbedding>,
+    layers: Vec<DecoderLayer>,
+    norm: Option<RMSNorm>,
+    lm_head: Option<UnifiedLinear>,
+}
+
+/// Select the causal-mask offset for a stage from the first full-attention
+/// layer present in the stage. Linear (GatedDeltaNet) layers do not track a
+/// KV offset, so the mask offset comes from the earliest attention cache in
+/// the stage; a stage with no attention layer (all linear) uses offset 0.
+///
+/// `is_linear[i]` marks stage-local layer `i` as a linear (GatedDeltaNet)
+/// layer. `caches` is the stage-local cache vector in the same order.
+fn stage_attention_offset(is_linear: &[bool], caches: &[Qwen3NextCache]) -> i32 {
+    is_linear
+        .iter()
+        .zip(caches.iter())
+        .find_map(|(&linear, cache)| (!linear).then_some(cache.offset()))
+        .unwrap_or(0)
+}
+
+impl Qwen3NextStageModel {
+    pub(crate) fn load(
+        model_dir: &Path,
+        filter: &LayerFilter,
+        stage_index: usize,
+    ) -> Result<Self, String> {
+        let config_path = model_dir.join("config.json");
+        let config_str = std::fs::read_to_string(&config_path)
+            .map_err(|e| format!("Failed to read config.json: {}", e))?;
+        let config: Qwen3NextConfig = serde_json::from_str(&config_str)
+            .map_err(|e| format!("Failed to parse config.json: {}", e))?;
+
+        let mut weights = crate::models::load_text_weights(model_dir, None)?;
+        weights = Qwen3NextModel::sanitize_weights(weights, &config);
+
+        // When embeddings are tied, the final stage produces logits from the
+        // embedding table, so it must keep `model.embed_tokens.weight` through
+        // the layer-range filter even though `filter.has_embedding` is false.
+        let mut effective_filter = filter.clone();
+        if config.tie_word_embeddings && filter.has_lm_head {
+            effective_filter.has_embedding = true;
+        }
+        filter_weight_map(&mut weights, &effective_filter);
+        Self::from_filtered_weights(&weights, &config, filter, stage_index)
+    }
+
+    fn from_filtered_weights(
+        weights: &WeightMap,
+        config: &Qwen3NextConfig,
+        filter: &LayerFilter,
+        stage_index: usize,
+    ) -> Result<Self, String> {
+        let group_size = config.group_size();
+        let bits = config.bits();
+
+        let load_embeddings =
+            filter.has_embedding || (config.tie_word_embeddings && filter.has_lm_head);
+        let embed_tokens = if load_embeddings {
+            Some(UnifiedEmbedding::from_weights(
+                weights,
+                "model.embed_tokens",
+                group_size,
+                bits,
+            )?)
+        } else {
+            None
+        };
+
+        let mut layers = Vec::with_capacity(filter.num_layers());
+        for layer_idx in filter.layer_range.clone() {
+            layers.push(DecoderLayer::from_weights(weights, config, layer_idx)?);
+        }
+
+        if layers.is_empty() {
+            return Err(format!(
+                "stage {} did not load any layers from range {}..{}",
+                stage_index, filter.layer_range.start, filter.layer_range.end
+            ));
+        }
+
+        let norm = if filter.has_lm_head {
+            Some(RMSNorm::new(
+                weights
+                    .get("model.norm.weight")
+                    .map(|w| mlxcel_core::copy(w))
+                    .ok_or_else(|| "Missing model.norm.weight".to_string())?,
+                config.rms_norm_eps,
+            ))
+        } else {
+            None
+        };
+
+        let lm_head = if filter.has_lm_head && !config.tie_word_embeddings {
+            Some(UnifiedLinear::from_weights(
+                weights, "lm_head", group_size, bits,
+            )?)
+        } else {
+            None
+        };
+
+        Ok(Self {
+            filter: filter.clone(),
+            embed_tokens,
+            layers,
+            norm,
+            lm_head,
+        })
+    }
+
+    pub(crate) fn num_layers(&self) -> usize {
+        self.layers.len()
+    }
+
+    /// Build the stage-local hybrid cache vector: one entry per local layer,
+    /// `Linear`/`Attention` chosen by that layer's `is_linear` flag (which is
+    /// itself derived from the GLOBAL layer index at load time).
+    pub(crate) fn make_caches(&self) -> Vec<Qwen3NextCache> {
+        self.layers
+            .iter()
+            .map(|layer| {
+                if layer.is_linear {
+                    Qwen3NextCache::Linear(GatedDeltaCache::new())
+                } else {
+                    Qwen3NextCache::Attention(KVCache::new())
+                }
+            })
+            .collect()
+    }
+
+    pub(crate) fn execute_from_token_ids(
+        &self,
+        input_ids: &MlxArray,
+        caches: &mut [Qwen3NextCache],
+    ) -> Result<StageExecutionOutput, String> {
+        let hidden = self
+            .embed_tokens
+            .as_ref()
+            .ok_or_else(|| {
+                "stage does not host embeddings; hidden-state input required".to_string()
+            })?
+            .forward(input_ids);
+        self.execute_hidden(hidden, caches)
+    }
+
+    pub(crate) fn execute_from_hidden_states(
+        &self,
+        hidden_states: UniquePtr<MlxArray>,
+        caches: &mut [Qwen3NextCache],
+    ) -> Result<StageExecutionOutput, String> {
+        if self.filter.has_embedding {
+            return Err("entry stage expects token IDs, not hidden states".to_string());
+        }
+        self.execute_hidden(hidden_states, caches)
+    }
+
+    fn execute_hidden(
+        &self,
+        mut hidden: UniquePtr<MlxArray>,
+        caches: &mut [Qwen3NextCache],
+    ) -> Result<StageExecutionOutput, String> {
+        if caches.len() != self.layers.len() {
+            return Err(format!(
+                "stage cache count mismatch: expected {}, got {}",
+                self.layers.len(),
+                caches.len()
+            ));
+        }
+
+        let shape = mlxcel_core::array_shape(hidden.as_ref().unwrap());
+        let seq_len = shape[1];
+        let fa_mask = if seq_len > 1 {
+            let is_linear: Vec<bool> = self.layers.iter().map(|layer| layer.is_linear).collect();
+            let offset = stage_attention_offset(&is_linear, caches);
+            Some(create_causal_mask(seq_len, offset))
+        } else {
+            None
+        };
+
+        for (layer, cache) in self.layers.iter().zip(caches.iter_mut()) {
+            let mask = if layer.is_linear {
+                None
+            } else {
+                fa_mask.as_deref()
+            };
+            hidden = layer.forward(hidden.as_ref().unwrap(), mask, cache);
+        }
+
+        let hidden = if let Some(norm) = &self.norm {
+            norm.forward(hidden.as_ref().unwrap())
+        } else {
+            hidden
+        };
+
+        if self.filter.has_lm_head {
+            let logits = if let Some(lm_head) = &self.lm_head {
+                lm_head.forward(&hidden)
+            } else {
+                self.embed_tokens
+                    .as_ref()
+                    .ok_or_else(|| {
+                        "final tied-word-embedding stage missing embeddings".to_string()
+                    })?
+                    .as_linear(&hidden)
+            };
+            Ok(StageExecutionOutput::Logits(logits))
+        } else {
+            Ok(StageExecutionOutput::HiddenStates(hidden))
+        }
+    }
+}
+
+#[cfg(test)]
+mod stage_tests {
+    use super::{Qwen3NextCache, Qwen3NextConfig, stage_attention_offset};
+    use crate::models::gated_delta::GatedDeltaCache;
+    use mlxcel_core::layers::KVCache;
+
+    /// Minimal config that exercises `is_linear_layer` / stage layer typing.
+    /// Field values are placeholders; only the layer-typing knobs matter.
+    fn tiny_config(full_attention_interval: usize, num_hidden_layers: usize) -> Qwen3NextConfig {
+        serde_json::from_value(serde_json::json!({
+            "model_type": "qwen3_next",
+            "hidden_size": 16,
+            "num_hidden_layers": num_hidden_layers,
+            "intermediate_size": 32,
+            "num_attention_heads": 4,
+            "num_key_value_heads": 2,
+            "head_dim": 4,
+            "linear_num_value_heads": 4,
+            "linear_num_key_heads": 2,
+            "linear_key_head_dim": 4,
+            "linear_value_head_dim": 4,
+            "linear_conv_kernel_dim": 4,
+            "num_experts": 0,
+            "num_experts_per_tok": 0,
+            "decoder_sparse_step": 1,
+            "moe_intermediate_size": 0,
+            "shared_expert_intermediate_size": 0,
+            "full_attention_interval": full_attention_interval,
+            "vocab_size": 100
+        }))
+        .expect("tiny qwen3-next config")
+    }
+
+    #[test]
+    fn stage_layer_typing_uses_global_layer_indices() {
+        let cfg = tiny_config(4, 8);
+        // full_attention_interval == 4: layer i is full attention iff
+        // (i + 1) % 4 == 0, i.e. layer 3 and 7. Everything else is linear.
+        // A stage covering GLOBAL layers 2..6 must type its LOCAL layers as
+        // [linear(2), attention(3), linear(4), linear(5)] — not renumbered
+        // from zero, which would wrongly type local layer 3 as attention.
+        let kinds: Vec<bool> = (2..6).map(|i| cfg.is_linear_layer(i)).collect();
+        assert_eq!(kinds, vec![true, false, true, true]);
+        // First stage 0..4 -> [linear, linear, linear, attention].
+        let head: Vec<bool> = (0..4).map(|i| cfg.is_linear_layer(i)).collect();
+        assert_eq!(head, vec![true, true, true, false]);
+    }
+
+    #[test]
+    fn stage_attention_offset_uses_first_stage_local_attention_layer() {
+        // Local layers: [linear, linear, linear, attention].
+        let is_linear = [true, true, true, false];
+        let mut kv = KVCache::new();
+        kv.offset = 9;
+        let caches = vec![
+            Qwen3NextCache::Linear(GatedDeltaCache::new()),
+            Qwen3NextCache::Linear(GatedDeltaCache::new()),
+            Qwen3NextCache::Linear(GatedDeltaCache::new()),
+            Qwen3NextCache::Attention(kv),
+        ];
+        assert_eq!(stage_attention_offset(&is_linear, &caches), 9);
+    }
+
+    #[test]
+    fn stage_attention_offset_defaults_to_zero_for_all_linear_stage() {
+        let is_linear = [true, true, true];
+        let caches = vec![
+            Qwen3NextCache::Linear(GatedDeltaCache::new()),
+            Qwen3NextCache::Linear(GatedDeltaCache::new()),
+            Qwen3NextCache::Linear(GatedDeltaCache::new()),
+        ];
+        assert_eq!(stage_attention_offset(&is_linear, &caches), 0);
     }
 }
 
