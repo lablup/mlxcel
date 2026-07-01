@@ -23,9 +23,11 @@ fn projection_layout_computes_expected_ranges_and_shapes() {
     assert_eq!(layout.q_range, (0, 4));
     assert_eq!(layout.k_range, (4, 8));
     assert_eq!(layout.v_range, (8, 24));
-    assert_eq!(layout.z_range, (24, -1));
+    // z spans the same width as v; explicit stop (not -1) so mlxcel_core::slice
+    // does not truncate the last column (stop = -1 means dim_size - 1).
+    assert_eq!(layout.z_range, (24, 40));
     assert_eq!(layout.b_range, (0, 2));
-    assert_eq!(layout.a_range, (2, -1));
+    assert_eq!(layout.a_range, (2, 4));
     assert_eq!(layout.v_shape, vec![2, 5, -1, 8]);
     assert_eq!(layout.ba_final_shape, vec![2, 5, 4]);
 }

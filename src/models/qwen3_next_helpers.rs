@@ -59,9 +59,13 @@ pub(super) fn build_projection_layout(
         q_range: (0, dn),
         k_range: (dn, 2 * dn),
         v_range: (2 * dn, 2 * dn + v_size),
-        z_range: (2 * dn + v_size, -1),
+        // z has the same width as v. Do NOT use -1 as the stop: mlxcel_core::slice
+        // treats stop = -1 as dim_size - 1 (drops the last element), not "to end",
+        // which would silently truncate z (and a) by one column.
+        z_range: (2 * dn + v_size, 2 * dn + 2 * v_size),
         b_range: (0, b_size),
-        a_range: (b_size, -1),
+        // a has the same width as b; explicit stop for the same slice-semantics reason.
+        a_range: (b_size, 2 * b_size),
         v_shape,
         ba_final_shape,
     }

@@ -38,6 +38,7 @@ use crate::distributed::pipeline::partial_loading::filter_weight_map;
 use crate::models::gated_delta::{
     GatedDeltaCache, RMSNormGated, gated_delta_update, scaled_fast_rms_norm_no_weight,
 };
+use crate::models::model_owned::ModelOwnedSequenceState;
 use mlxcel_core::dtype;
 use mlxcel_core::generate::LanguageModel;
 use mlxcel_core::layers::{KVCache, RMSNorm, UnifiedEmbedding, UnifiedLinear};
@@ -1136,9 +1137,17 @@ impl SwitchGLU {
         prefix: &str,
     ) -> Result<Self, String> {
         Ok(Self {
-            gate_proj: SwitchLinear::from_weights(weights, config, &format!("{}.w1", prefix))?,
-            up_proj: SwitchLinear::from_weights(weights, config, &format!("{}.w3", prefix))?,
-            down_proj: SwitchLinear::from_weights(weights, config, &format!("{}.w2", prefix))?,
+            gate_proj: SwitchLinear::from_weights(
+                weights,
+                config,
+                &format!("{}.gate_proj", prefix),
+            )?,
+            up_proj: SwitchLinear::from_weights(weights, config, &format!("{}.up_proj", prefix))?,
+            down_proj: SwitchLinear::from_weights(
+                weights,
+                config,
+                &format!("{}.down_proj", prefix),
+            )?,
         })
     }
 }
@@ -1301,10 +1310,17 @@ impl DecoderLayer {
         let normed = self.input_layernorm.forward(x);
 
         let r = match (&self.attention, cache) {
+            // Linear (gated-delta) layers must NOT receive the full-attention causal
+            // mask: their causality comes from the sequential recurrence and the
+            // causal conv, and the gated-delta path treats `mask` as a [b, s] padding
+            // mask. Passing the [s, s] causal mask makes `where_cond` broadcast the
+            // conv input to [s, s, conv_dim] and crashes the conv-state concatenate.
+            // Single-sequence generation has no padding, so None is correct (this
+            // mirrors the pipeline stage executor, which ignores the incoming mask).
             (AttentionVariant::LinearAttention(attn), Qwen3NextCache::Linear(c)) => {
-                attn.forward(&normed, mask, Some(c))
+                attn.forward(&normed, None, Some(c))
             }
-            (AttentionVariant::LinearAttention(attn), _) => attn.forward(&normed, mask, None),
+            (AttentionVariant::LinearAttention(attn), _) => attn.forward(&normed, None, None),
             (AttentionVariant::FullAttention(attn), Qwen3NextCache::Attention(c)) => {
                 attn.forward(&normed, c, mask)
             }
@@ -1384,6 +1400,11 @@ pub struct Qwen3NextModel {
     pub lm_head: Option<UnifiedLinear>,
     pub tie_word_embeddings: bool,
     pub full_attention_interval: usize,
+    // qwen3-next interleaves attention (KVCache) and linear (GatedDeltaCache)
+    // layers, so it cannot use the trait's homogeneous `&mut [KVCache]`. The
+    // model owns its heterogeneous cache here and persists it across forward
+    // calls; recreating it per call would make decode stateless.
+    sequence_state: ModelOwnedSequenceState<Qwen3NextCache>,
 }
 
 impl Qwen3NextModel {
@@ -1474,7 +1495,7 @@ impl Qwen3NextModel {
             }
 
             let base = format!("model.layers.{}.mlp.switch_mlp", l);
-            for proj in ["w1", "w2", "w3"] {
+            for proj in ["gate_proj", "up_proj", "down_proj"] {
                 let mut expert_weights: Vec<UniquePtr<MlxArray>> = Vec::new();
                 let mut expert_scales: Vec<UniquePtr<MlxArray>> = Vec::new();
                 let mut expert_biases: Vec<UniquePtr<MlxArray>> = Vec::new();
@@ -1546,6 +1567,17 @@ impl Qwen3NextModel {
             )?)
         };
 
+        let internal_caches: Vec<Qwen3NextCache> = layers
+            .iter()
+            .map(|l| {
+                if l.is_linear {
+                    Qwen3NextCache::Linear(GatedDeltaCache::new())
+                } else {
+                    Qwen3NextCache::Attention(KVCache::new())
+                }
+            })
+            .collect();
+
         Ok(Self {
             embed_tokens,
             layers,
@@ -1553,7 +1585,21 @@ impl Qwen3NextModel {
             lm_head,
             tie_word_embeddings: config.tie_word_embeddings,
             full_attention_interval: config.full_attention_interval,
+            sequence_state: ModelOwnedSequenceState::new(internal_caches),
         })
+    }
+
+    fn make_internal_caches(&self) -> Vec<Qwen3NextCache> {
+        self.layers
+            .iter()
+            .map(|l| {
+                if l.is_linear {
+                    Qwen3NextCache::Linear(GatedDeltaCache::new())
+                } else {
+                    Qwen3NextCache::Attention(KVCache::new())
+                }
+            })
+            .collect()
     }
 }
 
@@ -1565,25 +1611,35 @@ impl LanguageModel for Qwen3NextModel {
         _caches: &mut [KVCache],
         _mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
-        // Note: Qwen3Next uses mixed cache types (KVCache + GatedDeltaCache)
-        // For LanguageModel trait compatibility, we use internal caching
-        let mut caches = self.make_caches();
-        let mask = {
-            let shape = mlxcel_core::array_shape(input);
-            let seq_len = shape[1];
-            if seq_len > 1 {
+        // Qwen3Next uses mixed cache types (KVCache + GatedDeltaCache) that do
+        // not fit the trait's `&mut [KVCache]`. The model owns its heterogeneous
+        // cache in `sequence_state` and must persist it across forward calls:
+        // recreating fresh caches every call makes decode stateless (each step
+        // sees only the current token) and produces incoherent output.
+        let seq_len = mlxcel_core::array_shape(input)[1];
+        // A multi-token call is a prefill, i.e. the start of a new sequence:
+        // reset the model-owned fallback cache so it does not inherit stale state.
+        if seq_len > 1 {
+            self.sequence_state
+                .replace_internal(self.make_internal_caches());
+        }
+        self.sequence_state.with_sequence_state(None, |caches| {
+            let mask = if seq_len > 1 {
                 let fa_idx = self.full_attention_interval - 1;
-                let offset = if fa_idx < caches.len() {
-                    caches[fa_idx].offset()
-                } else {
-                    0
-                };
+                let offset = caches.get(fa_idx).map(|c| c.offset()).unwrap_or(0);
                 Some(create_causal_mask(seq_len, offset))
             } else {
                 None
-            }
-        };
-        self.forward(input, &mut caches, mask.as_deref())
+            };
+            self.forward(input, caches, mask.as_deref())
+        })
+    }
+
+    fn reset_runtime_state(&self) {
+        // New CLI / benchmark sequence: reset the model-owned fallback cache so a
+        // fresh generation does not inherit stale attention / gated-delta state.
+        self.sequence_state
+            .replace_internal(self.make_internal_caches());
     }
 
     fn make_caches(&self) -> Vec<KVCache> {
