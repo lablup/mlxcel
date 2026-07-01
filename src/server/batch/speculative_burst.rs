@@ -951,22 +951,20 @@ fn run_mtp_burst(
     // edge. We check this BEFORE taking the drafter so the decline leaves the
     // slot and the adopted cache untouched. `Some(0)` (cold) and any
     // `Some(0 < offset < prompt_len)` (reuse) both proceed.
-    let prefill_start_offset = match mtp_prefill_suffix_start(
-        seq.prefill_start_offset,
-        seq.prompt_tokens.len(),
-    ) {
-        Some(offset) => offset,
-        None => {
-            tracing::debug!(
-                "MTP speculative burst declined for seq {}: prefill_start_offset={} \
+    let prefill_start_offset =
+        match mtp_prefill_suffix_start(seq.prefill_start_offset, seq.prompt_tokens.len()) {
+            Some(offset) => offset,
+            None => {
+                tracing::debug!(
+                    "MTP speculative burst declined for seq {}: prefill_start_offset={} \
                  covers the whole prompt (len={}); falling back to classic decode",
-                seq.seq_id,
-                seq.prefill_start_offset,
-                seq.prompt_tokens.len(),
-            );
-            return Err(BurstOutcome::DeclineToClassic);
-        }
-    };
+                    seq.seq_id,
+                    seq.prefill_start_offset,
+                    seq.prompt_tokens.len(),
+                );
+                return Err(BurstOutcome::DeclineToClassic);
+            }
+        };
 
     // The MTP generator owns the drafter by value; take it from the
     // slot for the burst's lifetime. On success we return it via

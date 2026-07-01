@@ -148,7 +148,8 @@ fn prefill_and_seed_with_offset_reuses_prefix_and_matches_cold_full_prompt() {
     // --- Cold: a fresh slot prefills the whole prompt (offset defaults to 0). ---
     let seq_cold = SequenceId::from_raw(51_810);
     let cold_adapter = Gemma4MtpTargetAdapter::new_with_block_size(&wrapper, Some(seq_cold), 4);
-    let (bonus_cold, seed_cold, _) = cold_adapter.prefill_and_seed(&prompt, &sampler, &[], &logprobs);
+    let (bonus_cold, seed_cold, _) =
+        cold_adapter.prefill_and_seed(&prompt, &sampler, &[], &logprobs);
 
     // --- Adopted: seed `[..offset]` into a fresh slot (mirrors the scheduler's
     // APC snapshot restore), then the offset adapter forwards only the suffix. ---
