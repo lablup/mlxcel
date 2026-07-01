@@ -163,6 +163,15 @@ fn print_preparation_summary(summary: VlmPreparationSummary) {
                 image_blocks, total_image_tokens
             );
         }
+        VlmPreparationSummary::KimiVL {
+            image_blocks,
+            total_image_tokens,
+        } => {
+            println!(
+                "Kimi-VL: expanded {} media placeholder(s) ({} total image tokens)",
+                image_blocks, total_image_tokens
+            );
+        }
         VlmPreparationSummary::ImageBlocks(stats) => match stats.action {
             ImageTokenBlockAction::Expanded {
                 existing_image_count,

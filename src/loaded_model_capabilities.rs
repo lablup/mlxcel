@@ -47,6 +47,8 @@ pub enum VlmRuntimeRef<'a> {
     YoutuVL(&'a vision::YoutuVLModel),
     /// InternVL (internvl_chat) runtime.
     InternVL(&'a vision::InternVLChatVLM),
+    /// Kimi-VL / Kimi-VL 2.5 (MoonViT) runtime.
+    KimiVL(&'a vision::KimiVLModel),
     Standard(&'a vision::VisionModule),
 }
 
@@ -147,6 +149,7 @@ impl LoadedModel {
             Self::NemotronHNanoOmniVLM(model) => Some(VlmRuntimeRef::NemotronHNanoOmni(model)),
             Self::YoutuVL(model) => Some(VlmRuntimeRef::YoutuVL(model)),
             Self::InternVLChatVLM(model) => Some(VlmRuntimeRef::InternVL(model)),
+            Self::KimiVL(model) => Some(VlmRuntimeRef::KimiVL(model)),
             Self::Gemma3VLM(vlm) => Some(VlmRuntimeRef::Standard(&vlm.vision)),
             Self::Llama4VLM(vlm) => Some(VlmRuntimeRef::Standard(&vlm.vision)),
             Self::LlavaVLM(vlm) => Some(VlmRuntimeRef::Standard(&vlm.vision)),

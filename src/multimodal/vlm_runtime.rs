@@ -26,6 +26,7 @@ use image::DynamicImage;
 use mlxcel_core::MlxArray;
 
 use crate::internvl_prompt::insert_internvl_image_tokens;
+use crate::kimi_vl_prompt::insert_kimi_vl_image_tokens;
 use crate::minicpmo_prompt::{
     prepare_minicpmo_prompt_tokens, prepare_minicpmo_prompt_tokens_with_image_feature_sizes,
 };
@@ -118,6 +119,12 @@ pub enum VlmPreparationSummary {
     InternVL {
         image_blocks: usize,
         total_image_tokens: usize,
+    },
+    /// Kimi-VL expanded each `<|media_pad|>` into `(h/merge)*(w/merge)`
+    /// media-placeholder tokens.
+    KimiVL {
+        image_blocks: usize,
+        total_image_tokens: i32,
     },
     ImageBlocks(ImageTokenBlockStats),
 }
@@ -798,6 +805,38 @@ where
 
             let input_ids_arr = prompt_ids_array(prompt_tokens);
             let embeddings = internvl.get_input_embeddings(&input_ids_arr, &pixel_values);
+
+            Ok(Some(PreparedVlmEmbeddings {
+                embeddings,
+                preparation,
+            }))
+        }
+        VlmRuntimeRef::KimiVL(kimi) => {
+            // MoonViT native-resolution preprocessing: each image is patchified
+            // into [num_patches, C, p, p] plus its (h, w) patch grid.
+            let (pixel_values, grid_shapes) = kimi.processor.preprocess_with_grid(images);
+
+            // Expand each `<|media_pad|>` into (h/merge)*(w/merge) placeholders
+            // (or splice a run after the first token when absent).
+            let preparation = insert_kimi_vl_image_tokens(
+                prompt_tokens,
+                &grid_shapes,
+                kimi.spatial_merge_size,
+                kimi.media_placeholder_token_id,
+            )
+            .map(|stats| VlmPreparationSummary::KimiVL {
+                image_blocks: stats.image_blocks,
+                total_image_tokens: stats.total_image_tokens,
+            });
+
+            // Kimi-VL runs every image's patches in one tower call; skip the
+            // opportunistic vision cache for this first integration (mirrors the
+            // Youtu-VL / InternVL decision).
+            let _ = active_caches;
+            let _ = image_cache_keys;
+
+            let input_ids_arr = prompt_ids_array(prompt_tokens);
+            let embeddings = kimi.get_input_embeddings(&input_ids_arr, &pixel_values, &grid_shapes);
 
             Ok(Some(PreparedVlmEmbeddings {
                 embeddings,

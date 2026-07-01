@@ -49,6 +49,7 @@ use mlxcel_core::{MlxArray, UniquePtr};
 use crate::models::deepseek_v3::DeepSeekV3Model;
 use crate::vision::encoders::kimi_vl::KimiVLVisionModel;
 use crate::vision::merge::{self, InputEmbeddings};
+use crate::vision::processors::kimi_vl::KimiVLProcessor;
 
 /// The vision-to-language projector.
 ///
@@ -113,9 +114,14 @@ pub struct KimiVLModel {
     pub text_model: DeepSeekV3Model,
     pub vision_model: KimiVLVisionModel,
     pub projector: KimiVLMultiModalProjector,
+    /// Native-resolution image processor (patchify + per-image grid).
+    pub processor: KimiVLProcessor,
     /// Placeholder token id whose positions receive image features
     /// (`media_placeholder_token_id`, 163606 by default upstream).
     pub media_placeholder_token_id: i32,
+    /// `spatial_merge_size` from the vision config; used by the runtime to
+    /// expand each media placeholder into `(h/merge)*(w/merge)` tokens.
+    pub spatial_merge_size: i32,
     /// EOS/stop token ids resolved from the config at load time.
     pub eos_token_ids: Vec<i32>,
 }
