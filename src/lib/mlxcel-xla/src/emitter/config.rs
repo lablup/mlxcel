@@ -1087,6 +1087,21 @@ impl Config {
             && self.moe.is_none()
     }
 
+    /// Whether the issue #572 f16-resident-weight path can apply: the standard
+    /// (non-fused-qkv, non-fused-gate-up) layout where every linear projection the
+    /// emitter takes via `take_weight` maps to a single whole-tensor loader spec
+    /// (`WeightSpec::Proj`), not a row-slice of a fused tensor. Under f16 precision
+    /// such projections are declared f16 args and uploaded f16-resident, halving
+    /// their per-step weight DRAM read. Gated identically in the emitter
+    /// (`take_weight`) and the loader (`weights::load_weights`) so the uploaded
+    /// buffer dtype always matches the emitted arg. Independent of quantization (a
+    /// dequantized 4-bit checkpoint is packed to f16 here just like a bf16 / f16
+    /// one); the packed in-graph path (`supports_packed_quant`) takes precedence
+    /// when its env opt-in is set, since it keeps the weights ui32-resident instead.
+    pub(crate) fn supports_f16_resident(&self) -> bool {
+        !self.fused_qkv && !self.fused_gate_up
+    }
+
     /// Attention score scale. Granite supplies the raw multiplier directly
     /// (`attention_multiplier`, which replaces `head_dim^-0.5`); Gemma2/3 use
     /// `query_pre_attn_scalar^-0.5` (computed in f64 to match HF, since it can

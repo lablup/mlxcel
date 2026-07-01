@@ -62,7 +62,7 @@ pub(crate) use config::{MoeConfig, SharedExpertConfig};
 // so allow the re-export to be unused in the other. `emit_decode_batched` (the
 // superseded uniform-B Stage-1 graph) is re-exported for the validation harness.
 #[allow(unused_imports)]
-pub(crate) use builder::{quant_in_graph, resolve_precision};
+pub(crate) use builder::{Precision, quant_in_graph, resolve_precision};
 #[allow(unused_imports)]
 pub(crate) use model::{
     emit_decode, emit_decode_batched, emit_decode_ragged, emit_decode_ragged_with,
@@ -776,6 +776,26 @@ mod tests {
 
         // The f32 default carries no f16 at all (byte-exact path preserved).
         assert!(!emit_decode_with(&c, true, Precision::F32).contains("f16"));
+    }
+
+    /// issue #572: under f16 precision exactly the 7 per-layer linear projections
+    /// (down/gate/up/wk/wo/wq/wv) are declared f16 weight args (uploaded f16-resident);
+    /// embed / lm_head / norms / caches stay f32. Each signature arg renders as
+    /// `%argN: <ty> loc("...")`, so an f16 weight arg is the substring `xf16> loc(`;
+    /// counting them pins down that ONLY the projections are narrowed.
+    #[test]
+    fn f16_precision_declares_the_projection_weight_args_f16() {
+        use super::builder::Precision;
+        let c = Config::llama_3_2_1b();
+        let f16 = emit_prefill_with(&c, true, Precision::F16);
+        assert_eq!(
+            f16.matches("xf16> loc(").count(),
+            7 * c.n_layers,
+            "expected exactly the 7 per-layer projections as f16 weight args"
+        );
+        // The f32 default declares no f16 weight args (byte-exact goldens preserved).
+        let f32 = emit_prefill_with(&c, true, Precision::F32);
+        assert_eq!(f32.matches("xf16> loc(").count(), 0);
     }
 
     // ======================================================================

@@ -34,6 +34,13 @@ pub(crate) enum WeightSpec {
     /// Load the whole checkpoint tensor `name` (widened to f32, an MLX-quantized
     /// U32 tensor dequantized to f32).
     Whole(String),
+    /// Load the whole checkpoint tensor `name` for a linear projection the emitter
+    /// took via `take_weight` (issue #572). Widened to f32 like [`WeightSpec::Whole`],
+    /// but the loader packs it to an f16 resident buffer when the f16 GPU path is
+    /// active (`Config::supports_f16_resident` + f16 precision), matching the emitter's
+    /// f16 weight arg; otherwise it uploads f32, byte-identical to the old `Whole`.
+    /// Kept distinct from `Whole` (embed / norm / lm_head), which stays f32-resident.
+    Proj(String),
     /// Load rows `[start, end)` of the checkpoint tensor `name` (a fused Phi3
     /// projection, split into an emitter arg). Row-major `[out, in]`, so this is
     /// the `[start, end)` slice of the `out` axis.
@@ -65,6 +72,7 @@ impl WeightSpec {
     pub(crate) fn tensor_name(&self) -> &str {
         match self {
             WeightSpec::Whole(n) => n,
+            WeightSpec::Proj(n) => n,
             WeightSpec::Rows { name, .. } => name,
             WeightSpec::QuantRaw { name, .. } => name,
         }
@@ -113,7 +121,7 @@ fn push_proj(out: &mut Vec<WeightSpec>, name: String, quant: bool) {
             part: QuantPart::Biases,
         });
     } else {
-        out.push(WeightSpec::Whole(name));
+        out.push(WeightSpec::Proj(name));
     }
 }
 
@@ -368,6 +376,65 @@ pub(crate) fn f32_le_to_f32(bytes: &[u8]) -> Vec<f32> {
         .collect()
 }
 
+/// One f32 -> IEEE 754 half (f16) bit pattern, round-to-nearest, ties-to-even (the
+/// IEEE default), matching a `stablehlo.convert` f32 -> f16. So a projection weight
+/// packed here (issue #572, f16-resident) is bit-identical to demoting the same f32
+/// weight inside the graph, and the contraction sees the same f16 operand and stays
+/// token-exact. It is the exact inverse of [`half_to_f32`]:
+/// `f32_to_f16_bits(half_to_f32(h)) == h` for every finite, non-NaN f16 `h`.
+pub(crate) fn f32_to_f16_bits(x: f32) -> u16 {
+    let bits = x.to_bits();
+    let sign = ((bits >> 16) & 0x8000) as u16;
+    let abs = bits & 0x7fff_ffff;
+
+    // NaN / Inf (f32 exponent all ones): NaN -> a canonical quiet f16 NaN, Inf -> f16 Inf.
+    if abs >= 0x7f80_0000 {
+        return sign | if abs > 0x7f80_0000 { 0x7e00 } else { 0x7c00 };
+    }
+
+    // f16 biased exponent = (f32 biased exponent - 127) + 15.
+    let e = (abs >> 23) as i32 - 127 + 15;
+
+    if e >= 0x1f {
+        return sign | 0x7c00; // overflow -> Inf
+    }
+
+    if e <= 0 {
+        // Subnormal f16, or underflow to a signed zero.
+        if e < -10 {
+            return sign; // below half the smallest subnormal -> +/- 0
+        }
+        // 24-bit significand (implicit leading 1), shifted into the subnormal range
+        // and rounded to nearest, ties to even.
+        let mant = (abs & 0x007f_ffff) | 0x0080_0000;
+        let shift = (14 - e) as u32; // e in [-10, 0] -> shift in [14, 24]
+        let q = mant >> shift;
+        let rem = mant & ((1 << shift) - 1);
+        let half = 1u32 << (shift - 1);
+        let round = u32::from(rem > half || (rem == half && q & 1 == 1));
+        // q + round may reach 0x400, which is exactly the smallest normal (correct).
+        return sign | (q + round) as u16;
+    }
+
+    // Normal f16: keep the top 10 mantissa bits, round to nearest even on bit 12. A
+    // mantissa carry rolls into the exponent, an exponent carry into 0x7c00 (Inf) --
+    // both the correct results.
+    let mant = abs & 0x007f_ffff;
+    let base = ((e as u32) << 10) | (mant >> 13);
+    let rem = mant & 0x1fff; // the 13 dropped low bits
+    let half = 0x1000u32; // 1 << 12
+    let round = u32::from(rem > half || (rem == half && base & 1 == 1));
+    sign | (base + round) as u16
+}
+
+/// Pack a row-major f32 weight to its little-endian f16 bit pattern for an
+/// f16-resident device upload (issue #572), via [`f32_to_f16_bits`] (RNE, matching
+/// the in-graph demotion). The `u16` values are native-endian; the shim copies the
+/// raw bytes, so on a little-endian host they land as the f16 buffer IREE expects.
+pub(crate) fn pack_f16(data: &[f32]) -> Vec<u16> {
+    data.iter().map(|&x| f32_to_f16_bits(x)).collect()
+}
+
 /// Dequantize one MLX affine-quantized weight to row-major `[out, in]` f32.
 ///
 /// `packed` is the row-major `[out, in_packed]` u32 weight (little-endian bytes,
@@ -512,13 +579,23 @@ pub(crate) fn dequantize_affine_stacked(
 mod tests {
     use super::*;
 
-    /// The Llama family weight order is the legacy all-`Whole` sequence (embed,
-    /// norm, then 9 per layer), so the #498 spec loader is byte-identical for it.
+    /// The Llama family weight order is embed + norm (f32-resident `Whole`) then, per
+    /// layer, the 7 linear projections as `Proj` (f16-resident-capable, issue #572)
+    /// and the 2 norms as `Whole`, in the fixed order below. Names / order unchanged.
     #[test]
-    fn weight_specs_llama_is_the_legacy_whole_order() {
+    fn weight_specs_llama_projections_are_proj_norms_are_whole() {
         let c = Config::llama_3_2_1b();
         let specs = weight_specs(&c);
-        assert!(specs.iter().all(|s| matches!(s, WeightSpec::Whole(_))));
+        // Every projection weight (`*_proj.weight`) is `Proj`; embed / norm / the
+        // per-layer norms are `Whole`. No fused rows or quant parts for plain Llama.
+        for s in &specs {
+            let n = s.tensor_name();
+            match s {
+                WeightSpec::Proj(_) => assert!(n.ends_with("_proj.weight"), "Proj {n}"),
+                WeightSpec::Whole(_) => assert!(!n.ends_with("_proj.weight"), "Whole {n}"),
+                other => panic!("unexpected spec {other:?}"),
+            }
+        }
         assert_eq!(specs.len(), 2 + 9 * c.n_layers);
         let names: Vec<&str> = specs.iter().map(WeightSpec::tensor_name).collect();
         assert_eq!(names[0], "model.embed_tokens.weight");
@@ -537,6 +614,43 @@ mod tests {
                 "model.layers.0.self_attn.v_proj.weight",
             ]
         );
+    }
+
+    #[test]
+    fn f32_to_f16_round_trips_every_finite_half() {
+        // half_to_f32(h) is exactly representable, so packing it back must recover h
+        // for every finite, non-NaN f16 pattern (signed zeros, subnormals, normals).
+        for h in 0u16..=u16::MAX {
+            if (h >> 10) & 0x1f == 0x1f {
+                continue; // skip Inf / NaN (NaN is non-canonical); Inf covered below
+            }
+            assert_eq!(
+                f32_to_f16_bits(half_to_f32(h)),
+                h,
+                "round-trip failed for f16 bits {h:#06x}"
+            );
+        }
+    }
+
+    #[test]
+    fn f32_to_f16_rounds_ties_to_even_and_saturates() {
+        // Exact tie between 1.0 (0x3c00, even mantissa) and its successor 0x3c01
+        // rounds down to the even neighbour; the tie one step up rounds to 0x3c02.
+        assert_eq!(
+            f32_to_f16_bits((half_to_f32(0x3c00) + half_to_f32(0x3c01)) / 2.0),
+            0x3c00
+        );
+        assert_eq!(
+            f32_to_f16_bits((half_to_f32(0x3c01) + half_to_f32(0x3c02)) / 2.0),
+            0x3c02
+        );
+        // Above the f16 max (65504) saturates to +/-Inf; f16 max itself is exact.
+        assert_eq!(f32_to_f16_bits(65504.0), 0x7bff);
+        assert_eq!(f32_to_f16_bits(70000.0), 0x7c00);
+        assert_eq!(f32_to_f16_bits(-70000.0), 0xfc00);
+        // Signed zero.
+        assert_eq!(f32_to_f16_bits(0.0), 0x0000);
+        assert_eq!(f32_to_f16_bits(-0.0), 0x8000);
     }
 
     /// Phi3 row-slices the fused `qkv_proj` ([Q|K|V]) and `gate_up_proj` (gate then
@@ -886,12 +1000,14 @@ mod tests {
         assert!(
             matches!(&specs[i + 2], WeightSpec::QuantRaw { name, part: QuantPart::Biases } if name.ends_with("q_proj.biases"))
         );
-        // quant = false is the legacy all-Whole order (purely additive packed path).
+        // quant = false is the unquantized layout: projections are `Proj` (issue
+        // #572), everything else `Whole`, and there are no packed parts (the packed
+        // path is purely additive).
         assert!(
             weight_specs_q(&c, false)
                 .iter()
-                .all(|s| matches!(s, WeightSpec::Whole(_))),
-            "unquantized layout is unchanged"
+                .all(|s| matches!(s, WeightSpec::Whole(_) | WeightSpec::Proj(_))),
+            "unquantized layout has no packed parts"
         );
     }
 }

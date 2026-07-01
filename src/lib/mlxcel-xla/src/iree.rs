@@ -57,7 +57,8 @@ use memmap2::Mmap;
 use safetensors::{Dtype, SafeTensors};
 
 use crate::emitter::{
-    Config, emit_decode_ragged_with, emit_decode_with, emit_prefill_with, resolve_precision,
+    Config, Precision, emit_decode_ragged_with, emit_decode_with, emit_prefill_with,
+    resolve_precision,
 };
 // The loader reads the per-architecture checkpoint-weight order from
 // `weights::weight_specs`, which sources its names from `weight_names::scheme_names`
@@ -67,7 +68,7 @@ use crate::emitter::{
 // `dequantize_affine_stacked`). Both are pure-Rust and unit-tested without `iree`.
 use crate::weights::{
     QuantPart, WeightSpec, bf16_to_f32, dequantize_affine, dequantize_affine_stacked, f16_to_f32,
-    f32_le_to_f32, slice_rows, weight_specs,
+    f32_le_to_f32, pack_f16, slice_rows, weight_specs,
 };
 
 /// Weight-buffer element dtype passed to the C shim (issue #516 per-weight ABI):
@@ -79,10 +80,12 @@ const WDT_F16: c_int = 1;
 const WDT_U32: c_int = 2;
 
 /// A resident-weight host buffer, kept alive until the shim copies it to the device.
-/// Either f32 values (a widened / dequantized weight, the proven path) or raw bytes
-/// (an MLX packed-U32 weight or its f16 scales / biases, issue #516 packed path).
+/// f32 values (a widened / dequantized weight, the proven path), f16 values (an
+/// f16-resident projection, issue #572), or raw bytes (an MLX packed-U32 weight or
+/// its f16 scales / biases, issue #516 packed path).
 enum WeightBuf {
     F32(Vec<f32>),
+    F16(Vec<u16>),
     Raw(Vec<u8>),
 }
 
@@ -91,6 +94,7 @@ impl WeightBuf {
     fn as_u8_ptr(&self) -> *const u8 {
         match self {
             WeightBuf::F32(v) => v.as_ptr() as *const u8,
+            WeightBuf::F16(v) => v.as_ptr() as *const u8,
             WeightBuf::Raw(v) => v.as_ptr(),
         }
     }
@@ -369,6 +373,7 @@ fn resolve_weight_shards(model_dir: &Path, names: &[String]) -> Result<Vec<PathB
 fn load_weights(
     model_dir: &Path,
     cfg: &Config,
+    resident_f16: bool,
 ) -> Result<(Vec<WeightBuf>, Vec<c_int>, Vec<c_int>, Vec<i64>), String> {
     let specs = weight_specs(cfg);
     let names: Vec<String> = specs.iter().map(|s| s.tensor_name().to_string()).collect();
@@ -538,6 +543,22 @@ fn load_weights(
                     }
                     bufs[i] = WeightBuf::F32(data);
                 }
+                // issue #572: a linear projection. On the f16 GPU path pack it to an
+                // f16 resident buffer (WDT_F16), matching the emitter's f16 weight arg
+                // and halving its per-step DRAM read; otherwise upload f32, identical
+                // to the old `Whole`. `data` / `shape` are the widened row-major weight.
+                WeightSpec::Proj(_) => {
+                    ranks[i] = shape.len() as c_int;
+                    for (k, &s) in shape.iter().enumerate() {
+                        dims[i * 4 + k] = s as i64;
+                    }
+                    if resident_f16 {
+                        dtypes[i] = WDT_F16;
+                        bufs[i] = WeightBuf::F16(pack_f16(&data));
+                    } else {
+                        bufs[i] = WeightBuf::F32(data);
+                    }
+                }
                 WeightSpec::Rows { start, end, .. } => {
                     if shape.len() != 2 {
                         return Err(format!(
@@ -577,7 +598,11 @@ fn create_ctx(
     prefill_vmfb: &Path,
     decode_vmfb: &Path,
 ) -> Result<*mut XlaCtx, String> {
-    let (bufs, dtypes, ranks, dims) = load_weights(model_dir, cfg)?;
+    // issue #572: the f16 GPU path uploads the projection weights f16-resident to
+    // match the emitter's f16 args. Uses the same resolve_precision(device) the graph
+    // emit uses, so the uploaded buffer dtype always lines up with the emitted arg.
+    let resident_f16 = resolve_precision(device) == Precision::F16 && cfg.supports_f16_resident();
+    let (bufs, dtypes, ranks, dims) = load_weights(model_dir, cfg, resident_f16)?;
     let ptrs: Vec<*const c_void> = bufs
         .iter()
         .map(|b| b.as_u8_ptr() as *const c_void)

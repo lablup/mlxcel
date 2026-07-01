@@ -180,7 +180,20 @@ fn take_weight(
             );
             b.dequant_affine(&packed, &scales, &biases, qc.bits, qc.group_size)
         }
-        _ => take_arg(decls, idx, Ty::f32(vec![out, in_]), loc),
+        // issue #572: on the f16 GPU path, declare the resident projection weight as
+        // an f16 arg (uploaded f16-resident by the loader) instead of an f32 arg the
+        // dot demotes in-graph. `dot_general` sees the same f16 operand either way
+        // (its f32->f16 convert is skipped for an already-f16 weight), so this stays
+        // token-exact while halving the weight's per-step DRAM read. f32 / bf16
+        // precision and the fused layouts keep the f32 arg (byte-identical goldens).
+        _ => {
+            let elt = if b.precision() == Precision::F16 && c.supports_f16_resident() {
+                "f16"
+            } else {
+                "f32"
+            };
+            take_arg(decls, idx, Ty::new(vec![out, in_], elt), loc)
+        }
     }
 }
 

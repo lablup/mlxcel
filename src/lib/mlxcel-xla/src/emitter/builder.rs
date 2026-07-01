@@ -175,6 +175,13 @@ impl Builder {
         self
     }
 
+    /// The contraction precision this builder emits at (`F32` by default, else the
+    /// resolved narrow precision). Read by the weight-arg declaration to decide the
+    /// resident weight dtype (issue #572: an f16 projection arg on the f16 path).
+    pub(crate) fn precision(&self) -> Precision {
+        self.precision
+    }
+
     pub fn body(&self) -> &str {
         &self.body
     }
