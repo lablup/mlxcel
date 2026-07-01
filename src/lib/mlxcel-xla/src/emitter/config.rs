@@ -75,6 +75,15 @@ pub struct Config {
     pub attn_logit_softcap: Option<f32>,
     /// Gemma2 final logit soft-cap on the LM-head logits. `None` for Llama / Qwen2.
     pub final_logit_softcap: Option<f32>,
+    /// Gemma2 sliding-window attention (issue #495): `Some(window)` makes the
+    /// local (even) layers attend only to the last `window` keys, while the
+    /// global (odd) layers keep full-context attention. Read from `config.json`'s
+    /// `sliding_window` (HF Gemma2 default 4096) for a gemma2 checkpoint. `None`
+    /// for Llama / Qwen2, whose every layer is global; the emitter then emits no
+    /// window ops, so those graphs are byte-identical. (Qwen2's own
+    /// `sliding_window` field is deliberately ignored: the emitter serves Qwen2
+    /// with `use_sliding_window = false` semantics.)
+    pub sliding_window: Option<usize>,
 }
 
 impl Config {
@@ -103,6 +112,7 @@ impl Config {
             query_pre_attn_scalar: None,
             attn_logit_softcap: None,
             final_logit_softcap: None,
+            sliding_window: None,
         }
     }
 
@@ -254,6 +264,22 @@ impl Config {
             (None, None, None)
         };
 
+        // Gemma2 sliding-window size (issue #495). Read only for a gemma2
+        // checkpoint; an absent field falls back to the HF Gemma2 default of 4096.
+        // Non-gemma2 architectures get `None` (global attention on every layer),
+        // even if their config carries a `sliding_window` (e.g. Qwen2.5, which the
+        // emitter serves without sliding-window attention).
+        let sliding_window = if gemma2 {
+            Some(
+                v.get("sliding_window")
+                    .and_then(serde_json::Value::as_u64)
+                    .map(|x| x as usize)
+                    .unwrap_or(4096),
+            )
+        } else {
+            None
+        };
+
         Ok(Config {
             hidden,
             inter: u("intermediate_size")?,
@@ -272,6 +298,7 @@ impl Config {
             query_pre_attn_scalar,
             attn_logit_softcap,
             final_logit_softcap,
+            sliding_window,
         })
     }
 
@@ -300,5 +327,15 @@ impl Config {
     /// narrowed, matching HF's `hidden_size**0.5` cast to the activation dtype).
     pub fn embed_normalizer(&self) -> f32 {
         (self.hidden as f64).sqrt() as f32
+    }
+
+    /// Whether attention layer `li` uses sliding-window (local) attention (issue
+    /// #495). Gemma2 alternates local and global attention starting local, so the
+    /// even layers (0, 2, 4, …) are local and the odd layers are global, matching
+    /// HF `Gemma2DecoderLayer` (`is_sliding = not bool(layer_idx % 2)`). Only a
+    /// config with a sliding window (Gemma2) has local layers; Llama / Qwen2
+    /// return `false` for every layer, so their emitted graphs are unchanged.
+    pub fn is_sliding_layer(&self, li: usize) -> bool {
+        self.sliding_window.is_some() && li.is_multiple_of(2)
     }
 }

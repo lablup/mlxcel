@@ -14,7 +14,7 @@
 //! `embed` matrix (see [`take_lm_head`]); a tied checkpoint emits no such arg and
 //! is byte-identical to before.
 
-use super::builder::{Builder, Ty, Val, precision_from_env};
+use super::builder::{Builder, Precision, Ty, Val, precision_from_env};
 use super::config::Config;
 use super::rope;
 
@@ -446,7 +446,9 @@ fn apply_rope(b: &mut Builder, x: &Val, cos: &Val, sin: &Val, heads: usize, d: u
 /// single-sequence, ragged, and prefill paths. Each variant owns the per-graph
 /// constants its methods read (the RoPE cos/sin tensors, the additive key mask,
 /// and any per-row index vectors), all built once in the graph's head before the
-/// layer loop.
+/// layer loop. `mask` is the global causal mask every layer uses; `mask_local` is
+/// the Gemma2 sliding-window mask (issue #495), `Some` only for a windowed config
+/// and selected on the local (even) layers by [`AttnLayout::add_mask`].
 enum AttnLayout {
     /// Single-token decode: rank-reduced activations (`[heads, d]`), a shared
     /// `[d]` RoPE vector, an `[S]` key mask, and a shared-offset KV write at
@@ -455,6 +457,7 @@ enum AttnLayout {
         cos: Val,
         sin: Val,
         mask: Val,
+        mask_local: Option<Val>,
         cache_len: Val,
     },
     /// Ragged (continuous-batching) decode: `[B, ...]` activations, a per-row
@@ -465,6 +468,7 @@ enum AttnLayout {
         cos: Val,
         sin: Val,
         mask: Val,
+        mask_local: Option<Val>,
         pos: Val,
         row_idx: Vec<Val>,
     },
@@ -476,6 +480,7 @@ enum AttnLayout {
         cos: Val,
         sin: Val,
         mask: Val,
+        mask_local: Option<Val>,
     },
 }
 
@@ -683,20 +688,39 @@ impl AttnLayout {
         }
     }
 
-    /// Broadcast the additive key mask to the score shape and add it.
-    fn add_mask(&self, b: &mut Builder, c: &Config, scores: &Val) -> Val {
+    /// Broadcast the additive key mask for layer `li` to the score shape and add
+    /// it. A local (sliding-window) layer of a windowed config (Gemma2) selects
+    /// `mask_local`; every global layer, and every non-windowed config, uses the
+    /// causal `mask` (same handle, so the emitted op is byte-identical for them).
+    /// See [`layer_mask`].
+    fn add_mask(&self, b: &mut Builder, c: &Config, li: usize, scores: &Val) -> Val {
         let (nq, nkv, g) = (c.n_q, c.n_kv, c.group());
         match self {
-            AttnLayout::Single { mask, .. } => {
-                let mb = b.broadcast(mask, &[1], vec![nq, MAX_SEQ]);
+            AttnLayout::Single {
+                mask, mask_local, ..
+            } => {
+                let m = layer_mask(mask, mask_local, c, li);
+                let mb = b.broadcast(m, &[1], vec![nq, MAX_SEQ]);
                 b.add(scores, &mb)
             }
-            AttnLayout::Ragged { bsz, mask, .. } => {
-                let mb = b.broadcast(mask, &[0, 2], vec![*bsz, nq, MAX_SEQ]);
+            AttnLayout::Ragged {
+                bsz,
+                mask,
+                mask_local,
+                ..
+            } => {
+                let m = layer_mask(mask, mask_local, c, li);
+                let mb = b.broadcast(m, &[0, 2], vec![*bsz, nq, MAX_SEQ]);
                 b.add(scores, &mb)
             }
-            AttnLayout::Prefill { lp, mask, .. } => {
-                let mb = b.broadcast(mask, &[1, 3], vec![nkv, *lp, g, *lp]);
+            AttnLayout::Prefill {
+                lp,
+                mask,
+                mask_local,
+                ..
+            } => {
+                let m = layer_mask(mask, mask_local, c, li);
+                let mb = b.broadcast(m, &[1, 3], vec![nkv, *lp, g, *lp]);
                 b.add(scores, &mb)
             }
         }
@@ -750,6 +774,20 @@ impl AttnLayout {
             AttnLayout::Single { .. } => b.linear(o, &lw.wo),
             _ => b.linear_seq(o, &lw.wo),
         }
+    }
+}
+
+/// Select the additive key mask for layer `li` (issue #495): the local
+/// (sliding-window) mask on a local layer of a windowed config (Gemma2, even
+/// layers per [`Config::is_sliding_layer`]), otherwise the global causal `mask`.
+/// For a non-windowed config `mask_local` is `None` and `is_sliding_layer` is
+/// always false, so this returns `mask` and the emitted broadcast is
+/// byte-for-byte identical to before.
+fn layer_mask<'a>(mask: &'a Val, mask_local: &'a Option<Val>, c: &Config, li: usize) -> &'a Val {
+    if c.is_sliding_layer(li) {
+        mask_local.as_ref().unwrap_or(mask)
+    } else {
+        mask
     }
 }
 
@@ -843,7 +881,7 @@ fn emit_attention(
     let (kslab, vslab) = layout.write_read_kv(b, k, c, li, &kk, &vv, kcache, vcache);
     let scores = layout.raw_scores(b, c, &q, &kslab);
     let scores = apply_scale_and_softcap(b, c, k, scores);
-    let scores = layout.add_mask(b, c, &scores);
+    let scores = layout.add_mask(b, c, li, &scores);
     let attn = attn_softmax(b, k, &scores, layout.score_axis());
     let o = layout.context(b, c, &attn, &vslab);
     let attn_out = layout.o_proj(b, &o, lw);
@@ -855,8 +893,12 @@ fn emit_attention(
 /// an on-device argmax and returns the next token id (`tensor<i32>`, the Phase
 /// 2b pattern); otherwise it returns the raw `[V]` logits.
 pub fn emit_decode(c: &Config, sample: bool) -> String {
+    emit_decode_with(c, sample, precision_from_env())
+}
+
+pub fn emit_decode_with(c: &Config, sample: bool, precision: Precision) -> String {
     let (decls, a) = build_arg_schema(c);
-    let mut b = Builder::new().with_precision(precision_from_env());
+    let mut b = Builder::new().with_precision(precision);
     let k = emit_consts(&mut b, c);
 
     let h = c.hidden;
@@ -884,11 +926,27 @@ pub fn emit_decode(c: &Config, sample: bool) -> String {
     let zeros_s = b.broadcast(&k.zero, &[], vec![MAX_SEQ]);
     let negs_s = b.broadcast(&k.neg_big, &[], vec![MAX_SEQ]);
     let kmask = b.select(&valid, &zeros_s, &negs_s);
+    // Gemma2 local (sliding-window) mask (issue #495): a local layer additionally
+    // drops keys older than the window, keeping key s iff `cache_len - s < W`. The
+    // global `kmask` already encodes causality, so anding the window in is one more
+    // `select`: within-window -> keep `kmask`, else force -1e30. Built once and
+    // reused by every local layer; emitted only for a config with a window
+    // (Gemma2), so Llama / Qwen2 stay byte-identical. When `W >= MAX_SEQ` the
+    // predicate is always true (`cache_len - s <= MAX_SEQ-1 < W`), so it is a value
+    // no-op, which is why short-context Gemma2 output is unchanged.
+    let kmask_local = c.sliding_window.map(|w| {
+        let wc = b.const_i32(w as i32);
+        let wb = b.broadcast(&wc, &[], vec![MAX_SEQ]);
+        let age = b.subtract(&clen_b, &ii); // cache_len - s
+        let within = b.compare("LT", &age, &wb, "SIGNED");
+        b.select(&within, &kmask, &negs_s)
+    });
 
     let layout = AttnLayout::Single {
         cos: cos_vec,
         sin: sin_vec,
         mask: kmask,
+        mask_local: kmask_local,
         cache_len: a.cache_len.clone(),
     };
 
@@ -1088,8 +1146,17 @@ fn apply_rope_batched(
 /// `bsz`. With `sample`, the graph ends in a per-row on-device argmax and
 /// returns `[B]` token ids; otherwise it returns `[B, V]` logits.
 pub fn emit_decode_batched(c: &Config, bsz: usize, sample: bool) -> String {
+    emit_decode_batched_with(c, bsz, sample, precision_from_env())
+}
+
+pub fn emit_decode_batched_with(
+    c: &Config,
+    bsz: usize,
+    sample: bool,
+    precision: Precision,
+) -> String {
     let (decls, a) = build_batched_arg_schema(c, bsz);
-    let mut b = Builder::new().with_precision(precision_from_env());
+    let mut b = Builder::new().with_precision(precision);
     let k = emit_consts(&mut b, c);
 
     let h = c.hidden;
@@ -1372,8 +1439,17 @@ fn apply_rope_ragged(
 /// size `bsz`. With `sample`, ends in a per-row on-device argmax returning `[B]`
 /// token ids; otherwise returns `[B, V]` logits.
 pub fn emit_decode_ragged(c: &Config, bsz: usize, sample: bool) -> String {
+    emit_decode_ragged_with(c, bsz, sample, precision_from_env())
+}
+
+pub fn emit_decode_ragged_with(
+    c: &Config,
+    bsz: usize,
+    sample: bool,
+    precision: Precision,
+) -> String {
     let (decls, a) = build_ragged_arg_schema(c, bsz);
-    let mut b = Builder::new().with_precision(precision_from_env());
+    let mut b = Builder::new().with_precision(precision);
     let k = emit_consts(&mut b, c);
     // Constant row indices 0..bsz for the per-row KV-write dim-0 offsets.
     let row_idx: Vec<Val> = (0..bsz).map(|i| b.const_i32(i as i32)).collect();
@@ -1403,12 +1479,24 @@ pub fn emit_decode_ragged(c: &Config, bsz: usize, sample: bool) -> String {
     let zeros = b.broadcast(&k.zero, &[], vec![bsz, MAX_SEQ]);
     let negs = b.broadcast(&k.neg_big, &[], vec![bsz, MAX_SEQ]);
     let kmask = b.select(&valid, &zeros, &negs); // [B, S]
+    // Gemma2 local (sliding-window) mask (issue #495), per row: keep key s for row
+    // b iff `cache_len[b] - s < W`. And it into the causal `kmask` with one more
+    // `select`. Emitted only for a windowed config (Gemma2); reused by every local
+    // layer. No-op on the value when `W >= MAX_SEQ` (short-context parity).
+    let kmask_local = c.sliding_window.map(|w| {
+        let wc = b.const_i32(w as i32);
+        let wb = b.broadcast(&wc, &[], vec![bsz, MAX_SEQ]);
+        let age = b.subtract(&clen_b, &ii_b); // cache_len[b] - s
+        let within = b.compare("LT", &age, &wb, "SIGNED");
+        b.select(&within, &kmask, &negs)
+    });
 
     let layout = AttnLayout::Ragged {
         bsz,
         cos,
         sin,
         mask: kmask,
+        mask_local: kmask_local,
         pos: a.pos.clone(),
         row_idx,
     };
@@ -1575,9 +1663,13 @@ fn apply_rope_seq(
 /// on-device argmax and returns the first token id (`tensor<i32>`); otherwise it
 /// returns the raw `[V]` logits at `real_len-1`.
 pub fn emit_prefill(c: &Config, sample: bool) -> String {
+    emit_prefill_with(c, sample, precision_from_env())
+}
+
+pub fn emit_prefill_with(c: &Config, sample: bool, precision: Precision) -> String {
     let lp = PREFILL_LP;
     let (decls, a) = build_prefill_arg_schema(c, lp);
-    let mut b = Builder::new().with_precision(precision_from_env());
+    let mut b = Builder::new().with_precision(precision);
     let k = emit_consts(&mut b, c);
 
     let h = c.hidden;
@@ -1607,12 +1699,26 @@ pub fn emit_prefill(c: &Config, sample: bool) -> String {
     let zeros = b.broadcast(&k.zero, &[], vec![lp, lp]);
     let negs = b.broadcast(&k.neg_big, &[], vec![lp, lp]);
     let cmask = b.select(&le, &zeros, &negs); // [Lp, Lp]
+    // Gemma2 local (sliding-window) mask (issue #495): a local layer keeps key j
+    // for query i iff `i - j < W` (prefill positions are 0..Lp, so the buffer
+    // index equals the position). And it into the causal `cmask` with one more
+    // `select`. Emitted only for a windowed config (Gemma2); reused by every local
+    // layer. No-op on the value when `W >= Lp` (`i - j <= Lp-1 < W`), so a
+    // short-prompt Gemma2 prefill is unchanged.
+    let cmask_local = c.sliding_window.map(|w| {
+        let wc = b.const_i32(w as i32);
+        let wb = b.broadcast(&wc, &[], vec![lp, lp]);
+        let age = b.subtract(&row, &col); // i - j
+        let within = b.compare("LT", &age, &wb, "SIGNED");
+        b.select(&within, &cmask, &negs)
+    });
 
     let layout = AttnLayout::Prefill {
         lp,
         cos,
         sin,
         mask: cmask,
+        mask_local: cmask_local,
     };
 
     // caches start as zeros; prefill writes the [0:Lp] block and returns them

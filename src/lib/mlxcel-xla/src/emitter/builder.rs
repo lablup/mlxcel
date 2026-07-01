@@ -72,16 +72,50 @@ impl Precision {
     }
 }
 
-/// The contraction precision selected by `MLXCEL_XLA_PRECISION` (`f16` / `bf16`,
-/// else f32). Read once when a graph is emitted; a different value changes the
-/// emitted MLIR, so the vmfb content-hash cache keys each precision separately.
+/// The explicit `MLXCEL_XLA_PRECISION` override (`f16` / `bf16`), or `None` when
+/// unset / unrecognized (so the per-device default applies).
+#[must_use]
+pub fn precision_env_override() -> Option<Precision> {
+    match std::env::var("MLXCEL_XLA_PRECISION").as_deref() {
+        Ok("f16") => Some(Precision::F16),
+        Ok("bf16") => Some(Precision::Bf16),
+        // `f32` is an explicit override too, so it forces f32 even on a GPU device
+        // whose default is f16. Only an unset / unrecognized value falls through
+        // to the per-device default.
+        Ok("f32") => Some(Precision::F32),
+        _ => None,
+    }
+}
+
+/// The contraction precision, honoring `MLXCEL_XLA_PRECISION` else f32. Used where
+/// no HAL device is in scope (e.g. the emitter's byte-exact regression tests).
 #[must_use]
 pub fn precision_from_env() -> Precision {
-    match std::env::var("MLXCEL_XLA_PRECISION").as_deref() {
-        Ok("f16") => Precision::F16,
-        Ok("bf16") => Precision::Bf16,
-        _ => Precision::F32,
+    precision_env_override().unwrap_or(Precision::F32)
+}
+
+/// The default contraction precision for a HAL device when `MLXCEL_XLA_PRECISION`
+/// is unset: `f16` on the GPU devices (`metal`, `cuda`), whose runtimes and the
+/// pinned iree-compile handle f16 well and where it is ~2x, and `f32` on the CPU
+/// (`local-task` / `local-sync`), where f16 gains little and can round-trip
+/// through f32 anyway. CUDA is never *auto*-selected as a device, but if it is
+/// the target this is its default precision.
+#[must_use]
+pub fn default_precision(device: &str) -> Precision {
+    if device == "metal" || device == "cuda" {
+        Precision::F16
+    } else {
+        Precision::F32
     }
+}
+
+/// The precision to emit for `device`: the `MLXCEL_XLA_PRECISION` override wins on
+/// every device; otherwise the per-device default. Read once at graph emission; a
+/// different value changes the MLIR, so the vmfb content-hash cache keys each
+/// precision separately.
+#[must_use]
+pub fn resolve_precision(device: &str) -> Precision {
+    precision_env_override().unwrap_or_else(|| default_precision(device))
 }
 
 pub struct Builder {
@@ -702,5 +736,13 @@ mod tests {
             b.body()
                 .contains("(tensor<8xbf16>, tensor<4x8xbf16>) -> tensor<4xf32>")
         );
+    }
+
+    #[test]
+    fn default_precision_is_f16_on_gpu_and_f32_on_cpu() {
+        assert_eq!(default_precision("metal"), Precision::F16);
+        assert_eq!(default_precision("cuda"), Precision::F16);
+        assert_eq!(default_precision("local-task"), Precision::F32);
+        assert_eq!(default_precision("local-sync"), Precision::F32);
     }
 }
