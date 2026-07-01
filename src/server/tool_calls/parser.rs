@@ -739,7 +739,10 @@ mod tests {
             "<|tool_call>call:functions.get_weather{location:<|\"|>Paris<|\"|>}<tool_call|>";
         let tools = vec![make_tool("get_weather")];
         let result = parse_tool_calls(output, Some(&tools));
-        assert!(result.has_tool_calls(), "namespaced call should pass the filter");
+        assert!(
+            result.has_tool_calls(),
+            "namespaced call should pass the filter"
+        );
         assert_eq!(result.tool_calls.len(), 1);
         assert_eq!(
             result.tool_calls[0].name, "get_weather",
@@ -764,10 +767,12 @@ mod tests {
     fn filter_by_tools_unknown_namespaced_name_dropped() {
         // `functions.unknown_fn` is not in the registered tool set even after
         // stripping, so it must be dropped.
-        let output =
-            "<|tool_call>call:functions.unknown_fn{key:<|\"|>val<|\"|>}<tool_call|>";
+        let output = "<|tool_call>call:functions.unknown_fn{key:<|\"|>val<|\"|>}<tool_call|>";
         let tools = vec![make_tool("get_weather")];
         let result = parse_tool_calls(output, Some(&tools));
-        assert!(!result.has_tool_calls(), "unknown namespaced call must be dropped");
+        assert!(
+            !result.has_tool_calls(),
+            "unknown namespaced call must be dropped"
+        );
     }
 }
