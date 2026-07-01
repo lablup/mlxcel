@@ -150,6 +150,7 @@ pub fn get_model_type(model_path: &Path) -> Result<ModelType> {
         "deepseek_v2" => Ok(ModelType::DeepSeekV2),
         "deepseek_v3" => Ok(ModelType::DeepSeekV3),
         "deepseek_v32" | "deepseek_v3.2" => Ok(ModelType::DeepSeekV32),
+        "deepseek_v4" => Ok(ModelType::DeepSeekV4),
         "dots1" => Ok(ModelType::Dots1),
         "cohere" => Ok(ModelType::Cohere),
         "cohere2" => Ok(ModelType::Cohere2),
