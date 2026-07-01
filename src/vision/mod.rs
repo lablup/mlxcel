@@ -55,6 +55,7 @@ pub mod molmo_point_vl;
 pub mod molmo_vl;
 pub mod moondream3_vl;
 pub mod nemotron_h_nano_omni_vl;
+pub mod paddleocr_vl;
 pub mod phi3_vl;
 pub mod phi4_siglip_vl;
 pub mod phi4mm_vl;
@@ -63,6 +64,7 @@ pub mod qwen2_vl;
 pub mod qwen3_5_vl;
 pub mod qwen3_vl;
 pub mod qwen3_vl_moe;
+pub mod smolvlm;
 pub mod youtu_vl;
 
 // Re-export VLM model types
@@ -80,6 +82,7 @@ pub use molmo_vl::MolmoVLModel;
 pub use molmo2_vl::Molmo2VLModel;
 pub use moondream3_vl::Moondream3VLModel;
 pub use nemotron_h_nano_omni_vl::NemotronHNanoOmniVlModel;
+pub use paddleocr_vl::PaddleOcrVlModel;
 pub use phi3_vl::Phi3VLModel;
 pub use phi4_siglip_vl::Phi4SigLipVLModel;
 pub use phi4mm_vl::Phi4MMVLModel;
@@ -88,6 +91,7 @@ pub use qwen2_vl::Qwen2VLModel;
 pub use qwen3_5_vl::Qwen35VLModel;
 pub use qwen3_vl::Qwen3VLModel;
 pub use qwen3_vl_moe::Qwen3VLMoeModel;
+pub use smolvlm::SmolVLMModel;
 pub use youtu_vl::YoutuVLModel;
 
 use crate::LanguageModel;

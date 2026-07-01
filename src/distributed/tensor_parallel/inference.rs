@@ -187,7 +187,7 @@ fn fallback_architecture(model_type: ModelType) -> &'static str {
         ModelType::Glm4Moe | ModelType::Glm4vMoe => "glm4_moe",
         ModelType::Glm4MoeLite => "glm4_moe_lite",
         ModelType::GlmMoeDsa => "glm_moe_dsa",
-        ModelType::Ernie45 => "ernie4_5",
+        ModelType::Ernie45 | ModelType::PaddleOcrVL => "ernie4_5",
         ModelType::Ernie45Moe => "ernie4_5_moe",
         ModelType::HunyuanMoe => "hunyuan_moe",
         ModelType::HunyuanV1Dense => "hunyuan_v1_dense",
@@ -243,6 +243,9 @@ fn fallback_architecture(model_type: ModelType) -> &'static str {
         // Llama 3.2 Vision's text backbone is Llama-3; TP is not supported for
         // VLM-kind models (the loader refuses it earlier).
         | ModelType::MllamaVLM => "llama",
+        // SmolVLM's text backbone is SmolLM2 (llama family). TP is refused for
+        // VLM-kind models earlier; this keeps the dispatch table total.
+        | ModelType::SmolVLM => "llama",
         // Youtu-VL is not currently supported by tensor-parallel inference;
         // we return a placeholder architecture string here so the planner
         // does not panic on the dispatch table lookup. The actual loader

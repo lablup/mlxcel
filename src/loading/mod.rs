@@ -184,6 +184,7 @@ fn try_load_vlm_model_from_dir(
         ModelType::Qwen25VL => Some(load_qwen2_5_vl(model_path)?),
         ModelType::Qwen3VL => Some(load_qwen3_vl(model_path)?),
         ModelType::Qwen3VLMoe => Some(load_qwen3_vl_moe(model_path)?),
+        ModelType::PaddleOcrVL => Some(load_paddleocr_vl(model_path)?),
         ModelType::Glm4v => Some(load_glm4v(model_path)?),
         ModelType::Glm4vMoe => Some(load_glm4v_moe(model_path)?),
         ModelType::MiniCPMOVLM => Some(load_minicpmo_vlm(model_path)?),
@@ -199,6 +200,7 @@ fn try_load_vlm_model_from_dir(
         ModelType::NemotronHNanoOmniVLM => Some(load_nemotron_h_nano_omni_vlm(model_path)?),
         ModelType::YoutuVLM => Some(load_youtu_vl_vlm(model_path)?),
         ModelType::InternVLChatVLM => Some(load_internvl_vlm(model_path)?),
+        ModelType::SmolVLM => Some(load_smolvlm_vlm(model_path)?),
         _ => None,
     })
 }
