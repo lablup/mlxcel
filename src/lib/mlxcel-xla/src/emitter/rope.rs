@@ -75,12 +75,26 @@ fn llama3_inv_freq(
     inv
 }
 
-/// Build cos and sin tables of shape [max_seq, head_dim] as flat row-major f32.
-/// emb = concat([freqs, freqs], -1) where freqs = outer(pos, inv_freq).
-pub fn rope_tables(c: &Config, max_seq: usize) -> (Vec<f32>, Vec<f32>) {
-    let inv = inv_freq(c);
-    let half = c.head_dim / 2;
-    let d = c.head_dim;
+/// Plain RoPE base frequencies for an explicit base (Gemma3 / OLMo3 local layers,
+/// whose sliding layers use `rope_local_base_freq` instead of `rope_theta`):
+/// `inv_freq[i] = 1 / base^((2i)/head_dim)`.
+pub fn plain_inv_freq_with_base(head_dim: usize, base: f64) -> Vec<f64> {
+    let half = head_dim / 2;
+    (0..half)
+        .map(|i| {
+            let exponent = (2 * i) as f64 / head_dim as f64;
+            1.0 / base.powf(exponent)
+        })
+        .collect()
+}
+
+/// Build cos and sin tables of shape [max_seq, head_dim] as flat row-major f32 from
+/// a precomputed `inv_freq`. emb = concat([freqs, freqs], -1) where freqs =
+/// outer(pos, inv_freq). Shared by the global table and the Gemma3/OLMo3 local
+/// table.
+pub fn rope_tables_from_inv(inv: &[f64], head_dim: usize, max_seq: usize) -> (Vec<f32>, Vec<f32>) {
+    let half = head_dim / 2;
+    let d = head_dim;
     let mut cos = vec![0.0f32; max_seq * d];
     let mut sin = vec![0.0f32; max_seq * d];
     for p in 0..max_seq {
@@ -95,4 +109,20 @@ pub fn rope_tables(c: &Config, max_seq: usize) -> (Vec<f32>, Vec<f32>) {
         }
     }
     (cos, sin)
+}
+
+/// Build cos and sin tables of shape [max_seq, head_dim] for the config's global
+/// RoPE scheme.
+pub fn rope_tables(c: &Config, max_seq: usize) -> (Vec<f32>, Vec<f32>) {
+    rope_tables_from_inv(&inv_freq(c), c.head_dim, max_seq)
+}
+
+/// Build the local cos/sin tables for a config with a distinct local RoPE base
+/// (Gemma3 / OLMo3 sliding layers). Plain RoPE at `base`.
+pub fn rope_tables_local(c: &Config, max_seq: usize, base: f64) -> (Vec<f32>, Vec<f32>) {
+    rope_tables_from_inv(
+        &plain_inv_freq_with_base(c.head_dim, base),
+        c.head_dim,
+        max_seq,
+    )
 }

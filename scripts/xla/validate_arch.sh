@@ -77,9 +77,11 @@ done
 
 # --- structural pre-gate (fast, pure Rust, no GPU / IREE) ---
 if [ "$SKIP_STRUCTURAL" -eq 0 ]; then
-  echo "== [structural] byte-exact emitter regression (cargo test) =="
-  cargo test -p mlxcel-xla --lib \
-    validation::tests::registered_fixtures_are_byte_exact -- --nocapture
+  echo "== [structural] byte-exact + per-family signature emitter gate (cargo test) =="
+  # The whole validation tests module: the byte-exact goldens
+  # (registered_fixtures_are_byte_exact) plus the golden-less dense-family
+  # signatures (structural_families_emit_expected_signature, issue #497).
+  cargo test -p mlxcel-xla --lib validation::tests -- --nocapture
   echo "[structural] PASS"
 fi
 if [ "$STRUCTURAL_ONLY" -eq 1 ]; then
