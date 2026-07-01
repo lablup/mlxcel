@@ -2395,6 +2395,57 @@ pub fn sanitize_weights(mut weights: WeightMap, config: &Qwen35Config) -> Weight
                 }
             }
         }
+
+        // Handle per-expert gate_proj/up_proj/down_proj naming variant.
+        // Checkpoints that store experts under `experts.{e}.gate_proj.weight`
+        // instead of `experts.{e}.w1.weight` use this layout. The mapping
+        // mirrors the fused gate_up_proj path: gate->w1, up->w3, down->w2.
+        for (src_proj, dst_proj) in [("gate_proj", "w1"), ("up_proj", "w3"), ("down_proj", "w2")] {
+            // Skip if this target slot is already populated by the w1/w2/w3 pass above.
+            if weights.contains_key(format!("{}.{}.weight", base, dst_proj).as_str()) {
+                continue;
+            }
+
+            let mut expert_weights: Vec<UniquePtr<MlxArray>> = Vec::new();
+            let mut expert_scales: Vec<UniquePtr<MlxArray>> = Vec::new();
+            let mut expert_biases: Vec<UniquePtr<MlxArray>> = Vec::new();
+
+            let mut e = 0;
+            while let Some(w) = weights.remove(&format!(
+                "model.layers.{}.mlp.experts.{}.{}.weight",
+                l, e, src_proj
+            )) {
+                expert_weights.push(w);
+                if let Some(s) = weights.remove(&format!(
+                    "model.layers.{}.mlp.experts.{}.{}.scales",
+                    l, e, src_proj
+                )) {
+                    expert_scales.push(s);
+                }
+                if let Some(b) = weights.remove(&format!(
+                    "model.layers.{}.mlp.experts.{}.{}.biases",
+                    l, e, src_proj
+                )) {
+                    expert_biases.push(b);
+                }
+                e += 1;
+            }
+
+            if !expert_weights.is_empty() {
+                let stacked = stack_arrays(&expert_weights, 0);
+                weights.insert(format!("{}.{}.weight", base, dst_proj), stacked);
+
+                if !expert_scales.is_empty() {
+                    let stacked = stack_arrays(&expert_scales, 0);
+                    weights.insert(format!("{}.{}.scales", base, dst_proj), stacked);
+                }
+
+                if !expert_biases.is_empty() {
+                    let stacked = stack_arrays(&expert_biases, 0);
+                    weights.insert(format!("{}.{}.biases", base, dst_proj), stacked);
+                }
+            }
+        }
     }
 
     // 7. MoE gate_up_proj split (for qwen3_5_moe format)
@@ -2776,5 +2827,190 @@ impl LanguageModel for Qwen35Model {
 
     fn eos_token_ids(&self) -> Vec<i32> {
         vec![248046, 248044] // Qwen 3.5 EOS tokens
+    }
+}
+
+#[cfg(test)]
+mod sanitize_tests {
+    use super::{Qwen35Config, sanitize_weights};
+    use mlxcel_core::weights::WeightMap;
+
+    fn moe_config(num_layers: usize, num_experts: usize) -> Qwen35Config {
+        serde_json::from_value(serde_json::json!({
+            "model_type": "qwen3_5",
+            "hidden_size": 16,
+            "num_hidden_layers": num_layers,
+            "intermediate_size": 32,
+            "num_attention_heads": 4,
+            "num_key_value_heads": 2,
+            "num_experts": num_experts,
+            "num_experts_per_tok": 2,
+            "decoder_sparse_step": 1,
+            "moe_intermediate_size": 8,
+            "shared_expert_intermediate_size": 0,
+            "full_attention_interval": 4,
+            "vocab_size": 100
+        }))
+        .expect("minimal qwen3.5-moe test config")
+    }
+
+    #[test]
+    fn sanitize_weights_stacks_per_expert_gate_up_down_proj_names() {
+        // Per-expert layout with gate_proj/up_proj/down_proj naming (not w1/w2/w3).
+        // gate_proj -> w1, up_proj -> w3, down_proj -> w2 (mirrors fused gate_up_proj path).
+        let num_experts: usize = 3;
+        let out = 4i32;
+        let in_dim = 8i32;
+        let config = moe_config(1, num_experts);
+
+        let mut weights = WeightMap::new();
+        for e in 0..num_experts {
+            for proj in ["gate_proj", "up_proj", "down_proj"] {
+                weights.insert(
+                    format!("model.layers.0.mlp.experts.{}.{}.weight", e, proj),
+                    mlxcel_core::from_slice_f32(
+                        &vec![e as f32; (out * in_dim) as usize],
+                        &[out, in_dim],
+                    ),
+                );
+            }
+        }
+
+        let result = sanitize_weights(weights, &config);
+
+        // Each projection must be stacked into the w1/w3/w2 slots.
+        for dst in ["w1", "w2", "w3"] {
+            let key = format!("model.layers.0.mlp.switch_mlp.{}.weight", dst);
+            let arr = result
+                .get(key.as_str())
+                .unwrap_or_else(|| panic!("missing stacked weight at {key}"));
+            let shape = mlxcel_core::array_shape(arr);
+            assert_eq!(
+                shape,
+                vec![num_experts as i32, out, in_dim],
+                "stacked shape for {dst} should be [num_experts, out, in_dim]"
+            );
+        }
+
+        // Per-expert source keys must be consumed.
+        for e in 0..num_experts {
+            for proj in ["gate_proj", "up_proj", "down_proj"] {
+                let key = format!("model.layers.0.mlp.experts.{}.{}.weight", e, proj);
+                assert!(
+                    !result.contains_key(key.as_str()),
+                    "source key {key} should be removed after stacking"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn sanitize_weights_stacks_per_expert_gate_up_down_proj_with_scales_biases() {
+        // Quantized per-expert gate_proj layout: weight + scales + biases per expert.
+        let num_experts: usize = 2;
+        let out = 4i32;
+        let packed_in = 1i32; // 4-bit packed: in_dim=8 -> 8/8=1 uint32 per row
+        let num_groups = 1i32;
+        let config = moe_config(1, num_experts);
+
+        let mut weights = WeightMap::new();
+        for e in 0..num_experts {
+            for proj in ["gate_proj", "up_proj", "down_proj"] {
+                let prefix = format!("model.layers.0.mlp.experts.{}.{}", e, proj);
+                weights.insert(
+                    format!("{}.weight", prefix),
+                    mlxcel_core::from_slice_f32(
+                        &vec![0.0; (out * packed_in) as usize],
+                        &[out, packed_in],
+                    ),
+                );
+                weights.insert(
+                    format!("{}.scales", prefix),
+                    mlxcel_core::from_slice_f32(
+                        &vec![1.0; (out * num_groups) as usize],
+                        &[out, num_groups],
+                    ),
+                );
+                weights.insert(
+                    format!("{}.biases", prefix),
+                    mlxcel_core::from_slice_f32(
+                        &vec![0.0; (out * num_groups) as usize],
+                        &[out, num_groups],
+                    ),
+                );
+            }
+        }
+
+        let result = sanitize_weights(weights, &config);
+
+        for (dst, suffix) in [("w1", "weight"), ("w1", "scales"), ("w1", "biases"),
+                               ("w2", "weight"), ("w2", "scales"), ("w2", "biases"),
+                               ("w3", "weight"), ("w3", "scales"), ("w3", "biases")] {
+            let key = format!("model.layers.0.mlp.switch_mlp.{}.{}", dst, suffix);
+            assert!(
+                result.contains_key(key.as_str()),
+                "stacked quantized tensor missing at {key}"
+            );
+        }
+    }
+
+    #[test]
+    fn sanitize_weights_gate_up_down_proj_does_not_clobber_w1_w2_w3() {
+        // When both naming conventions appear in the same checkpoint, the w1/w2/w3
+        // pass runs first and populates the slots; the gate_proj pass must not
+        // overwrite them.  Verified by checking that the gate_proj source keys
+        // survive (not consumed) while the w1 stacked output is present.
+        let num_experts: usize = 2;
+        let out = 4i32;
+        let in_dim = 8i32;
+        let config = moe_config(1, num_experts);
+
+        let mut weights = WeightMap::new();
+        // Populate via the w1/w2/w3 naming.
+        for e in 0..num_experts {
+            for proj in ["w1", "w2", "w3"] {
+                weights.insert(
+                    format!("model.layers.0.mlp.experts.{}.{}.weight", e, proj),
+                    mlxcel_core::from_slice_f32(
+                        &vec![1.0; (out * in_dim) as usize],
+                        &[out, in_dim],
+                    ),
+                );
+            }
+        }
+        // Add gate_proj-named tensors for the same layer.
+        for e in 0..num_experts {
+            for proj in ["gate_proj", "up_proj", "down_proj"] {
+                weights.insert(
+                    format!("model.layers.0.mlp.experts.{}.{}.weight", e, proj),
+                    mlxcel_core::from_slice_f32(
+                        &vec![2.0; (out * in_dim) as usize],
+                        &[out, in_dim],
+                    ),
+                );
+            }
+        }
+
+        let result = sanitize_weights(weights, &config);
+
+        // The stacked w1/w2/w3 slots must exist (from the w1/w2/w3 source).
+        for dst in ["w1", "w2", "w3"] {
+            let key = format!("model.layers.0.mlp.switch_mlp.{}.weight", dst);
+            assert!(
+                result.contains_key(key.as_str()),
+                "stacked {dst} should be present"
+            );
+        }
+        // The gate_proj source keys should be untouched (not consumed) because
+        // the slot was already filled by the w1/w2/w3 pass.
+        for e in 0..num_experts {
+            for proj in ["gate_proj", "up_proj", "down_proj"] {
+                let key = format!("model.layers.0.mlp.experts.{}.{}.weight", e, proj);
+                assert!(
+                    result.contains_key(key.as_str()),
+                    "source key {key} should remain when slot is already filled"
+                );
+            }
+        }
     }
 }
