@@ -79,6 +79,17 @@ Consequences and refinements:
 
 This ADR stays Proposed; it moves to Accepted once the OpenXLA backend integrates behind the #448 session contract (Phase 3) and validates the full contract.
 
+### Low-precision performance decision (2026-07)
+
+Phase 3 landed the OpenXLA backend on macOS (Metal) and profiled it against MLX. On an M1 Ultra (Llama-3.2-1B, greedy) XLA-on-Metal runs about 117x slower than MLX. Profiling with `iree-benchmark-module` (pure runtime, no host glue) shows the Metal decode step is GPU-kernel-bound, not host-bound: a 13-thread CPU beats the Metal GPU on the same StableHLO graph, so the bottleneck is IREE's `metal-spirv` kernel codegen, not invoke overhead or bandwidth.
+
+That split of the performance levers decides where the project invests:
+
+- Graph-level precision and quantization, authored in the StableHLO graph, transfer to every IREE target, including future NPUs, for which low precision is the entry ticket rather than a 2x optimization. f16 / bf16 is landed (#514, #515): about 1.9x on Metal, token-exact, and it speeds up the CPU path too. This is in scope.
+- Per-backend kernel codegen (the remaining ~50x to MLX) is upstream IREE's responsibility, is Metal-specific (it does not transfer to non-SPIR-V NPUs), and MLX already owns Apple-Silicon performance. Out of scope.
+
+int8 / int4 weight quantization (#516) is the NPU lever, but its payoff is memory bandwidth: a compute-bound Metal decode cannot demonstrate it, and measuring it needs an actual NPU. It is deferred to a hardware-gated follow-up; on Metal only its token-exactness would be verifiable. Metal's absolute throughput is therefore a pessimistic proxy for an NPU, which brings its own optimized kernels.
+
 ## Consequences
 
 - The `ComputeBackend` trait from PR #446 is reworked from a load-boundary contract returning `LoadedModel` into a session-engine contract. The selection skeleton (`select_backend`, the `Backend` enum, the `experimental-backend` feature gate) survives the rework; only the contract shape changes.
