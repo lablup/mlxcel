@@ -53,6 +53,8 @@ mod pixtral;
 mod qwen;
 #[path = "vlm_siglip.rs"]
 mod siglip;
+#[path = "vlm_smolvlm.rs"]
+mod smolvlm;
 #[path = "vlm_special.rs"]
 mod special;
 #[path = "vlm_youtu_vl.rs"]
@@ -69,6 +71,7 @@ pub(crate) use qwen::{
     load_qwen3_vl_moe,
 };
 pub(crate) use siglip::{load_aya_vision_vlm, load_paligemma_vlm};
+pub(crate) use smolvlm::load_smolvlm_vlm;
 pub(crate) use special::{
     load_llama4_vlm, load_minicpmo_vlm, load_minicpmv4_6_vlm, load_molmo_point_vlm, load_molmo_vlm,
     load_molmo2_vlm, load_moondream3_vlm, load_phi3_vlm, load_phi4_siglip_vlm, load_phi4mm_vlm,

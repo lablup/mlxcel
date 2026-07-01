@@ -215,6 +215,7 @@ pub fn get_model_type(model_path: &Path) -> Result<ModelType> {
         "qwen3_vl_moe" => Ok(ModelType::Qwen3VLMoe),
         "youtu_vl" => Ok(ModelType::YoutuVLM),
         "internvl_chat" => Ok(ModelType::InternVLChatVLM),
+        "smolvlm" | "smolvlm2" => Ok(ModelType::SmolVLM),
         "minicpmo" => Ok(ModelType::MiniCPMOVLM),
         "minicpmv4_6" => Ok(ModelType::MiniCPMV46VLM),
         "moondream3" => Ok(ModelType::Moondream3VLM),

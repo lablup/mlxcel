@@ -196,6 +196,7 @@ fn try_load_vlm_model_from_dir(
         ModelType::NemotronHNanoOmniVLM => Some(load_nemotron_h_nano_omni_vlm(model_path)?),
         ModelType::YoutuVLM => Some(load_youtu_vl_vlm(model_path)?),
         ModelType::InternVLChatVLM => Some(load_internvl_vlm(model_path)?),
+        ModelType::SmolVLM => Some(load_smolvlm_vlm(model_path)?),
         _ => None,
     })
 }
