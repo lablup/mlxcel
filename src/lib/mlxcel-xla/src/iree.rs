@@ -28,11 +28,13 @@
 //! shim, which keeps the weights resident on the device and threads the KV cache
 //! across steps. Then [`IreeLlama::prefill`] / [`IreeLlama::decode`] are token-in
 //! / token-out. Emitting from config (issue #449 M3 Stage 2d) replaced the bundled
-//! Llama-3.2-1B `.mlir` assets, so any checkpoint of a supported architecture
-//! loads: Llama (any size) and Qwen2 (plain RoPE + q/k/v bias; Stage B), the
-//! latter adding its bias tensors to `weight_names` to match the emitted graph.
-//! An untied checkpoint (`tie_word_embeddings = false`, e.g. Llama-3.1-8B and the
-//! larger Qwen2.5 sizes) adds its `lm_head.weight` to `weight_names`, matching the
+//! Llama-3.2-1B `.mlir` assets, so any checkpoint of a supported dense family loads:
+//! Llama, Qwen2, Qwen3, Gemma1/2/3, SmolLM3, and OLMo2/3 (issue #497). Each family's
+//! per-layer weight order in `weight_names` mirrors the emitter's arg schedule: the
+//! Qwen2 q/k/v biases, the Qwen3 / Gemma3 / OLMo2/3 q/k norms, the Gemma2/3 feed-
+//! forward norms, and (for OLMo2/3's reordered post-norm) the absence of an
+//! `input_layernorm`. An untied checkpoint (`tie_word_embeddings = false`, e.g.
+//! Llama-3.1-8B, larger Qwen2.5, OLMo2/3) adds its `lm_head.weight`, matching the
 //! separate `params['lm_head']` arg the emitter takes for the final projection.
 //!
 //! Proven token-exact against the HF temp-0 reference in
