@@ -360,6 +360,47 @@ carries the whole packed ABI (emitter dequant, per-dtype weight upload, the
 standard Llama layout ([`Config::supports_packed_quant`]: non-fused-qkv,
 non-fused-gate-up, non-dense-MLP, non-MoE); embed / lm_head stay f32-resident.
 
+### int8 fusion spike (#573): in-tree vs upstream on GB10
+
+Following the fusion gate above, #573 measured whether any in-tree lever gets IREE's
+CUDA codegen to fuse the packed dequant into the matmul (so the reconstructed weight
+is not materialized to DRAM every decode step). The signal is the static decode
+dispatch count (`iree-compile --compile-to=flow`, count `flow.dispatch`); tok/s is
+end-to-end through the mlxcel binary. Reproduce with `scripts/xla/fusion_spike.sh`.
+
+| decode path | flow.dispatch | tok/s | note |
+|---|---|---|---|
+| packed, in-graph dequant (#568) | 678 | ~1.5 | weight reconstructed + materialized every step |
+| f16-resident (#572) | 454 | ~7.6 | no dequant; f16 weight stored directly |
+
+Findings (GB10, IREE 3.11.0rc @ e4a3b04):
+
+- **No iree-compile flag fuses it.** An 11-config flag sweep (aggressive-fusion,
+  generalize-matmul, early-trunc-fusion, horizontal-contractions, fuse-multi-use,
+  elementwise-multi-reduction, encoding-fusion, data-tiling x2, and all combined)
+  leaves the count at 677-678. Data-tiling is a no-op on CUDA: the encoding layout
+  resolvers exist only for the `hip` / `rocm` targets.
+- **The dequant is a separate dispatch.** A one-matmul microtest (int4 unpack +
+  scale then `dot_general`) is 2 dispatches (elementwise dequant producer + matmul)
+  and stays 2 under every fusion flag: IREE does not fuse an elementwise producer
+  into a matmul operand load on CUDA.
+- **`linalg.quantized_matmul` / ukernels are unavailable for CUDA.** The two IREE
+  facilities that would carry a fused quantized matmul (data-tiling encodings and
+  ukernels) are gated to `hip` / `rocm` / `llvm-cpu`, not the `cuda` target.
+- **int8 `dot_general` lowers, but without int8 tensor cores.** A bare `i8 x i8 ->
+  i32` matmul compiles to a single CUDA kernel (like the f16 one), but the codegen
+  upcasts `i8 -> i32` (17 `sext`, zero `dp4a` / `mma.*.s8`), so an int8 path would
+  not beat f16 here.
+
+**Split.** The graph-level dequant is necessary but the fused kernel is upstream
+IREE's job (a CUDA quantized-matmul codegen path / encoding resolver / ukernel that
+does not exist in 3.11.0). No in-tree representation or flag realizes it on CUDA. The
+realized low-precision bandwidth win today is **f16-resident weights (#572)**; the
+packed int8 path is a correctness-verified foundation but is dominated on CUDA until
+upstream fusion lands. #574 therefore ships the minimal in-tree packed representation
+(folding in the bf16 scales / biases limitation) and tracks the upstream fused
+quantized-matmul, rather than forcing an int8-beats-f16 win in-tree.
+
 ## File map
 
 | Path | Purpose |
