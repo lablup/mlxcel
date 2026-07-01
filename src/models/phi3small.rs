@@ -18,7 +18,8 @@
 //! - Fused query_key_value projection
 //! - GeGELU activation (gelu * (linear + 1))
 //! - mup scaling (attention, embedding, width multipliers)
-//! - Blocksparse attention pattern (with dense fallback)
+//! - Blocksparse attention pattern (local block window + per-head vertical
+//!   stride) on non-dense layers; periodic fully-dense layers stay causal
 //! - LayerNorm (not RMSNorm)
 //! - bias=True for all projections
 //! - Tied word embeddings
@@ -138,6 +139,9 @@ pub struct Attention {
     pub rope_dims: i32,
     pub rope_base: f32,
     pub block_sparse: bool, // Whether this layer uses block sparse attention
+    pub blocksparse_block_size: i32,
+    pub blocksparse_num_local_blocks: i32,
+    pub blocksparse_vert_stride: i32,
 }
 
 impl Attention {
@@ -203,18 +207,16 @@ impl Attention {
         // Update KV cache and get sliced views
         let (cache_k, cache_v) = cache.update_and_fetch(k, v);
 
-        // Scaled dot-product attention
-        // Note: block sparse attention would be more efficient for long sequences,
-        // but we use dense attention for simplicity (fallback)
-        let attn_out = if l > 1 && mask.is_none() {
-            mlxcel_core::causal_attention(&q, &cache_k, &cache_v, self.scale, 0.0, 0)
+        // Scaled dot-product attention.
+        //
+        // Non-dense layers use the Phi-3-small blocksparse pattern (local window
+        // of blocks plus a per-head vertical stride); the periodic dense layers
+        // (`block_sparse == false`) keep the plain causal path. See
+        // `blocksparse_attention` for the mask/selection details.
+        let attn_out = if self.block_sparse {
+            self.blocksparse_attention(&q, &cache_k, &cache_v, l, offset, mask)
         } else {
-            let mask_ptr = mask.map(|m| m as *const _).unwrap_or(std::ptr::null());
-            unsafe {
-                mlxcel_core::layers::attention_from_ptr(
-                    &q, &cache_k, &cache_v, self.scale, mask_ptr, 0.0, 0,
-                )
-            }
+            self.dense_attention(&q, &cache_k, &cache_v, l, mask)
         };
 
         // Transpose back and reshape
@@ -223,6 +225,104 @@ impl Attention {
 
         // Output projection
         self.dense.forward(&attn_out)
+    }
+
+    /// Plain causal attention, used by the periodic dense layers
+    /// (`block_sparse == false`) and by short-context blocksparse layers where
+    /// the pattern degenerates to causal. Byte-for-byte the original fallback.
+    fn dense_attention(
+        &self,
+        q: &MlxArray,
+        cache_k: &MlxArray,
+        cache_v: &MlxArray,
+        l: i32,
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        if l > 1 && mask.is_none() {
+            mlxcel_core::causal_attention(q, cache_k, cache_v, self.scale, 0.0, 0)
+        } else {
+            let mask_ptr = mask.map(|m| m as *const _).unwrap_or(std::ptr::null());
+            // SAFETY: `mask_ptr` is either null or a live `MlxArray` for this call.
+            unsafe {
+                mlxcel_core::layers::attention_from_ptr(
+                    q, cache_k, cache_v, self.scale, mask_ptr, 0.0, 0,
+                )
+            }
+        }
+    }
+
+    /// Phi-3-small blocksparse attention for a non-dense layer.
+    ///
+    /// A query token at block `qb` attends a key block `kb` (with `kb <= qb`)
+    /// when the key block is inside the local window
+    /// (`qb - kb < blocksparse_num_local_blocks`) OR the key block is selected
+    /// by the per-head vertical stride (`(kb + head + 1) % blocksparse_vert_stride
+    /// == 0`). Token-level causality is applied on top so intra-block ordering
+    /// matches the reference. This mirrors mlx-lm's
+    /// `mlx_lm/models/phi3small.py` (`Attention._block_sparse_attention` +
+    /// `_block_sparse_mask`).
+    ///
+    /// Short-context / in-window decode: when the full key length fits inside
+    /// the local window (`kv_len <= num_local_blocks * block_size`) the pattern
+    /// is exactly causal, so we reuse the dense path. This keeps short-context
+    /// output identical to the dense fallback and, for the common `L == 1`
+    /// decode inside the window, avoids materializing any per-step mask (the
+    /// maskless single-query fast path selects the whole cache directly). Beyond
+    /// the window the union of attended blocks across all heads spans the full
+    /// causal range for Phi-3-small's head count (`vert_stride` divides the head
+    /// set), so a per-head gather cannot shrink the fused-SDPA work; we build a
+    /// single additive mask (`[1, n_heads, L, kv_len]`, one row at decode) and
+    /// let the fused kernel consume it.
+    fn blocksparse_attention(
+        &self,
+        q: &MlxArray,
+        cache_k: &MlxArray,
+        cache_v: &MlxArray,
+        l: i32,
+        offset: i32,
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        let kv_len = mlxcel_core::array_shape(cache_k)[2];
+        let local_span = self.blocksparse_num_local_blocks * self.blocksparse_block_size;
+
+        // In-window: blocksparse degenerates to plain causal. Reuse the dense
+        // path so short-context output matches the dense fallback exactly and
+        // no per-step mask is allocated for in-window decode.
+        if kv_len <= local_span {
+            return self.dense_attention(q, cache_k, cache_v, l, mask);
+        }
+
+        // Long context: build the additive blocksparse mask and run fused SDPA.
+        let bs_mask = build_blocksparse_mask(
+            self.num_heads,
+            l,
+            kv_len,
+            offset,
+            self.blocksparse_block_size,
+            self.blocksparse_num_local_blocks,
+            self.blocksparse_vert_stride,
+        );
+        // Mirror the reference `if mask is not None: scores += mask`: fold any
+        // externally supplied mask (e.g. padding) into the blocksparse mask. The
+        // blocksparse mask already carries token-level causality, so this is
+        // additive and cannot create an all-`-inf` row (every query keeps its
+        // own diagonal key).
+        let bs_mask = match mask {
+            Some(m) => mlxcel_core::add(&bs_mask, m),
+            None => bs_mask,
+        };
+        // SAFETY: `bs_mask` is a live `MlxArray` for the duration of this call.
+        unsafe {
+            mlxcel_core::layers::attention_from_ptr(
+                q,
+                cache_k,
+                cache_v,
+                self.scale,
+                &*bs_mask as *const _,
+                0.0,
+                0,
+            )
+        }
     }
 
     pub fn from_weights(
@@ -267,8 +367,99 @@ impl Attention {
             rope_dims: head_dim,
             rope_base: args.rope_embedding_base,
             block_sparse,
+            blocksparse_block_size: args.blocksparse_block_size as i32,
+            blocksparse_num_local_blocks: args.blocksparse_num_local_blocks as i32,
+            blocksparse_vert_stride: args.blocksparse_vert_stride as i32,
         })
     }
+}
+
+/// Build the additive Phi-3-small blocksparse attention mask.
+///
+/// Returns a `[1, n_heads, q_len, kv_len]` additive mask (`0.0` where a query
+/// may attend a key, `-inf` otherwise) that combines, per head, the blocksparse
+/// block pattern with token-level causality. The head dimension broadcasts
+/// against the fused-SDPA score tensor `[B, n_heads, q_len, kv_len]`.
+///
+/// This is a faithful port of `mlx_lm/models/phi3small.py`
+/// (`Attention._block_sparse_mask`), including its right-aligned query-block
+/// assignment: query blocks occupy the last `ceil(q_len / block_size)` block
+/// rows of a `ceil(kv_len / block_size)`-block grid, and the token-to-block
+/// mapping reproduces the reference `repeat(...)[..., -q_len:, :kv_len]` slice.
+///
+/// Block selection for head `h`, query block `qb`, key block `kb`:
+/// `(qb >= kb) && ((qb - kb < local_blocks) || ((kb + h + 1) % vert_stride == 0))`.
+///
+/// The whole mask is built on-device with broadcasting ops; nothing of size
+/// `q_len * kv_len` is materialized on the host.
+fn build_blocksparse_mask(
+    n_heads: i32,
+    q_len: i32,
+    kv_len: i32,
+    offset: i32,
+    block_size: i32,
+    local_blocks: i32,
+    vert_stride: i32,
+) -> UniquePtr<MlxArray> {
+    use mlxcel_core::dtype;
+
+    // Block-grid geometry, matching the reference exactly.
+    let kv_blocks = (kv_len + block_size - 1) / block_size;
+    let q_blocks = (q_len + block_size - 1) / block_size;
+    let front_pad = q_blocks * block_size - q_len; // padding dropped by [-q_len:]
+    let offset_blocks = kv_blocks - q_blocks; // absolute index of the first query block
+
+    // Reusable i32 scalar operands (shape [1]) for broadcasting.
+    let block_size_arr = mlxcel_core::from_slice_i32(&[block_size], &[1]);
+    let vert_stride_arr = mlxcel_core::from_slice_i32(&[vert_stride], &[1]);
+    let local_blocks_arr = mlxcel_core::from_slice_i32(&[local_blocks], &[1]);
+    let offset_blocks_arr = mlxcel_core::from_slice_i32(&[offset_blocks], &[1]);
+    let one_arr = mlxcel_core::from_slice_i32(&[1], &[1]);
+    let zero_arr = mlxcel_core::from_slice_i32(&[0], &[1]);
+
+    // Absolute query-block index per query row -> shape [1, q_len, 1].
+    // full_row = arange(front_pad, front_pad + q_len); qb = offset_blocks + full_row // block_size.
+    let full_row = mlxcel_core::arange_i32(front_pad, front_pad + q_len, 1);
+    let qi = mlxcel_core::floor_divide(&full_row, &block_size_arr);
+    let q_block = mlxcel_core::add(&qi, &offset_blocks_arr);
+    let q_block = mlxcel_core::reshape(&q_block, &[1, q_len, 1]);
+
+    // Absolute key-block index per key column -> shape [1, 1, kv_len].
+    let k_positions = mlxcel_core::arange_i32(0, kv_len, 1);
+    let k_block = mlxcel_core::floor_divide(&k_positions, &block_size_arr);
+    let k_block = mlxcel_core::reshape(&k_block, &[1, 1, kv_len]);
+
+    // Per-head vertical stride selection -> shape [n_heads, 1, kv_len].
+    // vert[h, k] = ((k_block[k] + h + 1) % vert_stride) == 0.
+    let heads = mlxcel_core::arange_i32(0, n_heads, 1);
+    let heads = mlxcel_core::reshape(&heads, &[n_heads, 1, 1]);
+    let vert_sum = mlxcel_core::add(&k_block, &heads); // [n_heads, 1, kv_len]
+    let vert_sum = mlxcel_core::add(&vert_sum, &one_arr);
+    let vert_mod = mlxcel_core::remainder(&vert_sum, &vert_stride_arr);
+    let vert = mlxcel_core::equal(&vert_mod, &zero_arr); // bool [n_heads, 1, kv_len]
+
+    // Block-level causal + local window -> shape [1, q_len, kv_len].
+    let causal_block = mlxcel_core::greater_equal(&q_block, &k_block);
+    let block_dist = mlxcel_core::subtract(&q_block, &k_block);
+    let local = mlxcel_core::less(&block_dist, &local_blocks_arr);
+    let local_or_vert = mlxcel_core::logical_or(&local, &vert); // [n_heads, q_len, kv_len]
+    let block_attend = mlxcel_core::logical_and(&causal_block, &local_or_vert);
+
+    // Token-level causality -> shape [1, q_len, kv_len].
+    // Query token j sits at absolute position offset + j.
+    let q_tok = mlxcel_core::arange_i32(offset, offset + q_len, 1);
+    let q_tok = mlxcel_core::reshape(&q_tok, &[1, q_len, 1]);
+    let k_tok = mlxcel_core::reshape(&k_positions, &[1, 1, kv_len]);
+    let token_causal = mlxcel_core::greater_equal(&q_tok, &k_tok);
+
+    // Combined boolean attend mask -> [n_heads, q_len, kv_len].
+    let attend = mlxcel_core::logical_and(&block_attend, &token_causal);
+
+    // Convert to an additive 0 / -inf mask and add the batch axis.
+    let zero_f = mlxcel_core::zeros(&[1, 1, 1], dtype::FLOAT32);
+    let neg_inf_f = mlxcel_core::full_f32(&[1, 1, 1], f32::NEG_INFINITY, dtype::FLOAT32);
+    let additive = mlxcel_core::where_cond(&attend, &zero_f, &neg_inf_f);
+    mlxcel_core::reshape(&additive, &[1, n_heads, q_len, kv_len])
 }
 
 // MLP with GeGELU activation.
@@ -499,3 +690,7 @@ impl LanguageModel for Phi3SmallModel {
         vec![32000] // Phi3Small EOS token
     }
 }
+
+#[cfg(test)]
+#[path = "phi3small_tests.rs"]
+mod tests;
