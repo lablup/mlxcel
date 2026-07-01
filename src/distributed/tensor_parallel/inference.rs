@@ -187,7 +187,7 @@ fn fallback_architecture(model_type: ModelType) -> &'static str {
         ModelType::Glm4Moe => "glm4_moe",
         ModelType::Glm4MoeLite => "glm4_moe_lite",
         ModelType::GlmMoeDsa => "glm_moe_dsa",
-        ModelType::Ernie45 => "ernie4_5",
+        ModelType::Ernie45 | ModelType::PaddleOcrVL => "ernie4_5",
         ModelType::Ernie45Moe => "ernie4_5_moe",
         ModelType::HunyuanMoe => "hunyuan_moe",
         ModelType::HunyuanV1Dense => "hunyuan_v1_dense",

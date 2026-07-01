@@ -43,6 +43,8 @@ pub enum VlmRuntimeRef<'a> {
     MolmoPoint(&'a vision::MolmoPointVLModel),
     /// Nemotron H Nano Omni vision runtime (vision-only scope).
     NemotronHNanoOmni(&'a vision::NemotronHNanoOmniVlModel),
+    /// PaddleOCR-VL runtime (NaViT vision + ERNIE-4.5 MRoPE text).
+    PaddleOcr(&'a vision::PaddleOcrVlModel),
     /// Youtu-VL runtime.
     YoutuVL(&'a vision::YoutuVLModel),
     /// InternVL (internvl_chat) runtime.
@@ -132,6 +134,7 @@ impl LoadedModel {
             Self::Qwen3VL(model) => Some(VlmRuntimeRef::Qwen(model)),
             Self::Qwen3VLMoe(model) => Some(VlmRuntimeRef::Qwen(model)),
             Self::Qwen35VLM(model) | Self::Qwen35MoeVLM(model) => Some(VlmRuntimeRef::Qwen(model)),
+            Self::PaddleOcrVL(model) => Some(VlmRuntimeRef::PaddleOcr(model)),
             Self::MiniCPMOVLM(model) => Some(VlmRuntimeRef::MiniCPMO(model)),
             Self::MiniCPMV46VLM(model) => Some(VlmRuntimeRef::MiniCPMV46(model)),
             Self::Moondream3VLM(model) => Some(VlmRuntimeRef::Moondream3(model)),
