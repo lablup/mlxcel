@@ -73,6 +73,13 @@ mod sampler;
 #[cfg_attr(not(feature = "iree"), allow(dead_code))]
 mod weights;
 
+// Per-architecture checkpoint tensor naming (#449 M3 Stage 2d; generalized in
+// #499). Pure Rust; present under `iree` (the loader orders weights with it) and
+// under `test` (the naming schemes are unit-tested without the IREE runtime).
+#[cfg(any(feature = "iree", test))]
+#[cfg_attr(not(feature = "iree"), allow(dead_code))]
+mod weight_names;
+
 // Rust-native StableHLO emitter (#449 M3 Stage 2d, ported from the #451 spike).
 // Pure Rust; present under `iree` (the engine emits its graphs from config.json at
 // load) and under `test` (the byte-exact regression runs without the IREE

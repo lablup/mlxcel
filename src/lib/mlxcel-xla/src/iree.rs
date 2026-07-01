@@ -28,11 +28,17 @@
 //! shim, which keeps the weights resident on the device and threads the KV cache
 //! across steps. Then [`IreeLlama::prefill`] / [`IreeLlama::decode`] are token-in
 //! / token-out. Emitting from config (issue #449 M3 Stage 2d) replaced the bundled
-//! Llama-3.2-1B `.mlir` assets, so any checkpoint of a supported architecture
-//! loads: Llama (any size) and Qwen2 (plain RoPE + q/k/v bias; Stage B), the
-//! latter adding its bias tensors to `weight_specs` to match the emitted graph.
-//! An untied checkpoint (`tie_word_embeddings = false`, e.g. Llama-3.1-8B and the
-//! larger Qwen2.5 sizes) adds its `lm_head.weight` to `weight_specs`, matching the
+//! Llama-3.2-1B `.mlir` assets, so any checkpoint of a supported dense family loads:
+//! Llama, Qwen2, Qwen3, Gemma1/2/3, SmolLM3, OLMo2/3, Seed-OSS, MiMo, InternLM3,
+//! ExaOne (issues #497 / #499), and the parallel-block / norm-variant pack Cohere,
+//! Cohere2, Phi3, StableLM, StarCoder2, Granite, MiniCPM (issue #498). Each family's
+//! per-layer weight order in `weight_specs` (`weights.rs`) mirrors the emitter's arg
+//! schedule: the q/k/v biases, the Qwen3 / Gemma3 / OLMo2/3 q/k norms, the Gemma2/3
+//! feed-forward norms, the OLMo2/3 absence of an `input_layernorm`, the #498
+//! LayerNorm / o_proj / MLP biases and dense StarCoder2 MLP, and the fused Phi3
+//! `qkv_proj` / `gate_up_proj` (read once and row-sliced into the separate args). An
+//! untied checkpoint (`tie_word_embeddings = false`, e.g. Llama-3.1-8B, larger
+//! Qwen2.5, OLMo2/3, Phi3, StableLM, MiniCPM) adds its `lm_head.weight`, matching the
 //! separate `params['lm_head']` arg the emitter takes for the final projection.
 //!
 //! Proven token-exact against the HF temp-0 reference in
@@ -53,6 +59,11 @@ use safetensors::{Dtype, SafeTensors};
 use crate::emitter::{
     Config, emit_decode_ragged_with, emit_decode_with, emit_prefill_with, resolve_precision,
 };
+// The loader reads the per-architecture checkpoint-weight order from
+// `weights::weight_specs`, which sources its names from `weight_names::scheme_names`
+// (issue #499 naming schemes) and covers the #498 dense pack (LayerNorm / o_proj /
+// MLP biases, the dense StarCoder2 MLP, and the row-sliced fused Phi3 projections).
+// Both are pure-Rust and unit-tested without the `iree` feature.
 use crate::weights::{
     WeightSpec, bf16_to_f32, dequantize_affine, f16_to_f32, f32_le_to_f32, slice_rows, weight_specs,
 };
