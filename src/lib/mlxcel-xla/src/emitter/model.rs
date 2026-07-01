@@ -423,6 +423,434 @@ fn apply_rope(b: &mut Builder, x: &Val, cos: &Val, sin: &Val, heads: usize, d: u
     b.add(&xc, &rs)
 }
 
+// ===========================================================================
+// shared per-layer attention core (issue #494)
+// ===========================================================================
+//
+// One driver, [`emit_attention`], emits the complete per-layer attention block
+// (input norm, q/k/v projection + bias, RoPE, KV cache write/read, GQA scores,
+// scale, soft-cap, mask, softmax, context, o_proj, post-attn norm, residual) for
+// the single-sequence decode, ragged decode, and prefill graph kinds. The
+// architecture-level surface (the norm offset, the projection bias, the
+// attention scale, the Gemma2 soft-cap and post-attn norm, and the reserved
+// per-head q/k-norm hook) lives in the driver and its shared free helpers, so a
+// new dense family customizes attention once and reaches all three paths
+// together. The graph-kind-specific layout (activation rank, RoPE tables and
+// their broadcast, KV cache indexing, GQA `dot_general` dims, softmax axis) is
+// supplied per kind by [`AttnLayout`]. Each method emits the exact op sequence
+// the path previously inlined, so every existing graph stays byte-for-byte
+// identical. The uniform-B batched decode is a superseded Stage-1 graph off the
+// serve path and keeps its own inline attention (out of this refactor's scope).
+
+/// The graph-kind-specific attention layout: everything that differs between the
+/// single-sequence, ragged, and prefill paths. Each variant owns the per-graph
+/// constants its methods read (the RoPE cos/sin tensors, the additive key mask,
+/// and any per-row index vectors), all built once in the graph's head before the
+/// layer loop.
+enum AttnLayout {
+    /// Single-token decode: rank-reduced activations (`[heads, d]`), a shared
+    /// `[d]` RoPE vector, an `[S]` key mask, and a shared-offset KV write at
+    /// `cache_len`.
+    Single {
+        cos: Val,
+        sin: Val,
+        mask: Val,
+        cache_len: Val,
+    },
+    /// Ragged (continuous-batching) decode: `[B, ...]` activations, a per-row
+    /// `[B, d]` RoPE gather, a per-row `[B, S]` mask, and an unrolled per-row KV
+    /// write at each row's own `pos[b]`.
+    Ragged {
+        bsz: usize,
+        cos: Val,
+        sin: Val,
+        mask: Val,
+        pos: Val,
+        row_idx: Vec<Val>,
+    },
+    /// Prefill: `[Lp, ...]` activations, a per-position `[Lp, d]` RoPE gather, an
+    /// `[Lp, Lp]` causal mask, and a whole-block KV write into the zero cache.
+    /// Scores read the freshly projected K/V directly (no cache read-back).
+    Prefill {
+        lp: usize,
+        cos: Val,
+        sin: Val,
+        mask: Val,
+    },
+}
+
+impl AttnLayout {
+    /// RMSNorm at this kind's activation rank: rank-reduced for single decode,
+    /// per-row over the sequence axis otherwise.
+    fn norm(&self, b: &mut Builder, c: &Config, k: &Consts, x: &Val, w: &Val) -> Val {
+        match self {
+            AttnLayout::Single { .. } => rms_norm(b, x, w, k, c.hidden),
+            AttnLayout::Ragged { bsz, .. } => rms_norm_seq(b, x, w, k, *bsz, c.hidden),
+            AttnLayout::Prefill { lp, .. } => rms_norm_seq(b, x, w, k, *lp, c.hidden),
+        }
+    }
+
+    /// Project q/k/v, add the optional q/k/v bias, and reshape to head layout
+    /// (`[heads, d]` single; `[N, heads, d]` seq). RoPE is applied separately so
+    /// a future per-head q/k norm can slot in between (see [`emit_attention`]).
+    fn project_qkv(&self, b: &mut Builder, c: &Config, hn: &Val, lw: &LayerW) -> (Val, Val, Val) {
+        let d = c.head_dim;
+        let (nq, nkv) = (c.n_q, c.n_kv);
+        match self {
+            AttnLayout::Single { .. } => {
+                let q = b.linear(hn, &lw.wq);
+                let q = add_proj_bias(b, q, &lw.bq);
+                let q = b.reshape(&q, vec![nq, d]);
+                let kk = b.linear(hn, &lw.wk);
+                let kk = add_proj_bias(b, kk, &lw.bk);
+                let kk = b.reshape(&kk, vec![nkv, d]);
+                let vv = b.linear(hn, &lw.wv);
+                let vv = add_proj_bias(b, vv, &lw.bv);
+                let vv = b.reshape(&vv, vec![nkv, d]);
+                (q, kk, vv)
+            }
+            AttnLayout::Ragged { bsz, .. } => Self::project_qkv_seq(b, c, hn, lw, *bsz),
+            AttnLayout::Prefill { lp, .. } => Self::project_qkv_seq(b, c, hn, lw, *lp),
+        }
+    }
+
+    /// The `[N, ...]` (seq) q/k/v projection shared by ragged decode and prefill.
+    fn project_qkv_seq(
+        b: &mut Builder,
+        c: &Config,
+        hn: &Val,
+        lw: &LayerW,
+        n: usize,
+    ) -> (Val, Val, Val) {
+        let d = c.head_dim;
+        let (nq, nkv) = (c.n_q, c.n_kv);
+        let q = b.linear_seq(hn, &lw.wq);
+        let q = add_proj_bias_seq(b, q, &lw.bq, n, nq * d);
+        let q = b.reshape(&q, vec![n, nq, d]);
+        let kk = b.linear_seq(hn, &lw.wk);
+        let kk = add_proj_bias_seq(b, kk, &lw.bk, n, nkv * d);
+        let kk = b.reshape(&kk, vec![n, nkv, d]);
+        let vv = b.linear_seq(hn, &lw.wv);
+        let vv = add_proj_bias_seq(b, vv, &lw.bv, n, nkv * d);
+        let vv = b.reshape(&vv, vec![n, nkv, d]);
+        (q, kk, vv)
+    }
+
+    /// Apply this kind's RoPE to q and k (v is never rotated).
+    fn rope_qk(&self, b: &mut Builder, c: &Config, q: &Val, kk: &Val) -> (Val, Val) {
+        let d = c.head_dim;
+        let (nq, nkv) = (c.n_q, c.n_kv);
+        match self {
+            AttnLayout::Single { cos, sin, .. } => {
+                let q = apply_rope(b, q, cos, sin, nq, d);
+                let kk = apply_rope(b, kk, cos, sin, nkv, d);
+                (q, kk)
+            }
+            AttnLayout::Ragged { bsz, cos, sin, .. } => {
+                let q = apply_rope_ragged(b, q, cos, sin, *bsz, nq, d);
+                let kk = apply_rope_ragged(b, kk, cos, sin, *bsz, nkv, d);
+                (q, kk)
+            }
+            AttnLayout::Prefill { lp, cos, sin, .. } => {
+                let q = apply_rope_seq(b, q, cos, sin, *lp, nq, d);
+                let kk = apply_rope_seq(b, kk, cos, sin, *lp, nkv, d);
+                (q, kk)
+            }
+        }
+    }
+
+    /// Write the new K/V into the cache and return the (K, V) tensors the scores
+    /// read: the freshly projected block for prefill (no read-back), the layer's
+    /// cache slab otherwise. Mutates `kcache` / `vcache` in place.
+    #[allow(clippy::too_many_arguments)]
+    fn write_read_kv(
+        &self,
+        b: &mut Builder,
+        k: &Consts,
+        c: &Config,
+        li: usize,
+        kk: &Val,
+        vv: &Val,
+        kcache: &mut Val,
+        vcache: &mut Val,
+    ) -> (Val, Val) {
+        let d = c.head_dim;
+        let nkv = c.n_kv;
+        match self {
+            AttnLayout::Single { cache_len, .. } => {
+                let k_upd = b.reshape(kk, vec![1, 1, nkv, d]);
+                *kcache = b.dynamic_update_slice(
+                    &*kcache,
+                    &k_upd,
+                    &[&k.layer_idx[li], cache_len, &k.c0, &k.c0],
+                );
+                let v_upd = b.reshape(vv, vec![1, 1, nkv, d]);
+                *vcache = b.dynamic_update_slice(
+                    &*vcache,
+                    &v_upd,
+                    &[&k.layer_idx[li], cache_len, &k.c0, &k.c0],
+                );
+                let kl = b.slice(&*kcache, &[(li, li + 1), (0, MAX_SEQ), (0, nkv), (0, d)]);
+                let kl = b.reshape(&kl, vec![MAX_SEQ, nkv, d]);
+                let vl = b.slice(&*vcache, &[(li, li + 1), (0, MAX_SEQ), (0, nkv), (0, d)]);
+                let vl = b.reshape(&vl, vec![MAX_SEQ, nkv, d]);
+                (kl, vl)
+            }
+            AttnLayout::Ragged {
+                bsz, pos, row_idx, ..
+            } => {
+                // Row r writes its `[1,1,1,nkv,d]` K/V at `[r, li, pos[r]]`. `r`
+                // indexes both the row consts and the (r, r+1) slice ranges, so a
+                // plain iterator does not fit; keep the range loop.
+                #[allow(clippy::needless_range_loop)]
+                for r in 0..*bsz {
+                    let pos_r = b.slice(pos, &[(r, r + 1)]);
+                    let pos_r = b.reshape(&pos_r, vec![]);
+                    let kk_r = b.slice(kk, &[(r, r + 1), (0, nkv), (0, d)]);
+                    let kk_upd = b.reshape(&kk_r, vec![1, 1, 1, nkv, d]);
+                    *kcache = b.dynamic_update_slice(
+                        &*kcache,
+                        &kk_upd,
+                        &[&row_idx[r], &k.layer_idx[li], &pos_r, &k.c0, &k.c0],
+                    );
+                    let vv_r = b.slice(vv, &[(r, r + 1), (0, nkv), (0, d)]);
+                    let vv_upd = b.reshape(&vv_r, vec![1, 1, 1, nkv, d]);
+                    *vcache = b.dynamic_update_slice(
+                        &*vcache,
+                        &vv_upd,
+                        &[&row_idx[r], &k.layer_idx[li], &pos_r, &k.c0, &k.c0],
+                    );
+                }
+                let kl = b.slice(
+                    &*kcache,
+                    &[(0, *bsz), (li, li + 1), (0, MAX_SEQ), (0, nkv), (0, d)],
+                );
+                let kl = b.reshape(&kl, vec![*bsz, MAX_SEQ, nkv, d]);
+                let vl = b.slice(
+                    &*vcache,
+                    &[(0, *bsz), (li, li + 1), (0, MAX_SEQ), (0, nkv), (0, d)],
+                );
+                let vl = b.reshape(&vl, vec![*bsz, MAX_SEQ, nkv, d]);
+                (kl, vl)
+            }
+            AttnLayout::Prefill { lp, .. } => {
+                let k_upd = b.reshape(kk, vec![1, *lp, nkv, d]);
+                *kcache = b.dynamic_update_slice(
+                    &*kcache,
+                    &k_upd,
+                    &[&k.layer_idx[li], &k.c0, &k.c0, &k.c0],
+                );
+                let v_upd = b.reshape(vv, vec![1, *lp, nkv, d]);
+                *vcache = b.dynamic_update_slice(
+                    &*vcache,
+                    &v_upd,
+                    &[&k.layer_idx[li], &k.c0, &k.c0, &k.c0],
+                );
+                (kk.clone(), vv.clone())
+            }
+        }
+    }
+
+    /// The GQA scores `dot_general` in this kind's score shape (single / ragged
+    /// reshape to `[.., nq, S]`; prefill keeps `[nkv, Lp, g, Lp]`), pre-scale.
+    fn raw_scores(&self, b: &mut Builder, c: &Config, q: &Val, kslab: &Val) -> Val {
+        let d = c.head_dim;
+        let (nq, nkv, g) = (c.n_q, c.n_kv, c.group());
+        match self {
+            AttnLayout::Single { .. } => {
+                let q_r = b.reshape(q, vec![nkv, g, d]);
+                let scores =
+                    b.dot_general(&q_r, kslab, &[0], &[1], &[2], &[2], vec![nkv, g, MAX_SEQ]);
+                b.reshape(&scores, vec![nq, MAX_SEQ])
+            }
+            AttnLayout::Ragged { bsz, .. } => {
+                let q_r = b.reshape(q, vec![*bsz, nkv, g, d]);
+                let scores = b.dot_general(
+                    &q_r,
+                    kslab,
+                    &[0, 1],
+                    &[0, 2],
+                    &[3],
+                    &[3],
+                    vec![*bsz, nkv, g, MAX_SEQ],
+                );
+                b.reshape(&scores, vec![*bsz, nq, MAX_SEQ])
+            }
+            AttnLayout::Prefill { lp, .. } => {
+                let q4 = b.reshape(q, vec![*lp, nkv, g, d]);
+                b.dot_general(&q4, kslab, &[1], &[1], &[3], &[2], vec![nkv, *lp, g, *lp])
+            }
+        }
+    }
+
+    /// Broadcast the additive key mask to the score shape and add it.
+    fn add_mask(&self, b: &mut Builder, c: &Config, scores: &Val) -> Val {
+        let (nq, nkv, g) = (c.n_q, c.n_kv, c.group());
+        match self {
+            AttnLayout::Single { mask, .. } => {
+                let mb = b.broadcast(mask, &[1], vec![nq, MAX_SEQ]);
+                b.add(scores, &mb)
+            }
+            AttnLayout::Ragged { bsz, mask, .. } => {
+                let mb = b.broadcast(mask, &[0, 2], vec![*bsz, nq, MAX_SEQ]);
+                b.add(scores, &mb)
+            }
+            AttnLayout::Prefill { lp, mask, .. } => {
+                let mb = b.broadcast(mask, &[1, 3], vec![nkv, *lp, g, *lp]);
+                b.add(scores, &mb)
+            }
+        }
+    }
+
+    /// The softmax reduction axis (the key axis) in this kind's score shape.
+    fn score_axis(&self) -> usize {
+        match self {
+            AttnLayout::Single { .. } => 1,
+            AttnLayout::Ragged { .. } => 2,
+            AttnLayout::Prefill { .. } => 3,
+        }
+    }
+
+    /// The attention-weighted V context in `[.., nq*d]`, ready for o_proj.
+    fn context(&self, b: &mut Builder, c: &Config, attn: &Val, vslab: &Val) -> Val {
+        let d = c.head_dim;
+        let (nq, nkv, g) = (c.n_q, c.n_kv, c.group());
+        match self {
+            AttnLayout::Single { .. } => {
+                let attn_r = b.reshape(attn, vec![nkv, g, MAX_SEQ]);
+                let o = b.dot_general(&attn_r, vslab, &[0], &[1], &[2], &[0], vec![nkv, g, d]);
+                let o = b.reshape(&o, vec![nq, d]);
+                b.reshape(&o, vec![nq * d])
+            }
+            AttnLayout::Ragged { bsz, .. } => {
+                let attn_r = b.reshape(attn, vec![*bsz, nkv, g, MAX_SEQ]);
+                let o = b.dot_general(
+                    &attn_r,
+                    vslab,
+                    &[0, 1],
+                    &[0, 2],
+                    &[3],
+                    &[1],
+                    vec![*bsz, nkv, g, d],
+                );
+                let o = b.reshape(&o, vec![*bsz, nq, d]);
+                b.reshape(&o, vec![*bsz, nq * d])
+            }
+            AttnLayout::Prefill { lp, .. } => {
+                let o = b.dot_general(attn, vslab, &[0], &[1], &[3], &[0], vec![nkv, *lp, g, d]);
+                let o = b.transpose(&o, &[1, 0, 2, 3]);
+                b.reshape(&o, vec![*lp, nq * d])
+            }
+        }
+    }
+
+    /// The output projection at this kind's activation rank.
+    fn o_proj(&self, b: &mut Builder, o: &Val, lw: &LayerW) -> Val {
+        match self {
+            AttnLayout::Single { .. } => b.linear(o, &lw.wo),
+            _ => b.linear_seq(o, &lw.wo),
+        }
+    }
+}
+
+/// Numerically-stable softmax over `axis` of `scores` (max-subtract, exp,
+/// sum-divide). The keep-dims for the max/sum broadcasts are every axis but
+/// `axis`, so one helper serves the single (`axis 1`), ragged (`axis 2`), and
+/// prefill (`axis 3`) score ranks identically.
+fn attn_softmax(b: &mut Builder, k: &Consts, scores: &Val, axis: usize) -> Val {
+    let shape = scores.ty.shape.clone();
+    let keep: Vec<usize> = (0..shape.len()).filter(|&i| i != axis).collect();
+    let m = b.reduce_max(scores, axis, &k.neg_inf);
+    let m_b = b.broadcast(&m, &keep, shape.clone());
+    let sh = b.subtract(scores, &m_b);
+    let e = b.exponential(&sh);
+    let s = b.reduce_add(&e, axis, &k.zero);
+    let s_b = b.broadcast(&s, &keep, shape);
+    b.divide(&e, &s_b)
+}
+
+/// Scale the raw scores by the attention scale and, for Gemma2, soft-cap them,
+/// both before the mask. The scalar scale broadcasts to whatever score shape the
+/// layout produced and the soft-cap is elementwise, so this is shape-agnostic.
+fn apply_scale_and_softcap(b: &mut Builder, c: &Config, k: &Consts, scores: Val) -> Val {
+    let scale_b = b.broadcast(&k.scale, &[], scores.ty.shape.clone());
+    let scores = b.multiply(&scores, &scale_b);
+    match c.attn_logit_softcap {
+        Some(cap) => softcap(b, &scores, cap),
+        None => scores,
+    }
+}
+
+/// The architecture RMSNorm applied at a layout's rank: the Gemma2 `(1 + w)`
+/// weight offset (a no-op handle-copy for Llama / Qwen2) followed by the layout's
+/// rank-appropriate RMSNorm.
+fn arch_norm(
+    b: &mut Builder,
+    c: &Config,
+    k: &Consts,
+    layout: &AttnLayout,
+    x: &Val,
+    w_raw: &Val,
+) -> Val {
+    let w = norm_w(b, w_raw, c, k, c.hidden);
+    layout.norm(b, c, k, x, &w)
+}
+
+/// Gemma2's post-attention RMSNorm on the sublayer output before the residual (a
+/// no-op for Llama / Qwen2, which have no such norm), applied at the layout's rank.
+fn post_attn_norm(
+    b: &mut Builder,
+    c: &Config,
+    k: &Consts,
+    layout: &AttnLayout,
+    attn_out: Val,
+    lw: &LayerW,
+) -> Val {
+    if c.gemma2 {
+        let w = norm_w(b, &lw.post_ln, c, k, c.hidden);
+        layout.norm(b, c, k, &attn_out, &w)
+    } else {
+        attn_out
+    }
+}
+
+/// Emit one layer's complete attention block for graph kind `layout`, returning
+/// the residual stream after the attention residual add. The op sequence (input
+/// norm, q/k/v projection + bias, RoPE, KV write/read, GQA scores, scale,
+/// soft-cap, mask, softmax, context, o_proj, post-attn norm, residual) is the
+/// architecture surface a new dense family customizes once; `layout` supplies the
+/// per-graph-kind ranks, cache indexing, and dot shapes. Byte-for-byte identical
+/// to the op sequence each path previously inlined.
+#[allow(clippy::too_many_arguments)]
+fn emit_attention(
+    b: &mut Builder,
+    c: &Config,
+    k: &Consts,
+    lw: &LayerW,
+    li: usize,
+    x: &Val,
+    layout: &AttnLayout,
+    kcache: &mut Val,
+    vcache: &mut Val,
+) -> Val {
+    let hn = arch_norm(b, c, k, layout, x, &lw.in_ln);
+    let (q, kk, vv) = layout.project_qkv(b, c, &hn, lw);
+    // Reserved hook: a future per-head q/k normalization (e.g. Qwen3) is applied
+    // to q and kk here, once, and reaches the single / ragged / prefill paths
+    // together. No dense family the emitter serves emits it yet, so nothing is
+    // emitted today and every existing graph is unchanged.
+    let (q, kk) = layout.rope_qk(b, c, &q, &kk);
+    let (kslab, vslab) = layout.write_read_kv(b, k, c, li, &kk, &vv, kcache, vcache);
+    let scores = layout.raw_scores(b, c, &q, &kslab);
+    let scores = apply_scale_and_softcap(b, c, k, scores);
+    let scores = layout.add_mask(b, c, &scores);
+    let attn = attn_softmax(b, k, &scores, layout.score_axis());
+    let o = layout.context(b, c, &attn, &vslab);
+    let attn_out = layout.o_proj(b, &o, lw);
+    let attn_out = post_attn_norm(b, c, k, layout, attn_out, lw);
+    b.add(x, &attn_out)
+}
+
 /// Emit the complete decode_step module text. With `sample`, the graph ends in
 /// an on-device argmax and returns the next token id (`tensor<i32>`, the Phase
 /// 2b pattern); otherwise it returns the raw `[V]` logits.
@@ -433,9 +861,6 @@ pub fn emit_decode(c: &Config, sample: bool) -> String {
 
     let h = c.hidden;
     let d = c.head_dim;
-    let nq = c.n_q;
-    let nkv = c.n_kv;
-    let g = c.group();
 
     // --- head: embed gather, rope vectors, decode key mask ---
     let emb_row = b.dynamic_slice(&a.embed, &[&a.token, &k.c0], vec![1, h]);
@@ -460,85 +885,21 @@ pub fn emit_decode(c: &Config, sample: bool) -> String {
     let negs_s = b.broadcast(&k.neg_big, &[], vec![MAX_SEQ]);
     let kmask = b.select(&valid, &zeros_s, &negs_s);
 
+    let layout = AttnLayout::Single {
+        cos: cos_vec,
+        sin: sin_vec,
+        mask: kmask,
+        cache_len: a.cache_len.clone(),
+    };
+
     let mut kcache = a.kcache.clone();
     let mut vcache = a.vcache.clone();
 
     for li in 0..c.n_layers {
         let lw = &a.layers[li];
 
-        // attention block
-        let in_ln_w = norm_w(&mut b, &lw.in_ln, c, &k, h);
-        let hn = rms_norm(&mut b, &x, &in_ln_w, &k, h);
-        let q = b.linear(&hn, &lw.wq);
-        let q = add_proj_bias(&mut b, q, &lw.bq);
-        let q = b.reshape(&q, vec![nq, d]);
-        let kk = b.linear(&hn, &lw.wk);
-        let kk = add_proj_bias(&mut b, kk, &lw.bk);
-        let kk = b.reshape(&kk, vec![nkv, d]);
-        let vv = b.linear(&hn, &lw.wv);
-        let vv = add_proj_bias(&mut b, vv, &lw.bv);
-        let vv = b.reshape(&vv, vec![nkv, d]);
-
-        let q = apply_rope(&mut b, &q, &cos_vec, &sin_vec, nq, d);
-        let kk = apply_rope(&mut b, &kk, &cos_vec, &sin_vec, nkv, d);
-
-        // write new K/V at [li, cache_len]
-        let k_upd = b.reshape(&kk, vec![1, 1, nkv, d]);
-        kcache = b.dynamic_update_slice(
-            &kcache,
-            &k_upd,
-            &[&k.layer_idx[li], &a.cache_len, &k.c0, &k.c0],
-        );
-        let v_upd = b.reshape(&vv, vec![1, 1, nkv, d]);
-        vcache = b.dynamic_update_slice(
-            &vcache,
-            &v_upd,
-            &[&k.layer_idx[li], &a.cache_len, &k.c0, &k.c0],
-        );
-
-        // read this layer's cache slabs [S, nkv, d]
-        let kl = b.slice(&kcache, &[(li, li + 1), (0, MAX_SEQ), (0, nkv), (0, d)]);
-        let kl = b.reshape(&kl, vec![MAX_SEQ, nkv, d]);
-        let vl = b.slice(&vcache, &[(li, li + 1), (0, MAX_SEQ), (0, nkv), (0, d)]);
-        let vl = b.reshape(&vl, vec![MAX_SEQ, nkv, d]);
-
-        // GQA scores via batched dot_general (q head h uses kv head h/g)
-        let q_r = b.reshape(&q, vec![nkv, g, d]); // head h = kv*g + grp
-        let scores = b.dot_general(&q_r, &kl, &[0], &[1], &[2], &[2], vec![nkv, g, MAX_SEQ]);
-        let scores = b.reshape(&scores, vec![nq, MAX_SEQ]);
-        let scale_b = b.broadcast(&k.scale, &[], vec![nq, MAX_SEQ]);
-        let scores = b.multiply(&scores, &scale_b);
-        // Gemma2 attention logit soft-cap, applied to the scaled scores before the mask.
-        let scores = match c.attn_logit_softcap {
-            Some(cap) => softcap(&mut b, &scores, cap),
-            None => scores,
-        };
-        let kmask_b = b.broadcast(&kmask, &[1], vec![nq, MAX_SEQ]);
-        let scores = b.add(&scores, &kmask_b);
-
-        // softmax over the key axis
-        let m = b.reduce_max(&scores, 1, &k.neg_inf);
-        let m_b = b.broadcast(&m, &[0], vec![nq, MAX_SEQ]);
-        let sh = b.subtract(&scores, &m_b);
-        let e = b.exponential(&sh);
-        let s = b.reduce_add(&e, 1, &k.zero);
-        let s_b = b.broadcast(&s, &[0], vec![nq, MAX_SEQ]);
-        let attn = b.divide(&e, &s_b);
-
-        // context: out[h,d] = sum_s attn[h,s] * vl[s, h/g, d]
-        let attn_r = b.reshape(&attn, vec![nkv, g, MAX_SEQ]);
-        let o = b.dot_general(&attn_r, &vl, &[0], &[1], &[2], &[0], vec![nkv, g, d]);
-        let o = b.reshape(&o, vec![nq, d]);
-        let o = b.reshape(&o, vec![nq * d]);
-        let attn_out = b.linear(&o, &lw.wo);
-        // Gemma2: post-attention norm on the sublayer output before the residual.
-        let attn_out = if c.gemma2 {
-            let w = norm_w(&mut b, &lw.post_ln, c, &k, h);
-            rms_norm(&mut b, &attn_out, &w, &k, h)
-        } else {
-            attn_out
-        };
-        x = b.add(&x, &attn_out);
+        // attention block (shared per-layer core, issue #494)
+        x = emit_attention(&mut b, c, &k, lw, li, &x, &layout, &mut kcache, &mut vcache);
 
         // MLP. Pre-MLP norm: Llama / Qwen2 use post_attention_layernorm; Gemma2
         // uses pre_feedforward_layernorm (post_attention_layernorm became the
@@ -1018,10 +1379,6 @@ pub fn emit_decode_ragged(c: &Config, bsz: usize, sample: bool) -> String {
     let row_idx: Vec<Val> = (0..bsz).map(|i| b.const_i32(i as i32)).collect();
 
     let h = c.hidden;
-    let d = c.head_dim;
-    let nq = c.n_q;
-    let nkv = c.n_kv;
-    let g = c.group();
 
     // --- head: per-row embed gather, per-row rope gather, per-row key mask ---
     let tok_idx = b.reshape(&a.token, vec![bsz, 1]);
@@ -1047,113 +1404,23 @@ pub fn emit_decode_ragged(c: &Config, bsz: usize, sample: bool) -> String {
     let negs = b.broadcast(&k.neg_big, &[], vec![bsz, MAX_SEQ]);
     let kmask = b.select(&valid, &zeros, &negs); // [B, S]
 
+    let layout = AttnLayout::Ragged {
+        bsz,
+        cos,
+        sin,
+        mask: kmask,
+        pos: a.pos.clone(),
+        row_idx,
+    };
+
     let mut kcache = a.kcache.clone();
     let mut vcache = a.vcache.clone();
 
     for li in 0..c.n_layers {
         let lw = &a.layers[li];
 
-        let in_ln_w = norm_w(&mut b, &lw.in_ln, c, &k, h);
-        let hn = rms_norm_seq(&mut b, &x, &in_ln_w, &k, bsz, h); // [B, H]
-        let q = b.linear_seq(&hn, &lw.wq);
-        let q = add_proj_bias_seq(&mut b, q, &lw.bq, bsz, nq * d);
-        let q = b.reshape(&q, vec![bsz, nq, d]);
-        let kk = b.linear_seq(&hn, &lw.wk);
-        let kk = add_proj_bias_seq(&mut b, kk, &lw.bk, bsz, nkv * d);
-        let kk = b.reshape(&kk, vec![bsz, nkv, d]);
-        let vv = b.linear_seq(&hn, &lw.wv);
-        let vv = add_proj_bias_seq(&mut b, vv, &lw.bv, bsz, nkv * d);
-        let vv = b.reshape(&vv, vec![bsz, nkv, d]);
-
-        let q = apply_rope_ragged(&mut b, &q, &cos, &sin, bsz, nq, d);
-        let kk = apply_rope_ragged(&mut b, &kk, &cos, &sin, bsz, nkv, d);
-
-        // per-row KV write: row r writes its [1,1,1,nkv,d] K/V at [r, li, pos[r]].
-        // `r` indexes the row consts AND the slice ranges (r, r+1), so a plain
-        // iterator does not fit; keep the range loop.
-        #[allow(clippy::needless_range_loop)]
-        for r in 0..bsz {
-            let pos_r = b.slice(&a.pos, &[(r, r + 1)]); // [1]
-            let pos_r = b.reshape(&pos_r, vec![]); // scalar i32 offset
-            let kk_r = b.slice(&kk, &[(r, r + 1), (0, nkv), (0, d)]);
-            let kk_upd = b.reshape(&kk_r, vec![1, 1, 1, nkv, d]);
-            kcache = b.dynamic_update_slice(
-                &kcache,
-                &kk_upd,
-                &[&row_idx[r], &k.layer_idx[li], &pos_r, &k.c0, &k.c0],
-            );
-            let vv_r = b.slice(&vv, &[(r, r + 1), (0, nkv), (0, d)]);
-            let vv_upd = b.reshape(&vv_r, vec![1, 1, 1, nkv, d]);
-            vcache = b.dynamic_update_slice(
-                &vcache,
-                &vv_upd,
-                &[&row_idx[r], &k.layer_idx[li], &pos_r, &k.c0, &k.c0],
-            );
-        }
-
-        // read this layer's cache slabs [B, S, nkv, d]
-        let kl = b.slice(
-            &kcache,
-            &[(0, bsz), (li, li + 1), (0, MAX_SEQ), (0, nkv), (0, d)],
-        );
-        let kl = b.reshape(&kl, vec![bsz, MAX_SEQ, nkv, d]);
-        let vl = b.slice(
-            &vcache,
-            &[(0, bsz), (li, li + 1), (0, MAX_SEQ), (0, nkv), (0, d)],
-        );
-        let vl = b.reshape(&vl, vec![bsz, MAX_SEQ, nkv, d]);
-
-        // GQA scores (identical to uniform-B); only the mask below is per-row.
-        let q_r = b.reshape(&q, vec![bsz, nkv, g, d]);
-        let scores = b.dot_general(
-            &q_r,
-            &kl,
-            &[0, 1],
-            &[0, 2],
-            &[3],
-            &[3],
-            vec![bsz, nkv, g, MAX_SEQ],
-        );
-        let scores = b.reshape(&scores, vec![bsz, nq, MAX_SEQ]);
-        let scale_b = b.broadcast(&k.scale, &[], vec![bsz, nq, MAX_SEQ]);
-        let scores = b.multiply(&scores, &scale_b);
-        // Gemma2 attention logit soft-cap on the scaled scores before the mask.
-        let scores = match c.attn_logit_softcap {
-            Some(cap) => softcap(&mut b, &scores, cap),
-            None => scores,
-        };
-        let kmask_b = b.broadcast(&kmask, &[0, 2], vec![bsz, nq, MAX_SEQ]); // [B,S] -> [B,nq,S]
-        let scores = b.add(&scores, &kmask_b);
-
-        let m = b.reduce_max(&scores, 2, &k.neg_inf);
-        let m_b = b.broadcast(&m, &[0, 1], vec![bsz, nq, MAX_SEQ]);
-        let sh = b.subtract(&scores, &m_b);
-        let e = b.exponential(&sh);
-        let s = b.reduce_add(&e, 2, &k.zero);
-        let s_b = b.broadcast(&s, &[0, 1], vec![bsz, nq, MAX_SEQ]);
-        let attn = b.divide(&e, &s_b);
-
-        let attn_r = b.reshape(&attn, vec![bsz, nkv, g, MAX_SEQ]);
-        let o = b.dot_general(
-            &attn_r,
-            &vl,
-            &[0, 1],
-            &[0, 2],
-            &[3],
-            &[1],
-            vec![bsz, nkv, g, d],
-        );
-        let o = b.reshape(&o, vec![bsz, nq, d]);
-        let o = b.reshape(&o, vec![bsz, nq * d]);
-        let attn_out = b.linear_seq(&o, &lw.wo);
-        // Gemma2: post-attention norm before the residual.
-        let attn_out = if c.gemma2 {
-            let w = norm_w(&mut b, &lw.post_ln, c, &k, h);
-            rms_norm_seq(&mut b, &attn_out, &w, &k, bsz, h)
-        } else {
-            attn_out
-        };
-        x = b.add(&x, &attn_out);
+        // attention block (shared per-layer core, issue #494)
+        x = emit_attention(&mut b, c, &k, lw, li, &x, &layout, &mut kcache, &mut vcache);
 
         // MLP + its norms (SwiGLU, or Gemma2 GeGLU with pre/post FF norms),
         // shared with the prefill graph.
@@ -1315,9 +1582,7 @@ pub fn emit_prefill(c: &Config, sample: bool) -> String {
 
     let h = c.hidden;
     let d = c.head_dim;
-    let nq = c.n_q;
     let nkv = c.n_kv;
-    let g = c.group();
 
     // --- head: embed gather, per-position rope vectors, [Lp,Lp] causal mask ---
     let tok_idx = b.reshape(&a.tokens, vec![lp, 1]);
@@ -1343,6 +1608,13 @@ pub fn emit_prefill(c: &Config, sample: bool) -> String {
     let negs = b.broadcast(&k.neg_big, &[], vec![lp, lp]);
     let cmask = b.select(&le, &zeros, &negs); // [Lp, Lp]
 
+    let layout = AttnLayout::Prefill {
+        lp,
+        cos,
+        sin,
+        mask: cmask,
+    };
+
     // caches start as zeros; prefill writes the [0:Lp] block and returns them
     let mut kcache = b.broadcast(&k.zero, &[], vec![c.n_layers, MAX_SEQ, nkv, d]);
     let mut vcache = b.broadcast(&k.zero, &[], vec![c.n_layers, MAX_SEQ, nkv, d]);
@@ -1350,64 +1622,8 @@ pub fn emit_prefill(c: &Config, sample: bool) -> String {
     for li in 0..c.n_layers {
         let lw = &a.layers[li];
 
-        // attention block
-        let in_ln_w = norm_w(&mut b, &lw.in_ln, c, &k, h);
-        let hn = rms_norm_seq(&mut b, &x, &in_ln_w, &k, lp, h); // [Lp, H]
-        let q = b.linear_seq(&hn, &lw.wq); // [Lp, qd]
-        let q = add_proj_bias_seq(&mut b, q, &lw.bq, lp, nq * d);
-        let q = b.reshape(&q, vec![lp, nq, d]);
-        let kk = b.linear_seq(&hn, &lw.wk); // [Lp, kv]
-        let kk = add_proj_bias_seq(&mut b, kk, &lw.bk, lp, nkv * d);
-        let kk = b.reshape(&kk, vec![lp, nkv, d]);
-        let vv = b.linear_seq(&hn, &lw.wv); // [Lp, kv]
-        let vv = add_proj_bias_seq(&mut b, vv, &lw.bv, lp, nkv * d);
-        let vv = b.reshape(&vv, vec![lp, nkv, d]);
-
-        let q = apply_rope_seq(&mut b, &q, &cos, &sin, lp, nq, d);
-        let kk = apply_rope_seq(&mut b, &kk, &cos, &sin, lp, nkv, d);
-
-        // write the whole [Lp] K/V block at [li, 0:Lp]
-        let k_upd = b.reshape(&kk, vec![1, lp, nkv, d]);
-        kcache = b.dynamic_update_slice(&kcache, &k_upd, &[&k.layer_idx[li], &k.c0, &k.c0, &k.c0]);
-        let v_upd = b.reshape(&vv, vec![1, lp, nkv, d]);
-        vcache = b.dynamic_update_slice(&vcache, &v_upd, &[&k.layer_idx[li], &k.c0, &k.c0, &k.c0]);
-
-        // GQA scores: q head (kv*g+grp) attends kv head kv. Layout [nkv,Lp_i,g,Lp_j]
-        // so it reshapes to [nq, Lp_i, Lp_j] without a transpose (head = kv*g+grp).
-        let q4 = b.reshape(&q, vec![lp, nkv, g, d]);
-        let scores = b.dot_general(&q4, &kk, &[1], &[1], &[3], &[2], vec![nkv, lp, g, lp]);
-        let scale_b = b.broadcast(&k.scale, &[], vec![nkv, lp, g, lp]);
-        let scores = b.multiply(&scores, &scale_b);
-        // Gemma2 attention logit soft-cap on the scaled scores before the mask.
-        let scores = match c.attn_logit_softcap {
-            Some(cap) => softcap(&mut b, &scores, cap),
-            None => scores,
-        };
-        let cmask_b = b.broadcast(&cmask, &[1, 3], vec![nkv, lp, g, lp]);
-        let scores = b.add(&scores, &cmask_b);
-
-        // softmax over the key axis (Lp_j, dim 3)
-        let m = b.reduce_max(&scores, 3, &k.neg_inf); // [nkv, Lp, g]
-        let m_b = b.broadcast(&m, &[0, 1, 2], vec![nkv, lp, g, lp]);
-        let sh = b.subtract(&scores, &m_b);
-        let e = b.exponential(&sh);
-        let s = b.reduce_add(&e, 3, &k.zero); // [nkv, Lp, g]
-        let s_b = b.broadcast(&s, &[0, 1, 2], vec![nkv, lp, g, lp]);
-        let attn = b.divide(&e, &s_b); // [nkv, Lp, g, Lp]
-
-        // context: o[kv,i,grp,d] = sum_j attn[kv,i,grp,j] * vv[j,kv,d]
-        let o = b.dot_general(&attn, &vv, &[0], &[1], &[3], &[0], vec![nkv, lp, g, d]);
-        let o = b.transpose(&o, &[1, 0, 2, 3]); // [Lp, nkv, g, d]
-        let o = b.reshape(&o, vec![lp, nq * d]); // [Lp, nq*d], head-major
-        let attn_out = b.linear_seq(&o, &lw.wo); // [Lp, H]
-        // Gemma2: post-attention norm before the residual.
-        let attn_out = if c.gemma2 {
-            let w = norm_w(&mut b, &lw.post_ln, c, &k, h);
-            rms_norm_seq(&mut b, &attn_out, &w, &k, lp, h)
-        } else {
-            attn_out
-        };
-        x = b.add(&x, &attn_out);
+        // attention block (shared per-layer core, issue #494)
+        x = emit_attention(&mut b, c, &k, lw, li, &x, &layout, &mut kcache, &mut vcache);
 
         // MLP + its norms (SwiGLU, or Gemma2 GeGLU with pre/post FF norms),
         // shared with the ragged-decode graph.
