@@ -361,6 +361,107 @@ pub(crate) static LLAMA_3_2_1B: ArchFixture = ArchFixture {
 /// byte-exact gate; see the module docs for the freeze workflow.
 pub(crate) static REGISTERED: &[&ArchFixture] = &[&LLAMA_3_2_1B];
 
+/// A golden-less structural fixture (issue #497): a small synthetic `config.json`
+/// for a dense family plus the signature every emitted shared-core graph must
+/// carry. It registers a family in the harness WITHOUT bundling byte-exact goldens,
+/// which suits the new dense pack: their real checkpoints are large (Gemma /
+/// SmolLM3 / OLMo2), post-cutoff-heavy, or need a follow-up (OLMo3 yarn RoPE), so
+/// freezing real goldens would bloat the repo and pin an un-execution-proven graph.
+/// The exact op deltas are locked by the emitter's with/without-diff tests, and the
+/// execution tier (`spike/openxla/dense_arch_pack_check.py`) proves correctness on a
+/// small synthetic model per family. Mirrors the Qwen2.5 golden-less emit test.
+pub(crate) struct StructuralFixture {
+    /// Family id (e.g. `"qwen3"`).
+    pub arch: &'static str,
+    /// A small synthetic `config.json` carrying the family's real arch flags.
+    pub config_json: &'static str,
+    /// Substrings every shared-core graph (prefill / decode / ragged) must contain.
+    pub must_contain: &'static [&'static str],
+    /// Substrings none of those graphs may contain (the family's absent features).
+    pub must_not_contain: &'static [&'static str],
+}
+
+/// The shared-core graph kinds a structural fixture is checked against (the serve
+/// path: host-sampled prefill / decode logits and ragged decode).
+pub(crate) const STRUCTURAL_KINDS: &[GraphKind] = &[
+    GraphKind::Prefill { sample: false },
+    GraphKind::Decode { sample: false },
+    GraphKind::DecodeRagged {
+        b_max: 4,
+        sample: false,
+    },
+];
+
+/// The registered golden-less dense families (issue #497). Small synthetic dims
+/// (hidden 8, head_dim 4, 4 layers) keep the emit tiny while exercising every
+/// arch delta; `head_dim` differs from `hidden / n_q` and `n_q*head_dim` from
+/// `hidden`, so the flat q-norm and non-square o_proj widths are genuinely distinct.
+pub(crate) static STRUCTURAL_FAMILIES: &[StructuralFixture] = &[
+    StructuralFixture {
+        arch: "qwen3",
+        config_json: r#"{"model_type":"qwen3","hidden_size":8,"num_attention_heads":3,
+            "num_key_value_heads":1,"head_dim":4,"intermediate_size":16,"num_hidden_layers":4,
+            "rms_norm_eps":1e-6,"rope_theta":1000000,"vocab_size":12,"attention_bias":false}"#,
+        must_contain: &["['q_norm']", "['k_norm']", "['in_ln']"],
+        must_not_contain: &["['bq']", "['pre_ff_ln']", "['post_ff_ln']"],
+    },
+    StructuralFixture {
+        arch: "gemma1",
+        config_json: r#"{"model_type":"gemma","hidden_size":8,"num_attention_heads":2,
+            "num_key_value_heads":1,"head_dim":4,"intermediate_size":16,"num_hidden_layers":4,
+            "rms_norm_eps":1e-6,"rope_theta":10000.0,"vocab_size":12,
+            "hidden_activation":"gelu_pytorch_tanh"}"#,
+        must_contain: &["stablehlo.tanh", "['in_ln']"],
+        must_not_contain: &["['pre_ff_ln']", "['post_ff_ln']", "['q_norm']"],
+    },
+    StructuralFixture {
+        arch: "gemma3",
+        config_json: r#"{"model_type":"gemma3_text","hidden_size":8,"num_attention_heads":2,
+            "num_key_value_heads":1,"head_dim":4,"intermediate_size":16,"num_hidden_layers":4,
+            "rms_norm_eps":1e-6,"rope_theta":1000000,"rope_local_base_freq":10000,
+            "sliding_window":2,"sliding_window_pattern":3,"query_pre_attn_scalar":4,
+            "vocab_size":12,"hidden_activation":"gelu_pytorch_tanh"}"#,
+        must_contain: &[
+            "['q_norm']",
+            "['pre_ff_ln']",
+            "['post_ff_ln']",
+            "stablehlo.tanh",
+        ],
+        must_not_contain: &["['bq']"],
+    },
+    StructuralFixture {
+        arch: "smollm3",
+        config_json: r#"{"model_type":"smollm3","hidden_size":8,"num_attention_heads":2,
+            "num_key_value_heads":1,"intermediate_size":16,"num_hidden_layers":4,
+            "rms_norm_eps":1e-6,"rope_theta":5000000.0,"vocab_size":12,
+            "no_rope_layers":[1,1,1,0]}"#,
+        must_contain: &["['in_ln']"],
+        must_not_contain: &["['q_norm']", "['pre_ff_ln']", "['bq']"],
+    },
+    StructuralFixture {
+        arch: "olmo2",
+        config_json: r#"{"model_type":"olmo2","hidden_size":8,"num_attention_heads":3,
+            "num_key_value_heads":1,"head_dim":4,"intermediate_size":16,"num_hidden_layers":4,
+            "rms_norm_eps":1e-6,"rope_theta":500000,"vocab_size":12,"tie_word_embeddings":false}"#,
+        must_contain: &[
+            "['q_norm']",
+            "['k_norm']",
+            "['post_ff_ln']",
+            "params['lm_head']",
+        ],
+        must_not_contain: &["['in_ln']", "['pre_ff_ln']"],
+    },
+    StructuralFixture {
+        arch: "olmo3",
+        config_json: r#"{"model_type":"olmo3","hidden_size":8,"num_attention_heads":3,
+            "num_key_value_heads":1,"head_dim":4,"intermediate_size":16,"num_hidden_layers":4,
+            "rms_norm_eps":1e-6,"rope_theta":500000,"vocab_size":12,"sliding_window":2,
+            "sliding_window_pattern":4,"tie_word_embeddings":false}"#,
+        must_contain: &["['q_norm']", "['post_ff_ln']", "params['lm_head']"],
+        must_not_contain: &["['in_ln']", "['pre_ff_ln']"],
+    },
+];
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -431,6 +532,48 @@ mod tests {
                 mlir.contains("['bq']"),
                 "{kind} missing the Qwen2 q bias arg"
             );
+        }
+    }
+
+    /// Every registered golden-less dense family (issue #497) parses and emits each
+    /// shared-core graph kind carrying its expected structural signature: the
+    /// arch's signature args / ops are present and its absent features are absent,
+    /// in prefill, single decode, and ragged decode alike. This is the harness
+    /// registration for the new dense pack (Qwen3, Gemma1/3, SmolLM3, OLMo2/3),
+    /// whose byte-exact op deltas are pinned by the emitter's with/without-diff
+    /// tests and whose correctness is proven by the execution tier.
+    #[test]
+    fn structural_families_emit_expected_signature() {
+        for fx in STRUCTURAL_FAMILIES {
+            let graphs = emit_graphs(fx.config_json, STRUCTURAL_KINDS)
+                .unwrap_or_else(|e| panic!("{}: {e}", fx.arch));
+            assert_eq!(
+                graphs.len(),
+                STRUCTURAL_KINDS.len(),
+                "{}: one graph/kind",
+                fx.arch
+            );
+            for (kind, mlir) in &graphs {
+                assert!(
+                    mlir.contains("stablehlo."),
+                    "{} {kind}: not StableHLO",
+                    fx.arch
+                );
+                for needle in fx.must_contain {
+                    assert!(
+                        mlir.contains(needle),
+                        "{} {kind}: missing signature {needle:?}",
+                        fx.arch
+                    );
+                }
+                for needle in fx.must_not_contain {
+                    assert!(
+                        !mlir.contains(needle),
+                        "{} {kind}: unexpected {needle:?}",
+                        fx.arch
+                    );
+                }
+            }
         }
     }
 

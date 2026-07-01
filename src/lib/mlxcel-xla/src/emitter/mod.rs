@@ -19,15 +19,19 @@
 //! `config.json` at load, instead of being pinned to the bundled Llama-3.2-1B
 //! `.mlir` assets.
 //!
-//! Scope: the Llama, Qwen2, and Gemma2 architectures. The `Config` is
-//! parameterized by dimensions, so any checkpoint of a supported architecture (any
-//! size) emits correctly. The architecture switches the emitter branches on are
-//! the RoPE kind (llama3 scaling for Llama, plain for Qwen2 / Gemma2), whether the
-//! q/k/v projections carry a bias (Qwen2), whether the LM head is tied or a
-//! separate `lm_head.weight` (untied, e.g. Llama-3.1-8B), and the `gemma2` switch
-//! (embedding scale, `(1+w)` RMSNorm, GeGLU, a four-norm layer, attention / final
-//! logit soft-cap, non-square `o_proj`). Gemma2 is single-sequence only so far;
-//! the batched / ragged serve graphs are a follow-up.
+//! Scope: the dense families Llama, Qwen2, Qwen3, Gemma1, Gemma2, Gemma3, SmolLM3,
+//! and OLMo2/3. The `Config` is parameterized by dimensions AND by orthogonal
+//! architecture flags, so any checkpoint of a supported family (any size) emits
+//! correctly and a new family is a flag combination rather than a new code path.
+//! The switches the emitter branches on are the RoPE kind (llama3 vs plain, plus an
+//! optional per-layer local base for Gemma3), the q/k/v bias (Qwen2), the LM-head
+//! tie, MLX quantization, the Gemma embedding scale / `(1+w)` RMSNorm / GeGLU MLP,
+//! the per-layer norm placement ([`NormStyle`](config::NormStyle): pre-norm,
+//! Gemma four-norm, or OLMo reordered post-norm), an optional q/k normalization
+//! ([`QkNorm`](config::QkNorm): per-head for Qwen3 / Gemma3, flat for OLMo2/3), the
+//! sliding-window schedule, Gemma2/3 soft-caps, and a per-layer NoPE mask
+//! (SmolLM3). The single-sequence, ragged-decode, and prefill graphs share one
+//! per-layer attention core (issue #494), so every delta reaches all three.
 //!
 //! Pure Rust (no IREE), so it compiles and is unit-tested without the `iree`
 //! feature; only the IREE engine consumes it. The bundled `.mlir` assets remain
@@ -55,7 +59,7 @@ pub(crate) use model::{
 
 #[cfg(test)]
 mod tests {
-    use super::config::RopeScaling;
+    use super::config::{NormStyle, QkNorm, RopeScaling};
     use super::*;
 
     const CONFIG_JSON: &str = include_str!("../../assets/llama-3.2-1b/config.json");
@@ -91,11 +95,18 @@ mod tests {
             qkv_bias,
             tie_word_embeddings: true,
             quantization: None,
-            gemma2: false,
+            embed_scale: false,
+            norm_one_plus: false,
+            mlp_geglu: false,
+            norm_style: NormStyle::Plain,
+            qk_norm: None,
+            rope_local_base: None,
             query_pre_attn_scalar: None,
             attn_logit_softcap: None,
             final_logit_softcap: None,
             sliding_window: None,
+            sliding_pattern: 2,
+            use_rope_layers: None,
         }
     }
 
@@ -122,11 +133,18 @@ mod tests {
             qkv_bias: false,
             tie_word_embeddings: true,
             quantization: None,
-            gemma2: true,
+            embed_scale: true,
+            norm_one_plus: true,
+            mlp_geglu: true,
+            norm_style: NormStyle::GemmaFf,
+            qk_norm: None,
+            rope_local_base: None,
             query_pre_attn_scalar: Some(6.0),
             attn_logit_softcap: Some(50.0),
             final_logit_softcap: Some(30.0),
             sliding_window,
+            sliding_pattern: 2,
+            use_rope_layers: None,
         }
     }
 
@@ -171,21 +189,22 @@ mod tests {
         assert_eq!(c.eps, 1e-6);
     }
 
-    /// A non-Llama/Qwen2/Gemma2 architecture and an unsupported `rope_scaling` are
-    /// each rejected with a clear message rather than mis-emitted. (Untied
-    /// embeddings and Gemma2 are no longer rejected; see
-    /// `from_json_accepts_untied_embeddings` / `from_json_parses_gemma2`.)
+    /// An unsupported `model_type` and an unsupported `rope_scaling` are each
+    /// rejected with a clear message rather than mis-emitted. (Untied embeddings and
+    /// the Gemma / Qwen3 / SmolLM3 / OLMo2/3 families are now accepted; see their
+    /// own parse tests.)
     #[test]
     fn from_json_rejects_unsupported_configs() {
-        let gemma3 = r#"{"model_type":"gemma3","tie_word_embeddings":true,"hidden_size":8,
+        let mamba = r#"{"model_type":"mamba","tie_word_embeddings":true,"hidden_size":8,
             "num_attention_heads":2,"intermediate_size":16,"num_hidden_layers":2,
             "num_key_value_heads":1,"rms_norm_eps":1e-6,"rope_theta":1e4,"vocab_size":10}"#;
         assert!(
-            Config::from_json_str(gemma3)
+            Config::from_json_str(mamba)
                 .unwrap_err()
                 .contains("model_type")
         );
 
+        // yarn RoPE (e.g. OLMo3 at full size) is not supported yet.
         let yarn = r#"{"model_type":"qwen2","tie_word_embeddings":true,"hidden_size":8,
             "num_attention_heads":2,"intermediate_size":16,"num_hidden_layers":2,
             "num_key_value_heads":1,"rms_norm_eps":1e-6,"rope_theta":1e4,"vocab_size":10,
@@ -209,7 +228,10 @@ mod tests {
             "query_pre_attn_scalar":224,"attn_logit_softcapping":50.0,
             "final_logit_softcapping":30.0,"hidden_activation":"gelu_pytorch_tanh"}"#;
         let c = Config::from_json_str(g).expect("gemma2 parses");
-        assert!(c.gemma2);
+        assert_eq!(c.norm_style, NormStyle::GemmaFf);
+        assert!(c.embed_scale && c.norm_one_plus && c.mlp_geglu);
+        assert!(c.qk_norm.is_none(), "Gemma2 has no q/k norm");
+        assert!(c.rope_local_base.is_none(), "Gemma2 has a single RoPE base");
         assert_eq!(c.rope, RopeScaling::Plain);
         assert_eq!(c.query_pre_attn_scalar, Some(224.0));
         assert_eq!(c.attn_logit_softcap, Some(50.0));
@@ -665,5 +687,415 @@ mod tests {
 
         // The f32 default carries no f16 at all (byte-exact path preserved).
         assert!(!emit_decode_with(&c, true, Precision::F32).contains("f16"));
+    }
+
+    // ===================================================================
+    // issue #497: dense arch pack (Qwen3, Gemma1/3, SmolLM3, OLMo2/3)
+    // ===================================================================
+
+    /// A small Plain (Llama-shaped) config to derive the new families from. Tiny
+    /// dims keep the emitted text small while exercising every shared-core path;
+    /// `head_dim` (4) deliberately differs from `hidden / n_q`, and `n_q*head_dim`
+    /// (12) from `hidden` (8), so the flat q-norm and non-square o_proj widths are
+    /// genuinely distinct (as in real checkpoints).
+    fn dense_base() -> Config {
+        Config {
+            hidden: 8,
+            inter: 16,
+            n_layers: 4,
+            n_q: 3,
+            n_kv: 1,
+            head_dim: 4,
+            eps: 1e-6,
+            rope_theta: 1e4,
+            vocab: 12,
+            rope: RopeScaling::Plain,
+            qkv_bias: false,
+            tie_word_embeddings: true,
+            quantization: None,
+            embed_scale: false,
+            norm_one_plus: false,
+            mlp_geglu: false,
+            norm_style: NormStyle::Plain,
+            qk_norm: None,
+            rope_local_base: None,
+            query_pre_attn_scalar: None,
+            attn_logit_softcap: None,
+            final_logit_softcap: None,
+            sliding_window: None,
+            sliding_pattern: 2,
+            use_rope_layers: None,
+        }
+    }
+
+    fn qwen3_like() -> Config {
+        Config {
+            qk_norm: Some(QkNorm {
+                per_head: true,
+                one_plus: false,
+            }),
+            ..dense_base()
+        }
+    }
+
+    fn gemma1_like() -> Config {
+        Config {
+            embed_scale: true,
+            norm_one_plus: true,
+            mlp_geglu: true,
+            ..dense_base()
+        }
+    }
+
+    fn gemma3_like() -> Config {
+        Config {
+            embed_scale: true,
+            norm_one_plus: true,
+            mlp_geglu: true,
+            norm_style: NormStyle::GemmaFf,
+            qk_norm: Some(QkNorm {
+                per_head: true,
+                one_plus: true,
+            }),
+            rope_local_base: Some(1e3),
+            query_pre_attn_scalar: Some(4.0),
+            sliding_window: Some(2),
+            sliding_pattern: 3,
+            ..dense_base()
+        }
+    }
+
+    fn olmo2_like() -> Config {
+        Config {
+            norm_style: NormStyle::OlmoPost,
+            qk_norm: Some(QkNorm {
+                per_head: false,
+                one_plus: false,
+            }),
+            tie_word_embeddings: false,
+            ..dense_base()
+        }
+    }
+
+    /// The three shared-core graph kinds (single decode, ragged decode, prefill),
+    /// as `(name, emitter)` pairs, so a family delta is checked reaching all of them.
+    fn shared_core_kinds(c: &Config) -> [(&'static str, String); 3] {
+        [
+            ("decode", emit_decode(c, false)),
+            ("ragged", emit_decode_ragged(c, 4, false)),
+            ("prefill", emit_prefill(c, false)),
+        ]
+    }
+
+    /// Qwen3's per-head q/k RMSNorm reaches every shared-core graph kind: turning it
+    /// on adds exactly the two `[head_dim]` norm weights per layer and the two extra
+    /// `rsqrt`s (one for q, one for k) that normalize each head before RoPE, and
+    /// nothing else. A with/without diff over an otherwise-identical config isolates
+    /// exactly the q/k-norm surface.
+    #[test]
+    fn qwen3_per_head_qk_norm_reaches_every_shared_core_kind() {
+        let with = qwen3_like();
+        let without = dense_base();
+        let nl = with.n_layers;
+        for ((_, g_with), (name, g_without)) in shared_core_kinds(&with)
+            .iter()
+            .zip(shared_core_kinds(&without))
+        {
+            assert_eq!(
+                arg_count(g_with) - arg_count(&g_without),
+                2 * nl,
+                "{name}: q_norm + k_norm per layer"
+            );
+            assert_eq!(occurs(g_with, "['q_norm']"), nl, "{name}: one q_norm/layer");
+            assert_eq!(occurs(g_with, "['k_norm']"), nl, "{name}: one k_norm/layer");
+            assert_eq!(
+                occurs(g_with, "stablehlo.rsqrt") - occurs(&g_without, "stablehlo.rsqrt"),
+                2 * nl,
+                "{name}: one rsqrt each for the q and k head-norm per layer"
+            );
+            // Per-head: the norm weight is [head_dim] (4), not the flat n_q*head_dim.
+            assert!(
+                g_with.contains("tensor<4xf32> loc(\"params['layers'][0]['q_norm']\")"),
+                "{name}: qwen3 q_norm is per-head [head_dim]"
+            );
+        }
+    }
+
+    /// OLMo2 is the reordered post-norm structure with a FLAT q/k norm and an untied
+    /// head: no `input_layernorm`, the q/k norm sized over the whole projection
+    /// (`n_q*head_dim` = 12, `n_kv*head_dim` = 4), a `post_feedforward_layernorm` but
+    /// no `pre_feedforward_layernorm`, and a separate `lm_head`. Asserted on every
+    /// shared-core kind so the post-norm reaches all of them.
+    #[test]
+    fn olmo2_flat_qk_norm_and_post_norm_structure() {
+        let c = olmo2_like();
+        let nl = c.n_layers;
+        for (name, g) in shared_core_kinds(&c) {
+            assert_eq!(
+                occurs(&g, "['in_ln']"),
+                0,
+                "{name}: OLMo2 has no input norm"
+            );
+            assert_eq!(occurs(&g, "['q_norm']"), nl, "{name}: one q_norm/layer");
+            assert_eq!(occurs(&g, "['k_norm']"), nl, "{name}: one k_norm/layer");
+            assert_eq!(
+                occurs(&g, "['post_ff_ln']"),
+                nl,
+                "{name}: post-feedforward norm/layer"
+            );
+            assert_eq!(occurs(&g, "['pre_ff_ln']"), 0, "{name}: no pre-ff norm");
+            assert_eq!(occurs(&g, "params['lm_head']"), 1, "{name}: untied head");
+            // Flat: q_norm is [n_q*head_dim] (12), NOT [head_dim].
+            assert!(
+                g.contains("tensor<12xf32> loc(\"params['layers'][0]['q_norm']\")"),
+                "{name}: olmo2 q_norm is flat [n_q*head_dim]"
+            );
+        }
+    }
+
+    /// Gemma1 has the Gemma activation/scale surface (GeGLU `tanh`, `(1+w)` norm,
+    /// embedding scale) but the Llama TWO-norm layer (an `input_layernorm`, no
+    /// pre/post feed-forward norms) and no q/k norm, distinguishing it from Gemma2/3.
+    /// The embedding scale is isolated by a with/without diff.
+    #[test]
+    fn gemma1_is_two_norm_geglu_with_embed_scale() {
+        let g1 = gemma1_like();
+        let nl = g1.n_layers;
+        for (name, g) in shared_core_kinds(&g1) {
+            assert!(g.contains("stablehlo.tanh"), "{name}: GeGLU emits tanh");
+            assert_eq!(
+                occurs(&g, "['in_ln']"),
+                nl,
+                "{name}: Gemma1 keeps input norm"
+            );
+            assert_eq!(
+                occurs(&g, "['pre_ff_ln']"),
+                0,
+                "{name}: no pre-ff norm (2-norm)"
+            );
+            assert_eq!(
+                occurs(&g, "['post_ff_ln']"),
+                0,
+                "{name}: no post-ff norm (2-norm)"
+            );
+            assert_eq!(
+                occurs(&g, "['q_norm']"),
+                0,
+                "{name}: Gemma1 has no q/k norm"
+            );
+        }
+        // The embedding scale is one const + broadcast + multiply in the head.
+        let no_scale = Config {
+            embed_scale: false,
+            ..gemma1_like()
+        };
+        let d_with = emit_decode(&g1, false);
+        let d_without = emit_decode(&no_scale, false);
+        assert_eq!(
+            occurs(&d_with, "stablehlo.multiply") - occurs(&d_without, "stablehlo.multiply"),
+            1,
+            "embed scale adds exactly one head multiply"
+        );
+    }
+
+    /// SmolLM3's NoPE mask skips RoPE on the marked layers: the rotate-half
+    /// `concatenate` (two per rope'd layer, q and k) drops by exactly two per NoPE
+    /// layer, and nothing else changes. A with/without diff over the NoPE mask
+    /// isolates it on every shared-core kind.
+    #[test]
+    fn smollm3_nope_skips_rope_on_marked_layers() {
+        // Layer 3 is NoPE (the SmolLM3 every-fourth-layer pattern at n_layers = 4).
+        let with_nope = Config {
+            use_rope_layers: Some(vec![true, true, true, false]),
+            ..dense_base()
+        };
+        assert!(!with_nope.layer_uses_rope(3), "layer 3 is NoPE");
+        assert!(with_nope.layer_uses_rope(0), "layer 0 keeps RoPE");
+        let all_rope = dense_base();
+        for ((_, g_nope), (name, g_all)) in shared_core_kinds(&with_nope)
+            .iter()
+            .zip(shared_core_kinds(&all_rope))
+        {
+            assert_eq!(
+                occurs(&g_all, "stablehlo.concatenate") - occurs(g_nope, "stablehlo.concatenate"),
+                2,
+                "{name}: the one NoPE layer drops the q and k rotate-half concatenates"
+            );
+        }
+    }
+
+    /// Gemma3 pairs the Gemma2 four-norm layer and a per-head `(1+w)` q/k norm with a
+    /// DUAL RoPE base: the sliding layers rotate on a local-base table distinct from
+    /// the global one, so the graph carries two extra `[MAX_SEQ, head_dim]` constant
+    /// tables (cos_local, sin_local) versus a single-RoPE twin.
+    #[test]
+    fn gemma3_dual_rope_and_qk_norm_reach_the_shared_core() {
+        let g3 = gemma3_like();
+        let nl = g3.n_layers;
+        for (name, g) in shared_core_kinds(&g3) {
+            assert_eq!(occurs(&g, "['q_norm']"), nl, "{name}: per-head q norm");
+            assert_eq!(
+                occurs(&g, "['pre_ff_ln']"),
+                nl,
+                "{name}: Gemma 4-norm (pre)"
+            );
+            assert_eq!(
+                occurs(&g, "['post_ff_ln']"),
+                nl,
+                "{name}: Gemma 4-norm (post)"
+            );
+            assert!(g.contains("stablehlo.tanh"), "{name}: GeGLU tanh");
+        }
+        // Dual RoPE: two extra dense hex-blob constant tables (the local cos/sin).
+        let single = Config {
+            rope_local_base: None,
+            ..gemma3_like()
+        };
+        for ((_, g_dual), (name, g_single)) in shared_core_kinds(&g3)
+            .iter()
+            .zip(shared_core_kinds(&single))
+        {
+            assert_eq!(
+                occurs(g_dual, "stablehlo.constant dense<\"0x")
+                    - occurs(&g_single, "stablehlo.constant dense<\"0x"),
+                2,
+                "{name}: dual-RoPE adds the local cos + sin tables"
+            );
+        }
+    }
+
+    /// The local (sliding) layers rotate on the local RoPE table and the global
+    /// layers on the global table (Gemma3 dual-RoPE). With `sliding_pattern = 3` and
+    /// `n_layers = 4`, layers 0/1/3 are sliding and layer 2 is global, so
+    /// `local_rope_layer` selects the local table on exactly the sliding layers.
+    #[test]
+    fn gemma3_local_rope_selected_on_sliding_layers() {
+        let g3 = gemma3_like(); // sliding_pattern = 3
+        assert!(g3.local_rope_layer(0), "layer 0 sliding -> local rope");
+        assert!(g3.local_rope_layer(1), "layer 1 sliding -> local rope");
+        assert!(
+            !g3.local_rope_layer(2),
+            "layer 2 global (3rd) -> global rope"
+        );
+        assert!(g3.local_rope_layer(3), "layer 3 sliding -> local rope");
+    }
+
+    /// Each new family's real `config.json` shape parses to the expected flags.
+    #[test]
+    fn from_json_parses_new_dense_families() {
+        // Qwen3: per-head q/k norm, no bias, explicit head_dim, plain RoPE.
+        let qwen3 = r#"{"model_type":"qwen3","hidden_size":1024,"num_attention_heads":16,
+            "num_key_value_heads":8,"head_dim":128,"intermediate_size":3072,
+            "num_hidden_layers":28,"rms_norm_eps":1e-6,"rope_theta":1000000,"vocab_size":151936,
+            "attention_bias":false,"tie_word_embeddings":true}"#;
+        let c = Config::from_json_str(qwen3).expect("qwen3 parses");
+        assert_eq!(
+            c.qk_norm,
+            Some(QkNorm {
+                per_head: true,
+                one_plus: false
+            })
+        );
+        assert!(!c.qkv_bias, "Qwen3 drops the Qwen2 bias");
+        assert_eq!(c.head_dim, 128, "explicit head_dim != hidden/heads");
+        assert_eq!(c.norm_style, NormStyle::Plain);
+
+        // Gemma1: Plain norm, embed scale + (1+w) + GeGLU, no q/k norm, no sliding.
+        let gemma = r#"{"model_type":"gemma","hidden_size":2048,"num_attention_heads":8,
+            "num_key_value_heads":1,"head_dim":256,"intermediate_size":16384,
+            "num_hidden_layers":18,"rms_norm_eps":1e-6,"rope_theta":10000.0,"vocab_size":256000,
+            "hidden_activation":"gelu_pytorch_tanh"}"#;
+        let c = Config::from_json_str(gemma).expect("gemma parses");
+        assert_eq!(
+            c.norm_style,
+            NormStyle::Plain,
+            "Gemma1 is Llama-shaped 2-norm"
+        );
+        assert!(c.embed_scale && c.norm_one_plus && c.mlp_geglu);
+        assert!(c.qk_norm.is_none() && c.sliding_window.is_none());
+
+        // Gemma3: GemmaFf 4-norm, per-head (1+w) q/k norm, dual RoPE, 5:1 sliding.
+        let gemma3 = r#"{"model_type":"gemma3_text","hidden_size":1152,"num_attention_heads":4,
+            "num_key_value_heads":1,"head_dim":256,"intermediate_size":6912,
+            "num_hidden_layers":26,"rms_norm_eps":1e-6,"rope_theta":1000000,
+            "rope_local_base_freq":10000,"sliding_window":512,"sliding_window_pattern":6,
+            "query_pre_attn_scalar":256,"attn_logit_softcapping":null,
+            "final_logit_softcapping":null,"vocab_size":262144,
+            "hidden_activation":"gelu_pytorch_tanh"}"#;
+        let c = Config::from_json_str(gemma3).expect("gemma3 parses");
+        assert_eq!(c.norm_style, NormStyle::GemmaFf);
+        assert_eq!(
+            c.qk_norm,
+            Some(QkNorm {
+                per_head: true,
+                one_plus: true
+            })
+        );
+        assert_eq!(c.rope_local_base, Some(10000.0), "distinct local RoPE base");
+        assert_eq!(c.sliding_window, Some(512));
+        assert_eq!(c.sliding_pattern, 6, "5 local : 1 global");
+        assert!(c.attn_logit_softcap.is_none(), "Gemma3 drops the soft-caps");
+
+        // SmolLM3: NoPE mask (every 4th layer), no q/k norm.
+        let smollm3 = r#"{"model_type":"smollm3","hidden_size":2048,"num_attention_heads":16,
+            "num_key_value_heads":4,"intermediate_size":11008,"num_hidden_layers":8,
+            "rms_norm_eps":1e-6,"rope_theta":5000000.0,"vocab_size":128256,
+            "no_rope_layers":[1,1,1,0,1,1,1,0]}"#;
+        let c = Config::from_json_str(smollm3).expect("smollm3 parses");
+        assert!(c.qk_norm.is_none());
+        let rope = c.use_rope_layers.as_ref().expect("NoPE mask present");
+        assert_eq!(rope, &[true, true, true, false, true, true, true, false]);
+        assert!(!c.layer_uses_rope(3) && c.layer_uses_rope(0));
+
+        // OLMo2: reordered post-norm, flat q/k norm, untied.
+        let olmo2 = r#"{"model_type":"olmo2","hidden_size":4096,"num_attention_heads":32,
+            "num_key_value_heads":32,"intermediate_size":11008,"num_hidden_layers":32,
+            "rms_norm_eps":1e-6,"rope_theta":500000,"vocab_size":100352,
+            "tie_word_embeddings":false}"#;
+        let c = Config::from_json_str(olmo2).expect("olmo2 parses");
+        assert_eq!(c.norm_style, NormStyle::OlmoPost);
+        assert_eq!(
+            c.qk_norm,
+            Some(QkNorm {
+                per_head: false,
+                one_plus: false
+            })
+        );
+        assert!(!c.tie_word_embeddings);
+
+        // A plain-RoPE OLMo3 (structure only; the full checkpoint's yarn RoPE is a
+        // documented follow-up rejected by the rope guard).
+        let olmo3 = r#"{"model_type":"olmo3","hidden_size":5120,"num_attention_heads":40,
+            "num_key_value_heads":8,"intermediate_size":27648,"num_hidden_layers":64,
+            "rms_norm_eps":1e-6,"rope_theta":500000,"vocab_size":100278,
+            "sliding_window":4096,"sliding_window_pattern":4,"tie_word_embeddings":false}"#;
+        let c = Config::from_json_str(olmo3).expect("plain-rope olmo3 parses");
+        assert_eq!(c.norm_style, NormStyle::OlmoPost);
+        assert_eq!(
+            c.qk_norm,
+            Some(QkNorm {
+                per_head: false,
+                one_plus: false
+            })
+        );
+        assert_eq!(c.sliding_window, Some(4096));
+        assert_eq!(c.sliding_pattern, 4, "3 sliding : 1 global");
+    }
+
+    /// OLMo3 at full size uses yarn RoPE, which is rejected with a clear message
+    /// (the documented follow-up), rather than silently mis-emitted.
+    #[test]
+    fn from_json_rejects_yarn_olmo3() {
+        let olmo3_yarn = r#"{"model_type":"olmo3","hidden_size":5120,"num_attention_heads":40,
+            "num_key_value_heads":8,"intermediate_size":27648,"num_hidden_layers":64,
+            "rms_norm_eps":1e-6,"rope_theta":500000,"vocab_size":100278,"sliding_window":4096,
+            "tie_word_embeddings":false,"rope_scaling":{"rope_type":"yarn","factor":8.0,
+            "original_max_position_embeddings":8192}}"#;
+        assert!(
+            Config::from_json_str(olmo3_yarn)
+                .unwrap_err()
+                .contains("rope_type"),
+            "yarn RoPE is rejected"
+        );
     }
 }

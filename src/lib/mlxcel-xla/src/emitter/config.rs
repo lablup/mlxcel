@@ -1,20 +1,25 @@
-//! Emitter config for the Llama-family architectures the OpenXLA backend serves.
+//! Emitter config for the dense architectures the OpenXLA backend serves.
 //! The hard-coded [`Config::llama_3_2_1b`] matches spike/openxla/model_jax.py;
-//! [`Config::from_json`] reads the same shape from a checkpoint's `config.json`
-//! (issue #449 M3 Stage 2d). Stage A covered the Llama architecture (llama3 RoPE,
-//! no attention bias); Stage B adds Qwen2 (plain RoPE + QKV bias), so the config
-//! carries the architecture switches the emitter branches on: the RoPE kind,
-//! whether q/k/v projections have a bias, and whether the LM head is tied to the
-//! token embedding (tied) or a separate `lm_head.weight` (untied, e.g.
-//! Llama-3.1-8B and the larger Qwen2.5 checkpoints).
+//! [`Config::from_json`] reads the same shape from a checkpoint's `config.json`.
+//!
+//! The config carries orthogonal architecture switches the emitter branches on,
+//! so a new dense family is a combination of flags rather than a new code path:
+//! the RoPE kind (llama3 vs plain, plus an optional per-layer local base for
+//! Gemma3), whether q/k/v projections carry a bias (Qwen2), the LM-head tie, MLX
+//! quantization, the Gemma embedding scale / `(1+w)` RMSNorm / GeGLU MLP, the
+//! per-layer norm placement ([`NormStyle`]), an optional q/k normalization
+//! ([`QkNorm`]: per-head for Qwen3 / Gemma3, flat for OLMo2 / OLMo3), the
+//! sliding-window schedule (window + pattern period), and a per-layer NoPE mask
+//! (SmolLM3). Llama / Qwen2 / Gemma2 keep their exact previous flag combinations,
+//! so their emitted graphs are byte-for-byte unchanged.
 
 /// How the RoPE inverse-frequency table is computed. Both kinds share the
 /// `outer(pos, inv_freq)` table build (see [`rope`](super::rope)); they differ
 /// only in `inv_freq`.
 #[derive(Clone, Debug, PartialEq)]
 pub enum RopeScaling {
-    /// Plain RoPE: `inv_freq[i] = 1 / theta^(2i/head_dim)` (Qwen2, and plain-RoPE
-    /// Llama without a `rope_scaling` block).
+    /// Plain RoPE: `inv_freq[i] = 1 / theta^(2i/head_dim)` (Qwen2, Qwen3, Gemma,
+    /// SmolLM3, OLMo2, and plain-RoPE Llama without a `rope_scaling` block).
     Plain,
     /// Llama3 RoPE scaling, byte-for-byte with HF `_compute_llama3_parameters`.
     Llama3 {
@@ -23,6 +28,40 @@ pub enum RopeScaling {
         high_freq_factor: f64,
         orig_ctx: usize,
     },
+}
+
+/// Per-layer norm placement. The three dense patterns differ in where the
+/// RMSNorms sit relative to the attention / MLP sublayers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NormStyle {
+    /// Llama / Qwen2 / Qwen3 / Gemma1 / SmolLM3: pre-norm. `input_layernorm`
+    /// normalizes the residual before attention; `post_attention_layernorm`
+    /// normalizes it before the MLP. Two norms per layer, both on the input side.
+    Plain,
+    /// Gemma2 / Gemma3: pre-norm wrapped by post-norms. `input_layernorm` before
+    /// attention, then `post_attention_layernorm` on the attention output before
+    /// the residual; `pre_feedforward_layernorm` before the MLP, then
+    /// `post_feedforward_layernorm` on the MLP output before the residual. Four
+    /// norms per layer.
+    GemmaFf,
+    /// OLMo2 / OLMo3: reordered (post) norm. No `input_layernorm`; attention and
+    /// the MLP consume the raw residual, and `post_attention_layernorm` /
+    /// `post_feedforward_layernorm` normalize each sublayer's OUTPUT before its
+    /// residual add. Two norms per layer, both on the output side.
+    OlmoPost,
+}
+
+/// Optional q/k normalization applied to the projected query / key before RoPE.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct QkNorm {
+    /// `true` normalizes each head independently over `head_dim` (Qwen3, Gemma3;
+    /// weight shape `[head_dim]`). `false` normalizes the whole flattened
+    /// projection over `n_q*head_dim` / `n_kv*head_dim` (OLMo2, OLMo3; weight
+    /// shapes `[n_q*head_dim]` / `[n_kv*head_dim]`).
+    pub per_head: bool,
+    /// `true` uses Gemma's `(1 + weight)` RMSNorm (Gemma3); `false` the raw weight
+    /// (Qwen3, OLMo2, OLMo3).
+    pub one_plus: bool,
 }
 
 /// MLX affine weight quantization (`config.json` `quantization`). The linear /
@@ -46,44 +85,59 @@ pub struct Config {
     pub eps: f32,
     pub rope_theta: f64,
     pub vocab: usize,
-    /// RoPE inverse-frequency scheme (Stage B: `Plain` for Qwen2).
+    /// RoPE inverse-frequency scheme for the global (full-attention) layers.
     pub rope: RopeScaling,
-    /// q/k/v projections carry a bias (Qwen2). `o_proj` never does, and the MLP
-    /// projections never do, so this single switch covers the architecture delta.
+    /// q/k/v projections carry a bias (Qwen2 only; the HF `Qwen2Attention` hard-
+    /// codes `bias=True`). `o_proj` and the MLP projections never do. Qwen3 drops
+    /// the bias.
     pub qkv_bias: bool,
     /// The LM head shares the token-embedding matrix (HF `tie_word_embeddings`).
-    /// `true` (Llama-3.2-1B, Qwen2.5-0.5B) reuses `params['embed']` for the final
-    /// projection; `false` adds a separate `params['lm_head']` weight the tail
-    /// projects through instead (Llama-3.1-8B, larger Qwen2.5 sizes).
+    /// `true` reuses `params['embed']` for the final projection; `false` adds a
+    /// separate `params['lm_head']` weight (Llama-3.1-8B, larger Qwen2.5, OLMo2/3).
     pub tie_word_embeddings: bool,
     /// MLX affine weight quantization, if the checkpoint is quantized (`None` for
-    /// an unquantized bf16/f16/f32 checkpoint). The graph itself is unchanged (it
-    /// runs in f32); the loader dequantizes the packed weights at load.
+    /// an unquantized bf16/f16/f32 checkpoint). The graph runs in f32; the loader
+    /// dequantizes the packed weights at load.
     pub quantization: Option<QuantConfig>,
-    /// Gemma2 architecture switch. When true the emitter scales the input
-    /// embeddings by `sqrt(hidden)`, uses `(1 + weight)` RMSNorm, a GeGLU
-    /// (`gelu_tanh`) MLP, a post-norm on each sublayer (four norms per layer), and
-    /// attention / final logit soft-capping; `o_proj` is non-square
-    /// (`n_q*head_dim != hidden`). Llama / Qwen2 keep their existing path.
-    pub gemma2: bool,
+    /// Scale the input embeddings by `sqrt(hidden)` (the Gemma family).
+    pub embed_scale: bool,
+    /// Use Gemma's `(1 + weight)` RMSNorm on the layer / final norms (the Gemma
+    /// family). The q/k norm has its own `one_plus` flag in [`QkNorm`].
+    pub norm_one_plus: bool,
+    /// GeGLU (`gelu_pytorch_tanh`) MLP activation instead of SwiGLU (silu) (the
+    /// Gemma family).
+    pub mlp_geglu: bool,
+    /// Per-layer RMSNorm placement (see [`NormStyle`]).
+    pub norm_style: NormStyle,
+    /// Optional q/k normalization before RoPE (Qwen3 / Gemma3 per-head, OLMo2 /
+    /// OLMo3 flat). `None` for Llama / Qwen2 / Gemma1/2 / SmolLM3.
+    pub qk_norm: Option<QkNorm>,
+    /// Gemma3 (and OLMo3) local RoPE base for the sliding (local) layers: those
+    /// layers build their RoPE table from this base while the global layers use
+    /// `rope_theta`. `None` means every layer shares the single `rope` table.
+    pub rope_local_base: Option<f64>,
     /// Gemma2 query pre-attention scale base: the attention score scale is
-    /// `query_pre_attn_scalar^-0.5` (Gemma2; can differ from `head_dim`). `None`
-    /// uses `head_dim^-0.5` (Llama / Qwen2).
+    /// `query_pre_attn_scalar^-0.5`. `None` uses `head_dim^-0.5` (Llama / Qwen2 /
+    /// Qwen3 / Gemma1 / SmolLM3 / OLMo2/3).
     pub query_pre_attn_scalar: Option<f64>,
     /// Gemma2 attention logit soft-cap: `softcap * tanh(scores / softcap)` on the
-    /// pre-mask scores. `None` for Llama / Qwen2.
+    /// pre-mask scores. `None` for the other families (Gemma3's is null).
     pub attn_logit_softcap: Option<f32>,
-    /// Gemma2 final logit soft-cap on the LM-head logits. `None` for Llama / Qwen2.
+    /// Gemma2 final logit soft-cap on the LM-head logits. `None` otherwise.
     pub final_logit_softcap: Option<f32>,
-    /// Gemma2 sliding-window attention (issue #495): `Some(window)` makes the
-    /// local (even) layers attend only to the last `window` keys, while the
-    /// global (odd) layers keep full-context attention. Read from `config.json`'s
-    /// `sliding_window` (HF Gemma2 default 4096) for a gemma2 checkpoint. `None`
-    /// for Llama / Qwen2, whose every layer is global; the emitter then emits no
-    /// window ops, so those graphs are byte-identical. (Qwen2's own
-    /// `sliding_window` field is deliberately ignored: the emitter serves Qwen2
-    /// with `use_sliding_window = false` semantics.)
+    /// Sliding-window attention size: `Some(window)` makes the local layers attend
+    /// only to the last `window` keys, while the global layers keep full context.
+    /// `None` means every layer is global. The local/global schedule is set by
+    /// [`Config::is_sliding_layer`] via [`sliding_pattern`](Self::sliding_pattern).
     pub sliding_window: Option<usize>,
+    /// Sliding-window schedule period: layer `li` is global iff `(li+1) %
+    /// sliding_pattern == 0`, otherwise local. Gemma2 uses 2 (even layers local);
+    /// Gemma3 uses `sliding_window_pattern` (6, i.e. 5 local : 1 global); OLMo3
+    /// uses 4. Only meaningful when `sliding_window` is `Some`.
+    pub sliding_pattern: usize,
+    /// Per-layer NoPE mask (SmolLM3): `use_rope_layers[li] == false` skips RoPE on
+    /// that layer (`no_rope_layers`). `None` applies RoPE on every layer.
+    pub use_rope_layers: Option<Vec<bool>>,
 }
 
 impl Config {
@@ -108,55 +162,35 @@ impl Config {
             qkv_bias: false,
             tie_word_embeddings: true,
             quantization: None,
-            gemma2: false,
+            embed_scale: false,
+            norm_one_plus: false,
+            mlp_geglu: false,
+            norm_style: NormStyle::Plain,
+            qk_norm: None,
+            rope_local_base: None,
             query_pre_attn_scalar: None,
             attn_logit_softcap: None,
             final_logit_softcap: None,
             sliding_window: None,
+            sliding_pattern: 2,
+            use_rope_layers: None,
         }
     }
 
     /// Build a [`Config`] from a model's `config.json` text.
     ///
-    /// Scope: the Llama and Qwen2 architectures (RMSNorm, SwiGLU MLP, GQA, tied or
-    /// untied embeddings). Llama uses llama3 RoPE scaling and no attention bias;
-    /// Qwen2 uses plain RoPE and a q/k/v projection bias; either may tie its LM
-    /// head to the token embedding or carry a separate `lm_head.weight`. Configs
-    /// the emitter cannot yet reproduce are rejected with a clear error rather than
+    /// Scope: the dense architectures Llama, Qwen2, Qwen3, Gemma1, Gemma2, Gemma3,
+    /// SmolLM3, and OLMo2/3 (RMSNorm variants, SwiGLU / GeGLU MLP, GQA/MHA, tied or
+    /// untied embeddings, optional q/k norm, sliding windows, NoPE). Configs the
+    /// emitter cannot yet reproduce are rejected with a clear error rather than
     /// silently mis-emitted: an unsupported `model_type`, a `llama` checkpoint with
-    /// `attention_bias`, or a `rope_scaling` whose `rope_type` is not `llama3`.
+    /// `attention_bias`, or a `rope_scaling` whose `rope_type` is not `llama3`
+    /// (e.g. yarn, which OLMo3 uses at full size).
     pub fn from_json_str(s: &str) -> Result<Self, String> {
         let v: serde_json::Value =
             serde_json::from_str(s).map_err(|e| format!("parse config.json: {e}"))?;
 
         let model_type = v.get("model_type").and_then(serde_json::Value::as_str);
-        let gemma2 = model_type == Some("gemma2");
-        // Qwen2 always has a q/k/v projection bias (the HF `Qwen2Attention` hard-
-        // codes `bias=True`), and it is not a `config.json` field, so it is keyed
-        // off the architecture rather than read.
-        let qkv_bias = match model_type {
-            Some("llama") => {
-                // A `llama` checkpoint with attention bias would need the same bias
-                // emit Qwen2 uses, but that pairing is untested here, so reject it
-                // rather than emit an unvalidated graph.
-                if v.get("attention_bias").and_then(serde_json::Value::as_bool) == Some(true) {
-                    return Err(
-                        "the OpenXLA emitter does not support a `llama` checkpoint with \
-                         attention_bias = true (only Qwen2 carries a q/k/v bias here)"
-                            .to_string(),
-                    );
-                }
-                false
-            }
-            Some("qwen2") => true,
-            Some("gemma2") => false,
-            other => {
-                return Err(format!(
-                    "the OpenXLA emitter supports the Llama, Qwen2, and Gemma2 architectures; \
-                     config.json model_type = {other:?} (other Gemma variants are a follow-up)"
-                ));
-            }
-        };
 
         // Tied (share `embed` for the head) vs untied (separate `lm_head.weight`).
         // HF `PretrainedConfig` defaults this to `true`, so an absent field means
@@ -195,18 +229,162 @@ impl Config {
                 .and_then(serde_json::Value::as_f64)
                 .ok_or_else(|| format!("config.json missing number `{k}`"))
         };
+        let of64 = |k: &str| -> Option<f64> { v.get(k).and_then(serde_json::Value::as_f64) };
+        let ou = |k: &str| -> Option<usize> {
+            v.get(k)
+                .and_then(serde_json::Value::as_u64)
+                .map(|x| x as usize)
+        };
 
         let hidden = u("hidden_size")?;
         let n_q = u("num_attention_heads")?;
         // head_dim is explicit in recent configs; otherwise it is hidden / heads.
-        let head_dim = v
-            .get("head_dim")
-            .and_then(serde_json::Value::as_u64)
-            .map(|x| x as usize)
-            .unwrap_or(hidden / n_q.max(1));
+        let head_dim = ou("head_dim").unwrap_or(hidden / n_q.max(1));
+        let n_layers = u("num_hidden_layers")?;
 
-        // rope_scaling is optional: absent -> plain RoPE (Qwen2.5, plain Llama);
-        // present -> only the llama3 scheme is supported (Stage A).
+        // Architecture-family flags, defaulted to the Llama baseline and overridden
+        // per model_type below.
+        let mut qkv_bias = false;
+        let mut embed_scale = false;
+        let mut norm_one_plus = false;
+        let mut mlp_geglu = false;
+        let mut norm_style = NormStyle::Plain;
+        let mut qk_norm: Option<QkNorm> = None;
+        let mut rope_local_base: Option<f64> = None;
+        let mut query_pre_attn_scalar: Option<f64> = None;
+        let mut attn_logit_softcap: Option<f32> = None;
+        let mut final_logit_softcap: Option<f32> = None;
+        let mut sliding_window: Option<usize> = None;
+        let mut sliding_pattern = 2usize;
+        let mut use_rope_layers: Option<Vec<bool>> = None;
+
+        // Read a Gemma family's soft-caps + query scale + sliding window (shared by
+        // gemma2 / gemma3). Gemma3's soft-caps are null, so this yields `None` there.
+        let read_gemma_common =
+            |qpa: &mut Option<f64>, asc: &mut Option<f32>, fsc: &mut Option<f32>| {
+                *qpa = Some(of64("query_pre_attn_scalar").unwrap_or(head_dim as f64));
+                *asc = of64("attn_logit_softcapping").map(|x| x as f32);
+                *fsc = of64("final_logit_softcapping").map(|x| x as f32);
+            };
+
+        match model_type {
+            Some("llama") => {
+                // A `llama` checkpoint with attention bias would need the Qwen2 bias
+                // emit, untested here; reject rather than emit an unvalidated graph.
+                if v.get("attention_bias").and_then(serde_json::Value::as_bool) == Some(true) {
+                    return Err(
+                        "the OpenXLA emitter does not support a `llama` checkpoint with \
+                         attention_bias = true (only Qwen2 carries a q/k/v bias here)"
+                            .to_string(),
+                    );
+                }
+            }
+            Some("qwen2") => {
+                qkv_bias = true;
+            }
+            Some("qwen3") => {
+                // Qwen3 drops the Qwen2 bias and adds a per-head q/k RMSNorm (raw
+                // weight, over head_dim) before RoPE.
+                qk_norm = Some(QkNorm {
+                    per_head: true,
+                    one_plus: false,
+                });
+            }
+            Some("gemma") => {
+                // Gemma1: Llama-shaped norm placement, but embedding scale, `(1+w)`
+                // RMSNorm, and a GeGLU MLP. No soft-caps, sliding, or q/k norm.
+                embed_scale = true;
+                norm_one_plus = true;
+                mlp_geglu = true;
+            }
+            Some("gemma2") => {
+                embed_scale = true;
+                norm_one_plus = true;
+                mlp_geglu = true;
+                norm_style = NormStyle::GemmaFf;
+                sliding_pattern = 2;
+                sliding_window = Some(ou("sliding_window").unwrap_or(4096));
+                read_gemma_common(
+                    &mut query_pre_attn_scalar,
+                    &mut attn_logit_softcap,
+                    &mut final_logit_softcap,
+                );
+            }
+            Some("gemma3") | Some("gemma3_text") => {
+                embed_scale = true;
+                norm_one_plus = true;
+                mlp_geglu = true;
+                norm_style = NormStyle::GemmaFf;
+                // Gemma3: per-head `(1+w)` q/k norm, a 5:1 local:global schedule
+                // (`sliding_window_pattern` = 6), and a local RoPE base for the
+                // sliding layers (`rope_local_base_freq`) distinct from `rope_theta`.
+                qk_norm = Some(QkNorm {
+                    per_head: true,
+                    one_plus: true,
+                });
+                sliding_pattern = ou("sliding_window_pattern").unwrap_or(6).max(1);
+                sliding_window = Some(ou("sliding_window").unwrap_or(4096));
+                rope_local_base = Some(of64("rope_local_base_freq").unwrap_or(10000.0));
+                read_gemma_common(
+                    &mut query_pre_attn_scalar,
+                    &mut attn_logit_softcap,
+                    &mut final_logit_softcap,
+                );
+            }
+            Some("smollm3") => {
+                // SmolLM3: Llama-shaped, with a per-layer NoPE mask. HF stores
+                // `no_rope_layers[li]` as 1 = use RoPE, 0 = NoPE, so it maps directly
+                // to `use_rope_layers`.
+                if let Some(arr) = v
+                    .get("no_rope_layers")
+                    .and_then(serde_json::Value::as_array)
+                {
+                    let flags: Vec<bool> = arr
+                        .iter()
+                        .map(|x| x.as_i64().map(|n| n != 0).unwrap_or(true))
+                        .collect();
+                    if flags.iter().any(|&b| !b) {
+                        use_rope_layers = Some(flags);
+                    }
+                }
+            }
+            Some("olmo2") => {
+                // OLMo2: reordered (post) norm and a FLAT q/k RMSNorm over the whole
+                // projection (raw weight). No input_layernorm.
+                norm_style = NormStyle::OlmoPost;
+                qk_norm = Some(QkNorm {
+                    per_head: false,
+                    one_plus: false,
+                });
+            }
+            Some("olmo3") => {
+                // OLMo3: OLMo2 plus a sliding-window schedule. The full-size
+                // checkpoint additionally uses yarn RoPE scaling, which the rope
+                // block below rejects (a documented follow-up); a plain-RoPE OLMo3
+                // config exercises the norm/qk/sliding structure.
+                norm_style = NormStyle::OlmoPost;
+                qk_norm = Some(QkNorm {
+                    per_head: false,
+                    one_plus: false,
+                });
+                if let Some(w) = ou("sliding_window") {
+                    sliding_window = Some(w);
+                    // OLMo3 marks every `sliding_window_pattern`-th layer global;
+                    // the layer_types list (3 sliding : 1 full) implies a period 4.
+                    sliding_pattern = ou("sliding_window_pattern").unwrap_or(4).max(1);
+                }
+                rope_local_base = of64("rope_local_base_freq");
+            }
+            other => {
+                return Err(format!(
+                    "the OpenXLA emitter supports the Llama, Qwen2, Qwen3, Gemma1/2/3, \
+                     SmolLM3, and OLMo2/3 architectures; config.json model_type = {other:?}"
+                ));
+            }
+        }
+
+        // rope_scaling is optional: absent -> plain RoPE; present -> only the llama3
+        // scheme is supported (yarn, e.g. OLMo3 at full size, is a follow-up).
         let rope = match v.get("rope_scaling") {
             None | Some(serde_json::Value::Null) => RopeScaling::Plain,
             Some(scaling) => {
@@ -244,46 +422,10 @@ impl Config {
             }
         };
 
-        // Gemma2 logit soft-caps and the query pre-attention scale base (read only
-        // for a gemma2 checkpoint; the scale defaults to `head_dim` if absent).
-        let (query_pre_attn_scalar, attn_logit_softcap, final_logit_softcap) = if gemma2 {
-            (
-                Some(
-                    v.get("query_pre_attn_scalar")
-                        .and_then(serde_json::Value::as_f64)
-                        .unwrap_or(head_dim as f64),
-                ),
-                v.get("attn_logit_softcapping")
-                    .and_then(serde_json::Value::as_f64)
-                    .map(|x| x as f32),
-                v.get("final_logit_softcapping")
-                    .and_then(serde_json::Value::as_f64)
-                    .map(|x| x as f32),
-            )
-        } else {
-            (None, None, None)
-        };
-
-        // Gemma2 sliding-window size (issue #495). Read only for a gemma2
-        // checkpoint; an absent field falls back to the HF Gemma2 default of 4096.
-        // Non-gemma2 architectures get `None` (global attention on every layer),
-        // even if their config carries a `sliding_window` (e.g. Qwen2.5, which the
-        // emitter serves without sliding-window attention).
-        let sliding_window = if gemma2 {
-            Some(
-                v.get("sliding_window")
-                    .and_then(serde_json::Value::as_u64)
-                    .map(|x| x as usize)
-                    .unwrap_or(4096),
-            )
-        } else {
-            None
-        };
-
         Ok(Config {
             hidden,
             inter: u("intermediate_size")?,
-            n_layers: u("num_hidden_layers")?,
+            n_layers,
             n_q,
             n_kv: u("num_key_value_heads")?,
             head_dim,
@@ -294,11 +436,18 @@ impl Config {
             qkv_bias,
             tie_word_embeddings,
             quantization,
-            gemma2,
+            embed_scale,
+            norm_one_plus,
+            mlp_geglu,
+            norm_style,
+            qk_norm,
+            rope_local_base,
             query_pre_attn_scalar,
             attn_logit_softcap,
             final_logit_softcap,
             sliding_window,
+            sliding_pattern,
+            use_rope_layers,
         })
     }
 
@@ -313,9 +462,9 @@ impl Config {
         self.n_q / self.n_kv
     }
 
-    /// Attention score scale. Llama / Qwen2 use `head_dim^-0.5`; Gemma2 uses
+    /// Attention score scale. Most families use `head_dim^-0.5`; Gemma2/3 use
     /// `query_pre_attn_scalar^-0.5` (computed in f64 to match HF, since it can
-    /// differ from `head_dim`). The Llama / Qwen2 branch is unchanged.
+    /// differ from `head_dim`).
     pub fn scale(&self) -> f32 {
         match self.query_pre_attn_scalar {
             Some(q) => q.powf(-0.5) as f32,
@@ -323,19 +472,57 @@ impl Config {
         }
     }
 
-    /// Gemma2 input-embedding normalizer `sqrt(hidden)` (computed in f64 then
+    /// Gemma input-embedding normalizer `sqrt(hidden)` (computed in f64 then
     /// narrowed, matching HF's `hidden_size**0.5` cast to the activation dtype).
     pub fn embed_normalizer(&self) -> f32 {
         (self.hidden as f64).sqrt() as f32
     }
 
-    /// Whether attention layer `li` uses sliding-window (local) attention (issue
-    /// #495). Gemma2 alternates local and global attention starting local, so the
-    /// even layers (0, 2, 4, …) are local and the odd layers are global, matching
-    /// HF `Gemma2DecoderLayer` (`is_sliding = not bool(layer_idx % 2)`). Only a
-    /// config with a sliding window (Gemma2) has local layers; Llama / Qwen2
-    /// return `false` for every layer, so their emitted graphs are unchanged.
+    /// Whether attention layer `li` uses sliding-window (local) attention. A
+    /// windowed config marks layer `li` global iff `(li+1) % sliding_pattern == 0`,
+    /// otherwise local (Gemma2 period 2 = even local; Gemma3 period 6 = 5 local : 1
+    /// global; OLMo3 period 4). A non-windowed config has no local layer, so its
+    /// emitted graphs are unchanged.
     pub fn is_sliding_layer(&self, li: usize) -> bool {
-        self.sliding_window.is_some() && li.is_multiple_of(2)
+        self.sliding_window.is_some() && !(li + 1).is_multiple_of(self.sliding_pattern.max(1))
+    }
+
+    /// Whether attention layer `li` applies RoPE. Every layer does unless the
+    /// config carries a NoPE mask (SmolLM3) that clears it.
+    pub fn layer_uses_rope(&self, li: usize) -> bool {
+        self.use_rope_layers
+            .as_ref()
+            .and_then(|v| v.get(li).copied())
+            .unwrap_or(true)
+    }
+
+    /// The local RoPE table base for the sliding (local) layers, when the config
+    /// has a distinct one (Gemma3 / OLMo3). `None` means every layer shares the
+    /// single global `rope` table.
+    pub fn local_rope_layer(&self, li: usize) -> bool {
+        self.rope_local_base.is_some() && self.is_sliding_layer(li)
+    }
+
+    /// The layer has an `input_layernorm` applied to the residual before attention
+    /// (all styles except OLMo2/3's reordered post-norm).
+    pub fn has_input_norm(&self) -> bool {
+        self.norm_style != NormStyle::OlmoPost
+    }
+
+    /// The layer normalizes the attention OUTPUT before the residual add
+    /// (`post_attention_layernorm` in Gemma2/3 and OLMo2/3).
+    pub fn has_post_attn_norm(&self) -> bool {
+        matches!(self.norm_style, NormStyle::GemmaFf | NormStyle::OlmoPost)
+    }
+
+    /// The layer has a `pre_feedforward_layernorm` before the MLP (Gemma2/3).
+    pub fn has_pre_ff_norm(&self) -> bool {
+        self.norm_style == NormStyle::GemmaFf
+    }
+
+    /// The layer normalizes the MLP OUTPUT before the residual add
+    /// (`post_feedforward_layernorm` in Gemma2/3 and OLMo2/3).
+    pub fn has_post_ff_norm(&self) -> bool {
+        matches!(self.norm_style, NormStyle::GemmaFf | NormStyle::OlmoPost)
     }
 }

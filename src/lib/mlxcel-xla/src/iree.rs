@@ -28,11 +28,13 @@
 //! shim, which keeps the weights resident on the device and threads the KV cache
 //! across steps. Then [`IreeLlama::prefill`] / [`IreeLlama::decode`] are token-in
 //! / token-out. Emitting from config (issue #449 M3 Stage 2d) replaced the bundled
-//! Llama-3.2-1B `.mlir` assets, so any checkpoint of a supported architecture
-//! loads: Llama (any size) and Qwen2 (plain RoPE + q/k/v bias; Stage B), the
-//! latter adding its bias tensors to `weight_names` to match the emitted graph.
-//! An untied checkpoint (`tie_word_embeddings = false`, e.g. Llama-3.1-8B and the
-//! larger Qwen2.5 sizes) adds its `lm_head.weight` to `weight_names`, matching the
+//! Llama-3.2-1B `.mlir` assets, so any checkpoint of a supported dense family loads:
+//! Llama, Qwen2, Qwen3, Gemma1/2/3, SmolLM3, and OLMo2/3 (issue #497). Each family's
+//! per-layer weight order in `weight_names` mirrors the emitter's arg schedule: the
+//! Qwen2 q/k/v biases, the Qwen3 / Gemma3 / OLMo2/3 q/k norms, the Gemma2/3 feed-
+//! forward norms, and (for OLMo2/3's reordered post-norm) the absence of an
+//! `input_layernorm`. An untied checkpoint (`tie_word_embeddings = false`, e.g.
+//! Llama-3.1-8B, larger Qwen2.5, OLMo2/3) adds its `lm_head.weight`, matching the
 //! separate `params['lm_head']` arg the emitter takes for the final projection.
 //!
 //! Proven token-exact against the HF temp-0 reference in
@@ -124,11 +126,13 @@ pub(crate) const RAGGED_B_VALUES: &[usize] = &[4, 8];
 
 /// The weight names in the emitter's exact arg order: embed, final_norm, then —
 /// for an untied checkpoint (`tie_word_embeddings = false`) — `lm_head.weight`,
-/// then per layer down, gate, in_ln, post_ln, up, wk, wo, wq, wv, and — for a
-/// `qkv_bias` architecture (Qwen2) — the k/q/v projection biases. The layer count,
-/// the untied head, and the presence of biases come from the model config so the
-/// order matches the emitted graph's args (`take_lm_head` / `take_layer_weights`
-/// in `emitter/model.rs`).
+/// then per layer the base weights and the arch-conditional extras. The base order
+/// is down, gate, input_layernorm, post_attention_layernorm, up, wk, wo, wq, wv;
+/// then, matching `take_layer_weights` in `emitter/model.rs` exactly, the k/q/v
+/// biases (`qkv_bias`, Qwen2), the q/k norms (`qk_norm`, Qwen3 / Gemma3 / OLMo2/3),
+/// and the feed-forward norms. `input_layernorm` is skipped for the OLMo reordered
+/// post-norm (which has none). Every knob comes from the model config so the buffer
+/// order lines up with the emitted graph args.
 fn weight_names(cfg: &Config) -> Vec<String> {
     let mut names = vec![
         "model.embed_tokens.weight".to_string(),
@@ -141,10 +145,13 @@ fn weight_names(cfg: &Config) -> Vec<String> {
     }
     for i in 0..cfg.n_layers {
         let p = format!("model.layers.{i}.");
+        names.push(format!("{p}mlp.down_proj.weight"));
+        names.push(format!("{p}mlp.gate_proj.weight"));
+        // input_layernorm: present unless the reordered (OLMo) post-norm drops it.
+        if cfg.has_input_norm() {
+            names.push(format!("{p}input_layernorm.weight"));
+        }
         for suf in [
-            "mlp.down_proj.weight",
-            "mlp.gate_proj.weight",
-            "input_layernorm.weight",
             "post_attention_layernorm.weight",
             "mlp.up_proj.weight",
             "self_attn.k_proj.weight",
@@ -154,8 +161,7 @@ fn weight_names(cfg: &Config) -> Vec<String> {
         ] {
             names.push(format!("{p}{suf}"));
         }
-        // Qwen2 q/k/v projection biases, appended per layer in the same k/q/v
-        // order `take_layer_weights` adds them to the emitted graph args.
+        // Qwen2 q/k/v projection biases, in the same k/q/v order the emitter adds.
         if cfg.qkv_bias {
             for suf in [
                 "self_attn.k_proj.bias",
@@ -165,15 +171,17 @@ fn weight_names(cfg: &Config) -> Vec<String> {
                 names.push(format!("{p}{suf}"));
             }
         }
-        // Gemma2 has two extra per-layer norms (pre/post feed-forward), appended
-        // in the same order `take_layer_weights` takes their graph args.
-        if cfg.gemma2 {
-            for suf in [
-                "pre_feedforward_layernorm.weight",
-                "post_feedforward_layernorm.weight",
-            ] {
-                names.push(format!("{p}{suf}"));
-            }
+        // q/k norms (Qwen3 / Gemma3 per-head, OLMo2/3 flat), q then k.
+        if cfg.qk_norm.is_some() {
+            names.push(format!("{p}self_attn.q_norm.weight"));
+            names.push(format!("{p}self_attn.k_norm.weight"));
+        }
+        // Feed-forward norms: Gemma2/3 add pre AND post; OLMo2/3 add post only.
+        if cfg.has_pre_ff_norm() {
+            names.push(format!("{p}pre_feedforward_layernorm.weight"));
+        }
+        if cfg.has_post_ff_norm() {
+            names.push(format!("{p}post_feedforward_layernorm.weight"));
         }
     }
     names
