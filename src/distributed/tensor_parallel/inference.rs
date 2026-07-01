@@ -183,7 +183,7 @@ fn fallback_architecture(model_type: ModelType) -> &'static str {
         ModelType::InternLM2 => "internlm2",
         ModelType::InternLM3 => "internlm3",
         ModelType::Baichuan => "baichuan",
-        ModelType::Glm4 => "glm4",
+        ModelType::Glm4 | ModelType::Glm4v => "glm4",
         ModelType::Glm4Moe => "glm4_moe",
         ModelType::Glm4MoeLite => "glm4_moe_lite",
         ModelType::GlmMoeDsa => "glm_moe_dsa",

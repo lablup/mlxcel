@@ -131,6 +131,7 @@ impl LoadedModel {
             Self::Qwen25VL(model) => Some(VlmRuntimeRef::Qwen(model)),
             Self::Qwen3VL(model) => Some(VlmRuntimeRef::Qwen(model)),
             Self::Qwen3VLMoe(model) => Some(VlmRuntimeRef::Qwen(model)),
+            Self::Glm4v(model) => Some(VlmRuntimeRef::Qwen(model)),
             Self::Qwen35VLM(model) | Self::Qwen35MoeVLM(model) => Some(VlmRuntimeRef::Qwen(model)),
             Self::MiniCPMOVLM(model) => Some(VlmRuntimeRef::MiniCPMO(model)),
             Self::MiniCPMV46VLM(model) => Some(VlmRuntimeRef::MiniCPMV46(model)),

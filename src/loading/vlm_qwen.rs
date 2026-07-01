@@ -341,3 +341,75 @@ fn load_qwen3_5_vlm_with_variant(
 
     Ok(wrap_qwen35_vlm(vlm, variant))
 }
+
+/// Remap raw GLM-4V (`Glm4vForConditionalGeneration`) weight keys to the
+/// mlxcel layout: `model.visual.*` -> `vision_tower.*`,
+/// `model.language_model.*` -> `model.*`, `lm_head.*` unchanged.
+fn remap_glm4v_weights(
+    raw_weights: mlxcel_core::weights::WeightMap,
+) -> mlxcel_core::weights::WeightMap {
+    let mut weights = mlxcel_core::weights::WeightMap::new();
+    for (key, value) in raw_weights {
+        let new_key = if let Some(rest) = key.strip_prefix("model.visual.") {
+            format!("vision_tower.{}", rest)
+        } else if let Some(rest) = key.strip_prefix("visual.") {
+            format!("vision_tower.{}", rest)
+        } else if let Some(rest) = key.strip_prefix("model.language_model.") {
+            format!("model.{}", rest)
+        } else if let Some(rest) = key.strip_prefix("language_model.model.") {
+            format!("model.{}", rest)
+        } else if let Some(rest) = key.strip_prefix("language_model.lm_head.") {
+            format!("lm_head.{}", rest)
+        } else {
+            key
+        };
+        weights.insert(new_key, value);
+    }
+    weights
+}
+
+/// Load a GLM-4V model (GLM-4V ViT + GLM-4 text backbone with sectioned MRoPE).
+pub(crate) fn load_glm4v(model_path: &Path) -> Result<LoadedModel> {
+    use vision::encoders::glm4v::{Glm4vVisionConfig, Glm4vVisionEncoder};
+
+    let (_config_str, full_config) = read_sanitized_vlm_config(model_path)?;
+
+    let mut text_config: models::glm4v::Glm4vTextConfig =
+        parse_required_vlm_subconfig(&full_config, "text_config", "GLM-4V text config")?;
+    inherit_qwen_text_quantization(&mut text_config, &full_config);
+
+    let mut vision_config: Glm4vVisionConfig =
+        parse_required_vlm_subconfig(&full_config, "vision_config", "GLM-4V vision config")?;
+    inherit_qwen_vision_quantization(&mut vision_config, &full_config);
+
+    let mut weights = remap_glm4v_weights(load_vlm_weights_common(model_path, None)?);
+    models::sanitize_tied_embeddings(&mut weights, &full_config);
+
+    let text_model = models::Glm4vTextModel::from_weights(&weights, &text_config)
+        .map_err(|e| anyhow::anyhow!("Failed to load GLM-4V text model: {}", e))?;
+
+    let vision_encoder = Glm4vVisionEncoder::from_weights(&weights, &vision_config, "vision_tower")
+        .map_err(|e| anyhow::anyhow!("Failed to load GLM-4V vision encoder: {}", e))?;
+
+    let processor = qwen_vl_processor(&vision_config);
+    let token_ids = qwen_vl_token_ids(
+        &full_config,
+        QwenVisionTokenIds {
+            image_token_id: 151363,
+            video_token_id: 151364,
+            vision_start_token_id: 151339,
+        },
+    );
+
+    let vlm = vision::Glm4vModel {
+        text_model,
+        vision_encoder,
+        processor,
+        image_token_id: token_ids.image_token_id,
+        video_token_id: token_ids.video_token_id,
+        vision_start_token_id: token_ids.vision_start_token_id,
+        spatial_merge_size: vision_config.spatial_merge_size,
+    };
+
+    Ok(LoadedModel::Glm4v(vlm))
+}

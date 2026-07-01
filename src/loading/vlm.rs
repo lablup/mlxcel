@@ -65,8 +65,8 @@ pub(crate) use llava::{load_llava_bunny_vlm, load_llava_vlm};
 pub(crate) use nemotron_h_nano_omni::load_nemotron_h_nano_omni_vlm;
 pub(crate) use pixtral::{load_mistral3_vlm, load_pixtral_vlm};
 pub(crate) use qwen::{
-    load_qwen2_5_vl, load_qwen2_vl, load_qwen3_5_moe_vlm, load_qwen3_5_vlm, load_qwen3_vl,
-    load_qwen3_vl_moe,
+    load_glm4v, load_qwen2_5_vl, load_qwen2_vl, load_qwen3_5_moe_vlm, load_qwen3_5_vlm,
+    load_qwen3_vl, load_qwen3_vl_moe,
 };
 pub(crate) use siglip::{load_aya_vision_vlm, load_paligemma_vlm};
 pub(crate) use special::{
@@ -374,6 +374,36 @@ impl QwenVisionConfigExt for vision::encoders::qwen3_vl::Qwen3VLVisionConfig {
     }
 }
 
+impl QwenVisionConfigExt for vision::encoders::glm4v::Glm4vVisionConfig {
+    fn quant_group_size(&self) -> i32 {
+        self.quant_group_size
+    }
+
+    fn quant_bits(&self) -> i32 {
+        self.quant_bits
+    }
+
+    fn set_quant_group_size(&mut self, value: i32) {
+        self.quant_group_size = value;
+    }
+
+    fn set_quant_bits(&mut self, value: i32) {
+        self.quant_bits = value;
+    }
+
+    fn patch_size(&self) -> usize {
+        self.patch_size
+    }
+
+    fn temporal_patch_size(&self) -> usize {
+        self.temporal_patch_size
+    }
+
+    fn spatial_merge_size(&self) -> usize {
+        self.spatial_merge_size
+    }
+}
+
 fn inherit_qwen_vision_quantization<T: QwenVisionConfigExt>(
     vision_config: &mut T,
     full_config: &Value,
@@ -404,6 +434,16 @@ impl QwenTextQuantizationExt for models::qwen3_vl::Qwen3VLConfig {
 }
 
 impl QwenTextQuantizationExt for models::qwen3_vl_moe::Qwen3VLMoeConfig {
+    fn has_quantization(&self) -> bool {
+        self.quantization.is_some()
+    }
+
+    fn set_quantization_from_value(&mut self, value: &Value) {
+        self.quantization = serde_json::from_value(value.clone()).ok();
+    }
+}
+
+impl QwenTextQuantizationExt for models::glm4v::Glm4vTextConfig {
     fn has_quantization(&self) -> bool {
         self.quantization.is_some()
     }
