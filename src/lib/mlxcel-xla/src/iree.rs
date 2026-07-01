@@ -50,7 +50,9 @@ use std::process::Command;
 use memmap2::Mmap;
 use safetensors::{Dtype, SafeTensors};
 
-use crate::emitter::{Config, emit_decode, emit_decode_ragged, emit_prefill};
+use crate::emitter::{
+    Config, emit_decode_ragged_with, emit_decode_with, emit_prefill_with, resolve_precision,
+};
 use crate::weights::{bf16_to_f32, dequantize_affine, f16_to_f32, f32_le_to_f32};
 
 /// Prefill bucket baked into the emitted `prefill` graph (`tensor<256xi32>`,
@@ -318,8 +320,9 @@ fn compile_pair(
 /// is emitted from the model config, so `compile_one`'s text-hash cache keys a
 /// distinct vmfb per architecture.
 fn compile_vmfbs(device: &str, cfg: &Config) -> Result<(PathBuf, PathBuf), String> {
-    let prefill = emit_prefill(cfg, true);
-    let decode = emit_decode(cfg, true);
+    let precision = resolve_precision(device);
+    let prefill = emit_prefill_with(cfg, true, precision);
+    let decode = emit_decode_with(cfg, true, precision);
     compile_pair(device, &prefill, "prefill", &decode, "decode")
 }
 
@@ -650,9 +653,11 @@ impl IreeRaggedLlama {
                  {b_max} is not one of them"
             ));
         }
-        // Emit the logits prefill + the ragged decode graph for this model + b_max.
-        let prefill_mlir = emit_prefill(&cfg, false);
-        let decode_mlir = emit_decode_ragged(&cfg, b_max, false);
+        // Emit the logits prefill + the ragged decode graph for this model + b_max
+        // at the device-resolved precision (f16 on GPU by default, f32 on CPU).
+        let precision = resolve_precision(device);
+        let prefill_mlir = emit_prefill_with(&cfg, false, precision);
+        let decode_mlir = emit_decode_ragged_with(&cfg, b_max, false, precision);
         let (prefill_vmfb, decode_vmfb) = compile_pair(
             device,
             &prefill_mlir,

@@ -120,28 +120,37 @@ driver registers via `use_all_available_drivers`).
 
 ### Precision (low-precision matmul)
 
-`MLXCEL_XLA_PRECISION` selects the contraction (matmul) input precision, authored
-in the emitted StableHLO graph so it applies on every IREE target (CPU, CUDA,
-Metal, and future NPUs), not just one backend:
+The contraction (matmul) input precision is authored in the emitted StableHLO
+graph, so it applies on every IREE target (CPU, CUDA, Metal, and future NPUs),
+not just one backend:
 
-- `f32` (default) — unchanged.
 - `f16` / `bf16` — demote the f32 inputs of every `dot_general` to the narrow
   type while keeping the f32 accumulate and output, so only the matmuls change
   and the sensitive elementwise ops (norm, softmax, RoPE) stay f32. A blanket
   program-wide f32 to f16 is deliberately not done (it regressed accuracy and was
   slower).
+- `f32` — no demotion.
+
+**Default is per device:** `f16` on the GPU devices (`metal`, `cuda`), `f32` on
+the CPU (`local-task` / `local-sync`). `MLXCEL_XLA_PRECISION` (`f16` | `bf16` |
+`f32`) overrides the default on any device. So on Apple Silicon the Metal path
+runs f16 by default:
 
 ```bash
-MLXCEL_XLA_PRECISION=f16 MLXCEL_BACKEND=xla MLXCEL_XLA_DEVICE=metal \
-  ./target/release/mlxcel generate -m <Llama-3.2-1B-Instruct dir> -p "..." -n 48
+# f16 by default on metal (the device default); no env needed:
+MLXCEL_BACKEND=xla ./target/release/mlxcel generate \
+  -m <Llama-3.2-1B-Instruct dir> -p "..." -n 48
+# Force f32 for a token-exact reference:
+MLXCEL_XLA_PRECISION=f32 MLXCEL_BACKEND=xla ./target/release/mlxcel generate \
+  -m <Llama-3.2-1B-Instruct dir> -p "..." -n 48
 ```
 
 On an M1 Ultra (Llama-3.2-1B-Instruct, greedy) `f16` is ~1.9x the `f32` tok/s and
-token-exact with it. The same graph change also speeds up the CPU (`local-task`)
-path. Weights are still uploaded f32 and demoted in the graph; keeping the
-resident weights in the narrow type (a bandwidth win that needs the f16 weight
-FFI) lands with the quantized-weight path. This is a transferable, correctness
-first lever; it does not close the gap to MLX (see the perf note above).
+token-exact with it. The same graph change also speeds up the CPU path. Weights
+are still uploaded f32 and demoted in the graph; keeping the resident weights in
+the narrow type (a bandwidth win that needs the f16 weight FFI) lands with the
+quantized-weight path. This is a transferable, correctness-first lever; it does
+not close the gap to MLX (see the perf note above).
 
 ### Scope / limits
 

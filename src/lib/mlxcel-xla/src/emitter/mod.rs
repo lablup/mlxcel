@@ -40,7 +40,17 @@ mod model;
 mod rope;
 
 pub(crate) use config::Config;
-pub(crate) use model::{emit_decode, emit_decode_ragged, emit_prefill};
+// `resolve_precision` and the precision-taking `*_with` emit variants are consumed
+// by the IREE execution path; the f32-default `emit_*` wrappers by the byte-exact
+// regression tests. Which set is live depends on the build cfg (`iree` vs `test`),
+// so allow the re-export to be unused in the other.
+#[allow(unused_imports)]
+pub(crate) use builder::resolve_precision;
+#[allow(unused_imports)]
+pub(crate) use model::{
+    emit_decode, emit_decode_ragged, emit_decode_ragged_with, emit_decode_with, emit_prefill,
+    emit_prefill_with,
+};
 
 #[cfg(test)]
 mod tests {
@@ -395,5 +405,37 @@ mod tests {
             (inv[1] - 1.0 / theta.powf(2.0 / 4.0)).abs() < 1e-12,
             "i=1 -> theta^(-1/2)"
         );
+    }
+
+    // The precision accuracy gate (structural). Guards the "targeted, not blanket"
+    // invariant that makes f16 token-exact: only matmuls are demoted; RMSNorm
+    // (rsqrt) and softmax (exponential) stay f32. A blanket f32->f16 (which
+    // regressed accuracy and was slower) would demote those and fail this.
+    #[test]
+    fn f16_precision_demotes_only_matmuls_not_norm_or_softmax() {
+        use super::builder::Precision;
+        let c = Config::llama_3_2_1b();
+
+        let f16 = emit_decode_with(&c, true, Precision::F16);
+        assert!(f16.contains("xf16"), "f16 mode emitted no f16");
+        for line in f16.lines().filter(|l| l.contains("stablehlo.dot_general")) {
+            assert!(line.contains("f16>"), "matmul not demoted to f16: {line}");
+            assert!(
+                line.trim_end().ends_with("f32>"),
+                "matmul output not f32 (accumulate lost): {line}"
+            );
+        }
+        for line in f16
+            .lines()
+            .filter(|l| l.contains("stablehlo.rsqrt") || l.contains("stablehlo.exponential"))
+        {
+            assert!(
+                !line.contains("f16"),
+                "norm/softmax wrongly demoted to f16 (blanket regression): {line}"
+            );
+        }
+
+        // The f32 default carries no f16 at all (byte-exact path preserved).
+        assert!(!emit_decode_with(&c, true, Precision::F32).contains("f16"));
     }
 }
