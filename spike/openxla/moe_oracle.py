@@ -7,9 +7,18 @@ router + top-k expert dispatch + weighted combine (+ shared expert), with no
 attention, no pre-norm, and no residual, so it lines up exactly with an HF MoE
 block's forward and can be compared directly.
 
+Families checked (issue #501 extends #500's Qwen2-MoE / Mixtral):
+  - Qwen2-MoE: gated shared expert, softmax-before-top-k, norm_topk_prob.
+  - Mixtral: no shared expert, always renormalized.
+  - Qwen3-MoE: no shared expert, norm_topk_prob (its qk-norm attention is validated
+    separately; the FFN block is identical routing to Mixtral).
+  - OLMoE: no shared expert, norm_topk_prob, experts use `intermediate_size`.
+All four share the exact softmax-over-all-experts -> top-k -> renorm router, so the
+one primitive is proven across the family.
+
 Method (identical weights fed to both sides):
-  1. Build one small HF MoE block (Qwen2-MoE with a gated shared expert; Mixtral
-     with no shared expert), random weights, fp32, eval.
+  1. Build one small HF MoE block (Qwen2-MoE with a gated shared expert; Mixtral /
+     Qwen3-MoE / OLMoE with no shared expert), random weights, fp32, eval.
   2. Run the HF block on a random hidden `hn` [N, H] -> reference output [N, H].
   3. Map the HF (fused `gate_up_proj` / `down_proj`) weights to the emitter's probe
      arg layout: router [E, H]; stacked expert gate/up [E, I, H] (the two halves of
@@ -229,6 +238,109 @@ def check_mixtral():
     return compare("mixtral (no shared, always renorm)", out, np32(ref))
 
 
+def check_qwen3_moe():
+    from transformers import Qwen3MoeConfig
+    from transformers.models.qwen3_moe.modeling_qwen3_moe import Qwen3MoeSparseMoeBlock
+
+    h, i, e, k, n = 16, 6, 4, 2, 5
+    cfg = Qwen3MoeConfig(
+        hidden_size=h,
+        num_experts=e,
+        num_experts_per_tok=k,
+        norm_topk_prob=True,
+        moe_intermediate_size=i,
+    )
+    block = Qwen3MoeSparseMoeBlock(cfg).float().eval()
+    randomize(block)
+    sd = block.state_dict()
+
+    torch.manual_seed(SEED + 3)
+    hn = torch.randn(1, n, h)
+    with torch.no_grad():
+        ref = block(hn).reshape(n, h)
+
+    gate, up, down = split_fused_experts(sd, e, i)
+    # probe arg order (no shared expert): router, gate, up, down, hn
+    args = [
+        np32(sd["gate.weight"]),  # [E, H]
+        np32(gate),
+        np32(up),
+        np32(down),
+        np32(hn.reshape(n, h)),  # [N, H]
+    ]
+    cfg_json = dict(
+        model_type="qwen3_moe",
+        hidden_size=h,
+        num_attention_heads=3,
+        num_key_value_heads=1,
+        head_dim=4,
+        intermediate_size=16,
+        moe_intermediate_size=i,
+        num_hidden_layers=1,
+        num_experts=e,
+        num_experts_per_tok=k,
+        norm_topk_prob=True,
+        rms_norm_eps=1e-6,
+        rope_theta=1000000.0,
+        vocab_size=10,
+        tie_word_embeddings=False,
+    )
+    mod = emit_probe(cfg_json, n, "qwen3_moe")
+    out = run_probe(mod, args)
+    return compare("qwen3_moe (no shared, norm_topk_prob)", out, np32(ref))
+
+
+def check_olmoe():
+    from transformers import OlmoeConfig
+    from transformers.models.olmoe.modeling_olmoe import OlmoeSparseMoeBlock
+
+    # OLMoE's experts use `intermediate_size` (no `moe_intermediate_size`).
+    h, i, e, k, n = 16, 6, 4, 2, 5
+    cfg = OlmoeConfig(
+        hidden_size=h,
+        num_experts=e,
+        num_experts_per_tok=k,
+        norm_topk_prob=True,
+        intermediate_size=i,
+    )
+    block = OlmoeSparseMoeBlock(cfg).float().eval()
+    randomize(block)
+    sd = block.state_dict()
+
+    torch.manual_seed(SEED + 4)
+    hn = torch.randn(1, n, h)
+    with torch.no_grad():
+        ref = block(hn).reshape(n, h)
+
+    gate, up, down = split_fused_experts(sd, e, i)
+    args = [
+        np32(sd["gate.weight"]),  # [E, H]
+        np32(gate),
+        np32(up),
+        np32(down),
+        np32(hn.reshape(n, h)),  # [N, H]
+    ]
+    cfg_json = dict(
+        model_type="olmoe",
+        hidden_size=h,
+        num_attention_heads=2,
+        num_key_value_heads=1,
+        head_dim=8,
+        intermediate_size=i,
+        num_hidden_layers=1,
+        num_experts=e,
+        num_experts_per_tok=k,
+        norm_topk_prob=True,
+        rms_norm_eps=1e-6,
+        rope_theta=500000.0,
+        vocab_size=10,
+        tie_word_embeddings=False,
+    )
+    mod = emit_probe(cfg_json, n, "olmoe")
+    out = run_probe(mod, args)
+    return compare("olmoe (no shared, norm_topk_prob, expert intermediate_size)", out, np32(ref))
+
+
 def compare(name, iree_out, hf_out):
     diff = float(np.max(np.abs(iree_out - hf_out)))
     rel = diff / (float(np.max(np.abs(hf_out))) + 1e-12)
@@ -244,6 +356,8 @@ def main():
     ok = True
     ok = check_qwen2_moe() and ok
     ok = check_mixtral() and ok
+    ok = check_qwen3_moe() and ok
+    ok = check_olmoe() and ok
     print("RESULT:", "PASS" if ok else "FAIL", flush=True)
     return 0 if ok else 1
 

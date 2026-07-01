@@ -1506,6 +1506,49 @@ mod tests {
         }
     }
 
+    /// A Qwen3-MoE config composes the shared qk-norm attention (#497) with the shared
+    /// MoE FFN (#500) in every graph kind: the per-head q/k norm args and the router /
+    /// stacked-expert args both appear, and neither a dense MLP arg nor a shared-expert
+    /// arg does (Qwen3-MoE has no shared expert). OLMoE composes the FLAT q/k norm with
+    /// the MoE FFN the same way. This is the #501 composition the block-level oracle and
+    /// the byte-exact fixtures back.
+    #[test]
+    fn qwen3_moe_and_olmoe_compose_qk_norm_with_moe_ffn() {
+        let qwen3 = r#"{"model_type":"qwen3_moe","hidden_size":8,"num_attention_heads":3,
+            "num_key_value_heads":1,"head_dim":4,"intermediate_size":16,"moe_intermediate_size":12,
+            "num_hidden_layers":2,"num_experts":4,"num_experts_per_tok":2,"norm_topk_prob":true,
+            "rms_norm_eps":1e-6,"rope_theta":1e6,"vocab_size":10,"tie_word_embeddings":false}"#;
+        let olmoe = r#"{"model_type":"olmoe","hidden_size":8,"num_attention_heads":2,
+            "num_key_value_heads":1,"head_dim":4,"intermediate_size":12,"num_hidden_layers":2,
+            "num_experts":4,"num_experts_per_tok":2,"norm_topk_prob":true,"rms_norm_eps":1e-6,
+            "rope_theta":5e5,"vocab_size":10,"tie_word_embeddings":false}"#;
+        for (name, json) in [("qwen3_moe", qwen3), ("olmoe", olmoe)] {
+            let c = Config::from_json_str(json).unwrap_or_else(|e| panic!("{name}: {e}"));
+            for (kind, g) in [
+                ("decode", emit_decode(&c, false)),
+                ("prefill", emit_prefill(&c, false)),
+                ("ragged", emit_decode_ragged(&c, 4, false)),
+            ] {
+                assert!(
+                    g.contains("['q_norm']") && g.contains("['k_norm']"),
+                    "{name} {kind}: q/k norm args"
+                );
+                assert!(
+                    g.contains("['moe_router']") && g.contains("['moe_gate']"),
+                    "{name} {kind}: MoE router / expert args"
+                );
+                assert!(
+                    !g.contains("moe_shared"),
+                    "{name} {kind}: no shared-expert arg"
+                );
+                assert!(
+                    !g.contains("['down']") && !g.contains("['gate']") && !g.contains("['up']"),
+                    "{name} {kind}: no dense MLP arg on a MoE layer"
+                );
+            }
+        }
+    }
+
     /// `from_json` parses the supported MoE architectures to their routing knobs:
     /// Qwen2-MoE (softmax-before-top-k, norm_topk_prob, a gated shared expert, q/k/v
     /// bias) and Mixtral (8 experts top-2, always-renormalized, no shared expert, no
@@ -1544,27 +1587,97 @@ mod tests {
         assert!(!cm.qkv_bias, "Mixtral has no attention bias");
     }
 
-    /// MoE families whose attention is a follow-up are deferred with a clear message
-    /// (rather than mis-emitted): Qwen3-MoE (Qwen3 attention + MoE, #501) and
-    /// DeepSeek-V2 (multi-head latent attention). The MoE FFN primitive unblocks
-    /// wiring them in #501.
+    /// Qwen3-MoE and OLMoE parse to the shared MoE FFN primitive on top of the shared
+    /// attention core (issue #501): Qwen3-MoE reuses Qwen3 attention (per-head q/k
+    /// RMSNorm, no bias), OLMoE the flat q/k RMSNorm on the standard pre-norm block,
+    /// both with a no-shared, softmax-before-top-k router. The MoE FFN primitive (#500)
+    /// plus the qk-norm attention (#497) unblocked them. OLMoE `clip_qkv` (q/k/v
+    /// clamping) is a follow-up and is rejected.
     #[test]
-    fn from_json_defers_unsupported_moe_attention() {
-        let qwen3 = r#"{"model_type":"qwen3_moe","hidden_size":8,"num_attention_heads":2,
-            "num_key_value_heads":1,"intermediate_size":16,"moe_intermediate_size":12,
-            "num_hidden_layers":2,"num_experts":8,"num_experts_per_tok":2,"rms_norm_eps":1e-6,
-            "rope_theta":1e6,"vocab_size":10}"#;
-        assert!(
-            Config::from_json_str(qwen3).unwrap_err().contains("Qwen3"),
-            "qwen3_moe is deferred with a Qwen3 pointer"
+    fn from_json_parses_qwen3_moe_and_olmoe() {
+        let qwen3 = r#"{"model_type":"qwen3_moe","hidden_size":8,"num_attention_heads":3,
+            "num_key_value_heads":1,"head_dim":4,"intermediate_size":16,"moe_intermediate_size":12,
+            "num_hidden_layers":2,"num_experts":8,"num_experts_per_tok":2,"norm_topk_prob":true,
+            "rms_norm_eps":1e-6,"rope_theta":1e6,"vocab_size":10,"tie_word_embeddings":false}"#;
+        let c = Config::from_json_str(qwen3).expect("qwen3_moe parses");
+        let m = c.moe.as_ref().expect("qwen3_moe -> MoeConfig");
+        assert_eq!(m.n_experts, 8);
+        assert_eq!(m.top_k, 2);
+        assert_eq!(
+            m.intermediate, 12,
+            "qwen3_moe experts use moe_intermediate_size"
         );
-        let ds = r#"{"model_type":"deepseek_v2","hidden_size":8,"num_attention_heads":2,
-            "num_key_value_heads":1,"intermediate_size":16,"num_hidden_layers":2,
-            "rms_norm_eps":1e-6,"rope_theta":1e6,"vocab_size":10}"#;
+        assert!(m.norm_topk_prob);
+        assert!(m.shared.is_none(), "Qwen3-MoE has no shared expert");
+        assert_eq!(m.weight_prefix, "mlp");
+        assert!(!c.qkv_bias, "Qwen3 drops the q/k/v bias");
+        let qk = c.qk_norm.expect("Qwen3-MoE has a q/k norm");
         assert!(
-            Config::from_json_str(ds).unwrap_err().contains("DeepSeek"),
-            "deepseek_v2 is deferred with a DeepSeek pointer"
+            qk.per_head && !qk.one_plus,
+            "Qwen3 q/k norm is per-head, raw weight"
         );
+
+        let olmoe = r#"{"model_type":"olmoe","hidden_size":8,"num_attention_heads":2,
+            "num_key_value_heads":1,"head_dim":4,"intermediate_size":12,"num_hidden_layers":2,
+            "num_experts":8,"num_experts_per_tok":4,"norm_topk_prob":true,"rms_norm_eps":1e-6,
+            "rope_theta":5e5,"vocab_size":10,"tie_word_embeddings":false}"#;
+        let o = Config::from_json_str(olmoe).expect("olmoe parses");
+        let mo = o.moe.as_ref().expect("olmoe -> MoeConfig");
+        assert_eq!(mo.n_experts, 8);
+        assert_eq!(mo.top_k, 4);
+        assert_eq!(mo.intermediate, 12, "OLMoE experts use intermediate_size");
+        assert!(mo.shared.is_none(), "OLMoE has no shared expert");
+        let qk = o.qk_norm.expect("OLMoE has a q/k norm");
+        assert!(
+            !qk.per_head && !qk.one_plus,
+            "OLMoE q/k norm is flat, raw weight"
+        );
+        assert!(
+            matches!(o.norm_style, NormStyle::Plain),
+            "OLMoE is standard pre-norm"
+        );
+        // clip_qkv is a follow-up: an OLMoE config that sets it is rejected.
+        let clipped = olmoe.replace(
+            "\"tie_word_embeddings\":false",
+            "\"tie_word_embeddings\":false,\"clip_qkv\":8.0",
+        );
+        assert!(
+            Config::from_json_str(&clipped)
+                .unwrap_err()
+                .contains("clip_qkv"),
+            "OLMoE clip_qkv is deferred"
+        );
+    }
+
+    /// MoE families whose routing or attention the shared MoE FFN primitive / attention
+    /// core does not reproduce are deferred with a specific message rather than
+    /// mis-emitted (issue #501): DeepSeek-V2/V3 (MLA attention), PhiMoE (sparsemixer
+    /// routing), GLM4-MoE / dots1 (grouped sigmoid routing), ERNIE-4.5-MoE (interleaved
+    /// RoPE), gpt-oss (attention sinks). Each error names its blocker.
+    #[test]
+    fn from_json_defers_unsupported_moe_families() {
+        let base = |mt: &str| {
+            format!(
+                r#"{{"model_type":"{mt}","hidden_size":8,"num_attention_heads":2,
+                "num_key_value_heads":1,"intermediate_size":16,"num_hidden_layers":2,
+                "rms_norm_eps":1e-6,"rope_theta":1e6,"vocab_size":10}}"#
+            )
+        };
+        for (mt, needle) in [
+            ("deepseek_v2", "latent attention"),
+            ("deepseek_v3", "latent attention"),
+            ("phimoe", "sparsemixer"),
+            ("glm4_moe", "grouped"),
+            ("dots1", "sigmoid"),
+            ("ernie4_5_moe", "interleaved"),
+            ("gpt_oss", "attention sinks"),
+        ] {
+            let err = Config::from_json_str(&base(mt)).unwrap_err();
+            assert!(
+                err.contains(needle),
+                "{mt} deferral should name {needle:?}: {err}"
+            );
+        }
     }
 
     /// The `norm_topk_prob` flag emits the top-k renormalization (a divide of each

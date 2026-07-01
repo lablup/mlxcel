@@ -567,6 +567,57 @@ mod tests {
         );
     }
 
+    /// Qwen3-MoE / OLMoE (issue #501) name their per-layer expert bank on the `mlp`
+    /// prefix, matching the mlx-lm `switch_mlp` stacking a real checkpoint uses
+    /// (`model.layers.0.mlp.gate.weight`, `model.layers.0.mlp.switch_mlp.*_proj.weight`),
+    /// alongside the q/k norms; they add no shared-expert tensor, no dense
+    /// `mlp.{gate,up,down}_proj`, and no q/k/v bias.
+    #[test]
+    fn weight_specs_qwen3_moe_and_olmoe_name_the_expert_bank() {
+        let qwen3 = r#"{"model_type":"qwen3_moe","hidden_size":8,"num_attention_heads":3,
+            "num_key_value_heads":1,"head_dim":4,"intermediate_size":16,"moe_intermediate_size":12,
+            "num_hidden_layers":1,"num_experts":4,"num_experts_per_tok":2,"norm_topk_prob":true,
+            "rms_norm_eps":1e-6,"rope_theta":1e6,"vocab_size":10,"tie_word_embeddings":false}"#;
+        let olmoe = r#"{"model_type":"olmoe","hidden_size":8,"num_attention_heads":2,
+            "num_key_value_heads":1,"head_dim":4,"intermediate_size":12,"num_hidden_layers":1,
+            "num_experts":4,"num_experts_per_tok":2,"norm_topk_prob":true,"rms_norm_eps":1e-6,
+            "rope_theta":5e5,"vocab_size":10,"tie_word_embeddings":false}"#;
+        for (name, json) in [("qwen3_moe", qwen3), ("olmoe", olmoe)] {
+            let c = Config::from_json_str(json).unwrap_or_else(|e| panic!("{name}: {e}"));
+            let names: Vec<String> = weight_specs(&c)
+                .iter()
+                .map(|s| s.tensor_name().to_string())
+                .collect();
+            let has = |n: &str| names.iter().any(|x| x == n);
+            assert!(has("model.layers.0.mlp.gate.weight"), "{name}: router");
+            assert!(
+                has("model.layers.0.mlp.switch_mlp.gate_proj.weight")
+                    && has("model.layers.0.mlp.switch_mlp.up_proj.weight")
+                    && has("model.layers.0.mlp.switch_mlp.down_proj.weight"),
+                "{name}: stacked switch_mlp experts"
+            );
+            assert!(
+                has("model.layers.0.self_attn.q_norm.weight")
+                    && has("model.layers.0.self_attn.k_norm.weight"),
+                "{name}: q/k norms"
+            );
+            assert!(
+                !names.iter().any(|n| n.contains("shared_expert")),
+                "{name}: no shared expert"
+            );
+            assert!(
+                !has("model.layers.0.mlp.gate_proj.weight")
+                    && !has("model.layers.0.mlp.up_proj.weight")
+                    && !has("model.layers.0.mlp.down_proj.weight"),
+                "{name}: no dense MLP tensor on a MoE layer"
+            );
+            assert!(
+                !names.iter().any(|n| n.contains("q_proj.bias")),
+                "{name}: no q/k/v bias"
+            );
+        }
+    }
+
     /// `slice_rows` extracts a row band of a row-major `[out, in]` buffer and
     /// rejects an out-of-range band or a non-divisible length.
     #[test]

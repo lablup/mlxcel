@@ -224,10 +224,10 @@ pub struct Config {
     /// Per-layer NoPE mask (SmolLM3): `use_rope_layers[li] == false` skips RoPE on
     /// that layer (`no_rope_layers`). `None` applies RoPE on every layer.
     pub use_rope_layers: Option<Vec<bool>>,
-    /// Mixture-of-Experts FFN parameters (issue #500). `Some` for a MoE
-    /// architecture (Mixtral, Qwen2-MoE); the FFN then routes the top-k of N
-    /// experts instead of a dense MLP. `None` for a dense model, whose graphs are
-    /// byte-for-byte unchanged (no MoE op is emitted).
+    /// Mixture-of-Experts FFN parameters (issues #500 / #501). `Some` for a MoE
+    /// architecture (Mixtral, Qwen2-MoE, Qwen3-MoE, OLMoE); the FFN then routes the
+    /// top-k of N experts instead of a dense MLP. `None` for a dense model, whose
+    /// graphs are byte-for-byte unchanged (no MoE op is emitted).
     pub moe: Option<MoeConfig>,
     /// Checkpoint tensor-naming scheme (issue #499). Loader-only: it selects how
     /// [`weight_names`](crate::weight_names) maps the emitter's arg order onto the
@@ -741,24 +741,86 @@ impl Config {
                         .to_string(),
                 );
             }
-            // MoE families (issue #500). The attention flags are set here; the MoE
-            // FFN itself is built by the `moe` block below. Mixtral is Llama-style
+            // MoE families (issues #500 / #501). The attention flags are set here; the
+            // MoE FFN itself is built by the `moe` block below. Mixtral is Llama-style
             // attention (no bias, plain RoPE); Qwen2-MoE is Qwen2 attention (q/k/v
-            // bias). Qwen3-MoE (Qwen3 attention + MoE) and DeepSeek (multi-head
-            // latent attention) are #501 follow-ups.
+            // bias); Qwen3-MoE is Qwen3 attention (per-head q/k RMSNorm, no bias);
+            // OLMoE is standard pre-norm attention with a flat q/k RMSNorm. Families
+            // whose attention or routing the shared core / MoE primitive does not yet
+            // reproduce (DeepSeek MLA, PhiMoE sparsemixer, GLM4-MoE / dots1 grouped
+            // sigmoid routing, ERNIE-4.5-MoE interleaved RoPE, gpt-oss attention sinks)
+            // are deferred with a specific message rather than mis-emitted.
             Some("mixtral") => {}
             Some("qwen2_moe") => {
                 qkv_bias = true;
             }
             Some("qwen3_moe") => {
-                return Err("Qwen3-MoE (Qwen3 attention + the MoE FFN) is a follow-up \
-                            (#501); the pieces exist but the combination is not yet \
-                            validated here"
-                    .to_string());
+                // Qwen3 attention: a per-head q/k RMSNorm (raw weight, over head_dim)
+                // before RoPE, and no q/k/v bias. The MoE FFN is built below.
+                qk_norm = Some(QkNorm {
+                    per_head: true,
+                    one_plus: false,
+                });
+            }
+            Some("olmoe") => {
+                // OLMoE attention: a FLAT q/k RMSNorm (raw weight, over the whole
+                // projection, like OLMo2) before RoPE, on the standard pre-norm block.
+                // `clip_qkv` (q/k/v projection clamping) is a follow-up: reject it
+                // rather than silently drop the clamp.
+                qk_norm = Some(QkNorm {
+                    per_head: false,
+                    one_plus: false,
+                });
+                if of("clip_qkv").is_some() {
+                    return Err("the OpenXLA emitter does not yet support OLMoE \
+                                `clip_qkv` (q/k/v projection clamping); it is a \
+                                follow-up (#501)"
+                        .to_string());
+                }
             }
             Some("deepseek_v2") | Some("deepseek_v3") => {
-                return Err("DeepSeek uses multi-head latent attention, not yet \
-                            reproduced here; it is a follow-up (#501)"
+                return Err(
+                    "DeepSeek-V2/V3 use multi-head latent attention (compressed \
+                            q/kv LoRA latent projections with a decoupled RoPE head), \
+                            which the shared attention core does not reproduce; the MoE \
+                            routing is supported but the MLA attention is a follow-up \
+                            (#501)"
+                        .to_string(),
+                );
+            }
+            Some("phimoe") => {
+                return Err("PhiMoE (Phi-3.5-MoE) routes with sparsemixer (a two-step \
+                            masked top-2 selection), not the softmax-before-top-k the \
+                            shared MoE FFN primitive emits; it is a follow-up (#501)"
+                    .to_string());
+            }
+            Some("glm4_moe") => {
+                return Err("GLM-4.5-MoE routes with sigmoid expert scores, grouped \
+                            (n_group / topk_group) top-k, and a routed score-correction \
+                            bias, not the softmax-before-top-k the shared MoE FFN \
+                            primitive emits; it is a follow-up (#501)"
+                    .to_string());
+            }
+            Some("dots1") => {
+                return Err(
+                    "dots.llm1 routes with sigmoid expert scores, grouped top-k, \
+                            and a score-correction bias (DeepSeek-style), not the \
+                            softmax-before-top-k the shared MoE FFN primitive emits; it \
+                            is a follow-up (#501)"
+                        .to_string(),
+                );
+            }
+            Some("ernie4_5_moe") => {
+                return Err("ERNIE-4.5-MoE uses interleaved (GPT-J-style) RoPE, which \
+                            the half-split RoPE emit would get wrong, plus a routed \
+                            score-correction bias; it is a follow-up (#501)"
+                    .to_string());
+            }
+            Some("gpt_oss") => {
+                return Err("gpt-oss uses attention sinks and a clamped, alpha-scaled \
+                            gated-SwiGLU expert activation, neither in the shared \
+                            attention core nor the MoE FFN primitive; it is a follow-up \
+                            (#501)"
                     .to_string());
             }
             other => {
@@ -766,8 +828,8 @@ impl Config {
                     "the OpenXLA emitter supports the dense architectures Llama, Qwen2, \
                      Qwen3, Gemma1/2/3, SmolLM3, OLMo2/3, Seed-OSS, MiMo, InternLM3, ExaOne, \
                      Cohere, Cohere2, Phi3, StableLM, StarCoder2, Granite, and MiniCPM, plus \
-                     the Mixtral and Qwen2-MoE mixture-of-experts architectures; \
-                     config.json model_type = {other:?} (other MoE / MLA / \
+                     the Mixtral, Qwen2-MoE, Qwen3-MoE, and OLMoE mixture-of-experts \
+                     architectures; config.json model_type = {other:?} (other MoE / MLA / \
                      novel-activation variants are follow-ups)"
                 ));
             }
@@ -861,12 +923,13 @@ impl Config {
             }
         };
 
-        // MoE FFN (issue #500). A recognized MoE `model_type` builds a `MoeConfig`;
-        // the FFN then routes the top-k of N experts. The router does a softmax over
-        // ALL experts BEFORE the top-k (`scoring_func = "softmax"`), so the primitive
-        // is shared across Mixtral / Qwen2-MoE (and, once their attention lands,
-        // Qwen3-MoE / DeepSeek). Field names differ per family, so each is read
-        // explicitly rather than guessed.
+        // MoE FFN (issues #500 / #501). A recognized MoE `model_type` builds a
+        // `MoeConfig`; the FFN then routes the top-k of N experts. The router does a
+        // softmax over ALL experts BEFORE the top-k (`scoring_func = "softmax"`), so
+        // the primitive is shared across Mixtral / Qwen2-MoE / Qwen3-MoE / OLMoE. Field
+        // names differ per family (Mixtral `num_local_experts` + `intermediate_size`;
+        // Qwen2/3-MoE `num_experts` + `moe_intermediate_size`; OLMoE `num_experts` +
+        // `intermediate_size`), so each is read explicitly rather than guessed.
         let moe = match model_type {
             Some("mixtral") => Some(MoeConfig {
                 n_experts: u("num_local_experts")?,
@@ -894,6 +957,54 @@ impl Config {
                     // Qwen2-MoE gates the shared expert by sigmoid(x @ Wg^T).
                     gated: true,
                 }),
+                first_k_dense: 0,
+                weight_prefix: "mlp",
+            }),
+            Some("qwen3_moe") => {
+                // The shipped Qwen3-MoE checkpoints are all-MoE (`decoder_sparse_step`
+                // = 1, empty `mlp_only_layers`). An interleaved dense/MoE schedule is
+                // not expressible by the leading-dense `first_k_dense` prefix, so it is
+                // rejected here rather than mis-routed.
+                let step = ou("decoder_sparse_step").unwrap_or(1);
+                let mlp_only = v
+                    .get("mlp_only_layers")
+                    .and_then(serde_json::Value::as_array)
+                    .is_some_and(|a| !a.is_empty());
+                if step != 1 || mlp_only {
+                    return Err("the OpenXLA emitter supports all-MoE Qwen3-MoE \
+                                (decoder_sparse_step = 1, empty mlp_only_layers); an \
+                                interleaved dense/MoE layer schedule is a follow-up \
+                                (#501)"
+                        .to_string());
+                }
+                Some(MoeConfig {
+                    n_experts: u("num_experts")?,
+                    top_k: u("num_experts_per_tok")?,
+                    intermediate: u("moe_intermediate_size")?,
+                    // Qwen3-MoE reads the renormalization flag (softmax-before-top-k).
+                    norm_topk_prob: v
+                        .get("norm_topk_prob")
+                        .and_then(serde_json::Value::as_bool)
+                        .unwrap_or(false),
+                    routed_scaling_factor: 1.0,
+                    // Qwen3-MoE has no shared expert.
+                    shared: None,
+                    first_k_dense: 0,
+                    weight_prefix: "mlp",
+                })
+            }
+            Some("olmoe") => Some(MoeConfig {
+                n_experts: u("num_experts")?,
+                top_k: u("num_experts_per_tok")?,
+                // OLMoE's experts use `intermediate_size` (no `moe_intermediate_size`).
+                intermediate: u("intermediate_size")?,
+                norm_topk_prob: v
+                    .get("norm_topk_prob")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false),
+                routed_scaling_factor: 1.0,
+                // OLMoE has no shared expert.
+                shared: None,
                 first_k_dense: 0,
                 weight_prefix: "mlp",
             }),

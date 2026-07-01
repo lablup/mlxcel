@@ -396,6 +396,81 @@ pub(crate) static QWEN2_MOE_TINY: ArchFixture = ArchFixture {
     ],
 };
 
+/// Qwen3-MoE (synthetic tiny): the #501 fixture composing the shared qk-norm attention
+/// (#497: per-head q/k RMSNorm, no q/k/v bias) with the shared MoE FFN primitive (#500)
+/// and NO shared expert. A small config (4 experts, top-2, `norm_topk_prob`, head_dim 4
+/// with 3 q-heads so the per-head q-norm and non-square o_proj are genuinely distinct)
+/// over 2 layers keeps the routed-expert graph small enough to commit. The routing math
+/// is proven token-exact against an HF fp32 Qwen3-MoE block (max block diff ~1.9e-9,
+/// `spike/openxla/moe_oracle.py`) and the qk-norm attention against OLMo2/Qwen3 (#497);
+/// this fixture then guards the composed emit byte-for-byte forever.
+pub(crate) static QWEN3_MOE_TINY: ArchFixture = ArchFixture {
+    arch: "qwen3-moe-tiny",
+    config_json: include_str!("../assets/qwen3-moe-tiny/config.json"),
+    graphs: &[
+        GraphFixture {
+            kind: GraphKind::Prefill { sample: true },
+            golden_name: "prefill.mlir",
+            golden: include_str!("../assets/qwen3-moe-tiny/prefill.mlir"),
+        },
+        GraphFixture {
+            kind: GraphKind::Decode { sample: true },
+            golden_name: "decode.mlir",
+            golden: include_str!("../assets/qwen3-moe-tiny/decode.mlir"),
+        },
+        GraphFixture {
+            kind: GraphKind::Prefill { sample: false },
+            golden_name: "prefill_logits.mlir",
+            golden: include_str!("../assets/qwen3-moe-tiny/prefill_logits.mlir"),
+        },
+        GraphFixture {
+            kind: GraphKind::DecodeRagged {
+                b_max: 4,
+                sample: false,
+            },
+            golden_name: "decode_ragged_logits_b4.mlir",
+            golden: include_str!("../assets/qwen3-moe-tiny/decode_ragged_logits_b4.mlir"),
+        },
+    ],
+};
+
+/// OLMoE (synthetic tiny): the #501 fixture composing the FLAT q/k RMSNorm attention
+/// (#497: raw weight over the whole projection, like OLMo2) on the STANDARD pre-norm
+/// block with the shared MoE FFN primitive (#500) and NO shared expert. Unlike OLMo2,
+/// OLMoE keeps `input_layernorm` (standard pre-norm) and its experts use
+/// `intermediate_size` (no `moe_intermediate_size`). The routing math is proven
+/// token-exact against an HF fp32 OLMoE block (max block diff ~2.2e-8,
+/// `spike/openxla/moe_oracle.py`); this fixture guards the composed emit.
+pub(crate) static OLMOE_TINY: ArchFixture = ArchFixture {
+    arch: "olmoe-tiny",
+    config_json: include_str!("../assets/olmoe-tiny/config.json"),
+    graphs: &[
+        GraphFixture {
+            kind: GraphKind::Prefill { sample: true },
+            golden_name: "prefill.mlir",
+            golden: include_str!("../assets/olmoe-tiny/prefill.mlir"),
+        },
+        GraphFixture {
+            kind: GraphKind::Decode { sample: true },
+            golden_name: "decode.mlir",
+            golden: include_str!("../assets/olmoe-tiny/decode.mlir"),
+        },
+        GraphFixture {
+            kind: GraphKind::Prefill { sample: false },
+            golden_name: "prefill_logits.mlir",
+            golden: include_str!("../assets/olmoe-tiny/prefill_logits.mlir"),
+        },
+        GraphFixture {
+            kind: GraphKind::DecodeRagged {
+                b_max: 4,
+                sample: false,
+            },
+            golden_name: "decode_ragged_logits_b4.mlir",
+            golden: include_str!("../assets/olmoe-tiny/decode_ragged_logits_b4.mlir"),
+        },
+    ],
+};
+
 /// A dense-pack fixture: a small synthetic `config.json` and the frozen decode +
 /// prefill goldens for a family. `$sample` selects the graph tail the goldens were
 /// frozen with: `true` returns the on-device argmax token (the issue #499 pack:
@@ -453,8 +528,8 @@ dense_fixture!(INTERNLM3, "internlm3", true);
 dense_fixture!(EXAONE, "exaone", true);
 
 /// Every registered structural fixture. Append a family here to add it to the
-/// byte-exact gate; see the module docs for the freeze workflow. The MoE fixture
-/// (issue #500) rides the same byte-exact gate as the dense families.
+/// byte-exact gate; see the module docs for the freeze workflow. The MoE fixtures
+/// (issues #500 / #501) ride the same byte-exact gate as the dense families.
 pub(crate) static REGISTERED: &[&ArchFixture] = &[
     &LLAMA_3_2_1B,
     &COHERE,
@@ -469,6 +544,8 @@ pub(crate) static REGISTERED: &[&ArchFixture] = &[
     &INTERNLM3,
     &EXAONE,
     &QWEN2_MOE_TINY,
+    &QWEN3_MOE_TINY,
+    &OLMOE_TINY,
 ];
 
 /// A golden-less structural fixture (issue #497): a small synthetic `config.json`
@@ -790,19 +867,19 @@ mod tests {
         }
     }
 
-    /// Freeze the MoE structural goldens (issue #500) for the synthetic tiny
-    /// qwen2_moe fixture. A no-op unless `MLXCEL_FREEZE_MOE=1`; when set it emits
-    /// each graph from `assets/qwen2-moe-tiny/config.json` and writes the `.mlir`
-    /// goldens via the bootstrap [`emit_graphs`] path (no committed golden needed),
-    /// so a brand-new family authors its goldens before its [`ArchFixture`] exists.
-    /// Run once to author them; the byte-exact gate then guards them forever.
+    /// Freeze the MoE structural goldens (issues #500 / #501) for the synthetic tiny
+    /// MoE fixtures: qwen2_moe (shared expert, #500), qwen3_moe and olmoe (no shared
+    /// expert on the qk-norm attention core, #501). A no-op unless `MLXCEL_FREEZE_MOE=1`;
+    /// when set it emits each graph from `assets/<arch>/config.json` and writes the
+    /// `.mlir` goldens via the bootstrap [`emit_graphs`] path (no committed golden
+    /// needed), so a brand-new family authors its goldens before its [`ArchFixture`]
+    /// exists. Run once to author them; the byte-exact gate then guards them forever.
     #[test]
     fn freeze_moe_goldens() {
         if std::env::var("MLXCEL_FREEZE_MOE").as_deref() != Ok("1") {
             return;
         }
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/qwen2-moe-tiny");
-        let cfg_json = std::fs::read_to_string(root.join("config.json")).expect("read config.json");
+        let assets = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets");
         let targets: [(GraphKind, &str); 4] = [
             (GraphKind::Decode { sample: true }, "decode.mlir"),
             (GraphKind::Prefill { sample: true }, "prefill.mlir"),
@@ -815,12 +892,18 @@ mod tests {
                 "decode_ragged_logits_b4.mlir",
             ),
         ];
-        for (kind, name) in targets {
-            let graphs = emit_graphs(&cfg_json, &[kind]).expect("qwen2-moe-tiny config parses");
-            let (_, mlir) = &graphs[0];
-            let p = root.join(name);
-            std::fs::write(&p, mlir).unwrap_or_else(|e| panic!("write {}: {e}", p.display()));
-            eprintln!("froze {}", p.display());
+        for arch in ["qwen2-moe-tiny", "qwen3-moe-tiny", "olmoe-tiny"] {
+            let root = assets.join(arch);
+            let cfg_json =
+                std::fs::read_to_string(root.join("config.json")).expect("read config.json");
+            for (kind, name) in targets {
+                let graphs = emit_graphs(&cfg_json, &[kind])
+                    .unwrap_or_else(|e| panic!("{arch} config parses: {e}"));
+                let (_, mlir) = &graphs[0];
+                let p = root.join(name);
+                std::fs::write(&p, mlir).unwrap_or_else(|e| panic!("write {}: {e}", p.display()));
+                eprintln!("froze {}", p.display());
+            }
         }
     }
 
