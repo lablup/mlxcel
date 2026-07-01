@@ -31,11 +31,20 @@ const PREFILL_LP: usize = MAX_SEQ;
 /// post_ln, up, wk, wo, wq, wv). `bk`/`bq`/`bv` are the q/k/v projection biases,
 /// present only for an architecture with `qkv_bias` (Qwen2); `None` for Llama,
 /// where the bias add emits no op so the graph is byte-identical to before.
+///
+/// The dense arch pack (issue #498) adds three optionalities: `gate` is `None`
+/// for a dense (non-gated) MLP (StarCoder2, which has only `up`=c_fc and
+/// `down`=c_proj); `post_ln` is `None` for a parallel-block arch (Cohere/Cohere2,
+/// which has no `post_attention_layernorm`); and the `*_bias` handles carry the
+/// LayerNorm affine biases (`in_ln_bias`/`post_ln_bias`, StableLM/StarCoder2), the
+/// output-projection bias (`wo_bias`, StarCoder2), and the MLP biases
+/// (`down_bias`/`gate_bias`/`up_bias`, StarCoder2). All are `None` for the Llama
+/// family, so its graphs are byte-identical.
 struct LayerW {
     down: Val,
-    gate: Val,
+    gate: Option<Val>,
     in_ln: Val,
-    post_ln: Val,
+    post_ln: Option<Val>,
     up: Val,
     wk: Val,
     wo: Val,
@@ -49,11 +58,20 @@ struct LayerW {
     /// norm, `pre_ff_ln` the pre-MLP norm, `post_ff_ln` the post-MLP norm.
     pre_ff_ln: Option<Val>,
     post_ff_ln: Option<Val>,
+    // #498 LayerNorm / bias / dense-MLP handles.
+    in_ln_bias: Option<Val>,
+    post_ln_bias: Option<Val>,
+    wo_bias: Option<Val>,
+    down_bias: Option<Val>,
+    gate_bias: Option<Val>,
+    up_bias: Option<Val>,
 }
 
 struct Args {
     embed: Val,
     final_norm: Val,
+    /// Final-norm affine bias (`Some` for a LayerNorm arch, #498).
+    final_norm_bias: Option<Val>,
     /// Untied LM head (`None` when tied; the tail then reuses `embed`).
     lm_head: Option<Val>,
     layers: Vec<LayerW>,
@@ -83,7 +101,7 @@ fn take_arg(decls: &mut Vec<ArgDecl>, idx: &mut usize, ty: Ty, loc: String) -> V
 /// Take the untied LM head weight `params['lm_head']` (`[V, H]`), or `None` for a
 /// tied checkpoint (which reuses `embed` for the final projection). Called right
 /// after `final_norm` and before the layers, so the weight arg order is embed,
-/// final_norm, [lm_head when untied], layers..., matching `weight_names` in
+/// final_norm, [lm_head when untied], layers..., matching `weight_specs` in `weights.rs`, invoked from
 /// `iree.rs`. For a tied model nothing is emitted, so the graph stays byte-
 /// identical (the guard that keeps every tied checkpoint unchanged).
 fn take_lm_head(decls: &mut Vec<ArgDecl>, idx: &mut usize, c: &Config) -> Option<Val> {
@@ -107,9 +125,26 @@ fn head_weight<'a>(embed: &'a Val, lm_head: &'a Option<Val>) -> &'a Val {
     lm_head.as_ref().unwrap_or(embed)
 }
 
+/// Take the final-norm affine bias `params['final_norm_bias']` (`[H]`) for a
+/// LayerNorm arch (`norm_bias`, StableLM/StarCoder2), or `None` for an RMSNorm
+/// arch (which emits no such arg, keeping its graph byte-identical). Taken right
+/// after `final_norm` and before `lm_head`, matching `weight_specs` in `weights.rs`, invoked from `iree.rs`.
+fn take_final_norm_bias(decls: &mut Vec<ArgDecl>, idx: &mut usize, c: &Config) -> Option<Val> {
+    if c.norm_bias {
+        Some(take_arg(
+            decls,
+            idx,
+            Ty::f32(vec![c.hidden]),
+            "params['final_norm_bias']".into(),
+        ))
+    } else {
+        None
+    }
+}
+
 /// Append layer `li`'s weights (and, for `qkv_bias`, its q/k/v biases) in the one
 /// canonical order every graph kind shares, so the emitted arg order matches
-/// `weight_names` in `iree.rs` exactly. JAX-alphabetical weights (down, gate,
+/// `weight_specs` (`weights.rs`) exactly. JAX-alphabetical weights (down, gate,
 /// in_ln, post_ln, up, wk, wo, wq, wv), then — when `c.qkv_bias` — the k/q/v
 /// projection biases (alphabetical, matching the wk<wq<wv weight order). The
 /// biases are rank-1: `bk`/`bv` are `[n_kv*head_dim]`, `bq` is `[n_q*head_dim]`.
@@ -119,10 +154,23 @@ fn take_layer_weights(decls: &mut Vec<ArgDecl>, idx: &mut usize, c: &Config, li:
     let kv = c.n_kv * c.head_dim;
     let qd = c.n_q * c.head_dim;
     let p = |k: &str| format!("params['layers'][{}]['{}']", li, k);
+    // A dense (non-gated) MLP has no gate projection; a parallel-block arch has no
+    // post-attention layernorm. Both are `true` for the Llama family, so its arg
+    // order (down, gate, in_ln, post_ln, up, wk, wo, wq, wv) is unchanged.
+    let gated = !c.dense_mlp;
+    let has_post = !c.parallel_block;
     let down = take_arg(decls, idx, Ty::f32(vec![h, inter]), p("down"));
-    let gate = take_arg(decls, idx, Ty::f32(vec![inter, h]), p("gate"));
+    let gate = if gated {
+        Some(take_arg(decls, idx, Ty::f32(vec![inter, h]), p("gate")))
+    } else {
+        None
+    };
     let in_ln = take_arg(decls, idx, Ty::f32(vec![h]), p("in_ln"));
-    let post_ln = take_arg(decls, idx, Ty::f32(vec![h]), p("post_ln"));
+    let post_ln = if has_post {
+        Some(take_arg(decls, idx, Ty::f32(vec![h]), p("post_ln")))
+    } else {
+        None
+    };
     let up = take_arg(decls, idx, Ty::f32(vec![inter, h]), p("up"));
     let wk = take_arg(decls, idx, Ty::f32(vec![kv, h]), p("wk"));
     // o_proj maps `[n_q*head_dim]` -> `[hidden]`, so its weight is `[h, qd]` (HF's
@@ -140,13 +188,47 @@ fn take_layer_weights(decls: &mut Vec<ArgDecl>, idx: &mut usize, c: &Config, li:
         (None, None, None)
     };
     // Gemma2's two extra per-layer norms, appended after the q/k/v biases slot in
-    // the same order `weight_names` lists them (pre then post feed-forward).
+    // the same order `weight_specs` (`weights.rs`) lists them (pre then post feed-forward).
     let (pre_ff_ln, post_ff_ln) = if c.gemma2 {
         let pre = take_arg(decls, idx, Ty::f32(vec![h]), p("pre_ff_ln"));
         let post = take_arg(decls, idx, Ty::f32(vec![h]), p("post_ff_ln"));
         (Some(pre), Some(post))
     } else {
         (None, None)
+    };
+    // #498 optional handles, appended after the Gemma2 norms in the canonical order
+    // `weight_specs` (`weights.rs`) mirrors: LayerNorm affine biases (in_ln then, when present,
+    // post_ln), the o_proj bias, then the MLP biases (down, gate, up). Each is
+    // absent for the Llama family, so nothing is appended and its args are unchanged.
+    let in_ln_bias = if c.norm_bias {
+        Some(take_arg(decls, idx, Ty::f32(vec![h]), p("in_ln_bias")))
+    } else {
+        None
+    };
+    let post_ln_bias = if c.norm_bias && has_post {
+        Some(take_arg(decls, idx, Ty::f32(vec![h]), p("post_ln_bias")))
+    } else {
+        None
+    };
+    let wo_bias = if c.attn_o_bias {
+        Some(take_arg(decls, idx, Ty::f32(vec![h]), p("wo_bias")))
+    } else {
+        None
+    };
+    let down_bias = if c.mlp_bias {
+        Some(take_arg(decls, idx, Ty::f32(vec![h]), p("down_bias")))
+    } else {
+        None
+    };
+    let gate_bias = if c.mlp_bias && gated {
+        Some(take_arg(decls, idx, Ty::f32(vec![inter]), p("gate_bias")))
+    } else {
+        None
+    };
+    let up_bias = if c.mlp_bias {
+        Some(take_arg(decls, idx, Ty::f32(vec![inter]), p("up_bias")))
+    } else {
+        None
     };
     LayerW {
         down,
@@ -163,6 +245,12 @@ fn take_layer_weights(decls: &mut Vec<ArgDecl>, idx: &mut usize, c: &Config, li:
         bv,
         pre_ff_ln,
         post_ff_ln,
+        in_ln_bias,
+        post_ln_bias,
+        wo_bias,
+        down_bias,
+        gate_bias,
+        up_bias,
     }
 }
 
@@ -208,6 +296,7 @@ fn build_arg_schema(c: &Config) -> (Vec<ArgDecl>, Args) {
         Ty::f32(vec![h]),
         "params['final_norm']".into(),
     );
+    let final_norm_bias = take_final_norm_bias(&mut decls, &mut idx, c);
     let lm_head = take_lm_head(&mut decls, &mut idx, c);
 
     let mut layers = Vec::with_capacity(c.n_layers);
@@ -236,6 +325,7 @@ fn build_arg_schema(c: &Config) -> (Vec<ArgDecl>, Args) {
         Args {
             embed,
             final_norm,
+            final_norm_bias,
             lm_head,
             layers,
             token,
@@ -273,8 +363,9 @@ struct Consts {
 
 fn emit_consts(b: &mut Builder, c: &Config) -> Consts {
     let (cos, sin) = rope::rope_tables(c, MAX_SEQ);
-    let cos_table = b.const_tensor_f32(&cos, vec![MAX_SEQ, c.head_dim]);
-    let sin_table = b.const_tensor_f32(&sin, vec![MAX_SEQ, c.head_dim]);
+    let rot = c.rotary_width();
+    let cos_table = b.const_tensor_f32(&cos, vec![MAX_SEQ, rot]);
+    let sin_table = b.const_tensor_f32(&sin, vec![MAX_SEQ, rot]);
     let zero = b.const_f32(0.0);
     let one = b.const_f32(1.0);
     let neg_inf = b.const_f32(f32::NEG_INFINITY);
@@ -330,6 +421,135 @@ fn norm_w(b: &mut Builder, w: &Val, c: &Config, k: &Consts, hidden: usize) -> Va
     }
 }
 
+/// Single-token (`[hidden]`) normalization: RMSNorm (the Llama family, byte-exact
+/// `rms_norm`) or, for a LayerNorm arch (`c.layernorm`, issue #498), mean-subtract
+/// LayerNorm `w * (x - mean) * rsqrt(var + eps)` with an optional affine `bias`.
+/// The RMSNorm branch never carries a bias, so it delegates to `rms_norm` and is
+/// unchanged.
+fn normalize(
+    b: &mut Builder,
+    c: &Config,
+    k: &Consts,
+    x: &Val,
+    w: &Val,
+    bias: Option<&Val>,
+    hidden: usize,
+) -> Val {
+    if !c.layernorm {
+        return rms_norm(b, x, w, k, hidden);
+    }
+    let sum = b.reduce_add(x, 0, &k.zero); // scalar
+    let mean = b.divide(&sum, &k.hidden_f);
+    let mean_b = b.broadcast(&mean, &[], vec![hidden]);
+    let xc = b.subtract(x, &mean_b);
+    let sq = b.multiply(&xc, &xc);
+    let ssum = b.reduce_add(&sq, 0, &k.zero);
+    let var = b.divide(&ssum, &k.hidden_f);
+    let veps = b.add(&var, &k.eps);
+    let r = b.rsqrt(&veps);
+    let rb = b.broadcast(&r, &[], vec![hidden]);
+    let xn = b.multiply(&xc, &rb);
+    let out = b.multiply(&xn, w);
+    match bias {
+        Some(bb) => b.add(&out, bb),
+        None => out,
+    }
+}
+
+/// Per-row (`[n, hidden]`) normalization: RMSNorm (byte-exact `rms_norm_seq`) or
+/// mean-subtract LayerNorm with an optional affine `bias` (issue #498).
+#[allow(clippy::too_many_arguments)]
+fn normalize_seq(
+    b: &mut Builder,
+    c: &Config,
+    k: &Consts,
+    x: &Val,
+    w: &Val,
+    bias: Option<&Val>,
+    n: usize,
+    hidden: usize,
+) -> Val {
+    if !c.layernorm {
+        return rms_norm_seq(b, x, w, k, n, hidden);
+    }
+    let sum = b.reduce_add(x, 1, &k.zero); // [n]
+    let hb = b.broadcast(&k.hidden_f, &[], vec![n]);
+    let mean = b.divide(&sum, &hb);
+    let mean_b = b.broadcast(&mean, &[0], vec![n, hidden]);
+    let xc = b.subtract(x, &mean_b);
+    let sq = b.multiply(&xc, &xc);
+    let ssum = b.reduce_add(&sq, 1, &k.zero); // [n]
+    let var = b.divide(&ssum, &hb);
+    let epsb = b.broadcast(&k.eps, &[], vec![n]);
+    let veps = b.add(&var, &epsb);
+    let r = b.rsqrt(&veps); // [n]
+    let rb = b.broadcast(&r, &[0], vec![n, hidden]);
+    let xn = b.multiply(&xc, &rb);
+    let wb = b.broadcast(w, &[1], vec![n, hidden]);
+    let out = b.multiply(&xn, &wb);
+    match bias {
+        Some(bb) => {
+            let bbc = b.broadcast(bb, &[1], vec![n, hidden]);
+            b.add(&out, &bbc)
+        }
+        None => out,
+    }
+}
+
+/// `silu(x) = x * sigmoid(x)`, `sigmoid(z) = 1/(1+exp(-z))`, at any rank (the
+/// `one` broadcast uses `x`'s own shape, so this emits the exact op sequence the
+/// single-token and seq MLP paths inlined). Byte-identical to those inlines.
+fn silu(b: &mut Builder, k: &Consts, x: &Val) -> Val {
+    let neg = b.negate(x);
+    let ex = b.exponential(&neg);
+    let one_b = b.broadcast(&k.one, &[], x.ty.shape.clone());
+    let denom = b.add(&one_b, &ex);
+    let sig = b.divide(&one_b, &denom);
+    b.multiply(x, &sig)
+}
+
+/// Scale a sublayer output by the arch's per-residual multiplier before its
+/// residual add (Granite `residual_multiplier`, MiniCPM `scale_depth/sqrt(L)`,
+/// issue #498). A no-op (and no emitted op) for the Llama family (`None`), so its
+/// graphs are unchanged. Shape-agnostic (broadcasts to the output's own shape).
+fn scale_residual(b: &mut Builder, c: &Config, x: Val) -> Val {
+    match c.residual_multiplier {
+        Some(m) => {
+            let mc = b.const_f32(m);
+            let mb = b.broadcast(&mc, &[], x.ty.shape.clone());
+            b.multiply(&x, &mb)
+        }
+        None => x,
+    }
+}
+
+/// Apply the arch's final-logit scaling to `[V]` (single/prefill) or `[B, V]`
+/// (ragged) logits: the Gemma2 soft-cap, then a Cohere `logit_scale` multiply,
+/// then a Granite / MiniCPM divide. Each is per-arch exclusive and `None` for the
+/// Llama family, so its logits are unchanged.
+fn apply_logit_scale(b: &mut Builder, c: &Config, logits: Val) -> Val {
+    let logits = match c.final_logit_softcap {
+        Some(cap) => softcap(b, &logits, cap),
+        None => logits,
+    };
+    let logits = match c.logit_mul {
+        Some(m) => {
+            let mc = b.const_f32(m);
+            let mb = b.broadcast(&mc, &[], logits.ty.shape.clone());
+            b.multiply(&logits, &mb)
+        }
+        None => logits,
+    };
+    match c.logit_div {
+        Some(d) => {
+            let dc = b.const_f32(d);
+            let db = b.broadcast(&dc, &[], logits.ty.shape.clone());
+            b.divide(&logits, &db)
+        }
+        None => logits,
+    }
+}
+
 /// Gemma2 `gelu_pytorch_tanh` activation, elementwise over `x` (any shape):
 /// `0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))`.
 fn gelu_tanh(b: &mut Builder, x: &Val) -> Val {
@@ -363,62 +583,73 @@ fn softcap(b: &mut Builder, x: &Val, cap: f32) -> Val {
     b.multiply(&t, &capb)
 }
 
-/// The seq-shaped (`[n, H]`) per-layer MLP plus its surrounding norms, shared by
-/// every multi-row graph (prefill, ragged decode). Llama / Qwen2: a pre-MLP
-/// `post_attention_layernorm` then SwiGLU. Gemma2: a pre-MLP
-/// `pre_feedforward_layernorm`, GeGLU, and a post-MLP `post_feedforward_layernorm`.
-/// Returns the residual already added (`x + down`). For a non-Gemma2 config it
-/// emits exactly the op sequence the graphs carried inline, so their text is
-/// byte-identical. Writing it once is the lever that makes a new architecture's
-/// MLP delta (here, GeGLU + the two FF norms) reach every serve graph at once.
-fn seq_mlp(b: &mut Builder, c: &Config, lw: &LayerW, k: &Consts, x: &Val, n: usize) -> Val {
-    let h = c.hidden;
-    let pre_mlp = if c.gemma2 {
-        lw.pre_ff_ln.as_ref().expect("gemma2 pre_ff_ln")
-    } else {
-        &lw.post_ln
-    };
-    let pre_mlp_w = norm_w(b, pre_mlp, c, k, h);
-    let hn2 = rms_norm_seq(b, x, &pre_mlp_w, k, n, h);
-    let gate = b.linear_seq(&hn2, &lw.gate);
-    let up = b.linear_seq(&hn2, &lw.up);
-    let act = if c.gemma2 {
-        gelu_tanh(b, &gate)
-    } else {
-        let neg = b.negate(&gate);
-        let ex = b.exponential(&neg);
-        let one_b = b.broadcast(&k.one, &[], vec![n, c.inter]);
-        let denom = b.add(&one_b, &ex);
-        let sig = b.divide(&one_b, &denom);
-        b.multiply(&gate, &sig)
-    };
-    let act = b.multiply(&act, &up);
-    let down = b.linear_seq(&act, &lw.down);
-    let down = if c.gemma2 {
-        let w = norm_w(
-            b,
-            lw.post_ff_ln.as_ref().expect("gemma2 post_ff_ln"),
-            c,
-            k,
-            h,
-        );
-        rms_norm_seq(b, &down, &w, k, n, h)
-    } else {
-        down
-    };
-    b.add(x, &down)
+/// Scale the gathered input embeddings: Gemma2 by `sqrt(hidden)`, and Granite /
+/// MiniCPM by `embedding_multiplier` / `scale_emb` (issue #498). `shape` is the
+/// activation shape at the graph kind's rank (`[H]` single, `[N, H]` seq). Both
+/// are no-ops (no emitted op) for the Llama family, so its graphs are unchanged.
+fn scale_embedding(b: &mut Builder, c: &Config, x: Val, shape: Vec<usize>) -> Val {
+    let mut x = x;
+    if c.gemma2 {
+        let norm = b.const_f32(c.embed_normalizer());
+        let nb = b.broadcast(&norm, &[], shape.clone());
+        x = b.multiply(&x, &nb);
+    }
+    if let Some(em) = c.embedding_multiplier {
+        let emc = b.const_f32(em);
+        let emb = b.broadcast(&emc, &[], shape);
+        x = b.multiply(&x, &emb);
+    }
+    x
 }
 
-/// HF half-split RoPE on x:[heads, d]; cos/sin are [d] for the position.
-fn apply_rope(b: &mut Builder, x: &Val, cos: &Val, sin: &Val, heads: usize, d: usize) -> Val {
-    let half = d / 2;
-    let cos_b = b.broadcast(cos, &[1], vec![heads, d]);
-    let sin_b = b.broadcast(sin, &[1], vec![heads, d]);
+/// HF RoPE on x:[heads, d]; cos/sin are [rd] for the position (`rd` = rotary
+/// width). Full RoPE (`rd == d`) rotates the whole head; partial RoPE (StableLM,
+/// `rd < d`) rotates only the first `rd` of each head and passes the rest through.
+/// The rotation convention (half-split / interleaved) comes from `c` (issue #498).
+/// For a full-rope, half-split arch (Llama family) this emits the exact op
+/// sequence the path inlined, byte-identical.
+fn apply_rope(b: &mut Builder, c: &Config, x: &Val, cos: &Val, sin: &Val, heads: usize) -> Val {
+    let d = c.head_dim;
+    let rd = c.rotary_width();
+    if rd == d {
+        return rotate(b, c, x, cos, sin, heads, rd);
+    }
+    let x_rot = b.slice(x, &[(0, heads), (0, rd)]);
+    let x_pass = b.slice(x, &[(0, heads), (rd, d)]);
+    let rotated = rotate(b, c, &x_rot, cos, sin, heads, rd);
+    b.concatenate(&rotated, &x_pass, 1)
+}
+
+/// The core RoPE rotation on x:[heads, rd] with cos/sin [rd]. Half-split
+/// (`concat(-x2, x1)`, Llama) or interleaved (per adjacent pair `(2i, 2i+1)`:
+/// `[-x_odd, x_even]`, Cohere). Byte-identical to the inlined half-split for the
+/// Llama family.
+fn rotate(
+    b: &mut Builder,
+    c: &Config,
+    x: &Val,
+    cos: &Val,
+    sin: &Val,
+    heads: usize,
+    rd: usize,
+) -> Val {
+    let cos_b = b.broadcast(cos, &[1], vec![heads, rd]);
+    let sin_b = b.broadcast(sin, &[1], vec![heads, rd]);
     let xc = b.multiply(x, &cos_b);
-    let x1 = b.slice(x, &[(0, heads), (0, half)]);
-    let x2 = b.slice(x, &[(0, heads), (half, d)]);
-    let nx2 = b.negate(&x2);
-    let rh = b.concatenate(&nx2, &x1, 1);
+    let rh = if c.rope_interleaved {
+        let xr = b.reshape(x, vec![heads, rd / 2, 2]);
+        let even = b.slice(&xr, &[(0, heads), (0, rd / 2), (0, 1)]);
+        let odd = b.slice(&xr, &[(0, heads), (0, rd / 2), (1, 2)]);
+        let neg_odd = b.negate(&odd);
+        let st = b.concatenate(&neg_odd, &even, 2);
+        b.reshape(&st, vec![heads, rd])
+    } else {
+        let half = rd / 2;
+        let x1 = b.slice(x, &[(0, heads), (0, half)]);
+        let x2 = b.slice(x, &[(0, heads), (half, rd)]);
+        let nx2 = b.negate(&x2);
+        b.concatenate(&nx2, &x1, 1)
+    };
     let rs = b.multiply(&rh, &sin_b);
     b.add(&xc, &rs)
 }
@@ -485,13 +716,50 @@ enum AttnLayout {
 }
 
 impl AttnLayout {
-    /// RMSNorm at this kind's activation rank: rank-reduced for single decode,
-    /// per-row over the sequence axis otherwise.
-    fn norm(&self, b: &mut Builder, c: &Config, k: &Consts, x: &Val, w: &Val) -> Val {
+    /// Normalization at this kind's activation rank (rank-reduced for single
+    /// decode, per-row otherwise): RMSNorm for the Llama family, mean-subtract
+    /// LayerNorm with the optional `bias` for a LayerNorm arch (issue #498).
+    fn norm(
+        &self,
+        b: &mut Builder,
+        c: &Config,
+        k: &Consts,
+        x: &Val,
+        w: &Val,
+        bias: Option<&Val>,
+    ) -> Val {
         match self {
-            AttnLayout::Single { .. } => rms_norm(b, x, w, k, c.hidden),
-            AttnLayout::Ragged { bsz, .. } => rms_norm_seq(b, x, w, k, *bsz, c.hidden),
-            AttnLayout::Prefill { lp, .. } => rms_norm_seq(b, x, w, k, *lp, c.hidden),
+            AttnLayout::Single { .. } => normalize(b, c, k, x, w, bias, c.hidden),
+            AttnLayout::Ragged { bsz, .. } => normalize_seq(b, c, k, x, w, bias, *bsz, c.hidden),
+            AttnLayout::Prefill { lp, .. } => normalize_seq(b, c, k, x, w, bias, *lp, c.hidden),
+        }
+    }
+
+    /// A rank-aware linear `x @ W^T`: `[K] -> [N]` for single decode, `[L, K] ->
+    /// [L, N]` for the seq kinds. Lets the shared MLP body emit at any rank.
+    fn linear(&self, b: &mut Builder, x: &Val, w: &Val) -> Val {
+        match self {
+            AttnLayout::Single { .. } => b.linear(x, w),
+            _ => b.linear_seq(x, w),
+        }
+    }
+
+    /// Add an optional projection/MLP bias at this kind's rank: a plain `[K]` add
+    /// for single decode, a `[K] -> [N, K]` broadcast-add for the seq kinds. A
+    /// no-op (no emitted op) when the bias is absent, keeping the Llama family
+    /// byte-identical.
+    fn add_bias(&self, b: &mut Builder, x: Val, bias: Option<&Val>) -> Val {
+        match bias {
+            None => x,
+            Some(bb) => match self {
+                AttnLayout::Single { .. } => b.add(&x, bb),
+                _ => {
+                    let n = x.ty.shape[0];
+                    let kdim = x.ty.shape[1];
+                    let bbc = b.broadcast(bb, &[1], vec![n, kdim]);
+                    b.add(&x, &bbc)
+                }
+            },
         }
     }
 
@@ -541,24 +809,25 @@ impl AttnLayout {
         (q, kk, vv)
     }
 
-    /// Apply this kind's RoPE to q and k (v is never rotated).
+    /// Apply this kind's RoPE to q and k (v is never rotated). The half-split /
+    /// interleaved convention and partial-RoPE width come from `c`; ragged and
+    /// prefill share the per-row seq rotation (differing only in the row count).
     fn rope_qk(&self, b: &mut Builder, c: &Config, q: &Val, kk: &Val) -> (Val, Val) {
-        let d = c.head_dim;
         let (nq, nkv) = (c.n_q, c.n_kv);
         match self {
             AttnLayout::Single { cos, sin, .. } => {
-                let q = apply_rope(b, q, cos, sin, nq, d);
-                let kk = apply_rope(b, kk, cos, sin, nkv, d);
+                let q = apply_rope(b, c, q, cos, sin, nq);
+                let kk = apply_rope(b, c, kk, cos, sin, nkv);
                 (q, kk)
             }
             AttnLayout::Ragged { bsz, cos, sin, .. } => {
-                let q = apply_rope_ragged(b, q, cos, sin, *bsz, nq, d);
-                let kk = apply_rope_ragged(b, kk, cos, sin, *bsz, nkv, d);
+                let q = apply_rope_seq(b, c, q, cos, sin, *bsz, nq);
+                let kk = apply_rope_seq(b, c, kk, cos, sin, *bsz, nkv);
                 (q, kk)
             }
             AttnLayout::Prefill { lp, cos, sin, .. } => {
-                let q = apply_rope_seq(b, q, cos, sin, *lp, nq, d);
-                let kk = apply_rope_seq(b, kk, cos, sin, *lp, nkv, d);
+                let q = apply_rope_seq(b, c, q, cos, sin, *lp, nq);
+                let kk = apply_rope_seq(b, c, kk, cos, sin, *lp, nkv);
                 (q, kk)
             }
         }
@@ -768,12 +1037,15 @@ impl AttnLayout {
         }
     }
 
-    /// The output projection at this kind's activation rank.
+    /// The output projection at this kind's activation rank, plus the optional
+    /// `o_proj` bias (StarCoder2 `use_bias`, issue #498; a no-op for the Llama
+    /// family, byte-identical).
     fn o_proj(&self, b: &mut Builder, o: &Val, lw: &LayerW) -> Val {
-        match self {
+        let out = match self {
             AttnLayout::Single { .. } => b.linear(o, &lw.wo),
             _ => b.linear_seq(o, &lw.wo),
-        }
+        };
+        self.add_bias(b, out, lw.wo_bias.as_ref())
     }
 }
 
@@ -829,9 +1101,10 @@ fn arch_norm(
     layout: &AttnLayout,
     x: &Val,
     w_raw: &Val,
+    bias: Option<&Val>,
 ) -> Val {
     let w = norm_w(b, w_raw, c, k, c.hidden);
-    layout.norm(b, c, k, x, &w)
+    layout.norm(b, c, k, x, &w, bias)
 }
 
 /// Gemma2's post-attention RMSNorm on the sublayer output before the residual (a
@@ -845,20 +1118,25 @@ fn post_attn_norm(
     lw: &LayerW,
 ) -> Val {
     if c.gemma2 {
-        let w = norm_w(b, &lw.post_ln, c, k, c.hidden);
-        layout.norm(b, c, k, &attn_out, &w)
+        let post_ln = lw.post_ln.as_ref().expect("gemma2 post_ln");
+        let w = norm_w(b, post_ln, c, k, c.hidden);
+        layout.norm(b, c, k, &attn_out, &w, None)
     } else {
         attn_out
     }
 }
 
-/// Emit one layer's complete attention block for graph kind `layout`, returning
-/// the residual stream after the attention residual add. The op sequence (input
-/// norm, q/k/v projection + bias, RoPE, KV write/read, GQA scores, scale,
-/// soft-cap, mask, softmax, context, o_proj, post-attn norm, residual) is the
-/// architecture surface a new dense family customizes once; `layout` supplies the
-/// per-graph-kind ranks, cache indexing, and dot shapes. Byte-for-byte identical
-/// to the op sequence each path previously inlined.
+/// Emit one layer's attention block for graph kind `layout`, returning both the
+/// shared normed input `hn` (`input_layernorm(x)`, which a parallel-block arch
+/// feeds to the MLP too) and `attn_out` (the o_proj output after any post-attn
+/// norm), WITHOUT the residual add: the caller ([`emit_transformer_layer`]) owns
+/// the residual, so it can combine the attention and MLP outputs sequentially or
+/// in parallel. The op sequence (input norm + bias, q/k/v projection + bias, RoPE,
+/// KV write/read, GQA scores, scale, soft-cap, mask, softmax, context, o_proj +
+/// bias, post-attn norm) is the architecture surface a new dense family
+/// customizes once; `layout` supplies the per-graph-kind ranks, cache indexing,
+/// and dot shapes. For the Llama family this emits the exact op sequence the paths
+/// inlined (the caller's `add(x, attn_out)` lands at the same point), byte-identical.
 #[allow(clippy::too_many_arguments)]
 fn emit_attention(
     b: &mut Builder,
@@ -870,14 +1148,23 @@ fn emit_attention(
     layout: &AttnLayout,
     kcache: &mut Val,
     vcache: &mut Val,
-) -> Val {
-    let hn = arch_norm(b, c, k, layout, x, &lw.in_ln);
+) -> (Val, Val) {
+    let hn = arch_norm(b, c, k, layout, x, &lw.in_ln, lw.in_ln_bias.as_ref());
     let (q, kk, vv) = layout.project_qkv(b, c, &hn, lw);
-    // Reserved hook: a future per-head q/k normalization (e.g. Qwen3) is applied
-    // to q and kk here, once, and reaches the single / ragged / prefill paths
-    // together. No dense family the emitter serves emits it yet, so nothing is
-    // emitted today and every existing graph is unchanged.
-    let (q, kk) = layout.rope_qk(b, c, &q, &kk);
+    // Reserved hook: a future per-head q/k normalization (e.g. Qwen3, Cohere
+    // `use_qk_norm`) is applied to q and kk here, once, and reaches the single /
+    // ragged / prefill paths together. No dense family the emitter serves emits it
+    // yet, so nothing is emitted today and every existing graph is unchanged.
+    //
+    // RoPE gate (issue #498): Cohere2 leaves its full-attention layers position-
+    // free (NoPE), rotating only the sliding (local) layers. Every other arch
+    // rotates every layer, so `rope_applies_layer` is always true and the rotation
+    // emits unchanged.
+    let (q, kk) = if c.rope_applies_layer(li) {
+        layout.rope_qk(b, c, &q, &kk)
+    } else {
+        (q, kk)
+    };
     let (kslab, vslab) = layout.write_read_kv(b, k, c, li, &kk, &vv, kcache, vcache);
     let scores = layout.raw_scores(b, c, &q, &kslab);
     let scores = apply_scale_and_softcap(b, c, k, scores);
@@ -886,7 +1173,130 @@ fn emit_attention(
     let o = layout.context(b, c, &attn, &vslab);
     let attn_out = layout.o_proj(b, &o, lw);
     let attn_out = post_attn_norm(b, c, k, layout, attn_out, lw);
-    b.add(x, &attn_out)
+    (hn, attn_out)
+}
+
+/// The per-layer MLP compute given a pre-normed input `hn`, returning the MLP
+/// output (`down` projection) WITHOUT the residual add. Handles the gated SwiGLU
+/// (Llama family: `down(silu(gate(hn)) * up(hn))`), the Gemma2 GeGLU (`gelu_tanh`)
+/// with its post-feed-forward norm, and the dense (non-gated) StarCoder2 MLP
+/// (`c_proj(gelu_tanh(c_fc(hn)))`), plus the optional MLP biases (issue #498).
+/// `layout` supplies the rank (single vs seq). For the Llama family this emits the
+/// exact `gate, up, silu, mul, down` op sequence the paths inlined, byte-identical.
+fn emit_mlp_body(
+    b: &mut Builder,
+    c: &Config,
+    k: &Consts,
+    layout: &AttnLayout,
+    hn: &Val,
+    lw: &LayerW,
+) -> Val {
+    if c.dense_mlp {
+        // Dense (StarCoder2): up == c_fc, then gelu, then down == c_proj. No gate.
+        let up = layout.linear(b, hn, &lw.up);
+        let up = layout.add_bias(b, up, lw.up_bias.as_ref());
+        let act = gelu_tanh(b, &up);
+        let down = layout.linear(b, &act, &lw.down);
+        return layout.add_bias(b, down, lw.down_bias.as_ref());
+    }
+    let gate = layout.linear(b, hn, lw.gate.as_ref().expect("gated MLP has a gate"));
+    let gate = layout.add_bias(b, gate, lw.gate_bias.as_ref());
+    let up = layout.linear(b, hn, &lw.up);
+    let up = layout.add_bias(b, up, lw.up_bias.as_ref());
+    let act = if c.gemma2 {
+        gelu_tanh(b, &gate)
+    } else {
+        silu(b, k, &gate)
+    };
+    let act = b.multiply(&act, &up);
+    let down = layout.linear(b, &act, &lw.down);
+    let down = layout.add_bias(b, down, lw.down_bias.as_ref());
+    if c.gemma2 {
+        let w = norm_w(
+            b,
+            lw.post_ff_ln.as_ref().expect("gemma2 post_ff_ln"),
+            c,
+            k,
+            c.hidden,
+        );
+        layout.norm(b, c, k, &down, &w, None)
+    } else {
+        down
+    }
+}
+
+/// The sequential MLP's pre-norm: `pre_feedforward_layernorm` for Gemma2, else the
+/// `post_attention_layernorm` (with its LayerNorm bias for a LayerNorm arch). Only
+/// the sequential block calls this; a parallel-block arch reuses the shared
+/// `input_layernorm` output instead.
+fn mlp_pre_norm(
+    b: &mut Builder,
+    c: &Config,
+    k: &Consts,
+    layout: &AttnLayout,
+    x: &Val,
+    lw: &LayerW,
+) -> Val {
+    if c.gemma2 {
+        arch_norm(
+            b,
+            c,
+            k,
+            layout,
+            x,
+            lw.pre_ff_ln.as_ref().expect("gemma2 pre_ff_ln"),
+            None,
+        )
+    } else {
+        arch_norm(
+            b,
+            c,
+            k,
+            layout,
+            x,
+            lw.post_ln.as_ref().expect("sequential post_ln"),
+            lw.post_ln_bias.as_ref(),
+        )
+    }
+}
+
+/// Emit one complete transformer layer (attention + MLP) for graph kind `layout`,
+/// returning the residual stream after the layer. Sequential (Llama family, the
+/// two-residual pre-norm block, with the optional per-residual multiplier) or
+/// parallel (Cohere/Cohere2: `x + attn(ln(x)) + mlp(ln(x))`, one shared norm and a
+/// single residual). Shared by the single-token decode, ragged decode, and prefill
+/// graphs so a family's block structure is authored once and reaches all three.
+/// For the Llama family this emits the exact op sequence each path inlined.
+#[allow(clippy::too_many_arguments)]
+fn emit_transformer_layer(
+    b: &mut Builder,
+    c: &Config,
+    k: &Consts,
+    lw: &LayerW,
+    li: usize,
+    x: &Val,
+    layout: &AttnLayout,
+    kcache: &mut Val,
+    vcache: &mut Val,
+) -> Val {
+    if c.parallel_block {
+        // Parallel: attention and MLP both read the one input_layernorm output;
+        // their results are summed into a single residual (Cohere/Cohere2).
+        let (hn, attn_out) = emit_attention(b, c, k, lw, li, x, layout, kcache, vcache);
+        let mlp_out = emit_mlp_body(b, c, k, layout, &hn, lw);
+        let s1 = b.add(x, &attn_out);
+        b.add(&s1, &mlp_out)
+    } else {
+        // Sequential: attention residual, then a re-normed MLP residual, each
+        // optionally scaled by the arch's residual multiplier (Granite / MiniCPM).
+        let (_, attn_out) = emit_attention(b, c, k, lw, li, x, layout, kcache, vcache);
+        let attn_out = scale_residual(b, c, attn_out);
+        let x1 = b.add(x, &attn_out);
+        let hn2 = mlp_pre_norm(b, c, k, layout, &x1, lw);
+        let down = emit_mlp_body(b, c, k, layout, &hn2, lw);
+        let down = scale_residual(b, c, down);
+        b.add(&x1, &down)
+    }
 }
 
 /// Emit the complete decode_step module text. With `sample`, the graph ends in
@@ -902,22 +1312,19 @@ pub fn emit_decode_with(c: &Config, sample: bool, precision: Precision) -> Strin
     let k = emit_consts(&mut b, c);
 
     let h = c.hidden;
-    let d = c.head_dim;
 
     // --- head: embed gather, rope vectors, decode key mask ---
     let emb_row = b.dynamic_slice(&a.embed, &[&a.token, &k.c0], vec![1, h]);
-    let mut x = b.reshape(&emb_row, vec![h]);
-    // Gemma2 scales the input embeddings by sqrt(hidden).
-    if c.gemma2 {
-        let norm = b.const_f32(c.embed_normalizer());
-        let nb = b.broadcast(&norm, &[], vec![h]);
-        x = b.multiply(&x, &nb);
-    }
+    let emb = b.reshape(&emb_row, vec![h]);
+    let mut x = scale_embedding(&mut b, c, emb, vec![h]);
 
-    let cos_row = b.dynamic_slice(&k.cos_table, &[&a.pos, &k.c0], vec![1, d]);
-    let cos_vec = b.reshape(&cos_row, vec![d]);
-    let sin_row = b.dynamic_slice(&k.sin_table, &[&a.pos, &k.c0], vec![1, d]);
-    let sin_vec = b.reshape(&sin_row, vec![d]);
+    // RoPE cos/sin vectors for this position (rotary width, `d` for a full-rope
+    // arch, the smaller `rotary_dim` for partial RoPE; equal for the batched path).
+    let rot = c.rotary_width();
+    let cos_row = b.dynamic_slice(&k.cos_table, &[&a.pos, &k.c0], vec![1, rot]);
+    let cos_vec = b.reshape(&cos_row, vec![rot]);
+    let sin_row = b.dynamic_slice(&k.sin_table, &[&a.pos, &k.c0], vec![1, rot]);
+    let sin_vec = b.reshape(&sin_row, vec![rot]);
 
     // mask: keys s valid iff s <= cache_len -> additive 0 / -1e30, shape [S]
     let ii = b.iota(MAX_SEQ);
@@ -955,60 +1362,18 @@ pub fn emit_decode_with(c: &Config, sample: bool, precision: Precision) -> Strin
 
     for li in 0..c.n_layers {
         let lw = &a.layers[li];
-
-        // attention block (shared per-layer core, issue #494)
-        x = emit_attention(&mut b, c, &k, lw, li, &x, &layout, &mut kcache, &mut vcache);
-
-        // MLP. Pre-MLP norm: Llama / Qwen2 use post_attention_layernorm; Gemma2
-        // uses pre_feedforward_layernorm (post_attention_layernorm became the
-        // post-attn norm above). Activation: SwiGLU (silu) vs Gemma2 GeGLU (gelu).
-        let pre_mlp = if c.gemma2 {
-            lw.pre_ff_ln.as_ref().expect("gemma2 pre_ff_ln")
-        } else {
-            &lw.post_ln
-        };
-        let pre_mlp_w = norm_w(&mut b, pre_mlp, c, &k, h);
-        let hn2 = rms_norm(&mut b, &x, &pre_mlp_w, &k, h);
-        let gate = b.linear(&hn2, &lw.gate);
-        let up = b.linear(&hn2, &lw.up);
-        let act = if c.gemma2 {
-            gelu_tanh(&mut b, &gate)
-        } else {
-            // silu(gate) = gate * sigmoid(gate), sigmoid(z) = 1/(1+exp(-z))
-            let neg = b.negate(&gate);
-            let ex = b.exponential(&neg);
-            let one_b = b.broadcast(&k.one, &[], vec![c.inter]);
-            let denom = b.add(&one_b, &ex);
-            let sig = b.divide(&one_b, &denom);
-            b.multiply(&gate, &sig)
-        };
-        let act = b.multiply(&act, &up);
-        let down = b.linear(&act, &lw.down);
-        // Gemma2: post-MLP norm before the residual.
-        let down = if c.gemma2 {
-            let w = norm_w(
-                &mut b,
-                lw.post_ff_ln.as_ref().expect("gemma2 post_ff_ln"),
-                c,
-                &k,
-                h,
-            );
-            rms_norm(&mut b, &down, &w, &k, h)
-        } else {
-            down
-        };
-        x = b.add(&x, &down);
+        // Full transformer layer (attention + MLP, sequential or parallel), shared
+        // with the ragged / prefill graphs (issues #494 / #498).
+        x = emit_transformer_layer(&mut b, c, &k, lw, li, &x, &layout, &mut kcache, &mut vcache);
     }
 
-    // --- tail: final norm + LM head (tied embed or untied lm_head), Gemma2 final
-    // logit soft-cap, then optional on-device argmax ---
+    // --- tail: final norm (+ LayerNorm bias) + LM head (tied embed or untied
+    // lm_head), then the arch's final logit scaling (Gemma2 soft-cap / Cohere
+    // multiply / Granite / MiniCPM divide) and the optional on-device argmax ---
     let final_w = norm_w(&mut b, &a.final_norm, c, &k, h);
-    let xf = rms_norm(&mut b, &x, &final_w, &k, h);
+    let xf = normalize(&mut b, c, &k, &x, &final_w, a.final_norm_bias.as_ref(), h);
     let logits = b.linear(&xf, head_weight(&a.embed, &a.lm_head)); // [V]
-    let logits = match c.final_logit_softcap {
-        Some(cap) => softcap(&mut b, &logits, cap),
-        None => logits,
-    };
+    let logits = apply_logit_scale(&mut b, c, logits);
     let (out_val, out_ty) = if sample {
         let tok = b.argmax(&logits);
         (tok.name, Ty::scalar("i32").render())
@@ -1047,6 +1412,7 @@ pub fn emit_decode_with(c: &Config, sample: bool, precision: Precision) -> Strin
 struct BatchedArgs {
     embed: Val,
     final_norm: Val,
+    final_norm_bias: Option<Val>,
     lm_head: Option<Val>,
     layers: Vec<LayerW>,
     token: Val,     // [B] i32
@@ -1075,6 +1441,7 @@ fn build_batched_arg_schema(c: &Config, bsz: usize) -> (Vec<ArgDecl>, BatchedArg
         Ty::f32(vec![h]),
         "params['final_norm']".into(),
     );
+    let final_norm_bias = take_final_norm_bias(&mut decls, &mut idx, c);
     let lm_head = take_lm_head(&mut decls, &mut idx, c);
 
     let mut layers = Vec::with_capacity(c.n_layers);
@@ -1108,6 +1475,7 @@ fn build_batched_arg_schema(c: &Config, bsz: usize) -> (Vec<ArgDecl>, BatchedArg
         BatchedArgs {
             embed,
             final_norm,
+            final_norm_bias,
             lm_head,
             layers,
             token,
@@ -1170,10 +1538,13 @@ pub fn emit_decode_batched_with(
     let mut x = b.gather(&a.embed, &tok_idx); // [B, H]
 
     // pos is shared (lockstep), so cos/sin are one [d] vector for every row.
-    let cos_row = b.dynamic_slice(&k.cos_table, &[&a.pos, &k.c0], vec![1, d]);
-    let cos_vec = b.reshape(&cos_row, vec![d]);
-    let sin_row = b.dynamic_slice(&k.sin_table, &[&a.pos, &k.c0], vec![1, d]);
-    let sin_vec = b.reshape(&sin_row, vec![d]);
+    // RoPE cos/sin vectors for this position (rotary width, `d` for a full-rope
+    // arch, the smaller `rotary_dim` for partial RoPE; equal for the batched path).
+    let rot = c.rotary_width();
+    let cos_row = b.dynamic_slice(&k.cos_table, &[&a.pos, &k.c0], vec![1, rot]);
+    let cos_vec = b.reshape(&cos_row, vec![rot]);
+    let sin_row = b.dynamic_slice(&k.sin_table, &[&a.pos, &k.c0], vec![1, rot]);
+    let sin_vec = b.reshape(&sin_row, vec![rot]);
 
     // shared key mask [S]: key s valid iff s <= cache_len -> additive 0 / -1e30
     let ii = b.iota(MAX_SEQ);
@@ -1273,9 +1644,18 @@ pub fn emit_decode_batched_with(
         let attn_out = b.linear_seq(&o, &lw.wo); // [B, H]
         x = b.add(&x, &attn_out);
 
-        // MLP: down( silu(x@gate^T) * (x@up^T) )
-        let hn2 = rms_norm_seq(&mut b, &x, &lw.post_ln, &k, bsz, h);
-        let gate = b.linear_seq(&hn2, &lw.gate); // [B, inter]
+        // MLP: down( silu(x@gate^T) * (x@up^T) ). The superseded uniform-B graph
+        // serves only the gated, sequential Llama family, so `post_ln` / `gate` are
+        // always present (the dense-arch-pack graphs use the ragged serve path).
+        let hn2 = rms_norm_seq(
+            &mut b,
+            &x,
+            lw.post_ln.as_ref().expect("batched decode: post_ln"),
+            &k,
+            bsz,
+            h,
+        );
+        let gate = b.linear_seq(&hn2, lw.gate.as_ref().expect("batched decode: gate")); // [B, inter]
         let up = b.linear_seq(&hn2, &lw.up); // [B, inter]
         let neg = b.negate(&gate);
         let ex = b.exponential(&neg);
@@ -1330,6 +1710,7 @@ pub fn emit_decode_batched_with(
 struct RaggedArgs {
     embed: Val,
     final_norm: Val,
+    final_norm_bias: Option<Val>,
     lm_head: Option<Val>,
     layers: Vec<LayerW>,
     token: Val,     // [B] i32
@@ -1358,6 +1739,7 @@ fn build_ragged_arg_schema(c: &Config, bsz: usize) -> (Vec<ArgDecl>, RaggedArgs)
         Ty::f32(vec![h]),
         "params['final_norm']".into(),
     );
+    let final_norm_bias = take_final_norm_bias(&mut decls, &mut idx, c);
     let lm_head = take_lm_head(&mut decls, &mut idx, c);
 
     let mut layers = Vec::with_capacity(c.n_layers);
@@ -1401,6 +1783,7 @@ fn build_ragged_arg_schema(c: &Config, bsz: usize) -> (Vec<ArgDecl>, RaggedArgs)
         RaggedArgs {
             embed,
             final_norm,
+            final_norm_bias,
             lm_head,
             layers,
             token,
@@ -1410,29 +1793,6 @@ fn build_ragged_arg_schema(c: &Config, bsz: usize) -> (Vec<ArgDecl>, RaggedArgs)
             vcache,
         },
     )
-}
-
-/// HF half-split RoPE on x:[B, heads, d]; cos/sin are per-row `[B, d]` (each
-/// row's own position), broadcast over the head axis.
-fn apply_rope_ragged(
-    b: &mut Builder,
-    x: &Val,
-    cos: &Val,
-    sin: &Val,
-    bsz: usize,
-    heads: usize,
-    d: usize,
-) -> Val {
-    let half = d / 2;
-    let cos_b = b.broadcast(cos, &[0, 2], vec![bsz, heads, d]); // [B,d] -> [B,heads,d]
-    let sin_b = b.broadcast(sin, &[0, 2], vec![bsz, heads, d]);
-    let xc = b.multiply(x, &cos_b);
-    let x1 = b.slice(x, &[(0, bsz), (0, heads), (0, half)]);
-    let x2 = b.slice(x, &[(0, bsz), (0, heads), (half, d)]);
-    let nx2 = b.negate(&x2);
-    let rh = b.concatenate(&nx2, &x1, 2);
-    let rs = b.multiply(&rh, &sin_b);
-    b.add(&xc, &rs)
 }
 
 /// Emit the ragged (continuous-batching) `decode_step` module for a static batch
@@ -1458,13 +1818,8 @@ pub fn emit_decode_ragged_with(
 
     // --- head: per-row embed gather, per-row rope gather, per-row key mask ---
     let tok_idx = b.reshape(&a.token, vec![bsz, 1]);
-    let mut x = b.gather(&a.embed, &tok_idx); // [B, H]
-    // Gemma2 scales the input embeddings by sqrt(hidden).
-    if c.gemma2 {
-        let norm = b.const_f32(c.embed_normalizer());
-        let nb = b.broadcast(&norm, &[], vec![bsz, h]);
-        x = b.multiply(&x, &nb);
-    }
+    let emb = b.gather(&a.embed, &tok_idx); // [B, H]
+    let mut x = scale_embedding(&mut b, c, emb, vec![bsz, h]);
 
     // each row's rope vectors come from its own position: gather [B,d] by pos[B]
     let pos_idx = b.reshape(&a.pos, vec![bsz, 1]);
@@ -1506,23 +1861,23 @@ pub fn emit_decode_ragged_with(
 
     for li in 0..c.n_layers {
         let lw = &a.layers[li];
-
-        // attention block (shared per-layer core, issue #494)
-        x = emit_attention(&mut b, c, &k, lw, li, &x, &layout, &mut kcache, &mut vcache);
-
-        // MLP + its norms (SwiGLU, or Gemma2 GeGLU with pre/post FF norms),
-        // shared with the prefill graph.
-        x = seq_mlp(&mut b, c, lw, &k, &x, bsz);
+        // Full transformer layer, shared with the single / prefill graphs.
+        x = emit_transformer_layer(&mut b, c, &k, lw, li, &x, &layout, &mut kcache, &mut vcache);
     }
 
     let final_w = norm_w(&mut b, &a.final_norm, c, &k, h);
-    let xf = rms_norm_seq(&mut b, &x, &final_w, &k, bsz, h);
+    let xf = normalize_seq(
+        &mut b,
+        c,
+        &k,
+        &x,
+        &final_w,
+        a.final_norm_bias.as_ref(),
+        bsz,
+        h,
+    );
     let logits = b.linear_seq(&xf, head_weight(&a.embed, &a.lm_head)); // [B, V]
-    // Gemma2 final logit soft-cap (per row; argmax-invariant but kept for exactness).
-    let logits = match c.final_logit_softcap {
-        Some(cap) => softcap(&mut b, &logits, cap),
-        None => logits,
-    };
+    let logits = apply_logit_scale(&mut b, c, logits);
     let (out_val, out_ty) = if sample {
         let tok = b.argmax_batched(&logits);
         (tok.name, Ty::new(vec![bsz], "i32").render())
@@ -1561,6 +1916,7 @@ pub fn emit_decode_ragged_with(
 struct PrefillArgs {
     embed: Val,
     final_norm: Val,
+    final_norm_bias: Option<Val>,
     lm_head: Option<Val>,
     layers: Vec<LayerW>,
     tokens: Val,
@@ -1587,6 +1943,7 @@ fn build_prefill_arg_schema(c: &Config, lp: usize) -> (Vec<ArgDecl>, PrefillArgs
         Ty::f32(vec![h]),
         "params['final_norm']".into(),
     );
+    let final_norm_bias = take_final_norm_bias(&mut decls, &mut idx, c);
     let lm_head = take_lm_head(&mut decls, &mut idx, c);
 
     let mut layers = Vec::with_capacity(c.n_layers);
@@ -1613,6 +1970,7 @@ fn build_prefill_arg_schema(c: &Config, lp: usize) -> (Vec<ArgDecl>, PrefillArgs
         PrefillArgs {
             embed,
             final_norm,
+            final_norm_bias,
             lm_head,
             layers,
             tokens,
@@ -1637,24 +1995,62 @@ fn rms_norm_seq(b: &mut Builder, x: &Val, w: &Val, k: &Consts, lp: usize, hidden
     b.multiply(&xr, &wb)
 }
 
-/// HF half-split RoPE on x:[Lp, heads, d]; cos/sin are [Lp, d] (per position).
+/// HF RoPE on the seq / ragged activations x:[N, heads, d] (N = Lp for prefill,
+/// bsz for ragged decode); cos/sin are per-row `[N, rd]` (rotary width). Shared by
+/// both graph kinds (they differ only in the row count). Full or partial RoPE,
+/// half-split or interleaved, per `c`. Byte-identical to the inlined half-split
+/// for the Llama family.
 fn apply_rope_seq(
     b: &mut Builder,
+    c: &Config,
     x: &Val,
     cos: &Val,
     sin: &Val,
-    lp: usize,
+    n: usize,
     heads: usize,
-    d: usize,
 ) -> Val {
-    let half = d / 2;
-    let cos_b = b.broadcast(cos, &[0, 2], vec![lp, heads, d]); // [Lp,d] -> [Lp,heads,d]
-    let sin_b = b.broadcast(sin, &[0, 2], vec![lp, heads, d]);
+    let d = c.head_dim;
+    let rd = c.rotary_width();
+    if rd == d {
+        return rotate_seq(b, c, x, cos, sin, n, heads, rd);
+    }
+    let x_rot = b.slice(x, &[(0, n), (0, heads), (0, rd)]);
+    let x_pass = b.slice(x, &[(0, n), (0, heads), (rd, d)]);
+    let rotated = rotate_seq(b, c, &x_rot, cos, sin, n, heads, rd);
+    b.concatenate(&rotated, &x_pass, 2)
+}
+
+/// The core RoPE rotation on x:[N, heads, rd] with per-row cos/sin [N, rd].
+/// Half-split or interleaved (issue #498). Byte-identical to the inlined
+/// half-split for the Llama family.
+#[allow(clippy::too_many_arguments)]
+fn rotate_seq(
+    b: &mut Builder,
+    c: &Config,
+    x: &Val,
+    cos: &Val,
+    sin: &Val,
+    n: usize,
+    heads: usize,
+    rd: usize,
+) -> Val {
+    let cos_b = b.broadcast(cos, &[0, 2], vec![n, heads, rd]); // [N,rd] -> [N,heads,rd]
+    let sin_b = b.broadcast(sin, &[0, 2], vec![n, heads, rd]);
     let xc = b.multiply(x, &cos_b);
-    let x1 = b.slice(x, &[(0, lp), (0, heads), (0, half)]);
-    let x2 = b.slice(x, &[(0, lp), (0, heads), (half, d)]);
-    let nx2 = b.negate(&x2);
-    let rh = b.concatenate(&nx2, &x1, 2);
+    let rh = if c.rope_interleaved {
+        let xr = b.reshape(x, vec![n, heads, rd / 2, 2]);
+        let even = b.slice(&xr, &[(0, n), (0, heads), (0, rd / 2), (0, 1)]);
+        let odd = b.slice(&xr, &[(0, n), (0, heads), (0, rd / 2), (1, 2)]);
+        let neg_odd = b.negate(&odd);
+        let st = b.concatenate(&neg_odd, &even, 3);
+        b.reshape(&st, vec![n, heads, rd])
+    } else {
+        let half = rd / 2;
+        let x1 = b.slice(x, &[(0, n), (0, heads), (0, half)]);
+        let x2 = b.slice(x, &[(0, n), (0, heads), (half, rd)]);
+        let nx2 = b.negate(&x2);
+        b.concatenate(&nx2, &x1, 2)
+    };
     let rs = b.multiply(&rh, &sin_b);
     b.add(&xc, &rs)
 }
@@ -1678,13 +2074,8 @@ pub fn emit_prefill_with(c: &Config, sample: bool, precision: Precision) -> Stri
 
     // --- head: embed gather, per-position rope vectors, [Lp,Lp] causal mask ---
     let tok_idx = b.reshape(&a.tokens, vec![lp, 1]);
-    let mut x = b.gather(&a.embed, &tok_idx); // [Lp, H]
-    // Gemma2 scales the input embeddings by sqrt(hidden).
-    if c.gemma2 {
-        let norm = b.const_f32(c.embed_normalizer());
-        let nb = b.broadcast(&norm, &[], vec![lp, h]);
-        x = b.multiply(&x, &nb);
-    }
+    let emb = b.gather(&a.embed, &tok_idx); // [Lp, H]
+    let mut x = scale_embedding(&mut b, c, emb, vec![lp, h]);
 
     let pos_idx = b.reshape(&a.positions, vec![lp, 1]);
     let cos = b.gather(&k.cos_table, &pos_idx); // [Lp, d]
@@ -1727,28 +2118,29 @@ pub fn emit_prefill_with(c: &Config, sample: bool, precision: Precision) -> Stri
 
     for li in 0..c.n_layers {
         let lw = &a.layers[li];
-
-        // attention block (shared per-layer core, issue #494)
-        x = emit_attention(&mut b, c, &k, lw, li, &x, &layout, &mut kcache, &mut vcache);
-
-        // MLP + its norms (SwiGLU, or Gemma2 GeGLU with pre/post FF norms),
-        // shared with the ragged-decode graph.
-        x = seq_mlp(&mut b, c, lw, &k, &x, lp);
+        // Full transformer layer, shared with the single / ragged graphs.
+        x = emit_transformer_layer(&mut b, c, &k, lw, li, &x, &layout, &mut kcache, &mut vcache);
     }
 
-    // --- tail: final norm, take the row at real_len-1, LM head (tied embed or
-    // untied lm_head), Gemma2 final logit soft-cap ---
+    // --- tail: final norm (+ LayerNorm bias), take the row at real_len-1, LM head
+    // (tied embed or untied lm_head), then the arch's final logit scaling ---
     let final_w = norm_w(&mut b, &a.final_norm, c, &k, h);
-    let xf = rms_norm_seq(&mut b, &x, &final_w, &k, lp, h); // [Lp, H]
+    let xf = normalize_seq(
+        &mut b,
+        c,
+        &k,
+        &x,
+        &final_w,
+        a.final_norm_bias.as_ref(),
+        lp,
+        h,
+    ); // [Lp, H]
     let one_i = b.const_i32(1);
     let last_idx = b.subtract(&a.real_len, &one_i); // real_len - 1
     let last_row = b.dynamic_slice(&xf, &[&last_idx, &k.c0], vec![1, h]); // [1, H]
     let last = b.reshape(&last_row, vec![h]); // [H]
     let logits = b.linear(&last, head_weight(&a.embed, &a.lm_head)); // [V]
-    let logits = match c.final_logit_softcap {
-        Some(cap) => softcap(&mut b, &logits, cap),
-        None => logits,
-    };
+    let logits = apply_logit_scale(&mut b, c, logits);
     let (out_val, out_ty) = if sample {
         let tok = b.argmax(&logits);
         (tok.name, Ty::scalar("i32").render())

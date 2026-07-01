@@ -84,6 +84,77 @@ pub struct Config {
     /// `sliding_window` field is deliberately ignored: the emitter serves Qwen2
     /// with `use_sliding_window = false` semantics.)
     pub sliding_window: Option<usize>,
+
+    // --- dense arch pack (issue #498): per-family deltas on the shared core ---
+    /// The per-layer norms subtract the mean (true LayerNorm) rather than the
+    /// RMSNorm the Llama family uses. `true` for Cohere/Cohere2 (`CohereLayerNorm`)
+    /// and StableLM/StarCoder2 (`nn.LayerNorm`). Llama / Qwen2 / Gemma2 keep
+    /// RMSNorm (`false`), so their graphs are byte-identical.
+    pub layernorm: bool,
+    /// The per-layer norms carry an affine bias (`nn.LayerNorm` with `bias=True`).
+    /// `true` for StableLM and StarCoder2; the emitter then takes and adds a
+    /// per-norm bias arg. `false` (Cohere's bias-free `CohereLayerNorm`, and every
+    /// RMSNorm arch) emits no bias op, so those graphs are unchanged.
+    pub norm_bias: bool,
+    /// Parallel attention + MLP block (Cohere/Cohere2): both sublayers read the one
+    /// `input_layernorm` output and their results are summed into a single residual
+    /// (`x + attn(ln(x)) + mlp(ln(x))`), so there is no `post_attention_layernorm`.
+    /// `false` keeps the sequential two-residual Llama structure (byte-identical).
+    pub parallel_block: bool,
+    /// The `o_proj` output projection carries a bias (StarCoder2 `use_bias`).
+    pub attn_o_bias: bool,
+    /// The MLP projections carry biases (StarCoder2 `use_bias`; Granite `mlp_bias`
+    /// is false).
+    pub mlp_bias: bool,
+    /// Dense (non-gated) MLP: `c_proj(act(c_fc(x)))` with a `gelu_tanh` activation
+    /// and no gate projection (StarCoder2). `false` keeps the SwiGLU/GeGLU gated MLP.
+    pub dense_mlp: bool,
+    /// Interleaved ("traditional" / GPT-J) RoPE: adjacent dims `(2i, 2i+1)` rotate
+    /// together (Cohere/Cohere2, `position_embedding_type = rope_gptj`). `false` is
+    /// the half-split (GPT-NeoX / Llama) convention, so the Llama family is unchanged.
+    pub rope_interleaved: bool,
+    /// Partial-RoPE width: only the first `rotary_dim` of each head is rotated, the
+    /// rest passes through (StableLM `partial_rotary_factor`). `None` rotates the
+    /// full `head_dim` (Llama family), byte-identical.
+    pub rotary_dim: Option<usize>,
+    /// Apply RoPE only on the sliding-window (local) layers, leaving the
+    /// full-attention layers position-free (Cohere2 NoPE on its every-`pattern`-th
+    /// full layer). `false` applies RoPE on every layer (Llama family, Cohere v1).
+    pub rope_on_sliding_only: bool,
+    /// Sliding-window layer schedule period: a layer is local (sliding) iff
+    /// `(li + 1) % pattern != 0` (Cohere2 `sliding_window_pattern`). `None` with a
+    /// window uses Gemma2's even-local alternation; without a window there are no
+    /// local layers.
+    pub sliding_pattern: Option<usize>,
+    /// Attention score scale override: the raw multiplier applied to the scores
+    /// (Granite `attention_multiplier`, which replaces `head_dim^-0.5`). `None`
+    /// uses [`Config::scale`]'s default. See [`Config::scale`].
+    pub attention_multiplier: Option<f64>,
+    /// Input-embedding scalar multiply (Granite `embedding_multiplier`, MiniCPM
+    /// `scale_emb`). `None` leaves the embeddings unscaled (Llama family).
+    pub embedding_multiplier: Option<f32>,
+    /// Per-sublayer residual scalar: each attention / MLP output is multiplied by
+    /// this before its residual add (Granite `residual_multiplier`, MiniCPM
+    /// `scale_depth / sqrt(num_layers)`). `None` adds the raw output (Llama family).
+    /// Only applies to the sequential block (parallel-block archs carry no scalar).
+    pub residual_multiplier: Option<f32>,
+    /// Final-logit scalar multiply (Cohere `logit_scale`). `None` leaves the logits
+    /// unscaled.
+    pub logit_mul: Option<f32>,
+    /// Final-logit scalar divide (Granite `logits_scaling`; MiniCPM's pre-head
+    /// `hidden / dim_model_base` divide, equivalent since the head is bias-free).
+    /// `None` leaves the logits unscaled.
+    pub logit_div: Option<f32>,
+    /// The checkpoint fuses q/k/v into one `qkv_proj` weight (Phi3): the loader
+    /// splits it into the emitter's separate `wq`/`wk`/`wv` args, so the emitted
+    /// graph is the standard separate-projection shape. `false` for every arch that
+    /// ships separate projections. Consumed by the weight loader (`iree.rs`); the
+    /// emitter graph is unaffected.
+    pub fused_qkv: bool,
+    /// The checkpoint fuses gate/up into one `gate_up_proj` weight (Phi3): the
+    /// loader splits it (gate first, up second) into the emitter's `gate`/`up` args.
+    /// Consumed by the weight loader (`iree.rs`); the emitter graph is unaffected.
+    pub fused_gate_up: bool,
 }
 
 impl Config {
@@ -113,6 +184,23 @@ impl Config {
             attn_logit_softcap: None,
             final_logit_softcap: None,
             sliding_window: None,
+            layernorm: false,
+            norm_bias: false,
+            parallel_block: false,
+            attn_o_bias: false,
+            mlp_bias: false,
+            dense_mlp: false,
+            rope_interleaved: false,
+            rotary_dim: None,
+            rope_on_sliding_only: false,
+            sliding_pattern: None,
+            attention_multiplier: None,
+            embedding_multiplier: None,
+            residual_multiplier: None,
+            logit_mul: None,
+            logit_div: None,
+            fused_qkv: false,
+            fused_gate_up: false,
         }
     }
 
@@ -130,41 +218,6 @@ impl Config {
             serde_json::from_str(s).map_err(|e| format!("parse config.json: {e}"))?;
 
         let model_type = v.get("model_type").and_then(serde_json::Value::as_str);
-        let gemma2 = model_type == Some("gemma2");
-        // Qwen2 always has a q/k/v projection bias (the HF `Qwen2Attention` hard-
-        // codes `bias=True`), and it is not a `config.json` field, so it is keyed
-        // off the architecture rather than read.
-        let qkv_bias = match model_type {
-            Some("llama") => {
-                // A `llama` checkpoint with attention bias would need the same bias
-                // emit Qwen2 uses, but that pairing is untested here, so reject it
-                // rather than emit an unvalidated graph.
-                if v.get("attention_bias").and_then(serde_json::Value::as_bool) == Some(true) {
-                    return Err(
-                        "the OpenXLA emitter does not support a `llama` checkpoint with \
-                         attention_bias = true (only Qwen2 carries a q/k/v bias here)"
-                            .to_string(),
-                    );
-                }
-                false
-            }
-            Some("qwen2") => true,
-            Some("gemma2") => false,
-            other => {
-                return Err(format!(
-                    "the OpenXLA emitter supports the Llama, Qwen2, and Gemma2 architectures; \
-                     config.json model_type = {other:?} (other Gemma variants are a follow-up)"
-                ));
-            }
-        };
-
-        // Tied (share `embed` for the head) vs untied (separate `lm_head.weight`).
-        // HF `PretrainedConfig` defaults this to `true`, so an absent field means
-        // tied; the emitter and the weight loader branch on it.
-        let tie_word_embeddings = v
-            .get("tie_word_embeddings")
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(true);
 
         // MLX affine quantization: an optional `{bits, group_size}` block. The
         // loader dequantizes the packed weights; the emitted graph is unchanged.
@@ -184,6 +237,7 @@ impl Config {
             }
         };
 
+        // Required and optional field readers.
         let u = |k: &str| -> Result<usize, String> {
             v.get(k)
                 .and_then(serde_json::Value::as_u64)
@@ -195,15 +249,28 @@ impl Config {
                 .and_then(serde_json::Value::as_f64)
                 .ok_or_else(|| format!("config.json missing number `{k}`"))
         };
+        let ob = |k: &str| -> Option<bool> { v.get(k).and_then(serde_json::Value::as_bool) };
+        let of = |k: &str| -> Option<f64> { v.get(k).and_then(serde_json::Value::as_f64) };
+        let ou = |k: &str| -> Option<usize> {
+            v.get(k)
+                .and_then(serde_json::Value::as_u64)
+                .map(|x| x as usize)
+        };
 
         let hidden = u("hidden_size")?;
         let n_q = u("num_attention_heads")?;
+        let n_layers = u("num_hidden_layers")?;
         // head_dim is explicit in recent configs; otherwise it is hidden / heads.
-        let head_dim = v
-            .get("head_dim")
-            .and_then(serde_json::Value::as_u64)
-            .map(|x| x as usize)
-            .unwrap_or(hidden / n_q.max(1));
+        let head_dim = ou("head_dim").unwrap_or(hidden / n_q.max(1));
+
+        // Norm epsilon: `rms_norm_eps` (RMSNorm archs), else `layer_norm_eps`
+        // (Cohere / StableLM LayerNorm), else `norm_epsilon` (StarCoder2).
+        let eps = of("rms_norm_eps")
+            .or_else(|| of("layer_norm_eps"))
+            .or_else(|| of("norm_epsilon"))
+            .ok_or(
+                "config.json missing a norm epsilon (rms_norm_eps / layer_norm_eps / norm_epsilon)",
+            )? as f32;
 
         // rope_scaling is optional: absent -> plain RoPE (Qwen2.5, plain Llama);
         // present -> only the llama3 scheme is supported (Stage A).
@@ -217,8 +284,8 @@ impl Config {
                 if rope_type != Some("llama3") {
                     return Err(format!(
                         "the OpenXLA emitter supports plain RoPE and llama3 RoPE scaling; \
-                         config.json rope_scaling.rope_type = {rope_type:?} (e.g. yarn is a \
-                         follow-up)"
+                         config.json rope_scaling.rope_type = {rope_type:?} (e.g. yarn / \
+                         longrope are a follow-up)"
                     ));
                 }
                 let sf = |k: &str| -> Result<f64, String> {
@@ -244,50 +311,185 @@ impl Config {
             }
         };
 
-        // Gemma2 logit soft-caps and the query pre-attention scale base (read only
-        // for a gemma2 checkpoint; the scale defaults to `head_dim` if absent).
-        let (query_pre_attn_scalar, attn_logit_softcap, final_logit_softcap) = if gemma2 {
-            (
-                Some(
-                    v.get("query_pre_attn_scalar")
-                        .and_then(serde_json::Value::as_f64)
-                        .unwrap_or(head_dim as f64),
-                ),
-                v.get("attn_logit_softcapping")
-                    .and_then(serde_json::Value::as_f64)
-                    .map(|x| x as f32),
-                v.get("final_logit_softcapping")
-                    .and_then(serde_json::Value::as_f64)
-                    .map(|x| x as f32),
-            )
-        } else {
-            (None, None, None)
+        // Per-architecture deltas start at the Llama defaults and are overridden by
+        // the arch arm. `tie_default` is the arch's `tie_word_embeddings` default
+        // (an explicit config field always wins).
+        let mut qkv_bias = false;
+        let mut tie_default = true;
+        let mut gemma2 = false;
+        let mut query_pre_attn_scalar = None;
+        let mut attn_logit_softcap = None;
+        let mut final_logit_softcap = None;
+        let mut sliding_window = None;
+        let mut layernorm = false;
+        let mut norm_bias = false;
+        let mut parallel_block = false;
+        let mut attn_o_bias = false;
+        let mut mlp_bias = false;
+        let mut dense_mlp = false;
+        let mut rope_interleaved = false;
+        let mut rotary_dim = None;
+        let mut rope_on_sliding_only = false;
+        let mut sliding_pattern = None;
+        let mut attention_multiplier = None;
+        let mut embedding_multiplier = None;
+        let mut residual_multiplier = None;
+        let mut logit_mul = None;
+        let mut logit_div = None;
+        let mut fused_qkv = false;
+        let mut fused_gate_up = false;
+
+        // Partial-RoPE width from `partial_rotary_factor` (only when < 1).
+        let partial_rotary = |default: f64| -> Option<usize> {
+            let prf = of("partial_rotary_factor").unwrap_or(default);
+            (prf < 1.0).then_some((head_dim as f64 * prf) as usize)
         };
 
-        // Gemma2 sliding-window size (issue #495). Read only for a gemma2
-        // checkpoint; an absent field falls back to the HF Gemma2 default of 4096.
-        // Non-gemma2 architectures get `None` (global attention on every layer),
-        // even if their config carries a `sliding_window` (e.g. Qwen2.5, which the
-        // emitter serves without sliding-window attention).
-        let sliding_window = if gemma2 {
-            Some(
-                v.get("sliding_window")
-                    .and_then(serde_json::Value::as_u64)
-                    .map(|x| x as usize)
-                    .unwrap_or(4096),
-            )
-        } else {
-            None
-        };
+        match model_type {
+            Some("llama") | Some("minicpm") => {
+                // A `llama` checkpoint with attention bias would need the Qwen2
+                // bias emit, untested here, so reject it rather than mis-emit.
+                if ob("attention_bias") == Some(true) {
+                    return Err(
+                        "the OpenXLA emitter does not support a `llama` checkpoint with \
+                         attention_bias = true (only Qwen2 carries a q/k/v bias here)"
+                            .to_string(),
+                    );
+                }
+                if model_type == Some("minicpm") {
+                    tie_default = false;
+                }
+                // MiniCPM scalars (`scale_emb` / `scale_depth` / `dim_model_base`):
+                // some MiniCPM checkpoints ship as `model_type = "llama"` but keep
+                // these fields, so detect them by presence rather than model_type.
+                if let Some(se) = of("scale_emb") {
+                    embedding_multiplier = Some(se as f32);
+                    if let Some(sd) = of("scale_depth") {
+                        residual_multiplier = Some((sd / (n_layers as f64).sqrt()) as f32);
+                    }
+                    if let Some(dmb) = of("dim_model_base") {
+                        // Dividing the pre-head hidden by hidden/dim_model_base is a
+                        // logit divide (the LM head is bias-free).
+                        logit_div = Some((hidden as f64 / dmb) as f32);
+                    }
+                }
+            }
+            Some("qwen2") => {
+                // Qwen2 hard-codes a q/k/v projection bias (HF `Qwen2Attention`).
+                qkv_bias = true;
+            }
+            Some("gemma2") => {
+                gemma2 = true;
+                query_pre_attn_scalar =
+                    Some(of("query_pre_attn_scalar").unwrap_or(head_dim as f64));
+                attn_logit_softcap = of("attn_logit_softcapping").map(|x| x as f32);
+                final_logit_softcap = of("final_logit_softcapping").map(|x| x as f32);
+                sliding_window = Some(ou("sliding_window").unwrap_or(4096));
+            }
+            Some("cohere") => {
+                // LayerNorm (bias-free), parallel block, interleaved RoPE, tied,
+                // final logit multiply. `attention_bias` (default false) applies to
+                // q/k/v and o_proj alike.
+                layernorm = true;
+                parallel_block = true;
+                rope_interleaved = true;
+                let ab = ob("attention_bias").unwrap_or(false);
+                qkv_bias = ab;
+                attn_o_bias = ab;
+                if ob("use_qk_norm") == Some(true) {
+                    return Err(
+                        "the OpenXLA emitter does not yet support Cohere `use_qk_norm = true` \
+                         (per-head q/k LayerNorm is a follow-up)"
+                            .to_string(),
+                    );
+                }
+                logit_mul = Some(of("logit_scale").unwrap_or(0.0625) as f32);
+            }
+            Some("cohere2") => {
+                layernorm = true;
+                parallel_block = true;
+                rope_interleaved = true;
+                rope_on_sliding_only = true;
+                let ab = ob("attention_bias").unwrap_or(false);
+                qkv_bias = ab;
+                attn_o_bias = ab;
+                sliding_window = Some(ou("sliding_window").unwrap_or(4096));
+                sliding_pattern = Some(ou("sliding_window_pattern").unwrap_or(4));
+                logit_mul = Some(of("logit_scale").unwrap_or(0.0625) as f32);
+            }
+            Some("phi3") => {
+                // Fused qkv_proj / gate_up_proj (split at load); RMSNorm; untied.
+                fused_qkv = true;
+                fused_gate_up = true;
+                tie_default = false;
+                rotary_dim = partial_rotary(1.0);
+            }
+            Some("stablelm") => {
+                // LayerNorm with bias, partial RoPE, optional q/k/v bias, untied.
+                layernorm = true;
+                norm_bias = true;
+                tie_default = false;
+                qkv_bias = ob("use_qkv_bias").unwrap_or(false);
+                rotary_dim = partial_rotary(0.25);
+                if ob("qk_layernorm") == Some(true) {
+                    return Err("the OpenXLA emitter does not yet support StableLM \
+                         `qk_layernorm = true` (per-head q/k LayerNorm is a follow-up)"
+                        .to_string());
+                }
+                if ob("use_parallel_residual") == Some(true) {
+                    parallel_block = true;
+                }
+            }
+            Some("starcoder2") => {
+                // LayerNorm with bias, biases on q/k/v/o and the dense (non-gated)
+                // GELU MLP, tied.
+                layernorm = true;
+                norm_bias = true;
+                dense_mlp = true;
+                let ub = ob("use_bias").unwrap_or(true);
+                qkv_bias = ub;
+                attn_o_bias = ub;
+                mlp_bias = ub;
+            }
+            Some("granite") => {
+                // Llama shape + four scalar multipliers.
+                let ab = ob("attention_bias").unwrap_or(false);
+                qkv_bias = ab;
+                attn_o_bias = ab;
+                mlp_bias = ob("mlp_bias").unwrap_or(false);
+                attention_multiplier = of("attention_multiplier");
+                embedding_multiplier = of("embedding_multiplier").map(|x| x as f32);
+                residual_multiplier = of("residual_multiplier").map(|x| x as f32);
+                logit_div = of("logits_scaling").map(|x| x as f32);
+            }
+            Some("minicpm3") => {
+                return Err(
+                    "the OpenXLA emitter does not yet support MiniCPM3: its MLA \
+                     attention (q/kv LoRA latent projections with separate nope/rope \
+                     head dims) and LongRoPE are a follow-up to this dense arch pack \
+                     (issue #498)"
+                        .to_string(),
+                );
+            }
+            other => {
+                return Err(format!(
+                    "the OpenXLA emitter supports the Llama, Qwen2, Gemma2, Cohere, Cohere2, \
+                     Phi3, StableLM, StarCoder2, Granite, and MiniCPM architectures; \
+                     config.json model_type = {other:?}"
+                ));
+            }
+        }
+
+        let tie_word_embeddings = ob("tie_word_embeddings").unwrap_or(tie_default);
 
         Ok(Config {
             hidden,
             inter: u("intermediate_size")?,
-            n_layers: u("num_hidden_layers")?,
+            n_layers,
             n_q,
             n_kv: u("num_key_value_heads")?,
             head_dim,
-            eps: f("rms_norm_eps")? as f32,
+            eps,
             rope_theta: f("rope_theta")?,
             vocab: u("vocab_size")?,
             rope,
@@ -299,6 +501,23 @@ impl Config {
             attn_logit_softcap,
             final_logit_softcap,
             sliding_window,
+            layernorm,
+            norm_bias,
+            parallel_block,
+            attn_o_bias,
+            mlp_bias,
+            dense_mlp,
+            rope_interleaved,
+            rotary_dim,
+            rope_on_sliding_only,
+            sliding_pattern,
+            attention_multiplier,
+            embedding_multiplier,
+            residual_multiplier,
+            logit_mul,
+            logit_div,
+            fused_qkv,
+            fused_gate_up,
         })
     }
 
@@ -313,13 +532,35 @@ impl Config {
         self.n_q / self.n_kv
     }
 
-    /// Attention score scale. Llama / Qwen2 use `head_dim^-0.5`; Gemma2 uses
+    /// Attention score scale. Granite supplies the raw multiplier directly
+    /// (`attention_multiplier`, which replaces `head_dim^-0.5`); Gemma2 uses
     /// `query_pre_attn_scalar^-0.5` (computed in f64 to match HF, since it can
-    /// differ from `head_dim`). The Llama / Qwen2 branch is unchanged.
+    /// differ from `head_dim`); Llama / Qwen2 / Cohere / others use `head_dim^-0.5`.
+    /// The Llama / Qwen2 branch is unchanged.
     pub fn scale(&self) -> f32 {
+        if let Some(am) = self.attention_multiplier {
+            return am as f32;
+        }
         match self.query_pre_attn_scalar {
             Some(q) => q.powf(-0.5) as f32,
             None => (self.head_dim as f32).powf(-0.5),
+        }
+    }
+
+    /// The RoPE rotation width: `rotary_dim` for a partial-RoPE arch (StableLM),
+    /// else the full `head_dim` (Llama family). Always even.
+    pub fn rotary_width(&self) -> usize {
+        self.rotary_dim.unwrap_or(self.head_dim)
+    }
+
+    /// Whether RoPE is applied on attention layer `li`. Cohere2 leaves its
+    /// full-attention layers position-free (NoPE), rotating only the sliding
+    /// (local) layers; every other arch rotates every layer.
+    pub fn rope_applies_layer(&self, li: usize) -> bool {
+        if self.rope_on_sliding_only {
+            self.is_sliding_layer(li)
+        } else {
+            true
         }
     }
 
@@ -330,12 +571,19 @@ impl Config {
     }
 
     /// Whether attention layer `li` uses sliding-window (local) attention (issue
-    /// #495). Gemma2 alternates local and global attention starting local, so the
-    /// even layers (0, 2, 4, …) are local and the odd layers are global, matching
-    /// HF `Gemma2DecoderLayer` (`is_sliding = not bool(layer_idx % 2)`). Only a
-    /// config with a sliding window (Gemma2) has local layers; Llama / Qwen2
-    /// return `false` for every layer, so their emitted graphs are unchanged.
+    /// #495). Gemma2 alternates local and global starting local, so even layers
+    /// (0, 2, 4, …) are local (`is_sliding = not bool(layer_idx % 2)`). Cohere2
+    /// (issue #498) instead makes every `sliding_pattern`-th layer full-attention:
+    /// a layer is local iff `(li + 1) % pattern != 0`, matching HF
+    /// `Cohere2Config.layer_types`. Only a config with a sliding window has local
+    /// layers; Llama / Qwen2 return `false` for every layer, unchanged.
     pub fn is_sliding_layer(&self, li: usize) -> bool {
-        self.sliding_window.is_some() && li.is_multiple_of(2)
+        if self.sliding_window.is_none() {
+            return false;
+        }
+        match self.sliding_pattern {
+            Some(p) => !(li + 1).is_multiple_of(p),
+            None => li.is_multiple_of(2),
+        }
     }
 }

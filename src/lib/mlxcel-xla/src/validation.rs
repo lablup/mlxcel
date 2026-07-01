@@ -357,9 +357,52 @@ pub(crate) static LLAMA_3_2_1B: ArchFixture = ArchFixture {
     ],
 };
 
+/// A dense-arch-pack fixture (issue #498): a small synthetic `config.json` that
+/// exercises the family's delta, and its frozen prefill + decode logits goldens.
+/// The graphs were frozen after the family was proven token-exact against an HF
+/// fp32 oracle on the synthetic model (`spike/openxla/dense_arch_check.py`), so the
+/// goldens are trusted; the byte-exact gate then guards them against drift.
+macro_rules! dense_fixture {
+    ($static:ident, $arch:literal) => {
+        pub(crate) static $static: ArchFixture = ArchFixture {
+            arch: $arch,
+            config_json: include_str!(concat!("../assets/", $arch, "/config.json")),
+            graphs: &[
+                GraphFixture {
+                    kind: GraphKind::Prefill { sample: false },
+                    golden_name: "prefill.mlir",
+                    golden: include_str!(concat!("../assets/", $arch, "/prefill.mlir")),
+                },
+                GraphFixture {
+                    kind: GraphKind::Decode { sample: false },
+                    golden_name: "decode.mlir",
+                    golden: include_str!(concat!("../assets/", $arch, "/decode.mlir")),
+                },
+            ],
+        };
+    };
+}
+
+dense_fixture!(COHERE, "cohere");
+dense_fixture!(COHERE2, "cohere2");
+dense_fixture!(PHI3, "phi3");
+dense_fixture!(STABLELM, "stablelm");
+dense_fixture!(STARCODER2, "starcoder2");
+dense_fixture!(GRANITE, "granite");
+dense_fixture!(MINICPM, "minicpm");
+
 /// Every registered structural fixture. Append a family here to add it to the
 /// byte-exact gate; see the module docs for the freeze workflow.
-pub(crate) static REGISTERED: &[&ArchFixture] = &[&LLAMA_3_2_1B];
+pub(crate) static REGISTERED: &[&ArchFixture] = &[
+    &LLAMA_3_2_1B,
+    &COHERE,
+    &COHERE2,
+    &PHI3,
+    &STABLELM,
+    &STARCODER2,
+    &GRANITE,
+    &MINICPM,
+];
 
 #[cfg(test)]
 mod tests {

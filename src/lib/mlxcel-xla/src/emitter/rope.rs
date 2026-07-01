@@ -25,12 +25,15 @@ pub fn inv_freq(c: &Config) -> Vec<f64> {
     }
 }
 
-/// Plain RoPE base frequencies: `inv_freq[i] = 1 / theta^((2i)/head_dim)`.
+/// Plain RoPE base frequencies: `inv_freq[i] = 1 / theta^((2i)/d)`, where `d` is
+/// the rotary width (`head_dim`, or the smaller `rotary_dim` for a partial-RoPE
+/// arch like StableLM, where HF computes `inv_freq` over the rotated subspace).
 fn plain_inv_freq(c: &Config) -> Vec<f64> {
-    let half = c.head_dim / 2;
+    let d = c.rotary_width();
+    let half = d / 2;
     (0..half)
         .map(|i| {
-            let exponent = (2 * i) as f64 / c.head_dim as f64;
+            let exponent = (2 * i) as f64 / d as f64;
             1.0 / c.rope_theta.powf(exponent)
         })
         .collect()
@@ -44,13 +47,14 @@ fn llama3_inv_freq(
     high_freq_factor: f64,
     orig_ctx: usize,
 ) -> Vec<f64> {
-    let half = c.head_dim / 2;
+    let d = c.rotary_width();
+    let half = d / 2;
     let mut inv = vec![0.0f64; half];
     let low_wl = orig_ctx as f64 / low_freq_factor;
     let high_wl = orig_ctx as f64 / high_freq_factor;
     for (i, slot) in inv.iter_mut().enumerate() {
-        // base = 1 / theta^((2i)/head_dim)
-        let exponent = (2 * i) as f64 / c.head_dim as f64;
+        // base = 1 / theta^((2i)/d)
+        let exponent = (2 * i) as f64 / d as f64;
         let base = 1.0 / c.rope_theta.powf(exponent);
         let wavelen = 2.0 * std::f64::consts::PI / base;
 
@@ -75,23 +79,33 @@ fn llama3_inv_freq(
     inv
 }
 
-/// Build cos and sin tables of shape [max_seq, head_dim] as flat row-major f32.
-/// emb = concat([freqs, freqs], -1) where freqs = outer(pos, inv_freq).
+/// Build cos and sin tables of shape [max_seq, d] as flat row-major f32, where `d`
+/// is the rotary width ([`Config::rotary_width`]). The half-split layout (Llama
+/// family) is `emb = concat([freqs, freqs], -1)`: the first `[0, half)` and second
+/// `[half, d)` halves are identical. The interleaved layout (Cohere/Cohere2,
+/// `rope_interleaved`) is `emb = repeat_interleave(freqs, 2)`: adjacent columns
+/// `(2i, 2i+1)` share a frequency. Both are `freqs = outer(pos, inv_freq)`.
 pub fn rope_tables(c: &Config, max_seq: usize) -> (Vec<f32>, Vec<f32>) {
     let inv = inv_freq(c);
-    let half = c.head_dim / 2;
-    let d = c.head_dim;
+    let d = c.rotary_width();
+    let half = d / 2;
     let mut cos = vec![0.0f32; max_seq * d];
     let mut sin = vec![0.0f32; max_seq * d];
     for p in 0..max_seq {
-        for i in 0..half {
-            let angle = p as f64 * inv[i];
+        for (i, &inv_i) in inv.iter().enumerate().take(half) {
+            let angle = p as f64 * inv_i;
             let (c_val, s_val) = (angle.cos() as f32, angle.sin() as f32);
-            // first half [0, half) and second half [half, d) are identical
-            cos[p * d + i] = c_val;
-            cos[p * d + half + i] = c_val;
-            sin[p * d + i] = s_val;
-            sin[p * d + half + i] = s_val;
+            let (a, bb) = if c.rope_interleaved {
+                // repeat_interleave: columns 2i and 2i+1 share the frequency.
+                (2 * i, 2 * i + 1)
+            } else {
+                // half-split: column i and column half+i share the frequency.
+                (i, half + i)
+            };
+            cos[p * d + a] = c_val;
+            cos[p * d + bb] = c_val;
+            sin[p * d + a] = s_val;
+            sin[p * d + bb] = s_val;
         }
     }
     (cos, sin)

@@ -30,9 +30,9 @@
 //! / token-out. Emitting from config (issue #449 M3 Stage 2d) replaced the bundled
 //! Llama-3.2-1B `.mlir` assets, so any checkpoint of a supported architecture
 //! loads: Llama (any size) and Qwen2 (plain RoPE + q/k/v bias; Stage B), the
-//! latter adding its bias tensors to `weight_names` to match the emitted graph.
+//! latter adding its bias tensors to `weight_specs` to match the emitted graph.
 //! An untied checkpoint (`tie_word_embeddings = false`, e.g. Llama-3.1-8B and the
-//! larger Qwen2.5 sizes) adds its `lm_head.weight` to `weight_names`, matching the
+//! larger Qwen2.5 sizes) adds its `lm_head.weight` to `weight_specs`, matching the
 //! separate `params['lm_head']` arg the emitter takes for the final projection.
 //!
 //! Proven token-exact against the HF temp-0 reference in
@@ -53,7 +53,9 @@ use safetensors::{Dtype, SafeTensors};
 use crate::emitter::{
     Config, emit_decode_ragged_with, emit_decode_with, emit_prefill_with, resolve_precision,
 };
-use crate::weights::{bf16_to_f32, dequantize_affine, f16_to_f32, f32_le_to_f32};
+use crate::weights::{
+    WeightSpec, bf16_to_f32, dequantize_affine, f16_to_f32, f32_le_to_f32, slice_rows, weight_specs,
+};
 
 /// Prefill bucket baked into the emitted `prefill` graph (`tensor<256xi32>`,
 /// == MAX_SEQ, so it covers any prompt the 256-slot KV cache holds).
@@ -122,62 +124,12 @@ unsafe extern "C" {
 /// load (any `b_max` is emittable; the worker selects from this set).
 pub(crate) const RAGGED_B_VALUES: &[usize] = &[4, 8];
 
-/// The weight names in the emitter's exact arg order: embed, final_norm, then —
-/// for an untied checkpoint (`tie_word_embeddings = false`) — `lm_head.weight`,
-/// then per layer down, gate, in_ln, post_ln, up, wk, wo, wq, wv, and — for a
-/// `qkv_bias` architecture (Qwen2) — the k/q/v projection biases. The layer count,
-/// the untied head, and the presence of biases come from the model config so the
-/// order matches the emitted graph's args (`take_lm_head` / `take_layer_weights`
-/// in `emitter/model.rs`).
-fn weight_names(cfg: &Config) -> Vec<String> {
-    let mut names = vec![
-        "model.embed_tokens.weight".to_string(),
-        "model.norm.weight".to_string(),
-    ];
-    // Untied LM head: a separate `lm_head.weight` follows `final_norm`, matching
-    // the `params['lm_head']` arg the emitter takes in the same position.
-    if !cfg.tie_word_embeddings {
-        names.push("lm_head.weight".to_string());
-    }
-    for i in 0..cfg.n_layers {
-        let p = format!("model.layers.{i}.");
-        for suf in [
-            "mlp.down_proj.weight",
-            "mlp.gate_proj.weight",
-            "input_layernorm.weight",
-            "post_attention_layernorm.weight",
-            "mlp.up_proj.weight",
-            "self_attn.k_proj.weight",
-            "self_attn.o_proj.weight",
-            "self_attn.q_proj.weight",
-            "self_attn.v_proj.weight",
-        ] {
-            names.push(format!("{p}{suf}"));
-        }
-        // Qwen2 q/k/v projection biases, appended per layer in the same k/q/v
-        // order `take_layer_weights` adds them to the emitted graph args.
-        if cfg.qkv_bias {
-            for suf in [
-                "self_attn.k_proj.bias",
-                "self_attn.q_proj.bias",
-                "self_attn.v_proj.bias",
-            ] {
-                names.push(format!("{p}{suf}"));
-            }
-        }
-        // Gemma2 has two extra per-layer norms (pre/post feed-forward), appended
-        // in the same order `take_layer_weights` takes their graph args.
-        if cfg.gemma2 {
-            for suf in [
-                "pre_feedforward_layernorm.weight",
-                "post_feedforward_layernorm.weight",
-            ] {
-                names.push(format!("{p}{suf}"));
-            }
-        }
-    }
-    names
-}
+// The per-architecture checkpoint-weight order the loader reads lives in
+// `weights::weight_specs` (pure logic, unit-tested without the IREE runtime, and
+// kept in lock-step with the emitter's arg order). It covers the dense arch pack
+// (issue #498): LayerNorm biases, the o_proj / MLP biases, the dense StarCoder2
+// MLP, and the Phi3 fused `qkv_proj` / `gate_up_proj` (loaded once and row-sliced
+// into the emitter's separate args).
 
 /// Locate the IREE distribution: a runtime `IREE_DIST` override first, else the
 /// path baked at build time (the dist whose runtime is linked into this binary).
@@ -376,18 +328,21 @@ fn load_weights(
     model_dir: &Path,
     cfg: &Config,
 ) -> Result<(Vec<Vec<f32>>, Vec<c_int>, Vec<i64>), String> {
-    let names = weight_names(cfg);
+    let specs = weight_specs(cfg);
+    let names: Vec<String> = specs.iter().map(|s| s.tensor_name().to_string()).collect();
     let shard_paths = resolve_weight_shards(model_dir, &names)?;
 
     // Group weight indices by shard so each shard file is opened/mmap'd once; the
-    // results are placed by index, preserving the emitter's arg order.
+    // results are placed by index, preserving the emitter's arg order. A Phi3
+    // fused checkpoint references one tensor (`qkv_proj` / `gate_up_proj`) from
+    // several specs; each reads and row-slices the (memmapped) shard.
     let mut by_shard: std::collections::BTreeMap<&Path, Vec<usize>> =
         std::collections::BTreeMap::new();
     for (i, p) in shard_paths.iter().enumerate() {
         by_shard.entry(p.as_path()).or_default().push(i);
     }
 
-    let n = names.len();
+    let n = specs.len();
     let mut bufs: Vec<Vec<f32>> = vec![Vec::new(); n];
     let mut ranks: Vec<c_int> = vec![0; n];
     let mut dims: Vec<i64> = vec![0; n * 4];
@@ -404,11 +359,10 @@ fn load_weights(
                 .tensor(name)
                 .map_err(|e| format!("weight {name} in {}: {e}", shard.display()))?;
 
-            // MLX affine-quantized weight: a `U32`-packed `[out, in_packed]` weight
-            // with same-shard `*.scales` / `*.biases`. Dequantize to `[out, in]` f32
-            // (the graph's dtype); the layernorms and q/k/v biases are not quantized
-            // and fall through to the widen path below.
-            if t.dtype() == Dtype::U32 {
+            // Widen the whole tensor to row-major `[out, in]` (or `[out]`) f32 (the
+            // graph's dtype): an MLX affine `U32`-packed weight is dequantized (the
+            // layernorms / biases are not quantized and take the widen path).
+            let (data, shape): (Vec<f32>, Vec<usize>) = if t.dtype() == Dtype::U32 {
                 let qc = cfg.quantization.ok_or_else(|| {
                     format!(
                         "weight {name} is U32 (quantized) but config.json has no `quantization`"
@@ -438,7 +392,7 @@ fn load_weights(
                 }
                 let (out, in_packed) = (shape[0], shape[1]);
                 let in_ = in_packed * (32 / qc.bits);
-                bufs[i] = dequantize_affine(
+                let d = dequantize_affine(
                     t.data(),
                     scales.data(),
                     biases.data(),
@@ -448,35 +402,52 @@ fn load_weights(
                     qc.group_size,
                 )
                 .map_err(|e| format!("dequantize {name}: {e}"))?;
-                ranks[i] = 2;
-                dims[i * 4] = out as i64;
-                dims[i * 4 + 1] = in_ as i64;
-                continue;
-            }
-
-            // Widen to f32 (the graph's weight dtype). bf16 and f16 are the common
-            // checkpoint dtypes; f32 is a passthrough. The widening is exact for
-            // all three, so it matches HF's f32 reference.
-            let data = match t.dtype() {
-                Dtype::BF16 => bf16_to_f32(t.data()),
-                Dtype::F16 => f16_to_f32(t.data()),
-                Dtype::F32 => f32_le_to_f32(t.data()),
-                other => {
-                    return Err(format!(
-                        "weight {name} dtype {other:?}, expected BF16/F16/F32 or \
-                         MLX-quantized U32"
-                    ));
+                (d, vec![out, in_])
+            } else {
+                // bf16 and f16 are the common checkpoint dtypes; f32 is a
+                // passthrough. The widening is exact for all three, matching HF's
+                // f32 reference.
+                let d = match t.dtype() {
+                    Dtype::BF16 => bf16_to_f32(t.data()),
+                    Dtype::F16 => f16_to_f32(t.data()),
+                    Dtype::F32 => f32_le_to_f32(t.data()),
+                    other => {
+                        return Err(format!(
+                            "weight {name} dtype {other:?}, expected BF16/F16/F32 or \
+                             MLX-quantized U32"
+                        ));
+                    }
+                };
+                let shape = t.shape();
+                if shape.len() > 4 {
+                    return Err(format!("weight {name} rank {} > 4", shape.len()));
                 }
+                (d, shape.to_vec())
             };
-            let shape = t.shape();
-            if shape.len() > 4 {
-                return Err(format!("weight {name} rank {} > 4", shape.len()));
+
+            // Place the whole tensor, or (Phi3 fused) a row-slice, into arg slot i.
+            match &specs[i] {
+                WeightSpec::Whole(_) => {
+                    ranks[i] = shape.len() as c_int;
+                    for (k, &s) in shape.iter().enumerate() {
+                        dims[i * 4 + k] = s as i64;
+                    }
+                    bufs[i] = data;
+                }
+                WeightSpec::Rows { start, end, .. } => {
+                    if shape.len() != 2 {
+                        return Err(format!(
+                            "row-slice weight {name} is rank {} (expected 2)",
+                            shape.len()
+                        ));
+                    }
+                    bufs[i] = slice_rows(&data, shape[0], *start, *end)
+                        .map_err(|e| format!("row-slice {name}: {e}"))?;
+                    ranks[i] = 2;
+                    dims[i * 4] = (*end - *start) as i64;
+                    dims[i * 4 + 1] = shape[1] as i64;
+                }
             }
-            ranks[i] = shape.len() as c_int;
-            for (k, &s) in shape.iter().enumerate() {
-                dims[i * 4 + k] = s as i64;
-            }
-            bufs[i] = data;
         }
     }
     Ok((bufs, ranks, dims))
