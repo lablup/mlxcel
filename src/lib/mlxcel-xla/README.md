@@ -209,6 +209,60 @@ MLXCEL_XLA_DEVICE=cuda cargo run --release --features xla-iree \
   --example xla_batch_bench -- --device cuda --batch 8 --requests 16 --maxcap 48
 ```
 
+## Per-architecture validation harness (#496)
+
+Validating an architecture has two tiers, split so the cheap one can gate every
+change while the expensive one stays opt-in. Both are reusable, so adding a family
+is turnkey.
+
+**Structural (byte-exact, pure Rust, no GPU).** The emitter must reproduce a
+frozen StableHLO golden for each registered architecture, byte for byte. This is
+the fast regression gate that catches a graph which drifted from its validated
+form. It is the `src/validation.rs` module, run as a normal test:
+
+```bash
+cargo test -p mlxcel-xla --lib validation
+```
+
+`validation::REGISTERED` lists the fixtures (currently `llama-3.2-1b`, whose
+goldens live in `assets/llama-3.2-1b/`). The check honors `MLXCEL_XLA_PRECISION`:
+the goldens are the default `f32` graphs, so a byte-exact run under `f16` / `bf16`
+is rejected with a clear message instead of a confusing diff.
+
+**Execution (token-exact + reference-exact).** One command produces the HF fp32
+oracle and runs both run gates (needs a real IREE build and a checkpoint):
+
+```bash
+export IREE_DIST=/path/to/iree-dist          # or IREE_CUDA_HOME=... for CUDA
+scripts/xla/validate_arch.sh --model <checkpoint dir> --device local-task
+```
+
+It (0) runs the structural pre-gate, (1) produces the oracle with
+`spike/openxla/oracle_continuation.py` (loads the checkpoint in fp32,
+dequantizing an MLX 4-bit / 8-bit checkpoint offline first with the same affine
+formula as `src/weights.rs`), (2) runs `xla_oracle_check` (single-seq greedy ==
+HF oracle), and (3) runs `xla_batch_bench` (every batched request == its
+single-seq reference). It exits non-zero if any run gate fails.
+`--structural-only` runs just the pure-Rust pre-gate (no IREE, no GPU).
+
+### Adding a family is turnkey
+
+1. Emit correctly: extend `Config::from_json` and the emitter for the
+   architecture (the structural invariant tests in `emitter/mod.rs` cover the new
+   switches: RoPE kind, q/k/v bias, tied / untied head, soft-caps).
+2. Prove it: `scripts/xla/validate_arch.sh --model <checkpoint>` must report a
+   clean token-exact + reference-exact pass on a real checkpoint.
+3. Freeze goldens (optional, for a byte-exact CI guard): emit each graph with
+   `validation::emit_graphs(config_json, kinds)` and write them to
+   `assets/<arch>/*.mlir`; an already-registered family re-freezes in place with
+   `MLXCEL_FREEZE_GOLDENS=1 cargo test -p mlxcel-xla --lib validation::tests::freeze_goldens`.
+4. Register: add an `ArchFixture` to `validation::REGISTERED`; the byte-exact test
+   then guards it forever.
+
+Not every family bundles goldens: Qwen2.5 (`assets/qwen2.5-0.5b/`) is emitted at
+load and covered by the emitter's structural tests plus the execution tier, with
+no committed `.mlir`. The harness still drives its emit through `emit_graphs`.
+
 ## File map
 
 | Path | Purpose |
@@ -216,6 +270,7 @@ MLXCEL_XLA_DEVICE=cuda cargo run --release --features xla-iree \
 | `src/lib.rs` | `XlaInferenceSession`: the single-sequence `InferenceSession` impl + greedy drive loop. |
 | `src/iree.rs` | (feature `iree`) FFI to the shim; `IreeLlama` (single-seq) and `IreeRaggedLlama` (batched) load weights, compile + run the graphs. |
 | `src/batch.rs` | (feature `iree`) `XlaBatchEngine`: the continuous-batching engine (slots + queue + admit/decode/evict) and `XlaReferenceEngine` (single-seq reference for validation). The backend-neutral `Scheduler` bookkeeping is unit-tested without IREE. |
+| `src/validation.rs` | (issue #496) Reusable per-architecture structural harness: the `ArchFixture` registry + `check_arch` byte-exact golden gate + `emit_graphs` freeze primitive. Pure Rust; runs under `cargo test`. The execution tier lives in `scripts/xla/validate_arch.sh` + `spike/openxla/oracle_continuation.py`. |
 | `csrc/xla_iree.c` | C shim over the IREE runtime C API (one session, resident weights, threaded KV; single-seq `prefill`/`decode` plus the ragged `prefill_slot`/`decode_ragged` with a device-side per-slot KV write). |
 | `build.rs` | (feature `iree`) compiles the shim against `IREE_DIST` headers. The runtime link recipe lives in the **root** `mlxcel/build.rs` (a dependency's link-args do not propagate to the binary). |
 | `assets/llama-3.2-1b/` | The #451-emitted `prefill` / `decode_step` StableHLO graphs (on-device-argmax variant) plus the ragged `decode_ragged_b{4,8}` graphs, compiled to vmfbs at load. |

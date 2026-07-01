@@ -83,6 +83,14 @@ mod weights;
 #[allow(dead_code)]
 mod emitter;
 
+// Reusable per-architecture validation harness (issue #496). Pure Rust; present
+// under `iree` (so the harness is available to tooling) and under `test` (the
+// byte-exact structural gate runs here). The engine never calls it, so dead_code
+// is allowed under a non-test `iree` build, matching the sibling modules above.
+#[cfg(any(feature = "iree", test))]
+#[allow(dead_code)]
+mod validation;
+
 #[cfg(feature = "iree")]
 pub use batch::{EngineEvent, FinishReason, XlaBatchEngine, XlaReferenceEngine};
 #[cfg(feature = "iree")]

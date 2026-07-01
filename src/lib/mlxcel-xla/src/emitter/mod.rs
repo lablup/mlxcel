@@ -40,7 +40,7 @@ mod model;
 mod rope;
 
 pub(crate) use config::Config;
-pub(crate) use model::{emit_decode, emit_decode_ragged, emit_prefill};
+pub(crate) use model::{emit_decode, emit_decode_batched, emit_decode_ragged, emit_prefill};
 
 #[cfg(test)]
 mod tests {
@@ -48,11 +48,6 @@ mod tests {
     use super::*;
 
     const CONFIG_JSON: &str = include_str!("../../assets/llama-3.2-1b/config.json");
-    const PREFILL: &str = include_str!("../../assets/llama-3.2-1b/prefill.mlir");
-    const DECODE: &str = include_str!("../../assets/llama-3.2-1b/decode.mlir");
-    const PREFILL_LOGITS: &str = include_str!("../../assets/llama-3.2-1b/prefill_logits.mlir");
-    const RAGGED_B4: &str = include_str!("../../assets/llama-3.2-1b/decode_ragged_logits_b4.mlir");
-    const RAGGED_B8: &str = include_str!("../../assets/llama-3.2-1b/decode_ragged_logits_b8.mlir");
     const QWEN_CONFIG_JSON: &str = include_str!("../../assets/qwen2.5-0.5b/config.json");
 
     fn occurs(haystack: &str, needle: &str) -> usize {
@@ -119,31 +114,17 @@ mod tests {
         }
     }
 
-    /// The whole point of Stage A: a `Config` parsed from the real
-    /// Llama-3.2-1B-Instruct `config.json` emits every bundled graph
-    /// byte-for-byte. This proves the load-time emit path reproduces the assets
-    /// the engine shipped with, so switching from `include_str!` to emit-at-load
-    /// cannot change the compiled graphs for this model.
+    /// A `Config` parsed from the real Llama-3.2-1B-Instruct `config.json` emits
+    /// every bundled graph byte-for-byte, so switching from `include_str!` to
+    /// emit-at-load cannot change the compiled graphs for this model. Asserted
+    /// through the reusable per-architecture validation harness (issue #496),
+    /// which owns the golden fixtures (`crate::validation::LLAMA_3_2_1B`); adding
+    /// a family is then a registry row rather than a copy of this test.
     #[test]
     fn from_json_reproduces_bundled_assets_byte_for_byte() {
-        let c = Config::from_json_str(CONFIG_JSON).expect("parse Llama-3.2-1B config.json");
-        assert_eq!(emit_prefill(&c, true), PREFILL, "prefill.mlir (argmax)");
-        assert_eq!(emit_decode(&c, true), DECODE, "decode.mlir (argmax)");
-        assert_eq!(
-            emit_prefill(&c, false),
-            PREFILL_LOGITS,
-            "prefill_logits.mlir"
-        );
-        assert_eq!(
-            emit_decode_ragged(&c, 4, false),
-            RAGGED_B4,
-            "decode_ragged_logits_b4.mlir"
-        );
-        assert_eq!(
-            emit_decode_ragged(&c, 8, false),
-            RAGGED_B8,
-            "decode_ragged_logits_b8.mlir"
-        );
+        let report = crate::validation::check_arch(&crate::validation::LLAMA_3_2_1B)
+            .expect("llama-3.2-1b fixture parses at the default precision");
+        assert!(report.passed(), "{report}");
     }
 
     /// `from_json` reads the same values the spike hard-coded, so it emits
