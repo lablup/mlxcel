@@ -56,6 +56,8 @@ pub mod gemma4_mtp_target;
 pub mod glm4;
 pub mod glm4_moe;
 pub mod glm4_moe_lite;
+pub mod glm4v;
+pub mod glm4v_moe;
 pub mod glm_moe_dsa;
 pub mod gpt_oss;
 pub mod granite;
@@ -149,6 +151,8 @@ pub use glm_moe_dsa::GlmMoeDsaModel;
 pub use glm4::Glm4Model;
 pub use glm4_moe::Glm4MoeModel;
 pub use glm4_moe_lite::Glm4MoeLiteModel;
+pub use glm4v::Glm4vTextModel;
+pub use glm4v_moe::Glm4vMoeTextModel;
 pub use gpt_oss::{GptOssModel, GptOssWrapper};
 pub use granite::GraniteModel;
 pub use granitemoehybrid::GraniteMoeHybridModel;
@@ -253,6 +257,8 @@ pub enum ModelType {
     Qwen25VL,        // Qwen2.5-VL (windowed ViT + Qwen2 w/ MRoPE)
     Qwen3VL,         // Qwen3-VL (ViT + interleaved MRoPE + DeepStack)
     Qwen3VLMoe,      // Qwen3-VL-MoE (Qwen3-VL + MoE text backbone)
+    Glm4v,           // GLM-4V (GLM-4V ViT + GLM-4 text w/ sectioned MRoPE)
+    Glm4vMoe,        // GLM-4V MoE (GLM-4V ViT + GLM-4 MoE text w/ MRoPE)
     YoutuVLM,        // Youtu-VL (SigLIP2 windowed-attn + DeepSeek-V3-style MLA)
     InternVLChatVLM, // InternVL (internvl_chat): InternViT + pixel-shuffle mlp1 + Qwen2 text
     SmolVLM,         // SmolVLM/SmolVLM2 (smolvlm): SigLIP + pixel-shuffle connector + SmolLM2 text
@@ -423,6 +429,8 @@ pub const ALL_MODEL_TYPES: &[ModelType] = &[
     ModelType::Qwen25VL,
     ModelType::Qwen3VL,
     ModelType::Qwen3VLMoe,
+    ModelType::Glm4v,
+    ModelType::Glm4vMoe,
     ModelType::YoutuVLM,
     ModelType::InternVLChatVLM,
     ModelType::SmolVLM,
@@ -566,6 +574,8 @@ impl ModelType {
             ModelType::Qwen25VL => ("Qwen2.5-VL", "Qwen VLM"),
             ModelType::Qwen3VL => ("Qwen3-VL", "Qwen VLM"),
             ModelType::Qwen3VLMoe => ("Qwen3-VL MoE", "Qwen VLM"),
+            ModelType::Glm4v => ("GLM-4V", "GLM VLM"),
+            ModelType::Glm4vMoe => ("GLM-4V MoE", "GLM VLM"),
             ModelType::Qwen35VLM => ("Qwen 3.5 VLM", "Qwen VLM"),
             ModelType::Qwen35MoeVLM => ("Qwen 3.5 MoE VLM", "Qwen VLM"),
 
@@ -820,6 +830,8 @@ mod metadata_tests {
             Qwen25VL,
             Qwen3VL,
             Qwen3VLMoe,
+            Glm4v,
+            Glm4vMoe,
             YoutuVLM,
             InternVLChatVLM,
             SmolVLM,
