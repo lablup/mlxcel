@@ -164,6 +164,7 @@ fn try_load_vlm_model_from_dir(
 ) -> Result<Option<LoadedModel>> {
     Ok(match model_type {
         ModelType::Llama4VLM => Some(load_llama4_vlm(model_path)?),
+        ModelType::MllamaVLM => Some(load_mllama_vlm(model_path)?),
         ModelType::Qwen35VLM | ModelType::Qwen35MoeVLM => {
             Some(match require_qwen35_vlm_kind(model_type)? {
                 Qwen35VlmKind::Dense => load_qwen3_5_vlm(model_path)?,

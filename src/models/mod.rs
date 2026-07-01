@@ -80,6 +80,7 @@ pub mod minimax;
 pub mod ministral3;
 pub mod mistral4;
 pub mod mixtral;
+pub mod mllama;
 pub mod molmo;
 pub mod molmo2;
 pub mod molmo_point;
@@ -227,6 +228,7 @@ pub enum ModelType {
     Llama,           // Llama 1/2/3, Mistral
     Llama4,          // Llama 4 (MoE)
     Llama4VLM,       // Llama 4 VLM (vision-language)
+    MllamaVLM,       // Llama 3.2 Vision (mllama): tiled ViT + gated cross-attention
     Qwen2,           // Qwen 2/2.5
     Qwen3,           // Qwen 3
     Qwen3Moe,        // Qwen 3 MoE
@@ -396,6 +398,7 @@ pub const ALL_MODEL_TYPES: &[ModelType] = &[
     ModelType::Llama,
     ModelType::Llama4,
     ModelType::Llama4VLM,
+    ModelType::MllamaVLM,
     ModelType::Qwen2,
     ModelType::Qwen3,
     ModelType::Qwen3Moe,
@@ -549,6 +552,10 @@ impl ModelType {
             ModelType::Llama => ("Llama 1/2/3", "Llama"),
             ModelType::Llama4 => ("Llama 4 (MoE)", "Llama"),
             ModelType::Llama4VLM => ("Llama 4 VLM", "Llama VLM"),
+            ModelType::MllamaVLM => (
+                "Llama 3.2 Vision (tiled ViT + gated cross-attention)",
+                "Llama VLM",
+            ),
 
             // ----- Qwen (text/hybrid/MoE) -----
             ModelType::Qwen2 => ("Qwen 2 / 2.5", "Qwen"),
@@ -791,6 +798,7 @@ mod metadata_tests {
             Llama,
             Llama4,
             Llama4VLM,
+            MllamaVLM,
             Qwen2,
             Qwen3,
             Qwen3Moe,

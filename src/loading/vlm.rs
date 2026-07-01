@@ -45,6 +45,8 @@ mod gemma_unified;
 mod internvl;
 #[path = "vlm_llava.rs"]
 mod llava;
+#[path = "vlm_mllama.rs"]
+mod mllama;
 #[path = "vlm_nemotron_h_nano_omni.rs"]
 mod nemotron_h_nano_omni;
 #[path = "vlm_pixtral.rs"]
@@ -62,6 +64,7 @@ pub(crate) use gemma::{load_gemma3_vlm, load_gemma3n_vlm, load_gemma4_vlm};
 pub(crate) use gemma_unified::load_gemma4_unified;
 pub(crate) use internvl::load_internvl_vlm;
 pub(crate) use llava::{load_llava_bunny_vlm, load_llava_vlm};
+pub(crate) use mllama::load_mllama_vlm;
 pub(crate) use nemotron_h_nano_omni::load_nemotron_h_nano_omni_vlm;
 pub(crate) use pixtral::{load_mistral3_vlm, load_pixtral_vlm};
 pub(crate) use qwen::{

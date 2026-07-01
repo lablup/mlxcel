@@ -93,6 +93,9 @@ pub fn get_model_type(model_path: &Path) -> Result<ModelType> {
             ModelType::Llama4,
             ModelType::Llama4VLM,
         )),
+        // Llama 3.2 Vision. Always multimodal (Llama-3 text backbone with gated
+        // cross-attention adapters attending to a tiled ViT tower).
+        "mllama" => Ok(ModelType::MllamaVLM),
         "qwen2" => Ok(ModelType::Qwen2),
         "qwen3" => Ok(ModelType::Qwen3),
         "qwen3_moe" => Ok(ModelType::Qwen3Moe),

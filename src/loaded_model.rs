@@ -74,6 +74,8 @@ pub enum LoadedModel {
     Gemma4VLM(vision::Gemma4VLModel),
     Gemma4Unified(vision::Gemma4UnifiedModel),
     Llama4VLM(vision::VisionLanguageModel),
+    /// Llama 3.2 Vision (`mllama`): tiled ViT + gated cross-attention.
+    MllamaVLM(vision::MllamaVLModel),
     LlavaVLM(vision::VisionLanguageModel),
     Qwen2VL(vision::Qwen2VLModel),
     Qwen25VL(vision::Qwen25VLModel),
@@ -195,6 +197,7 @@ macro_rules! delegate_language_model {
             LoadedModel::Gemma4VLM(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::Gemma4Unified(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::Llama4VLM(inner) => LanguageModel::$method(inner, $($arg),*),
+            LoadedModel::MllamaVLM(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::LlavaVLM(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::Qwen2VL(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::Qwen25VL(inner) => LanguageModel::$method(inner, $($arg),*),
