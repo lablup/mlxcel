@@ -111,6 +111,24 @@ Qwen-style `<think>` models. To turn thinking off, pass
 default via `--chat-template-kwargs` or `LLAMA_ARG_CHAT_TEMPLATE_KWARGS`. A
 per-request value always wins over the server default.
 
+### `thinking` alias for the DeepSeek-V3.2 (`deepseek_v32`) chat template
+
+The upstream `deepseek-ai/DeepSeek-V3.2-Exp` chat template gates its
+`<think>` block on a bare `thinking` boolean rather than the conventional
+`enable_thinking` kwarg that mlxcel forwards by default (verified against
+[deepseek-ai/DeepSeek-V3.2-Exp `assets/chat_template.jinja`](https://huggingface.co/deepseek-ai/DeepSeek-V3.2-Exp/blob/main/assets/chat_template.jinja)).
+Because the template only ever reads `thinking`, `enable_thinking` alone would
+have no effect on this family. mlxcel detects the `{% if not thinking is
+defined %}` idiom in the loaded template and, when present, also mirrors the
+fully-resolved `enable_thinking` value (request override, or the server
+default) into a `thinking` key so toggling reasoning works the same way it
+does for every other thinking-capable model. The detection is based on the
+template source, not the model name, so any future template that adopts the
+same idiom is covered automatically. GLM-5.2 (`glm_moe_dsa`) ships its own
+chat template that already reads `enable_thinking` directly and is
+unaffected. An explicit `thinking` entry in `chat_template_kwargs` always
+overrides the derived alias.
+
 ### Loop-detection default-on for the Gemma 4 family
 
 Gemma 4 (31B Dense and 26B-A4B MoE, including the QAT 4-bit checkpoints) has an upstream, weights-level token-repetition collapse documented in [google-deepmind/gemma#622](https://github.com/google-deepmind/gemma/issues/622) and reproduced across other engines, including [vllm-project/vllm#40080](https://github.com/vllm-project/vllm/issues/40080). Generation can degenerate into a single repeated token (or short fragment) that fills the token budget, most often inside the thought channel. Tool declarations and `json_schema` structured-output requests amplify it, but it is not limited to those cases. Sampling penalties do not reliably recover it, because once the logits collapse the top-k candidates are themselves garbage.

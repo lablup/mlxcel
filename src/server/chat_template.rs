@@ -226,6 +226,43 @@ impl ChatTemplateProcessor {
         out
     }
 
+    /// Detect a chat template that gates its `<think>` block on a bare
+    /// `thinking` boolean instead of the conventional `enable_thinking`
+    /// kwarg mlxcel forwards by default.
+    ///
+    /// Verified against the upstream `deepseek-ai/DeepSeek-V3.2-Exp`
+    /// template (`deepseek_v32`; `glm_moe_dsa` derives its config handling
+    /// from the same model but ships its own `enable_thinking`-based
+    /// template on GLM-5.2 and is unaffected):
+    /// <https://huggingface.co/deepseek-ai/DeepSeek-V3.2-Exp/blob/main/assets/chat_template.jinja>
+    ///
+    /// ```text
+    /// {% if not thinking is defined %}
+    ///   {% set thinking = false %}
+    /// {% endif %}
+    /// ...
+    /// {%- if message['prefix'] is defined and message['prefix'] and thinking %}
+    /// ```
+    ///
+    /// mlxcel only ever populates `enable_thinking` in the template context
+    /// (see [`build_template_context`]), so on this template family `thinking`
+    /// is never defined by the request or the server default and the
+    /// `{% if not thinking is defined %}{% set thinking = false %}{% endif %}`
+    /// guard silently pins it to `false` regardless of what the caller asked
+    /// for. Detecting the `{% if not thinking is defined %}` idiom lets
+    /// [`build_template_context`] also surface a `thinking` alias mirroring
+    /// the resolved `enable_thinking` value, without hard-coding on the model
+    /// architecture name — any future template that adopts the same idiom is
+    /// covered automatically.
+    ///
+    /// The check requires the literal `not thinking is defined` substring, so
+    /// templates that instead declare `enable_thinking is not defined` (e.g.
+    /// GLM-5.2's `glm_moe_dsa` template) do not match: `"is not defined"` is
+    /// not the same substring as `"is defined"` preceded by `not `.
+    fn wants_bare_thinking_alias(&self) -> bool {
+        self.template.contains("not thinking is defined")
+    }
+
     /// Return whether the template uses the `tools` variable, without caching.
     ///
     /// Uses a conservative string-based heuristic so it can be called from
@@ -400,6 +437,7 @@ impl ChatTemplateProcessor {
             tools_val,
             kwargs,
             self.default_enable_thinking,
+            self.wants_bare_thinking_alias(),
         );
 
         let result = tmpl
@@ -462,6 +500,7 @@ impl ChatTemplateProcessor {
             tools_val,
             kwargs,
             self.default_enable_thinking,
+            self.wants_bare_thinking_alias(),
         );
 
         let result = tmpl
@@ -484,6 +523,12 @@ impl ChatTemplateProcessor {
 /// think marker pair, `false` otherwise.  The default is overridable through
 /// `kwargs` (the same mechanism that lets's `preserve_thinking` reach the template).  Any other kwarg key — including future
 /// template-specific hints — is passed through unchanged.
+///
+/// When `bare_thinking_alias` is `true` (see
+/// [`ChatTemplateProcessor::wants_bare_thinking_alias`]), the same resolved
+/// `enable_thinking` value is also mirrored into a bare `thinking` key, unless
+/// the caller already supplied an explicit `thinking` kwarg — that override
+/// always wins.
 fn build_template_context(
     messages: minijinja::Value,
     bos_token: &str,
@@ -492,6 +537,7 @@ fn build_template_context(
     tools: minijinja::Value,
     kwargs: &ChatTemplateKwargs,
     default_enable_thinking: bool,
+    bare_thinking_alias: bool,
 ) -> minijinja::Value {
     // Start with the default context fields.
     let mut ctx: std::collections::BTreeMap<&str, minijinja::Value> =
@@ -550,6 +596,28 @@ fn build_template_context(
             dropped_keys.join(", ")
         );
     }
+
+    // Model-aware `thinking` alias (issue #512): templates detected by
+    // `wants_bare_thinking_alias` (e.g. the upstream deepseek_v32 template)
+    // gate their `<think>` block on a bare `thinking` boolean rather than the
+    // conventional `enable_thinking` kwarg mlxcel forwards above. Mirror the
+    // fully-resolved `enable_thinking` value (server default, overridden by
+    // any request/server-default kwarg) into `thinking` so toggling reasoning
+    // actually has an effect on that template family. An explicit `thinking`
+    // kwarg from the request/server default is a non-reserved key already
+    // merged into `owned` by the loop above, so it always wins over this
+    // derived alias.
+    if bare_thinking_alias && !owned.contains_key("thinking") {
+        let effective_enable_thinking = kwargs
+            .get("enable_thinking")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(default_enable_thinking);
+        owned.insert(
+            "thinking".to_string(),
+            minijinja::Value::from(effective_enable_thinking),
+        );
+    }
+
     minijinja::Value::from_serialize(&owned)
 }
 
@@ -2022,5 +2090,158 @@ TOOL
             .unwrap();
         assert!(out.starts_with("<think>"));
         assert!(!out.contains("<|channel>thought"));
+    }
+
+    // ----- DeepSeek-V3.2 bare `thinking` alias (issue #512) -----
+    //
+    // The upstream `deepseek_v32` chat template gates its `<think>` block on
+    // a bare `thinking` boolean rather than the conventional `enable_thinking`
+    // kwarg mlxcel forwards by default, so without this alias toggling
+    // reasoning has no effect on that template family. This trimmed template
+    // reproduces the relevant idiom from the real
+    // `deepseek-ai/DeepSeek-V3.2-Exp` chat_template.jinja: the "is this
+    // variable even defined" default-setting guard, and the final
+    // generation-prompt branch that opens/closes the think block.
+
+    const DEEPSEEK_V32_LIKE_TEMPLATE: &str = r#"{% if not thinking is defined %}{% set thinking = false %}{% endif %}{% for m in messages %}{{ m.content }}{% endfor %}{% if add_generation_prompt %}{% if not thinking %}</think>{% else %}<think>{% endif %}{% endif %}"#;
+
+    #[test]
+    fn wants_bare_thinking_alias_detects_deepseek_v32_shape() {
+        let dsv32 = ChatTemplateProcessor::with_template(DEEPSEEK_V32_LIKE_TEMPLATE.to_string());
+        assert!(dsv32.wants_bare_thinking_alias());
+
+        // GLM-5.2's `glm_moe_dsa` template already reads the conventional
+        // `enable_thinking` kwarg directly (`enable_thinking is not defined`)
+        // — it must NOT be mistaken for the bare-`thinking` shape.
+        let glm5 = r#"{%- if (enable_thinking is not defined or enable_thinking) -%}THINK{%- endif -%}{{ messages[0].content }}"#;
+        let glm5_processor = ChatTemplateProcessor::with_template(glm5.to_string());
+        assert!(!glm5_processor.wants_bare_thinking_alias());
+
+        // Plain default / Qwen3-style `enable_thinking` templates must not
+        // trigger either — no behavior change for other model families.
+        let plain = ChatTemplateProcessor::default();
+        assert!(!plain.wants_bare_thinking_alias());
+
+        let qwen = r#"{% if enable_thinking %}<think>{% endif %}{{ messages[0].content }}"#;
+        let qwen_processor = ChatTemplateProcessor::with_template(qwen.to_string());
+        assert!(!qwen_processor.wants_bare_thinking_alias());
+    }
+
+    #[test]
+    fn bare_thinking_alias_mirrors_enable_thinking_true() {
+        let processor =
+            ChatTemplateProcessor::with_template(DEEPSEEK_V32_LIKE_TEMPLATE.to_string());
+        let messages = vec![ChatMessage {
+            role: "user".to_string(),
+            content: "hi".to_string(),
+        }];
+        let kwargs = ChatTemplateKwargs::from_json_str(r#"{"enable_thinking": true}"#).unwrap();
+        let out = processor
+            .apply_with_kwargs(&messages, None, &kwargs)
+            .unwrap();
+        assert!(
+            out.ends_with("<think>"),
+            "enable_thinking=true must alias to thinking=true; got: {out:?}"
+        );
+    }
+
+    #[test]
+    fn bare_thinking_alias_mirrors_enable_thinking_false() {
+        let processor =
+            ChatTemplateProcessor::with_template(DEEPSEEK_V32_LIKE_TEMPLATE.to_string());
+        let messages = vec![ChatMessage {
+            role: "user".to_string(),
+            content: "hi".to_string(),
+        }];
+        let kwargs = ChatTemplateKwargs::from_json_str(r#"{"enable_thinking": false}"#).unwrap();
+        let out = processor
+            .apply_with_kwargs(&messages, None, &kwargs)
+            .unwrap();
+        assert!(
+            out.ends_with("</think>"),
+            "enable_thinking=false must alias to thinking=false; got: {out:?}"
+        );
+    }
+
+    #[test]
+    fn bare_thinking_alias_honours_default_enable_thinking_when_kwarg_absent() {
+        // upstream PR #1114: a thinking model with no request-side kwarg
+        // still resolves `enable_thinking` from the tokenizer-derived
+        // default, and that resolved value must reach the bare-`thinking`
+        // alias too.
+        let mut processor =
+            ChatTemplateProcessor::with_template(DEEPSEEK_V32_LIKE_TEMPLATE.to_string());
+        processor.set_default_enable_thinking(true);
+        let messages = vec![ChatMessage {
+            role: "user".to_string(),
+            content: "hi".to_string(),
+        }];
+        let out = processor
+            .apply_with_kwargs(&messages, None, &ChatTemplateKwargs::new())
+            .unwrap();
+        assert!(
+            out.ends_with("<think>"),
+            "default_enable_thinking=true must flip the bare thinking alias too; got: {out:?}"
+        );
+    }
+
+    #[test]
+    fn explicit_thinking_kwarg_overrides_derived_alias() {
+        // An operator/template-author who already knows to send the real
+        // `thinking` key must be able to override the derived alias.
+        let processor =
+            ChatTemplateProcessor::with_template(DEEPSEEK_V32_LIKE_TEMPLATE.to_string());
+        let messages = vec![ChatMessage {
+            role: "user".to_string(),
+            content: "hi".to_string(),
+        }];
+        let kwargs =
+            ChatTemplateKwargs::from_json_str(r#"{"enable_thinking": true, "thinking": false}"#)
+                .unwrap();
+        let out = processor
+            .apply_with_kwargs(&messages, None, &kwargs)
+            .unwrap();
+        assert!(
+            out.ends_with("</think>"),
+            "explicit thinking kwarg must win over the derived alias; got: {out:?}"
+        );
+    }
+
+    #[test]
+    fn bare_thinking_alias_reaches_apply_raw_with_kwargs_too() {
+        // Multimodal-path parity: apply_raw_with_kwargs shares
+        // build_template_context, so the alias must reach it as well.
+        let processor =
+            ChatTemplateProcessor::with_template(DEEPSEEK_V32_LIKE_TEMPLATE.to_string());
+        let raw = serde_json::json!([{"role": "user", "content": "hi"}]);
+        let kwargs = ChatTemplateKwargs::from_json_str(r#"{"enable_thinking": true}"#).unwrap();
+        let out = processor
+            .apply_raw_with_kwargs(&raw, None, &kwargs)
+            .unwrap();
+        assert!(
+            out.ends_with("<think>"),
+            "apply_raw_with_kwargs must also receive the bare thinking alias; got: {out:?}"
+        );
+    }
+
+    #[test]
+    fn bare_thinking_alias_is_noop_for_other_model_families() {
+        // Regression guard for "no behavior change for non-DeepSeek-V3.2
+        // models": a Qwen3-shaped template reading the conventional
+        // `enable_thinking` kwarg must render identically whether or not
+        // this alias mechanism exists, and never see a `thinking` variable
+        // materialize in its context.
+        let qwen = r#"{% if thinking is defined %}HAS_BARE_THINKING{% elif enable_thinking %}<think>{% else %}<no_think>{% endif %}{{ messages[0].content }}"#;
+        let processor = ChatTemplateProcessor::with_template(qwen.to_string());
+        let messages = vec![ChatMessage {
+            role: "user".to_string(),
+            content: "hi".to_string(),
+        }];
+        let kwargs = ChatTemplateKwargs::from_json_str(r#"{"enable_thinking": true}"#).unwrap();
+        let out = processor
+            .apply_with_kwargs(&messages, None, &kwargs)
+            .unwrap();
+        assert!(out.starts_with("<think>"));
+        assert!(!out.contains("HAS_BARE_THINKING"));
     }
 }
