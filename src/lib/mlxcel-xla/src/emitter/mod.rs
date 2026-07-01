@@ -39,7 +39,7 @@ mod config;
 mod model;
 mod rope;
 
-pub(crate) use config::Config;
+pub(crate) use config::{Config, WeightScheme};
 // `resolve_precision` and the precision-taking `*_with` emit variants are consumed
 // by the IREE execution path; the f32-default `emit_*` wrappers by the byte-exact
 // regression tests. Which set is live depends on the build cfg (`iree` vs `test`),
@@ -96,6 +96,7 @@ mod tests {
             attn_logit_softcap: None,
             final_logit_softcap: None,
             sliding_window: None,
+            weight_scheme: super::WeightScheme::Llama,
         }
     }
 
@@ -127,6 +128,7 @@ mod tests {
             attn_logit_softcap: Some(50.0),
             final_logit_softcap: Some(30.0),
             sliding_window,
+            weight_scheme: super::WeightScheme::Llama,
         }
     }
 
@@ -618,6 +620,28 @@ mod tests {
         let text = std::fs::read_to_string(&cfg_path).expect("read MLXCEL_DUMP_CONFIG");
         let cfg = Config::from_json_str(&text).expect("parse Gemma2 config.json");
         std::fs::write(&out_path, emit_prefill(&cfg, false)).expect("write MLXCEL_DUMP_OUT");
+    }
+
+    /// Opt-in graph dump for the issue #499 dense-pack execution check. Ignored by
+    /// default; with `MLXCEL_DUMP_CONFIG` (a checkpoint `config.json`) and
+    /// `MLXCEL_DUMP_DIR` set, it writes the host-sampled prefill + decode logits
+    /// graphs (`prefill_logits.mlir` / `decode_logits.mlir`) from the REAL config,
+    /// so `spike/openxla/arch_execution_check.py` can compile them with IREE and
+    /// drive a token-exact continuation against an HF fp32 oracle. Pure Rust /
+    /// scoped, so the check never needs the `iree` cargo feature.
+    #[test]
+    #[ignore = "opt-in: writes prefill/decode graphs to disk for the spike/openxla execution check"]
+    fn dump_dense_pack_graphs_for_execution_check() {
+        let cfg_path =
+            std::env::var("MLXCEL_DUMP_CONFIG").expect("set MLXCEL_DUMP_CONFIG to a config.json");
+        let dir = std::env::var("MLXCEL_DUMP_DIR").expect("set MLXCEL_DUMP_DIR to an output dir");
+        let text = std::fs::read_to_string(&cfg_path).expect("read MLXCEL_DUMP_CONFIG");
+        let cfg = Config::from_json_str(&text).expect("parse config.json");
+        let dir = std::path::Path::new(&dir);
+        std::fs::write(dir.join("prefill_logits.mlir"), emit_prefill(&cfg, false))
+            .expect("write prefill_logits.mlir");
+        std::fs::write(dir.join("decode_logits.mlir"), emit_decode(&cfg, false))
+            .expect("write decode_logits.mlir");
     }
 
     /// Plain RoPE base frequencies are the textbook `1 / theta^(2i/head_dim)`

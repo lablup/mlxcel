@@ -53,6 +53,11 @@ use safetensors::{Dtype, SafeTensors};
 use crate::emitter::{
     Config, emit_decode_ragged_with, emit_decode_with, emit_prefill_with, resolve_precision,
 };
+// Checkpoint tensor names in the emitter's exact arg order, per the model config's
+// naming scheme (issue #499). Lives in a pure-Rust module so the ordering and each
+// architecture's names are unit-tested without the `iree` feature; the loader
+// below consumes the result unchanged.
+use crate::weight_names::weight_names;
 use crate::weights::{bf16_to_f32, dequantize_affine, f16_to_f32, f32_le_to_f32};
 
 /// Prefill bucket baked into the emitted `prefill` graph (`tensor<256xi32>`,
@@ -121,63 +126,6 @@ unsafe extern "C" {
 /// ragged decode graph for the chosen `b_max` is emitted from the model config at
 /// load (any `b_max` is emittable; the worker selects from this set).
 pub(crate) const RAGGED_B_VALUES: &[usize] = &[4, 8];
-
-/// The weight names in the emitter's exact arg order: embed, final_norm, then —
-/// for an untied checkpoint (`tie_word_embeddings = false`) — `lm_head.weight`,
-/// then per layer down, gate, in_ln, post_ln, up, wk, wo, wq, wv, and — for a
-/// `qkv_bias` architecture (Qwen2) — the k/q/v projection biases. The layer count,
-/// the untied head, and the presence of biases come from the model config so the
-/// order matches the emitted graph's args (`take_lm_head` / `take_layer_weights`
-/// in `emitter/model.rs`).
-fn weight_names(cfg: &Config) -> Vec<String> {
-    let mut names = vec![
-        "model.embed_tokens.weight".to_string(),
-        "model.norm.weight".to_string(),
-    ];
-    // Untied LM head: a separate `lm_head.weight` follows `final_norm`, matching
-    // the `params['lm_head']` arg the emitter takes in the same position.
-    if !cfg.tie_word_embeddings {
-        names.push("lm_head.weight".to_string());
-    }
-    for i in 0..cfg.n_layers {
-        let p = format!("model.layers.{i}.");
-        for suf in [
-            "mlp.down_proj.weight",
-            "mlp.gate_proj.weight",
-            "input_layernorm.weight",
-            "post_attention_layernorm.weight",
-            "mlp.up_proj.weight",
-            "self_attn.k_proj.weight",
-            "self_attn.o_proj.weight",
-            "self_attn.q_proj.weight",
-            "self_attn.v_proj.weight",
-        ] {
-            names.push(format!("{p}{suf}"));
-        }
-        // Qwen2 q/k/v projection biases, appended per layer in the same k/q/v
-        // order `take_layer_weights` adds them to the emitted graph args.
-        if cfg.qkv_bias {
-            for suf in [
-                "self_attn.k_proj.bias",
-                "self_attn.q_proj.bias",
-                "self_attn.v_proj.bias",
-            ] {
-                names.push(format!("{p}{suf}"));
-            }
-        }
-        // Gemma2 has two extra per-layer norms (pre/post feed-forward), appended
-        // in the same order `take_layer_weights` takes their graph args.
-        if cfg.gemma2 {
-            for suf in [
-                "pre_feedforward_layernorm.weight",
-                "post_feedforward_layernorm.weight",
-            ] {
-                names.push(format!("{p}{suf}"));
-            }
-        }
-    }
-    names
-}
 
 /// Locate the IREE distribution: a runtime `IREE_DIST` override first, else the
 /// path baked at build time (the dist whose runtime is linked into this binary).
