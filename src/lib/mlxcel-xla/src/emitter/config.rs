@@ -1073,6 +1073,20 @@ impl Config {
         self.n_q / self.n_kv
     }
 
+    /// Whether the issue #516 packed in-graph dequant path can apply: an MLX
+    /// affine-quantized checkpoint in the standard (non-fused-qkv, non-fused-gate-up,
+    /// non-dense-MLP, non-MoE) Llama layout the v1 packed path supports. Combined
+    /// with the `MLXCEL_XLA_QUANT=packed` opt-in (`builder::quant_in_graph`) by BOTH
+    /// the emitter (`take_weight`) and the loader (`weights::weight_specs`), so they
+    /// agree on which projections carry packed args and never diverge.
+    pub(crate) fn supports_packed_quant(&self) -> bool {
+        self.quantization.is_some()
+            && !self.fused_qkv
+            && !self.fused_gate_up
+            && !self.dense_mlp
+            && self.moe.is_none()
+    }
+
     /// Attention score scale. Granite supplies the raw multiplier directly
     /// (`attention_multiplier`, which replaces `head_dim^-0.5`); Gemma2/3 use
     /// `query_pre_attn_scalar^-0.5` (computed in f64 to match HF, since it can

@@ -90,6 +90,14 @@ That split of the performance levers decides where the project invests:
 
 int8 / int4 weight quantization (#516) is the NPU lever, but its payoff is memory bandwidth: a compute-bound Metal decode cannot demonstrate it, and measuring it needs an actual NPU. It is deferred to a hardware-gated follow-up; on Metal only its token-exactness would be verifiable. Metal's absolute throughput is therefore a pessimistic proxy for an NPU, which brings its own optimized kernels.
 
+### int8 weight quantization: the fusion gate (2026-07-01)
+
+The int8 lever (#516) was picked up on a GB10 (Grace-Blackwell, CUDA via a source-built IREE runtime), the first int-native target available. The packed path (`MLXCEL_XLA_QUANT=packed`) keeps the MLX 4/8-bit weights resident packed (`ui32` + f16 scales/biases) and dequantizes each weight in the StableHLO graph (bit-unpack, then `q*scale + bias`), rather than dequantizing to f32 at load. The whole packed ABI landed: an emitter dequant primitive, a per-weight-dtype weight upload, and `ui32` / f16 device buffers.
+
+The result refines the split above rather than contradicting it. On the GB10 the packed decode is **token-exact** with the f32/f16 path (the in-graph reconstruction is bit-identical to the host dequant) but about **4.3x slower** (roughly 1.6 vs 6.7 tok/s, Llama-3.2-1B 4-bit, greedy), with GPU utilization rising (84% to 96%). IREE's CUDA codegen does not fuse the unpack+dequant into the matmul: the decode step is about 678 dispatches and the reconstructed f32 weight is materialized to DRAM every step, so the graph pays more bandwidth and compute, not less. The aggressive-fusion / generalize-matmul / early-truncate-fusion flags leave the dispatch count unchanged (678 to 677).
+
+So the memory-bandwidth payoff is **not** realized by authoring the dequant in the portable graph alone; it requires the target to fuse dequant into the matmul (a quantized-matmul op, or an int8 `dot_general` lowering to the hardware int8 path). This is the same lever split the f16 profiling reached: the graph-level change is in scope and transferable, but the fused low-precision kernel is upstream IREE's responsibility. The packed path therefore stays behind the `MLXCEL_XLA_QUANT=packed` gate, off by default, as the correctness-verified foundation a fused quantized-matmul reuses. The bandwidth win is now gated on that fusion (in IREE, or on an NPU whose HAL driver lowers a quantized dot to its systolic int8 kernels), not on hardware availability alone.
+
 ## Consequences
 
 - The `ComputeBackend` trait from PR #446 is reworked from a load-boundary contract returning `LoadedModel` into a session-engine contract. The selection skeleton (`select_backend`, the `Backend` enum, the `experimental-backend` feature gate) survives the rework; only the contract shape changes.

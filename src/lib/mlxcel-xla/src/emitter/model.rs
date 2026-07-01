@@ -19,7 +19,7 @@
 //! `embed` matrix (see [`take_lm_head`]); a tied checkpoint emits no such arg and
 //! is byte-identical to before.
 
-use super::builder::{Builder, Precision, Ty, Val, precision_from_env};
+use super::builder::{Builder, Precision, Ty, Val, precision_from_env, quant_in_graph};
 use super::config::{Config, NormStyle};
 use super::moe::{self, MoeLayerW, MoeSharedW};
 use super::rope;
@@ -136,6 +136,54 @@ fn take_arg(decls: &mut Vec<ArgDecl>, idx: &mut usize, ty: Ty, loc: String) -> V
     val
 }
 
+/// Take one linear-projection weight `[out, in_]`, returning an `[out, in_]` f32
+/// handle the forward consumes uniformly. For an unquantized checkpoint (or with
+/// the packed path off) this is a single f32 arg, byte-identical to before. For an
+/// MLX affine-quantized checkpoint with `MLXCEL_XLA_QUANT=packed` (issue #516) it is
+/// THREE args, the packed `[out, in_/(32/bits)]` `ui32` weight and its
+/// `[out, in_/group_size]` f16 `scales` / `biases`, reconstructed to the `[out, in_]`
+/// f32 weight IN THE GRAPH via [`Builder::dequant_affine`]. That reconstruction is
+/// bit-identical to the host `dequantize_affine`, so the downstream forward (and its
+/// optional f16 contraction demotion) is unchanged and stays token-exact. The three
+/// args are declared packed, scales, biases, the order [`weight_specs`]
+/// (`weights.rs`) mirrors so the loader's uploaded buffers line up with the graph.
+fn take_weight(
+    b: &mut Builder,
+    decls: &mut Vec<ArgDecl>,
+    idx: &mut usize,
+    c: &Config,
+    out: usize,
+    in_: usize,
+    loc: String,
+) -> Val {
+    match c.quantization {
+        Some(qc) if quant_in_graph() && c.supports_packed_quant() => {
+            let in_packed = in_ * qc.bits / 32;
+            let n_groups = in_ / qc.group_size;
+            let packed = take_arg(
+                decls,
+                idx,
+                Ty::new(vec![out, in_packed], "ui32"),
+                loc.clone(),
+            );
+            let scales = take_arg(
+                decls,
+                idx,
+                Ty::new(vec![out, n_groups], "f16"),
+                format!("{loc}.scales"),
+            );
+            let biases = take_arg(
+                decls,
+                idx,
+                Ty::new(vec![out, n_groups], "f16"),
+                format!("{loc}.biases"),
+            );
+            b.dequant_affine(&packed, &scales, &biases, qc.bits, qc.group_size)
+        }
+        _ => take_arg(decls, idx, Ty::f32(vec![out, in_]), loc),
+    }
+}
+
 /// Take the untied LM head weight `params['lm_head']` (`[V, H]`), or `None` for a
 /// tied checkpoint (which reuses `embed` for the final projection). Called right
 /// after `final_norm` and before the layers, so the weight arg order is embed,
@@ -189,7 +237,13 @@ fn take_final_norm_bias(decls: &mut Vec<ArgDecl>, idx: &mut usize, c: &Config) -
 /// `in_ln` is skipped for the OLMo post-norm style (no input norm). The new
 /// conditional weights are inserted after the biases and before the FF norms, so a
 /// config that has none of them (Llama / Qwen2 / Gemma2) is byte-identical.
-fn take_layer_weights(decls: &mut Vec<ArgDecl>, idx: &mut usize, c: &Config, li: usize) -> LayerW {
+fn take_layer_weights(
+    b: &mut Builder,
+    decls: &mut Vec<ArgDecl>,
+    idx: &mut usize,
+    c: &Config,
+    li: usize,
+) -> LayerW {
     let h = c.hidden;
     let inter = c.inter;
     let kv = c.n_kv * c.head_dim;
@@ -202,22 +256,24 @@ fn take_layer_weights(decls: &mut Vec<ArgDecl>, idx: &mut usize, c: &Config, li:
     let gated = !c.dense_mlp;
     let has_post = !c.parallel_block;
     let moe_layer = c.is_moe_layer(li);
-    let down = (!moe_layer).then(|| take_arg(decls, idx, Ty::f32(vec![h, inter]), p("down")));
-    let gate =
-        (gated && !moe_layer).then(|| take_arg(decls, idx, Ty::f32(vec![inter, h]), p("gate")));
+    // The big linear projections take the packed-quantized path when enabled
+    // (issue #516: `take_weight` declares packed+scales+biases and dequants in the
+    // graph); the norms below stay f32. Byte-identical when unquantized / packed off.
+    let down = (!moe_layer).then(|| take_weight(b, decls, idx, c, h, inter, p("down")));
+    let gate = (gated && !moe_layer).then(|| take_weight(b, decls, idx, c, inter, h, p("gate")));
     // input_layernorm: present unless the reordered (OLMo) post-norm drops it.
     let in_ln = c
         .has_input_norm()
         .then(|| take_arg(decls, idx, Ty::f32(vec![h]), p("in_ln")));
     let post_ln = has_post.then(|| take_arg(decls, idx, Ty::f32(vec![h]), p("post_ln")));
-    let up = (!moe_layer).then(|| take_arg(decls, idx, Ty::f32(vec![inter, h]), p("up")));
-    let wk = take_arg(decls, idx, Ty::f32(vec![kv, h]), p("wk"));
+    let up = (!moe_layer).then(|| take_weight(b, decls, idx, c, inter, h, p("up")));
+    let wk = take_weight(b, decls, idx, c, kv, h, p("wk"));
     // o_proj maps `[n_q*head_dim]` -> `[hidden]`, so its weight is `[h, qd]` (HF's
     // `[out, in]`). For Llama / Qwen2 `qd == h`, so this renders the same square
     // type as before (byte-identical); Gemma is genuinely non-square.
-    let wo = take_arg(decls, idx, Ty::f32(vec![h, qd]), p("wo"));
-    let wq = take_arg(decls, idx, Ty::f32(vec![qd, h]), p("wq"));
-    let wv = take_arg(decls, idx, Ty::f32(vec![kv, h]), p("wv"));
+    let wo = take_weight(b, decls, idx, c, h, qd, p("wo"));
+    let wq = take_weight(b, decls, idx, c, qd, h, p("wq"));
+    let wv = take_weight(b, decls, idx, c, kv, h, p("wv"));
     let (bk, bq, bv) = if c.qkv_bias {
         let bk = take_arg(decls, idx, Ty::f32(vec![kv]), p("bk"));
         let bq = take_arg(decls, idx, Ty::f32(vec![qd]), p("bq"));
@@ -371,7 +427,7 @@ fn add_proj_bias_seq(b: &mut Builder, x: Val, bias: &Option<Val>, n: usize, k: u
     }
 }
 
-fn build_arg_schema(c: &Config) -> (Vec<ArgDecl>, Args) {
+fn build_arg_schema(b: &mut Builder, c: &Config) -> (Vec<ArgDecl>, Args) {
     let h = c.hidden;
     let v = c.vocab;
 
@@ -395,7 +451,7 @@ fn build_arg_schema(c: &Config) -> (Vec<ArgDecl>, Args) {
 
     let mut layers = Vec::with_capacity(c.n_layers);
     for li in 0..c.n_layers {
-        layers.push(take_layer_weights(&mut decls, &mut idx, c, li));
+        layers.push(take_layer_weights(b, &mut decls, &mut idx, c, li));
     }
 
     let token = take_arg(&mut decls, &mut idx, Ty::scalar("i32"), "token".into());
@@ -1599,8 +1655,8 @@ pub fn emit_decode(c: &Config, sample: bool) -> String {
 }
 
 pub fn emit_decode_with(c: &Config, sample: bool, precision: Precision) -> String {
-    let (decls, a) = build_arg_schema(c);
     let mut b = Builder::new().with_precision(precision);
+    let (decls, a) = build_arg_schema(&mut b, c);
     let k = emit_consts(&mut b, c);
 
     let h = c.hidden;
@@ -1727,7 +1783,11 @@ struct BatchedArgs {
     vcache: Val,
 }
 
-fn build_batched_arg_schema(c: &Config, bsz: usize) -> (Vec<ArgDecl>, BatchedArgs) {
+fn build_batched_arg_schema(
+    b: &mut Builder,
+    c: &Config,
+    bsz: usize,
+) -> (Vec<ArgDecl>, BatchedArgs) {
     let h = c.hidden;
     let v = c.vocab;
 
@@ -1751,7 +1811,7 @@ fn build_batched_arg_schema(c: &Config, bsz: usize) -> (Vec<ArgDecl>, BatchedArg
 
     let mut layers = Vec::with_capacity(c.n_layers);
     for li in 0..c.n_layers {
-        layers.push(take_layer_weights(&mut decls, &mut idx, c, li));
+        layers.push(take_layer_weights(b, &mut decls, &mut idx, c, li));
     }
 
     let token = take_arg(
@@ -1828,8 +1888,8 @@ pub fn emit_decode_batched_with(
     sample: bool,
     precision: Precision,
 ) -> String {
-    let (decls, a) = build_batched_arg_schema(c, bsz);
     let mut b = Builder::new().with_precision(precision);
+    let (decls, a) = build_batched_arg_schema(&mut b, c, bsz);
     let k = emit_consts(&mut b, c);
 
     let h = c.hidden;
@@ -2046,7 +2106,7 @@ struct RaggedArgs {
     vcache: Val,
 }
 
-fn build_ragged_arg_schema(c: &Config, bsz: usize) -> (Vec<ArgDecl>, RaggedArgs) {
+fn build_ragged_arg_schema(b: &mut Builder, c: &Config, bsz: usize) -> (Vec<ArgDecl>, RaggedArgs) {
     let h = c.hidden;
     let v = c.vocab;
 
@@ -2070,7 +2130,7 @@ fn build_ragged_arg_schema(c: &Config, bsz: usize) -> (Vec<ArgDecl>, RaggedArgs)
 
     let mut layers = Vec::with_capacity(c.n_layers);
     for li in 0..c.n_layers {
-        layers.push(take_layer_weights(&mut decls, &mut idx, c, li));
+        layers.push(take_layer_weights(b, &mut decls, &mut idx, c, li));
     }
 
     let token = take_arg(
@@ -2134,8 +2194,8 @@ pub fn emit_decode_ragged_with(
     sample: bool,
     precision: Precision,
 ) -> String {
-    let (decls, a) = build_ragged_arg_schema(c, bsz);
     let mut b = Builder::new().with_precision(precision);
+    let (decls, a) = build_ragged_arg_schema(&mut b, c, bsz);
     let k = emit_consts(&mut b, c);
     // Constant row indices 0..bsz for the per-row KV-write dim-0 offsets.
     let row_idx: Vec<Val> = (0..bsz).map(|i| b.const_i32(i as i32)).collect();
@@ -2259,7 +2319,7 @@ struct PrefillArgs {
     real_len: Val,
 }
 
-fn build_prefill_arg_schema(c: &Config, lp: usize) -> (Vec<ArgDecl>, PrefillArgs) {
+fn build_prefill_arg_schema(b: &mut Builder, c: &Config, lp: usize) -> (Vec<ArgDecl>, PrefillArgs) {
     let h = c.hidden;
     let v = c.vocab;
 
@@ -2283,7 +2343,7 @@ fn build_prefill_arg_schema(c: &Config, lp: usize) -> (Vec<ArgDecl>, PrefillArgs
 
     let mut layers = Vec::with_capacity(c.n_layers);
     for li in 0..c.n_layers {
-        layers.push(take_layer_weights(&mut decls, &mut idx, c, li));
+        layers.push(take_layer_weights(b, &mut decls, &mut idx, c, li));
     }
 
     let tokens = take_arg(
@@ -2399,8 +2459,8 @@ pub fn emit_prefill(c: &Config, sample: bool) -> String {
 
 pub fn emit_prefill_with(c: &Config, sample: bool, precision: Precision) -> String {
     let lp = PREFILL_LP;
-    let (decls, a) = build_prefill_arg_schema(c, lp);
     let mut b = Builder::new().with_precision(precision);
+    let (decls, a) = build_prefill_arg_schema(&mut b, c, lp);
     let k = emit_consts(&mut b, c);
 
     let h = c.hidden;

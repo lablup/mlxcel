@@ -147,10 +147,13 @@ MLXCEL_XLA_PRECISION=f32 MLXCEL_BACKEND=xla ./target/release/mlxcel generate \
 
 On an M1 Ultra (Llama-3.2-1B-Instruct, greedy) `f16` is ~1.9x the `f32` tok/s and
 token-exact with it. The same graph change also speeds up the CPU path. Weights
-are still uploaded f32 and demoted in the graph; keeping the resident weights in
-the narrow type (a bandwidth win that needs the f16 weight FFI) lands with the
-quantized-weight path. This is a transferable, correctness-first lever; it does
-not close the gap to MLX (see the perf note above).
+are uploaded f32 and demoted in the graph. Keeping the resident weights small is
+the separate weight-quantization axis (`MLXCEL_XLA_QUANT=packed`, issue #516): an
+MLX 4/8-bit checkpoint uploads the packed `ui32` weight + f16 scales/biases and
+dequantizes in the graph. It is token-exact but off by default, because IREE does
+not fuse the in-graph dequant into the matmul on CUDA, so it regresses throughput
+(see "int8 packed dequant on GB10 / CUDA" below). This is a transferable,
+correctness-first lever; it does not close the gap to MLX (see the perf note above).
 
 ### Scope / limits
 
@@ -317,12 +320,48 @@ own optimized kernels; what transfers is the graph, not the Metal tuning.
 ### Decision (2026-07)
 
 - **In scope:** graph-level low precision. f16 / bf16 is landed. int8 / int4
-  weight quantization is the NPU lever, but its payoff is memory bandwidth, which
-  a compute-bound Metal decode cannot demonstrate and which needs an actual NPU to
-  measure; it is **deferred to a hardware-gated follow-up** (on Metal only its
-  token-exactness would be verifiable, not the speedup).
+  weight quantization (the packed in-graph dequant, `MLXCEL_XLA_QUANT=packed`,
+  issue #516) is landed too, **token-exact** but **opt-in and off by default**
+  because on the one available int-capable target it does not yet pay off (see
+  below).
 - **Out of scope:** hand-writing Metal kernels or tuning IREE's `metal-spirv`
   codegen to chase MLX.
+
+### int8 packed dequant on GB10 / CUDA: the fusion gate (2026-07-01)
+
+The int8 lever was picked up on a GB10 (Grace-Blackwell, CUDA via the source-built
+IREE runtime), the one int-native target available. `MLXCEL_XLA_QUANT=packed` keeps
+the MLX 4/8-bit weights resident **packed** (`ui32` + f16 scales/biases) and
+reconstructs each weight in the StableHLO graph (`Builder::dequant_affine`: bit
+unpack -> `q*scale + bias`), instead of dequantizing to f32 at load.
+
+Measured on the GB10 (Llama-3.2-1B, 4-bit `group_size` 64, greedy, warm vmfb):
+
+| decode path | tok/s | GPU util | note |
+|-------------|-------|----------|------|
+| f16, dequant-at-load (default) | ~6.7 | 84% | resident f32 weights, f16 matmul inputs |
+| packed, dequant-in-graph | ~1.6 | 96% | **token-exact** with the f16 path, ~4.3x slower |
+
+The packed path is **correct** (bit-identical reconstruction, so the greedy token
+stream matches the f32/f16 path) but **slower**, because IREE's CUDA codegen does
+**not fuse** the unpack+dequant into the matmul: the decode step is ~678 dispatches
+and the reconstructed f32 weight is materialized to DRAM every step, so the graph
+pays *more* bandwidth + compute, not less (GPU util rises 84% -> 96%). Fusion flags
+(`--iree-dispatch-creation-enable-aggressive-fusion`, `--iree-opt-generalize-matmul`,
+`--iree-dispatch-creation-enable-early-trunc-fusion`) leave the dispatch count
+unchanged (678 -> 677).
+
+So the memory-bandwidth lever is **not** realized by authoring the dequant in the
+portable graph alone; it needs the target to fuse dequant->matmul (a
+quantized-matmul op / int8 `dot_general` lowering to the hardware's int8 path). That
+is the same split the f16 note reaches, now confirmed for int8: the graph-level
+change is necessary but the fused kernel is upstream IREE's job. The packed path
+therefore lands **behind the `MLXCEL_XLA_QUANT=packed` gate, off by default**, as the
+correctness-verified foundation for a fused quantized-matmul follow-up. It also
+carries the whole packed ABI (emitter dequant, per-dtype weight upload, the
+`ui32`/f16 device buffers) that a fused path reuses. The v1 packed path covers the
+standard Llama layout ([`Config::supports_packed_quant`]: non-fused-qkv,
+non-fused-gate-up, non-dense-MLP, non-MoE); embed / lm_head stay f32-resident.
 
 ## File map
 

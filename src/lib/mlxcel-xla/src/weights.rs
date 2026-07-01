@@ -23,7 +23,7 @@
 //! feature-gated `iree.rs`) so it is unit-tested without the IREE runtime and stays
 //! in lock-step with the emitter's arg order (`emitter::model::take_layer_weights`).
 
-use crate::emitter::Config;
+use crate::emitter::{Config, quant_in_graph};
 
 /// One checkpoint weight the loader reads, in the emitter's arg order. Most are a
 /// whole safetensors tensor; a Phi3 checkpoint fuses q/k/v into one `qkv_proj` and
@@ -31,7 +31,8 @@ use crate::emitter::Config;
 /// tensor for each of the emitter's separate `wq`/`wk`/`wv`/`gate`/`up` args.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum WeightSpec {
-    /// Load the whole checkpoint tensor `name`.
+    /// Load the whole checkpoint tensor `name` (widened to f32, an MLX-quantized
+    /// U32 tensor dequantized to f32).
     Whole(String),
     /// Load rows `[start, end)` of the checkpoint tensor `name` (a fused Phi3
     /// projection, split into an emitter arg). Row-major `[out, in]`, so this is
@@ -41,14 +42,31 @@ pub(crate) enum WeightSpec {
         start: usize,
         end: usize,
     },
+    /// Upload one part of an MLX affine-quantized projection as RAW bytes without
+    /// dequantizing (issue #516 packed path): the packed `[out, in_packed]` U32
+    /// weight, or its `[out, in/group_size]` f16 `scales` / `biases`. The graph
+    /// dequants it in-place ([`Builder::dequant_affine`]). `name` is the exact
+    /// tensor (`X.weight` / `X.scales` / `X.biases`). Emitted as three consecutive
+    /// specs per projection, matching the emitter's packed / scales / biases args.
+    QuantRaw { name: String, part: QuantPart },
+}
+
+/// Which part of an MLX affine-quantized projection a [`WeightSpec::QuantRaw`]
+/// uploads (issue #516): the packed U32 weight, or its f16 scales / biases.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum QuantPart {
+    Packed,
+    Scales,
+    Biases,
 }
 
 impl WeightSpec {
-    /// The checkpoint tensor this spec reads from (whole or sliced).
+    /// The checkpoint tensor this spec reads from (whole, sliced, or a quant part).
     pub(crate) fn tensor_name(&self) -> &str {
         match self {
             WeightSpec::Whole(n) => n,
             WeightSpec::Rows { name, .. } => name,
+            WeightSpec::QuantRaw { name, .. } => name,
         }
     }
 }
@@ -70,6 +88,40 @@ impl WeightSpec {
 /// family, and it mirrors `take_layer_weights` so the loaded buffers line up with
 /// the emitted graph's args exactly.
 pub(crate) fn weight_specs(cfg: &Config) -> Vec<WeightSpec> {
+    weight_specs_q(cfg, quant_in_graph() && cfg.supports_packed_quant())
+}
+
+/// Push a projection weight `name` (`X.weight`) in the emitter's arg order: three
+/// [`WeightSpec::QuantRaw`] parts (packed / scales / biases, from `X.weight` /
+/// `X.scales` / `X.biases`) when the issue #516 packed path is active (`quant`),
+/// else the single `Whole` f32 tensor (dequantized / widened at load). Mirrors
+/// `take_weight` in the emitter so the loaded buffers line up with the graph's
+/// 1-or-3 args per projection.
+fn push_proj(out: &mut Vec<WeightSpec>, name: String, quant: bool) {
+    if quant {
+        let stem = name.strip_suffix(".weight").unwrap_or(&name).to_string();
+        out.push(WeightSpec::QuantRaw {
+            name,
+            part: QuantPart::Packed,
+        });
+        out.push(WeightSpec::QuantRaw {
+            name: format!("{stem}.scales"),
+            part: QuantPart::Scales,
+        });
+        out.push(WeightSpec::QuantRaw {
+            name: format!("{stem}.biases"),
+            part: QuantPart::Biases,
+        });
+    } else {
+        out.push(WeightSpec::Whole(name));
+    }
+}
+
+/// [`weight_specs`] with the packed-path decision passed explicitly (so it is
+/// testable without the `MLXCEL_XLA_QUANT` env). `quant` already folds in
+/// [`Config::supports_packed_quant`], so it is `true` only for the standard Llama
+/// layout; the fused / dense / MoE branches below are therefore never quantized.
+fn weight_specs_q(cfg: &Config, quant: bool) -> Vec<WeightSpec> {
     let s = crate::weight_names::scheme_names(cfg.weight_scheme);
     let hd = cfg.head_dim;
     let nq = cfg.n_q * hd;
@@ -95,11 +147,12 @@ pub(crate) fn weight_specs(cfg: &Config) -> Vec<WeightSpec> {
         let moe_layer = cfg.is_moe_layer(i);
         // down (dense StarCoder2 uses c_proj; else the scheme's down projection).
         if !moe_layer {
-            out.push(WeightSpec::Whole(if cfg.dense_mlp {
+            let name = if cfg.dense_mlp {
                 format!("{p}mlp.c_proj.weight")
             } else {
                 format!("{p}{}", s.down)
-            }));
+            };
+            push_proj(&mut out, name, quant);
         }
         // gate (gated MLP only; the first half of gate_up_proj for a fused Phi3).
         if gated && !moe_layer {
@@ -110,7 +163,7 @@ pub(crate) fn weight_specs(cfg: &Config) -> Vec<WeightSpec> {
                     end: inter,
                 });
             } else {
-                out.push(WeightSpec::Whole(format!("{p}{}", s.gate)));
+                push_proj(&mut out, format!("{p}{}", s.gate), quant);
             }
         }
         // input_layernorm: present unless the OLMo reordered post-norm drops it.
@@ -136,7 +189,7 @@ pub(crate) fn weight_specs(cfg: &Config) -> Vec<WeightSpec> {
             } else if cfg.dense_mlp {
                 out.push(WeightSpec::Whole(format!("{p}mlp.c_fc.weight")));
             } else {
-                out.push(WeightSpec::Whole(format!("{p}{}", s.up)));
+                push_proj(&mut out, format!("{p}{}", s.up), quant);
             }
         }
         // wk, wo, wq, wv (JAX-alphabetical; a fused Phi3 qkv_proj is [Q|K|V] rows).
@@ -159,10 +212,10 @@ pub(crate) fn weight_specs(cfg: &Config) -> Vec<WeightSpec> {
                 end: nq + 2 * nkv,
             }); // wv
         } else {
-            out.push(WeightSpec::Whole(format!("{p}{}", s.k_proj)));
-            out.push(WeightSpec::Whole(format!("{p}{}", s.o_proj)));
-            out.push(WeightSpec::Whole(format!("{p}{}", s.q_proj)));
-            out.push(WeightSpec::Whole(format!("{p}{}", s.v_proj)));
+            push_proj(&mut out, format!("{p}{}", s.k_proj), quant);
+            push_proj(&mut out, format!("{p}{}", s.o_proj), quant);
+            push_proj(&mut out, format!("{p}{}", s.q_proj), quant);
+            push_proj(&mut out, format!("{p}{}", s.v_proj), quant);
         }
         // q/k/v projection biases (k, q, v order).
         if cfg.qkv_bias {
@@ -742,5 +795,81 @@ mod tests {
         let packed = [0u8; 4]; // one expert's worth, but experts = 2 declared
         let sb = [0u8; 4];
         assert!(dequantize_affine_stacked(&packed, &sb, &sb, 2, 1, 1, 4, 4).is_err());
+    }
+
+    /// The issue #516 packed path expands each of the 7 per-layer projections into
+    /// three consecutive `QuantRaw` specs (packed `.weight`, then `.scales`, then
+    /// `.biases`), while embed / norms stay single `Whole` specs. This is the loader
+    /// contract that must mirror the emitter's `take_weight` 3-args-per-projection so
+    /// the uploaded buffers line up with the graph args. `quant = false` is the
+    /// legacy all-`Whole` order (byte-identical to before), so the packed path is
+    /// purely additive.
+    #[test]
+    fn weight_specs_q_packed_expands_projections_to_triples() {
+        let c = Config::llama_3_2_1b();
+        let specs = weight_specs_q(&c, true);
+        // embed + final_norm remain single f32 tensors (not quantized in the v1 path).
+        assert_eq!(
+            specs[0],
+            WeightSpec::Whole("model.embed_tokens.weight".into())
+        );
+        assert_eq!(specs[1], WeightSpec::Whole("model.norm.weight".into()));
+        let packed = specs
+            .iter()
+            .filter(|s| {
+                matches!(
+                    s,
+                    WeightSpec::QuantRaw {
+                        part: QuantPart::Packed,
+                        ..
+                    }
+                )
+            })
+            .count();
+        let scales = specs
+            .iter()
+            .filter(|s| {
+                matches!(
+                    s,
+                    WeightSpec::QuantRaw {
+                        part: QuantPart::Scales,
+                        ..
+                    }
+                )
+            })
+            .count();
+        let biases = specs
+            .iter()
+            .filter(|s| {
+                matches!(
+                    s,
+                    WeightSpec::QuantRaw {
+                        part: QuantPart::Biases,
+                        ..
+                    }
+                )
+            })
+            .count();
+        assert_eq!(packed, 7 * c.n_layers, "7 packed projections per layer");
+        assert_eq!(scales, packed, "one scales part per packed weight");
+        assert_eq!(biases, packed, "one biases part per packed weight");
+        // The three parts of a projection are consecutive and share the tensor stem.
+        let i = specs
+            .iter()
+            .position(|s| matches!(s, WeightSpec::QuantRaw { name, part: QuantPart::Packed } if name.ends_with("q_proj.weight")))
+            .expect("a packed q_proj part");
+        assert!(
+            matches!(&specs[i + 1], WeightSpec::QuantRaw { name, part: QuantPart::Scales } if name.ends_with("q_proj.scales"))
+        );
+        assert!(
+            matches!(&specs[i + 2], WeightSpec::QuantRaw { name, part: QuantPart::Biases } if name.ends_with("q_proj.biases"))
+        );
+        // quant = false is the legacy all-Whole order (purely additive packed path).
+        assert!(
+            weight_specs_q(&c, false)
+                .iter()
+                .all(|s| matches!(s, WeightSpec::Whole(_))),
+            "unquantized layout is unchanged"
+        );
     }
 }

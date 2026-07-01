@@ -48,7 +48,7 @@
 use std::ffi::CString;
 use std::fs::File;
 use std::hash::{Hash, Hasher};
-use std::os::raw::{c_char, c_int};
+use std::os::raw::{c_char, c_int, c_void};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -66,9 +66,35 @@ use crate::emitter::{
 // and the #500 MoE expert bank (the stacked `switch_mlp` weights, dequantized with
 // `dequantize_affine_stacked`). Both are pure-Rust and unit-tested without `iree`.
 use crate::weights::{
-    WeightSpec, bf16_to_f32, dequantize_affine, dequantize_affine_stacked, f16_to_f32,
+    QuantPart, WeightSpec, bf16_to_f32, dequantize_affine, dequantize_affine_stacked, f16_to_f32,
     f32_le_to_f32, slice_rows, weight_specs,
 };
+
+/// Weight-buffer element dtype passed to the C shim (issue #516 per-weight ABI):
+/// f32 (a widened / dequantized weight), or f16 / packed-U32 for the raw parts of an
+/// MLX affine-quantized projection on the packed path. Kept in sync with the
+/// `switch` in `csrc/xla_iree.c`.
+const WDT_F32: c_int = 0;
+const WDT_F16: c_int = 1;
+const WDT_U32: c_int = 2;
+
+/// A resident-weight host buffer, kept alive until the shim copies it to the device.
+/// Either f32 values (a widened / dequantized weight, the proven path) or raw bytes
+/// (an MLX packed-U32 weight or its f16 scales / biases, issue #516 packed path).
+enum WeightBuf {
+    F32(Vec<f32>),
+    Raw(Vec<u8>),
+}
+
+impl WeightBuf {
+    /// Host pointer to the buffer bytes (the shim copies `nelem * dtype_size` of them).
+    fn as_u8_ptr(&self) -> *const u8 {
+        match self {
+            WeightBuf::F32(v) => v.as_ptr() as *const u8,
+            WeightBuf::Raw(v) => v.as_ptr(),
+        }
+    }
+}
 
 /// Prefill bucket baked into the emitted `prefill` graph (`tensor<256xi32>`,
 /// == MAX_SEQ, so it covers any prompt the 256-slot KV cache holds).
@@ -86,7 +112,8 @@ unsafe extern "C" {
         prefill: *const c_char,
         decode: *const c_char,
         n_weights: c_int,
-        weight_data: *const *const f32,
+        weight_data: *const *const c_void,
+        weight_dtypes: *const c_int,
         weight_ranks: *const c_int,
         weight_dims: *const i64,
     ) -> *mut XlaCtx;
@@ -342,7 +369,7 @@ fn resolve_weight_shards(model_dir: &Path, names: &[String]) -> Result<Vec<PathB
 fn load_weights(
     model_dir: &Path,
     cfg: &Config,
-) -> Result<(Vec<Vec<f32>>, Vec<c_int>, Vec<i64>), String> {
+) -> Result<(Vec<WeightBuf>, Vec<c_int>, Vec<c_int>, Vec<i64>), String> {
     let specs = weight_specs(cfg);
     let names: Vec<String> = specs.iter().map(|s| s.tensor_name().to_string()).collect();
     let shard_paths = resolve_weight_shards(model_dir, &names)?;
@@ -358,7 +385,8 @@ fn load_weights(
     }
 
     let n = specs.len();
-    let mut bufs: Vec<Vec<f32>> = vec![Vec::new(); n];
+    let mut bufs: Vec<WeightBuf> = (0..n).map(|_| WeightBuf::F32(Vec::new())).collect();
+    let mut dtypes: Vec<c_int> = vec![WDT_F32; n];
     let mut ranks: Vec<c_int> = vec![0; n];
     let mut dims: Vec<i64> = vec![0; n * 4];
     for (shard, idxs) in by_shard {
@@ -373,6 +401,35 @@ fn load_weights(
             let t = st
                 .tensor(name)
                 .map_err(|e| format!("weight {name} in {}: {e}", shard.display()))?;
+
+            // issue #516 packed path: upload the raw quantized part (the packed U32
+            // weight, or its f16 scales / biases) as-is, no dequant. Its native dtype
+            // and 2-D shape go straight to the device; the graph dequants in-place.
+            if let WeightSpec::QuantRaw { part, .. } = &specs[i] {
+                let (code, expect) = match part {
+                    QuantPart::Packed => (WDT_U32, Dtype::U32),
+                    QuantPart::Scales | QuantPart::Biases => (WDT_F16, Dtype::F16),
+                };
+                if t.dtype() != expect {
+                    return Err(format!(
+                        "quant part {name} dtype {:?}, expected {expect:?}",
+                        t.dtype()
+                    ));
+                }
+                let shape = t.shape();
+                if shape.len() != 2 {
+                    return Err(format!(
+                        "quant part {name} is rank {} (expected 2)",
+                        shape.len()
+                    ));
+                }
+                dtypes[i] = code;
+                ranks[i] = 2;
+                dims[i * 4] = shape[0] as i64;
+                dims[i * 4 + 1] = shape[1] as i64;
+                bufs[i] = WeightBuf::Raw(t.data().to_vec());
+                continue;
+            }
 
             // Widen the whole tensor to row-major `[out, in]` (or `[out]`) f32 (the
             // graph's dtype): an MLX affine `U32`-packed weight is dequantized (the
@@ -472,7 +529,7 @@ fn load_weights(
                     for (k, &s) in shape.iter().enumerate() {
                         dims[i * 4 + k] = s as i64;
                     }
-                    bufs[i] = data;
+                    bufs[i] = WeightBuf::F32(data);
                 }
                 WeightSpec::Rows { start, end, .. } => {
                     if shape.len() != 2 {
@@ -481,16 +538,21 @@ fn load_weights(
                             shape.len()
                         ));
                     }
-                    bufs[i] = slice_rows(&data, shape[0], *start, *end)
-                        .map_err(|e| format!("row-slice {name}: {e}"))?;
+                    bufs[i] = WeightBuf::F32(
+                        slice_rows(&data, shape[0], *start, *end)
+                            .map_err(|e| format!("row-slice {name}: {e}"))?,
+                    );
                     ranks[i] = 2;
                     dims[i * 4] = (*end - *start) as i64;
                     dims[i * 4 + 1] = shape[1] as i64;
                 }
+                WeightSpec::QuantRaw { .. } => {
+                    unreachable!("QuantRaw is handled by the early-continue above")
+                }
             }
         }
     }
-    Ok((bufs, ranks, dims))
+    Ok((bufs, dtypes, ranks, dims))
 }
 
 fn path_cstring(p: &Path) -> Result<CString, String> {
@@ -508,8 +570,11 @@ fn create_ctx(
     prefill_vmfb: &Path,
     decode_vmfb: &Path,
 ) -> Result<*mut XlaCtx, String> {
-    let (bufs, ranks, dims) = load_weights(model_dir, cfg)?;
-    let ptrs: Vec<*const f32> = bufs.iter().map(|b| b.as_ptr()).collect();
+    let (bufs, dtypes, ranks, dims) = load_weights(model_dir, cfg)?;
+    let ptrs: Vec<*const c_void> = bufs
+        .iter()
+        .map(|b| b.as_u8_ptr() as *const c_void)
+        .collect();
     let c_dev = CString::new(device).map_err(|_| "device has interior nul".to_string())?;
     let c_pre = path_cstring(prefill_vmfb)?;
     let c_dec = path_cstring(decode_vmfb)?;
@@ -522,6 +587,7 @@ fn create_ctx(
             c_dec.as_ptr(),
             bufs.len() as c_int,
             ptrs.as_ptr(),
+            dtypes.as_ptr(),
             ranks.as_ptr(),
             dims.as_ptr(),
         )

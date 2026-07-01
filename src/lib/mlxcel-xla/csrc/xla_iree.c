@@ -184,8 +184,9 @@ static iree_status_t xla_alloc_bv(xla_ctx* c, iree_host_size_t rank,
 
 static iree_status_t xla_llama_create_impl(
     xla_ctx* c, const char* device_uri, const char* prefill_vmfb,
-    const char* decode_vmfb, int32_t n_weights, const float* const* weight_data,
-    const int32_t* weight_ranks, const int64_t* weight_dims) {
+    const char* decode_vmfb, int32_t n_weights, const void* const* weight_data,
+    const int32_t* weight_dtypes, const int32_t* weight_ranks,
+    const int64_t* weight_dims) {
   c->n_weights = n_weights;
 
 #ifdef XLA_GATE_CUDA
@@ -233,9 +234,31 @@ static iree_status_t xla_llama_create_impl(
       shape[d] = dim;
       nelem *= (iree_host_size_t)dim;
     }
-    IREE_RETURN_IF_ERROR(xla_alloc_bv(c, (iree_host_size_t)rank, shape,
-                                      IREE_HAL_ELEMENT_TYPE_FLOAT_32,
-                                      weight_data[i], nelem * sizeof(float),
+    // issue #516 per-weight dtype: f32 (0, a widened / dequantized weight) or the
+    // raw parts of an MLX affine-quantized projection, f16 (1) scales / biases or a
+    // packed U32 (2) weight the graph dequantizes in place.
+    iree_hal_element_type_t elt;
+    iree_host_size_t esize;
+    switch (weight_dtypes[i]) {
+      case 0:
+        elt = IREE_HAL_ELEMENT_TYPE_FLOAT_32;
+        esize = 4;
+        break;
+      case 1:
+        elt = IREE_HAL_ELEMENT_TYPE_FLOAT_16;
+        esize = 2;
+        break;
+      case 2:
+        elt = IREE_HAL_ELEMENT_TYPE_UINT_32;
+        esize = 4;
+        break;
+      default:
+        return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
+                                "unknown weight dtype %d for weight %d",
+                                weight_dtypes[i], i);
+    }
+    IREE_RETURN_IF_ERROR(xla_alloc_bv(c, (iree_host_size_t)rank, shape, elt,
+                                      weight_data[i], nelem * esize,
                                       &c->weights[i]));
   }
   return iree_ok_status();
@@ -243,19 +266,21 @@ static iree_status_t xla_llama_create_impl(
 
 // Create the execution context. `device_uri` is "local-task" (CPU) or another
 // registered HAL driver. `weight_data[i]` points at `prod(weight_dims[i*4..])`
-// f32 values laid out row-major; the shim copies them into resident device
-// buffers, so the caller may free them after this returns. Returns NULL on
-// failure (after printing a diagnostic).
+// elements of dtype `weight_dtypes[i]` (0 f32, 1 f16, 2 packed U32; issue #516)
+// laid out row-major; the shim copies them into resident device buffers, so the
+// caller may free them after this returns. Returns NULL on failure (after printing
+// a diagnostic).
 xla_ctx* xla_llama_create(const char* device_uri, const char* prefill_vmfb,
                           const char* decode_vmfb, int32_t n_weights,
-                          const float* const* weight_data,
+                          const void* const* weight_data,
+                          const int32_t* weight_dtypes,
                           const int32_t* weight_ranks,
                           const int64_t* weight_dims) {
   xla_ctx* c = (xla_ctx*)calloc(1, sizeof(xla_ctx));
   if (!c) return NULL;
   iree_status_t s =
       xla_llama_create_impl(c, device_uri, prefill_vmfb, decode_vmfb, n_weights,
-                            weight_data, weight_ranks, weight_dims);
+                            weight_data, weight_dtypes, weight_ranks, weight_dims);
   if (!iree_status_is_ok(s)) {
     char buf[512];
     iree_host_size_t got = 0;
