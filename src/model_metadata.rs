@@ -96,6 +96,7 @@ macro_rules! for_each_model_registration {
             Llama => { kind: Text, directory: ConfigBacked, weight: Some(WeightLoadRoute::ConfigBacked), adapter: None, config_backed: { dir_loader: models::Llama3Model::load, args: models::llama3::ModelArgs, weight_builder: models::Llama3Model::from_weights, wrap: LoadedModel::Llama } };
             Llama4 => { kind: Text, directory: ConfigBacked, weight: Some(WeightLoadRoute::ConfigBacked), adapter: None, config_backed: { dir_loader: models::Llama4CxxModel::load, args: models::llama4::TextArgs, weight_builder: models::Llama4CxxModel::from_weights, wrap: |m| LoadedModel::Llama4(models::Llama4Wrapper::new(m)) } };
             Llama4VLM => { kind: Vlm, directory: Vlm, weight: None, adapter: Some("Llama4 VLM cannot be loaded with LoRA adapters yet") };
+            MllamaVLM => { kind: Vlm, directory: Vlm, weight: None, adapter: Some("Llama 3.2 Vision (mllama) does not support adapter loading; use load_model() instead") };
             Qwen2 => { kind: Text, directory: ConfigBacked, weight: Some(WeightLoadRoute::ConfigBacked), adapter: None, config_backed: { dir_loader: models::Qwen2Model::load, args: models::llama3::ModelArgs, weight_builder: models::Qwen2Model::from_weights, wrap: LoadedModel::Qwen2 } };
             Qwen3 => { kind: Text, directory: ConfigBacked, weight: Some(WeightLoadRoute::ConfigBacked), adapter: None, config_backed: { dir_loader: models::Qwen3Model::load, args: models::qwen3::ModelArgs, weight_builder: models::Qwen3Model::from_weights, wrap: LoadedModel::Qwen3 } };
             Qwen3Moe => { kind: Text, directory: ConfigBacked, weight: Some(WeightLoadRoute::ConfigBacked), adapter: None, config_backed: { dir_loader: models::Qwen3MoeModel::load, args: models::qwen3_moe::ModelArgs, weight_builder: models::Qwen3MoeModel::from_weights, wrap: LoadedModel::Qwen3Moe } };
@@ -122,10 +123,12 @@ macro_rules! for_each_model_registration {
             Qwen25VL => { kind: Vlm, directory: Vlm, weight: None, adapter: Some("Qwen VL models cannot be loaded with LoRA adapters yet") };
             Qwen3VL => { kind: Vlm, directory: Vlm, weight: None, adapter: Some("Qwen VL models cannot be loaded with LoRA adapters yet") };
             Qwen3VLMoe => { kind: Vlm, directory: Vlm, weight: None, adapter: Some("Qwen VL models cannot be loaded with LoRA adapters yet") };
+            PaddleOcrVL => { kind: Vlm, directory: Vlm, weight: None, adapter: Some("PaddleOCR-VL cannot be loaded with LoRA adapters yet") };
             Glm4v => { kind: Vlm, directory: Vlm, weight: None, adapter: Some("GLM-4V cannot be loaded with LoRA adapters yet") };
             Glm4vMoe => { kind: Vlm, directory: Vlm, weight: None, adapter: Some("GLM-4V MoE cannot be loaded with LoRA adapters yet") };
             YoutuVLM => { kind: Vlm, directory: Vlm, weight: None, adapter: Some("Youtu-VL VLM does not support adapter loading; use load_model() instead") };
             InternVLChatVLM => { kind: Vlm, directory: Vlm, weight: None, adapter: Some("InternVL VLM does not support adapter loading; use load_model() instead") };
+            SmolVLM => { kind: Vlm, directory: Vlm, weight: None, adapter: Some("SmolVLM VLM does not support adapter loading; use load_model() instead") };
             MiniCPMOVLM => { kind: Vlm, directory: Vlm, weight: None, adapter: Some("MiniCPM-o VLM does not support adapter loading; use load_model() instead") };
             MiniCPMV46VLM => { kind: Vlm, directory: Vlm, weight: None, adapter: Some("MiniCPM-V 4.6 VLM does not support adapter loading; use load_model() instead") };
             Moondream3VLM => { kind: Vlm, directory: Vlm, weight: None, adapter: Some("Moondream3 VLM does not support adapter loading; use load_model() instead") };

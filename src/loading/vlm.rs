@@ -45,14 +45,20 @@ mod gemma_unified;
 mod internvl;
 #[path = "vlm_llava.rs"]
 mod llava;
+#[path = "vlm_mllama.rs"]
+mod mllama;
 #[path = "vlm_nemotron_h_nano_omni.rs"]
 mod nemotron_h_nano_omni;
+#[path = "vlm_paddleocr.rs"]
+mod paddleocr;
 #[path = "vlm_pixtral.rs"]
 mod pixtral;
 #[path = "vlm_qwen.rs"]
 mod qwen;
 #[path = "vlm_siglip.rs"]
 mod siglip;
+#[path = "vlm_smolvlm.rs"]
+mod smolvlm;
 #[path = "vlm_special.rs"]
 mod special;
 #[path = "vlm_youtu_vl.rs"]
@@ -62,13 +68,16 @@ pub(crate) use gemma::{load_gemma3_vlm, load_gemma3n_vlm, load_gemma4_vlm};
 pub(crate) use gemma_unified::load_gemma4_unified;
 pub(crate) use internvl::load_internvl_vlm;
 pub(crate) use llava::{load_llava_bunny_vlm, load_llava_vlm};
+pub(crate) use mllama::load_mllama_vlm;
 pub(crate) use nemotron_h_nano_omni::load_nemotron_h_nano_omni_vlm;
+pub(crate) use paddleocr::load_paddleocr_vl;
 pub(crate) use pixtral::{load_mistral3_vlm, load_pixtral_vlm};
 pub(crate) use qwen::{
     load_glm4v, load_glm4v_moe, load_qwen2_5_vl, load_qwen2_vl, load_qwen3_5_moe_vlm,
     load_qwen3_5_vlm, load_qwen3_vl, load_qwen3_vl_moe,
 };
 pub(crate) use siglip::{load_aya_vision_vlm, load_paligemma_vlm};
+pub(crate) use smolvlm::load_smolvlm_vlm;
 pub(crate) use special::{
     load_llama4_vlm, load_minicpmo_vlm, load_minicpmv4_6_vlm, load_molmo_point_vlm, load_molmo_vlm,
     load_molmo2_vlm, load_moondream2_vlm, load_moondream3_vlm, load_phi3_vlm, load_phi4_siglip_vlm,

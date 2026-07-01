@@ -35,6 +35,7 @@ use crate::phi3v_prompt::prepare_phi3v_prompt_tokens;
 use crate::phi4_siglip_prompt::prepare_phi4_siglip_prompt_tokens;
 use crate::phi4mm_prompt::prepare_phi4mm_prompt_tokens;
 use crate::qwen_vl::insert_qwen_vl_image_tokens;
+use crate::smolvlm_prompt::insert_smolvlm_image_tokens;
 use crate::vision::feature_cache::{CacheKey, ModelVisionCaches, image_hash_from_pixels};
 use crate::vision::merge::InputEmbeddings;
 use crate::vision::processors::ImageProcessor;
@@ -122,6 +123,12 @@ pub enum VlmPreparationSummary {
     /// InternVL expanded each `<image>`/`<IMG_CONTEXT>` placeholder
     /// into `<img> + <IMG_CONTEXT> * (num_image_token * tiles) + </img>`.
     InternVL {
+        image_blocks: usize,
+        total_image_tokens: usize,
+    },
+    /// SmolVLM expanded each `<image>` placeholder into a
+    /// `<fake> <global-img> <image> * (num_image_token * tiles) <fake>` block.
+    SmolVLM {
         image_blocks: usize,
         total_image_tokens: usize,
     },
@@ -286,6 +293,28 @@ where
                 qwen_cache_key.as_ref(),
                 active_caches,
             );
+
+            Ok(Some(PreparedVlmEmbeddings {
+                embeddings,
+                preparation,
+            }))
+        }
+        VlmRuntimeRef::PaddleOcr(paddle) => {
+            let (pixel_values, grid_thw) = paddle.processor.preprocess_with_grid(images);
+            let preparation = insert_qwen_vl_image_tokens(
+                prompt_tokens,
+                &grid_thw,
+                paddle.spatial_merge_size,
+                paddle.vision_start_token_id,
+                paddle.image_token_id,
+            )
+            .map(|stats| VlmPreparationSummary::QwenVlm {
+                image_blocks: stats.image_blocks,
+                total_image_tokens: stats.total_image_tokens,
+            });
+
+            let input_ids_arr = prompt_ids_array(prompt_tokens);
+            let embeddings = paddle.input_embeddings(&input_ids_arr, &pixel_values, &grid_thw);
 
             Ok(Some(PreparedVlmEmbeddings {
                 embeddings,
@@ -822,6 +851,55 @@ where
 
             let input_ids_arr = prompt_ids_array(prompt_tokens);
             let embeddings = internvl.get_input_embeddings(&input_ids_arr, &pixel_values);
+
+            Ok(Some(PreparedVlmEmbeddings {
+                embeddings,
+                preparation,
+            }))
+        }
+        VlmRuntimeRef::Mllama(mllama) => {
+            // Llama 3.2 Vision keeps image features out of the token stream and
+            // consults them through gated cross-attention. Preprocess the
+            // image(s), run the tower + projector, and stash the resulting
+            // cross-attention states in the model so the subsequent forward()
+            // decode steps attend to them. No merged embeddings are produced
+            // (the `<|image|>` placeholder already sits in the prompt), so
+            // return `None` and let the standard forward path pick up the
+            // stashed state.
+            let _ = active_caches;
+            let _ = image_cache_keys;
+            let inputs = mllama.processor.process(images);
+            mllama.prepare_cross_attention_states(&inputs);
+            Ok(None)
+        }
+        VlmRuntimeRef::SmolVLM(smolvlm) => {
+            // Each image becomes `tiles` square tiles (a single global tile when
+            // splitting is disabled, or a `rows x cols` grid plus a global tile
+            // when enabled). Each tile contributes `num_image_token` compressed
+            // image-feature tokens.
+            let (pixel_values, tiles_per_image) = smolvlm.processor.preprocess_with_tiles(images);
+
+            let preparation = insert_smolvlm_image_tokens(
+                prompt_tokens,
+                &tiles_per_image,
+                smolvlm.num_image_token,
+                smolvlm.image_token_id,
+                smolvlm.fake_image_token_id,
+                smolvlm.global_image_token_id,
+            )
+            .map(|stats| VlmPreparationSummary::SmolVLM {
+                image_blocks: stats.image_blocks,
+                total_image_tokens: stats.total_image_tokens,
+            });
+
+            // SmolVLM processes all tiles for the request in one tower call;
+            // skip the opportunistic vision cache for the first integration
+            // (mirrors the InternVL / Youtu-VL decision).
+            let _ = active_caches;
+            let _ = image_cache_keys;
+
+            let input_ids_arr = prompt_ids_array(prompt_tokens);
+            let embeddings = smolvlm.get_input_embeddings(&input_ids_arr, &pixel_values);
 
             Ok(Some(PreparedVlmEmbeddings {
                 embeddings,
