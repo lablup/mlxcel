@@ -394,13 +394,18 @@ fn load_weights(
                 let biases = st.tensor(&biases_name).map_err(|e| {
                     format!("{biases_name} (for {name}) in {}: {e}", shard.display())
                 })?;
-                if scales.dtype() != Dtype::F16 || biases.dtype() != Dtype::F16 {
-                    return Err(format!(
-                        "{prefix} scales/biases dtype {:?}/{:?}, expected F16",
-                        scales.dtype(),
-                        biases.dtype()
-                    ));
-                }
+                // mlx-lm emits the affine scales/biases as either f16 or bf16
+                // (Qwen3 / Gemma3-27B / Qwen3-MoE checkpoints use bf16); accept a
+                // matching 16-bit pair and widen it to f32 in the dequantizer.
+                let sb_bf16 = match (scales.dtype(), biases.dtype()) {
+                    (Dtype::F16, Dtype::F16) => false,
+                    (Dtype::BF16, Dtype::BF16) => true,
+                    (s, b) => {
+                        return Err(format!(
+                            "{prefix} scales/biases dtype {s:?}/{b:?}, expected a matching F16 or BF16 pair"
+                        ));
+                    }
+                };
                 let shape = t.shape();
                 match shape.len() {
                     // Ordinary `[out, in_packed]` weight (attention, dense MLP,
@@ -416,6 +421,7 @@ fn load_weights(
                             in_packed,
                             qc.bits,
                             qc.group_size,
+                            sb_bf16,
                         )
                         .map_err(|e| format!("dequantize {name}: {e}"))?;
                         (d, vec![out, in_])
@@ -435,6 +441,7 @@ fn load_weights(
                             in_packed,
                             qc.bits,
                             qc.group_size,
+                            sb_bf16,
                         )
                         .map_err(|e| format!("dequantize stacked {name}: {e}"))?;
                         (d, vec![experts, out, in_])

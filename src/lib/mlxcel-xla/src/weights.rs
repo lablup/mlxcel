@@ -324,6 +324,7 @@ pub(crate) fn f32_le_to_f32(bytes: &[u8]) -> Vec<f32> {
 /// is the `bits`-wide value unpacked low-order-first from `packed[o, i/(32/bits)]`
 /// (the MLX affine layout). The graph runs in f32, so the packed weights are
 /// widened here once at load.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn dequantize_affine(
     packed: &[u8],
     scales: &[u8],
@@ -332,6 +333,7 @@ pub(crate) fn dequantize_affine(
     in_packed: usize,
     bits: usize,
     group_size: usize,
+    scales_bf16: bool,
 ) -> Result<Vec<f32>, String> {
     if !(bits == 4 || bits == 8) {
         return Err(format!(
@@ -353,8 +355,13 @@ pub(crate) fn dequantize_affine(
             out * in_packed * 4
         ));
     }
-    let scales = f16_to_f32(scales);
-    let biases = f16_to_f32(biases);
+    // mlx-lm stores the affine scale/bias in either f16 or bf16; widen the
+    // matching 16-bit format to f32 (both are exact in f32).
+    let (scales, biases) = if scales_bf16 {
+        (bf16_to_f32(scales), bf16_to_f32(biases))
+    } else {
+        (f16_to_f32(scales), f16_to_f32(biases))
+    };
     if scales.len() != out * n_groups || biases.len() != out * n_groups {
         return Err(format!(
             "scales/biases have {}/{} elements, expected {} ([{out}, {n_groups}])",
@@ -400,6 +407,7 @@ pub(crate) fn dequantize_affine_stacked(
     in_packed: usize,
     bits: usize,
     group_size: usize,
+    scales_bf16: bool,
 ) -> Result<Vec<f32>, String> {
     if experts == 0 {
         return Err("stacked expert weight has 0 experts".to_string());
@@ -430,7 +438,7 @@ pub(crate) fn dequantize_affine_stacked(
     }
     if scales.len() != experts * sb_stride || biases.len() != experts * sb_stride {
         return Err(format!(
-            "stacked scales/biases have {}/{} bytes, expected {} ([{experts}, {out}, {n_groups}] f16)",
+            "stacked scales/biases have {}/{} bytes, expected {} ([{experts}, {out}, {n_groups}] 16-bit)",
             scales.len(),
             biases.len(),
             experts * sb_stride
@@ -441,7 +449,7 @@ pub(crate) fn dequantize_affine_stacked(
         let p = &packed[e * packed_stride..(e + 1) * packed_stride];
         let s = &scales[e * sb_stride..(e + 1) * sb_stride];
         let bi = &biases[e * sb_stride..(e + 1) * sb_stride];
-        let slab = dequantize_affine(p, s, bi, out, in_packed, bits, group_size)?;
+        let slab = dequantize_affine(p, s, bi, out, in_packed, bits, group_size, scales_bf16)?;
         w.extend_from_slice(&slab);
     }
     Ok(w)
@@ -687,7 +695,20 @@ mod tests {
         let packed = [0x21u8, 0x43, 0x65, 0x87];
         let scales = [0x00u8, 0x40, 0x00, 0x38]; // f16 [2.0, 0.5]
         let biases = [0x00u8, 0x49, 0x00, 0xBC]; // f16 [10.0, -1.0]
-        let w = dequantize_affine(&packed, &scales, &biases, 1, 1, 4, 4).unwrap();
+        let w = dequantize_affine(&packed, &scales, &biases, 1, 1, 4, 4, false).unwrap();
+        assert_eq!(w, vec![12.0, 14.0, 16.0, 18.0, 1.5, 2.0, 2.5, 3.0]);
+    }
+
+    /// BF16 scales/biases (as emitted by e.g. Qwen3 / Qwen3-MoE MLX 4-bit
+    /// checkpoints) dequantize identically to the F16 hand example: the loader
+    /// accepts either 16-bit float format for the affine scale/bias. The values
+    /// 2.0 / 0.5 / 10.0 / -1.0 are exact in bf16, so the recovered row is unchanged.
+    #[test]
+    fn dequantize_affine_accepts_bf16_scales() {
+        let packed = [0x21u8, 0x43, 0x65, 0x87];
+        let scales = [0x00u8, 0x40, 0x00, 0x3F]; // bf16 [2.0, 0.5]
+        let biases = [0x20u8, 0x41, 0x80, 0xBF]; // bf16 [10.0, -1.0]
+        let w = dequantize_affine(&packed, &scales, &biases, 1, 1, 4, 4, true).unwrap();
         assert_eq!(w, vec![12.0, 14.0, 16.0, 18.0, 1.5, 2.0, 2.5, 3.0]);
     }
 
@@ -700,7 +721,7 @@ mod tests {
         let packed = [0x0Au8, 0x14, 0x1E, 0x28];
         let scales = [0x00u8, 0x40, 0x00, 0x38]; // f16 [2.0, 0.5]
         let biases = [0x00u8, 0x49, 0x00, 0xBC]; // f16 [10.0, -1.0]
-        let w = dequantize_affine(&packed, &scales, &biases, 1, 1, 8, 2).unwrap();
+        let w = dequantize_affine(&packed, &scales, &biases, 1, 1, 8, 2, false).unwrap();
         assert_eq!(w, vec![30.0, 50.0, 14.0, 19.0]);
     }
 
@@ -709,7 +730,7 @@ mod tests {
     fn dequantize_affine_rejects_size_mismatch() {
         let packed = [0u8; 4];
         let sb = [0u8; 4];
-        assert!(dequantize_affine(&packed, &sb, &sb, 2, 1, 4, 4).is_err());
+        assert!(dequantize_affine(&packed, &sb, &sb, 2, 1, 4, 4, false).is_err());
     }
 
     /// The stacked (rank-3) expert dequant is exactly the per-expert dequant
@@ -721,13 +742,13 @@ mod tests {
         let packed1 = [0x21u8, 0x43, 0x65, 0x87];
         let scales1 = [0x00u8, 0x40, 0x00, 0x38]; // f16 [2.0, 0.5]
         let biases1 = [0x00u8, 0x49, 0x00, 0xBC]; // f16 [10.0, -1.0]
-        let one = dequantize_affine(&packed1, &scales1, &biases1, 1, 1, 4, 4).unwrap();
+        let one = dequantize_affine(&packed1, &scales1, &biases1, 1, 1, 4, 4, false).unwrap();
 
         // Stack two identical experts.
         let packed: Vec<u8> = packed1.iter().chain(&packed1).copied().collect();
         let scales: Vec<u8> = scales1.iter().chain(&scales1).copied().collect();
         let biases: Vec<u8> = biases1.iter().chain(&biases1).copied().collect();
-        let stacked = dequantize_affine_stacked(&packed, &scales, &biases, 2, 1, 1, 4, 4).unwrap();
+        let stacked = dequantize_affine_stacked(&packed, &scales, &biases, 2, 1, 1, 4, 4, false).unwrap();
 
         let mut expected = one.clone();
         expected.extend_from_slice(&one);
@@ -741,6 +762,6 @@ mod tests {
     fn dequantize_affine_stacked_rejects_size_mismatch() {
         let packed = [0u8; 4]; // one expert's worth, but experts = 2 declared
         let sb = [0u8; 4];
-        assert!(dequantize_affine_stacked(&packed, &sb, &sb, 2, 1, 1, 4, 4).is_err());
+        assert!(dequantize_affine_stacked(&packed, &sb, &sb, 2, 1, 1, 4, 4, false).is_err());
     }
 }
