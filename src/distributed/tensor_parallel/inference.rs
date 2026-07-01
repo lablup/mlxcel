@@ -233,6 +233,7 @@ fn fallback_architecture(model_type: ModelType) -> &'static str {
         | ModelType::AyaVisionVLM
         | ModelType::PixtralVLM
         | ModelType::Moondream3VLM
+        | ModelType::Moondream2VLM
         | ModelType::MolmoVLM
         | ModelType::Molmo2VLM
         | ModelType::MolmoPointVLM

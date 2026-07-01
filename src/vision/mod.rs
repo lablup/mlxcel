@@ -50,6 +50,7 @@ pub mod minicpmv4_6_vl;
 pub mod molmo2_vl;
 pub mod molmo_point_vl;
 pub mod molmo_vl;
+pub mod moondream2_vl;
 pub mod moondream3_vl;
 pub mod nemotron_h_nano_omni_vl;
 pub mod phi3_vl;
@@ -72,6 +73,7 @@ pub use minicpmv4_6_vl::MiniCPMV46VLModel;
 pub use molmo_point_vl::MolmoPointVLModel;
 pub use molmo_vl::MolmoVLModel;
 pub use molmo2_vl::Molmo2VLModel;
+pub use moondream2_vl::Moondream2VLModel;
 pub use moondream3_vl::Moondream3VLModel;
 pub use nemotron_h_nano_omni_vl::NemotronHNanoOmniVlModel;
 pub use phi3_vl::Phi3VLModel;
@@ -400,3 +402,7 @@ mod tests;
 #[cfg(test)]
 #[path = "moondream3_vl_tests.rs"]
 mod moondream3_vl_tests;
+
+#[cfg(test)]
+#[path = "moondream2_vl_tests.rs"]
+mod moondream2_vl_tests;

@@ -83,6 +83,7 @@ pub mod mixtral;
 pub mod molmo;
 pub mod molmo2;
 pub mod molmo_point;
+pub mod moondream2;
 pub mod moondream3;
 pub mod nemotron;
 pub mod nemotron_h;
@@ -174,6 +175,7 @@ pub use mistral4::Mistral4Model;
 pub use mixtral::MixtralModel;
 pub use molmo::MolmoModel;
 pub use molmo2::Molmo2Model;
+pub use moondream2::Moondream2Model;
 pub use moondream3::Moondream3Model;
 pub use multimodal_placeholders::MultimodalPlaceholderTokens;
 pub use nemotron::NemotronModel;
@@ -258,6 +260,7 @@ pub enum ModelType {
     MiniCPMOVLM,     // MiniCPM-o (dynamic SigLIP + resampler + Qwen3-VL text)
     MiniCPMV46VLM,   // MiniCPM-V 4.6 (SigLIP + VitMerger + Merger + Qwen3.5 text)
     Moondream3VLM,   // Moondream3 (custom ViT + custom text decoder, query/caption image path)
+    Moondream2VLM,   // Moondream2 (SigLIP-style ViT + Phi text decoder + crop tiling)
     Gemma3n,         // Gemma 3n (text-only)
     Gemma3nVLM,      // Gemma 3n VLM (MobileNetV5 + Gemma3n)
     Phi,             // Phi 1/2
@@ -427,6 +430,7 @@ pub const ALL_MODEL_TYPES: &[ModelType] = &[
     ModelType::MiniCPMOVLM,
     ModelType::MiniCPMV46VLM,
     ModelType::Moondream3VLM,
+    ModelType::Moondream2VLM,
     ModelType::Gemma3n,
     ModelType::Gemma3nVLM,
     ModelType::Phi,
@@ -729,6 +733,7 @@ impl ModelType {
                 ("Molmo-Point (point prediction + Molmo2 text)", "Other VLM")
             }
             ModelType::Moondream3VLM => ("Moondream 3 (custom ViT + custom decoder)", "Other VLM"),
+            ModelType::Moondream2VLM => ("Moondream 2 (SigLIP-style ViT + Phi text)", "Other VLM"),
             ModelType::MiniCPMOVLM => (
                 "MiniCPM-o (dynamic SigLIP + resampler + Qwen3-VL text)",
                 "Other VLM",
@@ -822,6 +827,7 @@ mod metadata_tests {
             MiniCPMOVLM,
             MiniCPMV46VLM,
             Moondream3VLM,
+            Moondream2VLM,
             Gemma3n,
             Gemma3nVLM,
             Phi,

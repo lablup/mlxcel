@@ -80,6 +80,7 @@ Implemented VLM variants include:
 - Youtu-VL
 - MiniCPM-O
 - Moondream 3
+- Moondream 2 (`moondream2` / `moondream1`): reuses Moondream3's linear-patch ViT vision tower and overlap-crop preprocessor, paired with a Phi-1.5-style dense text decoder (fused QKV, partial rotary embedding, parallel attention/MLP, tanh-GELU) instead of Moondream3's sparse-MoE decoder. Images are split into a resized global crop and a grid of overlapping local crops; the local crop features are trimmed of their overlap margins, stitched, and adaptively average-pooled back to the 27x27 encoder grid before being concatenated with the global features and projected to the text hidden size. The BOS token and the 729 projected image tokens form a bidirectional prefix ahead of the causal text prompt.
 - Phi-3 Vision, Phi4MM, Phi4 SigLIP VLM
 - Molmo2 and Molmo-Point
 - Nemotron-H Nano Omni: ships a Conformer/Parakeet audio encoder and accepts spoken audio from the CLI with `--audio <path>`. Input audio is resampled to 16 kHz before the encoder. Server-side `input_audio` in `POST /v1/chat/completions` is also supported: the audio block is spliced inside the last user turn, before the `<|im_end|>` end-of-turn marker that the ChatML template uses (id 151 in the released checkpoint).

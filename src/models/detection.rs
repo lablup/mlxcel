@@ -218,6 +218,7 @@ pub fn get_model_type(model_path: &Path) -> Result<ModelType> {
         "minicpmo" => Ok(ModelType::MiniCPMOVLM),
         "minicpmv4_6" => Ok(ModelType::MiniCPMV46VLM),
         "moondream3" => Ok(ModelType::Moondream3VLM),
+        "moondream2" | "moondream1" => Ok(ModelType::Moondream2VLM),
         "llava" | "llava_next" => Ok(ModelType::LlavaVLM),
         "llava_bunny" | "bunny-llama" | "llava-qwen2" => Ok(ModelType::LlavaBunnyVLM),
         "aya_vision" => Ok(ModelType::AyaVisionVLM),

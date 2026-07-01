@@ -669,6 +669,108 @@ pub(crate) fn load_moondream3_vlm(model_path: &Path) -> Result<LoadedModel> {
     }))
 }
 
+pub(super) fn moondream2_text_config_value(full_config: &Value) -> Value {
+    let (group_size, bits) = parse_quantization_params(full_config);
+    let group_size = if group_size > 0 { group_size } else { 64 };
+    let bits = if bits > 0 { bits } else { 4 };
+    serde_json::json!({
+        "model_type": "moondream2",
+        "dim": 2048,
+        "ff_dim": 8192,
+        "n_layers": 24,
+        "vocab_size": 51200,
+        "max_context": 2048,
+        "n_heads": 32,
+        "n_kv_heads": 32,
+        "rope_theta": 10000.0,
+        "partial_rotary_factor": 0.5,
+        "layer_norm_eps": 1e-5,
+        "group_size": group_size,
+        "bits": bits,
+        "eos_token_id": 0
+    })
+}
+
+/// Rewrite a Moondream2 checkpoint weight key into the layout consumed by the
+/// text/vision loaders.
+///
+/// The shipped `vikhyatk/moondream2` checkpoint (config `model_type`
+/// `moondream1`) uses the same unified `model.text.blocks.*` /
+/// `model.vision.blocks.*` key space as Moondream3. The `model.` prefix is
+/// stripped, the tied `text.wte` parameter gains the `.weight` suffix expected
+/// by `UnifiedEmbedding`, and the unused region head plus any `position_ids`
+/// buffers are dropped.
+pub(super) fn rewrite_moondream2_weight_key(key: &str) -> Option<String> {
+    if key.contains("position_ids") {
+        return None;
+    }
+    if key.starts_with("model.region.") || key.starts_with("region.") {
+        return None;
+    }
+
+    let key = key.strip_prefix("model.").unwrap_or(key);
+    if key == "text.wte" {
+        Some("text.wte.weight".to_string())
+    } else {
+        Some(key.to_string())
+    }
+}
+
+fn remap_moondream2_weights(raw_weights: &WeightMap) -> WeightMap {
+    let mut weights = WeightMap::new();
+    for (key, value) in raw_weights {
+        if let Some(new_key) = rewrite_moondream2_weight_key(key) {
+            weights.insert(new_key, mlxcel_core::copy(value));
+        }
+    }
+
+    let ptrs: Vec<*const mlxcel_core::MlxArray> = weights
+        .values()
+        .filter_map(|value| value.as_ref().map(|array| array as *const _))
+        .collect();
+    if !ptrs.is_empty() {
+        unsafe { mlxcel_core::eval_all(&ptrs) };
+    }
+
+    weights
+}
+
+pub(crate) fn load_moondream2_vlm(model_path: &Path) -> Result<LoadedModel> {
+    // Moondream2 shares Moondream3's vision tower and crop preprocessor; only the
+    // text decoder differs (dense Phi-style instead of sparse MoE).
+    use vision::encoders::moondream3::{Moondream3VisionConfig, Moondream3VisionModel};
+    use vision::processors::moondream3::Moondream3Processor;
+
+    let (_config_str, full_config) = read_sanitized_vlm_config(model_path)?;
+    let text_config: models::moondream2::ModelArgs =
+        serde_json::from_value(moondream2_text_config_value(&full_config))
+            .map_err(|err| anyhow::anyhow!("Failed to parse Moondream2 text config: {}", err))?;
+    let vision_config: Moondream3VisionConfig =
+        serde_json::from_value(moondream3_vision_config_value(&full_config))
+            .map_err(|err| anyhow::anyhow!("Failed to parse Moondream2 vision config: {}", err))?;
+
+    let raw_weights = load_vlm_weights_common(model_path, None)?;
+    let weights = remap_moondream2_weights(&raw_weights);
+
+    let text_model = models::Moondream2Model::from_weights(&weights, &text_config)
+        .map_err(|err| anyhow::anyhow!("Failed to load Moondream2 text model: {}", err))?;
+    let vision_tower = Moondream3VisionModel::from_weights(&weights, &vision_config)
+        .map_err(|err| anyhow::anyhow!("Failed to load Moondream2 vision tower: {}", err))?;
+    let processor = Moondream3Processor::new(
+        vision_config.crop_size,
+        vision_config.enc_patch_size,
+        vision_config.max_crops,
+        vision_config.overlap_margin,
+    );
+
+    Ok(LoadedModel::Moondream2VLM(vision::Moondream2VLModel {
+        text_model,
+        vision_tower,
+        processor,
+        eos_token_ids: vec![text_config.eos_token_id],
+    }))
+}
+
 pub(super) fn rewrite_phi4_siglip_weight_key(key: &str) -> Option<String> {
     if key.contains("position_ids") || key.contains("vision_model.head.") {
         None

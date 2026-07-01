@@ -29,6 +29,7 @@ use crate::internvl_prompt::insert_internvl_image_tokens;
 use crate::minicpmo_prompt::{
     prepare_minicpmo_prompt_tokens, prepare_minicpmo_prompt_tokens_with_image_feature_sizes,
 };
+use crate::moondream2_prompt::{Moondream2PromptMode, prepare_moondream2_prompt_tokens};
 use crate::moondream3_prompt::{Moondream3PromptMode, prepare_moondream3_prompt_tokens};
 use crate::phi3v_prompt::prepare_phi3v_prompt_tokens;
 use crate::phi4_siglip_prompt::prepare_phi4_siglip_prompt_tokens;
@@ -55,6 +56,11 @@ pub enum VlmPreparationSummary {
     },
     Moondream3 {
         mode: Moondream3PromptMode,
+        total_tokens: usize,
+        prefix_tokens: usize,
+    },
+    Moondream2 {
+        mode: Moondream2PromptMode,
         total_tokens: usize,
         prefix_tokens: usize,
     },
@@ -364,6 +370,24 @@ where
                     mode: prepared.mode,
                     total_tokens: prompt_tokens.len(),
                     prefix_tokens: moondream3.prefix_token_count(),
+                }),
+            }))
+        }
+        VlmRuntimeRef::Moondream2(moondream2) => {
+            let prepared = prepare_moondream2_prompt_tokens(prompt, images.len(), &mut encode)
+                .map_err(|err| anyhow::anyhow!("{}", err))?;
+            *prompt_tokens = prepared.tokens;
+
+            let processed_image = moondream2.processor.preprocess_image(&images[0]);
+            let input_ids_arr = prompt_ids_array(prompt_tokens);
+            let embeddings = moondream2.get_input_embeddings(&input_ids_arr, &processed_image);
+
+            Ok(Some(PreparedVlmEmbeddings {
+                embeddings,
+                preparation: Some(VlmPreparationSummary::Moondream2 {
+                    mode: prepared.mode,
+                    total_tokens: prompt_tokens.len(),
+                    prefix_tokens: moondream2.prefix_token_count(),
                 }),
             }))
         }

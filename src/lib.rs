@@ -75,8 +75,8 @@ pub use mlxcel_core::generate::{
 };
 pub use mlxcel_core::speculative::SpeculativeGenerator;
 pub use multimodal::{
-    internvl_prompt, minicpmo_prompt, moondream3_prompt, phi3v_prompt, phi4_siglip_prompt,
-    phi4mm_prompt, qwen_vl, video, vlm_prompt, vlm_runtime, youtu_vl_prompt,
+    internvl_prompt, minicpmo_prompt, moondream2_prompt, moondream3_prompt, phi3v_prompt,
+    phi4_siglip_prompt, phi4mm_prompt, qwen_vl, video, vlm_prompt, vlm_runtime, youtu_vl_prompt,
 };
 
 // Re-export the compute-backend seam (issue #338, reframed to a session engine

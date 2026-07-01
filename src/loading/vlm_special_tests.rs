@@ -16,12 +16,12 @@ use super::{
     cap_molmo2_vit_num_layers, dequantize_moondream3_weight, flatten_phi4mm_patch_embedding,
     inherit_quantization_if_missing, llama4_mm_tokens_per_image, llama4_quantization_params,
     llama4_token_ids, llama4_vision_prefix, minicpmv4_6_text_weights, molmo2_max_crops,
-    moondream3_text_config_value, moondream3_vision_config_value, parse_molmo2_vit_layers,
-    phi3_num_crops, phi4_siglip_text_config_value, phi4mm_text_config_value,
-    phi4mm_vision_config_value, remap_minicpmo_text_weights, remap_minicpmv4_6_weights,
-    rewrite_molmo2_weight_key, rewrite_moondream3_weight_key, rewrite_phi3_weight_key,
-    rewrite_phi4_siglip_weight_key, rewrite_phi4mm_vision_key,
-    should_transpose_phi3_patch_embedding,
+    moondream2_text_config_value, moondream3_text_config_value, moondream3_vision_config_value,
+    parse_molmo2_vit_layers, phi3_num_crops, phi4_siglip_text_config_value,
+    phi4mm_text_config_value, phi4mm_vision_config_value, remap_minicpmo_text_weights,
+    remap_minicpmv4_6_weights, rewrite_molmo2_weight_key, rewrite_moondream2_weight_key,
+    rewrite_moondream3_weight_key, rewrite_phi3_weight_key, rewrite_phi4_siglip_weight_key,
+    rewrite_phi4mm_vision_key, should_transpose_phi3_patch_embedding,
 };
 use mlxcel_core::dtype;
 use mlxcel_core::weights::WeightMap;
@@ -154,6 +154,84 @@ fn moondream3_text_and_vision_config_helpers_fill_default_shapes() {
     assert_eq!(text["bits"], 4);
     assert_eq!(vision["crop_size"], 378);
     assert_eq!(vision["enc_patch_size"], 14);
+}
+
+#[test]
+fn rewrite_moondream2_weight_key_maps_unified_checkpoint_layout() {
+    // Text tower: strip `model.`, add `.weight` to the tied embedding.
+    assert_eq!(
+        rewrite_moondream2_weight_key("model.text.wte"),
+        Some("text.wte.weight".to_string())
+    );
+    assert_eq!(
+        rewrite_moondream2_weight_key("model.text.blocks.0.ln.weight"),
+        Some("text.blocks.0.ln.weight".to_string())
+    );
+    assert_eq!(
+        rewrite_moondream2_weight_key("model.text.blocks.3.attn.qkv.weight"),
+        Some("text.blocks.3.attn.qkv.weight".to_string())
+    );
+    assert_eq!(
+        rewrite_moondream2_weight_key("model.text.post_ln.weight"),
+        Some("text.post_ln.weight".to_string())
+    );
+    assert_eq!(
+        rewrite_moondream2_weight_key("model.text.lm_head.bias"),
+        Some("text.lm_head.bias".to_string())
+    );
+
+    // Vision tower: raw pos_emb keeps no `.weight`, blocks keep ln1/ln2.
+    assert_eq!(
+        rewrite_moondream2_weight_key("model.vision.patch_emb.weight"),
+        Some("vision.patch_emb.weight".to_string())
+    );
+    assert_eq!(
+        rewrite_moondream2_weight_key("model.vision.pos_emb"),
+        Some("vision.pos_emb".to_string())
+    );
+    assert_eq!(
+        rewrite_moondream2_weight_key("model.vision.blocks.0.ln1.weight"),
+        Some("vision.blocks.0.ln1.weight".to_string())
+    );
+    assert_eq!(
+        rewrite_moondream2_weight_key("model.vision.proj_mlp.fc1.weight"),
+        Some("vision.proj_mlp.fc1.weight".to_string())
+    );
+
+    // Region head and position-id buffers are dropped; already-stripped keys
+    // pass through unchanged.
+    assert_eq!(
+        rewrite_moondream2_weight_key("model.region.coord_encoder.weight"),
+        None
+    );
+    assert_eq!(
+        rewrite_moondream2_weight_key("model.text.position_ids"),
+        None
+    );
+    assert_eq!(
+        rewrite_moondream2_weight_key("vision.blocks.0.attn.qkv.weight"),
+        Some("vision.blocks.0.attn.qkv.weight".to_string())
+    );
+}
+
+#[test]
+fn moondream2_text_config_helper_fills_dense_phi_shapes() {
+    let text = moondream2_text_config_value(&json!({
+        "quantization": {"group_size": 32, "bits": 8}
+    }));
+
+    assert_eq!(text["model_type"], "moondream2");
+    assert_eq!(text["dim"], 2048);
+    assert_eq!(text["n_heads"], 32);
+    assert_eq!(text["partial_rotary_factor"], 0.5);
+    assert_eq!(text["rope_theta"], 10000.0);
+    assert_eq!(text["group_size"], 32);
+    assert_eq!(text["bits"], 8);
+
+    // No quantization block -> fp16 defaults (group_size 64 / bits 4).
+    let text_default = moondream2_text_config_value(&json!({}));
+    assert_eq!(text_default["group_size"], 64);
+    assert_eq!(text_default["bits"], 4);
 }
 
 #[test]
