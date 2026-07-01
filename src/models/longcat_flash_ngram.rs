@@ -764,7 +764,7 @@ impl NgramEmbedding {
             let keep = (self.n as i32 - 1).max(0);
             if ctx_len > keep {
                 let start = ctx_len - keep;
-                mlxcel_core::slice(&joined, &[0, start], &[-1, ctx_len])
+                slice_axis(&joined, 1, start, ctx_len)
             } else {
                 joined
             }
@@ -778,7 +778,7 @@ impl NgramEmbedding {
         let keep = (self.n as i32 - 1).max(0);
         *context = Some(if ctx_len > keep {
             let start = ctx_len - keep;
-            mlxcel_core::slice(&cur_context, &[0, start], &[-1, ctx_len])
+            slice_axis(&cur_context, 1, start, ctx_len)
         } else {
             mlxcel_core::copy(&cur_context)
         });
@@ -815,7 +815,7 @@ impl NgramEmbedding {
                 let modded_shape = mlxcel_core::array_shape(&modded);
                 let modded_len = modded_shape[modded_shape.len() - 1];
                 let new_ids = if modded_len > seq_len {
-                    mlxcel_core::slice(&modded, &[0, modded_len - seq_len], &[-1, modded_len])
+                    slice_axis(&modded, 1, modded_len - seq_len, modded_len)
                 } else {
                     modded
                 };
