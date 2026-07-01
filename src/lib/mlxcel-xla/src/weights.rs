@@ -748,7 +748,8 @@ mod tests {
         let packed: Vec<u8> = packed1.iter().chain(&packed1).copied().collect();
         let scales: Vec<u8> = scales1.iter().chain(&scales1).copied().collect();
         let biases: Vec<u8> = biases1.iter().chain(&biases1).copied().collect();
-        let stacked = dequantize_affine_stacked(&packed, &scales, &biases, 2, 1, 1, 4, 4, false).unwrap();
+        let stacked =
+            dequantize_affine_stacked(&packed, &scales, &biases, 2, 1, 1, 4, 4, false).unwrap();
 
         let mut expected = one.clone();
         expected.extend_from_slice(&one);
