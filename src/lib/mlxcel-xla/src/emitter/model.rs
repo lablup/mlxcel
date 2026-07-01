@@ -14,7 +14,7 @@
 //! `embed` matrix (see [`take_lm_head`]); a tied checkpoint emits no such arg and
 //! is byte-identical to before.
 
-use super::builder::{Builder, Ty, Val};
+use super::builder::{Builder, Ty, Val, precision_from_env};
 use super::config::Config;
 use super::rope;
 
@@ -428,7 +428,7 @@ fn apply_rope(b: &mut Builder, x: &Val, cos: &Val, sin: &Val, heads: usize, d: u
 /// 2b pattern); otherwise it returns the raw `[V]` logits.
 pub fn emit_decode(c: &Config, sample: bool) -> String {
     let (decls, a) = build_arg_schema(c);
-    let mut b = Builder::new();
+    let mut b = Builder::new().with_precision(precision_from_env());
     let k = emit_consts(&mut b, c);
 
     let h = c.hidden;
@@ -728,7 +728,7 @@ fn apply_rope_batched(
 /// returns `[B]` token ids; otherwise it returns `[B, V]` logits.
 pub fn emit_decode_batched(c: &Config, bsz: usize, sample: bool) -> String {
     let (decls, a) = build_batched_arg_schema(c, bsz);
-    let mut b = Builder::new();
+    let mut b = Builder::new().with_precision(precision_from_env());
     let k = emit_consts(&mut b, c);
 
     let h = c.hidden;
@@ -1012,7 +1012,7 @@ fn apply_rope_ragged(
 /// token ids; otherwise returns `[B, V]` logits.
 pub fn emit_decode_ragged(c: &Config, bsz: usize, sample: bool) -> String {
     let (decls, a) = build_ragged_arg_schema(c, bsz);
-    let mut b = Builder::new();
+    let mut b = Builder::new().with_precision(precision_from_env());
     let k = emit_consts(&mut b, c);
     // Constant row indices 0..bsz for the per-row KV-write dim-0 offsets.
     let row_idx: Vec<Val> = (0..bsz).map(|i| b.const_i32(i as i32)).collect();
@@ -1310,7 +1310,7 @@ fn apply_rope_seq(
 pub fn emit_prefill(c: &Config, sample: bool) -> String {
     let lp = PREFILL_LP;
     let (decls, a) = build_prefill_arg_schema(c, lp);
-    let mut b = Builder::new();
+    let mut b = Builder::new().with_precision(precision_from_env());
     let k = emit_consts(&mut b, c);
 
     let h = c.hidden;

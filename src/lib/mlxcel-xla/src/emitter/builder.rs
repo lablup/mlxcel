@@ -45,9 +45,49 @@ pub struct Val {
     pub ty: Ty,
 }
 
+/// Contraction (matmul) input precision. `F32` is the default (unchanged
+/// behavior). `F16` / `Bf16` demote the f32 inputs of every `dot_general` to the
+/// narrow type while keeping the f32 accumulate and output, so only the matmuls
+/// change and the sensitive elementwise ops (norm, softmax, RoPE) stay f32. This
+/// is authored in the graph (portable to every IREE target), matching
+/// `--iree-global-opt-demote-contraction-inputs-type=f16`. A blanket f32->f16 of
+/// the whole program is deliberately NOT done (it regressed norm/softmax/accum).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum Precision {
+    #[default]
+    F32,
+    F16,
+    Bf16,
+}
+
+impl Precision {
+    /// The narrow element type to demote contraction inputs to, or `None` for
+    /// f32 (no demotion).
+    fn dot_elt(self) -> Option<&'static str> {
+        match self {
+            Precision::F32 => None,
+            Precision::F16 => Some("f16"),
+            Precision::Bf16 => Some("bf16"),
+        }
+    }
+}
+
+/// The contraction precision selected by `MLXCEL_XLA_PRECISION` (`f16` / `bf16`,
+/// else f32). Read once when a graph is emitted; a different value changes the
+/// emitted MLIR, so the vmfb content-hash cache keys each precision separately.
+#[must_use]
+pub fn precision_from_env() -> Precision {
+    match std::env::var("MLXCEL_XLA_PRECISION").as_deref() {
+        Ok("f16") => Precision::F16,
+        Ok("bf16") => Precision::Bf16,
+        _ => Precision::F32,
+    }
+}
+
 pub struct Builder {
     body: String,
     next: usize,
+    precision: Precision,
 }
 
 fn dims_list(d: &[usize]) -> String {
@@ -76,7 +116,15 @@ impl Builder {
         Builder {
             body: String::new(),
             next: 0,
+            precision: Precision::F32,
         }
+    }
+
+    /// Set the contraction precision (builder-style). Default is `F32`.
+    #[must_use]
+    pub fn with_precision(mut self, precision: Precision) -> Self {
+        self.precision = precision;
+        self
     }
 
     pub fn body(&self) -> &str {
@@ -195,8 +243,9 @@ impl Builder {
         Val { name: r, ty }
     }
 
-    /// Unused by decode today; kept for the int4 dequant path (int -> f32).
-    #[allow(dead_code)]
+    /// Element-type conversion (`stablehlo.convert`), preserving shape. Used by
+    /// the low-precision contraction path (f32 -> f16/bf16) and reserved for the
+    /// int dequant path.
     pub fn convert(&mut self, x: &Val, elt: &'static str) -> Val {
         let ty = Ty::new(x.ty.shape.clone(), elt);
         let r = self.fresh();
@@ -548,6 +597,27 @@ impl Builder {
         rhs_contract: &[usize],
         out_shape: Vec<usize>,
     ) -> Val {
+        // Low-precision mode: demote the f32 contraction inputs to the narrow
+        // type, keeping the f32 accumulate + output (`ty` below stays f32). Only
+        // matmuls change; norm/softmax/RoPE stay f32. No-op under `Precision::F32`.
+        let lhs_demoted;
+        let rhs_demoted;
+        let (lhs, rhs) = match self.precision.dot_elt() {
+            Some(elt) => {
+                lhs_demoted = if lhs.ty.elt == "f32" {
+                    self.convert(lhs, elt)
+                } else {
+                    lhs.clone()
+                };
+                rhs_demoted = if rhs.ty.elt == "f32" {
+                    self.convert(rhs, elt)
+                } else {
+                    rhs.clone()
+                };
+                (&lhs_demoted, &rhs_demoted)
+            }
+            None => (lhs, rhs),
+        };
         let ty = Ty::new(out_shape, "f32");
         let r = self.fresh();
         let batch = if lhs_batch.is_empty() && rhs_batch.is_empty() {
@@ -588,5 +658,49 @@ impl Builder {
         let l = x.ty.shape[0];
         let n = w.ty.shape[0];
         self.dot_general(x, w, &[], &[], &[1], &[1], vec![l, n])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn f32_dot_emits_no_convert() {
+        let mut b = Builder::new(); // default Precision::F32
+        let x = Builder::arg(0, Ty::f32(vec![2048]));
+        let w = Builder::arg(1, Ty::f32(vec![512, 2048]));
+        let _ = b.linear(&x, &w);
+        assert!(!b.body().contains("stablehlo.convert"));
+        assert!(b.body().contains("stablehlo.dot_general"));
+    }
+
+    #[test]
+    fn f16_dot_demotes_inputs_and_keeps_f32_accumulate() {
+        let mut b = Builder::new().with_precision(Precision::F16);
+        let x = Builder::arg(0, Ty::f32(vec![2048]));
+        let w = Builder::arg(1, Ty::f32(vec![512, 2048]));
+        let y = b.linear(&x, &w);
+        let body = b.body();
+        // Both f32 operands are demoted to f16 (two converts).
+        assert_eq!(body.matches("stablehlo.convert").count(), 2);
+        assert!(body.contains("-> tensor<2048xf16>"));
+        assert!(body.contains("-> tensor<512x2048xf16>"));
+        // The dot consumes f16 inputs but accumulates/outputs f32.
+        assert!(body.contains("(tensor<2048xf16>, tensor<512x2048xf16>) -> tensor<512xf32>"));
+        assert_eq!(y.ty.elt, "f32");
+    }
+
+    #[test]
+    fn bf16_dot_demotes_to_bf16() {
+        let mut b = Builder::new().with_precision(Precision::Bf16);
+        let x = Builder::arg(0, Ty::f32(vec![8]));
+        let w = Builder::arg(1, Ty::f32(vec![4, 8]));
+        let _ = b.linear(&x, &w);
+        assert!(b.body().contains("-> tensor<8xbf16>"));
+        assert!(
+            b.body()
+                .contains("(tensor<8xbf16>, tensor<4x8xbf16>) -> tensor<4xf32>")
+        );
     }
 }
