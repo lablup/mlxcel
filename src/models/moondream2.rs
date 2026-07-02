@@ -60,6 +60,8 @@ pub struct ModelArgs {
     pub bits: i32,
     #[serde(default = "default_eos_token_id")]
     pub eos_token_id: i32,
+    #[serde(default = "default_bos_token_id")]
+    pub bos_token_id: i32,
 }
 
 fn default_model_type() -> String {
@@ -114,8 +116,17 @@ fn default_bits() -> i32 {
     4
 }
 
+/// The moondream2 checkpoint ships a GPT-2/CodeGen tokenizer whose
+/// `<|endoftext|>` token (id 50256) doubles as bos, eos and unk. Moondream3
+/// uses id 0 for the same role with a different tokenizer, so the moondream2
+/// port must not inherit that value: a `0` eos collides with a normal sampled
+/// token and halts generation before any output is produced.
 fn default_eos_token_id() -> i32 {
-    0
+    50256
+}
+
+fn default_bos_token_id() -> i32 {
+    50256
 }
 
 impl ModelArgs {
@@ -349,7 +360,7 @@ impl Moondream2Model {
     }
 
     pub fn bos_token_id(&self) -> i32 {
-        0
+        self.config.bos_token_id
     }
 }
 

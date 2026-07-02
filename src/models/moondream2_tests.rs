@@ -24,7 +24,10 @@ fn moondream2_model_args_fill_phi_style_defaults() {
     assert_eq!(args.n_heads, 32);
     assert_eq!(args.n_kv_heads, 32);
     assert_eq!(args.head_dim(), 64);
-    assert_eq!(args.eos_token_id, 0);
+    // The moondream2 tokenizer uses `<|endoftext|>` (id 50256) as bos/eos, not
+    // Moondream3's id 0. A `0` eos halts generation on the first sampled token.
+    assert_eq!(args.eos_token_id, 50256);
+    assert_eq!(args.bos_token_id, 50256);
 }
 
 #[test]

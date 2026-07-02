@@ -19,9 +19,10 @@ use super::{
     moondream2_text_config_value, moondream3_text_config_value, moondream3_vision_config_value,
     parse_molmo2_vit_layers, phi3_num_crops, phi4_siglip_text_config_value,
     phi4mm_text_config_value, phi4mm_vision_config_value, remap_minicpmo_text_weights,
-    remap_minicpmv4_6_weights, rewrite_molmo2_weight_key, rewrite_moondream2_weight_key,
-    rewrite_moondream3_weight_key, rewrite_phi3_weight_key, rewrite_phi4_siglip_weight_key,
-    rewrite_phi4mm_vision_key, should_transpose_phi3_patch_embedding,
+    remap_minicpmv4_6_weights, resolve_moondream2_eos_token_id, rewrite_molmo2_weight_key,
+    rewrite_moondream2_weight_key, rewrite_moondream3_weight_key, rewrite_phi3_weight_key,
+    rewrite_phi4_siglip_weight_key, rewrite_phi4mm_vision_key,
+    should_transpose_phi3_patch_embedding,
 };
 use mlxcel_core::dtype;
 use mlxcel_core::weights::WeightMap;
@@ -216,9 +217,12 @@ fn rewrite_moondream2_weight_key_maps_unified_checkpoint_layout() {
 
 #[test]
 fn moondream2_text_config_helper_fills_dense_phi_shapes() {
-    let text = moondream2_text_config_value(&json!({
-        "quantization": {"group_size": 32, "bits": 8}
-    }));
+    let text = moondream2_text_config_value(
+        &json!({
+            "quantization": {"group_size": 32, "bits": 8}
+        }),
+        50256,
+    );
 
     assert_eq!(text["model_type"], "moondream2");
     assert_eq!(text["dim"], 2048);
@@ -227,11 +231,59 @@ fn moondream2_text_config_helper_fills_dense_phi_shapes() {
     assert_eq!(text["rope_theta"], 10000.0);
     assert_eq!(text["group_size"], 32);
     assert_eq!(text["bits"], 8);
+    // The resolved special-token id feeds both bos and eos.
+    assert_eq!(text["eos_token_id"], 50256);
+    assert_eq!(text["bos_token_id"], 50256);
 
     // No quantization block -> fp16 defaults (group_size 64 / bits 4).
-    let text_default = moondream2_text_config_value(&json!({}));
+    let text_default = moondream2_text_config_value(&json!({}), 50256);
     assert_eq!(text_default["group_size"], 64);
     assert_eq!(text_default["bits"], 4);
+}
+
+#[test]
+fn resolve_moondream2_eos_falls_back_to_endoftext_id() {
+    // The real moondream2 checkpoint: `model_type: "moondream1"` with an empty
+    // nested `config` and no top-level `eos_token_id`. Without a tokenizer the
+    // resolver must fall back to the GPT-2 `<|endoftext|>` id (50256), never 0.
+    let real_config = json!({
+        "architectures": ["HfMoondream"],
+        "model_type": "moondream1",
+        "config": {},
+        "torch_dtype": "bfloat16"
+    });
+    assert_eq!(resolve_moondream2_eos_token_id(&real_config, None), 50256);
+}
+
+#[test]
+fn resolve_moondream2_eos_reads_id_from_tokenizer_config() {
+    // The real moondream2 tokenizer_config.json shape: `eos_token` is the
+    // `<|endoftext|>` string and `added_tokens_decoder` maps id 50256 to it.
+    let real_config = json!({ "model_type": "moondream1", "config": {} });
+    let tokenizer_config = json!({
+        "bos_token": "<|endoftext|>",
+        "eos_token": "<|endoftext|>",
+        "unk_token": "<|endoftext|>",
+        "tokenizer_class": "CodeGenTokenizer",
+        "added_tokens_decoder": {
+            "50256": { "content": "<|endoftext|>", "special": true }
+        }
+    });
+    assert_eq!(
+        resolve_moondream2_eos_token_id(&real_config, Some(&tokenizer_config)),
+        50256
+    );
+}
+
+#[test]
+fn resolve_moondream2_eos_prefers_explicit_config_ids() {
+    // An explicit top-level id wins over the tokenizer/fallback.
+    let top_level = json!({ "eos_token_id": 7 });
+    assert_eq!(resolve_moondream2_eos_token_id(&top_level, None), 7);
+
+    // A nested `config.eos_token_id` is honored when the top level is absent.
+    let nested = json!({ "config": { "eos_token_id": 11 } });
+    assert_eq!(resolve_moondream2_eos_token_id(&nested, None), 11);
 }
 
 #[test]
