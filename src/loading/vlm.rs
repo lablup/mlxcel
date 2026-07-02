@@ -41,6 +41,8 @@ use models::sanitize_config_json;
 mod gemma;
 #[path = "vlm_gemma_unified.rs"]
 mod gemma_unified;
+#[path = "vlm_idefics2.rs"]
+mod idefics2;
 #[path = "vlm_internvl.rs"]
 mod internvl;
 #[path = "vlm_kimi_vl.rs"]
@@ -68,6 +70,7 @@ mod youtu_vl_loader;
 
 pub(crate) use gemma::{load_gemma3_vlm, load_gemma3n_vlm, load_gemma4_vlm};
 pub(crate) use gemma_unified::load_gemma4_unified;
+pub(crate) use idefics2::load_idefics2_vlm;
 pub(crate) use internvl::load_internvl_vlm;
 pub(crate) use kimi_vl_loader::load_kimi_vl_vlm;
 pub(crate) use llava::{load_llava_bunny_vlm, load_llava_vlm};

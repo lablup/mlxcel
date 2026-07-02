@@ -23,7 +23,8 @@
 //! - Attention: standard multi-head with bias, uses scaled_dot_product_attention
 //! - MLP: Linear → GELU(precise) → Linear
 //!
-//! Used by: Gemma3 VLM (SigLIP), LLaVA (CLIP or SigLIP)
+//! Used by: Gemma3 VLM (SigLIP), LLaVA (CLIP or SigLIP), Idefics2 (via
+//! `forward_with_position_ids`, bucketized variable-resolution tiles)
 
 use super::{VisionEncoder, VisionEncoderOutput};
 use mlxcel_core::layers::{LayerNorm, UnifiedEmbedding, UnifiedLinear};
@@ -36,12 +37,20 @@ use crate::vision::config::VisionConfig;
 struct VisionMLP {
     fc1: UnifiedLinear,
     fc2: UnifiedLinear,
+    /// When true, use the sigmoid `GELU(approx="fast")` (`x * sigmoid(1.702x)`)
+    /// that the Idefics2 vision tower uses; otherwise the tanh `approx="precise"`
+    /// GELU that SigLIP/CLIP, Idefics3/SmolVLM, Gemma3, and LLaVA use.
+    use_fast_gelu: bool,
 }
 
 impl VisionMLP {
     fn forward(&self, x: &MlxArray) -> UniquePtr<MlxArray> {
         let x = self.fc1.forward(x);
-        let x = mlxcel_core::gelu_approx(&x); // GELU(approx="precise") matching Python
+        let x = if self.use_fast_gelu {
+            mlxcel_core::utils::gelu_sigmoid(&x)
+        } else {
+            mlxcel_core::gelu_approx(&x)
+        };
         self.fc2.forward(&x)
     }
 
@@ -50,12 +59,17 @@ impl VisionMLP {
         prefix: &str,
         group_size: i32,
         bits: i32,
+        use_fast_gelu: bool,
     ) -> Result<Self, String> {
         let fc1 =
             UnifiedLinear::from_weights(weights, &format!("{}.fc1", prefix), group_size, bits)?;
         let fc2 =
             UnifiedLinear::from_weights(weights, &format!("{}.fc2", prefix), group_size, bits)?;
-        Ok(Self { fc1, fc2 })
+        Ok(Self {
+            fc1,
+            fc2,
+            use_fast_gelu,
+        })
     }
 }
 
@@ -170,6 +184,7 @@ impl EncoderLayer {
         config: &VisionConfig,
         group_size: i32,
         bits: i32,
+        use_fast_gelu: bool,
     ) -> Result<Self, String> {
         let self_attn = VisionAttention::from_weights(
             weights,
@@ -191,7 +206,13 @@ impl EncoderLayer {
             config.layer_norm_eps,
         )?;
 
-        let mlp = VisionMLP::from_weights(weights, &format!("{}.mlp", prefix), group_size, bits)?;
+        let mlp = VisionMLP::from_weights(
+            weights,
+            &format!("{}.mlp", prefix),
+            group_size,
+            bits,
+            use_fast_gelu,
+        )?;
 
         Ok(Self {
             self_attn,
@@ -268,6 +289,33 @@ impl VisionEmbeddings {
         let pos_emb = self.position_embedding.forward(&pos_ids);
 
         mlxcel_core::add(&embeddings, &pos_emb)
+    }
+
+    /// SigLIP embed with caller-provided position ids and a *dynamic* patch
+    /// count taken from the conv output (not `config.image_size`). Used by
+    /// Idefics2, whose vision tower feeds variable-resolution tiles and maps each
+    /// tile's `(grid_h, grid_w)` patch grid into the fixed position table via
+    /// bucketized ids. Assumes a SigLIP tower (bias conv, no CLS token).
+    /// `position_ids` must have length `grid_h * grid_w` (batch 1) and be
+    /// pre-wrapped into `[0, num_positions)`.
+    fn forward_with_position_ids(&self, x: &MlxArray, position_ids: &[i32]) -> UniquePtr<MlxArray> {
+        let ps = self.patch_size as i32;
+        let patch_emb = if let Some(ref bias) = self.patch_embedding_bias {
+            let conv = mlxcel_core::conv2d(x, &self.patch_embedding_weight, ps, ps, 0, 0, 1, 1, 1);
+            mlxcel_core::add(&conv, bias)
+        } else {
+            mlxcel_core::conv2d(x, &self.patch_embedding_weight, ps, ps, 0, 0, 1, 1, 1)
+        };
+        // [B, grid_h, grid_w, hidden] -> [B, grid_h*grid_w, hidden]
+        let shape = mlxcel_core::array_shape(&patch_emb);
+        let b = shape[0];
+        let hidden = shape[3];
+        let num_patches = shape[1] * shape[2];
+        let patch_emb = mlxcel_core::reshape(&patch_emb, &[b, num_patches, hidden]);
+
+        let pos_ids = mlxcel_core::from_slice_i32(position_ids, &[b, num_patches]);
+        let pos_emb = self.position_embedding.forward(&pos_ids);
+        mlxcel_core::add(&patch_emb, &pos_emb)
     }
 
     fn from_weights(
@@ -360,6 +408,21 @@ impl SigLipVisionModel {
         group_size: i32,
         bits: i32,
     ) -> Result<Self, String> {
+        Self::from_weights_with_quant_and_gelu(weights, config, prefix, group_size, bits, false)
+    }
+
+    /// Like [`Self::from_weights_with_quant`] but selects the encoder MLP GELU
+    /// variant. `use_fast_gelu = true` uses the sigmoid `GELU(approx="fast")`
+    /// that the Idefics2 vision tower uses; `false` keeps the tanh
+    /// `approx="precise"` GELU every other SigLIP/CLIP consumer uses.
+    pub fn from_weights_with_quant_and_gelu(
+        weights: &WeightMap,
+        config: &VisionConfig,
+        prefix: &str,
+        group_size: i32,
+        bits: i32,
+        use_fast_gelu: bool,
+    ) -> Result<Self, String> {
         let emb_prefix = format!("{}.embeddings", prefix);
         let embeddings =
             VisionEmbeddings::from_weights(weights, &emb_prefix, config, group_size, bits)?;
@@ -367,8 +430,14 @@ impl SigLipVisionModel {
         let mut layers = Vec::with_capacity(config.num_hidden_layers);
         for i in 0..config.num_hidden_layers {
             let layer_prefix = format!("{}.encoder.layers.{}", prefix, i);
-            let layer =
-                EncoderLayer::from_weights(weights, &layer_prefix, config, group_size, bits)?;
+            let layer = EncoderLayer::from_weights(
+                weights,
+                &layer_prefix,
+                config,
+                group_size,
+                bits,
+                use_fast_gelu,
+            )?;
             layers.push(layer);
         }
 
@@ -401,6 +470,25 @@ impl SigLipVisionModel {
         self.vision_feature_layer = Some(layer);
         self.vision_feature_select_strategy = Some(strategy);
         self
+    }
+
+    /// Idefics2-style forward: embed with caller-provided (bucketized) position
+    /// ids over a dynamic patch grid, then run the encoder + `post_layernorm`.
+    /// SigLIP-only (no CLS, no `pre_layrnorm`, no feature-layer selection);
+    /// idefics2 consumes the post-layernorm last hidden state and its encoder
+    /// attention is unmasked, matching the reference vision tower.
+    pub fn forward_with_position_ids(
+        &self,
+        pixel_values: &MlxArray,
+        position_ids: &[i32],
+    ) -> UniquePtr<MlxArray> {
+        let mut h = self
+            .embeddings
+            .forward_with_position_ids(pixel_values, position_ids);
+        for layer in &self.layers {
+            h = layer.forward(&h);
+        }
+        self.post_layernorm.forward(&h)
     }
 }
 

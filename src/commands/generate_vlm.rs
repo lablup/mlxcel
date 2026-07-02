@@ -182,6 +182,15 @@ fn print_preparation_summary(summary: VlmPreparationSummary) {
                 image_blocks, total_image_tokens
             );
         }
+        VlmPreparationSummary::Idefics2 {
+            image_blocks,
+            total_image_tokens,
+        } => {
+            println!(
+                "Idefics2: inserted {} image block(s) ({} total image tokens)",
+                image_blocks, total_image_tokens
+            );
+        }
         VlmPreparationSummary::KimiVL {
             image_blocks,
             total_image_tokens,

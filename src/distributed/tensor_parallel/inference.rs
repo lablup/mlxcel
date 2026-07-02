@@ -248,7 +248,10 @@ fn fallback_architecture(model_type: ModelType) -> &'static str {
         | ModelType::MllamaVLM => "llama",
         // SmolVLM's text backbone is SmolLM2 (llama family). TP is refused for
         // VLM-kind models earlier; this keeps the dispatch table total.
-        | ModelType::SmolVLM => "llama",
+        | ModelType::SmolVLM
+        // Idefics2's text backbone is Mistral (llama family). TP is refused for
+        // VLM-kind models earlier; this keeps the dispatch table total.
+        | ModelType::Idefics2 => "llama",
         // Youtu-VL is not currently supported by tensor-parallel inference;
         // we return a placeholder architecture string here so the planner
         // does not panic on the dispatch table lookup. The actual loader

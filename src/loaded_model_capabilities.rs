@@ -56,6 +56,8 @@ pub enum VlmRuntimeRef<'a> {
     Mllama(&'a vision::MllamaVLModel),
     /// SmolVLM / SmolVLM2 (smolvlm) runtime.
     SmolVLM(&'a vision::SmolVLMModel),
+    /// Idefics2 (idefics2) runtime.
+    Idefics2(&'a vision::Idefics2Model),
     Standard(&'a vision::VisionModule),
 }
 
@@ -163,6 +165,7 @@ impl LoadedModel {
             Self::KimiVL(model) => Some(VlmRuntimeRef::KimiVL(model)),
             Self::MllamaVLM(model) => Some(VlmRuntimeRef::Mllama(model)),
             Self::SmolVLM(model) => Some(VlmRuntimeRef::SmolVLM(model)),
+            Self::Idefics2(model) => Some(VlmRuntimeRef::Idefics2(model)),
             Self::Gemma3VLM(vlm) => Some(VlmRuntimeRef::Standard(&vlm.vision)),
             Self::Llama4VLM(vlm) => Some(VlmRuntimeRef::Standard(&vlm.vision)),
             Self::LlavaVLM(vlm) => Some(VlmRuntimeRef::Standard(&vlm.vision)),

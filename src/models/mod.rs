@@ -269,6 +269,7 @@ pub enum ModelType {
     YoutuVLM,        // Youtu-VL (SigLIP2 windowed-attn + DeepSeek-V3-style MLA)
     InternVLChatVLM, // InternVL (internvl_chat): InternViT + pixel-shuffle mlp1 + Qwen2 text
     SmolVLM,         // SmolVLM/SmolVLM2 (smolvlm): SigLIP + pixel-shuffle connector + SmolLM2 text
+    Idefics2,        // Idefics2 (idefics2): SigLIP + perceiver-resampler connector + Mistral text
     MiniCPMOVLM,     // MiniCPM-o (dynamic SigLIP + resampler + Qwen3-VL text)
     MiniCPMV46VLM,   // MiniCPM-V 4.6 (SigLIP + VitMerger + Merger + Qwen3.5 text)
     Moondream3VLM,   // Moondream3 (custom ViT + custom text decoder, query/caption image path)
@@ -446,6 +447,7 @@ pub const ALL_MODEL_TYPES: &[ModelType] = &[
     ModelType::YoutuVLM,
     ModelType::InternVLChatVLM,
     ModelType::SmolVLM,
+    ModelType::Idefics2,
     ModelType::MiniCPMOVLM,
     ModelType::MiniCPMV46VLM,
     ModelType::Moondream3VLM,
@@ -758,6 +760,10 @@ impl ModelType {
                 ("InternVL (InternViT + pixel-shuffle + Qwen2)", "Other VLM")
             }
             ModelType::SmolVLM => ("SmolVLM (SigLIP + pixel-shuffle + SmolLM2)", "Other VLM"),
+            ModelType::Idefics2 => (
+                "Idefics2 (SigLIP + perceiver resampler + Mistral)",
+                "Other VLM",
+            ),
             ModelType::MolmoVLM => ("Molmo (CLIP ViT + OLMo-style text)", "Other VLM"),
             ModelType::Molmo2VLM => ("Molmo 2 (custom ViT + Molmo2 text)", "Other VLM"),
             ModelType::MolmoPointVLM => {
@@ -860,6 +866,7 @@ mod metadata_tests {
             YoutuVLM,
             InternVLChatVLM,
             SmolVLM,
+            Idefics2,
             MiniCPMOVLM,
             MiniCPMV46VLM,
             Moondream3VLM,

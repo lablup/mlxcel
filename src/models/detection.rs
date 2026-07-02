@@ -228,6 +228,9 @@ pub fn get_model_type(model_path: &Path) -> Result<ModelType> {
         // a SigLIP vision tower + pixel-shuffle connector + Llama text backbone,
         // which is exactly what the SmolVLM runtime implements.
         "smolvlm" | "smolvlm2" | "idefics3" => Ok(ModelType::SmolVLM),
+        // Idefics2 shares SmolVLM's SigLIP tower but uses a perceiver-resampler
+        // connector and a Mistral text backbone, so it gets its own runtime.
+        "idefics2" => Ok(ModelType::Idefics2),
         "minicpmo" => Ok(ModelType::MiniCPMOVLM),
         "minicpmv4_6" => Ok(ModelType::MiniCPMV46VLM),
         "moondream3" => Ok(ModelType::Moondream3VLM),

@@ -133,6 +133,12 @@ pub enum VlmPreparationSummary {
         image_blocks: usize,
         total_image_tokens: usize,
     },
+    /// Idefics2 expanded each `<image>` placeholder into a
+    /// `<fake> <image> * num_image_token <fake>` block.
+    Idefics2 {
+        image_blocks: usize,
+        total_image_tokens: usize,
+    },
     /// Kimi-VL expanded each `<|media_pad|>` into `(h/merge)*(w/merge)`
     /// media-placeholder tokens.
     KimiVL {
@@ -912,6 +918,41 @@ where
 
             let input_ids_arr = prompt_ids_array(prompt_tokens);
             let embeddings = smolvlm.get_input_embeddings(&input_ids_arr, &pixel_values);
+
+            Ok(Some(PreparedVlmEmbeddings {
+                embeddings,
+                preparation,
+            }))
+        }
+        VlmRuntimeRef::Idefics2(idefics2) => {
+            // Each image becomes a single full-resolution square tile (splitting
+            // disabled for this first port). Each tile contributes
+            // `num_image_token` (64) perceiver-compressed image-feature tokens.
+            let (pixel_values, tiles_per_image) = idefics2.processor.preprocess_with_tiles(images);
+
+            // Idefics2 frames each image with `<fake_token_around_image>` and has
+            // no `<global-img>` token, so reuse the Idefics-family inserter with a
+            // zero global-image id.
+            let preparation = insert_smolvlm_image_tokens(
+                prompt_tokens,
+                &tiles_per_image,
+                idefics2.num_image_token,
+                idefics2.image_token_id,
+                idefics2.fake_image_token_id,
+                0,
+            )
+            .map(|stats| VlmPreparationSummary::Idefics2 {
+                image_blocks: stats.image_blocks,
+                total_image_tokens: stats.total_image_tokens,
+            });
+
+            // Idefics2 runs every tile in one tower call; skip the opportunistic
+            // vision cache for this first integration (mirrors the SmolVLM decision).
+            let _ = active_caches;
+            let _ = image_cache_keys;
+
+            let input_ids_arr = prompt_ids_array(prompt_tokens);
+            let embeddings = idefics2.get_input_embeddings(&input_ids_arr, &pixel_values);
 
             Ok(Some(PreparedVlmEmbeddings {
                 embeddings,

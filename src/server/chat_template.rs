@@ -74,9 +74,12 @@ impl ChatTemplateProcessor {
             None
         };
 
-        // Try tokenizer_config.json "chat_template" field first, then chat_template.jinja file.
-        // Some models (e.g. Gemma 4 MLX Community quantizations) have an empty string
-        // for chat_template in tokenizer_config.json but ship a separate .jinja file.
+        // Try tokenizer_config.json "chat_template" field first, then a separate
+        // chat_template.jinja file, then a chat_template.json file.
+        // Some models (e.g. Gemma 4 MLX Community quantizations) have an empty
+        // string for chat_template in tokenizer_config.json but ship a separate
+        // .jinja file. Others (e.g. Idefics2) ship only a chat_template.json
+        // (`{"chat_template": "..."}`), the newer transformers convention.
         let template = config
             .as_ref()
             .and_then(|c| c.get("chat_template"))
@@ -85,7 +88,19 @@ impl ChatTemplateProcessor {
             .map(String::from)
             .or_else(|| {
                 let jinja_path = model_path.join("chat_template.jinja");
-                std::fs::read_to_string(jinja_path).ok()
+                std::fs::read_to_string(jinja_path)
+                    .ok()
+                    .filter(|s| !s.trim().is_empty())
+            })
+            .or_else(|| {
+                let json_path = model_path.join("chat_template.json");
+                let content = std::fs::read_to_string(json_path).ok()?;
+                serde_json::from_str::<serde_json::Value>(&content)
+                    .ok()?
+                    .get("chat_template")?
+                    .as_str()
+                    .filter(|s| !s.is_empty())
+                    .map(String::from)
             });
 
         let Some(template) = template else {

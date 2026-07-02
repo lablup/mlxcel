@@ -18,6 +18,7 @@
 
 pub mod gemma4;
 pub mod gemma4_unified;
+pub mod idefics2;
 pub mod internvl;
 pub mod kimi_vl;
 pub mod minicpmo;

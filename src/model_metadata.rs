@@ -131,6 +131,7 @@ macro_rules! for_each_model_registration {
             KimiVL => { kind: Vlm, directory: Vlm, weight: None, adapter: Some("Kimi-VL VLM does not support adapter loading; use load_model() instead") };
             KimiK25 => { kind: Vlm, directory: Vlm, weight: None, adapter: Some("Kimi-VL 2.5 VLM does not support adapter loading; use load_model() instead") };
             SmolVLM => { kind: Vlm, directory: Vlm, weight: None, adapter: Some("SmolVLM VLM does not support adapter loading; use load_model() instead") };
+            Idefics2 => { kind: Vlm, directory: Vlm, weight: None, adapter: Some("Idefics2 VLM does not support adapter loading; use load_model() instead") };
             MiniCPMOVLM => { kind: Vlm, directory: Vlm, weight: None, adapter: Some("MiniCPM-o VLM does not support adapter loading; use load_model() instead") };
             MiniCPMV46VLM => { kind: Vlm, directory: Vlm, weight: None, adapter: Some("MiniCPM-V 4.6 VLM does not support adapter loading; use load_model() instead") };
             Moondream3VLM => { kind: Vlm, directory: Vlm, weight: None, adapter: Some("Moondream3 VLM does not support adapter loading; use load_model() instead") };
