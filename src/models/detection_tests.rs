@@ -197,3 +197,55 @@ fn gemma4_detection_uses_vlm_route_when_vision_weights_exist() {
 
     fs::remove_dir_all(model_dir).unwrap();
 }
+
+#[test]
+fn idefics3_smolvlm_instruct_model_type_is_detected() {
+    // SmolVLM-Instruct ships as an Idefics3 checkpoint: top-level
+    // `model_type: "idefics3"` (`Idefics3ForConditionalGeneration`) with a Llama
+    // `text_config` and a SigLIP-style `vision_config` that is itself tagged
+    // `idefics3`. It must resolve to the SmolVLM runtime instead of erroring with
+    // "Unsupported model type: idefics3". Config shape mirrors the released
+    // HuggingFaceTB/SmolVLM-Instruct config.json.
+    let model_dir = temp_path("smolvlm_instruct_idefics3");
+    fs::create_dir_all(&model_dir).unwrap();
+    fs::write(
+        model_dir.join("config.json"),
+        r#"{
+            "architectures": ["Idefics3ForConditionalGeneration"],
+            "model_type": "idefics3",
+            "image_token_id": 49153,
+            "image_seq_len": 81,
+            "scale_factor": 3,
+            "tie_word_embeddings": false,
+            "text_config": {
+                "model_type": "llama",
+                "hidden_size": 2048,
+                "intermediate_size": 8192,
+                "num_hidden_layers": 24,
+                "num_attention_heads": 32,
+                "num_key_value_heads": 32,
+                "head_dim": 64,
+                "rms_norm_eps": 1e-05,
+                "rope_theta": 273768.0,
+                "vocab_size": 49155,
+                "tie_word_embeddings": false
+            },
+            "vision_config": {
+                "model_type": "idefics3",
+                "hidden_size": 1152,
+                "intermediate_size": 4304,
+                "num_hidden_layers": 27,
+                "num_attention_heads": 16,
+                "patch_size": 14,
+                "image_size": 384
+            },
+            "vocab_size": 49155
+        }"#,
+    )
+    .unwrap();
+
+    let detected = super::detection::get_model_type(&model_dir).unwrap();
+    assert_eq!(detected, ModelType::SmolVLM);
+
+    fs::remove_dir_all(model_dir).unwrap();
+}
