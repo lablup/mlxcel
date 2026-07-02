@@ -25,7 +25,7 @@
 //! `[B, num_media, num_tiles, num_patches, vision_output_dim]`, ready for the
 //! multi-modal projector.
 
-use mlxcel_core::layers::{LayerNorm, Linear};
+use mlxcel_core::layers::{LayerNorm, UnifiedEmbedding, UnifiedLinear};
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
 
@@ -49,10 +49,10 @@ fn load_layer_norm(weights: &WeightMap, prefix: &str, eps: f32) -> Result<LayerN
 /// Full self-attention over all patches of a tile (no mask beyond the padded
 /// aspect-ratio mask). No bias on any projection.
 struct VisionAttention {
-    q_proj: Linear,
-    k_proj: Linear,
-    v_proj: Linear,
-    o_proj: Linear,
+    q_proj: UnifiedLinear,
+    k_proj: UnifiedLinear,
+    v_proj: UnifiedLinear,
+    o_proj: UnifiedLinear,
     num_heads: i32,
     head_dim: i32,
     scale: f32,
@@ -63,13 +63,18 @@ impl VisionAttention {
         weights: &WeightMap,
         config: &MllamaVisionConfig,
         prefix: &str,
+        group_size: i32,
+        bits: i32,
     ) -> Result<Self, String> {
         let head_dim = config.head_dim() as i32;
+        let linear = |name: &str| {
+            UnifiedLinear::from_weights(weights, &format!("{prefix}.{name}"), group_size, bits)
+        };
         Ok(Self {
-            q_proj: Linear::from_weights(weights, &format!("{prefix}.q_proj"))?,
-            k_proj: Linear::from_weights(weights, &format!("{prefix}.k_proj"))?,
-            v_proj: Linear::from_weights(weights, &format!("{prefix}.v_proj"))?,
-            o_proj: Linear::from_weights(weights, &format!("{prefix}.o_proj"))?,
+            q_proj: linear("q_proj")?,
+            k_proj: linear("k_proj")?,
+            v_proj: linear("v_proj")?,
+            o_proj: linear("o_proj")?,
             num_heads: config.num_attention_heads as i32,
             head_dim,
             scale: (head_dim as f32).powf(-0.5),
@@ -102,15 +107,20 @@ impl VisionAttention {
 
 /// fc1 -> GELU(exact) -> fc2 (both projections carry a bias).
 struct VisionMLP {
-    fc1: Linear,
-    fc2: Linear,
+    fc1: UnifiedLinear,
+    fc2: UnifiedLinear,
 }
 
 impl VisionMLP {
-    fn from_weights(weights: &WeightMap, prefix: &str) -> Result<Self, String> {
+    fn from_weights(
+        weights: &WeightMap,
+        prefix: &str,
+        group_size: i32,
+        bits: i32,
+    ) -> Result<Self, String> {
         Ok(Self {
-            fc1: Linear::from_weights(weights, &format!("{prefix}.fc1"))?,
-            fc2: Linear::from_weights(weights, &format!("{prefix}.fc2"))?,
+            fc1: UnifiedLinear::from_weights(weights, &format!("{prefix}.fc1"), group_size, bits)?,
+            fc2: UnifiedLinear::from_weights(weights, &format!("{prefix}.fc2"), group_size, bits)?,
         })
     }
 
@@ -138,6 +148,8 @@ impl EncoderLayer {
         config: &MllamaVisionConfig,
         prefix: &str,
         is_gated: bool,
+        group_size: i32,
+        bits: i32,
     ) -> Result<Self, String> {
         let (gate_attn, gate_ffn) = if is_gated {
             (
@@ -162,8 +174,10 @@ impl EncoderLayer {
                 weights,
                 config,
                 &format!("{prefix}.self_attn"),
+                group_size,
+                bits,
             )?,
-            mlp: VisionMLP::from_weights(weights, &format!("{prefix}.mlp"))?,
+            mlp: VisionMLP::from_weights(weights, &format!("{prefix}.mlp"), group_size, bits)?,
             gate_attn,
             gate_ffn,
         })
@@ -189,8 +203,10 @@ impl EncoderLayer {
 }
 
 /// Learned per-tile aspect-ratio embedding (`nn.Embedding`), optionally gated.
+/// The embedding table is quantized in `-4bit`/`-8bit` checkpoints, so it loads
+/// through [`UnifiedEmbedding`] (which dequantizes on lookup).
 struct AspectRatioEmbedding {
-    weight: UniquePtr<MlxArray>,
+    embedding: UnifiedEmbedding,
     gate: Option<UniquePtr<MlxArray>>,
     max_num_tiles: i32,
     hidden_size: i32,
@@ -201,9 +217,16 @@ impl AspectRatioEmbedding {
         weights: &WeightMap,
         config: &MllamaVisionConfig,
         prefix: &str,
+        group_size: i32,
+        bits: i32,
     ) -> Result<Self, String> {
         Ok(Self {
-            weight: get_copy(weights, &format!("{prefix}.embedding.weight"))?,
+            embedding: UnifiedEmbedding::from_weights(
+                weights,
+                &format!("{prefix}.embedding"),
+                group_size,
+                bits,
+            )?,
             gate: Some(get_copy(weights, &format!("{prefix}.gate"))?),
             max_num_tiles: config.max_num_tiles as i32,
             hidden_size: config.hidden_size as i32,
@@ -213,7 +236,7 @@ impl AspectRatioEmbedding {
     /// `hidden_state`: `[bm, max_num_tiles, num_patches, hidden]`.
     /// `aspect_ratio_ids`: int32 `[bm, 1]`.
     fn forward(&self, hidden_state: &MlxArray, aspect_ratio_ids: &MlxArray) -> UniquePtr<MlxArray> {
-        let embeddings = mlxcel_core::embedding(&self.weight, aspect_ratio_ids);
+        let embeddings = self.embedding.forward(aspect_ratio_ids);
         let mut embeddings =
             mlxcel_core::reshape(&embeddings, &[-1, self.max_num_tiles, 1, self.hidden_size]);
         if let Some(gate) = &self.gate {
@@ -228,7 +251,7 @@ impl AspectRatioEmbedding {
 struct PositionEmbedding {
     gate: UniquePtr<MlxArray>,
     embedding: UniquePtr<MlxArray>,
-    tile_embedding_weight: UniquePtr<MlxArray>,
+    tile_embedding: UnifiedEmbedding,
     max_num_tiles: i32,
     num_patches: i32,
     hidden_size: i32,
@@ -239,11 +262,20 @@ impl PositionEmbedding {
         weights: &WeightMap,
         config: &MllamaVisionConfig,
         prefix: &str,
+        group_size: i32,
+        bits: i32,
     ) -> Result<Self, String> {
         Ok(Self {
             gate: get_copy(weights, &format!("{prefix}.gate"))?,
+            // The base per-patch table is a raw `nn.Parameter` (never quantized).
             embedding: get_copy(weights, &format!("{prefix}.embedding"))?,
-            tile_embedding_weight: get_copy(weights, &format!("{prefix}.tile_embedding.weight"))?,
+            // The per-tile table is an `nn.Embedding`, quantized in 4/8-bit.
+            tile_embedding: UnifiedEmbedding::from_weights(
+                weights,
+                &format!("{prefix}.tile_embedding"),
+                group_size,
+                bits,
+            )?,
             max_num_tiles: config.max_num_tiles as i32,
             num_patches: config.num_patches() as i32,
             hidden_size: config.hidden_size as i32,
@@ -262,7 +294,7 @@ impl PositionEmbedding {
         let hidden_state = mlxcel_core::add(hidden_state, &gated_pos);
 
         // Per-tile position embedding, gated by tanh(gate).
-        let tile = mlxcel_core::embedding(&self.tile_embedding_weight, aspect_ratio_ids);
+        let tile = self.tile_embedding.forward(aspect_ratio_ids);
         let tile = mlxcel_core::reshape(
             &tile,
             &[-1, self.max_num_tiles, self.num_patches, self.hidden_size],
@@ -279,12 +311,15 @@ struct VisionEncoder {
 }
 
 impl VisionEncoder {
+    #[allow(clippy::too_many_arguments)]
     fn from_weights(
         weights: &WeightMap,
         config: &MllamaVisionConfig,
         prefix: &str,
         num_layers: usize,
         is_gated: bool,
+        group_size: i32,
+        bits: i32,
     ) -> Result<Self, String> {
         let mut layers = Vec::with_capacity(num_layers);
         for i in 0..num_layers {
@@ -293,6 +328,8 @@ impl VisionEncoder {
                 config,
                 &format!("{prefix}.layers.{i}"),
                 is_gated,
+                group_size,
+                bits,
             )?);
         }
         Ok(Self { layers })
@@ -334,6 +371,13 @@ impl MllamaVisionModel {
         config: &MllamaVisionConfig,
         prefix: &str,
     ) -> Result<Self, String> {
+        // Quantization params inherited from the checkpoint's top-level block.
+        // The tower projections, MLPs, and tile/positional embedding tables are
+        // quantized in `-4bit`/`-8bit` releases; `Unified{Linear,Embedding}`
+        // fall back to plain tensors when `.scales` is absent (dense tower).
+        let group_size = config.quant_group_size();
+        let bits = config.quant_bits();
+
         // Conv2d patch weight; transpose PyTorch [out,in,kH,kW] -> MLX
         // [out,kH,kW,in] only when the checkpoint is not already channel-last.
         let mut patch_embedding_weight =
@@ -353,16 +397,22 @@ impl MllamaVisionModel {
                 weights,
                 config,
                 &format!("{prefix}.gated_positional_embedding"),
+                group_size,
+                bits,
             )?,
             pre_tile_positional_embedding: AspectRatioEmbedding::from_weights(
                 weights,
                 config,
                 &format!("{prefix}.pre_tile_positional_embedding"),
+                group_size,
+                bits,
             )?,
             post_tile_positional_embedding: AspectRatioEmbedding::from_weights(
                 weights,
                 config,
                 &format!("{prefix}.post_tile_positional_embedding"),
+                group_size,
+                bits,
             )?,
             layernorm_pre: load_layer_norm(
                 weights,
@@ -380,6 +430,8 @@ impl MllamaVisionModel {
                 &format!("{prefix}.transformer"),
                 config.num_hidden_layers,
                 false,
+                group_size,
+                bits,
             )?,
             global_transformer: VisionEncoder::from_weights(
                 weights,
@@ -387,9 +439,22 @@ impl MllamaVisionModel {
                 &format!("{prefix}.global_transformer"),
                 config.num_global_layers,
                 true,
+                group_size,
+                bits,
             )?,
             config: config.clone(),
         })
+    }
+
+    /// Whether the tower loaded quantized projections (i.e. the checkpoint
+    /// carried `.scales`/`.biases`). Drives nothing at runtime beyond the
+    /// `UnifiedLinear` dispatch it already encapsulates; exposed for load-time
+    /// inspection and the checkpoint-key parity tests.
+    pub fn is_quantized(&self) -> bool {
+        self.transformer
+            .layers
+            .first()
+            .is_some_and(|layer| layer.self_attn.q_proj.is_quantized())
     }
 
     /// `pixel_values`: `[B, num_media, num_tiles, C, H, W]`.
@@ -602,7 +667,9 @@ fn prepare_aspect_ratio_attention_mask(
 
 #[cfg(test)]
 mod tests {
-    use super::prepare_aspect_ratio_attention_mask;
+    use super::{MllamaVisionModel, prepare_aspect_ratio_attention_mask};
+    use crate::models::mllama::MllamaVisionConfig;
+    use mlxcel_core::weights::WeightMap;
 
     fn value_at(mask: &mlxcel_core::MlxArray, i: i32, j: i32) -> f32 {
         // mask: [1, 1, L, L]
@@ -639,5 +706,191 @@ mod tests {
         // Both endpoints in the padding tile -> masked.
         assert!(value_at(&mask, 2, 2) < -1e8);
         assert!(value_at(&mask, 3, 3) < -1e8);
+    }
+
+    // --- Real-checkpoint vision-tower key-set parity (issue #527 follow-up). ---
+    //
+    // These reconstruct the exact key names the real Llama-3.2-11B-Vision(-4bit)
+    // checkpoint stores for the tower (verified against
+    // `model.safetensors.index.json`) and feed them through
+    // `MllamaVisionModel::from_weights`, asserting the loader resolves every key
+    // it expects. They run on CPU with tiny tensors (no GPU, no real weights):
+    // `from_weights` only copies tensors and reads shapes, so no kernel runs.
+
+    /// Vision tower config mirroring the real tower's structure with a tiny
+    /// layer count, exercising both the local and gated global transformer.
+    fn tiny_vision_config(quantized: bool) -> MllamaVisionConfig {
+        let quant = if quantized {
+            r#", "quantization": { "group_size": 64, "bits": 4 }"#
+        } else {
+            ""
+        };
+        serde_json::from_str(&format!(
+            r#"{{
+                "image_size": 28,
+                "patch_size": 14,
+                "hidden_size": 8,
+                "num_hidden_layers": 2,
+                "num_global_layers": 1,
+                "num_attention_heads": 2,
+                "max_num_tiles": 4,
+                "intermediate_layers_indices": [0]
+                {quant}
+            }}"#
+        ))
+        .expect("tiny mllama vision config")
+    }
+
+    fn dense(map: &mut WeightMap, key: &str, shape: &[i32]) {
+        let n: i32 = shape.iter().product();
+        map.insert(
+            key.to_string(),
+            mlxcel_core::from_slice_f32(&vec![0.0; n as usize], shape),
+        );
+    }
+
+    /// Insert an `nn.Linear` / `nn.Embedding` at `prefix`. When `quantized`,
+    /// emit the affine triplet `.weight` (u32 packed) + `.scales` + `.biases`
+    /// with shapes satisfying MLX's `packed_in * 32 == bits * num_groups *
+    /// group_size` invariant (group_size 64 / bits 4: in=64 -> packed_in 8,
+    /// num_groups 1); otherwise a plain float `.weight`.
+    fn quant_or_dense(map: &mut WeightMap, prefix: &str, quantized: bool, bias: bool) {
+        if quantized {
+            map.insert(
+                format!("{prefix}.weight"),
+                mlxcel_core::from_slice_u32(&[0u32; 8 * 8], &[8, 8]),
+            );
+            dense(map, &format!("{prefix}.scales"), &[8, 1]);
+            dense(map, &format!("{prefix}.biases"), &[8, 1]);
+        } else {
+            dense(map, &format!("{prefix}.weight"), &[8, 64]);
+        }
+        if bias {
+            dense(map, &format!("{prefix}.bias"), &[8]);
+        }
+    }
+
+    fn add_transformer_layers(
+        map: &mut WeightMap,
+        prefix: &str,
+        stack: &str,
+        count: usize,
+        gated: bool,
+        quantized: bool,
+    ) {
+        for i in 0..count {
+            let p = format!("{prefix}.{stack}.layers.{i}");
+            dense(map, &format!("{p}.input_layernorm.weight"), &[8]);
+            dense(map, &format!("{p}.input_layernorm.bias"), &[8]);
+            dense(map, &format!("{p}.post_attention_layernorm.weight"), &[8]);
+            dense(map, &format!("{p}.post_attention_layernorm.bias"), &[8]);
+            for proj in ["q_proj", "k_proj", "v_proj", "o_proj"] {
+                quant_or_dense(map, &format!("{p}.self_attn.{proj}"), quantized, false);
+            }
+            // mlp fc1/fc2 carry a float bias in addition to quant scales/biases.
+            quant_or_dense(map, &format!("{p}.mlp.fc1"), quantized, true);
+            quant_or_dense(map, &format!("{p}.mlp.fc2"), quantized, true);
+            if gated {
+                dense(map, &format!("{p}.gate_attn"), &[1]);
+                dense(map, &format!("{p}.gate_ffn"), &[1]);
+            }
+        }
+    }
+
+    /// Build the full vision-tower weight set exactly as the real checkpoint
+    /// stores it under `prefix` (2 local + 1 gated global layer).
+    fn build_vision_weights(prefix: &str, quantized: bool) -> WeightMap {
+        let mut w = WeightMap::new();
+
+        // Non-quantized leaf tensors: patch conv, class token, pre/post norms.
+        dense(&mut w, &format!("{prefix}.class_embedding"), &[8]);
+        dense(
+            &mut w,
+            &format!("{prefix}.patch_embedding.weight"),
+            &[8, 3, 2, 2],
+        );
+        dense(&mut w, &format!("{prefix}.layernorm_pre.weight"), &[8]);
+        dense(&mut w, &format!("{prefix}.layernorm_pre.bias"), &[8]);
+        dense(&mut w, &format!("{prefix}.layernorm_post.weight"), &[8]);
+        dense(&mut w, &format!("{prefix}.layernorm_post.bias"), &[8]);
+
+        // Gated positional embedding: raw base table + gate, quantized tile table.
+        dense(
+            &mut w,
+            &format!("{prefix}.gated_positional_embedding.embedding"),
+            &[5, 8],
+        );
+        dense(
+            &mut w,
+            &format!("{prefix}.gated_positional_embedding.gate"),
+            &[1],
+        );
+        quant_or_dense(
+            &mut w,
+            &format!("{prefix}.gated_positional_embedding.tile_embedding"),
+            quantized,
+            false,
+        );
+
+        // Pre/post tile aspect-ratio embeddings: quantized table + gate.
+        for name in [
+            "pre_tile_positional_embedding",
+            "post_tile_positional_embedding",
+        ] {
+            quant_or_dense(
+                &mut w,
+                &format!("{prefix}.{name}.embedding"),
+                quantized,
+                false,
+            );
+            dense(&mut w, &format!("{prefix}.{name}.gate"), &[1]);
+        }
+
+        add_transformer_layers(&mut w, prefix, "transformer", 2, false, quantized);
+        add_transformer_layers(&mut w, prefix, "global_transformer", 1, true, quantized);
+        w
+    }
+
+    #[test]
+    fn real_vision_tower_keys_load_and_stay_quantized() {
+        let config = tiny_vision_config(true);
+        let weights = build_vision_weights("vision_tower", true);
+        let model = MllamaVisionModel::from_weights(&weights, &config, "vision_tower")
+            .expect("real 4-bit vision_tower key set must resolve against the encoder");
+        assert!(
+            model.is_quantized(),
+            "the 4-bit tower must load quantized projections, not raw packed weights"
+        );
+    }
+
+    #[test]
+    fn wrong_vision_prefix_reproduces_the_527_load_failure() {
+        // Before this fix the loader passed "vision_model", which does not exist
+        // in the real checkpoint. Guard against a regression to that prefix.
+        let config = tiny_vision_config(true);
+        let weights = build_vision_weights("vision_tower", true);
+        // `MllamaVisionModel` is not `Debug`, so match rather than `expect_err`.
+        let err = match MllamaVisionModel::from_weights(&weights, &config, "vision_model") {
+            Ok(_) => panic!("the pre-fix 'vision_model' prefix must not resolve"),
+            Err(e) => e,
+        };
+        assert!(
+            err.contains("vision_model.patch_embedding.weight"),
+            "expected the original #527 error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn dense_vision_tower_falls_back_to_regular_linear() {
+        // A hypothetical unquantized tower (no `.scales`) must still load, via
+        // the Unified{Linear,Embedding} regular fallback.
+        let config = tiny_vision_config(false);
+        let weights = build_vision_weights("vision_tower", false);
+        let model = MllamaVisionModel::from_weights(&weights, &config, "vision_tower")
+            .expect("dense vision_tower key set must resolve");
+        assert!(
+            !model.is_quantized(),
+            "a dense tower must not report quantized projections"
+        );
     }
 }

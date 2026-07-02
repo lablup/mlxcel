@@ -19,8 +19,9 @@
 //!
 //! Composition:
 //! - [`MllamaVisionModel`] tower produces `cross_attention_states`.
-//! - `multi_modal_projector` (a `Linear` with bias) maps the tower's
-//!   `vision_output_dim` features into the text hidden size.
+//! - `multi_modal_projector` (a `UnifiedLinear` with bias, quantized in the
+//!   `-4bit`/`-8bit` releases) maps the tower's `vision_output_dim` features
+//!   into the text hidden size.
 //! - [`MllamaTextModel`] is a Llama-3 decoder whose cross-attention layers
 //!   attend to those projected features.
 //!
@@ -37,7 +38,7 @@
 use std::cell::RefCell;
 
 use mlxcel_core::generate::LanguageModel;
-use mlxcel_core::layers::{KVCache, Linear};
+use mlxcel_core::layers::{KVCache, UnifiedLinear};
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
 
@@ -50,7 +51,7 @@ use crate::vision::processors::mllama::{MllamaImageInputs, MllamaImageProcessor}
 pub struct MllamaVLModel {
     pub text_model: MllamaTextModel,
     pub vision_tower: MllamaVisionModel,
-    pub multi_modal_projector: Linear,
+    pub multi_modal_projector: UnifiedLinear,
     pub processor: MllamaImageProcessor,
     pub config: MllamaConfig,
     pub eos_token_ids: Vec<i32>,
@@ -64,7 +65,7 @@ impl MllamaVLModel {
     pub fn from_parts(
         text_model: MllamaTextModel,
         vision_tower: MllamaVisionModel,
-        multi_modal_projector: Linear,
+        multi_modal_projector: UnifiedLinear,
         processor: MllamaImageProcessor,
         config: MllamaConfig,
         eos_token_ids: Vec<i32>,
@@ -81,8 +82,16 @@ impl MllamaVLModel {
     }
 
     /// Load the `multi_modal_projector` linear (`vision_output_dim -> hidden`).
-    pub fn load_projector(weights: &WeightMap) -> Result<Linear, String> {
-        Linear::from_weights(weights, "multi_modal_projector")
+    ///
+    /// Quantized in the `-4bit`/`-8bit` releases (`.scales`/`.biases` alongside
+    /// a float `.bias`); [`UnifiedLinear`] auto-detects this and falls back to a
+    /// plain linear on a dense checkpoint.
+    pub fn load_projector(
+        weights: &WeightMap,
+        group_size: i32,
+        bits: i32,
+    ) -> Result<UnifiedLinear, String> {
+        UnifiedLinear::from_weights(weights, "multi_modal_projector", group_size, bits)
     }
 
     /// Run the vision tower and projector to obtain the flattened
@@ -184,5 +193,43 @@ impl LanguageModel for MllamaVLModel {
 
     fn eos_token_ids(&self) -> Vec<i32> {
         self.eos_token_ids.clone()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::MllamaVLModel;
+    use mlxcel_core::weights::WeightMap;
+
+    /// The real checkpoint stores `multi_modal_projector` quantized with a float
+    /// `.bias` alongside the affine `.scales`/`.biases`. The loader must resolve
+    /// all four and report a quantized projector (issue #527 follow-up).
+    #[test]
+    fn projector_loads_quantized_with_bias() {
+        let mut w = WeightMap::new();
+        // group_size 64 / bits 4: in=64 -> packed_in 8, num_groups 1.
+        w.insert(
+            "multi_modal_projector.weight".to_string(),
+            mlxcel_core::from_slice_u32(&[0u32; 8 * 8], &[8, 8]),
+        );
+        w.insert(
+            "multi_modal_projector.scales".to_string(),
+            mlxcel_core::from_slice_f32(&[0.0; 8], &[8, 1]),
+        );
+        w.insert(
+            "multi_modal_projector.biases".to_string(),
+            mlxcel_core::from_slice_f32(&[0.0; 8], &[8, 1]),
+        );
+        w.insert(
+            "multi_modal_projector.bias".to_string(),
+            mlxcel_core::from_slice_f32(&[0.0; 8], &[8]),
+        );
+
+        let projector =
+            MllamaVLModel::load_projector(&w, 64, 4).expect("quantized projector must load");
+        assert!(
+            projector.is_quantized(),
+            "the 4-bit projector must load quantized, not as a raw packed linear"
+        );
     }
 }

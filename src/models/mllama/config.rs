@@ -128,6 +128,11 @@ pub struct MllamaVisionConfig {
     pub intermediate_layers_indices: Vec<usize>,
     #[serde(default = "default_supported_aspect_ratios")]
     pub supported_aspect_ratios: Vec<Vec<usize>>,
+    /// Quantization block inherited from the checkpoint's top-level
+    /// `quantization` (the vision tower, projector, and text backbone are
+    /// quantized together). `None` for an unquantized tower.
+    #[serde(default)]
+    pub quantization: Option<crate::models::llama3::Quantization>,
 }
 
 impl MllamaVisionConfig {
@@ -140,6 +145,22 @@ impl MllamaVisionConfig {
     /// Head dimension of the vision self-attention.
     pub fn head_dim(&self) -> usize {
         self.hidden_size / self.num_attention_heads
+    }
+
+    /// Quantization group size, or the MLX default (64) when the tower is not
+    /// quantized. Consulted only on the quantized path, where the checkpoint's
+    /// top-level `quantization` is inherited into this config.
+    pub fn quant_group_size(&self) -> i32 {
+        self.quantization
+            .as_ref()
+            .map(|q| q.group_size)
+            .unwrap_or(64)
+    }
+
+    /// Quantization bit width, or the MLX default (4) when the tower is not
+    /// quantized.
+    pub fn quant_bits(&self) -> i32 {
+        self.quantization.as_ref().map(|q| q.bits).unwrap_or(4)
     }
 }
 
@@ -290,6 +311,23 @@ mod tests {
         assert_eq!(cfg.vision_config.num_patches(), 1601);
         assert_eq!(cfg.vision_config.head_dim(), 80);
         assert_eq!(cfg.vision_config.supported_aspect_ratios.len(), 8);
+    }
+
+    #[test]
+    fn vision_config_reads_inherited_quantization() {
+        // Unquantized tower: MLX defaults, not a quantized load.
+        let dense: MllamaVisionConfig = serde_json::from_str("{}").expect("defaults");
+        assert!(dense.quantization.is_none());
+        assert_eq!(dense.quant_group_size(), 64);
+        assert_eq!(dense.quant_bits(), 4);
+
+        // Quantized tower: the top-level block is inherited into vision_config
+        // by the loader before parsing.
+        let quant: MllamaVisionConfig =
+            serde_json::from_str(r#"{ "quantization": { "group_size": 64, "bits": 4 } }"#)
+                .expect("quantized vision config");
+        assert_eq!(quant.quant_group_size(), 64);
+        assert_eq!(quant.quant_bits(), 4);
     }
 
     #[test]

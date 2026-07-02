@@ -17,8 +17,14 @@
 //! Checkpoint layout (Llama-3.2-11B-Vision):
 //! - `language_model.model.*` / `language_model.lm_head.weight` — the Llama-3
 //!   backbone with interleaved gated cross-attention layers.
-//! - `vision_model.*` — the tiled ViT tower.
+//! - `vision_tower.*` — the tiled ViT tower (patch/class embeds, gated
+//!   positional + pre/post tile embeddings, local + gated global transformers).
 //! - `multi_modal_projector.{weight,bias}` — `vision_output_dim -> hidden`.
+//!
+//! On a quantized checkpoint (e.g. the `-4bit` release) the tower projections,
+//! MLPs, the tile/positional embeddings, and the projector all carry
+//! `.scales`/`.biases`; the loaders below auto-detect this via the shared
+//! `Unified{Linear,Embedding}` primitives.
 //!
 //! Precision follows the standard Apple Silicon policy: bf16 tensors are
 //! widened to f16 (no Apple GPU has a native bf16 ALU), while quantization
@@ -68,20 +74,22 @@ fn resolve_eos_token_ids(full_config: &Value) -> Vec<i32> {
     DEFAULT_EOS_TOKEN_IDS.to_vec()
 }
 
-/// Inherit a top-level `quantization` block into `text_config` when the text
-/// config does not carry its own (the LLM weights are quantized).
+/// Inherit a top-level `quantization` block into `text_config` and
+/// `vision_config` when they do not carry their own. mllama quantizes the
+/// whole model together (text backbone, vision tower, and projector), but the
+/// exported `config.json` records the block only at the top level.
 fn inherit_quantization(config_value: &mut Value, full_config: &Value) {
-    let needs_quant = config_value
-        .get("text_config")
-        .and_then(|tc| tc.get("quantization"))
-        .is_none();
-    if needs_quant
-        && let Some(q) = full_config.get("quantization")
-        && let Some(tc) = config_value
-            .get_mut("text_config")
-            .and_then(Value::as_object_mut)
-    {
-        tc.insert("quantization".to_string(), q.clone());
+    let Some(q) = full_config.get("quantization") else {
+        return;
+    };
+    for sub in ["text_config", "vision_config"] {
+        let needs_quant = config_value
+            .get(sub)
+            .and_then(|c| c.get("quantization"))
+            .is_none();
+        if needs_quant && let Some(obj) = config_value.get_mut(sub).and_then(Value::as_object_mut) {
+            obj.insert("quantization".to_string(), q.clone());
+        }
     }
 }
 
@@ -114,11 +122,17 @@ pub(crate) fn load_mllama_vlm(model_path: &Path) -> Result<LoadedModel> {
 
     let text_model = MllamaTextModel::from_weights(&weights, &config.text_config)
         .map_err(|e| anyhow::anyhow!("Failed to load mllama text backbone: {}", e))?;
+    // The real checkpoint stores the tower under `vision_tower.*` (HF/MLX
+    // `MllamaForConditionalGeneration`), not `vision_model.*`.
     let vision_tower =
-        MllamaVisionModel::from_weights(&weights, &config.vision_config, "vision_model")
+        MllamaVisionModel::from_weights(&weights, &config.vision_config, "vision_tower")
             .map_err(|e| anyhow::anyhow!("Failed to load mllama vision tower: {}", e))?;
-    let projector = MllamaVLModel::load_projector(&weights)
-        .map_err(|e| anyhow::anyhow!("Failed to load mllama multi_modal_projector: {}", e))?;
+    let projector = MllamaVLModel::load_projector(
+        &weights,
+        config.vision_config.quant_group_size(),
+        config.vision_config.quant_bits(),
+    )
+    .map_err(|e| anyhow::anyhow!("Failed to load mllama multi_modal_projector: {}", e))?;
 
     let processor = MllamaImageProcessor::new(
         config.vision_config.image_size,
