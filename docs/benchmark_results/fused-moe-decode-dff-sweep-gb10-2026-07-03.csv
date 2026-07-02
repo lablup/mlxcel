@@ -1,0 +1,15 @@
+# Fused decode-MoE vs gather_qmm Dff crossover sweep (#626).
+# Host: GB10 (DGX Spark), sm_121, CUDA 13.0. MLX pin e9463bb.
+# Harness: mlxcel-bench-decode, prompt "Hello, how are you today?", 100 decode
+# tokens after a 20-token in-process warmup, median of 3 invocations per side.
+# Fallback side forced with MLXCEL_FUSED_MOE_MAX_DFF=1 (gather_qmm);
+# fused side forced with MLXCEL_FUSED_MOE_MAX_DFF=20000 (fused two-kernel path).
+# decode tok/s. NA = model does not run in the text decode bench harness.
+model,dff,quant_mode,fallback_run1,fallback_run2,fallback_run3,fallback_median,fused_run1,fused_run2,fused_run3,fused_median,fused_over_fallback
+qwen3.5-35b-a3b-4bit,512,affine,NA,NA,NA,NA,NA,NA,NA,NA,NA
+qwen3-30b-a3b-4bit,768,affine,91.00,91.66,90.44,91.00,88.43,91.91,91.34,91.34,1.0037
+lfm2-8b-a1b-4bit,1792,affine,140.65,139.82,140.35,140.35,157.36,157.80,157.76,157.76,1.1240
+gpt-oss-20b-mxfp4,2880,mxfp4,78.93,78.59,77.10,78.59,78.00,78.90,76.57,78.00,0.9925
+phi-3.5-moe-4bit,6400,affine,49.44,51.96,51.09,51.09,53.62,53.41,53.78,53.62,1.0495
+llama-4-scout-17b-4bit,8192,affine,21.23,21.23,21.28,21.23,21.00,21.27,21.08,21.08,0.9929
+mixtral-8x7b-4bit,14336,affine,28.15,28.23,28.30,28.23,27.88,27.89,27.90,27.89,0.9880

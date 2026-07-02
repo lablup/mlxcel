@@ -1801,6 +1801,13 @@ mod ffi {
         /// Check whether the current default device is GPU
         fn is_gpu_available() -> bool;
 
+        /// True when the MLX Metal backend is available at runtime (macOS
+        /// Apple Silicon). False on CUDA-only and CPU-only builds. Mirrors the
+        /// `mlx::core::metal::is_available()` gate that picks the Metal vs CUDA
+        /// kernel port, so Rust callers can choose a backend-specific default
+        /// without a compile-time cfg. See issue #626.
+        fn metal_is_available() -> bool;
+
         /// Fused sampling: temperature + top-k + top-p + min-p + categorical
         /// in a single C++ call to minimize FFI round-trips.
         /// Input: 2D logits [batch, vocab] (already sliced, penalties applied)

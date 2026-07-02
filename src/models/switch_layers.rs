@@ -61,6 +61,42 @@ pub(crate) fn fused_moe_enabled_from(value: Option<&str>) -> bool {
     }
 }
 
+/// Metal default for the fused decode-MoE expert-intermediate (Dff) upper bound.
+///
+/// The fused two-kernel path wins only while `gather_qmm` underutilizes the GPU
+/// (small experts); above this bound the caller falls back to `gather_qmm`.
+/// Tuned on M1 Ultra, where phi-3.5-moe (Dff 6400) already regresses. See
+/// `docs/benchmark_results/fused-moe-decode-kernel-design.md`.
+const FUSED_MOE_MAX_DFF_METAL: i32 = 4096;
+
+/// CUDA default for the same bound. At batch=1 `gather_qmm` leaves far more of
+/// the GPU idle than on Metal, so the fused path keeps winning to a larger
+/// expert size. Re-measured on GB10 (DGX Spark, sm_121) under MLX pin e9463bb
+/// (#626, after the #625 pin bump moved `gather_gemm` to JIT and sped the
+/// fallback): fused wins through Dff 6400 (phi-3.5-moe +5%, lfm2 +12%), is
+/// break-even at 8192 (llama-4-scout, within run-to-run noise) and loses at
+/// 14336 (mixtral -1.2%), so the crossover interpolates to ~8000. Set to the
+/// 8192 break-even boundary, which stays well below the 14336 regression while
+/// capturing the phi-3.5-moe / llama-4-scout mid-size experts that the old 4096
+/// default silently declined. The env var overrides this on both backends.
+const FUSED_MOE_MAX_DFF_CUDA: i32 = 8192;
+
+/// Resolve the fused-MoE Dff upper bound. An explicit positive
+/// `MLXCEL_FUSED_MOE_MAX_DFF` wins on both backends; otherwise the default is
+/// backend-specific (Metal keeps the conservative 4096, CUDA uses the higher
+/// measured crossover). Split out as a pure function so the backend-aware
+/// default is unit-testable without mutating process-global env or querying the
+/// live device; `metal_available` mirrors `mlx::core::metal::is_available()`.
+pub(crate) fn fused_moe_max_dff_from(env: Option<&str>, metal_available: bool) -> i32 {
+    env.and_then(|s| s.parse::<i32>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(if metal_available {
+            FUSED_MOE_MAX_DFF_METAL
+        } else {
+            FUSED_MOE_MAX_DFF_CUDA
+        })
+}
+
 /// Per-expert 3D linear layer (falls back to gather_mm for non-quantized models)
 /// Supports affine, mxfp4, nvfp4, and mxfp8 quantization modes.
 pub enum SwitchLinear {
@@ -394,16 +430,14 @@ impl SwitchGLU {
         let din = gw_shape[2] * (32 / gate.bits);
         // Large experts: gather_qmm already saturates the GPU, so the two-kernel
         // fused path's all-cores advantage disappears and its extra dispatch +
-        // global-memory activation staging becomes a net loss. Measured on M1
-        // Ultra: wins for small experts (Dff 704..2560: +3.5% to +15.4%), loses
-        // for large ones (phi-3.5-moe Dff 6400: -5.9%, mixtral Dff 14336: -21%).
-        // Decline above the break-even so the caller falls back to gather_qmm.
-        // The break-even is hardware-dependent, so the bound is env-tunable.
-        let max_dff = std::env::var("MLXCEL_FUSED_MOE_MAX_DFF")
-            .ok()
-            .and_then(|s| s.parse::<i32>().ok())
-            .filter(|v| *v > 0)
-            .unwrap_or(4096);
+        // global-memory activation staging becomes a net loss. The break-even is
+        // backend-dependent (Metal ~4096, CUDA ~8192; see FUSED_MOE_MAX_DFF_*),
+        // so the default follows the live backend and the env var overrides both.
+        // Decline above the bound so the caller falls back to gather_qmm.
+        let max_dff = fused_moe_max_dff_from(
+            std::env::var("MLXCEL_FUSED_MOE_MAX_DFF").ok().as_deref(),
+            mlxcel_core::metal_is_available(),
+        );
         if dff > max_dff {
             return None;
         }
@@ -655,6 +689,32 @@ mod tests {
             assert!(
                 fused_moe_enabled_from(Some(v)),
                 "{v:?} should keep the kernel on"
+            );
+        }
+    }
+
+    #[test]
+    fn fused_moe_max_dff_default_is_backend_aware_and_env_overrides() {
+        // Unset: Metal keeps the conservative 4096; CUDA (no Metal) uses the
+        // higher measured GB10 crossover (#626).
+        assert_eq!(fused_moe_max_dff_from(None, true), FUSED_MOE_MAX_DFF_METAL);
+        assert_eq!(fused_moe_max_dff_from(None, false), FUSED_MOE_MAX_DFF_CUDA);
+        // The CUDA default must exceed Metal's, which is the whole point of #626.
+        assert!(FUSED_MOE_MAX_DFF_CUDA > FUSED_MOE_MAX_DFF_METAL);
+        // An explicit positive value overrides the default on both backends.
+        for metal in [true, false] {
+            assert_eq!(fused_moe_max_dff_from(Some("16384"), metal), 16384);
+            assert_eq!(fused_moe_max_dff_from(Some("1"), metal), 1);
+        }
+        // Non-positive or unparseable values fall back to the backend default.
+        for bad in ["0", "-1", "abc", "", " 4096"] {
+            assert_eq!(
+                fused_moe_max_dff_from(Some(bad), true),
+                FUSED_MOE_MAX_DFF_METAL
+            );
+            assert_eq!(
+                fused_moe_max_dff_from(Some(bad), false),
+                FUSED_MOE_MAX_DFF_CUDA
             );
         }
     }

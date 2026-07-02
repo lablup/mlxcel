@@ -1558,6 +1558,11 @@ void fused_gated_delta_decode_step(
 // Check if GatedDeltaNet Metal kernel is available (Metal GPU only)
 bool gated_delta_kernel_available();
 
+// True when the MLX Metal backend is available at runtime (macOS Apple
+// Silicon); false on CUDA-only and CPU-only builds. Mirrors the
+// metal::is_available() gate used to pick the Metal vs CUDA kernel port. #626.
+bool metal_is_available();
+
 // Start/stop Metal GPU capture. Requires the process to run under
 // `MTL_CAPTURE_ENABLED=1`; otherwise Metal drops the capture silently.
 void metal_start_capture(rust::Str path);

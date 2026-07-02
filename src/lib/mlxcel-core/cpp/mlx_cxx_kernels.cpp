@@ -769,6 +769,19 @@ bool gated_delta_kernel_available() {
 #endif
 }
 
+// True when the MLX Metal backend is available at runtime. Mirrors the
+// metal::is_available() gate used to pick the CUDA vs Metal kernel port
+// (run_fused_moe_two_kernel, bitlinear_matmul) so Rust callers can choose a
+// backend-specific default without a compile-time cfg. False on CUDA-only and
+// CPU-only builds. See issue #626.
+bool metal_is_available() {
+#ifdef __APPLE__
+    return mlx::core::metal::is_available();
+#else
+    return false;
+#endif
+}
+
 // Start a GPU trace capture and stop an active one. Mirrors the Python
 // `mx.metal.start_capture` / `mx.metal.stop_capture` API so a mlxcel
 // decode run can emit the same `.gputrace` files that `mlx-lm` produces

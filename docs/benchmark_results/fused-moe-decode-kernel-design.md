@@ -168,7 +168,7 @@ falls back to the proven `gather_qmm` / `SwitchGLU` path automatically. Set
 | `MLXCEL_FUSED_MOE` | unset (on) | On by default. Set to `0` (also `false`/`off`/`no`, case-insensitive) to force the proven `gather_qmm` / `SwitchGLU` path; any other value, or leaving it unset, keeps the kernel on. |
 | `MLXCEL_FUSED_MOE_SGY` | 8 | Simdgroups per threadgroup (one output row each). Tune per hardware. |
 | `MLXCEL_FUSED_MOE_RELU2` | unset (off) | Enable the squared-ReLU (fc1/relu²/fc2) fused path used by nemotron-class experts. Correct but measured performance-neutral on nemotron-h; kept for a future MoE-dominated squared-ReLU model. |
-| `MLXCEL_FUSED_MOE_MAX_DFF` | 4096 | Expert-intermediate (Dff) upper bound. Above it, `forward_fused_kernel` declines and the caller falls back to `gather_qmm`. The fused path wins only while `gather_qmm` underutilizes the GPU (small experts); for large experts `gather_qmm` already saturates and the extra dispatch plus global-memory activation staging is a net loss. M1 Ultra measurements: Dff 704..2560 gain +3.5% to +15.4%, Dff 6400 (phi-3.5-moe) loses 5.9%, Dff 14336 (mixtral) loses 21%. On CUDA (GB10) the crossover is much higher, ~13-14k (Dff 768 +60%, 1792 +13%, 6400 +2%, 14336 -2%), so 4096 is conservative there but kept as the shared default. The break-even is hardware-dependent, so the bound is tunable. |
+| `MLXCEL_FUSED_MOE_MAX_DFF` | 4096 (Metal) / 8192 (CUDA) | Expert-intermediate (Dff) upper bound. Above it, `forward_fused_kernel` declines and the caller falls back to `gather_qmm`. The fused path wins only while `gather_qmm` underutilizes the GPU (small experts); for large experts `gather_qmm` already saturates and the extra dispatch plus global-memory activation staging is a net loss. The break-even is backend-dependent, so the default is chosen from the live backend (`mlx::core::metal::is_available()`). M1 Ultra measurements: Dff 704..2560 gain +3.5% to +15.4%, Dff 6400 (phi-3.5-moe) loses 5.9%, Dff 14336 (mixtral) loses 21%, so Metal keeps 4096. On CUDA the crossover is higher; re-measured on GB10 under MLX pin e9463bb (#626) it collapsed from the old ~13-14k to ~8000 (Dff 6400 +5%, 8192 break-even, 14336 -1.2%; see the 2026-07-03 addendum), so the CUDA default is 8192. An explicit value overrides both backends. |
 
 ### Measured decode gains (M1 Ultra, `MLXCEL_FUSED_MOE=1`)
 
@@ -250,11 +250,13 @@ Forcing the fused path past the cap (`MLXCEL_FUSED_MOE_MAX_DFF=20000`):
 | 6400 | phi-3.5-moe | +2% |
 | 14336 | mixtral | −2% |
 
-The CUDA crossover is ~13–14k (vs Metal's ~4096, where phi-3.5-moe already loses
-5.9%). The 4096 cap is therefore conservative on CUDA but kept as the shared
-default: the meaningful wins are all below it, and the 4096–14k range gains at
-most ~2% (phi-3.5-moe) while mixtral (14336) slightly prefers `gather_qmm`. CUDA
-users with mid-size experts can raise `MLXCEL_FUSED_MOE_MAX_DFF`.
+The CUDA crossover measured here (#319) was ~13–14k (vs Metal's ~4096, where
+phi-3.5-moe already loses 5.9%). At that time 4096 was kept as the shared default
+even on CUDA. That was re-measured after the #625 MLX pin bump (which moved
+`gather_gemm` to JIT and sped the fallback): the CUDA crossover collapsed to
+~8000 and the default is now backend-aware, 4096 on Metal and 8192 on CUDA. See
+the 2026-07-03 addendum below for the new sweep; CUDA users with larger experts
+can still raise or lower `MLXCEL_FUSED_MOE_MAX_DFF`.
 
 **Parity caveat.** The kernel accumulates the GEMV in f32 with a different
 reduction order than `gather_qmm`'s tiling, so it is within the f16 jitter
@@ -282,8 +284,9 @@ SwiGLU activation, text-only decode path), phimoe (Phi-3.5-MoE; migrated from
 its local `SwitchGLU`/`SwitchLinear` to the shared ones; checkpoints pre-stacked
 under `block_sparse_moe.switch_mlp.{gate,up,down}_proj`; `sanitize_weights` still
 handles the unstacked `experts.{i}.w1/w2/w3` layout for community checkpoints; the
-expert intermediate is 6400, above `MLXCEL_FUSED_MOE_MAX_DFF`, so like mixtral the
-kernel declines and decode stays on `gather_qmm`), olmoe (OLMoE; migrated from
+expert intermediate is 6400: below the CUDA default (8192) so the kernel dispatches
+on CUDA at a measured +5%, above the Metal default (4096) so it declines to
+`gather_qmm` on Metal; see the 2026-07-03 addendum), olmoe (OLMoE; migrated from
 its local `SwitchGLU`/`SwitchLinear` to the shared ones; SwiGLU, softmax-routed
 with optional `norm_topk_prob`, weights stacked under `switch_mlp.{gate,up,down}_proj`
 or joined from the per-expert `experts.{i}` layout by `sanitize_weights`; expert
@@ -301,3 +304,47 @@ to `gather_qmm`, generating coherent output with no crash or OOM; fused-path
 throughput and output-parity validation remain blocked on a fitting 4-bit or 8-bit
 minimax checkpoint). nemotron-h's MoE runs through the separate C++ `fused_moe_forward` and is wired
 behind `MLXCEL_FUSED_MOE_RELU2` only.
+
+### 2026-07-03 addendum: GB10 crossover re-measured under MLX pin e9463bb (#626)
+
+The #625 MLX pin bump to `e9463bb` moved `gather_gemm` to a JIT path, changing
+the `gather_qmm` fallback cost, so the CUDA crossover was re-measured on GB10 (DGX
+Spark, sm_121, CUDA 13.0). Harness: `mlxcel-bench-decode`, prompt "Hello, how are
+you today?", 100 decode tokens after a 20-token warmup, median of 3. Each side is
+forced with the env var: `MLXCEL_FUSED_MOE_MAX_DFF=1` selects the `gather_qmm`
+fallback, `=20000` selects the fused kernel. decode tok/s:
+
+| Dff | model | gather_qmm | fused | fused/fallback |
+|----:|-------|-----------:|------:|---------------:|
+| 768 | qwen3-30b-a3b | 91.00 | 91.34 | 1.00 |
+| 1792 | lfm2-8b-a1b | 140.35 | 157.76 | **1.12** |
+| 2880 | gpt-oss-20b (mxfp4) | 78.59 | 78.00 | 0.99 |
+| 6400 | phi-3.5-moe | 51.09 | 53.62 | **1.05** |
+| 8192 | llama-4-scout-17b | 21.23 | 21.08 | 0.99 |
+| 14336 | mixtral-8x7b | 28.23 | 27.89 | 0.99 |
+
+Findings:
+
+- **The crossover moved down from ~13-14k to ~8000, but stays well above Metal's
+  4096.** The fused path clearly wins at Dff 6400 (phi-3.5-moe +5%) and below
+  (lfm2 +12%), is break-even at 8192 (llama-4-scout, within run-to-run noise: one
+  of three fused runs matched the fallback), and loses at 14336 (mixtral -1.2%).
+  Interpolating phi (+5%) and llama-4-scout (break-even) puts the ratio=1.0
+  crossover at ~8000.
+- **The old +55% qwen3-30b-a3b win is gone**, not because the fused kernel
+  regressed but because the JIT `gather_gemm` made the fallback far faster for the
+  pathological 128-expert config (old fallback 58.2 -> now 91.0 tok/s). The fused
+  path itself is unchanged there (~91). Low-expert configs are unaffected: lfm2 is
+  still +12%, matching the #319 measurement.
+- **gpt-oss-20b is a control**: it is `mxfp4`, which `forward_fused_kernel`
+  declines (non-affine), so the env var is a no-op and both sides match (0.99).
+  qwen3.5-35b-a3b (Dff 512, multimodal `Qwen3_5MoeForConditionalGeneration`) does
+  not run in the text decode bench harness and is below 4096 regardless.
+
+**Default set to 8192 on CUDA** (the break-even boundary, rounded down from the
+14336 regression), keeping Metal at 4096. Models with an expert intermediate in
+`(4096, 8192]` now take the fused kernel by default on CUDA: phi-3.5-moe (Dff
+6400, 51.09 -> 53.62 tok/s, +5%) and llama-4-scout-17b (Dff 8192, 21.23 -> 21.08
+tok/s, break-even). Mixtral (Dff 14336) stays on `gather_qmm`. The env var
+`MLXCEL_FUSED_MOE_MAX_DFF` still overrides both backends. Raw per-run data:
+`fused-moe-decode-dff-sweep-gb10-2026-07-03.csv`.
