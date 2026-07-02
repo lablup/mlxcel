@@ -167,8 +167,11 @@ correctness-first lever; it does not close the gap to MLX (see the perf note abo
   message pointing at `f16` (issue #612), rather than dumping an opaque
   `iree-compile` legalization error mid-run. The packed int8 path
   (`MLXCEL_XLA_QUANT=packed`) compiles for Metal but the prefill invoke faults at
-  runtime (IREE `INTERNAL`, issue #613); it has only run on the CUDA runtime, and
-  its bandwidth win is un-demonstrable on the compute-bound Metal decode regardless.
+  runtime (a metal HAL `Metal command buffer failed` fault, surfaced as IREE
+  `INTERNAL`, issue #613); it has only run on the CUDA runtime, and its bandwidth
+  win is un-demonstrable on the compute-bound Metal decode regardless. So
+  `MLXCEL_XLA_QUANT=packed` on a `metal` device is **rejected at load** with a
+  message pointing at the CUDA / CPU targets, rather than faulting mid-run.
 
 ## Batched continuous batching (Stage 2b)
 

@@ -70,12 +70,16 @@ iree_status_t iree_xla_libc_ctl(void* self, iree_allocator_command_t command,
   }
 }
 
+// Print the FULL annotated IREE status (op / dispatch location, message), not
+// just the numeric code, so a runtime fault names its cause instead of an opaque
+// "status 13" (issue #613: the metal-spirv packed-dequant prefill invoke).
 #define XLA_CHECK(expr)                                                  \
   do {                                                                   \
     iree_status_t _s = (expr);                                          \
     if (!iree_status_is_ok(_s)) {                                       \
       int _c = (int)iree_status_code(_s);                               \
-      fprintf(stderr, "xla_iree: %s failed (status %d)\n", #expr, _c);  \
+      fprintf(stderr, "xla_iree: %s failed (status %d):\n", #expr, _c); \
+      iree_status_fprint(stderr, _s);                                   \
       iree_status_ignore(_s);                                           \
       return _c ? _c : 1;                                               \
     }                                                                    \

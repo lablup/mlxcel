@@ -161,6 +161,38 @@ pub fn resolve_precision_checked(device: &str) -> Result<Precision, String> {
     }
 }
 
+/// Whether a packed int8 in-graph-dequant build can execute on `device`.
+/// `packed_active` is whether the packed path is actually taken (the caller's
+/// `quant_in_graph() && cfg.supports_packed_quant()`). The metal HAL driver faults
+/// at runtime on the packed prefill: the ui32-unpack + dequant command buffer fails
+/// to execute (issue #613, `metal_device.m`, "Metal command buffer failed"), where
+/// the same graph runs token-exact on CUDA. So packed does not run on `metal`; it
+/// runs on CUDA and the CPU targets. Pure (no env / no Config), so it is unit-testable.
+fn packed_runs_on(device: &str, packed_active: bool) -> bool {
+    !(device == "metal" && packed_active)
+}
+
+/// Reject a packed int8 build the target cannot execute, before iree-compile and the
+/// weight upload (issue #613). `packed_active` is the caller's `quant_in_graph() &&
+/// cfg.supports_packed_quant()`. On Metal the packed prefill faults with an opaque
+/// Metal command-buffer error, and its memory-bandwidth win is un-demonstrable on the
+/// compute-bound Metal decode anyway (ADR 0004), so fail fast with an actionable
+/// message instead. Unaffected on CUDA / CPU, and a no-op when packed is not active.
+pub fn check_packed_supported(device: &str, packed_active: bool) -> Result<(), String> {
+    if packed_runs_on(device, packed_active) {
+        Ok(())
+    } else {
+        Err(
+            "MLXCEL_XLA_QUANT=packed is not supported on the Metal target: the packed \
+             int8 dequant prefill faults at runtime on the metal HAL driver (Metal \
+             command buffer error), and its bandwidth win is un-demonstrable on the \
+             compute-bound Metal decode. Unset MLXCEL_XLA_QUANT to dequant at load, \
+             or use the CUDA / CPU (local-task) target."
+                .to_string(),
+        )
+    }
+}
+
 pub struct Builder {
     body: String,
     next: usize,
@@ -912,6 +944,19 @@ mod tests {
         assert!(precision_lowers_on("cuda", Precision::Bf16));
         assert!(precision_lowers_on("local-task", Precision::Bf16));
         assert!(precision_lowers_on("local-sync", Precision::Bf16));
+    }
+
+    /// Issue #613: only an ACTIVE packed build on Metal is rejected (the metal HAL
+    /// driver faults on the packed prefill command buffer). Packed runs on CUDA and
+    /// the CPU targets, and an inactive packed path (`packed_active = false`) never
+    /// trips the guard, so a non-packed Metal build is unaffected.
+    #[test]
+    fn packed_runs_on_rejects_only_active_packed_on_metal() {
+        assert!(!packed_runs_on("metal", true));
+        assert!(packed_runs_on("metal", false));
+        assert!(packed_runs_on("cuda", true));
+        assert!(packed_runs_on("local-task", true));
+        assert!(packed_runs_on("local-sync", true));
     }
 
     /// 4-bit affine dequant-in-graph (issue #516): a `[out, in_packed]` ui32 weight

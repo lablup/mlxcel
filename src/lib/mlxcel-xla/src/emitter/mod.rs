@@ -62,7 +62,9 @@ pub(crate) use config::{MoeConfig, SharedExpertConfig};
 // so allow the re-export to be unused in the other. `emit_decode_batched` (the
 // superseded uniform-B Stage-1 graph) is re-exported for the validation harness.
 #[allow(unused_imports)]
-pub(crate) use builder::{Precision, quant_in_graph, resolve_precision, resolve_precision_checked};
+pub(crate) use builder::{
+    Precision, check_packed_supported, quant_in_graph, resolve_precision, resolve_precision_checked,
+};
 #[allow(unused_imports)]
 pub(crate) use model::{
     emit_decode, emit_decode_batched, emit_decode_ragged, emit_decode_ragged_with,
