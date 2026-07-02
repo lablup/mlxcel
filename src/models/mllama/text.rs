@@ -581,4 +581,113 @@ mod tests {
             "a new image must produce a different cached key, not a stale one"
         );
     }
+
+    // --- Real-tile cross-states equivalence (issue #527 perf follow-up). ---
+    //
+    // The reference masks every padding-tile position out of the text
+    // cross-attention with an additive -1e9 (`cross_attention_mask` derived
+    // from the per-image `num_tiles`). `exp(logit - 1e9)` underflows to
+    // exactly 0.0, so those positions add exact zeros to the softmax numerator
+    // and denominator: attending over the REAL-tile rows alone is the same
+    // computation. These tests pin that equivalence at the byte level, which
+    // is what licenses `MllamaVLModel` to drop the padding-tile rows from
+    // `cross_attention_states` instead of threading a reference-style mask.
+
+    /// `[1, rows, HIDDEN]` cross-states with identifiable per-row content.
+    fn cross_rows(rows: i32, seed: usize) -> UniquePtr<MlxArray> {
+        mlxcel_core::from_slice_f32(&fill((rows * HIDDEN) as usize, seed), &[1, rows, HIDDEN])
+    }
+
+    /// Additive `[1, 1, Q_LEN, kv]` mask: 0 everywhere, -1e9 on `masked` keys
+    /// (the reference's padding-tile columns).
+    fn additive_kv_mask(kv: i32, masked: &[i32]) -> UniquePtr<MlxArray> {
+        let mut vals = vec![0.0f32; (Q_LEN * kv) as usize];
+        for q in 0..Q_LEN {
+            for &k in masked {
+                vals[(q * kv + k) as usize] = -1e9;
+            }
+        }
+        mlxcel_core::from_slice_f32(&vals, &[1, 1, Q_LEN, kv])
+    }
+
+    fn rows_slice(x: &MlxArray, start: i32, end: i32) -> UniquePtr<MlxArray> {
+        mlxcel_core::slice(x, &[0, start, 0], &[1, end, HIDDEN])
+    }
+
+    /// Single image, 1 real tile of 4 (2 patch rows per tile): attention over
+    /// the real rows only is byte-identical to reference-masked attention over
+    /// all rows, garbage padding-lane features included.
+    #[test]
+    fn real_tile_rows_match_reference_masked_full_rows() {
+        let config = tiny_config();
+        let layer = build_layer(&config);
+        let h = hidden_states();
+
+        // 4 tiles x 2 patches = 8 kv rows; rows 2..8 are padding-lane features
+        // (arbitrary non-zero values, as the tower genuinely produces).
+        let full = cross_rows(8, 42);
+        let mask = additive_kv_mask(8, &[2, 3, 4, 5, 6, 7]);
+        let masked_out = layer.forward(&h, &full, Some(&mask));
+
+        // The fill-once KV cache belongs to the previous cross-states.
+        layer.invalidate_kv_cache();
+        let real_only = rows_slice(&full, 0, 2);
+        let sliced_out = layer.forward(&h, &real_only, None);
+
+        assert_eq!(
+            max_abs_diff(&masked_out, &sliced_out),
+            0.0,
+            "dropping the -1e9-masked padding-tile rows must be byte-identical"
+        );
+    }
+
+    /// Ragged multi-image (media 0: 1 real tile of 2, media 1: 2 of 2):
+    /// media-major concatenation of each image's real rows is byte-identical
+    /// to reference-masked attention over the full row set.
+    #[test]
+    fn ragged_real_tile_rows_match_reference_masked_full_rows() {
+        let config = tiny_config();
+        let layer = build_layer(&config);
+        let h = hidden_states();
+
+        // [media0 t0, media0 t1(pad), media1 t0, media1 t1] x 2 patches.
+        let full = cross_rows(8, 77);
+        let mask = additive_kv_mask(8, &[2, 3]);
+        let masked_out = layer.forward(&h, &full, Some(&mask));
+
+        layer.invalidate_kv_cache();
+        let media0 = rows_slice(&full, 0, 2);
+        let media1 = rows_slice(&full, 4, 8);
+        let sliced = mlxcel_core::concatenate(&media0, &media1, 1);
+        let sliced_out = layer.forward(&h, &sliced, None);
+
+        assert_eq!(
+            max_abs_diff(&masked_out, &sliced_out),
+            0.0,
+            "ragged per-image selection must be byte-identical to the \
+             reference-masked full attention"
+        );
+    }
+
+    /// All tiles real: the all-zero reference mask is the no-mask computation;
+    /// there is nothing to drop and no behavior change.
+    #[test]
+    fn full_tile_mask_is_the_unmasked_computation() {
+        let config = tiny_config();
+        let layer = build_layer(&config);
+        let h = hidden_states();
+
+        let full = cross_rows(8, 99);
+        let mask = additive_kv_mask(8, &[]);
+        let masked_out = layer.forward(&h, &full, Some(&mask));
+
+        layer.invalidate_kv_cache();
+        let unmasked_out = layer.forward(&h, &full, None);
+
+        assert_eq!(
+            max_abs_diff(&masked_out, &unmasked_out),
+            0.0,
+            "an all-zero mask must not perturb the attention output"
+        );
+    }
 }

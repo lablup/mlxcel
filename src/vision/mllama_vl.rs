@@ -28,6 +28,13 @@
 //! Unlike the LLaVA-style VLMs, mllama does **not** merge image features into
 //! the token stream. Instead the projected features are held as
 //! `cross_attention_states` and consumed by the gated cross-attention layers.
+//! The states keep only each image's REAL tiles: the tower runs on the full
+//! zero-padded tile axis (its lanes are not separable, see the encoder tests),
+//! but the reference's text-side `cross_attention_mask` gives every
+//! padding-tile position an additive `-1e9`, i.e. exactly zero softmax weight,
+//! so dropping those rows here is byte-equivalent to the reference while
+//! shrinking the projector and cross-attention K/V work by
+//! `max_num_tiles / num_real_tiles`.
 //! Because [`crate::LanguageModel::forward`] carries no cross-attention slot,
 //! the state computed by [`MllamaVLModel::prepare_cross_attention_states`] is
 //! stashed in an interior-mutable cell (mirroring the Qwen-VL MRoPE-state
@@ -96,29 +103,81 @@ impl MllamaVLModel {
 
     /// Run the vision tower and projector to obtain the flattened
     /// `cross_attention_states` `[B, num_media * num_tiles * num_patches,
-    /// hidden]`. Mirrors the vision branch of `Model.__call__`.
+    /// hidden]`. Mirrors the vision branch of `Model.__call__` with an unknown
+    /// per-image tile count: every tile lane of the padded tile axis (including
+    /// the processor's zero-padding tiles) lands in the states.
     pub fn compute_cross_attention_states(
         &self,
         pixel_values: &MlxArray,
         aspect_ratio_ids: &MlxArray,
         aspect_ratio_mask: &MlxArray,
     ) -> UniquePtr<MlxArray> {
+        // An empty tile list never passes `select_real_tile_states`, so this
+        // is exactly the legacy all-tiles path.
+        self.compute_cross_attention_states_for_tiles(
+            pixel_values,
+            aspect_ratio_ids,
+            aspect_ratio_mask,
+            &[],
+        )
+    }
+
+    /// Like [`Self::compute_cross_attention_states`], but keeps only the REAL
+    /// tiles of each image in the resulting states, dropping the processor's
+    /// zero-padding tile lanes (`num_tiles` is the per-image real tile count
+    /// the processor reports).
+    ///
+    /// Correctness: the vision tower itself still runs on ALL tile lanes.
+    /// Its aspect-ratio mask only blocks padding->padding attention, so the
+    /// padding lanes are live register-like inputs to the real tiles' outputs
+    /// and cannot be skipped (see the `padding_tile_content_reaches_real_tile
+    /// _output` encoder test). The reference then masks every padding-tile
+    /// position out of the text cross-attention with an additive `-1e9`
+    /// (`cross_attention_mask` built from `num_tiles` in
+    /// `processing_mllama.py`), which zeroes those positions' softmax weights
+    /// exactly. This port passes no text-side cross mask, so dropping the
+    /// padding-tile rows here reproduces the reference's tile-level masking
+    /// exactly while shrinking the projector matmul and every cross-attention
+    /// key/value computation by `max_num_tiles / num_real_tiles`.
+    ///
+    /// When the counts do not warrant (or do not safely permit) selection,
+    /// this falls back to the legacy all-tiles states.
+    pub fn compute_cross_attention_states_for_tiles(
+        &self,
+        pixel_values: &MlxArray,
+        aspect_ratio_ids: &MlxArray,
+        aspect_ratio_mask: &MlxArray,
+        num_tiles: &[usize],
+    ) -> UniquePtr<MlxArray> {
         let batch = mlxcel_core::array_shape(pixel_values)[0];
         let vision_output =
             self.vision_tower
                 .forward(pixel_values, aspect_ratio_ids, aspect_ratio_mask);
-        let projected = self.multi_modal_projector.forward(&vision_output);
         let hidden = self.config.text_config.hidden_size as i32;
-        mlxcel_core::reshape(&projected, &[batch, -1, hidden])
+        match select_real_tile_states(&vision_output, num_tiles) {
+            Some(selected) => {
+                // Project only the surviving rows (the projector is a
+                // per-position linear, so slicing before projecting is exact).
+                let projected = self.multi_modal_projector.forward(&selected);
+                mlxcel_core::reshape(&projected, &[batch, -1, hidden])
+            }
+            None => {
+                let projected = self.multi_modal_projector.forward(&vision_output);
+                mlxcel_core::reshape(&projected, &[batch, -1, hidden])
+            }
+        }
     }
 
     /// Compute and stash the cross-attention states from preprocessed image
     /// inputs so subsequent [`LanguageModel::forward`] calls attend to them.
+    /// Uses the processor's per-image real tile counts to keep only real-tile
+    /// features (see [`Self::compute_cross_attention_states_for_tiles`]).
     pub fn prepare_cross_attention_states(&self, inputs: &MllamaImageInputs) {
-        let states = self.compute_cross_attention_states(
+        let states = self.compute_cross_attention_states_for_tiles(
             &inputs.pixel_values,
             &inputs.aspect_ratio_ids,
             &inputs.aspect_ratio_mask,
+            &inputs.num_tiles,
         );
         self.set_cross_attention_states(states);
     }
@@ -168,6 +227,62 @@ impl MllamaVLModel {
     }
 }
 
+/// Select the real-tile rows of the vision tower output for the
+/// cross-attention states.
+///
+/// `vision_output`: `[B, num_media, max_num_tiles, num_patches, dim]` (all
+/// tile lanes, as produced by [`MllamaVisionModel::forward`]).
+/// `num_tiles[m]`: the number of REAL tiles of image `m`; real tiles are
+/// contiguous at tile indices `0..num_tiles[m]` (the processor appends the
+/// zero-padding tiles).
+///
+/// Returns the media-major concatenation
+/// `[B, sum(num_tiles) * num_patches, dim]`, which is the reference's
+/// flattened `[B, media * tiles * patches, dim]` layout restricted to the
+/// positions its text-side `cross_attention_mask` leaves unmasked. Ragged
+/// per-image tile counts are handled exactly (each image contributes its own
+/// real rows, order preserved).
+///
+/// Returns `None` (caller keeps the legacy all-tiles path) when:
+/// - the batch dimension is not 1 (per-row selection would be ragged across
+///   the shared kv axis; the current runtime only ever builds B == 1),
+/// - `num_tiles` does not match the media count or holds an out-of-range
+///   count (defensive; the processor cannot produce these), or
+/// - every image already uses all `max_num_tiles` tiles (selection would be
+///   a no-op; the legacy path is byte-identical and avoids extra reshapes).
+fn select_real_tile_states(
+    vision_output: &MlxArray,
+    num_tiles: &[usize],
+) -> Option<UniquePtr<MlxArray>> {
+    let shape = mlxcel_core::array_shape(vision_output);
+    if shape.len() != 5 || shape[0] != 1 {
+        return None;
+    }
+    let (media, max_tiles, patches, dim) = (shape[1], shape[2], shape[3], shape[4]);
+    if num_tiles.len() != media as usize
+        || num_tiles.iter().any(|&n| n == 0 || n > max_tiles as usize)
+        || num_tiles.iter().all(|&n| n == max_tiles as usize)
+    {
+        return None;
+    }
+
+    let mut selected: Option<UniquePtr<MlxArray>> = None;
+    for (m, &n) in num_tiles.iter().enumerate() {
+        let m = m as i32;
+        let part = mlxcel_core::slice(
+            vision_output,
+            &[0, m, 0, 0, 0],
+            &[1, m + 1, n as i32, patches, dim],
+        );
+        let part = mlxcel_core::reshape(&part, &[1, n as i32 * patches, dim]);
+        selected = Some(match selected {
+            None => part,
+            Some(acc) => mlxcel_core::concatenate(&acc, &part, 1),
+        });
+    }
+    selected
+}
+
 impl LanguageModel for MllamaVLModel {
     fn forward(
         &self,
@@ -207,8 +322,9 @@ impl LanguageModel for MllamaVLModel {
 
 #[cfg(test)]
 mod tests {
-    use super::MllamaVLModel;
+    use super::{MllamaVLModel, select_real_tile_states};
     use mlxcel_core::weights::WeightMap;
+    use mlxcel_core::{MlxArray, UniquePtr};
 
     /// The real checkpoint stores `multi_modal_projector` quantized with a float
     /// `.bias` alongside the affine `.scales`/`.biases`. The loader must resolve
@@ -240,5 +356,67 @@ mod tests {
             projector.is_quantized(),
             "the 4-bit projector must load quantized, not as a raw packed linear"
         );
+    }
+
+    // --- Real-tile row selection (issue #527 perf follow-up). ---
+
+    /// `[1, media, max_tiles, patches, dim]` filled with 0..N so every row is
+    /// identifiable by value.
+    fn arange_output(media: i32, max_tiles: i32, patches: i32, dim: i32) -> UniquePtr<MlxArray> {
+        let n = (media * max_tiles * patches * dim) as usize;
+        let vals: Vec<f32> = (0..n).map(|i| i as f32).collect();
+        mlxcel_core::from_slice_f32(&vals, &[1, media, max_tiles, patches, dim])
+    }
+
+    fn max_abs_diff(a: &MlxArray, b: &MlxArray) -> f32 {
+        let diff = mlxcel_core::subtract(a, b);
+        let m = mlxcel_core::max_all(&mlxcel_core::abs(&diff));
+        mlxcel_core::eval(&m);
+        mlxcel_core::item_f32(&m)
+    }
+
+    /// Ragged multi-image selection keeps exactly the real-tile rows of every
+    /// image, media-major, in the reference's flatten order.
+    #[test]
+    fn select_keeps_ragged_real_tile_rows_media_major() {
+        // 2 media, 2 tiles, 2 patches, dim 3; media 0 has 1 real tile, media 1
+        // has 2. Row layout (patch rows of dim 3):
+        //   media 0: tile 0 -> values 0..6,   tile 1 -> 6..12 (padding)
+        //   media 1: tile 0 -> values 12..18, tile 1 -> 18..24
+        let output = arange_output(2, 2, 2, 3);
+        let selected =
+            select_real_tile_states(&output, &[1, 2]).expect("sub-max ragged counts must select");
+        assert_eq!(mlxcel_core::array_shape(&selected), vec![1, 6, 3]);
+
+        let expected: Vec<f32> = (0..6)
+            .map(|i| i as f32)
+            .chain((12..24).map(|i| i as f32))
+            .collect();
+        let expected = mlxcel_core::from_slice_f32(&expected, &[1, 6, 3]);
+        assert_eq!(
+            max_abs_diff(&selected, &expected),
+            0.0,
+            "selection must keep media 0 tile 0 and media 1 tiles 0..2, in order"
+        );
+    }
+
+    /// Full tile counts are a no-op: the caller must keep the legacy all-tiles
+    /// path so the states stay byte-identical to the pre-optimization output.
+    #[test]
+    fn select_declines_full_tile_counts() {
+        let output = arange_output(2, 2, 2, 3);
+        assert!(select_real_tile_states(&output, &[2, 2]).is_none());
+    }
+
+    /// Defensive fallbacks: count/media mismatch, zero counts, and
+    /// out-of-range counts all keep the legacy path instead of guessing.
+    #[test]
+    fn select_declines_invalid_tile_counts() {
+        let output = arange_output(2, 2, 2, 3);
+        assert!(select_real_tile_states(&output, &[1]).is_none());
+        assert!(select_real_tile_states(&output, &[1, 2, 1]).is_none());
+        assert!(select_real_tile_states(&output, &[0, 2]).is_none());
+        assert!(select_real_tile_states(&output, &[1, 3]).is_none());
+        assert!(select_real_tile_states(&output, &[]).is_none());
     }
 }

@@ -30,10 +30,13 @@ mod common;
 use std::path::PathBuf;
 
 use common::repo_model_dir;
-use mlxcel::models::mllama::MllamaTextConfig;
 use mlxcel::models::mllama::text::MllamaTextModel;
+use mlxcel::models::mllama::{MllamaConfig, MllamaTextConfig};
 use mlxcel::models::{ModelType, get_model_type};
-use mlxcel::vision::processors::mllama::MllamaImageProcessor;
+use mlxcel::vision::MllamaVLModel;
+use mlxcel::vision::encoders::mllama::MllamaVisionModel;
+use mlxcel::vision::processors::mllama::{MllamaImageInputs, MllamaImageProcessor};
+use mlxcel_core::generate::LanguageModel;
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
 
@@ -337,6 +340,315 @@ fn processor_packs_tower_contract() {
     );
     assert_eq!(inputs.num_tiles.len(), 1);
     assert!(inputs.num_tiles[0] >= 1 && inputs.num_tiles[0] <= 4);
+}
+
+// --- Real-tile cross-attention states (issue #527 perf follow-up). ---
+//
+// The processor pads every image's tile axis to `max_num_tiles` with zero
+// tiles. The tower must keep processing all of those lanes (its aspect-ratio
+// mask deliberately leaves real->padding attention open, see the encoder unit
+// tests), but the reference then masks every padding-tile position out of the
+// TEXT cross-attention with an additive -1e9, which zeroes their softmax
+// weights exactly. `MllamaVLModel` reproduces that tile-level masking by
+// building `cross_attention_states` from the real-tile rows only. These tests
+// pin the states-level contract on a tiny but fully forward-capable VL model.
+
+const V_OUT: i32 = 16; // tower hidden (8) * (1 + |intermediate_layers_indices|)
+const V_PATCHES: i32 = 5; // (4 / 2)^2 patches + class token
+
+fn tiny_vl_config() -> MllamaConfig {
+    serde_json::from_str(
+        r#"{
+            "text_config": {
+                "model_type": "mllama",
+                "vocab_size": 6,
+                "hidden_size": 4,
+                "intermediate_size": 8,
+                "num_hidden_layers": 2,
+                "num_attention_heads": 2,
+                "num_key_value_heads": 1,
+                "rms_norm_eps": 1e-5,
+                "rope_theta": 10000.0,
+                "tie_word_embeddings": false,
+                "cross_attention_layers": [1]
+            },
+            "vision_config": {
+                "image_size": 4,
+                "patch_size": 2,
+                "hidden_size": 8,
+                "intermediate_size": 16,
+                "num_hidden_layers": 2,
+                "num_global_layers": 1,
+                "num_attention_heads": 2,
+                "max_num_tiles": 4,
+                "intermediate_layers_indices": [0]
+            }
+        }"#,
+    )
+    .expect("tiny mllama VL config")
+}
+
+/// Forward-capable tiny tower weights (mirrors the encoder unit-test harness:
+/// 4x4 image, patch 2, hidden 8, 2 local + 1 gated global layer).
+fn build_tiny_vision_weights(prefix: &str) -> WeightMap {
+    let (h, inter, np, tiles, ar_rows) = (8, 16, 5, 4, 9);
+    let mut w = WeightMap::new();
+
+    put(&mut w, &format!("{prefix}.class_embedding"), &[h], 1);
+    put(
+        &mut w,
+        &format!("{prefix}.patch_embedding.weight"),
+        &[h, 3, 2, 2],
+        2,
+    );
+    for (name, seed) in [("layernorm_pre", 3), ("layernorm_post", 5)] {
+        put(&mut w, &format!("{prefix}.{name}.weight"), &[h], seed);
+        put(&mut w, &format!("{prefix}.{name}.bias"), &[h], seed + 1);
+    }
+    put(
+        &mut w,
+        &format!("{prefix}.gated_positional_embedding.embedding"),
+        &[np, h],
+        7,
+    );
+    put(
+        &mut w,
+        &format!("{prefix}.gated_positional_embedding.gate"),
+        &[1],
+        8,
+    );
+    put(
+        &mut w,
+        &format!("{prefix}.gated_positional_embedding.tile_embedding.weight"),
+        &[ar_rows, tiles * np * h],
+        9,
+    );
+    for (name, seed) in [
+        ("pre_tile_positional_embedding", 10),
+        ("post_tile_positional_embedding", 12),
+    ] {
+        put(
+            &mut w,
+            &format!("{prefix}.{name}.embedding.weight"),
+            &[ar_rows, tiles * h],
+            seed,
+        );
+        put(&mut w, &format!("{prefix}.{name}.gate"), &[1], seed + 1);
+    }
+    let mut add_layers = |stack: &str, count: usize, gated: bool, base: usize| {
+        for i in 0..count {
+            let p = format!("{prefix}.{stack}.layers.{i}");
+            let s = base + i * 20;
+            put(&mut w, &format!("{p}.input_layernorm.weight"), &[h], s);
+            put(&mut w, &format!("{p}.input_layernorm.bias"), &[h], s + 1);
+            put(
+                &mut w,
+                &format!("{p}.post_attention_layernorm.weight"),
+                &[h],
+                s + 2,
+            );
+            put(
+                &mut w,
+                &format!("{p}.post_attention_layernorm.bias"),
+                &[h],
+                s + 3,
+            );
+            for (j, proj) in ["q_proj", "k_proj", "v_proj", "o_proj"].iter().enumerate() {
+                put(
+                    &mut w,
+                    &format!("{p}.self_attn.{proj}.weight"),
+                    &[h, h],
+                    s + 4 + j,
+                );
+            }
+            put(&mut w, &format!("{p}.mlp.fc1.weight"), &[inter, h], s + 8);
+            put(&mut w, &format!("{p}.mlp.fc1.bias"), &[inter], s + 9);
+            put(&mut w, &format!("{p}.mlp.fc2.weight"), &[h, inter], s + 10);
+            put(&mut w, &format!("{p}.mlp.fc2.bias"), &[h], s + 11);
+            if gated {
+                put(&mut w, &format!("{p}.gate_attn"), &[1], s + 12);
+                put(&mut w, &format!("{p}.gate_ffn"), &[1], s + 13);
+            }
+        }
+    };
+    add_layers("transformer", 2, false, 100);
+    add_layers("global_transformer", 1, true, 200);
+    w
+}
+
+fn tiny_vl_model() -> MllamaVLModel {
+    let config = tiny_vl_config();
+    let text_model = MllamaTextModel::from_weights(&build_weights(0.5), &config.text_config)
+        .expect("tiny mllama text model");
+    let tower = MllamaVisionModel::from_weights(
+        &build_tiny_vision_weights("vision_tower"),
+        &config.vision_config,
+        "vision_tower",
+    )
+    .expect("tiny mllama vision tower");
+
+    let mut pw = WeightMap::new();
+    put(
+        &mut pw,
+        "multi_modal_projector.weight",
+        &[HIDDEN, V_OUT],
+        300,
+    );
+    put(&mut pw, "multi_modal_projector.bias", &[HIDDEN], 301);
+    let projector = MllamaVLModel::load_projector(&pw, 64, 4).expect("tiny dense projector");
+
+    let processor = MllamaImageProcessor::new(4, 4);
+    MllamaVLModel::from_parts(text_model, tower, projector, processor, config, vec![5])
+}
+
+/// `[1, media, 4, 3, 4, 4]` pixel values; `Some(seed)` tiles carry content,
+/// `None` tiles are the processor's zero padding.
+fn tile_pixels(media_fills: &[[Option<usize>; 4]]) -> UniquePtr<MlxArray> {
+    let per_tile = 3 * 4 * 4;
+    let mut pixels = Vec::with_capacity(media_fills.len() * 4 * per_tile);
+    for tiles in media_fills {
+        for seed in tiles {
+            match seed {
+                Some(seed) => pixels.extend(fill(per_tile, *seed)),
+                None => pixels.extend(std::iter::repeat_n(0.0f32, per_tile)),
+            }
+        }
+    }
+    mlxcel_core::from_slice_f32(&pixels, &[1, media_fills.len() as i32, 4, 3, 4, 4])
+}
+
+fn states_rows(states: &MlxArray, start: i32, end: i32) -> UniquePtr<MlxArray> {
+    mlxcel_core::slice(states, &[0, start, 0], &[1, end, HIDDEN])
+}
+
+/// (a) Sub-max real tiles: the real-tile states are byte-identical to the
+/// corresponding rows of the legacy all-tiles states (slicing before the
+/// per-position projector changes nothing), and only the padding-tile rows
+/// are dropped.
+#[test]
+fn sub_max_real_tiles_keep_the_legacy_real_rows_byte_identical() {
+    let model = tiny_vl_model();
+    let pv = tile_pixels(&[[Some(400), None, None, None]]);
+    let ids = mlxcel_core::from_slice_i32(&[1], &[1, 1]);
+    let mask = mlxcel_core::from_slice_i32(&[1, 0, 0, 0], &[1, 1, 4]);
+
+    let full = model.compute_cross_attention_states(&pv, &ids, &mask);
+    let sub = model.compute_cross_attention_states_for_tiles(&pv, &ids, &mask, &[1]);
+
+    assert_eq!(
+        mlxcel_core::array_shape(&full),
+        vec![1, 4 * V_PATCHES, HIDDEN]
+    );
+    assert_eq!(mlxcel_core::array_shape(&sub), vec![1, V_PATCHES, HIDDEN]);
+
+    let expected = states_rows(&full, 0, V_PATCHES);
+    assert_eq!(
+        max_abs_diff(&sub, &expected),
+        0.0,
+        "real-tile states must be byte-identical to the legacy states' real rows"
+    );
+}
+
+/// (b) Full tile count: selection is a no-op and the states must be
+/// byte-identical to the legacy all-tiles path (zero behavior change).
+#[test]
+fn full_tile_count_states_are_byte_identical_to_legacy() {
+    let model = tiny_vl_model();
+    let pv = tile_pixels(&[[Some(410), Some(411), Some(412), Some(413)]]);
+    let ids = mlxcel_core::from_slice_i32(&[6], &[1, 1]); // (2, 2) tiling
+    let mask = mlxcel_core::from_slice_i32(&[1, 1, 1, 1], &[1, 1, 4]);
+
+    let full = model.compute_cross_attention_states(&pv, &ids, &mask);
+    let via_tiles = model.compute_cross_attention_states_for_tiles(&pv, &ids, &mask, &[4]);
+
+    assert_eq!(
+        max_abs_diff(&full, &via_tiles),
+        0.0,
+        "num_tiles == max_num_tiles must take the identical legacy path"
+    );
+}
+
+/// Ragged multi-image: each image contributes exactly its real-tile rows,
+/// media-major, byte-identical to the legacy states' corresponding rows.
+#[test]
+fn ragged_multi_image_states_concatenate_real_rows() {
+    let model = tiny_vl_model();
+    let pv = tile_pixels(&[
+        [Some(420), None, None, None],
+        [Some(430), Some(431), None, None],
+    ]);
+    let ids = mlxcel_core::from_slice_i32(&[1, 2], &[1, 2]);
+    let mask = mlxcel_core::from_slice_i32(&[1, 0, 0, 0, 1, 1, 0, 0], &[1, 2, 4]);
+
+    let full = model.compute_cross_attention_states(&pv, &ids, &mask);
+    let sub = model.compute_cross_attention_states_for_tiles(&pv, &ids, &mask, &[1, 2]);
+
+    assert_eq!(
+        mlxcel_core::array_shape(&full),
+        vec![1, 2 * 4 * V_PATCHES, HIDDEN]
+    );
+    assert_eq!(
+        mlxcel_core::array_shape(&sub),
+        vec![1, 3 * V_PATCHES, HIDDEN]
+    );
+
+    // Media 0 tile 0 = rows 0..5; media 1 tiles 0..2 = rows 20..30.
+    let media0 = states_rows(&full, 0, V_PATCHES);
+    let media1 = states_rows(&full, 4 * V_PATCHES, 6 * V_PATCHES);
+    let expected = mlxcel_core::concatenate(&media0, &media1, 1);
+    assert_eq!(
+        max_abs_diff(&sub, &expected),
+        0.0,
+        "ragged selection must keep each image's real rows in media-major order"
+    );
+}
+
+/// `prepare_cross_attention_states` threads the processor's real tile counts:
+/// the logits match a manual stash of the real-tile states, and genuinely
+/// differ from stashing the legacy all-tiles states (whose garbage padding
+/// rows the old unmasked cross-attention consulted).
+#[test]
+fn prepare_stashes_real_tile_states() {
+    let model = tiny_vl_model();
+    let pv = tile_pixels(&[[Some(440), None, None, None]]);
+    let ids = mlxcel_core::from_slice_i32(&[1], &[1, 1]);
+    let mask = mlxcel_core::from_slice_i32(&[1, 0, 0, 0], &[1, 1, 4]);
+
+    let vl_forward = |m: &MllamaVLModel| {
+        let ids = input_ids();
+        let mut caches = LanguageModel::make_caches(m);
+        let logits = LanguageModel::forward(m, &ids, &mut caches, None);
+        mlxcel_core::eval(&logits);
+        logits
+    };
+
+    let inputs = MllamaImageInputs {
+        pixel_values: mlxcel_core::copy(&pv),
+        aspect_ratio_ids: mlxcel_core::copy(&ids),
+        aspect_ratio_mask: mlxcel_core::copy(&mask),
+        num_tiles: vec![1],
+    };
+    model.prepare_cross_attention_states(&inputs);
+    assert!(model.has_cross_attention_states());
+    let logits_prepare = vl_forward(&model);
+
+    let sub = model.compute_cross_attention_states_for_tiles(&pv, &ids, &mask, &[1]);
+    model.set_cross_attention_states(sub);
+    let logits_sub = vl_forward(&model);
+    assert_eq!(
+        max_abs_diff(&logits_prepare, &logits_sub),
+        0.0,
+        "prepare must stash exactly the real-tile states"
+    );
+
+    let full = model.compute_cross_attention_states(&pv, &ids, &mask);
+    model.set_cross_attention_states(full);
+    let logits_full = vl_forward(&model);
+    assert!(
+        max_abs_diff(&logits_prepare, &logits_full) > 1e-6,
+        "the legacy all-tiles states let the unmasked cross-attention consult \
+         padding-lane rows; dropping them must actually change the logits"
+    );
 }
 
 // --- Model-gated smoke test (inert without the checkpoint). ---

@@ -670,6 +670,7 @@ mod tests {
     use super::{MllamaVisionModel, prepare_aspect_ratio_attention_mask};
     use crate::models::mllama::MllamaVisionConfig;
     use mlxcel_core::weights::WeightMap;
+    use mlxcel_core::{MlxArray, UniquePtr};
 
     fn value_at(mask: &mlxcel_core::MlxArray, i: i32, j: i32) -> f32 {
         // mask: [1, 1, L, L]
@@ -891,6 +892,239 @@ mod tests {
         assert!(
             !model.is_quantized(),
             "a dense tower must not report quantized projections"
+        );
+    }
+
+    // --- Padding-tile semantics (issue #527 perf follow-up). ---
+    //
+    // These tests document WHY the tower must keep processing the zero-padding
+    // tiles even though they look like wasted compute. The aspect-ratio mask is
+    // an outer product of the inverted validity vector, so it adds `-1e9` only
+    // where BOTH the query and the key are padding positions. Real-tile queries
+    // therefore attend to padding-tile keys with a zero bias (strictly positive
+    // softmax weight), and padding-tile lanes ingest real-tile content in one
+    // layer and feed it back to real-tile queries in the next. The padding
+    // tiles act as trained register lanes: dropping them from the tower input
+    // changes the real tiles' output. This matches the reference exactly
+    // (mlx-vlm `_prepare_aspect_ratio_attention_mask` and the HF processor,
+    // which always pads the tile axis to `max_image_tiles` before the tower).
+
+    /// Real->padding and padding->real attention is UNMASKED; only
+    /// padding->padding pairs carry the -1e9 bias. This is the structural
+    /// reason a "run the tower on real tiles only" optimization is unsound.
+    #[test]
+    fn mask_keeps_real_to_padding_attention_open() {
+        // 2 tiles, 2 patches each; tile 1 is a padding tile.
+        // Flattened positions: 0,1 = tile 0 (real), 2,3 = tile 1 (padding).
+        let ar_mask = mlxcel_core::from_slice_i32(&[1, 0], &[1, 2]);
+        let mask = prepare_aspect_ratio_attention_mask(&ar_mask, 2, 2, 2);
+
+        // Real query -> padding key: open (bias 0), NOT excluded.
+        assert_eq!(value_at(&mask, 0, 2), 0.0);
+        assert_eq!(value_at(&mask, 1, 3), 0.0);
+        // Padding query -> real key: also open.
+        assert_eq!(value_at(&mask, 2, 0), 0.0);
+        assert_eq!(value_at(&mask, 3, 1), 0.0);
+        // Only padding query -> padding key is masked.
+        assert!(value_at(&mask, 2, 3) < -1e8);
+        assert!(value_at(&mask, 3, 2) < -1e8);
+    }
+
+    // --- Forward-capable tiny tower harness. ---
+
+    /// Tiny but forward-runnable tower: 4x4 image, patch 2 (4 patches + cls =
+    /// 5, padded to 8), hidden 8, 2 heads, 2 local + 1 gated global layer,
+    /// max_num_tiles 4.
+    fn forward_vision_config() -> MllamaVisionConfig {
+        serde_json::from_str(
+            r#"{
+                "image_size": 4,
+                "patch_size": 2,
+                "hidden_size": 8,
+                "intermediate_size": 16,
+                "num_hidden_layers": 2,
+                "num_global_layers": 1,
+                "num_attention_heads": 2,
+                "max_num_tiles": 4,
+                "intermediate_layers_indices": [0]
+            }"#,
+        )
+        .expect("forward-capable tiny mllama vision config")
+    }
+
+    /// Deterministic pseudo-random fill in roughly `[-0.5, 0.5]`.
+    fn fill(n: usize, seed: usize) -> Vec<f32> {
+        (0..n)
+            .map(|i| ((i * 131 + seed * 977 + 7) % 251) as f32 / 251.0 - 0.5)
+            .collect()
+    }
+
+    fn put(map: &mut WeightMap, key: &str, shape: &[i32], seed: usize) {
+        let n: i32 = shape.iter().product();
+        map.insert(
+            key.to_string(),
+            mlxcel_core::from_slice_f32(&fill(n as usize, seed), shape),
+        );
+    }
+
+    /// Full dense weight set with non-degenerate values so attention mixing is
+    /// observable (the zero-filled loader-test weights would hide it).
+    fn build_forward_weights(prefix: &str) -> WeightMap {
+        let (h, inter, np, tiles, ar_rows) = (8, 16, 5, 4, 9);
+        let mut w = WeightMap::new();
+
+        put(&mut w, &format!("{prefix}.class_embedding"), &[h], 1);
+        // PyTorch conv layout [out, in, kH, kW]; the loader transposes it.
+        put(
+            &mut w,
+            &format!("{prefix}.patch_embedding.weight"),
+            &[h, 3, 2, 2],
+            2,
+        );
+        for (name, seed) in [("layernorm_pre", 3), ("layernorm_post", 5)] {
+            put(&mut w, &format!("{prefix}.{name}.weight"), &[h], seed);
+            put(&mut w, &format!("{prefix}.{name}.bias"), &[h], seed + 1);
+        }
+
+        put(
+            &mut w,
+            &format!("{prefix}.gated_positional_embedding.embedding"),
+            &[np, h],
+            7,
+        );
+        put(
+            &mut w,
+            &format!("{prefix}.gated_positional_embedding.gate"),
+            &[1],
+            8,
+        );
+        put(
+            &mut w,
+            &format!("{prefix}.gated_positional_embedding.tile_embedding.weight"),
+            &[ar_rows, tiles * np * h],
+            9,
+        );
+        for (name, seed) in [
+            ("pre_tile_positional_embedding", 10),
+            ("post_tile_positional_embedding", 12),
+        ] {
+            put(
+                &mut w,
+                &format!("{prefix}.{name}.embedding.weight"),
+                &[ar_rows, tiles * h],
+                seed,
+            );
+            put(&mut w, &format!("{prefix}.{name}.gate"), &[1], seed + 1);
+        }
+
+        let mut add_layers = |stack: &str, count: usize, gated: bool, base: usize| {
+            for i in 0..count {
+                let p = format!("{prefix}.{stack}.layers.{i}");
+                let s = base + i * 20;
+                put(&mut w, &format!("{p}.input_layernorm.weight"), &[h], s);
+                put(&mut w, &format!("{p}.input_layernorm.bias"), &[h], s + 1);
+                put(
+                    &mut w,
+                    &format!("{p}.post_attention_layernorm.weight"),
+                    &[h],
+                    s + 2,
+                );
+                put(
+                    &mut w,
+                    &format!("{p}.post_attention_layernorm.bias"),
+                    &[h],
+                    s + 3,
+                );
+                for (j, proj) in ["q_proj", "k_proj", "v_proj", "o_proj"].iter().enumerate() {
+                    put(
+                        &mut w,
+                        &format!("{p}.self_attn.{proj}.weight"),
+                        &[h, h],
+                        s + 4 + j,
+                    );
+                }
+                put(&mut w, &format!("{p}.mlp.fc1.weight"), &[inter, h], s + 8);
+                put(&mut w, &format!("{p}.mlp.fc1.bias"), &[inter], s + 9);
+                put(&mut w, &format!("{p}.mlp.fc2.weight"), &[h, inter], s + 10);
+                put(&mut w, &format!("{p}.mlp.fc2.bias"), &[h], s + 11);
+                if gated {
+                    put(&mut w, &format!("{p}.gate_attn"), &[1], s + 12);
+                    put(&mut w, &format!("{p}.gate_ffn"), &[1], s + 13);
+                }
+            }
+        };
+        add_layers("transformer", 2, false, 100);
+        add_layers("global_transformer", 1, true, 200);
+        w
+    }
+
+    fn forward_tower() -> MllamaVisionModel {
+        let config = forward_vision_config();
+        let weights = build_forward_weights("vision_tower");
+        MllamaVisionModel::from_weights(&weights, &config, "vision_tower")
+            .expect("forward-capable tiny tower must load")
+    }
+
+    /// Build `[1, 1, 4, 3, 4, 4]` pixel values: tile 0 is a real tile, tiles
+    /// 1..4 carry the given per-tile fills (zero = processor padding tile).
+    fn pixel_values_with_tiles(tile_fills: [Option<usize>; 4]) -> UniquePtr<MlxArray> {
+        let per_tile = 3 * 4 * 4;
+        let mut pixels = Vec::with_capacity(4 * per_tile);
+        for fill_seed in tile_fills {
+            match fill_seed {
+                Some(seed) => pixels.extend(fill(per_tile, seed)),
+                None => pixels.extend(std::iter::repeat_n(0.0f32, per_tile)),
+            }
+        }
+        mlxcel_core::from_slice_f32(&pixels, &[1, 1, 4, 3, 4, 4])
+    }
+
+    fn max_abs_diff(a: &mlxcel_core::MlxArray, b: &mlxcel_core::MlxArray) -> f32 {
+        let diff = mlxcel_core::subtract(a, b);
+        let m = mlxcel_core::max_all(&mlxcel_core::abs(&diff));
+        mlxcel_core::eval(&m);
+        mlxcel_core::item_f32(&m)
+    }
+
+    /// The content of a padding-tile lane reaches the REAL tile's tower
+    /// output. Two runs share an identical real tile 0 and differ only in
+    /// tile 1 (zero vs non-zero content); the real tile's output changes, so
+    /// padding lanes are live inputs to real-tile results, and slicing them
+    /// away before the tower is NOT an output-preserving optimization.
+    ///
+    /// If this test ever starts failing (diff == 0), the mask semantics were
+    /// changed to truly exclude padding tiles, and a real-tiles-only tower
+    /// fast path would become legal. Revisit issue #527's perf follow-up then.
+    #[test]
+    fn padding_tile_content_reaches_real_tile_output() {
+        let tower = forward_tower();
+        let ar_ids = mlxcel_core::from_slice_i32(&[1], &[1, 1]);
+        let ar_mask = mlxcel_core::from_slice_i32(&[1, 0, 0, 0], &[1, 1, 4]);
+
+        let zero_padding = pixel_values_with_tiles([Some(50), None, None, None]);
+        let perturbed_padding = pixel_values_with_tiles([Some(50), Some(60), None, None]);
+
+        let out_zero = tower.forward(&zero_padding, &ar_ids, &ar_mask);
+        let out_perturbed = tower.forward(&perturbed_padding, &ar_ids, &ar_mask);
+
+        // [1, 1, 4, 5, 16]: hidden (8) + one intermediate layer (8).
+        assert_eq!(
+            mlxcel_core::array_shape(&out_zero),
+            vec![1, 1, 4, 5, 16],
+            "tiny tower output contract"
+        );
+
+        // Compare ONLY the real tile (tile 0).
+        let real_zero = mlxcel_core::slice(&out_zero, &[0, 0, 0, 0, 0], &[1, 1, 1, 5, 16]);
+        let real_perturbed =
+            mlxcel_core::slice(&out_perturbed, &[0, 0, 0, 0, 0], &[1, 1, 1, 5, 16]);
+        let diff = max_abs_diff(&real_zero, &real_perturbed);
+        assert!(
+            diff > 1e-6,
+            "padding-tile content must leak into the real tile's output through \
+             the unmasked real->padding attention (measured diff {diff}); if this \
+             is now 0, the mask semantics changed and a real-tiles-only tower \
+             fast path may have become legal"
         );
     }
 }
