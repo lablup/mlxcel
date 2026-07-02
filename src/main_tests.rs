@@ -275,6 +275,76 @@ fn serve_command_surgery_flag_defaults_to_none() {
     );
 }
 
+// ── Drafter flag aliases (issue #464) ───────────────────────────
+//
+// `mlxcel serve` uses the mlx-lm-style `--draft-model` / `--draft-max`
+// spelling as the primary flag names, and `mlxcel-server` uses the
+// llama-server-style `--model-draft` / `--draft` spelling. Both binaries
+// now accept both spellings via `visible_alias`, so a command line copied
+// from one to the other parses unchanged. These tests pin that both
+// spellings resolve to the identical `ServeArgs` field value on `mlxcel
+// serve`; `src/bin/mlx_server.rs`'s test module carries the matching
+// assertions for `mlxcel-server`.
+
+#[test]
+fn serve_draft_model_and_model_draft_aliases_resolve_identically() {
+    let primary = Cli::try_parse_from([
+        "mlxcel",
+        "serve",
+        "-m",
+        "models/foo",
+        "--draft-model",
+        "models/draft",
+    ])
+    .expect("--draft-model must parse on `mlxcel serve`");
+    let Commands::Serve(primary_args) = primary.command else {
+        panic!("expected serve command");
+    };
+
+    let aliased = Cli::try_parse_from([
+        "mlxcel",
+        "serve",
+        "-m",
+        "models/foo",
+        "--model-draft",
+        "models/draft",
+    ])
+    .expect("--model-draft alias must parse on `mlxcel serve`");
+    let Commands::Serve(aliased_args) = aliased.command else {
+        panic!("expected serve command");
+    };
+
+    assert_eq!(
+        primary_args.draft_model, aliased_args.draft_model,
+        "--draft-model and its --model-draft alias must resolve to the same drafter path"
+    );
+    assert_eq!(
+        primary_args.draft_model,
+        Some(std::path::PathBuf::from("models/draft"))
+    );
+}
+
+#[test]
+fn serve_draft_max_and_draft_aliases_resolve_identically() {
+    let primary = Cli::try_parse_from(["mlxcel", "serve", "-m", "models/foo", "--draft-max", "24"])
+        .expect("--draft-max must parse on `mlxcel serve`");
+    let Commands::Serve(primary_args) = primary.command else {
+        panic!("expected serve command");
+    };
+
+    let aliased = Cli::try_parse_from(["mlxcel", "serve", "-m", "models/foo", "--draft", "24"])
+        .expect("--draft alias must parse on `mlxcel serve`");
+    let Commands::Serve(aliased_args) = aliased.command else {
+        panic!("expected serve command");
+    };
+
+    assert_eq!(
+        primary_args.draft_max, aliased_args.draft_max,
+        "--draft-max and its --draft alias must resolve to the same token budget"
+    );
+    assert_eq!(primary_args.draft_max, 24);
+}
+
 #[test]
 fn list_command_parses_to_list() {
     let cli = Cli::try_parse_from(["mlxcel", "list"]).expect("bare `list` must parse");

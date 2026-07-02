@@ -3343,6 +3343,61 @@ pub(crate) fn slice_layer_input(
     mlxcel_core::squeeze_axis(&sliced, 2)
 }
 
+/// Quantization schemes mlxcel can actually dequantize: MLX-native affine plus
+/// the block-float families. Anything else uses a packing mlxcel does not
+/// implement.
+const SUPPORTED_QUANT_SCHEMES: &[&str] = &["affine", "mxfp4", "nvfp4", "mxfp8"];
+
+/// Validate that a model's declared quantization scheme is one mlxcel supports,
+/// before any weights are loaded (issue #467).
+///
+/// MLX-native quantization records only `{group_size, bits}` (optionally a
+/// `mode` naming a block-float family); it never carries a `quant_method`.
+/// External / QAT formats such as OptiQ, AWQ, or GPTQ tag themselves with a
+/// `quant_method` (or a non-affine `mode`) whose on-disk packing does not match
+/// the affine layout the loader assumes. Dequantizing one as affine collapses
+/// the logits and produces the degenerate, repeating output reported in issue
+/// #467, so reject it here with an actionable message that names the format
+/// instead of serving garbage.
+///
+/// Inspects the top-level and `text_config`-nested `quantization` /
+/// `quantization_config` objects. Pure over the parsed config JSON so the
+/// policy is unit-testable without a model on disk.
+pub(crate) fn validate_quantization_scheme(config: &serde_json::Value) -> Result<(), String> {
+    fn check_obj(obj: &serde_json::Value, location: &str) -> Result<(), String> {
+        for key in ["quant_method", "mode"] {
+            let Some(raw) = obj.get(key).and_then(|v| v.as_str()) else {
+                continue;
+            };
+            let norm = raw.trim().to_ascii_lowercase();
+            if norm.is_empty() || SUPPORTED_QUANT_SCHEMES.contains(&norm.as_str()) {
+                continue;
+            }
+            return Err(format!(
+                "Unsupported quantization scheme '{raw}' declared at {location}.{key}. \
+                 mlxcel supports MLX-native affine and block-float (mxfp4 / nvfp4 / mxfp8) \
+                 quantization only; external formats such as OptiQ / AWQ / GPTQ use a \
+                 different packing that would dequantize to degenerate output. Re-export the \
+                 model to an MLX affine quantization (mlx_lm.convert / mlx-vlm) before serving."
+            ));
+        }
+        Ok(())
+    }
+
+    let null = serde_json::Value::Null;
+    let text_config = config.get("text_config").unwrap_or(&null);
+    for (root, root_name) in [(config, "config"), (text_config, "text_config")] {
+        for qkey in ["quantization", "quantization_config"] {
+            if let Some(obj) = root.get(qkey)
+                && obj.is_object()
+            {
+                check_obj(obj, &format!("{root_name}.{qkey}"))?;
+            }
+        }
+    }
+    Ok(())
+}
+
 pub struct Gemma4Model {
     pub(crate) text_model: Gemma4TextModel,
     pub(crate) config: TextConfig,
@@ -3362,6 +3417,11 @@ impl Gemma4Model {
             .map_err(|e| format!("Failed to parse config.json: {}", e))?;
         let config_value: serde_json::Value = serde_json::from_str(&config_str)
             .map_err(|e| format!("Failed to parse sanitized config.json: {}", e))?;
+
+        // Refuse unsupported external quantization formats (OptiQ / AWQ / GPTQ)
+        // up front rather than dequantizing them as affine and serving
+        // degenerate output (issue #467).
+        validate_quantization_scheme(&config_value)?;
 
         let is_quantized = config_value.get("quantization").is_some()
             || config_value
@@ -3590,6 +3650,11 @@ impl Gemma4StageModel {
             .map_err(|e| format!("Failed to parse config.json: {}", e))?;
         let config_value: serde_json::Value = serde_json::from_str(&config_str)
             .map_err(|e| format!("Failed to parse sanitized config.json: {}", e))?;
+
+        // Refuse unsupported external quantization formats (OptiQ / AWQ / GPTQ)
+        // up front rather than dequantizing them as affine and serving
+        // degenerate output (issue #467).
+        validate_quantization_scheme(&config_value)?;
 
         let is_quantized = config_value.get("quantization").is_some()
             || config_value
@@ -5044,4 +5109,81 @@ mod gemma4_unified_mask_tests {
     // caller's no-trim invariant is additionally pinned in
     // `gemma3::gemma3_mask_tests`. Gemma 4's real-model over-window behaviour is
     // covered by the byte-identical regression on `gemma-4-12b-it-4bit`.
+}
+
+#[cfg(test)]
+mod quant_scheme_tests {
+    use super::validate_quantization_scheme;
+    use serde_json::json;
+
+    #[test]
+    fn accepts_mlx_native_affine_quantization() {
+        // MLX-native quant records only group_size/bits (no quant_method).
+        let cfg = json!({ "quantization": { "group_size": 64, "bits": 4 } });
+        assert!(validate_quantization_scheme(&cfg).is_ok());
+    }
+
+    #[test]
+    fn accepts_absent_quantization() {
+        // Non-quantized model: nothing to validate.
+        let cfg = json!({ "model_type": "gemma4" });
+        assert!(validate_quantization_scheme(&cfg).is_ok());
+    }
+
+    #[test]
+    fn accepts_supported_block_float_mode() {
+        let cfg = json!({ "quantization": { "group_size": 32, "bits": 4, "mode": "mxfp4" } });
+        assert!(validate_quantization_scheme(&cfg).is_ok());
+    }
+
+    #[test]
+    fn rejects_optiq_quant_method_and_names_it() {
+        // The issue #467 model: an OptiQ-tagged quantization must be rejected
+        // with a message that names the offending scheme.
+        let cfg = json!({
+            "quantization": { "group_size": 64, "bits": 4, "quant_method": "optiq" }
+        });
+        let err = validate_quantization_scheme(&cfg).expect_err("OptiQ must be rejected");
+        assert!(
+            err.to_lowercase().contains("optiq"),
+            "message must name the scheme: {err}"
+        );
+        assert!(
+            err.contains("Unsupported quantization scheme"),
+            "actionable message: {err}"
+        );
+    }
+
+    #[test]
+    fn rejects_unknown_mode() {
+        let cfg = json!({ "quantization": { "group_size": 64, "bits": 4, "mode": "optiq" } });
+        assert!(validate_quantization_scheme(&cfg).is_err());
+    }
+
+    #[test]
+    fn rejects_awq_gptq_quant_method() {
+        for method in ["awq", "gptq", "AWQ"] {
+            let cfg = json!({ "quantization": { "quant_method": method } });
+            assert!(
+                validate_quantization_scheme(&cfg).is_err(),
+                "external method {method} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn detects_scheme_nested_under_text_config() {
+        // VLM configs nest text quantization under text_config.
+        let cfg = json!({
+            "text_config": { "quantization": { "quant_method": "optiq" } }
+        });
+        assert!(validate_quantization_scheme(&cfg).is_err());
+    }
+
+    #[test]
+    fn detects_hf_quantization_config_object() {
+        // HF-style external formats use a `quantization_config` object.
+        let cfg = json!({ "quantization_config": { "quant_method": "gptq", "bits": 4 } });
+        assert!(validate_quantization_scheme(&cfg).is_err());
+    }
 }

@@ -77,6 +77,7 @@
 //!   before the first byte streams.
 
 mod cli;
+mod completeness;
 mod errors;
 mod filters;
 mod progress;
