@@ -22,7 +22,9 @@
 //! - Partial RoPE (partial_rotary_factor)
 //! - Optional Q/K normalization
 //! - 4 RMSNorm layers per block (input, post_self_attn, post_attention, post_mlp)
-//! - Fused gate_up_proj for experts
+//! - Fused gate_up_proj for experts (fused at load from separate, already
+//!   expert-stacked switch_mlp.gate_proj/up_proj when the checkpoint is not
+//!   pre-fused, e.g. real GLM-4.5V MoE)
 
 use mlxcel_core::generate::LanguageModel;
 use mlxcel_core::layers::{KVCache, RMSNorm, UnifiedEmbedding, UnifiedLinear};
@@ -464,6 +466,62 @@ impl SwitchLinear {
             })
         }
     }
+
+    /// Fuse separately-stored, already-expert-stacked `gate_proj` and `up_proj`
+    /// tensors into the fused `gate_up_proj` layout the model consumes.
+    ///
+    /// Real GLM-4(.5)V MoE checkpoints ship the routed experts as two tensors,
+    /// `switch_mlp.gate_proj` and `switch_mlp.up_proj`, each shaped
+    /// `[num_experts, out_features, in_features]` (the last axis is the
+    /// group-packed input for quantized checkpoints). The forward path expects a
+    /// single fused `gate_up_proj` whose output-feature axis holds gate rows
+    /// first, then up rows (see `SwitchGLU::forward`, which splits the result at
+    /// `intermediate_size`). Fusion is therefore a concatenation along the
+    /// output-feature axis (axis 1).
+    ///
+    /// This is quant-aware: 4/8-bit weights pack along the *input* axis (the last
+    /// axis), so concatenating along the output axis never splits a packed word,
+    /// and the matching per-output-row `scales`/`biases` concatenate on the same
+    /// axis. No dequantization is required.
+    fn from_separate_gate_up(
+        weights: &WeightMap,
+        args: &ModelArgs,
+        gate_prefix: &str,
+        up_prefix: &str,
+    ) -> Result<Self, String> {
+        // Output-feature axis of the `[num_experts, out_features, in]` stack.
+        const EXPERT_OUT_AXIS: i32 = 1;
+
+        let gate_weight = get_weight_ref(weights, &format!("{}.weight", gate_prefix))?;
+        let up_weight = get_weight_ref(weights, &format!("{}.weight", up_prefix))?;
+        let weight = mlxcel_core::concatenate(gate_weight, up_weight, EXPERT_OUT_AXIS);
+        let num_experts = mlxcel_core::array_shape(&weight)[0] as usize;
+
+        let gate_scales_key = format!("{}.scales", gate_prefix);
+        if weights.contains_key(&gate_scales_key) {
+            let gate_scales = get_weight_ref(weights, &gate_scales_key)?;
+            let up_scales = get_weight_ref(weights, &format!("{}.scales", up_prefix))?;
+            let scales = mlxcel_core::concatenate(gate_scales, up_scales, EXPERT_OUT_AXIS);
+
+            let gate_biases = get_weight_ref(weights, &format!("{}.biases", gate_prefix))?;
+            let up_biases = get_weight_ref(weights, &format!("{}.biases", up_prefix))?;
+            let biases = mlxcel_core::concatenate(gate_biases, up_biases, EXPERT_OUT_AXIS);
+
+            Ok(Self::Quantized {
+                weight,
+                scales,
+                biases,
+                group_size: args.group_size(),
+                bits: args.bits(),
+                num_experts,
+            })
+        } else {
+            Ok(Self::Regular {
+                weight,
+                num_experts,
+            })
+        }
+    }
 }
 
 // SwitchGLU: SwiGLU with fused gate_up projection.
@@ -603,12 +661,24 @@ impl SwitchGLU {
         args: &ModelArgs,
         prefix: &str,
     ) -> Result<Self, String> {
-        Ok(Self {
-            gate_up_proj: SwitchLinear::from_weights(
+        // Prefer a checkpoint that already ships the fused `gate_up_proj` expert
+        // stack; otherwise fuse the separate `gate_proj` / `up_proj` tensors that
+        // real GLM-4(.5)V MoE checkpoints provide (concatenated gate-then-up
+        // along the expert output-feature axis, quant-aware).
+        let gate_up_prefix = format!("{}.gate_up_proj", prefix);
+        let gate_up_proj = if weights.contains_key(&format!("{}.weight", gate_up_prefix)) {
+            SwitchLinear::from_weights(weights, args, &gate_up_prefix)?
+        } else {
+            SwitchLinear::from_separate_gate_up(
                 weights,
                 args,
-                &format!("{}.gate_up_proj", prefix),
-            )?,
+                &format!("{}.gate_proj", prefix),
+                &format!("{}.up_proj", prefix),
+            )?
+        };
+
+        Ok(Self {
+            gate_up_proj,
             down_proj: SwitchLinear::from_weights(weights, args, &format!("{}.down_proj", prefix))?,
             intermediate_size: args.moe_intermediate_size as i32,
         })
@@ -986,6 +1056,16 @@ fn get_weight_copy(weights: &WeightMap, name: &str) -> Result<UniquePtr<MlxArray
         .ok_or_else(|| format!("Weight not found: {}", name))
 }
 
+/// Borrow a weight without copying (used when fusing tensors at load).
+fn get_weight_ref<'a>(
+    weights: &'a WeightMap,
+    name: &str,
+) -> Result<&'a UniquePtr<MlxArray>, String> {
+    weights
+        .get(name)
+        .ok_or_else(|| format!("Weight not found: {}", name))
+}
+
 // LanguageModel trait implementation.
 impl LanguageModel for Glm4MoeModel {
     fn forward(
@@ -1109,6 +1189,181 @@ mod tests {
 
         // Full RoPE (partial_rotary_factor = 1.0)
         assert_eq!(args.rope_dims(), 128);
+    }
+
+    /// Minimal GLM-4V MoE text args: only the fields the fusion path reads
+    /// (`moe_intermediate_size`, quant `group_size`/`bits` defaults) matter.
+    fn tiny_moe_args(moe_intermediate_size: usize) -> ModelArgs {
+        let json = format!(
+            r#"{{
+                "model_type": "glm4v_moe_text",
+                "vocab_size": 151552,
+                "hidden_size": 16,
+                "intermediate_size": 32,
+                "max_position_embeddings": 8192,
+                "moe_intermediate_size": {moe_intermediate_size},
+                "num_attention_heads": 4,
+                "num_hidden_layers": 2,
+                "num_key_value_heads": 2,
+                "head_dim": 4,
+                "rms_norm_eps": 1e-5,
+                "rope_theta": 10000.0,
+                "partial_rotary_factor": 0.5,
+                "n_routed_experts": 4,
+                "num_experts_per_tok": 2,
+                "routed_scaling_factor": 1.0,
+                "norm_topk_prob": true,
+                "first_k_dense_replace": 1
+            }}"#
+        );
+        serde_json::from_str(&json).unwrap()
+    }
+
+    /// Real GLM-4(.5)V MoE checkpoints ship the routed experts as separate,
+    /// already expert-stacked `switch_mlp.gate_proj` / `switch_mlp.up_proj`
+    /// (4-bit: `.weight` U32 + `.scales`/`.biases`), not a fused
+    /// `switch_mlp.gate_up_proj`. `SwitchGLU::from_weights` must fuse them into
+    /// the fused layout by concatenating gate-then-up along the expert
+    /// output-feature axis (axis 1), carrying the packed weight and its scales
+    /// and biases together, while `down_proj` is loaded unchanged.
+    #[test]
+    fn fuses_separate_switch_mlp_gate_up_experts() {
+        // Small dims that mirror the real 3D layout
+        // `[num_experts, out_features, in_features(packed)]`.
+        let e = 4i32; // n_routed_experts
+        let i = 8i32; // moe_intermediate_size (gate/up out_features)
+        let kp = 2i32; // packed input columns (hidden / 8 for 4-bit)
+        let g = 1i32; // quant groups along the input
+        let h = 16i32; // hidden (down_proj out_features)
+        let down_kp = 1i32; // down_proj packed input columns
+
+        let args = tiny_moe_args(i as usize);
+
+        let mut weights = WeightMap::new();
+        let prefix = "model.layers.1.mlp.switch_mlp";
+        // Separate, already expert-stacked gate_proj / up_proj (4-bit quantized).
+        for proj in ["gate_proj", "up_proj"] {
+            weights.insert(
+                format!("{}.{}.weight", prefix, proj),
+                mlxcel_core::ones(&[e, i, kp], mlxcel_core::dtype::UINT32),
+            );
+            weights.insert(
+                format!("{}.{}.scales", prefix, proj),
+                mlxcel_core::ones(&[e, i, g], mlxcel_core::dtype::BFLOAT16),
+            );
+            weights.insert(
+                format!("{}.{}.biases", prefix, proj),
+                mlxcel_core::ones(&[e, i, g], mlxcel_core::dtype::BFLOAT16),
+            );
+        }
+        // down_proj is consumed as-is (no fusion).
+        weights.insert(
+            format!("{}.down_proj.weight", prefix),
+            mlxcel_core::ones(&[e, h, down_kp], mlxcel_core::dtype::UINT32),
+        );
+        weights.insert(
+            format!("{}.down_proj.scales", prefix),
+            mlxcel_core::ones(&[e, h, g], mlxcel_core::dtype::BFLOAT16),
+        );
+        weights.insert(
+            format!("{}.down_proj.biases", prefix),
+            mlxcel_core::ones(&[e, h, g], mlxcel_core::dtype::BFLOAT16),
+        );
+
+        let glu = SwitchGLU::from_weights(&weights, &args, prefix)
+            .expect("fusing separate gate_proj/up_proj should succeed");
+
+        assert_eq!(glu.intermediate_size, i);
+
+        match &glu.gate_up_proj {
+            SwitchLinear::Quantized {
+                weight,
+                scales,
+                biases,
+                group_size,
+                bits,
+                num_experts,
+            } => {
+                assert_eq!(*num_experts, e as usize);
+                assert_eq!(*group_size, args.group_size());
+                assert_eq!(*bits, args.bits());
+                // Output-feature axis is doubled (gate rows then up rows); the
+                // packed input axis and the quant groups are unchanged.
+                assert_eq!(mlxcel_core::array_shape(weight), vec![e, 2 * i, kp]);
+                assert_eq!(mlxcel_core::array_shape(scales), vec![e, 2 * i, g]);
+                assert_eq!(mlxcel_core::array_shape(biases), vec![e, 2 * i, g]);
+            }
+            SwitchLinear::Regular { .. } => panic!("expected a quantized fused gate_up_proj"),
+        }
+
+        match &glu.down_proj {
+            SwitchLinear::Quantized {
+                weight,
+                num_experts,
+                ..
+            } => {
+                assert_eq!(*num_experts, e as usize);
+                assert_eq!(mlxcel_core::array_shape(weight), vec![e, h, down_kp]);
+            }
+            SwitchLinear::Regular { .. } => panic!("expected a quantized down_proj"),
+        }
+    }
+
+    /// Backward compatibility: a checkpoint that already provides the fused
+    /// `switch_mlp.gate_up_proj` stack must still load through the fused path.
+    #[test]
+    fn loads_prefused_switch_mlp_gate_up_experts() {
+        let e = 4i32;
+        let i = 8i32;
+        let kp = 2i32;
+        let g = 1i32;
+        let h = 16i32;
+        let down_kp = 1i32;
+
+        let args = tiny_moe_args(i as usize);
+
+        let mut weights = WeightMap::new();
+        let prefix = "model.layers.1.mlp.switch_mlp";
+        // Pre-fused gate_up_proj: out_features already 2 * moe_intermediate_size.
+        weights.insert(
+            format!("{}.gate_up_proj.weight", prefix),
+            mlxcel_core::ones(&[e, 2 * i, kp], mlxcel_core::dtype::UINT32),
+        );
+        weights.insert(
+            format!("{}.gate_up_proj.scales", prefix),
+            mlxcel_core::ones(&[e, 2 * i, g], mlxcel_core::dtype::BFLOAT16),
+        );
+        weights.insert(
+            format!("{}.gate_up_proj.biases", prefix),
+            mlxcel_core::ones(&[e, 2 * i, g], mlxcel_core::dtype::BFLOAT16),
+        );
+        weights.insert(
+            format!("{}.down_proj.weight", prefix),
+            mlxcel_core::ones(&[e, h, down_kp], mlxcel_core::dtype::UINT32),
+        );
+        weights.insert(
+            format!("{}.down_proj.scales", prefix),
+            mlxcel_core::ones(&[e, h, g], mlxcel_core::dtype::BFLOAT16),
+        );
+        weights.insert(
+            format!("{}.down_proj.biases", prefix),
+            mlxcel_core::ones(&[e, h, g], mlxcel_core::dtype::BFLOAT16),
+        );
+
+        let glu = SwitchGLU::from_weights(&weights, &args, prefix)
+            .expect("loading a pre-fused gate_up_proj should succeed");
+
+        match &glu.gate_up_proj {
+            SwitchLinear::Quantized {
+                weight,
+                num_experts,
+                ..
+            } => {
+                assert_eq!(*num_experts, e as usize);
+                assert_eq!(mlxcel_core::array_shape(weight), vec![e, 2 * i, kp]);
+            }
+            SwitchLinear::Regular { .. } => panic!("expected a quantized fused gate_up_proj"),
+        }
     }
 
     #[test]
