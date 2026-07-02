@@ -816,11 +816,21 @@ pub(crate) struct ServeArgs {
     n_predict: i32,
 
     /// Path to drafter checkpoint for server speculative decoding
-    #[arg(long, value_name = "PATH")]
+    ///
+    /// Accepts the mlx-lm-style `--draft-model` spelling (primary) and the
+    /// llama-server-style `--model-draft` spelling (alias, matches
+    /// `mlxcel-server`) so commands copied between the two binaries work
+    /// unchanged.
+    #[arg(long, visible_alias = "model-draft", value_name = "PATH")]
     draft_model: Option<PathBuf>,
 
     /// Maximum number of draft tokens per speculation step
-    #[arg(long, env = "LLAMA_ARG_DRAFT_MAX", default_value_t = 16)]
+    #[arg(
+        long,
+        visible_alias = "draft",
+        env = "LLAMA_ARG_DRAFT_MAX",
+        default_value_t = 16
+    )]
     draft_max: usize,
 
     /// Maximum concurrent decode sequences; explicit value shares --ctx-size
@@ -1433,10 +1443,12 @@ pub(crate) struct ServeArgs {
     /// Speculative-decoding flag group (`--draft-kind`, `--draft-block-size`).
     /// Defined once in `mlxcel::cli::speculative_args` so all three
     /// binaries (`mlxcel generate`, `mlxcel serve`, `mlxcel-server`) expose
-    /// identical help text and parsing. The `--draft-model` /
-    /// `--draft-max` flags stay above on this struct because they have
-    /// different naming on `mlxcel-server` (`--model-draft`) for
-    /// llama-server CLI compatibility.
+    /// identical help text and parsing. The `--draft-model` / `--draft-max`
+    /// flags stay above on this struct because their primary spelling is
+    /// mlx-lm-style; each also carries a visible alias (`--model-draft`,
+    /// `--draft`) matching the llama-server-compatible naming
+    /// `mlxcel-server` uses, so a command line built for either binary
+    /// parses on both.
     #[command(flatten)]
     speculative: SpeculativeArgs,
 

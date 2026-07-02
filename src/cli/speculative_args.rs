@@ -30,13 +30,17 @@
 //!   `env_fallback_draft_*` family) live next to the flag definitions so the
 //!   binary entry points stay slim.
 //!
-//! The existing `--draft-model` (`--model-draft` on `mlxcel-server` for
-//! llama.cpp compatibility) and `--draft-max` / `--num-draft-tokens` flags
-//! intentionally remain on the per-binary `Args` structs because their
-//! names diverge across binaries (the `mlxcel-server` binary needs the
-//! llama.cpp `--model-draft` spelling) and the `--num-draft-tokens` /
-//! `--draft-max` knob has separate semantics on the offline `generate` vs.
-//! the continuous-batched `serve` paths.
+//! The existing `--draft-model` / `--model-draft` and `--draft-max` /
+//! `--draft` flags intentionally remain on the per-binary `Args` structs
+//! rather than joining this shared group, because `mlxcel generate` uses
+//! the unrelated `--num-draft-tokens` spelling with offline-only semantics.
+//! On the two server binaries (`mlxcel serve`, `mlxcel-server`) both
+//! spellings are cross-aliased (`visible_alias`) so a command line written
+//! for one parses unchanged on the other: `--draft-model` /
+//! `--model-draft` both resolve to the drafter checkpoint path, and
+//! `--draft-max` / `--draft` both resolve to the per-step draft-token
+//! budget. See `tests/cli_help_consistency.rs` for the cross-binary
+//! parity test.
 //!
 //! Used by: mlxcel generate, mlxcel serve, mlxcel-server.
 
@@ -63,10 +67,12 @@ pub const DEFAULT_DFLASH_BLOCK_SIZE: u32 = 16;
 /// callers; see the integration test `tests/cli_help_consistency.rs`.
 ///
 /// The group only owns the **dispatch-selecting** flags (`--draft-kind`,
-/// `--draft-block-size`). The `--draft-model` path, the `--draft-max` /
-/// `--num-draft-tokens` knob, and the llama.cpp-compat `--model-draft`
-/// alias all remain on the per-binary `Args` structs because their
-/// spellings and semantics diverge.
+/// `--draft-block-size`). The drafter-path flag (`--draft-model` /
+/// `--model-draft`) and the draft-token-count knob (`--draft-max` /
+/// `--draft` on the servers, `--num-draft-tokens` on offline `generate`)
+/// remain on the per-binary `Args` structs; on `mlxcel serve` and
+/// `mlxcel-server` both spellings of each are cross-aliased for parity,
+/// see the module-level docs above.
 #[derive(Args, Debug, Clone, Default)]
 #[command(next_help_heading = "Speculative Decoding Options")]
 pub struct SpeculativeArgs {

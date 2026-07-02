@@ -98,6 +98,8 @@ mlxcel inspect -m Qwen3.5-0.8B-4bit --max-tokens 32768
 mlxcel generate -m Qwen3.5-0.8B-4bit -p "Hello, world!" -n 32768 --estimate-memory
 ```
 
+`mlxcel-server` mirrors `mlxcel serve` flag for flag, including the two speculative-decoding flags whose primary spelling differs by convention: the drafter checkpoint path (`--draft-model` on `mlxcel serve`, mlx-lm style; `--model-draft` on `mlxcel-server`, llama-server style) and the per-step draft-token budget (`--draft-max` on `mlxcel serve`; `--draft` on `mlxcel-server`). Both binaries accept both spellings as aliases, so a speculative-decoding command line built for one runs unchanged on the other, for example `--draft-model <path> --draft-kind mtp` also works as `--model-draft <path> --draft-kind mtp` on `mlxcel-server`. `--draft-kind` and `--draft-block-size` already share one spelling everywhere.
+
 Downloaded models land in a location-independent global store at `${MLXCEL_CACHE_DIR:-$HOME/.cache/mlxcel}/models/<owner>/<name>`, shared across every working directory. To relocate the store, write a snapshot to an exact path, change the default org, or tune the memory preflight, see [Environment variables](docs/environment-variables.md), `MLXCEL_MODELS_DIR` / `--models-dir`, `--local-dir`, `MLXCEL_DEFAULT_ORG`, and `MLXCEL_MEMORY_LIMIT` / `MLXCEL_HEADROOM_FACTOR`.
 
 If you build from source instead, use `./target/release/mlxcel` and

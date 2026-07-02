@@ -247,8 +247,13 @@ struct ServerArgs {
     timeout: u64,
 
     /// Path to drafter checkpoint for server speculative decoding
+    ///
+    /// Accepts the llama-server-style `--model-draft` spelling (primary) and
+    /// the mlx-lm-style `--draft-model` spelling (alias, matches `mlxcel
+    /// serve`) so commands copied between the two binaries work unchanged.
     #[arg(
         long = "model-draft",
+        visible_alias = "draft-model",
         env = "LLAMA_ARG_MODEL_DRAFT",
         value_name = "PATH"
     )]
@@ -908,9 +913,13 @@ struct ServerArgs {
     /// Speculative-decoding flag group (`--draft-kind`, `--draft-block-size`).
     /// Defined once in `mlxcel::cli::speculative_args` so all three
     /// binaries (`mlxcel generate`, `mlxcel serve`, `mlxcel-server`) expose
-    /// identical help text and parsing. The `--model-draft` /
-    /// `--draft` flags stay above on this struct because they have
-    /// llama-server-compatible naming on this binary.
+    /// identical help text and parsing. The `--model-draft` / `--draft`
+    /// flags stay above on this struct because their primary spelling is
+    /// llama-server-compatible; each also carries a visible alias
+    /// (`--draft-model`, `--draft-max`) so a `mlxcel serve` command line
+    /// works unchanged on `mlxcel-server`. See the parity note on
+    /// `SpeculativeArgs` and `ServeArgs::draft_model` / `draft_max` in
+    /// `src/main.rs`.
     #[command(flatten)]
     speculative: SpeculativeArgs,
 
@@ -1441,5 +1450,40 @@ mod tests {
         let input = build_startup_input(args).expect("existing path should be accepted");
 
         assert_eq!(input.model_path, local_model);
+    }
+
+    // ── Drafter flag aliases (issue #464) ───────────────────────
+    //
+    // `mlxcel-server` uses the llama-server-style `--model-draft` /
+    // `--draft` spelling as the primary flag names, and `mlxcel serve`
+    // uses the mlx-lm-style `--draft-model` / `--draft-max` spelling.
+    // Both binaries now accept both spellings via `visible_alias`, so a
+    // command line copied from one to the other parses unchanged. These
+    // tests pin that both spellings resolve to the identical `ServerArgs`
+    // field value here; `src/main_tests.rs` carries the matching
+    // assertions for `mlxcel serve`.
+
+    #[test]
+    fn model_draft_and_draft_model_aliases_resolve_identically() {
+        let primary = parse_server_args(&["mlxcel-server", "--model-draft", "models/draft"]);
+        let aliased = parse_server_args(&["mlxcel-server", "--draft-model", "models/draft"]);
+
+        assert_eq!(
+            primary.model_draft, aliased.model_draft,
+            "--model-draft and its --draft-model alias must resolve to the same drafter path"
+        );
+        assert_eq!(primary.model_draft, Some(PathBuf::from("models/draft")));
+    }
+
+    #[test]
+    fn draft_and_draft_max_aliases_resolve_identically() {
+        let primary = parse_server_args(&["mlxcel-server", "--draft", "24"]);
+        let aliased = parse_server_args(&["mlxcel-server", "--draft-max", "24"]);
+
+        assert_eq!(
+            primary.draft, aliased.draft,
+            "--draft and its --draft-max alias must resolve to the same token budget"
+        );
+        assert_eq!(primary.draft, 24);
     }
 }

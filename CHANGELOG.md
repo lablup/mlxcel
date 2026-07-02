@@ -9,6 +9,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Added
 - **ComputeBackend seam for the forward-execution engine.** A `ComputeBackend` abstraction at the model-load boundary lets a future non-MLX engine host `LanguageModel::forward` without routing through the MLX bridge. The existing MLX path moves behind `MlxBackend` as a behavior-preserving refactor (temp-0 output is byte-identical before and after). Under default features the selection folds to the single MLX backend at compile time with no runtime dispatch on the hot path; a default-off `experimental-backend` feature reserves the plug-in slot. No non-MLX kernels are implemented (#338).
 
+### Fixed
+- **Interrupted model downloads are detected and re-fetched instead of failing at load.** An interrupted `mlxcel run <repo-id>` (also `mlxcel serve` and `mlxcel-server` auto-download) previously reused the partial snapshot and died with a bare `Weight not found`. The load/resolve path now verifies the full weight set against the snapshot's own `model.safetensors.index.json` (every shard present and non-zero), not just `config.json` presence, so a partial snapshot is resumed through the shared downloader (re-fetching only the missing files, with a forced clean re-download as a fallback) before the model loads. Repackaged mlx-community quants whose stale full-precision index no longer matches the on-disk files are still reused without a re-fetch (#465).
+
 ### Docs
 - Finalize the per-backend `MLXCEL_FUSED_QK_NORM` default decision: CUDA (GB10) was measured and is also slower than the graph path, so the fused QK-norm decode path stays opt-in (default off) on every backend; `docs/environment-variables.md` updated to drop the CUDA-pending rationale and record the determinism nuance (#355).
 

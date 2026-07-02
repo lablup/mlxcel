@@ -223,7 +223,11 @@ pub fn get_model_type(model_path: &Path) -> Result<ModelType> {
         "glm4v_moe" => Ok(ModelType::Glm4vMoe),
         "youtu_vl" => Ok(ModelType::YoutuVLM),
         "internvl_chat" => Ok(ModelType::InternVLChatVLM),
-        "smolvlm" | "smolvlm2" => Ok(ModelType::SmolVLM),
+        // SmolVLM2 ships as `smolvlm`/`smolvlm2`. SmolVLM-Instruct ships as an
+        // Idefics3 checkpoint (`idefics3`, `Idefics3ForConditionalGeneration`):
+        // a SigLIP vision tower + pixel-shuffle connector + Llama text backbone,
+        // which is exactly what the SmolVLM runtime implements.
+        "smolvlm" | "smolvlm2" | "idefics3" => Ok(ModelType::SmolVLM),
         "minicpmo" => Ok(ModelType::MiniCPMOVLM),
         "minicpmv4_6" => Ok(ModelType::MiniCPMV46VLM),
         "moondream3" => Ok(ModelType::Moondream3VLM),

@@ -456,3 +456,39 @@ fn speculative_flag_signatures_match_across_binaries() {
         );
     }
 }
+
+// ── Drafter flag aliases (issue #464) ───────────────────────────
+//
+// `mlxcel serve` and `mlxcel-server` intentionally keep opposite primary
+// spellings for the drafter-path and draft-token-count flags (mlx-lm vs.
+// llama-server style), but both must accept both spellings so a command
+// line copied between the two binaries parses unchanged. This pins the
+// `--help` output on each binary to document the alias so an operator
+// discovers the alternate spelling without reading the source. Unit tests
+// in `src/main_tests.rs` and `src/bin/mlx_server.rs` cover that the
+// aliases resolve to the identical parsed value.
+#[test]
+fn drafter_flag_aliases_are_documented_on_both_binaries() {
+    let serve_help = help_output("mlxcel", &["serve", "--help"]);
+    let server_help = help_output("mlxcel-server", &["--help"]);
+
+    assert!(
+        serve_help.contains("--draft-model <PATH>")
+            && serve_help.contains("[aliases: --model-draft]"),
+        "mlxcel serve --help must document --draft-model with a --model-draft alias.\nHelp was:\n{serve_help}"
+    );
+    assert!(
+        serve_help.contains("--draft-max <DRAFT_MAX>") && serve_help.contains("[aliases: --draft]"),
+        "mlxcel serve --help must document --draft-max with a --draft alias.\nHelp was:\n{serve_help}"
+    );
+
+    assert!(
+        server_help.contains("--model-draft <PATH>")
+            && server_help.contains("[aliases: --draft-model]"),
+        "mlxcel-server --help must document --model-draft with a --draft-model alias.\nHelp was:\n{server_help}"
+    );
+    assert!(
+        server_help.contains("--draft <DRAFT>") && server_help.contains("[aliases: --draft-max]"),
+        "mlxcel-server --help must document --draft with a --draft-max alias.\nHelp was:\n{server_help}"
+    );
+}
