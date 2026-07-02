@@ -160,6 +160,13 @@ correctness-first lever; it does not close the gap to MLX (see the perf note abo
 - Greedy sampling only; text-only (no VLM / draft).
 - `XlaInferenceSession` is single-sequence; `XlaBatchEngine` (below) adds
   multi-sequence throughput.
+- **Metal precision (issue #575):** `f16` is the transferable lever on Metal (the
+  `metal` default, 2.3x over f32 and token-exact for 64 steps on an M1 Ultra).
+  `bf16` does **not** compile on `metal-spirv` (the Metal GPU target has no bf16
+  compute, so the `f32` to `bf16` bitcast fails to legalize); use `f16`. The packed
+  int8 path (`MLXCEL_XLA_QUANT=packed`) compiles for Metal but the prefill invoke
+  faults at runtime (IREE `INTERNAL`); it has only run on the CUDA runtime, and its
+  bandwidth win is un-demonstrable on the compute-bound Metal decode regardless.
 
 ## Batched continuous batching (Stage 2b)
 
@@ -253,6 +260,20 @@ formula as `src/weights.rs`), (2) runs `xla_oracle_check` (single-seq greedy ==
 HF oracle), and (3) runs `xla_batch_bench` (every batched request == its
 single-seq reference). It exits non-zero if any run gate fails.
 `--structural-only` runs just the pure-Rust pre-gate (no IREE, no GPU).
+
+On a host without the HF oracle venv (e.g. macOS / Metal), the `xla_traj_dump`
+example dumps the engine's greedy trajectory at the ambient `MLXCEL_XLA_PRECISION`
+as the same oracle JSON, so the token-exact gate can compare one precision against
+another (issue #575 checks `f16` against an XLA-`f32` reference this way):
+
+```bash
+MLXCEL_XLA_PRECISION=f32 MLXCEL_XLA_DEVICE=metal cargo run --release \
+  --features xla-iree --example xla_traj_dump -- \
+  --model models/llama-3.2-1b-4bit --max-new 64 --out /tmp/f32.json
+MLXCEL_XLA_PRECISION=f16 MLXCEL_XLA_DEVICE=metal cargo run --release \
+  --features xla-iree --example xla_oracle_check -- \
+  --model models/llama-3.2-1b-4bit --oracle /tmp/f32.json --device metal
+```
 
 ### Adding a family is turnkey
 

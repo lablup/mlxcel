@@ -258,3 +258,11 @@ required-features = ["xla-iree"]
 [[example]]
 name = "xla_oracle_check"
 required-features = ["xla-iree"]
+
+# Dump the OpenXLA engine's greedy argmax trajectory as an oracle JSON at the
+# ambient MLXCEL_XLA_PRECISION, so the token-exactness gate above can use the XLA
+# f32 path itself as the reference (issue #575, Metal validation without the HF
+# fp32 Python oracle). Needs real IREE execution, so it builds only under `xla-iree`.
+[[example]]
+name = "xla_traj_dump"
+required-features = ["xla-iree"]
