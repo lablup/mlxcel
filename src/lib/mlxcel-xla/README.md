@@ -162,11 +162,13 @@ correctness-first lever; it does not close the gap to MLX (see the perf note abo
   multi-sequence throughput.
 - **Metal precision (issue #575):** `f16` is the transferable lever on Metal (the
   `metal` default, 2.3x over f32 and token-exact for 64 steps on an M1 Ultra).
-  `bf16` does **not** compile on `metal-spirv` (the Metal GPU target has no bf16
-  compute, so the `f32` to `bf16` bitcast fails to legalize); use `f16`. The packed
-  int8 path (`MLXCEL_XLA_QUANT=packed`) compiles for Metal but the prefill invoke
-  faults at runtime (IREE `INTERNAL`); it has only run on the CUDA runtime, and its
-  bandwidth win is un-demonstrable on the compute-bound Metal decode regardless.
+  `bf16` cannot lower on `metal-spirv` (the Metal GPU target has no bf16 compute),
+  so `MLXCEL_XLA_PRECISION=bf16` on a `metal` device is **rejected at load** with a
+  message pointing at `f16` (issue #612), rather than dumping an opaque
+  `iree-compile` legalization error mid-run. The packed int8 path
+  (`MLXCEL_XLA_QUANT=packed`) compiles for Metal but the prefill invoke faults at
+  runtime (IREE `INTERNAL`, issue #613); it has only run on the CUDA runtime, and
+  its bandwidth win is un-demonstrable on the compute-bound Metal decode regardless.
 
 ## Batched continuous batching (Stage 2b)
 
