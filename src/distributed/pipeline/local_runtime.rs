@@ -80,22 +80,13 @@ pub fn resolve_in_process_pipeline_num_layers(model_dir: &Path) -> Result<usize>
             )
         })?;
 
-    // DeepSeek V3 stores a trailing multi-token-prediction (MTP) layer at
-    // `model.layers.{num_hidden_layers - 1}` that is **not** part of the
-    // normal transformer stack. The Rust model implementation skips it, so
-    // the effective depth seen by the pipeline partitioner must also skip
-    // it, otherwise the last stage's auto-assigned range extends past the
-    // real decoder blocks and fails to load.
-    let model_type = config
-        .get("model_type")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-    let effective_layers = if model_type == "deepseek_v3" {
-        (num_layers as usize).saturating_sub(1).max(1)
-    } else {
-        num_layers as usize
-    };
-    Ok(effective_layers)
+    // All `num_hidden_layers` DeepSeek-V3 entries are real decoder layers.
+    // Checkpoints that ship the trailing multi-token-prediction (MTP) head
+    // store it at layer index `num_hidden_layers` (out of range, e.g.
+    // `model.layers.61` for genuine DeepSeek-V3), and `sanitize_weights`
+    // strips it, so the partitioner sees exactly `num_hidden_layers`
+    // transformer blocks for every family.
+    Ok(num_layers as usize)
 }
 
 pub fn resolve_in_process_stage_assignments(
@@ -291,16 +282,19 @@ mod tests {
     }
 
     #[test]
-    fn num_layers_strips_mtp_layer_for_deepseek_v3() {
-        // DeepSeek V3's MTP trailer is not part of the transformer stack,
-        // so the pipeline partitioner must see the number of decoder blocks,
-        // not the raw config count.
+    fn num_layers_counts_all_decoder_blocks_for_deepseek_v3() {
+        // All `num_hidden_layers` entries are real decoder layers; the MTP
+        // trailer, when present, lives at index `num_hidden_layers` (out of
+        // range) and is stripped by `sanitize_weights`. The partitioner must
+        // therefore see the raw config count (61 blocks for genuine
+        // DeepSeek-V3, 27 for the Kimi-VL / Moonlight backbone), matching
+        // `DeepSeekV3Model::num_layers()` (issue #525 round 3).
         let dir = ScratchDir::new("deepseek_v3-count");
         write_config(
             &dir.path,
             r#"{"model_type":"deepseek_v3","num_hidden_layers":61,"hidden_size":128}"#,
         );
         let layers = resolve_in_process_pipeline_num_layers(&dir.path).unwrap();
-        assert_eq!(layers, 60);
+        assert_eq!(layers, 61);
     }
 }

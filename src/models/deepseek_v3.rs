@@ -22,7 +22,7 @@
 
 use mlxcel_core::generate::LanguageModel;
 use mlxcel_core::layers::{KVCache, MultiLinear, RMSNorm, UnifiedEmbedding, UnifiedLinear};
-use mlxcel_core::utils::{slice_axis, stack_arrays};
+use mlxcel_core::utils::{create_causal_mask, slice_axis, stack_arrays};
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
 use serde::Deserialize;
@@ -268,8 +268,11 @@ impl DeepSeekV3Attention {
         // kv_latent = layernorm(compressed)
         let kv_latent = self.kv_a_layernorm.forward(&compressed);
 
-        // Apply RoPE to pe parts
+        // Apply RoPE to pe parts. Capture the pre-update cache state: `offset`
+        // is the monotonic rope position, `live_before` the number of K rows
+        // already in the cache (mask columns for the causal fallback below).
         let offset = cache.offset;
+        let live_before = cache.live_len();
         let q_pe = mlxcel_core::fast_rope(
             &q_pe,
             self.qk_rope_head_dim,
@@ -299,10 +302,24 @@ impl DeepSeekV3Attention {
         let k_pe_t = mlxcel_core::transpose_axes(&k_pe, &[0, 1, 3, 2]);
         let pe_scores = mlxcel_core::matmul(&q_pe_scaled, &k_pe_t);
 
-        // Apply causal mask to pe_scores (for prefill)
+        // Apply causal mask to pe_scores (for prefill).
+        //
+        // The MLA attention below receives `pe_scores` as its additive SDPA
+        // mask, so causality exists ONLY if it is baked in here. The standard
+        // generation paths (CLI text prefill and the VLM embeddings prefill)
+        // call the model with `mask == None`, expecting the model to apply its
+        // own causal mask, exactly like the reference
+        // `create_attention_mask(h, cache[0])` in mlx-lm deepseek_v3.py /
+        // mlx-vlm kimi_vl/language.py. Without this fallback a multi-token
+        // prefill was fully bidirectional: every layer above the first wrote
+        // future-contaminated K/V into the cache, corrupting the whole
+        // generation (issue #525 round 3).
         let pe_scores = if let Some(m) = mask {
             // mask has 0 for attend, -inf for blocked
             mlxcel_core::add(&pe_scores, m)
+        } else if l > 1 {
+            let causal = create_causal_mask(l, live_before);
+            mlxcel_core::add(&pe_scores, &causal)
         } else {
             pe_scores
         };
@@ -506,6 +523,13 @@ impl MoEGate {
         let weight_t = mlxcel_core::transpose(&self.weight);
         let gates = mlxcel_core::matmul(x, &weight_t);
 
+        // Sigmoid scoring in float32, mirroring the reference
+        // `mx.sigmoid(gates.astype(mx.float32))` (mlx-lm deepseek_v3.py and
+        // mlx-vlm kimi_vl/language.py `group_expert_select`). Routing on f16
+        // scores loses ties/ordering precision after the correction-bias add
+        // and skews the normalized expert weights on f16 checkpoints.
+        let gates = mlxcel_core::astype(&gates, mlxcel_core::dtype::FLOAT32);
+
         // Sigmoid scoring
         let scores = mlxcel_core::sigmoid(&gates);
         let orig_scores = mlxcel_core::copy(&scores);
@@ -569,6 +593,26 @@ impl MoEGate {
             norm_topk_prob: args.norm_topk_prob,
         })
     }
+}
+
+/// Clipped SwiGLU activation for the routed experts:
+/// `clip(silu(gate), -100, 100) * up`.
+///
+/// Mirrors upstream `clipped_silu` in mlx-vlm kimi_vl/language.py, which the
+/// reference passes as the SwitchGLU activation "to prevent fp16 from
+/// overflowing": Kimi-VL / Moonlight expert activations spike far beyond the
+/// f16 range on real checkpoints stored in float16, and an unclipped
+/// `silu(gate) * up` overflows to inf, turning downstream norms into NaN and
+/// the logits argmax into a constant token 0 (issue #525 round 3). The clip is
+/// the identity for `|silu(gate)| <= 100`, so bf16/f32 checkpoints operating
+/// in the normal activation range are numerically unchanged.
+pub(crate) fn clipped_swiglu(gate: &MlxArray, up: &MlxArray) -> UniquePtr<MlxArray> {
+    let silu_gate = mlxcel_core::compiled_silu(gate);
+    let dt = mlxcel_core::array_dtype(&silu_gate);
+    let lo = mlxcel_core::full_f32(&[1], -100.0, dt);
+    let hi = mlxcel_core::full_f32(&[1], 100.0, dt);
+    let clipped = mlxcel_core::clip(&silu_gate, &lo, &hi);
+    mlxcel_core::multiply(&clipped, up)
 }
 
 // SwitchGLU (MoE expert layer using gather_qmm).
@@ -648,8 +692,9 @@ impl SwitchGLU {
             )
         };
 
-        // SwiGLU activation
-        let activated = mlxcel_core::compiled_swiglu_activation(&x_gate, &x_up);
+        // Clipped SwiGLU activation (see `clipped_swiglu`): mirrors the
+        // reference kimi_vl SwitchGLU `activation=clipped_silu` fp16 guard.
+        let activated = clipped_swiglu(&x_gate, &x_up);
 
         // Down projection
         // activated is [n_tokens, top_k, 1, intermediate_size]
@@ -965,7 +1010,7 @@ impl DeepSeekV3Model {
         // the rest of sanitize_weights runs, so all subsequent logic can assume the
         // canonical key structure.
         {
-            let num_layers = config.num_hidden_layers.saturating_sub(1);
+            let num_layers = config.num_hidden_layers;
 
             // Collect renames to avoid borrowing `weights` mutably while iterating it.
             let mut renames: Vec<(String, String)> = Vec::new();
@@ -1010,7 +1055,7 @@ impl DeepSeekV3Model {
 
         // Check if weights need stacking (individual experts.N format) or are already stacked (switch_mlp format)
         if let Some(n_routed) = config.n_routed_experts {
-            let num_layers = config.num_hidden_layers.saturating_sub(1);
+            let num_layers = config.num_hidden_layers;
 
             for l in 0..num_layers {
                 let prefix = format!("model.layers.{}", l);
@@ -1051,7 +1096,7 @@ impl DeepSeekV3Model {
         }
 
         // Decompose kv_b_proj into embed_q and unembed_out (if not already decomposed)
-        let num_layers = config.num_hidden_layers.saturating_sub(1);
+        let num_layers = config.num_hidden_layers;
         let num_heads = config.num_attention_heads as i32;
         let head_dim = (config.qk_nope_head_dim + config.v_head_dim) as i32;
         let qk_nope_head_dim = config.qk_nope_head_dim as i32;
@@ -1120,15 +1165,20 @@ impl DeepSeekV3Model {
             weights.insert(format!("{}.unembed_out.weight", prefix), wv);
         }
 
-        // Remove multi-token prediction layer (last layer) and rotary freqs
+        // Remove the multi-token prediction trailer layer and rotary freqs.
+        //
+        // Checkpoints that ship the MTP head store it at layer index
+        // `num_hidden_layers` (e.g. `model.layers.61` for genuine DeepSeek-V3
+        // with num_hidden_layers = 61), one PAST the decoder stack; mlx-lm's
+        // sanitize strips exactly that index. Layers `0..num_hidden_layers`
+        // are all real decoder layers and must survive: a previous
+        // `num_hidden_layers - 1` here silently deleted the final decoder
+        // layer of every checkpoint without an MTP trailer (Kimi-VL /
+        // Moonlight, issue #525 round 3).
+        let mtp_prefix = format!("model.layers.{}.", config.num_hidden_layers);
         let keys_to_remove: Vec<String> = weights
             .keys()
-            .filter(|k| {
-                k.starts_with(&format!(
-                    "model.layers.{}",
-                    config.num_hidden_layers.saturating_sub(1)
-                )) || k.contains("rotary_emb.inv_freq")
-            })
+            .filter(|k| k.starts_with(&mtp_prefix) || k.contains("rotary_emb.inv_freq"))
             .cloned()
             .collect();
 
@@ -1147,8 +1197,11 @@ impl DeepSeekV3Model {
         let embed_tokens =
             UnifiedEmbedding::from_weights(weights, "model.embed_tokens", group_size, bits)?;
 
-        // Load layers (excluding the last multi-token prediction layer)
-        let num_layers = args.num_hidden_layers.saturating_sub(1);
+        // Load ALL `num_hidden_layers` decoder layers (mirrors the reference
+        // `range(config.num_hidden_layers)`). The multi-token prediction
+        // trailer, when present, lives at index `num_hidden_layers` and was
+        // already stripped by `sanitize_weights`.
+        let num_layers = args.num_hidden_layers;
         let mut layers = Vec::with_capacity(num_layers);
         for i in 0..num_layers {
             let layer = DecoderLayer::from_weights(weights, args, i)?;
@@ -1216,7 +1269,7 @@ mod tests {
             hidden_size: 1,
             intermediate_size: 1,
             moe_intermediate_size: 1,
-            num_hidden_layers: 3, // 2 real layers + 1 MTP layer (last is dropped)
+            num_hidden_layers: 3, // 3 real decoder layers (an MTP trailer would sit at index 3)
             num_attention_heads: 16,
             num_key_value_heads: 1,
             n_shared_experts: None,
@@ -1521,5 +1574,307 @@ mod tests {
                 "canonical key should survive when both old and canonical were present"
             );
         }
+    }
+
+    // ---- Issue #525 round 3: backbone correctness regressions --------------
+    //
+    // The real kimi-vl-a3b-thinking checkpoint has 27 REAL decoder layers
+    // (`model.layers.0..=26`) and NO multi-token-prediction trailer; genuine
+    // DeepSeek-V3 stores its MTP head at the out-of-range index
+    // `model.layers.{num_hidden_layers}` (61), which mlx-lm's sanitize strips.
+    // The port previously treated index `num_hidden_layers - 1` as the MTP
+    // layer: sanitize deleted the last real layer's weights, skipped its
+    // kv_b_proj decomposition, and `from_weights` built one layer too few.
+
+    /// Minimal config for a 2-layer dense backbone with a direct q projection
+    /// (`q_lora_rank: None`), the exact shape of the Kimi-VL / Moonlight text
+    /// config.
+    fn test_config_dense_direct_q() -> DeepSeekV3Config {
+        DeepSeekV3Config {
+            model_type: "deepseek_v3".to_string(),
+            vocab_size: 11,
+            hidden_size: 8,
+            intermediate_size: 8,
+            moe_intermediate_size: 8,
+            num_hidden_layers: 2,
+            num_attention_heads: 2,
+            num_key_value_heads: 2,
+            n_shared_experts: None,
+            n_routed_experts: None,
+            routed_scaling_factor: 1.0,
+            kv_lora_rank: 8,
+            q_lora_rank: None,
+            qk_rope_head_dim: 4,
+            v_head_dim: 4,
+            qk_nope_head_dim: 4,
+            topk_method: "noaux_tc".to_string(),
+            scoring_func: "sigmoid".to_string(),
+            norm_topk_prob: true,
+            n_group: 1,
+            topk_group: 1,
+            num_experts_per_tok: 1,
+            moe_layer_freq: 1,
+            first_k_dense_replace: 0,
+            max_position_embeddings: 64,
+            rms_norm_eps: 1e-6,
+            rope_theta: 10000.0,
+            rope_scaling: None,
+            attention_bias: false,
+            quantization: None,
+        }
+    }
+
+    fn insert_ramp(weights: &mut WeightMap, key: &str, shape: &[i32]) {
+        let n: usize = shape.iter().product::<i32>() as usize;
+        weights.insert(
+            key.to_string(),
+            mlxcel_core::from_slice_f32(&ramp(n), shape),
+        );
+    }
+
+    /// Insert the full unquantized weight set for one direct-q decoder layer.
+    fn insert_dense_layer_weights(weights: &mut WeightMap, cfg: &DeepSeekV3Config, l: usize) {
+        let p = format!("model.layers.{l}");
+        let hidden = cfg.hidden_size as i32;
+        let heads = cfg.num_attention_heads as i32;
+        let q_head_dim = cfg.q_head_dim() as i32;
+        let kv_lora = cfg.kv_lora_rank as i32;
+        let rope = cfg.qk_rope_head_dim as i32;
+        let nope = cfg.qk_nope_head_dim as i32;
+        let v_dim = cfg.v_head_dim as i32;
+        let inter = cfg.intermediate_size as i32;
+
+        insert_ramp(
+            weights,
+            &format!("{p}.self_attn.q_proj.weight"),
+            &[heads * q_head_dim, hidden],
+        );
+        insert_ramp(
+            weights,
+            &format!("{p}.self_attn.kv_a_proj_with_mqa.weight"),
+            &[kv_lora + rope, hidden],
+        );
+        insert_ramp(
+            weights,
+            &format!("{p}.self_attn.kv_a_layernorm.weight"),
+            &[kv_lora],
+        );
+        insert_ramp(
+            weights,
+            &format!("{p}.self_attn.kv_b_proj.weight"),
+            &[heads * (nope + v_dim), kv_lora],
+        );
+        insert_ramp(
+            weights,
+            &format!("{p}.self_attn.o_proj.weight"),
+            &[hidden, heads * v_dim],
+        );
+        insert_ramp(
+            weights,
+            &format!("{p}.mlp.gate_proj.weight"),
+            &[inter, hidden],
+        );
+        insert_ramp(
+            weights,
+            &format!("{p}.mlp.up_proj.weight"),
+            &[inter, hidden],
+        );
+        insert_ramp(
+            weights,
+            &format!("{p}.mlp.down_proj.weight"),
+            &[hidden, inter],
+        );
+        insert_ramp(weights, &format!("{p}.input_layernorm.weight"), &[hidden]);
+        insert_ramp(
+            weights,
+            &format!("{p}.post_attention_layernorm.weight"),
+            &[hidden],
+        );
+    }
+
+    fn tiny_dense_model_weights(cfg: &DeepSeekV3Config) -> WeightMap {
+        let mut weights = WeightMap::new();
+        let hidden = cfg.hidden_size as i32;
+        let vocab = cfg.vocab_size as i32;
+        insert_ramp(&mut weights, "model.embed_tokens.weight", &[vocab, hidden]);
+        insert_ramp(&mut weights, "model.norm.weight", &[hidden]);
+        insert_ramp(&mut weights, "lm_head.weight", &[vocab, hidden]);
+        for l in 0..cfg.num_hidden_layers {
+            insert_dense_layer_weights(&mut weights, cfg, l);
+        }
+        weights
+    }
+
+    /// The last in-range decoder layer is REAL and must survive sanitize (its
+    /// kv_b_proj decomposed like every other layer); the MTP trailer at index
+    /// `num_hidden_layers` must be stripped.
+    #[test]
+    fn sanitize_keeps_last_decoder_layer_and_strips_mtp_trailer() {
+        let cfg = test_config_dense_direct_q();
+        let mut weights = tiny_dense_model_weights(&cfg);
+        // MTP trailer at the out-of-range index `num_hidden_layers` (= 2).
+        insert_dense_layer_weights(&mut weights, &cfg, cfg.num_hidden_layers);
+
+        let out = DeepSeekV3Model::sanitize_weights(weights, &cfg);
+
+        for l in 0..cfg.num_hidden_layers {
+            let embed_q = format!("model.layers.{l}.self_attn.embed_q.weight");
+            assert!(
+                out.contains_key(&embed_q),
+                "layer {l} kv_b_proj must be decomposed into {embed_q}"
+            );
+        }
+        assert!(
+            !out.keys()
+                .any(|k| k.starts_with(&format!("model.layers.{}.", cfg.num_hidden_layers))),
+            "MTP trailer at index {} must be stripped",
+            cfg.num_hidden_layers
+        );
+    }
+
+    /// `from_weights` must build ALL `num_hidden_layers` decoder layers
+    /// (reference: `range(config.num_hidden_layers)` in mlx-lm deepseek_v3.py
+    /// and mlx-vlm kimi_vl/language.py) and produce finite logits end to end.
+    #[test]
+    fn from_weights_builds_all_num_hidden_layers() {
+        let cfg = test_config_dense_direct_q();
+        let weights = tiny_dense_model_weights(&cfg);
+        let weights = DeepSeekV3Model::sanitize_weights(weights, &cfg);
+        let model = DeepSeekV3Model::from_weights(&weights, &cfg)
+            .expect("tiny dense direct-q model must load");
+        assert_eq!(
+            model.layers.len(),
+            cfg.num_hidden_layers,
+            "must build every real decoder layer"
+        );
+
+        let input = mlxcel_core::from_slice_i32(&[1, 2, 3], &[1, 3]);
+        let mut caches = model.make_caches_impl();
+        let logits = model.forward_impl(&input, &mut caches, None);
+        mlxcel_core::eval(&logits);
+        assert_eq!(
+            mlxcel_core::array_shape(&logits),
+            vec![1, 3, cfg.vocab_size as i32]
+        );
+        let mx = mlxcel_core::max_all(&mlxcel_core::abs(&logits));
+        mlxcel_core::eval(&mx);
+        assert!(
+            mlxcel_core::item_f32(&mx).is_finite(),
+            "logits must be finite"
+        );
+    }
+
+    /// A multi-token prefill with `mask == None` must be CAUSAL: position 0 of
+    /// a 2-token prefill must produce the same attention output as a 1-token
+    /// forward of that first token alone. The standard generation paths (CLI
+    /// text prefill and the VLM embeddings prefill) pass `mask == None`, so
+    /// before the round-3 fix prefill was fully bidirectional and every layer
+    /// above the first cached future-contaminated K/V.
+    #[test]
+    fn prefill_is_causal_without_caller_mask() {
+        let cfg = test_config_dense_direct_q();
+        let mut weights = WeightMap::new();
+        insert_dense_layer_weights(&mut weights, &cfg, 0);
+        let weights = DeepSeekV3Model::sanitize_weights(weights, &cfg);
+        let attn = DeepSeekV3Attention::from_weights(&weights, &cfg, "model.layers.0.self_attn")
+            .expect("tiny attention must load");
+
+        let hidden = cfg.hidden_size as i32;
+        let x_data = ramp(2 * cfg.hidden_size);
+        let x_two = mlxcel_core::from_slice_f32(&x_data, &[1, 2, hidden]);
+        let x_first = mlxcel_core::from_slice_f32(&x_data[..cfg.hidden_size], &[1, 1, hidden]);
+
+        let mut cache_prefill = KVCache::new();
+        let out_two = attn.forward(&x_two, &mut cache_prefill, None);
+        let pos0_of_two = mlxcel_core::slice(&out_two, &[0, 0, 0], &[1, 1, hidden]);
+
+        let mut cache_single = KVCache::new();
+        let out_one = attn.forward(&x_first, &mut cache_single, None);
+
+        let diff = mlxcel_core::max_all(&mlxcel_core::abs(&mlxcel_core::subtract(
+            &pos0_of_two,
+            &out_one,
+        )));
+        mlxcel_core::eval(&diff);
+        let diff = mlxcel_core::item_f32(&diff);
+        assert!(
+            diff < 1e-4,
+            "position 0 must not attend to position 1 during prefill (max diff {diff})"
+        );
+    }
+
+    /// `clipped_swiglu` mirrors upstream kimi_vl `clipped_silu`: identity in
+    /// the normal activation range, clipped where an f16 `silu(gate) * up`
+    /// would overflow to inf (the issue #525 round-3 "!" spam source).
+    #[test]
+    fn clipped_swiglu_prevents_f16_overflow() {
+        // Overflow case: silu(300) * 300 = 90000 > 65504 (f16 max) -> inf
+        // unclipped; clip(silu(300)) * 300 = 100 * 300 = 30000 stays finite.
+        let big = mlxcel_core::astype(
+            &mlxcel_core::from_slice_f32(&[300.0], &[1]),
+            mlxcel_core::dtype::FLOAT16,
+        );
+        let clipped = clipped_swiglu(&big, &big);
+        mlxcel_core::eval(&clipped);
+        let val =
+            mlxcel_core::item_f32(&mlxcel_core::astype(&clipped, mlxcel_core::dtype::FLOAT32));
+        assert!(
+            val.is_finite(),
+            "clipped activation must stay finite in f16"
+        );
+        assert!(
+            (val - 30_000.0).abs() < 64.0,
+            "expected clip(silu(300)) * 300 = 30000, got {val}"
+        );
+
+        let unclipped = mlxcel_core::compiled_swiglu_activation(&big, &big);
+        mlxcel_core::eval(&unclipped);
+        let raw = mlxcel_core::item_f32(&mlxcel_core::astype(
+            &unclipped,
+            mlxcel_core::dtype::FLOAT32,
+        ));
+        assert!(
+            raw.is_infinite(),
+            "sanity: the unclipped f16 activation must overflow for this input"
+        );
+
+        // Identity case: |silu(gate)| <= 100 must be numerically unchanged.
+        let gate = mlxcel_core::from_slice_f32(&[2.0], &[1]);
+        let up = mlxcel_core::from_slice_f32(&[3.0], &[1]);
+        let ours = clipped_swiglu(&gate, &up);
+        let reference = mlxcel_core::compiled_swiglu_activation(&gate, &up);
+        let diff =
+            mlxcel_core::max_all(&mlxcel_core::abs(&mlxcel_core::subtract(&ours, &reference)));
+        mlxcel_core::eval(&diff);
+        assert!(
+            mlxcel_core::item_f32(&diff) < 1e-6,
+            "clip must be the identity in the normal range"
+        );
+    }
+
+    /// Routing scores must be computed in float32 regardless of the activation
+    /// dtype (reference: `mx.sigmoid(gates.astype(mx.float32))` in mlx-lm
+    /// deepseek_v3.py / mlx-vlm kimi_vl language.py `group_expert_select`).
+    #[test]
+    fn moe_gate_routes_in_f32_for_f16_activations() {
+        let (e, hidden, top_k) = (4i32, 64i32, 2i32);
+        let mut gate = tiny_gate(e, hidden, top_k);
+        gate.weight = mlxcel_core::astype(&gate.weight, mlxcel_core::dtype::FLOAT16);
+
+        let x_f16 = mlxcel_core::astype(
+            &mlxcel_core::from_slice_f32(&ramp((3 * hidden) as usize), &[3, hidden]),
+            mlxcel_core::dtype::FLOAT16,
+        );
+        let (indices, scores) = gate.forward(&x_f16);
+        mlxcel_core::eval(&scores);
+        assert_eq!(
+            mlxcel_core::array_dtype(&scores),
+            mlxcel_core::dtype::FLOAT32,
+            "expert scores must be computed in float32"
+        );
+        assert_eq!(mlxcel_core::array_shape(&indices), vec![3, top_k]);
+        let mx = mlxcel_core::max_all(&mlxcel_core::abs(&scores));
+        mlxcel_core::eval(&mx);
+        assert!(mlxcel_core::item_f32(&mx).is_finite());
     }
 }

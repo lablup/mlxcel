@@ -29,16 +29,15 @@
 //!   map. Auto-partitioner callers should note that expert-heavy layers carry
 //!   a larger parameter footprint than the dense head; that bookkeeping lives
 //!   on the partitioner (feeds sub-issue 7), not on the stage executor.
-//! - **Multi-token-prediction (MTP) trailer layer** — the last entry of
-//!   `config.num_hidden_layers` is an MTP layer and is excluded from the
-//!   decoder stack. `DeepSeekV3Model::num_layers()` already reports the
-//!   trimmed count, so the pipeline partitioner sees `num_hidden_layers - 1`
-//!   transformer blocks. The partial-weight loader still preserves MTP
-//!   weights if they fall inside `filter.layer_range`; we simply do not
-//!   construct a decoder layer for them.
+//! - **Multi-token-prediction (MTP) trailer layer**: checkpoints that ship
+//!   the MTP head store it at layer index `num_hidden_layers` (one past the
+//!   decoder stack, e.g. `model.layers.61` for genuine DeepSeek-V3);
+//!   `sanitize_weights` strips it. All `num_hidden_layers` in-range layers
+//!   are real decoder layers, so the pipeline partitioner sees exactly
+//!   `num_hidden_layers` transformer blocks.
 //!
 //! Stage boundaries are safe at any layer index in
-//! `0..(num_hidden_layers - 1)` because DeepSeek V3 does not share layer
+//! `0..num_hidden_layers` because DeepSeek V3 does not share layer
 //! state across blocks beyond the standard KV cache.
 
 use std::path::Path;
@@ -66,7 +65,7 @@ impl DeepSeekV3StageExecutor {
         let config: models::deepseek_v3::DeepSeekV3Config = serde_json::from_str(&config_str)
             .map_err(|err| anyhow!("failed to parse {}: {}", config_path.display(), err))?;
 
-        let num_transformer_layers = config.num_hidden_layers.saturating_sub(1);
+        let num_transformer_layers = config.num_hidden_layers;
         ensure!(
             filter.layer_range.end <= num_transformer_layers,
             "stage {} layer range {}..{} exceeds DeepSeek V3 transformer depth {}",

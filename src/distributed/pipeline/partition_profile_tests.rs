@@ -78,11 +78,13 @@ fn build_profile_separates_dense_and_moe_in_deepseek() {
         "n_routed_experts": 8,
     });
     let profile = build_profile_from_json(&config, 6);
-    // DeepSeek V3 strips one layer (MTP), so the profile should be 5
-    // entries, not 6.
-    assert_eq!(profile.num_layers, 5);
+    // All `num_hidden_layers` entries are real decoder layers (the MTP
+    // trailer, when present, lives at the out-of-range index
+    // `num_hidden_layers` and is stripped by `sanitize_weights`), so the
+    // profile carries all 6 (issue #525 round 3).
+    assert_eq!(profile.num_layers, 6);
     let layers = profile.layer_bytes.unwrap();
-    assert_eq!(layers.len(), 5);
+    assert_eq!(layers.len(), 6);
     // First two layers are dense, third onward is MoE.
     let dense = layers[0];
     let moe = layers[2];

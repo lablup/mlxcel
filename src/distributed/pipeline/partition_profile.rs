@@ -97,14 +97,10 @@ pub fn build_profile_from_json(root: &Value, fallback_num_layers: usize) -> Mode
         .or_else(|| root.get("num_hidden_layers").and_then(|v| v.as_u64()))
         .map(|v| v as usize)
         .unwrap_or(fallback_num_layers);
-    // DeepSeek V3 ships a MTP trailer that the Rust side skips; mirror the
-    // logic from `resolve_in_process_pipeline_num_layers` so the profile
-    // layer count matches what the partitioner sees.
-    let num_layers = if model_type == "deepseek_v3" {
-        num_layers.saturating_sub(1).max(1)
-    } else {
-        num_layers
-    };
+    // All `num_hidden_layers` DeepSeek-V3 entries are real decoder layers;
+    // checkpoints that ship the multi-token-prediction trailer store it at
+    // index `num_hidden_layers` (out of range) and `sanitize_weights` strips
+    // it, so no per-family depth adjustment is needed here.
 
     let hidden_size = text
         .and_then(|t| t.get("hidden_size"))
