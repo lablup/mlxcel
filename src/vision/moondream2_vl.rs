@@ -57,6 +57,10 @@ pub struct Moondream2VLModel {
     pub vision_tower: encoders::moondream3::Moondream3VisionModel,
     pub processor: processors::moondream3::Moondream3Processor,
     pub eos_token_ids: Vec<i32>,
+    /// Which prompt/tokenizer generation the loaded checkpoint uses; decides
+    /// between starmie control-token templates and the legacy GPT-2
+    /// Question/Answer framing (see [`crate::moondream2_prompt`]).
+    pub prompt_style: crate::moondream2_prompt::Moondream2PromptStyle,
 }
 
 impl Moondream2VLModel {

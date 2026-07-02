@@ -34,6 +34,7 @@ use std::path::Path;
 
 use crate::LoadedModel;
 use crate::models;
+use crate::moondream2_prompt::Moondream2PromptStyle;
 use crate::vision;
 
 use super::{
@@ -669,26 +670,38 @@ pub(crate) fn load_moondream3_vlm(model_path: &Path) -> Result<LoadedModel> {
     }))
 }
 
-/// GPT-2 / CodeGen `<|endoftext|>` id. The moondream2 tokenizer uses this
-/// single token as its begin-of-text, end-of-text and unknown token, so it is
-/// the resolution fallback for both bos and eos.
+/// GPT-2 / CodeGen `<|endoftext|>` id. The legacy-era moondream2 tokenizer
+/// uses this single token as its begin-of-text, end-of-text and unknown
+/// token, so it is the resolution fallback for both bos and eos on
+/// legacy-era checkpoints.
 const MOONDREAM2_ENDOFTEXT_ID: i32 = 50256;
 
 /// Resolve the moondream2 begin/end-of-text id from the checkpoint.
 ///
 /// The shipped `vikhyatk/moondream2` checkpoint (`model_type: "moondream1"`)
 /// leaves both the top-level `eos_token_id` and the nested `config` object
-/// empty, so the authoritative id lives in the GPT-2/CodeGen tokenizer, where
-/// `<|endoftext|>` is id 50256 and doubles as bos/eos/unk. Moondream3 uses id 0
-/// for the same role with a different tokenizer; the moondream2 port must not
-/// inherit that value or generation stops on the very first sampled token.
+/// empty, so the id depends on which tokenizer generation the weights were
+/// trained against (see
+/// [`crate::moondream2_prompt::detect_moondream2_prompt_style`]):
 ///
-/// Resolution order: explicit `eos_token_id` in config.json (top-level, then the
-/// nested `config` object), then the tokenizer's declared `eos_token` id, then
-/// the GPT-2 fallback (50256).
+/// - starmie era (revision 2025-06-21+): `<|endoftext|>` is id 0 in
+///   `moondream/starmie-v1`, the same contract Moondream3 uses. The stale
+///   GPT-2 `tokenizer_config.json` still present in those snapshots must NOT
+///   be consulted: it reports 50256, an id the starmie-era model never
+///   emits, so generation would run past the true stop token (0) into
+///   degenerate repetition.
+/// - legacy era (revisions 2025-01-09 .. 2025-04-14): the GPT-2/CodeGen
+///   tokenizer shipped in the checkpoint is the correct one, and its
+///   `<|endoftext|>` is id 50256.
+///
+/// Resolution order: explicit `eos_token_id` in config.json (top-level, then
+/// the nested `config` object), then the starmie id for starmie-era
+/// checkpoints, then the tokenizer's declared `eos_token` id, then the GPT-2
+/// fallback (50256).
 pub(super) fn resolve_moondream2_eos_token_id(
     full_config: &Value,
     tokenizer_config: Option<&Value>,
+    prompt_style: Moondream2PromptStyle,
 ) -> i32 {
     if let Some(id) = full_config.get("eos_token_id").and_then(Value::as_i64) {
         return id as i32;
@@ -699,6 +712,9 @@ pub(super) fn resolve_moondream2_eos_token_id(
         .and_then(Value::as_i64)
     {
         return id as i32;
+    }
+    if prompt_style == Moondream2PromptStyle::StarmieTemplates {
+        return crate::moondream2_prompt::MOONDREAM2_STARMIE_BOS_ID;
     }
     if let Some(id) = tokenizer_config.and_then(moondream2_tokenizer_eos_token_id) {
         return id;
@@ -800,7 +816,9 @@ pub(crate) fn load_moondream2_vlm(model_path: &Path) -> Result<LoadedModel> {
 
     let (_config_str, full_config) = read_sanitized_vlm_config(model_path)?;
     let tokenizer_config = read_optional_json_config(model_path, "tokenizer_config.json");
-    let eos_token_id = resolve_moondream2_eos_token_id(&full_config, tokenizer_config.as_ref());
+    let prompt_style = crate::moondream2_prompt::detect_moondream2_prompt_style(model_path);
+    let eos_token_id =
+        resolve_moondream2_eos_token_id(&full_config, tokenizer_config.as_ref(), prompt_style);
     let text_config: models::moondream2::ModelArgs =
         serde_json::from_value(moondream2_text_config_value(&full_config, eos_token_id))
             .map_err(|err| anyhow::anyhow!("Failed to parse Moondream2 text config: {}", err))?;
@@ -827,6 +845,7 @@ pub(crate) fn load_moondream2_vlm(model_path: &Path) -> Result<LoadedModel> {
         vision_tower,
         processor,
         eos_token_ids: vec![eos_token_id],
+        prompt_style,
     }))
 }
 

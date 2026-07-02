@@ -132,6 +132,40 @@ fn detects_moondream2_from_checkpoint() {
 }
 
 #[test]
+fn real_checkpoint_is_starmie_era() {
+    // The 2025-06-21 snapshot ships `moondream.py` naming the
+    // `moondream/starmie-v1` tokenizer, while its local tokenizer.json is the
+    // STALE legacy GPT-2 one; detection must side with moondream.py or the
+    // model consumes and emits ids from the wrong vocabulary and generates
+    // garbage.
+    let Some(dir) = model_dir() else { return };
+    assert_eq!(
+        mlxcel::moondream2_prompt::detect_moondream2_prompt_style(&dir),
+        mlxcel::moondream2_prompt::Moondream2PromptStyle::StarmieTemplates
+    );
+}
+
+#[test]
+#[ignore = "resolves the starmie tokenizer from the Hub (network or hf-hub cache)"]
+fn real_checkpoint_tokenizer_resolves_to_starmie() {
+    // End-to-end tokenizer-override chain on the real checkpoint: despite the
+    // stale GPT-2 tokenizer.json in the directory, `load_tokenizer` must hand
+    // back moondream/starmie-v1, where `<|endoftext|>` is id 0 and the
+    // template words match the config.py ids ("query" = 15381).
+    let Some(dir) = model_dir() else { return };
+
+    let tokenizer = mlxcel::tokenizer::load_tokenizer(&dir).expect("load starmie tokenizer");
+    let query_ids = tokenizer.encode("query", false).expect("encode");
+    assert_eq!(query_ids, vec![15381], "starmie must map 'query' to 15381");
+
+    let endoftext = tokenizer.decode(&[0], false).expect("decode id 0");
+    assert!(
+        endoftext.contains("<|endoftext|>"),
+        "starmie id 0 must be <|endoftext|>, got {endoftext:?}"
+    );
+}
+
+#[test]
 #[ignore = "requires real checkpoint; orchestrator validates"]
 fn text_only_forward_produces_finite_logits() {
     let Some(dir) = model_dir() else { return };
@@ -139,12 +173,22 @@ fn text_only_forward_produces_finite_logits() {
     let (model, tokenizer) = mlxcel::load_model(&dir).expect("load moondream2");
     assert!(model.is_vlm(), "Moondream2 must register as a VLM");
 
-    let tokens: Vec<i32> = tokenizer
-        .encode("\n\nQuestion: Hello?\n\nAnswer:", true)
-        .expect("tokenize")
-        .iter()
-        .map(|&t| t as i32)
-        .collect();
+    let style = mlxcel::moondream2_prompt::detect_moondream2_prompt_style(&dir);
+    let prepared = mlxcel::moondream2_prompt::prepare_moondream2_prompt_tokens(
+        "Hello?",
+        0,
+        style,
+        |text, add_special| {
+            tokenizer
+                .encode(text, add_special)
+                .unwrap_or_default()
+                .iter()
+                .map(|&t| t as i32)
+                .collect()
+        },
+    )
+    .expect("prepare text-only prompt");
+    let tokens = prepared.tokens;
     let input_ids = mlxcel_core::from_slice_i32(&tokens, &[1, tokens.len() as i32]);
 
     let mut caches = mlxcel_core::generate::LanguageModel::make_caches(&model);

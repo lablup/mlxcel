@@ -24,6 +24,7 @@ use super::{
     rewrite_phi4_siglip_weight_key, rewrite_phi4mm_vision_key,
     should_transpose_phi3_patch_embedding,
 };
+use crate::moondream2_prompt::Moondream2PromptStyle;
 use mlxcel_core::dtype;
 use mlxcel_core::weights::WeightMap;
 use serde_json::json;
@@ -242,22 +243,57 @@ fn moondream2_text_config_helper_fills_dense_phi_shapes() {
 }
 
 #[test]
-fn resolve_moondream2_eos_falls_back_to_endoftext_id() {
-    // The real moondream2 checkpoint: `model_type: "moondream1"` with an empty
-    // nested `config` and no top-level `eos_token_id`. Without a tokenizer the
-    // resolver must fall back to the GPT-2 `<|endoftext|>` id (50256), never 0.
+fn resolve_moondream2_eos_falls_back_to_endoftext_id_for_legacy_era() {
+    // A legacy-era moondream2 checkpoint: `model_type: "moondream1"` with an
+    // empty nested `config` and no top-level `eos_token_id`. Without a
+    // tokenizer the resolver must fall back to the GPT-2 `<|endoftext|>` id
+    // (50256).
     let real_config = json!({
         "architectures": ["HfMoondream"],
         "model_type": "moondream1",
         "config": {},
         "torch_dtype": "bfloat16"
     });
-    assert_eq!(resolve_moondream2_eos_token_id(&real_config, None), 50256);
+    assert_eq!(
+        resolve_moondream2_eos_token_id(
+            &real_config,
+            None,
+            Moondream2PromptStyle::LegacyQuestionAnswer
+        ),
+        50256
+    );
 }
 
 #[test]
-fn resolve_moondream2_eos_reads_id_from_tokenizer_config() {
-    // The real moondream2 tokenizer_config.json shape: `eos_token` is the
+fn resolve_moondream2_eos_is_zero_for_starmie_era_despite_stale_tokenizer_config() {
+    // The real 2025-06-21 checkpoint: config carries no explicit ids, and the
+    // STALE legacy tokenizer_config.json still maps `<|endoftext|>` to 50256.
+    // For starmie-era weights the true stop token is id 0
+    // (`<|endoftext|>` in moondream/starmie-v1); trusting the stale sidecar
+    // makes generation run past the real EOS into degenerate repetition.
+    let real_config = json!({ "model_type": "moondream1", "config": {} });
+    let stale_tokenizer_config = json!({
+        "bos_token": "<|endoftext|>",
+        "eos_token": "<|endoftext|>",
+        "unk_token": "<|endoftext|>",
+        "tokenizer_class": "CodeGenTokenizer",
+        "added_tokens_decoder": {
+            "50256": { "content": "<|endoftext|>", "special": true }
+        }
+    });
+    assert_eq!(
+        resolve_moondream2_eos_token_id(
+            &real_config,
+            Some(&stale_tokenizer_config),
+            Moondream2PromptStyle::StarmieTemplates
+        ),
+        0
+    );
+}
+
+#[test]
+fn resolve_moondream2_eos_reads_id_from_tokenizer_config_for_legacy_era() {
+    // The legacy moondream2 tokenizer_config.json shape: `eos_token` is the
     // `<|endoftext|>` string and `added_tokens_decoder` maps id 50256 to it.
     let real_config = json!({ "model_type": "moondream1", "config": {} });
     let tokenizer_config = json!({
@@ -270,20 +306,215 @@ fn resolve_moondream2_eos_reads_id_from_tokenizer_config() {
         }
     });
     assert_eq!(
-        resolve_moondream2_eos_token_id(&real_config, Some(&tokenizer_config)),
+        resolve_moondream2_eos_token_id(
+            &real_config,
+            Some(&tokenizer_config),
+            Moondream2PromptStyle::LegacyQuestionAnswer
+        ),
         50256
     );
 }
 
 #[test]
 fn resolve_moondream2_eos_prefers_explicit_config_ids() {
-    // An explicit top-level id wins over the tokenizer/fallback.
-    let top_level = json!({ "eos_token_id": 7 });
-    assert_eq!(resolve_moondream2_eos_token_id(&top_level, None), 7);
+    for style in [
+        Moondream2PromptStyle::StarmieTemplates,
+        Moondream2PromptStyle::LegacyQuestionAnswer,
+    ] {
+        // An explicit top-level id wins over the era/tokenizer/fallback.
+        let top_level = json!({ "eos_token_id": 7 });
+        assert_eq!(resolve_moondream2_eos_token_id(&top_level, None, style), 7);
 
-    // A nested `config.eos_token_id` is honored when the top level is absent.
-    let nested = json!({ "config": { "eos_token_id": 11 } });
-    assert_eq!(resolve_moondream2_eos_token_id(&nested, None), 11);
+        // A nested `config.eos_token_id` is honored when the top level is
+        // absent.
+        let nested = json!({ "config": { "eos_token_id": 11 } });
+        assert_eq!(resolve_moondream2_eos_token_id(&nested, None, style), 11);
+    }
+}
+
+/// Enumerate the exact tensor-key list of the real `vikhyatk/moondream2`
+/// checkpoint (2025-06-21 revision, 592 tensors): 24 text blocks x 10 keys,
+/// 5 top-level text keys, 27 vision blocks x 12 keys, 9 top-level vision
+/// keys, and 14 region keys.
+fn real_moondream2_checkpoint_keys() -> Vec<String> {
+    let mut keys = Vec::new();
+
+    for layer in 0..24 {
+        for suffix in [
+            "attn.proj.bias",
+            "attn.proj.weight",
+            "attn.qkv.bias",
+            "attn.qkv.weight",
+            "ln.bias",
+            "ln.weight",
+            "mlp.fc1.bias",
+            "mlp.fc1.weight",
+            "mlp.fc2.bias",
+            "mlp.fc2.weight",
+        ] {
+            keys.push(format!("model.text.blocks.{layer}.{suffix}"));
+        }
+    }
+    for suffix in [
+        "lm_head.bias",
+        "lm_head.weight",
+        "post_ln.bias",
+        "post_ln.weight",
+        "wte",
+    ] {
+        keys.push(format!("model.text.{suffix}"));
+    }
+
+    for layer in 0..27 {
+        for suffix in [
+            "attn.proj.bias",
+            "attn.proj.weight",
+            "attn.qkv.bias",
+            "attn.qkv.weight",
+            "ln1.bias",
+            "ln1.weight",
+            "ln2.bias",
+            "ln2.weight",
+            "mlp.fc1.bias",
+            "mlp.fc1.weight",
+            "mlp.fc2.bias",
+            "mlp.fc2.weight",
+        ] {
+            keys.push(format!("model.vision.blocks.{layer}.{suffix}"));
+        }
+    }
+    for suffix in [
+        "patch_emb.bias",
+        "patch_emb.weight",
+        "pos_emb",
+        "post_ln.bias",
+        "post_ln.weight",
+        "proj_mlp.fc1.bias",
+        "proj_mlp.fc1.weight",
+        "proj_mlp.fc2.bias",
+        "proj_mlp.fc2.weight",
+    ] {
+        keys.push(format!("model.vision.{suffix}"));
+    }
+
+    for suffix in [
+        "coord_decoder.fc1.bias",
+        "coord_decoder.fc1.weight",
+        "coord_decoder.fc2.bias",
+        "coord_decoder.fc2.weight",
+        "coord_encoder.bias",
+        "coord_encoder.weight",
+        "coord_features",
+        "size_decoder.fc1.bias",
+        "size_decoder.fc1.weight",
+        "size_decoder.fc2.bias",
+        "size_decoder.fc2.weight",
+        "size_encoder.bias",
+        "size_encoder.weight",
+        "size_features",
+    ] {
+        keys.push(format!("model.region.{suffix}"));
+    }
+
+    assert_eq!(keys.len(), 592, "real checkpoint tensor count");
+    keys
+}
+
+/// The full weight-name set the Moondream2 text + (shared Moondream3) vision
+/// loaders consume: every `UnifiedLinear`/`LayerNorm` weight+bias, the raw
+/// `vision.pos_emb`, and the embedding under `text.wte.weight`.
+fn moondream2_loader_required_keys() -> std::collections::BTreeSet<String> {
+    let mut keys = std::collections::BTreeSet::new();
+
+    for layer in 0..24 {
+        for suffix in [
+            "ln.weight",
+            "ln.bias",
+            "attn.qkv.weight",
+            "attn.qkv.bias",
+            "attn.proj.weight",
+            "attn.proj.bias",
+            "mlp.fc1.weight",
+            "mlp.fc1.bias",
+            "mlp.fc2.weight",
+            "mlp.fc2.bias",
+        ] {
+            keys.insert(format!("text.blocks.{layer}.{suffix}"));
+        }
+    }
+    for key in [
+        "text.wte.weight",
+        "text.post_ln.weight",
+        "text.post_ln.bias",
+        "text.lm_head.weight",
+        "text.lm_head.bias",
+    ] {
+        keys.insert(key.to_string());
+    }
+
+    for layer in 0..27 {
+        for suffix in [
+            "ln1.weight",
+            "ln1.bias",
+            "ln2.weight",
+            "ln2.bias",
+            "attn.qkv.weight",
+            "attn.qkv.bias",
+            "attn.proj.weight",
+            "attn.proj.bias",
+            "mlp.fc1.weight",
+            "mlp.fc1.bias",
+            "mlp.fc2.weight",
+            "mlp.fc2.bias",
+        ] {
+            keys.insert(format!("vision.blocks.{layer}.{suffix}"));
+        }
+    }
+    for key in [
+        "vision.patch_emb.weight",
+        "vision.patch_emb.bias",
+        "vision.pos_emb",
+        "vision.post_ln.weight",
+        "vision.post_ln.bias",
+        "vision.proj_mlp.fc1.weight",
+        "vision.proj_mlp.fc1.bias",
+        "vision.proj_mlp.fc2.weight",
+        "vision.proj_mlp.fc2.bias",
+    ] {
+        keys.insert(key.to_string());
+    }
+
+    keys
+}
+
+#[test]
+fn rewrite_moondream2_weight_key_covers_the_real_checkpoint_exactly() {
+    // Guard the remap against the real 2025-06-21 checkpoint contract: every
+    // region tensor is dropped, and the remaining 578 tensors remap onto
+    // EXACTLY the key set the text/vision loaders request, with no leftovers
+    // (a tensor silently landing in an unused slot would zero-initialize
+    // nothing today but would mask future drift) and no misses (a missing
+    // slot fails the load).
+    let remapped: std::collections::BTreeSet<String> = real_moondream2_checkpoint_keys()
+        .iter()
+        .filter_map(|key| rewrite_moondream2_weight_key(key))
+        .collect();
+
+    let required = moondream2_loader_required_keys();
+
+    let missing: Vec<_> = required.difference(&remapped).collect();
+    assert!(
+        missing.is_empty(),
+        "loader-required keys not produced by the remap: {missing:?}"
+    );
+
+    let unused: Vec<_> = remapped.difference(&required).collect();
+    assert!(
+        unused.is_empty(),
+        "remapped keys no loader consumes: {unused:?}"
+    );
+
+    assert_eq!(remapped.len(), 592 - 14, "region tensors must be dropped");
 }
 
 #[test]

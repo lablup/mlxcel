@@ -323,11 +323,12 @@ pub(crate) fn compute_vlm_embeddings(
             )
             .map_err(|e| anyhow::anyhow!("{}", e))?;
             *prompt_tokens = prepared.tokens;
-        } else if matches!(model, LoadedModel::Moondream2VLM(_)) {
+        } else if let LoadedModel::Moondream2VLM(moondream2) = model {
             // Moondream2 also needs its own text-only framing.
             let prepared = mlxcel::moondream2_prompt::prepare_moondream2_prompt_tokens(
                 prompt,
                 0,
+                moondream2.prompt_style,
                 |text, add_special| {
                     tokenizer
                         .encode(text, add_special)

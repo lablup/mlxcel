@@ -410,8 +410,13 @@ where
             }))
         }
         VlmRuntimeRef::Moondream2(moondream2) => {
-            let prepared = prepare_moondream2_prompt_tokens(prompt, images.len(), &mut encode)
-                .map_err(|err| anyhow::anyhow!("{}", err))?;
+            let prepared = prepare_moondream2_prompt_tokens(
+                prompt,
+                images.len(),
+                moondream2.prompt_style,
+                &mut encode,
+            )
+            .map_err(|err| anyhow::anyhow!("{}", err))?;
             *prompt_tokens = prepared.tokens;
 
             let processed_image = moondream2.processor.preprocess_image(&images[0]);

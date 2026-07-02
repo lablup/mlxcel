@@ -24,10 +24,20 @@ fn moondream2_model_args_fill_phi_style_defaults() {
     assert_eq!(args.n_heads, 32);
     assert_eq!(args.n_kv_heads, 32);
     assert_eq!(args.head_dim(), 64);
-    // The moondream2 tokenizer uses `<|endoftext|>` (id 50256) as bos/eos, not
-    // Moondream3's id 0. A `0` eos halts generation on the first sampled token.
+    // The serde defaults match the LEGACY (GPT-2 tokenizer) revisions where
+    // `<|endoftext|>` is id 50256; the loader overrides both ids to 0 for
+    // starmie-era (2025-06-21+) checkpoints.
     assert_eq!(args.eos_token_id, 50256);
     assert_eq!(args.bos_token_id, 50256);
+
+    // Starmie-era loader configs override both ids to 0 in one place.
+    let starmie: ModelArgs = serde_json::from_value(serde_json::json!({
+        "eos_token_id": 0,
+        "bos_token_id": 0,
+    }))
+    .unwrap();
+    assert_eq!(starmie.eos_token_id, 0);
+    assert_eq!(starmie.bos_token_id, 0);
 }
 
 #[test]

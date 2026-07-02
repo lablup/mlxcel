@@ -22,7 +22,14 @@
 //! - tanh-approximate GELU MLP
 //! - a final LayerNorm followed by an untied `lm_head` with bias
 //!
-//! The port mirrors `references/mlx-vlm/mlx_vlm/models/moondream2/language.py`.
+//! The port mirrors the checkpoint's own reference implementation
+//! (`text.py`, `rope.py` and `layers.py` shipped in `vikhyatk/moondream2`);
+//! `references/mlx-vlm/mlx_vlm/models/moondream2/language.py` implements the
+//! same math for the pre-2025 key layout. Note that the reference RoPE reads
+//! the 32 rotary dims in NeoX half-split pairs and writes the rotated pairs
+//! back interleaved; because q and k receive the same fixed output
+//! permutation, attention scores are invariant to it, so `fast_rope` with
+//! `traditional = false` (half-split in, half-split out) is exact.
 
 use mlxcel_core::generate::LanguageModel;
 use mlxcel_core::layers::{KVCache, LayerNorm, UnifiedEmbedding, UnifiedLinear};
@@ -116,11 +123,12 @@ fn default_bits() -> i32 {
     4
 }
 
-/// The moondream2 checkpoint ships a GPT-2/CodeGen tokenizer whose
-/// `<|endoftext|>` token (id 50256) doubles as bos, eos and unk. Moondream3
-/// uses id 0 for the same role with a different tokenizer, so the moondream2
-/// port must not inherit that value: a `0` eos collides with a normal sampled
-/// token and halts generation before any output is produced.
+/// Default begin/end-of-text id, matching the LEGACY (2025-01-09 ..
+/// 2025-04-14) moondream2 revisions whose GPT-2/CodeGen tokenizer uses
+/// `<|endoftext|>` (id 50256) as bos, eos and unk. Starmie-era checkpoints
+/// (2025-06-21+) use id 0 with the `moondream/starmie-v1` tokenizer, exactly
+/// like Moondream3; the loader overrides both ids per detected era, so these
+/// serde defaults only cover configs built outside the loader.
 fn default_eos_token_id() -> i32 {
     50256
 }
