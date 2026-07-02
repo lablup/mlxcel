@@ -104,13 +104,21 @@ pub(crate) fn load_paddleocr_vl(model_path: &Path) -> Result<LoadedModel> {
 
 /// Remap raw checkpoint keys into mlxcel's PaddleOCR-VL namespace.
 ///
-/// Mirrors the reference `Model.sanitize`:
+/// Handles both the reference `Model.sanitize` layout and the published
+/// `PaddleOCRVLForConditionalGeneration` checkpoint layout (top-level
+/// `language_model.*` text weights plus already-sanitized, already-fused
+/// `visual.*` vision weights):
+/// - strip the `language_model.` wrapper so the ERNIE-4.5 backbone sees
+///   `model.*` / `lm_head.*`
 /// - `visual.vision_model.{embeddings,post_layernorm}` -> `visual.{...}`
 /// - `visual.vision_model.encoder.layers` -> `visual.layers`
-/// - vision `q_proj`/`k_proj`/`v_proj` -> fused `qkv` (concatenated on axis 0)
-/// - `mlp_AR` -> `visual.projector`
+/// - vision `q_proj`/`k_proj`/`v_proj` -> fused `qkv` (concatenated on axis 0);
+///   published exports are already fused as `self_attn.qkv`, so this only fires
+///   for split exports
+/// - `mlp_AR` -> `visual.projector` (published exports already nest the
+///   projector under `visual.projector`)
 /// - drop `packing_position_embedding`, `vision_model.head`, `position_ids`
-/// - text (`model.*`) and `lm_head.*` pass through unchanged
+/// - already-final `model.*` / `lm_head.*` / `visual.*` keys pass through
 fn remap_paddleocr_weights(mut raw: WeightMap) -> Result<WeightMap> {
     let mut out = WeightMap::new();
     let keys: Vec<String> = raw.keys().cloned().collect();
@@ -158,6 +166,14 @@ fn remap_paddleocr_weights(mut raw: WeightMap) -> Result<WeightMap> {
 }
 
 fn remap_key(key: &str) -> String {
+    // The published PaddleOCR-VL checkpoint nests the ERNIE-4.5 text backbone
+    // under `language_model` (`language_model.model.*`,
+    // `language_model.lm_head.*`). Strip that wrapper so the text model finds
+    // the `model.*` / `lm_head.*` keys it expects. Exports that already omit
+    // the wrapper fall through to the vision handling below unchanged.
+    if let Some(rest) = key.strip_prefix("language_model.") {
+        return rest.to_string();
+    }
     if key.contains("visual.vision_model.encoder") {
         key.replace("visual.vision_model.encoder", "visual")
     } else if key.contains("visual.vision_model") {
@@ -168,3 +184,7 @@ fn remap_key(key: &str) -> String {
         key.to_string()
     }
 }
+
+#[cfg(test)]
+#[path = "vlm_paddleocr_tests.rs"]
+mod tests;

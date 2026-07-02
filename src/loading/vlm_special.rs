@@ -669,7 +669,63 @@ pub(crate) fn load_moondream3_vlm(model_path: &Path) -> Result<LoadedModel> {
     }))
 }
 
-pub(super) fn moondream2_text_config_value(full_config: &Value) -> Value {
+/// GPT-2 / CodeGen `<|endoftext|>` id. The moondream2 tokenizer uses this
+/// single token as its begin-of-text, end-of-text and unknown token, so it is
+/// the resolution fallback for both bos and eos.
+const MOONDREAM2_ENDOFTEXT_ID: i32 = 50256;
+
+/// Resolve the moondream2 begin/end-of-text id from the checkpoint.
+///
+/// The shipped `vikhyatk/moondream2` checkpoint (`model_type: "moondream1"`)
+/// leaves both the top-level `eos_token_id` and the nested `config` object
+/// empty, so the authoritative id lives in the GPT-2/CodeGen tokenizer, where
+/// `<|endoftext|>` is id 50256 and doubles as bos/eos/unk. Moondream3 uses id 0
+/// for the same role with a different tokenizer; the moondream2 port must not
+/// inherit that value or generation stops on the very first sampled token.
+///
+/// Resolution order: explicit `eos_token_id` in config.json (top-level, then the
+/// nested `config` object), then the tokenizer's declared `eos_token` id, then
+/// the GPT-2 fallback (50256).
+pub(super) fn resolve_moondream2_eos_token_id(
+    full_config: &Value,
+    tokenizer_config: Option<&Value>,
+) -> i32 {
+    if let Some(id) = full_config.get("eos_token_id").and_then(Value::as_i64) {
+        return id as i32;
+    }
+    if let Some(id) = full_config
+        .get("config")
+        .and_then(|nested| nested.get("eos_token_id"))
+        .and_then(Value::as_i64)
+    {
+        return id as i32;
+    }
+    if let Some(id) = tokenizer_config.and_then(moondream2_tokenizer_eos_token_id) {
+        return id;
+    }
+    MOONDREAM2_ENDOFTEXT_ID
+}
+
+/// Look up the id of the tokenizer's declared `eos_token` string inside
+/// `added_tokens_decoder`, matching the moondream2 `tokenizer_config.json`
+/// shape (`eos_token: "<|endoftext|>"`, `added_tokens_decoder: { "50256": {
+/// "content": "<|endoftext|>", .. } }`). `eos_token` may be a bare string or an
+/// object carrying a `content` field.
+fn moondream2_tokenizer_eos_token_id(tokenizer_config: &Value) -> Option<i32> {
+    let eos_str = match tokenizer_config.get("eos_token")? {
+        Value::String(text) => text.as_str(),
+        Value::Object(entry) => entry.get("content")?.as_str()?,
+        _ => return None,
+    };
+    let decoder = tokenizer_config.get("added_tokens_decoder")?.as_object()?;
+    decoder.iter().find_map(|(id, entry)| {
+        (entry.get("content").and_then(Value::as_str) == Some(eos_str))
+            .then(|| id.parse::<i32>().ok())
+            .flatten()
+    })
+}
+
+pub(super) fn moondream2_text_config_value(full_config: &Value, special_token_id: i32) -> Value {
     let (group_size, bits) = parse_quantization_params(full_config);
     let group_size = if group_size > 0 { group_size } else { 64 };
     let bits = if bits > 0 { bits } else { 4 };
@@ -687,7 +743,8 @@ pub(super) fn moondream2_text_config_value(full_config: &Value) -> Value {
         "layer_norm_eps": 1e-5,
         "group_size": group_size,
         "bits": bits,
-        "eos_token_id": 0
+        "eos_token_id": special_token_id,
+        "bos_token_id": special_token_id
     })
 }
 
@@ -742,8 +799,10 @@ pub(crate) fn load_moondream2_vlm(model_path: &Path) -> Result<LoadedModel> {
     use vision::processors::moondream3::Moondream3Processor;
 
     let (_config_str, full_config) = read_sanitized_vlm_config(model_path)?;
+    let tokenizer_config = read_optional_json_config(model_path, "tokenizer_config.json");
+    let eos_token_id = resolve_moondream2_eos_token_id(&full_config, tokenizer_config.as_ref());
     let text_config: models::moondream2::ModelArgs =
-        serde_json::from_value(moondream2_text_config_value(&full_config))
+        serde_json::from_value(moondream2_text_config_value(&full_config, eos_token_id))
             .map_err(|err| anyhow::anyhow!("Failed to parse Moondream2 text config: {}", err))?;
     let vision_config: Moondream3VisionConfig =
         serde_json::from_value(moondream3_vision_config_value(&full_config))
@@ -767,8 +826,15 @@ pub(crate) fn load_moondream2_vlm(model_path: &Path) -> Result<LoadedModel> {
         text_model,
         vision_tower,
         processor,
-        eos_token_ids: vec![text_config.eos_token_id],
+        eos_token_ids: vec![eos_token_id],
     }))
+}
+
+/// Read and parse an optional JSON sidecar (e.g. `tokenizer_config.json`) from a
+/// model directory. Returns `None` when the file is absent or unparseable.
+fn read_optional_json_config(model_path: &Path, file_name: &str) -> Option<Value> {
+    let content = std::fs::read_to_string(model_path.join(file_name)).ok()?;
+    serde_json::from_str(&content).ok()
 }
 
 pub(super) fn rewrite_phi4_siglip_weight_key(key: &str) -> Option<String> {

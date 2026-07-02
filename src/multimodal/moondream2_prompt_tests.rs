@@ -20,6 +20,13 @@ fn encode(text: &str, _add_special: bool) -> Vec<i32> {
 }
 
 #[test]
+fn bos_id_is_the_endoftext_token() {
+    // The moondream2 GPT-2/CodeGen tokenizer uses `<|endoftext|>` (id 50256) as
+    // its begin-of-text token, not Moondream3's id 0.
+    assert_eq!(MOONDREAM2_BOS_ID, 50256);
+}
+
+#[test]
 fn text_only_prompt_leads_with_bos_and_frames_question() {
     let prepared = prepare_moondream2_prompt_tokens("What is this?", 0, encode).unwrap();
     assert_eq!(prepared.mode, Moondream2PromptMode::Query);

@@ -12,16 +12,24 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! SmolVLM / SmolVLM2 (`smolvlm`) VLM loader.
+//! SmolVLM / SmolVLM2 (`smolvlm`) and SmolVLM-Instruct (`idefics3`) VLM loader.
 //!
-//! Checkpoint composition (HuggingFace `SmolVLMForConditionalGeneration`
-//! layout, which mlx-community checkpoints preserve on disk):
-//! - Vision tower: SigLIP (`model.vision_model.*`).
-//! - Connector `model.connector.modality_projection.proj.*`: a single
-//!   bias-free Linear, with `pixel_shuffle(scale_factor)` in front.
-//! - Language model: SmolLM2 (`model.text_model.*`, plus a top-level
-//!   `lm_head.*`), a plain Llama architecture. We remap `model.text_model.*`
-//!   -> `model.*` and reuse mlxcel's [`crate::models::Llama3Model`].
+//! SmolVLM was built on Idefics3, so both checkpoints share one runtime: a
+//! SigLIP vision tower, a `pixel_shuffle(scale_factor)` + bias-free Linear
+//! connector, and a plain Llama text backbone. Two on-disk layouts are handled:
+//!
+//! - `SmolVLMForConditionalGeneration` (SmolVLM / SmolVLM2, mlx-community):
+//!   vision `model.vision_model.*`, connector
+//!   `model.connector.modality_projection.proj.*`, SmolLM2 text
+//!   `model.text_model.*` with a separate top-level untied head `lm_head.*`.
+//! - `Idefics3ForConditionalGeneration` (SmolVLM-Instruct): vision
+//!   `vision_model.*`, connector `connector.modality_projection.proj.*`, and the
+//!   whole Llama-with-head nested under `language_model.*` (including
+//!   `language_model.lm_head.*`).
+//!
+//! Both layouts are remapped into the plain Llama key layout mlxcel's
+//! [`crate::models::Llama3Model`] expects (see [`remap_smolvlm_text_key`]), and
+//! the vision/connector prefixes are resolved from whichever form is on disk.
 //!
 //! On Apple Silicon, non-quantized bf16 weights are converted to f16 by
 //! [`load_vlm_weights_common`]. For quantized checkpoints that conversion is
@@ -92,21 +100,47 @@ fn resolve_eos_token_ids(full_config: &Value, added_tokens: Option<&Value>) -> V
     ids
 }
 
+/// Map one checkpoint text-weight key into the plain Llama key layout the
+/// [`models::Llama3Model`] loader expects, returning `None` for keys that are
+/// not text weights (vision tower / connector keys are handled separately).
+///
+/// Two on-disk layouts are supported:
+/// - SmolVLM / SmolVLM2 (`SmolVLMForConditionalGeneration`, mlx-community): the
+///   SmolLM2 backbone lives under `model.text_model.*` with a separate
+///   top-level untied head at `lm_head.*`.
+/// - Idefics3 / SmolVLM-Instruct (`Idefics3ForConditionalGeneration`): the whole
+///   Llama-with-head is nested under `language_model.*`, so the untied head is
+///   `language_model.lm_head.*`. It must be promoted to the top-level `lm_head.*`
+///   key. [`models::Llama3Model::from_weights`] reads the untied head from
+///   `lm_head` (not `model.lm_head`), so mapping it to `model.lm_head.*` would
+///   leave the head unfound and fail the load.
+fn remap_smolvlm_text_key(key: &str) -> Option<String> {
+    if let Some(rest) = key.strip_prefix("model.text_model.") {
+        Some(format!("model.{rest}"))
+    } else if let Some(rest) = key.strip_prefix("language_model.") {
+        if let Some(head) = rest.strip_prefix("lm_head.") {
+            // Promote the idefics3 nested untied head to the top-level key.
+            Some(format!("lm_head.{head}"))
+        } else {
+            Some(format!("model.{rest}"))
+        }
+    } else if key.starts_with("lm_head.") {
+        Some(key.to_string())
+    } else {
+        None
+    }
+}
+
 /// Collect the SmolLM2 text weights and rewrite them into the plain Llama key
-/// layout the [`models::Llama3Model`] loader expects:
-/// `model.text_model.*` -> `model.*`, keeping the top-level `lm_head.*`.
+/// layout the [`models::Llama3Model`] loader expects. See
+/// [`remap_smolvlm_text_key`] for the per-key mapping rules.
 fn smolvlm_text_weights(
     weights: &mlxcel_core::weights::WeightMap,
 ) -> mlxcel_core::weights::WeightMap {
     let mut out = mlxcel_core::weights::WeightMap::new();
     for (key, value) in weights.iter() {
-        if let Some(rest) = key.strip_prefix("model.text_model.") {
-            out.insert(format!("model.{rest}"), mlxcel_core::copy(value));
-        } else if let Some(rest) = key.strip_prefix("language_model.") {
-            // Defensive: accept an already-sanitized mlx-vlm layout too.
-            out.insert(format!("model.{rest}"), mlxcel_core::copy(value));
-        } else if key.starts_with("lm_head.") {
-            out.insert(key.clone(), mlxcel_core::copy(value));
+        if let Some(dest) = remap_smolvlm_text_key(key) {
+            out.insert(dest, mlxcel_core::copy(value));
         }
     }
     out
@@ -264,4 +298,113 @@ pub(crate) fn load_smolvlm_vlm(model_path: &Path) -> Result<LoadedModel> {
     };
 
     Ok(LoadedModel::SmolVLM(vlm))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::remap_smolvlm_text_key;
+    use serde_json::json;
+
+    #[test]
+    fn idefics3_text_config_parses_into_llama_args() {
+        // The `text_config` sub-object of a real SmolVLM-Instruct (idefics3)
+        // config.json must deserialize into the Llama backbone args, including
+        // the untied-head flag the loader relies on to locate `lm_head`.
+        let text_config = json!({
+            "model_type": "llama",
+            "hidden_size": 2048,
+            "intermediate_size": 8192,
+            "num_hidden_layers": 24,
+            "num_attention_heads": 32,
+            "num_key_value_heads": 32,
+            "head_dim": 64,
+            "rms_norm_eps": 1e-05,
+            "rope_theta": 273768.0,
+            "vocab_size": 49155,
+            "tie_word_embeddings": false
+        });
+
+        let args: crate::models::llama3::ModelArgs =
+            serde_json::from_value(text_config).expect("idefics3 text_config parses as Llama args");
+
+        assert_eq!(args.hidden_size, 2048);
+        assert_eq!(args.num_hidden_layers, 24);
+        assert_eq!(args.num_attention_heads, 32);
+        assert_eq!(args.num_key_value_heads, Some(32));
+        assert_eq!(args.head_dim, Some(64));
+        assert_eq!(args.vocab_size, 49155);
+        // Untied head: the loader must fetch a real top-level `lm_head`.
+        assert!(!args.tie_word_embeddings);
+    }
+
+    #[test]
+    fn idefics3_vision_config_parses_into_siglip_vision_config() {
+        // The `vision_config` sub-object (model_type "idefics3") is a SigLIP
+        // tower and must deserialize into mlxcel's VisionConfig.
+        let vision_config = json!({
+            "model_type": "idefics3",
+            "hidden_size": 1152,
+            "intermediate_size": 4304,
+            "num_hidden_layers": 27,
+            "num_attention_heads": 16,
+            "patch_size": 14,
+            "image_size": 384
+        });
+
+        let cfg: crate::vision::config::VisionConfig =
+            serde_json::from_value(vision_config).expect("idefics3 vision_config parses");
+
+        assert_eq!(cfg.model_type, "idefics3");
+        assert_eq!(cfg.hidden_size, 1152);
+        assert_eq!(cfg.num_hidden_layers, 27);
+        assert_eq!(cfg.num_attention_heads, 16);
+        assert_eq!(cfg.patch_size, 14);
+        assert_eq!(cfg.image_size, 384);
+    }
+
+    #[test]
+    fn remap_promotes_idefics3_nested_lm_head_to_top_level() {
+        // idefics3 nests the whole Llama-with-head under `language_model.*`.
+        // The untied head must land at the top-level `lm_head.*` key that
+        // Llama3Model::from_weights reads; the backbone maps to `model.*`.
+        assert_eq!(
+            remap_smolvlm_text_key("language_model.embed_tokens.weight").as_deref(),
+            Some("model.embed_tokens.weight")
+        );
+        assert_eq!(
+            remap_smolvlm_text_key("language_model.layers.0.self_attn.q_proj.weight").as_deref(),
+            Some("model.layers.0.self_attn.q_proj.weight")
+        );
+        assert_eq!(
+            remap_smolvlm_text_key("language_model.norm.weight").as_deref(),
+            Some("model.norm.weight")
+        );
+        // The critical regression: the nested head is promoted to top-level,
+        // not left under `model.lm_head.*` where the loader never reads it.
+        assert_eq!(
+            remap_smolvlm_text_key("language_model.lm_head.weight").as_deref(),
+            Some("lm_head.weight")
+        );
+        // Vision tower and connector keys are not text weights.
+        assert!(remap_smolvlm_text_key("vision_model.post_layernorm.weight").is_none());
+        assert!(remap_smolvlm_text_key("connector.modality_projection.proj.weight").is_none());
+    }
+
+    #[test]
+    fn remap_preserves_smolvlm2_layout() {
+        // SmolVLM/SmolVLM2 keep the backbone under `model.text_model.*` with a
+        // separate top-level untied head; that mapping stays unchanged.
+        assert_eq!(
+            remap_smolvlm_text_key("model.text_model.embed_tokens.weight").as_deref(),
+            Some("model.embed_tokens.weight")
+        );
+        assert_eq!(
+            remap_smolvlm_text_key("model.text_model.layers.3.mlp.gate_proj.weight").as_deref(),
+            Some("model.layers.3.mlp.gate_proj.weight")
+        );
+        assert_eq!(
+            remap_smolvlm_text_key("lm_head.weight").as_deref(),
+            Some("lm_head.weight")
+        );
+    }
 }

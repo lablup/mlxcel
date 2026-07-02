@@ -20,7 +20,10 @@
 //! the image path only the framed text tokens are produced here. Text-only
 //! prompts additionally lead with the BOS id so the model still sees a prefix.
 
-pub const MOONDREAM2_BOS_ID: i32 = 0;
+/// The moondream2 tokenizer (GPT-2/CodeGen) uses `<|endoftext|>` (id 50256) as
+/// its begin-of-text token. Moondream3 uses id 0 with a different tokenizer;
+/// the moondream2 port must not reuse that value.
+pub const MOONDREAM2_BOS_ID: i32 = 50256;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Moondream2PromptMode {
