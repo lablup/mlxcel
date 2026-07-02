@@ -124,13 +124,22 @@ impl MllamaVLModel {
     }
 
     /// Stash externally-computed cross-attention states.
+    ///
+    /// The text cross-attention layers derive a per-layer key/value from these
+    /// states and cache it for the whole generation, so a new image must
+    /// invalidate that cache before the next forward rebuilds it.
     pub fn set_cross_attention_states(&self, states: UniquePtr<MlxArray>) {
         *self.cross_attention_states.borrow_mut() = Some(states);
+        self.text_model.invalidate_cross_attention_cache();
     }
 
     /// Drop any stashed cross-attention states (revert to text-only decoding).
+    ///
+    /// Also drops the cached per-layer image key/value so a later image
+    /// rebuilds it and the cross-attention layers stay pass-through meanwhile.
     pub fn clear_cross_attention_states(&self) {
         *self.cross_attention_states.borrow_mut() = None;
+        self.text_model.invalidate_cross_attention_cache();
     }
 
     /// `true` when image cross-attention state is currently active.
