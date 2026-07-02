@@ -52,7 +52,13 @@ pub struct DeepSeekV3Config {
     pub routed_scaling_factor: f32,
 
     pub kv_lora_rank: usize,
-    pub q_lora_rank: usize,
+
+    // `q_lora_rank` is null for backbones that project the query directly
+    // (e.g. the Moonlight-16B text model used by Kimi-VL); a numeric value
+    // selects the LoRA-style q_a_proj -> q_a_layernorm -> q_b_proj chain
+    // (genuine DeepSeek-V3). Accept both null and an absent key.
+    #[serde(default)]
+    pub q_lora_rank: Option<usize>,
     pub qk_rope_head_dim: usize,
     pub v_head_dim: usize,
     pub qk_nope_head_dim: usize,
@@ -188,10 +194,13 @@ impl DeepSeekV3Config {
 
 // DeepSeek-V3 MLA (Multi-head Latent Attention).
 pub struct DeepSeekV3Attention {
-    // Q projection with LoRA
-    pub q_a_proj: UnifiedLinear,
-    pub q_a_layernorm: RMSNorm,
-    pub q_b_proj: UnifiedLinear,
+    // Q projection: either a direct `q_proj` (when `q_lora_rank` is null) or the
+    // LoRA-style chain q_a_proj -> q_a_layernorm -> q_b_proj. Exactly one form is
+    // populated by `from_weights`.
+    pub q_proj: Option<UnifiedLinear>,
+    pub q_a_proj: Option<UnifiedLinear>,
+    pub q_a_layernorm: Option<RMSNorm>,
+    pub q_b_proj: Option<UnifiedLinear>,
 
     // KV projection with compression
     pub kv_a_proj_with_mqa: UnifiedLinear,
@@ -226,10 +235,16 @@ impl DeepSeekV3Attention {
         let b = shape[0];
         let l = shape[1];
 
-        // Compute Q with LoRA: q_a_proj → norm → q_b_proj
-        let q_a = self.q_a_proj.forward(x);
-        let q_a_norm = self.q_a_layernorm.forward(&q_a);
-        let q = self.q_b_proj.forward(&q_a_norm);
+        // Compute Q: direct projection when `q_lora_rank` is null, otherwise the
+        // LoRA-style chain q_a_proj -> q_a_layernorm -> q_b_proj. `from_weights`
+        // guarantees exactly one form is populated.
+        let q = if let Some(ref q_proj) = self.q_proj {
+            q_proj.forward(x)
+        } else {
+            let q_a = self.q_a_proj.as_ref().unwrap().forward(x);
+            let q_a_norm = self.q_a_layernorm.as_ref().unwrap().forward(&q_a);
+            self.q_b_proj.as_ref().unwrap().forward(&q_a_norm)
+        };
 
         // Reshape Q to [batch, seq, heads, head_dim] then transpose
         let q = mlxcel_core::reshape(&q, &[b, l, self.num_heads, self.q_head_dim]);
@@ -345,18 +360,42 @@ impl DeepSeekV3Attention {
         let bits = args.bits();
         let q_head_dim = args.q_head_dim() as i32;
 
-        let q_a_proj = UnifiedLinear::from_weights(
-            weights,
-            &format!("{}.q_a_proj", prefix),
-            group_size,
-            bits,
-        )?;
-        let q_b_proj = UnifiedLinear::from_weights(
-            weights,
-            &format!("{}.q_b_proj", prefix),
-            group_size,
-            bits,
-        )?;
+        // Q projection: a null `q_lora_rank` selects the direct `q_proj` weight
+        // (Moonlight-16B / Kimi-VL backbone); a numeric value selects the
+        // LoRA-style q_a_proj -> q_a_layernorm -> q_b_proj chain (DeepSeek-V3).
+        let (q_proj, q_a_proj, q_a_layernorm, q_b_proj) = if args.q_lora_rank.is_none() {
+            (
+                Some(UnifiedLinear::from_weights(
+                    weights,
+                    &format!("{}.q_proj", prefix),
+                    group_size,
+                    bits,
+                )?),
+                None,
+                None,
+                None,
+            )
+        } else {
+            (
+                None,
+                Some(UnifiedLinear::from_weights(
+                    weights,
+                    &format!("{}.q_a_proj", prefix),
+                    group_size,
+                    bits,
+                )?),
+                Some(RMSNorm::new(
+                    get_weight_copy(weights, &format!("{}.q_a_layernorm.weight", prefix))?,
+                    1e-6,
+                )),
+                Some(UnifiedLinear::from_weights(
+                    weights,
+                    &format!("{}.q_b_proj", prefix),
+                    group_size,
+                    bits,
+                )?),
+            )
+        };
         let kv_a_proj_with_mqa = UnifiedLinear::from_weights(
             weights,
             &format!("{}.kv_a_proj_with_mqa", prefix),
@@ -376,15 +415,12 @@ impl DeepSeekV3Attention {
             bits,
         )?;
 
-        let q_a_norm_weight =
-            get_weight_copy(weights, &format!("{}.q_a_layernorm.weight", prefix))?;
         let kv_a_norm_weight =
             get_weight_copy(weights, &format!("{}.kv_a_layernorm.weight", prefix))?;
-
-        let q_a_layernorm = RMSNorm::new(q_a_norm_weight, 1e-6);
         let kv_a_layernorm = RMSNorm::new(kv_a_norm_weight, 1e-6);
 
         Ok(Self {
+            q_proj,
             q_a_proj,
             q_a_layernorm,
             q_b_proj,
@@ -1181,7 +1217,7 @@ mod tests {
             n_routed_experts: Some(4),
             routed_scaling_factor: 1.0,
             kv_lora_rank: 32,
-            q_lora_rank: 1,
+            q_lora_rank: Some(1),
             qk_rope_head_dim: 1,
             v_head_dim: 64,
             qk_nope_head_dim: 64,
@@ -1200,6 +1236,73 @@ mod tests {
             attention_bias: false,
             quantization: None,
         }
+    }
+
+    /// Regression guard for the real Kimi-VL / Moonlight text config, whose
+    /// `q_lora_rank` is JSON `null` (the backbone projects the query directly).
+    /// Parsing this shape used to fail with "invalid type: null, expected
+    /// usize"; the Kimi-VL loader reuses this exact `DeepSeekV3Config`.
+    #[test]
+    fn parses_null_q_lora_rank_config() {
+        // Field values mirror the real kimi-vl-a3b-thinking config.json
+        // `text_config` block.
+        let json = r#"{
+            "model_type": "deepseek_v3",
+            "vocab_size": 163840,
+            "hidden_size": 2048,
+            "intermediate_size": 11264,
+            "moe_intermediate_size": 1408,
+            "num_hidden_layers": 27,
+            "num_attention_heads": 16,
+            "num_key_value_heads": 16,
+            "n_routed_experts": 64,
+            "n_shared_experts": 2,
+            "kv_lora_rank": 512,
+            "q_lora_rank": null,
+            "qk_rope_head_dim": 64,
+            "v_head_dim": 128,
+            "qk_nope_head_dim": 128,
+            "first_k_dense_replace": 1,
+            "rope_theta": 800000.0
+        }"#;
+        let cfg: DeepSeekV3Config =
+            serde_json::from_str(json).expect("null q_lora_rank must parse");
+        assert_eq!(cfg.q_lora_rank, None);
+        assert_eq!(cfg.kv_lora_rank, 512);
+        // q_head_dim = qk_nope_head_dim + qk_rope_head_dim = 128 + 64.
+        assert_eq!(cfg.q_head_dim(), 192);
+    }
+
+    /// A numeric `q_lora_rank` (genuine DeepSeek-V3) still parses to `Some`, and
+    /// an absent key defaults to `None` via `#[serde(default)]`.
+    #[test]
+    fn parses_numeric_and_absent_q_lora_rank() {
+        let base = r#"{
+            "vocab_size": 1,
+            "hidden_size": 1,
+            "intermediate_size": 1,
+            "moe_intermediate_size": 1,
+            "num_hidden_layers": 1,
+            "num_attention_heads": 1,
+            "num_key_value_heads": 1,
+            "kv_lora_rank": 1,
+            "qk_rope_head_dim": 1,
+            "v_head_dim": 1,
+            "qk_nope_head_dim": 1
+        }"#;
+        // Absent key -> None.
+        let absent: DeepSeekV3Config =
+            serde_json::from_str(base).expect("absent q_lora_rank must parse");
+        assert_eq!(absent.q_lora_rank, None);
+
+        // Numeric value -> Some.
+        let with_rank = base.replace(
+            "\"kv_lora_rank\": 1,",
+            "\"kv_lora_rank\": 1, \"q_lora_rank\": 1536,",
+        );
+        let numeric: DeepSeekV3Config =
+            serde_json::from_str(&with_rank).expect("numeric q_lora_rank must parse");
+        assert_eq!(numeric.q_lora_rank, Some(1536));
     }
 
     /// Insert a dummy (empty) weight entry — sufficient for key-presence checks.

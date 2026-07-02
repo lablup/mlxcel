@@ -167,7 +167,9 @@ impl YoutuTextConfig {
             n_routed_experts: self.n_routed_experts,
             routed_scaling_factor: self.routed_scaling_factor,
             kv_lora_rank: self.kv_lora_rank,
-            q_lora_rank: self.q_lora_rank,
+            // Youtu-VL always uses LoRA-compressed queries; wrap the required
+            // rank so the shared DeepSeek-V3 attention takes the LoRA branch.
+            q_lora_rank: Some(self.q_lora_rank),
             qk_rope_head_dim: self.qk_rope_head_dim,
             v_head_dim: self.v_head_dim,
             qk_nope_head_dim: self.qk_nope_head_dim,

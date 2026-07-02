@@ -242,6 +242,42 @@ mod tests {
         mlxcel_core::ones(&[1], mlxcel_core::dtype::FLOAT32)
     }
 
+    /// The real kimi-vl-a3b-thinking checkpoint stores `text_config.q_lora_rank`
+    /// as JSON `null` (the Moonlight-16B backbone projects the query directly).
+    /// This is the exact shape the loader hands to `parse_required_vlm_subconfig`,
+    /// which previously failed with "invalid type: null, expected usize".
+    #[test]
+    fn parses_real_kimi_vl_text_config_with_null_q_lora_rank() {
+        let full_config = serde_json::json!({
+            "model_type": "kimi_vl",
+            "text_config": {
+                "model_type": "deepseek_v3",
+                "vocab_size": 163840,
+                "hidden_size": 2048,
+                "intermediate_size": 11264,
+                "moe_intermediate_size": 1408,
+                "num_hidden_layers": 27,
+                "num_attention_heads": 16,
+                "num_key_value_heads": 16,
+                "n_routed_experts": 64,
+                "n_shared_experts": 2,
+                "kv_lora_rank": 512,
+                "q_lora_rank": null,
+                "qk_rope_head_dim": 64,
+                "v_head_dim": 128,
+                "qk_nope_head_dim": 128,
+                "first_k_dense_replace": 1,
+                "rope_theta": 800000.0
+            }
+        });
+
+        let text_config: DeepSeekV3Config =
+            parse_required_vlm_subconfig(&full_config, "text_config", "Kimi-VL text config")
+                .expect("real Kimi-VL text config must parse");
+        assert_eq!(text_config.q_lora_rank, None);
+        assert_eq!(text_config.num_hidden_layers, 27);
+    }
+
     #[test]
     fn remaps_language_and_vision_prefixes() {
         let mut raw = WeightMap::new();
