@@ -132,6 +132,35 @@ pub fn resolve_precision(device: &str) -> Precision {
     precision_env_override().unwrap_or_else(|| default_precision(device))
 }
 
+/// Whether `precision` can lower on `device`'s IREE target. The `metal-spirv` GPU
+/// target advertises no bf16 compute (`compute = fp32|fp16|int*`), so a bf16 graph
+/// cannot lower there (issue #612). Every other device / precision pair lowers: bf16
+/// is fine on CUDA and the CPU (`local-task` / `local-sync`) targets, and f16 / f32
+/// lower everywhere. Pure (no env), so the guard logic is unit-testable directly.
+fn precision_lowers_on(device: &str, precision: Precision) -> bool {
+    !(device == "metal" && precision == Precision::Bf16)
+}
+
+/// [`resolve_precision`], but reject a precision the target cannot lower before it
+/// reaches `iree-compile` (issue #612, found in #575). Without this, bf16 on Metal
+/// fails deep inside `iree-compile` with an opaque `vector.bitcast` legalization
+/// dump, after model load. Catch it at the emit/compile boundary and return an
+/// actionable message pointing at f16 (the Metal default). bf16 is only ever the
+/// explicit env override here (never a per-device default), so the message names it.
+pub fn resolve_precision_checked(device: &str) -> Result<Precision, String> {
+    let precision = resolve_precision(device);
+    if precision_lowers_on(device, precision) {
+        Ok(precision)
+    } else {
+        Err(
+            "MLXCEL_XLA_PRECISION=bf16 is not supported on the Metal target: the \
+             metal-spirv GPU target has no bf16 compute, so the graph fails to \
+             legalize. Use f16 (the Metal default) or f32."
+                .to_string(),
+        )
+    }
+}
+
 pub struct Builder {
     body: String,
     next: usize,
@@ -870,6 +899,19 @@ mod tests {
         assert_eq!(default_precision("cuda"), Precision::F16);
         assert_eq!(default_precision("local-task"), Precision::F32);
         assert_eq!(default_precision("local-sync"), Precision::F32);
+    }
+
+    /// Issue #612: only bf16-on-Metal is rejected; every other pair lowers. The
+    /// `metal-spirv` target has no bf16 compute, but f16 / f32 lower on Metal and
+    /// bf16 lowers on CUDA and the CPU targets.
+    #[test]
+    fn precision_lowers_on_rejects_only_bf16_on_metal() {
+        assert!(!precision_lowers_on("metal", Precision::Bf16));
+        assert!(precision_lowers_on("metal", Precision::F16));
+        assert!(precision_lowers_on("metal", Precision::F32));
+        assert!(precision_lowers_on("cuda", Precision::Bf16));
+        assert!(precision_lowers_on("local-task", Precision::Bf16));
+        assert!(precision_lowers_on("local-sync", Precision::Bf16));
     }
 
     /// 4-bit affine dequant-in-graph (issue #516): a `[out, in_packed]` ui32 weight

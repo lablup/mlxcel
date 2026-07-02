@@ -555,11 +555,53 @@ fn remote_tokenizer_repo_for_model_type(model_type: &str) -> Option<&'static str
 }
 
 fn remote_tokenizer_repo_for_model(model_path: &Path) -> Option<&'static str> {
+    let model_type = read_config_model_type(model_path)?;
+    remote_tokenizer_repo_for_model_type(&model_type)
+}
+
+fn read_config_model_type(model_path: &Path) -> Option<String> {
     let config_path = model_path.join("config.json");
     let content = std::fs::read_to_string(config_path).ok()?;
     let config = serde_json::from_str::<serde_json::Value>(&content).ok()?;
-    let model_type = config.get("model_type").and_then(|value| value.as_str())?;
-    remote_tokenizer_repo_for_model_type(model_type)
+    config
+        .get("model_type")
+        .and_then(|value| value.as_str())
+        .map(str::to_string)
+}
+
+/// Repos whose local `tokenizer.json` must be OVERRIDDEN (not merely used as
+/// a fallback when absent).
+///
+/// The official `vikhyatk/moondream2` repository never removed its legacy
+/// GPT-2/CodeGen tokenizer files, so a starmie-era snapshot (revision
+/// 2025-06-21+) still ships a `tokenizer.json` that does NOT match its
+/// weights; the shipped `moondream.py` loads `moondream/starmie-v1` from the
+/// Hub instead. Loading the stale local file makes the numerically correct
+/// forward pass consume and emit token ids from the wrong vocabulary, which
+/// surfaces as pure garbage text (see `crate::moondream2_prompt`).
+///
+/// Returns the repo to fetch the real tokenizer from, or `None` when the
+/// local `tokenizer.json` (if any) is trustworthy:
+/// - the checkpoint is not a moondream2-family one, or
+/// - it is a legacy-era moondream2 (GPT-2 tokenizer is correct), or
+/// - the local `tokenizer.json` is already the starmie one (converted or
+///   manually placed), so no fetch is needed.
+fn remote_tokenizer_override_for_model(model_path: &Path) -> Option<&'static str> {
+    let model_type = read_config_model_type(model_path)?;
+    if !matches!(model_type.as_str(), "moondream1" | "moondream2") {
+        return None;
+    }
+    if crate::moondream2_prompt::detect_moondream2_prompt_style(model_path)
+        != crate::moondream2_prompt::Moondream2PromptStyle::StarmieTemplates
+    {
+        return None;
+    }
+    if let Ok(tokenizer_json) = std::fs::read_to_string(model_path.join("tokenizer.json"))
+        && tokenizer_json.contains("<|md_reserved_0|>")
+    {
+        return None;
+    }
+    Some("moondream/starmie-v1")
 }
 
 fn download_remote_tokenizer(repo_id: &str) -> Result<tokenizers::Tokenizer> {
@@ -715,6 +757,23 @@ fn build_plamo_tokenizer(model_path: &Path) -> Result<tokenizers::Tokenizer> {
 }
 
 pub fn load_tokenizer(model_path: &Path) -> Result<MlxcelTokenizer> {
+    // Model-specific override: some official checkpoints ship a stale
+    // tokenizer.json that does not match their weights (starmie-era
+    // moondream2). The real tokenizer must be resolved from the Hub (cached
+    // by hf-hub after the first fetch) before the local file is considered.
+    if let Some(repo_id) = remote_tokenizer_override_for_model(model_path) {
+        let tokenizer = download_remote_tokenizer(repo_id).map_err(|err| {
+            anyhow::anyhow!(
+                "This moondream2 checkpoint pairs starmie-era weights with a stale legacy \
+                 tokenizer.json; its text is only coherent with the {repo_id} tokenizer. \
+                 Resolving that tokenizer failed: {err}. If this host is offline, download \
+                 https://huggingface.co/{repo_id}/resolve/main/tokenizer.json and place it \
+                 in {model_path:?} as tokenizer.json."
+            )
+        })?;
+        return Ok(MlxcelTokenizer::HuggingFace(tokenizer));
+    }
+
     // Try HuggingFace tokenizer.json first
     let tokenizer_json_path = model_path.join("tokenizer.json");
     if tokenizer_json_path.exists() {
@@ -772,7 +831,8 @@ pub fn load_tokenizer(model_path: &Path) -> Result<MlxcelTokenizer> {
 #[cfg(test)]
 mod tests {
     use super::{
-        MlxcelTokenizer, remote_tokenizer_repo_for_model, remote_tokenizer_repo_for_model_type,
+        MlxcelTokenizer, remote_tokenizer_override_for_model, remote_tokenizer_repo_for_model,
+        remote_tokenizer_repo_for_model_type,
     };
     use tokenizers::{AddedToken, Tokenizer, models::bpe::BPE};
 
@@ -802,6 +862,90 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(temp_dir);
+    }
+
+    // ------------------------------------------------------------------
+    // Starmie-era moondream2 tokenizer override
+    // ------------------------------------------------------------------
+
+    fn override_test_dir(files: &[(&str, &str)]) -> std::path::PathBuf {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "mlxcel-tokenizer-override-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        for (name, content) in files {
+            std::fs::write(temp_dir.join(name), content).unwrap();
+        }
+        temp_dir
+    }
+
+    #[test]
+    fn override_fires_for_starmie_era_moondream2_with_stale_local_tokenizer() {
+        // The real 2025-06-21 snapshot shape: model_type moondream1,
+        // moondream.py naming the starmie repo, and the STALE legacy GPT-2
+        // tokenizer.json next to it. The stale file must be overridden.
+        let dir = override_test_dir(&[
+            ("config.json", r#"{"model_type":"moondream1"}"#),
+            (
+                "moondream.py",
+                "self.tokenizer = Tokenizer.from_pretrained(\"moondream/starmie-v1\")",
+            ),
+            ("tokenizer.json", r#"{"model":{"vocab":{"!":0}}}"#),
+        ]);
+        assert_eq!(
+            remote_tokenizer_override_for_model(&dir),
+            Some("moondream/starmie-v1")
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn override_skipped_when_local_tokenizer_is_already_starmie() {
+        let dir = override_test_dir(&[
+            ("config.json", r#"{"model_type":"moondream1"}"#),
+            (
+                "moondream.py",
+                "self.tokenizer = Tokenizer.from_pretrained(\"moondream/starmie-v1\")",
+            ),
+            (
+                "tokenizer.json",
+                r#"{"added_tokens":[{"id":1,"content":"<|md_reserved_0|>"}]}"#,
+            ),
+        ]);
+        assert_eq!(remote_tokenizer_override_for_model(&dir), None);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn override_skipped_for_legacy_era_moondream2() {
+        // 2025-01-09 .. 2025-04-14 snapshots: the GPT-2 tokenizer in the
+        // checkpoint is the correct one, so no override.
+        let dir = override_test_dir(&[
+            ("config.json", r#"{"model_type":"moondream1"}"#),
+            (
+                "moondream.py",
+                "self.tokenizer = Tokenizer.from_pretrained(\n    \"vikhyatk/moondream2\", revision=\"2025-01-09\"\n)",
+            ),
+            ("tokenizer.json", r#"{"model":{"vocab":{"!":0}}}"#),
+        ]);
+        assert_eq!(remote_tokenizer_override_for_model(&dir), None);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn override_skipped_for_non_moondream2_models() {
+        // Even with a starmie-looking moondream.py present, other model types
+        // never trigger the moondream2 override.
+        let dir = override_test_dir(&[
+            ("config.json", r#"{"model_type":"llama"}"#),
+            (
+                "moondream.py",
+                "self.tokenizer = Tokenizer.from_pretrained(\"moondream/starmie-v1\")",
+            ),
+        ]);
+        assert_eq!(remote_tokenizer_override_for_model(&dir), None);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     // ------------------------------------------------------------------

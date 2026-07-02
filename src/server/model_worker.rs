@@ -1018,11 +1018,14 @@ pub(crate) fn prepare_request_vlm_embeddings(
             )
             .map_err(|e| anyhow!("{}", e))?;
             *prompt_tokens = prepared.tokens;
-        } else if images.is_empty() && matches!(model, LoadedModel::Moondream2VLM(_)) {
+        } else if images.is_empty()
+            && let LoadedModel::Moondream2VLM(moondream2) = model
+        {
             // Moondream2 frames text-only prompts the same way (BOS + question).
             let prepared = crate::moondream2_prompt::prepare_moondream2_prompt_tokens(
                 prompt,
                 0,
+                moondream2.prompt_style,
                 |text, add_special| {
                     tokenizer
                         .encode(text, add_special)
@@ -1161,10 +1164,13 @@ pub(crate) fn prepare_request_vlm_embeddings(
         )
         .map_err(|e| anyhow!("{}", e))?;
         *prompt_tokens = prepared.tokens;
-    } else if images.is_empty() && matches!(model, LoadedModel::Moondream2VLM(_)) {
+    } else if images.is_empty()
+        && let LoadedModel::Moondream2VLM(moondream2) = model
+    {
         let prepared = crate::moondream2_prompt::prepare_moondream2_prompt_tokens(
             prompt,
             0,
+            moondream2.prompt_style,
             |text, add_special| {
                 tokenizer
                     .encode(text, add_special)
