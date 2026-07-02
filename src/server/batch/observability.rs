@@ -28,6 +28,114 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use mlxcel_core::cache::PagedCacheStats;
 use serde::Serialize;
 
+/// Inclusive upper bounds for the per-request time-to-first-token histogram,
+/// in milliseconds. Chosen to span sub-100ms short-prompt TTFT through the
+/// multi-second range that long-prompt prefill produces (epic #623 #624).
+const TTFT_MS_BUCKETS: [f64; 12] = [
+    5.0, 10.0, 25.0, 50.0, 100.0, 250.0, 500.0, 1000.0, 2500.0, 5000.0, 10000.0, 30000.0,
+];
+
+/// Inclusive upper bounds for the per-request decode-rate histogram, in
+/// tokens/second. Covers the range from heavily-batched large-model decode up
+/// through small-model single-request rates on accelerated hardware.
+const DECODE_TOK_S_BUCKETS: [f64; 12] = [
+    1.0, 5.0, 10.0, 25.0, 50.0, 75.0, 100.0, 150.0, 200.0, 300.0, 500.0, 1000.0,
+];
+
+/// Fixed-bucket cumulative histogram for per-request telemetry.
+///
+/// Prometheus histogram semantics: each observation lands in the first bucket
+/// whose inclusive upper bound is `>= value`, otherwise the implicit `+Inf`
+/// bucket. Bucket counts are stored non-cumulatively and made cumulative at
+/// snapshot time. [`observe`](Self::observe) runs exactly once per request
+/// completion (never per token), so the compare-exchange loop used to
+/// accumulate the floating-point `_sum` is negligible overhead.
+pub struct RequestHistogram {
+    bounds: &'static [f64],
+    counts: Vec<AtomicU64>,
+    sum_bits: AtomicU64,
+    count: AtomicU64,
+}
+
+impl RequestHistogram {
+    fn new(bounds: &'static [f64]) -> Self {
+        let counts = bounds.iter().map(|_| AtomicU64::new(0)).collect();
+        Self {
+            bounds,
+            counts,
+            sum_bits: AtomicU64::new(0.0_f64.to_bits()),
+            count: AtomicU64::new(0),
+        }
+    }
+
+    /// Record a single observation. Non-finite or negative values are clamped
+    /// to `0.0` so a stray timing can never corrupt the running sum.
+    pub fn observe(&self, value: f64) {
+        let value = if value.is_finite() && value > 0.0 {
+            value
+        } else {
+            0.0
+        };
+        self.count.fetch_add(1, Ordering::Relaxed);
+
+        // Accumulate the f64 sum via a compare-exchange loop so the result is
+        // correct regardless of writer count. Only reached once per request.
+        let mut cur = self.sum_bits.load(Ordering::Relaxed);
+        loop {
+            let next = f64::from_bits(cur) + value;
+            match self.sum_bits.compare_exchange_weak(
+                cur,
+                next.to_bits(),
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(actual) => cur = actual,
+            }
+        }
+
+        for (i, &bound) in self.bounds.iter().enumerate() {
+            if value <= bound {
+                self.counts[i].fetch_add(1, Ordering::Relaxed);
+                return;
+            }
+        }
+        // Value exceeds every finite bound; it belongs to the +Inf bucket only,
+        // which the snapshot derives from the total `count`.
+    }
+
+    /// Snapshot with cumulative bucket counts (Prometheus `le` semantics).
+    pub fn snapshot(&self) -> HistogramSnapshot {
+        let mut cumulative = 0u64;
+        let buckets = self
+            .bounds
+            .iter()
+            .enumerate()
+            .map(|(i, &bound)| {
+                cumulative += self.counts[i].load(Ordering::Relaxed);
+                (bound, cumulative)
+            })
+            .collect();
+        HistogramSnapshot {
+            buckets,
+            sum: f64::from_bits(self.sum_bits.load(Ordering::Relaxed)),
+            count: self.count.load(Ordering::Relaxed),
+        }
+    }
+}
+
+/// Serializable snapshot of a [`RequestHistogram`].
+///
+/// `buckets` holds `(inclusive_upper_bound, cumulative_count)` pairs for the
+/// finite buckets; the `+Inf` bucket equals `count`. `sum` is the running total
+/// of observed values.
+#[derive(Debug, Clone)]
+pub struct HistogramSnapshot {
+    pub buckets: Vec<(f64, u64)>,
+    pub sum: f64,
+    pub count: u64,
+}
+
 /// Detailed observability counters for the batch scheduler.
 ///
 /// These complement the coarser [`BatchMetrics`] already tracked in
@@ -90,6 +198,14 @@ pub struct BatchObservability {
     /// (e.g. `InsertError::OversizedEntry`, `InsertError::Disabled`,
     /// `InsertError::PrefixTooShort`).
     pub prompt_cache_insert_rejects: AtomicU64,
+
+    // -- per-request latency/throughput histograms (epic #623 #624) --
+    /// Per-request time-to-first-token (prefill latency), in milliseconds.
+    /// Recorded once per completed request in `finalize_completed`.
+    pub request_ttft_ms: RequestHistogram,
+    /// Per-request decode throughput, in tokens/second. Recorded once per
+    /// completed request from `completion_tokens / generation_only_ms`.
+    pub request_decode_tok_s: RequestHistogram,
 }
 
 impl Default for BatchObservability {
@@ -124,6 +240,8 @@ impl BatchObservability {
             prompt_cache_hit_tokens: AtomicU64::new(0),
             prompt_cache_inserts: AtomicU64::new(0),
             prompt_cache_insert_rejects: AtomicU64::new(0),
+            request_ttft_ms: RequestHistogram::new(&TTFT_MS_BUCKETS),
+            request_decode_tok_s: RequestHistogram::new(&DECODE_TOK_S_BUCKETS),
         }
     }
 
@@ -181,6 +299,41 @@ impl BatchObservability {
     pub fn record_prompt_cache_insert_reject(&self) {
         self.prompt_cache_insert_rejects
             .fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Record per-request completion telemetry: time-to-first-token and the
+    /// observed decode rate. Called exactly once per finished sequence from the
+    /// scheduler thread (never per token), so the cost is negligible.
+    ///
+    /// Requests that produced no completion tokens are ignored: TTFT is
+    /// undefined without a first token and a zero-length generation has no
+    /// decode rate. The decode-rate observation is likewise skipped when the
+    /// decode phase rounded to 0ms (single-token completions), where a rate is
+    /// not measurable.
+    pub fn record_request_completion(
+        &self,
+        prompt_eval_ms: u64,
+        generation_only_ms: u64,
+        completion_tokens: usize,
+    ) {
+        if completion_tokens == 0 {
+            return;
+        }
+        self.request_ttft_ms.observe(prompt_eval_ms as f64);
+        if generation_only_ms > 0 {
+            let decode_tok_s = completion_tokens as f64 * 1000.0 / generation_only_ms as f64;
+            self.request_decode_tok_s.observe(decode_tok_s);
+        }
+    }
+
+    /// Snapshot of the per-request TTFT histogram for the `/metrics` endpoint.
+    pub fn ttft_ms_snapshot(&self) -> HistogramSnapshot {
+        self.request_ttft_ms.snapshot()
+    }
+
+    /// Snapshot of the per-request decode-rate histogram for `/metrics`.
+    pub fn decode_tok_s_snapshot(&self) -> HistogramSnapshot {
+        self.request_decode_tok_s.snapshot()
     }
 
     // -- Gauge updates (called by the scheduler thread) --
@@ -385,6 +538,61 @@ mod tests {
         assert_eq!(snap.cache_pool_paged_bytes_reserved, 8192);
         assert_eq!(snap.cache_pool_paged_bytes_in_use, 6144);
         assert_eq!(snap.cache_pool_paged_block_budget, 64);
+    }
+
+    #[test]
+    fn record_request_completion_populates_histograms() {
+        let obs = BatchObservability::new();
+        // 200ms TTFT, 100 decode tokens over 1000ms decode -> 100 tok/s.
+        obs.record_request_completion(200, 1000, 100);
+        // 40ms TTFT, 20 tokens over 500ms -> 40 tok/s.
+        obs.record_request_completion(40, 500, 20);
+
+        let ttft = obs.ttft_ms_snapshot();
+        assert_eq!(ttft.count, 2);
+        assert!((ttft.sum - 240.0).abs() < 1e-6);
+        // le=50 bucket (index 3) should include only the 40ms observation.
+        assert_eq!(ttft.buckets[3].0, 50.0);
+        assert_eq!(ttft.buckets[3].1, 1);
+        // le=250 bucket (index 5) should include both observations.
+        assert_eq!(ttft.buckets[5].0, 250.0);
+        assert_eq!(ttft.buckets[5].1, 2);
+
+        let decode = obs.decode_tok_s_snapshot();
+        assert_eq!(decode.count, 2);
+        assert!((decode.sum - 140.0).abs() < 1e-6);
+        // le=50 bucket (index 4) includes only the 40 tok/s observation.
+        assert_eq!(decode.buckets[4].0, 50.0);
+        assert_eq!(decode.buckets[4].1, 1);
+        // le=100 bucket (index 6) includes both observations.
+        assert_eq!(decode.buckets[6].0, 100.0);
+        assert_eq!(decode.buckets[6].1, 2);
+    }
+
+    #[test]
+    fn record_request_completion_skips_zero_token_requests() {
+        let obs = BatchObservability::new();
+        // Zero completion tokens: neither histogram should record anything.
+        obs.record_request_completion(500, 0, 0);
+        assert_eq!(obs.ttft_ms_snapshot().count, 0);
+        assert_eq!(obs.decode_tok_s_snapshot().count, 0);
+
+        // One token with a 0ms decode phase: TTFT records, decode rate skips.
+        obs.record_request_completion(120, 0, 1);
+        assert_eq!(obs.ttft_ms_snapshot().count, 1);
+        assert_eq!(obs.decode_tok_s_snapshot().count, 0);
+    }
+
+    #[test]
+    fn histogram_counts_plus_inf_observations() {
+        let obs = BatchObservability::new();
+        // 40000ms exceeds the largest finite TTFT bound (30000ms).
+        obs.record_request_completion(40_000, 1000, 10);
+        let ttft = obs.ttft_ms_snapshot();
+        assert_eq!(ttft.count, 1);
+        // No finite bucket captured the observation; the +Inf bucket (== count)
+        // still accounts for it.
+        assert_eq!(ttft.buckets.last().unwrap().1, 0);
     }
 
     #[test]

@@ -1,0 +1,21 @@
+model,model_path,prompt_tokens,generated_tokens,prefill_ms,prefill_tok_s,decode_ms,decode_tok_s,date,hardware,mlx_version,build_type,max_tokens,prompt,prompt_target_len
+llama-3.1-8b-4bit,./models/llama-3.1-8b-4bit,512,32,155.78,3286.67,589.27,54.30,2026-07-03,NVIDIA_GB10_122GB,0.3.3,release,32,"Hello, how are you today?",512
+llama-3.1-8b-4bit,./models/llama-3.1-8b-4bit,2048,32,695.17,2946.03,623.06,51.36,2026-07-03,NVIDIA_GB10_122GB,0.3.3,release,32,"Hello, how are you today?",2048
+llama-3.1-8b-4bit,./models/llama-3.1-8b-4bit,8192,32,4916.19,1666.33,730.88,43.78,2026-07-03,NVIDIA_GB10_122GB,0.3.3,release,32,"Hello, how are you today?",8192
+llama-3.1-8b-4bit,./models/llama-3.1-8b-4bit,,,,,,,2026-07-03,NVIDIA_GB10_122GB,0.3.3,release,32,"Hello, how are you today?",32768,FAIL:bench
+qwen2.5-7b-4bit,./models/qwen2.5-7b-4bit,512,32,146.80,3487.65,544.28,58.79,2026-07-03,NVIDIA_GB10_122GB,0.3.3,release,32,"Hello, how are you today?",512
+qwen2.5-7b-4bit,./models/qwen2.5-7b-4bit,2048,32,655.22,3125.65,559.22,57.22,2026-07-03,NVIDIA_GB10_122GB,0.3.3,release,32,"Hello, how are you today?",2048
+qwen2.5-7b-4bit,./models/qwen2.5-7b-4bit,8192,32,4538.43,1805.03,604.44,52.94,2026-07-03,NVIDIA_GB10_122GB,0.3.3,release,32,"Hello, how are you today?",8192
+qwen2.5-7b-4bit,./models/qwen2.5-7b-4bit,32736,32,27836.12,1176.03,775.96,41.24,2026-07-03,NVIDIA_GB10_122GB,0.3.3,release,32,"Hello, how are you today?",32768
+qwen3-30b-a3b-4bit,./models/qwen3-30b-a3b-4bit,512,32,3149.41,162.57,341.29,93.76,2026-07-03,NVIDIA_GB10_122GB,0.3.3,release,32,"Hello, how are you today?",512
+qwen3-30b-a3b-4bit,./models/qwen3-30b-a3b-4bit,2048,32,12625.16,162.22,361.66,88.48,2026-07-03,NVIDIA_GB10_122GB,0.3.3,release,32,"Hello, how are you today?",2048
+qwen3-30b-a3b-4bit,./models/qwen3-30b-a3b-4bit,,,,,,,2026-07-03,NVIDIA_GB10_122GB,0.3.3,release,32,"Hello, how are you today?",8192,FAIL:bench
+qwen3-30b-a3b-4bit,./models/qwen3-30b-a3b-4bit,,,,,,,2026-07-03,NVIDIA_GB10_122GB,0.3.3,release,32,"Hello, how are you today?",32768,FAIL:bench
+mixtral-8x7b-4bit,./models/mixtral-8x7b-4bit,512,32,33428.70,15.32,1057.19,30.27,2026-07-03,NVIDIA_GB10_122GB,0.3.3,release,32,"Hello, how are you today?",512
+mixtral-8x7b-4bit,./models/mixtral-8x7b-4bit,2048,32,148493.10,13.79,1087.42,29.43,2026-07-03,NVIDIA_GB10_122GB,0.3.3,release,32,"Hello, how are you today?",2048
+mixtral-8x7b-4bit,./models/mixtral-8x7b-4bit,8192,32,323919.23,25.29,1194.07,26.80,2026-07-03,NVIDIA_GB10_122GB,0.3.3,release,32,"Hello, how are you today?",8192
+mixtral-8x7b-4bit,./models/mixtral-8x7b-4bit,,,,,,,2026-07-03,NVIDIA_GB10_122GB,0.3.3,release,32,"Hello, how are you today?",32768,FAIL:bench
+gemma-4-31b-it-4bit,./models/gemma-4-31b-it-4bit,512,32,1311.67,390.34,3586.49,8.92,2026-07-03,NVIDIA_GB10_122GB,0.3.3,release,32,"Hello, how are you today?",512
+gemma-4-31b-it-4bit,./models/gemma-4-31b-it-4bit,2048,32,4186.44,489.20,3758.80,8.51,2026-07-03,NVIDIA_GB10_122GB,0.3.3,release,32,"Hello, how are you today?",2048
+gemma-4-31b-it-4bit,./models/gemma-4-31b-it-4bit,,,,,,,2026-07-03,NVIDIA_GB10_122GB,0.3.3,release,32,"Hello, how are you today?",8192,FAIL:bench
+gemma-4-31b-it-4bit,./models/gemma-4-31b-it-4bit,,,,,,,2026-07-03,NVIDIA_GB10_122GB,0.3.3,release,32,"Hello, how are you today?",32768,SKIP:oom

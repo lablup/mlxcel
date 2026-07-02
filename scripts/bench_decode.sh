@@ -17,10 +17,18 @@
 # `bench_mlxlm.py` harness and avoiding cold-prefill skew from two separate
 # `mlxcel generate` invocations.
 #
-# CSV columns (14):
+# CSV columns (15):
 #   model, model_path, prompt_tokens, generated_tokens,
 #   prefill_ms, prefill_tok_s, decode_ms, decode_tok_s,
-#   date, hardware, mlx_version, build_type, max_tokens, prompt
+#   date, hardware, mlx_version, build_type, max_tokens, prompt,
+#   prompt_target_len
+#
+# The first 14 columns are unchanged from the historical schema so older CSVs
+# stay comparable. Column 15 (prompt_target_len) records the --prompt-tokens
+# target for long-prompt prefill runs (epic #623 #624) and is empty for the
+# default short-prompt path. The actual prompt length used (after capping at the
+# model context) is still reported in the prompt_tokens column. Any trailing
+# result-classification token (SKIP:*/FAIL:*) follows prompt_target_len.
 #
 # Result classifications (trailing CSV token):
 #   (none)               successful decode with profiling numbers
@@ -59,6 +67,9 @@ TEXT_PROMPT="Hello, how are you today?"
 VLM_PROMPT="What is in this image?"
 MAX_TOKENS=100
 WARMUP_TOKENS=20
+# Optional deterministic long-prompt length (--prompt-tokens N). Empty keeps the
+# short-prompt default so historical CSV rows are byte-compatible.
+PROMPT_TOKENS=""
 TIMEOUT=300
 JIT_PREHEAT_TIMEOUT=600
 VLM_IMAGE="tests/fixtures/test_image.png"
@@ -270,6 +281,11 @@ Options:
                        against raw-prompt mlx-lm stream_generate baselines.
   --max-tokens N      Max tokens to generate (default: 100)
   --warmup-tokens N   Tokens for warmup pass (default: 20)
+  --prompt-tokens N   Synthesize a deterministic prompt of exactly N tokens
+                      (repeated corpus, tokenized, truncated; capped at the
+                      model context) for long-prompt prefill benchmarking.
+                      Recorded in the prompt_target_len CSV column. When unset
+                      the short-prompt --prompt path runs unchanged.
   --timeout N         Timeout per run in seconds (default: 300)
   --jit-preheat-timeout N  Timeout for CUDA JIT warmup in seconds (default: 600)
   --output PATH       Write CSV to specific file (overrides auto-naming)
@@ -381,6 +397,10 @@ bench_one() {
   local model_name
   model_name=$(basename "$model_path")
 
+  # Long-prompt target recorded in the prompt_target_len CSV column; empty for
+  # the short-prompt default so historical rows stay byte-compatible.
+  local ptl="$PROMPT_TOKENS"
+
   # Skip models that won't fit in memory
   if ! model_fits_in_memory "$model_path"; then
     local est_bytes effective_mb limit_mb
@@ -390,7 +410,7 @@ bench_one() {
     effective_mb=$(awk -v b="$est_bytes" -v f="$BENCH_MEM_OVERHEAD_FACTOR" 'BEGIN{printf "%.0f", b * f / 1048576}')
     limit_mb=$(( MEMORY_LIMIT_BYTES / 1048576 ))
     >&2 printf '>>> [skip]   %s (%d MB > %d MB limit)\n' "$model_name" "$effective_mb" "$limit_mb"
-    echo "${model_name},${model_path},,,,,,,$DATE,$HARDWARE_FULL,$MLX_VERSION,$BUILD_TYPE,$MAX_TOKENS,\"$TEXT_PROMPT\",SKIP:oom_estimate"
+    echo "${model_name},${model_path},,,,,,,$DATE,$HARDWARE_FULL,$MLX_VERSION,$BUILD_TYPE,$MAX_TOKENS,\"$TEXT_PROMPT\",${ptl},SKIP:oom_estimate"
     return
   fi
 
@@ -399,10 +419,15 @@ bench_one() {
   if [[ "$VLM_MODE" -eq 1 ]]; then
     prompt="$VLM_PROMPT"
     if [[ ! -f "$VLM_IMAGE" ]]; then
-      echo "${model_name},${model_path},,,,,,,$DATE,$HARDWARE_FULL,$MLX_VERSION,$BUILD_TYPE,$MAX_TOKENS,\"$prompt\",SKIP:vlm_image_not_found"
+      echo "${model_name},${model_path},,,,,,,$DATE,$HARDWARE_FULL,$MLX_VERSION,$BUILD_TYPE,$MAX_TOKENS,\"$prompt\",${ptl},SKIP:vlm_image_not_found"
       return
     fi
     extra_args+=(--image "$VLM_IMAGE")
+  fi
+
+  # Long-prompt prefill mode: synthesize an exactly-N-token prompt in the runner.
+  if [[ -n "$PROMPT_TOKENS" ]]; then
+    extra_args+=(--prompt-tokens "$PROMPT_TOKENS")
   fi
 
   # --- Same-process warmup + measured pass ---
@@ -430,10 +455,10 @@ bench_one() {
   if [[ "$rc" -ne 0 ]]; then
     if is_oom_failure "$rc" "$raw"; then
       >&2 printf '    OOM at load/run (exit %d) — SKIP:oom\n' "$rc"
-      echo "${model_name},${model_path},,,,,,,$DATE,$HARDWARE_FULL,$MLX_VERSION,$BUILD_TYPE,$MAX_TOKENS,\"$prompt\",SKIP:oom"
+      echo "${model_name},${model_path},,,,,,,$DATE,$HARDWARE_FULL,$MLX_VERSION,$BUILD_TYPE,$MAX_TOKENS,\"$prompt\",${ptl},SKIP:oom"
     else
       >&2 printf '    benchmark failed (exit %d)\n' "$rc"
-      echo "${model_name},${model_path},,,,,,,$DATE,$HARDWARE_FULL,$MLX_VERSION,$BUILD_TYPE,$MAX_TOKENS,\"$prompt\",FAIL:bench"
+      echo "${model_name},${model_path},,,,,,,$DATE,$HARDWARE_FULL,$MLX_VERSION,$BUILD_TYPE,$MAX_TOKENS,\"$prompt\",${ptl},FAIL:bench"
     fi
     return
   fi
@@ -445,10 +470,10 @@ bench_one() {
 
   if [[ -z "$decode_tps" ]]; then
     >&2 echo "    no decode output"
-    echo "${model_name},${model_path},${fields},$DATE,$HARDWARE_FULL,$MLX_VERSION,$BUILD_TYPE,$MAX_TOKENS,\"$prompt\",FAIL:no_output"
+    echo "${model_name},${model_path},${fields},$DATE,$HARDWARE_FULL,$MLX_VERSION,$BUILD_TYPE,$MAX_TOKENS,\"$prompt\",${ptl},FAIL:no_output"
   else
     >&2 printf '    decode: %s tok/s\n' "$decode_tps"
-    echo "${model_name},${model_path},${fields},$DATE,$HARDWARE_FULL,$MLX_VERSION,$BUILD_TYPE,$MAX_TOKENS,\"$prompt\""
+    echo "${model_name},${model_path},${fields},$DATE,$HARDWARE_FULL,$MLX_VERSION,$BUILD_TYPE,$MAX_TOKENS,\"$prompt\",${ptl}"
   fi
 }
 
@@ -488,6 +513,7 @@ while [[ $# -gt 0 ]]; do
     --no-chat-template) NO_CHAT_TEMPLATE=1; shift ;;
     --max-tokens)     MAX_TOKENS="$2"; shift 2 ;;
     --warmup-tokens)  WARMUP_TOKENS="$2"; shift 2 ;;
+    --prompt-tokens)  PROMPT_TOKENS="$2"; shift 2 ;;
     --timeout)        TIMEOUT="$2"; shift 2 ;;
     --jit-preheat-timeout) JIT_PREHEAT_TIMEOUT="$2"; shift 2 ;;
     --output)         OUTPUT="$2"; shift 2 ;;
@@ -538,7 +564,7 @@ fi
 # ---------------------------------------------------------------------------
 # CSV header
 # ---------------------------------------------------------------------------
-CSV_HEADER="model,model_path,prompt_tokens,generated_tokens,prefill_ms,prefill_tok_s,decode_ms,decode_tok_s,date,hardware,mlx_version,build_type,max_tokens,prompt"
+CSV_HEADER="model,model_path,prompt_tokens,generated_tokens,prefill_ms,prefill_tok_s,decode_ms,decode_tok_s,date,hardware,mlx_version,build_type,max_tokens,prompt,prompt_target_len"
 
 mkdir -p "$(dirname "$OUTPUT")"
 echo "$CSV_HEADER" > "$OUTPUT"

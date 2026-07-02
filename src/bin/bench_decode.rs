@@ -58,6 +58,17 @@ struct Args {
     #[arg(long, default_value_t = 20)]
     warmup_tokens: usize,
 
+    /// Synthesize a deterministic prompt of exactly N tokens instead of using
+    /// `--prompt`, for long-prompt prefill benchmarking (epic #623 #624). The
+    /// prompt is built by repeating a fixed corpus paragraph, tokenizing with
+    /// the model's tokenizer, and truncating to N tokens, so it reproduces
+    /// across models. Capped at the model's context window (leaving room for
+    /// `--max-tokens` generation); the actual length used is reported in the
+    /// `Prompt tokens` profile field. When unset, the short-prompt `--prompt`
+    /// path is used unchanged.
+    #[arg(long, value_name = "N")]
+    prompt_tokens: Option<usize>,
+
     /// Image path(s) for VLM benchmark mode.
     #[arg(long, value_name = "PATH", num_args = 1..)]
     image: Vec<PathBuf>,
@@ -144,6 +155,80 @@ fn tokenize_prompt(tokenizer: &MlxcelTokenizer, prompt: &str) -> Result<Vec<i32>
         .encode(prompt, add_special)
         .map_err(|err| anyhow::anyhow!("tokenization failed: {err}"))?;
     Ok(ids.into_iter().map(|id| id as i32).collect())
+}
+
+/// Fixed corpus paragraph repeated to synthesize long prompts. Kept constant
+/// so the `--prompt-tokens N` prompt is byte-identical across benchmark runs
+/// and models (only the tokenizer differs). Neutral prose with punctuation and
+/// varied vocabulary so the token stream resembles real text rather than a
+/// single repeated token.
+const LONG_PROMPT_CORPUS: &str = concat!(
+    "The measurement of large language model inference performance depends on ",
+    "both prefill and decode throughput. During prefill the entire prompt is ",
+    "processed in a single forward pass, so its cost grows with the prompt ",
+    "length and exercises the matrix-multiply kernels at large batch widths. ",
+    "During decode each new token is generated one step at a time, which ",
+    "stresses memory bandwidth and kernel launch overhead instead. A benchmark ",
+    "that only uses short prompts cannot separate these two regimes, because a ",
+    "few dozen prompt tokens are dominated by fixed launch costs. To study ",
+    "prefill behaviour honestly we therefore need prompts that are hundreds or ",
+    "thousands of tokens long, repeated deterministically so that every run ",
+    "observes the same input and the numbers stay comparable over time.\n\n",
+);
+
+/// Build a deterministic prompt of exactly `target_len` tokens by repeating
+/// [`LONG_PROMPT_CORPUS`], tokenizing once with the model's tokenizer, and
+/// truncating. Returns fewer than `target_len` tokens only if `target_len` is
+/// `0`.
+fn synthesize_prompt_tokens(tokenizer: &MlxcelTokenizer, target_len: usize) -> Result<Vec<i32>> {
+    if target_len == 0 {
+        return Ok(Vec::new());
+    }
+    // Estimate tokens per corpus copy (without special tokens) to size the
+    // repeated string, then over-provision so the final tokenization always
+    // yields at least `target_len` tokens before truncation.
+    let per_copy = tokenizer
+        .encode(LONG_PROMPT_CORPUS, false)
+        .map_err(|err| anyhow::anyhow!("tokenization failed: {err}"))?
+        .len()
+        .max(1);
+    let repeats = target_len / per_copy + 4;
+    let corpus = LONG_PROMPT_CORPUS.repeat(repeats);
+    let mut ids: Vec<i32> = tokenizer
+        .encode(&corpus, true)
+        .map_err(|err| anyhow::anyhow!("tokenization failed: {err}"))?
+        .into_iter()
+        .map(|id| id as i32)
+        .collect();
+    ids.truncate(target_len);
+    Ok(ids)
+}
+
+/// Prepare a synthesized long prompt of `target_len` tokens, capped at the
+/// model's context window minus a reservation for the tokens to be generated.
+/// Returns the prepared prompt and the effective (post-cap) token length.
+fn prepare_long_prompt(
+    tokenizer: &MlxcelTokenizer,
+    target_len: usize,
+    max_context: Option<usize>,
+    reserve_for_generation: usize,
+) -> Result<(PreparedPrompt, usize)> {
+    let effective = match max_context {
+        Some(ctx) => {
+            let usable = ctx.saturating_sub(reserve_for_generation).max(1);
+            target_len.min(usable)
+        }
+        None => target_len,
+    };
+    let tokens = synthesize_prompt_tokens(tokenizer, effective)?;
+    let actual = tokens.len();
+    Ok((
+        PreparedPrompt {
+            tokens,
+            embeddings: None,
+        },
+        actual,
+    ))
 }
 
 fn prepare_prompt(
@@ -300,14 +385,35 @@ fn main() -> Result<()> {
     let tokenizer = load_tokenizer(&args.model).unwrap_or(loaded_tokenizer);
     let sampling = sampling_config(&args.model);
 
-    let prepared = prepare_prompt(
-        &model,
-        &args.model,
-        &tokenizer,
-        &args.prompt,
-        args.no_chat_template,
-        &args.image,
-    )?;
+    // `--prompt-tokens N` synthesizes a deterministic long prompt for prefill
+    // benchmarking; otherwise the short-prompt `--prompt` path runs unchanged.
+    // The closure regenerates the prepared prompt on demand so both the warmup
+    // and measured passes see an identical input (long prompts are text-only;
+    // any `--image` args are ignored in this mode).
+    let max_context = mlxcel::read_model_context_window(&args.model);
+    let make_prepared = || -> Result<PreparedPrompt> {
+        if let Some(target) = args.prompt_tokens {
+            let (prepared, actual) =
+                prepare_long_prompt(&tokenizer, target, max_context, args.max_tokens)?;
+            eprintln!(
+                "[long-prompt] target={target} tokens -> using {actual} tokens \
+                 (max_context={max_context:?}, reserved {} for generation)",
+                args.max_tokens
+            );
+            Ok(prepared)
+        } else {
+            prepare_prompt(
+                &model,
+                &args.model,
+                &tokenizer,
+                &args.prompt,
+                args.no_chat_template,
+                &args.image,
+            )
+        }
+    };
+
+    let prepared = make_prepared()?;
     warmup(
         &model,
         &prepared,
@@ -323,14 +429,7 @@ fn main() -> Result<()> {
     // call). The warmup pass consumes that state, so regenerate the prepared
     // prompt before the measured pass. For text-only models this is cheap; for
     // VLM it re-runs the vision encoder against now-warm MLX/Metal state.
-    let prepared = prepare_prompt(
-        &model,
-        &args.model,
-        &tokenizer,
-        &args.prompt,
-        args.no_chat_template,
-        &args.image,
-    )?;
+    let prepared = make_prepared()?;
     let stats = measured(&model, &prepared, args.max_tokens, &sampling, kv_cache_mode)?;
 
     println!("[Profile Results]");

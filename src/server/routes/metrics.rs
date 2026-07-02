@@ -35,6 +35,7 @@ use axum::{
 
 use crate::distributed::pipeline::PipelineObservabilitySnapshot;
 use crate::server::AppState;
+use crate::server::batch::observability::HistogramSnapshot;
 
 /// GET /metrics -- Prometheus text format
 pub async fn metrics(State(state): State<AppState>) -> Response {
@@ -261,6 +262,24 @@ pub async fn metrics(State(state): State<AppState>) -> Response {
     );
 
     let mut body = body;
+
+    // Per-request TTFT / decode-rate histograms (epic #623 #624). Populated
+    // once per completed request by the scheduler's `finalize_completed`.
+    let ttft = state.batch_observability.ttft_ms_snapshot();
+    let decode_rate = state.batch_observability.decode_tok_s_snapshot();
+    append_request_histogram(
+        &mut body,
+        "mlxcel_request_ttft_ms",
+        "Per-request time to first token (prefill latency) in milliseconds",
+        &ttft,
+    );
+    append_request_histogram(
+        &mut body,
+        "mlxcel_request_decode_tok_s",
+        "Per-request decode throughput in tokens per second",
+        &decode_rate,
+    );
+
     append_pipeline_metrics(&mut body, &pp_snapshot);
 
     (
@@ -271,6 +290,22 @@ pub async fn metrics(State(state): State<AppState>) -> Response {
         body,
     )
         .into_response()
+}
+
+/// Append one per-request histogram family in Prometheus text format.
+///
+/// Emits the standard `_bucket{le="…"}` cumulative series (including the
+/// `le="+Inf"` bucket), `_sum`, and `_count` lines. The snapshot reads its
+/// atomics exactly once, so this is safe to call on every scrape.
+fn append_request_histogram(body: &mut String, name: &str, help: &str, snap: &HistogramSnapshot) {
+    let _ = writeln!(body, "# HELP {name} {help}");
+    let _ = writeln!(body, "# TYPE {name} histogram");
+    for (bound, cumulative) in &snap.buckets {
+        let _ = writeln!(body, "{name}_bucket{{le=\"{bound}\"}} {cumulative}");
+    }
+    let _ = writeln!(body, "{name}_bucket{{le=\"+Inf\"}} {}", snap.count);
+    let _ = writeln!(body, "{name}_sum {:.3}", snap.sum);
+    let _ = writeln!(body, "{name}_count {}", snap.count);
 }
 
 /// Append the pipeline-parallel observability families in Prometheus text

@@ -4949,6 +4949,14 @@ impl BatchScheduler {
                     seq.max_tokens,
                     cached,
                 );
+                // Per-request TTFT / decode-rate telemetry (epic #623 #624).
+                // Recorded once here, where the finished sequence's timings are
+                // available, never on the per-token hot path.
+                self.batch_observability.record_request_completion(
+                    result.prompt_eval_ms,
+                    result.generation_only_ms,
+                    result.completion_tokens,
+                );
                 tracing::info!(
                     prompt_tokens = seq.prompt_tokens.len(),
                     cached_tokens = cached,
