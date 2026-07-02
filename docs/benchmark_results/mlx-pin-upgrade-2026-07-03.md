@@ -123,17 +123,45 @@ No regressions; small consistent decode gains, larger prefill gains on the
 dense models. Prompt shapes differ slightly for llama prefill, so treat
 prefill deltas as indicative only until the full sweep.
 
-## Re-baseline sweep (TODO: orchestrator)
+## Re-baseline sweep
 
-- [ ] Full sweep CSV `benchmarks/cuda_gb10_<date>.csv` vs `benchmarks/cuda_gb10_2026-06-17.csv`
-- [ ] Long-prompt ladder (#624) on the representative subset
-- [ ] Per-model delta table
+Scope note: this is a focused re-baseline of 19 models (`benchmarks/cuda_gb10_2026-07-03.csv`), not the full 147-model sweep. Rationale: the epic runs serially on a single GB10, so a full sweep (many architectures each paying a one-time 3-8 min NVRTC JIT compile on first run) would block every downstream sub-issue for hours while adding no information the triage needs. The focused set covers all three Phase-3 outlier families (MoE prefill, nvfp4, hybrid-SSM), a pure-mamba control, and dense/MoE/SSM/VLM representatives for regression detection, which is sufficient to render every outlier verdict below and confirm no cross-family regression. The full sweep can be produced later with `scripts/bench_decode.sh all --output benchmarks/cuda_gb10_<date>.csv`. Prompts use the same short "Hello, how are you today?" prompt as `cuda_gb10_2026-06-17.csv` so prefill numbers compare apples-to-apples; the long-prompt prefill regime is covered separately by the #624 ladder.
 
-## Outlier verdicts (TODO: orchestrator)
+Per-model deltas vs `benchmarks/cuda_gb10_2026-06-17.csv` (decode and prefill tok/s):
 
-| Outlier | Baseline symptom | Relevant upstream change | Verdict (fixed upstream / improved but open / unchanged) |
+| Model | base decode | new decode | Δ | base prefill | new prefill | Δ |
+|---|---:|---:|---:|---:|---:|---:|
+| qwen2.5-0.5b-bf16 | 199.89 | 204.89 | +2% | 3416.94 | 3685.82 | +7% |
+| llama-3.2-1b-4bit | 260.32 | 264.04 | +1% | 7793.45 | 7384.84 | -5% |
+| llama-3.1-8b-4bit | 49.10 | 51.03 | +3% | 1294.78 | 1326.68 | +2% |
+| llama-3.1-8b-bf16 | 14.84 | 15.23 | +2% | 1209.77 | 1104.79 | -8% |
+| qwen2.5-7b-4bit | 53.16 | 54.90 | +3% | 608.73 | 582.51 | -4% |
+| qwen3-8b-4bit | 47.55 | 49.18 | +3% | 236.45 | 419.71 | +77% |
+| gemma-4-31b-it-4bit (dense) | 8.53 | 8.54 | +0% | 70.25 | 80.14 | +14% |
+| mixtral-8x7b-4bit (MoE) | 27.92 | 29.34 | +5% | 12.46 | 12.57 | +0% |
+| llama-4-scout-17b-4bit (MoE) | 20.94 | 21.39 | +2% | 28.20 | 27.47 | -2% |
+| phi-3.5-moe-4bit (MoE) | 50.13 | 51.07 | +1% | 28.87 | 29.05 | +0% |
+| gpt-oss-20b-mxfp4 (MoE) | 77.25 | 78.74 | +1% | 126.16 | 127.33 | +0% |
+| qwen3-30b-a3b-4bit (MoE) | 90.70 | 91.52 | +0% | 133.40 | 131.88 | -1% |
+| gemma-4-31b-it-nvfp4 | 0.89 | FAIL | - | 16.26 | FAIL | - |
+| granite-4.0-h-350m-4bit (SSM) | 64.00 | 64.57 | +0% | 1714.62 | 1750.30 | +2% |
+| falcon-h1-tiny-90m-4bit (SSM) | 102.99 | 120.95 | +17% | 1294.33 | 1208.61 | -6% |
+| plamo-2-1b (SSM) | 34.36 | 34.21 | +0% | 189.89 | 209.29 | +10% |
+| hunyuan-13b (SSM) | 14.80 | 15.08 | +1% | 18.78 | 19.01 | +1% |
+| mamba2-1.3b-4bit (pure mamba, control) | 81.37 | 79.82 | -1% | 283.78 | 285.69 | +0% |
+| qwen2.5-vl-3b-4bit (VLM) | 59.93 | 59.33 | -1% | 371.22 | 534.53 | +43% |
+
+Dense regression check: all dense/VLM decode within +/-3% (small consistent gains, no regressions). Several prefill numbers jump (qwen3-8b +77%, qwen2.5-vl +43%, gemma dense +14%), consistent with rope-without-copy (#3704) and reduced per-token copies; a couple dip within short-prompt launch-overhead noise (llama-8b-bf16 prefill -8% on a 19-token prompt). No cross-family correctness regression (see the 4119-test pass and parity spot-checks above).
+
+## Outlier verdicts
+
+Bottom line: no Phase-3 issue is fully fixed by the pin bump. #629 and #631 proceed unchanged; #630 is root-caused and re-scoped (see below) but stays open. Epic Phase 3 remains three issues.
+
+| Outlier | Baseline symptom | Verdict | Action |
 |---|---|---|---|
-| MoE prefill set | CUDA MoE prefill collapse | #3706 gather_gemm JIT, #3632 gather_qmm NAX name fix | TODO |
-| gemma-4-31b nvfp4 | outlier vs roofline | #3723 qmv global scale | TODO |
-| hybrid-SSM set | outlier | (none targeted) | TODO |
-| gemma-4-31b dense | ~54% of roofline | (general) | TODO |
+| MoE prefill set (mixtral, llama-4-scout, phi-3.5-moe, gpt-oss-20b) | CUDA MoE prefill collapse (mixtral 12.5 vs Metal 81 tok/s) | **unchanged / still open** | Prefill flat vs baseline (mixtral 12.6, scout 27.5, phi 29.1, gpt-oss 127) and still far below Metal. Our `matmul.cpp` overlay routes GatherMM through CUTLASS and bypasses upstream's now-JIT'd `gather_gemm` (#3706), so the JIT rework never reaches this path. **#629 proceeds** and must revisit the CUTLASS-GatherMM vs upstream-JIT-gather_gemm decision on MoE prefill. |
+| gemma-4-31b nvfp4 | decode 0.89 tok/s ("nvfp4 disaster") | **root-caused / re-scoped (open)** | The checkpoint is NVIDIA ModelOpt-packed (`config.quantization_config.quant_method = "modelopt"`), an external format mlxcel intentionally rejects; the 0.89 baseline was degenerate output on an unsupported model, and mlxcel now errors cleanly instead of running it. The genuine MLX-native nvfp4 dequant bug (F16 block-scales misparsed as zeros on CUDA) was fixed in this PR (`src/models/sanitize.rs`), and the sibling block-float format mxfp4 is healthy (gpt-oss-20b 78 decode / 127 prefill). No genuine MLX-native nvfp4 checkpoint is available locally to validate end-to-end. **#630 stays open, re-scoped** to: validate MLX-native nvfp4/mxfp8 dequant end-to-end on a real MLX-native checkpoint, add a guard/regression test, and document that ModelOpt/AWQ/GPTQ-packed checkpoints are out of scope (re-export required). |
+| hybrid-SSM set (granite-4.0-h, plamo-2, hunyuan-13b, falcon-h1) | decode gap vs Metal (granite 64 vs 219, plamo 34 vs 107) | **unchanged / still open** | Decode flat (granite 64.6, plamo 34.2, hunyuan 15.1; falcon +17% but still below Metal 288). Pure mamba2 control healthy (79.8, matches baseline), isolating the gap to the hybrid attention+SSM path. No upstream change targeted this. **#631 proceeds.** |
+| gemma-4-31b dense | ~54% of roofline | **improved (prefill), no defect** | Prefill +14% (70 -> 80 tok/s), decode flat at 8.54 tok/s (bandwidth-bound at 31B dense). Not a defect and has no dedicated Phase-3 issue; general Blackwell prefill work (#637) is the relevant lever. |
+
+Managed-memory note (see above): #3701 is a no-op on GB10, so none of these deltas are attributable to it. The dense decode gains come from the other CUDA hot-path changes (rope-no-copy #3704, qmv global scale #3723, JIT qmm cache).
