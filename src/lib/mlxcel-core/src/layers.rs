@@ -232,29 +232,29 @@ impl QuantizedEmbedding {
         // biases may not exist for mxfp4/nvfp4/mxfp8 modes
         let biases = weights.get(&biases_name).map(|w| ffi::copy(w));
 
-        // Reconcile caller-supplied bits with the actual tensor shapes, the same
-        // way UnifiedLinear does. Mixed-precision exports quantize the embedding
-        // at a different bit width than the model's top-level `config.quantization`
-        // (e.g. diffusiongemma / gemma4 store embed_tokens, attention, and MLP at
-        // 8-bit while the top-level default is 4-bit). Without this, the embedding
-        // lookup, the tied-embedding lm_head, and dequantized_weight() all
-        // dequantize with the wrong bits and abort. Uniform-quant checkpoints are
-        // unaffected (inference returns the caller bits unchanged).
-        let effective_bits = if mode == "affine" {
-            let w_shape = ffi::array_shape(&weight);
-            let s_shape = ffi::array_shape(&scales);
-            infer_quantization_bits(&w_shape, &s_shape, group_size, bits)
-                .map_err(|e| format!("{} (prefix: {})", e, prefix))?
-        } else {
-            bits
-        };
+        // Reconcile caller-supplied quant params with the actual tensor shapes,
+        // the same way UnifiedLinear does. Mixed-precision exports quantize the
+        // embedding at a different bit width than the model's top-level
+        // `config.quantization` (e.g. diffusiongemma / gemma4 store embed_tokens,
+        // attention, and MLP at 8-bit while the top-level default is 4-bit).
+        // Without this, the embedding lookup, the tied-embedding lm_head, and
+        // dequantized_weight() all dequantize with the wrong params and abort.
+        // Uniform-quant checkpoints are unaffected (reconciliation is a no-op and
+        // emits no warning); a genuine mismatch is surfaced via the shared
+        // warning so a divergent external packing (issue #467) is not silently
+        // mis-loaded.
+        let w_shape = ffi::array_shape(&weight);
+        let s_shape = ffi::array_shape(&scales);
+        let layout = reconcile_quantization_layout_logged(
+            &w_shape, &s_shape, group_size, bits, mode, prefix,
+        )?;
 
         Ok(Self {
             weight,
             scales,
             biases,
-            group_size,
-            bits: effective_bits,
+            group_size: layout.group_size,
+            bits: layout.bits,
             mode: mode.to_string(),
         })
     }
@@ -769,6 +769,144 @@ fn infer_quantization_bits(
     Ok(inferred_bits)
 }
 
+/// Reconciled quantization parameters plus whether reconciliation altered the
+/// caller-declared values.
+///
+/// `reconciled == true` means the on-disk tensor layout did not match the
+/// declared `group_size` / `bits`, so the loader substituted shape-derived
+/// values. Per issue #467, callers surface this (a load-time `tracing::warn!`)
+/// instead of silently overriding the declared metadata: a divergent external
+/// packing (e.g. OptiQ) that is quietly reconciled dequantizes with the wrong
+/// parameters and decodes to degenerate, repeating output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReconciledQuant {
+    pub bits: i32,
+    pub group_size: i32,
+    pub reconciled: bool,
+}
+
+/// Validate and reconcile caller-declared quantization params against the
+/// observed `weight` / `scales` tensor shapes for `mode`.
+///
+/// MLX affine and block-float quantization obey
+/// `packed_in * 32 == bits * num_groups * group_size`, where `packed_in` is the
+/// last dim of `weight` and `num_groups` the last dim of `scales`. This helper:
+///
+/// * returns the declared params unchanged (`reconciled = false`) when they
+///   already satisfy the invariant — the common uniform-quant case,
+/// * reconciles one divergent axis (`reconciled = true`) for legitimate
+///   mixed-precision exports: affine trusts `group_size` and re-derives `bits`
+///   (per-path bit overrides, e.g. Qwen3.5/3.6 MoE gates); block-float trusts
+///   the mode-fixed `bits` and re-derives `group_size` (e.g. minicpm-v mxfp4
+///   stored at group_size 32 under a config default of 64),
+/// * returns `Err` with an actionable message when the affine shapes match no
+///   valid bit width — the signature of a misdeclared / unsupported external
+///   packing that must not be dequantized as standard affine and served as
+///   garbage (issue #467, OptiQ).
+///
+/// Pure over shapes so the reconciliation policy is unit-testable without an
+/// MLX backend. `bits != declared` (affine) or `group_size != declared`
+/// (block-float) sets `reconciled`, which the loader turns into a warning.
+pub fn reconcile_quantization_layout(
+    weight_shape: &[i32],
+    scales_shape: &[i32],
+    group_size: i32,
+    bits: i32,
+    mode: &str,
+) -> Result<ReconciledQuant, String> {
+    // Insufficient shape info: trust the caller, mirroring the historical
+    // early-return in `infer_quantization_bits` for empty / scalar shapes.
+    if weight_shape.is_empty() || scales_shape.is_empty() || group_size <= 0 || bits <= 0 {
+        return Ok(ReconciledQuant {
+            bits,
+            group_size,
+            reconciled: false,
+        });
+    }
+    let packed_in = *weight_shape.last().unwrap();
+    let num_groups = *scales_shape.last().unwrap();
+    if packed_in <= 0 || num_groups <= 0 {
+        return Ok(ReconciledQuant {
+            bits,
+            group_size,
+            reconciled: false,
+        });
+    }
+
+    if mode == "affine" {
+        // Trust group_size, re-derive bits. A non-integer or out-of-range bit
+        // width propagates as the hard-fail path (the unsupported-layout guard).
+        let effective_bits = infer_quantization_bits(weight_shape, scales_shape, group_size, bits)?;
+        Ok(ReconciledQuant {
+            bits: effective_bits,
+            group_size,
+            reconciled: effective_bits != bits,
+        })
+    } else {
+        // Block-float (mxfp4 / nvfp4 / mxfp8): bits are fixed by the mode, so
+        // re-derive group_size from in_features = packed_in * (32 / bits) =
+        // num_groups * group_size. Preserve the historical guard/fallback shape
+        // exactly (keep declared group_size when the shapes are unusable), but
+        // flag an inconsistency so the loader surfaces it instead of proceeding
+        // silently.
+        let can_infer = weight_shape.len() >= 2 && scales_shape.len() >= 2 && 32 % bits == 0;
+        if !can_infer {
+            return Ok(ReconciledQuant {
+                bits,
+                group_size,
+                reconciled: false,
+            });
+        }
+        let in_features = packed_in * (32 / bits);
+        if in_features % num_groups == 0 {
+            let effective_group_size = in_features / num_groups;
+            Ok(ReconciledQuant {
+                bits,
+                group_size: effective_group_size,
+                reconciled: effective_group_size != group_size,
+            })
+        } else {
+            Ok(ReconciledQuant {
+                bits,
+                group_size,
+                reconciled: true,
+            })
+        }
+    }
+}
+
+/// Reconcile quant params and emit a load-time warning when the declared
+/// metadata did not match the tensor shapes. Thin wrapper over the pure
+/// [`reconcile_quantization_layout`] so the linear and embedding loaders
+/// surface the same diagnostic instead of silently overriding the config
+/// (issue #467).
+fn reconcile_quantization_layout_logged(
+    weight_shape: &[i32],
+    scales_shape: &[i32],
+    group_size: i32,
+    bits: i32,
+    mode: &str,
+    prefix: &str,
+) -> Result<ReconciledQuant, String> {
+    let layout = reconcile_quantization_layout(weight_shape, scales_shape, group_size, bits, mode)
+        .map_err(|e| format!("{e} (prefix: {prefix})"))?;
+    if layout.reconciled {
+        tracing::warn!(
+            target: "mlxcel::quant",
+            prefix,
+            mode,
+            declared_bits = bits,
+            declared_group_size = group_size,
+            effective_bits = layout.bits,
+            effective_group_size = layout.group_size,
+            "quantized layout does not match declared metadata; using shape-derived \
+             params. If this is an unsupported external quant format (e.g. OptiQ), \
+             decoding may be degenerate."
+        );
+    }
+    Ok(layout)
+}
+
 /// Unified Linear layer that auto-detects quantization
 ///
 /// Checks for `.scales` key in weight map to determine whether to use
@@ -858,29 +996,18 @@ impl UnifiedLinear {
             // group_size from the shapes instead: in_features = packed_in *
             // (32/bits) = num_groups * group_size (e.g. minicpm-v-4.6 mxfp4
             // stores some weights at group_size 32 while config says 64).
-            let (effective_bits, effective_group_size) = if mode == "affine" {
-                let w_shape = ffi::array_shape(&weight);
-                let s_shape = ffi::array_shape(&scales);
-                let eb = infer_quantization_bits(&w_shape, &s_shape, group_size, bits)
-                    .map_err(|e| format!("{} (prefix: {})", e, prefix))?;
-                (eb, group_size)
-            } else {
-                let w_shape = ffi::array_shape(&weight);
-                let s_shape = ffi::array_shape(&scales);
-                let egs = if w_shape.len() >= 2 && s_shape.len() >= 2 && bits > 0 {
-                    let packed_in = *w_shape.last().unwrap();
-                    let num_groups = *s_shape.last().unwrap();
-                    let in_features = packed_in * (32 / bits);
-                    if num_groups > 0 && in_features % num_groups == 0 {
-                        in_features / num_groups
-                    } else {
-                        group_size
-                    }
-                } else {
-                    group_size
-                };
-                (bits, egs)
-            };
+            //
+            // When reconciliation actually changes a value the wrapper emits a
+            // load-time warning instead of silently overriding the declared
+            // metadata, so a divergent external packing (issue #467, OptiQ)
+            // does not quietly dequantize with the wrong params and decode to
+            // degenerate output.
+            let w_shape = ffi::array_shape(&weight);
+            let s_shape = ffi::array_shape(&scales);
+            let layout = reconcile_quantization_layout_logged(
+                &w_shape, &s_shape, group_size, bits, mode, prefix,
+            )?;
+            let (effective_bits, effective_group_size) = (layout.bits, layout.group_size);
 
             let qweight = QuantizedWeight {
                 weight,
@@ -3110,6 +3237,113 @@ mod tests {
             format!("{prefix}.bias"),
             ffi::zeros(&[out_dim], dtype::FLOAT16),
         );
+    }
+
+    // -- quantization layout reconciliation (issue #467) ----------------
+    //
+    // Pure over tensor shapes: `weight = [out, packed_in]`,
+    // `scales = [out, num_groups]`, obeying
+    // `packed_in * 32 == bits * num_groups * group_size`.
+
+    #[test]
+    fn reconcile_affine_consistent_is_noop() {
+        // 4-bit, group_size 64, in_features 128 -> num_groups 2, packed_in 16.
+        // Declared params match the shapes: no reconciliation, no warning.
+        let layout =
+            reconcile_quantization_layout(&[32, 16], &[32, 2], 64, 4, "affine").expect("valid");
+        assert_eq!(layout.bits, 4);
+        assert_eq!(layout.group_size, 64);
+        assert!(!layout.reconciled);
+    }
+
+    #[test]
+    fn reconcile_affine_per_layer_bit_override_flags_reconciled() {
+        // Declared 4-bit but this tensor is genuinely 8-bit (in_features 128,
+        // num_groups 2, packed_in 32) — a legitimate mixed-precision override
+        // (e.g. a MoE router gate). Bits are re-derived to 8 AND the change is
+        // surfaced (reconciled = true) rather than silently applied.
+        let layout =
+            reconcile_quantization_layout(&[32, 32], &[32, 2], 64, 4, "affine").expect("valid");
+        assert_eq!(layout.bits, 8);
+        assert_eq!(layout.group_size, 64);
+        assert!(layout.reconciled);
+    }
+
+    #[test]
+    fn reconcile_affine_group_size_mismatch_is_flagged_not_silent() {
+        // The OptiQ-class failure: config declares group_size 64 / 4-bit but the
+        // tensor is packed at group_size 32 (in_features 128, num_groups 4,
+        // packed_in 16). The old path silently re-derived bits=2 and served
+        // garbage; now the divergence is flagged so the loader warns.
+        let layout =
+            reconcile_quantization_layout(&[32, 16], &[32, 4], 64, 4, "affine").expect("solvable");
+        assert_eq!(layout.bits, 2);
+        assert!(
+            layout.reconciled,
+            "a shape/metadata mismatch must be surfaced, not silently reconciled"
+        );
+    }
+
+    #[test]
+    fn reconcile_affine_invalid_bit_width_is_hard_error() {
+        // packed_in 14, num_groups 1, group_size 64 -> inferred bits 7, which is
+        // not a valid MLX width {2,3,4,5,6,8}. An unsupported/misdeclared layout
+        // must fail loudly instead of dequantizing as if it were standard affine.
+        let err = reconcile_quantization_layout(&[32, 14], &[32, 1], 64, 4, "affine")
+            .expect_err("bits=7 is not a supported width");
+        assert!(err.contains("not in"), "actionable message, got: {err}");
+    }
+
+    #[test]
+    fn reconcile_affine_non_integer_bits_is_hard_error() {
+        // packed_in 17 makes packed_in*32 not divisible by num_groups*group_size,
+        // so no integer bit width fits — reject rather than reconcile.
+        let err = reconcile_quantization_layout(&[32, 17], &[32, 2], 64, 4, "affine")
+            .expect_err("no integer bit width fits these shapes");
+        assert!(
+            err.contains("inconsistency") || err.contains("cannot derive"),
+            "actionable message, got: {err}"
+        );
+    }
+
+    #[test]
+    fn reconcile_block_float_consistent_is_noop() {
+        // mxfp4 (4-bit), group_size 32, in_features 256 -> num_groups 8,
+        // packed_in 32. Declared params match: no reconciliation.
+        let layout =
+            reconcile_quantization_layout(&[64, 32], &[64, 8], 32, 4, "mxfp4").expect("valid");
+        assert_eq!(layout.bits, 4);
+        assert_eq!(layout.group_size, 32);
+        assert!(!layout.reconciled);
+    }
+
+    #[test]
+    fn reconcile_block_float_group_size_override_flags_reconciled() {
+        // minicpm-v-style: config default group_size 64 but this mxfp4 weight is
+        // stored at group_size 32. group_size is re-derived AND surfaced.
+        let layout =
+            reconcile_quantization_layout(&[64, 32], &[64, 8], 64, 4, "mxfp4").expect("valid");
+        assert_eq!(layout.bits, 4);
+        assert_eq!(layout.group_size, 32);
+        assert!(layout.reconciled);
+    }
+
+    #[test]
+    fn reconcile_block_float_inconsistent_shapes_are_flagged() {
+        // num_groups 7 does not divide in_features 256: the historical fallback
+        // keeps the declared group_size, but the mismatch is now surfaced.
+        let layout =
+            reconcile_quantization_layout(&[64, 32], &[64, 7], 64, 4, "mxfp4").expect("no error");
+        assert_eq!(layout.group_size, 64);
+        assert!(layout.reconciled);
+    }
+
+    #[test]
+    fn reconcile_ignores_degenerate_shapes() {
+        // Empty / scalar shapes carry no layout signal: trust the caller.
+        let layout = reconcile_quantization_layout(&[], &[], 64, 4, "affine").expect("noop");
+        assert_eq!((layout.bits, layout.group_size), (4, 64));
+        assert!(!layout.reconciled);
     }
 
     #[test]
