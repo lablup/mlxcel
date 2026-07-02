@@ -1,12 +1,10 @@
 // Copyright © 2025 Apple Inc.
 // Patched by mlxcel: ensure input contiguity in QuantizedMatmul for
 // non-contiguous 3D batched weights (e.g. GLM-4 MLA embed_q with
-// transpose=false). Synced to upstream a6ec712 (post-c9aa5605: PR #3443
-// extracted qmm_naive / qmm_sm80 kernel bodies into .cuh headers but
-// preserved the public function signatures consumed here, including the
-// #3469 cutlass-half-type fix that landed at c9aa5605: ensure_row_contiguous
-// on x and indices, plus the optional<array> lhs_indices / rhs_indices
-// parameters on qmm_sm80 / qmm_naive).
+// transpose=false). Synced to upstream e9463bb (post-#3706/#3576 JIT
+// qmm rework and #3723 qmv global scale; the dispatch consumed here kept
+// its public signatures, with qmv gaining an optional global_scale that
+// QuantizedMatmul passes as std::nullopt).
 
 #include "mlx/backend/cuda/quantized/quantized.h"
 #include "mlx/backend/cuda/device.h"
@@ -96,7 +94,16 @@ void QuantizedMatmul::eval_gpu(const std::vector<array>& inputs, array& out) {
     if (can_use_fp_qmv) {
       fp_qmv(x, w, scales, out, bits_, group_size_, encoder, s);
     } else {
-      qmv(x, w, scales, biases, out, bits_, group_size_, mode_, encoder);
+      qmv(x,
+          w,
+          scales,
+          biases,
+          std::nullopt,
+          out,
+          bits_,
+          group_size_,
+          mode_,
+          encoder);
     }
   };
 
@@ -158,10 +165,6 @@ void GatherQMM::eval_gpu(const std::vector<array>& inputs, array& out) {
   auto& s = stream();
   auto& encoder = cu::get_command_encoder(s);
 
-  // [mlxcel] Sync with upstream #3469: ensure x is row-contiguous, and use
-  // ensure_row_contiguous for lhs/rhs indices (was ensure_contiguous before
-  // c9aa5605). w / scales / biases are intentionally left as const refs here
-  // because the gather paths consume them per-batch via indices.
   array x = ensure_row_contiguous(inputs[0], encoder, s);
   const array& w = inputs[1];
   const array& scales = inputs[2];

@@ -1408,6 +1408,11 @@ mod tests {
         }
         fs::create_dir_all(&dir).unwrap();
         fs::write(dir.join("config.json"), b"{}").unwrap();
+        // The resolver's offline completeness gate (downloader/completeness.rs,
+        // issue #465) also requires at least one non-zero weight file; a
+        // config-only directory is classified as an interrupted download and
+        // triggers a network re-fetch.
+        fs::write(dir.join("model.safetensors"), b"stub-weights").unwrap();
         dir
     }
 

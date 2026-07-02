@@ -1278,22 +1278,44 @@ fn divergent_round_hidden_matches_b1_replay() {
             .zip(&want)
             .map(|(g, w)| (g - w).abs())
             .fold(0.0f32, f32::max);
-        assert_eq!(
-            n_diff,
-            0,
-            "[{layer_type}] divergent-round hidden for the holed row deviates from \
-             the B=1 replay: {n_diff}/{} cells differ, max_abs={max_abs:e} \
-             (got[..4]={:?} want[..4]={:?})",
-            got.len(),
-            &got[..4.min(got.len())],
-            &want[..4.min(want.len())]
-        );
+        if cfg!(feature = "cuda") {
+            // On CUDA the batched and B=1 forwards are no longer bitwise
+            // identical: since MLX #3704 (rope without copy, pin e9463bb) RoPE
+            // preserves the input layout instead of canonicalizing it with a
+            // copy, so downstream GEMM/SDPA kernels can see different strides
+            // for the batched row than for the B=1 replay and pick different
+            // reduction orders. The forwards remain numerically equivalent;
+            // assert a tight fp32 tolerance instead of bit equality.
+            assert!(
+                max_abs <= 2e-3,
+                "[{layer_type}] divergent-round hidden for the holed row deviates from \
+                 the B=1 replay beyond fp32 reduction-order noise: {n_diff}/{} cells \
+                 differ, max_abs={max_abs:e} (got[..4]={:?} want[..4]={:?})",
+                got.len(),
+                &got[..4.min(got.len())],
+                &want[..4.min(want.len())]
+            );
+        } else {
+            assert_eq!(
+                n_diff,
+                0,
+                "[{layer_type}] divergent-round hidden for the holed row deviates from \
+                 the B=1 replay: {n_diff}/{} cells differ, max_abs={max_abs:e} \
+                 (got[..4]={:?} want[..4]={:?})",
+                got.len(),
+                &got[..4.min(got.len())],
+                &want[..4.min(want.len())]
+            );
+        }
         // Argmax must agree too (cheap end check).
         assert_eq!(
             fwd2.target_tokens_per_row[0][0], ref_fwd2.target_tokens_per_row[0][0],
             "[{layer_type}] divergent-round argmax must match the B=1 replay"
         );
-        eprintln!("[{layer_type}] divergent-round hidden bitwise-identical to B=1 replay");
+        eprintln!(
+            "[{layer_type}] divergent-round hidden matches B=1 replay \
+             (n_diff={n_diff}, max_abs={max_abs:e})"
+        );
     }
 }
 

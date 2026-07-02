@@ -1,10 +1,11 @@
 // Copyright © 2025 Apple Inc.
-// Modified by mlxcel:
+// Modified by mlxcel (synced to upstream e9463bb):
 // - CCCL include resolution honors the MLXCEL_CCCL_DIR override and resolves
 //   the executable directory from /proc/self/exe, so the bundled headers are
 //   found regardless of how the process is launched (a relative ./mlxcel from
 //   inside bin/ otherwise yields a relative dli_fname from dladdr and the
-//   lookup misses).
+//   lookup misses). Upstream's cccl_dir() (dirs.cpp, MLX_CCCL_DIR) remains the
+//   final fallback.
 // - A one-time notice when CUDA kernels are JIT-compiled on a cold cache, so
 //   the slower first response is not a mystery (suppress with MLXCEL_QUIET_JIT).
 
@@ -24,6 +25,9 @@
 #include <nvrtc.h>
 
 namespace mlx::core::cu {
+
+// Defined in dirs.cpp to avoid invalidating compile cache.
+const char* cccl_dir();
 
 namespace {
 
@@ -77,26 +81,46 @@ const std::vector<std::string>& include_path_args() {
 #if !defined(_WIN32)
     root_dir = root_dir.parent_path();
 #endif
+    // Add path to bundled headers.
+    auto path = root_dir / "include";
+    if (std::filesystem::exists(path)) {
+      args.push_back(fmt::format("--include-path={}", path.string()));
+    }
     // CCCL headers: an explicit MLXCEL_CCCL_DIR override wins (it lets an
     // embedder such as Backend.AI:GO point at the headers regardless of the
     // on-disk layout), then the bundled layout next to the executable
-    // (bin/ + include/cccl/), then MLX's compiled-in fallback.
-    std::filesystem::path path;
+    // (bin/ + include/cccl/), then upstream's cccl_dir() fallback compiled
+    // into dirs.cpp via MLX_CCCL_DIR.
     if (const char* cccl_override = std::getenv("MLXCEL_CCCL_DIR");
         cccl_override != nullptr && *cccl_override != '\0' &&
         std::filesystem::exists(cccl_override)) {
       path = cccl_override;
     } else {
-      path = root_dir / "include" / "cccl";
+      path = path / "cccl";
+      if (!std::filesystem::exists(path) && cccl_dir()) {
+        path = cccl_dir();
+      }
     }
-#if defined(MLX_CCCL_DIR)
-    if (!std::filesystem::exists(path)) {
-      path = MLX_CCCL_DIR;
-    }
-#endif
     if (std::filesystem::exists(path)) {
       args.push_back(fmt::format("--include-path={}", path.string()));
     }
+    // CUTLASS/CuTe headers for the runtime-JIT'd quantized kernels (upstream
+    // #3706/#3576 compile qmm_sm80/sm90/naive and gather_gemm with NVRTC, and
+    // those kernels include <cute/...> / <cutlass/...>). Installed layouts are
+    // already covered by the bundled include/ path added above (upstream
+    // installs cute/ and cutlass/ directly into include/); here an explicit
+    // MLXCEL_CUTLASS_DIR override wins, then the build-tree fallback compiled
+    // in via MLX_CUTLASS_DIR covers uninstalled dev binaries.
+    if (const char* cutlass_override = std::getenv("MLXCEL_CUTLASS_DIR");
+        cutlass_override != nullptr && *cutlass_override != '\0' &&
+        std::filesystem::exists(cutlass_override)) {
+      args.push_back(fmt::format("--include-path={}", cutlass_override));
+    }
+#if defined(MLX_CUTLASS_DIR)
+    else if (std::filesystem::exists(MLX_CUTLASS_DIR)) {
+      args.push_back(fmt::format("--include-path={}", MLX_CUTLASS_DIR));
+    }
+#endif
     // Add path to CUDA runtime headers, try local-installed python package
     // first and then system-installed headers.
     path = root_dir.parent_path() / "nvidia" / "cuda_runtime" / "include";
@@ -279,9 +303,14 @@ constexpr const char* g_include_names[] = {
     INCLUDE_PREFIX "cast_op.cuh",
     INCLUDE_PREFIX "config.h",
     INCLUDE_PREFIX "complex.cuh",
+    INCLUDE_PREFIX "cute_dequant.cuh",
     INCLUDE_PREFIX "fp16_math.cuh",
+    INCLUDE_PREFIX "gemm_sm70.cuh",
     INCLUDE_PREFIX "hadamard.cuh",
     INCLUDE_PREFIX "indexing.cuh",
+    INCLUDE_PREFIX "qmm_naive.cuh",
+    INCLUDE_PREFIX "qmm_sm80.cuh",
+    INCLUDE_PREFIX "qmm_sm90.cuh",
     INCLUDE_PREFIX "scatter_ops.cuh",
     INCLUDE_PREFIX "unary_ops.cuh",
     INCLUDE_PREFIX "ternary_ops.cuh",
@@ -296,9 +325,14 @@ constexpr const char* g_headers[] = {
     jit_source_cast_op,
     jit_source_config,
     jit_source_complex,
+    jit_source_cute_dequant,
     jit_source_fp16_math,
+    jit_source_gemm_sm70,
     jit_source_hadamard,
     jit_source_indexing,
+    jit_source_qmm_naive,
+    jit_source_qmm_sm80,
+    jit_source_qmm_sm90,
     jit_source_scatter_ops,
     jit_source_unary_ops,
     jit_source_ternary_ops,
@@ -328,8 +362,11 @@ void compile(
     CHECK_NVRTC_ERROR(nvrtcAddNameExpression(prog, name.c_str()));
   }
 
-  // Compile program.
+  // Required for compiling CUTLASS code.
   std::vector<const char*> args;
+  args.push_back("--device-as-default-execution-space");
+
+  // Target current device.
   bool use_sass = compiler_supports_device_sass(device);
   auto cc = device.compute_capability_major();
   std::string arch_tag = (cc >= 9) ? "a" : "";
@@ -343,6 +380,8 @@ void compile(
   for (const auto& include : include_path_args()) {
     args.push_back(include.c_str());
   }
+
+  // Compile program.
   nvrtcResult compile_result =
       nvrtcCompileProgram(prog, args.size(), args.data());
   if (compile_result != NVRTC_SUCCESS) {
@@ -488,7 +527,7 @@ CUfunction JitModule::get_kernel(
 }
 
 JitModule& get_jit_module(
-    const mlx::core::Device& device,
+    Device& device,
     const std::string& name,
     const KernelBuilder& builder,
     bool use_disk_cache) {
@@ -507,8 +546,7 @@ JitModule& get_jit_module(
   std::unique_lock wlock(*mtx);
   auto it = cache->find(name);
   if (it == cache->end()) {
-    auto& d = cu::device(device);
-    it = cache->try_emplace(name, d, name, builder, use_disk_cache).first;
+    it = cache->try_emplace(name, device, name, builder, use_disk_cache).first;
   }
   return it->second;
 }

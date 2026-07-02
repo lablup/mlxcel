@@ -127,9 +127,10 @@ validation.
 
 ### Prebuilt CUDA artifact: runtime requirements
 
-MLX's CUDA backend compiles some kernels (gather and other indexing kernels)
-at runtime with NVRTC the first time they run, so a prebuilt binary needs CUDA
-headers available on the deployment host, not only the runtime libraries:
+MLX's CUDA backend compiles some kernels at runtime with NVRTC the first time
+they run (gather and other indexing kernels, and since the 2026-07 MLX pin
+also the quantized matmul kernels), so a prebuilt binary needs CUDA headers
+available on the deployment host, not only the runtime libraries:
 
 - **CCCL (libcu++) headers** are bundled inside the prebuilt Linux CUDA
   archives (both aarch64 and x86_64). Each unpacks to `bin/` + `include/cccl/`,
@@ -140,6 +141,15 @@ headers available on the deployment host, not only the runtime libraries:
   (`/proc/self/exe`), so any launch style works, including a relative
   `./mlxcel`. Set `MLXCEL_CCCL_DIR` to point the JIT at the CCCL headers
   explicitly, e.g. when embedding mlxcel and keeping a flat binary layout.
+- **CUTLASS/CuTe headers** are bundled the same way (`include/cute/` and
+  `include/cutlass/` beside `bin/`). The MLX pin from 2026-07 on JIT-compiles
+  the quantized matmul kernels (`qmm`, `gather_gemm`) with NVRTC, and those
+  kernels include `<cute/...>`/`<cutlass/...>`. The JIT resolves them from
+  `<exe-dir>/../include`; set `MLXCEL_CUTLASS_DIR` to a directory containing
+  `cute/` and `cutlass/` to override, e.g. for a flat embedded layout. Source
+  builds fall back to the build tree automatically. Without these headers the
+  first quantized-model run fails with
+  `cannot open source file "cute/numeric/numeric_types.hpp"`.
 - **CUDA toolkit headers** (`cuda_runtime.h` and friends) come from the host.
   Install the CUDA toolkit and set `CUDA_HOME` (or `CUDA_PATH`) if it is not at
   `/usr/local/cuda`. Without them the first NVRTC compile fails with
@@ -176,6 +186,7 @@ MLXCEL_CXX_MARCH=none cargo build --release --features cuda
 | `MLX_CUDA_ARCHITECTURES` | CUDA SM target list, build-time | auto-detect via `nvidia-smi`, then `90a` fallback |
 | `MLXCEL_CXX_MARCH` | C++ bridge `-march` value, build-time; `none` omits the flag | `native` |
 | `MLXCEL_CCCL_DIR` | Override for the bundled CCCL (libcu++) header dir used by the CUDA NVRTC JIT | bundled `<exe-dir>/../include/cccl`, then build-time fallback |
+| `MLXCEL_CUTLASS_DIR` | Override for the bundled CUTLASS/CuTe header dir used by the CUDA NVRTC JIT for quantized matmul kernels | bundled `<exe-dir>/../include`, then build-time fallback |
 | `MLX_PTX_CACHE_DIR` | On-disk cache for JIT-compiled CUDA kernels | system temp dir |
 | `MLXCEL_QUIET_JIT` | Suppress the one-time "compiling CUDA kernels" notice on a cold first run | unset (notice shown) |
 | `MLXCEL_DEVICE` | Runtime device hint (`gpu` or `cpu`) | auto |
@@ -197,6 +208,19 @@ For the complete `MLXCEL_*` reference, see
 ./target/release/mlxcel generate \
     -m ~/.cache/mlxcel/models/mlx-community/Qwen3-0.6B-4bit \
     -p "Hello" -n 1
+```
+
+On CUDA hosts, run the test suite single threaded. Since the 2026-07 MLX pin
+the quantized kernels are JIT-compiled and module-loaded on first use, and
+those first-use paths are not safe against concurrent test threads: the
+default parallel run can abort with
+`cudaStreamEndCapture ... previous error during capture` (a module load
+racing another thread's stream capture) or, with graphs disabled, with
+`cuLaunchKernelEx ... invalid argument` (a kernel-configure race). Inference
+binaries are unaffected; this is a test-parallelism artifact.
+
+```bash
+cargo test --release --features cuda -- --test-threads=1
 ```
 
 ## Troubleshooting

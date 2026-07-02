@@ -92,7 +92,7 @@ else()
   FetchContent_Declare(
     mlx
     GIT_REPOSITORY "https://github.com/ml-explore/mlx.git"
-    GIT_TAG a6ec7123dac814417147e21d4aeed694924ddd4d)
+    GIT_TAG e9463bbfc1a7cd9e0e6b96aaa3068a316e234a63)
 
   # Use FetchContent_Populate + add_subdirectory so we can apply source
   # overlays before the MLX build system processes the files.
@@ -130,10 +130,31 @@ add_subdirectory(${mlx_SOURCE_DIR} ${mlx_BINARY_DIR})
 # ----------------------------- CUDA CCCL ---------------------------------
 # Ensure MLX_CCCL_DIR is defined for CUDA JIT kernel compilation at runtime.
 # MLX only sets this for test builds, but statically linked binaries need it too.
+# Since upstream e9463bb the macro is consumed by cccl_dir() in dirs.cpp, which
+# is compiled in the dedicated mlx_dirs OBJECT target (upstream isolates the
+# dynamic defines there to avoid invalidating the compile cache), so define it
+# on mlx_dirs when that target exists and fall back to mlx otherwise.
 if(MLX_BUILD_CUDA)
   set(_cccl_include "${CMAKE_BINARY_DIR}/_deps/cccl-src/include")
   if(EXISTS "${_cccl_include}")
+    if(TARGET mlx_dirs)
+      target_compile_definitions(mlx_dirs
+                                 PRIVATE MLX_CCCL_DIR="${_cccl_include}")
+    else()
+      target_compile_definitions(mlx
+                                 PRIVATE MLX_CCCL_DIR="${_cccl_include}")
+    endif()
+  endif()
+
+  # CUTLASS/CuTe headers for the runtime-JIT'd quantized kernels (MLX #3706/
+  # #3576 moved qmm_sm80/sm90/naive and gather_gemm to NVRTC JIT compilation,
+  # and those kernels include <cute/...> / <cutlass/...> at runtime). Upstream
+  # only installs the headers next to installed binaries; statically linked
+  # mlxcel binaries need a compiled-in fallback for dev builds. Consumed by
+  # our jit_module.cpp overlay, which compiles into the mlx target.
+  set(_cutlass_include "${CMAKE_BINARY_DIR}/_deps/cutlass-src/include")
+  if(EXISTS "${_cutlass_include}")
     target_compile_definitions(mlx
-                               PRIVATE MLX_CCCL_DIR="${_cccl_include}")
+                               PRIVATE MLX_CUTLASS_DIR="${_cutlass_include}")
   endif()
 endif()

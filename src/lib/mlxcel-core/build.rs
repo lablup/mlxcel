@@ -156,6 +156,7 @@ fn main() {
     println!("cargo:rerun-if-changed=metal/fused_attention_metal4.metal");
     println!("cargo:rerun-if-changed=../mlx-cpp/CMakeLists.txt");
     println!("cargo:rerun-if-changed=../mlx-cpp/patches");
+    println!("cargo:rerun-if-changed=../mlx-cpp/patches-cuda");
     // Sparse-V fused-skip Metal kernel launchers.
     println!("cargo:rerun-if-changed=../mlx-cpp/turbo/CMakeLists.txt");
     println!("cargo:rerun-if-changed=../mlx-cpp/turbo/sparse_v_sdpa.h");
@@ -175,7 +176,7 @@ fn main() {
 }
 
 /// Expected MLX git commit — must match GIT_TAG in mlx-cpp/CMakeLists.txt.
-const MLX_EXPECTED_COMMIT: &str = "a6ec7123dac814417147e21d4aeed694924ddd4d";
+const MLX_EXPECTED_COMMIT: &str = "e9463bbfc1a7cd9e0e6b96aaa3068a316e234a63";
 
 /// Purge stale cached MLX build artifacts before CMake runs.
 ///

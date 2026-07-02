@@ -1751,6 +1751,9 @@ const FAMILY_ORDER: &[&str] = &[
     "Phi VLM",
     "Cohere VLM",
     "Nemotron VLM",
+    "GLM VLM",
+    "Kimi VLM",
+    "PaddleOCR VLM",
     "Other VLM",
 ];
 

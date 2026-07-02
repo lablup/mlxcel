@@ -1,8 +1,8 @@
-// Copyright (c) 2025 Apple Inc.
+// Copyright © 2025 Apple Inc.
 //
 // CUDA patch: Mixed-precision binary operation kernels for bf16
 //
-// Modified from upstream MLX v0.31.1 mlx/backend/cuda/binary/binary.cuh
+// Modified from upstream MLX e9463bb mlx/backend/cuda/binary/binary.cuh
 //
 // Changes:
 //   - Added mixed-type kernel templates (binary_ss_mixed, binary_sv_mixed, etc.)
@@ -17,6 +17,10 @@
 //
 // This eliminates copy_v<float, bf16> kernels that previously consumed ~58% of
 // GPU time during bf16 model inference.
+//
+// The same-type kernels and dispatch below are byte-identical to upstream
+// e9463bb (including the large-grid index_rest fix and
+// get_launch_args_general); the mixed kernels mirror those conventions.
 //
 // This patch is CUDA-only -- applied via the overlay system in CMakeLists.txt
 // only when MLX_BUILD_CUDA is set. Metal builds use the unmodified upstream file.
@@ -37,12 +41,14 @@ namespace cu {
 
 namespace cg = cooperative_groups;
 
-// --------------------------------------------------------------------------
-// Original same-type kernels (unchanged from upstream)
-// --------------------------------------------------------------------------
+constexpr int BINARY_MAX_BLOCK_DIM = 1024;
 
 template <typename Op, typename In, typename Out, typename IdxT, int N_READS>
-__global__ void binary_ss(const In* a, const In* b, Out* out, IdxT size) {
+__global__ __launch_bounds__(BINARY_MAX_BLOCK_DIM) void binary_ss(
+    const In* a,
+    const In* b,
+    Out* out,
+    IdxT size) {
   IdxT index = cg::this_grid().thread_rank();
 
   if ((index + 1) * N_READS > size) {
@@ -61,7 +67,11 @@ __global__ void binary_ss(const In* a, const In* b, Out* out, IdxT size) {
 }
 
 template <typename Op, typename In, typename Out, typename IdxT, int N_READS>
-__global__ void binary_sv(const In* a, const In* b, Out* out, IdxT size) {
+__global__ __launch_bounds__(BINARY_MAX_BLOCK_DIM) void binary_sv(
+    const In* a,
+    const In* b,
+    Out* out,
+    IdxT size) {
   IdxT index = cg::this_grid().thread_rank();
 
   if ((index + 1) * N_READS > size) {
@@ -82,7 +92,11 @@ __global__ void binary_sv(const In* a, const In* b, Out* out, IdxT size) {
 }
 
 template <typename Op, typename In, typename Out, typename IdxT, int N_READS>
-__global__ void binary_vs(const In* a, const In* b, Out* out, IdxT size) {
+__global__ __launch_bounds__(BINARY_MAX_BLOCK_DIM) void binary_vs(
+    const In* a,
+    const In* b,
+    Out* out,
+    IdxT size) {
   IdxT index = cg::this_grid().thread_rank();
 
   if ((index + 1) * N_READS > size) {
@@ -103,7 +117,11 @@ __global__ void binary_vs(const In* a, const In* b, Out* out, IdxT size) {
 }
 
 template <typename Op, typename In, typename Out, typename IdxT, int N_READS>
-__global__ void binary_vv(const In* a, const In* b, Out* out, IdxT size) {
+__global__ __launch_bounds__(BINARY_MAX_BLOCK_DIM) void binary_vv(
+    const In* a,
+    const In* b,
+    Out* out,
+    IdxT size) {
   IdxT index = cg::this_grid().thread_rank();
 
   if ((index + 1) * N_READS > size) {
@@ -142,7 +160,9 @@ __global__ void binary_g_nd(
   auto block = cg::this_thread_block();
   auto grid = cg::this_grid();
   IdxT index_rest =
-      grid.block_index().y * block.dim_threads().y + block.thread_index().y;
+      (grid.block_index().z * grid.dim_blocks().y + grid.block_index().y) *
+          block.dim_threads().y +
+      block.thread_index().y;
   if (index_rest >= size_rest) {
     return;
   }
@@ -180,7 +200,9 @@ __global__ void binary_g(
   auto block = cg::this_thread_block();
   auto grid = cg::this_grid();
   IdxT index_rest =
-      grid.block_index().y * block.dim_threads().y + block.thread_index().y;
+      (grid.block_index().z * grid.dim_blocks().y + grid.block_index().y) *
+          block.dim_threads().y +
+      block.thread_index().y;
   if (index_rest >= size_rest) {
     return;
   }
@@ -224,8 +246,11 @@ template <
     typename Out,
     typename IdxT,
     int N_READS>
-__global__ void
-binary_ss_mixed(const InA* a, const InB* b, Out* out, IdxT size) {
+__global__ __launch_bounds__(BINARY_MAX_BLOCK_DIM) void binary_ss_mixed(
+    const InA* a,
+    const InB* b,
+    Out* out,
+    IdxT size) {
   IdxT index = cg::this_grid().thread_rank();
 
   if ((index + 1) * N_READS > size) {
@@ -251,8 +276,11 @@ template <
     typename Out,
     typename IdxT,
     int N_READS>
-__global__ void
-binary_sv_mixed(const InA* a, const InB* b, Out* out, IdxT size) {
+__global__ __launch_bounds__(BINARY_MAX_BLOCK_DIM) void binary_sv_mixed(
+    const InA* a,
+    const InB* b,
+    Out* out,
+    IdxT size) {
   IdxT index = cg::this_grid().thread_rank();
 
   if ((index + 1) * N_READS > size) {
@@ -279,8 +307,11 @@ template <
     typename Out,
     typename IdxT,
     int N_READS>
-__global__ void
-binary_vs_mixed(const InA* a, const InB* b, Out* out, IdxT size) {
+__global__ __launch_bounds__(BINARY_MAX_BLOCK_DIM) void binary_vs_mixed(
+    const InA* a,
+    const InB* b,
+    Out* out,
+    IdxT size) {
   IdxT index = cg::this_grid().thread_rank();
 
   if ((index + 1) * N_READS > size) {
@@ -307,8 +338,11 @@ template <
     typename Out,
     typename IdxT,
     int N_READS>
-__global__ void
-binary_vv_mixed(const InA* a, const InB* b, Out* out, IdxT size) {
+__global__ __launch_bounds__(BINARY_MAX_BLOCK_DIM) void binary_vv_mixed(
+    const InA* a,
+    const InB* b,
+    Out* out,
+    IdxT size) {
   IdxT index = cg::this_grid().thread_rank();
 
   if ((index + 1) * N_READS > size) {
@@ -348,7 +382,9 @@ __global__ void binary_g_nd_mixed(
   auto block = cg::this_thread_block();
   auto grid = cg::this_grid();
   IdxT index_rest =
-      grid.block_index().y * block.dim_threads().y + block.thread_index().y;
+      (grid.block_index().z * grid.dim_blocks().y + grid.block_index().y) *
+          block.dim_threads().y +
+      block.thread_index().y;
   if (index_rest >= size_rest) {
     return;
   }
@@ -393,7 +429,9 @@ __global__ void binary_g_mixed(
   auto block = cg::this_thread_block();
   auto grid = cg::this_grid();
   IdxT index_rest =
-      grid.block_index().y * block.dim_threads().y + block.thread_index().y;
+      (grid.block_index().z * grid.dim_blocks().y + grid.block_index().y) *
+          block.dim_threads().y +
+      block.thread_index().y;
   if (index_rest >= size_rest) {
     return;
   }
@@ -422,10 +460,6 @@ __global__ void binary_g_mixed(
   }
   store_vector(out + shape_x * index_rest, index_x, out_vec, shape_x);
 }
-
-// --------------------------------------------------------------------------
-// Type support traits
-// --------------------------------------------------------------------------
 
 template <typename Op, typename In, typename Out>
 constexpr bool supports_binary_op() {
@@ -489,10 +523,6 @@ constexpr bool supports_mixed_binary_op() {
 
 } // namespace cu
 
-// --------------------------------------------------------------------------
-// Host dispatch: same-type path (unchanged from upstream)
-// --------------------------------------------------------------------------
-
 template <typename Op>
 void binary_op_gpu_inplace(
     const std::vector<array>& inputs,
@@ -550,12 +580,8 @@ void binary_op_gpu_inplace(
                     if (dim0 >= 4) {
                       work_per_thread = 4;
                     }
-                    dim0 = (dim0 + work_per_thread - 1) / work_per_thread;
-                    auto block_dims = get_block_dims(dim0, rest, 1);
-                    uint32_t num_blocks_x =
-                        cuda::ceil_div(dim0, block_dims.x);
-                    uint32_t num_blocks_y =
-                        cuda::ceil_div(rest, block_dims.y);
+                    auto [grid_dims, block_dims] =
+                        get_launch_args_general(dim0, rest, work_per_thread);
                     if (ndim <= 3) {
                       dispatch_1_2_3(ndim, [&](auto dims_constant) {
                         auto kernel = cu::binary_g_nd_mixed<
@@ -578,7 +604,7 @@ void binary_op_gpu_inplace(
                         }
                         encoder.add_kernel_node(
                             kernel,
-                            {num_blocks_x, num_blocks_y},
+                            grid_dims,
                             block_dims,
                             gpu_ptr<InTypeA>(a),
                             gpu_ptr<InTypeB>(b),
@@ -589,15 +615,20 @@ void binary_op_gpu_inplace(
                             const_param<dims_constant()>(b_strides));
                       });
                     } else {
-                      auto kernel =
-                          cu::binary_g_mixed<Op, InTypeA, InTypeB, OutType, IdxT, 1>;
+                      auto kernel = cu::
+                          binary_g_mixed<Op, InTypeA, InTypeB, OutType, IdxT, 1>;
                       if (work_per_thread == 4) {
-                        kernel =
-                            cu::binary_g_mixed<Op, InTypeA, InTypeB, OutType, IdxT, 4>;
+                        kernel = cu::binary_g_mixed<
+                            Op,
+                            InTypeA,
+                            InTypeB,
+                            OutType,
+                            IdxT,
+                            4>;
                       }
                       encoder.add_kernel_node(
                           kernel,
-                          {num_blocks_x, num_blocks_y},
+                          grid_dims,
                           block_dims,
                           gpu_ptr<InTypeA>(a),
                           gpu_ptr<InTypeB>(b),
@@ -611,8 +642,7 @@ void binary_op_gpu_inplace(
                   });
             } else {
               dispatch_bool(out.data_size() > UINT32_MAX, [&](auto large) {
-                using IdxT =
-                    std::conditional_t<large(), int64_t, uint32_t>;
+                using IdxT = std::conditional_t<large(), int64_t, uint32_t>;
                 // Use the smaller type's size for N_READS to stay safe
                 constexpr int N_READS_A = 16 / sizeof(InTypeA);
                 constexpr int N_READS_B = 16 / sizeof(InTypeB);
@@ -655,7 +685,8 @@ void binary_op_gpu_inplace(
                     out.shape(),
                     out.strides(),
                     large(),
-                    N_READS);
+                    N_READS,
+                    cu::BINARY_MAX_BLOCK_DIM);
                 encoder.add_kernel_node(
                     kernel,
                     num_blocks,
@@ -709,10 +740,8 @@ void binary_op_gpu_inplace(
                 if (dim0 >= 4) {
                   work_per_thread = 4;
                 }
-                dim0 = (dim0 + work_per_thread - 1) / work_per_thread;
-                auto block_dims = get_block_dims(dim0, rest, 1);
-                uint32_t num_blocks_x = cuda::ceil_div(dim0, block_dims.x);
-                uint32_t num_blocks_y = cuda::ceil_div(rest, block_dims.y);
+                auto [grid_dims, block_dims] =
+                    get_launch_args_general(dim0, rest, work_per_thread);
                 if (ndim <= 3) {
                   dispatch_1_2_3(ndim, [&](auto dims_constant) {
                     auto kernel = cu::binary_g_nd<
@@ -733,7 +762,7 @@ void binary_op_gpu_inplace(
                     }
                     encoder.add_kernel_node(
                         kernel,
-                        {num_blocks_x, num_blocks_y},
+                        grid_dims,
                         block_dims,
                         gpu_ptr<InType>(a),
                         gpu_ptr<InType>(b),
@@ -750,7 +779,7 @@ void binary_op_gpu_inplace(
                   }
                   encoder.add_kernel_node(
                       kernel,
-                      {num_blocks_x, num_blocks_y},
+                      grid_dims,
                       block_dims,
                       gpu_ptr<InType>(a),
                       gpu_ptr<InType>(b),
@@ -775,7 +804,12 @@ void binary_op_gpu_inplace(
               kernel = cu::binary_vv<Op, InType, OutType, IdxT, N_READS>;
             }
             auto [num_blocks, block_dims] = get_launch_args(
-                out.data_size(), out.shape(), out.strides(), large(), N_READS);
+                out.data_size(),
+                out.shape(),
+                out.strides(),
+                large(),
+                N_READS,
+                cu::BINARY_MAX_BLOCK_DIM);
             encoder.add_kernel_node(
                 kernel,
                 num_blocks,

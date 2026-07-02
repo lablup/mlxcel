@@ -514,6 +514,17 @@ jobs:
           fi
           echo "Bundling CCCL headers from: $CCCL_INC"
 
+          # Bundle the CUTLASS/CuTe headers the runtime NVRTC JIT needs for the
+          # quantized matmul kernels (MLX #3706/#3576 JIT-compile qmm/gather_gemm,
+          # which include <cute/...> and <cutlass/...>). MLX's JIT resolves them
+          # from <exe-dir>/../include, hence include/cute/ + include/cutlass/.
+          CUTLASS_INC=$(find "$BIN_DIR/build" -type d -path '*/_deps/cutlass-src/include' 2>/dev/null | head -1)
+          if [ -z "$CUTLASS_INC" ] || [ ! -d "$CUTLASS_INC/cute" ] || [ ! -d "$CUTLASS_INC/cutlass" ]; then
+            echo "::error::CUTLASS headers not found under the build tree (expected _deps/cutlass-src/include/{cute,cutlass})"
+            exit 1
+          fi
+          echo "Bundling CUTLASS headers from: $CUTLASS_INC"
+
           package_one() {
             bin="$1"; asset="$2"
             pkg="package/${asset}"
@@ -527,8 +538,15 @@ jobs:
               echo "::error::CCCL bundle for ${asset} looks incomplete (${n} files)"
               exit 1
             fi
+            cp -R "$CUTLASS_INC/cute" "$pkg/include/"
+            cp -R "$CUTLASS_INC/cutlass" "$pkg/include/"
+            c=$(find "$pkg/include/cute" "$pkg/include/cutlass" -type f | wc -l | tr -d ' ')
+            if [ ! -f "$pkg/include/cute/numeric/numeric_types.hpp" ] || [ "$c" -lt 100 ]; then
+              echo "::error::CUTLASS bundle for ${asset} looks incomplete (${c} files)"
+              exit 1
+            fi
             ( cd package && zip -rq "../${asset}.zip" "${asset}" )
-            echo "Packaged ${asset}.zip ($(du -h "${asset}.zip" | cut -f1), CCCL headers: ${n})"
+            echo "Packaged ${asset}.zip ($(du -h "${asset}.zip" | cut -f1), CCCL headers: ${n}, CUTLASS headers: ${c})"
           }
 
           package_one mlxcel "${CLI_ASSET}"
@@ -706,6 +724,17 @@ jobs:
           fi
           echo "Bundling CCCL headers from: $CCCL_INC"
 
+          # Bundle the CUTLASS/CuTe headers the runtime NVRTC JIT needs for the
+          # quantized matmul kernels (MLX #3706/#3576 JIT-compile qmm/gather_gemm,
+          # which include <cute/...> and <cutlass/...>). MLX's JIT resolves them
+          # from <exe-dir>/../include, hence include/cute/ + include/cutlass/.
+          CUTLASS_INC=$(find "$BIN_DIR/build" -type d -path '*/_deps/cutlass-src/include' 2>/dev/null | head -1)
+          if [ -z "$CUTLASS_INC" ] || [ ! -d "$CUTLASS_INC/cute" ] || [ ! -d "$CUTLASS_INC/cutlass" ]; then
+            echo "::error::CUTLASS headers not found under the build tree (expected _deps/cutlass-src/include/{cute,cutlass})"
+            exit 1
+          fi
+          echo "Bundling CUTLASS headers from: $CUTLASS_INC"
+
           # Package one binary as its own self-contained archive: bin/<binary>
           # plus the CCCL headers in MLX's native include/cccl/ layout.
           package_one() {
@@ -721,8 +750,15 @@ jobs:
               echo "::error::CCCL bundle for ${asset} looks incomplete (${n} files)"
               exit 1
             fi
+            cp -R "$CUTLASS_INC/cute" "$pkg/include/"
+            cp -R "$CUTLASS_INC/cutlass" "$pkg/include/"
+            c=$(find "$pkg/include/cute" "$pkg/include/cutlass" -type f | wc -l | tr -d ' ')
+            if [ ! -f "$pkg/include/cute/numeric/numeric_types.hpp" ] || [ "$c" -lt 100 ]; then
+              echo "::error::CUTLASS bundle for ${asset} looks incomplete (${c} files)"
+              exit 1
+            fi
             ( cd package && zip -rq "../${asset}.zip" "${asset}" )
-            echo "Packaged ${asset}.zip ($(du -h "${asset}.zip" | cut -f1), CCCL headers: ${n})"
+            echo "Packaged ${asset}.zip ($(du -h "${asset}.zip" | cut -f1), CCCL headers: ${n}, CUTLASS headers: ${c})"
           }
 
           package_one mlxcel "${CLI_ASSET}"

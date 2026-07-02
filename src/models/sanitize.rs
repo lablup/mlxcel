@@ -161,6 +161,11 @@ fn fp4_e2m1_to_f32(nibble: u8) -> f32 {
 }
 
 /// Convert f16 bits to f32.
+///
+/// No longer used by the NVFP4 dequant hot path (the block scales are
+/// normalized to F32 via astype before parsing, since the CUDA loader widens
+/// F16 to F32 at load time); kept under cfg(test) for its format unit tests.
+#[cfg(test)]
 fn f16_to_f32(bits: u16) -> f32 {
     let sign = ((bits >> 15) & 1) as u32;
     let exp = ((bits >> 10) & 0x1F) as u32;
@@ -288,12 +293,18 @@ fn dequantize_nvfp4_weights(weights: &mut mlxcel_core::weights::WeightMap) {
             let scale2_arr = weights.get(&scale2_key).unwrap();
 
             mlxcel_core::eval(weight_arr);
-            mlxcel_core::eval(scale_arr);
             mlxcel_core::eval(scale2_arr);
 
             let weight_shape = mlxcel_core::array_shape(weight_arr);
             let weight_bytes = mlxcel_core::array_to_raw_bytes(weight_arr);
-            let scale_bytes = mlxcel_core::array_to_raw_bytes(scale_arr);
+            // The block scales are stored as F16 in the checkpoint, but the
+            // loader's in-memory dtype is platform-dependent: Metal keeps F16
+            // while the CUDA path widens F16 to F32 at load (from_bytes_f16).
+            // Normalize to F32 before the raw-byte parse below so the scale
+            // decode does not depend on the load-time dtype.
+            let scale_f32_arr = mlxcel_core::astype(scale_arr, mlxcel_core::dtype::FLOAT32);
+            mlxcel_core::eval(&scale_f32_arr);
+            let scale_bytes = mlxcel_core::array_to_raw_bytes(&scale_f32_arr);
             let scale2_val = mlxcel_core::item_f32(scale2_arr);
 
             (weight_shape, weight_bytes, scale_bytes, scale2_val)
@@ -336,7 +347,7 @@ fn dequantize_nvfp4_weights(weights: &mut mlxcel_core::weights::WeightMap) {
 
         // Validate raw byte buffer lengths match expected sizes before indexing.
         let expected_weight_bytes = out_dim * packed_dim;
-        let expected_scale_bytes = out_dim * num_groups * 2; // F16 = 2 bytes each
+        let expected_scale_bytes = out_dim * num_groups * 4; // F32 = 4 bytes each
         if weight_bytes.len() < expected_weight_bytes {
             eprintln!(
                 "Skipping NVFP4 dequant for {prefix}: weight_bytes length {} < expected {}",
@@ -368,14 +379,15 @@ fn dequantize_nvfp4_weights(weights: &mut mlxcel_core::weights::WeightMap) {
                 };
                 let fp4_val = fp4_e2m1_to_f32(nibble);
 
-                // Block scale (F16 stored as 2-byte little-endian).
+                // Block scale (normalized to F32, 4-byte little-endian).
                 let group_idx = col / group_size;
                 let scale_flat_idx = row * num_groups + group_idx;
-                let scale_f16_bits = u16::from_le_bytes([
-                    scale_bytes[scale_flat_idx * 2],
-                    scale_bytes[scale_flat_idx * 2 + 1],
+                let scale_val = f32::from_le_bytes([
+                    scale_bytes[scale_flat_idx * 4],
+                    scale_bytes[scale_flat_idx * 4 + 1],
+                    scale_bytes[scale_flat_idx * 4 + 2],
+                    scale_bytes[scale_flat_idx * 4 + 3],
                 ]);
-                let scale_val = f16_to_f32(scale_f16_bits);
 
                 dequant_f32.push(fp4_val * scale_val * scale2_val);
             }
