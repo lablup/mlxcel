@@ -51,17 +51,23 @@
 //! 4. **Neither** — a clear, actionable error (not an existing path, not a
 //!    valid `owner/name` repo-id, and not a bare single segment).
 //!
-//! The "completeness" gate for the legacy and store directories keys on a
-//! present `config.json`, mirroring the downloader's own `snapshot_complete`
-//! check and [`store::hf_cache_snapshot`]'s gate. A directory that exists but
-//! lacks `config.json` (e.g. a half-written or unrelated `models/` folder) is
-//! treated as a miss so the resolver never hands a model loader a path that
-//! will fail to load.
+//! The "completeness" gate for the legacy and store directories verifies the
+//! full weight set, not just `config.json` (issue #465): every shard named by a
+//! local `model.safetensors.index.json` (or, for a single-file / repackaged
+//! layout, at least one non-zero `*.safetensors`) must be present and non-zero.
+//! An interrupted download that fetched `config.json` and only some shards is
+//! therefore treated as a miss, and the resolver re-fetches it — resuming the
+//! partial snapshot through the shared downloader — instead of handing the
+//! loader a path that dies with `Weight not found`. See [`super::completeness`]
+//! for the classifier. The read-only HuggingFace cache reuse
+//! ([`store::hf_cache_snapshot`]) keeps its own `config.json` gate since mlxcel
+//! never writes into that externally-managed layout.
 
 use std::path::{Path, PathBuf};
 
 use anyhow::{Result, anyhow};
 
+use super::completeness::{SnapshotState, classify_snapshot};
 use super::filters::repo_basename;
 use super::store;
 use super::{DownloadOptions, download_repo};
@@ -70,11 +76,6 @@ use super::{DownloadOptions, download_repo};
 /// (epic #92, issue #93). A repo-id whose basename already lives under
 /// `./models/<basename>` is reused from there for back-compat.
 const LEGACY_MODELS_DIR: &str = "models";
-
-/// File whose presence marks a model snapshot directory as complete enough to
-/// load. Mirrors the downloader's `snapshot_complete` gate and
-/// [`store::hf_cache_snapshot`], both of which key on `config.json`.
-const SNAPSHOT_MARKER: &str = "config.json";
 
 /// Default HuggingFace org prepended to a bare, prefix-less model name
 /// (issue #112) when `MLXCEL_DEFAULT_ORG` is unset or empty.
@@ -163,35 +164,56 @@ fn resolve_repo_id(
 ) -> Result<PathBuf> {
     let cwd_models = PathBuf::from(LEGACY_MODELS_DIR);
 
-    // 2a–2c: reuse an existing snapshot without re-downloading.
+    // 2a–2c: reuse an existing COMPLETE snapshot without re-downloading.
     if let Some(hit) = locate_cached_snapshot(repo_id, revision, &cwd_models, models_dir) {
         return Ok(hit);
     }
 
-    // 2d: cache miss → download into the mlxcel global store (local_dir: None),
-    //     honoring the --models-dir override for the destination root, then
-    //     re-locate where it landed. We reuse the shared hardened downloader
-    //     rather than forking it, so allow-list filtering, token handling,
-    //     progress UX, and HF-cache reuse all stay in lock-step with
-    //     `mlxcel download`.
-    println!("[mlxcel] model '{repo_id}' not found locally; downloading into the mlxcel store...");
-    download_repo(DownloadOptions {
-        repo_id: repo_id.to_string(),
-        local_dir: None,
-        models_dir: models_dir.map(Path::to_path_buf),
-        revision: revision.map(str::to_string),
-        token: None,
-        force: false,
-    })
-    .map_err(|err| anyhow!("failed to download model '{repo_id}': {err}"))?;
+    // 2d: no complete snapshot anywhere. A miss is one of two things: nothing on
+    // disk, or a PARTIAL mlxcel snapshot left by an interrupted download
+    // (config.json + only some shards). We name the latter explicitly — instead
+    // of letting the loader die later with a bare `Weight not found` (issue
+    // #465) — then recover through the shared hardened downloader either way.
+    // Routing the destination back through `download_repo` RESUMES cheaply: it
+    // skips files already present and non-zero and re-fetches only what is
+    // missing. Reusing it (rather than forking) keeps allow-list filtering,
+    // token handling, progress UX, and HF-cache reuse in lock-step with
+    // `mlxcel download`.
+    let store_dest = store::model_dir_with_override(repo_id, models_dir);
+    match store_dest.as_deref().map(classify_snapshot) {
+        Some(SnapshotState::Incomplete { missing }) => {
+            // `store_dest` is Some in this arm, so the unwrap cannot panic.
+            report_incomplete_snapshot(store_dest.as_deref().unwrap_or(&cwd_models), &missing);
+        }
+        _ => announce_fresh_download(repo_id),
+    }
 
-    // After a successful download the snapshot is reachable via either the HF
-    // cache (download_repo reuses an existing HF snapshot read-only) or the
-    // mlxcel store. Re-run the same lookup to return the real landing path.
+    download_repo(download_options(repo_id, revision, models_dir, false))
+        .map_err(|err| anyhow!("failed to download model '{repo_id}': {err}"))?;
+
+    // After a successful download/resume the snapshot is reachable via either the
+    // HF cache (download_repo reuses an existing HF snapshot read-only) or the
+    // mlxcel store. Re-run the same completeness-gated lookup to return the real
+    // landing path.
+    if let Some(hit) = locate_cached_snapshot(repo_id, revision, &cwd_models, models_dir) {
+        return Ok(hit);
+    }
+
+    // The resume did not yield a loadable snapshot (e.g. a present-but-corrupt,
+    // non-zero file the resume skipped). Fall back to the "clean re-download"
+    // recovery from issue #465: force a full re-fetch of every file, then load.
+    eprintln!(
+        "[mlxcel] snapshot for '{repo_id}' still incomplete after resume; \
+         re-fetching every file..."
+    );
+    download_repo(download_options(repo_id, revision, models_dir, true))
+        .map_err(|err| anyhow!("failed to re-download model '{repo_id}': {err}"))?;
+
     locate_cached_snapshot(repo_id, revision, &cwd_models, models_dir).ok_or_else(|| {
         anyhow!(
-            "downloaded model '{repo_id}' but could not locate its snapshot \
-             afterwards (expected under the mlxcel store or HuggingFace cache)"
+            "downloaded model '{repo_id}' but its snapshot is still incomplete \
+             afterwards (expected under the mlxcel store or HuggingFace cache); \
+             remove the partial snapshot and retry"
         )
     })
 }
@@ -212,22 +234,26 @@ fn locate_cached_snapshot(
     models_dir: Option<&Path>,
 ) -> Option<PathBuf> {
     // 2a. Legacy per-CWD `./models/<basename>` (pre-#93 default location).
+    //     Only a fully-materialized snapshot is a hit; an interrupted partial
+    //     (config.json + only some shards) is skipped so 2d re-fetches it.
     let legacy = cwd_models.join(repo_basename(repo_id));
-    if snapshot_is_complete(&legacy) {
+    if matches!(classify_snapshot(&legacy), SnapshotState::Complete) {
         return Some(legacy);
     }
 
     // 2b. Existing HuggingFace Hub cache snapshot (read-only reuse). Its own
-    //     completeness gate already requires a `config.json`.
+    //     completeness gate keys on `config.json`; mlxcel never writes into that
+    //     externally-managed layout, so it is left to HuggingFace tooling.
     if let Some(hf) = store::hf_cache_snapshot(repo_id, revision) {
         return Some(hf);
     }
 
     // 2c. mlxcel global store under the override-aware models root: the
     //     `--models-dir` / `MLXCEL_MODELS_DIR` root directly, or the legacy
-    //     `${MLXCEL_CACHE_DIR}/models/<owner>/<name>`.
+    //     `${MLXCEL_CACHE_DIR}/models/<owner>/<name>`. Same full-weight gate as
+    //     2a so an interrupted store download is re-fetched, not loaded.
     if let Some(store_dir) = store::model_dir_with_override(repo_id, models_dir)
-        && snapshot_is_complete(&store_dir)
+        && matches!(classify_snapshot(&store_dir), SnapshotState::Complete)
     {
         return Some(store_dir);
     }
@@ -235,14 +261,47 @@ fn locate_cached_snapshot(
     None
 }
 
-/// True when `dir` is an existing directory containing a [`SNAPSHOT_MARKER`]
-/// (`config.json`).
-///
-/// Used as the completeness gate for the legacy CWD and mlxcel-store
-/// directories so a half-written or unrelated `models/` folder is treated as a
-/// miss instead of being handed to a model loader that would then fail.
-fn snapshot_is_complete(dir: &Path) -> bool {
-    dir.is_dir() && dir.join(SNAPSHOT_MARKER).exists()
+/// Emit the issue #465 "incomplete download detected" line naming the condition
+/// and the re-fetch action (a bounded preview of the missing files).
+fn report_incomplete_snapshot(dir: &Path, missing: &[String]) {
+    const PREVIEW: usize = 6;
+    let shown: Vec<&str> = missing.iter().take(PREVIEW).map(String::as_str).collect();
+    let extra = missing.len().saturating_sub(shown.len());
+    let more = if extra > 0 {
+        format!(", +{extra} more")
+    } else {
+        String::new()
+    };
+    println!(
+        "[mlxcel] incomplete download detected at {}: re-fetching {} missing file(s): {}{}",
+        dir.display(),
+        missing.len(),
+        shown.join(", "),
+        more,
+    );
+}
+
+/// Print the "not found locally; downloading" line for a genuine cache miss.
+fn announce_fresh_download(repo_id: &str) {
+    println!("[mlxcel] model '{repo_id}' not found locally; downloading into the mlxcel store...");
+}
+
+/// Build [`DownloadOptions`] for the resolver's store-destination download,
+/// threading the `--models-dir` override and the resume/clean `force` flag.
+fn download_options(
+    repo_id: &str,
+    revision: Option<&str>,
+    models_dir: Option<&Path>,
+    force: bool,
+) -> DownloadOptions {
+    DownloadOptions {
+        repo_id: repo_id.to_string(),
+        local_dir: None,
+        models_dir: models_dir.map(Path::to_path_buf),
+        revision: revision.map(str::to_string),
+        token: None,
+        force,
+    }
 }
 
 /// True when `value` has HuggingFace `owner/name` repo-id shape:

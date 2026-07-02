@@ -39,6 +39,7 @@ use crate::models::gated_delta::{
     GatedDeltaCache, RMSNormGated, gated_delta_update, scaled_fast_rms_norm_no_weight,
 };
 use crate::models::model_owned::ModelOwnedSequenceState;
+use mlxcel_core::cache::{SequenceId, SequenceStateLayout};
 use mlxcel_core::dtype;
 use mlxcel_core::generate::LanguageModel;
 use mlxcel_core::layers::{KVCache, RMSNorm, UnifiedEmbedding, UnifiedLinear};
@@ -1601,6 +1602,45 @@ impl Qwen3NextModel {
             })
             .collect()
     }
+
+    /// Shared forward that routes through the model-owned heterogeneous cache.
+    ///
+    /// qwen3_next mixes KVCache (attention) and GatedDeltaCache (linear) layers,
+    /// which do not fit the trait's homogeneous `&mut [KVCache]`; the model owns
+    /// its cache in `sequence_state` and must persist it across forward calls
+    /// (fresh caches per call make decode stateless -> incoherent output).
+    ///
+    /// `seq_id = None` uses the fallback cache (offline CLI / benchmark), reset
+    /// on prefill so a new prompt does not inherit stale state. `Some(id)` uses
+    /// the scheduler's per-sequence state so concurrent server requests stay
+    /// isolated; the scheduler calls `prepare_sequence_state` first, and
+    /// `with_or_create_sequence_state` also creates fresh state on demand as a
+    /// safety net.
+    fn forward_for_sequence(
+        &self,
+        input: &MlxArray,
+        seq_id: Option<SequenceId>,
+    ) -> UniquePtr<MlxArray> {
+        let seq_len = mlxcel_core::array_shape(input)[1];
+        if seq_id.is_none() && seq_len > 1 {
+            self.sequence_state
+                .replace_internal(self.make_internal_caches());
+        }
+        self.sequence_state.with_or_create_sequence_state(
+            seq_id,
+            || self.make_internal_caches(),
+            |caches| {
+                let mask = if seq_len > 1 {
+                    let fa_idx = self.full_attention_interval - 1;
+                    let offset = caches.get(fa_idx).map(|c| c.offset()).unwrap_or(0);
+                    Some(create_causal_mask(seq_len, offset))
+                } else {
+                    None
+                };
+                self.forward(input, caches, mask.as_deref())
+            },
+        )
+    }
 }
 
 // LanguageModel trait implementation.
@@ -1611,28 +1651,32 @@ impl LanguageModel for Qwen3NextModel {
         _caches: &mut [KVCache],
         _mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
-        // Qwen3Next uses mixed cache types (KVCache + GatedDeltaCache) that do
-        // not fit the trait's `&mut [KVCache]`. The model owns its heterogeneous
-        // cache in `sequence_state` and must persist it across forward calls:
-        // recreating fresh caches every call makes decode stateless (each step
-        // sees only the current token) and produces incoherent output.
-        let seq_len = mlxcel_core::array_shape(input)[1];
-        // A multi-token call is a prefill, i.e. the start of a new sequence:
-        // reset the model-owned fallback cache so it does not inherit stale state.
-        if seq_len > 1 {
-            self.sequence_state
-                .replace_internal(self.make_internal_caches());
-        }
-        self.sequence_state.with_sequence_state(None, |caches| {
-            let mask = if seq_len > 1 {
-                let fa_idx = self.full_attention_interval - 1;
-                let offset = caches.get(fa_idx).map(|c| c.offset()).unwrap_or(0);
-                Some(create_causal_mask(seq_len, offset))
-            } else {
-                None
-            };
-            self.forward(input, caches, mask.as_deref())
-        })
+        // Offline / no-sequence-id path: use the model-owned fallback cache.
+        self.forward_for_sequence(input, None)
+    }
+
+    fn forward_with_sequence_id(
+        &self,
+        input_ids: &MlxArray,
+        seq_id: Option<SequenceId>,
+        _caches: &mut [KVCache],
+        _mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        // Server path: route through the scheduler's per-sequence model-owned cache.
+        self.forward_for_sequence(input_ids, seq_id)
+    }
+
+    fn forward_with_embeddings_and_sequence_id(
+        &self,
+        input_ids: &MlxArray,
+        _input_embeddings: Option<&MlxArray>,
+        seq_id: Option<SequenceId>,
+        _caches: &mut [KVCache],
+        _mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        // qwen3_next is text-only; there is no image-embedding prefill path, so
+        // the embeddings argument is unused and this behaves like the token path.
+        self.forward_for_sequence(input_ids, seq_id)
     }
 
     fn reset_runtime_state(&self) {
@@ -1640,6 +1684,60 @@ impl LanguageModel for Qwen3NextModel {
         // fresh generation does not inherit stale attention / gated-delta state.
         self.sequence_state
             .replace_internal(self.make_internal_caches());
+    }
+
+    fn sequence_state_layout(&self) -> SequenceStateLayout {
+        // Heterogeneous attention + gated-delta state lives on the model, not in
+        // the scheduler's KVCache slice.
+        SequenceStateLayout::model_owned(self.layers.len())
+    }
+
+    fn prepare_sequence_state(&self, seq_id: SequenceId) {
+        self.sequence_state
+            .prepare_sequence_state(seq_id, self.make_internal_caches());
+    }
+
+    fn release_sequence_state_by_id(&self, seq_id: SequenceId) {
+        self.sequence_state.release_sequence_state(seq_id);
+    }
+
+    fn supports_snapshot_reuse(&self) -> bool {
+        true
+    }
+
+    fn snapshot_sequence_state(
+        &self,
+        seq_id: SequenceId,
+        token_len: usize,
+    ) -> Option<mlxcel_core::generate::ModelStateSnapshot> {
+        self.sequence_state
+            .with_sequence_state_ref(seq_id, |state| {
+                let mut snapshot =
+                    mlxcel_core::generate::ModelStateSnapshot::new("qwen3_next", token_len);
+                for (idx, cache) in state.iter().enumerate() {
+                    cache.snapshot_into(&mut snapshot, &format!("layer{idx}"));
+                }
+                snapshot
+            })
+    }
+
+    fn restore_sequence_state(
+        &self,
+        seq_id: SequenceId,
+        snapshot: &mlxcel_core::generate::ModelStateSnapshot,
+    ) -> Result<(), String> {
+        if snapshot.family() != "qwen3_next" {
+            return Err(format!(
+                "cannot restore {} snapshot into qwen3_next",
+                snapshot.family()
+            ));
+        }
+        let mut state = self.make_internal_caches();
+        for (idx, cache) in state.iter_mut().enumerate() {
+            cache.restore_from(snapshot, &format!("layer{idx}"));
+        }
+        self.sequence_state.replace_sequence_state(seq_id, state);
+        Ok(())
     }
 
     fn make_caches(&self) -> Vec<KVCache> {
@@ -1652,7 +1750,12 @@ impl LanguageModel for Qwen3NextModel {
     }
 
     fn supports_batching(&self) -> bool {
-        false // Qwen3Next uses internal mixed cache types, not compatible with per-sequence KV isolation
+        // No batched (multi-sequence-per-forward) decode: qwen3_next has no
+        // batched gated-delta path. Concurrent server requests are still
+        // isolated per sequence via the model-owned `sequence_state` +
+        // `forward_with_sequence_id` (the scheduler drives one sequence per
+        // forward, each with its own SequenceId).
+        false
     }
 
     fn eos_token_ids(&self) -> Vec<i32> {

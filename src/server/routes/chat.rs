@@ -449,6 +449,22 @@ async fn non_stream_chat_completion(
     // thinking family at once (Qwen `<think>`, Gemma 4 `<|channel>`).
     let reasoning = extract_reasoning_content(&result.text, primed_open_thinking);
 
+    // Issue #467: when the prompt primed an open thinking channel and the model
+    // never emitted its close marker, the whole generation routes to
+    // `reasoning_content` and the user-facing `content` is emptied below.
+    // Surface that here so a broken or degenerate decode (e.g. an unsupported
+    // quantization collapsing into repeating tokens) does not masquerade as a
+    // clean, intentionally-empty response.
+    if primed_thinking_unclosed(&result.text, primed_open_thinking) {
+        tracing::warn!(
+            target: "mlxcel::thinking",
+            completion_tokens = result.completion_tokens as u64,
+            finish_reason = %result.finish_reason,
+            "primed thinking channel never closed: `content` is empty and all output \
+             routed to `reasoning_content`; the decode may be truncated or degenerate"
+        );
+    }
+
     // Try to parse tool calls from the output
     if tool_calls::should_parse_tool_calls(&request) {
         let tools = request.tools.as_deref();
@@ -953,6 +969,27 @@ pub(crate) fn is_prompt_primed_open_thinking(prompt: &str) -> bool {
 /// closed when any of them appears in the raw output.
 const OPEN_THINKING_CLOSE_MARKERS: &[&str] = &["<channel|>", "</think>"];
 
+/// Whether the prompt primed an open thinking block that the raw output never
+/// closed.
+///
+/// True exactly when `primed` is set (the generation prompt ended with an open
+/// thinking marker) and `raw_output` contains none of the close markers
+/// (`<channel|>` for Gemma 4, `</think>` for Qwen-style). In that state the
+/// whole generation is reasoning and the non-streaming `content` is emptied by
+/// [`strip_unclosed_primed_thinking`].
+///
+/// Callers surface this condition (a `tracing::warn!`) instead of returning a
+/// silently-empty `content`, so a broken or degenerate decode that never emits
+/// a close marker (issue #467: an unsupported quantization collapsing into
+/// repeating tokens) does not masquerade as a clean, intentionally-empty
+/// response.
+fn primed_thinking_unclosed(raw_output: &str, primed: bool) -> bool {
+    primed
+        && !OPEN_THINKING_CLOSE_MARKERS
+            .iter()
+            .any(|m| raw_output.contains(m))
+}
+
 /// Strip reasoning content that would otherwise leak when the prompt primed
 /// an open thinking block and the model never emitted its close marker.
 ///
@@ -960,18 +997,15 @@ const OPEN_THINKING_CLOSE_MARKERS: &[&str] = &["<channel|>", "</think>"];
 /// * Returns `content` unchanged when `raw_output` contains any known close
 ///   marker (`<channel|>` for Gemma 4, `</think>` for Qwen-style) — the
 ///   regular parsers already handle that case.
-/// * Returns an empty string when the whole generation was unclosed thinking.
+/// * Returns an empty string when the whole generation was unclosed thinking
+///   (see [`primed_thinking_unclosed`], the shared predicate the caller also
+///   uses to emit the unclosed-thinking warning).
 fn strip_unclosed_primed_thinking(content: String, raw_output: &str, primed: bool) -> String {
-    if !primed {
-        return content;
+    if primed_thinking_unclosed(raw_output, primed) {
+        String::new()
+    } else {
+        content
     }
-    if OPEN_THINKING_CLOSE_MARKERS
-        .iter()
-        .any(|m| raw_output.contains(m))
-    {
-        return content;
-    }
-    String::new()
 }
 
 /// Extract the reasoning / thinking scratchpad from a completed generation by
@@ -1170,6 +1204,58 @@ mod tests {
         assert_eq!(
             strip_unclosed_primed_thinking(content.clone(), raw, false),
             content
+        );
+    }
+
+    // -- primed_thinking_unclosed (issue #467 unclosed-thinking surface) --
+
+    #[test]
+    fn primed_thinking_unclosed_true_when_primed_and_no_close_marker() {
+        // The reported failure shape: primed Gemma 4 channel, degenerate output
+        // with no `<channel|>` close marker anywhere. This is the condition the
+        // non-streaming path warns on instead of silently emptying content.
+        assert!(primed_thinking_unclosed(
+            "1\n//\n same////\n1 uma\n//\n//",
+            true
+        ));
+    }
+
+    #[test]
+    fn primed_thinking_unclosed_false_when_close_marker_present() {
+        // A real close marker (either family) means the block closed normally.
+        assert!(!primed_thinking_unclosed(
+            "thinking<channel|>the answer",
+            true
+        ));
+        assert!(!primed_thinking_unclosed("reasoning</think>done", true));
+    }
+
+    #[test]
+    fn primed_thinking_unclosed_false_when_not_primed() {
+        // Non-primed requests are never flagged, even without a close marker.
+        assert!(!primed_thinking_unclosed(
+            "plain answer with no markers",
+            false
+        ));
+    }
+
+    #[test]
+    fn primed_thinking_unclosed_is_the_content_emptying_predicate() {
+        // The predicate is the single source of truth: it is true exactly when
+        // strip_unclosed_primed_thinking empties content, so the warning and the
+        // emptying can never disagree.
+        let unclosed = "all reasoning, never closed";
+        assert!(primed_thinking_unclosed(unclosed, true));
+        assert_eq!(
+            strip_unclosed_primed_thinking("x".to_string(), unclosed, true),
+            String::new()
+        );
+
+        let closed = "reasoning<channel|>answer";
+        assert!(!primed_thinking_unclosed(closed, true));
+        assert_eq!(
+            strip_unclosed_primed_thinking("answer".to_string(), closed, true),
+            "answer"
         );
     }
 

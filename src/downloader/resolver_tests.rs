@@ -37,10 +37,14 @@ fn restore_env(key: &str, prev: Option<String>) {
     }
 }
 
-/// Create a complete (loadable) snapshot directory: `dir` plus a `config.json`.
+/// Create a complete (loadable) snapshot directory: `dir` plus a `config.json`
+/// and a non-zero single-file `model.safetensors`. The weight file is required
+/// for the issue #465 full-weight completeness gate to treat the snapshot as
+/// complete (a bare `config.json` is now an interrupted download, not a hit).
 fn make_complete_snapshot(dir: &Path) {
     fs::create_dir_all(dir).unwrap();
     fs::write(dir.join("config.json"), b"{}").unwrap();
+    fs::write(dir.join("model.safetensors"), b"weights").unwrap();
 }
 
 // ── is_repo_id_shape ────────────────────────────────────────────────────────
@@ -83,30 +87,6 @@ fn repo_id_shape_matches_locked_dot_owner_spec() {
     // repo-id branch (and then fail at the HF API as a malformed owner) — an
     // acceptable user error, not a back-compat regression.
     assert!(is_repo_id_shape("./models"));
-}
-
-// ── snapshot_is_complete ────────────────────────────────────────────────────
-
-#[test]
-fn snapshot_is_complete_requires_config_json() {
-    let tmp = tempfile::tempdir().unwrap();
-    let dir = tmp.path().join("snap");
-    // Missing entirely.
-    assert!(!snapshot_is_complete(&dir));
-    // Exists but no config.json → still incomplete (would fail to load).
-    fs::create_dir_all(&dir).unwrap();
-    assert!(!snapshot_is_complete(&dir));
-    // With config.json → complete.
-    fs::write(dir.join("config.json"), b"{}").unwrap();
-    assert!(snapshot_is_complete(&dir));
-}
-
-#[test]
-fn snapshot_is_complete_false_for_file_path() {
-    let tmp = tempfile::tempdir().unwrap();
-    let file = tmp.path().join("not-a-dir");
-    fs::write(&file, b"x").unwrap();
-    assert!(!snapshot_is_complete(&file));
 }
 
 // ── resolve_model_source: branch 1 (existing path, byte-identical) ───────────
@@ -301,6 +281,50 @@ fn locate_uses_mlxcel_store_when_complete() {
     restore_env("HF_HOME", prev_hf_home);
 
     assert_eq!(hit, Some(store_dir));
+}
+
+/// Regression (issue #465): an interrupted download leaves the mlxcel store
+/// snapshot with `config.json` + an index referencing two shards but only one
+/// shard on disk. The old weak gate (config.json present) returned it and the
+/// loader then died with `Weight not found`; the full-weight gate must instead
+/// treat it as a miss so `resolve_repo_id` re-fetches it.
+#[test]
+fn locate_ignores_incomplete_store_dir() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store_root = tmp.path().join("store");
+    let store_dir = store_root.join("models").join("owner").join("model");
+    fs::create_dir_all(&store_dir).unwrap();
+    fs::write(store_dir.join("config.json"), b"{}").unwrap();
+    fs::write(
+        store_dir.join("model.safetensors.index.json"),
+        br#"{"weight_map": {"a": "model-00001-of-00002.safetensors", "b": "model-00002-of-00002.safetensors"}}"#,
+    )
+    .unwrap();
+    // Only the first shard landed before the download was interrupted.
+    fs::write(store_dir.join("model-00001-of-00002.safetensors"), b"a").unwrap();
+
+    // Empty legacy + empty HF cache so only the (incomplete) store could hit.
+    let cwd_models = tmp.path().join("no-models");
+    let empty_hf = tmp.path().join("hf");
+    fs::create_dir_all(&empty_hf).unwrap();
+
+    let _guard = env_lock();
+    let prev_cache_dir = std::env::var("MLXCEL_CACHE_DIR").ok();
+    let prev_hf_cache = std::env::var("HF_HUB_CACHE").ok();
+    let prev_hf_home = std::env::var("HF_HOME").ok();
+    unsafe {
+        std::env::set_var("MLXCEL_CACHE_DIR", &store_root);
+        std::env::set_var("HF_HUB_CACHE", &empty_hf);
+        std::env::remove_var("HF_HOME");
+    }
+
+    let hit = locate_cached_snapshot("owner/model", None, &cwd_models, None);
+
+    restore_env("MLXCEL_CACHE_DIR", prev_cache_dir);
+    restore_env("HF_HUB_CACHE", prev_hf_cache);
+    restore_env("HF_HOME", prev_hf_home);
+
+    assert_eq!(hit, None, "an interrupted store snapshot must not be a hit");
 }
 
 // ── locate_cached_snapshot: --models-dir override (issue #107) ───────────────
