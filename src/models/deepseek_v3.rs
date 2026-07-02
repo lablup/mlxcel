@@ -589,11 +589,11 @@ pub struct SwitchGLU {
 
 impl SwitchGLU {
     pub fn forward(&self, x: &MlxArray, indices: &MlxArray) -> UniquePtr<MlxArray> {
-        let indices_shape = mlxcel_core::array_shape(indices);
-        let n_tokens = indices_shape[0];
-        let top_k = indices_shape[1];
-
-        // Expand x for gather_qmm: [n_tokens, hidden] -> [n_tokens, 1, 1, hidden]
+        // `x` is `[..., hidden]` with one or more leading token axes: a flat
+        // `[n_tokens, hidden]` stream in the text-only path, or a 3D
+        // `[batch, seq, hidden]` tensor in the VLM embeddings path. The two
+        // `expand_dims` below insert the gather (`top_k`) and matmul axes for
+        // `gather_qmm` regardless of how many leading axes `x` carries.
         let x_exp = mlxcel_core::expand_dims(x, -2);
         let x_exp = mlxcel_core::expand_dims(&x_exp, -3);
 
@@ -669,9 +669,15 @@ impl SwitchGLU {
             )
         };
 
-        // Squeeze: [n_tokens, top_k, 1, hidden] -> [n_tokens, top_k, hidden]
-        let output = mlxcel_core::squeeze_axis(&output, -2);
-        mlxcel_core::reshape(&output, &[n_tokens, top_k, -1])
+        // Drop the singleton matmul axis, preserving every leading token axis:
+        // `[..., top_k, 1, hidden] -> [..., top_k, hidden]`. A previous
+        // `reshape(&[n_tokens, top_k, -1])` here assumed a 2D `[n_tokens, hidden]`
+        // input; for a 3D `[batch, seq, hidden]` input it misread `n_tokens` and
+        // `top_k` from the leading axes and folded the real `top_k` and `hidden`
+        // axes into one (`[batch, seq, top_k * hidden]`). That corrupted tensor
+        // then failed to broadcast against `scores[..., None]` in
+        // `moe_weighted_sum` (`[batch, seq, top_k*hidden]` vs `[batch, seq, top_k, 1]`).
+        mlxcel_core::squeeze_axis(&output, -2)
     }
 
     pub fn from_weights(
@@ -1236,6 +1242,140 @@ mod tests {
             attention_bias: false,
             quantization: None,
         }
+    }
+
+    // ---- MoE 3D-input regression (issue #525 round 2) ---------------------
+    //
+    // The Kimi-VL text backbone is this DeepSeek-V3 model, driven through
+    // `forward_impl_with_embeddings` on 3D `[batch, seq, hidden]` hidden
+    // states. `SwitchGLU::forward` used to end with
+    // `reshape(&output, &[n_tokens, top_k, -1])`, where `n_tokens`/`top_k`
+    // were read from `indices.shape[0]`/`[1]`. That is only correct for a 2D
+    // `[n_tokens, hidden]` input; for a 3D input it read the batch/seq axes as
+    // `n_tokens`/`top_k` and folded the real `top_k` and `hidden` axes into a
+    // single `top_k * hidden` axis. The following `moe_weighted_sum` then tried
+    // to broadcast `[batch, seq, top_k*hidden]` against `[batch, seq, top_k, 1]`
+    // and aborted (the reported `(1,91,12288)` vs `(1,91,6,1)` crash).
+
+    /// Deterministic, varied, finite fill so quantization scales stay non-degenerate.
+    fn ramp(n: usize) -> Vec<f32> {
+        (0..n)
+            .map(|i| (((i * 37 + 11) % 97) as f32 - 48.0) * 0.01)
+            .collect()
+    }
+
+    fn quantized_triple(
+        data: &[f32],
+        shape: &[i32],
+        group_size: i32,
+        bits: i32,
+    ) -> (
+        UniquePtr<MlxArray>,
+        UniquePtr<MlxArray>,
+        UniquePtr<MlxArray>,
+    ) {
+        let w = mlxcel_core::from_slice_f32(data, shape);
+        (
+            mlxcel_core::quantize_weights_w(&w, group_size, bits),
+            mlxcel_core::quantize_weights_scales(&w, group_size, bits),
+            mlxcel_core::quantize_weights_biases(&w, group_size, bits),
+        )
+    }
+
+    /// Tiny quantized SwitchGLU: `gate`/`up` are `[E, inter, hidden]`,
+    /// `down` is `[E, hidden, inter]` (group_size 64, 4-bit).
+    fn tiny_switch_glu(e: i32, hidden: i32, inter: i32) -> SwitchGLU {
+        let (gs, bits) = (64i32, 4i32);
+        let (gate_weight, gate_scales, gate_biases) = quantized_triple(
+            &ramp((e * inter * hidden) as usize),
+            &[e, inter, hidden],
+            gs,
+            bits,
+        );
+        let (up_weight, up_scales, up_biases) = quantized_triple(
+            &ramp((e * inter * hidden) as usize),
+            &[e, inter, hidden],
+            gs,
+            bits,
+        );
+        let (down_weight, down_scales, down_biases) = quantized_triple(
+            &ramp((e * hidden * inter) as usize),
+            &[e, hidden, inter],
+            gs,
+            bits,
+        );
+        SwitchGLU {
+            gate_weight,
+            gate_scales,
+            gate_biases,
+            up_weight,
+            up_scales,
+            up_biases,
+            down_weight,
+            down_scales,
+            down_biases,
+            group_size: gs,
+            bits,
+        }
+    }
+
+    fn tiny_gate(e: i32, hidden: i32, top_k: i32) -> MoEGate {
+        MoEGate {
+            weight: mlxcel_core::from_slice_f32(&ramp((e * hidden) as usize), &[e, hidden]),
+            e_score_correction_bias: mlxcel_core::from_slice_f32(&vec![0.0f32; e as usize], &[e]),
+            top_k,
+            n_routed_experts: e,
+            routed_scaling_factor: 1.0,
+            n_group: 1,
+            topk_group: 1,
+            norm_topk_prob: true,
+        }
+    }
+
+    #[test]
+    fn switch_glu_forward_preserves_rank_for_2d_and_3d() {
+        let (e, hidden, inter, top_k) = (4i32, 64i32, 64i32, 2i32);
+        let glu = tiny_switch_glu(e, hidden, inter);
+        let gate = tiny_gate(e, hidden, top_k);
+
+        // 2D flat token stream: [n_tokens, hidden] -> [n_tokens, top_k, hidden].
+        let x2 = mlxcel_core::from_slice_f32(&ramp((3 * hidden) as usize), &[3, hidden]);
+        let (idx2, _) = gate.forward(&x2);
+        let y2 = glu.forward(&x2, &idx2);
+        mlxcel_core::eval(&y2);
+        assert_eq!(mlxcel_core::array_shape(&y2), vec![3, top_k, hidden]);
+
+        // 3D VLM embeddings path: [batch, seq, hidden] -> [batch, seq, top_k, hidden].
+        // The pre-fix reshape collapsed this to [batch, seq, top_k*hidden].
+        let x3 = mlxcel_core::from_slice_f32(&ramp((3 * hidden) as usize), &[1, 3, hidden]);
+        let (idx3, _) = gate.forward(&x3);
+        let y3 = glu.forward(&x3, &idx3);
+        mlxcel_core::eval(&y3);
+        assert_eq!(mlxcel_core::array_shape(&y3), vec![1, 3, top_k, hidden]);
+    }
+
+    #[test]
+    fn moe_block_3d_forward_matches_reference_shape() {
+        // Full MoE block on a 3D `[batch, seq, hidden]` input exercises the exact
+        // crash path: gate -> SwitchGLU -> moe_weighted_sum. Before the fix this
+        // aborted on the broadcast mismatch; it must now return `[batch, seq, hidden]`.
+        let (e, hidden, inter, top_k) = (4i32, 64i32, 64i32, 2i32);
+        let moe = MoEBlock {
+            gate: tiny_gate(e, hidden, top_k),
+            switch_mlp: tiny_switch_glu(e, hidden, inter),
+            shared_experts: None,
+        };
+        let x = mlxcel_core::from_slice_f32(&ramp((3 * hidden) as usize), &[1, 3, hidden]);
+        let out = moe.forward(&x);
+        mlxcel_core::eval(&out);
+        assert_eq!(mlxcel_core::array_shape(&out), vec![1, 3, hidden]);
+
+        let mx = mlxcel_core::max_all(&out);
+        mlxcel_core::eval(&mx);
+        assert!(
+            mlxcel_core::item_f32(&mx).is_finite(),
+            "MoE output must be finite"
+        );
     }
 
     /// Regression guard for the real Kimi-VL / Moonlight text config, whose
