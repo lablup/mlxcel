@@ -258,6 +258,9 @@ fn fallback_architecture(model_type: ModelType) -> &'static str {
         // Granite Vision's text backbone is Granite; TP is refused for VLM-kind
         // models earlier, this keeps the dispatch table total.
         ModelType::GraniteVisionVLM => "granite",
+        // Granite 4 Vision's text backbone is granitemoehybrid; TP is refused for
+        // VLM-kind models earlier, this keeps the dispatch table total.
+        ModelType::Granite4VisionVLM => "granitemoehybrid",
         // Youtu-VL is not currently supported by tensor-parallel inference;
         // we return a placeholder architecture string here so the planner
         // does not panic on the dispatch table lookup. The actual loader

@@ -821,6 +821,11 @@ impl GraniteMoeHybridSharedMLP {
 
 enum FeedForward {
     Dense(GraniteMoeHybridMLP),
+    /// Dense feed-forward kept in the fused `shared_mlp` form (a single
+    /// `input_linear` producing gate+up). Used for quantized dense checkpoints,
+    /// where the fused quantized `input_linear` cannot be split into separate
+    /// `mlp.gate_proj`/`up_proj` at load.
+    DenseShared(GraniteMoeHybridSharedMLP),
     Moe {
         moe: GraniteMoeHybridMoE,
         shared: GraniteMoeHybridSharedMLP,
@@ -831,6 +836,7 @@ impl FeedForward {
     fn forward(&self, x: &MlxArray) -> UniquePtr<MlxArray> {
         match self {
             FeedForward::Dense(mlp) => mlp.forward(x),
+            FeedForward::DenseShared(shared) => shared.forward(x),
             FeedForward::Moe { moe, shared } => {
                 let moe_out = moe.forward(x);
                 let shared_out = shared.forward(x);
@@ -946,6 +952,83 @@ impl GraniteMoeHybridLayerCache {
 
 // Granite 4.x model.
 
+/// Multi-depth visual injection for Granite 4 Vision: a per-target packed
+/// feature tensor `(total_image_tokens, hidden)` added at image-token positions
+/// right before the named decoder layer during prefill.
+pub struct HybridInjection<'a> {
+    /// `(1, seq)` mask (int/bool) that is nonzero at image-token positions.
+    pub visual_pos_mask: &'a MlxArray,
+    /// `(layer_index, features)` pairs; `features` is `(total_image_tokens, hidden)`.
+    pub targets: Vec<(usize, UniquePtr<MlxArray>)>,
+}
+
+/// Scatter-add `visual_embeds` `(n_img, hidden)` onto `h` `(1, seq, hidden)` at
+/// the nonzero positions of `visual_pos_mask` `(1, seq)`, in order. Batch-1 only
+/// (VLM prefill is unpadded batch-1). `pub(crate)` for the injection regression
+/// test (guards the `slice_update`-is-functional footgun).
+pub(crate) fn inject_at_positions(
+    h: &MlxArray,
+    visual_pos_mask: &MlxArray,
+    visual_embeds: &MlxArray,
+) -> UniquePtr<MlxArray> {
+    let h_shape = mlxcel_core::array_shape(h);
+    if h_shape[0] != 1 {
+        return mlxcel_core::copy(h);
+    }
+    let mask_1d = mlxcel_core::slice(visual_pos_mask, &[0, 0], &[1, h_shape[1]]);
+    let mask_1d = mlxcel_core::squeeze_axis(&mask_1d, 0);
+    let mask_i32 = mlxcel_core::astype(&mask_1d, mlxcel_core::dtype::INT32);
+    mlxcel_core::eval(&mask_i32);
+
+    let seq_len = h_shape[1] as usize;
+    let mut positions = Vec::new();
+    for i in 0..seq_len {
+        let val = mlxcel_core::slice(&mask_i32, &[i as i32], &[i as i32 + 1]);
+        mlxcel_core::eval(&val);
+        if mlxcel_core::item_i32(&val) != 0 {
+            positions.push(i as i32);
+        }
+    }
+    if positions.is_empty() {
+        return mlxcel_core::copy(h);
+    }
+
+    let hidden = h_shape[2];
+    let batch_h = mlxcel_core::slice(h, &[0, 0, 0], &[1, h_shape[1], hidden]);
+    let batch_h = mlxcel_core::squeeze_axis(&batch_h, 0);
+
+    let idx_arr = mlxcel_core::from_slice_i32(&positions, &[positions.len() as i32]);
+    let current = mlxcel_core::take(&batch_h, &idx_arr, 0);
+    let n_img = positions.len() as i32;
+    let embeds = mlxcel_core::slice(visual_embeds, &[0, 0], &[n_img, hidden]);
+    let embeds = mlxcel_core::astype(&embeds, mlxcel_core::array_dtype(&batch_h));
+    let updated = mlxcel_core::add(&current, &embeds);
+
+    // `slice_update` is functional (returns a new array); the result MUST be
+    // captured or the write is lost. Contiguous image runs (the single-image
+    // case) collapse to one slice_update; disjoint runs fall back to per-row.
+    let mut result = mlxcel_core::copy(&batch_h);
+    let contiguous = positions
+        .iter()
+        .enumerate()
+        .all(|(i, &p)| p == positions[0] + i as i32);
+    if contiguous {
+        let start = positions[0];
+        result =
+            mlxcel_core::slice_update(&result, &updated, &[start, 0], &[start + n_img, hidden]);
+    } else {
+        for (local_idx, &pos) in positions.iter().enumerate() {
+            let val = mlxcel_core::slice(
+                &updated,
+                &[local_idx as i32, 0],
+                &[local_idx as i32 + 1, hidden],
+            );
+            result = mlxcel_core::slice_update(&result, &val, &[pos, 0], &[pos + 1, hidden]);
+        }
+    }
+    mlxcel_core::expand_dims(&result, 0)
+}
+
 pub struct GraniteMoeHybridModel {
     config: ModelArgs,
     embed_tokens: UnifiedEmbedding,
@@ -974,8 +1057,50 @@ impl GraniteMoeHybridModel {
     ) -> UniquePtr<MlxArray> {
         // h = embed_tokens(x) * embedding_multiplier.
         let h = self.embed_tokens.forward(inputs);
-        let mut h = mlxcel_core::multiply_scalar(&h, self.embedding_multiplier);
+        let h = mlxcel_core::multiply_scalar(&h, self.embedding_multiplier);
+        self.run_from_embedded(h, caches, None)
+    }
 
+    /// Raw token-embedding lookup, no `embedding_multiplier`. Used by the
+    /// Granite 4 Vision wrapper, which zeroes image slots then relies on
+    /// multi-depth injection ([`HybridInjection`]) for image content.
+    pub fn input_embeddings(&self, input_ids: &MlxArray) -> UniquePtr<MlxArray> {
+        self.embed_tokens.forward(input_ids)
+    }
+
+    /// Forward from a pre-computed (un-scaled) embedding stream, applying
+    /// `embedding_multiplier` here, with optional multi-depth visual injection
+    /// (Granite 4 Vision). Routes through the model's own sequence state so
+    /// recurrent conv/SSM state and KV offsets advance exactly once.
+    pub(crate) fn forward_embeds_with_injection(
+        &self,
+        inputs_embeds: &MlxArray,
+        injection: Option<&HybridInjection>,
+        seq_id: Option<mlxcel_core::cache::SequenceId>,
+    ) -> UniquePtr<MlxArray> {
+        let run = |internal: &mut [GraniteMoeHybridLayerCache]| {
+            let h = mlxcel_core::multiply_scalar(inputs_embeds, self.embedding_multiplier);
+            self.run_from_embedded(h, internal, injection)
+        };
+        match seq_id {
+            Some(_) => self.sequence_state.with_or_create_sequence_state(
+                seq_id,
+                || GraniteMoeHybridModel::make_caches(self),
+                run,
+            ),
+            None => self.sequence_state.with_sequence_state(None, run),
+        }
+    }
+
+    /// Run the decoder stack + norm + head from an already-`embedding_multiplier`
+    /// scaled hidden state. Injects visual features at masked positions *before*
+    /// each targeted layer when `injection` is present.
+    fn run_from_embedded(
+        &self,
+        mut h: UniquePtr<MlxArray>,
+        caches: &mut [GraniteMoeHybridLayerCache],
+        injection: Option<&HybridInjection>,
+    ) -> UniquePtr<MlxArray> {
         let shape = mlxcel_core::array_shape(&h);
         let seq_len = shape[1];
 
@@ -993,7 +1118,16 @@ impl GraniteMoeHybridModel {
             None
         };
 
-        for (layer, cache) in self.layers.iter().zip(caches.iter_mut()) {
+        for (idx, (layer, cache)) in self.layers.iter().zip(caches.iter_mut()).enumerate() {
+            // Multi-depth visual injection happens before the targeted layer
+            // (layer 0 injection lands right after the embedding scale).
+            if let Some(inj) = injection {
+                for (target_layer, feats) in inj.targets.iter() {
+                    if *target_layer == idx {
+                        h = inject_at_positions(&h, inj.visual_pos_mask, feats);
+                    }
+                }
+            }
             let mask = if layer.is_attention() {
                 attn_mask.as_deref()
             } else {
@@ -1227,6 +1361,26 @@ fn build_feed_forward(
             shared_intermediate: args.shared_intermediate_size as i32,
         };
         Ok(FeedForward::Moe { moe, shared })
+    } else if weights.contains_key(&format!("{prefix}.shared_mlp.input_linear.weight"))
+        && !weights.contains_key(&format!("{prefix}.mlp.gate_proj.weight"))
+    {
+        // Dense checkpoint whose fused `shared_mlp.input_linear` was left intact
+        // by sanitize (quantized: the fused weight cannot be split). Use it as-is.
+        Ok(FeedForward::DenseShared(GraniteMoeHybridSharedMLP {
+            input_linear: UnifiedLinear::from_weights(
+                weights,
+                &format!("{prefix}.shared_mlp.input_linear"),
+                gs,
+                bits,
+            )?,
+            output_linear: UnifiedLinear::from_weights(
+                weights,
+                &format!("{prefix}.shared_mlp.output_linear"),
+                gs,
+                bits,
+            )?,
+            shared_intermediate: args.shared_intermediate_size as i32,
+        }))
     } else {
         let mlp_prefix = format!("{prefix}.mlp");
         Ok(FeedForward::Dense(GraniteMoeHybridMLP {
@@ -1320,9 +1474,14 @@ fn sanitize_weights(mut weights: WeightMap, args: &ModelArgs) -> WeightMap {
             if weights.contains_key(&format!("{layer_prefix}.mlp.gate_proj.weight")) {
                 continue;
             }
+            // Quantized fused `input_linear` cannot be split (slicing a quantized
+            // tensor is unsound); leave the whole fused `shared_mlp` intact so
+            // `build_feed_forward` loads it via `FeedForward::DenseShared`.
+            if weights.contains_key(&format!("{layer_prefix}.shared_mlp.input_linear.scales")) {
+                continue;
+            }
             let input_key = format!("{layer_prefix}.shared_mlp.input_linear.weight");
             if weights.contains_key(&input_key)
-                && !weights.contains_key(&format!("{layer_prefix}.shared_mlp.input_linear.scales"))
                 && let Some(input_weight) = weights.remove(&input_key)
             {
                 let shape = mlxcel_core::array_shape(&input_weight);
@@ -1411,6 +1570,43 @@ impl LanguageModel for GraniteMoeHybridModel {
             || GraniteMoeHybridModel::make_caches(self),
             |internal| self.forward_with_caches(input_ids, internal),
         )
+    }
+
+    fn forward_with_embeddings(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        _caches: &mut [KVCache],
+        _mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        match input_embeddings {
+            Some(embeds) => self.forward_embeds_with_injection(embeds, None, None),
+            None => self.sequence_state.with_sequence_state(None, |internal| {
+                self.forward_with_caches(input_ids, internal)
+            }),
+        }
+    }
+
+    fn forward_with_embeddings_and_sequence_id(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        seq_id: Option<mlxcel_core::cache::SequenceId>,
+        _caches: &mut [KVCache],
+        _mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        match input_embeddings {
+            Some(embeds) => self.forward_embeds_with_injection(embeds, None, seq_id),
+            None => self.sequence_state.with_or_create_sequence_state(
+                seq_id,
+                || GraniteMoeHybridModel::make_caches(self),
+                |internal| self.forward_with_caches(input_ids, internal),
+            ),
+        }
+    }
+
+    fn embed_tokens(&self, input_ids: &MlxArray) -> Option<UniquePtr<MlxArray>> {
+        Some(self.input_embeddings(input_ids))
     }
 
     fn supports_snapshot_reuse(&self) -> bool {

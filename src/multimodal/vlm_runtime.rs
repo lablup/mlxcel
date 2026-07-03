@@ -149,6 +149,11 @@ pub enum VlmPreparationSummary {
         image_blocks: usize,
         total_image_tokens: i32,
     },
+    /// Granite 4 Vision expanded each `<image>` into `num_image_tokens` copies.
+    Granite4Vision {
+        image_blocks: usize,
+        total_image_tokens: i32,
+    },
     /// Kimi-VL expanded each `<|media_pad|>` into `(h/merge)*(w/merge)`
     /// media-placeholder tokens.
     KimiVL {
@@ -1026,6 +1031,35 @@ where
 
             let input_ids_arr = prompt_ids_array(prompt_tokens);
             let embeddings = granite.get_input_embeddings(&input_ids_arr, &pixel_values, &infos);
+
+            Ok(Some(PreparedVlmEmbeddings {
+                embeddings,
+                preparation,
+            }))
+        }
+        VlmRuntimeRef::Granite4Vision(granite4) => {
+            // AnyRes tiling at grid side 12 (patch 16, downsample /2); each image
+            // packs into `144 + H*(W+1)` tokens per injected stream.
+            let (pixel_values, infos) = granite4.processor.preprocess_with_tiles(images);
+
+            let preparation =
+                crate::multimodal::granite_vision_prompt::insert_granite_vision_image_tokens(
+                    prompt_tokens,
+                    &infos,
+                    granite4.image_token_index,
+                    granite4.feature_side,
+                    granite4.base_tokens,
+                )
+                .map(|stats| VlmPreparationSummary::Granite4Vision {
+                    image_blocks: stats.image_blocks,
+                    total_image_tokens: stats.total_image_tokens,
+                });
+
+            let _ = active_caches;
+            let _ = image_cache_keys;
+
+            let input_ids_arr = prompt_ids_array(prompt_tokens);
+            let embeddings = granite4.get_input_embeddings(&input_ids_arr, &pixel_values, &infos);
 
             Ok(Some(PreparedVlmEmbeddings {
                 embeddings,

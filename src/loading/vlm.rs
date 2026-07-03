@@ -41,6 +41,8 @@ use models::sanitize_config_json;
 mod gemma;
 #[path = "vlm_gemma_unified.rs"]
 mod gemma_unified;
+#[path = "vlm_granite4_vision.rs"]
+mod granite4_vision;
 #[path = "vlm_granite_vision.rs"]
 mod granite_vision;
 #[path = "vlm_idefics2.rs"]
@@ -75,6 +77,7 @@ mod youtu_vl_loader;
 pub(crate) use gemma::{load_gemma3_vlm, load_gemma3n_vlm, load_gemma4_vlm};
 pub(crate) use gemma_unified::load_gemma4_unified;
 pub(crate) use granite_vision::load_granite_vision_vlm;
+pub(crate) use granite4_vision::load_granite4_vision_vlm;
 pub(crate) use idefics2::load_idefics2_vlm;
 pub(crate) use internvl::load_internvl_vlm;
 pub(crate) use kimi_vl_loader::load_kimi_vl_vlm;

@@ -682,6 +682,18 @@ fn preprocess_template(template: String) -> String {
             out = out.replace(v, "");
         }
     }
+    // Some chat templates (e.g. Granite 4 Vision) write the image marker as a
+    // multi-line string literal — `"<image>\n"` split across two source lines —
+    // which minijinja renders as empty/whitespace instead of the marker, so the
+    // per-model image-token expansion never finds a placeholder and mis-places
+    // the image. Normalize such literals to an escaped single-line form.
+    for marker in ["<image>", "<video>", "<audio>"] {
+        let multiline = format!("\"{marker}\n\"");
+        let escaped = format!("\"{marker}\\n\"");
+        if out.contains(&multiline) {
+            out = out.replace(&multiline, &escaped);
+        }
+    }
     out
 }
 
@@ -808,6 +820,26 @@ fn configure_environment(env: &mut Environment<'_>) {
                     let suffix = arg_str();
                     return Ok(Value::from(s.ends_with(suffix)));
                 }
+                "index" | "find" => {
+                    // Python `str.index(sub)` / `str.find(sub)`: return the
+                    // character index of the first occurrence. `index` raises on
+                    // absence; `find` returns -1. Used by the Granite 4 Vision
+                    // template's image-position dispatcher.
+                    let sub = arg_str();
+                    match s.find(sub) {
+                        Some(byte_idx) => {
+                            let char_idx = s[..byte_idx].chars().count() as i64;
+                            return Ok(Value::from(char_idx));
+                        }
+                        None if method == "find" => return Ok(Value::from(-1i64)),
+                        None => {
+                            return Err(minijinja::Error::new(
+                                ErrorKind::InvalidOperation,
+                                "substring not found",
+                            ));
+                        }
+                    }
+                }
                 "replace" => {
                     let old = args.first().and_then(|a| a.as_str()).unwrap_or_default();
                     let new = args.get(1).and_then(|a| a.as_str()).unwrap_or_default();
@@ -920,11 +952,6 @@ fn configure_environment(env: &mut Environment<'_>) {
                     return Ok(Value::from(
                         s.chars().any(|c| c.is_lowercase()) && !s.chars().any(|c| c.is_uppercase()),
                     ));
-                }
-                "find" => {
-                    let needle = arg_str();
-                    let idx = s.find(needle).map(|i| i as i64).unwrap_or(-1);
-                    return Ok(Value::from(idx));
                 }
                 "count" => {
                     let needle = arg_str();

@@ -197,3 +197,50 @@ fn granite_hybrid_quantization_read_from_config() {
     assert_eq!(bf16.group_size(), 64);
     assert_eq!(bf16.bits(), 4);
 }
+
+/// Regression for the `slice_update`-is-functional footgun: `inject_at_positions`
+/// MUST write the visual features into `h` at the image-token positions. A
+/// dropped `slice_update` return leaves the image slots zero and silently makes
+/// the VLM blind (Granite 4 Vision #541). Runs on the default device.
+#[test]
+fn inject_at_positions_writes_features_into_hidden_state() {
+    use super::granitemoehybrid::inject_at_positions;
+
+    let (seq, hidden) = (5i32, 4i32);
+    // Image slots start zeroed, exactly as `get_input_embeddings` produces them.
+    let h = mlxcel_core::zeros(&[1, seq, hidden], mlxcel_core::dtype::FLOAT32);
+    // Image tokens occupy positions 1, 2, 3 (a contiguous single-image run).
+    let mask = mlxcel_core::from_slice_i32(&[0, 1, 1, 1, 0], &[1, seq]);
+    // Three feature rows, each a distinct non-zero constant.
+    let feats = mlxcel_core::from_slice_f32(
+        &[1.0, 1.0, 1.0, 1.0, 2.0, 2.0, 2.0, 2.0, 3.0, 3.0, 3.0, 3.0],
+        &[3, hidden],
+    );
+
+    let out = inject_at_positions(&h, &mask, &feats);
+    mlxcel_core::eval(&out);
+    let val = |pos: i32, col: i32| {
+        let c = mlxcel_core::slice(&out, &[0, pos, col], &[1, pos + 1, col + 1]);
+        mlxcel_core::eval(&c);
+        mlxcel_core::item_f32(&c)
+    };
+
+    // Non-image positions stay zero; image positions carry their feature row.
+    assert_eq!(val(0, 0), 0.0, "non-image position must be untouched");
+    assert_eq!(
+        val(1, 0),
+        1.0,
+        "image position 1 must receive feature row 0"
+    );
+    assert_eq!(
+        val(2, 2),
+        2.0,
+        "image position 2 must receive feature row 1"
+    );
+    assert_eq!(
+        val(3, 3),
+        3.0,
+        "image position 3 must receive feature row 2"
+    );
+    assert_eq!(val(4, 0), 0.0, "non-image position must be untouched");
+}
