@@ -324,9 +324,30 @@ impl GraniteModel {
         caches: &mut [KVCache],
         mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
-        // Embed and scale: h = embed_tokens(x) * embedding_multiplier.
-        let h = self.embed_tokens.forward(input_ids);
-        let mut h = mlxcel_core::multiply_scalar(&h, self.embedding_multiplier);
+        let embeds = self.input_embeddings(input_ids);
+        self.forward_embeds(&embeds, caches, mask)
+    }
+
+    /// Raw token-embedding lookup with no `embedding_multiplier` applied. Used
+    /// by VLM wrappers that scatter image features into the embedding stream
+    /// before the multiplier (which [`Self::forward_embeds`] then applies once
+    /// to the merged stream).
+    pub fn input_embeddings(&self, input_ids: &MlxArray) -> UniquePtr<MlxArray> {
+        self.embed_tokens.forward(input_ids)
+    }
+
+    /// Forward from a pre-computed embedding stream (token embeddings, or a
+    /// VLM's merged text+image embeddings). Applies `embedding_multiplier` here,
+    /// so callers must pass un-scaled embeddings. `Self::forward` is exactly
+    /// this over `input_embeddings(input_ids)`.
+    pub fn forward_embeds(
+        &self,
+        inputs_embeds: &MlxArray,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        // Scale the merged stream: h = inputs_embeds * embedding_multiplier.
+        let mut h = mlxcel_core::multiply_scalar(inputs_embeds, self.embedding_multiplier);
 
         for (i, layer) in self.layers.iter().enumerate() {
             h = layer.forward(&h, &mut caches[i], mask);
@@ -415,6 +436,23 @@ impl LanguageModel for GraniteModel {
         mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
         GraniteModel::forward(self, input_ids, caches, mask)
+    }
+
+    fn forward_with_embeddings(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        match input_embeddings {
+            Some(embeds) => self.forward_embeds(embeds, caches, mask),
+            None => GraniteModel::forward(self, input_ids, caches, mask),
+        }
+    }
+
+    fn embed_tokens(&self, input_ids: &MlxArray) -> Option<UniquePtr<MlxArray>> {
+        Some(self.input_embeddings(input_ids))
     }
 
     fn make_caches(&self) -> Vec<KVCache> {

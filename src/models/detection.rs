@@ -237,7 +237,21 @@ pub fn get_model_type(model_path: &Path) -> Result<ModelType> {
         "minicpmv4_6" => Ok(ModelType::MiniCPMV46VLM),
         "moondream3" => Ok(ModelType::Moondream3VLM),
         "moondream2" | "moondream1" => Ok(ModelType::Moondream2VLM),
-        "llava" | "llava_next" => Ok(ModelType::LlavaVLM),
+        "granite_vision" => Ok(ModelType::GraniteVisionVLM),
+        "llava" | "llava_next" => {
+            // The original IBM Granite Vision checkpoint ships as `llava_next`
+            // with a `granite` text backbone; route it to the Granite VLM.
+            let text_model_type = v
+                .get("text_config")
+                .and_then(|t| t.get("model_type"))
+                .and_then(|m| m.as_str())
+                .unwrap_or("");
+            if text_model_type == "granite" {
+                Ok(ModelType::GraniteVisionVLM)
+            } else {
+                Ok(ModelType::LlavaVLM)
+            }
+        }
         "llava_bunny" | "bunny-llama" | "llava-qwen2" => Ok(ModelType::LlavaBunnyVLM),
         "aya_vision" => Ok(ModelType::AyaVisionVLM),
         "paligemma" => Ok(ModelType::PaliGemmaVLM),

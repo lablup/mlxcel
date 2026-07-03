@@ -36,6 +36,7 @@
 
 pub mod batched_dispatch;
 pub mod gemma4_vl;
+pub mod granite_vision_prompt;
 pub mod internvl_prompt;
 pub mod kimi_vl_prompt;
 pub mod lfm2_vl_prompt;

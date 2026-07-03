@@ -60,6 +60,7 @@ pub enum VlmRuntimeRef<'a> {
     Idefics2(&'a vision::Idefics2Model),
     /// LFM2-VL (lfm2_vl) runtime.
     Lfm2Vl(&'a vision::Lfm2VlModel),
+    GraniteVision(&'a vision::GraniteVisionVLModel),
     Standard(&'a vision::VisionModule),
 }
 
@@ -173,6 +174,7 @@ impl LoadedModel {
             Self::Gemma3VLM(vlm) => Some(VlmRuntimeRef::Standard(&vlm.vision)),
             Self::Llama4VLM(vlm) => Some(VlmRuntimeRef::Standard(&vlm.vision)),
             Self::LlavaVLM(vlm) => Some(VlmRuntimeRef::Standard(&vlm.vision)),
+            Self::GraniteVisionVLM(model) => Some(VlmRuntimeRef::GraniteVision(model)),
             _ => None,
         }
     }

@@ -472,6 +472,49 @@ impl SigLipVisionModel {
         self
     }
 
+    /// Multi-tap forward for LLaVA-Next-style feature selection from several
+    /// intermediate layers in a single pass. Builds the `num_layers + 1` entry
+    /// hidden-state list `L` (`L[0]` = embeddings output, `L[j]` = output of the
+    /// j-th encoder layer, all *before* `post_layernorm`) and returns the entries
+    /// named by `taps` in order. A negative tap `v` resolves to `L[len + v]`.
+    /// SigLIP-only (no CLS, no `pre_layrnorm`); the `"full"` select strategy is
+    /// assumed (no token dropped), which is what Granite Vision uses.
+    ///
+    /// Used by: Granite Vision (`granite_vision`).
+    pub fn forward_collect_layers(
+        &self,
+        pixel_values: &MlxArray,
+        taps: &[i32],
+    ) -> Vec<UniquePtr<MlxArray>> {
+        let total = self.layers.len() as i32 + 1; // L[0..=num_layers]
+        let resolved: Vec<i32> = taps
+            .iter()
+            .map(|&v| {
+                let idx = if v < 0 { total + v } else { v };
+                idx.clamp(0, total - 1)
+            })
+            .collect();
+        let want: std::collections::HashSet<i32> = resolved.iter().copied().collect();
+
+        let mut store: Vec<Option<UniquePtr<MlxArray>>> = (0..total).map(|_| None).collect();
+        let mut h = self.embeddings.forward(pixel_values);
+        if want.contains(&0) {
+            store[0] = Some(mlxcel_core::copy(&h));
+        }
+        for (i, layer) in self.layers.iter().enumerate() {
+            h = layer.forward(&h);
+            let lidx = i as i32 + 1;
+            if want.contains(&lidx) {
+                store[lidx as usize] = Some(mlxcel_core::copy(&h));
+            }
+        }
+
+        resolved
+            .iter()
+            .map(|&idx| mlxcel_core::copy(store[idx as usize].as_ref().unwrap()))
+            .collect()
+    }
+
     /// Idefics2-style forward: embed with caller-provided (bucketized) position
     /// ids over a dynamic patch grid, then run the encoder + `post_layernorm`.
     /// SigLIP-only (no CLS, no `pre_layrnorm`, no feature-layer selection);

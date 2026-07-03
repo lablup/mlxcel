@@ -209,6 +209,15 @@ fn print_preparation_summary(summary: VlmPreparationSummary) {
                 image_blocks, total_image_tokens
             );
         }
+        VlmPreparationSummary::GraniteVision {
+            image_blocks,
+            total_image_tokens,
+        } => {
+            println!(
+                "Granite Vision: expanded {} <image> placeholder(s) ({} total image tokens)",
+                image_blocks, total_image_tokens
+            );
+        }
         VlmPreparationSummary::ImageBlocks(stats) => match stats.action {
             ImageTokenBlockAction::Expanded {
                 existing_image_count,

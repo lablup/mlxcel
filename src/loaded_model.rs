@@ -77,6 +77,7 @@ pub enum LoadedModel {
     /// Llama 3.2 Vision (`mllama`): tiled ViT + gated cross-attention.
     MllamaVLM(vision::MllamaVLModel),
     LlavaVLM(vision::VisionLanguageModel),
+    GraniteVisionVLM(vision::GraniteVisionVLModel),
     Qwen2VL(vision::Qwen2VLModel),
     Qwen25VL(vision::Qwen25VLModel),
     Qwen3VL(vision::Qwen3VLModel),
@@ -208,6 +209,7 @@ macro_rules! delegate_language_model {
             LoadedModel::Llama4VLM(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::MllamaVLM(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::LlavaVLM(inner) => LanguageModel::$method(inner, $($arg),*),
+            LoadedModel::GraniteVisionVLM(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::Qwen2VL(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::Qwen25VL(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::Qwen3VL(inner) => LanguageModel::$method(inner, $($arg),*),

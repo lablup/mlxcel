@@ -144,6 +144,11 @@ pub enum VlmPreparationSummary {
         image_blocks: usize,
         total_image_tokens: usize,
     },
+    /// Granite Vision expanded each `<image>` into `num_image_tokens` copies.
+    GraniteVision {
+        image_blocks: usize,
+        total_image_tokens: i32,
+    },
     /// Kimi-VL expanded each `<|media_pad|>` into `(h/merge)*(w/merge)`
     /// media-placeholder tokens.
     KimiVL {
@@ -990,6 +995,37 @@ where
 
             let input_ids_arr = prompt_ids_array(prompt_tokens);
             let embeddings = lfm2vl.get_input_embeddings(&input_ids_arr, &pixel_values, &grids);
+
+            Ok(Some(PreparedVlmEmbeddings {
+                embeddings,
+                preparation,
+            }))
+        }
+        VlmRuntimeRef::GraniteVision(granite) => {
+            // AnyRes tiling: each image becomes `1 + n_tiles_h*n_tiles_w` tiles
+            // (base tile + grid), and packs into `729 + H*(W+1)` merged tokens.
+            let (pixel_values, infos) = granite.processor.preprocess_with_tiles(images);
+
+            let preparation =
+                crate::multimodal::granite_vision_prompt::insert_granite_vision_image_tokens(
+                    prompt_tokens,
+                    &infos,
+                    granite.image_token_index,
+                    granite.feature_side,
+                    granite.base_tokens,
+                )
+                .map(|stats| VlmPreparationSummary::GraniteVision {
+                    image_blocks: stats.image_blocks,
+                    total_image_tokens: stats.total_image_tokens,
+                });
+
+            // Granite Vision runs every tile in one tower call; skip the
+            // opportunistic vision cache for this first integration.
+            let _ = active_caches;
+            let _ = image_cache_keys;
+
+            let input_ids_arr = prompt_ids_array(prompt_tokens);
+            let embeddings = granite.get_input_embeddings(&input_ids_arr, &pixel_values, &infos);
 
             Ok(Some(PreparedVlmEmbeddings {
                 embeddings,

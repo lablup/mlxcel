@@ -114,6 +114,7 @@ macro_rules! for_each_model_registration {
             Gemma4VLM => { kind: Vlm, directory: Vlm, weight: None, adapter: Some("Gemma4 VLM cannot be loaded with LoRA adapters yet") };
             Gemma4Unified => { kind: Vlm, directory: Vlm, weight: None, adapter: Some("Gemma4 Unified cannot be loaded with LoRA adapters yet") };
             LlavaVLM => { kind: Vlm, directory: Vlm, weight: None, adapter: Some("LLaVA VLM cannot be loaded with LoRA adapters yet") };
+            GraniteVisionVLM => { kind: Vlm, directory: Vlm, weight: None, adapter: Some("Granite Vision VLM cannot be loaded with LoRA adapters yet") };
             LlavaBunnyVLM => { kind: Vlm, directory: Vlm, weight: None, adapter: Some("LLaVA VLM cannot be loaded with LoRA adapters yet") };
             AyaVisionVLM => { kind: Vlm, directory: Vlm, weight: None, adapter: Some("Aya Vision VLM cannot be loaded with LoRA adapters yet") };
             PaliGemmaVLM => { kind: Vlm, directory: Vlm, weight: None, adapter: Some("PaliGemma VLM cannot be loaded with LoRA adapters yet") };

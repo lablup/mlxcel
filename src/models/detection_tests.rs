@@ -274,3 +274,73 @@ fn lfm2_vl_model_type_is_detected_both_spellings() {
         assert_eq!(detected, ModelType::Lfm2VL, "spelling {mt}");
     }
 }
+
+#[test]
+fn granite_vision_model_type_is_detected() {
+    // MLX conversions ship `model_type: "granite_vision"`.
+    let model_dir = temp_path("granite_vision");
+    fs::create_dir_all(&model_dir).unwrap();
+    fs::write(
+        model_dir.join("config.json"),
+        r#"{
+            "model_type": "granite_vision",
+            "image_token_index": 49155,
+            "vision_feature_layer": [-24, -20, -12, -1],
+            "text_config": {"model_type": "granite", "hidden_size": 2048},
+            "vision_config": {"model_type": "siglip_vision_model", "num_hidden_layers": 27,
+                "hidden_size": 1152, "intermediate_size": 4304, "num_attention_heads": 16,
+                "patch_size": 14}
+        }"#,
+    )
+    .unwrap();
+
+    let detected = super::detection::get_model_type(&model_dir).unwrap();
+    assert_eq!(detected, ModelType::GraniteVisionVLM);
+
+    fs::remove_dir_all(model_dir).unwrap();
+}
+
+#[test]
+fn llava_next_with_granite_text_routes_to_granite_vision() {
+    // The original IBM checkpoint ships `llava_next` + a `granite` text config.
+    let model_dir = temp_path("llava_next_granite");
+    fs::create_dir_all(&model_dir).unwrap();
+    fs::write(
+        model_dir.join("config.json"),
+        r#"{
+            "model_type": "llava_next",
+            "image_token_index": 49155,
+            "text_config": {"model_type": "granite", "hidden_size": 2048},
+            "vision_config": {"model_type": "siglip_vision_model", "num_hidden_layers": 27,
+                "hidden_size": 1152, "intermediate_size": 4304, "num_attention_heads": 16,
+                "patch_size": 14}
+        }"#,
+    )
+    .unwrap();
+
+    let detected = super::detection::get_model_type(&model_dir).unwrap();
+    assert_eq!(detected, ModelType::GraniteVisionVLM);
+
+    fs::remove_dir_all(model_dir).unwrap();
+}
+
+#[test]
+fn llava_next_without_granite_stays_llava() {
+    // A vanilla LLaVA-Next (llama/mistral/qwen2 text) must still route to LLaVA.
+    let model_dir = temp_path("llava_next_vanilla");
+    fs::create_dir_all(&model_dir).unwrap();
+    fs::write(
+        model_dir.join("config.json"),
+        r#"{
+            "model_type": "llava_next",
+            "text_config": {"model_type": "llama", "hidden_size": 4096},
+            "vision_config": {"model_type": "clip_vision_model"}
+        }"#,
+    )
+    .unwrap();
+
+    let detected = super::detection::get_model_type(&model_dir).unwrap();
+    assert_eq!(detected, ModelType::LlavaVLM);
+
+    fs::remove_dir_all(model_dir).unwrap();
+}
