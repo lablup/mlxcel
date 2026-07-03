@@ -187,6 +187,7 @@ fn try_load_vlm_model_from_dir(
         ModelType::PaddleOcrVL => Some(load_paddleocr_vl(model_path)?),
         ModelType::Glm4v => Some(load_glm4v(model_path)?),
         ModelType::Glm4vMoe => Some(load_glm4v_moe(model_path)?),
+        ModelType::GlmOcr => Some(load_glm_ocr(model_path)?),
         ModelType::MiniCPMOVLM => Some(load_minicpmo_vlm(model_path)?),
         ModelType::MiniCPMV46VLM => Some(load_minicpmv4_6_vlm(model_path)?),
         ModelType::Moondream3VLM => Some(load_moondream3_vlm(model_path)?),

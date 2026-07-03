@@ -126,6 +126,7 @@ macro_rules! for_each_model_registration {
             PaddleOcrVL => { kind: Vlm, directory: Vlm, weight: None, adapter: Some("PaddleOCR-VL cannot be loaded with LoRA adapters yet") };
             Glm4v => { kind: Vlm, directory: Vlm, weight: None, adapter: Some("GLM-4V cannot be loaded with LoRA adapters yet") };
             Glm4vMoe => { kind: Vlm, directory: Vlm, weight: None, adapter: Some("GLM-4V MoE cannot be loaded with LoRA adapters yet") };
+            GlmOcr => { kind: Vlm, directory: Vlm, weight: None, adapter: Some("GLM-OCR cannot be loaded with LoRA adapters yet") };
             YoutuVLM => { kind: Vlm, directory: Vlm, weight: None, adapter: Some("Youtu-VL VLM does not support adapter loading; use load_model() instead") };
             InternVLChatVLM => { kind: Vlm, directory: Vlm, weight: None, adapter: Some("InternVL VLM does not support adapter loading; use load_model() instead") };
             KimiVL => { kind: Vlm, directory: Vlm, weight: None, adapter: Some("Kimi-VL VLM does not support adapter loading; use load_model() instead") };

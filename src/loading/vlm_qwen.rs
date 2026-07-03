@@ -414,6 +414,135 @@ pub(crate) fn load_glm4v(model_path: &Path) -> Result<LoadedModel> {
     Ok(LoadedModel::Glm4v(vlm))
 }
 
+/// Drop text decoder layers whose index is `>= num_hidden_layers` (the
+/// multi-token-prediction / next-n block). GLM-OCR ships a
+/// `num_nextn_predict_layers: 1` MTP block at `model.layers.{num_hidden_layers}.*`
+/// that inference never runs; dropping it keeps any layer-count logic honest and
+/// avoids leaking unused tensors. Published mlx conversions may have dropped it
+/// already, in which case this is a no-op.
+fn drop_extra_text_layers(weights: &mut mlxcel_core::weights::WeightMap, num_hidden_layers: usize) {
+    let to_remove: Vec<String> = weights
+        .keys()
+        .filter(|k| {
+            k.strip_prefix("model.layers.")
+                .and_then(|rest| rest.split('.').next())
+                .and_then(|idx| idx.parse::<usize>().ok())
+                .is_some_and(|idx| idx >= num_hidden_layers)
+        })
+        .cloned()
+        .collect();
+    for k in to_remove {
+        weights.remove(&k);
+    }
+}
+
+/// Lift GLM-OCR's `rope_parameters` block into the fields `Glm4vTextConfig`
+/// deserializes: `mrope_section` under `rope_scaling`, plus top-level
+/// `partial_rotary_factor` and `rope_theta`. GLM-OCR nests all three under
+/// `rope_parameters` (not `rope_scaling`) and omits the top-level scalars, so
+/// feeding the config through unchanged silently yields half-width rotary with
+/// the wrong sections.
+fn normalize_glm_ocr_rope(text_config: &mut serde_json::Value) -> Result<()> {
+    let obj = super::require_object_mut(text_config, "GLM-OCR text_config")?;
+    let Some(rp) = obj.get("rope_parameters").cloned() else {
+        return Ok(());
+    };
+    if let Some(section) = rp.get("mrope_section").cloned() {
+        let rs = obj
+            .entry("rope_scaling".to_string())
+            .or_insert_with(|| serde_json::json!({}));
+        if let Some(rs_obj) = rs.as_object_mut() {
+            rs_obj.insert("mrope_section".to_string(), section);
+        }
+    }
+    if obj
+        .get("partial_rotary_factor")
+        .and_then(|v| v.as_f64())
+        .is_none()
+        && let Some(prf) = rp.get("partial_rotary_factor").cloned()
+    {
+        obj.insert("partial_rotary_factor".to_string(), prf);
+    }
+    if obj.get("rope_theta").and_then(|v| v.as_f64()).is_none() {
+        let theta = rp
+            .get("rope_theta")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(10000.0);
+        obj.insert("rope_theta".to_string(), serde_json::json!(theta));
+    }
+    Ok(())
+}
+
+/// Load a GLM-OCR model (GLM-OCR ViT + GLM-4 text backbone, full-width MRoPE).
+pub(crate) fn load_glm_ocr(model_path: &Path) -> Result<LoadedModel> {
+    use vision::encoders::glm_ocr::GlmOcrVisionEncoder;
+    use vision::encoders::glm4v::Glm4vVisionConfig;
+
+    let (_config_str, full_config) = read_sanitized_vlm_config(model_path)?;
+
+    // Text config: lift `rope_parameters`, then reuse the GLM-4V text backbone.
+    let mut text_config_val = full_config
+        .get("text_config")
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("Missing text_config in config.json"))?;
+    normalize_glm_ocr_rope(&mut text_config_val)?;
+
+    let mut text_config: models::glm4v::Glm4vTextConfig =
+        serde_json::from_value(text_config_val)
+            .map_err(|e| anyhow::anyhow!("Failed to parse GLM-OCR text config: {}", e))?;
+    inherit_qwen_text_quantization(&mut text_config, &full_config);
+
+    let mut vision_config: Glm4vVisionConfig =
+        parse_required_vlm_subconfig(&full_config, "vision_config", "GLM-OCR vision config")?;
+    inherit_qwen_vision_quantization(&mut vision_config, &full_config);
+
+    // Remap raw keys (`model.visual.*` -> `vision_tower.*`,
+    // `model.language_model.*` -> `model.*`), then drop the MTP layer.
+    let mut weights = remap_glm4v_weights(load_vlm_weights_common(model_path, None)?);
+    drop_extra_text_layers(&mut weights, text_config.num_hidden_layers);
+    models::sanitize_tied_embeddings(&mut weights, &full_config);
+
+    let text_model = models::Glm4vTextModel::from_weights(&weights, &text_config)
+        .map_err(|e| anyhow::anyhow!("Failed to load GLM-OCR text model: {}", e))?;
+
+    let vision_encoder =
+        GlmOcrVisionEncoder::from_weights(&weights, &vision_config, "vision_tower")
+            .map_err(|e| anyhow::anyhow!("Failed to load GLM-OCR vision encoder: {}", e))?;
+
+    // OCR pixel bounds (preprocessor_config `size` = shortest/longest edge).
+    let mut processor = qwen_vl_processor(&vision_config);
+    processor.min_pixels = 12544;
+    processor.max_pixels = 9633792;
+
+    // GLM-OCR names its start/end tokens `image_start_token_id` /
+    // `image_end_token_id` (defaults 59256 / 59257), which are consecutive so the
+    // `vision_end = vision_start + 1` insertion assumption still holds.
+    let image_token_id = full_config
+        .get("image_token_id")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(59280) as i32;
+    let video_token_id = full_config
+        .get("video_token_id")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(59281) as i32;
+    let vision_start_token_id = full_config
+        .get("image_start_token_id")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(59256) as i32;
+
+    let vlm = vision::GlmOcrModel {
+        text_model,
+        vision_encoder,
+        processor,
+        image_token_id,
+        video_token_id,
+        vision_start_token_id,
+        spatial_merge_size: vision_config.spatial_merge_size,
+    };
+
+    Ok(LoadedModel::GlmOcr(vlm))
+}
+
 /// Extract the `mrope_section` from a GLM-4V MoE text config, checking both
 /// `rope_scaling` and `rope_parameters`; defaults to `[64, 32, 32]`.
 fn extract_glm4v_mrope_section(text_config: &serde_json::Value) -> Vec<i32> {
@@ -529,4 +658,100 @@ pub(crate) fn load_glm4v_moe(model_path: &Path) -> Result<LoadedModel> {
     };
 
     Ok(LoadedModel::Glm4vMoe(vlm))
+}
+
+#[cfg(test)]
+mod glm_ocr_loader_tests {
+    use super::{drop_extra_text_layers, normalize_glm_ocr_rope};
+    use crate::models::glm4v::Glm4vTextConfig;
+
+    #[test]
+    fn normalize_lifts_rope_parameters_into_config_fields() {
+        // GLM-OCR nests everything under `rope_parameters` with no top-level
+        // `rope_scaling` / `partial_rotary_factor` / `rope_theta`.
+        let mut cfg = serde_json::json!({
+            "model_type": "glm_ocr_text",
+            "hidden_size": 1536,
+            "num_hidden_layers": 16,
+            "intermediate_size": 4608,
+            "num_attention_heads": 16,
+            "num_key_value_heads": 8,
+            "vocab_size": 59392,
+            "head_dim": 128,
+            "rms_norm_eps": 1e-05,
+            "eos_token_id": [59246, 59253],
+            "rope_parameters": {
+                "rope_type": "default",
+                "mrope_section": [16, 24, 24],
+                "partial_rotary_factor": 1.0,
+                "rope_theta": 10000
+            }
+        });
+        normalize_glm_ocr_rope(&mut cfg).unwrap();
+        let parsed: Glm4vTextConfig = serde_json::from_value(cfg).unwrap();
+        assert_eq!(parsed.partial_rotary_factor, 1.0);
+        assert_eq!(parsed.rope_theta, 10000.0);
+        assert_eq!(
+            parsed.rope_scaling.as_ref().unwrap().mrope_section,
+            vec![16, 24, 24]
+        );
+        assert_eq!(parsed.eos_token_id, Some(vec![59246, 59253]));
+    }
+
+    #[test]
+    fn normalize_leaves_glm4v_style_config_untouched() {
+        // A glm4v config carries `rope_scaling` and top-level scalars; with no
+        // `rope_parameters` present, normalization is a no-op.
+        let mut cfg = serde_json::json!({
+            "hidden_size": 4096,
+            "num_hidden_layers": 40,
+            "intermediate_size": 13696,
+            "num_attention_heads": 32,
+            "num_key_value_heads": 2,
+            "vocab_size": 151552,
+            "partial_rotary_factor": 0.5,
+            "rope_theta": 10000.0,
+            "rope_scaling": {"mrope_section": [8, 12, 12]}
+        });
+        normalize_glm_ocr_rope(&mut cfg).unwrap();
+        let parsed: Glm4vTextConfig = serde_json::from_value(cfg).unwrap();
+        assert_eq!(parsed.partial_rotary_factor, 0.5);
+        assert_eq!(
+            parsed.rope_scaling.as_ref().unwrap().mrope_section,
+            vec![8, 12, 12]
+        );
+    }
+
+    #[test]
+    fn drop_extra_text_layers_removes_mtp_block() {
+        let dummy = || mlxcel_core::from_slice_f32(&[0.0], &[1]);
+        let mut weights = mlxcel_core::weights::WeightMap::new();
+        for i in 0..16 {
+            weights.insert(format!("model.layers.{i}.input_layernorm.weight"), dummy());
+        }
+        // Next-n prediction block at layer index 16 (num_hidden_layers = 16).
+        weights.insert("model.layers.16.eh_proj.weight".to_string(), dummy());
+        weights.insert(
+            "model.layers.16.shared_head.head.weight".to_string(),
+            dummy(),
+        );
+        weights.insert(
+            "model.layers.16.input_layernorm.weight".to_string(),
+            dummy(),
+        );
+        weights.insert("model.embed_tokens.weight".to_string(), dummy());
+
+        drop_extra_text_layers(&mut weights, 16);
+
+        assert!(!weights.keys().any(|k| k.starts_with("model.layers.16.")));
+        assert!(weights.contains_key("model.layers.15.input_layernorm.weight"));
+        assert!(weights.contains_key("model.embed_tokens.weight"));
+        assert_eq!(
+            weights
+                .keys()
+                .filter(|k| k.starts_with("model.layers."))
+                .count(),
+            16
+        );
+    }
 }

@@ -146,6 +146,7 @@ impl LoadedModel {
             Self::Qwen3VLMoe(model) => Some(VlmRuntimeRef::Qwen(model)),
             Self::Glm4v(model) => Some(VlmRuntimeRef::Qwen(model)),
             Self::Glm4vMoe(model) => Some(VlmRuntimeRef::Qwen(model)),
+            Self::GlmOcr(model) => Some(VlmRuntimeRef::Qwen(model)),
             Self::Qwen35VLM(model) | Self::Qwen35MoeVLM(model) => Some(VlmRuntimeRef::Qwen(model)),
             Self::PaddleOcrVL(model) => Some(VlmRuntimeRef::PaddleOcr(model)),
             Self::MiniCPMOVLM(model) => Some(VlmRuntimeRef::MiniCPMO(model)),

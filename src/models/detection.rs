@@ -222,6 +222,7 @@ pub fn get_model_type(model_path: &Path) -> Result<ModelType> {
         "paddleocr_vl" => Ok(ModelType::PaddleOcrVL),
         "glm4v" => Ok(ModelType::Glm4v),
         "glm4v_moe" => Ok(ModelType::Glm4vMoe),
+        "glm_ocr" => Ok(ModelType::GlmOcr),
         "youtu_vl" => Ok(ModelType::YoutuVLM),
         "internvl_chat" => Ok(ModelType::InternVLChatVLM),
         // SmolVLM2 ships as `smolvlm`/`smolvlm2`. SmolVLM-Instruct ships as an

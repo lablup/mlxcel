@@ -82,7 +82,7 @@ pub(crate) use nemotron_h_nano_omni::load_nemotron_h_nano_omni_vlm;
 pub(crate) use paddleocr::load_paddleocr_vl;
 pub(crate) use pixtral::{load_mistral3_vlm, load_pixtral_vlm};
 pub(crate) use qwen::{
-    load_glm4v, load_glm4v_moe, load_qwen2_5_vl, load_qwen2_vl, load_qwen3_5_moe_vlm,
+    load_glm_ocr, load_glm4v, load_glm4v_moe, load_qwen2_5_vl, load_qwen2_vl, load_qwen3_5_moe_vlm,
     load_qwen3_5_vlm, load_qwen3_vl, load_qwen3_vl_moe,
 };
 pub(crate) use siglip::{load_aya_vision_vlm, load_paligemma_vlm};

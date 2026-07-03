@@ -266,6 +266,7 @@ pub enum ModelType {
     PaddleOcrVL,     // PaddleOCR-VL (NaViT vision + ERNIE-4.5 w/ MRoPE)
     Glm4v,           // GLM-4V (GLM-4V ViT + GLM-4 text w/ sectioned MRoPE)
     Glm4vMoe,        // GLM-4V MoE (GLM-4V ViT + GLM-4 MoE text w/ MRoPE)
+    GlmOcr,          // GLM-OCR (GLM-OCR ViT + GLM-4 text w/ full-width MRoPE)
     YoutuVLM,        // Youtu-VL (SigLIP2 windowed-attn + DeepSeek-V3-style MLA)
     InternVLChatVLM, // InternVL (internvl_chat): InternViT + pixel-shuffle mlp1 + Qwen2 text
     SmolVLM,         // SmolVLM/SmolVLM2 (smolvlm): SigLIP + pixel-shuffle connector + SmolLM2 text
@@ -445,6 +446,7 @@ pub const ALL_MODEL_TYPES: &[ModelType] = &[
     ModelType::PaddleOcrVL,
     ModelType::Glm4v,
     ModelType::Glm4vMoe,
+    ModelType::GlmOcr,
     ModelType::YoutuVLM,
     ModelType::InternVLChatVLM,
     ModelType::SmolVLM,
@@ -600,6 +602,7 @@ impl ModelType {
             ModelType::PaddleOcrVL => ("PaddleOCR-VL", "PaddleOCR VLM"),
             ModelType::Glm4v => ("GLM-4V", "GLM VLM"),
             ModelType::Glm4vMoe => ("GLM-4V MoE", "GLM VLM"),
+            ModelType::GlmOcr => ("GLM-OCR", "GLM VLM"),
             ModelType::Qwen35VLM => ("Qwen 3.5 VLM", "Qwen VLM"),
             ModelType::Qwen35MoeVLM => ("Qwen 3.5 MoE VLM", "Qwen VLM"),
 
@@ -866,6 +869,7 @@ mod metadata_tests {
             PaddleOcrVL,
             Glm4v,
             Glm4vMoe,
+            GlmOcr,
             YoutuVLM,
             InternVLChatVLM,
             SmolVLM,
