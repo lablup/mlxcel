@@ -38,6 +38,7 @@ pub mod batched_dispatch;
 pub mod gemma4_vl;
 pub mod internvl_prompt;
 pub mod kimi_vl_prompt;
+pub mod lfm2_vl_prompt;
 pub mod minicpmo_prompt;
 pub mod moondream2_prompt;
 pub mod moondream3_prompt;

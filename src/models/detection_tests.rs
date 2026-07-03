@@ -249,3 +249,28 @@ fn idefics3_smolvlm_instruct_model_type_is_detected() {
 
     fs::remove_dir_all(model_dir).unwrap();
 }
+
+#[test]
+fn lfm2_vl_model_type_is_detected_both_spellings() {
+    // LFM2-VL ships model_type "lfm2-vl" (hyphen); the underscore alias must also
+    // resolve. Both map to the LFM2-VL runtime, not "Unsupported model type".
+    for mt in ["lfm2-vl", "lfm2_vl"] {
+        let model_dir = temp_path(&format!("lfm2_vl_{}", mt.replace('-', "_")));
+        fs::create_dir_all(&model_dir).unwrap();
+        fs::write(
+            model_dir.join("config.json"),
+            format!(
+                r#"{{
+                    "model_type": "{mt}",
+                    "image_token_index": 396,
+                    "downsample_factor": 2,
+                    "text_config": {{ "model_type": "lfm2", "hidden_size": 1024, "num_hidden_layers": 16 }},
+                    "vision_config": {{ "model_type": "siglip2_vision_model", "hidden_size": 768, "num_hidden_layers": 12, "num_attention_heads": 12, "patch_size": 16, "num_patches": 256 }}
+                }}"#
+            ),
+        )
+        .unwrap();
+        let detected = super::detection::get_model_type(&model_dir).unwrap();
+        assert_eq!(detected, ModelType::Lfm2VL, "spelling {mt}");
+    }
+}

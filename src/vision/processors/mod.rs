@@ -21,6 +21,7 @@ pub mod gemma4_unified;
 pub mod idefics2;
 pub mod internvl;
 pub mod kimi_vl;
+pub mod lfm2_vl;
 pub mod minicpmo;
 pub mod mllama;
 pub mod molmo;

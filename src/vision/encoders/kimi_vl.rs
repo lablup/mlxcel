@@ -49,7 +49,7 @@ use serde::Deserialize;
 use super::{VisionEncoder, VisionEncoderOutput};
 
 #[path = "kimi_vl_pos_emb.rs"]
-mod pos_emb;
+pub(crate) mod pos_emb;
 #[path = "kimi_vl_rope.rs"]
 mod rope;
 

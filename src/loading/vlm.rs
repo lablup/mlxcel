@@ -47,6 +47,8 @@ mod idefics2;
 mod internvl;
 #[path = "vlm_kimi_vl.rs"]
 mod kimi_vl_loader;
+#[path = "vlm_lfm2_vl.rs"]
+mod lfm2_vl;
 #[path = "vlm_llava.rs"]
 mod llava;
 #[path = "vlm_mllama.rs"]
@@ -73,6 +75,7 @@ pub(crate) use gemma_unified::load_gemma4_unified;
 pub(crate) use idefics2::load_idefics2_vlm;
 pub(crate) use internvl::load_internvl_vlm;
 pub(crate) use kimi_vl_loader::load_kimi_vl_vlm;
+pub(crate) use lfm2_vl::load_lfm2_vl;
 pub(crate) use llava::{load_llava_bunny_vlm, load_llava_vlm};
 pub(crate) use mllama::load_mllama_vlm;
 pub(crate) use nemotron_h_nano_omni::load_nemotron_h_nano_omni_vlm;

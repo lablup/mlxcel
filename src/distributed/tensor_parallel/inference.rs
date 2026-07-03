@@ -218,6 +218,9 @@ fn fallback_architecture(model_type: ModelType) -> &'static str {
         ModelType::FalconH1 => "falcon_h1",
         ModelType::Lfm2 => "lfm2",
         ModelType::Lfm2Moe => "lfm2_moe",
+        // LFM2-VL's text backbone is LFM2; TP is refused for VLM-kind models
+        // earlier, this keeps the dispatch table total.
+        ModelType::Lfm2VL => "lfm2",
         ModelType::Plamo2 => "plamo2",
         ModelType::GraniteMoeHybrid => "granitemoehybrid",
         ModelType::NemotronH => "nemotron_h",

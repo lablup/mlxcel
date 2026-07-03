@@ -19,6 +19,7 @@
 pub mod avg_pool;
 pub mod aya_vision;
 pub mod identity;
+pub mod lfm2_vl;
 pub mod linear;
 pub mod mistral3;
 pub mod mlp;

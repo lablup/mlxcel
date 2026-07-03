@@ -139,6 +139,11 @@ pub enum VlmPreparationSummary {
         image_blocks: usize,
         total_image_tokens: usize,
     },
+    /// LFM2-VL expanded each `<image>` into `[start? <image>*T_i end?]`.
+    Lfm2Vl {
+        image_blocks: usize,
+        total_image_tokens: usize,
+    },
     /// Kimi-VL expanded each `<|media_pad|>` into `(h/merge)*(w/merge)`
     /// media-placeholder tokens.
     KimiVL {
@@ -953,6 +958,38 @@ where
 
             let input_ids_arr = prompt_ids_array(prompt_tokens);
             let embeddings = idefics2.get_input_embeddings(&input_ids_arr, &pixel_values);
+
+            Ok(Some(PreparedVlmEmbeddings {
+                embeddings,
+                preparation,
+            }))
+        }
+        VlmRuntimeRef::Lfm2Vl(lfm2vl) => {
+            // Each image is packed at its native patch count; the tower + connector
+            // run per image and produce `ceil(h/f)*ceil(w/f)` compressed tokens.
+            let (pixel_values, grids) = lfm2vl.processor.preprocess_with_grid(images);
+
+            let preparation = crate::multimodal::lfm2_vl_prompt::insert_lfm2_vl_image_tokens(
+                prompt_tokens,
+                &grids,
+                lfm2vl.downsample_factor,
+                lfm2vl.image_token_id,
+                lfm2vl.image_start_id,
+                lfm2vl.image_end_id,
+                lfm2vl.use_image_special_tokens,
+            )
+            .map(|stats| VlmPreparationSummary::Lfm2Vl {
+                image_blocks: stats.image_blocks,
+                total_image_tokens: stats.total_image_tokens,
+            });
+
+            // LFM2-VL runs every image in one preparation pass; skip the
+            // opportunistic vision cache for this first integration.
+            let _ = active_caches;
+            let _ = image_cache_keys;
+
+            let input_ids_arr = prompt_ids_array(prompt_tokens);
+            let embeddings = lfm2vl.get_input_embeddings(&input_ids_arr, &pixel_values, &grids);
 
             Ok(Some(PreparedVlmEmbeddings {
                 embeddings,

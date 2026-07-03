@@ -373,6 +373,7 @@ pub enum ModelType {
     // Liquid Foundation Models (short-conv + attention hybrid)
     Lfm2,
     Lfm2Moe,
+    Lfm2VL, // LFM2-VL (lfm2_vl): packed-patch SigLIP2 ViT + LFM2 hybrid text
 
     // Preferred Networks PLaMo 2 (Mamba + attention interleaved hybrid)
     Plamo2,
@@ -533,6 +534,7 @@ pub const ALL_MODEL_TYPES: &[ModelType] = &[
     // Liquid Foundation Models
     ModelType::Lfm2,
     ModelType::Lfm2Moe,
+    ModelType::Lfm2VL,
     // Preferred Networks PLaMo 2
     ModelType::Plamo2,
     // IBM Granite 4.x hybrid
@@ -728,6 +730,7 @@ impl ModelType {
             // ----- Liquid Foundation Models -----
             ModelType::Lfm2 => ("LFM2 (short-conv + attention hybrid)", "LFM2"),
             ModelType::Lfm2Moe => ("LFM2-MoE (sigmoid-gated experts)", "LFM2"),
+            ModelType::Lfm2VL => ("LFM2-VL (packed-patch ViT + LFM2 hybrid text)", "LFM2"),
 
             // ----- Preferred Networks -----
             ModelType::Plamo2 => ("PLaMo 2 (Mamba + attention hybrid)", "PLaMo"),
@@ -937,6 +940,7 @@ mod metadata_tests {
             FalconH1,
             Lfm2,
             Lfm2Moe,
+            Lfm2VL,
             Plamo2,
             GraniteMoeHybrid,
             KimiLinear,

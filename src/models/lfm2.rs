@@ -736,7 +736,25 @@ impl Lfm2Model {
         inputs: &MlxArray,
         caches: &mut [Lfm2LayerCache],
     ) -> UniquePtr<MlxArray> {
-        let mut h = self.embed_tokens.forward(inputs);
+        let h = self.embed_tokens.forward(inputs);
+        self.forward_embeds_with_caches(&h, caches)
+    }
+
+    /// Token embedding front end. VLM wrappers (e.g. LFM2-VL) call this, scatter
+    /// image features into the `<image>` rows, and feed the result to
+    /// [`Self::forward_embeds_with_caches`]. `forward_with_caches` is exactly this
+    /// followed by the layer stack, so text-only behavior is unchanged.
+    pub fn input_embeddings(&self, inputs: &MlxArray) -> UniquePtr<MlxArray> {
+        self.embed_tokens.forward(inputs)
+    }
+
+    /// Layer stack over pre-computed input embeddings (the VLM injection point).
+    fn forward_embeds_with_caches(
+        &self,
+        input_embeds: &MlxArray,
+        caches: &mut [Lfm2LayerCache],
+    ) -> UniquePtr<MlxArray> {
+        let mut h = mlxcel_core::copy(input_embeds);
 
         let shape = mlxcel_core::array_shape(&h);
         let seq_len = shape[1];
@@ -979,6 +997,38 @@ impl LanguageModel for Lfm2Model {
             seq_id,
             || Lfm2Model::make_caches(self),
             |internal| self.forward_with_caches(input_ids, internal),
+        )
+    }
+
+    fn forward_with_embeddings(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        _caches: &mut [KVCache],
+        _mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        self.sequence_state
+            .with_sequence_state(None, |internal| match input_embeddings {
+                Some(embeds) => self.forward_embeds_with_caches(embeds, internal),
+                None => self.forward_with_caches(input_ids, internal),
+            })
+    }
+
+    fn forward_with_embeddings_and_sequence_id(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        seq_id: Option<mlxcel_core::cache::SequenceId>,
+        _caches: &mut [KVCache],
+        _mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        self.sequence_state.with_or_create_sequence_state(
+            seq_id,
+            || Lfm2Model::make_caches(self),
+            |internal| match input_embeddings {
+                Some(embeds) => self.forward_embeds_with_caches(embeds, internal),
+                None => self.forward_with_caches(input_ids, internal),
+            },
         )
     }
 

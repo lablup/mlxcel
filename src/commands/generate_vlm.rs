@@ -191,6 +191,15 @@ fn print_preparation_summary(summary: VlmPreparationSummary) {
                 image_blocks, total_image_tokens
             );
         }
+        VlmPreparationSummary::Lfm2Vl {
+            image_blocks,
+            total_image_tokens,
+        } => {
+            println!(
+                "LFM2-VL: inserted {} image block(s) ({} total image tokens)",
+                image_blocks, total_image_tokens
+            );
+        }
         VlmPreparationSummary::KimiVL {
             image_blocks,
             total_image_tokens,

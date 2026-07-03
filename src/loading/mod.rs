@@ -204,6 +204,7 @@ fn try_load_vlm_model_from_dir(
         ModelType::KimiVL | ModelType::KimiK25 => Some(load_kimi_vl_vlm(model_path)?),
         ModelType::SmolVLM => Some(load_smolvlm_vlm(model_path)?),
         ModelType::Idefics2 => Some(load_idefics2_vlm(model_path)?),
+        ModelType::Lfm2VL => Some(load_lfm2_vl(model_path)?),
         _ => None,
     })
 }

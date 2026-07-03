@@ -37,7 +37,7 @@ use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
 
 /// Learned per-patch position grid with on-the-fly bicubic resampling.
-pub(super) struct Learnable2DInterpPosEmb {
+pub(crate) struct Learnable2DInterpPosEmb {
     weight: UniquePtr<MlxArray>,
     init_h: i32,
     init_w: i32,
@@ -45,7 +45,7 @@ pub(super) struct Learnable2DInterpPosEmb {
 }
 
 impl Learnable2DInterpPosEmb {
-    pub(super) fn from_weights(
+    pub(crate) fn from_weights(
         weights: &WeightMap,
         prefix: &str,
         init_h: i32,
@@ -67,7 +67,7 @@ impl Learnable2DInterpPosEmb {
 
     /// Construct directly from an in-memory grid (used by unit tests).
     #[cfg(test)]
-    pub(super) fn from_array(
+    pub(crate) fn from_array(
         weight: UniquePtr<MlxArray>,
         init_h: i32,
         init_w: i32,
@@ -83,7 +83,7 @@ impl Learnable2DInterpPosEmb {
 
     /// Return the flattened position embedding for one `(h, w)` grid, shape
     /// `[h * w, dim]`.
-    pub(super) fn pos_for(&self, h: i32, w: i32) -> UniquePtr<MlxArray> {
+    pub(crate) fn pos_for(&self, h: i32, w: i32) -> UniquePtr<MlxArray> {
         if h == self.init_h && w == self.init_w {
             return mlxcel_core::reshape(&self.weight, &[h * w, self.dim]);
         }
@@ -93,7 +93,7 @@ impl Learnable2DInterpPosEmb {
 
     /// Add the concatenated per-image position embeddings to `x`
     /// (`[total_tokens, dim]`), matching upstream `Learnable2DInterpPosEmb.__call__`.
-    pub(super) fn add_to(&self, x: &MlxArray, shapes: &[(i32, i32)]) -> UniquePtr<MlxArray> {
+    pub(crate) fn add_to(&self, x: &MlxArray, shapes: &[(i32, i32)]) -> UniquePtr<MlxArray> {
         let mut pos: Vec<UniquePtr<MlxArray>> = Vec::with_capacity(shapes.len());
         for &(h, w) in shapes {
             pos.push(self.pos_for(h, w));
