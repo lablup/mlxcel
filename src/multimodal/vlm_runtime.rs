@@ -154,6 +154,11 @@ pub enum VlmPreparationSummary {
         image_blocks: usize,
         total_image_tokens: i32,
     },
+    /// DeepSeek-OCR expanded each `<image>` into its per-image placeholder run.
+    DeepSeekOcr {
+        image_blocks: usize,
+        total_image_tokens: i32,
+    },
     /// Kimi-VL expanded each `<|media_pad|>` into `(h/merge)*(w/merge)`
     /// media-placeholder tokens.
     KimiVL {
@@ -1060,6 +1065,31 @@ where
 
             let input_ids_arr = prompt_ids_array(prompt_tokens);
             let embeddings = granite4.get_input_embeddings(&input_ids_arr, &pixel_values, &infos);
+
+            Ok(Some(PreparedVlmEmbeddings {
+                embeddings,
+                preparation,
+            }))
+        }
+        VlmRuntimeRef::DeepSeekOcr(model) => {
+            let pre = model.processor.preprocess(images);
+
+            let preparation =
+                crate::multimodal::deepseekocr_prompt::insert_deepseekocr_image_tokens(
+                    prompt_tokens,
+                    &pre.placeholder_counts,
+                    model.image_token_id,
+                )
+                .map(|stats| VlmPreparationSummary::DeepSeekOcr {
+                    image_blocks: stats.image_blocks,
+                    total_image_tokens: stats.total_image_tokens,
+                });
+
+            let _ = active_caches;
+            let _ = image_cache_keys;
+
+            let input_ids_arr = prompt_ids_array(prompt_tokens);
+            let embeddings = model.input_embeddings(&input_ids_arr, &pre);
 
             Ok(Some(PreparedVlmEmbeddings {
                 embeddings,

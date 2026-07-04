@@ -35,6 +35,7 @@
 //! - `video`: generic VLM video frame extraction and FPS sampling
 
 pub mod batched_dispatch;
+pub mod deepseekocr_prompt;
 pub mod gemma4_vl;
 pub mod granite_vision_prompt;
 pub mod internvl_prompt;

@@ -256,6 +256,7 @@ pub enum ModelType {
     LlavaVLM,          // LLaVA (CLIP/SigLIP + Llama/Qwen2)
     GraniteVisionVLM,  // Granite Vision (SigLIP multi-tap + Granite text, AnyRes)
     Granite4VisionVLM, // Granite 4 Vision (SigLIP + window-QFormer + Granite-4 hybrid)
+    DeepSeekOcrVLM,    // DeepSeek-OCR (SAM + CLIP + DeepSeek MoE decoder)
     LlavaBunnyVLM,     // LLaVA-Bunny (SigLIP + Qwen2)
     AyaVisionVLM,      // Aya Vision (SigLIP + Cohere2)
     PaliGemmaVLM,      // PaliGemma (SigLIP + Gemma)
@@ -438,6 +439,7 @@ pub const ALL_MODEL_TYPES: &[ModelType] = &[
     ModelType::LlavaVLM,
     ModelType::GraniteVisionVLM,
     ModelType::Granite4VisionVLM,
+    ModelType::DeepSeekOcrVLM,
     ModelType::LlavaBunnyVLM,
     ModelType::AyaVisionVLM,
     ModelType::PaliGemmaVLM,
@@ -770,6 +772,7 @@ impl ModelType {
                 "Granite 4 Vision (SigLIP + Granite 4 hybrid)",
                 "Granite VLM",
             ),
+            ModelType::DeepSeekOcrVLM => ("DeepSeek-OCR (SAM + CLIP + DeepSeek MoE)", "Other VLM"),
             ModelType::LlavaBunnyVLM => ("LLaVA-Bunny (SigLIP + Qwen2)", "Other VLM"),
             ModelType::InternVLChatVLM => {
                 ("InternVL (InternViT + pixel-shuffle + Qwen2)", "Other VLM")
@@ -868,6 +871,7 @@ mod metadata_tests {
             LlavaVLM,
             GraniteVisionVLM,
             Granite4VisionVLM,
+            DeepSeekOcrVLM,
             LlavaBunnyVLM,
             AyaVisionVLM,
             PaliGemmaVLM,

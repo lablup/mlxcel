@@ -17,6 +17,7 @@
 //! Provides the ImageProcessor trait and processor implementations.
 
 pub mod anyres;
+pub mod deepseekocr;
 pub mod gemma4;
 pub mod gemma4_unified;
 pub mod idefics2;

@@ -37,6 +37,8 @@ use crate::models;
 use crate::vision;
 use models::sanitize_config_json;
 
+#[path = "vlm_deepseekocr.rs"]
+mod deepseekocr;
 #[path = "vlm_gemma.rs"]
 mod gemma;
 #[path = "vlm_gemma_unified.rs"]
@@ -74,6 +76,7 @@ mod special;
 #[path = "vlm_youtu_vl.rs"]
 mod youtu_vl_loader;
 
+pub(crate) use deepseekocr::load_deepseekocr_vlm;
 pub(crate) use gemma::{load_gemma3_vlm, load_gemma3n_vlm, load_gemma4_vlm};
 pub(crate) use gemma_unified::load_gemma4_unified;
 pub(crate) use granite_vision::load_granite_vision_vlm;
