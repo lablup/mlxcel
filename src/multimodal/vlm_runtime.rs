@@ -359,6 +359,28 @@ where
                 preparation,
             }))
         }
+        VlmRuntimeRef::DotsOcr(dots) => {
+            let (pixel_values, grid_thw) = dots.processor.preprocess_with_grid(images);
+            let preparation = insert_qwen_vl_image_tokens(
+                prompt_tokens,
+                &grid_thw,
+                dots.spatial_merge_size as usize,
+                dots.vision_start_token_id,
+                dots.image_token_id,
+            )
+            .map(|stats| VlmPreparationSummary::QwenVlm {
+                image_blocks: stats.image_blocks,
+                total_image_tokens: stats.total_image_tokens,
+            });
+
+            let input_ids_arr = prompt_ids_array(prompt_tokens);
+            let embeddings = dots.input_embeddings(&input_ids_arr, &pixel_values, &grid_thw);
+
+            Ok(Some(PreparedVlmEmbeddings {
+                embeddings,
+                preparation,
+            }))
+        }
         VlmRuntimeRef::MiniCPMO(minicpmo) => {
             let prepared = prepare_minicpmo_prompt_tokens(
                 prompt,

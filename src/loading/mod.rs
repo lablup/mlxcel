@@ -189,6 +189,7 @@ fn try_load_vlm_model_from_dir(
         ModelType::Qwen3VL => Some(load_qwen3_vl(model_path)?),
         ModelType::Qwen3VLMoe => Some(load_qwen3_vl_moe(model_path)?),
         ModelType::PaddleOcrVL => Some(load_paddleocr_vl(model_path)?),
+        ModelType::DotsOcrVL => Some(load_dots_ocr_vl(model_path)?),
         ModelType::Glm4v => Some(load_glm4v(model_path)?),
         ModelType::Glm4vMoe => Some(load_glm4v_moe(model_path)?),
         ModelType::GlmOcr => Some(load_glm_ocr(model_path)?),

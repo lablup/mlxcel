@@ -18,6 +18,7 @@
 
 pub mod anyres;
 pub mod deepseekocr;
+pub mod dots_ocr;
 pub mod gemma4;
 pub mod gemma4_unified;
 pub mod idefics2;

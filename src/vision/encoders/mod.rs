@@ -19,6 +19,7 @@
 pub mod deepseekocr_clip;
 pub mod deepseekocr_qwen2;
 pub mod deepseekocr_sam;
+pub mod dots_ocr;
 pub mod gemma3n;
 pub mod gemma4;
 pub mod gemma4_unified;
