@@ -262,6 +262,7 @@ fn fallback_architecture(model_type: ModelType) -> &'static str {
         // VLM-kind models earlier, this keeps the dispatch table total.
         ModelType::Granite4VisionVLM => "granitemoehybrid",
         ModelType::DeepSeekOcrVLM => "deepseek",
+        ModelType::DeepSeekOcr2VLM => "deepseek",
         // Youtu-VL is not currently supported by tensor-parallel inference;
         // we return a placeholder architecture string here so the planner
         // does not panic on the dispatch table lookup. The actual loader

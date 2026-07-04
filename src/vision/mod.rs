@@ -37,6 +37,7 @@ pub mod processors;
 
 // VLM model implementations
 pub mod deepseekocr;
+pub mod deepseekocr_2;
 pub mod gemma3n_per_layer_inputs_state;
 pub mod gemma3n_vl;
 pub mod gemma4_multimodal_embedder;
@@ -77,6 +78,7 @@ pub mod youtu_vl;
 
 // Re-export VLM model types
 pub use deepseekocr::DeepSeekOcrVlModel;
+pub use deepseekocr_2::DeepSeekOcr2VlModel;
 pub use gemma3n_vl::Gemma3nVLModel;
 pub use gemma4_unified::Gemma4UnifiedModel;
 pub use gemma4_vl::Gemma4VLModel;

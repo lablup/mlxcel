@@ -63,6 +63,7 @@ pub enum VlmRuntimeRef<'a> {
     GraniteVision(&'a vision::GraniteVisionVLModel),
     Granite4Vision(&'a vision::Granite4VisionVLModel),
     DeepSeekOcr(&'a vision::deepseekocr::DeepSeekOcrVlModel),
+    DeepSeekOcr2(&'a vision::deepseekocr_2::DeepSeekOcr2VlModel),
     Standard(&'a vision::VisionModule),
 }
 
@@ -179,6 +180,7 @@ impl LoadedModel {
             Self::GraniteVisionVLM(model) => Some(VlmRuntimeRef::GraniteVision(model)),
             Self::Granite4VisionVLM(model) => Some(VlmRuntimeRef::Granite4Vision(model)),
             Self::DeepSeekOcrVLM(model) => Some(VlmRuntimeRef::DeepSeekOcr(model)),
+            Self::DeepSeekOcr2VLM(model) => Some(VlmRuntimeRef::DeepSeekOcr2(model)),
             _ => None,
         }
     }

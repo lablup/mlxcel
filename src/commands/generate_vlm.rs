@@ -236,6 +236,15 @@ fn print_preparation_summary(summary: VlmPreparationSummary) {
                 image_blocks, total_image_tokens
             );
         }
+        VlmPreparationSummary::DeepSeekOcr2 {
+            image_blocks,
+            total_image_tokens,
+        } => {
+            println!(
+                "DeepSeek-OCR 2: expanded {} <image> placeholder(s) ({} total image tokens)",
+                image_blocks, total_image_tokens
+            );
+        }
         VlmPreparationSummary::ImageBlocks(stats) => match stats.action {
             ImageTokenBlockAction::Expanded {
                 existing_image_count,

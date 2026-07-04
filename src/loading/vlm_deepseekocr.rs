@@ -12,8 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! DeepSeek-OCR loader: SAM + CLIP towers, linear projector, `image_newline` /
-//! `view_separator`, and the shared DeepSeek MoE text decoder.
+//! DeepSeek-OCR loaders. V1: SAM + CLIP towers, linear projector,
+//! `image_newline` / `view_separator`. V2: SAM (896-channel compressor) + Qwen2
+//! query resampler, linear projector, `view_separator`. Both feed the shared
+//! DeepSeek MoE text decoder.
 
 use anyhow::Result;
 use serde_json::json;
@@ -23,6 +25,7 @@ use crate::LoadedModel;
 use crate::models;
 use crate::vision;
 use crate::vision::encoders::deepseekocr_clip::{ClipConfig, ClipEncoder};
+use crate::vision::encoders::deepseekocr_qwen2::{Qwen2Resampler, Qwen2ResamplerConfig};
 use crate::vision::encoders::deepseekocr_sam::{SamConfig, SamEncoder};
 use crate::vision::processors::deepseekocr::DeepSeekOcrProcessor;
 use mlxcel_core::layers::UnifiedLinear;
@@ -118,4 +121,102 @@ pub(crate) fn load_deepseekocr_vlm(model_path: &Path) -> Result<LoadedModel> {
         n_embed: N_EMBED,
     };
     Ok(LoadedModel::DeepSeekOcrVLM(vlm))
+}
+
+/// V2 key remap on top of V1's rules: fold the layout-B `qwen2_model` nesting
+/// (`model.qwen2_model.model.model.*` and the `query_*` banks) into the
+/// canonical `vision_model.qwen2_encoder.*`, and normalize the query banks to
+/// their bare (no `.weight`) names. A no-op on the already-canonical layout A.
+fn remap_deepseekocr_2_weights(weights: WeightMap) -> WeightMap {
+    let mut out = WeightMap::new();
+    for (k, v) in weights {
+        let mut key = if k == "model.view_seperator" || k == "view_seperator" {
+            "view_separator".to_string()
+        } else if let Some(rest) = k.strip_prefix("model.qwen2_model.model.model.") {
+            format!("vision_model.qwen2_encoder.{rest}")
+        } else if let Some(rest) = k.strip_prefix("model.qwen2_model.") {
+            format!("vision_model.qwen2_encoder.{rest}")
+        } else if let Some(rest) = k.strip_prefix("model.") {
+            if rest.starts_with("sam_model.")
+                || rest.starts_with("vision_model.")
+                || rest.starts_with("projector.")
+                || rest == "view_separator"
+            {
+                rest.to_string()
+            } else {
+                k
+            }
+        } else {
+            k
+        };
+        if key == "vision_model.qwen2_encoder.query_1024.weight" {
+            key = "vision_model.qwen2_encoder.query_1024".to_string();
+        } else if key == "vision_model.qwen2_encoder.query_768.weight" {
+            key = "vision_model.qwen2_encoder.query_768".to_string();
+        }
+        out.insert(key, v);
+    }
+    out
+}
+
+pub(crate) fn load_deepseekocr_2_vlm(model_path: &Path) -> Result<LoadedModel> {
+    let (_config_str, full_config) = read_sanitized_vlm_config(model_path)?;
+
+    let mut lc = full_config
+        .get("language_config")
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("Missing language_config in DeepSeek-OCR 2 config"))?;
+    if let Some(obj) = lc.as_object_mut() {
+        obj.entry("model_type".to_string())
+            .or_insert_with(|| json!("deepseek"));
+        if !obj.contains_key("quantization")
+            && let Some(q) = full_config.get("quantization")
+        {
+            obj.insert("quantization".to_string(), q.clone());
+        }
+    }
+    let args: models::deepseek::ModelArgs = serde_json::from_value(lc)
+        .map_err(|e| anyhow::anyhow!("Failed to parse DeepSeek-OCR 2 language_config: {}", e))?;
+    let (gs, bits) = (args.group_size(), args.bits());
+
+    let weights = remap_deepseekocr_2_weights(load_vlm_weights_common(model_path, None)?);
+
+    let sam = SamEncoder::from_weights(
+        &weights,
+        "sam_model",
+        SamConfig {
+            final_out_chans: 896,
+            ..SamConfig::default()
+        },
+    )
+    .map_err(|e| anyhow::anyhow!("Failed to load DeepSeek-OCR 2 SAM encoder: {}", e))?;
+    let resampler = Qwen2Resampler::from_weights(
+        &weights,
+        "vision_model.qwen2_encoder",
+        Qwen2ResamplerConfig::default(),
+    )
+    .map_err(|e| anyhow::anyhow!("Failed to load DeepSeek-OCR 2 query resampler: {}", e))?;
+    let projector = UnifiedLinear::from_weights(&weights, "projector.layers", gs, bits)
+        .map_err(|e| anyhow::anyhow!("Failed to load DeepSeek-OCR 2 projector: {}", e))?;
+    let view_separator = weights
+        .get("view_separator")
+        .map(|w| mlxcel_core::copy(w))
+        .ok_or_else(|| anyhow::anyhow!("Missing view_separator"))?;
+
+    let text_weights = strip_language_model_prefix(weights);
+    let text_model = models::deepseek::DeepSeekModel::from_weights(&text_weights, &args)
+        .map_err(|e| anyhow::anyhow!("Failed to load DeepSeek-OCR 2 text model: {}", e))?;
+
+    let vlm = vision::deepseekocr_2::DeepSeekOcr2VlModel {
+        text_model,
+        sam,
+        resampler,
+        projector,
+        view_separator,
+        processor: DeepSeekOcrProcessor::v2(),
+        image_token_id: IMAGE_TOKEN_ID,
+        eos_token_id: 1,
+        n_embed: N_EMBED,
+    };
+    Ok(LoadedModel::DeepSeekOcr2VLM(vlm))
 }
