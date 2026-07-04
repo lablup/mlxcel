@@ -2481,31 +2481,6 @@ pub fn sanitize_weights(mut weights: WeightMap, config: &Qwen35Config) -> Weight
         }
     }
 
-    // 8. Rename switch_mlp.{gate_proj,up_proj,down_proj} → switch_mlp.{w1,w3,w2}
-    // Pre-quantized MoE models use gate_proj/up_proj/down_proj naming,
-    // but SparseMoeBlock expects w1/w2/w3 naming.
-    let rename_map = [
-        ("switch_mlp.gate_proj.", "switch_mlp.w1."),
-        ("switch_mlp.up_proj.", "switch_mlp.w3."),
-        ("switch_mlp.down_proj.", "switch_mlp.w2."),
-    ];
-    let keys_to_rename: Vec<String> = weights
-        .keys()
-        .filter(|k| rename_map.iter().any(|(from, _)| k.contains(from)))
-        .cloned()
-        .collect();
-    for key in keys_to_rename {
-        for (from, to) in &rename_map {
-            if key.contains(from) {
-                let new_key = key.replace(from, to);
-                if let Some(v) = weights.remove(&key) {
-                    weights.insert(new_key, v);
-                }
-                break;
-            }
-        }
-    }
-
     weights
 }
 

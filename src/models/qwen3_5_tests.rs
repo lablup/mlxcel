@@ -21,7 +21,8 @@
 //! that need a real Qwen 3.5 model and are gated behind hardware availability.
 
 use super::qwen3_5::{
-    Qwen35Config, rebuild_with_zero_tail, sanitize_weights, zero_per_row_kv_tail,
+    Qwen35Config, rebuild_with_zero_tail, sanitize_moe_weights, sanitize_weights,
+    zero_per_row_kv_tail,
 };
 use mlxcel_core::dtype;
 use mlxcel_core::layers::KVCache;
@@ -308,4 +309,33 @@ fn sanitize_weights_drops_lm_head_when_tied_embeddings() {
         "lm_head.weight should have been dropped when tie_word_embeddings is true"
     );
     assert!(sanitized.contains_key("model.embed_tokens.weight"));
+}
+
+#[test]
+#[ignore = "requires serial MLX execution"]
+fn sanitize_moe_weights_preserves_stacked_switch_proj_names() {
+    let root = "language_model.model.layers.0.mlp.switch_mlp";
+    let mut weights = WeightMap::new();
+    for proj in ["gate_proj", "up_proj", "down_proj"] {
+        weights.insert(
+            format!("{root}.{proj}.weight"),
+            mlxcel_core::from_slice_f32(&[0.0_f32; 8], &[2, 4]),
+        );
+    }
+
+    let mut config = make_tiny_config();
+    config.num_experts = 2;
+    config.num_experts_per_tok = 1;
+    config.decoder_sparse_step = 1;
+    config.moe_intermediate_size = 2;
+    config.shared_expert_intermediate_size = 2;
+
+    let sanitized = sanitize_moe_weights(weights, &config);
+
+    assert!(sanitized.contains_key("model.layers.0.mlp.switch_mlp.gate_proj.weight"));
+    assert!(sanitized.contains_key("model.layers.0.mlp.switch_mlp.up_proj.weight"));
+    assert!(sanitized.contains_key("model.layers.0.mlp.switch_mlp.down_proj.weight"));
+    assert!(!sanitized.contains_key("model.layers.0.mlp.switch_mlp.w1.weight"));
+    assert!(!sanitized.contains_key("model.layers.0.mlp.switch_mlp.w2.weight"));
+    assert!(!sanitized.contains_key("model.layers.0.mlp.switch_mlp.w3.weight"));
 }
