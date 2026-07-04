@@ -2398,11 +2398,10 @@ pub fn sanitize_weights(mut weights: WeightMap, config: &Qwen35Config) -> Weight
 
         // Handle per-expert gate_proj/up_proj/down_proj naming variant.
         // Checkpoints that store experts under `experts.{e}.gate_proj.weight`
-        // instead of `experts.{e}.w1.weight` use this layout. The mapping
-        // mirrors the fused gate_up_proj path: gate->w1, up->w3, down->w2.
-        for (src_proj, dst_proj) in [("gate_proj", "w1"), ("up_proj", "w3"), ("down_proj", "w2")] {
-            // Skip if this target slot is already populated by the w1/w2/w3 pass above.
-            if weights.contains_key(format!("{}.{}.weight", base, dst_proj).as_str()) {
+        // instead of per-expert w1 weights use this layout. Keep the
+        // stacked names aligned with SwitchGLU::from_weights.
+        for proj in ["gate_proj", "up_proj", "down_proj"] {
+            if weights.contains_key(format!("{}.{}.weight", base, proj).as_str()) {
                 continue;
             }
 
@@ -2413,18 +2412,18 @@ pub fn sanitize_weights(mut weights: WeightMap, config: &Qwen35Config) -> Weight
             let mut e = 0;
             while let Some(w) = weights.remove(&format!(
                 "model.layers.{}.mlp.experts.{}.{}.weight",
-                l, e, src_proj
+                l, e, proj
             )) {
                 expert_weights.push(w);
                 if let Some(s) = weights.remove(&format!(
                     "model.layers.{}.mlp.experts.{}.{}.scales",
-                    l, e, src_proj
+                    l, e, proj
                 )) {
                     expert_scales.push(s);
                 }
                 if let Some(b) = weights.remove(&format!(
                     "model.layers.{}.mlp.experts.{}.{}.biases",
-                    l, e, src_proj
+                    l, e, proj
                 )) {
                     expert_biases.push(b);
                 }
@@ -2433,16 +2432,16 @@ pub fn sanitize_weights(mut weights: WeightMap, config: &Qwen35Config) -> Weight
 
             if !expert_weights.is_empty() {
                 let stacked = stack_arrays(&expert_weights, 0);
-                weights.insert(format!("{}.{}.weight", base, dst_proj), stacked);
+                weights.insert(format!("{}.{}.weight", base, proj), stacked);
 
                 if !expert_scales.is_empty() {
                     let stacked = stack_arrays(&expert_scales, 0);
-                    weights.insert(format!("{}.{}.scales", base, dst_proj), stacked);
+                    weights.insert(format!("{}.{}.scales", base, proj), stacked);
                 }
 
                 if !expert_biases.is_empty() {
                     let stacked = stack_arrays(&expert_biases, 0);
-                    weights.insert(format!("{}.{}.biases", base, dst_proj), stacked);
+                    weights.insert(format!("{}.{}.biases", base, proj), stacked);
                 }
             }
         }

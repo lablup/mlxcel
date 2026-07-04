@@ -21,7 +21,7 @@
 //! that need a real Qwen 3.5 model and are gated behind hardware availability.
 
 use super::qwen3_5::{
-    Qwen35Config, rebuild_with_zero_tail, sanitize_moe_weights, sanitize_weights,
+    Qwen35Config, rebuild_with_zero_tail, sanitize_weights,
     zero_per_row_kv_tail,
 };
 use mlxcel_core::dtype;
@@ -313,14 +313,16 @@ fn sanitize_weights_drops_lm_head_when_tied_embeddings() {
 
 #[test]
 #[ignore = "requires serial MLX execution"]
-fn sanitize_moe_weights_preserves_stacked_switch_proj_names() {
-    let root = "language_model.model.layers.0.mlp.switch_mlp";
+fn sanitize_weights_stacks_per_expert_switch_proj_names_for_loader() {
+    let root = "model.layers.0.mlp.experts";
     let mut weights = WeightMap::new();
-    for proj in ["gate_proj", "up_proj", "down_proj"] {
-        weights.insert(
-            format!("{root}.{proj}.weight"),
-            mlxcel_core::from_slice_f32(&[0.0_f32; 8], &[2, 4]),
-        );
+    for expert in 0..2 {
+        for proj in ["gate_proj", "up_proj", "down_proj"] {
+            weights.insert(
+                format!("{root}.{expert}.{proj}.weight"),
+                mlxcel_core::from_slice_f32(&[expert as f32; 8], &[2, 4]),
+            );
+        }
     }
 
     let mut config = make_tiny_config();
@@ -330,7 +332,7 @@ fn sanitize_moe_weights_preserves_stacked_switch_proj_names() {
     config.moe_intermediate_size = 2;
     config.shared_expert_intermediate_size = 2;
 
-    let sanitized = sanitize_moe_weights(weights, &config);
+    let sanitized = sanitize_weights(weights, &config);
 
     assert!(sanitized.contains_key("model.layers.0.mlp.switch_mlp.gate_proj.weight"));
     assert!(sanitized.contains_key("model.layers.0.mlp.switch_mlp.up_proj.weight"));
