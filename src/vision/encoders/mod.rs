@@ -16,6 +16,8 @@
 //!
 //! Provides the VisionEncoder trait and encoder implementations.
 
+pub mod deepseekocr_clip;
+pub mod deepseekocr_sam;
 pub mod gemma3n;
 pub mod gemma4;
 pub mod gemma4_unified;

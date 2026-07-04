@@ -40,7 +40,10 @@ pub struct ModelArgs {
     pub num_attention_heads: usize,
     pub num_key_value_heads: usize,
     pub max_position_embeddings: usize,
+    // DeepSeek-OCR's `language_config` omits both; supply the family defaults.
+    #[serde(default = "default_rms_norm_eps")]
     pub rms_norm_eps: f32,
+    #[serde(default = "default_rope_theta")]
     pub rope_theta: f32,
 
     // MoE parameters
@@ -75,6 +78,14 @@ fn default_moe_layer_freq() -> usize {
 
 fn default_routed_scaling_factor() -> f32 {
     1.0
+}
+
+fn default_rms_norm_eps() -> f32 {
+    1e-6
+}
+
+fn default_rope_theta() -> f32 {
+    10000.0
 }
 
 impl ModelArgs {
@@ -565,6 +576,27 @@ impl DeepSeekModel {
         self.lm_head.forward(&h)
     }
 
+    /// Forward pass from precomputed input embeddings (VLM prefill), skipping the
+    /// token-embedding lookup. `inputs_embeds` is `(batch, seq, hidden)`.
+    pub fn forward_from_embeds(
+        &self,
+        inputs_embeds: &MlxArray,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        let mut h = mlxcel_core::copy(inputs_embeds);
+        for (i, layer) in self.layers.iter().enumerate() {
+            h = layer.forward(&h, &mut caches[i], mask);
+        }
+        let h = self.norm.forward(&h);
+        self.lm_head.forward(&h)
+    }
+
+    /// Raw token-embedding lookup, exposed for VLM feature splicing.
+    pub fn embed_tokens_forward(&self, input_ids: &MlxArray) -> UniquePtr<MlxArray> {
+        self.embed_tokens.forward(input_ids)
+    }
+
     /// Load model from a directory containing safetensors files and config.json
     pub fn load<P: AsRef<Path>>(model_dir: P) -> Result<(Self, ModelArgs), String> {
         let model_dir = model_dir.as_ref();
@@ -861,5 +893,22 @@ impl LanguageModel for DeepSeekModel {
     fn eos_token_ids(&self) -> Vec<i32> {
         // DeepSeek v1 typically uses standard EOS token
         vec![2] // </s>
+    }
+
+    fn forward_with_embeddings(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        match input_embeddings {
+            Some(embeds) => self.forward_from_embeds(embeds, caches, mask),
+            None => DeepSeekModel::forward(self, input_ids, caches, mask),
+        }
+    }
+
+    fn embed_tokens(&self, input_ids: &MlxArray) -> Option<UniquePtr<MlxArray>> {
+        Some(self.embed_tokens_forward(input_ids))
     }
 }
