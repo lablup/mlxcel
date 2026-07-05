@@ -856,3 +856,50 @@ fn encode_path_segments_handles_empty_input() {
     assert_eq!(encode_path_segments("a/b/c"), "a/b/c");
     assert_eq!(encode_path_segments("a b/c d"), "a%20b/c%20d");
 }
+
+/// Regression for issue #463: `download_repo` must not abort with "Cannot
+/// start a runtime from within a runtime" when called on a thread that is
+/// already driving a Tokio runtime (the `mlxcel serve` / `mlxcel-server`
+/// auto-download startup path). Pins that the runtime-aware guard offloads
+/// the blocking body and surfaces a normal `Err`. The endpoint points at a
+/// closed local port so the offloaded download fails fast without touching
+/// the network.
+#[tokio::test(flavor = "multi_thread")]
+async fn download_repo_inside_runtime_errors_instead_of_aborting() {
+    let _guard = env_lock();
+    let prev_endpoint = std::env::var("HF_ENDPOINT").ok();
+    let prev_token = std::env::var("HF_TOKEN").ok();
+    unsafe {
+        std::env::set_var("HF_ENDPOINT", "http://127.0.0.1:9");
+        // A token from the host environment would trip the plaintext-endpoint
+        // refusal before the connection attempt; clear it so the failure mode
+        // under test is the (fast, local) connection refusal.
+        std::env::remove_var("HF_TOKEN");
+    }
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let opts = DownloadOptions {
+        repo_id: "mlx-community/issue-463-regression-not-a-real-repo".to_string(),
+        local_dir: Some(dir.path().to_path_buf()),
+        models_dir: None,
+        revision: None,
+        token: None,
+        force: true,
+    };
+    let result = download_repo(opts);
+
+    unsafe {
+        match prev_endpoint {
+            Some(v) => std::env::set_var("HF_ENDPOINT", v),
+            None => std::env::remove_var("HF_ENDPOINT"),
+        }
+        if let Some(v) = prev_token {
+            std::env::set_var("HF_TOKEN", v);
+        }
+    }
+
+    assert!(
+        result.is_err(),
+        "a closed endpoint must surface a normal error, not a nested-runtime abort"
+    );
+}
