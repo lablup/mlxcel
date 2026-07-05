@@ -68,6 +68,7 @@ pub enum VlmRuntimeRef<'a> {
     DeepSeekVL2(&'a vision::deepseek_vl2::DeepSeekVl2VlModel),
     FastVLM(&'a vision::VisionModule),
     Ernie45MoeVl(&'a vision::ernie4_5_moe_vl::Ernie45MoeVlModel),
+    Qwen3OmniMoe(&'a vision::qwen3_omni_moe::Qwen3OmniMoeModel),
     HunyuanVl(&'a vision::hunyuan_vl::HunyuanVlModel),
     Standard(&'a vision::VisionModule),
 }
@@ -153,6 +154,7 @@ impl LoadedModel {
             Self::Qwen25VL(model) => Some(VlmRuntimeRef::Qwen(model)),
             Self::Qwen3VL(model) => Some(VlmRuntimeRef::Qwen(model)),
             Self::Qwen3VLMoe(model) => Some(VlmRuntimeRef::Qwen(model)),
+            Self::Qwen3OmniMoe(model) => Some(VlmRuntimeRef::Qwen3OmniMoe(model)),
             Self::Glm4v(model) => Some(VlmRuntimeRef::Qwen(model)),
             Self::Glm4vMoe(model) => Some(VlmRuntimeRef::Qwen(model)),
             Self::GlmOcr(model) => Some(VlmRuntimeRef::Qwen(model)),

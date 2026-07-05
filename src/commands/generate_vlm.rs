@@ -366,6 +366,13 @@ pub(crate) fn compute_vlm_embeddings(
         );
     }
 
+    // Qwen3-Omni MoE thinker: audio-only or combined image + audio.
+    if let Some(audio) = audio_path
+        && let LoadedModel::Qwen3OmniMoe(omni_vl) = model
+    {
+        return compute_qwen3_omni_audio_embeddings(omni_vl, prompt_tokens, image_paths, audio);
+    }
+
     // Reject `--audio` for any remaining VLM that does not have a
     // dedicated dispatch above. Without this guard, `--audio` would be
     // silently dropped and the runtime would emit text-only output,
@@ -374,7 +381,7 @@ pub(crate) fn compute_vlm_embeddings(
     if audio_path.is_some() {
         return Err(anyhow::anyhow!(
             "--audio input is not supported for this model family. Currently audio is wired \
-             through Gemma 4 and Nemotron H Nano Omni VLMs only."
+             through Gemma 4, Nemotron H Nano Omni, and Qwen3-Omni MoE VLMs only."
         ));
     }
 
@@ -973,6 +980,131 @@ fn expand_gemma4_audio_tokens(
 ///
 /// Returns the number of audio tokens (post-subsampling) inserted, so
 /// the caller can pass it into the runtime summary.
+/// Qwen3-Omni MoE: `--audio` (optionally with `--image`). Resamples to
+/// 16 kHz, computes the 128-bin log-mel, expands the audio placeholder run to
+/// `audio_out_len(L)` copies of `audio_token_id` framed by the audio start /
+/// end ids, expands image placeholders via the shared Qwen VL insertion, and
+/// merges both feature sets into the embedding stream.
+fn compute_qwen3_omni_audio_embeddings(
+    model: &mlxcel::vision::Qwen3OmniMoeModel,
+    prompt_tokens: &mut Vec<i32>,
+    image_paths: &[PathBuf],
+    audio_path: &Path,
+) -> Result<Option<InputEmbeddings>> {
+    use mlxcel::audio::qwen3_omni_moe::audio_out_len;
+    use mlxcel::audio::whisper_mel::{log_mel_spectrogram, resample_to_16k};
+    use mlxcel::multimodal::qwen_vl::insert_qwen_vl_image_tokens;
+
+    let (samples, sample_rate) =
+        mlxcel::audio::load_wav_file(audio_path).map_err(|e| anyhow::anyhow!("{}", e))?;
+    println!(
+        "Loaded audio: {} samples at {} Hz ({:.1}s)",
+        samples.len(),
+        sample_rate,
+        samples.len() as f64 / sample_rate as f64
+    );
+    let samples = resample_to_16k(&samples, sample_rate);
+    let (mel, num_frames) = log_mel_spectrogram(&samples, 128);
+    if num_frames == 0 {
+        return Err(anyhow::anyhow!(
+            "Audio clip too short to produce mel frames"
+        ));
+    }
+    let num_audio_tokens = audio_out_len(num_frames).max(1);
+
+    expand_qwen3_omni_audio_tokens(
+        prompt_tokens,
+        model.audio_token_id,
+        model.audio_start_token_id,
+        model.audio_end_token_id,
+        num_audio_tokens,
+    );
+    println!(
+        "Qwen3-Omni audio: {} mel frames -> {} audio token(s) ({} total tokens)",
+        num_frames,
+        num_audio_tokens,
+        prompt_tokens.len()
+    );
+
+    // Optional image branch: same preprocessing + placeholder insertion the
+    // image-only Qwen runtime path performs.
+    let images_data = if !image_paths.is_empty() {
+        let images: Vec<image::DynamicImage> = image_paths
+            .iter()
+            .map(|path| {
+                image::open(path)
+                    .map_err(|e| anyhow::anyhow!("Failed to load image {:?}: {}", path, e))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        println!("Loaded {} image(s).", images.len());
+        let (pixel_values, grid_thw) = model.processor.preprocess_with_grid(&images);
+        if let Some(stats) = insert_qwen_vl_image_tokens(
+            prompt_tokens,
+            &grid_thw,
+            model.spatial_merge_size,
+            model.vision_start_token_id,
+            model.image_token_id,
+        ) {
+            println!(
+                "Inserted {} Qwen VL image token blocks ({} total image tokens)",
+                stats.image_blocks, stats.total_image_tokens
+            );
+        }
+        Some((pixel_values, grid_thw))
+    } else {
+        None
+    };
+
+    let input_ids = mlxcel_core::from_slice_i32(prompt_tokens, &[1, prompt_tokens.len() as i32]);
+    let audio_features = model.extract_audio_features(&mel, num_frames);
+    let embeddings = model.input_embeddings_multimodal(
+        &input_ids,
+        images_data
+            .as_ref()
+            .map(|(pv, grid)| (pv.as_ref().unwrap() as &mlxcel_core::MlxArray, &grid[..])),
+        Some(&audio_features),
+    );
+    Ok(Some(embeddings))
+}
+
+/// Expand the Qwen3-Omni audio placeholder: wrap an existing `audio_token_id`
+/// occurrence in place, or prepend `audio_start + audio_token * N + audio_end`
+/// when the prompt has no placeholder.
+fn expand_qwen3_omni_audio_tokens(
+    prompt_tokens: &mut Vec<i32>,
+    audio_token_id: i32,
+    audio_start_token_id: i32,
+    audio_end_token_id: i32,
+    num_audio_tokens: usize,
+) -> usize {
+    let mut expanded = Vec::with_capacity(prompt_tokens.len() + num_audio_tokens + 2);
+    let mut placed = false;
+    for &token in prompt_tokens.iter() {
+        if token == audio_token_id && !placed {
+            placed = true;
+            expanded.push(audio_start_token_id);
+            expanded.extend(std::iter::repeat_n(audio_token_id, num_audio_tokens));
+            expanded.push(audio_end_token_id);
+        } else {
+            expanded.push(token);
+        }
+    }
+    if !placed {
+        // No placeholder rendered: splice the framed block after the leading
+        // token (BOS/system head), before the question text.
+        let mut spliced = Vec::with_capacity(prompt_tokens.len() + num_audio_tokens + 2);
+        let split = 1.min(prompt_tokens.len());
+        spliced.extend_from_slice(&prompt_tokens[..split]);
+        spliced.push(audio_start_token_id);
+        spliced.extend(std::iter::repeat_n(audio_token_id, num_audio_tokens));
+        spliced.push(audio_end_token_id);
+        spliced.extend_from_slice(&prompt_tokens[split..]);
+        expanded = spliced;
+    }
+    *prompt_tokens = expanded;
+    num_audio_tokens
+}
+
 fn expand_nemotron_h_nano_omni_audio_tokens(
     prompt_tokens: &mut Vec<i32>,
     sound_context_token_id: i32,

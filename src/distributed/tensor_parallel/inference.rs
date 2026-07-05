@@ -154,7 +154,7 @@ fn fallback_architecture(model_type: ModelType) -> &'static str {
         ModelType::Llama4 | ModelType::Llama4VLM => "llama4",
         ModelType::Qwen2 | ModelType::Qwen2VL | ModelType::Qwen25VL | ModelType::FastVLM => "qwen2",
         ModelType::Qwen3 | ModelType::Qwen3VL => "qwen3",
-        ModelType::Qwen3Moe | ModelType::Qwen3VLMoe => "qwen3_moe",
+        ModelType::Qwen3Moe | ModelType::Qwen3VLMoe | ModelType::Qwen3OmniMoe => "qwen3_moe",
         ModelType::Qwen3Next => "qwen3_next",
         ModelType::Qwen35 | ModelType::Qwen35VLM => "qwen3_5",
         ModelType::Qwen35Moe | ModelType::Qwen35MoeVLM => "qwen3_5_moe",

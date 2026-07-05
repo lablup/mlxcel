@@ -660,6 +660,137 @@ pub(crate) fn load_glm4v_moe(model_path: &Path) -> Result<LoadedModel> {
     Ok(LoadedModel::Glm4vMoe(vlm))
 }
 
+/// Load a Qwen3-Omni MoE thinker (`qwen3_omni_moe`, stage 1: text output from
+/// text + image + audio inputs).
+///
+/// Verified against `mlx-community/Qwen3-Omni-30B-A3B-Instruct-4bit`: text
+/// quantized 4-bit under `thinker.language_model.model.*` with pre-stacked
+/// `switch_mlp` experts and an untied quantized `lm_head`; vision and audio
+/// towers plain bf16 under `thinker.vision_tower.*` / `thinker.audio_tower.*`
+/// with conv weights already channels-last. Raw exports instead ship
+/// `thinker.model.*` / `thinker.visual.*`; both spellings are remapped. The
+/// talker / code2wav speech stack (`talker.*`, `code2wav.*`) is dropped before
+/// remap so its arrays are freed; its absence (thinker-only exports) is fine.
+/// Sub-configs live under `thinker_config`, as do the multimodal token ids.
+pub(crate) fn load_qwen3_omni_moe(model_path: &Path) -> Result<LoadedModel> {
+    use vision::encoders::qwen3_vl::{Qwen3VLVisionConfig, Qwen3VLVisionEncoder};
+
+    let (_config_str, full_config) = read_sanitized_vlm_config(model_path)?;
+    let thinker = full_config
+        .get("thinker_config")
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("Missing thinker_config in Qwen3-Omni config.json"))?;
+
+    // Sub-configs carry explicit nulls (e.g. `num_position_embeddings: null`);
+    // strip them so serde defaults apply.
+    fn strip_nulls(value: &mut serde_json::Value) {
+        if let Some(map) = value.as_object_mut() {
+            map.retain(|_, v| !v.is_null());
+            for v in map.values_mut() {
+                strip_nulls(v);
+            }
+        }
+    }
+    let subconfig = |key: &str| -> Result<serde_json::Value> {
+        let mut v = thinker
+            .get(key)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("Missing thinker_config.{key} in config.json"))?;
+        strip_nulls(&mut v);
+        // HF exports carry both `in_channels` and its alias `in_chans`;
+        // serde rejects the pair as a duplicate field, so drop the alias.
+        if let Some(map) = v.as_object_mut()
+            && map.contains_key("in_channels")
+        {
+            map.remove("in_chans");
+        }
+        Ok(v)
+    };
+
+    let mut text_config: models::qwen3_vl_moe::Qwen3VLMoeConfig =
+        serde_json::from_value(subconfig("text_config")?)
+            .map_err(|e| anyhow::anyhow!("Failed to parse Qwen3-Omni text config: {}", e))?;
+    inherit_qwen_text_quantization(&mut text_config, &full_config);
+
+    let mut vision_config: Qwen3VLVisionConfig =
+        serde_json::from_value(subconfig("vision_config")?)
+            .map_err(|e| anyhow::anyhow!("Failed to parse Qwen3-Omni vision config: {}", e))?;
+    inherit_qwen_vision_quantization(&mut vision_config, &full_config);
+
+    let audio_config: crate::audio::qwen3_omni_moe::Qwen3OmniAudioConfig =
+        serde_json::from_value(subconfig("audio_config")?)
+            .map_err(|e| anyhow::anyhow!("Failed to parse Qwen3-Omni audio config: {}", e))?;
+
+    // Drop the speech-output stack first so its arrays are freed, then remap
+    // the thinker prefixes (converted and raw spellings).
+    let raw_weights = load_vlm_weights_common(model_path, None)?;
+    let mut weights = mlxcel_core::weights::WeightMap::new();
+    for (key, value) in raw_weights {
+        if key.starts_with("talker.") || key.starts_with("code2wav.") {
+            continue;
+        }
+        // The sinusoidal audio position table is computed at construction.
+        if key.ends_with("audio_tower.positional_embedding") {
+            continue;
+        }
+        let new_key = if let Some(rest) = key.strip_prefix("thinker.language_model.") {
+            rest.to_string()
+        } else if let Some(rest) = key.strip_prefix("thinker.vision_tower.") {
+            format!("vision_tower.{rest}")
+        } else if let Some(rest) = key.strip_prefix("thinker.visual.") {
+            format!("vision_tower.{rest}")
+        } else if let Some(rest) = key.strip_prefix("thinker.audio_tower.") {
+            format!("audio_tower.{rest}")
+        } else if let Some(rest) = key.strip_prefix("thinker.") {
+            rest.to_string()
+        } else {
+            key
+        };
+        weights.insert(new_key, value);
+    }
+    models::sanitize_tied_embeddings(&mut weights, &full_config);
+
+    let text_model = models::Qwen3VLMoeModel::from_weights(&weights, &text_config)
+        .map_err(|e| anyhow::anyhow!("Failed to load Qwen3-Omni text model: {}", e))?;
+
+    let vision_encoder =
+        Qwen3VLVisionEncoder::from_weights(&weights, &vision_config, "vision_tower")
+            .map_err(|e| anyhow::anyhow!("Failed to load Qwen3-Omni vision encoder: {}", e))?;
+
+    let audio_encoder = crate::audio::qwen3_omni_moe::Qwen3OmniAudioEncoder::from_weights(
+        &weights,
+        &audio_config,
+        "audio_tower",
+    )
+    .map_err(|e| anyhow::anyhow!("Failed to load Qwen3-Omni audio tower: {}", e))?;
+
+    let processor = qwen_vl_processor_with_norm(&vision_config, [0.5, 0.5, 0.5], [0.5, 0.5, 0.5]);
+
+    let id = |key: &str, default: i64| -> i32 {
+        thinker.get(key).and_then(|v| v.as_i64()).unwrap_or(default) as i32
+    };
+
+    let vlm = vision::qwen3_omni_moe::Qwen3OmniMoeModel {
+        text_model,
+        vision_encoder,
+        audio_encoder,
+        processor,
+        image_token_id: id("image_token_id", 151_655),
+        video_token_id: id("video_token_id", 151_656),
+        vision_start_token_id: id("vision_start_token_id", 151_652),
+        audio_token_id: id("audio_token_id", 151_675),
+        audio_start_token_id: id("audio_start_token_id", 151_669),
+        audio_end_token_id: id("audio_end_token_id", 151_670),
+        im_end_token_id: full_config
+            .get("im_end_token_id")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(151_645) as i32,
+        spatial_merge_size: vision_config.spatial_merge_size,
+    };
+
+    Ok(LoadedModel::Qwen3OmniMoe(vlm))
+}
+
 #[cfg(test)]
 mod glm_ocr_loader_tests {
     use super::{drop_extra_text_layers, normalize_glm_ocr_rope};

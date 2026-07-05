@@ -35,7 +35,7 @@ use crate::moondream3_prompt::{Moondream3PromptMode, prepare_moondream3_prompt_t
 use crate::phi3v_prompt::prepare_phi3v_prompt_tokens;
 use crate::phi4_siglip_prompt::prepare_phi4_siglip_prompt_tokens;
 use crate::phi4mm_prompt::prepare_phi4mm_prompt_tokens;
-use crate::qwen_vl::insert_qwen_vl_image_tokens;
+use crate::qwen_vl::{insert_qwen_vl_image_tokens, insert_qwen3_omni_image_tokens};
 use crate::smolvlm_prompt::insert_smolvlm_image_tokens;
 use crate::vision::feature_cache::{CacheKey, ModelVisionCaches, image_hash_from_pixels};
 use crate::vision::merge::InputEmbeddings;
@@ -1261,6 +1261,38 @@ where
                 preparation,
             }))
         }
+        VlmRuntimeRef::Qwen3OmniMoe(model) => {
+            // Qwen chat prompts open with `<|im_start|>system`; the generic
+            // after-BOS splice would break that header (the omni thinker then
+            // emits an immediate end-of-turn). Insert the framed image run at
+            // the end of the LAST user turn instead: right before the final
+            // `<|im_end|>` when present, else after the leading token.
+            let (pixel_values, grid_thw) = model.processor.preprocess_with_grid(images);
+            let preparation = insert_qwen3_omni_image_tokens(
+                prompt_tokens,
+                &grid_thw,
+                model.spatial_merge_size,
+                model.vision_start_token_id,
+                model.image_token_id,
+                model.im_end_token_id,
+            )
+            .map(|stats| VlmPreparationSummary::QwenVlm {
+                image_blocks: stats.image_blocks,
+                total_image_tokens: stats.total_image_tokens,
+            });
+
+            let input_ids_arr = prompt_ids_array(prompt_tokens);
+            let embeddings = model.input_embeddings_multimodal(
+                &input_ids_arr,
+                Some((&pixel_values, &grid_thw[..])),
+                None,
+            );
+
+            Ok(Some(PreparedVlmEmbeddings {
+                embeddings,
+                preparation,
+            }))
+        }
         VlmRuntimeRef::Ernie45MoeVl(model) => {
             // Qwen2-VL-family flow: smart-resize into packed patch rows plus
             // grid_thw, expand (or splice) one `<|IMAGE_PLACEHOLDER|>` run of
@@ -1700,6 +1732,44 @@ pub fn expand_gemma4_audio_tokens_for_server(
 /// non-zero, matching the CLI expander `expand_nemotron_h_nano_omni_audio_tokens`
 /// (the released checkpoint surfaces no sound framing tokens, so both default to
 /// `0`, which means "no framing token in the stream").
+/// Expand the Qwen3-Omni audio placeholder in server prompt tokens.
+///
+/// Same two-strategy shape as
+/// [`expand_nemotron_h_nano_omni_audio_tokens_for_server`]: wrap a rendered
+/// `<|audio_pad|>` placeholder in place when the chat template emitted one, or
+/// splice the framed `audio_start + audio_token * N + audio_end` block right
+/// before the LAST `end_of_turn_token_id` (the close of the user turn) when
+/// the prompt is text-only; a prompt without either falls back to inserting
+/// after the leading token.
+///
+/// Used by: Qwen3OmniMoeModel (server `input_audio` path).
+pub fn expand_qwen3_omni_audio_tokens_for_server(
+    prompt_tokens: &mut Vec<i32>,
+    audio_token_id: i32,
+    audio_start_token_id: i32,
+    audio_end_token_id: i32,
+    num_audio_tokens: usize,
+    end_of_turn_token_id: Option<i32>,
+) -> usize {
+    let mut block = Vec::with_capacity(num_audio_tokens + 2);
+    block.push(audio_start_token_id);
+    block.extend(std::iter::repeat_n(audio_token_id, num_audio_tokens));
+    block.push(audio_end_token_id);
+
+    // 1. Wrap a rendered placeholder in place.
+    if let Some(pos) = prompt_tokens.iter().position(|&t| t == audio_token_id) {
+        prompt_tokens.splice(pos..pos + 1, block);
+        return num_audio_tokens;
+    }
+
+    // 2. Splice before the last end-of-turn marker (end of the user turn).
+    let insert_at = end_of_turn_token_id
+        .and_then(|eot| prompt_tokens.iter().rposition(|&t| t == eot))
+        .unwrap_or(1.min(prompt_tokens.len()));
+    prompt_tokens.splice(insert_at..insert_at, block);
+    num_audio_tokens
+}
+
 pub fn expand_nemotron_h_nano_omni_audio_tokens_for_server(
     prompt_tokens: &mut Vec<i32>,
     sound_context_token_id: i32,

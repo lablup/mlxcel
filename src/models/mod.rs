@@ -276,6 +276,7 @@ pub enum ModelType {
     Qwen25VL,          // Qwen2.5-VL (windowed ViT + Qwen2 w/ MRoPE)
     Qwen3VL,           // Qwen3-VL (ViT + interleaved MRoPE + DeepStack)
     Qwen3VLMoe,        // Qwen3-VL-MoE (Qwen3-VL + MoE text backbone)
+    Qwen3OmniMoe,      // Qwen3-Omni MoE thinker (Qwen3-VL-MoE + audio tower)
     PaddleOcrVL,       // PaddleOCR-VL (NaViT vision + ERNIE-4.5 w/ MRoPE)
     DotsOcrVL,         // dots.ocr (dots_vit ViT + Qwen2 text decoder)
     Glm4v,             // GLM-4V (GLM-4V ViT + GLM-4 text w/ sectioned MRoPE)
@@ -466,6 +467,7 @@ pub const ALL_MODEL_TYPES: &[ModelType] = &[
     ModelType::Qwen25VL,
     ModelType::Qwen3VL,
     ModelType::Qwen3VLMoe,
+    ModelType::Qwen3OmniMoe,
     ModelType::PaddleOcrVL,
     ModelType::DotsOcrVL,
     ModelType::Glm4v,
@@ -623,6 +625,7 @@ impl ModelType {
             ModelType::Qwen25VL => ("Qwen2.5-VL", "Qwen VLM"),
             ModelType::Qwen3VL => ("Qwen3-VL", "Qwen VLM"),
             ModelType::Qwen3VLMoe => ("Qwen3-VL MoE", "Qwen VLM"),
+            ModelType::Qwen3OmniMoe => ("Qwen3-Omni MoE (thinker)", "Qwen VLM"),
             ModelType::PaddleOcrVL => ("PaddleOCR-VL", "PaddleOCR VLM"),
             ModelType::DotsOcrVL => ("dots.ocr (dots_vit + Qwen2)", "Other VLM"),
             ModelType::Glm4v => ("GLM-4V", "GLM VLM"),
@@ -921,6 +924,7 @@ mod metadata_tests {
             Qwen25VL,
             Qwen3VL,
             Qwen3VLMoe,
+            Qwen3OmniMoe,
             PaddleOcrVL,
             DotsOcrVL,
             Glm4v,

@@ -132,6 +132,7 @@ macro_rules! for_each_model_registration {
             Qwen25VL => { kind: Vlm, directory: Vlm, weight: None, adapter: Some("Qwen VL models cannot be loaded with LoRA adapters yet") };
             Qwen3VL => { kind: Vlm, directory: Vlm, weight: None, adapter: Some("Qwen VL models cannot be loaded with LoRA adapters yet") };
             Qwen3VLMoe => { kind: Vlm, directory: Vlm, weight: None, adapter: Some("Qwen VL models cannot be loaded with LoRA adapters yet") };
+            Qwen3OmniMoe => { kind: Vlm, directory: Vlm, weight: None, adapter: Some("Qwen VL models cannot be loaded with LoRA adapters yet") };
             PaddleOcrVL => { kind: Vlm, directory: Vlm, weight: None, adapter: Some("PaddleOCR-VL cannot be loaded with LoRA adapters yet") };
             DotsOcrVL => { kind: Vlm, directory: Vlm, weight: None, adapter: Some("dots.ocr cannot be loaded with LoRA adapters yet") };
             Glm4v => { kind: Vlm, directory: Vlm, weight: None, adapter: Some("GLM-4V cannot be loaded with LoRA adapters yet") };

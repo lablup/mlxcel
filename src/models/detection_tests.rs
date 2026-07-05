@@ -131,6 +131,29 @@ fn llava_qwen2_hyphen_stays_bunny() {
 }
 
 #[test]
+fn qwen3_omni_moe_model_type_is_detected() {
+    let model_dir = temp_path("qwen3_omni_moe");
+    fs::create_dir_all(&model_dir).unwrap();
+    fs::write(
+        model_dir.join("config.json"),
+        r#"{
+            "model_type": "qwen3_omni_moe",
+            "thinker_config": {
+                "text_config": { "num_hidden_layers": 48, "hidden_size": 2048 },
+                "vision_config": { "depth": 27 },
+                "audio_config": { "d_model": 1280 }
+            }
+        }"#,
+    )
+    .unwrap();
+
+    let detected = super::detection::get_model_type(&model_dir).unwrap();
+    assert_eq!(detected, ModelType::Qwen3OmniMoe);
+
+    fs::remove_dir_all(model_dir).unwrap();
+}
+
+#[test]
 fn hunyuan_vl_model_type_is_detected() {
     let model_dir = temp_path("hunyuan_vl");
     fs::create_dir_all(&model_dir).unwrap();
