@@ -16,6 +16,7 @@
 //!
 //! Provides the VisionEncoder trait and encoder implementations.
 
+pub mod deepseek_vl2;
 pub mod deepseekocr_clip;
 pub mod deepseekocr_qwen2;
 pub mod deepseekocr_sam;

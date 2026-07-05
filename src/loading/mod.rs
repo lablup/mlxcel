@@ -179,6 +179,7 @@ fn try_load_vlm_model_from_dir(
         ModelType::Granite4VisionVLM => Some(load_granite4_vision_vlm(model_path)?),
         ModelType::DeepSeekOcrVLM => Some(load_deepseekocr_vlm(model_path)?),
         ModelType::DeepSeekOcr2VLM => Some(load_deepseekocr_2_vlm(model_path)?),
+        ModelType::DeepSeekVL2 => Some(load_deepseek_vl2_vlm(model_path)?),
         ModelType::LlavaBunnyVLM => Some(load_llava_bunny_vlm(model_path)?),
         ModelType::AyaVisionVLM => Some(load_aya_vision_vlm(model_path)?),
         ModelType::PaliGemmaVLM => Some(load_paligemma_vlm(model_path)?),

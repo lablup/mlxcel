@@ -242,6 +242,7 @@ pub fn get_model_type(model_path: &Path) -> Result<ModelType> {
         "granite4_vision" => Ok(ModelType::Granite4VisionVLM),
         "deepseekocr" => Ok(ModelType::DeepSeekOcrVLM),
         "deepseekocr_2" => Ok(ModelType::DeepSeekOcr2VLM),
+        "deepseek_vl_v2" | "deepseek_vl2" => Ok(ModelType::DeepSeekVL2),
         "llava" | "llava_next" => {
             // The original IBM Granite Vision checkpoint ships as `llava_next`
             // with a `granite` text backbone; route it to the Granite VLM.

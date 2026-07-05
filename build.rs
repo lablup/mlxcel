@@ -81,7 +81,8 @@ fn main() {
             println!("cargo:rustc-link-arg={fw}");
         }
         println!("cargo:rustc-link-lib=c++");
-        return;
+        // The CUDA / Linux-dist recipes below are `cfg(not(macos))`, so nothing
+        // runs after this block on macOS; no explicit early return is needed.
     }
 
     // The CUDA and Linux-dist recipes below are GNU-ld only and never apply on

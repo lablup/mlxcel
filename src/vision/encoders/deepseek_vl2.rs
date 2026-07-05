@@ -106,7 +106,8 @@ impl Attention {
         let (heads, hd) = (self.num_heads, self.head_dim);
         let qkv = self.qkv.forward(x); // (b, N, 3*width)
         let split = |i: i32| {
-            let sl = mlxcel_core::slice(&qkv, &[0, 0, i * heads * hd], &[b, n, (i + 1) * heads * hd]);
+            let sl =
+                mlxcel_core::slice(&qkv, &[0, 0, i * heads * hd], &[b, n, (i + 1) * heads * hd]);
             let sl = mlxcel_core::reshape(&sl, &[b, n, heads, hd]);
             mlxcel_core::transpose_axes(&sl, &[0, 2, 1, 3]) // (b, heads, N, hd)
         };
@@ -143,11 +144,14 @@ impl Block {
 }
 
 pub struct DeepSeekVl2VisionEncoder {
-    patch_embed: Linear,            // (width, C*p*p) with bias, bf16
+    patch_embed: Linear,            // (width, C*p*p) with bias
     pos_embed: UniquePtr<MlxArray>, // (1, N, width)
     blocks: Vec<Block>,
     norm: LayerNorm,
     patch_size: i32,
+    /// Weight dtype code; pixel activations are cast to it before the patch
+    /// linear so a bf16 pixel batch meets f16 (or bf16) tower weights.
+    dtype: i32,
 }
 
 impl DeepSeekVl2VisionEncoder {
@@ -175,6 +179,7 @@ impl DeepSeekVl2VisionEncoder {
             _ => return Err(format!("unexpected patch proj shape {shape:?}")),
         };
         let patch_b = get(weights, &format!("{prefix}.patch_embed.proj.bias"))?;
+        let dtype = mlxcel_core::array_dtype(&patch_w);
         let patch_embed = Linear::new(patch_w, Some(patch_b));
         let pos_embed = get(weights, &format!("{prefix}.pos_embed"))?;
 
@@ -210,6 +215,7 @@ impl DeepSeekVl2VisionEncoder {
             blocks,
             norm,
             patch_size: config.patch_size,
+            dtype,
         })
     }
 
@@ -230,6 +236,8 @@ impl DeepSeekVl2VisionEncoder {
         let x = mlxcel_core::reshape(&crop, &[tiles, g, p, g, p, 3]);
         let x = mlxcel_core::transpose_axes(&x, &[0, 1, 3, 5, 2, 4]); // (tiles, g, g, 3, p, p)
         let x = mlxcel_core::reshape(&x, &[tiles * n, feat]);
+        // Match the tower weight dtype (pixels arrive bf16; weights may be f16).
+        let x = mlxcel_core::astype(&x, self.dtype);
         let embeds = self.patch_embed.forward(&x);
         let mut h = mlxcel_core::reshape(&embeds, &[tiles, n, -1]);
 

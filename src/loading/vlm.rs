@@ -37,6 +37,8 @@ use crate::models;
 use crate::vision;
 use models::sanitize_config_json;
 
+#[path = "vlm_deepseek_vl2.rs"]
+mod deepseek_vl2;
 #[path = "vlm_deepseekocr.rs"]
 mod deepseekocr;
 #[path = "vlm_dots_ocr.rs"]
@@ -78,6 +80,7 @@ mod special;
 #[path = "vlm_youtu_vl.rs"]
 mod youtu_vl_loader;
 
+pub(crate) use deepseek_vl2::load_deepseek_vl2_vlm;
 pub(crate) use deepseekocr::{load_deepseekocr_2_vlm, load_deepseekocr_vlm};
 pub(crate) use dots_ocr::load_dots_ocr_vl;
 pub(crate) use gemma::{load_gemma3_vlm, load_gemma3n_vlm, load_gemma4_vlm};
