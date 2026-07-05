@@ -43,6 +43,8 @@ mod deepseek_vl2;
 mod deepseekocr;
 #[path = "vlm_dots_ocr.rs"]
 mod dots_ocr;
+#[path = "vlm_ernie4_5_vl.rs"]
+mod ernie4_5_vl;
 #[path = "vlm_fastvlm.rs"]
 mod fastvlm;
 #[path = "vlm_gemma.rs"]
@@ -85,6 +87,7 @@ mod youtu_vl_loader;
 pub(crate) use deepseek_vl2::load_deepseek_vl2_vlm;
 pub(crate) use deepseekocr::{load_deepseekocr_2_vlm, load_deepseekocr_vlm};
 pub(crate) use dots_ocr::load_dots_ocr_vl;
+pub(crate) use ernie4_5_vl::load_ernie4_5_moe_vlm;
 pub(crate) use fastvlm::load_fastvlm_vlm;
 pub(crate) use gemma::{load_gemma3_vlm, load_gemma3n_vlm, load_gemma4_vlm};
 pub(crate) use gemma_unified::load_gemma4_unified;

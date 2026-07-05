@@ -131,6 +131,29 @@ fn llava_qwen2_hyphen_stays_bunny() {
 }
 
 #[test]
+fn ernie4_5_moe_vl_model_type_is_detected() {
+    let model_dir = temp_path("ernie4_5_moe_vl");
+    fs::create_dir_all(&model_dir).unwrap();
+    fs::write(
+        model_dir.join("config.json"),
+        r#"{
+            "model_type": "ernie4_5_moe_vl",
+            "hidden_size": 2560,
+            "num_hidden_layers": 28,
+            "num_attention_heads": 20,
+            "moe_num_experts": [64, 64],
+            "vision_config": { "depth": 32, "embed_dim": 1280 }
+        }"#,
+    )
+    .unwrap();
+
+    let detected = super::detection::get_model_type(&model_dir).unwrap();
+    assert_eq!(detected, ModelType::Ernie45MoeVLM);
+
+    fs::remove_dir_all(model_dir).unwrap();
+}
+
+#[test]
 fn deepseek_vl2_model_type_is_detected() {
     let model_dir = temp_path("deepseek_vl2");
     fs::create_dir_all(&model_dir).unwrap();

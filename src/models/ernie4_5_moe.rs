@@ -226,6 +226,7 @@ impl Attention {
 }
 
 // SwitchLinear: Stacked expert weights for MoE.
+// Used by: Ernie45Moe, Ernie45MoeVL (dual expert banks)
 /// Stacked linear layers for MoE experts
 /// Weights shape: [num_experts, output_dim, input_dim_packed]
 /// Supports both quantized (gather_qmm) and non-quantized (gather_mm) forward paths.
@@ -304,6 +305,7 @@ impl SwitchLinear {
 }
 
 // SwitchGLU: SwiGLU with stacked expert weights.
+// Used by: Ernie45Moe, Ernie45MoeVL (dual expert banks)
 /// SwitchGLU: SwiGLU activation with stacked expert weights for MoE
 pub struct SwitchGLU {
     pub gate_proj: SwitchLinear,
@@ -422,6 +424,7 @@ impl SwitchGLU {
 }
 
 // Dense MLP (for non-MoE layers and shared experts).
+// Used by: Ernie45Moe, Ernie45MoeVL (dense layers + fused shared experts)
 /// Standard MLP with SwiGLU activation
 pub struct DenseMLP {
     pub gate_proj: UnifiedLinear,

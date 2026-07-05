@@ -67,6 +67,7 @@ pub enum VlmRuntimeRef<'a> {
     DeepSeekOcr2(&'a vision::deepseekocr_2::DeepSeekOcr2VlModel),
     DeepSeekVL2(&'a vision::deepseek_vl2::DeepSeekVl2VlModel),
     FastVLM(&'a vision::VisionModule),
+    Ernie45MoeVl(&'a vision::ernie4_5_moe_vl::Ernie45MoeVlModel),
     Standard(&'a vision::VisionModule),
 }
 
@@ -187,6 +188,7 @@ impl LoadedModel {
             Self::DeepSeekOcr2VLM(model) => Some(VlmRuntimeRef::DeepSeekOcr2(model)),
             Self::DeepSeekVL2(model) => Some(VlmRuntimeRef::DeepSeekVL2(model)),
             Self::FastVLM(vlm) => Some(VlmRuntimeRef::FastVLM(&vlm.vision)),
+            Self::Ernie45MoeVLM(model) => Some(VlmRuntimeRef::Ernie45MoeVl(model)),
             _ => None,
         }
     }

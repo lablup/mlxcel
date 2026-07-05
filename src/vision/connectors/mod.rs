@@ -19,6 +19,7 @@
 pub mod avg_pool;
 pub mod aya_vision;
 pub mod deepseek_vl2;
+pub mod ernie4_5_vl;
 pub mod granite4_vision;
 pub mod identity;
 pub mod lfm2_vl;

@@ -43,6 +43,7 @@ pub mod diffusion_gemma;
 pub mod dots1;
 pub mod ernie4_5;
 pub mod ernie4_5_moe;
+pub mod ernie4_5_moe_vl;
 pub mod exaone;
 pub mod exaone4;
 pub mod exaone_moe;
@@ -264,6 +265,7 @@ pub enum ModelType {
     DeepSeekVL2,       // DeepSeek-VL2 (SigLIP + downsample MLP + DeepSeek-V2 MoE decoder)
     LlavaBunnyVLM,     // LLaVA-Bunny (SigLIP + Qwen2)
     FastVLM,           // FastVLM (FastViTHD vision + Qwen2 text, mlp2x_gelu)
+    Ernie45MoeVLM,     // ERNIE-4.5 MoE VL (DFNRope ViT + modality-split MoE + 3D MRoPE)
     AyaVisionVLM,      // Aya Vision (SigLIP + Cohere2)
     PaliGemmaVLM,      // PaliGemma (SigLIP + Gemma)
     PixtralVLM,        // Pixtral (ViT w/ 2D RoPE + Mistral)
@@ -452,6 +454,7 @@ pub const ALL_MODEL_TYPES: &[ModelType] = &[
     ModelType::DeepSeekVL2,
     ModelType::LlavaBunnyVLM,
     ModelType::FastVLM,
+    ModelType::Ernie45MoeVLM,
     ModelType::AyaVisionVLM,
     ModelType::PaliGemmaVLM,
     ModelType::PixtralVLM,
@@ -800,6 +803,7 @@ impl ModelType {
             ),
             ModelType::LlavaBunnyVLM => ("LLaVA-Bunny (SigLIP + Qwen2)", "Other VLM"),
             ModelType::FastVLM => ("FastVLM (FastViTHD + Qwen2)", "Other VLM"),
+            ModelType::Ernie45MoeVLM => ("ERNIE 4.5 MoE VL (DFNRope + MoE)", "ERNIE"),
             ModelType::InternVLChatVLM => {
                 ("InternVL (InternViT + pixel-shuffle + Qwen2)", "Other VLM")
             }
@@ -903,6 +907,7 @@ mod metadata_tests {
             DeepSeekVL2,
             LlavaBunnyVLM,
             FastVLM,
+            Ernie45MoeVLM,
             AyaVisionVLM,
             PaliGemmaVLM,
             PixtralVLM,

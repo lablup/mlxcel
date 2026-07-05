@@ -1232,6 +1232,33 @@ where
                 preparation,
             }))
         }
+        VlmRuntimeRef::Ernie45MoeVl(model) => {
+            // Qwen2-VL-family flow: smart-resize into packed patch rows plus
+            // grid_thw, expand (or splice) one `<|IMAGE_PLACEHOLDER|>` run of
+            // t*(h/merge)*(w/merge) tokens per image framed by
+            // `<|IMAGE_START|>` / `<|IMAGE_END|>`, then merge features and set
+            // the 3D MRoPE prefill state.
+            let (pixel_values, grid_thw) = model.processor.preprocess_with_grid(images);
+            let preparation = insert_qwen_vl_image_tokens(
+                prompt_tokens,
+                &grid_thw,
+                model.spatial_merge_size,
+                model.vision_start_token_id,
+                model.image_token_id,
+            )
+            .map(|stats| VlmPreparationSummary::QwenVlm {
+                image_blocks: stats.image_blocks,
+                total_image_tokens: stats.total_image_tokens,
+            });
+
+            let input_ids_arr = prompt_ids_array(prompt_tokens);
+            let embeddings = model.input_embeddings(&input_ids_arr, &pixel_values, &grid_thw);
+
+            Ok(Some(PreparedVlmEmbeddings {
+                embeddings,
+                preparation,
+            }))
+        }
         VlmRuntimeRef::KimiVL(kimi) => {
             // MoonViT native-resolution preprocessing: each image is patchified
             // into [num_patches, C, p, p] plus its (h, w) patch grid.

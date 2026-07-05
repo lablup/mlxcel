@@ -190,6 +190,9 @@ fn fallback_architecture(model_type: ModelType) -> &'static str {
         ModelType::Ernie45 | ModelType::PaddleOcrVL => "ernie4_5",
         ModelType::DotsOcrVL => "qwen2",
         ModelType::Ernie45Moe => "ernie4_5_moe",
+        // ERNIE-4.5-VL text backbone; TP is refused for VLM-kind models earlier,
+        // this keeps the dispatch table total.
+        ModelType::Ernie45MoeVLM => "ernie4_5_moe",
         ModelType::HunyuanMoe => "hunyuan_moe",
         ModelType::HunyuanV1Dense => "hunyuan_v1_dense",
         ModelType::MiMo => "mimo",
