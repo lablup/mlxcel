@@ -307,6 +307,20 @@ pub(crate) fn spawn_model_worker_with_batch_config(
                     );
                     return;
                 }
+                // LLaDA-2 MoE (issue #546): masked-diffusion block generator,
+                // served on the shared single-stream diffusion worker loop. The
+                // serve-level `--max-denoising-steps` flag maps to the LLaDA-2
+                // per-block step count.
+                LoadedModel::Llada2Moe(llada2) => {
+                    crate::server::diffusion_worker::run_llada2_worker_loop(
+                        &llada2,
+                        &tokenizer,
+                        request_rx,
+                        sched_config.max_denoising_steps,
+                        &config_eos,
+                    );
+                    return;
+                }
                 other => other,
             };
 
@@ -810,6 +824,19 @@ pub(crate) fn spawn_legacy_model_worker(
                         &model_path,
                         request_rx,
                         crate::server::diffusion_worker::DiffusionServeDefaults::default(),
+                        &config_eos,
+                    );
+                    return;
+                }
+                // LLaDA-2 MoE (issue #546): served on the shared single-stream
+                // loop. The legacy worker has no serve-level diffusion flags, so
+                // the engine step default applies (steps_override = None).
+                LoadedModel::Llada2Moe(llada2) => {
+                    crate::server::diffusion_worker::run_llada2_worker_loop(
+                        &llada2,
+                        &tokenizer,
+                        request_rx,
+                        None,
                         &config_eos,
                     );
                     return;

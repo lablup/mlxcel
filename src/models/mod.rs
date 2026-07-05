@@ -69,6 +69,7 @@ pub mod internlm3;
 pub mod jamba;
 pub mod kimi_linear;
 pub mod lfm2;
+pub mod llada2_moe;
 pub mod llama3;
 pub mod llama4;
 pub mod longcat_flash_ngram;
@@ -166,6 +167,7 @@ pub use internlm3::InternLM3Model;
 pub use jamba::JambaModel;
 pub use kimi_linear::KimiLinearModel;
 pub use lfm2::Lfm2Model;
+pub use llada2_moe::Llada2MoeModel;
 pub use llama3::Llama3Model;
 pub use llama4::{Llama4CxxModel, Llama4Wrapper};
 pub use longcat_flash_ngram::LongcatFlashNgramModel;
@@ -250,6 +252,7 @@ pub enum ModelType {
     Gemma3,            // Gemma 3 (text-only)
     Gemma4,            // Gemma 4 text-only route
     DiffusionGemma,    // DiffusionGemma (block-diffusion on the Gemma 4 MoE backbone)
+    Llada2Moe,         // LLaDA-2 MoE (masked-diffusion LM, DeepSeek-V3-style MoE FFN)
     Gemma3VLM,         // Gemma 3 VLM (vision-language)
     Gemma4VLM,         // Gemma 4 VLM (vision-language)
     Gemma4Unified,     // Gemma 4 Unified (encoder-free text + vision + audio)
@@ -436,6 +439,7 @@ pub const ALL_MODEL_TYPES: &[ModelType] = &[
     ModelType::Gemma3,
     ModelType::Gemma4,
     ModelType::DiffusionGemma,
+    ModelType::Llada2Moe,
     ModelType::Gemma3VLM,
     ModelType::Gemma4VLM,
     ModelType::Gemma4Unified,
@@ -628,6 +632,10 @@ impl ModelType {
             ModelType::DiffusionGemma => (
                 "DiffusionGemma (block-diffusion, Gemma 4 MoE backbone)",
                 "Gemma",
+            ),
+            ModelType::Llada2Moe => (
+                "LLaDA-2 MoE (masked-diffusion LM, DeepSeek-V3-style MoE)",
+                "Diffusion",
             ),
             ModelType::RecurrentGemma => ("RecurrentGemma (Griffin: RGLRU + attention)", "Gemma"),
 
@@ -880,6 +888,7 @@ mod metadata_tests {
             Gemma3,
             Gemma4,
             DiffusionGemma,
+            Llada2Moe,
             Gemma3VLM,
             Gemma4VLM,
             Gemma4Unified,

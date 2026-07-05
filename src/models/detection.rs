@@ -123,6 +123,10 @@ pub fn get_model_type(model_path: &Path) -> Result<ModelType> {
         } else {
             ModelType::Gemma4
         }),
+        // LLaDA-2 MoE (masked-diffusion LM with a DeepSeek-V3-style MoE FFN).
+        // Generates by iterative block-wise unmasking rather than autoregressive
+        // decode; served on the shared diffusion worker loop.
+        "llada2_moe" => Ok(ModelType::Llada2Moe),
         // DiffusionGemma (block-diffusion on the Gemma 4 MoE backbone). The
         // checkpoint always ships a vision tower, but phase 1 is text-only:
         // the loader skips the vision weights, so detection is by model_type

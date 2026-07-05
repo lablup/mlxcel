@@ -1766,6 +1766,17 @@ fn run_generate_once(mut args: GenerateArgs) -> Result<()> {
                 &user_prompt,
             );
         }
+        // LLaDA-2 MoE generates by block-wise unmasking, not autoregressive
+        // decode: route it to its own driver before the CxxGenerator loop.
+        if let mlxcel::LoadedModel::Llada2Moe(llada2_model) = &model {
+            return super::generate_llada2::run_llada2_generation(
+                llada2_model,
+                &args,
+                &tokenizer,
+                &prompt_tokens,
+                &user_prompt,
+            );
+        }
         let vlm_embeddings = generate_vlm::compute_vlm_embeddings(
             &model,
             &mut prompt_tokens,

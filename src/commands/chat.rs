@@ -174,11 +174,14 @@ pub fn run_chat(opts: ChatOptions) -> Result<()> {
     println!("Loading model from {model_path:?}...");
     let load_start = Instant::now();
     let (model, _tok_from_load) = select_backend().load_model(&model_path)?;
-    if matches!(model, mlxcel::LoadedModel::DiffusionGemma(_)) {
+    if matches!(
+        model,
+        mlxcel::LoadedModel::DiffusionGemma(_) | mlxcel::LoadedModel::Llada2Moe(_)
+    ) {
         // The REPL drives the autoregressive CxxGenerator loop; the
-        // block-diffusion engine is one-shot only in phase 1 of issue #217.
+        // block-diffusion / block-unmasking engines are one-shot only.
         return Err(anyhow!(
-            "DiffusionGemma interactive chat is not supported yet; use a one-shot prompt: \
+            "Block-diffusion models do not support interactive chat yet; use a one-shot prompt: \
              mlxcel generate -m <model> -p \"...\""
         ));
     }
