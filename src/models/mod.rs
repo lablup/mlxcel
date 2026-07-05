@@ -260,6 +260,7 @@ pub enum ModelType {
     DeepSeekOcr2VLM,   // DeepSeek-OCR 2 (SAM + Qwen2 resampler + DeepSeek MoE decoder)
     DeepSeekVL2,       // DeepSeek-VL2 (SigLIP + downsample MLP + DeepSeek-V2 MoE decoder)
     LlavaBunnyVLM,     // LLaVA-Bunny (SigLIP + Qwen2)
+    FastVLM,           // FastVLM (FastViTHD vision + Qwen2 text, mlp2x_gelu)
     AyaVisionVLM,      // Aya Vision (SigLIP + Cohere2)
     PaliGemmaVLM,      // PaliGemma (SigLIP + Gemma)
     PixtralVLM,        // Pixtral (ViT w/ 2D RoPE + Mistral)
@@ -446,6 +447,7 @@ pub const ALL_MODEL_TYPES: &[ModelType] = &[
     ModelType::DeepSeekOcr2VLM,
     ModelType::DeepSeekVL2,
     ModelType::LlavaBunnyVLM,
+    ModelType::FastVLM,
     ModelType::AyaVisionVLM,
     ModelType::PaliGemmaVLM,
     ModelType::PixtralVLM,
@@ -789,6 +791,7 @@ impl ModelType {
                 "Other VLM",
             ),
             ModelType::LlavaBunnyVLM => ("LLaVA-Bunny (SigLIP + Qwen2)", "Other VLM"),
+            ModelType::FastVLM => ("FastVLM (FastViTHD + Qwen2)", "Other VLM"),
             ModelType::InternVLChatVLM => {
                 ("InternVL (InternViT + pixel-shuffle + Qwen2)", "Other VLM")
             }
@@ -890,6 +893,7 @@ mod metadata_tests {
             DeepSeekOcr2VLM,
             DeepSeekVL2,
             LlavaBunnyVLM,
+            FastVLM,
             AyaVisionVLM,
             PaliGemmaVLM,
             PixtralVLM,

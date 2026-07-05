@@ -88,6 +88,49 @@ fn whisper_model_type_is_detected() {
 }
 
 #[test]
+fn fastvlm_model_type_is_detected() {
+    for model_type in ["fastvlm", "llava_qwen2"] {
+        let model_dir = temp_path(&format!("fastvlm_{model_type}"));
+        fs::create_dir_all(&model_dir).unwrap();
+        fs::write(
+            model_dir.join("config.json"),
+            format!(
+                r#"{{
+                "model_type": "{model_type}",
+                "hidden_size": 896,
+                "num_hidden_layers": 24,
+                "num_attention_heads": 14,
+                "mm_projector_type": "mlp2x_gelu",
+                "vision_config": {{ "image_size": 1024 }}
+            }}"#
+            ),
+        )
+        .unwrap();
+
+        let detected = super::detection::get_model_type(&model_dir).unwrap();
+        assert_eq!(detected, ModelType::FastVLM, "for model_type {model_type}");
+
+        fs::remove_dir_all(model_dir).unwrap();
+    }
+}
+
+#[test]
+fn llava_qwen2_hyphen_stays_bunny() {
+    // The hyphenated `llava-qwen2` is the Bunny family and must not route to
+    // FastVLM (which owns the underscore `llava_qwen2`).
+    let model_dir = temp_path("llava_qwen2_hyphen");
+    fs::create_dir_all(&model_dir).unwrap();
+    fs::write(
+        model_dir.join("config.json"),
+        r#"{ "model_type": "llava-qwen2", "hidden_size": 896 }"#,
+    )
+    .unwrap();
+    let detected = super::detection::get_model_type(&model_dir).unwrap();
+    assert_eq!(detected, ModelType::LlavaBunnyVLM);
+    fs::remove_dir_all(model_dir).unwrap();
+}
+
+#[test]
 fn deepseek_vl2_model_type_is_detected() {
     let model_dir = temp_path("deepseek_vl2");
     fs::create_dir_all(&model_dir).unwrap();

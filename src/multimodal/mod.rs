@@ -37,6 +37,7 @@
 pub mod batched_dispatch;
 pub mod deepseek_vl2_prompt;
 pub mod deepseekocr_prompt;
+pub mod fastvlm_prompt;
 pub mod gemma4_vl;
 pub mod granite_vision_prompt;
 pub mod internvl_prompt;

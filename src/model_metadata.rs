@@ -120,6 +120,7 @@ macro_rules! for_each_model_registration {
             DeepSeekOcr2VLM => { kind: Vlm, directory: Vlm, weight: None, adapter: Some("DeepSeek-OCR 2 VLM cannot be loaded with LoRA adapters yet") };
             DeepSeekVL2 => { kind: Vlm, directory: Vlm, weight: None, adapter: Some("DeepSeek-VL2 cannot be loaded with LoRA adapters yet") };
             LlavaBunnyVLM => { kind: Vlm, directory: Vlm, weight: None, adapter: Some("LLaVA VLM cannot be loaded with LoRA adapters yet") };
+            FastVLM => { kind: Vlm, directory: Vlm, weight: None, adapter: Some("FastVLM cannot be loaded with LoRA adapters yet") };
             AyaVisionVLM => { kind: Vlm, directory: Vlm, weight: None, adapter: Some("Aya Vision VLM cannot be loaded with LoRA adapters yet") };
             PaliGemmaVLM => { kind: Vlm, directory: Vlm, weight: None, adapter: Some("PaliGemma VLM cannot be loaded with LoRA adapters yet") };
             PixtralVLM => { kind: Vlm, directory: Vlm, weight: None, adapter: Some("Pixtral/Mistral3 VLM cannot be loaded with LoRA adapters yet") };

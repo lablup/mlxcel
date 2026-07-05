@@ -40,7 +40,7 @@ use crate::smolvlm_prompt::insert_smolvlm_image_tokens;
 use crate::vision::feature_cache::{CacheKey, ModelVisionCaches, image_hash_from_pixels};
 use crate::vision::merge::InputEmbeddings;
 use crate::vision::processors::ImageProcessor;
-use crate::vlm_prompt::{ImageTokenBlockStats, apply_image_token_blocks};
+use crate::vlm_prompt::{ImageTokenBlockInfo, ImageTokenBlockStats, apply_image_token_blocks};
 use crate::youtu_vl_prompt::insert_youtu_vl_image_tokens;
 use crate::{LoadedModel, VlmRuntimeRef};
 
@@ -166,6 +166,11 @@ pub enum VlmPreparationSummary {
     },
     /// DeepSeek-VL2 expanded each `<image>` into its per-image placeholder run.
     DeepSeekVL2 {
+        image_blocks: usize,
+        total_image_tokens: i32,
+    },
+    /// FastVLM spliced `-200` sentinels and expanded each to 256 image tokens.
+    FastVLM {
         image_blocks: usize,
         total_image_tokens: i32,
     },
@@ -1172,6 +1177,55 @@ where
 
             let input_ids_arr = prompt_ids_array(prompt_tokens);
             let embeddings = model.input_embeddings(&input_ids_arr, &pre);
+
+            Ok(Some(PreparedVlmEmbeddings {
+                embeddings,
+                preparation,
+            }))
+        }
+        VlmRuntimeRef::FastVLM(vision_module) => {
+            // `<image>` is not a vocabulary token (the sentinel is -200), so the
+            // rendered prompt is re-tokenized here with one sentinel spliced per
+            // image, then each sentinel is expanded to mm_tokens_per_image copies.
+            let prepared = crate::multimodal::fastvlm_prompt::prepare_fastvlm_prompt_tokens(
+                prompt,
+                images.len(),
+                &mut encode,
+            )
+            .map_err(|e| anyhow::anyhow!(e))?;
+            *prompt_tokens = prepared.tokens;
+
+            let info = ImageTokenBlockInfo {
+                use_boi_eoi: false,
+                image_token_id: vision_module.image_token_id,
+                mm_tokens_per_image: vision_module.mm_tokens_per_image,
+                boi_token_id: 0,
+                eoi_token_id: 0,
+                has_bos: true,
+                separator_token_id: None,
+                suffix_tokens: Vec::new(),
+                block_prefix_tokens: Vec::new(),
+                block_suffix_tokens: Vec::new(),
+            };
+            let tokens_per_image = vision_module.mm_tokens_per_image;
+            let preparation =
+                apply_image_token_blocks(prompt_tokens, info, images.len()).map(|_| {
+                    VlmPreparationSummary::FastVLM {
+                        image_blocks: images.len(),
+                        total_image_tokens: (images.len() * tokens_per_image) as i32,
+                    }
+                });
+
+            let pixel_values = vision_module.processor.preprocess(images);
+            let mask =
+                mlxcel_core::ones(&[1, prompt_tokens.len() as i32], mlxcel_core::dtype::INT32);
+            let input_ids_arr = prompt_ids_array(prompt_tokens);
+            let embeddings = vision_module.get_input_embeddings(
+                model,
+                &input_ids_arr,
+                Some(&pixel_values),
+                &mask,
+            )?;
 
             Ok(Some(PreparedVlmEmbeddings {
                 embeddings,

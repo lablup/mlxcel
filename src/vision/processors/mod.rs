@@ -20,6 +20,7 @@ pub mod anyres;
 pub mod deepseek_vl2;
 pub mod deepseekocr;
 pub mod dots_ocr;
+pub mod fastvlm;
 pub mod gemma4;
 pub mod gemma4_unified;
 pub mod idefics2;

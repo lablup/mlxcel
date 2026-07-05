@@ -152,7 +152,7 @@ fn fallback_architecture(model_type: ModelType) -> &'static str {
     match model_type {
         ModelType::Llama | ModelType::Mistral3 | ModelType::Mistral3VLM => "llama",
         ModelType::Llama4 | ModelType::Llama4VLM => "llama4",
-        ModelType::Qwen2 | ModelType::Qwen2VL | ModelType::Qwen25VL => "qwen2",
+        ModelType::Qwen2 | ModelType::Qwen2VL | ModelType::Qwen25VL | ModelType::FastVLM => "qwen2",
         ModelType::Qwen3 | ModelType::Qwen3VL => "qwen3",
         ModelType::Qwen3Moe | ModelType::Qwen3VLMoe => "qwen3_moe",
         ModelType::Qwen3Next => "qwen3_next",

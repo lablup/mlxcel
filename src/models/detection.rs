@@ -258,6 +258,7 @@ pub fn get_model_type(model_path: &Path) -> Result<ModelType> {
             }
         }
         "llava_bunny" | "bunny-llama" | "llava-qwen2" => Ok(ModelType::LlavaBunnyVLM),
+        "fastvlm" | "llava_qwen2" => Ok(ModelType::FastVLM),
         "aya_vision" => Ok(ModelType::AyaVisionVLM),
         "paligemma" => Ok(ModelType::PaliGemmaVLM),
         "pixtral" => Ok(ModelType::PixtralVLM),
