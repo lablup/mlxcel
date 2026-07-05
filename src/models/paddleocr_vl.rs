@@ -188,7 +188,15 @@ impl MRoPE {
                 &[src_dim + 1, batch, seq_len, end],
             );
             let section = mlxcel_core::squeeze_axis(&section, 0);
-            mlxcel_core::slice_update(&result, &section, &[0, 0, offset], &[batch, seq_len, end]);
+            // `slice_update` is functional; capture the return or the H/W
+            // sections are silently dropped and every dim keeps the temporal
+            // frequencies (issue #650).
+            result = mlxcel_core::slice_update(
+                &result,
+                &section,
+                &[0, 0, offset],
+                &[batch, seq_len, end],
+            );
             offset = end;
         }
         result
@@ -702,5 +710,36 @@ impl mlxcel_core::generate::LanguageModel for PaddleOcrTextModel {
 
     fn eos_token_ids(&self) -> Vec<i32> {
         self.eos_token_ids.clone()
+    }
+}
+
+#[cfg(test)]
+mod mrope_section_tests {
+    use super::*;
+
+    /// Regression for issue #650: `apply_mrope` must actually write the H and
+    /// W sections (the functional `slice_update` return was dropped, leaving
+    /// every dim on the temporal frequencies).
+    #[test]
+    fn apply_mrope_writes_h_and_w_sections() {
+        let rope = MRoPE::new(12, 10_000.0, vec![2, 2, 2]);
+        // freqs [3, batch=1, seq=1, half=6]: axis T = 1.0, H = 2.0, W = 3.0.
+        let mut data = Vec::new();
+        for axis_val in [1.0f32, 2.0, 3.0] {
+            data.extend(std::iter::repeat_n(axis_val, 6));
+        }
+        let freqs = mlxcel_core::from_slice_f32(&data, &[3, 1, 1, 6]);
+        let mixed = rope.apply_mrope(&freqs);
+        mlxcel_core::eval(&mixed);
+        let expected = [1.0f32, 1.0, 2.0, 2.0, 3.0, 3.0];
+        for (i, &want) in expected.iter().enumerate() {
+            let v = mlxcel_core::slice(&mixed, &[0, 0, i as i32], &[1, 1, i as i32 + 1]);
+            mlxcel_core::eval(&v);
+            let got = mlxcel_core::item_f32(&v);
+            assert!(
+                (got - want).abs() < 1e-6,
+                "dim {i}: expected axis value {want}, got {got} (H/W section write dropped?)"
+            );
+        }
     }
 }
