@@ -553,7 +553,12 @@ fn split_visible_reasoning(
     raw: &str,
     parsed: Option<&tool_calls::ToolCallParseResult>,
 ) -> (String, Option<String>) {
-    let reasoning = extract_reasoning_from_raw(raw);
+    // Harmony (GPT-OSS) carries its `analysis` channel as reasoning inside the
+    // parse result; prefer it, falling back to the raw `<think>` scan for
+    // families whose reasoning is a separable block.
+    let reasoning = parsed
+        .and_then(|p| p.reasoning_content.clone())
+        .or_else(|| extract_reasoning_from_raw(raw));
     let visible_source = match parsed {
         Some(p) => p.content.clone(),
         None => tool_calls::clean_structural_tokens(raw),
@@ -619,5 +624,24 @@ mod tests {
     fn extract_reasoning_empty_yields_none() {
         assert_eq!(extract_reasoning_from_raw("</think>x"), None);
         assert_eq!(extract_reasoning_from_raw("<think></think>x"), None);
+    }
+
+    #[test]
+    fn split_harmony_routes_analysis_to_reasoning() {
+        // Harmony (GPT-OSS) carries reasoning in the parse result rather than an
+        // inline `<think>` block. The split must surface `reasoning_content` as
+        // the reasoning and keep the visible answer empty (the tool call becomes
+        // a separate `tool_use` block), so `<think>`-only extraction is not
+        // enough here.
+        let parsed = tool_calls::ToolCallParseResult {
+            format: Some(tool_calls::ToolCallFormat::Harmony),
+            tool_calls: Vec::new(),
+            content: String::new(),
+            reasoning_content: Some("analysis scratchpad".to_string()),
+        };
+        let (visible, reasoning) =
+            split_visible_reasoning("<|channel|>analysis<|message|>x", Some(&parsed));
+        assert_eq!(visible, "");
+        assert_eq!(reasoning.as_deref(), Some("analysis scratchpad"));
     }
 }

@@ -470,6 +470,16 @@ async fn non_stream_chat_completion(
         let tools = request.tools.as_deref();
         let parsed = tool_calls::parse_tool_calls(&result.text, tools);
 
+        // Harmony (GPT-OSS) carries its `analysis` channel as reasoning inside
+        // the parse result; prefer it over the StreamFilter-derived `reasoning`,
+        // which does not recognise Harmony's `<|channel|>` markers. Every other
+        // family leaves `parsed.reasoning_content` `None` and keeps the
+        // StreamFilter value.
+        let reasoning = parsed
+            .reasoning_content
+            .clone()
+            .or_else(|| reasoning.clone());
+
         if parsed.has_tool_calls() {
             let tool_call_responses = tool_calls::build_tool_call_responses(&parsed, &request);
             if !tool_call_responses.is_empty() {

@@ -75,6 +75,7 @@ pub fn try_hermes(text: &str) -> Option<ToolCallParseResult> {
         format: Some(ToolCallFormat::Hermes),
         tool_calls: calls,
         content,
+        reasoning_content: None,
     })
 }
 
@@ -114,6 +115,7 @@ pub fn try_llama3(text: &str) -> Option<ToolCallParseResult> {
             format: Some(ToolCallFormat::Llama3),
             tool_calls: calls,
             content: String::new(),
+            reasoning_content: None,
         });
     }
 
@@ -124,6 +126,7 @@ pub fn try_llama3(text: &str) -> Option<ToolCallParseResult> {
             format: Some(ToolCallFormat::Llama3),
             tool_calls: vec![call],
             content: String::new(),
+            reasoning_content: None,
         });
     }
 
@@ -175,6 +178,7 @@ pub fn try_mistral_nemo(text: &str) -> Option<ToolCallParseResult> {
         format: Some(ToolCallFormat::MistralNemo),
         tool_calls: calls,
         content: String::new(),
+        reasoning_content: None,
     })
 }
 
@@ -238,6 +242,7 @@ pub fn try_functionary_v31(text: &str) -> Option<ToolCallParseResult> {
         format: Some(ToolCallFormat::FunctionaryV31),
         tool_calls: calls,
         content,
+        reasoning_content: None,
     })
 }
 
@@ -317,6 +322,7 @@ pub fn try_functionary_v32(text: &str) -> Option<ToolCallParseResult> {
         format: Some(ToolCallFormat::FunctionaryV32),
         tool_calls: calls,
         content: content.trim().to_string(),
+        reasoning_content: None,
     })
 }
 
@@ -372,6 +378,7 @@ pub fn try_command_r(text: &str) -> Option<ToolCallParseResult> {
         format: Some(ToolCallFormat::CommandR),
         tool_calls: calls,
         content: content.trim().to_string(),
+        reasoning_content: None,
     })
 }
 
@@ -488,6 +495,7 @@ pub fn try_gemma4(text: &str) -> Option<ToolCallParseResult> {
         format: Some(ToolCallFormat::Gemma4),
         tool_calls: calls,
         content,
+        reasoning_content: None,
     })
 }
 
@@ -760,6 +768,7 @@ pub fn try_minimax_m2(text: &str) -> Option<ToolCallParseResult> {
         format: Some(ToolCallFormat::MinimaxM2),
         tool_calls: calls,
         content: String::new(),
+        reasoning_content: None,
     })
 }
 
@@ -983,6 +992,7 @@ pub fn try_qwen3_coder(text: &str) -> Option<ToolCallParseResult> {
         format: Some(ToolCallFormat::Qwen3Coder),
         tool_calls: calls,
         content,
+        reasoning_content: None,
     })
 }
 
@@ -1070,6 +1080,7 @@ pub fn try_generic_json(text: &str) -> Option<ToolCallParseResult> {
                 format: Some(ToolCallFormat::GenericJson),
                 tool_calls: calls,
                 content: String::new(),
+                reasoning_content: None,
             });
         }
     }
@@ -1083,6 +1094,7 @@ pub fn try_generic_json(text: &str) -> Option<ToolCallParseResult> {
             format: Some(ToolCallFormat::GenericJson),
             tool_calls: vec![call],
             content: String::new(),
+            reasoning_content: None,
         });
     }
 
@@ -1100,6 +1112,175 @@ fn parse_generic_value(v: &serde_json::Value) -> Option<ParsedToolCall> {
             serde_json::to_string(args).ok()?
         },
     })
+}
+
+/// Markers that terminate a Harmony message body. The body after `<|message|>`
+/// runs until the earliest of these (or the end of the text): `<|call|>` ends a
+/// tool call, `<|end|>` ends an analysis/preamble message, `<|return|>` ends the
+/// final answer, and `<|start|>` / `<|channel|>` begin the next message when the
+/// model omitted an explicit terminator (or the output was truncated mid-token,
+/// as happens when `<|call|>` is a stop token that never reaches the text).
+const HARMONY_BODY_TERMINATORS: &[&str] = &[
+    "<|call|>",
+    "<|end|>",
+    "<|return|>",
+    "<|start|>",
+    "<|channel|>",
+];
+
+/// Try parsing the Harmony (GPT-OSS) channel format.
+///
+/// Harmony interleaves reasoning, tool calls, and the visible answer as a
+/// sequence of channel messages:
+///
+/// ```text
+/// <|channel|>analysis<|message|>chain of thought<|end|>
+/// <|start|>assistant<|channel|>commentary to=functions.NAME <|constrain|>json<|message|>{…}<|call|>
+/// <|start|>assistant<|channel|>final<|message|>visible answer<|return|>
+/// ```
+///
+/// Routing:
+/// - a channel header carrying a `to=` recipient is a tool call (the recipient's
+///   `functions.` namespace is stripped to the bare function name),
+/// - the `analysis` channel is chain-of-thought and surfaces as
+///   [`ToolCallParseResult::reasoning_content`],
+/// - the `final` channel (and any recipient-less `commentary` preamble) is the
+///   visible `content`.
+///
+/// The distinctive double-pipe `<|channel|>` / `<|message|>` markers never
+/// collide with Gemma 4's single-pipe `<|channel>` / `<channel|>`, so a plain
+/// `contains` guard is enough to claim only Harmony output. Because this parser
+/// also owns the reasoning/content split, the dispatcher runs it up front and
+/// returns its result whether or not a tool call is present, so channel markup
+/// never leaks into `content`.
+pub fn try_harmony(text: &str) -> Option<ToolCallParseResult> {
+    const CHANNEL: &str = "<|channel|>";
+    const MESSAGE: &str = "<|message|>";
+
+    if !text.contains(CHANNEL) || !text.contains(MESSAGE) {
+        return None;
+    }
+
+    let mut calls = Vec::new();
+    let mut content = String::new();
+    let mut reasoning = String::new();
+
+    let mut rest = text;
+    while let Some(ch_pos) = rest.find(CHANNEL) {
+        // Header = everything between `<|channel|>` and the message marker:
+        // the channel name plus any `to=` recipient and `<|constrain|>` hint.
+        let after_channel = &rest[ch_pos + CHANNEL.len()..];
+        let Some(msg_off) = after_channel.find(MESSAGE) else {
+            break;
+        };
+        let header = &after_channel[..msg_off];
+        let body_region = &after_channel[msg_off + MESSAGE.len()..];
+
+        // Body runs until the earliest terminator (or end of text).
+        let body_end = HARMONY_BODY_TERMINATORS
+            .iter()
+            .filter_map(|marker| body_region.find(marker))
+            .min()
+            .unwrap_or(body_region.len());
+        let body = &body_region[..body_end];
+
+        route_harmony_segment(header, body, &mut calls, &mut content, &mut reasoning);
+
+        // Advance past this body; `body_region` starts inside `rest`, and the
+        // header consumed at least the `<|channel|>` marker, so `rest` strictly
+        // shrinks every iteration (no infinite loop).
+        rest = &body_region[body_end..];
+    }
+
+    let reasoning = reasoning.trim();
+    Some(ToolCallParseResult {
+        format: Some(ToolCallFormat::Harmony),
+        tool_calls: calls,
+        content: content.trim().to_string(),
+        reasoning_content: if reasoning.is_empty() {
+            None
+        } else {
+            Some(reasoning.to_string())
+        },
+    })
+}
+
+/// Route one Harmony `(header, body)` segment to a tool call, reasoning, or
+/// visible content.
+fn route_harmony_segment(
+    header: &str,
+    body: &str,
+    calls: &mut Vec<ParsedToolCall>,
+    content: &mut String,
+    reasoning: &mut String,
+) {
+    // A `to=` recipient marks a tool call regardless of channel name.
+    if let Some(recipient) = harmony_recipient(header) {
+        let name = recipient
+            .strip_prefix("functions.")
+            .unwrap_or(recipient)
+            .to_string();
+        if !name.is_empty() {
+            calls.push(ParsedToolCall {
+                name,
+                arguments: harmony_arguments(body),
+            });
+        }
+        return;
+    }
+
+    let channel = header.split_whitespace().next().unwrap_or("");
+    let body = body.trim();
+    if body.is_empty() {
+        return;
+    }
+    // `analysis` is chain-of-thought; `final` is the answer and a recipient-less
+    // `commentary` is a user-visible preamble. Unknown channels are dropped so
+    // their markup never leaks.
+    let sink = match channel {
+        "analysis" => reasoning,
+        "final" | "commentary" => content,
+        _ => return,
+    };
+    if !sink.is_empty() {
+        sink.push('\n');
+    }
+    sink.push_str(body);
+}
+
+/// Extract the `to=` recipient from a Harmony channel header, if present.
+///
+/// The recipient runs from just after `to=` until the next whitespace or the
+/// next `<|` marker (e.g. `<|constrain|>` or `<|message|>`), whichever comes
+/// first: `commentary to=functions.get_weather <|constrain|>json` yields
+/// `functions.get_weather`.
+fn harmony_recipient(header: &str) -> Option<&str> {
+    let after = &header[header.find("to=")? + "to=".len()..];
+    let end = [after.find(char::is_whitespace), after.find("<|")]
+        .into_iter()
+        .flatten()
+        .min()
+        .unwrap_or(after.len());
+    let recipient = after[..end].trim();
+    (!recipient.is_empty()).then_some(recipient)
+}
+
+/// Normalize a Harmony tool-call body into a JSON `arguments` string.
+///
+/// The body is JSON when the header carried `<|constrain|>json` (the common
+/// case). Valid JSON is re-serialized to drop the model's pretty-printing (and,
+/// with serde_json's `preserve_order`, keep key order); a body that does not
+/// parse falls back to its trimmed form, and an empty body to `{}`, so a
+/// malformed call never yields invalid `arguments`.
+fn harmony_arguments(body: &str) -> String {
+    let trimmed = body.trim();
+    if trimmed.is_empty() {
+        return "{}".to_string();
+    }
+    match serde_json::from_str::<serde_json::Value>(trimmed) {
+        Ok(value) => serde_json::to_string(&value).unwrap_or_else(|_| trimmed.to_string()),
+        Err(_) => trimmed.to_string(),
+    }
 }
 
 #[cfg(test)]
@@ -1701,5 +1882,149 @@ mod tests {
             obj.len()
         );
         assert_eq!(obj.len(), MINIMAX_M2_MAX_PARAMS_PER_CALL);
+    }
+
+    // -- Harmony (GPT-OSS) --
+
+    fn harmony_args(call: &ParsedToolCall) -> serde_json::Value {
+        serde_json::from_str(&call.arguments).expect("arguments must be valid JSON")
+    }
+
+    #[test]
+    fn harmony_single_tool_call_matches_issue_repro() {
+        // The exact leaked output from the issue: an analysis channel followed
+        // by a truncated commentary tool call (no trailing `<|call|>`).
+        let text = "<|channel|>analysis<|message|>The user asks to read /etc/hosts and \
+                    summarize it. We have a tool to read file. We'll use read_file.<|end|>\
+                    <|start|>assistant<|channel|>commentary to=functions.read_file \
+                    <|constrain|>json<|message|>{\n  \"path\": \"/etc/hosts\"\n}";
+        let result = try_harmony(text).unwrap();
+        assert_eq!(result.format, Some(ToolCallFormat::Harmony));
+        assert_eq!(result.tool_calls.len(), 1);
+        assert_eq!(result.tool_calls[0].name, "read_file");
+        assert_eq!(harmony_args(&result.tool_calls[0])["path"], "/etc/hosts");
+        // Pretty-printed body is compacted.
+        assert_eq!(result.tool_calls[0].arguments, r#"{"path":"/etc/hosts"}"#);
+        // Analysis channel routes to reasoning, not content.
+        assert_eq!(result.content, "");
+        assert!(
+            result
+                .reasoning_content
+                .as_deref()
+                .unwrap()
+                .contains("read_file")
+        );
+    }
+
+    #[test]
+    fn harmony_strips_functions_namespace() {
+        let text = "<|channel|>commentary to=functions.get_weather <|constrain|>json\
+                    <|message|>{\"location\": \"Tokyo\"}<|call|>";
+        let result = try_harmony(text).unwrap();
+        assert_eq!(result.tool_calls.len(), 1);
+        assert_eq!(result.tool_calls[0].name, "get_weather");
+        assert_eq!(harmony_args(&result.tool_calls[0])["location"], "Tokyo");
+    }
+
+    #[test]
+    fn harmony_constrain_marker_optional() {
+        // Some outputs omit `<|constrain|>json` and go straight to `<|message|>`.
+        let text = "<|channel|>commentary to=functions.get_weather<|message|>\
+                    {\"location\": \"Paris\"}<|call|>";
+        let result = try_harmony(text).unwrap();
+        assert_eq!(result.tool_calls.len(), 1);
+        assert_eq!(result.tool_calls[0].name, "get_weather");
+        assert_eq!(harmony_args(&result.tool_calls[0])["location"], "Paris");
+    }
+
+    #[test]
+    fn harmony_multiple_sequential_tool_calls() {
+        let text = "<|channel|>analysis<|message|>Plan the calls.<|end|>\
+                    <|start|>assistant<|channel|>commentary to=functions.search \
+                    <|constrain|>json<|message|>{\"query\": \"rust\"}<|call|>\
+                    <|start|>assistant<|channel|>commentary to=functions.calc \
+                    <|constrain|>json<|message|>{\"expr\": \"2+2\"}<|call|>";
+        let result = try_harmony(text).unwrap();
+        assert_eq!(result.tool_calls.len(), 2);
+        assert_eq!(result.tool_calls[0].name, "search");
+        assert_eq!(harmony_args(&result.tool_calls[0])["query"], "rust");
+        assert_eq!(result.tool_calls[1].name, "calc");
+        assert_eq!(harmony_args(&result.tool_calls[1])["expr"], "2+2");
+        assert_eq!(result.reasoning_content.as_deref(), Some("Plan the calls."));
+    }
+
+    #[test]
+    fn harmony_final_channel_is_content_not_tool_call() {
+        // Tools were available but the model answered directly via `final`.
+        let text = "<|channel|>analysis<|message|>Simple question.<|end|>\
+                    <|start|>assistant<|channel|>final<|message|>The answer is 42.<|return|>";
+        let result = try_harmony(text).unwrap();
+        assert!(result.tool_calls.is_empty());
+        assert_eq!(result.content, "The answer is 42.");
+        assert_eq!(
+            result.reasoning_content.as_deref(),
+            Some("Simple question.")
+        );
+    }
+
+    #[test]
+    fn harmony_analysis_routes_to_reasoning() {
+        let text = "<|channel|>analysis<|message|>Deliberating carefully.<|end|>\
+                    <|start|>assistant<|channel|>commentary to=functions.noop \
+                    <|constrain|>json<|message|>{}<|call|>";
+        let result = try_harmony(text).unwrap();
+        assert_eq!(
+            result.reasoning_content.as_deref(),
+            Some("Deliberating carefully.")
+        );
+        assert_eq!(result.tool_calls[0].arguments, "{}");
+    }
+
+    #[test]
+    fn harmony_content_never_leaks_channel_markup() {
+        let text = "<|channel|>analysis<|message|>reasoning<|end|>\
+                    <|start|>assistant<|channel|>commentary to=functions.fn \
+                    <|constrain|>json<|message|>{\"a\": 1}<|call|>";
+        let result = try_harmony(text).unwrap();
+        assert!(!result.content.contains("<|channel|>"));
+        assert!(!result.content.contains("<|message|>"));
+        assert!(!result.content.contains("to=functions"));
+    }
+
+    #[test]
+    fn harmony_no_match_plain_text() {
+        assert!(try_harmony("Hello, how can I help you?").is_none());
+    }
+
+    #[test]
+    fn harmony_no_match_gemma_single_pipe_channel() {
+        // Gemma 4 uses single-pipe `<|channel>` / `<channel|>`; Harmony must not
+        // claim it (that would steal reasoning the Gemma path already handles).
+        let text = "<|channel>thought\nreasoning here<channel|>the answer";
+        assert!(try_harmony(text).is_none());
+    }
+
+    #[test]
+    fn harmony_no_match_hermes_tool_call() {
+        assert!(try_harmony(r#"<tool_call>{"name": "fn", "arguments": {}}</tool_call>"#).is_none());
+    }
+
+    #[test]
+    fn harmony_malformed_missing_message_marker_does_not_panic() {
+        // A channel header with no following `<|message|>`: must not panic and
+        // must not produce a bogus call.
+        let text = "<|channel|>commentary to=functions.fn <|constrain|>json";
+        // `contains("<|message|>")` is false, so this is not claimed at all.
+        assert!(try_harmony(text).is_none());
+    }
+
+    #[test]
+    fn harmony_recipient_stops_at_constrain_without_space() {
+        // Recipient immediately abutting `<|constrain|>` (no separating space).
+        let text = "<|channel|>commentary to=functions.fn<|constrain|>json\
+                    <|message|>{\"k\": \"v\"}<|call|>";
+        let result = try_harmony(text).unwrap();
+        assert_eq!(result.tool_calls.len(), 1);
+        assert_eq!(result.tool_calls[0].name, "fn");
     }
 }

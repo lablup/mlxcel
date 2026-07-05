@@ -57,6 +57,12 @@ pub enum ToolCallFormat {
     /// markup, not the model, so it also handles newer Qwen models that share
     /// this template (Qwen3.5 / Qwen3.6).
     Qwen3Coder,
+    /// Harmony (GPT-OSS): channel-structured output where a tool call is a
+    /// `commentary` message targeting `to=functions.NAME`, e.g.
+    /// `<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{…}<|call|>`.
+    /// The `analysis` channel carries chain-of-thought (routed to
+    /// `reasoning_content`) and the `final` channel carries the visible answer.
+    Harmony,
 }
 
 /// Result of parsing model output for tool calls.
@@ -68,6 +74,15 @@ pub struct ToolCallParseResult {
     pub tool_calls: Vec<ParsedToolCall>,
     /// Any text content before/outside the tool calls (may be empty)
     pub content: String,
+    /// Chain-of-thought / scratchpad text that the format carries inline and
+    /// that should surface as `reasoning_content` rather than `content`.
+    ///
+    /// Only formats whose reasoning is interleaved with the tool call in a
+    /// single stream populate this (currently Harmony / GPT-OSS, whose
+    /// `analysis` channel is the reasoning). For families where reasoning is a
+    /// separable `<think>` / `<|channel>` block, the routes recover it from the
+    /// raw text via the shared `StreamFilter`, so this stays `None`.
+    pub reasoning_content: Option<String>,
 }
 
 impl ToolCallParseResult {
@@ -82,6 +97,7 @@ impl ToolCallParseResult {
             format: None,
             tool_calls: Vec::new(),
             content,
+            reasoning_content: None,
         }
     }
 }
