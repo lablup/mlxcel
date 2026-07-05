@@ -173,6 +173,7 @@ pub fn get_model_type(model_path: &Path) -> Result<ModelType> {
         "ernie4_5_moe" | "ernie4.5_moe" => Ok(ModelType::Ernie45Moe),
         "ernie4_5_moe_vl" | "ernie4.5_moe_vl" => Ok(ModelType::Ernie45MoeVLM),
         "hunyuan_v1_dense" | "hunyuan_dense" => Ok(ModelType::HunyuanV1Dense),
+        "hunyuan_vl" => Ok(ModelType::HunyuanVLM),
         "hunyuan" => Ok(detect_hunyuan_model_type(&v)),
         "mimo" => Ok(ModelType::MiMo),
         "apertus" => Ok(ModelType::Apertus),

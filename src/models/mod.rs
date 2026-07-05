@@ -65,6 +65,7 @@ pub mod granite;
 pub mod granitemoehybrid;
 pub mod hunyuan_moe;
 pub mod hunyuan_v1_dense;
+pub mod hunyuan_vl;
 pub mod internlm2;
 pub mod internlm3;
 pub mod jamba;
@@ -266,6 +267,7 @@ pub enum ModelType {
     LlavaBunnyVLM,     // LLaVA-Bunny (SigLIP + Qwen2)
     FastVLM,           // FastVLM (FastViTHD vision + Qwen2 text, mlp2x_gelu)
     Ernie45MoeVLM,     // ERNIE-4.5 MoE VL (DFNRope ViT + modality-split MoE + 3D MRoPE)
+    HunyuanVLM,        // Hunyuan-VL (ViT + perceive merger + XD-RoPE decoder)
     AyaVisionVLM,      // Aya Vision (SigLIP + Cohere2)
     PaliGemmaVLM,      // PaliGemma (SigLIP + Gemma)
     PixtralVLM,        // Pixtral (ViT w/ 2D RoPE + Mistral)
@@ -455,6 +457,7 @@ pub const ALL_MODEL_TYPES: &[ModelType] = &[
     ModelType::LlavaBunnyVLM,
     ModelType::FastVLM,
     ModelType::Ernie45MoeVLM,
+    ModelType::HunyuanVLM,
     ModelType::AyaVisionVLM,
     ModelType::PaliGemmaVLM,
     ModelType::PixtralVLM,
@@ -804,6 +807,7 @@ impl ModelType {
             ModelType::LlavaBunnyVLM => ("LLaVA-Bunny (SigLIP + Qwen2)", "Other VLM"),
             ModelType::FastVLM => ("FastVLM (FastViTHD + Qwen2)", "Other VLM"),
             ModelType::Ernie45MoeVLM => ("ERNIE 4.5 MoE VL (DFNRope + MoE)", "ERNIE"),
+            ModelType::HunyuanVLM => ("Hunyuan-VL (ViT + XD-RoPE)", "Other VLM"),
             ModelType::InternVLChatVLM => {
                 ("InternVL (InternViT + pixel-shuffle + Qwen2)", "Other VLM")
             }
@@ -908,6 +912,7 @@ mod metadata_tests {
             LlavaBunnyVLM,
             FastVLM,
             Ernie45MoeVLM,
+            HunyuanVLM,
             AyaVisionVLM,
             PaliGemmaVLM,
             PixtralVLM,

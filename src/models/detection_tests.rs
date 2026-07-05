@@ -131,6 +131,28 @@ fn llava_qwen2_hyphen_stays_bunny() {
 }
 
 #[test]
+fn hunyuan_vl_model_type_is_detected() {
+    let model_dir = temp_path("hunyuan_vl");
+    fs::create_dir_all(&model_dir).unwrap();
+    fs::write(
+        model_dir.join("config.json"),
+        r#"{
+            "model_type": "hunyuan_vl",
+            "hidden_size": 1024,
+            "num_hidden_layers": 24,
+            "num_attention_heads": 16,
+            "vision_config": { "hidden_size": 1152, "num_hidden_layers": 27 }
+        }"#,
+    )
+    .unwrap();
+
+    let detected = super::detection::get_model_type(&model_dir).unwrap();
+    assert_eq!(detected, ModelType::HunyuanVLM);
+
+    fs::remove_dir_all(model_dir).unwrap();
+}
+
+#[test]
 fn ernie4_5_moe_vl_model_type_is_detected() {
     let model_dir = temp_path("ernie4_5_moe_vl");
     fs::create_dir_all(&model_dir).unwrap();

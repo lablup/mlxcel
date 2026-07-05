@@ -193,6 +193,9 @@ fn fallback_architecture(model_type: ModelType) -> &'static str {
         // ERNIE-4.5-VL text backbone; TP is refused for VLM-kind models earlier,
         // this keeps the dispatch table total.
         ModelType::Ernie45MoeVLM => "ernie4_5_moe",
+        // Hunyuan-VL text backbone is the Hunyuan dense stack; TP is refused
+        // for VLM-kind models earlier, this keeps the dispatch table total.
+        ModelType::HunyuanVLM => "hunyuan_v1_dense",
         ModelType::HunyuanMoe => "hunyuan_moe",
         ModelType::HunyuanV1Dense => "hunyuan_v1_dense",
         ModelType::MiMo => "mimo",

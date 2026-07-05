@@ -1232,6 +1232,35 @@ where
                 preparation,
             }))
         }
+        VlmRuntimeRef::HunyuanVl(model) => {
+            // Per image the merger emits mh * (mw + 1) + 2 rows (newline column
+            // plus begin/end framing), so the prompt needs exactly that many
+            // placeholder ids; expansion/splicing is count-based with no
+            // framing tokens (the framing is carried by the features).
+            let (pixel_values, grid_thw) = model.processor.preprocess_with_grid(images);
+            let counts: Vec<i32> = grid_thw
+                .iter()
+                .map(|&(_t, gh, gw)| model.processor.placeholder_count(gh, gw))
+                .collect();
+            let preparation =
+                crate::multimodal::deepseekocr_prompt::insert_deepseekocr_image_tokens(
+                    prompt_tokens,
+                    &counts,
+                    model.image_token_id,
+                )
+                .map(|stats| VlmPreparationSummary::QwenVlm {
+                    image_blocks: stats.image_blocks,
+                    total_image_tokens: stats.total_image_tokens,
+                });
+
+            let input_ids_arr = prompt_ids_array(prompt_tokens);
+            let embeddings = model.input_embeddings(&input_ids_arr, &pixel_values, &grid_thw);
+
+            Ok(Some(PreparedVlmEmbeddings {
+                embeddings,
+                preparation,
+            }))
+        }
         VlmRuntimeRef::Ernie45MoeVl(model) => {
             // Qwen2-VL-family flow: smart-resize into packed patch rows plus
             // grid_thw, expand (or splice) one `<|IMAGE_PLACEHOLDER|>` run of

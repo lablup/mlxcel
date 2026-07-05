@@ -123,6 +123,7 @@ macro_rules! for_each_model_registration {
             LlavaBunnyVLM => { kind: Vlm, directory: Vlm, weight: None, adapter: Some("LLaVA VLM cannot be loaded with LoRA adapters yet") };
             FastVLM => { kind: Vlm, directory: Vlm, weight: None, adapter: Some("FastVLM cannot be loaded with LoRA adapters yet") };
             Ernie45MoeVLM => { kind: Vlm, directory: Vlm, weight: None, adapter: Some("ERNIE-4.5 MoE VL cannot be loaded with LoRA adapters yet") };
+            HunyuanVLM => { kind: Vlm, directory: Vlm, weight: None, adapter: Some("Hunyuan-VL cannot be loaded with LoRA adapters yet") };
             AyaVisionVLM => { kind: Vlm, directory: Vlm, weight: None, adapter: Some("Aya Vision VLM cannot be loaded with LoRA adapters yet") };
             PaliGemmaVLM => { kind: Vlm, directory: Vlm, weight: None, adapter: Some("PaliGemma VLM cannot be loaded with LoRA adapters yet") };
             PixtralVLM => { kind: Vlm, directory: Vlm, weight: None, adapter: Some("Pixtral/Mistral3 VLM cannot be loaded with LoRA adapters yet") };
