@@ -290,6 +290,33 @@ pub trait LanguageModel {
         Vec::new()
     }
 
+    /// Forward pass for a single-sequence prefill whose caller only needs the
+    /// logits of one position (`last_pos`, 0-based within this call's
+    /// sequence). Returns `[batch, 1, vocab]`.
+    ///
+    /// The default computes the full `[batch, seq_len, vocab]` logits via
+    /// [`Self::forward`] and slices out `last_pos`, which is
+    /// behavior-identical to what the prefill call sites previously did
+    /// inline. Models with a large vocabulary should override this to project
+    /// only the `last_pos` hidden row through the LM head: for a 262k-vocab
+    /// gemma-4 at a 32k-token prefill, the full logits tensor is ~17 GiB in
+    /// f16 plus a same-size `final_logit_softcapping` copy, none of which is
+    /// needed to sample the first generated token (issue #672).
+    ///
+    /// Used by: the single-sequence prefill in `generate_streaming` and
+    /// `generate_with_stats`. Verify/speculative/logprobs paths keep calling
+    /// [`Self::forward`] for full per-position logits.
+    fn forward_last_logits(
+        &self,
+        input_ids: &MlxArray,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> UniquePtr<MlxArray> {
+        let logits = self.forward(input_ids, caches, mask);
+        logits_at_position(&logits, last_pos)
+    }
+
     /// Forward with pre-computed embeddings (for VLM prefill)
     /// Used by: VisionLanguageModel (Gemma3 VLM)
     fn forward_with_embeddings(
@@ -1079,25 +1106,24 @@ impl CxxGenerator {
                 model.supports_maskless_padded_prefill(),
             );
             let input = ffi::from_slice_i32(&padded_tokens, &[1, padded_len as i32]);
-            let raw_logits = model.forward(
+            // Last *real* token position; `forward_last_logits` slices there,
+            // replacing the previous forward + `logits_at_position` pair.
+            let raw_logits = model.forward_last_logits(
                 &input,
                 &mut self.caches,
                 mask_opt.as_ref().map(|m| m.as_ref().unwrap()),
+                actual_len.saturating_sub(1),
             );
             // Trim padding positions from all KV caches so decode uses the
             // correct cache offset (actual_len, not padded_len).
             if padded_len > actual_len {
                 trim_caches_to_actual_len(&mut self.caches, actual_len, padded_len);
                 model.trim_internal_caches((padded_len - actual_len) as i32);
-                // Extract logits at the last real token position.
-                logits_at_position(&raw_logits, actual_len - 1)
-            } else {
-                // No padding was needed (already aligned).
-                raw_logits
             }
+            raw_logits
         } else {
             let input = ffi::from_slice_i32(prompt_tokens, &[1, actual_len as i32]);
-            model.forward(&input, &mut self.caches, None)
+            model.forward_last_logits(&input, &mut self.caches, None, actual_len.saturating_sub(1))
         };
 
         if trace_dtype {
@@ -1744,21 +1770,22 @@ impl CxxGenerator {
                 model.supports_maskless_padded_prefill(),
             );
             let input = ffi::from_slice_i32(&padded_tokens, &[1, padded_len as i32]);
-            let raw_logits = model.forward(
+            // Last *real* token position; `forward_last_logits` slices there,
+            // replacing the previous forward + `logits_at_position` pair.
+            let raw_logits = model.forward_last_logits(
                 &input,
                 &mut self.caches,
                 mask_opt.as_ref().map(|m| m.as_ref().unwrap()),
+                actual_len.saturating_sub(1),
             );
             if padded_len > actual_len {
                 trim_caches_to_actual_len(&mut self.caches, actual_len, padded_len);
                 model.trim_internal_caches((padded_len - actual_len) as i32);
-                logits_at_position(&raw_logits, actual_len - 1)
-            } else {
-                raw_logits
             }
+            raw_logits
         } else {
             let input = ffi::from_slice_i32(prompt_tokens, &[1, actual_len as i32]);
-            model.forward(&input, &mut self.caches, None)
+            model.forward_last_logits(&input, &mut self.caches, None, actual_len.saturating_sub(1))
         };
 
         // Sample first token and force sync to measure prefill accurately
@@ -2083,6 +2110,56 @@ mod tests {
 
         fn eos_token_ids(&self) -> Vec<i32> {
             vec![99]
+        }
+    }
+
+    /// Multi-position stub: logits value encodes the sequence position, so a
+    /// slicing bug in `forward_last_logits` is directly visible.
+    struct SeqStubModel;
+
+    impl LanguageModel for SeqStubModel {
+        fn forward(
+            &self,
+            input_ids: &MlxArray,
+            _caches: &mut [KVCache],
+            _mask: Option<&MlxArray>,
+        ) -> UniquePtr<MlxArray> {
+            // Input [1, L] -> logits [1, L, 4] with row i filled with i as f32.
+            let seq_len = ffi::array_shape(input_ids)[1] as usize;
+            let mut logits = Vec::with_capacity(seq_len * 4);
+            for i in 0..seq_len {
+                logits.extend_from_slice(&[i as f32; 4]);
+            }
+            ffi::from_slice_f32(&logits, &[1, seq_len as i32, 4])
+        }
+
+        fn make_caches(&self) -> Vec<KVCache> {
+            vec![KVCache::new()]
+        }
+
+        fn num_layers(&self) -> usize {
+            1
+        }
+
+        fn eos_token_ids(&self) -> Vec<i32> {
+            vec![99]
+        }
+    }
+
+    /// The default `forward_last_logits` must equal forward + slice at the
+    /// requested position, with shape `[batch, 1, vocab]`.
+    #[test]
+    fn forward_last_logits_default_matches_forward_slice() {
+        let model = SeqStubModel;
+        let input = ffi::from_slice_i32(&[5, 6, 7, 8], &[1, 4]);
+
+        for pos in [0usize, 2, 3] {
+            let mut caches = model.make_caches();
+            let last = model.forward_last_logits(&input, &mut caches, None, pos);
+            assert_eq!(ffi::array_shape(&last).as_slice(), &[1, 1, 4]);
+            let first = ffi::slice(&last, &[0, 0, 0], &[1, 1, 1]);
+            ffi::eval(&first);
+            assert_eq!(ffi::item_f32(&first), pos as f32, "wrong row at pos {pos}");
         }
     }
 

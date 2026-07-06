@@ -2773,6 +2773,17 @@ pub fn causal_attention(
         return layers::metal4_causal_attention(q, k, v, scale);
     }
 
+    // Maskless causal prefill on a CUDA config with no fused SDPA kernel
+    // (e.g. head_dim > 128) would materialize the full [heads, L, L] score
+    // matrix in MLX's fallback; chunk the query axis instead (issue #672).
+    // `k_len >= q_len` guards the bottom-right causal alignment the chunked
+    // path reproduces.
+    if k_len >= q_len
+        && let Some(chunk) = layers::materializing_sdpa_query_chunk(q, k, v, 0.0)
+    {
+        return layers::chunked_causal_attention(q, k, v, scale, chunk);
+    }
+
     ffi::ffi_fast_scaled_dot_product_attention_causal(q, k, v, scale)
 }
 

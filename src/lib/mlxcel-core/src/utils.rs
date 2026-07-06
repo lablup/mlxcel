@@ -92,21 +92,47 @@ pub fn slice_axis(x: &MlxArray, axis: i32, start: i32, end: i32) -> UniquePtr<Ml
 /// # Returns
 /// Mask of shape [size, size + offset] with -inf in upper triangular region
 pub fn create_causal_mask(size: i32, offset: i32) -> UniquePtr<MlxArray> {
+    additive_causal_window_mask(size, offset, None)
+}
+
+/// Shared builder for full-width additive causal / windowed-causal masks.
+///
+/// Query row `q` (logical position `q + offset`) attends key column `k` iff
+/// `k <= q + offset` and, when `window` is set, `k >= q + offset - window + 1`.
+/// Output is `[size, size + offset]` f32 with `0.0` = attend, `-inf` = block,
+/// identical to the previous `ones -> tril [-> triu -> multiply] -> greater ->
+/// where` chain.
+///
+/// Built from broadcast index comparisons so the only full-size intermediates
+/// are one or two bool `[size, total]` arrays plus the f32 result. The old
+/// chain materialized up to six f32 `[size, total]` buffers, which at a 32k
+/// single-pass prefill is ~4 GiB each and dominated the allocator high-water
+/// mark of the very models the dense masks serve (issue #672).
+///
+/// Intentional FP32 output: additive attention masks carry 0/-inf sentinels
+/// and are added to attention scores, not propagated as model activations.
+fn additive_causal_window_mask(size: i32, offset: i32, window: Option<i32>) -> UniquePtr<MlxArray> {
     let total_len = size + offset;
 
-    // Create lower triangular mask (1 = attend, 0 = mask)
-    let ones = ffi::ones(&[size, total_len], dtype::FLOAT32);
-    let mask = ffi::tril(&ones, offset);
+    // Row coordinates as logical key positions [size, 1]; columns [1, total].
+    let q_idx = ffi::reshape(&ffi::arange_i32(offset, offset + size, 1), &[size, 1]);
+    let k_idx = ffi::reshape(&ffi::arange_i32(0, total_len, 1), &[1, total_len]);
 
-    // Convert to attention mask format: where mask=1 -> 0, where mask=0 -> -inf
-    // Use where_cond to avoid NaN from 0 * -inf
-    // Intentional FP32: additive attention masks carry 0/-inf sentinels and are
-    // added to attention scores, not propagated as model activations.
-    let zeros = ffi::zeros(&[size, total_len], dtype::FLOAT32);
-    let neg_inf = ffi::full_f32(&[size, total_len], f32::NEG_INFINITY, dtype::FLOAT32);
-    let bool_mask = ffi::greater(&mask, &zeros); // mask > 0 gives bool mask
+    // Causal upper bound: k <= q + offset.
+    let mut allowed = ffi::less_equal(&k_idx, &q_idx);
 
-    ffi::where_cond(&bool_mask, &zeros, &neg_inf)
+    // Sliding-window lower bound: k >= q + offset - window + 1.
+    if let Some(w) = window {
+        let q_low = ffi::reshape(
+            &ffi::arange_i32(offset - w + 1, offset - w + 1 + size, 1),
+            &[size, 1],
+        );
+        allowed = ffi::logical_and(&allowed, &ffi::greater_equal(&k_idx, &q_low));
+    }
+
+    let zero = crate::from_slice_f32(&[0.0], &[1, 1]);
+    let neg_inf = crate::from_slice_f32(&[f32::NEG_INFINITY], &[1, 1]);
+    ffi::where_cond(&allowed, &zero, &neg_inf)
 }
 
 /// Create a causal attention mask with per-sequence left-padding support.
@@ -603,27 +629,7 @@ pub fn create_causal_mask_with_window_full(
     offset: i32,
     window: Option<i32>,
 ) -> UniquePtr<MlxArray> {
-    let total_len = size + offset;
-
-    // Causal lower-triangular core: query row q attends to key columns
-    // `k <= q + offset`.
-    let ones = ffi::ones(&[size, total_len], dtype::FLOAT32);
-    let mut mask = ffi::tril(&ones, offset);
-
-    // Sliding-window lower bound: forbid keys older than `window` positions,
-    // i.e. require `k >= q + offset - window + 1`.
-    if let Some(w) = window {
-        let upper_mask = ffi::triu(&ones, offset - w + 1);
-        mask = ffi::multiply(&mask, &upper_mask);
-    }
-
-    // Convert to additive form (0 = attend, -inf = block) via where_cond to
-    // avoid NaN from `0 * -inf`. Intentional FP32 sentinel mask.
-    let zeros = ffi::zeros(&[size, total_len], dtype::FLOAT32);
-    let neg_inf = ffi::full_f32(&[size, total_len], f32::NEG_INFINITY, dtype::FLOAT32);
-    let bool_mask = ffi::greater(&mask, &zeros);
-
-    ffi::where_cond(&bool_mask, &zeros, &neg_inf)
+    additive_causal_window_mask(size, offset, window)
 }
 
 /// Build the sliding-window attention mask for a multi-token prefill

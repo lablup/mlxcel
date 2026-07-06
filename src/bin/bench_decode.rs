@@ -434,6 +434,13 @@ fn main() -> Result<()> {
 
     println!("[Profile Results]");
     stats.print();
+    // MLX allocator high-water mark for the whole run (model load + prefill +
+    // decode). This is the number an OOM budget must fit, independent of how
+    // much the cudaMallocAsync pool has returned to the OS (issue #672).
+    println!(
+        "  MLX peak memory:  {:.2} GB",
+        mlxcel_core::get_peak_memory() as f64 / 1e9
+    );
     io::stdout().flush()?;
 
     mlxcel_core::clear_memory_cache();
