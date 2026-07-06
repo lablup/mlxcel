@@ -2354,7 +2354,11 @@ pub fn sanitize_weights(mut weights: WeightMap, config: &Qwen35Config) -> Weight
         }
 
         let base = format!("model.layers.{}.mlp.switch_mlp", l);
-        for proj in ["w1", "w2", "w3"] {
+        // Stack into the names `SparseMoeBlock`/`SwitchGLU` actually load
+        // (gate_proj/up_proj/down_proj since #588); w1->gate, w3->up, w2->down
+        // (issue #670: stacking into the legacy w1/w2/w3 slots left every
+        // qwen3.5-MoE checkpoint failing with "Missing weight: ...gate_proj").
+        for (src_proj, dst_proj) in [("w1", "gate_proj"), ("w2", "down_proj"), ("w3", "up_proj")] {
             let mut expert_weights: Vec<UniquePtr<MlxArray>> = Vec::new();
             let mut expert_scales: Vec<UniquePtr<MlxArray>> = Vec::new();
             let mut expert_biases: Vec<UniquePtr<MlxArray>> = Vec::new();
@@ -2362,18 +2366,18 @@ pub fn sanitize_weights(mut weights: WeightMap, config: &Qwen35Config) -> Weight
             let mut e = 0;
             while let Some(w) = weights.remove(&format!(
                 "model.layers.{}.mlp.experts.{}.{}.weight",
-                l, e, proj
+                l, e, src_proj
             )) {
                 expert_weights.push(w);
                 if let Some(s) = weights.remove(&format!(
                     "model.layers.{}.mlp.experts.{}.{}.scales",
-                    l, e, proj
+                    l, e, src_proj
                 )) {
                     expert_scales.push(s);
                 }
                 if let Some(b) = weights.remove(&format!(
                     "model.layers.{}.mlp.experts.{}.{}.biases",
-                    l, e, proj
+                    l, e, src_proj
                 )) {
                     expert_biases.push(b);
                 }
@@ -2382,25 +2386,29 @@ pub fn sanitize_weights(mut weights: WeightMap, config: &Qwen35Config) -> Weight
 
             if !expert_weights.is_empty() {
                 let stacked = stack_arrays(&expert_weights, 0);
-                weights.insert(format!("{}.{}.weight", base, proj), stacked);
+                weights.insert(format!("{}.{}.weight", base, dst_proj), stacked);
 
                 if !expert_scales.is_empty() {
                     let stacked = stack_arrays(&expert_scales, 0);
-                    weights.insert(format!("{}.{}.scales", base, proj), stacked);
+                    weights.insert(format!("{}.{}.scales", base, dst_proj), stacked);
                 }
 
                 if !expert_biases.is_empty() {
                     let stacked = stack_arrays(&expert_biases, 0);
-                    weights.insert(format!("{}.{}.biases", base, proj), stacked);
+                    weights.insert(format!("{}.{}.biases", base, dst_proj), stacked);
                 }
             }
         }
 
         // Handle per-expert gate_proj/up_proj/down_proj naming variant.
         // Checkpoints that store experts under `experts.{e}.gate_proj.weight`
-        // instead of `experts.{e}.w1.weight` use this layout. The mapping
-        // mirrors the fused gate_up_proj path: gate->w1, up->w3, down->w2.
-        for (src_proj, dst_proj) in [("gate_proj", "w1"), ("up_proj", "w3"), ("down_proj", "w2")] {
+        // instead of `experts.{e}.w1.weight` use this layout; the names map
+        // straight onto the block's own gate/up/down slots (issue #670).
+        for (src_proj, dst_proj) in [
+            ("gate_proj", "gate_proj"),
+            ("up_proj", "up_proj"),
+            ("down_proj", "down_proj"),
+        ] {
             // Skip if this target slot is already populated by the w1/w2/w3 pass above.
             if weights.contains_key(format!("{}.{}.weight", base, dst_proj).as_str()) {
                 continue;
@@ -2481,13 +2489,16 @@ pub fn sanitize_weights(mut weights: WeightMap, config: &Qwen35Config) -> Weight
         }
     }
 
-    // 8. Rename switch_mlp.{gate_proj,up_proj,down_proj} → switch_mlp.{w1,w3,w2}
-    // Pre-quantized MoE models use gate_proj/up_proj/down_proj naming,
-    // but SparseMoeBlock expects w1/w2/w3 naming.
+    // 8. Rename legacy stacked switch_mlp.{w1,w3,w2} → switch_mlp.{gate_proj,
+    // up_proj,down_proj}. SparseMoeBlock loads the gate/up/down names since
+    // #588; pre-stacked checkpoints that already ship them pass through
+    // untouched, and w1/w2/w3-style exports are renamed forward (issue #670:
+    // the old direction renamed gate_proj INTO w1 and broke every
+    // qwen3.5-MoE checkpoint).
     let rename_map = [
-        ("switch_mlp.gate_proj.", "switch_mlp.w1."),
-        ("switch_mlp.up_proj.", "switch_mlp.w3."),
-        ("switch_mlp.down_proj.", "switch_mlp.w2."),
+        ("switch_mlp.w1.", "switch_mlp.gate_proj."),
+        ("switch_mlp.w3.", "switch_mlp.up_proj."),
+        ("switch_mlp.w2.", "switch_mlp.down_proj."),
     ];
     let keys_to_rename: Vec<String> = weights
         .keys()
@@ -2857,7 +2868,7 @@ mod sanitize_tests {
     #[test]
     fn sanitize_weights_stacks_per_expert_gate_up_down_proj_names() {
         // Per-expert layout with gate_proj/up_proj/down_proj naming (not w1/w2/w3).
-        // gate_proj -> w1, up_proj -> w3, down_proj -> w2 (mirrors fused gate_up_proj path).
+        // The names map straight onto the block's gate/up/down slots (#670).
         let num_experts: usize = 3;
         let out = 4i32;
         let in_dim = 8i32;
@@ -2878,8 +2889,8 @@ mod sanitize_tests {
 
         let result = sanitize_weights(weights, &config);
 
-        // Each projection must be stacked into the w1/w3/w2 slots.
-        for dst in ["w1", "w2", "w3"] {
+        // Each projection must be stacked into the slots the block loads.
+        for dst in ["gate_proj", "up_proj", "down_proj"] {
             let key = format!("model.layers.0.mlp.switch_mlp.{}.weight", dst);
             let arr = result
                 .get(key.as_str())
@@ -2944,15 +2955,15 @@ mod sanitize_tests {
         let result = sanitize_weights(weights, &config);
 
         for (dst, suffix) in [
-            ("w1", "weight"),
-            ("w1", "scales"),
-            ("w1", "biases"),
-            ("w2", "weight"),
-            ("w2", "scales"),
-            ("w2", "biases"),
-            ("w3", "weight"),
-            ("w3", "scales"),
-            ("w3", "biases"),
+            ("gate_proj", "weight"),
+            ("gate_proj", "scales"),
+            ("gate_proj", "biases"),
+            ("down_proj", "weight"),
+            ("down_proj", "scales"),
+            ("down_proj", "biases"),
+            ("up_proj", "weight"),
+            ("up_proj", "scales"),
+            ("up_proj", "biases"),
         ] {
             let key = format!("model.layers.0.mlp.switch_mlp.{}.{}", dst, suffix);
             assert!(
@@ -3001,8 +3012,9 @@ mod sanitize_tests {
 
         let result = sanitize_weights(weights, &config);
 
-        // The stacked w1/w2/w3 slots must exist (from the w1/w2/w3 source).
-        for dst in ["w1", "w2", "w3"] {
+        // The stacked gate/up/down slots must exist (from the w1/w2/w3 source,
+        // which runs first and wins the slot).
+        for dst in ["gate_proj", "up_proj", "down_proj"] {
             let key = format!("model.layers.0.mlp.switch_mlp.{}.weight", dst);
             assert!(
                 result.contains_key(key.as_str()),
@@ -3019,6 +3031,104 @@ mod sanitize_tests {
                     "source key {key} should remain when slot is already filled"
                 );
             }
+        }
+    }
+
+    /// The missing gate behind issue #670: sanitize output must actually LOAD
+    /// through the shared `SwitchGLU` (which requests gate/up/down since
+    /// #588), for every naming convention checkpoints ship. Output-key-only
+    /// assertions passed against the wrong convention while every real
+    /// qwen3.5-MoE checkpoint failed with "Missing weight: ...gate_proj".
+    #[test]
+    fn sanitize_output_loads_through_switch_glu_for_all_naming_conventions() {
+        use crate::models::qwen3_next::SwitchGLU;
+
+        let num_experts: usize = 2;
+        let out = 4i32;
+        let in_dim = 8i32;
+        let next_config: crate::models::qwen3_next::Qwen3NextConfig =
+            serde_json::from_value(serde_json::json!({
+                "model_type": "qwen3_next",
+                "hidden_size": 16,
+                "num_hidden_layers": 1,
+                "intermediate_size": 32,
+                "num_attention_heads": 4,
+                "num_key_value_heads": 2,
+                "head_dim": 4,
+                "linear_num_value_heads": 4,
+                "linear_num_key_heads": 2,
+                "linear_key_head_dim": 4,
+                "linear_value_head_dim": 4,
+                "linear_conv_kernel_dim": 4,
+                "num_experts": num_experts,
+                "num_experts_per_tok": 2,
+                "decoder_sparse_step": 1,
+                "moe_intermediate_size": 8,
+                "shared_expert_intermediate_size": 0,
+                "full_attention_interval": 4,
+                "vocab_size": 100
+            }))
+            .expect("minimal qwen3_next config");
+
+        let mk = |vals: f32| {
+            mlxcel_core::from_slice_f32(&vec![vals; (out * in_dim) as usize], &[out, in_dim])
+        };
+
+        // Convention A: per-expert w1/w2/w3. B: per-expert gate/up/down.
+        // C: pre-stacked gate/up/down. D: pre-stacked (legacy) w1/w2/w3.
+        let mut variants: Vec<(&str, WeightMap)> = Vec::new();
+
+        let mut a = WeightMap::new();
+        for e in 0..num_experts {
+            for proj in ["w1", "w2", "w3"] {
+                a.insert(
+                    format!("model.layers.0.mlp.experts.{}.{}.weight", e, proj),
+                    mk(1.0),
+                );
+            }
+        }
+        variants.push(("per-expert w1/w2/w3", a));
+
+        let mut b = WeightMap::new();
+        for e in 0..num_experts {
+            for proj in ["gate_proj", "up_proj", "down_proj"] {
+                b.insert(
+                    format!("model.layers.0.mlp.experts.{}.{}.weight", e, proj),
+                    mk(1.0),
+                );
+            }
+        }
+        variants.push(("per-expert gate/up/down", b));
+
+        let mut c = WeightMap::new();
+        for proj in ["gate_proj", "up_proj", "down_proj"] {
+            c.insert(
+                format!("model.layers.0.mlp.switch_mlp.{}.weight", proj),
+                mlxcel_core::from_slice_f32(
+                    &vec![1.0; (num_experts as i32 * out * in_dim) as usize],
+                    &[num_experts as i32, out, in_dim],
+                ),
+            );
+        }
+        variants.push(("pre-stacked gate/up/down", c));
+
+        let mut d = WeightMap::new();
+        for proj in ["w1", "w2", "w3"] {
+            d.insert(
+                format!("model.layers.0.mlp.switch_mlp.{}.weight", proj),
+                mlxcel_core::from_slice_f32(
+                    &vec![1.0; (num_experts as i32 * out * in_dim) as usize],
+                    &[num_experts as i32, out, in_dim],
+                ),
+            );
+        }
+        variants.push(("pre-stacked legacy w1/w2/w3", d));
+
+        let config = moe_config(1, num_experts);
+        for (label, weights) in variants {
+            let sanitized = sanitize_weights(weights, &config);
+            SwitchGLU::from_weights(&sanitized, &next_config, "model.layers.0.mlp.switch_mlp")
+                .unwrap_or_else(|e| panic!("SwitchGLU must load after sanitize for {label}: {e}"));
         }
     }
 }
