@@ -11,6 +11,10 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+// Portions of this file are derived from mlx-vlm
+// (https://github.com/Blaizzy/mlx-vlm), Copyright 2025 Prince Canuma,
+// licensed under the MIT License. See the top-level NOTICE file for the
+// attribution carried forward under the MIT License.
 
 //! Qwen3-Omni code2wav codec vocoder (stage 2).
 //!
@@ -326,6 +330,14 @@ impl Code2WavModel {
                     "code2wav frame {i} carries {} codes, expected {q}",
                     frame.len()
                 ));
+            }
+            for (qi, &code) in frame.iter().enumerate() {
+                if code < 0 || code as usize >= self.codebook_size {
+                    return Err(format!(
+                        "code2wav frame {i} quantizer {qi} has codec id {code}, expected 0..{}",
+                        self.codebook_size.saturating_sub(1)
+                    ));
+                }
             }
         }
 

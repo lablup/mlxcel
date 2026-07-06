@@ -11,6 +11,10 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+// Portions of this file are derived from mlx-vlm
+// (https://github.com/Blaizzy/mlx-vlm), Copyright 2025 Prince Canuma,
+// licensed under the MIT License. See the top-level NOTICE file for the
+// attribution carried forward under the MIT License.
 
 //! Qwen3-Omni talker: autoregressive MoE codec-token decoder (stage 2).
 //!

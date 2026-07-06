@@ -147,3 +147,24 @@ fn talker_sampling_reads_generation_config_fields() {
     assert!((cfg.sampling.temperature - 0.9).abs() < 1e-6);
     assert!((cfg.sampling.top_p - 1.0).abs() < 1e-6);
 }
+
+#[test]
+fn rejects_mismatched_talker_and_code2wav_group_counts() {
+    let mut root = root_config();
+    root["code2wav_config"]["num_quantizers"] = serde_json::json!(15);
+
+    let err = Qwen3OmniSpeechConfig::parse(&root, None).unwrap_err();
+    assert!(err.contains("code2wav_config.num_quantizers (15)"));
+    assert!(err.contains("talker_config.num_code_groups (16)"));
+}
+
+#[test]
+fn rejects_invalid_sampling_limits_from_generation_config() {
+    let generation = serde_json::json!({
+        "talker_max_new_tokens": 0,
+        "talker_temperature": -0.1
+    });
+
+    let err = Qwen3OmniSpeechConfig::parse(&root_config(), Some(&generation)).unwrap_err();
+    assert!(err.contains("talker_max_new_tokens must be nonzero"));
+}

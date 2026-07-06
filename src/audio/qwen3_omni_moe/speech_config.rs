@@ -11,6 +11,10 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+// Portions of this file are derived from mlx-vlm
+// (https://github.com/Blaizzy/mlx-vlm), Copyright 2025 Prince Canuma,
+// licensed under the MIT License. See the top-level NOTICE file for the
+// attribution carried forward under the MIT License.
 
 //! Qwen3-Omni speech-output configuration (stage 2: talker + code2wav).
 //!
@@ -235,6 +239,16 @@ impl Code2WavConfig {
         self.upsampling_ratios.iter().product::<usize>()
             * self.upsample_rates.iter().product::<usize>()
     }
+
+    fn checked_samples_per_frame(&self) -> Result<usize, String> {
+        self.upsampling_ratios
+            .iter()
+            .chain(self.upsample_rates.iter())
+            .try_fold(1usize, |acc, &v| {
+                acc.checked_mul(v)
+                    .ok_or_else(|| "code2wav upsampling product overflows usize".to_string())
+            })
+    }
 }
 
 /// code2wav output sample rate. Fixed by the codec (12.5 Hz frame rate x
@@ -366,7 +380,7 @@ impl Qwen3OmniSpeechConfig {
                 .unwrap_or(default) as i32
         };
 
-        Ok(Self {
+        let cfg = Self {
             talker,
             code2wav,
             ids,
@@ -377,6 +391,63 @@ impl Qwen3OmniSpeechConfig {
                 .unwrap_or(true),
             group_size: quant("group_size", 64),
             bits: quant("bits", 4),
-        })
+        };
+        cfg.validate()?;
+        Ok(cfg)
+    }
+
+    fn validate(&self) -> Result<(), String> {
+        let talker_groups = self.talker.num_code_groups;
+        if talker_groups < 2 {
+            return Err(format!(
+                "talker_config.num_code_groups must be at least 2, got {talker_groups}"
+            ));
+        }
+        let predictor_groups = self.talker.code_predictor_config.num_code_groups;
+        if predictor_groups != talker_groups {
+            return Err(format!(
+                "talker_config.code_predictor_config.num_code_groups ({predictor_groups}) must \
+                 match talker_config.num_code_groups ({talker_groups})"
+            ));
+        }
+        if self.code2wav.num_quantizers != talker_groups {
+            return Err(format!(
+                "code2wav_config.num_quantizers ({}) must match talker_config.num_code_groups \
+                 ({talker_groups})",
+                self.code2wav.num_quantizers
+            ));
+        }
+        if self.code2wav.codebook_size == 0 {
+            return Err("code2wav_config.codebook_size must be nonzero".to_string());
+        }
+        let table_size = self
+            .code2wav
+            .num_quantizers
+            .checked_mul(self.code2wav.codebook_size)
+            .ok_or_else(|| "code2wav embedding table size overflows usize".to_string())?;
+        if table_size > i32::MAX as usize {
+            return Err(format!(
+                "code2wav embedding table size {table_size} exceeds i32 index range"
+            ));
+        }
+        if self.code2wav.checked_samples_per_frame()? == 0 {
+            return Err("code2wav upsampling product must be nonzero".to_string());
+        }
+        if self.sampling.max_frames == 0 {
+            return Err("talker_max_new_tokens must be nonzero".to_string());
+        }
+        if !self.sampling.temperature.is_finite() || self.sampling.temperature < 0.0 {
+            return Err(format!(
+                "talker_temperature must be finite and non-negative, got {}",
+                self.sampling.temperature
+            ));
+        }
+        if !self.sampling.top_p.is_finite() || self.sampling.top_p <= 0.0 {
+            return Err(format!(
+                "talker_top_p must be finite and positive, got {}",
+                self.sampling.top_p
+            ));
+        }
+        Ok(())
     }
 }

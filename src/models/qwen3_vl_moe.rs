@@ -1204,8 +1204,12 @@ impl Qwen3VLMoeModel {
     ) -> UniquePtr<MlxArray> {
         let mut caches = self.make_caches();
         let mut h = self.embed_tokens.forward(input_ids);
+        let shape = mlxcel_core::array_shape(input_ids);
+        let seq_len = shape[1];
+        let mask = mlxcel_core::utils::create_causal_mask(seq_len, 0);
+        let mask_ref = mask.as_ref().unwrap() as &MlxArray;
         for (layer, cache) in self.layers.iter().zip(caches.iter_mut()).take(num_layers) {
-            h = layer.forward_text_only(&h, cache, None);
+            h = layer.forward_text_only(&h, cache, Some(mask_ref));
         }
         h
     }

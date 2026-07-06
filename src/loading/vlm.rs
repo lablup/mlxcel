@@ -199,7 +199,36 @@ pub(crate) fn load_vlm_weights_common(
 ) -> Result<WeightMap> {
     let mut weights = mlxcel_core::weights::load_weights_from_dir(model_path)
         .map_err(|e| anyhow::anyhow!("{}", e))?;
+    finish_vlm_weights_common(model_path, &mut weights, transform)?;
 
+    Ok(weights)
+}
+
+/// Filtered variant of [`load_vlm_weights_common`] for optional sub-stacks
+/// (for example Qwen3-Omni speech output) that live in the same checkpoint but
+/// must not retain the entire text/vision weight map while loading.
+///
+/// Used by: Qwen3-Omni speech-output loader (`load_qwen3_omni_speech`).
+pub(crate) fn load_vlm_weights_common_filtered<F>(
+    model_path: &Path,
+    transform: Option<&dyn mlxcel_core::weights::WeightTransform>,
+    keep: F,
+) -> Result<WeightMap>
+where
+    F: FnMut(&str) -> bool,
+{
+    let mut weights = mlxcel_core::weights::load_weights_from_dir_filtered(model_path, keep)
+        .map_err(|e| anyhow::anyhow!("{}", e))?;
+    finish_vlm_weights_common(model_path, &mut weights, transform)?;
+
+    Ok(weights)
+}
+
+fn finish_vlm_weights_common(
+    model_path: &Path,
+    weights: &mut WeightMap,
+    transform: Option<&dyn mlxcel_core::weights::WeightTransform>,
+) -> Result<()> {
     // On Apple Silicon, convert bf16 → f16 for performance (no Apple GPU has
     // native bf16 ALU).  Quantized models keep bf16 scales/biases as-is.
     let hw = mlxcel_core::hardware::get_hardware();
@@ -208,11 +237,11 @@ pub(crate) fn load_vlm_weights_common(
         if !is_quantized {
             let had_bf16 = if is_gemma3n_model(model_path) {
                 crate::models::convert_bf16_weights_with_keep(
-                    &mut weights,
+                    weights,
                     crate::models::gemma3n_language_mlp_bf16_key,
                 )
             } else {
-                crate::models::convert_bf16_weights(&mut weights)
+                crate::models::convert_bf16_weights(weights)
             };
             if had_bf16 {
                 crate::models::warn_bf16_precision();
@@ -259,11 +288,11 @@ pub(crate) fn load_vlm_weights_common(
             .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
             .unwrap_or(serde_json::Value::Null);
         transform
-            .apply(&mut weights, &cfg)
+            .apply(weights, &cfg)
             .map_err(|e| anyhow::anyhow!("{}", e))?;
     }
 
-    Ok(weights)
+    Ok(())
 }
 
 /// Check if a model is quantized by looking for `.scales` keys in weights

@@ -335,6 +335,40 @@ pub fn load_weights_from_dir<P: AsRef<Path>>(dir: P) -> Result<WeightMap, String
     Ok(weights)
 }
 
+/// Load a filtered subset of weights from a directory containing safetensors
+/// files.
+///
+/// This mirrors [`load_weights_from_dir`] shard discovery (including stale-index
+/// fallback and broken-symlink handling) but only retains tensors whose name
+/// satisfies `keep`. Unneeded tensors are not inserted into the returned
+/// [`WeightMap`], avoiding the peak memory cost of loading a full checkpoint and
+/// filtering it afterwards.
+///
+/// Used by: Qwen3-Omni speech sub-stack loader via `load_vlm_weights_common_filtered`.
+pub fn load_weights_from_dir_filtered<P, F>(dir: P, mut keep: F) -> Result<WeightMap, String>
+where
+    P: AsRef<Path>,
+    F: FnMut(&str) -> bool,
+{
+    let dir = dir.as_ref();
+    let mut weights = HashMap::new();
+    let shard_paths = collect_shard_paths(dir)?;
+
+    if shard_paths.is_empty() {
+        return Err(format!(
+            "No safetensors files found in directory: {}",
+            dir.display()
+        ));
+    }
+
+    for path in &shard_paths {
+        let loaded = load_safetensors_filtered(path, |name| keep(name))?;
+        weights.extend(loaded);
+    }
+
+    Ok(weights)
+}
+
 /// Collect and validate the list of shard paths to load from a model directory.
 ///
 /// Uses the index JSON when present; otherwise globs all `*.safetensors` files.

@@ -33,10 +33,10 @@ use crate::vision;
 
 use super::{
     Qwen35VlmVariant, QwenVisionTokenIds, inherit_qwen_text_quantization,
-    inherit_qwen_vision_quantization, load_vlm_weights_common, parse_required_vlm_subconfig,
-    parse_vlm_config, qwen_vl_processor, qwen_vl_processor_with_norm, qwen_vl_token_ids,
-    qwen35_vlm_token_defaults, read_sanitized_vlm_config, remap_qwen3_vl_weights,
-    strip_language_model_prefix, wrap_qwen35_vlm,
+    inherit_qwen_vision_quantization, load_vlm_weights_common, load_vlm_weights_common_filtered,
+    parse_required_vlm_subconfig, parse_vlm_config, qwen_vl_processor, qwen_vl_processor_with_norm,
+    qwen_vl_token_ids, qwen35_vlm_token_defaults, read_sanitized_vlm_config,
+    remap_qwen3_vl_weights, strip_language_model_prefix, wrap_qwen35_vlm,
 };
 
 /// Load a Qwen2-VL model (custom ViT + Qwen2 language model with MRoPE)
@@ -828,13 +828,7 @@ pub fn load_qwen3_omni_speech(
         );
     }
 
-    let raw_weights = load_vlm_weights_common(model_path, None)?;
-    let mut weights = mlxcel_core::weights::WeightMap::new();
-    for (key, value) in raw_weights {
-        if is_qwen3_omni_speech_key(&key) {
-            weights.insert(key, value);
-        }
-    }
+    let weights = load_vlm_weights_common_filtered(model_path, None, is_qwen3_omni_speech_key)?;
     if weights.is_empty() {
         anyhow::bail!(
             "Checkpoint at {} carries no talker.* / code2wav.* weights (thinker-only export?)",
