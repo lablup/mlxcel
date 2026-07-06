@@ -1,0 +1,2 @@
+model,model_path,prompt_tokens,generated_tokens,prefill_ms,prefill_tok_s,decode_ms,decode_tok_s,date,hardware,mlx_version,build_type,max_tokens,prompt
+idefics3-8b-llama3-4bit,./models/idefics3-8b-llama3-4bit/,3041,100,4718.98,644.42,1113.21,89.83,2026-07-06,Apple_M1_Ultra_128GB,mlx-vlm-0.4.4,python,100,"What is in this image?"

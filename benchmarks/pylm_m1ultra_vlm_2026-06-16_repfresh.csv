@@ -1,0 +1,10 @@
+model,model_path,prompt_tokens,generated_tokens,prefill_ms,prefill_tok_s,decode_ms,decode_tok_s,date,hardware,mlx_version,build_type,max_tokens,prompt
+gemma-4-26b-a4b-it-4bit,./models/gemma-4-26b-a4b-it-4bit/,277,13,1053.40,262.96,211.64,61.42,2026-06-16,Apple_M1_Ultra_128GB,mlx-vlm-0.4.4,python,100,"What is in this image?"
+gemma-4-e2b-it-4bit,./models/gemma-4-e2b-it-4bit/,277,100,420.68,658.46,995.32,100.47,2026-06-16,Apple_M1_Ultra_128GB,mlx-vlm-0.4.4,python,100,"What is in this image?"
+gemma3n-e2b-4bit,./models/gemma3n-e2b-4bit/,275,27,522.03,526.79,442.65,61.00,2026-06-16,Apple_M1_Ultra_128GB,mlx-vlm-0.4.4,python,100,"What is in this image?"
+internvl3-1b,./models/internvl3-1b/,270,39,162.24,1664.19,145.87,267.35,2026-06-16,Apple_M1_Ultra_128GB,mlx-vlm-0.4.4,python,100,"What is in this image?"
+llava-interleave-qwen-0.5b-bf16,./models/llava-interleave-qwen-0.5b-bf16/,744,60,189.77,3920.58,268.81,223.21,2026-06-16,Apple_M1_Ultra_128GB,mlx-vlm-0.4.4,python,100,"What is in this image?"
+molmo2-4b,./models/molmo2-4b/,438,47,625.03,700.77,769.94,61.04,2026-06-16,Apple_M1_Ultra_128GB,mlx-vlm-0.4.4,python,100,"What is in this image?"
+phi-3.5-vision-4bit,./models/phi-3.5-vision-4bit/,770,26,736.88,1044.95,280.90,92.56,2026-06-16,Apple_M1_Ultra_128GB,mlx-vlm-0.4.4,python,100,"What is in this image?"
+qwen3.5-0.8b-4bit,./models/qwen3.5-0.8b-4bit/,,,,,,,2026-06-16,Apple_M1_Ultra_128GB,mlx-vlm-0.4.4,python,100,"What is in this image?",FAIL:warmup
+qwen3.5-35b-a3b-4bit,./models/qwen3.5-35b-a3b-4bit/,,,,,,,2026-06-16,Apple_M1_Ultra_128GB,mlx-vlm-0.4.4,python,100,"What is in this image?",FAIL:warmup

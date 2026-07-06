@@ -14,7 +14,7 @@
 
 //! ERNIE-4.5 MoE VL (`ernie4_5_moe_vl`) real-model parity / smoke tests.
 //!
-//! Gated on the presence of `models/ERNIE-4.5-VL-28B-A3B-Thinking-4bit`; the
+//! Gated on the presence of `models/ernie-4.5-vl-28b-a3b-thinking-4bit`; the
 //! tests `eprintln!` + return when the model is absent, so they are inert in CI
 //! and on machines without the checkpoint. With the model present they
 //! exercise:
@@ -43,7 +43,7 @@ use common::repo_model_dir;
 use mlxcel::models::{ModelType, get_model_type};
 use mlxcel::vision::processors::ernie4_5_vl::Ernie45VlProcessor;
 
-const MODEL_NAME: &str = "ERNIE-4.5-VL-28B-A3B-Thinking-4bit";
+const MODEL_NAME: &str = "ernie-4.5-vl-28b-a3b-thinking-4bit";
 const VOCAB: i32 = 103_424;
 
 fn model_dir() -> Option<PathBuf> {

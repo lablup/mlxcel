@@ -14,7 +14,7 @@
 
 //! Hunyuan-VL (`hunyuan_vl`) real-model parity / smoke tests.
 //!
-//! Gated on the presence of `models/HunyuanOCR-mlx-4bit`; the tests
+//! Gated on the presence of `models/hunyuanocr-mlx-4bit`; the tests
 //! `eprintln!` + return when the model is absent, so they are inert in CI and
 //! on machines without the checkpoint. With the model present they exercise:
 //!
@@ -37,7 +37,7 @@ use common::repo_model_dir;
 use mlxcel::models::{ModelType, get_model_type};
 use mlxcel::vision::processors::hunyuan_vl::HunyuanVlProcessor;
 
-const MODEL_NAME: &str = "HunyuanOCR-mlx-4bit";
+const MODEL_NAME: &str = "hunyuanocr-mlx-4bit";
 const VOCAB: i32 = 120_818;
 
 fn model_dir() -> Option<PathBuf> {
@@ -79,7 +79,7 @@ fn processor_emits_raster_rows_and_count() {
 fn text_only_forward_produces_finite_logits() {
     let Some(dir) = model_dir() else { return };
 
-    let (model, tokenizer) = mlxcel::load_model(&dir).expect("load HunyuanOCR-mlx-4bit");
+    let (model, tokenizer) = mlxcel::load_model(&dir).expect("load hunyuanocr-mlx-4bit");
     assert!(model.is_vlm(), "Hunyuan-VL must register as a VLM");
 
     let tokens: Vec<i32> = tokenizer
@@ -112,7 +112,7 @@ fn text_only_forward_produces_finite_logits() {
 fn image_forward_produces_finite_logits() {
     let Some(dir) = model_dir() else { return };
 
-    let (model, tokenizer) = mlxcel::load_model(&dir).expect("load HunyuanOCR-mlx-4bit");
+    let (model, tokenizer) = mlxcel::load_model(&dir).expect("load hunyuanocr-mlx-4bit");
 
     let images = vec![fixture_image()];
     let mut prompt_tokens: Vec<i32> = tokenizer

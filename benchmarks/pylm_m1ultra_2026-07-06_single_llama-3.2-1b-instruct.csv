@@ -1,0 +1,2 @@
+model,model_path,prompt_tokens,generated_tokens,prefill_ms,prefill_tok_s,decode_ms,decode_tok_s,date,hardware,mlx_version,build_type,max_tokens,prompt
+llama-3.2-1b-instruct,./models/llama-3.2-1b-instruct/,8,100,29.44,271.71,532.25,187.88,2026-07-06,Apple_M1_Ultra_128GB,mlx-lm-0.31.3,python,100,"Hello, how are you today?"

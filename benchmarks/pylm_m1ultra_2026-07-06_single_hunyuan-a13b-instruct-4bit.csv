@@ -1,0 +1,2 @@
+model,model_path,prompt_tokens,generated_tokens,prefill_ms,prefill_tok_s,decode_ms,decode_tok_s,date,hardware,mlx_version,build_type,max_tokens,prompt
+hunyuan-a13b-instruct-4bit,./models/hunyuan-a13b-instruct-4bit/,,,,,,,2026-07-06,Apple_M1_Ultra_128GB,mlx-lm-0.31.3,python,100,"Hello, how are you today?",FAIL:warmup
