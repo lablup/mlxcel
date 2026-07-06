@@ -246,9 +246,14 @@ fn logits_at_position(logits: &MlxArray, pos: usize) -> UniquePtr<MlxArray> {
     ffi::slice(logits, &[0, pos as i32, 0], &[batch, pos as i32 + 1, vocab])
 }
 
+/// Default cache-level prefill chunk for the single-sequence CLI/bench path,
+/// matching upstream mlx-lm/mlx-vlm's `DEFAULT_PREFILL_STEP_SIZE` (issue
+/// #674). The server uses its own `prefill_chunk_size` (default 512).
+pub const DEFAULT_PREFILL_CHUNK: usize = 2048;
+
 /// Cache-level prefill chunk length for the single-sequence CLI/bench path,
-/// from `MLXCEL_PREFILL_CHUNK` (tokens, default `0` = single-pass prefill,
-/// unchanged behavior).
+/// from `MLXCEL_PREFILL_CHUNK` (tokens). Unset defaults to
+/// [`DEFAULT_PREFILL_CHUNK`]; `0` forces single-pass prefill.
 ///
 /// When enabled, the prompt is fed through `forward_last_logits` in chunks of
 /// this many tokens, evaluating each chunk before the next so the lazy graph
@@ -256,17 +261,33 @@ fn logits_at_position(logits: &MlxArray, pos: usize) -> UniquePtr<MlxArray> {
 /// memory the way the server's `prefill_chunk_size` path does: sliding-window
 /// KV caches rotate down to their window between chunks instead of holding
 /// every prompt token for one giant pass, and per-chunk attention scores,
-/// masks, and logits stay chunk-sized (issue #672). Mirrors mlx-lm's
-/// `prefill_step_size` (default 2048 there); opt-in here until per-family
-/// multi-call prefill parity is validated beyond the server-covered models.
+/// masks, and logits stay chunk-sized (issue #672). Models that cannot run a
+/// multi-call prefill opt out via
+/// [`LanguageModel::supports_chunked_prefill`], mirroring mlx-vlm's
+/// `chunked_prefill_policy`.
 fn prefill_chunk_len() -> usize {
     static CHUNK: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
     *CHUNK.get_or_init(|| {
         std::env::var("MLXCEL_PREFILL_CHUNK")
             .ok()
             .and_then(|v| v.trim().parse::<usize>().ok())
-            .unwrap_or(0)
+            .unwrap_or(DEFAULT_PREFILL_CHUNK)
     })
+}
+
+/// Effective prefill chunk for one generation call: the configured chunk when
+/// chunking applies, or `None` for a single-pass prefill.
+///
+/// Pure decision logic so the gate is unit-testable without touching process
+/// environment: chunking applies when the configured chunk is non-zero, the
+/// model supports multi-call prefill, and the prompt is actually longer than
+/// one chunk.
+fn effective_prefill_chunk(
+    configured: usize,
+    model_supports: bool,
+    prompt_len: usize,
+) -> Option<usize> {
+    (configured > 0 && model_supports && prompt_len > configured).then_some(configured)
 }
 
 /// Run a chunked single-sequence prefill: feed `prompt_tokens` through the
@@ -347,6 +368,22 @@ pub trait LanguageModel {
     /// at generator / scheduler construction.
     fn output_suppressed_token_ids(&self) -> Vec<i32> {
         Vec::new()
+    }
+
+    /// Whether this model supports a cache-level chunked prefill: feeding the
+    /// prompt through several consecutive multi-token `forward` calls that
+    /// continue from the KV caches, instead of one single-pass call.
+    ///
+    /// Defaults to true: continuing a multi-token forward from cache state is
+    /// the same contract the decode loop, multi-token verify, and the server
+    /// scheduler's `prefill_chunk_size` path already rely on. Override to
+    /// false for models that stash one-shot prompt state on the model which
+    /// only the FIRST forward consumes (e.g. multimodal prefills that `take()`
+    /// per-layer inputs or a prompt-shaped attention-mask captured at
+    /// `prepare_prompt` time), mirroring mlx-vlm's `chunked_prefill_policy`
+    /// opt-out (issue #674).
+    fn supports_chunked_prefill(&self) -> bool {
+        true
     }
 
     /// Forward pass for a single-sequence prefill whose caller only needs the
@@ -1157,10 +1194,14 @@ impl CxxGenerator {
         // On M5+ hardware pad the sequence to a 32-token tile boundary for
         // optimal Neural Accelerator throughput.
         let actual_len = prompt_tokens.len();
-        let prefill_chunk = prefill_chunk_len();
-        let logits = if prefill_chunk > 0 && actual_len > prefill_chunk {
-            // Opt-in cache-level chunked prefill (MLXCEL_PREFILL_CHUNK).
-            chunked_prefill_last_logits(model, &mut self.caches, prompt_tokens, prefill_chunk)
+        let prefill_chunk = effective_prefill_chunk(
+            prefill_chunk_len(),
+            model.supports_chunked_prefill(),
+            actual_len,
+        );
+        let logits = if let Some(chunk) = prefill_chunk {
+            // Cache-level chunked prefill (MLXCEL_PREFILL_CHUNK, default 2048).
+            chunked_prefill_last_logits(model, &mut self.caches, prompt_tokens, chunk)
         } else if should_align_prefill() && model.supports_padded_prefill() {
             let padded_len = align_to_na_tile(actual_len);
             let (padded_tokens, mask_opt) = pad_tokens_for_prefill(
@@ -1825,10 +1866,14 @@ impl CxxGenerator {
         // optimal Neural Accelerator throughput.
         let actual_len = prompt_tokens.len();
         let prefill_start = Instant::now();
-        let prefill_chunk = prefill_chunk_len();
-        let logits = if prefill_chunk > 0 && actual_len > prefill_chunk {
-            // Opt-in cache-level chunked prefill (MLXCEL_PREFILL_CHUNK).
-            chunked_prefill_last_logits(model, &mut self.caches, prompt_tokens, prefill_chunk)
+        let prefill_chunk = effective_prefill_chunk(
+            prefill_chunk_len(),
+            model.supports_chunked_prefill(),
+            actual_len,
+        );
+        let logits = if let Some(chunk) = prefill_chunk {
+            // Cache-level chunked prefill (MLXCEL_PREFILL_CHUNK, default 2048).
+            chunked_prefill_last_logits(model, &mut self.caches, prompt_tokens, chunk)
         } else if should_align_prefill() && model.supports_padded_prefill() {
             let padded_len = align_to_na_tile(actual_len);
             let (padded_tokens, mask_opt) = pad_tokens_for_prefill(
@@ -2253,6 +2298,51 @@ mod tests {
         fn eos_token_ids(&self) -> Vec<i32> {
             vec![99]
         }
+    }
+
+    /// The chunk gate applies only when configured, supported, and useful.
+    #[test]
+    fn effective_prefill_chunk_gates_correctly() {
+        // Normal case: configured, supported, prompt longer than one chunk.
+        assert_eq!(effective_prefill_chunk(2048, true, 8192), Some(2048));
+        // Prompt fits in one chunk: single-pass (byte-identical fast path).
+        assert_eq!(effective_prefill_chunk(2048, true, 2048), None);
+        assert_eq!(effective_prefill_chunk(2048, true, 1), None);
+        // MLXCEL_PREFILL_CHUNK=0 forces single-pass.
+        assert_eq!(effective_prefill_chunk(0, true, 8192), None);
+        // Model opt-out wins regardless of configuration.
+        assert_eq!(effective_prefill_chunk(2048, false, 8192), None);
+    }
+
+    /// The trait default opts in; an overriding model opts out.
+    #[test]
+    fn supports_chunked_prefill_default_and_override() {
+        struct OptOutModel;
+        impl LanguageModel for OptOutModel {
+            fn forward(
+                &self,
+                _input_ids: &MlxArray,
+                _caches: &mut [KVCache],
+                _mask: Option<&MlxArray>,
+            ) -> UniquePtr<MlxArray> {
+                ffi::from_slice_f32(&[0.0; 4], &[1, 1, 4])
+            }
+            fn make_caches(&self) -> Vec<KVCache> {
+                vec![KVCache::new()]
+            }
+            fn num_layers(&self) -> usize {
+                1
+            }
+            fn eos_token_ids(&self) -> Vec<i32> {
+                vec![99]
+            }
+            fn supports_chunked_prefill(&self) -> bool {
+                false
+            }
+        }
+
+        assert!(StubModel.supports_chunked_prefill());
+        assert!(!OptOutModel.supports_chunked_prefill());
     }
 
     /// Chunked prefill must feed every prompt token exactly once, in order,

@@ -1686,6 +1686,16 @@ impl LanguageModel for Gemma3nModel {
         // Gemma 3n EOS tokens: <eos> (1), <end_of_turn> (106)
         vec![1, 106]
     }
+
+    /// Opt out of cache-level chunked prefill (#674): the parity battery
+    /// showed gemma3n-e2b degenerating into repeated code fences under a
+    /// multi-call prefill while every rotating-cache family passed after the
+    /// #678 fix. Gemma 3n's AltUp / per-layer-input stack has no validated
+    /// multi-call prefill parity yet, so keep the single-pass path until a
+    /// dedicated investigation clears it.
+    fn supports_chunked_prefill(&self) -> bool {
+        false
+    }
 }
 
 // Multimodal Embedder (for VLM).
