@@ -347,6 +347,18 @@ pub(crate) struct GenerationOptions {
     #[arg(long, value_name = "FLOAT", default_value_t = 2.0)]
     pub(crate) fps: f64,
 
+    /// Write synthesized speech for the generated answer to this WAV path
+    /// (24 kHz mono PCM16). Qwen3-Omni models only; the talker + code2wav
+    /// speech stack is loaded lazily after text generation completes.
+    /// Text-only prompts for now (no --image / --audio / --video).
+    #[arg(long, value_name = "PATH")]
+    pub(crate) output_audio: Option<PathBuf>,
+
+    /// Speaker voice for `--output-audio` (Qwen3-Omni talker; the released
+    /// checkpoints ship ethan, chelsie, and aiden).
+    #[arg(long, value_name = "NAME", default_value = "ethan")]
+    pub(crate) speaker: String,
+
     /// Maximum number of tokens to generate.
     ///
     /// Defaults to `-1` (unlimited), matching llama.cpp: generation runs until

@@ -35,7 +35,23 @@
 //! Reference: mlx-vlm
 //! <https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/models/qwen3_omni_moe/audio.py>.
 //!
+//! The speech-output stack (stage 2) lives in the sibling modules: the
+//! [`talker`] MoE codec decoder, the [`code2wav`] vocoder, and the
+//! [`speech`] pipeline that ties them to a loaded thinker.
+//!
 //! Used by: Qwen3-Omni MoE VLM (thinker).
+
+pub mod code2wav;
+mod code2wav_blocks;
+pub mod speech;
+pub mod speech_config;
+#[cfg(test)]
+mod speech_config_tests;
+pub mod speech_layers;
+pub mod talker;
+
+pub use speech::{Qwen3OmniSpeech, SpeechOutput};
+pub use speech_config::{Qwen3OmniSpeechConfig, SPEECH_SAMPLE_RATE};
 
 use mlxcel_core::layers::{LayerNorm, UnifiedLinear};
 use mlxcel_core::weights::WeightMap;

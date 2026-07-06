@@ -1509,6 +1509,10 @@ pub(crate) fn run_generate(args: GenerateArgs) -> Result<()> {
     // parallelism / speculative / surgery flags are not applied in the
     // interactive scope (per #96: "scoped to the CLI run/generate path only").
     if args.generation.prompt.is_none() {
+        ensure!(
+            args.generation.output_audio.is_none(),
+            "--output-audio requires a one-shot -p/--prompt run (not interactive chat)"
+        );
         let opts = chat_options_from_args(&args)?;
         return crate::commands::run_chat(opts);
     }
@@ -1584,6 +1588,28 @@ fn run_generate_once(mut args: GenerateArgs) -> Result<()> {
     }
 
     let pipeline_requested = cli_pipeline_requested(&args);
+
+    // --output-audio (issue #665): validate the speech-output request before
+    // any heavy work. The Qwen3-Omni talker conditions on the chat-templated
+    // <|im_start|> role segments, and multimodal-conditioned speech (which
+    // needs the thinker hidden-state tap) is not wired yet.
+    if args.generation.output_audio.is_some() {
+        ensure!(
+            !pipeline_requested,
+            "--output-audio is not supported with pipeline parallelism"
+        );
+        ensure!(
+            !args.generation.no_chat_template,
+            "--output-audio requires the chat template; do not combine it with --no-chat-template"
+        );
+        ensure!(
+            args.generation.image.is_empty()
+                && args.generation.audio.is_none()
+                && args.generation.video.is_empty(),
+            "--output-audio currently supports text-only prompts (no --image/--audio/--video)"
+        );
+    }
+
     let tokenizer = load_tokenizer(&args.model.model)?;
     let prompt = load_cli_prompt(
         &args.model.model,
@@ -1769,6 +1795,16 @@ fn run_generate_once(mut args: GenerateArgs) -> Result<()> {
         )?
     } else {
         let (model, _loaded_tokenizer) = load_generation_model(&args, preflight_estimate.as_ref())?;
+        // --output-audio (issue #665): fail before generation when the loaded
+        // model carries no talker/code2wav speech stack.
+        if args.generation.output_audio.is_some()
+            && !matches!(model, mlxcel::LoadedModel::Qwen3OmniMoe(_))
+        {
+            anyhow::bail!(
+                "--output-audio is only supported for Qwen3-Omni models (this model has no \
+                 talker/code2wav speech stack)"
+            );
+        }
         // Block-diffusion models generate by canvas denoising, not
         // autoregressive decoding: route them to the diffusion engine BEFORE
         // the standard CxxGenerator loop (issue #217, phase 1).
@@ -1803,7 +1839,7 @@ fn run_generate_once(mut args: GenerateArgs) -> Result<()> {
             &tokenizer,
         )?;
         print_generation_preamble(&user_prompt)?;
-        run_generation_mode(
+        let generation = run_generation_mode(
             &model,
             &args,
             &prompt_tokens,
@@ -1811,7 +1847,20 @@ fn run_generate_once(mut args: GenerateArgs) -> Result<()> {
             vlm_embeddings.as_ref(),
             kv_cache_mode,
             token_bias,
-        )?
+        )?;
+        // --output-audio (issue #665): the speech pass runs AFTER text
+        // generation completes, re-conditioning the lazily-loaded talker on
+        // [prompt + generated] and vocoding through code2wav.
+        if let Some(wav_path) = args.generation.output_audio.clone() {
+            generate_vlm::run_speech_synthesis(
+                &model,
+                &args,
+                &wav_path,
+                &prompt_tokens,
+                &generation.0,
+            )?;
+        }
+        generation
     };
     let generated_text = decode_generated_text(&tokenizer, &prompt_tokens, &generated_tokens);
     print_generation_result(&generated_text, &stats, args.generation.profile)?;

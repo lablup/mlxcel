@@ -1389,6 +1389,61 @@ fn expand_nemotron_h_nano_omni_image_tokens(
     *prompt_tokens = expanded;
 }
 
+/// `--output-audio` (issue #665): synthesize speech for a completed
+/// Qwen3-Omni generation and write it as a WAV file.
+///
+/// Runs AFTER text generation: loads the talker + code2wav stack lazily (the
+/// default model load drops those weights, so text-only use pays nothing),
+/// re-conditions on [prompt + generated] token embeddings, generates codec
+/// frames, vocodes, and writes 24 kHz mono PCM16.
+pub(crate) fn run_speech_synthesis(
+    model: &LoadedModel,
+    args: &crate::GenerateArgs,
+    wav_path: &Path,
+    prompt_tokens: &[i32],
+    generated_tokens: &[i32],
+) -> Result<()> {
+    let LoadedModel::Qwen3OmniMoe(omni) = model else {
+        anyhow::bail!(
+            "--output-audio is only supported for Qwen3-Omni models (this model has no \
+             talker/code2wav speech stack)"
+        );
+    };
+
+    println!("Loading Qwen3-Omni speech stack (talker + code2wav)...");
+    let load_start = std::time::Instant::now();
+    let speech = mlxcel::load_qwen3_omni_speech(Path::new(&args.model.model))?;
+    println!(
+        "Speech stack loaded in {:.2}s. Synthesizing speech (speaker: {})...",
+        load_start.elapsed().as_secs_f64(),
+        args.generation.speaker
+    );
+
+    let synth_start = std::time::Instant::now();
+    let output = speech
+        .synthesize(
+            omni,
+            prompt_tokens,
+            generated_tokens,
+            &args.generation.speaker,
+            None,
+        )
+        .map_err(|e| anyhow::anyhow!("Speech synthesis failed: {e}"))?;
+
+    let wav = mlxcel::audio::encode_wav_pcm16(&output.samples, output.sample_rate, 1);
+    std::fs::write(wav_path, wav)
+        .map_err(|e| anyhow::anyhow!("Failed to write WAV file {}: {e}", wav_path.display()))?;
+
+    println!(
+        "[Speech] {} codec frames = {:.2}s of audio (synthesized in {:.2}s) -> {}",
+        output.frames,
+        output.samples.len() as f64 / f64::from(output.sample_rate),
+        synth_start.elapsed().as_secs_f64(),
+        wav_path.display()
+    );
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::{expand_gemma4_audio_tokens, expand_nemotron_h_nano_omni_audio_tokens};

@@ -1183,6 +1183,33 @@ impl Qwen3VLMoeModel {
         self.embed_tokens.forward(input_ids)
     }
 
+    /// Hidden states after the first `num_layers` decoder layers over a
+    /// text-only token sequence: pre-final-norm, sequential positions, fresh
+    /// throwaway caches. Equals the reference `output_hidden_states`
+    /// convention `hidden_states[idx + 1]` for `num_layers = idx + 1`, so the
+    /// Qwen3-Omni talker tap at `accept_hidden_layer` is
+    /// `forward_hidden_states(ids, accept_hidden_layer + 1)`. Causal
+    /// attention makes this re-encode positionally identical to the
+    /// incremental decode that produced the sequence, so no per-step capture
+    /// hook is needed. Additive capture API; the existing forward paths are
+    /// untouched.
+    ///
+    /// Used by: Qwen3-Omni MoE speech pipeline (multimodal hidden-state
+    /// conditioning; the text-only path consumes token embeddings only and
+    /// does not call this).
+    pub fn forward_hidden_states(
+        &self,
+        input_ids: &MlxArray,
+        num_layers: usize,
+    ) -> UniquePtr<MlxArray> {
+        let mut caches = self.make_caches();
+        let mut h = self.embed_tokens.forward(input_ids);
+        for (layer, cache) in self.layers.iter().zip(caches.iter_mut()).take(num_layers) {
+            h = layer.forward_text_only(&h, cache, None);
+        }
+        h
+    }
+
     pub fn make_caches(&self) -> Vec<KVCache> {
         (0..self.layers.len()).map(|_| KVCache::new()).collect()
     }

@@ -20,8 +20,10 @@
 //! positions exactly like image features at `image_token_id` positions; audio
 //! placeholders carry ordinary sequential text positions in the MRoPE index
 //! (all three axes equal), so `compute_rope_index` needs no audio awareness.
-//! The talker / code2wav speech-output stack is out of scope (weights are
-//! dropped at load).
+//! The talker / code2wav speech-output stack (stage 2) loads separately and
+//! opt-in as [`crate::audio::qwen3_omni_moe::Qwen3OmniSpeech`]; the default
+//! loader keeps dropping `talker.*` / `code2wav.*` so text/vision use pays
+//! zero extra memory.
 //!
 //! Reference: mlx-vlm
 //! <https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/models/qwen3_omni_moe/thinker.py>.

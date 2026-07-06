@@ -55,6 +55,9 @@ use self::nonstandard::try_load_nonstandard_model_from_dir;
 use self::special::try_load_special_model_from_weights;
 use self::vlm::*;
 
+// Re-exported at the crate root for the CLI's lazy `--output-audio` load.
+pub use self::vlm::load_qwen3_omni_speech;
+
 /// Resolve model path: if a file is given, use its parent directory.
 ///
 /// This provides compatibility with callers that pass a specific model file

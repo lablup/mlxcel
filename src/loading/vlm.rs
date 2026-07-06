@@ -109,6 +109,9 @@ pub(crate) use qwen::{
     load_glm_ocr, load_glm4v, load_glm4v_moe, load_qwen2_5_vl, load_qwen2_vl, load_qwen3_5_moe_vlm,
     load_qwen3_5_vlm, load_qwen3_omni_moe, load_qwen3_vl, load_qwen3_vl_moe,
 };
+// Public (re-exported at the crate root): the CLI loads the speech stack
+// lazily, outside the LoadedModel dispatch.
+pub use qwen::load_qwen3_omni_speech;
 pub(crate) use siglip::{load_aya_vision_vlm, load_paligemma_vlm};
 pub(crate) use smolvlm::load_smolvlm_vlm;
 pub(crate) use special::{

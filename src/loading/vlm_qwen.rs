@@ -671,6 +671,8 @@ pub(crate) fn load_glm4v_moe(model_path: &Path) -> Result<LoadedModel> {
 /// `thinker.model.*` / `thinker.visual.*`; both spellings are remapped. The
 /// talker / code2wav speech stack (`talker.*`, `code2wav.*`) is dropped before
 /// remap so its arrays are freed; its absence (thinker-only exports) is fine.
+/// Speech output loads those prefixes separately and opt-in through
+/// [`load_qwen3_omni_speech`], so this default path stays zero-cost.
 /// Sub-configs live under `thinker_config`, as do the multimodal token ids.
 pub(crate) fn load_qwen3_omni_moe(model_path: &Path) -> Result<LoadedModel> {
     use vision::encoders::qwen3_vl::{Qwen3VLVisionConfig, Qwen3VLVisionEncoder};
@@ -726,7 +728,7 @@ pub(crate) fn load_qwen3_omni_moe(model_path: &Path) -> Result<LoadedModel> {
     let raw_weights = load_vlm_weights_common(model_path, None)?;
     let mut weights = mlxcel_core::weights::WeightMap::new();
     for (key, value) in raw_weights {
-        if key.starts_with("talker.") || key.starts_with("code2wav.") {
+        if is_qwen3_omni_speech_key(&key) {
             continue;
         }
         // The sinusoidal audio position table is computed at construction.
@@ -789,6 +791,103 @@ pub(crate) fn load_qwen3_omni_moe(model_path: &Path) -> Result<LoadedModel> {
     };
 
     Ok(LoadedModel::Qwen3OmniMoe(vlm))
+}
+
+/// Qwen3-Omni speech-output keys: dropped by the default thinker loader,
+/// kept (exclusively) by the speech-bundle loader.
+fn is_qwen3_omni_speech_key(key: &str) -> bool {
+    key.starts_with("talker.") || key.starts_with("code2wav.")
+}
+
+/// Load the Qwen3-Omni speech-output stack (stage 2: `talker.*` + `code2wav.*`
+/// plus `talker_config` / `code2wav_config` from the config.json root, and the
+/// `talker_*` sampling defaults from generation_config.json when present).
+///
+/// Opt-in by design: [`load_qwen3_omni_moe`] keeps dropping these prefixes,
+/// and the CLI calls this lazily only when `--output-audio` is passed, so
+/// normal text/vision use pays zero extra memory. Verified against
+/// `mlx-community/Qwen3-Omni-30B-A3B-Instruct-4bit`: the talker text stack,
+/// projections, `codec_head`, and both embedding tables are 4-bit affine
+/// quantized; the code predictor and all vocoder convolutions are plain bf16
+/// (kept as-is per the quantized-model precision policy); conv weights ship
+/// already in the MLX `(out, kernel, in)` layout.
+pub fn load_qwen3_omni_speech(
+    model_path: &Path,
+) -> Result<crate::audio::qwen3_omni_moe::Qwen3OmniSpeech> {
+    use crate::audio::qwen3_omni_moe::{Qwen3OmniSpeech, Qwen3OmniSpeechConfig};
+
+    let (_config_str, full_config) = read_sanitized_vlm_config(model_path)?;
+    let generation_config = std::fs::read_to_string(model_path.join("generation_config.json"))
+        .ok()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok());
+    let cfg = Qwen3OmniSpeechConfig::parse(&full_config, generation_config.as_ref())
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    if !cfg.enable_audio_output {
+        anyhow::bail!(
+            "This Qwen3-Omni export sets enable_audio_output=false; it carries no usable speech stack"
+        );
+    }
+
+    let raw_weights = load_vlm_weights_common(model_path, None)?;
+    let mut weights = mlxcel_core::weights::WeightMap::new();
+    for (key, value) in raw_weights {
+        if is_qwen3_omni_speech_key(&key) {
+            weights.insert(key, value);
+        }
+    }
+    if weights.is_empty() {
+        anyhow::bail!(
+            "Checkpoint at {} carries no talker.* / code2wav.* weights (thinker-only export?)",
+            model_path.display()
+        );
+    }
+
+    Qwen3OmniSpeech::from_weights(&weights, cfg)
+        .map_err(|e| anyhow::anyhow!("Failed to load Qwen3-Omni speech stack: {e}"))
+}
+
+#[cfg(test)]
+mod qwen3_omni_speech_loader_tests {
+    use super::is_qwen3_omni_speech_key;
+
+    /// The default thinker path drops exactly the keys the speech bundle
+    /// keeps: the two loaders partition a checkpoint's key set.
+    #[test]
+    fn speech_key_filter_partitions_thinker_and_speech_weights() {
+        let dummy = || mlxcel_core::from_slice_f32(&[0.0], &[1]);
+        let mut raw = mlxcel_core::weights::WeightMap::new();
+        for key in [
+            "thinker.language_model.model.embed_tokens.weight",
+            "thinker.audio_tower.conv2d1.weight",
+            "talker.model.codec_embedding.weight",
+            "talker.code_predictor.lm_head.0.weight",
+            "code2wav.decoder.0.conv.weight",
+            "code2wav.pre_transformer.norm.weight",
+        ] {
+            raw.insert(key.to_string(), dummy());
+        }
+
+        let thinker_keys: Vec<&str> = raw
+            .keys()
+            .map(String::as_str)
+            .filter(|k| !is_qwen3_omni_speech_key(k))
+            .collect();
+        let speech_keys: Vec<&str> = raw
+            .keys()
+            .map(String::as_str)
+            .filter(|k| is_qwen3_omni_speech_key(k))
+            .collect();
+
+        assert_eq!(thinker_keys.len(), 2);
+        assert!(thinker_keys.iter().all(|k| k.starts_with("thinker.")));
+        assert_eq!(speech_keys.len(), 4);
+        assert!(
+            speech_keys
+                .iter()
+                .all(|k| k.starts_with("talker.") || k.starts_with("code2wav."))
+        );
+        assert_eq!(thinker_keys.len() + speech_keys.len(), raw.len());
+    }
 }
 
 #[cfg(test)]
