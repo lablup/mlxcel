@@ -981,14 +981,34 @@ impl Qwen3VLMoeModel {
             let visual_slice = mlxcel_core::slice(visual_embeds, &[0, 0], &[n_img, h_shape[2]]);
             let updated_vals = mlxcel_core::add(&current_vals, &visual_slice);
 
-            let result = mlxcel_core::copy(&batch_h);
-            for (local_idx, &pos) in image_positions.iter().enumerate() {
-                let val = mlxcel_core::slice(
+            // `slice_update` is functional (returns a new array); the result
+            // MUST be captured or the write is lost (issue #650, same class as
+            // the Granite 4 Vision blindness fixed by `inject_at_positions`).
+            // Contiguous image runs (the single-image case) collapse to one
+            // slice_update; disjoint runs fall back to per-row.
+            let mut result = mlxcel_core::copy(&batch_h);
+            let contiguous = image_positions
+                .iter()
+                .enumerate()
+                .all(|(i, &p)| p == image_positions[0] + i as i32);
+            if contiguous {
+                let start = image_positions[0];
+                result = mlxcel_core::slice_update(
+                    &result,
                     &updated_vals,
-                    &[local_idx as i32, 0],
-                    &[local_idx as i32 + 1, h_shape[2]],
+                    &[start, 0],
+                    &[start + n_img, h_shape[2]],
                 );
-                mlxcel_core::slice_update(&result, &val, &[pos, 0], &[pos + 1, h_shape[2]]);
+            } else {
+                for (local_idx, &pos) in image_positions.iter().enumerate() {
+                    let val = mlxcel_core::slice(
+                        &updated_vals,
+                        &[local_idx as i32, 0],
+                        &[local_idx as i32 + 1, h_shape[2]],
+                    );
+                    result =
+                        mlxcel_core::slice_update(&result, &val, &[pos, 0], &[pos + 1, h_shape[2]]);
+                }
             }
 
             mlxcel_core::expand_dims(&result, 0)
@@ -1232,5 +1252,39 @@ impl mlxcel_core::generate::LanguageModel for Qwen3VLMoeModel {
 
     fn eos_token_ids(&self) -> Vec<i32> {
         vec![151645, 151643] // Qwen EOS tokens
+    }
+}
+
+#[cfg(test)]
+mod deepstack_injection_tests {
+    use super::*;
+
+    /// Regression for issue #650: `deepstack_process` must add the visual
+    /// embeds at image positions (the functional `slice_update` return was
+    /// dropped, silently skipping the whole injection).
+    #[test]
+    fn deepstack_process_adds_visual_embeds_at_image_positions() {
+        let hidden = 4i32;
+        let seq = 5i32;
+        let h = mlxcel_core::full_f32(&[1, seq, hidden], 1.0, mlxcel_core::dtype::FLOAT32);
+        // Image positions 1..=3 (contiguous run).
+        let mask_vals = [0.0f32, 1.0, 1.0, 1.0, 0.0];
+        let mask = mlxcel_core::from_slice_f32(&mask_vals, &[1, seq]);
+        let mask = mlxcel_core::astype(&mask, mlxcel_core::dtype::BOOL);
+        let visual = mlxcel_core::full_f32(&[3, hidden], 10.0, mlxcel_core::dtype::FLOAT32);
+
+        let out = Qwen3VLMoeModel::deepstack_process(&h, &mask, &visual);
+        mlxcel_core::eval(&out);
+
+        for pos in 0..seq {
+            let v = mlxcel_core::slice(&out, &[0, pos, 0], &[1, pos + 1, 1]);
+            mlxcel_core::eval(&v);
+            let got = mlxcel_core::item_f32(&v);
+            let want = if (1..=3).contains(&pos) { 11.0 } else { 1.0 };
+            assert!(
+                (got - want).abs() < 1e-6,
+                "pos {pos}: expected {want}, got {got} (injection dropped?)"
+            );
+        }
     }
 }

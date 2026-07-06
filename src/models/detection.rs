@@ -123,6 +123,10 @@ pub fn get_model_type(model_path: &Path) -> Result<ModelType> {
         } else {
             ModelType::Gemma4
         }),
+        // LLaDA-2 MoE (masked-diffusion LM with a DeepSeek-V3-style MoE FFN).
+        // Generates by iterative block-wise unmasking rather than autoregressive
+        // decode; served on the shared diffusion worker loop.
+        "llada2_moe" => Ok(ModelType::Llada2Moe),
         // DiffusionGemma (block-diffusion on the Gemma 4 MoE backbone). The
         // checkpoint always ships a vision tower, but phase 1 is text-only:
         // the loader skips the vision weights, so detection is by model_type
@@ -167,7 +171,9 @@ pub fn get_model_type(model_path: &Path) -> Result<ModelType> {
         "glm_moe_dsa" => Ok(ModelType::GlmMoeDsa),
         "ernie4_5" | "ernie4.5" => Ok(ModelType::Ernie45),
         "ernie4_5_moe" | "ernie4.5_moe" => Ok(ModelType::Ernie45Moe),
+        "ernie4_5_moe_vl" | "ernie4.5_moe_vl" => Ok(ModelType::Ernie45MoeVLM),
         "hunyuan_v1_dense" | "hunyuan_dense" => Ok(ModelType::HunyuanV1Dense),
+        "hunyuan_vl" => Ok(ModelType::HunyuanVLM),
         "hunyuan" => Ok(detect_hunyuan_model_type(&v)),
         "mimo" => Ok(ModelType::MiMo),
         "apertus" => Ok(ModelType::Apertus),
@@ -219,7 +225,9 @@ pub fn get_model_type(model_path: &Path) -> Result<ModelType> {
         "qwen2_5_vl" => Ok(ModelType::Qwen25VL),
         "qwen3_vl" => Ok(ModelType::Qwen3VL),
         "qwen3_vl_moe" => Ok(ModelType::Qwen3VLMoe),
+        "qwen3_omni_moe" => Ok(ModelType::Qwen3OmniMoe),
         "paddleocr_vl" => Ok(ModelType::PaddleOcrVL),
+        "dots_ocr" => Ok(ModelType::DotsOcrVL),
         "glm4v" => Ok(ModelType::Glm4v),
         "glm4v_moe" => Ok(ModelType::Glm4vMoe),
         "glm_ocr" => Ok(ModelType::GlmOcr),
@@ -239,6 +247,9 @@ pub fn get_model_type(model_path: &Path) -> Result<ModelType> {
         "moondream2" | "moondream1" => Ok(ModelType::Moondream2VLM),
         "granite_vision" => Ok(ModelType::GraniteVisionVLM),
         "granite4_vision" => Ok(ModelType::Granite4VisionVLM),
+        "deepseekocr" => Ok(ModelType::DeepSeekOcrVLM),
+        "deepseekocr_2" => Ok(ModelType::DeepSeekOcr2VLM),
+        "deepseek_vl_v2" | "deepseek_vl2" => Ok(ModelType::DeepSeekVL2),
         "llava" | "llava_next" => {
             // The original IBM Granite Vision checkpoint ships as `llava_next`
             // with a `granite` text backbone; route it to the Granite VLM.
@@ -254,6 +265,7 @@ pub fn get_model_type(model_path: &Path) -> Result<ModelType> {
             }
         }
         "llava_bunny" | "bunny-llama" | "llava-qwen2" => Ok(ModelType::LlavaBunnyVLM),
+        "fastvlm" | "llava_qwen2" => Ok(ModelType::FastVLM),
         "aya_vision" => Ok(ModelType::AyaVisionVLM),
         "paligemma" => Ok(ModelType::PaliGemmaVLM),
         "pixtral" => Ok(ModelType::PixtralVLM),

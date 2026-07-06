@@ -1,0 +1,2 @@
+model,model_path,prompt_tokens,generated_tokens,prefill_ms,prefill_tok_s,decode_ms,decode_tok_s,date,hardware,mlx_version,build_type,max_tokens,prompt
+phi-3-small-8k-instruct-aq4_64,./models/phi-3-small-8k-instruct-aq4_64/,7,33,86.10,81.31,1221.82,27.01,2026-07-06,Apple_M1_Ultra_128GB,mlx-lm-0.31.3,python,100,"Hello, how are you today?"

@@ -1,0 +1,2 @@
+model,model_path,prompt_tokens,generated_tokens,prefill_ms,prefill_tok_s,decode_ms,decode_tok_s,date,hardware,mlx_version,build_type,max_tokens,prompt,prompt_target_len
+qwen3.5-35b-a3b-4bit,models/qwen3.5-35b-a3b-4bit,19,31,84.67,224.40,376.88,82.25,2026-07-06,Apple_M1_Ultra_128GB,0.3.3,release,100,"Hello, how are you today?",

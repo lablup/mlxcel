@@ -38,6 +38,12 @@ pub struct SentencePieceTokenizer {
     id_to_special_token: HashMap<u32, String>,
     /// Special tokens sorted by length descending for greedy longest-match-first splitting
     special_tokens_sorted: Vec<(String, u32)>,
+    /// Every `added_tokens_decoder` entry (special or not) by id. Added tokens
+    /// live OUTSIDE the SentencePiece vocab, so `decode_piece_ids` errors
+    /// "Out of range" on them; decode must map them from this table instead.
+    /// Non-special added tokens (e.g. ERNIE's `<|IMAGE_PLACEHOLDER|>`, marked
+    /// `special: false`) are real text per HF semantics and are never skipped.
+    added_token_contents: HashMap<u32, String>,
     bos_id: Option<u32>,
     add_bos: bool,
 }
@@ -348,6 +354,7 @@ impl SentencePieceTokenizer {
     fn new(
         processor: SentencePieceProcessor,
         special_tokens: HashMap<String, u32>,
+        added_token_contents: HashMap<u32, String>,
         bos_id: Option<u32>,
         add_bos: bool,
     ) -> Self {
@@ -368,6 +375,7 @@ impl SentencePieceTokenizer {
             special_token_to_id: special_tokens,
             id_to_special_token,
             special_tokens_sorted,
+            added_token_contents,
             bos_id,
             add_bos,
         }
@@ -436,6 +444,20 @@ impl SentencePieceTokenizer {
                 if !skip_special_tokens {
                     result.push_str(special);
                 }
+            } else if let Some(content) = self.added_token_contents.get(&id) {
+                // Non-special added token: outside the SentencePiece vocab
+                // (decode_piece_ids would error "Out of range"), but real text
+                // per HF semantics, so it is emitted regardless of
+                // skip_special_tokens.
+                if !regular_ids.is_empty() {
+                    let text = self
+                        .processor
+                        .decode_piece_ids(&regular_ids)
+                        .map_err(|e| anyhow::anyhow!("SentencePiece decode failed: {}", e))?;
+                    result.push_str(&text);
+                    regular_ids.clear();
+                }
+                result.push_str(content);
             } else {
                 regular_ids.push(id);
             }
@@ -492,9 +514,10 @@ impl SentencePieceTokenizer {
 }
 
 /// Parse special tokens from tokenizer_config.json's `added_tokens_decoder` field
-fn parse_special_tokens(model_path: &Path) -> (HashMap<String, u32>, bool) {
+fn parse_special_tokens(model_path: &Path) -> (HashMap<String, u32>, HashMap<u32, String>, bool) {
     let config_path = model_path.join("tokenizer_config.json");
     let mut special_tokens = HashMap::new();
+    let mut added_token_contents = HashMap::new();
     let mut add_bos = false;
 
     if let Ok(content) = std::fs::read_to_string(&config_path)
@@ -521,13 +544,18 @@ fn parse_special_tokens(model_path: &Path) -> (HashMap<String, u32>, bool) {
                         .unwrap_or(false);
                     if is_special {
                         special_tokens.insert(content.to_string(), id);
+                    } else {
+                        // Non-special added tokens (outside the SentencePiece
+                        // vocab) still need an id -> content mapping so decode
+                        // can render them instead of erroring "Out of range".
+                        added_token_contents.insert(id, content.to_string());
                     }
                 }
             }
         }
     }
 
-    (special_tokens, add_bos)
+    (special_tokens, added_token_contents, add_bos)
 }
 
 /// Find a `.tiktoken` file in the model directory.
@@ -790,9 +818,15 @@ pub fn load_tokenizer(model_path: &Path) -> Result<MlxcelTokenizer> {
 
         let bos_id = processor.bos_id();
 
-        let (special_tokens, add_bos) = parse_special_tokens(model_path);
+        let (special_tokens, added_token_contents, add_bos) = parse_special_tokens(model_path);
 
-        let sp_tokenizer = SentencePieceTokenizer::new(processor, special_tokens, bos_id, add_bos);
+        let sp_tokenizer = SentencePieceTokenizer::new(
+            processor,
+            special_tokens,
+            added_token_contents,
+            bos_id,
+            add_bos,
+        );
         return Ok(MlxcelTokenizer::SentencePiece(sp_tokenizer));
     }
 

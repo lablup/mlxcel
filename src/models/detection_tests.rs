@@ -88,6 +88,141 @@ fn whisper_model_type_is_detected() {
 }
 
 #[test]
+fn fastvlm_model_type_is_detected() {
+    for model_type in ["fastvlm", "llava_qwen2"] {
+        let model_dir = temp_path(&format!("fastvlm_{model_type}"));
+        fs::create_dir_all(&model_dir).unwrap();
+        fs::write(
+            model_dir.join("config.json"),
+            format!(
+                r#"{{
+                "model_type": "{model_type}",
+                "hidden_size": 896,
+                "num_hidden_layers": 24,
+                "num_attention_heads": 14,
+                "mm_projector_type": "mlp2x_gelu",
+                "vision_config": {{ "image_size": 1024 }}
+            }}"#
+            ),
+        )
+        .unwrap();
+
+        let detected = super::detection::get_model_type(&model_dir).unwrap();
+        assert_eq!(detected, ModelType::FastVLM, "for model_type {model_type}");
+
+        fs::remove_dir_all(model_dir).unwrap();
+    }
+}
+
+#[test]
+fn llava_qwen2_hyphen_stays_bunny() {
+    // The hyphenated `llava-qwen2` is the Bunny family and must not route to
+    // FastVLM (which owns the underscore `llava_qwen2`).
+    let model_dir = temp_path("llava_qwen2_hyphen");
+    fs::create_dir_all(&model_dir).unwrap();
+    fs::write(
+        model_dir.join("config.json"),
+        r#"{ "model_type": "llava-qwen2", "hidden_size": 896 }"#,
+    )
+    .unwrap();
+    let detected = super::detection::get_model_type(&model_dir).unwrap();
+    assert_eq!(detected, ModelType::LlavaBunnyVLM);
+    fs::remove_dir_all(model_dir).unwrap();
+}
+
+#[test]
+fn qwen3_omni_moe_model_type_is_detected() {
+    let model_dir = temp_path("qwen3_omni_moe");
+    fs::create_dir_all(&model_dir).unwrap();
+    fs::write(
+        model_dir.join("config.json"),
+        r#"{
+            "model_type": "qwen3_omni_moe",
+            "thinker_config": {
+                "text_config": { "num_hidden_layers": 48, "hidden_size": 2048 },
+                "vision_config": { "depth": 27 },
+                "audio_config": { "d_model": 1280 }
+            }
+        }"#,
+    )
+    .unwrap();
+
+    let detected = super::detection::get_model_type(&model_dir).unwrap();
+    assert_eq!(detected, ModelType::Qwen3OmniMoe);
+
+    fs::remove_dir_all(model_dir).unwrap();
+}
+
+#[test]
+fn hunyuan_vl_model_type_is_detected() {
+    let model_dir = temp_path("hunyuan_vl");
+    fs::create_dir_all(&model_dir).unwrap();
+    fs::write(
+        model_dir.join("config.json"),
+        r#"{
+            "model_type": "hunyuan_vl",
+            "hidden_size": 1024,
+            "num_hidden_layers": 24,
+            "num_attention_heads": 16,
+            "vision_config": { "hidden_size": 1152, "num_hidden_layers": 27 }
+        }"#,
+    )
+    .unwrap();
+
+    let detected = super::detection::get_model_type(&model_dir).unwrap();
+    assert_eq!(detected, ModelType::HunyuanVLM);
+
+    fs::remove_dir_all(model_dir).unwrap();
+}
+
+#[test]
+fn ernie4_5_moe_vl_model_type_is_detected() {
+    let model_dir = temp_path("ernie4_5_moe_vl");
+    fs::create_dir_all(&model_dir).unwrap();
+    fs::write(
+        model_dir.join("config.json"),
+        r#"{
+            "model_type": "ernie4_5_moe_vl",
+            "hidden_size": 2560,
+            "num_hidden_layers": 28,
+            "num_attention_heads": 20,
+            "moe_num_experts": [64, 64],
+            "vision_config": { "depth": 32, "embed_dim": 1280 }
+        }"#,
+    )
+    .unwrap();
+
+    let detected = super::detection::get_model_type(&model_dir).unwrap();
+    assert_eq!(detected, ModelType::Ernie45MoeVLM);
+
+    fs::remove_dir_all(model_dir).unwrap();
+}
+
+#[test]
+fn deepseek_vl2_model_type_is_detected() {
+    let model_dir = temp_path("deepseek_vl2");
+    fs::create_dir_all(&model_dir).unwrap();
+    fs::write(
+        model_dir.join("config.json"),
+        r#"{
+            "model_type": "deepseek_vl_v2",
+            "tile_tag": "2D",
+            "global_view_pos": "head",
+            "candidate_resolutions": [[384, 384]],
+            "language_config": { "model_type": "deepseek_v2", "hidden_size": 2048 },
+            "vision_config": { "model_type": "vision", "width": 1152, "layers": 27, "patch_size": 14 },
+            "projector_config": { "model_type": "mlp_projector" }
+        }"#,
+    )
+    .unwrap();
+
+    let detected = super::detection::get_model_type(&model_dir).unwrap();
+    assert_eq!(detected, ModelType::DeepSeekVL2);
+
+    fs::remove_dir_all(model_dir).unwrap();
+}
+
+#[test]
 fn mllama_model_type_is_detected() {
     // Llama 3.2 Vision: a `mllama` checkpoint must resolve to the VLM route
     // instead of erroring with "Unsupported model type".

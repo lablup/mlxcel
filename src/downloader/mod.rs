@@ -592,6 +592,28 @@ async fn stream_to_tempfile(
 /// invalid repo id, missing authentication on a gated repo, missing revision,
 /// network failure, and on-disk I/O errors.
 pub fn download_repo(opts: DownloadOptions) -> Result<()> {
+    // Issue #463: this function creates its own Tokio runtime and calls
+    // `block_on`, which Tokio forbids on a thread that is already driving a
+    // runtime ("Cannot start a runtime from within a runtime", an abort). The
+    // async `mlxcel serve` / `mlxcel-server` startup paths hit exactly that
+    // when a model must be auto-downloaded. When a runtime is detected on the
+    // current thread, run the blocking download body on a dedicated OS thread
+    // instead; the progress UX is unchanged (the bars write to the same
+    // stderr) and every caller, sync or async, becomes safe.
+    if tokio::runtime::Handle::try_current().is_ok() {
+        let handle = std::thread::Builder::new()
+            .name("mlxcel-download".to_string())
+            .spawn(move || download_repo_blocking(opts))
+            .context("Failed to spawn the download worker thread")?;
+        return match handle.join() {
+            Ok(result) => result,
+            Err(panic) => std::panic::resume_unwind(panic),
+        };
+    }
+    download_repo_blocking(opts)
+}
+
+fn download_repo_blocking(opts: DownloadOptions) -> Result<()> {
     // Issue #171: expand a bare, prefix-less model name (e.g. `Qwen3-4B-4bit`)
     // to `<default-org>/<name>` BEFORE anything is derived from `opts.repo_id` —
     // the HF-cache reuse probe below, the store destination

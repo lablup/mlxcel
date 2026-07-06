@@ -1,0 +1,2 @@
+model,model_path,prompt_tokens,generated_tokens,prefill_ms,prefill_tok_s,decode_ms,decode_tok_s,date,hardware,mlx_version,build_type,max_tokens,prompt
+LFM2-350M-8bit,./models/LFM2-350M-8bit/,8,100,12.25,653.11,178.43,560.44,2026-06-13,Apple_M1_Ultra_128GB,mlx-lm-0.31.3,python,100,"Hello, how are you today?"

@@ -1,0 +1,6 @@
+model,prompt_tokens,generated_tokens,prefill_chunk,prefill_ms,prefill_tok_s,decode_ms,decode_tok_s,mlx_peak_gb,sys_peak_gb,date,hardware,mlx_version,build_type,notes
+gemma-4-12b-it-4bit,8192,64,0,26084.04,314.06,4575.95,13.99,18.28,,2026-07-06,NVIDIA_GB10_122GB,0.3.3,release,single-pass prefill; pre-#672 this length already ran but with f32-promoted fallback scores
+gemma-4-12b-it-4bit,8192,64,2048,10555.41,776.09,4560.28,14.03,14.56,,2026-07-06,NVIDIA_GB10_122GB,0.3.3,release,MLXCEL_PREFILL_CHUNK=2048; decode unchanged vs single-pass
+gemma-4-12b-it-4bit,32768,16,2048,46389.66,706.36,1158.97,13.81,16.63,23,2026-07-06,NVIDIA_GB10_122GB,0.3.3,release,MLXCEL_PREFILL_CHUNK=2048; pre-#672 this configuration was the OOM class
+gemma-4-31b-it-4bit,16384,16,0,100495.96,163.03,2190.40,7.30,54.26,80,2026-07-06,NVIDIA_GB10_122GB,0.3.3,release,single-pass prefill with #672 attention chunk gate + last-position logits + flag-path masks
+gemma-4-31b-it-4bit,32768,64,2048,120648.11,271.60,11130.15,5.75,29.91,38,2026-07-06,NVIDIA_GB10_122GB,0.3.3,release,MLXCEL_PREFILL_CHUNK=2048; pre-#672 this configuration OOMed at ~101 GB (issue #672 repro)

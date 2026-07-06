@@ -335,8 +335,12 @@ impl MLAAttention {
         // kv_latent = layernorm(compressed)
         let kv_latent = self.kv_a_layernorm.forward(&compressed);
 
-        // Apply RoPE
+        // Apply RoPE. `offset` is the monotonic rope position; `live_before`
+        // is the number of K rows already in the cache BEFORE this call's
+        // update_and_fetch, which the causal fallback below needs (mirrors
+        // deepseek_v3's `live_before`, issue #619).
         let offset = cache.offset;
+        let live_before = cache.live_len();
         let q_pe = mlxcel_core::fast_rope(
             &q_pe,
             self.qk_rope_head_dim,
@@ -385,11 +389,29 @@ impl MLAAttention {
             None => (cache_keys, None),
         };
 
+        // Causal fallback (issue #619, same class as #618): both standard
+        // generation paths pass `mask == None` for prefill, and neither the
+        // SDPA wrapper nor the indexer applies implicit causality, so bake a
+        // causal mask in here for any maskless multi-token forward. It must
+        // reach BOTH consumers: the indexer top-k selection (or future keys
+        // get selected) and the additive `pe_scores` mask (which
+        // `apply_sparse_prefill_mask` documents as already-causal). Decode
+        // (`l == 1`) stays maskless: every cached position is causally valid.
+        let causal_storage;
+        let effective_mask: Option<&MlxArray> = if mask.is_some() {
+            mask
+        } else if l > 1 {
+            causal_storage = mlxcel_core::utils::create_causal_mask(l, live_before);
+            Some(causal_storage.as_ref().unwrap())
+        } else {
+            None
+        };
+
         // Top-k key selection. `None` at short context (kv_len <= index_topk),
         // in which case attention falls through to the dense path unchanged.
         let topk_indices = match (&self.indexer, &indexer_new, &indexer_keys) {
             (Some(idx), Some((_, idx_q, idx_w)), Some(idx_k)) => {
-                idx.top_indices(idx_q, idx_k, idx_w, mask)
+                idx.top_indices(idx_q, idx_k, idx_w, effective_mask)
             }
             _ => None,
         };
@@ -400,8 +422,8 @@ impl MLAAttention {
         let k_pe_t = mlxcel_core::transpose_axes(&k_pe, &[0, 1, 3, 2]);
         let pe_scores = mlxcel_core::matmul(&q_pe_scaled, &k_pe_t);
 
-        // Apply causal mask to pe_scores
-        let pe_scores = if let Some(m) = mask {
+        // Apply the (caller or fallback) causal mask to pe_scores.
+        let pe_scores = if let Some(m) = effective_mask {
             mlxcel_core::add(&pe_scores, m)
         } else {
             pe_scores

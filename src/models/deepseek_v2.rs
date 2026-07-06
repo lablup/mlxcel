@@ -665,6 +665,36 @@ impl DeepSeekV2Model {
         (0..self.layers.len()).map(|_| KVCache::new()).collect()
     }
 
+    pub fn num_layers(&self) -> usize {
+        self.layers.len()
+    }
+
+    /// Forward from pre-computed input embeddings (VLM feature splicing), the
+    /// same path as [`Self::forward`] with the token-embedding lookup skipped.
+    pub fn forward_from_embeds(
+        &self,
+        inputs_embeds: &MlxArray,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        let mut h = mlxcel_core::copy(inputs_embeds);
+        let mask = mask.map(mlxcel_core::copy);
+        for (layer, cache) in self.layers.iter().zip(caches.iter_mut()) {
+            h = layer.forward(&h, mask.as_deref(), cache);
+        }
+        let h = self.norm.forward(&h);
+        if let Some(ref head) = self.lm_head {
+            head.forward(&h)
+        } else {
+            self.embed_tokens.as_linear(&h)
+        }
+    }
+
+    /// Raw token-embedding lookup, exposed for VLM feature splicing.
+    pub fn embed_tokens_forward(&self, input_ids: &MlxArray) -> UniquePtr<MlxArray> {
+        self.embed_tokens.forward(input_ids)
+    }
+
     pub fn load<P: AsRef<Path>>(model_dir: P) -> Result<(Self, ModelArgs), String> {
         let model_dir = model_dir.as_ref();
 

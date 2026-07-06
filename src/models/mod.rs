@@ -43,6 +43,7 @@ pub mod diffusion_gemma;
 pub mod dots1;
 pub mod ernie4_5;
 pub mod ernie4_5_moe;
+pub mod ernie4_5_moe_vl;
 pub mod exaone;
 pub mod exaone4;
 pub mod exaone_moe;
@@ -64,11 +65,13 @@ pub mod granite;
 pub mod granitemoehybrid;
 pub mod hunyuan_moe;
 pub mod hunyuan_v1_dense;
+pub mod hunyuan_vl;
 pub mod internlm2;
 pub mod internlm3;
 pub mod jamba;
 pub mod kimi_linear;
 pub mod lfm2;
+pub mod llada2_moe;
 pub mod llama3;
 pub mod llama4;
 pub mod longcat_flash_ngram;
@@ -166,6 +169,7 @@ pub use internlm3::InternLM3Model;
 pub use jamba::JambaModel;
 pub use kimi_linear::KimiLinearModel;
 pub use lfm2::Lfm2Model;
+pub use llada2_moe::Llada2MoeModel;
 pub use llama3::Llama3Model;
 pub use llama4::{Llama4CxxModel, Llama4Wrapper};
 pub use longcat_flash_ngram::LongcatFlashNgramModel;
@@ -250,13 +254,20 @@ pub enum ModelType {
     Gemma3,            // Gemma 3 (text-only)
     Gemma4,            // Gemma 4 text-only route
     DiffusionGemma,    // DiffusionGemma (block-diffusion on the Gemma 4 MoE backbone)
+    Llada2Moe,         // LLaDA-2 MoE (masked-diffusion LM, DeepSeek-V3-style MoE FFN)
     Gemma3VLM,         // Gemma 3 VLM (vision-language)
     Gemma4VLM,         // Gemma 4 VLM (vision-language)
     Gemma4Unified,     // Gemma 4 Unified (encoder-free text + vision + audio)
     LlavaVLM,          // LLaVA (CLIP/SigLIP + Llama/Qwen2)
     GraniteVisionVLM,  // Granite Vision (SigLIP multi-tap + Granite text, AnyRes)
     Granite4VisionVLM, // Granite 4 Vision (SigLIP + window-QFormer + Granite-4 hybrid)
+    DeepSeekOcrVLM,    // DeepSeek-OCR (SAM + CLIP + DeepSeek MoE decoder)
+    DeepSeekOcr2VLM,   // DeepSeek-OCR 2 (SAM + Qwen2 resampler + DeepSeek MoE decoder)
+    DeepSeekVL2,       // DeepSeek-VL2 (SigLIP + downsample MLP + DeepSeek-V2 MoE decoder)
     LlavaBunnyVLM,     // LLaVA-Bunny (SigLIP + Qwen2)
+    FastVLM,           // FastVLM (FastViTHD vision + Qwen2 text, mlp2x_gelu)
+    Ernie45MoeVLM,     // ERNIE-4.5 MoE VL (DFNRope ViT + modality-split MoE + 3D MRoPE)
+    HunyuanVLM,        // Hunyuan-VL (ViT + perceive merger + XD-RoPE decoder)
     AyaVisionVLM,      // Aya Vision (SigLIP + Cohere2)
     PaliGemmaVLM,      // PaliGemma (SigLIP + Gemma)
     PixtralVLM,        // Pixtral (ViT w/ 2D RoPE + Mistral)
@@ -265,7 +276,9 @@ pub enum ModelType {
     Qwen25VL,          // Qwen2.5-VL (windowed ViT + Qwen2 w/ MRoPE)
     Qwen3VL,           // Qwen3-VL (ViT + interleaved MRoPE + DeepStack)
     Qwen3VLMoe,        // Qwen3-VL-MoE (Qwen3-VL + MoE text backbone)
+    Qwen3OmniMoe,      // Qwen3-Omni MoE thinker (Qwen3-VL-MoE + audio tower)
     PaddleOcrVL,       // PaddleOCR-VL (NaViT vision + ERNIE-4.5 w/ MRoPE)
+    DotsOcrVL,         // dots.ocr (dots_vit ViT + Qwen2 text decoder)
     Glm4v,             // GLM-4V (GLM-4V ViT + GLM-4 text w/ sectioned MRoPE)
     Glm4vMoe,          // GLM-4V MoE (GLM-4V ViT + GLM-4 MoE text w/ MRoPE)
     GlmOcr,            // GLM-OCR (GLM-OCR ViT + GLM-4 text w/ full-width MRoPE)
@@ -432,13 +445,20 @@ pub const ALL_MODEL_TYPES: &[ModelType] = &[
     ModelType::Gemma3,
     ModelType::Gemma4,
     ModelType::DiffusionGemma,
+    ModelType::Llada2Moe,
     ModelType::Gemma3VLM,
     ModelType::Gemma4VLM,
     ModelType::Gemma4Unified,
     ModelType::LlavaVLM,
     ModelType::GraniteVisionVLM,
     ModelType::Granite4VisionVLM,
+    ModelType::DeepSeekOcrVLM,
+    ModelType::DeepSeekOcr2VLM,
+    ModelType::DeepSeekVL2,
     ModelType::LlavaBunnyVLM,
+    ModelType::FastVLM,
+    ModelType::Ernie45MoeVLM,
+    ModelType::HunyuanVLM,
     ModelType::AyaVisionVLM,
     ModelType::PaliGemmaVLM,
     ModelType::PixtralVLM,
@@ -447,7 +467,9 @@ pub const ALL_MODEL_TYPES: &[ModelType] = &[
     ModelType::Qwen25VL,
     ModelType::Qwen3VL,
     ModelType::Qwen3VLMoe,
+    ModelType::Qwen3OmniMoe,
     ModelType::PaddleOcrVL,
+    ModelType::DotsOcrVL,
     ModelType::Glm4v,
     ModelType::Glm4vMoe,
     ModelType::GlmOcr,
@@ -603,7 +625,9 @@ impl ModelType {
             ModelType::Qwen25VL => ("Qwen2.5-VL", "Qwen VLM"),
             ModelType::Qwen3VL => ("Qwen3-VL", "Qwen VLM"),
             ModelType::Qwen3VLMoe => ("Qwen3-VL MoE", "Qwen VLM"),
+            ModelType::Qwen3OmniMoe => ("Qwen3-Omni MoE (thinker)", "Qwen VLM"),
             ModelType::PaddleOcrVL => ("PaddleOCR-VL", "PaddleOCR VLM"),
+            ModelType::DotsOcrVL => ("dots.ocr (dots_vit + Qwen2)", "Other VLM"),
             ModelType::Glm4v => ("GLM-4V", "GLM VLM"),
             ModelType::Glm4vMoe => ("GLM-4V MoE", "GLM VLM"),
             ModelType::GlmOcr => ("GLM-OCR", "GLM VLM"),
@@ -619,6 +643,10 @@ impl ModelType {
             ModelType::DiffusionGemma => (
                 "DiffusionGemma (block-diffusion, Gemma 4 MoE backbone)",
                 "Gemma",
+            ),
+            ModelType::Llada2Moe => (
+                "LLaDA-2 MoE (masked-diffusion LM, DeepSeek-V3-style MoE)",
+                "Diffusion",
             ),
             ModelType::RecurrentGemma => ("RecurrentGemma (Griffin: RGLRU + attention)", "Gemma"),
 
@@ -770,7 +798,19 @@ impl ModelType {
                 "Granite 4 Vision (SigLIP + Granite 4 hybrid)",
                 "Granite VLM",
             ),
+            ModelType::DeepSeekOcrVLM => ("DeepSeek-OCR (SAM + CLIP + DeepSeek MoE)", "Other VLM"),
+            ModelType::DeepSeekOcr2VLM => (
+                "DeepSeek-OCR 2 (SAM + Qwen2 resampler + DeepSeek MoE)",
+                "Other VLM",
+            ),
+            ModelType::DeepSeekVL2 => (
+                "DeepSeek-VL2 (SigLIP + downsample MLP + DeepSeek-V2 MoE)",
+                "Other VLM",
+            ),
             ModelType::LlavaBunnyVLM => ("LLaVA-Bunny (SigLIP + Qwen2)", "Other VLM"),
+            ModelType::FastVLM => ("FastVLM (FastViTHD + Qwen2)", "Other VLM"),
+            ModelType::Ernie45MoeVLM => ("ERNIE 4.5 MoE VL (DFNRope + MoE)", "ERNIE"),
+            ModelType::HunyuanVLM => ("Hunyuan-VL (ViT + XD-RoPE)", "Other VLM"),
             ModelType::InternVLChatVLM => {
                 ("InternVL (InternViT + pixel-shuffle + Qwen2)", "Other VLM")
             }
@@ -862,13 +902,20 @@ mod metadata_tests {
             Gemma3,
             Gemma4,
             DiffusionGemma,
+            Llada2Moe,
             Gemma3VLM,
             Gemma4VLM,
             Gemma4Unified,
             LlavaVLM,
             GraniteVisionVLM,
             Granite4VisionVLM,
+            DeepSeekOcrVLM,
+            DeepSeekOcr2VLM,
+            DeepSeekVL2,
             LlavaBunnyVLM,
+            FastVLM,
+            Ernie45MoeVLM,
+            HunyuanVLM,
             AyaVisionVLM,
             PaliGemmaVLM,
             PixtralVLM,
@@ -877,7 +924,9 @@ mod metadata_tests {
             Qwen25VL,
             Qwen3VL,
             Qwen3VLMoe,
+            Qwen3OmniMoe,
             PaddleOcrVL,
+            DotsOcrVL,
             Glm4v,
             Glm4vMoe,
             GlmOcr,

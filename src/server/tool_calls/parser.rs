@@ -140,6 +140,20 @@ pub fn parse_tool_calls(raw_output: &str, tools: Option<&[Tool]>) -> ToolCallPar
         return ToolCallParseResult::none(String::new());
     }
 
+    // Harmony (GPT-OSS) is handled up front, ahead of the single-purpose
+    // parsers below. Unlike them it owns the whole channel stream: it routes the
+    // `analysis` channel to `reasoning_content` and strips the channel markup
+    // from `content` even when the model answers directly without a tool call.
+    // Returning its result unconditionally (when the distinctive `<|channel|>`
+    // markers are present) is what prevents that markup from leaking through the
+    // fall-through cleaner in the no-tool-call case.
+    if let Some(mut result) = formats::try_harmony(text) {
+        if let Some(tools) = tools {
+            result.tool_calls = filter_by_tools(result.tool_calls, tools);
+        }
+        return result;
+    }
+
     // Try each format in order of specificity (most distinctive markers first)
     let parsers: &[fn(&str) -> Option<ToolCallParseResult>] = &[
         formats::try_granite, // <response><tool_call> — more specific than bare Hermes
@@ -774,5 +788,77 @@ mod tests {
             !result.has_tool_calls(),
             "unknown namespaced call must be dropped"
         );
+    }
+
+    // -- Harmony (GPT-OSS) end-to-end --------------------------------------------
+
+    #[test]
+    fn parse_harmony_tool_call() {
+        let output = "<|channel|>analysis<|message|>Read the file first.<|end|>\
+                      <|start|>assistant<|channel|>commentary to=functions.read_file \
+                      <|constrain|>json<|message|>{\"path\": \"/etc/hosts\"}<|call|>";
+        let tools = vec![make_tool("read_file")];
+        let result = parse_tool_calls(output, Some(&tools));
+        assert!(result.has_tool_calls());
+        assert_eq!(result.tool_calls.len(), 1);
+        assert_eq!(result.tool_calls[0].name, "read_file");
+        assert_eq!(arg_obj(&result.tool_calls[0])["path"], "/etc/hosts");
+        assert_eq!(
+            result.format,
+            Some(crate::server::tool_calls::ToolCallFormat::Harmony)
+        );
+        // Channel markup must never leak into content.
+        assert_eq!(result.content, "");
+        assert!(!result.content.contains("<|channel|>"));
+        // Analysis channel surfaces as reasoning_content.
+        assert_eq!(
+            result.reasoning_content.as_deref(),
+            Some("Read the file first.")
+        );
+    }
+
+    #[test]
+    fn parse_harmony_filters_unknown_tools() {
+        let output = "<|channel|>commentary to=functions.unknown_fn \
+                      <|constrain|>json<|message|>{}<|call|>";
+        let tools = vec![make_tool("read_file")];
+        let result = parse_tool_calls(output, Some(&tools));
+        assert!(!result.has_tool_calls());
+    }
+
+    #[test]
+    fn parse_harmony_no_tools_accepts_all() {
+        let output = "<|channel|>commentary to=functions.any_fn \
+                      <|constrain|>json<|message|>{\"x\": 1}<|call|>";
+        let result = parse_tool_calls(output, None);
+        assert!(result.has_tool_calls());
+        assert_eq!(result.tool_calls[0].name, "any_fn");
+    }
+
+    #[test]
+    fn parse_harmony_multiple_calls() {
+        let output = "<|channel|>commentary to=functions.a <|constrain|>json\
+                      <|message|>{\"x\": 1}<|call|><|start|>assistant<|channel|>\
+                      commentary to=functions.b <|constrain|>json<|message|>{\"y\": 2}<|call|>";
+        let tools = vec![make_tool("a"), make_tool("b")];
+        let result = parse_tool_calls(output, Some(&tools));
+        assert_eq!(result.tool_calls.len(), 2);
+        assert_eq!(result.tool_calls[0].name, "a");
+        assert_eq!(result.tool_calls[1].name, "b");
+    }
+
+    #[test]
+    fn parse_harmony_final_only_does_not_leak_markup() {
+        // Tools were requested but the model answered directly via `final`.
+        // Without the up-front Harmony handling this markup would leak through
+        // the fall-through content cleaner.
+        let output = "<|channel|>analysis<|message|>Thinking.<|end|><|start|>assistant\
+                      <|channel|>final<|message|>Hello there!<|return|>";
+        let tools = vec![make_tool("read_file")];
+        let result = parse_tool_calls(output, Some(&tools));
+        assert!(!result.has_tool_calls());
+        assert_eq!(result.content, "Hello there!");
+        assert_eq!(result.reasoning_content.as_deref(), Some("Thinking."));
+        assert!(!result.content.contains("<|channel|>"));
     }
 }

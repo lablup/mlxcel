@@ -307,6 +307,20 @@ pub(crate) fn spawn_model_worker_with_batch_config(
                     );
                     return;
                 }
+                // LLaDA-2 MoE (issue #546): masked-diffusion block generator,
+                // served on the shared single-stream diffusion worker loop. The
+                // serve-level `--max-denoising-steps` flag maps to the LLaDA-2
+                // per-block step count.
+                LoadedModel::Llada2Moe(llada2) => {
+                    crate::server::diffusion_worker::run_llada2_worker_loop(
+                        &llada2,
+                        &tokenizer,
+                        request_rx,
+                        sched_config.max_denoising_steps,
+                        &config_eos,
+                    );
+                    return;
+                }
                 other => other,
             };
 
@@ -814,6 +828,19 @@ pub(crate) fn spawn_legacy_model_worker(
                     );
                     return;
                 }
+                // LLaDA-2 MoE (issue #546): served on the shared single-stream
+                // loop. The legacy worker has no serve-level diffusion flags, so
+                // the engine step default applies (steps_override = None).
+                LoadedModel::Llada2Moe(llada2) => {
+                    crate::server::diffusion_worker::run_llada2_worker_loop(
+                        &llada2,
+                        &tokenizer,
+                        request_rx,
+                        None,
+                        &config_eos,
+                    );
+                    return;
+                }
                 other => other,
             };
 
@@ -1071,6 +1098,15 @@ pub(crate) fn prepare_request_vlm_embeddings(
             return Ok(Some(embeddings));
         }
         if let Some(embeddings) = prepare_gemma4_audio_embeddings(
+            model,
+            prompt_tokens,
+            images,
+            audio,
+            end_of_turn_token_id,
+        )? {
+            return Ok(Some(embeddings));
+        }
+        if let Some(embeddings) = prepare_qwen3_omni_audio_embeddings(
             model,
             prompt_tokens,
             images,
@@ -1433,6 +1469,92 @@ fn prepare_gemma4_unified_audio_embeddings(
 /// was loaded without an audio bundle or `sound_context_token_id`, so the
 /// dispatch in [`prepare_request_vlm_embeddings`] falls through to the next
 /// audio handler / the "model does not support audio" warning.
+/// Resolve `input_audio` (optionally with images) into Qwen3-Omni thinker
+/// embeddings. Mirrors the CLI's `compute_qwen3_omni_audio_embeddings` in
+/// `src/commands/generate_vlm.rs`.
+fn prepare_qwen3_omni_audio_embeddings(
+    model: &LoadedModel,
+    prompt_tokens: &mut Vec<i32>,
+    images: &[Vec<u8>],
+    audio_data: &[Vec<u8>],
+    end_of_turn_token_id: Option<i32>,
+) -> Result<Option<InputEmbeddings>> {
+    use crate::audio;
+    use crate::audio::qwen3_omni_moe::audio_out_len;
+    use crate::audio::whisper_mel::{log_mel_spectrogram, resample_to_16k};
+
+    let omni_vl = match model {
+        LoadedModel::Qwen3OmniMoe(vl) => vl,
+        _ => return Ok(None),
+    };
+
+    if audio_data.len() > 1 {
+        tracing::warn!(
+            "Multiple audio inputs provided ({}); only the first will be processed",
+            audio_data.len()
+        );
+    }
+
+    let (samples, sample_rate) = audio::load_wav_from_bytes(&audio_data[0])
+        .map_err(|e| anyhow!("Failed to decode audio: {}", e))?;
+    tracing::info!(
+        "Audio input: {} samples at {} Hz ({:.1}s)",
+        samples.len(),
+        sample_rate,
+        samples.len() as f64 / sample_rate.max(1) as f64
+    );
+    let samples = if sample_rate != 16_000 {
+        resample_to_16k(&samples, sample_rate)
+    } else {
+        samples
+    };
+    let (mel, num_frames) = log_mel_spectrogram(&samples, 128);
+    if num_frames == 0 {
+        return Err(anyhow!("Audio clip too short to produce mel frames"));
+    }
+    let num_audio_tokens = audio_out_len(num_frames).max(1);
+
+    crate::vlm_runtime::expand_qwen3_omni_audio_tokens_for_server(
+        prompt_tokens,
+        omni_vl.audio_token_id,
+        omni_vl.audio_start_token_id,
+        omni_vl.audio_end_token_id,
+        num_audio_tokens,
+        end_of_turn_token_id,
+    );
+
+    // Optional image branch: same preprocessing + placeholder insertion the
+    // image-only runtime path performs.
+    let images_data = if !images.is_empty() {
+        let decoded_images = decode_request_images(images)?;
+        let (pixel_values, grid_thw) = omni_vl.processor.preprocess_with_grid(&decoded_images);
+        crate::qwen_vl::insert_qwen3_omni_image_tokens(
+            prompt_tokens,
+            &grid_thw,
+            omni_vl.spatial_merge_size,
+            omni_vl.vision_start_token_id,
+            omni_vl.image_token_id,
+            omni_vl.im_end_token_id,
+        );
+        Some((pixel_values, grid_thw))
+    } else {
+        None
+    };
+
+    let input_ids_arr =
+        mlxcel_core::from_slice_i32(prompt_tokens, &[1, prompt_tokens.len() as i32]);
+    let audio_features = omni_vl.extract_audio_features(&mel, num_frames);
+    let embeddings = omni_vl.input_embeddings_multimodal(
+        &input_ids_arr,
+        images_data
+            .as_ref()
+            .map(|(pv, grid)| (pv.as_ref().unwrap() as &mlxcel_core::MlxArray, &grid[..])),
+        Some(&audio_features),
+    );
+
+    Ok(Some(embeddings))
+}
+
 fn prepare_nemotron_h_nano_omni_audio_embeddings(
     model: &LoadedModel,
     prompt_tokens: &mut Vec<i32>,

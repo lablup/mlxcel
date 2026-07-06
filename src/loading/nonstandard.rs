@@ -51,6 +51,10 @@ pub(crate) fn try_load_nonstandard_model_from_dir(
             load_from_path(model_path, |path| models::DiffusionGemmaModel::load(path))
                 .map(LoadedModel::DiffusionGemma)?,
         ),
+        ModelType::Llada2Moe => Some(
+            load_from_path(model_path, |path| models::Llada2MoeModel::load(path))
+                .map(LoadedModel::Llada2Moe)?,
+        ),
         ModelType::Mamba => Some(
             super::load_pair_from_dir(path_str, |path| models::MambaModel::load(&path))
                 .map(LoadedModel::Mamba)?,

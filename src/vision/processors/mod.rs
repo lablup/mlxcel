@@ -17,8 +17,14 @@
 //! Provides the ImageProcessor trait and processor implementations.
 
 pub mod anyres;
+pub mod deepseek_vl2;
+pub mod deepseekocr;
+pub mod dots_ocr;
+pub mod ernie4_5_vl;
+pub mod fastvlm;
 pub mod gemma4;
 pub mod gemma4_unified;
+pub mod hunyuan_vl;
 pub mod idefics2;
 pub mod internvl;
 pub mod kimi_vl;

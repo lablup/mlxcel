@@ -23,6 +23,11 @@ ignore = [
     # adoption depends on upstream `tokenizers` switching. No runtime vulnerability
     # — pure macro-expansion crate used at build time.
     { id = "RUSTSEC-2024-0436", reason = "Transitive via tokenizers; archived but no runtime impact; awaiting upstream switch to pastey" },
+    # `cxx` — RUSTSEC-2026-0202 flags the `let_cxx_string!` macro (uninitialized
+    # value on a C++ exception). mlxcel never uses `let_cxx_string!` (the FFI
+    # bridge passes owned Rust types, not stack `CxxString`s), so the unsound
+    # path is not reachable. Ignore until an upstream `cxx` release lands the fix.
+    { id = "RUSTSEC-2026-0202", reason = "cxx let_cxx_string! is not used in mlxcel; unsound path unreachable" },
 ]
 
 # ============================================================================

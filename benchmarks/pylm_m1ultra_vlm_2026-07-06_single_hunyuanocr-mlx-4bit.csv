@@ -1,0 +1,2 @@
+model,model_path,prompt_tokens,generated_tokens,prefill_ms,prefill_tok_s,decode_ms,decode_tok_s,date,hardware,mlx_version,build_type,max_tokens,prompt
+hunyuanocr-mlx-4bit,./models/hunyuanocr-mlx-4bit/,284,11,261.88,1084.46,72.78,151.14,2026-07-06,Apple_M1_Ultra_128GB,mlx-vlm-0.4.4,python,100,"What is in this image?"

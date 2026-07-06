@@ -1,0 +1,8 @@
+model,model_path,prompt_tokens,generated_tokens,prefill_ms,prefill_tok_s,decode_ms,decode_tok_s,date,hardware,mlx_version,build_type,max_tokens,prompt,prompt_target_len
+llama-3.1-8b-4bit,./models/llama-3.1-8b-4bit,512,32,165.40,3095.56,590.58,54.18,2026-07-04,NVIDIA_GB10_122GB,0.3.3,release,32,"Hello, how are you today?",512
+llama-3.1-8b-4bit,./models/llama-3.1-8b-4bit,2048,32,727.20,2816.30,616.86,51.88,2026-07-04,NVIDIA_GB10_122GB,0.3.3,release,32,"Hello, how are you today?",2048
+llama-3.1-8b-4bit,./models/llama-3.1-8b-4bit,8192,32,4829.97,1696.08,730.33,43.82,2026-07-04,NVIDIA_GB10_122GB,0.3.3,release,32,"Hello, how are you today?",8192
+llama-3.1-8b-4bit,./models/llama-3.1-8b-4bit,32768,32,21850.09,1499.67,1170.83,27.33,2026-07-04,NVIDIA_GB10_122GB,0.3.3,release,32,"Hello, how are you today?",32768
+qwen2.5-7b-4bit,./models/qwen2.5-7b-4bit,512,32,159.16,3216.99,546.10,58.60,2026-07-04,NVIDIA_GB10_122GB,0.3.3,release,32,"Hello, how are you today?",512
+qwen2.5-7b-4bit,./models/qwen2.5-7b-4bit,2048,32,687.89,2977.23,562.15,56.92,2026-07-04,NVIDIA_GB10_122GB,0.3.3,release,32,"Hello, how are you today?",2048
+qwen2.5-7b-4bit,./models/qwen2.5-7b-4bit,8192,32,4502.82,1819.30,603.65,53.01,2026-07-04,NVIDIA_GB10_122GB,0.3.3,release,32,"Hello, how are you today?",8192

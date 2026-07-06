@@ -663,6 +663,7 @@ fn resolve_cli_prompt(
 
 fn load_cli_prompt(
     model_path: &Path,
+    tokenizer: &crate::MlxcelTokenizer,
     user_prompt: &str,
     no_chat_template: bool,
     num_images: usize,
@@ -672,9 +673,22 @@ fn load_cli_prompt(
     let processor = if no_chat_template {
         None
     } else {
-        ChatTemplateProcessor::from_model_path(model_path)
+        let mut processor = ChatTemplateProcessor::from_model_path(model_path)
             .ok()
-            .flatten()
+            .flatten();
+        // CLI/server parity (upstream mlx-lm PR #1114): a tokenizer with a
+        // recognized think-marker pair defaults `enable_thinking=true`.
+        // Without this, templates that branch on `enable_thinking is defined
+        // and enable_thinking is false` (Qwen3 family) render an empty
+        // `<think>\n\n</think>` block; models not trained with that block
+        // (e.g. the Qwen3-Omni Instruct thinker) emit an immediate
+        // end-of-text after it.
+        if let Some(p) = processor.as_mut()
+            && tokenizer.infer_thinking_markers().has_thinking()
+        {
+            p.set_default_enable_thinking(true);
+        }
+        processor
     };
 
     resolve_cli_prompt(
@@ -1573,6 +1587,7 @@ fn run_generate_once(mut args: GenerateArgs) -> Result<()> {
     let tokenizer = load_tokenizer(&args.model.model)?;
     let prompt = load_cli_prompt(
         &args.model.model,
+        &tokenizer,
         &user_prompt,
         args.generation.no_chat_template,
         args.generation.image.len(),
@@ -1760,6 +1775,17 @@ fn run_generate_once(mut args: GenerateArgs) -> Result<()> {
         if let mlxcel::LoadedModel::DiffusionGemma(diffusion_model) = &model {
             return super::generate_diffusion::run_diffusion_generation(
                 diffusion_model,
+                &args,
+                &tokenizer,
+                &prompt_tokens,
+                &user_prompt,
+            );
+        }
+        // LLaDA-2 MoE generates by block-wise unmasking, not autoregressive
+        // decode: route it to its own driver before the CxxGenerator loop.
+        if let mlxcel::LoadedModel::Llada2Moe(llada2_model) = &model {
+            return super::generate_llada2::run_llada2_generation(
+                llada2_model,
                 &args,
                 &tokenizer,
                 &prompt_tokens,

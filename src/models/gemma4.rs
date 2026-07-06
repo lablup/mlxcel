@@ -2793,6 +2793,26 @@ impl Gemma4TextModel {
                 lp,
             );
             (Some(global_mask), Some(sliding_mask))
+        } else if l > DENSE_PREFILL_MASK_MAX_TOKENS
+            && bidirectional_block_ids.is_none()
+            && per_row_valid_end.is_none()
+        {
+            // Long text-only prefill: leave both masks `None` so `attend`
+            // routes through `causal_attention`'s flag paths instead of
+            // shipping dense `[l, l + offset]` f32 masks through every layer.
+            // At 32k tokens the two retained masks alone are ~8 GiB and their
+            // construction transients more, on top of the O(heads*L^2) score
+            // materialization they used to feed (issue #672). Semantics are
+            // unchanged: full-attention layers (`window_size == 0`) take the
+            // bottom-right-aligned causal path (row `q` attends `k <= q +
+            // offset`, exactly `create_causal_mask(l, live_len)`), and
+            // sliding layers take the over-window prefill path, which builds
+            // the same `create_causal_mask_with_window_full(l, offset,
+            // window)` mask per layer as a transient instead of retaining it
+            // for the whole forward. Short prefills and every verify /
+            // padding / vision-overlay shape keep the dense masks below,
+            // byte-identical to the previous behavior.
+            (None, None)
         } else if l > 1 {
             // Non-ragged prefill / multi-token verify: derive both masks from
             // the cache's live window (`live_len`), not the monotonic
@@ -3348,6 +3368,14 @@ pub(crate) fn slice_layer_input(
 /// implement.
 const SUPPORTED_QUANT_SCHEMES: &[&str] = &["affine", "mxfp4", "nvfp4", "mxfp8"];
 
+/// Longest text-only prefill that still builds the dense `[l, l + offset]`
+/// f32 prefill masks. Above this, the mask pair is left `None` and `attend`
+/// routes through `causal_attention`'s causal / sliding-window flag paths,
+/// avoiding the O(L^2) retained masks entirely (issue #672). 4096 keeps every
+/// dense mask under ~64 MiB and, like the LM-head gate in
+/// `forward_last_logits`, leaves short-context behavior byte-identical.
+const DENSE_PREFILL_MASK_MAX_TOKENS: i32 = 4096;
+
 /// Validate that a model's declared quantization scheme is one mlxcel supports,
 /// before any weights are loaded (issue #467).
 ///
@@ -3481,6 +3509,40 @@ impl Gemma4Model {
             self.text_model
                 .forward(input_ids, input_embeddings, caches, mask, per_layer_inputs);
         let mut logits = self.text_model.embed_tokens.as_linear(&hidden);
+        if let Some(cap) = self.config.final_logit_softcapping {
+            logits = mlxcel_core::compiled_softcap(&logits, cap);
+        }
+        logits
+    }
+
+    /// [`Self::forward_with_caches_and_embeddings`] variant that projects only
+    /// the `last_pos` hidden row through the LM head, for prefill callers that
+    /// sample a single position.
+    ///
+    /// With `vocab_size = 262144`, full-sequence logits at a 32k-token prefill
+    /// are ~17 GiB in f16 and `final_logit_softcapping` materializes a second
+    /// copy; slicing the hidden state first bounds both to `[batch, 1, vocab]`
+    /// (issue #672). The KV caches are updated by the full text forward
+    /// exactly as before; only the LM-head projection width changes.
+    fn forward_last_with_caches_and_embeddings(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        caches: &mut [Cache],
+        mask: Option<&MlxArray>,
+        per_layer_inputs: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> UniquePtr<MlxArray> {
+        let hidden =
+            self.text_model
+                .forward(input_ids, input_embeddings, caches, mask, per_layer_inputs);
+        let shape = mlxcel_core::array_shape(&hidden);
+        let last = mlxcel_core::slice(
+            &hidden,
+            &[0, last_pos as i32, 0],
+            &[shape[0], last_pos as i32 + 1, shape[2]],
+        );
+        let mut logits = self.text_model.embed_tokens.as_linear(&last);
         if let Some(cap) = self.config.final_logit_softcapping {
             logits = mlxcel_core::compiled_softcap(&logits, cap);
         }
@@ -4790,6 +4852,50 @@ impl LanguageModel for Gemma4Wrapper {
                     sequence_caches,
                     mask,
                     None,
+                )
+            },
+        )
+    }
+
+    /// Long-prefill override: project only the last real position through the
+    /// 262k-vocab LM head instead of materializing `[1, seq_len, vocab]`
+    /// logits plus a `final_logit_softcapping` copy (issue #672).
+    ///
+    /// Short prefills keep the full-logits path: the LM head then runs the
+    /// same batched kernel as before this override existed, so short-context
+    /// greedy output stays byte-identical. The threshold only trades memory
+    /// (full logits are ~0.5 GiB per 1k tokens) against that guarantee; at
+    /// long lengths the single-row projection is mathematically the same
+    /// `hidden[last] @ W` row, merely computed by the single-row kernel.
+    fn forward_last_logits(
+        &self,
+        input_ids: &MlxArray,
+        _caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> UniquePtr<MlxArray> {
+        const FULL_LOGITS_MAX_PREFILL: i32 = 4096;
+        let seq_len = mlxcel_core::array_shape(input_ids)[1];
+        if seq_len <= FULL_LOGITS_MAX_PREFILL {
+            let logits = self.forward(input_ids, _caches, mask);
+            let shape = mlxcel_core::array_shape(&logits);
+            return mlxcel_core::slice(
+                &logits,
+                &[0, last_pos as i32, 0],
+                &[shape[0], last_pos as i32 + 1, shape[2]],
+            );
+        }
+        self.sequence_state.with_or_create_sequence_state(
+            None,
+            || self.model.make_caches(),
+            |sequence_caches| {
+                self.model.forward_last_with_caches_and_embeddings(
+                    input_ids,
+                    None,
+                    sequence_caches,
+                    mask,
+                    None,
+                    last_pos,
                 )
             },
         )

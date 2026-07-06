@@ -10,14 +10,14 @@ Compatibility and performance testing for mlxcel models on **Mac Studio M1 Ultra
 |------|-------|
 | **Hardware** | Mac Studio M1 Ultra, 128GB RAM |
 | **OS** | macOS 26.4 (Tahoe) |
-| **mlxcel version** | 0.2.1 |
+| **mlxcel version** | 0.3.3 |
 | **MLX version** | 0.32.0-dev pin (commit a6ec712, 2026-06-11 upstream main, via mlxcel-core) |
 | **Bench harness** | `mlxcel-bench-decode` (model load, warmup, and measured pass in one process) |
 | **mlx-lm baseline** | 0.31.3 (dev checkout https://github.com/ml-explore/mlx-lm @ `df1d3f3` — "Fix Gemma 4 sanitize() not stripping KV projections for shared layers" ml-explore/mlx-lm#1240) |
 | **mlx-vlm baseline** | dev checkout https://github.com/Blaizzy/mlx-vlm @ `d85ca4d` — "Compatibility bridge for non-VL models" Blaizzy/mlx-vlm#1181 |
 | **Test Prompt** | "Hello, how are you today?" (text) / "What is in this image?" (VLM) |
 | **Max Tokens** | 100 (measured pass); 20 (warmup pass, same process) |
-| **Test Date** | 2026-05-19 full sweep (baseline); 2026-05-28 full text + VLM re-benchmark on mlxcel 0.1.0 (`--cooldown 0`); 2026-06-12 full text + VLM re-benchmark on mlxcel 0.1.4 (MLX pin a6ec712, post issue #222 bump); 2026-06-15 full text + VLM re-benchmark on mlxcel 0.2.1 (post #289 fix) |
+| **Test Date** | 2026-05-19 full sweep (baseline); 2026-05-28 full text + VLM re-benchmark on mlxcel 0.1.0 (`--cooldown 0`); 2026-06-12 full text + VLM re-benchmark on mlxcel 0.1.4 (MLX pin a6ec712, post issue #222 bump); 2026-06-15 full text + VLM re-benchmark on mlxcel 0.2.1 (post #289 fix); 2026-07-06 full text + VLM re-benchmark on mlxcel 0.3.3 (post 5-family VLM port batch #660-#664 and fix batch #666-#668, #671) |
 | **Baseline CSVs** | `benchmarks/pylm_m1ultra_2026-05-19.csv` (mlx-lm, 75 ran / 33 FAIL / 3 oversize-skip / 1 exit-fail) + `benchmarks/pylm_m1ultra_vlm_2026-05-19.csv` (mlx-vlm, 20 working VLM models) |
 
 ## Legend
@@ -32,64 +32,64 @@ Compatibility and performance testing for mlxcel models on **Mac Studio M1 Ultra
 
 | Model | Test Model | Status | Prefill | Decode | vs mlx-lm | Notes |
 |-------|------------|--------|---------|--------|-----------|-------|
-| llama3 | Llama-3.2-1B-Instruct-4bit | ✅ | 1964.37 | 364.36 | 87% | mlx-lm: 418.25; only 48 tokens |
+| llama3 | Llama-3.2-1B-Instruct-4bit | ✅ | 1950.81 | 431.96 | **103%** | mlx-lm: 418.25; only 48 tokens |
 | llama3 (8B bf16) | Llama-3.1-8B-Instruct (bf16) | ✅ | 418.74 | 35.58 | **101%** | mlx-lm: 35.32; non-quantized |
-| llama3.1 | Llama-3.1-8B-Instruct-4bit | ✅ | 486.83 | 107.89 | 97% | mlx-lm: 110.66; only 54 tokens |
+| llama3.1 | Llama-3.1-8B-Instruct-4bit | ✅ | 485.14 | 108.65 | 98% | mlx-lm: 110.66; only 54 tokens |
 | llama4 | Llama-4-Scout-17B-16E-Instruct-4bit | ⚠️ | 119.48 | 36.42 | - | mlx-lm: FAIL; long outputs repetitive |
-| qwen2 | Qwen2.5-0.5B-Instruct-4bit | ✅ | 1229.91 | 343.91 | **109%** | mlx-lm: 315.48 |
-| qwen2 (7B 4bit) | Qwen2.5-7B-Instruct-4bit | ✅ | 302.83 | 112.58 | **102%** | mlx-lm: 110.90 |
-| qwen2 (7B 8bit) | Qwen2.5-7B-Instruct-8bit | ✅ | 305.08 | 70.22 | 100% | mlx-lm: 70.46; 8-bit quantized |
-| qwen3 | Qwen3-0.6B-4bit | ✅ | 558.86 | 275.55 | 92% | mlx-lm: 299.61 |
-| qwen3 (1.7B) | Qwen3-1.7B-4bit | ✅ | 368.73 | 182.96 | 83% | mlx-lm: 221.37 |
-| qwen3 (4B) | Qwen3-4B-4bit | ✅ | 249.40 | 120.14 | 97% | mlx-lm: 123.92 |
-| qwen3 (8B) | Qwen3-8B-4bit | ✅ | 168.77 | 80.29 | 95% | mlx-lm: 84.54 |
-| qwen3_5 (0.8B) | Qwen3.5-0.8B-4bit | ✅ | 493.11 | 229.86 | 85% | mlx-lm: 269.52; Hybrid GatedDeltaNet |
-| qwen3_5 (2B) | Qwen3.5-2B-4bit | ✅ | 394.36 | 172.86 | 82% | mlx-lm: 211.68; Hybrid GatedDeltaNet; only 36 tokens |
-| qwen3_5 (4B) | Qwen3.5-4B-4bit | ✅ | 245.31 | 98.36 | 85% | mlx-lm: 115.60; Hybrid GatedDeltaNet; only 36 tokens |
-| qwen3_5 (9B 4bit) | qwen3.5-9B-4bit | ✅ | 152.95 | 70.67 | 87% | mlx-lm: 81.27; Hybrid GatedDeltaNet; only 29 tokens |
+| qwen2 | Qwen2.5-0.5B-Instruct-4bit | ✅ | 1222.51 | 374.64 | **119%** | mlx-lm: 315.48 |
+| qwen2 (7B 4bit) | Qwen2.5-7B-Instruct-4bit | ✅ | 299.80 | 111.72 | **101%** | mlx-lm: 110.90 |
+| qwen2 (7B 8bit) | Qwen2.5-7B-Instruct-8bit | ✅ | 306.69 | 70.39 | **100%** | mlx-lm: 70.46; 8-bit quantized |
+| qwen3 | Qwen3-0.6B-4bit | ✅ | 566.07 | 213.59 | 71% | mlx-lm: 299.61 |
+| qwen3 (1.7B) | Qwen3-1.7B-4bit | ✅ | 392.73 | 189.85 | 86% | mlx-lm: 221.37 |
+| qwen3 (4B) | Qwen3-4B-4bit | ✅ | 249.31 | 122.13 | 99% | mlx-lm: 123.92 |
+| qwen3 (8B) | Qwen3-8B-4bit | ✅ | 164.87 | 81.77 | 97% | mlx-lm: 84.54 |
+| qwen3_5 (0.8B) | Qwen3.5-0.8B-4bit | ✅ | 596.53 | 254.77 | 95% | mlx-lm: 269.52; Hybrid GatedDeltaNet |
+| qwen3_5 (2B) | Qwen3.5-2B-4bit | ✅ | 393.22 | 195.89 | 93% | mlx-lm: 211.68; Hybrid GatedDeltaNet; only 36 tokens |
+| qwen3_5 (4B) | Qwen3.5-4B-4bit | ✅ | 252.12 | 108.86 | 94% | mlx-lm: 115.60; Hybrid GatedDeltaNet; only 36 tokens |
+| qwen3_5 (9B 4bit) | qwen3.5-9B-4bit | ✅ | 152.14 | 72.08 | 89% | mlx-lm: 81.27; Hybrid GatedDeltaNet; only 29 tokens |
 | qwen3_5 (9B bf16) | qwen3.5-9B (bf16) | ✅ | 147.38 | 31.35 | 92% | mlx-lm: 34.22; bf16, not quantized; Hybrid GatedDeltaNet (compiled fused kernel) |
-| qwen3_5 (27B) | qwen3.5-27B-4bit | ✅ | 50.94 | 23.87 | 92% | mlx-lm: 25.93; Hybrid Transformer+GatedDeltaNet; VLM wrapper format |
-| qwen3_6 | qwen3.6-35B-A3B-4bit | ✅ | 214.72 | 64.61 | 88% | mlx-lm: 73.18; MoE architecture; 100 tokens |
+| qwen3_5 (27B) | qwen3.5-27B-4bit | ✅ | 51.63 | 24.09 | 93% | mlx-lm: 25.93; Hybrid Transformer+GatedDeltaNet; VLM wrapper format |
+| qwen3_6 | qwen3.6-35B-A3B-4bit | ✅ | 229.03 | 78.84 | **108%** | mlx-lm: 73.18; MoE architecture; 100 tokens |
 | qwen3_next | qwen3-next-480B-4bit | ⏳ | - | SKIP | - | Qwen3Next 480B architecture; >65GB skipped on 128GB host |
-| qwen2 (1.5B) | Qwen2.5-1.5B-Instruct-4bit | ✅ | 858.06 | 241.16 | **101%** | mlx-lm: 239.20; 100 tokens |
-| qwen2 (1.5B base) | Qwen2.5-1.5B-4bit | ✅ | 752.27 | 240.80 | 100% | mlx-lm: 241.41; base variant; 100 tokens |
+| qwen2 (1.5B) | Qwen2.5-1.5B-Instruct-4bit | ✅ | 859.05 | 247.42 | **103%** | mlx-lm: 239.20; 100 tokens |
+| qwen2 (1.5B base) | Qwen2.5-1.5B-4bit | ✅ | 743.52 | 258.66 | **107%** | mlx-lm: 241.41; base variant; 100 tokens |
 | phi | phi-2-hf-4bit-mlx | ✅ | 164.39 | 65.09 | - | mlx-lm fails to load; only 1 token (likely EOS) |
-| phi3 | Phi-3-mini-4k-instruct-4bit | ✅ | 194.34 | 168.08 | 98% | mlx-lm: 171.36; only 25 tokens |
-| phi3small | Phi-3.5-mini-instruct-4bit | ✅ | 234.59 | 163.60 | 98% | mlx-lm: 166.30; only 40 tokens |
-| phi4 | Phi-4-4bit | ✅ | 116.20 | 58.46 | 100% | mlx-lm: 58.68 |
-| smollm3 | SmolLM-135M-Instruct-4bit | ✅ | 579.03 | 374.92 | 100% | mlx-lm: 375.91 |
-| smollm3 (3B) | SmolLM3-3B-4bit | ✅ | 540.93 | 126.29 | 89% | mlx-lm: 141.66 |
+| phi3 | Phi-3-mini-4k-instruct-4bit | ✅ | 198.08 | 169.06 | 99% | mlx-lm: 171.36; only 25 tokens |
+| phi3small | Phi-3.5-mini-instruct-4bit | ✅ | 192.42 | 163.94 | 99% | mlx-lm: 166.30; only 40 tokens |
+| phi4 | Phi-4-4bit | ✅ | 112.20 | 58.44 | **100%** | mlx-lm: 58.68 |
+| smollm3 | SmolLM-135M-Instruct-4bit | ✅ | 479.02 | 435.50 | **116%** | mlx-lm: 375.91 |
+| smollm3 (3B) | SmolLM3-3B-4bit | ✅ | 569.01 | 135.51 | 96% | mlx-lm: 141.66 |
 | stablelm | stablelm-2-1_6b-chat-4bit | ✅ | 652.74 | 270.88 | 97% | mlx-lm: 280.65; only 59 tokens |
-| starcoder2 | starcoder2-3b-4bit | ✅ | 169.68 | 166.40 | **100%** | mlx-lm: 166.17 |
-| olmo | OLMo-1B-hf-4bit | ✅ | 188.02 | 210.63 | - | mlx-lm: FAIL |
-| olmo2 | OLMo2-7B-4bit | ✅ | 285.00 | 103.48 | 93% | mlx-lm: 110.88; only 27 tokens |
-| olmo3 | OLMo3.1-32B-4bit | ✅ | 81.65 | 21.81 | **101%** | mlx-lm: 21.57 |
-| minicpm | MiniCPM-2B-sft-bf16-4bit | ✅ | 290.84 | 164.41 | **105%** | mlx-lm: 156.47 |
+| starcoder2 | starcoder2-3b-4bit | ✅ | 183.78 | 169.13 | **102%** | mlx-lm: 166.17 |
+| olmo | OLMo-1B-hf-4bit | ✅ | 188.31 | 217.11 | - | mlx-lm: FAIL |
+| olmo2 | OLMo2-7B-4bit | ✅ | 285.51 | 104.97 | 95% | mlx-lm: 110.88; only 27 tokens |
+| olmo3 | OLMo3.1-32B-4bit | ✅ | 80.89 | 21.96 | **102%** | mlx-lm: 21.57 |
+| minicpm | MiniCPM-2B-sft-bf16-4bit | ✅ | 303.18 | 156.66 | **100%** | mlx-lm: 156.47 |
 | mimo | MiMo-7B-RL-4bit | ✅ | 229.33 | 85.30 | 99% | mlx-lm: 86.17 |
 
 ## Gemma Family
 
 | Model | Test Model | Status | Prefill | Decode | vs mlx-lm | Notes |
 |-------|------------|--------|---------|--------|-----------|-------|
-| gemma | gemma-2b-it-4bit | ✅ | 393.25 | 195.69 | 94% | mlx-lm: 207.78; only 49 tokens |
+| gemma | gemma-2b-it-4bit | ✅ | 390.34 | 191.92 | 92% | mlx-lm: 207.78; only 49 tokens |
 | gemma2 | gemma-2-2b-it-4bit | ✅ | 338.50 | 166.07 | **108%** | mlx-lm: 153.50; only 18 tokens |
 | gemma3 | gemma-3-1b-it-4bit | ✅ | 462.07 | 229.70 | **109%** | mlx-lm: 211.50; only 34 tokens |
-| gemma3 (4B) | gemma-3-4b-it-4bit | ✅ | 214.60 | 116.59 | **106%** | mlx-lm: 109.48; only 86 tokens |
-| gemma4 (12B) | gemma-4-12b-it-4bit | ✅ | 108.87 | 34.76 | - | NEW (6-12); no mlx-lm baseline |
-| gemma4 (31B) | gemma-4-31b-4bit | ✅ | 24.16 | 20.25 | 99% | mlx-lm: 20.36 |
-| gemma4 (31B-it) | gemma-4-31b-it-4bit | ✅ | 49.18 | 19.33 | 96% | mlx-lm: 20.23; instruction-tuned variant |
-| gemma4 (31B-it QAT) | gemma-4-31B-it-qat-4bit | ✅ | 47.93 | 15.53 | - | NEW (6-12); QAT variant; no mlx-lm baseline |
-| gemma4 (26B A4B) | gemma-4-26b-a4b-it-4bit | ✅ | 186.68 | 79.92 | **110%** | mlx-lm: 72.52; only 26 tokens |
-| gemma4 (26B A4B QAT) | gemma-4-26B-A4B-it-qat-4bit | ✅ | 185.36 | 77.99 | - | NEW (6-12); QAT variant; no mlx-lm baseline |
-| gemma4 (diffusion 26B A4B) | diffusiongemma-26B-A4B-it-4bit | ✅ | 182.66 | 68.50 | - | block-diffusion; AR-equivalent decode of the same backbone; current upstream export is mixed-precision (8-bit attn/mlp/embed + 4-bit default, per-layer quant), supported via per-tensor bit inference in the quantized embedding (#291); diffusion generation verified correct; see docs/block-diffusion.md |
-| gemma4 (E2B 4bit) | gemma-4-e2b-it-4bit | ✅ | 266.04 | 117.24 | - | mlx-lm: FAIL; only 34 tokens |
-| gemma4 (E2B 8bit) | gemma-4-e2b-it-8bit | ✅ | 248.37 | 87.87 | - | mlx-lm: FAIL; only 38 tokens |
-| gemma4 (E2B QAT) | gemma-4-e2b-it-qat-4bit | ✅ | 204.67 | 95.29 | - | NEW (6-12); QAT variant; no mlx-lm baseline |
-| gemma4 (E4B 4bit) | gemma-4-e4b-it-4bit | ✅ | 186.97 | 82.43 | - | mlx-lm: FAIL; only 25 tokens |
-| gemma4 (E4B 8bit) | gemma-4-e4b-it-8bit | ✅ | 177.82 | 59.20 | - | mlx-lm: FAIL; only 39 tokens |
-| gemma4 (E4B QAT) | gemma-4-e4b-it-qat-4bit | ✅ | 140.06 | 63.73 | - | NEW (6-12); QAT variant; no mlx-lm baseline |
-| gemma3n | gemma-3n-E2B-it-4bit | ✅ | 240.06 | 75.85 | - | mlx-lm: FAIL; only 69 tokens |
-| gemma3n (E4B) | gemma-3n-E4B-it-4bit | ✅ | 174.65 | 57.91 | - | mlx-lm: FAIL; only 74 tokens |
+| gemma3 (4B) | gemma-3-4b-it-4bit | ✅ | 216.61 | 118.57 | **108%** | mlx-lm: 109.48; only 86 tokens |
+| gemma4 (12B) | gemma-4-12b-it-4bit | ✅ | 109.37 | 35.00 | - | NEW (6-12); no mlx-lm baseline |
+| gemma4 (31B) | gemma-4-31b-4bit | ✅ | 22.95 | 20.39 | **100%** | mlx-lm: 20.36 |
+| gemma4 (31B-it) | gemma-4-31b-it-4bit | ✅ | 46.54 | 19.48 | 96% | mlx-lm: 20.23; instruction-tuned variant |
+| gemma4 (31B-it QAT) | gemma-4-31B-it-qat-4bit | ✅ | 45.30 | 15.60 | - | NEW (6-12); QAT variant; no mlx-lm baseline |
+| gemma4 (26B A4B) | gemma-4-26b-a4b-it-4bit | ✅ | 186.88 | 81.36 | **112%** | mlx-lm: 72.52; only 26 tokens |
+| gemma4 (26B A4B QAT) | gemma-4-26B-A4B-it-qat-4bit | ✅ | 164.32 | 79.46 | - | NEW (6-12); QAT variant; no mlx-lm baseline |
+| gemma4 (diffusion 26B A4B) | diffusiongemma-26B-A4B-it-4bit | ✅ | 180.55 | 66.80 | - | block-diffusion; AR-equivalent decode of the same backbone; current upstream export is mixed-precision (8-bit attn/mlp/embed + 4-bit default, per-layer quant), supported via per-tensor bit inference in the quantized embedding (#291); diffusion generation verified correct; see docs/block-diffusion.md |
+| gemma4 (E2B 4bit) | gemma-4-e2b-it-4bit | ✅ | 262.64 | 129.34 | - | mlx-lm: FAIL; only 34 tokens |
+| gemma4 (E2B 8bit) | gemma-4-e2b-it-8bit | ✅ | 239.31 | 96.46 | - | mlx-lm: FAIL; only 38 tokens |
+| gemma4 (E2B QAT) | gemma-4-e2b-it-qat-4bit | ✅ | 191.79 | 102.77 | - | NEW (6-12); QAT variant; no mlx-lm baseline |
+| gemma4 (E4B 4bit) | gemma-4-e4b-it-4bit | ✅ | 178.68 | 87.46 | - | mlx-lm: FAIL; only 25 tokens |
+| gemma4 (E4B 8bit) | gemma-4-e4b-it-8bit | ✅ | 159.00 | 62.79 | - | mlx-lm: FAIL; only 39 tokens |
+| gemma4 (E4B QAT) | gemma-4-e4b-it-qat-4bit | ✅ | 129.23 | 66.42 | - | NEW (6-12); QAT variant; no mlx-lm baseline |
+| gemma3n | gemma-3n-E2B-it-4bit | ✅ | 222.73 | 89.47 | - | mlx-lm: FAIL; only 69 tokens |
+| gemma3n (E4B) | gemma-3n-E4B-it-4bit | ✅ | 164.73 | 68.14 | - | mlx-lm: FAIL; only 74 tokens |
 | gemma3n (E4B bf16) | gemma-3n-E4B-it (bf16) | ✅ | 175.61 | 32.95 | 84% | mlx-lm: 39.02; bf16; AltUp/MLP decode graph scheduling |
 | recurrent_gemma | - | ⏳ | - | - | - | Griffin SSM+attention hybrid |
 
@@ -97,7 +97,7 @@ Compatibility and performance testing for mlxcel models on **Mac Studio M1 Ultra
 
 | Model | Test Model | Status | Prefill | Decode | vs mlx-lm | Notes |
 |-------|------------|--------|---------|--------|-----------|-------|
-| exaone | EXAONE-3.5-2.4B-Instruct-4bit | ✅ | 741.95 | 197.73 | **102%** | mlx-lm: 194.65 |
+| exaone | EXAONE-3.5-2.4B-Instruct-4bit | ✅ | 748.71 | 205.21 | **105%** | mlx-lm: 194.65 |
 | exaone4 | exaone-4.0-1.2b-4bit | ✅ | 462.20 | 241.51 | - | mlx-lm: FAIL; only 18 tokens |
 | exaone_moe | - | ⏳ | - | - | - | |
 
@@ -105,31 +105,31 @@ Compatibility and performance testing for mlxcel models on **Mac Studio M1 Ultra
 
 | Model | Test Model | Status | Prefill | Decode | vs mlx-lm | Notes |
 |-------|------------|--------|---------|--------|-----------|-------|
-| cohere | c4ai-command-r7b-12-2024-4bit | ✅ | 95.82 | 111.72 | **104%** | mlx-lm: 107.75 |
-| cohere2 | aya-expanse-8b-4bit | ✅ | 98.14 | 108.53 | 96% | mlx-lm: 112.74 |
+| cohere | c4ai-command-r7b-12-2024-4bit | ✅ | 86.60 | 113.24 | **105%** | mlx-lm: 107.75 |
+| cohere2 | aya-expanse-8b-4bit | ✅ | 98.48 | 109.25 | 97% | mlx-lm: 112.74 |
 
 ## MoE (Mixture of Experts)
 
 | Model | Test Model | Status | Prefill | Decode | vs mlx-lm | Notes |
 |-------|------------|--------|---------|--------|-----------|-------|
-| minimax | MiniMax-M2-3bit | ✅ | 67.99 | 31.90 | - | mlx-lm: FAIL on this host; 93GB, fits on the 128GB host since the 05-28 run |
-| mixtral | Mixtral-8x7B-Instruct-v0.1-4bit | ✅ | 80.96 | 54.25 | 99% | mlx-lm: 54.91; only 73 tokens |
-| qwen2_moe | Qwen1.5-MoE-A2.7B-Chat-4bit | ✅ | 386.79 | 145.88 | **101%** | mlx-lm: 144.98; only 43 tokens |
-| qwen3_moe | Qwen3-30B-A3B-4bit | ✅ | 197.62 | 83.75 | **119%** | mlx-lm: 70.18 |
-| qwen3_5_moe | qwen3.5-35B-A3B-4bit | ✅ | 224.46 | 69.74 | 91% | mlx-lm: 76.44; Hybrid GatedDeltaNet + MoE (256 experts); only 34 tokens |
-| phimoe | Phi-3.5-MoE-instruct-4bit | ✅ | 114.02 | 76.55 | **110%** | mlx-lm: 69.28 |
-| solar_open | Solar-Open-100B-4bit | ✅ | 70.96 | 32.96 | 92% | mlx-lm: 35.69; 128 experts, top-8; layer-eval skip; 54GB |
+| minimax | MiniMax-M2-3bit | ✅ | 80.97 | 33.27 | - | mlx-lm: FAIL on this host; 93GB, fits on the 128GB host since the 05-28 run |
+| mixtral | Mixtral-8x7B-Instruct-v0.1-4bit | ✅ | 80.19 | 54.88 | **100%** | mlx-lm: 54.91; only 73 tokens |
+| qwen2_moe | Qwen1.5-MoE-A2.7B-Chat-4bit | ✅ | 383.02 | 150.86 | **104%** | mlx-lm: 144.98; only 43 tokens |
+| qwen3_moe | Qwen3-30B-A3B-4bit | ✅ | 195.36 | 83.63 | **119%** | mlx-lm: 70.18 |
+| qwen3_5_moe | qwen3.5-35B-A3B-4bit | ✅ | 224.40 | 82.25 | **108%** | mlx-lm: 76.44; Hybrid GatedDeltaNet + MoE (256 experts); only 34 tokens |
+| phimoe | Phi-3.5-MoE-instruct-4bit | ✅ | 110.84 | 77.51 | **112%** | mlx-lm: 69.28 |
+| solar_open | Solar-Open-100B-4bit | ✅ | 74.89 | 36.24 | **102%** | mlx-lm: 35.69; 128 experts, top-8; layer-eval skip; 54GB |
 | solar_open (int4) | Solar-Open-100B-int4 | ✅ | - | 11.55 | - | mlx-lm: fails to load; 128 experts, top-8; int4 quantization; 54GB; not in the 06-12 sweep |
 | olmoe | OLMoE-1B-7B-0125-Instruct-4bit | ⏳ | - | - | - | router scoring fix (#318): full softmax over all experts then gather, not top-k-only softmax; greedy temp-0 output now coherent; perf sweep pending |
 | gpt_oss (20B) | gpt-oss-20b-MXFP4-Q4 | ✅ | 282.44 | 89.72 | **100%** | mlx-lm: 89.51; MXFP4 quantization; 32 experts; bf16 decode fix |
-| gpt_oss (120B) | gpt-oss-120b-4bit | ✅ | 162.21 | 58.41 | **101%** | mlx-lm: 57.58; 128 experts, top-4; 61GB model; bf16 decode fix |
+| gpt_oss (120B) | gpt-oss-120b-4bit | ✅ | 163.97 | 60.08 | **104%** | mlx-lm: 57.58; 128 experts, top-4; 61GB model; bf16 decode fix |
 
 ## DeepSeek Family
 
 | Model | Test Model | Status | Prefill | Decode | vs mlx-lm | Notes |
 |-------|------------|--------|---------|--------|-----------|-------|
-| deepseek | deepseek-coder-1.3b-instruct-4bit | ✅ | 1439.51 | 157.78 | - | mlx-lm: FAIL |
-| deepseek_v2 | DeepSeek-V2-Lite-Chat-4bit | ✅ | 216.67 | 101.56 | 87% | mlx-lm: 117.06; only 18 tokens |
+| deepseek | deepseek-coder-1.3b-instruct-4bit | ✅ | 1379.78 | 164.04 | - | mlx-lm: FAIL |
+| deepseek_v2 | DeepSeek-V2-Lite-Chat-4bit | ✅ | 252.80 | 107.91 | 92% | mlx-lm: 117.06; only 18 tokens |
 | deepseek_r1 | DeepSeek-R1-Distill-Qwen-7B-4bit | ✅ | 172.43 | 111.65 | **100%** | mlx-lm: 111.34 |
 | deepseek_v3 | deepseek-v3-4bit | ⏳ | - | SKIP | - | MoE + MLA; >65GB skipped on 128GB host (99GB) |
 | deepseek_v32 | - | ⏳ | - | - | - | |
@@ -138,41 +138,41 @@ Compatibility and performance testing for mlxcel models on **Mac Studio M1 Ultra
 
 | Model | Test Model | Status | Prefill | Decode | vs mlx-lm | Notes |
 |-------|------------|--------|---------|--------|-----------|-------|
-| minicpm3 | MiniCPM3-4B-4bit | ✅ | 237.75 | 80.22 | **110%** | mlx-lm: 73.26 |
+| minicpm3 | MiniCPM3-4B-4bit | ✅ | 242.40 | 89.43 | **122%** | mlx-lm: 73.26 |
 
 ## Nemotron Family
 
 | Model | Test Model | Status | Prefill | Decode | vs mlx-lm | Notes |
 |-------|------------|--------|---------|--------|-----------|-------|
-| nemotron_h | Nemotron-H-30B-4bit | ✅ | 179.02 | 91.54 | 98% | mlx-lm: 93.34; Hybrid Mamba2+Transformer+MoE; SSM Metal kernel |
+| nemotron_h | Nemotron-H-30B-4bit | ✅ | 179.47 | 91.94 | 99% | mlx-lm: 93.34; Hybrid Mamba2+Transformer+MoE; SSM Metal kernel |
 | nemotron_nas | Nemotron-NAS-30B-A3B-4bit | ✅ | 178.98 | 91.56 | 99% | mlx-lm: 92.93; Hybrid Mamba2+Transformer+MoE |
-| nemotron_h_nano_omni | Nemotron-3-Nano-Omni-30B-A3B-Reasoning-4bit | ✅ | 178.94 | 88.11 | - | mlx-lm: FAIL; NEW (5-19); Mamba2+Transformer+MoE+Parakeet audio; 100 tokens |
+| nemotron_h_nano_omni | Nemotron-3-Nano-Omni-30B-A3B-Reasoning-4bit | ✅ | 178.23 | 86.57 | - | mlx-lm: FAIL; NEW (5-19); Mamba2+Transformer+MoE+Parakeet audio; 100 tokens |
 
 ## SSM / Mamba Models
 
 | Model | Test Model | Status | Prefill | Decode | vs mlx-lm | Notes |
 |-------|------------|--------|---------|--------|-----------|-------|
-| mamba | Falcon-Mamba-7B-4bit | ⚠️ | 92.46 | 37.54 | 41% | mlx-lm: 91.04; only 2 tokens due to chat template EOS |
-| mamba2 | mamba2-1.3b-4bit | ✅ | 164.72 | 79.25 | - | mlx-lm: FAIL |
-| jamba | Jamba-v0.1-4bit | ✅ | 337.33 | 122.38 | 93% | mlx-lm: 131.04; only 76 tokens |
+| mamba | Falcon-Mamba-7B-4bit | ⚠️ | 116.62 | 45.67 | 50% | mlx-lm: 91.04; only 2 tokens due to chat template EOS |
+| mamba2 | mamba2-1.3b-4bit | ✅ | 184.03 | 108.23 | - | mlx-lm: FAIL |
+| jamba | Jamba-v0.1-4bit | ✅ | 339.79 | 130.98 | **100%** | mlx-lm: 131.04; only 76 tokens |
 | rwkv7 | - | ⏳ | - | - | - | RWKV v7 linear attention |
 
 ## Chinese / Asian Language Models
 
 | Model | Test Model | Status | Prefill | Decode | vs mlx-lm | Notes |
 |-------|------------|--------|---------|--------|-----------|-------|
-| baichuan | Baichuan-M1-14B-Instruct-4bit | ✅ | 56.83 | 40.47 | 82% | mlx-lm: 49.11; only 39 tokens |
+| baichuan | Baichuan-M1-14B-Instruct-4bit | ✅ | 55.29 | 37.83 | 77% | mlx-lm: 49.11; only 39 tokens |
 | glm4 | GLM-4-Flash-4bit | ✅ | 127.61 | 45.53 | 92% | mlx-lm: 49.47; Only 18 tokens |
 | glm4_moe | - | ⏳ | - | - | - | |
 | glm4_moe_lite | GLM-4.7-Flash-4bit | ✅ | - | 31.54 | 76% | mlx-lm: 41.55; only 18 tokens |
 | glm5 | GLM-5-4bit | ❌ | - | FAIL | - | warmup failure (persistent) |
-| internlm2 | InternLM2-7B-4bit | ✅ | 217.33 | 109.69 | 98% | mlx-lm: 111.92 |
-| internlm3 | internlm3-8b-instruct-4bit | ✅ | 306.15 | 87.02 | - | mlx-lm: FAIL |
-| ernie4_5 | ERNIE-4.5-0.3B-Instruct-4bit | ✅ | 1141.23 | 495.71 | - | mlx-lm: FAIL |
+| internlm2 | InternLM2-7B-4bit | ✅ | 209.11 | 109.41 | 98% | mlx-lm: 111.92 |
+| internlm3 | internlm3-8b-instruct-4bit | ✅ | 312.53 | 87.36 | - | mlx-lm: FAIL |
+| ernie4_5 | ERNIE-4.5-0.3B-Instruct-4bit | ✅ | 1117.19 | 544.02 | - | mlx-lm: FAIL |
 | ernie4_5_moe | - | ⏳ | - | - | - | |
 | hunyuan_moe | Hunyuan-Large-Instruct-4bit | ✅ | 77.40 | 44.07 | - | mlx-lm: FAIL |
 | hunyuan_moe_13b | HunYuan-MoE-A13B-Instruct (bf16) | ❌ | - | FAIL | - | mlx-lm: fails to load; Tiktoken tokenizer; bf16; warmup failure |
-| hunyuan_v1_dense | Hunyuan-1.8B-Instruct-4bit | ✅ | 268.39 | 182.55 | 91% | mlx-lm: 200.59; only 41 tokens |
+| hunyuan_v1_dense | Hunyuan-1.8B-Instruct-4bit | ✅ | 290.57 | 180.60 | 90% | mlx-lm: 200.59; only 41 tokens |
 | kimi_linear | - | ⏳ | - | - | - | Kimi linear attention (Moonshot) |
 | step3p5 | - | ⏳ | - | - | - | Step 3.5 (StepFun) |
 
@@ -180,71 +180,99 @@ Compatibility and performance testing for mlxcel models on **Mac Studio M1 Ultra
 
 | Model | Test Model | Status | Prefill | Decode | vs mlx-lm | Notes |
 |-------|------------|--------|---------|--------|-----------|-------|
-| ministral3 | Ministral-3B-Instruct-4bit | ✅ | 906.34 | 142.60 | 89% | mlx-lm: 159.34; VLM wrapper; text-only mode; only 34 tokens |
+| ministral3 | Ministral-3B-Instruct-4bit | ✅ | 914.03 | 145.96 | 92% | mlx-lm: 159.34; VLM wrapper; text-only mode; only 34 tokens |
 | mistral4 | - | ⏳ | - | - | - | MLA + MoE; implemented but no MLX model available |
 | moondream3 | moondream3-preview-4bit | ⚠️ | - | 8.45 | - | mlx-lm: fails to load; text-only test; SigLIP + MLP; image output garbled; only 14 tokens |
 | longcat_flash | - | ⏳ | - | - | - | |
 | longcat_flash_ngram | - | ⏳ | - | - | - | |
-| mistral_small | mistral-small-3.1-24b-4bit | ✅ | 35.39 | 31.94 | 100% | mlx-lm: 31.97; text-only mode |
+| mistral_small | mistral-small-3.1-24b-4bit | ✅ | 134.25 | 29.92 | 94% | mlx-lm: 31.97; text-only mode |
 
 ## Vision-Language Models (VLM)
 
 | Model | Test Model | Status | Prefill | Decode | vs mlx-vlm | Notes |
 |-------|------------|--------|---------|--------|------------|-------|
-| gemma3 | gemma-3-4b-it-4bit | ✅ | 230.47 | 86.57 | 92% | mlx-vlm: 93.79; SigLIP + AvgPool; 275 prompt, 16 gen |
-| gemma3n (E2B) | gemma-3n-E2B-it-4bit | ✅ | 780.31 | 72.95 | **122%** | mlx-vlm: 59.57; MobileNetV5 + MSFA; 273 prompt, 29 gen |
+| gemma3 | gemma-3-4b-it-4bit | ✅ | 238.05 | 83.18 | 89% | mlx-vlm: 93.79; SigLIP + AvgPool; 275 prompt, 16 gen |
+| gemma3n (E2B) | gemma-3n-E2B-it-4bit | ✅ | 743.65 | 83.19 | **140%** | mlx-vlm: 59.57; MobileNetV5 + MSFA; 273 prompt, 29 gen |
 | gemma3n (E4B bf16) | gemma-3n-E4B-it (bf16) | ✅ | 650.70 | 32.31 | 89% | mlx-vlm: 36.18; MobileNetV5 + MSFA; bf16 prefill path retune; bf16; 273 prompt, 24 gen |
-| gemma3n (E4B 4bit) | gemma-3n-E4B-it-4bit | ✅ | 483.72 | 57.92 | **116%** | mlx-vlm: 50.00; 273 prompt, 33 gen |
-| gemma4 (12B) | gemma-4-12b-it-4bit | ✅ | 237.69 | 32.07 | - | NEW (6-12); no mlx-vlm baseline; 277 prompt, 25 gen |
-| gemma4 (E2B 4bit) | gemma-4-e2b-it-4bit | ✅ | 717.10 | 106.05 | **109%** | mlx-vlm: 97.19; 274 prompt, 100 gen |
-| gemma4 (E2B 8bit) | gemma-4-e2b-it-8bit | ✅ | 726.49 | 81.82 | 90% | mlx-vlm: 91.06; 274 prompt, 100 gen |
-| gemma4 (E2B QAT) | gemma-4-e2b-it-qat-4bit | ✅ | 715.27 | 84.01 | - | NEW (6-12); QAT variant; 273 prompt, 42 gen |
-| gemma4 (E4B 4bit) | gemma-4-e4b-it-4bit | ✅ | 455.47 | 75.04 | **107%** | mlx-vlm: 70.34; 274 prompt, 54 gen |
-| gemma4 (E4B 8bit) | gemma-4-e4b-it-8bit | ✅ | 451.61 | 55.76 | 88% | mlx-vlm: 63.25; 274 prompt, 35 gen |
-| gemma4 (E4B QAT) | gemma-4-e4b-it-qat-4bit | ✅ | 450.65 | 60.45 | - | NEW (6-12); QAT variant; 273 prompt, 55 gen |
-| gemma4 (31B 4bit) | gemma-4-31b-4bit | ✅ | 79.78 | 15.48 | 76% | mlx-vlm: 20.30; 274 prompt, 100 gen |
-| gemma4 (31B-it 4bit) | gemma-4-31b-it-4bit | ✅ | 86.88 | 18.69 | 94% | mlx-vlm: 19.78; 274 prompt, 100 gen |
-| gemma4 (31B-it QAT) | gemma-4-31B-it-qat-4bit | ✅ | 87.72 | 15.21 | - | NEW (6-12); QAT variant; 277 prompt, 28 gen |
-| gemma4 (26B A4B) | gemma-4-26b-a4b-it-4bit | ✅ | 265.86 | 70.38 | **115%** | mlx-vlm: 61.07; 277 prompt, 28 gen |
-| gemma4 (26B A4B QAT) | gemma-4-26B-A4B-it-qat-4bit | ✅ | 268.42 | 66.77 | - | NEW (6-12); QAT variant; 277 prompt, 31 gen |
-| llava 1.5 | llava-1.5-7b-4bit | ✅ | 754.13 | 104.04 | - | CLIP + MLP; Vicuna-7b; 583 prompt, 100 gen; mlx-vlm requires PyTorch |
-| llava-interleave | llava-interleave-qwen-0.5b-bf16 | ✅ | 3753.62 | 264.66 | **118%** | mlx-vlm: 225.15; SigLIP + MLP; Qwen2-0.5b; 754 prompt, 36 gen |
+| gemma3n (E4B 4bit) | gemma-3n-E4B-it-4bit | ✅ | 487.08 | 63.72 | **127%** | mlx-vlm: 50.00; 273 prompt, 33 gen |
+| gemma4 (12B) | gemma-4-12b-it-4bit | ✅ | 246.21 | 32.66 | - | NEW (6-12); no mlx-vlm baseline; 277 prompt, 25 gen |
+| gemma4 (E2B 4bit) | gemma-4-e2b-it-4bit | ✅ | 732.15 | 111.68 | **115%** | mlx-vlm: 97.19; 277 prompt, 100 gen |
+| gemma4 (E2B 8bit) | gemma-4-e2b-it-8bit | ✅ | 726.48 | 88.40 | 97% | mlx-vlm: 91.06; 277 prompt, 100 gen |
+| gemma4 (E2B QAT) | gemma-4-e2b-it-qat-4bit | ✅ | 715.13 | 89.01 | - | NEW (6-12); QAT variant; 273 prompt, 42 gen |
+| gemma4 (E4B 4bit) | gemma-4-e4b-it-4bit | ✅ | 459.44 | 77.30 | **110%** | mlx-vlm: 70.34; 277 prompt, 92 gen |
+| gemma4 (E4B 8bit) | gemma-4-e4b-it-8bit | ✅ | 454.44 | 57.86 | 91% | mlx-vlm: 63.25; 277 prompt, 64 gen |
+| gemma4 (E4B QAT) | gemma-4-e4b-it-qat-4bit | ✅ | 444.51 | 62.02 | - | NEW (6-12); QAT variant; 273 prompt, 55 gen |
+| gemma4 (31B 4bit) | gemma-4-31b-4bit | ✅ | 83.70 | 15.43 | 76% | mlx-vlm: 20.30; 265 prompt, 5 gen |
+| gemma4 (31B-it 4bit) | gemma-4-31b-it-4bit | ✅ | 86.88 | 18.78 | 95% | mlx-vlm: 19.78; 277 prompt, 24 gen |
+| gemma4 (31B-it QAT) | gemma-4-31B-it-qat-4bit | ✅ | 86.62 | 15.16 | - | NEW (6-12); QAT variant; 277 prompt, 28 gen |
+| gemma4 (26B A4B) | gemma-4-26b-a4b-it-4bit | ✅ | 278.73 | 70.78 | **116%** | mlx-vlm: 61.07; 277 prompt, 27 gen |
+| gemma4 (26B A4B QAT) | gemma-4-26B-A4B-it-qat-4bit | ✅ | 279.51 | 69.07 | - | NEW (6-12); QAT variant; 277 prompt, 31 gen |
+| llava 1.5 | llava-1.5-7b-4bit | ✅ | 760.95 | 103.43 | - | CLIP + MLP; Vicuna-7b; 594 prompt, 100 gen; mlx-vlm requires PyTorch |
+| llava-interleave | llava-interleave-qwen-0.5b-bf16 | ✅ | 3950.41 | 267.71 | **119%** | mlx-vlm: 225.15; SigLIP + MLP; Qwen2-0.5b; 754 prompt, 36 gen |
 | llava-next | llava-v1.6-mistral-7b-4bit | ✅ | 714.95 | 106.80 | 98% | mlx-vlm: 109.51; CLIP + MLP; Mistral; 590 prompt, 100 gen; mlx-vlm template error |
 | llava-bunny | Bunny-Llama-3-8B-V-4bit | ✅ | 634.32 | 94.69 | - | mlx-vlm: FAIL; SigLIP + MLP; Llama3; 746 prompt, 37 gen |
 | llama4 | Llama-4-Scout-17B-16E-Instruct-4bit | ✅ | 182.31 | 34.90 | - | mlx-vlm: FAIL; 230 prompt, 67 gen |
-| aya-vision | aya-vision-8b | ✅ | 416.82 | 109.57 | **106%** | mlx-vlm: 103.74; SigLIP + SwiGLU; Cohere2; 176 prompt, 100 gen |
+| aya-vision | aya-vision-8b | ✅ | 642.06 | 100.45 | 97% | mlx-vlm: 103.74; SigLIP + SwiGLU; Cohere2; 735 prompt, 29 gen |
 | paligemma | paligemma2-3b (6-bit) | ⚠️ | 1481.79 | 50.14 | 71% | mlx-vlm: 70.45; SigLIP + Linear; Gemma2; 1032 prompt, only 2 gen tokens |
-| pixtral | pixtral-12b-4bit | ✅ | 447.38 | 59.76 | - | mlx-vlm: FAIL; Pixtral ViT; Mistral; 4102 prompt, 100 gen |
-| mistral3 | mistral-small-3.1-24b-4bit | ✅ | 128.57 | 29.83 | - | mlx-vlm: FAIL; Pixtral ViT + PatchMerger; Mistral; 3032 prompt, 100 gen; mlx-vlm error |
-| ministral3 | Ministral-3B-Instruct-4bit | ✅ | 527.26 | 124.82 | - | mlx-vlm: FAIL; Pixtral ViT; 3566 prompt, 100 gen |
-| phi3.5-vision | Phi-3.5-vision-instruct-4bit | ✅ | 991.19 | 122.35 | **132%** | mlx-vlm: 92.53; CLIP + HD tiling; Phi3; 773 prompt, 19 gen |
+| pixtral | pixtral-12b-4bit | ✅ | 447.56 | 60.55 | - | mlx-vlm: FAIL; Pixtral ViT; Mistral; 4099 prompt, 100 gen |
+| mistral3 | mistral-small-3.1-24b-4bit | ✅ | 128.93 | 28.55 | - | mlx-vlm: FAIL; Pixtral ViT + PatchMerger; Mistral; 3206 prompt, 29 gen; mlx-vlm error |
+| ministral3 | Ministral-3B-Instruct-4bit | ✅ | 526.26 | 126.52 | - | mlx-vlm: FAIL; Pixtral ViT; 3566 prompt, 100 gen |
+| phi3.5-vision | Phi-3.5-vision-instruct-4bit | ✅ | 977.99 | 123.57 | **134%** | mlx-vlm: 92.53; CLIP + HD tiling; Phi3; 773 prompt, 19 gen |
 | phi4mm | phi-4-multimodal-instruct (bf16) | ✅ | 571.90 | 25.42 | - | SigLIP + HD transform + AvgPool2d; Phi3; SuScaledRoPE + runtime LoRA; 2635 tokens; 12GB bf16; not in the 06-12 sweep |
 | moondream3 | moondream3-preview-4bit | ⚠️ | 1.36 | 10.05 | - | SigLIP + MLP; image output garbled; only 63 tokens; not in the 06-12 sweep |
 | minicpm-o | MiniCPM-o-2_6-4bit | ✅ | 33.67 | 70.80 | - | SigLIP + Resampler; Qwen3; 80 tokens; not in the 06-12 sweep |
-| minicpm-v | MiniCPM-V-4.6-bf16 | ✅ | 419.79 | 176.12 | - | NEW (6-12); bf16; 32 prompt, 23 gen |
-| molmo | Molmo-7B | ✅ | 579.94 | 80.46 | - | CLIP ViT + attention pooling + OLMo text; mlx-vlm baseline is a 1-token anomaly; 327 prompt, 100 gen |
-| molmo2 | molmo2-4b | ✅ | 712.94 | 59.87 | 98% | mlx-vlm: 60.87; fast SDPA vision encoder; 438 prompt, 46 gen |
-| internvl3 | InternVL3-1B | ✅ | 1809.47 | 238.34 | 90% | mlx-vlm: 264.40; InternViT + pixel-shuffle + Qwen2; 293 prompt, 8 gen |
-| nemotron-omni | Nemotron-3-Nano-Omni-30B-A3B-Reasoning-4bit | ✅ | 262.96 | 64.72 | - | mlx-vlm: FAIL; NEW (5-19); Mamba2+Transformer+MoE+Parakeet audio; 6 gen |
-| youtu-vl | youtu-vl-4b-instruct | ⚠️ | 400.75 | 24.19 | - | mlx-vlm: FAIL; NEW (5-19); only 1 gen token |
-| qwen2-vl | Qwen2-VL-2B-Instruct-4bit | ✅ | 775.63 | 126.81 | - | Custom ViT + MRoPE; VLM image mode fixed; 12 gen |
-| qwen2.5-vl | Qwen2.5-VL-3B-Instruct-4bit | ✅ | 602.35 | 97.65 | - | Windowed ViT + MRoPE; 91 prompt, 64 gen; mlx-vlm requires PyTorch |
-| qwen3-vl | Qwen3-VL-2B-Instruct-4bit | ✅ | 747.69 | 160.88 | - | mlx-vlm: FAIL; DeepStack + vectorized MRoPE; 80 gen |
-| qwen3-vl (4B) | Qwen3-VL-4B-Instruct-4bit | ✅ | 479.01 | 89.98 | - | mlx-vlm: FAIL; DeepStack + vectorized MRoPE; 38 gen |
-| qwen3-vl (8B) | Qwen3-VL-8B-Instruct-4bit | ✅ | 310.58 | 63.10 | - | mlx-vlm: FAIL; DeepStack + vectorized MRoPE; 30 gen |
-| qwen3-vl (32B) | Qwen3-VL-32B-Instruct-4bit | ✅ | 89.66 | 17.81 | - | mlx-vlm: FAIL; DeepStack + vectorized MRoPE; 59 gen |
-| qwen3-vl-moe | Qwen3-VL-30B-A3B-Instruct-4bit | ✅ | 295.81 | 40.53 | - | mlx-vlm: FAIL; MoE (128 experts) + DeepStack; 34 gen |
-| qwen3.5-vl (0.8B) | qwen3.5-0.8B-4bit | ✅ | 985.98 | 232.41 | - | mlx-vlm: FAIL; Hybrid GatedDeltaNet VLM; 69 prompt, 100 gen |
-| qwen3.5-vl (2B) | qwen3.5-2B-4bit | ✅ | 550.02 | 169.42 | - | mlx-vlm: FAIL; Hybrid GatedDeltaNet VLM; 69 prompt, 43 gen |
-| qwen3.5-vl (4B) | qwen3.5-4B-4bit | ✅ | 334.11 | 99.40 | - | mlx-vlm: FAIL; Hybrid GatedDeltaNet VLM; 69 prompt, 49 gen |
-| qwen3.5-vl (9B 4bit) | qwen3.5-9B-4bit | ✅ | 197.61 | 72.78 | - | mlx-vlm: FAIL; Hybrid GatedDeltaNet VLM; 69 prompt, 100 gen |
+| minicpm-v | MiniCPM-V-4.6-bf16 | ✅ | 366.61 | 185.05 | - | NEW (6-12); bf16; 32 prompt, 23 gen |
+| molmo | Molmo-7B | ✅ | 579.21 | 79.30 | - | CLIP ViT + attention pooling + OLMo text; mlx-vlm baseline is a 1-token anomaly; 327 prompt, 100 gen |
+| molmo2 | molmo2-4b | ✅ | 724.53 | 59.70 | 98% | mlx-vlm: 60.87; fast SDPA vision encoder; 438 prompt, 46 gen |
+| internvl3 | InternVL3-1B | ✅ | 1836.90 | 236.00 | 89% | mlx-vlm: 264.40; InternViT + pixel-shuffle + Qwen2; 293 prompt, 8 gen |
+| nemotron-omni | Nemotron-3-Nano-Omni-30B-A3B-Reasoning-4bit | ✅ | 258.58 | 63.08 | - | mlx-vlm: FAIL; NEW (5-19); Mamba2+Transformer+MoE+Parakeet audio; 6 gen |
+| youtu-vl | youtu-vl-4b-instruct | ⚠️ | 218.22 | 44.64 | - | mlx-vlm: FAIL; NEW (5-19); only 1 gen token |
+| qwen2-vl | Qwen2-VL-2B-Instruct-4bit | ✅ | 830.96 | 146.44 | - | Custom ViT + MRoPE; VLM image mode fixed; 12 gen |
+| qwen2.5-vl | Qwen2.5-VL-3B-Instruct-4bit | ✅ | 645.99 | 107.97 | - | Windowed ViT + MRoPE; 91 prompt, 64 gen; mlx-vlm requires PyTorch |
+| qwen3-vl | Qwen3-VL-2B-Instruct-4bit | ✅ | 612.11 | 182.33 | - | mlx-vlm: FAIL; DeepStack + vectorized MRoPE; 80 gen |
+| qwen3-vl (4B) | Qwen3-VL-4B-Instruct-4bit | ✅ | 455.27 | 98.76 | - | mlx-vlm: FAIL; DeepStack + vectorized MRoPE; 38 gen |
+| qwen3-vl (8B) | Qwen3-VL-8B-Instruct-4bit | ✅ | 305.96 | 65.36 | - | mlx-vlm: FAIL; DeepStack + vectorized MRoPE; 30 gen |
+| qwen3-vl (32B) | Qwen3-VL-32B-Instruct-4bit | ✅ | 90.88 | 17.98 | - | mlx-vlm: FAIL; DeepStack + vectorized MRoPE; 59 gen |
+| qwen3-vl-moe | Qwen3-VL-30B-A3B-Instruct-4bit | ✅ | 284.40 | 41.85 | - | mlx-vlm: FAIL; MoE (128 experts) + DeepStack; 34 gen |
+| qwen3.5-vl (0.8B) | qwen3.5-0.8B-4bit | ✅ | 832.38 | 279.25 | - | mlx-vlm: FAIL; Hybrid GatedDeltaNet VLM; 69 prompt, 100 gen |
+| qwen3.5-vl (2B) | qwen3.5-2B-4bit | ✅ | 518.65 | 195.20 | - | mlx-vlm: FAIL; Hybrid GatedDeltaNet VLM; 69 prompt, 43 gen |
+| qwen3.5-vl (4B) | qwen3.5-4B-4bit | ✅ | 312.48 | 107.91 | - | mlx-vlm: FAIL; Hybrid GatedDeltaNet VLM; 69 prompt, 49 gen |
+| qwen3.5-vl (9B 4bit) | qwen3.5-9B-4bit | ✅ | 196.14 | 74.97 | - | mlx-vlm: FAIL; Hybrid GatedDeltaNet VLM; 69 prompt, 100 gen |
 | qwen3.5-vl (9B bf16) | qwen3.5-9B (bf16) | ✅ | 272.55 | 32.59 | - | mlx-vlm: FAIL; Hybrid GatedDeltaNet VLM; 69 prompt, 100 gen; bf16 |
-| qwen3.5-vl (27B) | qwen3.5-27B-4bit | ✅ | 73.77 | 24.87 | - | mlx-vlm: FAIL; Hybrid GatedDeltaNet VLM; 69 prompt, 100 gen |
+| qwen3.5-vl (27B) | qwen3.5-27B-4bit | ✅ | 74.30 | 25.27 | - | mlx-vlm: FAIL; Hybrid GatedDeltaNet VLM; 69 prompt, 100 gen |
 | qwen3.5-vl-moe | qwen3.5-35B-A3B-4bit | ✅ | 279.27 | 74.68 | - | mlx-vlm: FAIL; Hybrid GatedDeltaNet + MoE VLM; 69 prompt, 100 gen; gated delta decode RMSNorm fix |
 | qwen3.6-vl-moe | qwen3.6-35B-A3B-4bit | ✅ | 279.77 | 70.25 | - | mlx-vlm: FAIL; Hybrid GatedDeltaNet + MoE VLM; 39 gen |
 | molmo-point | - | ⏳ | - | - | - | Molmo-Point (point detection); implemented but no MLX model available |
+| deepseek_vl2 | deepseek-vl2-small-4bit | ✅ | 440.43 | 102.06 | **112%** | mlx-vlm: 91.35; NEW (7-06, #660); SigLIP + 2D tile mosaic + DeepSeek-V2 MoE; 494 prompt, 24 gen |
+| fastvlm | fastvlm-0.5b-bf16 | ✅ | 1640.23 | 282.88 | - | mlx-vlm: FAIL:warmup; NEW (7-06, #661); FastViTHD + Qwen2; 282 prompt, 100 gen |
+| ernie4_5_moe_vl | ernie-4.5-vl-28b-a3b-thinking-4bit | ✅ | 219.44 | 90.41 | **160%** | mlx-vlm: 56.48; NEW (7-06, #662); modality-split MoE + 3D MRoPE; thinking model; 108 prompt, 100 gen |
+| hunyuan_vl | hunyuanocr-mlx-4bit | ✅ | 1057.94 | 94.29 | 62% | mlx-vlm: 151.14; NEW (7-06, #663); XD-RoPE + perceive merger; 10-token answer makes decode first-token-dominated, ratio not load-bearing; 284 prompt, 10 gen |
+| qwen3_omni_moe | qwen3-omni-30b-a3b-instruct-4bit | ✅ | 289.52 | 23.84 | 58% | mlx-vlm: 40.76; NEW (7-06, #664); thinker (text+image+audio in); 2-token answer makes decode an artifact; text-mode decode is 82.81 (parity with qwen3-vl-30b's 81.80); 69 prompt, 2 gen |
+| dots_ocr | dots.ocr-4bit | ⚠️ | 408.14 | 0.00 | - | NEW (7-06, #657); OCR-only model answers the generic image prompt with 0 tokens on both sides (mlx-vlm decode field also degenerate); OCR validated separately; 74 prompt, 0 gen |
+| deepseekocr | deepseek-ocr-4bit | ✅ | 821.29 | 261.49 | - | mlx-vlm: FAIL:warmup; NEW (7-06, #655); SAM+CLIP dual tower; 281 prompt, 31 gen |
+| deepseekocr2 | deepseek-ocr-2-4bit | ✅ | 793.99 | 172.21 | - | mlx-vlm: FAIL:warmup; NEW (7-06, #656); SAM + Qwen2-0.5B query resampler; 409 prompt, 5 gen |
+| glm_ocr | glm-ocr-4bit | ⚠️ | 882.18 | 0.00 | - | mlx-vlm: 288.66; NEW (7-06, #646); OCR model, 0-token answer on the generic prompt (text-mode decode 261.93); 82 prompt, 0 gen |
+| granite_vision | granite-vision-3.2-2b-4bit | ✅ | 1063.29 | 123.42 | 82% | mlx-vlm: 150.03; NEW (7-06, #647); AnyRes tiling drives the 1539-token prompt; 1539 prompt, 26 gen |
+| granite4_vision | granite-4.0-3b-vision-4bit | ✅ | 647.82 | 125.09 | 99% | mlx-vlm: 126.42; NEW (7-06, #647); 337 prompt, 41 gen |
+| lfm2_vl | lfm2-vl-450m-4bit | ✅ | 1302.06 | 474.75 | - | mlx-vlm: FAIL:warmup; NEW (7-06, #645); 82 prompt, 38 gen |
+| idefics2 | idefics2-8b-4bit | ✅ | 286.21 | 91.33 | 90% | mlx-vlm: 101.77; NEW (7-06, #639); SigLIP + perceiver resampler; 81 prompt, 12 gen |
+| idefics3 | idefics3-8b-llama3-4bit | ✅ | 469.67 | 106.73 | **119%** | mlx-vlm: 89.83; NEW (7-06, #640); SmolVLM path; 186 prompt, 100 gen |
 
 **VLM test conditions**: Image: 224x224 PNG (test_image.png) unless noted. Prompt: "What is in this image?" Max tokens: 100. Prefill includes vision encoder + projector overhead. mlx-vlm baseline uses the `d85ca4d` dev checkout. mlxcel decode speed was measured with `mlxcel-bench-decode` (model load, warmup, and measured pass in one process). Models with unavailable or failed mlx-vlm runs are marked with "-" in the vs mlx-vlm column. Two oversize models (`deepseek-v3-4bit` 99GB, `qwen3-next-480b-4bit` 251GB) do not run on this 128GB host; `minimax-m2-3bit` (93GB) fits and runs on the text side since the 05-28 sweep. Two Gemma 3 VLM rows (gemma-3-4b-it-4bit, gemma3-4b-4bit) were measured with `--warmup-tokens 0` because the prepared 4D attention mask shape is single-use against the first prefill's KV cache offset. The three Gemma 3n VLM rows use the default warmup=20 path.
+
+## New Text Models (2026-07-06 sweep)
+
+| Model | Test Model | Status | Prefill | Decode | vs mlx-lm | Notes |
+|-------|------------|--------|---------|--------|-----------|-------|
+| hunyuan_moe_13b (4bit) | hunyuan-a13b-instruct-4bit | ✅ | 76.81 | 44.46 | - | mlx-lm: FAIL:warmup; the 4-bit export loads where the bf16 one OOMs; 27 prompt, 100 gen |
+| llada2_moe | llada2.0-mini-preview-4bit | ✅ | 479.87 | 156.26 | - | mlx-lm: FAIL:warmup (no masked-diffusion support); NEW (#659); 25 prompt, 100 gen |
+| mellum2 | mellum2-12b-a2.5b-base | ✅ | 127.08 | 55.86 | - | mlx-lm: FAIL:warmup; base model, terse completions; 7 prompt, 6 gen |
+| qwen3_next (80B) | qwen3-next-80b-a3b-instruct-4bit | ✅ | 149.00 | 61.23 | **118%** | mlx-lm: 51.73; hybrid gated-delta + MoE; 15 prompt, 57 gen |
+| llama3.2 (1B instruct bf16) | llama-3.2-1b-instruct | ✅ | 2082.37 | 190.18 | **101%** | mlx-lm: 187.88; 99 prompt, 34 gen |
+| phi3_small (aq4_64) | phi-3-small-8k-instruct-aq4_64 | ✅ | 287.80 | 102.60 | **380%** | mlx-lm: 27.01 (aq4 path unoptimized in python); 22 prompt, 100 gen |
+| mistral_small_4 (119B) | mistral-small-4-119b-2603-4bit | ✅ | 124.03 | 19.46 | - | mlx-lm: FAIL:warmup (load exceeds python budget); 22 prompt, 60 gen |
+| qwen3.5 MoE (35B A3B) | qwen3.5-35b-a3b-4bit | ✅ | 224.40 | 82.25 | - | re-added post #670/#671 sanitize fix (load-regressed since #588); 19 prompt, 31 gen |
+| qwen3.6 MoE (35B A3B) | qwen3.6-35b-a3b-4bit | ✅ | 229.03 | 78.84 | - | re-added post #670/#671 sanitize fix; 19 prompt, 27 gen |
 
 ## Summary Statistics
 
@@ -269,6 +297,10 @@ runtime comparison.
 |------|-----------------:|-----------------------:|-------------:|------------:|------:|
 | Text vs mlx-lm | 74 | 98% | 59/74 (80%) | 24/74 (32%) | 41%-120% |
 | VLM vs mlx-vlm | 18 | 98% | 13/18 (72%) | 8/18 (44%) | 76%-132% |
+
+### Run-over-run (2026-07-06 mlxcel v0.3.3)
+
+The 2026-07-06 sweep (`benchmarks/metal_m1ultra_2026-07-06.csv` + `_vlm_`) lands after the five-family VLM port batch (#660-#664), the slice_update/causal-mask/downloader fix batch (#666-#668), and the qwen3.5-MoE sanitize fix (#671). Compared with 2026-06-15: no decode regressions; the qwen VLM family and small text models improved +10-16% (fused decode-MoE default-on and related work), youtu-vl recovered from a prior 24.2 artifact to 44.6. The sweep itself caught issue #670 (qwen3.5/3.6-35B MoE had silently stopped loading when #588 renamed the shared expert projections), which was fixed and re-benched the same day (82.25 / 78.84 tok/s, above their 2026-06-12 values). New python baselines were measured for 21 recently added models (`benchmarks/pylm_m1ultra_*2026-07-06*_single_*.csv`); mlx-lm/mlx-vlm failed to load 8 of them (fastvlm, lfm2-vl, deepseek-ocr/-2 among the VLMs; hunyuan-a13b-4bit, llada2-mini, mellum2, mistral-small-4-119b among text), so those rows carry no ratio.
 
 ### Run-over-run (2026-06-15 mlxcel v0.2.1, post #289 fix)
 

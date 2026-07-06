@@ -350,6 +350,78 @@ impl QwenVlRuntime for vision::Qwen35VLModel {
 ///
 /// Used by: `multimodal::vlm_runtime` (Qwen2VL, Qwen2.5VL, Qwen3VL, Qwen3VLMoe,
 /// Qwen3.5VL image prompt preparation).
+/// Qwen3-Omni variant of [`insert_qwen_vl_image_tokens`]: same per-image
+/// expansion when placeholders are present, but the no-placeholder fallback
+/// splices the framed runs right BEFORE the last `im_end_token_id` (the close
+/// of the user turn) instead of after the leading token, keeping the
+/// `<|im_start|>system` header intact.
+///
+/// Used by: Qwen3OmniMoeModel.
+pub fn insert_qwen3_omni_image_tokens(
+    prompt_tokens: &mut Vec<i32>,
+    grid_thw: &[(i32, i32, i32)],
+    spatial_merge_size: usize,
+    vision_start_token_id: i32,
+    image_token_id: i32,
+    im_end_token_id: i32,
+) -> Option<InsertedQwenVlmTokens> {
+    if prompt_tokens.is_empty() || grid_thw.is_empty() || spatial_merge_size == 0 {
+        return None;
+    }
+
+    let merge = spatial_merge_size as i32;
+    let per_image_counts: Vec<i32> = grid_thw
+        .iter()
+        .map(|&(t, h, w)| t * (h / merge) * (w / merge))
+        .collect();
+    let total_image_tokens: i32 = per_image_counts.iter().sum();
+
+    let placeholder_count = prompt_tokens
+        .iter()
+        .filter(|&&t| t == image_token_id)
+        .count();
+
+    if placeholder_count == grid_thw.len() {
+        // Delegate the canonical expand-per-placeholder path.
+        return insert_qwen_vl_image_tokens(
+            prompt_tokens,
+            grid_thw,
+            spatial_merge_size,
+            vision_start_token_id,
+            image_token_id,
+        );
+    }
+    if placeholder_count != 0 {
+        return None;
+    }
+
+    let vision_end_token_id = vision_start_token_id + 1;
+    let mut image_tokens = Vec::with_capacity(total_image_tokens as usize + 2 * grid_thw.len());
+    for &count in &per_image_counts {
+        image_tokens.push(vision_start_token_id);
+        for _ in 0..count {
+            image_tokens.push(image_token_id);
+        }
+        image_tokens.push(vision_end_token_id);
+    }
+
+    // End of the last user turn, else after the leading token.
+    let insert_at = prompt_tokens
+        .iter()
+        .rposition(|&t| t == im_end_token_id)
+        .unwrap_or(1.min(prompt_tokens.len()));
+    let mut spliced = Vec::with_capacity(prompt_tokens.len() + image_tokens.len());
+    spliced.extend_from_slice(&prompt_tokens[..insert_at]);
+    spliced.extend(image_tokens);
+    spliced.extend_from_slice(&prompt_tokens[insert_at..]);
+    *prompt_tokens = spliced;
+
+    Some(InsertedQwenVlmTokens {
+        image_blocks: grid_thw.len(),
+        total_image_tokens,
+    })
+}
+
 pub fn insert_qwen_vl_image_tokens(
     prompt_tokens: &mut Vec<i32>,
     grid_thw: &[(i32, i32, i32)],

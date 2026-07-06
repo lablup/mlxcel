@@ -700,7 +700,7 @@ mod tests {
         assert_eq!(fused_moe_max_dff_from(None, true), FUSED_MOE_MAX_DFF_METAL);
         assert_eq!(fused_moe_max_dff_from(None, false), FUSED_MOE_MAX_DFF_CUDA);
         // The CUDA default must exceed Metal's, which is the whole point of #626.
-        assert!(FUSED_MOE_MAX_DFF_CUDA > FUSED_MOE_MAX_DFF_METAL);
+        const { assert!(FUSED_MOE_MAX_DFF_CUDA > FUSED_MOE_MAX_DFF_METAL) };
         // An explicit positive value overrides the default on both backends.
         for metal in [true, false] {
             assert_eq!(fused_moe_max_dff_from(Some("16384"), metal), 16384);

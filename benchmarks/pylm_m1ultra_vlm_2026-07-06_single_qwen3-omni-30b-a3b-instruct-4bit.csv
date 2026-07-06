@@ -1,0 +1,2 @@
+model,model_path,prompt_tokens,generated_tokens,prefill_ms,prefill_tok_s,decode_ms,decode_tok_s,date,hardware,mlx_version,build_type,max_tokens,prompt
+qwen3-omni-30b-a3b-instruct-4bit,./models/qwen3-omni-30b-a3b-instruct-4bit/,65,63,388.87,167.15,1545.63,40.76,2026-07-06,Apple_M1_Ultra_128GB,mlx-vlm-0.4.4,python,100,"What is in this image?"

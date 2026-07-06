@@ -2470,10 +2470,30 @@ pub fn attention(
     softcap: f32,
     window_size: i32,
 ) -> UniquePtr<MlxArray> {
-    let mask_ptr = mask.map(|m| m as *const _).unwrap_or(std::ptr::null());
     if should_use_metal4_attention() {
         return metal4_attention(q, k, v, scale, mask, softcap, window_size);
     }
+
+    if let Some(chunk) = materializing_sdpa_query_chunk(q, k, v, softcap) {
+        return chunked_query_attention(q, k, v, scale, mask, softcap, chunk);
+    }
+
+    attention_dispatch(q, k, v, scale, mask, softcap)
+}
+
+/// Single-shot SDPA dispatch: softcap composite or MLX's fused/fallback SDPA.
+///
+/// The score-materialization chunk gate lives in [`attention`]; this inner
+/// dispatch always issues one SDPA over the full query length it is given.
+fn attention_dispatch(
+    q: &MlxArray,
+    k: &MlxArray,
+    v: &MlxArray,
+    scale: f32,
+    mask: Option<&MlxArray>,
+    softcap: f32,
+) -> UniquePtr<MlxArray> {
+    let mask_ptr = mask.map(|m| m as *const _).unwrap_or(std::ptr::null());
 
     if softcap > 0.0 {
         let q_heads = ffi::array_shape(q)[1];
@@ -2491,6 +2511,265 @@ pub fn attention(
 
     // SAFETY: q/k/v/mask_ptr are valid for the duration of this call.
     unsafe { ffi::fast_scaled_dot_product_attention(q, k, v, scale, mask_ptr) }
+}
+
+/// Score-matrix byte budget above which a prefill SDPA is query-chunked, from
+/// `MLXCEL_ATTENTION_CHUNK_BUDGET_MB` (MiB, default 1024; `0` disables
+/// chunking entirely).
+///
+/// The budget bounds the raw `[B, heads, chunk, k_len]` score matmul output;
+/// the fallback composite briefly holds a few score-sized buffers per chunk
+/// (masked scores, softmax), so the live attention transient is a small
+/// multiple of this value. 1024 MiB keeps that multiple to a few GiB while
+/// leaving per-chunk matmuls large enough to stay bandwidth-bound.
+fn attention_chunk_budget_bytes() -> usize {
+    static BUDGET: OnceLock<usize> = OnceLock::new();
+    *BUDGET.get_or_init(|| {
+        std::env::var("MLXCEL_ATTENTION_CHUNK_BUDGET_MB")
+            .ok()
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .unwrap_or(1024)
+            .saturating_mul(1024 * 1024)
+    })
+}
+
+/// True when this q/v + softcap combination cannot reach a fused
+/// (memory-linear) SDPA kernel on the CUDA backend, so MLX's fallback would
+/// materialize the full `[B, heads, q_len, k_len]` score matrix.
+///
+/// Mirrors `supports_sdpa_cudnn` in
+/// `mlx/backend/cuda/scaled_dot_product_attention.cpp`: the cuDNN flash SDPA
+/// requires `head_dim % 8 == 0 && head_dim <= 128` for both Q and V and an
+/// f16/bf16 dtype (gemma-3/gemma-4/gemma-3n use head_dim 256 and never
+/// qualify, issue #672). The softcap composite (`compiled_softcap_sdpa*`)
+/// is an explicit op graph and always materializes. `supports_sdpa_vector`
+/// only covers `q_len < 4`, which the chunk gate's own `q_len` threshold
+/// already excludes. Non-CUDA builds return false: Metal has a different
+/// fused-SDPA support matrix and keeps its current behavior.
+fn cuda_sdpa_materializes_scores(q: &MlxArray, v: &MlxArray, softcap: f32) -> bool {
+    if !cfg!(feature = "cuda") {
+        return false;
+    }
+    if softcap > 0.0 {
+        return true;
+    }
+    let q_shape = ffi::array_shape(q);
+    let v_shape = ffi::array_shape(v);
+    let (Some(&dq), Some(&dv)) = (q_shape.last(), v_shape.last()) else {
+        return false;
+    };
+    let dtype = ffi::array_dtype(q);
+    let flash_eligible = dq % 8 == 0
+        && dq <= 128
+        && dv % 8 == 0
+        && dv <= 128
+        && (dtype == crate::dtype::FLOAT16 || dtype == crate::dtype::BFLOAT16);
+    !flash_eligible
+}
+
+/// Pure chunk-length math for [`materializing_sdpa_query_chunk`].
+///
+/// Splits `q_len` into the smallest number of near-equal chunks whose
+/// per-chunk score matrix stays within `budget` bytes. Returns `None` when the
+/// full score matrix already fits.
+fn query_chunk_len(per_row_bytes: usize, q_len: i32, budget: usize) -> Option<i32> {
+    if q_len < 2 || per_row_bytes == 0 || budget == 0 {
+        return None;
+    }
+    let scores = per_row_bytes.saturating_mul(q_len as usize);
+    if scores <= budget {
+        return None;
+    }
+    let n_chunks = scores.div_ceil(budget).max(2);
+    let chunk = (q_len as usize).div_ceil(n_chunks).max(1);
+    Some(chunk as i32)
+}
+
+/// Query-chunk length for a prefill SDPA that would materialize a score
+/// matrix larger than the chunk budget, or `None` to run unchunked.
+///
+/// gemma-4-31b at a 32768-token single-pass prefill materializes
+/// `32 heads * 32768^2 * 2 B ~= 68 GiB` of scores in the CUDA fallback and
+/// OOMs GB10 (#672). Chunking the query axis bounds the transient to the
+/// budget while leaving per-row results mathematically identical: softmax and
+/// the value matmul are row-independent, and every chunk still sees the full
+/// key axis.
+pub(crate) fn materializing_sdpa_query_chunk(
+    q: &MlxArray,
+    k: &MlxArray,
+    v: &MlxArray,
+    softcap: f32,
+) -> Option<i32> {
+    let budget = attention_chunk_budget_bytes();
+    if budget == 0 {
+        return None;
+    }
+    let q_shape = ffi::array_shape(q);
+    if q_shape.len() != 4 {
+        return None;
+    }
+    let q_len = q_shape[2];
+    if q_len < 2 {
+        return None;
+    }
+    if !cuda_sdpa_materializes_scores(q, v, softcap) {
+        return None;
+    }
+    let k_len = ffi::array_shape(k)[2];
+    let bytes = crate::dtype::size_bytes(ffi::array_dtype(q)).unwrap_or(4);
+    let per_row = (q_shape[0].max(1) as usize)
+        .saturating_mul(q_shape[1].max(1) as usize)
+        .saturating_mul(k_len.max(1) as usize)
+        .saturating_mul(bytes);
+    query_chunk_len(per_row, q_len, budget)
+}
+
+/// Slice query rows `[start, stop)` from a `[B, H, L, D]` tensor.
+fn slice_query_rows(a: &MlxArray, start: i32, stop: i32) -> UniquePtr<MlxArray> {
+    let shape = ffi::array_shape(a);
+    ffi::slice(a, &[0, 0, start, 0], &[shape[0], shape[1], stop, shape[3]])
+}
+
+/// Slice the query-row range `[start, stop)` out of an attention mask whose
+/// second-to-last axis spans the full query length. Returns `None` for masks
+/// that broadcast over the query axis (size 1 there, or rank < 2), which are
+/// row-independent and can be reused unsliced.
+fn slice_mask_query_rows(
+    mask: &MlxArray,
+    start: i32,
+    stop: i32,
+    q_len: i32,
+) -> Option<UniquePtr<MlxArray>> {
+    let shape = ffi::array_shape(mask);
+    if shape.len() < 2 {
+        return None;
+    }
+    let q_axis = shape.len() - 2;
+    if shape[q_axis] != q_len {
+        return None;
+    }
+    let mut starts = vec![0; shape.len()];
+    let mut stops = shape.clone();
+    starts[q_axis] = start;
+    stops[q_axis] = stop;
+    Some(ffi::slice(mask, &starts, &stops))
+}
+
+/// Cast an additive f32 mask to the (f16/bf16) score dtype, or `None` when
+/// the mask is already usable as-is.
+///
+/// MLX's SDPA fallback composite adds an additive mask to the scores WITHOUT
+/// casting (`scores = add(scores, mask)` in `mlx/fast.cpp`), so an f32 mask
+/// promotes the masked scores AND the softmax to f32, doubling the largest
+/// transients of exactly the configurations that reach the fallback (#672).
+/// `-inf` sentinels survive the cast. Bool masks take the fallback's `where`
+/// path, which never promotes, and pass through.
+fn mask_in_score_dtype(mask: &MlxArray, q_dtype: i32) -> Option<UniquePtr<MlxArray>> {
+    let m_dtype = ffi::array_dtype(mask);
+    (m_dtype == crate::dtype::FLOAT32
+        && (q_dtype == crate::dtype::FLOAT16 || q_dtype == crate::dtype::BFLOAT16))
+        .then(|| ffi::astype(mask, q_dtype))
+}
+
+/// Query-chunked SDPA: identical math to a single [`attention_dispatch`] call,
+/// with the transient score matrix bounded to `heads * chunk * k_len` (#672).
+fn chunked_query_attention(
+    q: &MlxArray,
+    k: &MlxArray,
+    v: &MlxArray,
+    scale: f32,
+    mask: Option<&MlxArray>,
+    softcap: f32,
+    chunk: i32,
+) -> UniquePtr<MlxArray> {
+    let q_len = ffi::array_shape(q)[2];
+    let q_dtype = ffi::array_dtype(q);
+    let mut parts: Vec<UniquePtr<MlxArray>> =
+        Vec::with_capacity(((q_len + chunk - 1) / chunk).max(1) as usize);
+    let mut start = 0;
+    while start < q_len {
+        let stop = (start + chunk).min(q_len);
+        let q_c = slice_query_rows(q, start, stop);
+        // Row-slice masks that span the query axis (query-broadcast masks are
+        // reused whole), then keep the chunk-sized mask in the score dtype so
+        // the fallback's mask-add cannot promote scores to f32.
+        let sliced = mask.and_then(|m| slice_mask_query_rows(m, start, stop, q_len));
+        let base_ref: Option<&MlxArray> = sliced.as_deref().or(mask);
+        let cast = base_ref.and_then(|m| mask_in_score_dtype(m, q_dtype));
+        let mask_ref: Option<&MlxArray> = cast.as_deref().or(base_ref);
+        parts.push(attention_dispatch(&q_c, k, v, scale, mask_ref, softcap));
+        start = stop;
+    }
+    let ptrs: Vec<*const MlxArray> = parts
+        .iter()
+        .map(|p| p.as_ref().unwrap() as *const MlxArray)
+        .collect();
+    // SAFETY: every pointer references a live array owned by `parts`.
+    unsafe { ffi::concatenate(&ptrs, 2) }
+}
+
+/// Chunked equivalent of the maskless bottom-right-aligned causal SDPA, for
+/// configurations whose CUDA fallback would materialize the full score matrix
+/// (#672).
+///
+/// Query chunk `[start, stop)` (global offset `k_len - q_len`) attends keys
+/// `[0, offset + stop)` only, so K/V are sliced to that causal bound and the
+/// per-chunk `[stop - start, offset + stop]` causal mask reproduces the
+/// unchunked `do_causal` semantics row for row. Requires `k_len >= q_len`
+/// (callers guard; `do_causal` with `q_len > k_len` is undefined here).
+pub(crate) fn chunked_causal_attention(
+    q: &MlxArray,
+    k: &MlxArray,
+    v: &MlxArray,
+    scale: f32,
+    chunk: i32,
+) -> UniquePtr<MlxArray> {
+    let k_shape = ffi::array_shape(k);
+    let v_shape = ffi::array_shape(v);
+    let q_len = ffi::array_shape(q)[2];
+    let k_len = k_shape[2];
+    let offset = k_len - q_len;
+    debug_assert!(
+        offset >= 0,
+        "chunked_causal_attention requires k_len >= q_len"
+    );
+
+    let mut parts: Vec<UniquePtr<MlxArray>> =
+        Vec::with_capacity(((q_len + chunk - 1) / chunk).max(1) as usize);
+    let mut start = 0;
+    while start < q_len {
+        let stop = (start + chunk).min(q_len);
+        let k_end = offset + stop;
+        let q_c = slice_query_rows(q, start, stop);
+        let k_c = ffi::slice(
+            k,
+            &[0, 0, 0, 0],
+            &[k_shape[0], k_shape[1], k_end, k_shape[3]],
+        );
+        let v_c = ffi::slice(
+            v,
+            &[0, 0, 0, 0],
+            &[v_shape[0], v_shape[1], k_end, v_shape[3]],
+        );
+        let mask = crate::utils::create_causal_mask(stop - start, offset + start);
+        // Keep the per-chunk mask in the score dtype (see mask_in_score_dtype).
+        let mask = mask_in_score_dtype(mask.as_ref().unwrap(), ffi::array_dtype(q)).unwrap_or(mask);
+        parts.push(attention_dispatch(
+            &q_c,
+            &k_c,
+            &v_c,
+            scale,
+            Some(mask.as_ref().unwrap()),
+            0.0,
+        ));
+        start = stop;
+    }
+    let ptrs: Vec<*const MlxArray> = parts
+        .iter()
+        .map(|p| p.as_ref().unwrap() as *const MlxArray)
+        .collect();
+    // SAFETY: every pointer references a live array owned by `parts`.
+    unsafe { ffi::concatenate(&ptrs, 2) }
 }
 
 /// Pointer-friendly attention wrapper for existing model call sites.
@@ -3522,6 +3801,138 @@ mod tests {
 
         let out = attention(&q, &k, &v, 0.5, None, 30.0, 0);
         assert_eq!(ffi::array_shape(&out).as_slice(), &[1, 4, 3, 8]);
+    }
+
+    /// Deterministic pseudo-random f32 tensor for chunked-SDPA equivalence tests.
+    fn test_tensor(shape: &[i32]) -> UniquePtr<MlxArray> {
+        let len: i32 = shape.iter().product();
+        let data: Vec<f32> = (0..len)
+            .map(|i| ((i as f32) * 0.7371 + 0.13).sin())
+            .collect();
+        crate::from_slice_f32(&data, shape)
+    }
+
+    #[test]
+    fn query_chunk_len_splits_evenly_within_budget() {
+        // Fits: no chunking.
+        assert_eq!(query_chunk_len(100, 10, 1000), None);
+        assert_eq!(query_chunk_len(100, 10, 1_000_000), None);
+        // 10 rows * 100 B = 1000 B over a 400 B budget -> 3 chunks of 4/4/2.
+        assert_eq!(query_chunk_len(100, 10, 400), Some(4));
+        // Exactly one row over budget still splits in two.
+        assert_eq!(query_chunk_len(100, 10, 999), Some(5));
+        // Degenerate inputs never chunk.
+        assert_eq!(query_chunk_len(0, 10, 400), None);
+        assert_eq!(query_chunk_len(100, 1, 10), None);
+        assert_eq!(query_chunk_len(100, 10, 0), None);
+        // Every chunk's scores stay within budget.
+        let chunk = query_chunk_len(1000, 100, 7000).unwrap();
+        assert!(chunk as usize * 1000 <= 7000);
+    }
+
+    #[test]
+    fn slice_mask_query_rows_slices_and_broadcasts() {
+        let mask = crate::utils::create_causal_mask(4, 2);
+        let sliced = slice_mask_query_rows(mask.as_ref().unwrap(), 1, 3, 4).unwrap();
+        assert_eq!(ffi::array_shape(&sliced).as_slice(), &[2, 6]);
+        // Row 1 of the slice must equal row 2 of the full mask. `-inf - -inf`
+        // is NaN, so compare the attend/block structure instead of raw values.
+        let full_row = ffi::slice(mask.as_ref().unwrap(), &[2, 0], &[3, 6]);
+        let sliced_row = ffi::slice(&sliced, &[1, 0], &[2, 6]);
+        let sentinel = crate::from_slice_f32(&[-1.0; 6], &[1, 6]);
+        let full_open = ffi::astype(&ffi::greater(&full_row, &sentinel), crate::dtype::FLOAT32);
+        let sliced_open = ffi::astype(&ffi::greater(&sliced_row, &sentinel), crate::dtype::FLOAT32);
+        assert!(max_abs_diff(&full_open, &sliced_open) == 0.0);
+
+        // A mask that broadcasts over the query axis passes through unsliced.
+        let broadcast = crate::from_slice_f32(&[0.0; 6], &[1, 6]);
+        assert!(slice_mask_query_rows(&broadcast, 1, 3, 4).is_none());
+    }
+
+    /// Chunked SDPA must reproduce the unchunked dispatch with an explicit
+    /// causal mask, including an uneven final chunk.
+    #[test]
+    fn chunked_query_attention_matches_unchunked_with_mask() {
+        let q = test_tensor(&[1, 2, 6, 4]);
+        let k = test_tensor(&[1, 2, 6, 4]);
+        let v = test_tensor(&[1, 2, 6, 4]);
+        let scale = 0.5_f32;
+        let mask = crate::utils::create_causal_mask(6, 0);
+
+        let full = attention_dispatch(&q, &k, &v, scale, Some(mask.as_ref().unwrap()), 0.0);
+        for chunk in [1, 2, 4, 5] {
+            let chunked = chunked_query_attention(
+                &q,
+                &k,
+                &v,
+                scale,
+                Some(mask.as_ref().unwrap()),
+                0.0,
+                chunk,
+            );
+            assert_eq!(ffi::array_shape(&chunked), ffi::array_shape(&full));
+            assert!(
+                max_abs_diff(&full, &chunked) < 1e-5,
+                "chunk={chunk} diverged from unchunked SDPA"
+            );
+        }
+    }
+
+    /// Chunked SDPA must reproduce the softcap GQA composite path.
+    #[test]
+    fn chunked_query_attention_matches_unchunked_softcap_gqa() {
+        let q = test_tensor(&[1, 4, 6, 4]);
+        let k = test_tensor(&[1, 2, 6, 4]);
+        let v = test_tensor(&[1, 2, 6, 4]);
+        let scale = 0.5_f32;
+        let softcap = 30.0_f32;
+        let mask = crate::utils::create_causal_mask(6, 0);
+
+        let full = attention_dispatch(&q, &k, &v, scale, Some(mask.as_ref().unwrap()), softcap);
+        let chunked =
+            chunked_query_attention(&q, &k, &v, scale, Some(mask.as_ref().unwrap()), softcap, 2);
+        assert!(
+            max_abs_diff(&full, &chunked) < 1e-5,
+            "softcap GQA chunked SDPA diverged from unchunked"
+        );
+    }
+
+    /// A query-broadcast mask (row axis of size 1) is reused across chunks.
+    #[test]
+    fn chunked_query_attention_matches_unchunked_broadcast_mask() {
+        let q = test_tensor(&[1, 2, 6, 4]);
+        let k = test_tensor(&[1, 2, 6, 4]);
+        let v = test_tensor(&[1, 2, 6, 4]);
+        let scale = 0.5_f32;
+        let mask = crate::from_slice_f32(&[0.0, 0.0, 0.0, 0.0, f32::NEG_INFINITY, 0.0], &[1, 6]);
+
+        let full = attention_dispatch(&q, &k, &v, scale, Some(&mask), 0.0);
+        let chunked = chunked_query_attention(&q, &k, &v, scale, Some(&mask), 0.0, 2);
+        assert!(
+            max_abs_diff(&full, &chunked) < 1e-5,
+            "broadcast-mask chunked SDPA diverged from unchunked"
+        );
+    }
+
+    /// The chunked maskless-causal path must reproduce MLX's native
+    /// bottom-right-aligned `do_causal` SDPA, with and without a KV offset.
+    #[test]
+    fn chunked_causal_attention_matches_fast_causal() {
+        let scale = 0.5_f32;
+        for (q_len, k_len) in [(4, 4), (4, 7), (6, 9)] {
+            let q = test_tensor(&[1, 2, q_len, 4]);
+            let k = test_tensor(&[1, 2, k_len, 4]);
+            let v = test_tensor(&[1, 2, k_len, 4]);
+            let native = ffi::ffi_fast_scaled_dot_product_attention_causal(&q, &k, &v, scale);
+            for chunk in [1, 2, 3] {
+                let chunked = chunked_causal_attention(&q, &k, &v, scale, chunk);
+                assert_eq!(ffi::array_shape(&chunked), ffi::array_shape(&native));
+                assert!(
+                    max_abs_diff(&native, &chunked) < 1e-5,
+                    "q_len={q_len} k_len={k_len} chunk={chunk} diverged from do_causal SDPA"
+                );
+            }
+        }
     }
 
     /// Verify the public causal SDPA wrapper preserves the original shape

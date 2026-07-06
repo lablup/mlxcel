@@ -152,9 +152,9 @@ fn fallback_architecture(model_type: ModelType) -> &'static str {
     match model_type {
         ModelType::Llama | ModelType::Mistral3 | ModelType::Mistral3VLM => "llama",
         ModelType::Llama4 | ModelType::Llama4VLM => "llama4",
-        ModelType::Qwen2 | ModelType::Qwen2VL | ModelType::Qwen25VL => "qwen2",
+        ModelType::Qwen2 | ModelType::Qwen2VL | ModelType::Qwen25VL | ModelType::FastVLM => "qwen2",
         ModelType::Qwen3 | ModelType::Qwen3VL => "qwen3",
-        ModelType::Qwen3Moe | ModelType::Qwen3VLMoe => "qwen3_moe",
+        ModelType::Qwen3Moe | ModelType::Qwen3VLMoe | ModelType::Qwen3OmniMoe => "qwen3_moe",
         ModelType::Qwen3Next => "qwen3_next",
         ModelType::Qwen35 | ModelType::Qwen35VLM => "qwen3_5",
         ModelType::Qwen35Moe | ModelType::Qwen35MoeVLM => "qwen3_5_moe",
@@ -188,7 +188,14 @@ fn fallback_architecture(model_type: ModelType) -> &'static str {
         ModelType::Glm4MoeLite => "glm4_moe_lite",
         ModelType::GlmMoeDsa => "glm_moe_dsa",
         ModelType::Ernie45 | ModelType::PaddleOcrVL => "ernie4_5",
+        ModelType::DotsOcrVL => "qwen2",
         ModelType::Ernie45Moe => "ernie4_5_moe",
+        // ERNIE-4.5-VL text backbone; TP is refused for VLM-kind models earlier,
+        // this keeps the dispatch table total.
+        ModelType::Ernie45MoeVLM => "ernie4_5_moe",
+        // Hunyuan-VL text backbone is the Hunyuan dense stack; TP is refused
+        // for VLM-kind models earlier, this keeps the dispatch table total.
+        ModelType::HunyuanVLM => "hunyuan_v1_dense",
         ModelType::HunyuanMoe => "hunyuan_moe",
         ModelType::HunyuanV1Dense => "hunyuan_v1_dense",
         ModelType::MiMo => "mimo",
@@ -261,6 +268,11 @@ fn fallback_architecture(model_type: ModelType) -> &'static str {
         // Granite 4 Vision's text backbone is granitemoehybrid; TP is refused for
         // VLM-kind models earlier, this keeps the dispatch table total.
         ModelType::Granite4VisionVLM => "granitemoehybrid",
+        ModelType::DeepSeekOcrVLM => "deepseek",
+        ModelType::DeepSeekOcr2VLM => "deepseek",
+        // DeepSeek-VL2's text backbone is deepseek_v2; TP is refused for VLM-kind
+        // models earlier, this keeps the dispatch table total.
+        ModelType::DeepSeekVL2 => "deepseek_v2",
         // Youtu-VL is not currently supported by tensor-parallel inference;
         // we return a placeholder architecture string here so the planner
         // does not panic on the dispatch table lookup. The actual loader
@@ -273,6 +285,10 @@ fn fallback_architecture(model_type: ModelType) -> &'static str {
         // planner's supported-architecture validation rejects this string
         // before any TP load is attempted).
         ModelType::DiffusionGemma => "diffusion_gemma",
+        // LLaDA-2 MoE is a masked-diffusion model served through the diffusion
+        // worker loop, never routed to tensor-parallel text inference; the
+        // planner's supported-architecture validation rejects this string.
+        ModelType::Llada2Moe => "llada2_moe",
         // Whisper is an ASR model served through the audio endpoints, never
         // routed to tensor-parallel text inference; the loader rejects it
         // earlier. Return a placeholder so the dispatch table stays total.

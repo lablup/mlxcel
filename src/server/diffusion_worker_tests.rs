@@ -114,3 +114,61 @@ fn diffusion_serve_defaults_default_is_entropy_bound() {
     assert_eq!(d.confidence_threshold, 0.9);
     assert_eq!(d.max_denoising_steps, None);
 }
+
+// -------------------------------------------------------------------------
+// LLaDA-2 MoE serving (issue #546)
+// -------------------------------------------------------------------------
+
+#[test]
+fn build_llada2_options_maps_core_fields_and_step_override() {
+    let opts = build_llada2_options(128, 0.7, 40, 0.9, &[], Some(24), &[]);
+    assert_eq!(opts.max_new_tokens, 128);
+    assert_eq!(opts.temperature, 0.7);
+    assert_eq!(opts.top_k, 40);
+    assert_eq!(opts.top_p, 0.9);
+    assert_eq!(
+        opts.steps, 24,
+        "--max-denoising-steps overrides the step count"
+    );
+    assert!(opts.extra_eos_token_ids.is_empty());
+}
+
+#[test]
+fn build_llada2_options_unions_stop_tokens_and_config_eos_dedup() {
+    // Request stop ids and generation_config EOS ids union with de-duplication.
+    let opts = build_llada2_options(64, 0.0, 0, 1.0, &[7, 50], None, &[1, 50, 106]);
+    assert_eq!(opts.extra_eos_token_ids, vec![7, 50, 1, 106]);
+    // No override -> the engine default step count.
+    assert_eq!(opts.steps, Llada2GenerateOptions::default().steps);
+}
+
+#[test]
+fn reject_llada2_media_rejects_any_modality() {
+    assert_eq!(reject_llada2_media(false, false, false), None);
+    assert!(
+        reject_llada2_media(true, false, false).is_some(),
+        "image rejected"
+    );
+    assert!(
+        reject_llada2_media(false, true, false).is_some(),
+        "audio rejected"
+    );
+    assert!(
+        reject_llada2_media(false, false, true).is_some(),
+        "video rejected"
+    );
+}
+
+#[test]
+fn llada2_finish_reason_maps_to_server_strings() {
+    assert_eq!(
+        llada2_finish_reason_str(Llada2FinishReason::Length),
+        "length"
+    );
+    assert_eq!(llada2_finish_reason_str(Llada2FinishReason::Stop), "stop");
+    // An aborted (client-cancelled) run maps to "stop".
+    assert_eq!(
+        llada2_finish_reason_str(Llada2FinishReason::Aborted),
+        "stop"
+    );
+}

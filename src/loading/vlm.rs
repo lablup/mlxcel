@@ -37,6 +37,16 @@ use crate::models;
 use crate::vision;
 use models::sanitize_config_json;
 
+#[path = "vlm_deepseek_vl2.rs"]
+mod deepseek_vl2;
+#[path = "vlm_deepseekocr.rs"]
+mod deepseekocr;
+#[path = "vlm_dots_ocr.rs"]
+mod dots_ocr;
+#[path = "vlm_ernie4_5_vl.rs"]
+mod ernie4_5_vl;
+#[path = "vlm_fastvlm.rs"]
+mod fastvlm;
 #[path = "vlm_gemma.rs"]
 mod gemma;
 #[path = "vlm_gemma_unified.rs"]
@@ -45,6 +55,8 @@ mod gemma_unified;
 mod granite4_vision;
 #[path = "vlm_granite_vision.rs"]
 mod granite_vision;
+#[path = "vlm_hunyuan_vl.rs"]
+mod hunyuan_vl;
 #[path = "vlm_idefics2.rs"]
 mod idefics2;
 #[path = "vlm_internvl.rs"]
@@ -74,10 +86,16 @@ mod special;
 #[path = "vlm_youtu_vl.rs"]
 mod youtu_vl_loader;
 
+pub(crate) use deepseek_vl2::load_deepseek_vl2_vlm;
+pub(crate) use deepseekocr::{load_deepseekocr_2_vlm, load_deepseekocr_vlm};
+pub(crate) use dots_ocr::load_dots_ocr_vl;
+pub(crate) use ernie4_5_vl::load_ernie4_5_moe_vlm;
+pub(crate) use fastvlm::load_fastvlm_vlm;
 pub(crate) use gemma::{load_gemma3_vlm, load_gemma3n_vlm, load_gemma4_vlm};
 pub(crate) use gemma_unified::load_gemma4_unified;
 pub(crate) use granite_vision::load_granite_vision_vlm;
 pub(crate) use granite4_vision::load_granite4_vision_vlm;
+pub(crate) use hunyuan_vl::load_hunyuan_vlm;
 pub(crate) use idefics2::load_idefics2_vlm;
 pub(crate) use internvl::load_internvl_vlm;
 pub(crate) use kimi_vl_loader::load_kimi_vl_vlm;
@@ -89,7 +107,7 @@ pub(crate) use paddleocr::load_paddleocr_vl;
 pub(crate) use pixtral::{load_mistral3_vlm, load_pixtral_vlm};
 pub(crate) use qwen::{
     load_glm_ocr, load_glm4v, load_glm4v_moe, load_qwen2_5_vl, load_qwen2_vl, load_qwen3_5_moe_vlm,
-    load_qwen3_5_vlm, load_qwen3_vl, load_qwen3_vl_moe,
+    load_qwen3_5_vlm, load_qwen3_omni_moe, load_qwen3_vl, load_qwen3_vl_moe,
 };
 pub(crate) use siglip::{load_aya_vision_vlm, load_paligemma_vlm};
 pub(crate) use smolvlm::load_smolvlm_vlm;

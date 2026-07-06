@@ -46,6 +46,7 @@ pub enum VlmRuntimeRef<'a> {
     NemotronHNanoOmni(&'a vision::NemotronHNanoOmniVlModel),
     /// PaddleOCR-VL runtime (NaViT vision + ERNIE-4.5 MRoPE text).
     PaddleOcr(&'a vision::PaddleOcrVlModel),
+    DotsOcr(&'a vision::DotsOcrVlModel),
     /// Youtu-VL runtime.
     YoutuVL(&'a vision::YoutuVLModel),
     /// InternVL (internvl_chat) runtime.
@@ -62,6 +63,13 @@ pub enum VlmRuntimeRef<'a> {
     Lfm2Vl(&'a vision::Lfm2VlModel),
     GraniteVision(&'a vision::GraniteVisionVLModel),
     Granite4Vision(&'a vision::Granite4VisionVLModel),
+    DeepSeekOcr(&'a vision::deepseekocr::DeepSeekOcrVlModel),
+    DeepSeekOcr2(&'a vision::deepseekocr_2::DeepSeekOcr2VlModel),
+    DeepSeekVL2(&'a vision::deepseek_vl2::DeepSeekVl2VlModel),
+    FastVLM(&'a vision::VisionModule),
+    Ernie45MoeVl(&'a vision::ernie4_5_moe_vl::Ernie45MoeVlModel),
+    Qwen3OmniMoe(&'a vision::qwen3_omni_moe::Qwen3OmniMoeModel),
+    HunyuanVl(&'a vision::hunyuan_vl::HunyuanVlModel),
     Standard(&'a vision::VisionModule),
 }
 
@@ -146,11 +154,13 @@ impl LoadedModel {
             Self::Qwen25VL(model) => Some(VlmRuntimeRef::Qwen(model)),
             Self::Qwen3VL(model) => Some(VlmRuntimeRef::Qwen(model)),
             Self::Qwen3VLMoe(model) => Some(VlmRuntimeRef::Qwen(model)),
+            Self::Qwen3OmniMoe(model) => Some(VlmRuntimeRef::Qwen3OmniMoe(model)),
             Self::Glm4v(model) => Some(VlmRuntimeRef::Qwen(model)),
             Self::Glm4vMoe(model) => Some(VlmRuntimeRef::Qwen(model)),
             Self::GlmOcr(model) => Some(VlmRuntimeRef::Qwen(model)),
             Self::Qwen35VLM(model) | Self::Qwen35MoeVLM(model) => Some(VlmRuntimeRef::Qwen(model)),
             Self::PaddleOcrVL(model) => Some(VlmRuntimeRef::PaddleOcr(model)),
+            Self::DotsOcrVL(model) => Some(VlmRuntimeRef::DotsOcr(model)),
             Self::MiniCPMOVLM(model) => Some(VlmRuntimeRef::MiniCPMO(model)),
             Self::MiniCPMV46VLM(model) => Some(VlmRuntimeRef::MiniCPMV46(model)),
             Self::Moondream3VLM(model) => Some(VlmRuntimeRef::Moondream3(model)),
@@ -177,6 +187,12 @@ impl LoadedModel {
             Self::LlavaVLM(vlm) => Some(VlmRuntimeRef::Standard(&vlm.vision)),
             Self::GraniteVisionVLM(model) => Some(VlmRuntimeRef::GraniteVision(model)),
             Self::Granite4VisionVLM(model) => Some(VlmRuntimeRef::Granite4Vision(model)),
+            Self::DeepSeekOcrVLM(model) => Some(VlmRuntimeRef::DeepSeekOcr(model)),
+            Self::DeepSeekOcr2VLM(model) => Some(VlmRuntimeRef::DeepSeekOcr2(model)),
+            Self::DeepSeekVL2(model) => Some(VlmRuntimeRef::DeepSeekVL2(model)),
+            Self::FastVLM(vlm) => Some(VlmRuntimeRef::FastVLM(&vlm.vision)),
+            Self::Ernie45MoeVLM(model) => Some(VlmRuntimeRef::Ernie45MoeVl(model)),
+            Self::HunyuanVLM(model) => Some(VlmRuntimeRef::HunyuanVl(model)),
             _ => None,
         }
     }

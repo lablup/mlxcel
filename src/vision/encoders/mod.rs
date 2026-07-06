@@ -16,13 +16,19 @@
 //!
 //! Provides the VisionEncoder trait and encoder implementations.
 
+pub mod deepseek_vl2;
 pub mod deepseekocr_clip;
+pub mod deepseekocr_qwen2;
 pub mod deepseekocr_sam;
+pub mod dots_ocr;
+pub mod ernie4_5_vl;
+pub mod fastvlm;
 pub mod gemma3n;
 pub mod gemma4;
 pub mod gemma4_unified;
 pub mod glm4v;
 pub mod glm_ocr;
+pub mod hunyuan_vl;
 pub mod internvl;
 pub mod kimi_vl;
 pub mod lfm2_vl;
