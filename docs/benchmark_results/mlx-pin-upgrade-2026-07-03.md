@@ -40,6 +40,7 @@ in `src/lib/mlx-cpp/CMakeLists.txt`. Each was reconciled three-way
 | `patches/mlx/backend/cuda/reduce/init_reduce.cu` | kept | Base unchanged. Output buffer typed as T so it matches out.dtype() for bf16. |
 | `patches/mlx/backend/cuda/reduce/reduce_ops.cuh` | kept | Base unchanged. `ReduceResult<Sum/Prod, bf16>` accumulate-in-fp32 specializations. |
 | `patches/mlx/backend/cuda/reduce/row_reduce.cu` | kept | Base unchanged. Same V/U split. |
+| `patches/mlx/backend/cuda/scaled_dot_product_attention.cu` | added (#675) | New overlay, not part of the #625 rebase. Extends the `sdpa_vector` decode kernels and the `supports_sdpa_vector` gate to head_dim 256/288 so head_dim > 128 models (gemma family, qwen3.5/3.6, baichuan-m1, paligemma2) take the fused vector path at decode instead of the unfused materializing SDPA fallback. Gated behind the `MLXCEL_SDPA_VECTOR_LARGE_D` env kill switch (default on); `__launch_bounds__` caps the larger per-thread register footprint of the D=256/288 instantiations. Base is pristine e9463bb, so future pin bumps must rebase this file. |
 | `patches/mlx/backend/metal/compiled.cpp` | kept | Base unchanged. static_cast insertion for mixed-dtype compiled ops. |
 | `patches/mlx/backend/metal/kernels/utils.h` | kept | Base unchanged. `<metal_simdgroup_matrix>` include and `metal::vec` qualification. |
 | `patches-cuda/dtype.cpp` | kept | Base unchanged. bf16+fp32 -> bf16 promotion-table patch (CUDA-only). |

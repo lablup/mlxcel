@@ -1,0 +1,13 @@
+model,prompt_tokens,generated_tokens,prefill_chunk,prefill_ms,prefill_tok_s,decode_ms,decode_tok_s,mlx_peak_gb,sys_peak_gb,date,hardware,mlx_version,build_type,notes
+gemma-4-12b-it-4bit,512,64,,,,4377.57,14.62,,,2026-07-06,NVIDIA_GB10_122GB,0.3.3,release,sdpa_vector path (#675 overlay); 1-pass kernel; decode_ms derived from tok/s
+gemma-4-12b-it-4bit,512,64,,,,4347.83,14.72,,,2026-07-06,NVIDIA_GB10_122GB,0.3.3,release,materializing fallback (MLXCEL_SDPA_VECTOR_LARGE_D=0); decode_ms derived from tok/s
+gemma-4-12b-it-4bit,2048,64,,,,4466.15,14.33,,,2026-07-06,NVIDIA_GB10_122GB,0.3.3,release,sdpa_vector path (#675 overlay); 2-pass kernel; decode_ms derived from tok/s
+gemma-4-12b-it-4bit,2048,64,,,,4469.27,14.32,,,2026-07-06,NVIDIA_GB10_122GB,0.3.3,release,materializing fallback (MLXCEL_SDPA_VECTOR_LARGE_D=0); decode_ms derived from tok/s
+gemma-4-12b-it-4bit,8192,64,,9768.20,838.64,4481.07,14.28,14.51,,2026-07-06,NVIDIA_GB10_122GB,0.3.3,release,sdpa_vector path (#675 overlay); 2-pass kernel
+gemma-4-12b-it-4bit,8192,64,,10003.80,818.89,4454.60,14.37,14.51,,2026-07-06,NVIDIA_GB10_122GB,0.3.3,release,materializing fallback (MLXCEL_SDPA_VECTOR_LARGE_D=0)
+gemma-4-12b-it-4bit,32768,64,,42398.79,772.85,4643.21,13.78,16.65,,2026-07-07,NVIDIA_GB10_122GB,0.3.3,release,sdpa_vector path (#675 overlay); only 8/48 layers are full-attention
+gemma-4-12b-it-4bit,32768,64,,43317.00,756.47,4678.69,13.68,16.65,,2026-07-07,NVIDIA_GB10_122GB,0.3.3,release,materializing fallback (MLXCEL_SDPA_VECTOR_LARGE_D=0)
+qwen3.5-2b-4bit,8192,64,,2517.63,3253.85,495.89,129.06,5.48,,2026-07-07,NVIDIA_GB10_122GB,0.3.3,release,sdpa_vector path (#675 overlay); full attention every layer; 1.123x vs fallback
+qwen3.5-2b-4bit,8192,64,,2553.53,3208.11,557.06,114.89,5.48,,2026-07-07,NVIDIA_GB10_122GB,0.3.3,release,materializing fallback (MLXCEL_SDPA_VECTOR_LARGE_D=0)
+qwen3.5-9b-4bit,8192,64,,10923.69,749.93,1660.21,38.55,12.30,,2026-07-07,NVIDIA_GB10_122GB,0.3.3,release,sdpa_vector path (#675 overlay); full attention every layer; 1.044x vs fallback
+qwen3.5-9b-4bit,8192,64,,11060.52,740.65,1733.28,36.92,12.30,,2026-07-07,NVIDIA_GB10_122GB,0.3.3,release,materializing fallback (MLXCEL_SDPA_VECTOR_LARGE_D=0)
