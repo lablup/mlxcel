@@ -1385,22 +1385,32 @@ mod gemma3_mask_tests {
         }
     }
 
-    /// Issue #401 / PR #405 follow-up: a non-fresh multi-token append
-    /// (`sliding_offset > 0`) over the window has its K/V trimmed to `window`
-    /// keys by the rotating cache, and Gemma 3 forwards the mask directly with
-    /// no `trim_mask_to_keys` step. The mask must therefore be clamped to
-    /// `[seq_len, window]` so it broadcasts against the trimmed key axis. The
-    /// pre-fix full mask was `[seq_len, seq_len + sliding_offset]` (here
-    /// `[4, 7]`), which fails to broadcast and crashes.
+    /// Issue #678: a non-fresh multi-token append (`sliding_offset > 0`)
+    /// exposes `min(sliding_offset, window - 1)` retained prior keys plus ALL
+    /// new keys (the rotating cache no longer clamps its return to `window`),
+    /// and Gemma 3 forwards the mask directly with no `trim_mask_to_keys`
+    /// step. The mask must therefore span that exact key axis; the previous
+    /// `[seq_len, window]` clamp starved the earliest rows of a
+    /// `seq_len >= window` continuation chunk (all-masked rows -> NaN ->
+    /// `<pad>`) and no longer broadcasts against the cache return.
     #[test]
-    fn sliding_prefill_mask_nonfresh_over_window_matches_trimmed_cache() {
+    fn sliding_prefill_mask_nonfresh_over_window_matches_cache_return() {
+        // window 2, prior 3 -> kept prior = 1; 4 new keys -> axis 5.
         let mask = create_sliding_window_prefill_mask(4, 3, 2);
         mlxcel_core::eval(&mask);
         assert_eq!(
             mlxcel_core::array_shape(&mask),
-            vec![4, 2],
-            "non-fresh over-window prefill mask must match the window-trimmed key axis"
+            vec![4, 5],
+            "non-fresh over-window prefill mask must span kept prior keys plus all new keys"
         );
+        // No row may be fully masked (the pre-#678 failure mode).
+        for q in 0..4 {
+            assert_eq!(
+                mask_at(&mask, q, q + 1),
+                0.0,
+                "row {q} must attend to its own position"
+            );
+        }
     }
 
     // [H, n, D] K/V tensor for an `[1, H, n, D]` cache entry; only the key

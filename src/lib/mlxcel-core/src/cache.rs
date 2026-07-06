@@ -4174,34 +4174,45 @@ impl RotatingKVCache {
 
         let (base_k, base_v, current_seq_len) = self.visible_fp16_prefix_for_concat();
 
+        // Mirror upstream `RotatingKVCache._update_concat`: keep at most
+        // `max_size - 1` PRIOR tokens, then append ALL new tokens, and return
+        // (and store) that full concatenation. The return must include every
+        // key the incoming rows can attend: clamping it to `max_size` starves
+        // the earliest rows of a continuation chunk with `new_seq_len >=
+        // max_size` of their entire window (all-masked rows -> NaN -> `<pad>`
+        // decode, issue #678, the chunked-prefill sibling of #401/#413). The
+        // oversized STORED buffer is temporary by design: the next
+        // single-token update pre-trims it back to `max_size` exactly as it
+        // does after a fresh over-window prefill.
+        let prior_trim = (current_seq_len - self.max_size + 1).max(0);
+        let (base_k, base_v, kept_len) = if prior_trim > 0 {
+            let k_shape = ffi::array_shape(&base_k);
+            let v_shape = ffi::array_shape(&base_v);
+            (
+                ffi::slice(
+                    &base_k,
+                    &[0, 0, prior_trim, 0],
+                    &[k_shape[0], k_shape[1], current_seq_len, k_shape[3]],
+                ),
+                ffi::slice(
+                    &base_v,
+                    &[0, 0, prior_trim, 0],
+                    &[v_shape[0], v_shape[1], current_seq_len, v_shape[3]],
+                ),
+                current_seq_len - prior_trim,
+            )
+        } else {
+            (base_k, base_v, current_seq_len)
+        };
+
         let concat_k = concatenate(&base_k, &new_keys, 2);
         let concat_v = concatenate(&base_v, &new_values, 2);
 
-        let total_len = current_seq_len + new_seq_len;
         self.offset += new_seq_len;
-
-        if total_len > self.max_size {
-            let start = total_len - self.max_size;
-            let k = ffi::slice(
-                &concat_k,
-                &[0, 0, start, 0],
-                &[i32::MAX, i32::MAX, total_len, i32::MAX],
-            );
-            let v = ffi::slice(
-                &concat_v,
-                &[0, 0, start, 0],
-                &[i32::MAX, i32::MAX, total_len, i32::MAX],
-            );
-            self.idx = self.max_size;
-            self.keys = Some(ffi::contiguous(&k, false));
-            self.values = Some(ffi::contiguous(&v, false));
-            (k, v)
-        } else {
-            self.idx = total_len;
-            self.keys = Some(ffi::contiguous(&concat_k, false));
-            self.values = Some(ffi::contiguous(&concat_v, false));
-            (concat_k, concat_v)
-        }
+        self.idx = kept_len + new_seq_len;
+        self.keys = Some(ffi::contiguous(&concat_k, false));
+        self.values = Some(ffi::contiguous(&concat_v, false));
+        (concat_k, concat_v)
     }
 
     /// Return the visible FP16 K/V prefix in chronological order for a
@@ -6524,6 +6535,100 @@ mod tests {
         assert_eq!(cache.trim(5), 2);
         assert_eq!(cache.seq_len(), 0);
         assert!(cache.is_empty());
+    }
+
+    /// #678 repro at the cache layer: every suspect prefill shape (single-pass
+    /// over-window, chunked at the window size, chunked with an oversized
+    /// first chunk) followed by a stretch of decode steps must always expose
+    /// exactly the last `min(offset, max_size)` positions, with K/V pairs
+    /// aligned. Keys carry their logical position and values carry 10x that
+    /// position, so any stale slot, wrong window, or K/V misalignment is
+    /// directly visible.
+    #[test]
+    #[allow(clippy::single_range_in_vec_init)]
+    fn rotating_cache_prefill_shapes_expose_exact_window_through_decode() {
+        let to_f32 = |arr: &MlxArray| {
+            ffi::eval(arr);
+            ffi::array_to_raw_bytes(arr)
+                .chunks_exact(4)
+                .map(|c| f32::from_ne_bytes([c[0], c[1], c[2], c[3]]))
+                .collect::<Vec<_>>()
+        };
+        let tokens = |range: std::ops::Range<i32>| {
+            let k: Vec<f32> = range.clone().map(|p| p as f32).collect();
+            let v: Vec<f32> = range.clone().map(|p| (p * 10) as f32).collect();
+            let n = k.len() as i32;
+            (
+                ffi::from_slice_f32(&k, &[1, 1, n, 1]),
+                ffi::from_slice_f32(&v, &[1, 1, n, 1]),
+            )
+        };
+
+        let max = 8;
+        for (name, chunks) in [
+            ("single-pass-12", vec![0..12]),
+            ("chunked-8+5", vec![0..8, 8..13]),
+            ("chunked-12+5", vec![0..12, 12..17]),
+            ("chunked-8+8+3", vec![0..8, 8..16, 16..19]),
+            ("chunked-3+3+3", vec![0..3, 3..6, 6..9]),
+        ] {
+            let mut cache = RotatingKVCache::new(max);
+            // Reference model of the upstream contract: `physical` tracks the
+            // visible temporal length after each operation.
+            let mut physical = 0i32;
+            let mut next_pos = 0;
+            let check = |name: &str,
+                         range: &std::ops::Range<i32>,
+                         offset: i32,
+                         expect_len: i32,
+                         fetched_k: &MlxArray,
+                         fetched_v: &MlxArray| {
+                let k = to_f32(fetched_k);
+                let v = to_f32(fetched_v);
+                // K/V pair alignment: same permutation on both sides.
+                for (kk, vv) in k.iter().zip(&v) {
+                    assert_eq!(
+                        *vv,
+                        kk * 10.0,
+                        "{name}: K/V misaligned after feeding {range:?}: k={k:?} v={v:?}"
+                    );
+                }
+                let mut got: Vec<i32> = k.iter().map(|x| *x as i32).collect();
+                got.sort_unstable();
+                let expect: Vec<i32> = (offset - expect_len..offset).collect();
+                assert_eq!(
+                    got, expect,
+                    "{name}: wrong exposed window after feeding {range:?} (offset {offset})"
+                );
+            };
+
+            for range in chunks {
+                let s = range.len() as i32;
+                // Upstream `_update_concat`: keep at most `max - 1` prior
+                // tokens, append all `s` new ones, return the concatenation.
+                physical = if physical == 0 {
+                    s
+                } else {
+                    let trim = (physical - max + 1).max(0);
+                    (physical - trim) + s
+                };
+                let (k, v) = tokens(range.clone());
+                let (fk, fv) = cache.update_and_fetch(k, v);
+                next_pos = range.end;
+                check(name, &range, cache.offset, physical, &fk, &fv);
+            }
+            for _ in 0..2 * max {
+                // Upstream `_update_in_place`: an oversized buffer is trimmed
+                // back to `max` before the ring write.
+                physical = physical.min(max);
+                let range = next_pos..next_pos + 1;
+                let (k, v) = tokens(range.clone());
+                let (fk, fv) = cache.update_and_fetch(k, v);
+                next_pos = range.end;
+                let expect_len = cache.offset.min(physical);
+                check(name, &range, cache.offset, expect_len, &fk, &fv);
+            }
+        }
     }
 
     #[test]

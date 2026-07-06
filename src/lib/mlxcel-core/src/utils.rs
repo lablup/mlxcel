@@ -639,33 +639,24 @@ pub fn create_causal_mask_with_window_full(
 /// behind issue #401/#408: both [`RotatingKVCache`] (on its first prefill
 /// append) and a dense `KVCache` keep *every* prefill key, so the window must
 /// be enforced by the mask over the full key axis, not by capping the mask and
-/// dropping keys. For that case (`size > window && sliding_offset == 0`) this
-/// returns the uncapped [`create_causal_mask_with_window_full`] `[size, size]`
-/// mask. In every other case (within-window prefill, or a rolled-over rotating
-/// cache that already returns at most `window` keys) it returns the clamped
-/// [`create_causal_mask_with_window`] mask with the same
-/// `sliding_offset.min((window - size).max(0))` adjustment the per-model mask
-/// builders used before, so greedy output stays byte-identical there.
+/// dropping keys. For a fresh prefill (`sliding_offset == 0`) this returns the
+/// `[size, size]` windowed-causal mask.
 ///
-/// The `sliding_offset == 0` gate mirrors the gemma3 prior art: only a fresh
-/// prefill is guaranteed to hold all `size` keys; once a rotating cache has
-/// rolled over (`sliding_offset > 0`) it returns at most `window` keys and the
-/// clamped mask is the matching shape. Models whose attention layer slices K/V
-/// to the trailing window must slice to the mask's key dimension (not blindly
-/// to `window`) so they keep the full key set when this returns the full mask.
+/// For a CONTINUATION multi-token append (`sliding_offset > 0`, e.g. a chunked
+/// prefill chunk or a multi-token verify window), the rotating cache exposes
+/// `min(sliding_offset, window - 1)` retained prior keys plus ALL `size` new
+/// keys (mirroring upstream `RotatingKVCache._update_concat`; issue #678), so
+/// the mask spans `[size, min(sliding_offset, window - 1) + size]` with the
+/// window band enforced by the mask values. The previous clamped
+/// `[size, window]` shape matched the old cache behavior of trimming the
+/// RETURN to `window` keys, which starved the earliest rows of any
+/// `size >= window` continuation chunk of their whole window (all-`-inf` rows
+/// softmax to NaN and decode as `<pad>`).
 ///
 /// Used by: GptOss, Mellum, Exaone4, ExaoneMoE, Ministral3, Step3P5, Gemma3,
-/// Gemma4 sliding-window prefill mask construction.
-///
-/// Gemma3 carries the documented `sliding_offset == 0` invariant (no trim step,
-/// so it can legitimately see `sliding_offset > 0` with `size > window` under
-/// chunked prefill or multi-turn reuse and needs the clamped path). Gemma4
-/// routes through `trim_mask_to_keys`: when `size > window && sliding_offset > 0`,
-/// RotatingKVCache trims to exactly `window` keys and `trim_mask_to_keys` crops
-/// the full `[size, size+offset]` mask to its trailing `window` columns, which
-/// is the same band as the clamped output of this helper (`q-size+1 <= k <=
-/// q-size+window`, independent of offset). Old-trimmed equals new for every
-/// input, so the migration is behaviour-preserving (#410).
+/// Gemma4 sliding-window prefill mask construction. Gemma4 additionally
+/// routes through `trim_mask_to_keys`, which now sees this mask's key axis
+/// match the cache return exactly.
 ///
 /// [`RotatingKVCache`]: crate::cache::RotatingKVCache
 pub fn create_sliding_window_prefill_mask(
@@ -673,12 +664,14 @@ pub fn create_sliding_window_prefill_mask(
     sliding_offset: i32,
     window: i32,
 ) -> UniquePtr<MlxArray> {
-    if size > window && sliding_offset == 0 {
-        create_causal_mask_with_window_full(size, 0, Some(window))
+    // Prior keys the rotating cache retains for this append: none on a fresh
+    // prefill, at most `window - 1` once it has content (#678 contract).
+    let kept_prior = if sliding_offset <= 0 {
+        0
     } else {
-        let effective_offset = sliding_offset.min((window - size).max(0));
-        create_causal_mask_with_window(size, effective_offset, Some(window))
-    }
+        sliding_offset.min((window - 1).max(0))
+    };
+    create_causal_mask_with_window_full(size, kept_prior, Some(window))
 }
 
 /// Dense-`KVCache` variant of [`create_sliding_window_prefill_mask`].
@@ -1402,29 +1395,36 @@ mod tests {
     /// construction it replaced (same `min((window - size).max(0))` clamp).
     #[test]
     fn sliding_window_prefill_mask_clamps_when_rolled_over() {
+        // #678 contract: a rolled-over continuation append exposes
+        // `min(sliding_offset, window - 1)` retained prior keys plus every
+        // new key, so the mask spans that axis instead of clamping to
+        // `[size, window]`.
         let window = 4;
         let size = 2;
-        let sliding_offset = 9; // well past the window → clamped path
+        let sliding_offset = 9; // well past the window → kept prior = window - 1
         let prefill = create_sliding_window_prefill_mask(size, sliding_offset, window);
-        let effective_offset = sliding_offset.min((window - size).max(0));
-        let clamped = create_causal_mask_with_window(size, effective_offset, Some(window));
+        let kept = sliding_offset.min(window - 1);
+        let expected = create_causal_mask_with_window_full(size, kept, Some(window));
         assert_eq!(
             ffi::array_shape(&prefill),
-            ffi::array_shape(&clamped),
-            "rolled-over prefill must match the clamped mask shape"
+            vec![size, kept + size],
+            "rolled-over prefill mask must span kept prior keys plus all new keys"
         );
         let cols = ffi::array_shape(&prefill)[1];
         let at =
             |m: &MlxArray, q: i32, k: i32| ffi::item_f32(&ffi::slice(m, &[q, k], &[q + 1, k + 1]));
         for q in 0..size {
+            let mut attends = 0;
             for k in 0..cols {
                 let a = at(&prefill, q, k);
-                let b = at(&clamped, q, k);
+                let b = at(&expected, q, k);
                 assert_eq!(a.is_finite(), b.is_finite(), "cell ({q},{k}) finiteness");
                 if a.is_finite() {
                     assert_eq!(a, b, "cell ({q},{k}) value");
+                    attends += 1;
                 }
             }
+            assert!(attends > 0, "row {q} must not be fully masked");
         }
     }
 
