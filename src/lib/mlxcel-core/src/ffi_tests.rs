@@ -1798,6 +1798,288 @@ fn test_compiled_gelu_matches_gelu() {
     );
 }
 
+// --- compiled_gelu_approx_mlp_forward: 8-bit decode gate + 4-bit legacy
+// path coverage (issue #680) -------------------------------------------
+//
+// `compiled_gelu_approx_mlp_forward` had zero test coverage before this,
+// including the decode-gated 8-bit fusion added for Gemma 4 mixed-precision
+// checkpoints. The reference below reproduces the function's own
+// op-at-a-time fallback (`quantized_matmul` for gate/up/down plus
+// `gelu_tanh_approx`) using only primitive FFI ops, since none of the
+// exposed `gelu`/`gelu_approx`/`compiled_gelu*` helpers implement the
+// tanh approximation (they are all erf-based; see the comments on
+// `gelu_approx` and `compiled_gelu_approx` in mlx_cxx_bridge.cpp).
+
+/// Reference implementation of `gelu_tanh_approx` (mlx_cxx_internal.h):
+/// `0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))`, built from
+/// primitive FFI ops so it mirrors the exact formula the fused compiled
+/// path and the op-at-a-time fallback both evaluate.
+fn gelu_tanh_approx_ref(x: &UniquePtr<MlxArray>) -> UniquePtr<MlxArray> {
+    let shape = array_shape(x);
+    let half = full_f32(&shape, 0.5, dtype::FLOAT32);
+    let one = full_f32(&shape, 1.0, dtype::FLOAT32);
+    let coeff = full_f32(&shape, 0.797_884_6, dtype::FLOAT32); // sqrt(2/pi)
+    let cubic_coeff = full_f32(&shape, 0.044715, dtype::FLOAT32);
+
+    let x2 = multiply(x, x);
+    let x3 = multiply(&x2, x);
+    let inner = multiply(&coeff, &add(x, &multiply(&cubic_coeff, &x3)));
+    let cdf = multiply(&half, &add(&one, &tanh(&inner)));
+    multiply(x, &cdf)
+}
+
+/// Op-at-a-time GeGLU MLP reference: `down(gelu_tanh_approx(gate) * up)`,
+/// where gate/up/down each go through `quantized_matmul`. This is the
+/// same sequence `compiled_gelu_approx_mlp_forward`'s fallback branch
+/// runs, just built here from separate FFI calls instead of one fused
+/// `Compiled` primitive.
+#[allow(clippy::too_many_arguments)]
+fn reference_qgelu_mlp(
+    x: &UniquePtr<MlxArray>,
+    gate_w: &UniquePtr<MlxArray>,
+    gate_s: &UniquePtr<MlxArray>,
+    gate_b: &UniquePtr<MlxArray>,
+    up_w: &UniquePtr<MlxArray>,
+    up_s: &UniquePtr<MlxArray>,
+    up_b: &UniquePtr<MlxArray>,
+    down_w: &UniquePtr<MlxArray>,
+    down_s: &UniquePtr<MlxArray>,
+    down_b: &UniquePtr<MlxArray>,
+    group_size: i32,
+    bits: i32,
+) -> UniquePtr<MlxArray> {
+    let gate = unsafe {
+        quantized_matmul(
+            x,
+            gate_w,
+            gate_s,
+            gate_b.as_ref().unwrap() as *const MlxArray,
+            true,
+            group_size,
+            bits,
+            "affine",
+        )
+    };
+    let up = unsafe {
+        quantized_matmul(
+            x,
+            up_w,
+            up_s,
+            up_b.as_ref().unwrap() as *const MlxArray,
+            true,
+            group_size,
+            bits,
+            "affine",
+        )
+    };
+    let activated = multiply(&gelu_tanh_approx_ref(&gate), &up);
+    unsafe {
+        quantized_matmul(
+            &activated,
+            down_w,
+            down_s,
+            down_b.as_ref().unwrap() as *const MlxArray,
+            true,
+            group_size,
+            bits,
+            "affine",
+        )
+    }
+}
+
+/// Quantize a random-normal `[out_features, in_features]` weight and
+/// return its `(packed_weight, scales, biases)` triple, ready for both
+/// `compiled_gelu_approx_mlp_forward` and `quantized_matmul`.
+fn random_quantized_weight(
+    out_features: i32,
+    in_features: i32,
+    group_size: i32,
+    bits: i32,
+) -> (
+    UniquePtr<MlxArray>,
+    UniquePtr<MlxArray>,
+    UniquePtr<MlxArray>,
+) {
+    let full = unsafe {
+        random_normal(
+            &[out_features, in_features],
+            dtype::FLOAT32,
+            std::ptr::null(),
+        )
+    };
+    let w = quantize_weights_w(&full, group_size, bits);
+    let s = quantize_weights_scales(&full, group_size, bits);
+    let b = quantize_weights_biases(&full, group_size, bits);
+    (w, s, b)
+}
+
+#[test]
+fn compiled_qgelu_mlp_forward_8bit_decode_matches_reference() {
+    // group_size=64/bits=8 is the case newly covered by the #680 fix: the
+    // compiled path used to be keyed to group_size=64/bits=4 only, so this
+    // shape fell through to the fallback. A single-token `[1, 1, H]` input
+    // satisfies the decode gate (`is_single_token`), so it now takes the
+    // fused `Compiled` branch. Assert it matches the op-at-a-time reference.
+    random_seed(680);
+    let group_size = 64;
+    let bits = 8;
+    let hidden = 128;
+    let intermediate = 256;
+
+    let (gate_w, gate_s, gate_b) = random_quantized_weight(intermediate, hidden, group_size, bits);
+    let (up_w, up_s, up_b) = random_quantized_weight(intermediate, hidden, group_size, bits);
+    let (down_w, down_s, down_b) = random_quantized_weight(hidden, intermediate, group_size, bits);
+
+    let x = unsafe { random_normal(&[1, 1, hidden], dtype::FLOAT32, std::ptr::null()) };
+
+    let compiled_out = unsafe {
+        compiled_gelu_approx_mlp_forward(
+            &x,
+            &gate_w,
+            &gate_s,
+            gate_b.as_ref().unwrap() as *const MlxArray,
+            &up_w,
+            &up_s,
+            up_b.as_ref().unwrap() as *const MlxArray,
+            &down_w,
+            &down_s,
+            down_b.as_ref().unwrap() as *const MlxArray,
+            group_size,
+            bits,
+            "affine",
+        )
+    };
+    let reference = reference_qgelu_mlp(
+        &x, &gate_w, &gate_s, &gate_b, &up_w, &up_s, &up_b, &down_w, &down_s, &down_b, group_size,
+        bits,
+    );
+
+    eval(&compiled_out);
+    eval(&reference);
+    assert_eq!(array_shape(&compiled_out), vec![1, 1, hidden]);
+    assert_eq!(array_shape(&compiled_out), array_shape(&reference));
+
+    let close = allclose(&compiled_out, &reference, 1e-5, 1e-5);
+    eval(&close);
+    assert!(
+        item_bool(&close),
+        "compiled_gelu_approx_mlp_forward (8-bit decode-gated path) must match \
+         the op-at-a-time reference"
+    );
+}
+
+#[test]
+fn compiled_qgelu_mlp_forward_8bit_multi_token_takes_fallback_and_matches_reference() {
+    // Same group_size=64/bits=8 weights, but a `[1, 3, H]` multi-token input:
+    // `is_single_token` is false and this is not the legacy 4-bit shape, so
+    // `compiled_gelu_approx_mlp_forward` must take the op-at-a-time fallback
+    // (prefill stays off the new 8-bit fusion, per the #680 gating). Assert
+    // the fallback output still matches the reference, proving the compiled
+    // and fallback branches agree wherever both are reachable.
+    random_seed(681);
+    let group_size = 64;
+    let bits = 8;
+    let hidden = 128;
+    let intermediate = 256;
+
+    let (gate_w, gate_s, gate_b) = random_quantized_weight(intermediate, hidden, group_size, bits);
+    let (up_w, up_s, up_b) = random_quantized_weight(intermediate, hidden, group_size, bits);
+    let (down_w, down_s, down_b) = random_quantized_weight(hidden, intermediate, group_size, bits);
+
+    let x = unsafe { random_normal(&[1, 3, hidden], dtype::FLOAT32, std::ptr::null()) };
+
+    let fallback_out = unsafe {
+        compiled_gelu_approx_mlp_forward(
+            &x,
+            &gate_w,
+            &gate_s,
+            gate_b.as_ref().unwrap() as *const MlxArray,
+            &up_w,
+            &up_s,
+            up_b.as_ref().unwrap() as *const MlxArray,
+            &down_w,
+            &down_s,
+            down_b.as_ref().unwrap() as *const MlxArray,
+            group_size,
+            bits,
+            "affine",
+        )
+    };
+    let reference = reference_qgelu_mlp(
+        &x, &gate_w, &gate_s, &gate_b, &up_w, &up_s, &up_b, &down_w, &down_s, &down_b, group_size,
+        bits,
+    );
+
+    eval(&fallback_out);
+    eval(&reference);
+    assert_eq!(array_shape(&fallback_out), vec![1, 3, hidden]);
+    assert_eq!(array_shape(&fallback_out), array_shape(&reference));
+
+    let close = allclose(&fallback_out, &reference, 1e-5, 1e-5);
+    eval(&close);
+    assert!(
+        item_bool(&close),
+        "compiled_gelu_approx_mlp_forward (8-bit multi-token fallback) must match \
+         the op-at-a-time reference"
+    );
+}
+
+#[test]
+fn compiled_qgelu_mlp_forward_4bit_legacy_path_matches_reference() {
+    // group_size=64/bits=4 is the pre-#680 "legacy" shape: it is compiled on
+    // every token count (`legacy_compiled_shape`), not gated to single-token
+    // decode like the new 8-bit case above. Use a `[1, 3, H]` multi-token
+    // input specifically, since that is the shape the 8-bit case just proved
+    // takes the fallback: this proves the always-compiled 4-bit branch
+    // still agrees with the op-at-a-time reference there.
+    random_seed(682);
+    let group_size = 64;
+    let bits = 4;
+    let hidden = 128;
+    let intermediate = 256;
+
+    let (gate_w, gate_s, gate_b) = random_quantized_weight(intermediate, hidden, group_size, bits);
+    let (up_w, up_s, up_b) = random_quantized_weight(intermediate, hidden, group_size, bits);
+    let (down_w, down_s, down_b) = random_quantized_weight(hidden, intermediate, group_size, bits);
+
+    let x = unsafe { random_normal(&[1, 3, hidden], dtype::FLOAT32, std::ptr::null()) };
+
+    let compiled_out = unsafe {
+        compiled_gelu_approx_mlp_forward(
+            &x,
+            &gate_w,
+            &gate_s,
+            gate_b.as_ref().unwrap() as *const MlxArray,
+            &up_w,
+            &up_s,
+            up_b.as_ref().unwrap() as *const MlxArray,
+            &down_w,
+            &down_s,
+            down_b.as_ref().unwrap() as *const MlxArray,
+            group_size,
+            bits,
+            "affine",
+        )
+    };
+    let reference = reference_qgelu_mlp(
+        &x, &gate_w, &gate_s, &gate_b, &up_w, &up_s, &up_b, &down_w, &down_s, &down_b, group_size,
+        bits,
+    );
+
+    eval(&compiled_out);
+    eval(&reference);
+    assert_eq!(array_shape(&compiled_out), vec![1, 3, hidden]);
+    assert_eq!(array_shape(&compiled_out), array_shape(&reference));
+
+    let close = allclose(&compiled_out, &reference, 1e-5, 1e-5);
+    eval(&close);
+    assert!(
+        item_bool(&close),
+        "compiled_gelu_approx_mlp_forward (4-bit legacy always-compiled path) must \
+         match the op-at-a-time reference"
+    );
+}
+
 #[test]
 fn test_compiled_geglu_activation() {
     let gate = from_slice_f32(&[1.0, 2.0, 3.0, 4.0], &[1, 4]);

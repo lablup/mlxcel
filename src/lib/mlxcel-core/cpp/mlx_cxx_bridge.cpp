@@ -1680,7 +1680,7 @@ std::unique_ptr<MlxArray> compiled_gelu_mlp_forward(
 }
 
 // Compiled quantized GeGLU MLP using Python MLX's tanh-approx GELU.
-// Used by: Gemma2, Gemma3, Gemma4
+// Used by: Gemma, Gemma2, Gemma3, Gemma4
 namespace {
     // Compiled affine-quantized GeGLU MLP, keyed on (group_size, bits, mode).
     //
@@ -1697,8 +1697,8 @@ namespace {
     //
     // The cache is keyed on (group_size, bits, mode) so each quantization
     // contributes at most one compiled graph. Leaked on purpose, like the other
-    // compile caches in this file, so it outlives MLX's process-wide
-    // CompilerCache at shutdown.
+    // compile caches in this file, so it outlives MLX's `thread_local`
+    // CompilerCache at shutdown (mlx/compile.cpp: each thread re-traces once).
     static std::function<std::vector<array>(const std::vector<array>&)>&
     get_compiled_qgelu_approx_mlp(int group_size, int bits, const std::string& mode) {
         struct Key { int group_size; int bits; std::string mode; };
