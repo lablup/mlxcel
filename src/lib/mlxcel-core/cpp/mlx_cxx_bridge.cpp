@@ -1682,9 +1682,59 @@ std::unique_ptr<MlxArray> compiled_gelu_mlp_forward(
 // Compiled quantized GeGLU MLP using Python MLX's tanh-approx GELU.
 // Used by: Gemma2, Gemma3, Gemma4
 namespace {
-    static std::function<std::vector<array>(const std::vector<array>&)>
-    get_compiled_qgelu_approx_mlp() {
-        auto fn = [](const std::vector<array>& inputs) -> std::vector<array> {
+    // Compiled affine-quantized GeGLU MLP, keyed on (group_size, bits, mode).
+    //
+    // The earlier version hard-coded group_size=64/bits=4, so any other
+    // affine quantization (notably the group_size=64/bits=8 MLP weights that
+    // Gemma 4 mixed-precision checkpoints carry) fell through to the
+    // op-at-a-time fallback in `compiled_gelu_approx_mlp_forward`. That fallback
+    // runs `gelu_tanh_approx` outside any compile window, emitting ~7 Multiply +
+    // ~4 Broadcast + 2 Add + 1 Tanh per layer. On the CPU-bound GB10 decode path
+    // (issue #680) that is the single largest source of the gemma-4 per-step MLX
+    // primitive count. Compiling the whole gate/up/gelu/down chain collapses the
+    // element-wise activation into one fused `Compiled` primitive for any affine
+    // group_size/bits, so 8-bit MLPs get the same fusion 4-bit ones already had.
+    //
+    // The cache is keyed on (group_size, bits, mode) so each quantization
+    // contributes at most one compiled graph. Leaked on purpose, like the other
+    // compile caches in this file, so it outlives MLX's process-wide
+    // CompilerCache at shutdown.
+    static std::function<std::vector<array>(const std::vector<array>&)>&
+    get_compiled_qgelu_approx_mlp(int group_size, int bits, const std::string& mode) {
+        struct Key { int group_size; int bits; std::string mode; };
+        struct KeyHash {
+            size_t operator()(const Key& k) const noexcept {
+                size_t h = std::hash<int>{}(k.group_size);
+                h ^= std::hash<int>{}(k.bits) + 0x9e3779b9 + (h << 6) + (h >> 2);
+                h ^= std::hash<std::string>{}(k.mode) + 0x9e3779b9 + (h << 6) + (h >> 2);
+                return h;
+            }
+        };
+        struct KeyEq {
+            bool operator()(const Key& a, const Key& b) const noexcept {
+                return a.group_size == b.group_size && a.bits == b.bits && a.mode == b.mode;
+            }
+        };
+
+        static std::mutex& mu = *new std::mutex();
+        static std::unordered_map<
+            Key,
+            std::function<std::vector<array>(const std::vector<array>&)>,
+            KeyHash, KeyEq>& cache =
+            *new std::unordered_map<
+                Key,
+                std::function<std::vector<array>(const std::vector<array>&)>,
+                KeyHash, KeyEq>();
+
+        std::lock_guard<std::mutex> lock(mu);
+        Key key{group_size, bits, mode};
+        auto it = cache.find(key);
+        if (it != cache.end()) {
+            return it->second;
+        }
+
+        auto fn = [group_size, bits, mode]
+            (const std::vector<array>& inputs) -> std::vector<array> {
             // inputs: x, gate_w, gate_s, gate_b, up_w, up_s, up_b, down_w, down_s, down_b
             const auto& x = inputs[0];
             const auto& gate_w = inputs[1];
@@ -1697,21 +1747,24 @@ namespace {
             const auto& down_s = inputs[8];
             const auto& down_b = inputs[9];
 
-            int group_size = 64;
-            int bits = 4;
             auto gate = mlx::core::quantized_matmul(
-                x, gate_w, gate_s, gate_b, true, group_size, bits);
+                x, gate_w, gate_s, std::optional<array>(gate_b), true,
+                std::optional<int>(group_size), std::optional<int>(bits), mode);
             auto up = mlx::core::quantized_matmul(
-                x, up_w, up_s, up_b, true, group_size, bits);
+                x, up_w, up_s, std::optional<array>(up_b), true,
+                std::optional<int>(group_size), std::optional<int>(bits), mode);
 
             auto activated = mlx::core::multiply(gelu_tanh_approx(gate), up);
 
             auto down = mlx::core::quantized_matmul(
-                activated, down_w, down_s, down_b, true, group_size, bits);
+                activated, down_w, down_s, std::optional<array>(down_b), true,
+                std::optional<int>(group_size), std::optional<int>(bits), mode);
 
             return {down};
         };
-        return mlx::core::compile(fn, true);
+
+        auto [iter, _] = cache.emplace(key, mlx::core::compile(fn, /*shapeless=*/true));
+        return iter->second;
     }
 }
 
@@ -1732,9 +1785,47 @@ std::unique_ptr<MlxArray> compiled_gelu_approx_mlp_forward(
 ) {
     std::string mode_str(mode.data(), mode.size());
 
-    if (mode_str == "affine" && group_size == 64 && bits == 4
-        && gate_biases && up_biases && down_biases) {
-        static auto compiled_fn = get_compiled_qgelu_approx_mlp();
+    // Compile the whole gate/up/gelu/down chain for affine quantization that
+    // carries biases (all three projections), collapsing `gelu_tanh_approx`'s
+    // ~14 element-wise ops per layer into one fused `Compiled` primitive.
+    //
+    // Two regimes (issue #680):
+    //   * group_size=64/bits=4: compiled on every shape, exactly as before this
+    //     change. Prefill and decode were already validated on this path.
+    //   * any other affine group_size/bits (notably the group_size=64/bits=8
+    //     MLP weights in Gemma 4 mixed-precision checkpoints): compile only the
+    //     single-token DECODE call (`l == 1`). On GB10 the compiled 8-bit
+    //     *prefill* GEMM measured ~8-9% slower and ~0.2-0.7 GB higher peak than
+    //     the op-at-a-time path (the fused shapeless graph forces a
+    //     decode-oriented qmm kernel onto the large prefill matmul), so prefill
+    //     for these checkpoints stays on the op-at-a-time fallback below. Decode
+    //     is single-token and the fused transient is a few KB, so it neither
+    //     regresses peak nor prefill while removing the per-step element-wise ops.
+    //
+    // GB10 decode is weight-bandwidth-bound (the GPU is ~93-95% busy streaming
+    // the 8-bit MLP weights), so this primitive-count cut is throughput-neutral
+    // there; it still removes real CPU dispatch and helps op-count-bound backends.
+    // `MLXCEL_COMPILED_QGELU_MLP=0` forces the fallback (A/B + escape hatch).
+    static const bool compiled_qgelu_enabled = []() {
+        const char* v = std::getenv("MLXCEL_COMPILED_QGELU_MLP");
+        if (!v) {
+            return true;  // default ON
+        }
+        std::string s(v);
+        return !(s == "0" || s == "false" || s == "off" || s == "no");
+    }();
+
+    // `l == 1` single-token decode: x is [B, 1, hidden].
+    const auto& x_shape = x.inner.shape();
+    const bool is_single_token =
+        x_shape.size() >= 2 && x_shape[x_shape.size() - 2] == 1;
+    // The pre-#680 always-compiled case, preserved bit-for-bit.
+    const bool legacy_compiled_shape = (group_size == 64 && bits == 4);
+
+    if (compiled_qgelu_enabled && mode_str == "affine"
+        && gate_biases && up_biases && down_biases
+        && (legacy_compiled_shape || is_single_token)) {
+        auto& compiled_fn = get_compiled_qgelu_approx_mlp(group_size, bits, mode_str);
 
         auto result = compiled_fn({
             x.inner,
