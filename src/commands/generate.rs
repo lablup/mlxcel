@@ -683,8 +683,16 @@ fn load_cli_prompt(
         // `<think>\n\n</think>` block; models not trained with that block
         // (e.g. the Qwen3-Omni Instruct thinker) emit an immediate
         // end-of-text after it.
+        //
+        // Exception (issue #686): the Gemma-4 thinking-channel template's
+        // thinking-OFF branch already renders a well-formed CLOSED priming
+        // scaffold that makes the model answer directly, matching
+        // transformers' no-`enable_thinking` default. Forcing thinking on there
+        // instead yields a bare `<|turn>model\n` that greedy-collapses to
+        // `<pad>`, so keep its default at false.
         if let Some(p) = processor.as_mut()
             && tokenizer.infer_thinking_markers().has_thinking()
+            && !p.wants_thinking_default_off()
         {
             p.set_default_enable_thinking(true);
         }

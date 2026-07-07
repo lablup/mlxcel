@@ -1698,7 +1698,12 @@ pub async fn start_server(mut startup: ServerStartupConfig) -> Result<()> {
     // (`--chat-template-kwargs`, `LLAMA_ARG_CHAT_TEMPLATE_KWARGS`)
     // continue to win on conflict via `merge_server_and_request`.
     let thinking_markers = tokenizer.infer_thinking_markers();
-    if thinking_markers.has_thinking() {
+    // Issue #686: the Gemma-4 thinking-channel template's thinking-OFF branch
+    // is the correct interactive default (a CLOSED `<|channel>thought\n<channel|>`
+    // priming scaffold matching transformers' no-`enable_thinking` render), so
+    // the `has_thinking` heuristic below must not flip it on; forcing thinking
+    // there produces a bare `<|turn>model\n` that greedy-collapses to `<pad>`.
+    if thinking_markers.has_thinking() && !chat_template.wants_thinking_default_off() {
         tracing::info!(
             think_start = ?thinking_markers.think_start,
             think_end = ?thinking_markers.think_end,

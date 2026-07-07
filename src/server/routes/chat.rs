@@ -948,9 +948,13 @@ pub(crate) const MAX_TOOLS: usize = 128;
 /// * `<think>\n` — Qwen3 / Qwen3.5 / Exaone4 / Jamba and similar templates
 ///   that emit `<think>\n` at the end of the generation prompt to prime
 ///   reasoning. The close marker in generated text is `</think>`.
-/// * `<|channel>thought\n` — Gemma 4 when `enable_thinking=true`, courtesy
-///   of [`crate::server::chat_template::ChatTemplateProcessor::patch_gemma4_generation_prompt`].
-///   The close marker in generated text is `<channel|>`.
+/// * `<|channel>thought\n` is the Gemma 4 open reasoning channel. Its close
+///   marker in generated text is `<channel|>`. Since issue #686 the Gemma 4
+///   generation prompt is rendered faithfully to the template (no post-render
+///   priming patch): the interactive default ends with the CLOSED
+///   `<|channel>thought\n<channel|>` scaffold (not primed for open thinking),
+///   so this suffix only matches a prompt that genuinely leaves the channel
+///   open (e.g. a caller-crafted continuation).
 ///
 /// Ordered longest-first so the match is unambiguous.
 const OPEN_THINKING_SUFFIXES: &[&str] = &["<|channel>thought\n", "<think>\n"];
@@ -1154,8 +1158,9 @@ mod tests {
 
     #[test]
     fn prompt_primed_detection_matches_exact_suffix() {
-        // Prompts produced by `patch_gemma4_generation_prompt` end in
-        // exactly `<|channel>thought\n`. Only that exact suffix counts.
+        // A prompt that genuinely ends in exactly `<|channel>thought\n`
+        // (open channel) is primed for open thinking. Only that exact suffix
+        // counts.
         assert!(is_prompt_primed_open_thinking(
             "<|turn>model\n<|channel>thought\n"
         ));
