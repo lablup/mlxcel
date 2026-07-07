@@ -2916,6 +2916,68 @@ mod sanitize_tests {
     }
 
     #[test]
+    fn sanitize_weights_preserves_per_expert_gate_up_down_stack_order() {
+        let num_experts: usize = 2;
+        let out = 2i32;
+        let in_dim = 4i32;
+        let config = moe_config(1, num_experts);
+
+        let mut weights = WeightMap::new();
+        for expert in 0..num_experts {
+            for (proj, base) in [
+                ("gate_proj", 10.0_f32),
+                ("up_proj", 20.0_f32),
+                ("down_proj", 30.0_f32),
+            ] {
+                let value = base + expert as f32;
+                weights.insert(
+                    format!("model.layers.0.mlp.experts.{}.{}.weight", expert, proj),
+                    mlxcel_core::from_slice_f32(
+                        &vec![value; (out * in_dim) as usize],
+                        &[out, in_dim],
+                    ),
+                );
+            }
+        }
+
+        let result = sanitize_weights(weights, &config);
+
+        for (proj, base) in [
+            ("gate_proj", 10.0_f32),
+            ("up_proj", 20.0_f32),
+            ("down_proj", 30.0_f32),
+        ] {
+            let key = format!("model.layers.0.mlp.switch_mlp.{}.weight", proj);
+            let arr = result
+                .get(key.as_str())
+                .unwrap_or_else(|| panic!("missing stacked weight at {key}"));
+            assert_eq!(
+                mlxcel_core::array_shape(arr),
+                vec![num_experts as i32, out, in_dim],
+                "stacked shape for {proj} should be [num_experts, out, in_dim]"
+            );
+
+            for expert in 0..num_experts {
+                let actual = mlxcel_core::slice(
+                    arr,
+                    &[expert as i32, 0, 0],
+                    &[expert as i32 + 1, out, in_dim],
+                );
+                let expected = mlxcel_core::from_slice_f32(
+                    &vec![base + expert as f32; (out * in_dim) as usize],
+                    &[1, out, in_dim],
+                );
+                let close = mlxcel_core::allclose(&actual, &expected, 1e-6, 1e-6);
+                mlxcel_core::eval(&close);
+                assert!(
+                    mlxcel_core::item_bool(&close),
+                    "{proj} expert {expert} should preserve its source values"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn sanitize_weights_stacks_per_expert_gate_up_down_proj_with_scales_biases() {
         // Quantized per-expert gate_proj layout: weight + scales + biases per expert.
         let num_experts: usize = 2;
