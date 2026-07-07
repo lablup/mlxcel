@@ -784,6 +784,105 @@ fn build_plamo_tokenizer(model_path: &Path) -> Result<tokenizers::Tokenizer> {
     })
 }
 
+/// Repair Gemma-family `tokenizer.json` exports that dropped the
+/// BOS-inserting post-processor (issue #686).
+///
+/// `tokenizer_class: "GemmaTokenizer"` semantics in transformers prepend
+/// `<bos>` on every encode with special tokens (`add_bos_token` defaults to
+/// true), and Gemma model quality collapses without it: measured on the #686
+/// docs corpus, dropping BOS costs gemma-3-4b ~3.6 nats/token and
+/// gemma-4-12b ~6.6 nats/token of teacher-forced NLL. Gemma 3 checkpoints
+/// ship a `TemplateProcessing` post-processor that inserts `<bos>`, but
+/// current Gemma 4 exports ship a passthrough post-processor, so every
+/// raw-text path (CLI `generate`, `/v1/completions`, teacher-forced scoring)
+/// silently ran BOS-less. Chat-template paths were unaffected because the
+/// Gemma 4 template emits `{{ bos_token }}` itself.
+///
+/// The repair installs the exact `TemplateProcessing` Gemma 3 ships
+/// (`<bos> $A` single, `<bos> $A <bos>:1 $B:1` pair) when ALL hold:
+/// - `tokenizer_config.json` declares a Gemma tokenizer class, or an
+///   explicit `"add_bos_token": true`;
+/// - `add_bos_token` is not explicitly `false`;
+/// - the configured `bos_token` resolves to a vocab id; and
+/// - an encode probe shows the loaded post-processor does NOT already
+///   insert that id (so correct exports such as Gemma 3 are untouched).
+fn ensure_bos_post_processor(tokenizer: &mut tokenizers::Tokenizer, model_path: &Path) {
+    let config_path = model_path.join("tokenizer_config.json");
+    let Ok(raw) = std::fs::read_to_string(&config_path) else {
+        return;
+    };
+    let Ok(config) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return;
+    };
+
+    let add_bos = config.get("add_bos_token").and_then(|v| v.as_bool());
+    if add_bos == Some(false) {
+        return;
+    }
+    let tokenizer_class = config
+        .get("tokenizer_class")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let is_gemma_class = matches!(tokenizer_class, "GemmaTokenizer" | "GemmaTokenizerFast");
+    if add_bos != Some(true) && !is_gemma_class {
+        return;
+    }
+
+    // bos_token is either a plain string or an AddedToken-style object.
+    let bos_token = match config.get("bos_token") {
+        Some(serde_json::Value::String(s)) => s.clone(),
+        Some(serde_json::Value::Object(o)) => o
+            .get("content")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string(),
+        _ => String::new(),
+    };
+    if bos_token.is_empty() {
+        return;
+    }
+    let Some(bos_id) = tokenizer.token_to_id(&bos_token) else {
+        return;
+    };
+
+    // Probe: a correct export already inserts BOS on encode-with-specials.
+    if let Ok(probe) = tokenizer.encode("bos probe", true)
+        && probe.get_ids().first() == Some(&bos_id)
+    {
+        return;
+    }
+
+    let template = tokenizers::processors::template::TemplateProcessing::builder()
+        .try_single(format!("{bos_token} $A"))
+        .and_then(|builder| builder.try_pair(format!("{bos_token} $A {bos_token}:1 $B:1")))
+        .and_then(|builder| {
+            builder
+                .special_tokens(vec![(bos_token.clone(), bos_id)])
+                .build()
+                .map_err(|e| e.to_string())
+        });
+    match template {
+        Ok(template) => {
+            tokenizer.with_post_processor(Some(template));
+            tracing::info!(
+                model_path = %model_path.display(),
+                bos_token,
+                bos_id,
+                "tokenizer.json lacks the Gemma BOS post-processor; installed \
+                 the standard `<bos> $A` TemplateProcessing (issue #686)"
+            );
+        }
+        Err(err) => {
+            tracing::warn!(
+                model_path = %model_path.display(),
+                error = %err,
+                "failed to install the Gemma BOS post-processor; raw-text \
+                 encodes will remain BOS-less"
+            );
+        }
+    }
+}
+
 pub fn load_tokenizer(model_path: &Path) -> Result<MlxcelTokenizer> {
     // Model-specific override: some official checkpoints ship a stale
     // tokenizer.json that does not match their weights (starmie-era
@@ -805,8 +904,9 @@ pub fn load_tokenizer(model_path: &Path) -> Result<MlxcelTokenizer> {
     // Try HuggingFace tokenizer.json first
     let tokenizer_json_path = model_path.join("tokenizer.json");
     if tokenizer_json_path.exists() {
-        let tokenizer = tokenizers::Tokenizer::from_file(tokenizer_json_path)
+        let mut tokenizer = tokenizers::Tokenizer::from_file(tokenizer_json_path)
             .map_err(|e| anyhow::anyhow!(e))?;
+        ensure_bos_post_processor(&mut tokenizer, model_path);
         return Ok(MlxcelTokenizer::HuggingFace(tokenizer));
     }
 
