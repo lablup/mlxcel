@@ -4226,6 +4226,87 @@ mod tests {
         );
     }
 
+    /// Fill a `[rows, head_dim]` buffer with a deterministic pseudo-random
+    /// tensor whose every length-`head_dim` row is RMS-normalized (unit RMS,
+    /// so each element is O(1) and the row L2 norm is `sqrt(head_dim)`). This
+    /// mimics the post `q_norm` / `k_norm` distribution of Gemma 4, where the
+    /// attention scale is 1.0 and pre-softmax scores therefore reach O(head_dim).
+    fn rms_normed_rows(rows: usize, head_dim: usize, seed: u64) -> Vec<f32> {
+        let mut state = seed.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut next = || {
+            // SplitMix64 -> uniform in [-1, 1).
+            state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+            let mut z = state;
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            z ^= z >> 31;
+            ((z >> 11) as f32 / (1u64 << 53) as f32) * 2.0 - 1.0
+        };
+        let mut out = vec![0.0_f32; rows * head_dim];
+        for r in 0..rows {
+            let row = &mut out[r * head_dim..(r + 1) * head_dim];
+            for x in row.iter_mut() {
+                *x = next();
+            }
+            let ms: f32 = row.iter().map(|v| v * v).sum::<f32>() / head_dim as f32;
+            let inv_rms = 1.0 / ms.sqrt().max(1e-6);
+            for x in row.iter_mut() {
+                *x *= inv_rms;
+            }
+        }
+        out
+    }
+
+    /// Numerical parity guard for the head_dim-256 single-query decode path
+    /// investigated under issue #688: the maskless single-query path (which
+    /// routes head_dim-256 attention to the CUDA `sdpa_vector` kernel) must match
+    /// the explicit-mask materializing SDPA for a Gemma-4-shaped decode step,
+    /// INCLUDING the `scale = 1.0` regime where pre-softmax scores reach
+    /// O(head_dim). Gemma 4 uses `scale = 1.0` (its `q_norm`/`k_norm` absorb the
+    /// usual `1/sqrt(d)`), unlike gemma-3 / qwen3.5 (`scale = 1/sqrt(d)`). This
+    /// test confirms the vector kernel is numerically correct EAGERLY at that
+    /// scale; the actual #688 `<pad>` collapse was a CUDA-graph read-before-write
+    /// hazard in Gemma 4's decode (not the kernel math), fixed by disabling CUDA
+    /// graph capture for Gemma 4 in `crate`-external model loading. Keeping this
+    /// guard prevents a future regression of the eager vector-kernel numerics.
+    #[test]
+    fn single_query_maskless_matches_masked_gemma4_large_scale() {
+        let n_heads = 16_i32;
+        let n_kv = 8_i32;
+        let head_dim = 256_i32;
+        let k_len = 25_i32;
+
+        let q_data = rms_normed_rows(n_heads as usize, head_dim as usize, 1);
+        let k_data = rms_normed_rows((n_kv * k_len) as usize, head_dim as usize, 2);
+        let v_data = rms_normed_rows((n_kv * k_len) as usize, head_dim as usize, 3);
+
+        let q = crate::from_slice_f32(&q_data, &[1, n_heads, 1, head_dim]);
+        let k = crate::from_slice_f32(&k_data, &[1, n_kv, k_len, head_dim]);
+        let v = crate::from_slice_f32(&v_data, &[1, n_kv, k_len, head_dim]);
+
+        for &scale in &[1.0_f32, 1.0 / (head_dim as f32).sqrt()] {
+            // Maskless single-query path: `mask = None` routes to the fused
+            // decode kernel (the sdpa_vector kernel for head_dim 256 on CUDA).
+            let out_maskless = attention(&q, &k, &v, scale, None, 0.0, 0);
+            // Explicit all-attend mask: `create_causal_mask(1, k_len - 1)` is
+            // all-zero for a single query, forcing the materializing SDPA path.
+            let mask = crate::utils::create_causal_mask(1, k_len - 1);
+            let out_masked = attention(&q, &k, &v, scale, Some(mask.as_ref().unwrap()), 0.0, 0);
+
+            let diff =
+                crate::subtract(out_maskless.as_ref().unwrap(), out_masked.as_ref().unwrap());
+            let diff_abs = crate::abs(&diff);
+            let max_diff_arr = crate::max_all(&diff_abs);
+            crate::eval(&max_diff_arr);
+            let max_diff = crate::item_f32(&max_diff_arr);
+            assert!(
+                max_diff.is_finite() && max_diff < 2e-3,
+                "maskless single-query decode must match the masked reference at \
+                 scale={scale}; max abs diff = {max_diff}"
+            );
+        }
+    }
+
     /// Verify that the detection condition uses the canonical NA check
     /// (has_neural_accelerator && macos_supports_na) rather than just
     /// metal_version >= 4.

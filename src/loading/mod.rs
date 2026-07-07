@@ -355,11 +355,58 @@ pub fn context_window_from_config(config: &serde_json::Value) -> Option<usize> {
     None
 }
 
+/// Force CUDA graph capture off for Gemma 4 checkpoints (issue #688).
+///
+/// mlxcel's Gemma 4 incremental (single-query, KV-cache) decode has a CUDA-graph
+/// read-before-write hazard: greedy (temperature 0) decode is nondeterministic
+/// run to run and collapses to `<pad>` after 1-3 tokens on CUDA, while Apple
+/// mlx_lm decodes the same model and prompt coherently. Prefill and the first
+/// token are correct; the collapse is in the incremental decode graph. The
+/// hazard is not a single op: disabling the head_dim-256 `sdpa_vector` decode
+/// kernel (`MLXCEL_SDPA_VECTOR_LARGE_D=0`), the maskless single-query attention
+/// path (`MLXCEL_DISABLE_SINGLE_QUERY_MASKLESS=1`), or `mx.compile`
+/// (`MLX_DISABLE_COMPILE=1`) each only lengthens the coherent prefix; only
+/// turning off CUDA graph capture removes it entirely, restoring deterministic,
+/// coherent, mlx_lm-matching decode. Gemma 3, Qwen 3.5 and other families do not
+/// exhibit the collapse and keep graph capture on.
+///
+/// This writes `MLX_USE_CUDA_GRAPHS=0` before the first GPU eval so MLX's
+/// process-wide `use_cuda_graphs()` static (read once, on the first graph-eligible
+/// eval) picks it up. An explicit operator value (either direction) is respected.
+/// Non-Gemma-4 loads are untouched.
+fn maybe_disable_cuda_graphs_for_gemma4(model_type: ModelType) {
+    let is_gemma4 = matches!(
+        model_type,
+        ModelType::Gemma4 | ModelType::Gemma4VLM | ModelType::Gemma4Unified
+    );
+    if !is_gemma4 {
+        return;
+    }
+    // Respect an explicit operator override (either direction).
+    if std::env::var_os("MLX_USE_CUDA_GRAPHS").is_some() {
+        return;
+    }
+    // SAFETY: set_var mutates the process-global environment and is unsound only
+    // under a concurrent getenv/setenv on another thread. This runs inside the
+    // model load, on the single loading thread, before any weights are realised
+    // (the first GPU eval) and therefore before MLX's `use_cuda_graphs` static is
+    // first read and before any generation worker thread is spawned. It mirrors
+    // the established one-shot startup env write in
+    // `mlxcel_core::configure_ptx_cache`.
+    unsafe { std::env::set_var("MLX_USE_CUDA_GRAPHS", "0") };
+    tracing::info!(
+        "Gemma 4 detected: disabling CUDA graph capture (MLX_USE_CUDA_GRAPHS=0) to \
+         avoid the decode-path graph hazard from issue #688. Set MLX_USE_CUDA_GRAPHS \
+         explicitly to override."
+    );
+}
+
 /// Load a model from a directory (or file — parent directory will be used)
 pub fn load_model(model_path: &Path) -> Result<(LoadedModel, MlxcelTokenizer)> {
     let model_path = resolve_model_dir(model_path);
     let model_path = model_path.as_path();
     let model_type = get_model_type(model_path)?;
+    maybe_disable_cuda_graphs_for_gemma4(model_type);
 
     // Whisper is an encoder-decoder ASR model, not a text generator. It is
     // wired into the speech-to-text audio endpoints at server startup rather
@@ -466,6 +513,7 @@ pub fn load_model_with_tensor_parallel(
     let model_path = resolve_model_dir(model_path);
     let model_path = model_path.as_path();
     let support = validate_supported_runtime(model_path, shard_config.clone(), adapter_path)?;
+    maybe_disable_cuda_graphs_for_gemma4(support.summary.model_type);
     let model = match support.summary.model_type {
         ModelType::Llama | ModelType::Qwen2 => LoadedModel::TensorParallelLlama(
             TensorParallelLlamaModel::from_model_dir(model_path, shard_config.clone())?,
@@ -508,6 +556,8 @@ pub fn load_model_with_adapter(
 ) -> Result<(LoadedModel, MlxcelTokenizer)> {
     let model_path = resolve_model_dir(model_path);
     let model_path = model_path.as_path();
+    // Disable CUDA graphs for Gemma 4 before any weight realisation (issue #688).
+    maybe_disable_cuda_graphs_for_gemma4(get_model_type(model_path)?);
     // Load base weights
     let base_weights = mlxcel_core::weights::load_weights_from_dir(model_path)
         .map_err(|e| anyhow::anyhow!("{}", e))?;
@@ -525,6 +575,7 @@ pub fn load_model_with_adapter(
 /// Build a model from pre-loaded weights (used by adapter loading)
 fn load_model_from_weights(model_path: &Path, weights: &mut WeightMap) -> Result<LoadedModel> {
     let model_type = get_model_type(model_path)?;
+    maybe_disable_cuda_graphs_for_gemma4(model_type);
     let config_path = model_path.join("config.json");
     let config_str = std::fs::read_to_string(&config_path)?;
     let config_str = sanitize_config_json(&config_str);
