@@ -168,6 +168,16 @@ impl LoadedStageExecutor {
             stage.stage_index
         );
 
+        // Issue #688 (M2 hardening): defense-in-depth CUDA-graph disable for a
+        // Gemma 4 pipeline stage, mirroring the non-PP backend-seam load sites.
+        // Both the in-process and the remote-process pipeline loaders reach this
+        // common stage-load chokepoint before any stage weights are realised. The
+        // authoritative env write already happens on the main startup thread in
+        // `start_server`; this idempotent call (guarded by `var_os`) only takes
+        // effect if a future pipeline entry ever bypasses that hoist, so the env is
+        // set before the stage's first GPU eval regardless.
+        crate::loading::maybe_disable_cuda_graphs_for_gemma4_for_path(model_dir);
+
         let filter = LayerFilter::from_stage(stage);
         let family = resolve_stage_family(model_dir)?;
         let backend =

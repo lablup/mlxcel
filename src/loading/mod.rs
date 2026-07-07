@@ -374,6 +374,20 @@ pub fn context_window_from_config(config: &serde_json::Value) -> Option<usize> {
 /// process-wide `use_cuda_graphs()` static (read once, on the first graph-eligible
 /// eval) picks it up. An explicit operator value (either direction) is respected.
 /// Non-Gemma-4 loads are untouched.
+///
+/// The sound home for this write is the main startup thread, upstream of any
+/// worker spawn: the server path calls
+/// [`maybe_disable_cuda_graphs_for_gemma4_for_path`] from `start_server` before the
+/// generation or pipeline worker is created (issue #688 M1/M2 hardening), and the
+/// CLI `generate`/`run` path loads on the main thread. The per-load-site calls that
+/// invoke this helper remain as idempotent defense-in-depth.
+///
+/// Invariant: this env-based lever assumes one model per process. The server is
+/// single-model-per-process today (no in-process hot-swap in `start_server`), so a
+/// non-Gemma eval never latches `use_cuda_graphs = true` before a later Gemma 4
+/// load. If in-process model hot-swap is ever added, a non-Gemma model loaded first
+/// would make a subsequent Gemma 4 `set_var` a silent no-op (the static is already
+/// latched) and this approach would need revisiting.
 fn maybe_disable_cuda_graphs_for_gemma4(model_type: ModelType) {
     let is_gemma4 = matches!(
         model_type,
@@ -386,19 +400,44 @@ fn maybe_disable_cuda_graphs_for_gemma4(model_type: ModelType) {
     if std::env::var_os("MLX_USE_CUDA_GRAPHS").is_some() {
         return;
     }
-    // SAFETY: set_var mutates the process-global environment and is unsound only
-    // under a concurrent getenv/setenv on another thread. This runs inside the
-    // model load, on the single loading thread, before any weights are realised
-    // (the first GPU eval) and therefore before MLX's `use_cuda_graphs` static is
-    // first read and before any generation worker thread is spawned. It mirrors
-    // the established one-shot startup env write in
-    // `mlxcel_core::configure_ptx_cache`.
+    // SAFETY: set_var mutates the process-global environment and is unsound under
+    // Rust 2024 only when another thread runs getenv/setenv concurrently. The
+    // authoritative write is hoisted to the main startup thread, upstream of any
+    // worker spawn and of the first GPU eval that latches MLX's `use_cuda_graphs`
+    // static: `maybe_disable_cuda_graphs_for_gemma4_for_path` runs in `start_server`
+    // for every serve path (batched, legacy, tensor-parallel, XLA, in-process and
+    // remote pipeline-parallel), and the CLI `generate`/`run` path loads on the main
+    // thread. On the server path this per-load-site call runs inside the spawned
+    // worker, but by then the main-thread write has already set `MLX_USE_CUDA_GRAPHS`,
+    // so the `var_os` guard above returns early and no set_var executes off the main
+    // thread. This write is therefore reached only on a main-thread load (CLI,
+    // benches) or if a future entry bypasses the hoist. It mirrors the established
+    // one-shot startup env writes `mlxcel_core::ensure_persistent_ptx_cache`,
+    // `hardware::apply_metal_ops_per_buffer_default`, and
+    // `TurboKvCacheArgs::apply_to_environment`, all written upstream of runtime
+    // bring-up.
     unsafe { std::env::set_var("MLX_USE_CUDA_GRAPHS", "0") };
     tracing::info!(
         "Gemma 4 detected: disabling CUDA graph capture (MLX_USE_CUDA_GRAPHS=0) to \
          avoid the decode-path graph hazard from issue #688. Set MLX_USE_CUDA_GRAPHS \
          explicitly to override."
     );
+}
+
+/// Path-based entry to [`maybe_disable_cuda_graphs_for_gemma4`] for the main-thread
+/// hoist (issue #688 M1/M2 hardening).
+///
+/// Peeks the on-disk model type and, for a Gemma 4 checkpoint, performs the
+/// `MLX_USE_CUDA_GRAPHS=0` write on the calling (main startup) thread, before any
+/// generation or pipeline worker is spawned and before the first GPU eval. A
+/// detection error (unreadable or absent `config.json`) is a no-op, which preserves
+/// the baseline for non-model paths and defers to the per-load-site calls. Kept as a
+/// thin wrapper so the Gemma-4 detection, operator-override guard, idempotency, and
+/// logging all stay in the single [`maybe_disable_cuda_graphs_for_gemma4`] helper.
+pub(crate) fn maybe_disable_cuda_graphs_for_gemma4_for_path(model_path: &Path) {
+    if let Ok(model_type) = get_model_type(model_path) {
+        maybe_disable_cuda_graphs_for_gemma4(model_type);
+    }
 }
 
 /// Load a model from a directory (or file — parent directory will be used)

@@ -1542,6 +1542,20 @@ fn install_surgery_pipeline_for_server(startup: &ServerStartupConfig) -> Result<
 /// Shared entry point used by both `mlxcel serve` and `mlxcel-server`.
 pub async fn start_server(mut startup: ServerStartupConfig) -> Result<()> {
     initialize_server_logging(&startup)?;
+
+    // Issue #688 (M1/M2 hardening): disable CUDA graph capture for Gemma 4 here,
+    // on the main startup thread, before any generation or pipeline worker is
+    // spawned and before the first GPU eval latches MLX's process-wide
+    // `use_cuda_graphs` static. Performing the env write on this thread (rather than
+    // only at the per-load-site calls, which run inside the spawned worker) keeps it
+    // sound under Rust 2024's concurrent-getenv rule. This single chokepoint covers
+    // every serve path that flows through `start_server`: the batched, legacy,
+    // tensor-parallel and XLA workers, the in-process pipeline-parallel worker, and
+    // the remote pipeline stage worker (the `serve_remote_pipeline_stage` branch
+    // below) — all load `startup.model_path`. Non-Gemma-4 models and an explicit
+    // `MLX_USE_CUDA_GRAPHS` operator override are left untouched.
+    crate::loading::maybe_disable_cuda_graphs_for_gemma4_for_path(&startup.model_path);
+
     super::media::configure_image_input_limits(super::media::ImageInputLimits {
         max_payload_bytes: startup.max_image_payload_size,
         max_images_per_request: startup.max_images_per_request,
