@@ -1,0 +1,11 @@
+model,prompt_tokens,generated_tokens,prefill_chunk,prefill_ms,prefill_tok_s,decode_ms,decode_tok_s,mlx_peak_gb,sys_peak_gb,date,hardware,mlx_version,build_type,notes
+gemma-4-12b-it-4bit,512,64,,430.18,1190.20,4374.57,14.63,11.60,,2026-07-07,NVIDIA_GB10_122GB,0.3.3,release,op-at-a-time MLP (MLXCEL_COMPILED_QGELU_MLP=0)
+gemma-4-12b-it-4bit,512,64,,430.03,1190.61,4347.83,14.72,11.60,,2026-07-07,NVIDIA_GB10_122GB,0.3.3,release,decode-gated compiled 8-bit MLP (#680; default on)
+gemma-4-12b-it-4bit,2048,64,,2119.14,966.43,4447.53,14.39,13.00,,2026-07-07,NVIDIA_GB10_122GB,0.3.3,release,op-at-a-time MLP (MLXCEL_COMPILED_QGELU_MLP=0)
+gemma-4-12b-it-4bit,2048,64,,2140.54,956.77,4429.07,14.45,13.00,,2026-07-07,NVIDIA_GB10_122GB,0.3.3,release,decode-gated compiled 8-bit MLP (#680; default on)
+gemma-4-12b-it-4bit,8192,64,,10047.84,815.30,4475.52,14.30,14.51,,2026-07-07,NVIDIA_GB10_122GB,0.3.3,release,op-at-a-time MLP (MLXCEL_COMPILED_QGELU_MLP=0)
+gemma-4-12b-it-4bit,8192,64,,9925.73,825.33,4450.63,14.38,14.51,,2026-07-07,NVIDIA_GB10_122GB,0.3.3,release,decode-gated compiled 8-bit MLP (#680; default on)
+llama-3.1-8b-4bit,2048,64,,741.30,2762.73,1343.97,47.62,7.08,,2026-07-07,NVIDIA_GB10_122GB,0.3.3,release,non-gemma control; op-at-a-time (MLXCEL_COMPILED_QGELU_MLP=0)
+llama-3.1-8b-4bit,2048,64,,737.31,2777.68,1343.69,47.63,7.08,,2026-07-07,NVIDIA_GB10_122GB,0.3.3,release,non-gemma control; default; SwiGLU 4-bit MLP so unaffected
+gemma-4-31b-it-4bit,2048,64,,5010.52,408.74,7339.45,8.72,21.67,,2026-07-07,NVIDIA_GB10_122GB,0.3.3,release,family scaling; op-at-a-time (MLXCEL_COMPILED_QGELU_MLP=0)
+gemma-4-31b-it-4bit,2048,64,,4758.14,430.42,7322.65,8.74,22.16,,2026-07-07,NVIDIA_GB10_122GB,0.3.3,release,family scaling; uniform 4-bit MLP already compiled so unaffected; prefill/peak delta is run-to-run noise
