@@ -273,7 +273,7 @@ mod cache_isolation {
                 let weights = make_test_gemma4_weight_map();
                 Gemma4Wrapper::new(Gemma4Model::from_weights(&weights, &args).unwrap())
             };
-            let prompt: Vec<i32> = (0..24).map(|i| (i % 7) as i32).collect();
+            let prompt: Vec<i32> = (0..24).map(|i| i % 7).collect();
 
             let single = build();
             let mut caches = single.make_caches();
