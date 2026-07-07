@@ -1,0 +1,15 @@
+shape,bits,out_dim,in_dim,mb_per_call,us_per_call,gb_per_s,t_per_batch,rounds,date,hardware,mlx_version,build_type,notes
+g12b_mlp_gate_8b,8,15360,3840,62.67,293.1,213.8,64,5,2026-07-07,NVIDIA_GB10_122GB,0.3.3,release,gemma-4-12b MLP gate/up as shipped (8-bit mixed checkpoint)
+g12b_mlp_down_8b,8,3840,15360,62.67,292.9,214.0,64,5,2026-07-07,NVIDIA_GB10_122GB,0.3.3,release,gemma-4-12b MLP down as shipped (8-bit)
+g12b_mlp_gate_4b,4,15360,3840,33.18,160.9,206.2,64,5,2026-07-07,NVIDIA_GB10_122GB,0.3.3,release,requantization counterfactual (uniform 4-bit)
+g12b_mlp_down_4b,4,3840,15360,33.18,165.0,201.0,64,5,2026-07-07,NVIDIA_GB10_122GB,0.3.3,release,requantization counterfactual (uniform 4-bit)
+g12b_attn_q_4b,4,4096,3840,8.85,47.3,186.9,64,5,2026-07-07,NVIDIA_GB10_122GB,0.3.3,release,gemma-4-12b attention q_proj (4-bit as shipped)
+g12b_attn_kv_4b,4,2048,3840,4.42,25.7,172.1,64,5,2026-07-07,NVIDIA_GB10_122GB,0.3.3,release,gemma-4-12b attention k/v_proj
+g12b_attn_o_4b,4,3840,4096,8.85,52.2,169.6,64,5,2026-07-07,NVIDIA_GB10_122GB,0.3.3,release,gemma-4-12b attention o_proj
+l8b_mlp_gate_4b,4,14336,4096,33.03,158.3,208.7,64,5,2026-07-07,NVIDIA_GB10_122GB,0.3.3,release,llama-3.1-8b MLP gate/up (control)
+l8b_mlp_down_4b,4,4096,14336,33.03,159.5,207.1,64,5,2026-07-07,NVIDIA_GB10_122GB,0.3.3,release,llama-3.1-8b MLP down (control)
+l8b_attn_q_4b,4,4096,4096,9.44,49.8,189.6,64,5,2026-07-07,NVIDIA_GB10_122GB,0.3.3,release,llama-3.1-8b attention q/o_proj
+l8b_attn_kv_4b,4,1024,4096,2.36,13.3,177.3,64,5,2026-07-07,NVIDIA_GB10_122GB,0.3.3,release,llama-3.1-8b attention k/v_proj
+g31b_mlp_gate_4b,4,21504,5376,65.03,308.4,210.9,64,5,2026-07-07,NVIDIA_GB10_122GB,0.3.3,release,gemma-4-31b MLP gate/up (uniform 4-bit)
+g31b_mlp_down_4b,4,5376,21504,65.03,318.4,204.3,64,5,2026-07-07,NVIDIA_GB10_122GB,0.3.3,release,gemma-4-31b MLP down
+q9b_mlp_gate_4b,4,12288,4096,28.31,136.7,207.1,64,5,2026-07-07,NVIDIA_GB10_122GB,0.3.3,release,qwen3.5-9b MLP gate/up
