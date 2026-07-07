@@ -21,8 +21,8 @@
 // Defaults: T_PER_BATCH=64, ROUNDS=5 (best round reported).
 
 use mlxcel_core::{
-    add, astype, eval, from_slice_f32, quantize_weights_biases, quantize_weights_scales,
-    quantize_weights_w, quantized_matmul, synchronize_default, MlxArray, UniquePtr,
+    MlxArray, UniquePtr, add, astype, eval, from_slice_f32, quantize_weights_biases,
+    quantize_weights_scales, quantize_weights_w, quantized_matmul, synchronize_default,
 };
 use std::time::Instant;
 
@@ -245,5 +245,8 @@ fn main() {
     }
 
     println!();
-    println!("note: GB/s counts quantized weight + scales + biases bytes only (activations are negligible at B=1); {} weight copies round-robin per shape keep reads out of cache.", "2-12");
+    println!(
+        "note: GB/s counts quantized weight + scales + biases bytes only (activations are negligible at B=1); {} weight copies round-robin per shape keep reads out of cache.",
+        "2-12"
+    );
 }
