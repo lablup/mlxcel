@@ -265,6 +265,77 @@ mod tests {
     use super::*;
     use crate::{allclose, array_to_raw_bytes, astype, dtype, eval, item_bool};
 
+    /// The compiled full-head fast path (`compiled_proportional_rope`, taken
+    /// when `last_dim == head_dim`) must be numerically identical to the
+    /// mlx-vlm / mlx-lm reference `ProportionalRoPE.__call__`, which packs the
+    /// first `rotated_dims/2` slots of each head half into a `[.., rotated_dims]`
+    /// tensor, applies `mx.fast.rope` with the finite freqs there, and stitches
+    /// the halves back. Pins that the inf-tail full-head shortcut equals the
+    /// packed reference algorithm for the exact Gemma-4 global-layer config
+    /// (`head_dim = 512`, `partial_rotary_factor = 0.25`, `theta = 1e6`) at
+    /// several positions, including well past the rotated slice's longest
+    /// wavelength. Issue #686: a regression here would corrupt the 8
+    /// full-attention layers' long-range phase and reproduce the position-
+    /// dependent quality collapse that teacher-forced perplexity exposed but
+    /// generation and self-consistency A/Bs never did.
+    #[test]
+    fn proportional_rope_full_head_matches_packed_reference() {
+        let head_dim = 512_i32;
+        let prf = 0.25_f32; // rope_angles = 64, rotated_dims = 128.
+        let base = 1_000_000.0_f32;
+        let rot_half = 64_i32; // rotated_dims / 2
+        let half = head_dim / 2; // 256
+
+        let freqs = compute_proportional_rope_freqs(head_dim, prf, base, 1.0)
+            .expect("freqs must exist for prf=0.25");
+        // The reference packs only the finite (rotated) frequencies.
+        let freqs_rot = slice(&freqs, &[0], &[rot_half]);
+        eval(&freqs);
+        eval(&freqs_rot);
+
+        // Deterministic non-trivial input [1, 2 heads, 3 positions, head_dim].
+        let heads = 2_i32;
+        let positions = 3_i32;
+        let total = (heads * positions * head_dim) as usize;
+        let data: Vec<f32> = (0..total)
+            .map(|i| ((i as f32) * 0.013).sin() + 0.25)
+            .collect();
+        let x = from_slice_f32(&data, &[1, heads, positions, head_dim]);
+
+        // Reference packed algorithm (mlx-vlm ProportionalRoPE, tail empty).
+        let reference = |offset: i32| -> UniquePtr<MlxArray> {
+            let left = slice(&x, &[0, 0, 0, 0], &[1, heads, positions, half]);
+            let right = slice(&x, &[0, 0, 0, half], &[1, heads, positions, head_dim]);
+            let left_first = slice(&left, &[0, 0, 0, 0], &[1, heads, positions, rot_half]);
+            let right_first = slice(&right, &[0, 0, 0, 0], &[1, heads, positions, rot_half]);
+            let packed = concatenate(&left_first, &right_first, 3);
+            let rotated =
+                fast_rope_with_freqs(&packed, 2 * rot_half, false, 1.0, offset, &freqs_rot);
+            let rot_a = slice(&rotated, &[0, 0, 0, 0], &[1, heads, positions, rot_half]);
+            let rot_b = slice(
+                &rotated,
+                &[0, 0, 0, rot_half],
+                &[1, heads, positions, 2 * rot_half],
+            );
+            let left_rest = slice(&left, &[0, 0, 0, rot_half], &[1, heads, positions, half]);
+            let right_rest = slice(&right, &[0, 0, 0, rot_half], &[1, heads, positions, half]);
+            let left_new = concatenate(&rot_a, &left_rest, 3);
+            let right_new = concatenate(&rot_b, &right_rest, 3);
+            concatenate(&left_new, &right_new, 3)
+        };
+
+        for offset in [0_i32, 5, 130, 500] {
+            let got = apply_proportional_rope(&x, head_dim, prf, offset, freqs.as_ref());
+            let expected = reference(offset);
+            let close = allclose(&got, &expected, 1e-5, 1e-5);
+            eval(&close);
+            assert!(
+                item_bool(&close),
+                "full-head proportional rope diverged from the packed reference at offset {offset}"
+            );
+        }
+    }
+
     #[test]
     fn proportional_rope_freqs_match_python_formula() {
         // Gemma 4 full-attention layer: head_dim=256, partial_rotary_factor=0.25,

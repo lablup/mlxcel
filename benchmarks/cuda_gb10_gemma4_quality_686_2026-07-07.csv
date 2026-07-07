@@ -1,0 +1,22 @@
+model,scored_len,mean_nll,perplexity,variant,date,hardware,notes
+gemma-4-12b-it-4bit,128,3.45017,31.5058,mlxcel-default,2026-07-07,NVIDIA_GB10_122GB,single BOS-anchored fresh forward (chunks=1)
+gemma-4-12b-it-4bit,256,5.71208,302.4982,mlxcel-default,2026-07-07,NVIDIA_GB10_122GB,rises unbounded with position
+gemma-4-12b-it-4bit,512,8.40316,4461.1336,mlxcel-default,2026-07-07,NVIDIA_GB10_122GB,rises unbounded with position
+gemma-4-12b-it-4bit,1024,10.30782,29966.1347,mlxcel-default,2026-07-07,NVIDIA_GB10_122GB,approaching random ln(262144)=12.48
+gemma-4-12b-it-4bit,128,3.4338,30.994,mlx-lm-reference,2026-07-07,NVIDIA_GB10_122GB,independent mlx_lm.models.gemma4_text on GPU
+gemma-4-12b-it-4bit,256,5.6772,292.137,mlx-lm-reference,2026-07-07,NVIDIA_GB10_122GB,matches mlxcel within 0.05 nll
+gemma-4-12b-it-4bit,512,8.3551,4251.764,mlx-lm-reference,2026-07-07,NVIDIA_GB10_122GB,reference reproduces the same rising curve
+gemma-4-12b-it-4bit-uniform,128,3.74223,42.1919,mlxcel-uniform4bit,2026-07-07,NVIDIA_GB10_122GB,uniform 4-bit requant; same curve so quant scheme not the cause
+gemma-4-12b-it-4bit-uniform,512,8.21545,3697.6267,mlxcel-uniform4bit,2026-07-07,NVIDIA_GB10_122GB,uniform 4-bit requant; same curve
+gemma-4-12b-it-4bit,128,3.80883,45.0978,mlxcel-rope-div-rotated,2026-07-07,NVIDIA_GB10_122GB,probe: normalize rope exponent by rotated_dims; WORSE
+gemma-4-12b-it-4bit,256,6.85054,944.3949,mlxcel-rope-div-rotated,2026-07-07,NVIDIA_GB10_122GB,probe worse than default; proportional rope not the bug
+gemma-4-12b-it-4bit,512,9.34612,11454.3477,mlxcel-rope-div-rotated,2026-07-07,NVIDIA_GB10_122GB,probe worse; default div-head_dim confirmed correct
+gemma-4-12b-it-4bit,1024,10.79288,48672.9690,mlxcel-rope-div-rotated,2026-07-07,NVIDIA_GB10_122GB,probe reverted after measurement
+gemma-3-4b-it-4bit,128,1.51702,4.5586,mlxcel-control,2026-07-07,NVIDIA_GB10_122GB,healthy control; standard rope; stays flat
+gemma-3-4b-it-4bit,256,2.83064,16.9564,mlxcel-control,2026-07-07,NVIDIA_GB10_122GB,healthy control
+gemma-3-4b-it-4bit,512,3.52633,33.9991,mlxcel-control,2026-07-07,NVIDIA_GB10_122GB,healthy control; flat vs length
+gemma-3-4b-it-4bit,1024,3.62854,37.6578,mlxcel-control,2026-07-07,NVIDIA_GB10_122GB,healthy control; flat vs length
+qwen3.5-9b-4bit,128,1.10063,3.0061,mlxcel-control,2026-07-07,NVIDIA_GB10_122GB,healthy control; stays flat
+qwen3.5-9b-4bit,256,2.04700,7.7446,mlxcel-control,2026-07-07,NVIDIA_GB10_122GB,healthy control
+qwen3.5-9b-4bit,512,2.69592,14.8192,mlxcel-control,2026-07-07,NVIDIA_GB10_122GB,healthy control; flat vs length
+qwen3.5-9b-4bit,1024,2.55189,12.8314,mlxcel-control,2026-07-07,NVIDIA_GB10_122GB,healthy control; flat vs length
