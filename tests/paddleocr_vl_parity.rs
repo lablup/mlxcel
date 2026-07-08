@@ -190,8 +190,9 @@ fn vision_encoder_forward_handles_unique_variable_resolution_batch() {
     let encoder = PaddleOcrVisionEncoder::from_weights(&weights, &config, "visual")
         .expect("build vision encoder");
 
-    // Unique segment lengths exercise the block-diagonal mask fast path, which
-    // avoids a per-segment SDPA loop for small variable-resolution OCR batches.
+    // Unique segment lengths intentionally stay on the per-segment fallback so
+    // the fast-path dispatch does not force a dense block mask for page sizes
+    // where sequential block-diagonal attention is cheaper and safer.
     let grids = [(1, 2, 2), (1, 2, 3), (1, 4, 2)];
     let pixel_values = varied(&[18, 12]);
     let out = encoder.forward_with_grid(pixel_values.as_ref().unwrap(), &grids);

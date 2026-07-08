@@ -314,8 +314,6 @@ enum AttentionDispatch {
     Sequential,
 }
 
-const BLOCK_MASK_FAST_PATH_MAX_TOKENS: i32 = 4096;
-
 // Fused-QKV attention over packed variable-length sequences.
 struct Attention {
     qkv: UnifiedLinear,
@@ -381,38 +379,10 @@ impl Attention {
         }
     }
 
-    fn attend(
-        &self,
-        q: &MlxArray,
-        k: &MlxArray,
-        v: &MlxArray,
-        mask: Option<&MlxArray>,
-    ) -> UniquePtr<MlxArray> {
-        let mask_ptr = mask.map_or(std::ptr::null(), |m| m as *const MlxArray);
-        unsafe { mlxcel_core::layers::attention_from_ptr(q, k, v, self.scale, mask_ptr, 0.0, 0) }
-    }
-
-    fn should_use_block_mask(cu_seqlens: &[i32], seq_len: i32) -> bool {
-        matches!(
-            Self::dispatch_for(cu_seqlens),
-            AttentionDispatch::Sequential
-        ) && seq_len <= BLOCK_MASK_FAST_PATH_MAX_TOKENS
-    }
-
-    fn build_block_diagonal_mask(cu_seqlens: &[i32], seq_len: i32) -> UniquePtr<MlxArray> {
-        let n = seq_len as usize;
-        let mut mask = vec![f32::NEG_INFINITY; n * n];
-        for window in cu_seqlens.windows(2) {
-            let start = window[0] as usize;
-            let end = window[1] as usize;
-            for row in start..end {
-                let row_offset = row * n;
-                for col in start..end {
-                    mask[row_offset + col] = 0.0;
-                }
-            }
+    fn attend(&self, q: &MlxArray, k: &MlxArray, v: &MlxArray) -> UniquePtr<MlxArray> {
+        unsafe {
+            mlxcel_core::layers::attention_from_ptr(q, k, v, self.scale, std::ptr::null(), 0.0, 0)
         }
-        mlxcel_core::from_slice_f32(&mask, &[1, seq_len, seq_len])
     }
 
     fn slice_attn_segment(&self, x: &MlxArray, start: i32, end: i32) -> UniquePtr<MlxArray> {
@@ -438,7 +408,7 @@ impl Attention {
             let q_seg = self.slice_attn_segment(q, start, end);
             let k_seg = self.slice_attn_segment(k, start, end);
             let v_seg = self.slice_attn_segment(v, start, end);
-            outs.push(self.attend(&q_seg, &k_seg, &v_seg, None));
+            outs.push(self.attend(&q_seg, &k_seg, &v_seg));
         }
 
         if outs.len() == 1 {
@@ -469,7 +439,7 @@ impl Attention {
         let q_batched = pack(q);
         let k_batched = pack(k);
         let v_batched = pack(v);
-        let out = self.attend(&q_batched, &k_batched, &v_batched, None);
+        let out = self.attend(&q_batched, &k_batched, &v_batched);
 
         // [segments, heads, segment_len, head_dim] -> [1, heads, seq, head_dim].
         let out = mlxcel_core::transpose_axes(&out, &[1, 0, 2, 3]);
@@ -522,7 +492,7 @@ impl Attention {
             let q_batched = self.stack_bucket_segments(q, &entries);
             let k_batched = self.stack_bucket_segments(k, &entries);
             let v_batched = self.stack_bucket_segments(v, &entries);
-            let bucket_out = self.attend(&q_batched, &k_batched, &v_batched, None);
+            let bucket_out = self.attend(&q_batched, &k_batched, &v_batched);
 
             for (batch_idx, &(seg, _, _)) in entries.iter().enumerate() {
                 let batch_idx = batch_idx as i32;
@@ -546,7 +516,6 @@ impl Attention {
         x: &MlxArray,
         cu_seqlens: &[i32],
         rotary_pos_emb: &MlxArray,
-        block_mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
         let shape = mlxcel_core::array_shape(x);
         let seq_len = shape[0];
@@ -581,23 +550,19 @@ impl Attention {
         let k = mlxcel_core::expand_dims(&mlxcel_core::transpose_axes(&k, &[1, 0, 2]), 0);
         let v = mlxcel_core::expand_dims(&mlxcel_core::transpose_axes(&v, &[1, 0, 2]), 0);
 
-        let output = if let Some(mask) = block_mask {
-            self.attend(&q, &k, &v, Some(mask))
-        } else {
-            match Self::dispatch_for(cu_seqlens) {
-                AttentionDispatch::Single | AttentionDispatch::Sequential => {
-                    self.attend_sequential(&q, &k, &v, cu_seqlens)
-                }
-                AttentionDispatch::Uniform { segment_len } => self.attend_uniform(
-                    &q,
-                    &k,
-                    &v,
-                    seq_len,
-                    (cu_seqlens.len() - 1) as i32,
-                    segment_len,
-                ),
-                AttentionDispatch::Bucketed => self.attend_bucketed(&q, &k, &v, cu_seqlens),
+        let output = match Self::dispatch_for(cu_seqlens) {
+            AttentionDispatch::Single | AttentionDispatch::Sequential => {
+                self.attend_sequential(&q, &k, &v, cu_seqlens)
             }
+            AttentionDispatch::Uniform { segment_len } => self.attend_uniform(
+                &q,
+                &k,
+                &v,
+                seq_len,
+                (cu_seqlens.len() - 1) as i32,
+                segment_len,
+            ),
+            AttentionDispatch::Bucketed => self.attend_bucketed(&q, &k, &v, cu_seqlens),
         };
 
         let output = mlxcel_core::squeeze_axis(&output, 0);
@@ -651,16 +616,10 @@ impl EncoderLayer {
         })
     }
 
-    fn forward(
-        &self,
-        x: &MlxArray,
-        cu_seqlens: &[i32],
-        rotary: &MlxArray,
-        block_mask: Option<&MlxArray>,
-    ) -> UniquePtr<MlxArray> {
-        let attn_out =
-            self.attn
-                .forward(&self.layer_norm1.forward(x), cu_seqlens, rotary, block_mask);
+    fn forward(&self, x: &MlxArray, cu_seqlens: &[i32], rotary: &MlxArray) -> UniquePtr<MlxArray> {
+        let attn_out = self
+            .attn
+            .forward(&self.layer_norm1.forward(x), cu_seqlens, rotary);
         let h = mlxcel_core::add(x, &attn_out);
         let mlp_out = self.mlp.forward(&self.layer_norm2.forward(&h));
         mlxcel_core::add(&h, &mlp_out)
@@ -800,16 +759,9 @@ impl PaddleOcrVisionEncoder {
 
         let rotary = self.rot_pos_emb(grid_thw);
         let cu_seqlens = Self::compute_cu_seqlens(grid_thw);
-        let seq_len = mlxcel_core::array_shape(&h)[0];
-        let block_mask = if Attention::should_use_block_mask(&cu_seqlens, seq_len) {
-            Some(Attention::build_block_diagonal_mask(&cu_seqlens, seq_len))
-        } else {
-            None
-        };
-        let block_mask_ref = block_mask.as_ref().map(|mask| mask.as_ref().unwrap());
 
         for layer in &self.layers {
-            h = layer.forward(&h, &cu_seqlens, &rotary, block_mask_ref);
+            h = layer.forward(&h, &cu_seqlens, &rotary);
         }
 
         let h = self.post_layernorm.forward(&h);
@@ -828,6 +780,41 @@ impl super::VisionEncoder for PaddleOcrVisionEncoder {
 #[cfg(test)]
 mod tests {
     use super::{Attention, AttentionDispatch};
+    use mlxcel_core::layers::{Linear, UnifiedLinear};
+    use mlxcel_core::{MlxArray, UniquePtr};
+
+    fn dummy_linear() -> UnifiedLinear {
+        UnifiedLinear::Regular(Linear::new(
+            mlxcel_core::from_slice_f32(&[0.0], &[1, 1]),
+            None,
+        ))
+    }
+
+    fn tiny_attention() -> Attention {
+        Attention {
+            qkv: dummy_linear(),
+            out_proj: dummy_linear(),
+            num_heads: 2,
+            head_dim: 4,
+            scale: 0.5,
+        }
+    }
+
+    fn varied(shape: &[i32], offset: i32) -> UniquePtr<MlxArray> {
+        let n: i32 = shape.iter().product();
+        let data: Vec<f32> = (0..n)
+            .map(|i| ((((i + offset) % 19) as f32) - 9.0) * 0.025)
+            .collect();
+        mlxcel_core::from_slice_f32(&data, shape)
+    }
+
+    fn assert_allclose(actual: &MlxArray, expected: &MlxArray) {
+        let close = mlxcel_core::allclose(actual, expected, 1e-4, 1e-4);
+        assert!(
+            mlxcel_core::item_bool(&close),
+            "fast attention path diverged from sequential packed reference"
+        );
+    }
 
     #[test]
     fn attention_dispatch_uses_single_for_one_segment() {
@@ -859,9 +846,28 @@ mod tests {
     }
 
     #[test]
-    fn block_mask_fast_path_accepts_small_unique_variable_segments() {
-        assert!(Attention::should_use_block_mask(&[0, 4, 10, 18], 18));
-        assert!(!Attention::should_use_block_mask(&[0, 4096, 8192], 8192));
-        assert!(!Attention::should_use_block_mask(&[0, 4, 8], 8));
+    fn uniform_attention_fast_path_matches_sequential_segments() {
+        let attention = tiny_attention();
+        let q = varied(&[1, 2, 8, 4], 0);
+        let k = varied(&[1, 2, 8, 4], 7);
+        let v = varied(&[1, 2, 8, 4], 13);
+        let cu = [0, 4, 8];
+
+        let expected = attention.attend_sequential(&q, &k, &v, &cu);
+        let actual = attention.attend_uniform(&q, &k, &v, 8, 2, 4);
+        assert_allclose(&actual, &expected);
+    }
+
+    #[test]
+    fn bucketed_attention_fast_path_matches_sequential_segments() {
+        let attention = tiny_attention();
+        let q = varied(&[1, 2, 14, 4], 0);
+        let k = varied(&[1, 2, 14, 4], 5);
+        let v = varied(&[1, 2, 14, 4], 11);
+        let cu = [0, 4, 10, 14];
+
+        let expected = attention.attend_sequential(&q, &k, &v, &cu);
+        let actual = attention.attend_bucketed(&q, &k, &v, &cu);
+        assert_allclose(&actual, &expected);
     }
 }
