@@ -47,8 +47,8 @@ pub use generate::{
 };
 
 use crate::models::gemma4::{
-    Gemma4TextModel, QuantizationArgs, RMSNormNoScale, RootQuantization, TextConfig,
-    overlay_block_bidirectional, parse_eos_ids,
+    Gemma4TextModel, RMSNormNoScale, RootQuantization, TextConfig, overlay_block_bidirectional,
+    parse_eos_ids,
 };
 use crate::vision::encoders::gemma4::{Gemma4VisionConfig, Gemma4VisionModel};
 use crate::vision::gemma4_multimodal_embedder::Gemma4MultimodalEmbedder;
@@ -236,10 +236,7 @@ impl ModelArgs {
         if config.quantization.is_none()
             && let Some(ref q) = self.quantization
         {
-            config.quantization = Some(QuantizationArgs {
-                group_size: q.group_size,
-                bits: q.bits,
-            });
+            config.quantization = Some(q.clone());
         }
         Ok(config)
     }

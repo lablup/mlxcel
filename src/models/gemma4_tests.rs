@@ -25,7 +25,7 @@
 //! 3. Under `rope_type: "default"` (sliding-attention layers), mlxcel keeps
 //!    the historical `nn.RoPE(head_dim * partial_rotary_factor)` path.
 
-use super::gemma4::{RopeParameters, TextConfig};
+use super::gemma4::{ModelArgs, QuantizationParams, RopeParameters, TextConfig};
 
 fn parse_text_config(json: serde_json::Value) -> TextConfig {
     serde_json::from_value(json).expect("TextConfig must deserialize")
@@ -690,6 +690,56 @@ fn gemma4_config_parses_real_checkpoint_rope_parameters() {
     // the serde default should be 1.0.
     assert!((sliding.partial_rotary_factor - 1.0).abs() < 1e-6);
     assert!((sliding.rope_theta - 10_000.0).abs() < 1e-3);
+}
+
+#[test]
+fn gemma4_root_quantization_preserves_per_module_overrides() {
+    let args: ModelArgs = serde_json::from_value(serde_json::json!({
+        "model_type": "gemma4",
+        "text_config": real_gemma4_e2b_text_config(),
+        "eos_token_id": [1],
+        "quantization": {
+            "group_size": 64,
+            "bits": 4,
+            "language_model.model.layers.0.mlp.gate_proj": {
+                "group_size": 32,
+                "bits": 4
+            },
+            "language_model.model.layers.0.mlp.down_proj": {
+                "group_size": 64,
+                "bits": 8
+            }
+        }
+    }))
+    .expect("ModelArgs must deserialize root quantization overrides");
+
+    let cfg = args.text_args();
+
+    assert_eq!(
+        cfg.quant_params_for("language_model.model.layers.0.mlp.gate_proj"),
+        QuantizationParams {
+            group_size: 32,
+            bits: 4
+        },
+        "explicit gs32 module override must be passed to the loader instead of \
+         being mis-inferred from tensor shapes"
+    );
+    assert_eq!(
+        cfg.quant_params_for("language_model.model.layers.0.mlp.down_proj"),
+        QuantizationParams {
+            group_size: 64,
+            bits: 8
+        },
+        "mixed 8-bit down_proj override must survive root->text config promotion"
+    );
+    assert_eq!(
+        cfg.quant_params_for("language_model.model.layers.0.mlp.up_proj"),
+        QuantizationParams {
+            group_size: 64,
+            bits: 4
+        },
+        "modules without overrides must retain the root default"
+    );
 }
 
 #[test]

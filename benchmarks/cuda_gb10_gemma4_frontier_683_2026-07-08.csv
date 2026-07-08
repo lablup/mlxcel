@@ -1,0 +1,5 @@
+model,variant,scored_len,mean_nll,perplexity,date,hardware,build_type,notes
+gemma-4-12b-it-4bit,shipped-8bit-mlp,512,8.40327,4461.6187,2026-07-08,NVIDIA_GB10_122GB,debug-example,"baseline mixed checkpoint; single BOS-anchored fresh forward with examples/perplexity.rs"
+gemma-4-12b-it-4bit-uniform,uniform-4bit-mlp-gs64,512,8.18222,3576.7743,2026-07-08,NVIDIA_GB10_122GB,debug-example,"uniform 4-bit MLP variant; lower NLL than shipped on this README corpus slice"
+gemma-4-12b-it-4bit-down8,down-proj-8bit-gate-up-4bit-gs64,512,8.45547,4700.7293,2026-07-08,NVIDIA_GB10_122GB,debug-example,"mixed-layout frontier variant; load/forward requires per-module quant override plus non-shared MLP fallback"
+gemma-4-12b-it-4bit-gs32,uniform-4bit-mlp-gs32,512,8.53010,5064.9420,2026-07-08,NVIDIA_GB10_122GB,debug-example,"group_size=32 MLP variant; load/forward requires explicit per-module group_size override"

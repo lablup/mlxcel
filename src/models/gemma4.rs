@@ -51,8 +51,44 @@ use std::path::Path;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct QuantizationArgs {
+    #[serde(default = "default_quant_group_size")]
     pub group_size: usize,
+    #[serde(default = "default_quant_bits")]
     pub bits: usize,
+    #[serde(default, flatten)]
+    pub overrides: HashMap<String, serde_json::Value>,
+}
+
+fn default_quant_group_size() -> usize {
+    64
+}
+
+fn default_quant_bits() -> usize {
+    4
+}
+
+impl QuantizationArgs {
+    fn quant_params_for(&self, prefix: &str) -> QuantizationParams {
+        let mut params = QuantizationParams {
+            group_size: self.group_size as i32,
+            bits: self.bits as i32,
+        };
+        if let Some(serde_json::Value::Object(override_obj)) = self.overrides.get(prefix) {
+            if let Some(group_size) = override_obj.get("group_size").and_then(|v| v.as_u64()) {
+                params.group_size = group_size as i32;
+            }
+            if let Some(bits) = override_obj.get("bits").and_then(|v| v.as_u64()) {
+                params.bits = bits as i32;
+            }
+        }
+        params
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct QuantizationParams {
+    pub group_size: i32,
+    pub bits: i32,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -157,6 +193,16 @@ impl TextConfig {
             .unwrap_or(4)
     }
 
+    pub(crate) fn quant_params_for(&self, prefix: &str) -> QuantizationParams {
+        self.quantization
+            .as_ref()
+            .map(|q| q.quant_params_for(prefix))
+            .unwrap_or(QuantizationParams {
+                group_size: self.group_size(),
+                bits: self.bits(),
+            })
+    }
+
     fn first_kv_shared_layer_idx(&self) -> usize {
         self.num_hidden_layers
             .saturating_sub(self.num_kv_shared_layers)
@@ -225,11 +271,7 @@ impl TextConfig {
     }
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct RootQuantization {
-    pub group_size: usize,
-    pub bits: usize,
-}
+pub type RootQuantization = QuantizationArgs;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ModelArgs {
@@ -248,10 +290,7 @@ impl ModelArgs {
         if config.quantization.is_none()
             && let Some(ref q) = self.quantization
         {
-            config.quantization = Some(QuantizationArgs {
-                group_size: q.group_size,
-                bits: q.bits,
-            });
+            config.quantization = Some(q.clone());
         }
         config
     }
@@ -591,12 +630,39 @@ pub struct MLP {
     pub(crate) down_proj: UnifiedLinear,
 }
 
+fn dense_mlp_shared_quant_layout(
+    gate: QuantizationParams,
+    gate_mode: &str,
+    up: QuantizationParams,
+    up_mode: &str,
+    down: QuantizationParams,
+    down_mode: &str,
+) -> bool {
+    gate == up && gate == down && gate_mode == up_mode && gate_mode == down_mode
+}
+
 impl MLP {
     pub fn forward(&self, x: &MlxArray) -> UniquePtr<MlxArray> {
         if let (Some(gate_qw), Some(up_qw), Some(down_qw)) = (
             self.gate_proj.quantized_weight(),
             self.up_proj.quantized_weight(),
             self.down_proj.quantized_weight(),
+        ) && dense_mlp_shared_quant_layout(
+            QuantizationParams {
+                group_size: gate_qw.group_size,
+                bits: gate_qw.bits,
+            },
+            &gate_qw.mode,
+            QuantizationParams {
+                group_size: up_qw.group_size,
+                bits: up_qw.bits,
+            },
+            &up_qw.mode,
+            QuantizationParams {
+                group_size: down_qw.group_size,
+                bits: down_qw.bits,
+            },
+            &down_qw.mode,
         ) {
             return unsafe {
                 mlxcel_core::compiled_gelu_approx_mlp_forward(
@@ -636,24 +702,30 @@ impl MLP {
         prefix: &str,
     ) -> Result<Self, String> {
         let _ = config.mlp_intermediate_size(layer_idx);
+        let gate_prefix = format!("{}.gate_proj", prefix);
+        let up_prefix = format!("{}.up_proj", prefix);
+        let down_prefix = format!("{}.down_proj", prefix);
+        let gate_quant = config.quant_params_for(&gate_prefix);
+        let up_quant = config.quant_params_for(&up_prefix);
+        let down_quant = config.quant_params_for(&down_prefix);
         Ok(Self {
             gate_proj: UnifiedLinear::from_weights(
                 weights,
-                &format!("{}.gate_proj", prefix),
-                config.group_size(),
-                config.bits(),
+                &gate_prefix,
+                gate_quant.group_size,
+                gate_quant.bits,
             )?,
             up_proj: UnifiedLinear::from_weights(
                 weights,
-                &format!("{}.up_proj", prefix),
-                config.group_size(),
-                config.bits(),
+                &up_prefix,
+                up_quant.group_size,
+                up_quant.bits,
             )?,
             down_proj: UnifiedLinear::from_weights(
                 weights,
-                &format!("{}.down_proj", prefix),
-                config.group_size(),
-                config.bits(),
+                &down_prefix,
+                down_quant.group_size,
+                down_quant.bits,
             )?,
         })
     }
@@ -5219,7 +5291,7 @@ mod gemma4_unified_mask_tests {
 
 #[cfg(test)]
 mod quant_scheme_tests {
-    use super::validate_quantization_scheme;
+    use super::{QuantizationParams, dense_mlp_shared_quant_layout, validate_quantization_scheme};
     use serde_json::json;
 
     #[test]
@@ -5291,5 +5363,34 @@ mod quant_scheme_tests {
         // HF-style external formats use a `quantization_config` object.
         let cfg = json!({ "quantization_config": { "quant_method": "gptq", "bits": 4 } });
         assert!(validate_quantization_scheme(&cfg).is_err());
+    }
+
+    #[test]
+    fn dense_mlp_shared_quant_layout_accepts_uniform_frontier_variant() {
+        let q = QuantizationParams {
+            group_size: 32,
+            bits: 4,
+        };
+        assert!(
+            dense_mlp_shared_quant_layout(q, "affine", q, "affine", q, "affine"),
+            "uniform gs32 MLP variants can use the shared-layout fused helper"
+        );
+    }
+
+    #[test]
+    fn dense_mlp_shared_quant_layout_rejects_mixed_down8_frontier_variant() {
+        let q4 = QuantizationParams {
+            group_size: 64,
+            bits: 4,
+        };
+        let down8 = QuantizationParams {
+            group_size: 64,
+            bits: 8,
+        };
+        assert!(
+            !dense_mlp_shared_quant_layout(q4, "affine", q4, "affine", down8, "affine"),
+            "mixed down-proj-8-bit variants must use projection-local forwards because \
+             compiled_gelu_approx_mlp_forward accepts only one quant layout"
+        );
     }
 }
