@@ -542,8 +542,13 @@ impl SpeculativeGenerator {
                 );
             }
 
-            // Periodic cache clearing
-            if self.generated_tokens.len().is_multiple_of(256) {
+            // Periodic cache clearing, backend-aware cadence (#627): disabled by
+            // default on CUDA (clear churns the pool, defeats CUDA-graph reuse,
+            // mlx#2358), 256 on Metal/CPU, MLXCEL_CACHE_CLEAR_INTERVAL overrides.
+            if crate::memory::should_clear_cache_at(
+                self.generated_tokens.len(),
+                crate::memory::cache_clear_interval(),
+            ) {
                 ffi::clear_memory_cache();
             }
         }

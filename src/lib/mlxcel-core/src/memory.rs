@@ -199,7 +199,16 @@ pub fn cache_clear_interval() -> usize {
 /// pipelined tensors).
 #[inline]
 pub fn should_clear_cache_at(n: usize, interval: usize) -> bool {
-    interval != 0 && n > 0 && n % interval == 0
+    interval != 0 && n > 0 && n.is_multiple_of(interval)
+}
+
+/// Like [`should_clear_cache_at`] but for batched decode loops that emit more
+/// than one token per step: fire when the cumulative emitted count crosses a
+/// cadence boundary between `prev` and `new`. `interval == 0` disables it (and
+/// short-circuits before the division, so a zero interval never divides).
+#[inline]
+pub fn should_clear_cache_crossing(prev: usize, new: usize, interval: usize) -> bool {
+    interval != 0 && new / interval > prev / interval
 }
 
 /// Reset the recorded peak memory counter to 0.
@@ -441,5 +450,19 @@ mod tests {
             parse_cache_clear_interval(None),
             DEFAULT_CACHE_CLEAR_INTERVAL
         );
+    }
+
+    #[test]
+    fn crossing_gate_fires_when_cumulative_count_crosses_boundary() {
+        // Batched decode emits >1 token/step: fire when a cadence multiple is crossed.
+        assert!(should_clear_cache_crossing(250, 260, 256)); // crosses 256
+        assert!(should_clear_cache_crossing(0, 256, 256)); // crosses 256 from 0
+        assert!(should_clear_cache_crossing(511, 520, 256)); // crosses 512
+        assert!(!should_clear_cache_crossing(256, 300, 256)); // no new multiple crossed
+        assert!(!should_clear_cache_crossing(0, 100, 256)); // never reaches 256
+        // interval 0 (CUDA default) disables it and never divides.
+        for (p, n) in [(0_usize, 256_usize), (250, 260), (0, 100_000)] {
+            assert!(!should_clear_cache_crossing(p, n, 0));
+        }
     }
 }

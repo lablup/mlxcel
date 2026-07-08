@@ -555,11 +555,15 @@ impl DFlashBatchedGenerator {
                 target.rollback_partial_batched(caches, &verify_out, &accepted_i32, bs as i32);
             }
 
-            // Periodic memory cache clear. Mirrors upstream
-            //   if new_total // 256 > total_emitted // 256:
-            //       mx.clear_cache()
+            // Periodic memory cache clear, backend-aware cadence (#627): fires when
+            // the cumulative emitted count crosses a cadence boundary. Disabled by
+            // default on CUDA, 256 on Metal/CPU, MLXCEL_CACHE_CLEAR_INTERVAL overrides.
             let new_total: usize = emitted.iter().sum();
-            if new_total / 256 > total_emitted / 256 {
+            if crate::memory::should_clear_cache_crossing(
+                total_emitted,
+                new_total,
+                crate::memory::cache_clear_interval(),
+            ) {
                 ffi::clear_memory_cache();
             }
             total_emitted = new_total;

@@ -874,10 +874,12 @@ impl DFlashGenerator {
                 diagnostics.rollback_time_ms += phase_start.elapsed().as_secs_f64() * 1000.0;
             }
 
-            // Periodic memory cache clear, mirroring
-            // `if emitted % 256 == 0: mx.clear_cache()`. Bound by 256
-            // tokens like the upstream loop.
-            if emitted.is_multiple_of(256) {
+            // Periodic memory cache clear, backend-aware cadence (#627): disabled
+            // by default on CUDA, 256 on Metal/CPU, MLXCEL_CACHE_CLEAR_INTERVAL
+            // overrides. The should_clear_cache_at guard also drops the clear at
+            // emitted == 0 that the old `emitted % 256 == 0` fired.
+            if crate::memory::should_clear_cache_at(emitted, crate::memory::cache_clear_interval())
+            {
                 ffi::clear_memory_cache();
             }
         }
