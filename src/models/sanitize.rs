@@ -427,14 +427,17 @@ fn nvfp4_affine_group_size_for_in_dim(in_dim: usize, configured_group_size: i32)
 /// default direct transcode.
 ///
 /// The direct ModelOpt-triplet transcode (issue #693) is the default under
-/// CUDA. `MLXCEL_NVFP4_DENSE_REPACK=1` (or `true`/`on`/`yes`) forces the older
-/// dense fallback, which is retained for debugging and parity comparison.
+/// CUDA. `MLXCEL_NVFP4_DENSE_REPACK=1` (or `true`/`on`/`yes`, matched
+/// case-insensitively) forces the older dense fallback, which is retained for
+/// debugging and parity comparison.
 fn nvfp4_dense_repack_forced() -> bool {
     matches!(
         std::env::var("MLXCEL_NVFP4_DENSE_REPACK")
             .ok()
             .as_deref()
-            .map(str::trim),
+            .map(str::trim)
+            .map(str::to_lowercase)
+            .as_deref(),
         Some("1") | Some("true") | Some("on") | Some("yes")
     )
 }
@@ -498,7 +501,7 @@ fn repack_nvfp4_weights_to_quantized(
             continue;
         }
 
-        let (weight_shape, weight_bytes, scale_bytes, scale2_val) = {
+        let (weight_shape, weight_bytes, scale_bytes, scale2_size, scale2_val) = {
             let weight_arr = weights.get(&weight_key).unwrap();
             let scale_arr = weights.get(&scale_key).unwrap();
             let scale2_arr = weights.get(&scale2_key).unwrap();
@@ -517,9 +520,36 @@ fn repack_nvfp4_weights_to_quantized(
             let scale_f32_arr = mlxcel_core::astype(scale_arr, mlxcel_core::dtype::FLOAT32);
             mlxcel_core::eval(&scale_f32_arr);
             let scale_bytes = mlxcel_core::array_to_raw_bytes(&scale_f32_arr);
-            let scale2_val = mlxcel_core::item_f32(scale2_arr);
 
-            (weight_shape, weight_bytes, scale_bytes, scale2_val)
+            // `weight_scale_2` must be a single-element per-tensor scalar
+            // (ModelOpt's convention). `item_f32` reinterprets the buffer
+            // without checking cardinality, so a malformed multi-element or
+            // wrong-shape tensor would throw across the FFI boundary instead
+            // of failing gracefully like the shape guards below. Compute the
+            // size here and defer the item read until after validation.
+            let scale2_size = mlxcel_core::array_size(scale2_arr);
+            let scale2_val = if scale2_size == 1 {
+                Some(mlxcel_core::item_f32(scale2_arr))
+            } else {
+                None
+            };
+
+            (
+                weight_shape,
+                weight_bytes,
+                scale_bytes,
+                scale2_size,
+                scale2_val,
+            )
+        };
+
+        let Some(scale2_val) = scale2_val else {
+            eprintln!(
+                "Skipping NVFP4 repack for {prefix}: {scale2_key} has {scale2_size} \
+                 elements (expected a single-element scalar weight_scale_2)"
+            );
+            weights.remove(&scale2_key);
+            continue;
         };
 
         // Validate weight tensor is 2-D with positive dimensions.
@@ -592,12 +622,35 @@ fn repack_nvfp4_weights_to_quantized(
             // in bits 0-3, element 1 in bits 4-7, and so on). packed_dim is a
             // multiple of 4 because in_dim is a multiple of the source
             // group_size (16), so no padding is needed.
+            //
+            // SAFETY: `from_bytes(..., UINT32)` reinterprets the slice's raw
+            // pointer as `const uint32_t*` on the C++ side
+            // (`mlx_cxx_bridge.cpp::from_bytes`, case UINT32); reading through
+            // a misaligned `uint32_t*` is undefined behavior on some targets
+            // (mirrors the alignment note on `from_bytes_f16`'s bf16 path).
+            // `weight_bytes` is a `Vec<u8>` this function allocates itself
+            // (via `array_to_raw_bytes` above), so unlike a memory-mapped
+            // safetensors tensor its alignment is whatever the global
+            // allocator happens to return for a `u8` element type, not
+            // guaranteed to be a multiple of 4. Guard the rare misaligned
+            // case by decoding through a real `&[u32]` slice instead
+            // (`from_slice_u32`), which the Rust allocator does guarantee is
+            // 4-byte aligned.
             let u32_cols = packed_dim / 4;
-            let weight_u32 = mlxcel_core::from_bytes(
-                &weight_bytes,
-                &[out_dim as i32, u32_cols as i32],
-                mlxcel_core::dtype::UINT32,
-            );
+            let weight_u32 = if (weight_bytes.as_ptr() as usize).is_multiple_of(4) {
+                mlxcel_core::from_bytes(
+                    &weight_bytes,
+                    &[out_dim as i32, u32_cols as i32],
+                    mlxcel_core::dtype::UINT32,
+                )
+            } else {
+                let word_count = out_dim * u32_cols;
+                let words: Vec<u32> = weight_bytes[..word_count * 4]
+                    .chunks_exact(4)
+                    .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                    .collect();
+                mlxcel_core::from_slice_u32(&words, &[out_dim as i32, u32_cols as i32])
+            };
 
             // Scales: re-encode the block scales (decoded to f32 above by the
             // load-time F8_E4M3 -> f16 conversion) back to their original E4M3
@@ -1735,6 +1788,41 @@ mod tests {
         assert_eq!(gemma4_configured_bits(Some(&config)), 4);
     }
 
+    /// Review follow-up for issue #693/#697: `MLXCEL_NVFP4_DENSE_REPACK` must
+    /// match its truthy values case-insensitively, so `TRUE`/`On`/`YES` work
+    /// the same as the documented lowercase forms.
+    #[test]
+    fn nvfp4_dense_repack_forced_matches_case_insensitively() {
+        // `std::env::set_var`/`remove_var` mutate process-global state, so
+        // serialize through the crate-wide env_lock (see
+        // `crate::test_support::env_lock` for why a per-module lock is not
+        // enough).
+        let _guard = crate::test_support::env_lock::env_lock();
+
+        for value in ["1", "TRUE", "On", "YES", "  true  "] {
+            // SAFETY: tests are serialized through `env_lock`.
+            unsafe {
+                std::env::set_var("MLXCEL_NVFP4_DENSE_REPACK", value);
+            }
+            assert!(
+                nvfp4_dense_repack_forced(),
+                "{value:?} should be recognized as a truthy override"
+            );
+        }
+
+        // SAFETY: tests are serialized through `env_lock`.
+        unsafe {
+            std::env::set_var("MLXCEL_NVFP4_DENSE_REPACK", "no");
+        }
+        assert!(!nvfp4_dense_repack_forced());
+
+        // SAFETY: tests are serialized through `env_lock`.
+        unsafe {
+            std::env::remove_var("MLXCEL_NVFP4_DENSE_REPACK");
+        }
+        assert!(!nvfp4_dense_repack_forced());
+    }
+
     // --- f8_e4m3_to_f32 tests ---
 
     #[test]
@@ -2010,8 +2098,8 @@ mod tests {
             mlxcel_core::dtype::UINT32,
         );
         let mut e4m3 = Vec::with_capacity(out_dim);
-        for r in 0..out_dim {
-            e4m3.push(f32_to_f8_e4m3(f8_e4m3_to_f32(scale_row_bytes[r])));
+        for &scale_byte in scale_row_bytes.iter().take(out_dim) {
+            e4m3.push(f32_to_f8_e4m3(f8_e4m3_to_f32(scale_byte)));
         }
         let scales_u8 =
             mlxcel_core::from_bytes(&e4m3, &[out_dim as i32, 1i32], mlxcel_core::dtype::UINT8);

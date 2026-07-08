@@ -203,6 +203,7 @@ recommended as normal deployment settings.
 | `MLXCEL_ENABLE_FUSED_QKV_SPLIT_ROPE` | presence enables | off | Enables an experimental fused QKV projection/split/RoPE path. |
 | `MLXCEL_GEMMA4_ENABLE_FUSED_QKV` | presence enables | off | Enables a Gemma 4 fused-QKV projection experiment. |
 | `MLXCEL_DISABLE_COMPILED_SWITCH_QGEGLU` | presence disables | compiled path on when supported | Rolls back Gemma 4 compiled Switch-QGeGLU decode path. |
+| `MLXCEL_NVFP4_DENSE_REPACK` | `1`/`true`/`on`/`yes` (matched case-insensitively) forces the dense fallback; unset or any other value keeps the default | off (direct transcode) | **CUDA only.** Forces the older dense f16 -> MLX `quantize(mode="nvfp4")` repack instead of the default direct ModelOpt-triplet transcode (issue #693) when loading ModelOpt NVFP4 checkpoints. Debug/parity fallback only: the direct transcode is bit-exact to the checkpoint, while the dense repack re-derives block scales and drifts by roughly one FP8/FP4 rounding step. |
 | `MLXCEL_ENABLE_SOFTCAP_GQA_DECODE_GROUPED` | any value except `0` enables | off | Enables grouped softcap-GQA decode optimization. |
 | `MLXCEL_DISABLE_SOFTCAP_GQA_DECODE_GROUPED` | `1` disables, `0` enables | unset | Legacy rollback/override for grouped softcap-GQA decode. |
 | `MLXCEL_DISABLE_SINGLE_QUERY_MASKLESS` | truthy disables | maskless path on | Disables the single-query maskless attention path. |
