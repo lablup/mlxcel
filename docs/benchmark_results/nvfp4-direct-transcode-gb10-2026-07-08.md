@@ -115,7 +115,11 @@ in the PR that references this issue: `MLXCEL_NVFP4_NATIVE_REPACK=1` makes a
 non-CUDA build take the direct transcode without a code change, so the two
 paths can be compared on the same binary. This section is the exact procedure
 for that run; it has not been executed yet and the acceptance criteria in
-issue #694 remain open until it is.
+issue #694 remain open until it is. Note that the direct-transcode leg is
+itself unvalidated at runtime on Metal (the in-tree native NVFP4 qmm patches
+are CUDA-side), so a load or inference failure on the
+`MLXCEL_NVFP4_NATIVE_REPACK=1` leg is a possible and itself-informative
+outcome of this A/B rather than a harness mistake.
 
 ### Build
 
