@@ -67,18 +67,96 @@ fn default_quant_bits() -> usize {
     4
 }
 
+/// Bit widths mlxcel's affine quantization understands, mirroring
+/// `mlxcel_core::layers::infer_quantization_bits`'s `{2,3,4,5,6,8}` set.
+const SUPPORTED_OVERRIDE_BITS: &[u64] = &[2, 3, 4, 5, 6, 8];
+
+/// Validates a per-module override's `group_size` value, returning an
+/// actionable reason string when it is not a positive integer.
+fn validate_override_group_size(raw: &serde_json::Value) -> Result<i32, String> {
+    let Some(group_size) = raw.as_u64() else {
+        return Err(format!("must be a positive integer, got {raw}"));
+    };
+    if group_size == 0 {
+        return Err("must be a positive integer, got 0".to_string());
+    }
+    i32::try_from(group_size).map_err(|_| format!("overflows a 32-bit group size ({group_size})"))
+}
+
+/// Validates a per-module override's `bits` value, returning an actionable
+/// reason string when it is not an integer or not a supported bit width.
+fn validate_override_bits(raw: &serde_json::Value) -> Result<i32, String> {
+    let Some(bits) = raw.as_u64() else {
+        return Err(format!("must be a positive integer, got {raw}"));
+    };
+    if !SUPPORTED_OVERRIDE_BITS.contains(&bits) {
+        return Err(format!(
+            "must be one of {{2, 3, 4, 5, 6, 8}} bits, got {bits}"
+        ));
+    }
+    i32::try_from(bits).map_err(|_| format!("overflows a 32-bit bit width ({bits})"))
+}
+
 impl QuantizationArgs {
+    /// Resolves the quantization parameters for the module weight registered
+    /// under `prefix`, applying a per-module override when one is present.
+    ///
+    /// `overrides` is the flattened remainder of the parent `quantization`
+    /// object (everything besides the well-known root `group_size` / `bits`
+    /// pair, see PR #690). Only the entry keyed by the module's own `prefix`
+    /// is consulted here, so unrelated metadata keys that legitimately live
+    /// alongside per-module overrides (e.g. `mode`, `quant_method`,
+    /// `quant_algo`, `config_groups`, all validated separately by
+    /// `validate_quantization_scheme`) never collide with a real per-module
+    /// lookup and are left untouched.
+    ///
+    /// A malformed override for an exact-matching `prefix` (a non-object
+    /// value, or a `group_size`/`bits` field with the wrong type, a negative
+    /// value, a zero group size, or an unsupported bit width) is diagnosed
+    /// with an actionable `tracing::warn!` naming the offending key before
+    /// falling back to the root defaults for that field, rather than
+    /// silently mis-routing the load (issue #691).
     fn quant_params_for(&self, prefix: &str) -> QuantizationParams {
         let mut params = QuantizationParams {
             group_size: self.group_size as i32,
             bits: self.bits as i32,
         };
-        if let Some(serde_json::Value::Object(override_obj)) = self.overrides.get(prefix) {
-            if let Some(group_size) = override_obj.get("group_size").and_then(|v| v.as_u64()) {
-                params.group_size = group_size as i32;
+        let Some(value) = self.overrides.get(prefix) else {
+            return params;
+        };
+        let Some(override_obj) = value.as_object() else {
+            tracing::warn!(
+                override_key = prefix,
+                value = %value,
+                "gemma4 per-module quantization override '{prefix}' is not an object \
+                 (found {value}); falling back to root defaults (group_size={}, bits={})",
+                self.group_size,
+                self.bits
+            );
+            return params;
+        };
+        if let Some(raw) = override_obj.get("group_size") {
+            match validate_override_group_size(raw) {
+                Ok(group_size) => params.group_size = group_size,
+                Err(reason) => tracing::warn!(
+                    override_key = prefix,
+                    reason = %reason,
+                    "gemma4 per-module quantization override '{prefix}.group_size' is \
+                     malformed: {reason}; falling back to root group_size={}",
+                    self.group_size
+                ),
             }
-            if let Some(bits) = override_obj.get("bits").and_then(|v| v.as_u64()) {
-                params.bits = bits as i32;
+        }
+        if let Some(raw) = override_obj.get("bits") {
+            match validate_override_bits(raw) {
+                Ok(bits) => params.bits = bits,
+                Err(reason) => tracing::warn!(
+                    override_key = prefix,
+                    reason = %reason,
+                    "gemma4 per-module quantization override '{prefix}.bits' is malformed: \
+                     {reason}; falling back to root bits={}",
+                    self.bits
+                ),
             }
         }
         params
@@ -5542,6 +5620,228 @@ mod quant_scheme_tests {
             !dense_mlp_shared_quant_layout(q4, "affine", q4, "affine", down8, "affine"),
             "mixed down-proj-8-bit variants must use projection-local forwards because \
              compiled_gelu_approx_mlp_forward accepts only one quant layout"
+        );
+    }
+}
+
+/// Unit coverage for issue #691: `QuantizationArgs::quant_params_for` must
+/// diagnose malformed per-module overrides (a non-object value, or a
+/// `group_size` / `bits` field with the wrong type, a negative value, a zero
+/// group size, or an unsupported bit width) while still resolving valid
+/// overrides and root-only configs unchanged.
+#[cfg(test)]
+mod quant_override_diagnostics_tests {
+    use super::{QuantizationArgs, QuantizationParams};
+    use serde_json::json;
+    use std::collections::HashMap;
+
+    fn args_with_override(
+        group_size: usize,
+        bits: usize,
+        key: &str,
+        value: serde_json::Value,
+    ) -> QuantizationArgs {
+        let mut overrides = HashMap::new();
+        overrides.insert(key.to_string(), value);
+        QuantizationArgs {
+            group_size,
+            bits,
+            overrides,
+        }
+    }
+
+    #[test]
+    fn valid_override_applies_both_fields() {
+        let args = args_with_override(
+            64,
+            4,
+            "language_model.model.layers.0.mlp.gate_proj",
+            json!({ "group_size": 32, "bits": 8 }),
+        );
+        assert_eq!(
+            args.quant_params_for("language_model.model.layers.0.mlp.gate_proj"),
+            QuantizationParams {
+                group_size: 32,
+                bits: 8
+            }
+        );
+    }
+
+    #[test]
+    fn valid_partial_override_keeps_root_default_for_the_omitted_field() {
+        let args = args_with_override(
+            64,
+            4,
+            "language_model.model.layers.0.mlp.down_proj",
+            json!({ "bits": 8 }),
+        );
+        let params = args.quant_params_for("language_model.model.layers.0.mlp.down_proj");
+        assert_eq!(
+            params.group_size, 64,
+            "group_size absent from the override must retain the root default"
+        );
+        assert_eq!(params.bits, 8);
+    }
+
+    #[test]
+    fn absent_override_returns_root_defaults_unchanged() {
+        let args = QuantizationArgs {
+            group_size: 64,
+            bits: 4,
+            overrides: HashMap::new(),
+        };
+        assert_eq!(
+            args.quant_params_for("language_model.model.layers.0.mlp.gate_proj"),
+            QuantizationParams {
+                group_size: 64,
+                bits: 4
+            }
+        );
+    }
+
+    #[test]
+    fn non_object_override_value_falls_back_to_root_defaults() {
+        let args = args_with_override(
+            64,
+            4,
+            "language_model.model.layers.0.mlp.gate_proj",
+            json!(4),
+        );
+        assert_eq!(
+            args.quant_params_for("language_model.model.layers.0.mlp.gate_proj"),
+            QuantizationParams {
+                group_size: 64,
+                bits: 4
+            },
+            "a scalar override value must diagnose and fall back to root defaults instead of \
+             panicking or being silently misinterpreted"
+        );
+    }
+
+    #[test]
+    fn string_typed_bits_falls_back_to_root_bits_but_sibling_group_size_still_applies() {
+        // Regression for issue #691: "bits": "4" (string) must not be
+        // silently treated as if it were the integer 4.
+        let args = args_with_override(
+            64,
+            4,
+            "language_model.model.layers.0.mlp.gate_proj",
+            json!({ "group_size": 32, "bits": "4" }),
+        );
+        let params = args.quant_params_for("language_model.model.layers.0.mlp.gate_proj");
+        assert_eq!(
+            params.group_size, 32,
+            "the well-formed group_size sibling must still apply"
+        );
+        assert_eq!(
+            params.bits, 4,
+            "a string-typed bits value must fall back to the root default, not parse as 4"
+        );
+    }
+
+    #[test]
+    fn negative_group_size_falls_back_to_root_default() {
+        let args = args_with_override(
+            64,
+            4,
+            "language_model.model.layers.0.mlp.gate_proj",
+            json!({ "group_size": -32 }),
+        );
+        assert_eq!(
+            args.quant_params_for("language_model.model.layers.0.mlp.gate_proj")
+                .group_size,
+            64
+        );
+    }
+
+    #[test]
+    fn zero_group_size_falls_back_to_root_default() {
+        let args = args_with_override(
+            64,
+            4,
+            "language_model.model.layers.0.mlp.gate_proj",
+            json!({ "group_size": 0 }),
+        );
+        assert_eq!(
+            args.quant_params_for("language_model.model.layers.0.mlp.gate_proj")
+                .group_size,
+            64
+        );
+    }
+
+    #[test]
+    fn unsupported_bit_width_falls_back_to_root_default() {
+        let args = args_with_override(
+            64,
+            4,
+            "language_model.model.layers.0.mlp.gate_proj",
+            json!({ "bits": 7 }),
+        );
+        assert_eq!(
+            args.quant_params_for("language_model.model.layers.0.mlp.gate_proj")
+                .bits,
+            4
+        );
+    }
+
+    #[test]
+    fn float_typed_group_size_falls_back_to_root_default() {
+        let args = args_with_override(
+            64,
+            4,
+            "language_model.model.layers.0.mlp.gate_proj",
+            json!({ "group_size": 32.5 }),
+        );
+        assert_eq!(
+            args.quant_params_for("language_model.model.layers.0.mlp.gate_proj")
+                .group_size,
+            64
+        );
+    }
+
+    #[test]
+    fn sibling_metadata_keys_are_not_mistaken_for_the_queried_module_override() {
+        // `mode` / `quant_method` / `quant_algo` / `config_groups` legitimately
+        // live alongside per-module overrides in the flattened `overrides` map
+        // (see `validate_quantization_scheme`); their presence must never
+        // affect resolution of an unrelated, well-formed per-module override.
+        let mut overrides = HashMap::new();
+        overrides.insert("mode".to_string(), json!("mxfp4"));
+        overrides.insert(
+            "language_model.model.layers.0.mlp.gate_proj".to_string(),
+            json!({ "group_size": 32, "bits": 4 }),
+        );
+        let args = QuantizationArgs {
+            group_size: 64,
+            bits: 4,
+            overrides,
+        };
+        assert_eq!(
+            args.quant_params_for("language_model.model.layers.0.mlp.gate_proj"),
+            QuantizationParams {
+                group_size: 32,
+                bits: 4
+            }
+        );
+    }
+
+    #[test]
+    fn typo_prefix_never_matched_falls_back_to_root_defaults_for_the_real_prefix() {
+        // A typo'd override key never collides with a differently-named real
+        // prefix lookup; the queried (correctly spelled) module simply sees
+        // no override and keeps the root defaults.
+        let args = args_with_override(
+            64,
+            4,
+            "language_model.model.layers.0.mlp.gate_prj",
+            json!({ "group_size": 32, "bits": 8 }),
+        );
+        assert_eq!(
+            args.quant_params_for("language_model.model.layers.0.mlp.gate_proj"),
+            QuantizationParams {
+                group_size: 64,
+                bits: 4
+            }
         );
     }
 }
