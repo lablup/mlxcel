@@ -128,6 +128,7 @@ mod cache_isolation {
             }),
             eos_token_id: Some(serde_json::json!([1])),
             quantization: None,
+            quantization_config: None,
         }
     }
 

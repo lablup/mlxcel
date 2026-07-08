@@ -46,6 +46,14 @@ fn is_gemma4_model_config(config: &Value) -> bool {
             == Some("gemma4")
 }
 
+pub(crate) fn config_has_quantization_metadata(config: &Value) -> bool {
+    fn has_quantization(obj: &Value) -> bool {
+        obj.get("quantization").is_some() || obj.get("quantization_config").is_some()
+    }
+
+    has_quantization(config) || config.get("text_config").is_some_and(has_quantization)
+}
+
 fn is_gemma4_text_weight(name: &str) -> bool {
     name.starts_with("language_model.")
         || name.starts_with("model.")
@@ -248,16 +256,116 @@ fn normalize_nvfp4_keys(weights: &mut mlxcel_core::weights::WeightMap) {
     }
 }
 
-/// Dequantize NVFP4-packed weights in-place.
+const NVFP4_SOURCE_GROUP_SIZE: usize = 16;
+const NVFP4_AFFINE_BITS: i32 = 4;
+
+fn positive_i32(value: &Value) -> Option<i32> {
+    value
+        .as_i64()
+        .and_then(|group_size| i32::try_from(group_size).ok())
+        .filter(|group_size| *group_size > 0)
+}
+
+fn quantization_group_size(config: &Value) -> Option<i32> {
+    if let Some(group_size) = config.get("group_size").and_then(positive_i32) {
+        return Some(group_size);
+    }
+
+    if let Some(group_size) = config
+        .get("weights")
+        .and_then(|weights| weights.get("group_size"))
+        .and_then(positive_i32)
+    {
+        return Some(group_size);
+    }
+
+    config
+        .get("config_groups")
+        .and_then(Value::as_object)
+        .and_then(|groups| {
+            groups
+                .values()
+                .find_map(|group| quantization_group_size(group))
+        })
+}
+
+fn quantization_bits(config: &Value) -> Option<i32> {
+    if let Some(bits) = config
+        .get("bits")
+        .or_else(|| config.get("num_bits"))
+        .and_then(positive_i32)
+    {
+        return Some(bits);
+    }
+
+    if let Some(bits) = config.get("weights").and_then(quantization_bits) {
+        return Some(bits);
+    }
+
+    config
+        .get("config_groups")
+        .and_then(Value::as_object)
+        .and_then(|groups| groups.values().find_map(quantization_bits))
+}
+
+fn gemma4_quantization_obj(config: &Value) -> Option<&Value> {
+    config
+        .get("text_config")
+        .and_then(|text| text.get("quantization"))
+        .or_else(|| {
+            config
+                .get("text_config")
+                .and_then(|text| text.get("quantization_config"))
+        })
+        .or_else(|| config.get("quantization"))
+        .or_else(|| config.get("quantization_config"))
+}
+
+pub(crate) fn gemma4_configured_group_size(config: Option<&Value>) -> i32 {
+    config
+        .and_then(gemma4_quantization_obj)
+        .and_then(quantization_group_size)
+        .unwrap_or(64)
+}
+
+pub(crate) fn gemma4_configured_bits(config: Option<&Value>) -> i32 {
+    config
+        .and_then(gemma4_quantization_obj)
+        .and_then(quantization_bits)
+        .unwrap_or(4)
+}
+
+fn nvfp4_affine_group_size_for_in_dim(in_dim: usize, configured_group_size: i32) -> Option<usize> {
+    let preferred = match configured_group_size {
+        32 | 64 | 128 => configured_group_size as usize,
+        // CUDA affine qmv dispatch supports 32/64/128. NVFP4 checkpoints
+        // commonly declare source group_size=16. Repack to the standard MLX
+        // 4-bit group_size=64 when possible; it reduces scale traffic versus
+        // gs32 and matches the shipped Gemma 4 affine checkpoints.
+        _ => 64,
+    };
+    if in_dim.is_multiple_of(preferred) {
+        return Some(preferred);
+    }
+    [32usize, 64, 128]
+        .into_iter()
+        .find(|group_size| in_dim.is_multiple_of(*group_size))
+}
+
+/// Repack NVFP4-packed weights to MLX affine 4-bit in-place.
 ///
 /// Detects weight groups by the presence of `{prefix}.weight_scale_2` keys.
 /// For each group, unpacks FP4 E2M1 nibbles from U8 storage and applies
 /// per-block (weight_scale) and global (weight_scale_2) scale factors to
-/// produce dequantized f16 weights.
+/// produce dense f32 values, then immediately repacks them to MLX affine
+/// `{prefix}.weight/.scales/.biases` tensors.
 ///
-/// After dequantization the auxiliary keys `weight_scale`, `weight_scale_2`,
-/// and `input_scale` are removed from the weight map.
-fn dequantize_nvfp4_weights(weights: &mut mlxcel_core::weights::WeightMap) {
+/// After repacking the auxiliary keys `weight_scale`, `weight_scale_2`, and
+/// `input_scale` are removed from the weight map.
+fn repack_nvfp4_weights_to_affine(
+    weights: &mut mlxcel_core::weights::WeightMap,
+    config: Option<&Value>,
+) {
     // Collect prefixes first to avoid borrowing conflicts during mutation.
     let fp4_prefixes: Vec<String> = weights
         .keys()
@@ -269,9 +377,11 @@ fn dequantize_nvfp4_weights(weights: &mut mlxcel_core::weights::WeightMap) {
         return;
     }
 
+    let configured_group_size = gemma4_configured_group_size(config);
+
     eprintln!(
-        "Dequantizing {} NVFP4 weight groups to f16...",
-        fp4_prefixes.len()
+        "Repacking {} NVFP4 weight groups to MLX affine 4-bit for CUDA quantized matmul (configured_group_size={configured_group_size})...",
+        fp4_prefixes.len(),
     );
 
     for prefix in fp4_prefixes {
@@ -279,6 +389,8 @@ fn dequantize_nvfp4_weights(weights: &mut mlxcel_core::weights::WeightMap) {
         let scale_key = format!("{prefix}.weight_scale");
         let scale2_key = format!("{prefix}.weight_scale_2");
         let input_scale_key = format!("{prefix}.input_scale");
+        let affine_scales_key = format!("{prefix}.scales");
+        let affine_biases_key = format!("{prefix}.biases");
 
         // Verify all required keys exist before proceeding.
         if !weights.contains_key(&weight_key) || !weights.contains_key(&scale_key) {
@@ -313,7 +425,7 @@ fn dequantize_nvfp4_weights(weights: &mut mlxcel_core::weights::WeightMap) {
         // Validate weight tensor is 2-D with positive dimensions.
         if weight_shape.len() < 2 {
             eprintln!(
-                "Skipping NVFP4 dequant for {prefix}: weight tensor is {}-D (expected 2-D)",
+                "Skipping NVFP4 repack for {prefix}: weight tensor is {}-D (expected 2-D)",
                 weight_shape.len()
             );
             weights.remove(&scale2_key);
@@ -321,7 +433,7 @@ fn dequantize_nvfp4_weights(weights: &mut mlxcel_core::weights::WeightMap) {
         }
         if weight_shape[0] <= 0 || weight_shape[1] <= 0 {
             eprintln!(
-                "Skipping NVFP4 dequant for {prefix}: non-positive dimensions [{}, {}]",
+                "Skipping NVFP4 repack for {prefix}: non-positive dimensions [{}, {}]",
                 weight_shape[0], weight_shape[1]
             );
             weights.remove(&scale2_key);
@@ -333,24 +445,33 @@ fn dequantize_nvfp4_weights(weights: &mut mlxcel_core::weights::WeightMap) {
         let packed_dim = weight_shape[1] as usize; // in_dim / 2
         let in_dim = packed_dim * 2;
 
-        let group_size: usize = 16;
+        let group_size: usize = NVFP4_SOURCE_GROUP_SIZE;
 
         // in_dim must be a multiple of group_size for scale indexing to be valid.
         if !in_dim.is_multiple_of(group_size) {
             eprintln!(
-                "Skipping NVFP4 dequant for {prefix}: in_dim {in_dim} is not a multiple of group_size {group_size}"
+                "Skipping NVFP4 repack for {prefix}: in_dim {in_dim} is not a multiple of source group_size {group_size}"
             );
             weights.remove(&scale2_key);
             continue;
         }
         let num_groups = in_dim / group_size;
+        let Some(affine_group_size) =
+            nvfp4_affine_group_size_for_in_dim(in_dim, configured_group_size)
+        else {
+            eprintln!(
+                "Skipping NVFP4 repack for {prefix}: in_dim {in_dim} is not compatible with CUDA affine group sizes 32/64/128"
+            );
+            weights.remove(&scale2_key);
+            continue;
+        };
 
         // Validate raw byte buffer lengths match expected sizes before indexing.
         let expected_weight_bytes = out_dim * packed_dim;
         let expected_scale_bytes = out_dim * num_groups * 4; // F32 = 4 bytes each
         if weight_bytes.len() < expected_weight_bytes {
             eprintln!(
-                "Skipping NVFP4 dequant for {prefix}: weight_bytes length {} < expected {}",
+                "Skipping NVFP4 repack for {prefix}: weight_bytes length {} < expected {}",
                 weight_bytes.len(),
                 expected_weight_bytes
             );
@@ -359,7 +480,7 @@ fn dequantize_nvfp4_weights(weights: &mut mlxcel_core::weights::WeightMap) {
         }
         if scale_bytes.len() < expected_scale_bytes {
             eprintln!(
-                "Skipping NVFP4 dequant for {prefix}: scale_bytes length {} < expected {}",
+                "Skipping NVFP4 repack for {prefix}: scale_bytes length {} < expected {}",
                 scale_bytes.len(),
                 expected_scale_bytes
             );
@@ -393,18 +514,43 @@ fn dequantize_nvfp4_weights(weights: &mut mlxcel_core::weights::WeightMap) {
             }
         }
 
-        // Create a new f16 array with shape [out_dim, in_dim].
+        // Create a temporary f16 array with shape [out_dim, in_dim], then
+        // repack it immediately to MLX affine 4-bit so downstream linears stay
+        // on quantized_matmul instead of dense f16 matmul.
         let new_shape = vec![out_dim as i32, in_dim as i32];
         let new_arr = mlxcel_core::from_slice_f32(&dequant_f32, &new_shape);
-        let new_arr_f16 = mlxcel_core::astype(&new_arr, mlxcel_core::dtype::FLOAT16);
-        mlxcel_core::eval(&new_arr_f16);
+        let dense_f16 = mlxcel_core::astype(&new_arr, mlxcel_core::dtype::FLOAT16);
+        let quantized =
+            mlxcel_core::quantize_weights(&dense_f16, affine_group_size as i32, NVFP4_AFFINE_BITS);
+        let quantized_weight = mlxcel_core::quantized_weights_w(&quantized);
+        let quantized_scales = mlxcel_core::quantized_weights_scales(&quantized);
+        let quantized_biases = mlxcel_core::quantized_weights_biases(&quantized);
 
-        // Replace the packed weight and remove auxiliary keys.
-        weights.insert(weight_key, new_arr_f16);
+        let ptrs: Vec<*const mlxcel_core::MlxArray> =
+            [&quantized_weight, &quantized_scales, &quantized_biases]
+                .into_iter()
+                .filter_map(|arr| arr.as_ref().map(|arr| arr as *const mlxcel_core::MlxArray))
+                .collect();
+        if !ptrs.is_empty() {
+            unsafe { mlxcel_core::eval_all(&ptrs) };
+        }
+
+        // Replace the NVFP4 packed triplet with the MLX affine triplet.
+        weights.insert(weight_key, quantized_weight);
+        weights.insert(affine_scales_key, quantized_scales);
+        weights.insert(affine_biases_key, quantized_biases);
         weights.remove(&scale_key);
         weights.remove(&scale2_key);
         weights.remove(&input_scale_key); // may not exist; remove is a no-op then
     }
+}
+
+pub(crate) fn sanitize_gemma4_nvfp4_weights(
+    weights: &mut mlxcel_core::weights::WeightMap,
+    config: Option<&Value>,
+) {
+    normalize_nvfp4_keys(weights);
+    repack_nvfp4_weights_to_affine(weights, config);
 }
 
 /// Drop k_proj / v_proj / k_norm weight entries that belong to KV-shared
@@ -1080,7 +1226,7 @@ pub fn load_and_sanitize_weights<P: AsRef<std::path::Path>>(
 ///
 /// The optional `transform` parameter is the Axis A "weight-load
 /// surgery" hook. It is invoked *after* basic
-/// sanitization (tied embeddings, NVFP4 dequant, KV-shared stripping)
+/// sanitization (tied embeddings, NVFP4 repack, KV-shared stripping)
 /// and *before* the Apple Silicon bf16 → f16 conversion, so any
 /// transform observes weights in the same layout the model graph would
 /// see them. When `transform` is `None` the call is bit-exact identical
@@ -1132,11 +1278,11 @@ pub fn load_text_weights<P: AsRef<std::path::Path>>(
         mlxcel_core::weights::load_weights_from_dir(model_dir)?
     };
 
-    // Apply NVFP4 key normalization and dequantization for Gemma 4 nvfp4
-    // checkpoints before tied-embedding sanitization so that lookups succeed.
+    // Apply NVFP4 key normalization and affine repack for Gemma 4 nvfp4
+    // checkpoints before tied-embedding sanitization so that lookups succeed
+    // and downstream linears stay on quantized_matmul.
     if is_gemma4 {
-        normalize_nvfp4_keys(&mut weights);
-        dequantize_nvfp4_weights(&mut weights);
+        sanitize_gemma4_nvfp4_weights(&mut weights, parsed_config.as_ref());
     }
 
     let mut is_quantized = false;
@@ -1151,11 +1297,7 @@ pub fn load_text_weights<P: AsRef<std::path::Path>>(
             strip_gemma4_kv_shared_weights(&mut weights, config);
         }
         sanitize_tied_embeddings(&mut weights, config);
-        is_quantized = config.get("quantization").is_some()
-            || config
-                .get("text_config")
-                .and_then(|tc| tc.get("quantization"))
-                .is_some();
+        is_quantized = config_has_quantization_metadata(config);
     }
 
     // Axis A weight-load surgery hook. Runs after sanitization
@@ -1357,6 +1499,63 @@ pub fn sanitize_config_json(config_str: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gemma4_group_size_reads_modelopt_config_groups() {
+        let config = serde_json::json!({
+            "model_type": "gemma4",
+            "quantization_config": {
+                "quant_method": "modelopt",
+                "quant_algo": "NVFP4",
+                "config_groups": {
+                    "group_0": {
+                        "weights": {
+                            "num_bits": 4,
+                            "type": "float",
+                            "group_size": 16
+                        }
+                    }
+                }
+            }
+        });
+
+        assert_eq!(gemma4_configured_group_size(Some(&config)), 16);
+    }
+
+    #[test]
+    fn gemma4_group_size_prefers_text_quantization() {
+        let config = serde_json::json!({
+            "model_type": "gemma4",
+            "quantization": { "group_size": 64 },
+            "text_config": {
+                "quantization": { "group_size": 32 }
+            }
+        });
+
+        assert_eq!(gemma4_configured_group_size(Some(&config)), 32);
+    }
+
+    #[test]
+    fn gemma4_bits_reads_modelopt_num_bits() {
+        let config = serde_json::json!({
+            "model_type": "gemma4",
+            "quantization_config": {
+                "quant_method": "modelopt",
+                "quant_algo": "NVFP4",
+                "config_groups": {
+                    "group_0": {
+                        "weights": {
+                            "num_bits": 4,
+                            "type": "float",
+                            "group_size": 16
+                        }
+                    }
+                }
+            }
+        });
+
+        assert_eq!(gemma4_configured_bits(Some(&config)), 4);
+    }
 
     // --- f8_e4m3_to_f32 tests ---
 

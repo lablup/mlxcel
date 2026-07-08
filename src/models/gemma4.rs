@@ -239,6 +239,8 @@ pub struct ModelArgs {
     pub eos_token_id: Option<serde_json::Value>,
     #[serde(default)]
     pub quantization: Option<RootQuantization>,
+    #[serde(default)]
+    pub quantization_config: Option<serde_json::Value>,
 }
 
 impl ModelArgs {
@@ -251,6 +253,15 @@ impl ModelArgs {
             config.quantization = Some(QuantizationArgs {
                 group_size: q.group_size,
                 bits: q.bits,
+            });
+        }
+        if config.quantization.is_none()
+            && let Some(ref quantization_config) = self.quantization_config
+        {
+            let root = serde_json::json!({ "quantization_config": quantization_config });
+            config.quantization = Some(QuantizationArgs {
+                group_size: super::sanitize::gemma4_configured_group_size(Some(&root)) as usize,
+                bits: super::sanitize::gemma4_configured_bits(Some(&root)) as usize,
             });
         }
         config
@@ -3386,18 +3397,62 @@ const DENSE_PREFILL_MASK_MAX_TOKENS: i32 = 4096;
 /// the affine layout the loader assumes. Dequantizing one as affine collapses
 /// the logits and produces the degenerate, repeating output reported in issue
 /// #467, so reject it here with an actionable message that names the format
-/// instead of serving garbage.
+/// instead of serving garbage. The narrow exception is NVIDIA ModelOpt NVFP4:
+/// Gemma 4 checkpoints store explicit `{weight, weight_scale, weight_scale_2}`
+/// triplets that the sanitize layer repacks to MLX affine 4-bit at load time.
 ///
 /// Inspects the top-level and `text_config`-nested `quantization` /
 /// `quantization_config` objects. Pure over the parsed config JSON so the
 /// policy is unit-testable without a model on disk.
 pub(crate) fn validate_quantization_scheme(config: &serde_json::Value) -> Result<(), String> {
+    fn is_modelopt_nvfp4(obj: &serde_json::Value) -> bool {
+        let method = obj
+            .get("quant_method")
+            .and_then(|v| v.as_str())
+            .map(|v| v.trim().to_ascii_lowercase());
+        if method.as_deref() != Some("modelopt") {
+            return false;
+        }
+
+        let algo = obj
+            .get("quant_algo")
+            .and_then(|v| v.as_str())
+            .map(|v| v.trim().to_ascii_lowercase());
+        if algo.as_deref() != Some("nvfp4") {
+            return false;
+        }
+
+        let Some(groups) = obj.get("config_groups").and_then(|v| v.as_object()) else {
+            return false;
+        };
+        !groups.is_empty()
+            && groups.values().all(|group| {
+                group
+                    .get("weights")
+                    .and_then(|weights| {
+                        let bits = weights.get("num_bits").and_then(|v| v.as_i64())?;
+                        let group_size = weights.get("group_size").and_then(|v| v.as_i64())?;
+                        let ty = weights
+                            .get("type")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or_default()
+                            .trim()
+                            .to_ascii_lowercase();
+                        Some(bits == 4 && group_size == 16 && ty == "float")
+                    })
+                    .unwrap_or(false)
+            })
+    }
+
     fn check_obj(obj: &serde_json::Value, location: &str) -> Result<(), String> {
         for key in ["quant_method", "mode"] {
             let Some(raw) = obj.get(key).and_then(|v| v.as_str()) else {
                 continue;
             };
             let norm = raw.trim().to_ascii_lowercase();
+            if key == "quant_method" && norm == "modelopt" && is_modelopt_nvfp4(obj) {
+                continue;
+            }
             if norm.is_empty() || SUPPORTED_QUANT_SCHEMES.contains(&norm.as_str()) {
                 continue;
             }
@@ -3451,11 +3506,7 @@ impl Gemma4Model {
         // degenerate output (issue #467).
         validate_quantization_scheme(&config_value)?;
 
-        let is_quantized = config_value.get("quantization").is_some()
-            || config_value
-                .get("text_config")
-                .and_then(|text| text.get("quantization"))
-                .is_some();
+        let is_quantized = super::sanitize::config_has_quantization_metadata(&config_value);
         let (mut weights, weight_backing) = if is_quantized {
             super::sanitize::load_gemma4_text_weights_with_backing(model_dir)?
         } else {
@@ -3464,6 +3515,9 @@ impl Gemma4Model {
                 super::sanitize::Gemma4WeightBacking::default(),
             )
         };
+        if is_quantized {
+            super::sanitize::sanitize_gemma4_nvfp4_weights(&mut weights, Some(&config_value));
+        }
         // Strip k_proj/v_proj/k_norm entries for KV-shared layers so the
         // model constructor does not attempt to allocate them.  This applies
         // on all loader paths including the quantized text-only path above,
@@ -3718,11 +3772,7 @@ impl Gemma4StageModel {
         // degenerate output (issue #467).
         validate_quantization_scheme(&config_value)?;
 
-        let is_quantized = config_value.get("quantization").is_some()
-            || config_value
-                .get("text_config")
-                .and_then(|text| text.get("quantization"))
-                .is_some();
+        let is_quantized = super::sanitize::config_has_quantization_metadata(&config_value);
         let (mut weights, weight_backing) = if is_quantized {
             super::sanitize::load_gemma4_text_weights_with_backing(model_dir)?
         } else {
@@ -3731,6 +3781,9 @@ impl Gemma4StageModel {
                 super::sanitize::Gemma4WeightBacking::default(),
             )
         };
+        if is_quantized {
+            super::sanitize::sanitize_gemma4_nvfp4_weights(&mut weights, Some(&config_value));
+        }
         // Strip k_proj/v_proj/k_norm entries for KV-shared layers so the
         // model constructor does not attempt to allocate them.  Required on
         // the quantized path because load_gemma4_text_weights_with_backing
@@ -5219,7 +5272,7 @@ mod gemma4_unified_mask_tests {
 
 #[cfg(test)]
 mod quant_scheme_tests {
-    use super::validate_quantization_scheme;
+    use super::{ModelArgs, validate_quantization_scheme};
     use serde_json::json;
 
     #[test]
@@ -5240,6 +5293,101 @@ mod quant_scheme_tests {
     fn accepts_supported_block_float_mode() {
         let cfg = json!({ "quantization": { "group_size": 32, "bits": 4, "mode": "mxfp4" } });
         assert!(validate_quantization_scheme(&cfg).is_ok());
+    }
+
+    #[test]
+    fn accepts_modelopt_nvfp4_repack_source() {
+        let cfg = json!({
+            "quantization_config": {
+                "quant_method": "modelopt",
+                "quant_algo": "NVFP4",
+                "config_groups": {
+                    "group_0": {
+                        "weights": {
+                            "dynamic": false,
+                            "num_bits": 4,
+                            "type": "float",
+                            "group_size": 16
+                        },
+                        "targets": ["Linear"]
+                    }
+                }
+            }
+        });
+        assert!(validate_quantization_scheme(&cfg).is_ok());
+    }
+
+    #[test]
+    fn model_args_promotes_modelopt_nvfp4_quantization_config() {
+        let args = ModelArgs {
+            model_type: "gemma4".to_string(),
+            text_config: json!({
+                "model_type": "gemma4_text",
+                "hidden_size": 5376,
+                "num_hidden_layers": 1,
+                "intermediate_size": 21504,
+                "num_attention_heads": 32,
+                "head_dim": 256,
+                "rms_norm_eps": 1e-6,
+                "vocab_size": 262144,
+                "num_key_value_heads": 16,
+                "rope_parameters": {
+                    "sliding_attention": { "rope_theta": 10000.0 },
+                    "full_attention": { "rope_theta": 1000000.0 }
+                },
+                "sliding_window": 1024,
+                "max_position_embeddings": 262144,
+                "layer_types": ["sliding_attention"]
+            }),
+            eos_token_id: None,
+            quantization: None,
+            quantization_config: Some(json!({
+                "quant_method": "modelopt",
+                "quant_algo": "NVFP4",
+                "config_groups": {
+                    "group_0": {
+                        "weights": {
+                            "dynamic": false,
+                            "num_bits": 4,
+                            "type": "float",
+                            "group_size": 16
+                        },
+                        "targets": ["Linear"]
+                    }
+                }
+            })),
+        };
+
+        let text = args.text_args();
+        assert_eq!(text.group_size(), 16);
+        assert_eq!(text.bits(), 4);
+    }
+
+    #[test]
+    fn rejects_modelopt_without_nvfp4_repack_metadata() {
+        for cfg in [
+            json!({ "quantization_config": { "quant_method": "modelopt" } }),
+            json!({
+                "quantization_config": {
+                    "quant_method": "modelopt",
+                    "quant_algo": "INT4",
+                    "config_groups": {
+                        "group_0": {
+                            "weights": {
+                                "num_bits": 4,
+                                "type": "int",
+                                "group_size": 128
+                            }
+                        }
+                    }
+                }
+            }),
+        ] {
+            assert!(
+                validate_quantization_scheme(&cfg).is_err(),
+                "non-NVFP4 ModelOpt metadata must remain rejected: {cfg}"
+            );
+        }
     }
 
     #[test]

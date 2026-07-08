@@ -4799,6 +4799,23 @@ std::unique_ptr<MlxArray> random_multivariate_normal(
 }
 
 // Quantization additions.
+std::unique_ptr<MlxQuantizedWeights> quantize_weights(const MlxArray& w, int32_t group_size, int32_t bits) {
+    return std::make_unique<MlxQuantizedWeights>(
+        mlx::core::quantize(w.inner, group_size, bits));
+}
+
+std::unique_ptr<MlxArray> quantized_weights_w(const MlxQuantizedWeights& weights) {
+    return std::make_unique<MlxArray>(weights.weight);
+}
+
+std::unique_ptr<MlxArray> quantized_weights_scales(const MlxQuantizedWeights& weights) {
+    return std::make_unique<MlxArray>(weights.scales);
+}
+
+std::unique_ptr<MlxArray> quantized_weights_biases(const MlxQuantizedWeights& weights) {
+    return std::make_unique<MlxArray>(weights.biases);
+}
+
 std::unique_ptr<MlxArray> quantize_weights_w(const MlxArray& w, int32_t group_size, int32_t bits) {
     auto result = mlx::core::quantize(w.inner, group_size, bits);
     return std::make_unique<MlxArray>(std::move(result[0]));
