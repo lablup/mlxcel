@@ -27,6 +27,9 @@ mod ffi {
         /// Opaque wrapper for mlx::core::array
         type MlxArray;
 
+        /// Opaque wrapper for one MLX quantize() result triple.
+        type MlxQuantizedWeights;
+
         /// Opaque wrapper for mlx::core::Stream
         type MlxStream;
 
@@ -2261,6 +2264,33 @@ mod ffi {
         ) -> UniquePtr<MlxArray>;
 
         // Quantization additions.
+        /// Quantize weights once and retain the result triple.
+        fn quantize_weights(
+            w: &MlxArray,
+            group_size: i32,
+            bits: i32,
+        ) -> UniquePtr<MlxQuantizedWeights>;
+
+        /// Quantize weights once with an explicit MLX quantization mode.
+        fn quantize_weights_with_mode(
+            w: &MlxArray,
+            group_size: i32,
+            bits: i32,
+            mode: &str,
+        ) -> UniquePtr<MlxQuantizedWeights>;
+
+        /// Quantize result — quantized weights
+        fn quantized_weights_w(weights: &MlxQuantizedWeights) -> UniquePtr<MlxArray>;
+
+        /// Quantize result — scales
+        fn quantized_weights_scales(weights: &MlxQuantizedWeights) -> UniquePtr<MlxArray>;
+
+        /// Whether the quantize result contains affine biases.
+        fn quantized_weights_has_biases(weights: &MlxQuantizedWeights) -> bool;
+
+        /// Quantize result — biases
+        fn quantized_weights_biases(weights: &MlxQuantizedWeights) -> UniquePtr<MlxArray>;
+
         /// Quantize weights — quantized weights
         fn quantize_weights_w(w: &MlxArray, group_size: i32, bits: i32) -> UniquePtr<MlxArray>;
 

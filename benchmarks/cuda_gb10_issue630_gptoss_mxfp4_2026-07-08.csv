@@ -1,0 +1,2 @@
+model,model_path,prompt_tokens,generated_tokens,prefill_ms,prefill_tok_s,decode_ms,decode_tok_s,date,hardware,mlx_version,build_type,max_tokens,prompt,prompt_target_len
+gpt-oss-20b-mxfp4,models/gpt-oss-20b-mxfp4,73,64,761.53,95.86,911.26,70.23,2026-07-08,NVIDIA_GB10_122GB,0.3.3,release,64,"Hello, how are you today?",

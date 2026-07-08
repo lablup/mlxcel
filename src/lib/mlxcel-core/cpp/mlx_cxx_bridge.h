@@ -5,6 +5,8 @@
 
 #include <memory>
 #include <cstdint>
+#include <optional>
+#include <vector>
 #include "rust/cxx.h"
 #include "mlx/mlx.h"
 
@@ -17,6 +19,20 @@ struct MlxArray {
 
     explicit MlxArray(mlx::core::array&& arr) : inner(std::move(arr)) {}
     explicit MlxArray(const mlx::core::array& arr) : inner(arr) {}
+};
+
+struct MlxQuantizedWeights {
+    mlx::core::array weight;
+    mlx::core::array scales;
+    std::optional<mlx::core::array> biases;
+
+    explicit MlxQuantizedWeights(std::vector<mlx::core::array>&& arrays)
+        : weight(std::move(arrays.at(0))),
+          scales(std::move(arrays.at(1))) {
+        if (arrays.size() > 2) {
+            biases.emplace(std::move(arrays.at(2)));
+        }
+    }
 };
 
 // Opaque wrapper for mlx::core::Stream
@@ -1413,6 +1429,12 @@ std::unique_ptr<MlxArray> random_multivariate_normal(
 );
 
 // Quantization additions.
+std::unique_ptr<MlxQuantizedWeights> quantize_weights(const MlxArray& w, int32_t group_size, int32_t bits);
+std::unique_ptr<MlxQuantizedWeights> quantize_weights_with_mode(const MlxArray& w, int32_t group_size, int32_t bits, rust::Str mode);
+std::unique_ptr<MlxArray> quantized_weights_w(const MlxQuantizedWeights& weights);
+std::unique_ptr<MlxArray> quantized_weights_scales(const MlxQuantizedWeights& weights);
+bool quantized_weights_has_biases(const MlxQuantizedWeights& weights);
+std::unique_ptr<MlxArray> quantized_weights_biases(const MlxQuantizedWeights& weights);
 std::unique_ptr<MlxArray> quantize_weights_w(const MlxArray& w, int32_t group_size, int32_t bits);
 std::unique_ptr<MlxArray> quantize_weights_scales(const MlxArray& w, int32_t group_size, int32_t bits);
 std::unique_ptr<MlxArray> quantize_weights_biases(const MlxArray& w, int32_t group_size, int32_t bits);

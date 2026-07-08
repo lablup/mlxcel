@@ -4799,6 +4799,39 @@ std::unique_ptr<MlxArray> random_multivariate_normal(
 }
 
 // Quantization additions.
+std::unique_ptr<MlxQuantizedWeights> quantize_weights(const MlxArray& w, int32_t group_size, int32_t bits) {
+    return std::make_unique<MlxQuantizedWeights>(
+        mlx::core::quantize(w.inner, group_size, bits));
+}
+
+std::unique_ptr<MlxQuantizedWeights> quantize_weights_with_mode(const MlxArray& w, int32_t group_size, int32_t bits, rust::Str mode) {
+    return std::make_unique<MlxQuantizedWeights>(
+        mlx::core::quantize(
+            w.inner,
+            std::optional<int>(group_size),
+            std::optional<int>(bits),
+            std::string(mode.data(), mode.size())));
+}
+
+std::unique_ptr<MlxArray> quantized_weights_w(const MlxQuantizedWeights& weights) {
+    return std::make_unique<MlxArray>(weights.weight);
+}
+
+std::unique_ptr<MlxArray> quantized_weights_scales(const MlxQuantizedWeights& weights) {
+    return std::make_unique<MlxArray>(weights.scales);
+}
+
+bool quantized_weights_has_biases(const MlxQuantizedWeights& weights) {
+    return weights.biases.has_value();
+}
+
+std::unique_ptr<MlxArray> quantized_weights_biases(const MlxQuantizedWeights& weights) {
+    if (!weights.biases.has_value()) {
+        return nullptr;
+    }
+    return std::make_unique<MlxArray>(*weights.biases);
+}
+
 std::unique_ptr<MlxArray> quantize_weights_w(const MlxArray& w, int32_t group_size, int32_t bits) {
     auto result = mlx::core::quantize(w.inner, group_size, bits);
     return std::make_unique<MlxArray>(std::move(result[0]));

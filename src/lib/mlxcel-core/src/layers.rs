@@ -769,6 +769,43 @@ fn infer_quantization_bits(
     Ok(inferred_bits)
 }
 
+fn infer_quantization_group_size(
+    weight_shape: &[i32],
+    scales_shape: &[i32],
+    bits: i32,
+    caller_group_size: i32,
+) -> Result<i32, String> {
+    if weight_shape.is_empty() || scales_shape.is_empty() || bits <= 0 {
+        return Ok(caller_group_size);
+    }
+    let packed_in = *weight_shape.last().unwrap();
+    let num_groups = *scales_shape.last().unwrap();
+    if packed_in <= 0 || num_groups <= 0 {
+        return Ok(caller_group_size);
+    }
+
+    let numerator = packed_in.checked_mul(32).ok_or_else(|| {
+        format!(
+            "Quantized weight shape overflow: packed_in={}, weight.shape={:?}",
+            packed_in, weight_shape
+        )
+    })?;
+    let denominator = num_groups.checked_mul(bits).ok_or_else(|| {
+        format!(
+            "Quantized scales shape overflow: num_groups={}, bits={}",
+            num_groups, bits
+        )
+    })?;
+    if denominator == 0 || numerator % denominator != 0 {
+        return Err(format!(
+            "Quantized weight shape inconsistency: weight.shape={:?}, scales.shape={:?}, \
+             bits={}: cannot derive integer group_size",
+            weight_shape, scales_shape, bits
+        ));
+    }
+    Ok(numerator / denominator)
+}
+
 /// Reconciled quantization parameters plus whether reconciliation altered the
 /// caller-declared values.
 ///
@@ -834,6 +871,23 @@ pub fn reconcile_quantization_layout(
     }
 
     if mode == "affine" {
+        // The non-CUDA ModelOpt NVFP4 fallback repacks source group_size=16
+        // weights into standard affine group sizes so decode can stay quantized.
+        // Shapes are ambiguous with an 8-bit/gs16 tensor, but gs16 affine qmv
+        // is not supported by the backend. Prefer the declared 4-bit width and
+        // recover the qmv-supported group_size for this narrow case.
+        if group_size == 16 && bits == 4 {
+            let effective_group_size =
+                infer_quantization_group_size(weight_shape, scales_shape, bits, group_size)?;
+            if [32, 64, 128].contains(&effective_group_size) {
+                return Ok(ReconciledQuant {
+                    bits,
+                    group_size: effective_group_size,
+                    reconciled: effective_group_size != group_size,
+                });
+            }
+        }
+
         // Trust group_size, re-derive bits. A non-integer or out-of-range bit
         // width propagates as the hard-fail path (the unsupported-layout guard).
         let effective_bits = infer_quantization_bits(weight_shape, scales_shape, group_size, bits)?;
@@ -3561,6 +3615,29 @@ mod tests {
             layout.reconciled,
             "a shape/metadata mismatch must be surfaced, not silently reconciled"
         );
+    }
+
+    #[test]
+    fn reconcile_affine_nvfp4_fallback_recovers_group_size() {
+        // Issue #630: Gemma 4 nvfp4 checkpoints declare source group_size 16,
+        // but the affine fallback stores the same 4-bit dense values at
+        // group_size 32. Trusting gs16 would infer bits=8.
+        let layout =
+            reconcile_quantization_layout(&[32, 16], &[32, 4], 16, 4, "affine").expect("valid");
+        assert_eq!(layout.bits, 4);
+        assert_eq!(layout.group_size, 32);
+        assert!(layout.reconciled);
+    }
+
+    #[test]
+    fn reconcile_affine_nvfp4_fallback_recovers_group_size_64() {
+        // The ModelOpt NVFP4 affine fallback repacks to MLX's standard
+        // group_size=64 when dimensions allow it.
+        let layout =
+            reconcile_quantization_layout(&[32, 16], &[32, 2], 16, 4, "affine").expect("valid");
+        assert_eq!(layout.bits, 4);
+        assert_eq!(layout.group_size, 64);
+        assert!(layout.reconciled);
     }
 
     #[test]
