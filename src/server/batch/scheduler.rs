@@ -4548,8 +4548,13 @@ impl BatchScheduler {
                 }
             }
 
-            // Periodic cache clearing (matches Python mlx-lm which clears every 256)
-            if seq.generated_tokens.len() % 256 == 0 {
+            // Periodic cache clearing, backend-aware cadence (#627): disabled by
+            // default on CUDA (clear churns the pool and defeats CUDA-graph
+            // reuse, mlx#2358), 256 on Metal, MLXCEL_CACHE_CLEAR_INTERVAL overrides.
+            if mlxcel_core::memory::should_clear_cache_at(
+                seq.generated_tokens.len(),
+                mlxcel_core::memory::cache_clear_interval(),
+            ) {
                 mlxcel_core::clear_memory_cache();
             }
 
@@ -4675,8 +4680,13 @@ impl BatchScheduler {
                 }
             }
 
-            // Periodic cache clearing (matches Python mlx-lm which clears every 256).
-            if seq.generated_tokens.len() % 256 == 0 {
+            // Periodic cache clearing, backend-aware cadence (#627): disabled by
+            // default on CUDA (clear churns the pool and defeats CUDA-graph
+            // reuse, mlx#2358), 256 on Metal, MLXCEL_CACHE_CLEAR_INTERVAL overrides.
+            if mlxcel_core::memory::should_clear_cache_at(
+                seq.generated_tokens.len(),
+                mlxcel_core::memory::cache_clear_interval(),
+            ) {
                 mlxcel_core::clear_memory_cache();
             }
 
@@ -4865,8 +4875,13 @@ impl BatchScheduler {
             }
         }
 
-        // Periodic cache clearing (matches Python mlx-lm which clears every 256)
-        if seq.generated_tokens.len() % 256 == 0 {
+        // Periodic cache clearing, backend-aware cadence (#627): disabled by
+        // default on CUDA (clear churns the pool and defeats CUDA-graph
+        // reuse, mlx#2358), 256 on Metal, MLXCEL_CACHE_CLEAR_INTERVAL overrides.
+        if mlxcel_core::memory::should_clear_cache_at(
+            seq.generated_tokens.len(),
+            mlxcel_core::memory::cache_clear_interval(),
+        ) {
             mlxcel_core::clear_memory_cache();
         }
 

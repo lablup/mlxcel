@@ -1416,8 +1416,12 @@ impl CxxGenerator {
                 break;
             }
 
-            // Periodic cache clearing (matches Python mlx-lm which clears every 256)
-            if n % 256 == 0 && n > 0 {
+            // Periodic cache clearing. Backend-aware cadence (#627): Metal
+            // trims the buffer cache cheaply, but on CUDA the clear churns the
+            // memory pool and defeats CUDA-graph reuse (mlx#2358), so it is
+            // disabled by default there and the cache is bounded via
+            // MLXCEL_CACHE_LIMIT instead. MLXCEL_CACHE_CLEAR_INTERVAL overrides.
+            if crate::memory::should_clear_cache_at(n, crate::memory::cache_clear_interval()) {
                 ffi::clear_memory_cache();
             }
 
@@ -1620,8 +1624,12 @@ impl CxxGenerator {
                 break;
             }
 
-            // Periodic cache clearing (matches Python mlx-lm which clears every 256)
-            if n % 256 == 0 && n > 0 {
+            // Periodic cache clearing. Backend-aware cadence (#627): Metal
+            // trims the buffer cache cheaply, but on CUDA the clear churns the
+            // memory pool and defeats CUDA-graph reuse (mlx#2358), so it is
+            // disabled by default there and the cache is bounded via
+            // MLXCEL_CACHE_LIMIT instead. MLXCEL_CACHE_CLEAR_INTERVAL overrides.
+            if crate::memory::should_clear_cache_at(n, crate::memory::cache_clear_interval()) {
                 ffi::clear_memory_cache();
             }
 
@@ -1773,8 +1781,12 @@ impl CxxGenerator {
             if detect_repetition_loop(&self.generated_tokens, &sampling.loop_detection) {
                 break;
             }
-            // Periodic cache clearing (matches Python mlx-lm which clears every 256)
-            if n % 256 == 0 && n > 0 {
+            // Periodic cache clearing. Backend-aware cadence (#627): Metal
+            // trims the buffer cache cheaply, but on CUDA the clear churns the
+            // memory pool and defeats CUDA-graph reuse (mlx#2358), so it is
+            // disabled by default there and the cache is bounded via
+            // MLXCEL_CACHE_LIMIT instead. MLXCEL_CACHE_CLEAR_INTERVAL overrides.
+            if crate::memory::should_clear_cache_at(n, crate::memory::cache_clear_interval()) {
                 ffi::clear_memory_cache();
             }
             if let Some(ny) = next_y {
@@ -1969,8 +1981,12 @@ impl CxxGenerator {
                 break;
             }
 
-            // Periodic cache clearing (matches Python mlx-lm which clears every 256)
-            if n % 256 == 0 && n > 0 {
+            // Periodic cache clearing. Backend-aware cadence (#627): Metal
+            // trims the buffer cache cheaply, but on CUDA the clear churns the
+            // memory pool and defeats CUDA-graph reuse (mlx#2358), so it is
+            // disabled by default there and the cache is bounded via
+            // MLXCEL_CACHE_LIMIT instead. MLXCEL_CACHE_CLEAR_INTERVAL overrides.
+            if crate::memory::should_clear_cache_at(n, crate::memory::cache_clear_interval()) {
                 ffi::clear_memory_cache();
             }
 
@@ -2704,28 +2720,31 @@ mod tests {
         assert!(cfg.needs_token_history());
     }
 
-    // -- Cache clearing interval (aligned with Python mlx-lm) --
+    // -- Cache clearing cadence (backend-aware, #627) --
 
-    /// Verify that the cache clearing interval (256 tokens) matches Python
-    /// mlx-lm. The condition `n % 256 == 0 && n > 0` fires at n=256, 512, ...
+    /// The decode loops gate the periodic clear through
+    /// `memory::should_clear_cache_at`. Verify the contract the loops rely on:
+    /// it fires on multiples of the interval, never on token 0, and honors a
+    /// longer cadence.
     #[test]
-    fn cache_clearing_triggers_every_256_tokens() {
-        let clears: Vec<usize> = (1..=512).filter(|&n| n % 256 == 0).collect();
-        assert_eq!(clears, vec![256, 512]);
+    fn periodic_clear_gate_respects_interval() {
+        use crate::memory::should_clear_cache_at;
+        assert!(should_clear_cache_at(256, 256));
+        assert!(should_clear_cache_at(512, 256));
+        assert!(!should_clear_cache_at(0, 256));
+        assert!(!should_clear_cache_at(255, 256));
+        assert!(should_clear_cache_at(4096, 4096));
+        assert!(!should_clear_cache_at(256, 4096));
     }
 
+    /// Interval 0 is the CUDA default: the periodic clear never fires, so the
+    /// buffer cache stays resident for CUDA-graph reuse.
     #[test]
-    fn cache_clearing_does_not_trigger_on_token_zero() {
-        // n=0 is the very first decode iteration after prefill. Clearing here
-        // would discard tensors needed for the pipelined next-step computation.
-        let n = 0_usize;
-        assert!(!(n.is_multiple_of(256) && n > 0));
-    }
-
-    #[test]
-    fn cache_clearing_first_trigger_is_at_256() {
-        let first_clear = (1_usize..).find(|&n| n % 256 == 0 && n > 0);
-        assert_eq!(first_clear, Some(256));
+    fn periodic_clear_disabled_when_interval_zero() {
+        use crate::memory::should_clear_cache_at;
+        for n in [0_usize, 1, 256, 512, 4096, 100_000] {
+            assert!(!should_clear_cache_at(n, 0));
+        }
     }
 
     // -- SamplingConfig construction helpers --

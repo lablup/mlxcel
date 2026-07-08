@@ -150,6 +150,58 @@ pub fn set_cache_limit(bytes: u64) -> u64 {
     ffi::set_cache_limit(clamped) as u64
 }
 
+/// Default periodic decode-loop cache-clear cadence, in generated tokens.
+///
+/// On Metal, trimming the MLX buffer cache every 256 tokens is cheap and
+/// matches Python mlx-lm. On CUDA, dropping cached buffers forces the CUDA
+/// memory pool to reallocate on the next step and defeats MLX's CUDA-graph
+/// executable cache (graph reuse depends on stable buffer addresses;
+/// ml-explore/mlx#2358), so the periodic clear is a net loss. Issue #627
+/// disables it by default on CUDA and bounds the cache via [`set_cache_limit`]
+/// (`MLXCEL_CACHE_LIMIT`) instead. `0` means "never clear on cadence".
+#[cfg(feature = "cuda")]
+pub const DEFAULT_CACHE_CLEAR_INTERVAL: usize = 0;
+/// Default periodic decode-loop cache-clear cadence, in generated tokens.
+/// See the `cuda` variant for the rationale; on Metal/CPU the cheap 256-token
+/// trim used by Python mlx-lm is kept.
+#[cfg(not(feature = "cuda"))]
+pub const DEFAULT_CACHE_CLEAR_INTERVAL: usize = 256;
+
+const CACHE_CLEAR_INTERVAL_ENV: &str = "MLXCEL_CACHE_CLEAR_INTERVAL";
+
+fn parse_cache_clear_interval(raw: Option<&str>) -> usize {
+    match raw {
+        Some(s) => s
+            .trim()
+            .parse::<usize>()
+            .unwrap_or(DEFAULT_CACHE_CLEAR_INTERVAL),
+        None => DEFAULT_CACHE_CLEAR_INTERVAL,
+    }
+}
+
+/// Resolve the periodic decode-loop cache-clear cadence (in generated tokens).
+///
+/// `MLXCEL_CACHE_CLEAR_INTERVAL` overrides the backend default
+/// ([`DEFAULT_CACHE_CLEAR_INTERVAL`]): a positive integer sets the token
+/// cadence, `0` disables the periodic clear entirely, and an unset or
+/// unparseable value keeps the default. Resolved once per process.
+pub fn cache_clear_interval() -> usize {
+    static CACHED: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *CACHED.get_or_init(|| {
+        parse_cache_clear_interval(std::env::var(CACHE_CLEAR_INTERVAL_ENV).ok().as_deref())
+    })
+}
+
+/// Whether the periodic decode-loop clear should fire at generated-token
+/// count `n` for the resolved `interval`. Centralizes the gate so the decode
+/// loops and the batch scheduler stay in lockstep: `interval == 0` disables
+/// it, and `n == 0` never fires (the first post-prefill step still needs its
+/// pipelined tensors).
+#[inline]
+pub fn should_clear_cache_at(n: usize, interval: usize) -> bool {
+    interval != 0 && n > 0 && n % interval == 0
+}
+
 /// Reset the recorded peak memory counter to 0.
 ///
 /// Call this immediately before a region of code whose peak you want to
@@ -354,5 +406,40 @@ mod tests {
         // We can't assert a specific value here, only that the call
         // produced a reading and didn't crash.
         let _ = active;
+    }
+
+    #[test]
+    fn periodic_clear_gate_respects_interval() {
+        // interval 256 (Metal default): fires at 256, 512, ... never before, never at 0.
+        assert!(should_clear_cache_at(256, 256));
+        assert!(should_clear_cache_at(512, 256));
+        assert!(!should_clear_cache_at(0, 256));
+        assert!(!should_clear_cache_at(255, 256));
+        // a longer cadence fires later.
+        assert!(should_clear_cache_at(4096, 4096));
+        assert!(!should_clear_cache_at(256, 4096));
+    }
+
+    #[test]
+    fn periodic_clear_disabled_when_interval_zero() {
+        // interval 0 is the CUDA default: the clear never fires.
+        for n in [0_usize, 1, 256, 512, 4096, 100_000] {
+            assert!(!should_clear_cache_at(n, 0));
+        }
+    }
+
+    #[test]
+    fn parse_cache_clear_interval_falls_back_on_garbage() {
+        assert_eq!(parse_cache_clear_interval(Some("4096")), 4096);
+        assert_eq!(parse_cache_clear_interval(Some("0")), 0);
+        assert_eq!(parse_cache_clear_interval(Some("  32 ")), 32);
+        assert_eq!(
+            parse_cache_clear_interval(Some("nonsense")),
+            DEFAULT_CACHE_CLEAR_INTERVAL
+        );
+        assert_eq!(
+            parse_cache_clear_interval(None),
+            DEFAULT_CACHE_CLEAR_INTERVAL
+        );
     }
 }

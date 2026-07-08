@@ -30,6 +30,13 @@ const WIRED_LIMIT_ENV: &str = "MLXCEL_WIRED_LIMIT";
 /// as `MLXCEL_WIRED_LIMIT`: plain bytes, `NGB`, or `NMB`. Unset means
 /// "do not override MLX's default limit".
 const MEMORY_LIMIT_ENV: &str = "MLXCEL_MEMORY_LIMIT";
+/// Issue #627: optional bound on MLX's buffer cache. When set, the runtime
+/// calls `mlxcel_core::memory::set_cache_limit(...)` at startup so the CUDA
+/// memory pool stays bounded without the per-decode `clear_memory_cache`
+/// churn that defeats CUDA-graph reuse (ml-explore/mlx#2358). Same syntax as
+/// `MLXCEL_WIRED_LIMIT`: plain bytes, `NG`/`NGB`, or `NM`/`NMB`. Unset means
+/// "do not override MLX's default cache behavior".
+const CACHE_LIMIT_ENV: &str = "MLXCEL_CACHE_LIMIT";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RuntimeDevice {
@@ -67,6 +74,10 @@ pub struct RuntimeSetup {
     /// (issue #55). `None` when the env var was unset or invalid and
     /// MLX's default limit is in effect.
     pub memory_limit_bytes: Option<usize>,
+    /// Buffer-cache bound applied via `MLXCEL_CACHE_LIMIT` (issue #627).
+    /// `None` when the env var was unset/invalid and MLX's default cache
+    /// behavior is in effect.
+    pub cache_limit_bytes: Option<usize>,
     pub invalid_device_override: Option<String>,
 }
 
@@ -116,10 +127,16 @@ pub fn initialize_runtime() -> RuntimeSetup {
     // Silicon.
     let memory_limit_bytes = resolve_memory_limit();
 
+    // Issue #627: apply optional buffer-cache bound. Meaningful mainly on
+    // CUDA, where the periodic decode-loop clear is disabled by default and
+    // this cap is the intended mechanism for bounding cache growth instead.
+    let cache_limit_bytes = resolve_cache_limit();
+
     RuntimeSetup {
         device,
         wired_limit_bytes,
         memory_limit_bytes,
+        cache_limit_bytes,
         invalid_device_override,
     }
 }
@@ -177,15 +194,34 @@ fn resolve_memory_limit() -> Option<usize> {
     Some(bytes)
 }
 
-/// Parse a memory size string: plain bytes, "NGB", or "NMB".
+/// Resolve the MLX buffer-cache bound from MLXCEL_CACHE_LIMIT (issue #627).
+///
+/// Returns the limit applied, or `None` when unset/disabled. On CUDA this is
+/// the intended replacement for the periodic decode-loop `clear_memory_cache`
+/// (disabled by default there): it keeps the memory pool bounded without the
+/// per-step churn that defeats CUDA-graph reuse (ml-explore/mlx#2358).
+fn resolve_cache_limit() -> Option<usize> {
+    let raw = std::env::var(CACHE_LIMIT_ENV).ok();
+    let bytes = match raw.as_deref() {
+        Some("0") | Some("none") | Some("NONE") | None | Some("") => return None,
+        Some(s) => parse_memory_size(s)?,
+    };
+    if bytes == 0 {
+        return None;
+    }
+    mlxcel_core::memory::set_cache_limit(bytes as u64);
+    Some(bytes)
+}
+
+/// Parse a memory size string: plain bytes, "NG"/"NGB", or "NM"/"NMB".
 fn parse_memory_size(s: &str) -> Option<usize> {
     let s = s.trim().to_ascii_uppercase();
-    if let Some(n) = s.strip_suffix("GB") {
+    if let Some(n) = s.strip_suffix("GB").or_else(|| s.strip_suffix('G')) {
         n.trim()
             .parse::<f64>()
             .ok()
             .map(|v| (v * 1024.0 * 1024.0 * 1024.0) as usize)
-    } else if let Some(n) = s.strip_suffix("MB") {
+    } else if let Some(n) = s.strip_suffix("MB").or_else(|| s.strip_suffix('M')) {
         n.trim()
             .parse::<f64>()
             .ok()
