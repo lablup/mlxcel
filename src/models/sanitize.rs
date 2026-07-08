@@ -112,6 +112,81 @@ fn f8_e4m3_to_f32(bits: u8) -> f32 {
     }
 }
 
+/// Encode an f32 into a single F8_E4M3FN byte, round-to-nearest-even.
+///
+/// Exact inverse of [`f8_e4m3_to_f32`] for every value that function can
+/// produce: E4M3 is a subset of f16 which is a subset of f32, so the block
+/// scales decoded at load time re-encode to their original bytes bit-for-bit
+/// (verified exhaustively in the tests). Used by the direct ModelOpt NVFP4
+/// transcode (issue #693) to hand MLX native NVFP4 the checkpoint's own
+/// per-block E4M3 scales without folding `weight_scale_2` into them.
+///
+/// F8_E4M3FN: 1 sign, 4 exponent (bias 7), 3 mantissa, no infinities, largest
+/// finite magnitude 448, NaN = `S.1111.111`. Non-finite and out-of-range inputs
+/// saturate to ±448; NaN maps to the canonical NaN byte.
+fn f32_to_f8_e4m3(x: f32) -> u8 {
+    if x.is_nan() {
+        return 0x7F;
+    }
+    let sign_bit: u8 = if x.is_sign_negative() { 0x80 } else { 0x00 };
+    let ax = x.abs();
+    if ax == 0.0 {
+        return sign_bit;
+    }
+    // Saturate at or above the largest finite E4M3 value (448.0); E4M3FN has no
+    // infinity encoding, and 0x7F/0xFF are NaN.
+    if ax >= 448.0 {
+        return sign_bit | 0x7E;
+    }
+
+    let bits = ax.to_bits();
+    let unbiased_exp = ((bits >> 23) & 0xFF) as i32 - 127;
+    let mantissa = bits & 0x007F_FFFF;
+    let exp_field = unbiased_exp + 7;
+
+    if exp_field >= 1 {
+        // Normal E4M3: keep the top 3 mantissa bits, round the dropped 20 bits
+        // to nearest, ties to even.
+        let mut m3 = mantissa >> 20;
+        let rem = mantissa & 0x000F_FFFF;
+        let half = 1u32 << 19;
+        if rem > half || (rem == half && (m3 & 1) == 1) {
+            m3 += 1;
+        }
+        let mut exp_field = exp_field;
+        if m3 == 8 {
+            m3 = 0;
+            exp_field += 1;
+            if exp_field > 15 {
+                return sign_bit | 0x7E;
+            }
+        }
+        sign_bit | (((exp_field as u8) & 0xF) << 3) | ((m3 as u8) & 0x7)
+    } else {
+        // Subnormal E4M3: value = k * 2^-9 with k in 0..=7. Round the full
+        // significand (implicit 1 restored) to the 2^-9 grid, ties to even.
+        let significand = (1u64 << 23) | mantissa as u64;
+        let shift = 14 - unbiased_exp; // unbiased_exp <= -7 here, so shift >= 21
+        if shift >= 64 {
+            return sign_bit;
+        }
+        let low = significand & ((1u64 << shift) - 1);
+        let mut k = significand >> shift;
+        let half = 1u64 << (shift - 1);
+        if low > half || (low == half && (k & 1) == 1) {
+            k += 1;
+        }
+        if k == 0 {
+            sign_bit
+        } else if k >= 8 {
+            // Rounded up into the smallest normal (exp_field=1, mantissa=0).
+            sign_bit | (1 << 3)
+        } else {
+            sign_bit | ((k as u8) & 0x7)
+        }
+    }
+}
+
 /// Convert a single F8_E5M2 byte to f32.
 ///
 /// F8_E5M2 format: 1 sign bit, 5 exponent bits (bias=15), 2 mantissa bits.
@@ -284,11 +359,7 @@ fn quantization_group_size(config: &Value) -> Option<i32> {
     config
         .get("config_groups")
         .and_then(Value::as_object)
-        .and_then(|groups| {
-            groups
-                .values()
-                .find_map(|group| quantization_group_size(group))
-        })
+        .and_then(|groups| groups.values().find_map(quantization_group_size))
 }
 
 fn quantization_bits(config: &Value) -> Option<i32> {
@@ -352,18 +423,36 @@ fn nvfp4_affine_group_size_for_in_dim(in_dim: usize, configured_group_size: i32)
         .find(|group_size| in_dim.is_multiple_of(*group_size))
 }
 
+/// Whether to force the dense f16 -> MLX quantize NVFP4 repack instead of the
+/// default direct transcode.
+///
+/// The direct ModelOpt-triplet transcode (issue #693) is the default under
+/// CUDA. `MLXCEL_NVFP4_DENSE_REPACK=1` (or `true`/`on`/`yes`) forces the older
+/// dense fallback, which is retained for debugging and parity comparison.
+fn nvfp4_dense_repack_forced() -> bool {
+    matches!(
+        std::env::var("MLXCEL_NVFP4_DENSE_REPACK")
+            .ok()
+            .as_deref()
+            .map(str::trim),
+        Some("1") | Some("true") | Some("on") | Some("yes")
+    )
+}
+
 /// Repack ModelOpt NVFP4-packed weights to an MLX quantized layout in-place.
 ///
 /// Detects weight groups by the presence of `{prefix}.weight_scale_2` keys.
-/// For each group, unpacks FP4 E2M1 nibbles from U8 storage and applies
-/// per-block (weight_scale) and global (weight_scale_2) scale factors to
-/// produce dense f32 values, then immediately repacks them to an MLX quantized
-/// layout. CUDA uses native NVFP4 because it substantially improves long-prompt
-/// prefill on GB10; other backends keep the affine fallback pending separate
-/// Apple Silicon validation.
+/// Under CUDA the default is a direct triplet transcode (issue #693): the
+/// packed FP4 U8 bytes reinterpret to MLX native NVFP4 U32 words, the per-block
+/// E4M3 scales are preserved verbatim, and `weight_scale_2` is kept as a
+/// per-linear global-scale sidecar. This never materializes a dense f16 matrix
+/// and is bit-exact to the checkpoint. `MLXCEL_NVFP4_DENSE_REPACK=1` forces the
+/// older dense f16 -> MLX `quantize(mode="nvfp4")` fallback. Non-CUDA builds
+/// keep the affine fallback pending separate Apple Silicon validation.
 ///
 /// After repacking the auxiliary keys `weight_scale`, `weight_scale_2`, and
-/// `input_scale` are removed from the weight map.
+/// `input_scale` are removed from the weight map. The direct path additionally
+/// emits a `{prefix}.global_scale` sidecar.
 fn repack_nvfp4_weights_to_quantized(
     weights: &mut mlxcel_core::weights::WeightMap,
     config: Option<&Value>,
@@ -380,7 +469,11 @@ fn repack_nvfp4_weights_to_quantized(
     }
 
     let target = if cfg!(feature = "cuda") {
-        "MLX native NVFP4 for CUDA quantized matmul"
+        if nvfp4_dense_repack_forced() {
+            "MLX native NVFP4 via dense f16 requantize (forced)"
+        } else {
+            "MLX native NVFP4 via direct triplet transcode"
+        }
     } else {
         "MLX affine 4-bit fallback"
     };
@@ -396,6 +489,7 @@ fn repack_nvfp4_weights_to_quantized(
         let input_scale_key = format!("{prefix}.input_scale");
         let repacked_scales_key = format!("{prefix}.scales");
         let repacked_biases_key = format!("{prefix}.biases");
+        let global_scale_key = format!("{prefix}.global_scale");
 
         // Verify all required keys exist before proceeding.
         if !weights.contains_key(&weight_key) || !weights.contains_key(&scale_key) {
@@ -414,11 +508,12 @@ fn repack_nvfp4_weights_to_quantized(
 
             let weight_shape = mlxcel_core::array_shape(weight_arr);
             let weight_bytes = mlxcel_core::array_to_raw_bytes(weight_arr);
-            // The block scales are stored as F16 in the checkpoint, but the
-            // loader's in-memory dtype is platform-dependent: Metal keeps F16
-            // while the CUDA path widens F16 to F32 at load (from_bytes_f16).
-            // Normalize to F32 before the raw-byte parse below so the scale
-            // decode does not depend on the load-time dtype.
+            // The checkpoint stores the block scales as F8_E4M3; the Gemma 4
+            // loader decodes them to f16 at load time (MLX has no native float8
+            // dtype). Normalize to F32 before the raw-byte parse below so both
+            // the dense reconstruction and the direct transcode's E4M3
+            // re-encode read the same decoded scale values regardless of the
+            // load-time dtype.
             let scale_f32_arr = mlxcel_core::astype(scale_arr, mlxcel_core::dtype::FLOAT32);
             mlxcel_core::eval(&scale_f32_arr);
             let scale_bytes = mlxcel_core::array_to_raw_bytes(&scale_f32_arr);
@@ -481,6 +576,71 @@ fn repack_nvfp4_weights_to_quantized(
                 expected_scale_bytes
             );
             weights.remove(&scale2_key);
+            continue;
+        }
+
+        // Direct transcode (issue #693): the default CUDA path. It rewrites the
+        // ModelOpt triplet into MLX native NVFP4 without ever materializing a
+        // dense f16 [out, in] matrix, and it is bit-exact to the checkpoint
+        // (the dense f16 -> MLX quantize fallback re-derives block scales and
+        // drifts). Set MLXCEL_NVFP4_DENSE_REPACK=1 to force the dense fallback.
+        if cfg!(feature = "cuda") && !nvfp4_dense_repack_forced() {
+            // Weight: the packed FP4 U8 bytes reinterpret directly as
+            // little-endian U32. ModelOpt stores two E2M1 nibbles per byte, low
+            // nibble first; reading four consecutive bytes little-endian yields
+            // exactly MLX native NVFP4's eight-nibbles-per-u32 order (element 0
+            // in bits 0-3, element 1 in bits 4-7, and so on). packed_dim is a
+            // multiple of 4 because in_dim is a multiple of the source
+            // group_size (16), so no padding is needed.
+            let u32_cols = packed_dim / 4;
+            let weight_u32 = mlxcel_core::from_bytes(
+                &weight_bytes,
+                &[out_dim as i32, u32_cols as i32],
+                mlxcel_core::dtype::UINT32,
+            );
+
+            // Scales: re-encode the block scales (decoded to f32 above by the
+            // load-time F8_E4M3 -> f16 conversion) back to their original E4M3
+            // bytes. The decode is lossless, so this recovers the checkpoint's
+            // exact per-block scale for MLX native NVFP4 without folding
+            // weight_scale_2 into it.
+            let mut e4m3_bytes = Vec::with_capacity(out_dim * num_groups);
+            for i in 0..(out_dim * num_groups) {
+                let base = i * 4;
+                let v = f32::from_le_bytes([
+                    scale_bytes[base],
+                    scale_bytes[base + 1],
+                    scale_bytes[base + 2],
+                    scale_bytes[base + 3],
+                ]);
+                e4m3_bytes.push(f32_to_f8_e4m3(v));
+            }
+            let scales_u8 = mlxcel_core::from_bytes(
+                &e4m3_bytes,
+                &[out_dim as i32, num_groups as i32],
+                mlxcel_core::dtype::UINT8,
+            );
+
+            // Global-scale sidecar: the single per-tensor weight_scale_2, kept
+            // as an f32 scalar and applied as a scalar multiply on the linear
+            // output (see QuantizedWeight::apply_global_scale).
+            let global_scale = mlxcel_core::from_slice_f32(&[scale2_val], &[1]);
+
+            let ptrs: Vec<*const mlxcel_core::MlxArray> = [&weight_u32, &scales_u8, &global_scale]
+                .into_iter()
+                .map(|arr| arr.as_ref().unwrap() as *const mlxcel_core::MlxArray)
+                .collect();
+            unsafe { mlxcel_core::eval_all(&ptrs) };
+
+            weights.insert(weight_key, weight_u32);
+            weights.insert(repacked_scales_key, scales_u8);
+            weights.insert(global_scale_key, global_scale);
+            // Native NVFP4 has no affine biases; make sure a stale one cannot
+            // linger from a previous load.
+            weights.remove(&repacked_biases_key);
+            weights.remove(&scale_key);
+            weights.remove(&scale2_key);
+            weights.remove(&input_scale_key); // may not exist; remove is a no-op then
             continue;
         }
 
@@ -1760,6 +1920,161 @@ mod tests {
         assert!((fp4_e2m1_to_f32(0xE) - (-4.0f32)).abs() < 1e-6);
         // 0b1_11_1 = 0xF → -6.0
         assert!((fp4_e2m1_to_f32(0xF) - (-6.0f32)).abs() < 1e-6);
+    }
+
+    // --- f32_to_f8_e4m3 tests (issue #693 direct NVFP4 transcode) ---
+
+    #[test]
+    fn f32_to_f8_e4m3_roundtrips_every_e4m3_value() {
+        // E4M3 is a subset of f32, so decode-then-encode must recover the exact
+        // byte for every representable value. This is what makes the direct
+        // NVFP4 transcode bit-exact: the load-time F8_E4M3 -> f16 block-scale
+        // decode is reversed losslessly to hand MLX the checkpoint's own scales.
+        for byte in 0u8..=255 {
+            let v = f8_e4m3_to_f32(byte);
+            if v.is_nan() {
+                continue; // 0x7F / 0xFF NaN encodings
+            }
+            let enc = f32_to_f8_e4m3(v);
+            if v == 0.0 {
+                // +0 (0x00) and -0 (0x80) both decode to a signed zero.
+                assert_eq!(enc & 0x7F, 0, "byte {byte:#04x} zero magnitude");
+                assert_eq!(enc & 0x80, byte & 0x80, "byte {byte:#04x} zero sign");
+            } else {
+                assert_eq!(
+                    enc, byte,
+                    "byte {byte:#04x} decoded {v} re-encoded to {enc:#04x}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn f32_to_f8_e4m3_handles_specials_and_rounding() {
+        assert_eq!(f32_to_f8_e4m3(f32::NAN), 0x7F);
+        assert_eq!(f32_to_f8_e4m3(0.0), 0x00);
+        assert_eq!(f32_to_f8_e4m3(-0.0), 0x80);
+        assert_eq!(f32_to_f8_e4m3(448.0), 0x7E); // largest finite magnitude
+        assert_eq!(f32_to_f8_e4m3(1000.0), 0x7E); // saturates (no infinity)
+        assert_eq!(f32_to_f8_e4m3(-1000.0), 0xFE);
+        assert_eq!(f32_to_f8_e4m3(f32::INFINITY), 0x7E);
+        // Round-to-nearest-even: 1.0 -> 0x38, 1.125 -> 0x39, midpoint 1.0625
+        // ties to even (0x38).
+        assert_eq!(f32_to_f8_e4m3(1.0), 0x38);
+        assert_eq!(f32_to_f8_e4m3(1.125), 0x39);
+        assert_eq!(f32_to_f8_e4m3(1.0625), 0x38);
+    }
+
+    /// Fixture for issue #693: the direct ModelOpt NVFP4 transcode reproduces
+    /// the checkpoint's dequantized values bit-exactly, while the dense f16 ->
+    /// MLX `quantize(mode="nvfp4")` fallback drifts by at most one FP8
+    /// block-scale plus one FP4 rounding step. Documents that tolerance.
+    #[test]
+    fn nvfp4_direct_transcode_is_exact_and_bounds_dense_drift() {
+        let out_dim = 2usize;
+        let in_dim = 16usize; // one group_size=16 block per row
+        let packed_dim = in_dim / 2; // 8 U8 bytes per row
+
+        // Column c uses E2M1 nibble (c % 16) so the block exercises the whole
+        // LUT (including the +-6 extremes and the zeros). Two nibbles per byte,
+        // low nibble first, matching the ModelOpt packing.
+        let nibbles: Vec<u8> = (0..in_dim).map(|c| (c % 16) as u8).collect();
+        let mut weight_bytes = Vec::with_capacity(out_dim * packed_dim);
+        for _ in 0..out_dim {
+            for b in 0..packed_dim {
+                let low = nibbles[2 * b] & 0xF;
+                let high = nibbles[2 * b + 1] & 0xF;
+                weight_bytes.push((high << 4) | low);
+            }
+        }
+
+        // Distinct mid-range E4M3 block scale per row and one global scale.
+        let scale_row_bytes: [u8; 2] = [0x40, 0x3A]; // decode to 2.0 and 1.25
+        let scale2 = 0.5f32;
+
+        // Reference: fp4 * e4m3_decode(scale) * weight_scale_2.
+        let mut reference = vec![0f32; out_dim * in_dim];
+        for r in 0..out_dim {
+            let s = f8_e4m3_to_f32(scale_row_bytes[r]);
+            for c in 0..in_dim {
+                reference[r * in_dim + c] = fp4_e2m1_to_f32(nibbles[c]) * s * scale2;
+            }
+        }
+
+        // DIRECT: reinterpret U8 -> U32, re-encode block scales to E4M3 U8,
+        // native NVFP4 dequantize, then apply the global scalar in Rust (this
+        // mirrors QuantizedWeight::apply_global_scale).
+        let weight_u32 = mlxcel_core::from_bytes(
+            &weight_bytes,
+            &[out_dim as i32, (packed_dim / 4) as i32],
+            mlxcel_core::dtype::UINT32,
+        );
+        let mut e4m3 = Vec::with_capacity(out_dim);
+        for r in 0..out_dim {
+            e4m3.push(f32_to_f8_e4m3(f8_e4m3_to_f32(scale_row_bytes[r])));
+        }
+        let scales_u8 =
+            mlxcel_core::from_bytes(&e4m3, &[out_dim as i32, 1i32], mlxcel_core::dtype::UINT8);
+        let direct_deq = unsafe {
+            mlxcel_core::dequantize(&weight_u32, &scales_u8, std::ptr::null(), 16, 4, "nvfp4")
+        };
+        let direct_deq_f32 = mlxcel_core::astype(&direct_deq, mlxcel_core::dtype::FLOAT32);
+        mlxcel_core::eval(&direct_deq_f32);
+        let direct: Vec<f32> = mlxcel_core::array_to_raw_bytes(&direct_deq_f32)
+            .chunks_exact(4)
+            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]) * scale2)
+            .collect();
+
+        let direct_err = direct
+            .iter()
+            .zip(&reference)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0f32, f32::max);
+        assert!(
+            direct_err < 1e-4,
+            "direct transcode must be bit-exact to the checkpoint, max err {direct_err}"
+        );
+
+        // DENSE fallback: fp4*scale*scale2 -> f16 -> MLX quantize(nvfp4) -> dequant.
+        let dense_f16 = mlxcel_core::astype(
+            &mlxcel_core::from_slice_f32(&reference, &[out_dim as i32, in_dim as i32]),
+            mlxcel_core::dtype::FLOAT16,
+        );
+        let quant = mlxcel_core::quantize_weights_with_mode(&dense_f16, 16, 4, "nvfp4");
+        let dense_w = mlxcel_core::quantized_weights_w(&quant);
+        let dense_s = mlxcel_core::quantized_weights_scales(&quant);
+        let dense_deq = unsafe {
+            mlxcel_core::dequantize(
+                dense_w.as_ref().unwrap(),
+                dense_s.as_ref().unwrap(),
+                std::ptr::null(),
+                16,
+                4,
+                "nvfp4",
+            )
+        };
+        let dense_deq_f32 = mlxcel_core::astype(&dense_deq, mlxcel_core::dtype::FLOAT32);
+        mlxcel_core::eval(&dense_deq_f32);
+        let dense: Vec<f32> = mlxcel_core::array_to_raw_bytes(&dense_deq_f32)
+            .chunks_exact(4)
+            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .collect();
+
+        // Direct vs dense drift is bounded by the dense path's re-quantization
+        // (one E4M3 block-scale rounding plus one FP4 step). The block amax is
+        // 6 * 2.0 * 0.5 = 6.0, giving an FP4 half-step bound near 1.0; assert a
+        // generous multiple and keep the direct path as the exact reference.
+        let max_ref = reference.iter().fold(0f32, |m, v| m.max(v.abs()));
+        let dense_drift = direct
+            .iter()
+            .zip(&dense)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0f32, f32::max);
+        assert!(
+            dense_drift <= 0.5 * max_ref + 1e-3,
+            "dense drift {dense_drift} exceeded the FP8/FP4 requant bound {}",
+            0.5 * max_ref
+        );
     }
 
     // --- f16_to_f32 tests ---

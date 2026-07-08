@@ -733,27 +733,38 @@ fn dense_mlp_shared_quant_layout(
 
 impl MLP {
     pub fn forward(&self, x: &MlxArray) -> UniquePtr<MlxArray> {
+        // The fused gate/up/gelu/down C++ path has no parameter for the native
+        // NVFP4 `weight_scale_2` sidecar (issue #693). When any projection
+        // carries one, fall through to the op-at-a-time path below: each
+        // `UnifiedLinear::forward` applies its own scalar, and
+        // `compiled_geglu_approx_activation` is byte-identical to the fused
+        // NVFP4 fallback's `gelu_tanh_approx(gate) * up`, so the only
+        // difference from the fused path is the exact per-tensor scaling.
         if let (Some(gate_qw), Some(up_qw), Some(down_qw)) = (
             self.gate_proj.quantized_weight(),
             self.up_proj.quantized_weight(),
             self.down_proj.quantized_weight(),
-        ) && dense_mlp_shared_quant_layout(
-            QuantizationParams {
-                group_size: gate_qw.group_size,
-                bits: gate_qw.bits,
-            },
-            &gate_qw.mode,
-            QuantizationParams {
-                group_size: up_qw.group_size,
-                bits: up_qw.bits,
-            },
-            &up_qw.mode,
-            QuantizationParams {
-                group_size: down_qw.group_size,
-                bits: down_qw.bits,
-            },
-            &down_qw.mode,
-        ) {
+        ) && gate_qw.global_scale.is_none()
+            && up_qw.global_scale.is_none()
+            && down_qw.global_scale.is_none()
+            && dense_mlp_shared_quant_layout(
+                QuantizationParams {
+                    group_size: gate_qw.group_size,
+                    bits: gate_qw.bits,
+                },
+                &gate_qw.mode,
+                QuantizationParams {
+                    group_size: up_qw.group_size,
+                    bits: up_qw.bits,
+                },
+                &up_qw.mode,
+                QuantizationParams {
+                    group_size: down_qw.group_size,
+                    bits: down_qw.bits,
+                },
+                &down_qw.mode,
+            )
+        {
             return unsafe {
                 mlxcel_core::compiled_gelu_approx_mlp_forward(
                     x,

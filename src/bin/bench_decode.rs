@@ -380,8 +380,21 @@ fn main() -> Result<()> {
     mlxcel_core::synchronize_default();
     mlxcel_core::clear_memory_cache();
 
+    // Isolate the cold-load phase: reset the MLX high-water mark so the peak
+    // reported right after load reflects weight loading and any repack
+    // transients only (issue #693 compares direct transcode vs dense repack).
+    mlxcel_core::reset_peak_memory();
+    let load_start = std::time::Instant::now();
     let (model, loaded_tokenizer) =
         mlxcel::load_model(&args.model).context("failed to load model")?;
+    mlxcel_core::synchronize_default();
+    let load_wall = load_start.elapsed();
+    let load_peak_gb = mlxcel_core::get_peak_memory() as f64 / 1e9;
+    println!(
+        "[Load] wall: {:.3} s  MLX peak: {load_peak_gb:.2} GB",
+        load_wall.as_secs_f64()
+    );
+    io::stdout().flush()?;
     let tokenizer = load_tokenizer(&args.model).unwrap_or(loaded_tokenizer);
     let sampling = sampling_config(&args.model);
 

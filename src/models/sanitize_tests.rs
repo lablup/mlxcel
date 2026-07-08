@@ -354,6 +354,28 @@ fn load_and_sanitize_weights_repacks_nvfp4_gemma4_checkpoint() {
             vec![out_dim as i32, 2i32],
             "Expected native NVFP4 scales shape [2, 2] for group_size=16"
         );
+        // The direct transcode (issue #693) preserves weight_scale_2 as a
+        // per-linear global-scale sidecar instead of folding it into the E4M3
+        // block scales. The scales should be raw E4M3 U8 bytes.
+        let expected_global_scale_key = "language_model.model.layers.0.mlp.gate_proj.global_scale";
+        assert!(
+            weights.contains_key(expected_global_scale_key),
+            "Direct NVFP4 transcode should emit a global_scale sidecar"
+        );
+        assert_eq!(
+            mlxcel_core::array_dtype(scales),
+            dtype::UINT8,
+            "Native NVFP4 block scales should be raw E4M3 U8 bytes"
+        );
+        let global_scale = weights.get(expected_global_scale_key).unwrap();
+        let global_f32 = mlxcel_core::astype(global_scale, dtype::FLOAT32);
+        mlxcel_core::eval(&global_f32);
+        let g = mlxcel_core::array_to_raw_bytes(&global_f32);
+        let g_val = f32::from_le_bytes([g[0], g[1], g[2], g[3]]);
+        assert!(
+            (g_val - 1.0f32).abs() < 1e-6,
+            "Expected weight_scale_2 sidecar 1.0, got {g_val}"
+        );
         unsafe { mlxcel_core::dequantize(w, scales, std::ptr::null(), 16, 4, "nvfp4") }
     } else {
         assert!(

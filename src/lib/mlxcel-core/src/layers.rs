@@ -39,6 +39,18 @@ pub struct QuantizedWeight {
     pub group_size: i32,
     pub bits: i32,
     pub mode: String,
+    /// Optional per-linear global scale sidecar for native NVFP4.
+    ///
+    /// NVIDIA ModelOpt NVFP4 uses a two-level scale: a per-block E4M3 scale
+    /// (`scales`) and a single per-tensor f32 `weight_scale_2`. MLX native
+    /// NVFP4 stores the per-block E4M3 scale directly, but its kernels have no
+    /// parameter matching ModelOpt's `weight_scale_2` convention (MLX's own
+    /// `global_scale` re-derives the block scales during quantize, which is a
+    /// different meaning). Because `weight_scale_2` is a single scalar, it is
+    /// applied as a scalar multiply on the matmul output, which is
+    /// mathematically exact: `y = x @ (W * s2)^T = (x @ W^T) * s2`. `None`
+    /// means no sidecar (affine, mxfp4, mxfp8, or a folded/dense repack).
+    pub global_scale: Option<UniquePtr<MlxArray>>,
 }
 
 impl QuantizedWeight {
@@ -57,6 +69,7 @@ impl QuantizedWeight {
             group_size,
             bits,
             mode: "affine".to_string(),
+            global_scale: None,
         }
     }
 
@@ -76,6 +89,7 @@ impl QuantizedWeight {
             group_size,
             bits,
             mode,
+            global_scale: None,
         }
     }
 
@@ -84,6 +98,24 @@ impl QuantizedWeight {
         match &self.biases {
             Some(b) => b.as_ref().unwrap() as *const MlxArray,
             None => std::ptr::null(),
+        }
+    }
+
+    /// Apply the optional NVFP4 `weight_scale_2` sidecar to a linear output.
+    ///
+    /// Returns `out` unchanged when no sidecar is present. Otherwise multiplies
+    /// by the per-tensor scalar and casts back to `out`'s dtype so the f32
+    /// scalar does not promote the (bf16/f16) activation stream. This is the
+    /// exact reconstruction of the ModelOpt two-level scale for a per-tensor
+    /// scalar, without folding it into every E4M3 block scale.
+    pub fn apply_global_scale(&self, out: UniquePtr<MlxArray>) -> UniquePtr<MlxArray> {
+        match &self.global_scale {
+            Some(gs) => {
+                let out_dtype = ffi::array_dtype(&out);
+                let scaled = ffi::multiply(&out, gs);
+                ffi::astype(&scaled, out_dtype)
+            }
+            None => out,
         }
     }
 
@@ -100,6 +132,7 @@ impl QuantizedWeight {
             group_size: self.group_size,
             bits: self.bits,
             mode: self.mode.clone(),
+            global_scale: self.global_scale.as_ref().map(|g| ffi::copy(g)),
         }
     }
 }
@@ -1063,6 +1096,12 @@ impl UnifiedLinear {
             )?;
             let (effective_bits, effective_group_size) = (layout.bits, layout.group_size);
 
+            // Optional native-NVFP4 global-scale sidecar (`weight_scale_2`).
+            // Emitted by the direct ModelOpt transcode (issue #693); absent for
+            // affine, mxfp4, mxfp8, and the dense/affine NVFP4 fallbacks.
+            let global_scale_name = format!("{}.global_scale", prefix);
+            let global_scale = weights.get(&global_scale_name).map(|w| ffi::copy(w));
+
             let qweight = QuantizedWeight {
                 weight,
                 scales,
@@ -1070,6 +1109,7 @@ impl UnifiedLinear {
                 group_size: effective_group_size,
                 bits: effective_bits,
                 mode: mode.to_string(),
+                global_scale,
             };
 
             let bias_name = format!("{}.bias", prefix);
@@ -1096,6 +1136,32 @@ impl UnifiedLinear {
     pub fn forward(&self, x: &MlxArray) -> UniquePtr<MlxArray> {
         match self {
             Self::Quantized { weight, bias } => {
+                // Native-NVFP4 global-scale path (issue #693): the per-tensor
+                // `weight_scale_2` multiplies only the matmul output, not the
+                // (rare) fused linear bias, so run the qmm with a null fused
+                // bias, apply the scalar, then add the bias separately. `y =
+                // (x @ W^T) * s2 + b`. When no sidecar is present this is the
+                // original single fused call, byte-for-byte.
+                if weight.global_scale.is_some() {
+                    let mm = unsafe {
+                        ffi::quantized_linear_forward(
+                            x,
+                            &weight.weight,
+                            &weight.scales,
+                            weight.biases_ptr(),
+                            std::ptr::null(),
+                            weight.group_size,
+                            weight.bits,
+                            &weight.mode,
+                        )
+                    };
+                    let scaled = weight.apply_global_scale(mm);
+                    return match bias {
+                        Some(b) => ffi::add(&scaled, b),
+                        None => scaled,
+                    };
+                }
+
                 let bias_ptr = bias
                     .as_ref()
                     .map(|b| b.as_ref().unwrap() as *const MlxArray)
@@ -1383,6 +1449,9 @@ impl FusedQKVLinear {
                 group_size,
                 bits: effective_bits,
                 mode: mode.to_string(),
+                // Fused QKV is never a native-NVFP4 global-scale target: the
+                // ModelOpt NVFP4 Gemma 4 checkpoints leave attention dense.
+                global_scale: None,
             };
             UnifiedLinear::Quantized {
                 weight: qweight,

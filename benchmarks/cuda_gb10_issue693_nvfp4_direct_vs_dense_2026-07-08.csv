@@ -1,0 +1,5 @@
+variant,repack,model,model_path,prompt_tokens,generated_tokens,load_wall_s,load_peak_gb,prefill_ms,prefill_tok_s,decode_ms,decode_tok_s,run_peak_gb,date,hardware,mlx_version,build_type,max_tokens,prompt,prompt_target_len
+direct_short,direct,gemma-4-31b-it-nvfp4,models/gemma-4-31b-it-nvfp4,20,26,58.774,36.60,262.72,76.13,5376.07,4.84,36.60,2026-07-08,NVIDIA_GB10_122GB,0.3.3,release,100,"Hello, how are you today?",
+dense_short,dense,gemma-4-31b-it-nvfp4,models/gemma-4-31b-it-nvfp4,20,42,190.716,36.60,251.55,79.51,7990.42,5.26,36.60,2026-07-08,NVIDIA_GB10_122GB,0.3.3,release,100,"Hello, how are you today?",
+direct_2048,direct,gemma-4-31b-it-nvfp4,models/gemma-4-31b-it-nvfp4,2048,32,58.874,36.60,4614.17,443.85,6391.37,5.01,36.60,2026-07-08,NVIDIA_GB10_122GB,0.3.3,release,32,"Hello, how are you today?",2048
+dense_2048,dense,gemma-4-31b-it-nvfp4,models/gemma-4-31b-it-nvfp4,2048,32,190.687,36.60,5182.13,395.20,5950.56,5.38,36.60,2026-07-08,NVIDIA_GB10_122GB,0.3.3,release,32,"Hello, how are you today?",2048
