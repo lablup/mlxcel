@@ -19,8 +19,9 @@
 //!
 //! 1. Reference parity for the OCR-specific `smart_resize` and grid derivation.
 //!    Expected values are computed from the mlx-vlm reference formula in
-//!    `processing_paddleocr_vl.py` (factor = patch*merge = 28, min/max pixel
-//!    clamps with floor/ceil beta scaling).
+//!    https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/models/paddleocr_vl/processing_paddleocr_vl.py
+//!    (factor = patch*merge = 28, min/max pixel clamps with floor/ceil beta
+//!    scaling).
 //! 2. Construct-and-run shape checks that wire the net-new NaViT vision encoder,
 //!    the spatial-merge projector, and the ERNIE-4.5 MRoPE text decoder from
 //!    synthetic weights and exercise the full tensor plumbing end to end.
@@ -159,6 +160,46 @@ fn vision_encoder_forward_produces_per_token_hidden_states() {
         shape,
         vec![4, 8],
         "per-token vision hidden states [tokens, embed]"
+    );
+}
+
+#[test]
+fn vision_encoder_forward_handles_mixed_dynamic_resolution_batch() {
+    let config = vision_config();
+    let weights = vision_weights();
+    let encoder = PaddleOcrVisionEncoder::from_weights(&weights, &config, "visual")
+        .expect("build vision encoder");
+
+    // 2x2, 2x3, 2x2 patch grids exercise the repeated-length bucketed attention
+    // path while preserving the original packed token order.
+    let grids = [(1, 2, 2), (1, 2, 3), (1, 2, 2)];
+    let pixel_values = varied(&[14, 12]);
+    let out = encoder.forward_with_grid(pixel_values.as_ref().unwrap(), &grids);
+    let shape = mlxcel_core::array_shape(out.hidden_states.as_ref().unwrap());
+    assert_eq!(
+        shape,
+        vec![14, 8],
+        "mixed dynamic-resolution batch keeps packed [tokens, embed] output"
+    );
+}
+
+#[test]
+fn vision_encoder_forward_handles_unique_variable_resolution_batch() {
+    let config = vision_config();
+    let weights = vision_weights();
+    let encoder = PaddleOcrVisionEncoder::from_weights(&weights, &config, "visual")
+        .expect("build vision encoder");
+
+    // Unique segment lengths exercise the block-diagonal mask fast path, which
+    // avoids a per-segment SDPA loop for small variable-resolution OCR batches.
+    let grids = [(1, 2, 2), (1, 2, 3), (1, 4, 2)];
+    let pixel_values = varied(&[18, 12]);
+    let out = encoder.forward_with_grid(pixel_values.as_ref().unwrap(), &grids);
+    let shape = mlxcel_core::array_shape(out.hidden_states.as_ref().unwrap());
+    assert_eq!(
+        shape,
+        vec![18, 8],
+        "unique variable-resolution batch keeps packed [tokens, embed] output"
     );
 }
 

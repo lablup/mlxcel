@@ -28,7 +28,7 @@
 //! (`vision::connectors::paddleocr_vl`), matching the reference module split.
 //!
 //! Used by: PaddleOCR-VL
-//! Reference: mlx-vlm `paddleocr_vl/vision.py`.
+//! Reference: https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/models/paddleocr_vl/vision.py.
 
 use super::VisionEncoderOutput;
 use super::qwen2_vl::{apply_rotary_pos_emb_vision, concat_many};
@@ -36,6 +36,7 @@ use mlxcel_core::layers::{LayerNorm, UnifiedLinear};
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
 use serde::Deserialize;
+use std::collections::BTreeMap;
 
 /// PaddleOCR-VL vision encoder configuration.
 #[derive(Debug, Clone, Deserialize)]
@@ -185,9 +186,10 @@ impl PositionEmbedding {
 
     /// Bilinearly interpolate the `sqrt(N) x sqrt(N)` learned grid to `[h*w, embed]`.
     ///
-    /// Mirrors mlx-vlm `interpolate_pos_encoding` / `bilinear_interpolate`
-    /// (align_corners=False). Integer indices and weights are derived on the
-    /// host and gathered with `take`, so no device floor/clip is needed.
+    /// Mirrors https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/models/paddleocr_vl/vision.py
+    /// (`interpolate_pos_encoding`) and the shared `bilinear_interpolate`
+    /// helper (align_corners=False). Integer indices and weights are derived on
+    /// the host and gathered with `take`, so no device floor/clip is needed.
     fn interpolate(&self, h: i32, w: i32) -> UniquePtr<MlxArray> {
         let side = (self.num_positions as f64).sqrt().round() as i32;
         let h_in = side;
@@ -304,6 +306,16 @@ impl VisionRotaryEmbedding {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AttentionDispatch {
+    Single,
+    Uniform { segment_len: i32 },
+    Bucketed,
+    Sequential,
+}
+
+const BLOCK_MASK_FAST_PATH_MAX_TOKENS: i32 = 4096;
+
 // Fused-QKV attention over packed variable-length sequences.
 struct Attention {
     qkv: UnifiedLinear,
@@ -339,11 +351,202 @@ impl Attention {
         })
     }
 
+    fn dispatch_for(cu_seqlens: &[i32]) -> AttentionDispatch {
+        let num_segments = cu_seqlens.len().saturating_sub(1);
+        if num_segments <= 1 {
+            return AttentionDispatch::Single;
+        }
+
+        let mut counts = BTreeMap::<i32, usize>::new();
+        let mut first_len = None;
+        let mut uniform = true;
+        for window in cu_seqlens.windows(2) {
+            let len = window[1] - window[0];
+            if first_len.is_none() {
+                first_len = Some(len);
+            } else if Some(len) != first_len {
+                uniform = false;
+            }
+            *counts.entry(len).or_insert(0) += 1;
+        }
+
+        if uniform {
+            AttentionDispatch::Uniform {
+                segment_len: first_len.unwrap_or(0),
+            }
+        } else if counts.len() < num_segments {
+            AttentionDispatch::Bucketed
+        } else {
+            AttentionDispatch::Sequential
+        }
+    }
+
+    fn attend(
+        &self,
+        q: &MlxArray,
+        k: &MlxArray,
+        v: &MlxArray,
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        let mask_ptr = mask.map_or(std::ptr::null(), |m| m as *const MlxArray);
+        unsafe { mlxcel_core::layers::attention_from_ptr(q, k, v, self.scale, mask_ptr, 0.0, 0) }
+    }
+
+    fn should_use_block_mask(cu_seqlens: &[i32], seq_len: i32) -> bool {
+        matches!(
+            Self::dispatch_for(cu_seqlens),
+            AttentionDispatch::Sequential
+        ) && seq_len <= BLOCK_MASK_FAST_PATH_MAX_TOKENS
+    }
+
+    fn build_block_diagonal_mask(cu_seqlens: &[i32], seq_len: i32) -> UniquePtr<MlxArray> {
+        let n = seq_len as usize;
+        let mut mask = vec![f32::NEG_INFINITY; n * n];
+        for window in cu_seqlens.windows(2) {
+            let start = window[0] as usize;
+            let end = window[1] as usize;
+            for row in start..end {
+                let row_offset = row * n;
+                for col in start..end {
+                    mask[row_offset + col] = 0.0;
+                }
+            }
+        }
+        mlxcel_core::from_slice_f32(&mask, &[1, seq_len, seq_len])
+    }
+
+    fn slice_attn_segment(&self, x: &MlxArray, start: i32, end: i32) -> UniquePtr<MlxArray> {
+        mlxcel_core::slice(
+            x,
+            &[0, 0, start, 0],
+            &[1, self.num_heads, end, self.head_dim],
+        )
+    }
+
+    fn attend_sequential(
+        &self,
+        q: &MlxArray,
+        k: &MlxArray,
+        v: &MlxArray,
+        cu_seqlens: &[i32],
+    ) -> UniquePtr<MlxArray> {
+        let num_segments = cu_seqlens.len() - 1;
+        let mut outs = Vec::with_capacity(num_segments);
+        for seg in 0..num_segments {
+            let start = cu_seqlens[seg];
+            let end = cu_seqlens[seg + 1];
+            let q_seg = self.slice_attn_segment(q, start, end);
+            let k_seg = self.slice_attn_segment(k, start, end);
+            let v_seg = self.slice_attn_segment(v, start, end);
+            outs.push(self.attend(&q_seg, &k_seg, &v_seg, None));
+        }
+
+        if outs.len() == 1 {
+            outs.into_iter().next().unwrap()
+        } else {
+            concat_many(&outs, 2)
+        }
+    }
+
+    fn attend_uniform(
+        &self,
+        q: &MlxArray,
+        k: &MlxArray,
+        v: &MlxArray,
+        seq_len: i32,
+        num_segments: i32,
+        segment_len: i32,
+    ) -> UniquePtr<MlxArray> {
+        let pack = |x: &MlxArray| {
+            let x = mlxcel_core::squeeze_axis(x, 0);
+            let x = mlxcel_core::reshape(
+                &x,
+                &[self.num_heads, num_segments, segment_len, self.head_dim],
+            );
+            mlxcel_core::transpose_axes(&x, &[1, 0, 2, 3])
+        };
+
+        let q_batched = pack(q);
+        let k_batched = pack(k);
+        let v_batched = pack(v);
+        let out = self.attend(&q_batched, &k_batched, &v_batched, None);
+
+        // [segments, heads, segment_len, head_dim] -> [1, heads, seq, head_dim].
+        let out = mlxcel_core::transpose_axes(&out, &[1, 0, 2, 3]);
+        let out = mlxcel_core::reshape(&out, &[self.num_heads, seq_len, self.head_dim]);
+        mlxcel_core::expand_dims(&out, 0)
+    }
+
+    fn stack_bucket_segments(
+        &self,
+        x: &MlxArray,
+        entries: &[(usize, i32, i32)],
+    ) -> UniquePtr<MlxArray> {
+        if entries.len() == 1 {
+            let (_, start, end) = entries[0];
+            return self.slice_attn_segment(x, start, end);
+        }
+
+        let parts: Vec<UniquePtr<MlxArray>> = entries
+            .iter()
+            .map(|&(_, start, end)| {
+                let segment = self.slice_attn_segment(x, start, end);
+                mlxcel_core::squeeze_axis(&segment, 0)
+            })
+            .collect();
+        mlxcel_core::stack_owned(&parts, 0)
+    }
+
+    fn attend_bucketed(
+        &self,
+        q: &MlxArray,
+        k: &MlxArray,
+        v: &MlxArray,
+        cu_seqlens: &[i32],
+    ) -> UniquePtr<MlxArray> {
+        let num_segments = cu_seqlens.len() - 1;
+        let mut buckets = BTreeMap::<i32, Vec<(usize, i32, i32)>>::new();
+        for seg in 0..num_segments {
+            let start = cu_seqlens[seg];
+            let end = cu_seqlens[seg + 1];
+            buckets
+                .entry(end - start)
+                .or_default()
+                .push((seg, start, end));
+        }
+
+        let mut per_segment: Vec<Option<UniquePtr<MlxArray>>> =
+            std::iter::repeat_with(|| None).take(num_segments).collect();
+
+        for (segment_len, entries) in buckets {
+            let q_batched = self.stack_bucket_segments(q, &entries);
+            let k_batched = self.stack_bucket_segments(k, &entries);
+            let v_batched = self.stack_bucket_segments(v, &entries);
+            let bucket_out = self.attend(&q_batched, &k_batched, &v_batched, None);
+
+            for (batch_idx, &(seg, _, _)) in entries.iter().enumerate() {
+                let batch_idx = batch_idx as i32;
+                per_segment[seg] = Some(mlxcel_core::slice(
+                    &bucket_out,
+                    &[batch_idx, 0, 0, 0],
+                    &[batch_idx + 1, self.num_heads, segment_len, self.head_dim],
+                ));
+            }
+        }
+
+        let ordered: Vec<UniquePtr<MlxArray>> = per_segment
+            .into_iter()
+            .map(|segment| segment.expect("attention bucket produced every segment"))
+            .collect();
+        concat_many(&ordered, 2)
+    }
+
     fn forward(
         &self,
         x: &MlxArray,
         cu_seqlens: &[i32],
         rotary_pos_emb: &MlxArray,
+        block_mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
         let shape = mlxcel_core::array_shape(x);
         let seq_len = shape[0];
@@ -378,44 +581,23 @@ impl Attention {
         let k = mlxcel_core::expand_dims(&mlxcel_core::transpose_axes(&k, &[1, 0, 2]), 0);
         let v = mlxcel_core::expand_dims(&mlxcel_core::transpose_axes(&v, &[1, 0, 2]), 0);
 
-        let num_segments = cu_seqlens.len() - 1;
-        let mut outs = Vec::with_capacity(num_segments);
-        for seg in 0..num_segments {
-            let start = cu_seqlens[seg];
-            let end = cu_seqlens[seg + 1];
-            let q_seg = mlxcel_core::slice(
-                &q,
-                &[0, 0, start, 0],
-                &[1, self.num_heads, end, self.head_dim],
-            );
-            let k_seg = mlxcel_core::slice(
-                &k,
-                &[0, 0, start, 0],
-                &[1, self.num_heads, end, self.head_dim],
-            );
-            let v_seg = mlxcel_core::slice(
-                &v,
-                &[0, 0, start, 0],
-                &[1, self.num_heads, end, self.head_dim],
-            );
-            let attn = unsafe {
-                mlxcel_core::layers::attention_from_ptr(
-                    &q_seg,
-                    &k_seg,
-                    &v_seg,
-                    self.scale,
-                    std::ptr::null(),
-                    0.0,
-                    0,
-                )
-            };
-            outs.push(attn);
-        }
-
-        let output = if outs.len() == 1 {
-            outs.into_iter().next().unwrap()
+        let output = if let Some(mask) = block_mask {
+            self.attend(&q, &k, &v, Some(mask))
         } else {
-            concat_many(&outs, 2)
+            match Self::dispatch_for(cu_seqlens) {
+                AttentionDispatch::Single | AttentionDispatch::Sequential => {
+                    self.attend_sequential(&q, &k, &v, cu_seqlens)
+                }
+                AttentionDispatch::Uniform { segment_len } => self.attend_uniform(
+                    &q,
+                    &k,
+                    &v,
+                    seq_len,
+                    (cu_seqlens.len() - 1) as i32,
+                    segment_len,
+                ),
+                AttentionDispatch::Bucketed => self.attend_bucketed(&q, &k, &v, cu_seqlens),
+            }
         };
 
         let output = mlxcel_core::squeeze_axis(&output, 0);
@@ -469,10 +651,16 @@ impl EncoderLayer {
         })
     }
 
-    fn forward(&self, x: &MlxArray, cu_seqlens: &[i32], rotary: &MlxArray) -> UniquePtr<MlxArray> {
-        let attn_out = self
-            .attn
-            .forward(&self.layer_norm1.forward(x), cu_seqlens, rotary);
+    fn forward(
+        &self,
+        x: &MlxArray,
+        cu_seqlens: &[i32],
+        rotary: &MlxArray,
+        block_mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        let attn_out =
+            self.attn
+                .forward(&self.layer_norm1.forward(x), cu_seqlens, rotary, block_mask);
         let h = mlxcel_core::add(x, &attn_out);
         let mlp_out = self.mlp.forward(&self.layer_norm2.forward(&h));
         mlxcel_core::add(&h, &mlp_out)
@@ -590,10 +778,15 @@ impl PaddleOcrVisionEncoder {
     ) -> VisionEncoderOutput {
         let mut h = self.patch_embed.forward(pixel_values);
 
-        // Add per-image interpolated learned position embeddings.
+        // Add per-image interpolated learned position embeddings. Cache repeated
+        // dynamic-resolution grids in multi-image OCR batches so identical page
+        // sizes reuse the same interpolation graph instead of rebuilding it.
+        let mut pos_cache = BTreeMap::<(i32, i32), UniquePtr<MlxArray>>::new();
         let mut pos_parts: Vec<UniquePtr<MlxArray>> = Vec::with_capacity(grid_thw.len());
         for &(t, gh, gw) in grid_thw {
-            let per = self.position_embedding.interpolate(gh, gw);
+            let per = pos_cache
+                .entry((gh, gw))
+                .or_insert_with(|| self.position_embedding.interpolate(gh, gw));
             for _ in 0..t {
                 pos_parts.push(mlxcel_core::copy(per.as_ref().unwrap()));
             }
@@ -607,9 +800,16 @@ impl PaddleOcrVisionEncoder {
 
         let rotary = self.rot_pos_emb(grid_thw);
         let cu_seqlens = Self::compute_cu_seqlens(grid_thw);
+        let seq_len = mlxcel_core::array_shape(&h)[0];
+        let block_mask = if Attention::should_use_block_mask(&cu_seqlens, seq_len) {
+            Some(Attention::build_block_diagonal_mask(&cu_seqlens, seq_len))
+        } else {
+            None
+        };
+        let block_mask_ref = block_mask.as_ref().map(|mask| mask.as_ref().unwrap());
 
         for layer in &self.layers {
-            h = layer.forward(&h, &cu_seqlens, &rotary);
+            h = layer.forward(&h, &cu_seqlens, &rotary, block_mask_ref);
         }
 
         let h = self.post_layernorm.forward(&h);
@@ -622,5 +822,46 @@ impl PaddleOcrVisionEncoder {
 impl super::VisionEncoder for PaddleOcrVisionEncoder {
     fn forward(&self, _pixel_values: &MlxArray) -> VisionEncoderOutput {
         panic!("PaddleOCR-VL vision encoder requires grid_thw; use forward_with_grid() instead");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Attention, AttentionDispatch};
+
+    #[test]
+    fn attention_dispatch_uses_single_for_one_segment() {
+        assert_eq!(Attention::dispatch_for(&[0, 4]), AttentionDispatch::Single);
+    }
+
+    #[test]
+    fn attention_dispatch_batches_uniform_segments() {
+        assert_eq!(
+            Attention::dispatch_for(&[0, 4, 8, 12]),
+            AttentionDispatch::Uniform { segment_len: 4 }
+        );
+    }
+
+    #[test]
+    fn attention_dispatch_buckets_repeated_variable_segments() {
+        assert_eq!(
+            Attention::dispatch_for(&[0, 4, 10, 14]),
+            AttentionDispatch::Bucketed
+        );
+    }
+
+    #[test]
+    fn attention_dispatch_keeps_unique_variable_segments_sequential() {
+        assert_eq!(
+            Attention::dispatch_for(&[0, 4, 10, 18]),
+            AttentionDispatch::Sequential
+        );
+    }
+
+    #[test]
+    fn block_mask_fast_path_accepts_small_unique_variable_segments() {
+        assert!(Attention::should_use_block_mask(&[0, 4, 10, 18], 18));
+        assert!(!Attention::should_use_block_mask(&[0, 4096, 8192], 8192));
+        assert!(!Attention::should_use_block_mask(&[0, 4, 8], 8));
     }
 }
