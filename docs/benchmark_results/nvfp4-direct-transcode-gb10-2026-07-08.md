@@ -104,3 +104,70 @@ The token streams diverge early ("due to" vs "because of", "enters" vs
 keeps the checkpoint's exact weights. Token-identical output between the two
 paths is not expected; the meaningful bit-exactness is direct against the
 checkpoint reference.
+
+## Apple Silicon A/B runbook (issue #694)
+
+This benchmark ran on NVIDIA GB10, so it only validates the direct transcode
+under CUDA. Issue #694 asks whether Metal/non-CUDA builds should switch from
+the affine 4-bit fallback to the same direct transcode, and that decision
+needs an M-series host running the same checkpoint. The opt-in override lands
+in the PR that references this issue: `MLXCEL_NVFP4_NATIVE_REPACK=1` makes a
+non-CUDA build take the direct transcode without a code change, so the two
+paths can be compared on the same binary. This section is the exact procedure
+for that run; it has not been executed yet and the acceptance criteria in
+issue #694 remain open until it is.
+
+### Build
+
+```bash
+cargo build --release --bin mlxcel --bin mlxcel-bench-decode
+```
+
+### Runs
+
+Run each command twice on the same host and the same `gemma-4-31b-it-nvfp4`
+checkpoint: once with no override (the current affine fallback default) and
+once with `MLXCEL_NVFP4_NATIVE_REPACK=1` (the direct transcode).
+
+Affine fallback (default):
+
+```bash
+./target/release/mlxcel-bench-decode -m models/gemma-4-31b-it-nvfp4 -p "Hello, how are you today?" -n 100 --warmup-tokens 20
+./target/release/mlxcel-bench-decode -m models/gemma-4-31b-it-nvfp4 -p "Hello, how are you today?" --prompt-tokens 2048 -n 32 --warmup-tokens 20
+```
+
+Direct transcode (opt-in):
+
+```bash
+MLXCEL_NVFP4_NATIVE_REPACK=1 ./target/release/mlxcel-bench-decode -m models/gemma-4-31b-it-nvfp4 -p "Hello, how are you today?" -n 100 --warmup-tokens 20
+MLXCEL_NVFP4_NATIVE_REPACK=1 ./target/release/mlxcel-bench-decode -m models/gemma-4-31b-it-nvfp4 -p "Hello, how are you today?" --prompt-tokens 2048 -n 32 --warmup-tokens 20
+```
+
+### What to record
+
+For each of the four runs, record:
+
+- Cold-load wall time and MLX peak memory at load (`mlxcel-bench-decode`
+  prints `[Load] wall` and the peak after load completes, as in the CUDA
+  table above).
+- Short-prompt prefill and decode tok/s.
+- 2048-token prompt prefill and decode tok/s.
+- A spot-check of at least 40 generated tokens at `--temp 0` comparing the
+  affine fallback against the direct transcode, allowing only the expected
+  FP8/FP4 rounding drift described in the Correctness section above (the two
+  paths are not expected to be token-identical; the direct transcode is the
+  one that should match the ModelOpt reference bit-exactly).
+
+Record the raw numbers under `benchmarks/` (following the naming pattern of
+the existing `benchmarks/metal_*.csv` files) and update this section, or add a
+new `docs/benchmark_results/` note, with the results once the run completes.
+
+### Decision gate
+
+Per issue #694's acceptance criteria, enable the direct transcode as the
+default on Metal/non-CUDA only if, on the same host, 2048-token prefill
+improves by at least 20% and decode does not regress by more than 5% versus
+the affine fallback. If the gate passes, flipping the non-CUDA default is a
+separate follow-up change (the CUDA feature flag branch in
+`nvfp4_repack_strategy`, `src/models/sanitize.rs`) once the M-series numbers
+are in; this issue and this PR do not flip that default.
