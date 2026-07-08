@@ -871,8 +871,8 @@ pub fn reconcile_quantization_layout(
     }
 
     if mode == "affine" {
-        // NVFP4 CUDA stopgap repacks source group_size=16 weights into CUDA
-        // qmv-supported affine group sizes so decode can stay quantized.
+        // The non-CUDA ModelOpt NVFP4 fallback repacks source group_size=16
+        // weights into standard affine group sizes so decode can stay quantized.
         // Shapes are ambiguous with an 8-bit/gs16 tensor, but gs16 affine qmv
         // is not supported by the backend. Prefer the declared 4-bit width and
         // recover the qmv-supported group_size for this narrow case.
@@ -3618,10 +3618,10 @@ mod tests {
     }
 
     #[test]
-    fn reconcile_affine_nvfp4_cuda_repack_recovers_group_size() {
+    fn reconcile_affine_nvfp4_fallback_recovers_group_size() {
         // Issue #630: Gemma 4 nvfp4 checkpoints declare source group_size 16,
-        // but the CUDA-safe affine repack stores the same 4-bit dense values at
-        // group_size 32 so qmv can dispatch. Trusting gs16 would infer bits=8.
+        // but the affine fallback stores the same 4-bit dense values at
+        // group_size 32. Trusting gs16 would infer bits=8.
         let layout =
             reconcile_quantization_layout(&[32, 16], &[32, 4], 16, 4, "affine").expect("valid");
         assert_eq!(layout.bits, 4);
@@ -3630,8 +3630,8 @@ mod tests {
     }
 
     #[test]
-    fn reconcile_affine_nvfp4_cuda_repack_recovers_group_size_64() {
-        // The ModelOpt NVFP4 stopgap repacks to MLX's standard affine
+    fn reconcile_affine_nvfp4_fallback_recovers_group_size_64() {
+        // The ModelOpt NVFP4 affine fallback repacks to MLX's standard
         // group_size=64 when dimensions allow it.
         let layout =
             reconcile_quantization_layout(&[32, 16], &[32, 2], 16, 4, "affine").expect("valid");

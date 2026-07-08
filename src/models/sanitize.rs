@@ -258,6 +258,8 @@ fn normalize_nvfp4_keys(weights: &mut mlxcel_core::weights::WeightMap) {
 
 const NVFP4_SOURCE_GROUP_SIZE: usize = 16;
 const NVFP4_AFFINE_BITS: i32 = 4;
+const NVFP4_NATIVE_BITS: i32 = 4;
+const NVFP4_NATIVE_MODE: &str = "nvfp4";
 
 fn positive_i32(value: &Value) -> Option<i32> {
     value
@@ -338,10 +340,8 @@ pub(crate) fn gemma4_configured_bits(config: Option<&Value>) -> i32 {
 fn nvfp4_affine_group_size_for_in_dim(in_dim: usize, configured_group_size: i32) -> Option<usize> {
     let preferred = match configured_group_size {
         32 | 64 | 128 => configured_group_size as usize,
-        // CUDA affine qmv dispatch supports 32/64/128. NVFP4 checkpoints
-        // commonly declare source group_size=16. Repack to the standard MLX
-        // 4-bit group_size=64 when possible; it reduces scale traffic versus
-        // gs32 and matches the shipped Gemma 4 affine checkpoints.
+        // CUDA uses the native NVFP4 path below. The affine fallback is kept
+        // for other backends until they are re-benchmarked independently.
         _ => 64,
     };
     if in_dim.is_multiple_of(preferred) {
@@ -352,17 +352,19 @@ fn nvfp4_affine_group_size_for_in_dim(in_dim: usize, configured_group_size: i32)
         .find(|group_size| in_dim.is_multiple_of(*group_size))
 }
 
-/// Repack NVFP4-packed weights to MLX affine 4-bit in-place.
+/// Repack ModelOpt NVFP4-packed weights to an MLX quantized layout in-place.
 ///
 /// Detects weight groups by the presence of `{prefix}.weight_scale_2` keys.
 /// For each group, unpacks FP4 E2M1 nibbles from U8 storage and applies
 /// per-block (weight_scale) and global (weight_scale_2) scale factors to
-/// produce dense f32 values, then immediately repacks them to MLX affine
-/// `{prefix}.weight/.scales/.biases` tensors.
+/// produce dense f32 values, then immediately repacks them to an MLX quantized
+/// layout. CUDA uses native NVFP4 because it substantially improves long-prompt
+/// prefill on GB10; other backends keep the affine fallback pending separate
+/// Apple Silicon validation.
 ///
 /// After repacking the auxiliary keys `weight_scale`, `weight_scale_2`, and
 /// `input_scale` are removed from the weight map.
-fn repack_nvfp4_weights_to_affine(
+fn repack_nvfp4_weights_to_quantized(
     weights: &mut mlxcel_core::weights::WeightMap,
     config: Option<&Value>,
 ) {
@@ -377,10 +379,13 @@ fn repack_nvfp4_weights_to_affine(
         return;
     }
 
-    let configured_group_size = gemma4_configured_group_size(config);
-
+    let target = if cfg!(feature = "cuda") {
+        "MLX native NVFP4 for CUDA quantized matmul"
+    } else {
+        "MLX affine 4-bit fallback"
+    };
     eprintln!(
-        "Repacking {} NVFP4 weight groups to MLX affine 4-bit for CUDA quantized matmul (configured_group_size={configured_group_size})...",
+        "Repacking {} ModelOpt NVFP4 weight groups to {target}...",
         fp4_prefixes.len(),
     );
 
@@ -389,8 +394,8 @@ fn repack_nvfp4_weights_to_affine(
         let scale_key = format!("{prefix}.weight_scale");
         let scale2_key = format!("{prefix}.weight_scale_2");
         let input_scale_key = format!("{prefix}.input_scale");
-        let affine_scales_key = format!("{prefix}.scales");
-        let affine_biases_key = format!("{prefix}.biases");
+        let repacked_scales_key = format!("{prefix}.scales");
+        let repacked_biases_key = format!("{prefix}.biases");
 
         // Verify all required keys exist before proceeding.
         if !weights.contains_key(&weight_key) || !weights.contains_key(&scale_key) {
@@ -456,15 +461,6 @@ fn repack_nvfp4_weights_to_affine(
             continue;
         }
         let num_groups = in_dim / group_size;
-        let Some(affine_group_size) =
-            nvfp4_affine_group_size_for_in_dim(in_dim, configured_group_size)
-        else {
-            eprintln!(
-                "Skipping NVFP4 repack for {prefix}: in_dim {in_dim} is not compatible with CUDA affine group sizes 32/64/128"
-            );
-            weights.remove(&scale2_key);
-            continue;
-        };
 
         // Validate raw byte buffer lengths match expected sizes before indexing.
         let expected_weight_bytes = out_dim * packed_dim;
@@ -515,13 +511,31 @@ fn repack_nvfp4_weights_to_affine(
         }
 
         // Create a temporary f16 array with shape [out_dim, in_dim], then
-        // repack it immediately to MLX affine 4-bit so downstream linears stay
+        // repack it immediately to MLX native NVFP4 so downstream linears stay
         // on quantized_matmul instead of dense f16 matmul.
         let new_shape = vec![out_dim as i32, in_dim as i32];
         let new_arr = mlxcel_core::from_slice_f32(&dequant_f32, &new_shape);
         let dense_f16 = mlxcel_core::astype(&new_arr, mlxcel_core::dtype::FLOAT16);
-        let quantized =
-            mlxcel_core::quantize_weights(&dense_f16, affine_group_size as i32, NVFP4_AFFINE_BITS);
+        let quantized = if cfg!(feature = "cuda") {
+            mlxcel_core::quantize_weights_with_mode(
+                &dense_f16,
+                NVFP4_SOURCE_GROUP_SIZE as i32,
+                NVFP4_NATIVE_BITS,
+                NVFP4_NATIVE_MODE,
+            )
+        } else {
+            let configured_group_size = gemma4_configured_group_size(config);
+            let Some(affine_group_size) =
+                nvfp4_affine_group_size_for_in_dim(in_dim, configured_group_size)
+            else {
+                eprintln!(
+                    "Skipping NVFP4 repack for {prefix}: in_dim {in_dim} is not compatible with affine group sizes 32/64/128"
+                );
+                weights.remove(&scale2_key);
+                continue;
+            };
+            mlxcel_core::quantize_weights(&dense_f16, affine_group_size as i32, NVFP4_AFFINE_BITS)
+        };
         let quantized_weight = mlxcel_core::quantized_weights_w(&quantized);
         let quantized_scales = mlxcel_core::quantized_weights_scales(&quantized);
         let quantized_biases = mlxcel_core::quantized_weights_biases(&quantized);
@@ -535,10 +549,14 @@ fn repack_nvfp4_weights_to_affine(
             unsafe { mlxcel_core::eval_all(&ptrs) };
         }
 
-        // Replace the NVFP4 packed triplet with the MLX affine triplet.
+        // Replace the ModelOpt NVFP4 packed triplet with the MLX quantized tensors.
         weights.insert(weight_key, quantized_weight);
-        weights.insert(affine_scales_key, quantized_scales);
-        weights.insert(affine_biases_key, quantized_biases);
+        weights.insert(repacked_scales_key, quantized_scales);
+        if mlxcel_core::quantized_weights_has_biases(&quantized) {
+            weights.insert(repacked_biases_key, quantized_biases);
+        } else {
+            weights.remove(&repacked_biases_key);
+        }
         weights.remove(&scale_key);
         weights.remove(&scale2_key);
         weights.remove(&input_scale_key); // may not exist; remove is a no-op then
@@ -550,7 +568,7 @@ pub(crate) fn sanitize_gemma4_nvfp4_weights(
     config: Option<&Value>,
 ) {
     normalize_nvfp4_keys(weights);
-    repack_nvfp4_weights_to_affine(weights, config);
+    repack_nvfp4_weights_to_quantized(weights, config);
 }
 
 /// Drop k_proj / v_proj / k_norm weight entries that belong to KV-shared

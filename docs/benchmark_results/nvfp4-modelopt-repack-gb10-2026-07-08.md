@@ -5,8 +5,9 @@ NVIDIA GB10. The local `gemma-4-31b-it-nvfp4` checkpoint is not an MLX affine
 4-bit checkpoint: it is NVIDIA ModelOpt NVFP4 metadata with
 `quant_method=modelopt`, `quant_algo=NVFP4`, and per-linear
 `weight/weight_scale/weight_scale_2` triplets. The loader now accepts only that
-narrow metadata shape and repacks the triplets to MLX affine 4-bit tensors at
-load time so CUDA decode can use the existing quantized matmul path.
+narrow metadata shape. CUDA repacks the triplets to MLX native NVFP4 tensors at
+load time so long-prompt prefill can use the faster block-float matmul path;
+non-CUDA builds keep the affine fallback until Apple Silicon is re-benchmarked.
 
 ## Environment
 
@@ -24,8 +25,10 @@ load time so CUDA decode can use the existing quantized matmul path.
 | Model / run | CSV | Prompt tokens | Generated | Prefill tok/s | Decode tok/s | Notes |
 |-------------|-----|--------------:|----------:|--------------:|-------------:|-------|
 | Gemma 4 31B NVFP4 before | `benchmarks/cuda_gb10_2026-06-17.csv` | 20 | 26 | 16.26 | 0.89 | Historical baseline |
-| Gemma 4 31B NVFP4 after | `benchmarks/cuda_gb10_issue630_nvfp4_short_gs64_2026-07-08.csv` | 20 | 42 | 51.75 | 4.48 | ModelOpt NVFP4 repacked to MLX affine gs64 |
-| Gemma 4 31B NVFP4 after, 2048 prompt | `benchmarks/cuda_gb10_issue630_nvfp4_prefill2048_2026-07-08.csv` | 2048 | 32 | 116.44 | 4.60 | Acceptance prefill length |
+| Gemma 4 31B NVFP4 affine stopgap | `benchmarks/cuda_gb10_issue630_nvfp4_short_gs64_2026-07-08.csv` | 20 | 42 | 51.75 | 4.48 | ModelOpt NVFP4 repacked to MLX affine gs64 |
+| Gemma 4 31B NVFP4 native CUDA | `benchmarks/cuda_gb10_issue630_nvfp4_native_short_2026-07-08.csv` | 20 | 42 | 75.36 | 5.24 | ModelOpt NVFP4 repacked to MLX native NVFP4 |
+| Gemma 4 31B NVFP4 affine stopgap, 2048 prompt | `benchmarks/cuda_gb10_issue630_nvfp4_prefill2048_2026-07-08.csv` | 2048 | 32 | 116.44 | 4.60 | Acceptance prefill length |
+| Gemma 4 31B NVFP4 native CUDA, 2048 prompt | `benchmarks/cuda_gb10_issue630_nvfp4_native_prefill2048_2026-07-08.csv` | 2048 | 32 | 392.71 | 5.42 | Final CUDA path for this PR |
 | GPT-OSS 20B MXFP4 control | `benchmarks/cuda_gb10_issue630_gptoss_mxfp4_2026-07-08.csv` | 73 | 64 | 95.86 | 70.23 | Spot-check for existing MXFP4 path |
 | Gemma 4 31B IT 4-bit reference | `benchmarks/cuda_gb10_2026-07-03.csv` | 20 | 26 | 80.14 | 8.54 | Fully affine 4-bit reference checkpoint |
 
@@ -59,9 +62,9 @@ before-change nsys trace was captured for that baseline.
 
 - The broken NVFP4 execution path is repaired for the local ModelOpt NVFP4
   Gemma 4 checkpoint: it loads, normalizes the NVFP4-style keys, repacks 180
-  NVFP4 weight groups to MLX affine 4-bit, and completes CUDA decode.
-- Prefill at 2048 tokens is above the requested 39 tok/s target: 116.44 tok/s.
-- Decode improves from 0.89 tok/s to 4.48 tok/s on the comparable short prompt,
+  NVFP4 weight groups to MLX native NVFP4 on CUDA, and completes CUDA decode.
+- Prefill at 2048 tokens is above the requested 39 tok/s target: 392.71 tok/s.
+- Decode improves from 0.89 tok/s to 5.24 tok/s on the comparable short prompt,
   but it remains below the requested 9 tok/s target.
 - The GPT-OSS MXFP4 control remains healthy at 70.23 decode tok/s.
 

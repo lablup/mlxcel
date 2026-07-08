@@ -2271,11 +2271,22 @@ mod ffi {
             bits: i32,
         ) -> UniquePtr<MlxQuantizedWeights>;
 
+        /// Quantize weights once with an explicit MLX quantization mode.
+        fn quantize_weights_with_mode(
+            w: &MlxArray,
+            group_size: i32,
+            bits: i32,
+            mode: &str,
+        ) -> UniquePtr<MlxQuantizedWeights>;
+
         /// Quantize result — quantized weights
         fn quantized_weights_w(weights: &MlxQuantizedWeights) -> UniquePtr<MlxArray>;
 
         /// Quantize result — scales
         fn quantized_weights_scales(weights: &MlxQuantizedWeights) -> UniquePtr<MlxArray>;
+
+        /// Whether the quantize result contains affine biases.
+        fn quantized_weights_has_biases(weights: &MlxQuantizedWeights) -> bool;
 
         /// Quantize result — biases
         fn quantized_weights_biases(weights: &MlxQuantizedWeights) -> UniquePtr<MlxArray>;

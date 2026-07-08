@@ -1,0 +1,2 @@
+model,model_path,prompt_tokens,generated_tokens,prefill_ms,prefill_tok_s,decode_ms,decode_tok_s,date,hardware,mlx_version,build_type,max_tokens,prompt,prompt_target_len
+gemma-4-31b-it-nvfp4,models/gemma-4-31b-it-nvfp4,20,42,265.41,75.36,8009.43,5.24,2026-07-08,NVIDIA_GB10_122GB,0.3.3,release,100,"Hello, how are you today?",

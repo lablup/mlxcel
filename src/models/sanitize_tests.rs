@@ -219,20 +219,18 @@ fn load_and_sanitize_weights_selectively_keeps_gemma4_text_tensors() {
 
 /// Verify that loading an nvfp4 Gemma 4 checkpoint:
 /// 1. Remaps `model.language_model.X` → `language_model.model.X`
-/// 2. Repacks the packed U8 FP4 weight tensor to MLX affine 4-bit
+/// 2. Repacks the packed U8 FP4 weight tensor to a usable MLX quantized layout
 ///
 /// Test data: 2×16 packed U8 weights (nibble 0x2 = FP4 E2M1 value 1.0),
 /// 2×2 F16 block scales (all 1.0 = 0x3C00), global F32 scale 1.0.
-/// Expected output: affine weight/scales/biases tensors that dequantize to
-/// a 2×32 tensor with all values = 1.0.
+/// CUDA uses native NVFP4; other backends keep the affine fallback pending
+/// separate Metal benchmarks. Both paths dequantize to a 2×32 tensor with all
+/// values = 1.0.
 #[test]
 fn load_and_sanitize_weights_repacks_nvfp4_gemma4_checkpoint() {
     let dir = temp_model_dir("gemma4_nvfp4");
     std::fs::create_dir_all(&dir).unwrap();
 
-    // Real nvfp4 configs declare source group_size 16, but the CUDA-safe
-    // affine repack stores group_size 32. The loader reconciles this shape
-    // mismatch back to 4-bit/32 for quantized matmul.
     std::fs::write(
         dir.join("config.json"),
         serde_json::to_vec(&json!({
@@ -330,40 +328,52 @@ fn load_and_sanitize_weights_repacks_nvfp4_gemma4_checkpoint() {
     let expected_biases_key = "language_model.model.layers.0.mlp.gate_proj.biases";
     assert!(
         weights.contains_key(expected_scales_key),
-        "Expected affine scales key '{expected_scales_key}' not found"
-    );
-    assert!(
-        weights.contains_key(expected_biases_key),
-        "Expected affine biases key '{expected_biases_key}' not found"
+        "Expected repacked scales key '{expected_scales_key}' not found"
     );
 
-    // The repacked weight must be MLX affine UINT32 with shape [out_dim, 4].
     let w = weights.get(expected_key).unwrap();
     assert_eq!(
         mlxcel_core::array_dtype(w),
         dtype::UINT32,
-        "Expected UINT32 after affine repack"
+        "Expected UINT32 after quantized repack"
     );
     assert_eq!(
         mlxcel_core::array_shape(w),
         vec![out_dim as i32, 4i32],
-        "Expected packed affine shape [2, 4]"
-    );
-    let scales = weights.get(expected_scales_key).unwrap();
-    let biases = weights.get(expected_biases_key).unwrap();
-    assert_eq!(
-        mlxcel_core::array_shape(scales),
-        vec![out_dim as i32, 1i32],
-        "Expected affine scales shape [2, 1] for group_size=32"
-    );
-    assert_eq!(
-        mlxcel_core::array_shape(biases),
-        vec![out_dim as i32, 1i32],
-        "Expected affine biases shape [2, 1] for group_size=32"
+        "Expected packed quantized shape [2, 4]"
     );
 
-    let biases_ptr = biases.as_ref().unwrap() as *const _;
-    let dequantized = unsafe { mlxcel_core::dequantize(w, scales, biases_ptr, 32, 4, "affine") };
+    let scales = weights.get(expected_scales_key).unwrap();
+    let dequantized = if cfg!(feature = "cuda") {
+        assert!(
+            !weights.contains_key(expected_biases_key),
+            "Native NVFP4 repack should not emit affine biases"
+        );
+        assert_eq!(
+            mlxcel_core::array_shape(scales),
+            vec![out_dim as i32, 2i32],
+            "Expected native NVFP4 scales shape [2, 2] for group_size=16"
+        );
+        unsafe { mlxcel_core::dequantize(w, scales, std::ptr::null(), 16, 4, "nvfp4") }
+    } else {
+        assert!(
+            weights.contains_key(expected_biases_key),
+            "Affine fallback should emit biases"
+        );
+        let biases = weights.get(expected_biases_key).unwrap();
+        assert_eq!(
+            mlxcel_core::array_shape(scales),
+            vec![out_dim as i32, 1i32],
+            "Expected affine scales shape [2, 1] for group_size=32"
+        );
+        assert_eq!(
+            mlxcel_core::array_shape(biases),
+            vec![out_dim as i32, 1i32],
+            "Expected affine biases shape [2, 1] for group_size=32"
+        );
+        let biases_ptr = biases.as_ref().unwrap() as *const _;
+        unsafe { mlxcel_core::dequantize(w, scales, biases_ptr, 32, 4, "affine") }
+    };
     let dequantized_f32 = mlxcel_core::astype(&dequantized, dtype::FLOAT32);
     mlxcel_core::eval(&dequantized_f32);
     let shape = mlxcel_core::array_shape(&dequantized_f32);
@@ -375,7 +385,7 @@ fn load_and_sanitize_weights_repacks_nvfp4_gemma4_checkpoint() {
         let v = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
         assert!(
             (v - 1.0f32).abs() < 5e-2,
-            "Expected value close to 1.0 after affine repack, got {v}"
+            "Expected value close to 1.0 after quantized repack, got {v}"
         );
     }
 
