@@ -731,70 +731,126 @@ fn dense_mlp_shared_quant_layout(
     gate == up && gate == down && gate_mode == up_mode && gate_mode == down_mode
 }
 
+/// Whether the NVFP4 fused global-scale fold is disabled via
+/// `MLXCEL_DISABLE_FUSED_GLOBAL_SCALE` (issue #698). When disabled, gemma4 MLP
+/// and per-layer-input-gate paths that carry a `weight_scale_2` sidecar restore
+/// the op-at-a-time bypass, where `UnifiedLinear::forward` applies the scalar.
+/// Read once; accepts `1`/`true`/`on`/`yes` (case-insensitive) as truthy,
+/// matching the documented disable-var value convention.
+pub(crate) fn fused_global_scale_disabled() -> bool {
+    static DISABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *DISABLED.get_or_init(|| {
+        std::env::var("MLXCEL_DISABLE_FUSED_GLOBAL_SCALE")
+            .ok()
+            .map(|v| {
+                matches!(
+                    v.trim().to_ascii_lowercase().as_str(),
+                    "1" | "true" | "on" | "yes"
+                )
+            })
+            .unwrap_or(false)
+    })
+}
+
 /// Whether the compiled per-layer-input-gate fused path
-/// (`compiled_per_layer_input_gate`) is eligible for a given gate/projection
-/// pair. Mirrors the `MLP::forward` global-scale guard above: the fused C++
-/// path has no parameter for the native-NVFP4 `weight_scale_2` sidecar
-/// (issue #693), so a projection carrying one must fall through to the
-/// op-at-a-time path, where `UnifiedLinear::forward` applies the scalar.
+/// (`compiled_per_layer_input_gate`) can be used for a given gate/projection
+/// pair. The fused C++ path now folds the native-NVFP4 `weight_scale_2`
+/// sidecar (issue #698), so a sidecar-carrying pair is eligible when the fold
+/// is enabled (`fused_scale_enabled`). When the kill switch disables the fold,
+/// a sidecar-carrying pair falls through to the op-at-a-time path, where
+/// `UnifiedLinear::forward` applies the scalar. Pairs with no sidecar are
+/// always eligible, exactly as before.
 fn per_layer_input_gate_fused_path_eligible(
     gate_qw: &mlxcel_core::layers::QuantizedWeight,
     proj_qw: &mlxcel_core::layers::QuantizedWeight,
+    fused_scale_enabled: bool,
 ) -> bool {
-    gate_qw.global_scale.is_none() && proj_qw.global_scale.is_none()
+    if gate_qw.global_scale.is_some() || proj_qw.global_scale.is_some() {
+        fused_scale_enabled
+    } else {
+        true
+    }
 }
 
 impl MLP {
     pub fn forward(&self, x: &MlxArray) -> UniquePtr<MlxArray> {
-        // The fused gate/up/gelu/down C++ path has no parameter for the native
-        // NVFP4 `weight_scale_2` sidecar (issue #693). When any projection
-        // carries one, fall through to the op-at-a-time path below: each
-        // `UnifiedLinear::forward` applies its own scalar, and
-        // `compiled_geglu_approx_activation` is byte-identical to the fused
-        // NVFP4 fallback's `gelu_tanh_approx(gate) * up`, so the only
-        // difference from the fused path is the exact per-tensor scaling.
+        // Dense quantized MLP with a shared gate/up/down quant layout uses the
+        // fused gate/up/gelu/down C++ path. When the projections carry a native
+        // NVFP4 `weight_scale_2` sidecar (issue #693/#697), the fused scaled
+        // variant folds each per-projection global scale in at the
+        // mathematically correct point (issue #698): the gate scale before the
+        // GeGLU activation (nonlinear), the up scale on the up product, and the
+        // down scale on the fused output. Each fold reproduces
+        // `apply_global_scale` byte-for-byte, so the result is bit-identical to
+        // the op-at-a-time bypass. `MLXCEL_DISABLE_FUSED_GLOBAL_SCALE` restores
+        // that bypass below, where each `UnifiedLinear::forward` applies its own
+        // scalar.
         if let (Some(gate_qw), Some(up_qw), Some(down_qw)) = (
             self.gate_proj.quantized_weight(),
             self.up_proj.quantized_weight(),
             self.down_proj.quantized_weight(),
-        ) && gate_qw.global_scale.is_none()
-            && up_qw.global_scale.is_none()
-            && down_qw.global_scale.is_none()
-            && dense_mlp_shared_quant_layout(
-                QuantizationParams {
-                    group_size: gate_qw.group_size,
-                    bits: gate_qw.bits,
-                },
-                &gate_qw.mode,
-                QuantizationParams {
-                    group_size: up_qw.group_size,
-                    bits: up_qw.bits,
-                },
-                &up_qw.mode,
-                QuantizationParams {
-                    group_size: down_qw.group_size,
-                    bits: down_qw.bits,
-                },
-                &down_qw.mode,
-            )
-        {
-            return unsafe {
-                mlxcel_core::compiled_gelu_approx_mlp_forward(
-                    x,
-                    &gate_qw.weight,
-                    &gate_qw.scales,
-                    gate_qw.biases_ptr(),
-                    &up_qw.weight,
-                    &up_qw.scales,
-                    up_qw.biases_ptr(),
-                    &down_qw.weight,
-                    &down_qw.scales,
-                    down_qw.biases_ptr(),
-                    gate_qw.group_size,
-                    gate_qw.bits,
-                    &gate_qw.mode,
-                )
-            };
+        ) && dense_mlp_shared_quant_layout(
+            QuantizationParams {
+                group_size: gate_qw.group_size,
+                bits: gate_qw.bits,
+            },
+            &gate_qw.mode,
+            QuantizationParams {
+                group_size: up_qw.group_size,
+                bits: up_qw.bits,
+            },
+            &up_qw.mode,
+            QuantizationParams {
+                group_size: down_qw.group_size,
+                bits: down_qw.bits,
+            },
+            &down_qw.mode,
+        ) {
+            let any_sidecar = gate_qw.global_scale.is_some()
+                || up_qw.global_scale.is_some()
+                || down_qw.global_scale.is_some();
+
+            if any_sidecar && !fused_global_scale_disabled() {
+                return unsafe {
+                    mlxcel_core::compiled_gelu_approx_mlp_forward_global_scale(
+                        x,
+                        &gate_qw.weight,
+                        &gate_qw.scales,
+                        &up_qw.weight,
+                        &up_qw.scales,
+                        &down_qw.weight,
+                        &down_qw.scales,
+                        gate_qw.global_scale_ptr(),
+                        up_qw.global_scale_ptr(),
+                        down_qw.global_scale_ptr(),
+                        gate_qw.group_size,
+                        gate_qw.bits,
+                        &gate_qw.mode,
+                    )
+                };
+            }
+
+            if !any_sidecar {
+                return unsafe {
+                    mlxcel_core::compiled_gelu_approx_mlp_forward(
+                        x,
+                        &gate_qw.weight,
+                        &gate_qw.scales,
+                        gate_qw.biases_ptr(),
+                        &up_qw.weight,
+                        &up_qw.scales,
+                        up_qw.biases_ptr(),
+                        &down_qw.weight,
+                        &down_qw.scales,
+                        down_qw.biases_ptr(),
+                        gate_qw.group_size,
+                        gate_qw.bits,
+                        &gate_qw.mode,
+                    )
+                };
+            }
+            // any_sidecar && kill switch set: fall through to op-at-a-time,
+            // where each `UnifiedLinear::forward` applies its own scalar.
         }
 
         if let Some(out) =
@@ -2402,16 +2458,19 @@ impl DecoderLayer {
             // collapse the whole chain
             //   gate_proj → gelu_approx → mul(per_layer) → proj →
             //   post_norm → add(after_ffn)
-            // into a single `mx::core::compile` graph. Falls back
-            // to the op-at-a-time chain for non-quantized variants, and also
-            // for a native-NVFP4 `global_scale` sidecar (issue #693): the
-            // compiled graph has no parameter for it, so a sidecar-carrying
-            // pair must fall through to the `UnifiedLinear::forward` calls
-            // below, which apply the scalar per projection.
+            // into a single fused C++ call. The native-NVFP4 `global_scale`
+            // sidecar (issue #693) is now folded into that call (issue #698):
+            // the gate scale before the GeGLU activation and the proj scale on
+            // the projected output, byte-identical to `apply_global_scale`.
+            // `MLXCEL_DISABLE_FUSED_GLOBAL_SCALE` disables the fold, sending a
+            // sidecar-carrying pair to the op-at-a-time chain below.
             let combined = if let (Some(gate_qw), Some(proj_qw)) =
                 (gate_proj.quantized_weight(), proj.quantized_weight())
-                && per_layer_input_gate_fused_path_eligible(gate_qw, proj_qw)
-            {
+                && per_layer_input_gate_fused_path_eligible(
+                    gate_qw,
+                    proj_qw,
+                    !fused_global_scale_disabled(),
+                ) {
                 unsafe {
                     mlxcel_core::compiled_per_layer_input_gate(
                         &after_ffn,
@@ -2423,6 +2482,8 @@ impl DecoderLayer {
                         &proj_qw.scales,
                         proj_qw.biases_ptr(),
                         &post_norm.weight,
+                        gate_qw.global_scale_ptr(),
+                        proj_qw.global_scale_ptr(),
                         post_norm.eps,
                         gate_qw.group_size,
                         gate_qw.bits,
@@ -5671,47 +5732,70 @@ mod quant_scheme_tests {
         );
     }
 
-    /// Issue #693 follow-up: a per-layer-input gate/projection pair with no
-    /// native-NVFP4 `global_scale` sidecar on either side is eligible for the
-    /// compiled `compiled_per_layer_input_gate` fused path.
+    /// A per-layer-input gate/projection pair with no native-NVFP4
+    /// `global_scale` sidecar on either side is always eligible for the
+    /// compiled `compiled_per_layer_input_gate` fused path, regardless of the
+    /// fold toggle (the unscaled graph is unchanged by issue #698).
     #[test]
     fn per_layer_input_gate_fused_path_eligible_without_global_scale() {
         let gate_qw = dummy_quantized_weight(None);
         let proj_qw = dummy_quantized_weight(None);
-        assert!(
-            per_layer_input_gate_fused_path_eligible(&gate_qw, &proj_qw),
-            "no global_scale on either projection must take the compiled fused path"
-        );
+        for fused_scale_enabled in [true, false] {
+            assert!(
+                per_layer_input_gate_fused_path_eligible(&gate_qw, &proj_qw, fused_scale_enabled),
+                "no global_scale on either projection must always take the compiled fused path"
+            );
+        }
     }
 
-    /// Issue #693 follow-up (MEDIUM security finding): a per-layer-input gate
-    /// carrying a native-NVFP4 `global_scale` sidecar must NOT take the
-    /// compiled fused path, mirroring the `MLP::forward` guard. The fused
-    /// `compiled_per_layer_input_gate` kernel has no parameter for
-    /// `weight_scale_2`; taking the fused path here would silently drop the
-    /// sidecar and compute wrong outputs.
+    /// Issue #698: the fused `compiled_per_layer_input_gate` path now folds the
+    /// native-NVFP4 `weight_scale_2` sidecar, so a gate carrying one is
+    /// eligible when the fold is enabled.
     #[test]
-    fn per_layer_input_gate_rejects_fused_path_when_gate_has_global_scale() {
+    fn per_layer_input_gate_accepts_fused_path_when_gate_has_global_scale() {
         let gate_qw = dummy_quantized_weight(Some(mlxcel_core::ones(&[1], dtype::FLOAT32)));
         let proj_qw = dummy_quantized_weight(None);
         assert!(
-            !per_layer_input_gate_fused_path_eligible(&gate_qw, &proj_qw),
-            "a global_scale sidecar on the gate projection must fall through to \
-             the op-at-a-time path, where UnifiedLinear::forward applies the scalar"
+            per_layer_input_gate_fused_path_eligible(&gate_qw, &proj_qw, true),
+            "a gate global_scale sidecar must take the fused path when the fold is enabled"
         );
     }
 
-    /// Same as above, but the sidecar is on the down/projection side instead
-    /// of the gate: either side carrying `global_scale` must disable the
-    /// fused path.
+    /// Issue #698 kill switch: with the fold disabled
+    /// (`MLXCEL_DISABLE_FUSED_GLOBAL_SCALE`), a sidecar-carrying pair must fall
+    /// through to the op-at-a-time path, where `UnifiedLinear::forward` applies
+    /// the scalar. Covers a sidecar on the gate, on the proj, and on both.
     #[test]
-    fn per_layer_input_gate_rejects_fused_path_when_proj_has_global_scale() {
+    fn per_layer_input_gate_rejects_fused_path_when_fold_disabled() {
+        let with = || dummy_quantized_weight(Some(mlxcel_core::ones(&[1], dtype::FLOAT32)));
+        let without = || dummy_quantized_weight(None);
+        for (gate_qw, proj_qw, label) in [
+            (with(), without(), "gate-only sidecar"),
+            (without(), with(), "proj-only sidecar"),
+            (with(), with(), "both sidecars"),
+        ] {
+            assert!(
+                !per_layer_input_gate_fused_path_eligible(&gate_qw, &proj_qw, false),
+                "{label}: a sidecar-carrying pair must fall back to op-at-a-time when the fold \
+                 is disabled"
+            );
+        }
+    }
+
+    /// Issue #698 mixed case: only the projection side carries a sidecar. The
+    /// pair is eligible when the fold is enabled (the fused path treats the
+    /// absent gate scale as no multiply) and ineligible when it is disabled.
+    #[test]
+    fn per_layer_input_gate_mixed_proj_only_sidecar_follows_fold_toggle() {
         let gate_qw = dummy_quantized_weight(None);
         let proj_qw = dummy_quantized_weight(Some(mlxcel_core::ones(&[1], dtype::FLOAT32)));
         assert!(
-            !per_layer_input_gate_fused_path_eligible(&gate_qw, &proj_qw),
-            "a global_scale sidecar on the down projection must fall through to \
-             the op-at-a-time path, where UnifiedLinear::forward applies the scalar"
+            per_layer_input_gate_fused_path_eligible(&gate_qw, &proj_qw, true),
+            "proj-only sidecar must take the fused path when the fold is enabled"
+        );
+        assert!(
+            !per_layer_input_gate_fused_path_eligible(&gate_qw, &proj_qw, false),
+            "proj-only sidecar must fall back when the fold is disabled"
         );
     }
 }

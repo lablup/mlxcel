@@ -1857,6 +1857,218 @@ std::unique_ptr<MlxArray> compiled_gelu_approx_mlp_forward(
     return std::make_unique<MlxArray>(std::move(down));
 }
 
+// Compiled GeGLU MLP with per-projection NVFP4 global-scale sidecars folded in
+// (issue #698). Used by: Gemma 4 dense MLP loaded from ModelOpt NVFP4 triplets.
+//
+// The direct ModelOpt transcode (issue #693/#697) keeps `weight_scale_2` as a
+// per-linear f32 `global_scale` sidecar. `UnifiedLinear::forward` applies it
+// eagerly as `astype(multiply(qmm_out, s), qmm_out.dtype())` after each qmm. On
+// the gemma-4 decode path (CUDA graphs disabled, #688) routing each projection
+// through its own FFI call adds three extra element-wise dispatches per layer,
+// so a sidecar-carrying MLP used to bypass the fused kernel entirely.
+//
+// This function folds those exact multiplies back into the fused graph at the
+// mathematically correct points: the GeGLU is nonlinear, so the gate scale is
+// applied to the gate product BEFORE `gelu_tanh_approx`; the up scale is a
+// linear factor on the up product; the down scale multiplies the fused output.
+// Each fold reproduces `apply_global_scale`'s op sequence byte-for-byte
+// (`multiply` by the f32 scalar, then `astype` back to the activation dtype),
+// so the fused result is bit-identical to the op-at-a-time sidecar path. A null
+// scale pointer means no multiply for that projection (mixed sidecar sets stay
+// exact for the projections that carry no scale).
+namespace {
+    // Scaled GeGLU MLP compiled cache, keyed on
+    // (group_size, bits, mode, has_gate, has_up, has_down). The presence flags
+    // are part of the key because they change the emitted graph structure (a
+    // missing scale emits no multiply/astype), so each sidecar pattern compiles
+    // to its own graph. Leaked on purpose like the sibling compile caches so it
+    // outlives MLX's thread_local CompilerCache at shutdown.
+    static std::function<std::vector<array>(const std::vector<array>&)>&
+    get_compiled_qgelu_scaled_mlp(
+        int group_size, int bits, const std::string& mode,
+        bool has_gate, bool has_up, bool has_down) {
+        struct Key {
+            int group_size; int bits; std::string mode;
+            bool has_gate; bool has_up; bool has_down;
+        };
+        struct KeyHash {
+            size_t operator()(const Key& k) const noexcept {
+                size_t h = std::hash<int>{}(k.group_size);
+                h ^= std::hash<int>{}(k.bits) + 0x9e3779b9 + (h << 6) + (h >> 2);
+                h ^= std::hash<std::string>{}(k.mode) + 0x9e3779b9 + (h << 6) + (h >> 2);
+                size_t flags = (size_t(k.has_gate) << 2)
+                    | (size_t(k.has_up) << 1) | size_t(k.has_down);
+                h ^= std::hash<size_t>{}(flags) + 0x9e3779b9 + (h << 6) + (h >> 2);
+                return h;
+            }
+        };
+        struct KeyEq {
+            bool operator()(const Key& a, const Key& b) const noexcept {
+                return a.group_size == b.group_size && a.bits == b.bits
+                    && a.mode == b.mode && a.has_gate == b.has_gate
+                    && a.has_up == b.has_up && a.has_down == b.has_down;
+            }
+        };
+
+        static std::mutex& mu = *new std::mutex();
+        static std::unordered_map<
+            Key,
+            std::function<std::vector<array>(const std::vector<array>&)>,
+            KeyHash, KeyEq>& cache =
+            *new std::unordered_map<
+                Key,
+                std::function<std::vector<array>(const std::vector<array>&)>,
+                KeyHash, KeyEq>();
+
+        std::lock_guard<std::mutex> lock(mu);
+        Key key{group_size, bits, mode, has_gate, has_up, has_down};
+        auto it = cache.find(key);
+        if (it != cache.end()) {
+            return it->second;
+        }
+
+        auto fn = [group_size, bits, mode, has_gate, has_up, has_down]
+            (const std::vector<array>& inputs) -> std::vector<array> {
+            // inputs: x, gate_w, gate_s, up_w, up_s, down_w, down_s,
+            //         [gate_gs?], [up_gs?], [down_gs?]
+            // The optional global scales are appended in gate/up/down order and
+            // consumed in the same order, so the running index only advances
+            // when the matching presence flag is set.
+            size_t idx = 0;
+            const auto& x = inputs[idx++];
+            const auto& gate_w = inputs[idx++];
+            const auto& gate_s = inputs[idx++];
+            const auto& up_w = inputs[idx++];
+            const auto& up_s = inputs[idx++];
+            const auto& down_w = inputs[idx++];
+            const auto& down_s = inputs[idx++];
+
+            auto gate = mlx::core::quantized_matmul(
+                x, gate_w, gate_s, std::nullopt, true,
+                std::optional<int>(group_size), std::optional<int>(bits), mode);
+            if (has_gate) {
+                auto dt = gate.dtype();
+                gate = mlx::core::astype(
+                    mlx::core::multiply(gate, inputs[idx++]), dt);
+            }
+
+            auto up = mlx::core::quantized_matmul(
+                x, up_w, up_s, std::nullopt, true,
+                std::optional<int>(group_size), std::optional<int>(bits), mode);
+            if (has_up) {
+                auto dt = up.dtype();
+                up = mlx::core::astype(
+                    mlx::core::multiply(up, inputs[idx++]), dt);
+            }
+
+            auto activated = mlx::core::multiply(gelu_tanh_approx(gate), up);
+
+            auto down = mlx::core::quantized_matmul(
+                activated, down_w, down_s, std::nullopt, true,
+                std::optional<int>(group_size), std::optional<int>(bits), mode);
+            if (has_down) {
+                auto dt = down.dtype();
+                down = mlx::core::astype(
+                    mlx::core::multiply(down, inputs[idx++]), dt);
+            }
+
+            return {down};
+        };
+
+        auto [iter, _] = cache.emplace(key, mlx::core::compile(fn, /*shapeless=*/true));
+        return iter->second;
+    }
+
+    // Apply the sidecar to an eager (non-compiled) projection output, mirroring
+    // `QuantizedWeight::apply_global_scale` exactly.
+    static array apply_global_scale_eager(array out, const MlxArray* scale) {
+        if (!scale) {
+            return out;
+        }
+        auto dt = out.dtype();
+        return mlx::core::astype(mlx::core::multiply(out, scale->inner), dt);
+    }
+}
+
+std::unique_ptr<MlxArray> compiled_gelu_approx_mlp_forward_global_scale(
+    const MlxArray& x,
+    const MlxArray& gate_proj,
+    const MlxArray& gate_scales,
+    const MlxArray& up_proj,
+    const MlxArray& up_scales,
+    const MlxArray& down_proj,
+    const MlxArray& down_scales,
+    const MlxArray* gate_global_scale,
+    const MlxArray* up_global_scale,
+    const MlxArray* down_global_scale,
+    int32_t group_size,
+    int32_t bits,
+    rust::Str mode
+) {
+    std::string mode_str(mode.data(), mode.size());
+    const bool has_gate = gate_global_scale != nullptr;
+    const bool has_up = up_global_scale != nullptr;
+    const bool has_down = down_global_scale != nullptr;
+
+    // Same escape hatch as the unscaled fused path: `MLXCEL_COMPILED_QGELU_MLP=0`
+    // forces the eager fold. (The Rust-side `MLXCEL_DISABLE_FUSED_GLOBAL_SCALE`
+    // kill switch bypasses this function entirely and restores op-at-a-time.)
+    static const bool compiled_qgelu_enabled = []() {
+        const char* v = std::getenv("MLXCEL_COMPILED_QGELU_MLP");
+        if (!v) {
+            return true;
+        }
+        std::string s(v);
+        return !(s == "0" || s == "false" || s == "off" || s == "no");
+    }();
+
+    // Decode-only compile gate, identical to `compiled_gelu_approx_mlp_forward`:
+    // single-token calls take the fused graph; prefill (multi-token) folds the
+    // scales eagerly so the shapeless graph never forces a decode-oriented qmm
+    // kernel onto the large prefill matmul (the #680 prefill regression).
+    const auto& x_shape = x.inner.shape();
+    const bool is_single_token =
+        x_shape.size() >= 2 && x_shape[x_shape.size() - 2] == 1;
+    const bool legacy_compiled_shape = (group_size == 64 && bits == 4);
+
+    if (compiled_qgelu_enabled && (legacy_compiled_shape || is_single_token)) {
+        auto& compiled_fn = get_compiled_qgelu_scaled_mlp(
+            group_size, bits, mode_str, has_gate, has_up, has_down);
+        std::vector<array> inputs = {
+            x.inner,
+            gate_proj.inner, gate_scales.inner,
+            up_proj.inner, up_scales.inner,
+            down_proj.inner, down_scales.inner
+        };
+        if (has_gate) inputs.push_back(gate_global_scale->inner);
+        if (has_up) inputs.push_back(up_global_scale->inner);
+        if (has_down) inputs.push_back(down_global_scale->inner);
+        auto result = compiled_fn(inputs);
+        return std::make_unique<MlxArray>(std::move(result[0]));
+    }
+
+    // Eager fold (prefill / compile disabled). NVFP4 carries no quant biases,
+    // so the qmm bias operand is always null here.
+    auto gate = mlx::core::quantized_matmul(
+        x.inner, gate_proj.inner, gate_scales.inner, std::nullopt,
+        true, std::optional<int>(group_size), std::optional<int>(bits), mode_str);
+    gate = apply_global_scale_eager(std::move(gate), gate_global_scale);
+
+    auto up = mlx::core::quantized_matmul(
+        x.inner, up_proj.inner, up_scales.inner, std::nullopt,
+        true, std::optional<int>(group_size), std::optional<int>(bits), mode_str);
+    up = apply_global_scale_eager(std::move(up), up_global_scale);
+
+    auto activated = mlx::core::multiply(gelu_tanh_approx(gate), up);
+
+    auto down = mlx::core::quantized_matmul(
+        activated, down_proj.inner, down_scales.inner, std::nullopt,
+        true, std::optional<int>(group_size), std::optional<int>(bits), mode_str);
+    down = apply_global_scale_eager(std::move(down), down_global_scale);
+
+    return std::make_unique<MlxArray>(std::move(down));
+}
+
 // Compiled GeGLU SwitchGLU MLP forward: down(gelu(gate_gqm(x)) * up_gqm(x))
 // where gate/up/down each use `mx::core::gather_qmm` for per-expert
 // routing. Mirrors the dense `compiled_qgelu_mlp` pattern but with
@@ -2972,6 +3184,8 @@ std::unique_ptr<MlxArray> compiled_per_layer_input_gate(
     const MlxArray& proj_s,
     const MlxArray* proj_b,
     const MlxArray& post_norm_w,
+    const MlxArray* gate_global_scale,
+    const MlxArray* proj_global_scale,
     float post_norm_eps,
     int32_t group_size,
     int32_t bits,
@@ -2979,10 +3193,15 @@ std::unique_ptr<MlxArray> compiled_per_layer_input_gate(
 ) {
     std::string mode_str(mode.data(), mode.size());
 
-    // Compiled path only supports affine / gs=64 / bits=4 / both
-    // biases present. Anything else falls back in Rust.
+    // Compiled path only supports affine / gs=64 / bits=4 / both biases
+    // present. The NVFP4 global-scale sidecar is mutually exclusive with affine
+    // quantization (it is emitted only by the ModelOpt NVFP4 transcode), so the
+    // sidecar-carrying case never reaches the compiled branch; guarding on the
+    // scale pointers makes that explicit and keeps the fold in the eager path
+    // below, where the gate scale is applied before the GeGLU and the proj
+    // scale on the projected output (issue #698).
     if (mode_str == "affine" && group_size == 64 && bits == 4
-        && gate_b && proj_b) {
+        && gate_b && proj_b && !gate_global_scale && !proj_global_scale) {
         auto& compiled_fn = get_compiled_per_layer_input_gate(post_norm_eps);
         auto result = compiled_fn({
             after_ffn.inner, per_layer_input.inner,
@@ -2993,12 +3212,13 @@ std::unique_ptr<MlxArray> compiled_per_layer_input_gate(
         return std::make_unique<MlxArray>(std::move(result[0]));
     }
 
-    // Non-compiled fallback.
+    // Non-compiled fallback (covers NVFP4 with global-scale sidecars).
     std::optional<array> gb = gate_b ? std::optional(gate_b->inner) : std::nullopt;
     std::optional<array> pb = proj_b ? std::optional(proj_b->inner) : std::nullopt;
     auto gate = mlx::core::quantized_matmul(
         after_ffn.inner, gate_w.inner, gate_s.inner, gb,
         true, std::optional<int>(group_size), std::optional<int>(bits), mode_str);
+    gate = apply_global_scale_eager(std::move(gate), gate_global_scale);
 
     auto gelu_gate = gelu_tanh_approx(gate);
     auto gated = mlx::core::multiply(gelu_gate, per_layer_input.inner);
@@ -3006,6 +3226,7 @@ std::unique_ptr<MlxArray> compiled_per_layer_input_gate(
     auto projected = mlx::core::quantized_matmul(
         gated, proj_w.inner, proj_s.inner, pb,
         true, std::optional<int>(group_size), std::optional<int>(bits), mode_str);
+    projected = apply_global_scale_eager(std::move(projected), proj_global_scale);
     auto normed = mlx::core::fast::rms_norm(projected, post_norm_w.inner, post_norm_eps);
     auto combined = mlx::core::add(after_ffn.inner, normed);
     return std::make_unique<MlxArray>(std::move(combined));

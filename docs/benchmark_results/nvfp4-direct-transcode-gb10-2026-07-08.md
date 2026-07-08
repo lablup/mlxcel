@@ -175,3 +175,28 @@ the affine fallback. If the gate passes, flipping the non-CUDA default is a
 separate follow-up change (the CUDA feature flag branch in
 `nvfp4_repack_strategy`, `src/models/sanitize.rs`) once the M-series numbers
 are in; this issue and this PR do not flip that default.
+
+## Follow-up: NVFP4 global-scale fold into the fused MLP (issue #698, 2026-07-09)
+
+The direct transcode keeps `weight_scale_2` as a per-linear `global_scale` sidecar, applied by `UnifiedLinear::forward` as `astype(multiply(qmm_out, s), qmm_out.dtype())` after each projection. Before this change, a sidecar-carrying gemma-4 MLP bypassed the fused C++ path entirely and ran three separate op-at-a-time projections. Issue #698 folds those scales back into the fused kernel at the mathematically correct points: the gate scale before the GeGLU activation (nonlinear), the up scale on the up product, and the down scale on the fused output. The decode path compiles the scaled graph; prefill uses an eager fold. `MLXCEL_DISABLE_FUSED_GLOBAL_SCALE` restores the op-at-a-time bypass.
+
+All rows below are the same `mlxcel-bench-decode` release binary on the same GB10 host, run back to back on 2026-07-09 (raw CSV: `benchmarks/cuda_gb10_issue698_nvfp4_fused_scale_2026-07-09.csv`). `dense` is the `MLXCEL_NVFP4_DENSE_REPACK=1` baseline (the sidecar is folded into the E4M3 block scales at load, so decode runs no scale ops); `op-at-a-time` is the pre-#698 bypass (`MLXCEL_DISABLE_FUSED_GLOBAL_SCALE=1`); `fused fold` is the new default.
+
+| Run | Scale path | Prompt tokens | Prefill tok/s | Decode tok/s |
+|-----|-----------|--------------:|--------------:|-------------:|
+| short | dense (folded into block scales) | 20 | 78.55 | 5.25 |
+| short | op-at-a-time bypass | 20 | 74.62 | 4.86 |
+| short | fused fold (default) | 20 | 74.63 | 4.90 |
+| 2048 | dense (folded into block scales) | 2048 | 395.20 | 5.38* |
+| 2048 | op-at-a-time bypass | 2048 | 449.90 | 5.01 |
+| 2048 | fused fold (default) | 2048 | 412.48 | 5.07 |
+
+*Dense 2048 decode is the 2026-07-08 measurement; dense short reproduced yesterday's number exactly today (5.25 vs 5.26), so the 2048 dense row is carried over rather than re-running its ~190 s dense-requantize load.
+
+### Reading the numbers
+
+The fold is throughput-neutral on GB10 decode: +0.8% short (4.86 -> 4.90) and +1.2% at 2048 (5.01 -> 5.07) versus the op-at-a-time bypass, and it does not recover to within 2% of the dense baseline (fused is 6.7% below dense short, 5.8% below dense at 2048). This matches the documented behavior of the sibling GeGLU fusion (`MLXCEL_COMPILED_QGELU_MLP`): GB10 gemma-4 decode is weight-bandwidth-bound (~94% GPU-busy streaming the NVFP4 MLP weights), so removing per-layer element-wise dispatches is throughput-neutral there. The dense advantage therefore does not come from the scale-op dispatch count (folding them into one compiled graph does not close it); it comes from the native re-quantized NVFP4 weight layout the dense route produces, which the direct-transcode layout does not share. The fold still removes three FFI crossings and three element-wise dispatches per MLP layer, which reduces CPU dispatch work and helps op-count-bound backends, so it ships default-on with no regression and the kill switch retained.
+
+### Parity
+
+Greedy `--temp 0` decode is byte-identical between the fused fold and the op-at-a-time bypass on the 26-token short prompt (`Hello, how are you today?`). On a 120-token generation (`List five interesting facts about the planet Jupiter.`) the two paths agree for the first ~68 tokens and then diverge at a near-tie fact selection. That divergence is baseline CUDA nondeterminism, not the fold: two runs of the unmodified default path diverge from each other as well (at ~115 tokens, `so large that Earth could` vs `so large that it is`), so the NVFP4 qmm FP-reduction order is not run-to-run reproducible on this backend for either path. The fused output stays inside that envelope. The synthetic unit tests (`compiled_qgelu_mlp_global_scale_*` in `mlxcel-core`) confirm the fold matches the op-at-a-time `apply_global_scale` reference to 1e-5 on the compiled single-token branch, the eager multi-token fallback, and mixed sidecar sets.

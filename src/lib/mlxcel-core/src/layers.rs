@@ -101,6 +101,16 @@ impl QuantizedWeight {
         }
     }
 
+    /// Get raw pointer to the optional NVFP4 `weight_scale_2` sidecar (null if
+    /// absent). Used by the fused compiled paths that fold the per-projection
+    /// global scale in place of `apply_global_scale` (issue #698).
+    pub fn global_scale_ptr(&self) -> *const MlxArray {
+        match &self.global_scale {
+            Some(g) => g.as_ref().unwrap() as *const MlxArray,
+            None => std::ptr::null(),
+        }
+    }
+
     /// Apply the optional NVFP4 `weight_scale_2` sidecar to a linear output.
     ///
     /// Returns `out` unchanged when no sidecar is present. Otherwise multiplies

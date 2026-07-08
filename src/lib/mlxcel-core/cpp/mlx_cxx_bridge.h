@@ -565,6 +565,28 @@ std::unique_ptr<MlxArray> compiled_gelu_approx_mlp_forward(
     rust::Str mode
 );
 
+// Compiled GELU-approx MLP forward with per-projection NVFP4 global-scale
+// sidecars folded in (issue #698). The gate scale is applied before the
+// GeGLU activation, the up scale on the up product, and the down scale on the
+// fused output, each reproducing `apply_global_scale` byte-for-byte. Null scale
+// pointers mean no multiply for that projection. NVFP4 carries no quant biases,
+// so this signature omits the bias operands. Used by: Gemma 4 dense MLP.
+std::unique_ptr<MlxArray> compiled_gelu_approx_mlp_forward_global_scale(
+    const MlxArray& x,
+    const MlxArray& gate_proj,
+    const MlxArray& gate_scales,
+    const MlxArray& up_proj,
+    const MlxArray& up_scales,
+    const MlxArray& down_proj,
+    const MlxArray& down_scales,
+    const MlxArray* gate_global_scale,
+    const MlxArray* up_global_scale,
+    const MlxArray* down_global_scale,
+    int32_t group_size,
+    int32_t bits,
+    rust::Str mode
+);
+
 // Compiled GeGLU SwitchGLU MLP forward for quantized MoE experts.
 // Wraps three `gather_qmm` calls (gate/up/down) plus a tanh-approx
 // GeGLU activation into a single `mx::core::compile` window so MLX
@@ -908,6 +930,8 @@ std::unique_ptr<MlxArray> compiled_per_layer_input_gate(
     const MlxArray& proj_s,
     const MlxArray* proj_b,
     const MlxArray& post_norm_w,
+    const MlxArray* gate_global_scale,
+    const MlxArray* proj_global_scale,
     float post_norm_eps,
     int32_t group_size,
     int32_t bits,

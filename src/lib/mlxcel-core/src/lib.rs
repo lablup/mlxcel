@@ -690,6 +690,33 @@ mod ffi {
             mode: &str,
         ) -> UniquePtr<MlxArray>;
 
+        /// Compiled GELU-approx MLP forward with per-projection NVFP4
+        /// global-scale sidecars folded into the fused graph (issue #698).
+        /// The gate scale is applied to the gate product before the GeGLU
+        /// activation, the up scale on the up product, and the down scale on
+        /// the fused output, each reproducing `apply_global_scale`
+        /// (`astype(multiply(out, s), out.dtype())`) so the result is
+        /// bit-identical to the op-at-a-time sidecar path. A null scale
+        /// pointer means no multiply for that projection. NVFP4 carries no
+        /// quant biases, so no bias operands are passed.
+        /// Used by: Gemma4 dense MLP loaded from ModelOpt NVFP4 triplets
+        #[allow(clippy::too_many_arguments)]
+        unsafe fn compiled_gelu_approx_mlp_forward_global_scale(
+            x: &MlxArray,
+            gate_proj: &MlxArray,
+            gate_scales: &MlxArray,
+            up_proj: &MlxArray,
+            up_scales: &MlxArray,
+            down_proj: &MlxArray,
+            down_scales: &MlxArray,
+            gate_global_scale: *const MlxArray,
+            up_global_scale: *const MlxArray,
+            down_global_scale: *const MlxArray,
+            group_size: i32,
+            bits: i32,
+            mode: &str,
+        ) -> UniquePtr<MlxArray>;
+
         /// Compiled GeGLU SwitchGLU MLP forward for quantized MoE experts.
         /// Wraps three `gather_qmm` calls (gate/up/down) plus a tanh-approx
         /// GeGLU activation into a single `mx::core::compile` window so
@@ -1144,7 +1171,11 @@ mod ffi {
         /// variants): `gate_proj → gelu_approx → mul(per_layer) →
         /// proj → post_norm → add(after_ffn)` in one compile window.
         /// Falls back to op-at-a-time inside C++ when the quantized
-        /// config is not affine / gs=64 / bits=4 with biases.
+        /// config is not affine / gs=64 / bits=4 with biases. The optional
+        /// `gate_global_scale` / `proj_global_scale` sidecars (issue #698,
+        /// NVFP4) are folded into that fallback: the gate scale before the
+        /// GeGLU activation and the proj scale on the projected output. A
+        /// null scale pointer means no multiply for that projection.
         #[allow(clippy::too_many_arguments)]
         unsafe fn compiled_per_layer_input_gate(
             after_ffn: &MlxArray,
@@ -1156,6 +1187,8 @@ mod ffi {
             proj_s: &MlxArray,
             proj_b: *const MlxArray,
             post_norm_w: &MlxArray,
+            gate_global_scale: *const MlxArray,
+            proj_global_scale: *const MlxArray,
             post_norm_eps: f32,
             group_size: i32,
             bits: i32,

@@ -2080,6 +2080,372 @@ fn compiled_qgelu_mlp_forward_4bit_legacy_path_matches_reference() {
     );
 }
 
+// --- compiled_gelu_approx_mlp_forward_global_scale: NVFP4 sidecar fold
+// (issue #698) -----------------------------------------------------------
+//
+// The direct ModelOpt transcode keeps `weight_scale_2` as a per-linear f32
+// `global_scale`, applied by `UnifiedLinear::forward` as
+// `astype(multiply(qmm_out, s), qmm_out.dtype())`. These tests prove that
+// folding the scales into the fused kernel (gate before the GeGLU, up on the
+// up product, down on the output) is bit-close to that op-at-a-time reference,
+// on both the compiled single-token branch and the eager multi-token
+// fallback, including mixed sidecar sets. Block-float `mxfp4` weights carry no
+// affine biases, matching the NVFP4 no-bias signature; the scale-fold logic is
+// mode-independent, so `mxfp4` fully exercises it without needing the CUDA-only
+// NVFP4 quantizer.
+
+/// Quantize a random `[out, in]` weight to a bias-free block-float mode and
+/// return its `(packed_weight, scales)` pair, ready for both
+/// `compiled_gelu_approx_mlp_forward_global_scale` and `quantized_matmul`.
+fn random_block_float_weight(
+    out_features: i32,
+    in_features: i32,
+    group_size: i32,
+    bits: i32,
+    mode: &str,
+) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
+    let full = unsafe {
+        random_normal(
+            &[out_features, in_features],
+            dtype::FLOAT32,
+            std::ptr::null(),
+        )
+    };
+    let q = quantize_weights_with_mode(&full, group_size, bits, mode);
+    assert!(
+        !quantized_weights_has_biases(&q),
+        "block-float mode {mode} must not produce affine biases"
+    );
+    (quantized_weights_w(&q), quantized_weights_scales(&q))
+}
+
+/// Op-at-a-time reference for the scaled GeGLU MLP: `down(gelu(gate) * up)`
+/// with a null-bias `quantized_matmul` per projection and each optional global
+/// scale applied exactly as `QuantizedWeight::apply_global_scale`
+/// (`astype(multiply(out, s), out.dtype())`). `None` means no multiply for that
+/// projection, so mixed sidecar sets stay exact for the unscaled projections.
+#[allow(clippy::too_many_arguments)]
+fn reference_qgelu_mlp_scaled(
+    x: &UniquePtr<MlxArray>,
+    gate_w: &UniquePtr<MlxArray>,
+    gate_s: &UniquePtr<MlxArray>,
+    up_w: &UniquePtr<MlxArray>,
+    up_s: &UniquePtr<MlxArray>,
+    down_w: &UniquePtr<MlxArray>,
+    down_s: &UniquePtr<MlxArray>,
+    gate_gs: Option<&UniquePtr<MlxArray>>,
+    up_gs: Option<&UniquePtr<MlxArray>>,
+    down_gs: Option<&UniquePtr<MlxArray>>,
+    group_size: i32,
+    bits: i32,
+    mode: &str,
+) -> UniquePtr<MlxArray> {
+    let apply = |out: UniquePtr<MlxArray>, gs: Option<&UniquePtr<MlxArray>>| match gs {
+        Some(g) => {
+            let dt = array_dtype(&out);
+            astype(&multiply(&out, g), dt)
+        }
+        None => out,
+    };
+    let gate = unsafe {
+        quantized_matmul(
+            x,
+            gate_w,
+            gate_s,
+            std::ptr::null(),
+            true,
+            group_size,
+            bits,
+            mode,
+        )
+    };
+    let gate = apply(gate, gate_gs);
+    let up = unsafe {
+        quantized_matmul(
+            x,
+            up_w,
+            up_s,
+            std::ptr::null(),
+            true,
+            group_size,
+            bits,
+            mode,
+        )
+    };
+    let up = apply(up, up_gs);
+    let activated = multiply(&gelu_tanh_approx_ref(&gate), &up);
+    let down = unsafe {
+        quantized_matmul(
+            &activated,
+            down_w,
+            down_s,
+            std::ptr::null(),
+            true,
+            group_size,
+            bits,
+            mode,
+        )
+    };
+    apply(down, down_gs)
+}
+
+/// A per-tensor f32 global scale of a fixed value, shaped `[1]` like the loaded
+/// `weight_scale_2` sidecar.
+fn scale_scalar(value: f32) -> UniquePtr<MlxArray> {
+    full_f32(&[1], value, dtype::FLOAT32)
+}
+
+/// All three sidecars present, single-token input: the fused scaled kernel
+/// takes the compiled branch and must match the op-at-a-time reference.
+#[test]
+fn compiled_qgelu_mlp_global_scale_all_present_single_token_matches_reference() {
+    random_seed(698);
+    let (group_size, bits, mode) = (32, 4, "mxfp4");
+    let hidden = 128;
+    let intermediate = 256;
+
+    let (gate_w, gate_s) = random_block_float_weight(intermediate, hidden, group_size, bits, mode);
+    let (up_w, up_s) = random_block_float_weight(intermediate, hidden, group_size, bits, mode);
+    let (down_w, down_s) = random_block_float_weight(hidden, intermediate, group_size, bits, mode);
+
+    let gate_gs = scale_scalar(1.37);
+    let up_gs = scale_scalar(0.62);
+    let down_gs = scale_scalar(2.11);
+
+    let x = unsafe { random_normal(&[1, 1, hidden], dtype::FLOAT32, std::ptr::null()) };
+
+    let fused = unsafe {
+        compiled_gelu_approx_mlp_forward_global_scale(
+            &x,
+            &gate_w,
+            &gate_s,
+            &up_w,
+            &up_s,
+            &down_w,
+            &down_s,
+            gate_gs.as_ref().unwrap() as *const MlxArray,
+            up_gs.as_ref().unwrap() as *const MlxArray,
+            down_gs.as_ref().unwrap() as *const MlxArray,
+            group_size,
+            bits,
+            mode,
+        )
+    };
+    let reference = reference_qgelu_mlp_scaled(
+        &x,
+        &gate_w,
+        &gate_s,
+        &up_w,
+        &up_s,
+        &down_w,
+        &down_s,
+        Some(&gate_gs),
+        Some(&up_gs),
+        Some(&down_gs),
+        group_size,
+        bits,
+        mode,
+    );
+
+    eval(&fused);
+    eval(&reference);
+    assert_eq!(array_shape(&fused), vec![1, 1, hidden]);
+    assert_eq!(array_shape(&fused), array_shape(&reference));
+    let close = allclose(&fused, &reference, 1e-5, 1e-5);
+    eval(&close);
+    assert!(
+        item_bool(&close),
+        "fused scaled MLP (compiled single-token branch) must match the op-at-a-time \
+         apply_global_scale reference"
+    );
+
+    // The fold is genuinely applied, not silently dropped: with non-unit
+    // scales the fused output must diverge from the unscaled reference.
+    let unscaled = reference_qgelu_mlp_scaled(
+        &x, &gate_w, &gate_s, &up_w, &up_s, &down_w, &down_s, None, None, None, group_size, bits,
+        mode,
+    );
+    eval(&unscaled);
+    let same_as_unscaled = allclose(&fused, &unscaled, 1e-4, 1e-4);
+    eval(&same_as_unscaled);
+    assert!(
+        !item_bool(&same_as_unscaled),
+        "non-unit global scales must change the output; a match with the unscaled \
+         reference would mean the sidecar was dropped"
+    );
+}
+
+/// All three sidecars present, multi-token input: the fused scaled kernel takes
+/// the eager fallback and must still match the reference.
+#[test]
+fn compiled_qgelu_mlp_global_scale_multi_token_fallback_matches_reference() {
+    random_seed(6980);
+    let (group_size, bits, mode) = (32, 4, "mxfp4");
+    let hidden = 128;
+    let intermediate = 256;
+
+    let (gate_w, gate_s) = random_block_float_weight(intermediate, hidden, group_size, bits, mode);
+    let (up_w, up_s) = random_block_float_weight(intermediate, hidden, group_size, bits, mode);
+    let (down_w, down_s) = random_block_float_weight(hidden, intermediate, group_size, bits, mode);
+
+    let gate_gs = scale_scalar(0.81);
+    let up_gs = scale_scalar(1.44);
+    let down_gs = scale_scalar(0.57);
+
+    let x = unsafe { random_normal(&[1, 3, hidden], dtype::FLOAT32, std::ptr::null()) };
+
+    let fused = unsafe {
+        compiled_gelu_approx_mlp_forward_global_scale(
+            &x,
+            &gate_w,
+            &gate_s,
+            &up_w,
+            &up_s,
+            &down_w,
+            &down_s,
+            gate_gs.as_ref().unwrap() as *const MlxArray,
+            up_gs.as_ref().unwrap() as *const MlxArray,
+            down_gs.as_ref().unwrap() as *const MlxArray,
+            group_size,
+            bits,
+            mode,
+        )
+    };
+    let reference = reference_qgelu_mlp_scaled(
+        &x,
+        &gate_w,
+        &gate_s,
+        &up_w,
+        &up_s,
+        &down_w,
+        &down_s,
+        Some(&gate_gs),
+        Some(&up_gs),
+        Some(&down_gs),
+        group_size,
+        bits,
+        mode,
+    );
+
+    eval(&fused);
+    eval(&reference);
+    assert_eq!(array_shape(&fused), vec![1, 3, hidden]);
+    let close = allclose(&fused, &reference, 1e-5, 1e-5);
+    eval(&close);
+    assert!(
+        item_bool(&close),
+        "fused scaled MLP (eager multi-token fallback) must match the op-at-a-time reference"
+    );
+}
+
+/// Mixed sidecar set: only the down projection carries a scale. The gate and
+/// up projections must be treated as no-multiply (exact), and the down scale
+/// applied on the output.
+#[test]
+fn compiled_qgelu_mlp_global_scale_mixed_down_only_matches_reference() {
+    random_seed(6981);
+    let (group_size, bits, mode) = (32, 4, "mxfp4");
+    let hidden = 128;
+    let intermediate = 256;
+
+    let (gate_w, gate_s) = random_block_float_weight(intermediate, hidden, group_size, bits, mode);
+    let (up_w, up_s) = random_block_float_weight(intermediate, hidden, group_size, bits, mode);
+    let (down_w, down_s) = random_block_float_weight(hidden, intermediate, group_size, bits, mode);
+
+    let down_gs = scale_scalar(1.93);
+
+    let x = unsafe { random_normal(&[1, 1, hidden], dtype::FLOAT32, std::ptr::null()) };
+
+    let fused = unsafe {
+        compiled_gelu_approx_mlp_forward_global_scale(
+            &x,
+            &gate_w,
+            &gate_s,
+            &up_w,
+            &up_s,
+            &down_w,
+            &down_s,
+            std::ptr::null(),
+            std::ptr::null(),
+            down_gs.as_ref().unwrap() as *const MlxArray,
+            group_size,
+            bits,
+            mode,
+        )
+    };
+    let reference = reference_qgelu_mlp_scaled(
+        &x,
+        &gate_w,
+        &gate_s,
+        &up_w,
+        &up_s,
+        &down_w,
+        &down_s,
+        None,
+        None,
+        Some(&down_gs),
+        group_size,
+        bits,
+        mode,
+    );
+
+    eval(&fused);
+    eval(&reference);
+    let close = allclose(&fused, &reference, 1e-5, 1e-5);
+    eval(&close);
+    assert!(
+        item_bool(&close),
+        "fused scaled MLP (down-only sidecar) must match the op-at-a-time reference"
+    );
+}
+
+/// No sidecars: passing three null scales must reproduce the unscaled fused
+/// MLP output, proving the common no-sidecar case is unaffected by issue #698.
+#[test]
+fn compiled_qgelu_mlp_global_scale_no_sidecar_matches_unscaled() {
+    random_seed(6982);
+    let (group_size, bits, mode) = (32, 4, "mxfp4");
+    let hidden = 128;
+    let intermediate = 256;
+
+    let (gate_w, gate_s) = random_block_float_weight(intermediate, hidden, group_size, bits, mode);
+    let (up_w, up_s) = random_block_float_weight(intermediate, hidden, group_size, bits, mode);
+    let (down_w, down_s) = random_block_float_weight(hidden, intermediate, group_size, bits, mode);
+
+    let x = unsafe { random_normal(&[1, 1, hidden], dtype::FLOAT32, std::ptr::null()) };
+
+    let fused_null = unsafe {
+        compiled_gelu_approx_mlp_forward_global_scale(
+            &x,
+            &gate_w,
+            &gate_s,
+            &up_w,
+            &up_s,
+            &down_w,
+            &down_s,
+            std::ptr::null(),
+            std::ptr::null(),
+            std::ptr::null(),
+            group_size,
+            bits,
+            mode,
+        )
+    };
+    let reference = reference_qgelu_mlp_scaled(
+        &x, &gate_w, &gate_s, &up_w, &up_s, &down_w, &down_s, None, None, None, group_size, bits,
+        mode,
+    );
+
+    eval(&fused_null);
+    eval(&reference);
+    let close = allclose(&fused_null, &reference, 1e-5, 1e-5);
+    eval(&close);
+    assert!(
+        item_bool(&close),
+        "fused scaled MLP with all-null scales must match the unscaled op-at-a-time reference"
+    );
+}
+
 #[test]
 fn test_compiled_geglu_activation() {
     let gate = from_slice_f32(&[1.0, 2.0, 3.0, 4.0], &[1, 4]);
