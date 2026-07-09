@@ -295,9 +295,11 @@ the Metal / batch>=4 / ctx<=4096 / single-slab island ADR 0001 measured it
 winning, gather everywhere else, and the env var still force-pins either arm
 for A/B testing. The chunked slab storage narrows that island further, since
 the kernel declines (falling back to gather) once a layer has grown past one
-slab. Neither this kernel nor its selector is reached by the `mlxcel serve`
-decode path today, which stays on the block-table kernel described above; see
-ADR 0001's reachability caveat and #710. See
+slab. #710 retired this pooled entry point to a library-only API: neither this
+kernel nor its selector is on the `mlxcel serve` decode path (which stays on the
+block-table kernel described above), and `MLXCEL_PAGED_ATTENTION_NATIVE` is a
+control for external mlxcel-core consumers and the kernel bench, not a server
+knob. See ADR 0001's #710 decision record,
 [ADR 0001](adr/0001-paged-attention-gather-vs-fused-kernel.md).
 
 Pool growth appends fixed-size slabs instead of reallocating one big tensor

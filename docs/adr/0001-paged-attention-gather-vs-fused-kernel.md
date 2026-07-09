@@ -151,6 +151,29 @@ The table confirms the two design claims: single-slab `b=1` runs the kernel at a
 
 The multi-slab native-kernel spike stays out of scope. It is worth building only if live traces show sustained requests in the `B>=4`, ~4k, multi-slab regime; that evidence does not exist yet, so this ADR keeps the decline (#235) as the accepted state and the selector confines native to the single-slab island.
 
+## Pooled entry point retired to a library-only API (#710)
+
+#710 resolved the reachability caveat above. The pooled decode entry point (`paged_decode_attention_pooled` and its `select_pooled_paged_dispatch` selector) is retired to a library-only API rather than wired into the scheduler decode. The occupancy derivation below shows the selector's winning island is both unreachable under the shipped serving defaults and transient even when it is entered, so a wire-in would thread a new batched-decode arm through every transformer family (high blast radius, jitter-class parity risk) for a sliver of accelerated steps that real chat serving leaves within its first few generated tokens.
+
+### Occupancy derivation (Apple M1 Ultra)
+
+The kernel wins only on a single-slab layer (`slab_count <= 1`, the #235 decline hoisted into the selector). A slab is `POOL_SLAB_BLOCKS = 32` block rows (`src/lib/mlxcel-core/src/cache/paged.rs`) and a block holds `DEFAULT_PAGED_BLOCK_SIZE = 32` tokens (`src/server/batch/scheduler.rs`), so one slab is 32 x 32 = 1024 token rows per layer across every sequence resident in the shared pool: `PagedBlockPool::slab_count` returns the layer's whole slab-list length, not one sequence's rows. The pool stays single-slab only while the total allocated block rows satisfy `sum_i ceil(len_i / 32) <= 32`. For a batch of `B` equal-length sequences that is `B * ceil(len / 32) <= 32`.
+
+Combined with the selector's `batch_size >= 4` floor and the shipped `--parallel 4` default (#714, `n_parallel = 4`), the reachable island at `B = 4` is `ceil(len / 32) <= 8`, i.e. `len <= 256` tokens per sequence counting the prompt, the chat-template framing, and generated tokens together. At `B = 8` it tightens to `len <= 128`, and at `B = 16` to `len <= 64`.
+
+Two facts make that island negligible in production. First, it is unreachable under the shipped defaults: the #714 serving-throughput bench drives 512-token prompts, and at `B = 4` a 512-token sequence needs `ceil(512 / 32) = 16` blocks, so the pool holds `4 x 16 = 64` rows = 2 slabs and every layer is multi-slab from the first decode step. The #331 bench table above shows exactly this, with every `B >= 4` row at `ctx >= 512` (`ctx 4096`, 16-32 slabs) reading `declined` and only the `ctx 128 / 256` rows at `B = 4 / 8` staying single-slab and native. Real chat serving passes 256 total tokens per sequence almost immediately, since the system prompt and chat-template framing alone are tens of tokens before the first user turn. Second, the island is transient even when entered: the pool only appends slabs (#235: growth appends, existing slabs are never freed), so once total rows cross 32 the layer stays multi-slab for the rest of the request. A request that starts inside the island leaves it permanently within its first few dozen generated tokens and never returns, so the best case for a wire-in is a short burst of accelerated steps at the very start of short-prompt batched requests, after which every step is gather anyway.
+
+An instrumented occupancy run adds nothing here. The pooled path has no server caller, so its measured production occupancy is definitionally zero today, and the geometry above is a closed-form bound on the hypothetical wired-in occupancy rather than a noisy sample that Apple Silicon thermal drift would blur.
+
+### Decision
+
+Retire `paged_decode_attention_pooled` and `select_pooled_paged_dispatch` (with their `MLXCEL_PAGED_ATTENTION_NATIVE` override and per-shape memo) to a library-only API: kept and tested for external mlxcel-core consumers and `examples/paged_attention_kernel_bench.rs`, and documented as not on the `mlxcel-server` decode path. The fused kernel (`PagedBlockPool::paged_decode_fused`), the selector, and the bench all stay, since they are tested, benchmarked library surface and the selector remains the correct dispatch gate for any consumer that does call the pooled entry point. `MLXCEL_PAGED_ATTENTION_NATIVE` remains a library-consumer control and an A/B pin for the bench, not a server knob. Nothing is deleted: the `use_native_paged_kernel` scheduler request is left in place because it also gates the live `paged_decode_attention_dense_compat` block-table decode path (`src/models/llama3.rs` and the other families), so it is shared plumbing, not dead code.
+
+### What reopens this
+
+- A serving workload that sustains `B >= 4` with total contexts at or under ~256 tokens per sequence (short-prompt, high-concurrency batched decode), where the single-slab island is entered often enough that a wire-in's transient burst pays for the cross-family blast radius.
+- A multi-slab native kernel (the deferred #235 per-slab-base-pointer spike), which would lift the `slab_count <= 1` constraint and make the batched moderate-context win reachable at real context lengths. Live traces showing sustained `B >= 4`, ~4k, multi-slab decode would justify building it, per the #235 note above.
+
 ## References
 
 - Epic #116, unified KV cache.

@@ -3313,6 +3313,11 @@ const NATIVE_MAX_SLABS: usize = 1;
 
 /// Pure regime selector for the pooled paged-attention decode (issue #331).
 ///
+/// Library-only: this selector governs [`paged_decode_attention_pooled`], which
+/// #710 retired to a library-only API. It is not on the `mlxcel-server` decode
+/// path; it is kept for external mlxcel-core consumers and
+/// `examples/paged_attention_kernel_bench.rs`. See ADR 0001 (#710).
+///
 /// Returns [`PagedDecodeDispatch::Native`] only inside the island where ADR 0001
 /// Phase 6 measured the fused kernel winning: Apple Silicon Metal, batched
 /// decode (`batch_size >= `[`NATIVE_MIN_BATCH`]`), moderate context
@@ -3343,6 +3348,11 @@ pub fn select_pooled_paged_dispatch(
 
 /// Process-wide `MLXCEL_PAGED_ATTENTION_NATIVE` override for the fused
 /// paged-attention kernel (#123, extended to tri-state in #331).
+///
+/// Library-only control: this variable steers only the library-only
+/// [`paged_decode_attention_pooled`] entry point (ADR 0001 #710), not the live
+/// `mlxcel-server` block-table decode path (which uses the separate
+/// `DecodeBatchContext::use_native_paged_kernel` request).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum NativePagedOverride {
     /// Force the fused kernel, bypassing the adaptive selector (the original
@@ -3432,6 +3442,9 @@ fn paged_decode_backend() -> PagedDecodeBackend {
 
 /// Cheap per-shape memoization of the pooled-decode dispatch decision (#331,
 /// acceptance criterion 3).
+///
+/// Serves only the library-only [`paged_decode_attention_pooled`] path (ADR 0001
+/// #710); it is not on the `mlxcel-server` decode path.
 ///
 /// Within a decode step every layer shares the same `(batch_size, visible_len,
 /// slab_count, backend)` key, so the pure selector is recomputed at most once
@@ -3542,6 +3555,18 @@ fn resolve_pooled_paged_dispatch(
 
 /// Adaptive pooled paged decode attention (epic #116 Phase 6, #123; adaptive
 /// selector #331).
+///
+/// **Library-only (not on the `mlxcel-server` decode path).** #710 retired this
+/// entry point to a library API. The in-server decode routes pool-backed layers
+/// through the per-sequence `update_and_fetch` pool intercept (gather + standard
+/// SDPA, `src/models/llama3.rs` `is_paged_backed()`), and production models call
+/// [`paged_decode_attention_dense_compat`] / [`paged_decode_attention_dense_fallback`],
+/// never this function. It is kept and tested for external mlxcel-core consumers
+/// and `examples/paged_attention_kernel_bench.rs`. ADR 0001 (#710) records the
+/// occupancy derivation: the selector's single-slab batched island (`B>=4`, at
+/// most ~256 tokens per sequence at `block_size` 32) is unreachable under the
+/// shipped serving defaults and transient even when entered, so a scheduler
+/// wire-in is not worth its cross-family blast radius.
 ///
 /// The per-config `use_native_paged_kernel` flag marks the caller as *willing*
 /// to run the fused Metal kernel
