@@ -55,6 +55,12 @@ when `--parallel N` is used. If `--max-batch-size M` is set, `M` is the divisor
 because it controls the maximum number of concurrent decode sequences. With
 `--no-batch`, the divisor is `1`.
 
+`--parallel` defaults to `4` (serving-throughput default, #628), so an explicit
+`--ctx-size C` is divided across 4 slots by default; set `--parallel 1` to give a
+single slot the full budget. The default `--ctx-size 0` (use the model's context
+window per slot) is not divided. Non-batching families (SSM / hybrid) run a
+single decode slot regardless of `--parallel`.
+
 Startup fails when the effective per-slot context window is below 512 tokens.
 The `/slots` endpoint and `/health.context_size` report the effective per-slot
 window, not the total `--ctx-size` budget. The `--estimate-memory` preflight uses

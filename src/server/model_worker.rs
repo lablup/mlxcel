@@ -404,10 +404,33 @@ pub(crate) fn spawn_model_worker_with_batch_config(
             } else {
                 String::new()
             };
+
+            // Serving-throughput default gate (#628): the `--parallel` /
+            // `--max-batch-size` default admits a concurrent decode batch, but
+            // SSM / hybrid / mixed-cache families keep recurrent or shared
+            // internal state that is not compatible with per-sequence batching.
+            // Clamp the effective batch to 1 for those families now that the
+            // model is loaded, so the shipped default is safe for every
+            // architecture ("4 when supports_batching(), 1 otherwise"). Resolved
+            // before the scheduler log so the log reports the effective value.
+            let effective_max_batch_size = if model.supports_batching() {
+                sched_config.max_batch_size
+            } else {
+                if sched_config.max_batch_size > 1 {
+                    tracing::info!(
+                        "Model {} does not support batched decode; clamping \
+                         max_batch_size {} -> 1 (single-slot sequential serving)",
+                        worker_model_id,
+                        sched_config.max_batch_size,
+                    );
+                }
+                1
+            };
+
             tracing::info!(
                 "Starting BatchScheduler (max_batch_size={}, \
              max_queue_depth={}{chunk_info}{batch_prefill_info}{decode_storage_info}{lang_bias_info}{spec_info})",
-                sched_config.max_batch_size,
+                effective_max_batch_size,
                 sched_config.max_queue_depth,
             );
 
@@ -472,7 +495,7 @@ pub(crate) fn spawn_model_worker_with_batch_config(
             let paged_block_budget = resolve_worker_paged_block_budget(
                 &model_path,
                 &model,
-                sched_config.max_batch_size,
+                effective_max_batch_size,
                 sched_config.kv_cache_budget,
             );
 
@@ -481,7 +504,7 @@ pub(crate) fn spawn_model_worker_with_batch_config(
                 tokenizer,
                 config_eos,
                 request_rx,
-                sched_config.max_batch_size,
+                effective_max_batch_size,
                 sched_config.max_queue_depth,
                 batch_metrics,
                 batch_observability,

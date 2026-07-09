@@ -385,7 +385,8 @@ impl Default for ServerStartupConfig {
             port: 8080,
             api_key: None,
             api_key_file: None,
-            n_parallel: 1,
+            // Serving-throughput default: 4 concurrent decode slots (#628).
+            n_parallel: 4,
             ctx_size: 0,
             n_predict: -1,
             timeout: 600,
@@ -410,7 +411,8 @@ impl Default for ServerStartupConfig {
             cors_allowed_origins: None,
             preemption_policy: "longest-first".to_string(),
             no_batch: false,
-            max_batch_prefill: 1,
+            // Serving-throughput default: batched prefill up to 4 requests (#628).
+            max_batch_prefill: 4,
             decode_storage_backend: None,
             chat_template: None,
             chat_template_file: None,

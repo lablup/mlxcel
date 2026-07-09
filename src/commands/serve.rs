@@ -301,7 +301,9 @@ fn build_startup_input(mut args: crate::ServeArgs) -> anyhow::Result<ServerStart
         reasoning_budget: args.reasoning_budget,
         chat_template_kwargs: args.chat_template_kwargs,
         // prompt-cache knobs already resolved via env-var fallbacks above.
-        prompt_cache_enabled: args.prompt_cache_enabled,
+        // `--no-prompt-cache` is the highest-precedence opt-out: it wins over
+        // both `--prompt-cache-enabled` and the env-var fallbacks.
+        prompt_cache_enabled: args.prompt_cache_enabled && !args.no_prompt_cache,
         prompt_cache_capacity_bytes: args.prompt_cache_capacity_bytes,
         prompt_cache_max_entries: args.prompt_cache_max_entries,
         prompt_cache_ttl_seconds: args.prompt_cache_ttl,

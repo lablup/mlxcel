@@ -815,8 +815,14 @@ pub(crate) struct ServeArgs {
     #[arg(long, value_name = "PATH")]
     api_key_file: Option<PathBuf>,
 
-    /// Number of parallel request slots that share --ctx-size
-    #[arg(long, env = "LLAMA_ARG_N_PARALLEL", default_value_t = 1)]
+    /// Number of parallel request slots that share --ctx-size (default: 4)
+    ///
+    /// Sets the maximum concurrent decode batch for multi-client serving.
+    /// Weights are read once per decode step regardless of batch size, so
+    /// batched decode raises aggregate throughput and keeps time-to-first-token
+    /// low under concurrent load. Clamped to 1 for model families that cannot
+    /// batch. Use `--n-parallel 1` (or `--no-batch`) for single-slot serving.
+    #[arg(long, env = "LLAMA_ARG_N_PARALLEL", default_value_t = 4)]
     n_parallel: usize,
 
     /// Total context budget shared across parallel slots (0 = use model default)
@@ -941,13 +947,15 @@ pub(crate) struct ServeArgs {
     #[arg(long, default_value = "longest-first")]
     preemption_policy: String,
 
-    /// Maximum number of requests to batch together for prefill (default: 1)
+    /// Maximum number of requests to batch together for prefill (default: 4)
     ///
     /// When > 1, the scheduler collects up to this many pending requests and
     /// runs a single batched forward pass [batch_size, max_seq_len] for better
-    /// Neural Accelerator utilization. Falls back to sequential prefill when
-    /// only one request is pending. Recommended: 4-8 on M5 Pro/Max hardware.
-    #[arg(long, default_value_t = 1)]
+    /// Neural Accelerator utilization and lower time-to-first-token under
+    /// concurrent arrivals. Only engages for model families that opt into
+    /// batched prefill; other families fall back to sequential prefill. Set to
+    /// 1 to disable.
+    #[arg(long, default_value_t = 4)]
     max_batch_prefill: usize,
 
     /// Maximum KV cache size for plain (non-sliding) caches (0 = unbounded, the default).
@@ -1533,6 +1541,14 @@ pub(crate) struct ServeArgs {
         action = clap::ArgAction::Set
     )]
     prompt_cache_enabled: bool,
+
+    /// Disable the prompt-prefix KV cache (shorthand for
+    /// `--prompt-cache-enabled=false`).
+    ///
+    /// The prompt cache is on by default; this flag is a clean opt-out that
+    /// overrides `--prompt-cache-enabled` and the prompt-cache env vars.
+    #[arg(long = "no-prompt-cache")]
+    no_prompt_cache: bool,
 
     /// Maximum byte budget for the prompt-prefix KV cache (default: 2 GiB).
     ///

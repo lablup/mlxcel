@@ -13,14 +13,65 @@ either admits and prefills queued prompts (chunked at `--prefill-chunk-size` so 
 long prompt does not stall decode) or advances the active batch by one decode
 token, then streams the new tokens out. Relevant flags:
 
-| Flag | Purpose |
-|------|---------|
-| `--parallel N` | Maximum active (in-flight) sequences. |
-| `--max-batch-size N` | Maximum sequences decoded together in one batched step. |
-| `--max-queue-depth N` | Maximum queued (not yet admitted) requests. |
-| `--prefill-chunk-size N` | Token chunk size for prefill; bounds prefill's effect on decode latency. |
-| `--enable-preemption` | Allow evicting a lower-priority sequence to admit a waiting one. |
-| `--no-batch` | Disable batching and serve sequentially (the legacy single worker). |
+| Flag | Default | Purpose |
+|------|---------|---------|
+| `--parallel N` | 4 | Maximum active (in-flight) sequences; caps the concurrent decode batch. |
+| `--max-batch-size N` | (= `--parallel`) | Maximum sequences decoded together in one batched step. |
+| `--max-batch-prefill N` | 4 | Requests batched into one prefill forward pass (families that support it). |
+| `--max-queue-depth N` | 32 | Maximum queued (not yet admitted) requests. |
+| `--prefill-chunk-size N` | 512 | Token chunk size for prefill; bounds prefill's effect on decode latency. |
+| `--enable-preemption` | off | Allow evicting a lower-priority sequence to admit a waiting one. |
+| `--no-batch` | off | Disable batching and serve sequentially (the legacy single worker). |
+| `--no-prompt-cache` | off | Disable the prompt-prefix KV cache (it is on by default). |
+
+### Serving-throughput defaults
+
+The shipped defaults are tuned for multi-client serving. Batched decode reads
+each weight once per step regardless of how many sequences share the step, so
+aggregate throughput scales with concurrency until the batch hits the compute
+roofline, while per-request decode rate falls proportionally. The defaults:
+
+- `--parallel 4`: admit a decode batch of up to 4. The worker clamps this to 1
+  for families that cannot batch (SSM / hybrid / mixed-cache, i.e. any model
+  where `supports_batching()` is false), so the default is safe for every
+  architecture.
+- `--max-batch-prefill 4`: batch up to 4 pending prompts into one prefill pass.
+  Only families that opt into `supports_batched_prefill()` (Llama 3, Qwen 3,
+  Qwen 3.5, and aliases such as Qwen 2.5) use it; others fall back to sequential
+  prefill automatically.
+- Prompt-prefix cache on, bounded to a 2 GiB KV budget (`--prompt-cache-*` to
+  retune). A repeated shared prefix (for example a long system prompt) is
+  prefilled once and reused.
+
+Escape hatches restore the previous single-client behavior: `--parallel 1`
+(single decode slot), `--no-batch` (legacy sequential worker, no scheduler),
+`--max-batch-prefill 1` (sequential prefill), and `--no-prompt-cache`.
+
+Memory sizing: the KV footprint grows with the active batch, so budget for up to
+`--parallel` concurrent sequences' KV. When `--ctx-size` is set it is divided
+across the active slots (`ctx_size / parallel` per slot, floor 512 tokens);
+leave it at 0 to use the model default per slot. Admission control
+(`--kv-cache-budget`, `--max-kv-size`) still sheds load under pressure, so a
+large `--parallel` degrades to queueing rather than OOM.
+
+Measured scaling (Apple M1 Ultra, Metal; `meta-llama-3.1-8b-instruct-4bit`,
+512-token prompt, 128 new tokens; `scripts/bench_serving_concurrency.py`).
+Baseline is the previous default `--parallel 1`; new default is `--parallel 4
+--max-batch-prefill 4`. Aggregate is tokens/sec summed across concurrent
+clients; TTFT is time-to-first-token:
+
+| clients | aggregate tok/s (`--parallel 1`) | aggregate tok/s (`--parallel 4`) | TTFT mean ms (`-p1`) | TTFT mean ms (`-p4`) |
+|--------:|---------------------------------:|---------------------------------:|---------------------:|---------------------:|
+| 1 | 56.6 | 56.8 | 889 | 783 |
+| 2 | 71.5 | 99.9 | 1150 | 114 |
+| 4 | 65.6 | 107.9 | 3257 | 189 |
+| 8 | 62.8 | 105.1 | 7514 | 348 |
+
+At 4 concurrent clients the new default delivers 1.90x the single-client
+aggregate throughput and cuts mean TTFT under load ~17x (3257 ms to 189 ms),
+while single-client throughput is unchanged. On a higher-bandwidth decode target
+(for example GB10) the weights-read amortization headroom is larger; that
+number is pending a CUDA measurement session.
 
 ### Paged decode and the prompt-prefix cache
 
