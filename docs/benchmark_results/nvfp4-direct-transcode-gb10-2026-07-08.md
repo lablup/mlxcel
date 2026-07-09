@@ -114,13 +114,13 @@ The direct native NVFP4 path stayed opt-in on Metal because 2048-token prefill
 did not meet the required 20% improvement gate.
 
 This benchmark ran on NVIDIA GB10, so it only validates the direct transcode
-under CUDA. Issue #694 asks whether Metal/non-CUDA builds should switch from
-the affine 4-bit fallback to the same direct transcode, and that decision
-needs an M-series host running the same checkpoint. The opt-in override lands
-in the PR that references this issue: `MLXCEL_NVFP4_NATIVE_REPACK=1` makes a
-non-CUDA build take the direct transcode without a code change, so the two
-paths can be compared on the same binary. This section remains as the reusable
-runbook for future M-series retests.
+under CUDA. Issue #694 has since made the Metal/non-CUDA decision on an
+M-series host running the same checkpoint: keep the affine 4-bit fallback as
+the default because the native opt-in missed the long-prompt prefill gate.
+`MLXCEL_NVFP4_NATIVE_REPACK=1` makes a non-CUDA build take the direct
+transcode without a code change, so the two paths can still be compared on the
+same binary. This section remains as the reusable runbook for future M-series
+retests.
 
 ### Build
 
