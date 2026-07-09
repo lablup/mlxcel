@@ -49,7 +49,7 @@ const QWEN3_DIR: &str = "qwen3-0.6b-4bit";
 /// request for it must be rejected per-request with a clean error while the
 /// prefill node keeps serving (issue #708). Used by
 /// [`disaggregated_router_rejects_model_owned_family_and_keeps_serving`] as the
-/// model-owned fixture (it is NOT a byte-fallback parity fixture — see
+/// model-owned fixture (it is NOT a byte-fallback parity fixture; see
 /// [`MINICPM_DIR`], which is both byte-fallback AND pool-backed). Fetch with:
 /// `./target/release/mlxcel download mlx-community/gemma-3-1b-it-4bit`.
 const GEMMA_DIR: &str = "gemma-3-1b-it-4bit";
@@ -1431,7 +1431,7 @@ async fn disaggregated_router_chat_usage_matches_single_node_byte_fallback() {
 
 /// Issue #708: a `POST /v1/completions` for a MODEL-OWNED paged family (gemma3)
 /// through the 3-node disaggregated stack must fail with a CLEAN per-request
-/// error, and the prefill node must KEEP SERVING afterward — it must not crash
+/// error, and the prefill node must KEEP SERVING afterward: it must not crash
 /// the serving-role loop and take the node down (which would surface as a 503
 /// peer-down on every subsequent request).
 ///

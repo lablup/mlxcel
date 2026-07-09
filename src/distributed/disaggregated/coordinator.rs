@@ -423,8 +423,19 @@ impl ServingCoordinator {
                 );
                 continue;
             }
-            let request = PrefillRequestFrame::decode(&payload)
-                .context("prefill role: decode prefill request frame")?;
+            // A malformed-but-well-framed request payload is a per-request
+            // condition, not a transport failure: there is no decoded
+            // `reply_to` to answer, but the loop must keep serving everyone
+            // else (#708). Only the recv() arm above may exit the loop.
+            let request = match PrefillRequestFrame::decode(&payload) {
+                Ok(request) => request,
+                Err(e) => {
+                    tracing::warn!(
+                        "prefill role: dropping undecodable prefill request frame: {e:#}"
+                    );
+                    continue;
+                }
+            };
 
             // Node-level rejection for a model-owned paged family (#708): return a
             // clean per-request error frame and keep serving, rather than driving a
@@ -440,16 +451,23 @@ impl ServingCoordinator {
                     error: Some(
                         "the disaggregated handoff does not support this model's model-owned \
                          paged sequence-state backend; only pool-backed dense Fp16 families \
-                         (qwen3 / llama3) can be handed off (issue #708)"
+                         (qwen3 / llama3) can be handed off"
                             .to_string(),
                     ),
                     generated_tokens: None,
                 };
-                if let Err(e) = self
-                    .transport
-                    .send(&request.reply_to, err_result.encode()?)
-                    .await
-                {
+                let encoded = match err_result.encode() {
+                    Ok(encoded) => encoded,
+                    Err(e) => {
+                        tracing::warn!(
+                            request_id = request.request_id,
+                            "prefill role: failed to encode the model-owned rejection: {e}; \
+                             dropping request"
+                        );
+                        continue;
+                    }
+                };
+                if let Err(e) = self.transport.send(&request.reply_to, encoded).await {
                     tracing::warn!(
                         request_id = request.request_id,
                         reply_to = %request.reply_to,
@@ -490,11 +508,18 @@ impl ServingCoordinator {
                         error: Some(format!("prefill failed: {e}")),
                         generated_tokens: None,
                     };
-                    if let Err(send_err) = self
-                        .transport
-                        .send(&request.reply_to, err_result.encode()?)
-                        .await
-                    {
+                    let encoded = match err_result.encode() {
+                        Ok(encoded) => encoded,
+                        Err(encode_err) => {
+                            tracing::warn!(
+                                request_id = request.request_id,
+                                "prefill role: failed to encode the prefill error: \
+                                 {encode_err}; dropping request"
+                            );
+                            continue;
+                        }
+                    };
+                    if let Err(send_err) = self.transport.send(&request.reply_to, encoded).await {
                         tracing::warn!(
                             request_id = request.request_id,
                             reply_to = %request.reply_to,
@@ -531,11 +556,17 @@ impl ServingCoordinator {
                 error: drained.error,
                 generated_tokens: Some(prefill_generated),
             };
-            if let Err(e) = self
-                .transport
-                .send(&request.reply_to, first_result.encode()?)
-                .await
-            {
+            let first_encoded = match first_result.encode() {
+                Ok(encoded) => encoded,
+                Err(e) => {
+                    tracing::warn!(
+                        request_id = request.request_id,
+                        "prefill role: failed to encode the first token: {e}; dropping request"
+                    );
+                    continue;
+                }
+            };
+            if let Err(e) = self.transport.send(&request.reply_to, first_encoded).await {
                 tracing::warn!(
                     request_id = request.request_id,
                     reply_to = %request.reply_to,
@@ -609,10 +640,9 @@ impl ServingCoordinator {
                                 )),
                                 generated_tokens: None,
                             };
-                            let _ = self
-                                .transport
-                                .send(&request.reply_to, err_result.encode()?)
-                                .await;
+                            if let Ok(encoded) = err_result.encode() {
+                                let _ = self.transport.send(&request.reply_to, encoded).await;
+                            }
                             continue;
                         }
                     },
@@ -639,10 +669,9 @@ impl ServingCoordinator {
                         error: Some(format!("decode handoff to {decode_peer} failed: {e}")),
                         generated_tokens: None,
                     };
-                    let _ = self
-                        .transport
-                        .send(&request.reply_to, err_result.encode()?)
-                        .await;
+                    if let Ok(encoded) = err_result.encode() {
+                        let _ = self.transport.send(&request.reply_to, encoded).await;
+                    }
                 }
             }
         }
