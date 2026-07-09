@@ -13,11 +13,13 @@
 // limitations under the License.
 
 //! Unit tests for the disaggregated router front-end's usage accounting
-//! (issue #387).
+//! (issues #387, #398).
 //!
 //! Model-free: exercise `resolve_completion_tokens`, the pure function that
 //! turns the worker's authoritative wire-carried token count (or the emitted-
-//! piece fallback) into the reported `usage.completion_tokens`.
+//! piece fallback) into the reported `usage.completion_tokens`, and the chat
+//! response/chunk builders (`chat_completion_json`, `chat_chunk_usage`) that
+//! surface it on `/v1/chat/completions` (issue #398).
 
 use super::*;
 
@@ -107,6 +109,58 @@ fn authoritative_count_fixes_finish_reason_flip() {
         legacy < max_tokens,
         "frame-count fallback would have reported stop"
     );
+}
+
+// ── Chat `usage` parity (issue #398) ─────────────────────────────────────────
+
+/// The non-streaming chat JSON body carries a `usage` object with
+/// `prompt_tokens`, `completion_tokens`, and `total_tokens`, matching the
+/// single-node `ChatCompletionResponse` shape, using the caller-supplied
+/// (already-resolved) counts verbatim.
+#[test]
+fn chat_completion_json_includes_usage() {
+    let body = chat_completion_json("chatcmpl-1", "qwen3", "hello", "", "stop", 12, 5);
+    assert_eq!(body["usage"]["prompt_tokens"], serde_json::json!(12));
+    assert_eq!(body["usage"]["completion_tokens"], serde_json::json!(5));
+    assert_eq!(body["usage"]["total_tokens"], serde_json::json!(17));
+    // The rest of the shape is untouched by the usage addition.
+    assert_eq!(body["id"], serde_json::json!("chatcmpl-1"));
+    assert_eq!(body["object"], serde_json::json!("chat.completion"));
+    assert_eq!(
+        body["choices"][0]["finish_reason"],
+        serde_json::json!("stop")
+    );
+    assert_eq!(
+        body["choices"][0]["message"]["content"],
+        serde_json::json!("hello")
+    );
+}
+
+/// `reasoning_content` is included on the message only when non-empty; the
+/// `usage` object is present either way.
+#[test]
+fn chat_completion_json_usage_present_with_reasoning() {
+    let body = chat_completion_json("chatcmpl-2", "qwen3", "answer", "thinking...", "stop", 8, 3);
+    assert_eq!(
+        body["choices"][0]["message"]["reasoning_content"],
+        serde_json::json!("thinking...")
+    );
+    assert_eq!(body["usage"]["completion_tokens"], serde_json::json!(3));
+    assert_eq!(body["usage"]["total_tokens"], serde_json::json!(11));
+}
+
+/// The streaming usage chunk carries an empty `choices` array (per the OpenAI
+/// streaming-usage-chunk convention, matching `CompletionChunk::usage` and
+/// `ChatCompletionChunk::usage_with_cache`) and the caller-supplied counts.
+#[test]
+fn chat_chunk_usage_shape() {
+    let chunk = chat_chunk_usage("chatcmpl-3", "qwen3", 20, 7);
+    assert_eq!(chunk["id"], serde_json::json!("chatcmpl-3"));
+    assert_eq!(chunk["object"], serde_json::json!("chat.completion.chunk"));
+    assert_eq!(chunk["choices"], serde_json::json!([]));
+    assert_eq!(chunk["usage"]["prompt_tokens"], serde_json::json!(20));
+    assert_eq!(chunk["usage"]["completion_tokens"], serde_json::json!(7));
+    assert_eq!(chunk["usage"]["total_tokens"], serde_json::json!(27));
 }
 
 // ── /router/stats topology-disclosure redaction (issue #389) ────────────────

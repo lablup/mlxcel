@@ -58,6 +58,12 @@ const GEMMA_DIR: &str = "gemma-3-1b-it-4bit";
 /// echoed `model`).
 const GEMMA_MODEL_ALIAS: &str = "gemma-completions";
 
+/// Model alias for the Gemma byte-fallback CHAT usage parity test (issue #398).
+/// A distinct alias from [`GEMMA_MODEL_ALIAS`] keeps the completions-path and
+/// chat-path fixtures independent even though each test spawns its own
+/// isolated set of processes.
+const GEMMA_CHAT_MODEL_ALIAS: &str = "gemma-chat";
+
 /// Expected concatenated SSE content from the router for the test prompt.
 ///
 /// This is the single-node greedy reference: a hybrid `mlxcel-server` answers
@@ -1067,6 +1073,320 @@ async fn disaggregated_router_completions_match_single_node_byte_fallback() {
     eprintln!(
         "OK: router /v1/completions matches single-node for a byte-fallback tokenizer \
          (usage + finish_reason)."
+    );
+}
+
+/// Issue #398: `POST /v1/chat/completions` through the disaggregated router must
+/// report a `usage` object (`prompt_tokens`, `completion_tokens`, `total_tokens`)
+/// identical to single-node, in both the non-streaming response and the
+/// streaming final usage chunk (gated on `stream_options.include_usage`), for a
+/// BYTE-FALLBACK tokenizer (Gemma). Before this fix the router chat path never
+/// emitted `usage` at all.
+///
+/// Reuses the same byte-fallback prompt idea as
+/// `disaggregated_router_completions_match_single_node_byte_fallback` (issue
+/// #387) so the authoritative wire-carried token count is actually exercised:
+/// Gemma's SentencePiece tokenizer emits a multi-byte character (the `é` in
+/// "café") as several `<0xXX>` byte-fallback model tokens that surface as a
+/// single detokenized text piece, so a naive emitted-piece count would
+/// under-count `completion_tokens`.
+///
+/// Gated like the other real-model tests: `#[ignore]` plus a checkpoint-presence
+/// guard that skips cleanly when the Gemma checkpoint is absent.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "spawns four real mlxcel-server processes loading gemma-3-1b-it-4bit; run with --ignored"]
+async fn disaggregated_router_chat_usage_matches_single_node_byte_fallback() {
+    let model_dir = repo_model_dir(GEMMA_DIR);
+    if !model_dir.exists() {
+        eprintln!(
+            "Skipping {GEMMA_DIR}: model directory not found at {}.\n\
+             Fetch with: ./target/release/mlxcel download mlx-community/gemma-3-1b-it-4bit",
+            model_dir.display()
+        );
+        return;
+    }
+    let binary = repo_binary_path("mlxcel-server");
+    if !binary.exists() {
+        eprintln!("Skipping: mlxcel-server binary not found");
+        return;
+    }
+    let model_arg = model_dir.to_string_lossy().to_string();
+    // Same byte-fallback-forcing prompt as the completions parity test above,
+    // phrased as a chat turn.
+    let messages = serde_json::json!([{
+        "role": "user",
+        "content": "Spell the French word for coffee. It is café. Repeat it:"
+    }]);
+    let nonstream_body = serde_json::json!({
+        "model": GEMMA_CHAT_MODEL_ALIAS,
+        "messages": messages,
+        "max_tokens": 16,
+        "temperature": 0.0
+    });
+    let stream_body = serde_json::json!({
+        "model": GEMMA_CHAT_MODEL_ALIAS,
+        "messages": messages,
+        "max_tokens": 16,
+        "temperature": 0.0,
+        "stream": true,
+        "stream_options": {"include_usage": true}
+    });
+    let client = reqwest::Client::new();
+
+    // ---- Single-node reference (started with --alias for model parity) ----
+    let (ref_nonstream, ref_usage_chunk) = {
+        let ports = reserve_ports(1);
+        let http = ports[0].to_string();
+        let _single = spawn_role_server(&[
+            "-m",
+            &model_arg,
+            "--host",
+            "127.0.0.1",
+            "--port",
+            &http,
+            "--alias",
+            GEMMA_CHAT_MODEL_ALIAS,
+            "--no-warmup",
+        ]);
+        let deadline = Instant::now() + Duration::from_secs(240);
+        let health_url = format!("http://127.0.0.1:{http}/health");
+        assert!(
+            wait_for_http_health(&health_url, deadline).await,
+            "single-node Gemma reference never became healthy at {health_url}"
+        );
+        let chat_url = format!("http://127.0.0.1:{http}/v1/chat/completions");
+
+        let ns_resp = client
+            .post(&chat_url)
+            .json(&nonstream_body)
+            .send()
+            .await
+            .expect("POST single-node /v1/chat/completions (non-stream)");
+        assert!(
+            ns_resp.status().is_success(),
+            "single-node non-stream chat completion returned HTTP {}",
+            ns_resp.status()
+        );
+        let ns_json = ns_resp
+            .json::<serde_json::Value>()
+            .await
+            .expect("parse single-node non-stream chat completion JSON");
+
+        let st_resp = client
+            .post(&chat_url)
+            .json(&stream_body)
+            .send()
+            .await
+            .expect("POST single-node /v1/chat/completions (stream)");
+        assert!(
+            st_resp.status().is_success(),
+            "single-node stream chat completion returned HTTP {}",
+            st_resp.status()
+        );
+        let st_body = st_resp.text().await.expect("read single-node SSE body");
+        let st_chunks = parse_completion_chunks(&st_body);
+        let usage_chunk = st_chunks
+            .iter()
+            .find(|c| !c["usage"].is_null())
+            .cloned()
+            .expect("single-node chat stream must carry a final usage chunk");
+
+        (ns_json, usage_chunk)
+        // _single drops here, killing the reference server.
+    };
+    eprintln!("single-node Gemma chat non-stream reference: {ref_nonstream}");
+    let ref_text = ref_nonstream["choices"][0]["message"]["content"]
+        .as_str()
+        .unwrap_or("");
+    assert!(
+        !ref_text.is_empty(),
+        "single-node Gemma chat reference produced empty content; parity check would be vacuous"
+    );
+    // Guard the test's premise: the byte-fallback path is only exercised if the
+    // greedy output actually contains a multi-byte character.
+    assert!(
+        !ref_text.is_ascii(),
+        "single-node Gemma chat output {ref_text:?} is pure ASCII; the byte-fallback \
+         count path is not exercised. Adjust the prompt so the output contains a \
+         multi-byte character."
+    );
+    assert!(
+        !ref_nonstream["usage"].is_null(),
+        "single-node chat non-stream response must carry a usage object; \
+         parity check would be vacuous"
+    );
+
+    // ---- Three-process disaggregated router run ----
+    let ports = reserve_ports(6);
+    let prefill_http = ports[0].to_string();
+    let decode_http = ports[1].to_string();
+    let router_http = ports[2].to_string();
+    let prefill_serving_addr = format!("127.0.0.1:{}", ports[3]);
+    let decode_serving_addr = format!("127.0.0.1:{}", ports[4]);
+    let router_serving_addr = format!("127.0.0.1:{}", ports[5]);
+
+    let _decode = spawn_role_server(&[
+        "-m",
+        &model_arg,
+        "--host",
+        "127.0.0.1",
+        "--port",
+        &decode_http,
+        "--parallel",
+        "2",
+        "--max-batch-size",
+        "2",
+        "--decode-storage-backend",
+        "paged",
+        "--node-role",
+        "decode",
+        "--serving-bind",
+        &decode_serving_addr,
+        "--no-warmup",
+    ]);
+    let _prefill = spawn_role_server(&[
+        "-m",
+        &model_arg,
+        "--host",
+        "127.0.0.1",
+        "--port",
+        &prefill_http,
+        "--parallel",
+        "2",
+        "--max-batch-size",
+        "2",
+        "--decode-storage-backend",
+        "paged",
+        "--node-role",
+        "prefill",
+        "--serving-bind",
+        &prefill_serving_addr,
+        "--decode-peers",
+        &decode_serving_addr,
+        "--no-warmup",
+    ]);
+    let _router = spawn_role_server(&[
+        "-m",
+        &model_arg,
+        "--host",
+        "127.0.0.1",
+        "--port",
+        &router_http,
+        "--node-role",
+        "router",
+        "--serving-bind",
+        &router_serving_addr,
+        "--prefill-peers",
+        &prefill_serving_addr,
+        "--decode-peers",
+        &decode_serving_addr,
+        "--no-warmup",
+    ]);
+
+    let deadline = Instant::now() + Duration::from_secs(240);
+    assert!(
+        wait_for_tcp(&decode_serving_addr, deadline).await,
+        "decode node serving transport never came up"
+    );
+    assert!(
+        wait_for_tcp(&prefill_serving_addr, deadline).await,
+        "prefill node serving transport never came up"
+    );
+    let health_url = format!("http://127.0.0.1:{router_http}/health");
+    assert!(
+        wait_for_http_health(&health_url, deadline).await,
+        "router HTTP /health never returned 200"
+    );
+    let router_chat_url = format!("http://127.0.0.1:{router_http}/v1/chat/completions");
+
+    // Non-streaming parity: the router must now emit a `usage` object at all,
+    // and it must match single-node exactly for the byte-fallback tokenizer.
+    let router_ns_resp = client
+        .post(&router_chat_url)
+        .json(&nonstream_body)
+        .send()
+        .await
+        .expect("POST router /v1/chat/completions (non-stream)");
+    assert!(
+        router_ns_resp.status().is_success(),
+        "router non-stream chat completion returned HTTP {}",
+        router_ns_resp.status()
+    );
+    let router_ns = router_ns_resp
+        .json::<serde_json::Value>()
+        .await
+        .expect("parse router non-stream chat completion JSON");
+    eprintln!("router Gemma chat non-stream: {router_ns}");
+    assert!(
+        !router_ns["usage"].is_null(),
+        "router non-stream /v1/chat/completions must carry a usage object (issue #398)"
+    );
+    assert_eq!(
+        router_ns["usage"]["prompt_tokens"], ref_nonstream["usage"]["prompt_tokens"],
+        "router usage.prompt_tokens diverges from single-node"
+    );
+    assert_eq!(
+        router_ns["usage"]["completion_tokens"], ref_nonstream["usage"]["completion_tokens"],
+        "router usage.completion_tokens diverges from single-node for a byte-fallback tokenizer"
+    );
+    assert_eq!(
+        router_ns["usage"]["total_tokens"], ref_nonstream["usage"]["total_tokens"],
+        "router usage.total_tokens diverges from single-node"
+    );
+    assert_eq!(
+        router_ns["choices"][0]["finish_reason"], ref_nonstream["choices"][0]["finish_reason"],
+        "router finish_reason diverges from single-node for a byte-fallback tokenizer"
+    );
+
+    // Streaming parity: the final usage chunk (stream_options.include_usage)
+    // must also match single-node exactly.
+    let router_st_resp = client
+        .post(&router_chat_url)
+        .json(&stream_body)
+        .send()
+        .await
+        .expect("POST router /v1/chat/completions (stream)");
+    assert!(
+        router_st_resp.status().is_success(),
+        "router stream chat completion returned HTTP {}",
+        router_st_resp.status()
+    );
+    let router_st_body = router_st_resp.text().await.expect("read router SSE body");
+    let router_st_chunks = parse_completion_chunks(&router_st_body);
+    let router_usage_chunk = router_st_chunks
+        .iter()
+        .find(|c| !c["usage"].is_null())
+        .cloned()
+        .unwrap_or_else(|| {
+            panic!(
+                "router chat stream carried no usage chunk despite \
+                 stream_options.include_usage=true (issue #398); chunks: {router_st_chunks:?}"
+            )
+        });
+    assert_eq!(
+        router_usage_chunk["usage"]["prompt_tokens"], ref_usage_chunk["usage"]["prompt_tokens"],
+        "router stream usage.prompt_tokens diverges from single-node"
+    );
+    assert_eq!(
+        router_usage_chunk["usage"]["completion_tokens"],
+        ref_usage_chunk["usage"]["completion_tokens"],
+        "router stream usage.completion_tokens diverges from single-node for a \
+         byte-fallback tokenizer"
+    );
+    assert_eq!(
+        router_usage_chunk["usage"]["total_tokens"], ref_usage_chunk["usage"]["total_tokens"],
+        "router stream usage.total_tokens diverges from single-node"
+    );
+    // The usage chunk itself carries no choices, per the OpenAI streaming-usage
+    // convention (matches the router's own /v1/completions usage chunk).
+    assert_eq!(
+        router_usage_chunk["choices"],
+        serde_json::json!([]),
+        "router chat usage chunk must carry an empty choices array"
+    );
+    eprintln!(
+        "OK: router /v1/chat/completions matches single-node usage for a byte-fallback \
+         tokenizer (non-stream + stream)."
     );
 }
 

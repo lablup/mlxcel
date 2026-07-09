@@ -670,12 +670,19 @@ async fn route_chat(state: Arc<RouterState>, request: ChatCompletionRequest) -> 
     // (`chatcmpl-<n>`) is preserved exactly.
     let request_id = state.next_id.fetch_add(1, Ordering::Relaxed);
     let request_id_str = format!("chatcmpl-{request_id}");
-    let (_prompt_tokens, rx) =
+    let (prompt_tokens, rx) =
         start_handoff(&state, &prompt, request_id, &request_id_str, &opts).await?;
 
     if request.stream {
         // Streaming: spawn a task that drives the handoff and feeds SSE events
-        // into an unbounded channel; return the SSE response immediately.
+        // into an unbounded channel; return the SSE response immediately. The
+        // optional trailing usage chunk mirrors the router's own
+        // `/v1/completions` streaming path and single-node chat (issue #398).
+        let include_usage = request
+            .stream_options
+            .as_ref()
+            .map(|o| o.include_usage)
+            .unwrap_or(false);
         let (chunk_tx, chunk_rx) =
             tokio::sync::mpsc::unbounded_channel::<Result<Event, Infallible>>();
         let state2 = state.clone();
@@ -731,18 +738,20 @@ async fn route_chat(state: Arc<RouterState>, request: ChatCompletionRequest) -> 
             emit_filtered(filter.flush());
 
             let completed = result.is_ok();
+            // Resolve the authoritative completion-token count on success (issue
+            // #387); `None` on a handoff failure, which also means "stop" for
+            // `finish_reason` and no usage chunk below (issue #398), matching
+            // the router's own `/v1/completions` streaming path.
+            let completion_tokens = result
+                .as_ref()
+                .ok()
+                .map(|outcome| resolve_completion_tokens(outcome, frame_counted, max_tokens));
             // Mirror single-node chat: "length" when the whole token budget was
             // generated, else "stop". On a handoff failure finish as "stop"
             // alongside the visible error delta emitted just above.
-            let finish_reason = match &result {
-                Ok(outcome) => {
-                    if resolve_completion_tokens(outcome, frame_counted, max_tokens) >= max_tokens {
-                        "length"
-                    } else {
-                        "stop"
-                    }
-                }
-                Err(_) => "stop",
+            let finish_reason = match completion_tokens {
+                Some(n) if n >= max_tokens => "length",
+                _ => "stop",
             };
             if let Err(e) = result {
                 let _ = chunk_tx.send(Ok(sse_event(&chat_chunk_error(
@@ -756,6 +765,20 @@ async fn route_chat(state: Arc<RouterState>, request: ChatCompletionRequest) -> 
                 &model,
                 finish_reason,
             ))));
+
+            // Emit the usage chunk only on success, matching single-node
+            // `stream_chat_completion` (`if include_usage && let Ok(ref r) =
+            // result`) and the router's own `/v1/completions` streaming path.
+            // On a handoff failure (`completion_tokens` is `None`) no usage
+            // chunk is sent.
+            if include_usage && let Some(completion_tokens) = completion_tokens {
+                let _ = chunk_tx.send(Ok(sse_event(&chat_chunk_usage(
+                    &request_id_str2,
+                    &model,
+                    prompt_tokens,
+                    completion_tokens,
+                ))));
+            }
             let _ = chunk_tx.send(Ok(Event::default().data("[DONE]")));
 
             state2.pending.lock().unwrap().remove(&request_id);
@@ -767,12 +790,15 @@ async fn route_chat(state: Arc<RouterState>, request: ChatCompletionRequest) -> 
             .into_response())
     } else {
         // Non-streaming: collect all tokens (filtered) then return a single
-        // JSON object with `content` and, when present, `reasoning_content`.
+        // JSON object with `content`, `reasoning_content` when present, and a
+        // `usage` block matching single-node's `ChatCompletionResponse` shape
+        // (issue #398).
         let mut filter = stream_filter;
         let mut content = String::new();
         let mut reasoning = String::new();
         let mut rx = rx;
         let finish_reason;
+        let completion_tokens;
         {
             let mut frame_counted = 0usize;
             let mut absorb = |emit: FilterOutput| {
@@ -800,10 +826,10 @@ async fn route_chat(state: Arc<RouterState>, request: ChatCompletionRequest) -> 
             let outcome = r?;
             // Mirror single-node chat finish_reason: "length" when the whole
             // token budget was generated, else "stop", using the worker's
-            // authoritative count when present (issue #387).
-            finish_reason = if resolve_completion_tokens(&outcome, frame_counted, opts.max_tokens)
-                >= opts.max_tokens
-            {
+            // authoritative count when present (issue #387). The same
+            // resolved count feeds `usage.completion_tokens` below (issue #398).
+            completion_tokens = resolve_completion_tokens(&outcome, frame_counted, opts.max_tokens);
+            finish_reason = if completion_tokens >= opts.max_tokens {
                 "length"
             } else {
                 "stop"
@@ -815,6 +841,8 @@ async fn route_chat(state: Arc<RouterState>, request: ChatCompletionRequest) -> 
             &content,
             &reasoning,
             finish_reason,
+            prompt_tokens,
+            completion_tokens,
         ))
         .into_response())
     }
@@ -1462,16 +1490,48 @@ fn chat_chunk_error(id: &str, model: &str, msg: &str) -> serde_json::Value {
     })
 }
 
+/// Final usage chunk, sent only when the client requested
+/// `stream_options.include_usage` and the handoff succeeded (issue #398).
+/// `choices` is empty per the OpenAI streaming-usage-chunk convention.
+/// `completion_tokens` is the caller's already-resolved authoritative count
+/// (issue #387); mirrors the router's own `/v1/completions` streaming usage
+/// chunk (`CompletionChunk::usage`) and single-node chat's
+/// `ChatCompletionChunk::usage_with_cache` (without the prompt-cache
+/// breakdown, which the router does not track).
+fn chat_chunk_usage(
+    id: &str,
+    model: &str,
+    prompt_tokens: usize,
+    completion_tokens: usize,
+) -> serde_json::Value {
+    serde_json::json!({
+        "id": id,
+        "object": "chat.completion.chunk",
+        "model": model,
+        "choices": [],
+        "usage": {
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": prompt_tokens + completion_tokens
+        }
+    })
+}
+
 /// Non-streaming response body. `reasoning_content` is included only when
 /// the filter routed any thinking text. `finish_reason` ("stop" or "length")
 /// is derived from the worker's authoritative token count (issue #387) so it
-/// matches the single-node chat route.
+/// matches the single-node chat route. `usage` mirrors single-node's
+/// `ChatCompletionResponse` shape (`prompt_tokens`, `completion_tokens`,
+/// `total_tokens`); `completion_tokens` is the caller's already-resolved
+/// authoritative count (issue #398).
 fn chat_completion_json(
     id: &str,
     model: &str,
     content: &str,
     reasoning: &str,
     finish_reason: &str,
+    prompt_tokens: usize,
+    completion_tokens: usize,
 ) -> serde_json::Value {
     let mut message = serde_json::json!({"role": "assistant", "content": content});
     if !reasoning.is_empty() {
@@ -1485,7 +1545,12 @@ fn chat_completion_json(
             "index": 0,
             "message": message,
             "finish_reason": finish_reason
-        }]
+        }],
+        "usage": {
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": prompt_tokens + completion_tokens
+        }
     })
 }
 
