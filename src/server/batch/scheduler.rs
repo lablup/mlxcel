@@ -477,6 +477,20 @@ impl BatchScheduler {
         )
     }
 
+    /// Whether this node's model can participate in the disaggregated pool-block
+    /// KV handoff (#125). The handoff extracts pool-backed Fp16 KV, which only the
+    /// dense external KV-cache families (natural backend `DenseKvCache`: qwen3 /
+    /// llama3) produce. Model-owned paged families (gemma3 / gemma4 / llama4 /
+    /// qwen3_5 / qwen3_next, natural backend `ModelOwned`) keep their KV
+    /// model-internal and are routed through the paged backend for shadow
+    /// accounting only, so there is nothing pool-paged to extract: a handoff
+    /// attempt reads unwritten pool tensors and used to crash the prefill serving
+    /// loop (#708). The whole node serves one model, so this is a node-level fact
+    /// the serving-role loop checks once and applies to every request.
+    pub(crate) fn handoff_supported(&self) -> bool {
+        self.model.sequence_state_layout().backend == SequenceStateBackend::DenseKvCache
+    }
+
     /// Prefill role (#126 B2b): run a full prefill for `seq`, then extract its
     /// pool-backed KV as a handoff frame for a decode node and release the local
     /// caches.
@@ -576,6 +590,20 @@ impl BatchScheduler {
         response_tx: mpsc::Sender<GenerateEvent>,
         cancelled: Arc<AtomicBool>,
     ) -> anyhow::Result<Option<Vec<u8>>> {
+        // Reject model-owned paged families up front, before any allocation or
+        // prefill work: the pool-block handoff only supports pool-backed dense
+        // Fp16 families (#125). A model-owned family keeps its KV model-internal,
+        // so extraction would read unwritten pool tensors (#708). The serving-role
+        // loop turns this error into a per-request failure frame and keeps serving.
+        if !self.handoff_supported() {
+            anyhow::bail!(
+                "prefill-role handoff: the disaggregated handoff does not support this model's \
+                 {:?} sequence-state backend; only pool-backed dense Fp16 families (qwen3 / \
+                 llama3) can be handed off. Model-owned paged families (gemma3 / gemma4 / llama4 \
+                 / qwen3_5 / qwen3_next) keep their KV model-internal (issue #708).",
+                self.model.sequence_state_layout().backend
+            );
+        }
         if prompt_tokens.is_empty() {
             anyhow::bail!("prefill-role handoff: empty prompt has no tokens to prefill");
         }

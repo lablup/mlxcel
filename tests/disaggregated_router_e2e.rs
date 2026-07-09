@@ -44,18 +44,19 @@ use common::{repo_binary_path, repo_model_dir};
 /// qwen3 checkpoint directory name (pool-backed Fp16, the handoff scope).
 const QWEN3_DIR: &str = "qwen3-0.6b-4bit";
 
-/// Gemma checkpoint directory name (issue #387). Gemma's SentencePiece
-/// tokenizer has `byte_fallback = true`, so a multi-byte character (e.g. the
-/// `é` in "café") is emitted as a `<0xXX>` byte sequence: several model tokens
-/// surfacing as one detokenized text piece. Counting emitted pieces would
-/// under-count those tokens, which is exactly what the authoritative wire count
-/// fixes. Fetch with:
+/// Gemma checkpoint directory name. gemma3 is a MODEL-OWNED paged family: the
+/// disaggregated pool-block handoff (#125) does not support it, so a prefill
+/// request for it must be rejected per-request with a clean error while the
+/// prefill node keeps serving (issue #708). Used by
+/// [`disaggregated_router_rejects_model_owned_family_and_keeps_serving`] as the
+/// model-owned fixture (it is NOT a byte-fallback parity fixture — see
+/// [`MINICPM_DIR`], which is both byte-fallback AND pool-backed). Fetch with:
 /// `./target/release/mlxcel download mlx-community/gemma-3-1b-it-4bit`.
 const GEMMA_DIR: &str = "gemma-3-1b-it-4bit";
 
-/// Model alias for the Gemma byte-fallback parity test (single-node baseline
-/// started with `--alias <this>` so its `display_model_id()` matches the router-
-/// echoed `model`).
+/// Model alias for the model-owned rejection test (single-node baseline started
+/// with `--alias <this>` so its `display_model_id()` matches the router-echoed
+/// `model`).
 const GEMMA_MODEL_ALIAS: &str = "gemma-completions";
 
 /// MiniCPM-2B (llama-format export) checkpoint directory name (issue #398).
@@ -82,6 +83,11 @@ const MINICPM_DIR: &str = "minicpm-2b-4bit";
 /// completions-path and chat-path fixtures independent even though each test
 /// spawns its own isolated set of processes.
 const MINICPM_CHAT_MODEL_ALIAS: &str = "minicpm-chat";
+
+/// Model alias for the MiniCPM byte-fallback COMPLETIONS parity test (issues
+/// #387 / #708). Distinct from [`MINICPM_CHAT_MODEL_ALIAS`] so the
+/// completions-path and chat-path fixtures stay independent.
+const MINICPM_COMPLETIONS_MODEL_ALIAS: &str = "minicpm-completions";
 
 /// Expected concatenated SSE content from the router for the test prompt.
 ///
@@ -829,10 +835,12 @@ async fn disaggregated_router_completions_match_single_node() {
 
 /// Issue #387: `POST /v1/completions` through the disaggregated router must
 /// report `usage.completion_tokens` and `finish_reason` identical to single-node
-/// for a BYTE-FALLBACK tokenizer (Gemma), not just byte-level-BPE (Qwen).
+/// for a BYTE-FALLBACK tokenizer (MiniCPM-2B, llama-format export), not just
+/// byte-level-BPE (Qwen).
 ///
-/// Gemma's SentencePiece tokenizer emits multi-byte characters as `<0xXX>` byte
-/// sequences: several model tokens that surface as a single detokenized text
+/// The MiniCPM llama-format SentencePiece tokenizer has `byte_fallback = true`,
+/// so a multi-byte character (e.g. the `é` in "café") is emitted as `<0xXX>`
+/// byte pieces: several model tokens that surface as a single detokenized text
 /// piece. The previous router counted emitted pieces, which under-counted those
 /// tokens and could flip `finish_reason` between "length" and "stop". With the
 /// worker's authoritative token count carried over the wire
@@ -843,17 +851,25 @@ async fn disaggregated_router_completions_match_single_node() {
 /// (normalizing only the volatile `id` / `created`), and `usage.completion_tokens`
 /// plus `finish_reason` are asserted explicitly for a clear failure message.
 ///
+/// Retargeted from Gemma to MiniCPM-2B (issue #708): the original fixture used
+/// [`GEMMA_DIR`], but gemma3 is a model-owned paged family the disaggregated
+/// handoff cannot serve (the request crashed the prefill node), so the test was
+/// unrunnable. MiniCPM-2B is both byte-fallback AND pool-backed dense Llama, so
+/// it exercises the same authoritative-count path inside the handoff scope. See
+/// [`MINICPM_DIR`].
+///
 /// Gated like the other real-model tests: `#[ignore]` plus a checkpoint-presence
-/// guard that skips cleanly when the Gemma checkpoint is absent. Requires a
-/// byte-fallback checkpoint that also supports the pool-backed paged handoff.
+/// guard that skips cleanly when the MiniCPM checkpoint is absent.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "spawns four real mlxcel-server processes loading gemma-3-1b-it-4bit; run with --ignored"]
+#[ignore = "spawns four real mlxcel-server processes loading minicpm-2b-4bit; run with --ignored"]
 async fn disaggregated_router_completions_match_single_node_byte_fallback() {
-    let model_dir = repo_model_dir(GEMMA_DIR);
+    let model_dir = repo_model_dir(MINICPM_DIR);
     if !model_dir.exists() {
         eprintln!(
-            "Skipping {GEMMA_DIR}: model directory not found at {}.\n\
-             Fetch with: ./target/release/mlxcel download mlx-community/gemma-3-1b-it-4bit",
+            "Skipping {MINICPM_DIR}: model directory not found at {}.\n\
+             Fetch with: ./target/release/mlxcel download \
+             mlx-community/MiniCPM-2B-sft-4bit-llama-format-mlx (place it at \
+             models/{MINICPM_DIR})",
             model_dir.display()
         );
         return;
@@ -868,13 +884,13 @@ async fn disaggregated_router_completions_match_single_node_byte_fallback() {
     // sequence) into the greedy continuation so the count fix is exercised.
     let prompt = "Spell the French word for coffee. It is café. Repeat it:";
     let nonstream_body = serde_json::json!({
-        "model": GEMMA_MODEL_ALIAS,
+        "model": MINICPM_COMPLETIONS_MODEL_ALIAS,
         "prompt": prompt,
         "max_tokens": 16,
         "temperature": 0.0
     });
     let stream_body = serde_json::json!({
-        "model": GEMMA_MODEL_ALIAS,
+        "model": MINICPM_COMPLETIONS_MODEL_ALIAS,
         "prompt": prompt,
         "max_tokens": 16,
         "temperature": 0.0,
@@ -895,14 +911,14 @@ async fn disaggregated_router_completions_match_single_node_byte_fallback() {
             "--port",
             &http,
             "--alias",
-            GEMMA_MODEL_ALIAS,
+            MINICPM_COMPLETIONS_MODEL_ALIAS,
             "--no-warmup",
         ]);
         let deadline = Instant::now() + Duration::from_secs(240);
         let health_url = format!("http://127.0.0.1:{http}/health");
         assert!(
             wait_for_http_health(&health_url, deadline).await,
-            "single-node Gemma reference never became healthy at {health_url}"
+            "single-node MiniCPM reference never became healthy at {health_url}"
         );
         let completions_url = format!("http://127.0.0.1:{http}/v1/completions");
 
@@ -941,17 +957,17 @@ async fn disaggregated_router_completions_match_single_node_byte_fallback() {
         )
         // _single drops here, killing the reference server.
     };
-    eprintln!("single-node Gemma non-stream reference: {ref_nonstream}");
+    eprintln!("single-node MiniCPM non-stream reference: {ref_nonstream}");
     let ref_text = ref_nonstream["choices"][0]["text"].as_str().unwrap_or("");
     assert!(
         !ref_text.is_empty(),
-        "single-node Gemma reference produced empty completion text; parity check would be vacuous"
+        "single-node MiniCPM reference produced empty completion text; parity check would be vacuous"
     );
     // Guard the test's premise: the byte-fallback path is only exercised if the
     // greedy output actually contains a multi-byte character.
     assert!(
         !ref_text.is_ascii(),
-        "single-node Gemma output {ref_text:?} is pure ASCII; the byte-fallback \
+        "single-node MiniCPM output {ref_text:?} is pure ASCII; the byte-fallback \
          count path is not exercised. Adjust the prompt so the output contains a \
          multi-byte character."
     );
@@ -1057,7 +1073,7 @@ async fn disaggregated_router_completions_match_single_node_byte_fallback() {
             .await
             .expect("parse router non-stream completion JSON"),
     );
-    eprintln!("router Gemma non-stream: {router_ns}");
+    eprintln!("router MiniCPM non-stream: {router_ns}");
     assert_eq!(
         router_ns["usage"]["completion_tokens"], ref_nonstream["usage"]["completion_tokens"],
         "router usage.completion_tokens diverges from single-node for a byte-fallback tokenizer"
@@ -1068,7 +1084,7 @@ async fn disaggregated_router_completions_match_single_node_byte_fallback() {
     );
     assert_eq!(
         router_ns, ref_nonstream,
-        "router non-stream /v1/completions body is not byte-identical to single-node (Gemma)"
+        "router non-stream /v1/completions body is not byte-identical to single-node (MiniCPM)"
     );
 
     // Streaming parity: the usage chunk and finish chunk must match too.
@@ -1087,7 +1103,7 @@ async fn disaggregated_router_completions_match_single_node_byte_fallback() {
     let router_st_chunks = parse_completion_chunks(&router_st_body);
     assert_eq!(
         router_st_chunks, ref_stream_chunks,
-        "router stream /v1/completions chunks are not byte-identical to single-node (Gemma)"
+        "router stream /v1/completions chunks are not byte-identical to single-node (MiniCPM)"
     );
     eprintln!(
         "OK: router /v1/completions matches single-node for a byte-fallback tokenizer \
@@ -1410,6 +1426,168 @@ async fn disaggregated_router_chat_usage_matches_single_node_byte_fallback() {
     eprintln!(
         "OK: router /v1/chat/completions matches single-node usage for a byte-fallback \
          tokenizer (non-stream + stream)."
+    );
+}
+
+/// Issue #708: a `POST /v1/completions` for a MODEL-OWNED paged family (gemma3)
+/// through the 3-node disaggregated stack must fail with a CLEAN per-request
+/// error, and the prefill node must KEEP SERVING afterward — it must not crash
+/// the serving-role loop and take the node down (which would surface as a 503
+/// peer-down on every subsequent request).
+///
+/// Before the fix, `extract_paged_blocks` read the model-owned shadow block
+/// table's unwritten pool tensors (`PagedBlockPool::read_block_contents: layer 0
+/// has no pool tensors to read from`), the error propagated out of the prefill
+/// serving-role loop, the loop exited, the router health monitor marked the peer
+/// down, and every later request returned 503. After the fix the prefill node
+/// rejects the request up front (a node-level `handoff_supported` check) with a
+/// per-request error frame and stays alive.
+///
+/// The availability assertion: one model is served per node, so a follow-up
+/// request on a SUPPORTED model is impossible on the same stack. "Keeps serving"
+/// is therefore asserted by a SECOND identical request returning the SAME clean
+/// per-request error (an error status that is NOT 503 peer-down, with the
+/// model-owned rejection message in the body) rather than a wedged node.
+///
+/// Gated like the other real-model tests: `#[ignore]` plus a checkpoint-presence
+/// guard that skips cleanly when the Gemma checkpoint is absent.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "spawns three real mlxcel-server processes loading gemma-3-1b-it-4bit; run with --ignored"]
+async fn disaggregated_router_rejects_model_owned_family_and_keeps_serving() {
+    let model_dir = repo_model_dir(GEMMA_DIR);
+    if !model_dir.exists() {
+        eprintln!(
+            "Skipping {GEMMA_DIR}: model directory not found at {}.\n\
+             Fetch with: ./target/release/mlxcel download mlx-community/gemma-3-1b-it-4bit",
+            model_dir.display()
+        );
+        return;
+    }
+    let binary = repo_binary_path("mlxcel-server");
+    if !binary.exists() {
+        eprintln!("Skipping: mlxcel-server binary not found");
+        return;
+    }
+    let model_arg = model_dir.to_string_lossy().to_string();
+    let client = reqwest::Client::new();
+
+    // ---- Three-process disaggregated router run ----
+    let ports = reserve_ports(6);
+    let prefill_http = ports[0].to_string();
+    let decode_http = ports[1].to_string();
+    let router_http = ports[2].to_string();
+    let prefill_serving_addr = format!("127.0.0.1:{}", ports[3]);
+    let decode_serving_addr = format!("127.0.0.1:{}", ports[4]);
+    let router_serving_addr = format!("127.0.0.1:{}", ports[5]);
+
+    let _decode = spawn_decode(&model_arg, &decode_http, &decode_serving_addr);
+    let _prefill = spawn_prefill(
+        &model_arg,
+        &prefill_http,
+        &prefill_serving_addr,
+        &decode_serving_addr,
+    );
+    let _router = spawn_role_server(&[
+        "-m",
+        &model_arg,
+        "--host",
+        "127.0.0.1",
+        "--port",
+        &router_http,
+        "--node-role",
+        "router",
+        "--serving-bind",
+        &router_serving_addr,
+        "--prefill-peers",
+        &prefill_serving_addr,
+        "--decode-peers",
+        &decode_serving_addr,
+        "--no-warmup",
+    ]);
+
+    let deadline = Instant::now() + Duration::from_secs(240);
+    assert!(
+        wait_for_tcp(&decode_serving_addr, deadline).await,
+        "decode node serving transport never came up"
+    );
+    assert!(
+        wait_for_tcp(&prefill_serving_addr, deadline).await,
+        "prefill node serving transport never came up"
+    );
+    let health_url = format!("http://127.0.0.1:{router_http}/health");
+    assert!(
+        wait_for_http_health(&health_url, deadline).await,
+        "router HTTP /health never returned 200"
+    );
+    let completions_url = format!("http://127.0.0.1:{router_http}/v1/completions");
+    let body = serde_json::json!({
+        "model": GEMMA_MODEL_ALIAS,
+        "prompt": "The capital of France is",
+        "max_tokens": 8,
+        "temperature": 0.0
+    });
+
+    // ---- Request #1: a clean per-request error (not a hang, not success) ----
+    let resp1 = client
+        .post(&completions_url)
+        .json(&body)
+        .send()
+        .await
+        .expect("POST router /v1/completions (#1)");
+    let status1 = resp1.status();
+    let body1 = resp1.text().await.unwrap_or_default();
+    eprintln!("model-owned request #1 -> HTTP {status1}: {body1}");
+    assert!(
+        status1.is_client_error() || status1.is_server_error(),
+        "model-owned request should return a clean 4xx/5xx error, got HTTP {status1}"
+    );
+    assert_ne!(
+        status1,
+        reqwest::StatusCode::SERVICE_UNAVAILABLE,
+        "first model-owned request returned 503 (peer-down); the prefill node should reject \
+         per-request, not be marked down"
+    );
+    assert!(
+        body1.contains("model-owned") || body1.contains("handoff"),
+        "error body should explain the model-owned handoff rejection, got: {body1}"
+    );
+
+    // Give a hypothetically-crashed node time to be marked down by the router's
+    // health monitor, so request #2 is a genuine "is the node still serving?"
+    // probe (mirrors the failover test's post-kill settle delay).
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    // ---- Request #2: proves the prefill node kept serving ----
+    // A crashed node would be marked down by now, wedging this into a 503
+    // peer-down (or a transport error) with no model-owned rejection body. A
+    // live node returns the SAME clean per-request rejection.
+    let resp2 = client
+        .post(&completions_url)
+        .json(&body)
+        .send()
+        .await
+        .expect("POST router /v1/completions (#2)");
+    let status2 = resp2.status();
+    let body2 = resp2.text().await.unwrap_or_default();
+    eprintln!("model-owned request #2 -> HTTP {status2}: {body2}");
+    assert_ne!(
+        status2,
+        reqwest::StatusCode::SERVICE_UNAVAILABLE,
+        "second model-owned request returned 503 (peer-down): the prefill node did not keep \
+         serving after the first rejected request (issue #708 regression)"
+    );
+    assert!(
+        body2.contains("model-owned") || body2.contains("handoff"),
+        "second request must carry the same clean model-owned rejection, proving the node is \
+         still serving; got HTTP {status2}: {body2}"
+    );
+    assert_eq!(
+        status1, status2,
+        "the prefill node must reject both requests identically; got {status1} then {status2}"
+    );
+    eprintln!(
+        "OK: model-owned family rejected per-request with a clean error and the prefill node \
+         kept serving (no 503 peer-down)."
     );
 }
 

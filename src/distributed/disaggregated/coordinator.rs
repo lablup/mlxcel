@@ -381,6 +381,23 @@ impl ServingCoordinator {
         &self,
         scheduler: &mut BatchScheduler,
     ) -> Result<()> {
+        // The whole node serves one model, so its handoff eligibility is fixed:
+        // model-owned paged families (gemma3 / gemma4 / llama4 / qwen3_5 /
+        // qwen3_next) cannot be handed off over the pool-block transport (#125),
+        // and attempting it used to read unwritten pool tensors and crash this
+        // loop, taking the node down for every subsequent request (#708). Check it
+        // once here and reject each such request cheaply below with a clean
+        // per-request error, rather than doing (and discarding) prefill work.
+        let handoff_supported = scheduler.handoff_supported();
+        if !handoff_supported {
+            tracing::warn!(
+                "prefill role: this model uses a model-owned paged sequence-state backend, \
+                 which the disaggregated pool-block KV handoff does not support (#708). Every \
+                 prefill request to this node is rejected with a clean per-request error and \
+                 the node keeps serving; deploy a pool-backed dense Fp16 family (qwen3 / \
+                 llama3) for disaggregated prefill."
+            );
+        }
         loop {
             let message = match self.transport.recv().await {
                 Ok((from, message)) => {
@@ -409,16 +426,85 @@ impl ServingCoordinator {
             let request = PrefillRequestFrame::decode(&payload)
                 .context("prefill role: decode prefill request frame")?;
 
+            // Node-level rejection for a model-owned paged family (#708): return a
+            // clean per-request error frame and keep serving, rather than driving a
+            // prefill whose extracted KV cannot be pool-transferred. The router
+            // renders this error as a chat/completions failure to the client.
+            if !handoff_supported {
+                let err_result = ResultFrame {
+                    request_id: request.request_id,
+                    phase: ResultPhase::FirstToken,
+                    tokens: Vec::new(),
+                    start_sequence: 0,
+                    done: true,
+                    error: Some(
+                        "the disaggregated handoff does not support this model's model-owned \
+                         paged sequence-state backend; only pool-backed dense Fp16 families \
+                         (qwen3 / llama3) can be handed off (issue #708)"
+                            .to_string(),
+                    ),
+                    generated_tokens: None,
+                };
+                if let Err(e) = self
+                    .transport
+                    .send(&request.reply_to, err_result.encode()?)
+                    .await
+                {
+                    tracing::warn!(
+                        request_id = request.request_id,
+                        reply_to = %request.reply_to,
+                        "prefill role: failed to return the model-owned rejection: {e}; \
+                         dropping request"
+                    );
+                }
+                continue;
+            }
+
             // Drive the standard full-prefill + extract entry, capturing the
             // first token on a local channel so it can be returned over the wire.
             let (token_tx, token_rx) = mpsc::channel();
-            let frame = scheduler.prefill_text_request_for_handoff(
+            let frame = match scheduler.prefill_text_request_for_handoff(
                 request.prompt_tokens,
                 sampling_from_serializable(&request.sampling),
                 request.max_tokens as usize,
                 token_tx,
                 Arc::new(AtomicBool::new(false)),
-            )?;
+            ) {
+                Ok(frame) => frame,
+                // A per-request prefill/extract failure must not tear down the
+                // serving loop that serves everyone (#708). Return a clean error
+                // frame for this request and keep serving; loop exit is reserved
+                // for the transport-level/fatal condition on the recv() arm above.
+                Err(e) => {
+                    tracing::warn!(
+                        request_id = request.request_id,
+                        reply_to = %request.reply_to,
+                        "prefill role: prefill/extract failed: {e:#}; failing the request"
+                    );
+                    let err_result = ResultFrame {
+                        request_id: request.request_id,
+                        phase: ResultPhase::FirstToken,
+                        tokens: Vec::new(),
+                        start_sequence: 0,
+                        done: true,
+                        error: Some(format!("prefill failed: {e}")),
+                        generated_tokens: None,
+                    };
+                    if let Err(send_err) = self
+                        .transport
+                        .send(&request.reply_to, err_result.encode()?)
+                        .await
+                    {
+                        tracing::warn!(
+                            request_id = request.request_id,
+                            reply_to = %request.reply_to,
+                            "prefill role: failed to return the prefill error: {send_err}; \
+                             dropping request"
+                        );
+                    }
+                    continue;
+                }
+            };
             let drained = drain_generation_events(&token_rx);
 
             // The prefill node's authoritative count of model tokens it

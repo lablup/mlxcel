@@ -6278,8 +6278,13 @@ impl CachePool {
     /// decode node remaps these to fresh ids in
     /// [`Self::restore_paged_state_with_contents`].
     ///
-    /// Returns an empty vector for dense / model-owned sequences, for a paged
-    /// sequence with no block table, or when no paged pool exists.
+    /// Returns an empty vector for dense sequences, for a model-owned paged
+    /// sequence with dense placeholder caches, for a paged sequence with no
+    /// block table, or when no paged pool exists. Returns a clean error for a
+    /// model-owned paged sequence with a POPULATED shadow block table (empty
+    /// pool-backed caches): its KV lives model-internal, so there is nothing
+    /// pool-paged to extract and reading the shadow block ids would hit unwritten
+    /// pool tensors (issue #708).
     pub fn extract_paged_blocks(&self, id: SequenceId) -> Result<Vec<PagedBlockContents>, String> {
         let sequence = self
             .active
@@ -6289,11 +6294,38 @@ impl CachePool {
             return Ok(Vec::new());
         }
         // Only POOL-BACKED (Fp16 paged) sequences keep their K/V in the shared
-        // pool. A model-owned paged sequence (gemma3 / llama4 / qwen3_5) holds
-        // dense placeholder caches and keeps its KV model-internal, with the pool
-        // tracking a shadow block table only, so there is nothing pool-paged to
-        // transfer. `caches.is_empty()` (a paged-natural stub) is vacuously
-        // pool-backed and falls through to the empty block-table fast path below.
+        // pool. Their per-layer caches are the `KVCache::new_paged` handles that
+        // route `update_and_fetch` into the pool, so a pool-backed sequence has
+        // one non-empty cache per layer and every one reports `is_paged_backed()`.
+        //
+        // A model-owned paged family (gemma3 / gemma4 / llama4 / qwen3_5 /
+        // qwen3_next) keeps its KV model-internal and is routed through the paged
+        // backend for SHADOW block-table accounting only: `make_caches()` returns
+        // an EMPTY vec while `sync_paged_state_with_lengths` populates each layer's
+        // `block_ids`. Empty `caches` therefore means no cache ever wrote to the
+        // pool, so those shadow `block_ids` reference rows the pool never filled and
+        // `read_block_contents` would fail with "layer N has no pool tensors to read
+        // from". Detect this explicitly rather than letting the vacuous `.all()`
+        // (true for an empty iterator) fall through into a doomed pool read that
+        // used to crash the prefill serving loop (issue #708).
+        if sequence.caches.is_empty() {
+            // A populated shadow block table with no pool-backed caches is the
+            // model-owned handoff case: return a clean error the prefill node can
+            // surface as a per-request failure. An empty shadow table is a fresh
+            // paged sequence with nothing to transfer, so take the empty fast path.
+            // Either way, never issue a pool read for unwritten tensors.
+            let has_shadow_blocks = sequence
+                .paged_state()
+                .is_some_and(|state| state.layers.iter().any(|layer| !layer.block_ids.is_empty()));
+            if has_shadow_blocks {
+                return Err(format!(
+                    "CachePool::extract_paged_blocks: sequence {id} uses a model-owned paged \
+                     backend (shadow block table, no pool-backed caches); its KV lives \
+                     model-internal and cannot be extracted for a pool-block handoff"
+                ));
+            }
+            return Ok(Vec::new());
+        }
         if !sequence.caches.iter().all(|cache| cache.is_paged_backed()) {
             return Ok(Vec::new());
         }
@@ -7351,6 +7383,44 @@ mod tests {
         }
     }
 
+    /// Model-owned family whose `make_caches()` returns an EMPTY vec, mirroring
+    /// the REAL gemma3 / gemma4 / llama4 / qwen3_5 / qwen3_next shape (unlike
+    /// [`ShadowDenseModel`], which keeps NON-empty dense placeholder caches).
+    /// Allocated with a paged layout override and synced via
+    /// `sync_paged_state_with_lengths`, it reproduces the #708 shape:
+    /// `backend == PagedKvCache`, empty pool-backed caches, and a populated
+    /// SHADOW block table whose pool tensors were never written.
+    struct ModelOwnedEmptyModel {
+        num_layers: usize,
+    }
+
+    impl crate::generate::LanguageModel for ModelOwnedEmptyModel {
+        fn forward(
+            &self,
+            _input_ids: &MlxArray,
+            _caches: &mut [KVCache],
+            _mask: Option<&MlxArray>,
+        ) -> UniquePtr<MlxArray> {
+            ffi::zeros(&[1], 0)
+        }
+
+        fn make_caches(&self) -> Vec<KVCache> {
+            Vec::new()
+        }
+
+        fn num_layers(&self) -> usize {
+            self.num_layers
+        }
+
+        fn eos_token_ids(&self) -> Vec<i32> {
+            vec![0]
+        }
+
+        fn sequence_state_layout(&self) -> SequenceStateLayout {
+            SequenceStateLayout::model_owned(self.num_layers)
+        }
+    }
+
     #[test]
     fn cache_pool_allocate_and_release() {
         let model = StubModel { num_layers: 4 };
@@ -7787,6 +7857,71 @@ mod tests {
                 a.layer_idx
             );
         }
+    }
+
+    #[test]
+    fn extract_paged_blocks_rejects_model_owned_shadow_sequence() {
+        // #708 regression. A model-owned paged family (gemma3 and friends) is
+        // routed through the paged backend for SHADOW block-table accounting, so
+        // `extract_paged_blocks` sees a PagedKvCache sequence with a POPULATED
+        // block table but EMPTY pool-backed caches (its `make_caches()` returns
+        // `Vec::new()`). The pool tensors behind those shadow block ids were never
+        // written, so a pool read fails with "layer 0 has no pool tensors to read
+        // from" and used to propagate out of the prefill serving loop and kill the
+        // node. The guard must reject cleanly, never issue that pool read.
+        let num_layers = 2usize;
+        let block_size = 4usize;
+        let layout = PagedKvLayout::uniform(num_layers, block_size, block_size * 8).unwrap();
+        let model = ModelOwnedEmptyModel { num_layers };
+
+        let mut pool = CachePool::new(4);
+        let id = pool
+            .allocate_with_layout(&model, Some(SequenceStateLayout::paged_kv_cache(layout)))
+            .unwrap();
+
+        // The sequence is paged-backed for accounting, but its `make_caches()` is
+        // empty (the model-owned shape), so no pool-backed cache exists.
+        assert!(
+            pool.get_caches_mut(id).unwrap().is_empty(),
+            "model-owned family must allocate with empty pool-backed caches"
+        );
+
+        // Populate the shadow block table exactly as the scheduler does for a
+        // model-owned family (`sync_paged_state_with_lengths`), leaving the pool
+        // tensors unwritten.
+        pool.sync_paged_state_with_lengths(id, &[6, 6]).unwrap();
+        // Sanity-check the premise: the shadow block table is genuinely populated,
+        // otherwise the test would pass vacuously on the buggy code too.
+        let has_blocks = pool
+            .get_paged_state(id)
+            .unwrap()
+            .layers
+            .iter()
+            .any(|layer| !layer.block_ids.is_empty());
+        assert!(
+            has_blocks,
+            "shadow block table must be populated to reproduce #708"
+        );
+
+        // `PagedBlockContents` is not `Debug`, so match rather than `expect_err`.
+        let err = match pool.extract_paged_blocks(id) {
+            Ok(blocks) => panic!(
+                "extract_paged_blocks must reject a model-owned shadow sequence, not read the \
+                 pool (returned {} blocks)",
+                blocks.len()
+            ),
+            Err(e) => e,
+        };
+        assert!(
+            err.contains("model-owned paged backend"),
+            "expected a clean model-owned rejection, got: {err}"
+        );
+        // The failure must be the clean model-owned rejection, NOT the raw
+        // pool-read error that signalled the #708 crash.
+        assert!(
+            !err.contains("no pool tensors to read from"),
+            "extract_paged_blocks fell through to the doomed pool read: {err}"
+        );
     }
 
     #[test]
