@@ -3412,14 +3412,17 @@ fn resolve_dispatch_decision(
 
 /// The backend the fused kernel would run on, cached for the decode hot path.
 ///
-/// The fused kernel is Metal-only; on Apple Silicon (`target_os = "macos"`) it
-/// is a candidate, everywhere else the selector must pick gather. Detection is
-/// process-static, so it is read once.
+/// The fused kernel is a Metal JIT kernel, so it is a candidate only when Metal
+/// is available at runtime ([`crate::metal_is_available`], the same gate the
+/// model dispatch paths use). This correctly falls to gather for a non-Metal
+/// build (CUDA/CPU), a macOS build without the `metal` feature, and a machine
+/// with no usable Metal device, none of which a compile-time `target_os` check
+/// would catch. Detection is process-static, so it is read once.
 fn paged_decode_backend() -> PagedDecodeBackend {
     use std::sync::OnceLock;
     static BACKEND: OnceLock<PagedDecodeBackend> = OnceLock::new();
     *BACKEND.get_or_init(|| {
-        if cfg!(target_os = "macos") {
+        if crate::metal_is_available() {
             PagedDecodeBackend::Metal
         } else {
             PagedDecodeBackend::Other
