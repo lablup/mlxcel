@@ -803,7 +803,7 @@ async fn stream_chat_completion(
                         }
 
                         // Preserve token-position alignment for parallel tool
-                        // calls (upstream mlx-lm PR #1170, commit aa4f880). When
+                        // calls (upstream ml-explore/mlx-lm#1170, commit aa4f880). When
                         // the stream filter consumed a control-token delimiter
                         // (e.g. `<tool_call>`) it drained those bytes without
                         // producing output; with logprobs enabled, downstream
