@@ -25,7 +25,7 @@ use crate::ffi;
 use crate::ffi::MlxArray;
 use cxx::UniquePtr;
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 pub use crate::cache::{ChunkedKVCache, KVCache, KVCacheMode, RotatingKVCache};
 
@@ -3260,38 +3260,292 @@ pub fn paged_decode_attention_pooled_fallback(
     Ok(result)
 }
 
-/// Process-wide env override for the fused paged-attention kernel (#123).
+/// Where the pooled paged-attention decode should run for a given shape.
 ///
-/// `MLXCEL_PAGED_ATTENTION_NATIVE=1` (or `true` / `on` / `yes`) force-enables
-/// the native kernel regardless of the per-config `use_native_paged_kernel`
-/// flag, so operators can A/B the kernel without rebuilding. Read once and
-/// cached so the decode hot path never touches the environment.
-fn native_paged_kernel_env() -> bool {
+/// `Native` dispatches the fused Metal kernel
+/// ([`crate::cache::PagedBlockPool::paged_decode_fused`], ADR 0001 strategy B);
+/// `Gather` uses the gather-then-SDPA reference
+/// ([`paged_decode_attention_pooled_fallback`], strategy A). The two paths agree
+/// within RMS < 5e-3, so the choice is a pure performance switch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PagedDecodeDispatch {
+    /// Fused native kernel (strategy B).
+    Native,
+    /// Gather-then-SDPA reference (strategy A).
+    Gather,
+}
+
+/// Compute backend the pooled decode runs on. The fused kernel is a Metal JIT
+/// kernel and ADR 0001's regime table was measured on Apple Silicon Metal, so
+/// only [`PagedDecodeBackend::Metal`] is ever a native candidate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PagedDecodeBackend {
+    /// Apple Silicon Metal (the fused kernel's home).
+    Metal,
+    /// Anything else (CUDA/CPU): no fused-kernel evidence, always gather.
+    Other,
+}
+
+// ── Adaptive native-kernel selector thresholds (issue #331) ──────────────────
+//
+// All three cite docs/adr/0001-paged-attention-gather-vs-fused-kernel.md,
+// "Phase 6 outcome (#123)" (the fused-vs-gather speedup table) and the
+// "Chunked slab storage interaction (#235)" addendum.
+
+/// Minimum batch size for a native dispatch. ADR 0001 Phase 6: the fused kernel
+/// wins only once decode is batched (`b>=4` is `1.30x` at ctx 4096), and loses
+/// at `b=1` (`0.50x`).
+const NATIVE_MIN_BATCH: usize = 4;
+
+/// Maximum visible context for a native dispatch. ADR 0001 Phase 6: the fused
+/// kernel wins at ctx 4096 but loses across every batch size at ctx 16384
+/// (`0.83x`–`0.91x`). 4096 is the largest context with measured evidence of a
+/// win, so the selector stops there rather than extrapolating into the losing
+/// 16384 regime.
+const NATIVE_MAX_VISIBLE_LEN: usize = 4096;
+
+/// Maximum slab count for a native dispatch. ADR 0001 "#235": the fused kernel
+/// reads one contiguous pool buffer per side, so
+/// [`crate::cache::PagedBlockPool::paged_decode_fused`] declines any layer that
+/// has grown past a single slab. Selecting native above this would always fall
+/// back to gather; the selector short-circuits it instead.
+const NATIVE_MAX_SLABS: usize = 1;
+
+/// Pure regime selector for the pooled paged-attention decode (issue #331).
+///
+/// Returns [`PagedDecodeDispatch::Native`] only inside the island where ADR 0001
+/// Phase 6 measured the fused kernel winning: Apple Silicon Metal, batched
+/// decode (`batch_size >= `[`NATIVE_MIN_BATCH`]`), moderate context
+/// (`visible_len <= `[`NATIVE_MAX_VISIBLE_LEN`]`), and a single-slab layer the
+/// kernel will not decline (`slab_count <= `[`NATIVE_MAX_SLABS`]`). Everything
+/// else, including the `b=1` long-context regime the ADR named as a loss, routes
+/// to [`PagedDecodeDispatch::Gather`].
+///
+/// Pure and allocation-free (a handful of integer comparisons) so it is cheap
+/// to memoize on the decode hot path and trivially unit-testable without MLX.
+#[must_use]
+pub fn select_pooled_paged_dispatch(
+    batch_size: usize,
+    visible_len: usize,
+    slab_count: usize,
+    backend: PagedDecodeBackend,
+) -> PagedDecodeDispatch {
+    let native = backend == PagedDecodeBackend::Metal
+        && slab_count <= NATIVE_MAX_SLABS
+        && batch_size >= NATIVE_MIN_BATCH
+        && visible_len <= NATIVE_MAX_VISIBLE_LEN;
+    if native {
+        PagedDecodeDispatch::Native
+    } else {
+        PagedDecodeDispatch::Gather
+    }
+}
+
+/// Process-wide `MLXCEL_PAGED_ATTENTION_NATIVE` override for the fused
+/// paged-attention kernel (#123, extended to tri-state in #331).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NativePagedOverride {
+    /// Force the fused kernel, bypassing the adaptive selector (the original
+    /// #123 force-on semantics, preserved exactly).
+    ForceNative,
+    /// Force the gather fallback, bypassing the adaptive selector. The #331
+    /// escape hatch for operators who want to pin the pre-kernel behaviour.
+    ForceGather,
+    /// No override: the adaptive selector decides.
+    Auto,
+}
+
+/// Pure parse of a `MLXCEL_PAGED_ATTENTION_NATIVE` value into an override.
+///
+/// The force-on value set (`1` / `true` / `on` / `yes`, and their uppercase
+/// forms) is unchanged from #123, so an existing `MLXCEL_PAGED_ATTENTION_NATIVE=1`
+/// still force-enables the kernel regardless of the selector. #331 adds a
+/// symmetric force-off set (`0` / `false` / `off` / `no`) that pins the gather
+/// fallback. Any other value (or `None`) yields [`NativePagedOverride::Auto`],
+/// letting the selector govern dispatch.
+fn parse_native_paged_override(value: Option<&str>) -> NativePagedOverride {
+    match value.map(str::trim) {
+        Some("1" | "true" | "on" | "yes" | "TRUE" | "ON" | "YES") => {
+            NativePagedOverride::ForceNative
+        }
+        Some("0" | "false" | "off" | "no" | "FALSE" | "OFF" | "NO") => {
+            NativePagedOverride::ForceGather
+        }
+        _ => NativePagedOverride::Auto,
+    }
+}
+
+/// Read `MLXCEL_PAGED_ATTENTION_NATIVE` once and cache it so the decode hot path
+/// never touches the environment.
+fn native_paged_override() -> NativePagedOverride {
     use std::sync::OnceLock;
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        std::env::var("MLXCEL_PAGED_ATTENTION_NATIVE")
-            .map(|v| {
-                matches!(
-                    v.trim(),
-                    "1" | "true" | "on" | "yes" | "TRUE" | "ON" | "YES"
-                )
-            })
-            .unwrap_or(false)
+    static OVERRIDE: OnceLock<NativePagedOverride> = OnceLock::new();
+    *OVERRIDE.get_or_init(|| {
+        parse_native_paged_override(
+            std::env::var("MLXCEL_PAGED_ATTENTION_NATIVE")
+                .ok()
+                .as_deref(),
+        )
     })
 }
 
-/// Gated pooled paged decode attention (epic #116 Phase 6, #123).
+/// Pure combiner: apply the env override, otherwise the caller's willingness to
+/// run native, otherwise the (lazily computed) adaptive selector. Force cases
+/// never invoke `selector`, so the caller can skip deriving its inputs.
+fn resolve_dispatch_decision(
+    over: NativePagedOverride,
+    use_native_requested: bool,
+    selector: impl FnOnce() -> PagedDecodeDispatch,
+) -> PagedDecodeDispatch {
+    match over {
+        NativePagedOverride::ForceNative => PagedDecodeDispatch::Native,
+        NativePagedOverride::ForceGather => PagedDecodeDispatch::Gather,
+        NativePagedOverride::Auto => {
+            if use_native_requested {
+                selector()
+            } else {
+                PagedDecodeDispatch::Gather
+            }
+        }
+    }
+}
+
+/// The backend the fused kernel would run on, cached for the decode hot path.
 ///
-/// When the native kernel is enabled (the per-config `use_native_paged_kernel`
-/// flag or the `MLXCEL_PAGED_ATTENTION_NATIVE` env override), dispatches to the
-/// fused Metal kernel ([`crate::cache::PagedBlockPool::paged_decode_fused`]),
-/// which reads scattered pool blocks directly with no gather copy (ADR 0001
-/// strategy B). Otherwise, and whenever the kernel declines (the layer's pool
-/// tensors are not yet allocated, or no sequence has visible tokens), it falls
-/// back to [`paged_decode_attention_pooled_fallback`], the gather-then-SDPA
-/// reference. The two paths agree within RMS < 5e-3, so the gate is a pure
-/// performance switch with no behavioural change.
+/// The fused kernel is Metal-only; on Apple Silicon (`target_os = "macos"`) it
+/// is a candidate, everywhere else the selector must pick gather. Detection is
+/// process-static, so it is read once.
+fn paged_decode_backend() -> PagedDecodeBackend {
+    use std::sync::OnceLock;
+    static BACKEND: OnceLock<PagedDecodeBackend> = OnceLock::new();
+    *BACKEND.get_or_init(|| {
+        if cfg!(target_os = "macos") {
+            PagedDecodeBackend::Metal
+        } else {
+            PagedDecodeBackend::Other
+        }
+    })
+}
+
+/// Cheap per-shape memoization of the pooled-decode dispatch decision (#331,
+/// acceptance criterion 3).
+///
+/// Within a decode step every layer shares the same `(batch_size, visible_len,
+/// slab_count, backend)` key, so the pure selector is recomputed at most once
+/// per distinct shape and every subsequent layer takes the cached decision via
+/// a single relaxed atomic load + compare. This is the "last-key cell" the issue
+/// asks for, not a per-token locking map: the packed key and decision live in
+/// two `AtomicU64`s and the selector is only re-run when the key changes.
+struct PagedDispatchCache {
+    key: AtomicU64,
+    decision: AtomicU64,
+}
+
+/// Sentinel key that never collides with a real packed key (real keys pack
+/// three `u16`-bounded fields into the low 48 bits; see [`PagedDispatchCache::pack_key`]).
+const PAGED_DISPATCH_CACHE_EMPTY: u64 = u64::MAX;
+
+impl PagedDispatchCache {
+    const fn new() -> Self {
+        Self {
+            key: AtomicU64::new(PAGED_DISPATCH_CACHE_EMPTY),
+            decision: AtomicU64::new(0),
+        }
+    }
+
+    /// Pack the selector inputs into a single `u64` key. Each field is saturated
+    /// to `u16::MAX` first: the exact large value does not change the decision
+    /// (both `visible_len` and `slab_count` are far past every native threshold
+    /// once they exceed `u16::MAX`), and saturating keeps the packing lossless
+    /// for every value that could flip the outcome.
+    fn pack_key(
+        batch_size: usize,
+        visible_len: usize,
+        slab_count: usize,
+        backend: PagedDecodeBackend,
+    ) -> u64 {
+        let b = batch_size.min(u16::MAX as usize) as u64;
+        let v = visible_len.min(u16::MAX as usize) as u64;
+        let s = slab_count.min(u16::MAX as usize) as u64;
+        let k = match backend {
+            PagedDecodeBackend::Metal => 0u64,
+            PagedDecodeBackend::Other => 1u64,
+        };
+        b | (v << 16) | (s << 32) | (k << 48)
+    }
+
+    fn select(
+        &self,
+        batch_size: usize,
+        visible_len: usize,
+        slab_count: usize,
+        backend: PagedDecodeBackend,
+    ) -> PagedDecodeDispatch {
+        let key = Self::pack_key(batch_size, visible_len, slab_count, backend);
+        if self.key.load(Ordering::Relaxed) == key {
+            return match self.decision.load(Ordering::Relaxed) {
+                0 => PagedDecodeDispatch::Gather,
+                _ => PagedDecodeDispatch::Native,
+            };
+        }
+        let decision = select_pooled_paged_dispatch(batch_size, visible_len, slab_count, backend);
+        // Store decision before key: a racing reader that sees the new key then
+        // reads the freshly stored decision, and the selector is pure so a stale
+        // decision paired with a matching key would still be correct anyway.
+        self.decision.store(
+            match decision {
+                PagedDecodeDispatch::Gather => 0,
+                PagedDecodeDispatch::Native => 1,
+            },
+            Ordering::Relaxed,
+        );
+        self.key.store(key, Ordering::Relaxed);
+        decision
+    }
+}
+
+static PAGED_DISPATCH_CACHE: PagedDispatchCache = PagedDispatchCache::new();
+
+/// Resolve the dispatch for `paged_decode_attention_pooled`: honour the env
+/// override first, otherwise run the memoized adaptive selector over the shape
+/// derived from `pool`/`states`.
+fn resolve_pooled_paged_dispatch(
+    pool: &crate::cache::PagedBlockPool,
+    states: &[&crate::cache::PagedSequenceState],
+    layer_idx: usize,
+    use_native_requested: bool,
+) -> PagedDecodeDispatch {
+    resolve_dispatch_decision(native_paged_override(), use_native_requested, || {
+        let batch_size = states.len();
+        let visible_len = states
+            .iter()
+            .map(|s| s.layer(layer_idx).map_or(0, |l| l.visible_len()))
+            .max()
+            .unwrap_or(0);
+        let slab_count = pool.slab_count(layer_idx);
+        PAGED_DISPATCH_CACHE.select(batch_size, visible_len, slab_count, paged_decode_backend())
+    })
+}
+
+/// Adaptive pooled paged decode attention (epic #116 Phase 6, #123; adaptive
+/// selector #331).
+///
+/// The per-config `use_native_paged_kernel` flag marks the caller as *willing*
+/// to run the fused Metal kernel
+/// ([`crate::cache::PagedBlockPool::paged_decode_fused`], ADR 0001 strategy B).
+/// The actual dispatch is then decided by [`select_pooled_paged_dispatch`],
+/// which only picks the kernel inside the regime ADR 0001 Phase 6 measured it
+/// winning (Metal, `batch >= 4`, `visible_len <= 4096`, single-slab layer) and
+/// otherwise uses [`paged_decode_attention_pooled_fallback`], the
+/// gather-then-SDPA reference (strategy A). This keeps the long-context and
+/// `b=1` regimes on gather, where the ADR shows the kernel loses.
+///
+/// `MLXCEL_PAGED_ATTENTION_NATIVE` overrides the selector both ways: the
+/// original force-on values (`1`/`true`/`on`/`yes`) still pin the kernel, and
+/// #331 adds force-off values (`0`/`false`/`off`/`no`) that pin gather. Whenever
+/// native is chosen but the kernel declines (pool tensors not yet allocated, no
+/// visible tokens, or a multi-slab layer), it falls back to gather, so the two
+/// paths stay interchangeable (RMS < 5e-3).
 pub fn paged_decode_attention_pooled(
     q: &MlxArray,
     pool: &crate::cache::PagedBlockPool,
@@ -3300,7 +3554,8 @@ pub fn paged_decode_attention_pooled(
     scale: f32,
     use_native_paged_kernel: bool,
 ) -> Result<UniquePtr<MlxArray>, String> {
-    if (use_native_paged_kernel || native_paged_kernel_env())
+    if resolve_pooled_paged_dispatch(pool, states, layer_idx, use_native_paged_kernel)
+        == PagedDecodeDispatch::Native
         && let Some(out) = pool.paged_decode_fused(q, states, layer_idx, scale)?
     {
         return Ok(out);
@@ -4858,5 +5113,232 @@ mod tests {
                 "{v:?} should keep the fused QK-norm kernel off"
             );
         }
+    }
+
+    // ── Adaptive pooled paged-attention selector (issue #331) ────────────────
+    //
+    // Thresholds cite docs/adr/0001-paged-attention-gather-vs-fused-kernel.md
+    // Phase 6 (#123): the fused kernel wins at Metal / batch >= 4 / ctx 4096 /
+    // single-slab, and loses at b=1, ctx 16384, or a multi-slab layer.
+
+    use super::{
+        NativePagedOverride, PagedDecodeBackend, PagedDecodeDispatch, PagedDispatchCache,
+        parse_native_paged_override, resolve_dispatch_decision, select_pooled_paged_dispatch,
+    };
+
+    #[test]
+    fn selector_b1_long_context_is_gather() {
+        // ADR 0001 Phase 6: b=1 loses (0.50x at 4096, 0.39x at 16384). The
+        // single-sequence regime must never dispatch native (acceptance
+        // criterion 2: no B=1 long-context regression).
+        for &ctx in &[1usize, 1024, 4096, 16384, 32768] {
+            assert_eq!(
+                select_pooled_paged_dispatch(1, ctx, 1, PagedDecodeBackend::Metal),
+                PagedDecodeDispatch::Gather,
+                "b=1 ctx={ctx} must stay on gather"
+            );
+        }
+    }
+
+    #[test]
+    fn selector_batched_moderate_context_single_slab_is_native() {
+        // ADR 0001 Phase 6: the fused kernel wins at ctx 4096 for b>=4
+        // (1.30x/1.01x/1.36x at b=4/8/16), single-slab.
+        for &b in &[4usize, 8, 16] {
+            for &ctx in &[1usize, 512, 1024, 4096] {
+                assert_eq!(
+                    select_pooled_paged_dispatch(b, ctx, 1, PagedDecodeBackend::Metal),
+                    PagedDecodeDispatch::Native,
+                    "b={b} ctx={ctx} single-slab Metal must dispatch native"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn selector_batched_long_context_is_gather() {
+        // ADR 0001 Phase 6: at ctx 16384 the kernel loses for every batch size
+        // (0.83x/0.82x/0.91x), so context past 4096 stays on gather.
+        for &b in &[4usize, 8, 16] {
+            for &ctx in &[4097usize, 8192, 16384, 32768] {
+                assert_eq!(
+                    select_pooled_paged_dispatch(b, ctx, 1, PagedDecodeBackend::Metal),
+                    PagedDecodeDispatch::Gather,
+                    "b={b} ctx={ctx} must stay on gather past the 4096 cap"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn selector_multi_slab_is_gather() {
+        // ADR 0001 "#235": the fused kernel reads one contiguous buffer per side
+        // and declines multi-slab layers; the selector short-circuits them even
+        // in the otherwise-winning batched/4096 regime.
+        for &slabs in &[2usize, 3, 8] {
+            assert_eq!(
+                select_pooled_paged_dispatch(8, 4096, slabs, PagedDecodeBackend::Metal),
+                PagedDecodeDispatch::Gather,
+                "slab_count={slabs} must stay on gather"
+            );
+        }
+    }
+
+    #[test]
+    fn selector_non_metal_backend_is_gather() {
+        // The fused kernel is Metal-only; off Apple Silicon there is no evidence
+        // and no kernel, so every shape stays on gather.
+        for &b in &[1usize, 4, 8, 16] {
+            assert_eq!(
+                select_pooled_paged_dispatch(b, 4096, 1, PagedDecodeBackend::Other),
+                PagedDecodeDispatch::Gather,
+                "b={b} on a non-Metal backend must stay on gather"
+            );
+        }
+    }
+
+    #[test]
+    fn selector_batch_and_context_boundaries() {
+        // batch boundary: 3 -> gather, 4 -> native (NATIVE_MIN_BATCH).
+        assert_eq!(
+            select_pooled_paged_dispatch(3, 4096, 1, PagedDecodeBackend::Metal),
+            PagedDecodeDispatch::Gather
+        );
+        assert_eq!(
+            select_pooled_paged_dispatch(4, 4096, 1, PagedDecodeBackend::Metal),
+            PagedDecodeDispatch::Native
+        );
+        // context boundary: 4096 -> native, 4097 -> gather (NATIVE_MAX_VISIBLE_LEN).
+        assert_eq!(
+            select_pooled_paged_dispatch(4, 4096, 1, PagedDecodeBackend::Metal),
+            PagedDecodeDispatch::Native
+        );
+        assert_eq!(
+            select_pooled_paged_dispatch(4, 4097, 1, PagedDecodeBackend::Metal),
+            PagedDecodeDispatch::Gather
+        );
+        // slab boundary: 1 -> native, 2 -> gather (NATIVE_MAX_SLABS).
+        assert_eq!(
+            select_pooled_paged_dispatch(4, 4096, 1, PagedDecodeBackend::Metal),
+            PagedDecodeDispatch::Native
+        );
+        assert_eq!(
+            select_pooled_paged_dispatch(4, 4096, 2, PagedDecodeBackend::Metal),
+            PagedDecodeDispatch::Gather
+        );
+    }
+
+    #[test]
+    fn native_override_parses_force_on_off_and_auto() {
+        // Force-on set is preserved exactly from #123.
+        for v in ["1", "true", "on", "yes", "TRUE", "ON", "YES", " 1 "] {
+            assert_eq!(
+                parse_native_paged_override(Some(v)),
+                NativePagedOverride::ForceNative,
+                "{v:?} must force native"
+            );
+        }
+        // #331 force-off set.
+        for v in ["0", "false", "off", "no", "FALSE", "OFF", "NO", " 0 "] {
+            assert_eq!(
+                parse_native_paged_override(Some(v)),
+                NativePagedOverride::ForceGather,
+                "{v:?} must force gather"
+            );
+        }
+        // Unset or unrecognised -> selector decides.
+        for v in [None, Some(""), Some("maybe"), Some("2")] {
+            assert_eq!(
+                parse_native_paged_override(v),
+                NativePagedOverride::Auto,
+                "{v:?} must defer to the selector"
+            );
+        }
+    }
+
+    #[test]
+    fn override_pins_dispatch_both_ways_bypassing_selector() {
+        use std::cell::Cell;
+
+        // Force-native pins Native even when the selector would pick Gather, and
+        // the selector closure is never invoked.
+        let called = Cell::new(false);
+        let out = resolve_dispatch_decision(NativePagedOverride::ForceNative, true, || {
+            called.set(true);
+            PagedDecodeDispatch::Gather
+        });
+        assert_eq!(out, PagedDecodeDispatch::Native);
+        assert!(!called.get(), "force-native must not consult the selector");
+
+        // Force-gather pins Gather even when the selector would pick Native.
+        let called = Cell::new(false);
+        let out = resolve_dispatch_decision(NativePagedOverride::ForceGather, true, || {
+            called.set(true);
+            PagedDecodeDispatch::Native
+        });
+        assert_eq!(out, PagedDecodeDispatch::Gather);
+        assert!(!called.get(), "force-gather must not consult the selector");
+    }
+
+    #[test]
+    fn auto_defers_to_selector_and_respects_native_request() {
+        // Auto + caller willing -> whatever the selector returns.
+        assert_eq!(
+            resolve_dispatch_decision(NativePagedOverride::Auto, true, || {
+                PagedDecodeDispatch::Native
+            }),
+            PagedDecodeDispatch::Native
+        );
+        assert_eq!(
+            resolve_dispatch_decision(NativePagedOverride::Auto, true, || {
+                PagedDecodeDispatch::Gather
+            }),
+            PagedDecodeDispatch::Gather
+        );
+        // Auto + caller opted out of native -> gather, selector not consulted.
+        use std::cell::Cell;
+        let called = Cell::new(false);
+        let out = resolve_dispatch_decision(NativePagedOverride::Auto, false, || {
+            called.set(true);
+            PagedDecodeDispatch::Native
+        });
+        assert_eq!(out, PagedDecodeDispatch::Gather);
+        assert!(!called.get(), "opt-out must not consult the selector");
+    }
+
+    #[test]
+    fn dispatch_cache_returns_selector_decision_across_keys() {
+        // The last-key memo must agree with the pure selector for both a
+        // repeated key (cache hit) and a changed key (recompute), and must not
+        // let stale keys leak the wrong decision.
+        let cache = PagedDispatchCache::new();
+
+        // Miss then hit on a Gather shape (b=1).
+        assert_eq!(
+            cache.select(1, 4096, 1, PagedDecodeBackend::Metal),
+            PagedDecodeDispatch::Gather
+        );
+        assert_eq!(
+            cache.select(1, 4096, 1, PagedDecodeBackend::Metal),
+            PagedDecodeDispatch::Gather
+        );
+
+        // Key change flips to a Native shape (b=8).
+        assert_eq!(
+            cache.select(8, 4096, 1, PagedDecodeBackend::Metal),
+            PagedDecodeDispatch::Native
+        );
+        // Back to the Gather key recomputes correctly (no stale Native).
+        assert_eq!(
+            cache.select(1, 4096, 1, PagedDecodeBackend::Metal),
+            PagedDecodeDispatch::Gather
+        );
+
+        // Saturated fields (values past u16::MAX) never spuriously match a small
+        // key and stay on gather (well past every native threshold).
+        assert_eq!(
+            cache.select(1, 1 << 20, 9, PagedDecodeBackend::Metal),
+            PagedDecodeDispatch::Gather
+        );
     }
 }

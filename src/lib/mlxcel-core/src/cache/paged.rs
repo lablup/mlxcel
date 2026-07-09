@@ -1700,6 +1700,20 @@ impl PagedBlockPool {
         sum(&self.pool_k) + sum(&self.pool_v)
     }
 
+    /// Number of physical K slab tensors currently allocated for `layer_idx`
+    /// (0 before the layer's first write, then one per [`POOL_SLAB_BLOCKS`]-row
+    /// growth episode). The fused decode kernel reads one contiguous buffer per
+    /// side, so it can only run while this is `<= 1` (see
+    /// [`Self::paged_decode_fused`], which declines multi-slab layers). The
+    /// adaptive selector in `crate::layers` keys on this so it never dispatches
+    /// native for a layer the kernel would decline anyway.
+    ///
+    /// Used by: `crate::layers::paged_decode_attention_pooled` (adaptive
+    /// native-kernel selector, #331).
+    pub fn slab_count(&self, layer_idx: usize) -> usize {
+        self.pool_k.get(layer_idx).map(Vec::len).unwrap_or(0)
+    }
+
     /// Resolve the physical pool row for `block_id` on `layer_idx`, assigning
     /// one lazily on first write (reusing a freed row when available) and
     /// appending pool slabs if the new row exceeds capacity.

@@ -121,6 +121,34 @@ Phase 6 lands the kernel gated off. The native path is opt-in through the `MLXCE
 
 The pool later moved from one growable tensor per layer to a list of fixed-size slab tensors (32 blocks per slab), so growth appends a slab instead of reallocating and copying the whole layer. The fused kernel reads one contiguous pool buffer per side, so `paged_decode_fused` declines (returns `None`, the caller falls back to gather) on any layer that has grown past a single slab. Layers within their first slab keep the kernel available. Teaching the kernel per-slab base pointers is possible if the trade-off above ever flips; given the kernel is gated off by default and loses in the long-context regime, the decline is the accepted state. The gather path splits the block-row list into per-slab runs and concatenates the per-run `take` results, which keeps it byte-identical and within run noise of the single-tensor layout.
 
+## Adaptive native-kernel selector (#331)
+
+The `use_native_paged_kernel` request from the scheduler previously meant "attempt the fused kernel, fall back only when it declines". That let `paged_decode_attention_pooled` dispatch native in regimes the Phase 6 table shows it losing: at `b=1` a single-slab layer ran the kernel at ~0.9x of gather. #331 replaces the request-means-attempt behaviour with an adaptive selector, `select_pooled_paged_dispatch(batch_size, visible_len, slab_count, backend)` in `src/lib/mlxcel-core/src/layers.rs`, which dispatches the kernel only inside the island the Phase 6 table measured it winning and uses gather everywhere else.
+
+The selector is native only when all four hold: the backend is Apple Silicon Metal (the kernel is Metal-only and the tables here are Metal); `batch_size >= 4` (Phase 6: `b=1` loses at 0.50x/0.39x, `b>=4` wins at 4096); `visible_len <= 4096` (Phase 6: 4096 wins, 16384 loses across every batch size, so the selector stops at the last measured winning context rather than extrapolating into 16384); and `slab_count <= 1` (the #235 decline above, hoisted into the selector so it never dispatches native for a layer the kernel would decline anyway). The decision is memoized in a last-key atomic cell: every layer in a decode step shares the same `(batch, visible_len, slab_count, backend)` key, so the pure selector runs at most once per distinct shape and later layers take a single relaxed atomic load. The pure function is a handful of integer comparisons, so the memo is a formality that pins "no per-token recompute" rather than a measured hot-path saving.
+
+`MLXCEL_PAGED_ATTENTION_NATIVE` now overrides the selector both ways: the original force-on set (`1`/`true`/`on`/`yes` and uppercase) still pins the kernel, and #331 adds a symmetric force-off set (`0`/`false`/`off`/`no`) that pins gather. An unset or unrecognised value defers to the selector.
+
+The chunked-slab reality (#235) narrows where native is reachable. Slab count is a per-layer property across all sequences sharing the pool, so a batched layer spans `B * ceil(visible_len / block_size)` rows; at `block_size` 32 any `B>=4` layer past ~256 tokens already exceeds one 32-row slab and the kernel declines. The batched moderate-context win the Phase 6 table recorded on the pre-#235 single-tensor pool is therefore unreachable today without the deferred multi-slab kernel. The reachable remnant is short-context batched decode (single-slab, `B>=4`), where the kernel still wins.
+
+**Hardware:** Apple M1 Ultra (Mac Studio), 128 GB, macOS 26.5. `--release --features metal,accelerate`, 50 timed iterations after 20 warmup, f16 pool, head_dim 128, 32 q-heads, 8 kv-heads, block 32. From `examples/paged_attention_kernel_bench.rs`. Fused = raw `paged_decode_fused`; speedup > 1 means the kernel beats gather:
+
+| batch | visible_len | slabs | selector | gather_us | fused_us | speedup |
+|------:|------------:|------:|:---------|----------:|:---------|--------:|
+| 1 | 512 | 1 | gather | 355 | 386 | 0.92x |
+| 1 | 1024 | 1 | gather | 352 | 391 | 0.90x |
+| 1 | 4096 | 4 | gather | 577 | declined | — |
+| 1 | 16384 | 16 | gather | 1201 | declined | — |
+| 4 | 4096 | 16 | gather | 1355 | declined | — |
+| 8 | 4096 | 32 | gather | 3442 | declined | — |
+| 4 | 128 | 1 | native | 490 | 393 | 1.25x |
+| 4 | 256 | 1 | native | 521 | 433 | 1.20x |
+| 8 | 128 | 1 | native | 747 | 427 | 1.75x |
+
+The table confirms the two design claims: single-slab `b=1` runs the kernel at a ~0.9x loss (which the selector now avoids by choosing gather, a small win over the old request-means-attempt path), and the only reachable batched island (single-slab `B>=4`) runs it at 1.20x–1.75x, where the selector chooses native. Everything at 1k/4k/16k with `B>=4` is multi-slab and declines to gather, so the selector and the kernel agree.
+
+The multi-slab native-kernel spike stays out of scope. It is worth building only if live traces show sustained requests in the `B>=4`, ~4k, multi-slab regime; that evidence does not exist yet, so this ADR keeps the decline (#235) as the accepted state and the selector confines native to the single-slab island.
+
 ## References
 
 - Epic #116, unified KV cache.
@@ -128,4 +156,6 @@ The pool later moved from one growable tensor per layer to a list of fixed-size 
 - `examples/page_gather_microbench.rs`, the microbench backing this ADR.
 - `src/lib/mlx-cpp/turbo/sparse_v_sdpa.metal`, the fused-kernel model for strategy (B).
 - `src/lib/mlxcel-core/src/layers.rs`, `paged_decode_attention_dense_compat`, the current dense decode path.
+- `src/lib/mlxcel-core/src/layers.rs`, `select_pooled_paged_dispatch` and `paged_decode_attention_pooled`, the adaptive selector (#331).
 - `src/lib/mlxcel-core/src/cache/paged.rs`, `PagedBlockPool` and `PagedKvLayout`.
+- `examples/paged_attention_kernel_bench.rs`, the fused-vs-gather bench and selector cross-check (#123, #331).

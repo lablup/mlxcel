@@ -800,9 +800,15 @@ fn test_fused_paged_decode_gqa_and_batched() {
     let q = concatenate(&q0, &q1, 0);
 
     let states: [&PagedSequenceState; 2] = [&s0, &s1];
-    let fused =
-        crate::layers::paged_decode_attention_pooled(&q, &pool, &states, layer_idx, scale, true)
-            .unwrap();
+    // Call the raw fused kernel directly, not through
+    // `paged_decode_attention_pooled`: the adaptive selector (#331) routes B=2
+    // to gather (native needs B>=4), which would turn this fused-vs-gather
+    // parity check into a gather-vs-gather tautology. The layer is single-slab
+    // here (8 rows <= POOL_SLAB_BLOCKS), so the kernel must serve it.
+    let fused = pool
+        .paged_decode_fused(&q, &states, layer_idx, scale)
+        .unwrap()
+        .expect("single-slab layer: fused kernel must serve it");
     let gather =
         crate::layers::paged_decode_attention_pooled_fallback(&q, &pool, &states, layer_idx, scale)
             .unwrap();
