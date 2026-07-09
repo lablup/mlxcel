@@ -225,8 +225,12 @@ pub enum PagedBudgetDirective {
     Bytes(u64),
     /// Derive the cap from [`estimate_total_memory`]: the unified-memory
     /// headroom left for KV after weights, activation, and the allocator
-    /// safety factor (`--kv-cache-budget auto`).
+    /// safety factor (`--kv-cache-budget auto`). This is the server default.
     Auto,
+    /// Explicit opt-out: leave the paged KV pool unbounded. Spelled `none`,
+    /// `off`, `disabled`, `unbounded`, or `0` on the command line. Restores the
+    /// pre-default behaviour where no admission cap is installed.
+    Disabled,
 }
 
 impl std::str::FromStr for PagedBudgetDirective {
@@ -237,13 +241,27 @@ impl std::str::FromStr for PagedBudgetDirective {
         if trimmed.eq_ignore_ascii_case("auto") {
             return Ok(Self::Auto);
         }
+        // Explicit opt-out keywords leave the pool unbounded.
+        if matches!(
+            trimmed.to_ascii_lowercase().as_str(),
+            "none" | "off" | "disabled" | "unbounded"
+        ) {
+            return Ok(Self::Disabled);
+        }
         // A plain byte count. Human-readable suffixes (8GiB) are
         // intentionally not parsed, to stay consistent with the other
-        // byte-valued server knobs which all take raw bytes.
+        // byte-valued server knobs which all take raw bytes. A budget of `0`
+        // is meaningless as a cap, so it is treated as the explicit opt-out.
         trimmed
             .parse::<u64>()
-            .map(Self::Bytes)
-            .map_err(|_| format!("expected a byte count or 'auto', got '{s}'"))
+            .map(|bytes| {
+                if bytes == 0 {
+                    Self::Disabled
+                } else {
+                    Self::Bytes(bytes)
+                }
+            })
+            .map_err(|_| format!("expected a byte count, 'auto', or 'none', got '{s}'"))
     }
 }
 
@@ -855,6 +873,9 @@ pub fn resolve_paged_block_budget(
 ) -> Option<usize> {
     let per_block = paged_block_bytes(model_dir, num_layers, block_size, kv_dtype_int8)?;
     let budget_bytes = match directive {
+        // Explicit opt-out: no cap, leave the pool unbounded (mirrors the
+        // absent flag / the pre-default behaviour).
+        PagedBudgetDirective::Disabled => return None,
         PagedBudgetDirective::Bytes(bytes) => bytes,
         PagedBudgetDirective::Auto => {
             let est = estimate_total_memory(
@@ -1357,6 +1378,46 @@ mod tests {
         );
         assert!("8GiB".parse::<PagedBudgetDirective>().is_err());
         assert!("-5".parse::<PagedBudgetDirective>().is_err());
+    }
+
+    #[test]
+    fn paged_budget_directive_parses_disable_keywords() {
+        // #628: `none` / `off` / `disabled` / `unbounded` / `0` all mean the
+        // explicit opt-out (leave the pool unbounded).
+        for spelling in ["none", "NONE", "off", "disabled", "unbounded", " none "] {
+            assert_eq!(
+                spelling.parse::<PagedBudgetDirective>().unwrap(),
+                PagedBudgetDirective::Disabled,
+                "spelling {spelling:?} should disable the budget",
+            );
+        }
+        assert_eq!(
+            "0".parse::<PagedBudgetDirective>().unwrap(),
+            PagedBudgetDirective::Disabled,
+        );
+    }
+
+    #[test]
+    fn resolve_paged_block_budget_disabled_is_unbounded() {
+        // A `Disabled` directive resolves to no cap (None) regardless of model
+        // geometry, mirroring the absent flag.
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("config.json"),
+            br#"{"num_hidden_layers": 32, "hidden_size": 4096, "num_attention_heads": 32}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            resolve_paged_block_budget(
+                tmp.path(),
+                32,
+                32,
+                4,
+                false,
+                PagedBudgetDirective::Disabled
+            ),
+            None,
+        );
     }
 
     #[test]

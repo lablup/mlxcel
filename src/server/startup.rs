@@ -478,7 +478,10 @@ impl Default for ServerStartupConfig {
             kv_cache_mode: mlxcel_core::cache::KVCacheMode::Fp16,
             batch_kv_quant: mlxcel_core::cache::BatchKvQuantConfig::default(),
             max_kv_size: None,
-            kv_cache_budget: None,
+            // Serving-throughput default guard (#628): `auto` paged KV budget
+            // pairs with the batched-decode default. Disable with
+            // `--kv-cache-budget none`.
+            kv_cache_budget: Some(crate::memory_estimate::PagedBudgetDirective::Auto),
             responses_store_max_entries: 1024,
             responses_store_ttl_secs: 3600,
             conversation_store_max_entries: 256,

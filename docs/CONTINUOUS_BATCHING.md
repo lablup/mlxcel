@@ -56,22 +56,34 @@ large `--parallel` degrades to queueing rather than OOM.
 
 Measured scaling (Apple M1 Ultra, Metal; `meta-llama-3.1-8b-instruct-4bit`,
 512-token prompt, 128 new tokens; `scripts/bench_serving_concurrency.py`).
-Baseline is the previous default `--parallel 1`; new default is `--parallel 4
---max-batch-prefill 4`. Aggregate is tokens/sec summed across concurrent
+The baseline column is the previous default `--parallel 1`. The batched column
+was measured with `--max-batch-prefill 4` and a batch ceiling high enough to
+expose each concurrency level (`--parallel 8`), so the 8-client row reflects a
+`--parallel 8` server; the shipped default is `--parallel 4`, whose batch caps
+at 4 (the 4-client row is the default at saturation, and 8 clients would run 4
+batched plus 4 queued). Aggregate is tokens/sec summed across concurrent
 clients; TTFT is time-to-first-token:
 
-| clients | aggregate tok/s (`--parallel 1`) | aggregate tok/s (`--parallel 4`) | TTFT mean ms (`-p1`) | TTFT mean ms (`-p4`) |
-|--------:|---------------------------------:|---------------------------------:|---------------------:|---------------------:|
+| clients | aggregate tok/s (`-p1`) | aggregate tok/s (batched) | TTFT mean ms (`-p1`) | TTFT mean ms (batched) |
+|--------:|------------------------:|--------------------------:|---------------------:|-----------------------:|
 | 1 | 56.6 | 56.8 | 889 | 783 |
 | 2 | 71.5 | 99.9 | 1150 | 114 |
 | 4 | 65.6 | 107.9 | 3257 | 189 |
-| 8 | 62.8 | 105.1 | 7514 | 348 |
+| 8 | 62.8 | 105.1 (`-p8`) | 7514 | 348 (`-p8`) |
 
-At 4 concurrent clients the new default delivers 1.90x the single-client
-aggregate throughput and cuts mean TTFT under load ~17x (3257 ms to 189 ms),
-while single-client throughput is unchanged. On a higher-bandwidth decode target
-(for example GB10) the weights-read amortization headroom is larger; that
-number is pending a CUDA measurement session.
+At 4 concurrent clients the default delivers 1.90x the single-client aggregate
+throughput and cuts mean TTFT under load ~17x (3257 ms to 189 ms), while
+single-client throughput is unchanged. On a higher-bandwidth decode target (for
+example GB10) the weights-read amortization headroom is larger; that number is
+pending a CUDA measurement session.
+
+The batched-decode default is paired with an `auto` paged KV budget
+(`--kv-cache-budget auto`, the default): the #122 block-budget admission bounds
+KV for the concurrent batch and returns backpressure instead of letting four
+full-context sequences run into an OOM abort. On the dense decode backend the
+budget is inert. Disable the guard with `--kv-cache-budget none`. Memory-
+constrained hosts can also lower `--parallel` or cap `--ctx-size` (see the
+context-sizing note in [environment-variables.md](environment-variables.md)).
 
 ### Paged decode and the prompt-prefix cache
 

@@ -63,6 +63,8 @@ The hit counter increments and prefix tokens are reused, satisfying the end-to-e
 
 `--parallel 8`, 8 concurrent clients, 128 GB M1 Ultra: 0 request failures, peak RSS 4409 MB (sampled via `ps`). No OOM. Note MLX Metal reports `peak_bytes=0` for the 4-bit load path (a quantized-load accounting quirk; the bf16 qwen2.5-0.5b control on the same path reported `peak_bytes=1.27 GB` correctly), so external RSS is the better proxy for the 4-bit model. KV growth for `B` sequences is bounded by admission (`--kv-cache-budget` / `--max-kv-size`), which sheds load under pressure rather than OOMing.
 
+To make that guard automatic under the batched-decode default, the shipped `--kv-cache-budget` default is now `auto` (it was unset, i.e. unbounded, on the audited binary): the #122 paged block-budget admission bounds KV for the concurrent batch on the paged decode backend and is inert on the dense backend. `--kv-cache-budget none` (or `0`) restores the unbounded pool.
+
 ## Fast-model data point (qwen2.5-0.5b-bf16, `--parallel 8 --max-batch-prefill 4`)
 
 | clients | aggregate tok/s | TTFT mean ms |

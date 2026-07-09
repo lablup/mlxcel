@@ -424,16 +424,21 @@ struct ServerArgs {
     )]
     max_kv_size: usize,
 
-    /// Paged KV-cache pool block budget: `auto` or a byte count (default: unbounded).
+    /// Paged KV-cache pool block budget: `auto` (default), a byte count, or `none`.
     ///
     /// Bounds the unified paged KV cache (epic #116): `auto` derives the cap
-    /// from the memory estimate, a raw byte count sets it explicitly. Only
-    /// affects pool-backed (Fp16) models under `--decode-storage-backend paged`.
-    /// Also reads `MLXCEL_KV_CACHE_BUDGET`.
+    /// from the memory estimate, a raw byte count sets it explicitly, and
+    /// `none` / `0` leaves the pool unbounded. Only affects pool-backed (Fp16)
+    /// models under the paged decode backend (the `--parallel > 1` default);
+    /// dense-backend workers ignore it. Defaults to `auto` so the batched-decode
+    /// default cannot run concurrent full-context sequences into an OOM abort;
+    /// admission returns clean backpressure instead. Also reads
+    /// `MLXCEL_KV_CACHE_BUDGET`.
     #[arg(
         long = "kv-cache-budget",
         env = "MLXCEL_KV_CACHE_BUDGET",
-        value_name = "BYTES|auto",
+        value_name = "BYTES|auto|none",
+        default_value = "auto",
         value_parser = parse_kv_cache_budget
     )]
     kv_cache_budget: Option<mlxcel::memory_estimate::PagedBudgetDirective>,
@@ -1510,6 +1515,51 @@ mod tests {
         assert!(
             !off.prompt_cache_enabled,
             "--no-prompt-cache must disable the prompt cache"
+        );
+    }
+
+    #[test]
+    fn kv_cache_budget_defaults_to_auto() {
+        // #628: the batched-decode default pairs with an `auto` paged KV budget
+        // guard so admission sheds load instead of OOMing.
+        use mlxcel::memory_estimate::PagedBudgetDirective;
+        let args = parse_server_args(&["mlxcel-server", "-m", "models/foo"]);
+        assert_eq!(args.kv_cache_budget, Some(PagedBudgetDirective::Auto));
+    }
+
+    #[test]
+    fn kv_cache_budget_explicit_disable_and_bytes_parse() {
+        // #628: escape hatches. `none` and `0` disable the guard (unbounded);
+        // an explicit byte count sets a hard cap.
+        use mlxcel::memory_estimate::PagedBudgetDirective;
+        let none = parse_server_args(&[
+            "mlxcel-server",
+            "-m",
+            "models/foo",
+            "--kv-cache-budget",
+            "none",
+        ]);
+        assert_eq!(none.kv_cache_budget, Some(PagedBudgetDirective::Disabled));
+
+        let zero = parse_server_args(&[
+            "mlxcel-server",
+            "-m",
+            "models/foo",
+            "--kv-cache-budget",
+            "0",
+        ]);
+        assert_eq!(zero.kv_cache_budget, Some(PagedBudgetDirective::Disabled));
+
+        let bytes = parse_server_args(&[
+            "mlxcel-server",
+            "-m",
+            "models/foo",
+            "--kv-cache-budget",
+            "8589934592",
+        ]);
+        assert_eq!(
+            bytes.kv_cache_budget,
+            Some(PagedBudgetDirective::Bytes(8_589_934_592))
         );
     }
 

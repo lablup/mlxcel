@@ -974,21 +974,23 @@ pub(crate) struct ServeArgs {
     )]
     max_kv_size: usize,
 
-    /// Paged KV-cache pool block budget: `auto` or a byte count (default: unbounded).
+    /// Paged KV-cache pool block budget: `auto` (default), a byte count, or `none`.
     ///
     /// Bounds the unified paged KV cache (epic #116) so the server evicts cold
     /// cross-request prompt prefixes (then preempts running sequences) instead
     /// of growing the pool without limit. `auto` derives the cap from the
     /// memory estimate (`(available - weights - activation) / per-block bytes`);
-    /// a raw byte count (e.g. `8589934592` for 8 GiB) sets an explicit cap.
-    /// Only affects pool-backed (Fp16, dense-natural-backend) models. Model-owned
-    /// and quantized families keep dense caches and ignore it. Requires
-    /// `--decode-storage-backend paged` to have any effect.
-    /// Also reads `MLXCEL_KV_CACHE_BUDGET`.
+    /// a raw byte count (e.g. `8589934592` for 8 GiB) sets an explicit cap;
+    /// `none` / `0` leaves the pool unbounded. Only affects pool-backed (Fp16,
+    /// dense-natural-backend) models under the paged decode backend (the
+    /// `--n-parallel > 1` default). Model-owned and quantized families keep
+    /// dense caches and ignore it. Defaults to `auto` so the batched-decode
+    /// default is memory-guarded. Also reads `MLXCEL_KV_CACHE_BUDGET`.
     #[arg(
         long = "kv-cache-budget",
         env = "MLXCEL_KV_CACHE_BUDGET",
-        value_name = "BYTES|auto",
+        value_name = "BYTES|auto|none",
+        default_value = "auto",
         value_parser = parse_kv_cache_budget
     )]
     kv_cache_budget: Option<mlxcel::memory_estimate::PagedBudgetDirective>,

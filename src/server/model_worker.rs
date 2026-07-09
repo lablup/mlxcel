@@ -659,6 +659,15 @@ fn resolve_worker_paged_block_budget(
     directive: Option<crate::memory_estimate::PagedBudgetDirective>,
 ) -> Option<usize> {
     let directive = directive?;
+    // Explicit opt-out: leave the pool unbounded without the "geometry
+    // unavailable" warning path (#628 default budget guard escape hatch).
+    if matches!(
+        directive,
+        crate::memory_estimate::PagedBudgetDirective::Disabled
+    ) {
+        tracing::info!("--kv-cache-budget disabled; leaving the paged KV pool unbounded");
+        return None;
+    }
     let num_layers = model.num_layers();
     let block_size = crate::server::batch::scheduler::DEFAULT_PAGED_BLOCK_SIZE;
     // The paged pool stores Fp16; Int8 / Turbo sequences keep dense caches and
