@@ -981,7 +981,7 @@ impl BatchScheduler {
             // sequences are pool-backed on the paged path). The dense
             // batched-decode + front-trim path currently produces incorrect
             // output once a prompt exceeds the cap (a pre-existing,
-            // mode-independent defect, issue #635): `--kv-cache-mode fp16
+            // mode-independent defect, tracked in issue #718): `--kv-cache-mode fp16
             // --decode-storage-backend dense --max-kv-size N` mis-decodes the
             // same way, while the KV-cache-layer Int8 trim is proven correct
             // by unit tests. Warn loudly so operators do not silently get
