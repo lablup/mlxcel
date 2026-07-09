@@ -548,6 +548,26 @@ async fn non_stream_chat_completion(
     ))
 }
 
+/// Per-request streaming callback state (issue #633).
+///
+/// Collapses the three previously-separate `Arc<Mutex<…>>` values (tool-call
+/// accumulator, logprobs buffer, stream filter) into a single lock. The
+/// streaming callback runs on one blocking thread and the post-generation flush
+/// runs on that same thread afterwards, so the lock exists only to satisfy the
+/// `Send` bound on the `spawn_blocking` closure (an `Arc<RefCell<…>>` would not
+/// be `Send`); it is never contended. Combining them turns three lock/unlock
+/// pairs per token into one.
+struct StreamCallbackState {
+    /// Raw generated text accumulated for end-of-stream tool-call parsing. Only
+    /// appended to when tool-call parsing is enabled.
+    accumulated: String,
+    /// Stream filter that splits reasoning/content and strips structural tokens.
+    stream_filter: StreamFilter,
+    /// Per-`feed()` logprob buffer, drained in lockstep with the filter's
+    /// consumed/suppressed positions. Only used when logprobs are enabled.
+    lp_buffer: std::collections::VecDeque<Option<TokenLogprobData>>,
+}
+
 async fn stream_chat_completion(
     state: AppState,
     request: ChatCompletionRequest,
@@ -658,9 +678,10 @@ async fn stream_chat_completion(
         let request_id_inner = request_id_clone.clone();
         let model_id_inner = model_id_clone.clone();
 
-        let accumulated = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
-        let acc_clone = accumulated.clone();
-
+        // Single per-token lock (issue #633): the tool-call accumulator, the
+        // stream filter, and the parallel logprob buffer live behind one Mutex
+        // instead of three, so the hot callback locks once per token.
+        //
         // Stream filter: strips model-specific structural tokens from content
         // deltas so clients never see <|channel>, <|tool_call>, <think>, etc.
         // Always on — even non-tool chat requests need to suppress thinking-
@@ -675,34 +696,25 @@ async fn stream_chat_completion(
         // `reasoning_content` until the model emits the matching close marker
         // (`<channel|>` or `</think>`); otherwise the scratchpad leaks to the
         // client when max_tokens is reached mid-reasoning.
-        let stream_filter = std::sync::Arc::new(std::sync::Mutex::new(if primed_open_thinking {
-            StreamFilter::new_primed_open_thinking()
-        } else {
-            StreamFilter::new()
+        //
+        // The logprob buffer holds one entry per `feed()` call. The stream
+        // filter buffers incoming text fragments to handle delimiter matching at
+        // token boundaries; when it later drains buffered bytes, the original
+        // per-token `lp_data` is drained in lockstep with the filter's
+        // `consumed_positions` output (drop `consumed - suppressed` emitted
+        // entries; pop `suppressed` entries for placeholder chunks). This
+        // preserves the upstream mlx-lm `replace(t, text="")` semantics so OpenAI
+        // clients aligning by `choices[].logprobs.content` keep position info.
+        let cb_state = std::sync::Arc::new(std::sync::Mutex::new(StreamCallbackState {
+            accumulated: String::new(),
+            stream_filter: if primed_open_thinking {
+                StreamFilter::new_primed_open_thinking()
+            } else {
+                StreamFilter::new()
+            },
+            lp_buffer: std::collections::VecDeque::new(),
         }));
-        let filter_for_callback = stream_filter.clone();
-
-        // Parallel logprob buffer — one entry per `feed()` call (one per token).
-        //
-        // The stream filter buffers incoming text fragments to handle delimiter
-        // matching at token boundaries. When it later drains buffered bytes, the
-        // original per-token `lp_data` that arrived with those bytes is no longer
-        // directly available (the closure has moved on to newer tokens). This
-        // `VecDeque` mirrors the filter's internal fragment queue: we push
-        // `lp_data` here on every `feed()` call, then drain in lockstep with the
-        // filter's `consumed_positions` output:
-        //
-        //   - drop `consumed_positions - suppressed_positions` entries (emitted text)
-        //   - pop `suppressed_positions` entries → lp_data for placeholder chunks
-        //
-        // This preserves the upstream mlx-lm `replace(t, text="")` semantics:
-        // each suppressed delimiter position carries its original logprob metadata
-        // so OpenAI clients aligning by `choices[].logprobs.content` do not lose
-        // position information.
-        let lp_buffer: std::sync::Arc<
-            std::sync::Mutex<std::collections::VecDeque<Option<TokenLogprobData>>>,
-        > = std::sync::Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new()));
-        let lp_buffer_for_callback = lp_buffer.clone();
+        let cb_state_for_callback = cb_state.clone();
 
         let result = state
             .model_provider
@@ -714,116 +726,116 @@ async fn stream_chat_completion(
                 prepared.videos,
                 cancelled,
                 |token, lp_data| {
-                    // Always accumulate raw text for tool call parsing
-                    if parse_tools && let Ok(mut acc) = acc_clone.lock() {
-                        acc.push_str(&token);
-                    }
+                    // Single lock per token (issue #633): accumulate raw text,
+                    // push this token's lp_data, run the stream filter, and drain
+                    // the lp buffer under one lock. `lp_data` is pushed before
+                    // `feed()` because the filter may buffer the token internally
+                    // until a partial-match ambiguity resolves; the original
+                    // lp_data must stay available for placeholder chunks it later
+                    // drains. The emitted chunks are collected and sent after the
+                    // lock is released so the (uncontended) lock never spans a
+                    // channel send.
+                    let mut pending: Vec<ChatCompletionChunk> = Vec::new();
+                    {
+                        let Ok(mut cb) = cb_state_for_callback.lock() else {
+                            return;
+                        };
+                        let cb = &mut *cb;
 
-                    // Push this token's lp_data into the parallel buffer before
-                    // feeding the text to the stream filter. The filter may buffer
-                    // this token internally until a partial-match ambiguity
-                    // resolves; when it later drains those bytes we need the
-                    // original lp_data available for placeholder chunks.
-                    if logprobs_enabled && let Ok(mut buf) = lp_buffer_for_callback.lock() {
-                        buf.push_back(lp_data.clone());
-                    }
+                        if parse_tools {
+                            cb.accumulated.push_str(&token);
+                        }
+                        if logprobs_enabled {
+                            cb.lp_buffer.push_back(lp_data.clone());
+                        }
 
-                    // Apply stream filter to split thinking scratchpad from
-                    // user-facing content. Thinking goes out as
-                    // `delta.reasoning_content` so routers/UIs can surface a
-                    // "thinking" state; regular text goes as `delta.content`.
-                    let emit = filter_for_callback
-                        .lock()
-                        .ok()
-                        .map(|mut f| f.feed(&token))
-                        .unwrap_or_default();
+                        // Split thinking scratchpad from user-facing content.
+                        // Thinking goes out as `delta.reasoning_content`; regular
+                        // text goes as `delta.content`.
+                        let emit = cb.stream_filter.feed(&token);
 
-                    // Drain the parallel lp_data buffer in lockstep with the
-                    // filter's consumed_positions output:
-                    //   - Emitted positions (consumed but not suppressed): drop.
-                    //   - Suppressed positions: collect for placeholder chunks.
-                    let suppressed_lp: Vec<Option<TokenLogprobData>> =
-                        if logprobs_enabled && emit.consumed_positions > 0 {
+                        // Drain the parallel lp_data buffer in lockstep with the
+                        // filter's consumed_positions output:
+                        //   - Emitted positions (consumed, not suppressed): drop.
+                        //   - Suppressed positions: collect for placeholder chunks.
+                        let suppressed_lp: Vec<Option<TokenLogprobData>> = if logprobs_enabled
+                            && emit.consumed_positions > 0
+                        {
                             let emitted = emit.consumed_positions - emit.suppressed_positions;
                             let mut suppressed_out = Vec::with_capacity(emit.suppressed_positions);
-                            if let Ok(mut buf) = lp_buffer_for_callback.lock() {
-                                // Drop emitted-position entries (their text went to content/reasoning).
-                                for _ in 0..emitted {
-                                    buf.pop_front();
-                                }
-                                // Collect suppressed-position entries for placeholder chunks.
-                                for _ in 0..emit.suppressed_positions {
-                                    suppressed_out.push(buf.pop_front().flatten());
-                                }
+                            for _ in 0..emitted {
+                                cb.lp_buffer.pop_front();
+                            }
+                            for _ in 0..emit.suppressed_positions {
+                                suppressed_out.push(cb.lp_buffer.pop_front().flatten());
                             }
                             suppressed_out
                         } else {
                             Vec::new()
                         };
 
-                    if let Some(reasoning_text) = emit.reasoning
-                        && !reasoning_text.is_empty()
-                    {
-                        let chunk = ChatCompletionChunk::reasoning_content(
-                            request_id_inner.clone(),
-                            model_id_inner.clone(),
-                            reasoning_text,
-                        );
-                        let _ = token_events.json(&chunk);
-                    }
-
-                    if let Some(text) = emit.content
-                        && !text.is_empty()
-                    {
-                        let logprobs = if logprobs_enabled {
-                            lp_data
-                                .as_ref()
-                                .map(|lp| build_single_token_chat_logprobs(&tokenizer, lp, top_k))
-                        } else {
-                            None
-                        };
-                        let chunk = ChatCompletionChunk::content_with_logprobs(
-                            request_id_inner.clone(),
-                            model_id_inner.clone(),
-                            text,
-                            logprobs,
-                        );
-                        let _ = token_events.json(&chunk);
-                    }
-
-                    // Preserve token-position alignment for parallel tool calls
-                    // (upstream mlx-lm PR #1170, commit aa4f880).
-                    //
-                    // When the stream filter consumed a control-token delimiter
-                    // (e.g. `<tool_call>`, `</tool_call>`) it drained those
-                    // bytes without producing any text output. If logprobs are
-                    // enabled, downstream consumers expect one event per token
-                    // position. Emit an empty-content placeholder chunk for each
-                    // suppressed position, carrying the original per-token
-                    // lp_data so that OpenAI clients aligning by
-                    // `choices[].logprobs.content` do not lose the position.
-                    if logprobs_enabled && emit.suppressed_positions > 0 {
-                        for slot_lp in suppressed_lp {
-                            let logprobs = slot_lp
-                                .as_ref()
-                                .map(|lp| build_single_token_chat_logprobs(&tokenizer, lp, top_k));
-                            let chunk = ChatCompletionChunk::content_with_logprobs(
+                        if let Some(reasoning_text) = emit.reasoning
+                            && !reasoning_text.is_empty()
+                        {
+                            pending.push(ChatCompletionChunk::reasoning_content(
                                 request_id_inner.clone(),
                                 model_id_inner.clone(),
-                                String::new(),
-                                logprobs,
-                            );
-                            let _ = token_events.json(&chunk);
+                                reasoning_text,
+                            ));
                         }
+
+                        if let Some(text) = emit.content
+                            && !text.is_empty()
+                        {
+                            let logprobs = if logprobs_enabled {
+                                lp_data.as_ref().map(|lp| {
+                                    build_single_token_chat_logprobs(&tokenizer, lp, top_k)
+                                })
+                            } else {
+                                None
+                            };
+                            pending.push(ChatCompletionChunk::content_with_logprobs(
+                                request_id_inner.clone(),
+                                model_id_inner.clone(),
+                                text,
+                                logprobs,
+                            ));
+                        }
+
+                        // Preserve token-position alignment for parallel tool
+                        // calls (upstream mlx-lm PR #1170, commit aa4f880). When
+                        // the stream filter consumed a control-token delimiter
+                        // (e.g. `<tool_call>`) it drained those bytes without
+                        // producing output; with logprobs enabled, downstream
+                        // consumers expect one event per token position, so emit
+                        // an empty-content placeholder carrying the original
+                        // per-token lp_data.
+                        if logprobs_enabled && emit.suppressed_positions > 0 {
+                            for slot_lp in suppressed_lp {
+                                let logprobs = slot_lp.as_ref().map(|lp| {
+                                    build_single_token_chat_logprobs(&tokenizer, lp, top_k)
+                                });
+                                pending.push(ChatCompletionChunk::content_with_logprobs(
+                                    request_id_inner.clone(),
+                                    model_id_inner.clone(),
+                                    String::new(),
+                                    logprobs,
+                                ));
+                            }
+                        }
+                    }
+
+                    for chunk in &pending {
+                        let _ = token_events.json(chunk);
                     }
                 },
             );
 
         // Flush any remaining buffered content from the stream filter
-        let remaining = stream_filter
+        let remaining = cb_state
             .lock()
             .ok()
-            .map(|mut f| f.flush())
+            .map(|mut cb| cb.stream_filter.flush())
             .unwrap_or_default();
         if let Some(text) = remaining.reasoning
             && !text.is_empty()
@@ -853,9 +865,9 @@ async fn stream_chat_completion(
             Err(_) => "error".to_string(),
         };
 
-        if parse_tools && let Ok(full_output) = accumulated.lock() {
+        if parse_tools && let Ok(cb) = cb_state.lock() {
             let tools_ref = tools_for_parser.as_deref();
-            let parsed = tool_calls::parse_tool_calls(&full_output, tools_ref);
+            let parsed = tool_calls::parse_tool_calls(&cb.accumulated, tools_ref);
 
             if parsed.has_tool_calls() {
                 // Emit tool call deltas

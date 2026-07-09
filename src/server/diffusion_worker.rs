@@ -198,6 +198,9 @@ pub(crate) fn run_diffusion_worker_loop(
             }
             ModelRequest::Generate {
                 prompt,
+                // Diffusion workers tokenize internally; the dispatch-thread
+                // pre-tokenized ids (issue #633) are not used here.
+                prompt_token_ids: _,
                 options,
                 images,
                 audio,
@@ -496,6 +499,9 @@ pub(crate) fn run_llada2_worker_loop(
             }
             ModelRequest::Generate {
                 prompt,
+                // Diffusion workers tokenize internally; the dispatch-thread
+                // pre-tokenized ids (issue #633) are not used here.
+                prompt_token_ids: _,
                 options,
                 images,
                 audio,

@@ -18,8 +18,7 @@ use image::{DynamicImage, ImageBuffer, ImageFormat, Rgb};
 
 use super::{
     StreamingDecodeState, build_generation_result, decode_request_images,
-    decode_request_images_with_limits, merge_config_stop_tokens, parse_byte_fallback_token,
-    resolve_end_of_turn_token_id, safe_emit_boundary,
+    decode_request_images_with_limits, merge_config_stop_tokens, resolve_end_of_turn_token_id,
 };
 use crate::SamplingConfig;
 use crate::server::media::ImageInputLimits;
@@ -116,68 +115,6 @@ fn build_generation_result_computes_finish_reason_and_generation_split() {
     assert_eq!(length.generation_only_ms, 0);
 }
 
-#[test]
-fn safe_emit_boundary_stops_before_trailing_replacement_chars() {
-    // ASCII string: boundary is at the end.
-    assert_eq!(safe_emit_boundary("hello"), 5);
-
-    // Replacement char at end: boundary stops before it.
-    let with_replacement = "ok\u{FFFD}";
-    let expected = "ok".len();
-    assert_eq!(safe_emit_boundary(with_replacement), expected);
-
-    // All replacement chars: boundary is 0.
-    assert_eq!(safe_emit_boundary("\u{FFFD}\u{FFFD}"), 0);
-
-    // Empty string: boundary is 0.
-    assert_eq!(safe_emit_boundary(""), 0);
-
-    // Multi-byte character followed by replacement char.
-    let mixed = "\u{AC00}\u{FFFD}"; // Korean syllable + replacement
-    assert_eq!(safe_emit_boundary(mixed), "\u{AC00}".len()); // 3 bytes
-}
-
-// ── parse_byte_fallback_token tests ─────────────────────────────────────────
-
-/// Tokens in the form `<0xXX>` with a two-digit hex suffix should return the
-/// corresponding byte value.
-#[test]
-fn parse_byte_fallback_token_recognises_hex_tokens() {
-    assert_eq!(parse_byte_fallback_token("<0x00>"), Some(0x00));
-    assert_eq!(parse_byte_fallback_token("<0x61>"), Some(0x61)); // 'a'
-    assert_eq!(parse_byte_fallback_token("<0xE5>"), Some(0xE5));
-    assert_eq!(parse_byte_fallback_token("<0xAB>"), Some(0xAB));
-    assert_eq!(parse_byte_fallback_token("<0xFF>"), Some(0xFF));
-}
-
-/// Tokens that do not match the exact `<0xXX>` pattern must return `None`.
-#[test]
-fn parse_byte_fallback_token_rejects_non_hex_tokens() {
-    assert_eq!(parse_byte_fallback_token("Hello"), None);
-    assert_eq!(parse_byte_fallback_token("<BOS>"), None);
-    assert_eq!(parse_byte_fallback_token("<0x>"), None); // too short
-    assert_eq!(parse_byte_fallback_token("<0xABC>"), None); // too long
-    assert_eq!(parse_byte_fallback_token("0xE5"), None); // missing angle brackets
-    assert_eq!(parse_byte_fallback_token("<0xGG>"), None); // invalid hex
-    assert_eq!(parse_byte_fallback_token(""), None);
-}
-
-/// Defense-in-depth: `u8::from_str_radix` accepts a leading `+` sign, so
-/// `<0x+f>` would previously parse as `Some(0x0f)`. Byte-level checks now
-/// ensure both digit positions must be ASCII hex digits, rejecting `+` and `-`.
-#[test]
-fn parse_byte_fallback_token_rejects_leading_sign() {
-    // These six-character strings match the length and prefix/suffix of a valid
-    // byte-fallback token but contain a leading sign in the hex digit area.
-    assert_eq!(parse_byte_fallback_token("<0x+f>"), None);
-    assert_eq!(parse_byte_fallback_token("<0x-f>"), None);
-    assert_eq!(parse_byte_fallback_token("<0x+F>"), None);
-    // Valid tokens continue to work after the byte-level guard is applied.
-    assert_eq!(parse_byte_fallback_token("<0xE5>"), Some(0xE5));
-    assert_eq!(parse_byte_fallback_token("<0x00>"), Some(0x00));
-    assert_eq!(parse_byte_fallback_token("<0xff>"), Some(0xff));
-}
-
 // ── Byte-fallback streaming regression tests ───────────────────
 
 /// Helper: simulate streaming a sequence of tokens and collect the emitted
@@ -203,6 +140,213 @@ fn simulate_byte_fallback_stream(
     let start = Instant::now();
     let result = state.finish_with_cache(start, prompt_ids.len(), usize::MAX, 0);
     (chunks, result.text)
+}
+
+/// Build a HuggingFace tokenizer whose vocab contains every byte-fallback token
+/// `<0x00>`..`<0xFF>` (token id == byte value) plus a couple of regular ASCII
+/// word tokens, with a `ByteFallback` decoder. This lets a test drive the
+/// incremental detokenizer with the exact byte sequence of any UTF-8 string, so
+/// byte-exactness can be checked against a one-shot decode of the same ids.
+fn stub_all_byte_fallback() -> MlxcelTokenizer {
+    let mut vocab_entries: Vec<String> = (0u16..=255)
+        .map(|b| format!("\"<0x{b:02X}>\": {b}"))
+        .collect();
+    // Regular word tokens after the 256 byte ids, exercising the mixed
+    // regular-piece + byte-fallback path.
+    vocab_entries.push("\"Hello\": 256".to_string());
+    vocab_entries.push("\"world\": 257".to_string());
+    let vocab = vocab_entries.join(", ");
+    let json = format!(
+        r#"{{
+            "version": "1.0",
+            "truncation": null,
+            "padding": null,
+            "added_tokens": [],
+            "normalizer": null,
+            "pre_tokenizer": null,
+            "post_processor": null,
+            "decoder": {{"type": "ByteFallback"}},
+            "model": {{
+                "type": "BPE",
+                "dropout": null,
+                "unk_token": null,
+                "continuing_subword_prefix": null,
+                "end_of_word_suffix": null,
+                "fuse_unk": false,
+                "byte_fallback": true,
+                "vocab": {{{vocab}}},
+                "merges": []
+            }}
+        }}"#
+    );
+    let tokenizer = tokenizers::Tokenizer::from_bytes(json.as_bytes())
+        .expect("failed to build all-byte-fallback stub tokenizer");
+    MlxcelTokenizer::HuggingFace(tokenizer)
+}
+
+/// The `<0xXX>` token ids for the UTF-8 bytes of `s` in [`stub_all_byte_fallback`]
+/// (token id == byte value).
+fn byte_fallback_ids(s: &str) -> Vec<i32> {
+    s.bytes().map(|b| b as i32).collect()
+}
+
+/// Core byte-exactness invariant for the incremental detokenizer: streaming a
+/// token sequence one token at a time and concatenating the emitted chunks (plus
+/// the end-of-stream flush) must reproduce a one-shot `tokenizer.decode` of the
+/// whole sequence exactly. `prompt_ids` are treated as already-emitted context
+/// and excluded from the streamed output, matching production use.
+fn assert_stream_matches_oneshot(tokenizer: &MlxcelTokenizer, prompt_ids: &[i32], gen_ids: &[i32]) {
+    let mut all_ids: Vec<u32> = prompt_ids.iter().map(|&x| x as u32).collect();
+    all_ids.extend(gen_ids.iter().map(|&x| x as u32));
+    let full = tokenizer.decode(&all_ids, false).unwrap_or_default();
+    let prompt_decoded = tokenizer
+        .decode(
+            &prompt_ids.iter().map(|&x| x as u32).collect::<Vec<_>>(),
+            false,
+        )
+        .unwrap_or_default();
+    let expected = &full[prompt_decoded.len()..];
+
+    let (chunks, generated) = simulate_byte_fallback_stream(tokenizer, prompt_ids, gen_ids);
+    let concatenated: String = chunks.concat();
+
+    assert_eq!(
+        concatenated, generated,
+        "streamed chunks must equal the finished text"
+    );
+    assert_eq!(
+        generated,
+        expected,
+        "incremental detokenization must be byte-identical to a one-shot decode \
+         (prompt_ids={prompt_ids:?}, gen_ids len={})",
+        gen_ids.len()
+    );
+}
+
+/// Korean (Hangul, 3 bytes/char) streamed byte-by-byte must reconstruct exactly
+/// and match a one-shot decode; no chunk may contain a partial (U+FFFD) char.
+#[test]
+fn incremental_detok_korean_matches_oneshot() {
+    let tokenizer = stub_all_byte_fallback();
+    let text = "안녕하세요 세계";
+    let gen_ids = byte_fallback_ids(text);
+    assert_stream_matches_oneshot(&tokenizer, &[], &gen_ids);
+
+    let (chunks, generated) = simulate_byte_fallback_stream(&tokenizer, &[], &gen_ids);
+    assert_eq!(generated, text);
+    for chunk in &chunks {
+        assert!(
+            !chunk.contains('\u{FFFD}'),
+            "no streamed chunk may contain a replacement char: {chunk:?}"
+        );
+    }
+}
+
+/// Mixed ASCII, CJK, emoji, and Korean streamed byte-by-byte must be
+/// byte-identical to a one-shot decode.
+#[test]
+fn incremental_detok_mixed_scripts_match_oneshot() {
+    let tokenizer = stub_all_byte_fallback();
+    let text = "ab叫cd😀ef 안녕 gh€ij";
+    assert_stream_matches_oneshot(&tokenizer, &[], &byte_fallback_ids(text));
+}
+
+/// A regular word piece adjacent to multibyte byte-fallback runs (the common
+/// real-model shape) streams byte-exactly.
+#[test]
+fn incremental_detok_regular_piece_then_multibyte_matches_oneshot() {
+    let tokenizer = stub_all_byte_fallback();
+    // "Hello" (id 256), "world" (id 257), then a CJK char and an emoji as bytes.
+    let mut gen_ids = vec![256, 257];
+    gen_ids.extend(byte_fallback_ids("叫😀"));
+    assert_stream_matches_oneshot(&tokenizer, &[], &gen_ids);
+}
+
+/// A non-empty prompt is treated as already-emitted context: the streamed
+/// output starts after the prompt boundary and stays byte-exact across the
+/// prompt/generation seam even when the generation begins with a multibyte char.
+#[test]
+fn incremental_detok_with_prompt_context_matches_oneshot() {
+    let tokenizer = stub_all_byte_fallback();
+    let prompt_ids = byte_fallback_ids("prompt: ");
+    let gen_ids = byte_fallback_ids("안녕 world 叫");
+    assert_stream_matches_oneshot(&tokenizer, &prompt_ids, &gen_ids);
+}
+
+/// Stopping the stream mid-multibyte (as a stop-string truncation would) must
+/// never leave a partial character in the streamed chunks; the incomplete tail
+/// only surfaces (as U+FFFD) after the end-of-stream flush, matching a one-shot
+/// decode of the truncated ids.
+#[test]
+fn incremental_detok_truncated_mid_multibyte_holds_partial() {
+    let tokenizer = stub_all_byte_fallback();
+    // A regular word piece "Hello" (id 256, the shape real text takes) followed
+    // by the first two of the three bytes of "가" (EA B0 80) — i.e. a stop-string
+    // truncation that lands in the middle of a multibyte character.
+    let mut truncated = vec![256];
+    truncated.extend_from_slice(&byte_fallback_ids("가")[..2]);
+
+    let mut state = StreamingDecodeState::new(&tokenizer, &[]);
+    let mut chunks = Vec::new();
+    for &tok in &truncated {
+        if let Some(chunk) = state.on_token(tok, &tokenizer) {
+            chunks.push(chunk);
+        }
+    }
+    // Before flush, only the complete "Hello" may have been emitted; the
+    // incomplete "가" bytes must be held back — never streamed as a partial char.
+    let streamed: String = chunks.concat();
+    assert_eq!(streamed, "Hello", "partial multibyte must not be streamed");
+    for chunk in &chunks {
+        assert!(
+            !chunk.contains('\u{FFFD}'),
+            "no streamed chunk may contain a replacement char: {chunk:?}"
+        );
+    }
+
+    // After flush the held partial surfaces as replacement char(s). The already
+    // streamed "Hello" is preserved and the whole result is byte-identical to a
+    // one-shot decode of exactly the truncated ids.
+    state.flush(&tokenizer);
+    let result = state.finish_with_cache(std::time::Instant::now(), 0, usize::MAX, 0);
+    let expected = tokenizer
+        .decode(
+            &truncated.iter().map(|&x| x as u32).collect::<Vec<_>>(),
+            false,
+        )
+        .unwrap_or_default();
+    assert!(result.text.starts_with("Hello"));
+    assert_eq!(result.text, expected);
+}
+
+/// Fuzz: many random valid UTF-8 strings streamed byte-by-byte must each be
+/// byte-identical to a one-shot decode. Uses a deterministic xorshift PRNG so
+/// failures reproduce.
+#[test]
+fn incremental_detok_fuzz_matches_oneshot() {
+    let tokenizer = stub_all_byte_fallback();
+    // A pool of characters spanning 1/2/3/4-byte UTF-8 lengths plus ASCII
+    // whitespace so pieces land on and off char boundaries.
+    let pool: Vec<char> = "aZ9 \n.叫가한€😀🎉ßé中".chars().collect();
+
+    let mut seed: u64 = 0x9E37_79B9_7F4A_7C15;
+    let mut next = || {
+        // xorshift64
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        seed
+    };
+
+    for _ in 0..300 {
+        let len = (next() % 40) as usize;
+        let mut s = String::new();
+        for _ in 0..len {
+            let c = pool[(next() as usize) % pool.len()];
+            s.push(c);
+        }
+        assert_stream_matches_oneshot(&tokenizer, &[], &byte_fallback_ids(&s));
+    }
 }
 
 /// A stream of three byte-fallback tokens [<0xE5>, <0x8F>, <0xAB>] that

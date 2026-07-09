@@ -233,6 +233,10 @@ impl XlaServeWorker {
         match req {
             ModelRequest::Generate {
                 prompt,
+                // The XLA worker tokenizes on its own engine thread; the
+                // dispatch-thread pre-tokenized ids (issue #633) are unused here
+                // (the XLA provider path never sets a pre-tokenizer).
+                prompt_token_ids: _,
                 options,
                 images,
                 audio,

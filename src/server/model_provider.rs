@@ -35,6 +35,13 @@ use crate::server::state::BatchMetrics;
 pub(crate) enum ModelRequest {
     Generate {
         prompt: String,
+        /// Pre-tokenized prompt ids, produced on the request-dispatch thread via
+        /// [`tokenize_prompt_for_generation`] (issue #633). When `Some`, the
+        /// scheduler uses these directly instead of tokenizing `prompt` on its
+        /// own thread; `None` falls back to scheduler-side tokenization. The
+        /// `prompt` string is still carried for VLM prompt formatting (e.g.
+        /// Moondream3) and diagnostics.
+        prompt_token_ids: Option<Vec<i32>>,
         options: ServerGenerateOptions,
         /// Raw image bytes for VLM (empty for text-only)
         images: Vec<Vec<u8>>,
@@ -108,6 +115,13 @@ pub struct ModelProvider {
     /// Shared cross-request prompt-prefix KV cache.
     /// `None` when the feature is disabled by config.
     prompt_cache: Option<Arc<crate::server::prompt_cache::PromptCacheStore>>,
+    /// Tokenizer used to encode prompts on the request-dispatch (HTTP-side)
+    /// thread before enqueueing, so a long prompt no longer tokenizes on the
+    /// scheduler thread and stalls concurrent decode ticks (issue #633). `None`
+    /// on paths that do not pre-tokenize (legacy/XLA/tests); the scheduler then
+    /// tokenizes as before. Its encoding is byte-identical to the scheduler's
+    /// because both go through [`tokenize_prompt_for_generation`].
+    prompt_tokenizer: Option<Arc<crate::tokenizer::MlxcelTokenizer>>,
     /// Bounded wait applied during the decode phase of `drain_generation_events*`
     /// to detect a hung model worker.
     ///
@@ -220,6 +234,15 @@ impl ModelProvider {
             return Ok(provider);
         }
 
+        // Pre-tokenizer for the request-dispatch thread (issue #633). Loaded
+        // once here (borrowing `model_path` before it is moved into the worker
+        // constructor) so `send_generate_request_with_cancellation` can encode a
+        // prompt off the scheduler thread. A load failure leaves it `None` and
+        // the scheduler tokenizes as before, so this is never fatal.
+        let prompt_tokenizer = crate::tokenizer::load_tokenizer(&model_path)
+            .ok()
+            .map(std::sync::Arc::new);
+
         if config.no_batch {
             let mut provider = Self::new_with_legacy_worker(
                 model_path,
@@ -233,6 +256,7 @@ impl ModelProvider {
             // legacy path won't exercise it yet — `AppState` should still
             // be able to observe it via the model provider handle.
             provider.prompt_cache = prompt_cache_store;
+            provider.prompt_tokenizer = prompt_tokenizer;
             provider.decode_hang_timeout = decode_hang_timeout;
             // log a warning if the operator asked for
             // speculative decoding but selected `--no-batch`. The legacy
@@ -290,6 +314,7 @@ impl ModelProvider {
                 batch_metrics,
                 batch_observability,
             )?;
+            provider.prompt_tokenizer = prompt_tokenizer;
             provider.decode_hang_timeout = decode_hang_timeout;
             Ok(provider)
         }
@@ -341,6 +366,7 @@ impl ModelProvider {
             batch_metrics,
             batch_observability,
             prompt_cache: None,
+            prompt_tokenizer: None,
             decode_hang_timeout: DECODE_HANG_TIMEOUT,
             _worker_handle: worker_handle,
         })
@@ -390,6 +416,7 @@ impl ModelProvider {
             batch_metrics,
             batch_observability,
             prompt_cache: None,
+            prompt_tokenizer: None,
             decode_hang_timeout: DECODE_HANG_TIMEOUT,
             _worker_handle: worker_handle,
         })
@@ -677,6 +704,7 @@ impl ModelProvider {
             batch_metrics,
             batch_observability,
             prompt_cache: prompt_cache_store,
+            prompt_tokenizer: None,
             decode_hang_timeout: DECODE_HANG_TIMEOUT,
             _worker_handle: worker_handle,
         })
@@ -762,6 +790,7 @@ impl ModelProvider {
             batch_metrics,
             batch_observability,
             prompt_cache: None,
+            prompt_tokenizer: None,
             decode_hang_timeout: DECODE_HANG_TIMEOUT,
             _worker_handle: worker_handle,
         })
@@ -1020,9 +1049,26 @@ impl ModelProvider {
     ) -> Result<mpsc::Receiver<GenerateEvent>> {
         let (response_tx, response_rx) = mpsc::channel();
 
+        // Tokenize on this (request-dispatch / HTTP-side) thread when a
+        // pre-tokenizer is available, so a long prompt no longer stalls the
+        // scheduler thread's decode loop (issue #633). A tokenization failure
+        // falls back to `None` so the scheduler encodes it and surfaces the
+        // error through the normal response channel.
+        let prompt_token_ids = self.prompt_tokenizer.as_ref().and_then(|tok| {
+            tokenize_prompt_for_generation(tok, &prompt)
+                .map_err(|err| {
+                    tracing::debug!(
+                        "HTTP-side prompt tokenization failed ({err}); deferring to scheduler"
+                    );
+                    err
+                })
+                .ok()
+        });
+
         self.request_tx
             .send(ModelRequest::Generate {
                 prompt,
+                prompt_token_ids,
                 options,
                 images,
                 audio,
@@ -1034,6 +1080,22 @@ impl ModelProvider {
 
         Ok(response_rx)
     }
+}
+
+/// Tokenize a rendered prompt into `i32` ids using the same `add_special`
+/// convention the scheduler applies (issue #633).
+///
+/// `add_special` is suppressed when the prompt already begins with a literal BOS
+/// marker (`<bos>` / `<s>`), matching `BatchScheduler::enqueue_request` so that
+/// pre-tokenizing on the dispatch thread is byte-identical to tokenizing on the
+/// scheduler thread. This is the single source of truth for both sites.
+pub(crate) fn tokenize_prompt_for_generation(
+    tokenizer: &crate::tokenizer::MlxcelTokenizer,
+    prompt: &str,
+) -> Result<Vec<i32>> {
+    let add_special = !prompt.starts_with("<bos>") && !prompt.starts_with("<s>");
+    let ids = tokenizer.encode(prompt, add_special)?;
+    Ok(ids.iter().map(|&x| x as i32).collect())
 }
 
 fn send_shutdown_signal(request_tx: &mpsc::Sender<ModelRequest>) -> bool {

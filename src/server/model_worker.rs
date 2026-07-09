@@ -2014,44 +2014,122 @@ pub(crate) fn build_generation_result_with_cache(
     }
 }
 
-/// Maximum number of bytes accumulated in the byte-fallback buffer before the
-/// buffer is force-flushed as replacement characters to avoid holding tokens
-/// indefinitely on pathological model outputs.
-const BYTE_FALLBACK_BUFFER_MAX: usize = 4;
+/// Maximum number of unemitted trailing tokens the incremental detokenizer will
+/// hold while an incomplete UTF-8 sequence is still forming before it force-emits
+/// them (rendering any still-incomplete bytes as U+FFFD replacement characters).
+///
+/// A legitimate incomplete UTF-8 character is at most four bytes, i.e. at most
+/// four byte-fallback `<0xXX>` tokens (or a handful of split byte-level BPE
+/// pieces), so this bound is only ever reached on degenerate output that emits
+/// an unbounded run of invalid bytes. Capping the held window keeps the
+/// per-token decode cost O(window) instead of letting it grow to O(sequence
+/// length) on such input.
+const MAX_HELD_TOKENS: usize = 32;
 
 /// Incremental, byte-fallback-safe detokenizer for streaming generation.
 ///
-/// Owns the running token-id buffer and emits only the newly-resolved UTF-8
-/// suffix as each token arrives, holding back incomplete multi-byte sequences
-/// (byte-fallback `<0xXX>` tokens and split byte-level BPE pieces) until they
-/// form valid UTF-8. This is the canonical detokenizer for the server's
-/// streaming responses and is also reused by the offline interactive chat
-/// REPL (epic #92 / issue #96) so the two surfaces never diverge.
+/// Emits only the newly-resolved UTF-8 suffix as each token arrives, holding
+/// back incomplete multi-byte sequences (byte-fallback `<0xXX>` tokens and split
+/// byte-level BPE pieces) until they form valid UTF-8. This is the canonical
+/// detokenizer for the server's streaming responses and is also reused by the
+/// offline interactive chat REPL (epic #92 / issue #96) so the two surfaces
+/// never diverge.
+///
+/// ## Incremental windowing (issue #633)
+///
+/// Rather than re-decoding the entire token history on every token (which is
+/// O(N) per token and therefore O(N^2) over a full generation), only a bounded
+/// suffix *window* of the history is re-decoded. Two decodes are taken per
+/// token, both anchored at the same left boundary `prefix_offset`:
+///
+/// * `prefix_text = decode(all_ids[prefix_offset..read_offset])` — the text
+///   already emitted for the current window.
+/// * `new_text = decode(all_ids[prefix_offset..])` — that same text plus the
+///   newest, not-yet-emitted tokens.
+///
+/// Because both decodes share the `prefix_offset` left context, the shared
+/// prefix renders identically in each and cancels out, so the emitted delta
+/// `new_text[prefix_text.len()..]` is byte-identical to slicing a whole-history
+/// decode. This mirrors the mlx-lm `NaiveStreamingDetokenizer`
+/// (<https://github.com/ml-explore/mlx-lm/blob/main/mlx_lm/tokenizer_utils.py>)
+/// and the llama.cpp / vLLM incremental detokenizers. `read_offset` only ever
+/// advances to a position whose decoded text ends on a complete UTF-8 boundary,
+/// so `prefix_text` is always a genuine prefix of `new_text` and the byte slice
+/// never splits a multi-byte character.
+///
+/// This assumes the tokenizer's `decode` does not apply context-sensitive
+/// `clean_up_tokenization_spaces` rewriting across the window boundary, which
+/// holds for every tokenizer in the supported set (Llama, Qwen, Gemma,
+/// DeepSeek, Mixtral, ... all ship `clean_up_tokenization_spaces=false`); it is
+/// the same assumption the mlx-lm naive detokenizer makes.
 pub struct StreamingDecodeState {
+    /// Full running token-id history (prompt followed by generated tokens).
+    /// Retained for the window slices and for `finish_truncated`, but never
+    /// decoded in full on the hot path.
     all_ids: Vec<u32>,
-    prev_decoded_len: usize,
+    /// Left anchor of the re-decode window (token index into `all_ids`). See the
+    /// struct-level docs for how the shared-prefix cancellation keeps the
+    /// emitted delta byte-identical to a whole-history decode.
+    prefix_offset: usize,
+    /// Boundary between already-emitted tokens and the newest unemitted tokens
+    /// (token index into `all_ids`). Always advanced to a UTF-8-complete
+    /// position so it never splits a multi-byte character.
+    read_offset: usize,
     generated_text: String,
     completion_tokens: usize,
     first_token_time: Option<Instant>,
-    /// Buffer for raw bytes accumulated from consecutive byte-fallback tokens
-    /// (`<0xXX>`). Held until enough bytes arrive to form a valid UTF-8
-    /// sequence. Cleared on each successful decode or when a non-byte-fallback
-    /// token follows.
-    byte_fallback_buffer: Vec<u8>,
 }
 
 impl StreamingDecodeState {
-    pub fn new(tokenizer: &MlxcelTokenizer, prompt_tokens: &[i32]) -> Self {
+    pub fn new(_tokenizer: &MlxcelTokenizer, prompt_tokens: &[i32]) -> Self {
         let all_ids: Vec<u32> = prompt_tokens.iter().map(|&x| x as u32).collect();
-        let prev_decoded_len = tokenizer.decode(&all_ids, false).unwrap_or_default().len();
+        let read_offset = all_ids.len();
 
         Self {
             all_ids,
-            prev_decoded_len,
+            // Anchor the window at the very start so the first generated token's
+            // delta carries the full prompt as left context. This makes the
+            // first emitted byte identical to slicing a whole-history decode at
+            // the prompt boundary (the previous implementation's behaviour),
+            // including any leading-space handling at the prompt/generation seam.
+            prefix_offset: 0,
+            read_offset,
             generated_text: String::new(),
             completion_tokens: 0,
             first_token_time: None,
-            byte_fallback_buffer: Vec::new(),
+        }
+    }
+
+    /// Decode the token-id window `all_ids[start..end]` to text, tolerating
+    /// decode errors by yielding an empty string (matching the previous
+    /// `unwrap_or_default` behaviour on the full-history decode).
+    fn decode_window(&self, tokenizer: &MlxcelTokenizer, start: usize, end: usize) -> String {
+        tokenizer
+            .decode(&self.all_ids[start..end], false)
+            .unwrap_or_default()
+    }
+
+    /// The text newly emittable from the current window: the suffix of
+    /// `new_text` past the already-emitted `prefix_text`.
+    ///
+    /// Normally `prefix_text` is a genuine prefix of `new_text` (the window's
+    /// `read_offset` only advances to a UTF-8-complete boundary), so this is a
+    /// plain suffix. The fallback covers a decoder that retroactively rewrites
+    /// already-emitted text: the `tokenizers` `ByteFallback` decoder renders an
+    /// entire consecutive byte-token run as U+FFFD once it holds an incomplete
+    /// byte, which can change how an earlier byte in the same run rendered. In
+    /// that rare case `strip_prefix` fails; decoding only the un-emitted tail
+    /// tokens keeps streaming causal and never panics on a non-char-boundary
+    /// slice.
+    fn window_delta(
+        &self,
+        tokenizer: &MlxcelTokenizer,
+        prefix_text: &str,
+        new_text: &str,
+    ) -> String {
+        match new_text.strip_prefix(prefix_text) {
+            Some(rest) => rest.to_string(),
+            None => self.decode_window(tokenizer, self.read_offset, self.all_ids.len()),
         }
     }
 
@@ -2062,159 +2140,55 @@ impl StreamingDecodeState {
         self.completion_tokens += 1;
         self.all_ids.push(token_id as u32);
 
-        // --- Byte-fallback buffering ---
-        // Tokenizers that use byte-fallback (e.g. Gemma variants with
-        // `byte_fallback = true`) map each byte of a multi-byte UTF-8
-        // character to an individual token in the form `<0xXX>`. When decoded
-        // one token at a time, incomplete byte sequences produce U+FFFD
-        // replacement characters in the output.
+        // Re-decode only the bounded suffix window (see struct docs). Both
+        // decodes share the `prefix_offset` left context so the shared prefix
+        // cancels out and the delta is byte-identical to a whole-history decode.
+        let prefix_text = self.decode_window(tokenizer, self.prefix_offset, self.read_offset);
+        let new_text = self.decode_window(tokenizer, self.prefix_offset, self.all_ids.len());
+
+        // Hold back an incomplete trailing UTF-8 sequence: a byte-fallback or
+        // byte-level piece that only decodes to U+FFFD until the completing
+        // token arrives. Emitting it now would corrupt the stream because the
+        // byte offset shifts when the replacement character resolves into a
+        // shorter real character. The window is re-decoded on the next token, so
+        // nothing is lost by waiting.
         //
-        // We detect byte-fallback tokens by looking up the raw token piece. If
-        // the piece matches `<0xXX>`, we accumulate the raw byte into a
-        // dedicated buffer and defer emission until the buffer forms valid
-        // UTF-8. Once a non-byte-fallback token arrives, any remaining bytes in
-        // the buffer are force-flushed as replacement characters.
-        //
-        // The buffer is also bounded to BYTE_FALLBACK_BUFFER_MAX bytes to
-        // prevent indefinite buffering on pathological inputs; excess bytes are
-        // force-flushed as replacement characters.
-        if let Some(piece) = tokenizer.token_piece(token_id as u32)
-            && let Some(byte_val) = parse_byte_fallback_token(&piece)
-        {
-            self.byte_fallback_buffer.push(byte_val);
-
-            // Force-flush if buffer exceeds the maximum size (guards
-            // against unbounded growth on unusual model outputs).
-            if self.byte_fallback_buffer.len() >= BYTE_FALLBACK_BUFFER_MAX {
-                return self.flush_byte_fallback_buffer();
-            }
-
-            // Try to decode the buffered bytes as UTF-8.
-            match std::str::from_utf8(&self.byte_fallback_buffer) {
-                Ok(decoded) if !decoded.is_empty() => {
-                    let decoded = decoded.to_string();
-                    self.byte_fallback_buffer.clear();
-                    self.generated_text.push_str(&decoded);
-                    // Advance prev_decoded_len by syncing with the full
-                    // re-decode so that subsequent tokens start from the
-                    // right position.
-                    let full_text = tokenizer.decode(&self.all_ids, false).unwrap_or_default();
-                    self.prev_decoded_len = safe_emit_boundary(&full_text);
-                    return Some(decoded);
-                }
-                _ => {
-                    // Incomplete sequence -- hold in buffer, emit nothing.
-                    return None;
-                }
-            }
-        }
-
-        // Non-byte-fallback token: flush any leftover byte-fallback bytes as
-        // replacement characters before continuing with the normal decode path.
-        if !self.byte_fallback_buffer.is_empty() {
-            let flushed = self.flush_byte_fallback_buffer();
-            // Re-run the normal path for the current (non-byte-fallback) token.
-            // The flush already updated prev_decoded_len, so the subsequent
-            // re-decode will pick up where it left off.
-            let extra = self.emit_regular_token(tokenizer);
-            return match (flushed, extra) {
-                (Some(a), Some(b)) => Some(a + &b),
-                (Some(a), None) => Some(a),
-                (None, Some(b)) => Some(b),
-                (None, None) => None,
-            };
-        }
-
-        self.emit_regular_token(tokenizer)
-    }
-
-    /// Emit text from the current `all_ids` using the standard re-decode path.
-    ///
-    /// Advances `prev_decoded_len` to the safe boundary. Returns the newly
-    /// emitted text, or `None` if nothing can be emitted yet.
-    fn emit_regular_token(&mut self, tokenizer: &MlxcelTokenizer) -> Option<String> {
-        let full_text = tokenizer.decode(&self.all_ids, false).unwrap_or_default();
-
-        // Find the safe emit boundary: skip trailing U+FFFD replacement characters.
-        // Byte-level BPE tokenizers split multi-byte UTF-8 sequences across tokens.
-        // Incomplete byte sequences decode as U+FFFD, but become valid characters
-        // once the completing token arrives. Emitting FFFD prematurely corrupts
-        // the output because the byte offset shifts when the replacement chars
-        // resolve into shorter real characters.
-        let safe_len = safe_emit_boundary(&full_text);
-
-        if safe_len <= self.prev_decoded_len {
+        // `MAX_HELD_TOKENS` force-emits on degenerate output that never
+        // completes a sequence, bounding the held window (and thus the per-token
+        // decode cost). A legitimate incomplete character never spans that many
+        // tokens.
+        let force = self.all_ids.len().saturating_sub(self.read_offset) >= MAX_HELD_TOKENS;
+        if new_text.len() <= prefix_text.len() || (!force && new_text.ends_with('\u{FFFD}')) {
             return None;
         }
 
-        let new_text = &full_text[self.prev_decoded_len..safe_len];
-        if new_text.is_empty() {
+        let delta = self.window_delta(tokenizer, &prefix_text, &new_text);
+        self.prefix_offset = self.read_offset;
+        self.read_offset = self.all_ids.len();
+        if delta.is_empty() {
             return None;
         }
-
-        self.generated_text.push_str(new_text);
-        self.prev_decoded_len = safe_len;
-        Some(new_text.to_string())
+        self.generated_text.push_str(&delta);
+        Some(delta)
     }
 
-    /// Flush the byte-fallback buffer to the output.
+    /// Flush any remaining windowed text (including an unresolved trailing
+    /// incomplete sequence) at the end of generation.
     ///
-    /// If the buffered bytes form valid UTF-8, emit the decoded string.
-    /// Otherwise emit one replacement character (U+FFFD) per buffered byte, in
-    /// line with the `ByteFallback` decoder's own fallback behaviour. In both
-    /// cases the buffer is cleared and `prev_decoded_len` is re-synced.
-    fn flush_byte_fallback_buffer(&mut self) -> Option<String> {
-        if self.byte_fallback_buffer.is_empty() {
-            return None;
-        }
-        let buf = std::mem::take(&mut self.byte_fallback_buffer);
-        let flushed = match std::str::from_utf8(&buf) {
-            Ok(s) => s.to_string(),
-            Err(_) => "\u{FFFD}".repeat(buf.len()),
-        };
-        // Advance prev_decoded_len by the exact byte length of what was just
-        // emitted. Using safe_emit_boundary on the full re-decode would advance
-        // past any trailing text from the next regular token (which has already
-        // been pushed into all_ids), causing that text to be silently dropped.
-        self.prev_decoded_len += flushed.len();
-
-        if flushed.is_empty() {
-            None
-        } else {
-            self.generated_text.push_str(&flushed);
-            Some(flushed)
-        }
-    }
-
-    /// Flush any remaining buffered text (including unresolved replacement chars)
-    /// at the end of generation.
-    ///
-    /// Also drains the byte-fallback buffer: any accumulated bytes that did not
-    /// form a complete UTF-8 sequence are emitted as U+FFFD replacement
-    /// characters so that the streamed output matches the non-streaming result.
+    /// Unlike [`Self::on_token`], the trailing-U+FFFD guard is not applied: any
+    /// bytes that never completed a UTF-8 sequence are emitted here as U+FFFD
+    /// replacement characters so that the streamed output matches a
+    /// whole-history decode. The window prefix ended on a complete boundary, so
+    /// `prefix_text` is a genuine prefix of `new_text` and the slice is safe.
     pub fn flush(&mut self, tokenizer: &MlxcelTokenizer) {
-        // Drain the byte-fallback buffer first. Any incomplete byte sequences
-        // are flushed as replacement characters here; we then skip past the
-        // corresponding replacement chars in the full-decode result below so
-        // they are not emitted a second time.
-        if !self.byte_fallback_buffer.is_empty() {
-            self.flush_byte_fallback_buffer();
-            // After a byte-fallback flush, prev_decoded_len sits at
-            // safe_emit_boundary (i.e. just before trailing U+FFFD chars
-            // from the incomplete sequence). Advance it past those trailing
-            // replacement chars so the normal emit path below does not
-            // re-emit them.
-            let full_text = tokenizer.decode(&self.all_ids, false).unwrap_or_default();
-            self.prev_decoded_len = full_text.len();
-            return;
+        let prefix_text = self.decode_window(tokenizer, self.prefix_offset, self.read_offset);
+        let new_text = self.decode_window(tokenizer, self.prefix_offset, self.all_ids.len());
+        if new_text.len() > prefix_text.len() {
+            let delta = self.window_delta(tokenizer, &prefix_text, &new_text);
+            self.generated_text.push_str(&delta);
         }
-
-        let full_text = tokenizer.decode(&self.all_ids, false).unwrap_or_default();
-        if full_text.len() > self.prev_decoded_len {
-            let remaining = &full_text[self.prev_decoded_len..];
-            self.generated_text.push_str(remaining);
-            self.prev_decoded_len = full_text.len();
-        }
+        self.prefix_offset = self.all_ids.len();
+        self.read_offset = self.all_ids.len();
     }
 
     #[allow(dead_code)]
@@ -2278,45 +2252,6 @@ impl StreamingDecodeState {
             self.generated_text.truncate(cut);
         }
         self.finish_with_cache(start, prompt_token_count, max_tokens, 0)
-    }
-}
-
-/// Find the byte position after the last non-U+FFFD character.
-/// Trailing replacement characters are buffered because they likely come from
-/// incomplete multi-byte UTF-8 sequences that will be completed by the next token.
-fn safe_emit_boundary(text: &str) -> usize {
-    text.char_indices()
-        .rev()
-        .find(|(_, c)| *c != '\u{FFFD}')
-        .map(|(i, c)| i + c.len_utf8())
-        .unwrap_or(0)
-}
-
-/// Detect a byte-fallback token piece and return the raw byte value.
-///
-/// Byte-fallback tokens have the form `<0xXX>` where `XX` is a two-digit
-/// hex value, e.g. `<0xE2>`, `<0x80>`, `<0x9C>`. These are produced by
-/// tokenizers whose model config has `byte_fallback = true` (common in Gemma
-/// and some Llama variants built with SentencePiece byte-fallback vocabulary).
-///
-/// Returns `None` for regular token pieces that do not match this pattern.
-///
-/// Used by: StreamingDecodeState (model_worker.rs)
-fn parse_byte_fallback_token(piece: &str) -> Option<u8> {
-    // Must be exactly 6 bytes: '<', '0', 'x', HI, LO, '>'
-    // Use byte-level checks so that `from_str_radix` never sees a leading '+'
-    // or '-' sign (defense-in-depth: e.g. `<0x+f>` would otherwise parse as
-    // byte 0x0F).
-    let bytes = piece.as_bytes();
-    if bytes.len() == 6
-        && &bytes[..3] == b"<0x"
-        && bytes[5] == b'>'
-        && bytes[3].is_ascii_hexdigit()
-        && bytes[4].is_ascii_hexdigit()
-    {
-        u8::from_str_radix(std::str::from_utf8(&bytes[3..5]).ok()?, 16).ok()
-    } else {
-        None
     }
 }
 
