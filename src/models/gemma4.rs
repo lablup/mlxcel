@@ -756,20 +756,48 @@ pub(crate) fn fused_global_scale_disabled() -> bool {
 /// (`compiled_per_layer_input_gate`) can be used for a given gate/projection
 /// pair. The fused C++ path now folds the native-NVFP4 `weight_scale_2`
 /// sidecar (issue #698), so a sidecar-carrying pair is eligible when the fold
-/// is enabled (`fused_scale_enabled`). When the kill switch disables the fold,
-/// a sidecar-carrying pair falls through to the op-at-a-time path, where
-/// `UnifiedLinear::forward` applies the scalar. Pairs with no sidecar are
-/// always eligible, exactly as before.
+/// is enabled (`fused_scale_enabled`) AND the call is single-token decode
+/// (`single_token`). For multi-token prefill, the C++ bridge itself falls back
+/// to an uncompiled eager fold once the sidecar is present, which regresses
+/// prefill throughput versus the compiled op-at-a-time activation used below,
+/// so a sidecar-carrying pair must bypass the fused path for any multi-token
+/// call regardless of the fold toggle (issue #698 follow-up). When the kill
+/// switch disables the fold, or the call is multi-token, a sidecar-carrying
+/// pair falls through to the op-at-a-time path, where `UnifiedLinear::forward`
+/// applies the scalar. Pairs with no sidecar are always eligible, exactly as
+/// before.
 fn per_layer_input_gate_fused_path_eligible(
     gate_qw: &mlxcel_core::layers::QuantizedWeight,
     proj_qw: &mlxcel_core::layers::QuantizedWeight,
     fused_scale_enabled: bool,
+    single_token: bool,
 ) -> bool {
     if gate_qw.global_scale.is_some() || proj_qw.global_scale.is_some() {
-        fused_scale_enabled
+        fused_scale_enabled && single_token
     } else {
         true
     }
+}
+
+/// Whether the compiled scaled dense-MLP fused path
+/// (`compiled_gelu_approx_mlp_forward_global_scale`) can be used for a given
+/// sidecar / kill-switch / query-length combination. Mirrors
+/// `per_layer_input_gate_fused_path_eligible`'s gating for `MLP::forward`'s
+/// dense gate/up/down path: a sidecar-carrying MLP is eligible only when the
+/// fold is enabled AND the call is single-token decode. For multi-token
+/// prefill, the C++ bridge falls back to an uncompiled eager fold once a
+/// sidecar is present, which regressed 2048-token prefill throughput by 8.3%
+/// versus the compiled op-at-a-time activation `MLP::forward` falls through
+/// to, so multi-token must bypass the fused path regardless of the kill
+/// switch (issue #698 follow-up). An MLP with no sidecar is unaffected by
+/// this gate; `MLP::forward` takes the separate unscaled fused path for that
+/// case regardless of `single_token`.
+fn dense_mlp_scaled_fused_path_eligible(
+    any_sidecar: bool,
+    fused_scale_enabled: bool,
+    single_token: bool,
+) -> bool {
+    any_sidecar && fused_scale_enabled && single_token
 }
 
 impl MLP {
@@ -810,7 +838,20 @@ impl MLP {
                 || up_qw.global_scale.is_some()
                 || down_qw.global_scale.is_some();
 
-            if any_sidecar && !fused_global_scale_disabled() {
+            // The scaled fused C++ path is a decode-only win (issue #698
+            // follow-up): for multi-token prefill, the C++ bridge itself
+            // falls back to an EAGER, uncompiled `multiply(gelu_tanh_approx(
+            // gate), up)` once a sidecar is present, which is slower than the
+            // compiled op-at-a-time activation the fall-through below uses.
+            // Gate on the query length here so prefill never routes into that
+            // eager fold, regardless of the kill switch.
+            let single_token = mlxcel_core::array_shape(x)[1] == 1;
+
+            if dense_mlp_scaled_fused_path_eligible(
+                any_sidecar,
+                !fused_global_scale_disabled(),
+                single_token,
+            ) {
                 return unsafe {
                     mlxcel_core::compiled_gelu_approx_mlp_forward_global_scale(
                         x,
@@ -849,8 +890,10 @@ impl MLP {
                     )
                 };
             }
-            // any_sidecar && kill switch set: fall through to op-at-a-time,
-            // where each `UnifiedLinear::forward` applies its own scalar.
+            // any_sidecar && (kill switch set OR multi-token prefill): fall
+            // through to op-at-a-time, where each `UnifiedLinear::forward`
+            // applies its own scalar and the compiled activation below
+            // handles the GeGLU.
         }
 
         if let Some(out) =
@@ -2463,13 +2506,19 @@ impl DecoderLayer {
             // the gate scale before the GeGLU activation and the proj scale on
             // the projected output, byte-identical to `apply_global_scale`.
             // `MLXCEL_DISABLE_FUSED_GLOBAL_SCALE` disables the fold, sending a
-            // sidecar-carrying pair to the op-at-a-time chain below.
+            // sidecar-carrying pair to the op-at-a-time chain below. So does a
+            // multi-token (prefill) call: the C++ bridge falls back to an
+            // uncompiled eager fold once a sidecar is present, which regresses
+            // prefill versus the compiled op-at-a-time activation, so
+            // multi-token inputs bypass the fused path regardless of the kill
+            // switch (issue #698 follow-up).
             let combined = if let (Some(gate_qw), Some(proj_qw)) =
                 (gate_proj.quantized_weight(), proj.quantized_weight())
                 && per_layer_input_gate_fused_path_eligible(
                     gate_qw,
                     proj_qw,
                     !fused_global_scale_disabled(),
+                    mlxcel_core::array_shape(x)[1] == 1,
                 ) {
                 unsafe {
                     mlxcel_core::compiled_per_layer_input_gate(
@@ -5514,8 +5563,9 @@ mod gemma4_unified_mask_tests {
 #[cfg(test)]
 mod quant_scheme_tests {
     use super::{
-        ModelArgs, QuantizationParams, dense_mlp_shared_quant_layout,
-        per_layer_input_gate_fused_path_eligible, validate_quantization_scheme,
+        ModelArgs, QuantizationParams, dense_mlp_scaled_fused_path_eligible,
+        dense_mlp_shared_quant_layout, per_layer_input_gate_fused_path_eligible,
+        validate_quantization_scheme,
     };
     use mlxcel_core::dtype;
     use mlxcel_core::layers::QuantizedWeight;
@@ -5732,39 +5782,102 @@ mod quant_scheme_tests {
         );
     }
 
+    /// `MLP::forward`'s dense-MLP scaled fused path (issue #698 follow-up)
+    /// mirrors `per_layer_input_gate_fused_path_eligible`'s single-token +
+    /// kill-switch gating: no sidecar is unaffected by either toggle, a
+    /// sidecar-carrying MLP is eligible only for single-token decode with the
+    /// fold enabled, and multi-token bypasses the fused path regardless of
+    /// the kill switch.
+    #[test]
+    fn dense_mlp_scaled_fused_path_eligible_no_sidecar_always_false() {
+        // `any_sidecar = false` means `MLP::forward` takes the separate
+        // unscaled fused path instead, so this helper is never consulted for
+        // that branch; it must still report `false` for every toggle
+        // combination since the scaled-path call itself is guarded on
+        // `any_sidecar` first.
+        for fused_scale_enabled in [true, false] {
+            for single_token in [true, false] {
+                assert!(
+                    !dense_mlp_scaled_fused_path_eligible(false, fused_scale_enabled, single_token),
+                    "no sidecar must never route through the scaled fused path \
+                     (fused_scale_enabled={fused_scale_enabled}, single_token={single_token})"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn dense_mlp_scaled_fused_path_eligible_sidecar_single_token_enabled() {
+        assert!(
+            dense_mlp_scaled_fused_path_eligible(true, true, true),
+            "sidecar + single-token + fold enabled must take the scaled fused path"
+        );
+    }
+
+    #[test]
+    fn dense_mlp_scaled_fused_path_eligible_sidecar_multi_token_bypasses_regardless_of_fold() {
+        for fused_scale_enabled in [true, false] {
+            assert!(
+                !dense_mlp_scaled_fused_path_eligible(true, fused_scale_enabled, false),
+                "sidecar + multi-token must bypass the scaled fused path even when the fold is \
+                 enabled (fused_scale_enabled={fused_scale_enabled})"
+            );
+        }
+    }
+
+    #[test]
+    fn dense_mlp_scaled_fused_path_eligible_sidecar_rejects_when_fold_disabled() {
+        assert!(
+            !dense_mlp_scaled_fused_path_eligible(true, false, true),
+            "sidecar must fall back to op-at-a-time when the fold is disabled even for \
+             single-token decode"
+        );
+    }
+
     /// A per-layer-input gate/projection pair with no native-NVFP4
     /// `global_scale` sidecar on either side is always eligible for the
     /// compiled `compiled_per_layer_input_gate` fused path, regardless of the
-    /// fold toggle (the unscaled graph is unchanged by issue #698).
+    /// fold toggle or the query length (the unscaled graph is unchanged by
+    /// issue #698 and its single-token follow-up).
     #[test]
     fn per_layer_input_gate_fused_path_eligible_without_global_scale() {
         let gate_qw = dummy_quantized_weight(None);
         let proj_qw = dummy_quantized_weight(None);
         for fused_scale_enabled in [true, false] {
-            assert!(
-                per_layer_input_gate_fused_path_eligible(&gate_qw, &proj_qw, fused_scale_enabled),
-                "no global_scale on either projection must always take the compiled fused path"
-            );
+            for single_token in [true, false] {
+                assert!(
+                    per_layer_input_gate_fused_path_eligible(
+                        &gate_qw,
+                        &proj_qw,
+                        fused_scale_enabled,
+                        single_token
+                    ),
+                    "no global_scale on either projection must always take the compiled fused \
+                     path (fused_scale_enabled={fused_scale_enabled}, single_token={single_token})"
+                );
+            }
         }
     }
 
     /// Issue #698: the fused `compiled_per_layer_input_gate` path now folds the
     /// native-NVFP4 `weight_scale_2` sidecar, so a gate carrying one is
-    /// eligible when the fold is enabled.
+    /// eligible when the fold is enabled AND the call is single-token decode.
     #[test]
     fn per_layer_input_gate_accepts_fused_path_when_gate_has_global_scale() {
         let gate_qw = dummy_quantized_weight(Some(mlxcel_core::ones(&[1], dtype::FLOAT32)));
         let proj_qw = dummy_quantized_weight(None);
         assert!(
-            per_layer_input_gate_fused_path_eligible(&gate_qw, &proj_qw, true),
-            "a gate global_scale sidecar must take the fused path when the fold is enabled"
+            per_layer_input_gate_fused_path_eligible(&gate_qw, &proj_qw, true, true),
+            "a gate global_scale sidecar must take the fused path for single-token decode when \
+             the fold is enabled"
         );
     }
 
     /// Issue #698 kill switch: with the fold disabled
     /// (`MLXCEL_DISABLE_FUSED_GLOBAL_SCALE`), a sidecar-carrying pair must fall
     /// through to the op-at-a-time path, where `UnifiedLinear::forward` applies
-    /// the scalar. Covers a sidecar on the gate, on the proj, and on both.
+    /// the scalar. Covers a sidecar on the gate, on the proj, and on both, for
+    /// a single-token call (the fold's only otherwise-eligible shape).
     #[test]
     fn per_layer_input_gate_rejects_fused_path_when_fold_disabled() {
         let with = || dummy_quantized_weight(Some(mlxcel_core::ones(&[1], dtype::FLOAT32)));
@@ -5775,27 +5888,64 @@ mod quant_scheme_tests {
             (with(), with(), "both sidecars"),
         ] {
             assert!(
-                !per_layer_input_gate_fused_path_eligible(&gate_qw, &proj_qw, false),
+                !per_layer_input_gate_fused_path_eligible(&gate_qw, &proj_qw, false, true),
                 "{label}: a sidecar-carrying pair must fall back to op-at-a-time when the fold \
                  is disabled"
             );
         }
     }
 
+    /// Issue #698 follow-up: a sidecar-carrying pair must bypass the fused
+    /// path for a multi-token (prefill) call regardless of the fold toggle.
+    /// The C++ bridge falls back to an uncompiled eager fold for multi-token
+    /// sidecar calls, which regressed 2048-token prefill throughput by 8.3%
+    /// versus the compiled op-at-a-time activation the bypass below uses, so
+    /// multi-token must never route into the fused path even with the fold
+    /// enabled.
+    #[test]
+    fn per_layer_input_gate_rejects_fused_path_for_multi_token_regardless_of_fold() {
+        let with = || dummy_quantized_weight(Some(mlxcel_core::ones(&[1], dtype::FLOAT32)));
+        let without = || dummy_quantized_weight(None);
+        for (gate_qw, proj_qw, label) in [
+            (with(), without(), "gate-only sidecar"),
+            (without(), with(), "proj-only sidecar"),
+            (with(), with(), "both sidecars"),
+        ] {
+            for fused_scale_enabled in [true, false] {
+                assert!(
+                    !per_layer_input_gate_fused_path_eligible(
+                        &gate_qw,
+                        &proj_qw,
+                        fused_scale_enabled,
+                        false
+                    ),
+                    "{label}: multi-token must bypass the fused path even when the fold is \
+                     enabled (fused_scale_enabled={fused_scale_enabled})"
+                );
+            }
+        }
+    }
+
     /// Issue #698 mixed case: only the projection side carries a sidecar. The
-    /// pair is eligible when the fold is enabled (the fused path treats the
-    /// absent gate scale as no multiply) and ineligible when it is disabled.
+    /// pair is eligible for a single-token call when the fold is enabled (the
+    /// fused path treats the absent gate scale as no multiply) and ineligible
+    /// when the fold is disabled or the call is multi-token.
     #[test]
     fn per_layer_input_gate_mixed_proj_only_sidecar_follows_fold_toggle() {
         let gate_qw = dummy_quantized_weight(None);
         let proj_qw = dummy_quantized_weight(Some(mlxcel_core::ones(&[1], dtype::FLOAT32)));
         assert!(
-            per_layer_input_gate_fused_path_eligible(&gate_qw, &proj_qw, true),
-            "proj-only sidecar must take the fused path when the fold is enabled"
+            per_layer_input_gate_fused_path_eligible(&gate_qw, &proj_qw, true, true),
+            "proj-only sidecar must take the fused path for single-token decode when the fold \
+             is enabled"
         );
         assert!(
-            !per_layer_input_gate_fused_path_eligible(&gate_qw, &proj_qw, false),
+            !per_layer_input_gate_fused_path_eligible(&gate_qw, &proj_qw, false, true),
             "proj-only sidecar must fall back when the fold is disabled"
+        );
+        assert!(
+            !per_layer_input_gate_fused_path_eligible(&gate_qw, &proj_qw, true, false),
+            "proj-only sidecar must fall back for multi-token even when the fold is enabled"
         );
     }
 }

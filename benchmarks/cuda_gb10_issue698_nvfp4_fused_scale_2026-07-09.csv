@@ -5,3 +5,4 @@ dense_short,dense,folded_into_block_scales,gemma-4-31b-it-nvfp4,models/gemma-4-3
 fused_2048,direct,fused_global_scale,gemma-4-31b-it-nvfp4,models/gemma-4-31b-it-nvfp4,2048,32,60.689,36.60,4965.05,412.48,6309.04,5.07,36.60,2026-07-09,NVIDIA_GB10_122GB,0.3.3,release,32,"Hello, how are you today?",2048
 opat_2048,direct,op_at_a_time_bypass,gemma-4-31b-it-nvfp4,models/gemma-4-31b-it-nvfp4,2048,32,60.455,36.60,4552.13,449.90,6391.06,5.01,36.60,2026-07-09,NVIDIA_GB10_122GB,0.3.3,release,32,"Hello, how are you today?",2048
 dense_2048,dense,folded_into_block_scales,gemma-4-31b-it-nvfp4,models/gemma-4-31b-it-nvfp4,2048,32,190.687,36.60,5182.13,395.20,5950.56,5.38,36.60,2026-07-08,NVIDIA_GB10_122GB,0.3.3,release,32,"Hello, how are you today?",2048
+fused_fix_2048,direct,fused_global_scale,gemma-4-31b-it-nvfp4,models/gemma-4-31b-it-nvfp4,2048,32,70.819,36.60,4579.18,447.24,6341.67,5.05,36.60,2026-07-09,NVIDIA_GB10_122GB,0.3.3,release,32,"Hello, how are you today?",2048
