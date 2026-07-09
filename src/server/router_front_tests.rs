@@ -17,9 +17,11 @@
 //!
 //! Model-free: exercise `resolve_completion_tokens`, the pure function that
 //! turns the worker's authoritative wire-carried token count (or the emitted-
-//! piece fallback) into the reported `usage.completion_tokens`, and the chat
+//! piece fallback) into the reported `usage.completion_tokens`; the chat
 //! response/chunk builders (`chat_completion_json`, `chat_chunk_usage`) that
-//! surface it on `/v1/chat/completions` (issue #398).
+//! surface it on `/v1/chat/completions`; and `wants_stream_usage`, the
+//! `stream_options.include_usage` gate that decides whether the streaming
+//! usage chunk is sent at all (issue #398).
 
 use super::*;
 
@@ -161,6 +163,45 @@ fn chat_chunk_usage_shape() {
     assert_eq!(chunk["usage"]["prompt_tokens"], serde_json::json!(20));
     assert_eq!(chunk["usage"]["completion_tokens"], serde_json::json!(7));
     assert_eq!(chunk["usage"]["total_tokens"], serde_json::json!(27));
+}
+
+/// A request that omits `stream_options` entirely (the common case: most
+/// clients never set it) must not opt into the trailing usage chunk. This is
+/// the default this PR must not flip, since nothing else guards the streaming
+/// gate itself (`chat_completion_json` and `chat_chunk_usage` above only
+/// cover the chunk *shape*, not *whether* it is sent).
+#[test]
+fn wants_stream_usage_defaults_to_false_without_stream_options() {
+    let json = r#"{"model": "qwen3", "messages": [{"role": "user", "content": "hi"}]}"#;
+    let request: ChatCompletionRequest = serde_json::from_str(json).unwrap();
+    assert!(request.stream_options.is_none());
+    assert!(!wants_stream_usage(&request));
+}
+
+/// `stream_options.include_usage: false` (explicit, not just absent) is also
+/// a no.
+#[test]
+fn wants_stream_usage_respects_explicit_false() {
+    let json = r#"{
+        "model": "qwen3",
+        "messages": [{"role": "user", "content": "hi"}],
+        "stream_options": {"include_usage": false}
+    }"#;
+    let request: ChatCompletionRequest = serde_json::from_str(json).unwrap();
+    assert!(!wants_stream_usage(&request));
+}
+
+/// `stream_options.include_usage: true` opts in, matching single-node
+/// chat/completions and the router's own `/v1/completions` streaming path.
+#[test]
+fn wants_stream_usage_respects_explicit_true() {
+    let json = r#"{
+        "model": "qwen3",
+        "messages": [{"role": "user", "content": "hi"}],
+        "stream_options": {"include_usage": true}
+    }"#;
+    let request: ChatCompletionRequest = serde_json::from_str(json).unwrap();
+    assert!(wants_stream_usage(&request));
 }
 
 // ── /router/stats topology-disclosure redaction (issue #389) ────────────────

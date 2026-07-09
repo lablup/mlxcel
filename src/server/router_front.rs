@@ -678,11 +678,7 @@ async fn route_chat(state: Arc<RouterState>, request: ChatCompletionRequest) -> 
         // into an unbounded channel; return the SSE response immediately. The
         // optional trailing usage chunk mirrors the router's own
         // `/v1/completions` streaming path and single-node chat (issue #398).
-        let include_usage = request
-            .stream_options
-            .as_ref()
-            .map(|o| o.include_usage)
-            .unwrap_or(false);
+        let include_usage = wants_stream_usage(&request);
         let (chunk_tx, chunk_rx) =
             tokio::sync::mpsc::unbounded_channel::<Result<Event, Infallible>>();
         let state2 = state.clone();
@@ -1283,6 +1279,19 @@ fn resolve_completion_tokens(
         .generated_tokens
         .map(|n| (n as usize).min(max_tokens))
         .unwrap_or(frame_counted.min(max_tokens))
+}
+
+/// Whether the client requested the trailing streaming usage chunk via
+/// `stream_options.include_usage`. Defaults to `false` when the request omits
+/// `stream_options` entirely, or when the field is present but `false`,
+/// matching single-node chat/completions (`chat.rs`, `completions.rs`) and
+/// the router's own `/v1/completions` streaming path (issue #398).
+fn wants_stream_usage(request: &ChatCompletionRequest) -> bool {
+    request
+        .stream_options
+        .as_ref()
+        .map(|o| o.include_usage)
+        .unwrap_or(false)
 }
 
 /// Consume the two-part disaggregated result (prefill first token + decode
