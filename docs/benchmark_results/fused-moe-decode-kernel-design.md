@@ -415,9 +415,11 @@ Findings:
 - **The crossover held close to the e9463bb measurement.** Interpolating between
   phi-3.5-moe (Dff 6400, +3.6%) and llama-4-scout (Dff 8192, -1.5%) puts the
   ratio=1.0 crossover at Dff ~7672, against ~8000 on the prior pin. A ~4% shift
-  over a 3-run median is within the noise the 2026-07-03 sweep already flagged at
-  this same Dff point (fallback tok/s there spans 21.33-21.85 run to run, a 2.4%
-  spread larger than the shift itself).
+  in a crossover drawn from 3-run medians is within run-to-run noise: the
+  2026-07-03 sweep already flagged this same Dff point as noisy (one of its three
+  fused runs matched the fallback), and this 2026-07-10 sweep's own llama-4-scout
+  fallback spans 21.33-21.85 tok/s run to run, a 2.4% spread comparable to the
+  shift.
   - lfm2 (Dff 1792) still wins clearly, +14.2% versus the prior +11.2-12.4%.
   - phi-3.5-moe (Dff 6400) still wins, +3.6% versus the prior +5.0%.
   - llama-4-scout (Dff 8192) is now measurably negative at -1.5% rather than the
