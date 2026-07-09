@@ -13,12 +13,14 @@
 // limitations under the License.
 
 use super::sanitize::{load_text_weights, sanitize_config_json, sanitize_tied_embeddings};
+use crate::test_support::env_lock::env_lock;
 use mlxcel_core::weights::{WeightMap, WeightTransform};
 use mlxcel_core::{self, dtype};
 use safetensors::tensor::{Dtype as SafeTensorDtype, View};
 use serde_json::json;
 use std::borrow::Cow;
 use std::collections::HashMap;
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -85,6 +87,140 @@ fn write_safetensors(path: &Path, tensors: &[(&str, OwnedTensor)]) {
         views.insert((*name).to_string(), tensor.clone());
     }
     safetensors::serialize_to_file(&views, None, path).unwrap();
+}
+
+const NVFP4_REPACK_ENV_KEYS: &[&str] = &["MLXCEL_NVFP4_DENSE_REPACK", "MLXCEL_NVFP4_NATIVE_REPACK"];
+
+struct EnvRestore {
+    saved: Vec<(&'static str, Option<OsString>)>,
+}
+
+impl EnvRestore {
+    fn clear(keys: &[&'static str]) -> Self {
+        let saved = keys
+            .iter()
+            .map(|&key| (key, std::env::var_os(key)))
+            .collect();
+        let guard = Self { saved };
+        for key in keys {
+            // SAFETY: env-mutating tests acquire the crate-wide `env_lock()`
+            // before constructing this guard, so no other test thread mutates
+            // process environment variables concurrently.
+            #[allow(unsafe_code)]
+            unsafe {
+                std::env::remove_var(key);
+            }
+        }
+        guard
+    }
+
+    #[cfg(not(feature = "cuda"))]
+    fn set_with_clear(keys: &[&'static str], key: &'static str, value: &str) -> Self {
+        let guard = Self::clear(keys);
+        // SAFETY: same `env_lock()` serialization as `clear`; callers keep the
+        // lock guard alive longer than this environment restore guard.
+        #[allow(unsafe_code)]
+        unsafe {
+            std::env::set_var(key, value);
+        }
+        guard
+    }
+}
+
+impl Drop for EnvRestore {
+    fn drop(&mut self) {
+        for (key, value) in &self.saved {
+            // SAFETY: callers acquire `env_lock()` before constructing this
+            // guard, and Rust drops this guard before the lock guard because it
+            // is declared after the lock in each test.
+            #[allow(unsafe_code)]
+            unsafe {
+                match value {
+                    Some(value) => std::env::set_var(key, value),
+                    None => std::env::remove_var(key),
+                }
+            }
+        }
+    }
+}
+
+fn write_gemma4_nvfp4_repack_fixture(dir: &Path) -> usize {
+    std::fs::write(
+        dir.join("config.json"),
+        serde_json::to_vec(&json!({
+            "model_type": "gemma4",
+            "tie_word_embeddings": false,
+            "quantization": {
+                "group_size": 16,
+                "bits": 4,
+                "mode": "nvfp4"
+            },
+            "text_config": {
+                "model_type": "gemma4",
+                "quantization": {
+                    "group_size": 16,
+                    "bits": 4,
+                    "mode": "nvfp4"
+                }
+            }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    // Shape: [out_dim=2, packed_dim=16]. Each byte encodes two FP4 E2M1
+    // nibbles. Nibble 0x2 = 1.0, so byte 0x22 -> [1.0, 1.0]. Expected
+    // dequantized shape: [2, 32].
+    let out_dim: usize = 2;
+    let packed_dim: usize = 16; // in_dim / 2 = 32 / 2
+    let weight_data = vec![0x22u8; out_dim * packed_dim];
+
+    // F16 block scales: shape [out_dim=2, num_groups=2]. 1.0 in F16 = 0x3C00
+    // (little-endian bytes [0x00, 0x3C]).
+    let f16_one: [u8; 2] = [0x00, 0x3C];
+    let num_groups = 2usize;
+    let mut scale_data = Vec::with_capacity(out_dim * num_groups * 2);
+    for _ in 0..(out_dim * num_groups) {
+        scale_data.extend_from_slice(&f16_one);
+    }
+
+    // Global F32 scale: 1-element F32 tensor with value 1.0.
+    // 1.0 in F32 little-endian = [0x00, 0x00, 0x80, 0x3F].
+    let scale2_data: Vec<u8> = vec![0x00, 0x00, 0x80, 0x3F];
+
+    // Use nvfp4-style key prefix: `model.language_model.layers.0.mlp.gate_proj`
+    let prefix = "model.language_model.layers.0.mlp.gate_proj";
+    write_safetensors(
+        &dir.join("model.safetensors"),
+        &[
+            (
+                &format!("{prefix}.weight"),
+                OwnedTensor {
+                    dtype: SafeTensorDtype::U8,
+                    shape: vec![out_dim, packed_dim],
+                    data: weight_data,
+                },
+            ),
+            (
+                &format!("{prefix}.weight_scale"),
+                OwnedTensor {
+                    dtype: SafeTensorDtype::F16,
+                    shape: vec![out_dim, num_groups],
+                    data: scale_data,
+                },
+            ),
+            (
+                &format!("{prefix}.weight_scale_2"),
+                OwnedTensor {
+                    dtype: SafeTensorDtype::F32,
+                    shape: vec![1],
+                    data: scale2_data,
+                },
+            ),
+        ],
+    );
+
+    out_dim
 }
 
 #[test]
@@ -223,88 +359,15 @@ fn load_and_sanitize_weights_selectively_keeps_gemma4_text_tensors() {
 ///
 /// Test data: 2×16 packed U8 weights (nibble 0x2 = FP4 E2M1 value 1.0),
 /// 2×2 F16 block scales (all 1.0 = 0x3C00), global F32 scale 1.0.
-/// CUDA uses native NVFP4; other backends keep the affine fallback pending
-/// separate Metal benchmarks. Both paths dequantize to a 2×32 tensor with all
-/// values = 1.0.
+/// Issue #705 makes direct native NVFP4 the default on every backend. The
+/// explicit dense-affine rollback remains covered by a separate non-CUDA test.
 #[test]
 fn load_and_sanitize_weights_repacks_nvfp4_gemma4_checkpoint() {
+    let _env_guard = env_lock();
+    let _nvfp4_env = EnvRestore::clear(NVFP4_REPACK_ENV_KEYS);
     let dir = temp_model_dir("gemma4_nvfp4");
     std::fs::create_dir_all(&dir).unwrap();
-
-    std::fs::write(
-        dir.join("config.json"),
-        serde_json::to_vec(&json!({
-            "model_type": "gemma4",
-            "tie_word_embeddings": false,
-            "quantization": {
-                "group_size": 16,
-                "bits": 4,
-                "mode": "nvfp4"
-            },
-            "text_config": {
-                "model_type": "gemma4",
-                "quantization": {
-                    "group_size": 16,
-                    "bits": 4,
-                    "mode": "nvfp4"
-                }
-            }
-        }))
-        .unwrap(),
-    )
-    .unwrap();
-
-    // Shape: [out_dim=2, packed_dim=16]. Each byte encodes two FP4 E2M1
-    // nibbles. Nibble 0x2 = 1.0, so byte 0x22 → [1.0, 1.0]. Expected
-    // dequantized shape: [2, 32].
-    let out_dim: usize = 2;
-    let packed_dim: usize = 16; // in_dim / 2 = 32 / 2
-    let weight_data = vec![0x22u8; out_dim * packed_dim];
-
-    // F16 block scales: shape [out_dim=2, num_groups=2]. 1.0 in F16 = 0x3C00
-    // (little-endian bytes [0x00, 0x3C]).
-    let f16_one: [u8; 2] = [0x00, 0x3C];
-    let num_groups = 2usize;
-    let mut scale_data = Vec::with_capacity(out_dim * num_groups * 2);
-    for _ in 0..(out_dim * num_groups) {
-        scale_data.extend_from_slice(&f16_one);
-    }
-
-    // Global F32 scale: 1-element F32 tensor with value 1.0.
-    // 1.0 in F32 little-endian = [0x00, 0x00, 0x80, 0x3F].
-    let scale2_data: Vec<u8> = vec![0x00, 0x00, 0x80, 0x3F];
-
-    // Use nvfp4-style key prefix: `model.language_model.layers.0.mlp.gate_proj`
-    let prefix = "model.language_model.layers.0.mlp.gate_proj";
-    write_safetensors(
-        &dir.join("model.safetensors"),
-        &[
-            (
-                &format!("{prefix}.weight"),
-                OwnedTensor {
-                    dtype: SafeTensorDtype::U8,
-                    shape: vec![out_dim, packed_dim],
-                    data: weight_data,
-                },
-            ),
-            (
-                &format!("{prefix}.weight_scale"),
-                OwnedTensor {
-                    dtype: SafeTensorDtype::F16,
-                    shape: vec![out_dim, num_groups],
-                    data: scale_data,
-                },
-            ),
-            (
-                &format!("{prefix}.weight_scale_2"),
-                OwnedTensor {
-                    dtype: SafeTensorDtype::F32,
-                    shape: vec![1],
-                    data: scale2_data,
-                },
-            ),
-        ],
-    );
+    let out_dim = write_gemma4_nvfp4_repack_fixture(&dir);
 
     let weights = super::sanitize::load_and_sanitize_weights(&dir).unwrap();
 
@@ -344,70 +407,128 @@ fn load_and_sanitize_weights_repacks_nvfp4_gemma4_checkpoint() {
     );
 
     let scales = weights.get(expected_scales_key).unwrap();
-    let dequantized = if cfg!(feature = "cuda") {
-        assert!(
-            !weights.contains_key(expected_biases_key),
-            "Native NVFP4 repack should not emit affine biases"
-        );
-        assert_eq!(
-            mlxcel_core::array_shape(scales),
-            vec![out_dim as i32, 2i32],
-            "Expected native NVFP4 scales shape [2, 2] for group_size=16"
-        );
-        // The direct transcode (issue #693) preserves weight_scale_2 as a
-        // per-linear global-scale sidecar instead of folding it into the E4M3
-        // block scales. The scales should be raw E4M3 U8 bytes.
-        let expected_global_scale_key = "language_model.model.layers.0.mlp.gate_proj.global_scale";
-        assert!(
-            weights.contains_key(expected_global_scale_key),
-            "Direct NVFP4 transcode should emit a global_scale sidecar"
-        );
-        assert_eq!(
-            mlxcel_core::array_dtype(scales),
-            dtype::UINT8,
-            "Native NVFP4 block scales should be raw E4M3 U8 bytes"
-        );
-        let global_scale = weights.get(expected_global_scale_key).unwrap();
-        let global_f32 = mlxcel_core::astype(global_scale, dtype::FLOAT32);
-        mlxcel_core::eval(&global_f32);
-        let g = mlxcel_core::array_to_raw_bytes(&global_f32);
-        let g_val = f32::from_le_bytes([g[0], g[1], g[2], g[3]]);
-        assert!(
-            (g_val - 1.0f32).abs() < 1e-6,
-            "Expected weight_scale_2 sidecar 1.0, got {g_val}"
-        );
-        unsafe { mlxcel_core::dequantize(w, scales, std::ptr::null(), 16, 4, "nvfp4") }
-    } else {
-        assert!(
-            weights.contains_key(expected_biases_key),
-            "Affine fallback should emit biases"
-        );
-        let biases = weights.get(expected_biases_key).unwrap();
-        assert_eq!(
-            mlxcel_core::array_shape(scales),
-            vec![out_dim as i32, 1i32],
-            "Expected affine scales shape [2, 1] for group_size=32"
-        );
-        assert_eq!(
-            mlxcel_core::array_shape(biases),
-            vec![out_dim as i32, 1i32],
-            "Expected affine biases shape [2, 1] for group_size=32"
-        );
-        let biases_ptr = biases.as_ref().unwrap() as *const _;
-        unsafe { mlxcel_core::dequantize(w, scales, biases_ptr, 32, 4, "affine") }
-    };
+    assert!(
+        !weights.contains_key(expected_biases_key),
+        "Default direct NVFP4 repack should not emit affine biases"
+    );
+    assert_eq!(
+        mlxcel_core::array_shape(scales),
+        vec![out_dim as i32, 2i32],
+        "Expected native NVFP4 scales shape [2, 2] for group_size=16"
+    );
+    // The direct transcode (issue #693) preserves weight_scale_2 as a
+    // per-linear global-scale sidecar instead of folding it into the E4M3
+    // block scales. The scales should be raw E4M3 U8 bytes.
+    let expected_global_scale_key = "language_model.model.layers.0.mlp.gate_proj.global_scale";
+    assert!(
+        weights.contains_key(expected_global_scale_key),
+        "Direct NVFP4 transcode should emit a global_scale sidecar"
+    );
+    assert_eq!(
+        mlxcel_core::array_dtype(scales),
+        dtype::UINT8,
+        "Native NVFP4 block scales should be raw E4M3 U8 bytes"
+    );
+    let global_scale = weights.get(expected_global_scale_key).unwrap();
+    let global_f32 = mlxcel_core::astype(global_scale, dtype::FLOAT32);
+    mlxcel_core::eval(&global_f32);
+    let g = mlxcel_core::array_to_raw_bytes(&global_f32);
+    let g_val = f32::from_le_bytes([g[0], g[1], g[2], g[3]]);
+    assert!(
+        (g_val - 1.0f32).abs() < 1e-6,
+        "Expected weight_scale_2 sidecar 1.0, got {g_val}"
+    );
+    let dequantized =
+        unsafe { mlxcel_core::dequantize(w, scales, std::ptr::null(), 16, 4, "nvfp4") };
     let dequantized_f32 = mlxcel_core::astype(&dequantized, dtype::FLOAT32);
     mlxcel_core::eval(&dequantized_f32);
     let shape = mlxcel_core::array_shape(&dequantized_f32);
     assert_eq!(shape, vec![out_dim as i32, 32i32], "Expected shape [2, 32]");
 
-    // All values should remain close to 1.0 after the load-time affine repack.
+    // All values should remain close to 1.0 after the direct native repack.
     let w_bytes = mlxcel_core::array_to_raw_bytes(&dequantized_f32);
     for chunk in w_bytes.chunks_exact(4) {
         let v = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
         assert!(
             (v - 1.0f32).abs() < 5e-2,
             "Expected value close to 1.0 after quantized repack, got {v}"
+        );
+    }
+
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// Non-CUDA rollback coverage for issue #705: direct native NVFP4 is now the
+/// default, but `MLXCEL_NVFP4_DENSE_REPACK=1` still preserves the previous
+/// dense-affine route for prefill-sensitive A/B comparisons.
+#[cfg(not(feature = "cuda"))]
+#[test]
+fn load_and_sanitize_weights_dense_repack_env_keeps_non_cuda_affine_rollback() {
+    let _env_guard = env_lock();
+    let _nvfp4_env =
+        EnvRestore::set_with_clear(NVFP4_REPACK_ENV_KEYS, "MLXCEL_NVFP4_DENSE_REPACK", "1");
+    let dir = temp_model_dir("gemma4_nvfp4_affine_rollback");
+    std::fs::create_dir_all(&dir).unwrap();
+    let out_dim = write_gemma4_nvfp4_repack_fixture(&dir);
+
+    let weights = super::sanitize::load_and_sanitize_weights(&dir).unwrap();
+
+    let expected_key = "language_model.model.layers.0.mlp.gate_proj.weight";
+    let expected_scale_key = "language_model.model.layers.0.mlp.gate_proj.weight_scale";
+    let expected_scale2_key = "language_model.model.layers.0.mlp.gate_proj.weight_scale_2";
+    let expected_scales_key = "language_model.model.layers.0.mlp.gate_proj.scales";
+    let expected_biases_key = "language_model.model.layers.0.mlp.gate_proj.biases";
+    let expected_global_scale_key = "language_model.model.layers.0.mlp.gate_proj.global_scale";
+
+    assert!(weights.contains_key(expected_key));
+    assert!(!weights.contains_key(expected_scale_key));
+    assert!(!weights.contains_key(expected_scale2_key));
+    assert!(
+        !weights.contains_key(expected_global_scale_key),
+        "Dense-affine rollback should not emit the native global_scale sidecar"
+    );
+    assert!(
+        weights.contains_key(expected_scales_key),
+        "Dense-affine rollback should emit affine scales"
+    );
+    assert!(
+        weights.contains_key(expected_biases_key),
+        "Dense-affine rollback should emit affine biases"
+    );
+
+    let w = weights.get(expected_key).unwrap();
+    assert_eq!(mlxcel_core::array_dtype(w), dtype::UINT32);
+    assert_eq!(mlxcel_core::array_shape(w), vec![out_dim as i32, 4i32]);
+
+    let scales = weights.get(expected_scales_key).unwrap();
+    let biases = weights.get(expected_biases_key).unwrap();
+    assert_eq!(
+        mlxcel_core::array_shape(scales),
+        vec![out_dim as i32, 1i32],
+        "Expected affine scales shape [2, 1] for group_size=32"
+    );
+    assert_eq!(
+        mlxcel_core::array_shape(biases),
+        vec![out_dim as i32, 1i32],
+        "Expected affine biases shape [2, 1] for group_size=32"
+    );
+
+    let biases_ptr = biases.as_ref().unwrap() as *const _;
+    let dequantized = unsafe { mlxcel_core::dequantize(w, scales, biases_ptr, 32, 4, "affine") };
+    let dequantized_f32 = mlxcel_core::astype(&dequantized, dtype::FLOAT32);
+    mlxcel_core::eval(&dequantized_f32);
+    assert_eq!(
+        mlxcel_core::array_shape(&dequantized_f32),
+        vec![out_dim as i32, 32i32],
+        "Expected shape [2, 32]"
+    );
+
+    let w_bytes = mlxcel_core::array_to_raw_bytes(&dequantized_f32);
+    for chunk in w_bytes.chunks_exact(4) {
+        let v = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+        assert!(
+            (v - 1.0f32).abs() < 5e-2,
+            "Expected value close to 1.0 after dense-affine rollback, got {v}"
         );
     }
 
