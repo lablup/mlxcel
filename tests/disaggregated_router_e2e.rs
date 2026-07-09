@@ -58,11 +58,30 @@ const GEMMA_DIR: &str = "gemma-3-1b-it-4bit";
 /// echoed `model`).
 const GEMMA_MODEL_ALIAS: &str = "gemma-completions";
 
-/// Model alias for the Gemma byte-fallback CHAT usage parity test (issue #398).
-/// A distinct alias from [`GEMMA_MODEL_ALIAS`] keeps the completions-path and
-/// chat-path fixtures independent even though each test spawns its own
-/// isolated set of processes.
-const GEMMA_CHAT_MODEL_ALIAS: &str = "gemma-chat";
+/// MiniCPM-2B (llama-format export) checkpoint directory name (issue #398).
+/// Two properties make it the chat-usage parity fixture:
+///
+/// * its Llama-style SentencePiece tokenizer has `byte_fallback = true`
+///   (`<0xXX>` byte pieces in-vocab), satisfying the byte-fallback tokenizer
+///   requirement of issue #398, and
+/// * the llama-format export runs as a plain dense Llama model, so it is
+///   pool-backed Fp16 — inside the disaggregated handoff scope (#125).
+///
+/// Gemma, the natural byte-fallback reference used by [`GEMMA_DIR`], cannot be
+/// used here: gemma3 is a model-owned paged family and the prefill handoff
+/// does not support it — the request crashes the prefill node's serving loop
+/// (`PagedBlockPool::read_block_contents: layer 0 has no pool tensors`,
+/// issue #708).
+/// Fetch with:
+/// `./target/release/mlxcel download mlx-community/MiniCPM-2B-sft-4bit-llama-format-mlx`
+/// and place/symlink it at `models/minicpm-2b-4bit`.
+const MINICPM_DIR: &str = "minicpm-2b-4bit";
+
+/// Model alias for the MiniCPM byte-fallback CHAT usage parity test (issue
+/// #398). A distinct alias from [`GEMMA_MODEL_ALIAS`] keeps the
+/// completions-path and chat-path fixtures independent even though each test
+/// spawns its own isolated set of processes.
+const MINICPM_CHAT_MODEL_ALIAS: &str = "minicpm-chat";
 
 /// Expected concatenated SSE content from the router for the test prompt.
 ///
@@ -1080,27 +1099,31 @@ async fn disaggregated_router_completions_match_single_node_byte_fallback() {
 /// report a `usage` object (`prompt_tokens`, `completion_tokens`, `total_tokens`)
 /// identical to single-node, in both the non-streaming response and the
 /// streaming final usage chunk (gated on `stream_options.include_usage`), for a
-/// BYTE-FALLBACK tokenizer (Gemma). Before this fix the router chat path never
-/// emitted `usage` at all.
+/// BYTE-FALLBACK tokenizer (MiniCPM-2B, llama-format export). Before this fix
+/// the router chat path never emitted `usage` at all.
 ///
 /// Reuses the same byte-fallback prompt idea as
 /// `disaggregated_router_completions_match_single_node_byte_fallback` (issue
-/// #387) so the authoritative wire-carried token count is actually exercised:
-/// Gemma's SentencePiece tokenizer emits a multi-byte character (the `é` in
-/// "café") as several `<0xXX>` byte-fallback model tokens that surface as a
-/// single detokenized text piece, so a naive emitted-piece count would
-/// under-count `completion_tokens`.
+/// #387) so the authoritative wire-carried token count is exercised end to
+/// end: with a byte-fallback SentencePiece tokenizer, a multi-byte character
+/// missing from the vocab is emitted as several `<0xXX>` byte-fallback model
+/// tokens that surface as a single detokenized text piece, so a naive
+/// emitted-piece count would under-count `completion_tokens` (the divergence
+/// itself is pinned by the `resolve_completion_tokens` unit tests). Gemma
+/// cannot serve as the fixture — see [`MINICPM_DIR`].
 ///
 /// Gated like the other real-model tests: `#[ignore]` plus a checkpoint-presence
-/// guard that skips cleanly when the Gemma checkpoint is absent.
+/// guard that skips cleanly when the MiniCPM checkpoint is absent.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "spawns four real mlxcel-server processes loading gemma-3-1b-it-4bit; run with --ignored"]
+#[ignore = "spawns four real mlxcel-server processes loading minicpm-2b-4bit; run with --ignored"]
 async fn disaggregated_router_chat_usage_matches_single_node_byte_fallback() {
-    let model_dir = repo_model_dir(GEMMA_DIR);
+    let model_dir = repo_model_dir(MINICPM_DIR);
     if !model_dir.exists() {
         eprintln!(
-            "Skipping {GEMMA_DIR}: model directory not found at {}.\n\
-             Fetch with: ./target/release/mlxcel download mlx-community/gemma-3-1b-it-4bit",
+            "Skipping {MINICPM_DIR}: model directory not found at {}.\n\
+             Fetch with: ./target/release/mlxcel download \
+             mlx-community/MiniCPM-2B-sft-4bit-llama-format-mlx (place it at \
+             models/{MINICPM_DIR})",
             model_dir.display()
         );
         return;
@@ -1118,13 +1141,13 @@ async fn disaggregated_router_chat_usage_matches_single_node_byte_fallback() {
         "content": "Spell the French word for coffee. It is café. Repeat it:"
     }]);
     let nonstream_body = serde_json::json!({
-        "model": GEMMA_CHAT_MODEL_ALIAS,
+        "model": MINICPM_CHAT_MODEL_ALIAS,
         "messages": messages,
         "max_tokens": 16,
         "temperature": 0.0
     });
     let stream_body = serde_json::json!({
-        "model": GEMMA_CHAT_MODEL_ALIAS,
+        "model": MINICPM_CHAT_MODEL_ALIAS,
         "messages": messages,
         "max_tokens": 16,
         "temperature": 0.0,
@@ -1145,14 +1168,14 @@ async fn disaggregated_router_chat_usage_matches_single_node_byte_fallback() {
             "--port",
             &http,
             "--alias",
-            GEMMA_CHAT_MODEL_ALIAS,
+            MINICPM_CHAT_MODEL_ALIAS,
             "--no-warmup",
         ]);
         let deadline = Instant::now() + Duration::from_secs(240);
         let health_url = format!("http://127.0.0.1:{http}/health");
         assert!(
             wait_for_http_health(&health_url, deadline).await,
-            "single-node Gemma reference never became healthy at {health_url}"
+            "single-node MiniCPM reference never became healthy at {health_url}"
         );
         let chat_url = format!("http://127.0.0.1:{http}/v1/chat/completions");
 
@@ -1194,19 +1217,19 @@ async fn disaggregated_router_chat_usage_matches_single_node_byte_fallback() {
         (ns_json, usage_chunk)
         // _single drops here, killing the reference server.
     };
-    eprintln!("single-node Gemma chat non-stream reference: {ref_nonstream}");
+    eprintln!("single-node MiniCPM chat non-stream reference: {ref_nonstream}");
     let ref_text = ref_nonstream["choices"][0]["message"]["content"]
         .as_str()
         .unwrap_or("");
     assert!(
         !ref_text.is_empty(),
-        "single-node Gemma chat reference produced empty content; parity check would be vacuous"
+        "single-node MiniCPM chat reference produced empty content; parity check would be vacuous"
     );
     // Guard the test's premise: the byte-fallback path is only exercised if the
     // greedy output actually contains a multi-byte character.
     assert!(
         !ref_text.is_ascii(),
-        "single-node Gemma chat output {ref_text:?} is pure ASCII; the byte-fallback \
+        "single-node MiniCPM chat output {ref_text:?} is pure ASCII; the byte-fallback \
          count path is not exercised. Adjust the prompt so the output contains a \
          multi-byte character."
     );
@@ -1316,7 +1339,7 @@ async fn disaggregated_router_chat_usage_matches_single_node_byte_fallback() {
         .json::<serde_json::Value>()
         .await
         .expect("parse router non-stream chat completion JSON");
-    eprintln!("router Gemma chat non-stream: {router_ns}");
+    eprintln!("router MiniCPM chat non-stream: {router_ns}");
     assert!(
         !router_ns["usage"].is_null(),
         "router non-stream /v1/chat/completions must carry a usage object (issue #398)"
