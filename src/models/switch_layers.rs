@@ -79,6 +79,15 @@ const FUSED_MOE_MAX_DFF_METAL: i32 = 4096;
 /// 8192 break-even boundary, which stays well below the 14336 regression while
 /// capturing the phi-3.5-moe / llama-4-scout mid-size experts that the old 4096
 /// default silently declined. The env var overrides this on both backends.
+///
+/// Provenance caveat: that GB10 sweep ran on MLX pin e9463bb (#626). The pin has
+/// since advanced to 0.32.1 (#703/#704, commit 57c66cac), so 8192 is carried
+/// forward as the documented-data-based default, not a value re-measured on the
+/// current binaries. It is deliberately the conservative floor of the measured
+/// crossover (the 8192 break-even, not the 14336 regression edge), so MLX pin
+/// drift cannot flip the default into a regression. A GB10 re-validation on the
+/// 0.32.1 pin is pending; see the pending re-validation note in
+/// `docs/benchmark_results/fused-moe-decode-kernel-design.md`.
 const FUSED_MOE_MAX_DFF_CUDA: i32 = 8192;
 
 /// Resolve the fused-MoE Dff upper bound. An explicit positive
@@ -87,6 +96,16 @@ const FUSED_MOE_MAX_DFF_CUDA: i32 = 8192;
 /// measured crossover). Split out as a pure function so the backend-aware
 /// default is unit-testable without mutating process-global env or querying the
 /// live device; `metal_available` mirrors `mlx::core::metal::is_available()`.
+///
+/// The cap is family-agnostic: it governs every SwitchGLU MoE model uniformly
+/// (Mixtral, Qwen3-MoE, OLMoE, phi-3.5-moe, gemma4, dots.llm1, and the rest of
+/// the module `Used by:` list). The backend is resolved at runtime via
+/// `metal_is_available()` (at the call site in `forward_fused_kernel`) rather
+/// than a `cfg!(feature = "cuda")` compile-time switch, so a single binary built
+/// with both backends picks the cap from the live device. This matches the fused
+/// kernel's own runtime dispatch: `run_fused_moe_two_kernel` selects the
+/// `cuda_kernel` port when `metal::is_available()` is false, so gating the cap
+/// the same way keeps the decision consistent with which kernel actually runs.
 pub(crate) fn fused_moe_max_dff_from(env: Option<&str>, metal_available: bool) -> i32 {
     env.and_then(|s| s.parse::<i32>().ok())
         .filter(|v| *v > 0)
@@ -716,6 +735,36 @@ mod tests {
                 fused_moe_max_dff_from(Some(bad), false),
                 FUSED_MOE_MAX_DFF_CUDA
             );
+        }
+    }
+
+    #[test]
+    fn fused_moe_dff_above_cap_declines_and_at_cap_dispatches() {
+        // `forward_fused_kernel` declines the fused path (falling back to
+        // gather_qmm) exactly when `dff > max_dff`. Pin that boundary against the
+        // resolved cap for both backends and an explicit override, so the decline
+        // predicate cannot silently drift away from the cap it enforces.
+        let declines =
+            |dff: i32, env: Option<&str>, metal: bool| dff > fused_moe_max_dff_from(env, metal);
+
+        // Metal default 4096: at the cap dispatches, one above declines.
+        assert!(!declines(FUSED_MOE_MAX_DFF_METAL, None, true));
+        assert!(declines(FUSED_MOE_MAX_DFF_METAL + 1, None, true));
+
+        // CUDA default 8192: phi-3.5-moe (Dff 6400) and llama-4-scout (Dff 8192)
+        // dispatch, mixtral (Dff 14336) declines.
+        assert!(!declines(6400, None, false));
+        assert!(!declines(FUSED_MOE_MAX_DFF_CUDA, None, false));
+        assert!(declines(FUSED_MOE_MAX_DFF_CUDA + 1, None, false));
+        assert!(declines(14336, None, false));
+
+        // Metal keeps 4096, so the same mid-size experts decline there.
+        assert!(declines(6400, None, true));
+
+        // An explicit override moves the decline boundary on both backends.
+        for metal in [true, false] {
+            assert!(!declines(14336, Some("16384"), metal));
+            assert!(declines(16385, Some("16384"), metal));
         }
     }
 
