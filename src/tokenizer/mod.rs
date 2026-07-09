@@ -158,16 +158,18 @@ impl MlxcelTokenizer {
     /// Look up the raw token string for a given token ID, without applying any
     /// decoder transformations. Returns `None` if the ID is out of vocabulary.
     ///
-    /// Used by [`StreamingDecodeState`] to detect byte-fallback tokens
-    /// (`<0xXX>`) so they can be buffered until a complete UTF-8 sequence forms.
+    /// General vocab-lookup helper. Since issue #633 the streaming detokenizer
+    /// no longer inspects individual pieces to detect byte-fallback tokens
+    /// (`<0xXX>`): `StreamingDecodeState` holds incomplete UTF-8 by re-decoding a
+    /// bounded token window, so this is off the detok hot path.
     ///
-    /// Used by: StreamingDecodeState (model_worker.rs)
+    /// Used by: model_worker_tests (byte-fallback token identification)
     pub fn token_piece(&self, id: u32) -> Option<String> {
         match self {
             Self::HuggingFace(t) => t.id_to_token(id),
             // SentencePiece byte-fallback tokens appear directly as <0xXX> in
             // the decoded output; the incremental decoder handles them via the
-            // full re-decode path rather than per-piece inspection.
+            // windowed re-decode path rather than per-piece inspection.
             Self::SentencePiece(_) | Self::Tiktoken(_) => None,
         }
     }
