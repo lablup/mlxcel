@@ -6879,8 +6879,7 @@ mod tests {
         // within one step (rounding error is at most half a step, FP16
         // storage of the scale adds a little slack).
         let check = |orig: &[f32], deq: &[f32], side: &str| {
-            for (t, (o_chunk, d_chunk)) in
-                orig.chunks_exact(4).zip(deq.chunks_exact(4)).enumerate()
+            for (t, (o_chunk, d_chunk)) in orig.chunks_exact(4).zip(deq.chunks_exact(4)).enumerate()
             {
                 let absmax = o_chunk.iter().fold(0.0_f32, |m, &x| m.max(x.abs()));
                 // Tolerance: one quantization step, with a small FP16 slack
@@ -7044,8 +7043,10 @@ mod tests {
         assert_eq!(i8_v.len(), fp_v.len());
 
         let check = |reference: &[f32], quant: &[f32], side: &str| {
-            for (t, (r_chunk, q_chunk)) in
-                reference.chunks_exact(2).zip(quant.chunks_exact(2)).enumerate()
+            for (t, (r_chunk, q_chunk)) in reference
+                .chunks_exact(2)
+                .zip(quant.chunks_exact(2))
+                .enumerate()
             {
                 let absmax = r_chunk.iter().fold(0.0_f32, |m, &x| m.max(x.abs()));
                 let tol = (absmax / 127.0) * 1.1 + 2e-3;
