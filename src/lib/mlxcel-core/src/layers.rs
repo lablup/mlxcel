@@ -3434,22 +3434,32 @@ fn paged_decode_backend() -> PagedDecodeBackend {
 /// slab_count, backend)` key, so the pure selector is recomputed at most once
 /// per distinct shape and every subsequent layer takes the cached decision via
 /// a single relaxed atomic load + compare. This is the "last-key cell" the issue
-/// asks for, not a per-token locking map: the packed key and decision live in
-/// two `AtomicU64`s and the selector is only re-run when the key changes.
+/// asks for, not a per-token locking map: the packed key (bits `0..=48`) and the
+/// decision (bit `49`) live in one `AtomicU64`, so a reader observes them as one
+/// indivisible word and can never pair a fresh key with a stale decision. The
+/// selector is only re-run when the key changes.
 struct PagedDispatchCache {
-    key: AtomicU64,
-    decision: AtomicU64,
+    cell: AtomicU64,
 }
 
-/// Sentinel key that never collides with a real packed key (real keys pack
-/// three `u16`-bounded fields into the low 48 bits; see [`PagedDispatchCache::pack_key`]).
+/// Sentinel value that never collides with a real packed cell: real cells pack
+/// three `u16`-bounded fields plus the backend bit into bits `0..=48` (see
+/// [`PagedDispatchCache::pack_key`]) and the decision into bit `49`, so bits
+/// `50..=63` stay zero and the all-ones sentinel is unambiguous.
 const PAGED_DISPATCH_CACHE_EMPTY: u64 = u64::MAX;
 
 impl PagedDispatchCache {
+    /// Bit carrying the decision alongside the packed key: set means
+    /// [`PagedDecodeDispatch::Native`], clear means [`PagedDecodeDispatch::Gather`].
+    /// The key uses bits `0..=48` ([`Self::pack_key`]), so bit `49` is free.
+    const DECISION_BIT: u64 = 1u64 << 49;
+    /// Mask covering the packed-key bits (`0..=48`), used to compare a cell's
+    /// key half against a freshly packed key while ignoring the decision bit.
+    const KEY_MASK: u64 = Self::DECISION_BIT - 1;
+
     const fn new() -> Self {
         Self {
-            key: AtomicU64::new(PAGED_DISPATCH_CACHE_EMPTY),
-            decision: AtomicU64::new(0),
+            cell: AtomicU64::new(PAGED_DISPATCH_CACHE_EMPTY),
         }
     }
 
@@ -3482,24 +3492,24 @@ impl PagedDispatchCache {
         backend: PagedDecodeBackend,
     ) -> PagedDecodeDispatch {
         let key = Self::pack_key(batch_size, visible_len, slab_count, backend);
-        if self.key.load(Ordering::Relaxed) == key {
-            return match self.decision.load(Ordering::Relaxed) {
-                0 => PagedDecodeDispatch::Gather,
-                _ => PagedDecodeDispatch::Native,
+        // Key and decision share one word, so a single relaxed load is
+        // torn-free: a hit returns the decision packed with this exact key,
+        // never a stale decision paired with a fresh key.
+        let cell = self.cell.load(Ordering::Relaxed);
+        if cell != PAGED_DISPATCH_CACHE_EMPTY && (cell & Self::KEY_MASK) == key {
+            return if cell & Self::DECISION_BIT != 0 {
+                PagedDecodeDispatch::Native
+            } else {
+                PagedDecodeDispatch::Gather
             };
         }
         let decision = select_pooled_paged_dispatch(batch_size, visible_len, slab_count, backend);
-        // Store decision before key: a racing reader that sees the new key then
-        // reads the freshly stored decision, and the selector is pure so a stale
-        // decision paired with a matching key would still be correct anyway.
-        self.decision.store(
-            match decision {
+        let packed = key
+            | match decision {
+                PagedDecodeDispatch::Native => Self::DECISION_BIT,
                 PagedDecodeDispatch::Gather => 0,
-                PagedDecodeDispatch::Native => 1,
-            },
-            Ordering::Relaxed,
-        );
-        self.key.store(key, Ordering::Relaxed);
+            };
+        self.cell.store(packed, Ordering::Relaxed);
         decision
     }
 }
