@@ -1,0 +1,12 @@
+# Fused decode-MoE vs gather_qmm Dff crossover re-validation on MLX 0.32.1 (#712).
+# Host: GB10 (DGX Spark), sm_121, CUDA 13.0. MLX pin 57c66cac (0.32.1, #703/#704).
+# Harness: mlxcel-bench-decode, prompt "Hello, how are you today?", 100 decode
+# tokens after a 20-token in-process warmup, median of 3 invocations per side.
+# Fallback side forced with MLXCEL_FUSED_MOE_MAX_DFF=1 (gather_qmm);
+# fused side forced with MLXCEL_FUSED_MOE_MAX_DFF=20000 (fused two-kernel path).
+# decode tok/s. Compare against fused-moe-decode-dff-sweep-gb10-2026-07-03.csv (MLX pin e9463bb).
+model,dff,quant_mode,fallback_run1,fallback_run2,fallback_run3,fallback_median,fused_run1,fused_run2,fused_run3,fused_median,fused_over_fallback
+lfm2-8b-a1b-4bit,1792,affine,141.92,138.43,140.68,140.68,161.14,160.63,159.63,160.63,1.1418
+phi-3.5-moe-4bit,6400,affine,53.52,53.85,54.16,53.85,55.80,55.64,56.12,55.80,1.0362
+llama-4-scout-17b-4bit,8192,affine,21.85,21.64,21.33,21.64,21.26,21.37,21.32,21.32,0.9852
+mixtral-8x7b-4bit,14336,affine,28.26,28.27,28.17,28.26,27.78,27.79,27.77,27.78,0.9830

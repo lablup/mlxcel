@@ -168,7 +168,7 @@ falls back to the proven `gather_qmm` / `SwitchGLU` path automatically. Set
 | `MLXCEL_FUSED_MOE` | unset (on) | On by default. Set to `0` (also `false`/`off`/`no`, case-insensitive) to force the proven `gather_qmm` / `SwitchGLU` path; any other value, or leaving it unset, keeps the kernel on. |
 | `MLXCEL_FUSED_MOE_SGY` | 8 | Simdgroups per threadgroup (one output row each). Tune per hardware. |
 | `MLXCEL_FUSED_MOE_RELU2` | unset (off) | Enable the squared-ReLU (fc1/relu²/fc2) fused path used by nemotron-class experts. Correct but measured performance-neutral on nemotron-h; kept for a future MoE-dominated squared-ReLU model. |
-| `MLXCEL_FUSED_MOE_MAX_DFF` | 4096 (Metal) / 8192 (CUDA) | Expert-intermediate (Dff) upper bound. Above it, `forward_fused_kernel` declines and the caller falls back to `gather_qmm`. The fused path wins only while `gather_qmm` underutilizes the GPU (small experts); for large experts `gather_qmm` already saturates and the extra dispatch plus global-memory activation staging is a net loss. The break-even is backend-dependent, so the default is chosen from the live backend (`mlx::core::metal::is_available()`). M1 Ultra measurements: Dff 704..2560 gain +3.5% to +15.4%, Dff 6400 (phi-3.5-moe) loses 5.9%, Dff 14336 (mixtral) loses 21%, so Metal keeps 4096. On CUDA the crossover is higher; re-measured on GB10 under MLX pin e9463bb (#626) it collapsed from the old ~13-14k to ~8000 (Dff 6400 +5%, 8192 break-even, 14336 -1.2%; see the 2026-07-03 addendum), so the CUDA default is 8192. That sweep predates the 0.32.1 MLX pin (#703/#704); 8192 is carried forward as the conservative documented-data-based default and a GB10 re-validation on the current pin is pending (see the 2026-07-09 addendum). An explicit value overrides both backends. |
+| `MLXCEL_FUSED_MOE_MAX_DFF` | 4096 (Metal) / 8192 (CUDA) | Expert-intermediate (Dff) upper bound. Above it, `forward_fused_kernel` declines and the caller falls back to `gather_qmm`. The fused path wins only while `gather_qmm` underutilizes the GPU (small experts); for large experts `gather_qmm` already saturates and the extra dispatch plus global-memory activation staging is a net loss. The break-even is backend-dependent, so the default is chosen from the live backend (`mlx::core::metal::is_available()`). M1 Ultra measurements: Dff 704..2560 gain +3.5% to +15.4%, Dff 6400 (phi-3.5-moe) loses 5.9%, Dff 14336 (mixtral) loses 21%, so Metal keeps 4096. On CUDA the crossover is higher; re-measured on GB10 under MLX pin e9463bb (#626) it collapsed from the old ~13-14k to ~8000 (Dff 6400 +5%, 8192 break-even, 14336 -1.2%; see the 2026-07-03 addendum), so the CUDA default is 8192. Re-validated on GB10 under MLX pin 0.32.1 (`57c66cac`, #703/#704): the crossover interpolates to ~7672 (Dff 6400 +3.6%, 8192 -1.5%, 14336 -1.7%), close enough to the prior ~8000 that 8192 is confirmed rather than re-tuned (see the 2026-07-10 addendum). An explicit value overrides both backends. |
 
 ### Measured decode gains (M1 Ultra, `MLXCEL_FUSED_MOE=1`)
 
@@ -385,3 +385,54 @@ phi-3.5-moe (6400), llama-4-scout-17b (8192), mixtral-8x7b (14336), with lfm2-8b
 (1792) as a low-expert control. If the ratio=1.0 crossover on 0.32.1 lands away
 from ~8000, update `FUSED_MOE_MAX_DFF_CUDA` and this section together; otherwise
 record the confirmation and drop the "pending" note.
+
+**Resolved.** The re-validation described above ran on 2026-07-10 (#712); the
+crossover held close to the e9463bb measurement and 8192 is now confirmed on
+current binaries. See the 2026-07-10 addendum for the sweep and conclusion; this
+section stays as the historical record of why 8192 was carried forward before
+that re-validation existed.
+
+### 2026-07-10 addendum: GB10 re-validation on MLX 0.32.1 confirms the 8192 CUDA default
+
+This closes the pending item from the 2026-07-09 addendum above (#712, following
+Issue #330 / PR #711). Hardware: GB10 (DGX Spark), sm_121, CUDA 13.0. MLX pin:
+`57c66cac7cb3e5b1eb350488a61f1506b40d39f8` (0.32.1, #703/#704), read from
+`src/lib/mlx-cpp/CMakeLists.txt`. Harness: `mlxcel-bench-decode`, prompt `"Hello,
+how are you today?"`, 100 decode tokens after a 20-token warmup, median of 3 runs
+per side. Each side forced with the env var (`MLXCEL_FUSED_MOE_MAX_DFF=1` selects
+the `gather_qmm` fallback, `=20000` selects the fused kernel), one process per
+run. Raw per-run data: `benchmarks/cuda_gb10_issue712_fused_moe_dff_2026-07-10.csv`.
+
+| Dff | model | fallback tok/s | fused tok/s | fused/fallback |
+|----:|-------|----------------:|------------:|---------------:|
+| 1792 | lfm2-8b-a1b | 140.68 | 160.63 | **1.1418** |
+| 6400 | phi-3.5-moe | 53.85 | 55.80 | **1.0362** |
+| 8192 | llama-4-scout-17b | 21.64 | 21.32 | 0.9852 |
+| 14336 | mixtral-8x7b | 28.26 | 27.78 | 0.9830 |
+
+Findings:
+
+- **The crossover held close to the e9463bb measurement.** Interpolating between
+  phi-3.5-moe (Dff 6400, +3.6%) and llama-4-scout (Dff 8192, -1.5%) puts the
+  ratio=1.0 crossover at Dff ~7672, against ~8000 on the prior pin. A ~4% shift
+  over a 3-run median is within the noise the 2026-07-03 sweep already flagged at
+  this same Dff point (fallback tok/s there spans 21.33-21.85 run to run, a 2.4%
+  spread larger than the shift itself).
+  - lfm2 (Dff 1792) still wins clearly, +14.2% versus the prior +11.2-12.4%.
+  - phi-3.5-moe (Dff 6400) still wins, +3.6% versus the prior +5.0%.
+  - llama-4-scout (Dff 8192) is now measurably negative at -1.5% rather than the
+    prior break-even (-0.7%, one of three runs matching the fallback), but the
+    fused-side runs are tight (21.26-21.37) and the drop stays small.
+  - mixtral (Dff 14336) is unchanged in character, -1.7% versus the prior -1.2%.
+- **8192 is confirmed, not re-tuned.** The design intentionally sets
+  `FUSED_MOE_MAX_DFF_CUDA` to the break-even boundary rather than the 14336
+  regression edge, so a model exactly at 8192 taking a small loss on the fused
+  path is expected behavior, not a defect introduced by the pin bump. Moving the
+  cap down to, say, 7500 would trade a marginal loss on llama-4-scout for
+  declining the fused kernel on every model in (7500, 8192], which is a worse
+  trade given phi-3.5-moe's continued clear win at 6400. `FUSED_MOE_MAX_DFF_CUDA`
+  in `src/models/switch_layers.rs` stays at 8192.
+- **No code change was required.** This is a documentation-only re-validation;
+  the `switch_layers` unit tests (`fused_moe_max_dff_default_is_backend_aware_and_env_overrides`,
+  `fused_moe_dff_above_cap_declines_and_at_cap_dispatches`) already pin the 8192
+  boundary and continue to pass unmodified.
