@@ -125,6 +125,16 @@ The code shares the same cluster config, registry, transport, and metrics
 infrastructure as PP. Treat it as a topology-specific feature: run a live test
 with your traffic shape before publishing performance claims.
 
+Model support is narrower than PP: the paged prefill/decode handoff works only
+for pool-backed Fp16 families (dense-natural backends such as qwen3 and
+llama3). Model-owned paged families (gemma3, gemma4, llama4, qwen3_5,
+qwen3_next) carry their KV state outside the shared block pool, so it cannot
+be serialized across the handoff. A request against one of those families is
+rejected at the prefill node with a clean per-request error before any
+prefill work runs, and the node keeps serving subsequent requests (issue
+#708). See [continuous batching and disaggregated serving](CONTINUOUS_BATCHING.md#scope-and-limitations)
+for the full scope and limitations list.
+
 A `--node-role router` front balances independent prefill and decode pools. It
 picks both the prefill node and the decode node per request (round-robin over
 the nodes the registry marks online), ships the chosen decode node to the
