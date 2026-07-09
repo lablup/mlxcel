@@ -232,11 +232,14 @@ evictions. This path is deliberately whole-prefix only: it does not participate
 in APC block matching, does not share SSM state across sessions, and does not
 modify the block-sharing carve-out for hybrid SSM families.
 
-The block pool can be bounded with `--kv-cache-budget <bytes|auto>` (env
-`MLXCEL_KV_CACHE_BUDGET`); the default is unbounded. Under a budget the scheduler
-evicts cold cached prefixes, then preempts, before rejecting a request.
-`GET /v1/cache/stats` reports paged block usage (block size, allocated, live,
-free, bytes reserved/in use, and the budget).
+The block pool is bounded with `--kv-cache-budget <bytes|auto|none>` (env
+`MLXCEL_KV_CACHE_BUDGET`); the default is `auto`, which derives the cap from
+the memory estimate so the batched-decode default (#628) cannot run
+concurrent full-context sequences into an OOM abort. `none` (or `0`) restores
+the previous unbounded pool. Under a budget the scheduler evicts cold cached
+prefixes, then preempts, before rejecting a request. `GET /v1/cache/stats`
+reports paged block usage (block size, allocated, live, free, bytes
+reserved/in use, and the budget).
 
 ### Measured payoff
 
