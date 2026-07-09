@@ -781,23 +781,32 @@ fn per_layer_input_gate_fused_path_eligible(
 
 /// Whether the compiled scaled dense-MLP fused path
 /// (`compiled_gelu_approx_mlp_forward_global_scale`) can be used for a given
-/// sidecar / kill-switch / query-length combination. Mirrors
-/// `per_layer_input_gate_fused_path_eligible`'s gating for `MLP::forward`'s
-/// dense gate/up/down path: a sidecar-carrying MLP is eligible only when the
-/// fold is enabled AND the call is single-token decode. For multi-token
-/// prefill, the C++ bridge falls back to an uncompiled eager fold once a
-/// sidecar is present, which regressed 2048-token prefill throughput by 8.3%
-/// versus the compiled op-at-a-time activation `MLP::forward` falls through
-/// to, so multi-token must bypass the fused path regardless of the kill
-/// switch (issue #698 follow-up). An MLP with no sidecar is unaffected by
-/// this gate; `MLP::forward` takes the separate unscaled fused path for that
-/// case regardless of `single_token`.
+/// sidecar / kill-switch / query-length / quant-layout combination. A
+/// sidecar-carrying MLP is eligible when the fold is enabled and either:
+///
+/// - the call is single-token decode, which uses the existing shapeless
+///   compiled graph from issue #698; or
+/// - the call is native ModelOpt NVFP4 prefill (group_size=16/bits=4/mode=nvfp4),
+///   where issue #705 added a shape-specific compiled graph so MLX keeps the
+///   prefill qmm kernel while fusing the sidecar multiplies and GeGLU
+///   activation.
+///
+/// Other multi-token sidecar layouts still bypass the fused path because the
+/// bridge would otherwise fall back to an eager C++ fold; the op-at-a-time
+/// path below keeps the compiled activation and remains the safer default for
+/// unknown sidecar layouts. An MLP with no sidecar is unaffected by this gate;
+/// `MLP::forward` takes the separate unscaled fused path for that case
+/// regardless of `single_token`.
 fn dense_mlp_scaled_fused_path_eligible(
     any_sidecar: bool,
     fused_scale_enabled: bool,
     single_token: bool,
+    group_size: i32,
+    bits: i32,
+    mode: &str,
 ) -> bool {
-    any_sidecar && fused_scale_enabled && single_token
+    let native_nvfp4_prefill = !single_token && group_size == 16 && bits == 4 && mode == "nvfp4";
+    any_sidecar && fused_scale_enabled && (single_token || native_nvfp4_prefill)
 }
 
 impl MLP {
@@ -838,19 +847,22 @@ impl MLP {
                 || up_qw.global_scale.is_some()
                 || down_qw.global_scale.is_some();
 
-            // The scaled fused C++ path is a decode-only win (issue #698
-            // follow-up): for multi-token prefill, the C++ bridge itself
-            // falls back to an EAGER, uncompiled `multiply(gelu_tanh_approx(
-            // gate), up)` once a sidecar is present, which is slower than the
-            // compiled op-at-a-time activation the fall-through below uses.
-            // Gate on the query length here so prefill never routes into that
-            // eager fold, regardless of the kill switch.
+            // The scaled fused C++ path is now used for native NVFP4 prefill
+            // as well as decode. Issue #705 adds a shape-specific compiled
+            // graph for the group_size=16/bits=4/nvfp4 path so prefill avoids
+            // both the old C++ eager fold and the per-projection Rust/FFI
+            // sidecar dispatch. Unknown multi-token sidecar layouts still
+            // bypass the fused path via `dense_mlp_scaled_fused_path_eligible`
+            // because their bridge fallback remains eager rather than compiled.
             let single_token = mlxcel_core::array_shape(x)[1] == 1;
 
             if dense_mlp_scaled_fused_path_eligible(
                 any_sidecar,
                 !fused_global_scale_disabled(),
                 single_token,
+                gate_qw.group_size,
+                gate_qw.bits,
+                &gate_qw.mode,
             ) {
                 return unsafe {
                     mlxcel_core::compiled_gelu_approx_mlp_forward_global_scale(
@@ -5798,7 +5810,14 @@ mod quant_scheme_tests {
         for fused_scale_enabled in [true, false] {
             for single_token in [true, false] {
                 assert!(
-                    !dense_mlp_scaled_fused_path_eligible(false, fused_scale_enabled, single_token),
+                    !dense_mlp_scaled_fused_path_eligible(
+                        false,
+                        fused_scale_enabled,
+                        single_token,
+                        16,
+                        4,
+                        "nvfp4"
+                    ),
                     "no sidecar must never route through the scaled fused path \
                      (fused_scale_enabled={fused_scale_enabled}, single_token={single_token})"
                 );
@@ -5809,18 +5828,27 @@ mod quant_scheme_tests {
     #[test]
     fn dense_mlp_scaled_fused_path_eligible_sidecar_single_token_enabled() {
         assert!(
-            dense_mlp_scaled_fused_path_eligible(true, true, true),
+            dense_mlp_scaled_fused_path_eligible(true, true, true, 16, 4, "nvfp4"),
             "sidecar + single-token + fold enabled must take the scaled fused path"
         );
     }
 
     #[test]
-    fn dense_mlp_scaled_fused_path_eligible_sidecar_multi_token_bypasses_regardless_of_fold() {
-        for fused_scale_enabled in [true, false] {
+    fn dense_mlp_scaled_fused_path_eligible_native_nvfp4_prefill_enabled() {
+        assert!(
+            dense_mlp_scaled_fused_path_eligible(true, true, false, 16, 4, "nvfp4"),
+            "sidecar + native NVFP4 multi-token prefill must take the shape-specific scaled \
+             fused path when the fold is enabled"
+        );
+    }
+
+    #[test]
+    fn dense_mlp_scaled_fused_path_eligible_unknown_prefill_layout_bypasses() {
+        for (group_size, bits, mode) in [(64, 4, "affine"), (64, 8, "affine"), (32, 4, "mxfp4")] {
             assert!(
-                !dense_mlp_scaled_fused_path_eligible(true, fused_scale_enabled, false),
-                "sidecar + multi-token must bypass the scaled fused path even when the fold is \
-                 enabled (fused_scale_enabled={fused_scale_enabled})"
+                !dense_mlp_scaled_fused_path_eligible(true, true, false, group_size, bits, mode),
+                "sidecar + multi-token must bypass the scaled fused path for unknown layouts \
+                 (group_size={group_size}, bits={bits}, mode={mode})"
             );
         }
     }
@@ -5828,9 +5856,14 @@ mod quant_scheme_tests {
     #[test]
     fn dense_mlp_scaled_fused_path_eligible_sidecar_rejects_when_fold_disabled() {
         assert!(
-            !dense_mlp_scaled_fused_path_eligible(true, false, true),
+            !dense_mlp_scaled_fused_path_eligible(true, false, true, 16, 4, "nvfp4"),
             "sidecar must fall back to op-at-a-time when the fold is disabled even for \
              single-token decode"
+        );
+        assert!(
+            !dense_mlp_scaled_fused_path_eligible(true, false, false, 16, 4, "nvfp4"),
+            "sidecar must fall back to op-at-a-time when the fold is disabled for native \
+             NVFP4 prefill"
         );
     }
 

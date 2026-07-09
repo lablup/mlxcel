@@ -570,6 +570,20 @@ mod ffi {
             mode: &str,
         ) -> UniquePtr<MlxArray>;
 
+        /// Quantized linear forward with an optional post-qmm global scale.
+        /// Used by: UnifiedLinear native-NVFP4 sidecar path.
+        unsafe fn quantized_linear_forward_global_scale(
+            x: &MlxArray,
+            weight: &MlxArray,
+            scales: &MlxArray,
+            biases: *const MlxArray,
+            global_scale: *const MlxArray,
+            linear_bias: *const MlxArray,
+            group_size: i32,
+            bits: i32,
+            mode: &str,
+        ) -> UniquePtr<MlxArray>;
+
         /// SwiGLU MLP forward
         fn swiglu_mlp_forward(
             x: &MlxArray,
@@ -691,12 +705,15 @@ mod ffi {
         ) -> UniquePtr<MlxArray>;
 
         /// Compiled GELU-approx MLP forward with per-projection NVFP4
-        /// global-scale sidecars folded into the fused graph (issue #698).
+        /// global-scale sidecars folded into the fused graph (issues
+        /// #698/#705).
         /// The gate scale is applied to the gate product before the GeGLU
         /// activation, the up scale on the up product, and the down scale on
         /// the fused output, each reproducing `apply_global_scale`
         /// (`astype(multiply(out, s), out.dtype())`) so the result is
-        /// bit-identical to the op-at-a-time sidecar path. A null scale
+        /// bit-identical to the op-at-a-time sidecar path. Native NVFP4
+        /// prefill uses a shape-specific compiled graph so MLX can keep the
+        /// prefill qmm kernel while fusing the sidecar folds. A null scale
         /// pointer means no multiply for that projection. NVFP4 carries no
         /// quant biases, so no bias operands are passed.
         /// Used by: Gemma4 dense MLP loaded from ModelOpt NVFP4 triplets

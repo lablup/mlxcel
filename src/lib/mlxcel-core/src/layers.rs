@@ -147,6 +147,28 @@ impl QuantizedWeight {
     }
 }
 
+/// Whether native-NVFP4 global-scale fusion is disabled via
+/// `MLXCEL_DISABLE_FUSED_GLOBAL_SCALE`.
+///
+/// Used by: UnifiedLinear native-NVFP4 sidecar path. Gemma4 has additional
+/// model-level gates for dense MLP and per-layer-input fused helpers; this
+/// core-layer gate keeps the shared standalone-linear sidecar helper on the
+/// same rollback switch.
+fn fused_global_scale_disabled() -> bool {
+    static DISABLED: OnceLock<bool> = OnceLock::new();
+    *DISABLED.get_or_init(|| {
+        std::env::var("MLXCEL_DISABLE_FUSED_GLOBAL_SCALE")
+            .ok()
+            .map(|v| {
+                matches!(
+                    v.trim().to_ascii_lowercase().as_str(),
+                    "1" | "true" | "on" | "yes"
+                )
+            })
+            .unwrap_or(false)
+    })
+}
+
 // Embedding Layers.
 /// Non-quantized embedding layer
 pub struct Embedding {
@@ -1148,10 +1170,30 @@ impl UnifiedLinear {
             Self::Quantized { weight, bias } => {
                 // Native-NVFP4 global-scale path (issue #693): the per-tensor
                 // `weight_scale_2` multiplies only the matmul output, not the
-                // (rare) fused linear bias, so run the qmm with a null fused
-                // bias, apply the scalar, then add the bias separately. `y =
+                // (rare) dense linear bias, so the C++ helper runs qmm, applies
+                // the scalar, then adds that bias in one FFI call. `y =
                 // (x @ W^T) * s2 + b`. When no sidecar is present this is the
                 // original single fused call, byte-for-byte.
+                if weight.global_scale.is_some() && !fused_global_scale_disabled() {
+                    let bias_ptr = bias
+                        .as_ref()
+                        .map(|b| b.as_ref().unwrap() as *const MlxArray)
+                        .unwrap_or(std::ptr::null());
+                    return unsafe {
+                        ffi::quantized_linear_forward_global_scale(
+                            x,
+                            &weight.weight,
+                            &weight.scales,
+                            weight.biases_ptr(),
+                            weight.global_scale_ptr(),
+                            bias_ptr,
+                            weight.group_size,
+                            weight.bits,
+                            &weight.mode,
+                        )
+                    };
+                }
+
                 if weight.global_scale.is_some() {
                     let mm = unsafe {
                         ffi::quantized_linear_forward(

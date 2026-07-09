@@ -421,6 +421,21 @@ std::unique_ptr<MlxArray> quantized_linear_forward(
     rust::Str mode
 );
 
+// Quantized linear layer forward with an optional post-qmm global scale.
+// Applies `global_scale` before the optional dense linear bias, matching the
+// ModelOpt NVFP4 sidecar semantics in QuantizedWeight::apply_global_scale.
+std::unique_ptr<MlxArray> quantized_linear_forward_global_scale(
+    const MlxArray& x,
+    const MlxArray& weight,
+    const MlxArray& scales,
+    const MlxArray* biases,        // nullable for mxfp4/nvfp4/mxfp8
+    const MlxArray* global_scale,  // nullable
+    const MlxArray* linear_bias,   // nullable
+    int32_t group_size,
+    int32_t bits,
+    rust::Str mode
+);
+
 // SwiGLU MLP forward (common in LLMs like Llama)
 // output = down_proj(silu(gate_proj(x)) * up_proj(x))
 std::unique_ptr<MlxArray> swiglu_mlp_forward(
@@ -566,11 +581,13 @@ std::unique_ptr<MlxArray> compiled_gelu_approx_mlp_forward(
 );
 
 // Compiled GELU-approx MLP forward with per-projection NVFP4 global-scale
-// sidecars folded in (issue #698). The gate scale is applied before the
+// sidecars folded in (issues #698/#705). The gate scale is applied before the
 // GeGLU activation, the up scale on the up product, and the down scale on the
 // fused output, each reproducing `apply_global_scale` byte-for-byte. Null scale
-// pointers mean no multiply for that projection. NVFP4 carries no quant biases,
-// so this signature omits the bias operands. Used by: Gemma 4 dense MLP.
+// pointers mean no multiply for that projection. Native NVFP4 prefill uses a
+// shape-specific compiled graph so MLX can select the prefill qmm kernel while
+// still fusing the sidecar folds. NVFP4 carries no quant biases, so this
+// signature omits the bias operands. Used by: Gemma 4 dense MLP.
 std::unique_ptr<MlxArray> compiled_gelu_approx_mlp_forward_global_scale(
     const MlxArray& x,
     const MlxArray& gate_proj,

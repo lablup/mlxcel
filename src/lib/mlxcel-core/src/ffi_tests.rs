@@ -2087,12 +2087,13 @@ fn compiled_qgelu_mlp_forward_4bit_legacy_path_matches_reference() {
 // `global_scale`, applied by `UnifiedLinear::forward` as
 // `astype(multiply(qmm_out, s), qmm_out.dtype())`. These tests prove that
 // folding the scales into the fused kernel (gate before the GeGLU, up on the
-// up product, down on the output) is bit-close to that op-at-a-time reference,
-// on both the compiled single-token branch and the eager multi-token
-// fallback, including mixed sidecar sets. Block-float `mxfp4` weights carry no
+// up product, down on the output) is bit-close to that op-at-a-time reference.
+// The coverage includes the compiled single-token branch, the non-NVFP4 eager
+// multi-token fallback, the native-NVFP4 shape-specific prefill branch added by
+// issue #705, and mixed sidecar sets. Block-float `mxfp4` weights carry no
 // affine biases, matching the NVFP4 no-bias signature; the scale-fold logic is
-// mode-independent, so `mxfp4` fully exercises it without needing the CUDA-only
-// NVFP4 quantizer.
+// mode-independent, so `mxfp4` covers mixed sidecar patterns without requiring
+// every test to use native NVFP4.
 
 /// Quantize a random `[out, in]` weight to a bias-free block-float mode and
 /// return its `(packed_weight, scales)` pair, ready for both
@@ -2117,6 +2118,62 @@ fn random_block_float_weight(
         "block-float mode {mode} must not produce affine biases"
     );
     (quantized_weights_w(&q), quantized_weights_scales(&q))
+}
+
+/// `quantized_linear_forward_global_scale` is the UnifiedLinear fast path for
+/// native-NVFP4 sidecars: qmm, `apply_global_scale`, and the optional dense
+/// linear bias are issued through one FFI call while preserving the exact
+/// op-at-a-time semantics.
+#[test]
+fn quantized_linear_forward_global_scale_matches_manual_sidecar_path() {
+    random_seed(7051);
+    let (group_size, bits, mode) = (16, 4, "nvfp4");
+    let hidden = 128;
+    let out_features = 96;
+
+    let (w, s) = random_block_float_weight(out_features, hidden, group_size, bits, mode);
+    let global_scale = scale_scalar(1.23);
+    let linear_bias = unsafe { random_normal(&[out_features], dtype::FLOAT32, std::ptr::null()) };
+    let x = unsafe { random_normal(&[1, 3, hidden], dtype::FLOAT32, std::ptr::null()) };
+
+    let fused = unsafe {
+        quantized_linear_forward_global_scale(
+            &x,
+            &w,
+            &s,
+            std::ptr::null(),
+            global_scale.as_ref().unwrap() as *const MlxArray,
+            linear_bias.as_ref().unwrap() as *const MlxArray,
+            group_size,
+            bits,
+            mode,
+        )
+    };
+
+    let mm = unsafe {
+        quantized_linear_forward(
+            &x,
+            &w,
+            &s,
+            std::ptr::null(),
+            std::ptr::null(),
+            group_size,
+            bits,
+            mode,
+        )
+    };
+    let scaled = astype(&multiply(&mm, &global_scale), array_dtype(&mm));
+    let reference = add(&scaled, &linear_bias);
+
+    eval(&fused);
+    eval(&reference);
+    assert_eq!(array_shape(&fused), vec![1, 3, out_features]);
+    let close = allclose(&fused, &reference, 1e-5, 1e-5);
+    eval(&close);
+    assert!(
+        item_bool(&close),
+        "quantized_linear_forward_global_scale must match qmm + apply_global_scale + bias"
+    );
 }
 
 /// Op-at-a-time reference for the scaled GeGLU MLP: `down(gelu(gate) * up)`
@@ -2278,7 +2335,7 @@ fn compiled_qgelu_mlp_global_scale_all_present_single_token_matches_reference() 
 /// All three sidecars present, multi-token input: the fused scaled kernel takes
 /// the eager fallback and must still match the reference.
 #[test]
-fn compiled_qgelu_mlp_global_scale_multi_token_fallback_matches_reference() {
+fn compiled_qgelu_mlp_global_scale_non_nvfp4_multi_token_fallback_matches_reference() {
     random_seed(6980);
     let (group_size, bits, mode) = (32, 4, "mxfp4");
     let hidden = 128;
@@ -2335,6 +2392,71 @@ fn compiled_qgelu_mlp_global_scale_multi_token_fallback_matches_reference() {
     assert!(
         item_bool(&close),
         "fused scaled MLP (eager multi-token fallback) must match the op-at-a-time reference"
+    );
+}
+
+/// Native NVFP4 prefill uses the issue #705 shape-specific compiled branch:
+/// group_size=16/bits=4/mode=nvfp4 with a multi-token input must still match
+/// the op-at-a-time sidecar reference.
+#[test]
+fn compiled_qgelu_mlp_global_scale_native_nvfp4_prefill_matches_reference() {
+    random_seed(705);
+    let (group_size, bits, mode) = (16, 4, "nvfp4");
+    let hidden = 128;
+    let intermediate = 256;
+
+    let (gate_w, gate_s) = random_block_float_weight(intermediate, hidden, group_size, bits, mode);
+    let (up_w, up_s) = random_block_float_weight(intermediate, hidden, group_size, bits, mode);
+    let (down_w, down_s) = random_block_float_weight(hidden, intermediate, group_size, bits, mode);
+
+    let gate_gs = scale_scalar(1.12);
+    let up_gs = scale_scalar(0.74);
+    let down_gs = scale_scalar(1.31);
+
+    let x = unsafe { random_normal(&[1, 3, hidden], dtype::FLOAT32, std::ptr::null()) };
+
+    let fused = unsafe {
+        compiled_gelu_approx_mlp_forward_global_scale(
+            &x,
+            &gate_w,
+            &gate_s,
+            &up_w,
+            &up_s,
+            &down_w,
+            &down_s,
+            gate_gs.as_ref().unwrap() as *const MlxArray,
+            up_gs.as_ref().unwrap() as *const MlxArray,
+            down_gs.as_ref().unwrap() as *const MlxArray,
+            group_size,
+            bits,
+            mode,
+        )
+    };
+    let reference = reference_qgelu_mlp_scaled(
+        &x,
+        &gate_w,
+        &gate_s,
+        &up_w,
+        &up_s,
+        &down_w,
+        &down_s,
+        Some(&gate_gs),
+        Some(&up_gs),
+        Some(&down_gs),
+        group_size,
+        bits,
+        mode,
+    );
+
+    eval(&fused);
+    eval(&reference);
+    assert_eq!(array_shape(&fused), vec![1, 3, hidden]);
+    let close = allclose(&fused, &reference, 1e-5, 1e-5);
+    eval(&close);
+    assert!(
+        item_bool(&close),
+        "fused scaled MLP (native NVFP4 prefill compiled branch) must match the \
+         op-at-a-time reference"
     );
 }
 

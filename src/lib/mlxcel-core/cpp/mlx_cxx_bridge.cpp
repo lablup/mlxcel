@@ -1059,6 +1059,48 @@ std::unique_ptr<MlxArray> quantized_linear_forward(
     return std::make_unique<MlxArray>(std::move(result));
 }
 
+std::unique_ptr<MlxArray> quantized_linear_forward_global_scale(
+    const MlxArray& x,
+    const MlxArray& weight,
+    const MlxArray& scales,
+    const MlxArray* biases,
+    const MlxArray* global_scale,
+    const MlxArray* linear_bias,
+    int32_t group_size,
+    int32_t bits,
+    rust::Str mode
+) {
+    bool is_affine = (mode.size() == 6 && std::memcmp(mode.data(), "affine", 6) == 0);
+    array result = [&]() {
+        if (is_affine) {
+            if (biases) {
+                return mlx::core::quantized_matmul(
+                    x.inner, weight.inner, scales.inner, biases->inner,
+                    true, group_size, bits);
+            }
+            return mlx::core::quantized_matmul(
+                x.inner, weight.inner, scales.inner, std::nullopt,
+                true, group_size, bits);
+        }
+        std::optional<array> biases_opt = biases ? std::optional(biases->inner) : std::nullopt;
+        return mlx::core::quantized_matmul(
+            x.inner, weight.inner, scales.inner, biases_opt,
+            true, std::optional<int>(group_size), std::optional<int>(bits),
+            std::string(mode.data(), mode.size()));
+    }();
+
+    if (global_scale != nullptr) {
+        auto dt = result.dtype();
+        result = mlx::core::astype(mlx::core::multiply(result, global_scale->inner), dt);
+    }
+
+    if (linear_bias != nullptr) {
+        result = mlx::core::add(result, linear_bias->inner);
+    }
+
+    return std::make_unique<MlxArray>(std::move(result));
+}
+
 std::unique_ptr<MlxArray> swiglu_mlp_forward(
     const MlxArray& x,
     const MlxArray& gate_proj,
@@ -1878,18 +1920,24 @@ std::unique_ptr<MlxArray> compiled_gelu_approx_mlp_forward(
 // exact for the projections that carry no scale).
 namespace {
     // Scaled GeGLU MLP compiled cache, keyed on
-    // (group_size, bits, mode, has_gate, has_up, has_down). The presence flags
-    // are part of the key because they change the emitted graph structure (a
-    // missing scale emits no multiply/astype), so each sidecar pattern compiles
-    // to its own graph. Leaked on purpose like the sibling compile caches so it
+    // (group_size, bits, mode, has_gate, has_up, has_down, shapeless). The
+    // presence flags are part of the key because they change the emitted graph
+    // structure (a missing scale emits no multiply/astype), so each sidecar
+    // pattern compiles to its own graph. The shapeless bit separates the
+    // decode-oriented graph from the shape-specific native-NVFP4 prefill graph
+    // added for issue #705: a shapeless graph can force the single-token qmm
+    // kernel onto large prefill matmuls, while a shape-specific graph lets MLX
+    // choose the normal prefill qmm kernel and still fuse the sidecar scales and
+    // GeGLU activation. Leaked on purpose like the sibling compile caches so it
     // outlives MLX's thread_local CompilerCache at shutdown.
     static std::function<std::vector<array>(const std::vector<array>&)>&
     get_compiled_qgelu_scaled_mlp(
         int group_size, int bits, const std::string& mode,
-        bool has_gate, bool has_up, bool has_down) {
+        bool has_gate, bool has_up, bool has_down, bool shapeless) {
         struct Key {
             int group_size; int bits; std::string mode;
             bool has_gate; bool has_up; bool has_down;
+            bool shapeless;
         };
         struct KeyHash {
             size_t operator()(const Key& k) const noexcept {
@@ -1899,6 +1947,7 @@ namespace {
                 size_t flags = (size_t(k.has_gate) << 2)
                     | (size_t(k.has_up) << 1) | size_t(k.has_down);
                 h ^= std::hash<size_t>{}(flags) + 0x9e3779b9 + (h << 6) + (h >> 2);
+                h ^= std::hash<bool>{}(k.shapeless) + 0x9e3779b9 + (h << 6) + (h >> 2);
                 return h;
             }
         };
@@ -1906,7 +1955,8 @@ namespace {
             bool operator()(const Key& a, const Key& b) const noexcept {
                 return a.group_size == b.group_size && a.bits == b.bits
                     && a.mode == b.mode && a.has_gate == b.has_gate
-                    && a.has_up == b.has_up && a.has_down == b.has_down;
+                    && a.has_up == b.has_up && a.has_down == b.has_down
+                    && a.shapeless == b.shapeless;
             }
         };
 
@@ -1921,7 +1971,7 @@ namespace {
                 KeyHash, KeyEq>();
 
         std::lock_guard<std::mutex> lock(mu);
-        Key key{group_size, bits, mode, has_gate, has_up, has_down};
+        Key key{group_size, bits, mode, has_gate, has_up, has_down, shapeless};
         auto it = cache.find(key);
         if (it != cache.end()) {
             return it->second;
@@ -1975,7 +2025,7 @@ namespace {
             return {down};
         };
 
-        auto [iter, _] = cache.emplace(key, mlx::core::compile(fn, /*shapeless=*/true));
+        auto [iter, _] = cache.emplace(key, mlx::core::compile(fn, /*shapeless=*/shapeless));
         return iter->second;
     }
 
@@ -2022,18 +2072,25 @@ std::unique_ptr<MlxArray> compiled_gelu_approx_mlp_forward_global_scale(
         return !(s == "0" || s == "false" || s == "off" || s == "no");
     }();
 
-    // Decode-only compile gate, identical to `compiled_gelu_approx_mlp_forward`:
-    // single-token calls take the fused graph; prefill (multi-token) folds the
-    // scales eagerly so the shapeless graph never forces a decode-oriented qmm
-    // kernel onto the large prefill matmul (the #680 prefill regression).
+    // Compile gate:
+    //   * single-token decode uses the existing shapeless fused graph.
+    //   * native NVFP4 prefill (group_size=16/bits=4/mode=nvfp4) uses a
+    //     shape-specific fused graph. This is the issue #705 prefill recovery:
+    //     it keeps the sidecar folds and GeGLU activation in one graph without
+    //     forcing the decode-oriented qmm kernel that regressed #680.
+    //   * all other multi-token sidecar cases keep the eager fold fallback.
     const auto& x_shape = x.inner.shape();
     const bool is_single_token =
         x_shape.size() >= 2 && x_shape[x_shape.size() - 2] == 1;
     const bool legacy_compiled_shape = (group_size == 64 && bits == 4);
+    const bool native_nvfp4_prefill =
+        !is_single_token && mode_str == "nvfp4" && group_size == 16 && bits == 4;
 
-    if (compiled_qgelu_enabled && (legacy_compiled_shape || is_single_token)) {
+    if (compiled_qgelu_enabled
+        && (legacy_compiled_shape || is_single_token || native_nvfp4_prefill)) {
+        const bool shapeless = !native_nvfp4_prefill;
         auto& compiled_fn = get_compiled_qgelu_scaled_mlp(
-            group_size, bits, mode_str, has_gate, has_up, has_down);
+            group_size, bits, mode_str, has_gate, has_up, has_down, shapeless);
         std::vector<array> inputs = {
             x.inner,
             gate_proj.inner, gate_scales.inner,

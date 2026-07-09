@@ -442,15 +442,14 @@ fn nvfp4_dense_repack_forced() -> bool {
     )
 }
 
-/// Whether to force the direct native-NVFP4 transcode on a non-CUDA build.
+/// Whether to force native-NVFP4 as the target inside the dense debug route.
 ///
 /// `MLXCEL_NVFP4_NATIVE_REPACK=1` (or `true`/`on`/`yes`, matched
-/// case-insensitively) is the opt-in override tracked by issue #694: it lets a
-/// Metal/CPU build take the same bit-exact direct triplet transcode that is
-/// already the CUDA default, so Apple Silicon can be A/B benchmarked against
-/// the affine fallback without a code change. See [`nvfp4_repack_strategy`]
-/// for how this combines with `MLXCEL_NVFP4_DENSE_REPACK` and the CUDA
-/// feature flag.
+/// case-insensitively) was the issue #694 opt-in for the direct native
+/// transcode on non-CUDA. Issue #705 makes direct native the default there, so
+/// the variable is retained as a compatibility no-op for the direct route and
+/// as an explicit selector for the dense f16 -> native NVFP4 debug route when
+/// combined with `MLXCEL_NVFP4_DENSE_REPACK=1`.
 fn nvfp4_native_repack_forced() -> bool {
     matches!(
         std::env::var("MLXCEL_NVFP4_NATIVE_REPACK")
@@ -473,8 +472,8 @@ fn nvfp4_native_repack_forced() -> bool {
 ///   fallback; re-derives block scales so it drifts slightly from the
 ///   checkpoint.
 /// - `DenseAffine`: a dense f16 matrix is reconstructed and re-quantized into
-///   the MLX affine 4-bit format. The unmeasured non-CUDA default pending the
-///   Apple Silicon benchmark tracked by issue #694.
+///   the MLX affine 4-bit format. Kept as the explicit non-CUDA rollback and
+///   comparison path via `MLXCEL_NVFP4_DENSE_REPACK=1`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Nvfp4RepackStrategy {
     DirectTranscode,
@@ -490,27 +489,28 @@ enum Nvfp4RepackStrategy {
 ///
 /// Precedence (highest first):
 ///
-/// 1. `dense_forced` (`MLXCEL_NVFP4_DENSE_REPACK`) wins over everything. It
-///    forces the dense f16 repack route on any build; this is the existing
-///    debug/parity fallback from issue #693. The dense route still targets
-///    native NVFP4 quantization when native mode otherwise applies (CUDA, or
-///    `native_forced` on a non-CUDA build), and falls back to the affine
-///    format only when neither applies.
-/// 2. Otherwise `native_forced` (`MLXCEL_NVFP4_NATIVE_REPACK`) forces the
-///    direct transcode even on a non-CUDA build. This is the issue #694
-///    opt-in for Apple Silicon A/B testing.
-/// 3. Otherwise the default applies: native direct transcode on CUDA builds,
-///    affine fallback on non-CUDA builds (unchanged behavior).
+/// 1. `dense_forced` (`MLXCEL_NVFP4_DENSE_REPACK`) wins over the direct route.
+///    It forces the dense f16 repack route on any build; this is the existing
+///    debug/parity fallback from issue #693. On CUDA, and on non-CUDA when
+///    `native_forced` is also set, that dense route targets native NVFP4. On
+///    non-CUDA with only `dense_forced`, it targets affine 4-bit, preserving
+///    the pre-#705 comparison and rollback path.
+/// 2. Otherwise the default applies: native direct transcode on every build.
+///    This extends the CUDA default to Metal/CPU after the issue #705 prefill
+///    recovery.
 fn nvfp4_repack_strategy(
     cuda_build: bool,
     native_forced: bool,
     dense_forced: bool,
 ) -> Nvfp4RepackStrategy {
-    let native_applies = cuda_build || native_forced;
-    match (native_applies, dense_forced) {
-        (true, false) => Nvfp4RepackStrategy::DirectTranscode,
-        (true, true) => Nvfp4RepackStrategy::DenseNative,
-        (false, _) => Nvfp4RepackStrategy::DenseAffine,
+    if dense_forced {
+        if cuda_build || native_forced {
+            Nvfp4RepackStrategy::DenseNative
+        } else {
+            Nvfp4RepackStrategy::DenseAffine
+        }
+    } else {
+        Nvfp4RepackStrategy::DirectTranscode
     }
 }
 
@@ -527,17 +527,16 @@ fn current_nvfp4_repack_strategy() -> Nvfp4RepackStrategy {
 /// Repack ModelOpt NVFP4-packed weights to an MLX quantized layout in-place.
 ///
 /// Detects weight groups by the presence of `{prefix}.weight_scale_2` keys.
-/// Under CUDA the default is a direct triplet transcode (issue #693): the
+/// The default is a direct triplet transcode (issues #693/#705): the
 /// packed FP4 U8 bytes reinterpret to MLX native NVFP4 U32 words, the per-block
 /// E4M3 scales are preserved verbatim, and `weight_scale_2` is kept as a
 /// per-linear global-scale sidecar. This never materializes a dense f16 matrix
 /// and is bit-exact to the checkpoint. `MLXCEL_NVFP4_DENSE_REPACK=1` forces the
-/// older dense f16 -> MLX `quantize(mode="nvfp4")` fallback. Non-CUDA builds
-/// keep the affine fallback by default, pending the Apple Silicon benchmark
-/// tracked by issue #694; setting `MLXCEL_NVFP4_NATIVE_REPACK=1` opts a
-/// non-CUDA build into the same direct transcode for that A/B test. See
-/// [`nvfp4_repack_strategy`] for the exact precedence between the two env
-/// vars and the CUDA feature flag.
+/// older dense f16 fallback. On non-CUDA, that dense fallback targets affine
+/// 4-bit unless `MLXCEL_NVFP4_NATIVE_REPACK=1` is also set, preserving an
+/// explicit affine rollback path after direct native became the default. See
+/// [`nvfp4_repack_strategy`] for the exact precedence between the two env vars
+/// and the CUDA feature flag.
 ///
 /// After repacking the auxiliary keys `weight_scale`, `weight_scale_2`, and
 /// `input_scale` are removed from the weight map. The direct path additionally
@@ -692,8 +691,8 @@ fn repack_nvfp4_weights_to_quantized(
             continue;
         }
 
-        // Direct transcode (issue #693): the default CUDA path, and opt-in on
-        // non-CUDA builds via MLXCEL_NVFP4_NATIVE_REPACK=1 (issue #694). It
+        // Direct transcode (issues #693/#705): the default path on every
+        // backend after the native-NVFP4 prefill gap was reduced. It
         // rewrites the ModelOpt triplet into MLX native NVFP4 without ever
         // materializing a dense f16 [out, in] matrix, and it is bit-exact to
         // the checkpoint (the dense f16 -> MLX quantize fallback re-derives
@@ -1954,22 +1953,19 @@ mod tests {
     fn nvfp4_repack_strategy_matrix() {
         use Nvfp4RepackStrategy::*;
 
-        // Default behavior (both overrides unset): unchanged from before
-        // issue #694. CUDA gets the direct transcode, non-CUDA keeps the
-        // affine fallback.
+        // Default behavior (both overrides unset): issue #705 extends the CUDA
+        // direct transcode default to non-CUDA after the prefill gap recovery.
         assert_eq!(nvfp4_repack_strategy(true, false, false), DirectTranscode);
-        assert_eq!(nvfp4_repack_strategy(false, false, false), DenseAffine);
+        assert_eq!(nvfp4_repack_strategy(false, false, false), DirectTranscode);
 
-        // MLXCEL_NVFP4_NATIVE_REPACK opts a non-CUDA build into the direct
-        // transcode; it is a no-op on a CUDA build, which already defaults
-        // there.
+        // MLXCEL_NVFP4_NATIVE_REPACK is retained as a compatibility no-op for
+        // the direct route; both CUDA and non-CUDA already default there.
         assert_eq!(nvfp4_repack_strategy(false, true, false), DirectTranscode);
         assert_eq!(nvfp4_repack_strategy(true, true, false), DirectTranscode);
 
-        // MLXCEL_NVFP4_DENSE_REPACK forces the dense route on any build. The
-        // quantize target within that dense route still follows whether
-        // native mode applies: CUDA keeps native NVFP4, non-CUDA without the
-        // native override falls back to affine.
+        // MLXCEL_NVFP4_DENSE_REPACK forces the dense route on any build. CUDA
+        // keeps native NVFP4, while non-CUDA without the native override falls
+        // back to affine for explicit rollback/comparison.
         assert_eq!(nvfp4_repack_strategy(true, false, true), DenseNative);
         assert_eq!(nvfp4_repack_strategy(false, false, true), DenseAffine);
 
