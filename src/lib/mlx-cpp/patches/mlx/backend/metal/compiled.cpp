@@ -336,20 +336,19 @@ void Compiled::eval_gpu(
           /* dynamic_dims = */ false,
           /* use_big_index = */ false,
           /* work_per_thread = */ i > 3 ? 2 : 1);
-      if (i > 1) {
-        build_kernel(
-            kernel,
-            kernel_lib_ + "_strided_" + std::to_string(i) + "_large",
-            inputs_,
-            outputs_,
-            tape_,
-            is_constant_,
-            /* contiguous = */ false,
-            /* ndim = */ i,
-            /* dynamic_dims = */ false,
-            /* use_big_index = */ true,
-            /* work_per_thread = */ i > 3 ? 4 : 1);
-      }
+      // Negative strides force large mode even for small arrays.
+      build_kernel(
+          kernel,
+          kernel_lib_ + "_strided_" + std::to_string(i) + "_large",
+          inputs_,
+          outputs_,
+          tape_,
+          is_constant_,
+          /* contiguous = */ false,
+          /* ndim = */ i,
+          /* dynamic_dims = */ false,
+          /* use_big_index = */ true,
+          /* work_per_thread = */ i > 3 ? 4 : 1);
     }
     build_kernel(
         kernel,
