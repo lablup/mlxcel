@@ -330,6 +330,12 @@ pub struct ServerConfig {
     /// Default: 1 (no batching, backward compatible).
     /// Recommended: 4–8 on M5 Pro/Max hardware.
     pub max_batch_prefill: usize,
+    /// #715: padded-token budget bounding the batched-prefill transient
+    /// (`--max-batch-prefill-tokens`). `None` (the default) lets the scheduler
+    /// use `MLXCEL_MAX_BATCH_PREFILL_TOKENS` or the derived default
+    /// (`max_batch_prefill * prefill_chunk_size`); `Some(0)` disables the cap
+    /// (uncapped); `Some(n)` sets an explicit budget.
+    pub max_batch_prefill_tokens: Option<usize>,
     /// Decode-time storage backend used by the batch scheduler.
     pub decode_storage_backend: DecodeStorageBackend,
     /// Normalized pipeline-parallel runtime mode for the server worker.
@@ -552,6 +558,8 @@ impl Default for ServerConfig {
             // Serving-throughput default: batched prefill of up to 4 pending
             // requests (#628). No-ops for families without batched prefill.
             max_batch_prefill: 4,
+            // #715: unset -> scheduler derives `max_batch_prefill * prefill_chunk_size`.
+            max_batch_prefill_tokens: None,
             decode_storage_backend: DecodeStorageBackend::Auto,
             pipeline_parallel_runtime: None,
             remote_pipeline_stage: None,

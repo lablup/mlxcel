@@ -56,6 +56,11 @@ pub(crate) struct WorkerSchedulerConfig {
     pub preemption_policy: crate::server::config::PreemptionPolicy,
     /// Maximum number of requests to batch together for prefill (default: 1).
     pub max_batch_prefill: usize,
+    /// #715: explicit `--max-batch-prefill-tokens` value bounding the padded
+    /// batched-prefill transient. `None` keeps the env override or the derived
+    /// default (`max_batch_prefill * prefill_chunk_size`); `Some(0)` disables
+    /// the cap (uncapped); `Some(n)` sets an explicit budget.
+    pub max_batch_prefill_tokens: Option<usize>,
     /// Decode-time storage backend for server sequence state.
     pub decode_storage_backend: crate::server::DecodeStorageBackend,
     /// Optional pipeline runtime for in-process or remote coordinator execution.
@@ -515,6 +520,8 @@ pub(crate) fn spawn_model_worker_with_batch_config(
                 sched_config.decode_storage_backend,
             )
             .with_vision_cache_size(sched_config.vision_cache_size)
+            // cap the batched-prefill transient to --max-batch-prefill-tokens (#715).
+            .with_max_batch_prefill_tokens(sched_config.max_batch_prefill_tokens)
             .with_token_bias(token_bias)
             .with_reasoning_budget(sched_config.reasoning_budget, thinking_ids)
             .with_prompt_cache(sched_config.prompt_cache)

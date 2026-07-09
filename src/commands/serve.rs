@@ -237,6 +237,7 @@ fn build_startup_input(mut args: crate::ServeArgs) -> anyhow::Result<ServerStart
         enable_preemption: args.enable_preemption,
         preemption_policy: args.preemption_policy,
         max_batch_prefill: args.max_batch_prefill,
+        max_batch_prefill_tokens: args.max_batch_prefill_tokens,
         decode_storage_backend: args.decode_storage_backend,
         chat_template: args.chat_template,
         chat_template_file: args.chat_template_file,

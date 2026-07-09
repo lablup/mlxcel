@@ -401,6 +401,19 @@ struct ServerArgs {
     #[arg(long = "max-batch-prefill", default_value_t = 4)]
     max_batch_prefill: usize,
 
+    /// Cap on the transient memory of a single batched prefill (#715).
+    ///
+    /// The batched-prefill path pads every prompt in a cohort to the window's
+    /// longest prompt L and materializes a stacked `[B, L, L]` FP32 attention
+    /// mask, an O(B*L^2) transient. This caps the drained window by total
+    /// padded tokens (rows * L): rows past the budget spill to the next tick
+    /// and prefill via the chunked single-sequence path. Unset derives the
+    /// default `max_batch_prefill * prefill_chunk_size` (4 * 512 = 2048).
+    /// `0` disables the cap (uncapped). Env: `MLXCEL_MAX_BATCH_PREFILL_TOKENS`
+    /// overrides both.
+    #[arg(long = "max-batch-prefill-tokens")]
+    max_batch_prefill_tokens: Option<usize>,
+
     /// Maximum KV cache size for plain (non-sliding) caches (0 = unbounded, the default).
     ///
     /// When set to `N > 0`, the batch scheduler caps each per-sequence plain
@@ -1285,6 +1298,7 @@ fn build_startup_input(mut args: ServerArgs) -> anyhow::Result<ServerStartupInpu
         enable_preemption: args.enable_preemption,
         preemption_policy: args.preemption_policy,
         max_batch_prefill: args.max_batch_prefill,
+        max_batch_prefill_tokens: args.max_batch_prefill_tokens,
         decode_storage_backend: args.decode_storage_backend,
         chat_template: args.chat_template,
         chat_template_file: args.chat_template_file,

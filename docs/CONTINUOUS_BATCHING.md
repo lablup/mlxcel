@@ -18,6 +18,7 @@ token, then streams the new tokens out. Relevant flags:
 | `--parallel N` | 4 | Maximum active (in-flight) sequences; caps the concurrent decode batch. |
 | `--max-batch-size N` | (= `--parallel`) | Maximum sequences decoded together in one batched step. |
 | `--max-batch-prefill N` | 4 | Requests batched into one prefill forward pass (families that support it). |
+| `--max-batch-prefill-tokens N` | (derived) | Padded-token budget bounding one batched prefill's transient memory. Unset derives `max_batch_prefill * prefill_chunk_size`; `0` disables the cap. |
 | `--max-queue-depth N` | 32 | Maximum queued (not yet admitted) requests. |
 | `--prefill-chunk-size N` | 512 | Token chunk size for prefill; bounds prefill's effect on decode latency. |
 | `--enable-preemption` | off | Allow evicting a lower-priority sequence to admit a waiting one. |
@@ -97,6 +98,62 @@ full-context sequences run into an OOM abort. On the dense decode backend the
 budget is inert. Disable the guard with `--kv-cache-budget none`. Memory-
 constrained hosts can also lower `--parallel` or cap `--ctx-size` (see the
 context-sizing note in [environment-variables.md](environment-variables.md)).
+
+### Bounding the batched-prefill transient (`--max-batch-prefill-tokens`)
+
+The `--kv-cache-budget` guard above bounds steady-state KV, not the transient a
+batched prefill allocates while it runs. When two or more cold prompts share one
+padded batched prefill, the path pads every row to the window's longest prompt
+`L` and materializes a stacked `[B, L, L]` FP32 attention mask plus a
+`[B, L, hidden]` forward. Left uncapped, `B` long prompts arriving together
+allocate an `O(B*L^2)` mask that ignores `--prefill-chunk-size`: four 8k prompts
+build a `[4, 8192, 8192]` FP32 mask, about 1 GiB, a spike far above the working
+set of the sequential chunked prefill those prompts take when batched prefill is
+off. On the serving path an allocation failure is an uncatchable MLX C++ throw
+that aborts the whole server, so this is an availability edge the KV budget does
+not model.
+
+`--max-batch-prefill-tokens N` caps the drained batched window by total padded
+tokens (`rows * L`). Draining stops before a row that would push `rows * L` past
+`N`; the remaining rows stay queued and prefill on later ticks (short ones
+re-batch, long ones take the chunked single-sequence path). A head prompt too
+long to join a two-row batch (`2 * head_len > N`) skips the batched path
+entirely and prefills chunked. The bound follows from the token budget: a cohort
+of `B >= 2` rows padded to `L` costs `B*L <= N` tokens, and since `L <= (B*L)/2`
+the mask stays within `N^2 / 2` elements, i.e. `~N^2` bytes at FP16 and
+`~2*N^2` at FP32.
+
+The default budget is derived, not fixed: `max_batch_prefill * prefill_chunk_size`
+(the shipped `4 * 512 = 2048`), so a full batch of chunk-sized prompts stays
+eligible for batching while a window of longer prompts spills to the chunked
+path. At the default the FP32 mask is bounded to `2 * 2048^2` bytes, about 8 MiB,
+negligible beside model activation memory. `0` (the flag, or
+`MLXCEL_MAX_BATCH_PREFILL_TOKENS=0`) disables the cap for the pre-#715 unbounded
+behavior. The flag takes precedence over `MLXCEL_MAX_BATCH_PREFILL_TOKENS`, which
+takes precedence over the derived default (see
+[environment-variables.md](environment-variables.md)).
+
+The analytic prediction for four concurrent 8k-token prompts on
+`meta-llama-3.1-8b-instruct-4bit` (Apple M1 Ultra, Metal):
+
+| config | prefill mask window | mask transient (analytic) | path |
+|--------|--------------------:|--------------------------:|------|
+| uncapped (`--max-batch-prefill-tokens 0`) | `[4, 8192, 8192]` FP32 | `4 * 8192^2 * 4 B` = 1024 MiB | single unchunked batched forward |
+| default cap (2048) | four `[≤512, 8192]` chunk masks | `512 * 8192 * 4 B` = 16 MiB (one at a time) | 8k prompts spill to the chunked single-sequence path |
+
+The empirical A/B (server phys-footprint peak: RSS does not capture MLX Metal
+buffers on Apple Silicon, so use `/usr/bin/footprint -p <pid>` for
+`phys_footprint_peak`) is pending a measurement session. Reproduce with a server
+started at `--max-batch-prefill-tokens 0` versus the default, driven by four
+concurrent 8k-token requests (`scripts/bench_serving_concurrency.py --concurrency 4
+--prompt-tokens 8192`, `--max-tokens` small to isolate prefill).
+
+Short-prompt concurrency (the #714 default motivation) is unaffected by
+construction: at `--prompt-tokens 512 --concurrency 4` all four rows cost
+`4 * 512 = 2048` tokens, exactly the default budget, so they still batch; the
+`2 * head_len <= budget` admission holds (`2 * 512 <= 2048`). TTFT and aggregate
+throughput match the #714 table above (empirical re-run pending the same
+session).
 
 ### Paged decode and the prompt-prefix cache
 

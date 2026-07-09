@@ -77,7 +77,10 @@ use crate::vision::feature_cache::ModelVisionCaches;
 use crate::vlm_runtime::prepared_embedding_refs;
 
 use super::active::ActiveBatch;
-use super::prefill_cohort::{PrefillCohortKind, PrefillRow, plan_prefill_cohorts};
+use super::prefill_cohort::{
+    PrefillCohortKind, PrefillRow, batched_window_admits, default_batched_prefill_token_budget,
+    plan_prefill_cohorts,
+};
 use super::queue::PrefillQueue;
 use super::sequence::{
     BatchSchedulerAction, FinishReason, RequestPriority, SequenceInfo, SequenceState,
@@ -92,6 +95,33 @@ fn should_align_prefill() -> bool {
 }
 
 pub(crate) const DEFAULT_PAGED_BLOCK_SIZE: usize = 32;
+
+/// Environment override for the #715 batched-prefill token budget.
+const MAX_BATCH_PREFILL_TOKENS_ENV: &str = "MLXCEL_MAX_BATCH_PREFILL_TOKENS";
+
+/// Resolve the effective batched-prefill padded-token budget (#715).
+///
+/// Precedence (matching the `--flag` > env convention of the other server
+/// knobs): the explicit CLI/config value (`configured`, `Some` only when the
+/// flag was passed) wins; otherwise the `MLXCEL_MAX_BATCH_PREFILL_TOKENS` env
+/// var if set to a valid integer; otherwise the derived default
+/// [`default_batched_prefill_token_budget`]. A resolved value of `0` disables
+/// the cap (uncapped escape hatch) at every level.
+fn resolve_max_batch_prefill_tokens(
+    configured: Option<usize>,
+    prefill_chunk_size: usize,
+    max_batch_prefill: usize,
+) -> usize {
+    if let Some(value) = configured {
+        return value;
+    }
+    if let Ok(raw) = std::env::var(MAX_BATCH_PREFILL_TOKENS_ENV)
+        && let Ok(parsed) = raw.trim().parse::<usize>()
+    {
+        return parsed;
+    }
+    default_batched_prefill_token_budget(prefill_chunk_size, max_batch_prefill)
+}
 
 /// Decide whether a request may participate in experimental VLM prompt-prefix
 /// cache sharing (#124 step c).
@@ -213,6 +243,17 @@ pub struct BatchScheduler {
     /// run a single batched forward pass. Falls back to sequential prefill
     /// when only one request is pending or on any error.
     max_batch_prefill: usize,
+    /// #715: padded-token budget bounding a single batched-prefill window.
+    ///
+    /// The padded batched path pads every row of a cohort to the window's
+    /// longest prompt `L` and materializes a stacked `[B, L, L]` FP32 attention
+    /// mask, an `O(B*L^2)` transient. This caps `B*L` (`rows * max_len`) so the
+    /// mask stays within `budget^2 / 2` elements; rows past the budget spill to
+    /// the next tick and prefill via the chunked single-sequence path. `0`
+    /// disables the cap (uncapped). Resolved once in [`Self::with_config`] /
+    /// [`Self::with_max_batch_prefill_tokens`] from the env override, the CLI
+    /// value, or the derived default (`max_batch_prefill * prefill_chunk_size`).
+    max_batch_prefill_tokens: usize,
     /// Decode-time sequence-state backend used by this scheduler.
     decode_storage_backend: DecodeStorageBackend,
 
@@ -975,6 +1016,15 @@ impl BatchScheduler {
             chunked_prefill_seq: None,
             shutdown_requested: false,
             max_batch_prefill: max_batch_prefill.max(1),
+            // #715: resolve the batched-prefill token budget from the env
+            // override or the derived default (`max_batch_prefill *
+            // prefill_chunk_size`). `with_max_batch_prefill_tokens` overrides
+            // this later with an explicit CLI value when one was passed.
+            max_batch_prefill_tokens: resolve_max_batch_prefill_tokens(
+                None,
+                prefill_chunk_size,
+                max_batch_prefill.max(1),
+            ),
             decode_storage_backend: effective_decode_storage,
             vision_caches: Rc::new(ModelVisionCaches::new(
                 crate::vision::feature_cache::DEFAULT_VISION_CACHE_SIZE,
@@ -1013,6 +1063,29 @@ impl BatchScheduler {
             // be pure overhead).
             lookahead_force_sync: std::env::var("MLXCEL_FORCE_SYNC").is_ok(),
         }
+    }
+
+    /// Override the #715 batched-prefill padded-token budget with the explicit
+    /// CLI/config value (`--max-batch-prefill-tokens`).
+    ///
+    /// `configured` is `None` when the flag was not passed (keep the env value
+    /// or the derived default already resolved in [`Self::with_config`]),
+    /// `Some(0)` for the uncapped escape hatch, or `Some(n)` for an explicit
+    /// cap. An explicit value wins over `MLXCEL_MAX_BATCH_PREFILL_TOKENS` (see
+    /// [`resolve_max_batch_prefill_tokens`]).
+    pub fn with_max_batch_prefill_tokens(mut self, configured: Option<usize>) -> Self {
+        self.max_batch_prefill_tokens = resolve_max_batch_prefill_tokens(
+            configured,
+            self.prefill_chunk_size,
+            self.max_batch_prefill,
+        );
+        self
+    }
+
+    /// Returns the resolved batched-prefill padded-token budget (0 = uncapped).
+    /// Exposed for tests.
+    pub fn max_batch_prefill_tokens(&self) -> usize {
+        self.max_batch_prefill_tokens
     }
 
     /// Attach the server-wide KV cache quantization mode.
@@ -2071,10 +2144,17 @@ impl BatchScheduler {
                     // Use batched prefill when max_batch_prefill > 1 and at
                     // least 2 requests are waiting, otherwise take the regular
                     // single-request path so there is zero overhead for the
-                    // common case.
+                    // common case. #715: also require the head-of-queue prompt
+                    // to be short enough to join a padded batch within the
+                    // token budget; a head too long to batch takes the
+                    // chunk-aware single-sequence path (which keeps the
+                    // attention mask chunked to `[chunk, L]` instead of the
+                    // unchunked `[L, L]` a single-row batched forward would
+                    // build).
                     if self.max_batch_prefill > 1
                         && self.prefill_queue.len() >= 2
                         && self.chunked_prefill_seq.is_none()
+                        && self.batched_prefill_admits_head()
                     {
                         self.execute_batched_prefill();
                     } else {
@@ -3331,6 +3411,26 @@ impl BatchScheduler {
         }
     }
 
+    /// #715: whether the head-of-queue prompt is short enough to enter the
+    /// batched-prefill path under the padded-token budget.
+    ///
+    /// A batched cohort pads every row to the window's longest prompt `L`, so
+    /// the head can only ever join a `>= 2`-row batch when `2 * head_len` stays
+    /// within the budget. When it cannot (or the queue is empty), batching
+    /// would collapse to a single-row unchunked `[L, L]` forward, so the head
+    /// is instead routed to the normal chunk-aware single-sequence path. `0`
+    /// (uncapped) always admits.
+    fn batched_prefill_admits_head(&self) -> bool {
+        let budget = self.max_batch_prefill_tokens;
+        if budget == 0 {
+            return true;
+        }
+        match self.prefill_queue.peek_prompt_len() {
+            Some(head_len) => head_len.saturating_mul(2) <= budget,
+            None => false,
+        }
+    }
+
     /// Batched prefill: drain up to `max_batch_prefill` requests from the
     /// prefill queue and process eligible cold text rows in a single forward
     /// pass.
@@ -3350,12 +3450,33 @@ impl BatchScheduler {
         // Collect up to `batch_size` requests from the queue. The queue
         // dequeues in priority order (high lane, then normal, then low; FIFO
         // within a lane), so `seqs` is already in priority order.
+        //
+        // #715: the drain is also bounded by the padded-token budget
+        // (`max_batch_prefill_tokens`). Because the padded batched path pads
+        // every row to the window's longest prompt `L`, the drained window
+        // costs `rows * L` padded tokens and materializes an `O(rows * L^2)`
+        // FP32 mask. Draining stops before a row that would push `rows * L`
+        // past the budget; the remaining rows stay queued and are prefilled on
+        // a later tick (short ones re-batch, long ones take the chunked
+        // single-sequence path). The head row is always taken so the drain
+        // makes forward progress; the dispatch-time guard
+        // ([`Self::batched_prefill_admits_head`]) has already kept a head too
+        // long to batch out of this path entirely.
+        let budget = self.max_batch_prefill_tokens;
         let mut seqs: Vec<SequenceInfo> = Vec::with_capacity(batch_size);
-        for _ in 0..batch_size {
-            match self.prefill_queue.dequeue() {
-                Some(s) => seqs.push(s),
-                None => break,
+        let mut window_max_len = 0usize;
+        while seqs.len() < batch_size {
+            let Some(next_len) = self.prefill_queue.peek_prompt_len() else {
+                break;
+            };
+            if !batched_window_admits(seqs.len(), window_max_len, next_len, budget) {
+                break;
             }
+            let Some(seq) = self.prefill_queue.dequeue() else {
+                break;
+            };
+            window_max_len = window_max_len.max(seq.prompt_tokens.len());
+            seqs.push(seq);
         }
 
         if seqs.is_empty() {

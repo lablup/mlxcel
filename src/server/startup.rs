@@ -135,6 +135,9 @@ pub struct ServerStartupConfig {
     pub no_batch: bool,
     /// Maximum number of pending requests to batch together for prefill (default: 1).
     pub max_batch_prefill: usize,
+    /// #715: `--max-batch-prefill-tokens` cap on the batched-prefill transient.
+    /// `None` keeps the env override / derived default; `Some(0)` = uncapped.
+    pub max_batch_prefill_tokens: Option<usize>,
     /// Decode-time storage backend requested by the CLI. `None` preserves the
     /// legacy `MLXCEL_SERVER_DECODE_STORAGE` env-var fallback.
     pub decode_storage_backend: Option<crate::server::DecodeStorageBackend>,
@@ -413,6 +416,8 @@ impl Default for ServerStartupConfig {
             no_batch: false,
             // Serving-throughput default: batched prefill up to 4 requests (#628).
             max_batch_prefill: 4,
+            // #715: unset -> scheduler derives the token budget.
+            max_batch_prefill_tokens: None,
             decode_storage_backend: None,
             chat_template: None,
             chat_template_file: None,
@@ -871,6 +876,9 @@ pub(super) fn build_server_config(
         preemption_policy: parse_preemption_policy(&startup.preemption_policy),
         no_batch: startup.no_batch,
         max_batch_prefill: startup.max_batch_prefill.max(1),
+        // #715: pass the explicit --max-batch-prefill-tokens through untouched
+        // (the scheduler resolves env / derived default when this is None).
+        max_batch_prefill_tokens: startup.max_batch_prefill_tokens,
         decode_storage_backend: startup
             .decode_storage_backend
             .unwrap_or_else(resolve_decode_storage_backend),

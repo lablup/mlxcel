@@ -84,6 +84,9 @@ pub struct ServerStartupInput {
     pub no_batch: bool,
     /// Maximum number of pending requests to batch together for prefill (default: 1).
     pub max_batch_prefill: usize,
+    /// #715: `--max-batch-prefill-tokens` cap on the batched-prefill transient.
+    /// `None` = env override / derived default; `Some(0)` = uncapped.
+    pub max_batch_prefill_tokens: Option<usize>,
     /// Decode storage backend requested by the CLI. `None` means the startup
     /// layer should use `MLXCEL_SERVER_DECODE_STORAGE` or automatic selection.
     pub decode_storage_backend: Option<DecodeStorageBackend>,
@@ -551,6 +554,7 @@ impl ServerStartupInput {
             preemption_policy: self.preemption_policy,
             no_batch: self.no_batch,
             max_batch_prefill: self.max_batch_prefill,
+            max_batch_prefill_tokens: self.max_batch_prefill_tokens,
             decode_storage_backend: self.decode_storage_backend,
             chat_template: self.chat_template,
             chat_template_file: self.chat_template_file,

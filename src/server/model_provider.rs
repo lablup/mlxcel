@@ -285,6 +285,8 @@ impl ModelProvider {
                 config.enable_preemption,
                 config.preemption_policy,
                 config.max_batch_prefill,
+                // forward the --max-batch-prefill-tokens cap to the worker (#715).
+                config.max_batch_prefill_tokens,
                 config.decode_storage_backend,
                 config.pipeline_parallel_runtime.clone(),
                 config.vision_cache_size,
@@ -566,6 +568,9 @@ impl ModelProvider {
             enable_preemption,
             preemption_policy,
             max_batch_prefill,
+            // this wrapper predates --max-batch-prefill-tokens (#715); let the
+            // scheduler use the env override or the derived default.
+            None,
             decode_storage_backend,
             pipeline_parallel_runtime,
             vision_cache_size,
@@ -609,6 +614,7 @@ impl ModelProvider {
         enable_preemption: bool,
         preemption_policy: crate::server::config::PreemptionPolicy,
         max_batch_prefill: usize,
+        max_batch_prefill_tokens: Option<usize>,
         decode_storage_backend: crate::server::DecodeStorageBackend,
         pipeline_parallel_runtime: Option<crate::server::PipelineParallelRuntimeConfig>,
         vision_cache_size: usize,
@@ -650,6 +656,9 @@ impl ModelProvider {
             enable_preemption,
             preemption_policy,
             max_batch_prefill: max_batch_prefill.max(1),
+            // #715: forward the explicit --max-batch-prefill-tokens value; the
+            // scheduler resolves the env override / derived default otherwise.
+            max_batch_prefill_tokens,
             decode_storage_backend,
             pipeline_parallel_runtime,
             tensor_parallel: crate::distributed::ShardConfig::default(),
@@ -745,6 +754,8 @@ impl ModelProvider {
             enable_preemption: false,
             preemption_policy: crate::server::config::PreemptionPolicy::default(),
             max_batch_prefill: 1,
+            // #715: minimal test path never batches prefill; keep the default.
+            max_batch_prefill_tokens: None,
             decode_storage_backend: crate::server::DecodeStorageBackend::Dense,
             pipeline_parallel_runtime: None,
             tensor_parallel: crate::distributed::ShardConfig::default(),

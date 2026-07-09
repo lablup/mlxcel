@@ -149,6 +149,21 @@ impl PrefillQueue {
         collected
     }
 
+    /// Peek at the prompt length (in tokens) of the next sequence that
+    /// [`Self::dequeue`] would return, without removing it.
+    ///
+    /// used by the batched-prefill token-budget gate (#715) to decide,
+    /// before draining a window, whether the head-of-queue prompt is short
+    /// enough to join a padded batch or must take the chunked single-sequence
+    /// path instead.
+    pub fn peek_prompt_len(&self) -> Option<usize> {
+        self.high
+            .front()
+            .or_else(|| self.normal.front())
+            .or_else(|| self.low.front())
+            .map(|seq| seq.prompt_tokens.len())
+    }
+
     /// Peek at the priority of the next sequence that would be dequeued.
     pub fn peek_priority(&self) -> Option<RequestPriority> {
         if !self.high.is_empty() {

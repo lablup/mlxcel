@@ -162,6 +162,91 @@ fn flush_sequential(cohorts: &mut Vec<PrefillCohort>, pending: &mut Vec<usize>) 
     });
 }
 
+// ---------------------------------------------------------------------------
+// Batched-prefill token-budget cap (#715).
+//
+// `plan_prefill_cohorts` decides *which contiguous rows* may batch together;
+// this cap decides *how many* of them a single drained window may hold so the
+// padded batched transient stays bounded. The padded path (`run_padded_batched_prefill`)
+// pads every row of a cohort to the window's longest prompt `L` and runs one
+// stacked `[B, L, L]` FP32 attention mask plus a `[B, L, hidden]` forward. Left
+// uncapped, `B` long prompts arriving together allocate an `O(B*L^2)` mask (four
+// 8k prompts => a `[4, 8192, 8192]` FP32 mask ~= 1 GiB), a transient the serving
+// path does not model in its steady-state KV budget and which aborts the process
+// on OOM (an uncatchable MLX C++ throw). Bounding `B*L` (`rows * max_len`) to a
+// token budget bounds both transients: the mask is `B*L^2 = (B*L)*L` elements,
+// and for any window of `B >= 2` rows `L <= (B*L)/2`, so the mask stays within
+// `budget^2 / 2` elements (`~budget^2` bytes at FP16, `~2*budget^2` at FP32). At
+// the default budget of `max_batch_prefill * prefill_chunk_size` (4 * 512 = 2048)
+// that is at most ~8 MiB of FP32 mask, negligible beside model activation memory.
+// ---------------------------------------------------------------------------
+
+/// Whether a batched-prefill window that currently holds `count` rows padded to
+/// `cur_max` tokens may admit one more row of `next_len` tokens without pushing
+/// the padded window cost (`rows * max_len`) past `max_tokens`.
+///
+/// `max_tokens == 0` disables the cap (uncapped). The first row (`count == 0`)
+/// is always admitted so a drain makes forward progress even for a head that
+/// alone exceeds the budget; the scheduler's dispatch-time guard keeps such a
+/// long head out of the batched path in the first place, so a taken window's
+/// `max_len` is bounded by `max_tokens / 2`.
+pub(crate) fn batched_window_admits(
+    count: usize,
+    cur_max: usize,
+    next_len: usize,
+    max_tokens: usize,
+) -> bool {
+    if max_tokens == 0 || count == 0 {
+        return true;
+    }
+    let new_max = cur_max.max(next_len);
+    count.saturating_add(1).saturating_mul(new_max) <= max_tokens
+}
+
+/// Return how many leading rows of `prompt_lens` (in dequeue order) a batched
+/// prefill window may drain under the row-count cap `max_rows` and the
+/// padded-token budget `max_tokens` (0 = uncapped). Always returns at least 1
+/// when a row is available; see [`batched_window_admits`].
+///
+/// The scheduler drains incrementally via [`batched_window_admits`] (it peeks
+/// one queued row at a time rather than materializing all lengths); this
+/// aggregate form pins the same recurrence for the cap unit tests.
+#[cfg(test)]
+pub(crate) fn batched_prefill_window_len(
+    prompt_lens: &[usize],
+    max_rows: usize,
+    max_tokens: usize,
+) -> usize {
+    let mut cur_max = 0usize;
+    let mut take = 0usize;
+    for (i, &len) in prompt_lens.iter().take(max_rows).enumerate() {
+        if !batched_window_admits(i, cur_max, len, max_tokens) {
+            break;
+        }
+        cur_max = cur_max.max(len);
+        take = i + 1;
+    }
+    take
+}
+
+/// Derived default padded-token budget for a batched-prefill window when the
+/// operator sets neither `--max-batch-prefill-tokens` nor
+/// `MLXCEL_MAX_BATCH_PREFILL_TOKENS`: `max_batch_prefill * prefill_chunk_size`,
+/// so a full batch of chunk-sized prompts stays eligible for batching while a
+/// window of longer prompts spills to the chunked single-sequence path. Falls
+/// back to 512 tokens per row when chunking is disabled (`prefill_chunk_size == 0`).
+pub(crate) fn default_batched_prefill_token_budget(
+    prefill_chunk_size: usize,
+    max_batch_prefill: usize,
+) -> usize {
+    let per_row = if prefill_chunk_size == 0 {
+        512
+    } else {
+        prefill_chunk_size
+    };
+    max_batch_prefill.max(1).saturating_mul(per_row)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -422,5 +507,94 @@ mod tests {
             }]
         );
         assert_batched_cohorts_are_cold(&w, &plan);
+    }
+
+    // --- #715: batched-prefill token-budget cap ---
+
+    #[test]
+    fn window_uncapped_takes_up_to_row_cap() {
+        // budget == 0 disables the cap: the row-count cap is the only limit.
+        assert_eq!(
+            batched_prefill_window_len(&[8000, 8000, 8000, 8000], 4, 0),
+            4
+        );
+        assert_eq!(batched_prefill_window_len(&[8000; 8], 4, 0), 4);
+        assert_eq!(batched_prefill_window_len(&[], 4, 0), 0);
+    }
+
+    #[test]
+    fn window_fits_within_budget() {
+        // 4 short rows (4 * 500 = 2000) fit the default 2048-token budget.
+        assert_eq!(
+            batched_prefill_window_len(&[500, 500, 500, 500], 4, 2048),
+            4
+        );
+    }
+
+    #[test]
+    fn window_spills_rows_past_budget() {
+        // The 5th row would push the padded cost to 5 * 500 = 2500 > 2048, so
+        // only the first four are drained; the rest spill to the next tick.
+        assert_eq!(
+            batched_prefill_window_len(&[500, 500, 500, 500, 500], 8, 2048),
+            4
+        );
+    }
+
+    #[test]
+    fn window_boundary_is_inclusive() {
+        // Exactly at the budget (4 * 512 = 2048) is admitted; one more spills.
+        assert_eq!(
+            batched_prefill_window_len(&[512, 512, 512, 512], 4, 2048),
+            4
+        );
+        assert_eq!(
+            batched_prefill_window_len(&[512, 512, 512, 512, 512], 8, 2048),
+            4
+        );
+    }
+
+    #[test]
+    fn window_growing_max_len_recomputes_cost() {
+        // The window pads to the running max, so a longer later row retroactively
+        // raises the whole window's cost: [500, 1000, 1000] with budget 2048
+        // admits the first two (2 * 1000 = 2000) but not the third
+        // (3 * 1000 = 3000 > 2048).
+        assert_eq!(batched_prefill_window_len(&[500, 1000, 1000], 4, 2048), 2);
+    }
+
+    #[test]
+    fn window_long_head_always_makes_progress() {
+        // Even a head longer than the whole budget is taken (the drain must make
+        // progress); the second row is rejected. The scheduler's dispatch guard
+        // normally routes such a head to the chunked single-sequence path before
+        // this is ever reached.
+        assert_eq!(batched_prefill_window_len(&[8000, 100], 4, 2048), 1);
+        assert_eq!(batched_prefill_window_len(&[8000], 4, 2048), 1);
+    }
+
+    #[test]
+    fn window_admits_predicate_edges() {
+        // Head always admitted (progress); uncapped always admitted.
+        assert!(batched_window_admits(0, 0, 999_999, 2048));
+        assert!(batched_window_admits(3, 8000, 8000, 0));
+        // Boundary: (count + 1) * max(cur, next) == budget is inclusive.
+        assert!(batched_window_admits(3, 512, 512, 2048)); // 4 * 512 == 2048
+        assert!(!batched_window_admits(4, 512, 512, 2048)); // 5 * 512 > 2048
+        // A longer next row raises the window max: 2 * 1000 = 2000 still fits,
+        // but 2 * 1100 = 2200 tips it over.
+        assert!(batched_window_admits(1, 500, 1000, 2048));
+        assert!(!batched_window_admits(1, 500, 1100, 2048));
+    }
+
+    #[test]
+    fn default_budget_scales_with_batch_and_chunk() {
+        // Default = max_batch_prefill * prefill_chunk_size (the #714 defaults
+        // yield 4 * 512 = 2048).
+        assert_eq!(default_batched_prefill_token_budget(512, 4), 2048);
+        // Chunking disabled falls back to 512 tokens per row.
+        assert_eq!(default_batched_prefill_token_budget(0, 4), 2048);
+        assert_eq!(default_batched_prefill_token_budget(256, 8), 2048);
+        assert_eq!(default_batched_prefill_token_budget(512, 1), 512);
     }
 }
