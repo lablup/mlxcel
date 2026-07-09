@@ -107,19 +107,20 @@ checkpoint reference.
 
 ## Apple Silicon A/B runbook (issue #694)
 
+Issue #694 was run on 2026-07-09 on an M1 Ultra Metal host; see
+`docs/benchmark_results/nvfp4-native-metal-m1ultra-2026-07-09.md` and
+`benchmarks/metal_m1ultra_issue694_nvfp4_native_vs_affine_2026-07-09.csv`.
+The direct native NVFP4 path stayed opt-in on Metal because 2048-token prefill
+did not meet the required 20% improvement gate.
+
 This benchmark ran on NVIDIA GB10, so it only validates the direct transcode
 under CUDA. Issue #694 asks whether Metal/non-CUDA builds should switch from
 the affine 4-bit fallback to the same direct transcode, and that decision
 needs an M-series host running the same checkpoint. The opt-in override lands
 in the PR that references this issue: `MLXCEL_NVFP4_NATIVE_REPACK=1` makes a
 non-CUDA build take the direct transcode without a code change, so the two
-paths can be compared on the same binary. This section is the exact procedure
-for that run; it has not been executed yet and the acceptance criteria in
-issue #694 remain open until it is. Note that the direct-transcode leg is
-itself unvalidated at runtime on Metal (the in-tree native NVFP4 qmm patches
-are CUDA-side), so a load or inference failure on the
-`MLXCEL_NVFP4_NATIVE_REPACK=1` leg is a possible and itself-informative
-outcome of this A/B rather than a harness mistake.
+paths can be compared on the same binary. This section remains as the reusable
+runbook for future M-series retests.
 
 ### Build
 
