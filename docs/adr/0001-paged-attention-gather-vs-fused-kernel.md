@@ -131,6 +131,8 @@ The selector is native only when all four hold: the backend is Apple Silicon Met
 
 The chunked-slab reality (#235) narrows where native is reachable. Slab count is a per-layer property across all sequences sharing the pool, so a batched layer spans `B * ceil(visible_len / block_size)` rows; at `block_size` 32 any `B>=4` layer past ~256 tokens already exceeds one 32-row slab and the kernel declines. The batched moderate-context win the Phase 6 table recorded on the pre-#235 single-tensor pool is therefore unreachable today without the deferred multi-slab kernel. The reachable remnant is short-context batched decode (single-slab, `B>=4`), where the kernel still wins.
 
+Reachability caveat: the in-server decode path does not currently call `paged_decode_attention_pooled` at all. Pool-backed model layers gate out of the native-kernel arm (`is_paged_backed()`) and route through the per-sequence `update_and_fetch` pool intercept, which gathers the visible window and runs standard SDPA. The pooled entry point, and with it this selector, is exercised today by the kernel bench, the unit/FFI tests, and external mlxcel-core API consumers; inside `mlxcel-server` it is latent. Wiring the pooled path into the scheduler decode (or retiring it) is tracked in #710.
+
 **Hardware:** Apple M1 Ultra (Mac Studio), 128 GB, macOS 26.5. `--release --features metal,accelerate`, 50 timed iterations after 20 warmup, f16 pool, head_dim 128, 32 q-heads, 8 kv-heads, block 32. From `examples/paged_attention_kernel_bench.rs`. Fused = raw `paged_decode_fused`; speedup > 1 means the kernel beats gather:
 
 | batch | visible_len | slabs | selector | gather_us | fused_us | speedup |
