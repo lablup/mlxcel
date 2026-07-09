@@ -368,7 +368,11 @@ fn serve_streaming_request<G>(
 
     match result {
         Ok(finish_reason) => {
-            decode_state.flush(tokenizer);
+            // Forward the incremental detokenizer's held tail as one final token
+            // event before Done so streaming clients receive it (issue #633).
+            if let Some(tail) = decode_state.flush(tokenizer) {
+                let _ = response_tx.send(GenerateEvent::Token(tail));
+            }
             let mut gen_result: GenerationResult = decode_state.finish_with_cache(
                 start,
                 engine_prompt.len(),

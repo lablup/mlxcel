@@ -4044,7 +4044,13 @@ impl BatchScheduler {
             {
                 tracing::error!("State transition error: {err}");
             }
-            seq.decode_state.flush(&self.tokenizer);
+            // Forward any tail the incremental detokenizer held back (a final
+            // token carrying complete text plus a trailing incomplete UTF-8
+            // byte) as one last token event before Done, so streaming clients
+            // receive it (issue #633).
+            if let Some(tail) = seq.decode_state.flush(&self.tokenizer) {
+                let _ = seq.response_tx.send(GenerateEvent::Token(tail));
+            }
             let cached = seq.already_cached_tokens;
             let result = seq.decode_state.finish_with_cache(
                 seq.created_at,
@@ -4967,7 +4973,12 @@ impl BatchScheduler {
             if let Some(mut seq) = self.active_batch.remove(id) {
                 let tokens_generated = seq.generated_tokens.len();
 
-                seq.decode_state.flush(&self.tokenizer);
+                // Forward the incremental detokenizer's held tail as one final
+                // token event before Done, so streaming clients are not missing
+                // text the non-streaming result.text still carries (issue #633).
+                if let Some(tail) = seq.decode_state.flush(&self.tokenizer) {
+                    let _ = seq.response_tx.send(GenerateEvent::Token(tail));
+                }
                 let cached = seq.already_cached_tokens;
                 let result = seq.decode_state.finish_with_cache(
                     seq.created_at,

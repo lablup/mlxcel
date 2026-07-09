@@ -2173,22 +2173,36 @@ impl StreamingDecodeState {
     }
 
     /// Flush any remaining windowed text (including an unresolved trailing
-    /// incomplete sequence) at the end of generation.
+    /// incomplete sequence) at the end of generation, returning the flushed
+    /// delta so streaming callers can emit it as one final token event.
+    ///
+    /// This return value is load-bearing: `on_token` holds back the WHOLE window
+    /// while its tail is an incomplete UTF-8 sequence (a single token can carry
+    /// complete text plus a trailing incomplete byte), so if generation stops on
+    /// such a token the complete text is still buffered here. A streaming caller
+    /// that ignores the return would append it to `generated_text` (seen by the
+    /// non-streaming `result.text`) but never send it to the client. Every
+    /// streaming finish site must forward this delta before its `Done`/end event.
     ///
     /// Unlike [`Self::on_token`], the trailing-U+FFFD guard is not applied: any
     /// bytes that never completed a UTF-8 sequence are emitted here as U+FFFD
     /// replacement characters so that the streamed output matches a
     /// whole-history decode. The window prefix ended on a complete boundary, so
     /// `prefix_text` is a genuine prefix of `new_text` and the slice is safe.
-    pub fn flush(&mut self, tokenizer: &MlxcelTokenizer) {
+    #[must_use = "the flushed tail must be streamed to the client, not dropped"]
+    pub fn flush(&mut self, tokenizer: &MlxcelTokenizer) -> Option<String> {
         let prefix_text = self.decode_window(tokenizer, self.prefix_offset, self.read_offset);
         let new_text = self.decode_window(tokenizer, self.prefix_offset, self.all_ids.len());
-        if new_text.len() > prefix_text.len() {
+        let flushed = if new_text.len() > prefix_text.len() {
             let delta = self.window_delta(tokenizer, &prefix_text, &new_text);
             self.generated_text.push_str(&delta);
-        }
+            (!delta.is_empty()).then_some(delta)
+        } else {
+            None
+        };
         self.prefix_offset = self.all_ids.len();
         self.read_offset = self.all_ids.len();
+        flushed
     }
 
     #[allow(dead_code)]

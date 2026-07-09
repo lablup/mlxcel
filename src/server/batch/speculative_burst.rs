@@ -1773,7 +1773,11 @@ fn finalize_burst_success(
     }
 
     let tokens_generated = seq.generated_tokens.len();
-    seq.decode_state.flush(ctx.tokenizer);
+    // Forward the incremental detokenizer's held tail as one final token event
+    // before Done so streaming clients receive it (issue #633).
+    if let Some(tail) = seq.decode_state.flush(ctx.tokenizer) {
+        let _ = seq.response_tx.send(GenerateEvent::Token(tail));
+    }
     let cached = seq.already_cached_tokens;
     let result = seq.decode_state.finish_with_cache(
         seq.created_at,

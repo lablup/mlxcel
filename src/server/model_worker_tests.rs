@@ -136,7 +136,12 @@ fn simulate_byte_fallback_stream(
             chunks.push(chunk);
         }
     }
-    state.flush(tokenizer);
+    // Model a correct streaming client: the end-of-stream flush can carry real
+    // text the last token held back (complete text plus a trailing incomplete
+    // byte), so its return is part of the streamed output, not dropped.
+    if let Some(tail) = state.flush(tokenizer) {
+        chunks.push(tail);
+    }
     let start = Instant::now();
     let result = state.finish_with_cache(start, prompt_ids.len(), usize::MAX, 0);
     (chunks, result.text)
@@ -304,10 +309,12 @@ fn incremental_detok_truncated_mid_multibyte_holds_partial() {
         );
     }
 
-    // After flush the held partial surfaces as replacement char(s). The already
-    // streamed "Hello" is preserved and the whole result is byte-identical to a
-    // one-shot decode of exactly the truncated ids.
-    state.flush(&tokenizer);
+    // After flush the held partial surfaces as replacement char(s). The flush
+    // return is part of the stream, so a correct client accumulates it; the full
+    // streamed text and the non-streaming result.text are both byte-identical to
+    // a one-shot decode of exactly the truncated ids.
+    let flushed = state.flush(&tokenizer);
+    let full_streamed = format!("{streamed}{}", flushed.clone().unwrap_or_default());
     let result = state.finish_with_cache(std::time::Instant::now(), 0, usize::MAX, 0);
     let expected = tokenizer
         .decode(
@@ -317,6 +324,157 @@ fn incremental_detok_truncated_mid_multibyte_holds_partial() {
         .unwrap_or_default();
     assert!(result.text.starts_with("Hello"));
     assert_eq!(result.text, expected);
+    assert_eq!(
+        full_streamed, result.text,
+        "streamed deltas plus the flush return must equal the non-streaming text"
+    );
+}
+
+/// GPT-2/ByteLevel byte -> visible-char map (the map the ByteLevel decoder
+/// inverts). Lets a test build a vocab token whose decoded bytes end in the
+/// middle of a multibyte UTF-8 character. Unlike byte-fallback tokenizers, a
+/// ByteLevel tokenizer (Qwen, GPT-2, ...) can carry complete text plus an
+/// incomplete trailing byte inside a single token.
+fn bytelevel_byte_to_char() -> [char; 256] {
+    let mut is_direct = [false; 256];
+    let mut map = ['\0'; 256];
+    for (lo, hi) in [(0x21u32, 0x7E), (0xA1, 0xAC), (0xAE, 0xFF)] {
+        for b in lo..=hi {
+            is_direct[b as usize] = true;
+            map[b as usize] = char::from_u32(b).unwrap();
+        }
+    }
+    let mut n = 0u32;
+    for b in 0..256usize {
+        if !is_direct[b] {
+            map[b] = char::from_u32(256 + n).unwrap();
+            n += 1;
+        }
+    }
+    map
+}
+
+fn bytelevel_token(bytes: &[u8], map: &[char; 256]) -> String {
+    bytes.iter().map(|&b| map[b as usize]).collect()
+}
+
+/// A HuggingFace ByteLevel tokenizer whose token 0 decodes to "abc" plus the
+/// first byte of the 3-byte character "가" (i.e. a single token carrying
+/// complete text and an incomplete UTF-8 tail), and tokens 1/2 are the two
+/// remaining bytes of "가". This is the token shape that produces the
+/// "complete text held on a trailing incomplete byte" case the flush-return
+/// path must recover.
+fn stub_bytelevel_split_char() -> MlxcelTokenizer {
+    let map = bytelevel_byte_to_char();
+    let ga = "가".as_bytes(); // [0xEA, 0xB0, 0x80]
+    let t0 = bytelevel_token(&[b'a', b'b', b'c', ga[0]], &map);
+    let t1 = bytelevel_token(&[ga[1]], &map);
+    let t2 = bytelevel_token(&[ga[2]], &map);
+    let json = format!(
+        r#"{{
+            "version": "1.0",
+            "truncation": null,
+            "padding": null,
+            "added_tokens": [],
+            "normalizer": null,
+            "pre_tokenizer": {{"type": "ByteLevel", "add_prefix_space": false, "trim_offsets": true, "use_regex": true}},
+            "post_processor": null,
+            "decoder": {{"type": "ByteLevel", "add_prefix_space": true, "trim_offsets": true, "use_regex": true}},
+            "model": {{
+                "type": "BPE",
+                "dropout": null,
+                "unk_token": null,
+                "continuing_subword_prefix": null,
+                "end_of_word_suffix": null,
+                "fuse_unk": false,
+                "byte_fallback": false,
+                "vocab": {{"{t0}": 0, "{t1}": 1, "{t2}": 2}},
+                "merges": []
+            }}
+        }}"#
+    );
+    let tokenizer = tokenizers::Tokenizer::from_bytes(json.as_bytes())
+        .expect("failed to build ByteLevel split-char stub tokenizer");
+    MlxcelTokenizer::HuggingFace(tokenizer)
+}
+
+/// Regression for the flush-drop bug (PR #713 review): a single final token
+/// decodes to complete text ("abc") plus a trailing incomplete UTF-8 byte, then
+/// generation stops. `on_token` correctly holds the whole window (it ends in
+/// U+FFFD), so the complete "abc" is only recoverable from the `flush` return.
+/// A streaming client that ignores the return would lose "abc" while the
+/// non-streaming `result.text` keeps it. The streamed deltas plus the flush
+/// return must equal both `result.text` and a one-shot decode.
+#[test]
+fn incremental_detok_flush_returns_held_complete_text() {
+    let tokenizer = stub_bytelevel_split_char();
+    // Precondition: the stub really produces "complete + incomplete tail".
+    assert_eq!(
+        tokenizer.decode(&[0], false).unwrap_or_default(),
+        "abc\u{FFFD}",
+        "ByteLevel stub token 0 must decode to 'abc' + one replacement char"
+    );
+
+    let mut state = StreamingDecodeState::new(&tokenizer, &[]);
+    let held = state.on_token(0, &tokenizer);
+    assert!(
+        held.is_none(),
+        "a window ending in an incomplete byte must be held, not streamed: {held:?}"
+    );
+
+    // Generation stops here; flush must return the held text so it is streamed.
+    let flushed = state.flush(&tokenizer);
+    assert_eq!(
+        flushed.as_deref(),
+        Some("abc\u{FFFD}"),
+        "flush must return the held complete text plus the U+FFFD tail"
+    );
+
+    let streamed: String = flushed.unwrap_or_default();
+    let result = state.finish_with_cache(std::time::Instant::now(), 0, usize::MAX, 0);
+    assert_eq!(
+        streamed, result.text,
+        "streamed text must equal result.text"
+    );
+    assert_eq!(
+        result.text,
+        tokenizer.decode(&[0], false).unwrap_or_default(),
+        "result.text must equal a one-shot decode"
+    );
+}
+
+/// The mixed complete-plus-incomplete token followed by the completing bytes:
+/// mid-stream (generation continues) the completed text is emitted by `on_token`
+/// and `flush` has nothing to add. Byte-exact against a one-shot decode.
+#[test]
+fn incremental_detok_bytelevel_split_char_completes_mid_stream() {
+    let tokenizer = stub_bytelevel_split_char();
+    assert_eq!(
+        tokenizer.decode(&[0, 1, 2], false).unwrap_or_default(),
+        "abc가",
+        "ByteLevel stub tokens [0,1,2] must decode to 'abc가'"
+    );
+
+    let mut state = StreamingDecodeState::new(&tokenizer, &[]);
+    let mut chunks = Vec::new();
+    for tok in [0, 1, 2] {
+        if let Some(c) = state.on_token(tok, &tokenizer) {
+            chunks.push(c);
+        }
+    }
+    if let Some(tail) = state.flush(&tokenizer) {
+        chunks.push(tail);
+    }
+    let concatenated: String = chunks.concat();
+    let result = state.finish_with_cache(std::time::Instant::now(), 0, usize::MAX, 0);
+    assert_eq!(concatenated, "abc가");
+    assert_eq!(result.text, "abc가");
+    for chunk in &chunks {
+        assert!(
+            !chunk.contains('\u{FFFD}'),
+            "no chunk may contain a replacement char once the char completes: {chunk:?}"
+        );
+    }
 }
 
 /// Fuzz: many random valid UTF-8 strings streamed byte-by-byte must each be
@@ -454,10 +612,10 @@ fn byte_fallback_single_byte_ascii_emits_immediately() {
 /// `flush()` as replacement characters, matching the ByteFallback decoder's
 /// own behaviour for invalid byte sequences.
 ///
-/// Note: replacement chars from end-of-stream flushing are appended to
-/// `generated_text` but not emitted as streaming delta chunks. This is
-/// consistent with how the non-streaming decoder handles incomplete sequences
-/// (the final result includes U+FFFD; no intermediate chunk is sent).
+/// The U+FFFD tail is streamed exactly once, as the `flush` return (the final
+/// end-of-stream delta), never as a mid-stream `on_token` chunk. A streaming
+/// client that accumulates deltas therefore ends up byte-identical to the
+/// non-streaming `result.text` (issue #633 flush-return fix).
 #[test]
 fn byte_fallback_incomplete_sequence_flushed_at_end_of_stream() {
     // Token 5 = <0xE5>: alone, this is an incomplete UTF-8 sequence.
@@ -465,20 +623,34 @@ fn byte_fallback_incomplete_sequence_flushed_at_end_of_stream() {
     let prompt_ids: &[i32] = &[0]; // <BOS>
     let gen_ids: &[i32] = &[5]; // <0xE5> alone (incomplete)
 
-    let (chunks, generated) = simulate_byte_fallback_stream(&tokenizer, prompt_ids, gen_ids);
-
-    // An incomplete sequence must flush as one replacement char in the final text.
-    assert_eq!(
-        generated, "\u{FFFD}",
-        "incomplete byte-fallback must flush as U+FFFD"
+    // Stream without the flush merged, to inspect the mid-stream on_token chunks
+    // separately from the final flush delta.
+    let mut state = StreamingDecodeState::new(&tokenizer, prompt_ids);
+    let mut on_token_chunks = Vec::new();
+    for &tok in gen_ids {
+        if let Some(c) = state.on_token(tok, &tokenizer) {
+            on_token_chunks.push(c);
+        }
+    }
+    // Mid-stream, an incomplete sequence yields no chunk (nothing is emitted
+    // prematurely with a replacement char).
+    assert!(
+        on_token_chunks.is_empty(),
+        "incomplete byte-fallback must not emit a mid-stream chunk: {on_token_chunks:?}"
     );
 
-    // Incomplete sequences are not emitted as streaming chunks (they only appear
-    // in the final text after end-of-stream flush). So the chunks should be empty
-    // and the concatenation of streaming chunks does not include the replacement char.
-    assert!(
-        chunks.is_empty() || chunks.iter().all(|c| !c.contains('\u{FFFD}')),
-        "incomplete byte-fallback must not produce replacement chars in streaming chunks: {chunks:?}"
+    // The flush return carries the U+FFFD tail exactly once, so a streaming
+    // client receives it (previously it was appended to result.text but never
+    // streamed, dropping it from the client's accumulated text).
+    let flushed = state.flush(&tokenizer);
+    assert_eq!(flushed.as_deref(), Some("\u{FFFD}"));
+    let result =
+        state.finish_with_cache(std::time::Instant::now(), prompt_ids.len(), usize::MAX, 0);
+    assert_eq!(result.text, "\u{FFFD}");
+    assert_eq!(
+        flushed.unwrap_or_default(),
+        result.text,
+        "the streamed flush delta must equal the non-streaming result text"
     );
 }
 

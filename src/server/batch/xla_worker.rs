@@ -354,7 +354,13 @@ impl XlaServeWorker {
                         if !tail.is_empty() {
                             let _ = response_tx.send(GenerateEvent::Token(tail));
                         }
-                        detok.flush(&self.tokenizer);
+                        // Then release any tail the incremental detokenizer held
+                        // back (a final token carrying complete text plus a
+                        // trailing incomplete UTF-8 byte). It is the last output,
+                        // so it follows the stop-matcher tail (issue #633).
+                        if let Some(detok_tail) = detok.flush(&self.tokenizer) {
+                            let _ = response_tx.send(GenerateEvent::Token(detok_tail));
+                        }
                         let mut result = detok.finish(start, prompt_token_count, max_tokens);
                         // The engine knows the authoritative reason; prefer it over
                         // the count-based inference in `finish`.
