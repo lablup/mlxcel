@@ -86,6 +86,12 @@ mlxcel's fused kernel regressed decode 3-7x, because the hand-written fused
 kernel is slower than native SDPA over a materialized V, so the split dequant
 plus native SDPA stays the fast arrangement.
 
+### On CUDA (GB10)
+
+The same trade holds on CUDA, and the numbers were measured on GB10 (sm_121) with `llama-3.1-8b-4bit` (2026-07-10, `benchmarks/cuda_gb10_issue635_kvquant_2026-07-10.csv`; full matrix in `benchmark_results/cuda-kv-quant-modes-gb10-2026-07-10.md`). All six modes run without a Metal-only abort: every custom Turbo/Sparse-V kernel is gated to macOS and falls back to a plain-MLX graph path on CUDA.
+
+Int8 decode vs fp16 is 0.74x at 2K, 0.53x at 8K, and 0.31x at 32K, so it is slower at every length and the gap widens with context, because the path dequantizes the whole INT8 window to fp16 each step and then runs the standard fp16 SDPA (no fused INT8-KV kernel cuts the read bandwidth). What Int8 buys is memory: at 32K the MLX peak drops from 10.37 GB to 8.18 GB, matching a halved fp16 KV cache. Recommendation for CUDA: keep fp16 (default) for speed, and reach for `int8` only when an fp16 KV cache will not fit a long context or you need to pack more concurrent sequences into unified memory, accepting the decode-rate cost. The Turbo modes add V-quantization quality loss with no CUDA speed benefit today, so they stay experimental on CUDA. A fused INT8-KV / paged-attention kernel (#634) is the prerequisite for turning the smaller footprint into a decode win.
+
 ## CLI and server flags
 
 The same TurboQuant flag group is flattened into `mlxcel generate`,

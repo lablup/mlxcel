@@ -1,0 +1,7 @@
+date,device,model,context_tokens,gen_tokens,kv_cache_mode,prefill_ms,prefill_tok_s,decode_ms,decode_tok_s,mlx_peak_gb,prefill_chunk,notes
+2026-07-10,gb10_sm121,llama-3.1-8b-4bit,2048,256,fp16,718.08,2852.04,4965.17,51.56,7.08,none,baseline
+2026-07-10,gb10_sm121,llama-3.1-8b-4bit,2048,256,int8,1672.71,1224.36,6696.45,38.23,5.65,none,decode 0.74x vs fp16
+2026-07-10,gb10_sm121,llama-3.1-8b-4bit,8192,256,fp16,3573.78,2292.25,5794.18,44.18,7.18,2048,baseline
+2026-07-10,gb10_sm121,llama-3.1-8b-4bit,8192,256,int8,7004.79,1169.49,10973.10,23.33,6.42,2048,decode 0.53x vs fp16
+2026-07-10,gb10_sm121,llama-3.1-8b-4bit,32768,128,fp16,19606.49,1671.28,4580.42,27.95,10.37,2048,baseline
+2026-07-10,gb10_sm121,llama-3.1-8b-4bit,32768,128,int8,31128.24,1052.68,14853.50,8.62,8.18,2048,decode 0.31x vs fp16; peak -2.19 GB (~KV halved)

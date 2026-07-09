@@ -977,6 +977,29 @@ impl BatchScheduler {
                     },
                 );
             }
+            // Int8 KV forces the dense decode backend (only genuine Fp16
+            // sequences are pool-backed on the paged path). The dense
+            // batched-decode + front-trim path currently produces incorrect
+            // output once a prompt exceeds the cap (a pre-existing,
+            // mode-independent defect, issue #635): `--kv-cache-mode fp16
+            // --decode-storage-backend dense --max-kv-size N` mis-decodes the
+            // same way, while the KV-cache-layer Int8 trim is proven correct
+            // by unit tests. Warn loudly so operators do not silently get
+            // garbage; the cap is reliable today only on the paged backend
+            // (default Fp16).
+            let legacy_is_int8 = self.kv_cache_mode == KVCacheMode::Int8;
+            let batched_is_int8 = self.batch_kv_quant.is_enabled()
+                && self.batch_kv_quant.base_mode() == KVCacheMode::Int8;
+            if legacy_is_int8 || batched_is_int8 {
+                tracing::warn!(
+                    "--max-kv-size is set together with Int8 KV, which runs on the dense \
+                     decode backend. The dense batched-decode front-trim currently \
+                     mis-decodes prompts longer than the cap (a pre-existing defect that \
+                     also affects `--kv-cache-mode fp16 --decode-storage-backend dense`). \
+                     Omit --max-kv-size with Int8, or keep prompts within the cap, until \
+                     the dense-decode trim path is fixed."
+                );
+            }
         }
         self.max_kv_size = max_kv_size;
         self

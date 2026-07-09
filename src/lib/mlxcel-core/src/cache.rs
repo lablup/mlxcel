@@ -256,9 +256,22 @@ fn quantize_per_token(x: &MlxArray) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>
     // scale = absmax / 127.0  (FP16 to match cache dtype)
     let scale = divide_scalar(&absmax, 127.0); // [B, H, T, 1]
 
-    // Avoid divide-by-zero: replace zero scales with 1.0
+    // Avoid divide-by-zero on all-zero tokens ONLY: where the per-token scale
+    // is exactly zero (absmax == 0), substitute 1.0 so `round(x / scale)` is
+    // `round(0 / 1) = 0` and the dequant recovers 0. Every other token keeps
+    // its true `absmax / 127` scale so the max-magnitude coordinate maps to
+    // +-127 and uses the full INT8 range.
+    //
+    // The previous `maximum(scale, 1.0)` clamped EVERY scale up to a floor of
+    // 1.0. For the typical KV magnitude range (per-token absmax well under
+    // 127, so scale << 1) that collapsed quantization into round-to-nearest
+    // integer, destroying accuracy and producing degenerate greedy decodes.
+    // This is the single-stream analogue of the MLX-native affine quantize the
+    // batched server path (`cache/batch_quant.rs`) already uses correctly.
+    let zero = ffi::full_f32(&[1], 0.0, dtype::FLOAT16);
     let one = ffi::full_f32(&[1], 1.0, dtype::FLOAT16);
-    let safe_scale = ffi::maximum(&scale, &one);
+    let is_zero = ffi::equal(&scale, &zero);
+    let safe_scale = ffi::where_cond(&is_zero, &one, &scale);
 
     // x_int8 = round(x / safe_scale).clamp(-128, 127)
     let x_div = ffi::divide(x, &safe_scale);
@@ -6818,6 +6831,236 @@ mod tests {
         let v_data = read_f32(cache.values.as_ref().unwrap());
         assert_eq!(k_data, vec![3.0, 4.0]);
         assert_eq!(v_data, vec![7.0, 8.0]);
+    }
+
+    /// Regression lock for the INT8 per-token scale fix (issue #635).
+    ///
+    /// `update_and_fetch` in `KVCacheMode::Int8` must dequantize each token
+    /// back to within one quantization step (`absmax / 127`) of the original
+    /// FP16 value. The earlier `maximum(scale, 1.0)` guard clamped every
+    /// per-token scale up to a floor of 1.0, which for the usual KV magnitude
+    /// range (per-token absmax well below 127) collapsed quantization into
+    /// round-to-nearest-integer and produced errors on the order of the values
+    /// themselves. This test fails hard under that old behaviour and passes
+    /// with the corrected zero-only guard.
+    #[test]
+    fn int8_kv_fetch_recovers_values_within_one_quant_step() {
+        fn read_f32(arr: &ffi::MlxArray) -> Vec<f32> {
+            let a = ffi::astype(arr, dtype::FLOAT32);
+            ffi::eval(&a);
+            ffi::array_to_raw_bytes(&a)
+                .chunks_exact(4)
+                .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                .collect()
+        }
+
+        // Two real-magnitude tokens plus one all-zero token (exercises the
+        // divide-by-zero guard). Shape [B=1, H=1, T=3, D=4].
+        let k_vals = [
+            0.30_f32, -1.20, 2.50, -0.80, // absmax 2.50
+            4.10, -3.30, 0.05, 1.90, // absmax 4.10
+            0.00, 0.00, 0.00, 0.00, // all-zero token
+        ];
+        let v_vals = [
+            -5.60_f32, 0.90, 3.10, -2.20, // absmax 5.60
+            0.15, -0.45, 0.60, -0.30, // absmax 0.60 (sub-unit: old bug hits hardest)
+            0.00, 0.00, 0.00, 0.00,
+        ];
+        let mut cache = KVCache::new_with_mode(KVCacheMode::Int8);
+        let keys = ffi::from_slice_f32(&k_vals, &[1, 1, 3, 4]);
+        let values = ffi::from_slice_f32(&v_vals, &[1, 1, 3, 4]);
+        let (k_out, v_out) = cache.update_and_fetch(keys, values);
+        let k_deq = read_f32(&k_out);
+        let v_deq = read_f32(&v_out);
+        assert_eq!(k_deq.len(), 12);
+        assert_eq!(v_deq.len(), 12);
+
+        // Per-token absmax -> quantization step; every coordinate must land
+        // within one step (rounding error is at most half a step, FP16
+        // storage of the scale adds a little slack).
+        let check = |orig: &[f32], deq: &[f32], side: &str| {
+            for (t, (o_chunk, d_chunk)) in
+                orig.chunks_exact(4).zip(deq.chunks_exact(4)).enumerate()
+            {
+                let absmax = o_chunk.iter().fold(0.0_f32, |m, &x| m.max(x.abs()));
+                // Tolerance: one quantization step, with a small FP16 slack
+                // floor for the all-zero token where the step is 0.
+                let tol = (absmax / 127.0) * 1.05 + 1e-3;
+                for (i, (&o, &d)) in o_chunk.iter().zip(d_chunk).enumerate() {
+                    assert!(
+                        (o - d).abs() <= tol,
+                        "{side} token {t} coord {i}: |{o} - {d}| = {} exceeds one \
+                         quant step {tol} (absmax {absmax})",
+                        (o - d).abs()
+                    );
+                }
+            }
+        };
+        check(&k_vals, &k_deq, "key");
+        check(&v_vals, &v_deq, "value");
+    }
+
+    /// INT8 + `--max-kv-size` front-trim interaction on the single-stream
+    /// path (issue #635 server-integration concern). Trimming must slice the
+    /// INT8 buffers *and* their scale sidecars in lockstep, so the
+    /// dequantized visible window after a trim is bit-identical to the
+    /// dequantized tail before the trim.
+    #[test]
+    fn int8_kv_trim_front_then_fetch_matches_untrimmed_tail() {
+        fn read_f32(arr: &ffi::MlxArray) -> Vec<f32> {
+            let a = ffi::astype(arr, dtype::FLOAT32);
+            ffi::eval(&a);
+            ffi::array_to_raw_bytes(&a)
+                .chunks_exact(4)
+                .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                .collect()
+        }
+
+        // Four tokens, D=2. Distinct per-token magnitudes so a scale mix-up
+        // during the trim would corrupt the recovered values.
+        let k_vals = [0.5_f32, -1.5, 2.0, -0.5, -3.0, 1.0, 0.25, -0.75];
+        let v_vals = [1.0_f32, -2.0, 0.5, -1.0, 4.0, -0.5, -0.125, 0.375];
+
+        // Reference: quantize all four, fetch, keep the dequantized tail
+        // (tokens 2 and 3) for later comparison.
+        let mut reference = KVCache::new_with_mode(KVCacheMode::Int8);
+        let (rk, rv) = reference.update_and_fetch(
+            ffi::from_slice_f32(&k_vals, &[1, 1, 4, 2]),
+            ffi::from_slice_f32(&v_vals, &[1, 1, 4, 2]),
+        );
+        let rk_full = read_f32(&rk);
+        let rv_full = read_f32(&rv);
+        let rk_tail = rk_full[4..].to_vec(); // tokens 2,3 -> 4 floats
+        let rv_tail = rv_full[4..].to_vec();
+
+        // Trimmed cache: same prefill, then drop the two oldest tokens.
+        let mut cache = KVCache::new_with_mode(KVCacheMode::Int8);
+        cache.update(
+            ffi::from_slice_f32(&k_vals, &[1, 1, 4, 2]),
+            ffi::from_slice_f32(&v_vals, &[1, 1, 4, 2]),
+        );
+        assert_eq!(cache.trim_front(2), 2, "INT8 front-trim must drop 2 tokens");
+        assert_eq!(cache.live_len(), 2);
+        // Monotonic offset stays put (RoPE invariant); only live_start moved.
+        assert_eq!(cache.offset, 4);
+        assert_eq!(cache.live_start, 2);
+
+        // A zero-length new write just re-fetches the visible window.
+        let ks = cache.key_scales.as_ref().expect("int8 key scales present");
+        let vs = cache.val_scales.as_ref().expect("int8 val scales present");
+        // Scale sidecars were sliced to the live window too.
+        assert_eq!(ffi::array_shape(ks)[2], 2, "key scales trimmed to live len");
+        assert_eq!(ffi::array_shape(vs)[2], 2, "val scales trimmed to live len");
+
+        let k_int8 = cache.keys.as_ref().unwrap();
+        let v_int8 = cache.values.as_ref().unwrap();
+        let deq_k = read_f32(&dequantize(
+            &ffi::slice(k_int8, &[0, 0, 0, 0], &[1, 1, 2, 2]),
+            ks,
+        ));
+        let deq_v = read_f32(&dequantize(
+            &ffi::slice(v_int8, &[0, 0, 0, 0], &[1, 1, 2, 2]),
+            vs,
+        ));
+        assert_eq!(
+            deq_k, rk_tail,
+            "trimmed INT8 keys must match the untrimmed dequantized tail"
+        );
+        assert_eq!(
+            deq_v, rv_tail,
+            "trimmed INT8 values must match the untrimmed dequantized tail"
+        );
+    }
+
+    /// Reproduction + regression for the INT8 `--max-kv-size` trim path
+    /// (issue #635). Mirrors the server scenario: a prefill that grows the
+    /// buffer past the `step` boundary, a front-trim to the cap, then several
+    /// decode-step appends, then a fetch. The dequantized INT8 visible window
+    /// must track the known-correct FP16 window (within one quant step per
+    /// token). A divergence here is what produced degenerate server output
+    /// under `--kv-cache-mode int8 --max-kv-size N` on prompts exceeding N.
+    #[test]
+    fn int8_kv_prefill_grow_trim_then_decode_tracks_fp16() {
+        fn read_f32(arr: &ffi::MlxArray) -> Vec<f32> {
+            let a = ffi::astype(arr, dtype::FLOAT32);
+            ffi::eval(&a);
+            ffi::array_to_raw_bytes(&a)
+                .chunks_exact(4)
+                .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                .collect()
+        }
+
+        // Deterministic per-token K/V with distinct magnitudes. head_dim = 2.
+        let tok = |i: i32| -> (Vec<f32>, Vec<f32>) {
+            let f = i as f32;
+            (
+                vec![0.5 + 0.3 * f, -1.0 - 0.2 * f],
+                vec![-0.75 - 0.1 * f, 1.25 + 0.15 * f],
+            )
+        };
+        let build = |ids: &[i32]| -> (UniquePtr<ffi::MlxArray>, UniquePtr<ffi::MlxArray>) {
+            let mut k = Vec::new();
+            let mut v = Vec::new();
+            for &i in ids {
+                let (kt, vt) = tok(i);
+                k.extend_from_slice(&kt);
+                v.extend_from_slice(&vt);
+            }
+            let t = ids.len() as i32;
+            (
+                ffi::from_slice_f32(&k, &[1, 1, t, 2]),
+                ffi::from_slice_f32(&v, &[1, 1, t, 2]),
+            )
+        };
+
+        // Drive both an FP16 (reference) and INT8 cache through the identical
+        // prefill -> trim -> decode sequence with a small step so the buffer
+        // regrows, exactly as the server chunked prefill does at scale.
+        let run = |mode: KVCacheMode| -> (Vec<f32>, Vec<f32>) {
+            let mut cache = KVCache::new_with_mode(mode);
+            cache.step = 4; // force regrow across the 6-token prefill
+            let (pk, pv) = build(&[0, 1, 2, 3, 4, 5]);
+            cache.update(pk, pv);
+            assert_eq!(cache.live_len(), 6);
+            // Cap the live window at 4 (drop the 2 oldest): keep tokens 2..=5.
+            assert_eq!(cache.trim_front(2), 2);
+            assert_eq!(cache.live_len(), 4);
+            // Two decode appends (tokens 6, 7); each is a single-token update.
+            for id in [6, 7] {
+                let (dk, dv) = build(&[id]);
+                cache.update(dk, dv);
+            }
+            // Visible window is now tokens 2..=7.
+            let (k, v) = cache.update_and_fetch(build(&[8]).0, build(&[8]).1);
+            (read_f32(&k), read_f32(&v))
+        };
+
+        let (fp_k, fp_v) = run(KVCacheMode::Fp16);
+        let (i8_k, i8_v) = run(KVCacheMode::Int8);
+        // After the final fetch (which also appended token 8) the visible
+        // window is tokens 2..=8 -> 7 tokens x 2 coords = 14 values.
+        assert_eq!(fp_k.len(), 14, "fp16 visible window size");
+        assert_eq!(i8_k.len(), fp_k.len(), "int8 window size matches fp16");
+        assert_eq!(i8_v.len(), fp_v.len());
+
+        let check = |reference: &[f32], quant: &[f32], side: &str| {
+            for (t, (r_chunk, q_chunk)) in
+                reference.chunks_exact(2).zip(quant.chunks_exact(2)).enumerate()
+            {
+                let absmax = r_chunk.iter().fold(0.0_f32, |m, &x| m.max(x.abs()));
+                let tol = (absmax / 127.0) * 1.1 + 2e-3;
+                for (i, (&r, &q)) in r_chunk.iter().zip(q_chunk).enumerate() {
+                    assert!(
+                        (r - q).abs() <= tol,
+                        "{side} visible token {t} coord {i}: int8 {q} vs fp16 {r} \
+                         differ by {} > one quant step {tol}",
+                        (r - q).abs()
+                    );
+                }
+            }
+        };
+        check(&fp_k, &i8_k, "key");
+        check(&fp_v, &i8_v, "value");
     }
 
     #[test]
