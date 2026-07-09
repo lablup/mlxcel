@@ -29,7 +29,7 @@ permissions: {}
 # documented in CLAUDE.md). Hoisted to workflow scope so a future bump
 # touches one literal here instead of one per job.
 env:
-  MLX_EXPECTED_COMMIT: "a6ec7123dac814417147e21d4aeed694924ddd4d"
+  MLX_EXPECTED_COMMIT: "57c66cac7cb3e5b1eb350488a61f1506b40d39f8"
 
 jobs:
   # ============================================================================

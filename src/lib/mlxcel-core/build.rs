@@ -176,7 +176,7 @@ fn main() {
 }
 
 /// Expected MLX git commit — must match GIT_TAG in mlx-cpp/CMakeLists.txt.
-const MLX_EXPECTED_COMMIT: &str = "e9463bbfc1a7cd9e0e6b96aaa3068a316e234a63";
+const MLX_EXPECTED_COMMIT: &str = "57c66cac7cb3e5b1eb350488a61f1506b40d39f8";
 
 /// Purge stale cached MLX build artifacts before CMake runs.
 ///
