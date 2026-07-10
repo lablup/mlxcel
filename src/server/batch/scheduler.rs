@@ -4657,6 +4657,13 @@ impl BatchScheduler {
             // A stored lookahead carries exactly one speculative append per
             // sequence (the prime forward that produced its tokens); no step
             // n+1 prime has been issued on this teardown path.
+            //
+            // Unlike the steady finishing path, no pre-trim eval is needed
+            // here even if that prime is still in flight: KVCache::trim only
+            // adjusts a host-tracked offset, and all decode work runs on the
+            // single generation stream, so the lazy slice the trim enqueues is
+            // dependency-ordered after the append. The finishing path's eval
+            // is defensive, not required for safety.
             self.apply_lookahead_trim(&la.ids, lookahead_teardown_positions(false));
         }
     }
@@ -4817,6 +4824,14 @@ impl BatchScheduler {
             self.apply_lookahead_trim(&la.ids, positions);
             drop(next);
             drop(la);
+            // The sync re-dispatch below re-samples step n's token. fused_sample
+            // draws from MLX's global RNG (random::categorical without an
+            // explicit key), so at temperature > 0 the re-drawn token can
+            // differ from the discarded lookahead sample that triggered this
+            // finish pre-check; greedy (temp 0) is unaffected, matching the
+            // byte-equivalence gate. Bounded to one token per completing
+            // request, and stochastic runs carry no cross-mode determinism
+            // guarantee.
             self.dispatch_sync_decode(seq_ids);
             self.maybe_prime_lookahead(seq_ids);
             return;
