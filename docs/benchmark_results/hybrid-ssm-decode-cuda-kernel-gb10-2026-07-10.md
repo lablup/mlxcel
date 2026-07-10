@@ -5,7 +5,7 @@ Binary: `cargo build --release --features cuda`. Bench: `mlxcel-bench-decode` (6
 
 ## TL;DR
 
-Hybrid SSM/attention models decoded at 0.29-0.36x of Metal on GB10 because the fused single-token SSM update kernel (`ssm_update_kernel`, "replaces ~55 individual ops with a single kernel call") was Metal-only: `ssm_kernel_available()` returned false off Apple, so every CUDA decode step ran the ~55-op `ssm_step` graph path per SSM layer. nsys on granite-4.0-h-350m showed thousands of 1-2 us elementwise/copy kernels per token with the GPU busy only ~30% of decode wall time. Porting the kernel to `mx.fast.cuda_kernel` (same thread mapping, `__shfl_down_sync` warp reduction instead of `simd_sum`) lifts granite-4.0-h-350m decode **62.8 -> 281.7 tok/s (4.5x)**; granite, falcon-h1, and nemotron-h class models now beat their Metal M1 Ultra reference numbers. Greedy parity is byte-identical with the graph path on all three tested models; the mamba2 control is untouched.
+Hybrid SSM/attention models decoded at 0.29-0.36x of Metal on GB10 because the fused single-token SSM update kernel (`ssm_update_kernel`, "replaces ~55 individual ops with a single kernel call") was Metal-only: `ssm_kernel_available()` returned false off Apple, so every CUDA decode step ran the ~55-op `ssm_step` graph path per SSM layer. nsys on granite-4.0-h-350m showed thousands of 1-2 us elementwise/copy kernels per token with the GPU busy only ~30% of decode wall time. Porting the kernel to `mx.fast.cuda_kernel` (same thread mapping, `__shfl_down_sync` warp reduction instead of `simd_sum`) lifts granite-4.0-h-350m decode **62.8 -> 281.7 tok/s (4.5x)**; granite and falcon-h1 now beat their Metal M1 Ultra reference numbers and nemotron-h-30b reaches 0.96x of its Metal reference (from 0.45x). Greedy parity is byte-identical with the graph path on all three tested models; the mamba2 control is untouched.
 
 ## Root cause
 
@@ -28,6 +28,7 @@ Hybrid SSM/attention models decoded at 0.29-0.36x of Metal on GB10 because the f
 | granite-4.0-h-350m-4bit | 62.8 | 281.7 | 4.5x | 219.5 | 1.28 |
 | granite-4.0-h-tiny-4bit | 38.9 | 101.8 | 2.6x | 96.3 | 1.06 |
 | falcon-h1-tiny-90m-4bit | 112.0 | 319.7 | 2.9x | 288.1 | 1.11 |
+| nemotron-h-30b-4bit | 41.5 | 88.1 | 2.1x | 91.5 | 0.96 |
 | plamo-2-1b (f32 checkpoint) | 33.0 | 43.7 | 1.3x | 107.1 | 0.41 |
 | mamba2-1.3b-4bit (control) | 80.1 | 81.0 | 1.0x (unchanged) | 79.2 | 1.02 |
 
