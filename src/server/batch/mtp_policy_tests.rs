@@ -107,6 +107,53 @@ fn estimate_speedup_matches_closed_form() {
 }
 
 #[test]
+fn estimate_speedup_scaled_de_rates_compute_bound() {
+    // multiple == 1.0 reproduces the bandwidth-bound (Apple) estimate exactly.
+    let apple = estimate_speedup_scaled(2.5, 4.0, 1.0, 1.0).expect("finite");
+    assert!((apple - 2.8).abs() < 1e-9, "got {apple}");
+    assert_eq!(estimate_speedup(2.5, 4.0, 1.0), Some(apple));
+    // multiple == 2.0 (compute-bound, K=4 → sqrt(4)) halves the estimate.
+    let cuda = estimate_speedup_scaled(2.5, 4.0, 1.0, 2.0).expect("finite");
+    assert!((cuda - 1.4).abs() < 1e-9, "got {cuda}");
+    // Degenerate multiple is rejected.
+    assert_eq!(estimate_speedup_scaled(2.5, 4.0, 1.0, 0.0), None);
+    assert_eq!(estimate_speedup_scaled(2.5, 4.0, 1.0, -1.0), None);
+}
+
+#[test]
+fn verify_cost_multiple_is_backend_conditional() {
+    // key() carries block_size K=4. Apple Silicon amortizes the K-wide verify
+    // (multiple 1.0); compute-bound hardware de-rates by sqrt(K) = 2.0.
+    let apple = adaptive_policy_hw(false, false, false);
+    assert!((apple.verify_cost_multiple() - 1.0).abs() < 1e-9);
+    let cuda = adaptive_policy_hw(false, false, true);
+    assert!((cuda.verify_cost_multiple() - 2.0).abs() < 1e-9);
+}
+
+#[test]
+fn compute_bound_derating_declines_a_borderline_pairing() {
+    // A sample whose optimistic (Apple) estimate lands in the ENABLE zone
+    // (accepted_len = 0.8, zero drafter cost → speedup 1.8) but whose
+    // compute-bound scaled estimate (÷2.0) lands in the DECLINE zone (0.9).
+    let mut borderline = sample(10, 3, 0, 0.0, 4.0);
+    borderline.accepted_draft_tokens = 8; // accepted_len = 0.8
+    let mut acc = ProfileAccumulator::default();
+    acc.add(&borderline);
+    let apple = acc.estimated_speedup_scaled(1.0).expect("finite");
+    assert_eq!(
+        classify_speedup(apple),
+        SpeedupZone::Enable,
+        "apple={apple}"
+    );
+    let cuda = acc.estimated_speedup_scaled(2.0).expect("finite");
+    assert_eq!(
+        classify_speedup(cuda),
+        SpeedupZone::Decline,
+        "compute-bound de-rating must decline the borderline pairing, cuda={cuda}"
+    );
+}
+
+#[test]
 fn estimate_speedup_zero_acceptance_is_below_one() {
     // No drafts accepted: speedup = 1 / (1 + drafter/verify) < 1 always.
     let s = estimate_speedup(0.0, 4.0, 1.0).expect("finite");
@@ -225,11 +272,21 @@ fn drive(mut policy: MtpPolicy, s: MtpBurstProfile, n: usize) -> MtpPolicy {
 
 fn adaptive_policy(static_default_batching: bool, has_na: bool) -> MtpPolicy {
     // force = None → adaptive; no-dir store keeps these state-machine tests
-    // off the filesystem (persistence is exercised separately).
+    // off the filesystem (persistence is exercised separately). Bandwidth-bound
+    // (Apple) hardware unless the test opts into the compute-bound path.
+    adaptive_policy_hw(static_default_batching, has_na, false)
+}
+
+fn adaptive_policy_hw(
+    static_default_batching: bool,
+    has_na: bool,
+    compute_bound: bool,
+) -> MtpPolicy {
     MtpPolicy::from_parts(
         key(),
         static_default_batching,
         has_na,
+        compute_bound,
         None,
         PolicyStore::with_dir(None),
     )
@@ -325,6 +382,7 @@ fn env_force_on_pins_enable_and_never_profiles() {
         key(),
         true,
         false,
+        false,
         Some(true),
         PolicyStore::with_dir(Some(unique_temp_dir("force-on"))),
     );
@@ -341,6 +399,7 @@ fn env_force_off_pins_decline_and_never_profiles() {
         key(),
         false, // static default would enable
         true,
+        false,
         Some(false),
         PolicyStore::with_dir(Some(unique_temp_dir("force-off"))),
     );
@@ -375,12 +434,12 @@ fn adaptive_enabled_defaults_on() {
 fn settling_persists_a_loadable_verdict() {
     let dir = unique_temp_dir("persist");
     let store = PolicyStore::with_dir(Some(dir.clone()));
-    let policy = MtpPolicy::from_parts(key(), true, false, None, store.clone());
+    let policy = MtpPolicy::from_parts(key(), true, false, false, None, store.clone());
     let _ = drive(policy, favorable_sample(), PROFILE_SAMPLE_TARGET);
 
     // A fresh policy for the same pairing must load the persisted verdict and
     // skip profiling entirely (no force-on cost on restart).
-    let reloaded = MtpPolicy::from_parts(key(), true, false, None, store);
+    let reloaded = MtpPolicy::from_parts(key(), true, false, false, None, store);
     assert!(
         reloaded.is_settled(),
         "persisted verdict must be loaded at construction"
@@ -393,7 +452,7 @@ fn settling_persists_a_loadable_verdict() {
 fn persisted_hint_holds_only_coarse_fields() {
     let dir = unique_temp_dir("coarse");
     let store = PolicyStore::with_dir(Some(dir.clone()));
-    let policy = MtpPolicy::from_parts(key(), false, false, None, store.clone());
+    let policy = MtpPolicy::from_parts(key(), false, false, false, None, store.clone());
     // Settle on a favorable verdict and persist it.
     let _ = drive(policy, favorable_sample(), PROFILE_SAMPLE_TARGET);
 

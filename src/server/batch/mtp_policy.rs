@@ -117,12 +117,53 @@ const HINT_SUBDIR: &str = "mtp-policy";
 /// 1-wide forward; on a compute-bound GPU it is strictly more expensive, so
 /// the real speedup is lower. Returns `None` when there is no timing signal
 /// (`verify_ms <= 0`), which the caller treats as "ambiguous".
+// Retained as the closed-form (bandwidth-bound) reference exercised by the unit
+// tests; production settles through `estimate_speedup_scaled` with a
+// backend-specific multiple (issue #638).
+#[allow(dead_code)]
 #[must_use]
 pub(crate) fn estimate_speedup(accepted_len: f64, verify_ms: f64, drafter_ms: f64) -> Option<f64> {
-    if !verify_ms.is_finite() || verify_ms <= 0.0 || drafter_ms < 0.0 || accepted_len < 0.0 {
+    // Bandwidth-bound (Apple Silicon) default: the K-wide verify amortizes to
+    // about one classic decode forward, so the verify-cost multiple is 1.0.
+    estimate_speedup_scaled(accepted_len, verify_ms, drafter_ms, 1.0)
+}
+
+/// Backend-scaled variant of [`estimate_speedup`] (issue #638).
+///
+/// `verify_cost_multiple` is how many classic decode forwards one K-wide verify
+/// forward costs. On memory-bandwidth-bound hardware (Apple Silicon) a K-wide
+/// verify reads the weights once, so it costs about one classic forward
+/// (`multiple == 1.0`) and this reduces to the original estimate. On
+/// compute-bound hardware (GB10 / Blackwell) the target GPU is already saturated
+/// at B=1, so a K-wide verify does *not* run for free; the round cost grows with
+/// K and the optimistic `multiple == 1.0` model over-predicts the speedup.
+///
+/// One round yields `accepted_len + 1` tokens and costs
+/// `verify_cost_multiple` classic-forward-equivalents for the verify plus the
+/// drafter's share (`verify_cost_multiple * drafter_ms / verify_ms`), giving:
+///
+/// ```text
+/// speedup = (accepted_len + 1) / (verify_cost_multiple * (1 + drafter_ms / verify_ms))
+/// ```
+///
+/// which recovers the original formula exactly at `verify_cost_multiple == 1.0`.
+#[must_use]
+pub(crate) fn estimate_speedup_scaled(
+    accepted_len: f64,
+    verify_ms: f64,
+    drafter_ms: f64,
+    verify_cost_multiple: f64,
+) -> Option<f64> {
+    if !verify_ms.is_finite()
+        || verify_ms <= 0.0
+        || drafter_ms < 0.0
+        || accepted_len < 0.0
+        || !verify_cost_multiple.is_finite()
+        || verify_cost_multiple <= 0.0
+    {
         return None;
     }
-    Some((accepted_len + 1.0) / (1.0 + drafter_ms / verify_ms))
+    Some((accepted_len + 1.0) / (verify_cost_multiple * (1.0 + drafter_ms / verify_ms)))
 }
 
 /// Which side of the decision an estimated speedup falls on.
@@ -315,10 +356,29 @@ impl ProfileAccumulator {
     }
 
     /// Optimistic speedup estimate from the aggregate, or `None` when there is
-    /// no timing signal yet.
+    /// no timing signal yet. Assumes bandwidth-bound verify amortization
+    /// (`verify_cost_multiple == 1.0`); the policy uses
+    /// [`Self::estimated_speedup_scaled`] with a backend-specific multiple.
+    /// Retained for the no-signal unit test; production uses the scaled form.
+    #[allow(dead_code)]
     #[must_use]
     pub(crate) fn estimated_speedup(&self) -> Option<f64> {
         estimate_speedup(self.accepted_len(), self.verify_ms(), self.drafter_ms())
+    }
+
+    /// Speedup estimate scaled by a backend-specific verify-cost multiple
+    /// (issue #638). `verify_cost_multiple == 1.0` reproduces
+    /// [`Self::estimated_speedup`] exactly (Apple Silicon); a value `> 1.0`
+    /// de-rates the estimate for compute-bound hardware where a K-wide verify
+    /// does not amortize to one classic forward.
+    #[must_use]
+    pub(crate) fn estimated_speedup_scaled(&self, verify_cost_multiple: f64) -> Option<f64> {
+        estimate_speedup_scaled(
+            self.accepted_len(),
+            self.verify_ms(),
+            self.drafter_ms(),
+            verify_cost_multiple,
+        )
     }
 }
 
@@ -572,6 +632,10 @@ pub(crate) struct MtpPolicy {
     key: PolicyKey,
     target_supports_batching: bool,
     has_neural_accelerator: bool,
+    /// True on compute-bound (non-Apple-Silicon, e.g. CUDA / GB10) hardware,
+    /// where a K-wide verify forward does not amortize to one classic decode
+    /// forward. Drives the backend-specific verify-cost multiple (issue #638).
+    compute_bound: bool,
     state: PolicyState,
     store: PolicyStore,
 }
@@ -599,13 +663,23 @@ impl MtpPolicy {
             return None;
         }
         let key = PolicyKey::new(target_id, drafter_id, hardware_label(), block_size);
-        let has_neural_accelerator = mlxcel_core::hardware::get_hardware().has_neural_accelerator;
+        let hw = mlxcel_core::hardware::get_hardware();
+        let has_neural_accelerator = hw.has_neural_accelerator;
+        // Compute-bound = non-Apple-Silicon (CUDA / GB10): the runtime hardware
+        // probe reports `AppleSiliconGen::Unknown` off Apple GPUs. On such hosts
+        // the K-wide verify does not amortize (issue #638), so the policy
+        // de-rates its optimistic speedup estimate.
+        let compute_bound = matches!(
+            hw.silicon_gen,
+            mlxcel_core::hardware::AppleSiliconGen::Unknown
+        );
         let force = parse_force_override(std::env::var("MLXCEL_ENABLE_MTP_B1").ok().as_deref());
         let store = PolicyStore::from_cache_root();
         Some(Self::from_parts(
             key,
             target_supports_batching,
             has_neural_accelerator,
+            compute_bound,
             force,
             store,
         ))
@@ -619,6 +693,7 @@ impl MtpPolicy {
         key: PolicyKey,
         target_supports_batching: bool,
         has_neural_accelerator: bool,
+        compute_bound: bool,
         force: Option<bool>,
         store: PolicyStore,
     ) -> Self {
@@ -639,8 +714,28 @@ impl MtpPolicy {
             key,
             target_supports_batching,
             has_neural_accelerator,
+            compute_bound,
             state,
             store,
+        }
+    }
+
+    /// Backend-specific verify-cost multiple for the speedup estimate
+    /// (issue #638). `1.0` on bandwidth-bound Apple Silicon (the K-wide verify
+    /// amortizes to one classic forward, so the estimate is unchanged). On
+    /// compute-bound hardware (CUDA / GB10) the K-wide verify does not run for
+    /// free: GB10 measurements (Gemma 4 Unified 12B, K ∈ {2,4,8}) show the
+    /// per-round cost growing about `√K` with the block size, so the multiple is
+    /// `sqrt(K)`. This de-rates the optimistic estimate enough to decline the
+    /// measured-unprofitable Gemma MTP pairings (~0.52–0.77× on GB10) while
+    /// still admitting a genuinely favourable compute-bound pairing (high
+    /// acceptance length).
+    #[must_use]
+    fn verify_cost_multiple(&self) -> f64 {
+        if self.compute_bound {
+            (self.key.block_size as f64).max(1.0).sqrt()
+        } else {
+            1.0
         }
     }
 
@@ -688,6 +783,13 @@ impl MtpPolicy {
     /// hint. A no-op in the forced/settled states, so this never runs once the
     /// decision is fixed.
     pub(crate) fn record_b1_sample(&mut self, profile: MtpBurstProfile) {
+        // Resolve the backend-scaled verify-cost multiple before borrowing
+        // `self.state` mutably below (issue #638). On compute-bound hardware the
+        // K-wide verify does not amortize to one classic forward, so the
+        // optimistic Apple-tuned estimate is de-rated by `sqrt(K)`. On Apple
+        // Silicon the multiple is 1.0 and this is byte-identical to the
+        // pre-#638 estimate.
+        let verify_cost_multiple = self.verify_cost_multiple();
         let PolicyState::Profiling(acc) = &mut self.state else {
             return;
         };
@@ -698,7 +800,7 @@ impl MtpPolicy {
         // Read everything off the accumulator first so its borrow of
         // `self.state` ends before we touch other `self` fields or reassign
         // the state below.
-        let speedup = acc.estimated_speedup();
+        let speedup = acc.estimated_speedup_scaled(verify_cost_multiple);
         let acceptance_rate = acc.acceptance_rate();
         let samples = acc.samples();
         let accepted_len = acc.accepted_len();

@@ -3363,6 +3363,7 @@ impl BatchScheduler {
                     generated_tokens,
                     healthy_finish,
                     mtp_profile,
+                    burst_wall_ms,
                 }) => {
                     // Burst handled the full request lifecycle inline.
                     //
@@ -3403,6 +3404,28 @@ impl BatchScheduler {
                     if let (Some(policy), Some(profile)) = (self.mtp_policy.as_mut(), mtp_profile) {
                         policy.record_b1_sample(profile);
                     }
+                    // Observability (issue #638): the B=1 burst runs the whole
+                    // request to completion in this single scheduler tick, so
+                    // `burst_wall_ms` is the head-of-line stall it imposed on
+                    // every concurrent classic-decode row (none advanced while
+                    // the burst held the worker). Surface it with the round /
+                    // accepted-token counts so the HOL cost of the
+                    // run-to-completion burst is measurable until the
+                    // tick-cooperative slice lands. `queued` shows how many
+                    // rows waited behind it.
+                    let (rounds, accepted) = mtp_profile
+                        .map(|p| (p.rounds, p.accepted_draft_tokens))
+                        .unwrap_or((0, 0));
+                    tracing::info!(
+                        seq_id = %seq_id,
+                        burst_wall_ms,
+                        tokens_generated,
+                        rounds,
+                        accepted_draft_tokens = accepted,
+                        hol_waiters = self.active_batch.len() + self.prefill_queue.len(),
+                        "speculative B=1 burst finalized (burst_wall_ms is the HOL \
+                         stall on concurrent rows)"
+                    );
                     self.publish_metrics();
                     None
                 }

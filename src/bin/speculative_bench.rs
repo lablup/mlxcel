@@ -69,6 +69,7 @@ use clap::{Parser, ValueEnum};
 use mlxcel::tokenizer::MlxcelTokenizer;
 use mlxcel::{LanguageModel, SamplingConfig, initialize_runtime, load_model};
 use mlxcel_core::generate::{CxxGenerator, GenerationStats};
+use mlxcel_core::speculative::mtp::MtpAcceptanceSummary;
 
 /// Default 17-token prompt that matches the upstream MTP perf-table conditions
 /// (https://github.com/Blaizzy/mlx-vlm/blob/main/README.md). Token count is approximate (depends on
@@ -151,6 +152,14 @@ struct Args {
     /// catalog of pairings.
     #[arg(long, default_value_t = false)]
     sweep: bool,
+
+    /// Comma-separated draft block sizes (K) to sweep for the speculative
+    /// pairings in `--sweep` mode. Each MTP/DFlash pairing is benched once per
+    /// K, overriding the pairing's default block size; baseline (no-drafter)
+    /// rows are benched once (K does not apply). Default `2,4,8` matches the
+    /// issue's CUDA pairing-matrix request.
+    #[arg(long, default_value = "2,4,8", value_delimiter = ',')]
+    k_values: Vec<u32>,
 }
 
 /// A single sweep row's result.
@@ -176,6 +185,12 @@ struct Row {
     /// Speedup vs no-drafter baseline for the same `(target, batch)`. Filled
     /// after all rows are collected.
     speedup_vs_baseline: Option<f64>,
+    /// Coarse acceptance rate (accepted / proposed draft tokens) for a
+    /// speculative row; `None` for baseline rows and deferred/failed runs.
+    acceptance_rate: Option<f64>,
+    /// Mean accepted draft tokens per speculative round; `None` for baseline
+    /// rows and deferred/failed runs.
+    accepted_len: Option<f64>,
     /// `None` when the row ran successfully; otherwise a short message.
     status_note: Option<String>,
 }
@@ -199,6 +214,8 @@ impl Row {
             decode_ms: None,
             generated_tokens: None,
             speedup_vs_baseline: None,
+            acceptance_rate: None,
+            accepted_len: None,
             status_note: Some(note.to_string()),
         }
     }
@@ -243,7 +260,7 @@ const REACHABLE_PAIRINGS: &[Pairing] = &[
     Pairing {
         name: "Gemma 4 31B + MTP assistant",
         target_subdir: "gemma-4-31b-it-4bit",
-        draft_subdir: Some("gemma-4-31B-it-assistant-bf16"),
+        draft_subdir: Some("gemma-4-31b-it-assistant-bf16"),
         kind: BenchKind::Mtp,
         block_size: Some(4),
     },
@@ -260,7 +277,7 @@ const REACHABLE_PAIRINGS: &[Pairing] = &[
     Pairing {
         name: "Gemma 4 Unified 12B + MTP assistant",
         target_subdir: "gemma-4-12b-it-4bit",
-        draft_subdir: Some("gemma-4-12B-it-assistant-4bit"),
+        draft_subdir: Some("gemma-4-12b-it-assistant-4bit"),
         kind: BenchKind::Mtp,
         block_size: Some(4),
     },
@@ -387,7 +404,7 @@ fn run_mtp(
     prompt: &str,
     max_tokens: usize,
     block_size: Option<u32>,
-) -> Result<(f64, usize)> {
+) -> Result<(f64, usize, Option<MtpAcceptanceSummary>)> {
     use std::sync::atomic::AtomicBool;
 
     use mlxcel::LoadedModel;
@@ -486,21 +503,43 @@ fn run_mtp(
     );
     mlxcel_core::synchronize_default();
     let elapsed = started.elapsed();
+    // Capture the coarse acceptance + latency summary before the generator is
+    // dropped. `None` when no speculative round ran (immediate EOS or
+    // max_tokens == 1), in which case the pairing produced no acceptance
+    // signal. The mean accepted length per round is
+    // `accepted_draft_tokens / rounds`.
+    let acceptance = generator.last_acceptance();
     unified.release_sequence_state_by_id(seq_id);
 
     let generated = tokens.len();
+    let (acc_rate, acc_len, rounds) = acceptance
+        .map(|s| (s.acceptance_rate(), summary_accepted_len(&s), s.rounds))
+        .unwrap_or((0.0, 0.0, 0));
     eprintln!(
         "[bench/mtp] Done: prompt={} prefill_ms={:.1} decode_ms={:.1} \
-         generated={} tok/s={:.1} (wall {:.1}s) — mean acceptance length is \
-         logged by MtpRoundDiagnostics above",
+         generated={} tok/s={:.1} (wall {:.1}s) rounds={} \
+         acceptance_rate={:.3} mean_accepted_len={:.2}",
         stats.prompt_tokens,
         stats.prefill_time_ms,
         stats.decode_time_ms,
         generated,
         stats.decode_tok_per_sec,
         elapsed.as_secs_f64(),
+        rounds,
+        acc_rate,
+        acc_len,
     );
-    Ok((stats.decode_time_ms, generated))
+    Ok((stats.decode_time_ms, generated, acceptance))
+}
+
+/// Mean accepted draft tokens per speculative round for a summary
+/// (`accepted_draft_tokens / rounds`, 0 when no round ran).
+fn summary_accepted_len(s: &MtpAcceptanceSummary) -> f64 {
+    if s.rounds == 0 {
+        0.0
+    } else {
+        s.accepted_draft_tokens as f64 / s.rounds as f64
+    }
 }
 
 /// Render a Markdown perf table from the collected rows. Output goes to
@@ -510,8 +549,12 @@ fn print_markdown_table(rows: &[Row]) {
     println!();
     println!("### Speculative drafter perf table");
     println!();
-    println!("| Pairing | Kind | B | block_size | tok/s | speedup vs no-drafter | status |");
-    println!("|---------|------|---|------------|-------|------------------------|--------|");
+    println!(
+        "| Pairing | Kind | B | K (block_size) | tok/s | speedup vs no-drafter | acceptance rate | mean accepted len | status |"
+    );
+    println!(
+        "|---------|------|---|----------------|-------|------------------------|-----------------|-------------------|--------|"
+    );
     for row in rows {
         let tok_s_cell = match row.tok_per_sec {
             Some(t) => format!("{t:.1}"),
@@ -525,17 +568,34 @@ fn print_markdown_table(rows: &[Row]) {
             Some(b) => b.to_string(),
             None => "—".to_string(),
         };
+        let acc_rate_cell = match row.acceptance_rate {
+            Some(a) => format!("{:.1}%", a * 100.0),
+            None => "—".to_string(),
+        };
+        let acc_len_cell = match row.accepted_len {
+            Some(a) => format!("{a:.2}"),
+            None => "—".to_string(),
+        };
         let status_cell = row.status_note.as_deref().unwrap_or("ok").to_string();
         println!(
-            "| {} | {} | {} | {} | {} | {} | {} |",
-            row.pairing, row.kind, row.batch, block_cell, tok_s_cell, speedup_cell, status_cell,
+            "| {} | {} | {} | {} | {} | {} | {} | {} | {} |",
+            row.pairing,
+            row.kind,
+            row.batch,
+            block_cell,
+            tok_s_cell,
+            speedup_cell,
+            acc_rate_cell,
+            acc_len_cell,
+            status_cell,
         );
     }
     println!();
     println!("Note: MTP rows (Gemma 4 Unified + gemma4_unified_assistant) are real");
     println!("decode numbers captured on the host this binary ran on; the speedup");
-    println!("column is MTP tok/s ÷ the matching no-drafter baseline. The DFlash");
-    println!("row remains deferred — see `docs/model_tests.md::Speculative drafters`.");
+    println!("column is MTP tok/s ÷ the matching no-drafter baseline; acceptance rate");
+    println!("and mean accepted length come from the run's MtpAcceptanceSummary. The");
+    println!("DFlash row remains deferred — see `docs/benchmark_results/model_tests.md`.");
 }
 
 /// Fill in `speedup_vs_baseline` for every row against the matching
@@ -619,6 +679,8 @@ fn bench_one_pairing(p: &Pairing, prompt: &str, batch: usize, max_tokens: usize)
                 decode_ms: Some(decode_ms),
                 generated_tokens: Some(generated),
                 speedup_vs_baseline: None,
+                acceptance_rate: None,
+                accepted_len: None,
                 status_note: None,
             },
             Err(e) => Row::deferred(
@@ -646,7 +708,7 @@ fn bench_one_pairing(p: &Pairing, prompt: &str, batch: usize, max_tokens: usize)
             };
             let draft_path = resolve_model_dir(draft_sub);
             match run_mtp(&target_path, &draft_path, prompt, max_tokens, p.block_size) {
-                Ok((decode_ms, generated)) => Row {
+                Ok((decode_ms, generated, acceptance)) => Row {
                     pairing: p.name.to_string(),
                     target_dir: target_path,
                     kind: p.kind,
@@ -660,6 +722,8 @@ fn bench_one_pairing(p: &Pairing, prompt: &str, batch: usize, max_tokens: usize)
                     decode_ms: Some(decode_ms),
                     generated_tokens: Some(generated),
                     speedup_vs_baseline: None,
+                    acceptance_rate: acceptance.map(|s| s.acceptance_rate()),
+                    accepted_len: acceptance.map(|s| summary_accepted_len(&s)),
                     status_note: None,
                 },
                 Err(e) => Row::deferred(
@@ -694,12 +758,38 @@ fn main() -> Result<()> {
             args.max_tokens,
         );
         for p in REACHABLE_PAIRINGS {
-            let row = bench_one_pairing(p, &args.prompt, args.batch, args.max_tokens);
-            eprintln!(
-                "[bench] Finished pairing: {} -> tok/s={:?} status={:?}",
-                row.pairing, row.tok_per_sec, row.status_note,
-            );
-            rows.push(row);
+            // Baseline (no-drafter) rows are benched once — K does not apply.
+            // Speculative pairings are benched once per requested K so the
+            // matrix carries the acceptance/speedup envelope across
+            // K ∈ {2, 4, 8} (issue #638). The K override replaces the
+            // pairing's default block size.
+            if matches!(p.kind, BenchKind::None) {
+                let row = bench_one_pairing(p, &args.prompt, args.batch, args.max_tokens);
+                eprintln!(
+                    "[bench] Finished pairing: {} -> tok/s={:?} status={:?}",
+                    row.pairing, row.tok_per_sec, row.status_note,
+                );
+                rows.push(row);
+                continue;
+            }
+            for &k in &args.k_values {
+                let pairing_k = Pairing {
+                    name: p.name,
+                    target_subdir: p.target_subdir,
+                    draft_subdir: p.draft_subdir,
+                    kind: p.kind,
+                    block_size: Some(k),
+                };
+                let mut row =
+                    bench_one_pairing(&pairing_k, &args.prompt, args.batch, args.max_tokens);
+                // Distinguish the per-K rows in the rendered table.
+                row.pairing = format!("{} (K={k})", p.name);
+                eprintln!(
+                    "[bench] Finished pairing: {} -> tok/s={:?} status={:?}",
+                    row.pairing, row.tok_per_sec, row.status_note,
+                );
+                rows.push(row);
+            }
         }
     } else {
         let target = args
@@ -751,6 +841,8 @@ fn main() -> Result<()> {
                         decode_ms: Some(decode_ms),
                         generated_tokens: Some(generated),
                         speedup_vs_baseline: None,
+                        acceptance_rate: None,
+                        accepted_len: None,
                         status_note: None,
                     },
                     Err(e) => Row::deferred(
@@ -770,7 +862,7 @@ fn main() -> Result<()> {
                         args.max_tokens,
                         args.block_size,
                     ) {
-                        Ok((decode_ms, generated)) => Row {
+                        Ok((decode_ms, generated, acceptance)) => Row {
                             pairing: synthetic.name.to_string(),
                             target_dir: target.clone(),
                             kind: args.kind,
@@ -784,6 +876,8 @@ fn main() -> Result<()> {
                             decode_ms: Some(decode_ms),
                             generated_tokens: Some(generated),
                             speedup_vs_baseline: None,
+                            acceptance_rate: acceptance.map(|s| s.acceptance_rate()),
+                            accepted_len: acceptance.map(|s| summary_accepted_len(&s)),
                             status_note: None,
                         },
                         Err(e) => Row::deferred(

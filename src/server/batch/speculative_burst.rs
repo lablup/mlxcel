@@ -652,6 +652,15 @@ pub(crate) struct BurstFinalized {
     /// transition-failure paths. The scheduler feeds it to
     /// [`super::mtp_policy::MtpPolicy::record_b1_sample`].
     pub mtp_profile: Option<MtpBurstProfile>,
+    /// Wall-clock the B=1 burst occupied the single scheduler worker thread,
+    /// in milliseconds (issue #638 observability). Because the burst runs the
+    /// whole request to completion in one scheduler tick, this is also the
+    /// head-of-line stall it imposed on every concurrent classic-decode row:
+    /// no other sequence advanced while the burst ran. The scheduler logs it
+    /// alongside the round / accepted-token counts so the HOL cost of the
+    /// run-to-completion burst is operator-visible until the tick-cooperative
+    /// slice lands.
+    pub burst_wall_ms: f64,
 }
 
 /// Run a speculative burst for `seq`, producing every token the request
@@ -741,6 +750,7 @@ pub(crate) fn try_run_burst_b1(
                     healthy_finish: false,
                     // No usable profile: the burst never streamed tokens.
                     mtp_profile: None,
+                    burst_wall_ms: burst_start.elapsed().as_secs_f64() * 1000.0,
                 });
             }
             let seq_id = seq.seq_id;
@@ -761,6 +771,7 @@ pub(crate) fn try_run_burst_b1(
                 // Surface the MTP profile so the scheduler can feed the
                 // adaptive policy. `None` for DFlash / zero-round runs.
                 mtp_profile: profile,
+                burst_wall_ms: burst_start.elapsed().as_secs_f64() * 1000.0,
             })
         }
         Err(BurstOutcome::DeclineToClassic) => {
@@ -794,6 +805,7 @@ pub(crate) fn try_run_burst_b1(
                 healthy_finish: false,
                 // Errored burst: no profile to record.
                 mtp_profile: None,
+                burst_wall_ms: burst_start.elapsed().as_secs_f64() * 1000.0,
             })
         }
     }

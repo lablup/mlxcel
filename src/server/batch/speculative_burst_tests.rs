@@ -1411,6 +1411,7 @@ fn burst_finalized_carries_prompt_cache_donate_fields() {
         generated_tokens: vec![10, 11, 12],
         healthy_finish: true,
         mtp_profile: None,
+        burst_wall_ms: 12.5,
     };
 
     assert_eq!(finalized.seq_id, SequenceId::from_raw(7));
@@ -1418,6 +1419,10 @@ fn burst_finalized_carries_prompt_cache_donate_fields() {
     assert_eq!(finalized.prompt_tokens, vec![1, 2, 3, 4]);
     assert_eq!(finalized.generated_tokens, vec![10, 11, 12]);
     assert!(finalized.healthy_finish);
+    // `burst_wall_ms` is the HOL-stall observability field (issue #638); the
+    // scheduler logs it for every B=1 burst. Pin that it survives the
+    // destructure the scheduler performs.
+    assert_eq!(finalized.burst_wall_ms, 12.5);
     // `tokens_generated` must equal the committed `generated_tokens`
     // length — both are derived from `seq.generated_tokens` after the
     // early-EOS truncation in `finalize_burst_success`.
@@ -1444,6 +1449,7 @@ fn burst_finalized_error_outcome_has_empty_donate_payload() {
         generated_tokens: Vec::new(),
         healthy_finish: false,
         mtp_profile: None,
+        burst_wall_ms: 0.0,
     };
 
     assert!(!errored.healthy_finish, "error outcome must not be healthy");

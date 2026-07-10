@@ -244,6 +244,34 @@ by the `#[ignore]`-gated tests in `tests/speculative_parity.rs`.
 | Gemma 4 31B (no drafter)      | none   | 1 | —          | 20.4  | 1.00×                  | ok                                                                    |
 | Gemma 4 31B + MTP assistant   | mtp    | 1 | 4          | —     | —                      | parity verified; tok/s row is a perf-bench follow-up                  |
 
+### GB10 CUDA pairing matrix (2026-07-10, issue #638)
+
+Measured on the NVIDIA GB10 (Grace-Blackwell) CUDA host with
+`speculative_bench --sweep --k-values 2,4,8`. Greedy, decode-only tok/s, the
+14-token `DEFAULT_PROMPT`, `--max-tokens 128`. Full analysis and the policy
+tuning derivation are in
+[`speculative-pairing-gb10-2026-07-10.md`](speculative-pairing-gb10-2026-07-10.md).
+
+| Pairing (GB10 CUDA)                     | Kind | K | tok/s | speedup vs no-drafter | acceptance | mean accepted len | status |
+|-----------------------------------------|------|---|------:|----------------------:|-----------:|------------------:|--------|
+| Gemma 4 Unified 12B (no drafter)        | none | — | 14.5  | 1.00×                 | —          | —                 | ok |
+| Gemma 4 Unified 12B + MTP assistant     | mtp  | 2 | 11.1  | 0.77×                 | 55.6%      | 0.56              | regression |
+| Gemma 4 Unified 12B + MTP assistant     | mtp  | 4 | 7.6   | 0.52×                 | 35.0%      | 1.05              | regression |
+| Gemma 4 Unified 12B + MTP assistant     | mtp  | 8 | 7.5   | 0.52×                 | 35.0%      | 1.05              | regression (effective K=4) |
+
+The 12B Unified MTP pairing is a consistent regression on GB10 across K: the
+assistant's acceptance (35-56%) is too low for the K-wide verify to pay for
+itself on the compute-bound Blackwell GPU, where verification does not amortize
+to one classic forward the way it does on memory-bandwidth-bound Apple Silicon
+(the same pairing measures ~1.87× on M5 Max). K=8 collapses onto K=4 because the
+drafter's configured block size is 4 and the acceptance never clears the
+adaptive block-expansion gate. The adaptive policy now de-rates its speedup
+estimate by `sqrt(K)` on compute-bound hardware (issue #638) so it settles to a
+decline for this pairing after its bounded profiling window, while Apple Silicon
+verdicts stay byte-identical. No local Gemma-4 or Qwen-3.5 pairing on this host
+reaches the issue's 1.4× target; the DFlash and 31B rows remain deferred (no
+checkpoint / wrong target family, see the dated note).
+
 ### Deferred pairings
 
 These pairings cannot be measured today because the drafter checkpoint is
