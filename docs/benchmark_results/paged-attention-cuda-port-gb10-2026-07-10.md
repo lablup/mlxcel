@@ -22,6 +22,8 @@ This is the only path that reaches the fused kernel; `select=native` fires on CU
 | single-slab batched island | native | 2.55x / 6.20x / 1.27x |
 | multi-slab shapes | gather (declined) | - |
 
+Run-to-run variance: these kernels sit in the 200-900 us range where GB10 timing jitter is material. An independent re-run of the same sweep measured b1/512 at 0.88x (gather 266 us vs fused 303 us) and b1/1024 at 1.97x, so treat the single-batch ctx-512 case as noise-dominated around parity; the batched island and the b1/1024 win reproduce across runs.
+
 ## Sanity A/B (`mlxcel-bench-decode`, llama-3.1-8b-4bit, 2048-token prompt, 32 decode tokens)
 
 `MLXCEL_PAGED_ATTENTION_NATIVE=0` decode 50.93 tok/s, `=1` decode 50.94 tok/s. The two runs land within noise of each other because `mlxcel-bench-decode` uses dense single-stream caches and never reaches the fused kernel either way; this A/B confirms no accidental path divergence rather than a performance win.
