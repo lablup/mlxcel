@@ -177,8 +177,9 @@ fn flush_sequential(cohorts: &mut Vec<PrefillCohort>, pending: &mut Vec<usize>) 
 // token budget bounds both transients: the mask is `B*L^2 = (B*L)*L` elements,
 // and for any window of `B >= 2` rows `L <= (B*L)/2`, so the mask stays within
 // `budget^2 / 2` elements (`~budget^2` bytes at FP16, `~2*budget^2` at FP32). At
-// the default budget of `max_batch_prefill * prefill_chunk_size` (4 * 512 = 2048)
-// that is at most ~8 MiB of FP32 mask, negligible beside model activation memory.
+// the default budget of `2 * max_batch_prefill * prefill_chunk_size` (2 * 4 * 512
+// = 4096) that is at most ~34 MiB of FP32 mask, negligible beside model
+// activation memory.
 // ---------------------------------------------------------------------------
 
 /// Whether a batched-prefill window that currently holds `count` rows padded to
@@ -231,10 +232,20 @@ pub(crate) fn batched_prefill_window_len(
 
 /// Derived default padded-token budget for a batched-prefill window when the
 /// operator sets neither `--max-batch-prefill-tokens` nor
-/// `MLXCEL_MAX_BATCH_PREFILL_TOKENS`: `max_batch_prefill * prefill_chunk_size`,
-/// so a full batch of chunk-sized prompts stays eligible for batching while a
-/// window of longer prompts spills to the chunked single-sequence path. Falls
-/// back to 512 tokens per row when chunking is disabled (`prefill_chunk_size == 0`).
+/// `MLXCEL_MAX_BATCH_PREFILL_TOKENS`: `2 * max_batch_prefill * prefill_chunk_size`.
+/// Falls back to 512 tokens per row when chunking is disabled
+/// (`prefill_chunk_size == 0`).
+///
+/// The factor of 2 is headroom for padding slop: real "chunk-sized" prompts
+/// (chat template plus a nominal 512-token body) land slightly OVER
+/// `prefill_chunk_size`, and a budget of exactly `max_batch_prefill *
+/// prefill_chunk_size` then spills the last row of the motivating short-prompt
+/// batch, staggering prefill and doubling p95 TTFT (measured on M1 Ultra:
+/// 4 x ~520-token prompts against a 2048 budget ran as a split window at p95
+/// 6.6s vs 2.9s for one cohort). At the default `2 * 4 * 512 = 4096` the FP32
+/// mask stays bounded by `~2 * budget^2` bytes = ~34 MiB, still negligible
+/// next to model memory, while 4 x 8k prompts (~39k padded tokens) spill to
+/// the chunked path exactly as before.
 pub(crate) fn default_batched_prefill_token_budget(
     prefill_chunk_size: usize,
     max_batch_prefill: usize,
@@ -244,7 +255,10 @@ pub(crate) fn default_batched_prefill_token_budget(
     } else {
         prefill_chunk_size
     };
-    max_batch_prefill.max(1).saturating_mul(per_row)
+    max_batch_prefill
+        .max(1)
+        .saturating_mul(per_row)
+        .saturating_mul(2)
 }
 
 #[cfg(test)]
@@ -589,12 +603,13 @@ mod tests {
 
     #[test]
     fn default_budget_scales_with_batch_and_chunk() {
-        // Default = max_batch_prefill * prefill_chunk_size (the #714 defaults
-        // yield 4 * 512 = 2048).
-        assert_eq!(default_batched_prefill_token_budget(512, 4), 2048);
+        // Default = 2 * max_batch_prefill * prefill_chunk_size (the #714
+        // defaults yield 2 * 4 * 512 = 4096); the 2x headroom keeps a full
+        // batch of slightly-over-chunk-sized prompts in one window.
+        assert_eq!(default_batched_prefill_token_budget(512, 4), 4096);
         // Chunking disabled falls back to 512 tokens per row.
-        assert_eq!(default_batched_prefill_token_budget(0, 4), 2048);
-        assert_eq!(default_batched_prefill_token_budget(256, 8), 2048);
-        assert_eq!(default_batched_prefill_token_budget(512, 1), 512);
+        assert_eq!(default_batched_prefill_token_budget(0, 4), 4096);
+        assert_eq!(default_batched_prefill_token_budget(256, 8), 4096);
+        assert_eq!(default_batched_prefill_token_budget(512, 1), 1024);
     }
 }

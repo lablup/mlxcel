@@ -965,7 +965,7 @@ pub(crate) struct ServeArgs {
     /// mask, an O(B*L^2) transient. This caps the drained window by total
     /// padded tokens (rows * L); rows past the budget prefill via the chunked
     /// single-sequence path. Unset derives `max_batch_prefill *
-    /// prefill_chunk_size` (4 * 512 = 2048). `0` disables the cap. Env
+    /// prefill_chunk_size * 2` (2 * 4 * 512 = 4096). `0` disables the cap. Env
     /// `MLXCEL_MAX_BATCH_PREFILL_TOKENS` overrides both.
     #[arg(long)]
     max_batch_prefill_tokens: Option<usize>,

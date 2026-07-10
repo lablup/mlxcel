@@ -252,7 +252,7 @@ pub struct BatchScheduler {
     /// the next tick and prefill via the chunked single-sequence path. `0`
     /// disables the cap (uncapped). Resolved once in [`Self::with_config`] /
     /// [`Self::with_max_batch_prefill_tokens`] from the env override, the CLI
-    /// value, or the derived default (`max_batch_prefill * prefill_chunk_size`).
+    /// value, or the derived default (`2 * max_batch_prefill * prefill_chunk_size`).
     max_batch_prefill_tokens: usize,
     /// Decode-time sequence-state backend used by this scheduler.
     decode_storage_backend: DecodeStorageBackend,

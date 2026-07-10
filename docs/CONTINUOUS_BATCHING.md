@@ -18,7 +18,7 @@ token, then streams the new tokens out. Relevant flags:
 | `--parallel N` | 4 | Maximum active (in-flight) sequences; caps the concurrent decode batch. |
 | `--max-batch-size N` | (= `--parallel`) | Maximum sequences decoded together in one batched step. |
 | `--max-batch-prefill N` | 4 | Requests batched into one prefill forward pass (families that support it). |
-| `--max-batch-prefill-tokens N` | (derived) | Padded-token budget bounding one batched prefill's transient memory. Unset derives `max_batch_prefill * prefill_chunk_size`; `0` disables the cap. |
+| `--max-batch-prefill-tokens N` | (derived) | Padded-token budget bounding one batched prefill's transient memory. Unset derives `2 * max_batch_prefill * prefill_chunk_size`; `0` disables the cap. |
 | `--max-queue-depth N` | 32 | Maximum queued (not yet admitted) requests. |
 | `--prefill-chunk-size N` | 512 | Token chunk size for prefill; bounds prefill's effect on decode latency. |
 | `--enable-preemption` | off | Allow evicting a lower-priority sequence to admit a waiting one. |
@@ -123,10 +123,12 @@ of `B >= 2` rows padded to `L` costs `B*L <= N` tokens, and since `L <= (B*L)/2`
 the mask stays within `N^2 / 2` elements, i.e. `~N^2` bytes at FP16 and
 `~2*N^2` at FP32.
 
-The default budget is derived, not fixed: `max_batch_prefill * prefill_chunk_size`
-(the shipped `4 * 512 = 2048`), so a full batch of chunk-sized prompts stays
+The default budget is derived, not fixed: `2 * max_batch_prefill * prefill_chunk_size`
+(the shipped `2 * 4 * 512 = 4096`; the 2x headroom absorbs the padding slop of
+real chunk-sized prompts, whose chat template pushes them slightly over
+`prefill_chunk_size`), so a full batch of chunk-sized prompts stays
 eligible for batching while a window of longer prompts spills to the chunked
-path. At the default the FP32 mask is bounded to `2 * 2048^2` bytes, about 8 MiB,
+path. At the default the FP32 mask is bounded to `2 * 4096^2` bytes, about 34 MiB,
 negligible beside model activation memory. `0` (the flag, or
 `MLXCEL_MAX_BATCH_PREFILL_TOKENS=0`) disables the cap for the pre-#715 unbounded
 behavior. The flag takes precedence over `MLXCEL_MAX_BATCH_PREFILL_TOKENS`, which
@@ -139,7 +141,7 @@ The analytic prediction for four concurrent 8k-token prompts on
 | config | prefill mask window | mask transient (analytic) | path |
 |--------|--------------------:|--------------------------:|------|
 | uncapped (`--max-batch-prefill-tokens 0`) | `[4, 8192, 8192]` FP32 | `4 * 8192^2 * 4 B` = 1024 MiB | single unchunked batched forward |
-| default cap (2048) | four `[≤512, 8192]` chunk masks | `512 * 8192 * 4 B` = 16 MiB (one at a time) | 8k prompts spill to the chunked single-sequence path |
+| default cap (4096) | four `[≤512, 8192]` chunk masks | `512 * 8192 * 4 B` = 16 MiB (one at a time) | 8k prompts spill to the chunked single-sequence path |
 
 The empirical A/B (server phys-footprint peak: RSS does not capture MLX Metal
 buffers on Apple Silicon, so use `/usr/bin/footprint -p <pid>` for
@@ -150,8 +152,9 @@ concurrent 8k-token requests (`scripts/bench_serving_concurrency.py --concurrenc
 
 Short-prompt concurrency (the #714 default motivation) is unaffected by
 construction: at `--prompt-tokens 512 --concurrency 4` all four rows cost
-`4 * 512 = 2048` tokens, exactly the default budget, so they still batch; the
-`2 * head_len <= budget` admission holds (`2 * 512 <= 2048`). TTFT and aggregate
+`4 * 512 = 2048` padded tokens, half the default budget, so they batch with
+headroom even when the chat template pushes each prompt slightly past 512; the
+`2 * head_len <= budget` admission holds (`2 * 512 <= 4096`). TTFT and aggregate
 throughput match the #714 table above (empirical re-run pending the same
 session).
 
