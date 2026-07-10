@@ -20,13 +20,15 @@ The only remaining reducible AsType source on CUDA is the temperature-sampler ch
 
 The residual `1` on the sampling path is the intrinsic `u32 -> f32` inside `mlx::core::random::categorical` (uniform bit-draw to float for the gumbel key), not a logit dtype round-trip.
 
+On CUDA a natively-f16 checkpoint now runs temperature sampling in f16 rather than the previous f32 upcast. This is exactly the single-dtype behavior the issue asks for on CUDA, and it is within fp16 tolerance: an f16 softmax over well-separated logits on an inherently stochastic categorical draw. The scalar-dtype change is gated on `!metal::is_available()`, so Metal keeps its bare-f32-scalar behavior (the unpatched f16+f32 rule upcasts the chain to an f32 softmax) and its temperature-sampling numerics are unchanged.
+
 ## Inventory: where the AsType come from
 
 | Source | Model class | Before | Disposition |
 |--------|-------------|-------:|-------------|
 | Model body (weights/norms/rope/attention) on CUDA | quantized dense + MoE | 0 | Already single-dtype via the `patches-cuda/dtype.cpp` bf16 promotion patch and the consistent-dtype quant path. Nothing to reduce. |
 | Model body, bf16-native checkpoints on CUDA | dense bf16 | 0 | Single-dtype bf16; CUDA keeps bf16 (native ALUs). Optional f16 normalization available via env, no AsType change. |
-| Fused sampler scalars (temperature, top-k/top-p/min-p sentinels) | any, temperature sampling | 3 (`f32 -> bf16`) | Removed: scalars now built in the logit dtype so the CUDA promotion patch inserts no per-step conversion. Bit-identical for bf16 logits. |
+| Fused sampler scalars (temperature, top-k/top-p/min-p sentinels) | any, temperature sampling | 3 (`f32 -> bf16`) | Removed on non-Metal backends: scalars built in the logit dtype so the CUDA promotion patch inserts no per-step conversion. Bit-identical for bf16 logits. Metal keeps the bare f32 scalars unchanged (gated on `!metal::is_available()`), so its numerics are untouched. |
 | `random::categorical` uniform draw | any, temperature sampling | 1 (`u32 -> f32`) | Intrinsic to random generation; left as-is. |
 | RMSNorm fp32 accumulation | gemma family (f16-fragile) | 52 (`f16 <-> f32`, 2 per layer) | Intentionally kept: gemma norms + softcap need the wider accumulation. On the f16-fragile exception list. |
 

@@ -4453,23 +4453,26 @@ bool is_gpu_available() {
 // which causes "CumSum cannot infer output shapes" when used inside
 // mlx::core::compile with shapeless=true.
 namespace {
-    array top_p_filter(const array& x, float top_p) {
+    // `single_dtype_scalars` is true on non-Metal backends (issue #636): build
+    // the comparison/fill scalars in the working dtype so the CUDA bf16
+    // promotion patch inserts no per-step AsType on the scalar. On Metal it is
+    // false, keeping the bare `array(f32)` scalars exactly as before so the
+    // unpatched f16+f32 rule upcasts the chain to an f32 softmax unchanged.
+    array top_p_filter(const array& x, float top_p, bool single_dtype_scalars) {
         auto probs = mlx::core::softmax(x, -1);
         auto sorted_indices = mlx::core::argsort(mlx::core::negative(probs), -1);
         auto sorted_probs = mlx::core::take_along_axis(probs, sorted_indices, -1);
         auto cum_probs = mlx::core::cumsum(sorted_probs, -1, false, true);
         auto shifted_cum = cum_probs - sorted_probs;
-        // Build comparison and fill scalars in the working dtype (issue #636):
-        // a bare `array(f32)` against a bf16/f16 tensor forces the CUDA bf16
-        // promotion patch to insert an AsType conversion on the scalar every
-        // decode step. `probs`/`shifted_cum` follow softmax's output dtype.
-        auto mask = mlx::core::less_equal(
-            shifted_cum, mlx::core::array(top_p, shifted_cum.dtype()));
+        auto top_p_scalar = single_dtype_scalars
+            ? mlx::core::array(top_p, shifted_cum.dtype())
+            : mlx::core::array(top_p);
+        auto fill_scalar = single_dtype_scalars
+            ? mlx::core::array(std::numeric_limits<float>::lowest(), x.dtype())
+            : mlx::core::array(std::numeric_limits<float>::lowest());
+        auto mask = mlx::core::less_equal(shifted_cum, top_p_scalar);
         auto sorted_logits = mlx::core::take_along_axis(x, sorted_indices, -1);
-        auto filtered_sorted = mlx::core::where(
-            mask,
-            sorted_logits,
-            mlx::core::array(std::numeric_limits<float>::lowest(), x.dtype()));
+        auto filtered_sorted = mlx::core::where(mask, sorted_logits, fill_scalar);
         auto unsort_indices = mlx::core::argsort(sorted_indices, -1);
         return mlx::core::take_along_axis(filtered_sorted, unsort_indices, -1);
     }
@@ -4479,17 +4482,23 @@ namespace {
 namespace {
     static std::function<std::vector<array>(const std::vector<array>&)>
     get_compiled_min_p_filter() {
-        auto fn = [](const std::vector<array>& inputs) -> std::vector<array> {
+        // Backend is process-constant, so capture the gate once at build time.
+        // Non-Metal fills the sentinel in x's dtype so no per-step AsType is
+        // inserted on the scalar under the CUDA bf16 promotion patch (issue
+        // #636); Metal keeps the bare f32 sentinel exactly as before.
+        const bool single_dtype_scalars = !mlx::core::metal::is_available();
+        auto fn = [single_dtype_scalars](
+                      const std::vector<array>& inputs) -> std::vector<array> {
             const auto& x = inputs[0];
             const auto& min_p_arr = inputs[1];
             auto probs = mlx::core::softmax(x, -1);
             auto max_prob = mlx::core::max(probs, -1, true);
             auto threshold = mlx::core::multiply(max_prob, min_p_arr);
             auto mask = mlx::core::greater_equal(probs, threshold);
-            // Fill sentinel in x's dtype so no per-step AsType is inserted on
-            // the scalar under the CUDA bf16 promotion patch (issue #636).
-            return {mlx::core::where(mask, x,
-                mlx::core::array(std::numeric_limits<float>::lowest(), x.dtype()))};
+            auto fill_scalar = single_dtype_scalars
+                ? mlx::core::array(std::numeric_limits<float>::lowest(), x.dtype())
+                : mlx::core::array(std::numeric_limits<float>::lowest());
+            return {mlx::core::where(mask, x, fill_scalar)};
         };
         return mlx::core::compile(fn, true);
     }
@@ -4518,19 +4527,27 @@ std::unique_ptr<MlxArray> fused_sample(
         return std::make_unique<MlxArray>(mlx::core::argmax(x, -1, false));
     }
 
-    // Build all sampler scalars in the logit dtype (issue #636). On CUDA the
-    // bf16 promotion patch keeps bf16 op boundaries in bf16, but a bare
-    // `array(f32)` scalar against a bf16/f16 logit tensor still forces an
-    // AsType conversion on the scalar every decode step. Constructing each
-    // scalar in `x.dtype()` keeps the fused sampler chain single-dtype: for
-    // bf16 logits the math is bit-identical (the old path cast the f32 scalar
-    // to bf16 anyway); for f16 logits it also avoids upcasting the whole
-    // vocab tensor to f32 through the unpatched f16+f32 rule.
+    // Build sampler scalars in the logit dtype on non-Metal backends only
+    // (issue #636). On CUDA the bf16 promotion patch keeps bf16 op boundaries
+    // in bf16, but a bare `array(f32)` scalar against a bf16/f16 logit tensor
+    // still forces an AsType conversion on the scalar every decode step;
+    // constructing each scalar in `x.dtype()` keeps the fused sampler chain
+    // single-dtype (bit-identical for bf16 logits since the old path cast the
+    // f32 scalar to bf16 anyway). Metal is left exactly as before: dtype.cpp
+    // deliberately leaves f16+f32 -> f32 unpatched there, so a bare f32 scalar
+    // upcasts the chain to an f32 softmax, and issue #636 requires Metal
+    // numerics untouched. `single_dtype_scalars` mirrors the runtime
+    // `!metal::is_available()` gate used by the kernel dispatches in this file.
+    const bool single_dtype_scalars = !mlx::core::metal::is_available();
     const auto logit_dtype = x.dtype();
+    auto sampler_scalar = [&](float value) {
+        return single_dtype_scalars ? mlx::core::array(value, logit_dtype)
+                                     : mlx::core::array(value);
+    };
 
     // Temperature scaling
     if (temperature > 0.0f && temperature != 1.0f) {
-        x = x / mlx::core::array(temperature, logit_dtype);
+        x = x / sampler_scalar(temperature);
     }
 
     // Top-k filtering: keep only the k highest-probability tokens
@@ -4550,19 +4567,18 @@ std::unique_ptr<MlxArray> fused_sample(
         auto threshold = mlx::core::take_along_axis(x, kth_idx, -1);
         auto mask = mlx::core::greater_equal(x, threshold);
         x = mlx::core::where(
-            mask, x,
-            mlx::core::array(std::numeric_limits<float>::lowest(), logit_dtype));
+            mask, x, sampler_scalar(std::numeric_limits<float>::lowest()));
     }
 
     // Top-p (nucleus) filtering
     if (top_p > 0.0f && top_p < 1.0f) {
-        x = top_p_filter(x, top_p);
+        x = top_p_filter(x, top_p, single_dtype_scalars);
     }
 
     // Min-p filtering — compiled kernel
     if (min_p > 0.0f && min_p < 1.0f) {
         static auto compiled_fn = get_compiled_min_p_filter();
-        auto result = compiled_fn({x, mlx::core::array(min_p, logit_dtype)});
+        auto result = compiled_fn({x, sampler_scalar(min_p)});
         x = std::move(result[0]);
     }
 
