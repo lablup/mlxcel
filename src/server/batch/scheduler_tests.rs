@@ -25,7 +25,9 @@ use std::time::Instant;
 use mlxcel_core::cache::SequenceId;
 use mlxcel_core::generate::SamplingConfig;
 
-use super::{effective_decode_storage_backend, vlm_prefix_sharing_allowed};
+use super::{
+    effective_decode_storage_backend, resolve_max_batch_prefill_tokens, vlm_prefix_sharing_allowed,
+};
 use crate::server::batch::active::ActiveBatch;
 use crate::server::batch::queue::PrefillQueue;
 use crate::server::batch::sequence::{
@@ -1521,4 +1523,55 @@ fn lookahead_teardown_unwinds_one_position_without_prime() {
         lookahead_teardown_positions(/* next_prime_issued */ false),
         1
     );
+}
+
+// -------------------------------------------------------------------
+// Batched-prefill token budget resolution and head guard (#715)
+// -------------------------------------------------------------------
+
+/// `resolve_max_batch_prefill_tokens` reads `MLXCEL_MAX_BATCH_PREFILL_TOKENS`
+/// from the process environment for the `configured = None` branch, so a
+/// test that mutates or unsets that variable would race every other test in
+/// this binary (`cargo test` runs the crate's unit tests in one shared
+/// process). This test instead pins the deterministic, env-independent part
+/// of the precedence: `configured = Some(_)` must return that value
+/// immediately without ever consulting the env var, for both the uncapped
+/// escape hatch (`0`) and an explicit cap. It is safe to run in any thread
+/// interleaving because it never reads or writes process state.
+#[test]
+fn resolve_max_batch_prefill_tokens_configured_wins_without_reading_env() {
+    assert_eq!(resolve_max_batch_prefill_tokens(Some(777), 512, 4), 777);
+    assert_eq!(resolve_max_batch_prefill_tokens(Some(0), 512, 4), 0);
+}
+
+/// Mirrors `BatchScheduler::batched_prefill_admits_head` in isolation so this
+/// test does not need a full `BatchScheduler` (which requires a real
+/// `LoadedModel` + tokenizer). `head_len` stands in for
+/// `PrefillQueue::peek_prompt_len()`'s return value.
+fn batched_prefill_admits_head_from_state(budget: usize, head_len: Option<usize>) -> bool {
+    if budget == 0 {
+        return true;
+    }
+    match head_len {
+        Some(head_len) => head_len.saturating_mul(2) <= budget,
+        None => false,
+    }
+}
+
+#[test]
+fn batched_prefill_admits_head_boundary_is_inclusive() {
+    // 2 * 1024 == 2048: exactly at the budget still admits.
+    assert!(batched_prefill_admits_head_from_state(2048, Some(1024)));
+    // 2 * 1025 > 2048: one token over the budget is rejected.
+    assert!(!batched_prefill_admits_head_from_state(2048, Some(1025)));
+}
+
+#[test]
+fn batched_prefill_admits_head_uncapped_budget_always_admits() {
+    assert!(batched_prefill_admits_head_from_state(0, Some(1_000_000)));
+}
+
+#[test]
+fn batched_prefill_admits_head_empty_queue_never_admits() {
+    assert!(!batched_prefill_admits_head_from_state(2048, None));
 }
