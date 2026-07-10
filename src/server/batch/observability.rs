@@ -156,6 +156,14 @@ pub struct BatchObservability {
     pub prefill_chunks_processed: AtomicU64,
     /// Number of decode steps executed (one per tick per batch).
     pub decode_steps_processed: AtomicU64,
+    /// Number of decode steps served by the lookahead async_eval pipeline
+    /// (issue #632). One increment per steady pipelined tick where the batch
+    /// committed a token from a prebuilt (async-scheduled) forward instead of
+    /// running synchronously. Ticks that fall back to the synchronous path
+    /// (admission, stop, preemption, ineligible sampling, `MLXCEL_FORCE_SYNC`)
+    /// do not increment this, so the ratio against `decode_steps_processed`
+    /// reports how often lookahead actually engaged.
+    pub decode_lookahead_steps: AtomicU64,
 
     // -- Gauges (point-in-time values set by the scheduler) --
     /// Number of sequences currently in the active decode batch.
@@ -224,6 +232,7 @@ impl BatchObservability {
             total_decode_tokens: AtomicU64::new(0),
             prefill_chunks_processed: AtomicU64::new(0),
             decode_steps_processed: AtomicU64::new(0),
+            decode_lookahead_steps: AtomicU64::new(0),
             current_batch_size: AtomicUsize::new(0),
             current_queue_depth: AtomicUsize::new(0),
             cache_pool_active: AtomicUsize::new(0),
@@ -265,6 +274,12 @@ impl BatchObservability {
         self.decode_steps_processed.fetch_add(1, Ordering::Relaxed);
         self.total_decode_tokens
             .fetch_add(batch_size as u64, Ordering::Relaxed);
+    }
+
+    /// Record that one decode step was served by the lookahead async_eval
+    /// pipeline (issue #632). Called once per steady pipelined tick.
+    pub fn record_lookahead_step(&self) {
+        self.decode_lookahead_steps.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Record that a sequence has completed generation.
@@ -384,6 +399,7 @@ impl BatchObservability {
             total_decode_tokens: self.total_decode_tokens.load(Ordering::Relaxed),
             prefill_chunks_processed: self.prefill_chunks_processed.load(Ordering::Relaxed),
             decode_steps_processed: self.decode_steps_processed.load(Ordering::Relaxed),
+            decode_lookahead_steps: self.decode_lookahead_steps.load(Ordering::Relaxed),
             current_batch_size: self.current_batch_size.load(Ordering::Relaxed),
             current_queue_depth: self.current_queue_depth.load(Ordering::Relaxed),
             cache_pool_active: self.cache_pool_active.load(Ordering::Relaxed),
@@ -424,6 +440,8 @@ pub struct ObservabilitySnapshot {
     pub total_decode_tokens: u64,
     pub prefill_chunks_processed: u64,
     pub decode_steps_processed: u64,
+    /// Decode steps served by the lookahead async_eval pipeline (issue #632).
+    pub decode_lookahead_steps: u64,
     pub current_batch_size: usize,
     pub current_queue_depth: usize,
     pub cache_pool_active: usize,
@@ -462,6 +480,7 @@ mod tests {
         assert_eq!(snap.total_decode_tokens, 0);
         assert_eq!(snap.prefill_chunks_processed, 0);
         assert_eq!(snap.decode_steps_processed, 0);
+        assert_eq!(snap.decode_lookahead_steps, 0);
         assert_eq!(snap.current_batch_size, 0);
         assert_eq!(snap.current_queue_depth, 0);
         assert_eq!(snap.cache_pool_active, 0);

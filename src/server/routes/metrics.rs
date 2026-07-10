@@ -154,6 +154,9 @@ pub async fn metrics(State(state): State<AppState>) -> Response {
          # HELP mlxcel_batch_decode_steps_total Total decode steps executed\n\
          # TYPE mlxcel_batch_decode_steps_total counter\n\
          mlxcel_batch_decode_steps_total {decode_steps}\n\
+         # HELP mlxcel_batch_decode_lookahead_steps_total Decode steps served by the lookahead async_eval pipeline\n\
+         # TYPE mlxcel_batch_decode_lookahead_steps_total counter\n\
+         mlxcel_batch_decode_lookahead_steps_total {decode_lookahead_steps}\n\
          # HELP mlxcel_batch_prefill_chunks_total Total prefill chunks processed\n\
          # TYPE mlxcel_batch_prefill_chunks_total counter\n\
          mlxcel_batch_prefill_chunks_total {prefill_chunks}\n\
@@ -235,6 +238,7 @@ pub async fn metrics(State(state): State<AppState>) -> Response {
         prefill_tokens = obs.total_prefill_tokens,
         decode_tokens = obs.total_decode_tokens,
         decode_steps = obs.decode_steps_processed,
+        decode_lookahead_steps = obs.decode_lookahead_steps,
         prefill_chunks = obs.prefill_chunks_processed,
         batch_size = obs.current_batch_size,
         cache_active = obs.cache_pool_active,

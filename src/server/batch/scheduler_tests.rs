@@ -1411,3 +1411,101 @@ fn batch_kv_quant_per_layer_table_disabled_skip_keeps_uniform_modes() {
         );
     }
 }
+
+// -------------------------------------------------------------------
+// Lookahead async_eval pipeline invalidation logic (issue #632)
+// -------------------------------------------------------------------
+//
+// These exercise the pure decision helpers that govern when the steady
+// pipeline stays engaged versus falls back to a synchronous decode step. They
+// mirror the file's existing philosophy of testing scheduler policy in
+// isolation (see `decide_action_from_state`) so no live model or GPU is
+// required. The forward/sample plumbing is covered by the build + the
+// greedy-equivalence smoke run recorded on the PR.
+
+use super::{lookahead_pipeline_safe, lookahead_token_finishes};
+
+#[test]
+fn lookahead_engages_when_batch_stable_and_queue_empty() {
+    // Steady state: no queued admission, no chunked prefill, no preemption.
+    assert!(lookahead_pipeline_safe(
+        /* queue_empty */ true,
+        /* chunked_in_progress */ false,
+        /* preempting */ false,
+    ));
+}
+
+#[test]
+fn lookahead_invalidated_by_admission_mid_lookahead() {
+    // A queued request waiting to be admitted grows the batch next tick, so the
+    // prebuilt step for the old id set must be discarded and the tick run
+    // synchronously.
+    assert!(!lookahead_pipeline_safe(
+        /* queue_empty */ false,
+        false,
+        false,
+    ));
+}
+
+#[test]
+fn lookahead_invalidated_by_chunked_prefill_interleave() {
+    assert!(!lookahead_pipeline_safe(
+        /* queue_empty */ true,
+        /* chunked_in_progress */ true,
+        false,
+    ));
+}
+
+#[test]
+fn lookahead_invalidated_by_preemption() {
+    // A pending higher-priority preemption evicts a running sequence next tick.
+    assert!(!lookahead_pipeline_safe(
+        /* queue_empty */ true,
+        false,
+        /* preempting */ true,
+    ));
+}
+
+#[test]
+fn lookahead_falls_back_on_eos_stop_mid_lookahead() {
+    // The prebuilt token is an EOS/stop id: committing it stops the sequence, so
+    // the pipeline must hand the tick to the synchronous finish/donation path.
+    let merged_eos = [2, 100];
+    assert!(lookahead_token_finishes(
+        /* next_token */ 2,
+        /* generated_len */ 5,
+        /* max_tokens */ 128,
+        &merged_eos,
+        /* cancelled */ false,
+    ));
+    // A non-stop token well short of the limit keeps the pipeline engaged.
+    assert!(!lookahead_token_finishes(7, 5, 128, &merged_eos, false));
+}
+
+#[test]
+fn lookahead_falls_back_on_length_limit_mid_lookahead() {
+    // Committing this token would reach max_tokens (5 generated + 1 == 6), so
+    // the sequence finishes on length and the step runs synchronously.
+    assert!(lookahead_token_finishes(
+        /* next_token */ 7,
+        /* generated_len */ 5,
+        /* max_tokens */ 6,
+        &[2],
+        false,
+    ));
+    // One token earlier the pipeline is still safe to engage.
+    assert!(!lookahead_token_finishes(7, 4, 6, &[2], false));
+}
+
+#[test]
+fn lookahead_falls_back_on_cancellation_mid_lookahead() {
+    // A cancelled sequence aborts through the synchronous finalize path even
+    // when the token itself is neither an EOS nor at the length limit.
+    assert!(lookahead_token_finishes(
+        /* next_token */ 7,
+        /* generated_len */ 5,
+        /* max_tokens */ 128,
+        &[2],
+        /* cancelled */ true,
+    ));
+}
