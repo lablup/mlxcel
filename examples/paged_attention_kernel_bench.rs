@@ -15,12 +15,14 @@
 //! Fused paged-attention decode kernel throughput bench (epic #116 Phase 6,
 //! #123; adaptive selector #331).
 //!
-//! Compares the fused Metal kernel (raw `PagedBlockPool::paged_decode_fused`,
-//! which reads scattered pool blocks directly) against the gather-then-SDPA
-//! reference (`paged_decode_attention_pooled_fallback`, which re-materialises a
-//! contiguous K/V every step) over a real `PagedBlockPool`, and prints the
-//! decision the adaptive selector (`select_pooled_paged_dispatch`, #331) makes
-//! for each shape so both dispatch arms are visible.
+//! Compares the fused kernel (raw `PagedBlockPool::paged_decode_fused`, which
+//! reads scattered pool blocks directly) against the gather-then-SDPA reference
+//! (`paged_decode_attention_pooled_fallback`, which re-materialises a contiguous
+//! K/V every step) over a real `PagedBlockPool`, and prints the decision the
+//! adaptive selector (`select_pooled_paged_dispatch`, #331) makes for each shape
+//! so both dispatch arms are visible. The fused kernel runs its Metal JIT body
+//! on Apple and the #634 CUDA port on NVIDIA, so this bench exercises the native
+//! arm on either GPU backend.
 //!
 //! This is the #123 counterpart to `examples/page_gather_microbench.rs` (the
 //! ADR 0001 spike): the spike measured gather overhead against a contiguous
@@ -34,11 +36,13 @@
 //! reads `declined`. The selector encodes exactly that (plus the ADR 0001
 //! batch/context regime), so the two are cross-checked here.
 //!
-//! Run:
+//! Run (Apple):
 //!   cargo run --release --features metal,accelerate \
 //!     --example paged_attention_kernel_bench
-//! Run under `caffeinate -i` and let the machine cool between sweeps; Apple
-//! Silicon down-clocks under sustained load.
+//! Run (CUDA):
+//!   cargo run --release --features cuda --example paged_attention_kernel_bench
+//! On Apple Silicon run under `caffeinate -i` and let the machine cool between
+//! sweeps; it down-clocks under sustained load.
 
 use std::time::{Duration, Instant};
 
@@ -56,6 +60,19 @@ const BLOCK_SIZE: usize = 32;
 const LAYER: usize = 0;
 const WARMUP: usize = 20;
 const ITERS: usize = 50;
+
+/// Backend the fused kernel actually dispatches on: Metal on Apple, the #634
+/// CUDA port on NVIDIA, else CPU (no native kernel). Drives the selector label
+/// so the printed `select=` column matches production dispatch on this host.
+fn bench_backend() -> PagedDecodeBackend {
+    if mlxcel_core::metal_is_available() {
+        PagedDecodeBackend::Metal
+    } else if mlxcel_core::cuda_is_available() {
+        PagedDecodeBackend::Cuda
+    } else {
+        PagedDecodeBackend::Other
+    }
+}
 
 /// Deterministic pseudo-random f32 fill (a cheap LCG; only the timing matters,
 /// but distinct values keep softmax non-degenerate).
@@ -157,16 +174,15 @@ fn run_config(batch: usize, ctx: usize) {
         &[batch as i32, Q_HEADS, 1, HEAD_DIM],
     );
 
-    // Selector decision for this shape (Metal backend; this bench is
-    // Apple-Silicon only). Mirrors what production dispatch picks.
+    // Selector decision for this shape on this host's backend (Metal on Apple,
+    // the #634 CUDA port on NVIDIA). Mirrors what production dispatch picks.
     let visible_len = state_refs
         .iter()
         .map(|s| s.layer(LAYER).map_or(0, |l| l.visible_len()))
         .max()
         .unwrap_or(0);
     let slabs = pool.slab_count(LAYER);
-    let decision =
-        select_pooled_paged_dispatch(batch, visible_len, slabs, PagedDecodeBackend::Metal);
+    let decision = select_pooled_paged_dispatch(batch, visible_len, slabs, bench_backend());
     let pick = match decision {
         PagedDecodeDispatch::Native => "native",
         PagedDecodeDispatch::Gather => "gather",

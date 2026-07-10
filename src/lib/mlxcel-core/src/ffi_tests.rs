@@ -736,11 +736,10 @@ fn test_fused_paged_decode_matches_gather_over_200_steps() {
 fn test_fused_paged_decode_gqa_and_batched() {
     use crate::cache::{PagedBlockPool, PagedSequenceState};
 
-    // The fused paged-decode kernel is Metal-only; on a CUDA build it throws
-    // "No Metal back-end" and aborts the process. CUDA uses the gather-then-SDPA
-    // fallback instead (native CUDA paged attention is issue #634), so skip here
-    // on non-Metal backends.
-    if !crate::metal_is_available() {
+    // The fused paged-decode kernel dispatches a Metal JIT body on Apple and a
+    // CUDA JIT body on NVIDIA (#634); on a CPU-only build neither backend can
+    // launch it, so skip there rather than aborting the process.
+    if !crate::metal_is_available() && !crate::cuda_is_available() {
         return;
     }
 
@@ -822,6 +821,168 @@ fn test_fused_paged_decode_gqa_and_batched() {
         "GQA+batched fused vs gather RMS {rms} exceeded 5e-3"
     );
     println!("test_fused_paged_decode_gqa_and_batched: RMS = {rms:e}");
+}
+
+/// #634 native-vs-fallback parity matrix for the fused paged-attention decode
+/// kernel. This is the CUDA-port acceptance test: it runs the native fused
+/// kernel ([`crate::cache::PagedBlockPool::paged_decode_fused`]) and the
+/// gather-then-SDPA reference
+/// ([`crate::layers::paged_decode_attention_pooled_fallback`]) on the same
+/// synthetic pool and asserts they agree within fp16 tolerance across the case
+/// matrix the issue calls out: head dims 64/80/96/128, GQA ratios 1:1 / 4:1 /
+/// 8:1, page-boundary cases (a single partial block, a context exactly at a
+/// block edge, many blocks), and batch > 1.
+///
+/// The kernel is now dispatched on both Metal (original JIT body) and CUDA (the
+/// #634 port), so this runs on either GPU backend and is skipped only on a
+/// CPU-only build where neither backend can launch it. `paged_decode_fused` is
+/// called directly rather than through `paged_decode_attention_pooled` so the
+/// adaptive selector cannot silently route a case to gather and turn the
+/// comparison into a gather-vs-gather tautology.
+#[test]
+fn test_fused_paged_decode_native_vs_fallback_matrix() {
+    use crate::cache::{PagedBlockPool, PagedSequenceState};
+
+    if !crate::metal_is_available() && !crate::cuda_is_available() {
+        // No GPU backend can launch the fused kernel; the CPU build has no
+        // native path to compare (it always gathers). Nothing to verify.
+        return;
+    }
+
+    let backend = if crate::metal_is_available() {
+        "metal"
+    } else {
+        "cuda"
+    };
+    let block_size = 16usize;
+    let layer_idx = 0usize;
+
+    // One parity run for a single (head layout, batch shape) configuration.
+    // `seq_lens[b]` is sequence b's visible length; sequences are grown with
+    // interleaved single-token writes so their physical pool rows fragment, and
+    // every visible token gets distinct pseudo-random K/V. Returns the RMS and
+    // max-abs deviation of native vs gather over the flattened `[B, Hq, 1, D]`
+    // outputs.
+    let run_case = |n_kv_heads: i32, n_q_heads: i32, head_dim: i32, seq_lens: &[i32]| {
+        let scale = 1.0f32 / (head_dim as f32).sqrt();
+        let mut pool = PagedBlockPool::new(pooled_layout(block_size, 1, n_kv_heads, head_dim));
+        let batch = seq_lens.len();
+        let mut states: Vec<PagedSequenceState> = (0..batch)
+            .map(|_| PagedSequenceState::new(pool.layout()))
+            .collect();
+
+        let max_len = *seq_lens.iter().max().unwrap();
+        for t in 0..max_len {
+            for (bi, state) in states.iter_mut().enumerate() {
+                if t >= seq_lens[bi] {
+                    continue;
+                }
+                pool.append_tokens(state, layer_idx, 1).unwrap();
+                let ids = state.layer(layer_idx).unwrap().block_ids.clone();
+                let seed = (bi as u64 + 1)
+                    .wrapping_mul(0x1_0001)
+                    .wrapping_add(t as u64 + 1);
+                let k = from_slice_f32(
+                    &pooled_pseudo_f32(seed, (n_kv_heads * head_dim) as usize),
+                    &[1, n_kv_heads, 1, head_dim],
+                );
+                let v = from_slice_f32(
+                    &pooled_pseudo_f32(seed.wrapping_mul(7), (n_kv_heads * head_dim) as usize),
+                    &[1, n_kv_heads, 1, head_dim],
+                );
+                pool.write_block(
+                    ids[(t as usize) / block_size],
+                    layer_idx,
+                    (t as usize) % block_size,
+                    &k,
+                    &v,
+                )
+                .unwrap();
+            }
+        }
+
+        // Q: [B, Hq, 1, D], one distinct pseudo-random vector per sequence.
+        let mut q = None::<UniquePtr<MlxArray>>;
+        for bi in 0..batch {
+            let qb = from_slice_f32(
+                &pooled_pseudo_f32(0xB0B0 + bi as u64, (n_q_heads * head_dim) as usize),
+                &[1, n_q_heads, 1, head_dim],
+            );
+            q = Some(match q {
+                None => qb,
+                Some(prev) => concatenate(&prev, &qb, 0),
+            });
+        }
+        let q = q.unwrap();
+
+        let state_refs: Vec<&PagedSequenceState> = states.iter().collect();
+        let native = pool
+            .paged_decode_fused(&q, &state_refs, layer_idx, scale)
+            .unwrap()
+            .expect("single-slab layer: fused kernel must serve it");
+        let gather = crate::layers::paged_decode_attention_pooled_fallback(
+            &q,
+            &pool,
+            &state_refs,
+            layer_idx,
+            scale,
+        )
+        .unwrap();
+
+        assert_eq!(
+            array_shape(&native),
+            vec![batch as i32, n_q_heads, 1, head_dim],
+            "native output shape mismatch (kv={n_kv_heads} q={n_q_heads} d={head_dim})"
+        );
+
+        let f = flatten_f32_local(&native);
+        let g = flatten_f32_local(&gather);
+        let rms = pooled_rms(&f, &g);
+        let max_abs = f
+            .iter()
+            .zip(g.iter())
+            .map(|(x, y)| (x - y).abs())
+            .fold(0.0f32, f32::max);
+        (rms, max_abs)
+    };
+
+    // Head dims from the model zoo, GQA ratios 1:1 / 4:1 / 8:1, and page-boundary
+    // shapes: a single partial block (10), a context exactly at a block edge
+    // (16, 32), many blocks (112 = 7 * 16), and a mixed batch > 1. All row
+    // counts stay within one pool slab (POOL_SLAB_BLOCKS = 32).
+    let head_dims = [64i32, 80, 96, 128];
+    let gqa: [(i32, i32); 3] = [(4, 4), (2, 8), (1, 8)]; // 1:1, 4:1, 8:1
+    let scenarios: [&[i32]; 5] = [
+        &[10],             // single partial block, batch 1
+        &[16],             // exactly one full block (page edge)
+        &[112],            // many blocks (7), batch 1
+        &[16, 48, 80],     // batch 3: block edges of varying length
+        &[10, 33, 64, 17], // batch 4: partial + past-edge mix
+    ];
+
+    let mut worst_rms = 0.0f32;
+    let mut worst_max = 0.0f32;
+    let tol = 5e-3f32;
+    for &head_dim in &head_dims {
+        for &(n_kv_heads, n_q_heads) in &gqa {
+            for scenario in &scenarios {
+                let (rms, max_abs) = run_case(n_kv_heads, n_q_heads, head_dim, scenario);
+                assert!(
+                    rms < tol,
+                    "[{backend}] native vs gather RMS {rms:e} exceeded {tol:e} \
+                     (kv={n_kv_heads} q={n_q_heads} d={head_dim} lens={scenario:?})"
+                );
+                worst_rms = worst_rms.max(rms);
+                worst_max = worst_max.max(max_abs);
+            }
+        }
+    }
+    println!(
+        "test_fused_paged_decode_native_vs_fallback_matrix [{backend}]: \
+         worst RMS = {worst_rms:e}, worst max-abs = {worst_max:e} over \
+         {} configs",
+        head_dims.len() * gqa.len() * scenarios.len()
+    );
 }
 
 /// Sliding-window parity: a sequence with `logical_start > 0` (post-trim) must

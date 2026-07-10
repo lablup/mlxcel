@@ -17,6 +17,13 @@
 #include <mlx/fast.h>
 #include <mlx/ops.h>
 
+// Backend availability probes for the Metal-vs-CUDA kernel gate (#634). Both
+// headers are backend-agnostic: an Apple build links the CUDA no_cuda stub, a
+// CUDA build links the Metal no_metal stub, so `is_available()` is always
+// resolvable and returns false for the absent backend.
+#include <mlx/backend/cuda/cuda.h>
+#include <mlx/backend/metal/metal.h>
+
 #include <mutex>
 #include <optional>
 #include <string>
@@ -194,8 +201,169 @@ constexpr const char* PAGED_ATTENTION_DECODE_SOURCE = R"(
     }
 )";
 
+// CUDA port of the fused paged-attention decode kernel (#634). The Metal source
+// above is `mx.fast.metal_kernel`, which throws "[metal_kernel] No Metal
+// back-end" on the CUDA backend, so before this port every CUDA paged decode
+// fell back to the gather-then-SDPA path (`paged_decode_attention_pooled_fallback`):
+// a separate gather pass plus extra KV-pool traffic per step, exactly where
+// long-context decode is bandwidth-bound.
+//
+// Same split-K flash-decoding scheme, thread mapping, and online-softmax
+// accumulation as the Metal kernel: one CUDA block per (batch * query head), a
+// `(32, NumSplits)` thread layout where the 32 lanes of a warp partition the
+// head dimension and the `NumSplits` warps sweep strided token stripes. The
+// per-token QK dot is warp-reduced with a butterfly `__shfl_xor_sync` (an
+// all-reduce so every lane sees the score, matching Metal's `simd_sum`), and a
+// `__syncthreads()` combine over shared memory merges the `NumSplits` partial
+// softmaxes.
+//
+// Grid mapping (MLX passes Metal-style total threads and ceil-divides by the
+// threadgroup tuple, cf. backend/cuda/custom_kernel.cpp): grid
+// `(32, NumSplits, B*Hq)` over threadgroup `(32, NumSplits, 1)` yields blocks
+// `(1, 1, B*Hq)` with `blockDim = (32, NumSplits, 1)`. Every field is an exact
+// multiple, so no padded threads are launched and no guards are needed for
+// grid padding. `vlen` is block-uniform (a function of the batch index only),
+// so the empty-window `return` is taken by the whole block together and never
+// strands a warp at the later `__syncthreads()`.
+//
+// `k_pool`/`v_pool` are f16 (`const __half*` after MLX type substitution); the
+// `(float)` casts use `__half`'s implicit float conversion. Buffers, template
+// constants, and the `*_shape` metadata match the Metal launcher exactly.
+constexpr const char* PAGED_ATTENTION_DECODE_CUDA_SOURCE = R"(
+    uint32_t lane = threadIdx.x;                      // 0 .. 31 (within warp)
+    uint32_t sg = threadIdx.y;                        // 0 .. NumSplits-1
+    uint32_t bhq = blockIdx.z;                        // 0 .. B*Hq-1
+
+    uint32_t hq_count = (uint32_t)q_shape[1];         // Hq
+    uint32_t block_size = (uint32_t)k_pool_shape[1];  // tokens per block
+    uint32_t hkv_count = (uint32_t)k_pool_shape[2];   // Hkv
+    uint32_t dim = (uint32_t)Dim;
+    uint32_t dpt = (uint32_t)DimsPerThread;           // dims this lane owns
+    uint32_t d0 = lane * dpt;                         // first dim of this lane
+
+    uint32_t b = bhq / hq_count;                      // batch index
+    uint32_t h = bhq % hq_count;                      // query head
+    uint32_t kv_head = h / (uint32_t)NRep;            // grouped-query KV head
+    if (kv_head >= hkv_count) {
+        kv_head = 0;                                  // defensive
+    }
+
+    int vlen_i = visible_lens[b];
+    uint32_t vlen = vlen_i > 0 ? (uint32_t)vlen_i : 0u;
+    uint32_t logical_start = (uint32_t)logical_starts[b];
+    uint32_t row_off = (uint32_t)row_offsets[b];
+
+    // Stage this lane's Q slice in registers.
+    float q_reg[DimsPerThread];
+    for (uint32_t j = 0; j < dpt; j++) {
+        uint32_t d = d0 + j;
+        q_reg[j] = (d < dim) ? q[bhq * dim + d] : 0.0f;
+    }
+
+    // Shared scratch for the cross-warp flash combine.
+    __shared__ float tg_m[NumSplits];
+    __shared__ float tg_l[NumSplits];
+    __shared__ float tg_acc[NumSplits * Dim];
+
+    // Empty window: only warp 0 emits zeros (uniform across the whole block).
+    if (vlen == 0u) {
+        if (sg == 0u) {
+            for (uint32_t j = 0; j < dpt; j++) {
+                uint32_t d = d0 + j;
+                if (d < dim) {
+                    out[bhq * dim + d] = 0.0f;
+                }
+            }
+        }
+        return;
+    }
+
+    float scale_v = scale[0];
+
+    // This warp's online softmax over its strided token stripe.
+    float m = -INFINITY;
+    float l = 0.0f;
+    float acc[DimsPerThread];
+    for (uint32_t j = 0; j < dpt; j++) {
+        acc[j] = 0.0f;
+    }
+
+    uint32_t stride_kv = hkv_count * dim;             // elements per (block,slot)
+    for (uint32_t t = sg; t < vlen; t += (uint32_t)NumSplits) {
+        uint32_t abs_pos = logical_start + t;
+        uint32_t block_idx = abs_pos / block_size;
+        uint32_t slot = abs_pos - block_idx * block_size;
+        uint32_t row = (uint32_t)rows[row_off + block_idx];
+        uint32_t base = (row * block_size + slot) * stride_kv + kv_head * dim;
+
+        float partial = 0.0f;
+        for (uint32_t j = 0; j < dpt; j++) {
+            uint32_t d = d0 + j;
+            float kd = (d < dim) ? (float)k_pool[base + d] : 0.0f;
+            partial += q_reg[j] * kd;
+        }
+        // Butterfly all-reduce over the 32 lanes: full q . k_t in every lane
+        // (Metal simd_sum is an all-reduce; every lane needs `score`). The loop
+        // trip count is warp-uniform, so all 32 lanes reach each shuffle.
+        #pragma unroll
+        for (int o = 16; o > 0; o >>= 1) {
+            partial += __shfl_xor_sync(0xffffffffu, partial, o);
+        }
+        float score = partial * scale_v;
+
+        float m_new = fmaxf(m, score);
+        float corr = expf(m - m_new);
+        float p = expf(score - m_new);
+        l = l * corr + p;
+        for (uint32_t j = 0; j < dpt; j++) {
+            uint32_t d = d0 + j;
+            float vd = (d < dim) ? (float)v_pool[base + d] : 0.0f;
+            acc[j] = acc[j] * corr + p * vd;
+        }
+        m = m_new;
+    }
+
+    // Publish this warp's partial. Every lane stores its dim slice; lane 0
+    // stores the scalar (max, denominator).
+    for (uint32_t j = 0; j < dpt; j++) {
+        uint32_t d = d0 + j;
+        if (d < dim) {
+            tg_acc[sg * dim + d] = acc[j];
+        }
+    }
+    if (lane == 0u) {
+        tg_m[sg] = m;
+        tg_l[sg] = l;
+    }
+    __syncthreads();
+
+    // Warp 0 merges the NumSplits partials (flash rescale) and writes out.
+    if (sg == 0u) {
+        float m_g = tg_m[0];
+        for (uint32_t s = 1; s < (uint32_t)NumSplits; s++) {
+            m_g = fmaxf(m_g, tg_m[s]);
+        }
+        float l_g = 0.0f;
+        for (uint32_t s = 0; s < (uint32_t)NumSplits; s++) {
+            l_g += tg_l[s] * expf(tg_m[s] - m_g);
+        }
+        float inv_l = l_g > 0.0f ? (1.0f / l_g) : 0.0f;
+        for (uint32_t j = 0; j < dpt; j++) {
+            uint32_t d = d0 + j;
+            if (d < dim) {
+                float a = 0.0f;
+                for (uint32_t s = 0; s < (uint32_t)NumSplits; s++) {
+                    a += tg_acc[s * dim + d] * expf(tg_m[s] - m_g);
+                }
+                out[bhq * dim + d] = a * inv_l;
+            }
+        }
+    }
+)";
+
 // Apple Silicon SIMD width. Each SIMD group is 32 lanes that partition the head
-// dimension; `NumSplits` SIMD groups split the token range.
+// dimension; `NumSplits` SIMD groups split the token range. On CUDA the same
+// constant is the warp width.
 constexpr int PAGED_ATTENTION_SIMD_WIDTH = 32;
 
 // Thread-safe lazy-initialised holder for the JIT-compiled kernel. Mirrors the
@@ -221,6 +389,31 @@ struct PagedAttentionKernelHolder {
 
 inline PagedAttentionKernelHolder& get_paged_attention_kernel() {
     static PagedAttentionKernelHolder holder;
+    return holder;
+}
+
+// CUDA counterpart of `PagedAttentionKernelHolder`. Lazily JIT-compiles the
+// `cuda_kernel` port (#634) under the same `call_once` contract, reached only on
+// a CUDA backend where `metal::is_available()` is false.
+struct PagedAttentionKernelHolderCuda {
+    std::optional<mlx::core::fast::CustomKernelFunction> kernel;
+    std::once_flag init_flag;
+
+    mlx::core::fast::CustomKernelFunction& get() {
+        std::call_once(init_flag, [this] {
+            kernel = mlx::core::fast::cuda_kernel(
+                "mlxcel_paged_attention_decode",
+                {"q", "k_pool", "v_pool", "rows", "row_offsets", "logical_starts",
+                 "visible_lens", "scale"},
+                {"out"},
+                std::string(PAGED_ATTENTION_DECODE_CUDA_SOURCE));
+        });
+        return *kernel;
+    }
+};
+
+inline PagedAttentionKernelHolderCuda& get_paged_attention_kernel_cuda() {
+    static PagedAttentionKernelHolderCuda holder;
     return holder;
 }
 
@@ -251,7 +444,14 @@ mlx::core::array paged_attention_decode(
         n_rep = 1;
     }
 
-    auto& kernel = get_paged_attention_kernel().get();
+    // Metal kernel on Apple, CUDA port elsewhere. `mx.fast.metal_kernel` throws
+    // "[metal_kernel] No Metal back-end" on the CUDA backend, so dispatch the
+    // `cuda_kernel` port there; `metal::is_available()` is false on a CUDA-only
+    // build (#634). Both kernels share the template args, grid, and buffer
+    // contract below, so only the JIT-compiled body differs.
+    const bool use_cuda = !mlx::core::metal::is_available();
+    auto& kernel = use_cuda ? get_paged_attention_kernel_cuda().get()
+                            : get_paged_attention_kernel().get();
 
     // Each of the 32 lanes owns a ceil(Dim/32)-wide slice of the head.
     int dims_per_thread = (dim + PAGED_ATTENTION_SIMD_WIDTH - 1) / PAGED_ATTENTION_SIMD_WIDTH;

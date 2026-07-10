@@ -862,6 +862,15 @@ bool metal_is_available() {
 #endif
 }
 
+// True when the MLX CUDA backend is available at runtime. Backend-agnostic: the
+// `mlx/backend/cuda/cuda.h` probe links a `no_cuda` stub (returning false) on
+// builds without CUDA, so Rust callers can pick a backend-specific default
+// without a compile-time cfg. Used by the paged-attention decode gate to allow
+// the fused native kernel on CUDA (#634).
+bool cuda_is_available() {
+    return mlx::core::cu::is_available();
+}
+
 // Start a GPU trace capture and stop an active one. Mirrors the Python
 // `mx.metal.start_capture` / `mx.metal.stop_capture` API so a mlxcel
 // decode run can emit the same `.gputrace` files that `mlx-lm` produces

@@ -1871,6 +1871,13 @@ mod ffi {
         /// without a compile-time cfg. See issue #626.
         fn metal_is_available() -> bool;
 
+        /// True when the MLX CUDA backend is available at runtime. False on
+        /// Metal-only and CPU-only builds. Backend-agnostic (`no_cuda` stub off
+        /// CUDA), so Rust callers can choose a backend-specific default without
+        /// a compile-time cfg. Used by the paged-attention decode gate to allow
+        /// the fused native kernel on CUDA. See issue #634.
+        fn cuda_is_available() -> bool;
+
         /// Fused sampling: temperature + top-k + top-p + min-p + categorical
         /// in a single C++ call to minimize FFI round-trips.
         /// Input: 2D logits [batch, vocab] (already sliced, penalties applied)

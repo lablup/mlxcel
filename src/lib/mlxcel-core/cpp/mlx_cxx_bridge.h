@@ -1638,6 +1638,11 @@ bool gated_delta_kernel_available();
 // metal::is_available() gate used to pick the Metal vs CUDA kernel port. #626.
 bool metal_is_available();
 
+// True when the MLX CUDA backend is available at runtime; false on Metal-only
+// and CPU-only builds. Backend-agnostic (`no_cuda` stub off CUDA). Used by the
+// paged-attention decode gate to allow the fused native kernel on CUDA. #634.
+bool cuda_is_available();
+
 // Start/stop Metal GPU capture. Requires the process to run under
 // `MTL_CAPTURE_ENABLED=1`; otherwise Metal drops the capture silently.
 void metal_start_capture(rust::Str path);
