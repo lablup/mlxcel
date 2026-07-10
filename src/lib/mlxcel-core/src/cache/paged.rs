@@ -1607,6 +1607,21 @@ impl PagedBlockPool {
             (Some([k]), Some([v])) => (k, v),
             _ => return Ok(None),
         };
+
+        // The CUDA launch places batch * query_heads in gridDim.z, which CUDA
+        // caps at 65535 (Metal has no such cap). The bridge entry returns a
+        // bare UniquePtr, so a failed launch would abort rather than error;
+        // decline here and let the caller take the gather fallback (#634
+        // security review). Unreachable for the single-slab island's small
+        // batches, kept as a guard for external library callers.
+        if crate::layers::paged_decode_backend() == crate::layers::PagedDecodeBackend::Cuda {
+            let q_shape = ffi::array_shape(q);
+            let grid_z = i64::from(q_shape.first().copied().unwrap_or(0).max(0))
+                * i64::from(q_shape.get(1).copied().unwrap_or(0).max(0));
+            if grid_z > 65535 {
+                return Ok(None);
+            }
+        }
         let block_size = self.layout.block_size as i32;
 
         // Flatten every sequence's physical pool rows (block-table order) into

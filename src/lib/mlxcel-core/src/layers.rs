@@ -3446,7 +3446,7 @@ fn resolve_dispatch_decision(
 /// gather only for a CPU-only build or a machine with no usable GPU, neither of
 /// which a compile-time `target_os` check would catch. Metal is probed first so
 /// the Apple path is unchanged. Detection is process-static, so it is read once.
-fn paged_decode_backend() -> PagedDecodeBackend {
+pub(crate) fn paged_decode_backend() -> PagedDecodeBackend {
     use std::sync::OnceLock;
     static BACKEND: OnceLock<PagedDecodeBackend> = OnceLock::new();
     *BACKEND.get_or_init(|| {
