@@ -5,6 +5,7 @@
 
 #include "mlx/primitives.h"
 
+#include <cstdint>
 #include <map>
 #include <sstream>
 #include <unordered_set>
@@ -4536,8 +4537,9 @@ std::unique_ptr<MlxArray> fused_sample(
     // f32 scalar to bf16 anyway). Metal is left exactly as before: dtype.cpp
     // deliberately leaves f16+f32 -> f32 unpatched there, so a bare f32 scalar
     // upcasts the chain to an f32 softmax, and issue #636 requires Metal
-    // numerics untouched. `single_dtype_scalars` mirrors the runtime
-    // `!metal::is_available()` gate used by the kernel dispatches in this file.
+    // numerics untouched. `single_dtype_scalars` uses the same runtime
+    // `!metal::is_available()` selection as the fused-kernel ports in
+    // mlx_cxx_kernels.cpp (first use of that gate in this file).
     const bool single_dtype_scalars = !mlx::core::metal::is_available();
     const auto logit_dtype = x.dtype();
     auto sampler_scalar = [&](float value) {

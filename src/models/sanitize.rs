@@ -1730,10 +1730,14 @@ fn env_flag_enabled(name: &str) -> bool {
 ///
 /// f16's narrow dynamic range (max ~65504) clips wide-range activations and
 /// softcapped logits, so these families keep bf16 even when normalization is
-/// requested. The list is intentionally broad: when unsure, keep bf16. The
-/// goal is a single-dtype graph for the healthy majority, not full coverage.
+/// requested. Detection is heuristic (softcap/logit-scale config keys plus a
+/// known-family substring list): families it does not recognize are treated
+/// as healthy and normalized, which is why the whole path stays opt-in and
+/// default-off. Extend the list when a new fragile family surfaces.
 fn is_f16_fragile_family(config: &Value) -> bool {
-    // Softcap / logit-scaling config keys imply wide dynamic range.
+    // Softcap / logit-scaling config keys imply wide dynamic range. Checked
+    // at the top level and under `text_config`, mirroring the `model_type`
+    // fallback below, so nested multimodal configs are not a blind spot.
     for key in [
         "attn_logit_softcapping",
         "final_logit_softcapping",
@@ -1741,11 +1745,12 @@ fn is_f16_fragile_family(config: &Value) -> bool {
         "logits_soft_cap",
         "logit_scale",
     ] {
-        if config
-            .get(key)
-            .and_then(Value::as_f64)
-            .is_some_and(|v| v != 0.0 && v != 1.0)
-        {
+        let capped = |c: &Value| {
+            c.get(key)
+                .and_then(Value::as_f64)
+                .is_some_and(|v| v != 0.0 && v != 1.0)
+        };
+        if capped(config) || config.get("text_config").is_some_and(capped) {
             return true;
         }
     }
