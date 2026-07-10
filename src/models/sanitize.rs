@@ -1766,8 +1766,9 @@ fn is_f16_fragile_family(config: &Value) -> bool {
         .unwrap_or("");
     // Gemma (norms + softcap), Cohere/Command-R (logit scale), Apertus (xIELU
     // x^2), and gpt-oss (wide dynamic range) are the known-fragile families.
-    const FRAGILE_SUBSTRINGS: &[&str] =
-        &["gemma", "cohere", "command", "apertus", "gpt_oss", "gpt-oss"];
+    const FRAGILE_SUBSTRINGS: &[&str] = &[
+        "gemma", "cohere", "command", "apertus", "gpt_oss", "gpt-oss",
+    ];
     FRAGILE_SUBSTRINGS
         .iter()
         .any(|needle| model_type.contains(needle))
@@ -2665,6 +2666,53 @@ mod tests {
             weights.contains_key("model.layers.1.self_attn.k_proj.weight"),
             "Non-shared layer must not be stripped"
         );
+    }
+
+    /// Issue #636 / security-review follow-up (c1d1c33): the f16-fragile guard
+    /// must catch known-fragile `model_type`s, a top-level softcap/logit_scale
+    /// key, and the same softcap key nested under `text_config` (the
+    /// multimodal-checkpoint blind spot the review flagged), while leaving a
+    /// plain healthy family unaffected.
+    #[test]
+    fn is_f16_fragile_family_covers_model_type_and_softcap_cases() {
+        let cases: &[(Value, bool, &str)] = &[
+            (
+                serde_json::json!({ "model_type": "gemma2" }),
+                true,
+                "gemma model_type is on the known-fragile substring list",
+            ),
+            (
+                serde_json::json!({
+                    "model_type": "llama",
+                    "final_logit_softcapping": 30.0
+                }),
+                true,
+                "top-level softcap key implies wide dynamic range",
+            ),
+            (
+                serde_json::json!({
+                    "model_type": "llama",
+                    "text_config": {
+                        "final_logit_softcapping": 30.0
+                    }
+                }),
+                true,
+                "softcap nested under text_config must not slip past the guard",
+            ),
+            (
+                serde_json::json!({ "model_type": "llama" }),
+                false,
+                "plain llama with no softcap/logit_scale is not fragile",
+            ),
+        ];
+
+        for (config, expected, label) in cases {
+            assert_eq!(
+                is_f16_fragile_family(config),
+                *expected,
+                "{label}: {config:?}"
+            );
+        }
     }
 
     #[test]
