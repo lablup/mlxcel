@@ -174,6 +174,10 @@ Retire `paged_decode_attention_pooled` and `select_pooled_paged_dispatch` (with 
 - A serving workload that sustains `B >= 4` with total contexts at or under ~256 tokens per sequence (short-prompt, high-concurrency batched decode), where the single-slab island is entered often enough that a wire-in's transient burst pays for the cross-family blast radius.
 - A multi-slab native kernel (the deferred #235 per-slab-base-pointer spike), which would lift the `slab_count <= 1` constraint and make the batched moderate-context win reachable at real context lengths. Live traces showing sustained `B >= 4`, ~4k, multi-slab decode would justify building it, per the #235 note above.
 
+## Addendum (2026-07-10): CUDA port of the fused kernel (#634)
+
+#634 ports the fused kernel (`src/lib/mlx-cpp/turbo/paged_attention.cpp`) from Metal-only `mx.fast.metal_kernel` to a `mx.fast.cuda_kernel` body with the same split-K flash-decoding scheme and grid geometry; the reduction changes from `simd_sum` to a `__shfl_xor_sync` butterfly all-reduce. The Metal-measured batch>=4/ctx<=4096 gate above does not carry over: on CUDA the fused kernel's win grows with context rather than losing it, so `select_pooled_paged_dispatch` dispatches native for any single-slab layer (any batch, any context) and still declines multi-slab layers per the #235 constraint. The entry point stays the library-only surface this ADR retired above; #634 does not reopen server wiring. See `docs/benchmark_results/paged-attention-cuda-port-gb10-2026-07-10.md` for the GB10 kernel A/B and parity numbers.
+
 ## References
 
 - Epic #116, unified KV cache.

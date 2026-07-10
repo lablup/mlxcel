@@ -293,13 +293,16 @@ batch 4 the native kernel runs at 276 tok/s for a 512-token prompt and 84 tok/s
 for a 4096-token prompt, versus 146 and 7.7 tok/s for the gather reference (1.9x
 and 10.9x). The gather reference degrades sharply with context because it
 re-materializes the visible window every step, which is why the live path uses
-the native kernel. The separate fused split-K Metal kernel
+the native kernel. The separate fused split-K kernel (Metal, and since #634
+also CUDA via `mx.fast.cuda_kernel`)
 (`MLXCEL_PAGED_ATTENTION_NATIVE`, feeding `paged_decode_attention_pooled`) is a
 different code path from the block-table kernel above. Since #331 it is no
-longer a plain on/off switch: an adaptive selector dispatches it only inside
-the Metal / batch>=4 / ctx<=4096 / single-slab island ADR 0001 measured it
-winning, gather everywhere else, and the env var still force-pins either arm
-for A/B testing. The chunked slab storage narrows that island further, since
+longer a plain on/off switch: an adaptive selector dispatches it on Metal only
+inside the batch>=4 / ctx<=4096 / single-slab island ADR 0001 measured it
+winning; on CUDA (#634) it dispatches on any single-slab layer regardless of
+batch or context, since the Metal ceilings do not apply there. Gather runs
+everywhere else, and the env var still force-pins either arm for A/B testing.
+The chunked slab storage narrows that island further, since
 the kernel declines (falling back to gather) once a layer has grown past one
 slab. #710 retired this pooled entry point to a library-only API: neither this
 kernel nor its selector is on the `mlxcel serve` decode path (which stays on the
