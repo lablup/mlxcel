@@ -190,7 +190,9 @@ rust::Vec<uint8_t> try_array_to_raw_bytes(const MlxArray& arr);
 // just scheduled a later forward on the same stream (the #632 lookahead
 // pipeline), evaluating that fresh op would block on the later forward and
 // destroy the overlap. This reader adds no op, so it waits only for `arr`.
-// Caller MUST guarantee `arr` is row-contiguous (e.g. a `fused_sample` output).
+// Intended for an already-row-contiguous `arr` (e.g. a `fused_sample` output);
+// if the array is not row-contiguous it falls back to the safe
+// `array_to_raw_bytes` contiguous copy rather than reading past the allocation.
 rust::Vec<uint8_t> array_evaluated_bytes(const MlxArray& arr);
 
 // Evaluation.

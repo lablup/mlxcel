@@ -473,6 +473,19 @@ fn lookahead_token_finishes(
     cancelled || merged_eos.contains(&next_token) || generated_len + 1 >= max_tokens
 }
 
+/// Number of speculative KV positions a lookahead teardown must unwind.
+///
+/// The steady tick issues step n+1's prime forward BEFORE it learns step n's
+/// finish outcome, so a teardown after a successful prime (`next_prime_issued`)
+/// must unwind two speculative appends (step n plus step n+1). A prime that
+/// bailed (its forward returned `None`) or any teardown that runs before a prime
+/// (admission, preemption, stale id set, cancellation in `finalize_completed`)
+/// unwinds one (step n only). Mirrors the count selection in
+/// [`BatchScheduler::pipelined_steady_decode`] and the `1`-position teardowns.
+fn lookahead_teardown_positions(next_prime_issued: bool) -> usize {
+    if next_prime_issued { 2 } else { 1 }
+}
+
 impl BatchScheduler {
     fn release_sequence_caches(&mut self, seq_id: SequenceId) {
         self.model.release_sequence_state_by_id(seq_id);
@@ -4468,9 +4481,10 @@ impl BatchScheduler {
                 self.pipelined_steady_decode(la, seq_ids, &params.unwrap());
             }
             Some(la) => {
-                // Stale id set or no longer eligible/safe: undo the one
-                // speculative KV position and fall back to a clean sync step.
-                self.apply_lookahead_trim(&la.ids, 1);
+                // Stale id set or no longer eligible/safe: no step n+1 prime was
+                // issued, so undo the one speculative KV position and fall back
+                // to a clean sync step.
+                self.apply_lookahead_trim(&la.ids, lookahead_teardown_positions(false));
                 drop(la);
                 self.dispatch_sync_decode(seq_ids);
                 self.maybe_prime_lookahead(seq_ids);
@@ -4509,8 +4523,9 @@ impl BatchScheduler {
     /// deliberately narrow: it reuses the batched-fused predicate (which
     /// already rejects penalties/token-history, token bias, structured-output
     /// masks, thinking-budget overrides, and per-token logprobs) and further
-    /// requires dense caches, no `--max-kv-size`, no paged decode, no
-    /// speculative dispatch, and `MLXCEL_FORCE_SYNC` unset.
+    /// requires a trimmable KV tail (dense or pool-backed paged; model-owned
+    /// SSM / hybrid / mixed-cache backends stay synchronous), no
+    /// `--max-kv-size`, no speculative dispatch, and `MLXCEL_FORCE_SYNC` unset.
     fn lookahead_params(&self, seq_ids: &[SequenceId]) -> Option<FusedSampleParams> {
         if self.lookahead_force_sync {
             return None;
@@ -4593,11 +4608,38 @@ impl BatchScheduler {
                 .unwrap_or(false);
             if paged_backed {
                 for layer in 0..num_layers {
-                    let _ = self.cache_pool.rewind_paged_tokens(seq_id, layer, positions);
+                    // A failed rewind silently leaks the speculative KV
+                    // position(s), which would corrupt a later donation of this
+                    // sequence's cache; surface it so the leak is diagnosable.
+                    if let Err(err) = self.cache_pool.rewind_paged_tokens(seq_id, layer, positions)
+                    {
+                        tracing::warn!(
+                            seq_id = %seq_id,
+                            layer,
+                            positions,
+                            "lookahead teardown: paged rewind failed, speculative KV \
+                             position may leak: {err}"
+                        );
+                    }
                 }
             } else if let Some(caches) = self.cache_pool.get_caches_mut(seq_id) {
-                for cache in caches {
-                    cache.trim(positions as i32);
+                let want = positions as i32;
+                for (layer, cache) in caches.iter_mut().enumerate() {
+                    // KVCache::trim clamps to the live window and returns the
+                    // count actually removed; a short trim means a speculative
+                    // position was not unwound (e.g. an unexpectedly short cache),
+                    // which would desync the KV against generated_tokens.
+                    let trimmed = cache.trim(want);
+                    if trimmed != want {
+                        tracing::warn!(
+                            seq_id = %seq_id,
+                            layer,
+                            requested = want,
+                            trimmed,
+                            "lookahead teardown: dense trim removed fewer positions \
+                             than requested, KV may be out of sync"
+                        );
+                    }
                 }
                 // Re-mirror the shorter dense length into any paged bookkeeping
                 // (no-op for a pure dense pool).
@@ -4613,8 +4655,9 @@ impl BatchScheduler {
     fn discard_lookahead(&mut self) {
         if let Some(la) = self.decode_lookahead.take() {
             // A stored lookahead carries exactly one speculative append per
-            // sequence (the prime forward that produced its tokens).
-            self.apply_lookahead_trim(&la.ids, 1);
+            // sequence (the prime forward that produced its tokens); no step
+            // n+1 prime has been issued on this teardown path.
+            self.apply_lookahead_trim(&la.ids, lookahead_teardown_positions(false));
         }
     }
 
@@ -4767,13 +4810,10 @@ impl BatchScheduler {
             // speculative appends (step n from the previous prime plus step n+1
             // when it was actually issued) back to the synchronous-decode
             // invariant and re-run the tick synchronously.
-            let positions = match &next {
-                Some(nla) => {
-                    mlxcel_core::eval(&nla.tokens);
-                    2
-                }
-                None => 1,
-            };
+            if let Some(nla) = &next {
+                mlxcel_core::eval(&nla.tokens);
+            }
+            let positions = lookahead_teardown_positions(next.is_some());
             self.apply_lookahead_trim(&la.ids, positions);
             drop(next);
             drop(la);

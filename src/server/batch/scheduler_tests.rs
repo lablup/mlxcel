@@ -1423,7 +1423,7 @@ fn batch_kv_quant_per_layer_table_disabled_skip_keeps_uniform_modes() {
 // required. The forward/sample plumbing is covered by the build + the
 // greedy-equivalence smoke run recorded on the PR.
 
-use super::{lookahead_pipeline_safe, lookahead_token_finishes};
+use super::{lookahead_pipeline_safe, lookahead_teardown_positions, lookahead_token_finishes};
 
 #[test]
 fn lookahead_engages_when_batch_stable_and_queue_empty() {
@@ -1508,4 +1508,18 @@ fn lookahead_falls_back_on_cancellation_mid_lookahead() {
         &[2],
         /* cancelled */ true,
     ));
+}
+
+#[test]
+fn lookahead_teardown_unwinds_two_positions_after_prime() {
+    // A steady-tick teardown that already issued step n+1's prime forward must
+    // unwind both speculative appends (step n plus step n+1).
+    assert_eq!(lookahead_teardown_positions(/* next_prime_issued */ true), 2);
+}
+
+#[test]
+fn lookahead_teardown_unwinds_one_position_without_prime() {
+    // A prime that bailed (None) or any teardown before a prime (admission,
+    // preemption, stale id set, cancellation) unwinds only step n.
+    assert_eq!(lookahead_teardown_positions(/* next_prime_issued */ false), 1);
 }

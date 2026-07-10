@@ -349,9 +349,19 @@ rust::Vec<uint8_t> array_evaluated_bytes(const MlxArray& arr) {
     // Surgical read: `array::eval()` waits on THIS array's own completion event
     // and enqueues no new op, so a later forward already scheduled on the same
     // stream keeps running on the GPU (the #632 overlap). No `contiguous()` — the
-    // caller guarantees `arr` is already row-contiguous.
+    // caller is expected to pass an already-row-contiguous array.
     auto& a = const_cast<mlx::core::array&>(arr.inner);
     a.eval();
+
+    // Enforce the contiguity contract rather than trusting the caller: a
+    // non-row-contiguous array's `nbytes()` can exceed the backing allocation
+    // (strided / broadcast views), so reading it here would run past the buffer.
+    // Fall back to the safe `contiguous()` + eval copy in that case. Correct but
+    // slower (it enqueues the extra op the fast path avoids); it should never
+    // trigger for a `fused_sample` output.
+    if (!a.flags().row_contiguous) {
+        return array_to_raw_bytes(arr);
+    }
 
     size_t nbytes = a.nbytes();
     const auto* data = reinterpret_cast<const uint8_t*>(a.data<void>());
