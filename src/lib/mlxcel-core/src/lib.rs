@@ -1858,6 +1858,15 @@ mod ffi {
         /// Export two unevaluated arrays as a DOT graph for profiling.
         fn export_to_dot_pair(path: &str, a: &MlxArray, b: &MlxArray);
 
+        /// Count AsType (dtype-conversion) nodes in the unevaluated graph that
+        /// produces the given pair of arrays. Metric for the single-dtype
+        /// decode graph work (issue #636); traversal only, no eval.
+        fn count_astype_nodes_pair(a: &MlxArray, b: &MlxArray) -> u64;
+
+        /// Human-readable AsType breakdown (counts plus per src->dst dtype pair)
+        /// for the graph that produces the given pair of arrays.
+        fn astype_breakdown_pair(a: &MlxArray, b: &MlxArray) -> String;
+
         /// Set default stream for subsequent operations
         fn set_default_stream(stream: &MlxStream);
 

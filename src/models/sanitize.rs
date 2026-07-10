@@ -1670,7 +1670,17 @@ pub fn load_text_weights<P: AsRef<std::path::Path>>(
     // attributed to bf16 scales (Apertus-2509) was actually a separate xIELU
     // read_scalar bf16 bug, fixed in the apertus loader; Apertus, Seed-OSS, and
     // every other bf16-scale quant decode correctly with no scale promotion.
-    if should_convert_bf16_to_f16() && !is_bitnet && !is_quantized {
+    //
+    // On CUDA the base policy keeps bf16 (native bf16 ALUs, and the merged
+    // patches-cuda/dtype.cpp promotion patch already yields a 0-AsType,
+    // single-dtype bf16 decode graph). Issue #636 adds an opt-in load-time
+    // bf16 -> f16 normalization for the fixed-topology / CUDA-graph-reuse
+    // experiment, gated by MLXCEL_CUDA_F16_NORMALIZE and skipped for
+    // f16-fragile families (see `cuda_f16_normalize_for_config`). The default
+    // stays bf16 so bf16 models remain available unchanged.
+    let convert_bf16 =
+        should_convert_bf16_to_f16() || cuda_f16_normalize_for_config(parsed_config.as_ref());
+    if convert_bf16 && !is_bitnet && !is_quantized {
         let had_bf16 = if keep_gemma3n_mlp_bf16 {
             convert_bf16_weights_with_keep(&mut weights, gemma3n_language_mlp_bf16_key)
         } else {
@@ -1682,6 +1692,80 @@ pub fn load_text_weights<P: AsRef<std::path::Path>>(
     }
 
     Ok(weights)
+}
+
+/// True when opt-in CUDA load-time bf16 -> f16 normalization applies to this
+/// model (issue #636).
+///
+/// CUDA-only and default-off. Metal / Apple Silicon is driven by
+/// [`should_convert_bf16_to_f16`] and is unaffected. Returns true only when:
+/// - the MLX CUDA backend is active at runtime, and
+/// - `MLXCEL_CUDA_F16_NORMALIZE` is set to a truthy value (opt-in; unset or a
+///   falsy value keeps bf16 so bf16 models remain available), and
+/// - the model is not on the conservative f16-fragile exception list.
+fn cuda_f16_normalize_for_config(config: Option<&Value>) -> bool {
+    if !mlxcel_core::cuda_is_available() {
+        return false;
+    }
+    if !env_flag_enabled("MLXCEL_CUDA_F16_NORMALIZE") {
+        return false;
+    }
+    !config.is_some_and(is_f16_fragile_family)
+}
+
+/// Parse a boolean-ish environment flag. Unset, empty, `0`, `false`, `off`, and
+/// `no` (any case) are false; anything else is true.
+fn env_flag_enabled(name: &str) -> bool {
+    std::env::var(name).ok().is_some_and(|raw| {
+        let v = raw.trim();
+        !(v.is_empty()
+            || v == "0"
+            || v.eq_ignore_ascii_case("false")
+            || v.eq_ignore_ascii_case("off")
+            || v.eq_ignore_ascii_case("no"))
+    })
+}
+
+/// Conservative f16-fragile family check for CUDA f16 normalization.
+///
+/// f16's narrow dynamic range (max ~65504) clips wide-range activations and
+/// softcapped logits, so these families keep bf16 even when normalization is
+/// requested. The list is intentionally broad: when unsure, keep bf16. The
+/// goal is a single-dtype graph for the healthy majority, not full coverage.
+fn is_f16_fragile_family(config: &Value) -> bool {
+    // Softcap / logit-scaling config keys imply wide dynamic range.
+    for key in [
+        "attn_logit_softcapping",
+        "final_logit_softcapping",
+        "logit_softcapping",
+        "logits_soft_cap",
+        "logit_scale",
+    ] {
+        if config
+            .get(key)
+            .and_then(Value::as_f64)
+            .is_some_and(|v| v != 0.0 && v != 1.0)
+        {
+            return true;
+        }
+    }
+    let model_type = config
+        .get("model_type")
+        .and_then(Value::as_str)
+        .or_else(|| {
+            config
+                .get("text_config")
+                .and_then(|c| c.get("model_type"))
+                .and_then(Value::as_str)
+        })
+        .unwrap_or("");
+    // Gemma (norms + softcap), Cohere/Command-R (logit scale), Apertus (xIELU
+    // x^2), and gpt-oss (wide dynamic range) are the known-fragile families.
+    const FRAGILE_SUBSTRINGS: &[&str] =
+        &["gemma", "cohere", "command", "apertus", "gpt_oss", "gpt-oss"];
+    FRAGILE_SUBSTRINGS
+        .iter()
+        .any(|needle| model_type.contains(needle))
 }
 
 /// Returns true when bf16 tensors should be cast to f16 at load time.

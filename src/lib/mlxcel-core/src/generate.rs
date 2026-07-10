@@ -1186,6 +1186,12 @@ impl CxxGenerator {
 
         // Hoist env var checks out of the hot loop to avoid per-token syscalls.
         let trace_dtype = std::env::var("MLXCEL_TRACE_DTYPE").is_ok();
+        // AsType-per-token counter (issue #636). When set, the first decode
+        // step reports the number of AsType (dtype-conversion) nodes in the
+        // decode+sampler graph; `=2` (or any value containing "break") also
+        // dumps the per src->dst dtype breakdown. Traversal only, no extra
+        // eval, and entirely skipped when the env var is unset.
+        let trace_astype = std::env::var("MLXCEL_TRACE_ASTYPE").ok();
         let force_sync = std::env::var("MLXCEL_FORCE_SYNC").is_ok();
         let profile_pipeline = std::env::var("MLXCEL_PROFILE_PIPELINE").is_ok();
         let profile_pipeline_detail = std::env::var("MLXCEL_PROFILE_PIPELINE_DETAIL").is_ok();
@@ -1334,6 +1340,18 @@ impl CxxGenerator {
                     && let Ok(path) = std::env::var("MLXCEL_EXPORT_DECODE_DOT")
                 {
                     ffi::export_to_dot_pair(&path, &next_tok, &next_log);
+                }
+                if n == 0
+                    && let Some(mode) = trace_astype.as_deref()
+                {
+                    // Count on the unevaluated decode+sampler graph so no
+                    // conversion is hidden by a prior eval.
+                    let count = ffi::count_astype_nodes_pair(&next_tok, &next_log);
+                    eprintln!("[ASTYPE] decode astype_nodes={count}");
+                    if mode.contains("break") || mode == "2" {
+                        let breakdown = ffi::astype_breakdown_pair(&next_tok, &next_log);
+                        eprintln!("[ASTYPE] {breakdown}");
+                    }
                 }
                 // Optional Metal GPU capture of one warm decode token for
                 // per-kernel profiling vs mlx-lm. Fires at n==2 so

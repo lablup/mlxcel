@@ -1255,6 +1255,12 @@ void async_eval_pair(const MlxArray& a, const MlxArray& b);
 // Export a pair of unevaluated arrays as a DOT graph for profiling.
 void export_to_dot_pair(rust::Str path, const MlxArray& a, const MlxArray& b);
 
+// Count AsType (dtype-conversion) nodes in the unevaluated graph for a pair.
+uint64_t count_astype_nodes_pair(const MlxArray& a, const MlxArray& b);
+
+// Human-readable AsType breakdown (counts + per src->dst dtype pair) for a pair.
+rust::String astype_breakdown_pair(const MlxArray& a, const MlxArray& b);
+
 // Set default stream for subsequent operations
 void set_default_stream(const MlxStream& stream);
 
