@@ -595,7 +595,7 @@ fn print_markdown_table(rows: &[Row]) {
     println!("decode numbers captured on the host this binary ran on; the speedup");
     println!("column is MTP tok/s ÷ the matching no-drafter baseline; acceptance rate");
     println!("and mean accepted length come from the run's MtpAcceptanceSummary. The");
-    println!("DFlash row remains deferred — see `docs/benchmark_results/model_tests.md`.");
+    println!("DFlash row remains deferred, see `docs/benchmark_results/model_tests.md`.");
 }
 
 /// Fill in `speedup_vs_baseline` for every row against the matching
@@ -758,7 +758,7 @@ fn main() -> Result<()> {
             args.max_tokens,
         );
         for p in REACHABLE_PAIRINGS {
-            // Baseline (no-drafter) rows are benched once — K does not apply.
+            // Baseline (no-drafter) rows are benched once; K does not apply.
             // Speculative pairings are benched once per requested K so the
             // matrix carries the acceptance/speedup envelope across
             // K ∈ {2, 4, 8} (issue #638). The K override replaces the
