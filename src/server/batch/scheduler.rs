@@ -428,13 +428,18 @@ struct DecodeLookahead {
     tokens: UniquePtr<mlxcel_core::MlxArray>,
 }
 
-/// Copy a `[B]` device token-id array to host as `Vec<i32>` with a single
-/// evaluation. `fused_sample` returns `uint32` ids; the raw bytes are
-/// reinterpreted as `i32`, exact for any token id in `0..vocab_size`. Mirrors
-/// `mlxcel_core::sampling::token_ids_to_host` (which is crate-private) so the
-/// scheduler can read the pipeline's device tokens without an extra dependency.
+/// Copy a `[B]` device token-id array to host as `Vec<i32>`. `fused_sample`
+/// returns a row-contiguous `uint32` array; the raw bytes are reinterpreted as
+/// `i32`, exact for any token id in `0..vocab_size`.
+///
+/// Uses [`mlxcel_core::array_evaluated_bytes`] (surgical per-array `eval`, no
+/// `contiguous()` op) rather than `array_to_raw_bytes`: the steady pipeline has
+/// already scheduled the next forward on the same stream before this read, and
+/// `array_to_raw_bytes`' `contiguous()` would enqueue a fresh op behind that
+/// forward, making the read block on it and collapsing the overlap. This reader
+/// waits only on the token array's own completion event.
 fn lookahead_tokens_to_host(tokens: &mlxcel_core::MlxArray) -> Vec<i32> {
-    let bytes = mlxcel_core::array_to_raw_bytes(tokens);
+    let bytes = mlxcel_core::array_evaluated_bytes(tokens);
     bytes
         .chunks_exact(4)
         .map(|c| i32::from_ne_bytes([c[0], c[1], c[2], c[3]]))
@@ -4465,7 +4470,7 @@ impl BatchScheduler {
             Some(la) => {
                 // Stale id set or no longer eligible/safe: undo the one
                 // speculative KV position and fall back to a clean sync step.
-                self.apply_lookahead_trim(&la.ids);
+                self.apply_lookahead_trim(&la.ids, 1);
                 drop(la);
                 self.dispatch_sync_decode(seq_ids);
                 self.maybe_prime_lookahead(seq_ids);
@@ -4569,7 +4574,16 @@ impl BatchScheduler {
     /// token per layer, releasing any tail block); dense (and dense-natural
     /// paged mirror) sequences trim the dense KV tail and re-mirror the shorter
     /// length into the paged bookkeeping state.
-    fn apply_lookahead_trim(&mut self, ids: &[SequenceId]) {
+    ///
+    /// `positions` is the number of speculative appends to unwind: `1` for a
+    /// teardown before the step-n+1 prime forward has run (admission,
+    /// preemption, stale id set, cancellation seen in `finalize_completed`),
+    /// `2` for the steady-tick teardown that already issued the step-n+1 prime
+    /// (both the step-n and step-n+1 appends).
+    fn apply_lookahead_trim(&mut self, ids: &[SequenceId], positions: usize) {
+        if positions == 0 {
+            return;
+        }
         let num_layers = self.model.num_layers();
         for &seq_id in ids {
             let paged_backed = self
@@ -4579,11 +4593,11 @@ impl BatchScheduler {
                 .unwrap_or(false);
             if paged_backed {
                 for layer in 0..num_layers {
-                    let _ = self.cache_pool.rewind_paged_tokens(seq_id, layer, 1);
+                    let _ = self.cache_pool.rewind_paged_tokens(seq_id, layer, positions);
                 }
             } else if let Some(caches) = self.cache_pool.get_caches_mut(seq_id) {
                 for cache in caches {
-                    cache.trim(1);
+                    cache.trim(positions as i32);
                 }
                 // Re-mirror the shorter dense length into any paged bookkeeping
                 // (no-op for a pure dense pool).
@@ -4598,7 +4612,9 @@ impl BatchScheduler {
     /// before completion / cancellation donation (`finalize_completed`).
     fn discard_lookahead(&mut self) {
         if let Some(la) = self.decode_lookahead.take() {
-            self.apply_lookahead_trim(&la.ids);
+            // A stored lookahead carries exactly one speculative append per
+            // sequence (the prime forward that produced its tokens).
+            self.apply_lookahead_trim(&la.ids, 1);
         }
     }
 
@@ -4625,22 +4641,22 @@ impl BatchScheduler {
             }
         }
         let input = mlxcel_core::from_slice_i32(&last_tokens, &[seq_ids.len() as i32, 1]);
-        self.prime_lookahead_with_input(seq_ids, &input, &params);
+        self.decode_lookahead = self.prime_lookahead_with_input(seq_ids, &input, &params);
     }
 
     /// Run one forward for `seq_ids` on `input` (`[B, 1]`), fused-sample the
-    /// next tokens on-device, schedule them with `async_eval`, and store the
-    /// prebuilt step. The forward appends one KV position per sequence (the
-    /// speculative advance undone by [`Self::apply_lookahead_trim`]).
+    /// next tokens on-device, schedule them with `async_eval`, and return the
+    /// prebuilt step. The forward appends one speculative KV position per
+    /// sequence (undone by [`Self::apply_lookahead_trim`]). Returns `None` if a
+    /// sequence's caches vanished. The caller decides whether to keep the step
+    /// (store it in `decode_lookahead`) or unwind it.
     fn prime_lookahead_with_input(
         &mut self,
         seq_ids: &[SequenceId],
         input: &mlxcel_core::MlxArray,
         params: &FusedSampleParams,
-    ) {
-        let Some(logits) = self.lookahead_forward(seq_ids, input) else {
-            return;
-        };
+    ) -> Option<DecodeLookahead> {
+        let logits = self.lookahead_forward(seq_ids, input)?;
         let last_logits = mlxcel_core::slice_last_logits(&logits);
         let tokens = mlxcel_core::fused_sample(
             &last_logits,
@@ -4651,12 +4667,12 @@ impl BatchScheduler {
         );
         // Schedule the sampled tokens (and thus the whole forward graph) without
         // reading them to host, so the GPU runs ahead while the caller returns
-        // to the scheduler loop.
+        // to the scheduler loop and reads the PREVIOUS step's tokens.
         mlxcel_core::async_eval(&tokens);
-        self.decode_lookahead = Some(DecodeLookahead {
+        Some(DecodeLookahead {
             ids: seq_ids.to_vec(),
             tokens,
-        });
+        })
     }
 
     /// Forward pass for the lookahead pipeline, mirroring the synchronous decode
@@ -4694,73 +4710,84 @@ impl BatchScheduler {
         Some(logits)
     }
 
-    /// Steady pipelined decode: consume the prebuilt step, and if no sequence
-    /// finishes, commit its tokens and prime the next step from the same device
-    /// token array (no host round-trip for the forward input). Any finish or
-    /// unsafe condition tears the pipeline down and re-runs the tick
-    /// synchronously so completion / donation flows through the untouched sync
-    /// path from a clean cache state.
+    /// Steady pipelined decode, ordered exactly like the CLI generation loop
+    /// (`generate.rs`) so the GPU never idles on the host read:
+    ///
+    /// 1. FIRST build and `async_eval` step n+1 from `la.tokens` fed back
+    ///    device-side (no host knowledge needed). The GPU starts the next
+    ///    forward immediately.
+    /// 2. THEN read step n's tokens to host (this blocks on the PREVIOUS tick's
+    ///    prime forward, which by now has finished, while step n+1 runs on the
+    ///    GPU) and run the finish pre-check.
+    /// 3. If a row finishes (EOS / length / cancel) or the shape is off, unwind
+    ///    BOTH speculative appends (step n and the just-issued step n+1) and
+    ///    re-run the tick synchronously, so completion / donation flows through
+    ///    the untouched sync path from a clean cache state.
+    /// 4. Otherwise commit step n and keep the step n+1 prebuilt step.
     fn pipelined_steady_decode(
         &mut self,
         la: DecodeLookahead,
         seq_ids: &[SequenceId],
         params: &FusedSampleParams,
     ) {
-        // Sync point: read the prebuilt tokens to host (blocks on the in-flight
-        // prime forward). The overlap has already been paid — the GPU ran the
-        // forward while the previous tick did its host bookkeeping.
-        let toks = lookahead_tokens_to_host(&la.tokens);
-        if toks.len() != seq_ids.len() {
-            // Defensive: shape mismatch should be impossible, but never commit a
-            // misaligned batch. Fall back cleanly.
-            self.apply_lookahead_trim(&la.ids);
-            drop(la);
-            self.dispatch_sync_decode(seq_ids);
-            self.maybe_prime_lookahead(seq_ids);
-            return;
-        }
+        // Step 1: speculatively build + schedule step n+1 FIRST. Feed la.tokens
+        // ([B]) back as the next [B, 1] input device-side (reshape + int32 cast
+        // to match the synchronous from_slice_i32 dtype), keeping the GPU busy
+        // through the host read below. This appends a second speculative KV
+        // position per sequence (the overshoot the issue accepts).
+        let col = mlxcel_core::reshape_token_for_forward(&la.tokens);
+        let next_input = mlxcel_core::astype(&col, mlxcel_core::dtype::INT32);
+        let next = self.prime_lookahead_with_input(seq_ids, &next_input, params);
 
-        // Pre-check every host-knowable finish (EOS, length) plus cancellation.
-        // Loop detection is excluded by eligibility. Any finish means the batch
-        // changes next tick, so hand the whole tick to the synchronous path.
-        let mut finishing = false;
-        for (i, &seq_id) in seq_ids.iter().enumerate() {
-            let Some(seq) = self.active_batch.get(seq_id) else {
-                finishing = true;
-                break;
-            };
-            if lookahead_token_finishes(
-                toks[i],
-                seq.generated_tokens.len(),
-                seq.max_tokens,
-                &seq.merged_eos,
-                seq.cancelled.load(Ordering::Relaxed),
-            ) {
-                finishing = true;
-                break;
+        // Step 2: read step n's tokens to host (the sync point) and finish-check.
+        let toks = lookahead_tokens_to_host(&la.tokens);
+        let mut finishing = toks.len() != seq_ids.len();
+        if !finishing {
+            for (i, &seq_id) in seq_ids.iter().enumerate() {
+                let Some(seq) = self.active_batch.get(seq_id) else {
+                    finishing = true;
+                    break;
+                };
+                if lookahead_token_finishes(
+                    toks[i],
+                    seq.generated_tokens.len(),
+                    seq.max_tokens,
+                    &seq.merged_eos,
+                    seq.cancelled.load(Ordering::Relaxed),
+                ) {
+                    finishing = true;
+                    break;
+                }
             }
         }
 
         if finishing {
-            self.apply_lookahead_trim(&la.ids);
+            // Step 3: tear down. Sync the in-flight step n+1 forward so its
+            // kernels are not still writing KV when we rewind, then unwind both
+            // speculative appends (step n from the previous prime plus step n+1
+            // when it was actually issued) back to the synchronous-decode
+            // invariant and re-run the tick synchronously.
+            let positions = match &next {
+                Some(nla) => {
+                    mlxcel_core::eval(&nla.tokens);
+                    2
+                }
+                None => 1,
+            };
+            self.apply_lookahead_trim(&la.ids, positions);
+            drop(next);
             drop(la);
             self.dispatch_sync_decode(seq_ids);
             self.maybe_prime_lookahead(seq_ids);
             return;
         }
 
-        // Every row continues: commit the prebuilt tokens (reusing the batched
-        // fast-path bookkeeping — no finish can fire after the pre-check), then
-        // feed the SAME device token array back as the next [B, 1] input and
-        // prime the next forward.
-        self.apply_fused_decode_tokens(seq_ids, &toks);
-
-        // Device-side feedback: reshape [B] -> [B, 1] and cast to int32 to match
-        // the synchronous `from_slice_i32` input dtype exactly.
-        let col = mlxcel_core::reshape_token_for_forward(&la.tokens);
-        let next_input = mlxcel_core::astype(&col, mlxcel_core::dtype::INT32);
+        // Step 4: every row continues. Commit step n (reusing the batched
+        // fast-path bookkeeping; no finish can fire after the pre-check) and
+        // keep the already-primed step n+1.
         drop(la);
-        self.prime_lookahead_with_input(seq_ids, &next_input, params);
+        self.apply_fused_decode_tokens(seq_ids, &toks);
+        self.decode_lookahead = next;
         self.batch_observability.record_lookahead_step();
     }
 

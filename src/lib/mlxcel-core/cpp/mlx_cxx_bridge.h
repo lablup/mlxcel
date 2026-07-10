@@ -183,6 +183,16 @@ rust::Vec<uint8_t> array_to_raw_bytes(const MlxArray& arr);
 // as a Rust `Err` instead of aborting.
 rust::Vec<uint8_t> try_array_to_raw_bytes(const MlxArray& arr);
 
+// Copy an ALREADY-CONTIGUOUS array's data to host, evaluating it with the
+// surgical per-array `array::eval()` (waits on the array's own completion
+// event) rather than `array_to_raw_bytes`' `contiguous()` + `eval()`. The
+// `contiguous()` call enqueues a fresh op onto the stream; when the caller has
+// just scheduled a later forward on the same stream (the #632 lookahead
+// pipeline), evaluating that fresh op would block on the later forward and
+// destroy the overlap. This reader adds no op, so it waits only for `arr`.
+// Caller MUST guarantee `arr` is row-contiguous (e.g. a `fused_sample` output).
+rust::Vec<uint8_t> array_evaluated_bytes(const MlxArray& arr);
+
 // Evaluation.
 void eval(const MlxArray& arr);
 // Fallible counterpart of `eval`; declared `-> Result<()>` in the bridge so cxx

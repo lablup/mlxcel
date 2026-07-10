@@ -176,6 +176,14 @@ mod ffi {
         /// Used by: KV cache serialization for disaggregated inference
         fn array_to_raw_bytes(arr: &MlxArray) -> Vec<u8>;
 
+        /// Copy an ALREADY-CONTIGUOUS array's bytes to host using the surgical
+        /// per-array `array::eval()` (waits on the array's own event, enqueues
+        /// no op). Unlike [`array_to_raw_bytes`] it does not call `contiguous()`,
+        /// so a forward already scheduled on the same stream keeps running on the
+        /// GPU. Caller MUST guarantee `arr` is row-contiguous (e.g. a
+        /// `fused_sample` output). Used by: the #632 lookahead decode pipeline.
+        fn array_evaluated_bytes(arr: &MlxArray) -> Vec<u8>;
+
         /// Fallible counterpart of [`array_to_raw_bytes`].
         ///
         /// Makes the array contiguous, evaluates it, and copies the bytes out,

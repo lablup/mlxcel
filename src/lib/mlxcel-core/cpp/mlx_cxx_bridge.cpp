@@ -345,6 +345,25 @@ rust::Vec<uint8_t> array_to_raw_bytes(const MlxArray& arr) {
     return result;
 }
 
+rust::Vec<uint8_t> array_evaluated_bytes(const MlxArray& arr) {
+    // Surgical read: `array::eval()` waits on THIS array's own completion event
+    // and enqueues no new op, so a later forward already scheduled on the same
+    // stream keeps running on the GPU (the #632 overlap). No `contiguous()` — the
+    // caller guarantees `arr` is already row-contiguous.
+    auto& a = const_cast<mlx::core::array&>(arr.inner);
+    a.eval();
+
+    size_t nbytes = a.nbytes();
+    const auto* data = reinterpret_cast<const uint8_t*>(a.data<void>());
+
+    rust::Vec<uint8_t> result;
+    result.reserve(nbytes);
+    for (size_t i = 0; i < nbytes; ++i) {
+        result.push_back(data[i]);
+    }
+    return result;
+}
+
 // Same body as `array_to_raw_bytes`, but declared `-> Result<Vec<u8>>` on the
 // Rust side so cxx wraps the call in a try/catch and converts any thrown MLX
 // exception (an allocation failure making the contiguous copy, or any deferred
