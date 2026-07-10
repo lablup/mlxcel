@@ -154,6 +154,25 @@ fn compute_bound_derating_declines_a_borderline_pairing() {
 }
 
 #[test]
+fn compute_bound_derating_keeps_a_favorable_pairing_enabled() {
+    // A high-acceptance pairing must still clear the ENABLE floor after the
+    // compute-bound de-rate: accepted_len = 2.4, zero drafter cost gives an
+    // optimistic speedup of 3.4, and the / 2.0 de-rate lands at 1.7, above
+    // ENABLE_SPEEDUP_FLOOR (1.5). Pins the PR #733 claim that the de-rate
+    // only declines marginal pairings, not genuinely favorable ones.
+    let mut favorable = sample(10, 3, 0, 0.0, 4.0);
+    favorable.accepted_draft_tokens = 24; // accepted_len = 2.4
+    let mut acc = ProfileAccumulator::default();
+    acc.add(&favorable);
+    let cuda = acc.estimated_speedup_scaled(2.0).expect("finite");
+    assert_eq!(
+        classify_speedup(cuda),
+        SpeedupZone::Enable,
+        "favorable compute-bound pairing must stay enabled, cuda={cuda}"
+    );
+}
+
+#[test]
 fn estimate_speedup_zero_acceptance_is_below_one() {
     // No drafts accepted: speedup = 1 / (1 + drafter/verify) < 1 always.
     let s = estimate_speedup(0.0, 4.0, 1.0).expect("finite");

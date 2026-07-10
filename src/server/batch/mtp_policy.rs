@@ -668,7 +668,11 @@ impl MtpPolicy {
         // Compute-bound = non-Apple-Silicon (CUDA / GB10): the runtime hardware
         // probe reports `AppleSiliconGen::Unknown` off Apple GPUs. On such hosts
         // the K-wide verify does not amortize (issue #638), so the policy
-        // de-rates its optimistic speedup estimate.
+        // de-rates its optimistic speedup estimate. Caveat: `parse_silicon_gen`
+        // also maps Apple generations newer than the enumerated ones to
+        // `Unknown`, so the "Apple byte-identical" guarantee is scoped to the
+        // enumerated gens; extend the enum when a new Apple generation ships
+        // (same staleness contract as `has_neural_accelerator`).
         let compute_bound = matches!(
             hw.silicon_gen,
             mlxcel_core::hardware::AppleSiliconGen::Unknown
