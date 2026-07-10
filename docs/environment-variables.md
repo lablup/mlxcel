@@ -246,7 +246,7 @@ throughput measurements. Use them for diagnosis, not capacity planning.
 | Variable | Values | Default | Purpose |
 |----------|--------|---------|---------|
 | `MLXCEL_TRACE_DTYPE` | presence enables | off | Prints selected tensor dtypes/shapes during generation. |
-| `MLXCEL_FORCE_SYNC` | presence enables | off | Forces synchronous decode evaluation. |
+| `MLXCEL_FORCE_SYNC` | presence enables | off | Forces synchronous decode evaluation. Also disables the server `BatchScheduler`'s lookahead decode pipeline (issue #632), falling back to the pre-pipeline synchronous tick. |
 | `MLXCEL_PROFILE_PIPELINE` | presence enables | off | Emits high-level generation pipeline timing. |
 | `MLXCEL_PROFILE_PIPELINE_DETAIL` | presence enables | off | Adds per-step pipeline timing detail. |
 | `MLXCEL_PROFILE_BLOCKS` | presence enables | off | Emits per-block/model-family timing where implemented. |

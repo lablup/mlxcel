@@ -4558,8 +4558,7 @@ impl BatchScheduler {
                 Some(set)
                     if matches!(
                         set.backend,
-                        SequenceStateBackend::DenseKvCache
-                            | SequenceStateBackend::PagedKvCache
+                        SequenceStateBackend::DenseKvCache | SequenceStateBackend::PagedKvCache
                     ) => {}
                 _ => return None,
             }
@@ -4611,7 +4610,9 @@ impl BatchScheduler {
                     // A failed rewind silently leaks the speculative KV
                     // position(s), which would corrupt a later donation of this
                     // sequence's cache; surface it so the leak is diagnosable.
-                    if let Err(err) = self.cache_pool.rewind_paged_tokens(seq_id, layer, positions)
+                    if let Err(err) = self
+                        .cache_pool
+                        .rewind_paged_tokens(seq_id, layer, positions)
                     {
                         tracing::warn!(
                             seq_id = %seq_id,
@@ -5452,9 +5453,10 @@ impl BatchScheduler {
         // reuse and the surviving sequences rebuild their pipeline next tick
         // (#632 constraints 2, 3, 6). No-op on the steady no-finish path.
         if self.decode_lookahead.is_some()
-            && self.active_batch.iter_sequences().any(|s| {
-                s.state.is_finished() || s.cancelled.load(Ordering::Relaxed)
-            })
+            && self
+                .active_batch
+                .iter_sequences()
+                .any(|s| s.state.is_finished() || s.cancelled.load(Ordering::Relaxed))
         {
             self.discard_lookahead();
         }

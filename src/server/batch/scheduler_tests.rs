@@ -1429,8 +1429,7 @@ use super::{lookahead_pipeline_safe, lookahead_teardown_positions, lookahead_tok
 fn lookahead_engages_when_batch_stable_and_queue_empty() {
     // Steady state: no queued admission, no chunked prefill, no preemption.
     assert!(lookahead_pipeline_safe(
-        /* queue_empty */ true,
-        /* chunked_in_progress */ false,
+        /* queue_empty */ true, /* chunked_in_progress */ false,
         /* preempting */ false,
     ));
 }
@@ -1441,18 +1440,14 @@ fn lookahead_invalidated_by_admission_mid_lookahead() {
     // prebuilt step for the old id set must be discarded and the tick run
     // synchronously.
     assert!(!lookahead_pipeline_safe(
-        /* queue_empty */ false,
-        false,
-        false,
+        /* queue_empty */ false, false, false,
     ));
 }
 
 #[test]
 fn lookahead_invalidated_by_chunked_prefill_interleave() {
     assert!(!lookahead_pipeline_safe(
-        /* queue_empty */ true,
-        /* chunked_in_progress */ true,
-        false,
+        /* queue_empty */ true, /* chunked_in_progress */ true, false,
     ));
 }
 
@@ -1460,9 +1455,7 @@ fn lookahead_invalidated_by_chunked_prefill_interleave() {
 fn lookahead_invalidated_by_preemption() {
     // A pending higher-priority preemption evicts a running sequence next tick.
     assert!(!lookahead_pipeline_safe(
-        /* queue_empty */ true,
-        false,
-        /* preempting */ true,
+        /* queue_empty */ true, false, /* preempting */ true,
     ));
 }
 
@@ -1514,12 +1507,18 @@ fn lookahead_falls_back_on_cancellation_mid_lookahead() {
 fn lookahead_teardown_unwinds_two_positions_after_prime() {
     // A steady-tick teardown that already issued step n+1's prime forward must
     // unwind both speculative appends (step n plus step n+1).
-    assert_eq!(lookahead_teardown_positions(/* next_prime_issued */ true), 2);
+    assert_eq!(
+        lookahead_teardown_positions(/* next_prime_issued */ true),
+        2
+    );
 }
 
 #[test]
 fn lookahead_teardown_unwinds_one_position_without_prime() {
     // A prime that bailed (None) or any teardown before a prime (admission,
     // preemption, stale id set, cancellation) unwinds only step n.
-    assert_eq!(lookahead_teardown_positions(/* next_prime_issued */ false), 1);
+    assert_eq!(
+        lookahead_teardown_positions(/* next_prime_issued */ false),
+        1
+    );
 }

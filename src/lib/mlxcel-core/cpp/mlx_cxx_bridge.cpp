@@ -348,7 +348,7 @@ rust::Vec<uint8_t> array_to_raw_bytes(const MlxArray& arr) {
 rust::Vec<uint8_t> array_evaluated_bytes(const MlxArray& arr) {
     // Surgical read: `array::eval()` waits on THIS array's own completion event
     // and enqueues no new op, so a later forward already scheduled on the same
-    // stream keeps running on the GPU (the #632 overlap). No `contiguous()` — the
+    // stream keeps running on the GPU (the #632 overlap). No `contiguous()`: the
     // caller is expected to pass an already-row-contiguous array.
     auto& a = const_cast<mlx::core::array&>(arr.inner);
     a.eval();
