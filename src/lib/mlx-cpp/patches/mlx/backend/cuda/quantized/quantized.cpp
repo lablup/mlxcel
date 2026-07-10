@@ -3,13 +3,16 @@
 // non-contiguous 3D batched weights (e.g. GLM-4 MLA embed_q with
 // transpose=false); (2) split long-prompt quantized matmuls so no CUDA launch
 // exceeds the gridDim.y/z limit of 65535 and no `l = out.size()/(m*n)` int32
-// multiply overflows (see lablup/mlxcel#648). Synced to upstream e9463bb
+// multiply overflows (see lablup/mlxcel#648); (3) route sorted M==1 GatherQMM
+// (MoE prefill) through dequant + CUTLASS grouped GEMM (lablup/mlxcel#629).
+// Synced to upstream e9463bb
 // (post-#3706/#3576 JIT qmm rework and #3723 qmv global scale; the dispatch
 // consumed here kept its public signatures, with qmv gaining an optional
 // global_scale that QuantizedMatmul passes as std::nullopt).
 
 #include "mlx/backend/cuda/quantized/quantized.h"
 #include "mlx/backend/cuda/device.h"
+#include "mlx/backend/cuda/gemms/grouped_gemm.h"
 #include "mlx/backend/cuda/quantized/qmm/qmm.h"
 #include "mlx/backend/cuda/quantized/quantized_utils.h"
 #include "mlx/dtype_utils.h"
@@ -20,6 +23,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <cstdlib>
 
 namespace mlx::core {
 
@@ -282,6 +286,101 @@ void GatherQMM::eval_gpu(const std::vector<array>& inputs, array& out) {
   int N = out.shape(-1);
   int K = x.shape(-1);
   int B = out.size() / M / N;
+
+  // [mlxcel #629] Sorted MoE prefill fast path. With rhs_indices sorted and
+  // M == 1 (the SwitchGLU prefill contract: x pre-gathered to one row per
+  // (token, expert) pair), the tiled qmm path below degenerates into B
+  // independent 1-row GEMMs: every (token, expert) pair re-reads its expert's
+  // full quantized weight matrix, ~B * N*K*bits/8 bytes of DRAM traffic per
+  // call, which collapses CUDA MoE prefill 5-10x below Metal M1 Ultra on
+  // GB10. Instead, dequantize the expert stack once to the activation dtype
+  // (E * N*K traffic) and run one CUTLASS grouped GEMM over the
+  // expert-contiguous token segments -- the same grouped-GEMM path the float
+  // GatherMM M == 1 right-sorted case already uses. Gated on
+  // B >= min_rows * E (env MLXCEL_GATHER_QMM_GROUPED_MIN_ROWS, default 8)
+  // where the dequant traffic amortizes; decode is unaffected (the models
+  // only set sorted_indices on the >= 64-row prefill sort, and small sorted
+  // batches fail the gate). Kill switch: MLXCEL_GATHER_QMM_GROUPED=0.
+  auto use_grouped_gemm = [&]() -> bool {
+    if (!(right_sorted_ && transpose_ && M == 1 && w.ndim() == 3)) {
+      return false;
+    }
+    // Nvfp4 carries a tensor-level global scale this path does not plumb.
+    if (mode_ == QuantizationMode::Nvfp4) {
+      return false;
+    }
+    if (mode_ == QuantizationMode::Affine && !biases) {
+      return false;
+    }
+    if (x.dtype() != float32 && x.dtype() != float16 &&
+        x.dtype() != bfloat16) {
+      return false;
+    }
+    if (rhs_indices.dtype() != uint32 && rhs_indices.dtype() != int32) {
+      return false;
+    }
+    // prepare_grouped_mm_data builds its histogram in one thread block.
+    int E = w.shape(0);
+    if (E > 1024) {
+      return false;
+    }
+    // x rows must be pre-gathered 1:1 with out rows (identity lhs), which is
+    // what every sorted caller produces; anything else keeps the legacy path.
+    if (static_cast<int64_t>(x.size()) != static_cast<int64_t>(B) * K ||
+        static_cast<int64_t>(rhs_indices.size()) != B) {
+      return false;
+    }
+    if (const char* e = std::getenv("MLXCEL_GATHER_QMM_GROUPED")) {
+      if (e[0] == '0' && e[1] == '\0') {
+        return false;
+      }
+    }
+    int64_t min_rows = 8;
+    if (const char* e = std::getenv("MLXCEL_GATHER_QMM_GROUPED_MIN_ROWS")) {
+      min_rows = std::atoll(e);
+    }
+    return static_cast<int64_t>(B) >= min_rows * E;
+  };
+
+  if (use_grouped_gemm()) {
+    int E = w.shape(0);
+    array wq = ensure_row_contiguous(w, encoder, s);
+    array sc = ensure_row_contiguous(scales, encoder, s);
+    // Dequantize the full expert stack to the activation dtype: [E, N, K].
+    array w_dq(Shape{E, N, K}, x.dtype(), nullptr, {});
+    w_dq.set_data(cu::malloc_async(w_dq.nbytes(), encoder));
+    encoder.add_temporary(w_dq);
+    if (mode_ == QuantizationMode::Affine) {
+      array bs = ensure_row_contiguous(*biases, encoder, s);
+      affine_dequantize(wq, sc, bs, w_dq, group_size_, bits_, encoder, s);
+    } else {
+      fp_dequantize(
+          wq, sc, w_dq, group_size_, bits_, std::nullopt, encoder, s);
+    }
+    // Transposed [E, K, N] view of the dequantized stack (out = x @ w^T).
+    array w_t(Shape{E, K, N}, w_dq.dtype(), nullptr, {});
+    auto flags = w_dq.flags();
+    flags.row_contiguous = false;
+    flags.col_contiguous = false;
+    w_t.copy_shared_buffer(
+        w_dq,
+        Strides{static_cast<int64_t>(N) * K, 1, static_cast<int64_t>(K)},
+        flags,
+        w_dq.data_size());
+    out.set_data(cu::malloc_async(out.nbytes(), encoder));
+    cutlass_grouped_gemm_unaligned(
+        /* a_transposed */ false,
+        /* lda */ K,
+        /* b_transposed */ true,
+        /* ldb */ K,
+        /* group_count */ E,
+        x,
+        w_t,
+        rhs_indices,
+        out,
+        encoder);
+    return;
+  }
 
   auto supports = [&](auto&& f) {
     return f(

@@ -37,9 +37,14 @@ __global__ void prepare_grouped_mm_data(
     int8_t* a_start,
     int8_t* b_start,
     int8_t* out_start,
-    int a_batch_stride,
-    int b_batch_stride,
-    int out_batch_stride,
+    // [mlxcel #629] 64-bit batch strides: with many experts (e.g. 256) or
+    // long prompts, `group * item_size * b_batch_stride` and
+    // `offset * item_size * a_batch_stride` overflow int32 and produce wild
+    // pointers (observed as an illegal memory access on minimax-m2-3bit,
+    // E=256, dff*hidden ~ 4.7M elements).
+    int64_t a_batch_stride,
+    int64_t b_batch_stride,
+    int64_t out_batch_stride,
     ProblemSize* problem_sizes,
     int64_t* a_lds,
     int64_t* b_lds,
@@ -88,8 +93,8 @@ __global__ void prepare_grouped_mm_data(
     a_lds[group] = lda;
     b_lds[group] = ldb;
     out_lds[group] = N;
-    // Fill pointers.
-    auto offset = group == 0 ? 0 : cum_histo[group - 1];
+    // Fill pointers (64-bit arithmetic, see [mlxcel #629] note above).
+    int64_t offset = group == 0 ? 0 : cum_histo[group - 1];
     a_ptrs[group] = a_start + offset * item_size * a_batch_stride;
     b_ptrs[group] = b_start + group * item_size * b_batch_stride;
     out_ptrs[group] = out_start + offset * item_size * out_batch_stride;
@@ -418,9 +423,9 @@ void cutlass_grouped_gemm_unaligned(
       gpu_ptr<int8_t>(a),
       gpu_ptr<int8_t>(b),
       gpu_ptr<int8_t>(out),
-      a.shape(-2) * a.shape(-1), // a_batch_stride
-      b.shape(-2) * b.shape(-1), // b_batch_stride
-      out.shape(-2) * out.shape(-1), // out_batch_stride
+      static_cast<int64_t>(a.shape(-2)) * a.shape(-1), // a_batch_stride
+      static_cast<int64_t>(b.shape(-2)) * b.shape(-1), // b_batch_stride
+      static_cast<int64_t>(out.shape(-2)) * out.shape(-1), // out_batch_stride
       problem_sizes,
       a_lds,
       b_lds,
