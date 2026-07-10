@@ -20,8 +20,8 @@ inline auto make_cta_tiler(int m, int group_size, cu::Device& device) {
   // #637 (mlxcel overlay): on consumer Blackwell (sm_120/121, cc major >= 12)
   // a 128-row CTA tile fills the SMs far better for large-M (prefill / batched)
   // shapes; the upstream Ampere cap of 64 leaves them underutilized there (ncu:
-  // ~35-47% SM throughput). Measured on GB10: +35% prefill @8192 on
-  // llama-3.1-8b-4bit and +32% on qwen2.5-7b-4bit, greedy-parity identical, no
+  // ~35-47% SM throughput). Measured on GB10: +38% prefill @8192 on
+  // llama-3.1-8b-4bit and +31% on qwen2.5-7b-4bit, greedy-parity identical, no
   // decode regression (decode m=1 takes the qmv path and never reaches here).
   // sm_90/sm_80 keep the stock cap of 64 (untuned here). Wider tile_n / deeper
   // tile_k were also swept but break the fixed-MMA smem layout (JIT failure),

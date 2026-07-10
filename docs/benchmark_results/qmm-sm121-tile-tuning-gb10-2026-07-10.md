@@ -1,11 +1,11 @@
 # sm_120/121 quantized GEMM tile tuning for Blackwell (issue #637, GB10)
 
-Date: 2026-07-10. Host: NVIDIA GB10 (Grace-Blackwell, sm_121 / cc 12.1), CUDA 13.0, MLX 0.32.0.
+Date: 2026-07-10. Host: NVIDIA GB10 (Grace-Blackwell, sm_121 / cc 12.1), CUDA 13.0, MLX 0.32.1 (pin `57c66cac`).
 Binary: `make release-cuda`. Bench: `mlxcel-bench-decode` (`--prompt-tokens` for prefill), `mlxcel generate` (greedy parity).
 
 ## TL;DR
 
-The CUDA quantized prefill GEMM (`qmm_sm80`) ran at ~0.55x the bf16 ceiling on GB10 because it used the Ampere CTA tile (M=64), which underutilizes Blackwell's SMs. Raising the CTA tile's M cap to 128 on sm_120/121 (a one-line, arch-gated heuristic change in the overlay `qmm_sm80.cu`) recovers **+32-35% prefill** throughput, greedy-parity identical, no decode regression. Wider-N / deeper-K tiles were also swept but break the fixed-MMA shared-memory layout (JIT failure), so `tile_m` is the one safely-tunable axis in-tree.
+The CUDA quantized prefill GEMM (`qmm_sm80`) ran at ~0.55x the bf16 ceiling on GB10 because it used the Ampere CTA tile (M=64), which underutilizes Blackwell's SMs. Raising the CTA tile's M cap to 128 on sm_120/121 (a one-line, arch-gated heuristic change in the overlay `qmm_sm80.cu`) recovers **+31-38% prefill** throughput, greedy-parity identical, no decode regression. Wider-N / deeper-K tiles were also swept but break the fixed-MMA shared-memory layout (JIT failure), so `tile_m` is the one safely-tunable axis in-tree.
 
 ## Kernel dispatch map on sm_121
 
@@ -57,10 +57,12 @@ Only `tile_m` is safely tunable; wider `tile_n` / deeper `tile_k` break the fixe
 
 Arch-gated `make_cta_tiler` (overlay `qmm_sm80.cu`): `tile_m` cap = 128 when `device.compute_capability_major() >= 12` (sm_120/121), else 64. Small-M (decode) is unaffected because `min(128, next_power_of_2(m))` stays small.
 
+Numbers below are the same-session paired comparison (arch-gated default tile_m=128 vs `MLXCEL_QMM_TILE_M=64`), the most apples-to-apples measurement. The tile_m=64 baseline itself varies ~5% run-to-run (2213-2330 tok/s observed for llama @8192); every measurement clears the +25% bar.
+
 | check | result |
 |-------|--------|
-| llama-3.1-8b-4bit prefill @8192 | 2330 -> ~3075 (+32%) |
-| qwen2.5-7b-4bit prefill @8192 | 2435 -> 3206 (+32%) |
+| llama-3.1-8b-4bit prefill @8192 | 2213 -> 3054 (+38%) |
+| qwen2.5-7b-4bit prefill @8192 | 2410 -> 3168 (+31%) |
 | greedy parity (llama, 40 tok, temp 0) | generated tokens identical |
 | decode (llama, m=1) | unaffected (qmv path, never reaches qmm_sm80) |
 
