@@ -47,6 +47,19 @@ Escape hatches restore the previous single-client behavior: `--parallel 1`
 (single decode slot), `--no-batch` (legacy sequential worker, no scheduler),
 `--max-batch-prefill 1` (sequential prefill), and `--no-prompt-cache`.
 
+> Backend note (CUDA / Blackwell, e.g. GB10): the "aggregate throughput scales
+> with concurrency" statement above holds on Metal but not on CUDA. On CUDA the
+> quantized batched-decode matmul does not amortize weight bandwidth (a batch of
+> B decodes takes about B times a single decode), so aggregate decode throughput
+> is flat across `--parallel` (measured ~45 tok/s at B=1/2/4 on llama-3.1-8b-4bit
+> on GB10). There, `--parallel` is a TTFT / concurrency knob, not an aggregate
+> decode-throughput lever, and batched vs sequential decode is a throughput wash.
+> The aggregate lever on CUDA is prefill: see the sm_120/121 qmm tile tuning in
+> `docs/benchmark_results/qmm-sm121-tile-tuning-gb10-2026-07-10.md` (+38% prefill).
+> `--max-batch-prefill` (large-M, tile-tuned) and the prompt cache remain real
+> wins on CUDA. The root cause is the absence of an amortizing small-M quantized
+> GEMM (or a weight-reusing batched qmv) on Blackwell, an upstream MLX follow-up.
+
 Memory sizing: the KV footprint grows with the active batch, so budget for up to
 `--parallel` concurrent sequences' KV. When `--ctx-size` is set it is divided
 across the active slots (`ctx_size / parallel` per slot, floor 512 tokens);
