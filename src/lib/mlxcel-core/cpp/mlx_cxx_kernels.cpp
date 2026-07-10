@@ -5,6 +5,10 @@
 
 #include "mlx_cxx_internal.h"
 
+// CUDA backend availability probe for the fused-kernel gates (#631). The
+// header is backend-agnostic: builds without CUDA link the no_cuda stub.
+#include "mlx/backend/cuda/cuda.h"
+
 namespace mlx_cxx {
 
 // ── BitLinear ternary matmul (BitNet b1.58) ────────────────────────────────
@@ -421,6 +425,82 @@ namespace {
 
     static SsmKernelHolder& get_ssm_kernel() {
         static SsmKernelHolder holder;
+        return holder;
+    }
+
+    // CUDA port of the fused SSM decode step (#631). The Metal source above is
+    // mx.fast.metal_kernel, which throws "[metal_kernel] No Metal back-end" on
+    // CUDA, so before this port every hybrid-SSM decode step on CUDA fell back
+    // to the ~55-op ssm_step graph path (nsys: thousands of 1-2us elementwise /
+    // copy kernels per token, GPU busy ~30%), decoding at 0.29-0.36x of Metal.
+    // Same computation and thread mapping as the Metal kernel: one warp per
+    // (batch*head, head_dim row), each lane owns Ds/32 contiguous state
+    // columns, warp-reduced with __shfl_down_sync instead of simd_sum. The
+    // d_idx guard covers ceil-div grid padding when Dh is not a multiple of
+    // blockDim.y (warp-uniform: all 32 lanes of a warp share threadIdx.y).
+    static const char* SSM_CUDA_SOURCE = R"(
+        uint32_t n = blockIdx.z;                    // batch * heads
+        uint32_t h_idx = n % H;
+        uint32_t g_idx = n / G;
+        constexpr int n_per_t = Ds / 32;
+
+        uint32_t d_idx = blockIdx.y * blockDim.y + threadIdx.y;
+        if (d_idx >= (uint32_t)Dh) return;
+
+        auto x = X + n * Dh;
+        out += n * Dh;
+        auto i_state = state_in + n * Dh * Ds;
+        auto o_state = state_out + n * Dh * Ds;
+
+        auto C_ = C + g_idx * Ds;
+        auto B_ = B + g_idx * Ds;
+
+        uint32_t ds_idx = threadIdx.x;              // lane 0..31
+
+        float dt_ = (float)dt[n];
+        float A = -expf((float)A_log[h_idx]);
+        float dA = expf(A * dt_);
+
+        float acc = 0.0f;
+        float x_ = (float)x[d_idx];
+
+        for (int i = 0; i < n_per_t; ++i) {
+            int s_idx = n_per_t * (int)ds_idx + i;
+            int idx = (int)d_idx * Ds + s_idx;
+            float dB_by_x = x_ * dt_ * (float)B_[s_idx];
+            float state = dA * (float)i_state[idx] + dB_by_x;
+            o_state[idx] = (U)state;
+            acc += state * (float)C_[s_idx];
+        }
+        #pragma unroll
+        for (int o = 16; o > 0; o >>= 1) {
+            acc += __shfl_down_sync(0xffffffffu, acc, o);
+        }
+        if (ds_idx == 0u) {
+            out[d_idx] = (T)(acc + x_ * (float)D[h_idx]);
+        }
+    )";
+
+    struct SsmKernelHolderCuda {
+        std::optional<mlx::core::fast::CustomKernelFunction> kernel;
+        bool initialized = false;
+
+        mlx::core::fast::CustomKernelFunction& get() {
+            if (!initialized) {
+                kernel = mlx::core::fast::cuda_kernel(
+                    "ssm_kernel_cu",
+                    {"X", "A_log", "B", "C", "D", "dt", "state_in"},
+                    {"out", "state_out"},
+                    SSM_CUDA_SOURCE
+                );
+                initialized = true;
+            }
+            return *kernel;
+        }
+    };
+
+    static SsmKernelHolderCuda& get_ssm_kernel_cuda() {
+        static SsmKernelHolderCuda holder;
         return holder;
     }
 
@@ -1125,7 +1205,15 @@ bool ssm_kernel_available() {
 #ifdef __APPLE__
     return mlx::core::metal::is_available();
 #else
-    return false;
+    // CUDA port of the fused SSM decode kernel (#631); previously the hybrid
+    // SSM models fell back to the ~55-op graph path on every decode step.
+    // MLXCEL_SSM_CUDA_KERNEL=0 forces that graph path (debug / A-B bench).
+    if (const char* e = std::getenv("MLXCEL_SSM_CUDA_KERNEL")) {
+        if (e[0] == '0' && e[1] == '\0') {
+            return false;
+        }
+    }
+    return mlx::core::cu::is_available();
 #endif
 }
 
@@ -1160,8 +1248,10 @@ void ssm_update_kernel(
     // Compute dt with softplus + clip (promoted to float32 internally)
     auto dt_result = compute_dt_compiled(dt.inner, dt_bias.inner, time_step_min, time_step_max);
 
-    // Call the Metal kernel
-    auto& kernel = get_ssm_kernel().get();
+    // Metal kernel on Apple, CUDA port elsewhere (mx.fast.metal_kernel throws
+    // "[metal_kernel] No Metal back-end" on the CUDA backend), cf. #631.
+    const bool use_cuda = !mlx::core::metal::is_available();
+    auto& kernel = use_cuda ? get_ssm_kernel_cuda().get() : get_ssm_kernel().get();
 
     // CustomKernelFunction signature:
     // (inputs, output_shapes, output_dtypes, grid, threadgroup, template_args, init_value, verbose, stream)
