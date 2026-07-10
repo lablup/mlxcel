@@ -259,18 +259,22 @@ tuning derivation are in
 | Gemma 4 Unified 12B + MTP assistant     | mtp  | 4 | 7.6   | 0.52×                 | 35.0%      | 1.05              | regression |
 | Gemma 4 Unified 12B + MTP assistant     | mtp  | 8 | 7.5   | 0.52×                 | 35.0%      | 1.05              | regression (effective K=4) |
 
-The 12B Unified MTP pairing is a consistent regression on GB10 across K: the
-assistant's acceptance (35-56%) is too low for the K-wide verify to pay for
-itself on the compute-bound Blackwell GPU, where verification does not amortize
-to one classic forward the way it does on memory-bandwidth-bound Apple Silicon
-(the same pairing measures ~1.87× on M5 Max). K=8 collapses onto K=4 because the
-drafter's configured block size is 4 and the acceptance never clears the
-adaptive block-expansion gate. The adaptive policy now de-rates its speedup
-estimate by `sqrt(K)` on compute-bound hardware (issue #638) so it settles to a
-decline for this pairing after its bounded profiling window, while Apple Silicon
-verdicts stay byte-identical. No local Gemma-4 or Qwen-3.5 pairing on this host
-reaches the issue's 1.4× target; the DFlash and 31B rows remain deferred (no
-checkpoint / wrong target family, see the dated note).
+The 12B Unified MTP pairing is a consistent regression on GB10 across K. The
+verify `[1, K]` forward hits the CUDA quantized dispatch's `M*B < 8` per-row
+qmv fallback (the #725 kernel gap), so its cost is roughly K classic forwards
+instead of amortizing to one the way it does on Apple Silicon (the same
+pairing measures ~1.87× on M5 Max), and the assistant's acceptance (35-56%)
+is too low to pay for that. K=8 collapses onto K=4 because the drafter's
+configured block size is 4 and the acceptance never clears the adaptive
+block-expansion gate. The adaptive policy de-rates its speedup estimate by
+`sqrt(K)` on non-Apple-Silicon hosts (issue #638) so it settles to a decline
+for this pairing after its bounded profiling window, while Apple Silicon
+verdicts stay byte-identical (#736 tracks replacing the heuristic with the
+measured round cost). This is a kernel gap, not a hardware limit: SGLang on
+the same DGX Spark hardware shows near-linear batched decode scaling and up
+to 2× EAGLE-3 speculative speedups. No local Gemma-4 or Qwen-3.5 pairing on
+this host reaches the issue's 1.4× target; the DFlash and 31B rows remain
+deferred (no checkpoint / wrong target family, see the dated note).
 
 ### Deferred pairings
 

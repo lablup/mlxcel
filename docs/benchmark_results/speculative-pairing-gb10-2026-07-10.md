@@ -4,7 +4,9 @@ Measured B=1 MTP speculative-decoding numbers for the Gemma 4 pairing whose
 target and drafter checkpoints are present on the GB10 CUDA host, filling the
 CUDA column of the speculative pairing matrix (issue #638). The headline result:
 B=1 MTP with the Gemma 4 assistant is a consistent regression on GB10 across
-K, so the adaptive policy is tuned to decline it on compute-bound hardware.
+K, so the adaptive policy is tuned to decline it there. The regression is a
+kernel-dispatch effect (the small-M qmv fallback tracked in #725), not a
+hardware limit; see "Why MTP loses here".
 
 ## Hardware and build
 
@@ -60,34 +62,83 @@ prefix is usually fully accepted. That gate never trips at 35% acceptance, so
 but proposes only one draft per round (mean accepted 0.56), so its best case is
 still 0.77×.
 
-The per-round wall-clock grows sub-linearly with K: ~140 ms/round at K=2 versus
-~271 ms/round at K=8 (a 4x wider verify for ~1.9x the time). The verify forward
-is therefore not free on GB10, but it does not amortize to a single classic
-forward the way the memory-bandwidth-bound Apple path assumes.
+The verify cost is linear in K, and the mechanism is the quantized-matmul
+dispatch, not the GPU's compute budget. The MTP verify is a `[1, K]`
+sequence-axis forward, so every quantized linear in it runs with M = K rows.
+The CUDA dispatch
+(`src/lib/mlx-cpp/patches/mlx/backend/cuda/quantized/quantized.cpp`) routes
+`M*B < 8` to per-row `qmv`, and the sm90 CUTLASS GEMM is Hopper-gated, so on
+sm_121 a K=4 verify executes as four narrow GEMVs that each re-read the full
+weight matrix. This is the same root cause as the flat batched-decode
+throughput tracked in #725.
+
+The measured numbers fit this model exactly. The classic forward is 69 ms
+(14.5 tok/s); the K=2 round is ~140 ms (2.0 forwards) and the K=4 round is
+~271 ms (3.9 forwards), with the 258 MB drafter contributing only a few ms.
+The measured speedups are tokens-per-round divided by round cost:
+1.56 / 2.0 = 0.78x (measured 0.77x) and 2.05 / 3.9 = 0.53x (measured 0.52x).
+An earlier revision of this note read the `--block-size 8` row as evidence of
+sub-linear growth ("a 4x wider verify for ~1.9x the time"); that row runs at
+an effective K=4 (see above), so the datum actually shows a 2x wider verify
+for 1.94x the time, i.e. linear scaling.
 
 ## Contrast with Apple Silicon
 
 The same pairing measures ~1.87x on M5 Max (`gemma4-mtp-speculative-decoding.md`).
-The economics differ because the M5 decode is memory-bandwidth-bound at B=1: the
-K-wide verify reads the target weights once, so verifying K positions is nearly
-as cheap as decoding one token. GB10 at B=1 is comparatively compute-bound, so a
-K-wide verify runs closer to K narrow forwards and the drafter overhead is not
-recovered at this acceptance rate. This is the same compute-vs-bandwidth split
-noted for GB10 batched decode in the epic notes.
+On Metal the K-wide verify reads the target weights once, so verifying K
+positions is nearly as cheap as decoding one token; the speculative path even
+pads the verify up to a 32-token NA tile on M5+ to force the tiled `qmm_nax`
+GEMM instead of GEMV (`speculative/mod.rs`). The CUDA path has no analogous
+padding (#735), and with the `M*B < 8` qmv fallback the verify runs as K
+narrow forwards instead.
+
+This is a kernel gap, not a hardware limit. GB10 has more compute headroom per
+byte than Apple Silicon (~273 GB/s of memory bandwidth alongside ~100 TFLOPS
+dense bf16, versus ~614 GB/s on M5 Max with far less compute), so an
+amortizing kernel would make the K-wide verify nearly free here too. Runtimes
+with mature Blackwell kernels demonstrate it on the same hardware: LMSYS
+measured SGLang batched decode scaling near-linearly on a DGX Spark
+(llama-3.1-8b, 20.5 tok/s at B=1 to 368 tok/s at B=32) and EAGLE-3
+speculative decoding reaching up to 2x end-to-end
+(<https://www.lmsys.org/blog/2025-10-13-nvidia-dgx-spark/>), and NVIDIA ships
+speculative-decoding recipes for the same box
+(<https://build.nvidia.com/spark/speculative-decoding>). Once #725 lands an
+amortizing small-M path, this pairing's arithmetic flips positive even at the
+measured acceptance: ~2.05 tokens per round for ~1.2 forwards of round cost
+is ~1.7x at K=4.
 
 ## Policy tuning applied (issue #638)
 
 The adaptive MTP policy's speedup estimator assumed a bandwidth-bound verify
 (`verify_cost_multiple == 1.0`), which is optimistic on GB10 and would wrongly
 enable this regressing pairing. The estimator is now backend-conditional
-(`mtp_policy::estimate_speedup_scaled`): on compute-bound hardware (detected as
-non-Apple-Silicon, `AppleSiliconGen::Unknown`) the K-wide verify cost is scaled
-by `sqrt(K)`, chosen to match the measured ~1.9x round-cost growth from K=2 to
-K=8. Apple Silicon keeps `verify_cost_multiple == 1.0`, so its estimates and
-verdicts are byte-identical to before. With the de-rating, the profiler settles
-to a decline for this pairing on GB10 after its bounded profiling window, while
-a genuinely favourable compute-bound pairing (high accepted length) still clears
-the enable floor.
+(`mtp_policy::estimate_speedup_scaled`): on non-Apple-Silicon hosts (detected
+as `AppleSiliconGen::Unknown`) the K-wide verify cost is scaled by `sqrt(K)`.
+Apple Silicon keeps `verify_cost_multiple == 1.0`, so its estimates and
+verdicts are byte-identical to before. With the de-rating, the profiler
+settles to a decline for this pairing on GB10 after its bounded profiling
+window, while a pairing with high accepted length still clears the enable
+floor.
+
+Known limitation (#736): the `sqrt(K)` constant was calibrated against the
+"~1.9x growth from K=2 to K=8" datum, which the section above corrects to
+effective K=4; the true verify scaling is linear, so `sqrt(K)` under-costs a
+K=4 round by about 2x (sqrt(4) = 2 versus the measured ~3.9 classic-forward
+equivalents). The decline verdict for this pairing still holds because its
+accepted length is low, but a moderately better pairing could be wrongly
+enabled; #736 tracks replacing the shape heuristic with the measured round
+cost against a measured classic step time.
+
+## Follow-ups
+
+- #725: amortizing small-M quantized GEMM, the root-cause fix. Re-run this
+  matrix once it lands.
+- #735: pad the CUDA MTP verify past the qmv dispatch threshold, the
+  verify-side consumer of #725.
+- #736: measured-round-cost policy estimator replacing `sqrt(K)`.
+- #737: acceptance-rate cross-check on Apple Silicon. GB10's 35-56% is below
+  the 70-87% third parties report for the Gemma 4 assistants, and the M5 Max
+  run predates the bench's acceptance reporting.
 
 ## Deferred rows
 
