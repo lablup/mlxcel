@@ -1746,6 +1746,15 @@ fn test_from_bytes_fp16_bit_pattern_roundtrip() {
     );
 }
 
+/// [#741] The wired-memory limit is a Metal concept: the bridge's
+/// `get_wired_limit` reads `device_info()["max_recommended_working_set_size"]`,
+/// a key only the Metal backend publishes (CUDA publishes `total_memory`,
+/// which `gpu_max_memory_size` handles). The expectation is therefore
+/// backend-conditional: Metal reports a positive limit, CUDA reports 0 and
+/// treats `set_wired_limit` as a harmless no-op. Note this test only runs
+/// where `-p mlxcel-core` is passed explicitly; the CI-faithful gate
+/// (`make verify-test`) tests the root package only, which is why the CUDA
+/// failure went unnoticed until a manual `-p mlxcel-core` run.
 #[test]
 fn test_memory_functions() {
     let max_size = gpu_max_memory_size();
@@ -1753,7 +1762,16 @@ fn test_memory_functions() {
 
     let _old = set_wired_limit(1024 * 1024 * 1024);
     let limit = get_wired_limit();
-    assert!(limit > 0);
+    #[cfg(feature = "metal")]
+    assert!(
+        limit > 0,
+        "Metal must report max_recommended_working_set_size as the wired limit"
+    );
+    #[cfg(not(feature = "metal"))]
+    assert_eq!(
+        limit, 0,
+        "non-Metal backends have no wired limit; the getter must report 0"
+    );
     set_wired_limit(0);
 }
 
