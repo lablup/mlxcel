@@ -12,7 +12,8 @@
 // accumulator types, final float reduction) matches the stock kernel exactly,
 // so per-row outputs are bit-identical to the per-row launches it replaces.
 // Selection: broadcast weights and 2 <= m*l <= 8, kill switch
-// MLXCEL_QMV_MULTIROW=0. Everything else is upstream (sync base e9463bb).
+// MLXCEL_QMV_MULTIROW=0. Everything else is byte-identical upstream (pin
+// 57c66cac, v0.32.0-1).
 
 #include "mlx/backend/cuda/device/cute_dequant.cuh"
 #include "mlx/backend/cuda/kernel_utils.cuh"
@@ -242,6 +243,9 @@ __device__ __forceinline__ void qmv_kernel_impl(
 // k/n, which QuantizedMatmul::eval_gpu guarantees via ensure_row_contiguous.
 // The j-loop is unrolled to max_x_rows with a warp-uniform bound check, so
 // accumulators stay in registers for every x_rows in [2, max_x_rows].
+// Invariant: x_rows is a kernel argument (block-uniform), which is what makes
+// the cg::reduce collective inside the `j < x_rows` branch safe; do not turn
+// x_rows into anything lane-dependent.
 template <
     int elems_per_thread,
     int group_size,

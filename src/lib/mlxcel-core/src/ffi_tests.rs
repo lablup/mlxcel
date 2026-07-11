@@ -3734,6 +3734,7 @@ fn qmv_multirow_matches_per_row_qmv_bitwise() {
         (576, 64, 4, dtype::BFLOAT16),
         (1024, 64, 8, dtype::FLOAT16),
         (512, 32, 4, dtype::FLOAT32),
+        (1024, 128, 4, dtype::BFLOAT16),
     ];
     for &(k, group_size, bits, dt) in &cases {
         let (w, s, b) = random_quantized_weight(n, k, group_size, bits);
