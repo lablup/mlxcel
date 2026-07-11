@@ -219,15 +219,26 @@ speculative round pays for itself (Gemma 4 12B + assistant: ~1.87x on M5 Max,
 ~1.5x on GB10 with the multirow qmv verify) and declines it where it does not
 (the same pairing on M1 Ultra, or on CUDA with `MLXCEL_QMV_MULTIROW=0`).
 
-Scheduling caveat: an enabled B=1 burst runs its request to completion on the
-scheduler worker. For non-batchable targets (the 12B Unified family) this
-equals their inherent single-slot serialization, but for batch-capable targets
-it head-of-line-blocks concurrent rows for the burst's full duration; the
-scheduler logs the stall as `burst_wall_ms` at burst finalize, and the
-tick-cooperative slice that removes the stall is tracked in #734. Concurrent
+Scheduling: for non-batchable targets (the 12B Unified family) an enabled B=1
+burst equals their inherent single-slot serialization. For batch-capable
+targets, the B=1 MTP arm is served tick-cooperatively by default (issue #734):
+the request runs one speculative round per scheduler tick, alternating with
+the classic decode/prefill actions, so concurrent classic-decode rows advance
+between rounds instead of stalling for the whole request. This bounds the
+head-of-line stall a speculative request imposes on concurrent rows to about
+one round; the scheduler logs it as the max single-tick `burst_wall_ms` at
+finalize (on the validation pairing this dropped a multi-second whole-burst
+stall to about one round of steady-state occupancy, roughly 23x faster
+time-to-first-token for the concurrent classic rows). The interleaving is not
+free: on the validation pairing the strict alternation cost roughly 27% of
+the combined two-request aggregate decode throughput, so
+`MLXCEL_MTP_TICK_SLICE=0` restores the legacy run-to-completion burst for
+deployments that serve speculative requests without concurrent classic traffic
+and want raw speculative throughput. DFlash B=1 and every B>1 batched burst
+still run to completion inside one tick regardless of the flag. Concurrent
 speculative requests that share a prompt length, `max_tokens`, and sampling
-config can instead run as one B>1 batched burst, but that path is
-experimental and stays behind `MLXCEL_ENABLE_MTP_BATCH` (plus
+config can instead run as one B>1 batched burst, but that path is experimental
+and stays behind `MLXCEL_ENABLE_MTP_BATCH` (plus
 `MLXCEL_ENABLE_MTP_BATCH_RAGGED` for mixed prompt lengths).
 
 Operator controls, all env-level (see
