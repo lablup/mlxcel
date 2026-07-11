@@ -146,9 +146,13 @@ estimator measured against classic-step probe rounds (hint format v3);
   verify-side consumer of #725.
 - #736: measured-round-cost policy estimator replacing `sqrt(K)`. Done; see
   `qmv-multirow-gb10-2026-07-11.md`.
-- #737: acceptance-rate cross-check on Apple Silicon. GB10's 35-56% is below
-  the 70-87% third parties report for the Gemma 4 assistants, and the M5 Max
-  run predates the bench's acceptance reporting.
+- #737: acceptance-rate cross-check on Apple Silicon. Done, see
+  `speculative-acceptance-m5max-2026-07-11.md`. M5 Max accepts at the same rate
+  as GB10 on the same 14-token prompt (35.0% at K=4/8, to three digits), so the
+  low acceptance is a prompt property, not a CUDA numeric artifact; on three
+  longer prompts the same 4-bit pairing recovers 52-88% acceptance, inside the
+  70-87% third-party band. The host difference is round cost (this matrix), not
+  acceptance.
 
 ## Deferred rows
 

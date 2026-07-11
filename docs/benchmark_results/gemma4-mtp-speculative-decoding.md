@@ -55,6 +55,12 @@ Output is byte-identical to classic decode. The Unified target cannot batch
 (`supports_batching() == false`), so B=1 is its only decode path and the
 scheduler runs B=1 MTP for it by default.
 
+Acceptance rate for this pairing is measured in
+`speculative-acceptance-m5max-2026-07-11.md` (issue #737): 35% at K=4 on the
+short 14-token prompt, rising to 52-88% on longer, realistic prompts. Those
+same-prompt M5 Max numbers match GB10 within noise, so the acceptance is a
+prompt property rather than a host difference.
+
 ### Gemma 4 31B (measured on M5 Max)
 
 The 31B target is batch-capable, so an earlier "B=1 is slower" calibration had
