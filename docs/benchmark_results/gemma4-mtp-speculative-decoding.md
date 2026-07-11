@@ -90,8 +90,11 @@ batch-capable targets too. Lower-bandwidth Apple Silicon, where the earlier
 Apple M1 Ultra (128 GB), same pairings, block size 4, `temperature 0`,
 160 decode tokens, decode tok/s = `(N - 1) / (T_N - T_1)` over streamed
 requests (a 1-token request absorbs the prefill cost identically in both
-modes; the burst path emits tokens in lumps, so inter-token client timing is
-not usable there).
+modes; at measurement time the burst path emitted tokens in lumps, so
+inter-token client timing was not usable there. Since issue #734 the B=1 MTP
+arm is tick-cooperative and streams each round's accepted tokens as they
+land, so inter-token timing is usable again, arriving in per-round groups of
+`accepted + 1` tokens).
 
 **31B + bf16 assistant: a consistent regression.** Four greedy prompts:
 

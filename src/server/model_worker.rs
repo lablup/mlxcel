@@ -448,11 +448,17 @@ pub(crate) fn spawn_model_worker_with_batch_config(
             // — true B>1 batched speculative decoding. A
             // speculative request whose prompt length, `max_tokens`, or
             // sampling config does not match the current window head, or
-            // that arrives alone, still runs as a B=1 burst; in that case
-            // the burst occupies the worker thread for its full duration and
-            // concurrent classic-decode rows head-of-line-block behind it
-            // until it completes. The previous earlier wording described the
-            // B=1-only behaviour; this reflects the batched path.
+            // that arrives alone, runs on the B=1 arm. For MTP on the
+            // Gemma 4 family that arm is tick-cooperative (issue #734):
+            // the request is served one speculative round per scheduler
+            // tick, alternating with the classic actions, so concurrent
+            // classic-decode rows advance between rounds and the
+            // head-of-line stall is bounded by about one round (see
+            // `server::batch::speculative_slice`;
+            // `MLXCEL_MTP_TICK_SLICE=0` restores the legacy
+            // run-to-completion burst). The DFlash B=1 arm and every B>1
+            // batched arm still run to completion inside one tick and
+            // head-of-line-block concurrent rows for their full duration.
             //
             // Variable-length-prompt MTP bursts (different prompt lengths in one
             // B>1 window) are implemented behind the `MLXCEL_ENABLE_MTP_BATCH_RAGGED`
@@ -469,9 +475,13 @@ pub(crate) fn spawn_model_worker_with_batch_config(
                  prompt length, max_tokens, and sampling config are driven \
                  as a single B>1 batched burst. A speculative \
                  request that does not match the current window head, or \
-                 that arrives alone, runs as a B=1 burst and head-of-line-\
-                 blocks concurrent classic-decode rows for its full \
-                 duration. Variable-length-prompt MTP batched bursts are \
+                 that arrives alone, runs on the B=1 arm; MTP B=1 requests \
+                 are served tick-cooperatively (one speculative round per \
+                 scheduler tick, so concurrent classic-decode rows advance \
+                 between rounds; MLXCEL_MTP_TICK_SLICE=0 restores the \
+                 legacy run-to-completion burst), while DFlash B=1 and B>1 \
+                 batched bursts run to completion inside one tick. \
+                 Variable-length-prompt MTP batched bursts are \
                  available behind MLXCEL_ENABLE_MTP_BATCH_RAGGED=1 (with \
                  MLXCEL_ENABLE_MTP_BATCH=1).",
                     sched_config.speculative_dispatch.summary(),

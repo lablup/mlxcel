@@ -361,6 +361,11 @@ pub enum BatchSchedulerAction {
     Prefill(SequenceId),
     /// Run one decode step for the listed active sequences.
     Decode(Vec<SequenceId>),
+    /// Run one round of the in-flight tick-cooperative speculative slice
+    /// (issue #734). Emitted only while a B=1 MTP slice job is parked on
+    /// the scheduler; alternates with `Decode` / `Prefill` under
+    /// contention so classic rows advance between speculative rounds.
+    SpeculativeRound,
     /// No work available -- the engine should block until a new request
     /// arrives.
     Idle,

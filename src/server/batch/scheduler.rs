@@ -54,6 +54,9 @@ use mlxcel_core::utils::{align_to_na_tile, create_padded_prefill_mask};
 use mlxcel_core::{MlxThreadLocalStream, UniquePtr};
 
 use crate::LoadedModel;
+use crate::models::gemma4_mtp_target::{
+    Gemma4MtpTargetAdapter, Gemma4UnifiedMtpTargetAdapter, Gemma4VLMtpTargetAdapter,
+};
 use crate::server::ServerGenerateOptions;
 use crate::server::batch::observability::BatchObservability;
 use crate::server::config::{
@@ -423,6 +426,25 @@ pub struct BatchScheduler {
     /// [`super::mtp_policy::MtpPolicy::should_attempt_b1`] and fed via
     /// [`super::mtp_policy::MtpPolicy::record_b1_sample`].
     mtp_policy: Option<super::mtp_policy::MtpPolicy>,
+
+    /// In-flight tick-cooperative B=1 MTP speculative slice (issue #734).
+    /// `Some` while a speculative request is being served one round per
+    /// scheduler tick; the job owns the request's `SequenceInfo`, the
+    /// generator's owned session state, and the (un-reset) drafter between
+    /// ticks. At most one slice is in flight at a time; a second
+    /// speculative-eligible request arriving mid-slice falls back to
+    /// classic decode (see [`Self::try_speculative_burst`]). Boxed: the
+    /// job is fat (SequenceInfo + MLX handles) and this field is `None`
+    /// for every non-speculative deployment.
+    speculative_slice: Option<Box<super::speculative_slice::MtpSliceJob>>,
+
+    /// Fairness flag for the slice tick-arbitration
+    /// ([`super::speculative_slice::slice_takes_tick`]): `true` when the
+    /// previously executed action was a speculative round, so the next
+    /// tick yields to the classic actions when they have work. Cleared by
+    /// the `Prefill` / `Decode` arms. Gives strict round/classic
+    /// alternation under contention.
+    speculative_slice_yielded: bool,
 
     // -- Disaggregated serving-role handoff --
     /// Cached decode-model paged block geometry for cross-node KV handoff
@@ -1056,6 +1078,9 @@ impl BatchScheduler {
             // No adaptive MTP policy until `with_mtp_policy` builds one for an
             // MTP dispatch. The non-speculative hot path never touches it.
             mtp_policy: None,
+            // No tick-cooperative slice in flight at startup (issue #734).
+            speculative_slice: None,
+            speculative_slice_yielded: false,
             paged_handoff_geometry: None,
             decode_lookahead: None,
             // Honor MLXCEL_FORCE_SYNC=1 as the pipeline kill switch, probed once
@@ -2160,10 +2185,31 @@ impl BatchScheduler {
                     } else {
                         self.execute_prefill(seq_id);
                     }
+                    // A classic action ran: the next tick goes back to the
+                    // in-flight speculative slice, if any (issue #734).
+                    self.speculative_slice_yielded = false;
                     self.publish_metrics();
                 }
                 BatchSchedulerAction::Decode(ids) => {
                     self.execute_decode_step(&ids);
+                    // A classic action ran: the next tick goes back to the
+                    // in-flight speculative slice, if any (issue #734).
+                    self.speculative_slice_yielded = false;
+                }
+                BatchSchedulerAction::SpeculativeRound => {
+                    // Same invariant as the Prefill arm: any action that can
+                    // mutate KV caches outside the decode fast path must tear
+                    // down a prebuilt lookahead first (#632 invalidation).
+                    // Under speculative dispatch the lookahead pipeline is
+                    // globally disabled (`lookahead_params` returns `None`
+                    // when `should_dispatch_speculative()`), so this is a
+                    // guaranteed no-op kept for the invariant.
+                    self.discard_lookahead();
+                    self.execute_speculative_slice_round();
+                    // Yield the next tick to the classic actions when they
+                    // have work, so classic rows advance between rounds.
+                    self.speculative_slice_yielded = true;
+                    self.publish_metrics();
                 }
                 BatchSchedulerAction::Idle => match self.request_rx.recv() {
                     Ok(req) => {
@@ -2830,8 +2876,30 @@ impl BatchScheduler {
             active = self.active_batch.len(),
             queued = self.prefill_queue.len(),
             chunked_in_progress = self.chunked_prefill_seq.is_some(),
+            speculative_slice = self.speculative_slice.is_some(),
             "scheduler tick"
         );
+        // Tick-cooperative speculative slice in flight (issue #734): run
+        // one speculative round per tick, alternating strictly with the
+        // classic actions when they have work, so concurrent classic rows
+        // advance between rounds and the speculative request never
+        // starves. When nothing else has work the slice takes every tick
+        // (it IS work, so this branch also prevents an Idle block on the
+        // request channel while a slice is pending).
+        if self.speculative_slice.is_some() {
+            let others_have_work = self.chunked_prefill_seq.is_some()
+                || !self.active_batch.is_empty()
+                || !self.prefill_queue.is_empty();
+            if super::speculative_slice::slice_takes_tick(
+                self.speculative_slice_yielded,
+                others_have_work,
+            ) {
+                return BatchSchedulerAction::SpeculativeRound;
+            }
+            // Fall through: grant this tick to a classic action; its arm
+            // clears `speculative_slice_yielded` so the next tick returns
+            // to the slice.
+        }
         // Chunked prefill in progress: interleave decode with prefill
         if self.chunked_prefill_seq.is_some() {
             if !self.active_batch.is_empty() {
@@ -3140,6 +3208,21 @@ impl BatchScheduler {
             return Some(seq);
         }
 
+        // At most ONE tick-cooperative slice is in flight at a time (issue
+        // #734): the drafter handle is held by the in-flight job, and the
+        // slice state is a single scheduler slot. A second
+        // speculative-eligible request arriving mid-slice falls back to
+        // classic decode instead of waiting behind the slice (which could
+        // be a long request); this matches the legacy burst's effective
+        // capacity of one speculative request at a time on the worker.
+        if self.speculative_slice.is_some() {
+            tracing::debug!(
+                "speculative slice already in flight; seq {} falls back to classic decode",
+                seq.seq_id,
+            );
+            return Some(seq);
+        }
+
         // Try to assemble a B>1 batched window. The window head is
         // `seq`; siblings must (1) be speculative-eligible, (2) have the
         // same prompt length, (3) have the same `max_tokens`, and (4)
@@ -3349,8 +3432,24 @@ impl BatchScheduler {
                 }
             }
         } else {
-            // ---- B=1 burst (window collapsed to the head only) ----
+            // ---- B=1 arm (window collapsed to the head only) ----
             let seq = window.into_iter().next().expect("window has the head");
+
+            // Tick-cooperative MTP slice (issue #734): a B=1 MTP request on
+            // the Gemma 4 family is served one speculative round per
+            // scheduler tick instead of a run-to-completion burst, so
+            // concurrent classic rows advance between rounds. The DFlash
+            // arm keeps the legacy burst (its generator has no resumable
+            // step API yet); `MLXCEL_MTP_TICK_SLICE=0` forces the MTP arm
+            // back onto the legacy burst as an operator escape hatch.
+            if matches!(
+                self.speculative_dispatch,
+                crate::server::SpeculativeDispatch::Mtp { .. }
+            ) && super::speculative_slice::mtp_tick_slice_enabled()
+            {
+                return self.start_mtp_slice_b1(seq);
+            }
+
             let ctx = super::speculative_burst::BurstContext {
                 model: &self.model,
                 tokenizer: &self.tokenizer,
@@ -3367,82 +3466,490 @@ impl BatchScheduler {
                     .unwrap_or(0),
             };
             match super::speculative_burst::try_run_burst_b1(ctx, seq) {
-                Ok(super::speculative_burst::BurstFinalized {
-                    seq_id,
-                    tokens_generated,
-                    prompt_tokens,
-                    generated_tokens,
-                    healthy_finish,
-                    mtp_profile,
-                    burst_wall_ms,
-                }) => {
-                    // Burst handled the full request lifecycle inline.
-                    //
-                    // donate the finished sequence's KV
-                    // cache back to the prompt-cache store BEFORE the
-                    // `remove`/`release` below — `donate_finished_sequence_cache`
-                    // both consumes the `prompt_cache_seq_ctx` entry and
-                    // needs the cache slot still attached. This mirrors
-                    // the classic path's `finalize_completed`, keeping
-                    // the burst and classic donate paths symmetric. The
-                    // donate helper snapshots opt-in model-owned families and
-                    // detaches dense/paged KV for the regular backends. Wiring
-                    // it in removes the structural asymmetry between the two
-                    // paths and future-proofs the burst for any reusable model
-                    // family that later becomes burst-eligible.
-                    self.donate_finished_sequence_cache(
-                        seq_id,
-                        &prompt_tokens,
-                        &generated_tokens,
-                        healthy_finish,
-                    );
-                    // Release the pre-allocated cache slot for symmetry
-                    // with `finalize_completed`, and mirror the classic
-                    // path's per-sequence metric recording so Prometheus
-                    // counters cover burst completions too. The `remove`
-                    // here is the defensive non-donate cleanup (the
-                    // donate path above already removed the
-                    // `prompt_cache_seq_ctx` entry on the dense-KV path).
-                    self.prompt_cache_seq_ctx.remove(&seq_id);
-                    self.release_sequence_caches(seq_id);
-                    self.batch_metrics
-                        .record_sequence_completed(tokens_generated);
-                    self.batch_observability.record_sequence_completed();
-                    // Feed the adaptive MTP policy (issue #333) the coarse
-                    // profile of this B=1 burst. Only present for MTP runs that
-                    // executed a speculative round; a no-op once the policy has
-                    // settled, so there is no steady-state per-request cost.
-                    if let (Some(policy), Some(profile)) = (self.mtp_policy.as_mut(), mtp_profile) {
-                        policy.record_b1_sample(profile);
-                    }
-                    // Observability (issue #638): the B=1 burst runs the whole
-                    // request to completion in this single scheduler tick, so
-                    // `burst_wall_ms` is the head-of-line stall it imposed on
-                    // every concurrent classic-decode row (none advanced while
-                    // the burst held the worker). Surface it with the round /
-                    // accepted-token counts so the HOL cost of the
-                    // run-to-completion burst is measurable until the
-                    // tick-cooperative slice lands. `queued` shows how many
-                    // rows waited behind it.
-                    let (rounds, accepted) = mtp_profile
-                        .map(|p| (p.rounds, p.accepted_draft_tokens))
-                        .unwrap_or((0, 0));
-                    tracing::info!(
-                        seq_id = %seq_id,
-                        burst_wall_ms,
-                        tokens_generated,
-                        rounds,
-                        accepted_draft_tokens = accepted,
-                        hol_waiters = self.active_batch.len() + self.prefill_queue.len(),
-                        "speculative B=1 burst finalized (burst_wall_ms is the HOL \
-                         stall on concurrent rows)"
-                    );
-                    self.publish_metrics();
+                Ok(finalized) => {
+                    self.finish_speculative_b1(finalized);
                     None
                 }
                 Err(rejected_seq) => Some(rejected_seq),
             }
         }
+    }
+
+    /// Shared post-completion bookkeeping for a finalized B=1 speculative
+    /// request, whether it ran as a legacy run-to-completion burst or as a
+    /// tick-cooperative slice (issue #734): prompt-cache donate, cache-slot
+    /// release, Prometheus metrics, adaptive-policy feed, and the HOL
+    /// observability log.
+    fn finish_speculative_b1(&mut self, finalized: super::speculative_burst::BurstFinalized) {
+        let super::speculative_burst::BurstFinalized {
+            seq_id,
+            tokens_generated,
+            prompt_tokens,
+            generated_tokens,
+            healthy_finish,
+            mtp_profile,
+            burst_wall_ms,
+            burst_active_ms,
+            slices,
+        } = finalized;
+        // The request was handled end-to-end inline.
+        //
+        // donate the finished sequence's KV
+        // cache back to the prompt-cache store BEFORE the
+        // `remove`/`release` below; `donate_finished_sequence_cache`
+        // both consumes the `prompt_cache_seq_ctx` entry and
+        // needs the cache slot still attached. This mirrors
+        // the classic path's `finalize_completed`, keeping
+        // the burst and classic donate paths symmetric. The
+        // donate helper snapshots opt-in model-owned families and
+        // detaches dense/paged KV for the regular backends. Wiring
+        // it in removes the structural asymmetry between the two
+        // paths and future-proofs the burst for any reusable model
+        // family that later becomes burst-eligible.
+        self.donate_finished_sequence_cache(
+            seq_id,
+            &prompt_tokens,
+            &generated_tokens,
+            healthy_finish,
+        );
+        // Release the pre-allocated cache slot for symmetry
+        // with `finalize_completed`, and mirror the classic
+        // path's per-sequence metric recording so Prometheus
+        // counters cover burst completions too. The `remove`
+        // here is the defensive non-donate cleanup (the
+        // donate path above already removed the
+        // `prompt_cache_seq_ctx` entry on the dense-KV path).
+        self.prompt_cache_seq_ctx.remove(&seq_id);
+        self.release_sequence_caches(seq_id);
+        self.batch_metrics
+            .record_sequence_completed(tokens_generated);
+        self.batch_observability.record_sequence_completed();
+        // Feed the adaptive MTP policy (issue #333) the coarse
+        // profile of this B=1 run. Only present for MTP runs that
+        // executed a speculative round; a no-op once the policy has
+        // settled, so there is no steady-state per-request cost.
+        if let (Some(policy), Some(profile)) = (self.mtp_policy.as_mut(), mtp_profile) {
+            policy.record_b1_sample(profile);
+        }
+        // Observability (issue #638, re-scoped by issue #734):
+        // `burst_wall_ms` is the maximum wall-clock any SINGLE scheduler
+        // tick spent on this request: the head-of-line stall bound it
+        // imposed on concurrent classic-decode rows. On the
+        // tick-cooperative slice path that is about one speculative
+        // round (plus the unavoidable prefill slice 0); on the legacy
+        // run-to-completion arms (`slices == 1`) it is still the whole
+        // burst. `burst_active_ms` is the cumulative worker occupancy
+        // across all `slices`. `hol_waiters` shows how many rows share
+        // the worker at finalize time.
+        let (rounds, accepted) = mtp_profile
+            .map(|p| (p.rounds, p.accepted_draft_tokens))
+            .unwrap_or((0, 0));
+        tracing::info!(
+            seq_id = %seq_id,
+            burst_wall_ms,
+            burst_active_ms,
+            slices,
+            tokens_generated,
+            rounds,
+            accepted_draft_tokens = accepted,
+            hol_waiters = self.active_batch.len() + self.prefill_queue.len(),
+            "speculative B=1 burst finalized (burst_wall_ms is the max \
+             single-tick HOL stall on concurrent rows)"
+        );
+        self.publish_metrics();
+    }
+
+    /// Start a tick-cooperative B=1 MTP slice for `seq` (issue #734).
+    ///
+    /// Applies the same gates as the legacy `run_mtp_burst` in the same
+    /// order (variant gate before drafter IO, adopted-prefix suffix
+    /// resolution, drafter lazy-load + take + compat-check + bind) and
+    /// then runs slice 0 (prefill + seed + first bonus) inline in this
+    /// tick. Returns `None` when the request was handled (the slice job
+    /// is parked for later ticks, the request finished within slice 0, or
+    /// it failed with a client-visible error) and `Some(seq)` when the
+    /// slice path declines and the caller should route the request through
+    /// classic decode, mirroring `try_run_burst_b1`'s contract.
+    fn start_mtp_slice_b1(&mut self, mut seq: SequenceInfo) -> Option<SequenceInfo> {
+        let burst_start = Instant::now();
+        if seq.prompt_tokens.is_empty() {
+            // Defensive: mirrors try_run_burst_b1's empty-prompt decline
+            // (the scheduler already rejects empty prompts at enqueue).
+            return Some(seq);
+        }
+        let block_size = match &self.speculative_dispatch {
+            crate::server::SpeculativeDispatch::Mtp { block_size, .. } => *block_size as usize,
+            // Caller guarantees an Mtp dispatch; decline defensively.
+            _ => return Some(seq),
+        };
+        if block_size < 2 {
+            self.fail_speculative_slice_start(
+                seq,
+                &format!("MTP burst: block_size={block_size} < 2 produces no draft proposals"),
+                burst_start,
+            );
+            return None;
+        }
+
+        // Variant gate BEFORE any drafter IO, same rationale and message
+        // as `run_mtp_burst`: an unsupported pairing declines to classic
+        // without surfacing a confusing drafter-load error.
+        if !matches!(
+            self.model,
+            LoadedModel::Gemma4(_) | LoadedModel::Gemma4VLM(_) | LoadedModel::Gemma4Unified(_)
+        ) {
+            tracing::warn!(
+                "MTP speculative dispatch declined: target is not \
+                 Gemma 4 (text, VLM, or Unified); falling back to classic decode",
+            );
+            return Some(seq);
+        }
+
+        // Adopted prompt-cache prefix (issue #518): resolve where the
+        // suffix prefill starts; a degenerate offset (whole prompt cached)
+        // declines to classic, which owns that edge. Checked BEFORE taking
+        // the drafter so the decline leaves the slot untouched.
+        let prefill_start_offset = match super::speculative_burst::mtp_prefill_suffix_start(
+            seq.prefill_start_offset,
+            seq.prompt_tokens.len(),
+        ) {
+            Some(offset) => offset,
+            None => {
+                tracing::debug!(
+                    "MTP speculative slice declined for seq {}: prefill_start_offset={} \
+                     covers the whole prompt (len={}); falling back to classic decode",
+                    seq.seq_id,
+                    seq.prefill_start_offset,
+                    seq.prompt_tokens.len(),
+                );
+                return Some(seq);
+            }
+        };
+
+        // Drafter: lazy-load, take, compat-check, bind, the identical
+        // contracts as `run_mtp_burst` (bind is NOT called inside the
+        // generator; omitting it silently yields one seed-bonus token).
+        if let Err(e) = self.speculative_drafter_slot.ensure_loaded() {
+            self.fail_speculative_slice_start(seq, &e, burst_start);
+            return None;
+        }
+        let Some(mut drafter) = self.speculative_drafter_slot.take() else {
+            self.fail_speculative_slice_start(
+                seq,
+                "drafter slot empty after ensure_loaded",
+                burst_start,
+            );
+            return None;
+        };
+        fn compat_and_bind(
+            drafter: &mut Box<dyn mlxcel_core::drafter::Drafter>,
+            target_lm: &dyn LanguageModel,
+        ) -> Result<(), String> {
+            drafter
+                .validate_target_compat(target_lm)
+                .map_err(|e| format!("MTP drafter incompatible with target: {e}"))?;
+            drafter
+                .bind(target_lm)
+                .map_err(|e| format!("MTP drafter bind failed: {e}"))
+        }
+        let bind_result: Result<(), String> = match &self.model {
+            LoadedModel::Gemma4(wrapper) => compat_and_bind(&mut drafter, wrapper),
+            LoadedModel::Gemma4VLM(vlm) => compat_and_bind(&mut drafter, vlm),
+            LoadedModel::Gemma4Unified(unified) => compat_and_bind(&mut drafter, unified),
+            // Unreachable per the variant gate above; produce a clean
+            // per-request error rather than panicking.
+            _ => Err(
+                "MTP slice: unsupported target after variant gate (should not happen)".to_string(),
+            ),
+        };
+        if let Err(msg) = bind_result {
+            // Drop the failed drafter handle so the next request lazily
+            // reloads from disk, same slot semantics as `run_mtp_burst`.
+            drop(drafter);
+            self.fail_speculative_slice_start(seq, &msg, burst_start);
+            return None;
+        }
+
+        // Commit: the slice owns the request lifecycle from here. The
+        // legacy burst transitions Queued -> Prefilling at success
+        // finalize; the slice transitions up front because the request is
+        // genuinely prefilling in this tick and stays in flight across
+        // later ticks. `finalize_burst_stream` performs the
+        // Prefilling -> Finished(reason) transition, as on the legacy path.
+        seq.prefill_start = Some(burst_start);
+        if let Err(err) = seq.state.transition_to(SequenceState::Prefilling) {
+            self.speculative_drafter_slot.restore_unused(drafter);
+            self.fail_speculative_slice_start(
+                seq,
+                &format!("State transition error: {err}"),
+                burst_start,
+            );
+            return None;
+        }
+
+        // History-dependent-penalty context for the first-bonus sample,
+        // identical to `run_mtp_burst` / the classic path's first token.
+        let token_history =
+            initial_token_history(&seq.prompt_tokens, seq.sampling.needs_token_history());
+        // [#736] Classic-step probe rounds while the adaptive policy is
+        // profiling; they run in the first slices exactly as they run in
+        // the first rounds of a legacy burst.
+        let probe_rounds = self
+            .mtp_policy
+            .as_ref()
+            .map(|p| p.profile_probe_rounds())
+            .unwrap_or(0);
+        let model_eos = self.model.eos_token_ids();
+
+        // Slice 0: prefill + seed + first bonus, streamed immediately.
+        let started = match &self.model {
+            LoadedModel::Gemma4(wrapper) => {
+                let adapter = Gemma4MtpTargetAdapter::new_with_block_size(
+                    wrapper,
+                    Some(seq.seq_id),
+                    block_size,
+                )
+                .with_prefill_start_offset(prefill_start_offset);
+                Ok(super::speculative_slice::begin_slice_session(
+                    adapter,
+                    drafter,
+                    seq,
+                    &self.tokenizer,
+                    model_eos,
+                    block_size,
+                    probe_rounds,
+                    prefill_start_offset,
+                    &token_history,
+                ))
+            }
+            LoadedModel::Gemma4VLM(vlm) => {
+                let adapter = Gemma4VLMtpTargetAdapter::new_with_block_size(
+                    vlm,
+                    Some(seq.seq_id),
+                    block_size,
+                )
+                .with_prefill_start_offset(prefill_start_offset);
+                Ok(super::speculative_slice::begin_slice_session(
+                    adapter,
+                    drafter,
+                    seq,
+                    &self.tokenizer,
+                    model_eos,
+                    block_size,
+                    probe_rounds,
+                    prefill_start_offset,
+                    &token_history,
+                ))
+            }
+            LoadedModel::Gemma4Unified(unified) => {
+                let adapter = Gemma4UnifiedMtpTargetAdapter::new_with_block_size(
+                    unified,
+                    Some(seq.seq_id),
+                    block_size,
+                )
+                .with_prefill_start_offset(prefill_start_offset);
+                Ok(super::speculative_slice::begin_slice_session(
+                    adapter,
+                    drafter,
+                    seq,
+                    &self.tokenizer,
+                    model_eos,
+                    block_size,
+                    probe_rounds,
+                    prefill_start_offset,
+                    &token_history,
+                ))
+            }
+            // Defensive arm rather than `unreachable!()` so a future
+            // LoadedModel variant admitted by the gate above surfaces as a
+            // clean per-request error instead of a worker panic.
+            _ => Err((seq, drafter)),
+        };
+        match started {
+            Ok(job) => {
+                if job.finished() {
+                    // The request completed within slice 0 (EOS on the
+                    // first bonus, max_tokens == 1, or a degenerate
+                    // session). Finalize inline, behaviourally identical
+                    // to a one-tick legacy burst.
+                    self.finalize_speculative_slice(job);
+                } else {
+                    self.speculative_slice = Some(Box::new(job));
+                }
+                None
+            }
+            Err((seq, drafter)) => {
+                drop(drafter);
+                self.fail_speculative_slice_start(
+                    seq,
+                    "MTP slice: unsupported target after variant gate (should not happen)",
+                    burst_start,
+                );
+                None
+            }
+        }
+    }
+
+    /// Execute one tick-cooperative speculative round (issue #734): take
+    /// the parked slice job, reconstruct the borrowing target adapter for
+    /// this tick, run exactly one generator round, stream its tokens, and
+    /// either park the job again or finalize the request.
+    fn execute_speculative_slice_round(&mut self) {
+        let Some(mut job) = self.speculative_slice.take() else {
+            // Defensive: decide_action only emits SpeculativeRound while a
+            // slice is parked.
+            return;
+        };
+        let _span = tracing::info_span!(
+            "speculative_slice_round",
+            seq_id = %job.seq.seq_id,
+            slice = job.slices,
+        )
+        .entered();
+        let stepped = match &self.model {
+            LoadedModel::Gemma4(wrapper) => {
+                let adapter = Gemma4MtpTargetAdapter::new_with_block_size(
+                    wrapper,
+                    Some(job.seq.seq_id),
+                    job.block_size,
+                )
+                .with_prefill_start_offset(job.prefill_start_offset);
+                super::speculative_slice::step_slice_session(adapter, &mut job, &self.tokenizer);
+                true
+            }
+            LoadedModel::Gemma4VLM(vlm) => {
+                let adapter = Gemma4VLMtpTargetAdapter::new_with_block_size(
+                    vlm,
+                    Some(job.seq.seq_id),
+                    job.block_size,
+                )
+                .with_prefill_start_offset(job.prefill_start_offset);
+                super::speculative_slice::step_slice_session(adapter, &mut job, &self.tokenizer);
+                true
+            }
+            LoadedModel::Gemma4Unified(unified) => {
+                let adapter = Gemma4UnifiedMtpTargetAdapter::new_with_block_size(
+                    unified,
+                    Some(job.seq.seq_id),
+                    job.block_size,
+                )
+                .with_prefill_start_offset(job.prefill_start_offset);
+                super::speculative_slice::step_slice_session(adapter, &mut job, &self.tokenizer);
+                true
+            }
+            _ => false,
+        };
+        if !stepped {
+            // Defensive: the model cannot change mid-flight (slice 0 only
+            // starts on the Gemma 4 family). Fail the request cleanly; the
+            // drafter is dropped with the job so the next speculative
+            // request lazily reloads it.
+            let seq_id = job.seq.seq_id;
+            let _ = job.seq.response_tx.send(GenerateEvent::Error(
+                "Speculative burst: MTP slice target variant changed mid-flight \
+                 (should not happen)"
+                    .to_string(),
+            ));
+            drop(job);
+            self.prompt_cache_seq_ctx.remove(&seq_id);
+            self.release_sequence_caches(seq_id);
+            self.batch_metrics.record_sequence_completed(0);
+            self.batch_observability.record_sequence_completed();
+            self.publish_metrics();
+            return;
+        }
+        if job.finished() {
+            self.finalize_speculative_slice(*job);
+        } else {
+            self.speculative_slice = Some(job);
+        }
+    }
+
+    /// Finalize a finished slice job: return the drafter to the worker
+    /// slot (WITH the end-of-request reset), emit the tail + `Done` event
+    /// through the shared stream finalize, build the `BurstFinalized`
+    /// payload with the per-slice HOL accounting, and run the shared B=1
+    /// bookkeeping ([`Self::finish_speculative_b1`]).
+    fn finalize_speculative_slice(&mut self, mut job: super::speculative_slice::MtpSliceJob) {
+        // Return the drafter for the next request. The BETWEEN-slice holds
+        // deliberately skip `return_drafter` (its reset would wipe the
+        // shared-KV arming contract mid-session); the END-of-session
+        // return here resets, exactly like the legacy burst.
+        if let Some(drafter) = job.take_drafter() {
+            let target_lm: Option<&dyn LanguageModel> = match &self.model {
+                LoadedModel::Gemma4(wrapper) => Some(wrapper),
+                LoadedModel::Gemma4VLM(vlm) => Some(vlm),
+                LoadedModel::Gemma4Unified(unified) => Some(unified),
+                _ => None,
+            };
+            match target_lm {
+                Some(lm) => self.speculative_drafter_slot.return_drafter(drafter, lm),
+                // Defensive: without a resolvable target the reset cannot
+                // run; drop the handle so the next request lazily reloads.
+                None => drop(drafter),
+            }
+        }
+
+        let finish = job
+            .finish
+            .take()
+            .expect("finalize_speculative_slice requires a finished job");
+        // The generation stats mirror the legacy burst's, which discards
+        // them at finalize as well (`finalize_burst_success` ignores its
+        // timing arguments); the acceptance summary is the payload.
+        let _ = finish.stats;
+        let seq = job.seq;
+        let prompt_len = seq.prompt_tokens.len();
+        // Build the adaptive-policy profile from the acceptance summary
+        // (issue #333), with the same zero-round filter and batch_size=1 as the
+        // legacy `run_mtp_burst`.
+        let profile = finish
+            .summary
+            .filter(|summary| summary.rounds > 0 || summary.probe_rounds > 0)
+            .map(|summary| {
+                super::mtp_policy::MtpBurstProfile::from_summary(summary, 1, prompt_len)
+            });
+        let seq_id = seq.seq_id;
+        let outcome =
+            super::speculative_burst::finalize_burst_stream(&self.tokenizer, seq, &job.stream);
+        self.finish_speculative_b1(super::speculative_burst::BurstFinalized {
+            seq_id,
+            tokens_generated: outcome.tokens_generated,
+            prompt_tokens: outcome.prompt_tokens,
+            generated_tokens: outcome.generated_tokens,
+            healthy_finish: outcome.healthy_finish,
+            mtp_profile: profile,
+            // Per-slice HOL accounting (issue #734): the max single-tick
+            // wall is the realized HOL bound; the total is the cumulative
+            // worker occupancy across all slices.
+            burst_wall_ms: job.max_slice_wall_ms,
+            burst_active_ms: job.total_slice_wall_ms,
+            slices: job.slices,
+        });
+    }
+
+    /// Fail a slice start with a client-visible error: the slice
+    /// counterpart of the legacy burst's `BurstOutcome::Error` arm
+    /// (`emit_error_and_finalize` + an errored `BurstFinalized`), with the
+    /// identical `"Speculative burst: {msg}"` client message.
+    fn fail_speculative_slice_start(&mut self, seq: SequenceInfo, msg: &str, burst_start: Instant) {
+        let seq_id = seq.seq_id;
+        let _ = seq
+            .response_tx
+            .send(GenerateEvent::Error(format!("Speculative burst: {msg}")));
+        drop(seq);
+        let wall_ms = burst_start.elapsed().as_secs_f64() * 1000.0;
+        self.finish_speculative_b1(super::speculative_burst::BurstFinalized {
+            seq_id,
+            tokens_generated: 0,
+            prompt_tokens: Vec::new(),
+            generated_tokens: Vec::new(),
+            healthy_finish: false,
+            mtp_profile: None,
+            burst_wall_ms: wall_ms,
+            burst_active_ms: wall_ms,
+            slices: 1,
+        });
     }
 
     /// #715: whether the head-of-queue prompt is short enough to enter the

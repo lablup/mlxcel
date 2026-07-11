@@ -46,6 +46,13 @@ mod sequence;
 pub(crate) mod speculative_burst;
 #[cfg(test)]
 mod speculative_burst_tests;
+/// Tick-cooperative B=1 MTP speculative slices (issue #734): serves a
+/// speculative request one round per scheduler tick instead of running the
+/// whole burst inside one tick, so concurrent classic-decode rows advance
+/// between rounds (removes the burst head-of-line block measured by #638).
+pub(crate) mod speculative_slice;
+#[cfg(test)]
+mod speculative_slice_tests;
 /// Streaming-safe stop-string matcher (issue #449 M3 Stage 2d). Pure logic with
 /// no device state, so it is always compiled and unit-tested in ordinary
 /// `cargo test`; only the `xla-iree` serve worker consumes it today, so its

@@ -42,6 +42,17 @@
 //! `seq.response_tx` and finalizes inline. The classic non-speculative
 //! request stays on the bit-exact existing pipeline.
 //!
+//! **Issue #734 update:** the B=1 MTP arm no longer runs to completion by
+//! default. `MtpGenerator` now exposes a resumable session API, and the
+//! scheduler serves B=1 MTP requests on the Gemma 4 family as
+//! tick-cooperative slices (one speculative round per scheduler tick; see
+//! [`super::speculative_slice`]), removing the head-of-line block the
+//! run-to-completion burst imposed on concurrent classic rows. The
+//! run-to-completion path below remains for the DFlash arm, the B>1
+//! batched arms, and as the `MLXCEL_MTP_TICK_SLICE=0` escape hatch; the
+//! slice path reuses this module's gate predicates, drafter slot, and
+//! streaming/finalize helpers so both paths stay behaviourally identical.
+//!
 //! ## Scope (B = 1 today)
 //!
 //! This module implements the B = 1 burst for:
@@ -288,6 +299,15 @@ impl WorkerDrafterSlot {
     /// empty and the next request lazily reloads.
     pub(crate) fn take(&mut self) -> Option<Box<dyn Drafter>> {
         self.drafter.take()
+    }
+
+    /// Restore a drafter handle that was taken but never driven (e.g. the
+    /// slice path bound it and then failed the sequence-state transition
+    /// before any round ran). Skips [`Drafter::reset`]: with no per-run
+    /// state accumulated there is nothing to clear, and the next burst
+    /// re-binds anyway.
+    pub(crate) fn restore_unused(&mut self, drafter: Box<dyn Drafter>) {
+        self.drafter = Some(drafter);
     }
 
     /// Return the drafter handle after a successful burst. Resets the
@@ -652,15 +672,25 @@ pub(crate) struct BurstFinalized {
     /// transition-failure paths. The scheduler feeds it to
     /// [`super::mtp_policy::MtpPolicy::record_b1_sample`].
     pub mtp_profile: Option<MtpBurstProfile>,
-    /// Wall-clock the B=1 burst occupied the single scheduler worker thread,
-    /// in milliseconds (issue #638 observability). Because the burst runs the
-    /// whole request to completion in one scheduler tick, this is also the
-    /// head-of-line stall it imposed on every concurrent classic-decode row:
-    /// no other sequence advanced while the burst ran. The scheduler logs it
-    /// alongside the round / accepted-token counts so the HOL cost of the
-    /// run-to-completion burst is operator-visible until the tick-cooperative
-    /// slice lands.
+    /// Maximum wall-clock any SINGLE scheduler tick spent on this request,
+    /// in milliseconds (issue #638 observability, re-scoped by issue #734).
+    /// This is the head-of-line stall bound the request imposed on
+    /// concurrent classic-decode rows. On the tick-cooperative MTP slice
+    /// path one tick is one speculative round (or the prefill + seed slice
+    /// 0), so this is about one round's worker occupancy. The legacy
+    /// run-to-completion arms (DFlash, and MTP with
+    /// `MLXCEL_MTP_TICK_SLICE=0`) still serve the whole request in one
+    /// tick, so for them this remains the whole-burst wall clock.
     pub burst_wall_ms: f64,
+    /// Cumulative worker-thread occupancy across every slice of the
+    /// request, in milliseconds (issue #734). Equals [`Self::burst_wall_ms`]
+    /// on the run-to-completion arms (one slice = the whole burst).
+    pub burst_active_ms: f64,
+    /// Number of scheduler-tick slices the request consumed (issue #734).
+    /// `1` on the run-to-completion arms; `>= 1` on the tick-cooperative
+    /// MTP slice path (prefill + seed is slice 1, each speculative round
+    /// adds one).
+    pub slices: usize,
 }
 
 /// Run a speculative burst for `seq`, producing every token the request
@@ -740,6 +770,7 @@ pub(crate) fn try_run_burst_b1(
             if let Err(err) = seq.state.transition_to(SequenceState::Prefilling) {
                 let seq_id = seq.seq_id;
                 emit_error_and_finalize(ctx, seq, &format!("State transition error: {err}"));
+                let wall_ms = burst_start.elapsed().as_secs_f64() * 1000.0;
                 return Ok(BurstFinalized {
                     seq_id,
                     tokens_generated: 0,
@@ -750,7 +781,9 @@ pub(crate) fn try_run_burst_b1(
                     healthy_finish: false,
                     // No usable profile: the burst never streamed tokens.
                     mtp_profile: None,
-                    burst_wall_ms: burst_start.elapsed().as_secs_f64() * 1000.0,
+                    burst_wall_ms: wall_ms,
+                    burst_active_ms: wall_ms,
+                    slices: 1,
                 });
             }
             let seq_id = seq.seq_id;
@@ -762,6 +795,7 @@ pub(crate) fn try_run_burst_b1(
             // `TokenWithLogprobs` payload as the classic decode path
             let finalized =
                 finalize_burst_success(ctx, seq, tokens, logprobs, prefill_time_ms, decode_time_ms);
+            let wall_ms = burst_start.elapsed().as_secs_f64() * 1000.0;
             Ok(BurstFinalized {
                 seq_id,
                 tokens_generated: finalized.tokens_generated,
@@ -771,7 +805,9 @@ pub(crate) fn try_run_burst_b1(
                 // Surface the MTP profile so the scheduler can feed the
                 // adaptive policy. `None` for DFlash / zero-round runs.
                 mtp_profile: profile,
-                burst_wall_ms: burst_start.elapsed().as_secs_f64() * 1000.0,
+                burst_wall_ms: wall_ms,
+                burst_active_ms: wall_ms,
+                slices: 1,
             })
         }
         Err(BurstOutcome::DeclineToClassic) => {
@@ -794,6 +830,7 @@ pub(crate) fn try_run_burst_b1(
             // generated tokens.
             let seq_id = seq.seq_id;
             emit_error_and_finalize(ctx, seq, &msg);
+            let wall_ms = burst_start.elapsed().as_secs_f64() * 1000.0;
             Ok(BurstFinalized {
                 seq_id,
                 tokens_generated: 0,
@@ -805,7 +842,9 @@ pub(crate) fn try_run_burst_b1(
                 healthy_finish: false,
                 // Errored burst: no profile to record.
                 mtp_profile: None,
-                burst_wall_ms: burst_start.elapsed().as_secs_f64() * 1000.0,
+                burst_wall_ms: wall_ms,
+                burst_active_ms: wall_ms,
+                slices: 1,
             })
         }
     }
@@ -841,16 +880,16 @@ struct BurstSuccess {
 /// healthy (`Stop` / `Length`). The burst owns the `SequenceInfo` by
 /// value, so re-surfacing these is the only way the scheduler can call
 /// `donate_finished_sequence_cache` after the burst returns.
-struct FinalizeOutcome {
+pub(crate) struct FinalizeOutcome {
     /// Tokens actually streamed to the client (== committed
     /// `generated_tokens.len()`).
-    tokens_generated: usize,
+    pub(crate) tokens_generated: usize,
     /// The request's full prompt token stream (for the donate key).
-    prompt_tokens: Vec<i32>,
+    pub(crate) prompt_tokens: Vec<i32>,
     /// The tokens committed to the sequence after early-EOS truncation.
-    generated_tokens: Vec<i32>,
+    pub(crate) generated_tokens: Vec<i32>,
     /// `true` for `FinishReason::Stop` / `FinishReason::Length`.
-    healthy_finish: bool,
+    pub(crate) healthy_finish: bool,
 }
 
 /// Burst error / decline.
@@ -1705,26 +1744,97 @@ fn finalize_burst_success(
     _prefill_time_ms: f64,
     _decode_time_ms: f64,
 ) -> FinalizeOutcome {
-    // Resolve the eos set once for the EOS-vs-Length classification.
-    // `seq.merged_eos` is empty here (the classic path populates it in
-    // `finish_prefill`); we recompute from the sampling/model state.
-    let merged_eos = merged_eos_token_ids(ctx.model.eos_token_ids(), &seq.sampling.stop_token_ids);
-    let eos_set: std::collections::HashSet<i32> = merged_eos.iter().copied().collect();
+    let mut stream = begin_burst_stream(ctx.model.eos_token_ids(), &seq);
+    stream_burst_tokens(ctx.tokenizer, &mut seq, &mut stream, &tokens, &logprobs);
+    finalize_burst_stream(ctx.tokenizer, seq, &stream)
+}
 
-    let max_tokens = seq.max_tokens.max(1);
-    let mut hit_eos = false;
+/// Cross-slice streaming state of a burst-produced token stream
+/// (issue #734).
+///
+/// The run-to-completion burst streams every token in one
+/// [`finalize_burst_success`] call; the tick-cooperative MTP slice streams
+/// each round's tokens as they land, across scheduler ticks. Both paths
+/// drive the same three helpers ([`begin_burst_stream`],
+/// [`stream_burst_tokens`] (once, or once per slice), and
+/// [`finalize_burst_stream`]), so the client-visible event stream, the
+/// thinking-budget enforcement, and the EOS-vs-Length classification are
+/// identical regardless of how the tokens were produced.
+pub(crate) struct BurstStreamState {
+    /// Merged EOS set (target EOS + per-request stop tokens), resolved once.
+    eos_set: std::collections::HashSet<i32>,
+    /// Emission budget (`seq.max_tokens.max(1)`).
+    max_tokens: usize,
+    /// Whether an EOS token (post thinking-budget override) terminated the
+    /// stream. Drives the `FinishReason::Stop` classification.
+    hit_eos: bool,
+    /// Whether the request asked for per-token logprobs.
+    logprobs_enabled: bool,
+    /// Whether the stream reached a terminal condition (EOS or budget).
+    /// Once set, further [`stream_burst_tokens`] calls are no-ops; the
+    /// slice driver uses this to stop stepping the generator when the
+    /// stream layer finished the request first (e.g. a thinking-budget
+    /// forced `</think>` that is an EOS id).
+    done: bool,
+}
 
+/// Resolve the per-request streaming state once, before the first tokens
+/// land. `model_eos_token_ids` is the target's EOS set
+/// (`LoadedModel::eos_token_ids()`); `seq.merged_eos` is empty on the burst
+/// path (the classic path populates it in `finish_prefill`), so the merged
+/// set is recomputed here from the sampling/model state.
+pub(crate) fn begin_burst_stream(
+    model_eos_token_ids: Vec<i32>,
+    seq: &SequenceInfo,
+) -> BurstStreamState {
+    let merged_eos = merged_eos_token_ids(model_eos_token_ids, &seq.sampling.stop_token_ids);
+    BurstStreamState {
+        eos_set: merged_eos.iter().copied().collect(),
+        max_tokens: seq.max_tokens.max(1),
+        hit_eos: false,
+        logprobs_enabled: seq.logprobs_config.enabled,
+        done: false,
+    }
+}
+
+/// Stream one batch of burst-produced tokens to `seq.response_tx`,
+/// committing them to `seq.generated_tokens` and applying the per-token
+/// thinking-budget + EOS + budget checks. Returns `true` when the stream
+/// reached a terminal condition (EOS or budget); the caller must then
+/// stop producing tokens and call [`finalize_burst_stream`].
+///
+/// `logprobs` is index-aligned 1:1 with `tokens` (this call's slice, not
+/// the whole request). An empty `logprobs` with logprobs enabled degrades
+/// to plain `Token` events, matching the batched arm's contract.
+pub(crate) fn stream_burst_tokens(
+    tokenizer: &crate::tokenizer::MlxcelTokenizer,
+    seq: &mut SequenceInfo,
+    stream: &mut BurstStreamState,
+    tokens: &[i32],
+    logprobs: &[Option<TokenLogprobData>],
+) -> bool {
+    if stream.done {
+        return true;
+    }
+    // Stamp the first-token time when the first slice's tokens land. On
+    // the run-to-completion path this is the same instant the legacy code
+    // stamped (right before its token loop); on the slice path it is the
+    // end of slice 0, which is when the client actually receives the
+    // first token.
+    if seq.first_token_time.is_none() {
+        seq.first_token_time = Some(Instant::now());
+    }
     // When `seq.logprobs_config.enabled` the burst's generator returned
     // one logprob entry per emitted token, index-aligned with `tokens`.
     // We emit `GenerateEvent::TokenWithLogprobs` in that case so a
     // speculative response carries the same payload as the classic
-    // decode path's `decode_single_step`. The empty-vec
-    // case (logprobs disabled) falls through to plain `Token` events.
-    let logprobs_enabled = seq.logprobs_config.enabled && !logprobs.is_empty();
-
-    seq.first_token_time = Some(Instant::now());
+    // decode path's `decode_single_step`. The empty-slice
+    // case (logprobs disabled, or the batched arm) falls through to
+    // plain `Token` events.
+    let logprobs_on = stream.logprobs_enabled && !logprobs.is_empty();
     for (idx, token) in tokens.iter().copied().enumerate() {
-        if seq.generated_tokens.len() >= max_tokens {
+        if seq.generated_tokens.len() >= stream.max_tokens {
+            stream.done = true;
             break;
         }
 
@@ -1744,19 +1854,20 @@ fn finalize_burst_success(
         // `decode_single_step` semantics. The check uses the
         // post-override `final_token` so a forced `</think>` that
         // happens to be an EOS id is classified correctly.
-        if eos_set.contains(&final_token) {
-            hit_eos = true;
+        if stream.eos_set.contains(&final_token) {
+            stream.hit_eos = true;
+            stream.done = true;
             break;
         }
         seq.generated_tokens.push(final_token);
-        if let Some(new_text) = seq.decode_state.on_token(final_token, ctx.tokenizer) {
+        if let Some(new_text) = seq.decode_state.on_token(final_token, tokenizer) {
             // `logprobs[idx]` mirrors the classic path's per-token
             // `compute_logprobs(...)` result: `Some(lp)` → emit
             // `TokenWithLogprobs`, `None` → emit plain `Token` (the
             // classic path does the same when `compute_logprobs`
             // returns `None`, e.g. on a sampler override). A fired
             // thinking-budget override also forces plain `Token`.
-            let event = if logprobs_enabled && !override_fired {
+            let event = if logprobs_on && !override_fired {
                 match logprobs.get(idx).and_then(|lp| lp.clone()) {
                     Some(lp) => GenerateEvent::TokenWithLogprobs(new_text, lp),
                     None => GenerateEvent::Token(new_text),
@@ -1767,11 +1878,29 @@ fn finalize_burst_success(
             let _ = seq.response_tx.send(event);
         }
     }
+    // Budget saturation terminates the stream even when the last committed
+    // token was the final in-budget one (the legacy loop discovered this at
+    // the top of the NEXT iteration; the slice driver needs it now so it
+    // stops stepping the generator).
+    if seq.generated_tokens.len() >= stream.max_tokens {
+        stream.done = true;
+    }
+    stream.done
+}
 
+/// Classify the finish, transition the sequence state, flush the
+/// incremental detokenizer, and emit the `Done` event. The tail of the
+/// legacy `finalize_burst_success`, shared by the run-to-completion and
+/// tick-cooperative paths.
+pub(crate) fn finalize_burst_stream(
+    tokenizer: &crate::tokenizer::MlxcelTokenizer,
+    mut seq: SequenceInfo,
+    stream: &BurstStreamState,
+) -> FinalizeOutcome {
     // Final state classification.
-    let finish_reason = if hit_eos {
+    let finish_reason = if stream.hit_eos {
         FinishReason::Stop
-    } else if seq.generated_tokens.len() >= max_tokens {
+    } else if seq.generated_tokens.len() >= stream.max_tokens {
         FinishReason::Length
     } else {
         // The drafter / round loop bailed early without hitting EOS or
@@ -1803,7 +1932,7 @@ fn finalize_burst_success(
     let tokens_generated = seq.generated_tokens.len();
     // Forward the incremental detokenizer's held tail as one final token event
     // before Done so streaming clients receive it (issue #633).
-    if let Some(tail) = seq.decode_state.flush(ctx.tokenizer) {
+    if let Some(tail) = seq.decode_state.flush(tokenizer) {
         let _ = seq.response_tx.send(GenerateEvent::Token(tail));
     }
     let cached = seq.already_cached_tokens;
