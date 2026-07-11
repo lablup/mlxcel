@@ -276,12 +276,15 @@ classic forwards instead of amortizing to one the way it does on Apple Silicon
 GB10 now clears the 1.4× target from issue #638 at K=4/K=8 at unchanged
 acceptance (see `qmv-multirow-gb10-2026-07-11.md`). K=8 collapses onto K=4
 because the drafter's configured block size is 4 and the acceptance never
-clears the adaptive block-expansion gate. Serving caveat: the adaptive policy
-still de-rates non-Apple-Silicon hosts by `sqrt(K)` (issue #638), calibrated
-against the pre-#725 verify; it can now wrongly decline this favourable
-pairing, and #736 tracks the measured-round-cost re-calibration
-(`MLXCEL_ENABLE_MTP_B1=1` pins B=1 MTP on until then). The DFlash and 31B rows
-remain deferred (no checkpoint / wrong target family, see the dated note).
+clears the adaptive block-expansion gate. Serving note (#736, resolved): the
+adaptive policy no longer relies on the `sqrt(K)` shape heuristic (issue
+#638), which was calibrated against the pre-#725 verify and could wrongly
+decline this favourable pairing; it now settles verdicts from a measured
+comparison against classic-step probe rounds (hint format v3), so this
+pairing profiles to an enable verdict in serving without a manual override
+(`sqrt(K)` remains only as a fallback for windows with no probe signal). The
+DFlash and 31B rows remain deferred (no checkpoint / wrong target family, see
+the dated note).
 
 ### Deferred pairings
 

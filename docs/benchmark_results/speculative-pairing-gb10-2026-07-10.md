@@ -128,14 +128,15 @@ settles to a decline for this pairing on GB10 after its bounded profiling
 window, while a pairing with high accepted length still clears the enable
 floor.
 
-Known limitation (#736): the `sqrt(K)` constant was calibrated against the
-"~1.9x growth from K=2 to K=8" datum, which the section above corrects to
-effective K=4; the true verify scaling is linear, so `sqrt(K)` under-costs a
-K=4 round by about 2x (sqrt(4) = 2 versus the measured ~3.9 classic-forward
-equivalents). The decline verdict for this pairing still holds because its
-accepted length is low, but a moderately better pairing could be wrongly
-enabled; #736 tracks replacing the shape heuristic with the measured round
-cost against a measured classic step time.
+Known limitation (#736, resolved): the `sqrt(K)` constant was calibrated
+against the "~1.9x growth from K=2 to K=8" datum, which the section above
+corrects to effective K=4; the true verify scaling is linear, so `sqrt(K)`
+under-costs a K=4 round by about 2x (sqrt(4) = 2 versus the measured ~3.9
+classic-forward equivalents). The decline verdict for this pairing still held
+because its accepted length was low, but a moderately better pairing could
+have been wrongly enabled. #736 replaced the shape heuristic with an
+estimator measured against classic-step probe rounds (hint format v3);
+`sqrt(K)` remains only as a fallback for windows with no probe signal.
 
 ## Follow-ups
 
@@ -143,7 +144,8 @@ cost against a measured classic step time.
   matrix once it lands.
 - #735: pad the CUDA MTP verify past the qmv dispatch threshold, the
   verify-side consumer of #725.
-- #736: measured-round-cost policy estimator replacing `sqrt(K)`.
+- #736: measured-round-cost policy estimator replacing `sqrt(K)`. Done; see
+  `qmv-multirow-gb10-2026-07-11.md`.
 - #737: acceptance-rate cross-check on Apple Silicon. GB10's 35-56% is below
   the 70-87% third parties report for the Gemma 4 assistants, and the M5 Max
   run predates the bench's acceptance reporting.
