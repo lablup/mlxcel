@@ -591,7 +591,9 @@ impl<T: MtpTarget> MtpGenerator<T> {
             let budget = max_tokens - emitted.len();
             let walk_start = Instant::now();
             let walk = speculative_walk(&draft_tokens, &forward_out.target_tokens, budget);
-            diagnostics.speculative_walk_ms += duration_ms(walk_start.elapsed());
+            if !is_probe {
+                diagnostics.speculative_walk_ms += duration_ms(walk_start.elapsed());
+            }
             if is_probe {
                 // Probe rounds stand in for classic decode steps: their
                 // verify time is the classic-step signal and they stay out
@@ -614,7 +616,9 @@ impl<T: MtpTarget> MtpGenerator<T> {
             verify_out =
                 self.target
                     .verify_finalize(walk.accepted, actual_bs, forward_out.captured);
-            diagnostics.verify_finalize_ms += duration_ms(verify_finalize_start.elapsed());
+            if !is_probe {
+                diagnostics.verify_finalize_ms += duration_ms(verify_finalize_start.elapsed());
+            }
 
             // Emit accepted tokens. `walk.new_tokens[i] == target_tokens[i]`
             // for every `i` (accepted draft tokens matched the target by
@@ -668,7 +672,9 @@ impl<T: MtpTarget> MtpGenerator<T> {
             // next `draft_block`.
             let set_shared_start = Instant::now();
             self.set_shared_kv_from_verify(&verify_out);
-            diagnostics.set_shared_kv_ms += duration_ms(set_shared_start.elapsed());
+            if !is_probe {
+                diagnostics.set_shared_kv_ms += duration_ms(set_shared_start.elapsed());
+            }
         }
 
         let decode_time = decode_start.elapsed();

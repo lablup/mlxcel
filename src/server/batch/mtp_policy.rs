@@ -199,8 +199,10 @@ pub(crate) fn estimate_speedup_scaled(
 /// ratio reflects it, and on hardware where it does not (pre-#725 per-row
 /// qmv, unknown backends) the measured ratio reflects that too. The probe's
 /// verify carries the shared-KV capture that classic decode does not pay, so
-/// `classic_step_ms` is slightly over-measured and the estimate errs mildly
-/// conservative. Returns `None` without a usable signal.
+/// `classic_step_ms` is slightly over-measured, which mildly INFLATES the
+/// estimate (a slower-looking classic baseline raises the ratio; measured
+/// +1.7% on GB10, probe 76.3 ms vs forced-classic ~75 ms), well inside the
+/// 1.5x enable margin. Returns `None` without a usable signal.
 #[must_use]
 pub(crate) fn estimate_speedup_measured(
     accepted_len: f64,
@@ -439,7 +441,7 @@ impl ProfileAccumulator {
             return None;
         }
         let mut sorted = self.probe_burst_means.clone();
-        sorted.sort_by(|a, b| a.partial_cmp(b).expect("finite by construction"));
+        sorted.sort_by(f64::total_cmp);
         let n = sorted.len();
         let median = if n % 2 == 1 {
             sorted[n / 2]
