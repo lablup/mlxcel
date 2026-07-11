@@ -48,18 +48,19 @@ Escape hatches restore the previous single-client behavior: `--parallel 1`
 (single decode slot), `--no-batch` (legacy sequential worker, no scheduler),
 `--max-batch-prefill 1` (sequential prefill), and `--no-prompt-cache`.
 
-> Backend note (CUDA / Blackwell, e.g. GB10): the "aggregate throughput scales
-> with concurrency" statement above holds on Metal but not on CUDA. On CUDA the
-> quantized batched-decode matmul does not amortize weight bandwidth (a batch of
-> B decodes takes about B times a single decode), so aggregate decode throughput
-> is flat across `--parallel` (measured ~45 tok/s at B=1/2/4 on llama-3.1-8b-4bit
-> on GB10). There, `--parallel` is a TTFT / concurrency knob, not an aggregate
-> decode-throughput lever, and batched vs sequential decode is a throughput wash.
-> The aggregate lever on CUDA is prefill: see the sm_120/121 qmm tile tuning in
-> `docs/benchmark_results/qmm-sm121-tile-tuning-gb10-2026-07-10.md` (+38% prefill).
-> `--max-batch-prefill` (large-M, tile-tuned) and the prompt cache remain real
-> wins on CUDA. The root cause is the absence of an amortizing small-M quantized
-> GEMM (or a weight-reusing batched qmv) on Blackwell, an upstream MLX follow-up.
+> Backend note (CUDA / Blackwell, e.g. GB10): batched decode used to be a
+> throughput wash on CUDA because the `M*B < 8` quantized matmul fell back to
+> per-row qmv, re-reading the weights once per sequence (aggregate flat at
+> ~45-50 tok/s across B=1/2/4 on llama-3.1-8b-4bit). The multirow qmv path
+> (issue #725, `MLXCEL_QMV_MULTIROW`, on by default) amortizes the weight reads
+> across the batch, so aggregate decode now scales with concurrency on CUDA
+> too: 40.4 / 68.5 / 74.2 tok/s at 1/2/4 clients on llama-3.1-8b-4bit on GB10
+> (vs 40.5 / 49.8 / 49.6 with the kill switch off). Scaling stays sublinear
+> versus Metal because attention KV reads still grow with B; the small-M
+> `qmm_sm80` tile shape (`M*B >= 8`) remains upstream MLX territory. See
+> `docs/benchmark_results/qmv-multirow-gb10-2026-07-11.md`. `--max-batch-prefill`
+> (large-M, tile-tuned, `docs/benchmark_results/qmm-sm121-tile-tuning-gb10-2026-07-10.md`)
+> and the prompt cache remain independent wins on CUDA.
 
 Memory sizing: the KV footprint grows with the active batch, so budget for up to
 `--parallel` concurrent sequences' KV. When `--ctx-size` is set it is divided

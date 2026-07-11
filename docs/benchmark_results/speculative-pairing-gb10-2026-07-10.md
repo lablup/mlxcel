@@ -1,5 +1,13 @@
 # Speculative drafter pairing matrix on GB10 (CUDA), 2026-07-10
 
+> **2026-07-11 update (#725):** the multirow qmv path landed and flips this
+> matrix: the same pairing now measures 1.31x (K=2), 1.46x (K=4), 1.41x (K=8)
+> against the same 14.5 tok/s baseline, at unchanged acceptance. The verify
+> forward amortizes as the analysis below predicted once the `M*B < 8` per-row
+> qmv fallback is removed. Current numbers:
+> `qmv-multirow-gb10-2026-07-11.md`. The measurements below are kept as the
+> pre-#725 record.
+
 Measured B=1 MTP speculative-decoding numbers for the Gemma 4 pairing whose
 target and drafter checkpoints are present on the GB10 CUDA host, filling the
 CUDA column of the speculative pairing matrix (issue #638). The headline result:

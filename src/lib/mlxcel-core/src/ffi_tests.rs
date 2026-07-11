@@ -3710,3 +3710,76 @@ fn try_array_to_raw_bytes_round_trips_f32() {
         .collect();
     assert_eq!(values, vec![1.0, 2.0, 3.0]);
 }
+
+/// [#725] Multirow qmv parity: with broadcast weights and 2..8 input rows (the
+/// CUDA `M*B < 8` qmv dispatch window), the weight-amortizing multirow kernel
+/// must produce bit-identical rows to the stock per-row launches that
+/// single-token decode still uses. Bitwise equality is the contract because the
+/// multirow kernel keeps the stock kernel's per-row dequant -> fma -> reduce
+/// order; only the weight-tile loads are shared across rows. CUDA-only: the
+/// Metal qmv/qmm split has its own arch-dependent thresholds and the qmm side
+/// is not expected to be bitwise-equal to per-row qmv.
+#[cfg(feature = "cuda")]
+#[test]
+fn qmv_multirow_matches_per_row_qmv_bitwise() {
+    random_seed(725);
+    // n % 128 == 0 keeps supports_qmm_sm80 true so the M*B < 8 branch (not the
+    // qmv-only fallthrough) selects qmv, matching the production dispatch.
+    let n = 256;
+    // (k, group_size, bits, dtype): k=576 exercises the residue-k loop
+    // (576 % 512 != 0), bits=8 exercises the float accumulators, and the f32
+    // case exercises the qmm_naive-gated dispatch branch.
+    let cases = [
+        (1024, 64, 4, dtype::BFLOAT16),
+        (576, 64, 4, dtype::BFLOAT16),
+        (1024, 64, 8, dtype::FLOAT16),
+        (512, 32, 4, dtype::FLOAT32),
+    ];
+    for &(k, group_size, bits, dt) in &cases {
+        let (w, s, b) = random_quantized_weight(n, k, group_size, bits);
+        for &rows in &[2i32, 3, 4, 7] {
+            let x_f32 = unsafe { random_normal(&[rows, k], dtype::FLOAT32, std::ptr::null()) };
+            let x = astype(&x_f32, dt);
+            eval(&x);
+            let full = unsafe {
+                quantized_matmul(
+                    &x,
+                    &w,
+                    &s,
+                    b.as_ref().unwrap() as *const MlxArray,
+                    true,
+                    group_size,
+                    bits,
+                    "affine",
+                )
+            };
+            eval(&full);
+            assert_eq!(array_shape(&full), vec![rows, n]);
+            let full_bytes = array_to_raw_bytes(&full);
+            let row_nbytes = full_bytes.len() / rows as usize;
+            for j in 0..rows {
+                let xj = slice(&x, &[j, 0], &[j + 1, k]);
+                let one = unsafe {
+                    quantized_matmul(
+                        &xj,
+                        &w,
+                        &s,
+                        b.as_ref().unwrap() as *const MlxArray,
+                        true,
+                        group_size,
+                        bits,
+                        "affine",
+                    )
+                };
+                eval(&one);
+                let one_bytes = array_to_raw_bytes(&one);
+                assert_eq!(
+                    one_bytes.as_slice(),
+                    &full_bytes[j as usize * row_nbytes..(j as usize + 1) * row_nbytes],
+                    "row {j} of multirow [{rows}x{k}] {bits}-bit gs{group_size} \
+                     diverged from per-row qmv"
+                );
+            }
+        }
+    }
+}

@@ -255,26 +255,33 @@ tuning derivation are in
 | Pairing (GB10 CUDA)                     | Kind | K | tok/s | speedup vs no-drafter | acceptance | mean accepted len | status |
 |-----------------------------------------|------|---|------:|----------------------:|-----------:|------------------:|--------|
 | Gemma 4 Unified 12B (no drafter)        | none | — | 14.5  | 1.00×                 | —          | —                 | ok |
+| Gemma 4 Unified 12B + MTP assistant     | mtp  | 2 | 19.0  | 1.31×                 | 56.6%      | 0.57              | ok (multirow qmv, #725) |
+| Gemma 4 Unified 12B + MTP assistant     | mtp  | 4 | 21.2  | 1.46×                 | 35.8%      | 1.07              | ok (multirow qmv, #725) |
+| Gemma 4 Unified 12B + MTP assistant     | mtp  | 8 | 20.4  | 1.41×                 | 34.1%      | 1.02              | ok (effective K=4) |
+
+Pre-#725 record (per-row qmv verify; reproducible with `MLXCEL_QMV_MULTIROW=0`,
+which measures 7.7 tok/s at K=4 on the same binary):
+
+| Pairing (GB10 CUDA, pre-#725)           | Kind | K | tok/s | speedup vs no-drafter | acceptance | mean accepted len | status |
+|-----------------------------------------|------|---|------:|----------------------:|-----------:|------------------:|--------|
 | Gemma 4 Unified 12B + MTP assistant     | mtp  | 2 | 11.1  | 0.77×                 | 55.6%      | 0.56              | regression |
 | Gemma 4 Unified 12B + MTP assistant     | mtp  | 4 | 7.6   | 0.52×                 | 35.0%      | 1.05              | regression |
 | Gemma 4 Unified 12B + MTP assistant     | mtp  | 8 | 7.5   | 0.52×                 | 35.0%      | 1.05              | regression (effective K=4) |
 
-The 12B Unified MTP pairing is a consistent regression on GB10 across K. The
-verify `[1, K]` forward hits the CUDA quantized dispatch's `M*B < 8` per-row
-qmv fallback (the #725 kernel gap), so its cost is roughly K classic forwards
-instead of amortizing to one the way it does on Apple Silicon (the same
-pairing measures ~1.87× on M5 Max), and the assistant's acceptance (35-56%)
-is too low to pay for that. K=8 collapses onto K=4 because the drafter's
-configured block size is 4 and the acceptance never clears the adaptive
-block-expansion gate. The adaptive policy de-rates its speedup estimate by
-`sqrt(K)` on non-Apple-Silicon hosts (issue #638) so it settles to a decline
-for this pairing after its bounded profiling window, while Apple Silicon
-verdicts stay byte-identical (#736 tracks replacing the heuristic with the
-measured round cost). This is a kernel gap, not a hardware limit: SGLang on
-the same DGX Spark hardware shows near-linear batched decode scaling and up
-to 2× EAGLE-3 speculative speedups. No local Gemma-4 or Qwen-3.5 pairing on
-this host reaches the issue's 1.4× target; the DFlash and 31B rows remain
-deferred (no checkpoint / wrong target family, see the dated note).
+The pre-#725 regression came from the verify `[1, K]` forward hitting the CUDA
+quantized dispatch's `M*B < 8` per-row qmv fallback, which costs roughly K
+classic forwards instead of amortizing to one the way it does on Apple Silicon
+(the same pairing measures ~1.87× on M5 Max). The multirow qmv path (#725,
+`MLXCEL_QMV_MULTIROW`) removes that fallback's weight re-reads, and B=1 MTP on
+GB10 now clears the 1.4× target from issue #638 at K=4/K=8 at unchanged
+acceptance (see `qmv-multirow-gb10-2026-07-11.md`). K=8 collapses onto K=4
+because the drafter's configured block size is 4 and the acceptance never
+clears the adaptive block-expansion gate. Serving caveat: the adaptive policy
+still de-rates non-Apple-Silicon hosts by `sqrt(K)` (issue #638), calibrated
+against the pre-#725 verify; it can now wrongly decline this favourable
+pairing, and #736 tracks the measured-round-cost re-calibration
+(`MLXCEL_ENABLE_MTP_B1=1` pins B=1 MTP on until then). The DFlash and 31B rows
+remain deferred (no checkpoint / wrong target family, see the dated note).
 
 ### Deferred pairings
 
