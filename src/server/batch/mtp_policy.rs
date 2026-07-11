@@ -356,7 +356,13 @@ impl ProfileAccumulator {
     /// #736): a probe's signal is independent of whether the same burst also
     /// completed a speculative round.
     pub(crate) fn add(&mut self, profile: &MtpBurstProfile) {
-        if profile.probe_rounds > 0 {
+        // Cap the probe-mean history: the median only needs a handful of
+        // bursts, and without a cap a pairing that never settles (an
+        // all-tiny-completion workload where probes consume every round
+        // budget) would grow this vec by one entry per request for the
+        // process lifetime.
+        const MAX_PROBE_BURST_MEANS: usize = 2 * PROFILE_SAMPLE_TARGET;
+        if profile.probe_rounds > 0 && self.probe_burst_means.len() < MAX_PROBE_BURST_MEANS {
             let mean = profile.probe_ms / profile.probe_rounds as f64;
             if mean.is_finite() && mean > 0.0 {
                 self.probe_burst_means.push(mean);
