@@ -818,10 +818,13 @@ pub(crate) struct ServeArgs {
     /// Number of parallel request slots that share --ctx-size (default: 4)
     ///
     /// Sets the maximum concurrent decode batch for multi-client serving.
-    /// Weights are read once per decode step regardless of batch size, so
-    /// batched decode raises aggregate throughput and keeps time-to-first-token
-    /// low under concurrent load. Clamped to 1 for model families that cannot
-    /// batch. Use `--n-parallel 1` (or `--no-batch`) for single-slot serving.
+    /// Batched decode amortizes the per-step weight reads across the batch,
+    /// raising aggregate throughput and keeping time-to-first-token low under
+    /// concurrent load. On CUDA the amortizing kernel covers decode batches
+    /// of up to 7 rows (issue #725); keep this at 7 or below there (see
+    /// docs/CONTINUOUS_BATCHING.md). Clamped to 1 for model families that
+    /// cannot batch. Use `--n-parallel 1` (or `--no-batch`) for single-slot
+    /// serving.
     #[arg(long, env = "LLAMA_ARG_N_PARALLEL", default_value_t = 4)]
     n_parallel: usize,
 
@@ -839,6 +842,14 @@ pub(crate) struct ServeArgs {
     /// llama-server-style `--model-draft` spelling (alias, matches
     /// `mlxcel-server`) so commands copied between the two binaries work
     /// unchanged.
+    ///
+    /// Whether the singleton (B=1) speculative burst runs is decided by an
+    /// adaptive policy: the first few requests per (target, drafter,
+    /// hardware, block size) pairing are profiled with measured classic-step
+    /// probes, and the pairing is enabled or declined from the measured
+    /// speedup. `MLXCEL_ENABLE_MTP_B1` pins the decision, and
+    /// `MLXCEL_MTP_ADAPTIVE=0` restores the static per-hardware gates. See
+    /// docs/CONTINUOUS_BATCHING.md and docs/environment-variables.md.
     #[arg(long, visible_alias = "model-draft", value_name = "PATH")]
     draft_model: Option<PathBuf>,
 

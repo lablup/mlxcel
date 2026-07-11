@@ -195,6 +195,48 @@ prompt-prefix reuse across same-session follow-up turns with the same image.
 The default stays off for VLM requests, and text-only prompt-cache behavior is
 unchanged.
 
+### Speculative decoding under continuous batching
+
+Supplying a drafter checkpoint (`--draft-model` on `mlxcel serve`,
+`--model-draft` on `mlxcel-server`; the spellings are cross-aliased) turns on
+server-side speculative decoding. The kind is auto-detected from the drafter's
+`config.json` (`--draft-kind mtp|dflash` overrides), and the draft block size
+K defaults per kind (4 for MTP, 16 for DFlash; `--draft-block-size`).
+
+Whether the singleton (B=1) speculative burst actually runs is decided by an
+adaptive policy (issues #333/#736), not by the flag alone. The first 4
+qualifying requests of each (target, drafter, hardware, K) pairing are
+profiled with speculation forced on; each profiled burst also runs 2
+classic-step probe rounds (drafterless single-token verifies that emit real
+greedy tokens), so the policy can compare the measured speculative round cost
+against the measured classic step time and settle to Enable, Decline, or the
+static per-hardware default when the estimate is ambiguous. The verdict is
+persisted under `${MLXCEL_CACHE_DIR:-$HOME/.cache/mlxcel}/mtp-policy/` and
+logged at settle time (`adaptive MTP policy: settled verdict ... est_speedup=...
+[measured]`), so a restart skips profiling. Changing K re-profiles. Because
+the decision is measured, the same binary enables a pairing where the
+speculative round pays for itself (Gemma 4 12B + assistant: ~1.87x on M5 Max,
+~1.5x on GB10 with the multirow qmv verify) and declines it where it does not
+(the same pairing on M1 Ultra, or on CUDA with `MLXCEL_QMV_MULTIROW=0`).
+
+Scheduling caveat: an enabled B=1 burst runs its request to completion on the
+scheduler worker. For non-batchable targets (the 12B Unified family) this
+equals their inherent single-slot serialization, but for batch-capable targets
+it head-of-line-blocks concurrent rows for the burst's full duration; the
+scheduler logs the stall as `burst_wall_ms` at burst finalize, and the
+tick-cooperative slice that removes the stall is tracked in #734. Concurrent
+speculative requests that share a prompt length, `max_tokens`, and sampling
+config can instead run as one B>1 batched burst, but that path is
+experimental and stays behind `MLXCEL_ENABLE_MTP_BATCH` (plus
+`MLXCEL_ENABLE_MTP_BATCH_RAGGED` for mixed prompt lengths).
+
+Operator controls, all env-level (see
+[environment-variables.md](environment-variables.md)): `MLXCEL_ENABLE_MTP_B1`
+pins the B=1 decision in either direction and suppresses profiling,
+`MLXCEL_MTP_ADAPTIVE=0` disables the adaptive policy in favor of the static
+per-hardware gates, and `MLXCEL_QMV_MULTIROW=0` restores the stock per-row
+CUDA quantized-matmul kernel under the verify.
+
 ## Disaggregated serving
 
 Prefill is compute-bound and decode is memory-bound, so a deployment can run them
