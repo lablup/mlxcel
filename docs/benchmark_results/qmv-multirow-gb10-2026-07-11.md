@@ -59,12 +59,15 @@ forward plus the drafter and per-round overhead). B=1 MTP on GB10 flips from a
 (the adaptive block controller holds the drafter's configured block size at
 this acceptance).
 
-Policy note (#736): the adaptive MTP policy still de-rates compute-bound hosts
-by `sqrt(K)`, which was calibrated against the pre-#725 per-row verify. With
-the multirow verify the de-rating is now pessimistic in the opposite direction
-(it can decline this now-favourable pairing in serving). #736 (measured round
-cost vs measured classic step) covers the re-calibration; until it lands,
-`MLXCEL_ENABLE_MTP_B1=1` pins B=1 MTP on for serving.
+Policy note (#736, resolved): the adaptive MTP policy now settles verdicts
+from a measured comparison: profiling bursts run a couple of classic-step
+probe rounds (drafterless `[1, 1]` verifies, each emitting one real greedy
+token) and the estimator divides tokens-per-round by the measured
+round-cost-to-classic-step ratio. With the multirow verify this pairing
+profiles to about 1.5x and enables in serving without any manual override;
+the pre-#736 `sqrt(K)` heuristic (which landed this profile at ~1.0, the
+decline boundary) remains only as a fallback for windows with no probe
+signal. Persisted pre-#736 verdicts re-profile once (hint format v3).
 
 ## Batched serving decode: aggregate scaling
 

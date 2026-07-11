@@ -878,6 +878,12 @@ pub(crate) struct BurstContext<'a> {
     pub(crate) tokenizer: &'a crate::tokenizer::MlxcelTokenizer,
     pub(crate) drafter_slot: &'a mut WorkerDrafterSlot,
     pub(crate) dispatch: &'a crate::server::SpeculativeDispatch,
+    /// Classic-step probe rounds the MTP generator should run at the start
+    /// of the burst (issue #736). Non-zero only while the adaptive policy is
+    /// profiling this pairing; the scheduler sources it from
+    /// [`super::mtp_policy::MtpPolicy::profile_probe_rounds`]. Ignored by
+    /// the DFlash and batched burst arms.
+    pub(crate) profile_probe_rounds: usize,
 }
 
 impl<'a> BurstContext<'a> {
@@ -892,6 +898,7 @@ impl<'a> BurstContext<'a> {
             tokenizer: self.tokenizer,
             drafter_slot: &mut *self.drafter_slot,
             dispatch: self.dispatch,
+            profile_probe_rounds: self.profile_probe_rounds,
         }
     }
 }
@@ -1051,6 +1058,10 @@ fn run_mtp_burst(
     // `TokenWithLogprobs` events so speculative responses carry the
     // same payload as the classic decode path.
     let logprobs_config = seq.logprobs_config.clone();
+    // [#736] Classic-step probe rounds requested by the adaptive policy
+    // while profiling (0 otherwise). Copied out before the match borrows
+    // `ctx.model`.
+    let profile_probe_rounds = ctx.profile_probe_rounds;
     let (output, stats) = match ctx.model {
         LoadedModel::Gemma4(wrapper) => {
             let adapter =
@@ -1066,6 +1077,7 @@ fn run_mtp_burst(
                 block_size,
                 cancel,
                 &logprobs_config,
+                profile_probe_rounds,
             )
         }
         LoadedModel::Gemma4VLM(vlm) => {
@@ -1086,6 +1098,7 @@ fn run_mtp_burst(
                 block_size,
                 cancel,
                 &logprobs_config,
+                profile_probe_rounds,
             )
         }
         LoadedModel::Gemma4Unified(unified) => {
@@ -1106,6 +1119,7 @@ fn run_mtp_burst(
                 block_size,
                 cancel,
                 &logprobs_config,
+                profile_probe_rounds,
             )
         }
         // Unreachable: the hoisted variant check above already
@@ -1129,7 +1143,7 @@ fn run_mtp_burst(
     // for the singleton burst path.
     let profile = output
         .acceptance
-        .filter(|summary| summary.rounds > 0)
+        .filter(|summary| summary.rounds > 0 || summary.probe_rounds > 0)
         .map(|summary| MtpBurstProfile::from_summary(summary, 1, prompt.len()));
 
     // Hand the recovered drafter back to the slot for the next
@@ -1206,11 +1220,13 @@ fn drive_mtp_generator<T>(
     block_size: usize,
     cancel: &AtomicBool,
     logprobs_config: &mlxcel_core::sampling::LogprobsConfig,
+    profile_probe_rounds: usize,
 ) -> (DriveMtpOutput, mlxcel_core::generate::GenerationStats)
 where
     T: mlxcel_core::speculative::mtp::target::MtpTarget,
 {
-    let mut generator = MtpGenerator::new(target, drafter, block_size);
+    let mut generator = MtpGenerator::new(target, drafter, block_size)
+        .with_profile_probe_rounds(profile_probe_rounds);
     let (emitted, logprobs, stats) = generator.generate(
         prompt,
         max_tokens,

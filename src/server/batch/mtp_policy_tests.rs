@@ -55,6 +55,7 @@ fn sample(
             accepted_draft_tokens: accepted_per_round * rounds,
             draft_ms: draft_ms_per_round * rounds as f64,
             verify_forward_ms: verify_ms_per_round * rounds as f64,
+            ..Default::default()
         },
         1,
         128,
@@ -251,6 +252,7 @@ fn accumulator_records_batch_and_prompt_shape() {
             accepted_draft_tokens: 8,
             draft_ms: 4.0,
             verify_forward_ms: 16.0,
+            ..Default::default()
         },
         1,
         64,
@@ -262,6 +264,7 @@ fn accumulator_records_batch_and_prompt_shape() {
             accepted_draft_tokens: 8,
             draft_ms: 4.0,
             verify_forward_ms: 16.0,
+            ..Default::default()
         },
         1,
         192,
@@ -678,6 +681,7 @@ fn profile_sample_carries_no_token_level_data() {
         accepted_draft_tokens: 18,
         draft_ms: 8.0,
         verify_forward_ms: 32.0,
+        ..Default::default()
     };
     let profile = MtpBurstProfile::from_summary(summary, 1, 256);
     // Only aggregate counts, latencies, batch size, and prompt length: the
@@ -687,4 +691,208 @@ fn profile_sample_carries_no_token_level_data() {
     assert_eq!(profile.rounds, 8);
     assert_eq!(profile.accepted_draft_tokens, 18);
     assert_eq!(profile.proposed_tokens, 24);
+}
+
+// ── measured-cost estimator (issue #736) ─────────────────────────────────────
+
+/// Build a probe-bearing profile sample with explicit per-round means:
+/// `rounds` speculative rounds plus `probe_rounds` classic-step probes at
+/// `classic_ms_per_probe` each.
+#[allow(clippy::too_many_arguments)]
+fn measured_sample(
+    rounds: usize,
+    proposed_per_round: usize,
+    accepted_total: usize,
+    draft_ms_per_round: f64,
+    verify_ms_per_round: f64,
+    overhead_ms_per_round: f64,
+    probe_rounds: usize,
+    classic_ms_per_probe: f64,
+) -> MtpBurstProfile {
+    MtpBurstProfile::from_summary(
+        MtpAcceptanceSummary {
+            rounds,
+            proposed_tokens: proposed_per_round * rounds,
+            accepted_draft_tokens: accepted_total,
+            draft_ms: draft_ms_per_round * rounds as f64,
+            verify_forward_ms: verify_ms_per_round * rounds as f64,
+            overhead_ms: overhead_ms_per_round * rounds as f64,
+            probe_rounds,
+            probe_ms: classic_ms_per_probe * probe_rounds as f64,
+        },
+        1,
+        128,
+    )
+}
+
+#[test]
+fn estimate_speedup_measured_matches_closed_form() {
+    // (accepted_len + 1) * classic_step_ms / round_ms.
+    let s = estimate_speedup_measured(1.0, 98.0, 70.0).expect("finite");
+    assert!((s - 2.0 * 70.0 / 98.0).abs() < 1e-9, "got {s}");
+    // Guards: non-positive or non-finite inputs yield no estimate.
+    assert_eq!(estimate_speedup_measured(1.0, 0.0, 70.0), None);
+    assert_eq!(estimate_speedup_measured(1.0, 98.0, 0.0), None);
+    assert_eq!(estimate_speedup_measured(-0.1, 98.0, 70.0), None);
+    assert_eq!(estimate_speedup_measured(1.0, f64::NAN, 70.0), None);
+    assert_eq!(estimate_speedup_measured(1.0, 98.0, f64::INFINITY), None);
+}
+
+#[test]
+fn measured_estimator_enables_post_725_gb10_pairing() {
+    // GB10 post-#725 multirow-qmv shape (qmv-multirow-gb10-2026-07-11.md):
+    // classic step ~72 ms, K=4 round ~98 ms (verify 80 + drafter 12 +
+    // overhead 6), accepted_len ~1.07. Measured speedup =
+    // 2.07 * 72 / 98 = 1.52 >= ENABLE_SPEEDUP_FLOOR. The pre-#736 sqrt(K)
+    // heuristic landed this same profile at ~1.0 (the decline boundary),
+    // which is exactly the wrong-direction error this estimator removes.
+    let policy = adaptive_policy_hw(true, false, /* compute_bound */ true);
+    assert!(!policy.static_default(), "static default declines here");
+    let s = measured_sample(10, 3, 11, 12.0, 80.0, 6.0, 2, 72.0);
+    let policy = drive(policy, s, PROFILE_SAMPLE_TARGET);
+    assert!(policy.is_settled());
+    assert!(
+        policy.should_attempt_b1(),
+        "measured estimator must enable the favorable post-#725 GB10 pairing \
+         even against a static decline"
+    );
+}
+
+#[test]
+fn measured_estimator_declines_pre_725_shape_with_margin() {
+    // Pre-#725 per-row-qmv shape: classic step ~69 ms but the K=4 verify ran
+    // as ~4 narrow forwards (round ~269 ms), accepted_len ~1.05. Measured
+    // speedup = 2.05 * 69 / 269 = 0.53, well under DECLINE_SPEEDUP_CEIL: the
+    // decline is settled with margin rather than at the boundary.
+    let est = estimate_speedup_measured(1.05, 269.0, 69.0).expect("finite");
+    assert!(
+        est < 0.6,
+        "pre-#725 shape must decline with clear margin, got {est}"
+    );
+    let policy = adaptive_policy_hw(false, false, /* compute_bound */ true);
+    assert!(policy.static_default(), "static default enables here");
+    let s = measured_sample(10, 3, 10, 6.0, 260.0, 3.0, 2, 69.0);
+    let policy = drive(policy, s, PROFILE_SAMPLE_TARGET);
+    assert!(policy.is_settled());
+    assert!(
+        !policy.should_attempt_b1(),
+        "measured estimator must decline the pre-#725 shape, overriding the \
+         static enable"
+    );
+}
+
+#[test]
+fn measured_estimator_apple_verdicts_stay_correct() {
+    // M5 Max 12B Unified shape (gemma4-mtp-speculative-decoding.md, measured
+    // 1.87x): classic ~25.6 ms, round ~31 ms, accepted_len ~1.4. Measured
+    // speedup = 2.4 * 25.6 / 31 = 1.98 -> Enable, matching the shipped
+    // default and the real measurement.
+    let m5 = adaptive_policy_hw(false, true, /* compute_bound */ false);
+    let s = measured_sample(10, 3, 14, 3.0, 26.0, 2.0, 2, 25.6);
+    let m5 = drive(m5, s, PROFILE_SAMPLE_TARGET);
+    assert!(m5.is_settled());
+    assert!(m5.should_attempt_b1(), "M5-like pairing must stay enabled");
+
+    // M1 Ultra 31B shape (#165, measured 0.75-0.96x regression): the older
+    // GPU's verify does not amortize, which the probe measurement exposes
+    // directly (classic ~22 ms vs verify ~55 ms). Measured speedup =
+    // 2.0 * 22 / 70 = 0.63 -> Decline, matching the shipped per-hardware
+    // default without any hardware heuristic.
+    let m1u = adaptive_policy_hw(true, false, /* compute_bound */ false);
+    let s = measured_sample(10, 3, 10, 12.0, 55.0, 3.0, 2, 22.0);
+    let m1u = drive(m1u, s, PROFILE_SAMPLE_TARGET);
+    assert!(m1u.is_settled());
+    assert!(
+        !m1u.should_attempt_b1(),
+        "M1-Ultra-like pairing must stay declined"
+    );
+}
+
+#[test]
+fn heuristic_fallback_engages_without_probe_data() {
+    // No probe rounds in the window -> classic_step_ms is None -> the
+    // pre-#736 shape heuristic decides, preserving the existing behavior
+    // for bursts that never ran a probe.
+    let mut acc = ProfileAccumulator::default();
+    acc.add(&sample(10, 3, 2, 1.0, 4.0));
+    assert_eq!(acc.classic_step_ms(), None);
+    assert_eq!(acc.estimated_speedup_measured(), None);
+    assert!(acc.estimated_speedup_scaled(1.0).is_some());
+}
+
+#[test]
+fn accumulator_folds_probe_only_samples_without_counting_them() {
+    // A burst whose whole budget went to probes (rounds == 0) carries no
+    // speculative signal and must not count toward PROFILE_SAMPLE_TARGET,
+    // but its classic-step measurement is still real and is folded in.
+    let mut acc = ProfileAccumulator::default();
+    acc.add(&measured_sample(0, 0, 0, 0.0, 0.0, 0.0, 2, 70.0));
+    assert_eq!(acc.samples(), 0, "probe-only samples do not count");
+    assert_eq!(acc.classic_step_ms(), Some(70.0));
+    acc.add(&measured_sample(10, 3, 11, 12.0, 80.0, 6.0, 2, 74.0));
+    assert_eq!(acc.samples(), 1);
+    let classic = acc.classic_step_ms().expect("probe signal");
+    assert!(
+        (classic - 72.0).abs() < 1e-9,
+        "median of per-burst means {{70, 74}}, got {classic}"
+    );
+}
+
+#[test]
+fn classic_step_median_discards_first_burst_jit_pollution() {
+    // Measured on GB10: the first profiled burst's probes absorb the one-time
+    // CUDA kernel/graph compilation for the [1, 1] verify shape (~1.6 s per
+    // probe vs the ~74 ms steady state). A plain mean would report ~450 ms and
+    // inflate the speedup estimate by ~6x; the median of per-burst means must
+    // land on the steady state instead.
+    let mut acc = ProfileAccumulator::default();
+    acc.add(&measured_sample(10, 3, 11, 12.0, 80.0, 6.0, 2, 1575.8));
+    acc.add(&measured_sample(10, 3, 11, 12.0, 80.0, 6.0, 2, 73.8));
+    acc.add(&measured_sample(10, 3, 11, 12.0, 80.0, 6.0, 2, 74.6));
+    acc.add(&measured_sample(10, 3, 11, 12.0, 80.0, 6.0, 2, 75.0));
+    let classic = acc.classic_step_ms().expect("probe signal");
+    assert!(
+        (73.0..76.0).contains(&classic),
+        "median must sit in the steady-state band, got {classic}"
+    );
+    // And the resulting estimate stays in a sane range (the polluted mean
+    // would have produced ~11x here).
+    let est = acc.estimated_speedup_measured().expect("estimate");
+    assert!(
+        (1.0..3.0).contains(&est),
+        "estimate must be physically plausible, got {est}"
+    );
+}
+
+#[test]
+fn probe_rounds_requested_only_while_profiling() {
+    let mut policy = adaptive_policy(false, true);
+    assert_eq!(
+        policy.profile_probe_rounds(),
+        PROFILE_PROBE_ROUNDS_PER_BURST,
+        "profiling bursts must run classic-step probes"
+    );
+    for _ in 0..PROFILE_SAMPLE_TARGET {
+        policy.record_b1_sample(favorable_sample());
+    }
+    assert!(policy.is_settled());
+    assert_eq!(
+        policy.profile_probe_rounds(),
+        0,
+        "settled policies must not pay any probe cost"
+    );
+
+    let forced = MtpPolicy::from_parts(
+        key(),
+        false,
+        true,
+        false,
+        Some(true),
+        PolicyStore::with_dir(None),
+    );
+    assert_eq!(
+        forced.profile_probe_rounds(),
+        0,
+        "forced policies never probe"
+    );
 }

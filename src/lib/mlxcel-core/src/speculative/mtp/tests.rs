@@ -618,3 +618,55 @@ fn greedy_parity_perfect_drafter_matches_no_drafter_baseline_32_tokens() {
         "MTP path must be byte-identical to the no-drafter baseline at temp=0 with a perfect drafter",
     );
 }
+
+#[test]
+fn round_loop_probe_rounds_emit_one_greedy_token_and_stay_out_of_acceptance() {
+    // [#736] Two classic-step probe rounds, then one real speculative round
+    // (K=4).
+    //
+    // Probe 1: bonus = 100 (seed), verify input = [100], target = [10]
+    //   -> emits 10 (the target argmax; walk over an empty draft).
+    // Probe 2: bonus = 10, verify input = [10], target = [11] -> emits 11.
+    // Round 3 (real): bonus = 11, draft = [20, 21, 22],
+    //   verify input = [11, 20, 21, 22], target = [20, 21, 22, 23]
+    //   -> full accept, emits [20, 21, 22, 23].
+    //
+    // Total emitted including the seed bonus: [100, 10, 11, 20, 21, 22, 23].
+    let target = MockMtpTarget::new(vec![vec![10], vec![11], vec![20, 21, 22, 23]], vec![]);
+    let drafter = MockMtpDrafter::new(vec![vec![20, 21, 22]]);
+    let mut gen_ = MtpGenerator::new(target, Box::new(drafter), 4).with_profile_probe_rounds(2);
+
+    let (tokens, _logprobs, _stats) = gen_.generate(
+        &[1, 2, 3],
+        7,
+        &SamplingConfig::greedy(),
+        &[],
+        &AtomicBool::new(false),
+        &LogprobsConfig::default(),
+    );
+    assert_eq!(
+        tokens,
+        vec![100, 10, 11, 20, 21, 22, 23],
+        "probes must emit exactly one greedy token each before the real round",
+    );
+
+    // Probes are recorded separately: the acceptance summary counts only the
+    // real speculative round, so probe rounds can never dilute the
+    // acceptance/latency signal the adaptive policy settles on.
+    let summary = gen_.last_acceptance().expect("summary after generate");
+    assert_eq!(summary.probe_rounds, 2, "both probes recorded");
+    assert_eq!(summary.rounds, 1, "only the real round counts");
+    assert_eq!(summary.proposed_tokens, 3);
+    assert_eq!(summary.accepted_draft_tokens, 3);
+    assert!(summary.probe_ms >= 0.0);
+
+    // Rollback log: a probe finalizes with (accepted=0, block_size=1), so
+    // rejected = 1 - 0 - 1 = 0 and nothing is trimmed; the real round
+    // finalizes with (accepted=3, block_size=4).
+    let log = gen_.target().verify_log.borrow().clone();
+    assert_eq!(
+        log,
+        vec![(0, 1), (0, 1), (3, 4)],
+        "probe rounds must finalize as zero-trim single-position verifies",
+    );
+}

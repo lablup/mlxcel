@@ -3266,6 +3266,8 @@ impl BatchScheduler {
                 tokenizer: &self.tokenizer,
                 drafter_slot: &mut self.speculative_drafter_slot,
                 dispatch: &self.speculative_dispatch,
+                // Classic-step probes are a B=1 profiling concern (#736).
+                profile_probe_rounds: 0,
             };
             match super::speculative_burst::try_run_burst_batched(ctx, window) {
                 Ok(super::speculative_burst::BatchedBurstFinalized { rows }) => {
@@ -3354,6 +3356,15 @@ impl BatchScheduler {
                 tokenizer: &self.tokenizer,
                 drafter_slot: &mut self.speculative_drafter_slot,
                 dispatch: &self.speculative_dispatch,
+                // While the adaptive policy is profiling this pairing, ask
+                // the burst for a few classic-step probe rounds so the
+                // measured-cost estimator has a classic step time (#736);
+                // zero once the verdict is forced or settled.
+                profile_probe_rounds: self
+                    .mtp_policy
+                    .as_ref()
+                    .map(|p| p.profile_probe_rounds())
+                    .unwrap_or(0),
             };
             match super::speculative_burst::try_run_burst_b1(ctx, seq) {
                 Ok(super::speculative_burst::BurstFinalized {

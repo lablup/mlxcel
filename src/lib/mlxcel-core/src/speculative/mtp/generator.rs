@@ -63,6 +63,15 @@ struct MtpRoundDiagnostics {
     verify_forward_ms: f64,
     speculative_walk_ms: f64,
     verify_finalize_ms: f64,
+    /// Classic-step probe rounds executed (issue #736): drafterless rounds
+    /// whose `[1, 1]` verify forward stands in for a classic decode step.
+    /// Kept out of `rounds`/acceptance so probes never dilute the
+    /// speculative signal.
+    probe_rounds: usize,
+    /// Cumulative probe verify-forward wall-clock (ms). `probe_ms /
+    /// probe_rounds` is the measured classic single-token step time the
+    /// adaptive policy's measured-cost estimator divides by.
+    probe_ms: f64,
 }
 
 impl MtpRoundDiagnostics {
@@ -71,6 +80,11 @@ impl MtpRoundDiagnostics {
             prefill_seed_ms: duration_ms(prefill_seed_time),
             ..Self::default()
         }
+    }
+
+    fn record_probe(&mut self, verify_ms: f64) {
+        self.probe_rounds += 1;
+        self.probe_ms += verify_ms;
     }
 
     fn record_round(&mut self, proposed_tokens: usize, accepted: usize, emitted_tokens: usize) {
@@ -114,6 +128,9 @@ impl MtpRoundDiagnostics {
             accepted_draft_tokens: self.accepted_draft_tokens,
             draft_ms: self.draft_ms,
             verify_forward_ms: self.verify_forward_ms,
+            overhead_ms: self.speculative_walk_ms + self.verify_finalize_ms + self.set_shared_kv_ms,
+            probe_rounds: self.probe_rounds,
+            probe_ms: self.probe_ms,
         }
     }
 
@@ -143,6 +160,8 @@ impl MtpRoundDiagnostics {
             verify_forward_ms = self.verify_forward_ms,
             speculative_walk_ms = self.speculative_walk_ms,
             verify_finalize_ms = self.verify_finalize_ms,
+            probe_rounds = self.probe_rounds,
+            probe_ms = self.probe_ms,
             decode_ms = duration_ms(decode_time),
             "MTP round-loop diagnostics",
         );
@@ -182,6 +201,21 @@ pub struct MtpAcceptanceSummary {
     pub draft_ms: f64,
     /// Cumulative target verify-forward wall-clock time (ms) across all rounds.
     pub verify_forward_ms: f64,
+    /// Cumulative non-forward round overhead (ms) across the run: the
+    /// speculative walk, the verify finalize (cache rollback + shared-KV
+    /// slicing), and the drafter shared-KV re-arm. Part of the real
+    /// per-round cost the measured-cost policy estimator charges
+    /// (issue #736).
+    pub overhead_ms: f64,
+    /// Classic-step probe rounds executed while the adaptive policy was
+    /// profiling (issue #736). A probe skips the drafter and verifies only
+    /// the bonus token, so its `[1, 1]` verify forward is shape-identical to
+    /// a classic decode step. Probes emit exactly one greedy token each and
+    /// are excluded from `rounds` / acceptance aggregates.
+    pub probe_rounds: usize,
+    /// Cumulative probe verify-forward wall-clock (ms); `probe_ms /
+    /// probe_rounds` is the measured classic single-token step time.
+    pub probe_ms: f64,
 }
 
 impl MtpAcceptanceSummary {
@@ -242,6 +276,12 @@ pub struct MtpGenerator<T: MtpTarget> {
     /// MTP policy. `None` until the first run, and reset at the start of every
     /// `generate`. Holds no prompt data.
     last_acceptance: Option<MtpAcceptanceSummary>,
+    /// Number of classic-step probe rounds to run at the start of the round
+    /// loop (issue #736). Zero (the default) disables probing; the server's
+    /// adaptive policy requests a few probes per burst while profiling so the
+    /// measured-cost estimator has a classic single-token step time to divide
+    /// by. See [`Self::with_profile_probe_rounds`].
+    profile_probe_rounds: usize,
 }
 
 impl<T: MtpTarget> MtpGenerator<T> {
@@ -265,7 +305,23 @@ impl<T: MtpTarget> MtpGenerator<T> {
             configured_block_size,
             prefer_requested_block_size,
             last_acceptance: None,
+            profile_probe_rounds: 0,
         }
+    }
+
+    /// Request `rounds` classic-step probe rounds at the start of the next
+    /// [`Self::generate`] call (issue #736). A probe round skips the drafter
+    /// and verifies only the bonus token: its `[1, 1]` verify forward is
+    /// shape-identical to a classic decode step, so its wall-clock is the
+    /// measured classic single-token step time surfaced through
+    /// [`MtpAcceptanceSummary::probe_ms`]. Each probe emits exactly one
+    /// greedy token (the target argmax), so temperature-0 output stays
+    /// byte-identical to classic decode; probes are excluded from the
+    /// acceptance and round aggregates. Zero (the default) disables probing.
+    #[must_use]
+    pub fn with_profile_probe_rounds(mut self, rounds: usize) -> Self {
+        self.profile_probe_rounds = rounds;
+        self
     }
 
     /// Block size (K). Test/diagnostic accessor.
@@ -430,6 +486,7 @@ impl<T: MtpTarget> MtpGenerator<T> {
         let decode_start = Instant::now();
         let mut bonus = first_bonus;
         let mut accept_lens: Vec<f64> = Vec::new();
+        let mut probes_remaining = self.profile_probe_rounds;
 
         // Arm the drafter's shared K/V from the seed capture.
         // The drafter MUST already have been bound (see struct docs).
@@ -451,47 +508,63 @@ impl<T: MtpTarget> MtpGenerator<T> {
             if cancel.load(Ordering::Relaxed) {
                 break;
             }
-            // Bound the block size by the remaining budget. When the
-            // operator requested a block larger than the drafter's
-            // configured depth, mirror upstream's adaptive controller:
-            // stay at configured depth until recent acceptance proves the
-            // configured prefix is usually fully accepted, then expand to
-            // the requested ceiling. The `+1` is because the verify input
-            // is `[bonus, draft_0, …, draft_{K-2}]` — one prefix bonus
-            // position that the round-loop already counts as emitted.
-            let remaining = max_tokens - emitted.len() + 1;
-            let bs = if self.prefer_requested_block_size {
-                self.block_size.min(remaining)
+            // [#736] Classic-step probe rounds. While the adaptive policy is
+            // profiling, the first `profile_probe_rounds` rounds skip the
+            // drafter and verify only the bonus token: the resulting `[1, 1]`
+            // verify forward is shape-identical to a classic decode step, so
+            // its wall-clock is the measured classic step time the policy's
+            // measured-cost estimator divides by. A probe emits exactly one
+            // greedy token (the walk over an empty draft returns the target
+            // argmax), so temperature-0 output stays byte-identical to
+            // classic decode. Probes are recorded separately from the
+            // speculative aggregates below.
+            let is_probe = probes_remaining > 0;
+            let draft_tokens: Vec<i32> = if is_probe {
+                probes_remaining -= 1;
+                Vec::new()
             } else {
-                effective_mtp_block_size(
-                    self.block_size,
-                    self.configured_block_size,
-                    &accept_lens,
-                    remaining,
-                )
-            };
-            if bs <= 1 {
-                break;
-            }
-
-            // Drafter produces K-1 proposals. Pass the bonus + last
-            // hidden captured from the previous verify pass (or the
-            // seed verify on the first iteration).
-            let hidden = verify_out.next_hidden.as_ref();
-            let draft_start = Instant::now();
-            let draft_tokens = match self.drafter.draft_block(bonus, hidden, bs, sampling) {
-                Ok(t) => {
-                    diagnostics.draft_ms += duration_ms(draft_start.elapsed());
-                    t
-                }
-                Err(e) => {
-                    diagnostics.draft_ms += duration_ms(draft_start.elapsed());
-                    // Drafter failed — bail out cleanly. We've already
-                    // emitted at least the seed bonus, so return what
-                    // we have rather than panicking. Future hardening
-                    // can surface this through GenerationStats.
-                    let _ = e;
+                // Bound the block size by the remaining budget. When the
+                // operator requested a block larger than the drafter's
+                // configured depth, mirror upstream's adaptive controller:
+                // stay at configured depth until recent acceptance proves the
+                // configured prefix is usually fully accepted, then expand to
+                // the requested ceiling. The `+1` is because the verify input
+                // is `[bonus, draft_0, …, draft_{K-2}]` — one prefix bonus
+                // position that the round-loop already counts as emitted.
+                let remaining = max_tokens - emitted.len() + 1;
+                let bs = if self.prefer_requested_block_size {
+                    self.block_size.min(remaining)
+                } else {
+                    effective_mtp_block_size(
+                        self.block_size,
+                        self.configured_block_size,
+                        &accept_lens,
+                        remaining,
+                    )
+                };
+                if bs <= 1 {
                     break;
+                }
+
+                // Drafter produces K-1 proposals. Pass the bonus + last
+                // hidden captured from the previous verify pass (or the
+                // seed verify on the first iteration).
+                let hidden = verify_out.next_hidden.as_ref();
+                let draft_start = Instant::now();
+                match self.drafter.draft_block(bonus, hidden, bs, sampling) {
+                    Ok(t) => {
+                        diagnostics.draft_ms += duration_ms(draft_start.elapsed());
+                        t
+                    }
+                    Err(e) => {
+                        diagnostics.draft_ms += duration_ms(draft_start.elapsed());
+                        // Drafter failed — bail out cleanly. We've already
+                        // emitted at least the seed bonus, so return what
+                        // we have rather than panicking. Future hardening
+                        // can surface this through GenerationStats.
+                        let _ = e;
+                        break;
+                    }
                 }
             };
 
@@ -512,15 +585,25 @@ impl<T: MtpTarget> MtpGenerator<T> {
             let forward_out = self
                 .target
                 .verify_forward(&verify_input, sampling, logprobs_config);
-            diagnostics.verify_forward_ms += duration_ms(verify_forward_start.elapsed());
+            let verify_elapsed_ms = duration_ms(verify_forward_start.elapsed());
 
             // Walk the draft against the target's argmax tokens.
             let budget = max_tokens - emitted.len();
             let walk_start = Instant::now();
             let walk = speculative_walk(&draft_tokens, &forward_out.target_tokens, budget);
             diagnostics.speculative_walk_ms += duration_ms(walk_start.elapsed());
-            diagnostics.record_round(draft_tokens.len(), walk.accepted, walk.new_tokens.len());
-            accept_lens.push(walk.accepted as f64);
+            if is_probe {
+                // Probe rounds stand in for classic decode steps: their
+                // verify time is the classic-step signal and they stay out
+                // of the speculative round/acceptance aggregates (and out of
+                // `accept_lens`, so the adaptive block controller's recent
+                // window only sees real speculative rounds).
+                diagnostics.record_probe(verify_elapsed_ms);
+            } else {
+                diagnostics.verify_forward_ms += verify_elapsed_ms;
+                diagnostics.record_round(draft_tokens.len(), walk.accepted, walk.new_tokens.len());
+                accept_lens.push(walk.accepted as f64);
+            }
 
             // Phase 2: rollback the cache + slice shared K/V based on
             // the walk's accepted count. This consumes the captured

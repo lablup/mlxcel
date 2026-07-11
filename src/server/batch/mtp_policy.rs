@@ -74,6 +74,16 @@ use mlxcel_core::speculative::mtp::MtpAcceptanceSummary;
 /// kept small so the profiling cost is bounded and paid once per pairing.
 pub(crate) const PROFILE_SAMPLE_TARGET: usize = 4;
 
+/// Classic-step probe rounds requested per profiled burst (issue #736). While
+/// profiling, the burst's generator runs this many drafterless rounds whose
+/// `[1, 1]` verify forward is shape-identical to a classic decode step; the
+/// measured mean is the classic single-token step time the measured-cost
+/// estimator divides by. Each probe emits one real greedy token (no wasted
+/// compute), so the total profiling overhead is
+/// `PROFILE_SAMPLE_TARGET * PROFILE_PROBE_ROUNDS_PER_BURST` classic-paced
+/// tokens per pairing lifetime.
+pub(crate) const PROFILE_PROBE_ROUNDS_PER_BURST: usize = 2;
+
 /// Optimistic speedup at or above which MTP is auto-enabled (overriding a
 /// static decline). [`estimate_speedup`] is an upper bound: it assumes the
 /// K-wide verify forward costs the same as a single classic decode forward.
@@ -87,12 +97,17 @@ pub(crate) const ENABLE_SPEEDUP_FLOOR: f64 = 1.5;
 /// under the most generous assumption, so declining is safe.
 pub(crate) const DECLINE_SPEEDUP_CEIL: f64 = 1.0;
 
-/// On-disk hint format version. Bump when the schema changes; older/newer
-/// versions are ignored on load so a stale file just triggers a re-profile.
+/// On-disk hint format version. Bump when the schema changes OR when verdict
+/// semantics change; older/newer versions are ignored on load so a stale file
+/// just triggers a re-profile.
 /// v2: added `block_size` to `PolicyKey` and `PolicyHint` (K affects acceptance
 /// length and verify latency, so a verdict profiled at one K must not be reused
 /// if K changes).
-const HINT_VERSION: u32 = 2;
+/// v3: verdicts are settled by the measured-cost estimator (issue #736) on top
+/// of the multirow-qmv verify kernel (issue #725). v2 verdicts on CUDA were
+/// settled against the pre-#725 per-row verify (and the sqrt(K) heuristic), so
+/// they are systematically stale in both directions and must re-profile.
+const HINT_VERSION: u32 = 3;
 
 /// Subdirectory under the mlxcel cache root that holds per-pairing hints.
 const HINT_SUBDIR: &str = "mtp-policy";
@@ -166,6 +181,43 @@ pub(crate) fn estimate_speedup_scaled(
     Some((accepted_len + 1.0) / (verify_cost_multiple * (1.0 + drafter_ms / verify_ms)))
 }
 
+/// Measured-cost speedup estimate (issue #736).
+///
+/// One speculative round yields `accepted_len + 1` tokens and costs
+/// `round_ms` (verify + drafter + walk/finalize/re-arm overhead). Classic
+/// decode yields one token per `classic_step_ms` (measured from the burst's
+/// classic-step probe rounds, whose `[1, 1]` verify forward is
+/// shape-identical to a classic decode step). So:
+///
+/// ```text
+/// speedup = (accepted_len + 1) * classic_step_ms / round_ms
+/// ```
+///
+/// Unlike [`estimate_speedup_scaled`], this makes no assumption about how
+/// the K-wide verify relates to a classic forward: on hardware where the
+/// verify amortizes (Apple Silicon, post-#725 CUDA multirow qmv) the measured
+/// ratio reflects it, and on hardware where it does not (pre-#725 per-row
+/// qmv, unknown backends) the measured ratio reflects that too. The probe's
+/// verify carries the shared-KV capture that classic decode does not pay, so
+/// `classic_step_ms` is slightly over-measured and the estimate errs mildly
+/// conservative. Returns `None` without a usable signal.
+#[must_use]
+pub(crate) fn estimate_speedup_measured(
+    accepted_len: f64,
+    round_ms: f64,
+    classic_step_ms: f64,
+) -> Option<f64> {
+    if !round_ms.is_finite()
+        || round_ms <= 0.0
+        || !classic_step_ms.is_finite()
+        || classic_step_ms <= 0.0
+        || accepted_len < 0.0
+    {
+        return None;
+    }
+    Some((accepted_len + 1.0) * classic_step_ms / round_ms)
+}
+
 /// Which side of the decision an estimated speedup falls on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SpeedupZone {
@@ -224,6 +276,15 @@ pub(crate) struct MtpBurstProfile {
     pub draft_ms: f64,
     /// Cumulative verify-forward latency (ms) across all rounds.
     pub verify_forward_ms: f64,
+    /// Cumulative non-forward round overhead (ms): speculative walk, verify
+    /// finalize, and drafter shared-KV re-arm (issue #736).
+    pub overhead_ms: f64,
+    /// Classic-step probe rounds the burst executed while profiling
+    /// (issue #736).
+    pub probe_rounds: usize,
+    /// Cumulative probe verify-forward latency (ms); `probe_ms /
+    /// probe_rounds` is the measured classic single-token step time.
+    pub probe_ms: f64,
 }
 
 impl MtpBurstProfile {
@@ -243,6 +304,9 @@ impl MtpBurstProfile {
             accepted_draft_tokens: summary.accepted_draft_tokens,
             draft_ms: summary.draft_ms,
             verify_forward_ms: summary.verify_forward_ms,
+            overhead_ms: summary.overhead_ms,
+            probe_rounds: summary.probe_rounds,
+            probe_ms: summary.probe_ms,
         }
     }
 }
@@ -269,14 +333,33 @@ pub(crate) struct ProfileAccumulator {
     total_prompt_len: usize,
     /// Largest prompt length seen.
     max_prompt_len: usize,
+    /// Cumulative non-forward round overhead (ms) across samples
+    /// (issue #736).
+    total_overhead_ms: f64,
+    /// Per-burst mean classic-step probe times (ms), one entry per sample
+    /// that ran probes (issue #736). The estimator takes the MEDIAN of
+    /// these: the first burst's probes absorb one-time CUDA kernel/graph
+    /// compilation for the `[1, 1]` verify shape (measured ~1.6 s vs the
+    /// ~74 ms steady state on GB10), and a median over per-burst means is
+    /// robust to that one-off pollution where a plain mean is not.
+    probe_burst_means: Vec<f64>,
 }
 
 impl ProfileAccumulator {
-    /// Fold one sample in. Samples with zero rounds carry no acceptance or
-    /// timing signal (the request hit EOS on the seed bonus or `max_tokens`
-    /// was 1) and are ignored, so they neither count toward
-    /// [`PROFILE_SAMPLE_TARGET`] nor skew the aggregate.
+    /// Fold one sample in. Samples with zero speculative rounds carry no
+    /// acceptance or per-round timing signal (the request hit EOS on the seed
+    /// bonus or the budget went to probe rounds), so they neither count
+    /// toward [`PROFILE_SAMPLE_TARGET`] nor skew the speculative aggregate.
+    /// Their classic-step probe measurements are still folded in (issue
+    /// #736): a probe's signal is independent of whether the same burst also
+    /// completed a speculative round.
     pub(crate) fn add(&mut self, profile: &MtpBurstProfile) {
+        if profile.probe_rounds > 0 {
+            let mean = profile.probe_ms / profile.probe_rounds as f64;
+            if mean.is_finite() && mean > 0.0 {
+                self.probe_burst_means.push(mean);
+            }
+        }
         if profile.rounds == 0 {
             return;
         }
@@ -286,6 +369,7 @@ impl ProfileAccumulator {
         self.total_accepted += profile.accepted_draft_tokens;
         self.total_draft_ms += profile.draft_ms;
         self.total_verify_ms += profile.verify_forward_ms;
+        self.total_overhead_ms += profile.overhead_ms;
         self.max_batch_size = self.max_batch_size.max(profile.batch_size);
         self.total_prompt_len += profile.prompt_len;
         self.max_prompt_len = self.max_prompt_len.max(profile.prompt_len);
@@ -325,6 +409,44 @@ impl ProfileAccumulator {
         } else {
             self.total_verify_ms / self.total_rounds as f64
         }
+    }
+
+    /// Mean non-forward overhead (ms) per round (walk + finalize + shared-KV
+    /// re-arm; issue #736).
+    #[must_use]
+    pub(crate) fn overhead_ms(&self) -> f64 {
+        if self.total_rounds == 0 {
+            0.0
+        } else {
+            self.total_overhead_ms / self.total_rounds as f64
+        }
+    }
+
+    /// Mean full round cost (ms): verify + drafter + overhead (issue #736).
+    #[must_use]
+    pub(crate) fn round_cost_ms(&self) -> f64 {
+        self.verify_ms() + self.drafter_ms() + self.overhead_ms()
+    }
+
+    /// Measured classic single-token step time (ms): the MEDIAN of the
+    /// per-burst probe means, or `None` when no probe ran (issue #736). The
+    /// median discards the first burst's one-time CUDA kernel/graph
+    /// compilation cost, which would inflate a plain mean by an order of
+    /// magnitude and produce a nonsense speedup estimate.
+    #[must_use]
+    pub(crate) fn classic_step_ms(&self) -> Option<f64> {
+        if self.probe_burst_means.is_empty() {
+            return None;
+        }
+        let mut sorted = self.probe_burst_means.clone();
+        sorted.sort_by(|a, b| a.partial_cmp(b).expect("finite by construction"));
+        let n = sorted.len();
+        let median = if n % 2 == 1 {
+            sorted[n / 2]
+        } else {
+            (sorted[n / 2 - 1] + sorted[n / 2]) / 2.0
+        };
+        (median.is_finite() && median > 0.0).then_some(median)
     }
 
     /// Coarse acceptance rate (accepted / proposed) across the window.
@@ -369,8 +491,10 @@ impl ProfileAccumulator {
     /// Speedup estimate scaled by a backend-specific verify-cost multiple
     /// (issue #638). `verify_cost_multiple == 1.0` reproduces
     /// [`Self::estimated_speedup`] exactly (Apple Silicon); a value `> 1.0`
-    /// de-rates the estimate for compute-bound hardware where a K-wide verify
-    /// does not amortize to one classic forward.
+    /// de-rates the estimate for hardware where a K-wide verify does not
+    /// amortize to one classic forward. Since issue #736 this is the
+    /// fallback used only when no classic-step probe measurement exists
+    /// ([`Self::estimated_speedup_measured`] returns `None`).
     #[must_use]
     pub(crate) fn estimated_speedup_scaled(&self, verify_cost_multiple: f64) -> Option<f64> {
         estimate_speedup_scaled(
@@ -379,6 +503,16 @@ impl ProfileAccumulator {
             self.drafter_ms(),
             verify_cost_multiple,
         )
+    }
+
+    /// Measured-cost speedup estimate (issue #736): tokens per round divided
+    /// by the measured round-cost-to-classic-step ratio. `None` when no
+    /// classic-step probe measurement or no speculative round exists yet;
+    /// the caller then falls back to [`Self::estimated_speedup_scaled`].
+    #[must_use]
+    pub(crate) fn estimated_speedup_measured(&self) -> Option<f64> {
+        let classic = self.classic_step_ms()?;
+        estimate_speedup_measured(self.accepted_len(), self.round_cost_ms(), classic)
     }
 }
 
@@ -724,22 +858,33 @@ impl MtpPolicy {
         }
     }
 
-    /// Backend-specific verify-cost multiple for the speedup estimate
-    /// (issue #638). `1.0` on bandwidth-bound Apple Silicon (the K-wide verify
-    /// amortizes to one classic forward, so the estimate is unchanged). On
-    /// compute-bound hardware (CUDA / GB10) the K-wide verify does not run for
-    /// free: GB10 measurements (Gemma 4 Unified 12B, K ∈ {2,4,8}) show the
-    /// per-round cost growing about `√K` with the block size, so the multiple is
-    /// `sqrt(K)`. This de-rates the optimistic estimate enough to decline the
-    /// measured-unprofitable Gemma MTP pairings (~0.52–0.77× on GB10) while
-    /// still admitting a genuinely favourable compute-bound pairing (high
-    /// acceptance length).
+    /// Backend-specific verify-cost multiple for the FALLBACK speedup
+    /// estimate (issue #638), used only when the profiling window collected
+    /// no classic-step probe measurement (issue #736). `1.0` on
+    /// bandwidth-bound Apple Silicon (the K-wide verify amortizes to one
+    /// classic forward). `sqrt(K)` on non-Apple hosts, a shape heuristic
+    /// calibrated against the pre-#725 per-row-qmv verify; it is known to be
+    /// wrong in both directions across kernel eras (it under-costed the
+    /// pre-#725 linear-in-K verify and over-costs the post-#725 multirow
+    /// verify), which is exactly why the measured estimator replaced it as
+    /// the primary path.
     #[must_use]
     fn verify_cost_multiple(&self) -> f64 {
         if self.compute_bound {
             (self.key.block_size as f64).max(1.0).sqrt()
         } else {
             1.0
+        }
+    }
+
+    /// Classic-step probe rounds the burst should run for the next request
+    /// (issue #736): a few per burst while profiling, zero once forced or
+    /// settled, so the steady state carries no probe cost.
+    #[must_use]
+    pub(crate) fn profile_probe_rounds(&self) -> usize {
+        match &self.state {
+            PolicyState::Profiling(_) => PROFILE_PROBE_ROUNDS_PER_BURST,
+            PolicyState::Forced(_) | PolicyState::Settled(_) => 0,
         }
     }
 
@@ -787,12 +932,11 @@ impl MtpPolicy {
     /// hint. A no-op in the forced/settled states, so this never runs once the
     /// decision is fixed.
     pub(crate) fn record_b1_sample(&mut self, profile: MtpBurstProfile) {
-        // Resolve the backend-scaled verify-cost multiple before borrowing
-        // `self.state` mutably below (issue #638). On compute-bound hardware the
-        // K-wide verify does not amortize to one classic forward, so the
-        // optimistic Apple-tuned estimate is de-rated by `sqrt(K)`. On Apple
-        // Silicon the multiple is 1.0 and this is byte-identical to the
-        // pre-#638 estimate.
+        // Resolve the backend-scaled verify-cost multiple of the FALLBACK
+        // estimator before borrowing `self.state` mutably below (issue #638).
+        // The primary estimator is the measured-cost one (issue #736); the
+        // fallback only applies when the window collected no classic-step
+        // probe measurement.
         let verify_cost_multiple = self.verify_cost_multiple();
         let PolicyState::Profiling(acc) = &mut self.state else {
             return;
@@ -804,12 +948,26 @@ impl MtpPolicy {
         // Read everything off the accumulator first so its borrow of
         // `self.state` ends before we touch other `self` fields or reassign
         // the state below.
-        let speedup = acc.estimated_speedup_scaled(verify_cost_multiple);
+        //
+        // Estimator preference (issue #736): the measured-cost estimate
+        // (tokens per round over the measured round-cost-to-classic-step
+        // ratio) makes no assumption about verify amortization, so it is
+        // correct across backends and kernel eras. The shape-heuristic
+        // fallback only fires when no probe measurement exists.
+        let measured = acc.estimated_speedup_measured();
+        let speedup = measured.or_else(|| acc.estimated_speedup_scaled(verify_cost_multiple));
+        let estimator = if measured.is_some() {
+            "measured"
+        } else {
+            "heuristic-fallback"
+        };
         let acceptance_rate = acc.acceptance_rate();
         let samples = acc.samples();
         let accepted_len = acc.accepted_len();
         let drafter_ms = acc.drafter_ms();
         let verify_ms = acc.verify_ms();
+        let overhead_ms = acc.overhead_ms();
+        let classic_step_ms = acc.classic_step_ms();
         let max_batch_size = acc.max_batch_size();
         let max_prompt_len = acc.max_prompt_len();
         let mean_prompt_len = acc.mean_prompt_len();
@@ -818,19 +976,24 @@ impl MtpPolicy {
         let run = resolve_verdict(zone, static_default);
         tracing::info!(
             "adaptive MTP policy: settled verdict {} for {} after {} samples \
-             (accepted_len={:.2}, drafter_ms={:.2}, verify_ms={:.2}, acceptance≈{:.2}, \
-             est_speedup={}, zone={:?}, static_default={}, max_batch={}, \
-             prompt_len mean={}/max={})",
+             (accepted_len={:.2}, drafter_ms={:.2}, verify_ms={:.2}, overhead_ms={:.2}, \
+             classic_step_ms={}, acceptance≈{:.2}, est_speedup={} [{}], zone={:?}, \
+             static_default={}, max_batch={}, prompt_len mean={}/max={})",
             if run { "ENABLE" } else { "DECLINE" },
             self.key.display(),
             samples,
             accepted_len,
             drafter_ms,
             verify_ms,
+            overhead_ms,
+            classic_step_ms
+                .map(|c| format!("{c:.2}"))
+                .unwrap_or_else(|| "n/a".to_string()),
             acceptance_rate,
             speedup
                 .map(|s| format!("{s:.2}"))
                 .unwrap_or_else(|| "n/a".to_string()),
+            estimator,
             zone,
             static_default,
             max_batch_size,
