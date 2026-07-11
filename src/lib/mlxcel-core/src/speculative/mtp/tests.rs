@@ -619,6 +619,275 @@ fn greedy_parity_perfect_drafter_matches_no_drafter_baseline_32_tokens() {
     );
 }
 
+// ----- Resumable session API (issue #734) -----
+//
+// The tick-cooperative server path drives `begin_session` / `step_session`
+// / `finish_session` instead of `generate`. Because `generate` is now a
+// tight loop over the same methods, the two paths compute identical rounds
+// by construction; these tests pin that equivalence explicitly, including
+// under the harsher condition the server actually imposes: the generator is
+// DROPPED and RECONSTRUCTED between every round (the target adapter borrows
+// the model, so it cannot live across scheduler ticks), with only the
+// `MtpSessionState` and the un-reset drafter surviving.
+
+/// Script for a session-vs-generate equivalence run.
+struct SessionScript {
+    target_tokens: Vec<Vec<i32>>,
+    draft_tokens: Vec<Vec<i32>>,
+    eos: Vec<i32>,
+    first_bonus: i32,
+    max_tokens: usize,
+    probe_rounds: usize,
+}
+
+impl SessionScript {
+    fn build(&self) -> (MockMtpTarget, Box<dyn Drafter>) {
+        let target = MockMtpTarget::new(self.target_tokens.clone(), self.eos.clone())
+            .with_first_bonus(self.first_bonus);
+        let drafter: Box<dyn Drafter> = Box::new(MockMtpDrafter::new(self.draft_tokens.clone()));
+        (target, drafter)
+    }
+}
+
+/// Run the script through the run-to-completion `generate` call.
+fn run_script_via_generate(script: &SessionScript) -> (Vec<i32>, super::MtpAcceptanceSummary) {
+    let (target, drafter) = script.build();
+    let mut gen_ =
+        MtpGenerator::new(target, drafter, 4).with_profile_probe_rounds(script.probe_rounds);
+    let (tokens, _logprobs, _stats) = gen_.generate(
+        &[1, 2, 3],
+        script.max_tokens,
+        &SamplingConfig::greedy(),
+        &[],
+        &AtomicBool::new(false),
+        &LogprobsConfig::default(),
+    );
+    let summary = gen_.last_acceptance().expect("summary after generate");
+    (tokens, summary)
+}
+
+/// Run the script through the session API, reconstructing the generator
+/// between EVERY round via `into_parts`, the exact lifecycle the
+/// tick-cooperative scheduler slice imposes (fresh adapter per tick, state
+/// plus un-reset drafter carried across).
+fn run_script_via_steps(
+    script: &SessionScript,
+) -> (Vec<i32>, super::MtpAcceptanceSummary, Vec<Vec<i32>>) {
+    let (target, drafter) = script.build();
+    let mut gen_ =
+        MtpGenerator::new(target, drafter, 4).with_profile_probe_rounds(script.probe_rounds);
+    let sampling = SamplingConfig::greedy();
+    let cancel = AtomicBool::new(false);
+    let logprobs_config = LogprobsConfig::default();
+
+    let (mut state, first) = gen_.begin_session(
+        &[1, 2, 3],
+        script.max_tokens,
+        &sampling,
+        &[],
+        &logprobs_config,
+    );
+    let mut tokens = first.new_tokens.clone();
+    let mut per_step: Vec<Vec<i32>> = vec![first.new_tokens];
+    while !state.finished() {
+        // Tear the generator down to (target, drafter) and rebuild it, as
+        // the scheduler does across ticks. The mock target carries the
+        // script's remaining rounds; a real adapter carries nothing (the
+        // per-sequence KV lives in the model).
+        let (target, drafter) = gen_.into_parts();
+        gen_ = MtpGenerator::new(target, drafter, 4).with_profile_probe_rounds(script.probe_rounds);
+        let out = gen_.step_session(&mut state, &sampling, &cancel, &logprobs_config);
+        tokens.extend_from_slice(&out.new_tokens);
+        per_step.push(out.new_tokens);
+    }
+    let (_stats, summary) = gen_.finish_session(state);
+    (
+        tokens,
+        summary.expect("summary after finish_session"),
+        per_step,
+    )
+}
+
+/// Assert the count fields of two acceptance summaries match. The `_ms`
+/// fields are wall-clock and can never be bit-equal between two runs.
+fn assert_summary_counts_eq(a: &super::MtpAcceptanceSummary, b: &super::MtpAcceptanceSummary) {
+    assert_eq!(a.rounds, b.rounds, "rounds must match");
+    assert_eq!(
+        a.proposed_tokens, b.proposed_tokens,
+        "proposed_tokens must match"
+    );
+    assert_eq!(
+        a.accepted_draft_tokens, b.accepted_draft_tokens,
+        "accepted_draft_tokens must match"
+    );
+    assert_eq!(a.probe_rounds, b.probe_rounds, "probe_rounds must match");
+}
+
+#[test]
+fn session_steps_match_generate_full_accept() {
+    let script = SessionScript {
+        target_tokens: vec![
+            vec![10, 11, 12, 13],
+            vec![20, 21, 22, 23],
+            vec![30, 31, 32, 33],
+        ],
+        draft_tokens: vec![vec![10, 11, 12], vec![20, 21, 22], vec![30, 31, 32]],
+        eos: vec![],
+        first_bonus: 100,
+        max_tokens: 13,
+        probe_rounds: 0,
+    };
+    let (gen_tokens, gen_summary) = run_script_via_generate(&script);
+    let (step_tokens, step_summary, per_step) = run_script_via_steps(&script);
+    assert_eq!(step_tokens, gen_tokens, "streams must be token-identical");
+    assert_summary_counts_eq(&step_summary, &gen_summary);
+    // Per-round emission: slice 0 = the seed bonus, then one slice per
+    // full-accept round with its 4 walk tokens.
+    assert_eq!(per_step[0], vec![100]);
+    assert_eq!(per_step[1], vec![10, 11, 12, 13]);
+    assert_eq!(per_step[2], vec![20, 21, 22, 23]);
+}
+
+#[test]
+fn session_steps_match_generate_partial_accept() {
+    let script = SessionScript {
+        target_tokens: vec![vec![10, 11, 12, 13], vec![20, 21, 22, 23]],
+        draft_tokens: vec![vec![10, 99, 12], vec![99, 21, 22]],
+        eos: vec![],
+        first_bonus: 100,
+        max_tokens: 4,
+        probe_rounds: 0,
+    };
+    let (gen_tokens, gen_summary) = run_script_via_generate(&script);
+    let (step_tokens, step_summary, _per_step) = run_script_via_steps(&script);
+    assert_eq!(step_tokens, gen_tokens);
+    assert_eq!(step_tokens, vec![100, 10, 11, 20]);
+    assert_summary_counts_eq(&step_summary, &gen_summary);
+}
+
+#[test]
+fn session_steps_match_generate_eos_mid_round() {
+    // EOS (12) lands mid-walk in round 1: the round emits [10, 11, 12] and
+    // the session finishes inside the emit loop, dropping the walk's
+    // remaining token, the same truncation `generate` performs.
+    let script = SessionScript {
+        target_tokens: vec![vec![10, 11, 12, 13]],
+        draft_tokens: vec![vec![10, 11, 12]],
+        eos: vec![12],
+        first_bonus: 100,
+        max_tokens: 20,
+        probe_rounds: 0,
+    };
+    let (gen_tokens, gen_summary) = run_script_via_generate(&script);
+    let (step_tokens, step_summary, per_step) = run_script_via_steps(&script);
+    assert_eq!(step_tokens, gen_tokens);
+    assert_eq!(step_tokens, vec![100, 10, 11, 12]);
+    assert_summary_counts_eq(&step_summary, &gen_summary);
+    assert_eq!(
+        per_step.last().expect("at least one step"),
+        &vec![10, 11, 12],
+        "the EOS round must emit only up to (and including) the EOS token",
+    );
+}
+
+#[test]
+fn session_steps_match_generate_probe_rounds_first() {
+    // Two classic-step probes (issue #736), then a real speculative round.
+    let script = SessionScript {
+        target_tokens: vec![vec![10], vec![11], vec![20, 21, 22, 23]],
+        draft_tokens: vec![vec![20, 21, 22]],
+        eos: vec![],
+        first_bonus: 100,
+        max_tokens: 7,
+        probe_rounds: 2,
+    };
+    let (gen_tokens, gen_summary) = run_script_via_generate(&script);
+    let (step_tokens, step_summary, per_step) = run_script_via_steps(&script);
+    assert_eq!(step_tokens, gen_tokens);
+    assert_eq!(step_tokens, vec![100, 10, 11, 20, 21, 22, 23]);
+    assert_summary_counts_eq(&step_summary, &gen_summary);
+    assert_eq!(step_summary.probe_rounds, 2);
+    assert_eq!(step_summary.rounds, 1);
+    // Probe slices emit exactly one greedy token each.
+    assert_eq!(per_step[1], vec![10]);
+    assert_eq!(per_step[2], vec![11]);
+}
+
+#[test]
+fn session_first_bonus_eos_finishes_at_begin() {
+    let target = MockMtpTarget::new(vec![], vec![100]);
+    let drafter = MockMtpDrafter::new(vec![]);
+    let mut gen_ = MtpGenerator::new(target, Box::new(drafter), 4);
+    let (state, first) = gen_.begin_session(
+        &[1],
+        20,
+        &SamplingConfig::greedy(),
+        &[],
+        &LogprobsConfig::default(),
+    );
+    assert!(state.finished(), "EOS on the first bonus finishes slice 0");
+    assert!(first.finished);
+    assert_eq!(first.new_tokens, vec![100]);
+    let (stats, summary) = gen_.finish_session(state);
+    assert_eq!(stats.generated_tokens, 1);
+    assert_eq!(summary.expect("summary").rounds, 0);
+}
+
+#[test]
+fn session_step_after_finish_is_a_noop() {
+    let target = MockMtpTarget::new(vec![], vec![100]);
+    let drafter = MockMtpDrafter::new(vec![]);
+    let mut gen_ = MtpGenerator::new(target, Box::new(drafter), 4);
+    let (mut state, _first) = gen_.begin_session(
+        &[1],
+        20,
+        &SamplingConfig::greedy(),
+        &[],
+        &LogprobsConfig::default(),
+    );
+    assert!(state.finished());
+    let out = gen_.step_session(
+        &mut state,
+        &SamplingConfig::greedy(),
+        &AtomicBool::new(false),
+        &LogprobsConfig::default(),
+    );
+    assert!(out.finished);
+    assert!(out.new_tokens.is_empty());
+}
+
+#[test]
+fn session_cancel_between_rounds_finishes_without_drafting() {
+    // Cancellation flipped BETWEEN two rounds (i.e. between scheduler
+    // ticks) must finish the session at the next step without another
+    // draft/verify: the tick-cooperative path's improved cancel latency.
+    let script = SessionScript {
+        target_tokens: vec![vec![10, 11, 12, 13], vec![20, 21, 22, 23]],
+        draft_tokens: vec![vec![10, 11, 12], vec![20, 21, 22]],
+        eos: vec![],
+        first_bonus: 100,
+        max_tokens: 100,
+        probe_rounds: 0,
+    };
+    let (target, drafter) = script.build();
+    let mut gen_ = MtpGenerator::new(target, drafter, 4);
+    let sampling = SamplingConfig::greedy();
+    let cancel = AtomicBool::new(false);
+    let lp = LogprobsConfig::default();
+    let (mut state, _first) = gen_.begin_session(&[1, 2, 3], 100, &sampling, &[], &lp);
+    let out1 = gen_.step_session(&mut state, &sampling, &cancel, &lp);
+    assert_eq!(out1.new_tokens, vec![10, 11, 12, 13]);
+    assert!(!state.finished());
+    // Client disconnects between ticks.
+    cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+    let out2 = gen_.step_session(&mut state, &sampling, &cancel, &lp);
+    assert!(out2.finished);
+    assert!(out2.new_tokens.is_empty(), "no round runs after cancel");
+    assert!(state.finished());
+    let (_stats, summary) = gen_.finish_session(state);
+    assert_eq!(summary.expect("summary").rounds, 1);
+}
+
 #[test]
 fn round_loop_probe_rounds_emit_one_greedy_token_and_stay_out_of_acceptance() {
     // [#736] Two classic-step probe rounds, then one real speculative round

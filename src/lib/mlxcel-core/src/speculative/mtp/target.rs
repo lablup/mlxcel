@@ -407,6 +407,82 @@ pub trait MtpTarget {
     }
 }
 
+/// A shared reference to a target is itself a target: every trait method
+/// takes `&self`, so the forwarding is free. This lets a caller that must
+/// pass the target BY VALUE per call (e.g. the tick-cooperative slice
+/// driver, which reconstructs the borrowing generator every scheduler tick,
+/// issue #734) hand out cheap `&T` views over one long-lived target, the
+/// same "stateless view over persistent model state" shape the Gemma 4
+/// adapters have. Every method is forwarded explicitly (including the
+/// batched ones) so a concrete override is never shadowed by the trait's
+/// erroring defaults.
+impl<T: MtpTarget + ?Sized> MtpTarget for &T {
+    fn prefill_and_seed(
+        &self,
+        prompt_tokens: &[i32],
+        sampler: &SamplingConfig,
+        token_history: &[i32],
+        logprobs_config: &LogprobsConfig,
+    ) -> (i32, MtpVerifyOutput, Option<TokenLogprobData>) {
+        (**self).prefill_and_seed(prompt_tokens, sampler, token_history, logprobs_config)
+    }
+
+    fn embed_token(&self, token_id: i32) -> UniquePtr<MlxArray> {
+        (**self).embed_token(token_id)
+    }
+
+    fn verify_forward(
+        &self,
+        verify_input: &[i32],
+        sampler: &SamplingConfig,
+        logprobs_config: &LogprobsConfig,
+    ) -> VerifyForwardOutput {
+        (**self).verify_forward(verify_input, sampler, logprobs_config)
+    }
+
+    fn verify_finalize(
+        &self,
+        accepted: usize,
+        block_size: usize,
+        captured: VerifyCaptured,
+    ) -> MtpVerifyOutput {
+        (**self).verify_finalize(accepted, block_size, captured)
+    }
+
+    fn num_layers(&self) -> usize {
+        (**self).num_layers()
+    }
+
+    fn eos_token_ids(&self) -> Vec<i32> {
+        (**self).eos_token_ids()
+    }
+
+    fn prefill_and_seed_batched(
+        &self,
+        prompt_tokens_per_row: &[Vec<i32>],
+        sampler: &SamplingConfig,
+    ) -> Result<(Vec<i32>, MtpBatchedVerifyOutput), DrafterError> {
+        (**self).prefill_and_seed_batched(prompt_tokens_per_row, sampler)
+    }
+
+    fn verify_forward_batched(
+        &self,
+        verify_input_per_row: &[Vec<i32>],
+        sampler: &SamplingConfig,
+    ) -> Result<MtpBatchedVerifyForwardOutput, DrafterError> {
+        (**self).verify_forward_batched(verify_input_per_row, sampler)
+    }
+
+    fn verify_finalize_batched(
+        &self,
+        accepted_per_row: &[usize],
+        block_size: usize,
+        captured: VerifyCaptured,
+    ) -> Result<MtpBatchedVerifyOutput, DrafterError> {
+        (**self).verify_finalize_batched(accepted_per_row, block_size, captured)
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Batched MTP types
 // ---------------------------------------------------------------------------

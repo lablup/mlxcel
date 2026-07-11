@@ -230,6 +230,108 @@ impl MtpAcceptanceSummary {
     }
 }
 
+/// Owned cross-round state of a resumable MTP generation session
+/// (issue #734).
+///
+/// Everything the round loop carries between two rounds lives here, and
+/// nothing in here borrows the model: [`MtpVerifyOutput`] owns MLX
+/// `UniquePtr` array handles plus plain integers, so the state can be
+/// stashed across scheduler ticks while the borrowing target adapter (and
+/// the [`MtpGenerator`] wrapping it) is dropped and reconstructed per tick.
+/// The per-sequence KV cache itself lives in the model's sequence slot, not
+/// here; this state only references it logically via `kv_offset` /
+/// `bonus_position`.
+///
+/// Produced by [`MtpGenerator::begin_session`], advanced by
+/// [`MtpGenerator::step_session`], and consumed by
+/// [`MtpGenerator::finish_session`].
+///
+/// Not `Send`: the MLX handles are thread-affine to the worker thread that
+/// created them, which is also the only thread that drives the scheduler
+/// tick loop.
+#[derive(Debug)]
+pub struct MtpSessionState {
+    /// Latest verify output: seed capture after `begin_session`, then the
+    /// post-rollback slabs of the most recent round. The next round re-arms
+    /// the drafter from this and reads `next_hidden` for the draft.
+    verify_out: MtpVerifyOutput,
+    /// Current bonus token (the last emitted token).
+    bonus: i32,
+    /// Tokens emitted so far, including the first bonus. The session does
+    /// not keep the token stream itself: each step hands its new tokens to
+    /// the caller, who owns accumulation/streaming.
+    emitted_count: usize,
+    /// Per-round accepted counts feeding the adaptive block-size controller
+    /// ([`effective_mtp_block_size`]). Probe rounds are excluded.
+    accept_lens: Vec<f64>,
+    /// Classic-step probe rounds still to run (issue #736).
+    probes_remaining: usize,
+    /// Round diagnostics, accumulated across steps exactly as the
+    /// run-to-completion loop accumulates them within one call.
+    diagnostics: MtpRoundDiagnostics,
+    /// Prefill + seed wall-clock, for the final [`GenerationStats`].
+    prefill_time: Duration,
+    /// Sum of per-step wall-clocks. Cross-tick gaps between steps are NOT
+    /// included, so the reported decode time reflects worker occupancy, not
+    /// scheduling delay.
+    decode_elapsed: Duration,
+    /// Total emission budget, including the first bonus.
+    max_tokens: usize,
+    /// Prompt length, for stats/diagnostics.
+    prompt_len: usize,
+    /// Merged EOS set (target EOS + per-request stop tokens).
+    eos_tokens: Vec<i32>,
+    /// Whether the session reached a terminal condition (EOS, budget,
+    /// cancellation, drafter failure, or degenerate block size).
+    finished: bool,
+}
+
+impl MtpSessionState {
+    /// Whether the session reached a terminal condition. Once true,
+    /// further [`MtpGenerator::step_session`] calls are no-ops.
+    pub fn finished(&self) -> bool {
+        self.finished
+    }
+
+    /// Tokens emitted so far, including the first bonus.
+    pub fn emitted_count(&self) -> usize {
+        self.emitted_count
+    }
+
+    /// Speculative rounds completed so far (probe rounds excluded).
+    pub fn rounds(&self) -> usize {
+        self.diagnostics.rounds
+    }
+}
+
+/// Newly emitted tokens of one session slice ([`MtpGenerator::begin_session`]
+/// or [`MtpGenerator::step_session`]).
+#[derive(Debug)]
+pub struct MtpStepOutput {
+    /// Tokens emitted by this slice, in order. The first slice carries the
+    /// first bonus; a round slice carries the walk's accepted tokens plus
+    /// the target bonus. Empty when the slice terminated without emitting
+    /// (budget/cancel checks, drafter failure).
+    pub new_tokens: Vec<i32>,
+    /// Per-token log-probability data, index-aligned 1:1 with
+    /// [`Self::new_tokens`]. Empty when logprobs are disabled.
+    pub new_logprobs: Vec<Option<TokenLogprobData>>,
+    /// Whether the session finished during this slice. Mirrors
+    /// [`MtpSessionState::finished`] so callers can stop without touching
+    /// the state again.
+    pub finished: bool,
+}
+
+impl MtpStepOutput {
+    fn finished_empty() -> Self {
+        Self {
+            new_tokens: Vec::new(),
+            new_logprobs: Vec::new(),
+            finished: true,
+        }
+    }
+}
+
 /// Round-loop driver for Gemma 4 MTP speculative decoding (B=1).
 ///
 /// Generic over `T: MtpTarget` so we get static dispatch into the target's
@@ -364,6 +466,20 @@ impl<T: MtpTarget> MtpGenerator<T> {
         self.drafter
     }
 
+    /// Consume the generator and return both the target and the boxed
+    /// drafter handle.
+    ///
+    /// Used by the tick-cooperative slice path (issue #734): the target
+    /// adapter borrows the model, so the generator cannot live across
+    /// scheduler ticks. The caller reconstructs the adapter + generator
+    /// each tick, recovers the drafter here at the end of the tick
+    /// WITHOUT resetting it (the [`MtpSessionState`] plus a re-arm at
+    /// the next round's start carry the cross-round contract), and only
+    /// resets it once the whole session finishes.
+    pub fn into_parts(self) -> (T, Box<dyn Drafter>) {
+        (self.target, self.drafter)
+    }
+
     /// Run the full MTP generate cycle.
     ///
     /// # Arguments
@@ -423,22 +539,14 @@ impl<T: MtpTarget> MtpGenerator<T> {
         // Reset the per-run acceptance summary so `last_acceptance` always
         // reflects this call. The `max_tokens == 0` early return below leaves
         // it `None` (no decode ran); every later exit stamps the round
-        // diagnostics' summary.
+        // diagnostics' summary via `finish_session`.
         self.last_acceptance = None;
 
         let prompt_len = prompt_tokens.len();
-        let eos_tokens =
-            merged_eos_token_ids(self.target.eos_token_ids(), &sampling.stop_token_ids);
-
-        let mut emitted: Vec<i32> = Vec::with_capacity(max_tokens);
-        // `logprobs` is kept index-aligned with `emitted`: a push to one
-        // is always paired with a push to the other. Stays empty (no
-        // allocation) when `logprobs_config.enabled` is false.
-        let mut logprobs: Vec<Option<TokenLogprobData>> = Vec::new();
         if max_tokens == 0 {
             return (
-                emitted,
-                logprobs,
+                Vec::new(),
+                Vec::new(),
                 Self::build_stats(
                     prompt_len,
                     0,
@@ -448,6 +556,76 @@ impl<T: MtpTarget> MtpGenerator<T> {
             );
         }
 
+        // Run-to-completion = the resumable session API driven in a tight
+        // loop. `begin_session` is the prefill + seed slice; each
+        // `step_session` is exactly one speculative round (or one probe
+        // round). Because the tick-cooperative server path (issue #734)
+        // drives the identical methods, the two paths compute the same
+        // rounds, walks, and diagnostics by construction.
+        let (mut state, first) = self.begin_session(
+            prompt_tokens,
+            max_tokens,
+            sampling,
+            token_history,
+            logprobs_config,
+        );
+        let mut emitted: Vec<i32> = Vec::with_capacity(max_tokens);
+        emitted.extend_from_slice(&first.new_tokens);
+        // `logprobs` is kept index-aligned with `emitted`: a push to one
+        // is always paired with a push to the other. Stays empty (no
+        // allocation) when `logprobs_config.enabled` is false.
+        let mut logprobs: Vec<Option<TokenLogprobData>> = first.new_logprobs;
+        while !state.finished() {
+            let out = self.step_session(&mut state, sampling, cancel, logprobs_config);
+            emitted.extend_from_slice(&out.new_tokens);
+            logprobs.extend(out.new_logprobs);
+        }
+        let (stats, _summary) = self.finish_session(state);
+        (emitted, logprobs, stats)
+    }
+
+    /// Start a resumable MTP generation session (issue #734): run the
+    /// prefill + seed capture and emit the first bonus token.
+    ///
+    /// This is "slice 0" of the tick-cooperative server path. The returned
+    /// [`MtpSessionState`] owns every cross-round value (the seed
+    /// [`MtpVerifyOutput`] holds MLX array handles, not model borrows), so
+    /// the caller can drop this generator, stash the state across scheduler
+    /// ticks, reconstruct a generator over a fresh target adapter, and
+    /// continue with [`Self::step_session`]. The companion [`MtpStepOutput`]
+    /// carries the first bonus token (and its logprob when enabled); when
+    /// the first bonus is EOS or `max_tokens == 1`, the session is already
+    /// finished.
+    ///
+    /// The drafter is NOT armed here: [`Self::step_session`] re-arms it from
+    /// the stored verify output at the start of every round, which is what
+    /// makes the session resumable with a drafter that was held (unreset)
+    /// between ticks.
+    ///
+    /// Argument semantics match [`Self::generate`]. `max_tokens` must be
+    /// `>= 1` (the `max_tokens == 0` no-op is `generate`'s early return).
+    pub fn begin_session(
+        &mut self,
+        prompt_tokens: &[i32],
+        max_tokens: usize,
+        sampling: &SamplingConfig,
+        token_history: &[i32],
+        logprobs_config: &LogprobsConfig,
+    ) -> (MtpSessionState, MtpStepOutput) {
+        assert!(
+            !prompt_tokens.is_empty(),
+            "MtpGenerator: prompt_tokens must be non-empty",
+        );
+        assert!(
+            max_tokens >= 1,
+            "MtpGenerator::begin_session: max_tokens must be >= 1",
+        );
+        self.last_acceptance = None;
+
+        let prompt_len = prompt_tokens.len();
+        let eos_tokens =
+            merged_eos_token_ids(self.target.eos_token_ids(), &sampling.stop_token_ids);
+
         // PREFILL + SEED.
         //
         // Combined: prefill the prompt through the target with sinks
@@ -455,237 +633,316 @@ impl<T: MtpTarget> MtpGenerator<T> {
         // and capture hidden + shared K/V for the drafter's first
         // round.
         let prefill_start = Instant::now();
-        let (first_bonus, mut verify_out, first_bonus_lp) =
+        let (first_bonus, verify_out, first_bonus_lp) =
             self.target
                 .prefill_and_seed(prompt_tokens, sampling, token_history, logprobs_config);
         let prefill_time = prefill_start.elapsed();
-        let mut diagnostics = MtpRoundDiagnostics::new(prefill_time);
+        let diagnostics = MtpRoundDiagnostics::new(prefill_time);
 
         // Emit the first bonus and short-circuit if it's EOS or
         // max_tokens=1.
-        emitted.push(first_bonus);
+        let mut new_logprobs: Vec<Option<TokenLogprobData>> = Vec::new();
         if logprobs_config.enabled {
-            logprobs.push(first_bonus_lp);
+            new_logprobs.push(first_bonus_lp);
         }
-        if eos_tokens.contains(&first_bonus) || max_tokens == 1 {
-            let gen_count = emitted.len();
-            diagnostics.log(self.block_size, prompt_len, gen_count, Duration::ZERO);
-            self.last_acceptance = Some(diagnostics.summary());
-            return (
-                emitted,
-                logprobs,
-                Self::build_stats(
-                    prompt_len,
-                    gen_count,
-                    prefill_time,
-                    std::time::Duration::ZERO,
-                ),
-            );
-        }
-
-        let decode_start = Instant::now();
-        let mut bonus = first_bonus;
-        let mut accept_lens: Vec<f64> = Vec::new();
-        let mut probes_remaining = self.profile_probe_rounds;
-
-        // Arm the drafter's shared K/V from the seed capture.
-        // The drafter MUST already have been bound (see struct docs).
-        let set_shared_start = Instant::now();
-        self.set_shared_kv_from_verify(&verify_out);
-        diagnostics.set_shared_kv_ms += duration_ms(set_shared_start.elapsed());
-
-        // ROUND LOOP.
-        loop {
-            if emitted.len() >= max_tokens {
-                break;
-            }
-            // Cooperative cancellation: checked once per round (cheap —
-            // a single relaxed atomic load), not per token. On a client
-            // disconnect mid-burst the server flips `seq.cancelled` and
-            // this loop bails out with the tokens emitted so far rather
-            // than running the full `max_tokens` budget and
-            // head-of-line-blocking the next request.
-            if cancel.load(Ordering::Relaxed) {
-                break;
-            }
-            // [#736] Classic-step probe rounds. While the adaptive policy is
-            // profiling, the first `profile_probe_rounds` rounds skip the
-            // drafter and verify only the bonus token: the resulting `[1, 1]`
-            // verify forward is shape-identical to a classic decode step, so
-            // its wall-clock is the measured classic step time the policy's
-            // measured-cost estimator divides by. A probe emits exactly one
-            // greedy token (the walk over an empty draft returns the target
-            // argmax), so temperature-0 output stays byte-identical to
-            // classic decode. Probes are recorded separately from the
-            // speculative aggregates below.
-            let is_probe = probes_remaining > 0;
-            let draft_tokens: Vec<i32> = if is_probe {
-                probes_remaining -= 1;
-                Vec::new()
-            } else {
-                // Bound the block size by the remaining budget. When the
-                // operator requested a block larger than the drafter's
-                // configured depth, mirror upstream's adaptive controller:
-                // stay at configured depth until recent acceptance proves the
-                // configured prefix is usually fully accepted, then expand to
-                // the requested ceiling. The `+1` is because the verify input
-                // is `[bonus, draft_0, …, draft_{K-2}]` — one prefix bonus
-                // position that the round-loop already counts as emitted.
-                let remaining = max_tokens - emitted.len() + 1;
-                let bs = if self.prefer_requested_block_size {
-                    self.block_size.min(remaining)
-                } else {
-                    effective_mtp_block_size(
-                        self.block_size,
-                        self.configured_block_size,
-                        &accept_lens,
-                        remaining,
-                    )
-                };
-                if bs <= 1 {
-                    break;
-                }
-
-                // Drafter produces K-1 proposals. Pass the bonus + last
-                // hidden captured from the previous verify pass (or the
-                // seed verify on the first iteration).
-                let hidden = verify_out.next_hidden.as_ref();
-                let draft_start = Instant::now();
-                match self.drafter.draft_block(bonus, hidden, bs, sampling) {
-                    Ok(t) => {
-                        diagnostics.draft_ms += duration_ms(draft_start.elapsed());
-                        t
-                    }
-                    Err(e) => {
-                        diagnostics.draft_ms += duration_ms(draft_start.elapsed());
-                        // Drafter failed — bail out cleanly. We've already
-                        // emitted at least the seed bonus, so return what
-                        // we have rather than panicking. Future hardening
-                        // can surface this through GenerationStats.
-                        let _ = e;
-                        break;
-                    }
-                }
-            };
-
-            // Verify input = [bonus, draft_0, ..., draft_{K-2}].
-            // If the drafter returned fewer than bs-1 proposals (e.g.
-            // it short-circuited on a non-greedy path), `bs` shrinks
-            // accordingly so the verify shape stays consistent.
-            let actual_bs = draft_tokens.len() + 1;
-            let mut verify_input = Vec::with_capacity(actual_bs);
-            verify_input.push(bonus);
-            verify_input.extend_from_slice(&draft_tokens);
-
-            // Phase 1: sink-aware forward. The target's KV cache is now
-            // `bs` longer than before the call. We have target_tokens
-            // for the walk; the captured state holds hidden + shared
-            // K/V slabs for the finalize step.
-            let verify_forward_start = Instant::now();
-            let forward_out = self
-                .target
-                .verify_forward(&verify_input, sampling, logprobs_config);
-            let verify_elapsed_ms = duration_ms(verify_forward_start.elapsed());
-
-            // Walk the draft against the target's argmax tokens.
-            let budget = max_tokens - emitted.len();
-            let walk_start = Instant::now();
-            let walk = speculative_walk(&draft_tokens, &forward_out.target_tokens, budget);
-            if !is_probe {
-                diagnostics.speculative_walk_ms += duration_ms(walk_start.elapsed());
-            }
-            if is_probe {
-                // Probe rounds stand in for classic decode steps: their
-                // verify time is the classic-step signal and they stay out
-                // of the speculative round/acceptance aggregates (and out of
-                // `accept_lens`, so the adaptive block controller's recent
-                // window only sees real speculative rounds).
-                diagnostics.record_probe(verify_elapsed_ms);
-            } else {
-                diagnostics.verify_forward_ms += verify_elapsed_ms;
-                diagnostics.record_round(draft_tokens.len(), walk.accepted, walk.new_tokens.len());
-                accept_lens.push(walk.accepted as f64);
-            }
-
-            // Phase 2: rollback the cache + slice shared K/V based on
-            // the walk's accepted count. This consumes the captured
-            // state from phase 1. `target_logprobs` is pulled out
-            // *before* `forward_out` is moved into `verify_finalize`.
-            let target_logprobs = forward_out.target_logprobs;
-            let verify_finalize_start = Instant::now();
-            verify_out =
-                self.target
-                    .verify_finalize(walk.accepted, actual_bs, forward_out.captured);
-            if !is_probe {
-                diagnostics.verify_finalize_ms += duration_ms(verify_finalize_start.elapsed());
-            }
-
-            // Emit accepted tokens. `walk.new_tokens[i] == target_tokens[i]`
-            // for every `i` (accepted draft tokens matched the target by
-            // construction; the final entry is the target's bonus), so
-            // `target_logprobs[i]` is the correct log-probability for
-            // `walk.new_tokens[i]`.
-            for (i, &tok) in walk.new_tokens.iter().enumerate() {
-                emitted.push(tok);
-                if logprobs_config.enabled {
-                    // Defensive `.get(i)`: `target_logprobs` is aligned
-                    // 1:1 with `target_tokens` (length `actual_bs`) and
-                    // `walk.new_tokens.len() <= actual_bs`, so `i` is
-                    // always in range — but a missing entry degrades to
-                    // `None` rather than panicking.
-                    let lp = target_logprobs.as_ref().and_then(|v| v.get(i).cloned());
-                    logprobs.push(lp);
-                }
-                if eos_tokens.contains(&tok) {
-                    let decode_time = decode_start.elapsed();
-                    let gen_count = emitted.len();
-                    diagnostics.log(self.block_size, prompt_len, gen_count, decode_time);
-                    self.last_acceptance = Some(diagnostics.summary());
-                    return (
-                        emitted,
-                        logprobs,
-                        Self::build_stats(prompt_len, gen_count, prefill_time, decode_time),
-                    );
-                }
-                if emitted.len() >= max_tokens {
-                    let decode_time = decode_start.elapsed();
-                    let gen_count = emitted.len();
-                    diagnostics.log(self.block_size, prompt_len, gen_count, decode_time);
-                    self.last_acceptance = Some(diagnostics.summary());
-                    return (
-                        emitted,
-                        logprobs,
-                        Self::build_stats(prompt_len, gen_count, prefill_time, decode_time),
-                    );
-                }
-            }
-
-            // Next round's bonus is the last emitted token.
-            bonus = match emitted.last() {
-                Some(&t) => t,
-                None => break,
-            };
-
-            // Re-arm the drafter against the (now post-rollback) shared
-            // K/V the verify call produced. The drafter's
-            // `set_shared_kv` will read these slabs at the start of the
-            // next `draft_block`.
-            let set_shared_start = Instant::now();
-            self.set_shared_kv_from_verify(&verify_out);
-            if !is_probe {
-                diagnostics.set_shared_kv_ms += duration_ms(set_shared_start.elapsed());
-            }
-        }
-
-        let decode_time = decode_start.elapsed();
-        let gen_count = emitted.len();
-        diagnostics.log(self.block_size, prompt_len, gen_count, decode_time);
-        self.last_acceptance = Some(diagnostics.summary());
+        let finished = eos_tokens.contains(&first_bonus) || max_tokens == 1;
+        let state = MtpSessionState {
+            verify_out,
+            bonus: first_bonus,
+            emitted_count: 1,
+            accept_lens: Vec::new(),
+            probes_remaining: self.profile_probe_rounds,
+            diagnostics,
+            prefill_time,
+            decode_elapsed: Duration::ZERO,
+            max_tokens,
+            prompt_len,
+            eos_tokens,
+            finished,
+        };
         (
-            emitted,
-            logprobs,
-            Self::build_stats(prompt_len, gen_count, prefill_time, decode_time),
+            state,
+            MtpStepOutput {
+                new_tokens: vec![first_bonus],
+                new_logprobs,
+                finished,
+            },
         )
+    }
+
+    /// Run exactly ONE speculative round (or one classic-step probe round,
+    /// issue #736) of a session started by [`Self::begin_session`].
+    ///
+    /// A round is: re-arm the drafter from the stored verify output, draft
+    /// `K-1` proposals (skipped for probes), verify-forward
+    /// `[bonus, draft_0, …]`, walk, verify-finalize (cache rollback +
+    /// shared-KV re-slice), and emit the accepted tokens. The returned
+    /// [`MtpStepOutput`] carries this round's newly emitted tokens (with
+    /// logprobs when enabled) and whether the session finished (EOS,
+    /// budget, cancellation, or drafter failure).
+    ///
+    /// Calling this after the session finished is a no-op that returns an
+    /// empty, finished output.
+    ///
+    /// ## Resumability contract (issue #734)
+    ///
+    /// This method touches only `self` (target + drafter + config) and
+    /// `state`. The generator may be a FRESH instance over a reconstructed
+    /// target adapter, as long as (a) the underlying model's per-sequence KV
+    /// slot is untouched since the previous round, (b) the drafter is the
+    /// same bound handle, held WITHOUT [`Drafter::reset`] since the previous
+    /// round, and (c) the generator config (`block_size`, probe count) is
+    /// the same. The re-arm at the top of the round re-establishes the
+    /// drafter's shared-KV binding from `state`'s stored [`MtpVerifyOutput`],
+    /// so no drafter-side state needs to survive between rounds.
+    ///
+    /// The per-round wall-clock is accumulated into the session's decode
+    /// time, so cross-tick gaps between rounds never inflate the reported
+    /// decode stats.
+    pub fn step_session(
+        &mut self,
+        state: &mut MtpSessionState,
+        sampling: &SamplingConfig,
+        cancel: &AtomicBool,
+        logprobs_config: &LogprobsConfig,
+    ) -> MtpStepOutput {
+        if state.finished {
+            return MtpStepOutput::finished_empty();
+        }
+        let step_start = Instant::now();
+        let out = self.run_one_round(state, sampling, cancel, logprobs_config);
+        state.decode_elapsed += step_start.elapsed();
+        out
+    }
+
+    /// Finish a session: log the round diagnostics and stamp
+    /// [`Self::last_acceptance`], exactly as a completed
+    /// [`Self::generate`] call does. Returns the run's
+    /// [`GenerationStats`] plus the acceptance summary the server's
+    /// adaptive MTP policy consumes.
+    ///
+    /// Must be called exactly once per session, after the session
+    /// reports finished (or when the caller abandons it early, e.g. on
+    /// cancellation).
+    pub fn finish_session(
+        &mut self,
+        state: MtpSessionState,
+    ) -> (GenerationStats, Option<MtpAcceptanceSummary>) {
+        state.diagnostics.log(
+            self.block_size,
+            state.prompt_len,
+            state.emitted_count,
+            state.decode_elapsed,
+        );
+        let summary = state.diagnostics.summary();
+        self.last_acceptance = Some(summary);
+        (
+            Self::build_stats(
+                state.prompt_len,
+                state.emitted_count,
+                state.prefill_time,
+                state.decode_elapsed,
+            ),
+            Some(summary),
+        )
+    }
+
+    /// One round of the session round-loop. See [`Self::step_session`] for
+    /// the contract; this private body is the former `generate` loop body,
+    /// restructured so every cross-round value lives in `state`.
+    fn run_one_round(
+        &mut self,
+        state: &mut MtpSessionState,
+        sampling: &SamplingConfig,
+        cancel: &AtomicBool,
+        logprobs_config: &LogprobsConfig,
+    ) -> MtpStepOutput {
+        if state.emitted_count >= state.max_tokens {
+            state.finished = true;
+            return MtpStepOutput::finished_empty();
+        }
+        // Cooperative cancellation: checked once per round (cheap,
+        // a single relaxed atomic load), not per token. On a client
+        // disconnect the server flips `seq.cancelled` and the session
+        // finishes with the tokens emitted so far rather than running
+        // the full `max_tokens` budget.
+        if cancel.load(Ordering::Relaxed) {
+            state.finished = true;
+            return MtpStepOutput::finished_empty();
+        }
+        // [#736] Classic-step probe rounds. While the adaptive policy is
+        // profiling, the first `profile_probe_rounds` rounds skip the
+        // drafter and verify only the bonus token: the resulting `[1, 1]`
+        // verify forward is shape-identical to a classic decode step, so
+        // its wall-clock is the measured classic step time the policy's
+        // measured-cost estimator divides by. A probe emits exactly one
+        // greedy token (the walk over an empty draft returns the target
+        // argmax), so temperature-0 output stays byte-identical to
+        // classic decode. Probes are recorded separately from the
+        // speculative aggregates below.
+        let is_probe = state.probes_remaining > 0;
+        let draft_tokens: Vec<i32> = if is_probe {
+            state.probes_remaining -= 1;
+            Vec::new()
+        } else {
+            // Bound the block size by the remaining budget. When the
+            // operator requested a block larger than the drafter's
+            // configured depth, mirror upstream's adaptive controller:
+            // stay at configured depth until recent acceptance proves the
+            // configured prefix is usually fully accepted, then expand to
+            // the requested ceiling. The `+1` is because the verify input
+            // is `[bonus, draft_0, …, draft_{K-2}]`: one prefix bonus
+            // position that the round-loop already counts as emitted.
+            let remaining = state.max_tokens - state.emitted_count + 1;
+            let bs = if self.prefer_requested_block_size {
+                self.block_size.min(remaining)
+            } else {
+                effective_mtp_block_size(
+                    self.block_size,
+                    self.configured_block_size,
+                    &state.accept_lens,
+                    remaining,
+                )
+            };
+            if bs <= 1 {
+                state.finished = true;
+                return MtpStepOutput::finished_empty();
+            }
+
+            // Arm the drafter's shared K/V from the stored verify output
+            // (the seed capture on round 1, the previous round's
+            // post-rollback slabs afterwards). Running the arm at the
+            // START of the round, rather than at the end of the previous
+            // one, is what makes the session resumable across scheduler
+            // ticks: a drafter held (unreset) between ticks is re-armed
+            // here from `state` alone, and the data is identical to the
+            // legacy end-of-round arm because `set_shared_kv` is a
+            // stateless overwrite consumed only by the `draft_block`
+            // below. Probe rounds never consult the drafter, so they
+            // skip the arm entirely.
+            let set_shared_start = Instant::now();
+            self.set_shared_kv_from_verify(&state.verify_out);
+            state.diagnostics.set_shared_kv_ms += duration_ms(set_shared_start.elapsed());
+
+            // Drafter produces K-1 proposals. Pass the bonus + last
+            // hidden captured from the previous verify pass (or the
+            // seed verify on the first round).
+            let hidden = state.verify_out.next_hidden.as_ref();
+            let draft_start = Instant::now();
+            match self.drafter.draft_block(state.bonus, hidden, bs, sampling) {
+                Ok(t) => {
+                    state.diagnostics.draft_ms += duration_ms(draft_start.elapsed());
+                    t
+                }
+                Err(e) => {
+                    state.diagnostics.draft_ms += duration_ms(draft_start.elapsed());
+                    // Drafter failed; bail out cleanly. We've already
+                    // emitted at least the seed bonus, so finish with what
+                    // we have rather than panicking. Future hardening
+                    // can surface this through GenerationStats.
+                    let _ = e;
+                    state.finished = true;
+                    return MtpStepOutput::finished_empty();
+                }
+            }
+        };
+
+        // Verify input = [bonus, draft_0, ..., draft_{K-2}].
+        // If the drafter returned fewer than bs-1 proposals (e.g.
+        // it short-circuited on a non-greedy path), `bs` shrinks
+        // accordingly so the verify shape stays consistent.
+        let actual_bs = draft_tokens.len() + 1;
+        let mut verify_input = Vec::with_capacity(actual_bs);
+        verify_input.push(state.bonus);
+        verify_input.extend_from_slice(&draft_tokens);
+
+        // Phase 1: sink-aware forward. The target's KV cache is now
+        // `bs` longer than before the call. We have target_tokens
+        // for the walk; the captured state holds hidden + shared
+        // K/V slabs for the finalize step.
+        let verify_forward_start = Instant::now();
+        let forward_out = self
+            .target
+            .verify_forward(&verify_input, sampling, logprobs_config);
+        let verify_elapsed_ms = duration_ms(verify_forward_start.elapsed());
+
+        // Walk the draft against the target's argmax tokens.
+        let budget = state.max_tokens - state.emitted_count;
+        let walk_start = Instant::now();
+        let walk = speculative_walk(&draft_tokens, &forward_out.target_tokens, budget);
+        if !is_probe {
+            state.diagnostics.speculative_walk_ms += duration_ms(walk_start.elapsed());
+        }
+        if is_probe {
+            // Probe rounds stand in for classic decode steps: their
+            // verify time is the classic-step signal and they stay out
+            // of the speculative round/acceptance aggregates (and out of
+            // `accept_lens`, so the adaptive block controller's recent
+            // window only sees real speculative rounds).
+            state.diagnostics.record_probe(verify_elapsed_ms);
+        } else {
+            state.diagnostics.verify_forward_ms += verify_elapsed_ms;
+            state.diagnostics.record_round(
+                draft_tokens.len(),
+                walk.accepted,
+                walk.new_tokens.len(),
+            );
+            state.accept_lens.push(walk.accepted as f64);
+        }
+
+        // Phase 2: rollback the cache + slice shared K/V based on
+        // the walk's accepted count. This consumes the captured
+        // state from phase 1. `target_logprobs` is pulled out
+        // *before* `forward_out` is moved into `verify_finalize`.
+        let target_logprobs = forward_out.target_logprobs;
+        let verify_finalize_start = Instant::now();
+        state.verify_out =
+            self.target
+                .verify_finalize(walk.accepted, actual_bs, forward_out.captured);
+        if !is_probe {
+            state.diagnostics.verify_finalize_ms += duration_ms(verify_finalize_start.elapsed());
+        }
+
+        // Emit accepted tokens. `walk.new_tokens[i] == target_tokens[i]`
+        // for every `i` (accepted draft tokens matched the target by
+        // construction; the final entry is the target's bonus), so
+        // `target_logprobs[i]` is the correct log-probability for
+        // `walk.new_tokens[i]`.
+        let mut new_tokens: Vec<i32> = Vec::with_capacity(walk.new_tokens.len());
+        let mut new_logprobs: Vec<Option<TokenLogprobData>> = Vec::new();
+        for (i, &tok) in walk.new_tokens.iter().enumerate() {
+            new_tokens.push(tok);
+            state.emitted_count += 1;
+            if logprobs_config.enabled {
+                // Defensive `.get(i)`: `target_logprobs` is aligned
+                // 1:1 with `target_tokens` (length `actual_bs`) and
+                // `walk.new_tokens.len() <= actual_bs`, so `i` is
+                // always in range, but a missing entry degrades to
+                // `None` rather than panicking.
+                let lp = target_logprobs.as_ref().and_then(|v| v.get(i).cloned());
+                new_logprobs.push(lp);
+            }
+            if state.eos_tokens.contains(&tok) || state.emitted_count >= state.max_tokens {
+                state.finished = true;
+                return MtpStepOutput {
+                    new_tokens,
+                    new_logprobs,
+                    finished: true,
+                };
+            }
+        }
+
+        // Next round's bonus is the last emitted token. `walk.new_tokens`
+        // always carries at least the target's own token at position 0
+        // (the budget is >= 1 at the top of the round), so the fallback
+        // to the previous bonus is defensive only.
+        state.bonus = *new_tokens.last().unwrap_or(&state.bonus);
+
+        MtpStepOutput {
+            new_tokens,
+            new_logprobs,
+            finished: false,
+        }
     }
 
     /// Wire the verify output's `next_shared_kv` into the drafter's
