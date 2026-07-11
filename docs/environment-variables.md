@@ -44,7 +44,7 @@ and cached on first use. Set them before starting `mlxcel` or `mlxcel-server`.
 | `MLXCEL_MAX_BATCH_PREFILL_TOKENS` | unsigned integer tokens, `0` disables | derived (`2 * max_batch_prefill * prefill_chunk_size`) | Padded-token budget bounding one server batched prefill's transient memory (issue #715). The batched path pads a cohort to its longest prompt `L` and materializes a `[B, L, L]` FP32 mask, an `O(B*L^2)` transient; this caps the drained window by total padded tokens (`rows * L`) so the mask stays within `~2*N^2` bytes, with rows past the budget spilling to the chunked single-sequence path. `--max-batch-prefill-tokens` takes precedence. Unset derives `2 * max_batch_prefill * prefill_chunk_size` (the shipped `2 * 4 * 512 = 4096`; the 2x headroom keeps a full batch of slightly-over-chunk-sized prompts in one window); `0` disables the cap (pre-#715 unbounded behavior). Only affects families with `supports_batched_prefill()` under `--max-batch-prefill > 1`. |
 | `MLXCEL_ATTENTION_CHUNK_BUDGET_MB` | unsigned integer MiB, `0` disables | `1024` | **Advanced.** Score-matrix byte budget for the CUDA attention fallback. When a configuration cannot reach a fused SDPA kernel (head_dim > 128 families such as gemma-3/gemma-4, or softcap composites) and one attention call would materialize more scores than this budget, the query axis is processed in budget-sized chunks (issue #672). Larger values trade memory for fewer kernel launches; `0` restores the unchunked fallback. |
 | `MLXCEL_ALLOWED_ORIGINS` | comma-separated origin list (e.g. `https://app.example.com,https://admin.example.com`) | unset (permissive) | Restricts CORS to the listed origins. `--allowed-origins` takes precedence. Unset keeps the permissive default that reflects any origin. Each value must be a bare `scheme://host[:port]` origin (`http`/`https`, no path or query); a malformed value fails server startup with a clear message instead of being silently dropped. Only affects the browser-reachable TCP HTTP listener: the Unix-socket transport sends no `Origin` header and is unaffected. |
-| `MLXCEL_SURGERY` | YAML file path | unset | Feature-gated weight-load surgery configuration. `--surgery` takes precedence when the `surgery` feature is built. |
+| `MLXCEL_SURGERY` | YAML file path | unset | Weight-load surgery configuration path. `--surgery` takes precedence. Active when the `surgery` feature is built, which it is by default; a `--no-default-features` build ignores it. See [Cargo feature flags](installation.md#cargo-feature-flags). |
 
 ## Server context sizing
 
@@ -80,6 +80,27 @@ These are read by the `mlxcel-core` build script.
 
 CUDA builds also use non-`MLXCEL_*` variables such as `CUDA_HOME` and
 `MLX_CUDA_ARCHITECTURES`; see [Installation](installation.md#linux-with-cuda).
+
+## OpenXLA / StableHLO backend variables
+
+**Advanced.** These apply only to builds that enable the `xla-backend` /
+`xla-iree` Cargo features (issue #449, [ADR 0004](adr/0004-compute-backend-session-seam-and-stablehlo-family.md));
+shipping Apple-Silicon and CUDA binaries do not, so on those builds the variables
+below are inert and the engine is always MLX. See
+[Installation](installation.md#openxla--stablehlo-backend-xla-backend-xla-iree)
+for how to build the backend.
+
+| Variable | Values | Default | Notes |
+|----------|--------|---------|-------|
+| `MLXCEL_BACKEND` | `mlx`, `xla` | `mlx` | Runtime compute-backend selector read by `select_backend()`. `xla` routes `load_model` / `forward` through the OpenXLA/IREE engine; it takes effect only when the binary was built with `xla-backend` (else it is ignored and MLX runs). Any other value selects MLX. |
+| `MLXCEL_XLA_DEVICE` | `metal`, `cuda`, `local-task` | `metal` on macOS, `local-task` elsewhere | IREE HAL device for the XLA engine. CUDA is never auto-selected (it needs a CUDA-enabled runtime build), so set `cuda` explicitly on a GB10-class host. `local-task` is the CPU device. |
+| `MLXCEL_XLA_PRECISION` | `f32`, `f16`, `bf16` | `f32` | Contraction precision the StableHLO emitter uses for matmuls (norms and softmax stay in f32). Read at graph-emit time. An explicit value forces that precision even on a GPU device whose default would differ; an unset or unrecognized value falls back to the per-device default. The committed byte-exact goldens are the `f32` graphs, so a byte-exactness check rejects a non-default precision. |
+| `MLXCEL_XLA_QUANT` | `packed` | unset | `packed` keeps quantized weights packed inside the graph (device-side dequant) instead of dequantizing at load. Read both at emit time and by the loader so uploaded buffers match the emitted args. A no-op on unquantized checkpoints. Not supported on the Metal target (packed int8 dequant prefill faults on the Metal HAL driver); use the CUDA or `local-task` target, or leave it unset to dequant at load. |
+| `MLXCEL_XLA_IREE_COMPILE` | path to `iree-compile` | baked at build time | Runtime override for the `iree-compile` binary used to lower the bundled graphs to vmfbs. The CUDA source-runtime build ships no compiler, so this must point at a cuda-capable `iree-compile` matching the runtime version; the CPU/Vulkan dist build falls back to the dist's own `bin/iree-compile`. |
+| `IREE_DIST` | path to an `iree-dist` tree | baked at build time | Non-`MLXCEL_*` runtime override for the IREE distribution (CPU/Vulkan build). Takes precedence over the path baked in at build time. Also the build-time variable that selects the dist to link against; see [Installation](installation.md#openxla--stablehlo-backend-xla-backend-xla-iree). |
+
+Compiled vmfbs are cached on disk (keyed by graph text, flags, and the compiler
+path), so only the first load of each graph variant pays the `iree-compile` cost.
 
 ## Downloader variables
 

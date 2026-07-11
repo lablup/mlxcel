@@ -17,6 +17,61 @@ static binaries: platform GPU/runtime libraries are still required.
 | Linux CPU-only | not a release target | none | May compile in limited configurations, but it is not a useful or validated inference target for this project. |
 | Windows | not documented here | — | The current public installation path is macOS/Linux. |
 
+## Cargo feature flags
+
+Both binaries (`mlxcel` and `mlxcel-server`) build from the same root package, so
+one feature set applies to both. Pass them with `cargo build --features <a,b>`.
+Shipping builds enable only the platform backend flags; the rest are opt-in seams
+or test scaffolding.
+
+| Feature | Default | Effect |
+|---------|---------|--------|
+| `surgery` | **on** | Axis A weight-load surgery. Exposes `--surgery <config.yaml>` and `MLXCEL_SURGERY` for `scale` / `add` / `prune` / `replace` / `interpolate` weight-space edits at load time, and pulls in the `mlxcel-surgery` crate. When no surgery config is supplied the load path is byte-for-byte identical to a build without the feature. |
+| `metal` | off | Apple Silicon Metal GPU backend (delegates to `mlxcel-core/metal`). Standard on macOS. |
+| `accelerate` | off | Apple Accelerate CPU BLAS backend (delegates to `mlxcel-core/accelerate`). Standard on macOS. |
+| `cuda` | off | NVIDIA CUDA GPU backend (delegates to `mlxcel-core/cuda`). Required on NVIDIA hosts; a plain build is CPU-only (see the footgun note below). |
+| `experimental-backend` | off | Reserves the non-MLX compute-backend seam slot (issue #338). Ships no kernels and adds no runtime dispatch; it only compiles the plug-in boundary where a future non-MLX engine (e.g. FuriosaAI RNGD) would implement `ComputeBackend`. `select_backend()` still folds to MLX. |
+| `xla-backend` | off | OpenXLA / StableHLO backend seam (issue #449, [ADR 0004](adr/0004-compute-backend-session-seam-and-stablehlo-family.md)). Pulls in `mlxcel-xla` and compiles the `Backend::Xla` / `Session::Xla` arms and the `MLXCEL_BACKEND=xla` selector, but no native execution engine: the crate is pure-Rust stubs plus the StableHLO graph emitter, so CI builds it unchanged. |
+| `xla-iree` | off | `xla-backend` plus real IREE execution (`mlxcel-xla/iree`). Compiles a C shim against a prebuilt IREE runtime and drives the bundled prefill / decode_step graphs. Needs `IREE_DIST` (or the source-build vars below) at build time, so it is a local / opt-in build, not a CI or release default. |
+| `test-utils` | off | Test-only helpers. Required to build the `distributed_integration`, `pipeline_e2e`, and `paged_handoff_parity` integration tests (`cargo test --features test-utils`). Not needed for the binaries. |
+
+`default = ["surgery"]`, so a plain `cargo build` enables surgery only. A real
+build always adds a platform backend on top, e.g. `--features metal,accelerate` on
+Apple Silicon or `--features cuda` on NVIDIA. Build with `--no-default-features`
+to drop the `mlxcel-surgery` crate entirely (CI parity tests against pre-surgery
+behavior, or constrained embedded targets):
+
+```bash
+# Metal + Accelerate, no surgery crate.
+cargo build --release --no-default-features --features metal,accelerate
+```
+
+### OpenXLA / StableHLO backend (`xla-backend`, `xla-iree`)
+
+The XLA path is a two-tier opt-in and never enters Apple-Silicon or CUDA shipping
+builds, so those binaries compile none of it and the seam folds to MLX:
+
+- `xla-backend` compiles only the seam: the `Backend::Xla` / `Session::Xla` arms,
+  the `MLXCEL_BACKEND=xla` selection, and the StableHLO graph emitter. It needs no
+  native toolchain, so CI builds it unchanged.
+- `xla-iree` adds the executing runtime. Its build script compiles a C shim
+  against a prebuilt IREE distribution, so one of these must be set at build time:
+  - `IREE_DIST`: the extracted `iree-dist-<ver>-linux-<arch>` tree (CPU / Vulkan
+    dist). The dist's own `bin/iree-compile` lowers the bundled graphs.
+  - `IREE_CUDA_HOME` (+ `IREE_CUDA_COMPILE`): a source-built CUDA-enabled IREE
+    runtime and a matching cuda-capable `iree-compile`, for the GB10-class GPU
+    path. `scripts/iree/setup-cuda.sh` produces this tree.
+  - `IREE_MACOS_HOME` (+ `IREE_MACOS_COMPILE`): a source-built macOS runtime and
+    a Metal-capable `iree-compile`, for the Apple Silicon dev path.
+    `scripts/iree/setup-macos.sh` produces this tree and prints the matching
+    environment.
+
+At runtime, select the backend with `MLXCEL_BACKEND=xla` and tune it with the
+`MLXCEL_XLA_*` variables (device, precision, packed quant). See
+[Environment variables](environment-variables.md#openxla--stablehlo-backend-variables)
+for the full list and [ADR 0004](adr/0004-compute-backend-session-seam-and-stablehlo-family.md)
+for the design.
+
 ## macOS on Apple Silicon
 
 Prerequisites:
