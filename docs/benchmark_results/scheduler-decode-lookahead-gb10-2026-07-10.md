@@ -3,6 +3,12 @@
 Date: 2026-07-10. Host: NVIDIA GB10 (Grace-Blackwell), CUDA build.
 Bench: `bench_serving_concurrency.py` (512 prompt tokens, 512 max tokens) against `mlxcel-bench-decode --prompt-tokens 512` as the matched-context CLI reference; sync baseline via `MLXCEL_FORCE_SYNC=1`. Full run and methodology: PR #729.
 
+> **2026-07-11 update (#725):** the "#724 CUDA batched-decode caveat" bounding
+> the B=4 llama row below is closed by the multirow qmv path
+> (`MLXCEL_QMV_MULTIROW`); re-measured aggregate decode now scales with
+> concurrency instead of staying flat (`qmv-multirow-gb10-2026-07-11.md`). The
+> B=4 llama numbers below predate that fix and are kept as the pre-#725 record.
+
 ## TL;DR
 
 Porting the CLI generation loop's lookahead `async_eval` pipelining into the server `BatchScheduler` decode tick closes most of the structural decode-throughput gap between server and CLI on CUDA. The lookahead pipeline engages 509/511 decode steps per 512-token request, and greedy output stays byte-identical to the `MLXCEL_FORCE_SYNC=1` synchronous path.

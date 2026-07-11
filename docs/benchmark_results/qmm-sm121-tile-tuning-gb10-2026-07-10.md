@@ -3,6 +3,11 @@
 Date: 2026-07-10. Host: NVIDIA GB10 (Grace-Blackwell, sm_121 / cc 12.1), CUDA 13.0, MLX 0.32.1 (pin `57c66cac`).
 Binary: `make release-cuda`. Bench: `mlxcel-bench-decode` (`--prompt-tokens` for prefill), `mlxcel generate` (greedy parity).
 
+> **2026-07-11 update (#725):** the "NOT addressed" small-M batched-decode gap
+> in the Scope section below is now closed by the multirow qmv path
+> (`MLXCEL_QMV_MULTIROW`); see `qmv-multirow-gb10-2026-07-11.md`. The large-M
+> prefill tile fix on this page is unaffected and stands on its own.
+
 ## TL;DR
 
 The CUDA quantized prefill GEMM (`qmm_sm80`) ran at ~0.55x the bf16 ceiling on GB10 because it used the Ampere CTA tile (M=64), which underutilizes Blackwell's SMs. Raising the CTA tile's M cap to 128 on sm_120/121 (a one-line, arch-gated heuristic change in the overlay `qmm_sm80.cu`) recovers **+31-38% prefill** throughput, greedy-parity identical, no decode regression. Wider-N / deeper-K tiles were also swept but break the fixed-MMA shared-memory layout (JIT failure), so `tile_m` is the one safely-tunable axis in-tree.
@@ -71,9 +76,9 @@ Meets #637's acceptance (>= 25% prefill @8192).
 ## Scope: addressed vs not
 
 - **Addressed**: large-M prefill and batched prefill on sm_120/121 (+32%).
-- **NOT addressed**: small-M batched decode (`M*B` in [2,8)) still uses per-row `qmv` (no weight amortization across the batch), and the `tile_m` cap does not raise small-M tiles. This is the batched-decode non-amortization behind #714's `--parallel 4` CUDA regression, and needs a dedicated small-M kernel (or a weight-reusing batched `qmv`) - upstream MLX territory. Until then, #714's `--parallel` default should be made backend-aware (fall back to 1 on CUDA/Blackwell).
+- **NOT addressed at the time of this report, closed 2026-07-11 (#725)**: small-M batched decode (`M*B` in [2,8)) used per-row `qmv` with no weight amortization across the batch, the batched-decode non-amortization behind #714's `--parallel 4` CUDA regression. The `tile_m` cap here still does not raise small-M tiles, but a weight-reusing multirow `qmv` variant now covers that window instead (`qmv-multirow-gb10-2026-07-11.md`), so the CUDA-backend-aware `--parallel` fallback floated below is no longer needed for this gap.
 - **Further prefill gains** toward the bf16 ceiling (0.72x -> 1.0x) need a Blackwell-tuned kernel (5th-gen tensor-core MMA, wider tiles with a compatible smem layout) - upstream MLX.
 
 ## Upstream
 
-MLX's CUDA quantized GEMM has no sm_120/121 tile specialization: the Ampere tile underutilizes Blackwell (ncu evidence above), and there is no amortizing small-M (batched decode) quantized path on Blackwell. A tracking issue on lablup/mlxcel should carry this for upstream follow-up.
+MLX's CUDA quantized GEMM still has no sm_120/121 tile specialization: the Ampere tile underutilizes Blackwell (ncu evidence above), and stock MLX itself still has no amortizing small-M (batched decode) quantized path on Blackwell; the multirow `qmv` fix (#725) is a mlxcel overlay, not an upstream MLX change. A tracking issue on lablup/mlxcel should carry both gaps for upstream follow-up.
