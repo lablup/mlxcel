@@ -177,8 +177,10 @@ and GB10 (`121`) in a single build (`90a;100;121`), and x86_64 covering Ampere
 through Blackwell (`80;86;89;90a;100;120`). For each target the `mlxcel` CLI and the
 `mlxcel-server` are published as separate archives (`mlxcel-...` and
 `mlxcel-server-...`, each roughly 347 MB) so a consumer downloads only the one
-it needs. Treat other GPU/OS combinations as source builds that need local
-validation.
+it needs. Every published release also ships a CycloneDX SBOM named
+`sbom-<version>.cyclonedx.json.gz` for supply-chain transparency and
+vulnerability scanning. Treat other GPU/OS combinations as source builds that
+need local validation.
 
 ### Prebuilt CUDA artifact: runtime requirements
 
