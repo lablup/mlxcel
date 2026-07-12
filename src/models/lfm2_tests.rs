@@ -250,6 +250,68 @@ fn lfm2_short_conv_decode_matches_conv1d() {
 }
 
 #[test]
+fn lfm2_short_conv_decode_matches_conv1d_bf16() {
+    // bf16 variant of `lfm2_short_conv_decode_matches_conv1d`: this is the
+    // dtype the decode fast path actually runs in on real (bf16) LFM2
+    // checkpoints, and is defense-in-depth against a future MLX change to
+    // how `sum_axis` accumulates for half dtypes. Values are built in f32
+    // (same asymmetric kernel as the f32 test) and cast to bf16 for both
+    // the `conv1d` reference and the fast path, so the comparison isolates
+    // dtype-driven rounding rather than construction differences. bf16 has
+    // ~3 decimal digits of precision, so the tolerance is loose relative to
+    // the f32 test.
+    use super::lfm2::{build_conv_decode_weight, short_conv_decode_step};
+    use mlxcel_core::dtype;
+
+    let hidden = 4;
+    let l_cache = 3;
+
+    let weight_data: Vec<f32> = vec![
+        0.5, -0.25, 0.75, // channel 0
+        -1.0, 0.5, 0.25, // channel 1
+        0.1, 0.2, -0.3, // channel 2
+        2.0, -0.5, 1.5, // channel 3
+    ];
+    let conv_weight_f32 = mlxcel_core::from_slice_f32(&weight_data, &[hidden, l_cache, 1]);
+    let conv_weight = mlxcel_core::astype(&conv_weight_f32, dtype::BFLOAT16);
+
+    let padded_data: Vec<f32> = vec![
+        1.0, 2.0, 3.0, 4.0, // t = 0
+        -1.0, 0.5, 2.0, -2.0, // t = 1
+        0.25, -0.75, 1.0, 0.5, // t = 2
+    ];
+    let padded_f32 = mlxcel_core::from_slice_f32(&padded_data, &[1, l_cache, hidden]);
+    let padded = mlxcel_core::astype(&padded_f32, dtype::BFLOAT16);
+
+    // Ground truth: stride-1, no-pad, dilation-1, groups==hidden conv1d, run
+    // in bf16 (as it is on a bf16 checkpoint off Metal before this fix).
+    let reference = mlxcel_core::conv1d(&padded, &conv_weight, 1, 0, 1, hidden);
+    assert_eq!(mlxcel_core::array_shape(&reference), vec![1, 1, hidden]);
+    assert_eq!(mlxcel_core::array_dtype(&reference), dtype::BFLOAT16);
+
+    // Fast path, built from the bf16 conv weight exactly as `ShortConv`
+    // does for a bf16 checkpoint's non-quantized conv weight.
+    let decode_weight = build_conv_decode_weight(&conv_weight);
+    assert_eq!(
+        mlxcel_core::array_shape(&decode_weight),
+        vec![1, l_cache, hidden]
+    );
+    let elementwise = short_conv_decode_step(&padded, &decode_weight, dtype::BFLOAT16);
+    assert_eq!(mlxcel_core::array_shape(&elementwise), vec![1, 1, hidden]);
+
+    // Compare in f32 (bf16 subtraction/abs would itself be lossy).
+    let diff = mlxcel_core::subtract(
+        &mlxcel_core::astype(&reference, dtype::FLOAT32),
+        &mlxcel_core::astype(&elementwise, dtype::FLOAT32),
+    );
+    let max_abs = mlxcel_core::item_f32(&mlxcel_core::max_all(&mlxcel_core::abs(&diff)));
+    assert!(
+        max_abs < 2e-2,
+        "bf16 decode short-conv diverged from bf16 conv1d: max|diff| = {max_abs}"
+    );
+}
+
+#[test]
 fn lfm2_unquantized_config_uses_quantization_defaults() {
     // Drop the quantization block (a bf16 checkpoint) and confirm the defaults.
     let no_quant = LFM2_350M_CONFIG.replace(

@@ -430,12 +430,13 @@ impl ShortConv {
         // the (possibly bf16) activations; quantized checkpoints leave the
         // non-quantized conv weight at its stored precision.
         //
-        // On the single-step decode path off Metal, compute the conv as an
-        // explicit weighted sum of the L_cache taps instead of calling
-        // `conv1d`: a tiny bf16 depthwise conv on CUDA (MLX 0.32.1) otherwise
-        // falls into cuDNN's generic `convolve_common_engine`, which launches
-        // one kernel per channel and regressed lfm2-350m-8bit decode ~10x
-        // (issue #748). Prefill (out_len > 1) and Metal keep `conv1d`.
+        // Off Metal, any single-position output step (a decode step, or a
+        // 1-token prefill) computes the conv as an explicit weighted sum of
+        // the L_cache taps instead of calling `conv1d`: a tiny bf16 depthwise
+        // conv on CUDA (MLX 0.32.1) otherwise falls into cuDNN's generic
+        // `convolve_common_engine`, which launches one kernel per channel and
+        // regressed lfm2-350m-8bit decode ~10x (issue #748). Multi-position
+        // outputs (prefill, speculative verify) and Metal keep `conv1d`.
         let in_dtype = mlxcel_core::array_dtype(&padded);
         let conv_out = if let (Some(decode_weight), 1) = (&self.decode_weight, bx_shape[1]) {
             short_conv_decode_step(&padded, decode_weight, in_dtype)
