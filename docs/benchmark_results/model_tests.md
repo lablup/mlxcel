@@ -10,7 +10,7 @@ M5 Max, and mlx-lm / mlx-vlm baselines, see
 
 | Hardware | File | Status | Last Updated |
 |----------|------|--------|-------------|
-| Mac Studio M1 Ultra 128GB | [model_tests_m1ultra.md](model_tests_m1ultra.md) | Active | 2026-07-06 |
+| Mac Studio M1 Ultra 128GB | [model_tests_m1ultra.md](model_tests_m1ultra.md) | Active | 2026-07-12 |
 | MacBook Pro M5 Max 128GB | [model_tests_m5max.md](model_tests_m5max.md) | Active | 2026-06-15 |
 | NVIDIA GB10 (DGX Spark) | [model_tests_gb10.md](model_tests_gb10.md) | Active | 2026-06-17 |
 
@@ -27,6 +27,9 @@ Current source-of-truth data lives in `benchmarks/`:
 | `metal_m5max_vlm_2026-05-20.csv` | M5 Max | 2026-05-20 (mlxcel 0.0.28, MLX 0.31.2; Gemma3n + Molmo v1 + Phi-3.5 vision + Gemma3 4B VLM entries) | VLM |
 | `pylm_m5max_2026-05-18.csv` | M5 Max | 2026-05-19 benchmark campaign (mlx-lm 0.31.3 baseline; CSV date crossed midnight) | Text |
 | `pylm_m5max_vlm_2026-05-18.csv` | M5 Max | 2026-05-19 benchmark campaign (mlx-vlm 0.4.4 baseline; CSV date crossed midnight) | VLM |
+| `metal_m1ultra_2026-07-12.csv` | M1 Ultra | 2026-07-12 (mlxcel 0.4.0-rc.1, MLX pin 57c66cac, `--cooldown 30`; version-change full text re-benchmark, 168 rows; decode median 98% vs mlx-lm, flat vs 0.3.3, nvfp4/minicpm-mxfp4 recovered) | Text |
+| `metal_m1ultra_vlm_2026-07-12.csv` | M1 Ultra | 2026-07-12 (mlxcel 0.4.0-rc.1, MLX pin 57c66cac, `--cooldown 30`; version-change full VLM re-benchmark, 168 rows) | VLM |
+| `metal_m1ultra_2026-07-12_cooldown0.csv` + `_vlm_` | M1 Ultra | 2026-07-12 (mlxcel 0.4.0-rc.1; `--cooldown 0` pass of the same build, kept for the thermal-offset comparison: decode reads ~2% lower than the cooldown-30 canonical) | Text/VLM |
 | `metal_m1ultra_2026-07-06.csv` | M1 Ultra | 2026-07-06 (mlxcel 0.3.3; full text re-benchmark post VLM-port batch #660-#664 and fixes #666-#668/#671, 169 rows) | Text |
 | `metal_m1ultra_vlm_2026-07-06.csv` | M1 Ultra | 2026-07-06 (mlxcel 0.3.3; full VLM re-benchmark, 14 new VLM families measured) | VLM |
 | `pylm_m1ultra_*2026-07-06*_single_*.csv` | M1 Ultra | 2026-07-06 (mlx-lm 0.31.3 / mlx-vlm dev; per-model python baselines for 21 newly added models, 13 measured / 8 python-side FAIL) | Baselines |

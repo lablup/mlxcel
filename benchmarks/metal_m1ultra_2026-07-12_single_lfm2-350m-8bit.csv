@@ -1,0 +1,2 @@
+model,model_path,prompt_tokens,generated_tokens,prefill_ms,prefill_tok_s,decode_ms,decode_tok_s,date,hardware,mlx_version,build_type,max_tokens,prompt,prompt_target_len
+lfm2-350m-8bit,models/lfm2-350m-8bit,17,13,28.37,599.14,27.12,479.36,2026-07-12,Apple_M1_Ultra_128GB,0.4.0-rc.1,release,100,"Hello, how are you today?",
