@@ -306,6 +306,50 @@ struct ShortConv {
     conv_bias: Option<UniquePtr<MlxArray>>,
     hidden_size: i32,
     l_cache: i32,
+    /// Time-major depthwise-conv weight for the single-step (decode) fast path
+    /// (issue #748), shape `[1, L_cache, hidden]` where
+    /// `decode_weight[0, k, c] == conv_weight[c, k, 0]`. `None` on Metal, where
+    /// MLX's `conv1d` already dispatches a fast small-conv kernel and the proven
+    /// path is kept as-is.
+    decode_weight: Option<UniquePtr<MlxArray>>,
+}
+
+/// Materialize the time-major weight used by the decode fast path.
+/// `conv_weight` is `[hidden, L_cache, 1]` (MLX depthwise layout); transposing
+/// to `[1, L_cache, hidden]` lets a single broadcast multiply-and-sum over the
+/// `L_cache` axis replace `conv1d`. Materialized once at load so decode never
+/// reshapes the weight.
+pub(crate) fn build_conv_decode_weight(conv_weight: &MlxArray) -> UniquePtr<MlxArray> {
+    // [hidden, L_cache, 1] -> [1, L_cache, hidden].
+    let w = mlxcel_core::transpose_axes(conv_weight, &[2, 1, 0]);
+    let w = mlxcel_core::contiguous(&w, false);
+    mlxcel_core::eval(&w);
+    w
+}
+
+/// Single decode step of the depthwise causal short conv, computed as a
+/// broadcast weighted sum instead of `conv1d` (issue #748).
+///
+/// For `padded` of shape `[batch, L_cache, hidden]` and `decode_weight` of
+/// shape `[1, L_cache, hidden]` this returns `[batch, 1, hidden]` where
+/// `out[b, 0, c] = sum_k padded[b, k, c] * decode_weight[0, k, c]`, which is
+/// exactly what a stride-1, no-pad, dilation-1, `groups == hidden` `conv1d`
+/// produces for a length-1 output. The two-kernel elementwise form avoids the
+/// `conv1d` CUDA dispatch (MLX 0.32.1) that sends this tiny bf16 depthwise conv
+/// to cuDNN's generic `convolve_common_engine`, which launches one kernel per
+/// channel (~1024 for a 350M LFM2) and dominates decode.
+pub(crate) fn short_conv_decode_step(
+    padded: &MlxArray,
+    decode_weight: &MlxArray,
+    in_dtype: i32,
+) -> UniquePtr<MlxArray> {
+    let prod = if mlxcel_core::array_dtype(decode_weight) == in_dtype {
+        mlxcel_core::multiply(padded, decode_weight)
+    } else {
+        let w = mlxcel_core::astype(decode_weight, in_dtype);
+        mlxcel_core::multiply(padded, &w)
+    };
+    mlxcel_core::sum_axis(&prod, 1, true) // [batch, 1, hidden]
 }
 
 impl ShortConv {
@@ -321,6 +365,15 @@ impl ShortConv {
             .get(&format!("{prefix}.conv.bias"))
             .map(|w| mlxcel_core::copy(w));
 
+        // Precompute the decode fast-path weight off Metal (issue #748). On
+        // Metal `conv1d` already dispatches a fast small-conv kernel, so keep
+        // its proven path and leave `decode_weight` unset there.
+        let decode_weight = if mlxcel_core::metal_is_available() {
+            None
+        } else {
+            Some(build_conv_decode_weight(&conv_weight))
+        };
+
         Ok(Self {
             in_proj,
             out_proj,
@@ -328,6 +381,7 @@ impl ShortConv {
             conv_bias,
             hidden_size: args.hidden_size as i32,
             l_cache: args.conv_l_cache as i32,
+            decode_weight,
         })
     }
 
@@ -375,8 +429,17 @@ impl ShortConv {
         // Depthwise Conv1d (groups == hidden). Match the conv weight dtype to
         // the (possibly bf16) activations; quantized checkpoints leave the
         // non-quantized conv weight at its stored precision.
+        //
+        // On the single-step decode path off Metal, compute the conv as an
+        // explicit weighted sum of the L_cache taps instead of calling
+        // `conv1d`: a tiny bf16 depthwise conv on CUDA (MLX 0.32.1) otherwise
+        // falls into cuDNN's generic `convolve_common_engine`, which launches
+        // one kernel per channel and regressed lfm2-350m-8bit decode ~10x
+        // (issue #748). Prefill (out_len > 1) and Metal keep `conv1d`.
         let in_dtype = mlxcel_core::array_dtype(&padded);
-        let conv_out = if mlxcel_core::array_dtype(&self.conv_weight) == in_dtype {
+        let conv_out = if let (Some(decode_weight), 1) = (&self.decode_weight, bx_shape[1]) {
+            short_conv_decode_step(&padded, decode_weight, in_dtype)
+        } else if mlxcel_core::array_dtype(&self.conv_weight) == in_dtype {
             mlxcel_core::conv1d(&padded, &self.conv_weight, 1, 0, 1, h)
         } else {
             let w = mlxcel_core::astype(&self.conv_weight, in_dtype);

@@ -177,7 +177,7 @@ Prefill/Decode are the measured-pass figures from `mlxcel-bench-decode`. Notes r
 | falcon-h1-tiny-90m-instruct-4bit | ✅ | 1419.44 | 413.00 | 30 tok |
 | falcon-mamba-7b-4bit | ✅ | 92.54 | 22.06 | 2 tok |
 | jamba-v0.1-4bit | ✅ | 523.67 | 89.63 |  |
-| lfm2-350m-8bit | ✅ | 3031.35 | 39.84 | 13 tok; decode regression vs 0.3.1 (409.01 -> ~40 tok/s, reproducible); tracked in #748 |
+| lfm2-350m-8bit | ✅ | 3270.66 | 393.84 | 13 tok; decode regression fixed (#748): was ~40 tok/s, restored to the 0.3.1 envelope by computing the single-step depthwise short conv as a broadcast multiply-sum instead of a tiny bf16 `conv1d` (MLX 0.32.1 routed that to cuDNN's per-channel grouped-conv engine on CUDA) |
 | mamba2-130m | ✅ | 890.29 | 162.23 |  |
 | mamba2-1.3b-4bit | ✅ | 329.13 | 83.40 |  |
 | plamo-2-1b | ✅ | 199.12 | 44.54 |  |
@@ -373,7 +373,7 @@ Models that accept image input and generated tokens under the `"What is in this 
 ### Notable changes vs the 2026-06-17 (0.3.1) and 2026-07-09 (rc.1 subset) records
 
 - **SSM / hybrid / NAS decode reads 2-3x higher than every earlier record**: granite-4.0-h-350m 86.60 → 259.69, granite-4.0-h-tiny 33.84 → 100.28, falcon-h1-tiny 110.42 → 413.00, nemotron-h-30b 40.32 → 79.94, nemotron-nas-30b 37.33 → 82.72, nemotron-omni-30b 38.45 → 80.86, plamo-2-1b 35.14 → 44.54. Two of these (granite-350m, falcon-h1-tiny) were re-measured as recently as 2026-07-09 at the low values, and no SSM-related code has landed since, so the delta is environmental rather than a code change. The affected cluster is exactly the launch-latency-sensitive family. Re-verify after the planned pre-release reboot before treating these as the release numbers.
-- **lfm2-350m-8bit decode regressed ~10x**: 409.01 (0.3.1) → 39.84, and a standalone re-run reproduces it (42.47), so it is not sweep noise. The sibling `lfm2-8b-a1b-4bit` is unaffected (157.73 → 161.87). Tracked in #748.
+- **lfm2-350m-8bit decode regressed ~10x, now fixed (#748)**: 409.01 (0.3.1) → 39.84 at rc.1, restored to 393.84 by the fix. Root cause: MLX 0.32.1 dispatches the single-step (L=1) bf16 depthwise short conv on CUDA to cuDNN's generic `convolve_common_engine`, which launches one kernel per channel (~1024 for a 350M LFM2) and consumed 88.6% of decode GPU time; computing that decode step as a broadcast multiply-and-sum over the `L_cache` taps removes the grouped-conv dispatch. The sibling `lfm2-8b-a1b-4bit` was never affected (its conv runs on the fast `conv1d_c1_k1_nhwc` kernel; 157.73 → 161.87 → 161.39). Prefill still uses `conv1d` and was always healthy.
 - **Moderate decode drops worth watching**: gemma-4-26b-a4b-it-4bit 58.59 → 50.19 (-14%), gemma-4-26b-a4b-it-qat-4bit 50.33 → 45.29 (-10%), glm4-flash-4bit 53.33 → 45.72 (-14%).
 - **Text-only prefill for several VLM-capable models is an order of magnitude higher than 0.3.1** (aya-vision-8b 124.91 → 1354.53, pixtral-12b 35.97 → 120.39, youtu-vl 134.27 → 451.42, mistral-small-3.1-24b 63.68 → 891.89), consistent with the text-prompt path no longer paying vision-tower costs rather than with a kernel speedup.
 - **Decode improvements >10% on dense/MoE models**: apertus-8b +21%, gemma3-4b / gemma-3-4b-it +19%, gemma3-1b +15%, gemma3n-e2b +10%, qwen3-0.6b-4bit +13%, aya-expanse-8b +12%, plus the VLM-side gains below.

@@ -198,6 +198,58 @@ fn lfm2_eos_token_id_handles_scalar_array_and_missing() {
 }
 
 #[test]
+fn lfm2_short_conv_decode_matches_conv1d() {
+    // Guard the decode fast path (issue #748): the single-step depthwise short
+    // conv, computed as an explicit weighted sum of the L_cache taps, must be
+    // numerically identical to the stride-1/no-pad/depthwise `conv1d` it
+    // replaces. This is the checkpoint-free core of the regression fix; the
+    // CUDA kernel-dispatch win is measured end-to-end against real checkpoints.
+    use super::lfm2::{build_conv_decode_weight, short_conv_decode_step};
+
+    let hidden = 4;
+    let l_cache = 3;
+
+    // conv_weight is [hidden, L_cache, 1] (MLX depthwise layout): for each
+    // channel c, the three causal taps weight[c, 0..3, 0].
+    let weight_data: Vec<f32> = vec![
+        0.5, -0.25, 0.75, // channel 0
+        -1.0, 0.5, 0.25, // channel 1
+        0.1, 0.2, -0.3, // channel 2
+        2.0, -0.5, 1.5, // channel 3
+    ];
+    let conv_weight = mlxcel_core::from_slice_f32(&weight_data, &[hidden, l_cache, 1]);
+
+    // padded is [1, L_cache, hidden]: the cached conv-state tail prepended to
+    // the current Bx step, one row per time index.
+    let padded_data: Vec<f32> = vec![
+        1.0, 2.0, 3.0, 4.0, // t = 0
+        -1.0, 0.5, 2.0, -2.0, // t = 1
+        0.25, -0.75, 1.0, 0.5, // t = 2
+    ];
+    let padded = mlxcel_core::from_slice_f32(&padded_data, &[1, l_cache, hidden]);
+
+    // Ground truth: stride-1, no-pad, dilation-1, groups==hidden conv1d.
+    let reference = mlxcel_core::conv1d(&padded, &conv_weight, 1, 0, 1, hidden);
+    assert_eq!(mlxcel_core::array_shape(&reference), vec![1, 1, hidden]);
+
+    // Fast path: broadcast weighted sum over the precomputed time-major weight.
+    let decode_weight = build_conv_decode_weight(&conv_weight);
+    assert_eq!(
+        mlxcel_core::array_shape(&decode_weight),
+        vec![1, l_cache, hidden]
+    );
+    let elementwise = short_conv_decode_step(&padded, &decode_weight, mlxcel_core::dtype::FLOAT32);
+    assert_eq!(mlxcel_core::array_shape(&elementwise), vec![1, 1, hidden]);
+
+    let diff = mlxcel_core::subtract(&reference, &elementwise);
+    let max_abs = mlxcel_core::item_f32(&mlxcel_core::max_all(&mlxcel_core::abs(&diff)));
+    assert!(
+        max_abs < 1e-5,
+        "decode short-conv diverged from conv1d: max|diff| = {max_abs}"
+    );
+}
+
+#[test]
 fn lfm2_unquantized_config_uses_quantization_defaults() {
     // Drop the quantization block (a bf16 checkpoint) and confirm the defaults.
     let no_quant = LFM2_350M_CONFIG.replace(
