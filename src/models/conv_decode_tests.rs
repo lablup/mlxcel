@@ -117,8 +117,10 @@ fn assert_decode_matches_conv1d_bf16(channels: usize, kernel: usize) {
         &mlxcel_core::astype(&elementwise, dtype::FLOAT32),
     );
     let max_abs = mlxcel_core::item_f32(&mlxcel_core::max_all(&mlxcel_core::abs(&diff)));
-    // bf16 carries ~3 decimal digits; the tolerance scales with channel count
-    // because the widened reduce accumulates more terms.
+    // bf16 carries ~3 decimal digits; the assertion takes a max over all
+    // channels, and the expected magnitude of a max over more independent
+    // bf16 rounding errors grows roughly like sqrt(channels) (an
+    // order-statistic bound), so the tolerance scales with channel count too.
     let tol = 3e-2 * (channels as f32).sqrt();
     assert!(
         max_abs < tol,
