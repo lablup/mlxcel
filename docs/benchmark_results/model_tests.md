@@ -69,7 +69,7 @@ The table below summarizes the current cross-hardware decode readings for select
 | Gemma-3-1B | 1B | 229.70 | 396.72 | 278.52 |
 | EXAONE-3.5-2.4B | 2.4B | 197.73 | 287.70 | 141.83 |
 | SmolLM3-3B | 3B | 126.29 | 232.99 | 104.24 |
-| Nemotron-H-30B | 30B | 91.54 | 176.10 | 79.94¶ |
+| Nemotron-H-30B | 30B | 91.54 | 176.10 | 87.41¶ |
 | Qwen3-MoE-30B | 30B | 83.75 | 175.63 | 89.06† |
 | Llama-3.1-8B | 8B | 107.89 | 116.61 | 50.53 |
 | Qwen2.5-7B | 7B | 111.50 | 126.26 | 54.56 |
@@ -80,7 +80,7 @@ The table below summarizes the current cross-hardware decode readings for select
 *Qwen3-0.6B on GB10 again stopped at 9 tokens before EOS (2026-07-12); the 283.90 tok/s figure is from that short window and is not directly comparable to full-length runs.
 †Qwen3-MoE-30B (`qwen3-moe-4bit`) **failed** on GB10 at 0.3.0 (Metal-only fused-MoE kernel aborted on CUDA); the CUDA fused decode-MoE kernel (#319) restored it at 0.3.1, and at 89.06 tok/s it stays ahead of M1 Ultra (83.75).
 §GPT-OSS-120B and Solar-Open-100B were excluded from the 2026-07-12 GB10 sweep by the memory gate (weights > ~51 GiB, `SKIP:oom_estimate`); their figures are carried from the 2026-06-17 / 0.3.1 sweep.
-¶Nemotron-H-30B doubled vs both earlier GB10 records (40.32 on 2026-06-17) with no SSM-related code change in between; the whole SSM/hybrid cluster reads 2-3x higher on 2026-07-12 and should be re-verified after a fresh boot (see the GB10 file's notable-changes list).
+¶Nemotron-H-30B doubled vs the 2026-06-17 record (40.32) because the fused single-token SSM decode kernel was ported to CUDA on 2026-07-10 (#727); the post-reboot re-verification (#755) confirmed the gain on a fresh host (87.41, post-reboot single). The whole SSM/hybrid cluster carries the same attribution (see the GB10 file's notable-changes list).
 
 M1 Ultra column is from 2026-06-15 with mlxcel 0.2.1 / MLX pin commit `a6ec712` (0.32.0-dev) / no cooldown, using the `mlxcel-bench-decode` same-process harness (post #289 bf16-scale fix and #291 quantized-embedding fix).
 M5 Max column is from the 2026-06-15 full re-sweep with mlxcel 0.2.1 / MLX pin `a6ec7123` / same-process `mlxcel-bench-decode` harness (bare run).

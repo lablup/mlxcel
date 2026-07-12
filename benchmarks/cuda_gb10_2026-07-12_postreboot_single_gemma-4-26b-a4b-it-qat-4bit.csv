@@ -1,0 +1,4 @@
+model,model_path,prompt_tokens,generated_tokens,prefill_ms,prefill_tok_s,decode_ms,decode_tok_s,date,hardware,mlx_version,build_type,max_tokens,prompt,prompt_target_len
+gemma-4-26b-a4b-it-qat-4bit,models/gemma-4-26b-a4b-it-qat-4bit,20,26,150.25,133.11,484.35,53.68,2026-07-12,NVIDIA_GB10_122GB,0.4.0-rc.1,release,100,"Hello, how are you today?",
+gemma-4-26b-a4b-it-qat-4bit,models/gemma-4-26b-a4b-it-qat-4bit,20,26,149.90,133.43,486.17,53.48,2026-07-12,NVIDIA_GB10_122GB,0.4.0-rc.1,release,100,"Hello, how are you today?",
+gemma-4-26b-a4b-it-qat-4bit,models/gemma-4-26b-a4b-it-qat-4bit,20,26,149.73,133.57,484.07,53.71,2026-07-12,NVIDIA_GB10_122GB,0.4.0-rc.1,release,100,"Hello, how are you today?",

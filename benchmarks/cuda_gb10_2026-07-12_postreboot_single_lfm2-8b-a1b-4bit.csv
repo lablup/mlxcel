@@ -1,0 +1,2 @@
+model,model_path,prompt_tokens,generated_tokens,prefill_ms,prefill_tok_s,decode_ms,decode_tok_s,date,hardware,mlx_version,build_type,max_tokens,prompt,prompt_target_len
+lfm2-8b-a1b-4bit,models/lfm2-8b-a1b-4bit,17,37,114.22,148.84,223.53,165.53,2026-07-12,NVIDIA_GB10_122GB,0.4.0-rc.1,release,100,"Hello, how are you today?",

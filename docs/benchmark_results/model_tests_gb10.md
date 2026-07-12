@@ -93,8 +93,8 @@ Prefill/Decode are the measured-pass figures from `mlxcel-bench-decode`. Notes r
 | gemma-4-12b-it-4bit-gs32 | ✅ | 215.87 | 21.61 | 40 tok; local uniform-requant variant (#685 tooling) |
 | gemma-4-12b-it-4bit-uniform | ✅ | 192.16 | 21.15 | 27 tok; local uniform-requant variant (#685 tooling) |
 | gemma-4-12b-it-assistant-4bit | ⚪ | - | - | MTP/DFlash drafter (needs a target; not standalone) |
-| gemma-4-26b-a4b-it-4bit | ✅ | 114.81 | 50.19 | 26 tok |
-| gemma-4-26b-a4b-it-qat-4bit | ✅ | 114.43 | 45.29 | 26 tok |
+| gemma-4-26b-a4b-it-4bit | ✅ | 134.35 | 59.88 | 26 tok; median of 3 post-reboot runs (#755): 59.57-60.07, back above the 0.3.1 record (58.59) |
+| gemma-4-26b-a4b-it-qat-4bit | ✅ | 133.43 | 53.68 | 26 tok; median of 3 post-reboot runs (#755): 53.48-53.71, above the 0.3.1 record (50.33) |
 | gemma-4-31b-4bit | ✅ | 23.08 | 8.84 |  |
 | gemma-4-31b-it-4bit | ✅ | 52.37 | 8.33 | 26 tok |
 | gemma-4-31b-it-assistant-bf16 | ⚪ | - | - | MTP/DFlash drafter (needs a target; not standalone) |
@@ -126,8 +126,8 @@ Prefill/Decode are the measured-pass figures from `mlxcel-bench-decode`. Notes r
 | Model | Status | Prefill (tok/s) | Decode (tok/s) | Notes |
 |-------|--------|-----------------|----------------|-------|
 | granite-3.3-2b-instruct-4bit | ✅ | 1779.32 | 123.98 | 31 tok |
-| granite-4.0-h-350m-4bit | ✅ | 2207.98 | 259.69 | 18 tok |
-| granite-4.0-h-tiny-4bit | ✅ | 256.74 | 100.28 | 44 tok |
+| granite-4.0-h-350m-4bit | ✅ | 1857.41 | 171.22 | 19 tok; post-reboot single (#755); the overnight-sweep run read 259.69 (tiny launch-bound models swing widely run-to-run on this host) |
+| granite-4.0-h-tiny-4bit | ✅ | 238.51 | 101.37 | 42 tok; post-reboot single (#755) |
 | granite-4.1-3b-4bit | ✅ | 291.06 | 78.85 | 7 tok |
 | granite-4.1-8b-4bit | ✅ | 177.90 | 18.43 | 1 tok |
 | granite-speech-4.1-2b-nar-mlx | ⚪ | - | - | not a standalone text-gen model |
@@ -140,13 +140,13 @@ Prefill/Decode are the measured-pass figures from `mlxcel-bench-decode`. Notes r
 | dots.llm1.inst-mixed-4-6bit | ✅ | 25.42 | 22.04 | memory-gate skip on 2026-07-12 (see version note); figures from 2026-06-17 / 0.3.1 |
 | gpt-oss-120b-4bit | ✅ | 57.75 | 50.48 | memory-gate skip on 2026-07-12 (see version note); figures from 2026-06-17 / 0.3.1 |
 | gpt-oss-20b-mxfp4 | ✅ | 104.58 | 79.36 |  |
-| lfm2-8b-a1b-4bit | ✅ | 150.06 | 161.87 | 37 tok |
+| lfm2-8b-a1b-4bit | ✅ | 148.84 | 165.53 | 37 tok; post-reboot single (#755 control) |
 | llama-4-scout-17b-4bit | ✅ | 27.72 | 21.46 | memory-gate skip on 2026-07-12 (see version note); figures from 2026-07-09 / 0.4.0-rc.1 |
 | minimax-m2-3bit | ✅ | 26.95 | 22.03 | memory-gate skip on 2026-07-12 (see version note); figures from 2026-06-17 / 0.3.1 |
 | mixtral-8x7b-4bit | ✅ | 12.63 | 28.42 | 73 tok |
 | phi-3.5-moe-4bit | ✅ | 30.18 | 53.32 |  |
 | qwen1.5-moe-a2.7b-4bit | ✅ | 260.27 | 122.13 |  |
-| qwen3-30b-a3b-4bit | ✅ | 127.33 | 92.41 | 34 tok |
+| qwen3-30b-a3b-4bit | ✅ | 134.37 | 94.39 | 34 tok; post-reboot single (#755 control) |
 | qwen3-moe-4bit | ✅ | 129.28 | 89.06 | 34 tok |
 
 ## MLA (Multi-head Latent Attention)
@@ -166,21 +166,21 @@ Prefill/Decode are the measured-pass figures from `mlxcel-bench-decode`. Notes r
 
 | Model | Status | Prefill (tok/s) | Decode (tok/s) | Notes |
 |-------|--------|-----------------|----------------|-------|
-| nemotron-3-nano-omni-30b-a3b-reasoning-4bit | ✅ | 123.57 | 80.86 | 20 tok |
-| nemotron-h-30b-4bit | ✅ | 117.23 | 79.94 | 46 tok |
-| nemotron-nas-30b-4bit | ✅ | 114.13 | 82.72 | 46 tok |
+| nemotron-3-nano-omni-30b-a3b-reasoning-4bit | ✅ | 120.97 | 82.88 | 20 tok; post-reboot single (#755) |
+| nemotron-h-30b-4bit | ✅ | 113.24 | 87.41 | 46 tok; post-reboot single (#755) |
+| nemotron-nas-30b-4bit | ✅ | 117.99 | 85.91 | 46 tok; post-reboot single (#755) |
 
 ## SSM / Mamba / Hybrid
 
 | Model | Status | Prefill (tok/s) | Decode (tok/s) | Notes |
 |-------|--------|-----------------|----------------|-------|
-| falcon-h1-tiny-90m-instruct-4bit | ✅ | 1419.44 | 413.00 | 30 tok |
+| falcon-h1-tiny-90m-instruct-4bit | ✅ | 1193.95 | 354.43 | 30 tok; post-reboot single (#755); the overnight-sweep run read 413.00 |
 | falcon-mamba-7b-4bit | ✅ | 92.54 | 22.06 | 2 tok |
 | jamba-v0.1-4bit | ✅ | 523.67 | 89.63 |  |
 | lfm2-350m-8bit | ✅ | 3270.66 | 393.84 | 13 tok; decode regression fixed (#748): was ~40 tok/s, restored to the 0.3.1 envelope by computing the single-step depthwise short conv as a broadcast multiply-sum instead of a tiny bf16 `conv1d` (MLX 0.32.1 routed that to cuDNN's per-channel grouped-conv engine on CUDA) |
-| mamba2-130m | ✅ | 890.29 | 162.23 | decode conv audited (#752): runs on the fast `conv1d_c1_k1_nhwc` engine (576 launches = 24 layers x 24 tokens, one per op), not the `convolve_common_engine` per-channel path; the -10.4% sweep delta is environmental, not conv dispatch |
+| mamba2-130m | ✅ | 892.83 | 202.98 | median of 3 post-reboot runs (#755): decode read 147.98 / 202.98 / 204.77 across identical same-boot runs, so the earlier -10.4% sweep delta was run-to-run variance, not a regression; decode conv audited (#752): runs on the fast `conv1d_c1_k1_nhwc` engine (576 launches = 24 layers x 24 tokens, one per op), not the `convolve_common_engine` per-channel path |
 | mamba2-1.3b-4bit | ✅ | 329.13 | 83.40 |  |
-| plamo-2-1b | ✅ | 199.12 | 44.54 |  |
+| plamo-2-1b | ✅ | 198.43 | 46.84 | post-reboot single (#755) |
 
 ## Chinese / Asian Language Models
 
@@ -188,7 +188,7 @@ Prefill/Decode are the measured-pass figures from `mlxcel-bench-decode`. Notes r
 |-------|--------|-----------------|----------------|-------|
 | baichuan-m1-14b-4bit | ✅ | 73.62 | 23.18 | 7 tok |
 | ernie-4.5-0.3b-4bit | ✅ | 5857.00 | 625.30 |  |
-| glm4-flash-4bit | ✅ | 99.04 | 45.72 | 16 tok |
+| glm4-flash-4bit | ✅ | 105.46 | 47.42 | 18 tok; median of 3 post-reboot runs (#755); identical 100-token runs span 39.2-54.8 tok/s on this host, and the 0.3.1 record (53.33) sits inside that envelope |
 | glm-5.1-4bit | ⚪ | - | - | not tested (weights not downloaded; empty directory) |
 | glm-5-4bit | ⚪ | - | - | incomplete checkpoint: weights present but no tokenizer |
 | hunyuan-13b | ✅ | 19.05 | 14.79 |  |
@@ -372,9 +372,9 @@ Models that accept image input and generated tokens under the `"What is in this 
 
 ### Notable changes vs the 2026-06-17 (0.3.1) and 2026-07-09 (rc.1 subset) records
 
-- **SSM / hybrid / NAS decode reads 2-3x higher than every earlier record**: granite-4.0-h-350m 86.60 → 259.69, granite-4.0-h-tiny 33.84 → 100.28, falcon-h1-tiny 110.42 → 413.00, nemotron-h-30b 40.32 → 79.94, nemotron-nas-30b 37.33 → 82.72, nemotron-omni-30b 38.45 → 80.86, plamo-2-1b 35.14 → 44.54. Two of these (granite-350m, falcon-h1-tiny) were re-measured as recently as 2026-07-09 at the low values, and no SSM-related code has landed since, so the delta is environmental rather than a code change. The affected cluster is exactly the launch-latency-sensitive family. Re-verify after the planned pre-release reboot before treating these as the release numbers; the post-reboot session is shared with the #755 re-measurement plan.
+- **SSM / hybrid / NAS decode reads 2-4x higher than the 0.3.1 record, attributed to #727 and confirmed post-reboot (#755)**: granite-4.0-h-350m 86.60 → 171.22, granite-4.0-h-tiny 33.84 → 101.37, falcon-h1-tiny 110.42 → 354.43, nemotron-h-30b 40.32 → 87.41, nemotron-nas-30b 37.33 → 85.91, nemotron-omni-30b 38.45 → 82.88, plamo-2-1b 35.14 → 46.84 (post-reboot singles; the table rows above carry these values). An earlier revision of this note called the delta environmental because "no SSM-related code has landed since" the low 2026-07-09 readings. That was wrong: the fused single-token SSM decode kernel was ported to CUDA on 2026-07-10 (#727, one launch replacing the ~55-op SSD scan graph per SSM layer for granite-4.0-h, falcon-h1, plamo-2, nemotron-h), the day after those singles ran, and its own PR measured granite-4.0-h-350m at 4.5x. The post-reboot re-measurement (#755) confirms the gains persist on a fresh host, so these are real release numbers, not an artifact. The tiny launch-bound checkpoints still swing widely between individual runs (granite-350m read 259.69 in the overnight sweep vs 171.22 post-reboot; falcon-h1-tiny 413.00 vs 354.43); see the run-to-run variance note below.
 - **lfm2-350m-8bit decode regressed ~10x, now fixed (#748)**: 409.01 (0.3.1) → 39.84 at rc.1, restored to 393.84 by the fix. Root cause: MLX 0.32.1 dispatches the single-step (L=1) bf16 depthwise short conv on CUDA to cuDNN's generic `convolve_common_engine`, which launches one kernel per channel (~1024 for a 350M LFM2) and consumed 88.6% of decode GPU time; computing that decode step as a broadcast multiply-and-sum over the `L_cache` taps removes the grouped-conv dispatch. The sibling `lfm2-8b-a1b-4bit` was never affected (its conv runs on the fast `conv1d_c1_k1_nhwc` kernel; 157.73 → 161.87 → 161.39). Prefill still uses `conv1d` and was always healthy.
-- **Moderate decode drops worth watching**: gemma-4-26b-a4b-it-4bit 58.59 → 50.19 (-14%), gemma-4-26b-a4b-it-qat-4bit 50.33 → 45.29 (-10%), glm4-flash-4bit 53.33 → 45.72 (-14%). These are NOT the #748 conv-dispatch pattern (correcting the PR #751 hypothesis on the record, per #752): neither model is a conv architecture (`gemma4` MoE and `glm4_moe_lite` respectively; neither file calls `conv1d`), so their decode conv cannot fall into cuDNN's grouped-conv engine. The drops need separate attribution and are out of scope for the conv audit; tracked in #755, with a post-reboot re-measurement as the gating first step alongside the SSM-cluster re-verification above.
+- **Moderate decode drops, resolved as no code regression (#755)**: the overnight sweep read gemma-4-26b-a4b-it-4bit 58.59 → 50.19 (-14%), gemma-4-26b-a4b-it-qat-4bit 50.33 → 45.29 (-10%), glm4-flash-4bit 53.33 → 45.72 (-14%), and these were never the #748 conv-dispatch pattern (neither `gemma4` MoE nor `glm4_moe_lite` calls `conv1d`, per #752). The post-reboot re-measurement settles them in two different ways. The gemma pair recovered decisively and repeatably: 59.57-60.07 (n=3) and 53.48-53.71 (n=3), at or above the 0.3.1 records with ±0.5% spread. The 26B MoE is bandwidth-bound and does not flap between runs, so its sweep-day depression was the stale ~5.5-day host/driver state and a fresh boot removes it. glm4-flash did not "recover" because there was nothing to recover from: twelve identical 100-token greedy runs on the freshly booted host span 39.2-54.8 tok/s in a bimodal pattern (a ~41 tok/s mode and a ~52.5 tok/s mode; the generated tokens are identical, so the work is constant), and the 0.3.1 record (53.33) sits inside the fast mode, meaning a single sweep run simply draws from this distribution. mamba2-130m behaves the same (147.98 then 202.98-208.25 across identical same-boot runs, vs the 181.05 record). Kill-switch A/B rules out the code suspects: `MLXCEL_QMV_MULTIROW=0` reads 49.55 (inside the envelope; the #740 multirow path keeps `M*B == 1` classic decode on the stock kernel by design), `MLXCEL_SSM_CUDA_KERNEL=0` is unchanged on mamba2 (208.25; pure mamba2 never uses the fused kernel), and #732 shipped only trace tooling plus a default-off normalization. The slow mode is not SM clock capping either (slow runs were sampled at a pinned 2411-2424 MHz SM clock), so its host-level mechanism remains unidentified, but the fast mode reproducing the 0.3.1 number rules out a code-level regression. Practical consequence: single-run decode deltas within roughly ±25% on launch-bound models (small dense/SSM checkpoints and small MoEs like glm4-flash) are below this host's run-to-run noise floor and should not be read as regressions without repeats. Separately, glm4-flash's templated greedy output shortened from 100 tokens (0.3.1) to 18 (rc.1), a different greedy continuation rather than a failure, so its sweep-to-sweep decode averages additionally stopped being length-comparable.
 - **SSM / hybrid L=1 conv dispatch audited across the family (#752), no further regression found**: after #748/#751 fixed LFM2, every other decode-path depthwise-conv family was measured under `nsys` on a warm GB10 CUDA decode (`MLX_USE_CUDA_GRAPHS=0` for a complete kernel histogram). All run on the fast `conv1d_c1_k1_nhwc` cuDNN engine, not the per-channel `convolve_common_engine` that regressed LFM2: mamba2-130m (bf16), mamba2-1.3b-4bit, falcon-mamba-7b-4bit, falcon-h1-tiny-90m-4bit, granite-4.0-h-350m-4bit, jamba-v0.1-4bit, plamo-2-1b (f32 activations), qwen3.5-0.8b-4bit (covers the gated-delta conv), and nemotron-h-30b-4bit. The proof is the launch count: each shows conv instances equal to (conv layers x decode tokens), one launch per op, whereas the slow engine launches one kernel per channel (thousands per op). LFM2's slow-engine dispatch is specific to its `conv_L_cache = 3` / hidden-1024 shape and does not reproduce at the SSM `conv_kernel = 4` widths, so no family is adapted. All of this was measured on MLX pin `57c66cac` (0.32.1), the same pin whose CUDA conv dispatch heuristic produced the lfm2 slow path, so these REFUTED verdicts are point-in-time and should be re-checked against newer MLX pins. The #751 short-conv decode helper was still lifted into a shared `models::conv_decode` module so any future family that does regress can adopt it in one line.
 - **Text-only prefill for several VLM-capable models is an order of magnitude higher than 0.3.1** (aya-vision-8b 124.91 → 1354.53, pixtral-12b 35.97 → 120.39, youtu-vl 134.27 → 451.42, mistral-small-3.1-24b 63.68 → 891.89), consistent with the text-prompt path no longer paying vision-tower costs rather than with a kernel speedup.
 - **Decode improvements >10% on dense/MoE models**: apertus-8b +21%, gemma3-4b / gemma-3-4b-it +19%, gemma3-1b +15%, gemma3n-e2b +10%, qwen3-0.6b-4bit +13%, aya-expanse-8b +12%, plus the VLM-side gains below.

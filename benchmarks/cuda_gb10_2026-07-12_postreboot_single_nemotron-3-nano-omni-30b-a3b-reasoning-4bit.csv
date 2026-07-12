@@ -1,0 +1,2 @@
+model,model_path,prompt_tokens,generated_tokens,prefill_ms,prefill_tok_s,decode_ms,decode_tok_s,date,hardware,mlx_version,build_type,max_tokens,prompt,prompt_target_len
+nemotron-3-nano-omni-30b-a3b-reasoning-4bit,models/nemotron-3-nano-omni-30b-a3b-reasoning-4bit,23,20,190.12,120.97,241.32,82.88,2026-07-12,NVIDIA_GB10_122GB,0.4.0-rc.1,release,100,"Hello, how are you today?",

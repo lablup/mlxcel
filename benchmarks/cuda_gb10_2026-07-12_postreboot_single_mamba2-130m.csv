@@ -1,0 +1,4 @@
+model,model_path,prompt_tokens,generated_tokens,prefill_ms,prefill_tok_s,decode_ms,decode_tok_s,date,hardware,mlx_version,build_type,max_tokens,prompt,prompt_target_len
+mamba2-130m,models/mamba2-130m,7,100,7.84,892.53,675.77,147.98,2026-07-12,NVIDIA_GB10_122GB,0.4.0-rc.1,release,100,"Hello, how are you today?",
+mamba2-130m,models/mamba2-130m,7,100,7.84,892.83,492.66,202.98,2026-07-12,NVIDIA_GB10_122GB,0.4.0-rc.1,release,100,"Hello, how are you today?",
+mamba2-130m,models/mamba2-130m,7,100,6.99,1001.24,488.35,204.77,2026-07-12,NVIDIA_GB10_122GB,0.4.0-rc.1,release,100,"Hello, how are you today?",
