@@ -148,6 +148,17 @@ fn run_generate(model: &PathBuf, extra: &[&str]) -> (String, std::process::ExitS
 /// that the active-pipeline slot integration does not perturb load
 /// behaviour, and that the empty `transform.apply` short-circuits to
 /// zero work.
+///
+/// The comparison window is truncated at the first EOS marker in each
+/// run's own output (see [`truncate_at_first_eos`]) rather than
+/// spanning the full fixed `-n 20` token budget. `mlxcel generate`
+/// keeps sampling for the full `-n` count instead of stopping at EOS,
+/// so tokens after `<|im_end|>` / `<|endoftext|>` are a free-running
+/// tail with no signal for the no-op property under test; on the CUDA
+/// backend, near-tied logits in that tail let GPU reduction-order
+/// variance flip the argmax and make a full-window comparison flaky
+/// (issue #728). Truncating independently per run still catches any
+/// genuine pre-EOS divergence between the baseline and surgery paths.
 #[test]
 fn empty_surgery_pipeline_matches_baseline_output() {
     if skip_heavy_test_via_env() {
@@ -186,11 +197,11 @@ fn empty_surgery_pipeline_matches_baseline_output() {
     // that vary across runs, then compare just the generated suffix.
     // The reproducible substring is the final "Hello" + generated text
     // emitted by `print_generation_result`.
-    let baseline_generated = extract_generated_suffix(&baseline_stdout);
-    let surgery_generated = extract_generated_suffix(&surgery_stdout);
+    let baseline_generated = truncate_at_first_eos(extract_generated_suffix(&baseline_stdout));
+    let surgery_generated = truncate_at_first_eos(extract_generated_suffix(&surgery_stdout));
     assert_eq!(
         baseline_generated, surgery_generated,
-        "empty surgery pipeline must not change generated tokens\n\
+        "empty surgery pipeline must not change generated tokens (pre-EOS window)\n\
          baseline:\n{baseline_stdout}\n\
          surgery:\n{surgery_stdout}"
     );
@@ -208,6 +219,40 @@ fn extract_generated_suffix(stdout: &str) -> &str {
     let from_hello = &stdout[start..];
     let end = from_hello.find("\n[Generated").unwrap_or(from_hello.len());
     &from_hello[..end]
+}
+
+/// EOS marker strings that may appear literally in decoded CLI output.
+/// `decode_generated_text` (`src/commands/generate.rs`) decodes with
+/// `skip_special_tokens = false`, so the reference model's chat-template
+/// turn terminator and underlying EOS token render as literal text rather
+/// than being suppressed. `qwen2.5-0.5b-4bit`'s tokenizer emits both:
+/// `<|im_end|>` (the `config.json` `eos_token_id`) and `<|endoftext|>`
+/// (`tokenizer_config.json` `pad_token`, also observed as a de facto stop
+/// marker in generation).
+const EOS_MARKERS: &[&str] = &["<|im_end|>", "<|endoftext|>"];
+
+/// Truncate `text` at the end of whichever [`EOS_MARKERS`] entry starts
+/// earliest, keeping the marker itself in the returned prefix. Falls back
+/// to the full string when no marker is present, so a run that never
+/// reaches EOS within the fixed `-n` token budget still gets a full-window
+/// comparison (issue #728 acceptance criterion: the test must still
+/// meaningfully assert something in that case).
+///
+/// Applying this independently to each run's output bounds the equality
+/// assertion to the deterministic pre-EOS region while still failing loudly
+/// on any genuine divergence there: if the baseline and surgery outputs
+/// disagree before either one's first EOS marker, the truncated prefixes
+/// themselves differ and `assert_eq!` catches it.
+fn truncate_at_first_eos(text: &str) -> &str {
+    let first_match_end = EOS_MARKERS
+        .iter()
+        .filter_map(|marker| text.find(marker).map(|start| (start, start + marker.len())))
+        .min_by_key(|&(start, _)| start)
+        .map(|(_, end)| end);
+    match first_match_end {
+        Some(end) => &text[..end],
+        None => text,
+    }
 }
 
 /// Acceptance criterion (a) for the YAML parser side: a malformed
