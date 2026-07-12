@@ -225,13 +225,16 @@ async fn run_completion(model_path: &str, port: u16, extra_args: &[&str]) -> Opt
         .await;
 
     let completion = match result {
-        Ok(resp) if resp.status().is_success() => {
-            let value: serde_json::Value = resp.json().await.expect("parse completion JSON");
-            value["choices"][0]["text"]
+        Ok(resp) if resp.status().is_success() => match resp.json::<serde_json::Value>().await {
+            Ok(value) => value["choices"][0]["text"]
                 .as_str()
                 .unwrap_or_default()
-                .to_string()
-        }
+                .to_string(),
+            Err(err) => {
+                stop_server(&mut child);
+                panic!("parse completion JSON failed: {err}");
+            }
+        },
         Ok(resp) => {
             let status = resp.status();
             stop_server(&mut child);

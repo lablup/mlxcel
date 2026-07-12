@@ -296,21 +296,26 @@ pub struct BatchScheduler {
     /// When `Some(N)`, the scheduler enforces a hard cap on the **live KV
     /// window** of each per-layer plain `KVCache`: after every prefill
     /// chunk (full prefill, chunked prefill start, chunked prefill
-    /// continuation) and every decode step, [`KVCache::trim_front`] is
-    /// invoked on each cache whose `live_len()` exceeds `N`, dropping the
-    /// oldest excess tokens. **Crucially, the cache's monotonic `offset`
-    /// is never decremented** — `trim_front` advances `live_start` so
-    /// RoPE relative positions stay correct (see [`KVCache::trim_front`] for the position invariant).
+    /// continuation) and every decode step,
+    /// [`KVCache::trim_front_keep_sink`] is invoked on each cache whose
+    /// `live_len()` exceeds `N`, pinning a small leading attention-sink
+    /// prefix (`MAX_KV_SIZE_SINK_KEEP`) and dropping the excess tokens
+    /// that follow it rather than the oldest tokens overall. **Crucially,
+    /// the cache's monotonic `offset` is never decremented**,
+    /// `trim_front_keep_sink` advances `live_start` so RoPE relative
+    /// positions stay correct (see [`KVCache::trim_front_keep_sink`] for
+    /// the position invariant).
     ///
     /// Sliding-window models that manage their own internal
     /// `RotatingKVCache` go through a separate model-level code path and
     /// are unaffected. `None` (the default) preserves the legacy unbounded
     /// behaviour. Turbo-quantized caches (`Turbo4Asym` / `Turbo4` /
     /// `Turbo4Delegated` / `Turbo3Asym`) are skipped by
-    /// [`KVCache::trim_front`] (which returns `0` for those modes) with a
-    /// one-time startup warning logged in [`Self::with_max_kv_size`] —
-    /// the warning inspects both `kv_cache_mode` and the per-layer modes
-    /// resolved from `batch_kv_quant` so the combination
+    /// [`KVCache::trim_front_keep_sink`] (which returns `0` for those
+    /// modes) with a one-time startup warning logged in
+    /// [`Self::with_max_kv_size`], the warning inspects both
+    /// `kv_cache_mode` and the per-layer modes resolved from
+    /// `batch_kv_quant` so the combination
     /// `--kv-quant-scheme=turboquant --max-kv-size=M` is flagged even
     /// when the legacy `--kv-cache-mode` flag is left at FP16.
     max_kv_size: Option<usize>,
@@ -2329,11 +2334,14 @@ impl BatchScheduler {
 
     /// Enforce the `--max-kv-size` cap on a sequence's KV caches.
     ///
-    /// Trims the oldest `live_len(cache) - max_kv_size` tokens from every
-    /// plain `KVCache` layer whose live window exceeds the configured
-    /// bound. Turbo-mode caches return `0` from `KVCache::trim_front`
-    /// (safe no-op — see [`KVCache::trim_front`] for the per-mode
-    /// support matrix). Sliding-window models manage their own internal
+    /// Trims `live_len(cache) - max_kv_size` tokens from every plain
+    /// `KVCache` layer whose live window exceeds the configured bound,
+    /// pinning a small leading attention-sink prefix
+    /// (`MAX_KV_SIZE_SINK_KEEP`) and dropping the excess tokens that
+    /// follow it rather than the oldest tokens overall (issue #718). Turbo-mode
+    /// caches return `0` from `KVCache::trim_front_keep_sink` (safe no-op,
+    /// see [`KVCache::trim_front_keep_sink`] for the per-mode support
+    /// matrix). Sliding-window models manage their own internal
     /// `RotatingKVCache` and are never stored in the pool's
     /// `Vec<KVCache>`, so they are unaffected.
     ///

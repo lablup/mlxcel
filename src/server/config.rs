@@ -410,16 +410,20 @@ pub struct ServerConfig {
     ///
     /// Mirrors upstream mlx-lm's
     /// [`BatchGenerator(max_kv_size=...)`](https://github.com/ml-explore/mlx-lm/pull/1106)
-    /// parameter, with the same RoPE-faithful semantics as upstream's
-    /// `RotatingKVCache`: when set, the batch scheduler calls
-    /// [`mlxcel_core::cache::KVCache::trim_front`] after every prefill
-    /// chunk and every decode step on caches whose `live_len()` exceeds
-    /// the bound. `trim_front` advances `live_start` and physically slices
-    /// the buffer head — it **does not** decrement `offset`, so K vectors
-    /// rotated at write-time and Q vectors rotated at the current
-    /// monotonic offset continue to see the correct relative position
-    /// after the cap engages. See [`mlxcel_core::cache::KVCache::trim_front`]
-    /// for the full position invariant.
+    /// parameter, with the same RoPE-faithful, attention-sink-preserving
+    /// semantics as upstream's `RotatingKVCache(keep=...)`: when set, the
+    /// batch scheduler calls
+    /// [`mlxcel_core::cache::KVCache::trim_front_keep_sink`] after every
+    /// prefill chunk and every decode step on caches whose `live_len()`
+    /// exceeds the bound, pinning a small leading attention-sink prefix and
+    /// dropping the excess tokens that follow it rather than the oldest
+    /// tokens overall. `trim_front_keep_sink` advances `live_start` and
+    /// physically rearranges the buffer accordingly, it **does not**
+    /// decrement `offset`, so K vectors rotated at write-time and Q
+    /// vectors rotated at the current monotonic offset continue to see the
+    /// correct relative position after the cap engages. See
+    /// [`mlxcel_core::cache::KVCache::trim_front_keep_sink`] for the full
+    /// position invariant.
     ///
     /// Sliding-window models that build their own [`RotatingKVCache`]
     /// internally (Gemma 3/4, Exaone 4, RecurrentGemma, Step 3.5, gpt-oss)
