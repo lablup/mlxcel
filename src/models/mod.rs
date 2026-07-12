@@ -26,6 +26,7 @@ mod recurrent_snapshot;
 mod sanitize;
 
 // Shared modules
+pub(crate) mod conv_decode;
 pub mod gated_delta;
 pub mod switch_layers;
 
@@ -1139,6 +1140,10 @@ mod seed_oss_tests;
 #[cfg(test)]
 #[path = "dots1_tests.rs"]
 mod dots1_tests;
+
+#[cfg(test)]
+#[path = "conv_decode_tests.rs"]
+mod conv_decode_tests;
 
 #[cfg(test)]
 #[path = "lfm2_tests.rs"]

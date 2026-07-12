@@ -51,6 +51,12 @@ use super::model_owned::ModelOwnedSequenceState;
 use super::recurrent_snapshot::{push_optional, restore_optional};
 use super::switch_layers::{SwitchGLU, moe_weighted_sum};
 
+// The single-step short-conv decode fast path (issue #748) now lives in the
+// shared `conv_decode` module so the SSM / hybrid families can reuse it
+// (issue #752). Re-exported at the original path so the LFM2 unit tests still
+// resolve `super::lfm2::{build_conv_decode_weight, short_conv_decode_step}`.
+pub(crate) use super::conv_decode::{build_conv_decode_weight, short_conv_decode_step};
+
 // Configuration.
 
 #[derive(Debug, Clone, Deserialize)]
@@ -312,44 +318,6 @@ struct ShortConv {
     /// MLX's `conv1d` already dispatches a fast small-conv kernel and the proven
     /// path is kept as-is.
     decode_weight: Option<UniquePtr<MlxArray>>,
-}
-
-/// Materialize the time-major weight used by the decode fast path.
-/// `conv_weight` is `[hidden, L_cache, 1]` (MLX depthwise layout); transposing
-/// to `[1, L_cache, hidden]` lets a single broadcast multiply-and-sum over the
-/// `L_cache` axis replace `conv1d`. Materialized once at load so decode never
-/// reshapes the weight.
-pub(crate) fn build_conv_decode_weight(conv_weight: &MlxArray) -> UniquePtr<MlxArray> {
-    // [hidden, L_cache, 1] -> [1, L_cache, hidden].
-    let w = mlxcel_core::transpose_axes(conv_weight, &[2, 1, 0]);
-    let w = mlxcel_core::contiguous(&w, false);
-    mlxcel_core::eval(&w);
-    w
-}
-
-/// Single decode step of the depthwise causal short conv, computed as a
-/// broadcast weighted sum instead of `conv1d` (issue #748).
-///
-/// For `padded` of shape `[batch, L_cache, hidden]` and `decode_weight` of
-/// shape `[1, L_cache, hidden]` this returns `[batch, 1, hidden]` where
-/// `out[b, 0, c] = sum_k padded[b, k, c] * decode_weight[0, k, c]`, which is
-/// exactly what a stride-1, no-pad, dilation-1, `groups == hidden` `conv1d`
-/// produces for a length-1 output. The two-kernel elementwise form avoids the
-/// `conv1d` CUDA dispatch (MLX 0.32.1) that sends this tiny bf16 depthwise conv
-/// to cuDNN's generic `convolve_common_engine`, which launches one kernel per
-/// channel (~1024 for a 350M LFM2) and dominates decode.
-pub(crate) fn short_conv_decode_step(
-    padded: &MlxArray,
-    decode_weight: &MlxArray,
-    in_dtype: i32,
-) -> UniquePtr<MlxArray> {
-    let prod = if mlxcel_core::array_dtype(decode_weight) == in_dtype {
-        mlxcel_core::multiply(padded, decode_weight)
-    } else {
-        let w = mlxcel_core::astype(decode_weight, in_dtype);
-        mlxcel_core::multiply(padded, &w)
-    };
-    mlxcel_core::sum_axis(&prod, 1, true) // [batch, 1, hidden]
 }
 
 impl ShortConv {
