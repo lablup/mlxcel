@@ -35,9 +35,18 @@ fn gemma4_has_vision_weights(model_path: &Path) -> bool {
         && let Ok(index) = serde_json::from_str::<Value>(&index_str)
         && let Some(weight_map) = index.get("weight_map").and_then(Value::as_object)
     {
-        return weight_map
-            .keys()
-            .any(|key| key.starts_with("vision_tower.") || key.starts_with("embed_vision."));
+        // MLX-community checkpoints expose the vision front-end unprefixed
+        // (`vision_tower.` / `embed_vision.`); ModelOpt NVFP4 exports nest it
+        // under a leading `model.` (`model.vision_tower.` /
+        // `model.embed_vision.`). Recognize both so an NVFP4 multimodal
+        // checkpoint routes to Gemma4VLM instead of the text-only path, where
+        // `normalize_nvfp4_keys` then strips the `model.` prefix (issue #749).
+        return weight_map.keys().any(|key| {
+            key.starts_with("vision_tower.")
+                || key.starts_with("embed_vision.")
+                || key.starts_with("model.vision_tower.")
+                || key.starts_with("model.embed_vision.")
+        });
     }
 
     model_path.join("processor_config.json").exists()

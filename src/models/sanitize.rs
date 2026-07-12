@@ -282,37 +282,51 @@ fn f16_to_f32(bits: u16) -> f32 {
 
 /// Remap NVFP4-style weight keys to the MLX-community naming convention.
 ///
-/// nvfp4 Gemma 4 checkpoints use `model.language_model.X` prefixes while the
-/// model code expects `language_model.model.X`. This function performs the
-/// following remapping:
+/// ModelOpt NVFP4 Gemma 4 checkpoints nest every tensor under a leading
+/// `model.` prefix: the text decoder as `model.language_model.X`, the vision
+/// front-end as `model.vision_tower.X` / `model.embed_vision.X`, and (when
+/// present) `model.lm_head.X`. The model code expects the MLX-community
+/// convention, so this function rewrites:
 ///
 /// - `model.language_model.X` → `language_model.model.X`
+/// - `model.vision_tower.X`   → `vision_tower.X`
 /// - `model.embed_vision.X`   → `embed_vision.X`
 /// - `model.lm_head.X`        → `lm_head.X`
 ///
-/// If no keys matching the nvfp4 pattern are found, this is a no-op.
+/// The `model.vision_tower.` / `model.embed_vision.` strips are what let the
+/// gemma4 vision tower and multimodal embedder bind on the NVFP4 path (issue
+/// #749); without them the vision front-end stays under the `model.` prefix, so
+/// `gemma4_has_vision_weights` misdetects the checkpoint as text-only and
+/// `Gemma4VisionModel::from_weights` finds no `vision_tower.*` weights. The
+/// vision front-end is unquantized (ModelOpt keeps `model.vision_tower*` /
+/// `model.embed_vision*` in `quantization_config.ignore`), so it needs key
+/// renaming only, not an NVFP4 transcode; `repack_nvfp4_weights_to_quantized`
+/// leaves it alone because those tensors carry no `weight_scale_2` sidecar.
+///
+/// If no keys matching the nvfp4 pattern (a `model.language_model.` prefix) are
+/// found, this is a no-op.
 fn normalize_nvfp4_keys(weights: &mut mlxcel_core::weights::WeightMap) {
-    let nvfp4_keys: Vec<String> = weights
+    // The distinctive marker of a ModelOpt/NVFP4 export is the
+    // language-model-under-model nesting; MLX-community checkpoints use the
+    // inverse `language_model.model.` order. Detect on that before touching
+    // any keys so this stays a no-op on already-converted checkpoints.
+    let is_nvfp4_layout = weights
         .keys()
-        .filter(|k| k.starts_with("model.language_model."))
-        .cloned()
-        .collect();
-
-    if nvfp4_keys.is_empty() {
+        .any(|k| k.starts_with("model.language_model."));
+    if !is_nvfp4_layout {
         return;
     }
 
-    eprintln!(
-        "Remapping {} NVFP4-style weight keys to MLX-community convention...",
-        nvfp4_keys.len()
-    );
-
-    // Collect all key-value pairs that need remapping, then reinsert.
+    // Collect all key-value pairs that need remapping (text decoder AND vision
+    // front-end), then reinsert. Counting the full set here keeps the reported
+    // count honest: the vision keys are remapped too, not just the text ones.
     let remappings: Vec<(String, String)> = weights
         .keys()
         .filter_map(|k| {
             let new_key = if let Some(rest) = k.strip_prefix("model.language_model.") {
                 format!("language_model.model.{rest}")
+            } else if let Some(rest) = k.strip_prefix("model.vision_tower.") {
+                format!("vision_tower.{rest}")
             } else if let Some(rest) = k.strip_prefix("model.embed_vision.") {
                 format!("embed_vision.{rest}")
             } else if let Some(rest) = k.strip_prefix("model.lm_head.") {
@@ -323,6 +337,11 @@ fn normalize_nvfp4_keys(weights: &mut mlxcel_core::weights::WeightMap) {
             Some((k.clone(), new_key))
         })
         .collect();
+
+    eprintln!(
+        "Remapping {} NVFP4-style weight keys to MLX-community convention...",
+        remappings.len()
+    );
 
     for (old_key, new_key) in remappings {
         if let Some(arr) = weights.remove(&old_key) {
@@ -2528,6 +2547,58 @@ mod tests {
         assert!(weights.contains_key("lm_head.weight"));
         assert!(!weights.contains_key("model.embed_vision.proj.weight"));
         assert!(!weights.contains_key("model.lm_head.weight"));
+    }
+
+    #[test]
+    fn normalize_nvfp4_keys_remaps_vision_tower_and_embed_vision() {
+        // Representative ModelOpt NVFP4 multimodal key set (issue #749): the
+        // vision front-end nests under `model.vision_tower.` / `model.embed_vision.`
+        // with the extra `.linear.weight` projection nesting and the bare
+        // `std_bias` / `position_embedding_table` tensors. All of them must be
+        // stripped to the unprefixed MLX-community convention so the gemma4
+        // vision tower and multimodal embedder bind.
+        let mut weights = mlxcel_core::weights::WeightMap::new();
+        // A `model.language_model.` key is present in every real NVFP4 export
+        // and is what arms the remapper.
+        weights.insert(
+            "model.language_model.layers.0.mlp.gate_proj.weight".to_string(),
+            mlxcel_core::from_slice_f32(&[1.0f32], &[1]),
+        );
+        weights.insert(
+            "model.vision_tower.encoder.layers.0.mlp.down_proj.linear.weight".to_string(),
+            mlxcel_core::from_slice_f32(&[1.0f32], &[1]),
+        );
+        weights.insert(
+            "model.embed_vision.embedding_projection.weight".to_string(),
+            mlxcel_core::from_slice_f32(&[1.0f32], &[1]),
+        );
+        weights.insert(
+            "model.vision_tower.std_bias".to_string(),
+            mlxcel_core::from_slice_f32(&[1.0f32], &[1]),
+        );
+        weights.insert(
+            "model.vision_tower.patch_embedder.position_embedding_table".to_string(),
+            mlxcel_core::from_slice_f32(&[1.0f32], &[1]),
+        );
+
+        normalize_nvfp4_keys(&mut weights);
+
+        // Vision keys stripped to the unprefixed convention.
+        assert!(weights.contains_key("vision_tower.encoder.layers.0.mlp.down_proj.linear.weight"));
+        assert!(weights.contains_key("embed_vision.embedding_projection.weight"));
+        assert!(weights.contains_key("vision_tower.std_bias"));
+        assert!(weights.contains_key("vision_tower.patch_embedder.position_embedding_table"));
+        // Text decoder key still remapped (language-model-under-model inversion).
+        assert!(weights.contains_key("language_model.model.layers.0.mlp.gate_proj.weight"));
+        // No `model.`-prefixed vision key survives.
+        assert!(
+            !weights
+                .keys()
+                .any(|k| k.starts_with("model.vision_tower.")
+                    || k.starts_with("model.embed_vision.")),
+            "prefixed vision keys must be removed; keys: {:?}",
+            weights.keys().collect::<Vec<_>>()
+        );
     }
 
     #[test]
