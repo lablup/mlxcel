@@ -180,6 +180,7 @@ fn fallback_architecture(model_type: ModelType) -> &'static str {
         ModelType::Dots1 => "dots1",
         ModelType::Cohere => "cohere",
         ModelType::Cohere2 => "cohere2",
+        ModelType::Cohere2Moe => "cohere2_moe",
         ModelType::InternLM2 => "internlm2",
         ModelType::InternLM3 => "internlm3",
         ModelType::Baichuan => "baichuan",

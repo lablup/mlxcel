@@ -36,6 +36,7 @@ pub mod baichuan;
 pub mod bitnet;
 pub mod cohere;
 pub mod cohere2;
+pub mod cohere2_moe;
 pub mod deepseek;
 pub mod deepseek_v2;
 pub mod deepseek_v3;
@@ -136,6 +137,7 @@ pub use baichuan::BaichuanModel;
 pub use bitnet::BitNetModel;
 pub use cohere::CohereModel;
 pub use cohere2::Cohere2Model;
+pub use cohere2_moe::Cohere2MoeModel;
 pub use deepseek::DeepSeekModel;
 pub use deepseek_v2::DeepSeekV2Model;
 pub use deepseek_v3::DeepSeekV3Model;
@@ -322,6 +324,8 @@ pub enum ModelType {
     // Cohere family
     Cohere,
     Cohere2,
+    /// Command MoE (Cohere2 MoE): the Cohere2 backbone with a sparse MoE FFN.
+    Cohere2Moe,
 
     // Chinese/Asian models
     InternLM2,
@@ -509,6 +513,7 @@ pub const ALL_MODEL_TYPES: &[ModelType] = &[
     // Cohere family
     ModelType::Cohere,
     ModelType::Cohere2,
+    ModelType::Cohere2Moe,
     // Chinese/Asian models
     ModelType::InternLM2,
     ModelType::InternLM3,
@@ -693,6 +698,7 @@ impl ModelType {
             // ----- Cohere -----
             ModelType::Cohere => ("Command R (Cohere)", "Cohere"),
             ModelType::Cohere2 => ("Command R+ (Cohere2)", "Cohere"),
+            ModelType::Cohere2Moe => ("Command MoE (Cohere2 MoE)", "Cohere"),
             ModelType::AyaVisionVLM => ("Aya Vision (SigLIP + Cohere2)", "Cohere VLM"),
 
             // ----- InternLM -----
@@ -963,6 +969,7 @@ mod metadata_tests {
             Dots1,
             Cohere,
             Cohere2,
+            Cohere2Moe,
             InternLM2,
             InternLM3,
             Baichuan,

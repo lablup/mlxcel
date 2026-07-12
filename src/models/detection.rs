@@ -169,6 +169,7 @@ pub fn get_model_type(model_path: &Path) -> Result<ModelType> {
         "dots1" => Ok(ModelType::Dots1),
         "cohere" => Ok(ModelType::Cohere),
         "cohere2" => Ok(ModelType::Cohere2),
+        "cohere2_moe" => Ok(ModelType::Cohere2Moe),
         "internlm2" => Ok(ModelType::InternLM2),
         "internlm3" => Ok(ModelType::InternLM3),
         "baichuan_m1" => Ok(ModelType::Baichuan),

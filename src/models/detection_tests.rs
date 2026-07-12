@@ -259,6 +259,36 @@ fn mllama_model_type_is_detected() {
 }
 
 #[test]
+fn cohere2_moe_model_type_is_detected() {
+    // A `cohere2_moe` checkpoint must resolve to the Command MoE runtime instead
+    // of erroring with "Unsupported model type", and must not collide with the
+    // dense `cohere2` arm.
+    let model_dir = temp_path("cohere2_moe");
+    fs::create_dir_all(&model_dir).unwrap();
+    fs::write(
+        model_dir.join("config.json"),
+        r#"{
+            "model_type": "cohere2_moe",
+            "hidden_size": 1024,
+            "head_dim": 128,
+            "num_hidden_layers": 36,
+            "num_attention_heads": 64,
+            "num_key_value_heads": 8,
+            "num_experts": 128,
+            "num_experts_per_tok": 8,
+            "moe_num_shared_experts": 4,
+            "vocab_size": 256000
+        }"#,
+    )
+    .unwrap();
+
+    let detected = super::detection::get_model_type(&model_dir).unwrap();
+    assert_eq!(detected, ModelType::Cohere2Moe);
+
+    fs::remove_dir_all(model_dir).unwrap();
+}
+
+#[test]
 fn mellum_model_type_is_detected() {
     let model_dir = temp_path("mellum_code");
     fs::create_dir_all(&model_dir).unwrap();
