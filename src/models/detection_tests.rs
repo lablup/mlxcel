@@ -334,6 +334,54 @@ fn gemma4_detection_uses_vlm_route_when_vision_weights_exist() {
 }
 
 #[test]
+fn gemma4_detection_uses_vlm_route_for_nvfp4_prefixed_vision_weights() {
+    // ModelOpt NVFP4 exports nest the vision front-end under a leading
+    // `model.` (`model.vision_tower.` / `model.embed_vision.`) instead of the
+    // MLX-community unprefixed `vision_tower.` / `embed_vision.` keys. Both
+    // prefixed forms must also route to Gemma4VLM so `normalize_nvfp4_keys`
+    // gets a chance to strip the prefix later (issue #749).
+    for weight_key in [
+        "model.vision_tower.encoder.layers.0.input_layernorm.weight",
+        "model.embed_vision.embedding_projection.weight",
+    ] {
+        let model_dir = temp_path(&format!(
+            "gemma4_vlm_route_nvfp4_{}",
+            weight_key.replace(['.', '/'], "_")
+        ));
+        fs::create_dir_all(&model_dir).unwrap();
+        fs::write(
+            model_dir.join("config.json"),
+            r#"{
+                "model_type": "gemma4",
+                "vision_config": {},
+                "text_config": { "model_type": "gemma4_text" }
+            }"#,
+        )
+        .unwrap();
+        fs::write(
+            model_dir.join("model.safetensors.index.json"),
+            format!(
+                r#"{{
+                    "weight_map": {{
+                        "{weight_key}": "model-00001-of-00001.safetensors"
+                    }}
+                }}"#
+            ),
+        )
+        .unwrap();
+
+        let detected = super::detection::get_model_type(&model_dir).unwrap();
+        assert_eq!(
+            detected,
+            ModelType::Gemma4VLM,
+            "for weight key {weight_key}"
+        );
+
+        fs::remove_dir_all(model_dir).unwrap();
+    }
+}
+
+#[test]
 fn idefics3_smolvlm_instruct_model_type_is_detected() {
     // SmolVLM-Instruct ships as an Idefics3 checkpoint: top-level
     // `model_type: "idefics3"` (`Idefics3ForConditionalGeneration`) with a Llama
