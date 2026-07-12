@@ -855,3 +855,58 @@ jobs:
           gh release edit "${{ github.event.release.tag_name }}" \
             --repo "${{ github.repository }}" \
             --prerelease=false
+
+  # ============================================================================
+  # Software Bill of Materials (CycloneDX SBOM) generation
+  # ============================================================================
+  generate-sbom:
+    name: Generate CycloneDX SBOM
+    needs: [build-macos, build-linux-cuda, build-linux-x86_64-cuda]
+    # Real release uploads only, scoped to the canonical repo. Skips build-only
+    # verification runs (workflow_dispatch without a release_tag), mirroring the
+    # upload guards on the build jobs above.
+    if: |
+      github.repository == 'lablup/mlxcel' && (
+        github.event_name == 'release' ||
+        (github.event_name == 'workflow_dispatch' && github.event.inputs.release_tag != '')
+      )
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+        with:
+          # Don't leave GITHUB_TOKEN in .git/config; this job only reads source.
+          persist-credentials: false
+          # Catalog the source of the released tag, not the triggering branch, so
+          # the SBOM reflects exactly what shipped.
+          ref: ${{ github.event.release.tag_name || github.event.inputs.release_tag || github.sha }}
+
+      - name: Install Syft
+        run: |
+          set -euo pipefail
+          # Pin both the installer script and the syft binary to a tag for
+          # reproducibility (tracking main would drift the catalog over time).
+          SYFT_VERSION="v1.46.0"
+          curl -sSfL "https://raw.githubusercontent.com/anchore/syft/${SYFT_VERSION}/install.sh" \
+            | sh -s -- -b /usr/local/bin "${SYFT_VERSION}"
+          syft version
+
+      - name: Generate and upload CycloneDX SBOM
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.event.release.tag_name || github.event.inputs.release_tag }}
+        run: |
+          set -euo pipefail
+          VERSION="${TAG#v}"
+          # syft dir:. catalogs the Rust workspace via the committed Cargo.lock.
+          # Note: it does NOT capture the MLX C++ dependency fetched at build time
+          # via FetchContent (pinned by MLX_EXPECTED_COMMIT at the top of this
+          # file); recording that native pin in the SBOM is out of scope here.
+          syft dir:. -o cyclonedx-json > sbom.cyclonedx.json
+          gzip -9 sbom.cyclonedx.json
+          SBOM_FILE="sbom-${VERSION}.cyclonedx.json.gz"
+          mv sbom.cyclonedx.json.gz "$SBOM_FILE"
+          gh release upload "$TAG" "$SBOM_FILE" --clobber --repo "${{ github.repository }}"
