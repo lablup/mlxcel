@@ -98,7 +98,7 @@ Prefill/Decode are the measured-pass figures from `mlxcel-bench-decode`. Notes r
 | gemma-4-31b-4bit | ✅ | 23.08 | 8.84 |  |
 | gemma-4-31b-it-4bit | ✅ | 52.37 | 8.33 | 26 tok |
 | gemma-4-31b-it-assistant-bf16 | ⚪ | - | - | MTP/DFlash drafter (needs a target; not standalone) |
-| gemma-4-31b-it-nvfp4 | ✅ | 76.38 | 4.88 | 26 tok; ModelOpt NVFP4 direct transcode (#692, #693, #697); image input fails (see VLM note) |
+| gemma-4-31b-it-nvfp4 | ✅ | 76.38 | 4.88 | 26 tok; ModelOpt NVFP4 direct transcode (#692, #693, #697); image input works (see VLM note; fixed by #749) |
 | gemma-4-31b-it-qat-4bit | ✅ | 59.15 | 5.39 | 26 tok |
 | gemma-4-e2b-it-4bit | ✅ | 650.91 | 100.61 | 72 tok |
 | gemma-4-e2b-it-8bit | ✅ | 654.70 | 58.55 | 70 tok |
@@ -351,9 +351,9 @@ Models that accept image input and generated tokens under the `"What is in this 
 | smolvlm-instruct-bf16 | ✅ | 100 | 2815.60 | 67.24 |
 | youtu-vl-4b-instruct | ✅ | 30 | 337.10 | 20.89 |
 | llama-4-scout-17b-4bit | ✅ | 100 | 29.15 | 20.54 |
-| gemma-4-31b-it-nvfp4 | ❌ | - | - | - |
+| gemma-4-31b-it-nvfp4 | ✅ | 27 | 353.20 | 4.87 |
 
-`llama-4-scout-17b-4bit` figures are from 2026-06-17 (memory-gate skip on 2026-07-12). `gemma-4-31b-it-nvfp4` passes the text-only run but rejects image input: the NVFP4 key remapper translates only the 1372 text-decoder keys and leaves all 356 `model.vision_tower.*` / `model.embed_vision.*` keys unmapped, so the vision tower never binds and the model registers as text-only. Tracked in #749.
+`llama-4-scout-17b-4bit` figures are from 2026-06-17 (memory-gate skip on 2026-07-12). `gemma-4-31b-it-nvfp4` now serves image input (fixed by #749): the NVFP4 key remapper strips the `model.` prefix from all 356 `model.vision_tower.*` / `model.embed_vision.*` keys, not just the 1372 text-decoder keys, so the checkpoint routes to Gemma4VLM and the vision tower binds. The vision front-end stays dense (ModelOpt keeps `model.vision_tower*` / `model.embed_vision*` in `quantization_config.ignore`), so it needs key renaming only, no NVFP4 transcode.
 
 ---
 
@@ -378,7 +378,7 @@ Models that accept image input and generated tokens under the `"What is in this 
 - **Text-only prefill for several VLM-capable models is an order of magnitude higher than 0.3.1** (aya-vision-8b 124.91 → 1354.53, pixtral-12b 35.97 → 120.39, youtu-vl 134.27 → 451.42, mistral-small-3.1-24b 63.68 → 891.89), consistent with the text-prompt path no longer paying vision-tower costs rather than with a kernel speedup.
 - **Decode improvements >10% on dense/MoE models**: apertus-8b +21%, gemma3-4b / gemma-3-4b-it +19%, gemma3-1b +15%, gemma3n-e2b +10%, qwen3-0.6b-4bit +13%, aya-expanse-8b +12%, plus the VLM-side gains below.
 - **VLM (image-input) gains**: molmo-7b 23.81 → 35.89 (+51%), nemotron-omni-30b 32.86 → 70.09 (+113%), gemma3-4b family +13-18%.
-- **gemma-4-31b-it-nvfp4 rejects image input** while its text pass is stable (76.38 prefill / 4.88 decode); the NVFP4 key remapper leaves the 356 vision-tower keys unmapped so the model registers as text-only. Tracked in #749.
+- **gemma-4-31b-it-nvfp4 now serves image input** (fixed by #749: 27 tok, 353.20 prefill / 4.87 decode) with its text pass stable (76.38 prefill / 4.88 decode); the NVFP4 key remapper now strips the `model.` prefix from the 356 vision-tower keys, so the checkpoint routes to Gemma4VLM and the vision tower binds.
 
 ### New model directories since 2026-06-17 (14)
 

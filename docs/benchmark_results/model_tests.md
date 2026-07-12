@@ -40,7 +40,7 @@ Current source-of-truth data lives in `benchmarks/`:
 | `pylm_m1ultra_2026-05-19.csv` | M1 Ultra | 2026-05-19 (mlx-lm 0.31.3 baseline, https://github.com/ml-explore/mlx-lm @ `df1d3f3`; >65GB skipped) | Text |
 | `pylm_m1ultra_vlm_2026-05-19.csv` | M1 Ultra | 2026-05-19 (mlx-vlm baseline, https://github.com/Blaizzy/mlx-vlm @ `d85ca4d`; >65GB skipped) | VLM |
 | `cuda_gb10_2026-07-12.csv` | GB10 | 2026-07-12 (mlxcel 0.4.0-rc.1, MLX pin `57c66cac` / 0.32.1, CUDA 13.0 / SM 12.1; full 159-dir sweep, 142 measured / 0 code failures / 7 memory-gate `SKIP:oom_estimate` at `BENCH_MEM_OVERHEAD_FACTOR=2.0` / 10 N.A. FAILs [drafters, speech/TTS, incomplete checkpoints]) | Text |
-| `cuda_gb10_vlm_2026-07-12.csv` | GB10 | 2026-07-12 (mlxcel 0.4.0-rc.1; full VLM sweep over all dirs, 63 measured image rows; text-only models FAIL by design; gemma-4-31b-it-nvfp4 image-input FAIL is a real finding, tracked in #749) | VLM |
+| `cuda_gb10_vlm_2026-07-12.csv` | GB10 | 2026-07-12 (mlxcel 0.4.0-rc.1; full VLM sweep over all dirs, 63 measured image rows; text-only models FAIL by design; gemma-4-31b-it-nvfp4 image-input FAIL captured here, since fixed by #749) | VLM |
 | `cuda_gb10_2026-07-09.csv` | GB10 | 2026-07-09 (mlxcel 0.4.0-rc.1, MLX pin `57c66cac` / 0.32.1, CUDA 13.0 / SM 12.1; 19-model representative subset re-benchmark, 19 pass / 0 fail, includes gemma-4-31b-it-nvfp4 now functional via the ModelOpt NVFP4 direct-transcode path #692/#693/#697) | Text |
 | `cuda_gb10_2026-06-17.csv` | GB10 | 2026-06-17 (mlxcel 0.3.1 [CSV relabeled; Cargo.toml 0.3.0 until release], MLX pin a6ec7123, CUDA 13.0 / SM 12.1, post-#319 CUDA fused decode-MoE; full text re-benchmark, 147 models, 136 pass / 0 fail / 9 not-tested-N.A. / 2 too-large) | Text |
 | `cuda_gb10_vlm_2026-06-17.csv` | GB10 | 2026-06-17 (mlxcel 0.3.1; full VLM re-benchmark, 54 measured image rows) | VLM |
@@ -93,7 +93,7 @@ For Qwen2.5-0.5B the 4-bit row is the directly comparable cross-hardware figure;
 | Text models tested (M1 Ultra, 2026-06-15) | 136 pass, 2 partial, 4 fail, 9 skip/non-standalone (151 dirs; adds apertus, seed-oss, dots.llm1, granite family, lfm2, plamo-2, falcon-h1, BitNet; diffusiongemma loads via #291) |
 | Text models tested (M5 Max, 2026-06-15) | 131 pass, 5 partial, 14 fail/skip (0.2.1 full sweep; post-sweep: qwen2.5-vl-3b-4bit fixed by re-download, oversized bf16 hunyuan dropped; neither a code regression) |
 | Text models tested (GB10, 2026-07-12) | 141 pass measured + 5 pass carried (memory-gate skips), 0 code failures, 13 not-tested/N.A. (glm-5 pair incomplete/absent; paligemma2 image-only; docling/granite-speech/whisper/kokoro non-text-gen; 4 MTP/DFlash drafters; glm-4.5v + mistral-small-4-119b memory-gated, never measured) (159 dirs; 0.4.0-rc.1 full sweep) |
-| VLM models tested (GB10, 2026-07-12) | 63 measured image rows + 1 carried (llama-4-scout, memory-gate skip); gemma-4-31b-it-nvfp4 image-input FAIL, tracked in #749 (0.4.0-rc.1) |
+| VLM models tested (GB10, 2026-07-12) | 63 measured image rows + 1 carried (llama-4-scout, memory-gate skip); gemma-4-31b-it-nvfp4 image-input FAIL since fixed by #749 (0.4.0-rc.1) |
 | VLM models tested (M5 Max, 2026-06-15) | 54 valid VLM rows (0.2.1 full VLM re-sweep; adds qwen3-vl-4b/8b, minicpm-v-4.6-bf16, nemotron-omni, youtu-vl; qwen2.5-vl-3b-4bit restored after re-download) |
 | VLM models tested (M1 Ultra, 2026-06-15) | 55 measured VLM rows (53 pass + 2 partial) |
 | Beating mlx-lm on M1 Ultra (text, >=100%) | 24/74 (32%, 6-15 vs pinned 5-19 baseline) |
