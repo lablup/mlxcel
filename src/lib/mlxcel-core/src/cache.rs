@@ -2403,6 +2403,39 @@ impl KVCache {
     /// Used by: [`crate::cache::CachePool`] consumers that need to enforce
     /// a max KV size on otherwise-unbounded `KVCache` instances (server batch scheduler).
     pub fn trim_front(&mut self, n: i32) -> i32 {
+        self.trim_front_keep_sink(n, 0)
+    }
+
+    /// Front-trim that pins the first `keep` tokens as an attention sink.
+    ///
+    /// A plain front trim (`keep == 0`, what [`Self::trim_front`] forwards)
+    /// drops the `n` oldest tokens outright — including the BOS / opening
+    /// tokens that a transformer dumps its excess attention onto (the
+    /// "attention sink" of StreamingLLM). Discarding those makes dense
+    /// `--max-kv-size` decode collapse into degenerate repetition (issue
+    /// #718). With `keep > 0` the physical buffer is rearranged into
+    /// `[sink: first `keep` slots] ++ [most-recent window]` and the `n`
+    /// tokens **after** the sink are dropped instead, mirroring upstream
+    /// mlx-lm `RotatingKVCache(max_size, keep=...)`
+    /// (https://github.com/ml-explore/mlx-lm/blob/main/mlx_lm/models/cache.py#L410-L510),
+    /// which the scheduler's `--max-kv-size` path is documented to follow.
+    ///
+    /// The position bookkeeping is identical to a plain front trim: exactly
+    /// `n` tokens are removed regardless of *which* `n` slots are dropped, so
+    /// `live_start` still advances by `n` and `buffer_idx() = offset -
+    /// live_start` still equals the post-trim physical length. RoPE stays
+    /// correct because every retained K keeps its rotation baked in at its
+    /// original write-time position and `self.offset` is never decremented;
+    /// the sink slots simply no longer sit at buffer position `live_start`,
+    /// which nothing depends on (Q is rotated at the monotonic `offset`, not
+    /// at a slot-derived position).
+    ///
+    /// Returns the number of entries actually trimmed (clamped to
+    /// `[0, live_len]`); the same no-op rules as [`Self::trim_front`] apply
+    /// (pool-backed and Turbo/Turbo3 caches return `0`).
+    ///
+    /// Used by: the server batch scheduler's `enforce_max_kv_size_for`.
+    pub fn trim_front_keep_sink(&mut self, n: i32, keep: i32) -> i32 {
         // Clamp against the live window length, not the monotonic offset:
         // the live window is what attention sees, and that is what we are
         // capping.
@@ -2447,43 +2480,73 @@ impl KVCache {
             return n;
         }
 
-        // Slice keys: drop buffer slots `[0, n)` (i.e. monotonic positions
-        // `[live_start, live_start + n)`). The new buffer slot `0` now
-        // corresponds to monotonic position `live_start + n`, which is the
-        // new `live_start`.
-        if let Some(ref k) = self.keys {
-            let k_shape = ffi::array_shape(k);
-            self.keys = Some(ffi::slice(
-                k,
-                &[0, 0, n, 0],
-                &[k_shape[0], k_shape[1], live_len, k_shape[3]],
-            ));
-        }
-        if let Some(ref v) = self.values {
-            let v_shape = ffi::array_shape(v);
-            self.values = Some(ffi::slice(
-                v,
-                &[0, 0, n, 0],
-                &[v_shape[0], v_shape[1], live_len, v_shape[3]],
-            ));
-        }
-        // Slice INT8 scale sidecars in lockstep.
-        if self.mode == KVCacheMode::Int8 {
-            if let Some(ref ks) = self.key_scales {
-                let ks_shape = ffi::array_shape(ks);
-                self.key_scales = Some(ffi::slice(
-                    ks,
+        // Effective sink size: never large enough to eat into the `n` tokens
+        // that must be dropped (`keep + n <= live_len`, equivalently
+        // `keep <= new_live_len`). `keep == 0` reproduces the historical plain
+        // front trim byte-for-byte.
+        let keep = keep.clamp(0, new_live_len);
+
+        if keep > 0 {
+            // Sink-preserving trim: keep buffer slots `[0, keep)` and drop the
+            // `n` slots immediately after the sink, i.e. new buffer =
+            // `[0, keep) ++ [keep + n, live_len)`.
+            self.keys = self
+                .keys
+                .as_ref()
+                .map(|k| Self::slice_keep_sink(k, keep, n, live_len));
+            self.values = self
+                .values
+                .as_ref()
+                .map(|v| Self::slice_keep_sink(v, keep, n, live_len));
+            if self.mode == KVCacheMode::Int8 {
+                self.key_scales = self
+                    .key_scales
+                    .as_ref()
+                    .map(|ks| Self::slice_keep_sink(ks, keep, n, live_len));
+                self.val_scales = self
+                    .val_scales
+                    .as_ref()
+                    .map(|vs| Self::slice_keep_sink(vs, keep, n, live_len));
+            }
+        } else {
+            // Plain front trim: drop buffer slots `[0, n)` (i.e. monotonic
+            // positions `[live_start, live_start + n)`). The new buffer slot
+            // `0` now corresponds to monotonic position `live_start + n`,
+            // which is the new `live_start`.
+            if let Some(ref k) = self.keys {
+                let k_shape = ffi::array_shape(k);
+                self.keys = Some(ffi::slice(
+                    k,
                     &[0, 0, n, 0],
-                    &[ks_shape[0], ks_shape[1], live_len, 1],
+                    &[k_shape[0], k_shape[1], live_len, k_shape[3]],
                 ));
             }
-            if let Some(ref vs) = self.val_scales {
-                let vs_shape = ffi::array_shape(vs);
-                self.val_scales = Some(ffi::slice(
-                    vs,
+            if let Some(ref v) = self.values {
+                let v_shape = ffi::array_shape(v);
+                self.values = Some(ffi::slice(
+                    v,
                     &[0, 0, n, 0],
-                    &[vs_shape[0], vs_shape[1], live_len, 1],
+                    &[v_shape[0], v_shape[1], live_len, v_shape[3]],
                 ));
+            }
+            // Slice INT8 scale sidecars in lockstep.
+            if self.mode == KVCacheMode::Int8 {
+                if let Some(ref ks) = self.key_scales {
+                    let ks_shape = ffi::array_shape(ks);
+                    self.key_scales = Some(ffi::slice(
+                        ks,
+                        &[0, 0, n, 0],
+                        &[ks_shape[0], ks_shape[1], live_len, 1],
+                    ));
+                }
+                if let Some(ref vs) = self.val_scales {
+                    let vs_shape = ffi::array_shape(vs);
+                    self.val_scales = Some(ffi::slice(
+                        vs,
+                        &[0, 0, n, 0],
+                        &[vs_shape[0], vs_shape[1], live_len, 1],
+                    ));
+                }
             }
         }
 
@@ -2491,6 +2554,19 @@ impl KVCache {
         // See the top-level doc comment for the RoPE rationale.
         self.live_start += n;
         n
+    }
+
+    /// Slice `[0, keep) ++ [keep + n, live_len)` along the sequence axis
+    /// (dim 2) and concatenate — keep the first `keep` sink tokens and drop the
+    /// `n` tokens immediately after them. Works for both the K/V buffers and
+    /// the INT8 scale sidecars (their last dim is `1`); the head/tail bounds
+    /// read every non-sequence dim from the array's own shape. Mirrors mlx-lm
+    /// `RotatingKVCache._trim`.
+    fn slice_keep_sink(arr: &MlxArray, keep: i32, n: i32, live_len: i32) -> UniquePtr<MlxArray> {
+        let s = ffi::array_shape(arr);
+        let head = ffi::slice(arr, &[0, 0, 0, 0], &[s[0], s[1], keep, s[3]]);
+        let tail = ffi::slice(arr, &[0, 0, keep + n, 0], &[s[0], s[1], live_len, s[3]]);
+        concatenate(&head, &tail, 2)
     }
 
     /// Update cache and return view of filled portion.
@@ -7224,6 +7300,159 @@ mod tests {
         // positions [2, 3, 4] respectively.
         assert_eq!(&k_data[..3], &[3.0, 4.0, 9.0]);
         assert_eq!(&v_data[..3], &[7.0, 8.0, 10.0]);
+    }
+
+    fn read_seq_f32(arr: &ffi::MlxArray) -> Vec<f32> {
+        let a = ffi::astype(arr, dtype::FLOAT32);
+        ffi::eval(&a);
+        ffi::array_to_raw_bytes(&a)
+            .chunks_exact(4)
+            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .collect()
+    }
+
+    // issue #718: the sink-preserving front trim keeps the first `keep`
+    // tokens as an attention sink and drops the `n` tokens *after* them,
+    // rather than dropping the `n` oldest tokens overall. This mirrors
+    // mlx-lm `RotatingKVCache._trim`. Bookkeeping (`offset`, `live_start`,
+    // `live_len`) is identical to a plain front trim because exactly `n`
+    // tokens are removed either way.
+    #[test]
+    fn kv_cache_trim_front_keep_sink_retains_prefix_and_tail() {
+        let mut cache = KVCache::new();
+        // 6 distinct tokens at monotonic positions [0, 6).
+        let keys = ffi::from_slice_f32(&[10.0, 20.0, 30.0, 40.0, 50.0, 60.0], &[1, 1, 6, 1]);
+        let values = ffi::from_slice_f32(&[11.0, 21.0, 31.0, 41.0, 51.0, 61.0], &[1, 1, 6, 1]);
+        cache.update(keys, values);
+
+        // Keep the first 2 sink tokens, drop the next 2 (positions 2..4),
+        // leaving sink [0, 2) ++ tail [4, 6).
+        assert_eq!(cache.trim_front_keep_sink(2, 2), 2);
+        // Bookkeeping is the plain-front-trim bookkeeping: n tokens removed.
+        assert_eq!(cache.offset, 6);
+        assert_eq!(cache.live_start, 2);
+        assert_eq!(cache.live_len(), 4);
+
+        let k_data = read_seq_f32(cache.keys.as_ref().unwrap());
+        let v_data = read_seq_f32(cache.values.as_ref().unwrap());
+        // Physical buffer holds the sink prefix then the recent tail: the
+        // middle two tokens (30/40, 31/41) are gone, 10/20 and 50/60 remain.
+        assert_eq!(&k_data[..4], &[10.0, 20.0, 50.0, 60.0]);
+        assert_eq!(&v_data[..4], &[11.0, 21.0, 51.0, 61.0]);
+
+        // A subsequent decode write lands right after the retained window and
+        // the fetched attention window is sink ++ recent ++ new token.
+        let new_k = ffi::from_slice_f32(&[70.0], &[1, 1, 1, 1]);
+        let new_v = ffi::from_slice_f32(&[71.0], &[1, 1, 1, 1]);
+        let (fk, fv) = cache.update_and_fetch(new_k, new_v);
+        assert_eq!(cache.offset, 7);
+        assert_eq!(cache.live_start, 2);
+        assert_eq!(cache.live_len(), 5);
+        assert_eq!(read_seq_f32(&fk), &[10.0, 20.0, 50.0, 60.0, 70.0]);
+        assert_eq!(read_seq_f32(&fv), &[11.0, 21.0, 51.0, 61.0, 71.0]);
+    }
+
+    // `keep == 0` (what `trim_front` forwards) must stay byte-identical to
+    // the historical plain front trim: drop the `n` oldest tokens outright.
+    #[test]
+    fn kv_cache_trim_front_keep_sink_zero_matches_plain_front_trim() {
+        let build = || {
+            let mut c = KVCache::new();
+            let k = ffi::from_slice_f32(&[1.0, 2.0, 3.0, 4.0, 5.0], &[1, 1, 5, 1]);
+            let v = ffi::from_slice_f32(&[6.0, 7.0, 8.0, 9.0, 10.0], &[1, 1, 5, 1]);
+            c.update(k, v);
+            c
+        };
+        let mut plain = build();
+        let mut via_keep = build();
+        assert_eq!(plain.trim_front(2), 2);
+        assert_eq!(via_keep.trim_front_keep_sink(2, 0), 2);
+
+        assert_eq!(plain.offset, via_keep.offset);
+        assert_eq!(plain.live_start, via_keep.live_start);
+        assert_eq!(plain.live_len(), via_keep.live_len());
+        assert_eq!(
+            read_seq_f32(plain.keys.as_ref().unwrap())[..3].to_vec(),
+            read_seq_f32(via_keep.keys.as_ref().unwrap())[..3].to_vec(),
+        );
+        // Plain front trim drops the two oldest tokens, keeping [3, 4, 5].
+        assert_eq!(
+            read_seq_f32(via_keep.keys.as_ref().unwrap())[..3],
+            [3.0, 4.0, 5.0]
+        );
+    }
+
+    // The sink prefix is stable across repeated trims (the decode steady
+    // state under `--max-kv-size`): the first `keep` slots never move while
+    // the recent window slides forward one token at a time.
+    #[test]
+    fn kv_cache_trim_front_keep_sink_prefix_stable_across_repeated_trims() {
+        let mut cache = KVCache::new();
+        let keys = ffi::from_slice_f32(&[10.0, 20.0, 30.0, 40.0, 50.0], &[1, 1, 5, 1]);
+        let values = ffi::from_slice_f32(&[10.0, 20.0, 30.0, 40.0, 50.0], &[1, 1, 5, 1]);
+        cache.update(keys, values);
+
+        // Cap the live window at 4 with a 2-token sink: drop 1 -> [10,20,40,50].
+        assert_eq!(cache.trim_front_keep_sink(1, 2), 1);
+        assert_eq!(
+            read_seq_f32(cache.keys.as_ref().unwrap())[..4],
+            [10.0, 20.0, 40.0, 50.0]
+        );
+
+        // Append a token, then re-cap: sink [10,20] must survive again.
+        let nk = ffi::from_slice_f32(&[60.0], &[1, 1, 1, 1]);
+        let nv = ffi::from_slice_f32(&[60.0], &[1, 1, 1, 1]);
+        cache.update(nk, nv);
+        assert_eq!(cache.trim_front_keep_sink(1, 2), 1);
+        let (fk, _) = cache.update_and_fetch(
+            ffi::from_slice_f32(&[70.0], &[1, 1, 1, 1]),
+            ffi::from_slice_f32(&[70.0], &[1, 1, 1, 1]),
+        );
+        // Window = sink [10,20] ++ recent tail; the sink prefix is unchanged.
+        let win = read_seq_f32(&fk);
+        assert_eq!(win[..2], [10.0, 20.0]);
+    }
+
+    // INT8: the scale sidecars must be sliced in lockstep with the quantized
+    // K/V buffers under a sink-preserving trim, so the dequantized visible
+    // window keeps tracking the reference tokens.
+    #[test]
+    fn kv_cache_trim_front_keep_sink_int8_slices_scales_in_lockstep() {
+        let mut cache = KVCache::new();
+        cache.mode = KVCacheMode::Int8;
+        // 6 tokens, 2-dim so per-token absmax scales differ per token.
+        let k = ffi::from_slice_f32(
+            &[1.0, 0.0, 2.0, 0.0, 3.0, 0.0, 4.0, 0.0, 5.0, 0.0, 6.0, 0.0],
+            &[1, 1, 6, 2],
+        );
+        let v = ffi::from_slice_f32(
+            &[1.0, 0.0, 2.0, 0.0, 3.0, 0.0, 4.0, 0.0, 5.0, 0.0, 6.0, 0.0],
+            &[1, 1, 6, 2],
+        );
+        cache.update(k, v);
+
+        // Sink [0,2) ++ tail [4,6): keep tokens {1,2,5,6}.
+        assert_eq!(cache.trim_front_keep_sink(2, 2), 2);
+        assert_eq!(cache.live_len(), 4);
+
+        let (fk, _fv) = cache.update_and_fetch(
+            ffi::from_slice_f32(&[7.0, 0.0], &[1, 1, 1, 2]),
+            ffi::from_slice_f32(&[7.0, 0.0], &[1, 1, 1, 2]),
+        );
+        // Dequantized first coord of each visible token should track
+        // {1, 2, 5, 6, 7} within one INT8 quant step (scales sliced with the
+        // data, not left stale).
+        let deq = read_seq_f32(&fk);
+        let first_coords: Vec<f32> = deq.chunks_exact(2).map(|c| c[0]).collect();
+        let expected = [1.0_f32, 2.0, 5.0, 6.0, 7.0];
+        assert_eq!(first_coords.len(), expected.len());
+        for (got, want) in first_coords.iter().zip(expected.iter()) {
+            let tol = (want.abs() / 127.0) * 1.1 + 2e-3;
+            assert!(
+                (got - want).abs() <= tol,
+                "int8 sink-trim visible token {want} recovered as {got} (tol {tol})"
+            );
+        }
     }
 
     // correctness regression test — RoPE relative-position

@@ -99,6 +99,14 @@ fn should_align_prefill() -> bool {
 
 pub(crate) const DEFAULT_PAGED_BLOCK_SIZE: usize = 32;
 
+/// Number of leading tokens pinned as an attention sink when `--max-kv-size`
+/// front-trims a dense `KVCache` (issue #718). A transformer dumps its excess
+/// attention onto the first few tokens; dropping them along with the rest of
+/// the old window collapses decode into degenerate repetition. Mirrors
+/// upstream mlx-lm `RotatingKVCache(max_size=max_kv_size, keep=4)`
+/// (https://github.com/ml-explore/mlx-lm/blob/main/mlx_lm/models/cache.py#L37).
+const MAX_KV_SIZE_SINK_KEEP: i32 = 4;
+
 /// Environment override for the #715 batched-prefill token budget.
 const MAX_BATCH_PREFILL_TOKENS_ENV: &str = "MLXCEL_MAX_BATCH_PREFILL_TOKENS";
 
@@ -1198,29 +1206,14 @@ impl BatchScheduler {
                     },
                 );
             }
-            // Int8 KV forces the dense decode backend (only genuine Fp16
+            // Note: Int8 KV forces the dense decode backend (only genuine Fp16
             // sequences are pool-backed on the paged path). The dense
-            // batched-decode + front-trim path currently produces incorrect
-            // output once a prompt exceeds the cap (a pre-existing,
-            // mode-independent defect, tracked in issue #718): `--kv-cache-mode fp16
-            // --decode-storage-backend dense --max-kv-size N` mis-decodes the
-            // same way, while the KV-cache-layer Int8 trim is proven correct
-            // by unit tests. Warn loudly so operators do not silently get
-            // garbage; the cap is reliable today only on the paged backend
-            // (default Fp16).
-            let legacy_is_int8 = self.kv_cache_mode == KVCacheMode::Int8;
-            let batched_is_int8 = self.batch_kv_quant.is_enabled()
-                && self.batch_kv_quant.base_mode() == KVCacheMode::Int8;
-            if legacy_is_int8 || batched_is_int8 {
-                tracing::warn!(
-                    "--max-kv-size is set together with Int8 KV, which runs on the dense \
-                     decode backend. The dense batched-decode front-trim currently \
-                     mis-decodes prompts longer than the cap (a pre-existing defect that \
-                     also affects `--kv-cache-mode fp16 --decode-storage-backend dense`). \
-                     Omit --max-kv-size with Int8, or keep prompts within the cap, until \
-                     the dense-decode trim path is fixed."
-                );
-            }
+            // batched-decode front-trim used to mis-decode prompts longer than
+            // the cap because it dropped the leading attention-sink tokens
+            // (issue #718). `enforce_max_kv_size_for` now pins a small sink
+            // prefix via `KVCache::trim_front_keep_sink`, matching mlx-lm
+            // `RotatingKVCache(keep=4)`, so `--max-kv-size` decodes correctly on
+            // the dense backend (and therefore under Int8); no warning needed.
         }
         self.max_kv_size = max_kv_size;
         self
@@ -2377,6 +2370,10 @@ impl BatchScheduler {
         let Some(caches) = self.cache_pool.get_caches_mut(seq_id) else {
             return;
         };
+        // Pin a small attention-sink prefix so the trimmed window keeps the
+        // leading tokens the model attends to (issue #718). Never large enough
+        // to leave no room for the recent window under the configured cap.
+        let sink_keep = MAX_KV_SIZE_SINK_KEEP.min(max_i32 - 1).max(0);
         for cache in caches {
             // `live_len() = offset - live_start`. We trim against the live
             // window length (what attention sees), not the monotonic
@@ -2388,7 +2385,7 @@ impl BatchScheduler {
             if let Some(excess) = live_len.checked_sub(max_i32)
                 && excess > 0
             {
-                cache.trim_front(excess);
+                cache.trim_front_keep_sink(excess, sink_keep);
             }
         }
     }
