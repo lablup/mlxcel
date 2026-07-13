@@ -338,7 +338,7 @@ pub(crate) struct GenerationOptions {
     /// omitted, the budget configured in the checkpoint's
     /// `processor_config.json` is used (280 for the shipped Gemma 4
     /// checkpoints). Ignored by every other model family.
-    #[arg(long, value_name = "N")]
+    #[arg(long, value_name = "N", value_parser = parse_image_soft_tokens)]
     pub(crate) image_soft_tokens: Option<usize>,
 
     /// Audio file path for audio-language models (e.g. Gemma4 with audio)
@@ -580,6 +580,13 @@ fn parse_unit_interval(s: &str) -> Result<f32, String> {
     } else {
         Err(format!("must be between 0 and 1, got {v}"))
     }
+}
+
+/// Validate `--image-soft-tokens` at parse time so an off-ladder value is
+/// rejected before any model or image is loaded.
+fn parse_image_soft_tokens(s: &str) -> Result<usize, String> {
+    let v: usize = s.parse().map_err(|e| format!("not a number: {e}"))?;
+    mlxcel::vision::processors::gemma4::validate_image_soft_tokens(v)
 }
 
 /// Block-diffusion generation options.

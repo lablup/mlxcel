@@ -394,6 +394,31 @@ fn image_soft_token_budget_ladder_is_shared_with_video() {
 }
 
 #[test]
+fn patch_grid_at_top_budget_stays_inside_the_vit_position_table() {
+    // The gemma4 ViT indexes its learned per-axis position table with the raw
+    // patch x/y ids (`build_patch_position_ids` in encoders/gemma4.rs), gathered
+    // with `mlxcel_core::take`, which WRAPS on an out-of-range index rather than
+    // faulting. So an oversized patch grid would silently produce wrong position
+    // embeddings. The table default is `position_embedding_size = 10_240`. Pin
+    // that even a pathological aspect ratio at the top ladder budget keeps every
+    // single-axis patch index below it, mirroring the gemma4_unified bound test.
+    const VIT_POSITION_TABLE_SIZE: usize = 10_240;
+    let processor = Gemma4Processor::new(16, 280, 3);
+    // Extreme aspect ratios drive one axis toward `max_side_length`.
+    for (w, h) in [(8192u32, 64u32), (64u32, 8192u32), (16384u32, 32u32)] {
+        let image = synthetic_rgb(w, h, 100);
+        let out = processor.preprocess_with_budget(std::slice::from_ref(&image), Some(1120));
+        let (patch_h, patch_w) = out[0].patch_grid;
+        assert!(
+            patch_h < VIT_POSITION_TABLE_SIZE && patch_w < VIT_POSITION_TABLE_SIZE,
+            "patch grid {:?} for a {w}x{h} image at budget 1120 must stay inside the \
+             {VIT_POSITION_TABLE_SIZE}-wide position table",
+            (patch_h, patch_w)
+        );
+    }
+}
+
+#[test]
 fn preprocess_with_budget_yields_strictly_increasing_soft_tokens() {
     // Matches every shipped gemma4 checkpoint: patch 16, pooling 3, default 280.
     let processor = Gemma4Processor::new(16, 280, 3);
