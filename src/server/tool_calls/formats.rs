@@ -2724,6 +2724,18 @@ mod tests {
     }
 
     #[test]
+    fn pythonic_bracketed_list_with_quoted_string_items() {
+        // Each list item is coerced independently by `coerce_pythonic_value_inner`,
+        // so a quoted item (unlike the bare integers above) must have its
+        // surrounding quotes stripped rather than kept as a literal `"a"` string.
+        let text = r#"[tag(tags=["a", "b"])]"#;
+        let result = try_pythonic(text).unwrap();
+        let args: serde_json::Value =
+            serde_json::from_str(&result.tool_calls[0].arguments).unwrap();
+        assert_eq!(args["tags"], serde_json::json!(["a", "b"]));
+    }
+
+    #[test]
     fn pythonic_mixed_quoted_and_unquoted_args() {
         let text = r#"[get_weather(city="Paris", days=2)]"#;
         let result = try_pythonic(text).unwrap();
@@ -2779,12 +2791,10 @@ mod tests {
         // parsers claim it, instead of the pythonic parser stealing the inner
         // bracketed name. Both object and array JSON shapes are covered.
         assert!(
-            try_pythonic(r#"{"name": "search", "arguments": {"query": "[calc(x=1)]"}}"#)
-                .is_none()
+            try_pythonic(r#"{"name": "search", "arguments": {"query": "[calc(x=1)]"}}"#).is_none()
         );
         assert!(
-            try_pythonic(r#"[{"name": "search", "arguments": {"q": "[calc(x=1)]"}}]"#)
-                .is_none()
+            try_pythonic(r#"[{"name": "search", "arguments": {"q": "[calc(x=1)]"}}]"#).is_none()
         );
     }
 
@@ -2807,5 +2817,45 @@ mod tests {
         let args: serde_json::Value =
             serde_json::from_str(&result.tool_calls[0].arguments).unwrap();
         assert!(args.get("x").is_some());
+    }
+
+    /// Wrap `leaf` in `layers` levels of single-element JSON arrays, i.e.
+    /// `wrap_layers(leaf, 2)` is `[[leaf]]`. Used to build the expected value
+    /// for [`pythonic_list_depth_cap_boundary`] without hand-counting nesting.
+    fn wrap_layers(leaf: serde_json::Value, layers: usize) -> serde_json::Value {
+        (0..layers).fold(leaf, |v, _| serde_json::Value::Array(vec![v]))
+    }
+
+    #[test]
+    fn pythonic_list_depth_cap_boundary() {
+        // Exactly `PYTHONIC_MAX_LIST_DEPTH` (32) nested empty `[...]` pairs. Each
+        // `[...]` strip is gated by `depth < 32`, and depths 0..=31 (32 checks)
+        // are all under the cap, so the value fully resolves: 31 single-element
+        // array layers wrap an innermost empty array, matching `[f(x=32 pairs)]`
+        // decoded with no cap in effect at all: the cap never actually engages.
+        let at_cap = format!("[f(x={})]", "[".repeat(32) + &"]".repeat(32));
+        let result = try_pythonic(&at_cap).unwrap();
+        let args: serde_json::Value =
+            serde_json::from_str(&result.tool_calls[0].arguments).unwrap();
+        let expected_at_cap = wrap_layers(serde_json::json!([]), 31);
+        assert_eq!(
+            args["x"], expected_at_cap,
+            "32 nested pairs must fully resolve to arrays, never degrading to a string"
+        );
+
+        // One bracket pair beyond the cap: the 33rd `[...]` is reached at
+        // depth == 32, where `depth < 32` is false, so it is left unstripped.
+        // The 32 layers up to the cap still resolve to arrays, but the
+        // innermost element degrades to the literal string "[]" instead of
+        // continuing as an (empty) array.
+        let over_cap = format!("[f(x={})]", "[".repeat(33) + &"]".repeat(33));
+        let result = try_pythonic(&over_cap).unwrap();
+        let args: serde_json::Value =
+            serde_json::from_str(&result.tool_calls[0].arguments).unwrap();
+        let expected_over_cap = wrap_layers(serde_json::Value::String("[]".to_string()), 32);
+        assert_eq!(
+            args["x"], expected_over_cap,
+            "the pair past the cap must degrade to a raw string, not crash or vanish"
+        );
     }
 }
