@@ -885,6 +885,114 @@ fn ensure_bos_post_processor(tokenizer: &mut tokenizers::Tokenizer, model_path: 
     }
 }
 
+/// DiffusionGemma tool-parser / reasoning-channel markers that must decode as
+/// visible text rather than being stripped as special tokens.
+///
+/// `<|tool_call>` / `<tool_call|>` / `<|"|>` frame the pipe-delimited Gemma 4
+/// tool-call format (`server::tool_calls::formats::try_gemma4`); `<|channel>`
+/// / `<channel|>` frame the reasoning channel
+/// (`server::thinking_budget::resolve_thinking_token_ids`,
+/// `server::chat_template`). All five ship together in the DiffusionGemma
+/// `tokenizer.json` as `special: true` added tokens (issue #778).
+const DIFFUSION_GEMMA_TOOL_PARSER_MARKERS: [&str; 5] = [
+    "<|tool_call>",
+    "<tool_call|>",
+    "<|\"|>",
+    "<|channel>",
+    "<channel|>",
+];
+
+/// Demote the DiffusionGemma tool-parser markers from `special: true` to
+/// `special: false` inside a parsed `tokenizer.json` document, in place.
+///
+/// WHY this must happen before the tokenizer is deserialized, not after:
+/// `tokenizers::Tokenizer::decode(ids, skip_special_tokens=true)` strips any
+/// token the `AddedVocabulary` has recorded in its `special_tokens_set`. That
+/// set is insert-only: once a content string is registered special, nothing
+/// in the crate's public API (`add_tokens`, `add_special_tokens`, ...) ever
+/// removes it, because `add_tokens` only ever *inserts* into
+/// `special_tokens_set` and re-adding the same content with `special: false`
+/// is a no-op for that set. `AddedVocabulary`'s `Deserialize` path rebuilds
+/// the vocabulary from scratch by replaying `add_tokens` over each
+/// `added_tokens` entry's own `special` field, so the only reliable point to
+/// flip the flag is in the raw JSON, before that rebuild runs.
+///
+/// Demoted tokens remain ordinary added tokens (still `special: false`, not
+/// removed), so they still encode atomically and never split across the BPE
+/// encoder; they just stop being skipped by `decode(...,
+/// skip_special_tokens=true)`, so `server::tool_calls::parser::parse_tool_calls`
+/// can see them in generated text.
+///
+/// Only markers that are both present and currently special are touched, so
+/// a future checkpoint that ships a subset of the five (or none) is handled
+/// without error. Returns the list of marker strings that were demoted; an
+/// empty result means the document was left untouched.
+fn demote_tool_parser_markers(tokenizer_json: &mut serde_json::Value) -> Vec<String> {
+    let mut demoted = Vec::new();
+    let Some(added_tokens) = tokenizer_json
+        .get_mut("added_tokens")
+        .and_then(|v| v.as_array_mut())
+    else {
+        return demoted;
+    };
+
+    for entry in added_tokens.iter_mut() {
+        let Some(obj) = entry.as_object_mut() else {
+            continue;
+        };
+        let is_marker = obj
+            .get("content")
+            .and_then(|v| v.as_str())
+            .is_some_and(|content| DIFFUSION_GEMMA_TOOL_PARSER_MARKERS.contains(&content));
+        if !is_marker {
+            continue;
+        }
+        if obj.get("special").and_then(|v| v.as_bool()) != Some(true) {
+            continue;
+        }
+        obj.insert("special".to_string(), serde_json::Value::Bool(false));
+        if let Some(content) = obj.get("content").and_then(|v| v.as_str()) {
+            demoted.push(content.to_string());
+        }
+    }
+
+    demoted
+}
+
+/// Build the HuggingFace tokenizer for a DiffusionGemma checkpoint, demoting
+/// the tool-parser markers (see [`demote_tool_parser_markers`]) before the
+/// `tokenizers::Tokenizer` is deserialized from the patched JSON bytes.
+fn build_diffusion_gemma_tokenizer(tokenizer_json_path: &Path) -> Result<tokenizers::Tokenizer> {
+    let raw = std::fs::read_to_string(tokenizer_json_path)
+        .map_err(|e| anyhow::anyhow!("Failed to read {:?}: {}", tokenizer_json_path, e))?;
+    let mut json: serde_json::Value = serde_json::from_str(&raw)
+        .map_err(|e| anyhow::anyhow!("Failed to parse {:?}: {}", tokenizer_json_path, e))?;
+
+    let demoted = demote_tool_parser_markers(&mut json);
+    if !demoted.is_empty() {
+        tracing::info!(
+            tokenizer_json = %tokenizer_json_path.display(),
+            markers = ?demoted,
+            "demoted DiffusionGemma tool-parser markers from special to non-special \
+             added tokens so skip-special decode retains them (issue #778)"
+        );
+    }
+
+    let bytes = serde_json::to_vec(&json)
+        .map_err(|e| anyhow::anyhow!("Failed to re-serialize {:?}: {}", tokenizer_json_path, e))?;
+    tokenizers::Tokenizer::from_bytes(bytes).map_err(|e| anyhow::anyhow!(e))
+}
+
+/// `true` when `config.json`'s `model_type` identifies a DiffusionGemma
+/// checkpoint (text-only exports use `diffusion_gemma_text`; matches the
+/// detection table in `crate::models::detection`).
+fn is_diffusion_gemma_model(model_path: &Path) -> bool {
+    matches!(
+        read_config_model_type(model_path).as_deref(),
+        Some("diffusion_gemma") | Some("diffusion_gemma_text")
+    )
+}
+
 pub fn load_tokenizer(model_path: &Path) -> Result<MlxcelTokenizer> {
     // Model-specific override: some official checkpoints ship a stale
     // tokenizer.json that does not match their weights (starmie-era
@@ -906,8 +1014,12 @@ pub fn load_tokenizer(model_path: &Path) -> Result<MlxcelTokenizer> {
     // Try HuggingFace tokenizer.json first
     let tokenizer_json_path = model_path.join("tokenizer.json");
     if tokenizer_json_path.exists() {
-        let mut tokenizer = tokenizers::Tokenizer::from_file(tokenizer_json_path)
-            .map_err(|e| anyhow::anyhow!(e))?;
+        let mut tokenizer = if is_diffusion_gemma_model(model_path) {
+            build_diffusion_gemma_tokenizer(&tokenizer_json_path)?
+        } else {
+            tokenizers::Tokenizer::from_file(&tokenizer_json_path)
+                .map_err(|e| anyhow::anyhow!(e))?
+        };
         ensure_bos_post_processor(&mut tokenizer, model_path);
         return Ok(MlxcelTokenizer::HuggingFace(tokenizer));
     }
@@ -1371,6 +1483,347 @@ mod tests {
         // rfind variant returns the same index when there is exactly one
         // occurrence.
         assert_eq!(markers.rfind_think_end(&body, None, None), Some(close_idx));
+    }
+
+    // ------------------------------------------------------------------
+    // DiffusionGemma tool-parser marker demotion (issue #778)
+    //
+    // Premise confirmed against the real checkpoint
+    // (models/diffusiongemma-26b-a4b-it-4bit/tokenizer.json): all five
+    // markers ship as `special: true` added tokens (`<|tool_call>` id 48,
+    // `<tool_call|>` id 49, `<|"|>` id 52, `<|channel>` id 100, `<channel|>`
+    // id 101), and tokenizer_config.json's `added_tokens_decoder` is empty,
+    // so this checkpoint loads through the HuggingFace `tokenizer.json` arm
+    // of `load_tokenizer`, not the SentencePiece path.
+    // ------------------------------------------------------------------
+
+    use super::{
+        DIFFUSION_GEMMA_TOOL_PARSER_MARKERS, demote_tool_parser_markers, is_diffusion_gemma_model,
+    };
+
+    /// Build a synthetic tokenizer.json shaped like the real DiffusionGemma
+    /// checkpoint: the five tool-parser/channel markers as `special: true`
+    /// added tokens, plus a handful of plain (non-special) added tokens that
+    /// stand in for the literal text a Gemma4-style tool call carries between
+    /// the markers. No BPE vocab/merges are needed because every byte of the
+    /// test strings is covered by an added token.
+    fn diffusion_gemma_style_tokenizer_json() -> String {
+        serde_json::json!({
+            "version": "1.0",
+            "truncation": null,
+            "padding": null,
+            "added_tokens": [
+                {"id": 0, "content": "<|tool_call>", "single_word": false, "lstrip": false, "rstrip": false, "normalized": false, "special": true},
+                {"id": 1, "content": "<tool_call|>", "single_word": false, "lstrip": false, "rstrip": false, "normalized": false, "special": true},
+                {"id": 2, "content": "<|\"|>", "single_word": false, "lstrip": false, "rstrip": false, "normalized": false, "special": true},
+                {"id": 3, "content": "<|channel>", "single_word": false, "lstrip": false, "rstrip": false, "normalized": false, "special": true},
+                {"id": 4, "content": "<channel|>", "single_word": false, "lstrip": false, "rstrip": false, "normalized": false, "special": true},
+                {"id": 5, "content": "call:get_weather{location:", "single_word": false, "lstrip": false, "rstrip": false, "normalized": false, "special": false},
+                {"id": 6, "content": "Tokyo", "single_word": false, "lstrip": false, "rstrip": false, "normalized": false, "special": false},
+                {"id": 7, "content": "}", "single_word": false, "lstrip": false, "rstrip": false, "normalized": false, "special": false},
+                {"id": 8, "content": "thought reasoning here", "single_word": false, "lstrip": false, "rstrip": false, "normalized": false, "special": false},
+                {"id": 9, "content": "The weather is sunny.", "single_word": false, "lstrip": false, "rstrip": false, "normalized": false, "special": false}
+            ],
+            "normalizer": null,
+            "pre_tokenizer": null,
+            "post_processor": null,
+            // `Fuse` concatenates decoded token strings with no separator.
+            // Without an explicit decoder, the crate's BPE default inserts a
+            // space between adjacent tokens, which would make the literal
+            // string comparisons below fail for reasons unrelated to the
+            // demotion behavior under test.
+            "decoder": {"type": "Fuse"},
+            "model": {
+                "type": "BPE",
+                "dropout": null,
+                "unk_token": null,
+                "continuing_subword_prefix": null,
+                "end_of_word_suffix": null,
+                "fuse_unk": false,
+                "byte_fallback": false,
+                "vocab": {},
+                "merges": []
+            }
+        })
+        .to_string()
+    }
+
+    /// A synthetic Gemma4-style tool-call completion built entirely from the
+    /// added tokens in [`diffusion_gemma_style_tokenizer_json`]; mirrors the
+    /// literal string used by `server::tool_calls::parser`'s
+    /// `parse_gemma4_format` test.
+    const SYNTHETIC_GEMMA4_TOOL_CALL: &str =
+        "<|tool_call>call:get_weather{location:<|\"|>Tokyo<|\"|>}<tool_call|>";
+
+    #[test]
+    fn demote_tool_parser_markers_flips_special_flag_for_present_markers() {
+        let mut json: serde_json::Value =
+            serde_json::from_str(&diffusion_gemma_style_tokenizer_json()).unwrap();
+        let demoted = demote_tool_parser_markers(&mut json);
+
+        // All five markers were present and special, so all five come back.
+        let mut demoted_sorted = demoted.clone();
+        demoted_sorted.sort();
+        let mut expected: Vec<String> = DIFFUSION_GEMMA_TOOL_PARSER_MARKERS
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        expected.sort();
+        assert_eq!(demoted_sorted, expected);
+
+        // The JSON document itself must now carry special: false for each.
+        let added_tokens = json["added_tokens"].as_array().unwrap();
+        for entry in added_tokens {
+            let content = entry["content"].as_str().unwrap();
+            if DIFFUSION_GEMMA_TOOL_PARSER_MARKERS.contains(&content) {
+                assert_eq!(
+                    entry["special"].as_bool(),
+                    Some(false),
+                    "{content} must be demoted to special:false"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn demote_tool_parser_markers_is_a_noop_when_absent() {
+        let mut json = serde_json::json!({
+            "added_tokens": [
+                {"id": 0, "content": "<think>", "single_word": false, "lstrip": false, "rstrip": false, "normalized": false, "special": true}
+            ]
+        });
+        let demoted = demote_tool_parser_markers(&mut json);
+        assert!(demoted.is_empty());
+        // Untouched: the unrelated special token keeps its flag.
+        assert_eq!(json["added_tokens"][0]["special"].as_bool(), Some(true));
+    }
+
+    #[test]
+    fn demote_tool_parser_markers_skips_already_non_special_markers() {
+        // A marker that ships special:false already must not be reported as
+        // newly demoted (nothing changed).
+        let mut json = serde_json::json!({
+            "added_tokens": [
+                {"id": 0, "content": "<|tool_call>", "single_word": false, "lstrip": false, "rstrip": false, "normalized": false, "special": false}
+            ]
+        });
+        let demoted = demote_tool_parser_markers(&mut json);
+        assert!(demoted.is_empty());
+    }
+
+    #[test]
+    fn is_diffusion_gemma_model_matches_both_config_variants() {
+        let dir = override_test_dir(&[("config.json", r#"{"model_type":"diffusion_gemma"}"#)]);
+        assert!(is_diffusion_gemma_model(&dir));
+        let _ = std::fs::remove_dir_all(dir);
+
+        let dir_text =
+            override_test_dir(&[("config.json", r#"{"model_type":"diffusion_gemma_text"}"#)]);
+        assert!(is_diffusion_gemma_model(&dir_text));
+        let _ = std::fs::remove_dir_all(dir_text);
+
+        let dir_other = override_test_dir(&[("config.json", r#"{"model_type":"gemma3"}"#)]);
+        assert!(!is_diffusion_gemma_model(&dir_other));
+        let _ = std::fs::remove_dir_all(dir_other);
+    }
+
+    #[test]
+    fn diffusion_gemma_tokenizer_survives_skip_special_decode_round_trip() {
+        // Build the tokenizer the same way `build_diffusion_gemma_tokenizer`
+        // does: demote before deserializing, never mutate an already-loaded
+        // Tokenizer (see the doc comment on `demote_tool_parser_markers` for
+        // why post-load `add_tokens` cannot flip the special flag).
+        let mut json: serde_json::Value =
+            serde_json::from_str(&diffusion_gemma_style_tokenizer_json()).unwrap();
+        let demoted = demote_tool_parser_markers(&mut json);
+        assert_eq!(demoted.len(), 5);
+        let bytes = serde_json::to_vec(&json).unwrap();
+        let demoted_tokenizer = Tokenizer::from_bytes(bytes).unwrap();
+
+        let ids = demoted_tokenizer
+            .encode(SYNTHETIC_GEMMA4_TOOL_CALL, false)
+            .unwrap()
+            .get_ids()
+            .to_vec();
+
+        // Every marker is still a single atomic id (encode never splits it
+        // across the BPE encoder): the id list length must equal the number
+        // of added-token pieces the literal string decomposes into.
+        assert_eq!(ids.len(), 7, "unexpected token count for {ids:?}");
+
+        // The regression this issue fixes: with skip_special_tokens=true the
+        // decoded text must retain the markers (compare to the plain decode
+        // to make sure nothing else changed).
+        let decoded_plain = demoted_tokenizer.decode(&ids, false).unwrap();
+        let decoded_skip_special = demoted_tokenizer.decode(&ids, true).unwrap();
+        assert_eq!(decoded_plain, SYNTHETIC_GEMMA4_TOOL_CALL);
+        assert_eq!(
+            decoded_skip_special, SYNTHETIC_GEMMA4_TOOL_CALL,
+            "demoted markers must survive skip_special_tokens=true decode"
+        );
+
+        // Sanity control: build the SAME tokenizer WITHOUT demotion and
+        // confirm skip_special_tokens=true strips the markers there, so the
+        // test would actually fail without the fix (i.e. it is not
+        // vacuously true because skip_special_tokens never strips anything
+        // in this crate version).
+        let undemoted_json: serde_json::Value =
+            serde_json::from_str(&diffusion_gemma_style_tokenizer_json()).unwrap();
+        let undemoted_tokenizer =
+            Tokenizer::from_bytes(serde_json::to_vec(&undemoted_json).unwrap()).unwrap();
+        let undemoted_stripped = undemoted_tokenizer.decode(&ids, true).unwrap();
+        assert_ne!(
+            undemoted_stripped, SYNTHETIC_GEMMA4_TOOL_CALL,
+            "control: an un-demoted tokenizer must still strip the special markers"
+        );
+        assert!(
+            !undemoted_stripped.contains("<|tool_call>"),
+            "control tokenizer unexpectedly retained a marker: {undemoted_stripped:?}"
+        );
+    }
+
+    #[test]
+    fn diffusion_gemma_tool_call_output_parses_after_demotion() {
+        // The decoded text a demoted tokenizer now produces must still parse
+        // as a Gemma4-format tool call (mirrors
+        // `server::tool_calls::parser::tests::parse_gemma4_format`, whose
+        // literal input is reused as `SYNTHETIC_GEMMA4_TOOL_CALL`).
+        use crate::server::tool_calls::{ToolCallFormat, parse_tool_calls};
+        use crate::server::types::request::{FunctionDefinition, Tool};
+
+        let tools = vec![Tool {
+            tool_type: "function".to_string(),
+            function: FunctionDefinition {
+                name: "get_weather".to_string(),
+                description: None,
+                parameters: None,
+            },
+        }];
+
+        let result = parse_tool_calls(SYNTHETIC_GEMMA4_TOOL_CALL, Some(&tools));
+        assert!(result.has_tool_calls());
+        assert_eq!(result.tool_calls.len(), 1);
+        assert_eq!(result.tool_calls[0].name, "get_weather");
+        let args: serde_json::Value =
+            serde_json::from_str(&result.tool_calls[0].arguments).unwrap();
+        assert_eq!(args["location"], "Tokyo");
+        assert_eq!(result.format, Some(ToolCallFormat::Gemma4));
+    }
+
+    #[test]
+    fn diffusion_gemma_thinking_channel_survives_demotion() {
+        // `infer_thinking_markers` resolves markers by `token_to_id` lookup,
+        // never by the special flag, so demotion must not disturb it. Build
+        // the demoted tokenizer exactly as `build_diffusion_gemma_tokenizer`
+        // does and confirm the channel pair is still recognized.
+        let mut json: serde_json::Value =
+            serde_json::from_str(&diffusion_gemma_style_tokenizer_json()).unwrap();
+        demote_tool_parser_markers(&mut json);
+        let tokenizer = Tokenizer::from_bytes(serde_json::to_vec(&json).unwrap()).unwrap();
+        let tok = MlxcelTokenizer::HuggingFace(tokenizer);
+
+        let markers = tok.infer_thinking_markers();
+        assert!(markers.has_thinking());
+        assert_eq!(markers.think_start.as_deref(), Some("<|channel>thought"));
+        assert_eq!(markers.think_end.as_deref(), Some("<channel|>"));
+
+        // Text-based extraction (the server-side reasoning/tool-call parser)
+        // must also still strip the reasoning block from decoded text now
+        // that the channel markers are non-special: a demoted tokenizer's
+        // decode(..., skip_special_tokens=true) keeps the markers in the
+        // string, and `parse_tool_calls`'s internal `strip_thinking` pass
+        // removes the whole `<|channel>...<channel|>` span by literal text
+        // match (it never looked at the special flag either).
+        let hf = tok.hf_tokenizer().unwrap();
+        let full_text = "<|channel>thought reasoning here<channel|>The weather is sunny.";
+        let ids = hf.encode(full_text, false).unwrap().get_ids().to_vec();
+        let decoded = hf.decode(&ids, true).unwrap();
+        assert_eq!(
+            decoded, full_text,
+            "demoted channel markers must survive skip_special_tokens=true decode"
+        );
+
+        let result = crate::server::tool_calls::parse_tool_calls(&decoded, None);
+        assert!(!result.has_tool_calls());
+        assert_eq!(result.content, "The weather is sunny.");
+    }
+
+    #[test]
+    fn load_tokenizer_demotes_markers_only_for_diffusion_gemma_model_type() {
+        // End-to-end through the real `load_tokenizer` entry point: a
+        // diffusion_gemma config.json triggers demotion, so skip-special
+        // decode retains the markers.
+        let dg_dir = override_test_dir(&[
+            ("config.json", r#"{"model_type":"diffusion_gemma"}"#),
+            ("tokenizer.json", &diffusion_gemma_style_tokenizer_json()),
+        ]);
+        let dg_tokenizer = super::load_tokenizer(&dg_dir).expect("load diffusion_gemma tokenizer");
+        let ids = dg_tokenizer
+            .encode(SYNTHETIC_GEMMA4_TOOL_CALL, false)
+            .expect("encode");
+        let decoded = dg_tokenizer.decode(&ids, true).expect("decode");
+        assert_eq!(
+            decoded, SYNTHETIC_GEMMA4_TOOL_CALL,
+            "diffusion_gemma load_tokenizer must demote the markers"
+        );
+        let _ = std::fs::remove_dir_all(dg_dir);
+
+        // Same tokenizer.json, but a non-diffusion_gemma model_type: the
+        // markers must be left exactly as the checkpoint shipped them
+        // (still special, still stripped by skip_special_tokens=true).
+        let other_dir = override_test_dir(&[
+            ("config.json", r#"{"model_type":"gemma3"}"#),
+            ("tokenizer.json", &diffusion_gemma_style_tokenizer_json()),
+        ]);
+        let other_tokenizer = super::load_tokenizer(&other_dir).expect("load other tokenizer");
+        let other_ids = other_tokenizer
+            .encode(SYNTHETIC_GEMMA4_TOOL_CALL, false)
+            .expect("encode");
+        let other_decoded = other_tokenizer.decode(&other_ids, true).expect("decode");
+        assert_ne!(
+            other_decoded, SYNTHETIC_GEMMA4_TOOL_CALL,
+            "a non-diffusion_gemma model must be unaffected by the demotion gate"
+        );
+        assert!(
+            !other_decoded.contains("<|tool_call>"),
+            "non-diffusion_gemma model unexpectedly retained a marker: {other_decoded:?}"
+        );
+        let _ = std::fs::remove_dir_all(other_dir);
+    }
+
+    #[test]
+    fn real_diffusion_gemma_checkpoint_demotes_and_retains_markers() {
+        // Exercises the production `load_tokenizer` path against the actual
+        // published checkpoint's tokenizer.json (not the synthetic JSON
+        // above), confirming the premise (all five markers ship
+        // `special: true`) and the fix (they now survive skip-special
+        // decode). Skips gracefully when the checkpoint is absent, matching
+        // the PLaMo integration tests below.
+        let model_dir = std::path::Path::new("models/diffusiongemma-26b-a4b-it-4bit");
+        if !model_dir.exists() {
+            eprintln!(
+                "skipping real_diffusion_gemma_checkpoint_demotes_and_retains_markers: \
+                 {model_dir:?} is absent"
+            );
+            return;
+        }
+
+        let tok = super::load_tokenizer(model_dir).expect("load DiffusionGemma tokenizer");
+        let hf = tok
+            .hf_tokenizer()
+            .expect("DiffusionGemma loads via the HF tokenizer.json arm");
+
+        for marker in DIFFUSION_GEMMA_TOOL_PARSER_MARKERS {
+            let id = hf
+                .token_to_id(marker)
+                .unwrap_or_else(|| panic!("real checkpoint is missing marker {marker:?}"));
+            let decoded = hf.decode(&[id], true).expect("decode");
+            assert_eq!(
+                decoded, marker,
+                "marker {marker:?} (id {id}) must survive skip_special_tokens=true decode \
+                 on the real checkpoint"
+            );
+        }
     }
 
     // -- Real PLaMo tokenizer integration ---------------------------------
