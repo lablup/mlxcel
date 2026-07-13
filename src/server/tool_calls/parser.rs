@@ -729,6 +729,30 @@ mod tests {
     }
 
     #[test]
+    fn parse_pythonic_does_not_steal_json_tool_call() {
+        // Regression guard: `try_pythonic` runs before the JSON parsers and its
+        // call regex `\[(\w+)\(...\)\]` scans anywhere, so a valid JSON tool
+        // call whose string argument merely CONTAINS a `[word(...)]` substring
+        // must not be re-routed to the bracketed inner name. Here the real call
+        // is `search`, and `calc` (which appears inside the query string) is
+        // also a registered tool, so the parser must still return `search`.
+        let output = r#"{"name": "search", "arguments": {"query": "[calc(x=1)]"}}"#;
+        let tools = vec![make_tool("search"), make_tool("calc")];
+        let result = parse_tool_calls(output, Some(&tools));
+        assert!(result.has_tool_calls());
+        assert_eq!(result.tool_calls.len(), 1);
+        assert_eq!(
+            result.tool_calls[0].name, "search",
+            "a JSON `search` call must not be mis-parsed as the bracketed `calc`"
+        );
+        assert_ne!(
+            result.format,
+            Some(crate::server::tool_calls::ToolCallFormat::Pythonic),
+            "a JSON tool call must be claimed by a JSON parser, not the pythonic one"
+        );
+    }
+
+    #[test]
     fn parse_tool_calls_empty_after_strip_returns_empty_content() {
         // Previously we fell back to `raw_output` when stripping emptied the
         // text, which leaked the scratchpad back into the visible response.

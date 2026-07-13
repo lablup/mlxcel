@@ -1532,7 +1532,20 @@ fn is_ident_byte(b: u8) -> bool {
 /// inside a plain (non-bracketed) unquoted value, are not supported —
 /// matching the format's real usage rather than building a full expression
 /// parser. A single level of `[...]` list literal in a value IS supported.
+///
+/// Declines any input whose whole (trimmed) body is valid JSON. A genuine
+/// pythonic call (`[func(arg=value)]`, bare or marker-wrapped) is never itself
+/// valid JSON, whereas a JSON-format tool call IS, and its string arguments
+/// may merely CONTAIN a `[word(...)]` substring (e.g. a `search` call whose
+/// query is `"[calc(x=1)]"`). Because this parser runs before `try_llama3` /
+/// `try_generic_json` and its regex scans anywhere, without this guard such a
+/// JSON call would be mis-routed to the bracketed inner name. Declining lets
+/// the JSON parsers that run next own it.
 pub fn try_pythonic(text: &str) -> Option<ToolCallParseResult> {
+    if serde_json::from_str::<serde_json::Value>(text.trim()).is_ok() {
+        return None;
+    }
+
     let call_re = Regex::new(r"(?s)\[(\w+)\((.*?)\)\]").ok()?;
     let caps = call_re.captures(text).ok()??;
 
@@ -2736,5 +2749,21 @@ mod tests {
         let args: serde_json::Value =
             serde_json::from_str(&result.tool_calls[0].arguments).unwrap();
         assert_eq!(args["x"], 1);
+    }
+
+    #[test]
+    fn pythonic_declines_json_with_embedded_bracket_call() {
+        // A JSON tool call whose string argument merely contains a
+        // `[word(...)]` substring must be declined here so the downstream JSON
+        // parsers claim it, instead of the pythonic parser stealing the inner
+        // bracketed name. Both object and array JSON shapes are covered.
+        assert!(
+            try_pythonic(r#"{"name": "search", "arguments": {"query": "[calc(x=1)]"}}"#)
+                .is_none()
+        );
+        assert!(
+            try_pythonic(r#"[{"name": "search", "arguments": {"q": "[calc(x=1)]"}}]"#)
+                .is_none()
+        );
     }
 }
