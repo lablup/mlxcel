@@ -109,9 +109,17 @@ fn single_row_has_no_break() {
 
 #[test]
 fn placeholder_count_mismatch_returns_none() {
-    // Two placeholders but only one grid -> ambiguous, refuse.
+    // Two placeholders but only one grid -> ambiguous, refuse. This is the
+    // path a caller reaches by planting a literal [IMG] marker in the prompt;
+    // the runtime turns this None into a request error before any encoder or
+    // merge runs, so the prompt must be left UNEXPANDED (not partially mutated).
     let mut tokens = vec![1, IMG, IMG, 2];
+    let before = tokens.clone();
     assert!(insert_pixtral_image_tokens(&mut tokens, &[(2, 2)], IMG, BRK, END).is_none());
+    assert_eq!(
+        tokens, before,
+        "a rejected expansion must not mutate the prompt"
+    );
 }
 
 #[test]

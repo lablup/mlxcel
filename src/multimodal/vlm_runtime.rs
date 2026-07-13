@@ -1477,14 +1477,35 @@ where
             // image equals `tokens_h * tokens_w`, matching the feature count.
             let token_grids: Vec<(usize, usize)> =
                 per_image.iter().map(|p| (p.tokens_h, p.tokens_w)).collect();
-            let preparation = insert_pixtral_image_tokens(
+            let placeholder_count = prompt_tokens
+                .iter()
+                .filter(|&&t| t == layout.image_token_id)
+                .count();
+            // Expand before any encoder work. A `None` here means the `[IMG]`
+            // placeholder count matched neither the image count nor zero, which
+            // desyncs the prompt from the features. Proceeding would feed
+            // `merge_llava` an unexpanded prompt whose `[IMG]` positions no
+            // longer line up with the projected features, producing a wrong
+            // result and, for a tiny image whose grid is a single feature, an
+            // out-of-range scatter. Fail the request cleanly instead. A caller
+            // can provoke this by placing the literal `[IMG]` marker in the
+            // prompt text, so it is a request error, not an internal invariant.
+            let stats = insert_pixtral_image_tokens(
                 prompt_tokens,
                 &token_grids,
                 layout.image_token_id,
                 layout.image_break_token_id,
                 layout.image_end_token_id,
             )
-            .map(|stats| VlmPreparationSummary::Pixtral {
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Pixtral image-token expansion failed: the number of [IMG] placeholders \
+                     ({placeholder_count}) matches neither the image count ({}) nor zero. \
+                     Remove any literal [IMG] markers from the prompt text.",
+                    token_grids.len()
+                )
+            })?;
+            let preparation = Some(VlmPreparationSummary::Pixtral {
                 image_blocks: stats.image_blocks,
                 total_image_tokens: stats.total_image_tokens,
             });

@@ -108,6 +108,14 @@ fn build_pixtral_layout(
         .map(|v| v as usize)
         .unwrap_or(pixtral_config.image_size);
 
+    // The encoder's 2D-RoPE table is sized `image_size / patch_size` per side, so
+    // a resized image may never have more patches per side than that. Clamp the
+    // effective longest edge to `image_size` so a checkpoint whose `longest_edge`
+    // exceeds `image_size` cannot drive the patch grid past the RoPE table (which
+    // would wrap position ids or panic). The shipped checkpoints set the two
+    // equal, so this clamp is a no-op for them.
+    let longest_edge = longest_edge.min(pixtral_config.image_size);
+
     let processor =
         PixtralProcessor::new(pixtral_config.patch_size, spatial_merge_size, longest_edge);
     let (image_token_id, image_break_token_id, image_end_token_id) =
