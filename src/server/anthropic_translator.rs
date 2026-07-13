@@ -206,7 +206,7 @@ fn append_message(out: &mut Vec<Message>, message: &AnthropicMessage) {
                             && let Some(url) = source.to_image_ref()
                         {
                             image_parts.push(ContentPart::ImageUrl {
-                                image_url: ImageUrl { url },
+                                image_url: ImageUrl::new(url),
                             });
                         }
                     }
@@ -506,7 +506,7 @@ fn tool_result_message(
         }
         for url in images {
             parts.push(ContentPart::ImageUrl {
-                image_url: ImageUrl { url },
+                image_url: ImageUrl::new(url),
             });
         }
         MessageContent::Parts(parts)

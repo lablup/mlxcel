@@ -112,6 +112,95 @@ Audio/video capability is model-specific. The server request types include
 must advertise support for the corresponding modality. Video frame extraction
 uses the system `ffmpeg`/`ffprobe` binaries at runtime.
 
+### Gemma 4 image soft-token budget
+
+Gemma 4's vision front-end is resolution-driven: it works over whatever patch
+grid the preprocessor hands it, with no fixed feature length. The number of soft
+tokens an image contributes to the prompt therefore follows directly from the
+resize target, and the resize target follows from a soft-token budget. That
+budget is read from the checkpoint's config at load time (280 for every shipped
+Gemma 4 checkpoint) and can be overridden per request.
+
+This applies to both Gemma 4 architectures: `gemma4` (the ViT tower, e.g.
+`gemma-4-e2b-it`, `gemma-4-31b-it`) and `gemma4_unified` (the encoder-free patch
+projector, e.g. `gemma-4-12b-it`).
+
+A larger budget keeps more detail (denser patch grid, better small-text and
+fine-structure reading) at the cost of a longer prompt and more prefill work. A
+smaller budget is cheaper and faster. Supported values, shared with the video
+per-frame budget:
+
+| Budget | Meaning |
+|--------|---------|
+| 70 | Smallest. What `detail: "low"` maps to. |
+| 140 | |
+| 280 | Checkpoint default for the shipped Gemma 4 models. |
+| 560 | |
+| 1120 | Largest. What `detail: "high"` maps to. |
+
+Any other value is rejected with a 400. The budget is untrusted request input
+and it scales the resized image and its patch grid, so it is validated against
+this ladder rather than clamped: a silent clamp would leave the caller believing
+they got a budget they did not get. 1120 is also the hard ceiling for
+`gemma4_unified`, whose learned 2-D position table is exactly 1120 wide; a budget
+past it would index off the end of that table.
+
+#### Server
+
+Two optional fields on the `image_url` content part:
+
+```json
+{
+  "model": "gemma-4-12b-it-4bit",
+  "messages": [{
+    "role": "user",
+    "content": [
+      {"type": "text", "text": "Transcribe the small print."},
+      {"type": "image_url", "image_url": {
+        "url": "data:image/png;base64,...",
+        "detail": "high"
+      }}
+    ]
+  }]
+}
+```
+
+* `detail` is the OpenAI-standard field. `"low"` maps to 70, `"high"` maps to
+  1120, and `"auto"` (or an absent field) leaves the checkpoint's configured
+  budget in place. An unknown value is a 400, not a silent fallback to `"auto"`.
+* `max_soft_tokens` is an **mlxcel extension**, not part of the OpenAI spec. It
+  names an exact budget from the ladder above and takes precedence over `detail`
+  when both are present:
+
+  ```json
+  {"type": "image_url", "image_url": {"url": "...", "max_soft_tokens": 560}}
+  ```
+
+Both fields are optional and default to absent, so a request that sends only
+`url` behaves exactly as it did before these fields existed. The budget applies
+to the request as a whole; when a request carries several `image_url` parts they
+must agree on an explicit budget (parts that set neither field are free to
+coexist with parts that do). Every non-Gemma-4 model ignores both fields.
+
+Note that the budget is part of the vision-feature cache identity, so the same
+image requested at two budgets is encoded twice rather than served the wrong
+cached features.
+
+#### CLI
+
+`mlxcel generate --image-soft-tokens <N>` takes the same ladder and the same
+validation:
+
+```bash
+./target/release/mlxcel generate -m models/gemma-4-12b-it-4bit \
+  --image receipt.png --image-soft-tokens 1120 \
+  -p "What is the total?"
+```
+
+Omitting the flag uses the checkpoint's configured budget. The flag applies to
+`--image` inputs only; `--video` frames keep their own (smaller) per-frame
+budget.
+
 ### Thinking default for `gemma4_unified`
 
 Gemma 4 Unified (`gemma4_unified`) ships `<|channel>` / `<channel|>` thinking

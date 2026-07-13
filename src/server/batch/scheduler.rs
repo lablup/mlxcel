@@ -2653,6 +2653,7 @@ impl BatchScheduler {
                 &audio,
                 &videos,
                 Some(self.vision_caches.as_ref()),
+                options.image_soft_tokens,
             ) {
                 Ok(emb) => Some(emb),
                 Err(err) => {
@@ -2735,6 +2736,7 @@ impl BatchScheduler {
                 &audio,
                 &videos,
                 Some(self.vision_caches.as_ref()),
+                options.image_soft_tokens,
             ) {
                 Ok(emb) => emb,
                 Err(err) => {

@@ -52,9 +52,7 @@ fn build_chat_messages_flattens_text_parts() {
                 text: "Hello".to_string(),
             },
             ContentPart::ImageUrl {
-                image_url: ImageUrl {
-                    url: "data:image/png;base64,aGVsbG8=".to_string(),
-                },
+                image_url: ImageUrl::new("data:image/png;base64,aGVsbG8=".to_string()),
             },
             ContentPart::Text {
                 text: " world".to_string(),
@@ -81,9 +79,7 @@ async fn prepare_chat_request_uses_template_output_and_extracts_images() {
                 text: "Look".to_string(),
             },
             ContentPart::ImageUrl {
-                image_url: ImageUrl {
-                    url: "data:image/png;base64,aGVsbG8=".to_string(),
-                },
+                image_url: ImageUrl::new("data:image/png;base64,aGVsbG8=".to_string()),
             },
         ]),
         name: None,

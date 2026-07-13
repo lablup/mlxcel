@@ -153,6 +153,19 @@ pub struct ServerGenerateOptions {
     pub structured: Option<
         std::sync::Arc<std::sync::Mutex<crate::server::structured::StructuredOutputConstraint>>,
     >,
+
+    /// per-request Gemma 4 image soft-token budget.
+    ///
+    /// `None` means "no override": the Gemma 4 preprocessor uses the budget
+    /// read from the checkpoint's `processor_config.json` at load time, which
+    /// is the behavior for every request that does not set `detail` or
+    /// `max_soft_tokens` on an `image_url` content part.
+    ///
+    /// Resolved and validated in the route layer (see
+    /// [`crate::server::types::request::resolve_request_image_soft_tokens`]),
+    /// so by the time the scheduler sees this field it is already known to be
+    /// on the supported ladder. Ignored by every non-Gemma-4 model.
+    pub image_soft_tokens: Option<usize>,
 }
 
 /// Per-request reasoning-budget override.

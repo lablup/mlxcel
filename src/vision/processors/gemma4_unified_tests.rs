@@ -214,3 +214,136 @@ fn audio_exact_multiple_all_valid() {
         assert!(m, "frame {f} should be valid");
     }
 }
+
+// ---------------------------------------------------------------------------
+// Per-request image soft-token budget override (issue #777)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn preprocess_with_budget_yields_strictly_increasing_soft_tokens() {
+    // Mirrors gemma-4-12b-it-4bit: model_patch_size 48, num_soft_tokens 280.
+    let processor = Gemma4UnifiedProcessor::new(48, 280, 480);
+    let image = solid_image(1400, 900, [200, 40, 40]);
+
+    let counts: Vec<usize> = [70usize, 280, 1120]
+        .iter()
+        .map(|&budget| {
+            let out = processor.preprocess_with_budget(std::slice::from_ref(&image), Some(budget));
+            out[0].num_soft_tokens
+        })
+        .collect();
+
+    assert!(
+        counts[0] < counts[1] && counts[1] < counts[2],
+        "soft-token counts must strictly increase with the budget, got {counts:?}"
+    );
+    for (&budget, &count) in [70usize, 280, 1120].iter().zip(counts.iter()) {
+        assert!(
+            count <= budget,
+            "budget {budget} produced {count} soft tokens"
+        );
+    }
+}
+
+#[test]
+fn budget_padded_rows_match_the_budget_while_real_count_is_the_patch_count() {
+    // The unified path pads `patches`/`positions` up to the budget while
+    // `num_soft_tokens` carries the REAL patch count. The prompt's placeholder
+    // expansion is driven by the latter, so the two must not be conflated.
+    let processor = Gemma4UnifiedProcessor::new(48, 280, 480);
+    let image = solid_image(1400, 900, [10, 200, 10]);
+
+    for budget in [70usize, 280, 1120] {
+        let out = processor.preprocess_with_budget(std::slice::from_ref(&image), Some(budget));
+        let shape = mlxcel_core::array_shape(out[0].patches.as_ref().unwrap());
+        assert_eq!(
+            shape[0] as usize, budget,
+            "patch rows are padded up to the budget"
+        );
+        assert!(
+            out[0].num_soft_tokens <= budget,
+            "the real patch count never exceeds the budget"
+        );
+    }
+}
+
+#[test]
+fn grid_positions_stay_inside_the_learned_position_table_at_max_budget() {
+    // The learned 2-D position table is `mm_posemb_size` (1120) wide and is
+    // indexed by the raw (x, y) grid coordinate. An index at or past the table
+    // would wrap under MLX `take` semantics and silently produce garbage, so
+    // the top of the ladder must stay strictly inside it. This is the invariant
+    // that makes 1120 the highest safe budget.
+    const MM_POSEMB_SIZE: i32 = 1120;
+    let processor = Gemma4UnifiedProcessor::new(48, 280, 480);
+
+    // Extreme aspect ratios push one axis as far as the resize will allow.
+    for image in [
+        solid_image(4000, 60, [1, 2, 3]),
+        solid_image(60, 4000, [3, 2, 1]),
+        solid_image(1400, 900, [9, 9, 9]),
+    ] {
+        let out = processor.preprocess_with_budget(std::slice::from_ref(&image), Some(1120));
+        let positions = out[0].positions.as_ref().unwrap();
+        let rows = mlxcel_core::array_shape(positions)[0];
+        let mut max_pos = -1i32;
+        for r in 0..rows {
+            for axis in 0..2 {
+                max_pos = max_pos.max(read_i32_at(positions, &[r, axis]));
+            }
+        }
+        assert!(
+            max_pos < MM_POSEMB_SIZE,
+            "grid position {max_pos} would index past the {MM_POSEMB_SIZE}-wide position table"
+        );
+    }
+}
+
+#[test]
+fn default_path_is_unchanged_by_the_override_plumbing() {
+    let processor = Gemma4UnifiedProcessor::new(48, 280, 480);
+    let images = vec![
+        solid_image(640, 480, [120, 120, 120]),
+        solid_image(333, 777, [40, 90, 10]),
+    ];
+
+    let default_out = processor.preprocess(&images);
+    let none_out = processor.preprocess_with_budget(&images, None);
+    let explicit_out = processor.preprocess_with_budget(&images, Some(280));
+
+    for i in 0..images.len() {
+        assert_eq!(default_out[i].num_soft_tokens, none_out[i].num_soft_tokens);
+        assert_eq!(
+            default_out[i].num_soft_tokens,
+            explicit_out[i].num_soft_tokens
+        );
+
+        let lhs = default_out[i].patches.as_ref().unwrap();
+        let rhs = none_out[i].patches.as_ref().unwrap();
+        mlxcel_core::eval(lhs);
+        mlxcel_core::eval(rhs);
+        assert_eq!(
+            mlxcel_core::array_to_raw_bytes(lhs),
+            mlxcel_core::array_to_raw_bytes(rhs),
+            "preprocess() must stay byte-identical to preprocess_with_budget(None)"
+        );
+    }
+}
+
+#[test]
+fn video_frame_budget_is_untouched_by_the_image_override() {
+    // `--image-soft-tokens` / `detail` must not leak into the per-frame video
+    // budget, which is a separate (smaller) dial.
+    let processor = Gemma4UnifiedProcessor::new(48, 280, 480);
+    let frames = vec![solid_image(640, 480, [5, 5, 5])];
+
+    let baseline = processor.preprocess_video_frames(&frames);
+    let after_image_override = {
+        let _ = processor.preprocess_with_budget(&frames, Some(1120));
+        processor.preprocess_video_frames(&frames)
+    };
+    assert_eq!(
+        baseline[0].num_soft_tokens,
+        after_image_override[0].num_soft_tokens
+    );
+}

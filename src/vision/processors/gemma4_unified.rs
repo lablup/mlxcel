@@ -98,11 +98,39 @@ impl Gemma4UnifiedProcessor {
         self.model_patch_size * self.model_patch_size * 3
     }
 
-    /// Preprocess a batch of images.
+    /// Preprocess a batch of images at the checkpoint's configured budget.
+    ///
+    /// Equivalent to [`Self::preprocess_with_budget`] with `None`.
     pub fn preprocess(&self, images: &[DynamicImage]) -> Vec<Gemma4UnifiedImageInput> {
+        self.preprocess_with_budget(images, None)
+    }
+
+    /// Preprocess a batch of images under an optional per-call soft-token
+    /// budget, shadowing [`Self::num_soft_tokens`] when present.
+    ///
+    /// The ladder this budget is validated against
+    /// ([`crate::vision::processors::gemma4::SUPPORTED_IMAGE_SOFT_TOKENS`])
+    /// tops out at 1120, and the checkpoint's learned 2-D position table is
+    /// `mm_posemb_size = 1120` wide, so the largest grid index a ladder budget
+    /// can produce (`resize_dims` hard-caps `grid_h * grid_w <= budget`, hence a
+    /// single-axis index of at most `budget - 1`) still lands inside the table.
+    /// A budget above the ladder would index past it, which is one more reason
+    /// off-ladder values are rejected rather than clamped.
+    ///
+    /// Callers must derive the prompt's placeholder expansion from the
+    /// `num_soft_tokens` on the returned inputs, not from the budget: the patch
+    /// rows are padded up to the budget while `num_soft_tokens` carries the
+    /// real patch count, and only the latter matches the rows the embedder
+    /// keeps.
+    pub fn preprocess_with_budget(
+        &self,
+        images: &[DynamicImage],
+        num_soft_tokens: Option<usize>,
+    ) -> Vec<Gemma4UnifiedImageInput> {
+        let cap = num_soft_tokens.unwrap_or(self.num_soft_tokens).max(1);
         images
             .iter()
-            .map(|image| self.preprocess_single(image))
+            .map(|image| self.patchify(image, cap))
             .collect()
     }
 
@@ -123,13 +151,9 @@ impl Gemma4UnifiedProcessor {
             .collect()
     }
 
-    fn preprocess_single(&self, image: &DynamicImage) -> Gemma4UnifiedImageInput {
-        self.patchify(image, self.num_soft_tokens)
-    }
-
     /// Patchify one image (or video frame) into flat patch vectors plus grid
     /// positions, capped and padded to `soft_token_cap` rows. Shared by the
-    /// image ([`Self::preprocess_single`]) and video
+    /// image ([`Self::preprocess_with_budget`]) and video
     /// ([`Self::preprocess_video_frames`]) paths so the patch loop lives in one
     /// place; only the soft-token budget differs.
     fn patchify(&self, image: &DynamicImage, soft_token_cap: usize) -> Gemma4UnifiedImageInput {

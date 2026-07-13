@@ -77,6 +77,16 @@ use super::types::request::Tool;
 pub(crate) struct PreparedChatRequest {
     pub(crate) prompt: String,
     pub(crate) image_data: Vec<Vec<u8>>,
+    /// Request-scoped Gemma 4 image soft-token budget, resolved from the
+    /// `detail` / `max_soft_tokens` fields on the `image_url` content parts
+    /// (see [`crate::server::types::request::ImageUrl`]).
+    ///
+    /// `None` means "no override" and leaves the checkpoint's configured
+    /// budget in place, which is the behavior for every request that does not
+    /// set either field. Validation happens here, at the request boundary, so
+    /// an unsupported value fails the whole request with a 400 before any
+    /// image is decoded.
+    pub(crate) image_soft_tokens: Option<usize>,
     pub(crate) audio_data: Vec<Vec<u8>>,
     /// Resolved video items (hardened).
     ///
@@ -208,6 +218,13 @@ pub(crate) async fn prepare_chat_request_with_cache(
             })
     };
 
+    // Validate the per-request soft-token budget before any image is fetched or
+    // decoded: an unsupported `detail` / `max_soft_tokens` is a client error, so
+    // there is no reason to spend a download or a decode on it first.
+    let image_soft_tokens = request
+        .image_soft_tokens()
+        .map_err(|err| anyhow::anyhow!("{err}"))?;
+
     let (image_data, audio_data, videos) = tokio::join!(
         try_extract_chat_image_data(request),
         extract_chat_audio_data(request),
@@ -217,6 +234,7 @@ pub(crate) async fn prepare_chat_request_with_cache(
     Ok(PreparedChatRequest {
         prompt,
         image_data: image_data?,
+        image_soft_tokens,
         audio_data,
         videos,
     })

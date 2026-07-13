@@ -357,3 +357,173 @@ fn process_videos_pixel_values_match_input_color() {
         "channel 2 (B) mean after de-norm: {mean_b_8bit:.1} != expected {TARGET_B} (±{TOLERANCE})"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Per-request image soft-token budget override (issue #777)
+// ---------------------------------------------------------------------------
+
+/// Emulate the placeholder expansion the runtime performs, so the tests can
+/// assert the prompt's image-token run and the emitted feature rows agree.
+///
+/// Mirrors `vlm_runtime::expand_gemma4_image_tokens`: each image becomes
+/// `<boi>` + `image_token * num_soft_tokens` + `<eoi>`.
+fn expanded_placeholder_count(inputs: &[Gemma4ImageInput], image_token_id: i32) -> usize {
+    const BOI: i32 = -1;
+    const EOI: i32 = -2;
+    let mut expanded: Vec<i32> = Vec::new();
+    for input in inputs {
+        expanded.push(BOI);
+        expanded.extend(std::iter::repeat_n(image_token_id, input.num_soft_tokens));
+        expanded.push(EOI);
+    }
+    expanded.iter().filter(|&&t| t == image_token_id).count()
+}
+
+/// The soft-token count the vision tower will actually emit for an image is
+/// `patch_h * patch_w / pooling_kernel_size^2`. Recompute it straight from the
+/// patch grid so the test does not just re-read the field it is validating.
+fn soft_tokens_from_patch_grid(input: &Gemma4ImageInput, pooling_kernel_size: usize) -> usize {
+    let (patch_h, patch_w) = input.patch_grid;
+    (patch_h * patch_w) / pooling_kernel_size.pow(2)
+}
+
+#[test]
+fn image_soft_token_budget_ladder_is_shared_with_video() {
+    assert_eq!(SUPPORTED_IMAGE_SOFT_TOKENS, SUPPORTED_VIDEO_SOFT_TOKENS);
+    assert_eq!(SUPPORTED_IMAGE_SOFT_TOKENS, &[70, 140, 280, 560, 1120]);
+}
+
+#[test]
+fn preprocess_with_budget_yields_strictly_increasing_soft_tokens() {
+    // Matches every shipped gemma4 checkpoint: patch 16, pooling 3, default 280.
+    let processor = Gemma4Processor::new(16, 280, 3);
+    let image = synthetic_rgb(640, 480, 120);
+
+    let counts: Vec<usize> = [70usize, 280, 1120]
+        .iter()
+        .map(|&budget| {
+            let out = processor.preprocess_with_budget(std::slice::from_ref(&image), Some(budget));
+            assert_eq!(out.len(), 1);
+            out[0].num_soft_tokens
+        })
+        .collect();
+
+    assert!(
+        counts[0] < counts[1] && counts[1] < counts[2],
+        "soft-token counts must strictly increase with the budget, got {counts:?}"
+    );
+    // Each budget is an upper bound, never exceeded.
+    for (&budget, &count) in [70usize, 280, 1120].iter().zip(counts.iter()) {
+        assert!(
+            count <= budget,
+            "budget {budget} produced {count} soft tokens, which exceeds the budget"
+        );
+    }
+}
+
+#[test]
+fn placeholder_expansion_matches_feature_count_at_every_budget() {
+    const IMAGE_TOKEN_ID: i32 = 258_880;
+    let processor = Gemma4Processor::new(16, 280, 3);
+    let image = synthetic_rgb(800, 600, 90);
+
+    for budget in [70usize, 280, 1120] {
+        let processed =
+            processor.preprocess_with_budget(std::slice::from_ref(&image), Some(budget));
+
+        // What the vision tower will emit, derived from the patch grid.
+        let emitted: usize = processed
+            .iter()
+            .map(|input| soft_tokens_from_patch_grid(input, processor.pooling_kernel_size))
+            .sum();
+        // What the prompt will reserve.
+        let placeholders = expanded_placeholder_count(&processed, IMAGE_TOKEN_ID);
+
+        assert_eq!(
+            placeholders, emitted,
+            "budget {budget}: prompt reserves {placeholders} image tokens but the tower emits \
+             {emitted} feature rows; the prompt would desync from the features"
+        );
+    }
+}
+
+#[test]
+fn placeholder_expansion_matches_feature_count_for_multiple_images() {
+    const IMAGE_TOKEN_ID: i32 = 258_880;
+    let processor = Gemma4Processor::new(16, 280, 3);
+    // Different aspect ratios so the per-image counts differ under one budget.
+    let images = vec![
+        synthetic_rgb(640, 480, 30),
+        synthetic_rgb(480, 640, 60),
+        synthetic_rgb(1024, 256, 90),
+    ];
+
+    for budget in [70usize, 560] {
+        let processed = processor.preprocess_with_budget(&images, Some(budget));
+        assert_eq!(processed.len(), 3);
+
+        let emitted: usize = processed
+            .iter()
+            .map(|input| soft_tokens_from_patch_grid(input, processor.pooling_kernel_size))
+            .sum();
+        let placeholders = expanded_placeholder_count(&processed, IMAGE_TOKEN_ID);
+        assert_eq!(placeholders, emitted, "budget {budget}: multi-image desync");
+    }
+}
+
+#[test]
+fn default_path_is_byte_identical_to_configured_budget() {
+    let processor = Gemma4Processor::new(16, 280, 3);
+    let images = vec![synthetic_rgb(640, 480, 120), synthetic_rgb(333, 777, 40)];
+
+    let default_out = processor.preprocess(&images);
+    let none_out = processor.preprocess_with_budget(&images, None);
+    // Explicitly asking for the checkpoint's configured budget must land on the
+    // same result as not asking at all.
+    let explicit_out = processor.preprocess_with_budget(&images, Some(280));
+
+    for i in 0..images.len() {
+        assert_eq!(default_out[i].patch_grid, none_out[i].patch_grid);
+        assert_eq!(
+            default_out[i].num_soft_tokens, none_out[i].num_soft_tokens,
+            "preprocess() and preprocess_with_budget(None) must agree"
+        );
+        assert_eq!(default_out[i].patch_grid, explicit_out[i].patch_grid);
+        assert_eq!(
+            default_out[i].num_soft_tokens,
+            explicit_out[i].num_soft_tokens
+        );
+
+        // Same pixel tensor shape, and byte-identical contents.
+        let lhs = default_out[i].pixel_values.as_ref().unwrap();
+        let rhs = none_out[i].pixel_values.as_ref().unwrap();
+        assert_eq!(mlxcel_core::array_shape(lhs), mlxcel_core::array_shape(rhs));
+        mlxcel_core::eval(lhs);
+        mlxcel_core::eval(rhs);
+        assert_eq!(
+            mlxcel_core::array_to_raw_bytes(lhs),
+            mlxcel_core::array_to_raw_bytes(rhs),
+            "default path must be byte-identical to the pre-override behavior"
+        );
+    }
+}
+
+#[test]
+fn validate_image_soft_tokens_accepts_every_ladder_rung() {
+    for &budget in SUPPORTED_IMAGE_SOFT_TOKENS {
+        assert_eq!(validate_image_soft_tokens(budget), Ok(budget));
+    }
+}
+
+#[test]
+fn validate_image_soft_tokens_rejects_off_ladder_values() {
+    // Zero, an unbounded value, and a plausible-looking near-miss.
+    for bad in [0usize, 1, 281, 2240, usize::MAX] {
+        let err = validate_image_soft_tokens(bad)
+            .expect_err("off-ladder budget must be rejected, not clamped");
+        assert!(
+            err.contains("must be one of"),
+            "error should name the supported values, got: {err}"
+        );
+    }
+}

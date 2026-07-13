@@ -42,9 +42,51 @@ pub const DEFAULT_VIDEO_NUM_FRAMES: usize = 32;
 /// `default_fps = 2.0`.
 pub const DEFAULT_VIDEO_FPS: f64 = 2.0;
 
+/// Allowed soft-token budgets accepted by Gemma 4 preprocessing. Mirrors
+/// upstream `_SUPPORTED_SOFT_TOKENS`.
+///
+/// Images and video frames intentionally share one ladder: the resize math is
+/// the same function of the budget in both paths
+/// ([`Gemma4Processor::aspect_ratio_preserving_resize_dims`] and
+/// [`Gemma4Processor::video_resize_dims`] differ only in which budget they
+/// read), and the vision tower is fully resolution-driven, so any budget that
+/// is valid for a frame is valid for a still image. Keeping one ladder means a
+/// per-request image override cannot land on a value the video path would
+/// reject.
+pub const SUPPORTED_SOFT_TOKENS: &[usize] = &[70, 140, 280, 560, 1120];
+
 /// Allowed per-frame soft-token budgets accepted by Gemma 4 video
-/// processing. Mirrors upstream `_SUPPORTED_SOFT_TOKENS`.
-pub const SUPPORTED_VIDEO_SOFT_TOKENS: &[usize] = &[70, 140, 280, 560, 1120];
+/// processing. Alias of [`SUPPORTED_SOFT_TOKENS`], kept under its original
+/// name because `set_video_config` and its callers already reference it.
+pub const SUPPORTED_VIDEO_SOFT_TOKENS: &[usize] = SUPPORTED_SOFT_TOKENS;
+
+/// Allowed per-image soft-token budgets accepted by a per-request override.
+/// Alias of [`SUPPORTED_SOFT_TOKENS`]; see that constant for why images and
+/// video share the ladder.
+pub const SUPPORTED_IMAGE_SOFT_TOKENS: &[usize] = SUPPORTED_SOFT_TOKENS;
+
+/// Validate an untrusted per-request image soft-token budget against
+/// [`SUPPORTED_IMAGE_SOFT_TOKENS`].
+///
+/// The budget arrives from the HTTP request body (or a CLI flag) and drives
+/// the resize target: the preprocessed image, its patch grid, and the number
+/// of soft tokens injected into the prompt all scale with it. An unbounded
+/// value is therefore a memory-amplification vector, so anything outside the
+/// ladder is rejected rather than clamped: a silent clamp would leave the
+/// caller believing they got a budget they did not get.
+///
+/// # Errors
+/// Returns `Err` with a message naming the supported values when
+/// `max_soft_tokens` is not on the ladder.
+pub fn validate_image_soft_tokens(max_soft_tokens: usize) -> Result<usize, String> {
+    if SUPPORTED_IMAGE_SOFT_TOKENS.contains(&max_soft_tokens) {
+        Ok(max_soft_tokens)
+    } else {
+        Err(format!(
+            "image max_soft_tokens must be one of {SUPPORTED_IMAGE_SOFT_TOKENS:?}, got {max_soft_tokens}"
+        ))
+    }
+}
 
 /// Preprocessed output for a single image (or a single video frame) ready
 /// for the Gemma 4 vision tower.
@@ -152,17 +194,53 @@ impl Gemma4Processor {
         Ok(())
     }
 
-    /// Preprocess a batch of static images.
+    /// Preprocess a batch of static images at the checkpoint's configured
+    /// soft-token budget.
     ///
     /// Each image is resized to the aspect-ratio-preserving target dimensions
     /// derived from [`Self::max_soft_tokens`], rescaled to `[0, 1]`, and
     /// packed into a `[1, 3, H, W]` channel-first tensor. Returns one
     /// [`Gemma4ImageInput`] per input image, in the same order.
+    ///
+    /// Equivalent to [`Self::preprocess_with_budget`] with `None`.
     pub fn preprocess(&self, images: &[DynamicImage]) -> Vec<Gemma4ImageInput> {
+        self.preprocess_with_budget(images, None)
+    }
+
+    /// Preprocess a batch of static images under an optional per-call
+    /// soft-token budget.
+    ///
+    /// `max_soft_tokens` shadows [`Self::max_soft_tokens`] for this call only;
+    /// `None` uses the checkpoint's configured budget and is byte-identical to
+    /// [`Self::preprocess`]. A larger budget resizes the image to a larger
+    /// target, which yields a denser patch grid and therefore more soft tokens.
+    ///
+    /// Callers **must** derive the prompt's placeholder expansion from the
+    /// `num_soft_tokens` on the returned [`Gemma4ImageInput`]s rather than from
+    /// any independently computed budget. The vision tower emits exactly
+    /// `num_soft_tokens` rows per image, so a placeholder count derived from a
+    /// different budget would desync the prompt from the features and the model
+    /// would attend to garbage.
+    ///
+    /// The budget is expected to already have passed
+    /// [`validate_image_soft_tokens`] at the request boundary. A zero budget is
+    /// floored to 1 so the resize math cannot divide the target area to nothing.
+    pub fn preprocess_with_budget(
+        &self,
+        images: &[DynamicImage],
+        max_soft_tokens: Option<usize>,
+    ) -> Vec<Gemma4ImageInput> {
         images
             .iter()
-            .map(|image| self.preprocess_single(image))
+            .map(|image| self.preprocess_single(image, max_soft_tokens))
             .collect()
+    }
+
+    /// Resolve the effective image soft-token budget for one call: the
+    /// per-call override when present, otherwise the checkpoint's configured
+    /// [`Self::max_soft_tokens`].
+    fn effective_image_soft_tokens(&self, max_soft_tokens: Option<usize>) -> usize {
+        max_soft_tokens.unwrap_or(self.max_soft_tokens).max(1)
     }
 
     /// Process one or more videos into Gemma 4 video features.
@@ -319,10 +397,17 @@ impl Gemma4Processor {
         (target_h, target_w)
     }
 
-    fn preprocess_single(&self, image: &DynamicImage) -> Gemma4ImageInput {
+    fn preprocess_single(
+        &self,
+        image: &DynamicImage,
+        max_soft_tokens: Option<usize>,
+    ) -> Gemma4ImageInput {
         let rgb = image.to_rgb8();
-        let (target_h, target_w) =
-            self.aspect_ratio_preserving_resize_dims(rgb.height() as usize, rgb.width() as usize);
+        let (target_h, target_w) = self.aspect_ratio_preserving_resize_dims(
+            rgb.height() as usize,
+            rgb.width() as usize,
+            max_soft_tokens,
+        );
 
         let resized = if rgb.height() as usize == target_h && rgb.width() as usize == target_w {
             rgb
@@ -358,12 +443,18 @@ impl Gemma4Processor {
         }
     }
 
+    /// Target `(height, width)` for one image under an optional per-call
+    /// soft-token budget. `max_soft_tokens = None` uses the checkpoint's
+    /// configured [`Self::max_soft_tokens`], which reproduces the pre-override
+    /// behavior exactly.
     fn aspect_ratio_preserving_resize_dims(
         &self,
         image_height: usize,
         image_width: usize,
+        max_soft_tokens: Option<usize>,
     ) -> (usize, usize) {
-        let max_patches = self.max_soft_tokens * self.pooling_kernel_size.pow(2);
+        let budget = self.effective_image_soft_tokens(max_soft_tokens);
+        let max_patches = budget * self.pooling_kernel_size.pow(2);
         let target_px = max_patches as f64 * (self.patch_size * self.patch_size) as f64;
         let factor = (target_px / ((image_height * image_width).max(1) as f64)).sqrt();
         let side_mult = self.pooling_kernel_size * self.patch_size;

@@ -330,6 +330,17 @@ pub(crate) struct GenerationOptions {
     #[arg(long, value_name = "PATH", num_args = 1..)]
     pub(crate) image: Vec<PathBuf>,
 
+    /// Soft-token budget per `--image` (Gemma 4 only).
+    ///
+    /// Controls how much detail the vision tower keeps: the image is resized to
+    /// fit this many soft tokens, so a larger budget means a denser patch grid
+    /// and a longer prompt. Must be one of 70, 140, 280, 560, or 1120. When
+    /// omitted, the budget configured in the checkpoint's
+    /// `processor_config.json` is used (280 for the shipped Gemma 4
+    /// checkpoints). Ignored by every other model family.
+    #[arg(long, value_name = "N")]
+    pub(crate) image_soft_tokens: Option<usize>,
+
     /// Audio file path for audio-language models (e.g. Gemma4 with audio)
     #[arg(long, value_name = "PATH")]
     pub(crate) audio: Option<PathBuf>,

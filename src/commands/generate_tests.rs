@@ -292,6 +292,7 @@ fn sample_generate_args(model_path: PathBuf) -> crate::GenerateArgs {
         generation: crate::GenerationOptions {
             prompt: Some("Hello".to_string()),
             image: Vec::new(),
+            image_soft_tokens: None,
             audio: None,
             video: Vec::new(),
             fps: 2.0,

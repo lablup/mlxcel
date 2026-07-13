@@ -264,6 +264,7 @@ fn end_to_end_constrained_chat_completion_emits_schema_conforming_json() {
         thinking_enter_block_on_start: false,
         prompt_cache_ctx: None,
         structured: Some(constraint),
+        image_soft_tokens: None,
     };
 
     let result = provider

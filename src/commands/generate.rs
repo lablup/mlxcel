@@ -1836,6 +1836,15 @@ fn run_generate_once(mut args: GenerateArgs) -> Result<()> {
                 &user_prompt,
             );
         }
+        // Reject an off-ladder `--image-soft-tokens` before loading any image:
+        // the budget drives the resize target, so an unsupported value is a
+        // user error, not something to clamp silently.
+        let image_soft_tokens = args
+            .generation
+            .image_soft_tokens
+            .map(mlxcel::vision::processors::gemma4::validate_image_soft_tokens)
+            .transpose()
+            .map_err(|err| anyhow::anyhow!("--image-soft-tokens: {err}"))?;
         let vlm_embeddings = generate_vlm::compute_vlm_embeddings(
             &model,
             &mut prompt_tokens,
@@ -1845,6 +1854,7 @@ fn run_generate_once(mut args: GenerateArgs) -> Result<()> {
             &args.generation.video,
             args.generation.fps,
             &tokenizer,
+            image_soft_tokens,
         )?;
         print_generation_preamble(&user_prompt)?;
         let generation = run_generation_mode(

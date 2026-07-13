@@ -19,7 +19,7 @@ use mlxcel::LoadedModel;
 use mlxcel::video;
 use mlxcel::vision::merge::InputEmbeddings;
 use mlxcel::vlm_prompt::ImageTokenBlockAction;
-use mlxcel::vlm_runtime::{VlmPreparationSummary, prepare_and_compute_vlm_embeddings};
+use mlxcel::vlm_runtime::{VlmPreparationSummary, prepare_and_compute_vlm_embeddings_with_budget};
 
 use crate::MlxcelTokenizer;
 
@@ -302,6 +302,10 @@ fn print_preparation_summary(summary: VlmPreparationSummary) {
     }
 }
 
+/// `image_soft_tokens` is the `--image-soft-tokens` override (Gemma 4 only).
+/// `None` uses the checkpoint's configured budget. Validated by the caller
+/// against `SUPPORTED_IMAGE_SOFT_TOKENS`.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn compute_vlm_embeddings(
     model: &LoadedModel,
     prompt_tokens: &mut Vec<i32>,
@@ -311,6 +315,7 @@ pub(crate) fn compute_vlm_embeddings(
     video_paths: &[PathBuf],
     target_fps: f64,
     tokenizer: &MlxcelTokenizer,
+    image_soft_tokens: Option<usize>,
 ) -> Result<Option<InputEmbeddings>> {
     // Handle video-only or video + image mode for Gemma4.
     // Video and audio cannot coexist in this CLI surface yet, surface a
@@ -328,6 +333,7 @@ pub(crate) fn compute_vlm_embeddings(
                 image_paths,
                 video_paths,
                 target_fps,
+                image_soft_tokens,
             );
         }
         if let LoadedModel::Gemma4Unified(unified) = model {
@@ -337,6 +343,7 @@ pub(crate) fn compute_vlm_embeddings(
                 image_paths,
                 video_paths,
                 target_fps,
+                image_soft_tokens,
             );
         }
         if let LoadedModel::KimiVL(kimi) = model {
@@ -366,7 +373,13 @@ pub(crate) fn compute_vlm_embeddings(
         && let Some(audio) = audio_path
         && let LoadedModel::Gemma4VLM(gemma4_vl) = model
     {
-        return compute_gemma4_multimodal_embeddings(gemma4_vl, prompt_tokens, image_paths, audio);
+        return compute_gemma4_multimodal_embeddings(
+            gemma4_vl,
+            prompt_tokens,
+            image_paths,
+            audio,
+            image_soft_tokens,
+        );
     }
 
     // Handle audio-only and image+audio for Gemma 4 Unified (encoder-free).
@@ -378,6 +391,7 @@ pub(crate) fn compute_vlm_embeddings(
             prompt_tokens,
             image_paths,
             audio,
+            image_soft_tokens,
         );
     }
 
@@ -460,11 +474,12 @@ pub(crate) fn compute_vlm_embeddings(
         .collect::<Result<Vec<_>>>()?;
     println!("Loaded {} image(s).", images.len());
 
-    let prepared = prepare_and_compute_vlm_embeddings(
+    let prepared = prepare_and_compute_vlm_embeddings_with_budget(
         model,
         prompt_tokens,
         prompt,
         &images,
+        image_soft_tokens,
         |text, add_special| {
             tokenizer
                 .encode(text, add_special)
@@ -582,6 +597,7 @@ fn compute_gemma4_multimodal_embeddings(
     prompt_tokens: &mut Vec<i32>,
     image_paths: &[PathBuf],
     audio_path: &Path,
+    image_soft_tokens: Option<usize>,
 ) -> Result<Option<InputEmbeddings>> {
     use mlxcel::audio;
 
@@ -600,10 +616,13 @@ fn compute_gemma4_multimodal_embeddings(
         .collect::<Result<Vec<_>>>()?;
     println!("Loaded {} image(s).", images.len());
 
-    let processed_images = gemma4_vl.processor.preprocess(&images);
+    let processed_images = gemma4_vl
+        .processor
+        .preprocess_with_budget(&images, image_soft_tokens);
     let num_soft_tokens: Vec<usize> = processed_images.iter().map(|i| i.num_soft_tokens).collect();
 
-    // Expand image tokens
+    // Expand image tokens. The count comes from the features this exact call
+    // produced, so the placeholder run matches the emitted rows at any budget.
     mlxcel::vlm_runtime::expand_gemma4_image_tokens_pub(
         prompt_tokens,
         gemma4_vl.image_token_id,
@@ -675,6 +694,7 @@ fn compute_gemma4_unified_multimodal_embeddings(
     prompt_tokens: &mut Vec<i32>,
     image_paths: &[PathBuf],
     audio_path: &Path,
+    image_soft_tokens: Option<usize>,
 ) -> Result<Option<InputEmbeddings>> {
     use mlxcel::audio;
 
@@ -696,7 +716,9 @@ fn compute_gemma4_unified_multimodal_embeddings(
             })
             .collect::<Result<Vec<_>>>()?;
         println!("Loaded {} image(s).", images.len());
-        let processed = unified.processor.preprocess(&images);
+        let processed = unified
+            .processor
+            .preprocess_with_budget(&images, image_soft_tokens);
         let num_soft_tokens: Vec<usize> = processed.iter().map(|i| i.num_soft_tokens).collect();
         mlxcel::vlm_runtime::expand_gemma4_image_tokens_pub(
             prompt_tokens,
@@ -761,6 +783,7 @@ fn compute_gemma4_video_embeddings(
     image_paths: &[PathBuf],
     video_paths: &[PathBuf],
     target_fps: f64,
+    image_soft_tokens: Option<usize>,
 ) -> Result<Option<InputEmbeddings>> {
     if !video::ffmpeg_available() {
         return Err(anyhow::anyhow!(
@@ -790,8 +813,12 @@ fn compute_gemma4_video_embeddings(
         println!("Loaded {} image(s).", images.len());
     }
 
-    let processed_images = gemma4_vl.processor.preprocess(&images);
-    let image_soft_tokens: Vec<usize> = processed_images
+    // Companion still images honor `--image-soft-tokens`; the video frames keep
+    // their own smaller per-frame budget.
+    let processed_images = gemma4_vl
+        .processor
+        .preprocess_with_budget(&images, image_soft_tokens);
+    let image_soft_token_counts: Vec<usize> = processed_images
         .iter()
         .map(|img| img.num_soft_tokens)
         .collect();
@@ -837,7 +864,7 @@ fn compute_gemma4_video_embeddings(
             gemma4_vl.image_token_id,
             gemma4_vl.boi_token_id,
             gemma4_vl.eoi_token_id,
-            &image_soft_tokens,
+            &image_soft_token_counts,
         )?;
         mlxcel::vlm_runtime::expand_gemma4_video_tokens(
             prompt_tokens,
@@ -947,6 +974,7 @@ fn compute_gemma4_unified_video_embeddings(
     image_paths: &[PathBuf],
     video_paths: &[PathBuf],
     target_fps: f64,
+    image_soft_tokens: Option<usize>,
 ) -> Result<Option<InputEmbeddings>> {
     if !video::ffmpeg_available() {
         return Err(anyhow::anyhow!(
@@ -977,7 +1005,9 @@ fn compute_gemma4_unified_video_embeddings(
             })
             .collect::<Result<Vec<_>>>()?;
         println!("Loaded {} image(s).", images.len());
-        let processed = unified.processor.preprocess(&images);
+        let processed = unified
+            .processor
+            .preprocess_with_budget(&images, image_soft_tokens);
         let num_soft_tokens: Vec<usize> = processed.iter().map(|i| i.num_soft_tokens).collect();
         mlxcel::vlm_runtime::expand_gemma4_image_tokens_pub(
             prompt_tokens,

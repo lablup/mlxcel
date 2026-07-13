@@ -91,6 +91,36 @@ pub fn image_hash_from_bytes(bytes: &[u8]) -> [u8; 32] {
     digest
 }
 
+/// SHA-256 digest of an encoded image payload, domain-separated by a
+/// preprocessing soft-token budget.
+///
+/// The cached value is the *vision tower output*, which for Gemma 4 depends on
+/// both the image bytes and the soft-token budget the preprocessor resized
+/// under: the same PNG at budget 70 and budget 1120 yields different patch
+/// grids and a different number of feature rows. Keying on bytes alone would
+/// let the first request's features be served to the second, desyncing the
+/// features from the prompt's placeholder expansion.
+///
+/// `max_soft_tokens = None` (the overwhelmingly common case: no per-request
+/// override) returns exactly [`image_hash_from_bytes`], so cache identity for
+/// unmodified requests is bit-identical to before this parameter existed.
+pub fn image_hash_from_bytes_with_soft_tokens(
+    bytes: &[u8],
+    max_soft_tokens: Option<usize>,
+) -> [u8; 32] {
+    let Some(budget) = max_soft_tokens else {
+        return image_hash_from_bytes(bytes);
+    };
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    hasher.update(b"mlxcel:image-soft-tokens:v1");
+    hasher.update((budget as u64).to_le_bytes());
+    let out = hasher.finalize();
+    let mut digest = [0u8; 32];
+    digest.copy_from_slice(&out);
+    digest
+}
+
 /// SHA-256 digest of an MLX pixel tensor's raw bytes.
 ///
 /// Used when the image already lives on the MLX side (e.g. the request handler
@@ -98,6 +128,10 @@ pub fn image_hash_from_bytes(bytes: &[u8]) -> [u8; 32] {
 /// pixel buffer size — roughly ~8 ms for a 896×896×3 f32 tensor — which is
 /// still ~25x cheaper than the 230 ms vision tower forward pass on Gemma 4, so
 /// a cache hit is always a net win.
+///
+/// This variant needs no budget domain-separation: the pixel tensor it hashes
+/// is the *already resized* one, so a different budget produces different
+/// bytes and therefore a different digest on its own.
 pub fn image_hash_from_pixels(array: &MlxArray) -> [u8; 32] {
     // Fully materialize before extracting bytes; without eval() the contents
     // may reference lazy graph nodes that have not been realized yet.

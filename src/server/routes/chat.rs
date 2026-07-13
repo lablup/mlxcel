@@ -383,6 +383,10 @@ async fn non_stream_chat_completion(
     options.priority = priority;
     options.reasoning_budget = budget_override;
     options.prompt_cache_ctx = prompt_cache_ctx;
+    // per-request Gemma 4 image soft-token budget, already validated against the
+    // supported ladder by `prepare_chat_request_with_cache`. `None` for every
+    // request that did not set `detail` / `max_soft_tokens`.
+    options.image_soft_tokens = prepared.image_soft_tokens;
     // `ThinkingState` counts reasoning tokens from the first decoded token
     // only when the prompt already left the model inside an open thinking
     // block. The chat template decides this at render time (Qwen primes
@@ -615,6 +619,10 @@ async fn stream_chat_completion(
     options.priority = priority;
     options.reasoning_budget = budget_override;
     options.prompt_cache_ctx = prompt_cache_ctx;
+    // per-request Gemma 4 image soft-token budget, already validated against the
+    // supported ladder by `prepare_chat_request_with_cache`. `None` for every
+    // request that did not set `detail` / `max_soft_tokens`.
+    options.image_soft_tokens = prepared.image_soft_tokens;
     // `ThinkingState` counts reasoning tokens from the first decoded token
     // only when the prompt already left the model inside an open thinking
     // block. The chat template decides this at render time (Qwen primes
@@ -1470,9 +1478,7 @@ mod tests {
                 text: "describe".to_string(),
             },
             ContentPart::ImageUrl {
-                image_url: ImageUrl {
-                    url: "data:image/png;base64,abc".to_string(),
-                },
+                image_url: ImageUrl::new("data:image/png;base64,abc".to_string()),
             },
         ]);
         assert!(!request_has_video_blocks(&req));

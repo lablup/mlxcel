@@ -258,6 +258,7 @@ fn assert_multi_stage_coordinator_matches_dense_baseline(
         thinking_enter_block_on_start: false,
         prompt_cache_ctx: None,
         structured: None,
+        image_soft_tokens: None,
     };
 
     let dense = dense_provider

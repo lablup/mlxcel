@@ -174,6 +174,11 @@ pub(crate) fn build_server_generate_options(
         // that handle `response_format` populate this after the helper
         // returns — see `chat.rs` and `completions.rs`.
         structured: None,
+        // Default unset (use the checkpoint's configured Gemma 4 budget). The
+        // chat routes populate this from the resolved `image_url` content
+        // parts after the helper returns; the raw text-completion endpoints
+        // carry no image parts and always leave it `None`.
+        image_soft_tokens: None,
     }
 }
 

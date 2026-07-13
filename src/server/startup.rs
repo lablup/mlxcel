@@ -1044,6 +1044,8 @@ fn warmup_model(model_provider: &ModelProvider) -> Result<()> {
             prompt_cache_ctx: None,
             // Warmup never asks for structured output.
             structured: None,
+            // Warmup is text-only; no image budget to override.
+            image_soft_tokens: None,
         },
     )?;
     Ok(())

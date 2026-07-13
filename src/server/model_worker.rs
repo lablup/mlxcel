@@ -40,7 +40,7 @@ use crate::tokenizer::MlxcelTokenizer;
 use crate::vision::feature_cache::ModelVisionCaches;
 use crate::vision::merge::InputEmbeddings;
 use crate::vlm_runtime::{
-    prepare_and_compute_vlm_embeddings, prepare_and_compute_vlm_embeddings_with_cache,
+    prepare_and_compute_vlm_embeddings_with_budget, prepare_and_compute_vlm_embeddings_with_cache,
 };
 use crate::worker_failfast::run_core_thread_or_abort;
 
@@ -1065,6 +1065,10 @@ fn is_image_limit_error(err: &ImageError) -> bool {
     matches!(err, ImageError::Limits(_))
 }
 
+/// `image_soft_tokens` is the request-scoped Gemma 4 image soft-token budget
+/// (`None` = use the checkpoint's configured budget). It is already validated
+/// against the supported ladder at the request boundary. Every non-Gemma-4
+/// family ignores it.
 pub(crate) fn prepare_request_vlm_embeddings(
     model: &LoadedModel,
     tokenizer: &MlxcelTokenizer,
@@ -1074,6 +1078,7 @@ pub(crate) fn prepare_request_vlm_embeddings(
     audio: &[Vec<u8>],
     videos: &[crate::server::media::ResolvedVideo],
     vision_caches: Option<&ModelVisionCaches>,
+    image_soft_tokens: Option<usize>,
 ) -> Result<Option<InputEmbeddings>> {
     let has_media = !images.is_empty() || !audio.is_empty() || !videos.is_empty();
 
@@ -1126,7 +1131,13 @@ pub(crate) fn prepare_request_vlm_embeddings(
         if !audio.is_empty() {
             return Err(anyhow!("Combined video and audio inputs are not supported"));
         }
-        return prepare_request_video_embeddings(model, prompt_tokens, images, videos);
+        return prepare_request_video_embeddings(
+            model,
+            prompt_tokens,
+            images,
+            videos,
+            image_soft_tokens,
+        );
     }
 
     // Audio-only or audio+images for Gemma4 / Gemma4 Unified
@@ -1143,6 +1154,7 @@ pub(crate) fn prepare_request_vlm_embeddings(
             images,
             audio,
             end_of_turn_token_id,
+            image_soft_tokens,
         )? {
             return Ok(Some(embeddings));
         }
@@ -1152,6 +1164,7 @@ pub(crate) fn prepare_request_vlm_embeddings(
             images,
             audio,
             end_of_turn_token_id,
+            image_soft_tokens,
         )? {
             return Ok(Some(embeddings));
         }
@@ -1189,11 +1202,18 @@ pub(crate) fn prepare_request_vlm_embeddings(
     if !images.is_empty() {
         let decoded_images = decode_request_images(images)?;
         let prepared = if let Some(caches) = vision_caches.filter(|c| c.enabled()) {
+            // The cached value is the vision tower's output, which for Gemma 4
+            // depends on the soft-token budget as well as the image bytes.
+            // Fold the budget into the key so the same image requested at two
+            // budgets cannot serve one's features for the other.
             let image_cache_keys: Vec<Option<crate::vision::feature_cache::CacheKey>> = images
                 .iter()
                 .map(|bytes| {
                     Some(crate::vision::feature_cache::CacheKey::from_hash(
-                        crate::vision::feature_cache::image_hash_from_bytes(bytes),
+                        crate::vision::feature_cache::image_hash_from_bytes_with_soft_tokens(
+                            bytes,
+                            image_soft_tokens,
+                        ),
                     ))
                 })
                 .collect();
@@ -1204,6 +1224,7 @@ pub(crate) fn prepare_request_vlm_embeddings(
                 &decoded_images,
                 Some(&image_cache_keys),
                 Some(caches),
+                image_soft_tokens,
                 |text, add_special| {
                     tokenizer
                         .encode(text, add_special)
@@ -1214,11 +1235,12 @@ pub(crate) fn prepare_request_vlm_embeddings(
                 },
             )?
         } else {
-            prepare_and_compute_vlm_embeddings(
+            prepare_and_compute_vlm_embeddings_with_budget(
                 model,
                 prompt_tokens,
                 prompt,
                 &decoded_images,
+                image_soft_tokens,
                 |text, add_special| {
                     tokenizer
                         .encode(text, add_special)
@@ -1321,6 +1343,7 @@ fn prepare_gemma4_audio_embeddings(
     images: &[Vec<u8>],
     audio_data: &[Vec<u8>],
     end_of_turn_token_id: Option<i32>,
+    image_soft_tokens: Option<usize>,
 ) -> Result<Option<InputEmbeddings>> {
     use crate::audio;
 
@@ -1392,10 +1415,15 @@ fn prepare_gemma4_audio_embeddings(
     let audio_mask = mlxcel_core::from_slice_i32(&mask_i32, &[1, num_frames as i32]);
     let audio_mask = mlxcel_core::astype(&audio_mask, mlxcel_core::dtype::BOOL);
 
-    // Process images if present alongside audio
+    // Process images if present alongside audio. The placeholder expansion is
+    // driven by the `num_soft_tokens` this exact preprocess call produced, so
+    // the image-token run in the prompt matches the feature rows one-for-one at
+    // whatever budget the request asked for.
     let processed_images = if !images.is_empty() {
         let decoded_images = decode_request_images(images)?;
-        let processed = gemma4_vl.processor.preprocess(&decoded_images);
+        let processed = gemma4_vl
+            .processor
+            .preprocess_with_budget(&decoded_images, image_soft_tokens);
         let num_soft_tokens: Vec<usize> = processed.iter().map(|img| img.num_soft_tokens).collect();
         crate::vlm_runtime::expand_gemma4_image_tokens_pub(
             prompt_tokens,
@@ -1434,6 +1462,7 @@ fn prepare_gemma4_unified_audio_embeddings(
     images: &[Vec<u8>],
     audio_data: &[Vec<u8>],
     end_of_turn_token_id: Option<i32>,
+    image_soft_tokens: Option<usize>,
 ) -> Result<Option<InputEmbeddings>> {
     use crate::audio;
 
@@ -1478,7 +1507,9 @@ fn prepare_gemma4_unified_audio_embeddings(
     // Process images alongside audio (encoder-free patch projector).
     let processed_images = if !images.is_empty() {
         let decoded_images = decode_request_images(images)?;
-        let processed = unified.processor.preprocess(&decoded_images);
+        let processed = unified
+            .processor
+            .preprocess_with_budget(&decoded_images, image_soft_tokens);
         let num_soft_tokens: Vec<usize> = processed.iter().map(|img| img.num_soft_tokens).collect();
         crate::vlm_runtime::expand_gemma4_image_tokens_pub(
             prompt_tokens,
@@ -1786,6 +1817,7 @@ fn prepare_request_video_embeddings(
     prompt_tokens: &mut Vec<i32>,
     images: &[Vec<u8>],
     videos: &[crate::server::media::ResolvedVideo],
+    image_soft_tokens: Option<usize>,
 ) -> Result<Option<InputEmbeddings>> {
     use crate::multimodal::video;
 
@@ -1793,7 +1825,13 @@ fn prepare_request_video_embeddings(
     // per-frame patches scatter into video_token_id placeholders rather than
     // through the ViT image tower.
     if let LoadedModel::Gemma4Unified(unified) = model {
-        return prepare_gemma4_unified_video_embeddings(unified, prompt_tokens, images, videos);
+        return prepare_gemma4_unified_video_embeddings(
+            unified,
+            prompt_tokens,
+            images,
+            videos,
+            image_soft_tokens,
+        );
     }
 
     // Kimi-VL / Kimi-VL 2.5 (kimi_k25) MoonViT 3D video path (issue #551).
@@ -1856,8 +1894,13 @@ fn prepare_request_video_embeddings(
         decode_request_images(images)?
     };
 
-    let processed_images = gemma4_vl.processor.preprocess(&decoded_images);
-    let image_soft_tokens: Vec<usize> = processed_images
+    // Companion still images honor the per-request budget; the video frames keep
+    // their own (smaller) per-frame budget, which `--image-soft-tokens` and the
+    // `image_url` fields deliberately do not touch.
+    let processed_images = gemma4_vl
+        .processor
+        .preprocess_with_budget(&decoded_images, image_soft_tokens);
+    let image_soft_token_counts: Vec<usize> = processed_images
         .iter()
         .map(|img| img.num_soft_tokens)
         .collect();
@@ -1897,7 +1940,7 @@ fn prepare_request_video_embeddings(
             gemma4_vl.image_token_id,
             gemma4_vl.boi_token_id,
             gemma4_vl.eoi_token_id,
-            &image_soft_tokens,
+            &image_soft_token_counts,
         )?;
         crate::vlm_runtime::expand_gemma4_video_tokens(
             prompt_tokens,
@@ -2006,6 +2049,7 @@ fn prepare_gemma4_unified_video_embeddings(
     prompt_tokens: &mut Vec<i32>,
     images: &[Vec<u8>],
     videos: &[crate::server::media::ResolvedVideo],
+    image_soft_tokens: Option<usize>,
 ) -> Result<Option<InputEmbeddings>> {
     use crate::multimodal::video;
 
@@ -2044,7 +2088,9 @@ fn prepare_gemma4_unified_video_embeddings(
         Vec::new()
     } else {
         let decoded_images = decode_request_images(images)?;
-        let processed = unified.processor.preprocess(&decoded_images);
+        let processed = unified
+            .processor
+            .preprocess_with_budget(&decoded_images, image_soft_tokens);
         let num_soft_tokens: Vec<usize> = processed.iter().map(|img| img.num_soft_tokens).collect();
         crate::vlm_runtime::expand_gemma4_image_tokens_pub(
             prompt_tokens,

@@ -289,6 +289,37 @@ where
         images,
         None,
         None,
+        None,
+        encode,
+    )
+}
+
+/// [`prepare_and_compute_vlm_embeddings`] with a per-request Gemma 4 image
+/// soft-token budget.
+///
+/// `image_soft_tokens = None` is identical to
+/// [`prepare_and_compute_vlm_embeddings`]. The budget must already have passed
+/// [`crate::vision::processors::gemma4::validate_image_soft_tokens`]; every
+/// non-Gemma-4 family ignores it.
+pub fn prepare_and_compute_vlm_embeddings_with_budget<E>(
+    model: &LoadedModel,
+    prompt_tokens: &mut Vec<i32>,
+    prompt: &str,
+    images: &[DynamicImage],
+    image_soft_tokens: Option<usize>,
+    encode: E,
+) -> Result<Option<PreparedVlmEmbeddings>>
+where
+    E: FnMut(&str, bool) -> Vec<i32>,
+{
+    prepare_and_compute_vlm_embeddings_with_cache(
+        model,
+        prompt_tokens,
+        prompt,
+        images,
+        None,
+        None,
+        image_soft_tokens,
         encode,
     )
 }
@@ -303,6 +334,13 @@ where
 ///
 /// Passing `caches == None` or `caches.enabled() == false` falls through to
 /// the un-cached path with zero additional cost.
+///
+/// `image_soft_tokens` is the per-request Gemma 4 soft-token budget (`None` =
+/// the checkpoint's configured budget). When set, callers that also pass
+/// `image_cache_keys` must have folded the budget into those keys (see
+/// [`crate::vision::feature_cache::image_hash_from_bytes_with_soft_tokens`]),
+/// because the cached vision features differ per budget.
+#[allow(clippy::too_many_arguments)]
 pub fn prepare_and_compute_vlm_embeddings_with_cache<E>(
     model: &LoadedModel,
     prompt_tokens: &mut Vec<i32>,
@@ -310,6 +348,7 @@ pub fn prepare_and_compute_vlm_embeddings_with_cache<E>(
     images: &[DynamicImage],
     image_cache_keys: Option<&[Option<CacheKey>]>,
     caches: Option<&ModelVisionCaches>,
+    image_soft_tokens: Option<usize>,
     mut encode: E,
 ) -> Result<Option<PreparedVlmEmbeddings>>
 where
@@ -559,7 +598,16 @@ where
             }))
         }
         VlmRuntimeRef::Gemma4(gemma4_vl) => {
-            let processed_images = gemma4_vl.processor.preprocess(images);
+            // The placeholder expansion below is derived from the
+            // `num_soft_tokens` the preprocessor actually produced for THIS
+            // call's budget, not from the budget itself. That is what keeps the
+            // prompt's image-token run exactly as long as the feature rows the
+            // vision tower will emit; recomputing the count from the budget
+            // independently would desync the two whenever the resize rounds
+            // down to a smaller patch grid than the budget allows.
+            let processed_images = gemma4_vl
+                .processor
+                .preprocess_with_budget(images, image_soft_tokens);
             let num_soft_tokens: Vec<usize> = processed_images
                 .iter()
                 .map(|image| image.num_soft_tokens)
@@ -613,7 +661,12 @@ where
         VlmRuntimeRef::Gemma4Unified(unified) => {
             // Encoder-free patch projector: preprocess to flat patch matrices +
             // 2-D positions, expand BOI/IMAGE/EOI placeholders, then merge.
-            let processed_images = unified.processor.preprocess(images);
+            // Same lockstep rule as the Gemma4 arm: the placeholder expansion
+            // below counts the `num_soft_tokens` this call actually produced,
+            // which is the real (unpadded) patch count, not the budget.
+            let processed_images = unified
+                .processor
+                .preprocess_with_budget(images, image_soft_tokens);
             let num_soft_tokens: Vec<usize> = processed_images
                 .iter()
                 .map(|image| image.num_soft_tokens)

@@ -17,6 +17,8 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+use crate::vision::processors::gemma4::{SUPPORTED_IMAGE_SOFT_TOKENS, validate_image_soft_tokens};
+
 /// Chat message role
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
@@ -163,12 +165,127 @@ pub enum ContentPart {
     InputAudio { input_audio: InputAudio },
 }
 
-/// Image URL reference
+/// Image URL reference.
+///
+/// Both budget fields are optional and default to `None`, so a request that
+/// sends only `url` behaves exactly as it did before they existed.
+///
+/// # Soft-token budget (Gemma 4 only)
+///
+/// Gemma 4's vision tower is resolution-driven: the number of soft tokens an
+/// image contributes to the prompt is a function of the resize target, which
+/// is a function of the soft-token budget. These two fields expose that dial
+/// per request. Every other VLM family ignores them.
+///
+/// * [`Self::detail`] is the OpenAI-standard field. `"low"` maps to the
+///   smallest supported budget, `"high"` to the largest, and `"auto"` (or an
+///   absent field) leaves the checkpoint's configured default in place.
+/// * [`Self::max_soft_tokens`] is an **mlxcel extension**, not part of the
+///   OpenAI spec. It names an exact budget from the supported ladder and wins
+///   over `detail` when both are present.
+///
+/// Both are validated at the request boundary; an unsupported value is a 400
+/// rather than a silent clamp. See
+/// [`Self::resolve_soft_token_budget`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ImageUrl {
     /// URL: `data:image/...;base64,...`, `file://...`, bare local path, or
     /// `http(s)://...`
     pub url: String,
+    /// OpenAI-standard detail hint: `"low"`, `"high"`, or `"auto"`.
+    ///
+    /// Maps onto the Gemma 4 soft-token ladder (see [`Self`]). Unknown values
+    /// are rejected with a 400 rather than silently treated as `"auto"`, so a
+    /// typo cannot quietly downgrade image fidelity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    /// mlxcel extension: exact Gemma 4 soft-token budget for this image.
+    ///
+    /// Must be one of
+    /// [`mlxcel::vision::processors::gemma4::SUPPORTED_IMAGE_SOFT_TOKENS`].
+    /// Takes precedence over [`Self::detail`]. Not part of the OpenAI API.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_soft_tokens: Option<usize>,
+}
+
+impl ImageUrl {
+    /// Construct a plain image reference with no budget override, i.e. the
+    /// checkpoint's configured default. Used by translators (e.g. the Anthropic
+    /// Messages API) whose wire format has no soft-token dial.
+    pub fn new(url: impl Into<String>) -> Self {
+        Self {
+            url: url.into(),
+            detail: None,
+            max_soft_tokens: None,
+        }
+    }
+
+    /// Resolve this content part's soft-token budget.
+    ///
+    /// Returns `Ok(None)` when the caller expressed no preference (neither
+    /// field set, or `detail: "auto"`), which means "use the checkpoint's
+    /// configured default" and preserves today's behavior exactly.
+    ///
+    /// The numeric field wins over `detail` when both are present.
+    ///
+    /// # Errors
+    /// Returns `Err` with a caller-facing message (surfaced as a 400) when
+    /// `max_soft_tokens` is off the supported ladder or `detail` is not one of
+    /// `low` / `high` / `auto`. Both values are untrusted request input and the
+    /// budget drives the resize target, so neither is clamped.
+    pub fn resolve_soft_token_budget(&self) -> Result<Option<usize>, String> {
+        if let Some(requested) = self.max_soft_tokens {
+            return validate_image_soft_tokens(requested).map(Some);
+        }
+
+        let Some(detail) = self.detail.as_deref() else {
+            return Ok(None);
+        };
+
+        match detail.trim().to_ascii_lowercase().as_str() {
+            // The ladder is non-empty, so first/last always resolve; fall back
+            // to "no override" rather than panicking if that ever changes.
+            "low" => Ok(SUPPORTED_IMAGE_SOFT_TOKENS.first().copied()),
+            "high" => Ok(SUPPORTED_IMAGE_SOFT_TOKENS.last().copied()),
+            "auto" => Ok(None),
+            other => Err(format!(
+                "image_url.detail must be one of [\"low\", \"high\", \"auto\"], got \"{other}\""
+            )),
+        }
+    }
+}
+
+/// Resolve a single request-scoped Gemma 4 image soft-token budget from every
+/// `image_url` content part in the request.
+///
+/// The budget is applied per request rather than per image because the Gemma 4
+/// preprocessor takes one budget for the whole batch. Parts that express no
+/// preference are ignored. When two parts request *different* explicit budgets
+/// the request is rejected: silently picking one (or the max) would give the
+/// caller a budget they did not ask for on at least one image, and the prompt's
+/// placeholder expansion would then be derived from a value the caller cannot
+/// predict.
+///
+/// # Errors
+/// Returns `Err` when any part fails [`ImageUrl::resolve_soft_token_budget`],
+/// or when two parts disagree on an explicit budget.
+pub fn resolve_request_image_soft_tokens(parts: &[ImageUrl]) -> Result<Option<usize>, String> {
+    let mut resolved: Option<usize> = None;
+    for part in parts {
+        let Some(budget) = part.resolve_soft_token_budget()? else {
+            continue;
+        };
+        match resolved {
+            Some(existing) if existing != budget => {
+                return Err(format!(
+                    "conflicting image soft-token budgets in one request: {existing} and {budget}; \
+                     all image_url parts must agree"
+                ));
+            }
+            _ => resolved = Some(budget),
+        }
+    }
+    Ok(resolved)
 }
 
 /// Video URL reference. Same wire shape as [`ImageUrl`] for
@@ -234,6 +351,21 @@ impl MessageContent {
                 .iter()
                 .filter_map(|p| match p {
                     ContentPart::ImageUrl { image_url } => Some(image_url.url.clone()),
+                    _ => None,
+                })
+                .collect(),
+        }
+    }
+
+    /// Extract whole `image_url` content parts, preserving the per-part
+    /// `detail` / `max_soft_tokens` fields that [`Self::image_urls`] drops.
+    pub fn image_parts(&self) -> Vec<ImageUrl> {
+        match self {
+            MessageContent::Text(_) => Vec::new(),
+            MessageContent::Parts(parts) => parts
+                .iter()
+                .filter_map(|p| match p {
+                    ContentPart::ImageUrl { image_url } => Some(image_url.clone()),
                     _ => None,
                 })
                 .collect(),
@@ -673,6 +805,24 @@ impl ChatCompletionRequest {
             .collect()
     }
 
+    /// Extract all `image_url` content parts from messages, preserving the
+    /// per-part budget fields. Same order as [`Self::image_urls`].
+    pub fn image_parts(&self) -> Vec<ImageUrl> {
+        self.messages
+            .iter()
+            .flat_map(|m| m.content.image_parts())
+            .collect()
+    }
+
+    /// Resolve the request-scoped Gemma 4 image soft-token budget.
+    ///
+    /// # Errors
+    /// Returns `Err` when a part carries an unsupported `detail` /
+    /// `max_soft_tokens`, or when parts disagree. Routes surface this as a 400.
+    pub fn image_soft_tokens(&self) -> Result<Option<usize>, String> {
+        resolve_request_image_soft_tokens(&self.image_parts())
+    }
+
     /// Extract all audio inputs from messages
     pub fn audio_inputs(&self) -> Vec<InputAudio> {
         self.messages
@@ -940,5 +1090,176 @@ mod tests {
             minimal.temperature.is_none(),
             "temperature defaults to None"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Per-request Gemma 4 image soft-token budget (issue #777)
+    // -----------------------------------------------------------------------
+
+    fn chat_request_with_image_part(image_url_json: &str) -> ChatCompletionRequest {
+        let json = format!(
+            r#"{{
+                "model": "gemma-4",
+                "messages": [
+                    {{"role": "user", "content": [
+                        {{"type": "text", "text": "what is this?"}},
+                        {{"type": "image_url", "image_url": {image_url_json}}}
+                    ]}}
+                ]
+            }}"#
+        );
+        serde_json::from_str(&json).expect("request must deserialize")
+    }
+
+    #[test]
+    fn image_url_without_budget_fields_deserializes_and_means_no_override() {
+        // The pre-existing wire shape: bare `url`. Must stay valid and must
+        // resolve to "no override" so existing requests are unchanged.
+        let req = chat_request_with_image_part(r#"{"url": "data:image/png;base64,aGk="}"#);
+        let parts = req.image_parts();
+        assert_eq!(parts.len(), 1);
+        assert_eq!(parts[0].detail, None);
+        assert_eq!(parts[0].max_soft_tokens, None);
+        assert_eq!(req.image_soft_tokens(), Ok(None));
+        // And the plain URL accessor still sees it.
+        assert_eq!(
+            req.image_urls(),
+            vec!["data:image/png;base64,aGk=".to_string()]
+        );
+    }
+
+    #[test]
+    fn detail_low_and_high_map_to_ladder_ends() {
+        let low = chat_request_with_image_part(r#"{"url": "x.png", "detail": "low"}"#);
+        assert_eq!(low.image_soft_tokens(), Ok(Some(70)));
+
+        let high = chat_request_with_image_part(r#"{"url": "x.png", "detail": "high"}"#);
+        assert_eq!(high.image_soft_tokens(), Ok(Some(1120)));
+    }
+
+    #[test]
+    fn detail_auto_means_no_override() {
+        let auto = chat_request_with_image_part(r#"{"url": "x.png", "detail": "auto"}"#);
+        assert_eq!(
+            auto.image_soft_tokens(),
+            Ok(None),
+            "auto must leave the checkpoint default in place"
+        );
+    }
+
+    #[test]
+    fn detail_is_case_insensitive() {
+        let req = chat_request_with_image_part(r#"{"url": "x.png", "detail": "HIGH"}"#);
+        assert_eq!(req.image_soft_tokens(), Ok(Some(1120)));
+    }
+
+    #[test]
+    fn unknown_detail_value_is_rejected() {
+        let req = chat_request_with_image_part(r#"{"url": "x.png", "detail": "ultra"}"#);
+        let err = req
+            .image_soft_tokens()
+            .expect_err("an unknown detail must be a client error, not silently ignored");
+        assert!(err.contains("detail"), "error should name the field: {err}");
+        assert!(
+            err.contains("ultra"),
+            "error should echo the bad value: {err}"
+        );
+    }
+
+    #[test]
+    fn max_soft_tokens_extension_names_an_exact_budget() {
+        for budget in [70usize, 140, 280, 560, 1120] {
+            let req = chat_request_with_image_part(&format!(
+                r#"{{"url": "x.png", "max_soft_tokens": {budget}}}"#
+            ));
+            assert_eq!(req.image_soft_tokens(), Ok(Some(budget)));
+        }
+    }
+
+    #[test]
+    fn off_ladder_max_soft_tokens_is_rejected() {
+        // An unbounded budget scales the resized image and its patch grid, so
+        // it is a memory/DoS vector. Reject rather than clamp.
+        for bad in ["0", "281", "100000", "18446744073709551615"] {
+            let req = chat_request_with_image_part(&format!(
+                r#"{{"url": "x.png", "max_soft_tokens": {bad}}}"#
+            ));
+            let err = req
+                .image_soft_tokens()
+                .expect_err("off-ladder max_soft_tokens must be rejected");
+            assert!(
+                err.contains("must be one of"),
+                "error should name the supported values: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn numeric_budget_wins_over_detail() {
+        let req = chat_request_with_image_part(
+            r#"{"url": "x.png", "detail": "low", "max_soft_tokens": 560}"#,
+        );
+        assert_eq!(
+            req.image_soft_tokens(),
+            Ok(Some(560)),
+            "the mlxcel extension field takes precedence over detail"
+        );
+    }
+
+    #[test]
+    fn an_invalid_numeric_budget_is_rejected_even_when_detail_is_valid() {
+        // The numeric field wins, so its validation must not be skipped just
+        // because a valid `detail` is also present.
+        let req = chat_request_with_image_part(
+            r#"{"url": "x.png", "detail": "high", "max_soft_tokens": 999}"#,
+        );
+        assert!(req.image_soft_tokens().is_err());
+    }
+
+    #[test]
+    fn agreeing_parts_resolve_to_one_budget() {
+        let parts = vec![
+            ImageUrl {
+                url: "a.png".into(),
+                detail: Some("high".into()),
+                max_soft_tokens: None,
+            },
+            ImageUrl {
+                url: "b.png".into(),
+                detail: None,
+                max_soft_tokens: Some(1120),
+            },
+            // A part with no preference does not veto the others.
+            ImageUrl::new("c.png"),
+        ];
+        assert_eq!(resolve_request_image_soft_tokens(&parts), Ok(Some(1120)));
+    }
+
+    #[test]
+    fn conflicting_parts_are_rejected() {
+        let parts = vec![
+            ImageUrl {
+                url: "a.png".into(),
+                detail: Some("low".into()),
+                max_soft_tokens: None,
+            },
+            ImageUrl {
+                url: "b.png".into(),
+                detail: Some("high".into()),
+                max_soft_tokens: None,
+            },
+        ];
+        let err = resolve_request_image_soft_tokens(&parts).expect_err(
+            "two different explicit budgets in one request must not be silently merged",
+        );
+        assert!(err.contains("conflicting"), "got: {err}");
+    }
+
+    #[test]
+    fn image_url_serialization_omits_unset_budget_fields() {
+        // Round-tripping a plain image part must not introduce `detail: null`
+        // or `max_soft_tokens: null` into the wire payload.
+        let json = serde_json::to_string(&ImageUrl::new("x.png")).expect("serializes");
+        assert_eq!(json, r#"{"url":"x.png"}"#);
     }
 }

@@ -167,9 +167,7 @@ async fn extract_chat_image_data_reads_file_urls() {
     fs::write(&path, b"image-bytes").unwrap();
 
     let request = build_chat_request(vec![ContentPart::ImageUrl {
-        image_url: ImageUrl {
-            url: format!("file://{}", path.display()),
-        },
+        image_url: ImageUrl::new(format!("file://{}", path.display())),
     }]);
 
     let images = extract_chat_image_data(&request).await;
@@ -198,14 +196,10 @@ async fn extract_chat_image_data_collects_images_across_messages() {
                         text: "look".to_string(),
                     },
                     ContentPart::ImageUrl {
-                        image_url: ImageUrl {
-                            url: "data:image/png;base64,aGVsbG8=".to_string(),
-                        },
+                        image_url: ImageUrl::new("data:image/png;base64,aGVsbG8=".to_string()),
                     },
                     ContentPart::ImageUrl {
-                        image_url: ImageUrl {
-                            url: "data:image/png;base64,d29ybGQ=".to_string(),
-                        },
+                        image_url: ImageUrl::new("data:image/png;base64,d29ybGQ=".to_string()),
                     },
                 ]),
                 name: None,
