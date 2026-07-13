@@ -1625,6 +1625,17 @@ mod tests {
         let dir_other = override_test_dir(&[("config.json", r#"{"model_type":"gemma3"}"#)]);
         assert!(!is_diffusion_gemma_model(&dir_other));
         let _ = std::fs::remove_dir_all(dir_other);
+
+        // No config.json and a config.json without model_type must both resolve
+        // to false without panicking, so those checkpoints keep the unchanged
+        // `Tokenizer::from_file` path.
+        let dir_empty = override_test_dir(&[("placeholder.txt", "x")]);
+        assert!(!is_diffusion_gemma_model(&dir_empty));
+        let _ = std::fs::remove_dir_all(dir_empty);
+
+        let dir_no_type = override_test_dir(&[("config.json", r#"{"hidden_size":2048}"#)]);
+        assert!(!is_diffusion_gemma_model(&dir_no_type));
+        let _ = std::fs::remove_dir_all(dir_no_type);
     }
 
     #[test]
