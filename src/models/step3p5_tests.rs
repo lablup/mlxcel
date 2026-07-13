@@ -189,3 +189,33 @@ fn resolve_eos_prefers_top_level_int_then_list_then_text_config() {
     let cfg = serde_json::json!({ "text_config": {} });
     assert_eq!(Step3p5Config::resolve_step3p7_eos_token_ids(&cfg), vec![2]);
 }
+
+#[test]
+fn resolve_eos_treats_null_top_level_as_absent_and_uses_text_config() {
+    // Composite VLM configs commonly serialize the top-level `eos_token_id` as
+    // `null` with the real ids under `text_config`. A present-but-null value
+    // must be treated as absent so the text_config source wins over the `[2]`
+    // last resort.
+    let cfg = serde_json::json!({
+        "eos_token_id": serde_json::Value::Null,
+        "text_config": { "eos_token_id": [128805, 128806] }
+    });
+    assert_eq!(
+        Step3p5Config::resolve_step3p7_eos_token_ids(&cfg),
+        vec![128805, 128806]
+    );
+
+    // Null at both levels falls through to the `[2]` last resort.
+    let cfg = serde_json::json!({
+        "eos_token_id": serde_json::Value::Null,
+        "text_config": { "eos_token_id": serde_json::Value::Null }
+    });
+    assert_eq!(Step3p5Config::resolve_step3p7_eos_token_ids(&cfg), vec![2]);
+
+    // An empty list is not usable ids; fall through to text_config.
+    let cfg = serde_json::json!({
+        "eos_token_id": [],
+        "text_config": { "eos_token_id": 7 }
+    });
+    assert_eq!(Step3p5Config::resolve_step3p7_eos_token_ids(&cfg), vec![7]);
+}

@@ -296,14 +296,20 @@ impl Step3p5Config {
     /// Resolve eos token ids for a step3p7 checkpoint: prefer the top-level
     /// `eos_token_id` (int or list), then `text_config.eos_token_id`, then the
     /// flat `[2]` last resort.
+    ///
+    /// A present-but-`null` (or otherwise unparseable) `eos_token_id` is treated
+    /// as absent so the resolution order is actually honored. Composite VLM
+    /// configs commonly serialize the top-level `eos_token_id` as `null` and put
+    /// the real ids in `text_config`; short-circuiting on `is_some()` there would
+    /// wrongly pin eos to the `[2]` fallback and skip `text_config`.
     pub fn resolve_step3p7_eos_token_ids(full_config: &serde_json::Value) -> Vec<i32> {
-        if full_config.get("eos_token_id").is_some() {
-            return parse_eos_token_ids(full_config);
+        if let Some(ids) = usable_eos_token_ids(full_config) {
+            return ids;
         }
         if let Some(text_config) = full_config.get("text_config")
-            && text_config.get("eos_token_id").is_some()
+            && let Some(ids) = usable_eos_token_ids(text_config)
         {
-            return parse_eos_token_ids(text_config);
+            return ids;
         }
         vec![2]
     }
@@ -337,6 +343,23 @@ fn parse_eos_token_ids(config: &serde_json::Value) -> Vec<i32> {
         }
     }
     vec![2] // Default EOS
+}
+
+/// Parse `eos_token_id` into concrete ids, returning `None` when the key is
+/// absent, `null`, or carries no usable integer ids, so a caller chaining
+/// several config sources can fall through to the next one.
+fn usable_eos_token_ids(config: &serde_json::Value) -> Option<Vec<i32>> {
+    match config.get("eos_token_id") {
+        Some(serde_json::Value::Number(n)) => n.as_i64().map(|i| vec![i as i32]),
+        Some(serde_json::Value::Array(arr)) => {
+            let ids: Vec<i32> = arr
+                .iter()
+                .filter_map(|v| v.as_i64().map(|i| i as i32))
+                .collect();
+            (!ids.is_empty()).then_some(ids)
+        }
+        _ => None,
+    }
 }
 
 // Clamped SwiGLU activation.
