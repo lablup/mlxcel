@@ -246,8 +246,17 @@ const CHAT_DELIMITERS: &[(&str, DelimiterAction)] = &[
     ("]<]minimax[>[<tool_call>", DelimiterAction::EnterToolCall),
     // Hermes / Qwen / DeepSeek tool call markers.
     // Exit before enter so the closer is matched when both appear in one fragment.
+    // GLM-4.7 reuses these same `<tool_call>` / `</tool_call>` block tags, so no
+    // separate GLM rows are needed here.
     ("</tool_call>", DelimiterAction::ExitToolCall),
     ("<tool_call>", DelimiterAction::EnterToolCall),
+    // LongCat-Flash: `<longcat_tool_call>...</longcat_tool_call>`. Distinct from
+    // the Hermes tags (they diverge at byte 1: `<l` vs `<t`), so there is no
+    // prefix or substring collision with the plain Hermes rows above; exit before
+    // enter mirrors the Hermes convention. Both markers stay under the existing
+    // longest delimiter, so the partial-match window is unchanged.
+    ("</longcat_tool_call>", DelimiterAction::ExitToolCall),
+    ("<longcat_tool_call>", DelimiterAction::EnterToolCall),
     // Mistral Nemo: `[TOOL_CALLS] [...]` — no exit; the rest of output is JSON.
     ("[TOOL_CALLS]", DelimiterAction::EnterToolCall),
     // Kimi K2: `<|tool_calls_section_begin|>...<|tool_calls_section_end|>`.
@@ -1907,6 +1916,67 @@ mod tests {
             out2.content.as_deref(),
             Some("]<]minimax data"),
             "held-back partial namespace prefix must be released when not a marker"
+        );
+    }
+
+    // -- LongCat tool-call block --
+
+    /// A LongCat key/value tool-call block used by the streaming tests.
+    fn longcat_stream_block() -> String {
+        "<longcat_tool_call>get_weather\
+         <longcat_arg_key>location</longcat_arg_key>\n\
+         <longcat_arg_value>Paris</longcat_arg_value></longcat_tool_call>"
+            .to_string()
+    }
+
+    #[test]
+    fn longcat_tool_call_suppressed_single_feed() {
+        let mut f = StreamFilter::new();
+        let out = f.feed(&longcat_stream_block());
+        assert_eq!(
+            out.content, None,
+            "LongCat markup and payload must be suppressed"
+        );
+        // Content after the block resumes normally.
+        assert_eq!(f.feed("done").content.as_deref(), Some("done"));
+    }
+
+    #[test]
+    fn longcat_content_before_block_emitted() {
+        let mut f = StreamFilter::new();
+        let out = f.feed(&format!("Let me check.{}", longcat_stream_block()));
+        assert_eq!(
+            out.content.as_deref(),
+            Some("Let me check."),
+            "prose before the LongCat block must be emitted"
+        );
+        assert!(!out.content.as_deref().unwrap_or("").contains("longcat"));
+        assert!(!out.content.as_deref().unwrap_or("").contains("tool_call"));
+    }
+
+    #[test]
+    fn longcat_streaming_split_at_every_byte_boundary() {
+        // Feed one byte at a time; the LongCat markup and payload must never leak
+        // into visible content regardless of where the token stream is split.
+        let full = format!("A{}B", longcat_stream_block());
+        let mut f = StreamFilter::new();
+        let mut content = String::new();
+        for i in 0..full.len() {
+            // The block is pure ASCII, so byte boundaries are char boundaries.
+            if let Some(c) = f.feed(&full[i..i + 1]).content {
+                content.push_str(&c);
+            }
+        }
+        if let Some(c) = f.flush().content {
+            content.push_str(&c);
+        }
+        assert!(
+            !content.contains("longcat"),
+            "LongCat markup leaked: {content:?}"
+        );
+        assert_eq!(
+            content, "AB",
+            "only the prose before and after the block is visible"
         );
     }
 }

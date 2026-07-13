@@ -93,6 +93,18 @@ pub enum ToolCallFormat {
     /// corresponding tool-list template marker is `<|tool_list_start|>`).
     /// Single call per message.
     Pythonic,
+    /// GLM-4.7 generation (families `glm4_moe`, `glm4_moe_lite`, `glm_moe_dsa`,
+    /// `glm4v_moe`): an XML-ish key/value grammar sharing the Hermes
+    /// `<tool_call>` / `</tool_call>` block tags but with a non-JSON body of
+    /// `NAME<arg_key>KEY</arg_key><arg_value>VALUE</arg_value>` argument pairs.
+    /// Values are coerced against the request tool schema (a `string`-typed
+    /// parameter keeps its raw text; others are JSON/loose-literal parsed).
+    Glm47,
+    /// LongCat-Flash (`longcat_flash`, `longcat_flash_ngram`): structurally
+    /// identical to [`Glm47`](ToolCallFormat::Glm47) but with the distinct tags
+    /// `<longcat_tool_call>`, `<longcat_arg_key>`, and `<longcat_arg_value>`; a
+    /// block body that starts with `{` is treated as a raw JSON tool object.
+    Longcat,
 }
 
 /// Result of parsing model output for tool calls.

@@ -173,6 +173,36 @@ pub fn parse_tool_calls(raw_output: &str, tools: Option<&[Tool]>) -> ToolCallPar
         }
     }
 
+    // GLM-4.7 generation (glm4_moe / glm4_moe_lite / glm_moe_dsa / glm4v_moe) and
+    // LongCat-Flash emit tool calls in an XML-ish key/value grammar:
+    // `NAME<arg_key>KEY</arg_key><arg_value>VALUE</arg_value>`. Both need the
+    // request tool schema for schema-aware value coercion (a `string`-typed
+    // parameter keeps its raw text), so like try_minimax_m3 they run here ahead of
+    // the marker loop rather than inside the `fn(&str)` array. GLM shares the
+    // `<tool_call>` block tags with Hermes; try_glm47 declines cleanly on a bare
+    // `{name, arguments}` JSON body so it falls through to try_hermes in the loop
+    // below (a Hermes call is never misrouted to GLM), while the non-JSON
+    // key/value grammar is claimed here before Hermes sees it. When calls filter
+    // down to empty, execution falls through to the loop just like a declined
+    // parser.
+    if let Some(mut result) = formats::try_glm47(text, tools) {
+        if let Some(tools) = tools {
+            result.tool_calls = filter_by_tools(result.tool_calls, tools);
+        }
+        if result.has_tool_calls() {
+            return result;
+        }
+    }
+
+    if let Some(mut result) = formats::try_longcat(text, tools) {
+        if let Some(tools) = tools {
+            result.tool_calls = filter_by_tools(result.tool_calls, tools);
+        }
+        if result.has_tool_calls() {
+            return result;
+        }
+    }
+
     // Try each format in order of specificity (most distinctive markers first)
     let parsers: &[fn(&str) -> Option<ToolCallParseResult>] = &[
         formats::try_granite, // <response><tool_call> — more specific than bare Hermes
@@ -1142,5 +1172,131 @@ mod tests {
         assert_eq!(result.content, "Hello there!");
         assert_eq!(result.reasoning_content.as_deref(), Some("Thinking."));
         assert!(!result.content.contains("<|channel|>"));
+    }
+
+    // -- GLM-4.7 / LongCat end-to-end + ordering ---------------------------------
+
+    fn make_tool_with_schema(name: &str, schema: serde_json::Value) -> Tool {
+        Tool {
+            tool_type: "function".to_string(),
+            function: FunctionDefinition {
+                name: name.to_string(),
+                description: None,
+                parameters: Some(schema),
+            },
+        }
+    }
+
+    #[test]
+    fn parse_glm47_primary_end_to_end() {
+        let output = "<tool_call>get_weather\
+                      <arg_key>location</arg_key>\n<arg_value>Paris</arg_value>\n</tool_call>";
+        let tools = vec![make_tool("get_weather")];
+        let result = parse_tool_calls(output, Some(&tools));
+        assert!(result.has_tool_calls());
+        assert_eq!(result.tool_calls.len(), 1);
+        assert_eq!(result.tool_calls[0].name, "get_weather");
+        assert_eq!(
+            result.format,
+            Some(crate::server::tool_calls::ToolCallFormat::Glm47)
+        );
+        let args: serde_json::Value =
+            serde_json::from_str(&result.tool_calls[0].arguments).unwrap();
+        assert_eq!(args["location"], "Paris");
+    }
+
+    #[test]
+    fn parse_glm47_string_coercion_threads_schema() {
+        // The parser must hand the request schema to try_glm47 so a string-typed
+        // param keeps its numeric-looking raw text.
+        let output = "<tool_call>lookup\
+                      <arg_key>zip</arg_key>\n<arg_value>75001</arg_value>\n</tool_call>";
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {"zip": {"type": "string"}}
+        });
+        let tools = vec![make_tool_with_schema("lookup", schema)];
+        let result = parse_tool_calls(output, Some(&tools));
+        assert!(result.has_tool_calls());
+        let args: serde_json::Value =
+            serde_json::from_str(&result.tool_calls[0].arguments).unwrap();
+        assert_eq!(args["zip"], "75001");
+        assert!(args["zip"].is_string());
+    }
+
+    #[test]
+    fn parse_glm47_filters_unknown_tools() {
+        let output = "<tool_call>unknown_fn\
+                      <arg_key>k</arg_key>\n<arg_value>v</arg_value>\n</tool_call>";
+        let tools = vec![make_tool("get_weather")];
+        let result = parse_tool_calls(output, Some(&tools));
+        assert!(!result.has_tool_calls());
+    }
+
+    #[test]
+    fn parse_hermes_json_body_routes_to_hermes_not_glm47() {
+        // Regression guard for the shared `<tool_call>` tags: a genuine Hermes
+        // JSON body must route to try_hermes (format Hermes), never be claimed by
+        // the GLM parser that now runs ahead of it.
+        let output =
+            r#"<tool_call>{"name": "get_weather", "arguments": {"location": "Paris"}}</tool_call>"#;
+        let tools = vec![make_tool("get_weather")];
+        let result = parse_tool_calls(output, Some(&tools));
+        assert!(result.has_tool_calls());
+        assert_eq!(result.tool_calls[0].name, "get_weather");
+        assert_eq!(
+            result.format,
+            Some(crate::server::tool_calls::ToolCallFormat::Hermes),
+            "a Hermes JSON body must not be claimed by the GLM parser"
+        );
+    }
+
+    #[test]
+    fn parse_longcat_primary_end_to_end() {
+        let output = "<longcat_tool_call>get_weather\
+                      <longcat_arg_key>location</longcat_arg_key>\n\
+                      <longcat_arg_value>Paris</longcat_arg_value>\n</longcat_tool_call>";
+        let tools = vec![make_tool("get_weather")];
+        let result = parse_tool_calls(output, Some(&tools));
+        assert!(result.has_tool_calls());
+        assert_eq!(result.tool_calls[0].name, "get_weather");
+        assert_eq!(
+            result.format,
+            Some(crate::server::tool_calls::ToolCallFormat::Longcat)
+        );
+        let args: serde_json::Value =
+            serde_json::from_str(&result.tool_calls[0].arguments).unwrap();
+        assert_eq!(args["location"], "Paris");
+    }
+
+    #[test]
+    fn parse_glm47_does_not_regress_qwen3_coder() {
+        // Qwen3-Coder wraps `<function=...>` in `<tool_call>`. GLM runs first but
+        // must decline it so the Qwen3-Coder parser in the loop still claims it.
+        let output = "<tool_call><function=get_weather><parameter=location>Paris</parameter></function></tool_call>";
+        let tools = vec![make_tool("get_weather")];
+        let result = parse_tool_calls(output, Some(&tools));
+        assert!(result.has_tool_calls());
+        assert_eq!(result.tool_calls[0].name, "get_weather");
+        assert_eq!(
+            result.format,
+            Some(crate::server::tool_calls::ToolCallFormat::Qwen3Coder)
+        );
+    }
+
+    #[test]
+    fn parse_glm47_does_not_regress_generic_json() {
+        // A bare JSON object with `name` + `arguments` must still be claimed by a
+        // JSON parser, not the GLM parser.
+        let output = r#"{"name": "calc", "arguments": {"expr": "2+2"}}"#;
+        let tools = vec![make_tool("calc")];
+        let result = parse_tool_calls(output, Some(&tools));
+        assert!(result.has_tool_calls());
+        assert_eq!(result.tool_calls[0].name, "calc");
+        assert_ne!(
+            result.format,
+            Some(crate::server::tool_calls::ToolCallFormat::Glm47),
+            "a plain JSON tool call must not be claimed by the GLM parser"
+        );
     }
 }

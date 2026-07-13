@@ -2325,6 +2325,407 @@ fn minimax_m3_fallback_coerce(raw: &str) -> serde_json::Value {
     }
 }
 
+// ---------------------------------------------------------------------------
+// GLM-4.7 / LongCat (arg_key/arg_value key-value grammar)
+// ---------------------------------------------------------------------------
+
+/// Tag set for the shared key/value tool-call grammar used by GLM-4.7 and
+/// LongCat-Flash. The two grammars are byte-for-byte identical apart from these
+/// tag names, so a single parser is parameterised over them.
+struct KvGrammarTags {
+    /// Block opener, e.g. `<tool_call>` (GLM) or `<longcat_tool_call>`.
+    block_open: &'static str,
+    /// Block closer, e.g. `</tool_call>` (GLM) or `</longcat_tool_call>`.
+    block_close: &'static str,
+    /// Argument-key opener, e.g. `<arg_key>` or `<longcat_arg_key>`.
+    key_open: &'static str,
+    /// Argument-key closer, e.g. `</arg_key>` or `</longcat_arg_key>`.
+    key_close: &'static str,
+    /// Argument-value opener, e.g. `<arg_value>` or `<longcat_arg_value>`.
+    value_open: &'static str,
+    /// Argument-value closer, e.g. `</arg_value>` or `</longcat_arg_value>`.
+    value_close: &'static str,
+    /// The format reported on a successful parse.
+    format: ToolCallFormat,
+    /// When set, the block tags collide with the Hermes `<tool_call>` tags. A
+    /// bare `{name, arguments}` JSON body (the exact shape Hermes parses) is then
+    /// declined so the downstream Hermes parser claims it and reports the Hermes
+    /// format rather than this one. Non-Hermes JSON shapes are still claimed.
+    defer_hermes_json: bool,
+}
+
+/// GLM-4.7 tag set — shares the Hermes `<tool_call>` block tags.
+const GLM47_TAGS: KvGrammarTags = KvGrammarTags {
+    block_open: "<tool_call>",
+    block_close: "</tool_call>",
+    key_open: "<arg_key>",
+    key_close: "</arg_key>",
+    value_open: "<arg_value>",
+    value_close: "</arg_value>",
+    format: ToolCallFormat::Glm47,
+    defer_hermes_json: true,
+};
+
+/// LongCat-Flash tag set — distinct block tags, no Hermes collision.
+const LONGCAT_TAGS: KvGrammarTags = KvGrammarTags {
+    block_open: "<longcat_tool_call>",
+    block_close: "</longcat_tool_call>",
+    key_open: "<longcat_arg_key>",
+    key_close: "</longcat_arg_key>",
+    value_open: "<longcat_arg_value>",
+    value_close: "</longcat_arg_value>",
+    format: ToolCallFormat::Longcat,
+    defer_hermes_json: false,
+};
+
+/// Defensive caps bounding parallel-call and per-call parameter memory under
+/// adversarial model output, mirroring the other XML-style parsers.
+const KV_GRAMMAR_MAX_CALLS: usize = 1024;
+const KV_GRAMMAR_MAX_PAIRS: usize = 1024;
+
+/// Try parsing the GLM-4.7 tool-call grammar.
+///
+/// A tool call is `<tool_call>NAME<arg_key>KEY</arg_key><arg_value>VALUE`
+/// `</arg_value>...</tool_call>` where the function name is all text before the
+/// first `<arg_key>` and each argument is a key/value pair. Values are coerced
+/// against the request tool schema: a `string`-typed parameter keeps its raw
+/// text, any other type is JSON-parsed then loose-literal parsed then left raw.
+///
+/// GLM shares the `<tool_call>` block tags with Hermes, so a `<tool_call>` body
+/// that is a bare `{name, arguments}` JSON object is declined here (returns
+/// `None`) and left to [`try_hermes`]; the parser runs ahead of the Hermes marker
+/// loop so the non-JSON key/value grammar is claimed before Hermes sees it.
+pub fn try_glm47(text: &str, tools: Option<&[Tool]>) -> Option<ToolCallParseResult> {
+    try_kv_grammar(text, tools, &GLM47_TAGS)
+}
+
+/// Try parsing the LongCat-Flash tool-call grammar.
+///
+/// Structurally identical to [`try_glm47`] but keyed on the distinct
+/// `<longcat_tool_call>` / `<longcat_arg_key>` / `<longcat_arg_value>` tags. Those
+/// tags do not collide with any other format, so all fallback shapes (including a
+/// bare `{name, arguments}` JSON body) are claimed here.
+pub fn try_longcat(text: &str, tools: Option<&[Tool]>) -> Option<ToolCallParseResult> {
+    try_kv_grammar(text, tools, &LONGCAT_TAGS)
+}
+
+/// Shared driver for the GLM-4.7 / LongCat grammar. Iterates every
+/// `block_open` ... `block_close` block (multiple blocks = parallel calls) and
+/// parses each into a call. Prose before the first block becomes content.
+fn try_kv_grammar(
+    text: &str,
+    tools: Option<&[Tool]>,
+    tags: &KvGrammarTags,
+) -> Option<ToolCallParseResult> {
+    let first = text.find(tags.block_open)?;
+    let content = text[..first].trim().to_string();
+
+    let mut calls = Vec::new();
+    let mut remaining = &text[first..];
+
+    while let Some(start) = remaining.find(tags.block_open) {
+        let body_start = start + tags.block_open.len();
+        let (body, next) = match remaining[body_start..].find(tags.block_close) {
+            Some(end) => (
+                &remaining[body_start..body_start + end],
+                body_start + end + tags.block_close.len(),
+            ),
+            // No closing tag: take the rest of the text as the block body.
+            None => (&remaining[body_start..], remaining.len()),
+        };
+
+        if let Some(call) = parse_kv_block(body.trim(), tools, tags) {
+            calls.push(call);
+            if calls.len() >= KV_GRAMMAR_MAX_CALLS {
+                break;
+            }
+        }
+
+        remaining = &remaining[next..];
+    }
+
+    if calls.is_empty() {
+        return None;
+    }
+
+    Some(ToolCallParseResult {
+        format: Some(tags.format),
+        tool_calls: calls,
+        content,
+        reasoning_content: None,
+    })
+}
+
+/// Parse a single block body into a call. The primary grammar (an `<arg_key>` is
+/// present) is tried first; otherwise the defensive fallbacks are applied.
+fn parse_kv_block(
+    body: &str,
+    tools: Option<&[Tool]>,
+    tags: &KvGrammarTags,
+) -> Option<ParsedToolCall> {
+    if let Some(key_pos) = body.find(tags.key_open) {
+        return parse_kv_primary(body, key_pos, tools, tags);
+    }
+    parse_kv_fallback(body, tools, tags)
+}
+
+/// Parse the primary key/value grammar. The function name is everything before
+/// the first `<arg_key>`; each `<arg_key>KEY</arg_key>` (optional whitespace)
+/// `<arg_value>VALUE</arg_value>` pair becomes a schema-coerced argument.
+fn parse_kv_primary(
+    body: &str,
+    key_pos: usize,
+    tools: Option<&[Tool]>,
+    tags: &KvGrammarTags,
+) -> Option<ParsedToolCall> {
+    let name = body[..key_pos].trim();
+    if name.is_empty() {
+        return None;
+    }
+    let fn_schema = minimax_m3_function_schema(tools, name);
+
+    // `(?s)` so a value may span newlines; `.*?` is non-greedy so each pair stops
+    // at its own close tag. The tags are literal constants with no regex
+    // metacharacters, so no escaping is required.
+    let pattern = format!(
+        "(?s){}(.*?){}\\s*{}(.*?){}",
+        tags.key_open, tags.key_close, tags.value_open, tags.value_close
+    );
+    let re = Regex::new(&pattern).ok()?;
+
+    let mut map = serde_json::Map::new();
+    for caps in re.captures_iter(body) {
+        let Ok(caps) = caps else { continue };
+        let (Some(key_m), Some(val_m)) = (caps.get(1), caps.get(2)) else {
+            continue;
+        };
+        let key = key_m.as_str().trim();
+        if key.is_empty() {
+            continue;
+        }
+        let raw = val_m.as_str().trim();
+        let param_schema = kv_param_schema(fn_schema, key);
+        map.insert(key.to_string(), coerce_kv_value(raw, param_schema));
+        if map.len() >= KV_GRAMMAR_MAX_PAIRS {
+            break;
+        }
+    }
+
+    let arguments = serde_json::to_string(&serde_json::Value::Object(map)).ok()?;
+    Some(ParsedToolCall {
+        name: name.to_string(),
+        arguments,
+    })
+}
+
+/// Defensive fallbacks applied when a block body carries no `<arg_key>`.
+///
+/// In order: a JSON tool object (`{name, arguments}`, `{function, arguments}`, or
+/// `{tool: {...}}`); a `NAME {json}` / `NAME\n{json}` name-prefixed JSON body; or
+/// a `NAME key=value key=value` shell-style token split. The name-prefixed and
+/// shell forms require a plausible bare identifier as the name so bodies of other
+/// `<tool_call>`-wrapped formats (Qwen3-Coder, Functionary) are not misclaimed.
+fn parse_kv_fallback(
+    body: &str,
+    tools: Option<&[Tool]>,
+    tags: &KvGrammarTags,
+) -> Option<ParsedToolCall> {
+    let trimmed = body.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    // 1. JSON tool object.
+    if trimmed.starts_with('{') {
+        return kv_call_from_json(trimmed, tags.defer_hermes_json);
+    }
+
+    // 2. `NAME {json}` / `NAME\n{json}`.
+    if trimmed.contains('{')
+        && let Some(call) = kv_call_from_name_json(trimmed)
+    {
+        return Some(call);
+    }
+
+    // 3. `NAME key=value key=value`.
+    kv_call_from_shell(trimmed, tools)
+}
+
+/// Build a call from a JSON tool object body.
+///
+/// Recognised shapes are `{tool: {...}}`, `{name, arguments}`, and
+/// `{function, arguments}` (`parameters` accepted as an alias of `arguments`).
+/// When `defer_hermes_json` is set, a bare `{name, arguments}` object is declined
+/// so the Hermes parser downstream claims it; the `{function, arguments}` and
+/// `{tool: {...}}` shapes, which Hermes cannot parse, are still built here.
+fn kv_call_from_json(body: &str, defer_hermes_json: bool) -> Option<ParsedToolCall> {
+    let value: serde_json::Value = serde_json::from_str(body).ok()?;
+    let obj = value.as_object()?;
+
+    if let Some(tool) = obj.get("tool").and_then(|t| t.as_object()) {
+        return kv_call_from_name_args(tool);
+    }
+
+    if defer_hermes_json && obj.contains_key("name") {
+        return None;
+    }
+    kv_call_from_name_args(obj)
+}
+
+/// Build a call from a JSON object with a `name`/`function` field and an
+/// `arguments`/`parameters` field (the latter defaulting to `{}`).
+fn kv_call_from_name_args(
+    obj: &serde_json::Map<String, serde_json::Value>,
+) -> Option<ParsedToolCall> {
+    let name = obj
+        .get("name")
+        .or_else(|| obj.get("function"))
+        .and_then(|n| n.as_str())?
+        .to_string();
+    if name.is_empty() {
+        return None;
+    }
+    let arguments = match obj.get("arguments").or_else(|| obj.get("parameters")) {
+        Some(v) if v.is_string() => v.as_str().unwrap_or_default().to_string(),
+        Some(v) => serde_json::to_string(v).ok()?,
+        None => "{}".to_string(),
+    };
+    Some(ParsedToolCall { name, arguments })
+}
+
+/// Build a call from a `NAME {json}` / `NAME\n{json}` body: the text before the
+/// first `{` is a plausible function name and the remainder is a JSON object.
+fn kv_call_from_name_json(body: &str) -> Option<ParsedToolCall> {
+    let brace = body.find('{')?;
+    let name = body[..brace].trim();
+    if !plausible_fn_name(name) {
+        return None;
+    }
+    let value: serde_json::Value = serde_json::from_str(body[brace..].trim()).ok()?;
+    if !value.is_object() {
+        return None;
+    }
+    let arguments = serde_json::to_string(&value).ok()?;
+    Some(ParsedToolCall {
+        name: name.to_string(),
+        arguments,
+    })
+}
+
+/// Build a call from a `NAME key=value key=value` shell-style body. The first
+/// token is a plausible function name and each remaining `key=value` token
+/// becomes a schema-coerced argument. At least one `key=value` pair is required
+/// so a bare word is not misread as a no-argument call.
+fn kv_call_from_shell(body: &str, tools: Option<&[Tool]>) -> Option<ParsedToolCall> {
+    let mut tokens = shell_split(body).into_iter();
+    let name = tokens.next()?;
+    if !plausible_fn_name(&name) {
+        return None;
+    }
+    let fn_schema = minimax_m3_function_schema(tools, &name);
+
+    let mut map = serde_json::Map::new();
+    let mut saw_pair = false;
+    for token in tokens {
+        let Some(eq) = token.find('=') else { continue };
+        let key = &token[..eq];
+        if key.is_empty() {
+            continue;
+        }
+        saw_pair = true;
+        let param_schema = kv_param_schema(fn_schema, key);
+        map.insert(
+            key.to_string(),
+            coerce_kv_value(&token[eq + 1..], param_schema),
+        );
+        if map.len() >= KV_GRAMMAR_MAX_PAIRS {
+            break;
+        }
+    }
+    if !saw_pair {
+        return None;
+    }
+
+    let arguments = serde_json::to_string(&serde_json::Value::Object(map)).ok()?;
+    Some(ParsedToolCall { name, arguments })
+}
+
+/// Whether `name` is a plausible bare function identifier (letters, digits, `_`,
+/// `.`, `-`, no whitespace). Gates the name-prefixed and shell fallbacks so
+/// bodies of other `<tool_call>`-wrapped formats are declined rather than
+/// misclaimed.
+fn plausible_fn_name(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .chars()
+            .all(|c| c.is_alphanumeric() || matches!(c, '_' | '.' | '-'))
+}
+
+/// Split a body into shell-style tokens, honouring single and double quotes so a
+/// quoted value such as `title="two words"` stays one token. Bounded by
+/// [`KV_GRAMMAR_MAX_PAIRS`] tokens under adversarial input.
+fn shell_split(s: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut cur = String::new();
+    let mut in_token = false;
+    let mut chars = s.chars();
+
+    while let Some(c) = chars.next() {
+        match c {
+            '"' | '\'' => {
+                in_token = true;
+                for qc in chars.by_ref() {
+                    if qc == c {
+                        break;
+                    }
+                    cur.push(qc);
+                }
+            }
+            c if c.is_whitespace() => {
+                if in_token {
+                    tokens.push(std::mem::take(&mut cur));
+                    in_token = false;
+                    if tokens.len() >= KV_GRAMMAR_MAX_PAIRS {
+                        return tokens;
+                    }
+                }
+            }
+            c => {
+                in_token = true;
+                cur.push(c);
+            }
+        }
+    }
+    if in_token {
+        tokens.push(cur);
+    }
+    tokens
+}
+
+/// Look up a parameter's JSON schema inside a function's `parameters` object.
+fn kv_param_schema<'a>(
+    fn_schema: Option<&'a serde_json::Value>,
+    key: &str,
+) -> Option<&'a serde_json::Value> {
+    fn_schema?
+        .get("properties")
+        .and_then(|p| p.as_object())
+        .and_then(|props| props.get(key))
+}
+
+/// Coerce a raw argument value using schema-aware rules: a `string`-typed
+/// parameter keeps its raw text; any other type (or no schema) falls back to a
+/// JSON parse, then a loose literal parse (numbers, booleans, lists), then the
+/// raw string. Reuses the MiniMax M3 schema-type mapper and fallback coercion.
+fn coerce_kv_value(raw: &str, param_schema: Option<&serde_json::Value>) -> serde_json::Value {
+    if let Some(schema) = param_schema
+        && minimax_m3_schema_type(schema) == Some(M3Type::Str)
+    {
+        return serde_json::Value::String(raw.to_string());
+    }
+    minimax_m3_fallback_coerce(raw)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3928,5 +4329,342 @@ mod tests {
         assert_eq!(result.tool_calls.len(), 1);
         assert_eq!(result.tool_calls[0].name, "f");
         assert_eq!(m3_args(&result, 0)["x"], 1);
+    }
+
+    // ------------------------------------------------------------------
+    // GLM-4.7 / LongCat (arg_key/arg_value key-value grammar)
+    // ------------------------------------------------------------------
+
+    /// Build a GLM-4.7 `<tool_call>NAME<arg_key>k</arg_key>` newline
+    /// `<arg_value>v</arg_value>...</tool_call>` block.
+    fn glm_block(name: &str, pairs: &[(&str, &str)]) -> String {
+        let mut s = format!("<tool_call>{name}");
+        for (k, v) in pairs {
+            s.push_str(&format!(
+                "<arg_key>{k}</arg_key>\n<arg_value>{v}</arg_value>\n"
+            ));
+        }
+        s.push_str("</tool_call>");
+        s
+    }
+
+    /// Build the LongCat equivalent of [`glm_block`].
+    fn longcat_block(name: &str, pairs: &[(&str, &str)]) -> String {
+        let mut s = format!("<longcat_tool_call>{name}");
+        for (k, v) in pairs {
+            s.push_str(&format!(
+                "<longcat_arg_key>{k}</longcat_arg_key>\n<longcat_arg_value>{v}</longcat_arg_value>\n"
+            ));
+        }
+        s.push_str("</longcat_tool_call>");
+        s
+    }
+
+    fn kv_args(result: &ToolCallParseResult, idx: usize) -> serde_json::Value {
+        serde_json::from_str(&result.tool_calls[idx].arguments).expect("arguments must be JSON")
+    }
+
+    // -- GLM-4.7 primary grammar --
+
+    #[test]
+    fn glm47_single_arg() {
+        let output = glm_block("get_weather", &[("location", "Paris")]);
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {"location": {"type": "string"}}
+        });
+        let tools = vec![m3_tool("get_weather", schema)];
+        let result = try_glm47(&output, Some(&tools)).unwrap();
+        assert_eq!(result.format, Some(ToolCallFormat::Glm47));
+        assert_eq!(result.tool_calls.len(), 1);
+        assert_eq!(result.tool_calls[0].name, "get_weather");
+        assert_eq!(kv_args(&result, 0)["location"], "Paris");
+    }
+
+    #[test]
+    fn glm47_multiple_args_with_typed_coercion() {
+        let output = glm_block("search", &[("query", "rust"), ("limit", "5")]);
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "query": {"type": "string"},
+                "limit": {"type": "integer"}
+            }
+        });
+        let tools = vec![m3_tool("search", schema)];
+        let result = try_glm47(&output, Some(&tools)).unwrap();
+        let args = kv_args(&result, 0);
+        assert_eq!(args["query"], "rust");
+        assert_eq!(args["limit"], 5);
+        assert!(args["limit"].is_number());
+    }
+
+    #[test]
+    fn glm47_multiline_value_preserves_internal_newlines() {
+        let output = "<tool_call>write_file<arg_key>content</arg_key>\n\
+                      <arg_value>fn main() {\n    println!(\"hi\");\n}</arg_value></tool_call>";
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {"content": {"type": "string"}}
+        });
+        let tools = vec![m3_tool("write_file", schema)];
+        let result = try_glm47(output, Some(&tools)).unwrap();
+        assert_eq!(
+            kv_args(&result, 0)["content"],
+            "fn main() {\n    println!(\"hi\");\n}"
+        );
+    }
+
+    #[test]
+    fn glm47_string_typed_keeps_raw_vs_numeric_coerces() {
+        // Same numeric-looking value under two different declared types: the
+        // string-typed param keeps "007", the integer-typed one becomes 7.
+        let output = glm_block("f", &[("s", "007"), ("n", "007")]);
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "s": {"type": "string"},
+                "n": {"type": "integer"}
+            }
+        });
+        let tools = vec![m3_tool("f", schema)];
+        let result = try_glm47(&output, Some(&tools)).unwrap();
+        let args = kv_args(&result, 0);
+        assert_eq!(args["s"], "007");
+        assert!(args["s"].is_string());
+        assert_eq!(args["n"], 7);
+    }
+
+    #[test]
+    fn glm47_no_schema_uses_loose_literal_coercion() {
+        let output = glm_block("f", &[("n", "42"), ("flag", "true"), ("s", "hello")]);
+        let result = try_glm47(&output, None).unwrap();
+        let args = kv_args(&result, 0);
+        assert_eq!(args["n"], 42);
+        assert_eq!(args["flag"], true);
+        assert_eq!(args["s"], "hello");
+    }
+
+    #[test]
+    fn glm47_parallel_calls() {
+        let output = format!(
+            "{}{}",
+            glm_block("a", &[("x", "1")]),
+            glm_block("b", &[("y", "2")])
+        );
+        let result = try_glm47(&output, None).unwrap();
+        assert_eq!(result.tool_calls.len(), 2);
+        assert_eq!(result.tool_calls[0].name, "a");
+        assert_eq!(result.tool_calls[1].name, "b");
+        assert_eq!(kv_args(&result, 0)["x"], 1);
+        assert_eq!(kv_args(&result, 1)["y"], 2);
+    }
+
+    #[test]
+    fn glm47_content_before_block_preserved() {
+        let output = format!("Let me check.{}", glm_block("f", &[("x", "1")]));
+        let result = try_glm47(&output, None).unwrap();
+        assert_eq!(result.content, "Let me check.");
+    }
+
+    // -- GLM-4.7 fallbacks --
+
+    #[test]
+    fn glm47_fallback_json_function_shape() {
+        let output = r#"<tool_call>{"function": "get_weather", "arguments": {"location": "Paris"}}</tool_call>"#;
+        let result = try_glm47(output, None).unwrap();
+        assert_eq!(result.tool_calls[0].name, "get_weather");
+        assert_eq!(kv_args(&result, 0)["location"], "Paris");
+    }
+
+    #[test]
+    fn glm47_fallback_json_tool_shape() {
+        let output =
+            r#"<tool_call>{"tool": {"name": "search", "arguments": {"q": "rust"}}}</tool_call>"#;
+        let result = try_glm47(output, None).unwrap();
+        assert_eq!(result.tool_calls[0].name, "search");
+        assert_eq!(kv_args(&result, 0)["q"], "rust");
+    }
+
+    #[test]
+    fn glm47_declines_bare_hermes_json_body() {
+        // A bare `{name, arguments}` object is the exact Hermes shape; GLM shares
+        // the `<tool_call>` tags, so it must decline and leave the body to Hermes.
+        let output =
+            r#"<tool_call>{"name": "get_weather", "arguments": {"location": "Paris"}}</tool_call>"#;
+        assert!(try_glm47(output, None).is_none());
+    }
+
+    #[test]
+    fn glm47_fallback_name_newline_json() {
+        let output = "<tool_call>get_weather\n{\"location\": \"Paris\"}</tool_call>";
+        let result = try_glm47(output, None).unwrap();
+        assert_eq!(result.tool_calls[0].name, "get_weather");
+        assert_eq!(kv_args(&result, 0)["location"], "Paris");
+    }
+
+    #[test]
+    fn glm47_fallback_name_space_json() {
+        let output = "<tool_call>get_weather {\"location\": \"Paris\"}</tool_call>";
+        let result = try_glm47(output, None).unwrap();
+        assert_eq!(result.tool_calls[0].name, "get_weather");
+        assert_eq!(kv_args(&result, 0)["location"], "Paris");
+    }
+
+    #[test]
+    fn glm47_fallback_shell_kv() {
+        let output = "<tool_call>get_weather location=Paris units=celsius</tool_call>";
+        let result = try_glm47(output, None).unwrap();
+        assert_eq!(result.tool_calls[0].name, "get_weather");
+        let args = kv_args(&result, 0);
+        assert_eq!(args["location"], "Paris");
+        assert_eq!(args["units"], "celsius");
+    }
+
+    #[test]
+    fn glm47_fallback_shell_kv_quoted_value() {
+        let output = "<tool_call>note title=\"hello world\" pinned=true</tool_call>";
+        let result = try_glm47(output, None).unwrap();
+        assert_eq!(result.tool_calls[0].name, "note");
+        let args = kv_args(&result, 0);
+        assert_eq!(args["title"], "hello world");
+        assert_eq!(args["pinned"], true);
+    }
+
+    #[test]
+    fn glm47_malformed_returns_none() {
+        // No block markers at all.
+        assert!(try_glm47("just plain text, no markers", None).is_none());
+        // Empty block body.
+        assert!(try_glm47("<tool_call>   </tool_call>", None).is_none());
+        // A bare word with no key=value pairs is not a confident call.
+        assert!(try_glm47("<tool_call>random words here</tool_call>", None).is_none());
+        // `<arg_key>` present but no function name before it.
+        assert!(
+            try_glm47(
+                "<tool_call><arg_key>k</arg_key><arg_value>v</arg_value></tool_call>",
+                None
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn glm47_does_not_claim_qwen3_coder_body() {
+        // Qwen3-Coder wraps `<function=...>` in `<tool_call>`. GLM must decline it
+        // (the body has no `<arg_key>`, is not JSON, and its first shell token is
+        // not a plausible bare name) so the Qwen3-Coder parser can claim it.
+        let output = "<tool_call><function=get_weather><parameter=location>Paris</parameter></function></tool_call>";
+        assert!(try_glm47(output, None).is_none());
+    }
+
+    // -- LongCat grammar --
+
+    #[test]
+    fn longcat_single_and_multiple_args() {
+        let output = longcat_block("get_weather", &[("location", "Paris"), ("days", "3")]);
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "location": {"type": "string"},
+                "days": {"type": "integer"}
+            }
+        });
+        let tools = vec![m3_tool("get_weather", schema)];
+        let result = try_longcat(&output, Some(&tools)).unwrap();
+        assert_eq!(result.format, Some(ToolCallFormat::Longcat));
+        let args = kv_args(&result, 0);
+        assert_eq!(args["location"], "Paris");
+        assert_eq!(args["days"], 3);
+    }
+
+    #[test]
+    fn longcat_multiline_value() {
+        let output = "<longcat_tool_call>run<longcat_arg_key>script</longcat_arg_key>\n\
+                      <longcat_arg_value>line1\nline2</longcat_arg_value></longcat_tool_call>";
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {"script": {"type": "string"}}
+        });
+        let tools = vec![m3_tool("run", schema)];
+        let result = try_longcat(output, Some(&tools)).unwrap();
+        assert_eq!(kv_args(&result, 0)["script"], "line1\nline2");
+    }
+
+    #[test]
+    fn longcat_string_vs_numeric_coercion() {
+        let output = longcat_block("f", &[("s", "007"), ("n", "007")]);
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "s": {"type": "string"},
+                "n": {"type": "integer"}
+            }
+        });
+        let tools = vec![m3_tool("f", schema)];
+        let result = try_longcat(&output, Some(&tools)).unwrap();
+        let args = kv_args(&result, 0);
+        assert_eq!(args["s"], "007");
+        assert!(args["s"].is_string());
+        assert_eq!(args["n"], 7);
+    }
+
+    #[test]
+    fn longcat_parallel_calls() {
+        let output = format!(
+            "{}{}",
+            longcat_block("a", &[("x", "1")]),
+            longcat_block("b", &[("y", "2")])
+        );
+        let result = try_longcat(&output, None).unwrap();
+        assert_eq!(result.tool_calls.len(), 2);
+        assert_eq!(result.tool_calls[0].name, "a");
+        assert_eq!(result.tool_calls[1].name, "b");
+    }
+
+    #[test]
+    fn longcat_raw_json_body_claimed() {
+        // LongCat's tags do not collide with Hermes, so a bare `{name, arguments}`
+        // JSON body is claimed here (not deferred).
+        let output = r#"<longcat_tool_call>{"name": "search", "arguments": {"q": "rust"}}</longcat_tool_call>"#;
+        let result = try_longcat(output, None).unwrap();
+        assert_eq!(result.format, Some(ToolCallFormat::Longcat));
+        assert_eq!(result.tool_calls[0].name, "search");
+        assert_eq!(kv_args(&result, 0)["q"], "rust");
+    }
+
+    #[test]
+    fn longcat_fallback_shapes() {
+        let function_shape =
+            r#"<longcat_tool_call>{"function": "f", "arguments": {"a": 1}}</longcat_tool_call>"#;
+        assert_eq!(
+            try_longcat(function_shape, None).unwrap().tool_calls[0].name,
+            "f"
+        );
+
+        let tool_shape =
+            r#"<longcat_tool_call>{"tool": {"name": "g", "arguments": {}}}</longcat_tool_call>"#;
+        assert_eq!(
+            try_longcat(tool_shape, None).unwrap().tool_calls[0].name,
+            "g"
+        );
+
+        let name_json = "<longcat_tool_call>h {\"a\": 1}</longcat_tool_call>";
+        assert_eq!(
+            try_longcat(name_json, None).unwrap().tool_calls[0].name,
+            "h"
+        );
+
+        let shell = "<longcat_tool_call>k a=1 b=2</longcat_tool_call>";
+        let result = try_longcat(shell, None).unwrap();
+        assert_eq!(result.tool_calls[0].name, "k");
+        assert_eq!(kv_args(&result, 0)["a"], 1);
+        assert_eq!(kv_args(&result, 0)["b"], 2);
+    }
+
+    #[test]
+    fn longcat_malformed_returns_none() {
+        assert!(try_longcat("plain text with no markers", None).is_none());
+        assert!(try_longcat("<longcat_tool_call></longcat_tool_call>", None).is_none());
     }
 }
