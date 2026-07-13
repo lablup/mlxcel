@@ -35,6 +35,9 @@ pub enum ToolCallFormat {
     Llama3,
     /// Mistral Nemo: `[TOOL_CALLS] [{"name": ..., "arguments": ...}]`
     MistralNemo,
+    /// Mistral (bracketed): `[TOOL_CALLS]NAME[ARGS]{json}`, used by Ministral
+    /// 2410 and later, Mistral Small 3, Magistral, and Devstral.
+    Mistral,
     /// Functionary v3.1: `<function=name>{"key": "val"}</function>`
     FunctionaryV31,
     /// Functionary v3.2: `>>>name\n{"key": "val"}`

@@ -161,7 +161,10 @@ pub fn parse_tool_calls(raw_output: &str, tools: Option<&[Tool]>) -> ToolCallPar
         formats::try_hermes,  // <tool_call> — Hermes/Qwen/DeepSeek
         formats::try_minimax_m2, // <invoke name=...><parameter name=...>...</parameter></invoke>
         formats::try_kimi_k2, // <|tool_calls_section_begin|>...<|tool_calls_section_end|>
-        formats::try_mistral_nemo, // [TOOL_CALLS]
+        // [TOOL_CALLS]NAME[ARGS]{json}; declines (returns None) without [ARGS], so the
+        // older JSON-array format below still falls through to try_mistral_nemo.
+        formats::try_mistral_bracket,
+        formats::try_mistral_nemo,    // [TOOL_CALLS]
         formats::try_functionary_v31, // <function=name>{json}
         formats::try_qwen3_coder, // <function=name><parameter=key>val</parameter> (after v31, which declines non-JSON bodies)
         formats::try_functionary_v32, // >>>name\n
@@ -300,6 +303,37 @@ mod tests {
         let result = parse_tool_calls(output, Some(&tools));
         assert!(result.has_tool_calls());
         assert_eq!(result.tool_calls[0].name, "search");
+        // Regression: the old JSON-array format must still resolve to
+        // MistralNemo, proving try_mistral_bracket correctly falls through.
+        assert_eq!(
+            result.format,
+            Some(crate::server::tool_calls::ToolCallFormat::MistralNemo)
+        );
+    }
+
+    #[test]
+    fn parse_mistral_bracket_format() {
+        let output = r#"[TOOL_CALLS]get_weather[ARGS]{"city": "Paris"}"#;
+        let tools = vec![make_tool("get_weather")];
+        let result = parse_tool_calls(output, Some(&tools));
+        assert!(result.has_tool_calls());
+        assert_eq!(result.tool_calls.len(), 1);
+        assert_eq!(result.tool_calls[0].name, "get_weather");
+        let args: serde_json::Value =
+            serde_json::from_str(&result.tool_calls[0].arguments).unwrap();
+        assert_eq!(args["city"], "Paris");
+        assert_eq!(
+            result.format,
+            Some(crate::server::tool_calls::ToolCallFormat::Mistral)
+        );
+    }
+
+    #[test]
+    fn parse_mistral_bracket_filters_unknown_tools() {
+        let output = r#"[TOOL_CALLS]unknown_fn[ARGS]{}"#;
+        let tools = vec![make_tool("get_weather")];
+        let result = parse_tool_calls(output, Some(&tools));
+        assert!(!result.has_tool_calls());
     }
 
     #[test]

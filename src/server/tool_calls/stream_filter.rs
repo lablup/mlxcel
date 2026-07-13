@@ -1258,6 +1258,21 @@ mod tests {
         );
     }
 
+    #[test]
+    fn mistral_bracket_tool_calls_marker_suppressed() {
+        // Newer Mistral-family models (Ministral 2410+, Mistral Small 3,
+        // Magistral, Devstral) emit `[TOOL_CALLS]NAME[ARGS]{json}`. Because
+        // `[TOOL_CALLS]` is already a one-shot `EnterToolCall` marker, this
+        // shape is suppressed by the same delimiter as Mistral Nemo: no
+        // dedicated `[ARGS]` delimiter row is needed.
+        let mut f = StreamFilter::new();
+        let out = f.feed(r#"[TOOL_CALLS]get_weather[ARGS]{"city": "Paris"}"#);
+        assert_eq!(
+            out.content, None,
+            "bracketed Mistral tool-call payload must not appear in delta.content"
+        );
+    }
+
     // -- Token-position preservation for parallel tool calls --
     //
     // Upstream mlx-lm PR #1170 (commit aa4f880) fixed `_process_control_tokens`
