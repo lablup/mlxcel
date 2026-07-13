@@ -24,15 +24,102 @@
 use anyhow::Result;
 use mlxcel_core::weights::WeightMap;
 use serde_json::Value;
-use std::path::Path;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 
 use crate::LoadedModel;
 use crate::models;
 use crate::vision;
+use crate::vision::processors::pixtral::{PixtralLayout, PixtralProcessor};
 
 use super::llava::infer_llama_config_from_weights;
 use super::{load_vlm_weights_common, read_sanitized_vlm_config, strip_language_model_prefix};
 use crate::model_metadata::is_mistral4_config;
+
+fn read_json_file(path: PathBuf) -> Option<Value> {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+}
+
+/// Resolve the `[IMG] / [IMG_BREAK] / [IMG_END]` token ids for the Pixtral row
+/// layout. Token strings come from `processor_config.json`; the id mapping comes
+/// from `tokenizer_config.json`'s `added_tokens_decoder`. Falls back to the
+/// well-known ids (10 / 12 / 13) shared by pixtral-12b and mistral-small-3.1
+/// when a file or entry is missing.
+fn resolve_pixtral_row_tokens(model_path: &Path, image_token_id: i32) -> (i32, i32, i32) {
+    let proc_cfg = read_json_file(model_path.join("processor_config.json"));
+    let token_str = |key: &str, default: &str| -> String {
+        proc_cfg
+            .as_ref()
+            .and_then(|c| c.get(key))
+            .and_then(|v| v.as_str())
+            .unwrap_or(default)
+            .to_string()
+    };
+    let img_str = token_str("image_token", "[IMG]");
+    let brk_str = token_str("image_break_token", "[IMG_BREAK]");
+    let end_str = token_str("image_end_token", "[IMG_END]");
+
+    // added_tokens_decoder maps id -> { "content": "[IMG_BREAK]", ... }; invert
+    // to content -> id so we can look each special string up by name.
+    let mut content_to_id: HashMap<String, i32> = HashMap::new();
+    if let Some(tok_cfg) = read_json_file(model_path.join("tokenizer_config.json"))
+        && let Some(map) = tok_cfg
+            .get("added_tokens_decoder")
+            .and_then(|v| v.as_object())
+    {
+        for (id_str, entry) in map {
+            if let (Ok(id), Some(content)) = (
+                id_str.parse::<i32>(),
+                entry.get("content").and_then(|c| c.as_str()),
+            ) {
+                content_to_id.insert(content.to_string(), id);
+            }
+        }
+    }
+
+    let img_id = content_to_id
+        .get(&img_str)
+        .copied()
+        .unwrap_or(image_token_id);
+    let brk_id = content_to_id.get(&brk_str).copied().unwrap_or(12);
+    let end_id = content_to_id.get(&end_str).copied().unwrap_or(13);
+    (img_id, brk_id, end_id)
+}
+
+/// Build the dynamic aspect-ratio [`PixtralLayout`] shared by Pixtral and
+/// Mistral3. `spatial_merge_size` is 1 for Pixtral and 2 for Mistral3.
+fn build_pixtral_layout(
+    model_path: &Path,
+    pixtral_config: &vision::encoders::pixtral::PixtralVisionConfig,
+    image_token_id: i32,
+    spatial_merge_size: usize,
+) -> PixtralLayout {
+    // `size.longest_edge` from the (pre)processor config; both checkpoints set
+    // it equal to vision_config.image_size, which is the fallback.
+    let longest_edge = read_json_file(model_path.join("preprocessor_config.json"))
+        .or_else(|| read_json_file(model_path.join("processor_config.json")))
+        .and_then(|c| {
+            c.get("size")
+                .and_then(|s| s.get("longest_edge"))
+                .and_then(|v| v.as_u64())
+        })
+        .map(|v| v as usize)
+        .unwrap_or(pixtral_config.image_size);
+
+    let processor =
+        PixtralProcessor::new(pixtral_config.patch_size, spatial_merge_size, longest_edge);
+    let (image_token_id, image_break_token_id, image_end_token_id) =
+        resolve_pixtral_row_tokens(model_path, image_token_id);
+
+    PixtralLayout {
+        processor,
+        image_token_id,
+        image_break_token_id,
+        image_end_token_id,
+    }
+}
 
 struct PixtralFamilyContext {
     full_config: Value,
@@ -199,7 +286,6 @@ fn build_pixtral_family_context(model_path: &Path) -> Result<PixtralFamilyContex
 pub(crate) fn load_pixtral_vlm(model_path: &Path) -> Result<LoadedModel> {
     use vision::connectors::mlp::MLPProjector;
     use vision::encoders::pixtral::PixtralVisionModel;
-    use vision::processors::siglip::SigLipProcessor;
 
     let context = build_pixtral_family_context(model_path)?;
 
@@ -219,7 +305,15 @@ pub(crate) fn load_pixtral_vlm(model_path: &Path) -> Result<LoadedModel> {
     )
     .map_err(|e| anyhow::anyhow!("Failed to load MLP projector: {}", e))?;
 
-    let processor = SigLipProcessor::new_rescale_only(context.pixtral_config.image_size);
+    // Pixtral has no spatial merge (spatial_merge_size = 1); the row layout and
+    // resize round-up both key off patch_size alone here.
+    let layout = build_pixtral_layout(
+        model_path,
+        &context.pixtral_config,
+        context.image_token_id,
+        1,
+    );
+    let processor = layout.processor.clone();
     let num_patches =
         (context.pixtral_config.image_size / context.pixtral_config.patch_size).pow(2);
     let mm_tokens_per_image = context
@@ -232,7 +326,7 @@ pub(crate) fn load_pixtral_vlm(model_path: &Path) -> Result<LoadedModel> {
         encoder: Box::new(vision_encoder),
         connector: Box::new(connector),
         processor: Box::new(processor),
-        image_token_id: context.image_token_id,
+        image_token_id: layout.image_token_id,
         pad_token_id: context.pad_token_id,
         hidden_size: if context.hidden_size > 0 {
             context.hidden_size
@@ -248,6 +342,7 @@ pub(crate) fn load_pixtral_vlm(model_path: &Path) -> Result<LoadedModel> {
         suffix_tokens: Vec::new(),
         block_prefix_tokens: Vec::new(),
         block_suffix_tokens: Vec::new(),
+        pixtral_layout: Some(layout),
     };
 
     let vlm = vision::VisionLanguageModel {
@@ -262,7 +357,6 @@ pub(crate) fn load_pixtral_vlm(model_path: &Path) -> Result<LoadedModel> {
 pub(crate) fn load_mistral3_vlm(model_path: &Path) -> Result<LoadedModel> {
     use vision::connectors::mistral3::Mistral3Projector;
     use vision::encoders::pixtral::PixtralVisionModel;
-    use vision::processors::siglip::SigLipProcessor;
 
     let context = build_pixtral_family_context(model_path)?;
 
@@ -292,7 +386,13 @@ pub(crate) fn load_mistral3_vlm(model_path: &Path) -> Result<LoadedModel> {
     )
     .map_err(|e| anyhow::anyhow!("Failed to load Mistral3 projector: {}", e))?;
 
-    let processor = SigLipProcessor::new_rescale_only(context.pixtral_config.image_size);
+    let layout = build_pixtral_layout(
+        model_path,
+        &context.pixtral_config,
+        context.image_token_id,
+        spatial_merge_size as usize,
+    );
+    let processor = layout.processor.clone();
     let num_patches_per_side =
         context.pixtral_config.image_size / context.pixtral_config.patch_size;
     let merged_per_side = num_patches_per_side / spatial_merge_size as usize;
@@ -307,7 +407,7 @@ pub(crate) fn load_mistral3_vlm(model_path: &Path) -> Result<LoadedModel> {
         encoder: Box::new(vision_encoder),
         connector: Box::new(connector),
         processor: Box::new(processor),
-        image_token_id: context.image_token_id,
+        image_token_id: layout.image_token_id,
         pad_token_id: context.pad_token_id,
         hidden_size: if context.hidden_size > 0 {
             context.hidden_size
@@ -323,6 +423,7 @@ pub(crate) fn load_mistral3_vlm(model_path: &Path) -> Result<LoadedModel> {
         suffix_tokens: Vec::new(),
         block_prefix_tokens: Vec::new(),
         block_suffix_tokens: Vec::new(),
+        pixtral_layout: Some(layout),
     };
 
     let vlm = vision::VisionLanguageModel {

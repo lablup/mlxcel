@@ -65,6 +65,7 @@ fn test_vision_module() -> VisionModule {
         suffix_tokens: vec![13, 14],
         block_prefix_tokens: Vec::new(),
         block_suffix_tokens: Vec::new(),
+        pixtral_layout: None,
     }
 }
 

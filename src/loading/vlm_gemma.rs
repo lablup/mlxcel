@@ -190,6 +190,7 @@ pub(crate) fn load_gemma3_vlm(model_path: &Path) -> Result<LoadedModel> {
         // the extra \n\n wrapping when expanding BOI tokens from the template.
         block_prefix_tokens: vec![108],
         block_suffix_tokens: vec![108],
+        pixtral_layout: None,
     };
 
     let vlm = vision::VisionLanguageModel {

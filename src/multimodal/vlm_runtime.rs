@@ -35,6 +35,7 @@ use crate::moondream3_prompt::{Moondream3PromptMode, prepare_moondream3_prompt_t
 use crate::phi3v_prompt::prepare_phi3v_prompt_tokens;
 use crate::phi4_siglip_prompt::prepare_phi4_siglip_prompt_tokens;
 use crate::phi4mm_prompt::prepare_phi4mm_prompt_tokens;
+use crate::pixtral_prompt::insert_pixtral_image_tokens;
 use crate::qwen_vl::{insert_qwen_vl_image_tokens, insert_qwen3_omni_image_tokens};
 use crate::smolvlm_prompt::insert_smolvlm_image_tokens;
 use crate::vision::KimiVLModel;
@@ -44,7 +45,7 @@ use crate::vision::merge::InputEmbeddings;
 use crate::vision::processors::ImageProcessor;
 use crate::vlm_prompt::{ImageTokenBlockInfo, ImageTokenBlockStats, apply_image_token_blocks};
 use crate::youtu_vl_prompt::insert_youtu_vl_image_tokens;
-use crate::{LoadedModel, VlmRuntimeRef};
+use crate::{LanguageModel, LoadedModel, VlmRuntimeRef};
 
 const MOLMO_V1_BOS_TOKEN_ID: i32 = 151643;
 
@@ -196,6 +197,14 @@ pub enum VlmPreparationSummary {
     /// `<patch_start> <im_patch>*81 <patch_end> [<patch_newline>]` blocks plus a
     /// base `<im_start> <im_patch>*169 <im_end>` block.
     Step3p7 {
+        image_blocks: usize,
+        total_image_tokens: i32,
+    },
+    /// Pixtral / Mistral3 expanded each `[IMG]` placeholder into a
+    /// row-structured `[IMG]* [IMG_BREAK] ... [IMG_END]` block sized to the
+    /// image's aspect ratio. `total_image_tokens` counts only `[IMG]` tokens
+    /// (== vision features).
+    Pixtral {
         image_blocks: usize,
         total_image_tokens: i32,
     },
@@ -1436,6 +1445,88 @@ where
                 image_blocks: s.image_blocks,
                 total_image_tokens: s.total_image_tokens,
             });
+
+            Ok(Some(PreparedVlmEmbeddings {
+                embeddings,
+                preparation,
+            }))
+        }
+        VlmRuntimeRef::Pixtral(vision_module) => {
+            // Dynamic aspect-ratio path for Pixtral / Mistral3. Each image is
+            // resized preserving aspect ratio, so images in a multi-image batch
+            // may have different sizes and cannot be packed into one dense pixel
+            // tensor. We therefore run the encoder + connector once per image and
+            // concatenate the projected features in prompt order; the encoder's
+            // 2D-RoPE grid is derived per call from the actual pixel shape, and
+            // the connector receives that image's `(patches_h, patches_w)` so the
+            // Mistral3 PatchMerger unfolds the correct non-square grid. See
+            // lablup/mlxcel#779.
+            let layout = vision_module.pixtral_layout.as_ref().ok_or_else(|| {
+                anyhow::anyhow!("Pixtral runtime selected but pixtral_layout is missing")
+            })?;
+            let _ = active_caches;
+            let _ = image_cache_keys;
+
+            let per_image: Vec<_> = images
+                .iter()
+                .map(|img| layout.processor.preprocess_one(img))
+                .collect();
+
+            // Row-structured token expansion: one `[IMG]`-block per image sized to
+            // its post-merge `(tokens_h, tokens_w)` grid. The `[IMG]` count per
+            // image equals `tokens_h * tokens_w`, matching the feature count.
+            let token_grids: Vec<(usize, usize)> =
+                per_image.iter().map(|p| (p.tokens_h, p.tokens_w)).collect();
+            let preparation = insert_pixtral_image_tokens(
+                prompt_tokens,
+                &token_grids,
+                layout.image_token_id,
+                layout.image_break_token_id,
+                layout.image_end_token_id,
+            )
+            .map(|stats| VlmPreparationSummary::Pixtral {
+                image_blocks: stats.image_blocks,
+                total_image_tokens: stats.total_image_tokens,
+            });
+
+            // Text embeddings must be built AFTER expansion so the `[IMG]`
+            // positions line up with the projected features on merge.
+            let input_ids_arr = prompt_ids_array(prompt_tokens);
+            let inputs_embeds = model.embed_tokens(&input_ids_arr).ok_or_else(|| {
+                anyhow::anyhow!("Text model must support embed_tokens for Pixtral VLM")
+            })?;
+            let embed_dtype = mlxcel_core::array_dtype(&inputs_embeds);
+
+            let mut image_features: Option<mlxcel_core::UniquePtr<MlxArray>> = None;
+            for p in &per_image {
+                // Processor emits channels-first [1, C, H, W]; the encoder wants
+                // channels-last [1, H, W, C] in the text embedding dtype.
+                let pv = mlxcel_core::transpose_axes(&p.pixel_values, &[0, 2, 3, 1]);
+                let pv = mlxcel_core::astype(&pv, embed_dtype);
+                let encoded = vision_module.encoder.forward(&pv);
+                let projected = vision_module.connector.forward_with_grid(
+                    &encoded.hidden_states,
+                    p.patches_h as i32,
+                    p.patches_w as i32,
+                );
+                image_features = Some(match image_features {
+                    None => projected,
+                    Some(acc) => mlxcel_core::concatenate(&acc, &projected, 1),
+                });
+            }
+
+            let embeddings = match image_features {
+                Some(features) => crate::vision::merge::merge_llava(
+                    layout.image_token_id,
+                    &features,
+                    &inputs_embeds,
+                    &input_ids_arr,
+                ),
+                None => InputEmbeddings {
+                    inputs_embeds,
+                    attention_mask_4d: None,
+                },
+            };
 
             Ok(Some(PreparedVlmEmbeddings {
                 embeddings,

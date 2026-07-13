@@ -350,6 +350,7 @@ pub(crate) fn load_llava_vlm(model_path: &Path) -> Result<LoadedModel> {
         suffix_tokens: Vec::new(),
         block_prefix_tokens: Vec::new(),
         block_suffix_tokens: Vec::new(),
+        pixtral_layout: None,
     };
 
     let vlm = vision::VisionLanguageModel {
@@ -476,6 +477,7 @@ pub(crate) fn load_llava_bunny_vlm(model_path: &Path) -> Result<LoadedModel> {
         suffix_tokens: Vec::new(),
         block_prefix_tokens: Vec::new(),
         block_suffix_tokens: Vec::new(),
+        pixtral_layout: None,
     };
 
     let vlm = vision::VisionLanguageModel {

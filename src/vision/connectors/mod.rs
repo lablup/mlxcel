@@ -34,4 +34,22 @@ use mlxcel_core::{MlxArray, UniquePtr};
 /// Trait for multi-modal connectors that project vision features to text space
 pub trait MultiModalConnector {
     fn forward(&self, vision_features: &MlxArray) -> UniquePtr<MlxArray>;
+
+    /// Project vision features when the caller knows the pre-merge patch grid
+    /// `(grid_h, grid_w)` for a single image.
+    ///
+    /// The default ignores the grid and calls [`Self::forward`]; connectors
+    /// whose spatial merge assumes a square grid (Mistral3's PatchMerger)
+    /// override this so dynamic aspect-ratio inputs reshape correctly.
+    ///
+    /// Used by: Pixtral / Mistral3 dynamic aspect-ratio runtime path.
+    fn forward_with_grid(
+        &self,
+        vision_features: &MlxArray,
+        grid_h: i32,
+        grid_w: i32,
+    ) -> UniquePtr<MlxArray> {
+        let _ = (grid_h, grid_w);
+        self.forward(vision_features)
+    }
 }

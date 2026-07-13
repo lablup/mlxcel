@@ -49,6 +49,7 @@ pub mod moondream3_prompt;
 pub mod phi3v_prompt;
 pub mod phi4_siglip_prompt;
 pub mod phi4mm_prompt;
+pub mod pixtral_prompt;
 pub mod qwen_vl;
 pub mod smolvlm_prompt;
 pub mod step3p7_prompt;

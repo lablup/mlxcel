@@ -229,6 +229,15 @@ fn print_preparation_summary(summary: VlmPreparationSummary) {
                 image_blocks, total_image_tokens
             );
         }
+        VlmPreparationSummary::Pixtral {
+            image_blocks,
+            total_image_tokens,
+        } => {
+            println!(
+                "Pixtral/Mistral3: expanded {} image placeholder(s) into row-structured blocks ({} total image tokens)",
+                image_blocks, total_image_tokens
+            );
+        }
         VlmPreparationSummary::GraniteVision {
             image_blocks,
             total_image_tokens,

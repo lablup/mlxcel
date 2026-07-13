@@ -40,6 +40,7 @@ pub mod paddleocr_vl;
 pub mod phi3_v;
 pub mod phi4_siglip;
 pub mod phi4mm;
+pub mod pixtral;
 pub mod qwen2_vl;
 pub mod siglip;
 pub mod smolvlm;

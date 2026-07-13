@@ -92,17 +92,25 @@ impl Mistral3Projector {
     /// Matches Python's unfold (im2col) channels-first ordering:
     /// [c0_s0, c0_s1, c0_s2, c0_s3, c1_s0, c1_s1, ...]
     ///
-    /// Input: [N, D] (squeezed from [1, N, D])
+    /// `grid_h` / `grid_w` are the pre-merge patch rows/cols for this image
+    /// (`target_h / patch_size`, `target_w / patch_size`); for a fixed-square
+    /// input they both equal `patch_h`, for a dynamic aspect-ratio input they
+    /// differ. Mirrors
+    /// https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/models/mistral3/mistral3.py
+    /// (`Mistral3PatchMerger.__call__`), which reshapes each image's tokens to
+    /// its own `(h, w)` grid before the unfold.
+    ///
+    /// Input: [N, D] (squeezed from [1, N, D]), N == grid_h * grid_w
     /// 1. Reshape: [H*W, D] → [H, W, D]
     /// 2. Reshape: [H/2, 2, W/2, 2, D]
     /// 3. Transpose to channels-first: [H/2, W/2, D, 2, 2]
     /// 4. Reshape: [H/2 * W/2, D*4]
     /// 5. merging_layer: [H/2 * W/2, D]
-    fn patch_merge(&self, x: &MlxArray) -> UniquePtr<MlxArray> {
+    fn patch_merge(&self, x: &MlxArray, grid_h: i32, grid_w: i32) -> UniquePtr<MlxArray> {
         let shape = mlxcel_core::array_shape(x);
         let d = shape[shape.len() - 1];
-        let h = self.patch_h;
-        let w = h; // square patches
+        let h = grid_h;
+        let w = grid_w;
         let s = self.spatial_merge_size;
         let h2 = h / s;
         let w2 = w / s;
@@ -120,8 +128,9 @@ impl Mistral3Projector {
     }
 }
 
-impl MultiModalConnector for Mistral3Projector {
-    fn forward(&self, vision_features: &MlxArray) -> UniquePtr<MlxArray> {
+impl Mistral3Projector {
+    /// RMSNorm → PatchMerger(grid_h, grid_w) → Linear → GELU → Linear.
+    fn project(&self, vision_features: &MlxArray, grid_h: i32, grid_w: i32) -> UniquePtr<MlxArray> {
         // Squeeze batch dim: [1, N, D] → [N, D]
         let shape = mlxcel_core::array_shape(vision_features);
         let x = if shape.len() == 3 && shape[0] == 1 {
@@ -132,8 +141,8 @@ impl MultiModalConnector for Mistral3Projector {
 
         // RMSNorm
         let x = self.norm.forward(&x);
-        // PatchMerger
-        let x = self.patch_merge(&x);
+        // PatchMerger over this image's actual patch grid
+        let x = self.patch_merge(&x, grid_h, grid_w);
         // MLP: Linear → GELU → Linear
         let x = self.linear_1.forward(&x);
         let x = mlxcel_core::gelu(&x);
@@ -141,5 +150,21 @@ impl MultiModalConnector for Mistral3Projector {
 
         // Add batch dim back: [N', D'] → [1, N', D']
         mlxcel_core::expand_dims(&x, 0)
+    }
+}
+
+impl MultiModalConnector for Mistral3Projector {
+    fn forward(&self, vision_features: &MlxArray) -> UniquePtr<MlxArray> {
+        // Fixed-square fallback: assume the configured square patch grid.
+        self.project(vision_features, self.patch_h, self.patch_h)
+    }
+
+    fn forward_with_grid(
+        &self,
+        vision_features: &MlxArray,
+        grid_h: i32,
+        grid_w: i32,
+    ) -> UniquePtr<MlxArray> {
+        self.project(vision_features, grid_h, grid_w)
     }
 }

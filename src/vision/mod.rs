@@ -192,6 +192,13 @@ pub struct VisionModule {
     /// Tokens to insert after each image block during expansion.
     /// Gemma3 VLM: `[108]` (\n\n token) to match Python processor behavior.
     pub block_suffix_tokens: Vec<i32>,
+    /// Dynamic aspect-ratio row-structured layout for Pixtral / Mistral3.
+    ///
+    /// When `Some`, the model is routed to the Pixtral runtime path
+    /// (`VlmRuntimeRef::Pixtral`) which preserves each image's aspect ratio and
+    /// emits `[IMG] / [IMG_BREAK] / [IMG_END]` row structure instead of the
+    /// fixed-square LLaVA merge. `None` for every other `VisionModule` family.
+    pub pixtral_layout: Option<processors::pixtral::PixtralLayout>,
 }
 
 impl VisionModule {

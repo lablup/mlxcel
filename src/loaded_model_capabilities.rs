@@ -72,6 +72,10 @@ pub enum VlmRuntimeRef<'a> {
     Ernie45MoeVl(&'a vision::ernie4_5_moe_vl::Ernie45MoeVlModel),
     Qwen3OmniMoe(&'a vision::qwen3_omni_moe::Qwen3OmniMoeModel),
     HunyuanVl(&'a vision::hunyuan_vl::HunyuanVlModel),
+    /// Pixtral / Mistral3 dynamic aspect-ratio runtime. Shares the generic
+    /// `VisionModule` storage but preserves each image's aspect ratio and emits
+    /// `[IMG] / [IMG_BREAK] / [IMG_END]` row structure (see `pixtral_layout`).
+    Pixtral(&'a vision::VisionModule),
     Standard(&'a vision::VisionModule),
 }
 
@@ -120,7 +124,7 @@ pub(crate) fn vision_module_from_runtime(
     runtime: VlmRuntimeRef<'_>,
 ) -> Option<&vision::VisionModule> {
     match runtime {
-        VlmRuntimeRef::Standard(vision) => Some(vision),
+        VlmRuntimeRef::Standard(vision) | VlmRuntimeRef::Pixtral(vision) => Some(vision),
         _ => None,
     }
 }
@@ -187,7 +191,13 @@ impl LoadedModel {
             Self::Lfm2VL(model) => Some(VlmRuntimeRef::Lfm2Vl(model)),
             Self::Gemma3VLM(vlm) => Some(VlmRuntimeRef::Standard(&vlm.vision)),
             Self::Llama4VLM(vlm) => Some(VlmRuntimeRef::Standard(&vlm.vision)),
-            Self::LlavaVLM(vlm) => Some(VlmRuntimeRef::Standard(&vlm.vision)),
+            Self::LlavaVLM(vlm) => Some(if vlm.vision.pixtral_layout.is_some() {
+                // Pixtral / Mistral3 carry a row-structured dynamic layout;
+                // route them to the aspect-ratio-preserving runtime path.
+                VlmRuntimeRef::Pixtral(&vlm.vision)
+            } else {
+                VlmRuntimeRef::Standard(&vlm.vision)
+            }),
             Self::GraniteVisionVLM(model) => Some(VlmRuntimeRef::GraniteVision(model)),
             Self::Granite4VisionVLM(model) => Some(VlmRuntimeRef::Granite4Vision(model)),
             Self::DeepSeekOcrVLM(model) => Some(VlmRuntimeRef::DeepSeekOcr(model)),
