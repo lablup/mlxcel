@@ -1637,6 +1637,15 @@ fn pythonic_arguments(args_raw: &str) -> String {
     serde_json::to_string(&serde_json::Value::Object(map)).unwrap_or_else(|_| "{}".to_string())
 }
 
+/// Maximum nesting depth honoured when coercing a pythonic `[...]` list
+/// literal. Each `[...]` level recurses one frame in
+/// [`coerce_pythonic_value_inner`]; untrusted model output can nest brackets
+/// arbitrarily (`[f(x=[[[[...]]]]))]`), so without a cap a few thousand
+/// brackets overflow a worker thread's stack and abort the whole process. Real
+/// pythonic tool calls nest a couple of levels at most; at the cap the
+/// still-bracketed value is kept verbatim as a raw string.
+const PYTHONIC_MAX_LIST_DEPTH: usize = 32;
+
 /// Coerce a trimmed unquoted pythonic argument value (or list item) in the
 /// order the format spec prescribes: integer, float, bool (`true`/`false`),
 /// a bracketed list `[...]` (each inner comma-separated item coerced the
@@ -1644,6 +1653,13 @@ fn pythonic_arguments(args_raw: &str) -> String {
 /// `"a"` inside `tags=["a", "b"]`) has its surrounding quotes stripped
 /// rather than falling through to the raw-string branch verbatim.
 fn coerce_pythonic_value(raw: &str) -> serde_json::Value {
+    coerce_pythonic_value_inner(raw, 0)
+}
+
+/// Depth-tracked worker for [`coerce_pythonic_value`]. `depth` counts how many
+/// `[...]` levels have already been entered so the recursion is bounded by
+/// [`PYTHONIC_MAX_LIST_DEPTH`].
+fn coerce_pythonic_value_inner(raw: &str, depth: usize) -> serde_json::Value {
     if let Ok(i) = raw.parse::<i64>() {
         return serde_json::Value::Number(i.into());
     }
@@ -1655,11 +1671,16 @@ fn coerce_pythonic_value(raw: &str) -> serde_json::Value {
     if raw == "true" || raw == "false" {
         return serde_json::Value::Bool(raw == "true");
     }
-    if let Some(inner) = raw.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
+    // Only descend into a `[...]` list while under the depth cap. Past the cap
+    // the value is left as a raw string, so adversarial deeply-nested brackets
+    // cannot drive unbounded recursion into a stack overflow.
+    if depth < PYTHONIC_MAX_LIST_DEPTH
+        && let Some(inner) = raw.strip_prefix('[').and_then(|s| s.strip_suffix(']'))
+    {
         let items = inner
             .split(',')
             .filter(|s| !s.trim().is_empty())
-            .map(|item| coerce_pythonic_value(item.trim()))
+            .map(|item| coerce_pythonic_value_inner(item.trim(), depth + 1))
             .collect();
         return serde_json::Value::Array(items);
     }
@@ -2765,5 +2786,26 @@ mod tests {
             try_pythonic(r#"[{"name": "search", "arguments": {"q": "[calc(x=1)]"}}]"#)
                 .is_none()
         );
+    }
+
+    #[test]
+    fn pythonic_deeply_nested_list_does_not_overflow_stack() {
+        // Adversarial deeply-nested bracket value. Before the depth cap this
+        // recursed once per level and overflowed a worker-thread stack,
+        // aborting the process. The cap must keep parsing bounded: the call is
+        // still recognised, and the over-deep value degrades to a string rather
+        // than crashing.
+        let depth = 50_000;
+        let mut text = String::from("[f(x=");
+        text.push_str(&"[".repeat(depth));
+        text.push_str(&"]".repeat(depth));
+        text.push_str(")]");
+
+        let result = try_pythonic(&text).unwrap();
+        assert_eq!(result.tool_calls[0].name, "f");
+        // Arguments must still be valid, serializable JSON (never a panic).
+        let args: serde_json::Value =
+            serde_json::from_str(&result.tool_calls[0].arguments).unwrap();
+        assert!(args.get("x").is_some());
     }
 }
