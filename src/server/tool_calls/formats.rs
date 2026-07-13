@@ -2329,4 +2329,40 @@ mod tests {
         assert_eq!(result.tool_calls.len(), 1);
         assert_eq!(result.tool_calls[0].name, "get_weather");
     }
+
+    #[test]
+    fn kimi_k2_loose_literal_python_repr_arguments_coerced() {
+        // Arguments spelled as a Python dict repr (single-quoted keys/values,
+        // `True`/`False`/`None`) fail strict JSON parsing, so this exercises
+        // the second parse attempt in `kimi_k2_arguments`: the loose-literal
+        // reparse via `kimi_k2_loosen_literal` / `replace_python_literals`.
+        let text = "<|tool_calls_section_begin|>\
+                     <|tool_call_begin|>functions.set_profile:0<|tool_call_argument_begin|>{'active': True, 'name': 'Paris', 'note': None}<|tool_call_end|>\
+                     <|tool_calls_section_end|>";
+        let result = try_kimi_k2(text).unwrap();
+        assert_eq!(result.tool_calls.len(), 1);
+        assert_eq!(result.tool_calls[0].name, "set_profile");
+        let args: serde_json::Value =
+            serde_json::from_str(&result.tool_calls[0].arguments).unwrap();
+        assert_eq!(args["active"], true);
+        assert_eq!(args["name"], "Paris");
+        assert!(args["note"].is_null());
+    }
+
+    #[test]
+    fn kimi_k2_loose_literal_word_boundary_guard_preserves_identifier_substrings() {
+        // `NoneType` contains the literal token `None` as a substring, but
+        // `replace_python_literals` only replaces whole-word matches, so it
+        // must survive the loose-literal reparse untouched while the
+        // standalone `True` is still coerced to JSON `true`.
+        let text = "<|tool_calls_section_begin|>\
+                     <|tool_call_begin|>functions.describe:0<|tool_call_argument_begin|>{'active': True, 'kind': 'NoneType'}<|tool_call_end|>\
+                     <|tool_calls_section_end|>";
+        let result = try_kimi_k2(text).unwrap();
+        assert_eq!(result.tool_calls.len(), 1);
+        let args: serde_json::Value =
+            serde_json::from_str(&result.tool_calls[0].arguments).unwrap();
+        assert_eq!(args["active"], true);
+        assert_eq!(args["kind"], "NoneType");
+    }
 }
