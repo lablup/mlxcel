@@ -67,7 +67,6 @@ jobs:
       - uses: EmbarkStudios/cargo-deny-action@v2
         with:
           command: check
-          log-level: warn
 
   fmt:
     name: cargo-fmt
