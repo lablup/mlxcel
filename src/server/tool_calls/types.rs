@@ -63,6 +63,13 @@ pub enum ToolCallFormat {
     /// The `analysis` channel carries chain-of-thought (routed to
     /// `reasoning_content`) and the `final` channel carries the visible answer.
     Harmony,
+    /// Kimi K2: sectioned marker format `<|tool_calls_section_begin|>...<|tool_calls_section_end|>`
+    /// wrapping one or more `<|tool_call_begin|>...<|tool_call_end|>` calls
+    /// (the per-call wrapper is optional; an unwrapped section body is parsed
+    /// as a single call). Each call is shaped
+    /// `functions.NAME:INDEX<|tool_call_argument_begin|>{json arguments}`,
+    /// e.g. `functions.get_weather:0<|tool_call_argument_begin|>{"location": "Paris"}`.
+    KimiK2,
 }
 
 /// Result of parsing model output for tool calls.

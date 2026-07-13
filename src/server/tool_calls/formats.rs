@@ -20,6 +20,8 @@
 //!
 //! Used by: tool_calls::parser
 
+use fancy_regex::Regex;
+
 use super::types::{ParsedToolCall, ToolCallFormat, ToolCallParseResult};
 
 /// Try parsing Hermes/Qwen format:
@@ -1283,6 +1285,199 @@ fn harmony_arguments(body: &str) -> String {
     }
 }
 
+/// Try parsing the Kimi K2 sectioned tool-call format:
+///
+/// ```text
+/// <|tool_calls_section_begin|>
+/// <|tool_call_begin|>functions.get_weather:0<|tool_call_argument_begin|>{"location": "Paris"}<|tool_call_end|>
+/// <|tool_calls_section_end|>
+/// ```
+///
+/// The per-call `<|tool_call_begin|>` / `<|tool_call_end|>` wrappers are
+/// optional: when the section body carries none, the whole section body is
+/// parsed as a single call. Each call id has the shape `functions.NAME:INDEX`
+/// (the `functions.` namespace prefix is optional); only the middle `NAME`
+/// segment is kept. The model-provided id and index are discarded, matching
+/// every other parser in this module — `ParsedToolCall` has no `id` field, so
+/// the caller regenerates a fresh id via `generate_tool_call_id`.
+pub fn try_kimi_k2(text: &str) -> Option<ToolCallParseResult> {
+    const SECTION_BEGIN: &str = "<|tool_calls_section_begin|>";
+    const SECTION_END: &str = "<|tool_calls_section_end|>";
+    const CALL_BEGIN: &str = "<|tool_call_begin|>";
+    const CALL_END: &str = "<|tool_call_end|>";
+
+    let section_start = text.find(SECTION_BEGIN)?;
+    let content = text[..section_start].trim().to_string();
+    let body_start = section_start + SECTION_BEGIN.len();
+
+    let body = match text[body_start..].find(SECTION_END) {
+        Some(end_offset) => &text[body_start..body_start + end_offset],
+        None => &text[body_start..],
+    };
+
+    // Name/argument marker: `functions.NAME:INDEX<|tool_call_argument_begin|>`.
+    // Group 1 (unused downstream) is the full id `functions.NAME:INDEX`;
+    // group 2 is the bare function NAME. Compiled once and reused across
+    // every call segment in this section.
+    let Ok(name_re) =
+        Regex::new(r"^\s*((?:functions\.)?(.+?):\d+)\s*<\|tool_call_argument_begin\|>")
+    else {
+        return None;
+    };
+
+    let mut calls = Vec::new();
+
+    if body.contains(CALL_BEGIN) {
+        let mut remaining = body;
+        while let Some(start) = remaining.find(CALL_BEGIN) {
+            let call_start = start + CALL_BEGIN.len();
+            let call_body = match remaining[call_start..].find(CALL_END) {
+                Some(end_offset) => {
+                    let b = &remaining[call_start..call_start + end_offset];
+                    remaining = &remaining[call_start + end_offset + CALL_END.len()..];
+                    b
+                }
+                None => {
+                    // No closing wrapper: take the rest as the last call body.
+                    let b = &remaining[call_start..];
+                    remaining = "";
+                    b
+                }
+            };
+            if let Some(call) = parse_kimi_k2_call(call_body, &name_re) {
+                calls.push(call);
+            }
+        }
+    } else if let Some(call) = parse_kimi_k2_call(body, &name_re) {
+        calls.push(call);
+    }
+
+    if calls.is_empty() {
+        return None;
+    }
+
+    Some(ToolCallParseResult {
+        format: Some(ToolCallFormat::KimiK2),
+        tool_calls: calls,
+        content,
+        reasoning_content: None,
+    })
+}
+
+/// Parse one Kimi K2 call body: `functions.NAME:INDEX<|tool_call_argument_begin|>{...}`.
+///
+/// Returns `None` when the name marker does not match (e.g. a call segment
+/// that carries no `functions.NAME:INDEX<|tool_call_argument_begin|>` header
+/// at all), so a single malformed call in a multi-call section is skipped
+/// rather than discarding the whole result.
+fn parse_kimi_k2_call(call_body: &str, name_re: &Regex) -> Option<ParsedToolCall> {
+    let caps = name_re.captures(call_body).ok()??;
+    let name = caps.get(2)?.as_str().to_string();
+    if name.is_empty() {
+        return None;
+    }
+    let marker_end = caps.get(0)?.end();
+    let args_raw = call_body[marker_end..].trim();
+    Some(ParsedToolCall {
+        name,
+        arguments: kimi_k2_arguments(args_raw),
+    })
+}
+
+/// Convert raw Kimi K2 argument text (everything after
+/// `<|tool_call_argument_begin|>`, already trimmed) into a JSON `arguments`
+/// string.
+///
+/// Parse order: strict JSON first (the common case — Kimi K2 emits a JSON
+/// object literal); if that fails, a loose literal reparse that tolerates
+/// Python-dict-repr spellings (single-quoted strings, `True`/`False`/`None`);
+/// if both fail, the raw text is kept verbatim so a malformed call still
+/// produces a call instead of being dropped.
+fn kimi_k2_arguments(raw: &str) -> String {
+    if raw.is_empty() {
+        return "{}".to_string();
+    }
+
+    if let Some(json) = kimi_k2_try_json(raw) {
+        return json;
+    }
+
+    let loosened = kimi_k2_loosen_literal(raw);
+    if let Some(json) = kimi_k2_try_json(&loosened) {
+        return json;
+    }
+
+    raw.to_string()
+}
+
+/// Parse `raw` as a JSON value, re-serializing to a compact JSON string.
+/// A value that is itself a JSON string is unwrapped rather than
+/// double-encoded, mirroring `parse_hermes_json` / `try_mistral_nemo`.
+fn kimi_k2_try_json(raw: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(raw).ok()?;
+    Some(if value.is_string() {
+        value.as_str().unwrap_or_default().to_string()
+    } else {
+        serde_json::to_string(&value).ok()?
+    })
+}
+
+/// Best-effort normalization of Python-dict-repr-style arguments (single
+/// quotes, `True`/`False`/`None`) into JSON syntax, used as the second parse
+/// attempt in [`kimi_k2_arguments`]. Not a full Python literal evaluator:
+/// quotes are swapped verbatim, so a string value containing an apostrophe
+/// will not round-trip — the caller's raw-string fallback covers that case.
+fn kimi_k2_loosen_literal(raw: &str) -> String {
+    let quoted: String = raw
+        .chars()
+        .map(|c| if c == '\'' { '"' } else { c })
+        .collect();
+    replace_python_literals(&quoted)
+}
+
+/// Replace whole-word Python literal tokens (`True`, `False`, `None`) with
+/// their JSON equivalents (`true`, `false`, `null`). A token only matches
+/// when it is not adjacent to another identifier character on either side,
+/// so `NoneType` or `TrueValue` are left untouched.
+fn replace_python_literals(text: &str) -> String {
+    const REPLACEMENTS: &[(&str, &str)] = &[("True", "true"), ("False", "false"), ("None", "null")];
+
+    let bytes = text.as_bytes();
+    let mut out = String::with_capacity(text.len());
+    let mut i = 0;
+    while i < text.len() {
+        let mut matched = false;
+        for (lit, json) in REPLACEMENTS {
+            if text[i..].starts_with(lit) {
+                let before_ok = i == 0 || !is_ident_byte(bytes[i - 1]);
+                let after = i + lit.len();
+                let after_ok = after >= text.len() || !is_ident_byte(bytes[after]);
+                if before_ok && after_ok {
+                    out.push_str(json);
+                    i = after;
+                    matched = true;
+                    break;
+                }
+            }
+        }
+        if !matched {
+            let ch = text[i..]
+                .chars()
+                .next()
+                .expect("i < text.len() guarantees a char");
+            out.push(ch);
+            i += ch.len_utf8();
+        }
+    }
+    out
+}
+
+/// Whether a byte can be part of an identifier (used for word-boundary
+/// detection in [`replace_python_literals`]).
+fn is_ident_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_'
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2026,5 +2221,112 @@ mod tests {
         let result = try_harmony(text).unwrap();
         assert_eq!(result.tool_calls.len(), 1);
         assert_eq!(result.tool_calls[0].name, "fn");
+    }
+
+    // -- Kimi K2 --
+
+    #[test]
+    fn kimi_k2_single_call_with_wrapper() {
+        let text = "<|tool_calls_section_begin|>\
+                     <|tool_call_begin|>functions.get_weather:0<|tool_call_argument_begin|>{\"location\": \"Paris\"}<|tool_call_end|>\
+                     <|tool_calls_section_end|>";
+        let result = try_kimi_k2(text).unwrap();
+        assert_eq!(result.format, Some(ToolCallFormat::KimiK2));
+        assert_eq!(result.tool_calls.len(), 1);
+        assert_eq!(result.tool_calls[0].name, "get_weather");
+        let args: serde_json::Value =
+            serde_json::from_str(&result.tool_calls[0].arguments).unwrap();
+        assert_eq!(args["location"], "Paris");
+    }
+
+    #[test]
+    fn kimi_k2_multiple_calls_in_one_section() {
+        let text = "<|tool_calls_section_begin|>\
+                     <|tool_call_begin|>functions.search:0<|tool_call_argument_begin|>{\"query\": \"rust\"}<|tool_call_end|>\
+                     <|tool_call_begin|>functions.calc:1<|tool_call_argument_begin|>{\"expr\": \"2+2\"}<|tool_call_end|>\
+                     <|tool_calls_section_end|>";
+        let result = try_kimi_k2(text).unwrap();
+        assert_eq!(result.tool_calls.len(), 2);
+        assert_eq!(result.tool_calls[0].name, "search");
+        assert_eq!(result.tool_calls[1].name, "calc");
+        let args0: serde_json::Value =
+            serde_json::from_str(&result.tool_calls[0].arguments).unwrap();
+        assert_eq!(args0["query"], "rust");
+        let args1: serde_json::Value =
+            serde_json::from_str(&result.tool_calls[1].arguments).unwrap();
+        assert_eq!(args1["expr"], "2+2");
+    }
+
+    #[test]
+    fn kimi_k2_missing_per_call_wrappers_parses_whole_section_as_one_call() {
+        // No `<|tool_call_begin|>` / `<|tool_call_end|>` wrappers inside the
+        // section: the whole section body is a single call.
+        let text = "<|tool_calls_section_begin|>functions.get_time:0<|tool_call_argument_begin|>{}<|tool_calls_section_end|>";
+        let result = try_kimi_k2(text).unwrap();
+        assert_eq!(result.tool_calls.len(), 1);
+        assert_eq!(result.tool_calls[0].name, "get_time");
+        assert_eq!(result.tool_calls[0].arguments, "{}");
+    }
+
+    #[test]
+    fn kimi_k2_malformed_json_args_falls_back_to_raw_string() {
+        let text = "<|tool_calls_section_begin|>\
+                     <|tool_call_begin|>functions.broken:0<|tool_call_argument_begin|>{not valid json at all<|tool_call_end|>\
+                     <|tool_calls_section_end|>";
+        let result = try_kimi_k2(text).unwrap();
+        assert_eq!(result.tool_calls.len(), 1);
+        assert_eq!(result.tool_calls[0].name, "broken");
+        // Falls back to the raw (trimmed) argument text rather than panicking
+        // or dropping the call.
+        assert_eq!(result.tool_calls[0].arguments, "{not valid json at all");
+    }
+
+    #[test]
+    fn kimi_k2_name_extracted_from_functions_prefixed_id() {
+        // The tricky part of the name regex: `functions.NAME:INDEX` must
+        // yield the bare middle segment `NAME`, discarding both the
+        // `functions.` namespace and the `:INDEX` suffix.
+        let text = "<|tool_calls_section_begin|>\
+                     <|tool_call_begin|>functions.get_weather:0<|tool_call_argument_begin|>{}<|tool_call_end|>\
+                     <|tool_calls_section_end|>";
+        let result = try_kimi_k2(text).unwrap();
+        assert_eq!(result.tool_calls[0].name, "get_weather");
+    }
+
+    #[test]
+    fn kimi_k2_name_extracted_without_functions_prefix() {
+        // The `functions.` namespace prefix is optional per the spec regex.
+        let text = "<|tool_calls_section_begin|>\
+                     <|tool_call_begin|>get_weather:3<|tool_call_argument_begin|>{}<|tool_call_end|>\
+                     <|tool_calls_section_end|>";
+        let result = try_kimi_k2(text).unwrap();
+        assert_eq!(result.tool_calls[0].name, "get_weather");
+    }
+
+    #[test]
+    fn kimi_k2_no_match_without_section_marker() {
+        assert!(try_kimi_k2("Hello, world!").is_none());
+        assert!(try_kimi_k2(r#"<tool_call>{"name": "fn", "arguments": {}}</tool_call>"#).is_none());
+    }
+
+    #[test]
+    fn kimi_k2_content_before_section_preserved() {
+        let text = "Let me check the weather.\
+                     <|tool_calls_section_begin|>\
+                     <|tool_call_begin|>functions.get_weather:0<|tool_call_argument_begin|>{\"city\": \"Tokyo\"}<|tool_call_end|>\
+                     <|tool_calls_section_end|>";
+        let result = try_kimi_k2(text).unwrap();
+        assert_eq!(result.tool_calls.len(), 1);
+        assert!(result.content.contains("check the weather"));
+    }
+
+    #[test]
+    fn kimi_k2_missing_section_end_marker_still_parses() {
+        // No closing `<|tool_calls_section_end|>`: take the rest of the text.
+        let text = "<|tool_calls_section_begin|>\
+                     <|tool_call_begin|>functions.get_weather:0<|tool_call_argument_begin|>{\"city\": \"Seoul\"}<|tool_call_end|>";
+        let result = try_kimi_k2(text).unwrap();
+        assert_eq!(result.tool_calls.len(), 1);
+        assert_eq!(result.tool_calls[0].name, "get_weather");
     }
 }

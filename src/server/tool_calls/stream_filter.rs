@@ -196,6 +196,11 @@ enum DelimiterAction {
 ///   exists; all subsequent content (the JSON array) is tool-call payload.
 ///   It is placed after the `<tag>` families so angle-bracket markers still
 ///   benefit from the tighter (shorter) partial-match window that `<` gives.
+/// - Kimi K2 `<|tool_calls_section_end|>` / `<|tool_calls_section_begin|>` —
+///   exit before enter, matching the Hermes convention above. Neither prefix-
+///   collides with any other entry: `<|tool_call>` (Gemma 4) requires a `>`
+///   immediately after `tool_call`, whereas Kimi's markers continue with
+///   `s_section_...`, so the two families never partial-match each other.
 ///
 /// TODO: Consider extracting this into a startup-time configurable
 /// owned by the model worker so new reasoning families don't require a rebuild.
@@ -220,6 +225,13 @@ const CHAT_DELIMITERS: &[(&str, DelimiterAction)] = &[
     ("<tool_call>", DelimiterAction::EnterToolCall),
     // Mistral Nemo: `[TOOL_CALLS] [...]` — no exit; the rest of output is JSON.
     ("[TOOL_CALLS]", DelimiterAction::EnterToolCall),
+    // Kimi K2: `<|tool_calls_section_begin|>...<|tool_calls_section_end|>`.
+    // Exit before enter, mirroring the Hermes convention above.
+    ("<|tool_calls_section_end|>", DelimiterAction::ExitToolCall),
+    (
+        "<|tool_calls_section_begin|>",
+        DelimiterAction::EnterToolCall,
+    ),
 ];
 
 /// The state of the streaming filter state machine.
@@ -1521,6 +1533,106 @@ mod tests {
             "feed(`</`) + feed(`tool`) + feed(`_call>`) must give suppressed_positions == 3; \
              got {}",
             r3.suppressed_positions
+        );
+    }
+
+    // -- Kimi K2 sectioned tool-call markers --
+
+    #[test]
+    fn kimi_k2_tool_call_section_suppressed_in_one_fragment() {
+        // A full Kimi K2 section fed as a single fragment: the section body
+        // (including the per-call wrappers and JSON payload) must not leak
+        // into delta.content.
+        let mut f = StreamFilter::new();
+        let out = f.feed(
+            "<|tool_calls_section_begin|><|tool_call_begin|>functions.get_weather:0\
+             <|tool_call_argument_begin|>{\"location\": \"Paris\"}<|tool_call_end|>\
+             <|tool_calls_section_end|>",
+        );
+        assert_eq!(
+            out.content, None,
+            "Kimi K2 tool-call section markup must not appear in delta.content"
+        );
+        assert_eq!(out.reasoning, None);
+    }
+
+    #[test]
+    fn kimi_k2_content_before_section_emitted() {
+        let mut f = StreamFilter::new();
+        let out = f.feed(
+            "Let me check the weather.<|tool_calls_section_begin|><|tool_call_begin|>\
+             functions.get_weather:0<|tool_call_argument_begin|>{\"location\": \"Tokyo\"}\
+             <|tool_call_end|><|tool_calls_section_end|>",
+        );
+        assert_eq!(
+            out.content.as_deref(),
+            Some("Let me check the weather."),
+            "only the preamble text must appear in delta.content"
+        );
+        assert!(
+            !out.content
+                .as_deref()
+                .unwrap_or("")
+                .contains("<|tool_calls_section_begin|>")
+        );
+    }
+
+    #[test]
+    fn kimi_k2_section_markers_split_across_fragment_boundaries() {
+        // The long `<|tool_calls_section_begin|>` / `<|tool_calls_section_end|>`
+        // markers arrive split across multiple decode fragments (as a real
+        // tokenizer would emit them token-by-token). The filter must buffer
+        // partial matches and suppress the whole tool-call body regardless of
+        // how the marker bytes are chunked.
+        let mut f = StreamFilter::new();
+        let fragments = [
+            "Sure, let me check.",
+            "<|tool_calls",
+            "_section_begin|>",
+            "<|tool_call_begin|>functions.get_",
+            "weather:0<|tool_call_argument_begin|>",
+            "{\"location\": \"Se",
+            "oul\"}",
+            "<|tool_call_end|>",
+            "<|tool_calls_section",
+            "_end|>",
+            "Done.",
+        ];
+
+        let mut total_content = String::new();
+        for frag in &fragments {
+            if let Some(c) = f.feed(frag).content {
+                total_content.push_str(&c);
+            }
+        }
+        let flushed = f.flush();
+        if let Some(c) = flushed.content {
+            total_content.push_str(&c);
+        }
+
+        assert_eq!(
+            total_content, "Sure, let me check.Done.",
+            "only the pre- and post-section text must survive; the tool-call \
+             body must be fully suppressed even when the section markers \
+             straddle fragment boundaries; got: {total_content:?}"
+        );
+        assert!(!total_content.contains("tool_calls_section"));
+        assert!(!total_content.contains("Seoul"));
+    }
+
+    #[test]
+    fn kimi_k2_tool_call_not_confused_with_hermes_or_gemma4() {
+        // Kimi K2's `<|tool_calls_section_begin|>` must not be mistaken for
+        // Gemma 4's `<|tool_call>` open tag (both share the `<|tool_cal` prefix)
+        // and must not leave the filter in a state where a subsequent Hermes
+        // `<tool_call>` fails to enter ToolCall state.
+        let mut f = StreamFilter::new();
+        let out = f.feed("<|tool_calls_section_begin|>body<|tool_calls_section_end|>");
+        assert_eq!(out.content, None);
+        assert_eq!(
+            f.feed("after").content.as_deref(),
+            Some("after"),
+            "content after the Kimi K2 section must resume normally"
         );
     }
 }

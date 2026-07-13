@@ -160,6 +160,7 @@ pub fn parse_tool_calls(raw_output: &str, tools: Option<&[Tool]>) -> ToolCallPar
         formats::try_gemma4,  // <|tool_call>call:... — pipe-delimited, before Hermes
         formats::try_hermes,  // <tool_call> — Hermes/Qwen/DeepSeek
         formats::try_minimax_m2, // <invoke name=...><parameter name=...>...</parameter></invoke>
+        formats::try_kimi_k2, // <|tool_calls_section_begin|>...<|tool_calls_section_end|>
         formats::try_mistral_nemo, // [TOOL_CALLS]
         formats::try_functionary_v31, // <function=name>{json}
         formats::try_qwen3_coder, // <function=name><parameter=key>val</parameter> (after v31, which declines non-JSON bodies)
@@ -614,6 +615,50 @@ mod tests {
     #[test]
     fn parse_minimax_m2_filters_unknown_tools() {
         let output = "<invoke name=\"unknown_fn\">\n<parameter name=\"k\">v</parameter>\n</invoke>";
+        let tools = vec![make_tool("get_weather")];
+        let result = parse_tool_calls(output, Some(&tools));
+        assert!(!result.has_tool_calls());
+    }
+
+    // -- Kimi K2 --
+
+    #[test]
+    fn parse_kimi_k2_single_call() {
+        let output = "<|tool_calls_section_begin|>\
+                       <|tool_call_begin|>functions.get_weather:0<|tool_call_argument_begin|>{\"location\": \"Paris\"}<|tool_call_end|>\
+                       <|tool_calls_section_end|>";
+        let tools = vec![make_tool("get_weather")];
+        let result = parse_tool_calls(output, Some(&tools));
+        assert!(result.has_tool_calls());
+        assert_eq!(result.tool_calls.len(), 1);
+        assert_eq!(result.tool_calls[0].name, "get_weather");
+        let args: serde_json::Value =
+            serde_json::from_str(&result.tool_calls[0].arguments).unwrap();
+        assert_eq!(args["location"], "Paris");
+        assert_eq!(
+            result.format,
+            Some(crate::server::tool_calls::ToolCallFormat::KimiK2)
+        );
+    }
+
+    #[test]
+    fn parse_kimi_k2_multiple_calls() {
+        let output = "<|tool_calls_section_begin|>\
+                       <|tool_call_begin|>functions.search:0<|tool_call_argument_begin|>{\"query\": \"weather\"}<|tool_call_end|>\
+                       <|tool_call_begin|>functions.read_file:1<|tool_call_argument_begin|>{\"path\": \"/tmp/test.txt\"}<|tool_call_end|>\
+                       <|tool_calls_section_end|>";
+        let tools = vec![make_tool("search"), make_tool("read_file")];
+        let result = parse_tool_calls(output, Some(&tools));
+        assert_eq!(result.tool_calls.len(), 2);
+        assert_eq!(result.tool_calls[0].name, "search");
+        assert_eq!(result.tool_calls[1].name, "read_file");
+    }
+
+    #[test]
+    fn parse_kimi_k2_filters_unknown_tools() {
+        let output = "<|tool_calls_section_begin|>\
+                       <|tool_call_begin|>functions.unknown_fn:0<|tool_call_argument_begin|>{}<|tool_call_end|>\
+                       <|tool_calls_section_end|>";
         let tools = vec![make_tool("get_weather")];
         let result = parse_tool_calls(output, Some(&tools));
         assert!(!result.has_tool_calls());
