@@ -15,9 +15,12 @@
 //! Step-3.7 image processor (base pass + tiled-patch pass).
 //!
 //! Per image:
-//! 1. Convert to RGB and square-pad to `max(w, h)` (paste at top-left, black
-//!    fill), so all later math sees a square image.
-//! 2. Clamp the square side to `3024` (scale down if larger).
+//! 1. Convert to RGB and square-pad to a black canvas whose side is
+//!    `min(max(w, h), 3024)` (content pasted top-left), so all later math sees
+//!    a square image.
+//! 2. When `max(w, h)` exceeds `3024` the content is scaled down to fit the
+//!    clamped square *before* the canvas is allocated, so the canvas is never
+//!    larger than `3024 x 3024` regardless of the input aspect ratio.
 //! 3. Window decision: side `<= 728` gives no patches; side `> 728` gives a
 //!    `504` px window. (After square padding `long == short`, so the general
 //!    upstream rule collapses to exactly these two outcomes.)
@@ -135,23 +138,42 @@ impl Step3p7Processor {
         }
     }
 
-    /// Convert to RGB, square-pad to `max(w, h)` (top-left, black fill), then
-    /// clamp the square side to `max_side`.
+    /// Convert to RGB, then square-pad to a black canvas whose side is
+    /// `min(max(w, h), max_side)` (content pasted top-left, black fill).
+    ///
+    /// When `max(w, h)` exceeds `max_side` the source is scaled down by
+    /// `max_side / max(w, h)` before the square canvas is allocated, so the
+    /// canvas never exceeds `max_side x max_side`. Allocating the full
+    /// `max(w, h)` square first (then resizing down) would let an adversarial
+    /// or merely extreme aspect ratio commit a quadratic amount of memory: a
+    /// `16000 x 100` image is a few MB decoded but a `16000^2 * 3` (~768 MB)
+    /// canvas, defeating the caller's decode budget. Scaling first bounds the
+    /// canvas to `max_side^2` (~27 MB at the default `3024`).
     fn square_padded(&self, image: &DynamicImage) -> RgbImage {
         let rgb = image.to_rgb8();
         let (w, h) = (rgb.width(), rgb.height());
         let raw_side = w.max(h);
-        let mut canvas = RgbImage::from_pixel(raw_side, raw_side, Rgb([0, 0, 0]));
-        image::imageops::overlay(&mut canvas, &rgb, 0, 0);
-
         let side = self.clamped_side(raw_side);
-        if side != raw_side {
-            DynamicImage::ImageRgb8(canvas)
-                .resize_exact(side, side, FilterType::Triangle)
-                .to_rgb8()
-        } else {
-            canvas
+
+        if side == raw_side {
+            // Within `max_side`: pad at full resolution, no scaling.
+            let mut canvas = RgbImage::from_pixel(raw_side, raw_side, Rgb([0, 0, 0]));
+            image::imageops::overlay(&mut canvas, &rgb, 0, 0);
+            return canvas;
         }
+
+        // Oversized: scale the content down to fit the clamped square first,
+        // then pad. `raw_side > side >= 1` here, so the ratio is well defined;
+        // each scaled edge is clamped to `[1, side]`.
+        let scale = side as f64 / raw_side as f64;
+        let scaled_w = ((w as f64 * scale).round() as u32).clamp(1, side);
+        let scaled_h = ((h as f64 * scale).round() as u32).clamp(1, side);
+        let scaled = DynamicImage::ImageRgb8(rgb)
+            .resize_exact(scaled_w, scaled_h, FilterType::Triangle)
+            .to_rgb8();
+        let mut canvas = RgbImage::from_pixel(side, side, Rgb([0, 0, 0]));
+        image::imageops::overlay(&mut canvas, &scaled, 0, 0);
+        canvas
     }
 
     /// Append `rgb` as channels-first normalized floats `(3, H, W)`.
