@@ -155,10 +155,48 @@ pub struct AudioFeatureExtractor {
 
 impl AudioFeatureExtractor {
     pub fn new(config: AudioFeatureExtractorConfig) -> Self {
+        // A checkpoint's `processor_config.json` `feature_extractor` block is
+        // semi-trusted input read at load. Guard the scalar fields so a
+        // malformed or hostile block cannot drive a divide-by-zero in
+        // `extract` (hop_length == 0), an unbounded mel/feature allocation
+        // (feature_size), or a runaway `fft_length` doubling loop (frame_length).
+        // Out-of-range values fall back to the reference defaults, mirroring the
+        // per-bin-vector validation below.
+        let defaults = AudioFeatureExtractorConfig::default();
+        let mut config = config;
+        if config.sampling_rate == 0 {
+            config.sampling_rate = defaults.sampling_rate;
+        }
+        if !config.frame_length_ms.is_finite() || config.frame_length_ms <= 0.0 {
+            config.frame_length_ms = defaults.frame_length_ms;
+        }
+        if !config.hop_length_ms.is_finite() || config.hop_length_ms <= 0.0 {
+            config.hop_length_ms = defaults.hop_length_ms;
+        }
+        // 4096 mel bins is far above any real value (128) yet keeps the
+        // `[fft_length/2+1, feature_size]` filterbank and the per-frame feature
+        // buffer bounded.
+        if config.feature_size == 0 || config.feature_size > 4096 {
+            config.feature_size = defaults.feature_size;
+        }
+
         let frame_length =
             (config.sampling_rate as f64 * config.frame_length_ms / 1000.0).round() as usize;
         let hop_length =
             (config.sampling_rate as f64 * config.hop_length_ms / 1000.0).round() as usize;
+
+        // A tiny `*_ms` can still round to 0, and a huge one to an allocation
+        // bomb; re-derive from the defaults if either lands out of range.
+        let (frame_length, hop_length) = if (1..=65_536).contains(&frame_length) && hop_length >= 1
+        {
+            (frame_length, hop_length)
+        } else {
+            let fl = (defaults.sampling_rate as f64 * defaults.frame_length_ms / 1000.0).round()
+                as usize;
+            let hl =
+                (defaults.sampling_rate as f64 * defaults.hop_length_ms / 1000.0).round() as usize;
+            (fl, hl)
+        };
 
         let mut fft_length = 1;
         while fft_length < frame_length {
@@ -763,5 +801,61 @@ mod tests {
             (15..=40).contains(&peak_bin),
             "440 Hz mel energy peak at bin {peak_bin}, expected in range 15-40"
         );
+    }
+
+    /// A malformed `feature_extractor` config block (which reaches this path now
+    /// that the extractor honors `processor_config.json`) must not build an
+    /// extractor that divides by zero, allocates unboundedly, or spins the
+    /// `fft_length` loop. Each nonsensical scalar falls back to the reference
+    /// default, and `extract` then runs to completion on a real waveform.
+    #[test]
+    fn malformed_config_scalars_fall_back_to_defaults() {
+        let defaults = AudioFeatureExtractorConfig::default();
+        let tone = generate_tone(440.0, 0.5, 16_000);
+
+        // hop_length_ms == 0 would divide by zero in `extract`.
+        for bad in [
+            AudioFeatureExtractorConfig {
+                hop_length_ms: 0.0,
+                ..AudioFeatureExtractorConfig::default()
+            },
+            AudioFeatureExtractorConfig {
+                frame_length_ms: 0.0,
+                ..AudioFeatureExtractorConfig::default()
+            },
+            AudioFeatureExtractorConfig {
+                frame_length_ms: f64::NAN,
+                ..AudioFeatureExtractorConfig::default()
+            },
+            AudioFeatureExtractorConfig {
+                sampling_rate: 0,
+                ..AudioFeatureExtractorConfig::default()
+            },
+            AudioFeatureExtractorConfig {
+                feature_size: 0,
+                ..AudioFeatureExtractorConfig::default()
+            },
+            AudioFeatureExtractorConfig {
+                feature_size: usize::MAX,
+                ..AudioFeatureExtractorConfig::default()
+            },
+            AudioFeatureExtractorConfig {
+                frame_length_ms: 1.0e12,
+                ..AudioFeatureExtractorConfig::default()
+            },
+        ] {
+            let extractor = AudioFeatureExtractor::new(bad);
+            // feature_size never exceeds the sane cap; the default is restored
+            // for the zero/oversized cases.
+            assert!(extractor.feature_size() >= 1 && extractor.feature_size() <= 4096);
+            let (features, mask) = extractor.extract(&tone, None);
+            assert!(!features.is_empty());
+            assert_eq!(features.len() % extractor.feature_size(), 0);
+            assert!(!mask.is_empty());
+        }
+
+        // A well-formed default config is untouched by the guards.
+        let ok = AudioFeatureExtractor::new(defaults);
+        assert_eq!(ok.feature_size(), 128);
     }
 }
