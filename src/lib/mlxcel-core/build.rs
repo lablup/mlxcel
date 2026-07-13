@@ -87,7 +87,7 @@ fn main() {
             }
             Ok("none") => {}
             Ok(march) => {
-                bridge.flag_if_supported(&format!("-march={march}"));
+                bridge.flag_if_supported(format!("-march={march}"));
             }
         }
         // On macOS, Clang produces LLVM bitcode with -flto, which is compatible
