@@ -2295,6 +2295,18 @@ impl Qwen35StageModel {
 }
 
 // Weight Sanitization.
+
+/// Whether a `conv1d.weight` tensor is still in the raw torch layout.
+///
+/// The gated-delta conv is depthwise (`groups == channels`), so a raw torch
+/// weight is `[out, 1, kW]` and the converted MLX weight is `[out, kW, 1]`. A
+/// tensor of rank < 3 carries no layout information, so it reads as converted:
+/// the norm-shift gate in [`sanitize_weights`] keys on this predicate, and a
+/// degenerate tensor must not be able to trigger a shift that transposes nothing.
+fn is_raw_conv1d_layout(shape: &[i32]) -> bool {
+    shape.len() >= 3 && shape[shape.len() - 1] != 1
+}
+
 pub fn sanitize_weights(mut weights: WeightMap, config: &Qwen35Config) -> WeightMap {
     // 1. Detect sanitization needs.
     //
@@ -2311,11 +2323,13 @@ pub fn sanitize_weights(mut weights: WeightMap, config: &Qwen35Config) -> Weight
     // has_unsanitized_conv1d`
     // (https://github.com/ml-explore/mlx-lm/blob/main/mlx_lm/models/qwen3_5.py).
     // Do not reintroduce the `mtp.` term when syncing against that file.
+    //
+    // The gate and the transpose below share `is_raw_conv1d_layout`, so the
+    // invariant is "the norms shift only if at least one conv1d is actually
+    // transposed". A degenerate conv1d tensor of rank < 3 is undecidable, so it
+    // reads as converted and fails safe: no transpose, no shift.
     let has_unsanitized_conv1d = weights.iter().any(|(k, v)| {
-        k.contains("conv1d.weight") && {
-            let shape = mlxcel_core::array_shape(v);
-            shape.last() != Some(&1)
-        }
+        k.contains("conv1d.weight") && is_raw_conv1d_layout(&mlxcel_core::array_shape(v))
     });
     let should_shift_norms = has_unsanitized_conv1d;
 
@@ -2338,11 +2352,10 @@ pub fn sanitize_weights(mut weights: WeightMap, config: &Qwen35Config) -> Weight
 
     let keys: Vec<String> = weights.keys().cloned().collect();
     for k in &keys {
-        // Conv1d weight: moveaxis(2, 1) when shape[-1] != 1
+        // Conv1d weight: moveaxis(2, 1) when the layout is still raw
         if k.contains("conv1d.weight") {
             let v = weights.get(k.as_str()).unwrap();
-            let shape = mlxcel_core::array_shape(v);
-            if shape.len() >= 3 && shape[shape.len() - 1] != 1 {
+            if is_raw_conv1d_layout(&mlxcel_core::array_shape(v)) {
                 let transposed = mlxcel_core::swap_axes(v, -1, -2);
                 weights.insert(k.clone(), transposed);
             }

@@ -311,7 +311,7 @@ fn sanitize_weights_drops_lm_head_when_tied_embeddings() {
 }
 
 // ---------------------------------------------------------------------------
-// `sanitize_weights` idempotency (issue #776) — the norm `+1.0` shift must be
+// `sanitize_weights` idempotency (issue #776): the norm `+1.0` shift must be
 // layout-gated on the conv1d weight shape alone. A bundled `mtp.*` tensor
 // must never force a second shift on an already-converted checkpoint, and a
 // genuinely raw checkpoint must still shift exactly once.
@@ -396,9 +396,18 @@ fn sanitize_weights_shifts_norms_exactly_once_on_raw_layout() {
         "model.embed_tokens.weight".to_string(),
         mlxcel_core::from_slice_f32(&[0.0_f32; 8], &[2, 4]),
     );
+    // A raw checkpoint that bundles the MTP head. This is the direction in which
+    // dropping the `has_mtp` term could have lost coverage, so pin it: the raw
+    // conv1d layout alone must still drive the shift.
+    weights.insert(
+        "mtp.layers.0.weight".to_string(),
+        mlxcel_core::from_slice_f32(&[0.0_f32; 16], &[4, 4]),
+    );
 
     let config = make_tiny_config();
     let sanitized = sanitize_weights(weights, &config);
+
+    assert!(sanitized.keys().all(|k| !k.contains("mtp.")));
 
     // The norm gammas must be shifted exactly once: 0.5 + 1.0 = 1.5.
     assert_allclose(
@@ -419,4 +428,42 @@ fn sanitize_weights_shifts_norms_exactly_once_on_raw_layout() {
             .unwrap(),
     );
     assert_eq!(conv1d_shape, vec![4, 4, 1]);
+}
+
+#[test]
+#[ignore = "requires serial MLX execution"]
+fn sanitize_weights_does_not_shift_norms_on_a_degenerate_conv1d_shape() {
+    // A conv1d tensor of rank < 3 carries no layout information. The gate and the
+    // transpose share `is_raw_conv1d_layout`, so such a tensor must read as
+    // converted: nothing is transposed, and therefore nothing may be shifted.
+    // Gating on `shape.last() != Some(&1)` instead would shift every norm here
+    // while transposing no conv1d at all, which is the corruption issue #776 is
+    // about.
+    let mut weights = WeightMap::new();
+    weights.insert(
+        "model.layers.0.linear_attn.conv1d.weight".to_string(),
+        mlxcel_core::from_slice_f32(&[0.0_f32; 16], &[4, 4]),
+    );
+    weights.insert(
+        "model.norm.weight".to_string(),
+        mlxcel_core::from_slice_f32(&[1.5_f32; 4], &[4]),
+    );
+    weights.insert(
+        "model.embed_tokens.weight".to_string(),
+        mlxcel_core::from_slice_f32(&[0.0_f32; 8], &[2, 4]),
+    );
+
+    let config = make_tiny_config();
+    let sanitized = sanitize_weights(weights, &config);
+
+    assert_allclose(
+        sanitized.get("model.norm.weight").unwrap(),
+        &mlxcel_core::from_slice_f32(&[1.5_f32; 4], &[4]),
+    );
+    let conv1d_shape = mlxcel_core::array_shape(
+        sanitized
+            .get("model.layers.0.linear_attn.conv1d.weight")
+            .unwrap(),
+    );
+    assert_eq!(conv1d_shape, vec![4, 4]);
 }
