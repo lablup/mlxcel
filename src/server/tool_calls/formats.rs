@@ -1644,6 +1644,49 @@ mod tests {
         assert!(try_mistral_bracket(text).is_none());
     }
 
+    #[test]
+    fn mistral_bracket_no_args_marker_no_quadratic_blowup() {
+        // Adversarial body: `[TOOL_CALLS]` followed by a long run of word
+        // characters with no `[ARGS]` marker anywhere. The `(\w+)` capture in
+        // `^\s*(\w+)\[ARGS\]\s*(\{.*\})` backtracks one character at a time
+        // looking for the literal `[ARGS]` that never appears, so this must
+        // stay linear rather than hang.
+        let mut text = String::from("[TOOL_CALLS]");
+        text.push_str(&"a".repeat(50_000));
+
+        let start = std::time::Instant::now();
+        let result = try_mistral_bracket(&text);
+        let elapsed = start.elapsed();
+
+        // Should complete in well under one second on any reasonable hardware.
+        assert!(
+            elapsed.as_secs() < 2,
+            "parsing took {elapsed:?}; suggests catastrophic backtracking"
+        );
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn mistral_bracket_unclosed_args_no_quadratic_blowup() {
+        // Adversarial body: `[TOOL_CALLS]fn[ARGS]{` followed by a long run of
+        // word characters with no closing brace. The dotall `(\{.*\})` group
+        // cannot match without a closing `}`, so the regex must fail fast
+        // rather than degrade while `.*` backtracks across the whole buffer.
+        let mut text = String::from("[TOOL_CALLS]fn[ARGS]{");
+        text.push_str(&"a".repeat(50_000));
+
+        let start = std::time::Instant::now();
+        let result = try_mistral_bracket(&text);
+        let elapsed = start.elapsed();
+
+        // Should complete in well under one second on any reasonable hardware.
+        assert!(
+            elapsed.as_secs() < 2,
+            "parsing took {elapsed:?}; suggests catastrophic backtracking"
+        );
+        assert!(result.is_none());
+    }
+
     // -- Functionary v3.1 --
 
     #[test]
