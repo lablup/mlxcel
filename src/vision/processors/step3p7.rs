@@ -302,6 +302,36 @@ mod tests {
     }
 
     #[test]
+    fn square_pad_of_oversized_extreme_aspect_ratio_stays_bounded_by_max_side() {
+        let p = processor();
+        // Extreme aspect ratio (6000x100) whose raw max side (6000) exceeds
+        // max_side (3024). Squaring the raw side before clamping would have
+        // allocated a 6000x6000 canvas; the fixed path scales the content down
+        // first, so the canvas must never exceed max_side x max_side.
+        let side = p.max_side as u32;
+        let wide = DynamicImage::ImageRgb8(RgbImage::from_pixel(6000, 100, Rgb([200, 10, 10])));
+        let padded = p.square_padded(&wide);
+        assert_eq!(padded.width(), side);
+        assert_eq!(padded.height(), side);
+
+        // Content scales to `round(100 * 3024/6000) = 50` rows, pasted at the
+        // top; the solid source color survives the resize unchanged.
+        let scaled_h = ((100.0_f64 * side as f64 / 6000.0).round() as u32).clamp(1, side);
+        assert!(scaled_h < side, "expected padding below the scaled content");
+        assert_eq!(*padded.get_pixel(0, scaled_h - 1), Rgb([200, 10, 10]));
+
+        // The row immediately below the scaled content must be pure black:
+        // scaling the content before pasting hard-pastes it onto the black
+        // canvas with no blending. The pre-fix algorithm padded to the raw
+        // (unclamped) square first and resized the *whole* canvas down
+        // afterward, which blends the content/background boundary across
+        // several destination rows (e.g. `Rgb([80, 4, 4])` at this row for a
+        // 6000x100 source), so this assertion would fail against that order.
+        assert_eq!(*padded.get_pixel(0, scaled_h), Rgb([0, 0, 0]));
+        assert_eq!(*padded.get_pixel(0, side - 1), Rgb([0, 0, 0]));
+    }
+
+    #[test]
     fn feature_token_identity_169_plus_81_per_patch() {
         // 169 base tokens, 81 per patch.
         assert_eq!(BASE_FEATURE_TOKENS, 169);
