@@ -26,7 +26,7 @@ use image::DynamicImage;
 use mlxcel_core::MlxArray;
 
 use crate::internvl_prompt::insert_internvl_image_tokens;
-use crate::kimi_vl_prompt::insert_kimi_vl_image_tokens;
+use crate::kimi_vl_prompt::{InsertedKimiVlTokens, insert_kimi_vl_media_tokens};
 use crate::minicpmo_prompt::{
     prepare_minicpmo_prompt_tokens, prepare_minicpmo_prompt_tokens_with_image_feature_sizes,
 };
@@ -37,6 +37,8 @@ use crate::phi4_siglip_prompt::prepare_phi4_siglip_prompt_tokens;
 use crate::phi4mm_prompt::prepare_phi4mm_prompt_tokens;
 use crate::qwen_vl::{insert_qwen_vl_image_tokens, insert_qwen3_omni_image_tokens};
 use crate::smolvlm_prompt::insert_smolvlm_image_tokens;
+use crate::vision::KimiVLModel;
+use crate::vision::encoders::kimi_vl::KimiMediaGrid;
 use crate::vision::feature_cache::{CacheKey, ModelVisionCaches, image_hash_from_pixels};
 use crate::vision::merge::InputEmbeddings;
 use crate::vision::processors::ImageProcessor;
@@ -178,6 +180,16 @@ pub enum VlmPreparationSummary {
     /// media-placeholder tokens.
     KimiVL {
         image_blocks: usize,
+        total_image_tokens: i32,
+    },
+    /// Kimi-VL 2.5 expanded one or more video clips (and optional companion
+    /// images) into `<|media_pad|>` runs. `frame_slots` is the total number of
+    /// sampled frames across all clips; `total_image_tokens` is the merged token
+    /// count (independent of frame count per the temporal mean-pool).
+    KimiVLVideo {
+        media_blocks: usize,
+        video_count: usize,
+        frame_slots: usize,
         total_image_tokens: i32,
     },
     ImageBlocks(ImageTokenBlockStats),
@@ -1321,31 +1333,20 @@ where
             }))
         }
         VlmRuntimeRef::KimiVL(kimi) => {
-            // MoonViT native-resolution preprocessing: each image is patchified
-            // into [num_patches, C, p, p] plus its (h, w) patch grid.
-            let (pixel_values, grid_shapes) = kimi.processor.preprocess_with_grid(images);
-
-            // Expand each `<|media_pad|>` into (h/merge)*(w/merge) placeholders
-            // (or splice a run after the first token when absent).
-            let preparation = insert_kimi_vl_image_tokens(
-                prompt_tokens,
-                &grid_shapes,
-                kimi.spatial_merge_size,
-                kimi.media_placeholder_token_id,
-            )
-            .map(|stats| VlmPreparationSummary::KimiVL {
-                image_blocks: stats.image_blocks,
-                total_image_tokens: stats.total_image_tokens,
-            });
-
             // Kimi-VL runs every image's patches in one tower call; skip the
             // opportunistic vision cache for this first integration (mirrors the
             // Youtu-VL / InternVL decision).
             let _ = active_caches;
             let _ = image_cache_keys;
 
-            let input_ids_arr = prompt_ids_array(prompt_tokens);
-            let embeddings = kimi.get_input_embeddings(&input_ids_arr, &pixel_values, &grid_shapes);
+            // Image-only path: route through the shared media helper with no
+            // video clips, so image and video code stays token-identical.
+            let (embeddings, stats) =
+                compute_kimi_vl_media_embeddings(kimi, prompt_tokens, images, &[])?;
+            let preparation = stats.map(|s| VlmPreparationSummary::KimiVL {
+                image_blocks: s.image_blocks,
+                total_image_tokens: s.total_image_tokens,
+            });
 
             Ok(Some(PreparedVlmEmbeddings {
                 embeddings,
@@ -1375,6 +1376,76 @@ where
             }))
         }
     }
+}
+
+/// Compute Kimi-VL / Kimi-VL 2.5 input embeddings for a mixed set of images and
+/// video clips, expanding the `<|media_pad|>` placeholders to match.
+///
+/// Media order is images first, then video clips; the pixel patch tensors and
+/// the `<|media_pad|>` expansion runs follow the same order. Shared by the CLI
+/// (`commands/generate_vlm`) and the server (`server/model_worker`) so both
+/// surfaces build the identical mixed media-grid list and pixel packing.
+///
+/// `images` are already-decoded stills; `videos` are already-decoded frame
+/// sequences (one `Vec` per clip, as returned by `multimodal::video`). Returns
+/// the merged embeddings plus the insertion stats (the caller maps them to a
+/// [`VlmPreparationSummary`]).
+pub fn compute_kimi_vl_media_embeddings(
+    kimi: &KimiVLModel,
+    prompt_tokens: &mut Vec<i32>,
+    images: &[DynamicImage],
+    videos: &[Vec<DynamicImage>],
+) -> Result<(InputEmbeddings, Option<InsertedKimiVlTokens>)> {
+    // Preprocess images ((h, w) grids) and video clips ((t, h, w) grids).
+    let (image_pixels, image_grids) = if images.is_empty() {
+        (None, Vec::new())
+    } else {
+        let (pv, grids) = kimi.processor.preprocess_with_grid(images);
+        (Some(pv), grids)
+    };
+    let (video_pixels, video_grids) = if videos.is_empty() {
+        (None, Vec::new())
+    } else {
+        let (pv, grids) = kimi.processor.preprocess_video_with_grid(videos);
+        (Some(pv), grids)
+    };
+
+    // Media order: images first, then video clips.
+    let mut media_grids: Vec<KimiMediaGrid> =
+        Vec::with_capacity(image_grids.len() + video_grids.len());
+    for &(h, w) in &image_grids {
+        media_grids.push(KimiMediaGrid::Image { h, w });
+    }
+    for &(t, h, w) in &video_grids {
+        media_grids.push(KimiMediaGrid::Video { t, h, w });
+    }
+
+    if media_grids.is_empty() {
+        return Err(anyhow::anyhow!(
+            "Kimi-VL media embedding requested with no images or videos"
+        ));
+    }
+
+    // Concatenate the pixel patch tensors in the same media order.
+    let pixel_values = match (image_pixels, video_pixels) {
+        (Some(img), Some(vid)) => mlxcel_core::concatenate(&img, &vid, 0),
+        (Some(img), None) => img,
+        (None, Some(vid)) => vid,
+        (None, None) => unreachable!("media_grids non-empty implies pixel tensors present"),
+    };
+
+    // Expand each `<|media_pad|>` into (h/merge)*(w/merge) placeholders (or
+    // splice runs after the first token when absent), in media order.
+    let stats = insert_kimi_vl_media_tokens(
+        prompt_tokens,
+        &media_grids,
+        kimi.spatial_merge_size,
+        kimi.media_placeholder_token_id,
+    );
+
+    let input_ids_arr = prompt_ids_array(prompt_tokens);
+    let embeddings = kimi.get_input_embeddings(&input_ids_arr, &pixel_values, &media_grids);
+    Ok((embeddings, stats))
 }
 
 fn format_molmo_v1_prompt_for_processor(prompt: &str) -> String {

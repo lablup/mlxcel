@@ -209,6 +209,17 @@ fn print_preparation_summary(summary: VlmPreparationSummary) {
                 image_blocks, total_image_tokens
             );
         }
+        VlmPreparationSummary::KimiVLVideo {
+            media_blocks,
+            video_count,
+            frame_slots,
+            total_image_tokens,
+        } => {
+            println!(
+                "Kimi-VL: expanded {} media placeholder(s) across {} video(s) ({} sampled frame(s), {} total media tokens)",
+                media_blocks, video_count, frame_slots, total_image_tokens
+            );
+        }
         VlmPreparationSummary::GraniteVision {
             image_blocks,
             total_image_tokens,
@@ -319,8 +330,17 @@ pub(crate) fn compute_vlm_embeddings(
                 target_fps,
             );
         }
+        if let LoadedModel::KimiVL(kimi) = model {
+            return compute_kimi_vl_video_embeddings(
+                kimi,
+                prompt_tokens,
+                image_paths,
+                video_paths,
+                target_fps,
+            );
+        }
         return Err(anyhow::anyhow!(
-            "--video input is currently only supported by Gemma4 VLMs"
+            "--video input is currently only supported by Gemma 4 and Kimi-VL VLMs"
         ));
     }
 
@@ -834,6 +854,70 @@ fn compute_gemma4_video_embeddings(
         frame_slots: total_frames,
         total_tokens: prompt_tokens.len(),
     });
+
+    Ok(Some(embeddings))
+}
+
+/// Compute video embeddings (and optional companion image embeddings) for the
+/// Kimi-VL / Kimi-VL 2.5 (`kimi_k25`) MoonViT model.
+///
+/// Decodes each video via `mlxcel::video::load_videos` (subprocess `ffmpeg`,
+/// default 2.0 fps), then routes the decoded frames and any `--image` companions
+/// through the shared [`mlxcel::vlm_runtime::compute_kimi_vl_media_embeddings`]
+/// helper, which patchifies per frame, builds the mixed `(t, h, w)` / `(h, w)`
+/// media-grid list, expands `<|media_pad|>` placeholders in media order, and
+/// runs the MoonViT tower with temporal position embeddings + temporal pooling.
+fn compute_kimi_vl_video_embeddings(
+    kimi: &mlxcel::vision::KimiVLModel,
+    prompt_tokens: &mut Vec<i32>,
+    image_paths: &[PathBuf],
+    video_paths: &[PathBuf],
+    target_fps: f64,
+) -> Result<Option<InputEmbeddings>> {
+    if !video::ffmpeg_available() {
+        return Err(anyhow::anyhow!(
+            "Video input requires `ffmpeg` on PATH. Install ffmpeg (e.g. `brew install ffmpeg` \
+             on macOS or `apt install ffmpeg` on Linux) and retry."
+        ));
+    }
+
+    // Decode the videos. `target_fps == 0` is rejected by `smart_nframes`,
+    // so guard here with a clean error.
+    let videos = video::load_videos(video_paths, Some(target_fps), None)
+        .map_err(|err| anyhow::anyhow!("Failed to load video(s): {}", err))?;
+    let frame_slots: usize = videos.iter().map(Vec::len).sum();
+    println!(
+        "Loaded {} video(s) ({} total frames after sampling).",
+        videos.len(),
+        frame_slots
+    );
+
+    // Optional companion images (e.g. user passes both --image and --video).
+    let images: Vec<image::DynamicImage> = image_paths
+        .iter()
+        .map(|path| {
+            image::open(path).map_err(|e| anyhow::anyhow!("Failed to load image {:?}: {}", path, e))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    if !images.is_empty() {
+        println!("Loaded {} image(s).", images.len());
+    }
+
+    let (embeddings, stats) = mlxcel::vlm_runtime::compute_kimi_vl_media_embeddings(
+        kimi,
+        prompt_tokens,
+        &images,
+        &videos,
+    )?;
+
+    if let Some(stats) = stats {
+        print_preparation_summary(VlmPreparationSummary::KimiVLVideo {
+            media_blocks: stats.image_blocks,
+            video_count: videos.len(),
+            frame_slots,
+            total_image_tokens: stats.total_image_tokens,
+        });
+    }
 
     Ok(Some(embeddings))
 }

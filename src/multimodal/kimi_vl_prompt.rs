@@ -24,12 +24,21 @@
 //! in place.
 //!
 //! When the rendered prompt carries no `<|media_pad|>` placeholder (a bare CLI
-//! image), one expanded run per image is spliced in after the first token,
-//! mirroring the Youtu-VL / InternVL fallback.
+//! image or video), one expanded run per media item is spliced in after the
+//! first token, mirroring the Youtu-VL / InternVL fallback.
+//!
+//! Video clips (Kimi-VL 2.5) use the same `<|media_pad|>` placeholder and the
+//! same per-item count `(h / merge) * (w / merge)`. The count is independent of
+//! the frame count `t` because the MoonViT merger mean-pools all frames of a
+//! clip to one spatial token map before the spatial merge. A request may mix
+//! images and videos; grid entries expand in media order.
+
+use crate::vision::encoders::kimi_vl::KimiMediaGrid;
 
 /// Statistics describing the Kimi-VL media-token insertion/expansion.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct InsertedKimiVlTokens {
+    /// Number of media items (images + video clips) that were expanded.
     pub image_blocks: usize,
     pub total_image_tokens: i32,
 }
@@ -47,31 +56,61 @@ pub fn insert_kimi_vl_image_tokens(
     spatial_merge_size: i32,
     media_placeholder_token_id: i32,
 ) -> Option<InsertedKimiVlTokens> {
-    if prompt_tokens.is_empty() || grid_shapes.is_empty() || spatial_merge_size <= 0 {
+    if grid_shapes.is_empty() {
+        return None;
+    }
+    let media_grids: Vec<KimiMediaGrid> = grid_shapes
+        .iter()
+        .map(|&(h, w)| KimiMediaGrid::Image { h, w })
+        .collect();
+    insert_kimi_vl_media_tokens(
+        prompt_tokens,
+        &media_grids,
+        spatial_merge_size,
+        media_placeholder_token_id,
+    )
+}
+
+/// Insert (or expand) Kimi-VL media-placeholder runs for a mixed list of image
+/// and video grids (media order).
+///
+/// The per-item token count is `(h / merge) * (w / merge)` for both images and
+/// videos (the video path collapses `t` frames to one spatial map before the
+/// spatial merge, so the count does not depend on `t`).
+///
+/// Returns `None` when there is nothing to do (empty prompt, no media, or a
+/// zero merge size).
+pub fn insert_kimi_vl_media_tokens(
+    prompt_tokens: &mut Vec<i32>,
+    media_grids: &[KimiMediaGrid],
+    spatial_merge_size: i32,
+    media_placeholder_token_id: i32,
+) -> Option<InsertedKimiVlTokens> {
+    if prompt_tokens.is_empty() || media_grids.is_empty() || spatial_merge_size <= 0 {
         return None;
     }
 
-    let per_image_counts: Vec<i32> = grid_shapes
+    let per_item_counts: Vec<i32> = media_grids
         .iter()
-        .map(|&(h, w)| (h / spatial_merge_size) * (w / spatial_merge_size))
+        .map(|grid| grid.merged_count(spatial_merge_size))
         .collect();
-    let total_image_tokens: i32 = per_image_counts.iter().sum();
-    let image_blocks = grid_shapes.len();
+    let total_image_tokens: i32 = per_item_counts.iter().sum();
+    let image_blocks = media_grids.len();
 
-    // Case 1: the prompt already carries one <|media_pad|> per image. Expand
-    // each in place into its full run of placeholder tokens.
+    // Case 1: the prompt already carries one <|media_pad|> per media item.
+    // Expand each in place into its full run of placeholder tokens.
     let placeholder_count = prompt_tokens
         .iter()
         .filter(|&&t| t == media_placeholder_token_id)
         .count();
     if placeholder_count > 0 {
         let mut expanded = Vec::with_capacity(prompt_tokens.len() + total_image_tokens as usize);
-        let mut image_idx = 0usize;
+        let mut item_idx = 0usize;
         for &token in prompt_tokens.iter() {
-            if token == media_placeholder_token_id && image_idx < per_image_counts.len() {
-                let count = per_image_counts[image_idx].max(0) as usize;
+            if token == media_placeholder_token_id && item_idx < per_item_counts.len() {
+                let count = per_item_counts[item_idx].max(0) as usize;
                 expanded.extend(std::iter::repeat_n(media_placeholder_token_id, count));
-                image_idx += 1;
+                item_idx += 1;
             } else {
                 expanded.push(token);
             }
@@ -83,9 +122,10 @@ pub fn insert_kimi_vl_image_tokens(
         });
     }
 
-    // Case 2: no placeholder — splice one run per image after the first token.
+    // Case 2: no placeholder — splice one run per media item after the first
+    // token, in media order.
     let mut runs: Vec<i32> = Vec::with_capacity(total_image_tokens as usize);
-    for &count in &per_image_counts {
+    for &count in &per_item_counts {
         runs.extend(std::iter::repeat_n(
             media_placeholder_token_id,
             count.max(0) as usize,
@@ -147,5 +187,46 @@ mod tests {
         assert!(insert_kimi_vl_image_tokens(&mut empty, &[(4, 4)], 2, MEDIA_PAD).is_none());
         let mut prompt = vec![1, 2];
         assert!(insert_kimi_vl_image_tokens(&mut prompt, &[], 2, MEDIA_PAD).is_none());
+    }
+
+    #[test]
+    fn video_grid_expands_independent_of_t() {
+        // A video (t, h, w) expands its single <|media_pad|> to (h/2)*(w/2)
+        // tokens regardless of t. Try t = 1 and t = 5 for the same (4, 4) grid;
+        // both must yield 4 media tokens.
+        for t in [1, 5, 8] {
+            let mut prompt = vec![1i32, MEDIA_PAD, 300];
+            let stats = insert_kimi_vl_media_tokens(
+                &mut prompt,
+                &[KimiMediaGrid::Video { t, h: 4, w: 4 }],
+                2,
+                MEDIA_PAD,
+            )
+            .unwrap();
+            assert_eq!(stats.image_blocks, 1);
+            assert_eq!(stats.total_image_tokens, 4, "t={t} must give 4 tokens");
+            assert_eq!(prompt[0], 1);
+            assert_eq!(&prompt[1..5], &[MEDIA_PAD; 4]);
+            assert_eq!(prompt[5], 300);
+        }
+    }
+
+    #[test]
+    fn mixed_image_and_video_expand_in_media_order() {
+        // Media order: image (4,4) -> 4 tokens, then video (t=3, 2, 2) -> 1
+        // token. Two placeholders expand in order.
+        let mut prompt = vec![1i32, MEDIA_PAD, MEDIA_PAD, 9];
+        let grids = [
+            KimiMediaGrid::Image { h: 4, w: 4 },
+            KimiMediaGrid::Video { t: 3, h: 2, w: 2 },
+        ];
+        let stats = insert_kimi_vl_media_tokens(&mut prompt, &grids, 2, MEDIA_PAD).unwrap();
+        assert_eq!(stats.image_blocks, 2);
+        // image: (4/2)*(4/2)=4, video: (2/2)*(2/2)=1, total 5.
+        assert_eq!(stats.total_image_tokens, 5);
+        assert_eq!(prompt[0], 1);
+        assert_eq!(&prompt[1..5], &[MEDIA_PAD; 4]); // image run
+        assert_eq!(prompt[5], MEDIA_PAD); // video run (1 token)
+        assert_eq!(prompt[6], 9);
     }
 }

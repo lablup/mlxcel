@@ -1796,11 +1796,16 @@ fn prepare_request_video_embeddings(
         return prepare_gemma4_unified_video_embeddings(unified, prompt_tokens, images, videos);
     }
 
+    // Kimi-VL / Kimi-VL 2.5 (kimi_k25) MoonViT 3D video path (issue #551).
+    if let LoadedModel::KimiVL(kimi) = model {
+        return prepare_kimi_vl_video_embeddings(kimi, prompt_tokens, images, videos);
+    }
+
     let gemma4_vl = match model {
         LoadedModel::Gemma4VLM(model) => model,
         _ => {
             return Err(anyhow!(
-                "video inputs are only supported by Gemma 4 VLM models in this build"
+                "video inputs are only supported by Gemma 4 and Kimi-VL VLM models in this build"
             ));
         }
     };
@@ -1911,6 +1916,74 @@ fn prepare_request_video_embeddings(
         &processed_images,
         &processed_videos,
     );
+
+    Ok(Some(embeddings))
+}
+
+/// Resolve `videos` into Kimi-VL / Kimi-VL 2.5 (`kimi_k25`) MoonViT video
+/// embeddings (issue #551).
+///
+/// Mirrors [`prepare_request_video_embeddings`]'s decode/ffmpeg handling: probes
+/// for ffmpeg, decodes each video through its fd-backed [`VideoSource`] (no
+/// canonicalize -> ffmpeg-open TOCTOU window), decodes any companion images,
+/// then routes both through the shared
+/// [`crate::vlm_runtime::compute_kimi_vl_media_embeddings`] helper. That helper
+/// patchifies per frame, builds the mixed `(t, h, w)` / `(h, w)` media-grid
+/// list, expands `<|media_pad|>` placeholders in media order, and runs the
+/// MoonViT tower with the temporal position embedding + temporal pooling.
+fn prepare_kimi_vl_video_embeddings(
+    kimi: &crate::vision::KimiVLModel,
+    prompt_tokens: &mut Vec<i32>,
+    images: &[Vec<u8>],
+    videos: &[crate::server::media::ResolvedVideo],
+) -> Result<Option<InputEmbeddings>> {
+    use crate::multimodal::video;
+
+    if !video::ffmpeg_available() {
+        return Err(anyhow!(
+            "Video input requires `ffmpeg` on PATH. Install ffmpeg (e.g. `brew install ffmpeg` \
+             on macOS or `apt install ffmpeg` on Linux) and retry."
+        ));
+    }
+
+    // Decode each video honouring the per-video FPS override when supplied;
+    // otherwise fall back to `multimodal::video::DEFAULT_FPS` (2.0 fps). The
+    // fd-backed source means ffmpeg reads the open file description the resolver
+    // already validated.
+    let mut decoded_videos: Vec<Vec<image::DynamicImage>> = Vec::with_capacity(videos.len());
+    for resolved in videos.iter() {
+        let fps = resolved.fps.unwrap_or(video::DEFAULT_FPS);
+        let frames =
+            video::load_video_source(&resolved.source, Some(fps), None).map_err(|err| {
+                anyhow!(
+                    "Failed to load video {:?}: {}",
+                    resolved.source.canonical_path(),
+                    err
+                )
+            })?;
+        decoded_videos.push(frames);
+    }
+
+    let total_frames: usize = decoded_videos.iter().map(Vec::len).sum();
+    tracing::info!(
+        "Kimi-VL video request: decoded {} video(s) ({} total frames after sampling)",
+        decoded_videos.len(),
+        total_frames
+    );
+
+    // Optional companion images (e.g. user passes both image_url and video_url).
+    let decoded_images: Vec<image::DynamicImage> = if images.is_empty() {
+        Vec::new()
+    } else {
+        decode_request_images(images)?
+    };
+
+    let (embeddings, _stats) = crate::vlm_runtime::compute_kimi_vl_media_embeddings(
+        kimi,
+        prompt_tokens,
+        &decoded_images,
+        &decoded_videos,
+    )?;
 
     Ok(Some(embeddings))
 }

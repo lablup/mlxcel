@@ -1107,6 +1107,27 @@ fn detect_model_media_support_recognises_gemma4_unified() {
 }
 
 #[test]
+fn detect_model_media_support_recognises_kimi_k25() {
+    // Kimi-VL 2.5 (kimi_k25) MoonViT consumes `video_url` content blocks
+    // (issue #551). `model_type=kimi_k25` is detected by model_type alone, so a
+    // minimal config is enough to assert the route guard will admit video.
+    let dir = temp_path("media-kimi-k25");
+    let config = serde_json::json!({
+        "model_type": "kimi_k25",
+        "text_config": { "model_type": "deepseek_v3" },
+        "vision_config": { "model_type": "moonvit" }
+    });
+    std::fs::write(dir.join("config.json"), config.to_string()).unwrap();
+
+    let support = detect_model_media_support(&dir);
+    assert!(
+        support.video,
+        "kimi_k25 must enable video_url content blocks, got {support:?}"
+    );
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
 fn detect_model_media_support_falls_back_for_missing_config() {
     let dir = temp_path("media-missing-config");
     // No config.json → get_model_type fails → fallback yields "no video".

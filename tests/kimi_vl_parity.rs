@@ -24,7 +24,7 @@
 use std::path::PathBuf;
 
 use mlxcel::models::{ModelType, get_model_type};
-use mlxcel::vision::encoders::kimi_vl::{KimiVLVisionConfig, KimiVLVisionModel};
+use mlxcel::vision::encoders::kimi_vl::{KimiMediaGrid, KimiVLVisionConfig, KimiVLVisionModel};
 use mlxcel::vision::kimi_vl::KimiVLMultiModalProjector;
 use mlxcel_core::weights::WeightMap;
 
@@ -96,6 +96,7 @@ fn tiny_config(depth: usize) -> KimiVLVisionConfig {
         init_pos_emb_height: 4,
         init_pos_emb_width: 4,
         spatial_merge_size: 2,
+        temporal_patch_size: 2,
         layer_norm_eps: 1e-6,
         quant_group_size: 0,
         quant_bits: 0,
@@ -220,6 +221,10 @@ fn moonvit_encoder_and_connector_shapes_match_reference() {
 
     // One 4x4 patch grid -> 16 patches; patch 2, 3 channels.
     let grid = (4i32, 4i32);
+    let media = KimiMediaGrid::Image {
+        h: grid.0,
+        w: grid.1,
+    };
     let n = grid.0 * grid.1;
     let pixels = mlxcel_core::from_slice_f32(
         &vec![
@@ -233,7 +238,7 @@ fn moonvit_encoder_and_connector_shapes_match_reference() {
             cfg.num_channels as i32,
         ],
     );
-    let merged = encoder.forward_with_grid(&pixels, &[grid]);
+    let merged = encoder.forward_with_grid(&pixels, &[media]);
     // (4/2)*(4/2) = 4 merged tokens, each carrying kh*kw=4 vectors of dim 8.
     assert_eq!(
         mlxcel_core::array_shape(&merged),

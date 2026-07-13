@@ -37,8 +37,8 @@
 //! [`crate::vision::merge::merge_llava`] — exactly the upstream
 //! `Model.get_input_embeddings` scatter.
 //!
-//! Scope: image path only. Kimi-VL 2.5's 3D MoonViT video path is a separate
-//! follow-up and is not implemented here.
+//! Scope: image and video. Kimi-VL 2.5's 3D MoonViT video path is handled by
+//! the same tower via [`KimiMediaGrid`] media descriptors (issue #551).
 
 use mlxcel_core::cache::SequenceId;
 use mlxcel_core::generate::{DecodeBatchContext, LanguageModel};
@@ -47,7 +47,7 @@ use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
 
 use crate::models::deepseek_v3::DeepSeekV3Model;
-use crate::vision::encoders::kimi_vl::KimiVLVisionModel;
+use crate::vision::encoders::kimi_vl::{KimiMediaGrid, KimiVLVisionModel};
 use crate::vision::merge::{self, InputEmbeddings};
 use crate::vision::processors::kimi_vl::KimiVLProcessor;
 
@@ -131,14 +131,16 @@ impl KimiVLModel {
     /// Mirrors `Model.get_input_embeddings` in upstream `kimi_vl.py`.
     ///
     /// `pixel_values`: channels-first `[total_patches, C, p, p]` (the processor's
-    /// native layout). MoonViT is channels-last, so we transpose once here,
-    /// matching the reference `pixel_values.transpose(0, 2, 3, 1)`. `grid_shapes`
-    /// carries the `(h, w)` patch grid per image.
+    /// native layout), packed in media order (frame-major within each video).
+    /// MoonViT is channels-last, so we transpose once here, matching the
+    /// reference `pixel_values.transpose(0, 2, 3, 1)`. `media_grids` carries one
+    /// [`KimiMediaGrid`] per item (image `(h, w)` or video `(t, h, w)`), in the
+    /// same order the patches are concatenated.
     pub fn get_input_embeddings(
         &self,
         input_ids: &MlxArray,
         pixel_values: &MlxArray,
-        grid_shapes: &[(i32, i32)],
+        media_grids: &[KimiMediaGrid],
     ) -> InputEmbeddings {
         let inputs_embeds = self.text_model.get_embed_tokens(input_ids);
 
@@ -146,7 +148,7 @@ impl KimiVLModel {
         let pv = mlxcel_core::astype(pixel_values, embed_dtype);
         let pv = mlxcel_core::transpose_axes(&pv, &[0, 2, 3, 1]);
 
-        let vision_features = self.vision_model.forward_with_grid(&pv, grid_shapes);
+        let vision_features = self.vision_model.forward_with_grid(&pv, media_grids);
         let image_features = self.projector.forward(&vision_features);
 
         merge::merge_llava(

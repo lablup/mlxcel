@@ -36,6 +36,44 @@
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
 
+use super::KimiMediaGrid;
+
+/// Build the temporal position-embedding table for `t` frames, shape
+/// `[t, dim]`.
+///
+/// A closed-form 1D sinusoid over the frame index (Kimi-VL 2.5); it is computed
+/// on the fly and is never a checkpoint weight. With `half = dim / 2`:
+/// - `pos[f] = f` for `f in 0..t`,
+/// - `freq[j] = exp(-ln(10000) * j / half)` for `j in 0..half`,
+/// - `ang[f, j] = pos[f] * freq[j]`,
+/// - `table = concat([sin(ang), cos(ang)], axis = 1)`.
+///
+/// Row 0 is therefore `sin(0) = 0` across columns `0..half` and `cos(0) = 1`
+/// across columns `half..2*half`. When `dim` is odd the sin/cos halves cover
+/// `dim - 1` columns, so a single zero column is appended to reach `dim`.
+pub(crate) fn temporal_sinusoid(t: i32, dim: i32) -> UniquePtr<MlxArray> {
+    let half = dim / 2;
+    // pos = [0, 1, ..., t-1]; shape [t].
+    let pos = mlxcel_core::arange_f32(0.0, t as f32, 1.0);
+    // freq[j] = exp(-ln(10000) * j / half); shape [half].
+    let j = mlxcel_core::arange_f32(0.0, half as f32, 1.0);
+    let ln_theta = 10_000.0f32.ln();
+    let exponent = mlxcel_core::multiply_scalar(&j, -ln_theta / half as f32);
+    let freq = mlxcel_core::exp(&exponent);
+    // ang[f, j] = pos[f] * freq[j]; shape [t, half].
+    let ang = mlxcel_core::outer(&pos, &freq);
+    let sin = mlxcel_core::sin(&ang);
+    let cos = mlxcel_core::cos(&ang);
+    let table = mlxcel_core::concatenate(&sin, &cos, 1); // [t, 2*half]
+    if 2 * half < dim {
+        // Odd embed_dim: pad the missing trailing column(s) with zeros.
+        let pad = mlxcel_core::zeros(&[t, dim - 2 * half], mlxcel_core::dtype::FLOAT32);
+        mlxcel_core::concatenate(&table, &pad, 1)
+    } else {
+        table
+    }
+}
+
 /// Learned per-patch position grid with on-the-fly bicubic resampling.
 pub(crate) struct Learnable2DInterpPosEmb {
     weight: UniquePtr<MlxArray>,
@@ -91,12 +129,53 @@ impl Learnable2DInterpPosEmb {
         mlxcel_core::reshape(&resampled, &[h * w, self.dim])
     }
 
+    /// Build the per-item position term for one media grid, shape
+    /// `[token_count, dim]`.
+    ///
+    /// For an image this is the flattened spatial table `[h*w, dim]`. For a
+    /// video the spatial table is tiled `t` times along axis 0 (frame-major),
+    /// and the temporal sinusoid `[t, dim]` (row `f` repeated `h*w` times) is
+    /// added on top, giving `[t*h*w, dim]`.
+    fn pos_for_media(&self, grid: &KimiMediaGrid) -> UniquePtr<MlxArray> {
+        match *grid {
+            KimiMediaGrid::Image { h, w } => self.pos_for(h, w),
+            KimiMediaGrid::Video { t, h, w } => {
+                let spatial = self.pos_for(h, w); // [h*w, dim]
+                // Tile the per-frame spatial table t times along axis 0.
+                let spatial = mlxcel_core::tile(&spatial, &[t, 1]); // [t*h*w, dim]
+                // Temporal table [t, dim], each row repeated h*w times.
+                let temporal = temporal_sinusoid(t, self.dim); // [t, dim]
+                let temporal = mlxcel_core::repeat(&temporal, h * w, 0); // [t*h*w, dim]
+                mlxcel_core::add(&spatial, &temporal)
+            }
+        }
+    }
+
     /// Add the concatenated per-image position embeddings to `x`
     /// (`[total_tokens, dim]`), matching upstream `Learnable2DInterpPosEmb.__call__`.
+    ///
+    /// Image-only convenience over [`add_to_media`](Self::add_to_media); reused
+    /// by other encoders (e.g. LFM2-VL) that share this position embedding.
     pub(crate) fn add_to(&self, x: &MlxArray, shapes: &[(i32, i32)]) -> UniquePtr<MlxArray> {
-        let mut pos: Vec<UniquePtr<MlxArray>> = Vec::with_capacity(shapes.len());
-        for &(h, w) in shapes {
-            pos.push(self.pos_for(h, w));
+        let media_grids: Vec<KimiMediaGrid> = shapes
+            .iter()
+            .map(|&(h, w)| KimiMediaGrid::Image { h, w })
+            .collect();
+        self.add_to_media(x, &media_grids)
+    }
+
+    /// Add the concatenated per-item position embeddings to `x`
+    /// (`[total_tokens, dim]`) for a mixed list of image and video grids,
+    /// extending the upstream image behaviour with the temporal sinusoid for
+    /// video clips.
+    pub(crate) fn add_to_media(
+        &self,
+        x: &MlxArray,
+        media_grids: &[KimiMediaGrid],
+    ) -> UniquePtr<MlxArray> {
+        let mut pos: Vec<UniquePtr<MlxArray>> = Vec::with_capacity(media_grids.len());
+        for grid in media_grids {
+            pos.push(self.pos_for_media(grid));
         }
         let concatenated = if pos.len() == 1 {
             pos.into_iter().next().unwrap()

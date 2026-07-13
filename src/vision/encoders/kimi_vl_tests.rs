@@ -16,9 +16,9 @@
 //! without any checkpoint: every expected value is derived by hand from the
 //! upstream reference math.
 
-use super::pos_emb::Learnable2DInterpPosEmb;
+use super::pos_emb::{Learnable2DInterpPosEmb, temporal_sinusoid};
 use super::rope::{Rope2DPosEmb, apply_rope};
-use super::{KimiVLVisionConfig, KimiVLVisionModel, patch_merger};
+use super::{KimiMediaGrid, KimiVLVisionConfig, KimiVLVisionModel, cu_seqlens, patch_merger};
 use mlxcel_core::weights::WeightMap;
 
 fn to_vec(a: &mlxcel_core::MlxArray) -> Vec<f32> {
@@ -43,7 +43,7 @@ fn rope_cos_sin_matches_reference_2x2() {
     // Grid (2, 2), row-major tokens (row y, col x): (0,0),(0,1),(1,0),(1,1).
     // angle[t] = [x_angle=col*1, y_angle=row*1]  (interleaved x then y).
     let rope = Rope2DPosEmb::new(4);
-    let (cos, sin) = rope.cos_sin(&[(2, 2)]);
+    let (cos, sin) = rope.cos_sin(&[KimiMediaGrid::Image { h: 2, w: 2 }]);
     assert_eq!(mlxcel_core::array_shape(&cos), vec![4, 2]);
 
     let cos = to_vec(&cos); // [t0(x,y), t1, t2, t3]
@@ -87,7 +87,7 @@ fn patch_merger_2x2_groups_neighbours() {
     // A single (2,2) image, dim=1, patch values 0..4 in row-major order.
     // A 2x2 merge collapses to one token carrying [0,1,2,3] (kh,kw order).
     let x = mlxcel_core::from_slice_f32(&[0.0, 1.0, 2.0, 3.0], &[4, 1]);
-    let out = patch_merger(&x, &[(2, 2)], 2);
+    let out = patch_merger(&x, &[KimiMediaGrid::Image { h: 2, w: 2 }], 2);
     assert_eq!(mlxcel_core::array_shape(&out), vec![1, 4, 1]);
     assert_eq!(to_vec(&out), vec![0.0, 1.0, 2.0, 3.0]);
 }
@@ -127,6 +127,7 @@ fn tiny_config() -> KimiVLVisionConfig {
         init_pos_emb_height: 2,
         init_pos_emb_width: 2,
         spatial_merge_size: 2,
+        temporal_patch_size: 2,
         layer_norm_eps: 1e-6,
         quant_group_size: 0,
         quant_bits: 0,
@@ -247,7 +248,7 @@ fn encoder_forward_smoke_synthetic_weights() {
 
     // pixel_values [num_patches, p, p, C] = [4, 1, 1, 2].
     let pixels = mlxcel_core::from_slice_f32(&[0.5; 8], &[4, 1, 1, 2]);
-    let out = model.forward_with_grid(&pixels, &[(2, 2)]);
+    let out = model.forward_with_grid(&pixels, &[KimiMediaGrid::Image { h: 2, w: 2 }]);
     // (2,2) grid, 2x2 merge -> 1 merged token of [kh*kw=4, dim=4].
     assert_eq!(mlxcel_core::array_shape(&out), vec![1, 4, 4]);
 
@@ -256,4 +257,262 @@ fn encoder_forward_smoke_synthetic_weights() {
         values.iter().all(|v| v.is_finite()),
         "encoder output must be finite"
     );
+}
+
+// ── Video (3D MoonViT) tests ────────────────────────────────────────────────
+
+#[test]
+fn temporal_sinusoid_shape_row0_and_closed_form() {
+    // Real embed_dim so the col split lands exactly on 576.
+    let dim = 1152i32;
+    let half = dim / 2; // 576
+    let t = 3i32;
+    let table = temporal_sinusoid(t, dim);
+    assert_eq!(mlxcel_core::array_shape(&table), vec![t, dim]);
+
+    let v = to_vec(&table); // row-major [t, dim]
+    // Row 0: sin(0)=0 for cols 0..half, cos(0)=1 for cols half..dim.
+    for c in 0..half {
+        assert_close(v[c as usize], 0.0, "row0 sin col");
+    }
+    for c in half..dim {
+        assert_close(v[c as usize], 1.0, "row0 cos col");
+    }
+
+    // Spot-check frame f=2 against the closed form for a few columns j.
+    let ln_theta = 10_000.0f32.ln();
+    let f = 2i32;
+    let base = (f * dim) as usize;
+    for j in [0i32, 1, 100, 575] {
+        let freq = (-ln_theta * j as f32 / half as f32).exp();
+        let ang = f as f32 * freq;
+        assert_close(v[base + j as usize], ang.sin(), "sin closed form");
+        assert_close(v[base + (half + j) as usize], ang.cos(), "cos closed form");
+    }
+}
+
+#[test]
+fn pos_emb_video_t1_equals_image_plus_frame0_temporal() {
+    // Video table for grid (1, h, w) == image table for (h, w) plus the frame-0
+    // temporal row broadcast to all h*w rows.
+    let dim = 8i32;
+    let (ih, iw) = (2i32, 2i32);
+    let grid_vals: Vec<f32> = (0..(ih * iw * dim)).map(|i| i as f32 * 0.1).collect();
+    let weight = mlxcel_core::from_slice_f32(&grid_vals, &[ih, iw, dim]);
+    let emb = Learnable2DInterpPosEmb::from_array(mlxcel_core::copy(&weight), ih, iw, dim);
+
+    let (h, w) = (2i32, 2i32);
+    // Recover each position table as add_to_media(zeros).
+    let zeros_img = mlxcel_core::zeros(&[h * w, dim], mlxcel_core::dtype::FLOAT32);
+    let image_tbl = emb.add_to_media(&zeros_img, &[KimiMediaGrid::Image { h, w }]);
+    let zeros_vid = mlxcel_core::zeros(&[h * w, dim], mlxcel_core::dtype::FLOAT32);
+    let video_tbl = emb.add_to_media(&zeros_vid, &[KimiMediaGrid::Video { t: 1, h, w }]);
+
+    let frame0 = to_vec(&temporal_sinusoid(1, dim)); // dim values (row 0)
+    let img = to_vec(&image_tbl);
+    let vid = to_vec(&video_tbl);
+    assert_eq!(img.len(), (h * w * dim) as usize);
+    for r in 0..(h * w) as usize {
+        let base = r * dim as usize;
+        for (c, &f0) in frame0.iter().enumerate() {
+            let idx = base + c;
+            assert_close(
+                vid[idx],
+                img[idx] + f0,
+                "video(1,h,w) == image + frame0 temporal",
+            );
+        }
+    }
+}
+
+#[test]
+fn rope_video_table_tiles_image_table() {
+    // head_dim=4 -> dim/2 = 2 angle columns. The (t*h*w, 2) video table equals
+    // the (h*w, 2) image table repeated t times along axis 0.
+    let rope = Rope2DPosEmb::new(4);
+    let (h, w) = (2i32, 3i32);
+    let t = 3i32;
+    let half = 2i32; // head_dim/2
+
+    let (cos_img, sin_img) = rope.cos_sin(&[KimiMediaGrid::Image { h, w }]);
+    let (cos_vid, sin_vid) = rope.cos_sin(&[KimiMediaGrid::Video { t, h, w }]);
+    assert_eq!(mlxcel_core::array_shape(&cos_vid), vec![t * h * w, half]);
+
+    let ci = to_vec(&cos_img);
+    let si = to_vec(&sin_img);
+    let cv = to_vec(&cos_vid);
+    let sv = to_vec(&sin_vid);
+    let per = (h * w * half) as usize;
+    for f in 0..t as usize {
+        for k in 0..per {
+            assert_close(cv[f * per + k], ci[k], "cos tile");
+            assert_close(sv[f * per + k], si[k], "sin tile");
+        }
+    }
+}
+
+#[test]
+fn merger_temporal_pool_is_frame_mean_then_merge() {
+    // dim=1, grid (2,2), t=2 with distinct per-frame values.
+    // frame-major packing: frame0=[0,1,2,3], frame1=[10,11,12,13].
+    let dim = 1i32;
+    let (h, w) = (2i32, 2i32);
+    let t = 2i32;
+    let data: Vec<f32> = vec![0., 1., 2., 3., 10., 11., 12., 13.];
+    let x = mlxcel_core::from_slice_f32(&data, &[t * h * w, dim]);
+
+    let out = patch_merger(&x, &[KimiMediaGrid::Video { t, h, w }], 2);
+    // Output shape ((h/2)*(w/2), 4, dim) for any t.
+    assert_eq!(mlxcel_core::array_shape(&out), vec![1, 4, dim]);
+    // Frame mean [5,6,7,8], then the 2x2 merge groups them into one token.
+    assert_eq!(to_vec(&out), vec![5.0, 6.0, 7.0, 8.0]);
+}
+
+#[test]
+fn cu_seqlens_mixes_video_and_image_segments() {
+    // Media order: video (t=3,2,2)=12, image (2,2)=4, video (t=2,3,3)=18.
+    let grids = [
+        KimiMediaGrid::Video { t: 3, h: 2, w: 2 },
+        KimiMediaGrid::Image { h: 2, w: 2 },
+        KimiMediaGrid::Video { t: 2, h: 3, w: 3 },
+    ];
+    assert_eq!(cu_seqlens(&grids), vec![0, 12, 16, 34]);
+}
+
+/// Build the tiny synthetic MoonViT encoder weights with a configurable
+/// patch-embed bias and a non-trivial learned position grid.
+fn tiny_encoder_weights(p: &str, proj_bias: &[f32]) -> WeightMap {
+    let mut wm = WeightMap::new();
+    insert(
+        &mut wm,
+        &format!("{p}.patch_embed.proj.weight"),
+        &[0.1; 8],
+        &[4, 1, 1, 2],
+    );
+    insert(
+        &mut wm,
+        &format!("{p}.patch_embed.proj.bias"),
+        proj_bias,
+        &[4],
+    );
+    // Non-trivial learned pos grid [2,2,4].
+    let pos: Vec<f32> = (0..16).map(|i| i as f32 * 0.01).collect();
+    insert(
+        &mut wm,
+        &format!("{p}.patch_embed.pos_emb.weight"),
+        &pos,
+        &[2, 2, 4],
+    );
+    for norm in ["norm0", "norm1"] {
+        insert(
+            &mut wm,
+            &format!("{p}.blocks.0.{norm}.weight"),
+            &[1.0; 4],
+            &[4],
+        );
+        insert(
+            &mut wm,
+            &format!("{p}.blocks.0.{norm}.bias"),
+            &[0.0; 4],
+            &[4],
+        );
+    }
+    insert(
+        &mut wm,
+        &format!("{p}.blocks.0.attn.wqkv.weight"),
+        &[0.1; 48],
+        &[12, 4],
+    );
+    insert(
+        &mut wm,
+        &format!("{p}.blocks.0.attn.wqkv.bias"),
+        &[0.0; 12],
+        &[12],
+    );
+    insert(
+        &mut wm,
+        &format!("{p}.blocks.0.attn.wo.weight"),
+        &[0.1; 16],
+        &[4, 4],
+    );
+    insert(
+        &mut wm,
+        &format!("{p}.blocks.0.attn.wo.bias"),
+        &[0.0; 4],
+        &[4],
+    );
+    insert(
+        &mut wm,
+        &format!("{p}.blocks.0.mlp.fc0.weight"),
+        &[0.1; 32],
+        &[8, 4],
+    );
+    insert(
+        &mut wm,
+        &format!("{p}.blocks.0.mlp.fc0.bias"),
+        &[0.0; 8],
+        &[8],
+    );
+    insert(
+        &mut wm,
+        &format!("{p}.blocks.0.mlp.fc1.weight"),
+        &[0.1; 32],
+        &[4, 8],
+    );
+    insert(
+        &mut wm,
+        &format!("{p}.blocks.0.mlp.fc1.bias"),
+        &[0.0; 4],
+        &[4],
+    );
+    insert(
+        &mut wm,
+        &format!("{p}.final_layernorm.weight"),
+        &[1.0; 4],
+        &[4],
+    );
+    insert(
+        &mut wm,
+        &format!("{p}.final_layernorm.bias"),
+        &[0.0; 4],
+        &[4],
+    );
+    wm
+}
+
+#[test]
+fn video_t1_equals_image_with_frame0_temporal_folded_into_bias() {
+    // A t=1 clip through the full tower equals the image-path output once the
+    // frame-0 temporal constant is accounted for. We account for it by folding
+    // the frame-0 temporal row into the image model's patch-embed bias, so both
+    // block inputs are identical (addition is commutative). Token counts and
+    // every output value must then match exactly.
+    let cfg = tiny_config();
+    let p = "vision_tower";
+    let dim = cfg.embed_dim as i32; // 4
+
+    let frame0 = to_vec(&temporal_sinusoid(1, dim)); // [dim]
+    let base_bias = vec![0.0f32; dim as usize];
+    let img_bias: Vec<f32> = base_bias.iter().zip(&frame0).map(|(b, t)| b + t).collect();
+
+    let video_model =
+        KimiVLVisionModel::from_weights(&tiny_encoder_weights(p, &base_bias), &cfg, p).unwrap();
+    let image_model =
+        KimiVLVisionModel::from_weights(&tiny_encoder_weights(p, &img_bias), &cfg, p).unwrap();
+
+    let pixels = mlxcel_core::from_slice_f32(&[0.5; 8], &[4, 1, 1, 2]);
+    let vid_out =
+        video_model.forward_with_grid(&pixels, &[KimiMediaGrid::Video { t: 1, h: 2, w: 2 }]);
+    let img_out = image_model.forward_with_grid(&pixels, &[KimiMediaGrid::Image { h: 2, w: 2 }]);
+
+    assert_eq!(
+        mlxcel_core::array_shape(&vid_out),
+        mlxcel_core::array_shape(&img_out),
+        "token counts must match exactly"
+    );
+    let v = to_vec(&vid_out);
+    let i = to_vec(&img_out);
+    for (a, b) in v.iter().zip(i.iter()) {
+        assert_close(*a, *b, "t=1 video == image + frame0 temporal");
+    }
 }

@@ -36,6 +36,8 @@
 
 use mlxcel_core::{MlxArray, UniquePtr};
 
+use super::KimiMediaGrid;
+
 /// 2D rotary position embedding for MoonViT.
 ///
 /// `dim` is the attention head dimension (`embed_dim / num_heads`); it must be
@@ -71,19 +73,25 @@ impl Rope2DPosEmb {
     }
 
     /// Build `(cos, sin)` rotation tables of shape `[total_tokens, dim/2]` for
-    /// the concatenated per-image `(height, width)` patch grids. Token order is
-    /// row-major within each image, images concatenated in slice order.
+    /// the concatenated per-item patch grids. Token order is row-major within
+    /// each frame, items concatenated in media order. The rotary angles use only
+    /// spatial `(row, col)` positions; the frame index never enters them, so a
+    /// video item simply repeats its per-frame `(row, col)` stream `t` times
+    /// (frame-major), matching the tiled patch order.
     pub(super) fn cos_sin(
         &self,
-        shapes: &[(i32, i32)],
+        media_grids: &[KimiMediaGrid],
     ) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
         let mut col_pos: Vec<f32> = Vec::new();
         let mut row_pos: Vec<f32> = Vec::new();
-        for &(h, w) in shapes {
-            for y in 0..h {
-                for x in 0..w {
-                    col_pos.push(x as f32);
-                    row_pos.push(y as f32);
+        for grid in media_grids {
+            let (h, w) = grid.spatial();
+            for _frame in 0..grid.frames() {
+                for y in 0..h {
+                    for x in 0..w {
+                        col_pos.push(x as f32);
+                        row_pos.push(y as f32);
+                    }
                 }
             }
         }

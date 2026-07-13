@@ -27,8 +27,11 @@
 //! `spatial_merge_size × spatial_merge_size` patch merge that groups
 //! neighbouring patches for the language connector.
 //!
-//! Scope: image path only. The Kimi-VL 2.5 3D (image + video) MoonViT variant
-//! is a separate follow-up and is not implemented here.
+//! Scope: image and video. The Kimi-VL 2.5 3D MoonViT video path extends the
+//! image path with a computed temporal position embedding, per-frame tiling of
+//! the 2D rotary tables, one attention segment spanning the whole clip, and a
+//! temporal mean-pool in the patch merger (issue #551). Media items are
+//! described by [`KimiMediaGrid`] (`Image { h, w }` or `Video { t, h, w }`).
 //!
 //! Weight layout (post-`Model.sanitize`, rooted at `vision_tower.`):
 //! - `patch_embed.proj.{weight,bias}` — Conv2d (`weight` MLX-transposed to
@@ -55,6 +58,59 @@ mod rope;
 
 use pos_emb::Learnable2DInterpPosEmb;
 use rope::Rope2DPosEmb;
+
+/// A media item's patch grid handed to the MoonViT tower.
+///
+/// Images carry a 2D grid `(h, w)`; videos (Kimi-VL 2.5, `kimi_k25`) carry a 3D
+/// grid `(t, h, w)` where `t` is the number of sampled frames and `(h, w)` is
+/// the per-frame patch grid shared by every frame of the clip. The two are kept
+/// distinct on purpose: a video adds a computed temporal position embedding that
+/// an image does not, so a `t = 1` clip is not bit-identical to the same frame
+/// processed as an image (see `pos_emb::temporal_sinusoid`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KimiMediaGrid {
+    /// A still image with a `(h, w)` patch grid.
+    Image { h: i32, w: i32 },
+    /// A video clip with `t` frames, each a `(h, w)` patch grid.
+    Video { t: i32, h: i32, w: i32 },
+}
+
+impl KimiMediaGrid {
+    /// The spatial `(h, w)` patch grid shared by every frame of the item.
+    #[inline]
+    pub fn spatial(&self) -> (i32, i32) {
+        match *self {
+            KimiMediaGrid::Image { h, w } => (h, w),
+            KimiMediaGrid::Video { h, w, .. } => (h, w),
+        }
+    }
+
+    /// Number of frames: `1` for an image, `t` for a video.
+    #[inline]
+    pub fn frames(&self) -> i32 {
+        match *self {
+            KimiMediaGrid::Image { .. } => 1,
+            KimiMediaGrid::Video { t, .. } => t,
+        }
+    }
+
+    /// Number of encoder tokens (pre-merge): `h*w` for an image, `t*h*w` for a
+    /// video. This is also the item's `cu_seqlens` attention-segment length.
+    #[inline]
+    pub fn token_count(&self) -> i32 {
+        let (h, w) = self.spatial();
+        self.frames() * h * w
+    }
+
+    /// Number of merged tokens the tower emits for this item:
+    /// `(h/merge)*(w/merge)`, independent of `t` (the temporal mean-pool
+    /// collapses all frames to one spatial map before the spatial merge).
+    #[inline]
+    pub fn merged_count(&self, merge: i32) -> i32 {
+        let (h, w) = self.spatial();
+        (h / merge) * (w / merge)
+    }
+}
 
 /// MoonViT vision configuration.
 ///
@@ -84,6 +140,13 @@ pub struct KimiVLVisionConfig {
     pub init_pos_emb_width: usize,
     #[serde(default = "default_merge_size")]
     pub spatial_merge_size: usize,
+    /// Frame-sampling granularity for the video path (Kimi-VL 2.5). This is
+    /// **not** a convolution kernel depth: the checkpoint has no temporal conv
+    /// axis. Its only observable effect is that sampled frame counts are
+    /// multiples of this value (which coincides with `video::FRAME_FACTOR = 2`).
+    /// Present in `kimi_k25` configs and previously ignored.
+    #[serde(default = "default_temporal_patch_size")]
+    pub temporal_patch_size: usize,
     #[serde(default = "default_layer_norm_eps")]
     pub layer_norm_eps: f32,
     /// Quantization group_size inherited from the top-level config (0 = unset).
@@ -119,6 +182,9 @@ fn default_init_pos_emb() -> usize {
     64
 }
 fn default_merge_size() -> usize {
+    2
+}
+fn default_temporal_patch_size() -> usize {
     2
 }
 fn default_layer_norm_eps() -> f32 {
@@ -194,8 +260,13 @@ impl PatchEmbed {
     }
 
     /// `pixel_values`: `[num_patches, p, p, C]` (channels-last). Returns
-    /// `[num_patches, embed_dim]` with the 2D position embedding added.
-    fn forward(&self, pixel_values: &MlxArray, shapes: &[(i32, i32)]) -> UniquePtr<MlxArray> {
+    /// `[num_patches, embed_dim]` with the spatial (and, for video items, the
+    /// temporal) position embedding added.
+    fn forward(
+        &self,
+        pixel_values: &MlxArray,
+        media_grids: &[KimiMediaGrid],
+    ) -> UniquePtr<MlxArray> {
         // Stride-p convolution over each p×p patch -> [N, 1, 1, embed_dim].
         let conv = mlxcel_core::conv2d(
             pixel_values,
@@ -213,7 +284,7 @@ impl PatchEmbed {
         if let Some(ref bias) = self.proj_weight.bias {
             h = mlxcel_core::add(&h, bias);
         }
-        self.pos_emb.add_to(&h, shapes)
+        self.pos_emb.add_to_media(&h, media_grids)
     }
 }
 
@@ -391,19 +462,51 @@ impl VisionBlock {
     }
 }
 
-/// `spatial_merge_size × spatial_merge_size` patch merge.
+/// Block-diagonal attention `cu_seqlens` for the media items: one segment per
+/// item spanning the whole clip (`t*h*w` for a video, `h*w` for an image),
+/// prefixed with `0`. All frames of one clip form a single bidirectional
+/// segment; different media items never attend to each other.
+fn cu_seqlens(media_grids: &[KimiMediaGrid]) -> Vec<i32> {
+    let mut cu = Vec::with_capacity(media_grids.len() + 1);
+    cu.push(0i32);
+    let mut acc = 0i32;
+    for grid in media_grids {
+        acc += grid.token_count();
+        cu.push(acc);
+    }
+    cu
+}
+
+/// `spatial_merge_size × spatial_merge_size` patch merge, with a temporal
+/// mean-pool for video items.
+///
+/// For an image item the item's `(h*w, dim)` slice is grouped directly. For a
+/// video item the `(t*h*w, dim)` slice is first reshaped to `(t, h*w, dim)` and
+/// mean-pooled over the frame axis, collapsing the clip to one `(h*w, dim)`
+/// spatial map before the identical spatial merge. Each item therefore
+/// contributes `(h/merge)*(w/merge)` merged tokens regardless of `t`.
 ///
 /// Groups each `(kh, kw)` block of neighbouring patches into one merged token
-/// carrying `kh * kw` channel-stacked vectors. Returns the per-image merged
+/// carrying `kh * kw` channel-stacked vectors. Returns the per-item merged
 /// features concatenated along the token axis: `[total_merged, kh*kw, dim]`.
-fn patch_merger(x: &MlxArray, shapes: &[(i32, i32)], merge: i32) -> UniquePtr<MlxArray> {
+fn patch_merger(x: &MlxArray, media_grids: &[KimiMediaGrid], merge: i32) -> UniquePtr<MlxArray> {
     let dim = mlxcel_core::array_shape(x)[1];
     let mut offset = 0i32;
-    let mut outs: Vec<UniquePtr<MlxArray>> = Vec::with_capacity(shapes.len());
-    for &(h, w) in shapes {
-        let n = h * w;
+    let mut outs: Vec<UniquePtr<MlxArray>> = Vec::with_capacity(media_grids.len());
+    for grid in media_grids {
+        let (h, w) = grid.spatial();
+        let n = grid.token_count();
         let seq = mlxcel_core::slice(x, &[offset, 0], &[offset + n, dim]);
         offset += n;
+
+        // Temporal mean-pool: collapse the clip's frames to one spatial map.
+        let seq = if let KimiMediaGrid::Video { t, .. } = *grid {
+            let frames = mlxcel_core::reshape(&seq, &[t, h * w, dim]);
+            mlxcel_core::mean_axis(&frames, 0, false)
+        } else {
+            seq
+        };
+
         let (new_h, new_w) = (h / merge, w / merge);
         let seq = mlxcel_core::reshape(&seq, &[new_h, merge, new_w, merge, dim]);
         let seq = mlxcel_core::transpose_axes(&seq, &[0, 2, 1, 3, 4]);
@@ -472,37 +575,32 @@ impl KimiVLVisionModel {
         })
     }
 
-    /// Forward pass over one or more images.
+    /// Forward pass over one or more media items (images and/or video clips).
     ///
-    /// `pixel_values`: `[total_patches, p, p, C]` (channels-last). `shapes`:
-    /// one `(h, w)` patch-grid per image, in the same order the patches are
+    /// `pixel_values`: `[total_patches, p, p, C]` (channels-last), packed in
+    /// media order (frame-major within each video). `media_grids`: one
+    /// [`KimiMediaGrid`] per item, in the same order the patches are
     /// concatenated. Returns the merged features `[total_merged, kh*kw, dim]`.
     pub fn forward_with_grid(
         &self,
         pixel_values: &MlxArray,
-        shapes: &[(i32, i32)],
+        media_grids: &[KimiMediaGrid],
     ) -> UniquePtr<MlxArray> {
         assert!(
-            !shapes.is_empty(),
-            "MoonViT forward: shapes must not be empty"
+            !media_grids.is_empty(),
+            "MoonViT forward: media_grids must not be empty"
         );
 
-        let mut h = self.patch_embed.forward(pixel_values, shapes);
-        let (cos, sin) = self.rope.cos_sin(shapes);
+        let mut h = self.patch_embed.forward(pixel_values, media_grids);
+        let (cos, sin) = self.rope.cos_sin(media_grids);
 
-        // Block-diagonal cu_seqlens (h*w per image, prefixed with 0).
-        let mut cu = vec![0i32];
-        let mut acc = 0i32;
-        for &(hh, ww) in shapes {
-            acc += hh * ww;
-            cu.push(acc);
-        }
+        let cu = cu_seqlens(media_grids);
 
         for block in &self.blocks {
             h = block.forward(&h, &cu, &cos, &sin);
         }
         h = self.final_layernorm.forward(&h);
-        patch_merger(&h, shapes, self.spatial_merge_size)
+        patch_merger(&h, media_grids, self.spatial_merge_size)
     }
 }
 

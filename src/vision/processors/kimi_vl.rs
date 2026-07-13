@@ -31,8 +31,9 @@
 //! `grid_h * grid_w / (merge*merge)` and by MoonViT to build its 2D rope /
 //! block-diagonal attention).
 //!
-//! Scope: image path only. The Kimi-VL 2.5 video patch-embedding path is a
-//! separate follow-up.
+//! Scope: image and video. `preprocess_video_with_grid` extends the image path
+//! to decoded video clips, patchifying every frame with the frame-0 resize
+//! geometry and emitting frame-major `(t*h*w, C, p, p)` patches (issue #551).
 
 use super::ImageProcessor;
 use image::imageops::FilterType;
@@ -161,6 +162,49 @@ impl KimiVLProcessor {
         let pixel_values = mlxcel_core::from_slice_f32(&all, &[total, 3, p, p]);
         (pixel_values, grids)
     }
+
+    /// Preprocess a batch of decoded video clips. Each clip is a `Vec` of
+    /// sampled frames (already extracted by `multimodal::video`). Returns the
+    /// flattened patch tensor `[total_patches, C, p, p]` packed frame-major
+    /// (frame outermost, then row-major `(row, col)` within each frame) and the
+    /// per-clip `(t, grid_h, grid_w)` grid.
+    ///
+    /// The resize/crop geometry is computed from frame 0 and applied to every
+    /// frame; because all frames of a decoded clip share pixel dimensions, each
+    /// frame patchifies to the same `(grid_h, grid_w)`. Empty clips are skipped
+    /// (`t = 0`), which callers should treat as an error upstream.
+    pub fn preprocess_video_with_grid(
+        &self,
+        clips: &[Vec<image::DynamicImage>],
+    ) -> (UniquePtr<MlxArray>, Vec<(i32, i32, i32)>) {
+        let p = self.patch_size as i32;
+        let mut all: Vec<f32> = Vec::new();
+        let mut grids: Vec<(i32, i32, i32)> = Vec::with_capacity(clips.len());
+        let mut total = 0i32;
+
+        for clip in clips {
+            let t = clip.len() as i32;
+            let mut clip_grid: Option<(i32, i32)> = None;
+            for frame in clip {
+                let tile = self.rescale(frame);
+                let (gh, gw) = self.patchify(&tile, &mut all);
+                match clip_grid {
+                    None => clip_grid = Some((gh, gw)),
+                    Some((h0, w0)) => debug_assert_eq!(
+                        (gh, gw),
+                        (h0, w0),
+                        "video frames within a clip must share the same patch grid"
+                    ),
+                }
+                total += gh * gw;
+            }
+            let (gh, gw) = clip_grid.unwrap_or((0, 0));
+            grids.push((t, gh, gw));
+        }
+
+        let pixel_values = mlxcel_core::from_slice_f32(&all, &[total, 3, p, p]);
+        (pixel_values, grids)
+    }
 }
 
 impl ImageProcessor for KimiVLProcessor {
@@ -204,6 +248,38 @@ mod tests {
             "patch count {} should be reduced toward the 16-token budget",
             gh * gw
         );
+    }
+
+    fn solid(w: u32, h: u32, rgb: [u8; 3]) -> image::DynamicImage {
+        image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(w, h, image::Rgb(rgb)))
+    }
+
+    #[test]
+    fn video_clip_patches_frame_major_with_t_h_w_grid() {
+        // patch 14, merge 2 -> crop unit 28. 56x56 frames -> (4,4) grid = 16
+        // patches per frame. A 3-frame clip -> 48 patches, grid (3, 4, 4).
+        let proc = KimiVLProcessor::new(14, [2, 2], 4096);
+        let clip: Vec<image::DynamicImage> = vec![
+            solid(56, 56, [10, 10, 10]),
+            solid(56, 56, [128, 128, 128]),
+            solid(56, 56, [250, 250, 250]),
+        ];
+        let (pixels, grids) = proc.preprocess_video_with_grid(&[clip]);
+        assert_eq!(grids, vec![(3, 4, 4)]);
+        assert_eq!(mlxcel_core::array_shape(&pixels), vec![48, 3, 14, 14]);
+
+        // Frame-major packing: the first patch of frame 0 uses the frame-0
+        // color, and the first patch of frame 1 (index 16) uses the frame-1
+        // color, so their channel-0 values differ.
+        mlxcel_core::eval(&pixels);
+        let f0 = mlxcel_core::slice(&pixels, &[0, 0, 0, 0], &[1, 1, 1, 1]);
+        let f1 = mlxcel_core::slice(&pixels, &[16, 0, 0, 0], &[17, 1, 1, 1]);
+        let v0 = mlxcel_core::item_f32(&f0);
+        let v1 = mlxcel_core::item_f32(&f1);
+        let e0 = (10.0f32 / 255.0 - OPENAI_MEAN[0]) / OPENAI_STD[0];
+        let e1 = (128.0f32 / 255.0 - OPENAI_MEAN[0]) / OPENAI_STD[0];
+        assert!((v0 - e0).abs() < 1e-4, "frame 0 patch value");
+        assert!((v1 - e1).abs() < 1e-4, "frame 1 patch value (frame-major)");
     }
 
     #[test]
