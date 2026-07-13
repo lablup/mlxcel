@@ -369,7 +369,9 @@ pub(crate) fn load_gemma4_vlm(model_path: &Path) -> Result<LoadedModel> {
     )
     .map_err(|e| anyhow::anyhow!("Failed to load Gemma4 multimodal embedder: {}", e))?;
 
-    let image_processor_config = read_optional_model_json(model_path, "processor_config.json")
+    let processor_config = read_optional_model_json(model_path, "processor_config.json");
+    let image_processor_config = processor_config
+        .as_ref()
         .and_then(|config| config.get("image_processor").cloned());
     let max_soft_tokens = image_processor_config
         .as_ref()
@@ -467,6 +469,15 @@ pub(crate) fn load_gemma4_vlm(model_path: &Path) -> Result<LoadedModel> {
                 boa_token_id,
                 eoa_token_id,
             );
+
+            // Mel front-end config: honor a `feature_extractor` block from
+            // processor_config.json when the checkpoint ships one; the
+            // published Gemma 4 E-series checkpoints do not, so this
+            // resolves to the reference defaults (fft_length 512).
+            vlm.audio_extractor_config =
+                crate::audio::AudioFeatureExtractorConfig::from_processor_config(
+                    processor_config.as_ref(),
+                );
 
             eprintln!(
                 "Loaded Gemma4 audio encoder ({} Conformer layers)",

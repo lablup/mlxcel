@@ -37,6 +37,7 @@ pub mod whisper_mel;
 
 pub use config::AudioConfig;
 pub use encoder::AudioEncoder;
+pub(crate) use encoder::audio_probe_dump as encoder_probe_dump;
 pub use feature_extractor::{
     AudioFeatureExtractor, AudioFeatureExtractorConfig, compute_audio_num_tokens, load_wav_file,
     load_wav_from_bytes,

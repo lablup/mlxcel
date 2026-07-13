@@ -1401,9 +1401,9 @@ fn prepare_gemma4_audio_embeddings(
         samples
     };
 
-    // Extract mel spectrogram features
-    let extractor =
-        audio::AudioFeatureExtractor::new(audio::AudioFeatureExtractorConfig::default());
+    // Extract mel spectrogram features with the checkpoint's
+    // feature-extractor config (reference defaults when absent).
+    let extractor = audio::AudioFeatureExtractor::new(gemma4_vl.audio_extractor_config.clone());
     let (features, mask) = extractor.extract(&samples, None);
     let num_frames = mask.len();
 

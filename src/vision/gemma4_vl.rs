@@ -41,6 +41,10 @@ pub struct Gemma4VLModel {
     pub audio_token_id: i32,
     pub boa_token_id: i32,
     pub eoa_token_id: i32,
+    /// Mel front-end config for the Conformer audio tower. Populated from the
+    /// checkpoint's `processor_config.json` `feature_extractor` block when
+    /// present; reference defaults otherwise.
+    pub audio_extractor_config: audio::AudioFeatureExtractorConfig,
     /// Per-`SequenceId` storage for projected `per_layer_inputs`
     /// Mirrors `MRopeState`.
     per_layer_inputs_state: Gemma4PerLayerInputsState,
@@ -70,6 +74,7 @@ impl Gemma4VLModel {
             audio_token_id: 258_881,
             boa_token_id: 256_000,
             eoa_token_id: 258_883,
+            audio_extractor_config: audio::AudioFeatureExtractorConfig::default(),
             per_layer_inputs_state: Gemma4PerLayerInputsState::new(),
             _weight_backing: crate::models::Gemma4WeightBacking::default(),
         }
@@ -335,6 +340,7 @@ impl Gemma4VLModel {
             // abort) and is propagated to the caller as a per-request error.
             let (audio_encodings, _) = audio_tower.forward(audio_feat, &audio_mel_mask)?;
             let audio_encodings = embed_audio.forward(&audio_encodings);
+            crate::audio::encoder_probe_dump("embed_audio_out", &audio_encodings);
 
             let current_embeds = &result_embeds.inputs_embeds;
             let audio_encodings =

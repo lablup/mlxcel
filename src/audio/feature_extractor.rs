@@ -66,6 +66,14 @@ fn mel_filter_bank(
 }
 
 /// Audio feature extractor configuration.
+///
+/// Field names and defaults mirror the reference `Gemma4AudioFeatureExtractor`
+/// (https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/models/gemma4/audio_feature_extractor.py),
+/// so a `feature_extractor` block from a checkpoint's `processor_config.json`
+/// deserializes directly. Any field absent from the block keeps the reference
+/// default.
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(default)]
 pub struct AudioFeatureExtractorConfig {
     pub feature_size: usize,
     pub sampling_rate: u32,
@@ -79,6 +87,8 @@ pub struct AudioFeatureExtractorConfig {
     pub fft_overdrive: bool,
     pub input_scale_factor: f64,
     pub mel_floor: f64,
+    pub per_bin_mean: Option<Vec<f64>>,
+    pub per_bin_stddev: Option<Vec<f64>>,
 }
 
 impl Default for AudioFeatureExtractorConfig {
@@ -93,10 +103,33 @@ impl Default for AudioFeatureExtractorConfig {
             max_frequency: 8000.0,
             preemphasis: 0.0,
             preemphasis_htk_flavor: true,
-            fft_overdrive: true,
+            // The published Gemma 4 E-series checkpoints ship no
+            // `feature_extractor` block, so this default IS the effective
+            // config. The reference extractor defaults to `false`
+            // (fft_length 512 for the 20 ms / 320-sample frame); `true`
+            // (fft_length 1024) shifts every log-mel value by ~ln 2 and
+            // changes the fine spectral structure, which garbles the
+            // Conformer's perception (issue #782).
+            fft_overdrive: false,
             input_scale_factor: 1.0,
             mel_floor: 1e-3,
+            per_bin_mean: None,
+            per_bin_stddev: None,
         }
+    }
+}
+
+impl AudioFeatureExtractorConfig {
+    /// Build the config from a checkpoint's `processor_config.json` value.
+    ///
+    /// Reads the optional `feature_extractor` block; missing file, missing
+    /// block, or a malformed block all fall back to the reference defaults so
+    /// existing checkpoints keep working.
+    pub fn from_processor_config(processor_config: Option<&serde_json::Value>) -> Self {
+        processor_config
+            .and_then(|config| config.get("feature_extractor"))
+            .and_then(|block| serde_json::from_value(block.clone()).ok())
+            .unwrap_or_default()
     }
 }
 
@@ -116,6 +149,8 @@ pub struct AudioFeatureExtractor {
     fft_length: usize,
     window: Vec<f32>,
     mel_filters: Vec<f32>, // [fft_length/2 + 1, feature_size]
+    per_bin_mean: Option<Vec<f64>>,
+    per_bin_stddev: Option<Vec<f64>>,
 }
 
 impl AudioFeatureExtractor {
@@ -151,6 +186,15 @@ impl AudioFeatureExtractor {
             config.sampling_rate,
         );
 
+        // Per-bin normalization vectors must cover every mel bin; a
+        // wrong-length vector from a malformed config block is ignored.
+        let per_bin_mean = config
+            .per_bin_mean
+            .filter(|mean| mean.len() == config.feature_size);
+        let per_bin_stddev = config
+            .per_bin_stddev
+            .filter(|stddev| stddev.len() == config.feature_size);
+
         Self {
             feature_size: config.feature_size,
             sampling_rate: config.sampling_rate,
@@ -164,6 +208,8 @@ impl AudioFeatureExtractor {
             fft_length,
             window,
             mel_filters,
+            per_bin_mean,
+            per_bin_stddev,
         }
     }
 
@@ -209,14 +255,13 @@ impl AudioFeatureExtractor {
             }
         }
 
-        // Frame extraction with preemphasis.
-        // Non-HTK preemphasis reads frame_data[i+1], so needs frame_length+1
-        // samples per window. HTK flavor and no-preemphasis only need frame_length.
-        let frame_size_for_unfold = if self.preemphasis > 0.0 && !self.preemphasis_htk_flavor {
-            self.frame_length + 1
-        } else {
-            self.frame_length
-        };
+        // Frame extraction. The reference unfolds frame_length + 1 samples per
+        // window regardless of preemphasis (the trailing sample feeds the
+        // preemphasis difference; without preemphasis it is dropped), so the
+        // frame count is (total_len - frame_length - 1) / hop + 1. Unfolding
+        // only frame_length samples would emit one extra frame whenever
+        // total_len is a multiple of the hop.
+        let frame_size_for_unfold = self.frame_length + 1;
         let num_frames = if total_len >= frame_size_for_unfold {
             (total_len - frame_size_for_unfold) / self.hop_length + 1
         } else {
@@ -277,16 +322,38 @@ impl AudioFeatureExtractor {
                     mel_val +=
                         mag * self.mel_filters[freq_idx * self.feature_size + mel_idx] as f64;
                 }
-                // Log with floor
-                let log_mel = mel_val.max(self.mel_floor).ln() as f32;
-                features[frame_idx * self.feature_size + mel_idx] = log_mel;
+                // Additive log floor, log(mel + floor), matching the
+                // reference. A hard clamp, log(max(mel, floor)), differs by
+                // up to ln 2 on low-energy bins.
+                let mut log_mel = (mel_val + self.mel_floor).ln();
+                if let Some(mean) = &self.per_bin_mean {
+                    log_mel -= mean[mel_idx];
+                }
+                if let Some(stddev) = &self.per_bin_stddev {
+                    log_mel /= stddev[mel_idx];
+                }
+                features[frame_idx * self.feature_size + mel_idx] = log_mel as f32;
             }
         }
 
-        // Downsample attention mask by hop_length
+        // A frame is valid only when every sample in its analysis window
+        // [i*hop, i*hop + frame_size_for_unfold - 1] is real audio; the
+        // reference checks the window's LAST sample. Checking the first
+        // sample instead would wrongly invalidate frame 0 (whose window
+        // starts inside the structural left-pad) and wrongly validate tail
+        // frames that straddle the right padding.
         let frame_mask: Vec<bool> = (0..num_frames)
-            .map(|i| attn_mask[i * self.hop_length] == 0)
+            .map(|i| attn_mask[i * self.hop_length + frame_size_for_unfold - 1] == 0)
             .collect();
+
+        // Zero out padded (invalid) frames, matching the reference's
+        // `spec * mask` so the encoder receives identical input.
+        for (frame_idx, &invalid) in frame_mask.iter().enumerate() {
+            if invalid {
+                features[frame_idx * self.feature_size..(frame_idx + 1) * self.feature_size]
+                    .fill(0.0);
+            }
+        }
 
         (features, frame_mask)
     }
@@ -490,10 +557,15 @@ mod tests {
 
     /// Test that the semicausal left-pad produces the correct frame count.
     ///
-    /// A 1-second 440 Hz tone at 16 kHz should produce exactly 100 frames with
-    /// a 10 ms hop and 20 ms frame (frame_length=320, hop_length=160, left_pad=160):
+    /// A 1-second 440 Hz tone at 16 kHz should produce exactly 99 frames with
+    /// a 10 ms hop and 20 ms frame (frame_length=320, hop_length=160,
+    /// left_pad=160). The reference unfolds frame_length + 1 = 321 samples
+    /// per window:
     ///   total_len = 160 + 16000 = 16160
-    ///   num_frames = (16160 - 320) / 160 + 1 = 100
+    ///   num_frames = (16160 - 321) / 160 + 1 = 99
+    ///
+    /// Unfolding only 320 samples would yield a 100th frame here, one more
+    /// than the reference emits (issue #782).
     #[test]
     fn test_semicausal_left_pad_frame_count() {
         let tone = generate_tone(440.0, 1.0, 16_000);
@@ -501,10 +573,158 @@ mod tests {
         let (features, mask) = extractor.extract(&tone, None);
         let num_frames = features.len() / extractor.feature_size();
         assert_eq!(
-            num_frames, 100,
-            "expected 100 frames for 1s audio with left-pad, got {num_frames}"
+            num_frames, 99,
+            "expected 99 frames for 1s audio with left-pad, got {num_frames}"
         );
-        assert_eq!(mask.len(), 100, "mask length must equal num_frames");
+        assert_eq!(mask.len(), 99, "mask length must equal num_frames");
+        assert!(
+            mask.iter().all(|&invalid| !invalid),
+            "no frame of an unpadded 1s clip may be marked invalid"
+        );
+    }
+
+    /// The default config must match the reference `Gemma4AudioFeatureExtractor`
+    /// defaults. The published Gemma 4 E-series checkpoints ship no
+    /// `feature_extractor` block, so these defaults are the effective config;
+    /// `fft_overdrive = true` (fft_length 1024) garbles the Conformer's
+    /// perception (issue #782).
+    #[test]
+    fn test_default_config_matches_reference() {
+        let config = AudioFeatureExtractorConfig::default();
+        assert!(
+            !config.fft_overdrive,
+            "reference default is fft_overdrive=false"
+        );
+        let extractor = AudioFeatureExtractor::new(config);
+        assert_eq!(
+            extractor.fft_length, 512,
+            "20ms/320-sample frame -> fft 512"
+        );
+        assert_eq!(extractor.frame_length, 320);
+        assert_eq!(extractor.hop_length, 160);
+        assert_eq!(extractor.feature_size, 128);
+    }
+
+    /// Golden log-mel check against the reference extractor.
+    ///
+    /// The probe values were produced by running the HF/mlx-vlm reference
+    /// `Gemma4AudioFeatureExtractor` (default config) over this exact
+    /// waveform: a 1 s f64 sine mixture cast to f32,
+    ///   0.4*sin(2*pi*440*i/16000) + 0.2*sin(2*pi*1000*i/16000)
+    ///   + 0.1*sin(2*pi*3200*i/16000).
+    ///
+    /// The 1e-3 tolerance is far below the smallest semantic divergence this
+    /// guards against (the additive-vs-clamp mel floor differs by up to
+    /// ~0.69 = ln 2 per bin; fft_overdrive shifts every bin by ~ln 2) while
+    /// leaving room for f32 rounding and libm differences.
+    #[test]
+    fn test_golden_log_mel_matches_reference() {
+        let n = 16_000;
+        let waveform: Vec<f32> = (0..n)
+            .map(|i| {
+                let t = i as f64 / 16_000.0;
+                (0.4 * (2.0 * PI * 440.0 * t).sin()
+                    + 0.2 * (2.0 * PI * 1000.0 * t).sin()
+                    + 0.1 * (2.0 * PI * 3200.0 * t).sin()) as f32
+            })
+            .collect();
+
+        let extractor = AudioFeatureExtractor::new(AudioFeatureExtractorConfig::default());
+        let (features, mask) = extractor.extract(&waveform, None);
+        let feature_size = extractor.feature_size();
+        assert_eq!(mask.len(), 99);
+        assert_eq!(features.len(), 99 * feature_size);
+
+        // (frame, mel_bin) -> reference value. The -6.907755 = ln(1e-3)
+        // entries probe the additive mel floor on near-zero-energy bins.
+        let golden: &[(usize, usize, f32)] = &[
+            (0, 0, -6.907755),
+            (0, 25, 2.3889),
+            (0, 64, -0.843163),
+            (0, 127, -0.936063),
+            (10, 3, -4.119002),
+            (25, 25, 2.974617),
+            (50, 40, -1.472469),
+            (50, 90, -3.042887),
+            (80, 10, -4.155638),
+            (90, 70, -6.709886),
+            (98, 0, -6.907755),
+            (98, 127, -6.883512),
+        ];
+        for &(frame, bin, expected) in golden {
+            let actual = features[frame * feature_size + bin];
+            assert!(
+                (actual - expected).abs() < 1e-3,
+                "features[{frame}][{bin}] = {actual}, reference = {expected}"
+            );
+        }
+
+        let mean: f64 = features.iter().map(|&v| v as f64).sum::<f64>() / features.len() as f64;
+        assert!(
+            (mean - (-3.93961)).abs() < 1e-3,
+            "global feature mean {mean} deviates from reference -3.93961"
+        );
+    }
+
+    /// A clip needing right-padding (15000 samples pads to 15104, a multiple
+    /// of 128) must mark exactly the tail frame whose analysis window
+    /// straddles the padding as invalid, zero that feature row, and keep
+    /// frame 0 (whose window starts inside the structural left-pad) valid.
+    /// Matches the reference, which checks the LAST sample of each window
+    /// and multiplies the spectrogram by the mask.
+    #[test]
+    fn test_tail_padding_mask_and_zeroing() {
+        let waveform = generate_tone(440.0, 0.9375, 16_000); // 15000 samples
+        assert_eq!(waveform.len(), 15_000);
+        let extractor = AudioFeatureExtractor::new(AudioFeatureExtractorConfig::default());
+        let (features, mask) = extractor.extract(&waveform, None);
+        let feature_size = extractor.feature_size();
+        assert_eq!(mask.len(), 94, "(160 + 15104 - 321) / 160 + 1 = 94 frames");
+        assert!(!mask[0], "frame 0 must be valid despite the left-pad");
+        let invalid: Vec<usize> = (0..mask.len()).filter(|&i| mask[i]).collect();
+        assert_eq!(invalid, vec![93], "only the tail frame is invalid");
+        assert!(
+            features[93 * feature_size..94 * feature_size]
+                .iter()
+                .all(|&v| v == 0.0),
+            "invalid frame's features must be zeroed"
+        );
+    }
+
+    /// `from_processor_config` honors a checkpoint-shipped block and falls
+    /// back to reference defaults otherwise; wrong-length per-bin vectors
+    /// are rejected at construction.
+    #[test]
+    fn test_from_processor_config() {
+        // No processor config / no block -> reference defaults.
+        let config = AudioFeatureExtractorConfig::from_processor_config(None);
+        assert!(!config.fft_overdrive);
+        let empty = serde_json::json!({ "image_processor": {} });
+        let config = AudioFeatureExtractorConfig::from_processor_config(Some(&empty));
+        assert!(!config.fft_overdrive);
+        assert_eq!(config.feature_size, 128);
+
+        // Checkpoint-shipped block overrides only the fields it names.
+        let with_block = serde_json::json!({
+            "feature_extractor": {
+                "feature_extractor_type": "Gemma4AudioFeatureExtractor",
+                "fft_overdrive": true,
+                "frame_length_ms": 32.0,
+                "mel_floor": 1e-5,
+                "per_bin_mean": [0.5],
+            }
+        });
+        let config = AudioFeatureExtractorConfig::from_processor_config(Some(&with_block));
+        assert!(config.fft_overdrive);
+        assert_eq!(config.frame_length_ms, 32.0);
+        assert_eq!(config.mel_floor, 1e-5);
+        assert_eq!(config.hop_length_ms, 10.0, "unnamed fields keep defaults");
+        let extractor = AudioFeatureExtractor::new(config);
+        assert_eq!(extractor.fft_length, 1024, "512-sample frame + overdrive");
+        assert!(
+            extractor.per_bin_mean.is_none(),
+            "length-1 per_bin_mean must be rejected for feature_size 128"
+        );
     }
 
     /// Test that the periodic Hann window places the 440 Hz energy peak in the

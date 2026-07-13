@@ -32,6 +32,20 @@ fn copy_weight(weights: &WeightMap, key: &str) -> Result<UniquePtr<MlxArray>, St
         .ok_or_else(|| format!("Audio weight not found: {key}"))
 }
 
+/// Debug probe: dump an intermediate activation as raw f32 + shape when
+/// `MLXCEL_AUDIO_PROBE_DIR` is set. Used for parity diffing against the
+/// reference implementation; no-op in normal operation.
+pub(crate) fn audio_probe_dump(name: &str, arr: &MlxArray) {
+    if let Ok(dir) = std::env::var("MLXCEL_AUDIO_PROBE_DIR") {
+        let arr_f32 = mlxcel_core::astype(arr, mlxcel_core::dtype::FLOAT32);
+        mlxcel_core::eval(&arr_f32);
+        let bytes = mlxcel_core::array_to_raw_bytes(&arr_f32);
+        let shape = mlxcel_core::array_shape(&arr_f32);
+        let _ = std::fs::write(format!("{dir}/{name}.f32"), &bytes);
+        let _ = std::fs::write(format!("{dir}/{name}.shape"), format!("{shape:?}"));
+    }
+}
+
 // ---------------------------------------------------------------------------
 // AudioRMSNorm: weight applied directly (no +1 offset like Gemma text RMSNorm)
 // ---------------------------------------------------------------------------
@@ -55,12 +69,20 @@ impl AudioRMSNorm {
 }
 
 // ---------------------------------------------------------------------------
-// ClippableLinear: loads `linear.weight` as regular UnifiedLinear, skips
-// input_max/min/output_max/min (training artifacts, not used at inference).
+// ClippableLinear: `linear.weight` plus the checkpoint's input/output clamp
+// bounds. The Gemma 4 audio checkpoints ship FINITE per-layer bounds (for
+// example lconv1d.linear_end input is clamped to roughly +-5.8 while block
+// activations reach far larger tails), and the reference implementation
+// clamps input and output at inference, so the clamps are part of the
+// trained function. Skipping them decorrelates the Conformer stack: the
+// per-block error compounds from ~8% relative RMS after block 0 to ~95%
+// after block 11 (issue #782).
 // ---------------------------------------------------------------------------
 
 pub(crate) struct AudioLinear {
     linear: UnifiedLinear,
+    input_bounds: Option<(UniquePtr<MlxArray>, UniquePtr<MlxArray>)>,
+    output_bounds: Option<(UniquePtr<MlxArray>, UniquePtr<MlxArray>)>,
 }
 
 impl AudioLinear {
@@ -70,6 +92,11 @@ impl AudioLinear {
         group_size: i32,
         bits: i32,
     ) -> Result<Self, String> {
+        let bounds =
+            |min_key: &str, max_key: &str| match (weights.get(min_key), weights.get(max_key)) {
+                (Some(min), Some(max)) => Some((mlxcel_core::copy(min), mlxcel_core::copy(max))),
+                _ => None,
+            };
         Ok(Self {
             linear: UnifiedLinear::from_weights(
                 weights,
@@ -77,11 +104,31 @@ impl AudioLinear {
                 group_size,
                 bits,
             )?,
+            input_bounds: bounds(
+                &format!("{prefix}.input_min"),
+                &format!("{prefix}.input_max"),
+            ),
+            output_bounds: bounds(
+                &format!("{prefix}.output_min"),
+                &format!("{prefix}.output_max"),
+            ),
         })
     }
 
     pub(crate) fn forward(&self, x: &MlxArray) -> UniquePtr<MlxArray> {
-        self.linear.forward(x)
+        let clipped_input;
+        let x = if let Some((min, max)) = &self.input_bounds {
+            clipped_input = mlxcel_core::clip(x, min, max);
+            clipped_input.as_ref().unwrap()
+        } else {
+            x
+        };
+        let y = self.linear.forward(x);
+        if let Some((min, max)) = &self.output_bounds {
+            mlxcel_core::clip(&y, min, max)
+        } else {
+            y
+        }
     }
 }
 
@@ -591,14 +638,21 @@ impl AudioEncoder {
         audio_mel: &MlxArray,
         audio_mel_mask: &MlxArray,
     ) -> Result<(UniquePtr<MlxArray>, UniquePtr<MlxArray>), String> {
+        audio_probe_dump("in_mel", audio_mel);
+        audio_probe_dump(
+            "in_mask",
+            &mlxcel_core::astype(audio_mel_mask, mlxcel_core::dtype::FLOAT32),
+        );
         let (mut encodings, mut current_mask) = self
             .subsample_conv_projection
             .forward(audio_mel, audio_mel_mask)?;
+        audio_probe_dump("sscp_out", &encodings);
 
         let causal_valid_mask = self.build_causal_valid_mask();
 
-        for block in &self.layers {
+        for (idx, block) in self.layers.iter().enumerate() {
             encodings = block.forward(&encodings, &current_mask, &causal_valid_mask)?;
+            audio_probe_dump(&format!("block_{idx:02}"), &encodings);
         }
 
         // Output projection (with bias)
@@ -621,7 +675,12 @@ impl AudioEncoder {
         let mask_expanded = mlxcel_core::reshape(&current_mask, &[batch, enc_t, 1]);
         let zeros = mlxcel_core::zeros_like(&encodings);
         encodings = mlxcel_core::where_cond(&mask_expanded, &zeros, &encodings);
+        audio_probe_dump("tower_out", &encodings);
 
         Ok((encodings, current_mask))
     }
 }
+
+#[cfg(test)]
+#[path = "encoder_tests.rs"]
+mod tests;
