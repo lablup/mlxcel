@@ -309,3 +309,114 @@ fn sanitize_weights_drops_lm_head_when_tied_embeddings() {
     );
     assert!(sanitized.contains_key("model.embed_tokens.weight"));
 }
+
+// ---------------------------------------------------------------------------
+// `sanitize_weights` idempotency (issue #776) — the norm `+1.0` shift must be
+// layout-gated on the conv1d weight shape alone. A bundled `mtp.*` tensor
+// must never force a second shift on an already-converted checkpoint, and a
+// genuinely raw checkpoint must still shift exactly once.
+// ---------------------------------------------------------------------------
+
+#[test]
+#[ignore = "requires serial MLX execution"]
+fn sanitize_weights_is_idempotent_on_already_converted_checkpoint_with_stray_mtp_key() {
+    let mut weights = WeightMap::new();
+    // Already-converted conv1d layout: `[out, kW, 1]` (last dim == 1).
+    weights.insert(
+        "model.layers.0.linear_attn.conv1d.weight".to_string(),
+        mlxcel_core::from_slice_f32(&[0.0_f32; 16], &[4, 4, 1]),
+    );
+    // Already-shifted norm gammas (a raw gamma of 0.5 becomes 1.5 after a
+    // single +1.0 shift; a second shift would produce 2.5).
+    weights.insert(
+        "model.norm.weight".to_string(),
+        mlxcel_core::from_slice_f32(&[1.5_f32; 4], &[4]),
+    );
+    weights.insert(
+        "model.layers.0.input_layernorm.weight".to_string(),
+        mlxcel_core::from_slice_f32(&[1.5_f32; 8], &[8]),
+    );
+    weights.insert(
+        "model.embed_tokens.weight".to_string(),
+        mlxcel_core::from_slice_f32(&[0.0_f32; 8], &[2, 4]),
+    );
+    // A bundled MTP tensor, mirroring a future converted repo that ships the
+    // MTP head alongside an already-sanitized main checkpoint.
+    weights.insert(
+        "mtp.layers.0.weight".to_string(),
+        mlxcel_core::from_slice_f32(&[0.0_f32; 16], &[4, 4]),
+    );
+
+    let config = make_tiny_config();
+    let sanitized = sanitize_weights(weights, &config);
+
+    // mtp.* must still be stripped.
+    assert!(sanitized.keys().all(|k| !k.starts_with("mtp.")));
+
+    // The norm gammas must be UNCHANGED (no second shift), not 2.5.
+    assert_allclose(
+        sanitized.get("model.norm.weight").unwrap(),
+        &mlxcel_core::from_slice_f32(&[1.5_f32; 4], &[4]),
+    );
+    assert_allclose(
+        sanitized
+            .get("model.layers.0.input_layernorm.weight")
+            .unwrap(),
+        &mlxcel_core::from_slice_f32(&[1.5_f32; 8], &[8]),
+    );
+
+    // The already-converted conv1d weight must not be re-transposed: shape
+    // stays `[out, kW, 1]`.
+    let conv1d_shape = mlxcel_core::array_shape(
+        sanitized
+            .get("model.layers.0.linear_attn.conv1d.weight")
+            .unwrap(),
+    );
+    assert_eq!(conv1d_shape, vec![4, 4, 1]);
+}
+
+#[test]
+#[ignore = "requires serial MLX execution"]
+fn sanitize_weights_shifts_norms_exactly_once_on_raw_layout() {
+    let mut weights = WeightMap::new();
+    // Raw torch/HF conv1d layout: `[out, in, kW]` (last dim = kernel size != 1).
+    weights.insert(
+        "model.layers.0.linear_attn.conv1d.weight".to_string(),
+        mlxcel_core::from_slice_f32(&[0.0_f32; 16], &[4, 1, 4]),
+    );
+    weights.insert(
+        "model.norm.weight".to_string(),
+        mlxcel_core::from_slice_f32(&[0.5_f32; 4], &[4]),
+    );
+    weights.insert(
+        "model.layers.0.input_layernorm.weight".to_string(),
+        mlxcel_core::from_slice_f32(&[0.5_f32; 8], &[8]),
+    );
+    weights.insert(
+        "model.embed_tokens.weight".to_string(),
+        mlxcel_core::from_slice_f32(&[0.0_f32; 8], &[2, 4]),
+    );
+
+    let config = make_tiny_config();
+    let sanitized = sanitize_weights(weights, &config);
+
+    // The norm gammas must be shifted exactly once: 0.5 + 1.0 = 1.5.
+    assert_allclose(
+        sanitized.get("model.norm.weight").unwrap(),
+        &mlxcel_core::from_slice_f32(&[1.5_f32; 4], &[4]),
+    );
+    assert_allclose(
+        sanitized
+            .get("model.layers.0.input_layernorm.weight")
+            .unwrap(),
+        &mlxcel_core::from_slice_f32(&[1.5_f32; 8], &[8]),
+    );
+
+    // The raw conv1d weight must be transposed to `[out, kW, 1]`.
+    let conv1d_shape = mlxcel_core::array_shape(
+        sanitized
+            .get("model.layers.0.linear_attn.conv1d.weight")
+            .unwrap(),
+    );
+    assert_eq!(conv1d_shape, vec![4, 4, 1]);
+}

@@ -2296,15 +2296,31 @@ impl Qwen35StageModel {
 
 // Weight Sanitization.
 pub fn sanitize_weights(mut weights: WeightMap, config: &Qwen35Config) -> WeightMap {
-    // 1. Detect sanitization needs
-    let has_mtp = weights.keys().any(|k| k.contains("mtp."));
+    // 1. Detect sanitization needs.
+    //
+    // The conv1d weight layout is the reliable raw-vs-converted discriminator: a
+    // raw torch/HF conv1d weight is `[out, in, kW]` (last dim is the kernel size,
+    // never 1 for these kernel sizes), while an already-converted one is
+    // `[out, kW, 1]`. Every local qwen3.5-*/minicpm-v-4.6-* checkpoint inspected
+    // for issue #776 (0.8b/2b/4b/9b/27b/35b-a3b 4bit and 9b/27b bf16, plus both
+    // minicpm-v-4.6 variants) ships the converted `[out, kW, 1]` shape and none
+    // carries `mtp.*` keys, matching the issue's own observation that converted
+    // checkpoints ship the MTP head as a separate repo today. In every raw
+    // layout, a bundled `mtp.*` weight and the unconverted conv1d weight come
+    // from the same unsanitized dump, so `has_mtp` alone never adds a case that
+    // `has_unsanitized_conv1d` does not already cover. Keeping `has_mtp` as an
+    // independent OR term is actively unsafe: if a future converted repo ever
+    // bundles the MTP head into an already-sanitized checkpoint (norms already
+    // shifted by +1.0, conv1d already transposed), the norms would be shifted a
+    // second time and every RMSNorm would be corrupted. Gate on the conv1d
+    // layout alone so bundled MTP weights can never trigger a double shift.
     let has_unsanitized_conv1d = weights.iter().any(|(k, v)| {
         k.contains("conv1d.weight") && {
             let shape = mlxcel_core::array_shape(v);
             shape.last() != Some(&1)
         }
     });
-    let should_shift_norms = has_mtp || has_unsanitized_conv1d;
+    let should_shift_norms = has_unsanitized_conv1d;
 
     // 2. Filter MTP weights
     weights.retain(|k, _| !k.contains("mtp."));
