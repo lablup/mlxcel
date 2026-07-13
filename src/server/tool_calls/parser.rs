@@ -158,9 +158,10 @@ pub fn parse_tool_calls(raw_output: &str, tools: Option<&[Tool]>) -> ToolCallPar
     let parsers: &[fn(&str) -> Option<ToolCallParseResult>] = &[
         formats::try_granite, // <response><tool_call> — more specific than bare Hermes
         formats::try_gemma4,  // <|tool_call>call:... — pipe-delimited, before Hermes
-        formats::try_hermes,  // <tool_call> — Hermes/Qwen/DeepSeek
+        formats::try_function_gemma, // <start_function_call>call:... (distinct markers from Gemma 4)
+        formats::try_hermes,         // <tool_call> — Hermes/Qwen/DeepSeek
         formats::try_minimax_m2, // <invoke name=...><parameter name=...>...</parameter></invoke>
-        formats::try_kimi_k2, // <|tool_calls_section_begin|>...<|tool_calls_section_end|>
+        formats::try_kimi_k2,    // <|tool_calls_section_begin|>...<|tool_calls_section_end|>
         // [TOOL_CALLS]NAME[ARGS]{json}; declines (returns None) without [ARGS], so the
         // older JSON-array format below still falls through to try_mistral_nemo.
         formats::try_mistral_bracket,
@@ -407,6 +408,57 @@ mod tests {
         let tools = vec![make_tool("get_weather")];
         let result = parse_tool_calls(output, Some(&tools));
         assert!(!result.has_tool_calls());
+    }
+
+    // -- Function-calling Gemma --
+
+    #[test]
+    fn parse_function_gemma_format() {
+        let output = "<start_function_call>call:get_weather{location:<escape>Tokyo<escape>}<end_function_call>";
+        let tools = vec![make_tool("get_weather")];
+        let result = parse_tool_calls(output, Some(&tools));
+        assert!(result.has_tool_calls());
+        assert_eq!(result.tool_calls.len(), 1);
+        assert_eq!(result.tool_calls[0].name, "get_weather");
+        let args: serde_json::Value =
+            serde_json::from_str(&result.tool_calls[0].arguments).unwrap();
+        assert_eq!(args["location"], "Tokyo");
+        assert_eq!(
+            result.format,
+            Some(crate::server::tool_calls::ToolCallFormat::FunctionGemma)
+        );
+    }
+
+    #[test]
+    fn parse_function_gemma_filters_unknown_tools() {
+        let output =
+            "<start_function_call>call:unknown_fn{key:<escape>val<escape>}<end_function_call>";
+        let tools = vec![make_tool("get_weather")];
+        let result = parse_tool_calls(output, Some(&tools));
+        assert!(!result.has_tool_calls());
+    }
+
+    #[test]
+    fn parse_function_gemma_not_confused_with_gemma4() {
+        // Regression guard: both formats share the `call:name{...}` call
+        // syntax but use distinct wrapper markers and string escaping, so
+        // neither parser must claim the other's output.
+        let gemma4_output = "<|tool_call>call:get_weather{location:<|\"|>Tokyo<|\"|>}<tool_call|>";
+        let tools = vec![make_tool("get_weather")];
+        let result = parse_tool_calls(gemma4_output, Some(&tools));
+        assert!(result.has_tool_calls());
+        assert_eq!(
+            result.format,
+            Some(crate::server::tool_calls::ToolCallFormat::Gemma4)
+        );
+
+        let function_gemma_output = "<start_function_call>call:get_weather{location:<escape>Tokyo<escape>}<end_function_call>";
+        let result = parse_tool_calls(function_gemma_output, Some(&tools));
+        assert!(result.has_tool_calls());
+        assert_eq!(
+            result.format,
+            Some(crate::server::tool_calls::ToolCallFormat::FunctionGemma)
+        );
     }
 
     #[test]

@@ -29,6 +29,9 @@
 //! - Mistral Nemo: `[TOOL_CALLS]` — one-shot start marker (rest of output is tool call JSON)
 //! - Gemma 4: `<|channel>` / `<channel|>`, `<|tool_call>` / `<tool_call|>`,
 //!   `<|think|>`, `<|turn>` / `<turn|>`
+//! - Function-calling Gemma: `<start_function_call>` / `<end_function_call>`,
+//!   a distinct marker family from Gemma 4, sharing only the inner
+//!   `call:name{...}` syntax
 //!
 //! **Tool-call suppression behavior:** when the filter enters `ToolCall` state,
 //! all subsequent tokens are suppressed from `delta.content`. The tool-call
@@ -205,6 +208,11 @@ enum DelimiterAction {
 ///   comment on its entry below for why an `<|tool_call_end|>` exit row must
 ///   NOT be added. It does not prefix-collide with Gemma 4's `<|tool_call>`
 ///   either: they diverge at `_start` vs `>` immediately after `tool_call`.
+/// - Function-calling Gemma `<start_function_call>` / `<end_function_call>`:
+///   exit before enter, mirroring the Hermes convention above. Neither marker
+///   shares a prefix with any other entry in this table (the closest is
+///   Gemma 4's `<|tool_call>` / `<tool_call|>`, which start with `<|` / `<t`
+///   rather than `<s` / `<e`), so this family cannot partial-match another.
 ///
 /// TODO: Consider extracting this into a startup-time configurable
 /// owned by the model worker so new reasoning families don't require a rebuild.
@@ -250,6 +258,10 @@ const CHAT_DELIMITERS: &[(&str, DelimiterAction)] = &[
     // enter-only (mirroring Mistral Nemo's one-shot `[TOOL_CALLS]` above)
     // fully suppresses the payload without needing an exit marker.
     ("<|tool_call_start|>", DelimiterAction::EnterToolCall),
+    // Function-calling Gemma: `<start_function_call>call:name{...}<end_function_call>`.
+    // Exit before enter, mirroring the Hermes convention above.
+    ("<end_function_call>", DelimiterAction::ExitToolCall),
+    ("<start_function_call>", DelimiterAction::EnterToolCall),
 ];
 
 /// The state of the streaming filter state machine.
@@ -1740,5 +1752,59 @@ mod tests {
         let mut f = StreamFilter::new();
         let out = f.feed("<|tool_call_start|>[fn(x=1)]<|tool_call_end|>");
         assert_eq!(out.content, None);
+    }
+
+    // -- Function-calling Gemma --
+
+    #[test]
+    fn function_gemma_tool_call_suppressed() {
+        let mut f = StreamFilter::new();
+        let out = f.feed(
+            "<start_function_call>call:get_weather{location:<escape>Paris<escape>}<end_function_call>",
+        );
+        assert_eq!(
+            out.content, None,
+            "function-calling Gemma tool-call payload must not leak into delta.content"
+        );
+        let flushed = f.flush();
+        assert_eq!(flushed.content, None);
+    }
+
+    #[test]
+    fn function_gemma_content_before_call_emitted() {
+        let mut f = StreamFilter::new();
+        let out = f.feed(
+            "Let me check.<start_function_call>call:get_weather{location:<escape>Paris<escape>}<end_function_call>",
+        );
+        assert_eq!(
+            out.content.as_deref(),
+            Some("Let me check."),
+            "only the preamble text must appear in delta.content"
+        );
+    }
+
+    #[test]
+    fn function_gemma_content_after_call_emitted_in_same_fragment() {
+        let mut f = StreamFilter::new();
+        let out = f.feed("<start_function_call>call:get_time{}<end_function_call>Done.");
+        assert_eq!(
+            out.content.as_deref(),
+            Some("Done."),
+            "content after the closing marker must resume in the same fragment"
+        );
+    }
+
+    #[test]
+    fn function_gemma_markers_not_confused_with_gemma4() {
+        // `<start_function_call>` / `<end_function_call>` share no prefix with
+        // Gemma 4's `<|tool_call>` / `<tool_call|>`, so neither family should
+        // partial-match the other.
+        let mut f = StreamFilter::new();
+        let out = f.feed("<start_function_call>call:fn{}<end_function_call>");
+        assert_eq!(out.content, None);
+
+        let mut f2 = StreamFilter::new();
+        let out2 = f2.feed("<|tool_call>call:fn{}<tool_call|>");
+        assert_eq!(out2.content, None);
     }
 }

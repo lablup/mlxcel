@@ -48,6 +48,12 @@ pub enum ToolCallFormat {
     Granite,
     /// Gemma 4: `<|tool_call>call:name{key:<|"|>val<|"|>}<tool_call|>`
     Gemma4,
+    /// Function-calling Gemma: `<start_function_call>call:name{key:value,
+    /// key2:<escape>text<escape>}<end_function_call>`. Shares the
+    /// `call:name{...}` call syntax with [`Gemma4`](ToolCallFormat::Gemma4)
+    /// but uses distinct wrapper markers and a different string-escaping
+    /// convention (`<escape>...<escape>` rather than `<|"|>...<|"|>`).
+    FunctionGemma,
     /// Generic JSON: raw `{"name": ..., "arguments": ...}` object
     GenericJson,
     /// MiniMax M2: `<invoke name="fn_name"><parameter name="k">v</parameter></invoke>`

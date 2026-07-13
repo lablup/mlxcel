@@ -24,6 +24,12 @@ use fancy_regex::Regex;
 
 use super::types::{ParsedToolCall, ToolCallFormat, ToolCallParseResult};
 
+/// Internal placeholder [`split_top_level_commas`] uses to mark string
+/// regions once a format-specific string delimiter (Gemma 4's `<|"|>` or
+/// function-calling Gemma's `<escape>`) has been normalised away. Chosen to
+/// be a byte sequence that cannot appear in ordinary model output.
+const STR_DELIM: &str = "<|\"|\u{200b}>";
+
 /// Try parsing Hermes/Qwen format:
 /// `<tool_call>{"name": "fn", "arguments": {...}}</tool_call>`
 ///
@@ -576,9 +582,8 @@ fn gemma4_args_to_json(args: &str) -> Option<String> {
         return Some("{}".to_string());
     }
 
-    // Replace the string delimiter with a NUL placeholder that won't appear
+    // Replace the string delimiter with a placeholder that won't appear
     // in normal text, making it easy to detect string boundaries.
-    const STR_DELIM: &str = "<|\"|\u{200b}>";
     let normalised = inner.replace("<|\"|>", STR_DELIM);
 
     let pairs = split_top_level_commas(&normalised);
@@ -655,7 +660,6 @@ fn gemma4_array_to_json(arr: &str) -> Option<String> {
         return Some("[]".to_string());
     }
 
-    const STR_DELIM: &str = "<|\"|\u{200b}>";
     let normalised = inner.replace("<|\"|>", STR_DELIM);
     let items = split_top_level_commas(&normalised);
     let mut json_items: Vec<String> = Vec::with_capacity(items.len());
@@ -687,11 +691,12 @@ fn gemma4_array_to_json(arr: &str) -> Option<String> {
 /// Split a comma-separated sequence at the top level only
 /// (i.e., not inside `{}`, `[]` brackets, or string delimiters).
 ///
-/// String regions are bounded by the `STR_DELIM` placeholder that
-/// `gemma4_args_to_json` / `gemma4_array_to_json` substitute for the
-/// original `<|"|>` markers.  Commas inside string regions are ignored.
+/// String regions are bounded by the [`STR_DELIM`] placeholder that
+/// `gemma4_args_to_json` / `gemma4_array_to_json` / `function_gemma_arguments`
+/// substitute for their respective original string markers (`<|"|>` for
+/// Gemma 4, `<escape>` for function-calling Gemma). Commas inside string
+/// regions are ignored.
 fn split_top_level_commas(s: &str) -> Vec<&str> {
-    const STR_DELIM: &str = "<|\"|\u{200b}>";
     let delim_bytes = STR_DELIM.as_bytes();
 
     let mut parts = Vec::new();
@@ -726,6 +731,153 @@ fn split_top_level_commas(s: &str) -> Vec<&str> {
         parts.push(&s[last..]);
     }
     parts
+}
+
+/// Try parsing the function-calling Gemma variant's tool-call format:
+/// `<start_function_call>call:name{key:value, key2:<escape>text<escape>}<end_function_call>`
+///
+/// Distinct from [`try_gemma4`]: different wrapper markers
+/// (`<start_function_call>` / `<end_function_call>` rather than
+/// `<|tool_call>` / `<tool_call|>`) and a different string-escaping
+/// convention (`<escape>...<escape>` rather than `<|"|>...<|"|>`). The
+/// `call:name{...}` call syntax itself is shared with Gemma 4, so the block
+/// scanning below mirrors [`try_gemma4`]'s structure while
+/// [`function_gemma_arguments`] handles the format-specific argument syntax.
+pub fn try_function_gemma(text: &str) -> Option<ToolCallParseResult> {
+    let tag_open = "<start_function_call>";
+    let tag_close = "<end_function_call>";
+
+    if !text.contains(tag_open) {
+        return None;
+    }
+
+    let mut calls = Vec::new();
+    let mut content = String::new();
+    let mut remaining = text;
+
+    // Collect content before the first function-call tag.
+    if let Some(first_pos) = remaining.find(tag_open) {
+        let before = remaining[..first_pos].trim();
+        if !before.is_empty() {
+            content = before.to_string();
+        }
+        remaining = &remaining[first_pos..];
+    }
+
+    while let Some(start) = remaining.find(tag_open) {
+        let block_start = start + tag_open.len();
+        let block_end = remaining[block_start..].find(tag_close);
+
+        let block = if let Some(end_offset) = block_end {
+            let s = &remaining[block_start..block_start + end_offset];
+            remaining = &remaining[block_start + end_offset + tag_close.len()..];
+            s
+        } else {
+            // No closing tag: take the rest.
+            let s = &remaining[block_start..];
+            remaining = "";
+            s
+        };
+
+        if let Some(call) = parse_function_gemma_block(block.trim()) {
+            calls.push(call);
+        }
+    }
+
+    if calls.is_empty() {
+        return None;
+    }
+
+    Some(ToolCallParseResult {
+        format: Some(ToolCallFormat::FunctionGemma),
+        tool_calls: calls,
+        content: content.trim().to_string(),
+        reasoning_content: None,
+    })
+}
+
+/// Parse a single function-calling Gemma call block: `call:function_name{args_body}`.
+///
+/// The format spec describes the call shape as the dotall regex
+/// `call:(\w+)\{(.*?)\}`, but a literal non-greedy `(.*?)` capture stops at
+/// the *first* `}` in the block, which truncates early when an
+/// `<escape>...<escape>` argument value itself contains an unescaped `}`
+/// (e.g. `key:<escape>hello, {world}<escape>`). Since the block is already
+/// bounded by the caller's `<start_function_call>` / `<end_function_call>`
+/// markers with nothing trailing the call's own closing brace, this mirrors
+/// [`parse_gemma4_block`]'s more robust approach instead: take the first `{`
+/// as the start of the argument body and the *last* `}` in the (trimmed)
+/// block as its end, so embedded braces inside an escaped literal cannot
+/// truncate the capture early.
+fn parse_function_gemma_block(block: &str) -> Option<ParsedToolCall> {
+    let rest = block.strip_prefix("call:")?;
+
+    let brace_pos = rest.find('{')?;
+    let name = rest[..brace_pos].trim().to_string();
+    if name.is_empty() {
+        return None;
+    }
+
+    let args_with_brace = rest[brace_pos..].trim();
+    let inner = args_with_brace.strip_prefix('{')?.strip_suffix('}')?;
+
+    Some(ParsedToolCall {
+        name,
+        arguments: function_gemma_arguments(inner),
+    })
+}
+
+/// Build the JSON `arguments` object from a function-calling Gemma call's raw
+/// argument text (the body between the braces in `call:name{...}`).
+///
+/// Arguments are comma-separated `key:value` pairs, split at the top level
+/// via [`split_top_level_commas`], the same string-aware splitter Gemma 4
+/// uses, after swapping this format's `<escape>...<escape>` literal-string
+/// delimiter for the splitter's internal [`STR_DELIM`] marker. A value is
+/// either an escaped literal (kept verbatim; it may itself contain commas
+/// and braces) or a bare token parsed as JSON, falling back to a raw string
+/// when it is not valid JSON.
+fn function_gemma_arguments(args_raw: &str) -> String {
+    const ESCAPE_TAG: &str = "<escape>";
+
+    let normalised = args_raw.replace(ESCAPE_TAG, STR_DELIM);
+    let pairs = split_top_level_commas(&normalised);
+
+    let mut map = serde_json::Map::with_capacity(pairs.len());
+    for pair in pairs {
+        let pair = pair.trim();
+        if pair.is_empty() {
+            continue;
+        }
+
+        let Some(colon_pos) = pair.find(':') else {
+            continue;
+        };
+        let key = pair[..colon_pos].trim();
+        let value_raw = pair[colon_pos + 1..].trim();
+        if key.is_empty() {
+            continue;
+        }
+
+        let value = if let Some(without_open) = value_raw.strip_prefix(STR_DELIM) {
+            // Escaped literal string: the content may itself contain commas
+            // and braces, so it is kept verbatim rather than re-parsed.
+            let content = match without_open.rfind(STR_DELIM) {
+                Some(end) => &without_open[..end],
+                None => without_open,
+            };
+            serde_json::Value::String(content.to_string())
+        } else {
+            // Bare token: parse as JSON (covers numbers, booleans, null,
+            // and nested objects/arrays), falling back to a raw string.
+            serde_json::from_str::<serde_json::Value>(value_raw)
+                .unwrap_or_else(|_| serde_json::Value::String(value_raw.to_string()))
+        };
+
+        map.insert(key.to_string(), value);
+    }
+
+    serde_json::to_string(&serde_json::Value::Object(map)).unwrap_or_else(|_| "{}".to_string())
 }
 
 /// Maximum number of `<invoke>` blocks the MiniMax M2 parser will accept from a
@@ -2144,6 +2296,114 @@ mod tests {
         assert!(try_gemma4(r#"<tool_call>{"name": "fn", "arguments": {}}</tool_call>"#).is_none());
         // Plain text should not match
         assert!(try_gemma4("Hello, world!").is_none());
+    }
+
+    // -- Function-calling Gemma --
+
+    #[test]
+    fn function_gemma_no_args() {
+        let text = "<start_function_call>call:get_time{}<end_function_call>";
+        let result = try_function_gemma(text).unwrap();
+        assert_eq!(result.tool_calls.len(), 1);
+        assert_eq!(result.tool_calls[0].name, "get_time");
+        assert_eq!(result.tool_calls[0].arguments, "{}");
+        assert_eq!(result.format, Some(ToolCallFormat::FunctionGemma));
+    }
+
+    #[test]
+    fn function_gemma_escaped_string_arg() {
+        let text = "<start_function_call>call:get_weather{location:<escape>Tokyo<escape>}<end_function_call>";
+        let result = try_function_gemma(text).unwrap();
+        assert_eq!(result.tool_calls.len(), 1);
+        assert_eq!(result.tool_calls[0].name, "get_weather");
+        let args: serde_json::Value =
+            serde_json::from_str(&result.tool_calls[0].arguments).unwrap();
+        assert_eq!(args["location"], "Tokyo");
+    }
+
+    #[test]
+    fn function_gemma_escaped_string_with_comma_and_brace() {
+        // Escaped literal strings may themselves contain commas and braces
+        // without being split into extra arguments or unbalancing depth.
+        let text = "<start_function_call>call:fn{msg:<escape>hello, {world}<escape>,count:3}<end_function_call>";
+        let result = try_function_gemma(text).unwrap();
+        assert_eq!(result.tool_calls.len(), 1);
+        let args: serde_json::Value =
+            serde_json::from_str(&result.tool_calls[0].arguments).unwrap();
+        assert_eq!(args["msg"], "hello, {world}");
+        assert_eq!(args["count"], 3);
+    }
+
+    #[test]
+    fn function_gemma_numeric_and_boolean_values() {
+        let text = "<start_function_call>call:search{limit:10,ratio:1.5,active:true,disabled:false}<end_function_call>";
+        let result = try_function_gemma(text).unwrap();
+        assert_eq!(result.tool_calls.len(), 1);
+        let args: serde_json::Value =
+            serde_json::from_str(&result.tool_calls[0].arguments).unwrap();
+        assert_eq!(args["limit"], 10);
+        assert_eq!(args["ratio"], 1.5);
+        assert_eq!(args["active"], true);
+        assert_eq!(args["disabled"], false);
+    }
+
+    #[test]
+    fn function_gemma_bare_token_falls_back_to_raw_string() {
+        // A bare token that is not valid JSON (an unquoted identifier) falls
+        // back to a raw string instead of being dropped.
+        let text = "<start_function_call>call:fn{mode:fast}<end_function_call>";
+        let result = try_function_gemma(text).unwrap();
+        let args: serde_json::Value =
+            serde_json::from_str(&result.tool_calls[0].arguments).unwrap();
+        assert_eq!(args["mode"], "fast");
+    }
+
+    #[test]
+    fn function_gemma_multiple_args() {
+        let text = "<start_function_call>call:book{city:<escape>Paris<escape>,nights:3,refundable:false}<end_function_call>";
+        let result = try_function_gemma(text).unwrap();
+        assert_eq!(result.tool_calls.len(), 1);
+        let args: serde_json::Value =
+            serde_json::from_str(&result.tool_calls[0].arguments).unwrap();
+        assert_eq!(args["city"], "Paris");
+        assert_eq!(args["nights"], 3);
+        assert_eq!(args["refundable"], false);
+    }
+
+    #[test]
+    fn function_gemma_multiple_calls() {
+        let text = "<start_function_call>call:get_time{}<end_function_call><start_function_call>call:get_weather{location:<escape>Paris<escape>}<end_function_call>";
+        let result = try_function_gemma(text).unwrap();
+        assert_eq!(result.tool_calls.len(), 2);
+        assert_eq!(result.tool_calls[0].name, "get_time");
+        assert_eq!(result.tool_calls[1].name, "get_weather");
+        let args: serde_json::Value =
+            serde_json::from_str(&result.tool_calls[1].arguments).unwrap();
+        assert_eq!(args["location"], "Paris");
+    }
+
+    #[test]
+    fn function_gemma_with_content_before() {
+        let text = "Let me check the weather.\n<start_function_call>call:get_weather{city:<escape>Tokyo<escape>}<end_function_call>";
+        let result = try_function_gemma(text).unwrap();
+        assert_eq!(result.tool_calls.len(), 1);
+        assert!(result.content.contains("check the weather"));
+        assert_eq!(result.tool_calls[0].name, "get_weather");
+    }
+
+    #[test]
+    fn function_gemma_no_match() {
+        // Gemma 4's own marker family must not be claimed by this parser.
+        assert!(try_function_gemma("<|tool_call>call:fn{}<tool_call|>").is_none());
+        // Plain text should not match.
+        assert!(try_function_gemma("Hello, world!").is_none());
+    }
+
+    #[test]
+    fn function_gemma_malformed_call_body_returns_none() {
+        // Markers present, but no `call:NAME{...}` body inside them.
+        let text = "<start_function_call>not a call<end_function_call>";
+        assert!(try_function_gemma(text).is_none());
     }
 
     // -- Generic JSON --
