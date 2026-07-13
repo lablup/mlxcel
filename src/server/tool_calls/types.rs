@@ -73,6 +73,12 @@ pub enum ToolCallFormat {
     /// `functions.NAME:INDEX<|tool_call_argument_begin|>{json arguments}`,
     /// e.g. `functions.get_weather:0<|tool_call_argument_begin|>{"location": "Paris"}`.
     KimiK2,
+    /// Pythonic (Llama-family pythonic tool use, some Nemotron templates):
+    /// a bracketed Python-like call, e.g. `[get_weather(city="Paris", days=2)]`,
+    /// wrapped in `<|tool_call_start|>` / `<|tool_call_end|>` markers (the
+    /// corresponding tool-list template marker is `<|tool_list_start|>`).
+    /// Single call per message.
+    Pythonic,
 }
 
 /// Result of parsing model output for tool calls.

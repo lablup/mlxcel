@@ -1517,6 +1517,145 @@ fn is_ident_byte(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'_'
 }
 
+/// Try parsing the pythonic bracketed-call tool-call format:
+/// `<|tool_call_start|>[func(arg=value, ...)]<|tool_call_end|>`
+///
+/// Used by Llama-family "pythonic" tool use chat templates and some
+/// Nemotron templates. The call regex `\[(\w+)\((.*?)\)\]` (dotall, so it
+/// spans embedded newlines) only requires `[word(...)]` somewhere in the
+/// text, so it naturally ignores the surrounding `<|tool_call_start|>` /
+/// `<|tool_call_end|>` markers: marker-wrapped and bare bodies share this
+/// one code path. Only the FIRST match is used — the format carries a
+/// single call per message in practice.
+///
+/// Known limitation, preserved on purpose: nested parentheses, or commas
+/// inside a plain (non-bracketed) unquoted value, are not supported —
+/// matching the format's real usage rather than building a full expression
+/// parser. A single level of `[...]` list literal in a value IS supported.
+pub fn try_pythonic(text: &str) -> Option<ToolCallParseResult> {
+    let call_re = Regex::new(r"(?s)\[(\w+)\((.*?)\)\]").ok()?;
+    let caps = call_re.captures(text).ok()??;
+
+    let name = caps.get(1)?.as_str().to_string();
+    let args_raw = caps.get(2).map(|m| m.as_str()).unwrap_or_default();
+
+    Some(ToolCallParseResult {
+        format: Some(ToolCallFormat::Pythonic),
+        tool_calls: vec![ParsedToolCall {
+            name,
+            arguments: pythonic_arguments(args_raw),
+        }],
+        content: String::new(),
+        reasoning_content: None,
+    })
+}
+
+/// Placeholder used to temporarily hide commas that sit inside a `[...]`
+/// list literal from the per-argument regex in [`pythonic_arguments`]
+/// (whose unquoted alternative `[^,]+` would otherwise stop at the first
+/// comma, breaking multi-element lists such as `tags=[1, 2, 3]`). Restored
+/// by [`unmask_bracketed_commas`] once the surrounding key=value span has
+/// been captured. A Unicode Private Use Area codepoint is used so it cannot
+/// collide with a comma that legitimately appears in real argument text.
+const MASKED_COMMA: char = '\u{E000}';
+
+/// Hide commas that occur inside an unquoted `[...]` list literal (bracket
+/// depth > 0, outside a quoted string) behind [`MASKED_COMMA`] so the
+/// per-argument regex's unquoted alternative can span the whole list.
+fn mask_bracketed_commas(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    let mut depth: i32 = 0;
+    let mut in_quotes = false;
+    for c in raw.chars() {
+        match c {
+            '"' => {
+                in_quotes = !in_quotes;
+                out.push(c);
+            }
+            '[' if !in_quotes => {
+                depth += 1;
+                out.push(c);
+            }
+            ']' if !in_quotes => {
+                depth = depth.saturating_sub(1);
+                out.push(c);
+            }
+            ',' if !in_quotes && depth > 0 => out.push(MASKED_COMMA),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+/// Restore commas hidden by [`mask_bracketed_commas`].
+fn unmask_bracketed_commas(masked: &str) -> String {
+    masked.replace(MASKED_COMMA, ",")
+}
+
+/// Build the JSON `arguments` object from a pythonic call's raw argument
+/// text (the `(.*?)` capture between the call's parentheses), using the
+/// per-argument regex `(\w+)=(?:"([^"]*)"|([^,]+))(?:,\s*|$)`: group 1 is
+/// the key; a matched quoted alternative (group 2) becomes a JSON string
+/// verbatim; a matched unquoted alternative (group 3) is coerced via
+/// [`coerce_pythonic_value`]. Returns `"{}"` for empty args (e.g. `ping()`).
+fn pythonic_arguments(args_raw: &str) -> String {
+    let masked = mask_bracketed_commas(args_raw);
+    let Ok(args_re) = Regex::new(r#"(\w+)=(?:"([^"]*)"|([^,]+))(?:,\s*|$)"#) else {
+        return "{}".to_string();
+    };
+
+    let mut map = serde_json::Map::new();
+    for caps in args_re.captures_iter(&masked) {
+        let Ok(caps) = caps else { continue };
+        let Some(key) = caps.get(1) else { continue };
+
+        let value = if let Some(quoted) = caps.get(2) {
+            serde_json::Value::String(quoted.as_str().to_string())
+        } else if let Some(unquoted) = caps.get(3) {
+            let restored = unmask_bracketed_commas(unquoted.as_str());
+            coerce_pythonic_value(restored.trim())
+        } else {
+            continue;
+        };
+
+        map.insert(key.as_str().to_string(), value);
+    }
+
+    serde_json::to_string(&serde_json::Value::Object(map)).unwrap_or_else(|_| "{}".to_string())
+}
+
+/// Coerce a trimmed unquoted pythonic argument value (or list item) in the
+/// order the format spec prescribes: integer, float, bool (`true`/`false`),
+/// a bracketed list `[...]` (each inner comma-separated item coerced the
+/// same way, recursively), else the raw string. A quoted list item (e.g.
+/// `"a"` inside `tags=["a", "b"]`) has its surrounding quotes stripped
+/// rather than falling through to the raw-string branch verbatim.
+fn coerce_pythonic_value(raw: &str) -> serde_json::Value {
+    if let Ok(i) = raw.parse::<i64>() {
+        return serde_json::Value::Number(i.into());
+    }
+    if let Ok(f) = raw.parse::<f64>()
+        && let Some(n) = serde_json::Number::from_f64(f)
+    {
+        return serde_json::Value::Number(n);
+    }
+    if raw == "true" || raw == "false" {
+        return serde_json::Value::Bool(raw == "true");
+    }
+    if let Some(inner) = raw.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
+        let items = inner
+            .split(',')
+            .filter(|s| !s.trim().is_empty())
+            .map(|item| coerce_pythonic_value(item.trim()))
+            .collect();
+        return serde_json::Value::Array(items);
+    }
+    if raw.len() >= 2 && raw.starts_with('"') && raw.ends_with('"') {
+        return serde_json::Value::String(raw[1..raw.len() - 1].to_string());
+    }
+    serde_json::Value::String(raw.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2493,5 +2632,109 @@ mod tests {
             serde_json::from_str(&result.tool_calls[0].arguments).unwrap();
         assert_eq!(args["active"], true);
         assert_eq!(args["kind"], "NoneType");
+    }
+
+    // -- Pythonic --
+
+    #[test]
+    fn pythonic_quoted_string_arg() {
+        let text = r#"<|tool_call_start|>[get_weather(city="Paris")]<|tool_call_end|>"#;
+        let result = try_pythonic(text).unwrap();
+        assert_eq!(result.format, Some(ToolCallFormat::Pythonic));
+        assert_eq!(result.tool_calls.len(), 1);
+        assert_eq!(result.tool_calls[0].name, "get_weather");
+        let args: serde_json::Value =
+            serde_json::from_str(&result.tool_calls[0].arguments).unwrap();
+        assert_eq!(args["city"], "Paris");
+    }
+
+    #[test]
+    fn pythonic_unquoted_int_arg() {
+        let text = "[set_count(count=42)]";
+        let result = try_pythonic(text).unwrap();
+        let args: serde_json::Value =
+            serde_json::from_str(&result.tool_calls[0].arguments).unwrap();
+        assert_eq!(args["count"], 42);
+    }
+
+    #[test]
+    fn pythonic_unquoted_float_arg() {
+        let text = "[set_temp(value=98.6)]";
+        let result = try_pythonic(text).unwrap();
+        let args: serde_json::Value =
+            serde_json::from_str(&result.tool_calls[0].arguments).unwrap();
+        assert_eq!(args["value"], 98.6);
+    }
+
+    #[test]
+    fn pythonic_unquoted_bool_args() {
+        let text = "[toggle(enabled=true, verbose=false)]";
+        let result = try_pythonic(text).unwrap();
+        let args: serde_json::Value =
+            serde_json::from_str(&result.tool_calls[0].arguments).unwrap();
+        assert_eq!(args["enabled"], true);
+        assert_eq!(args["verbose"], false);
+    }
+
+    #[test]
+    fn pythonic_bracketed_list_arg() {
+        // The unquoted alternative `[^,]+` in the per-argument regex cannot
+        // itself cross a comma, so this exercises the comma-masking done in
+        // `mask_bracketed_commas` / `unmask_bracketed_commas` around the
+        // per-argument regex, which lets a multi-element list survive intact.
+        let text = "[tag(tags=[1, 2, 3])]";
+        let result = try_pythonic(text).unwrap();
+        let args: serde_json::Value =
+            serde_json::from_str(&result.tool_calls[0].arguments).unwrap();
+        assert_eq!(args["tags"], serde_json::json!([1, 2, 3]));
+    }
+
+    #[test]
+    fn pythonic_mixed_quoted_and_unquoted_args() {
+        let text = r#"[get_weather(city="Paris", days=2)]"#;
+        let result = try_pythonic(text).unwrap();
+        assert_eq!(result.tool_calls[0].name, "get_weather");
+        let args: serde_json::Value =
+            serde_json::from_str(&result.tool_calls[0].arguments).unwrap();
+        assert_eq!(args["city"], "Paris");
+        assert_eq!(args["days"], 2);
+    }
+
+    #[test]
+    fn pythonic_empty_args() {
+        let text = "[ping()]";
+        let result = try_pythonic(text).unwrap();
+        assert_eq!(result.tool_calls[0].name, "ping");
+        assert_eq!(result.tool_calls[0].arguments, "{}");
+    }
+
+    #[test]
+    fn pythonic_non_matching_text_returns_none() {
+        assert!(try_pythonic("Hello, world!").is_none());
+        assert!(try_pythonic(r#"{"name": "fn", "arguments": {}}"#).is_none());
+    }
+
+    #[test]
+    fn pythonic_marker_wrapped_and_bare_body_match() {
+        let wrapped = r#"<|tool_call_start|>[f(x="y")]<|tool_call_end|>"#;
+        let bare = r#"[f(x="y")]"#;
+        let wrapped_result = try_pythonic(wrapped).unwrap();
+        let bare_result = try_pythonic(bare).unwrap();
+        assert_eq!(wrapped_result.tool_calls, bare_result.tool_calls);
+        assert_eq!(wrapped_result.tool_calls[0].name, "f");
+        let args: serde_json::Value =
+            serde_json::from_str(&wrapped_result.tool_calls[0].arguments).unwrap();
+        assert_eq!(args["x"], "y");
+    }
+
+    #[test]
+    fn pythonic_first_match_only() {
+        let text = r#"[a(x=1)] [b(y=2)]"#;
+        let result = try_pythonic(text).unwrap();
+        assert_eq!(result.tool_calls.len(), 1);
+        assert_eq!(result.tool_calls[0].name, "a");
+        let args: serde_json::Value =
+            serde_json::from_str(&result.tool_calls[0].arguments).unwrap();
+        assert_eq!(args["x"], 1);
     }
 }

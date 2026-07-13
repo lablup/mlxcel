@@ -168,9 +168,11 @@ pub fn parse_tool_calls(raw_output: &str, tools: Option<&[Tool]>) -> ToolCallPar
         formats::try_functionary_v31, // <function=name>{json}
         formats::try_qwen3_coder, // <function=name><parameter=key>val</parameter> (after v31, which declines non-JSON bodies)
         formats::try_functionary_v32, // >>>name\n
-        formats::try_llama3,      // {"name": ..., "parameters": ...}
+        // <|tool_call_start|>[func(arg=value)]<|tool_call_end|> — pythonic, before generic JSON
+        formats::try_pythonic,
+        formats::try_llama3,       // {"name": ..., "parameters": ...}
         formats::try_generic_json, // {"name": ..., "arguments": ...}
-        formats::try_command_r,   // Action: / Action Input: — least specific
+        formats::try_command_r,    // Action: / Action Input: — least specific
     ];
 
     for parser in parsers {
@@ -693,6 +695,34 @@ mod tests {
         let output = "<|tool_calls_section_begin|>\
                        <|tool_call_begin|>functions.unknown_fn:0<|tool_call_argument_begin|>{}<|tool_call_end|>\
                        <|tool_calls_section_end|>";
+        let tools = vec![make_tool("get_weather")];
+        let result = parse_tool_calls(output, Some(&tools));
+        assert!(!result.has_tool_calls());
+    }
+
+    // -- Pythonic --
+
+    #[test]
+    fn parse_pythonic_format() {
+        let output = r#"<|tool_call_start|>[get_weather(city="Paris", days=2)]<|tool_call_end|>"#;
+        let tools = vec![make_tool("get_weather")];
+        let result = parse_tool_calls(output, Some(&tools));
+        assert!(result.has_tool_calls());
+        assert_eq!(result.tool_calls.len(), 1);
+        assert_eq!(result.tool_calls[0].name, "get_weather");
+        let args: serde_json::Value =
+            serde_json::from_str(&result.tool_calls[0].arguments).unwrap();
+        assert_eq!(args["city"], "Paris");
+        assert_eq!(args["days"], 2);
+        assert_eq!(
+            result.format,
+            Some(crate::server::tool_calls::ToolCallFormat::Pythonic)
+        );
+    }
+
+    #[test]
+    fn parse_pythonic_filters_unknown_tools() {
+        let output = "<|tool_call_start|>[unknown_fn(x=1)]<|tool_call_end|>";
         let tools = vec![make_tool("get_weather")];
         let result = parse_tool_calls(output, Some(&tools));
         assert!(!result.has_tool_calls());

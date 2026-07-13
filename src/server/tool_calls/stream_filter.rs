@@ -201,6 +201,10 @@ enum DelimiterAction {
 ///   collides with any other entry: `<|tool_call>` (Gemma 4) requires a `>`
 ///   immediately after `tool_call`, whereas Kimi's markers continue with
 ///   `s_section_...`, so the two families never partial-match each other.
+/// - Pythonic `<|tool_call_start|>` is **enter-only on purpose** — see the
+///   comment on its entry below for why an `<|tool_call_end|>` exit row must
+///   NOT be added. It does not prefix-collide with Gemma 4's `<|tool_call>`
+///   either: they diverge at `_start` vs `>` immediately after `tool_call`.
 ///
 /// TODO: Consider extracting this into a startup-time configurable
 /// owned by the model worker so new reasoning families don't require a rebuild.
@@ -232,6 +236,20 @@ const CHAT_DELIMITERS: &[(&str, DelimiterAction)] = &[
         "<|tool_calls_section_begin|>",
         DelimiterAction::EnterToolCall,
     ),
+    // Pythonic: `<|tool_call_start|>[func(arg=value)]<|tool_call_end|>`.
+    // Enter-only, deliberately with NO matching `<|tool_call_end|>` exit row:
+    // that marker is already registered as Kimi K2's PER-CALL terminator
+    // inside a `<|tool_calls_section_begin|>...<|tool_calls_section_end|>`
+    // section, whose streaming suppression relies on the section begin/end
+    // pair and treats `<|tool_call_end|>` as ordinary suppressed content. If
+    // `<|tool_call_end|>` were also registered as a global `ExitToolCall`
+    // here, it would fire on every Kimi K2 per-call terminator and
+    // prematurely exit tool-call suppression mid-section, leaking the
+    // second and later Kimi calls into visible `delta.content` (a
+    // regression of #766). Pythonic calls are terminal in practice, so
+    // enter-only (mirroring Mistral Nemo's one-shot `[TOOL_CALLS]` above)
+    // fully suppresses the payload without needing an exit marker.
+    ("<|tool_call_start|>", DelimiterAction::EnterToolCall),
 ];
 
 /// The state of the streaming filter state machine.
@@ -1649,5 +1667,78 @@ mod tests {
             Some("after"),
             "content after the Kimi K2 section must resume normally"
         );
+    }
+
+    #[test]
+    fn kimi_k2_multi_call_section_all_calls_suppressed() {
+        // Regression guard for #766. `<|tool_call_end|>` is Kimi K2's
+        // PER-CALL terminator, appearing once per call inside the section —
+        // it is intentionally NOT registered as a global `ExitToolCall`
+        // delimiter (see the pythonic entry's comment on `CHAT_DELIMITERS`
+        // for why). Feed a two-call section split right after the first
+        // `<|tool_call_end|>` so the second call's body arrives in its own
+        // fragment: if `<|tool_call_end|>` incorrectly triggered an
+        // `ExitToolCall` transition, this second fragment would leak into
+        // `delta.content`.
+        let mut f = StreamFilter::new();
+        let first = "<|tool_calls_section_begin|>\
+                      <|tool_call_begin|>functions.search:0<|tool_call_argument_begin|>\
+                      {\"query\": \"rust\"}<|tool_call_end|>";
+        let second = "<|tool_call_begin|>functions.calc:1<|tool_call_argument_begin|>\
+                       {\"expr\": \"2+2\"}<|tool_call_end|><|tool_calls_section_end|>";
+
+        let out1 = f.feed(first);
+        assert_eq!(
+            out1.content, None,
+            "first Kimi K2 call body must not leak into delta.content"
+        );
+
+        let out2 = f.feed(second);
+        assert_eq!(
+            out2.content, None,
+            "second Kimi K2 call body must not leak into delta.content after \
+             the first call's <|tool_call_end|> terminator"
+        );
+
+        let flushed = f.flush();
+        assert_eq!(flushed.content, None);
+    }
+
+    // -- Pythonic tool-call markers --
+
+    #[test]
+    fn pythonic_tool_call_suppressed() {
+        let mut f = StreamFilter::new();
+        let out = f.feed(r#"<|tool_call_start|>[get_weather(city="Paris")]<|tool_call_end|>"#);
+        assert_eq!(
+            out.content, None,
+            "pythonic tool-call payload must not leak into delta.content"
+        );
+        let flushed = f.flush();
+        assert_eq!(flushed.content, None);
+    }
+
+    #[test]
+    fn pythonic_content_before_call_emitted() {
+        let mut f = StreamFilter::new();
+        let out = f.feed(
+            r#"Let me check.<|tool_call_start|>[get_weather(city="Paris")]<|tool_call_end|>"#,
+        );
+        assert_eq!(
+            out.content.as_deref(),
+            Some("Let me check."),
+            "only the preamble text must appear in delta.content"
+        );
+    }
+
+    #[test]
+    fn pythonic_start_marker_not_confused_with_gemma4_or_kimi_k2() {
+        // `<|tool_call_start|>` shares the `<|tool_call` prefix with both
+        // Gemma 4's `<|tool_call>` and Kimi K2's `<|tool_calls_section_begin|>`,
+        // but diverges immediately after (`_start` vs `>` vs `s_section...`),
+        // so none of the three should partial-match another.
+        let mut f = StreamFilter::new();
+        let out = f.feed("<|tool_call_start|>[fn(x=1)]<|tool_call_end|>");
+        assert_eq!(out.content, None);
     }
 }
