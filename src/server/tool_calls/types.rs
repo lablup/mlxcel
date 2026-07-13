@@ -58,6 +58,14 @@ pub enum ToolCallFormat {
     GenericJson,
     /// MiniMax M2: `<invoke name="fn_name"><parameter name="k">v</parameter></invoke>`
     MinimaxM2,
+    /// MiniMax M3: a namespaced XML dialect where every tag is prefixed with
+    /// the literal namespace token `]<]minimax[>[`, e.g.
+    /// `]<]minimax[>[<tool_call>]<]minimax[>[<invoke name="NAME">`
+    /// `]<]minimax[>[<param>value]<]minimax[>[</param>]<]minimax[>[</invoke>`
+    /// `]<]minimax[>[</tool_call>`. Parameters nest (repeated tags and explicit
+    /// `item` tags form arrays; mixed text plus child elements route the text to
+    /// a `$text` field) and values are coerced against the request tool schema.
+    MinimaxM3,
     /// Qwen3-Coder: `<tool_call><function=name><parameter=key>val</parameter></function></tool_call>`
     ///
     /// Named for the family that introduced it (the format is spelled out in

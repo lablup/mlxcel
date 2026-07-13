@@ -154,6 +154,25 @@ pub fn parse_tool_calls(raw_output: &str, tools: Option<&[Tool]>) -> ToolCallPar
         return result;
     }
 
+    // MiniMax M3 (namespaced XML). Handled ahead of the marker loop below for two
+    // reasons: it is the only parser that needs the request tool schema (for
+    // schema-aware value coercion), and its embedded `<invoke name=` / `<tool_call>`
+    // substrings would otherwise be claimed by the generic marker parsers
+    // (`try_minimax_m2`, `try_hermes`) that run in the loop. Its `]<]minimax[>[`
+    // namespace token is highly distinctive, so it declines (returns `None`)
+    // cleanly on any non-M3 output, and this placement keeps it before the
+    // generic JSON parsers (`try_llama3` / `try_generic_json`). When its calls
+    // filter down to empty, execution falls through to the loop just like a
+    // declined parser.
+    if let Some(mut result) = formats::try_minimax_m3(text, tools) {
+        if let Some(tools) = tools {
+            result.tool_calls = filter_by_tools(result.tool_calls, tools);
+        }
+        if result.has_tool_calls() {
+            return result;
+        }
+    }
+
     // Try each format in order of specificity (most distinctive markers first)
     let parsers: &[fn(&str) -> Option<ToolCallParseResult>] = &[
         formats::try_granite, // <response><tool_call> — more specific than bare Hermes
@@ -706,6 +725,84 @@ mod tests {
         let tools = vec![make_tool("get_weather")];
         let result = parse_tool_calls(output, Some(&tools));
         assert!(!result.has_tool_calls());
+    }
+
+    // -- MiniMax M3 (namespaced XML) --
+
+    const M3_NS: &str = "]<]minimax[>[";
+
+    #[test]
+    fn parse_minimax_m3_end_to_end() {
+        let output = format!(
+            "{M3_NS}<tool_call>{M3_NS}<invoke name=\"get_weather\">{M3_NS}<location>Paris{M3_NS}</location>{M3_NS}</invoke>{M3_NS}</tool_call>"
+        );
+        let tools = vec![make_tool("get_weather")];
+        let result = parse_tool_calls(&output, Some(&tools));
+        assert!(result.has_tool_calls());
+        assert_eq!(result.tool_calls.len(), 1);
+        assert_eq!(result.tool_calls[0].name, "get_weather");
+        // The distinctive namespace token must win over try_minimax_m2, which
+        // matches the embedded `<invoke name=` substring.
+        assert_eq!(
+            result.format,
+            Some(crate::server::tool_calls::ToolCallFormat::MinimaxM3)
+        );
+        let args: serde_json::Value =
+            serde_json::from_str(&result.tool_calls[0].arguments).unwrap();
+        assert_eq!(args["location"], "Paris");
+    }
+
+    #[test]
+    fn parse_minimax_m3_parallel_invokes() {
+        let output = format!(
+            "{M3_NS}<tool_call>\
+             {M3_NS}<invoke name=\"search\">{M3_NS}<query>rust{M3_NS}</query>{M3_NS}</invoke>\
+             {M3_NS}<invoke name=\"read_file\">{M3_NS}<path>a.rs{M3_NS}</path>{M3_NS}</invoke>\
+             {M3_NS}</tool_call>"
+        );
+        let tools = vec![make_tool("search"), make_tool("read_file")];
+        let result = parse_tool_calls(&output, Some(&tools));
+        assert_eq!(result.tool_calls.len(), 2);
+        assert_eq!(result.tool_calls[0].name, "search");
+        assert_eq!(result.tool_calls[1].name, "read_file");
+    }
+
+    #[test]
+    fn parse_minimax_m3_filters_unknown_tools() {
+        let output = format!(
+            "{M3_NS}<tool_call>{M3_NS}<invoke name=\"unknown_fn\">{M3_NS}<x>1{M3_NS}</x>{M3_NS}</invoke>{M3_NS}</tool_call>"
+        );
+        let tools = vec![make_tool("get_weather")];
+        let result = parse_tool_calls(&output, Some(&tools));
+        assert!(!result.has_tool_calls());
+    }
+
+    #[test]
+    fn parse_minimax_m3_does_not_affect_hermes_or_generic_json() {
+        // Regression: adding the M3 parser must not change how plain Hermes and
+        // generic-JSON tool calls are detected.
+        let hermes =
+            r#"<tool_call>{"name": "get_weather", "arguments": {"location": "Paris"}}</tool_call>"#;
+        let tools = vec![make_tool("get_weather")];
+        let r = parse_tool_calls(hermes, Some(&tools));
+        assert_eq!(
+            r.format,
+            Some(crate::server::tool_calls::ToolCallFormat::Hermes)
+        );
+
+        // A bare JSON object with `name` + `arguments` is claimed by the JSON
+        // parsers (Llama3 accepts `arguments` too, so it wins over GenericJson —
+        // pre-existing order). The M3 parser must not steal it or change this.
+        let generic = r#"{"name": "calc", "arguments": {"expr": "2+2"}}"#;
+        let tools2 = vec![make_tool("calc")];
+        let r2 = parse_tool_calls(generic, Some(&tools2));
+        assert!(r2.has_tool_calls());
+        assert_eq!(r2.tool_calls[0].name, "calc");
+        assert_ne!(
+            r2.format,
+            Some(crate::server::tool_calls::ToolCallFormat::MinimaxM3),
+            "a plain JSON tool call must not be claimed by the M3 parser"
+        );
     }
 
     // -- Kimi K2 --

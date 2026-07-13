@@ -23,6 +23,7 @@
 use fancy_regex::Regex;
 
 use super::types::{ParsedToolCall, ToolCallFormat, ToolCallParseResult};
+use crate::server::types::request::Tool;
 
 /// Internal placeholder [`split_top_level_commas`] uses to mark string
 /// regions once a format-specific string delimiter (Gemma 4's `<|"|>` or
@@ -1842,6 +1843,488 @@ fn coerce_pythonic_value_inner(raw: &str, depth: usize) -> serde_json::Value {
     serde_json::Value::String(raw.to_string())
 }
 
+// ---------------------------------------------------------------------------
+// MiniMax M3 (namespaced XML tool-call format)
+// ---------------------------------------------------------------------------
+
+/// The literal namespace token that prefixes every MiniMax M3 tag.
+const MINIMAX_M3_NS: &str = "]<]minimax[>[";
+/// The namespace token immediately followed by `<` — the common prefix of both
+/// a namespaced open tag (`]<]minimax[>[<name>`) and a namespaced close tag
+/// (`]<]minimax[>[</name>`). Kept in sync with [`MINIMAX_M3_NS`] via a unit
+/// test so the two literals never drift.
+const MINIMAX_M3_NS_LT: &str = "]<]minimax[>[<";
+
+/// Defensive caps mirroring the MiniMax M2 parser: bound parallel-call and
+/// per-element memory, plus recursion depth, under adversarial model output.
+const MINIMAX_M3_MAX_CALLS: usize = 1024;
+const MINIMAX_M3_MAX_CHILDREN: usize = 1024;
+const MINIMAX_M3_MAX_DEPTH: usize = 64;
+
+/// Normalised schema kinds recognised by the MiniMax M3 coercion pass.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum M3Type {
+    Integer,
+    Number,
+    Boolean,
+    Object,
+    Array,
+    Str,
+}
+
+/// Try parsing the MiniMax M3 namespaced-XML tool-call format.
+///
+/// Every tag is prefixed with the literal namespace token `]<]minimax[>[`. A
+/// tool block is `]<]minimax[>[<tool_call>` ... `]<]minimax[>[</tool_call>`; each
+/// invocation is `]<]minimax[>[<invoke name="NAME">` ... `]<]minimax[>[</invoke>`
+/// (multiple invokes per block = parallel calls). Parameters are nested
+/// namespaced elements that recurse:
+/// - repeated tags with the same name fold into an array,
+/// - explicit `item` tags form an array,
+/// - mixed text plus child elements route the text to a `$text` field.
+///
+/// `tools` supplies the per-function JSON schema used for schema-aware value
+/// coercion: `int`/`uint`/`long` normalise to integer, `num`/`float` to number,
+/// `dict` to object, `list` to array, with `anyOf`/`oneOf`/`enum` handled. A
+/// value whose declared-type parse fails (or that has no schema) falls back to a
+/// JSON parse, then a loose literal parse (numbers and booleans), then the raw
+/// string.
+///
+/// A recursive-descent scan over the namespaced tags is used rather than a
+/// regex because parameter nesting matters. Malformed markup yields `None` (or
+/// drops the offending fragment) rather than panicking.
+pub fn try_minimax_m3(text: &str, tools: Option<&[Tool]>) -> Option<ToolCallParseResult> {
+    let tool_call_open = format!("{MINIMAX_M3_NS}<tool_call>");
+    let invoke_open = format!("{MINIMAX_M3_NS}<invoke");
+
+    // The `<invoke>` marker is required (a bare `<tool_call>` wrapper carries no
+    // call). The namespace token is highly distinctive, so a false positive on
+    // ordinary output is not a concern.
+    let invoke_pos = text.find(&invoke_open)?;
+    let block_pos = text.find(&tool_call_open);
+    let first_marker = block_pos.map_or(invoke_pos, |b| b.min(invoke_pos));
+
+    // Any prose before the first namespaced marker is user-visible content.
+    let content = text[..first_marker].trim().to_string();
+
+    let mut calls = Vec::new();
+    let mut remaining = &text[first_marker..];
+
+    while let Some(start) = remaining.find(&invoke_open) {
+        let after = start + invoke_open.len();
+        // The open tag runs until '>'; between the marker and '>' is the
+        // attribute region carrying `name="NAME"`. Use if-let (not `?`) so a
+        // trailing malformed opener does not discard already-parsed calls.
+        let Some(gt_rel) = remaining[after..].find('>') else {
+            break;
+        };
+        let attr_region = &remaining[after..after + gt_rel];
+        let function_name = minimax_m3_extract_invoke_name(attr_region);
+
+        let body_start = after + gt_rel + 1;
+        let (body, rest_rel) = minimax_m3_find_close(&remaining[body_start..], "invoke");
+
+        if let Some(name) = function_name {
+            let schema = minimax_m3_function_schema(tools, &name);
+            let arguments = minimax_m3_parse_arguments(body, schema);
+            calls.push(ParsedToolCall { name, arguments });
+            if calls.len() >= MINIMAX_M3_MAX_CALLS {
+                break;
+            }
+        }
+
+        remaining = &remaining[body_start + rest_rel..];
+    }
+
+    if calls.is_empty() {
+        return None;
+    }
+
+    Some(ToolCallParseResult {
+        format: Some(ToolCallFormat::MinimaxM3),
+        tool_calls: calls,
+        content,
+        reasoning_content: None,
+    })
+}
+
+/// Extract the function name from an `<invoke>` attribute region such as
+/// ` name="get_weather"` (or single-quoted / bare). Returns `None` when no
+/// non-empty name is present.
+fn minimax_m3_extract_invoke_name(attr_region: &str) -> Option<String> {
+    let after = attr_region.find("name=")? + "name=".len();
+    let rest = attr_region[after..].trim_start();
+    let name = if let Some(inner) = rest.strip_prefix('"') {
+        inner.split('"').next().unwrap_or("")
+    } else if let Some(inner) = rest.strip_prefix('\'') {
+        inner.split('\'').next().unwrap_or("")
+    } else {
+        rest.split_whitespace().next().unwrap_or("")
+    };
+    if name.is_empty() {
+        None
+    } else {
+        Some(name.to_string())
+    }
+}
+
+/// Look up a function's JSON-schema `parameters` object by name.
+fn minimax_m3_function_schema<'a>(
+    tools: Option<&'a [Tool]>,
+    name: &str,
+) -> Option<&'a serde_json::Value> {
+    tools?
+        .iter()
+        .find(|t| t.function.name == name)
+        .and_then(|t| t.function.parameters.as_ref())
+}
+
+/// Read a single namespaced tag whose namespace token starts at byte `m`.
+///
+/// Returns `(is_close, tag_name, end)` where `end` is the byte index just after
+/// the tag's closing `>`. Returns `None` if the tag has no closing `>` (a
+/// truncated / malformed tail).
+fn minimax_m3_read_tag(s: &str, m: usize) -> Option<(bool, &str, usize)> {
+    // `m` indexes the namespace token; skip `]<]minimax[>[<` to reach the tag.
+    let after = m + MINIMAX_M3_NS_LT.len();
+    let rest = s.get(after..)?;
+    let is_close = rest.starts_with('/');
+    let name_start = after + usize::from(is_close);
+    let region = s.get(name_start..)?;
+    let gt = region.find('>')?;
+    let end = name_start + gt + 1;
+    let name_slice = &region[..gt];
+    let name_len = name_slice
+        .find(|c: char| c == '>' || c == '/' || c.is_whitespace())
+        .unwrap_or(name_slice.len());
+    Some((is_close, &name_slice[..name_len], end))
+}
+
+/// Find the matching close tag for `name` inside `s`, where `s` begins just
+/// after the element's opening `>`.
+///
+/// Uses name-matched depth counting: only same-name opens/closes move the depth,
+/// so different-name children are transparent and correctly nested. Returns
+/// `(inner_body, rest_offset)` where `inner_body` is the slice between the open
+/// and its matching close and `rest_offset` is the byte offset into `s` just
+/// after the close tag. When no matching close is found (truncated output) the
+/// whole remainder becomes the body and `rest_offset == s.len()`.
+fn minimax_m3_find_close<'a>(s: &'a str, name: &str) -> (&'a str, usize) {
+    let mut depth = 1usize;
+    let mut cur = 0usize;
+    while let Some(rel) = s[cur..].find(MINIMAX_M3_NS_LT) {
+        let m = cur + rel;
+        let Some((is_close, tag_name, end)) = minimax_m3_read_tag(s, m) else {
+            break;
+        };
+        if tag_name == name {
+            if is_close {
+                depth -= 1;
+                if depth == 0 {
+                    return (&s[..m], end);
+                }
+            } else {
+                depth += 1;
+                if depth > MINIMAX_M3_MAX_DEPTH.saturating_mul(4) {
+                    break;
+                }
+            }
+        }
+        cur = end;
+    }
+    (s, s.len())
+}
+
+/// Split an element body into its child elements (name + inner slice, in order)
+/// and any interstitial text that is not inside a child element.
+fn minimax_m3_scan_children(body: &str) -> (Vec<(String, &str)>, String) {
+    let mut children: Vec<(String, &str)> = Vec::new();
+    let mut text = String::new();
+    let mut cur = 0usize;
+
+    loop {
+        let rest = &body[cur..];
+        match rest.find(MINIMAX_M3_NS_LT) {
+            Some(rel) => {
+                let m = cur + rel;
+                text.push_str(&body[cur..m]);
+                let Some((is_close, name, tag_end)) = minimax_m3_read_tag(body, m) else {
+                    // Malformed tag with no '>': treat the remainder as text.
+                    text.push_str(&body[m..]);
+                    break;
+                };
+                if is_close {
+                    // A close tag at this level means the parent close leaked
+                    // in (malformed); stop and keep the rest as text.
+                    text.push_str(&body[m..]);
+                    break;
+                }
+                let (inner, rest_rel) = minimax_m3_find_close(&body[tag_end..], name);
+                if !name.is_empty() {
+                    children.push((name.to_string(), inner));
+                }
+                cur = tag_end + rest_rel;
+                if children.len() >= MINIMAX_M3_MAX_CHILDREN {
+                    text.push_str(&body[cur..]);
+                    break;
+                }
+            }
+            None => {
+                text.push_str(rest);
+                break;
+            }
+        }
+    }
+
+    (children, text)
+}
+
+/// Parse an `<invoke>` body into a JSON arguments object string.
+fn minimax_m3_parse_arguments(body: &str, schema: Option<&serde_json::Value>) -> String {
+    let value = minimax_m3_element_value(body, schema, 0, true);
+    serde_json::to_string(&value).unwrap_or_else(|_| "{}".to_string())
+}
+
+/// Recursively turn an element body into a JSON value.
+///
+/// With `force_object`, the result is always an object (used for the invoke
+/// arguments). Otherwise a leaf (no children) is coerced against `schema`; a
+/// body whose children are all `item` tags becomes an array; and any other set
+/// of children becomes an object, folding repeated names into arrays and routing
+/// interstitial text to `$text`.
+fn minimax_m3_element_value(
+    body: &str,
+    schema: Option<&serde_json::Value>,
+    depth: usize,
+    force_object: bool,
+) -> serde_json::Value {
+    if depth > MINIMAX_M3_MAX_DEPTH {
+        return serde_json::Value::String(body.trim().to_string());
+    }
+
+    let (children, text) = minimax_m3_scan_children(body);
+
+    if children.is_empty() {
+        if force_object {
+            return serde_json::Value::Object(serde_json::Map::new());
+        }
+        return minimax_m3_coerce_leaf(text.trim(), schema);
+    }
+
+    let all_item = children.iter().all(|(n, _)| n == "item");
+    if all_item && !force_object {
+        let items = children
+            .into_iter()
+            .map(|(name, inner)| {
+                let child_schema = minimax_m3_schema_for_child(schema, &name);
+                minimax_m3_element_value(inner, child_schema, depth + 1, false)
+            })
+            .collect();
+        return serde_json::Value::Array(items);
+    }
+
+    let mut map = serde_json::Map::new();
+    for (name, inner) in children {
+        let child_schema = minimax_m3_schema_for_child(schema, &name);
+        let val = minimax_m3_element_value(inner, child_schema, depth + 1, false);
+        minimax_m3_insert_folding(&mut map, name, val);
+    }
+    let text_trim = text.trim();
+    if !text_trim.is_empty() {
+        map.entry("$text".to_string())
+            .or_insert_with(|| serde_json::Value::String(text_trim.to_string()));
+    }
+    serde_json::Value::Object(map)
+}
+
+/// Insert `val` under `name`, folding a repeated name into an array.
+fn minimax_m3_insert_folding(
+    map: &mut serde_json::Map<String, serde_json::Value>,
+    name: String,
+    val: serde_json::Value,
+) {
+    if let Some(existing) = map.get_mut(&name) {
+        if let serde_json::Value::Array(arr) = existing {
+            arr.push(val);
+        } else {
+            let prev = existing.take();
+            *existing = serde_json::Value::Array(vec![prev, val]);
+        }
+    } else {
+        map.insert(name, val);
+    }
+}
+
+/// Resolve the schema for a child element given its parent element's schema.
+///
+/// An `item` child resolves to the parent's `items` schema; a named child
+/// resolves to `properties[name]`. `anyOf`/`oneOf` alternatives are searched.
+fn minimax_m3_schema_for_child<'a>(
+    parent: Option<&'a serde_json::Value>,
+    child_name: &str,
+) -> Option<&'a serde_json::Value> {
+    let parent = parent?;
+    if let Some(found) = minimax_m3_child_in_schema(parent, child_name) {
+        return Some(found);
+    }
+    for key in ["anyOf", "oneOf"] {
+        if let Some(subs) = parent.get(key).and_then(|s| s.as_array()) {
+            for sub in subs {
+                if let Some(found) = minimax_m3_child_in_schema(sub, child_name) {
+                    return Some(found);
+                }
+            }
+        }
+    }
+    None
+}
+
+fn minimax_m3_child_in_schema<'a>(
+    schema: &'a serde_json::Value,
+    child_name: &str,
+) -> Option<&'a serde_json::Value> {
+    if child_name == "item"
+        && let Some(items) = schema.get("items")
+    {
+        return Some(items);
+    }
+    schema
+        .get("properties")
+        .and_then(|p| p.as_object())
+        .and_then(|props| props.get(child_name))
+}
+
+/// Coerce a leaf value string using the element's schema, then a JSON parse,
+/// then a loose literal parse, then the raw string.
+fn minimax_m3_coerce_leaf(raw: &str, schema: Option<&serde_json::Value>) -> serde_json::Value {
+    if let Some(schema) = schema {
+        // A repeated tag declared as `list`/`array` arrives here one occurrence
+        // at a time as a bare scalar. Coerce it against the item schema so each
+        // element takes the declared item type (a JSON-array literal is left to
+        // the typed path below).
+        if minimax_m3_schema_type(schema) == Some(M3Type::Array)
+            && !raw.trim_start().starts_with('[')
+        {
+            if let Some(items) = schema.get("items")
+                && let Some(v) = minimax_m3_typed_coerce(raw, items)
+            {
+                return v;
+            }
+            return minimax_m3_fallback_coerce(raw);
+        }
+        if let Some(v) = minimax_m3_typed_coerce(raw, schema) {
+            return v;
+        }
+    }
+    minimax_m3_fallback_coerce(raw)
+}
+
+/// Strict, schema-directed coercion. Returns `None` when the declared type does
+/// not apply (so the caller falls back), which is what lets `anyOf`/`oneOf` try
+/// the next alternative and `enum` reject a non-member.
+fn minimax_m3_typed_coerce(raw: &str, schema: &serde_json::Value) -> Option<serde_json::Value> {
+    if let Some(members) = schema.get("enum").and_then(|e| e.as_array()) {
+        return members
+            .iter()
+            .find(|m| minimax_m3_enum_member_matches(m, raw))
+            .cloned();
+    }
+    for key in ["anyOf", "oneOf"] {
+        if let Some(subs) = schema.get(key).and_then(|s| s.as_array()) {
+            return subs
+                .iter()
+                .find_map(|sub| minimax_m3_typed_coerce(raw, sub));
+        }
+    }
+    match minimax_m3_schema_type(schema)? {
+        M3Type::Integer => raw
+            .parse::<i64>()
+            .ok()
+            .map(|i| serde_json::Value::Number(i.into()))
+            .or_else(|| {
+                raw.parse::<u64>()
+                    .ok()
+                    .map(|u| serde_json::Value::Number(u.into()))
+            }),
+        M3Type::Number => raw
+            .parse::<f64>()
+            .ok()
+            .and_then(serde_json::Number::from_f64)
+            .map(serde_json::Value::Number),
+        M3Type::Boolean => match raw.trim() {
+            "true" | "True" => Some(serde_json::Value::Bool(true)),
+            "false" | "False" => Some(serde_json::Value::Bool(false)),
+            _ => None,
+        },
+        M3Type::Object => serde_json::from_str::<serde_json::Value>(raw)
+            .ok()
+            .filter(|v| v.is_object()),
+        M3Type::Array => serde_json::from_str::<serde_json::Value>(raw)
+            .ok()
+            .filter(|v| v.is_array()),
+        M3Type::Str => Some(serde_json::Value::String(raw.to_string())),
+    }
+}
+
+/// Map a schema's `type` (a string, or the first non-`null` of a type array) to
+/// a normalised [`M3Type`]. Handles the MiniMax type aliases (`int`, `uint`,
+/// `long`, `num`, `float`, `dict`, `list`) alongside the JSON-schema names.
+fn minimax_m3_schema_type(schema: &serde_json::Value) -> Option<M3Type> {
+    let ty = schema.get("type")?;
+    let name = match ty {
+        serde_json::Value::String(s) => s.as_str(),
+        serde_json::Value::Array(items) => items
+            .iter()
+            .filter_map(|v| v.as_str())
+            .find(|s| *s != "null")?,
+        _ => return None,
+    };
+    match name.to_ascii_lowercase().as_str() {
+        "int" | "integer" | "uint" | "long" | "int32" | "int64" => Some(M3Type::Integer),
+        "num" | "number" | "float" | "double" => Some(M3Type::Number),
+        "bool" | "boolean" => Some(M3Type::Boolean),
+        "dict" | "object" => Some(M3Type::Object),
+        "list" | "array" => Some(M3Type::Array),
+        "str" | "string" => Some(M3Type::Str),
+        _ => None,
+    }
+}
+
+/// Whether an `enum` member matches the raw string value.
+fn minimax_m3_enum_member_matches(member: &serde_json::Value, raw: &str) -> bool {
+    match member {
+        serde_json::Value::String(s) => s == raw,
+        serde_json::Value::Number(n) => n.to_string() == raw,
+        serde_json::Value::Bool(b) => b.to_string() == raw,
+        serde_json::Value::Null => raw == "null",
+        _ => false,
+    }
+}
+
+/// Schema-free coercion: JSON parse, then a loose literal parse (numbers and
+/// booleans), then the raw string.
+fn minimax_m3_fallback_coerce(raw: &str) -> serde_json::Value {
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(raw) {
+        return v;
+    }
+    if let Ok(i) = raw.parse::<i64>() {
+        return serde_json::Value::Number(i.into());
+    }
+    if let Ok(u) = raw.parse::<u64>() {
+        return serde_json::Value::Number(u.into());
+    }
+    if let Ok(f) = raw.parse::<f64>()
+        && let Some(n) = serde_json::Number::from_f64(f)
+    {
+        return serde_json::Value::Number(n);
+    }
+    match raw {
+        "true" | "True" => serde_json::Value::Bool(true),
+        "false" | "False" => serde_json::Value::Bool(false),
+        _ => serde_json::Value::String(raw.to_string()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3117,5 +3600,333 @@ mod tests {
             args["x"], expected_over_cap,
             "the pair past the cap must degrade to a raw string, not crash or vanish"
         );
+    }
+
+    // ------------------------------------------------------------------
+    // MiniMax M3 (namespaced XML tool-call format)
+    // ------------------------------------------------------------------
+
+    fn m3_tool(name: &str, params: serde_json::Value) -> Tool {
+        Tool {
+            tool_type: "function".to_string(),
+            function: crate::server::types::request::FunctionDefinition {
+                name: name.to_string(),
+                description: None,
+                parameters: Some(params),
+            },
+        }
+    }
+
+    fn m3_args(result: &ToolCallParseResult, idx: usize) -> serde_json::Value {
+        serde_json::from_str(&result.tool_calls[idx].arguments).expect("arguments must be JSON")
+    }
+
+    /// Build a `]<]minimax[>[<name>value]<]minimax[>[</name>` element.
+    fn m3_el(name: &str, body: &str) -> String {
+        format!("{MINIMAX_M3_NS}<{name}>{body}{MINIMAX_M3_NS}</{name}>")
+    }
+
+    /// Build a full tool block from `(function_name, body)` invokes.
+    fn m3_block(invokes: &[(&str, &str)]) -> String {
+        let mut s = format!("{MINIMAX_M3_NS}<tool_call>");
+        for (name, body) in invokes {
+            s.push_str(&format!("{MINIMAX_M3_NS}<invoke name=\"{name}\">{body}"));
+            s.push_str(&format!("{MINIMAX_M3_NS}</invoke>"));
+        }
+        s.push_str(&format!("{MINIMAX_M3_NS}</tool_call>"));
+        s
+    }
+
+    #[test]
+    fn minimax_m3_ns_lt_kept_in_sync() {
+        // The two namespace-token literals must never drift apart.
+        assert_eq!(MINIMAX_M3_NS_LT, format!("{MINIMAX_M3_NS}<"));
+    }
+
+    #[test]
+    fn minimax_m3_single_call() {
+        let output = m3_block(&[("get_weather", &m3_el("location", "Paris"))]);
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {"location": {"type": "string"}}
+        });
+        let tools = vec![m3_tool("get_weather", schema)];
+        let result = try_minimax_m3(&output, Some(&tools)).unwrap();
+        assert_eq!(result.format, Some(ToolCallFormat::MinimaxM3));
+        assert_eq!(result.tool_calls.len(), 1);
+        assert_eq!(result.tool_calls[0].name, "get_weather");
+        assert_eq!(m3_args(&result, 0)["location"], "Paris");
+    }
+
+    #[test]
+    fn minimax_m3_parallel_invokes() {
+        let output = m3_block(&[
+            ("search", &m3_el("query", "weather")),
+            ("read_file", &m3_el("path", "/tmp/test.txt")),
+        ]);
+        let result = try_minimax_m3(&output, None).unwrap();
+        assert_eq!(result.tool_calls.len(), 2);
+        assert_eq!(result.tool_calls[0].name, "search");
+        assert_eq!(result.tool_calls[1].name, "read_file");
+        assert_eq!(m3_args(&result, 0)["query"], "weather");
+        assert_eq!(m3_args(&result, 1)["path"], "/tmp/test.txt");
+    }
+
+    #[test]
+    fn minimax_m3_nested_object_param() {
+        let inner = format!("{}{}", m3_el("city", "Paris"), m3_el("zip", "75001"));
+        let output = m3_block(&[("book", &m3_el("location", &inner))]);
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "location": {
+                    "type": "object",
+                    "properties": {
+                        "city": {"type": "string"},
+                        "zip": {"type": "string"}
+                    }
+                }
+            }
+        });
+        let tools = vec![m3_tool("book", schema)];
+        let result = try_minimax_m3(&output, Some(&tools)).unwrap();
+        let args = m3_args(&result, 0);
+        assert_eq!(args["location"]["city"], "Paris");
+        // Typed as string, so the numeric-looking zip stays a string.
+        assert_eq!(args["location"]["zip"], "75001");
+        assert!(args["location"]["zip"].is_string());
+    }
+
+    #[test]
+    fn minimax_m3_item_tag_arrays() {
+        let items = format!(
+            "{}{}{}",
+            m3_el("item", "red"),
+            m3_el("item", "green"),
+            m3_el("item", "blue")
+        );
+        let output = m3_block(&[("paint", &m3_el("tags", &items))]);
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {"tags": {"type": "array", "items": {"type": "string"}}}
+        });
+        let tools = vec![m3_tool("paint", schema)];
+        let result = try_minimax_m3(&output, Some(&tools)).unwrap();
+        assert_eq!(
+            m3_args(&result, 0)["tags"],
+            serde_json::json!(["red", "green", "blue"])
+        );
+    }
+
+    #[test]
+    fn minimax_m3_repeated_tag_arrays() {
+        let body = format!("{}{}", m3_el("color", "red"), m3_el("color", "green"));
+        let output = m3_block(&[("paint", &body)]);
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {"color": {"type": "array", "items": {"type": "string"}}}
+        });
+        let tools = vec![m3_tool("paint", schema)];
+        let result = try_minimax_m3(&output, Some(&tools)).unwrap();
+        assert_eq!(
+            m3_args(&result, 0)["color"],
+            serde_json::json!(["red", "green"])
+        );
+    }
+
+    #[test]
+    fn minimax_m3_nested_item_arrays_typed() {
+        // matrix = [[1, 2], [3, 4]] via nested item tags, innermost typed int.
+        let row =
+            |a: &str, b: &str| m3_el("item", &format!("{}{}", m3_el("item", a), m3_el("item", b)));
+        let matrix = format!("{}{}", row("1", "2"), row("3", "4"));
+        let output = m3_block(&[("f", &m3_el("matrix", &matrix))]);
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "matrix": {
+                    "type": "list",
+                    "items": {"type": "list", "items": {"type": "int"}}
+                }
+            }
+        });
+        let tools = vec![m3_tool("f", schema)];
+        let result = try_minimax_m3(&output, Some(&tools)).unwrap();
+        assert_eq!(
+            m3_args(&result, 0)["matrix"],
+            serde_json::json!([[1, 2], [3, 4]])
+        );
+    }
+
+    #[test]
+    fn minimax_m3_mixed_text_and_children_uses_text_field() {
+        // <note>heads up<flag>urgent</flag></note> -> {"$text": "heads up", "flag": "urgent"}
+        let note = format!("heads up{}", m3_el("flag", "urgent"));
+        let output = m3_block(&[("annotate", &m3_el("note", &note))]);
+        let result = try_minimax_m3(&output, None).unwrap();
+        let note_val = &m3_args(&result, 0)["note"];
+        assert_eq!(note_val["$text"], "heads up");
+        assert_eq!(note_val["flag"], "urgent");
+    }
+
+    #[test]
+    fn minimax_m3_schema_coercion_numeric_kinds() {
+        // int / uint / long -> integer; num / float -> number.
+        let body = format!(
+            "{}{}{}{}{}",
+            m3_el("a", "42"),
+            m3_el("b", "7"),
+            m3_el("c", "1000000000000"),
+            m3_el("d", "3.5"),
+            m3_el("e", "2.71")
+        );
+        let output = m3_block(&[("f", &body)]);
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "a": {"type": "int"},
+                "b": {"type": "uint"},
+                "c": {"type": "long"},
+                "d": {"type": "num"},
+                "e": {"type": "float"}
+            }
+        });
+        let tools = vec![m3_tool("f", schema)];
+        let result = try_minimax_m3(&output, Some(&tools)).unwrap();
+        let args = m3_args(&result, 0);
+        assert_eq!(args["a"], 42);
+        assert_eq!(args["b"], 7);
+        assert_eq!(args["c"], 1_000_000_000_000_i64);
+        assert_eq!(args["d"], 3.5);
+        assert_eq!(args["e"], 2.71);
+        assert!(args["a"].is_i64() || args["a"].is_u64());
+        assert!(args["d"].is_f64());
+    }
+
+    #[test]
+    fn minimax_m3_schema_coercion_dict_and_list() {
+        let body = format!(
+            "{}{}",
+            m3_el("meta", r#"{"k": 1}"#),
+            m3_el("nums", "[1, 2, 3]")
+        );
+        let output = m3_block(&[("f", &body)]);
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "meta": {"type": "dict"},
+                "nums": {"type": "list"}
+            }
+        });
+        let tools = vec![m3_tool("f", schema)];
+        let result = try_minimax_m3(&output, Some(&tools)).unwrap();
+        let args = m3_args(&result, 0);
+        assert_eq!(args["meta"], serde_json::json!({"k": 1}));
+        assert_eq!(args["nums"], serde_json::json!([1, 2, 3]));
+    }
+
+    #[test]
+    fn minimax_m3_schema_coercion_string_not_numified() {
+        // A string-typed value that looks numeric must NOT be coerced to a number
+        // (without the schema, loose parsing would turn "007" into 7).
+        let output = m3_block(&[("f", &m3_el("code", "007"))]);
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {"code": {"type": "string"}}
+        });
+        let tools = vec![m3_tool("f", schema)];
+        let result = try_minimax_m3(&output, Some(&tools)).unwrap();
+        assert_eq!(m3_args(&result, 0)["code"], "007");
+        assert!(m3_args(&result, 0)["code"].is_string());
+    }
+
+    #[test]
+    fn minimax_m3_schema_coercion_anyof() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {"x": {"anyOf": [{"type": "int"}, {"type": "string"}]}}
+        });
+        let tools = vec![m3_tool("f", schema)];
+        let r1 = try_minimax_m3(&m3_block(&[("f", &m3_el("x", "42"))]), Some(&tools)).unwrap();
+        let r2 = try_minimax_m3(&m3_block(&[("f", &m3_el("x", "hello"))]), Some(&tools)).unwrap();
+        assert_eq!(m3_args(&r1, 0)["x"], 42);
+        assert!(m3_args(&r1, 0)["x"].is_i64() || m3_args(&r1, 0)["x"].is_u64());
+        assert_eq!(m3_args(&r2, 0)["x"], "hello");
+    }
+
+    #[test]
+    fn minimax_m3_schema_coercion_oneof() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {"x": {"oneOf": [{"type": "bool"}, {"type": "string"}]}}
+        });
+        let tools = vec![m3_tool("f", schema)];
+        let r = try_minimax_m3(&m3_block(&[("f", &m3_el("x", "true"))]), Some(&tools)).unwrap();
+        assert_eq!(m3_args(&r, 0)["x"], true);
+        assert!(m3_args(&r, 0)["x"].is_boolean());
+    }
+
+    #[test]
+    fn minimax_m3_schema_coercion_enum() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {"unit": {"enum": ["celsius", "fahrenheit"]}}
+        });
+        let tools = vec![m3_tool("f", schema)];
+        let ok =
+            try_minimax_m3(&m3_block(&[("f", &m3_el("unit", "celsius"))]), Some(&tools)).unwrap();
+        assert_eq!(m3_args(&ok, 0)["unit"], "celsius");
+        // A value that is not an enum member falls back to the raw string.
+        let bad =
+            try_minimax_m3(&m3_block(&[("f", &m3_el("unit", "kelvin"))]), Some(&tools)).unwrap();
+        assert_eq!(m3_args(&bad, 0)["unit"], "kelvin");
+    }
+
+    #[test]
+    fn minimax_m3_no_schema_loose_coercion() {
+        // Without a schema, numbers and booleans are coerced loosely; prose stays a string.
+        let body = format!(
+            "{}{}{}",
+            m3_el("n", "5"),
+            m3_el("flag", "true"),
+            m3_el("name", "Alice")
+        );
+        let result = try_minimax_m3(&m3_block(&[("f", &body)]), None).unwrap();
+        let args = m3_args(&result, 0);
+        assert_eq!(args["n"], 5);
+        assert_eq!(args["flag"], true);
+        assert_eq!(args["name"], "Alice");
+    }
+
+    #[test]
+    fn minimax_m3_content_before_block_preserved() {
+        let output = format!("Let me check.{}", m3_block(&[("f", &m3_el("x", "1"))]));
+        let result = try_minimax_m3(&output, None).unwrap();
+        assert_eq!(result.content, "Let me check.");
+    }
+
+    #[test]
+    fn minimax_m3_malformed_returns_none_no_panic() {
+        // No invoke marker at all.
+        assert!(try_minimax_m3("just some text", None).is_none());
+        // A tool_call wrapper with no invoke is not a usable call.
+        let empty = format!("{MINIMAX_M3_NS}<tool_call>{MINIMAX_M3_NS}</tool_call>");
+        assert!(try_minimax_m3(&empty, None).is_none());
+        // Truncated invoke opener (no closing '>').
+        let trunc = format!("{MINIMAX_M3_NS}<tool_call>{MINIMAX_M3_NS}<invoke name=\"f\"");
+        assert!(try_minimax_m3(&trunc, None).is_none());
+    }
+
+    #[test]
+    fn minimax_m3_unterminated_body_keeps_call() {
+        // Missing </invoke> and </tool_call>: the call is still recovered, no panic.
+        let unterminated = format!(
+            "{MINIMAX_M3_NS}<tool_call>{MINIMAX_M3_NS}<invoke name=\"f\">{}",
+            m3_el("x", "1")
+        );
+        let result = try_minimax_m3(&unterminated, None).unwrap();
+        assert_eq!(result.tool_calls.len(), 1);
+        assert_eq!(result.tool_calls[0].name, "f");
+        assert_eq!(m3_args(&result, 0)["x"], 1);
     }
 }

@@ -231,6 +231,19 @@ const CHAT_DELIMITERS: &[(&str, DelimiterAction)] = &[
     ("<|think|>", DelimiterAction::Strip),
     ("<|turn>", DelimiterAction::Strip),
     ("<turn|>", DelimiterAction::Strip),
+    // MiniMax M3 namespaced tool-call block: every tag is prefixed with the
+    // literal namespace token `]<]minimax[>[`. These entries must precede the
+    // plain Hermes `<tool_call>` / `</tool_call>` rows below because the M3
+    // markers contain `<tool_call>` / `</tool_call>` as a substring at byte
+    // offset 13. Selection is by earliest byte position (then longest on a tie),
+    // so when the full M3 marker is present it starts 13 bytes before the
+    // embedded Hermes match and wins; listing it first is a documentation
+    // convention (exit before enter, mirroring Hermes). The 25-byte exit marker
+    // stays under the existing longest delimiter, so `max_delim_len` (the
+    // partial-match window) is unchanged and `safe_emit_length` still holds back
+    // any partial `]<]minimax[>[` prefix at a token boundary.
+    ("]<]minimax[>[</tool_call>", DelimiterAction::ExitToolCall),
+    ("]<]minimax[>[<tool_call>", DelimiterAction::EnterToolCall),
     // Hermes / Qwen / DeepSeek tool call markers.
     // Exit before enter so the closer is matched when both appear in one fragment.
     ("</tool_call>", DelimiterAction::ExitToolCall),
@@ -1806,5 +1819,94 @@ mod tests {
         let mut f2 = StreamFilter::new();
         let out2 = f2.feed("<|tool_call>call:fn{}<tool_call|>");
         assert_eq!(out2.content, None);
+    }
+
+    // -- MiniMax M3 namespaced tool-call markers --
+
+    const M3_NS: &str = "]<]minimax[>[";
+
+    fn m3_stream_block() -> String {
+        format!(
+            "{M3_NS}<tool_call>{M3_NS}<invoke name=\"f\">{M3_NS}<x>1{M3_NS}</x>{M3_NS}</invoke>{M3_NS}</tool_call>"
+        )
+    }
+
+    #[test]
+    fn minimax_m3_tool_call_suppressed_single_feed() {
+        let mut f = StreamFilter::new();
+        let out = f.feed(&m3_stream_block());
+        assert_eq!(
+            out.content, None,
+            "M3 namespaced markup and payload must be suppressed"
+        );
+        // Content after the block resumes normally.
+        assert_eq!(f.feed("done").content.as_deref(), Some("done"));
+    }
+
+    #[test]
+    fn minimax_m3_content_before_block_emitted() {
+        let mut f = StreamFilter::new();
+        let out = f.feed(&format!("Let me check.{}", m3_stream_block()));
+        assert_eq!(
+            out.content.as_deref(),
+            Some("Let me check."),
+            "prose before the M3 block must be emitted"
+        );
+        assert!(!out.content.as_deref().unwrap_or("").contains("minimax"));
+        assert!(!out.content.as_deref().unwrap_or("").contains("tool_call"));
+    }
+
+    #[test]
+    fn minimax_m3_streaming_split_at_every_byte_boundary() {
+        // Feed one byte at a time across the whole block plus surrounding prose.
+        // The namespace token and markup must never leak into visible content,
+        // regardless of where the token stream is split.
+        let full = format!("A{}B", m3_stream_block());
+        let mut f = StreamFilter::new();
+        let mut content = String::new();
+        for i in 0..full.len() {
+            // The block is pure ASCII, so byte boundaries are char boundaries.
+            if let Some(c) = f.feed(&full[i..i + 1]).content {
+                content.push_str(&c);
+            }
+        }
+        if let Some(c) = f.flush().content {
+            content.push_str(&c);
+        }
+        assert!(
+            !content.contains("minimax"),
+            "namespace token leaked: {content:?}"
+        );
+        assert!(
+            !content.contains("tool_call"),
+            "tool-call markup leaked: {content:?}"
+        );
+        assert!(
+            !content.contains("invoke"),
+            "invoke markup leaked: {content:?}"
+        );
+        assert_eq!(
+            content, "AB",
+            "only the prose before and after the block is visible"
+        );
+    }
+
+    #[test]
+    fn minimax_m3_partial_prefix_released_when_not_marker() {
+        // A content tail that is a partial of the namespace token must be held
+        // back, then released once it turns out not to be a real marker.
+        let mut f = StreamFilter::new();
+        let out1 = f.feed("value ]<]minimax");
+        assert_eq!(
+            out1.content.as_deref(),
+            Some("value "),
+            "text before the partial namespace prefix must be emitted"
+        );
+        let out2 = f.feed(" data");
+        assert_eq!(
+            out2.content.as_deref(),
+            Some("]<]minimax data"),
+            "held-back partial namespace prefix must be released when not a marker"
+        );
     }
 }
