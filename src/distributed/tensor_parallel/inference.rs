@@ -240,6 +240,9 @@ fn fallback_architecture(model_type: ModelType) -> &'static str {
         ModelType::KimiVL | ModelType::KimiK25 => "deepseek_v3",
         ModelType::LongcatFlash | ModelType::LongcatFlashNgram => "longcat_flash",
         ModelType::Step3p5 => "step3p5",
+        // Step-3.7's text backbone is the Step-3.5 MoE stack; TP is refused for
+        // VLM-kind models earlier, this keeps the dispatch table total.
+        ModelType::Step3p7 => "step3p5",
         ModelType::RecurrentGemma => "recurrent_gemma",
         ModelType::LlavaVLM
         | ModelType::LlavaBunnyVLM

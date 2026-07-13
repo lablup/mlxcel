@@ -230,6 +230,7 @@ pub fn get_model_type(model_path: &Path) -> Result<ModelType> {
         "longcat_flash" => Ok(ModelType::LongcatFlash),
         "longcat_flash_ngram" => Ok(ModelType::LongcatFlashNgram),
         "step3p5" => Ok(ModelType::Step3p5),
+        "step3p7" => Ok(ModelType::Step3p7),
         "recurrent_gemma" | "griffin" => Ok(ModelType::RecurrentGemma),
         "qwen2_vl" => Ok(ModelType::Qwen2VL),
         "qwen2_5_vl" => Ok(ModelType::Qwen25VL),

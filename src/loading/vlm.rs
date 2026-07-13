@@ -83,6 +83,8 @@ mod siglip;
 mod smolvlm;
 #[path = "vlm_special.rs"]
 mod special;
+#[path = "vlm_step3p7.rs"]
+mod step3p7;
 #[path = "vlm_youtu_vl.rs"]
 mod youtu_vl_loader;
 
@@ -119,6 +121,7 @@ pub(crate) use special::{
     load_molmo2_vlm, load_moondream2_vlm, load_moondream3_vlm, load_phi3_vlm, load_phi4_siglip_vlm,
     load_phi4mm_vlm,
 };
+pub(crate) use step3p7::load_step3p7_vl;
 pub(crate) use youtu_vl_loader::load_youtu_vl_vlm;
 
 fn read_sanitized_vlm_config(model_path: &Path) -> Result<(String, Value)> {

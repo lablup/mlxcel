@@ -220,6 +220,15 @@ fn print_preparation_summary(summary: VlmPreparationSummary) {
                 media_blocks, video_count, frame_slots, total_image_tokens
             );
         }
+        VlmPreparationSummary::Step3p7 {
+            image_blocks,
+            total_image_tokens,
+        } => {
+            println!(
+                "Step-3.7: expanded {} image placeholder(s) ({} total image tokens)",
+                image_blocks, total_image_tokens
+            );
+        }
         VlmPreparationSummary::GraniteVision {
             image_blocks,
             total_image_tokens,

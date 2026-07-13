@@ -413,6 +413,7 @@ pub enum ModelType {
 
     // Step models
     Step3p5,
+    Step3p7, // Step-3.7 (perception_encoder ViT + Step-3.5 MoE text; VLM)
 
     // RNN models
     Rwkv7,
@@ -582,6 +583,7 @@ pub const ALL_MODEL_TYPES: &[ModelType] = &[
     ModelType::LongcatFlashNgram,
     // Step models
     ModelType::Step3p5,
+    ModelType::Step3p7,
     // RNN models
     ModelType::Rwkv7,
     ModelType::RecurrentGemma,
@@ -757,6 +759,7 @@ impl ModelType {
             ModelType::LongcatFlash => ("LongCat Flash (MLA + MoE, dual sublayer)", "MoE (other)"),
             ModelType::LongcatFlashNgram => ("LongCat Flash + N-gram embedding", "MoE (other)"),
             ModelType::Step3p5 => ("Step-3.5 (Sigmoid MoE gate + SwitchGLU)", "MoE (other)"),
+            ModelType::Step3p7 => ("Step-3.7 (ViT + Step-3.5 MoE)", "Step VLM"),
             ModelType::Dots1 => ("dots.llm1 (MoE)", "MoE (other)"),
 
             // ----- Mamba / SSM -----
@@ -1021,6 +1024,7 @@ mod metadata_tests {
             LongcatFlash,
             LongcatFlashNgram,
             Step3p5,
+            Step3p7,
             Rwkv7,
             RecurrentGemma,
             Whisper,

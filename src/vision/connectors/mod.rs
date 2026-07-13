@@ -27,6 +27,7 @@ pub mod linear;
 pub mod mistral3;
 pub mod mlp;
 pub mod paddleocr_vl;
+pub mod step3p7;
 
 use mlxcel_core::{MlxArray, UniquePtr};
 

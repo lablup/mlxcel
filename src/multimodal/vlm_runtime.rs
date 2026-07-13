@@ -192,6 +192,13 @@ pub enum VlmPreparationSummary {
         frame_slots: usize,
         total_image_tokens: i32,
     },
+    /// Step-3.7 expanded each `<im_patch>` placeholder into per-patch
+    /// `<patch_start> <im_patch>*81 <patch_end> [<patch_newline>]` blocks plus a
+    /// base `<im_start> <im_patch>*169 <im_end>` block.
+    Step3p7 {
+        image_blocks: usize,
+        total_image_tokens: i32,
+    },
     ImageBlocks(ImageTokenBlockStats),
 }
 
@@ -375,6 +382,35 @@ where
 
             let input_ids_arr = prompt_ids_array(prompt_tokens);
             let embeddings = paddle.input_embeddings(&input_ids_arr, &pixel_values, &grid_thw);
+
+            Ok(Some(PreparedVlmEmbeddings {
+                embeddings,
+                preparation,
+            }))
+        }
+        VlmRuntimeRef::Step3p7(step3p7) => {
+            // Base + tiled-patch preprocessing, then placeholder expansion using
+            // the processor's per-image layout so prompt and processor counts
+            // cannot drift.
+            let preprocessed = step3p7.processor.preprocess(images);
+            let preparation = crate::multimodal::step3p7_prompt::insert_step3p7_image_tokens(
+                prompt_tokens,
+                &preprocessed.layouts,
+                &step3p7.tokens,
+            )
+            .map(|stats| VlmPreparationSummary::Step3p7 {
+                image_blocks: stats.image_blocks,
+                total_image_tokens: stats.total_image_tokens,
+            });
+
+            // Step-3.7 runs both passes for the whole request in one wrapper
+            // call; the opportunistic vision cache is skipped for this first
+            // integration (mirrors Youtu-VL / InternVL).
+            let _ = active_caches;
+            let _ = image_cache_keys;
+
+            let input_ids_arr = prompt_ids_array(prompt_tokens);
+            let embeddings = step3p7.input_embeddings(&input_ids_arr, &preprocessed)?;
 
             Ok(Some(PreparedVlmEmbeddings {
                 embeddings,

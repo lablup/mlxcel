@@ -89,8 +89,20 @@ pub struct Step3p5Config {
     #[serde(default)]
     pub share_expert_dim: usize,
 
+    /// MoE layer selection. Accepts either a comma-separated string
+    /// (`"3,4,5"`) or a JSON int array (`[3, 4, 5]`); both encodings occur in
+    /// the wild (flat step3p5 uses the string form, nested step3p7 the array
+    /// form). Absent falls back to [`Step3p5Config::moe_layers_fallback`].
     #[serde(default)]
-    pub moe_layers_enum: Option<String>,
+    pub moe_layers_enum: serde_json::Value,
+
+    /// Family-specific fallback for `moe_layer_indices()`, used only when
+    /// `moe_layers_enum` is absent. Flat step3p5 configs keep the default
+    /// (`AllExceptZero`); a nested step3p7 `text_config` sets `Step3p7`. The
+    /// explicit config value always wins, so this only matters for checkpoints
+    /// that omit the key entirely.
+    #[serde(skip)]
+    pub moe_layers_fallback: MoeLayersFallback,
 
     #[serde(default = "default_moe_router_scaling")]
     pub moe_router_scaling_factor: f32,
@@ -117,6 +129,16 @@ pub struct Step3p5Config {
 pub struct AttentionOtherSetting {
     pub num_attention_heads: usize,
     pub num_attention_groups: usize,
+}
+
+/// Fallback policy for MoE layer indices when `moe_layers_enum` is absent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MoeLayersFallback {
+    /// Flat step3p5 default: every layer except layer 0.
+    #[default]
+    AllExceptZero,
+    /// step3p7 text stack default: layers 3 through 44 inclusive.
+    Step3p7,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -222,18 +244,68 @@ impl Step3p5Config {
         (self.num_attention_heads, self.num_attention_groups)
     }
 
-    /// Get the set of MoE layer indices
+    /// Get the set of MoE layer indices.
+    ///
+    /// Accepts both the comma-separated string form and the JSON int-array
+    /// form of `moe_layers_enum`. When the key is absent, the family-specific
+    /// [`Step3p5Config::moe_layers_fallback`] decides the default set.
     pub fn moe_layer_indices(&self) -> HashSet<usize> {
-        if let Some(ref enum_str) = self.moe_layers_enum {
-            enum_str
+        match &self.moe_layers_enum {
+            serde_json::Value::String(s) => s
                 .trim()
                 .split(',')
-                .filter_map(|s| s.trim().parse::<usize>().ok())
-                .collect()
-        } else {
-            // Default: all layers except 0
-            (1..self.num_hidden_layers).collect()
+                .filter_map(|x| x.trim().parse::<usize>().ok())
+                .collect(),
+            serde_json::Value::Array(arr) => arr
+                .iter()
+                .filter_map(|v| v.as_u64().map(|i| i as usize))
+                .collect(),
+            _ => match self.moe_layers_fallback {
+                MoeLayersFallback::AllExceptZero => (1..self.num_hidden_layers).collect(),
+                MoeLayersFallback::Step3p7 => (3..=44).collect(),
+            },
         }
+    }
+
+    /// Build a [`Step3p5Config`] from a nested step3p7 `text_config` JSON value.
+    ///
+    /// The text math is byte-for-byte the flat Step-3.5 stack; only the config
+    /// layout and three default values differ. The step3p7 default flips
+    /// (`use_head_wise_attn_gate` -> false, `moe_router_scaling_factor` -> 1.0)
+    /// are injected only when the checkpoint omits the key, so an explicit
+    /// value in the `text_config` always wins. `sliding_window` keeps the flat
+    /// default; it is only read for layers whose `layer_types` entry is
+    /// `sliding_attention`, which step3p7 checkpoints set explicitly.
+    pub fn from_nested_text_config(text_config: &serde_json::Value) -> Result<Self, String> {
+        let mut obj = text_config
+            .as_object()
+            .cloned()
+            .ok_or_else(|| "step3p7 text_config must be a JSON object".to_string())?;
+
+        obj.entry("use_head_wise_attn_gate".to_string())
+            .or_insert(serde_json::Value::Bool(false));
+        obj.entry("moe_router_scaling_factor".to_string())
+            .or_insert_with(|| serde_json::json!(1.0));
+
+        let mut config: Self = serde_json::from_value(serde_json::Value::Object(obj))
+            .map_err(|e| format!("Failed to parse step3p7 text_config: {e}"))?;
+        config.moe_layers_fallback = MoeLayersFallback::Step3p7;
+        Ok(config)
+    }
+
+    /// Resolve eos token ids for a step3p7 checkpoint: prefer the top-level
+    /// `eos_token_id` (int or list), then `text_config.eos_token_id`, then the
+    /// flat `[2]` last resort.
+    pub fn resolve_step3p7_eos_token_ids(full_config: &serde_json::Value) -> Vec<i32> {
+        if full_config.get("eos_token_id").is_some() {
+            return parse_eos_token_ids(full_config);
+        }
+        if let Some(text_config) = full_config.get("text_config")
+            && text_config.get("eos_token_id").is_some()
+        {
+            return parse_eos_token_ids(text_config);
+        }
+        vec![2]
     }
 }
 
@@ -944,10 +1016,17 @@ impl Step3p5Model {
     fn forward_with_caches(
         &self,
         input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
         caches: &mut [Cache],
         _mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
-        let mut h = self.embed_tokens.forward(input_ids);
+        // The step3p7 VLM wrapper supplies pre-merged `(batch, seq, hidden)`
+        // embeddings on prefill; text-only decode falls back to the token
+        // embedding table. `input_ids` still supplies the sequence geometry.
+        let mut h = match input_embeddings {
+            Some(embeds) => mlxcel_core::copy(embeds),
+            None => self.embed_tokens.forward(input_ids),
+        };
 
         let shape = mlxcel_core::array_shape(&h);
         let seq_len = shape[1] as i32;
@@ -989,6 +1068,26 @@ impl Step3p5Model {
         self.lm_head.forward(&h)
     }
 
+    /// Forward pass from pre-merged `(batch, seq, hidden)` embeddings, reusing
+    /// the internal per-layer caches (mirrors `LanguageModel::forward`). Used by
+    /// the step3p7 VLM wrapper to feed vision-merged embeddings at prefill.
+    /// `input_ids` supplies the sequence geometry only.
+    pub fn forward_with_embeddings_internal(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        let mut internal_caches = self.internal_caches.borrow_mut();
+        self.forward_with_caches(input_ids, input_embeddings, &mut internal_caches, mask)
+    }
+
+    /// Look up the token embedding table (exposed for the VLM wrapper's
+    /// text-row embeddings before vision-feature scatter).
+    pub fn get_embed_tokens(&self, input_ids: &MlxArray) -> UniquePtr<MlxArray> {
+        self.embed_tokens.forward(input_ids)
+    }
+
     pub fn load<P: AsRef<Path>>(model_dir: P) -> Result<(Self, Step3p5Config), String> {
         let model_dir = model_dir.as_ref();
 
@@ -1012,7 +1111,7 @@ impl Step3p5Model {
         Ok((model, config))
     }
 
-    fn sanitize_weights(mut weights: WeightMap, config: &Step3p5Config) -> WeightMap {
+    pub(crate) fn sanitize_weights(mut weights: WeightMap, config: &Step3p5Config) -> WeightMap {
         let remappings = [
             (".moe.gate_proj.", ".mlp.switch_mlp.gate_proj."),
             (".moe.up_proj.", ".mlp.switch_mlp.up_proj."),
@@ -1130,7 +1229,21 @@ impl LanguageModel for Step3p5Model {
         mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
         let mut internal_caches = self.internal_caches.borrow_mut();
-        self.forward_with_caches(input_ids, &mut internal_caches, mask)
+        self.forward_with_caches(input_ids, None, &mut internal_caches, mask)
+    }
+
+    fn forward_with_embeddings(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        _caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        self.forward_with_embeddings_internal(input_ids, input_embeddings, mask)
+    }
+
+    fn embed_tokens(&self, input_ids: &MlxArray) -> Option<UniquePtr<MlxArray>> {
+        Some(self.get_embed_tokens(input_ids))
     }
 
     fn make_caches(&self) -> Vec<KVCache> {

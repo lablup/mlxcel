@@ -43,6 +43,7 @@ pub mod phi4mm;
 pub mod qwen2_vl;
 pub mod siglip;
 pub mod smolvlm;
+pub mod step3p7;
 pub mod youtu_vl;
 
 use mlxcel_core::{MlxArray, UniquePtr};

@@ -222,6 +222,7 @@ macro_rules! for_each_model_registration {
             LongcatFlash => { kind: Text, directory: Nonstandard, weight: Some(WeightLoadRoute::Special), adapter: None };
             LongcatFlashNgram => { kind: Text, directory: Nonstandard, weight: Some(WeightLoadRoute::Special), adapter: None };
             Step3p5 => { kind: Text, directory: ConfigBacked, weight: Some(WeightLoadRoute::ConfigBacked), adapter: None, config_backed: { dir_loader: models::Step3p5Model::load, args: models::step3p5::Step3p5Config, weight_builder: models::Step3p5Model::from_weights, wrap: LoadedModel::Step3p5 } };
+            Step3p7 => { kind: Vlm, directory: Vlm, weight: None, adapter: Some("Step-3.7 cannot be loaded with LoRA adapters yet") };
             Rwkv7 => { kind: Text, directory: Nonstandard, weight: Some(WeightLoadRoute::Special), adapter: None };
             RecurrentGemma => { kind: Text, directory: Nonstandard, weight: Some(WeightLoadRoute::Special), adapter: None };
             Whisper => { kind: Text, directory: Nonstandard, weight: None, adapter: Some("Whisper ASR checkpoints are served through the /v1/audio/* endpoints, not text generation or adapter loading") };

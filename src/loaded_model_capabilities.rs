@@ -46,6 +46,8 @@ pub enum VlmRuntimeRef<'a> {
     NemotronHNanoOmni(&'a vision::NemotronHNanoOmniVlModel),
     /// PaddleOCR-VL runtime (NaViT vision + ERNIE-4.5 MRoPE text).
     PaddleOcr(&'a vision::PaddleOcrVlModel),
+    /// Step-3.7 runtime (perception_encoder ViT + Step-3.5 MoE text).
+    Step3p7(&'a vision::Step3p7VlModel),
     DotsOcr(&'a vision::DotsOcrVlModel),
     /// Youtu-VL runtime.
     YoutuVL(&'a vision::YoutuVLModel),
@@ -160,6 +162,7 @@ impl LoadedModel {
             Self::GlmOcr(model) => Some(VlmRuntimeRef::Qwen(model)),
             Self::Qwen35VLM(model) | Self::Qwen35MoeVLM(model) => Some(VlmRuntimeRef::Qwen(model)),
             Self::PaddleOcrVL(model) => Some(VlmRuntimeRef::PaddleOcr(model)),
+            Self::Step3p7VL(model) => Some(VlmRuntimeRef::Step3p7(model)),
             Self::DotsOcrVL(model) => Some(VlmRuntimeRef::DotsOcr(model)),
             Self::MiniCPMOVLM(model) => Some(VlmRuntimeRef::MiniCPMO(model)),
             Self::MiniCPMV46VLM(model) => Some(VlmRuntimeRef::MiniCPMV46(model)),

@@ -51,6 +51,7 @@ pub mod phi4_siglip_prompt;
 pub mod phi4mm_prompt;
 pub mod qwen_vl;
 pub mod smolvlm_prompt;
+pub mod step3p7_prompt;
 pub mod video;
 pub mod vlm_prompt;
 pub mod vlm_runtime;
