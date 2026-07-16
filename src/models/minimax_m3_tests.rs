@@ -18,10 +18,11 @@
 //! `text_config` parsing and the derived layer plan, the sanitizer's prefix
 //! rewrite / vision-skip against verbatim checkpoint keys, the MoE
 //! `block_sparse_moe` Mixtral (w1/w2/w3) layout with a separate shared expert,
-//! the MQA block-sparse indexer shapes, dense-layer index absence, the sigmoid
-//! router's bias-affects-selection-only invariant, partial RoPE, per-head Q/K
-//! norm, and the block-sparse indexer degeneration property. Run serially
-//! (`--test-threads=1`); the MLX ops touch the device.
+//! the MQA block-sparse indexer shapes, dense-layer index absence, the
+//! zero-`sparse_block_size`/zero-`sparse_topk_blocks` load-time rejection, the
+//! sigmoid router's bias-affects-selection-only invariant, partial RoPE,
+//! per-head Q/K norm, and the block-sparse indexer degeneration property. Run
+//! serially (`--test-threads=1`); the MLX ops touch the device.
 
 use super::indexer::{BlockSparseIndexer, build_block_drop_mask};
 use super::moe::{MoeBlock, route};
@@ -344,6 +345,54 @@ fn indexer_absent_on_dense_layer_returns_none() {
     let weights = WeightMap::new();
     let indexer = BlockSparseIndexer::load(&weights, &args, sparse, "attn").expect("load ok");
     assert!(indexer.is_none());
+}
+
+#[test]
+fn indexer_load_rejects_zero_sparse_block_size_or_topk_blocks() {
+    // A zero `sparse_block_size` divides by zero computing `num_blocks` in
+    // `build_block_drop_mask`; a zero `sparse_topk_blocks` reaches
+    // `argpartition` with `kth = -1`. Both must fail cleanly at load time
+    // (`SparseAttentionConfig::validate`) rather than corrupt the forward pass.
+    let mut args = tiny_args();
+    let hidden = args.hidden_size as i32;
+    let mut weights = WeightMap::new();
+    // Only the q-projection key needs to exist to reach validation; load()
+    // checks the config before the weight-shape checks.
+    weights.insert(
+        "attn.index_q_proj.weight".into(),
+        filled(&[4 * 128, hidden], 0.01),
+    );
+
+    // `BlockSparseIndexer` does not derive `Debug` (see its definition), so
+    // `Result::expect_err`/`unwrap_err` cannot be used here; match instead.
+    args.sparse_attention_config
+        .as_mut()
+        .unwrap()
+        .sparse_block_size = 0;
+    let sparse = args.sparse_attention_config.as_ref().unwrap();
+    let err = match BlockSparseIndexer::load(&weights, &args, sparse, "attn") {
+        Err(e) => e,
+        Ok(_) => panic!("zero sparse_block_size must be rejected"),
+    };
+    assert!(err.contains("sparse_block_size"), "unexpected error: {err}");
+
+    args.sparse_attention_config
+        .as_mut()
+        .unwrap()
+        .sparse_block_size = 4;
+    args.sparse_attention_config
+        .as_mut()
+        .unwrap()
+        .sparse_topk_blocks = 0;
+    let sparse = args.sparse_attention_config.as_ref().unwrap();
+    let err = match BlockSparseIndexer::load(&weights, &args, sparse, "attn") {
+        Err(e) => e,
+        Ok(_) => panic!("zero sparse_topk_blocks must be rejected"),
+    };
+    assert!(
+        err.contains("sparse_topk_blocks"),
+        "unexpected error: {err}"
+    );
 }
 
 #[test]

@@ -234,3 +234,34 @@ impl ModelArgs {
         }
     }
 }
+
+impl SparseAttentionConfig {
+    /// Reject a degenerate sparse-attention config before it reaches the
+    /// indexer math, following the `validate_quantization_scheme` precedent in
+    /// `gemma4.rs` (validate once at load time rather than guard ad hoc in the
+    /// hot path).
+    ///
+    /// `sparse_block_size == 0` would divide by zero computing `num_blocks` in
+    /// `build_block_drop_mask` and would always satisfy
+    /// `should_apply_sparse`'s `kv_len > 2 * topk_blocks * block_size` check
+    /// (degenerating it to "always sparse"); `sparse_topk_blocks == 0` would
+    /// call `argpartition` with `kth = topk_blocks - 1 = -1`, an invalid
+    /// partition index.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.sparse_block_size == 0 {
+            return Err(
+                "minimax_m3: sparse_attention_config.sparse_block_size must be non-zero \
+                 (zero divides by zero when computing the block-sparse mask)"
+                    .to_string(),
+            );
+        }
+        if self.sparse_topk_blocks == 0 {
+            return Err(
+                "minimax_m3: sparse_attention_config.sparse_topk_blocks must be non-zero \
+                 (zero is an invalid argpartition kth index)"
+                    .to_string(),
+            );
+        }
+        Ok(())
+    }
+}

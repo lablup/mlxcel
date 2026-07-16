@@ -79,7 +79,8 @@ impl BlockSparseIndexer {
     /// Load the indexer for `{attn_prefix}.{index_q_proj,index_k_proj,...}`.
     /// Returns `Ok(None)` when the checkpoint carries no index weights (dense
     /// fallback preserved), when the sparse config is absent, or when
-    /// [`DENSE_FALLBACK_ENV`] is set.
+    /// [`DENSE_FALLBACK_ENV`] is set. Returns `Err` when `sparse` is
+    /// degenerate (see [`SparseAttentionConfig::validate`]).
     ///
     /// The single-head index key rides on the regular K buffer (head-axis
     /// concat), which requires `sparse_index_dim == head_dim`; when they differ
@@ -97,6 +98,10 @@ impl BlockSparseIndexer {
         if !weights.contains_key(&q_key) {
             return Ok(None);
         }
+        // Reject a degenerate `sparse_block_size`/`sparse_topk_blocks` here,
+        // once, instead of guarding the masking hot path (`should_apply_sparse`,
+        // `build_block_drop_mask`) on every call.
+        sparse.validate()?;
 
         let n_query_heads = sparse.sparse_num_index_heads as i32;
         let index_dim = sparse.sparse_index_dim as i32;
