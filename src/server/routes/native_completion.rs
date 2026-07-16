@@ -259,6 +259,11 @@ fn build_native_generate_options(
             dry_allowed_length: request.dry_allowed_length,
             dry_penalty_last_n: request.dry_penalty_last_n,
             dry_sequence_breakers: request.dry_sequence_breakers.clone(),
+            // The native `/completion` endpoint has no per-request XTC
+            // fields (llama-server's `/completion` schema does not define
+            // them), so XTC always resolves to the disabled baseline here.
+            xtc_probability: None,
+            xtc_threshold: None,
             stop_sequences: request.stop.clone(),
             priority: RequestPriority::default(),
             // the caller fills this from the validated request

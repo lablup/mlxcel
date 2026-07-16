@@ -814,6 +814,10 @@ fn build_cli_sampling_config(args: &GenerateArgs, stop_token_ids: Vec<i32>) -> S
         dry_sequence_breakers: Vec::new(),
         frequency_penalty: 0.0,
         presence_penalty: 0.0,
+        // XTC is not yet exposed as a CLI flag; the CLI generation path
+        // keeps it disabled.
+        xtc_probability: 0.0,
+        xtc_threshold: 0.1,
         stop_token_ids,
     })
 }
@@ -1507,6 +1511,9 @@ fn chat_options_from_args(args: &GenerateArgs) -> Result<crate::commands::ChatOp
         dry_sequence_breakers: Vec::new(),
         frequency_penalty: 0.0,
         presence_penalty: 0.0,
+        // XTC is not yet exposed as a CLI flag; the REPL keeps it disabled.
+        xtc_probability: 0.0,
+        xtc_threshold: 0.1,
         stop_token_ids: Vec::new(),
     };
 

@@ -369,6 +369,17 @@ pub struct BatchScheduler {
     /// keeps the enqueue path zero-cost.
     model_output_suppressed: Vec<i32>,
 
+    /// Tokenizer newline token id(s), resolved once at worker startup.
+    ///
+    /// Part of the XTC (Exclude Top Choices) special-token allowlist: at
+    /// [`Self::enqueue_request`] time this is combined with the per-request
+    /// merged end-of-sequence set and installed on
+    /// `sampling.xtc_special_token_ids` so the filter can never remove a
+    /// token needed to end a line or the sequence. Empty for tokenizers
+    /// whose newline does not resolve (unlikely, but not fatal); the enqueue
+    /// path only spends the merge cost when `sampling.xtc_probability > 0.0`.
+    xtc_newline_token_ids: Vec<i32>,
+
     // -- — thinking-token budget --
     /// Server-wide default thinking-token budget. `None` means unrestricted.
     /// Per-request `thinking_budget_tokens` overrides this at enqueue time.
@@ -1066,6 +1077,7 @@ impl BatchScheduler {
             )),
             token_bias: TokenBiasMap::default(),
             model_output_suppressed,
+            xtc_newline_token_ids: Vec::new(),
             reasoning_budget: None,
             thinking_token_ids: None,
             prompt_cache: None,
@@ -1411,6 +1423,18 @@ impl BatchScheduler {
     /// Returns a reference to the cached token-bias map (for tests).
     pub fn token_bias(&self) -> &TokenBiasMap {
         &self.token_bias
+    }
+
+    /// Attach the tokenizer's newline token id(s), resolved once at worker
+    /// startup, for the XTC special-token allowlist.
+    ///
+    /// Cached for the scheduler's lifetime and combined with each request's
+    /// merged end-of-sequence set at enqueue time (see
+    /// [`Self::enqueue_request`]). An empty list is a no-op — it simply
+    /// contributes nothing to the allowlist.
+    pub fn with_xtc_newline_token_ids(mut self, ids: Vec<i32>) -> Self {
+        self.xtc_newline_token_ids = ids;
+        self
     }
 
     /// Attach the server-wide thinking-token budget and resolved
@@ -2620,6 +2644,23 @@ impl BatchScheduler {
             sampling
                 .token_bias
                 .suppress_tokens(&self.model_output_suppressed);
+        }
+
+        // XTC (Exclude Top Choices) special-token allowlist: the tokenizer's
+        // newline id(s) plus every id in this request's merged end-of-sequence
+        // set (built the same way EOS detection does during decode, see the
+        // `merged_eos_token_ids` calls in `execute_batched_decode` and the
+        // classic decode paths). Only computed when XTC is actually enabled
+        // for this request — the overwhelming majority of requests leave
+        // `xtc_probability == 0.0` and skip this entirely.
+        if sampling.xtc_probability > 0.0 {
+            let mut allowlist = self.xtc_newline_token_ids.clone();
+            for id in merged_eos_token_ids(self.model.eos_token_ids(), &sampling.stop_token_ids) {
+                if !allowlist.contains(&id) {
+                    allowlist.push(id);
+                }
+            }
+            sampling.xtc_special_token_ids = allowlist;
         }
 
         let is_multimodal = !images.is_empty() || !audio.is_empty() || !videos.is_empty();

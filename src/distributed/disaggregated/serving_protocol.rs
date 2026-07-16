@@ -274,6 +274,12 @@ pub fn sampling_from_serializable(state: &SerializableSamplingState) -> Sampling
         // prefill/decode handoff; the decode node keeps the disabled baseline.
         // Wiring it into `SerializableSamplingState` is a follow-up.
         loop_detection: Default::default(),
+        // XTC is likewise not yet part of the wire frame; the decode node
+        // keeps the disabled baseline (`xtc_probability == 0.0`) until this
+        // is wired into `SerializableSamplingState` as a follow-up.
+        xtc_probability: Default::default(),
+        xtc_threshold: Default::default(),
+        xtc_special_token_ids: Default::default(),
     }
 }
 
