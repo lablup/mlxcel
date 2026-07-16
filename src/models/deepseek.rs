@@ -830,7 +830,11 @@ impl SwitchLinear {
     /// `baidu/Unlimited-OCR`) is stacked into one `[num_experts, ...]` tensor
     /// via [`crate::models::switch_layers::stack_individual_experts`]; this
     /// fallback only runs when the pre-stacked tensor is absent, so it never
-    /// changes behavior for an already-loadable checkpoint.
+    /// changes behavior for an already-loadable checkpoint. The declared
+    /// `args.n_routed_experts` is passed through as the expected count, so a
+    /// checkpoint truncated mid-experts (missing a middle or trailing expert)
+    /// fails to load with a clear error instead of silently registering fewer
+    /// experts than the router can index.
     pub fn from_weights(
         weights: &WeightMap,
         args: &ModelArgs,
@@ -850,7 +854,11 @@ impl SwitchLinear {
 
         // Per-expert layout: stack `{root}.experts.{idx}.{proj}` tensors.
         if let Some((weight, scales, biases)) =
-            crate::models::switch_layers::stack_individual_experts(weights, prefix)
+            crate::models::switch_layers::stack_individual_experts(
+                weights,
+                prefix,
+                args.n_routed_experts,
+            )?
         {
             return Ok(Self::from_stacked_parts(weight, scales, biases, args));
         }
@@ -943,3 +951,7 @@ impl LanguageModel for DeepSeekModel {
         Some(self.embed_tokens_forward(input_ids))
     }
 }
+
+#[cfg(test)]
+#[path = "deepseek_tests.rs"]
+mod tests;

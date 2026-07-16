@@ -287,3 +287,7 @@ impl LanguageModel for UnlimitedOcrVlModel {
         false
     }
 }
+
+#[cfg(test)]
+#[path = "unlimited_ocr_tests.rs"]
+mod tests;
