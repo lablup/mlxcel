@@ -590,16 +590,29 @@ fn apply_vlm_chat_template(
     }
 
     // Build a multimodal content list:
-    // [{type: image}, ..., {type: video}, ..., {type: audio}, ...,
-    //  {type: text, text: prompt}].
+    // [{type: image}, ..., {type: video}, ..., {type: text, text: prompt},
+    //  {type: audio}, ...].
     // Video and audio items are only included when the template renders them
     // (so the marker lands inside the user turn, alongside the question,
     // instead of before it). Placing the marker in the user turn matters: a
     // video spliced before the user turn yields no grounded answer (issue
     // #164), and an audio block placed in the model turn forces an immediate
-    // EOS (issue #436). Mirrors the upstream mlx-vlm Gemma 4 processor, which
-    // adds the audio item to the user content list:
-    // https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/models/gemma4/processing_gemma4.py
+    // EOS (issue #436).
+    //
+    // Ordering (issue #797): images and video precede the prompt text, but the
+    // audio placeholder must follow it. Upstream mlx-vlm's Gemma 4 formatter
+    // (`_format_list_with_image_type`, selected by `LIST_WITH_IMAGE_TYPE_TEXT`
+    // for `gemma4` / `gemma3n`) builds the user content as
+    // `[image]*n + [text] + [audio]*n`, i.e. audio AFTER the text, and the
+    // server audio path lands the block in the same place (it splices the
+    // BOA / AUDIO / EOA run right before the user turn's closing
+    // `<end_of_turn>`, see `expand_gemma4_audio_tokens_for_server`). Rendering
+    // audio BEFORE the text fed the 12B Unified checkpoint an out-of-distribution
+    // frame that deterministically flipped it from transcription into answering
+    // the perceived content on acoustically hard clips, and diverged from the
+    // server. Keep audio last so the CLI and server render the identical audio
+    // user turn.
+    // https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/prompt_utils.py
     let emit_video = num_videos > 0 && processor.supports_video_content();
     let emit_audio = num_audios > 0 && processor.supports_audio_content();
     let mut content_parts: Vec<serde_json::Value> = Vec::new();
@@ -611,12 +624,12 @@ fn apply_vlm_chat_template(
             content_parts.push(serde_json::json!({"type": "video"}));
         }
     }
+    content_parts.push(serde_json::json!({"type": "text", "text": user_prompt}));
     if emit_audio {
         for _ in 0..num_audios {
             content_parts.push(serde_json::json!({"type": "audio"}));
         }
     }
-    content_parts.push(serde_json::json!({"type": "text", "text": user_prompt}));
 
     let messages = serde_json::json!([{
         "role": "user",
