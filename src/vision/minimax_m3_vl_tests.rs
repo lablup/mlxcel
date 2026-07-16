@@ -19,7 +19,7 @@
 //! (`vision_config` and `text_config`), the sanitizer's vision/projector skip
 //! against verbatim checkpoint keys, the projector fold ordering
 //! (`merge^2 * projection_dim`), a tiny synthetic tower forward (patch embed ->
-//! pre_layrnorm -> CLIP layers with `cu_seqlens` + 2D vision RoPE -> two-stage
+//! pre_layrnorm -> CLIP layers with `cu_seqlens` + 3D vision RoPE -> two-stage
 //! projector), and the placeholder-count invariant against the shared Qwen-VL
 //! insertion helper. Run serially (`--test-threads=1`); the MLX ops touch the
 //! device.
@@ -144,7 +144,7 @@ fn tiny_tower_weights(cfg: &MiniMaxM3VisionConfig) -> WeightMap {
 fn tower_loads_verbatim_keys_and_emits_merged_token_shape() {
     // A single 2x2-patch-grid image (grid (1,2,2)) -> 4 patches -> 1 merged
     // token after the merge^2 fold. Exercises patch embed, pre_layrnorm, the
-    // CLIP layer (cu_seqlens attention + 2D vision RoPE), and both projector
+    // CLIP layer (cu_seqlens attention + 3D vision RoPE), and both projector
     // stages, and proves the tower resolves every verbatim key (including the
     // `pre_layrnorm` spelling).
     let cfg = tiny_vision_config();

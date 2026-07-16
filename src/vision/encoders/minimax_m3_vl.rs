@@ -28,11 +28,19 @@
 //!   a `patch_merge_mlp` that folds `spatial_merge_size^2 = 4` adjacent patches
 //!   (`linear_1` [6144, 24576] -> GELU -> `linear_2`) into the text hidden size.
 //!
-//! The tower reuses the shared Qwen2-VL vision helpers for the 2D (h, w) rotary
-//! embedding and per-image `cu_seqlens` variable-length attention, matching the
-//! `image_grid_thw` packing emitted by the processor. Video (`grid_t > 1`) is
-//! out of scope for this port; the temporal axis of the rope reduces to the
-//! well-tested (h, w) form for images (`grid_t == 1`).
+//! The tower reuses the shared Qwen2-VL `cu_seqlens` variable-length attention
+//! and the frequency-table / `apply_rotary_pos_emb_vision` helpers, but drives
+//! them with a genuine 3D (t, h, w) vision RoPE that matches the reference
+//! `MiniMaxVLVisionTransformer`. The head dimension is split into three equal
+//! axis sections (t, h, w) plus a trailing unrotated tail: `axis_dim =
+//! 2 * ((head_dim / 2) / 3 / 2)` head dims per axis, `rot_dim = 3 * axis_dim`
+//! head dims rotated, and the remaining `head_dim - rot_dim` trailing dims pass
+//! through untouched (2 dims for head_dim 80, 4 for the reduced test head_dim
+//! 64). For images (`grid_t == 1`) the temporal section is inert (all-zero t
+//! ids), but it still reserves its slice of the head dimension, so the split
+//! cannot collapse to the 2D (h, w) form. Video (`grid_t > 1`) is out of scope
+//! for this port. The `image_grid_thw` packing emitted by the processor drives
+//! both the position ids and the per-image `cu_seqlens`.
 //!
 //! The whole tower runs in f32: the checkpoint stores the vision weights as
 //! f32/bf16 non-quantized, and running the tower uniformly in f32 avoids
@@ -151,6 +159,26 @@ impl MiniMaxM3VisionConfig {
     }
 }
 
+/// Per-axis rotary width of the 3D vision RoPE, shared by the t/h/w sections.
+///
+/// Matches the reference `MiniMaxVLVisionTransformer`: `rope_dims` rounds the
+/// head dim down to an even width, then each of the three axis sections gets an
+/// even slice `axis_dim = 2 * ((rope_dims / 3) / 2)` (integer division). The
+/// frequency table therefore holds `axis_dim / 2` entries per axis. head_dim 80
+/// -> axis_dim 26; head_dim 64 -> axis_dim 20.
+fn rope_axis_dim(head_dim: i32) -> i32 {
+    let rope_dims = 2 * (head_dim / 2);
+    2 * ((rope_dims / 3) / 2)
+}
+
+/// Number of head dims actually rotated by the 3D vision RoPE (`3 * axis_dim`).
+/// The remaining `head_dim - rot_dim` trailing dims pass through unrotated.
+/// head_dim 80 -> rot_dim 78 (2 pass-through); head_dim 64 -> rot_dim 60 (4
+/// pass-through).
+fn rope_rot_dim(head_dim: i32) -> i32 {
+    3 * rope_axis_dim(head_dim)
+}
+
 // ============================================================================
 // Plain f32 linear / layernorm helpers
 // ============================================================================
@@ -262,6 +290,9 @@ struct VisionAttention {
     out_proj: VisionLinear,
     num_heads: i32,
     head_dim: i32,
+    /// Leading head dims rotated by the 3D vision RoPE (`3 * axis_dim`); the
+    /// trailing `head_dim - rot_dim` dims pass through unrotated.
+    rot_dim: i32,
     scale: f32,
 }
 
@@ -279,6 +310,7 @@ impl VisionAttention {
             out_proj: VisionLinear::load(weights, &format!("{}.out_proj", prefix))?,
             num_heads: config.num_attention_heads as i32,
             head_dim,
+            rot_dim: rope_rot_dim(head_dim),
             scale: (head_dim as f32).powf(-0.5),
         })
     }
@@ -302,8 +334,25 @@ impl VisionAttention {
         let k = reshape_heads(self.k_proj.forward(x));
         let v = reshape_heads(self.v_proj.forward(x));
 
-        let q = apply_rotary_pos_emb_vision(&q, rotary_pos_emb);
-        let k = apply_rotary_pos_emb_vision(&k, rotary_pos_emb);
+        // Partial 3D vision RoPE: rotate only the leading `rot_dim` head dims
+        // (the concatenated t/h/w axis sections) and pass the trailing
+        // `head_dim - rot_dim` dims through unrotated. v is not rotated.
+        let apply_rope = |t: &MlxArray| -> UniquePtr<MlxArray> {
+            if self.rot_dim >= self.head_dim {
+                return apply_rotary_pos_emb_vision(t, rotary_pos_emb);
+            }
+            let rot =
+                mlxcel_core::slice(t, &[0, 0, 0], &[seq_length, self.num_heads, self.rot_dim]);
+            let pass = mlxcel_core::slice(
+                t,
+                &[0, 0, self.rot_dim],
+                &[seq_length, self.num_heads, self.head_dim],
+            );
+            let rot = apply_rotary_pos_emb_vision(&rot, rotary_pos_emb);
+            mlxcel_core::concatenate(&rot, &pass, 2)
+        };
+        let q = apply_rope(&q);
+        let k = apply_rope(&k);
 
         // [seq, heads, head_dim] -> [1, heads, seq, head_dim]
         let to_bhsd = |t: &MlxArray| {
@@ -505,9 +554,12 @@ impl MiniMaxM3VisionEncoder {
             config.layer_norm_eps,
         )?;
 
-        // The vision rope table covers head_dim/2 frequencies (h and w halves),
-        // matching the shared Qwen2-VL helper.
-        let rotary_pos_emb = VisionRotaryEmbedding::new(config.head_dim() / 2);
+        // The 3D vision RoPE splits the head dim into three equal (t, h, w) axis
+        // sections plus an unrotated tail. All three axes share one frequency
+        // table of `axis_dim / 2` entries (their widths are identical), so a
+        // single `VisionRotaryEmbedding::new(axis_dim)` covers t, h, and w.
+        let axis_dim = rope_axis_dim(config.head_dim() as i32);
+        let rotary_pos_emb = VisionRotaryEmbedding::new(axis_dim as usize);
 
         let mut layers = Vec::with_capacity(config.num_hidden_layers);
         for i in 0..config.num_hidden_layers {
@@ -537,15 +589,19 @@ impl MiniMaxM3VisionEncoder {
         })
     }
 
-    /// 2D (h, w) rotary position embeddings, merge-grouped to match the
-    /// processor patch order. Identical construction to the Qwen2-VL tower.
+    /// 3D (t, h, w) rotary position embeddings, merge-grouped to match the
+    /// processor patch order. The (h, w) grouping is identical to the Qwen2-VL
+    /// tower; the temporal ids repeat each frame index over its `h * w` tokens
+    /// and are all-zero for images (`grid_t == 1`). Emits
+    /// `[total_tokens, 3 * (axis_dim / 2)]` (the t, h, w frequency sections
+    /// concatenated) for the partial rotation in `VisionAttention::forward`.
     fn rot_pos_emb(&self, grid_thw: &[(i32, i32, i32)]) -> UniquePtr<MlxArray> {
         let mut all_pos_ids: Vec<UniquePtr<MlxArray>> = Vec::new();
         let mut max_grid_dim: i32 = 0;
         let merge = self.spatial_merge_size as i32;
 
         for &(t, h, w) in grid_thw {
-            max_grid_dim = max_grid_dim.max(h).max(w);
+            max_grid_dim = max_grid_dim.max(t).max(h).max(w);
 
             let h_arange = mlxcel_core::arange_i32(0, h, 1);
             let h_col = mlxcel_core::reshape(&h_arange, &[h, 1]);
@@ -561,9 +617,20 @@ impl MiniMaxM3VisionEncoder {
             let wpos = mlxcel_core::transpose_axes(&wpos, &[0, 2, 1, 3]);
             let wpos = mlxcel_core::flatten(&wpos);
 
-            let stacked = mlxcel_core::stack_owned(&[hpos, wpos], -1);
-            let tiled = mlxcel_core::tile(&stacked, &[t, 1]);
-            all_pos_ids.push(tiled);
+            // Stack the spatial (h, w) ids and tile them across the t frames.
+            let hw = mlxcel_core::stack_owned(&[hpos, wpos], -1);
+            let hw = mlxcel_core::tile(&hw, &[t, 1]);
+
+            // Temporal ids: each frame index repeated over its h * w tokens
+            // (all-zero for images, where grid_t == 1).
+            let t_arange = mlxcel_core::arange_i32(0, t, 1);
+            let t_col = mlxcel_core::reshape(&t_arange, &[t, 1]);
+            let tpos = mlxcel_core::repeat(&t_col, h * w, 1);
+            let tpos = mlxcel_core::reshape(&tpos, &[t * h * w, 1]);
+
+            // Concatenate the (t, h, w) columns in that order -> [t*h*w, 3].
+            let stacked = mlxcel_core::concatenate(&tpos, &hw, 1);
+            all_pos_ids.push(stacked);
         }
 
         let pos_ids = if all_pos_ids.len() == 1 {
@@ -579,8 +646,10 @@ impl MiniMaxM3VisionEncoder {
         let total_tokens = total_shape[0];
         let freq_shape = mlxcel_core::array_shape(&all_freqs);
         let half_dim = freq_shape[1];
-        let all_freqs = mlxcel_core::reshape(&all_freqs, &[total_tokens, 2, half_dim]);
-        mlxcel_core::reshape(&all_freqs, &[total_tokens, 2 * half_dim])
+        // [total*3, axis_dim/2] -> [total, 3, axis_dim/2] -> [total, 3*axis_dim/2],
+        // concatenating the t, h, w frequency sections in that order.
+        let all_freqs = mlxcel_core::reshape(&all_freqs, &[total_tokens, 3, half_dim]);
+        mlxcel_core::reshape(&all_freqs, &[total_tokens, 3 * half_dim])
     }
 
     /// Per-image `cu_seqlens` (full attention over each image's patches):

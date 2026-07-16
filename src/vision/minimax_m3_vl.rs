@@ -122,8 +122,16 @@ impl LanguageModel for MiniMaxM3VlModel {
     }
 
     fn output_suppressed_token_ids(&self) -> Vec<i32> {
-        // The image placeholder id must never be sampled during decode.
-        vec![self.image_token_id]
+        // Image/video placeholders and their vision framing markers are
+        // input-alignment ids and must never be sampled during decode. Video
+        // reuses the image vision_start/vision_end framing in MiniMax-M3-VL, so
+        // there are no separate video framing tokens.
+        vec![
+            self.image_token_id,
+            self.video_token_id,
+            self.vision_start_token_id,
+            self.vision_end_token_id,
+        ]
     }
 }
 
