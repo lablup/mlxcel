@@ -272,6 +272,15 @@ impl LanguageModel for UnlimitedOcrVlModel {
         false
     }
 
+    fn supports_chunked_prefill(&self) -> bool {
+        // The ring cache infers the prefill -> decode boundary from the first
+        // single-token forward. A chunked prefill whose final chunk is one
+        // token would misclassify that prompt token as the first decode token
+        // and let the ring evict it, so force single-pass prefill. The OCR
+        // image path already prefills in a single embeddings pass.
+        false
+    }
+
     fn supports_batching(&self) -> bool {
         // Internal ring caches are not compatible with per-sequence KV cache
         // isolation used by continuous batching.
