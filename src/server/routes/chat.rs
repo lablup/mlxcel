@@ -970,7 +970,7 @@ fn request_has_video_blocks(request: &ChatCompletionRequest) -> bool {
 /// server default then applies. Returns `Err` with a client-facing message
 /// so the caller can surface a 400 `invalid_request_error` before any
 /// generation work begins.
-fn validate_xtc_params(
+pub(crate) fn validate_xtc_params(
     xtc_threshold: Option<f32>,
     xtc_probability: Option<f32>,
 ) -> Result<(), &'static str> {

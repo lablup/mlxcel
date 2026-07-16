@@ -482,13 +482,15 @@ impl FusedSampleParams {
 /// The fast path applies one set of scalar parameters across the whole
 /// `[B, vocab]` batch in a single [`ffi::fused_sample`] call. It cannot
 /// represent per-row history-based penalties (repetition / DRY / frequency /
-/// presence) or a non-empty token bias, both of which require per-row logit
-/// edits before sampling. When this returns `false`, the caller must fall
-/// back to the per-row sampler.
+/// presence), a non-empty token bias, or XTC (`xtc_probability > 0.0`), all of
+/// which require per-row logit edits before sampling. XTC, like a non-empty
+/// token bias, is a per-row logit edit that must run through the per-row
+/// sampler, so it disqualifies the fused fast path. When this returns `false`,
+/// the caller must fall back to the per-row sampler.
 ///
 /// Used by: `BatchScheduler::execute_batched_decode` fast-path gate
 pub fn config_supports_fused_batch(config: &SamplingConfig) -> bool {
-    !config.needs_token_history() && config.token_bias.is_empty()
+    !config.needs_token_history() && config.token_bias.is_empty() && config.xtc_probability <= 0.0
 }
 
 /// Per-row eligibility for the batched fused fast path.
@@ -1460,6 +1462,15 @@ mod tests {
             ..Default::default()
         };
         assert!(!config_supports_fused_batch(&dry));
+    }
+
+    #[test]
+    fn config_supports_fused_batch_false_for_xtc() {
+        let xtc = SamplingConfig {
+            xtc_probability: 1.0,
+            ..Default::default()
+        };
+        assert!(!config_supports_fused_batch(&xtc));
     }
 
     #[test]

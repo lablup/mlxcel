@@ -60,6 +60,7 @@ use crate::server::types::responses_stream::ResponseStreamEvent;
 
 use super::chat::{
     build_generate_options, build_prompt_cache_request_context, parse_priority_header,
+    validate_xtc_params,
 };
 
 /// POST /v1/responses
@@ -77,6 +78,15 @@ pub async fn create_response(
         Ok(t) => t,
         Err(err) => return translate_error_to_response(err).into_response(),
     };
+
+    // Validate XTC (Exclude Top Choices) sampling parameter ranges before any
+    // generation work begins.
+    if let Err(message) = validate_xtc_params(
+        translated.chat_request.params.xtc_threshold,
+        translated.chat_request.params.xtc_probability,
+    ) {
+        return ErrorResponse::new(message, "invalid_request_error").into_response();
+    }
 
     // Build the structured-output constraint (json_schema) up front.
     let structured = {
@@ -993,5 +1003,56 @@ mod tests {
         let (visible, reasoning) = split_reasoning("just text", None);
         assert_eq!(visible, "just text");
         assert!(reasoning.is_none());
+    }
+
+    // -- XTC (Exclude Top Choices) request validation on /v1/responses --
+    //
+    // `CreateResponseRequest` flattens `SamplingParams`, and the translator
+    // forwards it into `translated.chat_request.params`. These tests walk the
+    // same translate-then-validate path as `create_response` and confirm the
+    // shared `validate_xtc_params` gate rejects out-of-range values.
+
+    #[test]
+    fn responses_rejects_out_of_range_xtc_probability() {
+        let request: CreateResponseRequest =
+            serde_json::from_str(r#"{"model":"m","input":"hi","xtc_probability":2.0}"#).unwrap();
+        let translated = responses_request_to_chat(&request, None, None).unwrap();
+        assert_eq!(
+            validate_xtc_params(
+                translated.chat_request.params.xtc_threshold,
+                translated.chat_request.params.xtc_probability,
+            ),
+            Err("xtc_probability must be between 0.0 and 1.0")
+        );
+    }
+
+    #[test]
+    fn responses_rejects_out_of_range_xtc_threshold() {
+        let request: CreateResponseRequest =
+            serde_json::from_str(r#"{"model":"m","input":"hi","xtc_threshold":-0.1}"#).unwrap();
+        let translated = responses_request_to_chat(&request, None, None).unwrap();
+        assert_eq!(
+            validate_xtc_params(
+                translated.chat_request.params.xtc_threshold,
+                translated.chat_request.params.xtc_probability,
+            ),
+            Err("xtc_threshold must be between 0.0 and 0.5")
+        );
+    }
+
+    #[test]
+    fn responses_accepts_in_range_xtc() {
+        let request: CreateResponseRequest = serde_json::from_str(
+            r#"{"model":"m","input":"hi","xtc_probability":0.5,"xtc_threshold":0.1}"#,
+        )
+        .unwrap();
+        let translated = responses_request_to_chat(&request, None, None).unwrap();
+        assert!(
+            validate_xtc_params(
+                translated.chat_request.params.xtc_threshold,
+                translated.chat_request.params.xtc_probability,
+            )
+            .is_ok()
+        );
     }
 }
