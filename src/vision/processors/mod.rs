@@ -30,6 +30,7 @@ pub mod internvl;
 pub mod kimi_vl;
 pub mod lfm2_vl;
 pub mod minicpmo;
+pub mod minimax_m3;
 pub mod mllama;
 pub mod molmo;
 pub mod molmo2;

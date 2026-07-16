@@ -67,6 +67,8 @@ mod kimi_vl_loader;
 mod lfm2_vl;
 #[path = "vlm_llava.rs"]
 mod llava;
+#[path = "vlm_minimax_m3_vl.rs"]
+mod minimax_m3_vl;
 #[path = "vlm_mllama.rs"]
 mod mllama;
 #[path = "vlm_nemotron_h_nano_omni.rs"]
@@ -103,6 +105,7 @@ pub(crate) use internvl::load_internvl_vlm;
 pub(crate) use kimi_vl_loader::load_kimi_vl_vlm;
 pub(crate) use lfm2_vl::load_lfm2_vl;
 pub(crate) use llava::{load_llava_bunny_vlm, load_llava_vlm};
+pub(crate) use minimax_m3_vl::load_minimax_m3_vl;
 pub(crate) use mllama::load_mllama_vlm;
 pub(crate) use nemotron_h_nano_omni::load_nemotron_h_nano_omni_vlm;
 pub(crate) use paddleocr::load_paddleocr_vl;

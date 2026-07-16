@@ -72,6 +72,8 @@ pub enum VlmRuntimeRef<'a> {
     Ernie45MoeVl(&'a vision::ernie4_5_moe_vl::Ernie45MoeVlModel),
     Qwen3OmniMoe(&'a vision::qwen3_omni_moe::Qwen3OmniMoeModel),
     HunyuanVl(&'a vision::hunyuan_vl::HunyuanVlModel),
+    /// MiniMax-M3-VL runtime (CLIP ViT + MiniMax-M3 hybrid dense/MoE text).
+    MiniMaxM3Vl(&'a vision::MiniMaxM3VlModel),
     /// Pixtral / Mistral3 dynamic aspect-ratio runtime. Shares the generic
     /// `VisionModule` storage but preserves each image's aspect ratio and emits
     /// `[IMG] / [IMG_BREAK] / [IMG_END]` row structure (see `pixtral_layout`).
@@ -206,6 +208,7 @@ impl LoadedModel {
             Self::FastVLM(vlm) => Some(VlmRuntimeRef::FastVLM(&vlm.vision)),
             Self::Ernie45MoeVLM(model) => Some(VlmRuntimeRef::Ernie45MoeVl(model)),
             Self::HunyuanVLM(model) => Some(VlmRuntimeRef::HunyuanVl(model)),
+            Self::MiniMaxM3VL(model) => Some(VlmRuntimeRef::MiniMaxM3Vl(model)),
             _ => None,
         }
     }

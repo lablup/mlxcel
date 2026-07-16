@@ -487,6 +487,36 @@ where
                 preparation,
             }))
         }
+        VlmRuntimeRef::MiniMaxM3Vl(model) => {
+            // Native-resolution CLIP tower: preprocess to (pixel_values,
+            // grid_thw), expand image placeholders with the shared Qwen-VL
+            // helper (its `t*(h/merge)*(w/merge)` count and vision_start/+1
+            // framing already match MiniMax-M3-VL: start 200029, end 200030),
+            // then scatter the projected features LLaVA-style.
+            let (pixel_values, grid_thw) = model.processor.preprocess_with_grid(images);
+            let preparation = insert_qwen_vl_image_tokens(
+                prompt_tokens,
+                &grid_thw,
+                model.spatial_merge_size as usize,
+                model.vision_start_token_id,
+                model.image_token_id,
+            )
+            .map(|stats| VlmPreparationSummary::QwenVlm {
+                image_blocks: stats.image_blocks,
+                total_image_tokens: stats.total_image_tokens,
+            });
+
+            let _ = active_caches;
+            let _ = image_cache_keys;
+
+            let input_ids_arr = prompt_ids_array(prompt_tokens);
+            let embeddings = model.input_embeddings(&input_ids_arr, &pixel_values, &grid_thw);
+
+            Ok(Some(PreparedVlmEmbeddings {
+                embeddings,
+                preparation,
+            }))
+        }
         VlmRuntimeRef::MiniCPMO(minicpmo) => {
             let prepared = prepare_minicpmo_prompt_tokens(
                 prompt,

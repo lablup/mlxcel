@@ -35,6 +35,7 @@ pub mod lfm2_vl;
 pub mod llama4;
 pub mod minicpmo;
 pub mod minicpmv4_6;
+pub mod minimax_m3_vl;
 pub mod mllama;
 pub mod molmo;
 pub mod molmo2;

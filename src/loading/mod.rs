@@ -186,6 +186,7 @@ fn try_load_vlm_model_from_dir(
         ModelType::FastVLM => Some(load_fastvlm_vlm(model_path)?),
         ModelType::Ernie45MoeVLM => Some(load_ernie4_5_moe_vlm(model_path)?),
         ModelType::HunyuanVLM => Some(load_hunyuan_vlm(model_path)?),
+        ModelType::MiniMaxM3VL => Some(load_minimax_m3_vl(model_path)?),
         ModelType::LlavaBunnyVLM => Some(load_llava_bunny_vlm(model_path)?),
         ModelType::AyaVisionVLM => Some(load_aya_vision_vlm(model_path)?),
         ModelType::PaliGemmaVLM => Some(load_paligemma_vlm(model_path)?),

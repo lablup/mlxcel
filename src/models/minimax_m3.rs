@@ -167,7 +167,30 @@ impl MiniMaxM3Model {
         caches: &mut [KVCache],
         mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
-        let mut h = self.embed_tokens.forward(input_ids);
+        self.forward_with_embeddings_impl(input_ids, None, caches, mask)
+    }
+
+    /// Token embedding lookup, exposed for the VL wrapper's LLaVA-style merge
+    /// (`src/vision/minimax_m3_vl.rs`).
+    pub fn get_embed_tokens(&self, input_ids: &MlxArray) -> UniquePtr<MlxArray> {
+        self.embed_tokens.forward(input_ids)
+    }
+
+    /// Decoder forward that optionally starts from precomputed input
+    /// embeddings. When `input_embeddings` is `Some`, the embedding lookup is
+    /// skipped and the provided (already vision-merged) embeddings are decoded
+    /// directly; `input_ids` is then only used for shape/consistency by callers.
+    pub fn forward_with_embeddings_impl(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        let mut h = match input_embeddings {
+            Some(embeds) => mlxcel_core::copy(embeds),
+            None => self.embed_tokens.forward(input_ids),
+        };
 
         for (i, layer) in self.layers.iter().enumerate() {
             h = layer.forward(&h, &mut caches[i], mask);
