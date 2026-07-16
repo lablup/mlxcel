@@ -19,7 +19,7 @@
 mod detection;
 mod gemma3n_helpers;
 mod llama4_helpers;
-mod model_owned;
+pub(crate) mod model_owned;
 pub mod multimodal_placeholders;
 pub(crate) mod qwen_mrope_state;
 mod recurrent_snapshot;
@@ -268,6 +268,7 @@ pub enum ModelType {
     Granite4VisionVLM, // Granite 4 Vision (SigLIP + window-QFormer + Granite-4 hybrid)
     DeepSeekOcrVLM,    // DeepSeek-OCR (SAM + CLIP + DeepSeek MoE decoder)
     DeepSeekOcr2VLM,   // DeepSeek-OCR 2 (SAM + Qwen2 resampler + DeepSeek MoE decoder)
+    UnlimitedOcrVLM,   // Unlimited-OCR (DeepSeek-OCR stack + ring sliding decode cache)
     DeepSeekVL2,       // DeepSeek-VL2 (SigLIP + downsample MLP + DeepSeek-V2 MoE decoder)
     LlavaBunnyVLM,     // LLaVA-Bunny (SigLIP + Qwen2)
     FastVLM,           // FastVLM (FastViTHD vision + Qwen2 text, mlp2x_gelu)
@@ -464,6 +465,7 @@ pub const ALL_MODEL_TYPES: &[ModelType] = &[
     ModelType::Granite4VisionVLM,
     ModelType::DeepSeekOcrVLM,
     ModelType::DeepSeekOcr2VLM,
+    ModelType::UnlimitedOcrVLM,
     ModelType::DeepSeekVL2,
     ModelType::LlavaBunnyVLM,
     ModelType::FastVLM,
@@ -827,6 +829,10 @@ impl ModelType {
                 "DeepSeek-OCR 2 (SAM + Qwen2 resampler + DeepSeek MoE)",
                 "Other VLM",
             ),
+            ModelType::UnlimitedOcrVLM => (
+                "Unlimited-OCR (SAM + CLIP + DeepSeek MoE, ring sliding decode)",
+                "Other VLM",
+            ),
             ModelType::DeepSeekVL2 => (
                 "DeepSeek-VL2 (SigLIP + downsample MLP + DeepSeek-V2 MoE)",
                 "Other VLM",
@@ -935,6 +941,7 @@ mod metadata_tests {
             Granite4VisionVLM,
             DeepSeekOcrVLM,
             DeepSeekOcr2VLM,
+            UnlimitedOcrVLM,
             DeepSeekVL2,
             LlavaBunnyVLM,
             FastVLM,

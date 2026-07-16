@@ -119,6 +119,7 @@ macro_rules! for_each_model_registration {
             Granite4VisionVLM => { kind: Vlm, directory: Vlm, weight: None, adapter: Some("Granite 4 Vision VLM cannot be loaded with LoRA adapters yet") };
             DeepSeekOcrVLM => { kind: Vlm, directory: Vlm, weight: None, adapter: Some("DeepSeek-OCR VLM cannot be loaded with LoRA adapters yet") };
             DeepSeekOcr2VLM => { kind: Vlm, directory: Vlm, weight: None, adapter: Some("DeepSeek-OCR 2 VLM cannot be loaded with LoRA adapters yet") };
+            UnlimitedOcrVLM => { kind: Vlm, directory: Vlm, weight: None, adapter: Some("Unlimited-OCR VLM cannot be loaded with LoRA adapters yet") };
             DeepSeekVL2 => { kind: Vlm, directory: Vlm, weight: None, adapter: Some("DeepSeek-VL2 cannot be loaded with LoRA adapters yet") };
             LlavaBunnyVLM => { kind: Vlm, directory: Vlm, weight: None, adapter: Some("LLaVA VLM cannot be loaded with LoRA adapters yet") };
             FastVLM => { kind: Vlm, directory: Vlm, weight: None, adapter: Some("FastVLM cannot be loaded with LoRA adapters yet") };

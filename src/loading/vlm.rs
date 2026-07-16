@@ -91,7 +91,9 @@ mod step3p7;
 mod youtu_vl_loader;
 
 pub(crate) use deepseek_vl2::load_deepseek_vl2_vlm;
-pub(crate) use deepseekocr::{load_deepseekocr_2_vlm, load_deepseekocr_vlm};
+pub(crate) use deepseekocr::{
+    load_deepseekocr_2_vlm, load_deepseekocr_vlm, load_unlimited_ocr_vlm,
+};
 pub(crate) use dots_ocr::load_dots_ocr_vl;
 pub(crate) use ernie4_5_vl::load_ernie4_5_moe_vlm;
 pub(crate) use fastvlm::load_fastvlm_vlm;

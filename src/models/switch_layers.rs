@@ -329,7 +329,7 @@ impl SwitchLinear {
 ///
 /// Used by: Qwen2Moe (Qwen1.5-MoE / Qwen2-MoE individual-expert checkpoints),
 ///          Mixtral (`block_sparse_moe.experts.{idx}.{w1,w2,w3}` checkpoints)
-fn stack_individual_experts(
+pub(crate) fn stack_individual_experts(
     weights: &WeightMap,
     prefix: &str,
 ) -> Option<(

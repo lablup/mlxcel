@@ -276,6 +276,10 @@ fn fallback_architecture(model_type: ModelType) -> &'static str {
         ModelType::Granite4VisionVLM => "granitemoehybrid",
         ModelType::DeepSeekOcrVLM => "deepseek",
         ModelType::DeepSeekOcr2VLM => "deepseek",
+        // Unlimited-OCR's text backbone is the DeepSeek MoE decoder; TP is
+        // refused for VLM-kind models earlier, this keeps the dispatch table
+        // total.
+        ModelType::UnlimitedOcrVLM => "deepseek",
         // DeepSeek-VL2's text backbone is deepseek_v2; TP is refused for VLM-kind
         // models earlier, this keeps the dispatch table total.
         ModelType::DeepSeekVL2 => "deepseek_v2",

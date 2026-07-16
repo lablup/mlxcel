@@ -167,6 +167,12 @@ pub enum VlmPreparationSummary {
         image_blocks: usize,
         total_image_tokens: i32,
     },
+    /// Unlimited-OCR expanded the `<image>` placeholder(s) into the per-page
+    /// placeholder runs (a single `<image>` covers all pages).
+    UnlimitedOcr {
+        image_blocks: usize,
+        total_image_tokens: i32,
+    },
     /// DeepSeek-VL2 expanded each `<image>` into its per-image placeholder run.
     DeepSeekVL2 {
         image_blocks: usize,
@@ -1292,6 +1298,31 @@ where
 
             let input_ids_arr = prompt_ids_array(prompt_tokens);
             let embeddings = model.input_embeddings(&input_ids_arr, &pre);
+
+            Ok(Some(PreparedVlmEmbeddings {
+                embeddings,
+                preparation,
+            }))
+        }
+        VlmRuntimeRef::UnlimitedOcr(model) => {
+            let pre = model.inner.processor.preprocess(images);
+
+            let preparation =
+                crate::multimodal::deepseekocr_prompt::insert_unlimited_ocr_image_tokens(
+                    prompt_tokens,
+                    &pre.placeholder_counts,
+                    model.inner.image_token_id,
+                )
+                .map(|stats| VlmPreparationSummary::UnlimitedOcr {
+                    image_blocks: stats.image_blocks,
+                    total_image_tokens: stats.total_image_tokens,
+                });
+
+            let _ = active_caches;
+            let _ = image_cache_keys;
+
+            let input_ids_arr = prompt_ids_array(prompt_tokens);
+            let embeddings = model.inner.input_embeddings(&input_ids_arr, &pre);
 
             Ok(Some(PreparedVlmEmbeddings {
                 embeddings,

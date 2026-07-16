@@ -274,6 +274,15 @@ fn print_preparation_summary(summary: VlmPreparationSummary) {
                 image_blocks, total_image_tokens
             );
         }
+        VlmPreparationSummary::UnlimitedOcr {
+            image_blocks,
+            total_image_tokens,
+        } => {
+            println!(
+                "Unlimited-OCR: expanded {} image block(s) ({} total image tokens)",
+                image_blocks, total_image_tokens
+            );
+        }
         VlmPreparationSummary::DeepSeekVL2 {
             image_blocks,
             total_image_tokens,

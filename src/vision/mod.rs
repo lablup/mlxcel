@@ -81,6 +81,7 @@ pub mod qwen3_vl;
 pub mod qwen3_vl_moe;
 pub mod smolvlm;
 pub mod step3p7;
+pub mod unlimited_ocr;
 pub mod youtu_vl;
 
 // Re-export VLM model types
@@ -124,6 +125,7 @@ pub use qwen3_vl::Qwen3VLModel;
 pub use qwen3_vl_moe::Qwen3VLMoeModel;
 pub use smolvlm::SmolVLMModel;
 pub use step3p7::Step3p7VlModel;
+pub use unlimited_ocr::UnlimitedOcrVlModel;
 pub use youtu_vl::YoutuVLModel;
 
 use crate::LanguageModel;
