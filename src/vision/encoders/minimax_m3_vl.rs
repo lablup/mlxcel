@@ -166,7 +166,7 @@ impl MiniMaxM3VisionConfig {
 /// even slice `axis_dim = 2 * ((rope_dims / 3) / 2)` (integer division). The
 /// frequency table therefore holds `axis_dim / 2` entries per axis. head_dim 80
 /// -> axis_dim 26; head_dim 64 -> axis_dim 20.
-fn rope_axis_dim(head_dim: i32) -> i32 {
+pub(crate) fn rope_axis_dim(head_dim: i32) -> i32 {
     let rope_dims = 2 * (head_dim / 2);
     2 * ((rope_dims / 3) / 2)
 }
@@ -175,7 +175,7 @@ fn rope_axis_dim(head_dim: i32) -> i32 {
 /// The remaining `head_dim - rot_dim` trailing dims pass through unrotated.
 /// head_dim 80 -> rot_dim 78 (2 pass-through); head_dim 64 -> rot_dim 60 (4
 /// pass-through).
-fn rope_rot_dim(head_dim: i32) -> i32 {
+pub(crate) fn rope_rot_dim(head_dim: i32) -> i32 {
     3 * rope_axis_dim(head_dim)
 }
 
@@ -595,7 +595,12 @@ impl MiniMaxM3VisionEncoder {
     /// and are all-zero for images (`grid_t == 1`). Emits
     /// `[total_tokens, 3 * (axis_dim / 2)]` (the t, h, w frequency sections
     /// concatenated) for the partial rotation in `VisionAttention::forward`.
-    fn rot_pos_emb(&self, grid_thw: &[(i32, i32, i32)]) -> UniquePtr<MlxArray> {
+    ///
+    /// `pub(crate)` (rather than private) so the unit tests in
+    /// `vision::minimax_m3_vl_tests` can pin the emitted shape and the
+    /// all-zero temporal section for `grid_t == 1` directly, without
+    /// duplicating this method's logic.
+    pub(crate) fn rot_pos_emb(&self, grid_thw: &[(i32, i32, i32)]) -> UniquePtr<MlxArray> {
         let mut all_pos_ids: Vec<UniquePtr<MlxArray>> = Vec::new();
         let mut max_grid_dim: i32 = 0;
         let merge = self.spatial_merge_size as i32;

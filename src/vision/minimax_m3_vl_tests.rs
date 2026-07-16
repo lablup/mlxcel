@@ -20,12 +20,15 @@
 //! against verbatim checkpoint keys, the projector fold ordering
 //! (`merge^2 * projection_dim`), a tiny synthetic tower forward (patch embed ->
 //! pre_layrnorm -> CLIP layers with `cu_seqlens` + 3D vision RoPE -> two-stage
-//! projector), and the placeholder-count invariant against the shared Qwen-VL
-//! insertion helper. Run serially (`--test-threads=1`); the MLX ops touch the
-//! device.
+//! projector), the 3D vision RoPE axis/rot-dim arithmetic and the emitted
+//! `rot_pos_emb` shape with its all-zero temporal section for `grid_t == 1`,
+//! and the placeholder-count invariant against the shared Qwen-VL insertion
+//! helper. Run serially (`--test-threads=1`); the MLX ops touch the device.
 
 use crate::models::minimax_m3;
-use crate::vision::encoders::minimax_m3_vl::{MiniMaxM3VisionConfig, MiniMaxM3VisionEncoder};
+use crate::vision::encoders::minimax_m3_vl::{
+    MiniMaxM3VisionConfig, MiniMaxM3VisionEncoder, rope_axis_dim, rope_rot_dim,
+};
 use mlxcel_core::MlxArray;
 use mlxcel_core::weights::WeightMap;
 
@@ -170,6 +173,54 @@ fn tower_loads_verbatim_keys_and_emits_merged_token_shape() {
     assert!(
         reduce_max_abs(&out.hidden_states).is_finite(),
         "tower forward must be finite"
+    );
+}
+
+#[test]
+fn rope_axis_and_rot_dim_match_reference_arithmetic() {
+    // Pins the 3D vision RoPE split introduced by the review fix: axis_dim =
+    // 2 * ((head_dim / 2) / 3 / 2) head dims per (t, h, w) axis, rot_dim =
+    // 3 * axis_dim rotated, with head_dim - rot_dim trailing dims untouched.
+    // head_dim 80 is the real MiniMaxAI/MiniMax-M3 vision head_dim (hidden
+    // 1280 / 16 heads); head_dim 64 is the reduced tiny test config's
+    // (hidden 128 / 2 heads).
+    assert_eq!(rope_axis_dim(80), 26);
+    assert_eq!(rope_rot_dim(80), 78);
+    assert_eq!(rope_axis_dim(64), 20);
+    assert_eq!(rope_rot_dim(64), 60);
+
+    // rot_pos_emb must emit [total_tokens, rot_dim / 2] (the concatenated t, h,
+    // w frequency sections), and for grid_t == 1 (images) the temporal ids are
+    // all-zero, so the leading axis_dim/2 columns (the t section) must be
+    // exactly zero even though the axis still reserves its slice of head_dim.
+    let cfg = tiny_vision_config();
+    let weights = tiny_tower_weights(&cfg);
+    let encoder = MiniMaxM3VisionEncoder::from_weights(&weights, &cfg).expect("tiny tower loads");
+
+    let head_dim = cfg.head_dim() as i32;
+    let axis_dim = rope_axis_dim(head_dim);
+    let rot_dim = rope_rot_dim(head_dim);
+    assert_eq!(head_dim, 64);
+    assert_eq!(axis_dim, 20);
+    assert_eq!(rot_dim, 60);
+
+    let grid = vec![(1i32, 2i32, 2i32)]; // grid_t == 1: temporal section is inert.
+    let (t, h, w) = grid[0];
+    let total_tokens = t * h * w;
+
+    let freqs = encoder.rot_pos_emb(&grid);
+    mlxcel_core::eval(&freqs);
+    assert_eq!(
+        mlxcel_core::array_shape(&freqs),
+        vec![total_tokens, rot_dim / 2]
+    );
+
+    let half_axis = axis_dim / 2;
+    let t_section = mlxcel_core::slice(&freqs, &[0, 0], &[total_tokens, half_axis]);
+    assert_eq!(
+        reduce_max_abs(&t_section),
+        0.0,
+        "t-section of rot_pos_emb must be exactly zero for grid_t == 1"
     );
 }
 
