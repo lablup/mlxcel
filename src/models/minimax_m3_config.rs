@@ -233,13 +233,4 @@ impl ModelArgs {
             _ => false,
         }
     }
-
-    /// The shared expert is packed into the switch tensors (as index
-    /// `num_local_experts`, score 1.0) when its width equals the routed expert
-    /// width; otherwise it is a separate MLP.
-    pub fn shared_expert_is_packed(&self) -> bool {
-        self.n_shared_experts > 0
-            && self.shared_intermediate_size != 0
-            && self.shared_intermediate_size == self.intermediate_size
-    }
 }

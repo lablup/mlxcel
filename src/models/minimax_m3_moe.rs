@@ -12,14 +12,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! MiniMax-M3 sparse MoE block: sigmoid router with a selection-only routing
-//! bias, `num_experts_per_tok` routed experts through a clamp-SwiGLU
-//! `SwitchGLU`, plus one shared expert.
+//! MiniMax-M3 sparse MoE block (`block_sparse_moe`): a sigmoid router with a
+//! selection-only routing bias, `num_experts_per_tok` routed experts through a
+//! clamp-SwiGLU `SwitchGLU`, plus one always-on shared expert.
 //!
-//! The shared expert is packed as switch-tensor index `num_local_experts` and
-//! participates with a fixed score of `1.0` when its width equals the routed
-//! expert width (`shared_intermediate_size == intermediate_size`); otherwise it
-//! is a separate clamp-SwiGLU MLP added to the routed mixture.
+//! The real checkpoint stores experts under the Mixtral convention
+//! (`block_sparse_moe.experts.{i}.w1/w2/w3.weight`, w1=gate_proj, w2=down_proj,
+//! w3=up_proj) and the shared expert as a SEPARATE MLP
+//! (`block_sparse_moe.shared_experts.{gate_proj,up_proj,down_proj}.weight`),
+//! never packed into the switch tensors. The shared expert is loaded when its
+//! tensors are present; otherwise the block is routed-only.
 
 use mlxcel_core::layers::UnifiedLinear;
 use mlxcel_core::utils::slice_axis;
@@ -63,7 +65,21 @@ pub(super) fn route(
     };
     let scale = mlxcel_core::full_f32(&[1], routed_scaling_factor, mlxcel_core::array_dtype(&topk));
     let topk = mlxcel_core::multiply(&topk, &scale);
-    (idx, topk)
+    (mlxcel_core::astype(&idx, mlxcel_core::dtype::INT32), topk)
+}
+
+/// Pick the expert projection leaf names for `{moe_prefix}.experts.{i}.*`.
+///
+/// The real MiniMax-M3 checkpoint uses the Mixtral convention
+/// (`w1`=gate_proj, `w3`=up_proj, `w2`=down_proj); community conversions may use
+/// the plain `gate_proj/up_proj/down_proj` names (individual or pre-stacked).
+/// The returned triple is `[gate, up, down]`.
+fn expert_proj_names(weights: &WeightMap, moe_prefix: &str) -> [&'static str; 3] {
+    if weights.contains_key(&format!("{}.experts.0.w1.weight", moe_prefix)) {
+        ["w1", "w3", "w2"]
+    } else {
+        ["gate_proj", "up_proj", "down_proj"]
+    }
 }
 
 /// `SwitchGLU` over pre-stacked experts with the clamp-SwiGLU activation.
@@ -89,30 +105,37 @@ impl SwitchGluOai {
         mlxcel_core::squeeze_axis(&output, -2)
     }
 
+    /// Load routed experts from `{moe_prefix}.switch_mlp.{gate,up,down}`, which
+    /// the shared loader resolves to either a pre-stacked tensor or per-expert
+    /// `{moe_prefix}.experts.{i}.{leaf}` tensors. `proj_names` is `[gate, up,
+    /// down]` (e.g. Mixtral `["w1", "w3", "w2"]`).
     fn from_weights(
         weights: &WeightMap,
-        prefix: &str,
+        moe_prefix: &str,
         group_size: i32,
         bits: i32,
         alpha: f32,
         limit: f32,
+        proj_names: [&str; 3],
     ) -> Result<Self, String> {
+        let [gate, up, down] = proj_names;
+        let switch_prefix = format!("{}.switch_mlp", moe_prefix);
         Ok(Self {
             gate_proj: SwitchLinear::from_weights(
                 weights,
-                &format!("{}.gate_proj", prefix),
+                &format!("{}.{}", switch_prefix, gate),
                 group_size,
                 bits,
             )?,
             up_proj: SwitchLinear::from_weights(
                 weights,
-                &format!("{}.up_proj", prefix),
+                &format!("{}.{}", switch_prefix, up),
                 group_size,
                 bits,
             )?,
             down_proj: SwitchLinear::from_weights(
                 weights,
-                &format!("{}.down_proj", prefix),
+                &format!("{}.{}", switch_prefix, down),
                 group_size,
                 bits,
             )?,
@@ -122,36 +145,12 @@ impl SwitchGluOai {
     }
 }
 
-/// How the single shared expert is realized.
-enum SharedExpert {
-    /// Packed into the switch tensors at `index`; participates with score 1.0.
-    Packed { index: i32 },
-    /// Separate clamp-SwiGLU MLP added to the routed mixture.
-    Separate(DenseMlp),
-}
-
-/// Append the packed shared expert (`index`, score 1.0) to each token's routed
-/// selection. `indices`/`scores` are `[n, k]`; returns `[n, k+1]` each.
-pub(super) fn append_shared_expert(
-    indices: &MlxArray,
-    scores: &MlxArray,
-    index: i32,
-) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
-    let n = mlxcel_core::array_shape(indices)[0];
-    let shared_idx = mlxcel_core::from_slice_i32(&vec![index; n as usize], &[n, 1]);
-    let indices = mlxcel_core::astype(indices, mlxcel_core::dtype::INT32);
-    let idx_full = mlxcel_core::concatenate(&indices, &shared_idx, -1);
-
-    let shared_score = mlxcel_core::ones(&[n, 1], mlxcel_core::array_dtype(scores));
-    let score_full = mlxcel_core::concatenate(scores, &shared_score, -1);
-    (idx_full, score_full)
-}
-
 pub(super) struct MoeBlock {
     router: UnifiedLinear,
     bias: UniquePtr<MlxArray>,
     experts: SwitchGluOai,
-    shared: SharedExpert,
+    /// Separate always-on shared expert; `None` when the block is routed-only.
+    shared: Option<DenseMlp>,
     num_experts_per_tok: i32,
     norm_topk: bool,
     routed_scaling_factor: f32,
@@ -179,20 +178,12 @@ impl MoeBlock {
         );
 
         let out_dtype = mlxcel_core::array_dtype(&x_flat);
-        let result = match &self.shared {
-            SharedExpert::Packed { index } => {
-                let (idx_full, score_full) = append_shared_expert(&idx, &scores, *index);
-                let expert_out = self.experts.forward(&x_flat, &idx_full);
-                moe_weighted_sum(&expert_out, &score_full, out_dtype)
-            }
-            SharedExpert::Separate(mlp) => {
-                let idx = mlxcel_core::astype(&idx, mlxcel_core::dtype::INT32);
-                let expert_out = self.experts.forward(&x_flat, &idx);
-                let routed = moe_weighted_sum(&expert_out, &scores, out_dtype);
-                let shared = mlp.forward(&x_flat);
-                mlxcel_core::add(&routed, &shared)
-            }
-        };
+        let expert_out = self.experts.forward(&x_flat, &idx);
+        let mut result = moe_weighted_sum(&expert_out, &scores, out_dtype);
+        if let Some(shared) = &self.shared {
+            let shared_out = shared.forward(&x_flat);
+            result = mlxcel_core::add(&result, &shared_out);
+        }
 
         if orig_shape.len() > 2 {
             mlxcel_core::reshape(&result, &orig_shape)
@@ -201,63 +192,52 @@ impl MoeBlock {
         }
     }
 
+    /// Load the MoE block at `moe_prefix` (e.g.
+    /// `model.layers.{i}.block_sparse_moe`).
     pub(super) fn from_weights(
         weights: &WeightMap,
         args: &ModelArgs,
-        prefix: &str,
+        moe_prefix: &str,
     ) -> Result<Self, String> {
         let group_size = args.group_size();
         let bits = args.bits();
 
         let router = UnifiedLinear::from_weights(
             weights,
-            &format!("{}.gate", prefix),
+            &format!("{}.gate", moe_prefix),
             group_size,
             args.gate_bits(),
         )?;
 
         let bias = if args.use_routing_bias {
             weights
-                .get(&format!("{}.gate.e_score_correction_bias", prefix))
-                .or_else(|| weights.get(&format!("{}.e_score_correction_bias", prefix)))
+                .get(&format!("{}.e_score_correction_bias", moe_prefix))
+                .or_else(|| weights.get(&format!("{}.gate.e_score_correction_bias", moe_prefix)))
                 .map(|w| mlxcel_core::copy(w))
-                .unwrap_or_else(|| {
-                    mlxcel_core::full_f32(
-                        &[args.num_local_experts as i32],
-                        0.0,
-                        mlxcel_core::dtype::FLOAT32,
-                    )
-                })
+                .unwrap_or_else(|| zeros_bias(args.num_local_experts))
         } else {
-            mlxcel_core::full_f32(
-                &[args.num_local_experts as i32],
-                0.0,
-                mlxcel_core::dtype::FLOAT32,
-            )
+            zeros_bias(args.num_local_experts)
         };
 
+        let proj_names = expert_proj_names(weights, moe_prefix);
         let experts = SwitchGluOai::from_weights(
             weights,
-            &format!("{}.switch_mlp", prefix),
+            moe_prefix,
             group_size,
             bits,
             args.swiglu_alpha,
             args.swiglu_limit,
+            proj_names,
         )?;
 
-        // Packed when the shared width equals the routed width (the switch
-        // tensors then carry the shared expert as row `num_local_experts`);
-        // otherwise a separate MLP under `{prefix}.shared_experts`.
-        let shared = if args.shared_expert_is_packed() {
-            SharedExpert::Packed {
-                index: args.num_local_experts as i32,
-            }
+        // The shared expert is a separate MLP (never packed into the switch
+        // tensors). Load it when its tensors are present.
+        let shared_prefix = format!("{}.shared_experts", moe_prefix);
+        let has_shared = weights.contains_key(&format!("{}.gate_proj.weight", shared_prefix));
+        let shared = if args.n_shared_experts > 0 && has_shared {
+            Some(DenseMlp::from_weights(weights, args, &shared_prefix)?)
         } else {
-            SharedExpert::Separate(DenseMlp::from_weights(
-                weights,
-                args,
-                &format!("{}.shared_experts", prefix),
-            )?)
+            None
         };
 
         Ok(Self {
@@ -270,4 +250,8 @@ impl MoeBlock {
             routed_scaling_factor: args.routed_scaling_factor,
         })
     }
+}
+
+fn zeros_bias(num_experts: usize) -> UniquePtr<MlxArray> {
+    mlxcel_core::full_f32(&[num_experts as i32], 0.0, mlxcel_core::dtype::FLOAT32)
 }

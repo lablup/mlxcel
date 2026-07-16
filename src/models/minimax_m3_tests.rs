@@ -15,16 +15,20 @@
 //! Checkpoint-free unit tests for the MiniMax-M3 text decoder.
 //!
 //! These cover the surface reachable without the 427B checkpoint: real
-//! `text_config` parsing and the derived layer plan, the sigmoid router's
-//! bias-affects-selection-only invariant, the packed shared expert, partial
-//! RoPE, per-head Q/K norm, and the block-sparse indexer degeneration property.
-//! Run serially (`--test-threads=1`); the MLX ops touch the device.
+//! `text_config` parsing and the derived layer plan, the sanitizer's prefix
+//! rewrite / vision-skip against verbatim checkpoint keys, the MoE
+//! `block_sparse_moe` Mixtral (w1/w2/w3) layout with a separate shared expert,
+//! the MQA block-sparse indexer shapes, dense-layer index absence, the sigmoid
+//! router's bias-affects-selection-only invariant, partial RoPE, per-head Q/K
+//! norm, and the block-sparse indexer degeneration property. Run serially
+//! (`--test-threads=1`); the MLX ops touch the device.
 
-use super::ModelArgs;
-use super::indexer::build_block_drop_mask;
-use super::moe::{append_shared_expert, route};
+use super::indexer::{BlockSparseIndexer, build_block_drop_mask};
+use super::moe::{MoeBlock, route};
+use super::{ModelArgs, sanitize_weights};
 use crate::models::gemma::GemmaRMSNorm;
 use mlxcel_core::MlxArray;
+use mlxcel_core::weights::WeightMap;
 
 // The real MiniMaxAI/MiniMax-M3 `text_config` (60 layers, first 3 dense) laid
 // out as the flat text config a text-only export / VL wrapper would present.
@@ -75,6 +79,41 @@ const REAL_TEXT_CONFIG: &str = r#"{
     }
 }"#;
 
+// A tiny synthetic config (index_dim == head_dim as the real checkpoint
+// requires) used to drive the loaders without the 427B weights.
+const TINY_CONFIG: &str = r#"{
+    "model_type": "minimax_m3",
+    "hidden_size": 8,
+    "intermediate_size": 8,
+    "num_hidden_layers": 4,
+    "num_attention_heads": 4,
+    "num_key_value_heads": 4,
+    "head_dim": 128,
+    "vocab_size": 16,
+    "rotary_dim": 64,
+    "num_local_experts": 4,
+    "num_experts_per_tok": 2,
+    "n_shared_experts": 1,
+    "routed_scaling_factor": 1.0,
+    "sparse_attention_config": {
+        "use_sparse_attention": true,
+        "sparse_index_dim": 128,
+        "sparse_num_index_heads": 4,
+        "sparse_block_size": 4,
+        "sparse_topk_blocks": 2,
+        "sparse_attention_freq": [0,0,0,1]
+    }
+}"#;
+
+fn tiny_args() -> ModelArgs {
+    serde_json::from_str(TINY_CONFIG).expect("tiny config parses")
+}
+
+fn filled(shape: &[i32], val: f32) -> mlxcel_core::UniquePtr<MlxArray> {
+    let n: i32 = shape.iter().product();
+    mlxcel_core::from_slice_f32(&vec![val; n as usize], shape)
+}
+
 fn reduce_max_abs(a: &MlxArray) -> f32 {
     let flat = mlxcel_core::reshape(a, &[-1]);
     let m = mlxcel_core::max_axis(&mlxcel_core::abs(&flat), 0, false);
@@ -100,6 +139,10 @@ fn reduce_sum(a: &MlxArray) -> f32 {
 fn scalar_i32(a: &MlxArray) -> i32 {
     mlxcel_core::eval(a);
     mlxcel_core::item_i32(a)
+}
+
+fn sigmoid(x: f32) -> f32 {
+    1.0 / (1.0 + (-x).exp())
 }
 
 #[test]
@@ -139,9 +182,6 @@ fn config_parses_real_text_config_and_derives_layer_plan() {
     assert!(args.is_moe_layer(3));
     assert!(args.is_moe_layer(59));
 
-    // Shared expert packs into the switch tensors (widths equal).
-    assert!(args.shared_expert_is_packed());
-
     // Sparse-attention layer plan aligns with the MoE plan (first 3 dense).
     let sparse = args
         .sparse_attention_config
@@ -159,6 +199,151 @@ fn config_parses_real_text_config_and_derives_layer_plan() {
     assert!(!args.is_sparse_layer(2));
     assert!(args.is_sparse_layer(3));
     assert!(args.is_sparse_layer(59));
+}
+
+#[test]
+fn sanitizer_rewrites_prefixes_and_drops_vision_and_mtp() {
+    // Verbatim VL-checkpoint key layout (values are stand-in scalars).
+    let mut weights = WeightMap::new();
+    for key in [
+        "language_model.model.embed_tokens.weight",
+        "language_model.model.norm.weight",
+        "language_model.model.layers.0.mlp.gate_proj.weight",
+        "language_model.model.layers.3.block_sparse_moe.gate.weight",
+        "language_model.model.layers.3.block_sparse_moe.experts.0.w1.weight",
+        "language_model.model.layers.3.block_sparse_moe.shared_experts.gate_proj.weight",
+        "language_model.lm_head.weight",
+        "vision_tower.encoder.layers.0.self_attn.q_proj.weight",
+        "multi_modal_projector.linear_1.weight",
+        "patch_merge_mlp.0.weight",
+    ] {
+        weights.insert(key.to_string(), filled(&[1], 0.0));
+    }
+
+    let args: ModelArgs = serde_json::from_str(REAL_TEXT_CONFIG).expect("config parses");
+    let out = sanitize_weights(weights, &args);
+
+    // Prefixes collapse to the flat `model.` layout the loader expects.
+    assert!(out.contains_key("model.embed_tokens.weight"));
+    assert!(out.contains_key("model.norm.weight"));
+    assert!(out.contains_key("model.layers.0.mlp.gate_proj.weight"));
+    assert!(out.contains_key("model.layers.3.block_sparse_moe.gate.weight"));
+    assert!(out.contains_key("model.layers.3.block_sparse_moe.experts.0.w1.weight"));
+    assert!(out.contains_key("model.layers.3.block_sparse_moe.shared_experts.gate_proj.weight"));
+    // lm_head lands at model.lm_head (loader resolves via its fallback).
+    assert!(out.contains_key("model.lm_head.weight"));
+
+    // Vision / multimodal tensors are dropped for a text-only load.
+    assert!(!out.contains_key("vision_tower.encoder.layers.0.self_attn.q_proj.weight"));
+    assert!(!out.contains_key("multi_modal_projector.linear_1.weight"));
+    assert!(!out.contains_key("patch_merge_mlp.0.weight"));
+    assert_eq!(out.len(), 7);
+}
+
+#[test]
+fn moe_loads_block_sparse_moe_mixtral_layout_with_separate_shared_expert() {
+    // Build a reduced block_sparse_moe with the real Mixtral naming (w1=gate,
+    // w3=up, w2=down), 4 routed experts, and a separate shared_experts MLP.
+    let args = tiny_args();
+    let hidden = 8i32;
+    let inter = 8i32;
+    let n_experts = 4i32;
+    let prefix = "block_sparse_moe";
+
+    let mut weights = WeightMap::new();
+    weights.insert(
+        format!("{prefix}.gate.weight"),
+        filled(&[n_experts, hidden], 0.05),
+    );
+    weights.insert(
+        format!("{prefix}.e_score_correction_bias"),
+        filled(&[n_experts], 0.0),
+    );
+    for e in 0..n_experts {
+        weights.insert(
+            format!("{prefix}.experts.{e}.w1.weight"),
+            filled(&[inter, hidden], 0.02),
+        );
+        weights.insert(
+            format!("{prefix}.experts.{e}.w3.weight"),
+            filled(&[inter, hidden], 0.03),
+        );
+        weights.insert(
+            format!("{prefix}.experts.{e}.w2.weight"),
+            filled(&[hidden, inter], 0.04),
+        );
+    }
+    for proj in ["gate_proj", "up_proj", "down_proj"] {
+        let shape = if proj == "down_proj" {
+            [hidden, inter]
+        } else {
+            [inter, hidden]
+        };
+        weights.insert(
+            format!("{prefix}.shared_experts.{proj}.weight"),
+            filled(&shape, 0.02),
+        );
+    }
+
+    let block = MoeBlock::from_weights(&weights, &args, prefix)
+        .expect("block_sparse_moe Mixtral layout loads");
+
+    let x = filled(&[1, 2, hidden], 0.1);
+    let out = block.forward(&x);
+    mlxcel_core::eval(&out);
+    assert_eq!(mlxcel_core::array_shape(&out), vec![1, 2, hidden]);
+    assert!(
+        reduce_max_abs(&out).is_finite(),
+        "MoE forward must produce finite output"
+    );
+}
+
+#[test]
+fn indexer_uses_mqa_shapes_four_query_heads_one_key_head() {
+    // index_q_proj -> 4 query heads x 128; index_k_proj -> a single shared head
+    // of 128 (the real [512, hidden] / [128, hidden] MQA layout).
+    let args = tiny_args();
+    let sparse = args.sparse_attention_config.as_ref().unwrap();
+    let hidden = args.hidden_size as i32;
+    let dim = 128i32;
+    let n_qh = 4i32;
+
+    let mut weights = WeightMap::new();
+    weights.insert(
+        "attn.index_q_proj.weight".into(),
+        filled(&[n_qh * dim, hidden], 0.01),
+    );
+    weights.insert(
+        "attn.index_k_proj.weight".into(),
+        filled(&[dim, hidden], 0.01),
+    );
+    weights.insert("attn.index_q_norm.weight".into(), filled(&[dim], 0.0));
+    weights.insert("attn.index_k_norm.weight".into(), filled(&[dim], 0.0));
+
+    let indexer = BlockSparseIndexer::load(&weights, &args, sparse, "attn")
+        .expect("indexer loads")
+        .expect("indexer present when index weights exist");
+
+    let s = 3i32;
+    let x = filled(&[1, s, hidden], 0.1);
+    let k = indexer.keys(&x, 0);
+    let q = indexer.queries(&x, 0);
+    mlxcel_core::eval(&k);
+    mlxcel_core::eval(&q);
+    // Single shared key head; four query heads.
+    assert_eq!(mlxcel_core::array_shape(&k), vec![1, 1, s, dim]);
+    assert_eq!(mlxcel_core::array_shape(&q), vec![1, n_qh, s, dim]);
+}
+
+#[test]
+fn indexer_absent_on_dense_layer_returns_none() {
+    // Dense-attention layers carry no index_* tensors; the loader must tolerate
+    // this and fall back to dense (Ok(None)).
+    let args = tiny_args();
+    let sparse = args.sparse_attention_config.as_ref().unwrap();
+    let weights = WeightMap::new();
+    let indexer = BlockSparseIndexer::load(&weights, &args, sparse, "attn").expect("load ok");
+    assert!(indexer.is_none());
 }
 
 #[test]
@@ -191,37 +376,6 @@ fn router_bias_changes_selection_not_mixture_weights() {
         (sum - expected).abs() < 1e-3,
         "mixture weights must be unbiased sigmoids: got {sum}, expected {expected}"
     );
-}
-
-fn sigmoid(x: f32) -> f32 {
-    1.0 / (1.0 + (-x).exp())
-}
-
-#[test]
-fn packed_shared_expert_appended_with_index_and_unit_score() {
-    // 2 tokens, top-2 routed. The shared expert (index 128) must be appended to
-    // every token's selection with a fixed score of 1.0.
-    let idx = mlxcel_core::from_slice_i32(&[0, 1, 5, 7], &[2, 2]);
-    let scores = mlxcel_core::from_slice_f32(&[0.3, 0.7, 0.4, 0.6], &[2, 2]);
-
-    let (idx_full, score_full) = append_shared_expert(&idx, &scores, 128);
-
-    assert_eq!(mlxcel_core::array_shape(&idx_full), vec![2, 3]);
-    assert_eq!(mlxcel_core::array_shape(&score_full), vec![2, 3]);
-
-    // Last column: index 128 for both tokens -> sum 256; score 1.0 -> sum 2.0.
-    let last_idx = mlxcel_core::utils::slice_axis(&idx_full, -1, 2, 3);
-    let last_score = mlxcel_core::utils::slice_axis(&score_full, -1, 2, 3);
-    assert!((reduce_sum(&last_idx) - 256.0).abs() < 1e-3);
-    assert!((reduce_sum(&last_score) - 2.0).abs() < 1e-4);
-
-    // The original routed columns are preserved unchanged.
-    let kept_idx = mlxcel_core::utils::slice_axis(&idx_full, -1, 0, 2);
-    let kept_diff = mlxcel_core::subtract(
-        &mlxcel_core::astype(&kept_idx, mlxcel_core::dtype::FLOAT32),
-        &mlxcel_core::astype(&idx, mlxcel_core::dtype::FLOAT32),
-    );
-    assert!(reduce_max_abs(&kept_diff) < 1e-4);
 }
 
 #[test]
@@ -263,7 +417,7 @@ fn per_head_qk_norm_normalizes_each_head_independently() {
     // Per-head norm operates on the last axis of [b, l, heads, head_dim]. Feed
     // head 1 = 2 * head 0; RMSNorm is scale-invariant, so if the norm is truly
     // per-head both heads become equal. A wrongly-flattened norm over all 8
-    // values would not.
+    // values would not. The gamma is a single [head_dim] shared across heads.
     let head_dim = 4usize;
     let input = mlxcel_core::from_slice_f32(
         &[1.0, 2.0, 3.0, 4.0, 2.0, 4.0, 6.0, 8.0],

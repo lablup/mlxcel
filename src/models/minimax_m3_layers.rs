@@ -26,7 +26,7 @@ use mlxcel_core::utils::slice_axis;
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
 
-use super::indexer::BlockSparseIndexer;
+use super::indexer::{BlockSparseIndexer, check_out_dim};
 use super::{ModelArgs, SparseAttentionConfig, get_weight_copy};
 use crate::models::gemma::GemmaRMSNorm;
 
@@ -116,30 +116,26 @@ impl Attention {
         let q = mlxcel_core::fast_rope(&q, self.rope_dims, false, self.rope_base, 1.0, offset);
         let k = mlxcel_core::fast_rope(&k, self.rope_dims, false, self.rope_base, 1.0, offset);
 
-        // Index key for the new tokens rides on the K buffer (feature-axis
-        // concat), so a later decode step can score against every cached
-        // position. Guarded at load time to `sparse_num_index_heads ==
-        // num_key_value_heads`, so the concat axis lines up.
+        // The single-head index key for the new tokens rides on the regular K
+        // buffer via a head-axis concat (index_dim == head_dim, guaranteed at
+        // load), so a later decode step can score against every cached position.
+        // Combined K is [b, num_kv_heads + 1, s, head_dim]; the extra head is the
+        // index key, sliced back off after the cache fetch.
         let index_new = self
             .indexer
             .as_ref()
             .map(|idx| (idx.keys(x, offset), idx.queries(x, offset)));
 
         let cache_keys = match &index_new {
-            Some((idx_key, _)) => mlxcel_core::concatenate(&k, idx_key, -1),
+            Some((idx_key, _)) => mlxcel_core::concatenate(&k, idx_key, 1),
             None => k,
         };
         let (cache_keys, cache_v) = cache.update_and_fetch(cache_keys, v);
 
         let (cache_k, index_keys) = match &self.indexer {
-            Some(idx) => {
-                let kk = slice_axis(&cache_keys, -1, 0, self.head_dim);
-                let ik = slice_axis(
-                    &cache_keys,
-                    -1,
-                    self.head_dim,
-                    self.head_dim + idx.cache_feature_width(),
-                );
+            Some(_) => {
+                let kk = slice_axis(&cache_keys, 1, 0, self.num_kv_heads);
+                let ik = slice_axis(&cache_keys, 1, self.num_kv_heads, self.num_kv_heads + 1);
                 (kk, Some(ik))
             }
             None => (cache_keys, None),
@@ -206,6 +202,29 @@ impl Attention {
         }
         let group_size = args.group_size();
         let bits = args.bits();
+        let head_dim = args.head_dim as i32;
+        let num_heads = args.num_attention_heads as i32;
+        let num_kv_heads = args.num_key_value_heads as i32;
+
+        // Defensive shape checks: fail with a clear error on a GQA layout
+        // mismatch instead of corrupting the forward pass. q_proj is
+        // `[num_heads * head_dim, hidden]`, k/v_proj are
+        // `[num_kv_heads * head_dim, hidden]`.
+        check_out_dim(
+            weights,
+            &format!("{}.q_proj.weight", prefix),
+            num_heads * head_dim,
+        )?;
+        check_out_dim(
+            weights,
+            &format!("{}.k_proj.weight", prefix),
+            num_kv_heads * head_dim,
+        )?;
+        check_out_dim(
+            weights,
+            &format!("{}.v_proj.weight", prefix),
+            num_kv_heads * head_dim,
+        )?;
 
         let q_proj =
             UnifiedLinear::from_weights(weights, &format!("{}.q_proj", prefix), group_size, bits)?;
@@ -231,7 +250,6 @@ impl Attention {
             None => None,
         };
 
-        let head_dim = args.head_dim as i32;
         Ok(Self {
             q_proj,
             k_proj,
@@ -240,8 +258,8 @@ impl Attention {
             q_norm,
             k_norm,
             indexer,
-            num_heads: args.num_attention_heads as i32,
-            num_kv_heads: args.num_key_value_heads as i32,
+            num_heads,
+            num_kv_heads,
             head_dim,
             scale: (head_dim as f32).powf(-0.5),
             rope_dims: args.rotary_dim as i32,
@@ -250,9 +268,9 @@ impl Attention {
     }
 }
 
-/// Dense SwiGLU MLP for the first `dense_intermediate_size` layers (and the
-/// separate shared expert when the shared width differs from the routed width).
-/// Uses the same clamp-SwiGLU activation as the experts.
+/// Dense SwiGLU MLP for the leading dense layers (`dense_intermediate_size`
+/// wide) and for the separate MoE shared expert. Uses the same clamp-SwiGLU
+/// activation as the routed experts.
 pub(super) struct DenseMlp {
     gate_proj: UnifiedLinear,
     up_proj: UnifiedLinear,

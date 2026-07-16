@@ -112,11 +112,13 @@ impl DecoderLayer {
         let self_attn =
             Attention::from_weights(weights, args, sparse, &format!("{}.self_attn", prefix))?;
 
+        // MoE layers store their FFN under `block_sparse_moe`; the leading dense
+        // layers store a plain `mlp` (verbatim checkpoint layout).
         let mlp = if args.is_moe_layer(layer_idx) {
             Mlp::Moe(MoeBlock::from_weights(
                 weights,
                 args,
-                &format!("{}.mlp", prefix),
+                &format!("{}.block_sparse_moe", prefix),
             )?)
         } else {
             Mlp::Dense(DenseMlp::from_weights(
@@ -236,18 +238,26 @@ impl MiniMaxM3Model {
 // Weight sanitization
 // ============================================================================
 
-/// Normalize checkpoint key prefixes and drop MTP tensors so loading a flat
+/// Normalize checkpoint key prefixes and drop non-text tensors so loading a flat
 /// text export or a nested VL text tower both land on the `model.`-prefixed
-/// layout the loader expects, and never fail on the MTP metadata the config
-/// carries but this decoder does not implement.
+/// layout the loader expects, and never fail on tensors this text decoder does
+/// not implement.
 ///
-/// - Prefix rewrites: `model.language_model.` and a leading `language_model.`
-///   both collapse to `model.` (no-op for a flat text export).
+/// - Vision skip: `vision_tower.*`, `multi_modal_projector.*`, and
+///   `patch_merge_mlp.*` are dropped so a text-only load of the VL checkpoint
+///   ignores the vision front-end.
+/// - Prefix rewrites: `language_model.model.`, `model.language_model.`, and a
+///   leading `language_model.` all collapse to `model.` (no-op for a flat text
+///   export). `language_model.lm_head.` becomes `model.lm_head.`, which the
+///   loader resolves via its `model.lm_head` fallback.
 /// - MTP strip: any tensor for a layer index `>= num_hidden_layers`, or whose
 ///   path names an MTP / next-N module, is removed.
 pub fn sanitize_weights(weights: WeightMap, args: &ModelArgs) -> WeightMap {
     let mut out = WeightMap::new();
     for (key, value) in weights.into_iter() {
+        if is_non_text_key(&key) {
+            continue;
+        }
         let key = rewrite_language_model_prefix(&key);
         if is_mtp_key(&key, args.num_hidden_layers) {
             continue;
@@ -255,6 +265,19 @@ pub fn sanitize_weights(weights: WeightMap, args: &ModelArgs) -> WeightMap {
         out.insert(key, value);
     }
     out
+}
+
+/// Vision / multimodal tensors to drop for a text-only load of the VL
+/// checkpoint. Matches both the top-level layout and any `model.`-nested export.
+fn is_non_text_key(key: &str) -> bool {
+    const PREFIXES: [&str; 3] = [
+        "vision_tower.",
+        "multi_modal_projector.",
+        "patch_merge_mlp.",
+    ];
+    PREFIXES
+        .iter()
+        .any(|p| key.starts_with(p) || key.starts_with(&format!("model.{}", p)))
 }
 
 fn rewrite_language_model_prefix(key: &str) -> String {

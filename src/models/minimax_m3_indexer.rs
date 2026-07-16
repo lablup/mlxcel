@@ -49,14 +49,21 @@ use mlxcel_core::layers::UnifiedLinear;
 pub(super) const DENSE_FALLBACK_ENV: &str = "MLXCEL_MINIMAX_M3_DENSE";
 
 /// The block-sparse "MSA" indexer for one attention block.
+///
+/// MQA-style, matching the real checkpoint: `index_q_proj` produces
+/// `sparse_num_index_heads` query heads of `sparse_index_dim`, while
+/// `index_k_proj` produces a SINGLE shared index-key stream of `sparse_index_dim`
+/// (checkpoint shapes: `index_q_proj [512, 6144]`, `index_k_proj [128, 6144]`
+/// with 4 heads x 128). The query heads all score against the one key stream.
 pub(super) struct BlockSparseIndexer {
     index_q_proj: UnifiedLinear,
     index_k_proj: UnifiedLinear,
     q_norm: GemmaRMSNorm,
     k_norm: GemmaRMSNorm,
-    /// Number of index heads (`sparse_num_index_heads`). Shared by Q and K.
-    n_heads: i32,
-    /// Per-head index dimension (`sparse_index_dim`).
+    /// Number of index query heads (`sparse_num_index_heads`). The key is a
+    /// single shared head (MQA).
+    n_query_heads: i32,
+    /// Index vector dimension (`sparse_index_dim`).
     index_dim: i32,
     /// Partial-RoPE dimension applied to the index projections.
     rope_dims: i32,
@@ -74,10 +81,9 @@ impl BlockSparseIndexer {
     /// fallback preserved), when the sparse config is absent, or when
     /// [`DENSE_FALLBACK_ENV`] is set.
     ///
-    /// The index-key side cache concatenates the index key onto the regular K
-    /// along the feature axis, which requires the index head count to equal the
-    /// KV head count. When they differ the indexer is disabled (dense fallback)
-    /// rather than silently mis-caching.
+    /// The single-head index key rides on the regular K buffer (head-axis
+    /// concat), which requires `sparse_index_dim == head_dim`; when they differ
+    /// the indexer is disabled (dense fallback) rather than silently mis-caching.
     pub(super) fn load(
         weights: &WeightMap,
         args: &ModelArgs,
@@ -91,11 +97,31 @@ impl BlockSparseIndexer {
         if !weights.contains_key(&q_key) {
             return Ok(None);
         }
-        if sparse.sparse_num_index_heads as i32 != args.num_key_value_heads as i32 {
-            // The side cache rides on the regular K buffer (feature-axis concat),
-            // which needs matching head counts. Fall back to dense otherwise.
+
+        let n_query_heads = sparse.sparse_num_index_heads as i32;
+        let index_dim = sparse.sparse_index_dim as i32;
+        let head_dim = args.head_dim as i32;
+        if index_dim != head_dim {
+            // The single-head index key is cached on the regular K buffer via a
+            // head-axis concat, which needs a matching last-axis width. Fall back
+            // to dense otherwise instead of mis-caching.
             return Ok(None);
         }
+
+        // Defensive shape checks: catch an MHA-vs-MQA layout mismatch at load
+        // time instead of corrupting the forward pass. index_q_proj is
+        // `[n_query_heads * index_dim, hidden]`; index_k_proj is a single shared
+        // head `[index_dim, hidden]`.
+        check_out_dim(
+            weights,
+            &format!("{}.index_q_proj.weight", attn_prefix),
+            n_query_heads * index_dim,
+        )?;
+        check_out_dim(
+            weights,
+            &format!("{}.index_k_proj.weight", attn_prefix),
+            index_dim,
+        )?;
 
         let group_size = args.group_size();
         let bits = args.bits();
@@ -121,13 +147,12 @@ impl BlockSparseIndexer {
             args.rms_norm_eps,
         );
 
-        let index_dim = sparse.sparse_index_dim as i32;
         Ok(Some(Self {
             index_q_proj,
             index_k_proj,
             q_norm,
             k_norm,
-            n_heads: sparse.sparse_num_index_heads as i32,
+            n_query_heads,
             index_dim,
             rope_dims: args.rotary_dim.min(sparse.sparse_index_dim) as i32,
             rope_base: args.rope_theta,
@@ -139,34 +164,30 @@ impl BlockSparseIndexer {
         }))
     }
 
-    /// Per-head index key for the new tokens: `rope(norm(index_k_proj(x)))`.
-    /// Shape `[b, n_heads, s, index_dim]`. This is what gets cached on the K
-    /// side buffer (concatenated onto the regular K along the feature axis).
+    /// Single shared index key for the new tokens: `rope(norm(index_k_proj(x)))`.
+    /// Shape `[b, 1, s, index_dim]`. This is what gets cached on the K side
+    /// buffer (concatenated onto the regular K along the head axis).
     pub(super) fn keys(&self, x: &MlxArray, offset: i32) -> UniquePtr<MlxArray> {
         let shape = mlxcel_core::array_shape(x);
         let (b, s) = (shape[0], shape[1]);
         let k = self.index_k_proj.forward(x);
-        let k = mlxcel_core::reshape(&k, &[b, s, self.n_heads, self.index_dim]);
+        // Single head: [b, s, index_dim] -> norm over index_dim -> [b, 1, s, dim].
+        let k = mlxcel_core::reshape(&k, &[b, s, 1, self.index_dim]);
         let k = self.k_norm.forward(&k);
         let k = mlxcel_core::transpose_axes(&k, &[0, 2, 1, 3]);
         mlxcel_core::fast_rope(&k, self.rope_dims, false, self.rope_base, 1.0, offset)
     }
 
     /// Per-head index query: `rope(norm(index_q_proj(x)))`.
-    /// Shape `[b, n_heads, s, index_dim]`.
+    /// Shape `[b, n_query_heads, s, index_dim]`.
     pub(super) fn queries(&self, x: &MlxArray, offset: i32) -> UniquePtr<MlxArray> {
         let shape = mlxcel_core::array_shape(x);
         let (b, s) = (shape[0], shape[1]);
         let q = self.index_q_proj.forward(x);
-        let q = mlxcel_core::reshape(&q, &[b, s, self.n_heads, self.index_dim]);
+        let q = mlxcel_core::reshape(&q, &[b, s, self.n_query_heads, self.index_dim]);
         let q = self.q_norm.forward(&q);
         let q = mlxcel_core::transpose_axes(&q, &[0, 2, 1, 3]);
         mlxcel_core::fast_rope(&q, self.rope_dims, false, self.rope_base, 1.0, offset)
-    }
-
-    /// Feature width of the index key cached alongside the regular K.
-    pub(super) fn cache_feature_width(&self) -> i32 {
-        self.index_dim
     }
 
     /// Whether the block-sparse mask should actually be applied at the current
@@ -186,13 +207,15 @@ impl BlockSparseIndexer {
         k: &MlxArray,
         mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
-        // scores = (q @ k^T) * scale -> [b, n_heads, s, kv_len].
+        // q: [b, n_query_heads, s, index_dim]; k: [b, 1, kv_len, index_dim].
+        // scores = (q @ k^T) * scale -> [b, n_query_heads, s, kv_len], the single
+        // key head broadcasting across the query heads.
         let k_t = mlxcel_core::transpose_axes(k, &[0, 1, 3, 2]);
         let scores = mlxcel_core::matmul(q, &k_t);
         let scale =
             mlxcel_core::full_f32(&[1], self.softmax_scale, mlxcel_core::array_dtype(&scores));
         let scores = mlxcel_core::multiply(&scores, &scale);
-        // Mean over index heads -> [b, 1, s, kv_len].
+        // Mean over query heads -> [b, 1, s, kv_len].
         let scores = mlxcel_core::mean_axis(&scores, 1, true);
         match mask {
             Some(m) => mlxcel_core::add(&scores, m),
@@ -216,6 +239,26 @@ impl BlockSparseIndexer {
             self.local_blocks,
         )
     }
+}
+
+/// Assert that a weight's output dimension (first axis) matches `expected`.
+/// Returns a clear error on mismatch so a wrong tensor layout fails at load
+/// instead of corrupting the forward pass. A quantized weight still carries its
+/// true output dim on axis 0 (packing is on the input axis), so this holds for
+/// both quantized and unquantized tensors.
+pub(super) fn check_out_dim(weights: &WeightMap, name: &str, expected: i32) -> Result<(), String> {
+    if let Some(w) = weights.get(name) {
+        let shape = mlxcel_core::array_shape(w);
+        if let Some(&out) = shape.first()
+            && out != expected
+        {
+            return Err(format!(
+                "minimax_m3: {} has output dim {}, expected {} (tensor layout mismatch)",
+                name, out, expected
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Build the additive per-token block-sparse mask.
