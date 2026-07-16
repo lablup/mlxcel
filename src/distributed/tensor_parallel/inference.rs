@@ -170,6 +170,7 @@ fn fallback_architecture(model_type: ModelType) -> &'static str {
         ModelType::PhiMoe => "phimoe",
         ModelType::GptOss => "gpt_oss",
         ModelType::MiniMax => "minimax",
+        ModelType::MiniMaxM3 => "minimax_m3",
         ModelType::Mixtral => "mixtral",
         ModelType::Qwen2Moe => "qwen2_moe",
         ModelType::OLMoE => "olmoe",

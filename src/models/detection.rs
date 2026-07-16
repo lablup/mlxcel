@@ -159,6 +159,7 @@ pub fn get_model_type(model_path: &Path) -> Result<ModelType> {
         "phi3small" => Ok(ModelType::Phi3Small),
         "phimoe" => Ok(ModelType::PhiMoe),
         "minimax" => Ok(ModelType::MiniMax),
+        "minimax_m3" => Ok(ModelType::MiniMaxM3),
         "gpt_oss" => Ok(ModelType::GptOss),
         "mixtral" => Ok(ModelType::Mixtral),
         "olmoe" => Ok(ModelType::OLMoE),

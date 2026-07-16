@@ -84,6 +84,7 @@ pub mod mimo;
 pub mod minicpm;
 pub mod minicpm3;
 pub mod minimax;
+pub mod minimax_m3;
 pub mod ministral3;
 pub mod mistral4;
 pub mod mixtral;
@@ -183,6 +184,7 @@ pub use mimo::MiMoModel;
 pub use minicpm::MiniCPMModel;
 pub use minicpm3::MiniCPM3Model;
 pub use minimax::MiniMaxModel;
+pub use minimax_m3::MiniMaxM3Model;
 pub use ministral3::{Ministral3Model, Ministral3Wrapper};
 pub use mistral4::Mistral4Model;
 pub use mixtral::MixtralModel;
@@ -309,6 +311,7 @@ pub enum ModelType {
     // MoE models
     GptOss,
     MiniMax,
+    MiniMaxM3,
     Mixtral,
     Qwen2Moe,
     OLMoE,
@@ -502,6 +505,7 @@ pub const ALL_MODEL_TYPES: &[ModelType] = &[
     // MoE models
     ModelType::GptOss,
     ModelType::MiniMax,
+    ModelType::MiniMaxM3,
     ModelType::Mixtral,
     ModelType::Qwen2Moe,
     ModelType::OLMoE,
@@ -752,6 +756,10 @@ impl ModelType {
             // ----- MoE (other) -----
             ModelType::GptOss => ("gpt-oss (MoE)", "MoE (other)"),
             ModelType::MiniMax => ("MiniMax-M2 (MoE, 256 experts)", "MoE (other)"),
+            ModelType::MiniMaxM3 => (
+                "MiniMax-M3 (hybrid dense/MoE, block-sparse attention)",
+                "MoE (other)",
+            ),
             ModelType::Mixtral => ("Mixtral (MoE)", "MoE (other)"),
             ModelType::KimiLinear => ("Kimi Linear (MLA + GatedDeltaNet hybrid)", "MoE (other)"),
             ModelType::KimiVL => ("Kimi-VL (MoonViT + DeepSeek-V3 MoE)", "Kimi VLM"),
@@ -962,6 +970,7 @@ mod metadata_tests {
             PhiMoe,
             GptOss,
             MiniMax,
+            MiniMaxM3,
             Mixtral,
             Qwen2Moe,
             OLMoE,
