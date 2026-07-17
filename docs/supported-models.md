@@ -244,6 +244,10 @@ chat template that already reads `enable_thinking` directly and is
 unaffected. An explicit `thinking` entry in `chat_template_kwargs` always
 overrides the derived alias.
 
+### `thinking_mode` alias for chat templates gating on a string variable
+
+Some chat templates check a `thinking_mode` string (for example `thinking_mode == "enabled"`) instead of the `enable_thinking` boolean, so mlxcel also detects that identifier in the loaded template and injects `thinking_mode: "enabled"` whenever the resolved `enable_thinking` value is true. Nothing is injected when thinking is off, and an explicit `thinking_mode` entry in `chat_template_kwargs` always overrides the derived value.
+
 ### Loop-detection default-on for the Gemma 4 family
 
 Gemma 4 (31B Dense and 26B-A4B MoE, including the QAT 4-bit checkpoints) has an upstream, weights-level token-repetition collapse documented in [google-deepmind/gemma#622](https://github.com/google-deepmind/gemma/issues/622) and reproduced across other engines, including [vllm-project/vllm#40080](https://github.com/vllm-project/vllm/issues/40080). Generation can degenerate into a single repeated token (or short fragment) that fills the token budget, most often inside the thought channel. Tool declarations and `json_schema` structured-output requests amplify it, but it is not limited to those cases. Sampling penalties do not reliably recover it, because once the logits collapse the top-k candidates are themselves garbage.
