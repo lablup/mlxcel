@@ -248,6 +248,8 @@ model_fits_in_memory() {
 #                 failed to allocate, cannot allocate memory, unable to allocate,
 #                 bad_alloc, "memory allocation of N bytes failed" (Rust abort)
 #   MLX Metal:    "greater than the maximum allowed buffer size", metal::malloc
+#   MLX CUDA:     CUDA_ERROR_OUT_OF_MEMORY, cudaErrorMemoryAllocation,
+#                 "cuMemAlloc failed" (issue #807, GB10 CUDA unified memory)
 #
 # Bare "oom" is intentionally excluded to avoid false positives (e.g. "zoom").
 is_oom_failure() {
@@ -264,7 +266,7 @@ is_oom_failure() {
   # Otherwise (exit 1 cxx exception, 134 bad_alloc abort, ...) it is OOM only
   # if the captured output names an allocator failure.
   printf '%s\n' "$err_text" | grep -qiE \
-    'out of memory|out-of-memory|insufficient memory|failed to allocate|cannot allocate memory|unable to allocate|bad_alloc|memory allocation of [0-9]|greater than the maximum allowed buffer size|metal::malloc'
+    'out of memory|out-of-memory|insufficient memory|failed to allocate|cannot allocate memory|unable to allocate|bad_alloc|memory allocation of [0-9]|greater than the maximum allowed buffer size|metal::malloc|CUDA_ERROR_OUT_OF_MEMORY|cudaErrorMemoryAllocation|cuMemAlloc failed'
 }
 
 # ---------------------------------------------------------------------------

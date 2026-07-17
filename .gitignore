@@ -39,3 +39,8 @@ __pycache__/
 webpage/site/.next/
 webpage/site/out/
 webpage/site/node_modules/
+
+# Persistent cross-run OOM record for scripts/bench_longprompt.sh (issue #807).
+# Host-specific and reactive to local memory conditions, so it never belongs
+# in version control alongside the tracked benchmarks/*.csv result files.
+/benchmarks/.oom-record
