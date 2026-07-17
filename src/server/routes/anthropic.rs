@@ -42,7 +42,7 @@ use crate::server::anthropic_translator::{
     AnthropicTranslated, anthropic_request_to_chat, anthropic_stop_reason, apply_stop_sequences,
     build_content_blocks, parsed_call_to_tool_use, short_uuid, thinking_enabled,
 };
-use crate::server::chat_request::prepare_chat_request_with_cache;
+use crate::server::chat_request::{prepare_chat_request_with_cache, request_has_effective_input};
 use crate::server::config::ReasoningBudgetOverride;
 use crate::server::streaming_anthropic::{AnthropicBlockEmitter, anthropic_sse_channel};
 use crate::server::thinking_budget::{pick_budget_alias, resolve_request_budget};
@@ -68,6 +68,19 @@ pub async fn anthropic_messages(
     Json(request): Json<AnthropicRequest>,
 ) -> Response {
     let translated = anthropic_request_to_chat(&request);
+
+    // Reject requests with no effective input before any model dispatch
+    // (issue #805, extending the #773 guard to the Anthropic Messages
+    // route). Runs on the translated `ChatCompletionRequest` so a non-empty
+    // top-level `system` prompt (folded into a leading system message by
+    // `anthropic_request_to_chat`) counts toward "effective input" the same
+    // way `instructions`-alone does on the responses route.
+    if !request_has_effective_input(&translated.chat_request) {
+        return AnthropicErrorResponse::bad_request(
+            "Request must include at least one non-empty message content or media input.",
+        )
+        .into_response();
+    }
 
     // Enforce the tools array size limit to prevent DoS via template
     // rendering, matching the chat-completions route. The check runs on the
@@ -649,5 +662,110 @@ mod tests {
             split_visible_reasoning("<|channel|>analysis<|message|>x", Some(&parsed));
         assert_eq!(visible, "");
         assert_eq!(reasoning.as_deref(), Some("analysis scratchpad"));
+    }
+
+    // -- no-effective-input rejection (issue #805), exercised on the
+    // translated request `anthropic_messages` actually checks, mirroring the
+    // matrix in `super::responses::tests` (issue #773 / #803).
+
+    fn parse_req(body: &str) -> AnthropicRequest {
+        serde_json::from_str(body).unwrap()
+    }
+
+    fn translate(body: &str) -> crate::server::types::request::ChatCompletionRequest {
+        anthropic_request_to_chat(&parse_req(body)).chat_request
+    }
+
+    #[test]
+    fn anthropic_route_rejects_empty_messages_array() {
+        let chat_request = translate(r#"{"model":"m","max_tokens":8,"messages":[]}"#);
+        assert!(!request_has_effective_input(&chat_request));
+    }
+
+    #[test]
+    fn anthropic_route_rejects_single_empty_string_content() {
+        let chat_request =
+            translate(r#"{"model":"m","max_tokens":8,"messages":[{"role":"user","content":""}]}"#);
+        assert!(!request_has_effective_input(&chat_request));
+    }
+
+    #[test]
+    fn anthropic_route_rejects_whitespace_only_content() {
+        let chat_request = translate(
+            r#"{"model":"m","max_tokens":8,"messages":[{"role":"user","content":"   \n\t"}]}"#,
+        );
+        assert!(!request_has_effective_input(&chat_request));
+    }
+
+    #[test]
+    fn anthropic_route_rejects_content_list_with_only_empty_text_block() {
+        let chat_request = translate(
+            r#"{"model":"m","max_tokens":8,"messages":[
+                {"role":"user","content":[{"type":"text","text":""}]}
+            ]}"#,
+        );
+        assert!(!request_has_effective_input(&chat_request));
+    }
+
+    #[test]
+    fn anthropic_route_accepts_image_only_message() {
+        let chat_request = translate(
+            r#"{"model":"m","max_tokens":8,"messages":[
+                {"role":"user","content":[
+                    {"type":"image","source":{"type":"base64","media_type":"image/png","data":"aGVsbG8="}}
+                ]}
+            ]}"#,
+        );
+        assert!(request_has_effective_input(&chat_request));
+    }
+
+    #[test]
+    fn anthropic_route_accepts_tool_result_only_message() {
+        let chat_request = translate(
+            r#"{"model":"m","max_tokens":8,"messages":[{"role":"user","content":[
+                {"type":"tool_result","tool_use_id":"toolu_1","content":"sunny"}
+            ]}]}"#,
+        );
+        assert!(request_has_effective_input(&chat_request));
+    }
+
+    #[test]
+    fn anthropic_route_history_with_real_content_passes_despite_empty_last_message() {
+        let chat_request = translate(
+            r#"{"model":"m","max_tokens":8,"messages":[
+                {"role":"user","content":"What is the capital of France?"},
+                {"role":"assistant","content":"Paris."},
+                {"role":"user","content":""}
+            ]}"#,
+        );
+        assert!(request_has_effective_input(&chat_request));
+    }
+
+    #[test]
+    fn anthropic_route_system_prompt_alone_counts_as_effective_input() {
+        // `system` is folded into a leading system message by
+        // `anthropic_request_to_chat` (see `anthropic_translator.rs`), so a
+        // request with an empty `messages` array but a real `system` prompt
+        // is not degenerate, consistent with how `instructions`-alone is
+        // treated on the responses route (issue #803).
+        let chat_request = translate(
+            r#"{"model":"m","max_tokens":8,"system":"You are a helpful assistant.","messages":[]}"#,
+        );
+        assert!(request_has_effective_input(&chat_request));
+    }
+
+    #[test]
+    fn anthropic_route_rejects_empty_system_and_empty_messages() {
+        let chat_request =
+            translate(r#"{"model":"m","max_tokens":8,"system":"   ","messages":[]}"#);
+        assert!(!request_has_effective_input(&chat_request));
+    }
+
+    #[test]
+    fn anthropic_route_accepts_normal_request() {
+        let chat_request = translate(
+            r#"{"model":"m","max_tokens":8,"messages":[{"role":"user","content":"Hello there"}]}"#,
+        );
+        assert!(request_has_effective_input(&chat_request));
     }
 }
