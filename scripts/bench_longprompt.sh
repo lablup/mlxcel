@@ -348,6 +348,21 @@ if [[ ! -x "$BENCH_DECODE" ]]; then
   exit 1
 fi
 
+# Every ladder length must be a plain non-negative integer. The OOM backstop
+# and the persistent-record pre-skip both compare the cell length with `[[
+# "$len" -ge N ]]`, and a non-numeric entry (a typo such as "2o48", or "32k")
+# makes that arithmetic error out and silently evaluate false -- which would
+# launch a cell the backstop was supposed to skip. Since launching a
+# near-OOM cell is exactly what wedges the GB10 driver (issue #807), a
+# malformed length is a fatal config error, caught before the sweep starts
+# rather than after hours of running.
+for _len in $LADDER; do
+  if [[ ! "$_len" =~ ^[0-9]+$ ]]; then
+    echo "Error: --lengths must be space-separated non-negative integers; got \"$_len\"." >&2
+    exit 1
+  fi
+done
+
 if [[ -z "$OUTPUT" ]]; then
   BACKEND=$(detect_backend)
   HW=$(detect_hardware_short)
