@@ -1566,6 +1566,8 @@ impl BatchScheduler {
             let seq_id = match self.allocate_sequence_state() {
                 Ok(id) => id,
                 Err(err) => {
+                    // Intentionally not a `record_prompt_cache_reject` site: slot
+                    // exhaustion is a scheduler-capacity failure, not a cache-specific decline.
                     tracing::warn!("Cache pool allocation failed during snapshot restore: {err}");
                     return None;
                 }

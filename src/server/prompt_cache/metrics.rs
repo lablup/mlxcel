@@ -211,7 +211,10 @@ pub trait PromptCacheMetrics: Send + Sync {
     /// declines (mode mismatch, empty set, layout constraints, block-
     /// boundary flooring) never reach the store, so the scheduler records
     /// those directly against `BatchObservability` instead of through this
-    /// trait.
+    /// trait. The production adapter (`BatchMetricsCacheAdapter`) leaves this
+    /// hook at its no-op default, so `/v1/cache/stats` and Prometheus
+    /// reject-reason exposition is fed solely by that scheduler path, not by
+    /// this hook; only the `AtomicPromptCacheMetrics` test implementor uses it.
     fn record_reject(&self, reason: PromptCacheRejectReason, bytes: usize) {
         let _ = (reason, bytes);
     }
