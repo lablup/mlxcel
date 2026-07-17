@@ -225,7 +225,7 @@ panic = "unwind"
 # [profile.release] above is tuned for shipping binaries: fat LTO across all
 # ~439 locked crates plus a single codegen unit (`codegen-units = 1`) for the
 # ~390k-line main crate maximizes runtime performance and minimizes binary
-# size, at the cost of a multi-minute link on every rebuild — measured at
+# size, at the cost of a multi-minute link on every rebuild, measured at
 # 4 to 6 minutes per incremental rebuild, and a typical issue cycle pays 5 to
 # 8 such rebuilds. See docs/installation.md ("Fast iteration builds") for the
 # full measurement writeup.

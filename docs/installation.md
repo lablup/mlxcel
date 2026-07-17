@@ -286,7 +286,7 @@ cargo test --release --features cuda -- --test-threads=1
 fat LTO across all ~439 locked crates plus `codegen-units = 1` for the
 ~390k-line main crate. That is the right tradeoff for CI-faithful validation
 and for anything you ship, but it is expensive for the day-to-day edit-test
-loop — measured at 4 to 6 minutes per incremental rebuild, so a typical issue
+loop: measured at 4 to 6 minutes per incremental rebuild, so a typical issue
 cycle of several edit-test iterations pays 20+ minutes of pure compile time.
 
 For local and agent development, use `[profile.test-fast]` instead (thin LTO,
@@ -310,9 +310,16 @@ or invoke cargo directly:
 cargo test --profile test-fast --features cuda -- --test-threads=1
 ```
 
+Measured on the Linux/CUDA development machine (2026-07): a cold `test-fast`
+build (all dependencies plus the MLX C++ tree) takes about 4m53s, and an
+incremental rebuild after touching one main-crate source file takes about 19s,
+versus 4 to 6 minutes under `[profile.release]`, roughly a 13x to 19x
+iteration speedup. A representative narrow test set (139 tests across model,
+server, sampling, and cache modules) passes identically under both profiles.
+
 `test-fast` is for iteration only. Use `[profile.release]` (`make release*`,
 `make verify-test`, or plain `cargo test --release`) for anything you ship,
-benchmark, or quote as representative performance — `test-fast` trades link
+benchmark, or quote as representative performance: `test-fast` trades link
 time and binary size for rebuild speed and is not tuned for either.
 
 ## Troubleshooting

@@ -223,7 +223,7 @@ test-doc: ## Run documentation tests
 # `test` / `verify-test` above build under [profile.release] (fat LTO,
 # codegen-units = 1), which is the right choice for CI-faithful and shipping
 # validation but measured at 4 to 6 minutes per incremental rebuild on the
-# ~390k-line main crate — expensive for the edit-test-edit loop of local and
+# ~390k-line main crate, which is expensive for the edit-test-edit loop of local and
 # agent development. These targets build under [profile.test-fast] instead
 # (thin LTO, parallel codegen, incremental compilation); see the profile's
 # Cargo.toml comment and docs/installation.md ("Fast iteration builds") for
