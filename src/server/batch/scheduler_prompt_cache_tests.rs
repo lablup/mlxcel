@@ -311,11 +311,7 @@ fn disabled_and_prefix_too_short_insert_errors_record_distinct_reasons() {
         .insert(&key, entry)
         .expect_err("disabled store must reject");
     let obs = BatchObservability::new();
-    obs.record_prompt_cache_reject(
-        PromptCacheRejectReason::from(&err),
-        Some(1),
-        tokens.len(),
-    );
+    obs.record_prompt_cache_reject(PromptCacheRejectReason::from(&err), Some(1), tokens.len());
     assert_eq!(obs.snapshot().prompt_cache_reject_disabled, 1);
 
     // Prefix-too-short store.

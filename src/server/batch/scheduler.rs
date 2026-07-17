@@ -1677,10 +1677,9 @@ impl BatchScheduler {
                 }
                 match cache_pool.clone_detached_paged_prefix(paged, adoptable) {
                     Ok(clone) => PagedCloneOutcome::Cloned(Box::new(clone), adoptable),
-                    Err(err) => PagedCloneOutcome::Decline(
-                        PromptCacheRejectReason::LayoutConstraints,
-                        err,
-                    ),
+                    Err(err) => {
+                        PagedCloneOutcome::Decline(PromptCacheRejectReason::LayoutConstraints, err)
+                    }
                 }
             }
             // Paged entry under a dense decode backend: cross-backend
