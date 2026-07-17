@@ -110,12 +110,40 @@ fn build_single_token_completion_logprobs(
     }
 }
 
+/// Returns `true` when `prompt` is whitespace-only but non-empty (issue
+/// #806): a string that survives deserialization as a `String` but has no
+/// non-whitespace character.
+///
+/// A fully empty prompt (`""`) is deliberately *not* flagged by this
+/// predicate: unlike the chat-shaped routes (`/v1/chat/completions`,
+/// `/v1/responses`, `/v1/messages`), which always have template scaffolding
+/// around user content, `/v1/completions` takes a raw prompt with no
+/// scaffolding, so an empty prompt is a legitimate request for unconditional
+/// generation from BOS on a base/text-completion model. `"   \n\t"`-shaped
+/// prompts have no such legitimate reading, so they are treated the same as
+/// no effective input.
+fn prompt_is_whitespace_only(prompt: &str) -> bool {
+    !prompt.is_empty() && prompt.trim().is_empty()
+}
+
 /// POST /v1/completions
 pub async fn completions(
     State(state): State<AppState>,
     headers: HeaderMap,
     Json(request): Json<CompletionRequest>,
 ) -> Response {
+    // Reject whitespace-only-but-nonempty prompts before any model dispatch,
+    // alongside the route's other pre-dispatch validations (issue #806).
+    // See `prompt_is_whitespace_only` for why an empty prompt is allowed
+    // through instead of rejected here.
+    if prompt_is_whitespace_only(&request.prompt) {
+        return ErrorResponse::new(
+            "Request must include at least one non-empty message content or media input.",
+            "invalid_request_error",
+        )
+        .into_response();
+    }
+
     // Validate logprobs range per OpenAI spec (0-5 for legacy completions)
     if let Some(top) = request.logprobs
         && top > 5
@@ -437,5 +465,75 @@ mod tests {
             validate_xtc_params(request.params.xtc_threshold, request.params.xtc_probability)
                 .is_ok()
         );
+    }
+
+    // -- no-effective-input decision for /v1/completions (issue #806) --
+    //
+    // Unlike the chat-shaped routes, `/v1/completions` deliberately allows a
+    // fully empty prompt through (unconditional generation from BOS is a
+    // legitimate base-model use case) while still rejecting
+    // whitespace-only-but-nonempty prompts, which have no such legitimate
+    // reading. These tests exercise `prompt_is_whitespace_only`, the same
+    // predicate the `completions` handler calls before dispatch.
+
+    #[test]
+    fn completions_rejects_whitespace_only_spaces() {
+        assert!(prompt_is_whitespace_only("   "));
+    }
+
+    #[test]
+    fn completions_rejects_whitespace_only_newline() {
+        assert!(prompt_is_whitespace_only("\n"));
+    }
+
+    #[test]
+    fn completions_rejects_whitespace_only_tabs_and_mixed() {
+        assert!(prompt_is_whitespace_only("\t \n\t"));
+    }
+
+    /// Pinned regression test: an empty prompt (`""`) is an intentional
+    /// unconditional-generation request on `/v1/completions` (issue #806)
+    /// and must NOT be rejected by the guard. This test exists specifically
+    /// so a future change cannot silently regress that decision back to
+    /// rejecting empty prompts.
+    #[test]
+    fn completions_allows_fully_empty_prompt() {
+        assert!(!prompt_is_whitespace_only(""));
+    }
+
+    #[test]
+    fn completions_allows_normal_prompt() {
+        assert!(!prompt_is_whitespace_only("Hello, world"));
+    }
+
+    #[test]
+    fn completions_no_effective_input_error_matches_issue_773_spec() {
+        // The handler's whitespace-only-prompt rejection must surface the
+        // same HTTP 400 `invalid_request_error` shape and message string as
+        // the #773 guard used on the chat-shaped routes.
+        let response = ErrorResponse::new(
+            "Request must include at least one non-empty message content or media input.",
+            "invalid_request_error",
+        );
+        assert_eq!(response.status, axum::http::StatusCode::BAD_REQUEST);
+        assert_eq!(response.error.error_type, "invalid_request_error");
+        assert_eq!(
+            response.error.message,
+            "Request must include at least one non-empty message content or media input."
+        );
+    }
+
+    #[test]
+    fn completions_deserializes_empty_and_whitespace_prompts() {
+        // Confirms `{"prompt":""}` and a whitespace-only prompt both pass
+        // deserialization (required `String`, not `Option`), so the guard
+        // is the only line of defense before dispatch.
+        let empty: CompletionRequest =
+            serde_json::from_str(r#"{"model":"m","prompt":""}"#).unwrap();
+        assert!(!prompt_is_whitespace_only(&empty.prompt));
+
+        let whitespace: CompletionRequest =
+            serde_json::from_str(r#"{"model":"m","prompt":"  \n\t"}"#).unwrap();
+        assert!(prompt_is_whitespace_only(&whitespace.prompt));
     }
 }

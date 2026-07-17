@@ -116,7 +116,11 @@ the translated conversation (including history pulled in through
 `invalid_request_error`. A blank `input` combined with non-empty
 `instructions` still passes, since `instructions` becomes a real system
 message in the rendered conversation. The same check applies to
-`/v1/chat/completions`.
+`/v1/chat/completions`. `/v1/completions` (the raw-prompt legacy endpoint) is
+a deliberate exception: it rejects a whitespace-only prompt with the same 400
+`invalid_request_error`, but allows a fully empty prompt through, since
+unconditional generation from BOS is a legitimate base-model use case on a
+route that has no chat-template scaffolding to be empty around (issue #806).
 
 ## Response shape
 
