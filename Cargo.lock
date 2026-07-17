@@ -1892,7 +1892,7 @@ dependencies = [
 
 [[package]]
 name = "mlxcel"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -1946,7 +1946,7 @@ dependencies = [
 
 [[package]]
 name = "mlxcel-core"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "cmake",
  "cxx",
@@ -1968,7 +1968,7 @@ dependencies = [
 
 [[package]]
 name = "mlxcel-surgery"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "anyhow",
  "globset",

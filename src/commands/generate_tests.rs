@@ -190,9 +190,12 @@ fn vlm_chat_template_omits_video_when_template_lacks_video_support() {
 #[test]
 fn vlm_chat_template_renders_audio_content_part_in_user_turn() {
     // A Gemma-4-style template that handles image and audio content items. The
-    // `<|audio|>` marker must land alongside the text (inside the user turn),
-    // not before it: an audio block in the model turn forces an immediate EOS
-    // (issue #436).
+    // `<|audio|>` marker must land inside the user turn (an audio block in the
+    // model turn forces an immediate EOS, issue #436) and, for Gemma 4, AFTER
+    // the prompt text (issue #797): upstream mlx-vlm's `_format_list_with_image_type`
+    // builds the user content as `[image]*n + [text] + [audio]*n`, and the
+    // server audio path splices the block right before the user turn's closing
+    // `<end_of_turn>`. Both land audio after the text.
     let template = "user: {% for item in messages[0]['content'] %}\
         {% if item['type'] == 'image' %}<IMG>\
         {% elif item['type'] == 'audio' %}<|audio|>\
@@ -202,10 +205,15 @@ fn vlm_chat_template_renders_audio_content_part_in_user_turn() {
     let processor = ChatTemplateProcessor::with_template(template);
     assert!(processor.supports_audio_content());
 
-    // One audio clip + the question: the audio marker precedes the text within
-    // the user turn, so `expand_gemma4_audio_tokens` finds it in place.
+    // One audio clip + the question: the audio marker follows the text within
+    // the user turn, so `expand_gemma4_audio_tokens` wraps it right after the
+    // prompt, matching the server splice and the reference frame.
     let prompt = apply_vlm_chat_template(&processor, "Transcribe this audio.", 0, 0, 1);
-    assert_eq!(prompt, "user: <|audio|>Transcribe this audio.");
+    assert_eq!(prompt, "user: Transcribe this audio.<|audio|>");
+
+    // Image + audio together render as image (before text) then text then audio.
+    let mixed = apply_vlm_chat_template(&processor, "Transcribe this audio.", 1, 0, 1);
+    assert_eq!(mixed, "user: <IMG>Transcribe this audio.<|audio|>");
 }
 
 #[test]
@@ -240,8 +248,10 @@ fn resolve_cli_prompt_routes_audio_through_vlm_template() {
         .to_string();
     let processor = ChatTemplateProcessor::with_template(template);
 
+    // Audio follows the text within the user turn (issue #797), matching the
+    // reference frame and the server audio-after-text splice.
     let prompt = resolve_cli_prompt("Transcribe.", false, Some(&processor), 0, 0, 1);
-    assert_eq!(prompt, "user: <|audio|>Transcribe.");
+    assert_eq!(prompt, "user: Transcribe.<|audio|>");
 }
 
 #[test]
@@ -259,6 +269,89 @@ fn resolve_cli_prompt_keeps_text_path_for_audio_on_plain_template() {
     let without_audio = resolve_cli_prompt("Hello", false, Some(&processor), 0, 0, 0);
     assert_eq!(with_audio, without_audio);
     assert_eq!(with_audio, "user: Hello");
+}
+
+#[test]
+fn gemma4_unified_audio_prompt_matches_reference_framing() {
+    // Regression for issue #797. On the Gemma 4 12B Unified audio path the CLI
+    // used to render the `<|audio|>` marker BEFORE the prompt text, an
+    // out-of-distribution frame that deterministically flipped the model from
+    // transcription into answering the perceived content on acoustically hard
+    // clips. The reference (upstream mlx-vlm `_format_list_with_image_type` for
+    // `gemma4`) and the server audio path both place the audio block AFTER the
+    // text. This pins the rendered CLI prompt for a Gemma 4 12B Unified audio
+    // request using the real template shape: BOS, the system-block guard, the
+    // content-parts loop, and the closed thinking-channel scaffold that the
+    // generation prompt emits when thinking defaults OFF (issue #686).
+    let template = r#"{{- bos_token -}}
+{%- if (enable_thinking is defined and enable_thinking) or tools or messages[0]['role'] in ['system', 'developer'] -%}
+{{- '<|turn>system\n<turn|>\n' -}}
+{%- endif -%}
+{%- for message in messages -%}
+{{- '<|turn>' + message['role'] + '\n' -}}
+{%- if message['content'] is string -%}
+{{- message['content'] | trim -}}
+{%- else -%}
+{%- for item in message['content'] -%}
+{%- if item['type'] == 'text' -%}{{- item['text'] | trim -}}
+{%- elif item['type'] == 'image' -%}{{- '<|image|>' -}}
+{%- elif item['type'] == 'audio' -%}{{- '<|audio|>' -}}
+{%- endif -%}
+{%- endfor -%}
+{%- endif -%}
+{{- '<turn|>\n' -}}
+{%- endfor -%}
+{%- if add_generation_prompt -%}
+{{- '<|turn>model\n' -}}
+{%- if not enable_thinking | default(false) -%}{{- '<|channel>thought\n<channel|>' -}}{%- endif -%}
+{%- endif -%}"#
+        .to_string();
+
+    let processor = ChatTemplateProcessor::with_template(template);
+    assert!(processor.supports_image_content());
+    assert!(processor.supports_audio_content());
+
+    const PROMPT: &str = "이 음성을 들리는 그대로 한국어로 받아쓰기 하세요.";
+    let prompt = apply_vlm_chat_template(&processor, PROMPT, 0, 0, 1);
+
+    // The audio marker lands AFTER the prompt text (issue #797).
+    let text_pos = prompt.find("받아쓰기").expect("prompt text present");
+    let audio_pos = prompt.find("<|audio|>").expect("audio marker present");
+    assert!(
+        text_pos < audio_pos,
+        "audio marker must follow the prompt text: {prompt}"
+    );
+
+    // Thinking defaults OFF: the closed `<|channel>thought\n<channel|>` scaffold
+    // primes a direct answer and no system turn is emitted (issue #686).
+    assert!(
+        prompt.contains("<|turn>model\n<|channel>thought\n<channel|>"),
+        "closed thinking-channel scaffold must render: {prompt}"
+    );
+    assert!(
+        !prompt.contains("<|turn>system"),
+        "no system turn without a system message: {prompt}"
+    );
+
+    // The full rendered frame, pinned exactly.
+    assert_eq!(
+        prompt,
+        "<|turn>user\n\
+         이 음성을 들리는 그대로 한국어로 받아쓰기 하세요.<|audio|><turn|>\n\
+         <|turn>model\n<|channel>thought\n<channel|>"
+    );
+
+    // CLI / server parity: the server renders the chat text-only and splices the
+    // BOA/AUDIO/EOA block right before the user turn's closing `<end_of_turn>`
+    // (`expand_gemma4_audio_tokens_for_server`). At the marker level that is the
+    // text-only prompt with `<|audio|>` inserted before the user turn's first
+    // `<turn|>`. It must equal the CLI audio prompt.
+    let text_only = apply_user_chat_template(&processor, PROMPT);
+    let server_equiv = text_only.replacen("<turn|>", "<|audio|><turn|>", 1);
+    assert_eq!(
+        prompt, server_equiv,
+        "CLI and server must frame the audio user turn identically"
+    );
 }
 
 #[test]

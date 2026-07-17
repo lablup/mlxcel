@@ -19,6 +19,7 @@ use image::{DynamicImage, ImageBuffer, ImageFormat, Rgb};
 use super::{
     StreamingDecodeState, build_generation_result, decode_request_images,
     decode_request_images_with_limits, merge_config_stop_tokens, resolve_end_of_turn_token_id,
+    resolve_xtc_newline_token_ids,
 };
 use crate::SamplingConfig;
 use crate::server::media::ImageInputLimits;
@@ -938,4 +939,55 @@ fn resolve_end_of_turn_id_prefers_gemma_over_chatml() {
         Some(107),
         "<end_of_turn> must win over <|im_end|> when both are present (candidate order)"
     );
+}
+
+// -- resolve_xtc_newline_token_ids (XTC special-token allowlist) --
+
+/// Minimal HF tokenizer stub whose vocab is the same ASCII `"a"`/`"b"` pair as
+/// [`stub_tokenizer_no_eot`] plus a literal single-character newline entry.
+/// Used to exercise the single-token case of `resolve_xtc_newline_token_ids`.
+fn stub_tokenizer_with_newline() -> MlxcelTokenizer {
+    let json = r#"{
+        "version": "1.0",
+        "truncation": null,
+        "padding": null,
+        "added_tokens": [],
+        "normalizer": null,
+        "pre_tokenizer": null,
+        "post_processor": null,
+        "decoder": null,
+        "model": {
+            "type": "BPE",
+            "dropout": null,
+            "unk_token": null,
+            "continuing_subword_prefix": null,
+            "end_of_word_suffix": null,
+            "fuse_unk": false,
+            "byte_fallback": false,
+            "vocab": {"a": 0, "b": 1, "\n": 2},
+            "merges": []
+        }
+    }"#;
+    let tokenizer = tokenizers::Tokenizer::from_bytes(json.as_bytes())
+        .expect("failed to build stub newline tokenizer");
+    MlxcelTokenizer::HuggingFace(tokenizer)
+}
+
+/// A byte-level BPE tokenizer whose vocabulary contains the bare `"\n"`
+/// character resolves it to that single id, mirroring how most
+/// production tokenizers (GPT-2/Llama-style) represent a newline as one
+/// token.
+#[test]
+fn resolve_xtc_newline_token_ids_finds_single_token_newline() {
+    let tokenizer = stub_tokenizer_with_newline();
+    assert_eq!(resolve_xtc_newline_token_ids(&tokenizer), vec![2]);
+}
+
+/// A tokenizer whose vocabulary has no entry for `"\n"` (and no `unk_token`
+/// fallback) must contribute nothing to the XTC allowlist rather than
+/// panicking or aborting model load.
+#[test]
+fn resolve_xtc_newline_token_ids_empty_when_newline_not_in_vocab() {
+    let tokenizer = stub_tokenizer_no_eot();
+    assert_eq!(resolve_xtc_newline_token_ids(&tokenizer), Vec::<i32>::new());
 }

@@ -503,6 +503,12 @@ pub(crate) fn spawn_model_worker_with_batch_config(
                 );
             }
 
+            // resolve the tokenizer's newline token id(s) once, for the
+            // XTC (Exclude Top Choices) special-token allowlist. Combined
+            // with each request's merged end-of-sequence set at enqueue time
+            // (see `BatchScheduler::enqueue_request`).
+            let xtc_newline_token_ids = resolve_xtc_newline_token_ids(&tokenizer);
+
             // #122 b3: resolve the `--kv-cache-budget` directive into a paged
             // block count now (the model's geometry is known) and install it on
             // the scheduler's pool below. A no-op (unbounded) when the flag is
@@ -533,6 +539,7 @@ pub(crate) fn spawn_model_worker_with_batch_config(
             // cap the batched-prefill transient to --max-batch-prefill-tokens (#715).
             .with_max_batch_prefill_tokens(sched_config.max_batch_prefill_tokens)
             .with_token_bias(token_bias)
+            .with_xtc_newline_token_ids(xtc_newline_token_ids)
             .with_reasoning_budget(sched_config.reasoning_budget, thinking_ids)
             .with_prompt_cache(sched_config.prompt_cache)
             .with_kv_cache_mode(sched_config.kv_cache_mode)
@@ -914,6 +921,11 @@ pub(crate) fn spawn_legacy_model_worker(
                 );
             }
 
+            // resolve the tokenizer's newline token id(s) once, mirroring
+            // the batched-worker path above, for the XTC special-token
+            // allowlist.
+            let xtc_newline_token_ids = resolve_xtc_newline_token_ids(&tokenizer);
+
             // Reuse BatchScheduler with max_batch_size=1 and chunking disabled.
             // Per the scheduler docs, size-1 behavior is identical to the old
             // sequential recv() loop, with no extra overhead.
@@ -937,6 +949,7 @@ pub(crate) fn spawn_legacy_model_worker(
                 1, // max_batch_prefill = 1 → sequential prefill
                 crate::server::DecodeStorageBackend::Dense,
             )
+            .with_xtc_newline_token_ids(xtc_newline_token_ids)
             .with_reasoning_budget(reasoning_budget, thinking_ids);
             scheduler.serve();
         })
@@ -1332,6 +1345,24 @@ fn resolve_end_of_turn_token_id(tokenizer: &MlxcelTokenizer) -> Option<i32> {
         }
     }
     None
+}
+
+/// Resolve the tokenizer's newline token id(s), once per model load.
+///
+/// XTC (Exclude Top Choices) sampling must never remove a token needed to end
+/// a line, so these ids are folded into the per-request special-token
+/// allowlist alongside the merged end-of-sequence set (see
+/// `BatchScheduler::enqueue_request`). Encoding the bare `"\n"` character
+/// (no special tokens) covers both a single-token byte-level newline piece
+/// (e.g. the GPT-2/Llama-style `Ċ`) and any tokenizer that splits it into
+/// more than one id. An encode failure (not expected for a model's own
+/// tokenizer) yields an empty allowlist contribution rather than aborting
+/// startup.
+fn resolve_xtc_newline_token_ids(tokenizer: &MlxcelTokenizer) -> Vec<i32> {
+    tokenizer
+        .encode("\n", false)
+        .map(|ids| ids.into_iter().map(|id| id as i32).collect())
+        .unwrap_or_default()
 }
 
 /// Process audio (and optionally images) for Gemma4 VLM models.

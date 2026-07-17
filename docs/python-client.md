@@ -109,7 +109,7 @@ print(llm.chat(messages, max_tokens=128, temperature=0.3))
 
 ## Sampling parameters
 
-Generation methods accept OpenAI sampling fields directly: `max_tokens`, `temperature`, `top_p`, `stop`, `seed`, `presence_penalty`, `frequency_penalty`, `logit_bias`, and `response_format`. Server-specific knobs that are not part of the OpenAI schema (`top_k`, `min_p`, `repetition_penalty`, DRY settings, and the vLLM-compatible loop-detection fields `max_pattern_size` / `min_pattern_size` / `min_count`) are forwarded in the request body. You can also pass an explicit `extra_body={...}` for arbitrary server fields; values you set there win on conflict.
+Generation methods accept OpenAI sampling fields directly: `max_tokens`, `temperature`, `top_p`, `stop`, `seed`, `presence_penalty`, `frequency_penalty`, `logit_bias`, and `response_format`. Server-specific knobs that are not part of the OpenAI schema (`top_k`, `min_p`, `repetition_penalty`, DRY settings, `xtc_probability` / `xtc_threshold`, and the vLLM-compatible loop-detection fields `max_pattern_size` / `min_pattern_size` / `min_count`) are forwarded in the request body. `xtc_probability` (`0.0`-`1.0`, default `0.0`, disabled) is the per-step chance that XTC (Exclude Top Choices) removes all but the single least-probable token among those whose probability exceeds `xtc_threshold` (`0.0`-`0.5`, default `0.1`); both are validated on `/v1/chat/completions`, `/v1/completions`, and `/v1/responses`, and an out-of-range value returns a 400 before generation starts. You can also pass an explicit `extra_body={...}` for arbitrary server fields; values you set there win on conflict.
 
 ```python
 llm.generate("Once upon a time", max_tokens=200, top_p=0.9, top_k=40, min_p=0.05)

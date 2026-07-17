@@ -814,6 +814,23 @@ pub struct SamplingConfig {
     /// When enabled, the decode loops end generation early once the raw
     /// generated stream collapses into a short repeated pattern.
     pub loop_detection: LoopDetectionConfig,
+    /// XTC (Exclude Top Choices) per-step probability (0.0 = disabled, the
+    /// default). With this probability, each sampling step applies the XTC
+    /// filter (see [`crate::sampling::apply_xtc_filter`]); otherwise the step
+    /// samples normally. `0.0` is a zero-overhead no-op that preserves the
+    /// bit-exact baseline: the gate is skipped entirely rather than drawing
+    /// (and thereby consuming) a random sample.
+    pub xtc_probability: f32,
+    /// XTC probability threshold: among the tokens whose probability exceeds
+    /// this value, the filter removes all but the single least-probable one.
+    /// Valid range `0.0..=0.5` (enforced at the request layer). Unused while
+    /// `xtc_probability == 0.0`.
+    pub xtc_threshold: f32,
+    /// Token ids the XTC filter must never remove, even when selected by its
+    /// removal rule: the tokenizer's newline token id(s) plus every id in the
+    /// merged end-of-sequence set. Resolved once per request at enqueue time
+    /// (empty by default, and unused while `xtc_probability == 0.0`).
+    pub xtc_special_token_ids: Vec<i32>,
 }
 
 impl Default for SamplingConfig {
@@ -835,6 +852,9 @@ impl Default for SamplingConfig {
             stop_token_ids: Vec::new(),
             token_bias: TokenBiasMap::default(),
             loop_detection: LoopDetectionConfig::default(),
+            xtc_probability: 0.0,
+            xtc_threshold: 0.1,
+            xtc_special_token_ids: Vec::new(),
         }
     }
 }
@@ -859,6 +879,9 @@ impl SamplingConfig {
             stop_token_ids: Vec::new(),
             token_bias: TokenBiasMap::default(),
             loop_detection: LoopDetectionConfig::default(),
+            xtc_probability: 0.0,
+            xtc_threshold: 0.1,
+            xtc_special_token_ids: Vec::new(),
         }
     }
 

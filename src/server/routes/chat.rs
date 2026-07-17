@@ -230,6 +230,14 @@ pub async fn chat_completions(
         .into_response();
     }
 
+    // Validate XTC (Exclude Top Choices) sampling parameter ranges before any
+    // generation work begins.
+    if let Err(message) =
+        validate_xtc_params(request.params.xtc_threshold, request.params.xtc_probability)
+    {
+        return ErrorResponse::new(message, "invalid_request_error").into_response();
+    }
+
     // reject `video_url` content blocks early for models that do
     // not support video. Detected once at startup from `config.json` and
     // cached on `AppState.media_support`. Returning a 400 keeps the client
@@ -967,6 +975,30 @@ fn request_has_video_blocks(request: &ChatCompletionRequest) -> bool {
     !request.video_urls().is_empty()
 }
 
+/// Validate the XTC (Exclude Top Choices) sampling parameter ranges.
+///
+/// `xtc_threshold` must be `0.0..=0.5` and `xtc_probability` must be
+/// `0.0..=1.0` when set; an absent field (`None`) is always valid since the
+/// server default then applies. Returns `Err` with a client-facing message
+/// so the caller can surface a 400 `invalid_request_error` before any
+/// generation work begins.
+pub(crate) fn validate_xtc_params(
+    xtc_threshold: Option<f32>,
+    xtc_probability: Option<f32>,
+) -> Result<(), &'static str> {
+    if let Some(threshold) = xtc_threshold
+        && !(0.0..=0.5).contains(&threshold)
+    {
+        return Err("xtc_threshold must be between 0.0 and 0.5");
+    }
+    if let Some(probability) = xtc_probability
+        && !(0.0..=1.0).contains(&probability)
+    {
+        return Err("xtc_probability must be between 0.0 and 1.0");
+    }
+    Ok(())
+}
+
 /// Maximum number of tools allowed in a single request.
 ///
 /// Enforced in `chat_completions()` to prevent DoS via large tool definitions
@@ -1125,6 +1157,8 @@ pub(crate) fn build_generate_options(
             dry_allowed_length: params.dry_allowed_length,
             dry_penalty_last_n: params.dry_penalty_last_n,
             dry_sequence_breakers: params.dry_sequence_breakers.clone(),
+            xtc_probability: params.xtc_probability,
+            xtc_threshold: params.xtc_threshold,
             stop_sequences: params.stop.clone(),
             priority: RequestPriority::default(),
             // the caller (non_stream_chat_completion /
@@ -1166,6 +1200,57 @@ mod tests {
     #[test]
     fn max_tools_constant_is_128() {
         assert_eq!(MAX_TOOLS, 128);
+    }
+
+    // -- XTC (Exclude Top Choices) request validation --
+
+    #[test]
+    fn validate_xtc_params_accepts_unset_fields() {
+        assert!(validate_xtc_params(None, None).is_ok());
+    }
+
+    #[test]
+    fn validate_xtc_params_accepts_in_range_boundaries() {
+        assert!(validate_xtc_params(Some(0.0), Some(0.0)).is_ok());
+        assert!(validate_xtc_params(Some(0.5), Some(1.0)).is_ok());
+        assert!(validate_xtc_params(Some(0.1), Some(0.4)).is_ok());
+    }
+
+    #[test]
+    fn validate_xtc_params_rejects_out_of_range_threshold() {
+        // Above the 0.5 upper bound.
+        assert_eq!(
+            validate_xtc_params(Some(0.6), None),
+            Err("xtc_threshold must be between 0.0 and 0.5")
+        );
+        // Below the 0.0 lower bound.
+        assert_eq!(
+            validate_xtc_params(Some(-0.1), None),
+            Err("xtc_threshold must be between 0.0 and 0.5")
+        );
+    }
+
+    #[test]
+    fn validate_xtc_params_rejects_out_of_range_probability() {
+        // Above the 1.0 upper bound.
+        assert_eq!(
+            validate_xtc_params(None, Some(1.1)),
+            Err("xtc_probability must be between 0.0 and 1.0")
+        );
+        // Below the 0.0 lower bound.
+        assert_eq!(
+            validate_xtc_params(None, Some(-0.5)),
+            Err("xtc_probability must be between 0.0 and 1.0")
+        );
+    }
+
+    #[test]
+    fn validate_xtc_params_checks_threshold_before_probability() {
+        // Both fields invalid: the threshold check runs first.
+        assert_eq!(
+            validate_xtc_params(Some(0.9), Some(2.0)),
+            Err("xtc_threshold must be between 0.0 and 0.5")
+        );
     }
 
     #[test]

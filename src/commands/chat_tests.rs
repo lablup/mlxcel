@@ -203,6 +203,8 @@ fn chat_options_new_sets_conventional_defaults() {
         dry_sequence_breakers: Vec::new(),
         frequency_penalty: 0.0,
         presence_penalty: 0.0,
+        xtc_probability: 0.0,
+        xtc_threshold: 0.1,
         stop_token_ids: Vec::new(),
     };
     let opts = ChatOptions::new(PathBuf::from("models/foo"), 128, sampling);

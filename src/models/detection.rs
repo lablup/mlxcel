@@ -159,6 +159,8 @@ pub fn get_model_type(model_path: &Path) -> Result<ModelType> {
         "phi3small" => Ok(ModelType::Phi3Small),
         "phimoe" => Ok(ModelType::PhiMoe),
         "minimax" => Ok(ModelType::MiniMax),
+        "minimax_m3" => Ok(ModelType::MiniMaxM3),
+        "minimax_m3_vl" => Ok(ModelType::MiniMaxM3VL),
         "gpt_oss" => Ok(ModelType::GptOss),
         "mixtral" => Ok(ModelType::Mixtral),
         "olmoe" => Ok(ModelType::OLMoE),
@@ -260,6 +262,7 @@ pub fn get_model_type(model_path: &Path) -> Result<ModelType> {
         "granite4_vision" => Ok(ModelType::Granite4VisionVLM),
         "deepseekocr" => Ok(ModelType::DeepSeekOcrVLM),
         "deepseekocr_2" => Ok(ModelType::DeepSeekOcr2VLM),
+        "unlimited-ocr" | "unlimited_ocr" => Ok(ModelType::UnlimitedOcrVLM),
         "deepseek_vl_v2" | "deepseek_vl2" => Ok(ModelType::DeepSeekVL2),
         "llava" | "llava_next" => {
             // The original IBM Granite Vision checkpoint ships as `llava_next`

@@ -61,6 +61,7 @@ pub mod kimi_vl;
 pub mod lfm2_vl;
 pub mod minicpmo_vl;
 pub mod minicpmv4_6_vl;
+pub mod minimax_m3_vl;
 pub mod mllama_vl;
 pub mod molmo2_vl;
 pub mod molmo_point_vl;
@@ -80,6 +81,7 @@ pub mod qwen3_vl;
 pub mod qwen3_vl_moe;
 pub mod smolvlm;
 pub mod step3p7;
+pub mod unlimited_ocr;
 pub mod youtu_vl;
 
 // Re-export VLM model types
@@ -103,6 +105,7 @@ pub use kimi_vl::{KimiVLModel, KimiVLMultiModalProjector};
 pub use lfm2_vl::Lfm2VlModel;
 pub use minicpmo_vl::MiniCPMOVLModel;
 pub use minicpmv4_6_vl::MiniCPMV46VLModel;
+pub use minimax_m3_vl::MiniMaxM3VlModel;
 pub use mllama_vl::MllamaVLModel;
 pub use molmo_point_vl::MolmoPointVLModel;
 pub use molmo_vl::MolmoVLModel;
@@ -122,6 +125,7 @@ pub use qwen3_vl::Qwen3VLModel;
 pub use qwen3_vl_moe::Qwen3VLMoeModel;
 pub use smolvlm::SmolVLMModel;
 pub use step3p7::Step3p7VlModel;
+pub use unlimited_ocr::UnlimitedOcrVlModel;
 pub use youtu_vl::YoutuVLModel;
 
 use crate::LanguageModel;

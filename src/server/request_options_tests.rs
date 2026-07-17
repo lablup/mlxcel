@@ -38,6 +38,10 @@ fn build_server_generate_options_uses_server_defaults() {
         options.sampling.dry_multiplier,
         config.default_dry_multiplier
     );
+    // XTC has no server-level CLI default; an absent request field always
+    // resolves to the disabled baseline regardless of server configuration.
+    assert_eq!(options.sampling.xtc_probability, 0.0);
+    assert_eq!(options.sampling.xtc_threshold, 0.1);
     assert_eq!(options.stop_sequences, None);
 }
 
@@ -61,6 +65,8 @@ fn build_server_generate_options_applies_request_overrides() {
             dry_allowed_length: Some(5),
             dry_penalty_last_n: Some(17),
             dry_sequence_breakers: Some(vec![1, 2]),
+            xtc_probability: Some(0.7),
+            xtc_threshold: Some(0.2),
             stop_sequences: Some(vec!["stop".to_string()]),
             priority: crate::server::batch::RequestPriority::High,
             reasoning_budget: crate::server::config::ReasoningBudgetOverride::default(),
@@ -83,6 +89,8 @@ fn build_server_generate_options_applies_request_overrides() {
     assert_eq!(options.sampling.dry_allowed_length, 5);
     assert_eq!(options.sampling.dry_penalty_last_n, 17);
     assert_eq!(options.sampling.dry_sequence_breakers, Vec::<i32>::new());
+    assert_eq!(options.sampling.xtc_probability, 0.7);
+    assert_eq!(options.sampling.xtc_threshold, 0.2);
     assert_eq!(options.stop_sequences, Some(vec!["stop".to_string()]));
 }
 

@@ -19,7 +19,7 @@
 mod detection;
 mod gemma3n_helpers;
 mod llama4_helpers;
-mod model_owned;
+pub(crate) mod model_owned;
 pub mod multimodal_placeholders;
 pub(crate) mod qwen_mrope_state;
 mod recurrent_snapshot;
@@ -84,6 +84,7 @@ pub mod mimo;
 pub mod minicpm;
 pub mod minicpm3;
 pub mod minimax;
+pub mod minimax_m3;
 pub mod ministral3;
 pub mod mistral4;
 pub mod mixtral;
@@ -183,6 +184,7 @@ pub use mimo::MiMoModel;
 pub use minicpm::MiniCPMModel;
 pub use minicpm3::MiniCPM3Model;
 pub use minimax::MiniMaxModel;
+pub use minimax_m3::MiniMaxM3Model;
 pub use ministral3::{Ministral3Model, Ministral3Wrapper};
 pub use mistral4::Mistral4Model;
 pub use mixtral::MixtralModel;
@@ -266,6 +268,7 @@ pub enum ModelType {
     Granite4VisionVLM, // Granite 4 Vision (SigLIP + window-QFormer + Granite-4 hybrid)
     DeepSeekOcrVLM,    // DeepSeek-OCR (SAM + CLIP + DeepSeek MoE decoder)
     DeepSeekOcr2VLM,   // DeepSeek-OCR 2 (SAM + Qwen2 resampler + DeepSeek MoE decoder)
+    UnlimitedOcrVLM,   // Unlimited-OCR (DeepSeek-OCR stack + ring sliding decode cache)
     DeepSeekVL2,       // DeepSeek-VL2 (SigLIP + downsample MLP + DeepSeek-V2 MoE decoder)
     LlavaBunnyVLM,     // LLaVA-Bunny (SigLIP + Qwen2)
     FastVLM,           // FastVLM (FastViTHD vision + Qwen2 text, mlp2x_gelu)
@@ -309,6 +312,8 @@ pub enum ModelType {
     // MoE models
     GptOss,
     MiniMax,
+    MiniMaxM3,
+    MiniMaxM3VL, // MiniMax-M3-VL (CLIP ViT + M3 hybrid dense/MoE text)
     Mixtral,
     Qwen2Moe,
     OLMoE,
@@ -460,6 +465,7 @@ pub const ALL_MODEL_TYPES: &[ModelType] = &[
     ModelType::Granite4VisionVLM,
     ModelType::DeepSeekOcrVLM,
     ModelType::DeepSeekOcr2VLM,
+    ModelType::UnlimitedOcrVLM,
     ModelType::DeepSeekVL2,
     ModelType::LlavaBunnyVLM,
     ModelType::FastVLM,
@@ -502,6 +508,8 @@ pub const ALL_MODEL_TYPES: &[ModelType] = &[
     // MoE models
     ModelType::GptOss,
     ModelType::MiniMax,
+    ModelType::MiniMaxM3,
+    ModelType::MiniMaxM3VL,
     ModelType::Mixtral,
     ModelType::Qwen2Moe,
     ModelType::OLMoE,
@@ -752,6 +760,14 @@ impl ModelType {
             // ----- MoE (other) -----
             ModelType::GptOss => ("gpt-oss (MoE)", "MoE (other)"),
             ModelType::MiniMax => ("MiniMax-M2 (MoE, 256 experts)", "MoE (other)"),
+            ModelType::MiniMaxM3 => (
+                "MiniMax-M3 (hybrid dense/MoE, block-sparse attention)",
+                "MoE (other)",
+            ),
+            ModelType::MiniMaxM3VL => (
+                "MiniMax-M3-VL (CLIP ViT + M3 hybrid dense/MoE)",
+                "MiniMax VLM",
+            ),
             ModelType::Mixtral => ("Mixtral (MoE)", "MoE (other)"),
             ModelType::KimiLinear => ("Kimi Linear (MLA + GatedDeltaNet hybrid)", "MoE (other)"),
             ModelType::KimiVL => ("Kimi-VL (MoonViT + DeepSeek-V3 MoE)", "Kimi VLM"),
@@ -811,6 +827,10 @@ impl ModelType {
             ModelType::DeepSeekOcrVLM => ("DeepSeek-OCR (SAM + CLIP + DeepSeek MoE)", "Other VLM"),
             ModelType::DeepSeekOcr2VLM => (
                 "DeepSeek-OCR 2 (SAM + Qwen2 resampler + DeepSeek MoE)",
+                "Other VLM",
+            ),
+            ModelType::UnlimitedOcrVLM => (
+                "Unlimited-OCR (SAM + CLIP + DeepSeek MoE, ring sliding decode)",
                 "Other VLM",
             ),
             ModelType::DeepSeekVL2 => (
@@ -921,6 +941,7 @@ mod metadata_tests {
             Granite4VisionVLM,
             DeepSeekOcrVLM,
             DeepSeekOcr2VLM,
+            UnlimitedOcrVLM,
             DeepSeekVL2,
             LlavaBunnyVLM,
             FastVLM,
@@ -962,6 +983,8 @@ mod metadata_tests {
             PhiMoe,
             GptOss,
             MiniMax,
+            MiniMaxM3,
+            MiniMaxM3VL,
             Mixtral,
             Qwen2Moe,
             OLMoE,

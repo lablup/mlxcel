@@ -1,3 +1,30 @@
+mlxcel (0.4.1-1~jammy1) jammy; urgency=medium
+
+  * Added: server tool-call parsers for Kimi K2 (#783), the pythonic
+    [func(arg=value)] format (#786), function-calling Gemma start_function_call
+    (#791), MiniMax-M3 namespaced XML (#793), and GLM-4.7 / LongCat arg_key /
+    arg_value grammar (#794).
+  * Added: Step-3 (step3p7) model port (#781), Command MoE (Cohere2 MoE) model
+    port (#761), and Kimi-VL 3D MoonViT video support (#762).
+  * Added: Gemma 4 per-request image soft-token budget via --image-soft-tokens
+    and the server detail / max_soft_tokens fields (#787).
+  * Fixed: Gemma 4 E-series audio transcription no longer garbles; the Conformer
+    mel front-end and per-layer clamp bounds now match the reference (#796).
+  * Fixed: Pixtral and Mistral 3 preserve image aspect ratio with row-structured
+    IMG_BREAK / IMG_END tokens and CLIP normalization (#792).
+  * Fixed: DiffusionGemma tool-call markers demoted from special tokens so tool
+    calls parse (#789).
+  * Fixed: Qwen3.5 norm shift gated on the conv1d layout so a bundled MTP head
+    cannot double-shift a converted checkpoint (#784).
+  * Fixed: bracketed Mistral tool-call parsing (#785), attention-sink prefix
+    pinned on dense --max-kv-size trim (#759), and a needless borrow in the
+    mlxcel-core build script (#795).
+  * CI: publish a CycloneDX SBOM on release (#758); drop the broken log-level
+    input from the cargo-deny action (#790).
+  * Dependencies: bump the minor-and-patch group with 5 updates (#780).
+
+ -- Jeongkyu Shin <inureyes@gmail.com>  Thu, 16 Jul 2026 09:00:00 +0000
+
 mlxcel (0.4.0-1~jammy1) jammy; urgency=medium
 
   * Added: experimental OpenXLA / IREE compiler backend, opt-in and default-off

@@ -40,6 +40,7 @@ use crate::tokenizer::MlxcelTokenizer;
 
 use super::chat::{
     build_generate_options, decode_token, parse_priority_header, structured_error_to_response,
+    validate_xtc_params,
 };
 
 /// Build a `CompletionLogprobs` from a list of `TokenLogprobData` (legacy format).
@@ -121,6 +122,14 @@ pub async fn completions(
     {
         return ErrorResponse::new("logprobs must be between 0 and 5", "invalid_request_error")
             .into_response();
+    }
+
+    // Validate XTC (Exclude Top Choices) sampling parameter ranges before any
+    // generation work begins.
+    if let Err(message) =
+        validate_xtc_params(request.params.xtc_threshold, request.params.xtc_probability)
+    {
+        return ErrorResponse::new(message, "invalid_request_error").into_response();
     }
 
     // validate thinking_budget_tokens early.
@@ -385,4 +394,48 @@ async fn stream_completion(
     Sse::new(stream)
         .keep_alive(keepalive.into_inner())
         .into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -- XTC (Exclude Top Choices) request validation on /v1/completions --
+    //
+    // `CompletionRequest` flattens `SamplingParams`, so `xtc_probability` /
+    // `xtc_threshold` are reachable off `request.params`. These tests exercise
+    // the same field access the `completions` handler performs and confirm the
+    // shared `validate_xtc_params` gate rejects out-of-range values.
+
+    #[test]
+    fn completions_rejects_out_of_range_xtc_probability() {
+        let request: CompletionRequest =
+            serde_json::from_str(r#"{"model":"m","prompt":"hi","xtc_probability":2.0}"#).unwrap();
+        assert_eq!(
+            validate_xtc_params(request.params.xtc_threshold, request.params.xtc_probability),
+            Err("xtc_probability must be between 0.0 and 1.0")
+        );
+    }
+
+    #[test]
+    fn completions_rejects_out_of_range_xtc_threshold() {
+        let request: CompletionRequest =
+            serde_json::from_str(r#"{"model":"m","prompt":"hi","xtc_threshold":-0.1}"#).unwrap();
+        assert_eq!(
+            validate_xtc_params(request.params.xtc_threshold, request.params.xtc_probability),
+            Err("xtc_threshold must be between 0.0 and 0.5")
+        );
+    }
+
+    #[test]
+    fn completions_accepts_in_range_xtc() {
+        let request: CompletionRequest = serde_json::from_str(
+            r#"{"model":"m","prompt":"hi","xtc_probability":0.5,"xtc_threshold":0.1}"#,
+        )
+        .unwrap();
+        assert!(
+            validate_xtc_params(request.params.xtc_threshold, request.params.xtc_probability)
+                .is_ok()
+        );
+    }
 }

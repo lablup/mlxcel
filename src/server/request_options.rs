@@ -49,6 +49,12 @@ pub(crate) struct RequestOptionOverrides {
     pub dry_allowed_length: Option<usize>,
     pub dry_penalty_last_n: Option<usize>,
     pub dry_sequence_breakers: Option<Vec<i32>>,
+    /// XTC (Exclude Top Choices) per-step probability override. Validated at
+    /// the request layer (`0.0..=1.0`) before it reaches here.
+    pub xtc_probability: Option<f32>,
+    /// XTC probability threshold override. Validated at the request layer
+    /// (`0.0..=0.5`) before it reaches here.
+    pub xtc_threshold: Option<f32>,
     pub stop_sequences: Option<Vec<String>>,
     pub priority: RequestPriority,
     /// per-request thinking-token budget override.
@@ -145,6 +151,14 @@ pub(crate) fn build_server_generate_options(
         presence_penalty: overrides
             .presence_penalty
             .unwrap_or(config.default_presence_penalty),
+        // XTC has no server-level CLI default (unlike the other knobs above):
+        // it is an experimental, purely opt-in per-request feature, so an
+        // absent request field always resolves to the disabled baseline
+        // (`0.0`) regardless of server configuration. `0.1` is the inert
+        // upstream-conventional threshold value used only while
+        // `xtc_probability > 0.0`.
+        xtc_probability: overrides.xtc_probability.unwrap_or(0.0),
+        xtc_threshold: overrides.xtc_threshold.unwrap_or(0.1),
         stop_token_ids: Vec::new(),
     });
 

@@ -252,8 +252,10 @@ impl SwitchLinear {
         // tensor. Stack them here so the gather paths see the same `[num_experts,
         // ...]` layout as the pre-stacked checkpoints. This branch only runs when
         // the pre-stacked tensor is absent, so it never changes behavior for an
-        // already-loadable checkpoint.
-        if let Some((weight, scales, biases)) = stack_individual_experts(weights, prefix) {
+        // already-loadable checkpoint. No declared expert count is available at
+        // this generic call site, so the shortfall cross-check is skipped
+        // (`None`); callers that do carry one (DeepSeek v1) pass it through.
+        if let Some((weight, scales, biases)) = stack_individual_experts(weights, prefix, None)? {
             return Ok(Self::from_stacked_parts(
                 weight, scales, biases, group_size, bits, mode,
             ));
@@ -314,13 +316,22 @@ impl SwitchLinear {
 
 /// Stack per-expert projection tensors (`{root}.experts.{idx}.{proj}.{weight,
 /// scales,biases}`) into single `[num_experts, ...]` tensors, given a
-/// stacked-style `prefix` of the form `{root}.switch_mlp.{proj}`. Returns `None`
-/// when the prefix is not in that form or no `experts.0` weight exists, so the
-/// caller falls through to its own missing-weight error.
+/// stacked-style `prefix` of the form `{root}.switch_mlp.{proj}`. Returns
+/// `Ok(None)` when the prefix is not in that form or no `experts.0` weight
+/// exists, so the caller falls through to its own missing-weight error.
 ///
 /// `scales`/`biases` are stacked only when expert 0 carries them, matching the
 /// quantized/regular split the stacked loader applies. Experts are gathered
 /// contiguously from index 0 until the first gap.
+///
+/// `expected_experts` lets a caller that knows the model's declared expert
+/// count (e.g. DeepSeek's `n_routed_experts`) cross-check it against how many
+/// were actually stacked: `Err` is returned when fewer contiguous experts were
+/// found than declared, so a truncated checkpoint fails at load time with a
+/// clear message instead of silently registering fewer experts than the
+/// router can index (which would otherwise surface as an out-of-range
+/// `gather_qmm`/`gather_mm` at inference). Pass `None` to skip the check (the
+/// generic MoE loaders below do not have an expected count to check against).
 ///
 /// The expert leaf name comes from the `{proj}` segment of the prefix, so a
 /// caller that passes overridden leaf names (e.g. Mixtral's `w1`/`w2`/`w3` via
@@ -328,14 +339,50 @@ impl SwitchLinear {
 /// keys without any name baked in here.
 ///
 /// Used by: Qwen2Moe (Qwen1.5-MoE / Qwen2-MoE individual-expert checkpoints),
-///          Mixtral (`block_sparse_moe.experts.{idx}.{w1,w2,w3}` checkpoints)
-fn stack_individual_experts(
+///          Mixtral (`block_sparse_moe.experts.{idx}.{w1,w2,w3}` checkpoints),
+///          DeepSeek v1 (`baidu/Unlimited-OCR` raw per-expert checkpoint)
+pub(crate) fn stack_individual_experts(
+    weights: &WeightMap,
+    prefix: &str,
+    expected_experts: Option<usize>,
+) -> Result<
+    Option<(
+        UniquePtr<MlxArray>,
+        Option<UniquePtr<MlxArray>>,
+        Option<UniquePtr<MlxArray>>,
+    )>,
+    String,
+> {
+    let Some((weight, scales, biases, found)) =
+        stack_individual_experts_with_count(weights, prefix)
+    else {
+        return Ok(None);
+    };
+
+    if let Some(expected) = expected_experts
+        && found < expected
+    {
+        return Err(format!(
+            "{prefix}: checkpoint provides only {found} of the {expected} experts declared \
+             by the model config (stacked contiguously from index 0 until the first gap); \
+             refusing to load a truncated MoE layer"
+        ));
+    }
+
+    Ok(Some((weight, scales, biases)))
+}
+
+/// Same contiguous per-expert stacking as [`stack_individual_experts`], plus
+/// the number of experts actually found so the caller can cross-check it
+/// against a declared expert count.
+fn stack_individual_experts_with_count(
     weights: &WeightMap,
     prefix: &str,
 ) -> Option<(
     UniquePtr<MlxArray>,
     Option<UniquePtr<MlxArray>>,
     Option<UniquePtr<MlxArray>>,
+    usize,
 )> {
     // prefix: "{root}.switch_mlp.{proj}"  ->  experts at "{root}.experts.{idx}.{proj}"
     let proj = prefix.rsplit('.').next()?;
@@ -366,7 +413,7 @@ fn stack_individual_experts(
     let weight = mlxcel_core::stack_owned(&stacked_weight, 0);
     let scales = has_scales.then(|| mlxcel_core::stack_owned(&stacked_scales, 0));
     let biases = has_biases.then(|| mlxcel_core::stack_owned(&stacked_biases, 0));
-    Some((weight, scales, biases))
+    Some((weight, scales, biases, idx))
 }
 
 pub struct SwitchGLU {

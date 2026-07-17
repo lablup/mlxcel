@@ -85,6 +85,7 @@ mod paged_pool_tests;
 #[cfg(test)]
 #[path = "cache/paged_turbo_tests.rs"]
 mod paged_turbo_tests;
+pub mod ring;
 #[cfg(test)]
 #[path = "cache/sparse_v_tests.rs"]
 mod sparse_v_tests;
@@ -103,6 +104,7 @@ pub use paged::{
     PagedSequenceState,
 };
 pub use paged_detach::DetachedPagedCacheSet;
+pub use ring::RingSlidingKVCache;
 
 use std::cell::{Ref, RefCell, RefMut};
 use std::rc::Rc;

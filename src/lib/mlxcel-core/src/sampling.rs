@@ -379,6 +379,18 @@ fn sample_token_optimized_core(
         last_logits
     };
 
+    // XTC (Exclude Top Choices): a logits pre-processing step, applied here
+    // (before the fused temperature/top-k/top-p/min-p/categorical sampler)
+    // the same way the penalties above are. `xtc_probability <= 0.0` is the
+    // default disabled state and skips this entirely — no array ops, and no
+    // draw from the per-request RNG stream, which keeps every existing
+    // request's token stream byte-identical to before this feature existed.
+    let last_logits = if config.xtc_probability > 0.0 {
+        apply_xtc_step(&last_logits, config)
+    } else {
+        last_logits
+    };
+
     let token = ffi::fused_sample(
         &last_logits,
         config.temperature,
@@ -470,13 +482,15 @@ impl FusedSampleParams {
 /// The fast path applies one set of scalar parameters across the whole
 /// `[B, vocab]` batch in a single [`ffi::fused_sample`] call. It cannot
 /// represent per-row history-based penalties (repetition / DRY / frequency /
-/// presence) or a non-empty token bias, both of which require per-row logit
-/// edits before sampling. When this returns `false`, the caller must fall
-/// back to the per-row sampler.
+/// presence), a non-empty token bias, or XTC (`xtc_probability > 0.0`), all of
+/// which require per-row logit edits before sampling. XTC, like a non-empty
+/// token bias, is a per-row logit edit that must run through the per-row
+/// sampler, so it disqualifies the fused fast path. When this returns `false`,
+/// the caller must fall back to the per-row sampler.
 ///
 /// Used by: `BatchScheduler::execute_batched_decode` fast-path gate
 pub fn config_supports_fused_batch(config: &SamplingConfig) -> bool {
-    !config.needs_token_history() && config.token_bias.is_empty()
+    !config.needs_token_history() && config.token_bias.is_empty() && config.xtc_probability <= 0.0
 }
 
 /// Per-row eligibility for the batched fused fast path.
@@ -1153,6 +1167,128 @@ pub(crate) fn top_p_filter(logits: &MlxArray, p: f32) -> UniquePtr<MlxArray> {
     ffi::take_along_axis(&filtered_sorted, &unsort_indices, -1)
 }
 
+/// Apply XTC (Exclude Top Choices) filtering to logits.
+///
+/// Among the tokens whose probability exceeds `threshold`, if two or more
+/// exist, this removes (sets to `-inf`) all of them except the single
+/// least-probable one — suppressing the dominant choices promotes lexical
+/// diversity. If fewer than two tokens exceed the threshold, this is a
+/// no-op. Token ids in `allowlist` are never removed even when selected by
+/// that rule; callers pass the tokenizer's newline token id(s) plus the full
+/// merged end-of-sequence set (see `BatchScheduler::enqueue_request`) so XTC
+/// can never suppress a token needed to end a line or the sequence.
+///
+/// This is a logits pre-processing step, applied the same way
+/// [`apply_dry_penalty`] and the repetition/frequency/presence penalties
+/// are: before the fused C++ temperature/top-k/top-p/min-p/categorical
+/// sampler ([`ffi::fused_sample`]), not inside it.
+///
+/// Algorithm (all lazy MLX array ops, no host round-trip):
+/// 1. `probs = softmax(logits)`; `above = probs > threshold`.
+/// 2. No-op guard: `count(above) < 2` disables removal for that row.
+/// 3. Mask every non-`above` position to `+inf` in a scratch copy of
+///    `probs`, then `argmin` finds the single least-probable `above` token
+///    (the one to keep).
+/// 4. Removal candidates = `above` AND NOT the kept index AND NOT
+///    `allowlist`, gated by the no-op guard from step 2.
+/// 5. `where(remove, -inf, logits)`.
+///
+/// Used by: [`apply_xtc_step`]
+pub(crate) fn apply_xtc_filter(
+    logits: &MlxArray,
+    threshold: f32,
+    allowlist: &[i32],
+) -> UniquePtr<MlxArray> {
+    let shape = ffi::array_shape(logits);
+    let vocab_size = *shape.last().unwrap() as usize;
+
+    let probs = ffi::softmax(logits, -1);
+
+    // Tokens whose probability exceeds the threshold.
+    let threshold_arr = ffi::full_f32(&[1], threshold, dtype::FLOAT32);
+    let above = ffi::greater(&probs, &threshold_arr);
+
+    // No-op guard: fewer than two above-threshold tokens in this row.
+    let above_f32 = ffi::astype(&above, dtype::FLOAT32);
+    let count = ffi::sum_axis(&above_f32, -1, true);
+    let two = ffi::full_f32(&[1], 2.0, dtype::FLOAT32);
+    let has_two_or_more = ffi::greater_equal(&count, &two);
+
+    // Identify the single least-probable above-threshold token: mask every
+    // other position to +inf so it can never win the row-wise argmin.
+    let pos_inf = ffi::full_f32(&[1], f32::INFINITY, dtype::FLOAT32);
+    let masked_probs = ffi::where_cond(&above, &probs, &pos_inf);
+    let least_idx = ffi::argmin(&masked_probs, -1, true);
+
+    // One-hot mark of the least-probable token via scatter, so it can be
+    // excluded from the removal set below.
+    let zeros_full = ffi::zeros(&shape, dtype::FLOAT32);
+    let least_idx_shape = ffi::array_shape(&least_idx);
+    let ones_col = ffi::ones(&least_idx_shape, dtype::FLOAT32);
+    let is_least_f32 = ffi::put_along_axis(&zeros_full, &least_idx, &ones_col, -1);
+    let zero_scalar = ffi::full_f32(&[1], 0.0, dtype::FLOAT32);
+    let is_least = ffi::greater(&is_least_f32, &zero_scalar);
+
+    // Removal candidates: above-threshold, excluding the least-probable one.
+    let not_least = ffi::logical_not(&is_least);
+    let remove_candidate = ffi::logical_and(&above, &not_least);
+
+    // Never remove allowlisted special tokens (newline + merged EOS ids).
+    let remove_candidate = if allowlist.is_empty() {
+        remove_candidate
+    } else {
+        let mut allow_vec = vec![0.0f32; vocab_size];
+        for &id in allowlist {
+            if id >= 0 && (id as usize) < vocab_size {
+                allow_vec[id as usize] = 1.0;
+            }
+        }
+        let allow_arr = ffi::from_slice_f32(&allow_vec, &[1, vocab_size as i32]);
+        let allow_broadcast = ffi::broadcast_to(&allow_arr, &shape);
+        let is_allowed = ffi::greater(&allow_broadcast, &zero_scalar);
+        let not_allowed = ffi::logical_not(&is_allowed);
+        ffi::logical_and(&remove_candidate, &not_allowed)
+    };
+
+    // Gate the whole filter on having >= 2 above-threshold candidates.
+    let remove_mask = ffi::logical_and(&remove_candidate, &has_two_or_more);
+
+    let neg_inf = ffi::full_f32(&[1], f32::NEG_INFINITY, dtype::FLOAT32);
+    ffi::where_cond(&remove_mask, &neg_inf, logits)
+}
+
+/// Per-step probability gate for [`apply_xtc_filter`].
+///
+/// Draws exactly one uniform sample from the same per-request seeded global
+/// MLX random stream the fused categorical sampler consumes at the end of
+/// [`sample_token_optimized_core`] (`ffi::random_seed`, called once per
+/// generation via `generation_policy::seed_rng_if_needed`, seeds this
+/// stream). MLX's default random key is a thread-local sequence that is
+/// split synchronously at graph-*construction* time, not at `eval` time —
+/// so the order these calls are made in Rust (not the order their results
+/// are later evaluated) determines which slice of the stream each one
+/// consumes. Drawing here, before the categorical draw inside
+/// [`ffi::fused_sample`], keeps the whole decode step reproducible for a
+/// fixed seed: the same seed always produces the same gate outcome followed
+/// by the same categorical sample.
+///
+/// Only called when `config.xtc_probability > 0.0` (see
+/// [`sample_token_optimized_core`]); a request that leaves XTC disabled
+/// never advances the RNG stream here, preserving the pre-XTC token stream
+/// byte-for-byte.
+fn apply_xtc_step(logits: &MlxArray, config: &SamplingConfig) -> UniquePtr<MlxArray> {
+    // SAFETY: `key` is documented to accept a null pointer, meaning "draw
+    // from the current thread-local default RNG state" (mirrors the
+    // existing `std::ptr::null()` "no explicit key" usage in `layers.rs`).
+    let gate_draw =
+        unsafe { ffi::random_uniform(0.0, 1.0, &[1], dtype::FLOAT32, std::ptr::null()) };
+    let probability = ffi::full_f32(&[1], config.xtc_probability, dtype::FLOAT32);
+    let gate = ffi::less(&gate_draw, &probability);
+
+    let filtered = apply_xtc_filter(logits, config.xtc_threshold, &config.xtc_special_token_ids);
+    ffi::where_cond(&gate, &filtered, logits)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1326,6 +1462,15 @@ mod tests {
             ..Default::default()
         };
         assert!(!config_supports_fused_batch(&dry));
+    }
+
+    #[test]
+    fn config_supports_fused_batch_false_for_xtc() {
+        let xtc = SamplingConfig {
+            xtc_probability: 1.0,
+            ..Default::default()
+        };
+        assert!(!config_supports_fused_batch(&xtc));
     }
 
     #[test]
@@ -2177,5 +2322,129 @@ mod tests {
             fast.logprob,
             full
         );
+    }
+
+    // -- XTC (Exclude Top Choices) filter --
+
+    /// Logits whose softmax probabilities are roughly: token 0 ~0.665,
+    /// token 1 ~0.245, token 2 ~0.090, token 3 ~1.4e-9. Tokens 0-2 clearly
+    /// exceed a 0.01 threshold; token 3 clearly does not. Only token 0
+    /// exceeds a 0.5 threshold.
+    fn xtc_test_logits() -> UniquePtr<MlxArray> {
+        ffi::from_slice_f32(&[10.0, 9.0, 8.0, -10.0], &[1, 4])
+    }
+
+    #[test]
+    fn apply_xtc_filter_keeps_least_probable_above_threshold_token() {
+        let logits = xtc_test_logits();
+        let result = apply_xtc_filter(&logits, 0.01, &[]);
+
+        // Tokens 0 and 1 are above threshold and not the least-probable of
+        // the three, so both are removed. Token 2 is the least-probable
+        // above-threshold token and is kept. Token 3 never exceeded the
+        // threshold and is untouched either way.
+        assert_eq!(logit_at(&result, 0), f32::NEG_INFINITY);
+        assert_eq!(logit_at(&result, 1), f32::NEG_INFINITY);
+        assert_eq!(logit_at(&result, 2), 8.0);
+        assert_eq!(logit_at(&result, 3), -10.0);
+    }
+
+    #[test]
+    fn apply_xtc_filter_allowlist_tokens_survive_removal() {
+        let logits = xtc_test_logits();
+        // Token 0 would otherwise be removed (above threshold, not the
+        // least-probable); the allowlist must keep it intact.
+        let result = apply_xtc_filter(&logits, 0.01, &[0]);
+
+        assert_eq!(logit_at(&result, 0), 10.0);
+        assert_eq!(logit_at(&result, 1), f32::NEG_INFINITY);
+        assert_eq!(logit_at(&result, 2), 8.0);
+        assert_eq!(logit_at(&result, 3), -10.0);
+    }
+
+    #[test]
+    fn apply_xtc_filter_is_noop_with_fewer_than_two_candidates() {
+        let logits = xtc_test_logits();
+        // threshold 0.5: only token 0 (~0.665) exceeds it, so the filter
+        // must not remove anything.
+        let result = apply_xtc_filter(&logits, 0.5, &[]);
+
+        assert_eq!(logit_at(&result, 0), 10.0);
+        assert_eq!(logit_at(&result, 1), 9.0);
+        assert_eq!(logit_at(&result, 2), 8.0);
+        assert_eq!(logit_at(&result, 3), -10.0);
+    }
+
+    #[test]
+    fn apply_xtc_filter_is_noop_with_zero_candidates() {
+        let logits = xtc_test_logits();
+        // threshold 0.9: no token exceeds it.
+        let result = apply_xtc_filter(&logits, 0.9, &[]);
+
+        assert_eq!(logit_at(&result, 0), 10.0);
+        assert_eq!(logit_at(&result, 1), 9.0);
+        assert_eq!(logit_at(&result, 2), 8.0);
+        assert_eq!(logit_at(&result, 3), -10.0);
+    }
+
+    #[test]
+    fn apply_xtc_step_gate_at_zero_never_fires() {
+        let config = SamplingConfig {
+            xtc_probability: 0.0,
+            xtc_threshold: 0.01,
+            ..Default::default()
+        };
+        // Try several seeds: a probability-0.0 gate must never fire
+        // regardless of the drawn uniform sample.
+        for seed in [1u64, 2, 3] {
+            ffi::random_seed(seed);
+            let logits = xtc_test_logits();
+            let result = apply_xtc_step(&logits, &config);
+            assert_eq!(logit_at(&result, 0), 10.0);
+            assert_eq!(logit_at(&result, 1), 9.0);
+        }
+    }
+
+    #[test]
+    fn apply_xtc_step_gate_at_one_always_fires() {
+        let config = SamplingConfig {
+            xtc_probability: 1.0,
+            xtc_threshold: 0.01,
+            ..Default::default()
+        };
+        // Uniform samples are drawn from [0, 1), so a probability-1.0 gate
+        // must always fire regardless of the drawn value.
+        for seed in [11u64, 12, 13] {
+            ffi::random_seed(seed);
+            let logits = xtc_test_logits();
+            let result = apply_xtc_step(&logits, &config);
+            assert_eq!(logit_at(&result, 0), f32::NEG_INFINITY);
+            assert_eq!(logit_at(&result, 1), f32::NEG_INFINITY);
+            assert_eq!(logit_at(&result, 2), 8.0);
+        }
+    }
+
+    #[test]
+    fn apply_xtc_step_mid_probability_is_reproducible_for_the_same_seed() {
+        let config = SamplingConfig {
+            xtc_probability: 0.5,
+            xtc_threshold: 0.01,
+            ..Default::default()
+        };
+
+        ffi::random_seed(42);
+        let result_a = apply_xtc_step(&xtc_test_logits(), &config);
+        let a0 = logit_at(&result_a, 0);
+        let a1 = logit_at(&result_a, 1);
+
+        // Re-seeding with the same value must reproduce the same gate
+        // outcome (and therefore the same resulting logits) deterministically.
+        ffi::random_seed(42);
+        let result_b = apply_xtc_step(&xtc_test_logits(), &config);
+        let b0 = logit_at(&result_b, 0);
+        let b1 = logit_at(&result_b, 1);
+
+        assert_eq!(a0, b0);
+        assert_eq!(a1, b1);
     }
 }

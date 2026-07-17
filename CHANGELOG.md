@@ -4,6 +4,35 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [v0.4.1] - 2026-07-16
+
+### Added
+
+- Server tool-call parsers for more model families: Kimi K2 sectioned format (#783), the pythonic `[func(arg=value)]` format (#786), function-calling Gemma `start_function_call` (#791), MiniMax-M3 namespaced XML (#793), and GLM-4.7 and LongCat `arg_key` / `arg_value` grammar (#794).
+- Step-3 (`step3p7`) model port (#781).
+- Command MoE (Cohere2 MoE) model port (#761).
+- Kimi-VL 3D MoonViT video support: image and video patch embedding (#762).
+- Gemma 4 per-request image soft-token budget. Set it with `--image-soft-tokens` on the CLI or with `detail` (`low` / `high` / `auto`) or the `max_soft_tokens` extension on a server `image_url` content part; off-ladder values are rejected rather than clamped (#787).
+
+### Fixed
+
+- Gemma 4 E-series (`e2b` / `e4b`) audio transcription was garbled. The Conformer mel front-end (`fft_overdrive`, log floor, unfold size, frame mask) and the per-layer ClippableLinear clamp bounds now match the reference, so E-series transcription is correct again (#796).
+- Pixtral and Mistral 3 force-resized every image to a square and dropped the row structure. They now preserve aspect ratio and emit `[IMG_BREAK]` between rows and `[IMG_END]` at the end, with CLIP normalization (#792).
+- DiffusionGemma tool-call and channel markers were registered as special tokens, so skip-special decode stripped them and the tool-call parser never saw them. They are demoted to non-special at load (#789).
+- Qwen3.5 gated the RMSNorm `+1.0` shift on the presence of MTP weights, which could shift an already-converted checkpoint a second time. The shift is now gated on the conv1d weight layout alone (#784).
+- Server tool-call parsing for the bracketed Mistral format (#785).
+- Dense `--max-kv-size` trim dropped the attention-sink prefix; it is now pinned (#759).
+- Needless borrow on the `march` flag in the `mlxcel-core` build script (#795).
+
+### CI/CD
+
+- Generate and publish a CycloneDX SBOM on release (#758).
+- Drop the broken `log-level` input from the cargo-deny action step (#790).
+
+### Dependencies
+
+- Bump the minor-and-patch group with 5 updates (#780).
+
 ## [v0.4.0] - 2026-07-12
 
 ### Added
@@ -1040,6 +1069,7 @@ Initial public release of mlxcel.
 - GitHub Actions release workflow for macOS ARM64
 - Profile mode for prefill/decode timing analysis
 
+[v0.4.1]: https://github.com/lablup/mlxcel/compare/v0.4.0...v0.4.1
 [v0.4.0]: https://github.com/lablup/mlxcel/compare/v0.3.3...v0.4.0
 [v0.3.3]: https://github.com/lablup/mlxcel/compare/v0.3.2...v0.3.3
 [v0.3.2]: https://github.com/lablup/mlxcel/compare/v0.3.1...v0.3.2

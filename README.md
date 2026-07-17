@@ -6,7 +6,14 @@
 
 High-performance LLM/VLM inference runtime and server for Apple Silicon. The CLI and server are implemented in Rust and execute models through native MLX C++ bindings. Linux/CUDA builds are supported as a secondary target.
 
-## New in v0.4.0
+## New in v0.4.1
+
+- **Tool calling across more model families.** Server tool-call parsers for Kimi K2, the pythonic `[func(arg=value)]` format, function-calling Gemma (`start_function_call`), MiniMax-M3 (namespaced XML), GLM-4.7, and LongCat, plus the bracketed Mistral format.
+- **Three more model families.** Step-3 (`step3p7`), Command MoE (Cohere2 MoE), and Kimi-VL video input (3D MoonViT image and video patch embedding).
+- **Per-request image detail for Gemma 4.** An image soft-token budget trades prompt length for image detail, set with `--image-soft-tokens` on the CLI or `detail` / `max_soft_tokens` on the server image content parts.
+- **Audio and vision correctness fixes.** Gemma 4 E-series audio transcription no longer garbles (the Conformer mel front-end and per-layer clamp bounds now match the reference), Pixtral and Mistral 3 preserve image aspect ratio with row-structured `[IMG_BREAK]` / `[IMG_END]` tokens, DiffusionGemma tool calls parse again, and a Qwen3.5 norm-shift guard stops a converted checkpoint that bundles an MTP head from corrupting its RMSNorm weights.
+
+## New in v0.4
 
 - **Experimental OpenXLA / IREE backend (opt-in).** A second forward-execution engine built on a Rust-native StableHLO emitter and the IREE runtime, selectable with `MLXCEL_BACKEND=xla` behind the `xla-backend` / `xla-iree` build features. It runs on Metal and CUDA and serves through a continuous-batching engine. Default builds do not compile it, and the MLX path is unchanged.
 - **Over 20 new vision-language and OCR families.** Qwen3-Omni (with talker speech output), Llama 3.2 Vision, GLM-4V and GLM-4V MoE, Hunyuan-VL, ERNIE-4.5 MoE VL, DeepSeek-VL2, Kimi-VL, FastVLM, Moondream2, Idefics2, SmolVLM, LFM2-VL, and Granite Vision, plus the OCR set DeepSeek-OCR and DeepSeek-OCR 2, dots.ocr, GLM-OCR, and PaddleOCR-VL.

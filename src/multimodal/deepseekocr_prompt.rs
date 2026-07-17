@@ -84,3 +84,89 @@ pub fn insert_deepseekocr_image_tokens(
 
     None
 }
+
+/// Unlimited-OCR variant: a single literal `<image>` placeholder covers *all*
+/// pages, so one placeholder expands to the sum of every page's placeholder
+/// count (in page order). Falls back to [`insert_deepseekocr_image_tokens`] for
+/// the one-placeholder-per-image and no-placeholder layouts.
+pub fn insert_unlimited_ocr_image_tokens(
+    prompt_tokens: &mut Vec<i32>,
+    counts: &[i32],
+    image_token_id: i32,
+) -> Option<InsertedDeepSeekOcrTokens> {
+    if prompt_tokens.is_empty() || counts.is_empty() {
+        return None;
+    }
+    let placeholders = prompt_tokens
+        .iter()
+        .filter(|&&t| t == image_token_id)
+        .count();
+
+    // Single `<image>` covering every page: expand it to the summed run. This
+    // also matches the common single-page case (one placeholder, one count).
+    if placeholders == 1 {
+        let total: i32 = counts.iter().sum();
+        let mut expanded = Vec::with_capacity(prompt_tokens.len() + total as usize);
+        for &tok in prompt_tokens.iter() {
+            if tok == image_token_id {
+                for _ in 0..total {
+                    expanded.push(image_token_id);
+                }
+            } else {
+                expanded.push(tok);
+            }
+        }
+        *prompt_tokens = expanded;
+        return Some(InsertedDeepSeekOcrTokens {
+            image_blocks: counts.len(),
+            total_image_tokens: total,
+        });
+    }
+
+    insert_deepseekocr_image_tokens(prompt_tokens, counts, image_token_id)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const IMG: i32 = 128815;
+
+    #[test]
+    fn unlimited_single_image_expands_in_place() {
+        let mut toks = vec![0, IMG, 5, 6];
+        let stats = insert_unlimited_ocr_image_tokens(&mut toks, &[3], IMG).unwrap();
+        assert_eq!(stats.image_blocks, 1);
+        assert_eq!(stats.total_image_tokens, 3);
+        assert_eq!(toks, vec![0, IMG, IMG, IMG, 5, 6]);
+    }
+
+    #[test]
+    fn unlimited_single_placeholder_covers_all_pages() {
+        // One literal <image> covers three pages: expand to the summed count.
+        let mut toks = vec![0, IMG, 9];
+        let stats = insert_unlimited_ocr_image_tokens(&mut toks, &[2, 3, 4], IMG).unwrap();
+        assert_eq!(stats.image_blocks, 3);
+        assert_eq!(stats.total_image_tokens, 9);
+        assert_eq!(toks.iter().filter(|&&t| t == IMG).count(), 9);
+        assert_eq!(toks.first().copied(), Some(0));
+        assert_eq!(toks.last().copied(), Some(9));
+    }
+
+    #[test]
+    fn unlimited_no_placeholder_falls_back_to_splice() {
+        let mut toks = vec![0, 7, 8];
+        let stats = insert_unlimited_ocr_image_tokens(&mut toks, &[2, 2], IMG).unwrap();
+        assert_eq!(stats.total_image_tokens, 4);
+        // Spliced after BOS.
+        assert_eq!(toks, vec![0, IMG, IMG, IMG, IMG, 7, 8]);
+    }
+
+    #[test]
+    fn unlimited_empty_inputs_return_none() {
+        let mut empty: Vec<i32> = vec![];
+        assert!(insert_unlimited_ocr_image_tokens(&mut empty, &[1], IMG).is_none());
+        let mut toks = vec![0, IMG];
+        assert!(insert_unlimited_ocr_image_tokens(&mut toks, &[], IMG).is_none());
+    }
+}

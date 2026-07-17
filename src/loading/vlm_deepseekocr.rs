@@ -123,6 +123,79 @@ pub(crate) fn load_deepseekocr_vlm(model_path: &Path) -> Result<LoadedModel> {
     Ok(LoadedModel::DeepSeekOcrVLM(vlm))
 }
 
+const DEFAULT_SLIDING_WINDOW: i32 = 128;
+
+/// Load `baidu/Unlimited-OCR`. The vision + text stack is the DeepSeek-OCR V1
+/// layout (SAM + CLIP + linear projector + DeepSeek MoE decoder) shipped under
+/// the same layout-B `model.*` prefixes, so it loads exactly like
+/// [`load_deepseekocr_vlm`]; the raw checkpoint stores MoE experts per-expert
+/// (`experts.{idx}`) rather than pre-stacked, which the DeepSeek `SwitchLinear`
+/// loader now folds in transparently. The only Unlimited-OCR-specific step is
+/// wrapping the runtime with a ring sliding decode cache whose window comes from
+/// `language_config.sliding_window_size`.
+pub(crate) fn load_unlimited_ocr_vlm(model_path: &Path) -> Result<LoadedModel> {
+    let (_config_str, full_config) = read_sanitized_vlm_config(model_path)?;
+
+    let mut lc = full_config
+        .get("language_config")
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("Missing language_config in Unlimited-OCR config"))?;
+    let window = lc
+        .get("sliding_window_size")
+        .and_then(|v| v.as_i64())
+        .map(|v| v as i32)
+        .unwrap_or(DEFAULT_SLIDING_WINDOW)
+        .max(1);
+    if let Some(obj) = lc.as_object_mut() {
+        obj.entry("model_type".to_string())
+            .or_insert_with(|| json!("deepseek"));
+        if !obj.contains_key("quantization")
+            && let Some(q) = full_config.get("quantization")
+        {
+            obj.insert("quantization".to_string(), q.clone());
+        }
+    }
+    let args: models::deepseek::ModelArgs = serde_json::from_value(lc)
+        .map_err(|e| anyhow::anyhow!("Failed to parse Unlimited-OCR language_config: {}", e))?;
+    let (gs, bits) = (args.group_size(), args.bits());
+
+    let weights = remap_deepseekocr_weights(load_vlm_weights_common(model_path, None)?);
+
+    let sam = SamEncoder::from_weights(&weights, "sam_model", SamConfig::default())
+        .map_err(|e| anyhow::anyhow!("Failed to load Unlimited-OCR SAM encoder: {}", e))?;
+    let clip = ClipEncoder::from_weights(&weights, "vision_model", ClipConfig::default())
+        .map_err(|e| anyhow::anyhow!("Failed to load Unlimited-OCR CLIP encoder: {}", e))?;
+    let projector = UnifiedLinear::from_weights(&weights, "projector.layers", gs, bits)
+        .map_err(|e| anyhow::anyhow!("Failed to load Unlimited-OCR projector: {}", e))?;
+    let image_newline = weights
+        .get("image_newline")
+        .map(|w| mlxcel_core::copy(w))
+        .ok_or_else(|| anyhow::anyhow!("Missing image_newline"))?;
+    let view_separator = weights
+        .get("view_separator")
+        .map(|w| mlxcel_core::copy(w))
+        .ok_or_else(|| anyhow::anyhow!("Missing view_separator"))?;
+
+    let text_weights = strip_language_model_prefix(weights);
+    let text_model = models::deepseek::DeepSeekModel::from_weights(&text_weights, &args)
+        .map_err(|e| anyhow::anyhow!("Failed to load Unlimited-OCR text model: {}", e))?;
+
+    let inner = vision::deepseekocr::DeepSeekOcrVlModel {
+        text_model,
+        sam,
+        clip,
+        projector,
+        image_newline,
+        view_separator,
+        processor: DeepSeekOcrProcessor::default(),
+        image_token_id: IMAGE_TOKEN_ID,
+        eos_token_id: 1,
+        n_embed: N_EMBED,
+    };
+    let vlm = vision::unlimited_ocr::UnlimitedOcrVlModel::new(inner, window);
+    Ok(LoadedModel::UnlimitedOcrVLM(vlm))
+}
+
 /// V2 key remap on top of V1's rules: fold the layout-B `qwen2_model` nesting
 /// (`model.qwen2_model.model.model.*` and the `query_*` banks) into the
 /// canonical `vision_model.qwen2_encoder.*`, and normalize the query banks to

@@ -292,6 +292,8 @@ fn sampling_config(model_path: &Path) -> SamplingConfig {
         dry_sequence_breakers: Vec::new(),
         frequency_penalty: 0.0,
         presence_penalty: 0.0,
+        xtc_probability: 0.0,
+        xtc_threshold: 0.1,
         stop_token_ids: mlxcel::read_eos_token_ids(model_path),
     })
 }

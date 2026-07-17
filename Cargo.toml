@@ -4,7 +4,7 @@ resolver = "2"
 
 [package]
 name = "mlxcel"
-version = "0.4.0"
+version = "0.4.1"
 edition = "2024"
 description = "High-performance LLM/VLM/VLA inference on Apple Silicon and CUDA GPUs"
 repository = "https://github.com/lablup/mlxcel"

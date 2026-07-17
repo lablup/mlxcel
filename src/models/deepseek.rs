@@ -822,33 +822,72 @@ impl SwitchGLU {
 
 impl SwitchLinear {
     /// Load SwitchLinear from weights, falling back to non-quantized when scales are absent.
+    ///
+    /// Two on-disk layouts are accepted. A pre-stacked `{prefix}.weight`
+    /// (`[num_experts, ...]`, from mlx-converted checkpoints) is loaded
+    /// directly. Otherwise the per-expert layout
+    /// `{root}.experts.{idx}.{proj}.weight` (raw HF checkpoints such as
+    /// `baidu/Unlimited-OCR`) is stacked into one `[num_experts, ...]` tensor
+    /// via [`crate::models::switch_layers::stack_individual_experts`]; this
+    /// fallback only runs when the pre-stacked tensor is absent, so it never
+    /// changes behavior for an already-loadable checkpoint. The declared
+    /// `args.n_routed_experts` is passed through as the expected count, so a
+    /// checkpoint truncated mid-experts (missing a middle or trailing expert)
+    /// fails to load with a clear error instead of silently registering fewer
+    /// experts than the router can index.
     pub fn from_weights(
         weights: &WeightMap,
         args: &ModelArgs,
         prefix: &str,
     ) -> Result<Self, String> {
-        let weight = get_weight_copy(weights, &format!("{}.weight", prefix))?;
-        let scales_key = format!("{}.scales", prefix);
-        if weights.contains_key(&scales_key) {
-            let scales = mlxcel_core::copy(weights.get(&scales_key).unwrap());
-            let biases = get_weight_copy(weights, &format!("{}.biases", prefix))?;
-            let shape = mlxcel_core::array_shape(&weight);
-            let num_experts = shape[0] as usize;
-            Ok(Self::Quantized {
+        // Pre-stacked layout.
+        if let Some(weight) = weights.get(&format!("{}.weight", prefix)) {
+            let weight = mlxcel_core::copy(weight);
+            let scales = weights
+                .get(&format!("{}.scales", prefix))
+                .map(|w| mlxcel_core::copy(w));
+            let biases = weights
+                .get(&format!("{}.biases", prefix))
+                .map(|w| mlxcel_core::copy(w));
+            return Ok(Self::from_stacked_parts(weight, scales, biases, args));
+        }
+
+        // Per-expert layout: stack `{root}.experts.{idx}.{proj}` tensors.
+        if let Some((weight, scales, biases)) =
+            crate::models::switch_layers::stack_individual_experts(
+                weights,
+                prefix,
+                args.n_routed_experts,
+            )?
+        {
+            return Ok(Self::from_stacked_parts(weight, scales, biases, args));
+        }
+
+        Err(format!("Weight not found: {}.weight", prefix))
+    }
+
+    /// Build a `SwitchLinear` from a stacked `[num_experts, ...]` weight,
+    /// selecting the quantized path when scales are present.
+    fn from_stacked_parts(
+        weight: UniquePtr<MlxArray>,
+        scales: Option<UniquePtr<MlxArray>>,
+        biases: Option<UniquePtr<MlxArray>>,
+        args: &ModelArgs,
+    ) -> Self {
+        let num_experts = mlxcel_core::array_shape(&weight)[0] as usize;
+        match (scales, biases) {
+            (Some(scales), Some(biases)) => Self::Quantized {
                 weight,
                 scales,
                 biases,
                 group_size: args.group_size(),
                 bits: args.bits(),
                 num_experts,
-            })
-        } else {
-            let shape = mlxcel_core::array_shape(&weight);
-            let num_experts = shape[0] as usize;
-            Ok(Self::Regular {
+            },
+            _ => Self::Regular {
                 weight,
                 num_experts,
-            })
+            },
         }
     }
 }
@@ -912,3 +951,7 @@ impl LanguageModel for DeepSeekModel {
         Some(self.embed_tokens_forward(input_ids))
     }
 }
+
+#[cfg(test)]
+#[path = "deepseek_tests.rs"]
+mod tests;

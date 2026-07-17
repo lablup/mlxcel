@@ -29,6 +29,8 @@ fn sample_params() -> ResolvedSamplingParams {
         dry_sequence_breakers: vec![10, 20],
         frequency_penalty: 0.2,
         presence_penalty: 0.3,
+        xtc_probability: 0.4,
+        xtc_threshold: 0.15,
         stop_token_ids: vec![1, 2],
     }
 }
@@ -51,6 +53,8 @@ fn build_sampling_config_keeps_sampling_fields_when_temperature_is_positive() {
     assert_eq!(config.dry_sequence_breakers, params.dry_sequence_breakers);
     assert_eq!(config.frequency_penalty, params.frequency_penalty);
     assert_eq!(config.presence_penalty, params.presence_penalty);
+    assert_eq!(config.xtc_probability, params.xtc_probability);
+    assert_eq!(config.xtc_threshold, params.xtc_threshold);
     assert_eq!(config.stop_token_ids, params.stop_token_ids);
 }
 
@@ -69,5 +73,9 @@ fn build_sampling_config_uses_greedy_defaults_when_temperature_is_zero() {
     assert_eq!(config.repetition_penalty, params.repetition_penalty);
     assert_eq!(config.frequency_penalty, params.frequency_penalty);
     assert_eq!(config.presence_penalty, params.presence_penalty);
+    // XTC is applied regardless of temperature, so the greedy branch still
+    // threads the resolved probability/threshold through.
+    assert_eq!(config.xtc_probability, params.xtc_probability);
+    assert_eq!(config.xtc_threshold, params.xtc_threshold);
     assert_eq!(config.stop_token_ids, params.stop_token_ids);
 }

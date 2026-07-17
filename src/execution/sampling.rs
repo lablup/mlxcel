@@ -41,6 +41,11 @@ pub struct ResolvedSamplingParams {
     pub dry_sequence_breakers: Vec<i32>,
     pub frequency_penalty: f32,
     pub presence_penalty: f32,
+    /// XTC (Exclude Top Choices) per-step probability (0.0 = disabled).
+    pub xtc_probability: f32,
+    /// XTC probability threshold (valid range `0.0..=0.5`, enforced at the
+    /// request layer). Unused while `xtc_probability == 0.0`.
+    pub xtc_threshold: f32,
     pub stop_token_ids: Vec<i32>,
 }
 
@@ -56,6 +61,11 @@ pub fn build_sampling_config(params: ResolvedSamplingParams) -> SamplingConfig {
             dry_base: params.dry_base,
             dry_allowed_length: params.dry_allowed_length,
             dry_penalty_last_n: params.dry_penalty_last_n,
+            // XTC is a logits pre-processing step applied regardless of
+            // temperature (like the repetition/DRY/frequency/presence
+            // penalties above), so the greedy branch threads it through too.
+            xtc_probability: params.xtc_probability,
+            xtc_threshold: params.xtc_threshold,
             stop_token_ids: params.stop_token_ids,
             ..SamplingConfig::greedy()
         }
@@ -74,6 +84,8 @@ pub fn build_sampling_config(params: ResolvedSamplingParams) -> SamplingConfig {
             dry_sequence_breakers: params.dry_sequence_breakers,
             frequency_penalty: params.frequency_penalty,
             presence_penalty: params.presence_penalty,
+            xtc_probability: params.xtc_probability,
+            xtc_threshold: params.xtc_threshold,
             stop_token_ids: params.stop_token_ids,
             token_bias: TokenBiasMap::default(),
             // Loop detection defaults to disabled here. The server control
@@ -81,6 +93,12 @@ pub fn build_sampling_config(params: ResolvedSamplingParams) -> SamplingConfig {
             // where the loaded model family is visible (see
             // `request_options::build_server_generate_options`).
             loop_detection: LoopDetectionConfig::default(),
+            // The special-token allowlist is resolved per-request from the
+            // tokenizer and the merged EOS set, which are not visible here;
+            // the server control plane sets `sampling.xtc_special_token_ids`
+            // after this helper returns (see
+            // `BatchScheduler::enqueue_request`).
+            xtc_special_token_ids: Vec::new(),
         }
     }
 }
