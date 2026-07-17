@@ -72,7 +72,7 @@ use super::media::{
 };
 use super::prompt_cache::key::resolve_session_key;
 use super::types::ChatCompletionRequest;
-use super::types::request::Tool;
+use super::types::request::{ContentPart, Message, MessageContent, Tool};
 
 pub(crate) struct PreparedChatRequest {
     pub(crate) prompt: String,
@@ -298,6 +298,74 @@ fn has_reasoning_fields(request: &ChatCompletionRequest) -> bool {
         .messages
         .iter()
         .any(|m| m.reasoning.as_ref().is_some_and(|r| !r.is_empty()))
+}
+
+/// Returns `true` when the request carries at least one message with
+/// user-meaningful ("effective") input, per issue #773.
+///
+/// A message counts as effective input when any of the following holds:
+///
+/// * its flattened text content (string form, or a content-list `text`
+///   part) is non-empty after trimming whitespace
+/// * a content-list `image_url` part carries a non-empty `url`
+/// * a content-list `video_url` part carries a non-empty `url` (mlxcel's
+///   media-input surface extends the OpenAI shape with video; treated the
+///   same as an image for this check)
+/// * a content-list `input_audio` part carries non-empty `data`
+/// * the message carries a non-empty `tool_calls` array
+/// * the message carries a non-empty `reasoning` field
+///
+/// An empty `messages` array (or a request where every message fails all
+/// of the above) has no effective input and should be rejected with a 400
+/// before any model dispatch — see [`super::routes::chat::chat_completions`]
+/// and [`super::routes::responses::create_response`].
+pub(crate) fn request_has_effective_input(request: &ChatCompletionRequest) -> bool {
+    request.messages.iter().any(message_has_effective_input)
+}
+
+/// Single-message half of [`request_has_effective_input`].
+fn message_has_effective_input(message: &Message) -> bool {
+    if !message.content.text().trim().is_empty() {
+        return true;
+    }
+
+    if let MessageContent::Parts(parts) = &message.content {
+        for part in parts {
+            match part {
+                // Text parts are already covered by `content.text()` above.
+                ContentPart::Text { .. } => {}
+                ContentPart::ImageUrl { image_url } => {
+                    if !image_url.url.trim().is_empty() {
+                        return true;
+                    }
+                }
+                ContentPart::VideoUrl { video_url } => {
+                    if !video_url.url.trim().is_empty() {
+                        return true;
+                    }
+                }
+                ContentPart::InputAudio { input_audio } => {
+                    if !input_audio.data.trim().is_empty() {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+
+    if message.tool_calls.as_ref().is_some_and(|tc| !tc.is_empty()) {
+        return true;
+    }
+
+    if message
+        .reasoning
+        .as_ref()
+        .is_some_and(|r| !r.trim().is_empty())
+    {
+        return true;
+    }
+
+    false
 }
 
 /// Build raw JSON messages for template rendering, preserving all fields

@@ -28,7 +28,7 @@ use axum::{
 use mlxcel_core::sampling::{LogprobsConfig, TokenLogprobData};
 
 use crate::server::batch::RequestPriority;
-use crate::server::chat_request::prepare_chat_request_with_cache;
+use crate::server::chat_request::{prepare_chat_request_with_cache, request_has_effective_input};
 use crate::server::chat_template_kwargs::{extract_request_kwargs, merge_server_and_request};
 use crate::server::config::{PromptCacheRequestContext, ReasoningBudgetOverride};
 use crate::server::prompt_cache::key::{
@@ -199,6 +199,18 @@ pub async fn chat_completions(
     headers: HeaderMap,
     Json(request): Json<ChatCompletionRequest>,
 ) -> Response {
+    // Reject requests with no effective input before any other validation or
+    // model dispatch (issue #773): an empty `messages` array, or messages
+    // whose content is empty/whitespace-only with no media/tool/reasoning
+    // payload, would otherwise reach the model worker and waste a prefill.
+    if !request_has_effective_input(&request) {
+        return ErrorResponse::new(
+            "Request must include at least one non-empty message content or media input.",
+            "invalid_request_error",
+        )
+        .into_response();
+    }
+
     // Validate top_logprobs range per OpenAI spec (0-20)
     if let Some(top) = request.top_logprobs
         && top > 20
@@ -1493,5 +1505,47 @@ mod tests {
         // `MessageContent::Text` branch.
         req.messages[0].content = MessageContent::Text("hi".to_string());
         assert!(!request_has_video_blocks(&req));
+    }
+
+    // -- no-effective-input rejection (issue #773), exercised at the
+    // handler-check boundary rather than the shared helper's own unit tests
+    // (see chat_request_tests.rs for the full helper matrix). ------------
+
+    #[test]
+    fn chat_completions_handler_check_rejects_empty_messages() {
+        let mut req = build_request(vec![]);
+        req.messages.clear();
+        assert!(!request_has_effective_input(&req));
+    }
+
+    #[test]
+    fn chat_completions_handler_check_rejects_empty_string_content() {
+        let mut req = build_request(vec![]);
+        req.messages[0].content = MessageContent::Text(String::new());
+        assert!(!request_has_effective_input(&req));
+    }
+
+    #[test]
+    fn chat_completions_handler_check_accepts_image_only_request() {
+        let req = build_request(vec![ContentPart::ImageUrl {
+            image_url: ImageUrl::new("data:image/png;base64,abc".to_string()),
+        }]);
+        assert!(request_has_effective_input(&req));
+    }
+
+    #[test]
+    fn chat_completions_no_effective_input_error_matches_issue_773_spec() {
+        // The handler's early-reject branch must surface HTTP 400,
+        // `invalid_request_error`, and this exact message.
+        let response = ErrorResponse::new(
+            "Request must include at least one non-empty message content or media input.",
+            "invalid_request_error",
+        );
+        assert_eq!(response.status, axum::http::StatusCode::BAD_REQUEST);
+        assert_eq!(response.error.error_type, "invalid_request_error");
+        assert_eq!(
+            response.error.message,
+            "Request must include at least one non-empty message content or media input."
+        );
     }
 }

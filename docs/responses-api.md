@@ -108,6 +108,16 @@ means `text`, `image_url`, `video_url`, and `input_audio` can deserialize, but
 actual execution still depends on the loaded model's media support. OpenAI
 Responses-specific `input_image` / `input_file` compatibility is not complete.
 
+A request with no effective input is rejected with 400 before any model
+dispatch: an empty `input` array, a blank/whitespace-only string or `text`
+part, and no image/video/audio, tool call, or reasoning content anywhere in
+the translated conversation (including history pulled in through
+`previous_response_id` / `conversation`) all trigger the same
+`invalid_request_error`. A blank `input` combined with non-empty
+`instructions` still passes, since `instructions` becomes a real system
+message in the rendered conversation. The same check applies to
+`/v1/chat/completions`.
+
 ## Response shape
 
 Responses use an OpenAI-like object shape:

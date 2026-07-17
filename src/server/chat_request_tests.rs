@@ -14,10 +14,10 @@
 
 use super::{
     build_chat_messages, build_raw_json_messages, prepare_chat_request,
-    prepare_chat_request_with_cache,
+    prepare_chat_request_with_cache, request_has_effective_input,
 };
 use crate::server::chat_template::ChatTemplateProcessor;
-use crate::server::types::request::{ToolCallFunction, ToolCallInMessage};
+use crate::server::types::request::{InputAudio, ToolCallFunction, ToolCallInMessage, VideoUrl};
 use crate::server::types::{
     ChatCompletionRequest, ContentPart, ImageUrl, Message, MessageContent, Role, SamplingParams,
 };
@@ -1784,4 +1784,216 @@ fn reasoning_field_routes_request_through_raw_json_path() {
         Some("compute 2+2=4"),
         "raw JSON assistant message must carry the reasoning field"
     );
+}
+
+// -- request_has_effective_input (issue #773) --------------------------
+
+fn text_message(role: Role, text: &str) -> Message {
+    Message {
+        role,
+        content: MessageContent::Text(text.to_string()),
+        name: None,
+        tool_call_id: None,
+        reasoning: None,
+        tool_calls: None,
+    }
+}
+
+#[test]
+fn effective_input_rejects_empty_messages_array() {
+    let request = request_with_messages(vec![]);
+    assert!(!request_has_effective_input(&request));
+}
+
+#[test]
+fn effective_input_rejects_single_empty_string_content() {
+    let request = request_with_messages(vec![text_message(Role::User, "")]);
+    assert!(!request_has_effective_input(&request));
+}
+
+#[test]
+fn effective_input_rejects_whitespace_only_content() {
+    let request = request_with_messages(vec![text_message(Role::User, "   \n\t  ")]);
+    assert!(!request_has_effective_input(&request));
+}
+
+#[test]
+fn effective_input_rejects_content_list_with_only_an_empty_text_item() {
+    let request = request_with_messages(vec![Message {
+        role: Role::User,
+        content: MessageContent::Parts(vec![ContentPart::Text {
+            text: String::new(),
+        }]),
+        name: None,
+        tool_call_id: None,
+        reasoning: None,
+        tool_calls: None,
+    }]);
+    assert!(!request_has_effective_input(&request));
+}
+
+#[test]
+fn effective_input_accepts_image_only_request() {
+    let request = request_with_messages(vec![Message {
+        role: Role::User,
+        content: MessageContent::Parts(vec![ContentPart::ImageUrl {
+            image_url: ImageUrl::new("data:image/png;base64,aGVsbG8=".to_string()),
+        }]),
+        name: None,
+        tool_call_id: None,
+        reasoning: None,
+        tool_calls: None,
+    }]);
+    assert!(request_has_effective_input(&request));
+}
+
+#[test]
+fn effective_input_accepts_history_with_real_content_even_when_last_message_is_empty() {
+    let request = request_with_messages(vec![
+        text_message(Role::User, "What is the capital of France?"),
+        text_message(Role::Assistant, "Paris."),
+        text_message(Role::User, ""),
+    ]);
+    assert!(request_has_effective_input(&request));
+}
+
+#[test]
+fn effective_input_rejects_image_url_that_is_itself_empty() {
+    // A part of type `image_url` is present, but its `url` is blank — this
+    // must not count as media input any more than an empty text does.
+    let request = request_with_messages(vec![Message {
+        role: Role::User,
+        content: MessageContent::Parts(vec![ContentPart::ImageUrl {
+            image_url: ImageUrl::new(""),
+        }]),
+        name: None,
+        tool_call_id: None,
+        reasoning: None,
+        tool_calls: None,
+    }]);
+    assert!(!request_has_effective_input(&request));
+}
+
+#[test]
+fn effective_input_accepts_audio_only_request() {
+    let request = request_with_messages(vec![Message {
+        role: Role::User,
+        content: MessageContent::Parts(vec![ContentPart::InputAudio {
+            input_audio: InputAudio {
+                data: "base64audiodata".to_string(),
+                format: "wav".to_string(),
+            },
+        }]),
+        name: None,
+        tool_call_id: None,
+        reasoning: None,
+        tool_calls: None,
+    }]);
+    assert!(request_has_effective_input(&request));
+}
+
+#[test]
+fn effective_input_rejects_input_audio_with_empty_data() {
+    let request = request_with_messages(vec![Message {
+        role: Role::User,
+        content: MessageContent::Parts(vec![ContentPart::InputAudio {
+            input_audio: InputAudio {
+                data: String::new(),
+                format: "wav".to_string(),
+            },
+        }]),
+        name: None,
+        tool_call_id: None,
+        reasoning: None,
+        tool_calls: None,
+    }]);
+    assert!(!request_has_effective_input(&request));
+}
+
+#[test]
+fn effective_input_accepts_video_only_request() {
+    let request = request_with_messages(vec![Message {
+        role: Role::User,
+        content: MessageContent::Parts(vec![ContentPart::VideoUrl {
+            video_url: VideoUrl {
+                url: "file:///tmp/clip.mp4".to_string(),
+                fps: None,
+            },
+        }]),
+        name: None,
+        tool_call_id: None,
+        reasoning: None,
+        tool_calls: None,
+    }]);
+    assert!(request_has_effective_input(&request));
+}
+
+#[test]
+fn effective_input_accepts_message_with_only_tool_calls() {
+    // An assistant message that carries `tool_calls` but empty `content`
+    // (issue #89 shape) legitimately carries no text but is not degenerate.
+    let request = request_with_messages(vec![Message {
+        role: Role::Assistant,
+        content: MessageContent::Text(String::new()),
+        name: None,
+        tool_call_id: None,
+        reasoning: None,
+        tool_calls: Some(vec![ToolCallInMessage {
+            id: "call_1".to_string(),
+            call_type: "function".to_string(),
+            function: ToolCallFunction {
+                name: "get_weather".to_string(),
+                arguments: "{}".to_string(),
+            },
+        }]),
+    }]);
+    assert!(request_has_effective_input(&request));
+}
+
+#[test]
+fn effective_input_rejects_message_with_empty_tool_calls_array() {
+    let request = request_with_messages(vec![Message {
+        role: Role::Assistant,
+        content: MessageContent::Text(String::new()),
+        name: None,
+        tool_call_id: None,
+        reasoning: None,
+        tool_calls: Some(vec![]),
+    }]);
+    assert!(!request_has_effective_input(&request));
+}
+
+#[test]
+fn effective_input_accepts_message_with_only_non_empty_reasoning() {
+    let request = request_with_messages(vec![Message {
+        role: Role::Assistant,
+        content: MessageContent::Text(String::new()),
+        name: None,
+        tool_call_id: None,
+        reasoning: Some("thinking about it".to_string()),
+        tool_calls: None,
+    }]);
+    assert!(request_has_effective_input(&request));
+}
+
+#[test]
+fn effective_input_rejects_message_with_whitespace_only_reasoning() {
+    let request = request_with_messages(vec![Message {
+        role: Role::Assistant,
+        content: MessageContent::Text(String::new()),
+        name: None,
+        tool_call_id: None,
+        reasoning: Some("   ".to_string()),
+        tool_calls: None,
+    }]);
+    assert!(!request_has_effective_input(&request));
+}
+
+#[test]
+fn effective_input_accepts_normal_multi_turn_text_conversation() {
+    let request = request_with_messages(vec![
+        text_message(Role::System, "You are a helpful assistant."),
+        text_message(Role::User, "Hello!"),
+    ]);
+    assert!(request_has_effective_input(&request));
 }

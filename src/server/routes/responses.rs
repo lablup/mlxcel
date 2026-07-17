@@ -36,7 +36,7 @@ use axum::{
 };
 
 use crate::server::AppState;
-use crate::server::chat_request::prepare_chat_request_with_cache;
+use crate::server::chat_request::{prepare_chat_request_with_cache, request_has_effective_input};
 use crate::server::config::ReasoningBudgetOverride;
 use crate::server::conversation_store::ConversationItem;
 use crate::server::responses_store::StoredResponse;
@@ -77,6 +77,20 @@ pub async fn create_response(
         Ok(t) => t,
         Err(err) => return translate_error_to_response(err).into_response(),
     };
+
+    // Reject requests with no effective input before any model dispatch
+    // (issue #773), mirroring the chat-completions check. Runs on the
+    // translated `ChatCompletionRequest` so history pulled in from
+    // `previous_response_id` / `conversation` and the `instructions`
+    // system-message counts toward "effective input" the same way a
+    // legitimate chat-completions history turn would.
+    if !request_has_effective_input(&translated.chat_request) {
+        return ErrorResponse::new(
+            "Request must include at least one non-empty message content or media input.",
+            "invalid_request_error",
+        )
+        .into_response();
+    }
 
     // Build the structured-output constraint (json_schema) up front.
     let structured = {
@@ -963,6 +977,7 @@ fn persist_response(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::server::types::ChatCompletionRequest;
 
     #[test]
     fn split_reasoning_inline_block_separates_content() {
@@ -993,5 +1008,78 @@ mod tests {
         let (visible, reasoning) = split_reasoning("just text", None);
         assert_eq!(visible, "just text");
         assert!(reasoning.is_none());
+    }
+
+    // -- no-effective-input rejection (issue #773), exercised on the
+    // translated request the create_response handler actually checks.
+
+    fn translate(body: &str) -> ChatCompletionRequest {
+        let request: CreateResponseRequest = serde_json::from_str(body).unwrap();
+        responses_request_to_chat(&request, None, None)
+            .expect("translation should succeed")
+            .chat_request
+    }
+
+    #[test]
+    fn responses_route_rejects_empty_string_input() {
+        let chat_request = translate(r#"{"model":"m","input":""}"#);
+        assert!(!request_has_effective_input(&chat_request));
+    }
+
+    #[test]
+    fn responses_route_rejects_whitespace_only_input() {
+        let chat_request = translate(r#"{"model":"m","input":"   "}"#);
+        assert!(!request_has_effective_input(&chat_request));
+    }
+
+    #[test]
+    fn responses_route_rejects_content_list_with_only_empty_text() {
+        let chat_request = translate(
+            r#"{"model":"m","input":[
+                {"type":"message","role":"user","content":[{"type":"text","text":""}]}
+            ]}"#,
+        );
+        assert!(!request_has_effective_input(&chat_request));
+    }
+
+    #[test]
+    fn responses_route_accepts_image_only_input() {
+        let chat_request = translate(
+            r#"{"model":"m","input":[
+                {"type":"message","role":"user","content":[
+                    {"type":"image_url","image_url":{"url":"data:image/png;base64,aGVsbG8="}}
+                ]}
+            ]}"#,
+        );
+        assert!(request_has_effective_input(&chat_request));
+    }
+
+    #[test]
+    fn responses_route_accepts_normal_text_input() {
+        let chat_request = translate(r#"{"model":"m","input":"Hello there"}"#);
+        assert!(request_has_effective_input(&chat_request));
+    }
+
+    #[test]
+    fn responses_route_history_with_real_content_passes_despite_empty_last_message() {
+        let chat_request = translate(
+            r#"{"model":"m","input":[
+                {"type":"message","role":"user","content":"What is the capital of France?"},
+                {"type":"message","role":"assistant","content":"Paris."},
+                {"type":"message","role":"user","content":""}
+            ]}"#,
+        );
+        assert!(request_has_effective_input(&chat_request));
+    }
+
+    #[test]
+    fn responses_route_non_empty_instructions_count_as_effective_input() {
+        // `instructions` is translated into a leading system message (see
+        // `responses_request_to_chat`), so a request with blank `input` but
+        // real `instructions` is not degenerate — documented behavior, not
+        // an oversight.
+        let chat_request =
+            translate(r#"{"model":"m","input":"","instructions":"You are a helpful assistant."}"#);
+        assert!(request_has_effective_input(&chat_request));
     }
 }
