@@ -257,6 +257,26 @@ impl ChatTemplateProcessor {
         self.template.contains("not thinking is defined")
     }
 
+    /// Detect a chat template that gates reasoning on a `thinking_mode`
+    /// string variable rather than the conventional boolean `enable_thinking`
+    /// kwarg mlxcel forwards by default (issue #775).
+    ///
+    /// Some HuggingFace chat templates check `thinking_mode == "enabled"` (or
+    /// similar string comparisons) instead of the `enable_thinking` boolean.
+    /// mlxcel never populates `thinking_mode`, so such templates silently take
+    /// their non-thinking branch regardless of what the caller asked for.
+    ///
+    /// The check is a conservative substring scan for the literal identifier
+    /// `thinking_mode` anywhere in the template source, mirroring the style of
+    /// [`wants_bare_thinking_alias`] and the other template-introspection
+    /// heuristics in this file. It may false-positive on a template that
+    /// merely mentions the string in a comment, but never false-negatives on a
+    /// template that reads the variable — and a spurious kwarg is harmless
+    /// since Jinja silently ignores unreferenced context entries.
+    fn wants_thinking_mode_alias(&self) -> bool {
+        self.template.contains("thinking_mode")
+    }
+
     /// Return whether the template uses the `tools` variable, without caching.
     ///
     /// Uses a conservative string-based heuristic so it can be called from
@@ -432,6 +452,7 @@ impl ChatTemplateProcessor {
             kwargs,
             self.default_enable_thinking,
             self.wants_bare_thinking_alias(),
+            self.wants_thinking_mode_alias(),
         );
 
         // Render directly: minijinja reproduces the template's own
@@ -496,6 +517,7 @@ impl ChatTemplateProcessor {
             kwargs,
             self.default_enable_thinking,
             self.wants_bare_thinking_alias(),
+            self.wants_thinking_mode_alias(),
         );
 
         // Render directly: minijinja reproduces the template's own
@@ -525,6 +547,14 @@ impl ChatTemplateProcessor {
 /// `enable_thinking` value is also mirrored into a bare `thinking` key, unless
 /// the caller already supplied an explicit `thinking` kwarg — that override
 /// always wins.
+///
+/// When `thinking_mode_alias` is `true` (see
+/// [`ChatTemplateProcessor::wants_thinking_mode_alias`]) and the resolved
+/// `enable_thinking` value is `true`, `thinking_mode: "enabled"` is injected
+/// into the context, unless the caller already supplied an explicit
+/// `thinking_mode` kwarg (that override always wins). Nothing is injected
+/// when thinking is disabled — templates default the variable themselves in
+/// that case (issue #775).
 fn build_template_context(
     messages: minijinja::Value,
     bos_token: &str,
@@ -534,6 +564,7 @@ fn build_template_context(
     kwargs: &ChatTemplateKwargs,
     default_enable_thinking: bool,
     bare_thinking_alias: bool,
+    thinking_mode_alias: bool,
 ) -> minijinja::Value {
     // Start with the default context fields.
     let mut ctx: std::collections::BTreeMap<&str, minijinja::Value> =
@@ -593,24 +624,43 @@ fn build_template_context(
         );
     }
 
+    // Fully-resolved `enable_thinking` value: the request/server-default
+    // kwarg if present, otherwise the tokenizer-derived server default.
+    // Shared by both alias mechanisms below.
+    let effective_enable_thinking = kwargs
+        .get("enable_thinking")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(default_enable_thinking);
+
     // Model-aware `thinking` alias (issue #512): templates detected by
     // `wants_bare_thinking_alias` (e.g. the upstream deepseek_v32 template)
     // gate their `<think>` block on a bare `thinking` boolean rather than the
     // conventional `enable_thinking` kwarg mlxcel forwards above. Mirror the
-    // fully-resolved `enable_thinking` value (server default, overridden by
-    // any request/server-default kwarg) into `thinking` so toggling reasoning
-    // actually has an effect on that template family. An explicit `thinking`
-    // kwarg from the request/server default is a non-reserved key already
-    // merged into `owned` by the loop above, so it always wins over this
-    // derived alias.
+    // fully-resolved `enable_thinking` value into `thinking` so toggling
+    // reasoning actually has an effect on that template family. An explicit
+    // `thinking` kwarg from the request/server default is a non-reserved key
+    // already merged into `owned` by the loop above, so it always wins over
+    // this derived alias.
     if bare_thinking_alias && !owned.contains_key("thinking") {
-        let effective_enable_thinking = kwargs
-            .get("enable_thinking")
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(default_enable_thinking);
         owned.insert(
             "thinking".to_string(),
             minijinja::Value::from(effective_enable_thinking),
+        );
+    }
+
+    // Model-aware `thinking_mode` alias (issue #775): templates detected by
+    // `wants_thinking_mode_alias` gate reasoning on a `thinking_mode` string
+    // variable rather than the boolean `enable_thinking`. When thinking is
+    // enabled, inject `thinking_mode: "enabled"` so those templates actually
+    // take their thinking branch, unless the caller already supplied an
+    // explicit `thinking_mode` kwarg (that override always wins). Inject
+    // nothing when thinking is disabled — templates default the variable
+    // themselves in that case, and there is no well-known "disabled" spelling
+    // to standardize on across template families.
+    if thinking_mode_alias && effective_enable_thinking && !owned.contains_key("thinking_mode") {
+        owned.insert(
+            "thinking_mode".to_string(),
+            minijinja::Value::from("enabled"),
         );
     }
 
@@ -2276,5 +2326,167 @@ TOOL
             .unwrap();
         assert!(out.starts_with("<think>"));
         assert!(!out.contains("HAS_BARE_THINKING"));
+    }
+
+    // ----- `thinking_mode` string-variable alias (issue #775) -----
+    //
+    // Some chat templates gate reasoning on a `thinking_mode` STRING variable
+    // rather than the boolean `enable_thinking` mlxcel forwards by default. As
+    // with the bare `thinking` alias above, without this mechanism such
+    // templates silently take their non-thinking branch regardless of what
+    // the caller asked for.
+
+    /// Gates its output on `thinking_mode == "enabled"`, defaulting safely
+    /// when the variable is undefined (as a real-world template would).
+    const THINKING_MODE_LIKE_TEMPLATE: &str = r#"{% if thinking_mode is defined and thinking_mode == "enabled" %}<think>{% else %}<no_think>{% endif %}{{ messages[0].content }}"#;
+
+    /// Reports whether `thinking_mode` was defined at all (and its value),
+    /// so tests can distinguish "nothing injected" from "injected as some
+    /// falsy/other value".
+    const THINKING_MODE_PRESENCE_TEMPLATE: &str = r#"{% if thinking_mode is defined %}DEFINED:{{ thinking_mode }}{% else %}UNDEFINED{% endif %}{{ messages[0].content }}"#;
+
+    #[test]
+    fn wants_thinking_mode_alias_detects_identifier() {
+        let tm = ChatTemplateProcessor::with_template(THINKING_MODE_LIKE_TEMPLATE.to_string());
+        assert!(tm.wants_thinking_mode_alias());
+
+        // Templates that never reference the identifier must not trigger.
+        let plain = ChatTemplateProcessor::default();
+        assert!(!plain.wants_thinking_mode_alias());
+
+        let qwen = r#"{% if enable_thinking %}<think>{% endif %}{{ messages[0].content }}"#;
+        let qwen_processor = ChatTemplateProcessor::with_template(qwen.to_string());
+        assert!(!qwen_processor.wants_thinking_mode_alias());
+
+        let dsv32 = ChatTemplateProcessor::with_template(DEEPSEEK_V32_LIKE_TEMPLATE.to_string());
+        assert!(!dsv32.wants_thinking_mode_alias());
+    }
+
+    #[test]
+    fn thinking_mode_alias_injects_enabled_when_thinking_enabled() {
+        let processor =
+            ChatTemplateProcessor::with_template(THINKING_MODE_LIKE_TEMPLATE.to_string());
+        let messages = vec![ChatMessage {
+            role: "user".to_string(),
+            content: "hi".to_string(),
+        }];
+        let kwargs = ChatTemplateKwargs::from_json_str(r#"{"enable_thinking": true}"#).unwrap();
+        let out = processor
+            .apply_with_kwargs(&messages, None, &kwargs)
+            .unwrap();
+        assert!(
+            out.starts_with("<think>"),
+            "enable_thinking=true must inject thinking_mode=\"enabled\"; got: {out:?}"
+        );
+    }
+
+    #[test]
+    fn thinking_mode_alias_injects_nothing_when_thinking_disabled() {
+        let processor =
+            ChatTemplateProcessor::with_template(THINKING_MODE_PRESENCE_TEMPLATE.to_string());
+        let messages = vec![ChatMessage {
+            role: "user".to_string(),
+            content: "hi".to_string(),
+        }];
+
+        // Explicit enable_thinking=false.
+        let kwargs = ChatTemplateKwargs::from_json_str(r#"{"enable_thinking": false}"#).unwrap();
+        let out = processor
+            .apply_with_kwargs(&messages, None, &kwargs)
+            .unwrap();
+        assert!(
+            out.starts_with("UNDEFINED"),
+            "thinking disabled must inject nothing, not even a falsy value; got: {out:?}"
+        );
+
+        // No kwarg at all — default_enable_thinking defaults to false.
+        let out_default = processor
+            .apply_with_kwargs(&messages, None, &ChatTemplateKwargs::new())
+            .unwrap();
+        assert!(
+            out_default.starts_with("UNDEFINED"),
+            "thinking disabled by default must inject nothing; got: {out_default:?}"
+        );
+    }
+
+    #[test]
+    fn thinking_mode_alias_honours_default_enable_thinking_when_kwarg_absent() {
+        // Mirrors bare_thinking_alias_honours_default_enable_thinking_when_kwarg_absent:
+        // a thinking model with no request-side kwarg still resolves
+        // enable_thinking from the tokenizer-derived default, and that
+        // resolved value must reach the thinking_mode alias too.
+        let mut processor =
+            ChatTemplateProcessor::with_template(THINKING_MODE_LIKE_TEMPLATE.to_string());
+        processor.set_default_enable_thinking(true);
+        let messages = vec![ChatMessage {
+            role: "user".to_string(),
+            content: "hi".to_string(),
+        }];
+        let out = processor
+            .apply_with_kwargs(&messages, None, &ChatTemplateKwargs::new())
+            .unwrap();
+        assert!(
+            out.starts_with("<think>"),
+            "default_enable_thinking=true must flip the thinking_mode alias too; got: {out:?}"
+        );
+    }
+
+    #[test]
+    fn explicit_thinking_mode_kwarg_overrides_derived_alias() {
+        // A client that already knows to send thinking_mode directly must be
+        // able to override the derived alias, even when thinking is enabled.
+        let processor =
+            ChatTemplateProcessor::with_template(THINKING_MODE_LIKE_TEMPLATE.to_string());
+        let messages = vec![ChatMessage {
+            role: "user".to_string(),
+            content: "hi".to_string(),
+        }];
+        let kwargs = ChatTemplateKwargs::from_json_str(
+            r#"{"enable_thinking": true, "thinking_mode": "disabled"}"#,
+        )
+        .unwrap();
+        let out = processor
+            .apply_with_kwargs(&messages, None, &kwargs)
+            .unwrap();
+        assert!(
+            out.starts_with("<no_think>"),
+            "client-supplied thinking_mode kwarg must win over the derived alias; got: {out:?}"
+        );
+    }
+
+    #[test]
+    fn thinking_mode_alias_reaches_apply_raw_with_kwargs_too() {
+        // Multimodal-path parity: apply_raw_with_kwargs shares
+        // build_template_context, so the alias must reach it as well.
+        let processor =
+            ChatTemplateProcessor::with_template(THINKING_MODE_LIKE_TEMPLATE.to_string());
+        let raw = serde_json::json!([{"role": "user", "content": "hi"}]);
+        let kwargs = ChatTemplateKwargs::from_json_str(r#"{"enable_thinking": true}"#).unwrap();
+        let out = processor
+            .apply_raw_with_kwargs(&raw, None, &kwargs)
+            .unwrap();
+        assert!(
+            out.starts_with("<think>"),
+            "apply_raw_with_kwargs must also receive the thinking_mode alias; got: {out:?}"
+        );
+    }
+
+    #[test]
+    fn thinking_mode_alias_is_noop_for_other_model_families() {
+        // Regression guard: a template that never references thinking_mode
+        // must render identically whether or not this alias mechanism
+        // exists.
+        let qwen = r#"{% if enable_thinking %}<think>{% else %}<no_think>{% endif %}{{ messages[0].content }}"#;
+        let processor = ChatTemplateProcessor::with_template(qwen.to_string());
+        assert!(!processor.wants_thinking_mode_alias());
+        let messages = vec![ChatMessage {
+            role: "user".to_string(),
+            content: "hi".to_string(),
+        }];
+        let kwargs = ChatTemplateKwargs::from_json_str(r#"{"enable_thinking": true}"#).unwrap();
+        let out = processor
+            .apply_with_kwargs(&messages, None, &kwargs)
+            .unwrap();
+        assert!(out.starts_with("<think>"));
     }
 }
