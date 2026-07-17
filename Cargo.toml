@@ -220,6 +220,42 @@ opt-level = 3             # Maximum speed optimization (inference is compute-bou
 # crashes cleanly for a supervised restart rather than silently unwinding.
 panic = "unwind"
 
+# Fast profile for local/agent edit-test iteration (issue #809).
+#
+# [profile.release] above is tuned for shipping binaries: fat LTO across all
+# ~439 locked crates plus a single codegen unit (`codegen-units = 1`) for the
+# ~390k-line main crate maximizes runtime performance and minimizes binary
+# size, at the cost of a multi-minute link on every rebuild — measured at
+# 4 to 6 minutes per incremental rebuild, and a typical issue cycle pays 5 to
+# 8 such rebuilds. See docs/installation.md ("Fast iteration builds") for the
+# full measurement writeup.
+#
+# `test-fast` keeps `opt-level = 3` (MLX-heavy tests need optimized numerics
+# for tolerable runtimes) but relaxes everything that exists purely to shrink
+# or speed up the *shipped* binary:
+#   - `codegen-units = 16` restores parallel codegen instead of serializing
+#     the whole crate onto one core.
+#   - `lto = "thin"` keeps cross-crate inlining across the mlxcel /
+#     mlxcel-core workspace boundary (the hot MLX FFI call sites), unlike
+#     `lto = false`, while dropping the whole-program fat-LTO link that
+#     dominates release build time.
+#   - `incremental = true` lets rustc reuse per-function codegen work between
+#     edits instead of recompiling the whole crate query graph from scratch.
+#   - `strip = false` skips a symbol-stripping pass nobody needs for a local
+#     test binary.
+#
+# DO NOT use this profile for anything that ships or gets measured:
+# performance benchmarks, release binaries, or numbers quoted in a PR as
+# representative throughput/latency. Use `[profile.release]` (via
+# `make release*` / `make verify-test`) for those.
+[profile.test-fast]
+inherits = "release"
+lto = "thin"           # cross-crate inlining kept; drops the whole-program fat-LTO link
+codegen-units = 16     # parallel codegen instead of one serialized unit
+strip = false          # skip the strip pass; irrelevant for a local test binary
+incremental = true     # reuse per-function codegen work between edits
+opt-level = 3          # keep: MLX-heavy tests need optimized numerics for tolerable runtimes
+
 [lints.clippy]
 upper_case_acronyms = "allow"
 too_many_arguments = "allow"

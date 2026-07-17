@@ -47,6 +47,8 @@ Thank you for your interest in contributing to mlxcel! This document covers the 
    cargo deny check             # advisories + licenses + sources
    ```
    CI enforces `clippy` (with `-D warnings`) and `cargo test` on the `self-hosted-macos-26-arm64` runner on every PR that touches Rust files. CUDA verification is not gated at PR time — that stays exclusive to `release.yml`.
+
+   While iterating, prefer `[profile.test-fast]` over `--release`: `make test-fast` / `make test-fast-cuda` (or `cargo test --profile test-fast --features <...>`) rebuild in seconds instead of minutes. It is for local/agent edit-test loops only — run the `--release` commands above (or `make verify`) before opening or updating a PR. See [`docs/installation.md`](docs/installation.md#fast-iteration-builds) for the measured comparison.
 5. For inference changes, validate against a real checkpoint — synthetic or build-only validation is not enough (see [`AGENTS.md`](AGENTS.md) for why).
 6. Commit with a conventional prefix (see below) and a clear message.
 7. Push to your fork and open a Pull Request. The PR template will prompt for a summary, test plan, and linked issues.

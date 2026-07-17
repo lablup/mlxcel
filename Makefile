@@ -35,6 +35,10 @@ MODEL ?= ./models/default
 # Default prompt for examples
 PROMPT ?= "Hello, world!"
 
+# Optional test-name filter forwarded to `cargo test` by the test-fast targets
+# below, e.g. `make test-fast-cuda FILTER=server::chat_request` (issue #809).
+FILTER ?=
+
 # Server settings
 HOST ?= 127.0.0.1
 PORT ?= 8080
@@ -95,6 +99,7 @@ help: ## Show this help message
 	@echo "  make run-generate MODEL=./models/llama PROMPT=\"Tell me a joke\""
 	@echo "  make serve MODEL=./models/qwen PORT=8000"
 	@echo "  make test                            # Run all tests"
+	@echo "  make test-fast-cuda FILTER=server::chat_request  # Fast filtered test-fast-profile run"
 	@echo ""
 
 # ============================================================================
@@ -211,6 +216,37 @@ test-lib: ## Run library tests only
 .PHONY: test-doc
 test-doc: ## Run documentation tests
 	$(CARGO) test --doc
+
+# ----------------------------------------------------------------------------
+# Fast dev-iteration test targets (issue #809)
+#
+# `test` / `verify-test` above build under [profile.release] (fat LTO,
+# codegen-units = 1), which is the right choice for CI-faithful and shipping
+# validation but measured at 4 to 6 minutes per incremental rebuild on the
+# ~390k-line main crate — expensive for the edit-test-edit loop of local and
+# agent development. These targets build under [profile.test-fast] instead
+# (thin LTO, parallel codegen, incremental compilation); see the profile's
+# Cargo.toml comment and docs/installation.md ("Fast iteration builds") for
+# the measured speedup. Set FILTER to narrow the run, e.g.
+# `make test-fast-cuda FILTER=server::chat_request`.
+# ----------------------------------------------------------------------------
+
+.PHONY: test-fast
+test-fast: ## Run tests under the fast dev-iteration profile (macOS adds metal,accelerate; set FILTER=<path>; issue #809)
+	@echo "$(CYAN)Running tests (test-fast profile)...$(RESET)"
+	$(CARGO) test --profile test-fast $(RELEASE_FEATURE_FLAG) $(FILTER) -- --test-threads=1
+	@echo "$(GREEN)All tests passed!$(RESET)"
+
+.PHONY: test-fast-cuda
+test-fast-cuda: ## Run tests under the fast dev-iteration profile with CUDA (Linux/NVIDIA; set FILTER=<path>; issue #809)
+	@echo "$(CYAN)Running tests (test-fast profile, CUDA)...$(RESET)"
+	$(CARGO) test --profile test-fast --features cuda $(FILTER) -- --test-threads=1
+	@echo "$(GREEN)All tests passed!$(RESET)"
+
+.PHONY: check-fast
+check-fast: ## Check all targets under the fast dev-iteration profile (issue #809)
+	@echo "$(CYAN)Checking code (test-fast profile)...$(RESET)"
+	$(CARGO) check --all-targets --profile test-fast $(RELEASE_FEATURE_FLAG)
 
 .PHONY: check
 check: ## Check code without building

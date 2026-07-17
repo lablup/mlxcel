@@ -280,6 +280,41 @@ binaries are unaffected; this is a test-parallelism artifact.
 cargo test --release --features cuda -- --test-threads=1
 ```
 
+## Fast iteration builds
+
+`cargo test --release` (and `cargo build --release`) use `[profile.release]`:
+fat LTO across all ~439 locked crates plus `codegen-units = 1` for the
+~390k-line main crate. That is the right tradeoff for CI-faithful validation
+and for anything you ship, but it is expensive for the day-to-day edit-test
+loop — measured at 4 to 6 minutes per incremental rebuild, so a typical issue
+cycle of several edit-test iterations pays 20+ minutes of pure compile time.
+
+For local and agent development, use `[profile.test-fast]` instead (thin LTO,
+`codegen-units = 16`, incremental compilation, `strip = false`; still
+`opt-level = 3` so MLX-heavy numerics stay representative):
+
+```bash
+# CPU / Metal / Accelerate (macOS adds metal,accelerate automatically)
+make test-fast
+
+# Linux / CUDA
+make test-fast-cuda
+
+# Narrow to a subset while iterating
+make test-fast-cuda FILTER=server::chat_request
+```
+
+or invoke cargo directly:
+
+```bash
+cargo test --profile test-fast --features cuda -- --test-threads=1
+```
+
+`test-fast` is for iteration only. Use `[profile.release]` (`make release*`,
+`make verify-test`, or plain `cargo test --release`) for anything you ship,
+benchmark, or quote as representative performance — `test-fast` trades link
+time and binary size for rebuild speed and is not tuned for either.
+
 ## Troubleshooting
 
 **Missing Metal toolchain on macOS** — run
