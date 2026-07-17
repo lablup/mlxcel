@@ -74,6 +74,29 @@
 
 set -euo pipefail
 
+# This script uses associative arrays (declare -A), a bash 4+ feature. Stock
+# macOS ships bash 3.2 as /bin/bash, and this harness explicitly supports
+# Darwin/Metal (see detect_hardware_short below), so re-exec under a newer
+# bash when one is on PATH (Homebrew installs it at /opt/homebrew/bin or
+# /usr/local/bin). If none is found, fail with an actionable message instead
+# of the cryptic "declare: -A: invalid option" abort bash 3.2 would emit. The
+# guard itself is bash-3-compatible and only re-execs into a bash whose major
+# version is >= 4, so it cannot loop.
+if [[ -z "${BASH_VERSINFO:-}" || "${BASH_VERSINFO[0]}" -lt 4 ]]; then
+  for _alt_bash in /opt/homebrew/bin/bash /usr/local/bin/bash "$(command -v bash 2>/dev/null || true)"; do
+    if [[ -n "$_alt_bash" && -x "$_alt_bash" ]]; then
+      # shellcheck disable=SC2016  # intentional: the candidate bash must expand this, not us
+      _alt_major=$("$_alt_bash" -c 'echo "${BASH_VERSINFO[0]}"' 2>/dev/null || echo 0)
+      if [[ "$_alt_major" -ge 4 ]]; then
+        exec "$_alt_bash" "$0" "$@"
+      fi
+    fi
+  done
+  echo "Error: bench_longprompt.sh requires bash >= 4 (associative arrays); running under ${BASH_VERSION:-unknown}." >&2
+  echo "       On macOS install a newer bash, e.g. 'brew install bash', or invoke it explicitly: /opt/homebrew/bin/bash scripts/bench_longprompt.sh" >&2
+  exit 1
+fi
+
 trap 'echo "Interrupted (signal received)" >&2; exit 130' INT TERM
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -254,10 +277,16 @@ load_oom_record() {
   while IFS= read -r line || [[ -n "$line" ]]; do
     line_num=$((line_num + 1))
     [[ -z "$line" ]] && continue
-    local rec_model rec_len
+    local rec_model rec_len field_count
     rec_model=$(cut -d, -f1 <<< "$line")
     rec_len=$(cut -d, -f2 <<< "$line")
-    if [[ -z "$rec_model" || ! "$rec_len" =~ ^[0-9]+$ ]]; then
+    # The documented record format is six fields
+    # (model,prompt_target_len,date,commit,peak_bytes,source_csv); reject any
+    # line with fewer, so a truncated/hand-edited entry like "model,32768" is
+    # skipped rather than treated as an active OOM record. A source path that
+    # itself contains a comma only inflates the count, so >= 6 stays lenient.
+    field_count=$(awk -F, '{print NF}' <<< "$line")
+    if [[ "$field_count" -lt 6 || -z "$rec_model" || ! "$rec_len" =~ ^[0-9]+$ ]]; then
       >&2 echo "Warning: malformed line $line_num in $OOM_RECORD_FILE, skipping: $line"
       continue
     fi
