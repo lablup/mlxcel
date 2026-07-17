@@ -68,7 +68,10 @@ pub use key::{
     multimodal_digest, multimodal_digest_from_vecs, resolve_session_key, template_sig,
     tools_digest,
 };
-pub use metrics::{AtomicPromptCacheMetrics, NoopPromptCacheMetrics, PromptCacheMetrics};
+pub use metrics::{
+    AtomicPromptCacheMetrics, NoopPromptCacheMetrics, PromptCacheLastReject, PromptCacheMetrics,
+    PromptCacheRejectCounters, PromptCacheRejectReason,
+};
 pub use policy::{ApcConfig, PromptCacheConfig, PromptCacheStats};
 pub use store::PromptCacheStore;
 pub use types::{BucketKey, InsertError};

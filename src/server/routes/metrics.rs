@@ -116,6 +116,16 @@ pub async fn metrics(State(state): State<AppState>) -> Response {
     // Batch observability counters
     let obs = state.batch_observability.snapshot();
 
+    // Prompt-cache reject-reason breakdown (issue #774). Covers both the
+    // donate-back (insert) path and the adopt path.
+    let pc_reject_oversized = obs.prompt_cache_reject_oversized;
+    let pc_reject_disabled = obs.prompt_cache_reject_disabled;
+    let pc_reject_prefix_too_short = obs.prompt_cache_reject_prefix_too_short;
+    let pc_reject_mode_mismatch = obs.prompt_cache_reject_mode_mismatch;
+    let pc_reject_empty_set = obs.prompt_cache_reject_empty_set;
+    let pc_reject_layout_constraints = obs.prompt_cache_reject_layout_constraints;
+    let pc_reject_block_boundary_floor = obs.prompt_cache_reject_block_boundary_floor;
+
     let pp_snapshot = state.pp_observability.snapshot();
     let body = format!(
         "# HELP mlxcel_requests_total Total number of generation requests\n\
@@ -231,7 +241,16 @@ pub async fn metrics(State(state): State<AppState>) -> Response {
          # HELP mlxcel_prompt_cache_snapshot_evictions_total Snapshot evictions labeled by reason\n\
          # TYPE mlxcel_prompt_cache_snapshot_evictions_total counter\n\
          mlxcel_prompt_cache_snapshot_evictions_total{{reason=\"lru\"}} {pc_snapshot_evict_lru}\n\
-         mlxcel_prompt_cache_snapshot_evictions_total{{reason=\"ttl\"}} {pc_snapshot_evict_ttl}\n",
+         mlxcel_prompt_cache_snapshot_evictions_total{{reason=\"ttl\"}} {pc_snapshot_evict_ttl}\n\
+         # HELP mlxcel_prompt_cache_reject_total Prompt-prefix cache reject/decline events labeled by reason (covers both the donate-back and adopt paths)\n\
+         # TYPE mlxcel_prompt_cache_reject_total counter\n\
+         mlxcel_prompt_cache_reject_total{{reason=\"oversized\"}} {pc_reject_oversized}\n\
+         mlxcel_prompt_cache_reject_total{{reason=\"disabled\"}} {pc_reject_disabled}\n\
+         mlxcel_prompt_cache_reject_total{{reason=\"prefix_too_short\"}} {pc_reject_prefix_too_short}\n\
+         mlxcel_prompt_cache_reject_total{{reason=\"mode_mismatch\"}} {pc_reject_mode_mismatch}\n\
+         mlxcel_prompt_cache_reject_total{{reason=\"empty_set\"}} {pc_reject_empty_set}\n\
+         mlxcel_prompt_cache_reject_total{{reason=\"layout_constraints\"}} {pc_reject_layout_constraints}\n\
+         mlxcel_prompt_cache_reject_total{{reason=\"block_boundary_floor\"}} {pc_reject_block_boundary_floor}\n",
         gen_time_sec = gen_time_ms as f64 / 1000.0,
         seq_started = obs.sequences_started,
         seq_completed = obs.sequences_completed,
@@ -263,6 +282,13 @@ pub async fn metrics(State(state): State<AppState>) -> Response {
         pc_snapshot_reused_tokens = pc_snapshot_reused_tokens,
         pc_snapshot_evict_lru = pc_snapshot_evict_lru,
         pc_snapshot_evict_ttl = pc_snapshot_evict_ttl,
+        pc_reject_oversized = pc_reject_oversized,
+        pc_reject_disabled = pc_reject_disabled,
+        pc_reject_prefix_too_short = pc_reject_prefix_too_short,
+        pc_reject_mode_mismatch = pc_reject_mode_mismatch,
+        pc_reject_empty_set = pc_reject_empty_set,
+        pc_reject_layout_constraints = pc_reject_layout_constraints,
+        pc_reject_block_boundary_floor = pc_reject_block_boundary_floor,
     );
 
     let mut body = body;

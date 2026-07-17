@@ -261,6 +261,114 @@ fn oversized_entry_records_reject_counter() {
 }
 
 // ---------------------------------------------------------------------------
+// Per-reason reject breakdown (issue #774)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn oversized_insert_error_records_oversized_reject_reason() {
+    // Mirrors `donate_finished_sequence_cache`'s `Err(err) => ...` arm: the
+    // scheduler classifies the real `InsertError` via
+    // `PromptCacheRejectReason::from(&err)` and records it against
+    // `BatchObservability` alongside the existing aggregate counter.
+    let store = Arc::new(PromptCacheStore::with_config(PromptCacheConfig::new(
+        true,
+        1,
+        32,
+        Duration::from_secs(60),
+        4,
+    )));
+    let tokens: Vec<i32> = (1..=16).collect();
+    let entry = CacheEntry::new_for_test(tokens.clone(), 4096);
+    let key = make_key("m", "s", "t", &tokens);
+    let err = store
+        .insert(&key, entry)
+        .expect_err("oversized entry must be rejected");
+
+    let obs = BatchObservability::new();
+    let reason = crate::server::prompt_cache::metrics::PromptCacheRejectReason::from(&err);
+    obs.record_prompt_cache_reject(reason, Some(42), tokens.len());
+
+    let snap = obs.snapshot();
+    assert_eq!(snap.prompt_cache_reject_oversized, 1);
+    assert_eq!(snap.prompt_cache_reject_disabled, 0);
+    assert_eq!(snap.prompt_cache_reject_prefix_too_short, 0);
+    let last = snap.prompt_cache_last_reject.expect("last reject recorded");
+    assert_eq!(last.reason, "oversized");
+    assert_eq!(last.seq_id, Some(42));
+    assert_eq!(last.context_len, tokens.len() as u64);
+}
+
+#[test]
+fn disabled_and_prefix_too_short_insert_errors_record_distinct_reasons() {
+    use crate::server::prompt_cache::metrics::PromptCacheRejectReason;
+
+    // Disabled store.
+    let disabled_store = Arc::new(PromptCacheStore::with_config(PromptCacheConfig::disabled()));
+    let tokens: Vec<i32> = (1..=16).collect();
+    let entry = CacheEntry::new_for_test(tokens.clone(), 128);
+    let key = make_key("m", "s", "t", &tokens);
+    let err = disabled_store
+        .insert(&key, entry)
+        .expect_err("disabled store must reject");
+    let obs = BatchObservability::new();
+    obs.record_prompt_cache_reject(
+        PromptCacheRejectReason::from(&err),
+        Some(1),
+        tokens.len(),
+    );
+    assert_eq!(obs.snapshot().prompt_cache_reject_disabled, 1);
+
+    // Prefix-too-short store.
+    let short_store = Arc::new(PromptCacheStore::with_config(PromptCacheConfig::new(
+        true,
+        1 << 20,
+        32,
+        Duration::from_secs(60),
+        64,
+    )));
+    let short_tokens: Vec<i32> = (1..=8).collect();
+    let entry = CacheEntry::new_for_test(short_tokens.clone(), 128);
+    let key = make_key("m", "s", "t", &short_tokens);
+    let err = short_store
+        .insert(&key, entry)
+        .expect_err("prefix shorter than min_prefix_tokens must be rejected");
+    let obs = BatchObservability::new();
+    obs.record_prompt_cache_reject(
+        PromptCacheRejectReason::from(&err),
+        Some(2),
+        short_tokens.len(),
+    );
+    assert_eq!(obs.snapshot().prompt_cache_reject_prefix_too_short, 1);
+}
+
+#[test]
+fn adopt_path_declines_record_reasons_with_no_seq_id() {
+    // Most adopt-path declines happen before a sequence id is allocated
+    // (`try_adopt_cached_prefix` runs before `allocate_sequence_state`), so
+    // the scheduler records them with `seq_id = None`. Mirrors the
+    // `ModeMismatch` / `EmptySet` / `LayoutConstraints` /
+    // `BlockBoundaryFloor` decline sites in `try_adopt_cached_prefix`.
+    use crate::server::prompt_cache::metrics::PromptCacheRejectReason;
+
+    let obs = BatchObservability::new();
+    obs.record_prompt_cache_reject(PromptCacheRejectReason::ModeMismatch, None, 10);
+    obs.record_prompt_cache_reject(PromptCacheRejectReason::EmptySet, None, 0);
+    obs.record_prompt_cache_reject(PromptCacheRejectReason::LayoutConstraints, None, 20);
+    obs.record_prompt_cache_reject(PromptCacheRejectReason::BlockBoundaryFloor, None, 5);
+
+    let snap = obs.snapshot();
+    assert_eq!(snap.prompt_cache_reject_mode_mismatch, 1);
+    assert_eq!(snap.prompt_cache_reject_empty_set, 1);
+    assert_eq!(snap.prompt_cache_reject_layout_constraints, 1);
+    assert_eq!(snap.prompt_cache_reject_block_boundary_floor, 1);
+    // None of these ever touch the donate-only aggregate counter.
+    assert_eq!(snap.prompt_cache_insert_rejects, 0);
+    let last = snap.prompt_cache_last_reject.expect("last reject recorded");
+    assert_eq!(last.reason, "block_boundary_floor");
+    assert_eq!(last.seq_id, None);
+}
+
+// ---------------------------------------------------------------------------
 // SequenceInfo fields transport the hit metadata
 // ---------------------------------------------------------------------------
 

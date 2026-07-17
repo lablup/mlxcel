@@ -23,10 +23,22 @@
 //! decode step, sequence completion) and HTTP handlers read them from `/health`
 //! and `/metrics` endpoints without locking.
 
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use mlxcel_core::cache::PagedCacheStats;
 use serde::Serialize;
+
+use crate::server::prompt_cache::metrics::{PromptCacheRejectCounters, PromptCacheRejectReason};
+
+/// Returns whether `MLXCEL_APC_TRACE=1` opt-in prompt-cache trace logging is
+/// enabled (issue #774). Read exactly once via [`OnceLock`] so the store /
+/// adopt / reject hot paths pay a single relaxed load per event rather than
+/// an environment-variable lookup.
+pub fn apc_trace_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var("MLXCEL_APC_TRACE").ok().as_deref() == Some("1"))
+}
 
 /// Inclusive upper bounds for the per-request time-to-first-token histogram,
 /// in milliseconds. Chosen to span sub-100ms short-prompt TTFT through the
@@ -206,6 +218,13 @@ pub struct BatchObservability {
     /// (e.g. `InsertError::OversizedEntry`, `InsertError::Disabled`,
     /// `InsertError::PrefixTooShort`).
     pub prompt_cache_insert_rejects: AtomicU64,
+    /// Per-reason breakdown of prompt-cache reject/decline events across
+    /// both the donate-back (insert) path and the adopt path (issue #774).
+    /// A superset of `prompt_cache_insert_rejects`: it additionally covers
+    /// adopt-path declines (mode mismatch, empty set, layout constraints,
+    /// block-boundary flooring) that never call `store.insert`/
+    /// `insert_snapshot` at all, so never touch that older counter.
+    pub prompt_cache_reject_reasons: PromptCacheRejectCounters,
 
     // -- per-request latency/throughput histograms (epic #623 #624) --
     /// Per-request time-to-first-token (prefill latency), in milliseconds.
@@ -249,6 +268,7 @@ impl BatchObservability {
             prompt_cache_hit_tokens: AtomicU64::new(0),
             prompt_cache_inserts: AtomicU64::new(0),
             prompt_cache_insert_rejects: AtomicU64::new(0),
+            prompt_cache_reject_reasons: PromptCacheRejectCounters::new(),
             request_ttft_ms: RequestHistogram::new(&TTFT_MS_BUCKETS),
             request_decode_tok_s: RequestHistogram::new(&DECODE_TOK_S_BUCKETS),
         }
@@ -314,6 +334,41 @@ impl BatchObservability {
     pub fn record_prompt_cache_insert_reject(&self) {
         self.prompt_cache_insert_rejects
             .fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Record a prompt-cache reject/decline with its specific reason
+    /// (issue #774). Called from both `donate_finished_sequence_cache` and
+    /// `try_adopt_cached_prefix` in the scheduler at every real decline site.
+    ///
+    /// `seq_id` is `None` for adopt-path declines that occur before a
+    /// sequence id has been allocated (the common case: most adopt declines
+    /// happen before `allocate_sequence_state`/`cache_pool.adopt*` runs); it
+    /// is `Some` for donate-path declines (a finished sequence always
+    /// carries one) and the handful of adopt declines that occur after a
+    /// sequence id was already allocated (the snapshot-restore-failure
+    /// path). `context_len` is the matched-prefix length for adopt declines,
+    /// or the donated token count for donate declines.
+    ///
+    /// Also emits a `tracing::info!` one-liner when `MLXCEL_APC_TRACE=1` is
+    /// set (see [`apc_trace_enabled`]) so reject events are greppable
+    /// without needing metrics scraping.
+    pub fn record_prompt_cache_reject(
+        &self,
+        reason: PromptCacheRejectReason,
+        seq_id: Option<u64>,
+        context_len: usize,
+    ) {
+        self.prompt_cache_reject_reasons
+            .record(reason, seq_id, context_len);
+        if apc_trace_enabled() {
+            tracing::info!(
+                apc_event = "reject",
+                reason = reason.as_str(),
+                seq_id = ?seq_id,
+                context_len,
+                "prompt-cache reject"
+            );
+        }
     }
 
     /// Record per-request completion telemetry: time-to-first-token and the
@@ -424,6 +479,35 @@ impl BatchObservability {
             prompt_cache_hit_tokens: self.prompt_cache_hit_tokens.load(Ordering::Relaxed),
             prompt_cache_inserts: self.prompt_cache_inserts.load(Ordering::Relaxed),
             prompt_cache_insert_rejects: self.prompt_cache_insert_rejects.load(Ordering::Relaxed),
+            prompt_cache_reject_oversized: self
+                .prompt_cache_reject_reasons
+                .count(PromptCacheRejectReason::Oversized),
+            prompt_cache_reject_disabled: self
+                .prompt_cache_reject_reasons
+                .count(PromptCacheRejectReason::Disabled),
+            prompt_cache_reject_prefix_too_short: self
+                .prompt_cache_reject_reasons
+                .count(PromptCacheRejectReason::PrefixTooShort),
+            prompt_cache_reject_mode_mismatch: self
+                .prompt_cache_reject_reasons
+                .count(PromptCacheRejectReason::ModeMismatch),
+            prompt_cache_reject_empty_set: self
+                .prompt_cache_reject_reasons
+                .count(PromptCacheRejectReason::EmptySet),
+            prompt_cache_reject_layout_constraints: self
+                .prompt_cache_reject_reasons
+                .count(PromptCacheRejectReason::LayoutConstraints),
+            prompt_cache_reject_block_boundary_floor: self
+                .prompt_cache_reject_reasons
+                .count(PromptCacheRejectReason::BlockBoundaryFloor),
+            prompt_cache_last_reject: self.prompt_cache_reject_reasons.last().map(|r| {
+                PromptCacheLastRejectSnapshot {
+                    reason: r.reason,
+                    seq_id: r.seq_id,
+                    context_len: r.context_len as u64,
+                    at_unix_ms: r.at_unix_ms,
+                }
+            }),
         }
     }
 }
@@ -464,6 +548,31 @@ pub struct ObservabilitySnapshot {
     /// rejected donate-back inserts (oversized
     /// entry, store disabled, prefix too short, …).
     pub prompt_cache_insert_rejects: u64,
+    /// Per-reason prompt-cache reject/decline counts (issue #774). See
+    /// [`PromptCacheRejectReason`] for what each reason covers; this is a
+    /// superset of `prompt_cache_insert_rejects` that also counts adopt-path
+    /// declines.
+    pub prompt_cache_reject_oversized: u64,
+    pub prompt_cache_reject_disabled: u64,
+    pub prompt_cache_reject_prefix_too_short: u64,
+    pub prompt_cache_reject_mode_mismatch: u64,
+    pub prompt_cache_reject_empty_set: u64,
+    pub prompt_cache_reject_layout_constraints: u64,
+    pub prompt_cache_reject_block_boundary_floor: u64,
+    /// Most recent prompt-cache reject/decline event, if any has happened
+    /// yet.
+    pub prompt_cache_last_reject: Option<PromptCacheLastRejectSnapshot>,
+}
+
+/// Serializable snapshot of [`crate::server::prompt_cache::PromptCacheLastReject`]
+/// for the `/v1/cache/stats` JSON body and the `/health` observability
+/// snapshot.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PromptCacheLastRejectSnapshot {
+    pub reason: &'static str,
+    pub seq_id: Option<u64>,
+    pub context_len: u64,
+    pub at_unix_ms: u64,
 }
 
 #[cfg(test)]
@@ -625,5 +734,67 @@ mod tests {
         assert!(json.contains("\"sequences_started\":1"));
         assert!(json.contains("\"total_decode_tokens\":2"));
         assert!(json.contains("\"decode_storage_fallbacks\":1"));
+    }
+
+    // -- Prompt-cache reject-reason breakdown (issue #774) --
+
+    #[test]
+    fn reject_reasons_start_zeroed_with_no_last_reject() {
+        let obs = BatchObservability::new();
+        let snap = obs.snapshot();
+        assert_eq!(snap.prompt_cache_reject_oversized, 0);
+        assert_eq!(snap.prompt_cache_reject_disabled, 0);
+        assert_eq!(snap.prompt_cache_reject_prefix_too_short, 0);
+        assert_eq!(snap.prompt_cache_reject_mode_mismatch, 0);
+        assert_eq!(snap.prompt_cache_reject_empty_set, 0);
+        assert_eq!(snap.prompt_cache_reject_layout_constraints, 0);
+        assert_eq!(snap.prompt_cache_reject_block_boundary_floor, 0);
+        assert!(snap.prompt_cache_last_reject.is_none());
+    }
+
+    #[test]
+    fn record_prompt_cache_reject_increments_only_its_own_reason() {
+        let obs = BatchObservability::new();
+        obs.record_prompt_cache_reject(PromptCacheRejectReason::ModeMismatch, None, 12);
+        obs.record_prompt_cache_reject(PromptCacheRejectReason::ModeMismatch, Some(7), 34);
+        obs.record_prompt_cache_reject(PromptCacheRejectReason::BlockBoundaryFloor, Some(9), 56);
+
+        let snap = obs.snapshot();
+        assert_eq!(snap.prompt_cache_reject_mode_mismatch, 2);
+        assert_eq!(snap.prompt_cache_reject_block_boundary_floor, 1);
+        // Every other reason stays at zero: the counters are independent.
+        assert_eq!(snap.prompt_cache_reject_oversized, 0);
+        assert_eq!(snap.prompt_cache_reject_disabled, 0);
+        assert_eq!(snap.prompt_cache_reject_prefix_too_short, 0);
+        assert_eq!(snap.prompt_cache_reject_empty_set, 0);
+        assert_eq!(snap.prompt_cache_reject_layout_constraints, 0);
+    }
+
+    #[test]
+    fn record_prompt_cache_reject_updates_last_reject_snapshot() {
+        let obs = BatchObservability::new();
+        obs.record_prompt_cache_reject(PromptCacheRejectReason::EmptySet, Some(1), 10);
+        obs.record_prompt_cache_reject(PromptCacheRejectReason::Oversized, Some(2), 20);
+
+        // `last_reject` always reflects the most recent event, regardless of
+        // which reason it was.
+        let last = obs
+            .snapshot()
+            .prompt_cache_last_reject
+            .expect("a reject has been recorded");
+        assert_eq!(last.reason, "oversized");
+        assert_eq!(last.seq_id, Some(2));
+        assert_eq!(last.context_len, 20);
+    }
+
+    #[test]
+    fn snapshot_serializes_reject_reason_fields() {
+        let obs = BatchObservability::new();
+        obs.record_prompt_cache_reject(PromptCacheRejectReason::LayoutConstraints, Some(5), 99);
+        let json = serde_json::to_string(&obs.snapshot()).unwrap();
+        assert!(json.contains("\"prompt_cache_reject_layout_constraints\":1"));
+        assert!(json.contains("\"reason\":\"layout_constraints\""));
+        assert!(json.contains("\"seq_id\":5"));
+        assert!(json.contains("\"context_len\":99"));
     }
 }

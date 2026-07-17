@@ -477,6 +477,66 @@ fn metrics_hooks_fire_on_insert_and_lookup() {
 }
 
 #[test]
+fn metrics_hooks_fire_reject_reasons_for_each_insert_decline() {
+    // issue #774: each of the three store-detectable `InsertError` variants
+    // must classify into its own fixed `PromptCacheRejectReason` counter.
+    use super::super::metrics::PromptCacheRejectReason;
+
+    // Oversized: single entry too large for the byte budget.
+    let metrics = AtomicPromptCacheMetrics::shared();
+    let store = PromptCacheStore::with_metrics(cfg(1024, 64, 4), metrics.clone());
+    let toks = tokens(0, 16);
+    let err = store
+        .insert(
+            &key_for("m", &toks),
+            CacheEntry::new_for_test(toks.clone(), 2048),
+        )
+        .unwrap_err();
+    assert!(matches!(err, InsertError::OversizedEntry { .. }));
+    assert_eq!(
+        metrics
+            .reject_reasons
+            .count(PromptCacheRejectReason::Oversized),
+        1
+    );
+
+    // Disabled: the store itself is disabled.
+    let metrics = AtomicPromptCacheMetrics::shared();
+    let store = PromptCacheStore::with_metrics(PromptCacheConfig::disabled(), metrics.clone());
+    let err = store
+        .insert(
+            &key_for("m", &toks),
+            CacheEntry::new_for_test(toks.clone(), 1024),
+        )
+        .unwrap_err();
+    assert_eq!(err, InsertError::Disabled);
+    assert_eq!(
+        metrics
+            .reject_reasons
+            .count(PromptCacheRejectReason::Disabled),
+        1
+    );
+
+    // PrefixTooShort: entry token length below `min_prefix_tokens`.
+    let metrics = AtomicPromptCacheMetrics::shared();
+    let store = PromptCacheStore::with_metrics(cfg(1 << 20, 64, 32), metrics.clone());
+    let short = tokens(0, 16);
+    let err = store
+        .insert(
+            &key_for("m", &short),
+            CacheEntry::new_for_test(short.clone(), 1024),
+        )
+        .unwrap_err();
+    assert!(matches!(err, InsertError::PrefixTooShort { .. }));
+    assert_eq!(
+        metrics
+            .reject_reasons
+            .count(PromptCacheRejectReason::PrefixTooShort),
+        1
+    );
+}
+
+#[test]
 fn snapshot_metrics_hooks_fire_on_insert_and_lookup() {
     let metrics = AtomicPromptCacheMetrics::shared();
     let store = PromptCacheStore::with_metrics(

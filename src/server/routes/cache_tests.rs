@@ -37,7 +37,9 @@ use crate::server::prompt_cache::{
     ApcConfig, ApcHashAlgo, CacheEntry, MultimodalDigest, PromptCacheConfig, PromptCacheKey,
     PromptCacheStore,
 };
-use crate::server::routes::cache::{CacheResetResponse, CacheStatsResponse, PagedBlockStats};
+use crate::server::routes::cache::{
+    CacheResetResponse, CacheStatsResponse, PagedBlockStats, RejectReasonStats,
+};
 
 fn enabled_store() -> Arc<PromptCacheStore> {
     let cfg = PromptCacheConfig::new(true, 1 << 20, 32, Duration::from_secs(3600), 4);
@@ -116,6 +118,17 @@ fn cache_stats_response_serializes_with_expected_keys() {
         paged_bytes_reserved: 65536,
         paged_bytes_in_use: 49152,
         paged_block_budget: 128,
+        reject_oversized: 1,
+        reject_disabled: 0,
+        reject_prefix_too_short: 2,
+        reject_mode_mismatch: 3,
+        reject_empty_set: 4,
+        reject_layout_constraints: 5,
+        reject_block_boundary_floor: 6,
+        last_reject_reason: Some("oversized".to_string()),
+        last_reject_seq_id: Some(42),
+        last_reject_context_len: Some(128),
+        last_reject_at_unix_ms: Some(1_700_000_000_000),
     };
     let json = serde_json::to_string(&resp).expect("serialize");
     for key in [
@@ -144,6 +157,17 @@ fn cache_stats_response_serializes_with_expected_keys() {
         "\"paged_bytes_reserved\":65536",
         "\"paged_bytes_in_use\":49152",
         "\"paged_block_budget\":128",
+        "\"reject_oversized\":1",
+        "\"reject_disabled\":0",
+        "\"reject_prefix_too_short\":2",
+        "\"reject_mode_mismatch\":3",
+        "\"reject_empty_set\":4",
+        "\"reject_layout_constraints\":5",
+        "\"reject_block_boundary_floor\":6",
+        "\"last_reject_reason\":\"oversized\"",
+        "\"last_reject_seq_id\":42",
+        "\"last_reject_context_len\":128",
+        "\"last_reject_at_unix_ms\":1700000000000",
     ] {
         assert!(json.contains(key), "expected `{key}` in: {json}");
     }
@@ -248,6 +272,17 @@ fn cache_stats_response_disabled_payload_uses_zero_counters() {
         paged_bytes_reserved: 0,
         paged_bytes_in_use: 0,
         paged_block_budget: 0,
+        reject_oversized: 0,
+        reject_disabled: 0,
+        reject_prefix_too_short: 0,
+        reject_mode_mismatch: 0,
+        reject_empty_set: 0,
+        reject_layout_constraints: 0,
+        reject_block_boundary_floor: 0,
+        last_reject_reason: None,
+        last_reject_seq_id: None,
+        last_reject_context_len: None,
+        last_reject_at_unix_ms: None,
     };
     assert!(!resp.enabled);
     assert!(!resp.apc_enabled);
@@ -278,7 +313,8 @@ fn build_stats_response_surfaces_paged_pool_independent_of_store() {
     let cfg = PromptCacheConfig::default();
 
     // None store (prompt cache disabled) still reports the live paged pool.
-    let disabled = super::super::cache::build_stats_response(None, &cfg, paged);
+    let disabled =
+        super::super::cache::build_stats_response(None, &cfg, paged, RejectReasonStats::default());
     assert!(!disabled.enabled);
     assert_eq!(disabled.paged_block_size, 32);
     assert_eq!(disabled.paged_blocks_live, 150);
@@ -291,7 +327,12 @@ fn build_stats_response_surfaces_paged_pool_independent_of_store() {
 
     // With a live store the same paged values flow through unchanged.
     let store = enabled_store();
-    let enabled = super::super::cache::build_stats_response(Some(store.as_ref()), &cfg, paged);
+    let enabled = super::super::cache::build_stats_response(
+        Some(store.as_ref()),
+        &cfg,
+        paged,
+        RejectReasonStats::default(),
+    );
     assert_eq!(enabled.paged_blocks_allocated, 200);
     assert_eq!(enabled.paged_bytes_in_use, 98304);
     assert_eq!(enabled.paged_block_budget, 256);
@@ -355,7 +396,12 @@ fn hit_rate_handles_zero_lookups_without_nan() {
 #[test]
 fn build_stats_response_disabled_when_store_is_none() {
     let cfg = PromptCacheConfig::default();
-    let resp = super::super::cache::build_stats_response(None, &cfg, PagedBlockStats::default());
+    let resp = super::super::cache::build_stats_response(
+        None,
+        &cfg,
+        PagedBlockStats::default(),
+        RejectReasonStats::default(),
+    );
     assert!(!resp.enabled);
     assert!(!resp.apc_enabled);
     assert_eq!(resp.entries, 0);
@@ -379,6 +425,7 @@ fn build_stats_response_reflects_live_store() {
         Some(store.as_ref()),
         &cfg,
         PagedBlockStats::default(),
+        RejectReasonStats::default(),
     );
     assert!(resp.enabled);
     assert!(
@@ -423,6 +470,7 @@ fn build_stats_response_reflects_apc_blocks_when_enabled() {
         Some(store.as_ref()),
         &cfg,
         PagedBlockStats::default(),
+        RejectReasonStats::default(),
     );
     assert!(resp.enabled);
     assert!(resp.apc_enabled, "APC must be enabled in this fixture");
@@ -458,6 +506,7 @@ fn build_stats_response_apc_zero_when_disabled_with_inserts() {
         Some(store.as_ref()),
         &cfg,
         PagedBlockStats::default(),
+        RejectReasonStats::default(),
     );
     assert!(!resp.apc_enabled);
     assert_eq!(resp.entries, 3);
@@ -504,6 +553,7 @@ fn apc_unique_block_hashes_reflects_dedup_potential() {
         Some(store.as_ref()),
         &cfg,
         PagedBlockStats::default(),
+        RejectReasonStats::default(),
     );
     assert_eq!(resp.entries, 2);
     assert_eq!(resp.apc_active_entries, 2);
@@ -580,6 +630,7 @@ async fn router_returns_stats_and_reset_with_correct_methods() {
             Some(s.store.as_ref()),
             s.cfg.as_ref(),
             PagedBlockStats::default(),
+            RejectReasonStats::default(),
         ))
     }
     async fn reset_handler(

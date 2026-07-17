@@ -62,6 +62,49 @@ impl PagedBlockStats {
     }
 }
 
+/// Prompt-cache reject/decline breakdown for the cache-stats body
+/// (issue #774).
+///
+/// Sourced from the batch observability snapshot rather than the store's own
+/// counters (like [`PagedBlockStats`]), because it covers BOTH the
+/// donate-back (insert) path and the adopt path -- the store's own
+/// `rejections_oversized` only ever sees the former.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct RejectReasonStats {
+    pub oversized: u64,
+    pub disabled: u64,
+    pub prefix_too_short: u64,
+    pub mode_mismatch: u64,
+    pub empty_set: u64,
+    pub layout_constraints: u64,
+    pub block_boundary_floor: u64,
+    pub last_reason: Option<String>,
+    pub last_seq_id: Option<u64>,
+    pub last_context_len: Option<u64>,
+    pub last_at_unix_ms: Option<u64>,
+}
+
+impl RejectReasonStats {
+    /// Project the per-reason reject counters and last-reject snapshot out
+    /// of a batch observability snapshot.
+    pub(crate) fn from_observability(snap: &ObservabilitySnapshot) -> Self {
+        let last = snap.prompt_cache_last_reject.as_ref();
+        Self {
+            oversized: snap.prompt_cache_reject_oversized,
+            disabled: snap.prompt_cache_reject_disabled,
+            prefix_too_short: snap.prompt_cache_reject_prefix_too_short,
+            mode_mismatch: snap.prompt_cache_reject_mode_mismatch,
+            empty_set: snap.prompt_cache_reject_empty_set,
+            layout_constraints: snap.prompt_cache_reject_layout_constraints,
+            block_boundary_floor: snap.prompt_cache_reject_block_boundary_floor,
+            last_reason: last.map(|r| r.reason.to_string()),
+            last_seq_id: last.and_then(|r| r.seq_id),
+            last_context_len: last.map(|r| r.context_len),
+            last_at_unix_ms: last.map(|r| r.at_unix_ms),
+        }
+    }
+}
+
 /// Snapshot of cache state returned by `GET /v1/cache/stats`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CacheStatsResponse {
@@ -153,6 +196,40 @@ pub struct CacheStatsResponse {
     /// below this, so `paged_block_budget - paged_blocks_live` is the
     /// acquirable headroom before eviction / preemption kicks in.
     pub paged_block_budget: u64,
+
+    // ── Prompt-cache reject-reason breakdown (issue #774) ────────────────────
+    // Sourced from the batch observability gauges (not the prompt-cache
+    // store), so -- like the paged block-pool fields above -- these are
+    // populated even when the prompt cache is disabled. They cover BOTH the
+    // donate-back (insert) path and the adopt path; `rejections_oversized`
+    // above only ever sees the former.
+    /// Single-entry-too-large declines (donate-back only).
+    pub reject_oversized: u64,
+    /// Store-disabled declines (donate-back only).
+    pub reject_disabled: u64,
+    /// Below-`min_prefix_tokens` declines, from either path.
+    pub reject_prefix_too_short: u64,
+    /// Cross-backend or whole-entry-policy declines (adopt path only).
+    pub reject_mode_mismatch: u64,
+    /// Nothing-to-cache declines, from either path.
+    pub reject_empty_set: u64,
+    /// Pool-level operation failures (paged clone/trim, dense truncate,
+    /// snapshot restore, or the final adopt call).
+    pub reject_layout_constraints: u64,
+    /// Paged pool block-size floor pushed the adoptable/donatable length
+    /// below `min_prefix_tokens` (adopt path only).
+    pub reject_block_boundary_floor: u64,
+    /// Reason label of the most recent reject/decline event, if any has
+    /// happened yet.
+    pub last_reject_reason: Option<String>,
+    /// Sequence id of the most recent reject, when one was available at the
+    /// decline site (see [`crate::server::prompt_cache::PromptCacheLastReject`]).
+    pub last_reject_seq_id: Option<u64>,
+    /// Matched-prefix length (adopt) or donated token count (donate) at the
+    /// time of the most recent reject.
+    pub last_reject_context_len: Option<u64>,
+    /// Unix epoch milliseconds of the most recent reject.
+    pub last_reject_at_unix_ms: Option<u64>,
 }
 
 /// Response for `POST /v1/cache/reset`.
@@ -169,11 +246,14 @@ pub struct CacheResetResponse {
 
 /// `GET /v1/cache/stats` — return a snapshot of cache statistics.
 pub async fn cache_stats(State(state): State<AppState>) -> Json<CacheStatsResponse> {
-    let paged = PagedBlockStats::from_observability(&state.batch_observability.snapshot());
+    let obs_snapshot = state.batch_observability.snapshot();
+    let paged = PagedBlockStats::from_observability(&obs_snapshot);
+    let reject = RejectReasonStats::from_observability(&obs_snapshot);
     Json(build_stats_response(
         state.prompt_cache.as_deref(),
         &state.config.prompt_cache,
         paged,
+        reject,
     ))
 }
 
@@ -193,6 +273,7 @@ pub(crate) fn build_stats_response(
     store: Option<&crate::server::prompt_cache::PromptCacheStore>,
     cfg: &crate::server::prompt_cache::PromptCacheConfig,
     paged: PagedBlockStats,
+    reject: RejectReasonStats,
 ) -> CacheStatsResponse {
     let apc = &cfg.apc;
     match store {
@@ -247,6 +328,18 @@ pub(crate) fn build_stats_response(
                 paged_bytes_reserved: paged.bytes_reserved,
                 paged_bytes_in_use: paged.bytes_in_use,
                 paged_block_budget: paged.block_budget,
+                // Reject-reason breakdown is store-independent (issue #774).
+                reject_oversized: reject.oversized,
+                reject_disabled: reject.disabled,
+                reject_prefix_too_short: reject.prefix_too_short,
+                reject_mode_mismatch: reject.mode_mismatch,
+                reject_empty_set: reject.empty_set,
+                reject_layout_constraints: reject.layout_constraints,
+                reject_block_boundary_floor: reject.block_boundary_floor,
+                last_reject_reason: reject.last_reason,
+                last_reject_seq_id: reject.last_seq_id,
+                last_reject_context_len: reject.last_context_len,
+                last_reject_at_unix_ms: reject.last_at_unix_ms,
             }
         }
         None => CacheStatsResponse {
@@ -288,6 +381,20 @@ pub(crate) fn build_stats_response(
             paged_bytes_reserved: paged.bytes_reserved,
             paged_bytes_in_use: paged.bytes_in_use,
             paged_block_budget: paged.block_budget,
+            // Reject events can still occur while the prompt cache is
+            // disabled (e.g. `InsertError::Disabled` on an in-flight donate
+            // racing a runtime disable), so these mirror the `Some` branch.
+            reject_oversized: reject.oversized,
+            reject_disabled: reject.disabled,
+            reject_prefix_too_short: reject.prefix_too_short,
+            reject_mode_mismatch: reject.mode_mismatch,
+            reject_empty_set: reject.empty_set,
+            reject_layout_constraints: reject.layout_constraints,
+            reject_block_boundary_floor: reject.block_boundary_floor,
+            last_reject_reason: reject.last_reason,
+            last_reject_seq_id: reject.last_seq_id,
+            last_reject_context_len: reject.last_context_len,
+            last_reject_at_unix_ms: reject.last_at_unix_ms,
         },
     }
 }

@@ -66,7 +66,7 @@ mod stop_matcher;
 pub(crate) mod xla_worker;
 
 pub use active::ActiveBatch;
-pub use observability::{BatchObservability, ObservabilitySnapshot};
+pub use observability::{BatchObservability, ObservabilitySnapshot, PromptCacheLastRejectSnapshot};
 pub use queue::PrefillQueue;
 pub use scheduler::BatchScheduler;
 pub use sequence::{

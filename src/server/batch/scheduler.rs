@@ -58,7 +58,7 @@ use crate::models::gemma4_mtp_target::{
     Gemma4MtpTargetAdapter, Gemma4UnifiedMtpTargetAdapter, Gemma4VLMtpTargetAdapter,
 };
 use crate::server::ServerGenerateOptions;
-use crate::server::batch::observability::BatchObservability;
+use crate::server::batch::observability::{BatchObservability, apc_trace_enabled};
 use crate::server::config::{
     DecodeStorageBackend, PreemptionPolicy, PromptCacheRequestContext, ReasoningBudgetOverride,
 };
@@ -68,6 +68,7 @@ use crate::server::model_provider::model_worker::{
 };
 use crate::server::model_provider::{GenerateEvent, ModelRequest};
 use crate::server::prompt_cache::key::PromptCacheKey;
+use crate::server::prompt_cache::metrics::PromptCacheRejectReason;
 use crate::server::prompt_cache::{
     CacheEntry, DetachedKvSet, ModelSnapshotEntry, PromptCacheStore,
 };
@@ -1588,12 +1589,26 @@ impl BatchScheduler {
                         self.batch_metrics
                             .update_prompt_cache_gauges(store.bytes(), store.len());
                     }
+                    if apc_trace_enabled() {
+                        tracing::info!(
+                            apc_event = "adopt",
+                            seq_id = %seq_id,
+                            matched_len = matched_len,
+                            total_tokens = tokens.len(),
+                            "prompt-cache adopt (snapshot)"
+                        );
+                    }
                     return Some((seq_id, matched_len));
                 }
                 Err(err) => {
                     tracing::warn!(
                         seq_id = %seq_id,
                         "prompt-cache snapshot restore failed ({err}); falling back to cold prefill"
+                    );
+                    self.batch_observability.record_prompt_cache_reject(
+                        PromptCacheRejectReason::LayoutConstraints,
+                        Some(seq_id.as_u64()),
+                        matched_len,
                     );
                     self.release_sequence_caches(seq_id);
                     return None;
@@ -1608,6 +1623,11 @@ impl BatchScheduler {
         // back to a cold prefill) before consuming anything; the entry stays
         // available for a later exact match.
         if require_whole_entry && matched_len < entry.tokens.len() {
+            self.batch_observability.record_prompt_cache_reject(
+                PromptCacheRejectReason::ModeMismatch,
+                None,
+                matched_len,
+            );
             return None;
         }
         // Length the adopted cache actually covers. The dense path truncates
@@ -1624,8 +1644,9 @@ impl BatchScheduler {
             /// Adoptable clone built; the source entry stays in the store.
             Cloned(Box<DetachedPagedCacheSet>, usize),
             /// Cold prefill, entry untouched (below minimum, pin failure,
-            /// or cross-backend).
-            Decline(String),
+            /// or cross-backend). Carries the classified reject reason
+            /// (issue #774) alongside the human-readable message.
+            Decline(PromptCacheRejectReason, String),
             /// Dense entry, or a clone-ineligible paged shape (dense-compat
             /// handles, Turbo4, sliding-window): the consuming take path
             /// below can still adopt those.
@@ -1647,21 +1668,28 @@ impl BatchScheduler {
                 // re-covers the dropped partial tail.
                 let adoptable = (matched_len.min(paged.seq_len()) / block_size) * block_size;
                 if adoptable < min_prefix {
-                    return PagedCloneOutcome::Decline(format!(
-                        "block-floored match {adoptable} below the minimum prefix {min_prefix}"
-                    ));
+                    return PagedCloneOutcome::Decline(
+                        PromptCacheRejectReason::BlockBoundaryFloor,
+                        format!(
+                            "block-floored match {adoptable} below the minimum prefix {min_prefix}"
+                        ),
+                    );
                 }
                 match cache_pool.clone_detached_paged_prefix(paged, adoptable) {
                     Ok(clone) => PagedCloneOutcome::Cloned(Box::new(clone), adoptable),
-                    Err(err) => PagedCloneOutcome::Decline(err),
+                    Err(err) => PagedCloneOutcome::Decline(
+                        PromptCacheRejectReason::LayoutConstraints,
+                        err,
+                    ),
                 }
             }
             // Paged entry under a dense decode backend: cross-backend
             // adoption is invalid; decline without touching the entry
             // (the old path took the set just to release it).
-            DetachedKvSet::Paged(_) if !backend_is_paged => {
-                PagedCloneOutcome::Decline("paged entry under a dense decode backend".into())
-            }
+            DetachedKvSet::Paged(_) if !backend_is_paged => PagedCloneOutcome::Decline(
+                PromptCacheRejectReason::ModeMismatch,
+                "paged entry under a dense decode backend".into(),
+            ),
             // Clone-ineligible paged shapes and dense entries.
             DetachedKvSet::Paged(_) | DetachedKvSet::Dense(_) => PagedCloneOutcome::TakePath,
         });
@@ -1673,9 +1701,14 @@ impl BatchScheduler {
                     .adopt_paged(&self.model as &dyn LanguageModel, *clone);
                 return self.finish_prompt_cache_adopt(adopt_result, adopted_len, tokens.len());
             }
-            Some(PagedCloneOutcome::Decline(reason)) => {
+            Some(PagedCloneOutcome::Decline(reject_reason, reason)) => {
                 tracing::debug!(
                     "prompt-cache adopt: paged clone declined ({reason}); falling back to cold prefill (entry preserved)"
+                );
+                self.batch_observability.record_prompt_cache_reject(
+                    reject_reason,
+                    None,
+                    matched_len,
                 );
                 return None;
             }
@@ -1691,6 +1724,11 @@ impl BatchScheduler {
             // A paged set drained on this path would leak its block pins via
             // `Drop`; release them explicitly so the pool budget stays honest.
             self.release_unused_detached(detached);
+            self.batch_observability.record_prompt_cache_reject(
+                PromptCacheRejectReason::EmptySet,
+                None,
+                matched_len,
+            );
             return None;
         }
 
@@ -1705,6 +1743,11 @@ impl BatchScheduler {
         );
         if backend_mismatch {
             self.release_unused_detached(detached);
+            self.batch_observability.record_prompt_cache_reject(
+                PromptCacheRejectReason::ModeMismatch,
+                None,
+                matched_len,
+            );
             return None;
         }
 
@@ -1724,6 +1767,11 @@ impl BatchScheduler {
                     if let Err(err) = dense.truncate_to(target) {
                         tracing::warn!(
                             "prompt-cache adopt: APC partial truncate to {target} failed ({err}); falling back to cold prefill"
+                        );
+                        self.batch_observability.record_prompt_cache_reject(
+                            PromptCacheRejectReason::LayoutConstraints,
+                            None,
+                            matched_len,
                         );
                         return None;
                     }
@@ -1760,6 +1808,11 @@ impl BatchScheduler {
                         "prompt-cache adopt: block-floored paged match below the minimum prefix; releasing and falling back to cold prefill"
                     );
                     self.cache_pool.release_detached_paged(paged);
+                    self.batch_observability.record_prompt_cache_reject(
+                        PromptCacheRejectReason::BlockBoundaryFloor,
+                        None,
+                        matched_len,
+                    );
                     return None;
                 }
                 if adoptable < paged_seq_len {
@@ -1771,6 +1824,11 @@ impl BatchScheduler {
                             "prompt-cache adopt: paged partial trim to {adoptable} failed ({err}); falling back to cold prefill"
                         );
                         self.cache_pool.release_detached_paged(paged);
+                        self.batch_observability.record_prompt_cache_reject(
+                            PromptCacheRejectReason::LayoutConstraints,
+                            None,
+                            matched_len,
+                        );
                         return None;
                     }
                     tracing::debug!(
@@ -1813,12 +1871,26 @@ impl BatchScheduler {
                     self.batch_metrics
                         .update_prompt_cache_gauges(store.bytes(), store.len());
                 }
+                if apc_trace_enabled() {
+                    tracing::info!(
+                        apc_event = "adopt",
+                        seq_id = %adopted_id,
+                        matched_len = adopted_len,
+                        total_tokens = total_tokens,
+                        "prompt-cache adopt"
+                    );
+                }
                 Some((adopted_id, adopted_len))
             }
             Err(err) => {
                 // `adopt_paged` already releases paged pins on its error path;
                 // `adopt` (dense) simply drops the buffers. Nothing to reclaim.
                 tracing::debug!("prompt-cache adopt failed ({err}); falling back to cold prefill");
+                self.batch_observability.record_prompt_cache_reject(
+                    PromptCacheRejectReason::LayoutConstraints,
+                    None,
+                    adopted_len,
+                );
                 None
             }
         }
@@ -1916,6 +1988,11 @@ impl BatchScheduler {
                 None => return,
             };
             if tokens.len() < store.min_prefix_tokens() {
+                self.batch_observability.record_prompt_cache_reject(
+                    PromptCacheRejectReason::PrefixTooShort,
+                    Some(seq_id.as_u64()),
+                    tokens.len(),
+                );
                 return;
             }
             let snapshot = match self.model.snapshot_sequence_state(seq_id, tokens.len()) {
@@ -1926,6 +2003,11 @@ impl BatchScheduler {
                         token_len = tokens.len(),
                         "prompt-cache snapshot donate skipped: captured snapshot was empty"
                     );
+                    self.batch_observability.record_prompt_cache_reject(
+                        PromptCacheRejectReason::EmptySet,
+                        Some(seq_id.as_u64()),
+                        tokens.len(),
+                    );
                     return;
                 }
                 None => {
@@ -1933,6 +2015,11 @@ impl BatchScheduler {
                         seq_id = %seq_id,
                         token_len = tokens.len(),
                         "prompt-cache snapshot donate skipped: no model-owned state for sequence"
+                    );
+                    self.batch_observability.record_prompt_cache_reject(
+                        PromptCacheRejectReason::EmptySet,
+                        Some(seq_id.as_u64()),
+                        tokens.len(),
                     );
                     return;
                 }
@@ -1951,10 +2038,23 @@ impl BatchScheduler {
                     self.batch_observability.record_prompt_cache_insert();
                     self.batch_metrics
                         .update_prompt_cache_gauges(store.bytes(), store.len());
+                    if apc_trace_enabled() {
+                        tracing::info!(
+                            apc_event = "store",
+                            seq_id = %seq_id,
+                            matched_len = key_tokens.len(),
+                            "prompt-cache store (snapshot)"
+                        );
+                    }
                 }
                 Err(err) => {
                     tracing::debug!("prompt-cache snapshot insert skipped: {err}");
                     self.batch_observability.record_prompt_cache_insert_reject();
+                    self.batch_observability.record_prompt_cache_reject(
+                        PromptCacheRejectReason::from(&err),
+                        Some(seq_id.as_u64()),
+                        key_tokens.len(),
+                    );
                 }
             }
             return;
@@ -1991,6 +2091,11 @@ impl BatchScheduler {
                 // immediately release. The dense path needs no such screen — a
                 // rejected dense entry just drops its buffers.
                 if tokens.len() < store.min_prefix_tokens() {
+                    self.batch_observability.record_prompt_cache_reject(
+                        PromptCacheRejectReason::PrefixTooShort,
+                        Some(seq_id.as_u64()),
+                        tokens.len(),
+                    );
                     return;
                 }
                 match self.cache_pool.detach_paged(seq_id) {
@@ -2006,6 +2111,11 @@ impl BatchScheduler {
             // model never populated the KV state. Release any paged pins we
             // took so the pool budget stays honest.
             self.release_unused_detached(kv_set);
+            self.batch_observability.record_prompt_cache_reject(
+                PromptCacheRejectReason::EmptySet,
+                Some(seq_id.as_u64()),
+                tokens.len(),
+            );
             return;
         }
 
@@ -2022,6 +2132,14 @@ impl BatchScheduler {
                 // refresh byte/entry gauges after a successful insert.
                 self.batch_metrics
                     .update_prompt_cache_gauges(store.bytes(), store.len());
+                if apc_trace_enabled() {
+                    tracing::info!(
+                        apc_event = "store",
+                        seq_id = %seq_id,
+                        matched_len = key_tokens.len(),
+                        "prompt-cache store"
+                    );
+                }
             }
             Err(err) => {
                 // Oversized / disabled / prefix-too-short — `insert` declines
@@ -2035,6 +2153,11 @@ impl BatchScheduler {
                     "prompt-cache donate-back skipped: {err:?}"
                 );
                 self.batch_observability.record_prompt_cache_insert_reject();
+                self.batch_observability.record_prompt_cache_reject(
+                    PromptCacheRejectReason::from(&err),
+                    Some(seq_id.as_u64()),
+                    key_tokens.len(),
+                );
             }
         }
         // Return to the pool any paged pins this insert's eviction / rejection

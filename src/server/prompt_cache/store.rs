@@ -34,7 +34,7 @@ use super::apc_lookup::{ApcStoreStats, apc_consistent_prefix_len};
 use super::block_hash::{ApcBlockHash, BlockHashChain};
 use super::entry::{CacheEntry, DetachedKvSet, DetachedKvSetHolder, ModelSnapshotEntry};
 use super::key::{PromptCacheKey, PromptCacheKeyDigest};
-use super::metrics::{NoopPromptCacheMetrics, PromptCacheMetrics};
+use super::metrics::{NoopPromptCacheMetrics, PromptCacheMetrics, PromptCacheRejectReason};
 use super::policy::{PromptCacheConfig, PromptCacheStats};
 use super::trie::RadixTrie;
 pub(super) use super::types::SessionlessBucketKey;
@@ -550,14 +550,19 @@ impl PromptCacheStore {
         // for the scheduler to release before returning the error.
         if !guard.config.is_enabled() {
             guard.stash_paged_pins_for_release(&entry);
+            let metrics = Arc::clone(&self.metrics);
+            drop(guard);
+            metrics.record_reject(PromptCacheRejectReason::Disabled, entry_bytes);
             return Err(InsertError::Disabled);
         }
         if key.effective_prefix_len() < guard.config.min_prefix_tokens {
             guard.stash_paged_pins_for_release(&entry);
-            return Err(InsertError::PrefixTooShort {
-                got: key.effective_prefix_len(),
-                min_required: guard.config.min_prefix_tokens,
-            });
+            let got = key.effective_prefix_len();
+            let min_required = guard.config.min_prefix_tokens;
+            let metrics = Arc::clone(&self.metrics);
+            drop(guard);
+            metrics.record_reject(PromptCacheRejectReason::PrefixTooShort, entry_bytes);
+            return Err(InsertError::PrefixTooShort { got, min_required });
         }
         if entry_bytes > guard.config.capacity_bytes {
             guard.rejections_oversized = guard.rejections_oversized.saturating_add(1);
@@ -565,6 +570,7 @@ impl PromptCacheStore {
             let metrics = Arc::clone(&self.metrics);
             drop(guard);
             metrics.record_reject_oversized(entry_bytes);
+            metrics.record_reject(PromptCacheRejectReason::Oversized, entry_bytes);
             return Err(InsertError::OversizedEntry {
                 entry_bytes,
                 capacity_bytes: self
@@ -645,13 +651,18 @@ impl PromptCacheStore {
 
         let mut guard = self.inner.write().expect("prompt cache inner lock");
         if !guard.config.is_enabled() {
+            let metrics = Arc::clone(&self.metrics);
+            drop(guard);
+            metrics.record_reject(PromptCacheRejectReason::Disabled, entry_bytes);
             return Err(InsertError::Disabled);
         }
         if key.effective_prefix_len() < guard.config.min_prefix_tokens {
-            return Err(InsertError::PrefixTooShort {
-                got: key.effective_prefix_len(),
-                min_required: guard.config.min_prefix_tokens,
-            });
+            let got = key.effective_prefix_len();
+            let min_required = guard.config.min_prefix_tokens;
+            let metrics = Arc::clone(&self.metrics);
+            drop(guard);
+            metrics.record_reject(PromptCacheRejectReason::PrefixTooShort, entry_bytes);
+            return Err(InsertError::PrefixTooShort { got, min_required });
         }
         if entry_bytes > guard.config.snapshot_capacity_bytes {
             guard.snapshot_rejections_oversized =
@@ -659,6 +670,7 @@ impl PromptCacheStore {
             let metrics = Arc::clone(&self.metrics);
             drop(guard);
             metrics.record_reject_oversized(entry_bytes);
+            metrics.record_reject(PromptCacheRejectReason::Oversized, entry_bytes);
             return Err(InsertError::OversizedEntry {
                 entry_bytes,
                 capacity_bytes: self
