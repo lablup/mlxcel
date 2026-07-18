@@ -470,25 +470,39 @@ pub struct BatchScheduler {
     /// (issue #746): parked in-flight jobs (rotated out at a grant
     /// boundary, drafter returned to the worker slot) and admitted
     /// waiters (slice 0 not yet run) in ONE FIFO ring, granted priority
-    /// lane first then FIFO
+    /// lane first then FIFO, with a skip-cap anti-starvation floor
     /// ([`super::speculative_slice::next_grant_index`]). Bounded by
-    /// [`super::speculative_slice::MTP_SLICE_BACKLOG_CAP`] at admission.
-    /// Empty for non-speculative deployments (a `VecDeque` allocates
-    /// nothing until the first push). On scheduler shutdown the entries
-    /// drop exactly like an in-flight `speculative_slice` job (response
-    /// channels close and clients observe the hangup).
+    /// [`super::speculative_slice::MTP_SLICE_BACKLOG_CAP`] at admission;
+    /// a park transiently pushes the ring to CAP + 1 entries until the
+    /// next promotion, so total live speculative sessions (the active
+    /// job plus parked jobs and waiters, each holding its per-sequence
+    /// KV) peak at CAP + 1 = 3. Empty for non-speculative deployments (a
+    /// `VecDeque` allocates nothing until the first push). On scheduler
+    /// shutdown the entries drop exactly like an in-flight
+    /// `speculative_slice` job (response channels close and clients
+    /// observe the hangup).
     speculative_slice_backlog:
         std::collections::VecDeque<super::speculative_slice::SliceBacklogEntry>,
 
     /// Slices the active job has executed in its CURRENT slot grant
     /// (issue #746), slice 0 included for an admission grant. When it
-    /// reaches the `MLXCEL_MTP_SLICE_GRANT_ROUNDS` budget AND the backlog
+    /// reaches [`Self::speculative_slice_grant_budget`] AND the backlog
     /// is non-empty, the job is parked at the next round boundary
     /// ([`super::speculative_slice::slice_grant_expired`], checked at the
     /// tail of [`Self::execute_speculative_slice_round`]). Keeps counting
     /// while uncontended so contention appearing after an overrun rotates
     /// at the first round boundary.
     speculative_slice_grant_slices: usize,
+
+    /// The `MLXCEL_MTP_SLICE_GRANT_ROUNDS` budget resolved ONCE at the
+    /// start of the current grant (both grant-start sites: the
+    /// slice-0 install in [`Self::start_mtp_slice_b1`] and the
+    /// parked-job promotion), so the per-round expiry check costs a
+    /// counter increment plus a comparison against this cached value
+    /// instead of an env read (env var access takes std's process-wide
+    /// ENV lock and allocates). Runtime tunability stays at the same
+    /// per-request cadence as the `mtp_tick_slice_enabled()` gate.
+    speculative_slice_grant_budget: usize,
 
     /// Fairness flag for the slice tick-arbitration
     /// ([`super::speculative_slice::slice_takes_tick`]): `true` when the
@@ -1137,6 +1151,7 @@ impl BatchScheduler {
             speculative_slice_yielded: false,
             speculative_slice_backlog: std::collections::VecDeque::new(),
             speculative_slice_grant_slices: 0,
+            speculative_slice_grant_budget: 0,
             paged_handoff_geometry: None,
             decode_lookahead: None,
             // Honor MLXCEL_FORCE_SYNC=1 as the pipeline kill switch, probed once
@@ -3489,7 +3504,7 @@ impl BatchScheduler {
                     self.speculative_slice_backlog.len() + 1,
                 );
                 self.speculative_slice_backlog.push_back(
-                    super::speculative_slice::SliceBacklogEntry::Waiter(Box::new(seq)),
+                    super::speculative_slice::SliceBacklogEntry::waiter(Box::new(seq)),
                 );
                 return None;
             }
@@ -4077,9 +4092,13 @@ impl BatchScheduler {
                     // `try_speculative_burst` parks or declines new
                     // arrivals while the backlog is non-empty.
                     self.speculative_slice_grant_slices = 1;
+                    // Resolve the budget once per grant; the per-round
+                    // expiry check compares against this cached value.
+                    self.speculative_slice_grant_budget =
+                        super::speculative_slice::mtp_slice_grant_rounds();
                     if super::speculative_slice::slice_grant_expired(
                         self.speculative_slice_grant_slices,
-                        super::speculative_slice::mtp_slice_grant_rounds(),
+                        self.speculative_slice_grant_budget,
                         !self.speculative_slice_backlog.is_empty(),
                     ) {
                         self.park_speculative_slice(Box::new(job));
@@ -4179,9 +4198,13 @@ impl BatchScheduler {
             self.finalize_speculative_slice(*job);
         } else {
             self.speculative_slice_grant_slices += 1;
+            // The uncontended per-round added cost is this counter
+            // increment plus a comparison against the budget cached at
+            // grant start (no per-round env read; see
+            // `speculative_slice_grant_budget`).
             if super::speculative_slice::slice_grant_expired(
                 self.speculative_slice_grant_slices,
-                super::speculative_slice::mtp_slice_grant_rounds(),
+                self.speculative_slice_grant_budget,
                 !self.speculative_slice_backlog.is_empty(),
             ) {
                 // Round boundary with the grant spent and other grantees
@@ -4223,7 +4246,7 @@ impl BatchScheduler {
             "speculative slice grant expired; parking the job and rotating the slot"
         );
         self.speculative_slice_backlog
-            .push_back(super::speculative_slice::SliceBacklogEntry::Parked(job));
+            .push_back(super::speculative_slice::SliceBacklogEntry::parked(job));
         self.speculative_slice_grant_slices = 0;
     }
 
@@ -4241,8 +4264,8 @@ impl BatchScheduler {
     fn promote_next_speculative_grantee(&mut self) -> bool {
         debug_assert!(self.speculative_slice.is_none());
         while let Some(entry) = self.pop_next_speculative_grantee() {
-            match entry {
-                super::speculative_slice::SliceBacklogEntry::Waiter(seq) => {
+            match entry.kind {
+                super::speculative_slice::SliceBacklogKind::Waiter(seq) => {
                     let seq = *seq;
                     if seq.cancelled.load(std::sync::atomic::Ordering::Relaxed) {
                         // The client disconnected while the request waited
@@ -4289,7 +4312,7 @@ impl BatchScheduler {
                         }
                     }
                 }
-                super::speculative_slice::SliceBacklogEntry::Parked(mut job) => {
+                super::speculative_slice::SliceBacklogKind::Parked(mut job) => {
                     // Re-acquire the worker drafter returned at park time.
                     // `ensure_loaded` is a no-op while the handle sits in
                     // the slot; it reloads from disk only if the park-time
@@ -4332,8 +4355,12 @@ impl BatchScheduler {
                     );
                     self.speculative_slice = Some(job);
                     // The promotion itself is bookkeeping; the round that
-                    // runs this tick is the grant's first slice.
+                    // runs this tick is the grant's first slice. Resolve
+                    // the budget once per grant here, the second of the
+                    // two grant-start sites.
                     self.speculative_slice_grant_slices = 0;
+                    self.speculative_slice_grant_budget =
+                        super::speculative_slice::mtp_slice_grant_rounds();
                     return true;
                 }
             }
@@ -4363,17 +4390,29 @@ impl BatchScheduler {
         }
     }
 
-    /// Pop the next grantee: the earliest backlog entry of the highest
-    /// priority lane present (issue #746).
+    /// Pop the next grantee per [`super::speculative_slice::next_grant_index`]:
+    /// priority lane first with the skip-cap anti-starvation floor (issue
+    /// #746). Every grant decision increments the skip counter of every
+    /// NON-selected entry, so a lower-lane entry repeatedly passed over
+    /// by higher-lane grants becomes overdue within
+    /// `MTP_SLICE_GRANT_SKIP_CAP` decisions and must be granted next;
+    /// this bounds the delay a sustained higher-lane stream can impose
+    /// on any entry. (A cancelled or declined pop also counts as a
+    /// decision, which only escalates the survivors sooner.)
     fn pop_next_speculative_grantee(
         &mut self,
     ) -> Option<super::speculative_slice::SliceBacklogEntry> {
-        let lanes: Vec<_> = self
+        let entries: Vec<_> = self
             .speculative_slice_backlog
             .iter()
-            .map(|entry| entry.priority())
+            .map(|entry| (entry.priority(), entry.skipped_grants))
             .collect();
-        let idx = super::speculative_slice::next_grant_index(&lanes)?;
+        let idx = super::speculative_slice::next_grant_index(&entries)?;
+        for (i, entry) in self.speculative_slice_backlog.iter_mut().enumerate() {
+            if i != idx {
+                entry.skipped_grants += 1;
+            }
+        }
         self.speculative_slice_backlog.remove(idx)
     }
 

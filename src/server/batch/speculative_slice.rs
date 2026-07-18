@@ -142,6 +142,12 @@ pub(crate) const MTP_SLICE_BACKLOG_CAP: usize = 2;
 /// #734 whole-generation hold, as an operator escape hatch; admission
 /// then also stops parking waiters, restoring the pre-#746 classic
 /// fallback for concurrent speculative requests).
+///
+/// Read cadence: once per GRANT (at the two grant-start sites, cached in
+/// the scheduler's `speculative_slice_grant_budget`) and once per
+/// admission decision, never per round; env access takes std's
+/// process-wide ENV lock and allocates, so the per-round expiry check
+/// compares against the cached value instead.
 pub(crate) fn mtp_slice_grant_rounds() -> usize {
     mtp_slice_grant_rounds_default(
         std::env::var("MLXCEL_MTP_SLICE_GRANT_ROUNDS")
@@ -186,17 +192,50 @@ pub(crate) fn slice_backlog_admits(backlog_len: usize, budget: usize) -> bool {
     budget > 0 && backlog_len < MTP_SLICE_BACKLOG_CAP
 }
 
-/// Index of the next slot grantee in the backlog (issue #746): the
-/// earliest entry of the highest priority lane present. Priority lane
-/// first, then FIFO; parked jobs and waiters share the one ring in
-/// park/arrival order, so neither kind can starve the other within a
-/// lane. (Strict lane precedence means a lower-lane entry can be
-/// overtaken by later higher-lane arrivals, the same semantics as the
-/// scheduler's classic preemption path; the backlog cap bounds how many
-/// can be queued at once.)
-pub(crate) fn next_grant_index(priorities: &[super::sequence::RequestPriority]) -> Option<usize> {
+/// Anti-starvation skip cap for the grant order (issue #746 security
+/// hardening). A backlog entry that `MTP_SLICE_GRANT_SKIP_CAP` grant
+/// decisions have passed over becomes OVERDUE and must be granted next,
+/// regardless of priority lane. Without this floor, strict lane
+/// precedence would let a sustained stream of higher-lane arrivals
+/// starve a lower-lane PARKED job indefinitely; a parked job is not in
+/// the active batch, so starving it stalls its client stream completely,
+/// losing the #745 "everyone still progresses" floor, and priorities are
+/// client-assignable (the `X-Priority` header), so the starvation would
+/// be remotely triggerable. With the cap, every entry is granted within
+/// a bounded number of grant boundaries.
+pub(crate) const MTP_SLICE_GRANT_SKIP_CAP: usize = 2;
+
+/// Index of the next slot grantee in the backlog (issue #746). Each
+/// element is the entry's `(priority lane, skipped_grants)` pair in ring
+/// order.
+///
+/// Selection: if any entry is OVERDUE (skipped by at least
+/// [`MTP_SLICE_GRANT_SKIP_CAP`] grant decisions), the most-skipped entry
+/// wins, earliest in the ring on ties, regardless of lane; this is the
+/// anti-starvation floor. Otherwise: priority lane first, then FIFO;
+/// parked jobs and waiters share the one ring in park/arrival order, so
+/// neither kind can starve the other within a lane, and a lower-lane
+/// entry can be overtaken by later higher-lane arrivals only until its
+/// skip counter reaches the cap.
+pub(crate) fn next_grant_index(
+    entries: &[(super::sequence::RequestPriority, usize)],
+) -> Option<usize> {
+    // Anti-starvation escalation: an overdue entry preempts lane order.
+    let mut overdue: Option<(usize, usize)> = None;
+    for (idx, &(_, skips)) in entries.iter().enumerate() {
+        if skips >= MTP_SLICE_GRANT_SKIP_CAP
+            && overdue.is_none_or(|(best_skips, _)| skips > best_skips)
+        {
+            // Strictly greater keeps the earliest overdue entry on ties.
+            overdue = Some((skips, idx));
+        }
+    }
+    if let Some((_, idx)) = overdue {
+        return Some(idx);
+    }
+    // Un-escalated order: priority lane first, FIFO within a lane.
     let mut best: Option<(super::sequence::RequestPriority, usize)> = None;
-    for (idx, &lane) in priorities.iter().enumerate() {
+    for (idx, &(lane, _)) in entries.iter().enumerate() {
         // Strictly greater keeps the earliest entry within a lane.
         if best.is_none_or(|(best_lane, _)| lane > best_lane) {
             best = Some((lane, idx));
@@ -207,7 +246,20 @@ pub(crate) fn next_grant_index(priorities: &[super::sequence::RequestPriority]) 
 
 /// One backlog entry waiting for a speculative slice slot grant (issue
 /// #746). Owned by the scheduler (`BatchScheduler::speculative_slice_backlog`).
-pub(crate) enum SliceBacklogEntry {
+pub(crate) struct SliceBacklogEntry {
+    pub(crate) kind: SliceBacklogKind,
+    /// Grant decisions that selected some OTHER entry while this one
+    /// waited in the ring. Incremented by the scheduler for every
+    /// non-selected entry when a grantee is popped; at
+    /// [`MTP_SLICE_GRANT_SKIP_CAP`] the entry becomes overdue and
+    /// [`next_grant_index`] must select it next. A granted entry leaves
+    /// the ring, so re-parking re-enters with a fresh counter of 0 (the
+    /// "reset on grant").
+    pub(crate) skipped_grants: usize,
+}
+
+/// The payload of a [`SliceBacklogEntry`].
+pub(crate) enum SliceBacklogKind {
     /// An in-flight job parked at a grant boundary. Its drafter was
     /// returned to the worker slot at park time; promotion re-acquires
     /// and re-attaches it ([`MtpSliceJob::attach_drafter`]).
@@ -219,11 +271,27 @@ pub(crate) enum SliceBacklogEntry {
 }
 
 impl SliceBacklogEntry {
+    /// A freshly parked in-flight job (skip counter starts at 0).
+    pub(crate) fn parked(job: Box<MtpSliceJob>) -> Self {
+        Self {
+            kind: SliceBacklogKind::Parked(job),
+            skipped_grants: 0,
+        }
+    }
+
+    /// A freshly admitted waiter (skip counter starts at 0).
+    pub(crate) fn waiter(seq: Box<SequenceInfo>) -> Self {
+        Self {
+            kind: SliceBacklogKind::Waiter(seq),
+            skipped_grants: 0,
+        }
+    }
+
     /// The entry's request priority lane, for [`next_grant_index`].
     pub(crate) fn priority(&self) -> super::sequence::RequestPriority {
-        match self {
-            SliceBacklogEntry::Parked(job) => job.seq.priority,
-            SliceBacklogEntry::Waiter(seq) => seq.priority,
+        match &self.kind {
+            SliceBacklogKind::Parked(job) => job.seq.priority,
+            SliceBacklogKind::Waiter(seq) => seq.priority,
         }
     }
 }
@@ -630,19 +698,98 @@ mod tests {
         assert!(!slice_backlog_admits(0, 0), "budget 0 disables waiting");
     }
 
-    /// Grant order (issue #746): priority lane first, FIFO within a lane
-    /// (parked jobs and waiters share the one ring in park/arrival
-    /// order, so the earliest entry of the highest lane present wins).
+    /// Grant order, un-escalated case (issue #746): priority lane first,
+    /// FIFO within a lane (parked jobs and waiters share the one ring in
+    /// park/arrival order, so the earliest entry of the highest lane
+    /// present wins while no entry is overdue).
     #[test]
     fn grant_order_is_priority_lane_first_then_fifo() {
         use RequestPriority::{High, Low, Normal};
         assert_eq!(next_grant_index(&[]), None);
-        assert_eq!(next_grant_index(&[Normal]), Some(0));
-        assert_eq!(next_grant_index(&[Normal, Normal]), Some(0), "FIFO");
-        assert_eq!(next_grant_index(&[Normal, High]), Some(1), "lane first");
-        assert_eq!(next_grant_index(&[High, Normal, High]), Some(0));
-        assert_eq!(next_grant_index(&[Low, Normal]), Some(1));
-        assert_eq!(next_grant_index(&[Low, Low, Normal]), Some(2));
+        assert_eq!(next_grant_index(&[(Normal, 0)]), Some(0));
+        assert_eq!(
+            next_grant_index(&[(Normal, 0), (Normal, 0)]),
+            Some(0),
+            "FIFO"
+        );
+        assert_eq!(
+            next_grant_index(&[(Normal, 0), (High, 0)]),
+            Some(1),
+            "lane first"
+        );
+        assert_eq!(
+            next_grant_index(&[(High, 0), (Normal, 0), (High, 0)]),
+            Some(0)
+        );
+        assert_eq!(next_grant_index(&[(Low, 0), (Normal, 0)]), Some(1));
+        assert_eq!(
+            next_grant_index(&[(Low, 0), (Low, 0), (Normal, 0)]),
+            Some(2)
+        );
+    }
+
+    /// Anti-starvation escalation (issue #746): an entry skipped by
+    /// [`super::MTP_SLICE_GRANT_SKIP_CAP`] grant decisions is overdue and
+    /// preempts lane order; the most-skipped overdue entry wins, earliest
+    /// in ring order on ties; below the cap, lane order still rules.
+    #[test]
+    fn grant_order_escalates_overdue_entries_over_lanes() {
+        use super::MTP_SLICE_GRANT_SKIP_CAP;
+        use RequestPriority::{High, Low, Normal};
+        let cap = MTP_SLICE_GRANT_SKIP_CAP;
+        assert_eq!(next_grant_index(&[(High, 0), (Normal, cap)]), Some(1));
+        assert_eq!(next_grant_index(&[(High, 0), (Low, cap)]), Some(1));
+        assert_eq!(
+            next_grant_index(&[(High, 0), (Normal, cap - 1)]),
+            Some(0),
+            "below the cap lane order rules"
+        );
+        assert_eq!(
+            next_grant_index(&[(Normal, cap), (High, cap + 1)]),
+            Some(1),
+            "most-skipped overdue entry wins"
+        );
+        assert_eq!(
+            next_grant_index(&[(Normal, cap), (Low, cap)]),
+            Some(0),
+            "tie on skips: earliest in ring order"
+        );
+    }
+
+    /// The escalation loop bounds starvation (issue #746): a Normal
+    /// entry behind an endless supply of FRESH High entries (each
+    /// granted entry leaves the ring; a new arrival or a re-park enters
+    /// with a counter of 0, the reset-on-grant) would never be selected
+    /// under strict lane order, but with the skip counter incremented by
+    /// every decision that passes it over, it must be selected within
+    /// `MTP_SLICE_GRANT_SKIP_CAP + 1` grant decisions.
+    #[test]
+    fn grant_order_skip_cap_bounds_starvation_under_high_lane_stream() {
+        use super::MTP_SLICE_GRANT_SKIP_CAP;
+        use RequestPriority::{High, Normal};
+        let mut normal_skips = 0usize;
+        let mut decisions = 0usize;
+        loop {
+            decisions += 1;
+            assert!(
+                decisions <= MTP_SLICE_GRANT_SKIP_CAP + 1,
+                "starvation must be bounded"
+            );
+            // Ring: a fresh High entry (skips 0) plus the waiting Normal.
+            let entries = [(High, 0), (Normal, normal_skips)];
+            let idx = next_grant_index(&entries).expect("non-empty ring");
+            if idx == 1 {
+                break;
+            }
+            // The High entry was granted; the Normal entry was skipped
+            // and the next decision sees another fresh High arrival.
+            normal_skips += 1;
+        }
+        assert_eq!(
+            decisions,
+            MTP_SLICE_GRANT_SKIP_CAP + 1,
+            "selected exactly when overdue"
+        );
     }
 
     /// Issue #746 tick arbitration: the SpeculativeRound action is taken

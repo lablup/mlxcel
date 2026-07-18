@@ -250,7 +250,15 @@ cap fall back to classic decode, the pre-#746 behavior), and once the active
 request has run `MLXCEL_MTP_SLICE_GRANT_ROUNDS` slices (default 8, slice 0
 included) with the backlog non-empty, it is parked at the next round boundary
 and the slot is granted to the next request, priority lane first and FIFO
-within a lane. A parked request resumes from its saved session state on its
+within a lane, with an anti-starvation floor: an entry passed over by 2 grant
+decisions becomes overdue and must be granted next regardless of lane, so a
+sustained stream of higher-priority arrivals (priorities are client-assignable
+via the `X-Priority` header) can delay a lower-priority request only by a
+bounded number of grants, never stall its stream outright. The backlog cap
+applies at admission; a park transiently holds cap + 1 backlog entries until
+the next promotion, so total live speculative sessions (the active request
+plus parked and waiting ones, each holding its per-sequence KV) peak at 3.
+A parked request resumes from its saved session state on its
 next grant, with the worker's one drafter handle handed over through the same
 return/take plumbing the end of a request uses (safe because the MTP
 assistant drafter's reset is a no-op and every round re-arms the drafter from

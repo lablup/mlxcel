@@ -65,7 +65,8 @@ use crate::server::thinking_budget::ThinkingState;
 
 use super::speculative_burst::{begin_burst_stream, finalize_burst_stream, stream_burst_tokens};
 use super::speculative_slice::{
-    MtpSliceJob, begin_slice_session, next_grant_index, slice_grant_expired, step_slice_session,
+    MTP_SLICE_GRANT_SKIP_CAP, MtpSliceJob, begin_slice_session, next_grant_index,
+    slice_grant_expired, step_slice_session,
 };
 
 // =============================================================================
@@ -622,6 +623,7 @@ struct RotSpec {
     first_bonus: i32,
     target_script: Vec<Vec<i32>>,
     eos: Vec<i32>,
+    lane: RequestPriority,
 }
 
 fn spec_a() -> RotSpec {
@@ -634,6 +636,7 @@ fn spec_a() -> RotSpec {
             vec![9999, 0, 0, 0],
         ],
         eos: vec![9999],
+        lane: RequestPriority::Normal,
     }
 }
 
@@ -643,6 +646,33 @@ fn spec_b() -> RotSpec {
         first_bonus: 500,
         target_script: vec![vec![501, 502, 503, 504], vec![8888, 0, 0, 0]],
         eos: vec![8888],
+        lane: RequestPriority::Normal,
+    }
+}
+
+/// Build a spec of `full_rounds` fully accepted rounds (each committing
+/// 4 tokens against the deterministic drafter's `bonus+1..bonus+3`
+/// proposals) followed by an EOS round, in the given priority lane.
+fn chain_spec(
+    tag: char,
+    first_bonus: i32,
+    lane: RequestPriority,
+    full_rounds: usize,
+    eos: i32,
+) -> RotSpec {
+    let mut script = Vec::with_capacity(full_rounds + 1);
+    let mut bonus = first_bonus;
+    for _ in 0..full_rounds {
+        script.push(vec![bonus + 1, bonus + 2, bonus + 3, bonus + 4]);
+        bonus += 4;
+    }
+    script.push(vec![eos, 0, 0, 0]);
+    RotSpec {
+        tag,
+        first_bonus,
+        target_script: script,
+        eos: vec![eos],
+        lane,
     }
 }
 
@@ -730,7 +760,8 @@ fn run_rotation_harness(
         .into_iter()
         .enumerate()
         .map(|(i, spec)| {
-            let (seq, rx) = make_slice_sequence_with_id(64, 200 + i as u64);
+            let (mut seq, rx) = make_slice_sequence_with_id(64, 200 + i as u64);
+            seq.priority = spec.lane;
             if cancel_waiter == Some(i) {
                 seq.cancelled.store(true, Ordering::Relaxed);
             }
@@ -774,6 +805,10 @@ fn run_rotation_harness(
     }
 
     let mut backlog: std::collections::VecDeque<usize> = (1..states.len()).collect();
+    // Per-spec skip counters mirroring `SliceBacklogEntry::skipped_grants`
+    // (a fresh ring entry starts at 0; every grant decision increments
+    // the non-selected ring members; reset when granted or re-parked).
+    let mut skip_counts: Vec<usize> = vec![0; states.len()];
     let mut active: Option<usize> = None;
     let mut grant_log: Vec<(char, usize)> = Vec::new();
 
@@ -804,23 +839,36 @@ fn run_rotation_harness(
             // Promotion, mirroring `promote_next_speculative_grantee`.
             let mut tick_consumed = false;
             loop {
-                let lanes: Vec<RequestPriority> = backlog
+                let entries: Vec<(RequestPriority, usize)> = backlog
                     .iter()
-                    .map(|&i| match &states[i].job {
-                        Some(job) => job.seq.priority,
-                        None => {
-                            states[i]
-                                .seq
-                                .as_ref()
-                                .expect("waiter holds a sequence")
-                                .priority
-                        }
+                    .map(|&i| {
+                        let lane = match &states[i].job {
+                            Some(job) => job.seq.priority,
+                            None => {
+                                states[i]
+                                    .seq
+                                    .as_ref()
+                                    .expect("waiter holds a sequence")
+                                    .priority
+                            }
+                        };
+                        (lane, skip_counts[i])
                     })
                     .collect();
-                let Some(pos) = next_grant_index(&lanes) else {
+                let Some(pos) = next_grant_index(&entries) else {
                     break;
                 };
+                // Mirror `pop_next_speculative_grantee`: every grant
+                // decision increments the skip counter of every
+                // non-selected ring entry; the selected entry leaves
+                // the ring with its counter reset.
+                for (ring_pos, &j) in backlog.iter().enumerate() {
+                    if ring_pos != pos {
+                        skip_counts[j] += 1;
+                    }
+                }
                 let i = backlog.remove(pos).expect("index from next_grant_index");
+                skip_counts[i] = 0;
                 if states[i].job.is_none() {
                     // Waiter.
                     let cancelled = states[i]
@@ -865,6 +913,8 @@ fn run_rotation_harness(
                         let job = states[i].job.as_mut().expect("job");
                         free_drafter =
                             Some(job.take_drafter().expect("drafter held after slice 0"));
+                        // Re-parking enters the ring as a fresh entry.
+                        skip_counts[i] = 0;
                         backlog.push_back(i);
                     } else {
                         active = Some(i);
@@ -923,6 +973,8 @@ fn run_rotation_harness(
             if cancel_on_first_park == Some(i) {
                 job.seq.cancelled.store(true, Ordering::Relaxed);
             }
+            // Re-parking enters the ring as a fresh entry.
+            skip_counts[i] = 0;
             backlog.push_back(i);
             active = None;
         }
@@ -1113,4 +1165,55 @@ fn rotation_declined_waiter_at_promotion_routes_to_classic() {
     // Same shape as the cancelled-waiter schedule: B resolves with
     // bookkeeping only and A's next grant runs uncontended to the end.
     assert_eq!(grant_log, vec![('A', 2), ('A', 2)]);
+}
+
+/// Anti-starvation floor (issue #746 security hardening): two long
+/// High-lane jobs rotating between themselves keep a High entry in the
+/// ring at every grant decision, so under strict lane precedence the
+/// Normal-lane parked job A would receive NO grant (zero progress, a
+/// stalled mid-stream client) until both High jobs completed; a
+/// sustained High-lane arrival stream would extend that indefinitely.
+/// With the skip-cap escalation, A's skip counter reaches the cap
+/// within two decisions and A must be granted next, so between any two
+/// consecutive A grants at most `MTP_SLICE_GRANT_SKIP_CAP + 1` other
+/// grants run, and every stream still matches its isolated run.
+#[test]
+fn rotation_skip_cap_prevents_high_lane_starvation() {
+    let a = chain_spec('A', 100, RequestPriority::Normal, 5, 9999);
+    let b = chain_spec('B', 500, RequestPriority::High, 5, 8888);
+    let c = chain_spec('C', 900, RequestPriority::High, 5, 7777);
+    let iso = [
+        isolated_outcome(a.clone()),
+        isolated_outcome(b.clone()),
+        isolated_outcome(c.clone()),
+    ];
+    let (states, grant_log) = run_rotation_harness(2, vec![a, b, c], None, None, None);
+    for (idx, iso) in iso.iter().enumerate() {
+        let out = states[idx].outcome.as_ref().expect("job finished");
+        assert_eq!(
+            out.committed, iso.committed,
+            "stream parity for spec {idx} under lane contention"
+        );
+        assert!(out.healthy_finish);
+    }
+    // Bounded gap for the Normal-lane job: between consecutive A grants
+    // at most MTP_SLICE_GRANT_SKIP_CAP + 1 non-A grants run.
+    let mut gap = 0usize;
+    for &(tag, _) in &grant_log {
+        if tag == 'A' {
+            gap = 0;
+        } else {
+            gap += 1;
+            assert!(
+                gap <= MTP_SLICE_GRANT_SKIP_CAP + 1,
+                "Normal-lane job starved by the High lane: {grant_log:?}"
+            );
+        }
+    }
+    // A kept receiving grants throughout, not only the opening one.
+    let a_grants = grant_log.iter().filter(|&&(tag, _)| tag == 'A').count();
+    assert!(
+        a_grants >= 3,
+        "A must keep progressing under High-lane pressure: {grant_log:?}"
+    );
 }
