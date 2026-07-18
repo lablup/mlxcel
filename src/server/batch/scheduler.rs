@@ -452,16 +452,43 @@ pub struct BatchScheduler {
     /// [`super::mtp_policy::MtpPolicy::record_b1_sample`].
     mtp_policy: Option<super::mtp_policy::MtpPolicy>,
 
-    /// In-flight tick-cooperative B=1 MTP speculative slice (issue #734).
-    /// `Some` while a speculative request is being served one round per
+    /// In-flight tick-cooperative B=1 MTP speculative slice (issue #734):
+    /// the ACTIVE holder of the worker's single speculative slot. `Some`
+    /// while a speculative request is being served one round per
     /// scheduler tick; the job owns the request's `SequenceInfo`, the
     /// generator's owned session state, and the (un-reset) drafter between
-    /// ticks. At most one slice is in flight at a time; a second
-    /// speculative-eligible request arriving mid-slice falls back to
-    /// classic decode (see [`Self::try_speculative_burst`]). Boxed: the
-    /// job is fat (SequenceInfo + MLX handles) and this field is `None`
-    /// for every non-speculative deployment.
+    /// ticks. At most one slice is ACTIVE at a time; further
+    /// speculative-eligible requests either wait in
+    /// [`Self::speculative_slice_backlog`] for a slot grant (issue #746)
+    /// or fall back to classic decode (see
+    /// [`Self::try_speculative_burst`]). Boxed: the job is fat
+    /// (SequenceInfo + MLX handles) and this field is `None` for every
+    /// non-speculative deployment.
     speculative_slice: Option<Box<super::speculative_slice::MtpSliceJob>>,
+
+    /// Backlog of speculative work waiting for the single slice slot
+    /// (issue #746): parked in-flight jobs (rotated out at a grant
+    /// boundary, drafter returned to the worker slot) and admitted
+    /// waiters (slice 0 not yet run) in ONE FIFO ring, granted priority
+    /// lane first then FIFO
+    /// ([`super::speculative_slice::next_grant_index`]). Bounded by
+    /// [`super::speculative_slice::MTP_SLICE_BACKLOG_CAP`] at admission.
+    /// Empty for non-speculative deployments (a `VecDeque` allocates
+    /// nothing until the first push). On scheduler shutdown the entries
+    /// drop exactly like an in-flight `speculative_slice` job (response
+    /// channels close and clients observe the hangup).
+    speculative_slice_backlog:
+        std::collections::VecDeque<super::speculative_slice::SliceBacklogEntry>,
+
+    /// Slices the active job has executed in its CURRENT slot grant
+    /// (issue #746), slice 0 included for an admission grant. When it
+    /// reaches the `MLXCEL_MTP_SLICE_GRANT_ROUNDS` budget AND the backlog
+    /// is non-empty, the job is parked at the next round boundary
+    /// ([`super::speculative_slice::slice_grant_expired`], checked at the
+    /// tail of [`Self::execute_speculative_slice_round`]). Keeps counting
+    /// while uncontended so contention appearing after an overrun rotates
+    /// at the first round boundary.
+    speculative_slice_grant_slices: usize,
 
     /// Fairness flag for the slice tick-arbitration
     /// ([`super::speculative_slice::slice_takes_tick`]): `true` when the
@@ -1104,9 +1131,12 @@ impl BatchScheduler {
             // No adaptive MTP policy until `with_mtp_policy` builds one for an
             // MTP dispatch. The non-speculative hot path never touches it.
             mtp_policy: None,
-            // No tick-cooperative slice in flight at startup (issue #734).
+            // No tick-cooperative slice in flight at startup (issue #734),
+            // and nothing waiting for a slot grant (issue #746).
             speculative_slice: None,
             speculative_slice_yielded: false,
+            speculative_slice_backlog: std::collections::VecDeque::new(),
+            speculative_slice_grant_slices: 0,
             paged_handoff_geometry: None,
             decode_lookahead: None,
             // Honor MLXCEL_FORCE_SYNC=1 as the pipeline kill switch, probed once
@@ -3049,16 +3079,22 @@ impl BatchScheduler {
             queued = self.prefill_queue.len(),
             chunked_in_progress = self.chunked_prefill_seq.is_some(),
             speculative_slice = self.speculative_slice.is_some(),
+            slice_backlog = self.speculative_slice_backlog.len(),
             "scheduler tick"
         );
-        // Tick-cooperative speculative slice in flight (issue #734): run
-        // one speculative round per tick, alternating strictly with the
-        // classic actions when they have work, so concurrent classic rows
-        // advance between rounds and the speculative request never
+        // Tick-cooperative speculative slice work pending (issue #734):
+        // run one speculative action per tick, alternating strictly with
+        // the classic actions when they have work, so concurrent classic
+        // rows advance between rounds and the speculative request never
         // starves. When nothing else has work the slice takes every tick
         // (it IS work, so this branch also prevents an Idle block on the
-        // request channel while a slice is pending).
-        if self.speculative_slice.is_some() {
+        // request channel while a slice is pending). Pending means an
+        // ACTIVE job, or (issue #746) a non-empty grant backlog with the
+        // slot empty right after a rotation: that tick's speculative
+        // action is the promotion of the next grantee (a parked job's
+        // round, or a waiter's slice 0), under the same alternation, so
+        // the #734 HOL bound holds across rotations.
+        if self.speculative_slice.is_some() || !self.speculative_slice_backlog.is_empty() {
             let others_have_work = self.chunked_prefill_seq.is_some()
                 || !self.active_batch.is_empty()
                 || !self.prefill_queue.is_empty();
@@ -3284,7 +3320,9 @@ impl BatchScheduler {
         // round-loop driver in one tick. A window of size 1 falls back
         // to the B=1 burst.
         let seq = match self.try_speculative_burst(seq) {
-            // Burst (B=1 or batched) handled the request(s) end-to-end.
+            // Burst (B=1 or batched) handled the request(s) end-to-end,
+            // or the scheduler took ownership of the sequence as a
+            // slice-slot grant waiter (issue #746).
             None => return,
             // Burst declined; route the returned head sequence through
             // the classic prefill path. Any sibling rows that were
@@ -3369,6 +3407,40 @@ impl BatchScheduler {
         }
     }
 
+    /// Whether `seq`, arriving while the speculative slice slot is busy,
+    /// can be parked as a slot-grant waiter (issue #746) instead of
+    /// falling back to classic decode.
+    ///
+    /// Re-applies the request-independent gates
+    /// [`Self::start_mtp_slice_b1`] applies, so a parked waiter's later
+    /// promotion is expected to succeed: MTP dispatch with the tick slice
+    /// enabled, a usable block size, a Gemma 4 family target, a
+    /// non-degenerate adopted prefix, and a B=1 verdict from the adaptive
+    /// policy (`seq` already passed `should_burst_for_sequence` at the
+    /// caller). Anything else keeps the pre-#746 classic fallback. A gate
+    /// that drifts between admission and promotion (the adaptive policy
+    /// settling to decline) is handled at promotion time by routing the
+    /// declined sequence to classic prefill.
+    fn can_wait_for_slice_grant(&self, seq: &SequenceInfo) -> bool {
+        let block_size = match &self.speculative_dispatch {
+            crate::server::SpeculativeDispatch::Mtp { block_size, .. } => *block_size as usize,
+            _ => return false,
+        };
+        block_size >= 2
+            && super::speculative_slice::mtp_tick_slice_enabled()
+            && matches!(
+                self.model,
+                LoadedModel::Gemma4(_) | LoadedModel::Gemma4VLM(_) | LoadedModel::Gemma4Unified(_)
+            )
+            && !seq.prompt_tokens.is_empty()
+            && super::speculative_burst::mtp_prefill_suffix_start(
+                seq.prefill_start_offset,
+                seq.prompt_tokens.len(),
+            )
+            .is_some()
+            && self.mtp_b1_should_run()
+    }
+
     fn try_speculative_burst(&mut self, seq: SequenceInfo) -> Option<SequenceInfo> {
         // Fast path: speculative dispatch off, or the head fails the
         // per-sequence gate (multimodal payload / VLM embeddings /
@@ -3380,16 +3452,47 @@ impl BatchScheduler {
             return Some(seq);
         }
 
-        // At most ONE tick-cooperative slice is in flight at a time (issue
+        // At most ONE tick-cooperative slice is ACTIVE at a time (issue
         // #734): the drafter handle is held by the in-flight job, and the
-        // slice state is a single scheduler slot. A second
-        // speculative-eligible request arriving mid-slice falls back to
-        // classic decode instead of waiting behind the slice (which could
-        // be a long request); this matches the legacy burst's effective
-        // capacity of one speculative request at a time on the worker.
-        if self.speculative_slice.is_some() {
+        // slice state is a single scheduler slot. A further
+        // speculative-eligible request arriving while the slot is busy
+        // (active job, or grantees already queued behind it) no longer
+        // always falls back to classic decode (issue #746): when the
+        // request could itself be served by the tick-slice path and the
+        // grant backlog has room, it is parked as a WAITER and the slot
+        // rotates across grantees at round boundaries
+        // (`MLXCEL_MTP_SLICE_GRANT_ROUNDS`), so one long stream cannot
+        // monopolize speculative acceleration. Returning `None` keeps this
+        // method's contract of "do not route to classic prefill", but note
+        // the sequence is now OWNED by the scheduler in
+        // `speculative_slice_backlog` rather than having been finalized
+        // inline. Beyond the backlog cap, with rotation disabled (budget
+        // 0), or for requests the slice path cannot serve (DFlash
+        // dispatch, non-Gemma-4 target, tick slice disabled, degenerate
+        // adopted prefix, adaptive-policy decline), the request falls back
+        // to classic decode exactly as pre-#746. The B>1 batched-window
+        // assembly below is untouched: it only runs when the slot is free.
+        if self.speculative_slice.is_some() || !self.speculative_slice_backlog.is_empty() {
+            if self.can_wait_for_slice_grant(&seq)
+                && super::speculative_slice::slice_backlog_admits(
+                    self.speculative_slice_backlog.len(),
+                    super::speculative_slice::mtp_slice_grant_rounds(),
+                )
+            {
+                tracing::debug!(
+                    "speculative slice slot busy; parking seq {} as a slot-grant waiter \
+                     (backlog {} -> {})",
+                    seq.seq_id,
+                    self.speculative_slice_backlog.len(),
+                    self.speculative_slice_backlog.len() + 1,
+                );
+                self.speculative_slice_backlog.push_back(
+                    super::speculative_slice::SliceBacklogEntry::Waiter(Box::new(seq)),
+                );
+                return None;
+            }
             tracing::debug!(
-                "speculative slice already in flight; seq {} falls back to classic decode",
+                "speculative slice slot busy; seq {} falls back to classic decode",
                 seq.seq_id,
             );
             return Some(seq);
@@ -3731,6 +3834,41 @@ impl BatchScheduler {
         self.publish_metrics();
     }
 
+    /// Validate-and-bind a drafter against the loaded Gemma 4 target, the
+    /// identical contracts as `run_mtp_burst` (bind is NOT called inside
+    /// the generator; omitting it silently yields one seed-bonus token).
+    /// Shared by the slice-0 start ([`Self::start_mtp_slice_b1`]) and the
+    /// parked-job promotion (issue #746), for which the re-bind is
+    /// idempotent on the handle returned at park time (it recomputes the
+    /// same target-derived state) and required after a defensive
+    /// from-disk reload.
+    fn bind_drafter_to_target(
+        &self,
+        drafter: &mut Box<dyn mlxcel_core::drafter::Drafter>,
+    ) -> Result<(), String> {
+        fn compat_and_bind(
+            drafter: &mut Box<dyn mlxcel_core::drafter::Drafter>,
+            target_lm: &dyn LanguageModel,
+        ) -> Result<(), String> {
+            drafter
+                .validate_target_compat(target_lm)
+                .map_err(|e| format!("MTP drafter incompatible with target: {e}"))?;
+            drafter
+                .bind(target_lm)
+                .map_err(|e| format!("MTP drafter bind failed: {e}"))
+        }
+        match &self.model {
+            LoadedModel::Gemma4(wrapper) => compat_and_bind(drafter, wrapper),
+            LoadedModel::Gemma4VLM(vlm) => compat_and_bind(drafter, vlm),
+            LoadedModel::Gemma4Unified(unified) => compat_and_bind(drafter, unified),
+            // Unreachable per the callers' variant gates; produce a clean
+            // per-request error rather than panicking.
+            _ => Err(
+                "MTP slice: unsupported target after variant gate (should not happen)".to_string(),
+            ),
+        }
+    }
+
     /// Start a tick-cooperative B=1 MTP slice for `seq` (issue #734).
     ///
     /// Applies the same gates as the legacy `run_mtp_burst` in the same
@@ -3813,28 +3951,7 @@ impl BatchScheduler {
             );
             return None;
         };
-        fn compat_and_bind(
-            drafter: &mut Box<dyn mlxcel_core::drafter::Drafter>,
-            target_lm: &dyn LanguageModel,
-        ) -> Result<(), String> {
-            drafter
-                .validate_target_compat(target_lm)
-                .map_err(|e| format!("MTP drafter incompatible with target: {e}"))?;
-            drafter
-                .bind(target_lm)
-                .map_err(|e| format!("MTP drafter bind failed: {e}"))
-        }
-        let bind_result: Result<(), String> = match &self.model {
-            LoadedModel::Gemma4(wrapper) => compat_and_bind(&mut drafter, wrapper),
-            LoadedModel::Gemma4VLM(vlm) => compat_and_bind(&mut drafter, vlm),
-            LoadedModel::Gemma4Unified(unified) => compat_and_bind(&mut drafter, unified),
-            // Unreachable per the variant gate above; produce a clean
-            // per-request error rather than panicking.
-            _ => Err(
-                "MTP slice: unsupported target after variant gate (should not happen)".to_string(),
-            ),
-        };
-        if let Err(msg) = bind_result {
+        if let Err(msg) = self.bind_drafter_to_target(&mut drafter) {
             // Drop the failed drafter handle so the next request lazily
             // reloads from disk, same slot semantics as `run_mtp_burst`.
             drop(drafter);
@@ -3947,6 +4064,9 @@ impl BatchScheduler {
                     self.finalize_speculative_slice(job);
                 } else {
                     self.speculative_slice = Some(Box::new(job));
+                    // A fresh slot grant begins with slice 0 already
+                    // executed (issue #746).
+                    self.speculative_slice_grant_slices = 1;
                 }
                 None
             }
@@ -3962,14 +4082,28 @@ impl BatchScheduler {
         }
     }
 
-    /// Execute one tick-cooperative speculative round (issue #734): take
-    /// the parked slice job, reconstruct the borrowing target adapter for
+    /// Execute one tick-cooperative speculative action (issue #734): take
+    /// the active slice job, reconstruct the borrowing target adapter for
     /// this tick, run exactly one generator round, stream its tokens, and
-    /// either park the job again or finalize the request.
+    /// either keep the job active, park it at an expired grant boundary
+    /// (issue #746), or finalize the request. With the slot empty and the
+    /// grant backlog non-empty (right after a rotation), the tick instead
+    /// promotes the next grantee: a parked job's round runs below in this
+    /// same tick (its promotion is cheap bookkeeping), while a waiter's
+    /// slice 0 IS the tick's one action, preserving the #734 HOL bound of
+    /// one model action per tick.
     fn execute_speculative_slice_round(&mut self) {
+        if self.speculative_slice.is_none() && !self.promote_next_speculative_grantee() {
+            // The tick's speculative action already ran inside the
+            // promotion (a waiter's slice 0), or the backlog emptied
+            // (cancelled / declined entries resolved with O(1)
+            // bookkeeping only).
+            return;
+        }
         let Some(mut job) = self.speculative_slice.take() else {
-            // Defensive: decide_action only emits SpeculativeRound while a
-            // slice is parked.
+            // Defensive: decide_action only emits SpeculativeRound while
+            // speculative work is pending, and the promotion above either
+            // installed a job or reported the tick as consumed.
             return;
         };
         let _span = tracing::info_span!(
@@ -4016,25 +4150,213 @@ impl BatchScheduler {
             // starts on the Gemma 4 family). Fail the request cleanly; the
             // drafter is dropped with the job so the next speculative
             // request lazily reloads it.
-            let seq_id = job.seq.seq_id;
-            let _ = job.seq.response_tx.send(GenerateEvent::Error(
-                "Speculative burst: MTP slice target variant changed mid-flight \
-                 (should not happen)"
-                    .to_string(),
-            ));
-            drop(job);
-            self.prompt_cache_seq_ctx.remove(&seq_id);
-            self.release_sequence_caches(seq_id);
-            self.batch_metrics.record_sequence_completed(0);
-            self.batch_observability.record_sequence_completed();
-            self.publish_metrics();
+            self.fail_inflight_slice_job(
+                *job,
+                "MTP slice target variant changed mid-flight (should not happen)",
+            );
             return;
         }
         if job.finished() {
             self.finalize_speculative_slice(*job);
         } else {
-            self.speculative_slice = Some(job);
+            self.speculative_slice_grant_slices += 1;
+            if super::speculative_slice::slice_grant_expired(
+                self.speculative_slice_grant_slices,
+                super::speculative_slice::mtp_slice_grant_rounds(),
+                !self.speculative_slice_backlog.is_empty(),
+            ) {
+                // Round boundary with the grant spent and other grantees
+                // waiting (issue #746): park the job and leave the slot
+                // empty. The next grantee's work runs on a LATER tick
+                // (one action per tick preserves the #734 HOL bound).
+                self.park_speculative_slice(job);
+            } else {
+                self.speculative_slice = Some(job);
+            }
         }
+    }
+
+    /// Park the active slice job at an expired grant boundary (issue
+    /// #746): release its drafter back through the worker slot (the same
+    /// end-of-session plumbing `finalize_speculative_slice` uses, whose
+    /// `Drafter::reset` is the trait default no-op for the MTP assistant
+    /// drafter; see `MtpSliceJob::attach_drafter` for the correctness
+    /// argument) and push the job onto the grant backlog ring.
+    fn park_speculative_slice(&mut self, mut job: Box<super::speculative_slice::MtpSliceJob>) {
+        if let Some(drafter) = job.take_drafter() {
+            let target_lm: Option<&dyn LanguageModel> = match &self.model {
+                LoadedModel::Gemma4(wrapper) => Some(wrapper),
+                LoadedModel::Gemma4VLM(vlm) => Some(vlm),
+                LoadedModel::Gemma4Unified(unified) => Some(unified),
+                _ => None,
+            };
+            match target_lm {
+                Some(lm) => self.speculative_drafter_slot.return_drafter(drafter, lm),
+                // Defensive: without a resolvable target the reset cannot
+                // run; drop the handle so the next grantee lazily reloads.
+                None => drop(drafter),
+            }
+        }
+        tracing::debug!(
+            seq_id = %job.seq.seq_id,
+            slices = job.slices,
+            backlog = self.speculative_slice_backlog.len(),
+            "speculative slice grant expired; parking the job and rotating the slot"
+        );
+        self.speculative_slice_backlog
+            .push_back(super::speculative_slice::SliceBacklogEntry::Parked(job));
+        self.speculative_slice_grant_slices = 0;
+    }
+
+    /// Promote the next backlog grantee into the empty slice slot (issue
+    /// #746), priority lane first then FIFO
+    /// ([`super::speculative_slice::next_grant_index`]).
+    ///
+    /// Returns `true` when a parked job was installed as the active slice
+    /// and still needs its round run this tick; `false` when the tick's
+    /// speculative action already ran inside the promotion (a waiter's
+    /// slice 0, or a slice-0 inline finish / client-visible failure) or
+    /// the backlog emptied. Cancelled waiters and grantees that decline
+    /// at promotion time resolve with O(1) bookkeeping and the loop moves
+    /// to the next grantee in the same tick.
+    fn promote_next_speculative_grantee(&mut self) -> bool {
+        debug_assert!(self.speculative_slice.is_none());
+        while let Some(entry) = self.pop_next_speculative_grantee() {
+            match entry {
+                super::speculative_slice::SliceBacklogEntry::Waiter(seq) => {
+                    let seq = *seq;
+                    if seq.cancelled.load(std::sync::atomic::Ordering::Relaxed) {
+                        // The client disconnected while the request waited
+                        // for a grant: abort through the standard path
+                        // (error event + cache release) and try the next
+                        // grantee this tick.
+                        tracing::debug!(
+                            "slice waiter seq {} cancelled while queued; aborting",
+                            seq.seq_id,
+                        );
+                        self.prompt_cache_seq_ctx.remove(&seq.seq_id);
+                        self.abort_sequence(
+                            seq,
+                            "Request cancelled while waiting for the speculative slice slot",
+                        );
+                        continue;
+                    }
+                    match self.start_mtp_slice_b1(seq) {
+                        // Slice 0 ran: the job now holds the slot, or the
+                        // request finished inline / failed with a
+                        // client-visible error. The tick's speculative
+                        // action is done either way.
+                        None => return false,
+                        // Declined at promotion time (a gate drifted since
+                        // admission, e.g. the adaptive policy settled to
+                        // decline): route to classic prefill, the same
+                        // destination an admission-time decline takes.
+                        Some(seq) => {
+                            let seq_id = seq.seq_id;
+                            tracing::debug!(
+                                "slice grant declined at promotion; seq {seq_id} \
+                                 re-queued for classic prefill",
+                            );
+                            if let Err(boxed) = self.prefill_queue.enqueue(seq) {
+                                tracing::warn!(
+                                    "slice grant declined and prefill queue full; \
+                                     aborting seq {seq_id}"
+                                );
+                                self.prompt_cache_seq_ctx.remove(&seq_id);
+                                self.abort_sequence(
+                                    *boxed,
+                                    "speculative slice grant declined and prefill queue full",
+                                );
+                            }
+                            continue;
+                        }
+                    }
+                }
+                super::speculative_slice::SliceBacklogEntry::Parked(mut job) => {
+                    // Re-acquire the worker drafter returned at park time.
+                    // `ensure_loaded` is a no-op while the handle sits in
+                    // the slot; it reloads from disk only if the park-time
+                    // reset failed and dropped the handle (cannot happen
+                    // for the MTP arm, whose reset is the trait default
+                    // no-op, but handled for symmetry with the burst
+                    // paths). A cancelled parked job is promoted normally:
+                    // its next `step_session` observes the cancel at the
+                    // round top and finishes with the tokens emitted so
+                    // far, exactly like an active job's cancellation.
+                    if let Err(e) = self.speculative_drafter_slot.ensure_loaded() {
+                        self.fail_inflight_slice_job(
+                            *job,
+                            &format!("drafter reload failed at slice grant: {e}"),
+                        );
+                        continue;
+                    }
+                    let Some(mut drafter) = self.speculative_drafter_slot.take() else {
+                        self.fail_inflight_slice_job(
+                            *job,
+                            "drafter slot empty after ensure_loaded at slice grant",
+                        );
+                        continue;
+                    };
+                    // Re-bind: idempotent for the handle returned at park
+                    // time (recomputes the same target-derived state),
+                    // required after a defensive from-disk reload. The
+                    // per-round drafter state is rebuilt by
+                    // `step_session`'s shared-KV re-arm either way.
+                    if let Err(msg) = self.bind_drafter_to_target(&mut drafter) {
+                        drop(drafter);
+                        self.fail_inflight_slice_job(*job, &msg);
+                        continue;
+                    }
+                    job.attach_drafter(drafter);
+                    tracing::debug!(
+                        seq_id = %job.seq.seq_id,
+                        slices = job.slices,
+                        "parked slice job granted the slot; resuming"
+                    );
+                    self.speculative_slice = Some(job);
+                    // The promotion itself is bookkeeping; the round that
+                    // runs this tick is the grant's first slice.
+                    self.speculative_slice_grant_slices = 0;
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// Pop the next grantee: the earliest backlog entry of the highest
+    /// priority lane present (issue #746).
+    fn pop_next_speculative_grantee(
+        &mut self,
+    ) -> Option<super::speculative_slice::SliceBacklogEntry> {
+        let lanes: Vec<_> = self
+            .speculative_slice_backlog
+            .iter()
+            .map(|entry| entry.priority())
+            .collect();
+        let idx = super::speculative_slice::next_grant_index(&lanes)?;
+        self.speculative_slice_backlog.remove(idx)
+    }
+
+    /// Fail an in-flight slice job mid-session with a client-visible
+    /// error: the mid-flight counterpart of
+    /// [`Self::fail_speculative_slice_start`], used by the defensive arm
+    /// of [`Self::execute_speculative_slice_round`] and by
+    /// drafter-acquisition failures at parked-job promotion (issue #746).
+    /// Any drafter still held by the job is dropped with it, so the next
+    /// speculative request lazily reloads.
+    fn fail_inflight_slice_job(&mut self, job: super::speculative_slice::MtpSliceJob, msg: &str) {
+        let seq_id = job.seq.seq_id;
+        let _ = job
+            .seq
+            .response_tx
+            .send(GenerateEvent::Error(format!("Speculative burst: {msg}")));
+        drop(job);
+        self.prompt_cache_seq_ctx.remove(&seq_id);
+        self.release_sequence_caches(seq_id);
+        self.batch_metrics.record_sequence_completed(0);
+        self.batch_observability.record_sequence_completed();
+        self.publish_metrics();
     }
 
     /// Finalize a finished slice job: return the drafter to the worker
@@ -4043,10 +4365,13 @@ impl BatchScheduler {
     /// payload with the per-slice HOL accounting, and run the shared B=1
     /// bookkeeping ([`Self::finish_speculative_b1`]).
     fn finalize_speculative_slice(&mut self, mut job: super::speculative_slice::MtpSliceJob) {
-        // Return the drafter for the next request. The BETWEEN-slice holds
-        // deliberately skip `return_drafter` (its reset would wipe the
-        // shared-KV arming contract mid-session); the END-of-session
-        // return here resets, exactly like the legacy burst.
+        // Return the drafter for the next request or grantee. While a job
+        // holds the slot, the BETWEEN-slice holds skip `return_drafter`
+        // (there is nothing to hand off); the END-of-session return here
+        // resets, exactly like the legacy burst, and the park boundary
+        // (issue #746) routes through the same `return_drafter` plumbing
+        // (safe for the MTP arm because its reset is the trait default
+        // no-op; see `MtpSliceJob::attach_drafter`).
         if let Some(drafter) = job.take_drafter() {
             let target_lm: Option<&dyn LanguageModel> = match &self.model {
                 LoadedModel::Gemma4(wrapper) => Some(wrapper),

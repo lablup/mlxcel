@@ -47,10 +47,15 @@
 //!   scalars), so reconstructing one per tick is free.
 //!
 //! On resume, `step_session` re-arms the drafter's shared K/V from the
-//! stored `MtpVerifyOutput` at the top of the round, which is why the
-//! drafter is held here WITHOUT [`Drafter::reset`] between slices; the
-//! resetting [`super::speculative_burst::WorkerDrafterSlot::return_drafter`]
-//! runs only once, when the whole session finishes.
+//! stored `MtpVerifyOutput` at the top of the round, so no drafter-side
+//! state needs to survive between rounds. While a job holds the slot, the
+//! drafter is held in the job WITHOUT [`Drafter::reset`] between slices;
+//! the resetting
+//! [`super::speculative_burst::WorkerDrafterSlot::return_drafter`] runs
+//! when the whole session finishes, and (since issue #746) at every
+//! park boundary when the slot rotates to another grantee, which is safe
+//! because the MTP assistant drafter's reset is the trait default no-op
+//! (see [`MtpSliceJob::attach_drafter`]).
 //!
 //! ## Streaming
 //!
@@ -67,6 +72,23 @@
 //! arms keep the legacy run-to-completion burst (their generators do not
 //! expose a resumable step API yet), and `MLXCEL_MTP_TICK_SLICE=0` forces
 //! the MTP arm back onto the legacy burst as an operator escape hatch.
+//!
+//! ## Slot rotation (issue #746)
+//!
+//! A slice holds the worker's single speculative slot for its whole
+//! generation, which spans many ticks. Pre-#746, a second
+//! speculative-eligible request arriving mid-slice fell back to classic
+//! decode permanently, so one long stream monopolized speculative
+//! acceleration. Now the slot is GRANTED in bounded turns: the scheduler
+//! keeps a small backlog ([`SliceBacklogEntry`]) of parked in-flight jobs
+//! and admitted waiters, and under contention the active job is parked at
+//! a round boundary once its grant budget
+//! (`MLXCEL_MTP_SLICE_GRANT_ROUNDS`, [`mtp_slice_grant_rounds`]) is spent,
+//! releasing the drafter for the next grantee. Without contention the
+//! budget never binds and behavior is identical to #734. The drafter
+//! handoff is routed through the existing
+//! [`super::speculative_burst::WorkerDrafterSlot`] return/take plumbing;
+//! see [`MtpSliceJob::attach_drafter`] for why that is correct.
 
 use std::time::{Duration, Instant};
 
@@ -92,6 +114,117 @@ pub(crate) fn mtp_tick_slice_default(env_override: Option<&str>) -> bool {
     match env_override {
         Some(v) => !matches!(v, "0" | "false" | "FALSE" | "no" | "off"),
         None => true,
+    }
+}
+
+/// Default grant budget for one hold of the speculative slice slot under
+/// contention (issue #746), counted in executed slices (slice 0, the
+/// prefill + seed, counts as the first slice of an admission grant).
+pub(crate) const MTP_SLICE_GRANT_ROUNDS_DEFAULT: usize = 8;
+
+/// Cap on the slice backlog (parked jobs + waiters) queued behind the
+/// active job (issue #746).
+///
+/// Rationale: a waiter streams nothing until its slice 0 runs, so its
+/// worst-case pre-first-token wait is about `cap x budget` speculative
+/// slices (each grant ahead of it can spend the full budget) plus the
+/// strict-alternation classic ticks interleaved between them. With the
+/// defaults (cap 2, budget 8) that is ~16 rounds of wall clock, small
+/// against a long generation and repaid by speculative acceleration over
+/// the rest of the stream. Beyond the cap, a request falls back to
+/// classic decode exactly as pre-#746, so the bound cannot grow with
+/// offered load.
+pub(crate) const MTP_SLICE_BACKLOG_CAP: usize = 2;
+
+/// Grant budget for one hold of the speculative slice slot (issue #746):
+/// `MLXCEL_MTP_SLICE_GRANT_ROUNDS`, default
+/// [`MTP_SLICE_GRANT_ROUNDS_DEFAULT`]. `0` means unbounded (the legacy
+/// #734 whole-generation hold, as an operator escape hatch; admission
+/// then also stops parking waiters, restoring the pre-#746 classic
+/// fallback for concurrent speculative requests).
+pub(crate) fn mtp_slice_grant_rounds() -> usize {
+    mtp_slice_grant_rounds_default(
+        std::env::var("MLXCEL_MTP_SLICE_GRANT_ROUNDS")
+            .ok()
+            .as_deref(),
+    )
+}
+
+/// Pure decision core of [`mtp_slice_grant_rounds`], separated for unit
+/// testing. Unparseable values fall back to the default.
+pub(crate) fn mtp_slice_grant_rounds_default(env_override: Option<&str>) -> usize {
+    env_override
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .unwrap_or(MTP_SLICE_GRANT_ROUNDS_DEFAULT)
+}
+
+/// Whether the active job's slot grant has expired at a round boundary
+/// (issue #746). Binds ONLY under contention: with an empty backlog the
+/// job keeps the slot and behavior is byte-identical to #734 (no
+/// rotation, the slice takes every tick [`slice_takes_tick`] gives it).
+/// A `budget` of 0 never expires (legacy hold escape hatch).
+///
+/// Free fast-handoff property: the counter keeps counting while the job
+/// runs uncontended, so if contention appears after the budget is
+/// already spent, the FIRST round boundary rotates immediately and a
+/// newcomer waits at most about one round.
+pub(crate) fn slice_grant_expired(
+    slices_in_grant: usize,
+    budget: usize,
+    backlog_pending: bool,
+) -> bool {
+    budget > 0 && backlog_pending && slices_in_grant >= budget
+}
+
+/// Whether a speculative-eligible request arriving while the slice slot
+/// is busy may join the backlog as a waiter (issue #746) instead of
+/// falling back to classic decode. Beyond [`MTP_SLICE_BACKLOG_CAP`], or
+/// with rotation disabled (`budget == 0`, under which a waiter could
+/// starve for the active job's whole generation), the request takes the
+/// pre-#746 classic fallback.
+pub(crate) fn slice_backlog_admits(backlog_len: usize, budget: usize) -> bool {
+    budget > 0 && backlog_len < MTP_SLICE_BACKLOG_CAP
+}
+
+/// Index of the next slot grantee in the backlog (issue #746): the
+/// earliest entry of the highest priority lane present. Priority lane
+/// first, then FIFO; parked jobs and waiters share the one ring in
+/// park/arrival order, so neither kind can starve the other within a
+/// lane. (Strict lane precedence means a lower-lane entry can be
+/// overtaken by later higher-lane arrivals, the same semantics as the
+/// scheduler's classic preemption path; the backlog cap bounds how many
+/// can be queued at once.)
+pub(crate) fn next_grant_index(priorities: &[super::sequence::RequestPriority]) -> Option<usize> {
+    let mut best: Option<(super::sequence::RequestPriority, usize)> = None;
+    for (idx, &lane) in priorities.iter().enumerate() {
+        // Strictly greater keeps the earliest entry within a lane.
+        if best.is_none_or(|(best_lane, _)| lane > best_lane) {
+            best = Some((lane, idx));
+        }
+    }
+    best.map(|(_, idx)| idx)
+}
+
+/// One backlog entry waiting for a speculative slice slot grant (issue
+/// #746). Owned by the scheduler (`BatchScheduler::speculative_slice_backlog`).
+pub(crate) enum SliceBacklogEntry {
+    /// An in-flight job parked at a grant boundary. Its drafter was
+    /// returned to the worker slot at park time; promotion re-acquires
+    /// and re-attaches it ([`MtpSliceJob::attach_drafter`]).
+    Parked(Box<MtpSliceJob>),
+    /// An admitted speculative-eligible request whose slice 0 has not
+    /// run yet. Promotion runs slice 0 through the same begin machinery
+    /// as direct admission.
+    Waiter(Box<SequenceInfo>),
+}
+
+impl SliceBacklogEntry {
+    /// The entry's request priority lane, for [`next_grant_index`].
+    pub(crate) fn priority(&self) -> super::sequence::RequestPriority {
+        match self {
+            SliceBacklogEntry::Parked(job) => job.seq.priority,
+            SliceBacklogEntry::Waiter(seq) => seq.priority,
+        }
     }
 }
 
@@ -142,9 +275,13 @@ pub(crate) struct MtpSliceJob {
     /// Cross-slice streaming state (EOS classification, budget, thinking
     /// budget interplay).
     pub(crate) stream: BurstStreamState,
-    /// The bound drafter, held WITHOUT reset between slices. `None` only
-    /// transiently inside a slice (while the generator owns it) and after
-    /// [`Self::take_drafter`] at finalize.
+    /// The bound drafter, held WITHOUT reset between slices while the job
+    /// is ACTIVE (holds the slot). `None` transiently inside a slice
+    /// (while the generator owns it), after [`Self::take_drafter`] at
+    /// finalize, and for the whole time the job is PARKED in the
+    /// scheduler's slice backlog (issue #746): the park boundary returns
+    /// the drafter to the worker slot for the next grantee, and promotion
+    /// re-attaches it via [`Self::attach_drafter`].
     drafter: Option<Box<dyn Drafter>>,
     /// Requested draft block size (K), fixed for the session.
     pub(crate) block_size: usize,
@@ -171,10 +308,38 @@ impl MtpSliceJob {
         self.finish.is_some()
     }
 
-    /// Take the drafter for the end-of-session return to the
-    /// [`super::speculative_burst::WorkerDrafterSlot`] (which resets it).
+    /// Take the drafter for the return to the
+    /// [`super::speculative_burst::WorkerDrafterSlot`] (which resets it):
+    /// at end of session, and at a park boundary when the slot rotates to
+    /// another grantee (issue #746).
     pub(crate) fn take_drafter(&mut self) -> Option<Box<dyn Drafter>> {
         self.drafter.take()
+    }
+
+    /// Re-attach the worker drafter at grant-promotion time (issue #746),
+    /// the counterpart of [`Self::take_drafter`] at the park boundary.
+    ///
+    /// Correctness of the round-trip through
+    /// [`super::speculative_burst::WorkerDrafterSlot::return_drafter`]
+    /// (which calls [`Drafter::reset`]) and back: `step_session`'s
+    /// resumability contract requires that nothing the shared-KV re-arm
+    /// does not rebuild is destroyed between rounds. For the MTP arm this
+    /// holds because (a) the Gemma 4 assistant drafter does not override
+    /// `reset`, so its reset is the trait default no-op (verified: it
+    /// unloads no weights and unbinds nothing), (b) its bind state
+    /// (captured target embedding + resolved LM head) is derived from the
+    /// worker's one target model and is recomputed identically by the
+    /// promotion-time re-bind, and (c) every per-round value the drafter
+    /// consumes (`shared_kv`, offsets, RoPE position) is a stateless
+    /// overwrite performed by `set_shared_kv` at the top of EVERY round
+    /// from the session's own stored `MtpVerifyOutput`, so rounds of
+    /// another session in between cannot leak state into this one.
+    pub(crate) fn attach_drafter(&mut self, drafter: Box<dyn Drafter>) {
+        debug_assert!(
+            self.drafter.is_none(),
+            "attach_drafter over a still-held drafter"
+        );
+        self.drafter = Some(drafter);
     }
 
     fn record_slice(&mut self, wall: Duration) {
@@ -267,13 +432,16 @@ pub(crate) fn step_slice_session<T: MtpTarget>(
 ) {
     debug_assert!(!job.finished(), "step_slice_session on a finished job");
     let slice_start = Instant::now();
-    // Invariant: while `finish` is `None`, the job holds both the session
-    // and the drafter (the only code that takes them is this function and
-    // the finalize path, and both restore or finish).
+    // Invariant: while `finish` is `None` AND the job holds the slot, the
+    // job holds both the session and the drafter (a PARKED job holds only
+    // the session; the promotion path re-attaches the drafter before any
+    // step, see `attach_drafter`). The only code that takes them is this
+    // function, the park boundary, and the finalize path, and each
+    // restores, re-attaches, or finishes.
     let drafter = job
         .drafter
         .take()
-        .expect("MtpSliceJob invariant: drafter present while in flight");
+        .expect("MtpSliceJob invariant: drafter present while holding the slot");
     let mut session = job
         .session
         .take()
@@ -326,7 +494,11 @@ fn settle_slice<T: MtpTarget>(
 
 #[cfg(test)]
 mod tests {
-    use super::{mtp_tick_slice_default, slice_takes_tick};
+    use super::super::sequence::RequestPriority;
+    use super::{
+        MTP_SLICE_GRANT_ROUNDS_DEFAULT, mtp_slice_grant_rounds_default, mtp_tick_slice_default,
+        next_grant_index, slice_backlog_admits, slice_grant_expired, slice_takes_tick,
+    };
 
     #[test]
     fn tick_slice_env_gate_default_on_and_off_values() {
@@ -404,5 +576,107 @@ mod tests {
     fn slice_takes_tick_after_classic_action() {
         assert!(slice_takes_tick(false, true));
         assert!(!slice_takes_tick(true, true));
+    }
+
+    /// Grant-budget env parsing (issue #746): default 8, custom values,
+    /// 0 = unbounded legacy hold, garbage falls back to the default.
+    #[test]
+    fn grant_rounds_env_default_custom_zero_and_garbage() {
+        assert_eq!(
+            mtp_slice_grant_rounds_default(None),
+            MTP_SLICE_GRANT_ROUNDS_DEFAULT
+        );
+        assert_eq!(mtp_slice_grant_rounds_default(Some("4")), 4);
+        assert_eq!(mtp_slice_grant_rounds_default(Some(" 12 ")), 12);
+        assert_eq!(mtp_slice_grant_rounds_default(Some("0")), 0);
+        for garbage in ["", "abc", "-3", "8.5", "eight"] {
+            assert_eq!(
+                mtp_slice_grant_rounds_default(Some(garbage)),
+                MTP_SLICE_GRANT_ROUNDS_DEFAULT,
+                "{garbage:?} must fall back to the default"
+            );
+        }
+    }
+
+    /// The grant budget binds ONLY under contention (issue #746): an
+    /// uncontended job never rotates regardless of how long it has held
+    /// the slot, and budget 0 never expires (legacy hold escape hatch).
+    #[test]
+    fn grant_expiry_binds_only_under_contention() {
+        assert!(slice_grant_expired(8, 8, true));
+        assert!(
+            slice_grant_expired(100, 8, true),
+            "fast handoff after idle overrun"
+        );
+        assert!(!slice_grant_expired(7, 8, true), "budget not yet spent");
+        assert!(
+            !slice_grant_expired(100, 8, false),
+            "no contention, no rotation"
+        );
+        assert!(!slice_grant_expired(100, 0, true), "budget 0 is unbounded");
+    }
+
+    /// Backlog admission (issue #746): admits below the cap, rejects at
+    /// and beyond it (those requests keep the pre-#746 classic-decode
+    /// fallback), and rejects everything when rotation is disabled
+    /// (budget 0), under which a waiter could starve for the active
+    /// job's whole generation.
+    #[test]
+    fn backlog_admission_cap_and_legacy_escape_hatch() {
+        assert!(slice_backlog_admits(0, 8));
+        assert!(slice_backlog_admits(1, 8));
+        assert!(!slice_backlog_admits(2, 8), "cap reached: classic fallback");
+        assert!(!slice_backlog_admits(5, 8));
+        assert!(!slice_backlog_admits(0, 0), "budget 0 disables waiting");
+    }
+
+    /// Grant order (issue #746): priority lane first, FIFO within a lane
+    /// (parked jobs and waiters share the one ring in park/arrival
+    /// order, so the earliest entry of the highest lane present wins).
+    #[test]
+    fn grant_order_is_priority_lane_first_then_fifo() {
+        use RequestPriority::{High, Low, Normal};
+        assert_eq!(next_grant_index(&[]), None);
+        assert_eq!(next_grant_index(&[Normal]), Some(0));
+        assert_eq!(next_grant_index(&[Normal, Normal]), Some(0), "FIFO");
+        assert_eq!(next_grant_index(&[Normal, High]), Some(1), "lane first");
+        assert_eq!(next_grant_index(&[High, Normal, High]), Some(0));
+        assert_eq!(next_grant_index(&[Low, Normal]), Some(1));
+        assert_eq!(next_grant_index(&[Low, Low, Normal]), Some(2));
+    }
+
+    /// Issue #746 tick arbitration: the SpeculativeRound action is taken
+    /// on "speculative work pending" (active job OR non-empty backlog),
+    /// not on "active job present", and the SAME `slice_takes_tick`
+    /// alternation governs promotion ticks (empty slot, backlog pending)
+    /// as governs round ticks. So the #734 HOL bound is preserved across
+    /// a rotation: at most one speculative action (a round, a waiter's
+    /// slice 0, or a promotion + round) per tick, alternating strictly
+    /// with classic work.
+    #[test]
+    fn backlog_grant_ticks_obey_the_same_alternation() {
+        // Simulate the scheduler's flag protocol across a rotation: ticks
+        // 0..3 have an active job, tick 4 parks it (slot empty, backlog
+        // pending), later ticks promote and continue. The arbitration
+        // input is identical in every phase.
+        let mut yielded = false;
+        let mut history: Vec<&'static str> = Vec::new();
+        for _ in 0..12 {
+            // "Speculative work pending" covers both phases; classic work
+            // is always present in this scenario.
+            if slice_takes_tick(yielded, /* others_have_work */ true) {
+                history.push("speculative");
+                yielded = true;
+            } else {
+                history.push("classic");
+                yielded = false;
+            }
+        }
+        for pair in history.windows(2) {
+            assert_ne!(
+                pair[0], pair[1],
+                "promotion ticks must alternate exactly like round ticks: {history:?}"
+            );
+        }
     }
 }

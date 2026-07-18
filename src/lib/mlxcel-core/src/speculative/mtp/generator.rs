@@ -689,12 +689,17 @@ impl<T: MtpTarget> MtpGenerator<T> {
     /// This method touches only `self` (target + drafter + config) and
     /// `state`. The generator may be a FRESH instance over a reconstructed
     /// target adapter, as long as (a) the underlying model's per-sequence KV
-    /// slot is untouched since the previous round, (b) the drafter is the
-    /// same bound handle, held WITHOUT [`Drafter::reset`] since the previous
-    /// round, and (c) the generator config (`block_size`, probe count) is
-    /// the same. The re-arm at the top of the round re-establishes the
-    /// drafter's shared-KV binding from `state`'s stored [`MtpVerifyOutput`],
-    /// so no drafter-side state needs to survive between rounds.
+    /// slot is untouched since the previous round, (b) the drafter is a
+    /// bound handle whose draft-relevant state was not destroyed since the
+    /// previous round: held WITHOUT [`Drafter::reset`], or reset by an
+    /// implementation whose reset provably preserves it (the MTP assistant
+    /// drafter's reset is the trait default no-op, which is what lets the
+    /// server rotate one drafter handle across sessions between rounds,
+    /// issue #746), and (c) the generator config (`block_size`, probe
+    /// count) is the same. The re-arm at the top of the round
+    /// re-establishes the drafter's shared-KV binding from `state`'s stored
+    /// [`MtpVerifyOutput`], so no drafter-side state needs to survive
+    /// between rounds.
     ///
     /// The per-round wall-clock is accumulated into the session's decode
     /// time, so cross-tick gaps between rounds never inflate the reported

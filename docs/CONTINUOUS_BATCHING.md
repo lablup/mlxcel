@@ -241,12 +241,33 @@ config can instead run as one B>1 batched burst, but that path is experimental
 and stays behind `MLXCEL_ENABLE_MTP_BATCH` (plus
 `MLXCEL_ENABLE_MTP_BATCH_RAGGED` for mixed prompt lengths).
 
+A tick-cooperative slice spans the request's whole generation, so the single
+speculative slot would otherwise be held for that entire time. Since issue
+#746 the slot rotates across concurrent speculative requests instead of
+serving only the first one: while a slice is in flight, up to 2 further
+tick-slice-eligible requests are parked in a grant backlog (any beyond that
+cap fall back to classic decode, the pre-#746 behavior), and once the active
+request has run `MLXCEL_MTP_SLICE_GRANT_ROUNDS` slices (default 8, slice 0
+included) with the backlog non-empty, it is parked at the next round boundary
+and the slot is granted to the next request, priority lane first and FIFO
+within a lane. A parked request resumes from its saved session state on its
+next grant, with the worker's one drafter handle handed over through the same
+return/take plumbing the end of a request uses (safe because the MTP
+assistant drafter's reset is a no-op and every round re-arms the drafter from
+the session's own stored verify output), so the token streams are
+byte-identical to uncontended runs. The budget binds only under contention:
+a single speculative request never rotates and behaves exactly as under
+#734. `MLXCEL_MTP_SLICE_GRANT_ROUNDS=0` disables rotation and restores the
+whole-generation hold, including the classic fallback for every concurrent
+speculative request.
+
 Operator controls, all env-level (see
 [environment-variables.md](environment-variables.md)): `MLXCEL_ENABLE_MTP_B1`
 pins the B=1 decision in either direction and suppresses profiling,
 `MLXCEL_MTP_ADAPTIVE=0` disables the adaptive policy in favor of the static
-per-hardware gates, and `MLXCEL_QMV_MULTIROW=0` restores the stock per-row
-CUDA quantized-matmul kernel under the verify.
+per-hardware gates, `MLXCEL_MTP_SLICE_GRANT_ROUNDS` sizes (or disables) the
+speculative-slot grant rotation, and `MLXCEL_QMV_MULTIROW=0` restores the
+stock per-row CUDA quantized-matmul kernel under the verify.
 
 ## Disaggregated serving
 

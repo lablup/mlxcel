@@ -64,7 +64,9 @@ use crate::server::model_provider::model_worker::StreamingDecodeState;
 use crate::server::thinking_budget::ThinkingState;
 
 use super::speculative_burst::{begin_burst_stream, finalize_burst_stream, stream_burst_tokens};
-use super::speculative_slice::{MtpSliceJob, begin_slice_session, step_slice_session};
+use super::speculative_slice::{
+    MtpSliceJob, begin_slice_session, next_grant_index, slice_grant_expired, step_slice_session,
+};
 
 // =============================================================================
 // Mocks: mirror `speculative_burst_tests.rs` / the mlxcel-core mtp tests,
@@ -90,6 +92,13 @@ impl MockMtpTarget {
             eos,
             cumulative_offset: RefCell::new(0),
         }
+    }
+
+    /// Override the seed bonus so two concurrent mock requests emit
+    /// disjoint token ranges (rotation tests, issue #746).
+    fn with_first_bonus(mut self, first_bonus: i32) -> Self {
+        self.first_bonus = first_bonus;
+        self
     }
 
     fn build_verify_output(&self, advance: usize) -> MtpVerifyOutput {
@@ -238,12 +247,19 @@ impl Drafter for ScriptedDrafter {
 /// transitions Queued -> Prefilling before slice 0, and the stream
 /// finalize transitions Prefilling -> Finished).
 fn make_slice_sequence(max_tokens: usize) -> (SequenceInfo, mpsc::Receiver<GenerateEvent>) {
+    make_slice_sequence_with_id(max_tokens, 77)
+}
+
+fn make_slice_sequence_with_id(
+    max_tokens: usize,
+    raw_id: u64,
+) -> (SequenceInfo, mpsc::Receiver<GenerateEvent>) {
     let (tx, rx) = mpsc::channel();
     let tokenizer = crate::tokenizer::MlxcelTokenizer::stub();
     let prompt_tokens = vec![1, 2, 3];
     let decode_state = StreamingDecodeState::new(&tokenizer, &prompt_tokens);
     let seq = SequenceInfo {
-        seq_id: SequenceId::from_raw(77),
+        seq_id: SequenceId::from_raw(raw_id),
         state: SequenceState::Prefilling,
         prompt_tokens,
         sampling: SamplingConfig::greedy(),
@@ -544,4 +560,456 @@ fn slice_driver_probe_rounds_run_in_first_slices() {
         1,
         "probe rounds never arm the drafter; only the real round does"
     );
+}
+
+// =============================================================================
+// Slot-grant rotation (issue #746): the scheduler's park / promote protocol
+// driven over the REAL policy functions (`slice_grant_expired`,
+// `next_grant_index`) and the real slice driver, with ONE shared drafter
+// handle rotating across jobs exactly as the worker's single drafter does.
+// The mixed speculative+classic tick arbitration is pinned separately in
+// `speculative_slice.rs`'s own test module (`slice_takes_tick` is common to
+// both phases), and the real-model interleaving stays in the on-hardware
+// E2E lane, as for #734.
+// =============================================================================
+
+/// Deterministic drafter: proposals are a pure function of the bonus token
+/// (`bonus+1, bonus+2, ...`), the shape of the real MTP assistant whose
+/// draft depends only on the per-round `set_shared_kv` arm plus the bonus
+/// and hidden inputs. One instance is SHARED across all jobs of a rotation
+/// run, so any cross-session state leak the rotation failed to overwrite
+/// would corrupt the streams and break parity with the isolated runs. Like
+/// the real Gemma 4 assistant drafter, it does not override
+/// `Drafter::reset` (the park-boundary `return_drafter` reset is the trait
+/// default no-op).
+struct DeterministicDrafter;
+
+impl Drafter for DeterministicDrafter {
+    fn bind(
+        &mut self,
+        _target: &dyn mlxcel_core::generate::LanguageModel,
+    ) -> Result<(), DrafterError> {
+        Ok(())
+    }
+
+    fn draft_block(
+        &mut self,
+        last_bonus: i32,
+        _hidden: Option<&MlxArray>,
+        block_size: usize,
+        _sampler: &SamplingConfig,
+    ) -> Result<Vec<i32>, DrafterError> {
+        Ok((1..block_size as i32).map(|i| last_bonus + i).collect())
+    }
+
+    fn sanitize(&mut self, _weights: &mut WeightMap) -> Result<(), DrafterError> {
+        Ok(())
+    }
+
+    fn kind(&self) -> DrafterKind {
+        DrafterKind::Mtp
+    }
+}
+
+/// One request spec for the rotation harness. The target script is written
+/// against the deterministic drafter: a fully accepted round's row is
+/// `[bonus+1, bonus+2, bonus+3, next_bonus]`, and a terminal row leads
+/// with the EOS id (zero drafts accepted, the correction token is the
+/// EOS).
+#[derive(Clone)]
+struct RotSpec {
+    tag: char,
+    first_bonus: i32,
+    target_script: Vec<Vec<i32>>,
+    eos: Vec<i32>,
+}
+
+fn spec_a() -> RotSpec {
+    RotSpec {
+        tag: 'A',
+        first_bonus: 100,
+        target_script: vec![
+            vec![101, 102, 103, 104],
+            vec![105, 106, 107, 108],
+            vec![9999, 0, 0, 0],
+        ],
+        eos: vec![9999],
+    }
+}
+
+fn spec_b() -> RotSpec {
+    RotSpec {
+        tag: 'B',
+        first_bonus: 500,
+        target_script: vec![vec![501, 502, 503, 504], vec![8888, 0, 0, 0]],
+        eos: vec![8888],
+    }
+}
+
+/// Per-request terminal accounting produced by the harness.
+struct RotOutcome {
+    committed: Vec<i32>,
+    healthy_finish: bool,
+    rounds: usize,
+    slices: usize,
+}
+
+struct RotJobState {
+    spec: RotSpec,
+    /// `Some` until slice 0 runs (the waiter phase).
+    seq: Option<SequenceInfo>,
+    _rx: mpsc::Receiver<GenerateEvent>,
+    /// `Some` after slice 0 until finalize.
+    job: Option<MtpSliceJob>,
+    /// Persistent per-request stepping target: emulates the model's
+    /// per-sequence KV slot surviving parks (same pattern as
+    /// `run_slices`).
+    stepping_target: Option<MockMtpTarget>,
+    outcome: Option<RotOutcome>,
+    aborted: bool,
+}
+
+fn finalize_rot_job(
+    mut job: MtpSliceJob,
+    tokenizer: &crate::tokenizer::MlxcelTokenizer,
+) -> RotOutcome {
+    let slices = job.slices;
+    let finish = job.finish.take().expect("job finished");
+    let rounds = finish.summary.map(|s| s.rounds).unwrap_or(0);
+    let outcome = finalize_burst_stream(tokenizer, job.seq, &job.stream);
+    RotOutcome {
+        committed: outcome.generated_tokens,
+        healthy_finish: outcome.healthy_finish,
+        rounds,
+        slices,
+    }
+}
+
+/// Emulate the scheduler's slot-grant protocol (issue #746) over the real
+/// policy functions and the real slice driver:
+///
+/// - spec 0 is admitted directly (the slot was free); every later spec is
+///   a WAITER in the backlog ring.
+/// - one speculative action per tick: an active job's round, a promoted
+///   parked job's round (promotion is bookkeeping), or a promoted
+///   waiter's slice 0.
+/// - at a round boundary with the grant spent and the backlog non-empty
+///   (`slice_grant_expired`), the active job parks: its drafter is
+///   released (the trait-default no-op reset, as through
+///   `WorkerDrafterSlot::return_drafter`) and handed to the next grantee
+///   chosen by `next_grant_index`.
+/// - a cancelled waiter aborts at promotion with bookkeeping only; a
+///   cancelled parked job is promoted normally and finishes at its next
+///   step.
+///
+/// `cancel_waiter` / `cancel_on_first_park` cancel the given spec index
+/// up front / when it first parks.
+fn run_rotation_harness(
+    budget: usize,
+    specs: Vec<RotSpec>,
+    cancel_waiter: Option<usize>,
+    cancel_on_first_park: Option<usize>,
+) -> (Vec<RotJobState>, Vec<(char, usize)>) {
+    let tokenizer = crate::tokenizer::MlxcelTokenizer::stub();
+    let mut free_drafter: Option<Box<dyn Drafter>> = Some(Box::new(DeterministicDrafter));
+    let mut states: Vec<RotJobState> = specs
+        .into_iter()
+        .enumerate()
+        .map(|(i, spec)| {
+            let (seq, rx) = make_slice_sequence_with_id(64, 200 + i as u64);
+            if cancel_waiter == Some(i) {
+                seq.cancelled.store(true, Ordering::Relaxed);
+            }
+            RotJobState {
+                spec,
+                seq: Some(seq),
+                _rx: rx,
+                job: None,
+                stepping_target: None,
+                outcome: None,
+                aborted: false,
+            }
+        })
+        .collect();
+
+    fn start_slice0(
+        state: &mut RotJobState,
+        drafter: Box<dyn Drafter>,
+        tokenizer: &crate::tokenizer::MlxcelTokenizer,
+    ) {
+        let seq = state.seq.take().expect("slice 0 needs the parked sequence");
+        let target = MockMtpTarget::new(state.spec.target_script.clone(), state.spec.eos.clone())
+            .with_first_bonus(state.spec.first_bonus);
+        let job = begin_slice_session(
+            target,
+            drafter,
+            seq,
+            tokenizer,
+            state.spec.eos.clone(),
+            /* block_size */ 4,
+            /* profile_probe_rounds */ 0,
+            /* prefill_start_offset */ 0,
+            &[],
+        );
+        state.stepping_target = Some(
+            MockMtpTarget::new(state.spec.target_script.clone(), state.spec.eos.clone())
+                .with_first_bonus(state.spec.first_bonus),
+        );
+        state.job = Some(job);
+    }
+
+    let mut backlog: std::collections::VecDeque<usize> = (1..states.len()).collect();
+    let mut active: Option<usize> = None;
+    let mut grant_log: Vec<(char, usize)> = Vec::new();
+
+    // Direct admission of spec 0 (mirrors `start_mtp_slice_b1` on a free
+    // slot): slice 0 runs and opens the first grant.
+    start_slice0(
+        &mut states[0],
+        free_drafter.take().expect("drafter free at start"),
+        &tokenizer,
+    );
+    let mut grant_slices = 1usize;
+    if states[0].job.as_ref().expect("job started").finished() {
+        grant_log.push((states[0].spec.tag, grant_slices));
+        let mut job = states[0].job.take().expect("job");
+        free_drafter = job.take_drafter();
+        states[0].outcome = Some(finalize_rot_job(job, &tokenizer));
+    } else {
+        active = Some(0);
+    }
+
+    for _tick in 0..200 {
+        if active.is_none() {
+            // Promotion, mirroring `promote_next_speculative_grantee`.
+            let mut tick_consumed = false;
+            loop {
+                let lanes: Vec<RequestPriority> = backlog
+                    .iter()
+                    .map(|&i| match &states[i].job {
+                        Some(job) => job.seq.priority,
+                        None => {
+                            states[i]
+                                .seq
+                                .as_ref()
+                                .expect("waiter holds a sequence")
+                                .priority
+                        }
+                    })
+                    .collect();
+                let Some(pos) = next_grant_index(&lanes) else {
+                    break;
+                };
+                let i = backlog.remove(pos).expect("index from next_grant_index");
+                if states[i].job.is_none() {
+                    // Waiter.
+                    let cancelled = states[i]
+                        .seq
+                        .as_ref()
+                        .expect("waiter holds a sequence")
+                        .cancelled
+                        .load(Ordering::Relaxed);
+                    if cancelled {
+                        // Bookkeeping-only abort; try the next grantee in
+                        // the same tick, as the scheduler does.
+                        states[i].seq = None;
+                        states[i].aborted = true;
+                        continue;
+                    }
+                    let drafter = free_drafter.take().expect("drafter free at promotion");
+                    start_slice0(&mut states[i], drafter, &tokenizer);
+                    grant_slices = 1;
+                    if states[i].job.as_ref().expect("job started").finished() {
+                        grant_log.push((states[i].spec.tag, grant_slices));
+                        let mut job = states[i].job.take().expect("job");
+                        free_drafter = job.take_drafter();
+                        states[i].outcome = Some(finalize_rot_job(job, &tokenizer));
+                    } else {
+                        active = Some(i);
+                    }
+                    // A waiter's slice 0 is the tick's one action.
+                    tick_consumed = true;
+                    break;
+                }
+                // Parked job: re-attach the drafter; its round runs this
+                // tick below.
+                let drafter = free_drafter.take().expect("drafter free at promotion");
+                states[i]
+                    .job
+                    .as_mut()
+                    .expect("parked job present")
+                    .attach_drafter(drafter);
+                grant_slices = 0;
+                active = Some(i);
+                break;
+            }
+            if tick_consumed {
+                continue;
+            }
+            if active.is_none() {
+                // Backlog drained with no active job: the run is over.
+                break;
+            }
+        }
+
+        // Run exactly one round of the active job.
+        let i = active.expect("active job");
+        {
+            let state = &mut states[i];
+            let stepping = state
+                .stepping_target
+                .as_ref()
+                .expect("stepping target present");
+            let job = state.job.as_mut().expect("active job present");
+            step_slice_session(stepping, job, &tokenizer);
+        }
+        grant_slices += 1;
+        let finished = states[i].job.as_ref().expect("job").finished();
+        if finished {
+            grant_log.push((states[i].spec.tag, grant_slices));
+            let mut job = states[i].job.take().expect("job");
+            free_drafter = job.take_drafter();
+            states[i].outcome = Some(finalize_rot_job(job, &tokenizer));
+            active = None;
+        } else if slice_grant_expired(grant_slices, budget, !backlog.is_empty()) {
+            // Park at the round boundary: release the drafter for the
+            // next grantee (no-op reset, as through the worker slot) and
+            // rejoin the ring.
+            grant_log.push((states[i].spec.tag, grant_slices));
+            let job = states[i].job.as_mut().expect("job");
+            free_drafter = Some(job.take_drafter().expect("drafter held while active"));
+            if cancel_on_first_park == Some(i) {
+                job.seq.cancelled.store(true, Ordering::Relaxed);
+            }
+            backlog.push_back(i);
+            active = None;
+        }
+    }
+
+    (states, grant_log)
+}
+
+/// Reference: each spec driven alone through the same harness (a
+/// single-job run never rotates, so this is exactly the #734 behavior).
+fn isolated_outcome(spec: RotSpec) -> RotOutcome {
+    let (mut states, _log) = run_rotation_harness(usize::MAX, vec![spec], None, None);
+    states.remove(0).outcome.expect("isolated run finishes")
+}
+
+/// AC1 + AC2 + AC5 (issue #746): two long concurrent speculative
+/// requests BOTH receive speculative rounds, the slot rotates in grants
+/// of at most the budget, and each request's committed stream is
+/// byte-identical to its isolated single-request run (greedy parity
+/// across rotation).
+#[test]
+fn rotation_shares_the_slot_and_preserves_stream_parity() {
+    let iso_a = isolated_outcome(spec_a());
+    let iso_b = isolated_outcome(spec_b());
+    assert_eq!(
+        iso_a.committed,
+        vec![100, 101, 102, 103, 104, 105, 106, 107, 108]
+    );
+    assert_eq!(iso_b.committed, vec![500, 501, 502, 503, 504]);
+
+    let budget = 2;
+    let (states, grant_log) = run_rotation_harness(budget, vec![spec_a(), spec_b()], None, None);
+    let a = states[0].outcome.as_ref().expect("A finished");
+    let b = states[1].outcome.as_ref().expect("B finished");
+
+    // Both requests were speculatively accelerated (not one speculative
+    // plus one permanently classic).
+    assert!(
+        a.rounds >= 2 && b.rounds >= 2,
+        "both must run speculative rounds"
+    );
+    assert_eq!(a.rounds, iso_a.rounds);
+    assert_eq!(b.rounds, iso_b.rounds);
+    assert_eq!(a.slices, iso_a.slices);
+    assert_eq!(b.slices, iso_b.slices);
+
+    // Greedy parity: byte-identical committed streams per request.
+    assert_eq!(
+        a.committed, iso_a.committed,
+        "A's stream must survive rotation"
+    );
+    assert_eq!(
+        b.committed, iso_b.committed,
+        "B's stream must survive rotation"
+    );
+    assert!(a.healthy_finish && b.healthy_finish);
+
+    // The grant schedule alternates in bounded grants: A's admission
+    // grant (slice 0 + round 1), B's admission grant (slice 0 + round
+    // 1), A's resumed grant (rounds 2 and 3, finishing), B's resumed
+    // grant (round 2, finishing).
+    assert_eq!(grant_log, vec![('A', 2), ('B', 2), ('A', 2), ('B', 1)]);
+    for (_, slices) in &grant_log {
+        assert!(
+            *slices <= budget,
+            "no grant may exceed the budget: {grant_log:?}"
+        );
+    }
+}
+
+/// Uncontended no-op (issue #746): a single request never rotates
+/// regardless of the budget, and its slice count matches the pre-change
+/// behavior (the expiry condition requires a non-empty backlog).
+#[test]
+fn rotation_uncontended_single_request_never_parks() {
+    let budget = 2;
+    let (states, grant_log) = run_rotation_harness(budget, vec![spec_a()], None, None);
+    let a = states[0].outcome.as_ref().expect("A finished");
+    // Slice 0 + three rounds, all in ONE grant despite exceeding the
+    // budget: uncontended holds never expire.
+    assert_eq!(a.slices, 4);
+    assert_eq!(grant_log, vec![('A', 4)]);
+    assert_eq!(
+        a.committed,
+        vec![100, 101, 102, 103, 104, 105, 106, 107, 108]
+    );
+}
+
+/// A parked job whose client disconnected is promoted normally; its next
+/// step observes the cancel at the round top and finishes with the
+/// tokens emitted so far, and the ring does not wedge (the other request
+/// still completes with full parity).
+#[test]
+fn rotation_cancelled_parked_job_resolves_without_wedging() {
+    let iso_b = isolated_outcome(spec_b());
+    let (states, _grant_log) = run_rotation_harness(
+        2,
+        vec![spec_a(), spec_b()],
+        None,
+        /* cancel A at its first park */ Some(0),
+    );
+    let a = states[0].outcome.as_ref().expect("A resolved");
+    let b = states[1].outcome.as_ref().expect("B finished");
+    // A stopped at its cancellation boundary: slice 0 + round 1 only.
+    assert_eq!(a.committed, vec![100, 101, 102, 103, 104]);
+    assert_eq!(a.rounds, 1);
+    assert!(a.healthy_finish, "cancel classifies as a clean early stop");
+    // B is unaffected.
+    assert_eq!(b.committed, iso_b.committed);
+    assert!(b.healthy_finish);
+}
+
+/// A waiter whose client disconnected before its first grant aborts with
+/// bookkeeping only, and the ring does not wedge: the parked job behind
+/// it is promoted in the same tick and completes with full parity.
+#[test]
+fn rotation_cancelled_waiter_is_skipped_without_wedging() {
+    let iso_a = isolated_outcome(spec_a());
+    let (states, grant_log) = run_rotation_harness(
+        2,
+        vec![spec_a(), spec_b()],
+        /* cancel B before any grant */ Some(1),
+        None,
+    );
+    let a = states[0].outcome.as_ref().expect("A finished");
+    assert!(states[1].aborted, "cancelled waiter must abort");
+    assert!(states[1].outcome.is_none());
+    assert_eq!(a.committed, iso_a.committed);
+    // A's schedule: admission grant (2 slices), then, after B's abort,
+    // an uncontended resumed grant to completion (rounds 2 and 3).
+    assert_eq!(grant_log, vec![('A', 2), ('A', 2)]);
 }
