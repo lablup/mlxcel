@@ -3417,10 +3417,12 @@ impl BatchScheduler {
     /// enabled, a usable block size, a Gemma 4 family target, a
     /// non-degenerate adopted prefix, and a B=1 verdict from the adaptive
     /// policy (`seq` already passed `should_burst_for_sequence` at the
-    /// caller). Anything else keeps the pre-#746 classic fallback. A gate
-    /// that drifts between admission and promotion (the adaptive policy
-    /// settling to decline) is handled at promotion time by routing the
-    /// declined sequence to classic prefill.
+    /// caller). Anything else keeps the pre-#746 classic fallback. The one
+    /// gate that can drift while the request waits, the adaptive policy's
+    /// B=1 verdict, is re-checked explicitly at promotion time
+    /// ([`Self::promote_next_speculative_grantee`]); a then-declined
+    /// waiter routes to classic prefill
+    /// ([`Self::route_declined_slice_waiter_to_classic`]).
     fn can_wait_for_slice_grant(&self, seq: &SequenceInfo) -> bool {
         let block_size = match &self.speculative_dispatch {
             crate::server::SpeculativeDispatch::Mtp { block_size, .. } => *block_size as usize,
@@ -4063,10 +4065,27 @@ impl BatchScheduler {
                     // to a one-tick legacy burst.
                     self.finalize_speculative_slice(job);
                 } else {
-                    self.speculative_slice = Some(Box::new(job));
                     // A fresh slot grant begins with slice 0 already
-                    // executed (issue #746).
+                    // executed (issue #746). At
+                    // MLXCEL_MTP_SLICE_GRANT_ROUNDS=1 with other grantees
+                    // waiting, slice 0 already spends the whole grant, so
+                    // the job parks right here instead of getting a free
+                    // extra round; the park is pure bookkeeping, the
+                    // slice-0 forward stays this tick's one model action.
+                    // Reachable only from waiter promotion: a direct
+                    // admission always sees an empty backlog because
+                    // `try_speculative_burst` parks or declines new
+                    // arrivals while the backlog is non-empty.
                     self.speculative_slice_grant_slices = 1;
+                    if super::speculative_slice::slice_grant_expired(
+                        self.speculative_slice_grant_slices,
+                        super::speculative_slice::mtp_slice_grant_rounds(),
+                        !self.speculative_slice_backlog.is_empty(),
+                    ) {
+                        self.park_speculative_slice(Box::new(job));
+                    } else {
+                        self.speculative_slice = Some(Box::new(job));
+                    }
                 }
                 None
             }
@@ -4241,33 +4260,31 @@ impl BatchScheduler {
                         );
                         continue;
                     }
+                    // Re-check the B=1 verdict at promotion time: the
+                    // adaptive policy (issue #333) may have settled to
+                    // Decline while the request waited for its grant.
+                    // `start_mtp_slice_b1` does not consult the policy
+                    // (on the direct-admission path its caller checks it
+                    // before the call), so without this re-check a
+                    // declined pairing would still start speculative
+                    // decode here.
+                    if !self.mtp_b1_should_run() {
+                        self.route_declined_slice_waiter_to_classic(seq);
+                        continue;
+                    }
                     match self.start_mtp_slice_b1(seq) {
-                        // Slice 0 ran: the job now holds the slot, or the
+                        // Slice 0 ran: the job now holds the slot (or
+                        // parked straight back at a spent budget), or the
                         // request finished inline / failed with a
                         // client-visible error. The tick's speculative
                         // action is done either way.
                         None => return false,
-                        // Declined at promotion time (a gate drifted since
-                        // admission, e.g. the adaptive policy settled to
-                        // decline): route to classic prefill, the same
-                        // destination an admission-time decline takes.
+                        // Declined by the start's own gates (target
+                        // variant, degenerate adopted prefix): route to
+                        // classic prefill, the same destination an
+                        // admission-time decline takes.
                         Some(seq) => {
-                            let seq_id = seq.seq_id;
-                            tracing::debug!(
-                                "slice grant declined at promotion; seq {seq_id} \
-                                 re-queued for classic prefill",
-                            );
-                            if let Err(boxed) = self.prefill_queue.enqueue(seq) {
-                                tracing::warn!(
-                                    "slice grant declined and prefill queue full; \
-                                     aborting seq {seq_id}"
-                                );
-                                self.prompt_cache_seq_ctx.remove(&seq_id);
-                                self.abort_sequence(
-                                    *boxed,
-                                    "speculative slice grant declined and prefill queue full",
-                                );
-                            }
+                            self.route_declined_slice_waiter_to_classic(seq);
                             continue;
                         }
                     }
@@ -4322,6 +4339,28 @@ impl BatchScheduler {
             }
         }
         false
+    }
+
+    /// Route a slot-grant waiter that declined at promotion time back to
+    /// the classic prefill path (issue #746): the same destination an
+    /// admission-time burst decline takes. Used for the promotion-time
+    /// B=1 verdict re-check and for `start_mtp_slice_b1`'s own declines.
+    /// Aborts the sequence when the prefill queue is full (the sequence
+    /// was originally dequeued from this same queue, so a full queue here
+    /// is extremely unlikely).
+    fn route_declined_slice_waiter_to_classic(&mut self, seq: SequenceInfo) {
+        let seq_id = seq.seq_id;
+        tracing::debug!(
+            "slice grant declined at promotion; seq {seq_id} re-queued for classic prefill"
+        );
+        if let Err(boxed) = self.prefill_queue.enqueue(seq) {
+            tracing::warn!("slice grant declined and prefill queue full; aborting seq {seq_id}");
+            self.prompt_cache_seq_ctx.remove(&seq_id);
+            self.abort_sequence(
+                *boxed,
+                "speculative slice grant declined and prefill queue full",
+            );
+        }
     }
 
     /// Pop the next grantee: the earliest backlog entry of the highest

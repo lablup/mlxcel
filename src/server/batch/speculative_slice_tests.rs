@@ -667,6 +667,10 @@ struct RotJobState {
     stepping_target: Option<MockMtpTarget>,
     outcome: Option<RotOutcome>,
     aborted: bool,
+    /// The waiter declined at promotion time (the B=1 verdict re-check)
+    /// and was routed to the classic prefill path instead of starting
+    /// slice 0.
+    routed_to_classic: bool,
 }
 
 fn finalize_rot_job(
@@ -701,14 +705,24 @@ fn finalize_rot_job(
 /// - a cancelled waiter aborts at promotion with bookkeeping only; a
 ///   cancelled parked job is promoted normally and finishes at its next
 ///   step.
+/// - a waiter's promotion re-checks the B=1 verdict (mirroring the
+///   scheduler's `mtp_b1_should_run` re-check for an adaptive policy that
+///   settled to Decline while the request waited); a declined waiter is
+///   routed to classic prefill with bookkeeping only and the loop tries
+///   the next grantee in the same tick.
+/// - a waiter promotion whose slice 0 already spends the grant budget
+///   (`MLXCEL_MTP_SLICE_GRANT_ROUNDS=1`) parks the job immediately, so
+///   an admission grant cannot hold a free extra round beyond the budget.
 ///
 /// `cancel_waiter` / `cancel_on_first_park` cancel the given spec index
-/// up front / when it first parks.
+/// up front / when it first parks; `decline_waiter_at_promotion` fails
+/// the given spec index's promotion-time verdict re-check.
 fn run_rotation_harness(
     budget: usize,
     specs: Vec<RotSpec>,
     cancel_waiter: Option<usize>,
     cancel_on_first_park: Option<usize>,
+    decline_waiter_at_promotion: Option<usize>,
 ) -> (Vec<RotJobState>, Vec<(char, usize)>) {
     let tokenizer = crate::tokenizer::MlxcelTokenizer::stub();
     let mut free_drafter: Option<Box<dyn Drafter>> = Some(Box::new(DeterministicDrafter));
@@ -728,6 +742,7 @@ fn run_rotation_harness(
                 stepping_target: None,
                 outcome: None,
                 aborted: false,
+                routed_to_classic: false,
             }
         })
         .collect();
@@ -763,7 +778,12 @@ fn run_rotation_harness(
     let mut grant_log: Vec<(char, usize)> = Vec::new();
 
     // Direct admission of spec 0 (mirrors `start_mtp_slice_b1` on a free
-    // slot): slice 0 runs and opens the first grant.
+    // slot): slice 0 runs and opens the first grant. No immediate-expiry
+    // check here: in the real scheduler a direct admission always sees an
+    // EMPTY backlog (`try_speculative_burst` parks or declines arrivals
+    // while it is non-empty), so `slice_grant_expired(1, budget, false)`
+    // is always false; the harness's upfront backlog models requests that
+    // arrive DURING this first grant.
     start_slice0(
         &mut states[0],
         free_drafter.take().expect("drafter free at start"),
@@ -816,6 +836,17 @@ fn run_rotation_harness(
                         states[i].aborted = true;
                         continue;
                     }
+                    if decline_waiter_at_promotion == Some(i) {
+                        // Mirror of the scheduler's promotion-time
+                        // `mtp_b1_should_run` re-check: an adaptive
+                        // policy that settled to Decline while the
+                        // request waited routes the waiter to classic
+                        // prefill with bookkeeping only, and the loop
+                        // tries the next grantee in the same tick.
+                        states[i].seq = None;
+                        states[i].routed_to_classic = true;
+                        continue;
+                    }
                     let drafter = free_drafter.take().expect("drafter free at promotion");
                     start_slice0(&mut states[i], drafter, &tokenizer);
                     grant_slices = 1;
@@ -824,6 +855,17 @@ fn run_rotation_harness(
                         let mut job = states[i].job.take().expect("job");
                         free_drafter = job.take_drafter();
                         states[i].outcome = Some(finalize_rot_job(job, &tokenizer));
+                    } else if slice_grant_expired(grant_slices, budget, !backlog.is_empty()) {
+                        // Budget of 1 with other grantees waiting: slice 0
+                        // already spent the whole grant, so the job parks
+                        // immediately instead of holding a free extra
+                        // round (mirrors `start_mtp_slice_b1`'s install
+                        // site).
+                        grant_log.push((states[i].spec.tag, grant_slices));
+                        let job = states[i].job.as_mut().expect("job");
+                        free_drafter =
+                            Some(job.take_drafter().expect("drafter held after slice 0"));
+                        backlog.push_back(i);
                     } else {
                         active = Some(i);
                     }
@@ -892,7 +934,7 @@ fn run_rotation_harness(
 /// Reference: each spec driven alone through the same harness (a
 /// single-job run never rotates, so this is exactly the #734 behavior).
 fn isolated_outcome(spec: RotSpec) -> RotOutcome {
-    let (mut states, _log) = run_rotation_harness(usize::MAX, vec![spec], None, None);
+    let (mut states, _log) = run_rotation_harness(usize::MAX, vec![spec], None, None, None);
     states.remove(0).outcome.expect("isolated run finishes")
 }
 
@@ -912,7 +954,8 @@ fn rotation_shares_the_slot_and_preserves_stream_parity() {
     assert_eq!(iso_b.committed, vec![500, 501, 502, 503, 504]);
 
     let budget = 2;
-    let (states, grant_log) = run_rotation_harness(budget, vec![spec_a(), spec_b()], None, None);
+    let (states, grant_log) =
+        run_rotation_harness(budget, vec![spec_a(), spec_b()], None, None, None);
     let a = states[0].outcome.as_ref().expect("A finished");
     let b = states[1].outcome.as_ref().expect("B finished");
 
@@ -957,7 +1000,7 @@ fn rotation_shares_the_slot_and_preserves_stream_parity() {
 #[test]
 fn rotation_uncontended_single_request_never_parks() {
     let budget = 2;
-    let (states, grant_log) = run_rotation_harness(budget, vec![spec_a()], None, None);
+    let (states, grant_log) = run_rotation_harness(budget, vec![spec_a()], None, None, None);
     let a = states[0].outcome.as_ref().expect("A finished");
     // Slice 0 + three rounds, all in ONE grant despite exceeding the
     // budget: uncontended holds never expire.
@@ -981,6 +1024,7 @@ fn rotation_cancelled_parked_job_resolves_without_wedging() {
         vec![spec_a(), spec_b()],
         None,
         /* cancel A at its first park */ Some(0),
+        None,
     );
     let a = states[0].outcome.as_ref().expect("A resolved");
     let b = states[1].outcome.as_ref().expect("B finished");
@@ -1004,6 +1048,7 @@ fn rotation_cancelled_waiter_is_skipped_without_wedging() {
         vec![spec_a(), spec_b()],
         /* cancel B before any grant */ Some(1),
         None,
+        None,
     );
     let a = states[0].outcome.as_ref().expect("A finished");
     assert!(states[1].aborted, "cancelled waiter must abort");
@@ -1011,5 +1056,61 @@ fn rotation_cancelled_waiter_is_skipped_without_wedging() {
     assert_eq!(a.committed, iso_a.committed);
     // A's schedule: admission grant (2 slices), then, after B's abort,
     // an uncontended resumed grant to completion (rounds 2 and 3).
+    assert_eq!(grant_log, vec![('A', 2), ('A', 2)]);
+}
+
+/// Budget 1: strict per-slice interleave. A waiter's slice 0 spends its
+/// whole grant and parks immediately, so an admission grant cannot hold
+/// a free extra round beyond the budget; every later grant is exactly
+/// one slice. The opening grant still holds slice 0 plus round 1
+/// because a direct admission always starts with an empty backlog (the
+/// contention modeled here arrives during that first grant) and the
+/// first expiry check is the round boundary after it appears.
+#[test]
+fn rotation_budget_one_interleaves_strictly_per_slice() {
+    let iso_a = isolated_outcome(spec_a());
+    let iso_b = isolated_outcome(spec_b());
+    let (states, grant_log) = run_rotation_harness(1, vec![spec_a(), spec_b()], None, None, None);
+    let a = states[0].outcome.as_ref().expect("A finished");
+    let b = states[1].outcome.as_ref().expect("B finished");
+    assert_eq!(a.committed, iso_a.committed);
+    assert_eq!(b.committed, iso_b.committed);
+    assert!(a.healthy_finish && b.healthy_finish);
+    assert_eq!(
+        grant_log,
+        vec![('A', 2), ('B', 1), ('A', 1), ('B', 1), ('A', 1), ('B', 1)],
+        "B's admission grant must park right after slice 0 at budget 1"
+    );
+}
+
+/// A waiter whose promotion-time B=1 verdict re-check declines (the
+/// adaptive policy settled to Decline while the request waited) is
+/// routed to classic prefill with bookkeeping only: it never runs a
+/// speculative slice, the ring does not wedge, and the other request
+/// completes with full parity. Mirrors the scheduler's
+/// `mtp_b1_should_run` re-check in the Waiter promotion arm.
+#[test]
+fn rotation_declined_waiter_at_promotion_routes_to_classic() {
+    let iso_a = isolated_outcome(spec_a());
+    let (states, grant_log) = run_rotation_harness(
+        2,
+        vec![spec_a(), spec_b()],
+        None,
+        None,
+        /* decline B's promotion verdict */ Some(1),
+    );
+    let a = states[0].outcome.as_ref().expect("A finished");
+    assert!(
+        states[1].routed_to_classic,
+        "declined waiter must route to classic"
+    );
+    assert!(
+        states[1].outcome.is_none(),
+        "no speculative slices for the declined waiter"
+    );
+    assert!(!states[1].aborted, "routing to classic is not an abort");
+    assert_eq!(a.committed, iso_a.committed);
+    // Same shape as the cancelled-waiter schedule: B resolves with
+    // bookkeeping only and A's next grant runs uncontended to the end.
     assert_eq!(grant_log, vec![('A', 2), ('A', 2)]);
 }
