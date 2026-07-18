@@ -325,14 +325,15 @@ pub(crate) fn request_has_effective_input(request: &ChatCompletionRequest) -> bo
 
 /// Single-message half of [`request_has_effective_input`].
 fn message_has_effective_input(message: &Message) -> bool {
-    if !message.content.text().trim().is_empty() {
+    if message.content.has_effective_text() {
         return true;
     }
 
     if let MessageContent::Parts(parts) = &message.content {
         for part in parts {
             match part {
-                // Text parts are already covered by `content.text()` above.
+                // Text parts are already covered by
+                // `content.has_effective_text()` above.
                 ContentPart::Text { .. } => {}
                 ContentPart::ImageUrl { image_url } => {
                     if !image_url.url.trim().is_empty() {

@@ -343,6 +343,22 @@ impl MessageContent {
         }
     }
 
+    /// Returns `true` when the content has at least one non-whitespace text
+    /// character, without allocating a `String` the way [`Self::text`] does.
+    ///
+    /// Equivalent to `!self.text().trim().is_empty()`: joining `Parts` text
+    /// parts with `""` is non-whitespace iff at least one part is
+    /// non-whitespace on its own, so a per-part `any` check gives the same
+    /// answer as trimming the joined string.
+    pub fn has_effective_text(&self) -> bool {
+        match self {
+            MessageContent::Text(s) => !s.trim().is_empty(),
+            MessageContent::Parts(parts) => parts
+                .iter()
+                .any(|p| matches!(p, ContentPart::Text { text } if !text.trim().is_empty())),
+        }
+    }
+
     /// Extract image data URIs/paths from multimodal content
     pub fn image_urls(&self) -> Vec<String> {
         match self {
@@ -974,6 +990,51 @@ mod tests {
         let c = MessageContent::default();
         assert_eq!(c.text(), "");
         assert!(matches!(c, MessageContent::Text(_)));
+    }
+
+    /// `has_effective_text` must agree with `!text().trim().is_empty()` for
+    /// every shape (issue #804): `Text` variants directly, and `Parts`
+    /// variants where the borrow-only per-part `any` check has to reach the
+    /// same verdict as trimming the fully joined string.
+    #[test]
+    fn has_effective_text_matches_text_trim_is_empty_for_all_shapes() {
+        let cases = [
+            MessageContent::Text(String::new()),
+            MessageContent::Text("   \n\t  ".to_string()),
+            MessageContent::Text("hello".to_string()),
+            MessageContent::Parts(vec![]),
+            MessageContent::Parts(vec![ContentPart::Text {
+                text: String::new(),
+            }]),
+            MessageContent::Parts(vec![
+                ContentPart::Text {
+                    text: "   ".to_string(),
+                },
+                ContentPart::Text {
+                    text: "\n\t".to_string(),
+                },
+            ]),
+            MessageContent::Parts(vec![
+                ContentPart::Text {
+                    text: "   ".to_string(),
+                },
+                ContentPart::Text {
+                    text: "hi".to_string(),
+                },
+            ]),
+            MessageContent::Parts(vec![ContentPart::ImageUrl {
+                image_url: ImageUrl::new("data:image/png;base64,aGVsbG8="),
+            }]),
+        ];
+        for content in cases {
+            let expected = !content.text().trim().is_empty();
+            assert_eq!(
+                content.has_effective_text(),
+                expected,
+                "mismatch for {content:?}: text()={:?}",
+                content.text()
+            );
+        }
     }
 
     #[test]

@@ -1833,6 +1833,72 @@ fn effective_input_rejects_content_list_with_only_an_empty_text_item() {
 }
 
 #[test]
+fn effective_input_rejects_content_list_with_several_whitespace_only_text_items() {
+    // Several whitespace-only text parts, joined, are still whitespace-only —
+    // this exercises the `Parts` branch of `has_effective_text` with more
+    // than one part, none of which is individually non-whitespace.
+    let request = request_with_messages(vec![Message {
+        role: Role::User,
+        content: MessageContent::Parts(vec![
+            ContentPart::Text {
+                text: "   ".to_string(),
+            },
+            ContentPart::Text {
+                text: "\n\t".to_string(),
+            },
+            ContentPart::Text {
+                text: String::new(),
+            },
+        ]),
+        name: None,
+        tool_call_id: None,
+        reasoning: None,
+        tool_calls: None,
+    }]);
+    assert!(!request_has_effective_input(&request));
+}
+
+#[test]
+fn effective_input_accepts_content_list_with_one_non_whitespace_text_among_whitespace_ones() {
+    // Only one of several text parts is non-whitespace; `has_effective_text`
+    // must find it via `any` even though the first part(s) are blank.
+    let request = request_with_messages(vec![Message {
+        role: Role::User,
+        content: MessageContent::Parts(vec![
+            ContentPart::Text {
+                text: "   ".to_string(),
+            },
+            ContentPart::Text {
+                text: "hello".to_string(),
+            },
+            ContentPart::Text {
+                text: "".to_string(),
+            },
+        ]),
+        name: None,
+        tool_call_id: None,
+        reasoning: None,
+        tool_calls: None,
+    }]);
+    assert!(request_has_effective_input(&request));
+}
+
+#[test]
+fn effective_input_rejects_empty_content_parts_list() {
+    // An empty `Parts` vec (no text, no media parts at all) must not count
+    // as effective input.
+    let request = request_with_messages(vec![Message {
+        role: Role::User,
+        content: MessageContent::Parts(vec![]),
+        name: None,
+        tool_call_id: None,
+        reasoning: None,
+        tool_calls: None,
+    }]);
+    assert!(!request_has_effective_input(&request));
+}
+
+#[test]
 fn effective_input_accepts_image_only_request() {
     let request = request_with_messages(vec![Message {
         role: Role::User,
