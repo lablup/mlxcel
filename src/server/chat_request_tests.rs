@@ -1834,7 +1834,7 @@ fn effective_input_rejects_content_list_with_only_an_empty_text_item() {
 
 #[test]
 fn effective_input_rejects_content_list_with_several_whitespace_only_text_items() {
-    // Several whitespace-only text parts, joined, are still whitespace-only —
+    // Several whitespace-only text parts, joined, are still whitespace-only;
     // this exercises the `Parts` branch of `has_effective_text` with more
     // than one part, none of which is individually non-whitespace.
     let request = request_with_messages(vec![Message {
