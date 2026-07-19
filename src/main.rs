@@ -49,6 +49,10 @@ Environment Variables:
                            unset, auto-defaults to 1000 on pre-M5 Apple Silicon (M1-M4),
                              MLX default on M5+ and non-Apple (hardware-gated, #353)
                            explicit value always wins (manual override / sweeps)
+  MLX_CUDA_GRAPH_CACHE_SIZE CUDA graph-cache LRU capacity (CUDA only)
+                           unset, auto-defaults to 2000 on CUDA builds (MLX default 400
+                             aborts long-lived shape-diverse decode, #818)
+                           explicit value always wins
 
 Tensor Parallel Runtime:
   Current multi-rank support: dense Llama, Qwen2/2.5, Qwen3, Qwen3.5 text, Gemma 3 text, Gemma 4 text, ERNIE 4.5, Hunyuan v1 Dense
@@ -1757,6 +1761,13 @@ fn main() -> anyhow::Result<()> {
     // command-buffer dispatch-gap idle (#353). Hardware-gated, a no-op when the
     // variable is already set, and must run before any MLX op.
     mlxcel_core::hardware::apply_metal_ops_per_buffer_default();
+
+    // On a CUDA build, raise MLX_CUDA_GRAPH_CACHE_SIZE so long-lived,
+    // shape-diverse decode (especially speculative/batched) does not abort on
+    // MLX's fatal "Cache thrashing" throw at the default capacity (#818). No-op
+    // off CUDA, a no-op when the variable is already set, and must run before
+    // any MLX op.
+    mlxcel_core::hardware::apply_cuda_graph_cache_default();
 
     match cli.command {
         Commands::Run(args) => commands::run_run(args),

@@ -186,6 +186,67 @@ pub fn apply_metal_ops_per_buffer_default() {
     }
 }
 
+/// The `MLX_CUDA_GRAPH_CACHE_SIZE` default to apply on a CUDA build, or `None`
+/// off CUDA.
+///
+/// MLX's CUDA backend keeps an LRU cache of captured CUDA graphs keyed by graph
+/// shape, and its built-in capacity default is 400
+/// (`mlx/backend/cuda/device.cpp`). `mlx/backend/cuda/lru_cache.h` also keeps a
+/// lifetime miss counter that is never reset (not on hits, not on trim) and
+/// throws a fatal `std::runtime_error("Cache thrashing is happening ...")` once
+/// that counter passes `2 * capacity`, i.e. 800 lifetime misses at the default.
+/// A long-lived, shape-diverse CUDA server crosses that threshold over its
+/// lifetime, and speculative or batched decode reaches it fastest: the draft and
+/// verify phases, multiplied across varying batch sizes and sequence-length
+/// buckets, produce many distinct graph shapes. The throw is a process death,
+/// not a request-level error, so it drops every in-flight request (issue #818).
+///
+/// Raising the cap to 2000 was validated to eliminate the crash (13/13 requests
+/// across multiple bursts on GB10). 2000 is an LRU capacity cap, not a
+/// preallocation, so it only costs memory as distinct graph shapes actually
+/// accumulate. This is a default only: an operator-set `MLX_CUDA_GRAPH_CACHE_SIZE`
+/// (any value) always wins (see [`apply_cuda_graph_cache_default`]). The variable
+/// is read only by MLX's CUDA backend, so it is a harmless no-op when the runtime
+/// device is CPU.
+#[must_use]
+pub fn cuda_graph_cache_default() -> Option<u32> {
+    #[cfg(feature = "cuda")]
+    {
+        Some(2000)
+    }
+    #[cfg(not(feature = "cuda"))]
+    {
+        None
+    }
+}
+
+/// Apply the [`cuda_graph_cache_default`] to the process environment, unless
+/// `MLX_CUDA_GRAPH_CACHE_SIZE` is already set.
+///
+/// Call this once, early in `main()`, before any MLX op runs and before spawning
+/// threads: MLX reads `MLX_CUDA_GRAPH_CACHE_SIZE` when it first sizes the CUDA
+/// graph cache, and setting an environment variable is only sound while the
+/// process is effectively single-threaded. An operator-set
+/// `MLX_CUDA_GRAPH_CACHE_SIZE` (any value) is always respected.
+pub fn apply_cuda_graph_cache_default() {
+    if std::env::var_os("MLX_CUDA_GRAPH_CACHE_SIZE").is_some() {
+        return;
+    }
+    if let Some(value) = cuda_graph_cache_default() {
+        // SAFETY: set_var mutates the process-global environment and is unsound
+        // only if another thread reads or writes the environment concurrently.
+        // Per this function's documented contract, all in-tree callers invoke it
+        // once at the top of `main` right after CLI parsing (src/main.rs,
+        // src/bin/mlx_server.rs, src/bin/bench_decode.rs), before any model load,
+        // MLX op, or worker thread touches the environment, so no other thread is
+        // accessing it here.
+        unsafe { std::env::set_var("MLX_CUDA_GRAPH_CACHE_SIZE", value.to_string()) };
+        tracing::info!(
+            "Defaulting MLX_CUDA_GRAPH_CACHE_SIZE to {value} so long-lived, shape-diverse CUDA decode does not abort on MLX's cache-thrashing throw (issue #818); an explicit MLX_CUDA_GRAPH_CACHE_SIZE overrides this default"
+        );
+    }
+}
+
 // ── Detection ─────────────────────────────────────────────────────────────────
 
 /// Detect hardware capabilities by querying the OS at runtime.
@@ -754,6 +815,19 @@ mod tests {
             metal_ops_per_buffer_default(AppleSiliconGen::Unknown, false),
             None
         );
+    }
+
+    #[test]
+    fn cuda_graph_cache_default_matches_build_feature() {
+        // The CUDA graph-cache default is a compile-time gate: a `cuda`-feature
+        // build raises the LRU capacity to 2000 so long-lived, shape-diverse
+        // decode does not hit MLX's fatal "Cache thrashing" throw at the default
+        // capacity 400 (issue #818); every other build leaves MLX's default in
+        // place and the CUDA-only variable is never touched.
+        #[cfg(feature = "cuda")]
+        assert_eq!(cuda_graph_cache_default(), Some(2000));
+        #[cfg(not(feature = "cuda"))]
+        assert_eq!(cuda_graph_cache_default(), None);
     }
 
     #[test]

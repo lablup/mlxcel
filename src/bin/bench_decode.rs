@@ -367,6 +367,12 @@ fn main() -> Result<()> {
     // pre-set MLX_MAX_OPS_PER_BUFFER (manual sweep override) always wins.
     mlxcel_core::hardware::apply_metal_ops_per_buffer_default();
 
+    // Also match the production binaries' CUDA graph-cache default (#818) so
+    // long-lived shape-diverse benchmark runs do not abort on MLX's fatal
+    // "Cache thrashing" throw. No-op off CUDA; an explicit
+    // MLX_CUDA_GRAPH_CACHE_SIZE always wins.
+    mlxcel_core::hardware::apply_cuda_graph_cache_default();
+
     let kv_cache_mode = resolve_kv_cache_mode(
         args.turbo.cache_type_k.as_deref(),
         args.turbo.cache_type_v.as_deref(),

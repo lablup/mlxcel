@@ -1174,6 +1174,13 @@ async fn main() -> anyhow::Result<()> {
     // variable is already set, and must run before any MLX op.
     mlxcel_core::hardware::apply_metal_ops_per_buffer_default();
 
+    // On a CUDA build, raise MLX_CUDA_GRAPH_CACHE_SIZE so long-lived,
+    // shape-diverse decode (especially speculative/batched) does not abort on
+    // MLX's fatal "Cache thrashing" throw at the default capacity (#818). No-op
+    // off CUDA, a no-op when the variable is already set, and must run before
+    // any MLX op.
+    mlxcel_core::hardware::apply_cuda_graph_cache_default();
+
     match cli.command {
         // Subcommand-driven dispatch. Currently only `download`
         // exists; future operational subcommands (e.g. cache inspection) can
