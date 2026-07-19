@@ -3735,6 +3735,22 @@ fn try_array_to_raw_bytes_round_trips_f32() {
     assert_eq!(values, vec![1.0, 2.0, 3.0]);
 }
 
+#[test]
+fn try_async_eval_ok_matches_async_eval() {
+    // #822: the batch scheduler's decode-loop lookahead pipeline schedules its
+    // sampled tokens through `try_async_eval` so an MLX C++ throw at graph
+    // capture is caught at the cxx boundary and returned as `Err` instead of
+    // aborting the whole worker. On a well-formed graph the fallible variant is
+    // identical to `async_eval`: it schedules the eval and returns `Ok`, and the
+    // array reads back to the same value after a synchronize.
+    let y = ones(&[2, 2], dtype::FLOAT32);
+    try_async_eval(&y).expect("scheduling a valid array returns Ok");
+    synchronize_default();
+    let total = sum_all(&y);
+    eval(&total);
+    assert_eq!(item_f32(&total), 4.0);
+}
+
 /// [#725] Multirow qmv parity: with broadcast weights and 2..8 input rows (the
 /// CUDA `M*B < 8` qmv dispatch window), the weight-amortizing multirow kernel
 /// must produce bit-identical rows to the stock per-row launches that

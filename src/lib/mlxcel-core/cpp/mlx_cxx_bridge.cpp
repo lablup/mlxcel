@@ -4195,6 +4195,14 @@ void async_eval(const MlxArray& arr) {
     mlx::core::async_eval(const_cast<array&>(arr.inner));
 }
 
+// Same as `async_eval`, but declared `-> Result<()>` on the Rust side so cxx
+// wraps the call in a try/catch and converts any thrown MLX exception into a
+// Rust `Err` instead of letting it cross the FFI boundary uncaught (which
+// aborts the process). The body is otherwise identical to `async_eval`.
+void try_async_eval(const MlxArray& arr) {
+    mlx::core::async_eval(const_cast<array&>(arr.inner));
+}
+
 void async_eval_all(rust::Slice<const MlxArray* const> arrays) {
     std::vector<array> arrs;
     arrs.reserve(arrays.size());

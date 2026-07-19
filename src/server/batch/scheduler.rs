@@ -111,6 +111,37 @@ const MAX_KV_SIZE_SINK_KEEP: i32 = 4;
 /// Environment override for the #715 batched-prefill token budget.
 const MAX_BATCH_PREFILL_TOKENS_ENV: &str = "MLXCEL_MAX_BATCH_PREFILL_TOKENS";
 
+/// #822: consecutive MLX eval failures at the decode/prefill FFI boundary that
+/// the scheduler tolerates before treating the backend as unrecoverable and
+/// shutting down cleanly. The decode loop evaluates on-device tensors through
+/// the fallible `try_eval` / `try_async_eval` boundary so a single MLX C++
+/// throw (a graph-cache abort at capture, an allocation failure, ...) fails the
+/// affected request(s) instead of aborting the whole process. A graph-capture
+/// throw is clean to fail per-batch, but an OOM or internal-invariant throw may
+/// leave the allocator/device in an undefined state; once failures hit this
+/// bound the scheduler stops rather than spinning on a broken backend. The goal
+/// is graceful request-scoped failure OR clean shutdown, NOT pretend-recovery.
+const MAX_CONSECUTIVE_EVAL_FAILURES: u32 = 8;
+
+/// #822: advance the consecutive decode-eval failure counter for one eval
+/// outcome. A successful eval (`eval_ok == true`) resets the run to 0; a failure
+/// bumps it, saturating so an extreme failure streak cannot wrap. Pure so the
+/// guard's arithmetic is unit-testable without a live model.
+fn advance_eval_failure_count(current: u32, eval_ok: bool) -> u32 {
+    if eval_ok {
+        0
+    } else {
+        current.saturating_add(1)
+    }
+}
+
+/// #822: whether the consecutive decode-eval failure count has reached the
+/// unrecoverable-backend threshold ([`MAX_CONSECUTIVE_EVAL_FAILURES`]) at which
+/// the scheduler drains in-flight requests and shuts down instead of spinning.
+fn eval_failures_reached_limit(count: u32) -> bool {
+    count >= MAX_CONSECUTIVE_EVAL_FAILURES
+}
+
 /// Resolve the effective batched-prefill padded-token budget (#715).
 ///
 /// Precedence (matching the `--flag` > env convention of the other server
@@ -248,6 +279,14 @@ pub struct BatchScheduler {
 
     // -- Shutdown flag --
     shutdown_requested: bool,
+
+    /// #822: consecutive MLX eval failures at the decode/prefill FFI boundary.
+    /// Bumped whenever a `try_eval` / `try_async_eval` catches an MLX C++ throw
+    /// and reset to 0 on any successful eval. When it reaches
+    /// [`MAX_CONSECUTIVE_EVAL_FAILURES`] the scheduler drains in-flight requests
+    /// with an error and shuts down cleanly instead of spinning on a broken
+    /// allocator/device.
+    consecutive_decode_eval_failures: u32,
 
     // -- Batched prefill config --
     /// Maximum number of pending requests to batch together for prefill.
@@ -622,6 +661,90 @@ impl BatchScheduler {
             self.model.release_sequence_state(caches);
         }
         self.cache_pool.release(seq_id);
+    }
+
+    /// #822: note a successful MLX eval at the decode/prefill boundary, clearing
+    /// the consecutive-failure run. Cheap single-field write on the hot path.
+    #[inline]
+    fn note_eval_success(&mut self) {
+        self.consecutive_decode_eval_failures = 0;
+    }
+
+    /// #822: record the outcome of a fallible decode/prefill eval and translate
+    /// a failure into a request-facing error string.
+    ///
+    /// `result` is the `Result` from `mlxcel_core::try_eval` /
+    /// `mlxcel_core::try_async_eval` (an MLX C++ throw already caught at the cxx
+    /// boundary and mapped to `String`). On `Ok` the consecutive-failure counter
+    /// is reset. On `Err` the counter is bumped, the MLX message is logged, and
+    /// a request-facing error is returned so the caller can abort the affected
+    /// sequence(s) instead of letting the throw abort the whole process.
+    ///
+    /// The counter bookkeeping is deliberately split from the eval call itself:
+    /// several eval sites run while a `cache_pool` / `active_batch` borrow is
+    /// still live, so the raw `try_*` call is made inline there and its `Result`
+    /// is handed to this method once the borrow has ended.
+    fn record_eval_outcome(&mut self, result: Result<(), String>) -> Result<(), String> {
+        self.consecutive_decode_eval_failures =
+            advance_eval_failure_count(self.consecutive_decode_eval_failures, result.is_ok());
+        match result {
+            Ok(()) => Ok(()),
+            Err(mlx_msg) => {
+                tracing::error!(
+                    consecutive = self.consecutive_decode_eval_failures,
+                    threshold = MAX_CONSECUTIVE_EVAL_FAILURES,
+                    "MLX threw at the decode/prefill eval FFI boundary; failing the affected request(s) instead of aborting the process: {mlx_msg}"
+                );
+                Err(format!("inference backend error: {mlx_msg}"))
+            }
+        }
+    }
+
+    /// #822: after an eval failure has been recorded and the affected
+    /// sequence(s) aborted, decide whether the backend is unrecoverable.
+    ///
+    /// Returns `false` (keep serving other sequences) while consecutive failures
+    /// stay under [`MAX_CONSECUTIVE_EVAL_FAILURES`]. Once the threshold is
+    /// reached it logs a fatal-level line, drains every remaining in-flight
+    /// sequence with an error, requests a clean scheduler shutdown, and returns
+    /// `true`. This is the guard that stops a persistently-failing backend (a
+    /// corrupted allocator/device after an OOM, say) from spinning forever: the
+    /// contract is graceful request-scoped failure OR clean shutdown, never
+    /// pretend-recovery.
+    fn eval_failures_exhausted(&mut self) -> bool {
+        if !eval_failures_reached_limit(self.consecutive_decode_eval_failures) {
+            return false;
+        }
+        tracing::error!(
+            consecutive = self.consecutive_decode_eval_failures,
+            "FATAL: {MAX_CONSECUTIVE_EVAL_FAILURES} consecutive MLX eval failures at the decode boundary; treating the backend as unrecoverable, draining in-flight requests and shutting down the scheduler."
+        );
+        self.drain_all_inflight_with_error(
+            "inference backend unavailable: too many consecutive MLX evaluation failures",
+        );
+        self.shutdown_requested = true;
+        true
+    }
+
+    /// #822: fail every in-flight sequence (the active decode batch plus any
+    /// chunked prefill in progress) with `err` so no request hangs when the
+    /// scheduler shuts down on an unrecoverable backend. A sequence already in a
+    /// terminal state this tick (e.g. the row whose eval just failed) is only
+    /// reclaimed, not re-notified, so it never receives a duplicate error event.
+    fn drain_all_inflight_with_error(&mut self, err: &str) {
+        for seq_id in self.active_batch.sequence_ids() {
+            if let Some(seq) = self.active_batch.remove(seq_id) {
+                if seq.state.is_finished() {
+                    self.prompt_cache_seq_ctx.remove(&seq.seq_id);
+                    self.release_sequence_caches(seq.seq_id);
+                } else {
+                    self.abort_sequence(seq, err);
+                }
+            }
+        }
+        if let Some(seq) = self.chunked_prefill_seq.take() {
+            self.abort_sequence(seq, err);
+        }
     }
 
     fn begin_prefill(seq: &mut SequenceInfo) -> Result<(), String> {
@@ -1103,6 +1226,7 @@ impl BatchScheduler {
             preemption_policy,
             chunked_prefill_seq: None,
             shutdown_requested: false,
+            consecutive_decode_eval_failures: 0,
             max_batch_prefill: max_batch_prefill.max(1),
             // #715: resolve the batched-prefill token budget from the env
             // override or the derived default (`max_batch_prefill *
@@ -4774,7 +4898,23 @@ impl BatchScheduler {
             None,
         );
 
-        mlxcel_core::eval(&raw_logits);
+        // Release the cache_pool borrow before the guarded eval touches
+        // `&mut self`; the per-sequence loop below re-borrows caches anyway.
+        drop(batch_caches);
+
+        // #822: force-evaluate the cohort's prefill graph through the fallible
+        // boundary. This single eval covers the whole batch, so an MLX C++ throw
+        // (graph-cache abort, allocation failure) fails every sequence in this
+        // cohort with the error instead of aborting the process.
+        if let Err(msg) = self
+            .record_eval_outcome(mlxcel_core::try_eval(&raw_logits).map_err(|e| e.to_string()))
+        {
+            for seq in seqs {
+                self.abort_sequence(seq, &msg);
+            }
+            self.eval_failures_exhausted();
+            return;
+        }
         mlxcel_core::clear_memory_cache();
 
         // Process per-sequence results.
@@ -4896,6 +5036,10 @@ impl BatchScheduler {
 
         let eff_len = effective_tokens.len() as i32;
         let input = mlxcel_core::from_slice_i32(&effective_tokens, &[1, eff_len]);
+        // #822: the VLM branch force-evaluates the prefill graph while `caches`
+        // still borrows the cache pool, so capture the fallible eval outcome
+        // here and act on it below once the borrow has ended.
+        let mut prefill_eval: Option<Result<(), String>> = None;
         let logits = {
             let caches = match self.cache_pool.get_caches_mut(seq.seq_id) {
                 Some(c) => c,
@@ -4920,7 +5064,8 @@ impl BatchScheduler {
                             caches,
                             effective_mask,
                         );
-                        mlxcel_core::eval(&logits);
+                        prefill_eval =
+                            Some(mlxcel_core::try_eval(&logits).map_err(|e| e.to_string()));
                         self.model.after_prefill();
                         logits
                     }
@@ -4959,6 +5104,17 @@ impl BatchScheduler {
                 raw_logits
             }
         };
+
+        // #822: if the VLM prefill eval threw, fail just this request and, if the
+        // backend has failed too many times in a row, shut the scheduler down.
+        if let Some(outcome) = prefill_eval
+            && let Err(msg) = self.record_eval_outcome(outcome)
+        {
+            self.abort_sequence(seq, &msg);
+            self.eval_failures_exhausted();
+            return;
+        }
+
         self.sync_sequence_storage(seq.seq_id);
 
         // H2: enforce the `--max-kv-size` cap at the end of a
@@ -5042,6 +5198,11 @@ impl BatchScheduler {
 
         let eff_len = eff_chunk.len() as i32;
         let input = mlxcel_core::from_slice_i32(&eff_chunk, &[1, eff_len]);
+        // #822: this chunk's forward is force-evaluated while `caches` still
+        // borrows the cache pool, so capture the fallible eval outcome and act
+        // on it below once the borrow has ended. Deferred-init: every path that
+        // reaches the check below assigns it exactly once; the others return.
+        let prefill_eval: Option<Result<(), String>>;
         let logits = {
             let caches = match self.cache_pool.get_caches_mut(seq.seq_id) {
                 Some(c) => c,
@@ -5064,7 +5225,8 @@ impl BatchScheduler {
                             caches,
                             effective_mask,
                         );
-                        mlxcel_core::eval(&logits);
+                        prefill_eval =
+                            Some(mlxcel_core::try_eval(&logits).map_err(|e| e.to_string()));
                         self.model.after_prefill();
                         logits
                     }
@@ -5080,7 +5242,7 @@ impl BatchScheduler {
                     caches,
                     pad_mask_opt.as_ref().map(|m| m.as_ref().unwrap()),
                 );
-                mlxcel_core::eval(&logits);
+                prefill_eval = Some(mlxcel_core::try_eval(&logits).map_err(|e| e.to_string()));
                 logits
             };
 
@@ -5093,6 +5255,17 @@ impl BatchScheduler {
             }
             logits
         };
+
+        // #822: if this chunk's eval threw, fail just this request and, if the
+        // backend has failed too many times in a row, shut the scheduler down.
+        if let Some(outcome) = prefill_eval
+            && let Err(msg) = self.record_eval_outcome(outcome)
+        {
+            self.abort_sequence(seq, &msg);
+            self.eval_failures_exhausted();
+            return;
+        }
+
         self.sync_sequence_storage(seq.seq_id);
 
         // H2: enforce the `--max-kv-size` cap after each
@@ -5250,8 +5423,16 @@ impl BatchScheduler {
         );
 
         if !chunk_range.is_terminal {
-            // More chunks remain -- store and yield back to the scheduler
-            mlxcel_core::eval(&logits);
+            // More chunks remain -- store and yield back to the scheduler.
+            // #822: evaluate this chunk through the fallible boundary so an MLX
+            // throw fails just this request rather than aborting the process.
+            if let Err(msg) = self
+                .record_eval_outcome(mlxcel_core::try_eval(&logits).map_err(|e| e.to_string()))
+            {
+                self.abort_sequence(seq, &msg);
+                self.eval_failures_exhausted();
+                return;
+            }
             mlxcel_core::clear_memory_cache();
             self.chunked_prefill_seq = Some(seq);
             return;
@@ -5324,7 +5505,17 @@ impl BatchScheduler {
         seed_rng_if_needed(&seq.sampling);
         let (first_token_arr, adjusted_logits) =
             sample_token_optimized(&logits_for_sampling, &seq.sampling, &token_history);
-        mlxcel_core::eval(&first_token_arr);
+        // #822: force-evaluate the first sampled token through the fallible
+        // boundary. On an MLX throw, fail just this request; the infallible
+        // `item_i32` readback below would otherwise re-trigger the same throw
+        // and abort the process.
+        if let Err(msg) = self
+            .record_eval_outcome(mlxcel_core::try_eval(&first_token_arr).map_err(|e| e.to_string()))
+        {
+            self.abort_sequence(seq, &msg);
+            self.eval_failures_exhausted();
+            return;
+        }
         let sampled_first_token = mlxcel_core::item_i32(&first_token_arr);
 
         // advance the matcher state with the just-sampled token.
@@ -5956,7 +6147,19 @@ impl BatchScheduler {
         // Schedule the sampled tokens (and thus the whole forward graph) without
         // reading them to host, so the GPU runs ahead while the caller returns
         // to the scheduler loop and reads the PREVIOUS step's tokens.
-        mlxcel_core::async_eval(&tokens);
+        //
+        // #822: go through the fallible async boundary. An MLX throw at graph
+        // capture (e.g. a graph-cache abort) is recorded and priming is skipped;
+        // the caller then takes the synchronous decode path, which re-evaluates
+        // through the same guard and fails the affected request(s) cleanly. This
+        // speculative helper never aborts sequences itself, so the failure is
+        // handled once, in the sync path.
+        if self
+            .record_eval_outcome(mlxcel_core::try_async_eval(&tokens).map_err(|e| e.to_string()))
+            .is_err()
+        {
+            return None;
+        }
         Some(DecodeLookahead {
             ids: seq_ids.to_vec(),
             tokens,
@@ -6056,7 +6259,13 @@ impl BatchScheduler {
             // when it was actually issued) back to the synchronous-decode
             // invariant and re-run the tick synchronously.
             if let Some(nla) = &next {
-                mlxcel_core::eval(&nla.tokens);
+                // #822: sync the in-flight step n+1 forward through the fallible
+                // boundary before rewinding. A throw here is recorded but does
+                // not abort inline: the teardown + synchronous re-dispatch below
+                // re-runs the tick and fails the affected request(s) through the
+                // guarded synchronous decode path.
+                let _ = self
+                    .record_eval_outcome(mlxcel_core::try_eval(&nla.tokens).map_err(|e| e.to_string()));
             }
             let positions = lookahead_teardown_positions(next.is_some());
             self.apply_lookahead_trim(&la.ids, positions);
@@ -6172,6 +6381,14 @@ impl BatchScheduler {
         // mixed sampling configs).
         if let Some(params) = self.batched_decode_fused_params(seq_ids) {
             let tokens = batched_fused_sample(&logits, &params);
+            // #822: a completed fused decode is a successful eval (the graph is
+            // evaluated inside `batched_fused_sample`'s host readback), so clear
+            // the consecutive-failure run. This keeps isolated earlier failures
+            // from accumulating toward the shutdown threshold across a long run
+            // when the hot path stays on the fused branch. The fused readback
+            // itself still uses the infallible host-copy path; routing that
+            // through the fallible readback is tracked as a follow-up.
+            self.note_eval_success();
             self.apply_fused_decode_tokens(seq_ids, &tokens);
             return;
         }
@@ -6218,25 +6435,52 @@ impl BatchScheduler {
             // hand it a token outside its allowed set and cause a parser
             // error or silent mis-advance.
             let (sampled_token, token_val, token_lp) = {
+                // Penalty rows use the incremental per-sequence sampler state
+                // (lazily created); the no-penalty rows that reach this per-row
+                // fallback take the original rebuild-free path unchanged.
+                let (token_arr, adjusted_logits) = {
+                    let seq = match self.active_batch.get_mut(seq_id) {
+                        Some(s) => s,
+                        None => continue,
+                    };
+                    if seq.sampling.needs_token_history() {
+                        sample_token_optimized_with_state(
+                            &logits_for_sampling,
+                            &seq.sampling,
+                            &seq.token_history,
+                            &mut seq.sampler_state,
+                        )
+                    } else {
+                        sample_token_optimized(
+                            &logits_for_sampling,
+                            &seq.sampling,
+                            &seq.token_history,
+                        )
+                    }
+                };
+                // #822: force-evaluate the sampled token through the fallible
+                // boundary now that the `active_batch` borrow has ended. On an
+                // MLX throw, fail just this row and keep serving the rest of the
+                // batch; the infallible `item_i32` readback below would otherwise
+                // re-trigger the same throw and abort the process.
+                if let Err(msg) = self
+                    .record_eval_outcome(mlxcel_core::try_eval(&token_arr).map_err(|e| e.to_string()))
+                {
+                    Self::abort_sequence_with_error(
+                        self.active_batch.get_mut(seq_id),
+                        "inference backend",
+                        &msg,
+                    );
+                    if self.eval_failures_exhausted() {
+                        return;
+                    }
+                    continue;
+                }
+                let sampled = mlxcel_core::item_i32(&token_arr);
                 let seq = match self.active_batch.get_mut(seq_id) {
                     Some(s) => s,
                     None => continue,
                 };
-                // Penalty rows use the incremental per-sequence sampler state
-                // (lazily created); the no-penalty rows that reach this per-row
-                // fallback take the original rebuild-free path unchanged.
-                let (token_arr, adjusted_logits) = if seq.sampling.needs_token_history() {
-                    sample_token_optimized_with_state(
-                        &logits_for_sampling,
-                        &seq.sampling,
-                        &seq.token_history,
-                        &mut seq.sampler_state,
-                    )
-                } else {
-                    sample_token_optimized(&logits_for_sampling, &seq.sampling, &seq.token_history)
-                };
-                mlxcel_core::eval(&token_arr);
-                let sampled = mlxcel_core::item_i32(&token_arr);
                 // apply the thinking-budget override first so that
                 // when the override fires (sampled != final_id) we can skip
                 // the log-softmax work entirely. The logprob metadata would
@@ -6560,24 +6804,42 @@ impl BatchScheduler {
         // from the unaltered logits; passing the post-override forced
         // `</think>` would feed it a token outside its allowed set.
         let (sampled_token, token_val, token_lp) = {
-            let seq = self.active_batch.get_mut(seq_id).unwrap();
             // Penalty sequences use the incremental per-sequence sampler state
             // (lazily created); a no-penalty sequence takes the original
             // rebuild-free path unchanged.
-            let (token_arr, adjusted_logits) = if seq.sampling.needs_token_history() {
-                sample_token_optimized_with_state(
-                    &logits_for_sampling,
-                    &seq.sampling,
-                    &seq.token_history,
-                    &mut seq.sampler_state,
-                )
-            } else {
-                sample_token_optimized(&logits_for_sampling, &seq.sampling, &seq.token_history)
+            let (token_arr, adjusted_logits) = {
+                let seq = self.active_batch.get_mut(seq_id).unwrap();
+                if seq.sampling.needs_token_history() {
+                    sample_token_optimized_with_state(
+                        &logits_for_sampling,
+                        &seq.sampling,
+                        &seq.token_history,
+                        &mut seq.sampler_state,
+                    )
+                } else {
+                    sample_token_optimized(&logits_for_sampling, &seq.sampling, &seq.token_history)
+                }
             };
-            mlxcel_core::eval(&token_arr);
+            // #822: force-evaluate the sampled token through the fallible
+            // boundary now that the `active_batch` borrow has ended. On an MLX
+            // throw, fail just this request; the infallible `item_i32` readback
+            // below would otherwise re-trigger the same throw and abort the
+            // process.
+            if let Err(msg) = self
+                .record_eval_outcome(mlxcel_core::try_eval(&token_arr).map_err(|e| e.to_string()))
+            {
+                Self::abort_sequence_with_error(
+                    self.active_batch.get_mut(seq_id),
+                    "inference backend",
+                    &msg,
+                );
+                self.eval_failures_exhausted();
+                return;
+            }
             let sampled = mlxcel_core::item_i32(&token_arr);
+            let seq = self.active_batch.get_mut(seq_id).unwrap();
             // apply the thinking-budget override first so that
-            // when the override fires the log-softmax work is skipped — the
+            // when the override fires the log-softmax work is skipped: the
             // logprob metadata for the sampled token would be dropped anyway
             // (token text and logprob `token_id` must stay consistent), so
             // computing it up-front wastes GPU time on every override step.

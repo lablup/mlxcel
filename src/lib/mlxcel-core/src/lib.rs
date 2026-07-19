@@ -1781,6 +1781,16 @@ mod ffi {
         /// Async eval single array
         fn async_eval(arr: &MlxArray);
 
+        /// Async-eval an array, returning an error instead of throwing.
+        ///
+        /// Same effect as [`async_eval`], but any MLX C++ exception (missing
+        /// stream, shape mismatch, allocation failure, graph-cache abort) is
+        /// caught at the FFI boundary and surfaced as a Rust `Err` rather than
+        /// an uncaught exception that aborts the process. The batch scheduler's
+        /// decode-loop lookahead pipeline uses this so a backend throw fails the
+        /// affected request(s) instead of the whole worker (issue #822).
+        fn try_async_eval(arr: &MlxArray) -> Result<()>;
+
         /// Async eval multiple arrays at once
         unsafe fn async_eval_all(arrays: &[*const MlxArray]);
 

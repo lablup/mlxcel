@@ -26,7 +26,8 @@ use mlxcel_core::cache::SequenceId;
 use mlxcel_core::generate::SamplingConfig;
 
 use super::{
-    effective_decode_storage_backend, resolve_max_batch_prefill_tokens, vlm_prefix_sharing_allowed,
+    MAX_CONSECUTIVE_EVAL_FAILURES, advance_eval_failure_count, effective_decode_storage_backend,
+    eval_failures_reached_limit, resolve_max_batch_prefill_tokens, vlm_prefix_sharing_allowed,
 };
 use crate::server::batch::active::ActiveBatch;
 use crate::server::batch::queue::PrefillQueue;
@@ -1574,4 +1575,79 @@ fn batched_prefill_admits_head_uncapped_budget_always_admits() {
 #[test]
 fn batched_prefill_admits_head_empty_queue_never_admits() {
     assert!(!batched_prefill_admits_head_from_state(2048, None));
+}
+
+// --- #822: decode/prefill eval-failure guard ------------------------------
+//
+// The decode loop routes every on-device eval through the fallible
+// `try_eval` / `try_async_eval` boundary; a caught MLX throw is fed into
+// `record_eval_outcome` (which advances `consecutive_decode_eval_failures`) and
+// then `eval_failures_exhausted` decides whether to keep serving or shut down.
+// `record_eval_outcome` and `eval_failures_exhausted` need a live `LoadedModel`
+// to construct, so the guard's arithmetic and threshold are factored into the
+// pure `advance_eval_failure_count` / `eval_failures_reached_limit` helpers,
+// tested here without a model.
+
+#[test]
+fn advance_eval_failure_count_resets_on_success() {
+    // Any successful eval clears the consecutive-failure run.
+    assert_eq!(advance_eval_failure_count(0, true), 0);
+    assert_eq!(advance_eval_failure_count(7, true), 0);
+    assert_eq!(advance_eval_failure_count(u32::MAX, true), 0);
+}
+
+#[test]
+fn advance_eval_failure_count_increments_on_failure() {
+    // A caught MLX throw bumps the counter by one.
+    assert_eq!(advance_eval_failure_count(0, false), 1);
+    assert_eq!(advance_eval_failure_count(4, false), 5);
+}
+
+#[test]
+fn advance_eval_failure_count_saturates_at_max() {
+    // An extreme failure streak must not wrap around to zero.
+    assert_eq!(advance_eval_failure_count(u32::MAX, false), u32::MAX);
+}
+
+#[test]
+fn eval_failures_reached_limit_is_inclusive_at_threshold() {
+    assert!(!eval_failures_reached_limit(MAX_CONSECUTIVE_EVAL_FAILURES - 1));
+    assert!(eval_failures_reached_limit(MAX_CONSECUTIVE_EVAL_FAILURES));
+    assert!(eval_failures_reached_limit(MAX_CONSECUTIVE_EVAL_FAILURES + 1));
+}
+
+#[test]
+fn consecutive_failures_reach_limit_then_trip_guard() {
+    // Simulate the scheduler's counter across a run of eval outcomes: the guard
+    // must not trip below the threshold and must trip once the threshold-th
+    // consecutive failure lands.
+    let mut count = 0u32;
+    for _ in 0..MAX_CONSECUTIVE_EVAL_FAILURES - 1 {
+        count = advance_eval_failure_count(count, false);
+        assert!(
+            !eval_failures_reached_limit(count),
+            "guard tripped early at count = {count}"
+        );
+    }
+    // The threshold-th consecutive failure trips the guard.
+    count = advance_eval_failure_count(count, false);
+    assert_eq!(count, MAX_CONSECUTIVE_EVAL_FAILURES);
+    assert!(eval_failures_reached_limit(count));
+}
+
+#[test]
+fn a_single_success_prevents_the_guard_from_tripping() {
+    // A successful eval part-way through a failure streak resets the run, so a
+    // transient failure spread across a long generation never accumulates to a
+    // false shutdown.
+    let mut count = 0u32;
+    for _ in 0..MAX_CONSECUTIVE_EVAL_FAILURES - 1 {
+        count = advance_eval_failure_count(count, false);
+    }
+    // One success mid-run clears the accumulated failures.
+    count = advance_eval_failure_count(count, true);
+    assert_eq!(count, 0);
+    // A fresh single failure is nowhere near the threshold.
+    count = advance_eval_failure_count(count, false);
+    assert!(!eval_failures_reached_limit(count));
 }

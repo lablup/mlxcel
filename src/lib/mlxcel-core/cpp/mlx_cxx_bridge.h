@@ -1196,6 +1196,10 @@ void clear_memory_cache();
 
 // Async evaluation
 void async_eval(const MlxArray& arr);
+// Fallible counterpart of `async_eval`; declared `-> Result<()>` in the bridge
+// so cxx catches any thrown MLX exception at the FFI boundary instead of
+// aborting. Body is identical to `async_eval`.
+void try_async_eval(const MlxArray& arr);
 void async_eval_all(rust::Slice<const MlxArray* const> arrays);
 void detach_all(rust::Slice<const MlxArray* const> arrays);
 
