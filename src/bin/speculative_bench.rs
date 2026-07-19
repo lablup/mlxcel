@@ -750,6 +750,14 @@ fn bench_one_pairing(p: &Pairing, prompt: &str, batch: usize, max_tokens: usize)
 fn main() -> Result<()> {
     let args = Args::parse();
 
+    // On a CUDA build, raise MLX_CUDA_GRAPH_CACHE_SIZE before any model load
+    // or MLX op so a long-lived speculative sweep (many distinct draft/verify
+    // graph shapes across pairings and K values) does not abort on MLX's
+    // fatal "Cache thrashing" throw at the default capacity (#818). This is
+    // the canonical workload that surfaced the bug. No-op off CUDA; an
+    // explicit MLX_CUDA_GRAPH_CACHE_SIZE always wins.
+    mlxcel_core::hardware::apply_cuda_graph_cache_default();
+
     let mut rows: Vec<Row> = Vec::new();
     if args.sweep {
         eprintln!(
