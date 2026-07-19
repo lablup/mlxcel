@@ -237,9 +237,9 @@ pub fn apply_cuda_graph_cache_default() {
         // only if another thread reads or writes the environment concurrently.
         // Per this function's documented contract, all in-tree callers invoke it
         // once at the top of `main` right after CLI parsing (src/main.rs,
-        // src/bin/mlx_server.rs, src/bin/bench_decode.rs), before any model load,
-        // MLX op, or worker thread touches the environment, so no other thread is
-        // accessing it here.
+        // src/bin/mlx_server.rs, src/bin/bench_decode.rs,
+        // src/bin/speculative_bench.rs), before any model load, MLX op, or worker
+        // thread touches the environment, so no other thread is accessing it here.
         unsafe { std::env::set_var("MLX_CUDA_GRAPH_CACHE_SIZE", value.to_string()) };
     }
 }

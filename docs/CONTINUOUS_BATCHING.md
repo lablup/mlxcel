@@ -277,6 +277,13 @@ per-hardware gates, `MLXCEL_MTP_SLICE_GRANT_ROUNDS` sizes (or disables) the
 speculative-slot grant rotation, and `MLXCEL_QMV_MULTIROW=0` restores the
 stock per-row CUDA quantized-matmul kernel under the verify.
 
+On CUDA, the same draft/verify shape diversity (multiplied by batch size and
+sequence-length bucket) is also what drives MLX's own captured-graph-cache
+LRU hardest; mlxcel raises `MLX_CUDA_GRAPH_CACHE_SIZE` to 2000 at startup by
+default so a long-lived server does not hit MLX's fatal `Cache thrashing`
+abort at its own 400 default (issue #818, `MLX_CUDA_GRAPH_CACHE_SIZE` in
+[environment-variables.md](environment-variables.md)).
+
 ## Disaggregated serving
 
 Prefill is compute-bound and decode is memory-bound, so a deployment can run them
