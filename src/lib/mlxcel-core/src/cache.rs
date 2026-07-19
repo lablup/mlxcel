@@ -6275,6 +6275,19 @@ impl CachePool {
         let mut pool = pool.borrow_mut();
         let mut state = state_cell.borrow_mut();
 
+        // An empty length list is the model-owned "nothing to mirror yet" no-op.
+        // The model-owned paged families (gemma3/gemma4/llama4/qwen3_5/qwen3_next)
+        // build `target_lens` from their per-sequence `sequence_caches`, which are
+        // empty for a seq whose model-owned caches are not yet populated (a
+        // just-admitted or speculative/draft row before its first model-owned
+        // forward). There is genuinely no shadow paged state to update on this
+        // tick, so return Ok rather than treating it as a length divergence. This
+        // is distinct from a NONZERO count that differs from `state.layers.len()`,
+        // which is a real desync and still errors below.
+        if target_lens.is_empty() {
+            return Ok(());
+        }
+
         if target_lens.len() != state.layers.len() {
             return Err(format!(
                 "CachePool: expected {} paged layer lengths for {id}, got {}",
@@ -8396,6 +8409,68 @@ mod tests {
         assert!(
             !err.contains("no pool tensors to read from"),
             "extract_paged_blocks fell through to the doomed pool read: {err}"
+        );
+    }
+
+    #[test]
+    fn sync_paged_state_with_lengths_empty_is_benign_noop() {
+        // #823 regression. During batched speculative decode the model-owned
+        // paged families build `target_lens` from their per-sequence caches; a
+        // just-admitted or speculative/draft row has empty `sequence_caches`
+        // before its first model-owned forward, so an EMPTY length list reaches
+        // `sync_paged_state_with_lengths`. That is a genuine "nothing to mirror
+        // yet" no-op and must return Ok, not the "expected N ... got 0" Err that
+        // used to spam the log hundreds of times per burst. A NONZERO but wrong
+        // count is still a real desync and must still error.
+        let num_layers = 2usize;
+        let block_size = 4usize;
+        let layout = PagedKvLayout::uniform(num_layers, block_size, block_size * 8).unwrap();
+        let model = ModelOwnedEmptyModel { num_layers };
+
+        let mut pool = CachePool::new(4);
+        let id = pool
+            .allocate_with_layout(&model, Some(SequenceStateLayout::paged_kv_cache(layout)))
+            .unwrap();
+
+        // Populate the shadow block table with a full-count length list so the
+        // per-layer lengths are known and non-zero.
+        pool.sync_paged_state_with_lengths(id, &[6, 6]).unwrap();
+        let lens_before: Vec<usize> = pool
+            .get_paged_state(id)
+            .unwrap()
+            .layers
+            .iter()
+            .map(|layer| layer.len)
+            .collect();
+        assert_eq!(
+            lens_before,
+            vec![6, 6],
+            "premise: shadow lengths must be populated before the empty sync"
+        );
+
+        // The empty length list is the benign no-op: Ok, and the layer lengths
+        // are left exactly as they were.
+        pool.sync_paged_state_with_lengths(id, &[]).unwrap();
+        let lens_after: Vec<usize> = pool
+            .get_paged_state(id)
+            .unwrap()
+            .layers
+            .iter()
+            .map(|layer| layer.len)
+            .collect();
+        assert_eq!(
+            lens_after, lens_before,
+            "an empty length list must leave the shadow layer lengths unchanged"
+        );
+
+        // A NONZERO count that differs from the layer count is a real desync and
+        // must still error, exactly as before.
+        let err = pool
+            .sync_paged_state_with_lengths(id, &[6])
+            .expect_err("a nonzero partial length list must still be rejected");
+        assert!(
+            err.contains(&format!("expected {num_layers} paged layer lengths")),
+            "expected the nonzero-mismatch error, got: {err}"
         );
     }
 
