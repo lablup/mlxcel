@@ -115,9 +115,11 @@ padded batched prefill, the path pads every row to the window's longest prompt
 allocate an `O(B*L^2)` mask that ignores `--prefill-chunk-size`: four 8k prompts
 build a `[4, 8192, 8192]` FP32 mask, about 1 GiB, a spike far above the working
 set of the sequential chunked prefill those prompts take when batched prefill is
-off. On the serving path an allocation failure is an uncatchable MLX C++ throw
-that aborts the whole server, so this is an availability edge the KV budget does
-not model.
+off. On the serving path an allocation failure at this eval is now caught at the
+fallible `try_eval` FFI boundary and fails just the cohort's requests instead of
+aborting the whole server (issue #822); a persistent run of consecutive eval
+failures across cohorts still trips a shutdown guard, so the transient itself
+remains an availability edge the KV budget does not model.
 
 `--max-batch-prefill-tokens N` caps the drained batched window by total padded
 tokens (`rows * L`). Draining stops before a row that would push `rows * L` past

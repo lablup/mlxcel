@@ -1611,9 +1611,13 @@ fn advance_eval_failure_count_saturates_at_max() {
 
 #[test]
 fn eval_failures_reached_limit_is_inclusive_at_threshold() {
-    assert!(!eval_failures_reached_limit(MAX_CONSECUTIVE_EVAL_FAILURES - 1));
+    assert!(!eval_failures_reached_limit(
+        MAX_CONSECUTIVE_EVAL_FAILURES - 1
+    ));
     assert!(eval_failures_reached_limit(MAX_CONSECUTIVE_EVAL_FAILURES));
-    assert!(eval_failures_reached_limit(MAX_CONSECUTIVE_EVAL_FAILURES + 1));
+    assert!(eval_failures_reached_limit(
+        MAX_CONSECUTIVE_EVAL_FAILURES + 1
+    ));
 }
 
 #[test]

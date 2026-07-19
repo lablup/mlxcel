@@ -4906,8 +4906,8 @@ impl BatchScheduler {
         // boundary. This single eval covers the whole batch, so an MLX C++ throw
         // (graph-cache abort, allocation failure) fails every sequence in this
         // cohort with the error instead of aborting the process.
-        if let Err(msg) = self
-            .record_eval_outcome(mlxcel_core::try_eval(&raw_logits).map_err(|e| e.to_string()))
+        if let Err(msg) =
+            self.record_eval_outcome(mlxcel_core::try_eval(&raw_logits).map_err(|e| e.to_string()))
         {
             for seq in seqs {
                 self.abort_sequence(seq, &msg);
@@ -5426,8 +5426,8 @@ impl BatchScheduler {
             // More chunks remain -- store and yield back to the scheduler.
             // #822: evaluate this chunk through the fallible boundary so an MLX
             // throw fails just this request rather than aborting the process.
-            if let Err(msg) = self
-                .record_eval_outcome(mlxcel_core::try_eval(&logits).map_err(|e| e.to_string()))
+            if let Err(msg) =
+                self.record_eval_outcome(mlxcel_core::try_eval(&logits).map_err(|e| e.to_string()))
             {
                 self.abort_sequence(seq, &msg);
                 self.eval_failures_exhausted();
@@ -6272,8 +6272,9 @@ impl BatchScheduler {
                 // not abort inline: the teardown + synchronous re-dispatch below
                 // re-runs the tick and fails the affected request(s) through the
                 // guarded synchronous decode path.
-                let _ = self
-                    .record_eval_outcome(mlxcel_core::try_eval(&nla.tokens).map_err(|e| e.to_string()));
+                let _ = self.record_eval_outcome(
+                    mlxcel_core::try_eval(&nla.tokens).map_err(|e| e.to_string()),
+                );
             }
             let positions = lookahead_teardown_positions(next.is_some());
             self.apply_lookahead_trim(&la.ids, positions);
@@ -6471,9 +6472,9 @@ impl BatchScheduler {
                 // MLX throw, fail just this row and keep serving the rest of the
                 // batch; the infallible `item_i32` readback below would otherwise
                 // re-trigger the same throw and abort the process.
-                if let Err(msg) = self
-                    .record_eval_outcome(mlxcel_core::try_eval(&token_arr).map_err(|e| e.to_string()))
-                {
+                if let Err(msg) = self.record_eval_outcome(
+                    mlxcel_core::try_eval(&token_arr).map_err(|e| e.to_string()),
+                ) {
                     Self::abort_sequence_with_error(
                         self.active_batch.get_mut(seq_id),
                         "inference backend",
