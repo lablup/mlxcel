@@ -6158,6 +6158,14 @@ impl BatchScheduler {
             .record_eval_outcome(mlxcel_core::try_async_eval(&tokens).map_err(|e| e.to_string()))
             .is_err()
         {
+            // #822: `lookahead_forward` already appended one speculative KV
+            // position per sequence before this async schedule. The async eval
+            // threw and was caught, so unwind that append before bailing;
+            // otherwise the untrimmed position desyncs the KV against
+            // `generated_tokens` and the fallback synchronous decode runs on a
+            // corrupted cache. Mirrors the one-position teardown the
+            // stale/bootstrap fallbacks use.
+            self.apply_lookahead_trim(seq_ids, lookahead_teardown_positions(false));
             return None;
         }
         Some(DecodeLookahead {
