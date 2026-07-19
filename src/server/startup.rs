@@ -1651,6 +1651,19 @@ pub async fn start_server(mut startup: ServerStartupConfig) -> Result<()> {
         );
     }
     tracing::info!("Runtime device: {}", runtime.device);
+    // Report the effective CUDA graph-cache LRU capacity now that a tracing
+    // subscriber is installed (initialize_server_logging, above) and the runtime
+    // device is known to be CUDA. `apply_cuda_graph_cache_default` sets the env var
+    // at the top of `main()`, before any subscriber exists, so this is the first
+    // point on the server path where the choice can actually be logged (issue #818).
+    #[cfg(feature = "cuda")]
+    if runtime.device == crate::RuntimeDevice::Gpu {
+        let cache_size =
+            std::env::var("MLX_CUDA_GRAPH_CACHE_SIZE").unwrap_or_else(|_| "unset".to_string());
+        tracing::info!(
+            "CUDA graph-cache LRU capacity: MLX_CUDA_GRAPH_CACHE_SIZE={cache_size} (mlxcel raises MLX's default of 400 to 2000 so long-lived, shape-diverse decode does not hit the cache-thrashing abort from issue #818, unless an operator override is set)"
+        );
+    }
     if let Some(max_memory) = runtime.wired_limit_bytes {
         tracing::info!(
             "Wired memory limit: {:.1} GB",

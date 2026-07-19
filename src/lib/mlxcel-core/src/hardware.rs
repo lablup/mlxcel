@@ -241,9 +241,6 @@ pub fn apply_cuda_graph_cache_default() {
         // MLX op, or worker thread touches the environment, so no other thread is
         // accessing it here.
         unsafe { std::env::set_var("MLX_CUDA_GRAPH_CACHE_SIZE", value.to_string()) };
-        tracing::info!(
-            "Defaulting MLX_CUDA_GRAPH_CACHE_SIZE to {value} so long-lived, shape-diverse CUDA decode does not abort on MLX's cache-thrashing throw (issue #818); an explicit MLX_CUDA_GRAPH_CACHE_SIZE overrides this default"
-        );
     }
 }
 
