@@ -176,7 +176,7 @@ impl LoadedStageExecutor {
         // `start_server`; this idempotent call (guarded by `var_os`) only takes
         // effect if a future pipeline entry ever bypasses that hoist, so the env is
         // set before the stage's first GPU eval regardless.
-        crate::loading::maybe_disable_cuda_graphs_for_gemma4_for_path(model_dir);
+        crate::loading::maybe_disable_cuda_graphs_for_model_for_path(model_dir);
 
         let filter = LayerFilter::from_stage(stage);
         let family = resolve_stage_family(model_dir)?;

@@ -1574,7 +1574,7 @@ pub async fn start_server(mut startup: ServerStartupConfig) -> Result<()> {
     // the remote pipeline stage worker (the `serve_remote_pipeline_stage` branch
     // below) — all load `startup.model_path`. Non-Gemma-4 models and an explicit
     // `MLX_USE_CUDA_GRAPHS` operator override are left untouched.
-    crate::loading::maybe_disable_cuda_graphs_for_gemma4_for_path(&startup.model_path);
+    crate::loading::maybe_disable_cuda_graphs_for_model_for_path(&startup.model_path);
 
     super::media::configure_image_input_limits(super::media::ImageInputLimits {
         max_payload_bytes: startup.max_image_payload_size,

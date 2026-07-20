@@ -358,7 +358,13 @@ pub fn context_window_from_config(config: &serde_json::Value) -> Option<usize> {
     None
 }
 
-/// Force CUDA graph capture off for Gemma 4 checkpoints (issue #688).
+/// Force CUDA graph capture off for model families whose captured decode
+/// collapses on this hardware: Gemma 4 (issue #688) and DeepSeek-V2 (issue
+/// #824). The DeepSeek-V2 case is the same class of hazard: with graph capture
+/// on, the naive-MLA incremental decode degenerates into repeated tokens even
+/// though the identical forward is deterministically coherent with capture off
+/// (verified via `MLX_USE_CUDA_GRAPHS=0`). The Gemma 4 analysis below applies to
+/// that family; DeepSeek-V2 is added to the same lever for the same reason.
 ///
 /// mlxcel's Gemma 4 incremental (single-query, KV-cache) decode has a CUDA-graph
 /// read-before-write hazard: greedy (temperature 0) decode is nondeterministic
@@ -376,11 +382,11 @@ pub fn context_window_from_config(config: &serde_json::Value) -> Option<usize> {
 /// This writes `MLX_USE_CUDA_GRAPHS=0` before the first GPU eval so MLX's
 /// process-wide `use_cuda_graphs()` static (read once, on the first graph-eligible
 /// eval) picks it up. An explicit operator value (either direction) is respected.
-/// Non-Gemma-4 loads are untouched.
+/// Loads of unaffected families are untouched.
 ///
 /// The sound home for this write is the main startup thread, upstream of any
 /// worker spawn: the server path calls
-/// [`maybe_disable_cuda_graphs_for_gemma4_for_path`] from `start_server` before the
+/// [`maybe_disable_cuda_graphs_for_model_for_path`] from `start_server` before the
 /// generation or pipeline worker is created (issue #688 M1/M2 hardening), and the
 /// CLI `generate`/`run` path loads on the main thread. The per-load-site calls that
 /// invoke this helper remain as idempotent defense-in-depth.
@@ -391,14 +397,23 @@ pub fn context_window_from_config(config: &serde_json::Value) -> Option<usize> {
 /// load. If in-process model hot-swap is ever added, a non-Gemma model loaded first
 /// would make a subsequent Gemma 4 `set_var` a silent no-op (the static is already
 /// latched) and this approach would need revisiting.
-fn maybe_disable_cuda_graphs_for_gemma4(model_type: ModelType) {
-    let is_gemma4 = matches!(
-        model_type,
-        ModelType::Gemma4 | ModelType::Gemma4VLM | ModelType::Gemma4Unified
-    );
-    if !is_gemma4 {
+fn maybe_disable_cuda_graphs_for_model(model_type: ModelType) {
+    // Families whose CUDA-graph-captured decode collapses on this hardware and
+    // must run with graph capture off. Gemma 4 (issue #688) and DeepSeek-V2
+    // (issue #824: the naive-MLA decode path degenerates into repeated tokens
+    // under graph capture even though the same forward is coherent with capture
+    // off). Other families (Gemma 3, Qwen 3.5, etc.) are unaffected and keep
+    // capture on.
+    let hazard = match model_type {
+        ModelType::Gemma4 | ModelType::Gemma4VLM | ModelType::Gemma4Unified => {
+            Some(("Gemma 4", "#688"))
+        }
+        ModelType::DeepSeekV2 | ModelType::DeepSeekVL2 => Some(("DeepSeek-V2", "#824")),
+        _ => None,
+    };
+    let Some((family, issue)) = hazard else {
         return;
-    }
+    };
     // Respect an explicit operator override (either direction).
     if std::env::var_os("MLX_USE_CUDA_GRAPHS").is_some() {
         return;
@@ -407,7 +422,7 @@ fn maybe_disable_cuda_graphs_for_gemma4(model_type: ModelType) {
     // Rust 2024 only when another thread runs getenv/setenv concurrently. The
     // authoritative write is hoisted to the main startup thread, upstream of any
     // worker spawn and of the first GPU eval that latches MLX's `use_cuda_graphs`
-    // static: `maybe_disable_cuda_graphs_for_gemma4_for_path` runs in `start_server`
+    // static: `maybe_disable_cuda_graphs_for_model_for_path` runs in `start_server`
     // for every serve path (batched, legacy, tensor-parallel, XLA, in-process and
     // remote pipeline-parallel), and the CLI `generate`/`run` path loads on the main
     // thread. On the server path this per-load-site call runs inside the spawned
@@ -421,13 +436,13 @@ fn maybe_disable_cuda_graphs_for_gemma4(model_type: ModelType) {
     // bring-up.
     unsafe { std::env::set_var("MLX_USE_CUDA_GRAPHS", "0") };
     tracing::info!(
-        "Gemma 4 detected: disabling CUDA graph capture (MLX_USE_CUDA_GRAPHS=0) to \
-         avoid the decode-path graph hazard from issue #688. Set MLX_USE_CUDA_GRAPHS \
+        "{family} detected: disabling CUDA graph capture (MLX_USE_CUDA_GRAPHS=0) to \
+         avoid the decode-path graph hazard from issue {issue}. Set MLX_USE_CUDA_GRAPHS \
          explicitly to override."
     );
 }
 
-/// Path-based entry to [`maybe_disable_cuda_graphs_for_gemma4`] for the main-thread
+/// Path-based entry to [`maybe_disable_cuda_graphs_for_model`] for the main-thread
 /// hoist (issue #688 M1/M2 hardening).
 ///
 /// Peeks the on-disk model type and, for a Gemma 4 checkpoint, performs the
@@ -436,10 +451,10 @@ fn maybe_disable_cuda_graphs_for_gemma4(model_type: ModelType) {
 /// detection error (unreadable or absent `config.json`) is a no-op, which preserves
 /// the baseline for non-model paths and defers to the per-load-site calls. Kept as a
 /// thin wrapper so the Gemma-4 detection, operator-override guard, idempotency, and
-/// logging all stay in the single [`maybe_disable_cuda_graphs_for_gemma4`] helper.
-pub(crate) fn maybe_disable_cuda_graphs_for_gemma4_for_path(model_path: &Path) {
+/// logging all stay in the single [`maybe_disable_cuda_graphs_for_model`] helper.
+pub(crate) fn maybe_disable_cuda_graphs_for_model_for_path(model_path: &Path) {
     if let Ok(model_type) = get_model_type(model_path) {
-        maybe_disable_cuda_graphs_for_gemma4(model_type);
+        maybe_disable_cuda_graphs_for_model(model_type);
     }
 }
 
@@ -448,7 +463,7 @@ pub fn load_model(model_path: &Path) -> Result<(LoadedModel, MlxcelTokenizer)> {
     let model_path = resolve_model_dir(model_path);
     let model_path = model_path.as_path();
     let model_type = get_model_type(model_path)?;
-    maybe_disable_cuda_graphs_for_gemma4(model_type);
+    maybe_disable_cuda_graphs_for_model(model_type);
 
     // Whisper is an encoder-decoder ASR model, not a text generator. It is
     // wired into the speech-to-text audio endpoints at server startup rather
@@ -555,7 +570,7 @@ pub fn load_model_with_tensor_parallel(
     let model_path = resolve_model_dir(model_path);
     let model_path = model_path.as_path();
     let support = validate_supported_runtime(model_path, shard_config.clone(), adapter_path)?;
-    maybe_disable_cuda_graphs_for_gemma4(support.summary.model_type);
+    maybe_disable_cuda_graphs_for_model(support.summary.model_type);
     let model = match support.summary.model_type {
         ModelType::Llama | ModelType::Qwen2 => LoadedModel::TensorParallelLlama(
             TensorParallelLlamaModel::from_model_dir(model_path, shard_config.clone())?,
@@ -599,7 +614,7 @@ pub fn load_model_with_adapter(
     let model_path = resolve_model_dir(model_path);
     let model_path = model_path.as_path();
     // Disable CUDA graphs for Gemma 4 before any weight realisation (issue #688).
-    maybe_disable_cuda_graphs_for_gemma4(get_model_type(model_path)?);
+    maybe_disable_cuda_graphs_for_model(get_model_type(model_path)?);
     // Load base weights
     let base_weights = mlxcel_core::weights::load_weights_from_dir(model_path)
         .map_err(|e| anyhow::anyhow!("{}", e))?;
@@ -617,7 +632,7 @@ pub fn load_model_with_adapter(
 /// Build a model from pre-loaded weights (used by adapter loading)
 fn load_model_from_weights(model_path: &Path, weights: &mut WeightMap) -> Result<LoadedModel> {
     let model_type = get_model_type(model_path)?;
-    maybe_disable_cuda_graphs_for_gemma4(model_type);
+    maybe_disable_cuda_graphs_for_model(model_type);
     let config_path = model_path.join("config.json");
     let config_str = std::fs::read_to_string(&config_path)?;
     let config_str = sanitize_config_json(&config_str);
