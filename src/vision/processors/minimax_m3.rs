@@ -267,7 +267,7 @@ mod tests {
         mlxcel_core::eval(&pixel_values);
         let shape = mlxcel_core::array_shape(&pixel_values);
         let (t, gh, gw) = grid[0];
-        let expected_rows = (t * gh * gw) as i32;
+        let expected_rows = t * gh * gw;
         assert_eq!(shape, vec![expected_rows, 1176]);
     }
 
