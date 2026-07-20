@@ -168,8 +168,9 @@ impl LoadedStageExecutor {
             stage.stage_index
         );
 
-        // Issue #688 (M2 hardening): defense-in-depth CUDA-graph disable for a
-        // Gemma 4 pipeline stage, mirroring the non-PP backend-seam load sites.
+        // Issue #688 (M2 hardening), extended to DeepSeek-V2 by issue #824:
+        // defense-in-depth CUDA-graph disable for a hazard-family pipeline stage,
+        // mirroring the non-PP backend-seam load sites.
         // Both the in-process and the remote-process pipeline loaders reach this
         // common stage-load chokepoint before any stage weights are realised. The
         // authoritative env write already happens on the main startup thread in

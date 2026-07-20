@@ -393,10 +393,11 @@ pub fn context_window_from_config(config: &serde_json::Value) -> Option<usize> {
 ///
 /// Invariant: this env-based lever assumes one model per process. The server is
 /// single-model-per-process today (no in-process hot-swap in `start_server`), so a
-/// non-Gemma eval never latches `use_cuda_graphs = true` before a later Gemma 4
-/// load. If in-process model hot-swap is ever added, a non-Gemma model loaded first
-/// would make a subsequent Gemma 4 `set_var` a silent no-op (the static is already
-/// latched) and this approach would need revisiting.
+/// non-hazard-family eval never latches `use_cuda_graphs = true` before a later
+/// hazard-family (Gemma 4 or DeepSeek-V2) load. If in-process model hot-swap is
+/// ever added, a non-hazard-family model loaded first would make a subsequent
+/// hazard-family `set_var` a silent no-op (the static is already latched) and this
+/// approach would need revisiting.
 fn maybe_disable_cuda_graphs_for_model(model_type: ModelType) {
     // Families whose CUDA-graph-captured decode collapses on this hardware and
     // must run with graph capture off. Gemma 4 (issue #688) and DeepSeek-V2
