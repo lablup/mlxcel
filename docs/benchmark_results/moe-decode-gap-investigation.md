@@ -85,7 +85,28 @@ fusion they largely collapse into adjacent kernels. This is the same class as
 the prior Gemma3n bf16 decode-gap investigation, where removing the AsType excess
 measured only ~+2.6%; the static node count overstates GPU kernels.
 
-## 4. Dense gaps (#269): same overhead, milder
+## 4. Nemotron-H intra-MoE attribution (#284)
+
+`fused_moe_forward` already owns the complete Nemotron-H MoE graph: router scoring and top-k selection, routed fc1/relu²/fc2, score-weighted combine, and the always-on shared up/relu²/down expert. The remaining useful profiling boundary is therefore inside that C++ graph, not another Rust-to-C++ fusion boundary.
+
+Set `MLXCEL_PROFILE_NEMOTRON_MOE=1` to force evaluation after each of those four phases. Each MoE call emits:
+
+```text
+[MLXCEL_PROFILE_NEMOTRON_MOE] path=gather-qmm tokens=1 top_k=6 router_ms=... routed_ms=... combine_ms=... shared_ms=... total_ms=...
+```
+
+The values are attribution measurements, not production throughput: every phase boundary synchronizes the device, so the sum includes repeated scheduling and synchronization costs. Compare phase shares within the same run, then re-run the normal unsynchronized benchmark after changing any lever. The experimental `MLXCEL_FUSED_MOE_RELU2` path folds score multiplication into its down kernel, so its `routed_ms` includes that multiply and `combine_ms` covers only the final top-k reduction.
+
+Reproduce on the M1 Ultra with a warmed release binary:
+
+```bash
+cargo build --release --features metal,accelerate --bin mlxcel-bench-decode
+MLXCEL_PROFILE_NEMOTRON_MOE=1 ./target/release/mlxcel-bench-decode --model ./models/nemotron-h-30b-4bit --prompt "Hello, how are you today?" --max-tokens 16 --warmup-tokens 4
+```
+
+This instrumentation sizes the remaining levers without claiming a speedup. The prior squared-ReLU kernel is neutral because it replaces only the routed fc1/fc2 GEMVs, while the larger always-on shared expert and router/combine stay unchanged. A dense shared-expert fusion or a router/gather/combine kernel should be built only if this phase split shows enough time to recover; each candidate must then pass greedy temp-0 parity and an unsynchronized `mlxcel-bench-decode` A/B against mlx-lm.
+
+## 5. Dense gaps (#269): same overhead, milder
 
 apertus (0.83×) and seed_oss (0.84×) have no model-specific bug. llama-8b is at
 parity, qwen3-8b (QK-norm) is 0.90×, apertus (QK-norm + xIELU) 0.83×. mlxcel's
@@ -94,7 +115,7 @@ runtime `softplus` on GPU arrays). The residual tracks the per-layer extra
 small-op count, the same per-op execution overhead as the MoE case, just
 smaller. Subsumed by #268.
 
-## 5. Conclusion and realistic paths
+## 6. Conclusion and realistic paths
 
 The remaining gap is a single underlying phenomenon: mlxcel's per-op execution
 overhead, amplified by op density. Vanilla dense ≈ parity; QK-norm/xIELU add a

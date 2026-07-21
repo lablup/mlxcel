@@ -9,6 +9,8 @@
 // header is backend-agnostic: builds without CUDA link the no_cuda stub.
 #include "mlx/backend/cuda/cuda.h"
 
+#include <chrono>
+
 namespace mlx_cxx {
 
 // ── BitLinear ternary matmul (BitNet b1.58) ────────────────────────────────
@@ -1093,6 +1095,21 @@ std::unique_ptr<MlxArray> fused_moe_forward(
 ) {
     using namespace mlx::core;
 
+    // Forced evaluation is intentionally opt-in: it serializes each phase and
+    // therefore measures attribution, not production throughput. Cache the
+    // switch so the normal decode path pays only this predictable branch.
+    static const bool profile_nemotron_moe =
+        std::getenv("MLXCEL_PROFILE_NEMOTRON_MOE") != nullptr;
+    using ProfileClock = std::chrono::steady_clock;
+    ProfileClock::time_point profile_checkpoint;
+    double router_ms = 0.0;
+    double routed_ms = 0.0;
+    double combine_ms = 0.0;
+    double shared_ms = 0.0;
+    if (profile_nemotron_moe) {
+        profile_checkpoint = ProfileClock::now();
+    }
+
     // 1. Gate: compiled sigmoid + topk + compiled normalize + scale
     auto gates = matmul(x.inner, transpose(gate_weight.inner));
 
@@ -1113,6 +1130,16 @@ std::unique_ptr<MlxArray> fused_moe_forward(
     } else {
         topk_scores = multiply(topk_scores, array(scaling_factor));
     }
+    if (profile_nemotron_moe) {
+        // Both outputs are consumed below. Evaluating them at the boundary
+        // charges gate matmul, scoring, top-k, and normalization to the router.
+        topk_indices.eval();
+        topk_scores.eval();
+        auto now = ProfileClock::now();
+        router_ms = std::chrono::duration<double, std::milli>(
+            now - profile_checkpoint).count();
+        profile_checkpoint = now;
+    }
 
     // 2. SwitchMLP: expand + gather_qmm(fc1) + relu² + gather_qmm(fc2) + squeeze.
     auto x_shape = x.inner.shape();
@@ -1121,11 +1148,12 @@ std::unique_ptr<MlxArray> fused_moe_forward(
     // Experimental fused squared-ReLU decode path (#268), behind its own flag
     // MLXCEL_FUSED_MOE_RELU2 (NOT the default MLXCEL_FUSED_MOE): fc1 + relu² ->
     // act_g[K, Dff], then reuse moe_down for fc2 * score. Correct and
-    // byte-identical, but measured performance-NEUTRAL on nemotron-h-30b (its
-    // decode is dominated by Mamba2 + attention, so the MoE expert GEMV is a
-    // small, already-efficient slice). Kept wired behind the dedicated flag so
-    // the kernel stays referenceable for a future squared-ReLU model whose
-    // decode is MoE-dominated; the default path below stays on gather_qmm.
+    // byte-identical, but measured performance-NEUTRAL on nemotron-h-30b. MoE
+    // is its largest block, but this kernel replaces only the already-efficient
+    // routed fc1/fc2 GEMVs; the router, shared expert, and combine remain. Kept
+    // wired behind the dedicated flag so it stays referenceable for a model
+    // where that narrower routed-expert slice dominates; the default path below
+    // stays on gather_qmm.
     bool fused_relu2 = x_shape[0] == 1 && (bits == 4 || bits == 8) &&
         std::getenv("MLXCEL_FUSED_MOE_RELU2");
     array result = x.inner;  // placeholder; overwritten in both branches
@@ -1169,7 +1197,23 @@ std::unique_ptr<MlxArray> fused_moe_forward(
             std::make_tuple(32, round_up(din, sgy), k),
             std::make_tuple(32, sgy, 1),
             ta, std::nullopt, false, {});
+        if (profile_nemotron_moe) {
+            // moe_down folds score multiplication into fc2 on this experimental
+            // path. routed_ms includes it; combine_ms is the final K reduction.
+            rB[0].eval();
+            auto now = ProfileClock::now();
+            routed_ms = std::chrono::duration<double, std::milli>(
+                now - profile_checkpoint).count();
+            profile_checkpoint = now;
+        }
         result = reshape(sum(rB[0], 0, false), {1, din});
+        if (profile_nemotron_moe) {
+            result.eval();
+            auto now = ProfileClock::now();
+            combine_ms = std::chrono::duration<double, std::milli>(
+                now - profile_checkpoint).count();
+            profile_checkpoint = now;
+        }
     } else {
         auto x_exp = reshape(x.inner, {x_shape[0], 1, 1, x_shape[1]});
 
@@ -1184,6 +1228,13 @@ std::unique_ptr<MlxArray> fused_moe_forward(
             std::nullopt, topk_indices,
             true, group_size, bits, "affine", false);
         h = squeeze(h, -2);  // [tokens, top_k, hidden]
+        if (profile_nemotron_moe) {
+            h.eval();
+            auto now = ProfileClock::now();
+            routed_ms = std::chrono::duration<double, std::milli>(
+                now - profile_checkpoint).count();
+            profile_checkpoint = now;
+        }
 
         // 3. Score weighting: weighted sum over experts, cast back to input dtype
         // Cast scores to h's dtype to avoid mixed float32×float16 multiply
@@ -1191,6 +1242,13 @@ std::unique_ptr<MlxArray> fused_moe_forward(
         auto scores_exp = reshape(topk_scores, {topk_scores.shape()[0], top_k, 1});
         auto scores_cast = astype(scores_exp, h.dtype());
         result = astype(sum(multiply(h, scores_cast), -2, false), x.inner.dtype());
+        if (profile_nemotron_moe) {
+            result.eval();
+            auto now = ProfileClock::now();
+            combine_ms = std::chrono::duration<double, std::milli>(
+                now - profile_checkpoint).count();
+            profile_checkpoint = now;
+        }
     }
 
     // 4. Optional shared expert
@@ -1205,6 +1263,27 @@ std::unique_ptr<MlxArray> fused_moe_forward(
             shared_down_biases ? std::optional(shared_down_biases->inner) : std::nullopt,
             true, group_size, bits);
         result = add(result, shared_h);
+        if (profile_nemotron_moe) {
+            result.eval();
+            auto now = ProfileClock::now();
+            shared_ms = std::chrono::duration<double, std::milli>(
+                now - profile_checkpoint).count();
+            profile_checkpoint = now;
+        }
+    }
+
+    if (profile_nemotron_moe) {
+        std::cerr
+            << "[MLXCEL_PROFILE_NEMOTRON_MOE] path="
+            << (fused_relu2 ? "fused-relu2" : "gather-qmm")
+            << " tokens=" << x_shape[0]
+            << " top_k=" << top_k
+            << " router_ms=" << router_ms
+            << " routed_ms=" << routed_ms
+            << " combine_ms=" << combine_ms
+            << " shared_ms=" << shared_ms
+            << " total_ms=" << (router_ms + routed_ms + combine_ms + shared_ms)
+            << std::endl;
     }
 
     return std::make_unique<MlxArray>(std::move(result));
