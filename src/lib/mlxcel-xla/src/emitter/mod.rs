@@ -70,8 +70,11 @@ pub(crate) use builder::{
 };
 #[allow(unused_imports)]
 pub(crate) use model::{
+    PREFILL_EMBEDDINGS_MASKED_VALUE, PrefillEmbeddingsDType, PrefillEmbeddingsInputMetadata,
     emit_decode, emit_decode_batched, emit_decode_ragged, emit_decode_ragged_with,
-    emit_decode_with, emit_moe_probe, emit_moe_probe_with, emit_prefill, emit_prefill_with,
+    emit_decode_with, emit_moe_probe, emit_moe_probe_with, emit_prefill, emit_prefill_embeddings,
+    emit_prefill_embeddings_with, emit_prefill_with, validate_prefill_embeddings_attention_bias,
+    validate_prefill_embeddings_metadata,
 };
 
 #[cfg(test)]
@@ -734,6 +737,170 @@ mod tests {
             .expect("write prefill_logits.mlir");
         std::fs::write(dir.join("decode_logits.mlir"), emit_decode(&cfg, false))
             .expect("write decode_logits.mlir");
+    }
+
+    /// Opt-in graph dump for the real IREE token-vs-embeddings parity fixture.
+    /// Both modules are emitted from the exact same config and precision so the
+    /// fixture can feed one weight set to each and compare logits plus every K/V
+    /// element. This stays pure Rust; the Python harness owns IREE compilation and
+    /// execution.
+    #[test]
+    #[ignore = "opt-in: writes token and embeddings prefill graphs for IREE parity"]
+    fn dump_prefill_embeddings_parity_graphs() {
+        let cfg_path = std::env::var("MLXCEL_DUMP_CONFIG")
+            .expect("set MLXCEL_DUMP_CONFIG to a config.json path");
+        let dir = std::env::var("MLXCEL_DUMP_DIR").expect("set MLXCEL_DUMP_DIR");
+        let text = std::fs::read_to_string(&cfg_path).expect("read MLXCEL_DUMP_CONFIG");
+        let cfg = Config::from_json_str(&text).expect("parse config.json");
+        let dir = std::path::Path::new(&dir);
+        std::fs::write(dir.join("prefill_logits.mlir"), emit_prefill(&cfg, false))
+            .expect("write token prefill graph");
+        std::fs::write(
+            dir.join("prefill_embeddings_logits.mlir"),
+            emit_prefill_embeddings(&cfg, false),
+        )
+        .expect("write embeddings prefill graph");
+    }
+
+    #[test]
+    fn prefill_embeddings_schema_bypasses_lookup_and_embedding_scale() {
+        let cfg = gemma2_like(None);
+        let lp = cfg.context_capacity;
+        let token = emit_prefill(&cfg, false);
+        let embeddings = emit_prefill_embeddings(&cfg, false);
+        let sampled_embeddings = emit_prefill_embeddings(&cfg, true);
+
+        assert!(token.starts_with("module @prefill {"));
+        assert!(embeddings.starts_with("module @prefill_embeddings {"));
+        assert!(embeddings.contains(&format!("tensor<{lp}x8xf32> loc(\"embeddings\")")));
+        assert!(embeddings.contains(&format!("tensor<{lp}xi32> loc(\"positions\")")));
+        assert!(embeddings.contains("tensor<i32> loc(\"real_len\")"));
+        assert!(embeddings.contains(&format!("tensor<{lp}x{lp}xf32> loc(\"attention_bias\")")));
+        assert!(!embeddings.contains("loc(\"tokens\")"));
+        assert!(
+            sampled_embeddings.contains(&format!(
+                ") -> (tensor<i32>, tensor<4x{lp}x1x6xf32>, tensor<4x{lp}x1x6xf32>)"
+            )),
+            "sampled embeddings prefill keeps the scalar argmax plus K/V return contract"
+        );
+
+        let ordered = [
+            "loc(\"embeddings\")",
+            "loc(\"positions\")",
+            "loc(\"real_len\")",
+            "loc(\"attention_bias\")",
+        ];
+        let offsets: Vec<_> = ordered
+            .iter()
+            .map(|needle| embeddings.find(needle).expect("schema arg present"))
+            .collect();
+        assert!(
+            offsets.windows(2).all(|w| w[0] < w[1]),
+            "runtime inputs keep their documented deterministic order"
+        );
+
+        assert!(
+            token.contains("\"stablehlo.gather\"(%arg0,"),
+            "token prefill gathers the embedding table"
+        );
+        assert!(
+            !embeddings.contains("\"stablehlo.gather\"(%arg0,"),
+            "embeddings prefill must not gather the embedding table"
+        );
+        let scale_hex = format!("0x{:08X}", cfg.embed_normalizer().to_bits());
+        assert!(
+            token.contains(&scale_hex),
+            "token prefill emits Gemma scaling"
+        );
+        assert!(
+            !embeddings.contains(&scale_hex),
+            "post-scale embeddings must not be scaled a second time"
+        );
+    }
+
+    #[test]
+    fn prefill_embeddings_preserves_tied_and_untied_head_weights() {
+        let tied = qwen_like(false);
+        let tied_mlir = emit_prefill_embeddings(&tied, false);
+        assert!(tied_mlir.contains("loc(\"params['embed']\")"));
+        assert!(!tied_mlir.contains("params['lm_head']"));
+        let tied_tail = tied_mlir
+            .lines()
+            .rfind(|line| line.contains("stablehlo.dot_general"))
+            .expect("tied logits dot");
+        assert!(tied_tail.contains("%arg0"), "tied logits reuse embed");
+
+        let mut untied = tied;
+        untied.tie_word_embeddings = false;
+        let untied_mlir = emit_prefill_embeddings(&untied, false);
+        assert!(untied_mlir.contains("loc(\"params['embed']\")"));
+        assert!(untied_mlir.contains("loc(\"params['lm_head']\")"));
+        let untied_tail = untied_mlir
+            .lines()
+            .rfind(|line| line.contains("stablehlo.dot_general"))
+            .expect("untied logits dot");
+        assert!(untied_tail.contains("%arg2"), "untied logits use lm_head");
+    }
+
+    #[test]
+    fn prefill_embeddings_metadata_and_bias_fail_closed() {
+        let cfg = qwen_like(false);
+        let lp = cfg.context_capacity;
+        let valid = PrefillEmbeddingsInputMetadata::canonical(&cfg);
+        validate_prefill_embeddings_metadata(&cfg, &valid).expect("canonical metadata");
+
+        let invalid = [
+            PrefillEmbeddingsInputMetadata {
+                embeddings_shape: [lp - 1, cfg.hidden],
+                ..valid
+            },
+            PrefillEmbeddingsInputMetadata {
+                embeddings_shape: [lp, cfg.hidden + 1],
+                ..valid
+            },
+            PrefillEmbeddingsInputMetadata {
+                embeddings_dtype: PrefillEmbeddingsDType::F16,
+                ..valid
+            },
+            PrefillEmbeddingsInputMetadata {
+                positions_shape: [lp - 1],
+                ..valid
+            },
+            PrefillEmbeddingsInputMetadata {
+                attention_bias_shape: [lp, lp - 1],
+                ..valid
+            },
+            PrefillEmbeddingsInputMetadata {
+                attention_bias_dtype: PrefillEmbeddingsDType::Bf16,
+                ..valid
+            },
+            PrefillEmbeddingsInputMetadata {
+                real_len: 0,
+                ..valid
+            },
+            PrefillEmbeddingsInputMetadata {
+                real_len: lp + 1,
+                ..valid
+            },
+        ];
+        for metadata in invalid {
+            assert!(
+                validate_prefill_embeddings_metadata(&cfg, &metadata).is_err(),
+                "invalid metadata must fail: {metadata:?}"
+            );
+        }
+
+        let mut bias = vec![PREFILL_EMBEDDINGS_MASKED_VALUE; lp * lp];
+        bias[0] = 0.0;
+        validate_prefill_embeddings_attention_bias(&cfg, &bias).expect("canonical finite bias");
+        for invalid_value in [f32::NEG_INFINITY, f32::NAN, -1.0] {
+            bias[17] = invalid_value;
+            assert!(
+                validate_prefill_embeddings_attention_bias(&cfg, &bias).is_err(),
+                "invalid bias value {invalid_value} must fail"
+            );
+        }
+        assert!(validate_prefill_embeddings_attention_bias(&cfg, &bias[..bias.len() - 1]).is_err());
     }
 
     /// Plain RoPE base frequencies are the textbook `1 / theta^(2i/head_dim)`

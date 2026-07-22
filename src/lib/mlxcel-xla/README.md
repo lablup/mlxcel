@@ -152,6 +152,39 @@ not fuse the in-graph dequant into the matmul on CUDA, so it regresses throughpu
 (see "int8 packed dequant on GB10 / CUDA" below). This is a transferable,
 correctness-first lever; it does not close the gap to MLX (see the perf note above).
 
+### Prefill from embeddings
+
+The emitter exposes a second, non-overloaded StableHLO module named
+`prefill_embeddings.main`. It begins at the shared transformer stack and returns
+the same logits/argmax and per-layer K/V tensors as `prefill.main`; the existing
+token module remains byte-identical at the compatibility capacity. `Lp` is the
+configured static context capacity for both modules, not a separate embeddings
+limit. Runtime and C-ABI wiring is intentionally a separate integration step.
+
+After the model weights, the embeddings entry has one deterministic argument
+order: `embeddings`, `positions`, `real_len`, `attention_bias`.
+
+- `embeddings` is `[Lp, hidden_size]` f32 and contains post-token-embedding-scale hidden states. The graph performs no token lookup and applies neither Gemma's `sqrt(hidden_size)` scale nor an architecture embedding multiplier again.
+- `positions` is `[Lp]` i32 and retains the existing one-dimensional text position contract. M-RoPE uses a later, distinct schema rather than changing this argument's meaning.
+- `real_len` is an i32 scalar in `1..=Lp` and selects the output row at `real_len - 1`.
+- `attention_bias` is `[Lp, Lp]` f32. `0.0` means allowed and the finite value `-1e30` means masked; NaN, infinity, and intermediate additive values are rejected. The caller supplies the complete static bucket, including padding rows. Token-parity padding retains the ordinary causal pattern on padded rows while real rows mask future and padded keys.
+
+`PrefillEmbeddingsInputMetadata` and the additive-bias validator provide the
+pre-compilation/invocation checks for hidden size, sequence length, dtypes,
+position/mask shapes, `real_len`, and mask values. The embedding table remains a
+weight argument because tied checkpoints use it as the LM head; untied
+checkpoints continue to consume their dedicated `lm_head` in the same weight
+order.
+
+The pure-Rust structural/golden checks run with `cargo test -p mlxcel-xla --lib`.
+The real execution fixture gathers embeddings from a deterministic tied and
+untied checkpoint, compiles both modules for IREE llvm-cpu, and compares logits
+plus every K/V element across one-token, nonzero-padding, and near-capacity cases:
+
+```bash
+spike/openxla/.venv/bin/python spike/openxla/prefill_embeddings_check.py
+```
+
 ### Scope / limits
 
 - The bundled graphs are authored for **Llama-3.2-1B-Instruct** specifically;

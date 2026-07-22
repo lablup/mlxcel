@@ -24,6 +24,144 @@ use super::config::{Config, NormStyle};
 use super::moe::{self, MoeLayerW, MoeSharedW};
 use super::rope;
 
+/// Canonical finite additive-attention value for a disallowed prefill edge.
+///
+/// The embeddings entry accepts only `0.0` (allowed) and this value (masked).
+/// Negative infinity is deliberately rejected so every caller, compiler target,
+/// and softmax lowering observes the same finite input convention as the existing
+/// token prefill graph.
+pub(crate) const PREFILL_EMBEDDINGS_MASKED_VALUE: f32 = -1e30;
+
+/// Runtime tensor element types understood by the prefill-embeddings schema
+/// validator. The graph currently consumes f32 hidden states and an f32 additive
+/// bias; the other variants exist so callers get an actionable error before IREE
+/// compilation/invocation instead of silently reinterpreting bytes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PrefillEmbeddingsDType {
+    F32,
+    F16,
+    Bf16,
+}
+
+/// Shape/dtype metadata validated before compiling or invoking
+/// `prefill_embeddings.main`.
+///
+/// Argument order after the model weights is stable and deliberately documented
+/// here: `embeddings`, `positions`, `real_len`, `attention_bias`. Positions remain
+/// one-dimensional in this entry; a later M-RoPE entry can add a distinct position
+/// representation without overloading this contract.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct PrefillEmbeddingsInputMetadata {
+    pub embeddings_shape: [usize; 2],
+    pub embeddings_dtype: PrefillEmbeddingsDType,
+    pub positions_shape: [usize; 1],
+    pub attention_bias_shape: [usize; 2],
+    pub attention_bias_dtype: PrefillEmbeddingsDType,
+    pub real_len: usize,
+}
+
+impl PrefillEmbeddingsInputMetadata {
+    /// Metadata for the static context-capacity schema emitted for `c`.
+    pub(crate) fn canonical(c: &Config) -> Self {
+        let lp = c.context_capacity;
+        Self {
+            embeddings_shape: [lp, c.hidden],
+            embeddings_dtype: PrefillEmbeddingsDType::F32,
+            positions_shape: [lp],
+            attention_bias_shape: [lp, lp],
+            attention_bias_dtype: PrefillEmbeddingsDType::F32,
+            real_len: lp,
+        }
+    }
+}
+
+/// Validate the static prefill-from-embeddings input contract before compiling or
+/// invoking the graph.
+///
+/// `real_len` selects the output row but does not alter padded-row computation:
+/// callers provide a complete `[Lp, Lp]` bias for the whole static bucket. For
+/// token-parity padding, padded rows therefore retain the same causal pattern as
+/// ordinary rows, while real rows mask every future/padded key.
+pub(crate) fn validate_prefill_embeddings_metadata(
+    c: &Config,
+    metadata: &PrefillEmbeddingsInputMetadata,
+) -> Result<(), String> {
+    let lp = c.context_capacity;
+    let want_embeddings = [lp, c.hidden];
+    if metadata.embeddings_shape != want_embeddings {
+        return Err(format!(
+            "prefill embeddings shape {:?} does not match required {:?}",
+            metadata.embeddings_shape, want_embeddings
+        ));
+    }
+    if metadata.embeddings_dtype != PrefillEmbeddingsDType::F32 {
+        return Err(format!(
+            "prefill embeddings dtype {:?} is unsupported; expected F32",
+            metadata.embeddings_dtype
+        ));
+    }
+    if metadata.positions_shape != [lp] {
+        return Err(format!(
+            "prefill positions shape {:?} does not match required [{}]",
+            metadata.positions_shape, lp
+        ));
+    }
+    if metadata.attention_bias_shape != [lp, lp] {
+        return Err(format!(
+            "prefill attention-bias shape {:?} does not match required [{}, {}]",
+            metadata.attention_bias_shape, lp, lp
+        ));
+    }
+    if metadata.attention_bias_dtype != PrefillEmbeddingsDType::F32 {
+        return Err(format!(
+            "prefill attention-bias dtype {:?} is unsupported; expected F32",
+            metadata.attention_bias_dtype
+        ));
+    }
+    if !(1..=lp).contains(&metadata.real_len) {
+        return Err(format!(
+            "prefill real_len {} is outside the required range 1..={lp}",
+            metadata.real_len,
+        ));
+    }
+    Ok(())
+}
+
+/// Validate a canonical additive attention-bias payload. Only `0.0` (allowed)
+/// and [`PREFILL_EMBEDDINGS_MASKED_VALUE`] (masked) are accepted; NaN, infinity,
+/// and intermediate additive values are rejected to keep polarity unambiguous.
+pub(crate) fn validate_prefill_embeddings_attention_bias(
+    c: &Config,
+    bias: &[f32],
+) -> Result<(), String> {
+    let expected = c
+        .context_capacity
+        .checked_mul(c.context_capacity)
+        .ok_or_else(|| {
+            format!(
+                "prefill attention-bias size overflows for context capacity {}",
+                c.context_capacity
+            )
+        })?;
+    if bias.len() != expected {
+        return Err(format!(
+            "prefill attention bias has {} elements; expected {expected}",
+            bias.len()
+        ));
+    }
+    if let Some((index, value)) = bias
+        .iter()
+        .copied()
+        .enumerate()
+        .find(|(_, value)| *value != 0.0 && *value != PREFILL_EMBEDDINGS_MASKED_VALUE)
+    {
+        return Err(format!(
+            "prefill attention bias at flat index {index} is {value}; expected only 0 or {}",
+            PREFILL_EMBEDDINGS_MASKED_VALUE
+        ));
+    }
+    Ok(())
+}
 /// Per-layer weight handles (JAX alphabetical order: down, gate, in_ln,
 /// post_ln, up, wk, wo, wq, wv). `bk`/`bq`/`bv` are the q/k/v projection biases,
 /// present only for an architecture with `qkv_bias` (Qwen2); `None` for Llama,
@@ -2341,20 +2479,43 @@ pub fn emit_decode_ragged_with(
 // processed at once over an [Lp] sequence axis with an [Lp,Lp] causal mask, and
 // the returned logit is the row at real_len-1 (the last real prompt token).
 
-/// Prefill arg handles. Weights are identical to decode (same order/locs); the
-/// trailing inputs are tokens/positions/real_len with no caches.
+/// Which stable prefill entry schema to build. The token entry remains unchanged;
+/// the embeddings entry replaces `tokens` with post-scale hidden states and adds
+/// an explicit additive attention bias.
+#[derive(Clone, Copy)]
+enum PrefillInputKind {
+    Tokens,
+    Embeddings,
+}
+
+enum PrefillInput {
+    Tokens(Val),
+    Embeddings { hidden: Val, attention_bias: Val },
+}
+
+/// Prefill arg handles. Weights are identical to decode (same order/locs), which
+/// intentionally retains `params['embed']`: token prefill gathers from it and a
+/// tied embeddings prefill reuses it as the LM head. The trailing schema is:
+///
+/// - token: `tokens`, `positions`, `real_len`;
+/// - embeddings: `embeddings`, `positions`, `real_len`, `attention_bias`.
 struct PrefillArgs {
     embed: Val,
     final_norm: Val,
     final_norm_bias: Option<Val>,
     lm_head: Option<Val>,
     layers: Vec<LayerW>,
-    tokens: Val,
+    input: PrefillInput,
     positions: Val,
     real_len: Val,
 }
 
-fn build_prefill_arg_schema(b: &mut Builder, c: &Config, lp: usize) -> (Vec<ArgDecl>, PrefillArgs) {
+fn build_prefill_arg_schema(
+    b: &mut Builder,
+    c: &Config,
+    lp: usize,
+    input_kind: PrefillInputKind,
+) -> (Vec<ArgDecl>, PrefillArgs) {
     let h = c.hidden;
     let v = c.vocab;
 
@@ -2381,12 +2542,26 @@ fn build_prefill_arg_schema(b: &mut Builder, c: &Config, lp: usize) -> (Vec<ArgD
         layers.push(take_layer_weights(b, &mut decls, &mut idx, c, li));
     }
 
-    let tokens = take_arg(
-        &mut decls,
-        &mut idx,
-        Ty::new(vec![lp], "i32"),
-        "tokens".into(),
-    );
+    let (tokens, embeddings) = match input_kind {
+        PrefillInputKind::Tokens => (
+            Some(take_arg(
+                &mut decls,
+                &mut idx,
+                Ty::new(vec![lp], "i32"),
+                "tokens".into(),
+            )),
+            None,
+        ),
+        PrefillInputKind::Embeddings => (
+            None,
+            Some(take_arg(
+                &mut decls,
+                &mut idx,
+                Ty::f32(vec![lp, h]),
+                "embeddings".into(),
+            )),
+        ),
+    };
     let positions = take_arg(
         &mut decls,
         &mut idx,
@@ -2394,6 +2569,19 @@ fn build_prefill_arg_schema(b: &mut Builder, c: &Config, lp: usize) -> (Vec<ArgD
         "positions".into(),
     );
     let real_len = take_arg(&mut decls, &mut idx, Ty::scalar("i32"), "real_len".into());
+    let input = match (tokens, embeddings) {
+        (None, Some(hidden)) => PrefillInput::Embeddings {
+            hidden,
+            attention_bias: take_arg(
+                &mut decls,
+                &mut idx,
+                Ty::f32(vec![lp, lp]),
+                "attention_bias".into(),
+            ),
+        },
+        (Some(tokens), None) => PrefillInput::Tokens(tokens),
+        _ => unreachable!("each prefill schema has exactly one input representation"),
+    };
 
     (
         decls,
@@ -2403,7 +2591,7 @@ fn build_prefill_arg_schema(b: &mut Builder, c: &Config, lp: usize) -> (Vec<ArgD
             final_norm_bias,
             lm_head,
             layers,
-            tokens,
+            input,
             positions,
             real_len,
         },
@@ -2493,20 +2681,53 @@ pub fn emit_prefill(c: &Config, sample: bool) -> String {
 }
 
 pub fn emit_prefill_with(c: &Config, sample: bool, precision: Precision) -> String {
+    emit_prefill_module(c, sample, precision, PrefillInputKind::Tokens)
+}
+
+/// Emit the distinct prefill-from-embeddings StableHLO module at the ambient
+/// precision. The input hidden states are already post-token-embedding-scale;
+/// this entry performs neither a token gather nor [`scale_embedding`].
+pub(crate) fn emit_prefill_embeddings(c: &Config, sample: bool) -> String {
+    emit_prefill_embeddings_with(c, sample, precision_from_env())
+}
+
+/// Emit `prefill_embeddings.main` at an explicit contraction precision.
+pub(crate) fn emit_prefill_embeddings_with(
+    c: &Config,
+    sample: bool,
+    precision: Precision,
+) -> String {
+    emit_prefill_module(c, sample, precision, PrefillInputKind::Embeddings)
+}
+
+fn emit_prefill_module(
+    c: &Config,
+    sample: bool,
+    precision: Precision,
+    input_kind: PrefillInputKind,
+) -> String {
     let lp = c.context_capacity;
     let mut b = Builder::new().with_precision(precision);
-    let (decls, a) = build_prefill_arg_schema(&mut b, c, lp);
+    let (decls, a) = build_prefill_arg_schema(&mut b, c, lp, input_kind);
     let k = emit_consts(&mut b, c);
 
     let h = c.hidden;
     let d = c.head_dim;
     let nkv = c.n_kv;
 
-    // --- head: embed gather, per-position rope vectors, [Lp,Lp] causal mask ---
-    let tok_idx = b.reshape(&a.tokens, vec![lp, 1]);
-    let emb = b.gather(&a.embed, &tok_idx); // [Lp, H]
-    let mut x = scale_embedding(&mut b, c, emb, vec![lp, h]);
+    // --- input head ---
+    // Token prefill gathers + applies the architecture's embedding scale. The
+    // embeddings entry consumes already-merged, post-scale hidden states as-is.
+    let mut x = match &a.input {
+        PrefillInput::Tokens(tokens) => {
+            let tok_idx = b.reshape(tokens, vec![lp, 1]);
+            let emb = b.gather(&a.embed, &tok_idx); // [Lp, H]
+            scale_embedding(&mut b, c, emb, vec![lp, h])
+        }
+        PrefillInput::Embeddings { hidden, .. } => hidden.clone(),
+    };
 
+    // --- shared position preparation ---
     let pos_idx = b.reshape(&a.positions, vec![lp, 1]);
     let cos = b.gather(&k.cos_table, &pos_idx); // [Lp, d]
     let sin = b.gather(&k.sin_table, &pos_idx); // [Lp, d]
@@ -2516,28 +2737,55 @@ pub fn emit_prefill_with(c: &Config, sample: bool, precision: Precision) -> Stri
         _ => (None, None),
     };
 
-    // causal mask [Lp, Lp]: query i attends key j iff j <= i -> additive 0/-1e30
-    let irow = b.iota(lp);
-    let row = b.broadcast(&irow, &[0], vec![lp, lp]); // entry[i,j] = i
-    let jcol = b.iota(lp);
-    let col = b.broadcast(&jcol, &[1], vec![lp, lp]); // entry[i,j] = j
-    let le = b.compare("LE", &col, &row, "SIGNED"); // j <= i
-    let zeros = b.broadcast(&k.zero, &[], vec![lp, lp]);
-    let negs = b.broadcast(&k.neg_big, &[], vec![lp, lp]);
-    let cmask = b.select(&le, &zeros, &negs); // [Lp, Lp]
-    // Gemma2 local (sliding-window) mask (issue #495): a local layer keeps key j
-    // for query i iff `i - j < W` (prefill positions are 0..Lp, so the buffer
-    // index equals the position). And it into the causal `cmask` with one more
-    // `select`. Emitted only for a windowed config (Gemma2); reused by every local
-    // layer. No-op on the value when `W >= Lp` (`i - j <= Lp-1 < W`), so a
-    // short-prompt Gemma2 prefill is unchanged.
-    let cmask_local = c.sliding_window.map(|w| {
-        let wc = b.const_i32(w as i32);
-        let wb = b.broadcast(&wc, &[], vec![lp, lp]);
-        let age = b.subtract(&row, &col); // i - j
-        let within = b.compare("LT", &age, &wb, "SIGNED");
-        b.select(&within, &cmask, &negs)
-    });
+    // --- attention-bias preparation ---
+    // Token prefill retains the exact internal causal-mask construction. The
+    // embeddings entry uses the caller's canonical f32 additive bias directly.
+    // For a sliding architecture, the local-layer window is intersected with
+    // either base mask, preserving the architecture invariant without changing
+    // multimodal/global visibility.
+    let (cmask, cmask_local) = match &a.input {
+        PrefillInput::Tokens(_) => {
+            // causal mask [Lp, Lp]: query i attends key j iff j <= i -> additive 0/-1e30
+            let irow = b.iota(lp);
+            let row = b.broadcast(&irow, &[0], vec![lp, lp]); // entry[i,j] = i
+            let jcol = b.iota(lp);
+            let col = b.broadcast(&jcol, &[1], vec![lp, lp]); // entry[i,j] = j
+            let le = b.compare("LE", &col, &row, "SIGNED"); // j <= i
+            let zeros = b.broadcast(&k.zero, &[], vec![lp, lp]);
+            let negs = b.broadcast(&k.neg_big, &[], vec![lp, lp]);
+            let cmask = b.select(&le, &zeros, &negs); // [Lp, Lp]
+            // Gemma2 local (sliding-window) mask (issue #495): a local layer keeps key j
+            // for query i iff `i - j < W` (prefill positions are 0..Lp, so the buffer
+            // index equals the position). And it into the causal `cmask` with one more
+            // `select`. Emitted only for a windowed config (Gemma2); reused by every local
+            // layer. No-op on the value when `W >= Lp` (`i - j <= Lp-1 < W`), so a
+            // short-prompt Gemma2 prefill is unchanged.
+            let cmask_local = c.sliding_window.map(|w| {
+                let wc = b.const_i32(w as i32);
+                let wb = b.broadcast(&wc, &[], vec![lp, lp]);
+                let age = b.subtract(&row, &col); // i - j
+                let within = b.compare("LT", &age, &wb, "SIGNED");
+                b.select(&within, &cmask, &negs)
+            });
+            (cmask, cmask_local)
+        }
+        PrefillInput::Embeddings { attention_bias, .. } => {
+            let cmask = attention_bias.clone();
+            let cmask_local = c.sliding_window.map(|w| {
+                let irow = b.iota(lp);
+                let row = b.broadcast(&irow, &[0], vec![lp, lp]);
+                let jcol = b.iota(lp);
+                let col = b.broadcast(&jcol, &[1], vec![lp, lp]);
+                let wc = b.const_i32(w as i32);
+                let wb = b.broadcast(&wc, &[], vec![lp, lp]);
+                let age = b.subtract(&row, &col);
+                let within = b.compare("LT", &age, &wb, "SIGNED");
+                let negs = b.broadcast(&k.neg_big, &[], vec![lp, lp]);
+                b.select(&within, &cmask, &negs)
+            });
+            (cmask, cmask_local)
+        }
+    };
 
     let layout = AttnLayout::Prefill {
         lp,
@@ -2587,8 +2835,13 @@ pub fn emit_prefill_with(c: &Config, sample: bool, precision: Precision) -> Stri
 
     let sig = render_signature(&decls);
     let cache_ty = Ty::f32(vec![c.n_layers, lp, c.n_kv, c.head_dim]).render();
+    let module_name = match input_kind {
+        PrefillInputKind::Tokens => "prefill",
+        PrefillInputKind::Embeddings => "prefill_embeddings",
+    };
     format!(
-        "module @prefill {{\n  func.func public @main({sig}) -> ({out_ty}, {cache_ty}, {cache_ty}) {{\n{body}    return {l}, {kc}, {vc} : {out_ty}, {cache_ty}, {cache_ty}\n  }}\n}}\n",
+        "module @{module_name} {{\n  func.func public @main({sig}) -> ({out_ty}, {cache_ty}, {cache_ty}) {{\n{body}    return {l}, {kc}, {vc} : {out_ty}, {cache_ty}, {cache_ty}\n  }}\n}}\n",
+        module_name = module_name,
         sig = sig,
         out_ty = out_ty,
         cache_ty = cache_ty,

@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use super::{Config, emit_decode, emit_decode_ragged, emit_prefill};
+use super::{Config, emit_decode, emit_decode_ragged, emit_prefill, emit_prefill_embeddings};
 
 fn tiny_config(context_capacity: usize) -> Config {
     Config {
@@ -31,11 +31,13 @@ fn tiny_config(context_capacity: usize) -> Config {
 fn assert_capacity_shapes(context_capacity: usize) {
     let cfg = tiny_config(context_capacity);
     let prefill = emit_prefill(&cfg, false);
+    let embeddings_prefill = emit_prefill_embeddings(&cfg, false);
     let decode = emit_decode(&cfg, false);
     let ragged = emit_decode_ragged(&cfg, 4, false);
     let single_cache = format!("tensor<2x{context_capacity}x1x4xf32>");
     let batch_cache = format!("tensor<4x2x{context_capacity}x1x4xf32>");
     let prompt = format!("tensor<{context_capacity}xi32>");
+    let embeddings = format!("tensor<{context_capacity}x8xf32>");
     let causal_mask = format!("tensor<{context_capacity}x{context_capacity}xf32>");
     let ragged_mask = format!("tensor<4x{context_capacity}xf32>");
     let rope = format!("tensor<{context_capacity}x4xf32>");
@@ -55,6 +57,26 @@ fn assert_capacity_shapes(context_capacity: usize) {
     assert!(
         prefill.contains(&rope),
         "prefill position table uses {rope}"
+    );
+    assert!(
+        embeddings_prefill.contains(&embeddings),
+        "embeddings prefill input uses {embeddings}"
+    );
+    assert!(
+        embeddings_prefill.matches(&prompt).count() >= 1,
+        "embeddings prefill positions use {prompt}"
+    );
+    assert!(
+        embeddings_prefill.matches(&single_cache).count() >= 3,
+        "embeddings prefill returns matching K/V"
+    );
+    assert!(
+        embeddings_prefill.contains(&causal_mask),
+        "embeddings prefill bias uses {causal_mask}"
+    );
+    assert!(
+        embeddings_prefill.contains(&rope),
+        "embeddings prefill position table uses {rope}"
     );
 
     assert!(

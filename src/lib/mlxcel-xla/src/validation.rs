@@ -58,7 +58,10 @@
 //! a byte-exact run under a non-default precision (`f16` / `bf16`) with a clear
 //! error rather than reporting a confusing diff.
 
-use crate::emitter::{Config, emit_decode, emit_decode_batched, emit_decode_ragged, emit_prefill};
+use crate::emitter::{
+    Config, emit_decode, emit_decode_batched, emit_decode_ragged, emit_prefill,
+    emit_prefill_embeddings,
+};
 
 /// One emitted graph kind, matching the emitter's entry points. `sample = true`
 /// ends the graph in an on-device argmax returning a token id (the single-sequence
@@ -68,6 +71,8 @@ use crate::emitter::{Config, emit_decode, emit_decode_batched, emit_decode_ragge
 pub(crate) enum GraphKind {
     /// Bucketed prompt prefill ([`emit_prefill`]).
     Prefill { sample: bool },
+    /// Bucketed prefill from post-scale hidden states ([`emit_prefill_embeddings`]).
+    PrefillEmbeddings { sample: bool },
     /// Single-token decode step ([`emit_decode`]).
     Decode { sample: bool },
     /// Ragged (continuous-batching) decode for `b_max` slots ([`emit_decode_ragged`]).
@@ -81,6 +86,7 @@ impl GraphKind {
     fn emit(self, cfg: &Config) -> String {
         match self {
             GraphKind::Prefill { sample } => emit_prefill(cfg, sample),
+            GraphKind::PrefillEmbeddings { sample } => emit_prefill_embeddings(cfg, sample),
             GraphKind::Decode { sample } => emit_decode(cfg, sample),
             GraphKind::DecodeRagged { b_max, sample } => emit_decode_ragged(cfg, b_max, sample),
             GraphKind::DecodeBatched { b_max, sample } => emit_decode_batched(cfg, b_max, sample),
@@ -92,6 +98,9 @@ impl core::fmt::Display for GraphKind {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             GraphKind::Prefill { sample } => write!(f, "prefill(sample={sample})"),
+            GraphKind::PrefillEmbeddings { sample } => {
+                write!(f, "prefill_embeddings(sample={sample})")
+            }
             GraphKind::Decode { sample } => write!(f, "decode(sample={sample})"),
             GraphKind::DecodeRagged { b_max, sample } => {
                 write!(f, "decode_ragged(b={b_max}, sample={sample})")
@@ -362,10 +371,11 @@ pub(crate) static LLAMA_3_2_1B: ArchFixture = ArchFixture {
 /// shared expert, q/k/v bias, untied head) exercising the whole routing / dispatch
 /// surface in a graph small enough to commit. The goldens are the frozen StableHLO
 /// the emitter produces for `assets/qwen2-moe-tiny/config.json`: on-device-argmax
-/// `prefill` / `decode`, plus the host-sampled `prefill_logits` and ragged `decode`
-/// serve graphs (B_max 4). The routing math itself is proven token-exact against an
-/// HF MoE block by the out-of-crate execution check (`spike/openxla/moe_oracle.py`);
-/// this fixture then guards the emit byte-for-byte forever.
+/// `prefill` / `decode`, plus the host-sampled token and embeddings prefill graphs
+/// and ragged `decode` serve graph (B_max 4). The routing math itself is proven
+/// token-exact against an HF MoE block by the out-of-crate execution check
+/// (`spike/openxla/moe_oracle.py`); this fixture then guards the emit byte-for-byte
+/// forever.
 pub(crate) static QWEN2_MOE_TINY: ArchFixture = ArchFixture {
     arch: "qwen2-moe-tiny",
     config_json: include_str!("../assets/qwen2-moe-tiny/config.json"),
@@ -384,6 +394,11 @@ pub(crate) static QWEN2_MOE_TINY: ArchFixture = ArchFixture {
             kind: GraphKind::Prefill { sample: false },
             golden_name: "prefill_logits.mlir",
             golden: include_str!("../assets/qwen2-moe-tiny/prefill_logits.mlir"),
+        },
+        GraphFixture {
+            kind: GraphKind::PrefillEmbeddings { sample: false },
+            golden_name: "prefill_embeddings_logits.mlir",
+            golden: include_str!("../assets/qwen2-moe-tiny/prefill_embeddings_logits.mlir"),
         },
         GraphFixture {
             kind: GraphKind::DecodeRagged {
@@ -777,6 +792,7 @@ mod tests {
     fn emit_graphs_drives_a_golden_less_arch() {
         let kinds = [
             GraphKind::Prefill { sample: true },
+            GraphKind::PrefillEmbeddings { sample: false },
             GraphKind::Decode { sample: false },
             GraphKind::DecodeRagged {
                 b_max: 4,
@@ -902,6 +918,15 @@ mod tests {
                 let (_, mlir) = &graphs[0];
                 let p = root.join(name);
                 std::fs::write(&p, mlir).unwrap_or_else(|e| panic!("write {}: {e}", p.display()));
+                eprintln!("froze {}", p.display());
+            }
+            if arch == "qwen2-moe-tiny" {
+                let kind = GraphKind::PrefillEmbeddings { sample: false };
+                let graphs = emit_graphs(&cfg_json, &[kind])
+                    .unwrap_or_else(|e| panic!("{arch} config parses: {e}"));
+                let p = root.join("prefill_embeddings_logits.mlir");
+                std::fs::write(&p, &graphs[0].1)
+                    .unwrap_or_else(|e| panic!("write {}: {e}", p.display()));
                 eprintln!("froze {}", p.display());
             }
         }
