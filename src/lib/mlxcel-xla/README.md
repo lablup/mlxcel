@@ -156,7 +156,7 @@ correctness-first lever; it does not close the gap to MLX (see the perf note abo
 
 - The bundled graphs are authored for **Llama-3.2-1B-Instruct** specifically;
   `load` verifies `config.json` matches and errors otherwise.
-- Prompt length is capped at the prefill bucket (`MAX_SEQ = 256` tokens).
+- The context capacity is a static graph shape selected with `MLXCEL_XLA_CONTEXT_CAPACITY` (compatibility default `256`).
 - Greedy sampling only; text-only (no VLM / draft).
 - `XlaInferenceSession` is single-sequence; `XlaBatchEngine` (below) adds
   multi-sequence throughput.
@@ -174,6 +174,14 @@ correctness-first lever; it does not close the gap to MLX (see the perf note abo
   message pointing at the CUDA / CPU targets, rather than faulting mid-run.
 
 ## Batched continuous batching (Stage 2b)
+
+### Static context capacity
+
+Set `MLXCEL_XLA_CONTEXT_CAPACITY` before loading a model to select the sequence dimension shared by the prefill graph, decode graph, RoPE tables, masks, and single/ragged KV caches. For example, `MLXCEL_XLA_CONTEXT_CAPACITY=1024` provides enough static space for a 729-token image expansion plus text and generation headroom. The selected value is part of the compiled-artifact identity; modules and runtime buffers with a different capacity are rejected instead of being paired.
+
+Admission uses `effective_prompt_len + max_new_tokens <= context_capacity`. Text requests use their token count. A multimodal preprocessor must supply the length after placeholder expansion to the same validation helper before native execution. The error reports the effective prompt length, requested generation budget, and configured capacity, and batch rejection occurs before a request id or slot is consumed.
+
+Larger capacities trade flexibility for resources: KV memory grows linearly with capacity, while the static prefill attention mask and score tensors grow quadratically and compilation can take longer. This backend emits a separate static StableHLO graph for each capacity; it does not claim or rely on dynamic StableHLO sequence shapes.
 
 `XlaBatchEngine` runs many sequences at once: `B_max` slots share one rank-5 KV
 cache and serve a request stream, so the device stays full. Requests of different

@@ -100,10 +100,6 @@ impl WeightBuf {
     }
 }
 
-/// Prefill bucket baked into the emitted `prefill` graph (`tensor<256xi32>`,
-/// == MAX_SEQ, so it covers any prompt the 256-slot KV cache holds).
-pub const PREFILL_LP: usize = 256;
-
 /// Opaque handle to the C-side execution context.
 #[repr(C)]
 struct XlaCtx {
@@ -120,6 +116,7 @@ unsafe extern "C" {
         weight_dtypes: *const c_int,
         weight_ranks: *const c_int,
         weight_dims: *const i64,
+        context_capacity: c_int,
     ) -> *mut XlaCtx;
     fn xla_llama_prefill(
         c: *mut XlaCtx,
@@ -256,6 +253,7 @@ fn compile_one(
     flags: &[&str],
     cache: &Path,
     tag: &str,
+    context_capacity: usize,
 ) -> Result<PathBuf, String> {
     let mut h = std::collections::hash_map::DefaultHasher::new();
     mlir.hash(&mut h);
@@ -265,9 +263,10 @@ fn compile_one(
     // Include the compiler path so a cuda vmfb is never reused for a cpu build
     // (or across iree-compile versions) just because the graph text matches.
     iree_compile.to_string_lossy().hash(&mut h);
+    context_capacity.hash(&mut h);
     let key = h.finish();
-    let mlir_path = cache.join(format!("{tag}-{key:016x}.mlir"));
-    let vmfb_path = cache.join(format!("{tag}-{key:016x}.vmfb"));
+    let mlir_path = cache.join(format!("{tag}-c{context_capacity}-{key:016x}.mlir"));
+    let vmfb_path = cache.join(format!("{tag}-c{context_capacity}-{key:016x}.vmfb"));
     if vmfb_path.exists() {
         return Ok(vmfb_path);
     }
@@ -297,6 +296,7 @@ fn compile_pair(
     prefill_tag: &str,
     decode_mlir: &str,
     decode_tag: &str,
+    context_capacity: usize,
 ) -> Result<(PathBuf, PathBuf), String> {
     let iree_compile = iree_compile_bin()?;
     if !iree_compile.exists() {
@@ -308,8 +308,22 @@ fn compile_pair(
     let flags = target_flags(device)?;
     let cache = std::env::temp_dir().join("mlxcel-xla-vmfb");
     std::fs::create_dir_all(&cache).map_err(|e| format!("mkdir {}: {e}", cache.display()))?;
-    let pre = compile_one(&iree_compile, prefill_mlir, flags, &cache, prefill_tag)?;
-    let dec = compile_one(&iree_compile, decode_mlir, flags, &cache, decode_tag)?;
+    let pre = compile_one(
+        &iree_compile,
+        prefill_mlir,
+        flags,
+        &cache,
+        prefill_tag,
+        context_capacity,
+    )?;
+    let dec = compile_one(
+        &iree_compile,
+        decode_mlir,
+        flags,
+        &cache,
+        decode_tag,
+        context_capacity,
+    )?;
     Ok((pre, dec))
 }
 
@@ -322,7 +336,14 @@ fn compile_vmfbs(device: &str, cfg: &Config) -> Result<(PathBuf, PathBuf), Strin
     check_packed_supported(device, quant_in_graph() && cfg.supports_packed_quant())?;
     let prefill = emit_prefill_with(cfg, true, precision);
     let decode = emit_decode_with(cfg, true, precision);
-    compile_pair(device, &prefill, "prefill", &decode, "decode")
+    compile_pair(
+        device,
+        &prefill,
+        "prefill",
+        &decode,
+        "decode",
+        cfg.context_capacity,
+    )
 }
 
 /// Map each needed weight name to the safetensors file that holds it, in the same
@@ -623,6 +644,7 @@ fn create_ctx(
             dtypes.as_ptr(),
             ranks.as_ptr(),
             dims.as_ptr(),
+            cfg.context_capacity as c_int,
         )
     };
     // Weights are resident on the device now; free the host copy.
@@ -641,20 +663,30 @@ fn create_ctx(
 /// (the raw context is single-threaded), matching the single-sequence session.
 pub struct IreeLlama {
     ctx: *mut XlaCtx,
+    context_capacity: usize,
 }
 
 impl IreeLlama {
     /// Prepare execution for a model directory on a HAL `device`
     /// (`"local-task"` for CPU). Compiles the bundled graphs, uploads the
     /// weights resident, and readies the prefill / decode calls.
-    pub fn load(model_dir: &Path, device: &str) -> Result<Self, String> {
-        let cfg = Config::from_json(model_dir)?;
+    pub fn load(model_dir: &Path, device: &str, context_capacity: usize) -> Result<Self, String> {
+        let cfg = Config::from_json(model_dir)?.with_context_capacity(context_capacity)?;
         let (prefill_vmfb, decode_vmfb) = compile_vmfbs(device, &cfg)?;
         let ctx = create_ctx(model_dir, &cfg, device, &prefill_vmfb, &decode_vmfb)?;
-        Ok(Self { ctx })
+        Ok(Self {
+            ctx,
+            context_capacity: cfg.context_capacity,
+        })
     }
 
-    /// Seed the KV cache with `token_ids` (length <= [`PREFILL_LP`]) via the
+    /// Static sequence capacity compiled into the paired graphs and KV buffers.
+    #[must_use]
+    pub fn context_capacity(&self) -> usize {
+        self.context_capacity
+    }
+
+    /// Seed the KV cache with `token_ids` (length <= the configured capacity) via the
     /// bucketed prefill graph. The returned token (the graph's argmax at
     /// `real_len-1`) is unused by the seed-then-decode drive loop.
     pub fn prefill_seed(&mut self, token_ids: &[i32]) -> Result<(), String> {
@@ -676,27 +708,27 @@ impl IreeLlama {
         self.prefill_padded(prompt)
     }
 
-    /// Pad `prompt` into the [`PREFILL_LP`] bucket, run the prefill, and return its
+    /// Pad `prompt` into the configured static bucket, run the prefill, and return its
     /// first token. Accepts an empty prompt (the seed-then-decode loop prefills a
     /// zero-length prefix when the prompt is a single token).
     fn prefill_padded(&mut self, prompt: &[i32]) -> Result<i32, String> {
-        if prompt.len() > PREFILL_LP {
+        if prompt.len() > self.context_capacity {
             return Err(format!(
-                "the OpenXLA M2 prefill graph is bucketed at {PREFILL_LP} tokens; prompt \
-                 prefix of {} exceeds it (a larger-bucket graph is a follow-up)",
-                prompt.len()
+                "prompt prefix of {} exceeds context_capacity={}",
+                prompt.len(),
+                self.context_capacity
             ));
         }
-        let mut tokens = vec![0i32; PREFILL_LP];
+        let mut tokens = vec![0i32; self.context_capacity];
         tokens[..prompt.len()].copy_from_slice(prompt);
-        let positions: Vec<c_int> = (0..PREFILL_LP as c_int).collect();
+        let positions: Vec<c_int> = (0..self.context_capacity as c_int).collect();
         let mut out = 0i32;
         // Safety: buffers outlive the call; the shim stores the returned KV.
         let rc = unsafe {
             xla_llama_prefill(
                 self.ctx,
                 tokens.as_ptr(),
-                PREFILL_LP as c_int,
+                self.context_capacity as c_int,
                 positions.as_ptr(),
                 prompt.len() as c_int,
                 &mut out,
@@ -711,6 +743,12 @@ impl IreeLlama {
     /// Advance one token at `cache_len` (== position), returning the next token
     /// id (on-device argmax) and writing the new K/V into the resident cache.
     pub fn decode(&mut self, token: i32, cache_len: i32) -> Result<i32, String> {
+        if cache_len < 0 || cache_len as usize >= self.context_capacity {
+            return Err(format!(
+                "decode position {cache_len} is outside context_capacity={}",
+                self.context_capacity
+            ));
+        }
         let mut out = 0i32;
         // Safety: the shim threads its own resident KV; only scalars cross here.
         let rc = unsafe { xla_llama_decode(self.ctx, token, cache_len, cache_len, &mut out) };
@@ -747,6 +785,7 @@ pub struct IreeRaggedLlama {
     /// Vocabulary size (logits per row), from the model config; the readback
     /// buffers and the per-row logits slice are sized by it.
     vocab: usize,
+    context_capacity: usize,
 }
 
 impl IreeRaggedLlama {
@@ -755,8 +794,13 @@ impl IreeRaggedLlama {
     /// Verifies the architecture, compiles the bundled prefill + the ragged decode
     /// graph for `b_max`, uploads the weights resident, and sizes the batch.
     /// `b_max` must be one of the bundled graphs ([`RAGGED_B_VALUES`]).
-    pub fn load(model_dir: &Path, device: &str, b_max: usize) -> Result<Self, String> {
-        let cfg = Config::from_json(model_dir)?;
+    pub fn load(
+        model_dir: &Path,
+        device: &str,
+        b_max: usize,
+        context_capacity: usize,
+    ) -> Result<Self, String> {
+        let cfg = Config::from_json(model_dir)?.with_context_capacity(context_capacity)?;
         if !RAGGED_B_VALUES.contains(&b_max) {
             return Err(format!(
                 "the OpenXLA serve worker selects B_max from {RAGGED_B_VALUES:?}; \
@@ -775,6 +819,7 @@ impl IreeRaggedLlama {
             "prefill_logits",
             &decode_mlir,
             &format!("decode_ragged_logits_b{b_max}"),
+            cfg.context_capacity,
         )?;
         let ctx = create_ctx(model_dir, &cfg, device, &prefill_vmfb, &decode_vmfb)?;
         // Safety: ctx is a fresh valid context from create_ctx; free it on error.
@@ -787,6 +832,7 @@ impl IreeRaggedLlama {
             ctx,
             b_max,
             vocab: cfg.vocab,
+            context_capacity: cfg.context_capacity,
         })
     }
 
@@ -803,7 +849,13 @@ impl IreeRaggedLlama {
         self.vocab
     }
 
-    /// Seed slot `slot` with `prompt` (1..=[`PREFILL_LP`] tokens) and return its
+    /// Static sequence capacity compiled into the paired graphs and KV buffers.
+    #[must_use]
+    pub fn context_capacity(&self) -> usize {
+        self.context_capacity
+    }
+
+    /// Seed slot `slot` with `prompt` (up to the configured capacity) and return its
     /// first-token `[vocab]` LOGITS (#449 M3 Stage 2d). The prompt's KV is written
     /// device-side into the slot's region of the rank-5 cache; the other slots are
     /// untouched, so a mid-stream admit does not disturb live sequences. The caller
@@ -815,15 +867,16 @@ impl IreeRaggedLlama {
         if prompt.is_empty() {
             return Err("prefill_slot_logits requires a non-empty prompt".to_string());
         }
-        if prompt.len() > PREFILL_LP {
+        if prompt.len() > self.context_capacity {
             return Err(format!(
-                "prompt of {} exceeds the {PREFILL_LP}-token prefill bucket",
-                prompt.len()
+                "prompt of {} exceeds context_capacity={}",
+                prompt.len(),
+                self.context_capacity
             ));
         }
-        let mut tokens = vec![0i32; PREFILL_LP];
+        let mut tokens = vec![0i32; self.context_capacity];
         tokens[..prompt.len()].copy_from_slice(prompt);
-        let positions: Vec<c_int> = (0..PREFILL_LP as c_int).collect();
+        let positions: Vec<c_int> = (0..self.context_capacity as c_int).collect();
         let mut logits = vec![0f32; self.vocab];
         // Safety: input buffers outlive the call; `logits` has self.vocab elements,
         // which the shim fills; the shim also writes the slot's KV device-side.
@@ -832,7 +885,7 @@ impl IreeRaggedLlama {
                 self.ctx,
                 slot as c_int,
                 tokens.as_ptr(),
-                PREFILL_LP as c_int,
+                self.context_capacity as c_int,
                 positions.as_ptr(),
                 prompt.len() as c_int,
                 self.vocab as c_int,
@@ -862,6 +915,17 @@ impl IreeRaggedLlama {
                 "decode_ragged_logits expects per-row arrays of length b_max = {}",
                 self.b_max
             ));
+        }
+        for row in 0..self.b_max {
+            if pos[row] != cache_len[row]
+                || pos[row] < 0
+                || pos[row] as usize >= self.context_capacity
+            {
+                return Err(format!(
+                    "decode row {row} has pos={} and cache_len={} outside context_capacity={} or not equal",
+                    pos[row], cache_len[row], self.context_capacity
+                ));
+            }
         }
         let mut logits = vec![0f32; self.b_max * self.vocab];
         // Safety: the three input slices are length b_max == bsz; `logits` has

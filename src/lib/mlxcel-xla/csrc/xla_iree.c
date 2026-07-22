@@ -91,6 +91,7 @@ typedef struct xla_ctx {
   iree_runtime_session_t* session;   // holds both @prefill and @decode_step
   iree_hal_allocator_t* allocator;   // device allocator (shared by both calls)
   int32_t n_weights;
+  int32_t context_capacity;
   iree_hal_buffer_view_t** weights;  // resident weights, uploaded once
   iree_hal_buffer_view_t* kcache;    // threaded KV (set by prefill, advanced by decode)
   iree_hal_buffer_view_t* vcache;
@@ -186,12 +187,49 @@ static iree_status_t xla_alloc_bv(xla_ctx* c, iree_host_size_t rank,
       iree_make_const_byte_span(data, nbytes), out);
 }
 
+// Validate the static KV contract shared by the paired prefill/decode modules.
+// `context_axis` is 1 for rank-4 [L,S,nkv,d] and 2 for rank-5 [B,L,S,nkv,d].
+static int xla_validate_kv_pair(xla_ctx* c, iree_hal_buffer_view_t* kc,
+                                iree_hal_buffer_view_t* vc,
+                                iree_host_size_t rank,
+                                iree_host_size_t context_axis) {
+  if (!kc || !vc || iree_hal_buffer_view_shape_rank(kc) != rank ||
+      iree_hal_buffer_view_shape_rank(vc) != rank) {
+    fprintf(stderr, "xla_iree: expected matching rank-%zu K/V buffers\n",
+            (size_t)rank);
+    return 1;
+  }
+  for (iree_host_size_t i = 0; i < rank; ++i) {
+    iree_hal_dim_t kd = iree_hal_buffer_view_shape_dim(kc, i);
+    iree_hal_dim_t vd = iree_hal_buffer_view_shape_dim(vc, i);
+    if (kd != vd) {
+      fprintf(stderr, "xla_iree: K/V shape mismatch at axis %zu (%lld vs %lld)\n",
+              (size_t)i, (long long)kd, (long long)vd);
+      return 1;
+    }
+  }
+  iree_hal_dim_t actual =
+      iree_hal_buffer_view_shape_dim(kc, context_axis);
+  if (actual != (iree_hal_dim_t)c->context_capacity) {
+    fprintf(stderr,
+            "xla_iree: module KV context dimension %lld disagrees with configured context_capacity=%d\n",
+            (long long)actual, c->context_capacity);
+    return 1;
+  }
+  return 0;
+}
+
 static iree_status_t xla_llama_create_impl(
     xla_ctx* c, const char* device_uri, const char* prefill_vmfb,
     const char* decode_vmfb, int32_t n_weights, const void* const* weight_data,
     const int32_t* weight_dtypes, const int32_t* weight_ranks,
-    const int64_t* weight_dims) {
+    const int64_t* weight_dims, int32_t context_capacity) {
+  if (context_capacity <= 0) {
+    return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
+                            "context_capacity must be positive");
+  }
   c->n_weights = n_weights;
+  c->context_capacity = context_capacity;
 
 #ifdef XLA_GATE_CUDA
   // Register the CUDA driver so use_all_available_drivers exposes it for a
@@ -279,12 +317,14 @@ xla_ctx* xla_llama_create(const char* device_uri, const char* prefill_vmfb,
                           const void* const* weight_data,
                           const int32_t* weight_dtypes,
                           const int32_t* weight_ranks,
-                          const int64_t* weight_dims) {
+                          const int64_t* weight_dims,
+                          int32_t context_capacity) {
   xla_ctx* c = (xla_ctx*)calloc(1, sizeof(xla_ctx));
   if (!c) return NULL;
   iree_status_t s =
       xla_llama_create_impl(c, device_uri, prefill_vmfb, decode_vmfb, n_weights,
-                            weight_data, weight_dtypes, weight_ranks, weight_dims);
+                            weight_data, weight_dtypes, weight_ranks, weight_dims,
+                            context_capacity);
   if (!iree_status_is_ok(s)) {
     char buf[512];
     iree_host_size_t got = 0;
@@ -303,6 +343,12 @@ xla_ctx* xla_llama_create(const char* device_uri, const char* prefill_vmfb,
 int xla_llama_prefill(xla_ctx* c, const int32_t* tokens, int32_t lp,
                       const int32_t* positions, int32_t real_len,
                       int32_t* out_token) {
+  if (lp != c->context_capacity || real_len < 0 || real_len > lp) {
+    fprintf(stderr,
+            "xla_llama_prefill: lp=%d real_len=%d context_capacity=%d\n", lp,
+            real_len, c->context_capacity);
+    return 1;
+  }
   iree_runtime_call_t call;
   XLA_CHECK(iree_runtime_call_initialize_by_name(
       c->session, iree_make_cstring_view("prefill.main"), &call));
@@ -333,6 +379,16 @@ int xla_llama_prefill(xla_ctx* c, const int32_t* tokens, int32_t lp,
   XLA_CHECK(iree_runtime_call_outputs_pop_front_buffer_view(&call, &token_out));
   XLA_CHECK(iree_runtime_call_outputs_pop_front_buffer_view(&call, &kc));
   XLA_CHECK(iree_runtime_call_outputs_pop_front_buffer_view(&call, &vc));
+  if (xla_validate_kv_pair(c, kc, vc, 4, 1) != 0) {
+    iree_hal_buffer_view_release(token_out);
+    iree_hal_buffer_view_release(kc);
+    iree_hal_buffer_view_release(vc);
+    iree_hal_buffer_view_release(tok_bv);
+    iree_hal_buffer_view_release(pos_bv);
+    iree_hal_buffer_view_release(len_bv);
+    iree_runtime_call_deinitialize(&call);
+    return 1;
+  }
   if (c->kcache) iree_hal_buffer_view_release(c->kcache);
   if (c->vcache) iree_hal_buffer_view_release(c->vcache);
   c->kcache = kc;
@@ -352,6 +408,13 @@ int xla_llama_prefill(xla_ctx* c, const int32_t* tokens, int32_t lp,
 // the resident KV cache in place.
 int xla_llama_decode(xla_ctx* c, int32_t token, int32_t pos, int32_t cache_len,
                      int32_t* out_token) {
+  if (!c->kcache || !c->vcache || pos != cache_len || pos < 0 ||
+      pos >= c->context_capacity) {
+    fprintf(stderr,
+            "xla_llama_decode: pos=%d cache_len=%d context_capacity=%d or KV is uninitialized\n",
+            pos, cache_len, c->context_capacity);
+    return 1;
+  }
   iree_runtime_call_t call;
   XLA_CHECK(iree_runtime_call_initialize_by_name(
       c->session, iree_make_cstring_view("decode_step.main"), &call));
@@ -382,6 +445,16 @@ int xla_llama_decode(xla_ctx* c, int32_t token, int32_t pos, int32_t cache_len,
   XLA_CHECK(iree_runtime_call_outputs_pop_front_buffer_view(&call, &token_out));
   XLA_CHECK(iree_runtime_call_outputs_pop_front_buffer_view(&call, &kc));
   XLA_CHECK(iree_runtime_call_outputs_pop_front_buffer_view(&call, &vc));
+  if (xla_validate_kv_pair(c, kc, vc, 4, 1) != 0) {
+    iree_hal_buffer_view_release(token_out);
+    iree_hal_buffer_view_release(kc);
+    iree_hal_buffer_view_release(vc);
+    iree_hal_buffer_view_release(tok_bv);
+    iree_hal_buffer_view_release(pos_bv);
+    iree_hal_buffer_view_release(len_bv);
+    iree_runtime_call_deinitialize(&call);
+    return 1;
+  }
   iree_hal_buffer_view_t* old_k = c->kcache;
   iree_hal_buffer_view_t* old_v = c->vcache;
   c->kcache = kc;
@@ -438,6 +511,10 @@ static iree_status_t xla_ensure_batch_kv(xla_ctx* c) {
 // per-slot dims (re-captured by the next prefill_slot, which lazily reallocates
 // the rank-5 KV once the dims are known). Call once before seeding slots.
 int xla_llama_ragged_reset(xla_ctx* c, int32_t bsz) {
+  if (bsz <= 0) {
+    fprintf(stderr, "xla_llama_ragged_reset: bsz must be positive\n");
+    return 1;
+  }
   c->rg_bsz = bsz;
   c->rg_per = 0;
   if (c->kcache_b) {
@@ -464,6 +541,12 @@ int xla_llama_prefill_slot_logits(xla_ctx* c, int32_t slot, const int32_t* token
   if (slot < 0 || slot >= c->rg_bsz) {
     fprintf(stderr, "xla_llama_prefill_slot_logits: slot %d out of range [0,%d)\n",
             slot, c->rg_bsz);
+    return 1;
+  }
+  if (lp != c->context_capacity || real_len <= 0 || real_len > lp) {
+    fprintf(stderr,
+            "xla_llama_prefill_slot_logits: lp=%d real_len=%d context_capacity=%d\n",
+            lp, real_len, c->context_capacity);
     return 1;
   }
   iree_runtime_call_t call;
@@ -496,6 +579,16 @@ int xla_llama_prefill_slot_logits(xla_ctx* c, int32_t slot, const int32_t* token
   XLA_CHECK(iree_runtime_call_outputs_pop_front_buffer_view(&call, &logits));
   XLA_CHECK(iree_runtime_call_outputs_pop_front_buffer_view(&call, &kc));
   XLA_CHECK(iree_runtime_call_outputs_pop_front_buffer_view(&call, &vc));
+  if (xla_validate_kv_pair(c, kc, vc, 4, 1) != 0) {
+    iree_hal_buffer_view_release(logits);
+    iree_hal_buffer_view_release(kc);
+    iree_hal_buffer_view_release(vc);
+    iree_hal_buffer_view_release(tok_bv);
+    iree_hal_buffer_view_release(pos_bv);
+    iree_hal_buffer_view_release(len_bv);
+    iree_runtime_call_deinitialize(&call);
+    return 1;
+  }
   if (c->kcache) iree_hal_buffer_view_release(c->kcache);
   if (c->vcache) iree_hal_buffer_view_release(c->vcache);
   c->kcache = kc;
@@ -514,19 +607,25 @@ int xla_llama_prefill_slot_logits(xla_ctx* c, int32_t slot, const int32_t* token
     return code ? code : 1;
   }
 
-  if (iree_hal_buffer_view_shape_rank(c->kcache) != 4) {
-    fprintf(stderr, "xla_llama_prefill_slot_logits: expected rank-4 single-seq KV\n");
-    return 1;
-  }
   iree_host_size_t per = iree_hal_buffer_view_element_count(c->kcache);
   if (c->rg_per == 0) {
     c->rg_per = per;
     for (int32_t i = 0; i < 4; i++) {
       c->rg_dims[i] = iree_hal_buffer_view_shape_dim(c->kcache, i);
     }
-  } else if (per != c->rg_per) {
-    fprintf(stderr, "xla_llama_prefill_slot_logits: KV element count changed\n");
-    return 1;
+  } else {
+    if (per != c->rg_per) {
+      fprintf(stderr, "xla_llama_prefill_slot_logits: KV element count changed\n");
+      return 1;
+    }
+    for (int32_t i = 0; i < 4; i++) {
+      if (c->rg_dims[i] != iree_hal_buffer_view_shape_dim(c->kcache, i)) {
+        fprintf(stderr,
+                "xla_llama_prefill_slot_logits: KV shape changed at axis %d\n",
+                i);
+        return 1;
+      }
+    }
   }
   XLA_CHECK(xla_ensure_batch_kv(c));
   iree_device_size_t off = (iree_device_size_t)slot * per * sizeof(float);
@@ -553,6 +652,21 @@ int xla_llama_prefill_slot_logits(xla_ctx* c, int32_t slot, const int32_t* token
 int xla_llama_decode_ragged_logits(xla_ctx* c, int32_t bsz, const int32_t* tokens,
                                    const int32_t* pos, const int32_t* cache_len,
                                    int32_t vocab, float* out_logits) {
+  if (bsz != c->rg_bsz || !c->kcache_b || !c->vcache_b) {
+    fprintf(stderr,
+            "xla_llama_decode_ragged_logits: bsz=%d configured=%d or KV is uninitialized\n",
+            bsz, c->rg_bsz);
+    return 1;
+  }
+  for (int32_t i = 0; i < bsz; ++i) {
+    if (pos[i] != cache_len[i] || pos[i] < 0 ||
+        pos[i] >= c->context_capacity) {
+      fprintf(stderr,
+              "xla_llama_decode_ragged_logits: row=%d pos=%d cache_len=%d context_capacity=%d\n",
+              i, pos[i], cache_len[i], c->context_capacity);
+      return 1;
+    }
+  }
   iree_runtime_call_t call;
   XLA_CHECK(iree_runtime_call_initialize_by_name(
       c->session, iree_make_cstring_view("decode_step.main"), &call));
@@ -585,6 +699,18 @@ int xla_llama_decode_ragged_logits(xla_ctx* c, int32_t bsz, const int32_t* token
   XLA_CHECK(iree_runtime_call_outputs_pop_front_buffer_view(&call, &logits_out));
   XLA_CHECK(iree_runtime_call_outputs_pop_front_buffer_view(&call, &kc));
   XLA_CHECK(iree_runtime_call_outputs_pop_front_buffer_view(&call, &vc));
+  if (xla_validate_kv_pair(c, kc, vc, 5, 2) != 0 ||
+      iree_hal_buffer_view_shape_dim(kc, 0) != (iree_hal_dim_t)c->rg_bsz) {
+    fprintf(stderr, "xla_llama_decode_ragged_logits: output batch shape mismatch\n");
+    iree_hal_buffer_view_release(logits_out);
+    iree_hal_buffer_view_release(kc);
+    iree_hal_buffer_view_release(vc);
+    iree_hal_buffer_view_release(tok_bv);
+    iree_hal_buffer_view_release(pos_bv);
+    iree_hal_buffer_view_release(len_bv);
+    iree_runtime_call_deinitialize(&call);
+    return 1;
+  }
   iree_hal_buffer_view_t* old_k = c->kcache_b;
   iree_hal_buffer_view_t* old_v = c->vcache_b;
   c->kcache_b = kc;

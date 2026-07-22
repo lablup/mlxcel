@@ -49,6 +49,8 @@ use std::path::{Path, PathBuf};
 
 use mlxcel_core::session::{InferenceSession, SessionCapabilities};
 
+mod context;
+
 #[cfg(feature = "iree")]
 mod iree;
 
@@ -99,7 +101,11 @@ mod emitter;
 mod validation;
 
 #[cfg(feature = "iree")]
-pub use batch::{EngineEvent, FinishReason, XlaBatchEngine, XlaReferenceEngine};
+pub use batch::{EngineEvent, FinishReason, XlaAdmissionError, XlaBatchEngine, XlaReferenceEngine};
+pub use context::{
+    CONTEXT_CAPACITY_ENV, ContextCapacityError, DEFAULT_CONTEXT_CAPACITY,
+    context_capacity_from_env, validate_request_capacity,
+};
 #[cfg(feature = "iree")]
 pub use sampler::SampleParams;
 
@@ -149,6 +155,7 @@ fn read_eos(_model_path: &Path) -> Vec<i32> {
 pub struct XlaInferenceSession {
     model_path: PathBuf,
     num_layers: usize,
+    context_capacity: usize,
     eos_token_ids: Vec<i32>,
     #[cfg(feature = "iree")]
     engine: iree::IreeLlama,
@@ -192,15 +199,27 @@ impl XlaInferenceSession {
     /// unsupported model architecture, a missing IREE distribution, an
     /// `iree-compile` failure, or a weight-loading failure.
     pub fn load(model_path: &Path, num_layers: usize) -> Result<Self, String> {
+        let context_capacity = context_capacity_from_env()?;
+        Self::load_with_context_capacity(model_path, num_layers, context_capacity)
+    }
+
+    /// Prepare a session with an explicitly selected static context capacity.
+    pub fn load_with_context_capacity(
+        model_path: &Path,
+        num_layers: usize,
+        context_capacity: usize,
+    ) -> Result<Self, String> {
+        let context_capacity = context::validate_context_capacity_value(context_capacity)?;
         let eos_token_ids = read_eos(model_path);
         #[cfg(feature = "iree")]
         {
             let device =
                 std::env::var("MLXCEL_XLA_DEVICE").unwrap_or_else(|_| default_device().to_string());
-            let engine = iree::IreeLlama::load(model_path, &device)?;
+            let engine = iree::IreeLlama::load(model_path, &device, context_capacity)?;
             Ok(Self {
                 model_path: model_path.to_path_buf(),
                 num_layers,
+                context_capacity,
                 eos_token_ids,
                 engine,
                 cache_len: 0,
@@ -211,6 +230,7 @@ impl XlaInferenceSession {
             Ok(Self {
                 model_path: model_path.to_path_buf(),
                 num_layers,
+                context_capacity,
                 eos_token_ids,
             })
         }
@@ -226,6 +246,12 @@ impl XlaInferenceSession {
     #[must_use]
     pub fn model_path(&self) -> &Path {
         &self.model_path
+    }
+
+    /// Static sequence capacity compiled into this session's graph and KV cache.
+    #[must_use]
+    pub fn context_capacity(&self) -> usize {
+        self.context_capacity
     }
 
     /// The model's EOS token ids (from `generation_config.json`), so the drive
@@ -274,6 +300,8 @@ impl XlaInferenceSession {
         if prompt_tokens.is_empty() {
             return Err("XLA generation requires a non-empty prompt".to_string());
         }
+        validate_request_capacity(prompt_tokens.len(), max_new_tokens, self.context_capacity)
+            .map_err(|err| err.to_string())?;
         // Seed KV with all but the last prompt token; the last token is the first
         // input to decode_step, which returns the first generated token. This
         // keeps decode_step's "given the previously emitted token" contract exact
@@ -302,6 +330,13 @@ impl InferenceSession for XlaInferenceSession {
 
     #[cfg(feature = "iree")]
     fn prefill(&mut self, token_ids: &[i32]) -> Result<(), String> {
+        if token_ids.len() > self.context_capacity {
+            return Err(format!(
+                "prefill length {} exceeds context_capacity={}",
+                token_ids.len(),
+                self.context_capacity
+            ));
+        }
         self.engine.prefill_seed(token_ids)?;
         self.cache_len = token_ids.len() as i32;
         Ok(())
@@ -314,6 +349,12 @@ impl InferenceSession for XlaInferenceSession {
 
     #[cfg(feature = "iree")]
     fn decode_step(&mut self, token: i32) -> Result<i32, String> {
+        if self.cache_len < 0 || self.cache_len as usize >= self.context_capacity {
+            return Err(format!(
+                "decode position {} is outside context_capacity={}",
+                self.cache_len, self.context_capacity
+            ));
+        }
         let next = self.engine.decode(token, self.cache_len)?;
         self.cache_len += 1;
         Ok(next)
@@ -351,6 +392,19 @@ mod tests {
         let s = session();
         assert_eq!(s.num_layers(), 16);
         assert_eq!(s.model_path(), Path::new("/tmp/xla-model"));
+        assert_eq!(s.context_capacity(), DEFAULT_CONTEXT_CAPACITY);
+    }
+
+    #[test]
+    fn explicit_context_capacity_is_recorded_and_validated() {
+        let s =
+            XlaInferenceSession::load_with_context_capacity(Path::new("/tmp/xla-model"), 16, 1024)
+                .unwrap();
+        assert_eq!(s.context_capacity(), 1024);
+        assert!(
+            XlaInferenceSession::load_with_context_capacity(Path::new("/tmp/xla-model"), 16, 0,)
+                .is_err()
+        );
     }
 
     #[test]
@@ -367,6 +421,17 @@ mod tests {
             s.generate_greedy(&[1, 2, 3], 8, &[2]).unwrap_err(),
             NOT_WIRED
         );
+    }
+
+    #[test]
+    fn greedy_rejects_context_overflow_before_the_unwired_backend() {
+        let mut s =
+            XlaInferenceSession::load_with_context_capacity(Path::new("/tmp/xla-model"), 16, 8)
+                .unwrap();
+        let err = s.generate_greedy(&[1, 2, 3, 4, 5], 4, &[2]).unwrap_err();
+        assert!(err.contains("effective_prompt_len=5"));
+        assert!(err.contains("max_new_tokens=4"));
+        assert!(err.contains("context_capacity=8"));
     }
 
     #[test]

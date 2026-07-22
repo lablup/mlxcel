@@ -51,6 +51,9 @@ mod model;
 mod moe;
 mod rope;
 
+#[cfg(test)]
+mod context_tests;
+
 pub(crate) use config::{Config, NormStyle, QkNorm, WeightScheme};
 // MoE FFN config types (issue #500), read by the weight loader (`iree.rs`) and the
 // validation harness. `SharedExpertConfig` is only named in some build cfgs.
@@ -1235,7 +1238,7 @@ mod tests {
 
     /// Gemma3 pairs the Gemma2 four-norm layer and a per-head `(1+w)` q/k norm with a
     /// DUAL RoPE base: the sliding layers rotate on a local-base table distinct from
-    /// the global one, so the graph carries two extra `[MAX_SEQ, head_dim]` constant
+    /// the global one, so the graph carries two extra `[context_capacity, head_dim]` constant
     /// tables (cos_local, sin_local) versus a single-RoPE twin.
     #[test]
     fn gemma3_dual_rope_and_qk_norm_reach_the_shared_core() {

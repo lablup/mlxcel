@@ -160,6 +160,9 @@ pub struct MoeConfig {
 
 #[derive(Clone, Debug)]
 pub struct Config {
+    /// Static sequence dimension shared by prefill, decode, and every KV cache.
+    /// StableHLO shapes remain static; changing this value emits a distinct graph.
+    pub context_capacity: usize,
     pub hidden: usize,
     pub inter: usize,
     pub n_layers: usize,
@@ -307,6 +310,7 @@ impl Config {
     /// Hard-coded Llama-3.2-1B-Instruct values (config.json of the spike model).
     pub fn llama_3_2_1b() -> Self {
         Config {
+            context_capacity: crate::DEFAULT_CONTEXT_CAPACITY,
             hidden: 2048,
             inter: 8192,
             n_layers: 16,
@@ -1016,6 +1020,7 @@ impl Config {
         let tie_word_embeddings = ob("tie_word_embeddings").unwrap_or(tie_default);
 
         Ok(Config {
+            context_capacity: crate::DEFAULT_CONTEXT_CAPACITY,
             hidden,
             inter: u("intermediate_size")?,
             n_layers,
@@ -1067,6 +1072,12 @@ impl Config {
         let p = model_dir.join("config.json");
         let s = std::fs::read_to_string(&p).map_err(|e| format!("read {}: {e}", p.display()))?;
         Self::from_json_str(&s).map_err(|e| format!("{}: {e}", p.display()))
+    }
+
+    /// Select the static sequence shape used by all emitted graphs and caches.
+    pub fn with_context_capacity(mut self, context_capacity: usize) -> Result<Self, String> {
+        self.context_capacity = crate::context::validate_context_capacity_value(context_capacity)?;
+        Ok(self)
     }
 
     pub fn group(&self) -> usize {

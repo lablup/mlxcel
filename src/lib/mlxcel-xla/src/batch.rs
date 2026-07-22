@@ -36,15 +36,43 @@
 //! tests cannot link the IREE runtime; see the `iree.rs` test note).
 
 use std::collections::VecDeque;
+use std::fmt;
 
 #[cfg(feature = "iree")]
 use std::path::Path;
 
 #[cfg(feature = "iree")]
-use crate::iree::{IreeLlama, IreeRaggedLlama, PREFILL_LP};
+use crate::iree::{IreeLlama, IreeRaggedLlama};
 use crate::sampler::SampleParams;
 #[cfg(feature = "iree")]
 use crate::sampler::sample;
+use crate::{ContextCapacityError, validate_request_capacity};
+
+/// Typed validation failure returned before a request enters the scheduler.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum XlaAdmissionError {
+    EmptyPrompt,
+    ZeroMaxNewTokens,
+    ContextCapacity(ContextCapacityError),
+}
+
+impl fmt::Display for XlaAdmissionError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::EmptyPrompt => f.write_str("XLA batched submit requires a non-empty prompt"),
+            Self::ZeroMaxNewTokens => f.write_str("max_new_tokens must be >= 1"),
+            Self::ContextCapacity(err) => err.fmt(f),
+        }
+    }
+}
+
+impl std::error::Error for XlaAdmissionError {}
+
+impl From<ContextCapacityError> for XlaAdmissionError {
+    fn from(value: ContextCapacityError) -> Self {
+        Self::ContextCapacity(value)
+    }
+}
 
 /// Why a request stopped generating. Cancellation is silent (the caller that
 /// called [`XlaBatchEngine::cancel`] already knows), so it is not a finish reason.
@@ -202,6 +230,25 @@ impl Scheduler {
     }
 }
 
+/// Validate and queue atomically: every failure returns before scheduler state is
+/// changed, which keeps both free and active slots untouched.
+fn queue_request(
+    sched: &mut Scheduler,
+    prompt: &[i32],
+    max_new_tokens: usize,
+    params: SampleParams,
+    context_capacity: usize,
+) -> Result<u64, XlaAdmissionError> {
+    if prompt.is_empty() {
+        return Err(XlaAdmissionError::EmptyPrompt);
+    }
+    if max_new_tokens == 0 {
+        return Err(XlaAdmissionError::ZeroMaxNewTokens);
+    }
+    validate_request_capacity(prompt.len(), max_new_tokens, context_capacity)?;
+    Ok(sched.submit(prompt.to_vec(), max_new_tokens, params))
+}
+
 /// The continuous-batching engine: `B_max` slots over one ragged decode graph,
 /// fed by a FIFO queue. See the module docs.
 #[cfg(feature = "iree")]
@@ -222,7 +269,19 @@ impl XlaBatchEngine {
     /// Propagates load/compile failures, or an unsupported `b_max` (must be one
     /// of the bundled ragged graphs).
     pub fn load(model_path: &Path, b_max: usize, device: &str) -> Result<Self, String> {
-        let engine = IreeRaggedLlama::load(model_path, device, b_max)?;
+        let context_capacity = crate::context_capacity_from_env()?;
+        Self::load_with_context_capacity(model_path, b_max, device, context_capacity)
+    }
+
+    /// Load with an explicitly selected static graph and KV-cache capacity.
+    pub fn load_with_context_capacity(
+        model_path: &Path,
+        b_max: usize,
+        device: &str,
+        context_capacity: usize,
+    ) -> Result<Self, String> {
+        let context_capacity = crate::context::validate_context_capacity_value(context_capacity)?;
+        let engine = IreeRaggedLlama::load(model_path, device, b_max, context_capacity)?;
         let eos = crate::read_eos(model_path);
         Ok(Self {
             engine,
@@ -234,6 +293,12 @@ impl XlaBatchEngine {
     #[must_use]
     pub fn b_max(&self) -> usize {
         self.engine.b_max()
+    }
+
+    /// Static sequence capacity compiled into the graph and per-slot KV cache.
+    #[must_use]
+    pub fn context_capacity(&self) -> usize {
+        self.engine.context_capacity()
     }
 
     /// The model's EOS token ids (from `generation_config.json`).
@@ -274,20 +339,15 @@ impl XlaBatchEngine {
         prompt: &[i32],
         max_new_tokens: usize,
         params: SampleParams,
-    ) -> Result<u64, String> {
-        if prompt.is_empty() {
-            return Err("XLA batched submit requires a non-empty prompt".to_string());
-        }
-        if prompt.len() > PREFILL_LP {
-            return Err(format!(
-                "prompt of {} exceeds the {PREFILL_LP}-token prefill bucket",
-                prompt.len()
-            ));
-        }
-        if max_new_tokens == 0 {
-            return Err("max_new_tokens must be >= 1".to_string());
-        }
-        Ok(self.sched.submit(prompt.to_vec(), max_new_tokens, params))
+    ) -> Result<u64, XlaAdmissionError> {
+        let context_capacity = self.context_capacity();
+        queue_request(
+            &mut self.sched,
+            prompt,
+            max_new_tokens,
+            params,
+            context_capacity,
+        )
     }
 
     /// Cancel a request by id (frees its slot or drops it from the queue).
@@ -424,8 +484,18 @@ impl XlaReferenceEngine {
     ///
     /// Propagates the underlying load/compile failures.
     pub fn load(model_path: &Path, device: &str) -> Result<Self, String> {
+        let context_capacity = crate::context_capacity_from_env()?;
+        Self::load_with_context_capacity(model_path, device, context_capacity)
+    }
+
+    /// Load a reference engine at the same explicit capacity as a batch engine.
+    pub fn load_with_context_capacity(
+        model_path: &Path,
+        device: &str,
+        context_capacity: usize,
+    ) -> Result<Self, String> {
         Ok(Self {
-            inner: IreeLlama::load(model_path, device)?,
+            inner: IreeLlama::load(model_path, device, context_capacity)?,
         })
     }
 
@@ -443,6 +513,14 @@ impl XlaReferenceEngine {
         max_new_tokens: usize,
         eos: &[i32],
     ) -> Result<Vec<i32>, String> {
+        if prompt.is_empty() {
+            return Err("XLA reference generation requires a non-empty prompt".to_string());
+        }
+        validate_request_capacity(prompt.len(), max_new_tokens, self.inner.context_capacity())
+            .map_err(|err| err.to_string())?;
+        if max_new_tokens == 0 {
+            return Ok(Vec::new());
+        }
         let first = self.inner.prefill_first(prompt)?;
         let mut out = vec![first];
         let mut cache_len = prompt.len() as i32;
@@ -489,6 +567,50 @@ mod tests {
         assert_eq!(s.free_slots(), vec![0, 1]);
         assert!(!s.is_idle());
         assert!(!s.any_active());
+    }
+
+    #[test]
+    fn request_admission_checks_prompt_plus_generation_budget() {
+        let mut s = Scheduler::new(2, EOS.to_vec());
+        let id = queue_request(&mut s, &[1; 768], 256, g(), 1024).expect("exact fit");
+        assert_eq!(id, 0);
+
+        let err = queue_request(&mut s, &[1; 769], 256, g(), 1024).unwrap_err();
+        assert_eq!(
+            err,
+            XlaAdmissionError::ContextCapacity(ContextCapacityError {
+                effective_prompt_len: 769,
+                max_new_tokens: 256,
+                context_capacity: 1024,
+            })
+        );
+    }
+
+    #[test]
+    fn rejected_request_does_not_mutate_queue_or_live_slot() {
+        let mut s = Scheduler::new(2, EOS.to_vec());
+        s.slots[0] = Some(Slot {
+            req_id: 41,
+            cur: 7,
+            cache_len: 300,
+            produced: 4,
+            cap: 100,
+            params: g(),
+            rng: 9,
+            history: vec![1, 2, 3],
+        });
+        let before_next_id = s.next_id;
+        let before_queue_len = s.queue.len();
+
+        let err = queue_request(&mut s, &[5; 900], 125, g(), 1024).unwrap_err();
+        assert!(matches!(err, XlaAdmissionError::ContextCapacity(_)));
+        assert_eq!(s.next_id, before_next_id, "no request id was consumed");
+        assert_eq!(s.queue.len(), before_queue_len, "nothing was queued");
+        let live = s.slots[0].as_ref().expect("existing slot remains active");
+        assert_eq!(live.req_id, 41);
+        assert_eq!(live.cur, 7);
+        assert_eq!(live.cache_len, 300);
+        assert!(s.slots[1].is_none(), "a free slot remains free");
     }
 
     #[test]

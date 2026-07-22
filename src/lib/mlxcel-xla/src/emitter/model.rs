@@ -24,15 +24,6 @@ use super::config::{Config, NormStyle};
 use super::moe::{self, MoeLayerW, MoeSharedW};
 use super::rope;
 
-const MAX_SEQ: usize = 256;
-
-/// Bucketed padded prompt length for prefill. Set to MAX_SEQ so the one bucket
-/// covers any prompt the cache holds (e.g. the ~103-token Llama-3.2 chat-template
-/// prompt), not just the 46-token spike prompt. KV for real positions is
-/// identical to a smaller bucket (padding positions are causally masked), so the
-/// generated tokens are unchanged.
-const PREFILL_LP: usize = MAX_SEQ;
-
 /// Per-layer weight handles (JAX alphabetical order: down, gate, in_ln,
 /// post_ln, up, wk, wo, wq, wv). `bk`/`bq`/`bv` are the q/k/v projection biases,
 /// present only for an architecture with `qkv_bias` (Qwen2); `None` for Llama,
@@ -473,13 +464,13 @@ fn build_arg_schema(b: &mut Builder, c: &Config) -> (Vec<ArgDecl>, Args) {
     let kcache = take_arg(
         &mut decls,
         &mut idx,
-        Ty::f32(vec![c.n_layers, MAX_SEQ, c.n_kv, c.head_dim]),
+        Ty::f32(vec![c.n_layers, c.context_capacity, c.n_kv, c.head_dim]),
         "kcache".into(),
     );
     let vcache = take_arg(
         &mut decls,
         &mut idx,
-        Ty::f32(vec![c.n_layers, MAX_SEQ, c.n_kv, c.head_dim]),
+        Ty::f32(vec![c.n_layers, c.context_capacity, c.n_kv, c.head_dim]),
         "vcache".into(),
     );
 
@@ -533,20 +524,21 @@ pub(crate) struct Consts {
 }
 
 fn emit_consts(b: &mut Builder, c: &Config) -> Consts {
-    let (cos, sin) = rope::rope_tables(c, MAX_SEQ);
+    let seq = c.context_capacity;
+    let (cos, sin) = rope::rope_tables(c, seq);
     // The rotary width (`head_dim`, or the smaller `rotary_dim` for a partial-RoPE
     // arch like StableLM). The Llama family has `rot == head_dim`, so its tables are
     // byte-identical.
     let rot = c.rotary_width();
-    let cos_table = b.const_tensor_f32(&cos, vec![MAX_SEQ, rot]);
-    let sin_table = b.const_tensor_f32(&sin, vec![MAX_SEQ, rot]);
+    let cos_table = b.const_tensor_f32(&cos, vec![seq, rot]);
+    let sin_table = b.const_tensor_f32(&sin, vec![seq, rot]);
     // Gemma3 / OLMo3 local RoPE tables (distinct base for the sliding layers).
     let (cos_local, sin_local) = match c.rope_local_base {
         Some(base) => {
-            let (cl, sl) = rope::rope_tables_local(c, MAX_SEQ, base);
+            let (cl, sl) = rope::rope_tables_local(c, seq, base);
             (
-                Some(b.const_tensor_f32(&cl, vec![MAX_SEQ, rot])),
-                Some(b.const_tensor_f32(&sl, vec![MAX_SEQ, rot])),
+                Some(b.const_tensor_f32(&cl, vec![seq, rot])),
+                Some(b.const_tensor_f32(&sl, vec![seq, rot])),
             )
         }
         None => (None, None),
@@ -1282,6 +1274,7 @@ impl AttnLayout {
     ) -> (Val, Val) {
         let d = c.head_dim;
         let nkv = c.n_kv;
+        let seq = c.context_capacity;
         match self {
             AttnLayout::Single { cache_len, .. } => {
                 let k_upd = b.reshape(kk, vec![1, 1, nkv, d]);
@@ -1296,10 +1289,10 @@ impl AttnLayout {
                     &v_upd,
                     &[&k.layer_idx[li], cache_len, &k.c0, &k.c0],
                 );
-                let kl = b.slice(&*kcache, &[(li, li + 1), (0, MAX_SEQ), (0, nkv), (0, d)]);
-                let kl = b.reshape(&kl, vec![MAX_SEQ, nkv, d]);
-                let vl = b.slice(&*vcache, &[(li, li + 1), (0, MAX_SEQ), (0, nkv), (0, d)]);
-                let vl = b.reshape(&vl, vec![MAX_SEQ, nkv, d]);
+                let kl = b.slice(&*kcache, &[(li, li + 1), (0, seq), (0, nkv), (0, d)]);
+                let kl = b.reshape(&kl, vec![seq, nkv, d]);
+                let vl = b.slice(&*vcache, &[(li, li + 1), (0, seq), (0, nkv), (0, d)]);
+                let vl = b.reshape(&vl, vec![seq, nkv, d]);
                 (kl, vl)
             }
             AttnLayout::Ragged {
@@ -1329,14 +1322,14 @@ impl AttnLayout {
                 }
                 let kl = b.slice(
                     &*kcache,
-                    &[(0, *bsz), (li, li + 1), (0, MAX_SEQ), (0, nkv), (0, d)],
+                    &[(0, *bsz), (li, li + 1), (0, seq), (0, nkv), (0, d)],
                 );
-                let kl = b.reshape(&kl, vec![*bsz, MAX_SEQ, nkv, d]);
+                let kl = b.reshape(&kl, vec![*bsz, seq, nkv, d]);
                 let vl = b.slice(
                     &*vcache,
-                    &[(0, *bsz), (li, li + 1), (0, MAX_SEQ), (0, nkv), (0, d)],
+                    &[(0, *bsz), (li, li + 1), (0, seq), (0, nkv), (0, d)],
                 );
-                let vl = b.reshape(&vl, vec![*bsz, MAX_SEQ, nkv, d]);
+                let vl = b.reshape(&vl, vec![*bsz, seq, nkv, d]);
                 (kl, vl)
             }
             AttnLayout::Prefill { lp, .. } => {
@@ -1362,12 +1355,12 @@ impl AttnLayout {
     fn raw_scores(&self, b: &mut Builder, c: &Config, q: &Val, kslab: &Val) -> Val {
         let d = c.head_dim;
         let (nq, nkv, g) = (c.n_q, c.n_kv, c.group());
+        let seq = c.context_capacity;
         match self {
             AttnLayout::Single { .. } => {
                 let q_r = b.reshape(q, vec![nkv, g, d]);
-                let scores =
-                    b.dot_general(&q_r, kslab, &[0], &[1], &[2], &[2], vec![nkv, g, MAX_SEQ]);
-                b.reshape(&scores, vec![nq, MAX_SEQ])
+                let scores = b.dot_general(&q_r, kslab, &[0], &[1], &[2], &[2], vec![nkv, g, seq]);
+                b.reshape(&scores, vec![nq, seq])
             }
             AttnLayout::Ragged { bsz, .. } => {
                 let q_r = b.reshape(q, vec![*bsz, nkv, g, d]);
@@ -1378,9 +1371,9 @@ impl AttnLayout {
                     &[0, 2],
                     &[3],
                     &[3],
-                    vec![*bsz, nkv, g, MAX_SEQ],
+                    vec![*bsz, nkv, g, seq],
                 );
-                b.reshape(&scores, vec![*bsz, nq, MAX_SEQ])
+                b.reshape(&scores, vec![*bsz, nq, seq])
             }
             AttnLayout::Prefill { lp, .. } => {
                 let q4 = b.reshape(q, vec![*lp, nkv, g, d]);
@@ -1396,12 +1389,13 @@ impl AttnLayout {
     /// See [`layer_mask`].
     fn add_mask(&self, b: &mut Builder, c: &Config, li: usize, scores: &Val) -> Val {
         let (nq, nkv, g) = (c.n_q, c.n_kv, c.group());
+        let seq = c.context_capacity;
         match self {
             AttnLayout::Single {
                 mask, mask_local, ..
             } => {
                 let m = layer_mask(mask, mask_local, c, li);
-                let mb = b.broadcast(m, &[1], vec![nq, MAX_SEQ]);
+                let mb = b.broadcast(m, &[1], vec![nq, seq]);
                 b.add(scores, &mb)
             }
             AttnLayout::Ragged {
@@ -1411,7 +1405,7 @@ impl AttnLayout {
                 ..
             } => {
                 let m = layer_mask(mask, mask_local, c, li);
-                let mb = b.broadcast(m, &[0, 2], vec![*bsz, nq, MAX_SEQ]);
+                let mb = b.broadcast(m, &[0, 2], vec![*bsz, nq, seq]);
                 b.add(scores, &mb)
             }
             AttnLayout::Prefill {
@@ -1440,15 +1434,16 @@ impl AttnLayout {
     fn context(&self, b: &mut Builder, c: &Config, attn: &Val, vslab: &Val) -> Val {
         let d = c.head_dim;
         let (nq, nkv, g) = (c.n_q, c.n_kv, c.group());
+        let seq = c.context_capacity;
         match self {
             AttnLayout::Single { .. } => {
-                let attn_r = b.reshape(attn, vec![nkv, g, MAX_SEQ]);
+                let attn_r = b.reshape(attn, vec![nkv, g, seq]);
                 let o = b.dot_general(&attn_r, vslab, &[0], &[1], &[2], &[0], vec![nkv, g, d]);
                 let o = b.reshape(&o, vec![nq, d]);
                 b.reshape(&o, vec![nq * d])
             }
             AttnLayout::Ragged { bsz, .. } => {
-                let attn_r = b.reshape(attn, vec![*bsz, nkv, g, MAX_SEQ]);
+                let attn_r = b.reshape(attn, vec![*bsz, nkv, g, seq]);
                 let o = b.dot_general(
                     &attn_r,
                     vslab,
@@ -1673,6 +1668,7 @@ pub fn emit_decode_with(c: &Config, sample: bool, precision: Precision) -> Strin
     let k = emit_consts(&mut b, c);
 
     let h = c.hidden;
+    let seq = c.context_capacity;
     // RoPE cos/sin vectors span the rotary width (`head_dim` for a full-rope arch,
     // the smaller `rotary_dim` for partial RoPE; equal for the Llama family).
     let rot = c.rotary_width();
@@ -1699,23 +1695,23 @@ pub fn emit_decode_with(c: &Config, sample: bool, precision: Precision) -> Strin
     };
 
     // mask: keys s valid iff s <= cache_len -> additive 0 / -1e30, shape [S]
-    let ii = b.iota(MAX_SEQ);
-    let clen_b = b.broadcast(&a.cache_len, &[], vec![MAX_SEQ]);
+    let ii = b.iota(seq);
+    let clen_b = b.broadcast(&a.cache_len, &[], vec![seq]);
     let valid = b.compare("LE", &ii, &clen_b, "SIGNED");
-    let zeros_s = b.broadcast(&k.zero, &[], vec![MAX_SEQ]);
-    let negs_s = b.broadcast(&k.neg_big, &[], vec![MAX_SEQ]);
+    let zeros_s = b.broadcast(&k.zero, &[], vec![seq]);
+    let negs_s = b.broadcast(&k.neg_big, &[], vec![seq]);
     let kmask = b.select(&valid, &zeros_s, &negs_s);
     // Gemma2 local (sliding-window) mask (issue #495): a local layer additionally
     // drops keys older than the window, keeping key s iff `cache_len - s < W`. The
     // global `kmask` already encodes causality, so anding the window in is one more
     // `select`: within-window -> keep `kmask`, else force -1e30. Built once and
     // reused by every local layer; emitted only for a config with a window
-    // (Gemma2), so Llama / Qwen2 stay byte-identical. When `W >= MAX_SEQ` the
-    // predicate is always true (`cache_len - s <= MAX_SEQ-1 < W`), so it is a value
+    // (Gemma2), so Llama / Qwen2 stay byte-identical. When `W >= context_capacity`
+    // the predicate is always true, so it is a value
     // no-op, which is why short-context Gemma2 output is unchanged.
     let kmask_local = c.sliding_window.map(|w| {
         let wc = b.const_i32(w as i32);
-        let wb = b.broadcast(&wc, &[], vec![MAX_SEQ]);
+        let wb = b.broadcast(&wc, &[], vec![seq]);
         let age = b.subtract(&clen_b, &ii); // cache_len - s
         let within = b.compare("LT", &age, &wb, "SIGNED");
         b.select(&within, &kmask, &negs_s)
@@ -1756,7 +1752,7 @@ pub fn emit_decode_with(c: &Config, sample: bool, precision: Precision) -> Strin
     };
 
     let sig = render_signature(&decls);
-    let cache_ty = Ty::f32(vec![c.n_layers, MAX_SEQ, c.n_kv, c.head_dim]).render();
+    let cache_ty = Ty::f32(vec![c.n_layers, seq, c.n_kv, c.head_dim]).render();
     format!(
         "module @decode_step {{\n  func.func public @main({sig}) -> ({out_ty}, {cache_ty}, {cache_ty}) {{\n{body}    return {l}, {kc}, {vc} : {out_ty}, {cache_ty}, {cache_ty}\n  }}\n}}\n",
         sig = sig,
@@ -1792,7 +1788,7 @@ struct BatchedArgs {
     token: Val,     // [B] i32
     pos: Val,       // scalar i32 (shared across the batch)
     cache_len: Val, // scalar i32 (shared across the batch)
-    kcache: Val,    // [B, L, MAX_SEQ, nkv, d]
+    kcache: Val,    // [B, L, context_capacity, nkv, d]
     vcache: Val,
 }
 
@@ -1838,13 +1834,25 @@ fn build_batched_arg_schema(
     let kcache = take_arg(
         &mut decls,
         &mut idx,
-        Ty::f32(vec![bsz, c.n_layers, MAX_SEQ, c.n_kv, c.head_dim]),
+        Ty::f32(vec![
+            bsz,
+            c.n_layers,
+            c.context_capacity,
+            c.n_kv,
+            c.head_dim,
+        ]),
         "kcache".into(),
     );
     let vcache = take_arg(
         &mut decls,
         &mut idx,
-        Ty::f32(vec![bsz, c.n_layers, MAX_SEQ, c.n_kv, c.head_dim]),
+        Ty::f32(vec![
+            bsz,
+            c.n_layers,
+            c.context_capacity,
+            c.n_kv,
+            c.head_dim,
+        ]),
         "vcache".into(),
     );
 
@@ -1910,6 +1918,7 @@ pub fn emit_decode_batched_with(
     let nq = c.n_q;
     let nkv = c.n_kv;
     let g = c.group();
+    let seq = c.context_capacity;
 
     // --- head: per-row embed gather, shared rope vectors, shared key mask ---
     let tok_idx = b.reshape(&a.token, vec![bsz, 1]);
@@ -1922,11 +1931,11 @@ pub fn emit_decode_batched_with(
     let sin_vec = b.reshape(&sin_row, vec![d]);
 
     // shared key mask [S]: key s valid iff s <= cache_len -> additive 0 / -1e30
-    let ii = b.iota(MAX_SEQ);
-    let clen_b = b.broadcast(&a.cache_len, &[], vec![MAX_SEQ]);
+    let ii = b.iota(seq);
+    let clen_b = b.broadcast(&a.cache_len, &[], vec![seq]);
     let valid = b.compare("LE", &ii, &clen_b, "SIGNED");
-    let zeros_s = b.broadcast(&k.zero, &[], vec![MAX_SEQ]);
-    let negs_s = b.broadcast(&k.neg_big, &[], vec![MAX_SEQ]);
+    let zeros_s = b.broadcast(&k.zero, &[], vec![seq]);
+    let negs_s = b.broadcast(&k.neg_big, &[], vec![seq]);
     let kmask = b.select(&valid, &zeros_s, &negs_s);
 
     let mut kcache = a.kcache.clone();
@@ -1973,14 +1982,14 @@ pub fn emit_decode_batched_with(
         // read this layer's cache slabs [B, S, nkv, d]
         let kl = b.slice(
             &kcache,
-            &[(0, bsz), (li, li + 1), (0, MAX_SEQ), (0, nkv), (0, d)],
+            &[(0, bsz), (li, li + 1), (0, seq), (0, nkv), (0, d)],
         );
-        let kl = b.reshape(&kl, vec![bsz, MAX_SEQ, nkv, d]);
+        let kl = b.reshape(&kl, vec![bsz, seq, nkv, d]);
         let vl = b.slice(
             &vcache,
-            &[(0, bsz), (li, li + 1), (0, MAX_SEQ), (0, nkv), (0, d)],
+            &[(0, bsz), (li, li + 1), (0, seq), (0, nkv), (0, d)],
         );
-        let vl = b.reshape(&vl, vec![bsz, MAX_SEQ, nkv, d]);
+        let vl = b.reshape(&vl, vec![bsz, seq, nkv, d]);
 
         // GQA scores: batch over (B, kv head). q head kv*g+grp attends kv head
         // kv. Output [B, nkv, g, S] reshapes to [B, nq, S] (head = kv*g+grp).
@@ -1992,25 +2001,25 @@ pub fn emit_decode_batched_with(
             &[0, 2],
             &[3],
             &[3],
-            vec![bsz, nkv, g, MAX_SEQ],
+            vec![bsz, nkv, g, seq],
         );
-        let scores = b.reshape(&scores, vec![bsz, nq, MAX_SEQ]);
-        let scale_b = b.broadcast(&k.scale, &[], vec![bsz, nq, MAX_SEQ]);
+        let scores = b.reshape(&scores, vec![bsz, nq, seq]);
+        let scale_b = b.broadcast(&k.scale, &[], vec![bsz, nq, seq]);
         let scores = b.multiply(&scores, &scale_b);
-        let kmask_b = b.broadcast(&kmask, &[2], vec![bsz, nq, MAX_SEQ]);
+        let kmask_b = b.broadcast(&kmask, &[2], vec![bsz, nq, seq]);
         let scores = b.add(&scores, &kmask_b);
 
         // softmax over the key axis (dim 2)
         let m = b.reduce_max(&scores, 2, &k.neg_inf); // [B, nq]
-        let m_b = b.broadcast(&m, &[0, 1], vec![bsz, nq, MAX_SEQ]);
+        let m_b = b.broadcast(&m, &[0, 1], vec![bsz, nq, seq]);
         let sh = b.subtract(&scores, &m_b);
         let e = b.exponential(&sh);
         let s = b.reduce_add(&e, 2, &k.zero); // [B, nq]
-        let s_b = b.broadcast(&s, &[0, 1], vec![bsz, nq, MAX_SEQ]);
+        let s_b = b.broadcast(&s, &[0, 1], vec![bsz, nq, seq]);
         let attn = b.divide(&e, &s_b); // [B, nq, S]
 
         // context: o[b,h,d] = sum_s attn[b,h,s] * vl[b,s,h/g,d]
-        let attn_r = b.reshape(&attn, vec![bsz, nkv, g, MAX_SEQ]);
+        let attn_r = b.reshape(&attn, vec![bsz, nkv, g, seq]);
         let o = b.dot_general(
             &attn_r,
             &vl,
@@ -2079,7 +2088,7 @@ pub fn emit_decode_batched_with(
     };
 
     let sig = render_signature(&decls);
-    let cache_ty = Ty::f32(vec![bsz, c.n_layers, MAX_SEQ, c.n_kv, c.head_dim]).render();
+    let cache_ty = Ty::f32(vec![bsz, c.n_layers, seq, c.n_kv, c.head_dim]).render();
     format!(
         "module @decode_step {{\n  func.func public @main({sig}) -> ({out_ty}, {cache_ty}, {cache_ty}) {{\n{body}    return {l}, {kc}, {vc} : {out_ty}, {cache_ty}, {cache_ty}\n  }}\n}}\n",
         sig = sig,
@@ -2115,7 +2124,7 @@ struct RaggedArgs {
     token: Val,     // [B] i32
     pos: Val,       // [B] i32 (per row)
     cache_len: Val, // [B] i32 (per row)
-    kcache: Val,    // [B, L, MAX_SEQ, nkv, d]
+    kcache: Val,    // [B, L, context_capacity, nkv, d]
     vcache: Val,
 }
 
@@ -2167,13 +2176,25 @@ fn build_ragged_arg_schema(b: &mut Builder, c: &Config, bsz: usize) -> (Vec<ArgD
     let kcache = take_arg(
         &mut decls,
         &mut idx,
-        Ty::f32(vec![bsz, c.n_layers, MAX_SEQ, c.n_kv, c.head_dim]),
+        Ty::f32(vec![
+            bsz,
+            c.n_layers,
+            c.context_capacity,
+            c.n_kv,
+            c.head_dim,
+        ]),
         "kcache".into(),
     );
     let vcache = take_arg(
         &mut decls,
         &mut idx,
-        Ty::f32(vec![bsz, c.n_layers, MAX_SEQ, c.n_kv, c.head_dim]),
+        Ty::f32(vec![
+            bsz,
+            c.n_layers,
+            c.context_capacity,
+            c.n_kv,
+            c.head_dim,
+        ]),
         "vcache".into(),
     );
 
@@ -2214,6 +2235,7 @@ pub fn emit_decode_ragged_with(
     let row_idx: Vec<Val> = (0..bsz).map(|i| b.const_i32(i as i32)).collect();
 
     let h = c.hidden;
+    let seq = c.context_capacity;
 
     // --- head: per-row embed gather, per-row rope gather, per-row key mask ---
     let tok_idx = b.reshape(&a.token, vec![bsz, 1]);
@@ -2231,20 +2253,20 @@ pub fn emit_decode_ragged_with(
     };
 
     // per-row key mask [B,S]: key s valid for row b iff s <= cache_len[b]
-    let ii = b.iota(MAX_SEQ); // [S]
-    let ii_b = b.broadcast(&ii, &[1], vec![bsz, MAX_SEQ]); // entry[b,s] = s
-    let clen_b = b.broadcast(&a.cache_len, &[0], vec![bsz, MAX_SEQ]); // entry[b,s] = cache_len[b]
+    let ii = b.iota(seq); // [S]
+    let ii_b = b.broadcast(&ii, &[1], vec![bsz, seq]); // entry[b,s] = s
+    let clen_b = b.broadcast(&a.cache_len, &[0], vec![bsz, seq]); // entry[b,s] = cache_len[b]
     let valid = b.compare("LE", &ii_b, &clen_b, "SIGNED");
-    let zeros = b.broadcast(&k.zero, &[], vec![bsz, MAX_SEQ]);
-    let negs = b.broadcast(&k.neg_big, &[], vec![bsz, MAX_SEQ]);
+    let zeros = b.broadcast(&k.zero, &[], vec![bsz, seq]);
+    let negs = b.broadcast(&k.neg_big, &[], vec![bsz, seq]);
     let kmask = b.select(&valid, &zeros, &negs); // [B, S]
     // Gemma2 local (sliding-window) mask (issue #495), per row: keep key s for row
     // b iff `cache_len[b] - s < W`. And it into the causal `kmask` with one more
     // `select`. Emitted only for a windowed config (Gemma2); reused by every local
-    // layer. No-op on the value when `W >= MAX_SEQ` (short-context parity).
+    // layer. No-op on the value when `W >= context_capacity` (short-context parity).
     let kmask_local = c.sliding_window.map(|w| {
         let wc = b.const_i32(w as i32);
-        let wb = b.broadcast(&wc, &[], vec![bsz, MAX_SEQ]);
+        let wb = b.broadcast(&wc, &[], vec![bsz, seq]);
         let age = b.subtract(&clen_b, &ii_b); // cache_len[b] - s
         let within = b.compare("LT", &age, &wb, "SIGNED");
         b.select(&within, &kmask, &negs)
@@ -2294,7 +2316,7 @@ pub fn emit_decode_ragged_with(
     };
 
     let sig = render_signature(&decls);
-    let cache_ty = Ty::f32(vec![bsz, c.n_layers, MAX_SEQ, c.n_kv, c.head_dim]).render();
+    let cache_ty = Ty::f32(vec![bsz, c.n_layers, seq, c.n_kv, c.head_dim]).render();
     format!(
         "module @decode_step {{\n  func.func public @main({sig}) -> ({out_ty}, {cache_ty}, {cache_ty}) {{\n{body}    return {l}, {kc}, {vc} : {out_ty}, {cache_ty}, {cache_ty}\n  }}\n}}\n",
         sig = sig,
@@ -2471,7 +2493,7 @@ pub fn emit_prefill(c: &Config, sample: bool) -> String {
 }
 
 pub fn emit_prefill_with(c: &Config, sample: bool, precision: Precision) -> String {
-    let lp = PREFILL_LP;
+    let lp = c.context_capacity;
     let mut b = Builder::new().with_precision(precision);
     let (decls, a) = build_prefill_arg_schema(&mut b, c, lp);
     let k = emit_consts(&mut b, c);
@@ -2528,8 +2550,8 @@ pub fn emit_prefill_with(c: &Config, sample: bool, precision: Precision) -> Stri
     };
 
     // caches start as zeros; prefill writes the [0:Lp] block and returns them
-    let mut kcache = b.broadcast(&k.zero, &[], vec![c.n_layers, MAX_SEQ, nkv, d]);
-    let mut vcache = b.broadcast(&k.zero, &[], vec![c.n_layers, MAX_SEQ, nkv, d]);
+    let mut kcache = b.broadcast(&k.zero, &[], vec![c.n_layers, lp, nkv, d]);
+    let mut vcache = b.broadcast(&k.zero, &[], vec![c.n_layers, lp, nkv, d]);
 
     for li in 0..c.n_layers {
         let lw = &a.layers[li];
@@ -2564,7 +2586,7 @@ pub fn emit_prefill_with(c: &Config, sample: bool, precision: Precision) -> Stri
     };
 
     let sig = render_signature(&decls);
-    let cache_ty = Ty::f32(vec![c.n_layers, MAX_SEQ, c.n_kv, c.head_dim]).render();
+    let cache_ty = Ty::f32(vec![c.n_layers, lp, c.n_kv, c.head_dim]).render();
     format!(
         "module @prefill {{\n  func.func public @main({sig}) -> ({out_ty}, {cache_ty}, {cache_ty}) {{\n{body}    return {l}, {kc}, {vc} : {out_ty}, {cache_ty}, {cache_ty}\n  }}\n}}\n",
         sig = sig,

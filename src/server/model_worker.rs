@@ -983,9 +983,16 @@ pub(crate) fn spawn_xla_model_worker(
         run_core_thread_or_abort("model-worker-xla", move || {
             let device = std::env::var("MLXCEL_XLA_DEVICE")
                 .unwrap_or_else(|_| mlxcel_xla::default_device().to_string());
+            let context_capacity = match mlxcel_xla::context_capacity_from_env() {
+                Ok(value) => value,
+                Err(err) => {
+                    tracing::error!("Failed to configure the OpenXLA engine: {err}");
+                    return;
+                }
+            };
             tracing::info!(
                 "Model worker thread starting (OpenXLA continuous batching, B_max={b_max}, \
-                 device={device}), loading model..."
+                 context_capacity={context_capacity}, device={device}), loading model..."
             );
 
             let load_start = Instant::now();
@@ -996,7 +1003,12 @@ pub(crate) fn spawn_xla_model_worker(
                     return;
                 }
             };
-            let engine = match mlxcel_xla::XlaBatchEngine::load(&model_path, b_max, &device) {
+            let engine = match mlxcel_xla::XlaBatchEngine::load_with_context_capacity(
+                &model_path,
+                b_max,
+                &device,
+                context_capacity,
+            ) {
                 Ok(engine) => engine,
                 Err(err) => {
                     tracing::error!("Failed to load the OpenXLA engine: {err}");
@@ -1007,7 +1019,7 @@ pub(crate) fn spawn_xla_model_worker(
             tracing::info!(
                 worker_model_id = %worker_model_id,
                 load_seconds = load_elapsed.as_secs_f64(),
-                "OpenXLA model {worker_model_id} loaded in {:.3}s (B_max={b_max}, device={device})",
+                "OpenXLA model {worker_model_id} loaded in {:.3}s (B_max={b_max}, context_capacity={context_capacity}, device={device})",
                 load_elapsed.as_secs_f64(),
             );
             loaded.store(true, Ordering::Release);
