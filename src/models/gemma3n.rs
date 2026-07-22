@@ -1747,3 +1747,175 @@ impl Gemma3nMultimodalEmbedder {
         })
     }
 }
+
+/// Gemma 3n audio embedder with both the learned hard-token table and the
+/// soft encoder projection. Audio padding uses the final hard-vocabulary row,
+/// while real encoder frames use the separate soft normalization path.
+pub struct Gemma3nAudioEmbedder {
+    embedding: UnifiedEmbedding,
+    hard_embedding_norm: RMSNorm,
+    soft_embedding_norm: RMSNorm,
+    embedding_projection: UnifiedLinear,
+    post_projection_norm: RMSNoScale,
+    vocab_size: usize,
+    vocab_offset: i32,
+}
+
+impl Gemma3nAudioEmbedder {
+    pub fn from_weights(
+        weights: &WeightMap,
+        prefix: &str,
+        config: &crate::audio::gemma3n::Gemma3nAudioConfig,
+        text_hidden_size: usize,
+        group_size: i32,
+        bits: i32,
+    ) -> Result<Self, String> {
+        let embedding_prefix = format!("{prefix}.embedding");
+        let weight_key = format!("{embedding_prefix}.weight");
+        let weight = weights
+            .get(&weight_key)
+            .ok_or_else(|| format!("Gemma3n audio weight not found: {weight_key}"))?;
+        let shape = mlxcel_core::array_shape(weight);
+        let quantized = weights.contains_key(&format!("{embedding_prefix}.scales"));
+        if shape.len() != 2
+            || shape[0] != config.vocab_size as i32
+            || (!quantized && shape[1] != config.hidden_size as i32)
+        {
+            return Err(format!(
+                "{weight_key} has shape {shape:?}; expected logical [{}, {}]",
+                config.vocab_size, config.hidden_size
+            ));
+        }
+        if let Some(scales) = weights.get(&format!("{embedding_prefix}.scales")) {
+            let scales_shape = mlxcel_core::array_shape(scales);
+            if scales_shape.len() != 2 || scales_shape[0] != config.vocab_size as i32 {
+                return Err(format!(
+                    "{embedding_prefix}.scales has invalid shape {scales_shape:?}"
+                ));
+            }
+            if let Some(biases) = weights.get(&format!("{embedding_prefix}.biases"))
+                && mlxcel_core::array_shape(biases) != scales_shape
+            {
+                return Err(format!(
+                    "{embedding_prefix}.biases must match scales shape {scales_shape:?}"
+                ));
+            }
+        }
+        let embedding =
+            UnifiedEmbedding::from_weights(weights, &embedding_prefix, group_size, bits)?;
+        let hard_weight =
+            get_weight_copy(weights, &format!("{prefix}.hard_embedding_norm.weight"))?;
+        let soft_weight =
+            get_weight_copy(weights, &format!("{prefix}.soft_embedding_norm.weight"))?;
+        if mlxcel_core::array_shape(&hard_weight) != [config.hidden_size as i32]
+            || mlxcel_core::array_shape(&soft_weight) != [config.hidden_size as i32]
+        {
+            return Err(format!(
+                "{prefix} audio RMS norm weights must have {} elements",
+                config.hidden_size
+            ));
+        }
+        Ok(Self {
+            embedding,
+            hard_embedding_norm: RMSNorm::new(hard_weight, config.rms_norm_eps),
+            soft_embedding_norm: RMSNorm::new(soft_weight, config.rms_norm_eps),
+            embedding_projection: crate::audio::gemma3n::checked_unified_linear(
+                weights,
+                &format!("{prefix}.embedding_projection"),
+                config.hidden_size,
+                text_hidden_size,
+                group_size,
+                bits,
+            )?,
+            post_projection_norm: RMSNoScale::new(text_hidden_size as i32, config.rms_norm_eps),
+            vocab_size: config.vocab_size,
+            vocab_offset: config.vocab_offset,
+        })
+    }
+
+    fn project(&self, normalized: &MlxArray) -> UniquePtr<MlxArray> {
+        self.post_projection_norm
+            .forward(&self.embedding_projection.forward(normalized))
+    }
+
+    pub fn forward_soft(&self, inputs: &MlxArray) -> UniquePtr<MlxArray> {
+        self.project(&self.soft_embedding_norm.forward(inputs))
+    }
+
+    /// Replace the text-table rows for hard audio vocabulary tokens. The
+    /// official model performs this before replacing `<audio_soft_token>`
+    /// rows with encoder output; notably `<end_of_audio>` remains a hard
+    /// audio embedding and must not use the text embedding table.
+    pub fn merge_hard_tokens(
+        &self,
+        input_ids: &MlxArray,
+        inputs_embeds: &MlxArray,
+    ) -> UniquePtr<MlxArray> {
+        let offset = mlxcel_core::from_slice_i32(&[self.vocab_offset], &[1]);
+        let audio_mask = mlxcel_core::greater_equal(input_ids, &offset);
+        let dummy =
+            mlxcel_core::from_slice_i32(&[self.vocab_offset + self.vocab_size as i32 - 1], &[1]);
+        let global_ids = mlxcel_core::where_cond(&audio_mask, input_ids, &dummy);
+        let local_ids = mlxcel_core::subtract(&global_ids, &offset);
+        let hard = self.embedding.forward(&local_ids);
+        let hard = self.project(&self.hard_embedding_norm.forward(&hard));
+        mlxcel_core::where_cond(
+            &mlxcel_core::expand_dims(&audio_mask, -1),
+            &hard,
+            inputs_embeds,
+        )
+    }
+
+    pub fn padding_embedding(&self) -> UniquePtr<MlxArray> {
+        let token = mlxcel_core::from_slice_i32(&[(self.vocab_size - 1) as i32], &[1, 1]);
+        let embedded = self.embedding.forward(&token);
+        self.project(&self.hard_embedding_norm.forward(&embedded))
+    }
+}
+
+#[cfg(test)]
+mod audio_embedder_tests {
+    use super::*;
+
+    fn values(array: &MlxArray) -> Vec<f32> {
+        mlxcel_core::eval(array);
+        mlxcel_core::array_to_raw_bytes(array)
+            .chunks_exact(4)
+            .map(|bytes| f32::from_ne_bytes(bytes.try_into().unwrap()))
+            .collect()
+    }
+
+    #[test]
+    fn hard_audio_vocabulary_replaces_only_tokens_at_or_above_offset() {
+        let config = crate::audio::gemma3n::Gemma3nAudioConfig {
+            vocab_size: 2,
+            vocab_offset: 100,
+            hidden_size: 2,
+            ..crate::audio::gemma3n::Gemma3nAudioConfig::default()
+        };
+        let mut weights = WeightMap::new();
+        weights.insert(
+            "embed.embedding.weight".into(),
+            mlxcel_core::from_slice_f32(&[1.0, 0.0, 0.0, 1.0], &[2, 2]),
+        );
+        for name in ["hard_embedding_norm", "soft_embedding_norm"] {
+            weights.insert(
+                format!("embed.{name}.weight"),
+                mlxcel_core::ones(&[2], mlxcel_core::dtype::FLOAT32),
+            );
+        }
+        weights.insert(
+            "embed.embedding_projection.weight".into(),
+            mlxcel_core::from_slice_f32(&[1.0, 0.0, 0.0, 1.0], &[2, 2]),
+        );
+        let embedder =
+            Gemma3nAudioEmbedder::from_weights(&weights, "embed", &config, 2, 64, 4).unwrap();
+        let ids = mlxcel_core::from_slice_i32(&[99, 100, 101], &[1, 3]);
+        let text = mlxcel_core::zeros(&[1, 3, 2], mlxcel_core::dtype::FLOAT32);
+        let merged = embedder.merge_hard_tokens(&ids, &text);
+        let output = values(&merged);
+        assert_eq!(&output[..2], &[0.0, 0.0]);
+        assert!(output[2] > 1.4 && output[3].abs() < 1e-6);
+        assert!(output[4].abs() < 1e-6 && output[5] > 1.4);
+    }
+}

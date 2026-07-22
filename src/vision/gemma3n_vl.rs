@@ -51,6 +51,12 @@ pub struct Gemma3nVLModel {
     pub boi_token_id: i32,                              // 255_999 (<start_of_image>)
     pub eoi_token_id: i32,                              // 262_144 (<end_of_image>)
     pub vision_hidden_size: usize,                      // 2048
+    pub audio_tower: Option<crate::audio::gemma3n::Gemma3nAudioEncoder>,
+    pub embed_audio: Option<crate::models::gemma3n::Gemma3nAudioEmbedder>,
+    pub audio_token_id: i32,
+    pub boa_token_id: i32,
+    pub eoa_token_id: i32,
+    pub audio_soft_tokens_per_clip: usize,
     /// Per-sequence storage for the projected `per_layer_inputs` tensor
     /// that is produced during embedding prep and consumed during the
     /// prefill `forward_with_embeddings_and_sequence_id` call. See module
@@ -78,8 +84,35 @@ impl Gemma3nVLModel {
             boi_token_id,
             eoi_token_id,
             vision_hidden_size,
+            audio_tower: None,
+            embed_audio: None,
+            audio_token_id: 262_273,
+            boa_token_id: 256_000,
+            eoa_token_id: 262_272,
+            audio_soft_tokens_per_clip: crate::audio::gemma3n::GEMMA3N_AUDIO_SOFT_TOKENS,
             per_layer_inputs_state: Gemma3nPerLayerInputsState::new(),
         }
+    }
+
+    pub fn set_audio(
+        &mut self,
+        audio_tower: crate::audio::gemma3n::Gemma3nAudioEncoder,
+        embed_audio: crate::models::gemma3n::Gemma3nAudioEmbedder,
+        audio_token_id: i32,
+        boa_token_id: i32,
+        eoa_token_id: i32,
+        audio_soft_tokens_per_clip: usize,
+    ) {
+        self.audio_tower = Some(audio_tower);
+        self.embed_audio = Some(embed_audio);
+        self.audio_token_id = audio_token_id;
+        self.boa_token_id = boa_token_id;
+        self.eoa_token_id = eoa_token_id;
+        self.audio_soft_tokens_per_clip = audio_soft_tokens_per_clip;
+    }
+
+    pub fn supports_audio(&self) -> bool {
+        self.audio_tower.is_some() && self.embed_audio.is_some()
     }
 
     /// Get input embeddings with vision features merged in.
@@ -96,51 +129,142 @@ impl Gemma3nVLModel {
         input_ids: &MlxArray,
         pixel_values: &MlxArray,
     ) -> merge::InputEmbeddings {
+        self.get_input_embeddings_with_media(input_ids, Some(pixel_values), None, None)
+            .expect("Gemma3n image embedding preparation failed")
+    }
+
+    /// Prepare text embeddings and merge any supplied image and/or audio
+    /// features. Audio masks use `true = invalid`, matching the encoder.
+    pub fn get_input_embeddings_with_media(
+        &self,
+        input_ids: &MlxArray,
+        pixel_values: Option<&MlxArray>,
+        audio_features: Option<&MlxArray>,
+        invalid_audio_mask: Option<&MlxArray>,
+    ) -> Result<merge::InputEmbeddings, String> {
         // 1. Text embeddings
-        let inputs_embeds = self.text_model.language_model.get_embed_tokens(input_ids);
+        let mut inputs_embeds = self.text_model.language_model.get_embed_tokens(input_ids);
+        if let Some(embed_audio) = &self.embed_audio {
+            inputs_embeds = embed_audio.merge_hard_tokens(input_ids, &inputs_embeds);
+        }
 
         // 2. Per-layer inputs (image_token_id >= vocab_size_per_layer, auto-zeroed)
         let per_layer_inputs = self
             .text_model
             .language_model
             .get_per_layer_inputs(input_ids);
+
+        let mut merged = merge::InputEmbeddings {
+            inputs_embeds,
+            attention_mask_4d: None,
+        };
+
+        // 3. Optional vision path.
+        if let Some(pixel_values) = pixel_values {
+            let embed_dtype = mlxcel_core::array_dtype(&merged.inputs_embeds);
+            let pv = mlxcel_core::astype(pixel_values, embed_dtype);
+            let vision_out = self.vision_tower.forward(&pv);
+            let vo = mlxcel_core::transpose_axes(&vision_out, &[0, 3, 1, 2]);
+            let vo_shape = mlxcel_core::array_shape(&vo);
+            let (batch, channels) = (vo_shape[0], vo_shape[1]);
+            let patches = vo_shape[2] * vo_shape[3];
+            let vo = mlxcel_core::reshape(&vo, &[batch, channels, patches]);
+            let vo = mlxcel_core::transpose_axes(&vo, &[0, 2, 1]);
+            let vo = mlxcel_core::multiply_scalar(&vo, (self.vision_hidden_size as f32).sqrt());
+            let image_features = self.embed_vision.forward_soft(&vo);
+            merged = merge::merge_llava(
+                self.image_token_id,
+                &image_features,
+                &merged.inputs_embeds,
+                input_ids,
+            );
+        }
+
+        // 4. Optional audio tower, projection, fixed-length padding and merge.
+        match (audio_features, invalid_audio_mask) {
+            (Some(audio_features), Some(invalid_audio_mask)) => {
+                let audio_tower = self
+                    .audio_tower
+                    .as_ref()
+                    .ok_or_else(|| "Gemma3n checkpoint has no audio tower".to_string())?;
+                let embed_audio = self
+                    .embed_audio
+                    .as_ref()
+                    .ok_or_else(|| "Gemma3n checkpoint has no audio embedder".to_string())?;
+                let padding_embedding = embed_audio.padding_embedding();
+                let input_shape = mlxcel_core::array_shape(audio_features);
+                let mask_shape = mlxcel_core::array_shape(invalid_audio_mask);
+                if input_shape.len() != 3 || input_shape[2] != 128 || mask_shape != input_shape[..2]
+                {
+                    return Err(format!(
+                        "Gemma3n audio input shapes must be [B,T,128] and [B,T], got {input_shape:?} and {mask_shape:?}"
+                    ));
+                }
+                let batch_size = input_shape[0];
+                let projected = if input_shape[1] == 0 {
+                    // The pinned processor returns zero mel frames for clips
+                    // shorter than its 513-sample unfold. The reference model
+                    // consequently emits only the fixed hard-padding rows.
+                    let hidden = mlxcel_core::array_shape(&padding_embedding)[2];
+                    mlxcel_core::broadcast_to(
+                        &padding_embedding,
+                        &[batch_size, self.audio_soft_tokens_per_clip as i32, hidden],
+                    )
+                } else {
+                    let (encoded, encoded_invalid_mask) =
+                        audio_tower.forward(audio_features, invalid_audio_mask)?;
+                    let mut projected = embed_audio.forward_soft(&encoded);
+                    let shape = mlxcel_core::array_shape(&projected);
+                    if shape[1] > self.audio_soft_tokens_per_clip as i32 {
+                        return Err(format!(
+                            "Gemma3n audio encoder emitted {} tokens, exceeding the fixed {}-token contract",
+                            shape[1], self.audio_soft_tokens_per_clip
+                        ));
+                    }
+                    let invalid =
+                        mlxcel_core::reshape(&encoded_invalid_mask, &[shape[0], shape[1], 1]);
+                    projected = mlxcel_core::where_cond(&invalid, &padding_embedding, &projected);
+                    let missing = self.audio_soft_tokens_per_clip as i32 - shape[1];
+                    if missing > 0 {
+                        let padding = mlxcel_core::broadcast_to(
+                            &padding_embedding,
+                            &[shape[0], missing, shape[2]],
+                        );
+                        projected = mlxcel_core::concatenate(&projected, &padding, 1);
+                    }
+                    projected
+                };
+
+                let expected_tokens = batch_size as usize * self.audio_soft_tokens_per_clip;
+                let actual_tokens = count_i32_token(input_ids, self.audio_token_id)?;
+                if actual_tokens != expected_tokens {
+                    return Err(format!(
+                        "Gemma3n audio features and placeholders do not match: {expected_tokens} features, {actual_tokens} tokens"
+                    ));
+                }
+                merged = merge::merge_llava(
+                    self.audio_token_id,
+                    &projected,
+                    &merged.inputs_embeds,
+                    input_ids,
+                );
+            }
+            (None, None) => {}
+            _ => {
+                return Err(
+                    "Gemma3n audio features and invalid mask must be provided together".into(),
+                );
+            }
+        }
+
+        // The official multimodal forward projects PLE after hard/soft media
+        // embeddings have replaced their placeholder rows. Projecting from
+        // the initial text-table rows gives image/audio positions the wrong
+        // router input.
         let per_layer_inputs = self
             .text_model
             .language_model
-            .project_per_layer_inputs(&inputs_embeds, &per_layer_inputs);
-
-        // 3. Vision: pixel_values → VisionTower → [B, H, W, C] (NHWC)
-        let embed_dtype = mlxcel_core::array_dtype(&inputs_embeds);
-        let pv = mlxcel_core::astype(pixel_values, embed_dtype);
-        let vision_out = self.vision_tower.forward(&pv);
-
-        // Reshape NHWC → [B, num_patches, hidden_size]
-        let vo = mlxcel_core::transpose_axes(&vision_out, &[0, 3, 1, 2]);
-        let vo_shape = mlxcel_core::array_shape(&vo);
-        let b = vo_shape[0];
-        let c = vo_shape[1]; // hidden_size (2048)
-        let num_patches = vo_shape[2] * vo_shape[3]; // H*W
-        let vo = mlxcel_core::reshape(&vo, &[b, c, num_patches]);
-        let vo = mlxcel_core::transpose_axes(&vo, &[0, 2, 1]); // [B, num_patches, hidden_size]
-
-        // Scale by sqrt(vision_hidden_size)
-        let scale = mlxcel_core::full_f32(
-            &[1],
-            (self.vision_hidden_size as f32).sqrt(),
-            mlxcel_core::dtype::FLOAT32,
-        );
-        let vo = mlxcel_core::multiply(&vo, &scale);
-
-        // 4. Multimodal embedder: → [B, num_patches, text_hidden]
-        let image_features = self.embed_vision.forward_soft(&vo);
-
-        // 5. masked_scatter merge
-        let merged = merge::merge_llava(
-            self.image_token_id,
-            &image_features,
-            &inputs_embeds,
-            input_ids,
-        );
+            .project_per_layer_inputs(&merged.inputs_embeds, &per_layer_inputs);
 
         // 6. Park the projected per_layer_inputs in the state container's
         //    fallback slot. The scheduler's
@@ -151,7 +275,7 @@ impl Gemma3nVLModel {
         self.per_layer_inputs_state
             .set_fallback(Some(per_layer_inputs));
 
-        merged
+        Ok(merged)
     }
 
     // -- Per-sequence per_layer_inputs (issue #85) --------------------
@@ -201,15 +325,12 @@ impl Gemma3nVLModel {
         }
     }
 
-    /// Internal helper: resolve the active per_layer_inputs tensor for a
-    /// VLM prefill. Prefers the per-`SequenceId` slot (server flow) and
-    /// falls back to the fallback slot (CLI / bench / single-row).
+    /// Resolve the active per-layer tensor. A server sequence must never
+    /// consume the unbound fallback slot: doing so can reuse another
+    /// concurrent request's PLE state.
     fn take_per_layer_inputs(&self, seq_id: Option<SequenceId>) -> Option<UniquePtr<MlxArray>> {
         match seq_id {
-            Some(id) => self
-                .per_layer_inputs_state
-                .take_for_sequence(id)
-                .or_else(|| self.per_layer_inputs_state.take_fallback()),
+            Some(id) => self.per_layer_inputs_state.take_for_sequence(id),
             None => self.per_layer_inputs_state.take_fallback(),
         }
     }
@@ -241,6 +362,18 @@ impl Gemma3nVLModel {
             mlxcel_core::zeros(&[pli_shape[0], pad_rows, pli_shape[2], pli_shape[3]], dtype);
         Some(mlxcel_core::concatenate(per_layer_inputs, &padding, 1))
     }
+}
+
+fn count_i32_token(input_ids: &MlxArray, token_id: i32) -> Result<usize, String> {
+    if mlxcel_core::array_dtype(input_ids) != mlxcel_core::dtype::INT32 {
+        return Err("Gemma3n input ids must use int32 dtype".into());
+    }
+    mlxcel_core::eval(input_ids);
+    let bytes = mlxcel_core::array_to_raw_bytes(input_ids);
+    Ok(bytes
+        .chunks_exact(std::mem::size_of::<i32>())
+        .filter(|bytes| i32::from_ne_bytes((*bytes).try_into().unwrap()) == token_id)
+        .count())
 }
 
 impl LanguageModel for Gemma3nVLModel {

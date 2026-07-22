@@ -29,6 +29,10 @@ fn gemma3n_metadata_applies_defaults_and_overrides() {
     assert_eq!(defaults.boi_token_id, 255_999);
     assert_eq!(defaults.eoi_token_id, 262_144);
     assert!((defaults.vision_rms_eps - 1e-6).abs() < f32::EPSILON);
+    assert_eq!(defaults.audio_token_id, 262_273);
+    assert_eq!(defaults.boa_token_id, 256_000);
+    assert_eq!(defaults.eoa_token_id, 262_272);
+    assert_eq!(defaults.audio_soft_tokens_per_clip, 188);
 
     let overrides = gemma3n_metadata(&json!({
         "vision_config": {
@@ -39,12 +43,20 @@ fn gemma3n_metadata_applies_defaults_and_overrides() {
         "image_token_index": 9,
         "boi_token_id": 10,
         "eoi_token_id": 11
+        ,"audio_token_id": 12,
+        "boa_token_id": 13,
+        "eoa_token_id": 14,
+        "audio_soft_tokens_per_image": 15
     }));
     assert_eq!(overrides.vision_hidden_size, 3072);
     assert_eq!(overrides.image_size, 384);
     assert_eq!(overrides.image_token_id, 9);
     assert_eq!(overrides.boi_token_id, 10);
     assert_eq!(overrides.eoi_token_id, 11);
+    assert_eq!(overrides.audio_token_id, 12);
+    assert_eq!(overrides.boa_token_id, 13);
+    assert_eq!(overrides.eoa_token_id, 14);
+    assert_eq!(overrides.audio_soft_tokens_per_clip, 15);
     assert!((overrides.vision_rms_eps - 1e-5).abs() < f32::EPSILON);
 }
 
@@ -95,6 +107,10 @@ fn sanitize_gemma3n_weights_strips_model_prefix_and_transposes_conv_weights() {
         "model.language_model.embed_tokens.weight".to_string(),
         mlxcel_core::ones(&[4, 4], dtype::FLOAT32),
     );
+    raw_weights.insert(
+        "model.audio_tower.conformer.0.lconv1d.depthwise_conv1d.weight".to_string(),
+        mlxcel_core::ones(&[1536, 1, 5], dtype::FLOAT32),
+    );
 
     let sanitized = sanitize_gemma3n_weights(raw_weights);
 
@@ -107,6 +123,14 @@ fn sanitize_gemma3n_weights_strips_model_prefix_and_transposes_conv_weights() {
                 .unwrap()
         ),
         vec![8, 3, 3, 16]
+    );
+    assert_eq!(
+        mlxcel_core::array_shape(
+            sanitized
+                .get("audio_tower.conformer.0.lconv1d.depthwise_conv1d.weight")
+                .unwrap()
+        ),
+        vec![1536, 5, 1]
     );
 }
 

@@ -13,11 +13,100 @@
 // limitations under the License.
 
 use super::{
-    VlmPreparationSummary, expand_gemma4_audio_tokens_for_server,
+    VlmPreparationSummary, expand_gemma3n_audio_tokens, expand_gemma4_audio_tokens_for_server,
     expand_gemma4_unified_video_tokens, expand_gemma4_video_tokens,
     expand_nemotron_h_nano_omni_audio_tokens_for_server, format_molmo_v1_prompt_for_processor,
     prepared_embedding_refs, shift_molmo_v1_image_input_idx_for_bos, should_prepare_vlm_embeddings,
 };
+use crate::vlm_prompt::{ImageTokenBlockInfo, apply_image_token_blocks};
+
+#[test]
+fn gemma3n_audio_expands_multiple_placeholders_in_order() {
+    const AUDIO: i32 = 262_273;
+    let mut prompt = vec![10, AUDIO, 20, AUDIO, 106];
+    expand_gemma3n_audio_tokens(
+        &mut prompt,
+        AUDIO,
+        256_000,
+        262_272,
+        2,
+        3,
+        &[108],
+        Some(106),
+    )
+    .unwrap();
+    assert_eq!(
+        prompt,
+        vec![
+            10, 108, 256_000, AUDIO, AUDIO, AUDIO, 262_272, 108, 20, 108, 256_000, AUDIO, AUDIO,
+            AUDIO, 262_272, 108, 106,
+        ]
+    );
+}
+
+#[test]
+fn gemma3n_audio_inserts_all_clips_inside_user_turn() {
+    const AUDIO: i32 = 262_273;
+    let mut prompt = vec![1, 2, 106, 3];
+    expand_gemma3n_audio_tokens(&mut prompt, AUDIO, 256_000, 262_272, 2, 2, &[], Some(106))
+        .unwrap();
+    assert_eq!(
+        prompt,
+        vec![
+            1, 2, 256_000, AUDIO, AUDIO, 262_272, 256_000, AUDIO, AUDIO, 262_272, 106, 3,
+        ]
+    );
+}
+
+#[test]
+fn gemma3n_audio_rejects_placeholder_clip_mismatch() {
+    let mut prompt = vec![1, 262_273, 2];
+    let error =
+        expand_gemma3n_audio_tokens(&mut prompt, 262_273, 256_000, 262_272, 2, 188, &[], None)
+            .unwrap_err();
+    assert!(error.to_string().contains("placeholder mismatch"));
+}
+
+#[test]
+fn gemma3n_mixed_media_preserves_image_then_audio_order() {
+    const IMAGE: i32 = 262_145;
+    const AUDIO: i32 = 262_273;
+    let mut prompt = vec![2, IMAGE, 9, AUDIO, 106];
+    apply_image_token_blocks(
+        &mut prompt,
+        ImageTokenBlockInfo {
+            use_boi_eoi: true,
+            image_token_id: IMAGE,
+            mm_tokens_per_image: 2,
+            boi_token_id: 255_999,
+            eoi_token_id: 262_144,
+            has_bos: true,
+            separator_token_id: None,
+            suffix_tokens: Vec::new(),
+            block_prefix_tokens: Vec::new(),
+            block_suffix_tokens: Vec::new(),
+        },
+        1,
+    )
+    .unwrap();
+    expand_gemma3n_audio_tokens(
+        &mut prompt,
+        AUDIO,
+        256_000,
+        262_272,
+        1,
+        2,
+        &[108],
+        Some(106),
+    )
+    .unwrap();
+    assert_eq!(
+        prompt,
+        vec![
+            2, 255_999, IMAGE, IMAGE, 262_144, 9, 108, 256_000, AUDIO, AUDIO, 262_272, 108, 106,
+        ]
+    );
+}
 use crate::vision::merge::InputEmbeddings;
 use crate::vlm_prompt::{ImageTokenBlockAction, ImageTokenBlockStats};
 use mlxcel_core::{self, UniquePtr, dtype};

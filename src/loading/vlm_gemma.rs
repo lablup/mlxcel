@@ -42,6 +42,10 @@ struct Gemma3nMetadata {
     boi_token_id: i32,
     eoi_token_id: i32,
     vision_rms_eps: f32,
+    audio_token_id: i32,
+    boa_token_id: i32,
+    eoa_token_id: i32,
+    audio_soft_tokens_per_clip: usize,
 }
 
 fn gemma3n_metadata(config: &Value) -> Gemma3nMetadata {
@@ -74,6 +78,23 @@ fn gemma3n_metadata(config: &Value) -> Gemma3nMetadata {
             .and_then(|vc| vc.get("rms_norm_eps"))
             .and_then(|v| v.as_f64())
             .unwrap_or(1e-6) as f32,
+        audio_token_id: config
+            .get("audio_token_id")
+            .and_then(|value| value.as_i64())
+            .unwrap_or(262_273) as i32,
+        boa_token_id: config
+            .get("boa_token_id")
+            .and_then(|value| value.as_i64())
+            .unwrap_or(256_000) as i32,
+        eoa_token_id: config
+            .get("eoa_token_id")
+            .and_then(|value| value.as_i64())
+            .unwrap_or(262_272) as i32,
+        audio_soft_tokens_per_clip: config
+            .get("audio_soft_tokens_per_image")
+            .and_then(|value| value.as_u64())
+            .unwrap_or(crate::audio::gemma3n::GEMMA3N_AUDIO_SOFT_TOKENS as u64)
+            as usize,
     }
 }
 
@@ -111,6 +132,8 @@ fn sanitize_gemma3n_weights(raw_weights: WeightMap) -> WeightMap {
             let shape = mlxcel_core::array_shape(&value);
             if shape.len() == 4 {
                 mlxcel_core::transpose_axes(&value, &[0, 2, 3, 1])
+            } else if shape.len() == 3 && new_key.ends_with(".lconv1d.depthwise_conv1d.weight") {
+                mlxcel_core::transpose_axes(&value, &[0, 2, 1])
             } else {
                 mlxcel_core::copy(&value)
             }
@@ -253,7 +276,7 @@ pub(crate) fn load_gemma3n_vlm(model_path: &Path) -> Result<LoadedModel> {
 
     let processor = SigLipProcessor::new_rescale_only(metadata.image_size);
 
-    let vlm = vision::Gemma3nVLModel::new(
+    let mut vlm = vision::Gemma3nVLModel::new(
         text_model,
         vision_tower,
         embed_vision,
@@ -263,6 +286,43 @@ pub(crate) fn load_gemma3n_vlm(model_path: &Path) -> Result<LoadedModel> {
         metadata.eoi_token_id,
         metadata.vision_hidden_size,
     );
+
+    // Audio is optional at load time. Text/vision-only converted checkpoints
+    // can omit the entire audio namespace without failing model startup.
+    if let Some(audio_config_value) = full_config.get("audio_config")
+        && !audio_config_value.is_null()
+        && weights.contains_key("audio_tower.subsample_conv_projection.conv_0.conv.weight")
+    {
+        let audio_config: crate::audio::gemma3n::Gemma3nAudioConfig =
+            serde_json::from_value(audio_config_value.clone()).map_err(|error| {
+                anyhow::anyhow!("Failed to parse Gemma3n audio_config: {error}")
+            })?;
+        let audio_tower = crate::audio::gemma3n::Gemma3nAudioEncoder::from_weights(
+            &weights,
+            "audio_tower",
+            &audio_config,
+            group_size,
+            bits,
+        )
+        .map_err(|error| anyhow::anyhow!("Failed to load Gemma3n audio tower: {error}"))?;
+        let embed_audio = models::gemma3n::Gemma3nAudioEmbedder::from_weights(
+            &weights,
+            "embed_audio",
+            &audio_config,
+            text_config.hidden_size,
+            group_size,
+            bits,
+        )
+        .map_err(|error| anyhow::anyhow!("Failed to load Gemma3n audio embedder: {error}"))?;
+        vlm.set_audio(
+            audio_tower,
+            embed_audio,
+            metadata.audio_token_id,
+            metadata.boa_token_id,
+            metadata.eoa_token_id,
+            metadata.audio_soft_tokens_per_clip,
+        );
+    }
 
     Ok(LoadedModel::Gemma3nVLM(vlm))
 }

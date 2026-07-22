@@ -43,11 +43,10 @@
 //!   into this map under the scheduler-allocated id, draining the
 //!   fallback in the same step so the next request cannot inherit the
 //!   previous row's tensor.
-//! - **Fallback slot** preserves legacy single-instance callers (CLI
-//!   `mlxcel generate`, `mlxcel-bench-decode`, single-row tests). It also
-//!   acts as a last-resort when `take_for_sequence(id)` finds no entry
-//!   under `id` (e.g., a request that started before per-sequence wiring
-//!   landed).
+//! - **Fallback slot** preserves only legacy single-instance callers (CLI
+//!   `mlxcel generate`, `mlxcel-bench-decode`, single-row tests). A request
+//!   carrying a `SequenceId` never reads this slot, because it could belong to
+//!   a different concurrently-prepared request.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -103,9 +102,8 @@ impl Gemma3nPerLayerInputsState {
     }
 
     /// Take a row's per-layer-inputs out of the map for prefill
-    /// consumption. Returns `None` when no entry exists — the prefill
-    /// path then falls back to the legacy single-row slot via
-    /// [`Self::take_fallback`].
+    /// consumption. Returns `None` when no entry exists; sequence-scoped
+    /// consumers treat that as an invariant violation and never fall back.
     pub(crate) fn take_for_sequence(&self, seq_id: SequenceId) -> Option<UniquePtr<MlxArray>> {
         self.sequences.borrow_mut().remove(&seq_id)
     }

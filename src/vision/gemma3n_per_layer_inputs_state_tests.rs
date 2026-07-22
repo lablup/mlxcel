@@ -218,3 +218,15 @@ fn take_for_sequence_returns_none_for_unknown_id() {
     let unknown = SequenceId::from_raw(401);
     assert!(state.take_for_sequence(unknown).is_none());
 }
+
+#[test]
+#[ignore = "requires serial MLX execution"]
+fn unknown_sequence_cannot_consume_another_requests_fallback() {
+    let state = Gemma3nPerLayerInputsState::new();
+    state.set_fallback(Some(make_pli(77.0)));
+    assert!(state.take_for_sequence(SequenceId::from_raw(999)).is_none());
+    let fallback = state
+        .take_fallback()
+        .expect("unknown sequence must not drain fallback");
+    assert!((read_pli_scalar(fallback.as_ref().unwrap()) - 77.0).abs() < 1e-5);
+}

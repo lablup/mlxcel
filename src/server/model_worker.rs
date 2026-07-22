@@ -39,6 +39,7 @@ use crate::server::state::BatchMetrics;
 use crate::tokenizer::MlxcelTokenizer;
 use crate::vision::feature_cache::ModelVisionCaches;
 use crate::vision::merge::InputEmbeddings;
+use crate::vision::processors::ImageProcessor;
 use crate::vlm_runtime::{
     prepare_and_compute_vlm_embeddings_with_budget, prepare_and_compute_vlm_embeddings_with_cache,
 };
@@ -1179,6 +1180,16 @@ pub(crate) fn prepare_request_vlm_embeddings(
         // the last user turn instead of the model turn (which forces an
         // immediate EOS / 0-token output).
         let end_of_turn_token_id = resolve_end_of_turn_token_id(tokenizer);
+        if let Some(embeddings) = prepare_gemma3n_audio_embeddings(
+            model,
+            tokenizer,
+            prompt_tokens,
+            images,
+            audio,
+            end_of_turn_token_id,
+        )? {
+            return Ok(Some(embeddings));
+        }
         if let Some(embeddings) = prepare_gemma4_unified_audio_embeddings(
             model,
             prompt_tokens,
@@ -1399,6 +1410,103 @@ fn prepare_phi4mm_audio_embeddings(
         prompt_tokens = prompt_tokens.len(),
         "Prepared Phi4MM mixed-media embeddings"
     );
+    Ok(Some(embeddings))
+}
+
+/// Process all Gemma 3n clips as one padded batch, preserving clip order and
+/// merging exactly 188 projected rows for each prompt placeholder block.
+fn prepare_gemma3n_audio_embeddings(
+    model: &LoadedModel,
+    tokenizer: &MlxcelTokenizer,
+    prompt_tokens: &mut Vec<i32>,
+    images: &[Vec<u8>],
+    audio_data: &[Vec<u8>],
+    end_of_turn_token_id: Option<i32>,
+) -> Result<Option<InputEmbeddings>> {
+    let gemma3n = match model {
+        LoadedModel::Gemma3nVLM(model) => model,
+        _ => return Ok(None),
+    };
+    if !gemma3n.supports_audio() {
+        return Err(anyhow!(
+            "This Gemma3n checkpoint was loaded without audio parameters"
+        ));
+    }
+    if !images.is_empty()
+        && let Some(info) = model.image_token_block_info()
+    {
+        let _ = crate::vlm_prompt::apply_image_token_blocks(prompt_tokens, info, images.len())?;
+    }
+
+    let mut clips = Vec::with_capacity(audio_data.len());
+    for (index, bytes) in audio_data.iter().enumerate() {
+        let (samples, sample_rate) = crate::audio::load_wav_from_bytes(bytes)
+            .map_err(|error| anyhow!("Failed to decode Gemma3n audio clip {index}: {error}"))?;
+        let samples = if sample_rate == crate::audio::gemma3n::GEMMA3N_SAMPLE_RATE {
+            samples
+        } else {
+            crate::audio::whisper_mel::resample_to_16k(&samples, sample_rate)
+        };
+        clips.push(samples);
+    }
+
+    let batch = crate::audio::gemma3n::Gemma3nAudioFeatureExtractor::new()
+        .extract_batch(&clips)
+        .map_err(|error| anyhow!(error))?;
+    let wrapper_tokens: Vec<i32> = tokenizer
+        .encode("\n\n", false)
+        .map_err(|error| anyhow!("Failed to tokenize Gemma3n audio wrapper: {error}"))?
+        .into_iter()
+        .map(|token| token as i32)
+        .collect();
+    if wrapper_tokens.is_empty() {
+        return Err(anyhow!(
+            "Gemma3n audio wrapper tokenized to an empty sequence"
+        ));
+    }
+    crate::vlm_runtime::expand_gemma3n_audio_tokens(
+        prompt_tokens,
+        gemma3n.audio_token_id,
+        gemma3n.boa_token_id,
+        gemma3n.eoa_token_id,
+        clips.len(),
+        gemma3n.audio_soft_tokens_per_clip,
+        &wrapper_tokens,
+        end_of_turn_token_id,
+    )?;
+
+    let features = mlxcel_core::from_slice_f32(
+        &batch.features,
+        &[batch.batch_size as i32, batch.frames as i32, 128],
+    );
+    let valid: Vec<i32> = batch
+        .valid_mask
+        .iter()
+        .map(|valid| i32::from(*valid))
+        .collect();
+    let valid = mlxcel_core::astype(
+        &mlxcel_core::from_slice_i32(&valid, &[batch.batch_size as i32, batch.frames as i32]),
+        mlxcel_core::dtype::BOOL,
+    );
+    let invalid = mlxcel_core::logical_not(&valid);
+
+    let decoded_images = if images.is_empty() {
+        None
+    } else {
+        Some(decode_request_images(images)?)
+    };
+    let pixel_values = decoded_images
+        .as_ref()
+        .map(|images| gemma3n.processor.preprocess(images));
+    let input_ids = mlxcel_core::from_slice_i32(prompt_tokens, &[1, prompt_tokens.len() as i32]);
+    let embeddings = gemma3n
+        .get_input_embeddings_with_media(
+            &input_ids,
+            pixel_values.as_deref(),
+            Some(&features),
+            Some(&invalid),
+        )
+        .map_err(|error| anyhow!(error))?;
     Ok(Some(embeddings))
 }
 

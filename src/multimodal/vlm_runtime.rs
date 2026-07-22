@@ -77,6 +77,11 @@ pub enum VlmPreparationSummary {
         audio_tokens: usize,
         total_tokens: usize,
     },
+    Gemma3nAudio {
+        audio_clips: usize,
+        audio_tokens: usize,
+        total_tokens: usize,
+    },
     /// Gemma 4 expanded `<|video|>` placeholders for one or
     /// more decoded videos. `frame_slots` is the total number of frames
     /// across all videos (each frame consumes
@@ -2027,6 +2032,67 @@ pub fn expand_gemma4_audio_tokens_for_server(
     if let Some(tok) = last {
         prompt_tokens.push(tok);
     }
+}
+
+/// Expand Gemma 3n audio placeholders using the pinned processor's fixed
+/// `boa + audio*188 + eoa` sequence for every clip. When the rendered template
+/// dropped audio content parts, all clip blocks are inserted before the last
+/// user-turn terminator. Existing placeholders must match the clip count
+/// exactly; a mismatch is rejected instead of silently reordering media.
+pub fn expand_gemma3n_audio_tokens(
+    prompt_tokens: &mut Vec<i32>,
+    audio_token_id: i32,
+    boa_token_id: i32,
+    eoa_token_id: i32,
+    audio_clips: usize,
+    soft_tokens_per_clip: usize,
+    wrapper_tokens: &[i32],
+    end_of_turn_token_id: Option<i32>,
+) -> Result<()> {
+    if audio_clips == 0 {
+        return Ok(());
+    }
+    let block = || {
+        let mut tokens = Vec::with_capacity(wrapper_tokens.len() * 2 + soft_tokens_per_clip + 2);
+        tokens.extend_from_slice(wrapper_tokens);
+        tokens.push(boa_token_id);
+        tokens.extend(std::iter::repeat_n(audio_token_id, soft_tokens_per_clip));
+        tokens.push(eoa_token_id);
+        tokens.extend_from_slice(wrapper_tokens);
+        tokens
+    };
+    let placeholders = prompt_tokens
+        .iter()
+        .filter(|token| **token == audio_token_id)
+        .count();
+    if placeholders > 0 {
+        if placeholders != audio_clips {
+            anyhow::bail!(
+                "Gemma3n audio placeholder mismatch: prompt has {placeholders}, request has {audio_clips} clips"
+            );
+        }
+        let mut expanded =
+            Vec::with_capacity(prompt_tokens.len() + audio_clips * (soft_tokens_per_clip + 2));
+        for token in prompt_tokens.iter().copied() {
+            if token == audio_token_id {
+                expanded.extend(block());
+            } else {
+                expanded.push(token);
+            }
+        }
+        *prompt_tokens = expanded;
+        return Ok(());
+    }
+
+    let insertion = end_of_turn_token_id
+        .and_then(|eot| prompt_tokens.iter().rposition(|token| *token == eot))
+        .unwrap_or(prompt_tokens.len());
+    let mut blocks = Vec::with_capacity(audio_clips * (soft_tokens_per_clip + 2));
+    for _ in 0..audio_clips {
+        blocks.extend(block());
+    }
+    prompt_tokens.splice(insertion..insertion, blocks);
+    Ok(())
 }
 
 /// Place the Nemotron H Nano Omni sound-context block in the server prompt.
