@@ -25,13 +25,17 @@ set -euo pipefail
 
 # --- pinned IREE version (keep in sync with the runtime/compiler the vmfbs are
 # authored against; see CLAUDE.md "MLX upstream commit upgrade" sibling note) ---
-IREE_TAG="iree-3.12.0rc20260626"
+IREE_VERSION="3.12.0rc20260721"
+IREE_TAG="iree-$IREE_VERSION"
 # macOS universal2, cp312-abi3 (works on CPython >= 3.12). sha256 from the
 # iree-org GitHub release assets for ${IREE_TAG}.
-WHEEL="iree_base_compiler-3.12.0rc20260626-cp312-abi3-macosx_13_0_universal2.whl"
-WHEEL_SHA256="21e76f89f206f396c34845ed8d9da93236038398b60e5597dc9ada2b51b70ae6"
+WHEEL="iree_base_compiler-${IREE_VERSION}-cp312-abi3-macosx_13_0_universal2.whl"
+WHEEL_SHA256="973730ffc0f3bc538f43fefdc90ad65e920bb5604c8142241d230123996e0736"
 
-IREE_DIR="${MLXCEL_IREE_MACOS_DIR:-$HOME/.cache/mlxcel/iree-macos}"
+# Version the default cache directory so a pin bump cannot silently reuse an
+# older compiler/runtime build. Explicit MLXCEL_IREE_MACOS_DIR overrides remain
+# available for callers that manage their own cache lifecycle.
+IREE_DIR="${MLXCEL_IREE_MACOS_DIR:-$HOME/.cache/mlxcel/iree-macos-$IREE_VERSION}"
 SRC="$IREE_DIR/src"
 BUILD="$IREE_DIR/build"
 VENV="$IREE_DIR/venv"

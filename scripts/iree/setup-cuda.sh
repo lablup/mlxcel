@@ -24,13 +24,18 @@
 #     ./target/release/mlxcel generate -m <Llama-3.2-1B dir> -p "..." -n 48
 set -euo pipefail
 
-# --- pinned IREE version. PIP_VER is the wheel; IREE_SHA is the exact iree-org
-# commit that wheel reports (iree-compile --version), so the source-built runtime
-# is byte-version-matched to the compiler that lowers the vmfbs. ---
-PIP_VER="3.11.0"
-IREE_SHA="e4a3b0405d7d23554da26403658d0e8c3c5ecf25"
+# --- pinned IREE version. The compiler wheel comes from the matching official
+# GitHub candidate release; IREE_SHA is that tag's exact iree-org commit, so the
+# source-built runtime is byte-version-matched to the compiler that lowers the
+# vmfbs. ---
+IREE_VERSION="3.12.0rc20260721"
+IREE_TAG="iree-$IREE_VERSION"
+IREE_SHA="dc9601f88654749456c7cee4ae87e13de2654e1e"
 
-IREE_DIR="${MLXCEL_IREE_CUDA_DIR:-$HOME/.cache/mlxcel/iree-cuda}"
+# Version the default cache directory so a pin bump cannot silently reuse an
+# older compiler/runtime build. Explicit MLXCEL_IREE_CUDA_DIR overrides remain
+# available for callers that manage their own cache lifecycle.
+IREE_DIR="${MLXCEL_IREE_CUDA_DIR:-$HOME/.cache/mlxcel/iree-cuda-$IREE_VERSION}"
 SRC="$IREE_DIR/src"
 BUILD="$IREE_DIR/build"
 VENV="$IREE_DIR/venv"
@@ -50,7 +55,7 @@ emit_info() {
   echo "IREE home:     $IREE_DIR"
   echo "iree-compile:  $IREE_COMPILE"
   echo "CUDA root:     $CUDA_ROOT"
-  echo "Pinned:        iree-base-compiler==$PIP_VER  (iree-org @ $IREE_SHA)"
+  echo "Pinned:        $IREE_TAG  (iree-org @ $IREE_SHA)"
   echo
   echo "# export the build env with: eval \"\$(scripts/iree/setup-cuda.sh --env)\""
   emit_env
@@ -71,26 +76,57 @@ log() { printf '\033[1;34m[setup-cuda]\033[0m %s\n' "$*" >&2; }
 
 # --- prerequisites ---
 [ "$(uname -s)" = "Linux" ] || { echo "this script is Linux/CUDA-only (use setup-macos.sh on macOS)" >&2; exit 1; }
-for tool in git cmake make python3; do
+for tool in git cmake make python3 curl sha256sum; do
   command -v "$tool" >/dev/null 2>&1 || { echo "missing required tool: $tool" >&2; exit 1; }
 done
 [ -x "$CUDA_ROOT/bin/nvcc" ] || { echo "no CUDA toolkit at $CUDA_ROOT (set CUDAToolkit_ROOT)" >&2; exit 1; }
+
+# Select the official manylinux wheel for this Python ABI and host architecture.
+# CPython >= 3.12 can consume IREE's cp312-abi3 wheel.
+PYV=$(python3 -c 'import sys; print("%d.%d" % sys.version_info[:2])')
+case "$PYV" in
+  3.10) PY_TAG="cp310-cp310" ;;
+  3.11) PY_TAG="cp311-cp311" ;;
+  *)
+    python3 -c 'import sys; raise SystemExit(0 if sys.version_info[:2] >= (3,12) else 1)' \
+      || { echo "need CPython >= 3.10 for the IREE compiler wheel (have $PYV)" >&2; exit 1; }
+    PY_TAG="cp312-abi3"
+    ;;
+esac
+case "$(uname -m)" in
+  aarch64) WHEEL_ARCH="aarch64" ;;
+  x86_64) WHEEL_ARCH="x86_64" ;;
+  *) echo "unsupported Linux architecture for the IREE compiler wheel: $(uname -m)" >&2; exit 1 ;;
+esac
+WHEEL="iree_base_compiler-${IREE_VERSION}-${PY_TAG}-manylinux_2_27_${WHEEL_ARCH}.manylinux_2_28_${WHEEL_ARCH}.whl"
+case "${PY_TAG}/${WHEEL_ARCH}" in
+  cp310-cp310/aarch64) WHEEL_SHA256="292f92ea749da937d9557fae27dafdd227eb79d8d62d2a4dffd25285b8b11aaf" ;;
+  cp310-cp310/x86_64) WHEEL_SHA256="8ca7f0610c5c51efc898a4e647687b6f64fef0ccbc6aeb9fd0217597b03768b8" ;;
+  cp311-cp311/aarch64) WHEEL_SHA256="fa288fd6824b343fae186d51d6e80a046f1440fe772afc790fa3c6f39deaa6b1" ;;
+  cp311-cp311/x86_64) WHEEL_SHA256="91f725e7de1964ad195e9299d922b12e2e416126ee94d550e6452851997d6c80" ;;
+  cp312-abi3/aarch64) WHEEL_SHA256="2aa7b17adbeab2d406e54f6c4814896256a9f6687b3e35b44a2b18ca4da42784" ;;
+  cp312-abi3/x86_64) WHEEL_SHA256="496e003f14a8eefa9fb5182949fd1ab5604f8b7a5bfb66c897cfd2e3b25d6652" ;;
+esac
 
 mkdir -p "$IREE_DIR"
 
 # --- 1. CUDA-capable iree-compile from the pinned wheel, into a private venv ---
 if [ ! -x "$IREE_COMPILE" ]; then
-  log "creating venv and installing iree-base-compiler==$PIP_VER"
+  log "creating venv and installing $WHEEL"
   python3 -m venv "$VENV"
+  curl -sSL -o "$IREE_DIR/$WHEEL" \
+    "https://github.com/iree-org/iree/releases/download/${IREE_TAG}/${WHEEL}"
+  GOT=$(sha256sum "$IREE_DIR/$WHEEL" | awk '{print $1}')
+  [ "$GOT" = "$WHEEL_SHA256" ] || { echo "sha256 mismatch for $WHEEL: got $GOT" >&2; exit 1; }
   "$VENV/bin/python" -m pip install -q --upgrade pip
-  "$VENV/bin/python" -m pip install -q "iree-base-compiler==$PIP_VER"
+  "$VENV/bin/python" -m pip install -q --no-deps "$IREE_DIR/$WHEEL"
   [ -x "$IREE_COMPILE" ] || { echo "iree-compile not found after install" >&2; exit 1; }
 else
   log "reusing iree-compile at $IREE_COMPILE"
 fi
 
 # --- 2. source-build the IREE runtime (runtime only; local + cuda drivers) ---
-# Fetch the exact pinned commit shallowly (the wheel is an rc, not a release tag).
+# Fetch the exact pinned release commit shallowly.
 if [ ! -e "$SRC/.git" ]; then
   log "fetching IREE runtime source @ $IREE_SHA (shallow, no LLVM)"
   git init -q "$SRC"
